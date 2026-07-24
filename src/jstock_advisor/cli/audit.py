@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from jstock_advisor.domain.jst import format_jst
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import (
     AuditLogRepository,
 )
@@ -30,7 +31,7 @@ def show_audit_log(
 
     for entry in entries:
         typer.echo(
-            f"[{entry.timestamp.isoformat()}] {entry.decision_type} "
+            f"[{format_jst(entry.timestamp)}] {entry.decision_type} "
             f"(rule_version={entry.rule_version})"
         )
         typer.echo(f"  入力値: {entry.input_values}")
@@ -38,6 +39,6 @@ def show_audit_log(
         typer.echo(f"  出力値: {entry.output_values}")
         if entry.data_sources:
             sources = ", ".join(
-                f"{s.provider}@{s.fetched_at.isoformat()}" for s in entry.data_sources
+                f"{s.provider}@{format_jst(s.fetched_at)}" for s in entry.data_sources
             )
             typer.echo(f"  データ出典: {sources}")

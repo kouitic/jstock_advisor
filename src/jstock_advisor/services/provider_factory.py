@@ -7,7 +7,9 @@ MVPのローカル動作確認用にモックProviderを提供するほか、実
 (未確定事項#5)。適時開示(TDnet)には公式APIが無いため、EDINET臨時報告書
 (重大な会社情報の変更は金融商品取引法上EDINETにも提出義務がある)と
 yfinanceの決算発表予定日を組み合わせた実データ実装を使う(決算短信そのものは
-TDnet専用のため取得不可)。
+TDnet専用のため取得不可)。銘柄名はyfinanceからは英語名しか取得できないため、
+EDINET提出書類のfilerName(日本語)を優先する(financial_dataとdividend_dataで
+同じEdinetFilingCacheRepositoryを共有し、書類スキャンを重複させない)。
 """
 
 from __future__ import annotations
@@ -57,11 +59,14 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
 
     株主優待はユーザーの手動/CSV登録データ(local_registry_impl)を使う。
     """
+    edinet_client = EdinetClient()
+    edinet_filing_cache = EdinetFilingCacheRepository()
+
     corporate_action = YFinanceCorporateActionProvider(now=now)
     dividend_data = CrossValidatingDividendDataProvider(
         primary=YFinanceDividendDataProvider(now=now),
         secondary=EdinetDividendDataProvider(
-            client=EdinetClient(), cache_repository=EdinetFilingCacheRepository(), now=now
+            client=edinet_client, cache_repository=edinet_filing_cache, now=now
         ),
         corporate_action_provider=corporate_action,
         config=config.data_validation,
@@ -69,7 +74,9 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
     )
     return ProviderBundle(
         market_data=YFinanceMarketDataProvider(now=now),
-        financial_data=YFinanceFinancialDataProvider(now=now),
+        financial_data=YFinanceFinancialDataProvider(
+            now=now, edinet_client=edinet_client, edinet_cache_repository=edinet_filing_cache
+        ),
         dividend_data=dividend_data,
         shareholder_benefit=LocalRegistryShareholderBenefitProvider(),
         disclosure=EdinetYfinanceDisclosureProvider(

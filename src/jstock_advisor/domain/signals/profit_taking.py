@@ -168,6 +168,7 @@ def _apply_mitigating_factors(
 
 
 def _compute_sell_prices(
+    current_price: Decimal,
     average_purchase_price: Decimal,
     fair_value: Decimal | None,
     forecast_annual_dividend_per_share: Decimal | None,
@@ -196,8 +197,14 @@ def _compute_sell_prices(
     partial_candidates = [p for p in (gain_partial_price, fv_partial_price) if p is not None]
     partial_start = min(partial_candidates) if partial_candidates else None
 
-    recommended_candidates = [p for p in (gain_full_price, fv_partial_price) if p is not None]
+    # 「利確推奨」は含み益・適正価格超過のいずれかがFULL水準に到達した時点とする
+    # (両方の水準がFULLに達するまで待つ「全株利確検討」より緩い基準)。PARTIAL水準の
+    # 適正価格超過を再利用すると一部利確開始価格と同値になってしまうため、
+    # 必ずFULL水準の候補のみを用いる。
+    recommended_candidates = [p for p in (gain_full_price, fv_full_price) if p is not None]
     recommended = min(recommended_candidates) if recommended_candidates else None
+    if recommended is not None and partial_start is not None:
+        recommended = max(recommended, partial_start)
 
     full_candidates = [p for p in (gain_full_price, fv_full_price) if p is not None]
     full_take = max(full_candidates) if full_candidates else None
@@ -206,6 +213,18 @@ def _compute_sell_prices(
         forecast_annual_dividend_per_share, t.total_yield_strong_caution_pct
     )
     reassessment = round_yen(reassessment) if reassessment is not None else None
+
+    # 適正価格・配当額から逆算した水準が、既に現在株価を下回っている(=とうに
+    # 通過済み)場合、過去の水準をそのまま示すと「現在より安い利確目安」という
+    # 意味不明な表示になる。これから到達すべき/現在地を示す値として、
+    # 現在株価を下限にクリップする。
+    def _floor_at_current_price(price: Decimal | None) -> Decimal | None:
+        return max(price, current_price) if price is not None else None
+
+    partial_start = _floor_at_current_price(partial_start)
+    recommended = _floor_at_current_price(recommended)
+    full_take = _floor_at_current_price(full_take)
+    reassessment = _floor_at_current_price(reassessment)
 
     def _wrap(price: Decimal | None, rationale: str) -> PriceWithRationale | None:
         return PriceWithRationale(price=price, rationale=rationale) if price is not None else None
@@ -217,7 +236,7 @@ def _compute_sell_prices(
         ),
         profit_take_recommended=_wrap(
             recommended,
-            f"含み益{t.unrealized_gain_full_pct}%、または適正価格超過{t.fair_value_excess_partial_pct}%到達の低い方",
+            f"含み益{t.unrealized_gain_full_pct}%、または適正価格超過{t.fair_value_excess_full_pct}%到達の低い方",
         ),
         full_take_consider=_wrap(
             full_take,
@@ -262,11 +281,25 @@ def evaluate_profit_taking(
     if level_gain > _Level.HOLD:
         triggered_reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%")
 
-    level_fv = _level_from_fair_value_excess(fair_value_excess_pct, config)
+    # 「利確」は含み益があって初めて成立する概念のため、含み損の状態では
+    # 適正価格超過・総合利回り低下による判定は考慮しない(含み損のまま
+    # 「利確検討」と表示される矛盾を避ける。株価下落そのものによる売却判断は
+    # 本ロジックの対象外であり、sell_signal側の投資前提悪化判定で扱う)。
+    has_unrealized_gain = pnl.unrealized_pnl_pct > 0
+
+    level_fv = (
+        _level_from_fair_value_excess(fair_value_excess_pct, config)
+        if has_unrealized_gain
+        else _Level.HOLD
+    )
     if level_fv > _Level.HOLD and fair_value_excess_pct is not None:
         triggered_reasons.append(f"最終適正価格を{fair_value_excess_pct:.1f}%超過")
 
-    level_yield = _level_from_total_yield(current_total_yield_pct, config)
+    level_yield = (
+        _level_from_total_yield(current_total_yield_pct, config)
+        if has_unrealized_gain
+        else _Level.HOLD
+    )
     if level_yield > _Level.HOLD and current_total_yield_pct is not None:
         triggered_reasons.append(f"現在の総合利回りが{current_total_yield_pct:.2f}%まで低下")
 
@@ -279,7 +312,11 @@ def evaluate_profit_taking(
             mitigating_factors_applied=[],
             hold_reasons=["利確シグナルに該当する条件がない"],
             sell_prices=_compute_sell_prices(
-                average_purchase_price, fair_value, forecast_annual_dividend_per_share, config
+                current_price,
+                average_purchase_price,
+                fair_value,
+                forecast_annual_dividend_per_share,
+                config,
             ),
             pnl=pnl,
         )
@@ -302,7 +339,11 @@ def evaluate_profit_taking(
         mitigating_factors_applied=applied_factors,
         hold_reasons=hold_reasons,
         sell_prices=_compute_sell_prices(
-            average_purchase_price, fair_value, forecast_annual_dividend_per_share, config
+            current_price,
+            average_purchase_price,
+            fair_value,
+            forecast_annual_dividend_per_share,
+            config,
         ),
         pnl=pnl,
     )

@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 
 from jstock_advisor.domain.entities.enums import ApprovalStatus
+from jstock_advisor.domain.jst import to_jst
 from jstock_advisor.infrastructure.line.client import LineClient
 from jstock_advisor.services.performance_metrics_service import (
     MetricsBucket,
@@ -64,7 +65,7 @@ class ReviewReportService:
             horizon_business_days=horizon_business_days, now=report_time
         )
 
-        lines = [f"■ 振り返りレポート({report_time.date().isoformat()})"]
+        lines = [f"■ 振り返りレポート({to_jst(report_time).date().isoformat()})"]
         lines.extend(_format_summary(summary))
 
         proposals = self._proposals.list_all()
