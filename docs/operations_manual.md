@@ -112,7 +112,7 @@ AWS移行後はこれらがLambda + EventBridge Schedulerで自動実行され�
 | 時刻 | schedule.yamlのジョブ | 対応コマンド | 備考 |
 |---|---|---|---|
 | 08:00 | `daily_buy_candidates_analysis` | `jstock analyze buy-candidates <銘柄コード...> --source real --notify` | `--source real`時は対象銘柄コードの指定が必須(全銘柄自動スキャンは未対応) |
-| 10:00/12:30/15:30 | `disclosure_check` | **未実装** | 適時開示データは`analyze`コマンド実行時にその場で取得されるのみで、独立した速報通知コマンドは無い |
+| 10:00/12:30/15:30 | `disclosure_check` | `jstock analyze disclosure-check --source real --notify` | 保有銘柄の新規開示にリスクキーワードが検出された場合のみ速報通知する |
 | 16:30 | `daily_holdings_watchlist_analysis` | `jstock analyze holdings --source real --notify`<br>`jstock analyze watchlist --source real --notify` | 保有銘柄・ウォッチリストは全件自動対象 |
 | 18:00 | `point_in_time_evaluation` | `jstock evaluation run --source real` | 評価期限(営業日数)を迎えた推奨のみ処理。通知機能は無く、結果はコンソール表示のみ |
 
@@ -196,7 +196,7 @@ jstock feedback add --recommendation-id <推奨ID> --satisfaction-score 4
 | 項目 | 制約 |
 |---|---|
 | 適時開示(決算短信) | TDnet専用のためEDINETからは取得不可。取得できるのはEDINET臨時報告書(代表者異動・特定子会社異動・財務コベナンツ等)のみ |
-| 適時開示チェックの自動速報 | `disclosure_check`ジョブに対応する独立コマンドは未実装 |
+| 適時開示チェックの対象範囲 | 保有銘柄のみが対象(ウォッチリストは対象外)。EDINET臨時報告書のみで、TDnet速報自体は取得不可 |
 | 株主優待 | 自動取得不可。必ず手動/CSV登録が必要 |
 | バックテスト | `screening.total_yield.min_total_yield_pct`のみ対応。それ以外のターゲットは「データ不足」扱い。かつ閾値を緩める方向は生存バイアスにより検証不可 |
 | 定点評価のtotal_return | 配当・優待込みの正確な総合リターンは未算出(株価ベースのリターンのみ) |

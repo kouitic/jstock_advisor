@@ -27,6 +27,9 @@ class _FakeLineClient:
     def push_message(self, text: str) -> None:
         self.sent.append(text)
 
+    def reply_message(self, reply_token: str, text: str) -> None:
+        self.sent.append(text)
+
 
 def _make_recommendation(
     *, recommendation_id: str, recommendation_type: RecommendationType, standard_price: str
@@ -193,6 +196,66 @@ def test_data_error_notification_resends_for_different_message(service_and_repos
     service.notify_data_error("9999", "株価データを取得できません", _NOW)
     sent = service.notify_data_error(
         "9999", "財務データを取得できません", _NOW + dt.timedelta(hours=1)
+    )
+    assert sent is True
+    assert len(client.sent) == 2
+
+
+def test_disclosure_risk_notification_is_sent(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+    sent = service.notify_disclosure_risk(
+        stock_code="2914",
+        disclosure_title="臨時報告書",
+        disclosure_summary="特別調査委員会の設置について",
+        matched_keywords=["特別調査委員会"],
+        published_at=_NOW,
+        now=_NOW,
+    )
+    assert sent is True
+    assert len(client.sent) == 1
+    assert "2914" in client.sent[0]
+    assert "特別調査委員会" in client.sent[0]
+
+
+def test_disclosure_risk_notification_dedup_for_same_disclosure(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+    service.notify_disclosure_risk(
+        stock_code="2914",
+        disclosure_title="臨時報告書",
+        disclosure_summary="特別調査委員会の設置について",
+        matched_keywords=["特別調査委員会"],
+        published_at=_NOW,
+        now=_NOW,
+    )
+    sent = service.notify_disclosure_risk(
+        stock_code="2914",
+        disclosure_title="臨時報告書",
+        disclosure_summary="特別調査委員会の設置について",
+        matched_keywords=["特別調査委員会"],
+        published_at=_NOW,
+        now=_NOW + dt.timedelta(hours=1),
+    )
+    assert sent is False
+    assert len(client.sent) == 1
+
+
+def test_disclosure_risk_notification_resends_for_different_disclosure(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+    service.notify_disclosure_risk(
+        stock_code="2914",
+        disclosure_title="臨時報告書",
+        disclosure_summary="特別調査委員会の設置について",
+        matched_keywords=["特別調査委員会"],
+        published_at=_NOW,
+        now=_NOW,
+    )
+    sent = service.notify_disclosure_risk(
+        stock_code="2914",
+        disclosure_title="訂正臨時報告書",
+        disclosure_summary="継続企業の前提に関する重要事象",
+        matched_keywords=["継続企業の前提に関する重要事象"],
+        published_at=_NOW + dt.timedelta(days=1),
+        now=_NOW + dt.timedelta(days=1),
     )
     assert sent is True
     assert len(client.sent) == 2

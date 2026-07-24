@@ -20,6 +20,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.providers.mock_fixtures import MOCK_STOCKS
 from jstock_advisor.services.buy_signal_service import BuySignalService
+from jstock_advisor.services.disclosure_check_service import DisclosureCheckService
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
@@ -230,6 +231,50 @@ def analyze_holdings(
 
     if not found_any:
         typer.echo("保有継続(HOLD)以外の判定に該当する銘柄はありませんでした。")
+    typer.echo(_DISCLAIMER)
+
+
+@app.command("disclosure-check")
+def analyze_disclosure_check(
+    notify: bool = typer.Option(False, "--notify/--no-notify", help=_NOTIFY_HELP),
+    source: str = typer.Option("mock", "--source", help=_SOURCE_HELP),
+) -> None:
+    """保有銘柄の新規適時開示をチェックし、リスクキーワード検出時に速報する。"""
+    if source not in ("mock", "real"):
+        raise typer.BadParameter("--source は mock または real を指定してください")
+
+    now = dt.datetime.now(dt.UTC)
+    config = load_config()
+    providers = _build_providers(source, now, config)
+    service = DisclosureCheckService(disclosure_provider=providers.disclosure, config=config)
+    notification_service = (
+        _build_notification_service(
+            build_line_client_from_env(), RecommendationRepository(), config
+        )
+        if notify
+        else None
+    )
+
+    alerts = service.check_holdings(now)
+    if not alerts:
+        typer.echo("リスクキーワードを含む新規開示はありませんでした。")
+        return
+
+    for alert in alerts:
+        typer.echo(f"[重要開示検知] {alert.stock_code}: {alert.disclosure.title}")
+        typer.echo(f"  検出キーワード: {', '.join(alert.matched_keywords)}")
+        if notification_service is not None:
+            sent = notification_service.notify_disclosure_risk(
+                stock_code=alert.stock_code,
+                disclosure_title=alert.disclosure.title,
+                disclosure_summary=alert.disclosure.summary,
+                matched_keywords=alert.matched_keywords,
+                published_at=alert.disclosure.published_at,
+                now=now,
+            )
+            typer.echo(
+                "  → LINE通知しました" if sent else "  → 同一開示のため通知をスキップしました"
+            )
     typer.echo(_DISCLAIMER)
 
 

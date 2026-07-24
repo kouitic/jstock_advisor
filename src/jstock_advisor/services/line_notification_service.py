@@ -210,6 +210,51 @@ class LineNotificationService:
         )
         return True
 
+    def notify_disclosure_risk(
+        self,
+        stock_code: str,
+        disclosure_title: str,
+        disclosure_summary: str | None,
+        matched_keywords: list[str],
+        published_at: dt.datetime,
+        now: dt.datetime,
+    ) -> bool:
+        """適時開示からリスクキーワードが検出された場合に速報として送信する。
+
+        同一開示(published_at+タイトルで識別)は再送しない。
+        """
+        content_hash = hashlib.sha256(
+            f"{stock_code}|{published_at.isoformat()}|{disclosure_title}".encode()
+        ).hexdigest()[:16]
+        latest = self._log_repo.latest_by_stock_and_type(
+            stock_code, NotificationType.IMPORTANT_DISCLOSURE
+        )
+        if latest is not None and latest.content_hash == content_hash:
+            return False
+
+        lines = [
+            f"【重要開示検知】{stock_code}",
+            f"検出キーワード: {', '.join(matched_keywords)}",
+            f"開示タイトル: {disclosure_title}",
+        ]
+        if disclosure_summary:
+            lines.append(f"概要: {disclosure_summary[:300]}")
+        lines.append(f"開示日時: {format_jst(published_at)}")
+        lines.append(_DISCLAIMER)
+        self._client.push_message("\n".join(lines))
+
+        self._log_repo.save(
+            NotificationLog(
+                notification_id=str(uuid.uuid4()),
+                notification_type=NotificationType.IMPORTANT_DISCLOSURE,
+                stock_code=stock_code,
+                content_hash=content_hash,
+                sent_at=now,
+                related_recommendation_id=None,
+            )
+        )
+        return True
+
     def notify_data_error(self, stock_code: str, message: str, now: dt.datetime) -> bool:
         content_hash = hashlib.sha256(message.encode()).hexdigest()[:16]
         latest = self._log_repo.latest_by_stock_and_type(stock_code, NotificationType.DATA_ERROR)
