@@ -23,15 +23,29 @@ from jstock_advisor.services.buy_signal_service import BuySignalService
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
-from jstock_advisor.services.provider_factory import build_mock_provider_bundle
+from jstock_advisor.services.provider_bundle import ProviderBundle
+from jstock_advisor.services.provider_factory import (
+    build_mock_provider_bundle,
+    build_real_provider_bundle,
+)
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.watchlist_service import WatchlistService
 
-app = typer.Typer(help="買い候補・保有銘柄・ウォッチリストの分析(MVPはモックデータで動作)")
+app = typer.Typer(help="買い候補・保有銘柄・ウォッチリストの分析(--sourceでmock/realを切替)")
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
 
 _NOTIFY_HELP = "LINEへ通知する(LINE_CHANNEL_ACCESS_TOKEN/LINE_USER_ID未設定時は標準出力に表示のみ)"
+_SOURCE_HELP = (
+    "データ提供元: mock(モックデータ、既定)/ real(yfinance+EDINETの実データ。"
+    "株主優待・適時開示は未実装のため取得不可扱いになります)"
+)
+
+
+def _build_providers(source: str, now: dt.datetime, config: AppConfig) -> ProviderBundle:
+    if source == "real":
+        return build_real_provider_bundle(now, config)
+    return build_mock_provider_bundle(now)
 
 
 def _build_notification_service(
@@ -50,15 +64,21 @@ def _build_notification_service(
 @app.command("buy-candidates")
 def analyze_buy_candidates(
     stock_codes: list[str] | None = typer.Argument(
-        None, help="対象銘柄コード(省略時はモックデータの全銘柄)"
+        None, help="対象銘柄コード(mock時省略でモックデータの全銘柄。real時は必須)"
     ),
     notify: bool = typer.Option(False, "--notify/--no-notify", help=_NOTIFY_HELP),
+    source: str = typer.Option("mock", "--source", help=_SOURCE_HELP),
 ) -> None:
     """買い候補を分析し、推奨買値とともに一覧表示・保存する。"""
+    if source not in ("mock", "real"):
+        raise typer.BadParameter("--source は mock または real を指定してください")
+    if source == "real" and not stock_codes:
+        raise typer.BadParameter("--source real の場合、対象銘柄コードを指定してください")
+
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     calendar = BusinessCalendar.from_config(config.holiday_calendar)
-    providers = build_mock_provider_bundle(now)
+    providers = _build_providers(source, now, config)
     service = BuySignalService(providers=providers, config=config, business_calendar=calendar)
     repo = RecommendationRepository()
     notification_service = (
@@ -93,12 +113,16 @@ def analyze_buy_candidates(
 @app.command("watchlist")
 def analyze_watchlist(
     notify: bool = typer.Option(False, "--notify/--no-notify", help=_NOTIFY_HELP),
+    source: str = typer.Option("mock", "--source", help=_SOURCE_HELP),
 ) -> None:
     """ウォッチリスト銘柄が買い条件に該当するか分析する。"""
+    if source not in ("mock", "real"):
+        raise typer.BadParameter("--source は mock または real を指定してください")
+
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     calendar = BusinessCalendar.from_config(config.holiday_calendar)
-    providers = build_mock_provider_bundle(now)
+    providers = _build_providers(source, now, config)
     service = BuySignalService(providers=providers, config=config, business_calendar=calendar)
     repo = RecommendationRepository()
     notification_service = (
@@ -139,11 +163,15 @@ def analyze_watchlist(
 @app.command("holdings")
 def analyze_holdings(
     notify: bool = typer.Option(False, "--notify/--no-notify", help=_NOTIFY_HELP),
+    source: str = typer.Option("mock", "--source", help=_SOURCE_HELP),
 ) -> None:
     """保有銘柄の利確判定・投資前提悪化売却判定を行う。"""
+    if source not in ("mock", "real"):
+        raise typer.BadParameter("--source は mock または real を指定してください")
+
     now = dt.datetime.now(dt.UTC)
     config = load_config()
-    providers = build_mock_provider_bundle(now)
+    providers = _build_providers(source, now, config)
     profit_service = ProfitTakingService(providers=providers, config=config)
     sell_service = SellSignalService(providers=providers, config=config)
     repo = RecommendationRepository()

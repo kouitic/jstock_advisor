@@ -144,7 +144,9 @@ def test_buy_signal_service_records_audit_on_data_error(tmp_path: Path) -> None:
 def test_profit_taking_service_records_audit(tmp_path: Path) -> None:
     audit_repo = AuditLogRepository(store_dir=tmp_path)
     audit_service = AuditService(repository=audit_repo)
-    service = ProfitTakingService(providers=_providers(), config=_CONFIG, audit_service=audit_service)
+    service = ProfitTakingService(
+        providers=_providers(), config=_CONFIG, audit_service=audit_service
+    )
 
     holding = Holding(
         stock_code="8136",
