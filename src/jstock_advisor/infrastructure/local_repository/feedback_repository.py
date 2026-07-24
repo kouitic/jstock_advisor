@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from jstock_advisor.domain.entities.feedback import UserFeedback
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
 
 class UserFeedbackRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[UserFeedback] = JsonCollectionStore(
+        self._store: CollectionStore[UserFeedback] = build_collection_store(
             UserFeedback, "user_feedback.json", "feedback_id", store_dir
         )
 

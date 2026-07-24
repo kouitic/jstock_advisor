@@ -14,9 +14,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.csv_parser import extract_main_document_rows
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
 
 _EXTRAORDINARY_REPORT_DOC_TYPE_CODES = {"180", "190"}  # 臨時報告書・訂正臨時報告書
 _DEFAULT_INITIAL_LOOKBACK_DAYS = 60
@@ -43,7 +43,7 @@ class EdinetDisclosureCache(BaseModel):
 
 class EdinetDisclosureCacheRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[EdinetDisclosureCache] = JsonCollectionStore(
+        self._store: CollectionStore[EdinetDisclosureCache] = build_collection_store(
             EdinetDisclosureCache, "edinet_disclosure_cache.json", "stock_code", store_dir
         )
 

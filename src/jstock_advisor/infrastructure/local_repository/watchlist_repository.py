@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
 
 class WatchlistRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[WatchlistItem] = JsonCollectionStore(
+        self._store: CollectionStore[WatchlistItem] = build_collection_store(
             WatchlistItem, "watchlist.json", "stock_code", store_dir
         )
 

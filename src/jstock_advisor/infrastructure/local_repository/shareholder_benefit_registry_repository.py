@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 from jstock_advisor.interfaces.types import ShareholderBenefit
 
 
 class ShareholderBenefitRegistryRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[ShareholderBenefit] = JsonCollectionStore(
+        self._store: CollectionStore[ShareholderBenefit] = build_collection_store(
             ShareholderBenefit, "shareholder_benefits.json", "stock_code", store_dir
         )
 
