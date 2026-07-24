@@ -246,6 +246,15 @@ class NotificationRulesConfig(StrictModel):
     price_change_resend_threshold_pct: float
 
 
+# --- data_validation_rules.yaml -------------------------------------------
+
+
+class DataValidationRulesConfig(StrictModel):
+    version: int
+    discrepancy_threshold_pct: float
+    split_adjustment_lookback_days: int
+
+
 # --- holiday_calendar.json ----------------------------------------------------
 
 
@@ -276,4 +285,5 @@ class AppConfig(StrictModel):
     scoring: ScoringWeightsConfig
     schedule: ScheduleConfig
     notification: NotificationRulesConfig
+    data_validation: DataValidationRulesConfig
     holiday_calendar: HolidayCalendarConfig
