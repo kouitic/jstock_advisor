@@ -1,0 +1,2 @@
+# jstock_advisor
+ClaudeCodeで作った日本株売買の補助アプリ
