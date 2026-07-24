@@ -1,0 +1,9 @@
+# LINE通知の再通知ルール設定(要求仕様16節)
+
+version: 1
+
+# 前回通知からこの日数(暦日)が経過したら、同じ判定内容でも再通知する
+resend_after_days: 5
+
+# 推奨価格(買値/売値の代表値)がこの割合(%)以上変化したら再通知する
+price_change_resend_threshold_pct: 3.0

@@ -1,0 +1,64 @@
+# 実行スケジュール設定（要求仕様 20節・51節）
+# ここでの時刻はすべて timezone で指定したローカル時刻。
+# AWSデプロイ時、infra層でこの設定からEventBridge Schedulerのcron式(UTC変換込み)を生成する。
+
+version: 1
+timezone: "Asia/Tokyo"
+
+jobs:
+  daily_buy_candidates_analysis:
+    description: "前営業日終値・決算・適時開示を用いた買い候補分析"
+    enabled: true
+    days: ["mon", "tue", "wed", "thu", "fri"]
+    time: "08:00"
+
+  daily_holdings_watchlist_analysis:
+    description: "当日終値を用いた保有銘柄およびウォッチリスト分析"
+    enabled: true
+    days: ["mon", "tue", "wed", "thu", "fri"]
+    time: "16:30"
+
+  disclosure_check:
+    description: "適時開示の確認(平日数回)"
+    enabled: true
+    days: ["mon", "tue", "wed", "thu", "fri"]
+    times: ["10:00", "12:30", "15:30"]
+
+  point_in_time_evaluation:
+    description: "評価期限を迎えた推奨の定点評価"
+    enabled: true
+    days: ["mon", "tue", "wed", "thu", "fri"]
+    time: "18:00"
+
+  weekly_review:
+    description: "週次レビュー"
+    enabled: true
+    days: ["sat"]
+    time: "09:00"
+
+  monthly_review:
+    description: "前月の月次レビュー(実行日が当月第1土曜日かどうかはLambda側で判定)"
+    enabled: true
+    days: ["sat"]
+    time: "10:00"
+    run_only_on_first_occurrence_of_month: true
+
+  quarterly_logic_review:
+    description: "四半期ロジックレビュー(1,4,7,10月の第1土曜日)"
+    enabled: true
+    days: ["sat"]
+    time: "11:00"
+    run_only_on_first_occurrence_of_month: true
+    months: [1, 4, 7, 10]
+
+evaluation_horizons_business_days:
+  # 29節: 推奨種別ごとの主要評価期間
+  BUY: [60, 120, 250]
+  WATCH_BUY: [60, 120, 250]
+  HOLD: [60, 120, 250]
+  PARTIAL_PROFIT_TAKE: [20, 60, 120]
+  FULL_PROFIT_TAKE: [20, 60, 120]
+  SELL: [5, 20, 60]
+  URGENT_REVIEW: [5, 20, 60]
+  # 全種別共通で記録する短期チェックポイント
+  all_types_common: [1, 5, 20, 60, 120, 250]

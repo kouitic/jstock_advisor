@@ -1,0 +1,41 @@
+# 買い候補スコアリング設定（要求仕様 15節）
+# 合計100点。減配・重大不祥事・債務超過・継続企業リスク等は screening_rules.yaml /
+# sell_rules.yaml 側の除外条件で扱い、スコアには反映しない。
+
+version: 1
+
+weights:
+  total_yield_attractiveness: 20   # 総合利回りの魅力度
+  dividend_sustainability: 20      # 配当持続性
+  financial_health: 20             # 財務健全性
+  undervaluation: 20               # 割安度
+  shareholder_benefit_value: 10    # 株主優待価値
+  earnings_stability: 5            # 業績安定性
+  price_stability: 5               # 株価安定性
+
+# 各項目内の採点ロジックのパラメータ(domain/scoring層が参照)
+total_yield_attractiveness:
+  # 総合利回りがこの値(%)以上で満点
+  full_score_total_yield_pct: 6.0
+  # 満点となる下限利回り(この値未満は0点)
+  zero_score_total_yield_pct: 3.5
+
+undervaluation:
+  # 割安条件(9節)のうち何個満たすかで加点。1条件あたりの点数目安
+  criteria_considered:
+    - "per_below_median"
+    - "pbr_below_median"
+    - "dividend_yield_above_historical_average"
+    - "drawdown_from_52w_high"
+    - "below_fair_value"
+    - "price_down_despite_stable_earnings"
+
+shareholder_benefit_value:
+  # 株主優待評価額算出時の利用可能性係数の初期値(要求仕様7節)。銘柄ごとに上書き可能。
+  utility_coefficients_default:
+    cash_equivalent: 1.0        # QUOカード・商品券・現金同等物
+    versatile_point: 0.9        # 汎用性の高いポイント
+    in_house_service: 0.7       # 自社店舗・サービス利用券
+    in_house_product: 0.6       # 自社商品・カタログ商品
+    discount_voucher: 0.3       # 割引券
+    lottery_or_commemorative: 0.0  # 抽選権・記念品など(原則0%)

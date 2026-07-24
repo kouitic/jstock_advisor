@@ -1,0 +1,50 @@
+# 適正価格・推奨買値の算出設定（要求仕様 10節）
+
+version: 1
+
+fair_value_methods:
+  # 利用可能な方式のみ使用する。算出できない方式は自動的にスキップされる。
+  enabled_methods:
+    - "target_yield"    # 目標利回り方式
+    - "per"              # PER方式
+    - "pbr"               # PBR方式
+    - "historical_range"   # 過去株価レンジ方式
+  # 最終適正価格の集約方法: "median"(中央値, 初期値) または "mean"(平均) または "weighted"
+  aggregation_method: "median"
+  # aggregation_method が "weighted" の場合の重み(合計1.0)
+  method_weights:
+    target_yield: 0.25
+    per: 0.25
+    pbr: 0.25
+    historical_range: 0.25
+
+target_yield_method:
+  # 配当基準価格 = 予想年間配当金 ÷ 目標配当利回り
+  # スクリーニングの下限(3.5%)より高めに設定し、値上がり余地を確保する
+  target_dividend_yield_pct: 4.0
+  # 総合利回り基準価格の算出にも同じ目標値を使用する
+  target_total_yield_pct: 4.0
+
+per_method:
+  # 過去PER中央値の算出に用いる期間(年)。5年データが無い場合は3年にフォールバック
+  lookback_years_primary: 5
+  lookback_years_fallback: 3
+
+pbr_method:
+  lookback_years_primary: 5
+  lookback_years_fallback: 3
+
+historical_range_method:
+  # 52週安値・過去3年安値・支持線候補のうち利用可能なものを使用
+  lookback_years: 3
+  use_52_week_low: true
+  use_support_levels: true
+
+recommended_buy_price:
+  # 最終適正価格に対する割引率
+  tentative_buy_ratio: 0.95     # 打診買い価格
+  standard_buy_ratio: 0.90      # 標準買い価格
+  aggressive_buy_ratio: 0.85    # 積極買い価格
+  # 拡張ポイント: 現在株価・直近安値・値幅制限・移動平均線等を用いた補正を
+  # domain/valuation 層のプラグインとして追加可能な設計とする(初期値は無効)
+  enable_price_context_adjustment: false
