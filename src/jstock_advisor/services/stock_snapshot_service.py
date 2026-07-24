@@ -18,6 +18,7 @@ from jstock_advisor.domain.entities.common import (
     BuyPriceLevels,
     DataSourceReference,
 )
+from jstock_advisor.domain.financial_series import to_seasonally_adjusted_series
 from jstock_advisor.domain.screening.rules import detect_disclosure_risk_keywords
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.valuation.buy_price import compute_recommended_buy_prices
@@ -163,12 +164,19 @@ def build_stock_snapshot(
         disclosures, config.sell.disclosure_risk_keywords
     )
 
-    quarterly_operating_incomes = [
-        q.operating_income for q in financial.recent_quarters if q.operating_income is not None
-    ]
-    quarterly_operating_cashflows = [
-        q.operating_cashflow for q in financial.recent_quarters if q.operating_cashflow is not None
-    ]
+    period_ends = [q.quarter_end for q in financial.recent_quarters]
+    raw_operating_incomes = [q.operating_income for q in financial.recent_quarters]
+    raw_operating_cashflows = [q.operating_cashflow for q in financial.recent_quarters]
+
+    # 四半期粒度のデータは直近12ヶ月移動合計(TTM)に変換し、季節性(業種特有の
+    # 繁閑差)による誤検知を防ぐ。年次粒度はそのまま(恒等変換)。
+    adjusted_operating_incomes = to_seasonally_adjusted_series(raw_operating_incomes, period_ends)
+    adjusted_operating_cashflows = to_seasonally_adjusted_series(
+        raw_operating_cashflows, period_ends
+    )
+
+    quarterly_operating_incomes = [v for v in adjusted_operating_incomes if v is not None]
+    quarterly_operating_cashflows = [v for v in adjusted_operating_cashflows if v is not None]
     severe_earnings_decline = has_severe_earnings_decline(quarterly_operating_incomes)
 
     snapshot = StockSnapshot(

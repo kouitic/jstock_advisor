@@ -83,6 +83,19 @@ MOCK_STOCKS: dict[str, MockStockProfile] = {
         is_progressive_or_doe_policy=True,
         consecutive_dividend_increase_years=3,
         quarters=(
+            # TTM(直近12ヶ月移動合計)による季節調整の検証に必要なため8四半期(2年)分を保持する
+            QuarterlyProfile(
+                Decimal("160000000000"), Decimal("155000000000"), Decimal("145000000000")
+            ),
+            QuarterlyProfile(
+                Decimal("165000000000"), Decimal("160000000000"), Decimal("150000000000")
+            ),
+            QuarterlyProfile(
+                Decimal("170000000000"), Decimal("165000000000"), Decimal("155000000000")
+            ),
+            QuarterlyProfile(
+                Decimal("175000000000"), Decimal("170000000000"), Decimal("158000000000")
+            ),
             QuarterlyProfile(
                 Decimal("180000000000"), Decimal("175000000000"), Decimal("160000000000")
             ),
@@ -116,6 +129,10 @@ MOCK_STOCKS: dict[str, MockStockProfile] = {
         is_progressive_or_doe_policy=False,
         consecutive_dividend_increase_years=1,
         quarters=(
+            QuarterlyProfile(Decimal("1800000000"), Decimal("1750000000"), Decimal("1600000000")),
+            QuarterlyProfile(Decimal("1900000000"), Decimal("1850000000"), Decimal("1700000000")),
+            QuarterlyProfile(Decimal("1950000000"), Decimal("1900000000"), Decimal("1750000000")),
+            QuarterlyProfile(Decimal("2000000000"), Decimal("1950000000"), Decimal("1800000000")),
             QuarterlyProfile(Decimal("2100000000"), Decimal("2050000000"), Decimal("1900000000")),
             QuarterlyProfile(Decimal("2200000000"), Decimal("2150000000"), Decimal("2000000000")),
             QuarterlyProfile(Decimal("2300000000"), Decimal("2250000000"), Decimal("2100000000")),
@@ -151,6 +168,10 @@ MOCK_STOCKS: dict[str, MockStockProfile] = {
         is_progressive_or_doe_policy=False,
         consecutive_dividend_increase_years=2,
         quarters=(
+            QuarterlyProfile(Decimal("6500000000"), Decimal("6300000000"), Decimal("5200000000")),
+            QuarterlyProfile(Decimal("7200000000"), Decimal("7000000000"), Decimal("5800000000")),
+            QuarterlyProfile(Decimal("7900000000"), Decimal("7700000000"), Decimal("6500000000")),
+            QuarterlyProfile(Decimal("8400000000"), Decimal("8200000000"), Decimal("7000000000")),
             QuarterlyProfile(Decimal("9000000000"), Decimal("8800000000"), Decimal("7500000000")),
             QuarterlyProfile(Decimal("9500000000"), Decimal("9300000000"), Decimal("8000000000")),
             QuarterlyProfile(Decimal("10200000000"), Decimal("10000000000"), Decimal("8600000000")),
@@ -185,6 +206,18 @@ MOCK_STOCKS: dict[str, MockStockProfile] = {
         forecast_annual_dividend_per_share=Decimal("60"),
         previous_fiscal_year_dividend_per_share=Decimal("55"),
         quarters=(
+            QuarterlyProfile(
+                Decimal("370000000000"), Decimal("390000000000"), Decimal("470000000000")
+            ),
+            QuarterlyProfile(
+                Decimal("380000000000"), Decimal("400000000000"), Decimal("480000000000")
+            ),
+            QuarterlyProfile(
+                Decimal("390000000000"), Decimal("410000000000"), Decimal("490000000000")
+            ),
+            QuarterlyProfile(
+                Decimal("395000000000"), Decimal("415000000000"), Decimal("495000000000")
+            ),
             QuarterlyProfile(
                 Decimal("400000000000"), Decimal("420000000000"), Decimal("500000000000")
             ),
