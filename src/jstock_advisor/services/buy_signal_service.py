@@ -25,6 +25,7 @@ from jstock_advisor.domain.signals.buy_signal import (
     is_earnings_trend_non_decreasing,
 )
 from jstock_advisor.domain.valuation.fair_value import median_historical_pbr, median_historical_per
+from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
@@ -46,10 +47,12 @@ class BuySignalService:
         providers: ProviderBundle,
         config: AppConfig,
         business_calendar: BusinessCalendar,
+        audit_service: AuditService | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
         self._calendar = business_calendar
+        self._audit = audit_service or AuditService()
 
     def analyze(
         self,
@@ -59,6 +62,16 @@ class BuySignalService:
     ) -> BuyAnalysisOutcome:
         snapshot, error = build_stock_snapshot(self._providers, stock_code, now, self._config)
         if snapshot is None:
+            self._audit.record(
+                decision_type="buy_signal",
+                stock_code=stock_code,
+                input_values={},
+                calculation_formulas={},
+                output_values={"data_error": error},
+                data_sources=[],
+                rule_version=RULE_VERSION_PLACEHOLDER,
+                timestamp=now,
+            )
             return BuyAnalysisOutcome(stock_code, None, False, [], error)
 
         screening_result = evaluate_screening(
@@ -140,6 +153,49 @@ class BuySignalService:
             fair_value_methods_used_count=snapshot.fair_value_methods_used_count,
             data_sources_count=len(snapshot.data_sources),
             has_stale_data_warning=has_stale_data_warning,
+        )
+
+        self._audit.record(
+            decision_type="buy_signal",
+            stock_code=stock_code,
+            input_values={
+                "current_price": str(current_price),
+                "forecast_annual_dividend_per_share": (
+                    str(snapshot.dividend.forecast_annual_dividend_per_share)
+                    if snapshot.dividend.forecast_annual_dividend_per_share is not None
+                    else None
+                ),
+                "forecast_eps": str(financial.forecast_eps) if financial.forecast_eps else None,
+                "forecast_bps": str(financial.forecast_bps) if financial.forecast_bps else None,
+                "equity_ratio_pct": financial.equity_ratio_pct,
+                "payout_ratio_pct": financial.payout_ratio_pct,
+                "avg_trading_value": str(snapshot.avg_trading_value)
+                if snapshot.avg_trading_value is not None
+                else None,
+                "total_yield_pct": snapshot.total_yield_pct,
+                "dividend_yield_pct": snapshot.dividend_yield_pct,
+                "benefit_yield_pct": snapshot.benefit_yield_pct,
+                "severe_earnings_decline": snapshot.severe_earnings_decline,
+                "data_age_business_days": data_age_days,
+            },
+            calculation_formulas={
+                "fair_value_aggregation": (
+                    self._config.valuation.fair_value_methods.aggregation_method
+                ),
+                **score_result.formulas,
+            },
+            output_values={
+                "screening_passed": screening_result.passed,
+                "exclusion_reasons": screening_result.exclusion_reasons,
+                "fair_value": str(snapshot.fair_value) if snapshot.fair_value is not None else None,
+                "total_score": score_result.breakdown.total,
+                "recommended": buy_result.recommended,
+                "recommendation_exclusion_reasons": buy_result.exclusion_reasons,
+                "confidence": buy_result.confidence.value,
+            },
+            data_sources=list(snapshot.data_sources),
+            rule_version=RULE_VERSION_PLACEHOLDER,
+            timestamp=now,
         )
 
         if not buy_result.recommended:
