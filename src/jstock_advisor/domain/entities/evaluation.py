@@ -10,6 +10,7 @@ from jstock_advisor.domain.entities.enums import EvaluationLabel
 
 
 class EvaluationResult(Entity):
+    evaluation_id: str
     recommendation_id: str
     horizon_business_days: int
     evaluated_at: dt.datetime

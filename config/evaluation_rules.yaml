@@ -1,0 +1,18 @@
+# 推奨の定点評価ルール(要求仕様29〜36節)。
+# recommendation_evaluation_serviceが、推奨後の株価変動をEvaluationLabelへ
+# 変換する際に使用する閾値。すべてユーザーが変更可能。
+
+version: 1
+
+# BUY/WATCH_BUY/HOLD(買い・保有継続系)の評価に使用。
+# 推奨後の最大下落率(%、マイナス値)がこの値以下になった場合、
+# 「想定リスクを超える下落が発生した」としてRISK_UNDERESTIMATEDと判定する。
+severe_decline_after_buy_pct: -15.0
+
+# PARTIAL_PROFIT_TAKE/FULL_PROFIT_TAKE/SELL/URGENT_REVIEW(利確・売却系)の評価に使用。
+exit_evaluation:
+  # 推奨後の株価騰落率(%)がこの値以下(下落)であれば、判断は妥当だったとみなしSUCCESSとする
+  decline_confirms_good_call_pct: -5.0
+  # 推奨後の株価騰落率(%)がこの値以上(上昇)であれば、
+  # 利確系はPROFIT_TAKE_TOO_EARLY、売却系はSELL_TOO_SENSITIVEとする
+  rally_flags_too_early_or_too_sensitive_pct: 10.0
