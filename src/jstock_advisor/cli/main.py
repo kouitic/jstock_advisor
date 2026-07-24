@@ -16,6 +16,7 @@ from jstock_advisor.cli import (
     performance,
     review,
     rules,
+    shareholder_benefit,
     transactions,
     watchlist,
 )
@@ -35,6 +36,7 @@ app.add_typer(performance.app, name="performance")
 app.add_typer(feedback.app, name="feedback")
 app.add_typer(rules.app, name="rules")
 app.add_typer(review.app, name="review")
+app.add_typer(shareholder_benefit.app, name="shareholder-benefit")
 
 
 @app.callback()

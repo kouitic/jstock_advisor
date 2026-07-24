@@ -1,0 +1,136 @@
+"""株主優待の手動登録サービス(要求仕様7節、未確定事項#5)。
+
+株主優待は自動取得できる公式データ源が無いため、ユーザーが手動またはCSVで
+登録した内容をそのまま返す。ここでの登録内容がスコアリング・売却判定
+(優待廃止・改悪の検知)に直接使われるため、登録は必ずユーザー自身が
+確認した一次情報(会社発表・証券会社サイト等)に基づいて行うこと。
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from decimal import Decimal
+
+from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import BenefitUtilityCategory
+from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
+    ShareholderBenefitRegistryRepository,
+)
+from jstock_advisor.interfaces.types import BenefitDetail, ShareholderBenefit
+
+_PROVIDER_NAME = "manual_registry"
+
+
+class ShareholderBenefitRegistryService:
+    def __init__(self, repository: ShareholderBenefitRegistryRepository | None = None) -> None:
+        self._repo = repository or ShareholderBenefitRegistryRepository()
+
+    def register(
+        self,
+        stock_code: str,
+        min_shares_required: int,
+        frequency_per_year: int,
+        category: BenefitUtilityCategory,
+        description: str,
+        min_shares_for_tier: int,
+        estimated_value: Decimal | None = None,
+        long_term_holding_condition_months: int | None = None,
+        benefit_record_dates: list[dt.date] | None = None,
+        now: dt.datetime | None = None,
+    ) -> ShareholderBenefit:
+        if min_shares_required <= 0:
+            raise ValueError("min_shares_requiredは正の整数である必要があります")
+        if frequency_per_year <= 0:
+            raise ValueError("frequency_per_yearは正の整数である必要があります")
+
+        benefit = ShareholderBenefit(
+            stock_code=stock_code,
+            min_shares_required=min_shares_required,
+            benefits=[
+                BenefitDetail(
+                    category=category,
+                    description=description,
+                    estimated_value=estimated_value,
+                    min_shares_for_tier=min_shares_for_tier,
+                    long_term_holding_condition_months=long_term_holding_condition_months,
+                )
+            ],
+            frequency_per_year=frequency_per_year,
+            benefit_record_dates=benefit_record_dates or [],
+            source=DataSourceReference(
+                provider=_PROVIDER_NAME, fetched_at=now or dt.datetime.now(dt.UTC)
+            ),
+        )
+        self._repo.save(benefit)
+        return benefit
+
+    def add_benefit_detail(
+        self,
+        stock_code: str,
+        category: BenefitUtilityCategory,
+        description: str,
+        min_shares_for_tier: int,
+        estimated_value: Decimal | None = None,
+        long_term_holding_condition_months: int | None = None,
+        now: dt.datetime | None = None,
+    ) -> ShareholderBenefit:
+        existing = self._repo.get(stock_code)
+        if existing is None:
+            raise ValueError(
+                f"stock_code={stock_code} は未登録です。先にregisterで登録してください"
+            )
+
+        detail = BenefitDetail(
+            category=category,
+            description=description,
+            estimated_value=estimated_value,
+            min_shares_for_tier=min_shares_for_tier,
+            long_term_holding_condition_months=long_term_holding_condition_months,
+        )
+        updated = existing.model_copy(
+            update={
+                "benefits": [*existing.benefits, detail],
+                "source": DataSourceReference(
+                    provider=_PROVIDER_NAME, fetched_at=now or dt.datetime.now(dt.UTC)
+                ),
+            }
+        )
+        self._repo.save(updated)
+        return updated
+
+    def update_status(
+        self,
+        stock_code: str,
+        is_abolished: bool | None = None,
+        is_major_downgrade: bool | None = None,
+        change_note: str | None = None,
+        now: dt.datetime | None = None,
+    ) -> ShareholderBenefit:
+        existing = self._repo.get(stock_code)
+        if existing is None:
+            raise ValueError(f"stock_code={stock_code} は未登録です")
+
+        updates: dict[str, object] = {
+            "source": DataSourceReference(
+                provider=_PROVIDER_NAME, fetched_at=now or dt.datetime.now(dt.UTC)
+            )
+        }
+        if is_abolished is not None:
+            updates["is_abolished"] = is_abolished
+        if is_major_downgrade is not None:
+            updates["is_major_downgrade"] = is_major_downgrade
+        if change_note is not None:
+            updates["change_note"] = change_note
+
+        updated = existing.model_copy(update=updates)
+        self._repo.save(updated)
+        return updated
+
+    def list_all(self) -> list[ShareholderBenefit]:
+        return self._repo.list_all()
+
+    def get(self, stock_code: str) -> ShareholderBenefit | None:
+        return self._repo.get(stock_code)
+
+    def delete(self, stock_code: str) -> bool:
+        return self._repo.delete(stock_code)

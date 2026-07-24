@@ -38,7 +38,8 @@ _DISCLAIMER = "※最終的な投資判断は利用者が行ってください�
 _NOTIFY_HELP = "LINEへ通知する(LINE_CHANNEL_ACCESS_TOKEN/LINE_USER_ID未設定時は標準出力に表示のみ)"
 _SOURCE_HELP = (
     "データ提供元: mock(モックデータ、既定)/ real(yfinance+EDINETの実データ。"
-    "株主優待・適時開示は未実装のため取得不可扱いになります)"
+    "株主優待はjstock shareholder-benefitで手動登録した内容を使用。"
+    "適時開示はEDINET臨時報告書+yfinance決算予定日を使用。決算短信は取得不可)"
 )
 
 
