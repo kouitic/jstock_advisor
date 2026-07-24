@@ -1,0 +1,49 @@
+# 一次スクリーニング設定（要求仕様 8節、未確定事項#10・#11の推奨初期値を反映）
+# すべてユーザーが変更可能。単位はコメントに明記。
+
+version: 1
+
+universe:
+  exclude_reit: true
+  exclude_etf: true
+  # 直近20営業日の平均売買代金がこの金額(円)未満の銘柄は流動性不足として除外候補とする
+  min_avg_trading_value_20d_yen: 30_000_000
+
+total_yield:
+  # 総合利回り(配当利回り+株主優待利回り)の下限(%)。これを下回る銘柄は一次スクリーニングで除外
+  min_total_yield_pct: 3.5
+
+financial_health:
+  # 配当性向の上限(%)
+  max_payout_ratio_pct: 70.0
+  # 自己資本比率の下限(%)
+  min_equity_ratio_pct: 30.0
+  # 営業キャッシュフローがマイナスの場合は除外
+  require_positive_operating_cashflow: true
+  # 債務超過(自己資本がマイナス)の企業は除外
+  exclude_negative_equity: true
+  # 赤字企業(直近期純利益がマイナス)は原則除外
+  exclude_deficit_companies: true
+
+corporate_events:
+  # 直近で減配発表があった銘柄は一次スクリーニングで除外(買い候補としない。売り判定側では別途評価)
+  exclude_recent_dividend_cut_announced: true
+  # 継続企業の前提に重大な疑義がある(GC注記)銘柄は除外
+  exclude_going_concern_doubt: true
+  # 重大な不祥事・会計問題・上場廃止リスクがある銘柄の扱い: "exclude"(除外) または "warn"(警告付きで残す)
+  scandal_or_delisting_risk_action: "exclude"
+
+industry_specific_rules:
+  # 銀行・証券・保険等は自己資本比率など指標の意味が通常企業と異なるため、
+  # MVPでは個別評価ルール未実装。フラグを立てて除外+警告するに留める。
+  # 将来: financial_sector_action を "custom_rules" に変更し、業種別ルールを追加する。
+  financial_sector_action: "exclude_with_warning"
+  target_industry_classification:
+    - "銀行業"
+    - "証券、商品先物取引業"
+    - "保険業"
+    - "その他金融業"
+
+data_quality:
+  # 判定に使用するデータがこの営業日数より古い場合は「データ鮮度エラー」として推奨を出さない
+  max_data_age_business_days: 3

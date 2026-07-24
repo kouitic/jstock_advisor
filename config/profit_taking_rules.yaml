@@ -1,0 +1,48 @@
+# 利確判定設定（要求仕様 12節）
+
+version: 1
+
+thresholds:
+  # 含み益率(%)によるシグナル
+  unrealized_gain_watch_pct: 20.0        # 利確候補として監視
+  unrealized_gain_partial_pct: 30.0      # 一部利確を検討
+  unrealized_gain_full_pct: 50.0         # 全株または大部分の利確を検討
+
+  # 最終適正価格に対する超過率(%)
+  fair_value_excess_partial_pct: 15.0    # 一部利確を検討
+  fair_value_excess_full_pct: 30.0       # 全株利確を検討
+
+  # 総合利回りの低下によるシグナル(%)
+  total_yield_caution_pct: 2.5           # 利確を検討
+  total_yield_strong_caution_pct: 2.0    # 強く利確を検討
+
+# 利確判定を弱める要因。該当する場合、判定レベルを1段階引き下げる(FULL->PARTIAL, PARTIAL->WATCH等)
+mitigating_factors:
+  fair_value_rising_with_earnings_growth:
+    enabled: true
+    downgrade_levels: 1
+  continuous_dividend_increase:
+    enabled: true
+    # 増配が継続しているとみなす年数
+    min_consecutive_years: 2
+    downgrade_levels: 1
+  progressive_dividend_or_doe_policy:
+    enabled: true
+    downgrade_levels: 1
+  long_term_holding_benefit_imminent:
+    enabled: true
+    # 優待の長期保有優遇まで、この営業日数以内であれば適用
+    within_business_days: 60
+    downgrade_levels: 1
+  few_reinvestment_alternatives:
+    enabled: true
+    downgrade_levels: 1
+  nisa_long_term_benefit:
+    enabled: true
+    downgrade_levels: 1
+
+# 権利確定日・決算発表予定日が近い場合、判定に付記する(自動での判定変更は行わない)
+event_proximity_notice:
+  dividend_record_date_within_business_days: 10
+  benefit_record_date_within_business_days: 10
+  earnings_announcement_within_business_days: 10

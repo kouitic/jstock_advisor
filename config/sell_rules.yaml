@@ -1,0 +1,81 @@
+# 投資前提悪化による売却判定設定（要求仕様 13節）
+# 株価下落そのものは判定材料としない。個別ルールはすべて業績・配当・財務・優待・
+# ガバナンスに関する開示情報にもとづいて評価する。
+
+version: 1
+
+rules:
+  dividend_cut:
+    enabled: true
+    severity: "major"           # major -> SELL条件, critical -> URGENT_REVIEW条件
+  dividend_omission:             # 無配転落
+    enabled: true
+    severity: "critical"
+  unfavorable_dividend_policy_change:
+    enabled: true
+    severity: "major"
+  large_earnings_guidance_downgrade:
+    enabled: true
+    # 修正後の営業利益/経常利益予想が修正前よりこの割合(%)以上悪化した場合に該当
+    threshold_pct: 10.0
+    severity: "major"
+  continuous_operating_income_decline:
+    enabled: true
+    # この四半期数以上連続で減益の場合に該当
+    consecutive_quarters: 2
+    severity: "major"
+  continuous_operating_cashflow_decline:
+    enabled: true
+    consecutive_quarters: 2
+    severity: "major"
+  interest_bearing_debt_surge:
+    enabled: true
+    # 前年同期比でこの割合(%)以上増加した場合に該当
+    yoy_increase_threshold_pct: 30.0
+    severity: "major"
+  financial_health_severe_deterioration:
+    enabled: true
+    # 自己資本比率がこの値(%)を下回った場合、重大悪化とみなす
+    equity_ratio_critical_pct: 15.0
+    severity: "critical"
+  shareholder_benefit_abolished:
+    enabled: true
+    severity: "major"
+  shareholder_benefit_major_downgrade:
+    enabled: true
+    severity: "minor"           # 内容次第でmajorに引き上げる余地あり(判定根拠に明記)
+  long_term_holding_condition_unfavorable_change:
+    enabled: true
+    severity: "minor"
+  major_scandal:
+    enabled: true
+    severity: "critical"
+  accounting_problem:
+    enabled: true
+    severity: "critical"
+  listing_maintenance_risk:
+    enabled: true
+    severity: "critical"
+  investment_premise_broken:
+    # ユーザーが登録した個別銘柄の投資目的(investment_purpose)と整合しなくなった場合の汎用ルール
+    enabled: true
+    severity: "major"
+
+judgment:
+  # major severityのルールが1件以上該当 -> SELL
+  # critical severityのルールが1件以上、またはmajor該当が2件以上 -> URGENT_REVIEW
+  major_to_sell_min_count: 1
+  critical_to_urgent_review_min_count: 1
+  major_to_urgent_review_min_count: 2
+
+# 適時開示・ニュースのテキストからリスク要因を抽出する際にLLMへ渡す注目キーワード(検出の補助のみ。
+# 数値判定やSELL/URGENT_REVIEWの最終決定はPythonのルールエンジンが行う)
+disclosure_risk_keywords:
+  - "特別調査委員会"
+  - "第三者委員会"
+  - "内部統制上の重要な不備"
+  - "上場廃止基準"
+  - "監理銘柄"
+  - "整理銘柄"
+  - "不適切な会計処理"
+  - "継続企業の前提に関する重要事象"
