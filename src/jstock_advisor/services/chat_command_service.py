@@ -1,0 +1,137 @@
+"""LINEチャット経由のコマンド処理(将来拡張: チャット起点の売買記録・ウォッチ登録)。
+
+ユーザーがLINEで送ったCSV形式のテキストメッセージを、実売買記録・ウォッチリスト
+登録のコマンドとして解釈する。誤登録を避けるため固定フォーマットのCSVのみを
+受け付け、LLMによる自由文解析は行わない(要求仕様12節「推測で補完しない」原則)。
+解釈できない入力は登録を行わず、書式を案内するエラー応答を返す。
+
+送信者の認可(本人のLINEアカウントからの送信か)はWebhook層(lambda_handlers/
+line_webhook.py)の責務とし、本サービスはコマンド解析・実行のみを担う。
+"""
+
+from __future__ import annotations
+
+import csv
+import datetime as dt
+import io
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+
+from jstock_advisor.domain.entities.enums import TransactionType
+from jstock_advisor.services.portfolio_service import PortfolioService
+from jstock_advisor.services.transaction_history_service import TransactionHistoryService
+from jstock_advisor.services.watchlist_service import WatchlistService
+
+_BUY_COMMAND = "買付"
+_SELL_COMMAND = "売却"
+_WATCH_COMMAND = "ウォッチ"
+
+_HELP_TEXT = (
+    "コマンドが認識できませんでした。以下のCSV形式で送信してください:\n"
+    "買付,銘柄コード,株数,単価\n"
+    "売却,銘柄コード,株数,単価\n"
+    "ウォッチ,銘柄コード"
+)
+
+
+@dataclass(frozen=True)
+class ChatCommandResult:
+    reply_text: str
+    success: bool
+
+
+def _parse_csv_line(text: str) -> list[str] | None:
+    try:
+        rows = list(csv.reader(io.StringIO(text.strip())))
+    except csv.Error:
+        return None
+    if not rows or not rows[0]:
+        return None
+    return [field.strip() for field in rows[0]]
+
+
+class ChatCommandService:
+    def __init__(
+        self,
+        transaction_history_service: TransactionHistoryService | None = None,
+        watchlist_service: WatchlistService | None = None,
+        portfolio_service: PortfolioService | None = None,
+    ) -> None:
+        self._transactions = transaction_history_service or TransactionHistoryService()
+        self._watchlist = watchlist_service or WatchlistService()
+        self._portfolio = portfolio_service or PortfolioService()
+
+    def handle(self, text: str, now: dt.datetime | None = None) -> ChatCommandResult:
+        now = now or dt.datetime.now(dt.UTC)
+        fields = _parse_csv_line(text)
+        if not fields:
+            return ChatCommandResult(_HELP_TEXT, False)
+
+        command, args = fields[0], fields[1:]
+        if command in (_BUY_COMMAND, _SELL_COMMAND):
+            return self._handle_transaction(command, args, now)
+        if command == _WATCH_COMMAND:
+            return self._handle_watchlist(args)
+        return ChatCommandResult(_HELP_TEXT, False)
+
+    def _handle_transaction(
+        self, command: str, args: list[str], now: dt.datetime
+    ) -> ChatCommandResult:
+        if len(args) != 3:
+            return ChatCommandResult(
+                f"{command}は「{command},銘柄コード,株数,単価」の形式で送信してください", False
+            )
+        stock_code, shares_raw, price_raw = args
+
+        try:
+            shares = int(shares_raw)
+            if shares <= 0:
+                raise ValueError
+        except ValueError:
+            return ChatCommandResult("株数は正の整数で指定してください", False)
+
+        try:
+            price = Decimal(price_raw)
+            if price <= 0:
+                raise InvalidOperation
+        except InvalidOperation:
+            return ChatCommandResult("単価は正の数値で指定してください", False)
+
+        holding = self._portfolio.get_holding(stock_code)
+        if command == _BUY_COMMAND:
+            transaction_type = (
+                TransactionType.ADDITIONAL_BUY if holding is not None else TransactionType.BUY
+            )
+        else:
+            if holding is None:
+                return ChatCommandResult(f"{stock_code}は保有銘柄として登録されていません", False)
+            transaction_type = (
+                TransactionType.FULL_SELL
+                if shares >= holding.shares
+                else TransactionType.PARTIAL_SELL
+            )
+
+        try:
+            self._transactions.record_execution(
+                stock_code=stock_code,
+                transaction_type=transaction_type,
+                shares=shares,
+                execution_price=price,
+                execution_date=now.date(),
+                now=now,
+            )
+        except ValueError as e:
+            return ChatCommandResult(str(e), False)
+
+        return ChatCommandResult(
+            f"記録しました: {transaction_type.value} {stock_code} {shares}株 @{price}円", True
+        )
+
+    def _handle_watchlist(self, args: list[str]) -> ChatCommandResult:
+        if len(args) != 1 or not args[0]:
+            return ChatCommandResult(
+                "ウォッチは「ウォッチ,銘柄コード」の形式で送信してください", False
+            )
+        stock_code = args[0]
+        item = self._watchlist.add_item(stock_code=stock_code)
+        return ChatCommandResult(f"ウォッチリストに追加しました: {item.stock_code}", True)

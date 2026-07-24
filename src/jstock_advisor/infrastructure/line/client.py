@@ -18,33 +18,50 @@ from typing import Protocol
 class LineClient(Protocol):
     def push_message(self, text: str) -> None: ...
 
+    def reply_message(self, reply_token: str, text: str) -> None: ...
+
+
+def _post_messages(token: str, endpoint: str, payload: dict[str, object]) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            if response.status >= 300:
+                raise RuntimeError(f"LINE通知の送信に失敗しました: status={response.status}")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"LINE通知の送信に失敗しました: {e.code} {e.reason}") from e
+
 
 class LiveLineClient:
-    _ENDPOINT = "https://api.line.me/v2/bot/message/push"
+    _PUSH_ENDPOINT = "https://api.line.me/v2/bot/message/push"
+    _REPLY_ENDPOINT = "https://api.line.me/v2/bot/message/reply"
 
     def __init__(self, channel_access_token: str, user_id: str) -> None:
         self._token = channel_access_token
         self._user_id = user_id
 
     def push_message(self, text: str) -> None:
-        body = json.dumps(
-            {"to": self._user_id, "messages": [{"type": "text", "text": text}]}
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            self._ENDPOINT,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._token}",
-            },
-            method="POST",
+        _post_messages(
+            self._token,
+            self._PUSH_ENDPOINT,
+            {"to": self._user_id, "messages": [{"type": "text", "text": text}]},
         )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
-                if response.status >= 300:
-                    raise RuntimeError(f"LINE通知の送信に失敗しました: status={response.status}")
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(f"LINE通知の送信に失敗しました: {e.code} {e.reason}") from e
+
+    def reply_message(self, reply_token: str, text: str) -> None:
+        """Webhookで受信したイベントのreplyTokenを使って返信する(Push枠を消費しない)。"""
+        _post_messages(
+            self._token,
+            self._REPLY_ENDPOINT,
+            {"replyToken": reply_token, "messages": [{"type": "text", "text": text}]},
+        )
 
 
 class ConsoleLineClient:
@@ -56,6 +73,12 @@ class ConsoleLineClient:
     def push_message(self, text: str) -> None:
         self.sent_messages.append(text)
         print("----- [LINE通知(ドライラン・未送信)] -----")
+        print(text)
+        print("--------------------------------------")
+
+    def reply_message(self, reply_token: str, text: str) -> None:
+        self.sent_messages.append(text)
+        print(f"----- [LINE返信(ドライラン・未送信、reply_token={reply_token})] -----")
         print(text)
         print("--------------------------------------")
 
