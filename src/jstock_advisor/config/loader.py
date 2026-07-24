@@ -15,6 +15,7 @@ import yaml
 from jstock_advisor.config.models import (
     AppConfig,
     DataValidationRulesConfig,
+    EvaluationRulesConfig,
     HolidayCalendarConfig,
     NotificationRulesConfig,
     ProfitTakingRulesConfig,
@@ -77,6 +78,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     data_validation = DataValidationRulesConfig.model_validate(
         _load_yaml(directory / "data_validation_rules.yaml")
     )
+    evaluation = EvaluationRulesConfig.model_validate(
+        _load_yaml(directory / "evaluation_rules.yaml")
+    )
     holiday_calendar = HolidayCalendarConfig.model_validate(
         _load_json(directory / "holiday_calendar.json")
     )
@@ -90,5 +94,6 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         schedule=schedule,
         notification=notification,
         data_validation=data_validation,
+        evaluation=evaluation,
         holiday_calendar=holiday_calendar,
     )

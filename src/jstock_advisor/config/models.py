@@ -255,6 +255,20 @@ class DataValidationRulesConfig(StrictModel):
     split_adjustment_lookback_days: int
 
 
+# --- evaluation_rules.yaml --------------------------------------------------
+
+
+class ExitEvaluationThresholds(StrictModel):
+    decline_confirms_good_call_pct: float
+    rally_flags_too_early_or_too_sensitive_pct: float
+
+
+class EvaluationRulesConfig(StrictModel):
+    version: int
+    severe_decline_after_buy_pct: float
+    exit_evaluation: ExitEvaluationThresholds
+
+
 # --- holiday_calendar.json ----------------------------------------------------
 
 
@@ -286,4 +300,5 @@ class AppConfig(StrictModel):
     schedule: ScheduleConfig
     notification: NotificationRulesConfig
     data_validation: DataValidationRulesConfig
+    evaluation: EvaluationRulesConfig
     holiday_calendar: HolidayCalendarConfig
