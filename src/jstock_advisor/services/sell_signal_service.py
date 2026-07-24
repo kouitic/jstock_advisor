@@ -20,6 +20,7 @@ from jstock_advisor.domain.signals.sell_signal import (
     build_sell_rule_inputs_from_data,
     evaluate_sell_signal,
 )
+from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
@@ -33,15 +34,31 @@ class SellSignalOutcome:
 
 
 class SellSignalService:
-    def __init__(self, providers: ProviderBundle, config: AppConfig) -> None:
+    def __init__(
+        self,
+        providers: ProviderBundle,
+        config: AppConfig,
+        audit_service: AuditService | None = None,
+    ) -> None:
         self._providers = providers
         self._config = config
+        self._audit = audit_service or AuditService()
 
     def analyze(self, holding: Holding, now: dt.datetime) -> SellSignalOutcome:
         snapshot, error = build_stock_snapshot(
             self._providers, holding.stock_code, now, self._config
         )
         if snapshot is None:
+            self._audit.record(
+                decision_type="sell_signal",
+                stock_code=holding.stock_code,
+                input_values={},
+                calculation_formulas={},
+                output_values={"data_error": error},
+                data_sources=[],
+                rule_version=RULE_VERSION_PLACEHOLDER,
+                timestamp=now,
+            )
             return SellSignalOutcome(holding.stock_code, None, error)
 
         inputs = build_sell_rule_inputs_from_data(
@@ -55,6 +72,28 @@ class SellSignalService:
         )
 
         result = evaluate_sell_signal(inputs, snapshot.current_price, self._config.sell)
+
+        self._audit.record(
+            decision_type="sell_signal",
+            stock_code=holding.stock_code,
+            input_values=inputs.as_dict(),
+            calculation_formulas={
+                "judgment": (
+                    "critical_count>=critical_to_urgent_review_min_count or "
+                    "major_count>=major_to_urgent_review_min_count -> URGENT_REVIEW; "
+                    "major_count>=major_to_sell_min_count or critical_count>=1 -> SELL; "
+                    "それ以外 -> HOLD"
+                ),
+            },
+            output_values={
+                "recommendation_type": result.recommendation_type.value,
+                "triggered_rules": result.triggered_rules,
+                "reasons": result.reasons,
+            },
+            data_sources=list(snapshot.data_sources),
+            rule_version=RULE_VERSION_PLACEHOLDER,
+            timestamp=now,
+        )
 
         if result.recommendation_type == RecommendationType.HOLD:
             return SellSignalOutcome(holding.stock_code, None, None)

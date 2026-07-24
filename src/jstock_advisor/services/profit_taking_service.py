@@ -20,6 +20,7 @@ from jstock_advisor.domain.signals.profit_taking import (
     evaluate_profit_taking,
 )
 from jstock_advisor.interfaces.types import ShareholderBenefit
+from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
@@ -33,15 +34,31 @@ class ProfitTakingOutcome:
 
 
 class ProfitTakingService:
-    def __init__(self, providers: ProviderBundle, config: AppConfig) -> None:
+    def __init__(
+        self,
+        providers: ProviderBundle,
+        config: AppConfig,
+        audit_service: AuditService | None = None,
+    ) -> None:
         self._providers = providers
         self._config = config
+        self._audit = audit_service or AuditService()
 
     def analyze(self, holding: Holding, now: dt.datetime) -> ProfitTakingOutcome:
         snapshot, error = build_stock_snapshot(
             self._providers, holding.stock_code, now, self._config
         )
         if snapshot is None:
+            self._audit.record(
+                decision_type="profit_taking",
+                stock_code=holding.stock_code,
+                input_values={},
+                calculation_formulas={},
+                output_values={"data_error": error},
+                data_sources=[],
+                rule_version=RULE_VERSION_PLACEHOLDER,
+                timestamp=now,
+            )
             return ProfitTakingOutcome(holding.stock_code, None, error)
 
         mitigating_inputs = MitigatingFactorInputs(
@@ -79,6 +96,42 @@ class ProfitTakingService:
             forecast_annual_dividend_per_share=snapshot.dividend.forecast_annual_dividend_per_share,
             mitigating_inputs=mitigating_inputs,
             config=self._config.profit_taking,
+        )
+
+        self._audit.record(
+            decision_type="profit_taking",
+            stock_code=holding.stock_code,
+            input_values={
+                "current_price": str(snapshot.current_price),
+                "average_purchase_price": str(holding.average_purchase_price),
+                "shares": holding.shares,
+                "fair_value": (
+                    str(snapshot.fair_value) if snapshot.fair_value is not None else None
+                ),
+                "current_total_yield_pct": snapshot.total_yield_pct,
+                "consecutive_dividend_increase_years": (
+                    mitigating_inputs.continuous_dividend_increase_years
+                ),
+                "is_progressive_or_doe_policy": mitigating_inputs.is_progressive_or_doe_policy,
+                "is_nisa_account": mitigating_inputs.is_nisa_account,
+            },
+            calculation_formulas={
+                "unrealized_pnl_pct": "(current_price / average_purchase_price - 1) * 100",
+                "total_return_pct": (
+                    "(unrealized_pnl + cumulative_dividend + cumulative_benefit) "
+                    "/ total_purchase_amount * 100"
+                ),
+            },
+            output_values={
+                "recommendation_type": result.recommendation_type.value,
+                "triggered_reasons": result.triggered_reasons,
+                "mitigating_factors_applied": result.mitigating_factors_applied,
+                "unrealized_pnl_pct": result.pnl.unrealized_pnl_pct,
+                "total_return_pct": result.pnl.total_return_pct,
+            },
+            data_sources=list(snapshot.data_sources),
+            rule_version=RULE_VERSION_PLACEHOLDER,
+            timestamp=now,
         )
 
         if result.recommendation_type == RecommendationType.HOLD:
