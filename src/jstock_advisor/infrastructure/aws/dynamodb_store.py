@@ -1,0 +1,71 @@
+"""DynamoDBバックエンドの汎用コレクションストア。
+
+ローカルのJsonCollectionStoreと同一のインターフェース(list_all/get/upsert/
+upsert_many/delete/find)を提供し、Lambda環境ではリポジトリ層のコード変更
+無しにストレージをDynamoDBへ差し替えられるようにする(infrastructure/
+collection_store.pyのファクトリ経由で選択される)。
+
+各アイテムは丸ごとJSON文字列としてdata属性に保存する。ローカルJSON実装と
+同じシリアライズ経路(model_dump_json/model_validate_json)を使うことで、
+Decimal等の型変換ロジックを一本化し挙動の差異を避ける。パーティションキーは
+id_fieldの値をそのまま使う単純な設計とする(単一ユーザー運用規模のため、
+アクセスパターンごとのGSI設計は行わずスキャンで十分とする)。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any
+
+import boto3
+from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from mypy_boto3_dynamodb.service_resource import Table
+
+
+class DynamoDbCollectionStore[T: BaseModel]:
+    def __init__(self, model_type: type[T], table_name: str, id_field: str) -> None:
+        self._model_type = model_type
+        self._id_field = id_field
+        resource = boto3.resource("dynamodb")
+        self._table: Table = resource.Table(table_name)
+
+    def _to_item(self, model: T) -> dict[str, Any]:
+        item_id = str(getattr(model, self._id_field))
+        return {self._id_field: item_id, "data": model.model_dump_json()}
+
+    def _from_item(self, item: dict[str, Any]) -> T:
+        return self._model_type.model_validate_json(item["data"])
+
+    def list_all(self) -> list[T]:
+        items: list[T] = []
+        scan_kwargs: dict[str, Any] = {}
+        while True:
+            response = self._table.scan(**scan_kwargs)
+            items.extend(self._from_item(raw) for raw in response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
+        return items
+
+    def get(self, item_id: str) -> T | None:
+        response = self._table.get_item(Key={self._id_field: item_id})
+        item = response.get("Item")
+        return self._from_item(item) if item is not None else None
+
+    def upsert(self, item: T) -> None:
+        self._table.put_item(Item=self._to_item(item))
+
+    def upsert_many(self, new_items: Iterable[T]) -> None:
+        with self._table.batch_writer() as batch:
+            for item in new_items:
+                batch.put_item(Item=self._to_item(item))
+
+    def delete(self, item_id: str) -> bool:
+        response = self._table.delete_item(Key={self._id_field: item_id}, ReturnValues="ALL_OLD")
+        return "Attributes" in response
+
+    def find(self, predicate: Callable[[T], bool]) -> list[T]:
+        return [item for item in self.list_all() if predicate(item)]

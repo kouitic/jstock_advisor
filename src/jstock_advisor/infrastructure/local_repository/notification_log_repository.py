@@ -6,12 +6,12 @@ from pathlib import Path
 
 from jstock_advisor.domain.entities.enums import NotificationType
 from jstock_advisor.domain.entities.notification import NotificationLog
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
 
 class NotificationLogRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[NotificationLog] = JsonCollectionStore(
+        self._store: CollectionStore[NotificationLog] = build_collection_store(
             NotificationLog, "notification_log.json", "notification_id", store_dir
         )
 

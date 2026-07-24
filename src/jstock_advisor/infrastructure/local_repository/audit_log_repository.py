@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from jstock_advisor.domain.entities.audit import AuditLogEntry
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
 
 class AuditLogRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[AuditLogEntry] = JsonCollectionStore(
+        self._store: CollectionStore[AuditLogEntry] = build_collection_store(
             AuditLogEntry, "audit_log.json", "audit_id", store_dir
         )
 

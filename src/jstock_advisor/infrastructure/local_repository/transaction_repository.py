@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from jstock_advisor.domain.entities.transaction import SkippedRecommendation, Transaction
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
 
 class TransactionRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[Transaction] = JsonCollectionStore(
+        self._store: CollectionStore[Transaction] = build_collection_store(
             Transaction, "transactions.json", "transaction_id", store_dir
         )
 
@@ -33,7 +33,7 @@ class TransactionRepository:
 
 class SkippedRecommendationRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[SkippedRecommendation] = JsonCollectionStore(
+        self._store: CollectionStore[SkippedRecommendation] = build_collection_store(
             SkippedRecommendation, "skipped_recommendations.json", "recommendation_id", store_dir
         )
 

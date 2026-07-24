@@ -13,8 +13,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 from jstock_advisor.infrastructure.edinet.client import EdinetClient
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
 
 _ANNUAL_DOC_TYPE_CODES = {"120", "130"}  # 有価証券報告書・訂正有価証券報告書
 _SEMIANNUAL_DOC_TYPE_CODES = {"160", "170"}  # 半期報告書・訂正半期報告書
@@ -37,7 +37,7 @@ class EdinetFilingCache(BaseModel):
 
 class EdinetFilingCacheRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[EdinetFilingCache] = JsonCollectionStore(
+        self._store: CollectionStore[EdinetFilingCache] = build_collection_store(
             EdinetFilingCache, "edinet_filing_cache.json", "stock_code", store_dir
         )
 

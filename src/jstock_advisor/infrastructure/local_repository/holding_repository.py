@@ -10,12 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
-from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
 
 class PurchaseLotRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[PurchaseLot] = JsonCollectionStore(
+        self._store: CollectionStore[PurchaseLot] = build_collection_store(
             PurchaseLot, "purchase_lots.json", "lot_id", store_dir
         )
 
@@ -44,7 +44,7 @@ class PurchaseLotRepository:
 
 class HoldingRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
-        self._store: JsonCollectionStore[Holding] = JsonCollectionStore(
+        self._store: CollectionStore[Holding] = build_collection_store(
             Holding, "holdings.json", "stock_code", store_dir
         )
 
