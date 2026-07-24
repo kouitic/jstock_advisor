@@ -1,0 +1,139 @@
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
+    ShareholderBenefitRegistryRepository,
+)
+from jstock_advisor.services.shareholder_benefit_csv_import_service import (
+    CsvRowStatus,
+    ShareholderBenefitCsvImportService,
+)
+
+_HEADER = (
+    "stock_code,min_shares_required,frequency_per_year,category,description,min_shares_for_tier"
+)
+
+
+@pytest.fixture
+def repository(tmp_path: Path) -> ShareholderBenefitRegistryRepository:
+    return ShareholderBenefitRegistryRepository(store_dir=tmp_path)
+
+
+@pytest.fixture
+def import_service(
+    repository: ShareholderBenefitRegistryRepository,
+) -> ShareholderBenefitCsvImportService:
+    return ShareholderBenefitCsvImportService(repository=repository)
+
+
+def _write_csv(tmp_path: Path, content: str) -> Path:
+    path = tmp_path / "import.csv"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_import_valid_single_row(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER}\n2914,100,1,CASH_EQUIVALENT,クオカード1000円分,100\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.success_count == 1
+    saved = repository.get("2914")
+    assert saved is not None
+    assert len(saved.benefits) == 1
+
+
+def test_import_groups_multiple_tiers_for_same_stock(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER}\n"
+        "2914,100,1,CASH_EQUIVALENT,100株優待,100\n"
+        "2914,100,1,CASH_EQUIVALENT,1000株優待,1000\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.success_count == 2
+    saved = repository.get("2914")
+    assert saved is not None
+    assert len(saved.benefits) == 2
+    assert saved.min_shares_required == 100  # 最初の行の値を採用
+
+
+def test_import_optional_columns(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER},estimated_value,benefit_record_dates,is_abolished,change_note\n"
+        "2914,100,1,CASH_EQUIVALENT,x,100,1000,2026-03-31;2026-09-30,true,廃止予定\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.success_count == 1
+    saved = repository.get("2914")
+    assert saved is not None
+    assert saved.benefits[0].estimated_value == Decimal("1000")
+    assert saved.benefit_record_dates[0].isoformat() == "2026-03-31"
+    assert saved.is_abolished is True
+    assert saved.change_note == "廃止予定"
+
+
+def test_import_missing_required_column_raises(
+    import_service: ShareholderBenefitCsvImportService, tmp_path: Path
+) -> None:
+    csv_path = _write_csv(tmp_path, "stock_code,category\n2914,CASH_EQUIVALENT\n")
+    with pytest.raises(ValueError, match="必須列"):
+        import_service.import_file(csv_path)
+
+
+def test_import_invalid_category_is_row_error(
+    import_service: ShareholderBenefitCsvImportService, tmp_path: Path
+) -> None:
+    csv_path = _write_csv(tmp_path, f"{_HEADER}\n2914,100,1,INVALID,x,100\n")
+    summary = import_service.import_file(csv_path)
+    assert summary.error_count == 1
+    assert summary.results[0].status == CsvRowStatus.ERROR
+
+
+def test_import_non_positive_min_shares_required_is_row_error(
+    import_service: ShareholderBenefitCsvImportService, tmp_path: Path
+) -> None:
+    csv_path = _write_csv(tmp_path, f"{_HEADER}\n2914,0,1,CASH_EQUIVALENT,x,100\n")
+    summary = import_service.import_file(csv_path)
+    assert summary.error_count == 1
+
+
+def test_import_missing_description_is_row_error(
+    import_service: ShareholderBenefitCsvImportService, tmp_path: Path
+) -> None:
+    csv_path = _write_csv(tmp_path, f"{_HEADER}\n2914,100,1,CASH_EQUIVALENT,,100\n")
+    summary = import_service.import_file(csv_path)
+    assert summary.error_count == 1
+
+
+def test_import_row_level_error_isolation(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER}\n2914,100,1,CASH_EQUIVALENT,valid,100\n8136,100,1,INVALID,x,100\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.total_rows == 2
+    assert summary.success_count == 1
+    assert summary.error_count == 1
+    assert repository.get("2914") is not None
+    assert repository.get("8136") is None
