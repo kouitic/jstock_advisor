@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from jstock_advisor.domain.jst import format_jst
 from jstock_advisor.services.user_feedback_service import UserFeedbackService
 
 app = typer.Typer(help="推奨・売買記録に対する定性フィードバックの記録")
@@ -61,7 +62,7 @@ def list_feedback(
         return
     for item in items:
         typer.echo(
-            f"[{item.created_at.isoformat()}] recommendation_id={item.recommendation_id} "
+            f"[{format_jst(item.created_at)}] recommendation_id={item.recommendation_id} "
             f"transaction_id={item.transaction_id} satisfaction_score={item.satisfaction_score}"
         )
         if item.comment:

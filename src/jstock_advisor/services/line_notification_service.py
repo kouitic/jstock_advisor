@@ -20,6 +20,7 @@ from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import NotificationType, RecommendationType
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.jst import format_jst
 from jstock_advisor.infrastructure.line.client import LineClient
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -103,7 +104,7 @@ def _format_buy_message(recommendation: Recommendation, notification_type: Notif
     lines.append(f"権利確定月: {_record_months(recommendation)}")
     if recommendation.data_sources:
         fetched_at = min(s.fetched_at for s in recommendation.data_sources)
-        lines.append(f"データ取得日時: {fetched_at.strftime('%Y-%m-%d %H:%M')}")
+        lines.append(f"データ取得日時: {format_jst(fetched_at)}")
     lines.append(f"判定の信頼度: {recommendation.confidence.value}")
     lines.append(_DISCLAIMER)
     return "\n".join(lines)
@@ -136,7 +137,7 @@ def _format_profit_taking_message(recommendation: Recommendation) -> str:
     lines.append(f"権利確定月: {_record_months(recommendation)}")
     if recommendation.data_sources:
         fetched_at = min(s.fetched_at for s in recommendation.data_sources)
-        lines.append(f"データ取得日時: {fetched_at.strftime('%Y-%m-%d %H:%M')}")
+        lines.append(f"データ取得日時: {format_jst(fetched_at)}")
     lines.append(f"判定の信頼度: {recommendation.confidence.value}")
     lines.append(_DISCLAIMER)
     return "\n".join(lines)
@@ -158,7 +159,7 @@ def _format_sell_message(recommendation: Recommendation) -> str:
     lines.append("保有を継続する場合のリスク: 投資前提の悪化が是正されない可能性があります")
     if recommendation.data_sources:
         fetched_at = min(s.fetched_at for s in recommendation.data_sources)
-        lines.append(f"データ取得日時: {fetched_at.strftime('%Y-%m-%d %H:%M')}")
+        lines.append(f"データ取得日時: {format_jst(fetched_at)}")
     lines.append(f"判定の信頼度: {recommendation.confidence.value}")
     lines.append(_DISCLAIMER)
     return "\n".join(lines)
@@ -219,7 +220,7 @@ class LineNotificationService:
 
         text = (
             f"【データ取得エラー】{stock_code}\n{message}\n"
-            f"データ取得日時: {now.strftime('%Y-%m-%d %H:%M')}\n{_DISCLAIMER}"
+            f"データ取得日時: {format_jst(now)}\n{_DISCLAIMER}"
         )
         self._client.push_message(text)
         self._log_repo.save(

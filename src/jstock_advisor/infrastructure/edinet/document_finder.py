@@ -25,6 +25,7 @@ class EdinetFilingCache(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     stock_code: str
+    filer_name: str | None = None  # EDINET提出書類のfilerName(日本語の正式社名)
     latest_annual_doc_id: str | None = None
     latest_annual_period_end: str | None = None
     latest_semiannual_doc_id: str | None = None
@@ -80,6 +81,7 @@ def find_latest_filings(
     today = now.date()
     cache = cache_repo.get(stock_code)
 
+    filer_name = cache.filer_name if cache else None
     annual_doc_id = cache.latest_annual_doc_id if cache else None
     annual_period_end = cache.latest_annual_period_end if cache else None
     semiannual_doc_id = cache.latest_semiannual_doc_id if cache else None
@@ -99,6 +101,11 @@ def find_latest_filings(
         for entry in client.list_documents(scan_date):
             if entry.get("secCode") != sec_code:
                 continue
+            if filer_name is None:
+                candidate_name = entry.get("filerName")
+                if isinstance(candidate_name, str) and candidate_name:
+                    filer_name = candidate_name
+
             doc_type = entry.get("docTypeCode")
             period_end = entry.get("periodEnd")
             doc_id = entry.get("docID")
@@ -115,6 +122,7 @@ def find_latest_filings(
 
     updated_cache = EdinetFilingCache(
         stock_code=stock_code,
+        filer_name=filer_name,
         latest_annual_doc_id=annual_doc_id,
         latest_annual_period_end=annual_period_end,
         latest_semiannual_doc_id=semiannual_doc_id,

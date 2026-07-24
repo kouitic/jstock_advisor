@@ -4,22 +4,38 @@ quarterly_*系のデータは超大型株を除きほとんど空であること
 年次データ(annual)を基本とする。自己資本比率は貸借対照表の総資産・自己資本から
 自前で計算する(EDINETの経営指標サマリーは連結/個別の基準が銘柄により不統一で
 あることを実測で確認済みのため、要素を自前で組み合わせる方が信頼できる)。
+
+社名はyfinanceからは英語名(longName/shortName)しか取得できないため(実測確認済み)、
+EDINET提出書類のfilerName(日本語の正式社名)が利用できる場合はそちらを優先する。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.infrastructure.edinet.client import EdinetClient
+from jstock_advisor.infrastructure.edinet.document_finder import (
+    EdinetFilingCacheRepository,
+    find_latest_filings,
+)
 from jstock_advisor.interfaces.types import (
     FinancialSummary,
     HistoricalValuation,
     QuarterlyFinancials,
 )
+
+_CORPORATE_SUFFIX_PATTERN = re.compile(r"株式会社")
+
+
+def _strip_corporate_suffix(name: str) -> str:
+    return _CORPORATE_SUFFIX_PATTERN.sub("", name).strip()
+
 
 _PROVIDER_NAME = "yfinance"
 _TICKER_SUFFIX = ".T"
@@ -48,11 +64,30 @@ def _to_decimal(value: object) -> Decimal | None:
 
 
 class YFinanceFinancialDataProvider:
-    def __init__(self, now: dt.datetime | None = None) -> None:
+    def __init__(
+        self,
+        now: dt.datetime | None = None,
+        edinet_client: EdinetClient | None = None,
+        edinet_cache_repository: EdinetFilingCacheRepository | None = None,
+    ) -> None:
         self._now = now or dt.datetime.now(dt.UTC)
+        self._edinet_client = edinet_client
+        self._edinet_cache_repo = edinet_cache_repository
 
     def _source(self) -> DataSourceReference:
         return DataSourceReference(provider=_PROVIDER_NAME, fetched_at=self._now)
+
+    def _resolve_japanese_stock_name(self, stock_code: str) -> str | None:
+        if self._edinet_client is None or self._edinet_cache_repo is None:
+            return None
+        if not self._edinet_client.is_configured:
+            return None
+        filing = find_latest_filings(
+            self._edinet_client, self._edinet_cache_repo, stock_code, self._now
+        )
+        if filing is None or filing.filer_name is None:
+            return None
+        return _strip_corporate_suffix(filing.filer_name)
 
     def get_financial_summary(self, stock_code: str) -> FinancialSummary | None:
         ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
@@ -83,9 +118,15 @@ class YFinanceFinancialDataProvider:
         is_deficit = net_income is not None and net_income < 0
         is_debt_excess = equity_ratio_pct is not None and equity_ratio_pct < 0
 
+        stock_name = (
+            self._resolve_japanese_stock_name(stock_code)
+            or info.get("longName")
+            or info.get("shortName")
+        )
+
         return FinancialSummary(
             stock_code=stock_code,
-            stock_name=info.get("longName") or info.get("shortName"),
+            stock_name=stock_name,
             fiscal_period_end=self._now.date(),
             security_type=security_type,
             market_segment=None,  # yfinanceは市場区分(プライム/スタンダード等)を提供しない
