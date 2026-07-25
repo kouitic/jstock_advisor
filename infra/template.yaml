@@ -1,0 +1,438 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  jstock_advisor - 日本株 長期・高配当・株主優待重視の売買支援システム。
+  config/schedule.yamlの各ジョブに対応するLambda関数、DynamoDBテーブル、
+  LINE Webhook用API Gatewayを定義する。
+
+Parameters:
+  TablePrefix:
+    Type: String
+    Default: jstock
+    Description: DynamoDBテーブル名の接頭辞(build_collection_storeのDYNAMODB_TABLE_PREFIXと一致させる)
+  EdinetApiKeySecretArn:
+    Type: String
+    Description: >
+      EDINET_API_KEYを保持するSecrets ManagerシークレットのARN。
+      事前に`aws secretsmanager create-secret`等で作成し、
+      `aws secretsmanager put-secret-value`で値を投入してから指定する。
+  LineChannelAccessTokenSecretArn:
+    Type: String
+    Description: LINE_CHANNEL_ACCESS_TOKENを保持するSecrets ManagerシークレットのARN
+  LineUserIdSecretArn:
+    Type: String
+    Description: LINE_USER_IDを保持するSecrets ManagerシークレットのARN(本人確認・Webhook認可にも使用)
+  LineChannelSecretSecretArn:
+    Type: String
+    Description: LINE_CHANNEL_SECRETを保持するSecrets ManagerシークレットのARN(Webhook署名検証用)
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+    Timeout: 300
+    MemorySize: 512
+    Layers:
+      - !Ref DependenciesLayer
+    Environment:
+      Variables:
+        DYNAMODB_TABLE_PREFIX: !Ref TablePrefix
+        EDINET_API_KEY: !Sub "{{resolve:secretsmanager:${EdinetApiKeySecretArn}:SecretString}}"
+        LINE_CHANNEL_ACCESS_TOKEN: !Sub "{{resolve:secretsmanager:${LineChannelAccessTokenSecretArn}:SecretString}}"
+        LINE_USER_ID: !Sub "{{resolve:secretsmanager:${LineUserIdSecretArn}:SecretString}}"
+
+Resources:
+  # --- Lambda Layer(依存パッケージ) -------------------------------------
+
+  DependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-deps"
+      ContentUri: layer/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: python3.12
+
+  # --- DynamoDBテーブル ----------------------------------------------------
+  # オンデマンド課金(個人利用規模でアクセス頻度が低く予測しづらいため)。
+  # 各テーブルはinfrastructure/collection_store.pyのresolve_table_name()が
+  # 計算する名前(${TablePrefix}-<file_nameから.jsonを除いたもの>)と一致させる。
+
+  HoldingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-holdings"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+
+  PurchaseLotsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-purchase_lots"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: lot_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lot_id
+          KeyType: HASH
+
+  WatchlistTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-watchlist"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+
+  RecommendationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-recommendations"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: recommendation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: recommendation_id
+          KeyType: HASH
+
+  TransactionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-transactions"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: transaction_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transaction_id
+          KeyType: HASH
+
+  SkippedRecommendationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-skipped_recommendations"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: recommendation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: recommendation_id
+          KeyType: HASH
+
+  NotificationLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-notification_log"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: notification_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: notification_id
+          KeyType: HASH
+
+  EvaluationResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-evaluation_results"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: evaluation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: evaluation_id
+          KeyType: HASH
+
+  RuleVersionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-rule_versions"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: rule_version
+          AttributeType: S
+      KeySchema:
+        - AttributeName: rule_version
+          KeyType: HASH
+
+  RuleProposalsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-rule_proposals"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: proposal_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: proposal_id
+          KeyType: HASH
+
+  UserFeedbackTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-user_feedback"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: feedback_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: feedback_id
+          KeyType: HASH
+
+  AuditLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-audit_log"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: audit_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: audit_id
+          KeyType: HASH
+
+  ShareholderBenefitsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-shareholder_benefits"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+
+  EdinetFilingCacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-edinet_filing_cache"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+
+  EdinetDisclosureCacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-edinet_disclosure_cache"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+
+  # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
+
+  BuyCandidatesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-buy-candidates"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.buy_candidates_handler.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref RecommendationsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        - DynamoDBReadPolicy: { TableName: !Ref WatchlistTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
+      Events:
+        DailyMorning:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 8 ? * MON-FRI *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  HoldingsWatchlistFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-holdings-watchlist"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.holdings_watchlist_handler.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref RecommendationsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref PurchaseLotsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref WatchlistTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
+      Events:
+        DailyAfternoon:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(30 16 ? * MON-FRI *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  DisclosureCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-disclosure-check"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.disclosure_check_handler.handler
+      Timeout: 180
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+      Events:
+        Morning:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 10 ? * MON-FRI *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+        Midday:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(30 12 ? * MON-FRI *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+        Afternoon:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(30 15 ? * MON-FRI *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  EvaluationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-evaluation"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.evaluation_handler.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EvaluationResultsTable }
+      Events:
+        DailyEvening:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 18 ? * MON-FRI *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  WeeklyReviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-weekly-review"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.weekly_review_handler.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref EvaluationResultsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RuleProposalsTable }
+      Events:
+        SaturdayMorning:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 9 ? * SAT *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  MonthlyReviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-monthly-review"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.monthly_review_handler.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref EvaluationResultsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RuleProposalsTable }
+      Events:
+        # 毎週土曜に起動し、当月第1土曜日かはLambda側(_scheduling.py)で判定する
+        SaturdayMorning:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 10 ? * SAT *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  QuarterlyReviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-quarterly-review"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.quarterly_review_handler.handler
+      Events:
+        # 毎週土曜に起動し、1/4/7/10月の第1土曜日かはLambda側で判定する
+        SaturdayMorning:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 11 ? * SAT *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  # --- LINE Webhook(API Gateway経由、チャット起点の売買記録・ウォッチ登録) --
+
+  LineWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-line-webhook"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.line_webhook_handler.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          LINE_CHANNEL_SECRET: !Sub "{{resolve:secretsmanager:${LineChannelSecretSecretArn}:SecretString}}"
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref TransactionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref SkippedRecommendationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref HoldingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref PurchaseLotsTable }
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WebhookApi
+            Path: /webhook
+            Method: POST
+
+  WebhookApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+
+Outputs:
+  WebhookUrl:
+    Description: >
+      LINE DevelopersコンソールのWebhook URLに設定するエンドポイント。
+      デプロイ後、この値を「https://<ここ>/webhook」の形でMessaging API設定に登録する。
+      検証(Verify)を押す前に、4つのSecrets Managerシークレットへ値を投入しておくこと。
+    Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/prod"

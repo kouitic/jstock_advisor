@@ -1,0 +1,10 @@
+# Lambda Layer用の依存パッケージ一覧。
+# boto3/botocoreはLambdaマネージドランタイムに標準搭載されているため含めない
+# (パッケージサイズ削減のためAWS推奨のプラクティスに従う)。
+# typer/python-dotenvはCLI専用の依存であり、lambda_handlers/services/domainからは
+# 参照されないため含めない。
+pydantic>=2.7
+pyyaml>=6.0
+python-dateutil>=2.9
+jpholiday>=0.1.9
+yfinance>=0.2.40
