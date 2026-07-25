@@ -11,8 +11,10 @@
 ## 1. システム概要
 
 - 対象: 日本株の長期・高配当・株主優待重視の売買支援(REIT・ETFは対象外)
-- 現状: ローカルCLI(このリポジトリ)で完結。AWS(Lambda/DynamoDB等)への移行は未着手
-- データ保存先: `data/local_store/*.json`(ローカルJSON。DynamoDB移行後もリポジトリ層のインターフェースは変わらない想定)
+- 現状: ローカルCLIとAWS(Lambda/DynamoDB/EventBridge Scheduler/API Gateway)の両方に対応
+  (`infrastructure/collection_store.py`が実行環境を自動判定してストレージを切り替える)。
+  AWSへのデプロイ手順は[infra/README.md](../infra/README.md)を参照
+- データ保存先: ローカル実行時は`data/local_store/*.json`、AWS実行時はDynamoDB(リポジトリ層のインターフェースは同一)
 - 判断の原則:
   - Pythonが数値計算・判定を行い、あいまいな推測はしない(データが無ければ「取得不可」として扱う)
   - ルール変更(config/*.yaml)は`rules`コマンド経由の提案→人間承認を経ないと本適用されない
@@ -105,16 +107,18 @@ jstock shareholder-benefit import-csv benefits.csv
 
 ## 4. 日次運用
 
-`config/schedule.yaml` の日次ジョブと、対応するCLIコマンドの対応表です。
-AWS移行後はこれらがLambda + EventBridge Schedulerで自動実行される想定ですが、
-現状(ローカル運用)では利用者自身がタスクスケジューラ等に登録するか、手動で実行します。
+`config/schedule.yaml` の日次ジョブと、対応するCLIコマンド・AWS Lambda関数の対応表です。
+AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実行します(時刻はJST、
+`infra/template.yaml`の`ScheduleExpressionTimezone: Asia/Tokyo`により変換不要)。
+ローカル運用のみの場合は、利用者自身がタスクスケジューラ等にCLIコマンドを登録するか
+手動で実行してください。
 
-| 時刻 | schedule.yamlのジョブ | 対応コマンド | 備考 |
-|---|---|---|---|
-| 08:00 | `daily_buy_candidates_analysis` | `jstock analyze buy-candidates <銘柄コード...> --source real --notify` | `--source real`時は対象銘柄コードの指定が必須(全銘柄自動スキャンは未対応) |
-| 10:00/12:30/15:30 | `disclosure_check` | `jstock analyze disclosure-check --source real --notify` | 保有銘柄の新規開示にリスクキーワードが検出された場合のみ速報通知する |
-| 16:30 | `daily_holdings_watchlist_analysis` | `jstock analyze holdings --source real --notify`<br>`jstock analyze watchlist --source real --notify` | 保有銘柄・ウォッチリストは全件自動対象 |
-| 18:00 | `point_in_time_evaluation` | `jstock evaluation run --source real` | 評価期限(営業日数)を迎えた推奨のみ処理。通知機能は無く、結果はコンソール表示のみ |
+| 時刻 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 | 備考 |
+|---|---|---|---|---|
+| 08:00 | `daily_buy_candidates_analysis` | `jstock analyze buy-candidates <銘柄コード...> --source real --notify` | `BuyCandidatesFunction` | ★Lambda版はウォッチリスト登録銘柄のみを走査対象とする(全上場銘柄の自動スクリーニングではない。CLIも`--source real`時はコード指定必須) |
+| 10:00/12:30/15:30 | `disclosure_check` | `jstock analyze disclosure-check --source real --notify` | `DisclosureCheckFunction` | 保有銘柄の新規開示にリスクキーワードが検出された場合のみ速報通知する |
+| 16:30 | `daily_holdings_watchlist_analysis` | `jstock analyze holdings --source real --notify`<br>`jstock analyze watchlist --source real --notify` | `HoldingsWatchlistFunction` | 保有銘柄・ウォッチリストは全件自動対象 |
+| 18:00 | `point_in_time_evaluation` | `jstock evaluation run --source real` | `EvaluationFunction` | 評価期限(営業日数)を迎えた推奨のみ処理。通知機能は無く、結果はコンソール/CloudWatch Logs表示のみ |
 
 ### 実行結果の確認ポイント
 
@@ -126,14 +130,20 @@ AWS移行後はこれらがLambda + EventBridge Schedulerで自動実行され�
 
 ## 5. 週次・月次・四半期レビュー
 
-| 頻度 | schedule.yamlのジョブ | 対応コマンド |
-|---|---|---|
-| 週次(土09:00) | `weekly_review` | `jstock review report --notify` |
-| 月次(第1土10:00) | `monthly_review` | `jstock review report --notify`(全ホライズン合算)<br>必要に応じ `jstock performance summary --horizon <N>` で特定ホライズンを確認 |
-| 四半期(1,4,7,10月第1土11:00) | `quarterly_logic_review` | 第7節「ルール改善承認フロー」を参照 |
+| 頻度 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 |
+|---|---|---|---|
+| 週次(土09:00) | `weekly_review` | `jstock review report --notify` | `WeeklyReviewFunction` |
+| 月次(第1土10:00) | `monthly_review` | `jstock review report --notify`(全ホライズン合算)<br>必要に応じ `jstock performance summary --horizon <N>` で特定ホライズンを確認 | `MonthlyReviewFunction` |
+| 四半期(1,4,7,10月第1土11:00) | `quarterly_logic_review` | 第7節「ルール改善承認フロー」を参照 | `QuarterlyReviewFunction`(★LINEでリマインドを送るのみ。提案の自動生成はしない) |
 
-`monthly_review`/`quarterly_logic_review`が「当月第1土曜日か」を判定する処理は、
-現状のCLIには実装されていません(実行タイミングは利用者が手動判断してください)。
+ローカルCLIには「当月第1土曜日か」を判定する処理はありません(実行タイミングは
+利用者が手動判断してください)。AWS Lambda版(`MonthlyReviewFunction`/
+`QuarterlyReviewFunction`)は毎週土曜に起動したうえで、`lambda_handlers/_scheduling.py`が
+当月第1土曜日かどうかを内部判定し、該当しない場合は何もせず終了します。
+`QuarterlyReviewFunction`はルール改善提案(リスク影響・過学習リスク評価等の自由記述を
+要する)を自動生成しません(要求仕様45節の人間承認必須の原則のため)。レビュー時期が
+来たことをLINEで知らせるのみで、実際の`rules backtest`/`rules propose`は利用者が
+手動で実行してください。
 
 ---
 
@@ -149,6 +159,23 @@ jstock transactions sell-executed 2914 50 4600 --recommendation-id <推奨ID>
 jstock transactions skip-recommendation <推奨ID> --reason WAITED_FOR_EARNINGS
 jstock transactions list
 ```
+
+### 6.1 LINEチャットからの登録(AWSデプロイ時のみ)
+
+AWSデプロイ後、LINE Webhookを設定していれば、CLIを開かずLINEのトーク画面から
+以下のCSV形式のメッセージを送るだけで売買記録・ウォッチリスト登録ができます
+(誤登録を防ぐため固定フォーマットのみ対応。自由文解析は行いません)。
+
+```
+買付,2914,100,3400
+売却,2914,50,4600
+ウォッチ,7203
+```
+
+送信すると同じトークに結果が返信されます。本人(LINE_USER_IDに設定したアカウント)
+以外からのメッセージは無視されます。推奨IDとの紐付けは行われないため
+(CLIの`--recommendation-id`相当の機能は無い)、推奨との価格差分析が必要な場合は
+引き続きCLIの`transactions buy-executed`/`sell-executed`を使用してください。
 
 ---
 
@@ -202,4 +229,7 @@ jstock feedback add --recommendation-id <推奨ID> --satisfaction-score 4
 | 定点評価のtotal_return | 配当・優待込みの正確な総合リターンは未算出(株価ベースのリターンのみ) |
 | EvaluationLabelの自動付与 | LATE / PROFIT_TAKE_TOO_LATE は自動付与されない(推奨前の価格推移データを保持していないため) |
 | `--source real`時の全銘柄スキャン | `analyze buy-candidates --source real` は対象銘柄コードの指定が必須(mock時のみ全銘柄自動) |
-| 月次・四半期の「第1土曜日」判定 | CLI側では未実装。実行タイミングは利用者が判断 |
+| 月次・四半期の「第1土曜日」判定 | CLI側では未実装(Lambda版は`_scheduling.py`で判定)。CLIで手動実行する場合は実行タイミングを利用者が判断 |
+| `BuyCandidatesFunction`のスキャン対象 | 全上場銘柄の自動スクリーニングではなく、ウォッチリスト登録銘柄のみを対象とする(市場全体をスキャンする実データ取得元が未接続のため) |
+| `QuarterlyReviewFunction` | ルール改善提案の自動生成は行わない(人間承認が必須な自由記述項目があるため)。レビュー時期のLINEリマインドのみ |
+| LINEチャット登録(6.1節) | 推奨ID・手数料・税額・メモ等は指定不可(最小限の項目のみ)。詳細な記録はCLIを使用 |
