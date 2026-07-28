@@ -263,6 +263,24 @@ Resources:
         - AttributeName: stock_code
           KeyType: HASH
 
+  # 銘柄単位ファンアウト(_fanout.py)の完了検知用。原子的なADDカウンタとして
+  # infrastructure/aws/batch_tracker.pyから直接操作するため、他テーブルと異なり
+  # {id_field, data: JSON}形式ではなく数値属性を直接持つ。TTLで数時間後に自動削除する
+  BatchRunsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-batch_runs"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: batch_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: batch_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
 
   BuyCandidatesFunction:
@@ -284,6 +302,7 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow
@@ -320,6 +339,7 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow

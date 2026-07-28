@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import logging
 import uuid
 from decimal import Decimal
 
@@ -37,6 +38,8 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.data_quality_service import DataQualityIssueSeverity, detect_anomalies
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
+
+logger = logging.getLogger(__name__)
 
 _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType] = {
     RecommendationType.BUY: NotificationType.DAILY_BUY_CANDIDATES,
@@ -447,54 +450,33 @@ class LineNotificationService:
                 ],
             },
             suppressed_rules=[issue.check_name for issue in anomalies],
-            notification_values={"suppressed_values": suppressed_values},
+            notification_values={
+                "suppressed_values": suppressed_values,
+                "recommended_action": alert.recommended_action,
+            },
         )
         return alert
 
     def notify_data_quality_alert(self, alert: DataQualityAlert, now: dt.datetime) -> bool:
-        """判定/価格の矛盾または異常値を検出した際、通常の推奨通知の代わりに送信する。
+        """判定/価格の矛盾または異常値を検出した際、通常の推奨通知の代わりに呼ばれる。
 
-        同一銘柄・同一内容(矛盾リストが同一)のアラートは再送しない。
+        LINEへは個別送信しない(要求仕様: 個別のデータ品質アラートはチャットへ
+        配信せず、バッチ全体のサマリー通知(notify_batch_summary)に集約する)。
+        検出内容・対応内容はCloudWatch Logsおよび監査ログ(_check_data_quality内で
+        AuditServiceへ記録済み)で追跡できる。LINEへは何も送信していないためFalseを返す
+        (戻り値は「メッセージを送信したか」を表す既存の意味を保つ)。
         """
-        content_hash = hashlib.sha256(
-            f"{alert.stock_code}|{'|'.join(alert.contradictions)}".encode()
-        ).hexdigest()[:16]
-        latest = self._log_repo.latest_by_stock_and_type(
-            alert.stock_code, NotificationType.DATA_QUALITY_ALERT
-        )
-        if latest is not None and latest.content_hash == content_hash:
-            return False
-
+        del now
         name_part = f" {alert.stock_name}" if alert.stock_name else ""
-        lines = [
-            f"【データ品質アラート】{alert.stock_code}{name_part}",
-            f"検出元処理: {alert.process}",
-            "検出した矛盾・異常: " + " / ".join(alert.contradictions),
-        ]
-        if alert.suppressed_values:
-            values = ", ".join(f"{k}={v}" for k, v in alert.suppressed_values.items())
-            lines.append(f"使用を停止した値: {values}")
-        if alert.recalculation_result:
-            lines.append(f"再計算結果: {alert.recalculation_result}")
-        lines.append(f"対応要否: {'要対応' if alert.action_required else '参考情報'}")
-        if alert.action_required:
-            lines.append(f"対応内容: {alert.recommended_action or _DEFAULT_RECOMMENDED_ACTION}")
-        lines.append("この銘柄の通常の売買推奨通知は、問題が解消されるまで抑止されます。")
-        lines.append(f"検出日時: {format_jst(alert.detected_at)}")
-        lines.append(_DISCLAIMER)
-        self._client.push_message("\n".join(lines))
-
-        self._log_repo.save(
-            NotificationLog(
-                notification_id=str(uuid.uuid4()),
-                notification_type=NotificationType.DATA_QUALITY_ALERT,
-                stock_code=alert.stock_code,
-                content_hash=content_hash,
-                sent_at=now,
-                related_recommendation_id=None,
-            )
+        logger.warning(
+            "data_quality_alert stock_code=%s%s process=%s contradictions=%s recommended_action=%s",
+            alert.stock_code,
+            name_part,
+            alert.process,
+            alert.contradictions,
+            alert.recommended_action,
         )
-        return True
+        return False
 
     def notify_disclosure_risk(
         self,
@@ -547,31 +529,33 @@ class LineNotificationService:
     def notify_data_error(
         self, stock_code: str, message: str, now: dt.datetime, stock_name: str | None = None
     ) -> bool:
-        content_hash = hashlib.sha256(message.encode()).hexdigest()[:16]
-        latest = self._log_repo.latest_by_stock_and_type(stock_code, NotificationType.DATA_ERROR)
-        if latest is not None and latest.content_hash == content_hash:
-            days_elapsed = (now.date() - latest.sent_at.date()).days
-            if days_elapsed < self._config.notification.resend_after_days:
-                return False
+        """データ取得エラーが発生した際に呼ばれる。
 
+        LINEへは個別送信しない(要求仕様: 個別のデータ取得エラーはチャットへ配信せず、
+        バッチ全体のサマリー通知(notify_batch_summary)に集約する)。詳細はCloudWatch
+        Logsで追跡できる。LINEへは何も送信していないためFalseを返す。
+        """
+        del now
         name_part = f" {stock_name}" if stock_name else ""
-        text = (
-            f"【データ取得エラー】{stock_code}{name_part}\n{message}\n"
-            "対応内容: 一時的な障害の可能性があります。次回の自動分析で解消しない場合は"
-            "CloudWatch Logsで詳細を確認してください。\n"
-            f"データ取得日時: {format_jst(now)}\n{_DISCLAIMER}"
-        )
-        self._client.push_message(text)
-        self._log_repo.save(
-            NotificationLog(
-                notification_id=str(uuid.uuid4()),
-                notification_type=NotificationType.DATA_ERROR,
-                stock_code=stock_code,
-                content_hash=content_hash,
-                sent_at=now,
-                related_recommendation_id=None,
-            )
-        )
+        logger.warning("data_error stock_code=%s%s message=%s", stock_code, name_part, message)
+        return False
+
+    def notify_batch_summary(
+        self, process_name: str, total: int, succeeded: int, failed: int, now: dt.datetime
+    ) -> bool:
+        """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
+        全体件数・正常件数・異常件数のサマリー通知。個別のデータ取得エラー・データ品質
+        アラートはこれに集約され、個別には送信しない。
+        """
+        lines = [
+            f"【処理完了】{process_name}",
+            f"全体処理件数: {total}",
+            f"正常件数: {succeeded}",
+            f"異常件数: {failed}",
+            f"完了日時: {format_jst(now)}",
+            _DISCLAIMER,
+        ]
+        self._client.push_message("\n".join(lines))
         return True
 
     def _previous_recommendation(

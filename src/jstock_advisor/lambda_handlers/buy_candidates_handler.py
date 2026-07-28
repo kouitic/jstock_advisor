@@ -11,6 +11,10 @@ EventBridge Scheduler経由で自動実行する薄いアダプタ。
 
 銘柄単位のファンアウト(_fanout.py)を採用しており、通常のスケジュール起動では
 銘柄一覧を取得して銘柄ごとに自分自身を非同期再帰呼び出しするだけで即座に戻る。
+
+個別のデータ取得エラーはLINEへ配信せず、全銘柄の処理が完了した時点で
+全体件数・正常件数・異常件数のサマリーを1通だけ送信する
+(batch_tracker.pyのDynamoDB原子カウンタで完了を検知する)。
 """
 
 from __future__ import annotations
@@ -18,11 +22,13 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import uuid
 from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.infrastructure.aws.batch_tracker import record_result, start_batch
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -40,9 +46,12 @@ from jstock_advisor.services.watchlist_service import WatchlistService
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+_PROCESS_NAME = "買い候補分析"
+
 
 def _process_single_candidate(
     stock_code: str,
+    batch_id: str | None,
     now: dt.datetime,
     providers: ProviderBundle,
     config: AppConfig,
@@ -51,23 +60,34 @@ def _process_single_candidate(
     notification_service: LineNotificationService,
 ) -> dict[str, Any]:
     service = BuySignalService(providers=providers, config=config, business_calendar=calendar)
+    succeeded = False
     try:
         outcome = service.analyze(stock_code, now)
         if outcome.data_error:
-            logger.warning("data_error stock_code=%s error=%s", stock_code, outcome.data_error)
             item = WatchlistService().get_item(stock_code)
             notification_service.notify_data_error(
                 stock_code, outcome.data_error, now, stock_name=item.stock_name if item else None
             )
-            return {"stock_code": stock_code, "recommended": False, "notified": False}
-        if outcome.recommendation is None:
-            return {"stock_code": stock_code, "recommended": False, "notified": False}
-        recommendation_repo.save(outcome.recommendation)
-        notified = notification_service.notify_recommendation(outcome.recommendation, now)
-        return {"stock_code": stock_code, "recommended": True, "notified": notified}
+            result = {"stock_code": stock_code, "recommended": False, "notified": False}
+        elif outcome.recommendation is None:
+            succeeded = True
+            result = {"stock_code": stock_code, "recommended": False, "notified": False}
+        else:
+            succeeded = True
+            recommendation_repo.save(outcome.recommendation)
+            notified = notification_service.notify_recommendation(outcome.recommendation, now)
+            result = {"stock_code": stock_code, "recommended": True, "notified": notified}
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
         logger.exception("buy candidate analysis failed unexpectedly stock_code=%s", stock_code)
-        return {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
+        result = {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
+
+    if batch_id is not None:
+        progress = record_result(batch_id, succeeded)
+        if progress is not None and progress.is_complete:
+            notification_service.notify_batch_summary(
+                _PROCESS_NAME, progress.total, progress.succeeded, progress.failed, now
+            )
+    return result
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
@@ -86,6 +106,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     if event.get("task") == "buy_candidate":
         result = _process_single_candidate(
             event["stock_code"],
+            event.get("batch_id"),
             now,
             providers,
             config,
@@ -100,8 +121,14 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # 自己再帰呼び出しに委ねる)
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
     items = WatchlistService().list_items()
-    for item in items:
-        dispatch_async(function_name, {"task": "buy_candidate", "stock_code": item.stock_code})
+    batch_id = f"buy-candidates-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    start_batch(batch_id, len(items), now)
 
-    logger.info("buy_candidates_handler dispatched: scanned=%d", len(items))
+    for item in items:
+        dispatch_async(
+            function_name,
+            {"task": "buy_candidate", "stock_code": item.stock_code, "batch_id": batch_id},
+        )
+
+    logger.info("buy_candidates_handler dispatched: scanned=%d batch_id=%s", len(items), batch_id)
     return {"dispatched": len(items)}

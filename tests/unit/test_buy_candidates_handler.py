@@ -55,16 +55,23 @@ def test_dispatch_mode_dispatches_one_call_per_watchlist_item(
     result = handler_module.handler({}, _FakeContext())
 
     assert result == {"dispatched": 2}
+    batch_ids = {d["batch_id"] for d in dispatched}
+    assert len(batch_ids) == 1
+
+    def _without_batch_id(payload: dict[str, object]) -> dict[str, object]:
+        return {k: v for k, v in payload.items() if k != "batch_id"}
+
+    stripped = [_without_batch_id(d) for d in dispatched]
     assert {
         "fn": "jstock-advisor-buy-candidates",
         "task": "buy_candidate",
         "stock_code": "2914",
-    } in dispatched
+    } in stripped
     assert {
         "fn": "jstock-advisor-buy-candidates",
         "task": "buy_candidate",
         "stock_code": "8136",
-    } in dispatched
+    } in stripped
 
 
 def test_task_buy_candidate_processes_only_requested_stock(
