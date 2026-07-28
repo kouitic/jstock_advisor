@@ -23,8 +23,15 @@ from jstock_advisor.domain.entities.common import (
 from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
-from jstock_advisor.domain.financial_series import to_seasonally_adjusted_series
-from jstock_advisor.domain.screening.rules import detect_disclosure_risk_keywords
+from jstock_advisor.domain.financial_series import (
+    FinancialPeriodValue,
+    build_financial_period_series,
+    to_seasonally_adjusted_series,
+)
+from jstock_advisor.domain.screening.rules import (
+    detect_disclosure_risk_keywords,
+    detect_material_event_keywords,
+)
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.signals.momentum import compute_momentum_snapshot
 from jstock_advisor.domain.valuation.buy_price import compute_recommended_buy_prices
@@ -79,8 +86,13 @@ class StockSnapshot:
     data_fetched_at: dt.datetime
     quarterly_operating_incomes: list[Decimal]
     quarterly_operating_cashflows: list[Decimal]
+    # --- 財務期間の構造化(2026-07仕様レビュー対応)。sell_signal専用に、
+    # period_type(QUARTER/YTD/TTM/ANNUAL)を明示したうえで継続悪化判定を行う ---
+    quarterly_operating_income_periods: list[FinancialPeriodValue]
+    quarterly_operating_cashflow_periods: list[FinancialPeriodValue]
     severe_earnings_decline: bool
     disclosure_risk_keywords_found: list[str]
+    material_event_keywords_found: list[str]
     cashflow_decomposition: CashflowDecomposition | None
     stock_type_classification: StockTypeClassification
     fair_value_range: FairValueRange
@@ -233,6 +245,7 @@ def build_stock_snapshot(
     keywords_found = detect_disclosure_risk_keywords(
         disclosures, config.sell.disclosure_risk_keywords
     )
+    material_event_keywords_found = detect_material_event_keywords(disclosures)
 
     period_ends = [q.quarter_end for q in financial.recent_quarters]
     raw_operating_incomes = [q.operating_income for q in financial.recent_quarters]
@@ -248,6 +261,12 @@ def build_stock_snapshot(
     quarterly_operating_incomes = [v for v in adjusted_operating_incomes if v is not None]
     quarterly_operating_cashflows = [v for v in adjusted_operating_cashflows if v is not None]
     severe_earnings_decline = has_severe_earnings_decline(quarterly_operating_incomes)
+    quarterly_operating_income_periods = build_financial_period_series(
+        raw_operating_incomes, period_ends, source=financial.source.provider
+    )
+    quarterly_operating_cashflow_periods = build_financial_period_series(
+        raw_operating_cashflows, period_ends, source=financial.source.provider
+    )
     cashflow_decomposition = providers.financial_data.get_cashflow_decomposition(stock_code)
     stock_type_classification = classify_stock_type(
         financial=financial,
@@ -289,8 +308,11 @@ def build_stock_snapshot(
         data_fetched_at=data_fetched_at,
         quarterly_operating_incomes=quarterly_operating_incomes,
         quarterly_operating_cashflows=quarterly_operating_cashflows,
+        quarterly_operating_income_periods=quarterly_operating_income_periods,
+        quarterly_operating_cashflow_periods=quarterly_operating_cashflow_periods,
         severe_earnings_decline=severe_earnings_decline,
         disclosure_risk_keywords_found=keywords_found,
+        material_event_keywords_found=material_event_keywords_found,
         cashflow_decomposition=cashflow_decomposition,
         stock_type_classification=stock_type_classification,
         fair_value_range=fair_value_range,

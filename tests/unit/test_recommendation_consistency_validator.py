@@ -23,6 +23,9 @@ def _recommendation(
     average_purchase_price: Decimal | None = None,
     total_yield_pct: float | None = None,
     reasons: list[str] | None = None,
+    confidence: ConfidenceLevel = ConfidenceLevel.MEDIUM,
+    evidence_details: list[dict] | None = None,
+    independent_evidence_group_count: int | None = None,
 ) -> Recommendation:
     return Recommendation(
         recommendation_id="rec-1",
@@ -35,8 +38,10 @@ def _recommendation(
         average_purchase_price_at_recommendation=average_purchase_price,
         total_yield_pct_at_recommendation=total_yield_pct,
         reasons=reasons or [],
-        confidence=ConfidenceLevel.MEDIUM,
+        confidence=confidence,
         rule_version="v1-mvp",
+        evidence_details=evidence_details or [],
+        independent_evidence_group_count=independent_evidence_group_count,
     )
 
 
@@ -187,4 +192,84 @@ def test_price_equals_current_with_target_basis_flagged() -> None:
     result = validate_recommendation(r, _CONFIG)
     assert any(
         v.check_name == "price_equals_current_with_target_basis" for v in result.violations
+    )
+
+
+# --- 独立根拠グループ数ベースの整合性検査(2026-07仕様レビュー対応) ------------
+
+
+def _evidence(*, immediate: bool = False, primary_confirmed: bool = False) -> dict:
+    return {
+        "rule_name": "x",
+        "status": "TRIGGERED",
+        "severity": "critical",
+        "evidence_group": "GOVERNANCE",
+        "is_immediate_critical": immediate,
+        "primary_source_confirmed": primary_confirmed,
+        "explanation": "x",
+    }
+
+
+def test_sell_with_single_independent_group_flagged_for_manual_review() -> None:
+    r = _recommendation(
+        RecommendationType.SELL,
+        Decimal("1000"),
+        evidence_details=[_evidence()],
+        independent_evidence_group_count=1,
+    )
+    result = validate_recommendation(r, _CONFIG)
+    assert result.requires_manual_review
+    assert any(v.check_name == "sell_based_on_single_evidence" for v in result.violations)
+
+
+def test_sell_with_two_independent_groups_not_flagged() -> None:
+    r = _recommendation(
+        RecommendationType.SELL,
+        Decimal("1000"),
+        evidence_details=[_evidence(), _evidence()],
+        independent_evidence_group_count=2,
+    )
+    result = validate_recommendation(r, _CONFIG)
+    assert not any(v.check_name == "sell_based_on_single_evidence" for v in result.violations)
+
+
+def test_urgent_review_with_unconfirmed_immediate_critical_flagged() -> None:
+    r = _recommendation(
+        RecommendationType.URGENT_REVIEW,
+        Decimal("1000"),
+        evidence_details=[_evidence(immediate=True, primary_confirmed=False)],
+        independent_evidence_group_count=1,
+    )
+    result = validate_recommendation(r, _CONFIG)
+    assert any(v.check_name == "sell_based_on_single_evidence" for v in result.violations)
+
+
+def test_urgent_review_with_confirmed_immediate_critical_allowed_single_group() -> None:
+    r = _recommendation(
+        RecommendationType.URGENT_REVIEW,
+        Decimal("1000"),
+        evidence_details=[_evidence(immediate=True, primary_confirmed=True)],
+        independent_evidence_group_count=1,
+    )
+    result = validate_recommendation(r, _CONFIG)
+    assert not any(v.check_name == "sell_based_on_single_evidence" for v in result.violations)
+
+
+def test_review_with_immediate_execution_price_flagged() -> None:
+    sell_prices = SellPriceLevels(
+        immediate_execution_price=PriceWithRationale(price=Decimal("1000"), rationale="x")
+    )
+    r = _recommendation(RecommendationType.REVIEW, Decimal("1000"), sell_prices=sell_prices)
+    result = validate_recommendation(r, _CONFIG)
+    assert result.requires_manual_review
+    assert any(
+        v.check_name == "review_retains_immediate_execution_price" for v in result.violations
+    )
+
+
+def test_review_without_immediate_execution_price_not_flagged() -> None:
+    r = _recommendation(RecommendationType.REVIEW, Decimal("1000"), sell_prices=SellPriceLevels())
+    result = validate_recommendation(r, _CONFIG)
+    assert not any(
+        v.check_name == "review_retains_immediate_execution_price" for v in result.violations
     )

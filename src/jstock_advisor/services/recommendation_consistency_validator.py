@@ -44,15 +44,34 @@ _SELL_LIKE_TYPES = (RecommendationType.SELL, RecommendationType.URGENT_REVIEW)
 
 
 def _check_sell_single_evidence(r: Recommendation) -> ConsistencyViolation | None:
-    """SELL/URGENT_REVIEWが証拠1件のみに基づいていないか(要求仕様§15)。"""
+    """SELL/URGENT_REVIEWが独立根拠グループ2件未満に基づいていないか(要求仕様§15、
+    レビュー対応でTRIGGERED件数ではなくindependent_evidence_group_countを使用)。
+
+    ただし、一次情報確認済みの即時性criticalが存在する場合は、単一グループでも
+    URGENT_REVIEWを許可する(要求仕様レビュー対応の例外)。
+    """
     if r.recommendation_type not in _SELL_LIKE_TYPES:
         return None
-    triggered_count = sum(1 for e in r.evidence_details if e.get("status") == "TRIGGERED")
-    if triggered_count <= 1:
+
+    has_confirmed_immediate_critical = any(
+        e.get("status") == "TRIGGERED"
+        and e.get("is_immediate_critical")
+        and e.get("primary_source_confirmed")
+        for e in r.evidence_details
+    )
+    if (
+        r.recommendation_type == RecommendationType.URGENT_REVIEW
+        and has_confirmed_immediate_critical
+    ):
+        return None
+
+    if r.independent_evidence_group_count is None:
+        return None
+    if r.independent_evidence_group_count < 2:
         return ConsistencyViolation(
             "sell_based_on_single_evidence",
-            f"{r.recommendation_type.value}の根拠が{triggered_count}件しかない"
-            "(独立した複数の根拠が必要)",
+            f"{r.recommendation_type.value}の独立根拠グループが"
+            f"{r.independent_evidence_group_count}件しかない(独立した複数の根拠が必要)",
             manual_review_required=True,
         )
     return None
@@ -105,6 +124,36 @@ def _check_sell_price_equals_current_as_future_condition(
                 "future_condition_equals_current_price",
                 f"{name}が現在値と同一だが、将来の再判断条件として提示されている"
                 "(すでに成立している条件を将来条件として表示しない)",
+                manual_review_required=True,
+            )
+    return None
+
+
+def _check_review_retains_immediate_execution_price(
+    r: Recommendation,
+) -> ConsistencyViolation | None:
+    """REVIEW判定(自動的な売却判断を行わない)なのに、即時執行を意味する価格が
+    残っていないか(要求仕様レビュー対応: SELL/URGENT_REVIEWからの格下げ後、
+    元の強い行動提案の価格だけが残る矛盾を防ぐ)。
+    """
+    if r.recommendation_type != RecommendationType.REVIEW or r.sell_prices is None:
+        return None
+    if r.sell_prices.immediate_execution_price is not None:
+        return ConsistencyViolation(
+            "review_retains_immediate_execution_price",
+            "REVIEW判定(自動売却判断を行わない)なのに、即時執行目安価格が"
+            "設定されたままになっている",
+            manual_review_required=True,
+        )
+    for name, field in (
+        ("recommended_limit_price", r.sell_prices.recommended_limit_price),
+        ("stop_review_price", r.sell_prices.stop_review_price),
+    ):
+        if field is not None and field.basis == PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE:
+            return ConsistencyViolation(
+                "review_retains_immediate_execution_price",
+                f"REVIEW判定なのに、{name}が即時執行目安(IMMEDIATE_EXECUTION_REFERENCE)"
+                "のまま残っている",
                 manual_review_required=True,
             )
     return None
@@ -223,8 +272,7 @@ def _check_gain_below_threshold_full_take(
     if gain_pct < gain_full_threshold_pct and len(r.reasons) < min_reasons:
         return ConsistencyViolation(
             "full_take_with_insufficient_gain_and_reasons",
-            f"含み益率({gain_pct:.1f}%)が全株利確閾値未満なのに、"
-            f"根拠が{len(r.reasons)}件しかない",
+            f"含み益率({gain_pct:.1f}%)が全株利確閾値未満なのに、根拠が{len(r.reasons)}件しかない",
         )
     return None
 
@@ -290,6 +338,7 @@ def validate_recommendation(
         _check_high_confidence_insufficient_groups(recommendation),
         _check_sell_based_on_yfinance_only(recommendation),
         _check_sell_price_equals_current_as_future_condition(recommendation),
+        _check_review_retains_immediate_execution_price(recommendation),
     ]
     violations = [c for c in checks if c is not None]
     return ConsistencyCheckResult(passed=not violations, violations=violations)

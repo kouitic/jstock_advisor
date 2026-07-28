@@ -160,6 +160,10 @@ class YFinanceDividendDataProvider:
             official_dividend_cut_announced=False,
             inferred_dividend_decrease=is_dividend_cut_announced,
             total_dividend_decrease_detected=is_dividend_cut_announced,
+            # yfinanceの予想配当率=0のみからの推測であり、公式な無配転落発表の
+            # 確認ではない(恒久的な制約。一次情報ソースが無い)。
+            official_dividend_omission_announced=False,
+            inferred_dividend_omission=is_dividend_omission_announced,
         )
 
     def _sum_by_calendar_year(self, dividends: Any, stock_code: str) -> dict[int, float]:

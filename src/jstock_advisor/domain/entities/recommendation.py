@@ -27,6 +27,9 @@ class Recommendation(ImmutableSnapshot):
     stock_name: str
     recommended_at: dt.datetime
     recommendation_type: RecommendationType
+    # 格下げ前の生の判定(2026-07仕様レビュー対応)。格下げが無かった場合は
+    # recommendation_typeと同じ値になる。
+    raw_recommendation_type: RecommendationType | None = None
 
     buy_prices: BuyPriceLevels | None = None
     sell_prices: SellPriceLevels | None = None

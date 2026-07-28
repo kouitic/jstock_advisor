@@ -15,15 +15,18 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from jstock_advisor.config.models import SellRulesConfig
-from jstock_advisor.domain.classification.financial_industry import classify_financial_industry
+from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.common import PriceWithRationale
 from jstock_advisor.domain.entities.enums import (
+    DisclosureRiskConfirmationLevel,
     EvidenceGroup,
+    IndustryClassification,
     PriceFieldBasis,
     RecommendationType,
     TriggerStatus,
 )
 from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
+from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
     DividendInfo,
@@ -106,12 +109,59 @@ def classify_disclosure_risk_keywords(found_keywords: list[str]) -> dict[str, bo
     return result
 
 
+# is_immediate_criticalの対象とするルール(major_scandal/listing_maintenance_risk)は、
+# リスクキーワード一致だけでなく、決算訂正・監査意見への影響等の重大事象確認語が
+# 別途検出された場合のみMATERIAL_EVENT_CONFIRMEDとする(2026-07仕様レビュー対応)。
+_TWO_STAGE_CONFIRMATION_RULES = frozenset({"major_scandal", "listing_maintenance_risk"})
+
+
+def classify_disclosure_risk_keywords_with_confirmation(
+    found_keywords: list[str], material_event_keywords_found: list[str]
+) -> dict[str, DisclosureRiskConfirmationLevel | None]:
+    """開示リスクキーワードの検出結果を、重大性の二段階(RISK_KEYWORD_DETECTED/
+    MATERIAL_EVENT_CONFIRMED)で分類する。該当なしはNone。
+    """
+    flags = classify_disclosure_risk_keywords(found_keywords)
+    has_material_event = bool(material_event_keywords_found)
+    result: dict[str, DisclosureRiskConfirmationLevel | None] = {}
+    for rule_name, triggered in flags.items():
+        if not triggered:
+            result[rule_name] = None
+        elif rule_name in _TWO_STAGE_CONFIRMATION_RULES and has_material_event:
+            result[rule_name] = DisclosureRiskConfirmationLevel.MATERIAL_EVENT_CONFIRMED
+        else:
+            result[rule_name] = DisclosureRiskConfirmationLevel.RISK_KEYWORD_DETECTED
+    return result
+
+
 def detect_continuous_decline(values: list[Decimal], consecutive_quarters: int) -> bool:
     """直近consecutive_quarters期にわたり前期比で悪化し続けているかを判定する。"""
     if consecutive_quarters < 1 or len(values) < consecutive_quarters + 1:
         return False
     recent = values[-(consecutive_quarters + 1) :]
     return all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
+
+
+def detect_continuous_decline_period_aware(
+    periods: list[FinancialPeriodValue], consecutive_quarters: int
+) -> bool | None:
+    """period_typeを明示したFinancialPeriodValue系列で継続悪化を判定する
+    (2026-07仕様レビュー対応)。
+
+    QUARTERとANNUALの比較・単独四半期と累計値の比較・比較期間種別不明の値による
+    判定を禁止する。比較対象窓の中でperiod_typeが揃っていない場合や、件数が
+    不足している場合はNone(判定不能)を返す(データ不足を理由に安全側の判定を
+    弱めない、という既存方針とは別に、そもそも比較不能なものを比較しない)。
+    """
+    if consecutive_quarters < 1 or len(periods) < consecutive_quarters + 1:
+        return None
+    recent = periods[-(consecutive_quarters + 1) :]
+    period_types = {p.period_type for p in recent}
+    if len(period_types) != 1:
+        return None
+    if any(p.is_cumulative for p in recent):
+        return None
+    return all(recent[i].value < recent[i - 1].value for i in range(1, len(recent)))
 
 
 @dataclass(frozen=True)
@@ -144,13 +194,24 @@ def _evaluate_financial_health_rules(
     financial: FinancialSummary, config: SellRulesConfig
 ) -> list[SellRuleEvaluation]:
     """balance_sheet_insolvency(全業種共通)とfinancial_health_severe_deterioration
-    (一般事業会社限定)を評価する(要求仕様§2)。
+    (一般事業会社限定)を評価する(要求仕様§2、レビュー対応で業種三値化・
+    債務超過のsuspected/confirmed分離)。
 
-    金融業(銀行・保険・証券商品先物取引業・その他金融業)には、一般事業会社向けの
-    自己資本比率基準を適用しない。銀行専用の健全性指標(CET1比率等)は現時点で
+    業種分類は三値(GENERAL_CORPORATE/FINANCIAL/UNKNOWN)。UNKNOWN(sector欠損等で
+    業種を確認できない)をGENERAL_CORPORATEとして扱わない(一般事業会社向け
+    自己資本比率ルールは、業種がGENERAL_CORPORATEと明確に判定できた場合にのみ適用)。
+    金融業には同ルールを適用しない。銀行専用の健全性指標(CET1比率等)は現時点で
     取得できるProviderが無いため、regulatory_capital_breachは常にNOT_EVALUATEDとする。
+
+    債務超過(balance_sheet_insolvency)は、yfinance等の二次情報による自己資本比率
+    マイナスの検出のみではSUSPECTEDとし、SELL/URGENT_REVIEWの直接的な根拠(major/
+    critical件数・独立根拠グループ数)には算入しない。決算短信・有価証券報告書等の
+    一次情報で純資産合計が負であることを確認できた場合のみTRIGGERED(即時critical)
+    とするが、現時点でそうした一次情報を取得するProviderは存在しないため、実運用上は
+    常にSUSPECTED/NOT_TRIGGERED/NOT_EVALUATEDのいずれかとなる。
     """
-    industry = classify_financial_industry(financial.sector, financial.industry)
+    classification = classify_industry(financial.sector, financial.industry)
+    industry = classification.classification
     results: list[SellRuleEvaluation] = []
     insolvency_severity = config.rules["balance_sheet_insolvency"].severity
 
@@ -167,13 +228,15 @@ def _evaluate_financial_health_rules(
             )
         )
     else:
-        insolvent = financial.equity_ratio_pct < 0
+        insolvent_suspected = financial.equity_ratio_pct < 0
         results.append(
             SellRuleEvaluation(
                 rule_name="balance_sheet_insolvency",
-                status=TriggerStatus.TRIGGERED if insolvent else TriggerStatus.NOT_TRIGGERED,
+                status=(
+                    TriggerStatus.SUSPECTED if insolvent_suspected else TriggerStatus.NOT_TRIGGERED
+                ),
                 evidence_group=EvidenceGroup.BALANCE_SHEET,
-                severity=insolvency_severity if insolvent else None,
+                severity=insolvency_severity if insolvent_suspected else None,
                 is_immediate_critical=True,
                 metric_name="equity_ratio_pct",
                 current_value=f"{financial.equity_ratio_pct:.1f}%",
@@ -181,15 +244,33 @@ def _evaluate_financial_health_rules(
                 source="yfinance",
                 primary_source_confirmed=False,
                 explanation=(
-                    "自己資本比率がマイナスであり債務超過の可能性がある"
-                    if insolvent
+                    "自己資本比率がマイナスであり債務超過の疑いがあるが、yfinance由来の"
+                    "二次情報のみであり、一次情報での確認が取れるまでSELL/URGENT_REVIEW"
+                    "の根拠にはしない(insolvency_suspected)"
+                    if insolvent_suspected
                     else "自己資本比率はマイナスではない(債務超過ではない)"
                 ),
             )
         )
 
     rule_cfg = config.rules["financial_health_severe_deterioration"]
-    if industry is not None:
+    if industry != IndustryClassification.GENERAL_CORPORATE:
+        if industry == IndustryClassification.FINANCIAL:
+            category_label = (
+                classification.financial_category.value
+                if classification.financial_category is not None
+                else "金融業"
+            )
+            reason = (
+                f"業種({category_label})が金融業のため、一般事業会社向け自己資本比率"
+                "ルールは適用しない。銀行・保険・証券専用の健全性指標は未実装のため、"
+                "この観点での財務健全性は判定不能"
+            )
+        else:
+            reason = (
+                "sector/industryが取得できず業種を確認できないため、一般事業会社向け"
+                "自己資本比率ルールを適用しない(業種不明を一般事業会社として扱わない)"
+            )
         results.append(
             SellRuleEvaluation(
                 rule_name="financial_health_severe_deterioration",
@@ -197,24 +278,21 @@ def _evaluate_financial_health_rules(
                 evidence_group=EvidenceGroup.BALANCE_SHEET,
                 metric_name="equity_ratio_pct",
                 source="yfinance",
-                explanation=(
-                    f"業種({industry.value})が金融業のため、一般事業会社向け自己資本比率"
-                    "ルールは適用しない。銀行・保険・証券専用の健全性指標は未実装のため、"
-                    "この観点での財務健全性は判定不能"
-                ),
+                explanation=reason,
             )
         )
-        results.append(
-            SellRuleEvaluation(
-                rule_name="regulatory_capital_breach",
-                status=TriggerStatus.NOT_EVALUATED,
-                evidence_group=EvidenceGroup.REGULATORY_CAPITAL,
-                is_immediate_critical=True,
-                metric_name="cet1_ratio_pct/total_capital_ratio_pct",
-                source=None,
-                explanation="銀行専用の規制資本指標を取得できるデータソースが無いため判定不能",
+        if industry == IndustryClassification.FINANCIAL:
+            results.append(
+                SellRuleEvaluation(
+                    rule_name="regulatory_capital_breach",
+                    status=TriggerStatus.NOT_EVALUATED,
+                    evidence_group=EvidenceGroup.REGULATORY_CAPITAL,
+                    is_immediate_critical=True,
+                    metric_name="cet1_ratio_pct/total_capital_ratio_pct",
+                    source=None,
+                    explanation="銀行専用の規制資本指標を取得できるデータソースが無いため判定不能",
+                )
             )
-        )
     elif financial.equity_ratio_pct is None:
         results.append(
             SellRuleEvaluation(
@@ -253,19 +331,35 @@ def _evaluate_financial_health_rules(
 
 
 def _evaluate_cashflow_decline_rule(
-    quarterly_operating_cashflows: list[Decimal],
+    quarterly_operating_cashflow_periods: list[FinancialPeriodValue],
     cashflow_decomposition: CashflowDecomposition | None,
     consecutive_quarters: int,
     severity: str,
 ) -> SellRuleEvaluation:
-    """営業CF継続悪化ルール(要求仕様§14)。
+    """営業CF継続悪化ルール(要求仕様§14、レビュー対応で財務期間の構造化)。
 
-    要因分解が無く「本業要因が主因かどうか」を確認できない場合、悪化そのものは
-    観測されていてもmajorとして扱わずNOT_EVALUATEDとする(データ不足を理由に
-    強い判定を出さない)。要因分解の結果、明確に運転資本・一過性要因が主因だと
-    分かっている場合はNOT_TRIGGERED(発火させない)。
+    比較対象窓の中でperiod_type(QUARTER/YTD/TTM/ANNUAL)が揃っていない場合は
+    そもそも継続悪化を判定できないためNOT_EVALUATEDとする。要因分解が無く
+    「本業要因が主因かどうか」を確認できない場合も、悪化そのものは観測されていても
+    majorとして扱わずNOT_EVALUATEDとする(データ不足を理由に強い判定を出さない)。
+    要因分解の結果、明確に運転資本・一過性要因が主因だと分かっている場合は
+    NOT_TRIGGERED(発火させない)。
     """
-    declined = detect_continuous_decline(quarterly_operating_cashflows, consecutive_quarters)
+    declined = detect_continuous_decline_period_aware(
+        quarterly_operating_cashflow_periods, consecutive_quarters
+    )
+    if declined is None:
+        return SellRuleEvaluation(
+            rule_name="continuous_operating_cashflow_decline",
+            status=TriggerStatus.NOT_EVALUATED,
+            evidence_group=EvidenceGroup.CASHFLOW,
+            metric_name="operating_cashflow",
+            source="yfinance",
+            explanation=(
+                "比較対象期間のperiod_typeが揃っていない、または期間データが不足しており、"
+                "継続悪化を判定できない"
+            ),
+        )
     if not declined:
         return SellRuleEvaluation(
             rule_name="continuous_operating_cashflow_decline",
@@ -346,11 +440,12 @@ def build_sell_rule_inputs_from_data(
     dividend: DividendInfo | None,
     financial: FinancialSummary,
     benefit: ShareholderBenefit | None,
-    quarterly_operating_incomes: list[Decimal],
-    quarterly_operating_cashflows: list[Decimal],
+    quarterly_operating_income_periods: list[FinancialPeriodValue],
+    quarterly_operating_cashflow_periods: list[FinancialPeriodValue],
     disclosure_risk_keywords_found: list[str],
     config: SellRulesConfig,
     cashflow_decomposition: CashflowDecomposition | None = None,
+    material_event_keywords_found: list[str] | None = None,
     interest_bearing_debt_surge: SellRuleOverride | None = None,
     unfavorable_dividend_policy_change: SellRuleOverride | None = None,
     large_earnings_guidance_downgrade: SellRuleOverride | None = None,
@@ -360,8 +455,10 @@ def build_sell_rule_inputs_from_data(
     """構造化データから機械的に判定可能なルールを自動評価し、それ以外は
     SellRuleOverrideが渡された場合のみ反映する(渡されない場合はNOT_EVALUATED)。
     """
-    keyword_flags = classify_disclosure_risk_keywords(disclosure_risk_keywords_found)
-    industry = classify_financial_industry(financial.sector, financial.industry)
+    keyword_confirmation = classify_disclosure_risk_keywords_with_confirmation(
+        disclosure_risk_keywords_found, material_event_keywords_found or []
+    )
+    industry = classify_industry(financial.sector, financial.industry).classification
 
     income_quarters = config.rules["continuous_operating_income_decline"].consecutive_quarters or 2
     cashflow_quarters = (
@@ -392,31 +489,44 @@ def build_sell_rule_inputs_from_data(
         ),
     )
 
-    dividend_omission_triggered = bool(dividend and dividend.is_dividend_omission_announced)
+    official_omission = bool(dividend and dividend.official_dividend_omission_announced)
+    inferred_omission = bool(dividend and dividend.inferred_dividend_omission)
+    omission_status = (
+        TriggerStatus.TRIGGERED
+        if official_omission
+        else (TriggerStatus.SUSPECTED if inferred_omission else TriggerStatus.NOT_TRIGGERED)
+    )
     evaluations["dividend_omission"] = SellRuleEvaluation(
         rule_name="dividend_omission",
-        status=(
-            TriggerStatus.TRIGGERED if dividend_omission_triggered else TriggerStatus.NOT_TRIGGERED
-        ),
+        status=omission_status,
         evidence_group=EvidenceGroup.DIVIDEND,
-        severity=(
-            config.rules["dividend_omission"].severity if dividend_omission_triggered else None
-        ),
-        is_immediate_critical=False,  # yfinance推測のみで一次情報未確認のため即時性は付与しない
-        metric_name="forecast_annual_dividend_per_share",
-        source="yfinance",
-        primary_source_confirmed=False,
+        severity=config.rules["dividend_omission"].severity if official_omission else None,
+        is_immediate_critical=False,
+        metric_name="official_dividend_omission_announced",
+        source="EDINET/TDnet" if official_omission else "yfinance",
+        primary_source_confirmed=official_omission,
         explanation=(
-            "yfinanceの予想配当率が0になっているが、一次情報での公式発表は未確認"
-            if dividend_omission_triggered
-            else "無配転落は検出されていない"
+            "一次情報で確認された正式な無配転落発表がある"
+            if official_omission
+            else (
+                "yfinanceの予想配当率が0になっているが、一次情報での公式発表は未確認"
+                "(SUSPECTED、SELL根拠の独立根拠数には含めない)"
+                if inferred_omission
+                else "無配転落は検出されていない"
+            )
         ),
     )
 
-    income_declined = detect_continuous_decline(quarterly_operating_incomes, income_quarters)
+    income_declined = detect_continuous_decline_period_aware(
+        quarterly_operating_income_periods, income_quarters
+    )
     evaluations["continuous_operating_income_decline"] = SellRuleEvaluation(
         rule_name="continuous_operating_income_decline",
-        status=TriggerStatus.TRIGGERED if income_declined else TriggerStatus.NOT_TRIGGERED,
+        status=(
+            TriggerStatus.NOT_EVALUATED
+            if income_declined is None
+            else (TriggerStatus.TRIGGERED if income_declined else TriggerStatus.NOT_TRIGGERED)
+        ),
         evidence_group=EvidenceGroup.EARNINGS,
         severity=(
             config.rules["continuous_operating_income_decline"].severity
@@ -425,14 +535,19 @@ def build_sell_rule_inputs_from_data(
         ),
         source="yfinance",
         explanation=(
-            f"営業利益が{income_quarters}期連続で悪化している"
-            if income_declined
-            else "営業利益の継続悪化は検出されなかった"
+            "比較対象期間のperiod_typeが揃っていない、または期間データが不足しており、"
+            "継続悪化を判定できない"
+            if income_declined is None
+            else (
+                f"営業利益が{income_quarters}期連続で悪化している"
+                if income_declined
+                else "営業利益の継続悪化は検出されなかった"
+            )
         ),
     )
 
     evaluations["continuous_operating_cashflow_decline"] = _evaluate_cashflow_decline_rule(
-        quarterly_operating_cashflows,
+        quarterly_operating_cashflow_periods,
         cashflow_decomposition,
         cashflow_quarters,
         config.rules["continuous_operating_cashflow_decline"].severity,
@@ -471,17 +586,27 @@ def build_sell_rule_inputs_from_data(
     )
 
     for rule_name in ("major_scandal", "accounting_problem", "listing_maintenance_risk"):
-        triggered = keyword_flags[rule_name]
+        confirmation = keyword_confirmation[rule_name]
+        triggered = confirmation is not None
+        material_confirmed = (
+            confirmation == DisclosureRiskConfirmationLevel.MATERIAL_EVENT_CONFIRMED
+        )
         evaluations[rule_name] = SellRuleEvaluation(
             rule_name=rule_name,
             status=TriggerStatus.TRIGGERED if triggered else TriggerStatus.NOT_TRIGGERED,
             evidence_group=_RULE_EVIDENCE_GROUP[rule_name],
             severity=config.rules[rule_name].severity if triggered else None,
-            is_immediate_critical=rule_name in _IMMEDIATE_CRITICAL_RULES,
+            is_immediate_critical=(rule_name in _IMMEDIATE_CRITICAL_RULES) and material_confirmed,
             source="EDINET/TDnet開示",
             primary_source_confirmed=True,
             explanation=(
-                f"開示情報に該当キーワードが検出された({_RULE_LABELS[rule_name]})"
+                (
+                    f"開示情報に重大事象の確認語を含めて検出された({_RULE_LABELS[rule_name]}、"
+                    "MATERIAL_EVENT_CONFIRMED)"
+                    if material_confirmed
+                    else f"開示情報にリスクキーワードのみ検出された({_RULE_LABELS[rule_name]}、"
+                    "RISK_KEYWORD_DETECTED。重大事象は未確認のためREVIEW止まりとする)"
+                )
                 if triggered
                 else "該当する開示情報は検出されなかった"
             ),
@@ -497,12 +622,18 @@ def build_sell_rule_inputs_from_data(
         "investment_premise_broken": investment_premise_broken,
     }
     for rule_name, override in override_rules.items():
-        if rule_name == "interest_bearing_debt_surge" and industry is not None:
+        if (
+            rule_name == "interest_bearing_debt_surge"
+            and industry != IndustryClassification.GENERAL_CORPORATE
+        ):
             evaluations[rule_name] = SellRuleEvaluation(
                 rule_name=rule_name,
                 status=TriggerStatus.NOT_EVALUATED,
                 evidence_group=_RULE_EVIDENCE_GROUP[rule_name],
-                explanation="金融業には一般事業会社向けの有利子負債比率ルールを適用しない",
+                explanation=(
+                    "業種がGENERAL_CORPORATEと明確に判定できないため、一般事業会社向けの"
+                    "有利子負債比率ルールを適用しない"
+                ),
             )
             continue
         if override is None:
@@ -581,17 +712,20 @@ def evaluate_sell_signal(
     major = [e for e in triggered if e.severity == "major"]
     critical = [e for e in triggered if e.severity == "critical"]
     immediate_critical = [e for e in critical if e.is_immediate_critical]
-    # immediate_criticalが1件でもあれば下のelif以降には進まないため、ここでの
-    # criticalは実質的にnon-immediate criticalのみを指す。
+    # 即時性のあるcriticalは、一次情報で確認されたものに限りURGENT_REVIEWの根拠と
+    # する(レビュー対応: 一次情報未確認の即時criticalではURGENTを許可しない)。
+    immediate_critical_confirmed = [e for e in immediate_critical if e.primary_source_confirmed]
+    # immediate_critical_confirmedが1件でもあれば下のelif以降には進まないため、
+    # ここでのcriticalは実質的にnon-immediate(または未確認即時)criticalのみを指す。
 
     independent_groups = _independent_evidence_groups(triggered)
     independent_major_groups = _independent_evidence_groups(major)
     independent_critical_groups = _independent_evidence_groups(critical)
     all_yfinance_only = bool(triggered) and all(not e.primary_source_confirmed for e in triggered)
 
-    if immediate_critical:
-        # 即時性のあるcritical該当が1件でもあれば、それ単独でもURGENT_REVIEW候補
-        # (他に独立根拠があっても結論は変わらない、要求仕様§4)。
+    if immediate_critical_confirmed:
+        # 一次情報確認済みの即時性critical該当が1件でもあれば、それ単独でも
+        # URGENT_REVIEW候補(他に独立根拠があっても結論は変わらない、要求仕様§4)。
         recommendation_type = RecommendationType.URGENT_REVIEW
     elif (
         len(independent_major_groups) >= 2
