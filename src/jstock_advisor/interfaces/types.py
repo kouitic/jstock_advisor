@@ -20,6 +20,26 @@ from jstock_advisor.domain.entities.enums import (
 )
 
 
+class BankRegulatoryMetrics(ImmutableSnapshot):
+    """銀行専用の規制資本・健全性指標(2026-07仕様§2)。
+
+    現時点でこれらを安定的に取得できるProviderが存在しないため、全項目が
+    Noneのままとなる恒久的な制約。データが取得可能になるまで、この構造体を
+    根拠にSELL/URGENT_REVIEWを出してはならない(呼び出し側の責務)。
+    """
+
+    cet1_ratio_pct: float | None = None  # 普通株式等Tier1比率
+    total_capital_ratio_pct: float | None = None  # 総自己資本比率
+    tier1_ratio_pct: float | None = None
+    leverage_ratio_pct: float | None = None
+    non_performing_loan_ratio_pct: float | None = None  # 不良債権比率
+    credit_cost_ratio_pct: float | None = None  # 与信費用率
+    allowance_coverage_ratio_pct: float | None = None  # 貸倒引当率
+    liquidity_coverage_ratio_pct: float | None = None  # 流動性カバレッジ比率(LCR)
+    tlac_ratio_pct: float | None = None
+    net_interest_margin_pct: float | None = None
+
+
 class PriceBar(ImmutableSnapshot):
     date: dt.date
     open: Decimal
@@ -61,6 +81,7 @@ class FinancialSummary(ImmutableSnapshot):
     security_type: str = "STOCK"  # "STOCK" / "REIT" / "ETF"
     market_segment: str | None = None
     industry: str | None = None
+    sector: str | None = None
     equity_ratio_pct: float | None = None
     payout_ratio_pct: float | None = None
     operating_cashflow: Decimal | None = None
@@ -77,6 +98,9 @@ class FinancialSummary(ImmutableSnapshot):
     is_debt_excess: bool = False
     recent_quarters: list[QuarterlyFinancials] = []
     source: DataSourceReference
+
+    # --- 業種別分類+金融業向け財務健全性ルール(2026-07仕様§2)で追加 ---
+    bank_regulatory_metrics: BankRegulatoryMetrics | None = None
 
 
 class HistoricalValuation(ImmutableSnapshot):
@@ -116,6 +140,25 @@ class DividendInfo(ImmutableSnapshot):
     dividend_record_date: dt.date | None = None
     dividend_ex_date: dt.date | None = None
     dividend_record_date_unknown_reason: RecordDateUnknownReason | None = None
+
+    # --- 配当の普通/特別分離+official/inferred区別(2026-07仕様§10・§11) ---
+    # yfinance/EDINETいずれも配当の内訳(普通/特別/記念/臨時)を提供しないため、
+    # 現時点ではdividend_breakdown_confirmed=False・各内訳フィールドはNoneが常態となる
+    # (恒久的な制約。データソースが増えない限り解消しない)。
+    ordinary_dividend_per_share: Decimal | None = None
+    special_dividend_per_share: Decimal | None = None
+    commemorative_dividend_per_share: Decimal | None = None
+    extraordinary_dividend_per_share: Decimal | None = None
+    total_dividend_per_share: Decimal | None = None
+    dividend_breakdown_confirmed: bool = False
+    # 会社が公式に減配・無配転落を発表したことが一次情報で確認できた場合のみTrue。
+    # yfinanceの数値比較のみからは絶対に真にしない(§11)。
+    official_dividend_cut_announced: bool = False
+    # yfinance等の年間配当合計の単純比較から推測される減少シグナル(弱い根拠)。
+    # SELL/URGENT_REVIEWの直接的な根拠にはできない(§12)。
+    inferred_dividend_decrease: bool = False
+    total_dividend_decrease_detected: bool = False
+    special_dividend_expired: bool | None = None
 
 
 class BenefitDetail(ImmutableSnapshot):

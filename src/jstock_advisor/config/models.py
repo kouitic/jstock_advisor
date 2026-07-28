@@ -465,6 +465,7 @@ class HighConfidenceDisallowRules(StrictModel):
     min_business_days_to_earnings: int
     max_days_since_split_for_unconfirmed_adjustment: int
     max_fair_value_method_spread_ratio: float
+    min_independent_evidence_groups_for_high: int
 
 
 class JudgmentSafetyLadderConfig(StrictModel):

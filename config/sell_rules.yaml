@@ -35,8 +35,17 @@ rules:
     severity: "major"
   financial_health_severe_deterioration:
     enabled: true
-    # 自己資本比率がこの値(%)を下回った場合、重大悪化とみなす
+    # 自己資本比率がこの値(%)を下回った場合、重大悪化とみなす(一般事業会社限定。
+    # 銀行・保険・証券商品先物取引業・その他金融業には適用しない)
     equity_ratio_critical_pct: 15.0
+    severity: "critical"
+  balance_sheet_insolvency:
+    # 自己資本比率がマイナス(債務超過)。全業種共通、即時性のあるcritical。
+    enabled: true
+    severity: "critical"
+  regulatory_capital_breach:
+    # 銀行専用の規制資本指標(CET1比率等)。データソース未実装のため常にNOT_EVALUATED。
+    enabled: true
     severity: "critical"
   shareholder_benefit_abolished:
     enabled: true

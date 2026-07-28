@@ -355,8 +355,26 @@ def test_message_shows_dividend_comparison_with_fiscal_years(service_and_repos) 
     assert "配当比較(2025 → 2026): 減配(実績確定)" in client.sent[0]
 
 
+def _evidence(rule_name: str, group: str, *, primary_source_confirmed: bool = True) -> dict:
+    return {
+        "rule_name": rule_name,
+        "status": "TRIGGERED",
+        "severity": "major",
+        "evidence_group": group,
+        "is_immediate_critical": False,
+        "metric_name": None,
+        "current_value": None,
+        "previous_value": None,
+        "threshold": None,
+        "comparison_period": None,
+        "primary_source_confirmed": primary_source_confirmed,
+        "source": "EDINET/TDnet",
+        "explanation": f"{rule_name}が検出された",
+    }
+
+
 def _make_sell_recommendation(
-    *, recommendation_id: str, reasons: list[str]
+    *, recommendation_id: str, reasons: list[str], evidence_details: list[dict] | None = None
 ) -> Recommendation:
     return Recommendation(
         recommendation_id=recommendation_id,
@@ -365,42 +383,57 @@ def _make_sell_recommendation(
         recommended_at=_NOW,
         recommendation_type=RecommendationType.SELL,
         sell_prices=SellPriceLevels(
-            stop_review_price=PriceWithRationale(price=Decimal("4384"), rationale="x")
+            stop_review_price=PriceWithRationale(price=Decimal("4000"), rationale="x")
         ),
         price_at_recommendation=Decimal("4384"),
         average_purchase_price_at_recommendation=Decimal("3745"),
         shares_at_recommendation=100,
         reasons=reasons,
-        confidence=ConfidenceLevel.HIGH,
+        confidence=ConfidenceLevel.MEDIUM,
         rule_version="v1-mvp",
+        evidence_details=evidence_details or [],
+        recommended_action_summary="複数の独立した根拠に基づき投資前提の悪化が疑われます。売却を検討してください。",
+        holding_risks=["自己資本比率が閾値を下回っている"],
+        independent_evidence_group_count=2,
     )
 
 
-def test_sell_message_with_single_reason_explains_no_other_risks_found(
+def test_sell_message_with_insufficient_evidence_routes_to_manual_review(
     service_and_repos,
 ) -> None:
+    # 根拠が1件のみ(または未設定)のSELLは、自動確定させず手動確認へ回す(要求仕様§15・§16)。
     service, repo, client = service_and_repos
     rec = _make_sell_recommendation(recommendation_id="rec-1", reasons=["減配(major)"])
     repo.save(rec)
 
-    service.notify_recommendation(rec, _NOW)
+    sent = service.notify_recommendation(rec, _NOW)
 
+    assert sent is True
     message = client.sent[0]
-    assert "検出された懸念要因は「減配(major)」の1件のみです" in message
-    assert "他の重大リスク項目は現時点で検出されていません" in message
+    assert "【要手動確認】4631 ＤＩＣ" in message
+    assert "自動売却推奨: 停止" in message
 
 
-def test_sell_message_with_multiple_reasons_flags_compounding_risk(service_and_repos) -> None:
+def test_sell_message_with_sufficient_independent_evidence_sends_normally(
+    service_and_repos,
+) -> None:
     service, repo, client = service_and_repos
     rec = _make_sell_recommendation(
-        recommendation_id="rec-1", reasons=["減配(major)", "営業利益の継続悪化(major)"]
+        recommendation_id="rec-1",
+        reasons=["減配(major)", "営業利益の継続悪化(major)"],
+        evidence_details=[
+            _evidence("dividend_cut", "DIVIDEND"),
+            _evidence("continuous_operating_income_decline", "EARNINGS"),
+        ],
     )
     repo.save(rec)
 
     service.notify_recommendation(rec, _NOW)
 
     message = client.sent[0]
-    assert "複数の懸念要因が同時に検出されているため(2件)" in message
+    assert "判定内容: 複数の独立した根拠に基づき投資前提の悪化が疑われます" in message
+    assert "保有を継続する場合のリスク: 自己資本比率が閾値を下回っている" in message
+    assert "直ちに売却としない理由" not in message
 
 
 def test_data_error_notification_logs_stock_name_instead_of_sending(

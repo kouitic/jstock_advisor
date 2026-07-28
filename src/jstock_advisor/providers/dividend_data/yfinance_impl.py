@@ -133,6 +133,10 @@ class YFinanceDividendDataProvider:
             forecast_annual_dividend_per_share=forecast_annual,
             actual_annual_dividend_per_share=actual_annual,
             previous_fiscal_year_dividend_per_share=previous_annual,
+            # is_dividend_cut_announcedは後方互換のため従来通りyfinanceの数値比較結果を
+            # 保持する(買い候補スクリーニングの弱いフィルタとして使用: screening/rules.py)。
+            # SELL/URGENT_REVIEWの根拠にはofficial_dividend_cut_announced(常にFalse)を
+            # 使うこと(要求仕様§11・§12: yfinance単独の推測を「公式発表」扱いしない)。
             is_dividend_cut_announced=is_dividend_cut_announced,
             is_dividend_omission_announced=is_dividend_omission_announced,
             is_progressive_or_doe_policy=False,  # yfinanceからは判定不可(既知の限界)
@@ -148,6 +152,14 @@ class YFinanceDividendDataProvider:
             dividend_ex_date=None,
             # yfinanceは権利確定日・権利落ち日いずれも提供しない(恒久的な制約)
             dividend_record_date_unknown_reason=RecordDateUnknownReason.DATA_PROVIDER_MISSING,
+            # yfinanceは配当の内訳(普通/特別/記念/臨時)を提供しないため常に未確定
+            # (恒久的な制約)。年間合計の単純比較から推測される減少シグナルのみ
+            # inferred_dividend_decreaseとして保持し、official_dividend_cut_announcedは
+            # 一次情報での確認が取れるまで常にFalseとする。
+            dividend_breakdown_confirmed=False,
+            official_dividend_cut_announced=False,
+            inferred_dividend_decrease=is_dividend_cut_announced,
+            total_dividend_decrease_detected=is_dividend_cut_announced,
         )
 
     def _sum_by_calendar_year(self, dividends: Any, stock_code: str) -> dict[int, float]:
