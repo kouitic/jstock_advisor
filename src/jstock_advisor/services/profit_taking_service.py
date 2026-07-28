@@ -29,7 +29,7 @@ from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
-from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 
 
 @dataclass(frozen=True)
@@ -55,10 +55,16 @@ class ProfitTakingService:
     def _active_rule_version(self) -> str:
         return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
 
-    def analyze(self, holding: Holding, now: dt.datetime) -> ProfitTakingOutcome:
-        snapshot, error = build_stock_snapshot(
-            self._providers, holding.stock_code, now, self._config
-        )
+    def analyze(
+        self, holding: Holding, now: dt.datetime, snapshot: StockSnapshot | None = None
+    ) -> ProfitTakingOutcome:
+        """snapshotを渡すと再取得を省略する(sell_signalと同一銘柄を二重に取得する
+        無駄を避けるため、呼び出し側で一度だけ取得して両方に渡すことを想定)。"""
+        error: str | None = None
+        if snapshot is None:
+            snapshot, error = build_stock_snapshot(
+                self._providers, holding.stock_code, now, self._config
+            )
         if snapshot is None:
             self._audit.record(
                 decision_type="profit_taking",

@@ -110,6 +110,37 @@ def test_excludes_when_discrepancy_unresolvable() -> None:
     assert result is None
 
 
+def test_reconciles_discrepancy_via_cumulative_multiple_splits() -> None:
+    # 2回の分割(3分割→5分割)の通算15倍でのみ説明できる乖離。個別の比率では
+    # 説明できないため、通算倍率での照合が必要な回帰テスト
+    primary_info = _dividend_info("4.6")
+    split_events = [
+        CorporateActionEvent(
+            stock_code="8136",
+            event_type="SPLIT",
+            announced_date=dt.date(2024, 3, 28),
+            ratio=Decimal("3"),
+            source=_SOURCE_A,
+        ),
+        CorporateActionEvent(
+            stock_code="8136",
+            event_type="SPLIT",
+            announced_date=dt.date(2026, 3, 30),
+            ratio=Decimal("5"),
+            source=_SOURCE_A,
+        ),
+    ]
+    provider = CrossValidatingDividendDataProvider(
+        primary=_FixedDividendProvider(primary_info),
+        secondary=_FixedDividendProvider(_dividend_info("69", _SOURCE_B)),
+        corporate_action_provider=_FixedCorporateActionProvider(split_events),
+        config=_CONFIG,
+        now=_NOW,
+    )
+    result = provider.get_dividend_info("8136")
+    assert result is primary_info
+
+
 def test_unrelated_split_does_not_falsely_reconcile() -> None:
     # 分割はあるが、その比率では説明できない乖離は除外されるべき
     primary_info = _dividend_info("16")

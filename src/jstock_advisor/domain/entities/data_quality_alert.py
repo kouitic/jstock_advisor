@@ -13,9 +13,11 @@ from jstock_advisor.domain.entities.base import ImmutableSnapshot
 
 class DataQualityAlert(ImmutableSnapshot):
     stock_code: str
+    stock_name: str | None = None
     detected_at: dt.datetime
     process: str  # 検出元処理(例: "profit_taking", "sell_signal")
     contradictions: list[str]  # 検出した矛盾・異常
     suppressed_values: dict[str, str]  # 使用を停止した値(フィールド名 -> 値の文字列表現)
     recalculation_result: str | None = None  # 再計算結果(可能な場合)
     action_required: bool = True  # 対応要否
+    recommended_action: str | None = None  # ユーザーが具体的に何を確認・実施すべきか

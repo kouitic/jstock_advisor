@@ -48,6 +48,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             matched_keywords=alert.matched_keywords,
             published_at=alert.disclosure.published_at,
             now=now,
+            stock_name=alert.stock_name,
         ):
             notified += 1
 

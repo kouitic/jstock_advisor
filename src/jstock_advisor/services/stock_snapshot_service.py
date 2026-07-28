@@ -103,7 +103,12 @@ def build_stock_snapshot(
 
     dividend = providers.dividend_data.get_dividend_info(stock_code)
     if dividend is None:
-        return None, "配当データを取得できません"
+        return None, (
+            "配当データを取得できません"
+            "(データ提供元(yfinance)から取得できなかったか、yfinanceとEDINETの配当額が"
+            "株式分割等で説明できない水準まで乖離しており自動判定できないため除外しています。"
+            "後者の場合、詳細はCloudWatch Logsの該当銘柄のwarningログをご確認ください)"
+        )
 
     benefit = providers.shareholder_benefit.get_shareholder_benefit(stock_code)
     current_price = snap.close_price

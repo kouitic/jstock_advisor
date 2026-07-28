@@ -271,6 +271,7 @@ def analyze_disclosure_check(
                 matched_keywords=alert.matched_keywords,
                 published_at=alert.disclosure.published_at,
                 now=now,
+                stock_name=alert.stock_name,
             )
             typer.echo(
                 "  → LINE通知しました" if sent else "  → 同一開示のため通知をスキップしました"

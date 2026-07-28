@@ -48,26 +48,38 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         config=config,
     )
 
-    stock_codes = [item.stock_code for item in WatchlistService().list_items()]
+    items = WatchlistService().list_items()
     processed = 0
     notified = 0
-    for stock_code in stock_codes:
-        outcome = service.analyze(stock_code, now)
-        if outcome.data_error:
-            logger.warning("data_error stock_code=%s error=%s", stock_code, outcome.data_error)
-            notification_service.notify_data_error(stock_code, outcome.data_error, now)
-            continue
-        if outcome.recommendation is None:
-            continue
-        processed += 1
-        recommendation_repo.save(outcome.recommendation)
-        if notification_service.notify_recommendation(outcome.recommendation, now):
-            notified += 1
+    failed = 0
+    for item in items:
+        try:
+            outcome = service.analyze(item.stock_code, now)
+            if outcome.data_error:
+                logger.warning(
+                    "data_error stock_code=%s error=%s", item.stock_code, outcome.data_error
+                )
+                notification_service.notify_data_error(
+                    item.stock_code, outcome.data_error, now, stock_name=item.stock_name
+                )
+                continue
+            if outcome.recommendation is None:
+                continue
+            processed += 1
+            recommendation_repo.save(outcome.recommendation)
+            if notification_service.notify_recommendation(outcome.recommendation, now):
+                notified += 1
+        except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーが他銘柄の処理を止めないようにする
+            failed += 1
+            logger.exception(
+                "buy candidate analysis failed unexpectedly stock_code=%s", item.stock_code
+            )
 
     logger.info(
-        "buy_candidates_handler done: scanned=%d recommended=%d notified=%d",
-        len(stock_codes),
+        "buy_candidates_handler done: scanned=%d recommended=%d notified=%d failed=%d",
+        len(items),
         processed,
         notified,
+        failed,
     )
-    return {"scanned": len(stock_codes), "recommended": processed, "notified": notified}
+    return {"scanned": len(items), "recommended": processed, "notified": notified, "failed": failed}
