@@ -46,3 +46,10 @@ event_proximity_notice:
   dividend_record_date_within_business_days: 10
   benefit_record_date_within_business_days: 10
   earnings_announcement_within_business_days: 10
+
+# 複数条件による判定(要求仕様9節)。含み益率単独ではFULLへ到達できない設計とする。
+condition_based_judgment:
+  min_conditions_for_partial: 2
+  min_moderate_conditions_for_full: 2
+  forward_return_inferior_threshold_pct: -20.0
+  timing_downgrade_block_margin_pct: 0.0

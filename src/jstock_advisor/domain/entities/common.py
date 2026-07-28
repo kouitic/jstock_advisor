@@ -5,22 +5,41 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
+from pydantic import model_validator
+
+from jstock_advisor.domain.entities._legacy_migration import remap_legacy_fields
 from jstock_advisor.domain.entities.base import Entity, ImmutableSnapshot
+from jstock_advisor.domain.entities.enums import PriceFieldBasis, SourceType
 
 
 class DataSourceReference(ImmutableSnapshot):
-    """判定に使用したデータの出典と取得日時(要求仕様13節)。"""
+    """判定に使用したデータの出典と取得日時(要求仕様13節・14節)。"""
 
     provider: str
     fetched_at: dt.datetime
     detail: str | None = None
 
+    # --- データソース優先順位(要求仕様14節)で追加。既定はCONTRACTED_PROVIDER
+    # (yfinance等の契約データプロバイダ)とし、各Provider実装側で必要に応じて上書きする ---
+    source_type: SourceType = SourceType.CONTRACTED_PROVIDER
+    primary_source_flag: bool = False
+    source_url: str | None = None
+    source_title: str | None = None
+    source_published_at: dt.datetime | None = None
+
 
 class PriceWithRationale(ImmutableSnapshot):
-    """価格とその算出根拠(要求仕様10節・14節)。"""
+    """価格とその算出根拠(要求仕様10節・14節)。
+
+    basisは、priceが現在値と一致する場合に「実際の目標価格」なのか
+    「即時執行の目安」「監視開始価格(売却推奨ではない)」なのかを明示する
+    (要求仕様11節: 現在値をデフォルト補完した結果と、意図的に現在値と
+    一致させた結果を区別できるようにする)。
+    """
 
     price: Decimal
     rationale: str
+    basis: PriceFieldBasis = PriceFieldBasis.TARGET_PRICE
 
 
 class BuyPriceLevels(ImmutableSnapshot):
@@ -31,14 +50,45 @@ class BuyPriceLevels(ImmutableSnapshot):
     aggressive: PriceWithRationale | None = None  # 積極買い価格
 
 
-class SellPriceLevels(ImmutableSnapshot):
-    """推奨売値(要求仕様14節)。"""
+_SELL_PRICE_LEVELS_LEGACY_FIELD_MAP = {
+    "partial_take_start": "partial_profit_start_price",
+    "profit_take_recommended": "recommended_limit_price",
+    "full_take_consider": "full_profit_consideration_price",
+    "premise_deterioration_target": "stop_review_price",
+    "reassessment_price": "reevaluation_price_upside",
+}
 
-    partial_take_start: PriceWithRationale | None = None  # 一部利確開始価格
-    profit_take_recommended: PriceWithRationale | None = None  # 利確推奨価格
-    full_take_consider: PriceWithRationale | None = None  # 全株利確検討価格
-    premise_deterioration_target: PriceWithRationale | None = None  # 投資前提悪化時の売却目安価格
-    reassessment_price: PriceWithRationale | None = None  # 保有継続判断を再評価する価格
+
+class SellPriceLevels(ImmutableSnapshot):
+    """推奨売値(要求仕様10節・14節)。
+
+    各フィールドの意味は明確に分離する(要求仕様11節):
+    - partial_profit_start_price: 一部利確を開始する条件価格
+    - recommended_limit_price: 実際に指値候補として提示する価格
+    - full_profit_consideration_price: 全利確を再検討する条件価格
+    - reevaluation_price_upside: 上昇時の再評価価格
+    - reevaluation_price_downside: 下落時の再評価価格(投資前提再確認価格を兼ねる)
+    - stop_review_price: 損切り・投資前提再確認価格(sell_signal側の悪化判定用)
+    - trailing_stop_reference_price: トレーリングストップ参考価格(モメンタム層が必要、
+      未実装の間は常にNone)
+
+    算出不能な場合はNone(現在値へのフォールバックは行わない)。現在値と一致する
+    値を意図的に返す場合は、PriceWithRationale.basisで即時執行目安か監視専用かを
+    明示する。
+    """
+
+    partial_profit_start_price: PriceWithRationale | None = None
+    recommended_limit_price: PriceWithRationale | None = None
+    full_profit_consideration_price: PriceWithRationale | None = None
+    reevaluation_price_upside: PriceWithRationale | None = None
+    reevaluation_price_downside: PriceWithRationale | None = None
+    stop_review_price: PriceWithRationale | None = None
+    trailing_stop_reference_price: PriceWithRationale | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_legacy_field_names(cls, data: object) -> object:
+        return remap_legacy_fields(data, _SELL_PRICE_LEVELS_LEGACY_FIELD_MAP)
 
 
 class ScoreBreakdown(ImmutableSnapshot):

@@ -1,0 +1,35 @@
+# 信頼度スコアリング設定(要求仕様12節)。
+#
+# 信頼度は「判定の強さ」ではなく「データと分析の信頼性」を表す。
+# 以下のいずれかに該当する場合、スコアに関わらずHIGHを禁止する。
+
+version: 1
+
+scoring:
+  base_score: 100.0
+  penalty_stale_data: 15.0
+  penalty_low_primary_source_rate: 15.0
+  penalty_corporate_action_inconsistent: 25.0
+  penalty_financial_period_incomparable: 15.0
+  penalty_low_method_agreement: 10.0
+  penalty_missing_data: 15.0
+  penalty_untraced_one_time_factors: 10.0
+  penalty_cross_rule_disagreement: 10.0
+  high_threshold: 85.0
+  medium_threshold: 60.0
+
+max_data_freshness_days: 3
+min_primary_source_rate: 0.5
+
+# HIGH禁止条件(要求仕様12節)
+high_confidence_disallow:
+  min_business_days_to_earnings: 5
+  max_days_since_split_for_unconfirmed_adjustment: 365
+  max_fair_value_method_spread_ratio: 2.0
+
+# 推奨判定の安全制約(要求仕様22節)。強い判定(FULL_ACTION/URGENT_REVIEW)は
+# 以下のいずれかに該当する場合、禁止する。
+judgment_safety_ladder:
+  min_data_quality_score_for_strong_action: 80.0
+  max_latest_earnings_age_days: 120
+  min_business_days_to_earnings_for_strong_action: 5

@@ -1,0 +1,34 @@
+# 銘柄タイプ分類設定(要求仕様7節)。
+#
+# LLMや自由文推測は使わず、閾値駆動の決定的ルールのみで分類する(既存方針を踏襲)。
+# 複合タイプ(例: 5401=CYCLICAL+INCOME)を許容するため、各タイプは独立に判定する。
+
+version: 1
+
+income:
+  min_dividend_yield_pct: 3.5
+  max_payout_ratio_pct: 80.0
+
+growth:
+  min_consecutive_growth_quarters: 2
+  max_dividend_yield_pct: 2.0
+
+value:
+  max_pbr: 1.0
+  min_dividend_yield_pct: 2.0
+
+cyclical:
+  industry_keywords: [鉄鋼, 化学, 海運, 空運, 非鉄金属, 卸売, 商社, 石油, 石炭, ゴム, 機械, 造船]
+
+defensive:
+  industry_keywords: [食品, 医薬品, 電力, ガス, 鉄道, 通信, 水産, 小売]
+
+turnaround:
+  min_consecutive_improvement_quarters: 2
+
+asset_play:
+  max_pbr: 0.7
+  min_equity_ratio_pct: 50.0
+
+event_driven:
+  disclosure_keywords: [自己株式取得, 自社株買い, MBO, TOB, 会社分割, 株式交換, 事業譲渡]

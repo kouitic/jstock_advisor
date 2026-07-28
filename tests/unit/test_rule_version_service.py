@@ -63,6 +63,21 @@ def test_activate_deactivates_previous_active(service: RuleVersionService) -> No
     assert active.rule_version == "v2"
 
 
+def test_get_active_version_or_returns_default_when_none_active(
+    service: RuleVersionService,
+) -> None:
+    assert service.get_active_version_or("v1-mvp") == "v1-mvp"
+
+
+def test_get_active_version_or_returns_active_version(service: RuleVersionService) -> None:
+    service.create_draft("v2-corporate-action-redesign", "desc", "reason", now=_NOW)
+    service.submit_for_approval("v2-corporate-action-redesign")
+    service.approve("v2-corporate-action-redesign", "alice")
+    service.activate("v2-corporate-action-redesign", now=_NOW)
+
+    assert service.get_active_version_or("v1-mvp") == "v2-corporate-action-redesign"
+
+
 def test_activate_requires_approved_status(service: RuleVersionService) -> None:
     service.create_draft("v1", "d", "r", now=_NOW)
     with pytest.raises(ValueError):

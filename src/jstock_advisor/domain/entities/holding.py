@@ -49,6 +49,11 @@ class Holding(Entity):
     created_at: dt.datetime
     updated_at: dt.datetime
 
+    # shares/average_purchase_priceが分割調整済みかどうか・どの基準日時点の値かを
+    # 明示する(要求仕様2節)。Noneは企業行動調整サービスが未接続の環境
+    # (ローカルCLIでcorporate_action_serviceを注入していない場合等)を示す。
+    shares_and_price_adjustment_basis_date: dt.date | None = None
+
 
 def summarize_lots(lots: list[PurchaseLot]) -> tuple[int, Decimal, Decimal, dt.date, dt.date]:
     """購入ロットの一覧から(保有株数合計, 平均購入単価, 総購入金額,

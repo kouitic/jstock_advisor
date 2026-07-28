@@ -31,6 +31,17 @@ class AuditService:
         data_sources: list[DataSourceReference],
         rule_version: str,
         timestamp: dt.datetime,
+        raw_input_data: dict[str, Any] | None = None,
+        adjusted_input_data: dict[str, Any] | None = None,
+        corporate_actions_applied: list[str] | None = None,
+        fair_value_results: list[dict[str, Any]] | None = None,
+        triggered_rules: list[str] | None = None,
+        suppressed_rules: list[str] | None = None,
+        consistency_validation_result: dict[str, Any] | None = None,
+        data_quality_score: float | None = None,
+        confidence_score: float | None = None,
+        notification_values: dict[str, Any] | None = None,
+        source_metadata: list[dict[str, Any]] | None = None,
     ) -> AuditLogEntry:
         entry = AuditLogEntry(
             audit_id=str(uuid.uuid4()),
@@ -42,6 +53,17 @@ class AuditService:
             output_values=output_values,
             data_sources=data_sources,
             rule_version=rule_version,
+            raw_input_data=raw_input_data,
+            adjusted_input_data=adjusted_input_data,
+            corporate_actions_applied=corporate_actions_applied or [],
+            fair_value_results=fair_value_results,
+            triggered_rules=triggered_rules or [],
+            suppressed_rules=suppressed_rules or [],
+            consistency_validation_result=consistency_validation_result,
+            data_quality_score=data_quality_score,
+            confidence_score=confidence_score,
+            notification_values=notification_values,
+            source_metadata=source_metadata,
         )
         self._repository.save(entry)
         return entry

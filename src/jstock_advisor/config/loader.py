@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,19 +15,29 @@ import yaml
 
 from jstock_advisor.config.models import (
     AppConfig,
+    ConfidenceRulesConfig,
     DataValidationRulesConfig,
+    EarningsWindowRulesConfig,
     EvaluationRulesConfig,
     HolidayCalendarConfig,
+    MomentumRulesConfig,
     NotificationRulesConfig,
     ProfitTakingRulesConfig,
     ScheduleConfig,
     ScoringWeightsConfig,
     ScreeningRulesConfig,
     SellRulesConfig,
+    StockClassificationRulesConfig,
     ValuationRulesConfig,
 )
 
-DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[3] / "config"
+# Lambda環境ではconfig/がリポジトリ構成のまま同梱されないため、
+# JSTOCK_CONFIG_DIR(Lambda Layerのマウント先)で上書きできるようにする。
+DEFAULT_CONFIG_DIR = (
+    Path(os.environ["JSTOCK_CONFIG_DIR"])
+    if "JSTOCK_CONFIG_DIR" in os.environ
+    else Path(__file__).resolve().parents[3] / "config"
+)
 
 
 def _strip_comment_keys(value: Any) -> Any:
@@ -84,6 +95,16 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     holiday_calendar = HolidayCalendarConfig.model_validate(
         _load_json(directory / "holiday_calendar.json")
     )
+    stock_classification = StockClassificationRulesConfig.model_validate(
+        _load_yaml(directory / "stock_classification_rules.yaml")
+    )
+    momentum = MomentumRulesConfig.model_validate(_load_yaml(directory / "momentum_rules.yaml"))
+    confidence = ConfidenceRulesConfig.model_validate(
+        _load_yaml(directory / "confidence_rules.yaml")
+    )
+    earnings_window = EarningsWindowRulesConfig.model_validate(
+        _load_yaml(directory / "earnings_window_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -96,4 +117,8 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         data_validation=data_validation,
         evaluation=evaluation,
         holiday_calendar=holiday_calendar,
+        stock_classification=stock_classification,
+        momentum=momentum,
+        confidence=confidence,
+        earnings_window=earnings_window,
     )

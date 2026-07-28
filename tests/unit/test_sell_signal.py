@@ -12,7 +12,7 @@ from jstock_advisor.domain.signals.sell_signal import (
     detect_financial_health_severe_deterioration,
     evaluate_sell_signal,
 )
-from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary
+from jstock_advisor.interfaces.types import CashflowDecomposition, DividendInfo, FinancialSummary
 
 _NOW = dt.datetime(2026, 7, 24, 7, 0, tzinfo=dt.UTC)
 _SOURCE = DataSourceReference(provider="test", fetched_at=_NOW)
@@ -22,7 +22,7 @@ _CONFIG = load_config()
 def test_no_triggers_is_hold() -> None:
     result = evaluate_sell_signal(SellRuleTriggerInputs(), Decimal("1000"), _CONFIG.sell)
     assert result.recommendation_type == RecommendationType.HOLD
-    assert result.premise_deterioration_target is None
+    assert result.stop_review_price is None
 
 
 def test_price_decline_alone_does_not_trigger_sell() -> None:
@@ -36,8 +36,8 @@ def test_dividend_cut_alone_triggers_sell() -> None:
         SellRuleTriggerInputs(dividend_cut=True), Decimal("1000"), _CONFIG.sell
     )
     assert result.recommendation_type == RecommendationType.SELL
-    assert result.premise_deterioration_target is not None
-    assert result.premise_deterioration_target.price == Decimal("1000")
+    assert result.stop_review_price is not None
+    assert result.stop_review_price.price == Decimal("1000")
 
 
 def test_dividend_omission_is_critical_and_triggers_urgent_review() -> None:
@@ -119,3 +119,50 @@ def test_build_sell_rule_inputs_from_data_detects_continuous_income_decline() ->
         config=_CONFIG.sell,
     )
     assert inputs.continuous_operating_income_decline is True
+
+
+def test_continuous_cashflow_decline_detected_without_decomposition() -> None:
+    financial = FinancialSummary(
+        stock_code="8136", fiscal_period_end=_NOW.date(), equity_ratio_pct=50.0, source=_SOURCE
+    )
+    inputs = build_sell_rule_inputs_from_data(
+        dividend=None,
+        financial=financial,
+        benefit=None,
+        quarterly_operating_incomes=[],
+        quarterly_operating_cashflows=[Decimal("100"), Decimal("90"), Decimal("80")],
+        disclosure_risk_keywords_found=[],
+        config=_CONFIG.sell,
+        cashflow_decomposition=None,
+    )
+    # 要因分解データが無い場合、データ不足を理由に元のシグナルを弱めない
+    assert inputs.continuous_operating_cashflow_decline is True
+
+
+def test_continuous_cashflow_decline_suppressed_when_working_capital_driven() -> None:
+    financial = FinancialSummary(
+        stock_code="8136", fiscal_period_end=_NOW.date(), equity_ratio_pct=50.0, source=_SOURCE
+    )
+    decomposition = CashflowDecomposition(
+        stock_code="8136",
+        period_end=_NOW.date(),
+        pretax_income=Decimal("1000"),
+        receivables_change=Decimal("-3000"),  # 運転資本要因が税引前利益を上回る
+        inventory_change=Decimal("0"),
+        payables_change=Decimal("0"),
+        one_time_items=Decimal("0"),
+        ma_related_items=Decimal("0"),
+        other_working_capital=Decimal("0"),
+        source=_SOURCE,
+    )
+    inputs = build_sell_rule_inputs_from_data(
+        dividend=None,
+        financial=financial,
+        benefit=None,
+        quarterly_operating_incomes=[],
+        quarterly_operating_cashflows=[Decimal("100"), Decimal("90"), Decimal("80")],
+        disclosure_risk_keywords_found=[],
+        config=_CONFIG.sell,
+        cashflow_decomposition=decomposition,
+    )
+    assert inputs.continuous_operating_cashflow_decline is False

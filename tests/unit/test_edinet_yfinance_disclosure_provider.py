@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from jstock_advisor.domain.entities.enums import SourceType
 from jstock_advisor.infrastructure.edinet.disclosure_finder import (
     EdinetDisclosureCache,
     EdinetDisclosureCacheRepository,
@@ -72,6 +73,8 @@ def test_get_disclosures_filters_by_since_date(tmp_path: Path) -> None:
     assert len(disclosures) == 1
     assert disclosures[0].summary == "新しい開示"
     assert disclosures[0].stock_code == _STOCK_CODE
+    assert disclosures[0].source.source_type == SourceType.TDNET_EDINET
+    assert disclosures[0].source.primary_source_flag is True
 
 
 def test_get_next_earnings_date_returns_date_from_calendar(monkeypatch: pytest.MonkeyPatch) -> None:

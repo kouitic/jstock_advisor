@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.interfaces.types import (
+    CashflowDecomposition,
     FinancialSummary,
     HistoricalValuation,
     QuarterlyFinancials,
@@ -96,3 +97,8 @@ class MockFinancialDataProvider:
                 )
             )
         return result
+
+    def get_cashflow_decomposition(self, stock_code: str) -> CashflowDecomposition | None:
+        # モックフィクスチャは営業CFの要因分解に必要な内訳データ(運転資本の
+        # 各項目等)を保持していないため、未対応(None)とする。
+        return None

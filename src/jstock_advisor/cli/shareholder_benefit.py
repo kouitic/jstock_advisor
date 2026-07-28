@@ -56,8 +56,23 @@ def add(
     record_dates: str = typer.Option(
         None, "--record-dates", help="権利確定日(カンマ区切り、YYYY-MM-DD)"
     ),
+    ex_date: str = typer.Option(
+        None, "--ex-date", help="権利落ち日(YYYY-MM-DD、権利確定日とは別概念)"
+    ),
+    long_term_holding_requirement: str = typer.Option(
+        None,
+        "--long-term-holding-requirement",
+        help="長期保有条件の自由記述(例: 3年以上継続保有で優待内容が優遇される)",
+    ),
 ) -> None:
     """株主優待を登録する(既存登録があれば上書きされる)。"""
+    ex_date_parsed = None
+    if ex_date:
+        try:
+            ex_date_parsed = dt.date.fromisoformat(ex_date)
+        except ValueError as e:
+            raise typer.BadParameter("権利落ち日はYYYY-MM-DD形式で指定してください") from e
+
     service = ShareholderBenefitRegistryService()
     benefit = service.register(
         stock_code=stock_code,
@@ -69,6 +84,8 @@ def add(
         estimated_value=_parse_decimal(estimated_value, "estimated_value"),
         long_term_holding_condition_months=long_term_months,
         benefit_record_dates=_parse_date_list(record_dates),
+        benefit_ex_date=ex_date_parsed,
+        long_term_holding_requirement=long_term_holding_requirement,
     )
     typer.echo(f"登録しました: {benefit.stock_code} ({len(benefit.benefits)}件の優待内容)")
 

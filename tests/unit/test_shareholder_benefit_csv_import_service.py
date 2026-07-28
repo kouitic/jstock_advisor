@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from jstock_advisor.domain.entities.enums import RecordDateUnknownReason, SourceType
 from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
     ShareholderBenefitRegistryRepository,
 )
@@ -87,6 +88,44 @@ def test_import_optional_columns(
     assert saved.benefit_record_dates[0].isoformat() == "2026-03-31"
     assert saved.is_abolished is True
     assert saved.change_note == "廃止予定"
+
+
+def test_import_sets_source_type_and_ex_date_and_holding_requirement(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER},benefit_record_dates,benefit_ex_date,long_term_holding_requirement\n"
+        "2914,100,1,CASH_EQUIVALENT,x,100,2026-03-31,2026-03-27,3年以上継続保有で優遇\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.success_count == 1
+    saved = repository.get("2914")
+    assert saved is not None
+    assert saved.source.source_type == SourceType.MANUAL_REGISTRY
+    assert saved.source.primary_source_flag is True
+    assert saved.benefit_ex_date is not None
+    assert saved.benefit_ex_date.isoformat() == "2026-03-27"
+    assert saved.long_term_holding_requirement == "3年以上継続保有で優遇"
+    assert saved.benefit_record_date_unknown_reason is None
+
+
+def test_import_without_record_dates_sets_unknown_reason(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER}\n2914,100,1,CASH_EQUIVALENT,x,100\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.success_count == 1
+    saved = repository.get("2914")
+    assert saved is not None
+    assert saved.benefit_record_date_unknown_reason == RecordDateUnknownReason.SOURCE_NOT_FOUND
 
 
 def test_import_missing_required_column_raises(

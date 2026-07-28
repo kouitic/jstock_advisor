@@ -12,13 +12,33 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.common import DataSourceReference
-from jstock_advisor.domain.entities.enums import BenefitUtilityCategory
+from jstock_advisor.domain.entities.enums import (
+    BenefitUtilityCategory,
+    RecordDateUnknownReason,
+    SourceType,
+)
 from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
     ShareholderBenefitRegistryRepository,
 )
 from jstock_advisor.interfaces.types import BenefitDetail, ShareholderBenefit
 
 _PROVIDER_NAME = "manual_registry"
+
+
+def _source(fetched_at: dt.datetime) -> DataSourceReference:
+    # ユーザー自身が一次情報を確認して登録するため、一次情報源として扱う
+    return DataSourceReference(
+        provider=_PROVIDER_NAME,
+        fetched_at=fetched_at,
+        source_type=SourceType.MANUAL_REGISTRY,
+        primary_source_flag=True,
+    )
+
+
+def _record_date_unknown_reason(
+    record_dates: list[dt.date],
+) -> RecordDateUnknownReason | None:
+    return None if record_dates else RecordDateUnknownReason.SOURCE_NOT_FOUND
 
 
 class ShareholderBenefitRegistryService:
@@ -36,6 +56,8 @@ class ShareholderBenefitRegistryService:
         estimated_value: Decimal | None = None,
         long_term_holding_condition_months: int | None = None,
         benefit_record_dates: list[dt.date] | None = None,
+        benefit_ex_date: dt.date | None = None,
+        long_term_holding_requirement: str | None = None,
         now: dt.datetime | None = None,
     ) -> ShareholderBenefit:
         if min_shares_required <= 0:
@@ -43,6 +65,7 @@ class ShareholderBenefitRegistryService:
         if frequency_per_year <= 0:
             raise ValueError("frequency_per_yearは正の整数である必要があります")
 
+        record_dates = benefit_record_dates or []
         benefit = ShareholderBenefit(
             stock_code=stock_code,
             min_shares_required=min_shares_required,
@@ -56,10 +79,11 @@ class ShareholderBenefitRegistryService:
                 )
             ],
             frequency_per_year=frequency_per_year,
-            benefit_record_dates=benefit_record_dates or [],
-            source=DataSourceReference(
-                provider=_PROVIDER_NAME, fetched_at=now or dt.datetime.now(dt.UTC)
-            ),
+            benefit_record_dates=record_dates,
+            source=_source(now or dt.datetime.now(dt.UTC)),
+            benefit_ex_date=benefit_ex_date,
+            long_term_holding_requirement=long_term_holding_requirement,
+            benefit_record_date_unknown_reason=_record_date_unknown_reason(record_dates),
         )
         self._repo.save(benefit)
         return benefit
@@ -90,9 +114,7 @@ class ShareholderBenefitRegistryService:
         updated = existing.model_copy(
             update={
                 "benefits": [*existing.benefits, detail],
-                "source": DataSourceReference(
-                    provider=_PROVIDER_NAME, fetched_at=now or dt.datetime.now(dt.UTC)
-                ),
+                "source": _source(now or dt.datetime.now(dt.UTC)),
             }
         )
         self._repo.save(updated)
@@ -110,11 +132,7 @@ class ShareholderBenefitRegistryService:
         if existing is None:
             raise ValueError(f"stock_code={stock_code} は未登録です")
 
-        updates: dict[str, object] = {
-            "source": DataSourceReference(
-                provider=_PROVIDER_NAME, fetched_at=now or dt.datetime.now(dt.UTC)
-            )
-        }
+        updates: dict[str, object] = {"source": _source(now or dt.datetime.now(dt.UTC))}
         if is_abolished is not None:
             updates["is_abolished"] = is_abolished
         if is_major_downgrade is not None:

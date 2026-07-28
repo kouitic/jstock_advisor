@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import CorporateActionType
 from jstock_advisor.interfaces.types import CorporateActionEvent
 
 _PROVIDER_NAME = "yfinance"
@@ -38,7 +39,11 @@ class YFinanceCorporateActionProvider:
                 ratio_decimal = Decimal(str(round(float(ratio), 4)))
             except (InvalidOperation, ValueError, TypeError):
                 continue
-            event_type = "SPLIT" if ratio_decimal >= 1 else "REVERSE_SPLIT"
+            event_type = (
+                CorporateActionType.SPLIT
+                if ratio_decimal >= 1
+                else CorporateActionType.REVERSE_SPLIT
+            )
             events.append(
                 CorporateActionEvent(
                     stock_code=stock_code,

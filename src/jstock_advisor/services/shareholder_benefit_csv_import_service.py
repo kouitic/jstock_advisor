@@ -2,7 +2,8 @@
 
 1行 = 1優待段階(BenefitDetail)として扱う。同一stock_codeの行は1つの
 ShareholderBenefitにまとめる(銘柄レベルの項目 min_shares_required/
-frequency_per_year/benefit_record_dates/is_abolished/is_major_downgrade/
+frequency_per_year/benefit_record_dates/benefit_ex_date/
+long_term_holding_requirement/is_abolished/is_major_downgrade/
 change_noteは、その銘柄コードで最初に現れた行の値を採用する)。
 """
 
@@ -17,7 +18,11 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.common import DataSourceReference
-from jstock_advisor.domain.entities.enums import BenefitUtilityCategory
+from jstock_advisor.domain.entities.enums import (
+    BenefitUtilityCategory,
+    RecordDateUnknownReason,
+    SourceType,
+)
 from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
     ShareholderBenefitRegistryRepository,
 )
@@ -191,6 +196,25 @@ class ShareholderBenefitCsvImportService:
                     None,
                 )
 
+        ex_date_raw = (row.get("benefit_ex_date") or "").strip()
+        ex_date: dt.date | None = None
+        if ex_date_raw:
+            try:
+                ex_date = dt.date.fromisoformat(ex_date_raw)
+            except ValueError:
+                return (
+                    _error(
+                        row_number,
+                        stock_code,
+                        "benefit_ex_dateはYYYY-MM-DD形式で指定してください",
+                    ),
+                    None,
+                )
+
+        long_term_holding_requirement = (
+            row.get("long_term_holding_requirement") or ""
+        ).strip() or None
+
         detail = BenefitDetail(
             category=category,
             description=description,
@@ -198,7 +222,12 @@ class ShareholderBenefitCsvImportService:
             min_shares_for_tier=min_shares_for_tier,
             long_term_holding_condition_months=long_term_months,
         )
-        source = DataSourceReference(provider=_PROVIDER_NAME, fetched_at=fetched_at)
+        source = DataSourceReference(
+            provider=_PROVIDER_NAME,
+            fetched_at=fetched_at,
+            source_type=SourceType.MANUAL_REGISTRY,
+            primary_source_flag=True,
+        )
 
         existing = grouped.get(stock_code)
         if existing is not None:
@@ -216,6 +245,11 @@ class ShareholderBenefitCsvImportService:
                 is_major_downgrade=is_major_downgrade_raw in ("true", "1", "yes"),
                 change_note=(row.get("change_note") or "").strip() or None,
                 source=source,
+                benefit_ex_date=ex_date,
+                long_term_holding_requirement=long_term_holding_requirement,
+                benefit_record_date_unknown_reason=(
+                    None if record_dates else RecordDateUnknownReason.SOURCE_NOT_FOUND
+                ),
             )
 
         return (

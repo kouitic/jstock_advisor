@@ -9,14 +9,16 @@ fair_value_methods:
     - "per"              # PER方式
     - "pbr"               # PBR方式
     - "historical_range"   # 過去株価レンジ方式
+    - "dcf"                # 簡易DCF方式(固定割引率)
   # 最終適正価格の集約方法: "median"(中央値, 初期値) または "mean"(平均) または "weighted"
   aggregation_method: "median"
   # aggregation_method が "weighted" の場合の重み(合計1.0)
   method_weights:
-    target_yield: 0.25
-    per: 0.25
-    pbr: 0.25
-    historical_range: 0.25
+    target_yield: 0.2
+    per: 0.2
+    pbr: 0.2
+    historical_range: 0.2
+    dcf: 0.2
 
 target_yield_method:
   # 配当基準価格 = 予想年間配当金 ÷ 目標配当利回り
@@ -48,3 +50,17 @@ recommended_buy_price:
   # 拡張ポイント: 現在株価・直近安値・値幅制限・移動平均線等を用いた補正を
   # domain/valuation 層のプラグインとして追加可能な設計とする(初期値は無効)
   enable_price_context_adjustment: false
+
+dcf_method:
+  # 完全なCAPM(リスクフリーレート・株式リスクプレミアム・ベータ)を算出する
+  # データソースが無いため、固定割引率による簡易DCFとする(要求仕様8節)。
+  # 割引率が固定である旨を明示するため、この手法のconfidenceは常にMEDIUM上限。
+  discount_rate_pct: 8.0
+  terminal_growth_rate_pct: 1.0
+  projection_years: 5
+
+fair_value_usability:
+  # 手法間の最大値/最小値がこの倍率以上離れている場合、適正価格を売買判定に使用しない
+  max_method_spread_ratio: 2.0
+  # 有効な手法数がこれ未満の場合、適正価格を売買判定に使用しない
+  min_methods_required: 2

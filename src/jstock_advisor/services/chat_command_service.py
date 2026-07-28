@@ -17,7 +17,7 @@ import io
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
-from jstock_advisor.domain.entities.enums import TransactionType
+from jstock_advisor.domain.entities.enums import AccountType, TransactionType
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 from jstock_advisor.services.watchlist_service import WatchlistService
@@ -105,9 +105,13 @@ class ChatCommandService:
         else:
             if holding is None:
                 return ChatCommandResult(f"{stock_code}は保有銘柄として登録されていません", False)
+            if shares > holding.shares:
+                return ChatCommandResult(
+                    f"保有株数({holding.shares}株)を超える売却はできません", False
+                )
             transaction_type = (
                 TransactionType.FULL_SELL
-                if shares >= holding.shares
+                if shares == holding.shares
                 else TransactionType.PARTIAL_SELL
             )
 
@@ -122,6 +126,18 @@ class ChatCommandService:
             )
         except ValueError as e:
             return ChatCommandResult(str(e), False)
+
+        if command == _BUY_COMMAND:
+            self._portfolio.register_purchase(
+                stock_code=stock_code,
+                stock_name=None,
+                shares=shares,
+                purchase_price=price,
+                purchase_date=now.date(),
+                account_type=AccountType.GENERAL,
+            )
+        else:
+            self._portfolio.sell_shares(stock_code, shares)
 
         return ChatCommandResult(
             f"記録しました: {transaction_type.value} {stock_code} {shares}株 @{price}円", True

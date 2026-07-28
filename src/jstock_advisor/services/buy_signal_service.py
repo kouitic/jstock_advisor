@@ -27,9 +27,11 @@ from jstock_advisor.domain.signals.buy_signal import (
 from jstock_advisor.domain.valuation.fair_value import median_historical_pbr, median_historical_per
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.provider_bundle import ProviderBundle
+from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
-RULE_VERSION_PLACEHOLDER = "v1-mvp"  # rule_version_service(要求仕様43節)実装までの暫定値
+# アクティブなRuleVersionが未登録の場合(初期運用時)のフォールバック値
+RULE_VERSION_PLACEHOLDER = "v1-mvp"
 
 
 @dataclass(frozen=True)
@@ -48,11 +50,16 @@ class BuySignalService:
         config: AppConfig,
         business_calendar: BusinessCalendar,
         audit_service: AuditService | None = None,
+        rule_version_service: RuleVersionService | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
         self._calendar = business_calendar
         self._audit = audit_service or AuditService()
+        self._rule_version_service = rule_version_service or RuleVersionService()
+
+    def _active_rule_version(self) -> str:
+        return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
 
     def analyze(
         self,
@@ -69,7 +76,7 @@ class BuySignalService:
                 calculation_formulas={},
                 output_values={"data_error": error},
                 data_sources=[],
-                rule_version=RULE_VERSION_PLACEHOLDER,
+                rule_version=self._active_rule_version(),
                 timestamp=now,
             )
             return BuyAnalysisOutcome(stock_code, None, False, [], error)
@@ -194,7 +201,7 @@ class BuySignalService:
                 "confidence": buy_result.confidence.value,
             },
             data_sources=list(snapshot.data_sources),
-            rule_version=RULE_VERSION_PLACEHOLDER,
+            rule_version=self._active_rule_version(),
             timestamp=now,
         )
 
@@ -233,7 +240,14 @@ class BuySignalService:
             benefit_record_date=benefit.benefit_record_dates[0]
             if benefit is not None and benefit.benefit_record_dates
             else None,
-            rule_version=RULE_VERSION_PLACEHOLDER,
+            dividend_comparison_source_fiscal_year=dividend.comparison_source_fiscal_year,
+            dividend_comparison_target_fiscal_year=dividend.comparison_target_fiscal_year,
+            dividend_comparison_outcome=dividend.dividend_comparison_outcome,
+            dividend_record_date_unknown_reason=dividend.dividend_record_date_unknown_reason,
+            benefit_record_date_unknown_reason=(
+                benefit.benefit_record_date_unknown_reason if benefit is not None else None
+            ),
+            rule_version=self._active_rule_version(),
             config_values_used={
                 "min_total_yield_pct": self._config.screening.total_yield.min_total_yield_pct,
                 "aggregation_method": self._config.valuation.fair_value_methods.aggregation_method,
