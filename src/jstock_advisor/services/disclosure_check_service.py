@@ -23,6 +23,7 @@ _LOOKBACK_DAYS = 7  # 直近何日分の開示を確認対象とするか
 @dataclass(frozen=True)
 class DisclosureRiskAlert:
     stock_code: str
+    stock_name: str
     disclosure: Disclosure
     matched_keywords: list[str]
 
@@ -48,5 +49,9 @@ class DisclosureCheckService:
                     [disclosure], self._config.sell.disclosure_risk_keywords
                 )
                 if matched:
-                    alerts.append(DisclosureRiskAlert(holding.stock_code, disclosure, matched))
+                    alerts.append(
+                        DisclosureRiskAlert(
+                            holding.stock_code, holding.stock_name, disclosure, matched
+                        )
+                    )
         return alerts

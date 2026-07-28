@@ -71,6 +71,73 @@ _DIVIDEND_COMPARISON_OUTCOME_LABELS: dict[DividendComparisonOutcome, str] = {
     DividendComparisonOutcome.COMPARISON_NOT_POSSIBLE: "比較不可",
 }
 
+# データ品質アラートの対応内容(要求仕様18節): check_nameごとに「何を確認・実施すべきか」を明示する
+_RECOMMENDED_ACTION_BY_CHECK: dict[str, str] = {
+    "full_take_extreme_margin": (
+        "全株利確検討価格が現在値から極端に乖離しています。"
+        "適正価格算出の入力データ(企業行動調整・財務データ等)に誤りがないか確認してください。"
+    ),
+    "full_take_no_price_guidance": (
+        "全株利確判定なのに指値候補が算出されていません。データ取得状況を確認してください。"
+    ),
+    "watch_recommends_immediate_sell": (
+        "監視判定なのに即時執行目安の価格が提示されています。判定ロジックの不整合の"
+        "可能性があるため、該当銘柄の他の通知履歴と照合してください。"
+    ),
+    "three_or_more_equal_prices": (
+        "3つ以上の価格フィールドが同一値になっています。適正価格・利確価格の"
+        "算出元データを確認してください。"
+    ),
+    "reevaluation_unreasonably_above_full_take": (
+        "再評価価格が全株利確検討価格より不合理に高くなっています。"
+        "適正価格レンジの算出結果を確認してください。"
+    ),
+    "low_fair_value_confidence_full_take": (
+        "適正価格の信頼度がLOWのまま全株利確判定が出ています。"
+        "適正価格算出に使われた手法数・データ鮮度を確認してください。"
+    ),
+    "full_take_with_insufficient_gain_and_reasons": (
+        "含み益率が全利確閾値未満なのに根拠が少数です。判定ロジックの条件充足状況を"
+        "確認してください。"
+    ),
+    "sufficient_yield_full_take_on_yield_alone": (
+        "総合利回りが基準以上なのに利回り低下のみを根拠に全株利確が出ています。"
+        "配当・優待データを確認してください。"
+    ),
+    "price_equals_current_with_target_basis": (
+        "価格フィールドが現在値と一致していますが、目標価格として扱われています。"
+        "basis(算出根拠の種別)の設定を確認してください。"
+    ),
+    "fair_value_out_of_plausible_range": (
+        "適正価格が現在株価から大きく外れた倍率になっています。"
+        "財務データ(EPS/BPS等)の取得元・算出ロジックを確認してください。"
+    ),
+    "fair_value_changed_sharply": (
+        "前回分析から適正価格が大きく変動しています。決算発表・企業行動(株式分割等)・"
+        "データ取得エラーのいずれかが原因である可能性があります。CloudWatch Logsで"
+        "直近の分析ログを確認してください。"
+    ),
+    "price_change_resembles_split_ratio": (
+        "株価が前回から典型的な分割比率に近い倍率で変化しています。未反映の株式分割が"
+        "ないか確認し、必要であれば企業行動レジストリに手動登録してください。"
+    ),
+    "full_profit_take_with_unrealized_loss": (
+        "全株利確判定なのに含み損になっています。判定ロジックに重大な誤りがある"
+        "可能性が高いため、優先的に確認してください。"
+    ),
+}
+_DEFAULT_RECOMMENDED_ACTION = (
+    "検出内容を確認し、必要に応じてデータの再取得や手動確認を行ってください。"
+    "原因が分からない場合はCloudWatch Logsで該当銘柄のログを確認してください。"
+)
+
+
+def _build_recommended_action(check_names: list[str]) -> str:
+    actions = dict.fromkeys(
+        _RECOMMENDED_ACTION_BY_CHECK.get(name, _DEFAULT_RECOMMENDED_ACTION) for name in check_names
+    )
+    return " / ".join(actions) if actions else _DEFAULT_RECOMMENDED_ACTION
+
 
 def _representative_price(recommendation: Recommendation) -> Decimal | None:
     if recommendation.buy_prices is not None and recommendation.buy_prices.standard is not None:
@@ -227,10 +294,17 @@ def _format_sell_message(recommendation: Recommendation) -> str:
         lines.append("悪化懸念(投資前提が悪化した理由): " + " / ".join(recommendation.reasons))
     if recommendation.counter_factors:
         lines.append("直ちに売却としない理由: " + " / ".join(recommendation.counter_factors))
-    else:
+    elif len(recommendation.reasons) == 1:
         lines.append(
-            "直ちに売却としない理由: "
-            "本通知は投資前提悪化の可能性を示すものであり、執行タイミングの判断は利用者が行います"
+            "直ちに売却としない理由: 検出された懸念要因は"
+            f"「{recommendation.reasons[0]}」の1件のみです。業績・財務健全性・株主優待・"
+            "上場維持リスク等、他の重大リスク項目は現時点で検出されていません。"
+        )
+    elif len(recommendation.reasons) >= 2:
+        lines.append(
+            "直ちに売却としない理由: 複数の懸念要因が同時に検出されているため("
+            f"{len(recommendation.reasons)}件)、投資前提の悪化が深刻な水準に達している"
+            "可能性があります。早期の検討を推奨します。"
         )
     sp = recommendation.sell_prices
     if sp is not None and sp.stop_review_price:
@@ -319,12 +393,14 @@ class LineNotificationService:
         del notification_type  # 将来process名の出し分けに使う可能性があるため引数として保持
         contradictions: list[str] = []
         suppressed_values: dict[str, str] = {}
+        check_names: list[str] = []
 
         consistency_result = validate_recommendation(
             recommendation, self._config.data_validation.consistency_validation
         )
         for violation in consistency_result.violations:
             contradictions.append(f"[{violation.check_name}] {violation.description}")
+            check_names.append(violation.check_name)
 
         anomalies = detect_anomalies(
             recommendation.stock_code,
@@ -337,18 +413,21 @@ class LineNotificationService:
                 continue
             contradictions.append(f"[{issue.check_name}] {issue.description}")
             suppressed_values.update(issue.suppressed_values)
+            check_names.append(issue.check_name)
 
         if not contradictions:
             return None
 
         alert = DataQualityAlert(
             stock_code=recommendation.stock_code,
+            stock_name=recommendation.stock_name,
             detected_at=now,
             process="notify_recommendation",
             contradictions=contradictions,
             suppressed_values=suppressed_values,
             recalculation_result=None,
             action_required=True,
+            recommended_action=_build_recommended_action(check_names),
         )
 
         self._audit.record(
@@ -386,8 +465,9 @@ class LineNotificationService:
         if latest is not None and latest.content_hash == content_hash:
             return False
 
+        name_part = f" {alert.stock_name}" if alert.stock_name else ""
         lines = [
-            f"【データ品質アラート】{alert.stock_code}",
+            f"【データ品質アラート】{alert.stock_code}{name_part}",
             f"検出元処理: {alert.process}",
             "検出した矛盾・異常: " + " / ".join(alert.contradictions),
         ]
@@ -397,8 +477,10 @@ class LineNotificationService:
         if alert.recalculation_result:
             lines.append(f"再計算結果: {alert.recalculation_result}")
         lines.append(f"対応要否: {'要対応' if alert.action_required else '参考情報'}")
-        lines.append(f"検出日時: {format_jst(alert.detected_at)}")
+        if alert.action_required:
+            lines.append(f"対応内容: {alert.recommended_action or _DEFAULT_RECOMMENDED_ACTION}")
         lines.append("この銘柄の通常の売買推奨通知は、問題が解消されるまで抑止されます。")
+        lines.append(f"検出日時: {format_jst(alert.detected_at)}")
         lines.append(_DISCLAIMER)
         self._client.push_message("\n".join(lines))
 
@@ -422,6 +504,7 @@ class LineNotificationService:
         matched_keywords: list[str],
         published_at: dt.datetime,
         now: dt.datetime,
+        stock_name: str | None = None,
     ) -> bool:
         """適時開示からリスクキーワードが検出された場合に速報として送信する。
 
@@ -436,13 +519,15 @@ class LineNotificationService:
         if latest is not None and latest.content_hash == content_hash:
             return False
 
+        name_part = f" {stock_name}" if stock_name else ""
         lines = [
-            f"【重要開示検知】{stock_code}",
+            f"【重要開示検知】{stock_code}{name_part}",
             f"検出キーワード: {', '.join(matched_keywords)}",
             f"開示タイトル: {disclosure_title}",
         ]
         if disclosure_summary:
             lines.append(f"概要: {disclosure_summary[:300]}")
+        lines.append("対応内容: 開示内容を確認し、投資前提に影響がないか確認してください。")
         lines.append(f"開示日時: {format_jst(published_at)}")
         lines.append(_DISCLAIMER)
         self._client.push_message("\n".join(lines))
@@ -459,7 +544,9 @@ class LineNotificationService:
         )
         return True
 
-    def notify_data_error(self, stock_code: str, message: str, now: dt.datetime) -> bool:
+    def notify_data_error(
+        self, stock_code: str, message: str, now: dt.datetime, stock_name: str | None = None
+    ) -> bool:
         content_hash = hashlib.sha256(message.encode()).hexdigest()[:16]
         latest = self._log_repo.latest_by_stock_and_type(stock_code, NotificationType.DATA_ERROR)
         if latest is not None and latest.content_hash == content_hash:
@@ -467,8 +554,11 @@ class LineNotificationService:
             if days_elapsed < self._config.notification.resend_after_days:
                 return False
 
+        name_part = f" {stock_name}" if stock_name else ""
         text = (
-            f"【データ取得エラー】{stock_code}\n{message}\n"
+            f"【データ取得エラー】{stock_code}{name_part}\n{message}\n"
+            "対応内容: 一時的な障害の可能性があります。次回の自動分析で解消しない場合は"
+            "CloudWatch Logsで詳細を確認してください。\n"
             f"データ取得日時: {format_jst(now)}\n{_DISCLAIMER}"
         )
         self._client.push_message(text)

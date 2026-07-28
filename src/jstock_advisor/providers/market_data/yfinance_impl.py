@@ -30,8 +30,14 @@ _BENCHMARK_TICKERS: dict[str, str] = {
 
 def _to_decimal(value: float) -> Decimal | None:
     try:
-        return Decimal(str(round(float(value), 2)))
-    except (InvalidOperation, ValueError, TypeError):
+        f = float(value)
+    except (ValueError, TypeError):
+        return None
+    if f != f:  # NaN(欠測日・取引停止日等でyfinanceがNaNを返すことがある)
+        return None
+    try:
+        return Decimal(str(round(f, 2)))
+    except InvalidOperation:
         return None
 
 

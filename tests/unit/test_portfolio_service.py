@@ -274,7 +274,9 @@ def test_recompute_all_adjusts_shares_and_price_for_past_split(tmp_path: Path) -
     assert after.shares == 500  # 100株 * 5
     assert after.average_purchase_price == Decimal("700")  # 3500円 / 5
     assert after.total_purchase_amount == Decimal("350000")  # 支出総額は不変
-    assert after.shares_and_price_adjustment_basis_date == _NOW.date()
+    # _recompute_holding()は実時刻(dt.datetime.now)を基準日として使うため、_NOWではなく
+    # 実行時の日付と比較する(_NOWはCorporateActionServiceのイベント有効性判定にのみ使用)
+    assert after.shares_and_price_adjustment_basis_date == dt.datetime.now(dt.UTC).date()
 
     # PurchaseLot(購入時の生データ)自体は書き換えられていないことを確認
     lots = adjusting_service.list_lots("5401")

@@ -96,10 +96,22 @@ class CrossValidatingDividendDataProvider:
         splits: list[CorporateActionEvent],
         threshold_pct: float,
     ) -> bool:
-        for event in splits:
-            ratio = event.ratio
-            if ratio is None or ratio <= 0:
-                continue
+        """乖離が株式分割で説明できるかを判定する。
+
+        ルックバック期間内に複数回の分割・併合があった場合、単一の分割比率だけでは
+        不十分(例: 3分割の2年後に5分割が起きていれば、通算15倍のずれが生じる)なため、
+        個別の比率に加えて全比率の累積(通算)倍率でも照合する。
+        """
+        ratios = [event.ratio for event in splits if event.ratio is not None and event.ratio > 0]
+        if not ratios:
+            return False
+
+        cumulative = Decimal(1)
+        for ratio in ratios:
+            cumulative *= ratio
+        candidates = [*ratios, cumulative]
+
+        for ratio in candidates:
             if _within_threshold(secondary_value / ratio, primary_value, threshold_pct):
                 return True
             if _within_threshold(secondary_value * ratio, primary_value, threshold_pct):

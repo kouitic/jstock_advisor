@@ -376,3 +376,74 @@ def test_message_shows_dividend_comparison_with_fiscal_years(service_and_repos) 
     service.notify_recommendation(rec, _NOW)
 
     assert "配当比較(2025 → 2026): 減配(実績確定)" in client.sent[0]
+
+
+def _make_sell_recommendation(
+    *, recommendation_id: str, reasons: list[str]
+) -> Recommendation:
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code="4631",
+        stock_name="ＤＩＣ",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL,
+        sell_prices=SellPriceLevels(
+            stop_review_price=PriceWithRationale(price=Decimal("4384"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("4384"),
+        average_purchase_price_at_recommendation=Decimal("3745"),
+        shares_at_recommendation=100,
+        reasons=reasons,
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+
+
+def test_sell_message_with_single_reason_explains_no_other_risks_found(
+    service_and_repos,
+) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_sell_recommendation(recommendation_id="rec-1", reasons=["減配(major)"])
+    repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    message = client.sent[0]
+    assert "検出された懸念要因は「減配(major)」の1件のみです" in message
+    assert "他の重大リスク項目は現時点で検出されていません" in message
+
+
+def test_sell_message_with_multiple_reasons_flags_compounding_risk(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_sell_recommendation(
+        recommendation_id="rec-1", reasons=["減配(major)", "営業利益の継続悪化(major)"]
+    )
+    repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    message = client.sent[0]
+    assert "複数の懸念要因が同時に検出されているため(2件)" in message
+
+
+def test_data_error_notification_includes_stock_name(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+    service.notify_data_error("9999", "株価データを取得できません", _NOW, stock_name="テスト銘柄")
+
+    assert "【データ取得エラー】9999 テスト銘柄" in client.sent[0]
+    assert "対応内容:" in client.sent[0]
+
+
+def test_data_quality_alert_includes_stock_name_and_recommended_action(
+    service_and_repos,
+) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_full_profit_take_recommendation(recommendation_id="rec-1", full_take_price="9000")
+    repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    message = client.sent[0]
+    assert f"【データ品質アラート】{rec.stock_code} {rec.stock_name}" in message
+    assert "対応内容:" in message
+    assert "適正価格算出の入力データ" in message
