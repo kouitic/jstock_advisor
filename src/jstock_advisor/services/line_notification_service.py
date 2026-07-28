@@ -53,6 +53,9 @@ _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType]
     RecommendationType.WATCH_BEFORE_EARNINGS: NotificationType.WATCHLIST_BUY_SIGNAL,
     RecommendationType.PARTIAL_RISK_REDUCTION: NotificationType.PROFIT_TAKING_SIGNAL,
     RecommendationType.REVIEW_AFTER_EARNINGS: NotificationType.PROFIT_TAKING_SIGNAL,
+    # --- 売却判定エンジンの再設計(2026-07仕様)で追加 ---
+    RecommendationType.REVIEW: NotificationType.SELL_SIGNAL,
+    RecommendationType.MANUAL_REVIEW_REQUIRED: NotificationType.MANUAL_REVIEW_REQUIRED,
 }
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
@@ -296,24 +299,18 @@ def _format_sell_message(recommendation: Recommendation) -> str:
     if recommendation.reasons:
         lines.append("悪化懸念(投資前提が悪化した理由): " + " / ".join(recommendation.reasons))
     if recommendation.counter_factors:
-        lines.append("直ちに売却としない理由: " + " / ".join(recommendation.counter_factors))
-    elif len(recommendation.reasons) == 1:
-        lines.append(
-            "直ちに売却としない理由: 検出された懸念要因は"
-            f"「{recommendation.reasons[0]}」の1件のみです。業績・財務健全性・株主優待・"
-            "上場維持リスク等、他の重大リスク項目は現時点で検出されていません。"
-        )
-    elif len(recommendation.reasons) >= 2:
-        lines.append(
-            "直ちに売却としない理由: 複数の懸念要因が同時に検出されているため("
-            f"{len(recommendation.reasons)}件)、投資前提の悪化が深刻な水準に達している"
-            "可能性があります。早期の検討を推奨します。"
-        )
+        lines.append("反対材料: " + " / ".join(recommendation.counter_factors))
+    if recommendation.recommended_action_summary:
+        lines.append("判定内容: " + recommendation.recommended_action_summary)
     sp = recommendation.sell_prices
+    if sp is not None and sp.immediate_execution_price:
+        lines.append(f"即時執行目安価格: {sp.immediate_execution_price.price}円")
     if sp is not None and sp.stop_review_price:
         lines.append(f"売却目安価格: {sp.stop_review_price.price}円")
-        lines.append(f"次の判断条件: 売却目安価格({sp.stop_review_price.price}円)到達時に再検討")
-    lines.append("保有を継続する場合のリスク: 投資前提の悪化が是正されない可能性があります")
+    if recommendation.next_review_conditions:
+        lines.append("次の判断条件: " + " / ".join(recommendation.next_review_conditions))
+    if recommendation.holding_risks:
+        lines.append("保有を継続する場合のリスク: " + " / ".join(recommendation.holding_risks))
     if recommendation.data_sources:
         fetched_at = min(s.fetched_at for s in recommendation.data_sources)
         lines.append(f"データ取得日時: {format_jst(fetched_at)}")
@@ -365,8 +362,12 @@ class LineNotificationService:
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         previous = self._previous_recommendation(recommendation.stock_code, notification_type)
 
-        alert = self._check_data_quality(recommendation, previous, notification_type, now)
+        alert, requires_manual_review = self._check_data_quality(
+            recommendation, previous, notification_type, now
+        )
         if alert is not None:
+            if requires_manual_review:
+                return self.notify_manual_review_required(recommendation, alert, now)
             return self.notify_data_quality_alert(alert, now)
 
         if not self._should_send(recommendation, previous, now):
@@ -392,7 +393,7 @@ class LineNotificationService:
         previous: Recommendation | None,
         notification_type: NotificationType,
         now: dt.datetime,
-    ) -> DataQualityAlert | None:
+    ) -> tuple[DataQualityAlert | None, bool]:
         del notification_type  # 将来process名の出し分けに使う可能性があるため引数として保持
         contradictions: list[str] = []
         suppressed_values: dict[str, str] = {}
@@ -419,7 +420,7 @@ class LineNotificationService:
             check_names.append(issue.check_name)
 
         if not contradictions:
-            return None
+            return None, False
 
         alert = DataQualityAlert(
             stock_code=recommendation.stock_code,
@@ -455,7 +456,7 @@ class LineNotificationService:
                 "recommended_action": alert.recommended_action,
             },
         )
-        return alert
+        return alert, consistency_result.requires_manual_review
 
     def notify_data_quality_alert(self, alert: DataQualityAlert, now: dt.datetime) -> bool:
         """判定/価格の矛盾または異常値を検出した際、通常の推奨通知の代わりに呼ばれる。
@@ -477,6 +478,44 @@ class LineNotificationService:
             alert.recommended_action,
         )
         return False
+
+    def notify_manual_review_required(
+        self, recommendation: Recommendation, alert: DataQualityAlert, now: dt.datetime
+    ) -> bool:
+        """SELL/URGENT_REVIEW等の自動判定が安全条件(独立根拠件数・一次情報確認等)を
+        満たさない場合、自動通知の代わりに手動確認を促すメッセージを送信する
+        (要求仕様§15・§16)。DATA_QUALITY_ALERTと異なり、これは実際にLINEへ配信する
+        (根拠不足のSELL/URGENT_REVIEWは自動で確定させず、必ず人間の確認を経由させるため)。
+        """
+        lines = [
+            f"【要手動確認】{recommendation.stock_code} {recommendation.stock_name}",
+            "自動売却判定の根拠に、業種別評価未対応・独立根拠不足・一次情報未確認の"
+            "いずれかの項目が含まれています。",
+            "検出内容:",
+            *[f"・{c}" for c in alert.contradictions],
+            f"自動判定結果: {recommendation.recommendation_type.value}",
+            "自動売却推奨: 停止(手動確認が完了するまで自動での売却推奨は行いません)",
+            "確認事項:",
+        ]
+        if recommendation.reasons:
+            lines.append(f"・検出された懸念事項: {' / '.join(recommendation.reasons)}")
+        lines.append("・一次情報(EDINET/TDnet等)での事実確認")
+        if recommendation.next_earnings_date:
+            lines.append(f"・次回決算({recommendation.next_earnings_date})の内容")
+        lines.append(_DISCLAIMER)
+        self._client.push_message("\n".join(lines))
+
+        self._log_repo.save(
+            NotificationLog(
+                notification_id=str(uuid.uuid4()),
+                notification_type=NotificationType.MANUAL_REVIEW_REQUIRED,
+                stock_code=recommendation.stock_code,
+                content_hash=_compute_content_hash(recommendation.recommendation_type),
+                sent_at=now,
+                related_recommendation_id=recommendation.recommendation_id,
+            )
+        )
+        return True
 
     def notify_disclosure_risk(
         self,

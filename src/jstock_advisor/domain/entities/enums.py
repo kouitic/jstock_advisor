@@ -40,6 +40,10 @@ class RecommendationType(StrEnum):
     PARTIAL_RISK_REDUCTION = "PARTIAL_RISK_REDUCTION"
     REVIEW_AFTER_EARNINGS = "REVIEW_AFTER_EARNINGS"
 
+    # --- 売却判定エンジンの再設計で追加(2026-07仕様) ---
+    REVIEW = "REVIEW"  # 単一の根拠のみで、SELL/URGENT_REVIEWへ進めるには不十分
+    MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"  # 自動判定の安全条件を満たさない
+
 
 class TransactionType(StrEnum):
     BUY = "BUY"
@@ -92,6 +96,7 @@ class NotificationType(StrEnum):
     IMPORTANT_DISCLOSURE = "IMPORTANT_DISCLOSURE"
     DATA_ERROR = "DATA_ERROR"
     DATA_QUALITY_ALERT = "DATA_QUALITY_ALERT"
+    MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
     WEEKLY_REVIEW = "WEEKLY_REVIEW"
     MONTHLY_REVIEW = "MONTHLY_REVIEW"
     QUARTERLY_LOGIC_REVIEW = "QUARTERLY_LOGIC_REVIEW"
@@ -237,6 +242,48 @@ class EarningsWindowStatus(StrEnum):
     NONE = "NONE"
     APPROACHING_EARNINGS = "APPROACHING_EARNINGS"
     RECENTLY_REPORTED = "RECENTLY_REPORTED"
+
+
+class TriggerStatus(StrEnum):
+    """売却ルール1件ごとの該当有無を三値で表現する(2026-07仕様§3)。
+
+    データ不足はNOT_TRIGGERED(Falseと同義に扱う)ではなくNOT_EVALUATEDとする。
+    「推測で補完しない」という既存方針を売却ルールにも徹底するための区分。
+    """
+
+    TRIGGERED = "TRIGGERED"
+    NOT_TRIGGERED = "NOT_TRIGGERED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
+class EvidenceGroup(StrEnum):
+    """独立根拠グループ(2026-07仕様§5)。
+
+    同一の根本的な財務変化に由来する複数ルールは、同じグループに属する限り
+    1件の独立根拠としてしか数えない(例: 自己資本比率低下+有利子負債急増は
+    どちらもBALANCE_SHEETグループであり、合わせて1件)。
+    """
+
+    DIVIDEND = "DIVIDEND"
+    EARNINGS = "EARNINGS"
+    CASHFLOW = "CASHFLOW"
+    BALANCE_SHEET = "BALANCE_SHEET"
+    REGULATORY_CAPITAL = "REGULATORY_CAPITAL"
+    GOVERNANCE = "GOVERNANCE"
+    LISTING = "LISTING"
+    SHAREHOLDER_BENEFIT = "SHAREHOLDER_BENEFIT"
+    INVESTMENT_PREMISE = "INVESTMENT_PREMISE"
+
+
+class FinancialIndustryCategory(StrEnum):
+    """金融業の細分類(2026-07仕様§2)。一般事業会社向けの自己資本比率・D/Eレシオ等の
+    財務健全性指標は、業態がまったく異なるこれらの業種には適用しない。
+    """
+
+    BANKING = "BANKING"
+    INSURANCE = "INSURANCE"
+    SECURITIES = "SECURITIES"
+    OTHER_FINANCIAL = "OTHER_FINANCIAL"
 
 
 class BenefitUtilityCategory(StrEnum):

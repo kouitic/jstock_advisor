@@ -62,3 +62,11 @@ class Recommendation(ImmutableSnapshot):
     rule_version: str
     config_values_used: dict[str, Any] = {}
     data_sources: list[DataSourceReference] = []
+
+    # --- 通知層の自動生成文言廃止(2026-07仕様§9)で追加。判定結果の文言は
+    # 通知層(line_notification_service)で生成せず、ここに判定サービスが直接格納する ---
+    recommended_action_summary: str | None = None
+    next_review_conditions: list[str] = []
+    holding_risks: list[str] = []
+    evidence_details: list[dict[str, Any]] = []
+    independent_evidence_group_count: int | None = None

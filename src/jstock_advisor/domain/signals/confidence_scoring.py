@@ -38,6 +38,14 @@ class ConfidenceFactors:
     one_time_factors_identified: bool | None = None
     cross_rule_agreement: bool | None = None
 
+    # --- 信頼度HIGH固定の廃止(2026-07仕様§6)で追加 ---
+    independent_evidence_group_count: int | None = None
+    industry_specific_model_unavailable: bool = False
+    evidence_sourced_from_yfinance_only: bool = False
+    dividend_breakdown_confirmed: bool | None = None
+    counter_factors_evaluated: bool | None = None
+    corporate_action_adjustment_confirmed: bool | None = None
+
 
 @dataclass(frozen=True)
 class ConfidenceScoreResult:
@@ -85,6 +93,30 @@ def _high_confidence_disallow_reasons(
 
     if factors.one_time_factors_identified is not True:
         reasons.append("一過性要因を分離できていない、または未確認")
+
+    if (
+        factors.independent_evidence_group_count is not None
+        and factors.independent_evidence_group_count < d.min_independent_evidence_groups_for_high
+    ):
+        reasons.append(
+            f"独立根拠グループが{factors.independent_evidence_group_count}件しかない"
+            f"({d.min_independent_evidence_groups_for_high}件以上必要)"
+        )
+
+    if factors.industry_specific_model_unavailable:
+        reasons.append("業種別評価モデルが未実装")
+
+    if factors.evidence_sourced_from_yfinance_only:
+        reasons.append("根拠がyfinance等の二次情報のみ")
+
+    if factors.dividend_breakdown_confirmed is False:
+        reasons.append("配当の内訳(普通/特別)が未確定")
+
+    if factors.counter_factors_evaluated is False:
+        reasons.append("反対材料(counter_factors)が未評価")
+
+    if factors.corporate_action_adjustment_confirmed is False:
+        reasons.append("企業行動調整が未確認")
 
     return reasons
 

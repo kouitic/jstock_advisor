@@ -134,6 +134,7 @@ class YFinanceFinancialDataProvider:
             security_type=security_type,
             market_segment=None,  # yfinanceは市場区分(プライム/スタンダード等)を提供しない
             industry=info.get("industry"),
+            sector=info.get("sector"),
             equity_ratio_pct=equity_ratio_pct,
             payout_ratio_pct=payout_ratio_pct,
             operating_cashflow=operating_cashflow,

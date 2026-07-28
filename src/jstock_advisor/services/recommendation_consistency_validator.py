@@ -27,12 +27,87 @@ from jstock_advisor.domain.entities.valuation import FairValueRange
 class ConsistencyViolation:
     check_name: str
     description: str
+    manual_review_required: bool = False
 
 
 @dataclass(frozen=True)
 class ConsistencyCheckResult:
     passed: bool
     violations: list[ConsistencyViolation]
+
+    @property
+    def requires_manual_review(self) -> bool:
+        return any(v.manual_review_required for v in self.violations)
+
+
+_SELL_LIKE_TYPES = (RecommendationType.SELL, RecommendationType.URGENT_REVIEW)
+
+
+def _check_sell_single_evidence(r: Recommendation) -> ConsistencyViolation | None:
+    """SELL/URGENT_REVIEWが証拠1件のみに基づいていないか(要求仕様§15)。"""
+    if r.recommendation_type not in _SELL_LIKE_TYPES:
+        return None
+    triggered_count = sum(1 for e in r.evidence_details if e.get("status") == "TRIGGERED")
+    if triggered_count <= 1:
+        return ConsistencyViolation(
+            "sell_based_on_single_evidence",
+            f"{r.recommendation_type.value}の根拠が{triggered_count}件しかない"
+            "(独立した複数の根拠が必要)",
+            manual_review_required=True,
+        )
+    return None
+
+
+def _check_high_confidence_insufficient_groups(r: Recommendation) -> ConsistencyViolation | None:
+    """HIGH信頼度なのに独立根拠グループが2件未満でないか(要求仕様§6・§15)。"""
+    if r.confidence != ConfidenceLevel.HIGH:
+        return None
+    if r.independent_evidence_group_count is None:
+        return None
+    if r.independent_evidence_group_count < 2:
+        return ConsistencyViolation(
+            "high_confidence_insufficient_evidence_groups",
+            f"信頼度HIGHだが独立根拠グループが{r.independent_evidence_group_count}件しかない",
+            manual_review_required=True,
+        )
+    return None
+
+
+def _check_sell_based_on_yfinance_only(r: Recommendation) -> ConsistencyViolation | None:
+    """SELL/URGENT_REVIEWの根拠がyfinance等の二次情報のみでないか(要求仕様§12・§15)。"""
+    if r.recommendation_type not in _SELL_LIKE_TYPES:
+        return None
+    triggered = [e for e in r.evidence_details if e.get("status") == "TRIGGERED"]
+    if not triggered:
+        return None
+    if all(not e.get("primary_source_confirmed") for e in triggered):
+        return ConsistencyViolation(
+            "sell_based_on_secondary_source_only",
+            f"{r.recommendation_type.value}の根拠がすべて一次情報未確認(yfinance等の二次情報)のみ",
+            manual_review_required=True,
+        )
+    return None
+
+
+def _check_sell_price_equals_current_as_future_condition(
+    r: Recommendation,
+) -> ConsistencyViolation | None:
+    """成立済みの現在値がそのまま将来の再判断条件として提示されていないか(要求仕様§8)。"""
+    if r.sell_prices is None:
+        return None
+    for name, field in (
+        ("stop_review_price", r.sell_prices.stop_review_price),
+        ("reevaluation_price_upside", r.sell_prices.reevaluation_price_upside),
+        ("reevaluation_price_downside", r.sell_prices.reevaluation_price_downside),
+    ):
+        if field is not None and field.price == r.price_at_recommendation:
+            return ConsistencyViolation(
+                "future_condition_equals_current_price",
+                f"{name}が現在値と同一だが、将来の再判断条件として提示されている"
+                "(すでに成立している条件を将来条件として表示しない)",
+                manual_review_required=True,
+            )
+    return None
 
 
 def _check_full_take_extreme_margin(
@@ -211,6 +286,10 @@ def validate_recommendation(
         _check_gain_below_threshold_full_take(recommendation, config, gain_full_threshold_pct),
         _check_yield_sufficient_full_take_on_yield_alone(recommendation, min_yield_pct),
         _check_price_equals_current_with_wrong_basis(recommendation),
+        _check_sell_single_evidence(recommendation),
+        _check_high_confidence_insufficient_groups(recommendation),
+        _check_sell_based_on_yfinance_only(recommendation),
+        _check_sell_price_equals_current_as_future_condition(recommendation),
     ]
     violations = [c for c in checks if c is not None]
     return ConsistencyCheckResult(passed=not violations, violations=violations)

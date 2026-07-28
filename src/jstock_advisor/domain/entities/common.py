@@ -68,9 +68,13 @@ class SellPriceLevels(ImmutableSnapshot):
     - full_profit_consideration_price: 全利確を再検討する条件価格
     - reevaluation_price_upside: 上昇時の再評価価格
     - reevaluation_price_downside: 下落時の再評価価格(投資前提再確認価格を兼ねる)
-    - stop_review_price: 損切り・投資前提再確認価格(sell_signal側の悪化判定用)
+    - stop_review_price: 損切り・投資前提再確認価格(sell_signal側の悪化判定用、
+      将来の価格水準であり現在値のコピーではない)
     - trailing_stop_reference_price: トレーリングストップ参考価格(モメンタム層が必要、
       未実装の間は常にNone)
+    - immediate_execution_price: 即時執行が真に必要な場合(URGENT_REVIEW等)にのみ
+      設定する現在値ベースの参考価格(2026-07仕様§7)。stop_review_price等の
+      「将来の再評価条件」とは意味を混同しない。
 
     算出不能な場合はNone(現在値へのフォールバックは行わない)。現在値と一致する
     値を意図的に返す場合は、PriceWithRationale.basisで即時執行目安か監視専用かを
@@ -84,6 +88,7 @@ class SellPriceLevels(ImmutableSnapshot):
     reevaluation_price_downside: PriceWithRationale | None = None
     stop_review_price: PriceWithRationale | None = None
     trailing_stop_reference_price: PriceWithRationale | None = None
+    immediate_execution_price: PriceWithRationale | None = None
 
     @model_validator(mode="before")
     @classmethod
