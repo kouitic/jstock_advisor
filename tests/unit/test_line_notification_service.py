@@ -189,25 +189,15 @@ def test_resend_after_days_elapsed(service_and_repos) -> None:
     assert len(client.sent) == 2
 
 
-def test_data_error_notification_dedup(service_and_repos) -> None:
+def test_data_error_notification_is_not_sent_to_line(service_and_repos, caplog) -> None:
+    # 個別のデータ取得エラーはLINEへ配信せず、バッチサマリーに集約する
     service, _repo, client = service_and_repos
-    sent1 = service.notify_data_error("9999", "株価データを取得できません", _NOW)
-    sent2 = service.notify_data_error(
-        "9999", "株価データを取得できません", _NOW + dt.timedelta(hours=1)
-    )
-    assert sent1 is True
-    assert sent2 is False
-    assert len(client.sent) == 1
+    with caplog.at_level("WARNING"):
+        sent = service.notify_data_error("9999", "株価データを取得できません", _NOW)
 
-
-def test_data_error_notification_resends_for_different_message(service_and_repos) -> None:
-    service, _repo, client = service_and_repos
-    service.notify_data_error("9999", "株価データを取得できません", _NOW)
-    sent = service.notify_data_error(
-        "9999", "財務データを取得できません", _NOW + dt.timedelta(hours=1)
-    )
-    assert sent is True
-    assert len(client.sent) == 2
+    assert sent is False
+    assert client.sent == []
+    assert "data_error stock_code=9999" in caplog.text
 
 
 def test_disclosure_risk_notification_is_sent(service_and_repos) -> None:
@@ -291,37 +281,24 @@ def _make_full_profit_take_recommendation(
     )
 
 
-def test_recommendation_with_consistency_violation_sends_data_quality_alert_instead(
-    service_and_repos,
+def test_recommendation_with_consistency_violation_suppresses_normal_notification(
+    service_and_repos, caplog
 ) -> None:
     service, repo, client = service_and_repos
-    # 全株利確検討価格が現在値の100%以上高く、極端な乖離(full_take_extreme_margin)
+    # 全株利確検討価格が現在値の100%以上高く、極端な乖離(full_take_extreme_margin)。
+    # データ品質アラートはLINEへ個別送信せず、通常の推奨通知のみを抑止する
     rec = _make_full_profit_take_recommendation(
         recommendation_id="rec-1", full_take_price="9000"
     )
     repo.save(rec)
 
-    sent = service.notify_recommendation(rec, _NOW)
-
-    assert sent is True
-    assert len(client.sent) == 1
-    assert "データ品質アラート" in client.sent[0]
-    assert "full_take_extreme_margin" in client.sent[0]
-    assert "2914" in client.sent[0]
-
-
-def test_data_quality_alert_deduplicates_identical_contradiction(service_and_repos) -> None:
-    service, repo, client = service_and_repos
-    rec1 = _make_full_profit_take_recommendation(recommendation_id="rec-1", full_take_price="9000")
-    repo.save(rec1)
-    service.notify_recommendation(rec1, _NOW)
-
-    rec2 = _make_full_profit_take_recommendation(recommendation_id="rec-2", full_take_price="9000")
-    repo.save(rec2)
-    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+    with caplog.at_level("WARNING"):
+        sent = service.notify_recommendation(rec, _NOW)
 
     assert sent is False
-    assert len(client.sent) == 1
+    assert client.sent == []
+    assert "full_take_extreme_margin" in caplog.text
+    assert "stock_code=2914" in caplog.text
 
 
 def test_clean_full_profit_take_is_sent_normally(service_and_repos) -> None:
@@ -426,24 +403,44 @@ def test_sell_message_with_multiple_reasons_flags_compounding_risk(service_and_r
     assert "複数の懸念要因が同時に検出されているため(2件)" in message
 
 
-def test_data_error_notification_includes_stock_name(service_and_repos) -> None:
+def test_data_error_notification_logs_stock_name_instead_of_sending(
+    service_and_repos, caplog
+) -> None:
     service, _repo, client = service_and_repos
-    service.notify_data_error("9999", "株価データを取得できません", _NOW, stock_name="テスト銘柄")
+    with caplog.at_level("WARNING"):
+        service.notify_data_error(
+            "9999", "株価データを取得できません", _NOW, stock_name="テスト銘柄"
+        )
 
-    assert "【データ取得エラー】9999 テスト銘柄" in client.sent[0]
-    assert "対応内容:" in client.sent[0]
+    assert client.sent == []
+    assert "stock_code=9999 テスト銘柄" in caplog.text
 
 
-def test_data_quality_alert_includes_stock_name_and_recommended_action(
-    service_and_repos,
+def test_data_quality_alert_logs_stock_name_and_recommended_action_instead_of_sending(
+    service_and_repos, caplog
 ) -> None:
     service, repo, client = service_and_repos
     rec = _make_full_profit_take_recommendation(recommendation_id="rec-1", full_take_price="9000")
     repo.save(rec)
 
-    service.notify_recommendation(rec, _NOW)
+    with caplog.at_level("WARNING"):
+        service.notify_recommendation(rec, _NOW)
 
+    assert client.sent == []
+    assert f"stock_code={rec.stock_code} {rec.stock_name}" in caplog.text
+    assert "適正価格算出の入力データ" in caplog.text
+
+
+def test_notify_batch_summary_sends_counts(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析", total=27, succeeded=24, failed=3, now=_NOW
+    )
+
+    assert sent is True
+    assert len(client.sent) == 1
     message = client.sent[0]
-    assert f"【データ品質アラート】{rec.stock_code} {rec.stock_name}" in message
-    assert "対応内容:" in message
-    assert "適正価格算出の入力データ" in message
+    assert "全体処理件数: 27" in message
+    assert "正常件数: 24" in message
+    assert "異常件数: 3" in message

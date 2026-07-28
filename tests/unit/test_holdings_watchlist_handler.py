@@ -78,18 +78,30 @@ def test_dispatch_mode_dispatches_one_call_per_holding_and_watchlist_item(
     result = handler_module.handler({}, _FakeContext())
 
     assert result == {"dispatched_holdings": 2, "dispatched_watchlist": 1}
-    assert {"fn": "jstock-advisor-holdings-watchlist", "task": "holding", "stock_code": "2914"} in (
-        dispatched
-    )
-    assert {"fn": "jstock-advisor-holdings-watchlist", "task": "holding", "stock_code": "8136"} in (
-        dispatched
-    )
+    assert len(dispatched) == 3
+    # 全ディスパッチが同一のbatch_idを共有していることを確認する
+    batch_ids = {d["batch_id"] for d in dispatched}
+    assert len(batch_ids) == 1
+
+    def _without_batch_id(payload: dict[str, object]) -> dict[str, object]:
+        return {k: v for k, v in payload.items() if k != "batch_id"}
+
+    stripped = [_without_batch_id(d) for d in dispatched]
+    assert {
+        "fn": "jstock-advisor-holdings-watchlist",
+        "task": "holding",
+        "stock_code": "2914",
+    } in stripped
+    assert {
+        "fn": "jstock-advisor-holdings-watchlist",
+        "task": "holding",
+        "stock_code": "8136",
+    } in stripped
     assert {
         "fn": "jstock-advisor-holdings-watchlist",
         "task": "watchlist",
         "stock_code": "7203",
-    } in dispatched
-    assert len(dispatched) == 3
+    } in stripped
 
 
 def test_task_holding_processes_only_requested_stock(monkeypatch: pytest.MonkeyPatch) -> None:
