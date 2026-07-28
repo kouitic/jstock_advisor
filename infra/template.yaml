@@ -284,6 +284,11 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
+        # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
+        - Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-buy-candidates"
       Events:
         DailyMorning:
           Type: ScheduleV2
@@ -315,6 +320,11 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
+        # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
+        - Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-holdings-watchlist"
       Events:
         DailyAfternoon:
           Type: ScheduleV2
