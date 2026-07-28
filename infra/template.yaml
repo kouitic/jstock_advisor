@@ -34,9 +34,11 @@ Globals:
     MemorySize: 512
     Layers:
       - !Ref DependenciesLayer
+      - !Ref ConfigLayer
     Environment:
       Variables:
         DYNAMODB_TABLE_PREFIX: !Ref TablePrefix
+        JSTOCK_CONFIG_DIR: /opt
         EDINET_API_KEY: !Sub "{{resolve:secretsmanager:${EdinetApiKeySecretArn}:SecretString}}"
         LINE_CHANNEL_ACCESS_TOKEN: !Sub "{{resolve:secretsmanager:${LineChannelAccessTokenSecretArn}:SecretString}}"
         LINE_USER_ID: !Sub "{{resolve:secretsmanager:${LineUserIdSecretArn}:SecretString}}"
@@ -54,6 +56,15 @@ Resources:
       RetentionPolicy: Delete
     Metadata:
       BuildMethod: python3.12
+
+  ConfigLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-config"
+      ContentUri: ../config/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Delete
 
   # --- DynamoDBテーブル ----------------------------------------------------
   # オンデマンド課金(個人利用規模でアクセス頻度が低く予測しづらいため)。
@@ -216,6 +227,18 @@ Resources:
         - AttributeName: stock_code
           KeyType: HASH
 
+  CorporateActionRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-corporate_action_registry"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+
   EdinetFilingCacheTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -248,6 +271,9 @@ Resources:
       FunctionName: !Sub "${AWS::StackName}-buy-candidates"
       CodeUri: ../src/
       Handler: jstock_advisor.lambda_handlers.buy_candidates_handler.handler
+      # 24節仕様の再設計(モメンタム・複数手法適正価格・分割調整等)で銘柄あたりの
+      # 実データ取得件数が増えたため、既定の300秒では銘柄数によってはタイムアウトしうる
+      Timeout: 900
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
         - DynamoDBCrudPolicy: { TableName: !Ref RecommendationsTable }
@@ -256,6 +282,8 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
       Events:
         DailyMorning:
           Type: ScheduleV2
@@ -271,6 +299,10 @@ Resources:
       FunctionName: !Sub "${AWS::StackName}-holdings-watchlist"
       CodeUri: ../src/
       Handler: jstock_advisor.lambda_handlers.holdings_watchlist_handler.handler
+      # 保有銘柄27件+ウォッチリストを、24節仕様の再設計後の判定ロジック
+      # (モメンタム・複数手法適正価格・分割調整等)で処理するため、既定の300秒では
+      # 不足する。Lambdaの最大値である900秒まで引き上げる
+      Timeout: 900
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
         - DynamoDBCrudPolicy: { TableName: !Ref RecommendationsTable }
@@ -281,6 +313,8 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
       Events:
         DailyAfternoon:
           Type: ScheduleV2
