@@ -245,15 +245,19 @@ class EarningsWindowStatus(StrEnum):
 
 
 class TriggerStatus(StrEnum):
-    """売却ルール1件ごとの該当有無を三値で表現する(2026-07仕様§3)。
+    """売却ルール1件ごとの該当有無を表現する(2026-07仕様§3、レビュー対応で拡張)。
 
     データ不足はNOT_TRIGGERED(Falseと同義に扱う)ではなくNOT_EVALUATEDとする。
     「推測で補完しない」という既存方針を売却ルールにも徹底するための区分。
+    SUSPECTEDは、一次情報未確認の推測のみで該当が疑われる状態(例: yfinanceの
+    予想配当0のみを根拠とする無配転落疑い)。TRIGGEREDとは異なり、major/critical
+    件数・独立根拠グループ数のいずれにも算入しない(参考情報としてのみ保持する)。
     """
 
     TRIGGERED = "TRIGGERED"
     NOT_TRIGGERED = "NOT_TRIGGERED"
     NOT_EVALUATED = "NOT_EVALUATED"
+    SUSPECTED = "SUSPECTED"
 
 
 class EvidenceGroup(StrEnum):
@@ -284,6 +288,40 @@ class FinancialIndustryCategory(StrEnum):
     INSURANCE = "INSURANCE"
     SECURITIES = "SECURITIES"
     OTHER_FINANCIAL = "OTHER_FINANCIAL"
+
+
+class IndustryClassification(StrEnum):
+    """業種分類の三値(2026-07仕様レビュー対応: 業種不明と一般事業会社を区別する)。
+
+    sector/industryが欠損・空文字の場合はGENERAL_CORPORATEにフォールバックせず
+    UNKNOWNとする。一般事業会社向けの財務健全性ルールは、GENERAL_CORPORATEと
+    明確に判定できた場合にのみ適用する。
+    """
+
+    GENERAL_CORPORATE = "GENERAL_CORPORATE"
+    FINANCIAL = "FINANCIAL"
+    UNKNOWN = "UNKNOWN"
+
+
+class PeriodType(StrEnum):
+    """財務期間の種別(2026-07仕様レビュー対応)。異なる種別同士は比較しない。"""
+
+    QUARTER = "QUARTER"
+    YTD = "YTD"
+    TTM = "TTM"
+    ANNUAL = "ANNUAL"
+
+
+class DisclosureRiskConfirmationLevel(StrEnum):
+    """開示リスクキーワード検出の重大性確認段階(2026-07仕様レビュー対応)。
+
+    キーワード一致のみでは、実際に企業価値へ重大な影響がある事象かどうか
+    確認できない。重大事象を示す語(決算訂正・監査意見への影響等)が
+    本文中に別途確認できた場合のみMATERIAL_EVENT_CONFIRMEDとする。
+    """
+
+    RISK_KEYWORD_DETECTED = "RISK_KEYWORD_DETECTED"
+    MATERIAL_EVENT_CONFIRMED = "MATERIAL_EVENT_CONFIRMED"
 
 
 class BenefitUtilityCategory(StrEnum):

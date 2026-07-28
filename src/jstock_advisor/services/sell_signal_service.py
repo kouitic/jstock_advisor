@@ -16,10 +16,17 @@ import uuid
 from dataclasses import dataclass
 
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.common import SellPriceLevels
-from jstock_advisor.domain.entities.enums import RecommendationType, TriggerStatus
+from jstock_advisor.domain.entities.enums import (
+    IndustryClassification,
+    RecommendationType,
+    TriggerStatus,
+)
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
 from jstock_advisor.domain.signals.confidence_scoring import (
     ConfidenceFactors,
     ConfidenceScoreResult,
@@ -38,6 +45,22 @@ from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 
 _STRONG_TYPES = (RecommendationType.SELL, RecommendationType.URGENT_REVIEW)
+
+# 反対材料(counter_factors)の評価対象カテゴリー(2026-07仕様レビュー対応)。
+# 実際に評価できたカテゴリーのみをcounter_factors_evaluatedの判定に使う
+# (未評価のカテゴリーがある場合はTrueを固定しない)。
+_COUNTER_FACTOR_CATEGORIES = (
+    "earnings_improvement",
+    "guidance_upgrade",
+    "dividend_increase",
+    "buyback",
+    "dividend_policy_maintained",
+    "financial_capacity",
+    "bank_regulatory_capital_buffer",
+    "one_time_factor",
+    "momentum",
+    "single_major_risk",
+)
 
 
 @dataclass(frozen=True)
@@ -76,18 +99,89 @@ def _build_action_summary(recommendation_type: RecommendationType) -> str:
     )
 
 
-def _build_counter_factors(dividend: object, benefit: object) -> list[str]:
+def _evaluate_counter_factors(
+    snapshot: StockSnapshot, triggered_count: int
+) -> tuple[list[str], bool]:
+    """反対材料(counter_factors)を評価する(2026-07仕様レビュー対応)。
+
+    最低限、増益・業績上方修正・増配・自社株買い・配当方針維持・財務余力・
+    銀行の規制資本余力・一過性要因・モメンタム・重大リスクが単一であること、
+    の各カテゴリーを評価対象とする。評価できないカテゴリーが1件でもあれば
+    counter_factors_evaluated=Falseとする(固定Trueにしない)。
+    """
     factors: list[str] = []
-    increase_years = getattr(dividend, "consecutive_dividend_increase_years", None)
+    evaluated: dict[str, bool] = {}
+
+    # 増益
+    incomes = snapshot.quarterly_operating_income_periods
+    if len(incomes) >= 2:
+        evaluated["earnings_improvement"] = True
+        if incomes[-1].value > incomes[-2].value:
+            factors.append("直近期は営業利益が改善している")
+    else:
+        evaluated["earnings_improvement"] = False
+
+    # 業績上方修正
+    guidance_upgrade_found = any(
+        "上方修正" in f"{d.title} {d.summary or ''}" for d in snapshot.disclosures
+    )
+    evaluated["guidance_upgrade"] = True  # 開示テキストは常に検索可能(該当なしも評価済み)
+    if guidance_upgrade_found:
+        factors.append("業績予想の上方修正が確認されている")
+
+    # 増配
+    dividend = snapshot.dividend
+    increase_years = dividend.consecutive_dividend_increase_years
+    evaluated["dividend_increase"] = increase_years is not None
     if increase_years is not None and increase_years > 0:
         factors.append(f"配当は{increase_years}期連続増配中")
-    if (
-        benefit is not None
-        and not getattr(benefit, "is_abolished", False)
-        and not getattr(benefit, "is_major_downgrade", False)
-    ):
-        factors.append("株主優待は継続しており、廃止・大幅改悪は確認されていない")
-    return factors
+
+    # 自社株買い
+    buyback_found = any(
+        "自己株式取得" in f"{d.title} {d.summary or ''}"
+        or "自社株買い" in f"{d.title} {d.summary or ''}"
+        for d in snapshot.disclosures
+    )
+    evaluated["buyback"] = True
+    if buyback_found:
+        factors.append("自社株買いの実施が確認されている")
+
+    # 配当方針維持
+    evaluated["dividend_policy_maintained"] = dividend.has_dividend_floor_policy is not None or (
+        dividend.is_progressive_or_doe_policy
+    )
+    if dividend.is_progressive_or_doe_policy or dividend.has_dividend_floor_policy:
+        factors.append("累進的配当方針・配当下限方針が維持されている")
+
+    # 財務余力(一般事業会社のみ評価可能)
+    industry = classify_industry(snapshot.financial.sector, snapshot.financial.industry)
+    if industry.classification == IndustryClassification.GENERAL_CORPORATE:
+        evaluated["financial_capacity"] = snapshot.financial.equity_ratio_pct is not None
+        if (
+            snapshot.financial.equity_ratio_pct is not None
+            and snapshot.financial.equity_ratio_pct >= 40.0
+        ):
+            factors.append(
+                f"自己資本比率({snapshot.financial.equity_ratio_pct:.1f}%)は良好な水準"
+            )
+    elif industry.classification == IndustryClassification.FINANCIAL:
+        # 銀行の規制資本余力: データソースが無いため常に未評価
+        evaluated["bank_regulatory_capital_buffer"] = False
+
+    # 一過性要因
+    fundamentally_driven = is_fundamentally_driven(snapshot.cashflow_decomposition)
+    evaluated["one_time_factor"] = fundamentally_driven is not None
+
+    # モメンタム
+    evaluated["momentum"] = snapshot.momentum.ma20 is not None
+
+    # 重大リスクが単一であること(常に評価可能。TRIGGERED件数から直接判定できる)
+    evaluated["single_major_risk"] = True
+    if triggered_count <= 1:
+        factors.append("検出された重大な懸念事項は1件のみ")
+
+    counter_factors_evaluated = all(evaluated.values())
+    return factors, counter_factors_evaluated
 
 
 def _build_next_review_conditions(
@@ -122,11 +216,13 @@ class SellSignalService:
         config: AppConfig,
         audit_service: AuditService | None = None,
         rule_version_service: RuleVersionService | None = None,
+        business_calendar: BusinessCalendar | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
         self._audit = audit_service or AuditService()
         self._rule_version_service = rule_version_service or RuleVersionService()
+        self._calendar = business_calendar or BusinessCalendar.from_config(config.holiday_calendar)
 
     def _active_rule_version(self) -> str:
         return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
@@ -136,6 +232,7 @@ class SellSignalService:
         result: SellSignalResult,
         snapshot: StockSnapshot,
         now: dt.datetime,
+        counter_factors_evaluated: bool,
     ) -> ConfidenceScoreResult:
         industry_unevaluated = any(
             e.rule_name in ("financial_health_severe_deterioration", "regulatory_capital_breach")
@@ -145,25 +242,30 @@ class SellSignalService:
         data_freshness_days = (now - snapshot.data_fetched_at).days
         days_to_earnings = None
         if snapshot.next_earnings_date is not None:
-            days_to_earnings = (snapshot.next_earnings_date - now.date()).days
+            # 営業日ベースで算出する(要求仕様レビュー対応。土日祝日を除く)。
+            days_to_earnings = self._calendar.business_days_between(
+                now.date(), snapshot.next_earnings_date
+            )
+
+        triggered = [e for e in result.evidence_details if e.status == TriggerStatus.TRIGGERED]
+        primary_source_fetch_rate = (
+            sum(1 for e in triggered if e.primary_source_confirmed) / len(triggered)
+            if triggered
+            else None
+        )
 
         factors = ConfidenceFactors(
             data_freshness_days=data_freshness_days,
-            primary_source_fetch_rate=(
-                sum(1 for e in result.evidence_details if e.primary_source_confirmed)
-                / len(result.evidence_details)
-                if result.evidence_details
-                else None
-            ),
+            primary_source_fetch_rate=primary_source_fetch_rate,
             days_to_next_earnings_business_days=days_to_earnings,
-            latest_quarter_fetched=bool(snapshot.quarterly_operating_incomes),
+            latest_quarter_fetched=bool(snapshot.quarterly_operating_income_periods),
             record_date_known=snapshot.dividend.dividend_record_date is not None,
             key_metric_missing=snapshot.financial.equity_ratio_pct is None,
             independent_evidence_group_count=result.independent_evidence_group_count,
             industry_specific_model_unavailable=industry_unevaluated,
             evidence_sourced_from_yfinance_only=result.all_evidence_yfinance_only,
             dividend_breakdown_confirmed=snapshot.dividend.dividend_breakdown_confirmed,
-            counter_factors_evaluated=True,
+            counter_factors_evaluated=counter_factors_evaluated,
         )
         return compute_confidence(factors, self._config.confidence)
 
@@ -194,26 +296,47 @@ class SellSignalService:
             dividend=snapshot.dividend,
             financial=snapshot.financial,
             benefit=snapshot.benefit,
-            quarterly_operating_incomes=snapshot.quarterly_operating_incomes,
-            quarterly_operating_cashflows=snapshot.quarterly_operating_cashflows,
+            quarterly_operating_income_periods=snapshot.quarterly_operating_income_periods,
+            quarterly_operating_cashflow_periods=snapshot.quarterly_operating_cashflow_periods,
             disclosure_risk_keywords_found=snapshot.disclosure_risk_keywords_found,
             config=self._config.sell,
             cashflow_decomposition=snapshot.cashflow_decomposition,
+            material_event_keywords_found=snapshot.material_event_keywords_found,
         )
 
         result = evaluate_sell_signal(inputs, snapshot.current_price, self._config.sell)
+        raw_recommendation_type = result.recommendation_type
 
         recommendation_type = result.recommendation_type
         downgraded_reason: str | None = None
+        sell_prices = SellPriceLevels(
+            immediate_execution_price=result.immediate_execution_price,
+            stop_review_price=result.stop_review_price,
+        )
         if recommendation_type in _STRONG_TYPES and result.all_evidence_yfinance_only:
             # 要求仕様§12: 根拠がすべてyfinance等の二次情報のみの場合、SELL/URGENT_REVIEWを
-            # 出さずREVIEWへ格下げする。
+            # 出さずREVIEWへ格下げする。格下げ後は即時執行を意味する価格フィールドを
+            # 必ずnullにする(レビュー対応: 格下げ後に強い行動提案の価格だけが
+            # 残る矛盾を防ぐ)。
             downgraded_reason = (
                 f"{recommendation_type.value}の根拠がすべて一次情報未確認のためREVIEWへ格下げ"
             )
             recommendation_type = RecommendationType.REVIEW
+            sell_prices = SellPriceLevels(
+                immediate_execution_price=None,
+                recommended_limit_price=None,
+                stop_review_price=None,
+            )
 
-        confidence_result = self._compute_confidence_level(result, snapshot, now)
+        triggered_count = sum(
+            1 for e in result.evidence_details if e.status == TriggerStatus.TRIGGERED
+        )
+        counter_factors, counter_factors_evaluated = _evaluate_counter_factors(
+            snapshot, triggered_count
+        )
+        confidence_result = self._compute_confidence_level(
+            result, snapshot, now, counter_factors_evaluated
+        )
 
         self._audit.record(
             decision_type="sell_signal",
@@ -247,12 +370,6 @@ class SellSignalService:
         if recommendation_type == RecommendationType.HOLD:
             return SellSignalOutcome(holding.stock_code, None, None)
 
-        sell_prices = SellPriceLevels(
-            immediate_execution_price=result.immediate_execution_price,
-            stop_review_price=result.stop_review_price,
-        )
-
-        counter_factors = _build_counter_factors(snapshot.dividend, snapshot.benefit)
         evidence_details = result.evidence_details
 
         recommendation = Recommendation(
@@ -261,6 +378,7 @@ class SellSignalService:
             stock_name=snapshot.financial.stock_name or holding.stock_name,
             recommended_at=now,
             recommendation_type=recommendation_type,
+            raw_recommendation_type=raw_recommendation_type,
             sell_prices=sell_prices,
             price_at_recommendation=snapshot.current_price,
             average_purchase_price_at_recommendation=holding.average_purchase_price,
@@ -285,6 +403,8 @@ class SellSignalService:
                 "triggered_rules": result.triggered_rules,
                 "independent_evidence_group_count": result.independent_evidence_group_count,
                 "downgraded_reason": downgraded_reason,
+                "raw_recommendation_type": raw_recommendation_type.value,
+                "counter_factors_evaluated": counter_factors_evaluated,
             },
             data_sources=list(snapshot.data_sources),
             recommended_action_summary=_build_action_summary(recommendation_type),

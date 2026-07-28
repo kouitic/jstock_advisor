@@ -160,6 +160,10 @@ class DividendInfo(ImmutableSnapshot):
     total_dividend_decrease_detected: bool = False
     special_dividend_expired: bool | None = None
 
+    # --- 無配転落のofficial/inferred分離(2026-07仕様レビュー対応) ---
+    official_dividend_omission_announced: bool = False
+    inferred_dividend_omission: bool = False
+
 
 class BenefitDetail(ImmutableSnapshot):
     category: BenefitUtilityCategory

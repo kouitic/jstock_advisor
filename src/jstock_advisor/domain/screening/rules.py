@@ -39,6 +39,29 @@ def detect_disclosure_risk_keywords(
     return sorted(found)
 
 
+# 重大事象の確認語(2026-07仕様レビュー対応)。「第三者委員会設置」等のリスク
+# キーワード一致のみでは、実際に企業価値へ重大な影響がある事象かどうか
+# 確認できないため、これらの語が別途本文中に見つかった場合にのみ
+# MATERIAL_EVENT_CONFIRMEDとする(major_scandal/listing_maintenance_riskの
+# is_immediate_critical判定に使用)。
+MATERIAL_EVENT_KEYWORDS: tuple[str, ...] = (
+    "決算訂正",
+    "決算発表延期",
+    "監査意見",
+    "業績予想の大幅修正",
+    "上場維持",
+    "重大な財務損失",
+    "経営陣の責任",
+    "不正の事実",
+    "継続企業",
+)
+
+
+def detect_material_event_keywords(disclosures: list[Disclosure]) -> list[str]:
+    """開示本文から重大事象の確認語を検出する(決定論的な文字列検索)。"""
+    return detect_disclosure_risk_keywords(disclosures, list(MATERIAL_EVENT_KEYWORDS))
+
+
 def evaluate_screening(
     financial: FinancialSummary,
     dividend: DividendInfo | None,

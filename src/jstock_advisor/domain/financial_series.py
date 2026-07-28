@@ -16,10 +16,33 @@ Months)の系列に変換し、季節性(業種特有の繁閑差)を打ち消�
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from decimal import Decimal
+
+from jstock_advisor.domain.entities.enums import PeriodType
 
 _QUARTERLY_MAX_AVERAGE_GAP_DAYS = 200
 _TTM_WINDOW = 4
+
+
+@dataclass(frozen=True)
+class FinancialPeriodValue:
+    """期間種別を明示した財務系列1点(2026-07仕様レビュー対応)。
+
+    period_type違いの値同士は比較しない(QUARTERとANNUALの比較禁止・
+    単独四半期と累計値の比較禁止・年次フォールバック値をquarterlyとして
+    扱うことの禁止)。fiscal_quarterは実データからは安定して算出できない
+    ため常にNone(恒久的な制約。真の四半期同期(YoY)比較は未実装)。
+    """
+
+    value: Decimal
+    period_end: dt.date
+    period_type: PeriodType
+    period_start: dt.date | None = None
+    fiscal_year: int | None = None
+    fiscal_quarter: int | None = None
+    is_cumulative: bool = False
+    source: str | None = None
 
 
 def is_quarterly_cadence(period_ends: list[dt.date]) -> bool:
@@ -60,3 +83,54 @@ def to_seasonally_adjusted_series(
         else:
             ttm.append(sum(non_null_window, Decimal("0")))
     return ttm
+
+
+def build_financial_period_series(
+    values: list[Decimal | None], period_ends: list[dt.date], source: str | None = None
+) -> list[FinancialPeriodValue]:
+    """to_seasonally_adjusted_series()の変換結果に、明示的なperiod_typeを付与する。
+
+    四半期粒度は変換後TTM(直近12ヶ月移動合計)、年次粒度はANNUALとしてタグ付けする。
+    どちらも「約1年分の値」という点で意味的には比較可能だが、period_type自体は
+    区別して保持し、呼び出し側(継続悪化判定)で異なるperiod_type同士を誤って
+    比較しないようにする。
+    """
+    if len(values) != len(period_ends):
+        raise ValueError("values and period_ends must have the same length")
+
+    quarterly = is_quarterly_cadence(period_ends)
+    adjusted = to_seasonally_adjusted_series(values, period_ends)
+
+    result: list[FinancialPeriodValue] = []
+    if quarterly:
+        if len(values) < _TTM_WINDOW:
+            return []
+        for offset, value in enumerate(adjusted):
+            period_end = period_ends[_TTM_WINDOW - 1 + offset]
+            if value is None:
+                continue
+            result.append(
+                FinancialPeriodValue(
+                    value=value,
+                    period_end=period_end,
+                    period_type=PeriodType.TTM,
+                    fiscal_year=period_end.year,
+                    is_cumulative=False,
+                    source=source,
+                )
+            )
+    else:
+        for value, period_end in zip(adjusted, period_ends, strict=True):
+            if value is None:
+                continue
+            result.append(
+                FinancialPeriodValue(
+                    value=value,
+                    period_end=period_end,
+                    period_type=PeriodType.ANNUAL,
+                    fiscal_year=period_end.year,
+                    is_cumulative=False,
+                    source=source,
+                )
+            )
+    return result

@@ -374,7 +374,11 @@ def _evidence(rule_name: str, group: str, *, primary_source_confirmed: bool = Tr
 
 
 def _make_sell_recommendation(
-    *, recommendation_id: str, reasons: list[str], evidence_details: list[dict] | None = None
+    *,
+    recommendation_id: str,
+    reasons: list[str],
+    evidence_details: list[dict] | None = None,
+    independent_evidence_group_count: int = 2,
 ) -> Recommendation:
     return Recommendation(
         recommendation_id=recommendation_id,
@@ -394,16 +398,18 @@ def _make_sell_recommendation(
         evidence_details=evidence_details or [],
         recommended_action_summary="複数の独立した根拠に基づき投資前提の悪化が疑われます。売却を検討してください。",
         holding_risks=["自己資本比率が閾値を下回っている"],
-        independent_evidence_group_count=2,
+        independent_evidence_group_count=independent_evidence_group_count,
     )
 
 
 def test_sell_message_with_insufficient_evidence_routes_to_manual_review(
     service_and_repos,
 ) -> None:
-    # 根拠が1件のみ(または未設定)のSELLは、自動確定させず手動確認へ回す(要求仕様§15・§16)。
+    # 独立根拠グループが1件のみのSELLは、自動確定させず手動確認へ回す(要求仕様§15・§16)。
     service, repo, client = service_and_repos
-    rec = _make_sell_recommendation(recommendation_id="rec-1", reasons=["減配(major)"])
+    rec = _make_sell_recommendation(
+        recommendation_id="rec-1", reasons=["減配(major)"], independent_evidence_group_count=1
+    )
     repo.save(rec)
 
     sent = service.notify_recommendation(rec, _NOW)
