@@ -5,8 +5,17 @@ from pathlib import Path
 import pytest
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
-from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
+from jstock_advisor.domain.entities.common import (
+    BuyPriceLevels,
+    PriceWithRationale,
+    SellPriceLevels,
+)
+from jstock_advisor.domain.entities.enums import (
+    ConfidenceLevel,
+    DividendComparisonOutcome,
+    RecommendationType,
+    RecordDateUnknownReason,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -259,3 +268,111 @@ def test_disclosure_risk_notification_resends_for_different_disclosure(service_a
     )
     assert sent is True
     assert len(client.sent) == 2
+
+
+def _make_full_profit_take_recommendation(
+    *, recommendation_id: str, full_take_price: str
+) -> Recommendation:
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code="2914",
+        stock_name="日本たばこ産業",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.FULL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            full_profit_consideration_price=PriceWithRationale(
+                price=Decimal(full_take_price), rationale="x"
+            )
+        ),
+        price_at_recommendation=Decimal("4200"),
+        reasons=["適正価格レンジ上限を超過"],
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+
+
+def test_recommendation_with_consistency_violation_sends_data_quality_alert_instead(
+    service_and_repos,
+) -> None:
+    service, repo, client = service_and_repos
+    # 全株利確検討価格が現在値の100%以上高く、極端な乖離(full_take_extreme_margin)
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="9000"
+    )
+    repo.save(rec)
+
+    sent = service.notify_recommendation(rec, _NOW)
+
+    assert sent is True
+    assert len(client.sent) == 1
+    assert "データ品質アラート" in client.sent[0]
+    assert "full_take_extreme_margin" in client.sent[0]
+    assert "2914" in client.sent[0]
+
+
+def test_data_quality_alert_deduplicates_identical_contradiction(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec1 = _make_full_profit_take_recommendation(recommendation_id="rec-1", full_take_price="9000")
+    repo.save(rec1)
+    service.notify_recommendation(rec1, _NOW)
+
+    rec2 = _make_full_profit_take_recommendation(recommendation_id="rec-2", full_take_price="9000")
+    repo.save(rec2)
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+
+    assert sent is False
+    assert len(client.sent) == 1
+
+
+def test_clean_full_profit_take_is_sent_normally(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    # 現在値+10%程度の穏当な価格なので、整合性検証・異常値検知いずれも問題を検出しない
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    )
+    repo.save(rec)
+
+    sent = service.notify_recommendation(rec, _NOW)
+
+    assert sent is True
+    assert len(client.sent) == 1
+    assert "データ品質アラート" not in client.sent[0]
+    assert "全株利確検討価格" in client.sent[0]
+    assert f"通知ID: {rec.recommendation_id}" in client.sent[0]
+
+
+def test_message_shows_record_date_unknown_reason_instead_of_bare_unknown(
+    service_and_repos,
+) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(
+        update={
+            "dividend_record_date": None,
+            "dividend_record_date_unknown_reason": RecordDateUnknownReason.DATA_PROVIDER_MISSING,
+        }
+    )
+    repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    assert "不明(データ提供元が非対応(恒久的))" in client.sent[0]
+
+
+def test_message_shows_dividend_comparison_with_fiscal_years(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(
+        update={
+            "dividend_comparison_source_fiscal_year": "2025",
+            "dividend_comparison_target_fiscal_year": "2026",
+            "dividend_comparison_outcome": DividendComparisonOutcome.ACTUAL_DIVIDEND_CUT,
+        }
+    )
+    repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    assert "配当比較(2025 → 2026): 減配(実績確定)" in client.sent[0]

@@ -8,11 +8,20 @@ from pathlib import Path
 
 import typer
 
+from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.services.audit_service import AuditService
+from jstock_advisor.services.corporate_action_service import CorporateActionService
 from jstock_advisor.services.csv_import_service import HoldingsCsvImportService
 from jstock_advisor.services.portfolio_service import PortfolioService
+from jstock_advisor.services.provider_factory import (
+    build_mock_provider_bundle,
+    build_real_provider_bundle,
+)
 
 app = typer.Typer(help="保有銘柄の登録・編集・削除")
+
+_SOURCE_HELP = "企業行動データの取得元: mock(既定)/ real(yfinance+手動登録レジストリ)"
 
 
 def _parse_date(value: str | None) -> dt.date:
@@ -172,6 +181,71 @@ def delete_lot(stock_code: str, lot_id: str) -> None:
         typer.echo("最後のロットを削除したため、保有銘柄も削除されました。")
     else:
         typer.echo(f"削除しました。再計算後の平均取得単価: {holding.average_purchase_price}円")
+
+
+@app.command("recompute-all")
+def recompute_all(
+    source: str = typer.Option("mock", "--source", help=_SOURCE_HELP),
+) -> None:
+    """全保有銘柄を、企業行動(株式分割等)調整後の基準で遡及再計算する(要求仕様2節)。
+
+    PurchaseLot(購入時の生データ)は書き換えず、Holdingのshares/
+    average_purchase_priceのみを、各ロットの購入日時点からの累積分割係数で
+    調整して再計算する。本番DynamoDBに対する実行は、次回の自動分析ジョブが
+    未調整の値を使ってしまう前に、デプロイ直後に一度だけ手動で行うこと。
+    """
+    if source not in ("mock", "real"):
+        raise typer.BadParameter("--source は mock または real を指定してください")
+
+    now = dt.datetime.now(dt.UTC)
+    config = load_config()
+    providers = (
+        build_real_provider_bundle(now, config)
+        if source == "real"
+        else build_mock_provider_bundle(now)
+    )
+    corporate_action_service = CorporateActionService(providers.corporate_action, now=now)
+    service = PortfolioService(corporate_action_service=corporate_action_service)
+    audit = AuditService()
+
+    holdings = service.list_holdings()
+    if not holdings:
+        typer.echo("保有銘柄は登録されていません。")
+        return
+
+    for holding in holdings:
+        before_shares, before_price = holding.shares, holding.average_purchase_price
+        updated = service.recompute_holding(holding.stock_code)
+        audit.record(
+            decision_type="holding_split_adjustment",
+            stock_code=holding.stock_code,
+            input_values={
+                "shares_before": before_shares,
+                "average_purchase_price_before": str(before_price),
+            },
+            calculation_formulas={
+                "shares": (
+                    "sum(lot.shares * cumulative_split_factor(lot.purchase_date, now) "
+                    "for lot in lots)"
+                ),
+                "average_purchase_price": "sum(lot.amount() for lot in lots) / adjusted_shares",
+            },
+            output_values={
+                "shares_after": updated.shares,
+                "average_purchase_price_after": str(updated.average_purchase_price),
+            },
+            data_sources=[],
+            rule_version="corporate-action-recompute-v1",
+            timestamp=now,
+        )
+        if updated.shares != before_shares or updated.average_purchase_price != before_price:
+            typer.echo(
+                f"調整しました: {holding.stock_code} "
+                f"{before_shares}株@{before_price}円 → "
+                f"{updated.shares}株@{updated.average_purchase_price}円"
+            )
+        else:
+            typer.echo(f"変更なし: {holding.stock_code}")
 
 
 @app.command("import-csv")

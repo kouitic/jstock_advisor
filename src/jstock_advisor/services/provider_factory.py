@@ -20,6 +20,10 @@ from jstock_advisor.config.models import AppConfig
 from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.disclosure_finder import EdinetDisclosureCacheRepository
 from jstock_advisor.infrastructure.edinet.document_finder import EdinetFilingCacheRepository
+from jstock_advisor.providers.corporate_action.local_registry_impl import (
+    LocalRegistryCorporateActionProvider,
+)
+from jstock_advisor.providers.corporate_action.merged_impl import MergedCorporateActionProvider
 from jstock_advisor.providers.corporate_action.mock_impl import MockCorporateActionProvider
 from jstock_advisor.providers.corporate_action.yfinance_impl import YFinanceCorporateActionProvider
 from jstock_advisor.providers.disclosure.edinet_yfinance_impl import (
@@ -40,6 +44,7 @@ from jstock_advisor.providers.shareholder_benefit.local_registry_impl import (
     LocalRegistryShareholderBenefitProvider,
 )
 from jstock_advisor.providers.shareholder_benefit.mock_impl import MockShareholderBenefitProvider
+from jstock_advisor.services.corporate_action_service import CorporateActionService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 
 
@@ -62,9 +67,15 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
     edinet_client = EdinetClient()
     edinet_filing_cache = EdinetFilingCacheRepository()
 
-    corporate_action = YFinanceCorporateActionProvider(now=now)
+    corporate_action = MergedCorporateActionProvider(
+        auto_provider=YFinanceCorporateActionProvider(now=now),
+        manual_provider=LocalRegistryCorporateActionProvider(),
+    )
+    corporate_action_service = CorporateActionService(corporate_action, now=now)
     dividend_data = CrossValidatingDividendDataProvider(
-        primary=YFinanceDividendDataProvider(now=now),
+        primary=YFinanceDividendDataProvider(
+            now=now, corporate_action_service=corporate_action_service
+        ),
         secondary=EdinetDividendDataProvider(
             client=edinet_client, cache_repository=edinet_filing_cache, now=now
         ),

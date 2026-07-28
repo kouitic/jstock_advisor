@@ -61,7 +61,9 @@ def service(
 
 
 def test_buy_command_registers_new_purchase(
-    service: ChatCommandService, transactions: TransactionHistoryService
+    service: ChatCommandService,
+    portfolio: PortfolioService,
+    transactions: TransactionHistoryService,
 ) -> None:
     result = service.handle("買付,8136,100,3775", now=_NOW)
     assert result.success is True
@@ -71,6 +73,11 @@ def test_buy_command_registers_new_purchase(
     assert saved[0].transaction_type == TransactionType.BUY
     assert saved[0].shares == 100
     assert saved[0].execution_price == Decimal("3775")
+
+    holding = portfolio.get_holding("8136")
+    assert holding is not None
+    assert holding.shares == 100
+    assert holding.average_purchase_price == Decimal("3775")
 
 
 def test_buy_command_detects_additional_purchase(
@@ -91,6 +98,10 @@ def test_buy_command_detects_additional_purchase(
     saved = transactions.list_transactions("8136")
     assert saved[0].transaction_type == TransactionType.ADDITIONAL_BUY
 
+    holding = portfolio.get_holding("8136")
+    assert holding is not None
+    assert holding.shares == 150
+
 
 def test_sell_command_detects_partial_sell(
     service: ChatCommandService,
@@ -109,6 +120,10 @@ def test_sell_command_detects_partial_sell(
     assert result.success is True
     saved = transactions.list_transactions("8136")
     assert saved[0].transaction_type == TransactionType.PARTIAL_SELL
+
+    holding = portfolio.get_holding("8136")
+    assert holding is not None
+    assert holding.shares == 70
 
 
 def test_sell_command_detects_full_sell(
@@ -129,11 +144,35 @@ def test_sell_command_detects_full_sell(
     saved = transactions.list_transactions("8136")
     assert saved[0].transaction_type == TransactionType.FULL_SELL
 
+    assert portfolio.get_holding("8136") is None
+
 
 def test_sell_command_rejects_unheld_stock(service: ChatCommandService) -> None:
     result = service.handle("売却,8136,100,1500", now=_NOW)
     assert result.success is False
     assert "保有銘柄として登録されていません" in result.reply_text
+
+
+def test_sell_command_rejects_oversell(
+    service: ChatCommandService,
+    portfolio: PortfolioService,
+    transactions: TransactionHistoryService,
+) -> None:
+    portfolio.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("1000"),
+        purchase_date=dt.date(2026, 1, 1),
+        account_type=AccountType.NISA,
+    )
+    result = service.handle("売却,8136,150,1500", now=_NOW)
+    assert result.success is False
+    assert "保有株数" in result.reply_text
+    assert transactions.list_transactions("8136") == []
+    holding = portfolio.get_holding("8136")
+    assert holding is not None
+    assert holding.shares == 100
 
 
 def test_watch_command_adds_to_watchlist(

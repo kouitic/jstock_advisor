@@ -23,6 +23,7 @@ from jstock_advisor.domain.signals.sell_signal import (
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.provider_bundle import ProviderBundle
+from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
 
@@ -39,10 +40,15 @@ class SellSignalService:
         providers: ProviderBundle,
         config: AppConfig,
         audit_service: AuditService | None = None,
+        rule_version_service: RuleVersionService | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
         self._audit = audit_service or AuditService()
+        self._rule_version_service = rule_version_service or RuleVersionService()
+
+    def _active_rule_version(self) -> str:
+        return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
 
     def analyze(self, holding: Holding, now: dt.datetime) -> SellSignalOutcome:
         snapshot, error = build_stock_snapshot(
@@ -56,7 +62,7 @@ class SellSignalService:
                 calculation_formulas={},
                 output_values={"data_error": error},
                 data_sources=[],
-                rule_version=RULE_VERSION_PLACEHOLDER,
+                rule_version=self._active_rule_version(),
                 timestamp=now,
             )
             return SellSignalOutcome(holding.stock_code, None, error)
@@ -69,6 +75,7 @@ class SellSignalService:
             quarterly_operating_cashflows=snapshot.quarterly_operating_cashflows,
             disclosure_risk_keywords_found=snapshot.disclosure_risk_keywords_found,
             config=self._config.sell,
+            cashflow_decomposition=snapshot.cashflow_decomposition,
         )
 
         result = evaluate_sell_signal(inputs, snapshot.current_price, self._config.sell)
@@ -91,16 +98,14 @@ class SellSignalService:
                 "reasons": result.reasons,
             },
             data_sources=list(snapshot.data_sources),
-            rule_version=RULE_VERSION_PLACEHOLDER,
+            rule_version=self._active_rule_version(),
             timestamp=now,
         )
 
         if result.recommendation_type == RecommendationType.HOLD:
             return SellSignalOutcome(holding.stock_code, None, None)
 
-        sell_prices = SellPriceLevels(
-            premise_deterioration_target=result.premise_deterioration_target
-        )
+        sell_prices = SellPriceLevels(stop_review_price=result.stop_review_price)
 
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
@@ -127,7 +132,7 @@ class SellSignalService:
             benefit_record_date=snapshot.benefit.benefit_record_dates[0]
             if snapshot.benefit is not None and snapshot.benefit.benefit_record_dates
             else None,
-            rule_version=RULE_VERSION_PLACEHOLDER,
+            rule_version=self._active_rule_version(),
             config_values_used={
                 "major_to_sell_min_count": self._config.sell.judgment.major_to_sell_min_count,
                 "critical_to_urgent_review_min_count": (

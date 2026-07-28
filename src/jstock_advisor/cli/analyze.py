@@ -313,17 +313,19 @@ def _print_profit_taking_recommendation(r: Recommendation) -> None:
         typer.echo(f"  保有継続を支持する要因: {factor}")
     sp = r.sell_prices
     if sp is not None:
-        if sp.partial_take_start:
-            typer.echo(f"  一部利確開始価格: {sp.partial_take_start.price}円")
-        if sp.profit_take_recommended:
-            typer.echo(f"  利確推奨価格: {sp.profit_take_recommended.price}円")
-        if sp.full_take_consider:
-            typer.echo(f"  全株利確検討価格: {sp.full_take_consider.price}円")
+        if sp.partial_profit_start_price:
+            typer.echo(f"  一部利確開始価格: {sp.partial_profit_start_price.price}円")
+        if sp.recommended_limit_price:
+            typer.echo(f"  利確推奨価格(指値候補): {sp.recommended_limit_price.price}円")
+        if sp.full_profit_consideration_price:
+            typer.echo(
+                f"  全株利確検討価格(参考水準): {sp.full_profit_consideration_price.price}円"
+            )
 
 
 def _print_sell_recommendation(r: Recommendation) -> None:
     typer.echo(f"[{r.recommendation_type.value}] {r.stock_code} {r.stock_name}(投資前提悪化)")
     for reason in r.reasons:
         typer.echo(f"  理由: {reason}")
-    if r.sell_prices is not None and r.sell_prices.premise_deterioration_target:
-        typer.echo(f"  売却目安価格: {r.sell_prices.premise_deterioration_target.price}円")
+    if r.sell_prices is not None and r.sell_prices.stop_review_price:
+        typer.echo(f"  売却目安価格: {r.sell_prices.stop_review_price.price}円")

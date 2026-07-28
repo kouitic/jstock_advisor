@@ -1,0 +1,36 @@
+# モメンタム・トレンド層設定(要求仕様9節)。
+
+version: 1
+
+moving_averages:
+  windows: [20, 60, 120, 200]
+  slope_lookback_days: 20
+
+high_low:
+  high_window_days_short: 20
+  high_window_days_long: 60
+  drawdown_window_days: 60
+
+volume:
+  short_window_days: 5
+  long_window_days: 20
+
+rsi:
+  period: 14
+  overbought_threshold: 70.0
+  oversold_threshold: 30.0
+
+macd:
+  fast_period: 12
+  slow_period: 26
+  signal_period: 9
+
+trailing_stop:
+  trailing_pct: 8.0
+
+trend_classification:
+  strong_trend_rsi_threshold: 60.0
+
+# セクター指数の相対強度は、流動性のあるETFが存在する業種のみ対応する
+# (yfinanceには全33業種を網羅する指数が無いため)。未対応業種はNoneのままとする。
+sector_etf_map: {}

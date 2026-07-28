@@ -11,8 +11,14 @@ from decimal import Decimal
 
 from jstock_advisor.config.models import SellRulesConfig
 from jstock_advisor.domain.entities.common import PriceWithRationale
-from jstock_advisor.domain.entities.enums import RecommendationType
-from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, ShareholderBenefit
+from jstock_advisor.domain.entities.enums import PriceFieldBasis, RecommendationType
+from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
+from jstock_advisor.interfaces.types import (
+    CashflowDecomposition,
+    DividendInfo,
+    FinancialSummary,
+    ShareholderBenefit,
+)
 
 _RULE_LABELS: dict[str, str] = {
     "dividend_cut": "減配",
@@ -133,6 +139,7 @@ def build_sell_rule_inputs_from_data(
     large_earnings_guidance_downgrade: bool = False,
     long_term_holding_condition_unfavorable_change: bool = False,
     investment_premise_broken: bool = False,
+    cashflow_decomposition: CashflowDecomposition | None = None,
 ) -> SellRuleTriggerInputs:
     """構造化データから機械的に判定可能なルールを自動評価し、それ以外は引数の値をそのまま使う。"""
     keyword_flags = classify_disclosure_risk_keywords(disclosure_risk_keywords_found)
@@ -145,6 +152,19 @@ def build_sell_rule_inputs_from_data(
         config.rules["financial_health_severe_deterioration"].equity_ratio_critical_pct or 15.0
     )
 
+    cashflow_decline_detected = detect_continuous_decline(
+        quarterly_operating_cashflows, cashflow_quarters
+    )
+    # 営業CFの継続悪化が検出されても、要因分解の結果が「運転資本・一過性要因が
+    # 主因」(False)と明確に示している場合は、投資前提悪化ルールとして発火させない。
+    # 分解データが無い(None)場合は、データ不足を理由に元のシグナルを弱めない
+    # (要求仕様4節: 「運転資本や一過性支払いが主因の場合は…断定しない」の裏返しとして、
+    # 主因不明な場合まで安全側を弱める必要は無い)。
+    fundamentally_driven = is_fundamentally_driven(cashflow_decomposition)
+    continuous_operating_cashflow_decline = cashflow_decline_detected and (
+        fundamentally_driven is not False
+    )
+
     return SellRuleTriggerInputs(
         dividend_cut=bool(dividend and dividend.is_dividend_cut_announced),
         dividend_omission=bool(dividend and dividend.is_dividend_omission_announced),
@@ -153,9 +173,7 @@ def build_sell_rule_inputs_from_data(
         continuous_operating_income_decline=detect_continuous_decline(
             quarterly_operating_incomes, income_quarters
         ),
-        continuous_operating_cashflow_decline=detect_continuous_decline(
-            quarterly_operating_cashflows, cashflow_quarters
-        ),
+        continuous_operating_cashflow_decline=continuous_operating_cashflow_decline,
         interest_bearing_debt_surge=interest_bearing_debt_surge,
         financial_health_severe_deterioration=detect_financial_health_severe_deterioration(
             financial, equity_critical_pct
@@ -176,7 +194,7 @@ class SellSignalResult:
     triggered_rules: list[str]
     reasons: list[str]
     hold_reasons: list[str]
-    premise_deterioration_target: PriceWithRationale | None
+    stop_review_price: PriceWithRationale | None
 
 
 def evaluate_sell_signal(
@@ -217,17 +235,18 @@ def evaluate_sell_signal(
             triggered_rules=triggered,
             reasons=reasons,
             hold_reasons=["投資前提の悪化を示すルールに該当しない(株価の下落のみでは判定しない)"],
-            premise_deterioration_target=None,
+            stop_review_price=None,
         )
 
     target = PriceWithRationale(
         price=current_price,
         rationale="投資前提が悪化したため、現在株価付近での売却検討を目安とする",
+        basis=PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE,
     )
     return SellSignalResult(
         recommendation_type=recommendation_type,
         triggered_rules=triggered,
         reasons=reasons,
         hold_reasons=[],
-        premise_deterioration_target=target,
+        stop_review_price=target,
     )

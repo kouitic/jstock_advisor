@@ -20,6 +20,7 @@ import datetime as dt
 import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import SourceType
 from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.disclosure_finder import (
     EdinetDisclosureCacheRepository,
@@ -45,7 +46,12 @@ class EdinetYfinanceDisclosureProvider:
         cache = find_extraordinary_reports(self._client, self._cache_repo, stock_code, self._now)
         if cache is None:
             return []
-        source = DataSourceReference(provider=_EDINET_PROVIDER_NAME, fetched_at=self._now)
+        source = DataSourceReference(
+            provider=_EDINET_PROVIDER_NAME,
+            fetched_at=self._now,
+            source_type=SourceType.TDNET_EDINET,
+            primary_source_flag=True,
+        )
         return [
             Disclosure(
                 stock_code=stock_code,

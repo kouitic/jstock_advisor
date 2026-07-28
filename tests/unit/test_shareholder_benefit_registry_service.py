@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from jstock_advisor.domain.entities.enums import BenefitUtilityCategory
+from jstock_advisor.domain.entities.enums import (
+    BenefitUtilityCategory,
+    RecordDateUnknownReason,
+    SourceType,
+)
 from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
     ShareholderBenefitRegistryRepository,
 )
@@ -42,6 +46,57 @@ def test_register_creates_single_tier_benefit(service: ShareholderBenefitRegistr
     assert benefit.stock_code == "2914"
     assert len(benefit.benefits) == 1
     assert benefit.benefits[0].estimated_value == Decimal("1000")
+
+
+def test_register_marks_source_as_primary_manual_registry(
+    service: ShareholderBenefitRegistryService,
+) -> None:
+    benefit = service.register(
+        stock_code="2914",
+        min_shares_required=100,
+        frequency_per_year=1,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="クオカード1000円分",
+        min_shares_for_tier=100,
+        now=_NOW,
+    )
+    assert benefit.source.source_type == SourceType.MANUAL_REGISTRY
+    assert benefit.source.primary_source_flag is True
+
+
+def test_register_without_record_dates_sets_unknown_reason(
+    service: ShareholderBenefitRegistryService,
+) -> None:
+    benefit = service.register(
+        stock_code="2914",
+        min_shares_required=100,
+        frequency_per_year=1,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="クオカード1000円分",
+        min_shares_for_tier=100,
+        now=_NOW,
+    )
+    assert benefit.benefit_record_date_unknown_reason == RecordDateUnknownReason.SOURCE_NOT_FOUND
+
+
+def test_register_with_record_dates_and_ex_date_clears_unknown_reason(
+    service: ShareholderBenefitRegistryService,
+) -> None:
+    benefit = service.register(
+        stock_code="2914",
+        min_shares_required=100,
+        frequency_per_year=1,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="クオカード1000円分",
+        min_shares_for_tier=100,
+        benefit_record_dates=[dt.date(2026, 3, 31)],
+        benefit_ex_date=dt.date(2026, 3, 27),
+        long_term_holding_requirement="3年以上継続保有で優待内容が優遇される",
+        now=_NOW,
+    )
+    assert benefit.benefit_record_date_unknown_reason is None
+    assert benefit.benefit_ex_date == dt.date(2026, 3, 27)
+    assert benefit.long_term_holding_requirement == "3年以上継続保有で優待内容が優遇される"
 
 
 def test_register_rejects_non_positive_min_shares(

@@ -25,6 +25,7 @@ from jstock_advisor.infrastructure.edinet.document_finder import (
     find_latest_filings,
 )
 from jstock_advisor.interfaces.types import (
+    CashflowDecomposition,
     FinancialSummary,
     HistoricalValuation,
     QuarterlyFinancials,
@@ -101,11 +102,13 @@ class YFinanceFinancialDataProvider:
 
         equity_ratio_pct = self._compute_equity_ratio_pct(ticker)
         operating_cashflow = self._latest_annual_value(ticker, "cashflow", "Operating Cash Flow")
+        capital_expenditure = self._latest_annual_value(ticker, "cashflow", "Capital Expenditure")
         operating_income = self._latest_annual_value(ticker, "income_stmt", "Operating Income")
         net_income = self._latest_annual_value(ticker, "income_stmt", "Net Income")
 
         forecast_eps = _to_decimal(info.get("forwardEps"))
         forecast_bps = _to_decimal(info.get("bookValue"))
+        shares_outstanding = _to_decimal(info.get("sharesOutstanding"))
         payout_ratio_pct = None
         if info.get("payoutRatio") is not None:
             try:
@@ -134,12 +137,14 @@ class YFinanceFinancialDataProvider:
             equity_ratio_pct=equity_ratio_pct,
             payout_ratio_pct=payout_ratio_pct,
             operating_cashflow=operating_cashflow,
+            capital_expenditure=capital_expenditure,
             net_income=net_income,
             operating_income=operating_income,
             ordinary_income=None,  # 経常利益はJP-GAAP独自概念でyfinanceに対応項目なし
             interest_bearing_debt=None,
             forecast_eps=forecast_eps,
             forecast_bps=forecast_bps,
+            shares_outstanding=shares_outstanding,
             is_going_concern_doubt=False,  # yfinanceからは判定不可(既知の限界)
             is_deficit=is_deficit,
             is_debt_excess=is_debt_excess,
@@ -223,6 +228,144 @@ class YFinanceFinancialDataProvider:
         return results
 
     def get_historical_valuation(self, stock_code: str, years: int) -> list[HistoricalValuation]:
-        # yfinanceから過去のEPS/BPS時系列を安定して取得する手段が無いため、MVPでは未対応。
-        # (PER/PBR中央値による適正価格算出は他方式で代替される)
-        return []
+        """過去(通常4年分程度、yfinanceが提供する年次決算の範囲)のEPS/BPS/株価から
+        PER/PBRを算出する(要求仕様8節)。
+
+        PER=株価/EPS、PBR=株価/BPSはいずれも比率であり、株式分割が発生しても
+        分子(株価)・分母(EPS/BPS)が同じ比率で変化するため、この比率自体は
+        分割の影響を受けない(分割調整不要)。ただし、BPSは各期の発行済株式数の
+        履歴が安定して取得できないため、現在の発行済株式数で近似する
+        (自己株買い・増資等で株式数が変動している場合は誤差が生じうる既知の制約。
+        confidenceをMEDIUM上限とする理由となる)。
+        """
+        ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
+        try:
+            income_df = ticker.income_stmt
+            balance_df = ticker.balance_sheet
+        except Exception:  # noqa: BLE001
+            return []
+
+        if income_df is None or income_df.empty:
+            return []
+        eps_row = next(
+            (r for r in ("Diluted EPS", "Basic EPS") if r in income_df.index), None
+        )
+        if eps_row is None or balance_df is None or balance_df.empty:
+            return []
+        if "Stockholders Equity" not in balance_df.index:
+            return []
+
+        try:
+            info = ticker.info or {}
+            shares_outstanding = _to_decimal(info.get("sharesOutstanding"))
+        except Exception:  # noqa: BLE001
+            shares_outstanding = None
+
+        start = self._now.date() - dt.timedelta(days=365 * years + 30)
+        try:
+            price_history = ticker.history(start=start, end=self._now.date(), interval="1d")
+        except Exception:  # noqa: BLE001
+            price_history = None
+
+        source = self._source()
+        results: list[HistoricalValuation] = []
+        for column in sorted(income_df.columns):
+            period_end = column.date() if hasattr(column, "date") else None
+            if period_end is None or period_end < start:
+                continue
+            eps = _to_decimal(income_df.loc[eps_row, column])
+            equity = (
+                _to_decimal(balance_df.loc["Stockholders Equity", column])
+                if column in balance_df.columns
+                else None
+            )
+            bps = (
+                equity / shares_outstanding
+                if equity is not None and shares_outstanding is not None and shares_outstanding > 0
+                else None
+            )
+            price = self._nearest_price(price_history, period_end)
+            per = price / eps if price is not None and eps is not None and eps > 0 else None
+            pbr = price / bps if price is not None and bps is not None and bps > 0 else None
+            if per is None and pbr is None:
+                continue
+            results.append(
+                HistoricalValuation(
+                    stock_code=stock_code,
+                    date=period_end,
+                    eps=eps,
+                    bps=bps,
+                    price=price,
+                    per=per,
+                    pbr=pbr,
+                    source=source,
+                )
+            )
+        return results
+
+    @staticmethod
+    def _nearest_price(price_history: Any, target_date: dt.date) -> Decimal | None:
+        if price_history is None or price_history.empty:
+            return None
+        best_price: Decimal | None = None
+        best_diff: int | None = None
+        for index, row in price_history.iterrows():
+            index_date = index.date() if hasattr(index, "date") else None
+            if index_date is None:
+                continue
+            diff = abs((index_date - target_date).days)
+            if diff > 14:
+                continue
+            if best_diff is None or diff < best_diff:
+                close = _to_decimal(row.get("Close"))
+                if close is not None:
+                    best_price = close
+                    best_diff = diff
+        return best_price
+
+    def get_cashflow_decomposition(self, stock_code: str) -> CashflowDecomposition | None:
+        """直近期の営業キャッシュフロー要因分解(要求仕様4節)。
+
+        yfinanceのcashflow/income_stmt行の有無は銘柄により大きく異なる
+        (特に大型株以外は多くの項目が欠損する)ため、pretax_income(判定の
+        基準値)すら取得できない場合はNoneを返す。「一過性要因」に対応する
+        単独の行はyfinanceに存在しないため、one_time_itemsは常にNone
+        (既知の制約、捏造しない)。
+        """
+        ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
+        pretax_income = self._latest_value(ticker, "income_stmt", "Pretax Income")
+        if pretax_income is None:
+            return None
+
+        period_end = self._now.date()
+        try:
+            income_df = ticker.income_stmt
+            if income_df is not None and not income_df.empty:
+                latest_column = sorted(income_df.columns)[-1]
+                if hasattr(latest_column, "date"):
+                    period_end = latest_column.date()
+        except Exception:  # noqa: BLE001
+            pass
+
+        return CashflowDecomposition(
+            stock_code=stock_code,
+            period_end=period_end,
+            pretax_income=pretax_income,
+            depreciation_amortization=self._latest_value(
+                ticker, "cashflow", "Depreciation And Amortization"
+            ),
+            receivables_change=self._latest_value(ticker, "cashflow", "Change In Receivables"),
+            inventory_change=self._latest_value(ticker, "cashflow", "Change In Inventory"),
+            payables_change=self._latest_value(
+                ticker, "cashflow", "Change In Payables And Accrued Expense"
+            ),
+            tax_paid=self._latest_value(
+                ticker, "cashflow", "Income Tax Paid Supplemental Data"
+            ),
+            one_time_items=None,  # yfinanceに対応する行が無い(既知の制約)
+            ma_related_items=self._latest_value(ticker, "cashflow", "Purchase Of Business"),
+            other_working_capital=self._latest_value(
+                ticker, "cashflow", "Change In Working Capital"
+            ),
+            source=self._source(),
+        )

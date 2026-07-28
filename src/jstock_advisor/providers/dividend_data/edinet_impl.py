@@ -13,6 +13,7 @@ import datetime as dt
 from decimal import Decimal, InvalidOperation
 
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import RecordDateUnknownReason, SourceType
 from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.csv_parser import EdinetCsvRow, extract_main_document_rows
 from jstock_advisor.infrastructure.edinet.document_finder import (
@@ -38,7 +39,12 @@ class EdinetDividendDataProvider:
         self._now = now or dt.datetime.now(dt.UTC)
 
     def _source(self) -> DataSourceReference:
-        return DataSourceReference(provider=_PROVIDER_NAME, fetched_at=self._now)
+        return DataSourceReference(
+            provider=_PROVIDER_NAME,
+            fetched_at=self._now,
+            source_type=SourceType.TDNET_EDINET,
+            primary_source_flag=True,
+        )
 
     def get_dividend_info(self, stock_code: str) -> DividendInfo | None:
         if not self._client.is_configured:
@@ -77,6 +83,10 @@ class EdinetDividendDataProvider:
             dividend_record_dates=[],  # EDINETのこの表からは権利確定日を取得できない
             consecutive_dividend_increase_years=consecutive_increase_years,
             source=self._source(),
+            dividend_record_date=None,
+            dividend_ex_date=None,
+            # EDINETの「経営指標等の推移」表も権利確定日・権利落ち日は提供しない(恒久的な制約)
+            dividend_record_date_unknown_reason=RecordDateUnknownReason.DATA_PROVIDER_MISSING,
         )
 
     @staticmethod

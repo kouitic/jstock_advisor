@@ -32,6 +32,11 @@ class RuleVersionService:
                 return version
         return None
 
+    def get_active_version_or(self, default: str) -> str:
+        """有効化済みのルールバージョンが無い場合はdefaultを返す(未運用の初期状態向け)。"""
+        active = self.get_active_version()
+        return active.rule_version if active is not None else default
+
     def _require(self, rule_version: str) -> RuleVersion:
         version = self._repo.get(rule_version)
         if version is None:

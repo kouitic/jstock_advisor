@@ -41,12 +41,12 @@ def _reference_price(
         if sp is None:
             return None
         if transaction_type == TransactionType.PARTIAL_SELL:
-            candidate = sp.partial_take_start or sp.profit_take_recommended
+            candidate = sp.partial_profit_start_price or sp.recommended_limit_price
         else:
             candidate = (
-                sp.full_take_consider
-                or sp.premise_deterioration_target
-                or sp.profit_take_recommended
+                sp.full_profit_consideration_price
+                or sp.stop_review_price
+                or sp.recommended_limit_price
             )
         return candidate.price if candidate is not None else None
     return None

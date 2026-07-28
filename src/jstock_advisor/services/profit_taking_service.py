@@ -15,14 +15,20 @@ from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import AccountType, ConfidenceLevel, RecommendationType
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.financial_decomposition import (
+    has_guidance_revision_disclosure,
+    is_fundamentally_driven,
+)
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
+    ProfitTakingConditionInputs,
     evaluate_profit_taking,
 )
 from jstock_advisor.interfaces.types import ShareholderBenefit
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.provider_bundle import ProviderBundle
+from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
 
@@ -39,10 +45,15 @@ class ProfitTakingService:
         providers: ProviderBundle,
         config: AppConfig,
         audit_service: AuditService | None = None,
+        rule_version_service: RuleVersionService | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
         self._audit = audit_service or AuditService()
+        self._rule_version_service = rule_version_service or RuleVersionService()
+
+    def _active_rule_version(self) -> str:
+        return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
 
     def analyze(self, holding: Holding, now: dt.datetime) -> ProfitTakingOutcome:
         snapshot, error = build_stock_snapshot(
@@ -56,7 +67,7 @@ class ProfitTakingService:
                 calculation_formulas={},
                 output_values={"data_error": error},
                 data_sources=[],
-                rule_version=RULE_VERSION_PLACEHOLDER,
+                rule_version=self._active_rule_version(),
                 timestamp=now,
             )
             return ProfitTakingOutcome(holding.stock_code, None, error)
@@ -84,6 +95,20 @@ class ProfitTakingService:
             is_nisa_account=holding.account_type == AccountType.NISA,
         )
 
+        condition_inputs = ProfitTakingConditionInputs(
+            stock_types=snapshot.stock_type_classification.types,
+            fair_value_range=snapshot.fair_value_range,
+            momentum=snapshot.momentum,
+            dividend_comparison_outcome=snapshot.dividend.dividend_comparison_outcome,
+            cashflow_fundamentally_driven=is_fundamentally_driven(
+                snapshot.cashflow_decomposition
+            ),
+            guidance_revision_disclosed=has_guidance_revision_disclosure(snapshot.disclosures),
+            severe_earnings_decline=snapshot.severe_earnings_decline,
+            profit_target_price=holding.profit_target_price,
+            profit_target_rate=holding.profit_target_rate,
+        )
+
         result = evaluate_profit_taking(
             current_price=snapshot.current_price,
             average_purchase_price=holding.average_purchase_price,
@@ -96,6 +121,7 @@ class ProfitTakingService:
             forecast_annual_dividend_per_share=snapshot.dividend.forecast_annual_dividend_per_share,
             mitigating_inputs=mitigating_inputs,
             config=self._config.profit_taking,
+            condition_inputs=condition_inputs,
         )
 
         self._audit.record(
@@ -124,14 +150,28 @@ class ProfitTakingService:
             },
             output_values={
                 "recommendation_type": result.recommendation_type.value,
+                "fundamental_action": result.fundamental_action.value,
+                "timing_action": result.timing_action.value,
+                "final_action": result.final_action.value,
                 "triggered_reasons": result.triggered_reasons,
                 "mitigating_factors_applied": result.mitigating_factors_applied,
                 "unrealized_pnl_pct": result.pnl.unrealized_pnl_pct,
                 "total_return_pct": result.pnl.total_return_pct,
             },
             data_sources=list(snapshot.data_sources),
-            rule_version=RULE_VERSION_PLACEHOLDER,
+            rule_version=self._active_rule_version(),
             timestamp=now,
+            fair_value_results=[
+                {
+                    "method": m.method,
+                    "fair_value": str(m.fair_value) if m.fair_value is not None else None,
+                    "confidence": m.confidence.value,
+                    "exclusion_reason": m.exclusion_reason,
+                }
+                for m in snapshot.fair_value_range.methods_used
+            ],
+            triggered_rules=result.triggered_reasons,
+            suppressed_rules=result.mitigating_factors_applied,
         )
 
         if result.recommendation_type == RecommendationType.HOLD:
@@ -165,7 +205,7 @@ class ProfitTakingService:
             benefit_record_date=snapshot.benefit.benefit_record_dates[0]
             if snapshot.benefit is not None and snapshot.benefit.benefit_record_dates
             else None,
-            rule_version=RULE_VERSION_PLACEHOLDER,
+            rule_version=self._active_rule_version(),
             config_values_used={
                 "unrealized_gain_full_pct": (
                     self._config.profit_taking.thresholds.unrealized_gain_full_pct

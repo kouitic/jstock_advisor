@@ -82,6 +82,45 @@ def compute_pbr_price(
     return forecast_bps * historical_pbr_median
 
 
+def compute_dcf_price(
+    operating_cashflow: Decimal | None,
+    capital_expenditure: Decimal | None,
+    shares_outstanding: Decimal | None,
+    discount_rate_pct: float,
+    terminal_growth_rate_pct: float,
+    projection_years: int,
+) -> Decimal | None:
+    """簡易DCF法(要求仕様8節)。
+
+    完全なCAPM(リスクフリーレート・株式リスクプレミアム・ベータ)を算出する
+    データソースが無いため、固定割引率(discount_rate_pct)による簡易DCFとする。
+    FCF = 営業CF + 設備投資(yfinanceのCapital Expenditureは通常、キャッシュ
+    アウトフローを表す負値として報告されるため加算する)。この手法は割引率が
+    固定である旨を利用側に伝え、confidenceをMEDIUM上限として扱うこと。
+    """
+    if operating_cashflow is None or capital_expenditure is None or shares_outstanding is None:
+        return None
+    if shares_outstanding <= 0 or discount_rate_pct <= terminal_growth_rate_pct:
+        return None
+
+    fcf = operating_cashflow + capital_expenditure
+    if fcf <= 0:
+        return None
+
+    discount_rate = Decimal(str(discount_rate_pct)) / 100
+    terminal_growth = Decimal(str(terminal_growth_rate_pct)) / 100
+
+    pv_sum = Decimal("0")
+    for year in range(1, projection_years + 1):
+        pv_sum += fcf / ((1 + discount_rate) ** year)
+
+    terminal_value = fcf * (1 + terminal_growth) / (discount_rate - terminal_growth)
+    pv_terminal = terminal_value / ((1 + discount_rate) ** projection_years)
+
+    enterprise_value_proxy = pv_sum + pv_terminal
+    return enterprise_value_proxy / shares_outstanding
+
+
 def median_historical_per(values: list[HistoricalValuation]) -> Decimal | None:
     pers = [v.per for v in values if v.per is not None and v.per > 0]
     if not pers:

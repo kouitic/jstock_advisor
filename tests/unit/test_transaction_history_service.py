@@ -55,8 +55,10 @@ def _profit_take_recommendation(recommendation_id: str = "rec-sell") -> Recommen
         recommended_at=_NOW,
         recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
         sell_prices=SellPriceLevels(
-            partial_take_start=PriceWithRationale(price=Decimal("4500"), rationale="x"),
-            full_take_consider=PriceWithRationale(price=Decimal("5000"), rationale="x"),
+            partial_profit_start_price=PriceWithRationale(price=Decimal("4500"), rationale="x"),
+            full_profit_consideration_price=PriceWithRationale(
+                price=Decimal("5000"), rationale="x"
+            ),
         ),
         price_at_recommendation=Decimal("4600"),
         average_purchase_price_at_recommendation=Decimal("3400"),
@@ -110,7 +112,7 @@ def test_record_buy_with_recommendation_computes_price_diff(
     assert tx.price_diff_from_recommendation == Decimal("41")
 
 
-def test_record_partial_sell_uses_partial_take_start_price(
+def test_record_partial_sell_uses_partial_profit_start_price(
     service: TransactionHistoryService,
 ) -> None:
     tx = service.record_execution(
@@ -126,7 +128,7 @@ def test_record_partial_sell_uses_partial_take_start_price(
     assert tx.price_diff_from_recommendation == Decimal("100")
 
 
-def test_record_full_sell_uses_full_take_consider_price(
+def test_record_full_sell_uses_full_profit_consideration_price(
     service: TransactionHistoryService,
 ) -> None:
     tx = service.record_execution(

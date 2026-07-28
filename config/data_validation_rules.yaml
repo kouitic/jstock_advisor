@@ -13,3 +13,29 @@ discrepancy_threshold_pct: 15.0
 
 # 株式分割補正を試す際に遡る日数
 split_adjustment_lookback_days: 1095
+
+# 分析前の株式分割整合性チェック(要求仕様3節・4節)。異常候補を検出した場合は
+# 売買推奨を生成せず、DATA_QUALITY_ALERTを通知する。
+split_consistency:
+  lookback_years: 3
+  # 典型的な分割・併合比率(この近辺の乖離は「分割の可能性」の候補とする)
+  typical_split_ratios: [2.0, 3.0, 4.0, 5.0, 10.0]
+  ratio_tolerance_pct: 10.0
+  # 株価が前営業日比でこの割合(%)以上変化した場合、価格帯の不連続候補とする
+  price_discontinuity_threshold_pct: 40.0
+
+# 異常値検知(要求仕様18節)。該当する場合、売買通知を抑止しDATA_QUALITY_ALERTを送信する。
+anomaly_detection:
+  fair_value_min_ratio: 0.3   # 適正価格が現在株価のこの倍率未満
+  fair_value_max_ratio: 3.0   # 適正価格が現在株価のこの倍率超
+  fair_value_change_threshold_pct: 30.0        # 前回分析からの適正価格変化率
+  profit_take_price_change_threshold_pct: 20.0 # 利確価格の前回値からの変化率
+  reassessment_price_deviation_threshold_pct: 50.0 # 再評価価格の現在値からの乖離率
+  dividend_yield_change_threshold_pts: 1.0     # 配当利回りの前日比変化(ポイント)
+  eps_bps_dps_change_threshold_pct: 50.0       # EPS/BPS/DPSの前回取得値からの変化率
+
+# 判定/価格の整合性検証(要求仕様11節)。矛盾を検出した場合はDATA_QUALITY_ALERTへ切り替える。
+consistency_validation:
+  full_take_extreme_margin_pct: 100.0             # 全株利確検討価格が現在値よりこの%以上高い場合は極端とみなす
+  reevaluation_vs_full_take_max_margin_pct: 100.0  # 上昇時再評価価格が全株利確検討価格よりこの%以上高い場合は不合理とみなす
+  min_reasons_for_full_take_on_gain_alone: 2       # 含み益が全利確閾値未満の場合、これ未満の理由数なら矛盾とする

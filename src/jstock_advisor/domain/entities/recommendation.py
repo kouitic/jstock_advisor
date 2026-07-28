@@ -13,7 +13,12 @@ from jstock_advisor.domain.entities.common import (
     ScoreBreakdown,
     SellPriceLevels,
 )
-from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
+from jstock_advisor.domain.entities.enums import (
+    ConfidenceLevel,
+    DividendComparisonOutcome,
+    RecommendationType,
+    RecordDateUnknownReason,
+)
 
 
 class Recommendation(ImmutableSnapshot):
@@ -46,6 +51,13 @@ class Recommendation(ImmutableSnapshot):
     next_earnings_date: dt.date | None = None
     dividend_record_date: dt.date | None = None
     benefit_record_date: dt.date | None = None
+
+    # --- 通知本文の改善(要求仕様16節)で追加。確認事項を比較年度付きで表示するため ---
+    dividend_comparison_source_fiscal_year: str | None = None
+    dividend_comparison_target_fiscal_year: str | None = None
+    dividend_comparison_outcome: DividendComparisonOutcome | None = None
+    dividend_record_date_unknown_reason: RecordDateUnknownReason | None = None
+    benefit_record_date_unknown_reason: RecordDateUnknownReason | None = None
 
     rule_version: str
     config_values_used: dict[str, Any] = {}
