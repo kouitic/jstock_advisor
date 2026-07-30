@@ -73,3 +73,27 @@ class Recommendation(ImmutableSnapshot):
     holding_risks: list[str] = []
     evidence_details: list[dict[str, Any]] = []
     independent_evidence_group_count: int | None = None
+
+    # --- 利確判定レビュー対応で追加: 適正価格の内訳を通知へ表示するため ---
+    fair_value_bear: Decimal | None = None
+    fair_value_neutral: Decimal | None = None
+    fair_value_bull: Decimal | None = None
+    fair_value_overall_confidence: ConfidenceLevel | None = None
+    fair_value_methods: list[dict[str, Any]] = []  # method/fair_value/confidence/exclusion_reason
+    fair_value_spread_ratio: float | None = None
+
+    # --- 増配実績と増配予想の分離(2026-07仕様レビュー対応) ---
+    consecutive_actual_dividend_increase_years: int | None = None
+    forecast_dividend_increase: bool | None = None
+    forecast_dividend_increase_rate: float | None = None
+
+    # --- 配当・優待基準日の推定ラベル(2026-07仕様レビュー対応)。正確な次回日付が
+    # 不明でも、決算期末等の一次情報から基準月・基準日の周期パターンが分かる場合、
+    # 単なる「不明」ではなくこのラベルを表示する ---
+    dividend_record_date_recurring_label: str | None = None
+    benefit_record_date_recurring_label: str | None = None
+
+    # --- WATCH通知フォーマット刷新(2026-07仕様レビュー対応)。「保有継続を支持する
+    # 要因」(counter_factors)とは別に、「直ちに利確しない理由」(まだ強い判定へ
+    # 進めない理由)を明示する ---
+    not_yet_action_reasons: list[str] = []

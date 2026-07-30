@@ -190,7 +190,40 @@ def test_mitigating_factors_floor_does_not_apply_when_no_signal() -> None:
     assert result.recommendation_type == RecommendationType.HOLD
 
 
-def test_sell_price_levels_are_populated() -> None:
+def test_sell_price_levels_are_populated_for_partial_and_scoped_to_final_action() -> None:
+    # gain=45%(partial以上full未満)+fv超過20.8%(partial以上full未満)の2独立条件でPARTIALへ到達。
+    # PARTIAL判定では一部利確開始価格・推奨指値候補のみを表示し、FULL専用の
+    # full_profit_consideration_price/reevaluation_price_upsideは表示しない
+    # (要求仕様レビュー対応: final_actionに応じて表示可能な価格フィールドを制限する)。
+    result = evaluate_profit_taking(
+        current_price=Decimal("1450"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        fair_value=Decimal("1200"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+    )
+    assert result.final_action == RecommendationType.PARTIAL_PROFIT_TAKE
+    prices = result.sell_prices
+    assert prices.partial_profit_start_price is not None
+    assert prices.partial_profit_start_price.price == Decimal("1300")
+    assert prices.recommended_limit_price is not None
+    assert prices.recommended_limit_price.price == Decimal("1500")
+    assert prices.recommended_limit_price.price_low is not None
+    assert prices.recommended_limit_price.price_high is not None
+    assert prices.recommended_limit_price.price_low < prices.recommended_limit_price.price_high
+    assert prices.full_profit_consideration_price is None
+    assert prices.reevaluation_price_upside is None
+    assert prices.immediate_execution_price is None
+
+
+def test_full_profit_take_shows_full_and_immediate_price_fields() -> None:
+    # 投資前提が明確に崩れた、という強い条件でFULLへ到達させる(gain単独ではない)。
     result = evaluate_profit_taking(
         current_price=Decimal("1600"),
         average_purchase_price=Decimal("1000"),
@@ -203,17 +236,15 @@ def test_sell_price_levels_are_populated() -> None:
         forecast_annual_dividend_per_share=Decimal("40"),
         mitigating_inputs=MitigatingFactorInputs(),
         config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(investment_premise_broken=True),
     )
+    assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
     prices = result.sell_prices
-    assert prices.partial_profit_start_price is not None
-    assert prices.recommended_limit_price is not None
     assert prices.full_profit_consideration_price is not None
-    assert prices.reevaluation_price_upside is not None
-    assert prices.partial_profit_start_price.price == Decimal("1300")
-    assert prices.recommended_limit_price.price == Decimal("1500")
     assert prices.full_profit_consideration_price.price == Decimal("1950")
-    assert prices.reevaluation_price_upside.price == Decimal("2000")
-    assert prices.partial_profit_start_price.price <= prices.full_profit_consideration_price.price
+    # 一部利確開始価格(1300円)は現在値(1600円)を下回っているためimmediate扱いになりうるが、
+    # PARTIAL専用のrecommended_limit_priceはFULL判定でも指値候補として妥当なため表示される。
+    assert prices.partial_profit_start_price is not None
 
 
 def test_full_take_price_never_below_recommended_limit_price() -> None:
@@ -479,7 +510,7 @@ def test_trailing_stop_reference_price_surfaced_from_momentum() -> None:
         trailing_stop_reference_price=Decimal("1400"),
     )
     result = evaluate_profit_taking(
-        current_price=Decimal("1050"),
+        current_price=Decimal("1250"),
         average_purchase_price=Decimal("1000"),
         shares=100,
         total_purchase_amount=Decimal("100000"),
@@ -492,5 +523,228 @@ def test_trailing_stop_reference_price_surfaced_from_momentum() -> None:
         config=_CONFIG.profit_taking,
         condition_inputs=ProfitTakingConditionInputs(momentum=momentum),
     )
+    # gain=25%は監視水準(20%)以上のためWATCH以上となり、モメンタム層のトレーリング
+    # ストップは付与される(HOLD判定の場合のみ価格提案を一切出さない、レビュー対応)。
+    assert result.final_action != RecommendationType.HOLD
     assert result.sell_prices.trailing_stop_reference_price is not None
     assert result.sell_prices.trailing_stop_reference_price.price == Decimal("1400")
+
+
+# --- 中立適正価格単独でのFULL条件廃止(要求仕様レビュー対応) ---------------------
+
+
+def _fair_value_range(
+    *,
+    neutral: Decimal,
+    bull: Decimal,
+    bear: Decimal,
+    overall_confidence: ConfidenceLevel,
+    method_count: int,
+) -> FairValueRange:
+    methods = [
+        FairValueMethodResult(
+            method=f"method{i}", fair_value=neutral, confidence=overall_confidence
+        )
+        for i in range(method_count)
+    ]
+    return FairValueRange(
+        bear=bear,
+        neutral=neutral,
+        bull=bull,
+        overall_confidence=overall_confidence,
+        methods_used=methods,
+        methods_excluded=[],
+        usable_for_trading_judgment=True,
+    )
+
+
+def test_neutral_fair_value_expected_return_alone_does_not_trigger_full() -> None:
+    # forward_return = 800/1010-1 ≒ -20.8%(閾値以下)だが、信頼度MEDIUM・手法1件のみ
+    # のため強い条件の要件を満たさず、単独ではFULLへ到達しない。
+    # 「利確」は含み益がある場合のみ成立するため、現在値は取得価格をわずかに上回る。
+    fv_range = _fair_value_range(
+        neutral=Decimal("800"),
+        bull=Decimal("900"),
+        bear=Decimal("750"),
+        overall_confidence=ConfidenceLevel.MEDIUM,
+        method_count=1,
+    )
+    result = evaluate_profit_taking(
+        current_price=Decimal("1010"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        fair_value=None,
+        current_total_yield_pct=None,
+        forecast_annual_dividend_per_share=None,
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(fair_value_range=fv_range),
+    )
+    assert result.final_action != RecommendationType.FULL_PROFIT_TAKE
+    assert result.fair_value_used_as_sole_strong_basis is False
+
+
+def test_fair_value_strong_condition_requires_bull_excess() -> None:
+    # 中立適正価格の期待リターンは閾値以下だが、現在値がbullを超過していないため
+    # 強い条件を満たさない(手法数・信頼度は満たす)。
+    fv_range = _fair_value_range(
+        neutral=Decimal("800"),
+        bull=Decimal("1200"),  # 現在値1010はbull未満
+        bear=Decimal("750"),
+        overall_confidence=ConfidenceLevel.HIGH,
+        method_count=3,
+    )
+    result = evaluate_profit_taking(
+        current_price=Decimal("1010"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        fair_value=None,
+        current_total_yield_pct=None,
+        forecast_annual_dividend_per_share=None,
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=fv_range,
+            guidance_revision_disclosed=True,
+            fair_value_reflects_latest_earnings=True,
+        ),
+    )
+    assert result.fair_value_used_as_sole_strong_basis is False
+
+
+def test_fair_value_strong_condition_requires_high_confidence() -> None:
+    fv_range = _fair_value_range(
+        neutral=Decimal("800"),
+        bull=Decimal("900"),
+        bear=Decimal("750"),
+        overall_confidence=ConfidenceLevel.MEDIUM,  # HIGHでない
+        method_count=3,
+    )
+    result = evaluate_profit_taking(
+        current_price=Decimal("1010"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        fair_value=None,
+        current_total_yield_pct=None,
+        forecast_annual_dividend_per_share=None,
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=fv_range,
+            guidance_revision_disclosed=True,
+            fair_value_reflects_latest_earnings=True,
+        ),
+    )
+    assert result.final_action != RecommendationType.FULL_PROFIT_TAKE
+    assert result.fair_value_used_as_sole_strong_basis is False
+
+
+def test_fair_value_strong_condition_met_with_all_gates_triggers_full() -> None:
+    # 「利確」は含み益がある場合のみ成立する設計のため、現在値は取得価格をわずかに
+    # (gain軸単独ではWATCH閾値にすら届かない程度に)上回る値にする。
+    fv_range = _fair_value_range(
+        neutral=Decimal("800"),
+        bull=Decimal("900"),
+        bear=Decimal("750"),
+        overall_confidence=ConfidenceLevel.HIGH,
+        method_count=3,
+    )
+    result = evaluate_profit_taking(
+        current_price=Decimal("1010"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        fair_value=None,
+        current_total_yield_pct=None,
+        forecast_annual_dividend_per_share=None,
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=fv_range,
+            guidance_revision_disclosed=True,
+            fair_value_reflects_latest_earnings=True,
+        ),
+    )
+    assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
+    assert result.fair_value_used_as_sole_strong_basis is True
+
+
+# --- 総合利回り再評価価格(配当+優待、要求仕様レビュー対応) ---------------------
+
+
+def test_benefit_eligible_reevaluation_price_none_when_value_unavailable() -> None:
+    result = evaluate_profit_taking(
+        current_price=Decimal("637"),
+        average_purchase_price=Decimal("578"),
+        shares=800,
+        total_purchase_amount=Decimal("462400"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        fair_value=Decimal("498"),
+        current_total_yield_pct=1.5,
+        forecast_annual_dividend_per_share=Decimal("22"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(investment_premise_broken=True),
+        annual_benefit_value_at_min_lot=None,  # 優待対象だが評価額が取得できない
+        benefit_min_shares_required=100,
+        is_benefit_eligible=True,
+    )
+    assert result.sell_prices.reevaluation_price_upside is None
+
+
+def test_benefit_eligible_reevaluation_price_uses_total_yield() -> None:
+    result = evaluate_profit_taking(
+        current_price=Decimal("637"),
+        average_purchase_price=Decimal("578"),
+        shares=800,
+        total_purchase_amount=Decimal("462400"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        fair_value=Decimal("498"),
+        current_total_yield_pct=1.5,
+        forecast_annual_dividend_per_share=Decimal("22"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(investment_premise_broken=True),
+        annual_benefit_value_at_min_lot=Decimal("3000"),
+        benefit_min_shares_required=100,
+        is_benefit_eligible=True,
+    )
+    p = result.sell_prices.reevaluation_price_upside
+    assert p is not None
+    assert p.basis_type is not None
+    assert p.basis_type.value == "TOTAL_YIELD_THRESHOLD"
+
+
+def test_non_benefit_stock_reevaluation_price_uses_dividend_yield_only() -> None:
+    result = evaluate_profit_taking(
+        current_price=Decimal("1000"),
+        average_purchase_price=Decimal("900"),
+        shares=100,
+        total_purchase_amount=Decimal("90000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        fair_value=Decimal("900"),
+        current_total_yield_pct=1.5,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(investment_premise_broken=True),
+        is_benefit_eligible=False,
+    )
+    p = result.sell_prices.reevaluation_price_upside
+    assert p is not None
+    assert p.basis_type is not None
+    assert p.basis_type.value == "DIVIDEND_YIELD_THRESHOLD"

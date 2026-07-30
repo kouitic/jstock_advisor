@@ -53,3 +53,8 @@ condition_based_judgment:
   min_moderate_conditions_for_full: 2
   forward_return_inferior_threshold_pct: -20.0
   timing_downgrade_block_margin_pct: 0.0
+  # 中立適正価格基準の期待リターン単独ではFULLの強条件にしない(レビュー対応)。
+  # 以下も併せて満たす場合のみ、適正価格ベースの強いFULL条件として成立する。
+  min_fair_value_methods_for_full: 3
+  max_fair_value_spread_ratio_for_full: 1.5
+  bull_excess_margin_pct_for_full: 0.0

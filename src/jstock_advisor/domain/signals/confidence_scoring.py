@@ -46,6 +46,12 @@ class ConfidenceFactors:
     counter_factors_evaluated: bool | None = None
     corporate_action_adjustment_confirmed: bool | None = None
 
+    # --- 利確判定の信頼度共通化(2026-07仕様レビュー対応) ---
+    # 優待銘柄(株主優待の対象)なのに優待評価額が取得できていない場合True。
+    benefit_eligible_but_value_unavailable: bool = False
+    # 強い判定(FULL相当)の根拠が適正価格のみ(他の独立根拠が無い)場合True。
+    fair_value_is_sole_strong_basis: bool = False
+
 
 @dataclass(frozen=True)
 class ConfidenceScoreResult:
@@ -117,6 +123,12 @@ def _high_confidence_disallow_reasons(
 
     if factors.corporate_action_adjustment_confirmed is False:
         reasons.append("企業行動調整が未確認")
+
+    if factors.benefit_eligible_but_value_unavailable:
+        reasons.append("優待銘柄だが優待評価額が未取得")
+
+    if factors.fair_value_is_sole_strong_basis:
+        reasons.append("強い判定の根拠が適正価格のみ")
 
     return reasons
 

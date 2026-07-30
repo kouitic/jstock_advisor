@@ -78,6 +78,7 @@ class StockSnapshot:
     next_earnings_date: dt.date | None
     dividend_yield_pct: float | None
     benefit_yield_pct: float | None
+    annual_benefit_value: Decimal | None
     total_yield_pct: float
     fair_value: Decimal | None
     buy_prices: BuyPriceLevels | None
@@ -300,6 +301,7 @@ def build_stock_snapshot(
         next_earnings_date=next_earnings_date,
         dividend_yield_pct=dividend_yield_pct,
         benefit_yield_pct=benefit_yield_pct,
+        annual_benefit_value=annual_benefit_value,
         total_yield_pct=total_yield_pct,
         fair_value=fair_value,
         buy_prices=buy_prices,

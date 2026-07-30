@@ -162,11 +162,17 @@ class ConditionBasedJudgment(StrictModel):
     min_conditions_for_partial: int
     # FULLは強い条件1つ、またはこの件数以上の中程度条件で成立する
     min_moderate_conditions_for_full: int
-    # 適正価格ベースの期待リターンがこの%以下(例: -20%)ならFULLの強い条件とする
+    # 適正価格ベースの期待リターンがこの%以下(例: -20%)ならFULLの強い条件の候補とする
+    # (単独では不十分。他の複数条件と併せて要求する。利確判定レビュー対応)
     forward_return_inferior_threshold_pct: float
     # 現在値が適正価格レンジ上限(bull)をこの%以上超えている場合、上昇トレンドによる
     # 判定緩和(timing_action)を禁止する(トレンドだけで割高評価を無効化しない)
     timing_downgrade_block_margin_pct: float
+    # --- 利確判定レビュー対応で追加: 中立適正価格単独でのFULL強条件化を廃止し、
+    # 以下の複数条件をすべて満たす場合にのみ適正価格ベースの強いFULL条件とする ---
+    min_fair_value_methods_for_full: int
+    max_fair_value_spread_ratio_for_full: float
+    bull_excess_margin_pct_for_full: float
 
 
 class ProfitTakingRulesConfig(StrictModel):

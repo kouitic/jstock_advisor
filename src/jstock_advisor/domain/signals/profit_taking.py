@@ -1,14 +1,17 @@
-"""利確判定(要求仕様12節)。
+"""利確判定(要求仕様12節、2026-07仕様レビュー対応)。
 
 含み益率・適正価格超過率・総合利回り低下を組み合わせて判定候補レベルを算出したうえで、
 緩和要因(業績成長・増配継続・長期優待直前等)に応じて判定を弱める。上昇率だけで
 機械的に売却判定を出さないよう、緩和要因は必ず考慮する。
+
+価格フィールドは最終判定(final_action)に基づいて再構成する。格下げされた判定に
+格下げ前の強い価格提案(即時執行価格・指値候補)が残らないようにする。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from enum import IntEnum
 
 from jstock_advisor.config.models import MitigatingFactors, ProfitTakingRulesConfig
@@ -16,6 +19,7 @@ from jstock_advisor.domain.entities.common import PriceWithRationale, SellPriceL
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     DividendComparisonOutcome,
+    PriceBasisType,
     PriceFieldBasis,
     RecommendationType,
     StockType,
@@ -24,7 +28,11 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.valuation import FairValueRange
-from jstock_advisor.domain.valuation.fair_value import compute_target_yield_price, round_yen
+from jstock_advisor.domain.valuation.fair_value import (
+    compute_target_total_yield_price,
+    compute_target_yield_price,
+    round_yen,
+)
 
 
 class _Level(IntEnum):
@@ -83,6 +91,10 @@ class ProfitTakingConditionInputs:
     earnings_event_risk_reduction_rationale: bool = False
     profit_target_price: Decimal | None = None
     profit_target_rate: float | None = None
+    # --- 利確判定レビュー対応で追加 ---
+    # 適正価格算出に使った入力(EPS/BPS/実績配当等)が、直近の確定決算を反映しているか。
+    # 判定できない場合はNone(判定不能をFalse=反映していない、と扱わない)。
+    fair_value_reflects_latest_earnings: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +108,9 @@ class ProfitTakingResult:
     hold_reasons: list[str]
     sell_prices: SellPriceLevels
     pnl: UnrealizedPnl
+    # --- 利確判定レビュー対応で追加: 信頼度計算に必要な補助情報 ---
+    independent_condition_count: int
+    fair_value_used_as_sole_strong_basis: bool
 
 
 def compute_unrealized_pnl(
@@ -165,7 +180,8 @@ def _apply_mitigating_factors(
     min_years = cdi.min_consecutive_years or 0
     if cdi.enabled and inputs.continuous_dividend_increase_years >= min_years and min_years > 0:
         total_downgrade += cdi.downgrade_levels
-        applied.append(f"増配が{inputs.continuous_dividend_increase_years}年連続している")
+        # 「連続増配」は実績確定年数のみを指す(予想は含まない、要求仕様レビュー対応)。
+        applied.append(f"実績で{inputs.continuous_dividend_increase_years}年連続増配している")
 
     if config.progressive_dividend_or_doe_policy.enabled and inputs.is_progressive_or_doe_policy:
         total_downgrade += config.progressive_dividend_or_doe_policy.downgrade_levels
@@ -196,6 +212,7 @@ def _count_partial_conditions(
     current_total_yield_pct: float | None,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
+    weak_fair_value_forward_return_reason: str | None,
 ) -> tuple[int, list[str]]:
     """一部利確(PARTIAL)の根拠となる独立条件を数える(要求仕様9節)。
 
@@ -220,6 +237,12 @@ def _count_partial_conditions(
         and fair_value_excess_pct >= t.fair_value_excess_partial_pct
     ):
         reasons.append(f"適正価格レンジ上限を{fair_value_excess_pct:.1f}%超過")
+
+    # 中立適正価格基準の期待リターンが閾値以下だが、強い条件としての要件(手法数・
+    # 手法間一致度・信頼度等)を満たさない場合は、PARTIALの根拠の1つとしてのみ数える
+    # (要求仕様レビュー対応: 中立適正価格単独でFULLの強条件にしない)。
+    if weak_fair_value_forward_return_reason is not None:
+        reasons.append(weak_fair_value_forward_return_reason)
 
     # 成長株は業績予想の下方修正・急激な業績悪化があった場合のみ「成長鈍化」を条件化する
     # (要求仕様7節: GROWTHは配当利回り低下だけを利確理由にしない)。
@@ -249,11 +272,80 @@ def _count_partial_conditions(
     return len(reasons), reasons
 
 
+def _fair_value_strong_condition(
+    current_price: Decimal,
+    inputs: ProfitTakingConditionInputs,
+    config: ProfitTakingRulesConfig,
+) -> tuple[str | None, str | None]:
+    """適正価格基準の強いFULL条件を評価する(要求仕様レビュー対応)。
+
+    中立適正価格基準の期待リターンが閾値以下であっても、それだけではFULLの強い
+    条件にしない。以下をすべて満たす場合にのみ強い条件(1件目の戻り値)として扱う:
+    - usable_for_trading_judgment=True
+    - overall_confidence=HIGH
+    - 現在値がbull(強気)適正価格を一定率超過
+    - 有効手法数が設定件数以上
+    - 手法間乖離(bull/bear)が設定値以下
+    - 業績予想の鈍化または下方修正が確認されている
+    - 適正価格入力値が最新決算を反映している
+
+    要件を満たさない場合は、2件目の戻り値としてPARTIAL候補用の弱い理由文を返す
+    (中立適正価格ベースの期待リターンが閾値以下、という観測自体は無かったことに
+    しない)。
+    """
+    fv_range = inputs.fair_value_range
+    if (
+        fv_range is None
+        or not fv_range.usable_for_trading_judgment
+        or fv_range.neutral is None
+        or fv_range.neutral <= 0
+        or current_price <= 0
+    ):
+        return None, None
+
+    forward_return_pct = float(fv_range.neutral / current_price - 1) * 100
+    cbj = config.condition_based_judgment
+    if forward_return_pct > cbj.forward_return_inferior_threshold_pct:
+        return None, None
+
+    weak_reason = (
+        f"適正価格基準の期待リターンが{forward_return_pct:.1f}%と、保有継続の合理性が低い(参考水準)"
+    )
+
+    method_count = len(fv_range.methods_used)
+    spread_ratio = (
+        float(fv_range.bull / fv_range.bear)
+        if fv_range.bear is not None and fv_range.bull is not None and fv_range.bear > 0
+        else None
+    )
+    bull_excess_ok = fv_range.bull is not None and current_price > fv_range.bull * (
+        1 + Decimal(str(cbj.bull_excess_margin_pct_for_full)) / 100
+    )
+    strong_ok = (
+        fv_range.overall_confidence == ConfidenceLevel.HIGH
+        and bull_excess_ok
+        and method_count >= cbj.min_fair_value_methods_for_full
+        and spread_ratio is not None
+        and spread_ratio <= cbj.max_fair_value_spread_ratio_for_full
+        and (inputs.guidance_revision_disclosed or inputs.severe_earnings_decline)
+        and inputs.fair_value_reflects_latest_earnings is True
+    )
+    if strong_ok:
+        return (
+            f"適正価格基準の期待リターンが{forward_return_pct:.1f}%であり、"
+            "手法間の一致度・強気適正価格超過・業績予想の鈍化を含め、保有継続の"
+            "合理性が低いと複数条件で確認できる",
+            weak_reason,
+        )
+    return None, weak_reason
+
+
 def _full_strong_conditions(
     current_price: Decimal,
     pnl: UnrealizedPnl,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
+    fair_value_strong_reason: str | None,
 ) -> list[str]:
     """全株利確(FULL)を単独で正当化できる強い条件(要求仕様9節)。
 
@@ -276,20 +368,8 @@ def _full_strong_conditions(
     ):
         reasons.append("配当投資銘柄で確定的な減配とフリーキャッシュフロー悪化が重なった")
 
-    if (
-        inputs.fair_value_range is not None
-        and inputs.fair_value_range.usable_for_trading_judgment
-        and inputs.fair_value_range.neutral is not None
-        and inputs.fair_value_range.neutral > 0
-        and current_price > 0
-    ):
-        forward_return_pct = float(inputs.fair_value_range.neutral / current_price - 1) * 100
-        cbj = config.condition_based_judgment
-        if forward_return_pct <= cbj.forward_return_inferior_threshold_pct:
-            reasons.append(
-                f"適正価格基準の期待リターンが{forward_return_pct:.1f}%と、"
-                "保有継続の合理性が低い"
-            )
+    if fair_value_strong_reason is not None:
+        reasons.append(fair_value_strong_reason)
 
     if inputs.profit_target_price is not None and current_price >= inputs.profit_target_price:
         reasons.append(f"ユーザー設定の全利確目標価格({inputs.profit_target_price}円)に到達")
@@ -348,10 +428,60 @@ def _wrap(
     price: Decimal | None,
     rationale: str,
     basis: PriceFieldBasis = PriceFieldBasis.TARGET_PRICE,
+    basis_type: PriceBasisType | None = None,
+    price_low: Decimal | None = None,
+    price_high: Decimal | None = None,
 ) -> PriceWithRationale | None:
     """算出不能(price is None)の場合はNoneのまま返す(現在値へのフォールバックは行わない、
     要求仕様11節)。"""
-    return PriceWithRationale(price=price, rationale=rationale, basis=basis) if price else None
+    if not price:
+        return None
+    return PriceWithRationale(
+        price=price,
+        rationale=rationale,
+        basis=basis,
+        basis_type=basis_type,
+        price_low=price_low,
+        price_high=price_high,
+    )
+
+
+def _tick_size(price: Decimal) -> Decimal:
+    """東証の呼値の簡易近似(要求仕様レビュー対応)。
+
+    実際の呼値は価格帯に応じてさらに細かく区分されるが、ここでは代表的な区分の
+    簡易近似を用いる(小型・低流動性銘柄で1円単位の精密な指値を避けることが目的
+    であり、正確な公式呼値テーブルの再現ではないことに留意)。
+    """
+    p = float(price)
+    if p <= 3000:
+        return Decimal("1")
+    if p <= 5000:
+        return Decimal("5")
+    if p <= 30000:
+        return Decimal("10")
+    if p <= 50000:
+        return Decimal("50")
+    if p <= 300000:
+        return Decimal("100")
+    return Decimal("1000")
+
+
+def _round_to_tick(price: Decimal) -> Decimal:
+    tick = _tick_size(price)
+    return (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+
+
+def _price_range(price: Decimal, width_pct: float = 1.5) -> tuple[Decimal, Decimal]:
+    """指値のレンジ表示用に、呼値へ丸めた上下限を返す(要求仕様レビュー対応)。
+
+    出来高・ATR等の市場マイクロ構造データは現時点で本判定エンジンへ渡されて
+    いないため、簡易的に価格の±width_pct%を呼値丸めしたレンジとする(真の
+    ボラティリティ・呼値ベースのレンジではない簡易近似)。
+    """
+    low = _round_to_tick(price * Decimal(str(1 - width_pct / 100)))
+    high = _round_to_tick(price * Decimal(str(1 + width_pct / 100)))
+    return low, high
 
 
 def _compute_sell_prices(
@@ -359,24 +489,29 @@ def _compute_sell_prices(
     average_purchase_price: Decimal,
     fair_value: Decimal | None,
     forecast_annual_dividend_per_share: Decimal | None,
+    annual_benefit_value_at_min_lot: Decimal | None,
+    benefit_min_shares_required: int | None,
+    is_benefit_eligible: bool,
     level_gain: _Level,
     level_fv: _Level,
+    final_level: _Level,
     config: ProfitTakingRulesConfig,
 ) -> SellPriceLevels:
-    """4価格フィールドを算出する。
+    """final_action(格下げ後の最終判定)に基づいて価格フィールドを再構成する
+    (要求仕様レビュー対応)。
 
-    旧実装は「利確推奨価格」「全株利確検討価格」を同じ2候補(含み益基準・
-    適正価格基準)からmin/maxで導出したうえで、両方を無条件に現在値へ
-    切り上げていた。これにより、判定が実際にはどの軸(含み益/適正価格/
-    総合利回り)で発火したかと無関係な価格が表示され、「FULL判定なのに
-    全株利確検討価格が現在値より高い」という矛盾を生んでいた(2914の事例)。
+    - HOLD: 価格提案なし
+    - WATCH: 割高判定開始価格(監視専用、即時売却を意味しない)と将来の再評価条件のみ。
+      recommended_limit_price・immediate_execution_priceは常にNone。
+    - PARTIAL_PROFIT_TAKE: 一部利確開始価格・推奨指値候補(レンジ付き)。
+    - FULL_PROFIT_TAKE: 即時または全株利確検討価格を表示可能。
 
-    修正方針: recommended_limit_price(実際に指値候補として提示する価格)は、
-    現在の判定水準(level_gain/level_fv)に実際に寄与した軸からのみ導出する。
-    総合利回り低下(level_yield)のみで判定が発火した場合、含み益・適正価格
-    いずれの軸からも「到達済みの具体的な指値」は導出できないため、
-    無理に現在値を割り当てず算出不能(None)とする。
+    旧実装は判定レベル算出前のraw水準(level_gain/level_fv)だけを使っており、
+    緩和要因・タイミング層による格下げ後もその水準の価格が残る矛盾があった。
     """
+    if final_level == _Level.HOLD:
+        return SellPriceLevels()
+
     t = config.thresholds
 
     gain_partial_price = round_yen(
@@ -397,36 +532,125 @@ def _compute_sell_prices(
         else None
     )
 
-    # 一部利確開始価格: 含み益・適正価格いずれか早く到達する方(=より緩い基準)。
-    # 既に到達済み(現在値以下)であれば「即時執行目安」として現在値との
-    # 前後関係を明示する(現在値への無条件フォールバックではなく、実際に
-    # 計算された閾値が現在値を下回っている、という事実に基づく判断)。
+    # 割高判定開始価格/一部利確開始価格: 含み益・適正価格いずれか早く到達する方
+    # (=より緩い基準)。WATCHの場合は「監視専用」であることをbasisで明示し、
+    # 「一部利確開始価格」という表示は通知層で行わない。
     partial_candidates = [p for p in (gain_partial_price, fv_partial_price) if p is not None]
     partial_start = min(partial_candidates) if partial_candidates else None
-
-    # 実際に「利確検討」水準へ到達させた軸だけを、指値候補の根拠に使う。
-    # level_gain/level_fvのうちPARTIAL以上に達している軸の価格のみを候補とし、
-    # どちらも達していない(=総合利回り低下のみで発火した)場合はNoneとする。
-    recommended_candidates: list[Decimal] = []
-    if level_gain >= _Level.PARTIAL:
-        recommended_candidates.append(gain_full_price)
-    if level_fv >= _Level.PARTIAL and fv_full_price is not None:
-        recommended_candidates.append(fv_full_price)
-    recommended = min(recommended_candidates) if recommended_candidates else None
-    recommended_basis = PriceFieldBasis.TARGET_PRICE
-    if recommended is not None and recommended <= current_price:
-        recommended_basis = PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE
-
-    # 全株利確検討価格: 含み益・適正価格の両基準のうち、より厳しい方(高い方)。
-    # 「利確推奨価格」よりも先の、更に強い確信を持てる水準を示す参考値であり、
-    # 判定が既にFULLへ達している場合でも、この値自体は将来の追加確認水準
-    # (=まだ現在値を超えていて構わない)であることをrationaleで明示する。
-    full_candidates = [p for p in (gain_full_price, fv_full_price) if p is not None]
-    full_take = max(full_candidates) if full_candidates else None
-
-    reevaluation_upside = compute_target_yield_price(
-        forecast_annual_dividend_per_share, t.total_yield_strong_caution_pct
+    partial_basis_type = (
+        PriceBasisType.FAIR_VALUE_THRESHOLD
+        if fv_partial_price is not None and partial_start == fv_partial_price
+        else PriceBasisType.PURCHASE_PRICE_RETURN_TARGET
     )
+
+    if final_level == _Level.WATCH:
+        partial_field = _wrap(
+            partial_start,
+            f"含み益{t.unrealized_gain_partial_pct}%到達、または適正価格超過"
+            f"{t.fair_value_excess_partial_pct}%到達の早い方(監視開始水準。"
+            "即時売却を意味しない)",
+            basis=PriceFieldBasis.MONITORING_ONLY_NOT_A_SELL_TARGET,
+            basis_type=partial_basis_type,
+        )
+        return SellPriceLevels(partial_profit_start_price=partial_field)
+
+    # PARTIAL / FULL: 実際に「利確検討」水準へ到達させた軸だけを、指値候補の根拠に使う。
+    recommended_candidates: list[tuple[Decimal, PriceBasisType]] = []
+    if level_gain >= _Level.PARTIAL:
+        recommended_candidates.append(
+            (gain_full_price, PriceBasisType.PURCHASE_PRICE_RETURN_TARGET)
+        )
+    if level_fv >= _Level.PARTIAL and fv_full_price is not None:
+        recommended_candidates.append((fv_full_price, PriceBasisType.FAIR_VALUE_THRESHOLD))
+    recommended, recommended_basis_type = (
+        min(recommended_candidates, key=lambda x: x[0]) if recommended_candidates else (None, None)
+    )
+    recommended_basis = PriceFieldBasis.TARGET_PRICE
+    recommended_low, recommended_high = None, None
+    if recommended is not None:
+        if recommended <= current_price:
+            recommended_basis = PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE
+        else:
+            recommended_low, recommended_high = _price_range(recommended)
+
+    partial_field = _wrap(
+        partial_start,
+        f"含み益{t.unrealized_gain_partial_pct}%到達、または適正価格超過"
+        f"{t.fair_value_excess_partial_pct}%到達の早い方",
+        basis=(
+            PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE
+            if partial_start is not None and partial_start <= current_price
+            else PriceFieldBasis.TARGET_PRICE
+        ),
+        basis_type=partial_basis_type,
+    )
+    recommended_field = _wrap(
+        recommended,
+        "利確検討水準に実際に到達した軸(含み益・適正価格超過)から算出した指値候補レンジ。"
+        "総合利回り低下のみが根拠の場合は具体的な指値を算出しない",
+        basis=recommended_basis,
+        basis_type=recommended_basis_type,
+        price_low=recommended_low,
+        price_high=recommended_high,
+    )
+
+    if final_level == _Level.PARTIAL:
+        return SellPriceLevels(
+            partial_profit_start_price=partial_field,
+            recommended_limit_price=recommended_field,
+        )
+
+    # FULL_PROFIT_TAKE: 即時または全株利確検討価格を表示する。
+    full_candidates: list[tuple[Decimal, PriceBasisType]] = [
+        (p, basis_type)
+        for p, basis_type in (
+            (gain_full_price, PriceBasisType.PURCHASE_PRICE_RETURN_TARGET),
+            (fv_full_price, PriceBasisType.FAIR_VALUE_THRESHOLD),
+        )
+        if p is not None
+    ]
+    full_take, full_take_basis_type = (
+        max(full_candidates, key=lambda x: x[0]) if full_candidates else (None, None)
+    )
+    full_field = _wrap(
+        full_take,
+        f"含み益{t.unrealized_gain_full_pct}%かつ適正価格超過{t.fair_value_excess_full_pct}%の"
+        "両方を満たす、より強い確信が持てる参考水準(現在値を上回っていても矛盾ではない)",
+        basis_type=full_take_basis_type,
+    )
+    immediate_field = None
+    if full_take is not None and full_take <= current_price:
+        immediate_field = _wrap(
+            current_price,
+            "全株利確条件が既に成立しているため、現在値付近での執行を検討する目安",
+            basis=PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE,
+            basis_type=full_take_basis_type,
+        )
+
+    # 総合利回り再評価価格: 優待対象銘柄では優待価値を含めて計算する(要求仕様レビュー対応)。
+    # 優待対象なのに優待価値が取得できない場合は算出不能(None)とする。
+    reevaluation_upside = None
+    reevaluation_basis_type = None
+    if is_benefit_eligible:
+        if (
+            annual_benefit_value_at_min_lot is not None
+            and benefit_min_shares_required is not None
+            and benefit_min_shares_required > 0
+            and forecast_annual_dividend_per_share is not None
+        ):
+            reevaluation_upside = compute_target_total_yield_price(
+                forecast_annual_dividend_per_share,
+                annual_benefit_value_at_min_lot,
+                benefit_min_shares_required,
+                t.total_yield_strong_caution_pct,
+            )
+            reevaluation_basis_type = PriceBasisType.TOTAL_YIELD_THRESHOLD
+    else:
+        reevaluation_upside = compute_target_yield_price(
+            forecast_annual_dividend_per_share, t.total_yield_strong_caution_pct
+        )
+        reevaluation_basis_type = PriceBasisType.DIVIDEND_YIELD_THRESHOLD
+
     reevaluation_upside = (
         round_yen(reevaluation_upside) if reevaluation_upside is not None else None
     )
@@ -436,32 +660,24 @@ def _compute_sell_prices(
     if reevaluation_upside is not None and reevaluation_upside <= current_price:
         reevaluation_upside = None
 
+    reevaluation_label = (
+        "総合利回り(配当+株主優待)が"
+        if reevaluation_basis_type == PriceBasisType.TOTAL_YIELD_THRESHOLD
+        else "配当利回りが"
+    )
+    reevaluation_field = _wrap(
+        reevaluation_upside,
+        f"{reevaluation_label}{t.total_yield_strong_caution_pct}%まで低下する水準"
+        "(上昇時の再評価目安)",
+        basis_type=reevaluation_basis_type,
+    )
+
     return SellPriceLevels(
-        partial_profit_start_price=_wrap(
-            partial_start,
-            f"含み益{t.unrealized_gain_partial_pct}%到達、または適正価格超過"
-            f"{t.fair_value_excess_partial_pct}%到達の早い方",
-            basis=(
-                PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE
-                if partial_start is not None and partial_start <= current_price
-                else PriceFieldBasis.TARGET_PRICE
-            ),
-        ),
-        recommended_limit_price=_wrap(
-            recommended,
-            "利確検討水準に実際に到達した軸(含み益・適正価格超過)から算出した指値候補。"
-            "総合利回り低下のみが根拠の場合は具体的な指値を算出しない",
-            basis=recommended_basis,
-        ),
-        full_profit_consideration_price=_wrap(
-            full_take,
-            f"含み益{t.unrealized_gain_full_pct}%かつ適正価格超過{t.fair_value_excess_full_pct}%の"
-            "両方を満たす、より強い確信が持てる参考水準(現在値を上回っていても矛盾ではない)",
-        ),
-        reevaluation_price_upside=_wrap(
-            reevaluation_upside,
-            f"総合利回りが{t.total_yield_strong_caution_pct}%まで低下する水準(上昇時の再評価目安)",
-        ),
+        partial_profit_start_price=partial_field,
+        recommended_limit_price=recommended_field,
+        full_profit_consideration_price=full_field,
+        reevaluation_price_upside=reevaluation_field,
+        immediate_execution_price=immediate_field,
     )
 
 
@@ -478,6 +694,9 @@ def evaluate_profit_taking(
     mitigating_inputs: MitigatingFactorInputs,
     config: ProfitTakingRulesConfig,
     condition_inputs: ProfitTakingConditionInputs | None = None,
+    annual_benefit_value_at_min_lot: Decimal | None = None,
+    benefit_min_shares_required: int | None = None,
+    is_benefit_eligible: bool = False,
 ) -> ProfitTakingResult:
     """利確判定(要求仕様6節・7節・8節・9節・10節)。
 
@@ -519,17 +738,27 @@ def evaluate_profit_taking(
     )
 
     triggered_reasons: list[str] = []
+    fair_value_used_as_sole_strong_basis = False
     if has_unrealized_gain:
+        fv_strong_reason, fv_weak_reason = _fair_value_strong_condition(
+            current_price, condition_inputs, config
+        )
         partial_count, partial_reasons = _count_partial_conditions(
-            pnl, fair_value_excess_pct, current_total_yield_pct, condition_inputs, config
+            pnl,
+            fair_value_excess_pct,
+            current_total_yield_pct,
+            condition_inputs,
+            config,
+            fv_weak_reason,
         )
         full_strong_reasons = _full_strong_conditions(
-            current_price, pnl, condition_inputs, config
+            current_price, pnl, condition_inputs, config, fv_strong_reason
         )
         full_moderate_count, full_moderate_reasons = _count_full_moderate_conditions(
             pnl, fair_value_excess_pct, current_total_yield_pct, condition_inputs, config
         )
     else:
+        fv_strong_reason = None
         partial_count, partial_reasons = 0, []
         full_strong_reasons = []
         full_moderate_count, full_moderate_reasons = 0, []
@@ -538,12 +767,14 @@ def evaluate_profit_taking(
     if full_strong_reasons or full_moderate_count >= cbj.min_moderate_conditions_for_full:
         raw_level = _Level.FULL
         triggered_reasons.extend(full_strong_reasons or full_moderate_reasons)
+        fair_value_used_as_sole_strong_basis = (
+            len(full_strong_reasons) == 1 and full_strong_reasons[0] == fv_strong_reason
+        )
     elif partial_count >= cbj.min_conditions_for_partial:
         raw_level = _Level.PARTIAL
         triggered_reasons.extend(partial_reasons)
     elif (
-        partial_count >= 1
-        or pnl.unrealized_pnl_pct >= config.thresholds.unrealized_gain_watch_pct
+        partial_count >= 1 or pnl.unrealized_pnl_pct >= config.thresholds.unrealized_gain_watch_pct
     ):
         raw_level = _Level.WATCH
         triggered_reasons.extend(partial_reasons)
@@ -601,16 +832,25 @@ def evaluate_profit_taking(
         average_purchase_price,
         fair_value,
         forecast_annual_dividend_per_share,
+        annual_benefit_value_at_min_lot,
+        benefit_min_shares_required,
+        is_benefit_eligible,
         level_gain,
         level_fv,
+        final_level,
         config,
     )
-    if momentum is not None and momentum.trailing_stop_reference_price is not None:
+    if (
+        final_level != _Level.HOLD
+        and momentum is not None
+        and momentum.trailing_stop_reference_price is not None
+    ):
         sell_prices = sell_prices.model_copy(
             update={
                 "trailing_stop_reference_price": _wrap(
                     momentum.trailing_stop_reference_price,
                     "直近高値からのトレーリングストップ参考水準(モメンタム層算出)",
+                    basis_type=PriceBasisType.TECHNICAL_PRICE_LEVEL,
                 )
             }
         )
@@ -625,4 +865,8 @@ def evaluate_profit_taking(
         hold_reasons=hold_reasons,
         sell_prices=sell_prices,
         pnl=pnl,
+        independent_condition_count=max(
+            partial_count, full_moderate_count, len(full_strong_reasons)
+        ),
+        fair_value_used_as_sole_strong_basis=fair_value_used_as_sole_strong_basis,
     )

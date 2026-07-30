@@ -9,7 +9,7 @@ from pydantic import model_validator
 
 from jstock_advisor.domain.entities._legacy_migration import remap_legacy_fields
 from jstock_advisor.domain.entities.base import Entity, ImmutableSnapshot
-from jstock_advisor.domain.entities.enums import PriceFieldBasis, SourceType
+from jstock_advisor.domain.entities.enums import PriceBasisType, PriceFieldBasis, SourceType
 
 
 class DataSourceReference(ImmutableSnapshot):
@@ -40,6 +40,10 @@ class PriceWithRationale(ImmutableSnapshot):
     price: Decimal
     rationale: str
     basis: PriceFieldBasis = PriceFieldBasis.TARGET_PRICE
+    # --- 利確判定レビュー対応で追加 ---
+    basis_type: PriceBasisType | None = None  # どの算定軸(適正価格/取得価格/利回り等)か
+    price_low: Decimal | None = None  # レンジ表示時の下限(単一値のみの場合はNone)
+    price_high: Decimal | None = None  # レンジ表示時の上限
 
 
 class BuyPriceLevels(ImmutableSnapshot):
