@@ -44,6 +44,58 @@ class RecommendationType(StrEnum):
     REVIEW = "REVIEW"  # 単一の根拠のみで、SELL/URGENT_REVIEWへ進めるには不十分
     MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"  # 自動判定の安全条件を満たさない
 
+    # --- 利確判定エンジン再レビュー対応(2026-07)で追加 ---
+    # 決算直前は、公式確認済みの即時criticalを除き、通常の一部/全部利確提案を
+    # 一旦保留して決算内容を確認してから再評価する(WATCH_BEFORE_EARNINGSとは異なり、
+    # 既に利確検討の水準に達していたことを示す)。
+    REVIEW_BEFORE_EARNINGS = "REVIEW_BEFORE_EARNINGS"
+    # 銘柄単体の企業価値評価とは独立した、ポートフォリオ内保有比率の高さに基づく通知。
+    PORTFOLIO_CONCENTRATION_REVIEW = "PORTFOLIO_CONCENTRATION_REVIEW"
+
+
+class EvaluationStatus(StrEnum):
+    """保有銘柄1件ごとの評価処理の結果区分(2026-07仕様レビュー対応)。
+
+    通知が送られなかった銘柄について、正常なHOLDなのか、データ不足なのか、
+    データ品質チェックでブロックされたのか、処理自体が失敗したのかを区別する。
+    """
+
+    COMPLETED = "COMPLETED"
+    DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
+    DATA_QUALITY_BLOCKED = "DATA_QUALITY_BLOCKED"
+    ANALYSIS_FAILED = "ANALYSIS_FAILED"
+
+
+class NotificationStatus(StrEnum):
+    """通知送信の結果区分(2026-07仕様レビュー対応)。"""
+
+    SENT = "SENT"
+    NOT_REQUIRED = "NOT_REQUIRED"
+    DUPLICATE_SUPPRESSED = "DUPLICATE_SUPPRESSED"
+    RESEND_INTERVAL_NOT_REACHED = "RESEND_INTERVAL_NOT_REACHED"
+    PRICE_CHANGE_BELOW_THRESHOLD = "PRICE_CHANGE_BELOW_THRESHOLD"
+    DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
+    ANALYSIS_FAILED = "ANALYSIS_FAILED"
+
+
+class ProfitTakingIndustrySector(StrEnum):
+    """利確判定における業種別適正価格モデルの区分(2026-07仕様レビュー対応)。
+
+    銀行・リース金融等は一般事業会社向けのPER/PBR/配当利回りモデルをそのまま
+    適用すべきではない。ただし、指定された評価要素(CET1比率・DOE等)を安定して
+    取得できるデータソースが現時点で存在しないため、専用の多変量モデル自体は
+    実装せず、区分の識別とHIGH信頼度禁止ゲートのみを行う(推測で補完しない方針)。
+    """
+
+    BANKING = "BANKING"
+    LEASING_FINANCE = "LEASING_FINANCE"
+    FOOD = "FOOD"
+    CHEMICAL = "CHEMICAL"
+    GAS_UTILITY = "GAS_UTILITY"
+    SMALL_GROWTH = "SMALL_GROWTH"
+    GENERAL = "GENERAL"
+    UNKNOWN = "UNKNOWN"
+
 
 class TransactionType(StrEnum):
     BUY = "BUY"

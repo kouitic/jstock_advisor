@@ -11,3 +11,8 @@ approaching_window_business_days: 5
 # 直近四半期の期末日(fiscal_period_end、決算発表日そのものではない近似指標)
 # からの経過暦日数がこの値以下の場合、「決算直後」とみなす
 recently_reported_calendar_days: 10
+
+# 利確判定エンジン再レビュー対応(2026-07): 決算までこの営業日数以内の場合、
+# 通常のPARTIAL/FULL_PROFIT_TAKE提案を保留してREVIEW_BEFORE_EARNINGSへ、
+# WATCHをWATCH_BEFORE_EARNINGSへ調整する(公式確認済みの即時criticalは例外)
+profit_taking_suppression_business_days: 3

@@ -16,6 +16,7 @@ from jstock_advisor.domain.entities.common import (
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     DividendComparisonOutcome,
+    ProfitTakingIndustrySector,
     RecommendationType,
     RecordDateUnknownReason,
 )
@@ -97,3 +98,29 @@ class Recommendation(ImmutableSnapshot):
     # 要因」(counter_factors)とは別に、「直ちに利確しない理由」(まだ強い判定へ
     # 進めない理由)を明示する ---
     not_yet_action_reasons: list[str] = []
+
+    # --- 利確判定エンジン再レビュー対応(2026-07)で追加 ---
+    # 現在株価が中立/強気適正価格をどれだけ超過(または下回る)しているか。
+    # 監視開始価格(閾値ベースの価格)ではなく、必ず実際の現在株価を使って算出する。
+    current_price_vs_neutral_fair_value_pct: float | None = None
+    current_price_vs_bull_fair_value_pct: float | None = None
+
+    # 保有株数・売買単位を考慮した一部売却の実行可能性
+    trading_unit: int | None = None
+    minimum_sellable_shares: int | None = None
+    partial_sale_executable: bool | None = None
+    suggested_sell_shares: int | None = None
+    odd_lot_trading_available: bool | None = None
+
+    # 業種別適正価格モデルの適用状況(未対応の場合は信頼度HIGH・適正価格単独での
+    # PARTIAL以上を禁止するゲートに使う)
+    industry_sector: ProfitTakingIndustrySector | None = None
+    industry_model_applied: bool | None = None
+    industry_model_missing_reason: str | None = None
+
+    # 配当減少の表示文言(実績確定/予想のみ/内訳不明の総額減少、を区別する)
+    dividend_decrease_explanation: str | None = None
+
+    # ポートフォリオ内保有比率(企業価値判断とは別の集中リスク通知に使う)
+    portfolio_weight_pct: float | None = None
+    portfolio_acquisition_cost_weight_pct: float | None = None
