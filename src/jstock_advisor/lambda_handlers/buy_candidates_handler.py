@@ -12,14 +12,22 @@ EventBridge Scheduler経由で自動実行する薄いアダプタ。
 銘柄単位のファンアウト(_fanout.py)を採用しており、通常のスケジュール起動では
 銘柄一覧を取得して銘柄ごとに自分自身を非同期再帰呼び出しするだけで即座に戻る。
 
-【購入候補/価格待ちの2ランキング化(2026-07 BUYパイプライン再設計・要求仕様17節)】
+【購入候補のみをランキング・通知(BUYパイプライン第2次修正2026-07・要求仕様13〜16節)】
 「企業として投資候補になり得るか」と「現在の株価で実際に購入すべきか」を分離した
-ため、通知ランキングも2種類に分ける。各ワーカーはBuyAction判定が確定した時点で
-即座に送信せず、購入候補(STRONG_BUY/BUY/SMALL_ENTRY)と価格待ち
-(WATCH_FOR_PRICE/WATCH_BEFORE_EARNINGS)を別々にバッチトラッカーへ登録するだけに
-留める。全銘柄の処理が完了した時点(最後のワーカーが検知)で、それぞれの
-ランキング上位config.notification.buy_candidate_max_notifications_per_run件のみを
-実際に送信する。「優先順位の高いN件」という単一ランキングでの表現は行わない。
+ため、監視継続・購入見送り・要確認・データ不足・対象外はLINE通知しない
+(分析結果・監査ログへの記録はBuySignalService.analyze()側で全銘柄について既に
+完了している)。各ワーカーはBuyAction判定が確定した時点で、購入候補
+(STRONG_BUY/BUY/SMALL_ENTRY)のみをランキング候補としてバッチトラッカーへ登録する
+(価格待ちは件数カウントのみ行い、送信対象のランキングには載せない)。全銘柄の
+処理が完了した時点(最後のワーカーが検知)で、購入候補ランキング上位
+config.notification.buy_candidate_max_notifications_per_run件についてのみ
+再通知抑止・データ品質チェックを実行し(要求仕様15節: 全銘柄一律ではなく上位N件
+だけを評価する)、条件を満たしたものだけを1通(長すぎる場合のみ複数通)にまとめて
+送信する。「優先順位の高いN件」という単一ランキングでの表現は行わない。
+
+購入候補が1件も無い場合、config.notification.send_empty_summaryがfalseなら
+バッチ完了サマリー自体を送信しない(要求仕様16節: 無理に候補を作らず、
+何も無い日は通知しない)。
 
 個別のデータ取得エラーはLINEへ配信せず、全銘柄の処理が完了した時点で
 全体件数・正常件数・異常件数のサマリーを1通だけ送信する
@@ -63,8 +71,6 @@ logger.setLevel(logging.INFO)
 
 _PROCESS_NAME = "買い候補分析"
 _RANKING_ENTRY_DELIMITER = "|"
-_BUY_PREFIX = "BUY"
-_WATCH_PREFIX = "WATCH"
 
 # 購入候補ランキングの第一ソートキー(BuyActionの強さ。数値が大きいほど優先)。
 _ACTION_PRIORITY: dict[BuyAction, int] = {
@@ -75,56 +81,48 @@ _ACTION_PRIORITY: dict[BuyAction, int] = {
 
 
 def _encode_buy_ranking_entry(recommendation: Recommendation) -> str:
-    """購入候補ランキングキー: (action_priority, purchase_attractiveness_score,
-    company_quality_score) の降順(要求仕様17節)。
+    """購入候補ランキングキー(要求仕様15節): action_priority(BuyActionの強さ)
+    → purchase_attractiveness_score → company_quality_score →
+    現在値が標準買い価格をどれだけ下回るか、の降順。同点時は銘柄コード昇順で
+    決定性を確保する(_finalize_batch側でタプルの最後の要素として比較される)。
+
+    価格待ち(WATCH_FOR_PRICE/WATCH_BEFORE_EARNINGS)はLINE通知対象外のため
+    ランキング登録自体を行わない(BUYパイプライン第2次修正2026-07)。
     """
     action_priority = _ACTION_PRIORITY.get(recommendation.buy_action, 0)  # type: ignore[arg-type]
     purchase_score = recommendation.purchase_attractiveness_score or 0.0
     quality_score = recommendation.company_quality_score or 0.0
+    standard_price = (
+        recommendation.standard_buy_price if recommendation.standard_buy_price is not None else None
+    )
+    discount_to_standard_pct = (
+        float((standard_price - recommendation.price_at_recommendation) / standard_price * 100)
+        if standard_price is not None and standard_price > 0
+        else 0.0
+    )
     return _RANKING_ENTRY_DELIMITER.join(
         [
-            _BUY_PREFIX,
             str(action_priority),
             str(purchase_score),
             str(quality_score),
+            str(discount_to_standard_pct),
             recommendation.stock_code,
             recommendation.recommendation_id,
         ]
     )
 
 
-def _encode_watch_ranking_entry(recommendation: Recommendation) -> str:
-    """価格待ちランキングキー: (company_quality_score, -distance_to_entry_price_pct)
-    の降順(要求仕様17節)。距離が不明な場合は最下位扱いとする。
-    """
-    quality_score = recommendation.company_quality_score or 0.0
-    distance_pct = (
-        float(recommendation.current_vs_entry_price_pct)
-        if recommendation.current_vs_entry_price_pct is not None
-        else 999999.0
+def _decode_buy_ranking_entry(entry: str) -> tuple[tuple[float, ...], str, str]:
+    action_priority, purchase_score, quality_score, discount_pct, stock_code, recommendation_id = (
+        entry.split(_RANKING_ENTRY_DELIMITER)
     )
-    return _RANKING_ENTRY_DELIMITER.join(
-        [
-            _WATCH_PREFIX,
-            str(quality_score),
-            str(distance_pct),
-            recommendation.stock_code,
-            recommendation.recommendation_id,
-        ]
+    sort_key = (
+        float(action_priority),
+        float(purchase_score),
+        float(quality_score),
+        float(discount_pct),
     )
-
-
-def _decode_ranking_entry(entry: str) -> tuple[str, tuple[float, ...], str, str]:
-    parts = entry.split(_RANKING_ENTRY_DELIMITER)
-    prefix = parts[0]
-    sort_key: tuple[float, ...]
-    if prefix == _BUY_PREFIX:
-        _, action_priority, purchase_score, quality_score, stock_code, recommendation_id = parts
-        sort_key = (float(action_priority), float(purchase_score), float(quality_score))
-    else:
-        _, quality_score, distance_pct, stock_code, recommendation_id = parts
-        sort_key = (float(quality_score), -float(distance_pct))
-    return prefix, sort_key, stock_code, recommendation_id
+    return sort_key, stock_code, recommendation_id
 
 
 def _process_single_candidate(
@@ -155,27 +153,27 @@ def _process_single_candidate(
             category = "hold"
             result = {"stock_code": stock_code, "recommended": False, "notified": False}
         else:
+            # --- BUYパイプライン第2次修正(2026-07)。要求仕様13〜15節 ---
+            # ここではLINE通知の可否(再通知抑止・データ品質チェック)を判定しない。
+            # 監査ログへの記録はBuySignalService.analyze()側で既に完了しており、
+            # 通知対象の判定(evaluate_notification_status)は購入候補ランキング
+            # 上位N件が確定した後、_finalize_batchで初めて行う(全銘柄一律に
+            # 重い整合性検証・異常値検知を実行しない)。
             recommendation_repo.save(outcome.recommendation)
-            eligibility = notification_service.evaluate_notification_status(
-                outcome.recommendation, now
-            )
-            if outcome.buy_action == BuyAction.MANUAL_REVIEW or eligibility.data_quality_blocked:
-                # 要手動確認・データ品質アラートは優先度付けの対象外とし、
-                # evaluate_notification_status内で即時に処理済み(要求仕様§11・§17・§20)。
+            if outcome.buy_action == BuyAction.MANUAL_REVIEW:
                 category = "review"
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
-            elif eligibility.status != NotificationStatus.SENT:
-                category = "suppressed"
-                result = {"stock_code": stock_code, "recommended": True, "notified": False}
             elif outcome.ranking_group == "buy_candidate":
-                # 実際の送信は行わず、ランキング候補として登録するだけに留める
-                # (全銘柄処理完了後、購入候補ランキング上位N件のみ送信する)。
+                # 実際の送信可否判定は行わず、ランキング候補として登録するだけに
+                # 留める(全銘柄処理完了後、購入候補ランキング上位N件のみを対象に
+                # 再通知抑止・データ品質チェックを行い送信する)。
                 category = "candidate_not_ranked"
                 ranking_entry = _encode_buy_ranking_entry(outcome.recommendation)
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
             elif outcome.ranking_group == "watch_price":
+                # 価格待ちはLINE通知対象外のため、ランキング登録は行わず件数のみ
+                # 集計する(バッチサマリーの内訳表示・監査目的)。
                 category = "watch_not_ranked"
-                ranking_entry = _encode_watch_ranking_entry(outcome.recommendation)
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
             else:
                 # NOT_ATTRACTIVE等、購入候補にも価格待ちにも属さない場合は
@@ -204,26 +202,24 @@ def _finalize_batch(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
 ) -> None:
-    """全銘柄の処理完了を検知したワーカーが1回だけ呼ぶ。購入候補ランキング・
-    価格待ちランキングそれぞれの上位N件のみ実際にLINE送信し、件数内訳を
-    調整したうえでバッチサマリーを送信する。
+    """全銘柄の処理完了を検知したワーカーが1回だけ呼ぶ。購入候補ランキング上位
+    N件についてのみ再通知抑止・データ品質チェックを行い(要求仕様15節ステップ7)、
+    条件を満たしたものだけを1通にまとめて送信する(要求仕様15節ステップ8)。
+    価格待ちはランキング・送信の対象外(件数のみバッチサマリーに反映する)。
     """
     max_notifications = config.notification.buy_candidate_max_notifications_per_run
 
-    buy_entries: list[tuple[tuple[float, ...], str, str]] = []
-    watch_entries: list[tuple[tuple[float, ...], str, str]] = []
-    for entry in progress.ranking_entries:
-        prefix, sort_key, stock_code, recommendation_id = _decode_ranking_entry(entry)
-        target = buy_entries if prefix == _BUY_PREFIX else watch_entries
-        target.append((sort_key, stock_code, recommendation_id))
-
-    buy_entries.sort(key=lambda item: item[0], reverse=True)
-    watch_entries.sort(key=lambda item: item[0], reverse=True)
-
+    buy_entries: list[tuple[tuple[float, ...], str, str]] = [
+        _decode_buy_ranking_entry(entry) for entry in progress.ranking_entries
+    ]
+    # 降順ソート。同点時は銘柄コード昇順で決定性を確保する(要求仕様15節)。
+    buy_entries.sort(key=lambda item: (tuple(-v for v in item[0]), item[1]))
     buy_winners = buy_entries[:max_notifications]
-    watch_winners = watch_entries[:max_notifications]
 
-    for _sort_key, stock_code, recommendation_id in (*buy_winners, *watch_winners):
+    eligible_winners: list[Recommendation] = []
+    quality_blocked_count = 0
+    suppressed_count = 0
+    for _sort_key, stock_code, recommendation_id in buy_winners:
         recommendation = recommendation_repo.get(recommendation_id)
         if recommendation is None:
             logger.warning(
@@ -233,16 +229,26 @@ def _finalize_batch(
                 recommendation_id,
             )
             continue
-        notification_service.send_recommendation_notification(recommendation, now)
+        eligibility = notification_service.evaluate_notification_status(recommendation, now)
+        if eligibility.data_quality_blocked:
+            # 要手動確認・データ品質アラートはevaluate_notification_status内で
+            # 即時に処理済み(要求仕様§16の安全弁は購入候補上位N件にのみ適用される)。
+            quality_blocked_count += 1
+        elif eligibility.status != NotificationStatus.SENT:
+            suppressed_count += 1
+        else:
+            eligible_winners.append(recommendation)
+
+    sent_count = notification_service.notify_buy_candidates_digest(eligible_winners, now)
 
     total_buy_candidates = progress.category_counts.get("candidate_not_ranked", 0)
-    total_watch_candidates = progress.category_counts.get("watch_not_ranked", 0)
     adjusted_counts = dict(progress.category_counts)
-    adjusted_counts["sent"] = (
-        progress.category_counts.get("sent", 0) + len(buy_winners) + len(watch_winners)
+    adjusted_counts["sent"] = progress.category_counts.get("sent", 0) + sent_count
+    adjusted_counts["review"] = progress.category_counts.get("review", 0) + quality_blocked_count
+    adjusted_counts["suppressed"] = (
+        progress.category_counts.get("suppressed", 0) + suppressed_count
     )
     adjusted_counts["candidate_not_ranked"] = total_buy_candidates - len(buy_winners)
-    adjusted_counts["watch_not_ranked"] = total_watch_candidates - len(watch_winners)
 
     notification_service.notify_batch_summary(
         _PROCESS_NAME,
@@ -251,7 +257,8 @@ def _finalize_batch(
         now,
         data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
         failed_stock_codes=progress.failed_stock_codes,
-        buy_candidates_sent_count=len(buy_winners),
+        buy_candidates_sent_count=sent_count,
+        send_empty_summary=config.notification.send_empty_summary,
     )
 
 

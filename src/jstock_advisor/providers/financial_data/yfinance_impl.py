@@ -24,6 +24,9 @@ from jstock_advisor.infrastructure.edinet.document_finder import (
     EdinetFilingCacheRepository,
     find_latest_filings,
 )
+from jstock_advisor.infrastructure.local_repository.stock_name_override_repository import (
+    StockNameOverrideRepository,
+)
 from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
     FinancialSummary,
@@ -70,15 +73,25 @@ class YFinanceFinancialDataProvider:
         now: dt.datetime | None = None,
         edinet_client: EdinetClient | None = None,
         edinet_cache_repository: EdinetFilingCacheRepository | None = None,
+        stock_name_override_repository: StockNameOverrideRepository | None = None,
     ) -> None:
         self._now = now or dt.datetime.now(dt.UTC)
         self._edinet_client = edinet_client
         self._edinet_cache_repo = edinet_cache_repository
+        # 銘柄名の手動オーバーライド(2026-07 BUYパイプライン第2次修正・要求仕様19節)。
+        # EDINET filerNameが取得できない、または表記の見直しが必要な銘柄のみ、
+        # 運用者が手動登録した日本語社名を最優先で使う。
+        self._stock_name_override_repo = (
+            stock_name_override_repository or StockNameOverrideRepository()
+        )
 
     def _source(self) -> DataSourceReference:
         return DataSourceReference(provider=_PROVIDER_NAME, fetched_at=self._now)
 
     def _resolve_japanese_stock_name(self, stock_code: str) -> str | None:
+        override = self._stock_name_override_repo.get(stock_code)
+        if override is not None:
+            return override
         if self._edinet_client is None or self._edinet_cache_repo is None:
             return None
         if not self._edinet_client.is_configured:

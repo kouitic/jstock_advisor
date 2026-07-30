@@ -293,6 +293,10 @@ class NotificationRulesConfig(StrictModel):
     resend_after_days: int
     price_change_resend_threshold_pct: float
     buy_candidate_max_notifications_per_run: int
+    # --- BUYパイプライン第2次修正(2026-07)で追加。要求仕様16節: 購入候補が
+    # 0件の場合、原則としてバッチ完了サマリー自体をLINEへ送らない
+    # (運用確認のため送りたい場合のみtrueにする) ---
+    send_empty_summary: bool
 
 
 # --- data_validation_rules.yaml -------------------------------------------
@@ -605,15 +609,64 @@ class MarginAdjustments(StrictModel):
     data_quality_warning: float
 
 
+class MarginOfSafetyAdjustmentMultipliers(StrictModel):
+    """カテゴリ集約後のリスク加算合計を、entry/standard/strongの各段階へ
+    反映する際の感応度倍率(2026-07 BUYパイプライン第2次修正)。同額をそのまま
+    3段階へ加算すると、上限到達時に3段階すべてが同一価格へ潰れるため、
+    段階が進むほど強くリスクを反映させる。
+    """
+
+    entry: float
+    standard: float
+    strong: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> MarginOfSafetyAdjustmentMultipliers:
+        for value in (self.entry, self.standard, self.strong):
+            if value < 0:
+                raise ValueError("adjustment_multipliersは0以上である必要があります")
+        if not (self.entry <= self.standard <= self.strong):
+            raise ValueError(
+                "adjustment_multipliersはentry <= standard <= strongの順序が必要です"
+            )
+        return self
+
+
+class MarginOfSafetyMaximumTiers(StrictModel):
+    """段階別の安全余裕率上限(2026-07 BUYパイプライン第2次修正)。
+
+    共通の上限(旧maximum)を全段階へ適用すると、リスク加算が大きい銘柄で
+    3段階すべてが同一の上限値へ潰れてしまうため、段階ごとに異なる上限を
+    設ける(entry <= standard <= strong)。
+    """
+
+    entry: float
+    standard: float
+    strong: float
+
+    @model_validator(mode="after")
+    def _check_order_and_range(self) -> MarginOfSafetyMaximumTiers:
+        for value in (self.entry, self.standard, self.strong):
+            if not (0 < value <= 0.45):
+                raise ValueError("maximum_marginは0.45以下である必要があります")
+        if not (self.entry <= self.standard <= self.strong):
+            raise ValueError(
+                "maximum_marginはentry <= standard <= strongの順序が必要です"
+            )
+        return self
+
+
 class MarginOfSafetyConfig(StrictModel):
     confidence: MarginOfSafetyConfidenceTiers
-    maximum: float
+    maximum_margin: MarginOfSafetyMaximumTiers
+    minimum_margin_gap: float
+    adjustment_multipliers: MarginOfSafetyAdjustmentMultipliers
     adjustments: MarginAdjustments
 
     @model_validator(mode="after")
-    def _check_maximum(self) -> MarginOfSafetyConfig:
-        if not (0 < self.maximum <= 0.45):
-            raise ValueError("maximumは0.45以下である必要があります")
+    def _check_minimum_gap(self) -> MarginOfSafetyConfig:
+        if not (0 <= self.minimum_margin_gap < 0.45):
+            raise ValueError("minimum_margin_gapは0以上0.45未満である必要があります")
         return self
 
 

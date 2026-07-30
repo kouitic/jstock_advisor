@@ -1,14 +1,17 @@
-"""買い判定サービス(2026-07 BUYパイプライン再設計)。
+"""買い判定サービス(2026-07 BUYパイプライン再設計、および第2次修正)。
 
 「企業として投資候補になり得るか(company_quality_score)」と「現在の株価で
 実際に購入すべきか(purchase_attractiveness_score + BuyAction)」を分離した
-3段階パイプラインをオーケストレーションする。処理順序は以下の22ステップ:
+3段階パイプラインをオーケストレーションする。処理順序は以下の22ステップ
+(第2次修正で決算日stale判定・下方外れ値除外・買付価格信頼性ゲートを追加):
 
-1. データ品質検証 2. 投資対象スクリーニング 3. 業種分類 4. 利益/EPSの平準化
-5. 各方式の適正価格算出 6. 不適用方式と外れ値の除外 7. 適正価格のばらつき判定
-8. valuation_anchor算出 9. 適正価格信頼度決定 10. 必要安全余裕率算出
-11. 3段階買付価格算出 12. company_quality_score算出 13. purchase_attractiveness_score算出
-14. 現在価格によるBuyAction仮判定 15. スコアによる格下げ 16. 決算直前調整
+1. データ品質検証(決算日の妥当性検証を含む) 2. 投資対象スクリーニング
+3. 業種分類 4. 利益/EPSの平準化 5. 各方式の適正価格算出
+6. 不適用方式と外れ値の除外(DCF上方乖離+下方外れ値フィルタ) 7. 適正価格のばらつき判定
+8. valuation_anchor算出 9. 適正価格信頼度決定 10. 必要安全余裕率算出(カテゴリ集約方式)
+10.5. 買付価格信頼性ゲート 11. 3段階買付価格算出 12. company_quality_score算出
+13. purchase_attractiveness_score算出 14. 現在価格によるBuyAction仮判定
+15. スコアによる格下げ 16. 決算直前調整 16.5. 買付価格信頼性による格下げ
 17. データ品質・業種モデルによる格下げ(margin加算に反映済み) 18. 整合性検証
 19-20. 購入候補/価格待ちランキング用の情報確定 21. 通知生成(通知層) 22. 監査ログ保存
 """
@@ -33,6 +36,7 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     BuyIndustrySector,
     ConfidenceLevel,
+    EarningsDateStatus,
     RecommendationType,
     StockType,
 )
@@ -56,7 +60,9 @@ from jstock_advisor.domain.signals.buy_signal import (
 )
 from jstock_advisor.domain.signals.eps_normalization import normalize_eps
 from jstock_advisor.domain.valuation.buy_price_levels import compute_buy_price_levels
+from jstock_advisor.domain.valuation.buy_price_reliability import determine_buy_price_reliability
 from jstock_advisor.domain.valuation.fair_value import (
+    compute_52_week_low,
     compute_dcf_price,
     compute_historical_range_price,
     compute_pbr_price,
@@ -305,11 +311,14 @@ class BuySignalService:
         filtered_dcf = apply_dcf_divergence_filter(dcf_result, other_results)
         method_results = [filtered_dcf if r.method == "dcf" else r for r in method_results]
 
+        low_52_week = compute_52_week_low(snapshot.bars, now.date())
         valuation_summary = build_valuation_summary(
             method_results,
             self._config.valuation.fair_value_methods.aggregation_method,
             self._config.valuation.fair_value_methods.method_weights,
             self._config.valuation.fair_value_usability,
+            current_price=current_price,
+            low_52_week=low_52_week,
         )
 
         # --- 7. 適正価格のばらつき判定 ---
@@ -338,10 +347,25 @@ class BuySignalService:
             self._config.valuation.fair_value_methods.method_weights,
         )
 
+        # --- 決算日の妥当性検証(要求仕様12節)。データ提供元(yfinance等)の
+        # 更新遅延により、評価日より過去の日付が「次回決算予定日」として
+        # 返ってくることがある。過去日をそのまま次回決算日として使わず、
+        # 検証済みの値(resolved_next_earnings_date)のみを以降のステップで使う ---
+        earnings_date_raw = snapshot.next_earnings_date
+        if earnings_date_raw is None:
+            earnings_date_status = EarningsDateStatus.UNAVAILABLE
+            resolved_next_earnings_date = None
+        elif earnings_date_raw < now.date():
+            earnings_date_status = EarningsDateStatus.STALE_PAST_DATE
+            resolved_next_earnings_date = None
+        else:
+            earnings_date_status = EarningsDateStatus.CONFIRMED
+            resolved_next_earnings_date = earnings_date_raw
+
         # 次回決算までの営業日数(§16)
         business_days_to_earnings = (
-            self._calendar.business_days_between(now.date(), snapshot.next_earnings_date)
-            if snapshot.next_earnings_date is not None
+            self._calendar.business_days_between(now.date(), resolved_next_earnings_date)
+            if resolved_next_earnings_date is not None
             else None
         )
         data_quality_warning = has_stale_data_warning or business_days_to_earnings is None
@@ -402,6 +426,24 @@ class BuySignalService:
         margin_result = compute_margin_of_safety(
             valuation_confidence, adjustment_codes, self._config.buy_decision.margin_of_safety
         )
+
+        # --- 買付価格の信頼性ゲート(要求仕様6節)。機械的に算出した買付価格
+        # をそのまま購入判断に使ってよいか怪しい場合はLOWとし、後続のBuyAction
+        # 判定でBUY系への昇格を禁止する ---
+        excluded_outlier_count = sum(
+            1 for m in valuation_summary.methods_excluded if m.exclusion_detail is not None
+        )
+        reliability_result = determine_buy_price_reliability(
+            margin_result=margin_result,
+            maximum_entry_margin=self._config.buy_decision.margin_of_safety.maximum_margin.entry,
+            valuation_dispersion_ratio=valuation_summary.valuation_dispersion_ratio,
+            dispersion_medium_max=self._config.buy_decision.valuation_dispersion.medium_max,
+            methods_used_count=valuation_summary.methods_used_count,
+            data_quality_warning=data_quality_warning,
+            earnings_date_status=earnings_date_status,
+            excluded_outlier_count=excluded_outlier_count,
+        )
+        buy_price_reliability = reliability_result.reliability
 
         # --- 11. 3段階買付価格算出 ---
         buy_price_levels = compute_buy_price_levels(valuation_anchor, margin_result)
@@ -471,6 +513,7 @@ class BuySignalService:
             company_quality_score=company_quality_score,
             business_days_to_earnings=business_days_to_earnings,
             valuation_dispersion_ratio=valuation_summary.valuation_dispersion_ratio,
+            buy_price_reliability=buy_price_reliability,
             config=self._config.buy_decision,
         )
         buy_action = decision.action
@@ -539,6 +582,14 @@ class BuySignalService:
             if buy_price_levels.entry is not None
             else None
         )
+        # 「打診買い価格まで、あと何%下落が必要か」(current_vs_entry_price_pctとは
+        # 意味が異なる別指標。current_vs_entry_price_pctは「現在値がentryを何%
+        # 上回っているか」であり、通知の「まで」という接近方向の文言には使えない)。
+        required_decline_to_entry_pct = (
+            (1 - buy_price_levels.entry.price / current_price) * 100
+            if buy_price_levels.entry is not None and current_price > 0
+            else None
+        )
 
         # --- 22. 監査ログ保存(買い候補にならなかった銘柄も含め全件記録) ---
         self._audit.record(
@@ -572,6 +623,28 @@ class BuySignalService:
                 if valuation_summary.valuation_max is not None
                 else None,
                 "valuation_dispersion_ratio": valuation_summary.valuation_dispersion_ratio,
+                "decision_valuation_min": str(valuation_summary.decision_valuation_min)
+                if valuation_summary.decision_valuation_min is not None
+                else None,
+                "decision_valuation_max": str(valuation_summary.decision_valuation_max)
+                if valuation_summary.decision_valuation_max is not None
+                else None,
+                "excluded_outlier_methods": [
+                    m.method
+                    for m in valuation_summary.methods_excluded
+                    if m.exclusion_detail is not None
+                ],
+                "buy_price_reliability": buy_price_reliability.value,
+                "buy_price_reliability_concerns": reliability_result.concerns,
+                "earnings_date_raw": earnings_date_raw.isoformat()
+                if earnings_date_raw is not None
+                else None,
+                "earnings_date_resolved": resolved_next_earnings_date.isoformat()
+                if resolved_next_earnings_date is not None
+                else None,
+                "earnings_date_status": earnings_date_status.value,
+                "earnings_date_source": "yfinance_calendar",
+                "earnings_date_retrieved_at": snapshot.data_fetched_at.isoformat(),
                 "entry_buy_price": str(buy_price_levels.entry.price)
                 if buy_price_levels.entry
                 else None,
@@ -635,7 +708,7 @@ class BuySignalService:
             counter_factors=counter_factors,
             key_risks=counter_factors,
             confidence=valuation_confidence,
-            next_earnings_date=snapshot.next_earnings_date,
+            next_earnings_date=resolved_next_earnings_date,
             dividend_record_date=dividend.dividend_record_dates[0]
             if dividend.dividend_record_dates
             else None,
@@ -674,6 +747,12 @@ class BuySignalService:
             strong_buy_price=buy_price_levels.strong.price if buy_price_levels.strong else None,
             current_vs_valuation_pct=current_vs_valuation_pct,
             current_vs_entry_price_pct=current_vs_entry_price_pct,
+            required_decline_to_entry_pct=required_decline_to_entry_pct,
+            buy_price_reliability=buy_price_reliability,
+            decision_valuation_min=valuation_summary.decision_valuation_min,
+            decision_valuation_max=valuation_summary.decision_valuation_max,
+            earnings_date_status=earnings_date_status,
+            earnings_date_raw=earnings_date_raw,
             required_margin_of_safety_entry=margin_result.entry_margin,
             required_margin_of_safety_standard=margin_result.standard_margin,
             required_margin_of_safety_strong=margin_result.strong_margin,

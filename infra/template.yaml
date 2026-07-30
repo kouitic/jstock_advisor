@@ -239,6 +239,19 @@ Resources:
         - AttributeName: event_id
           KeyType: HASH
 
+  # 銘柄名の手動オーバーライド(2026-07 BUYパイプライン第2次修正・要求仕様19節)。
+  StockNameOverridesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-stock_name_overrides"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+
   EdinetFilingCacheTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -303,6 +316,7 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow
@@ -340,6 +354,7 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow

@@ -19,8 +19,10 @@ from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
     BuyAction,
     BuyIndustrySector,
+    BuyPriceReliability,
     ConfidenceLevel,
     DividendComparisonOutcome,
+    EarningsDateStatus,
     ProfitTakingIndustrySector,
     RecommendationType,
     RecordDateUnknownReason,
@@ -176,6 +178,27 @@ class Recommendation(ImmutableSnapshot):
 
     # 構造化された購入判断理由。通知層はこれを再計算せずそのまま表示する。
     buy_decision_reasons: tuple[BuyDecisionReason, ...] = ()
+
+    # --- BUYパイプライン第2次修正(2026-07)で追加 ---
+    # 買付価格3段階の信頼性(安全余裕率が上限に張り付いた・手法間バラつきが
+    # 大きい・有効な算出方式が少ない等)。LOWの場合はBUY系判定を禁止する。
+    buy_price_reliability: BuyPriceReliability | None = None
+
+    # 下方外れ値除外後、購入判断に実際に使用した適正価格レンジ
+    # (valuation_min/valuation_maxは全採用方式ベースの参考値のまま維持)。
+    decision_valuation_min: Decimal | None = None
+    decision_valuation_max: Decimal | None = None
+
+    # 「打診買い価格まで、あと何%下落が必要か」(current_vs_entry_price_pctとは
+    # 意味が異なる別指標。current_vs_entry_price_pctは「現在値がentryを何%
+    # 上回っているか」であり、通知の「まで」という接近方向の文言には使えない)。
+    required_decline_to_entry_pct: Decimal | None = None
+
+    # 次回決算予定日の妥当性検証結果(要求仕様12節: 評価日より過去の決算日を
+    # 「次回決算予定日」として表示しない)。earnings_date_rawは検証前の生値
+    # (監査用、STALE_PAST_DATEの場合でもnext_earnings_dateはNoneのまま)。
+    earnings_date_status: EarningsDateStatus | None = None
+    earnings_date_raw: dt.date | None = None
 
     @property
     def recommended(self) -> bool:

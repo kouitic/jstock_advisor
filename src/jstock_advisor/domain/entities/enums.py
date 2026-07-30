@@ -468,3 +468,47 @@ class BuyIndustrySector(StrEnum):
     SMALL_GROWTH = "SMALL_GROWTH"
     GENERAL = "GENERAL"
     UNKNOWN = "UNKNOWN"
+
+
+class MarginRiskCategory(StrEnum):
+    """安全余裕率リスク加算のカテゴリ(2026-07 BUYパイプライン第2次修正)。
+
+    個別のリスクコード(industry_model_not_appliedやcyclical_industry等)を
+    単純合算すると、実質的に同じリスクを複数回加算してしまう
+    (例: 自動車部品業種ではindustry_model_not_applied/cyclical_industry/
+    major_customer_dependencyが常に同時発生する)。カテゴリ内は最大値のみを
+    採用し、カテゴリ間のみ合算することで二重加点を防ぐ。
+    """
+
+    VALUATION_UNCERTAINTY = "VALUATION_UNCERTAINTY"
+    INDUSTRY_AND_BUSINESS = "INDUSTRY_AND_BUSINESS"
+    EARNINGS_QUALITY = "EARNINGS_QUALITY"
+    EVENT_TIMING = "EVENT_TIMING"
+    DATA_QUALITY = "DATA_QUALITY"
+    LIQUIDITY = "LIQUIDITY"
+
+
+class BuyPriceReliability(StrEnum):
+    """買付価格3段階の信頼性区分(2026-07 BUYパイプライン第2次修正)。
+
+    安全余裕率が上限に張り付く、適正価格手法間のバラつきが大きい、
+    有効な算出方式が少ない等、機械的に算出した買付価格をそのまま
+    購入判断へ使ってよいか怪しい場合はLOWとし、BUY系判定を禁止する
+    (無理に低い買付価格を提示するより、要確認・監視継続とする)。
+    """
+
+    OK = "OK"
+    LOW = "LOW"
+
+
+class EarningsDateStatus(StrEnum):
+    """次回決算予定日の妥当性区分(2026-07 BUYパイプライン第2次修正)。
+
+    yfinance等のデータ提供元が返す決算日は、更新遅延により評価日より
+    過去の日付になっていることがある。過去日をそのまま「次回決算予定日」
+    として通知・判定に使わないよう、取得値と検証結果を分けて保持する。
+    """
+
+    CONFIRMED = "CONFIRMED"
+    STALE_PAST_DATE = "STALE_PAST_DATE"
+    UNAVAILABLE = "UNAVAILABLE"

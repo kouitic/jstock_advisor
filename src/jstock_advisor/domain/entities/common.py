@@ -9,7 +9,12 @@ from pydantic import model_validator
 
 from jstock_advisor.domain.entities._legacy_migration import remap_legacy_fields
 from jstock_advisor.domain.entities.base import Entity, ImmutableSnapshot
-from jstock_advisor.domain.entities.enums import PriceBasisType, PriceFieldBasis, SourceType
+from jstock_advisor.domain.entities.enums import (
+    MarginRiskCategory,
+    PriceBasisType,
+    PriceFieldBasis,
+    SourceType,
+)
 
 
 class DataSourceReference(ImmutableSnapshot):
@@ -108,11 +113,21 @@ class MarginAdjustment(ImmutableSnapshot):
 
     基本安全余裕率に対するリスク調整1件を表す。通知には主要な調整理由のみを
     表示するが、監査ログにはすべて保存する。
+
+    --- BUYパイプライン第2次修正(2026-07)で追加 ---
+    同一カテゴリ内で複数のリスクコードが該当した場合、最大値のみを採用し
+    重複加算を防ぐ(例: 自動車部品業種のcyclical_industry/industry_model_not_applied/
+    major_customer_dependencyは同じ業種リスクを3重に加算していた)。categoryは
+    このコードが属するリスクカテゴリ、superseded_byはカテゴリ内でこのコードより
+    大きい値が採用され、このコード自体は不採用になった場合にその採用コードを指す
+    (不採用の場合でも監査ログへは記録し、隠さない)。
     """
 
     code: str
     adjustment: Decimal
     reason: str
+    category: MarginRiskCategory | None = None
+    superseded_by: str | None = None
 
 
 _SELL_PRICE_LEVELS_LEGACY_FIELD_MAP = {
