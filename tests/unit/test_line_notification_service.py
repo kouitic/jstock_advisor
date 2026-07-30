@@ -23,7 +23,10 @@ from jstock_advisor.infrastructure.local_repository.notification_log_repository 
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
-from jstock_advisor.services.line_notification_service import LineNotificationService
+from jstock_advisor.services.line_notification_service import (
+    LineNotificationService,
+    render_notification_preview,
+)
 
 _CONFIG = load_config()
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
@@ -526,3 +529,68 @@ def test_notify_batch_summary_sends_again_when_content_differs(service_and_repos
     assert first is True
     assert second is True
     assert len(client.sent) == 2
+
+
+def test_prices_are_rounded_to_whole_yen_in_notification() -> None:
+    # 要求仕様レビュー対応: 金額は小数点以下を表示せず、整数円(カンマ区切り)で表示する。
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600.5"
+    ).model_copy(
+        update={
+            "fair_value_bear": Decimal("390.0262389877913247479315874"),
+            "fair_value_neutral": Decimal("498"),
+            "fair_value_bull": Decimal("657.3426438760979267386731305"),
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "4,601円" in message
+    assert "4600.5" not in message
+    assert "390円" in message
+    assert "390.0262389877913247479315874" not in message
+    assert "657円" in message
+
+
+def test_yen_amount_with_scientific_notation_decimal_is_not_shown_in_exponent_form() -> None:
+    # Decimal('5.5E+2')のように指数を内部保持する値は、str()するとそのまま
+    # "5.5E+2"と表示されてしまう(to_integral_value()だけでは解消しない)ため回帰確認する。
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(
+        update={
+            "fair_value_neutral": Decimal("550"),
+            "fair_value_methods": [
+                {"method": "target_yield", "fair_value": str(Decimal("5.5E+2"))},
+            ],
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "550円" in message
+    assert "E+2" not in message
+
+
+def test_recommendation_type_shown_as_japanese_label_not_raw_enum(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_full_profit_take_recommendation(recommendation_id="rec-1", full_take_price="4600")
+    repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    message = client.sent[0]
+    assert "全部売却を検討" in message
+    assert "PARTIAL_PROFIT_TAKE" not in message
+    assert "FULL_PROFIT_TAKE" not in message
+
+
+def test_watch_recommendation_type_shown_as_japanese_label() -> None:
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(update={"recommendation_type": RecommendationType.WATCH})
+
+    message = render_notification_preview(rec)
+
+    assert "保有継続(監視)" in message
+    assert "WATCH" not in message
