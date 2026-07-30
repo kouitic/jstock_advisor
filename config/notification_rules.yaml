@@ -18,3 +18,17 @@ buy_candidate_max_notifications_per_run: 5
 # 2026-07追加。要求仕様16節)。falseの場合、0件の日はLINE通知なしとする
 # (運用確認のため日次完了通知が必要な場合のみtrueにする)。
 send_empty_summary: false
+
+# BUY候補バッチ専用の通知設定(BUYパイプライン第3次修正2026-07追加)。
+buy_candidates:
+  # 個別銘柄のデータ取得エラーをLINEへ個別送信するか。falseの場合、
+  # CloudWatch警告ログ+バッチ完了サマリーの内訳件数(data_insufficient)
+  # のみとし、個別LINE送信は行わない(「今日買える銘柄だけを通知する」方針)。
+  notify_data_errors: false
+
+# 運用障害通知の設定(BUYパイプライン第3次修正2026-07追加)。
+# BUY候補の個別データ取得エラー通知(buy_candidates.notify_data_errors)とは
+# 目的が異なるため、意図的に別設定として分離している。
+operations:
+  # バッチ全体が異常終了した場合に運用向け通知を行うか。
+  notify_batch_failure: true

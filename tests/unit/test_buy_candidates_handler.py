@@ -168,10 +168,15 @@ class _FakeNotificationServiceForRanking:
         self.sent_recommendations: list[Recommendation] = []
         self.digest_calls: list[list[Recommendation]] = []
         self.batch_summary_calls: list[dict[str, object]] = []
+        self.evaluate_calls_context: list[object] = []
 
     def evaluate_notification_status(
-        self, recommendation: Recommendation, now: dt.datetime
+        self,
+        recommendation: Recommendation,
+        now: dt.datetime,
+        context: object | None = None,
     ) -> NotificationOutcome:
+        self.evaluate_calls_context.append(context)
         return self._eligibility_by_stock[recommendation.stock_code]
 
     def send_recommendation_notification(
@@ -293,7 +298,7 @@ def test_process_single_candidate_does_not_evaluate_eligibility_per_stock(
     )
 
     class _EligibilityCallRecordingService(_FakeNotificationServiceForRanking):
-        def evaluate_notification_status(self, recommendation, now):
+        def evaluate_notification_status(self, recommendation, now, context=None):
             raise AssertionError(
                 "_process_single_candidateはevaluate_notification_statusを呼ばないはず"
             )
@@ -562,3 +567,332 @@ def test_finalize_batch_passes_send_empty_summary_from_config(tmp_path) -> None:
     handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
 
     assert fake_service.batch_summary_calls[0]["send_empty_summary"] is False
+
+
+def _config_with_notify_data_errors(notify_data_errors: bool):
+    return _CONFIG.model_copy(
+        update={
+            "notification": _CONFIG.notification.model_copy(
+                update={
+                    "buy_candidates": _CONFIG.notification.buy_candidates.model_copy(
+                        update={"notify_data_errors": notify_data_errors}
+                    )
+                }
+            )
+        }
+    )
+
+
+def test_process_single_candidate_data_error_does_not_notify_line_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, caplog
+) -> None:
+    """個別のデータ取得エラーは既定でLINE個別通知しない(BUYパイプライン第3次修正
+    2026-07)。CloudWatch警告ログとdata_insufficientカテゴリへの計上のみ行う。
+    """
+    monkeypatch.setattr(handler_module.WatchlistService, "get_item", lambda self, code: None)
+
+    class _FakeOutcome:
+        data_error = "テストエラー"
+        recommendation = None
+        buy_action = None
+        ranking_group = None
+
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
+    )
+
+    class _NotifyDataErrorAssertingService(_FakeNotificationServiceForRanking):
+        def notify_data_error(self, *args: object, **kwargs: object) -> bool:
+            raise AssertionError("既定ではnotify_data_errorを呼ばないはず")
+
+    fake_service = _NotifyDataErrorAssertingService({})
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda batch_id, category, stock_code=None, ranking_entry=None: captured.update(
+            category=category
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        result = handler_module._process_single_candidate(
+            "2914",
+            "batch-1",
+            _NOW,
+            object(),
+            _config_with_notify_data_errors(False),
+            object(),
+            repo,
+            fake_service,
+        )
+
+    assert result == {"stock_code": "2914", "recommended": False, "notified": False}
+    assert captured["category"] == "data_insufficient"
+    assert "buy_candidate_data_error stock_code=2914" in caplog.text
+    assert "テストエラー" in caplog.text
+
+
+def test_process_single_candidate_data_error_notifies_line_when_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """notify_data_errors=trueの場合のみ、従来通りnotify_data_errorを呼ぶ
+    (運用上どうしても個別通知が必要な場合の明示的なオプトイン)。
+    """
+    monkeypatch.setattr(handler_module.WatchlistService, "get_item", lambda self, code: None)
+
+    class _FakeOutcome:
+        data_error = "テストエラー"
+        recommendation = None
+        buy_action = None
+        ranking_group = None
+
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
+    )
+
+    calls: list[str] = []
+
+    class _NotifyDataErrorRecordingService(_FakeNotificationServiceForRanking):
+        def notify_data_error(self, stock_code: str, *args: object, **kwargs: object) -> bool:
+            calls.append(stock_code)
+            return False
+
+    fake_service = _NotifyDataErrorRecordingService({})
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    handler_module._process_single_candidate(
+        "2914",
+        None,
+        _NOW,
+        object(),
+        _config_with_notify_data_errors(True),
+        object(),
+        repo,
+        fake_service,
+    )
+
+    assert calls == ["2914"]
+
+
+def _add_ranked_candidate(
+    repo: RecommendationRepository,
+    ranking_entries: list[str],
+    eligibility: dict[str, NotificationOutcome],
+    stock_code: str,
+    purchase_score: float,
+    outcome: NotificationOutcome,
+    recommendation_id: str | None = None,
+) -> None:
+    rec = _make_recommendation(
+        stock_code,
+        company_quality_score=60.0,
+        recommendation_id=recommendation_id or f"rec-{stock_code}",
+        buy_action=BuyAction.BUY,
+        purchase_attractiveness_score=purchase_score,
+    )
+    repo.save(rec)
+    ranking_entries.append(handler_module._encode_buy_ranking_entry(rec))
+    eligibility[stock_code] = outcome
+
+
+def test_finalize_batch_promotes_lower_ranked_candidate_when_top_is_suppressed(
+    tmp_path,
+) -> None:
+    """1位が再送抑止で除外されても、下位の適格候補(6位)が繰り上げられ、
+    最終的に上限件数(5件)が送信されることを確認する(BUYパイプライン第3次修正
+    2026-07。従来は上位N件を先に切り出していたため繰り上げが起きなかった)。
+    """
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    eligibility: dict[str, NotificationOutcome] = {}
+
+    # purchase_scoreの降順が = ランキング順位。1位を抑止し、6位まで作る。
+    scores = [100.0, 90.0, 80.0, 70.0, 60.0, 50.0]
+    for rank, (code, score) in enumerate(
+        zip(["1st", "2nd", "3rd", "4th", "5th", "6th"], scores, strict=True), start=1
+    ):
+        status = (
+            NotificationStatus.DUPLICATE_SUPPRESSED if rank == 1 else NotificationStatus.SENT
+        )
+        _add_ranked_candidate(
+            repo,
+            ranking_entries,
+            eligibility,
+            code,
+            score,
+            NotificationOutcome(status=status, sent=False),
+        )
+
+    config = _config_with_max_notifications(5)
+    progress = handler_module.BatchProgress(
+        total=6,
+        completed=6,
+        category_counts={"candidate_not_ranked": 6},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=ranking_entries,
+    )
+    fake_service = _FakeNotificationServiceForRanking(eligibility)
+
+    handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
+
+    digested_codes = [r.stock_code for r in fake_service.digest_calls[0]]
+    assert digested_codes == ["2nd", "3rd", "4th", "5th", "6th"]
+    assert len(digested_codes) == 5
+
+    call = fake_service.batch_summary_calls[0]
+    assert call["buy_candidates_sent_count"] == 5
+    assert call["category_counts"]["suppressed"] == 1
+    assert call["category_counts"]["candidate_not_ranked"] == 0
+
+
+def test_finalize_batch_sends_up_to_max_when_multiple_top_ranked_are_suppressed(
+    tmp_path,
+) -> None:
+    """上位5件のうち3件が抑止されても、下位の適格候補で埋め合わせて上限
+    (5件)まで送信することを確認する。
+    """
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    eligibility: dict[str, NotificationOutcome] = {}
+
+    codes = [f"c{i}" for i in range(1, 9)]  # 8件、上位5件中3件を抑止
+    suppressed_ranks = {1, 2, 3}
+    scores = [80.0 - i for i in range(8)]
+    for rank, (code, score) in enumerate(zip(codes, scores, strict=True), start=1):
+        status = (
+            NotificationStatus.DUPLICATE_SUPPRESSED
+            if rank in suppressed_ranks
+            else NotificationStatus.SENT
+        )
+        _add_ranked_candidate(
+            repo,
+            ranking_entries,
+            eligibility,
+            code,
+            score,
+            NotificationOutcome(status=status, sent=False),
+        )
+
+    config = _config_with_max_notifications(5)
+    progress = handler_module.BatchProgress(
+        total=8,
+        completed=8,
+        category_counts={"candidate_not_ranked": 8},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=ranking_entries,
+    )
+    fake_service = _FakeNotificationServiceForRanking(eligibility)
+
+    handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
+
+    digested_codes = [r.stock_code for r in fake_service.digest_calls[0]]
+    assert digested_codes == ["c4", "c5", "c6", "c7", "c8"]
+    assert fake_service.batch_summary_calls[0]["buy_candidates_sent_count"] == 5
+
+
+def test_finalize_batch_sends_exactly_all_eligible_when_fewer_than_max(tmp_path) -> None:
+    """適格な候補が上限件数(5件)未満(3件)しか無い場合、その3件のみを送信し、
+    存在しない候補を無理に水増ししない。"""
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    eligibility: dict[str, NotificationOutcome] = {}
+
+    for code, score in [("a", 90.0), ("b", 80.0), ("c", 70.0)]:
+        _add_ranked_candidate(
+            repo,
+            ranking_entries,
+            eligibility,
+            code,
+            score,
+            NotificationOutcome(status=NotificationStatus.SENT, sent=False),
+        )
+
+    config = _config_with_max_notifications(5)
+    progress = handler_module.BatchProgress(
+        total=3,
+        completed=3,
+        category_counts={"candidate_not_ranked": 3},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=ranking_entries,
+    )
+    fake_service = _FakeNotificationServiceForRanking(eligibility)
+
+    handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
+
+    digested_codes = [r.stock_code for r in fake_service.digest_calls[0]]
+    assert digested_codes == ["a", "b", "c"]
+    assert fake_service.batch_summary_calls[0]["buy_candidates_sent_count"] == 3
+
+
+def test_finalize_batch_sends_nothing_when_all_candidates_are_suppressed(tmp_path) -> None:
+    """適格な候補が0件の場合は送信しない(digestは空リストで呼ばれる)。"""
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    eligibility: dict[str, NotificationOutcome] = {}
+
+    for code, score in [("a", 90.0), ("b", 80.0)]:
+        _add_ranked_candidate(
+            repo,
+            ranking_entries,
+            eligibility,
+            code,
+            score,
+            NotificationOutcome(status=NotificationStatus.DUPLICATE_SUPPRESSED, sent=False),
+        )
+
+    config = _config_with_max_notifications(5)
+    progress = handler_module.BatchProgress(
+        total=2,
+        completed=2,
+        category_counts={"candidate_not_ranked": 2},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=ranking_entries,
+    )
+    fake_service = _FakeNotificationServiceForRanking(eligibility)
+
+    handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
+
+    assert fake_service.digest_calls == [[]]
+    assert fake_service.batch_summary_calls[0]["buy_candidates_sent_count"] == 0
+    assert fake_service.batch_summary_calls[0]["category_counts"]["suppressed"] == 2
+
+
+def test_finalize_batch_evaluates_with_buy_candidate_batch_context(tmp_path) -> None:
+    """evaluate_notification_statusはBUY_CANDIDATE_BATCHコンテキストで呼ばれる
+    (BUYパイプライン第3次修正2026-07。要手動確認LINE安全弁を抑止するため)。
+    """
+    from jstock_advisor.domain.entities.enums import NotificationContext
+
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    eligibility: dict[str, NotificationOutcome] = {}
+    _add_ranked_candidate(
+        repo,
+        ranking_entries,
+        eligibility,
+        "2914",
+        90.0,
+        NotificationOutcome(status=NotificationStatus.SENT, sent=False),
+    )
+
+    config = _config_with_max_notifications(5)
+    progress = handler_module.BatchProgress(
+        total=1,
+        completed=1,
+        category_counts={"candidate_not_ranked": 1},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=ranking_entries,
+    )
+    fake_service = _FakeNotificationServiceForRanking(eligibility)
+
+    handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
+
+    assert fake_service.evaluate_calls_context == [NotificationContext.BUY_CANDIDATE_BATCH]

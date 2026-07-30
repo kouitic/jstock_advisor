@@ -26,11 +26,12 @@ valuation_anchor・バラつき判定・通知の適正価格レンジに使わ�
 from __future__ import annotations
 
 import statistics
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
 from jstock_advisor.config.models import FairValueUsability, ValuationDispersionThresholds
-from jstock_advisor.domain.entities.enums import ConfidenceLevel
+from jstock_advisor.domain.entities.enums import BuyPriceReliability, ConfidenceLevel
 from jstock_advisor.domain.entities.valuation import (
     FairValueMethodResult,
     FairValueRange,
@@ -49,6 +50,16 @@ _EXTREME_LOW_VS_CURRENT_PRICE_RATIO = Decimal("0.10")
 _EXTREME_LOW_VS_MEDIAN_RATIO = Decimal("0.40")
 _EXTREME_HIGH_VS_MEDIAN_RATIO = Decimal("2.50")
 _BELOW_52_WEEK_LOW_RATIO = Decimal("0.50")
+
+# --- BUYパイプライン第3次修正(2026-07)で追加 ---
+# 有効な方式が2件しかない場合、外れ値検知は「相手が唯一の比較対象」になるため
+# 双方を機械的に外れ値とみなし合い、有効な方式が0件になる危険がある。
+# 3件以上ある場合のみ外れ値検知を実行する。
+_MIN_METHODS_FOR_OUTLIER_DETECTION = 3
+# 外れ値除外後、比較・購入判断に使える方式がこの件数未満になった場合、
+# 除外そのものが信頼できないと判断し、除外前の結果へフォールバックする。
+_MIN_REMAINING_METHODS_AFTER_FILTER = 2
+_TOO_FEW_METHODS_AFTER_OUTLIER_FILTER = "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER"
 
 
 def _detect_outlier(
@@ -115,34 +126,63 @@ def _detect_outlier(
     return None
 
 
+@dataclass(frozen=True)
+class OutlierFilterResult:
+    """apply_outlier_filters()の戻り値(BUYパイプライン第3次修正2026-07で追加)。
+
+    reliability/blocking_reasonは、外れ値除外そのものが信頼できない場合
+    (除外後に残る方式が1件以下になる場合)にLOW/理由コードを持つ。呼び出し側
+    (buy_signal_service.py)はこれを買付価格信頼性ゲート(determine_buy_price_
+    reliability)へそのまま伝え、無理に少数の値だけで購入判断を確定させない。
+    """
+
+    results: list[FairValueMethodResult]
+    excluded_count: int = 0
+    remaining_count: int = 0
+    reliability: BuyPriceReliability = BuyPriceReliability.OK
+    blocking_reason: str | None = None
+
+
 def apply_outlier_filters(
     method_results: list[FairValueMethodResult],
     current_price: Decimal | None = None,
     low_52_week: Decimal | None = None,
-) -> list[FairValueMethodResult]:
+) -> OutlierFilterResult:
     """下方(および保険的に上方)の外れ値を集計から除外する(要求仕様10節)。
 
     `apply_dcf_divergence_filter`がDCF専用・上方乖離専用なのに対し、こちらは
     方式を問わず、現在値・他方式中央値・52週安値との比較で機械的に検出できる
     外れ値を除外する。除外理由は`ValuationExclusionReason`として構造化し、
     `exclusion_reason`(既存の文字列フィールド)にも同じ内容を人が読める形で残す。
-    有効な方式が2件未満の場合は比較対象が無いため何もしない。
+
+    --- BUYパイプライン第3次修正(2026-07)で修正 ---
+    有効な方式が3件未満(=2件以下)の場合は外れ値検知そのものを行わない
+    (2件では「相手が唯一の比較対象」になり、双方が互いを外れ値とみなし合って
+    有効な方式が0件になりうるため)。methods_used_count<=2の低信頼シグナルは
+    既存のbuy_price_reliability.py側のTOO_FEW_VALUATION_METHODSゲートに委ねる。
+    また、3件以上で外れ値検知を行った結果、残る方式が1件以下になった場合
+    (例: 3方式が互いを外れ値とみなし合い全滅する)、その除外結果は採用せず
+    除外前の結果へフォールバックし、明示的な低信頼シグナルを返す。
     """
     applicable = [r for r in method_results if r.applicable and r.fair_value is not None]
-    if len(applicable) < 2:
-        return method_results
+    if len(applicable) < _MIN_METHODS_FOR_OUTLIER_DETECTION:
+        return OutlierFilterResult(
+            results=method_results, excluded_count=0, remaining_count=len(applicable)
+        )
 
-    result: list[FairValueMethodResult] = []
+    filtered: list[FairValueMethodResult] = []
+    excluded_count = 0
     for r in method_results:
         if not r.applicable or r.fair_value is None:
-            result.append(r)
+            filtered.append(r)
             continue
         other_values = [o.fair_value for o in applicable if o.method != r.method and o.fair_value]
         exclusion = _detect_outlier(r.fair_value, other_values, current_price, low_52_week)
         if exclusion is None:
-            result.append(r)
+            filtered.append(r)
             continue
-        result.append(
+        excluded_count += 1
+        filtered.append(
             r.model_copy(
                 update={
                     "applicable": False,
@@ -152,7 +192,20 @@ def apply_outlier_filters(
                 }
             )
         )
-    return result
+
+    remaining_count = len(applicable) - excluded_count
+    if remaining_count < _MIN_REMAINING_METHODS_AFTER_FILTER:
+        return OutlierFilterResult(
+            results=method_results,
+            excluded_count=0,
+            remaining_count=len(applicable),
+            reliability=BuyPriceReliability.LOW,
+            blocking_reason=_TOO_FEW_METHODS_AFTER_OUTLIER_FILTER,
+        )
+
+    return OutlierFilterResult(
+        results=filtered, excluded_count=excluded_count, remaining_count=remaining_count
+    )
 
 
 def build_valuation_summary(
@@ -177,9 +230,9 @@ def build_valuation_summary(
     ]
     all_values = [r.fair_value for r in normalized_results if r.fair_value is not None]
 
-    filtered_results = apply_outlier_filters(normalized_results, current_price, low_52_week)
+    outlier_filter_result = apply_outlier_filters(normalized_results, current_price, low_52_week)
     base_range = build_fair_value_range(
-        filtered_results, aggregation_method, method_weights, usability_config
+        outlier_filter_result.results, aggregation_method, method_weights, usability_config
     )
 
     used_values = [r.fair_value for r in base_range.methods_used if r.fair_value is not None]
@@ -188,6 +241,7 @@ def build_valuation_summary(
             update={
                 "valuation_min": min(all_values) if all_values else None,
                 "valuation_max": max(all_values) if all_values else None,
+                "outlier_filter_blocking_reason": outlier_filter_result.blocking_reason,
             }
         )
 
@@ -207,6 +261,7 @@ def build_valuation_summary(
             "methods_used_count": len(used_values),
             "decision_valuation_min": decision_min,
             "decision_valuation_max": decision_max,
+            "outlier_filter_blocking_reason": outlier_filter_result.blocking_reason,
         }
     )
 

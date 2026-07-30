@@ -77,3 +77,10 @@ class FairValueRange(ImmutableSnapshot):
     # そのエイリアスとして通知層が明示的に参照できるようにする ---
     decision_valuation_min: Decimal | None = None
     decision_valuation_max: Decimal | None = None
+
+    # --- BUYパイプライン第3次修正(2026-07)で追加。要求仕様: 外れ値フィルタ適用後
+    # に比較・購入判断へ使える方式が1件以下になった場合(3方式が互いを外れ値と
+    # みなし合う等)、除外前の結果へフォールバックしたうえで、その事実を明示的な
+    # 低信頼シグナルとして買付価格信頼性ゲート(buy_price_reliability.py)へ
+    # 伝える ---
+    outlier_filter_blocking_reason: str | None = None

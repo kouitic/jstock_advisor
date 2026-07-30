@@ -512,3 +512,20 @@ class EarningsDateStatus(StrEnum):
     CONFIRMED = "CONFIRMED"
     STALE_PAST_DATE = "STALE_PAST_DATE"
     UNAVAILABLE = "UNAVAILABLE"
+
+
+class NotificationContext(StrEnum):
+    """evaluate_notification_statusの呼び出し元コンテキスト(BUYパイプライン第3次修正)。
+
+    データ品質アラートでrequires_manual_review=Trueとなった場合、通常は
+    notify_manual_review_required()で「要手動確認」LINEを即時送信する安全弁が
+    働く。しかしBUY候補バッチ(BUY_CANDIDATE_BATCH)では「今日、現在の株価で
+    実際に購入条件を満たした銘柄だけ」を通知する方針のため、この安全弁を
+    LINE送信させず、data_quality_blocked=Trueとして黙って除外する
+    (異常は監査ログには引き続き記録される)。SELL/保有銘柄レビュー系
+    (HOLDING_REVIEW)・その他(DEFAULT)は従来通りLINE送信する。
+    """
+
+    DEFAULT = "DEFAULT"
+    BUY_CANDIDATE_BATCH = "BUY_CANDIDATE_BATCH"
+    HOLDING_REVIEW = "HOLDING_REVIEW"
