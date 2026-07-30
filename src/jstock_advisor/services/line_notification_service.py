@@ -50,12 +50,19 @@ _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType]
     RecommendationType.SELL: NotificationType.SELL_SIGNAL,
     RecommendationType.URGENT_REVIEW: NotificationType.SELL_SIGNAL,
     # --- 決算直前・直後ルール(要求仕様14節)で追加 ---
-    RecommendationType.WATCH_BEFORE_EARNINGS: NotificationType.WATCHLIST_BUY_SIGNAL,
+    # 2026-07仕様レビュー対応: WATCH_BEFORE_EARNINGSは利確判定エンジンのWATCH抑制
+    # 専用として使う(買い候補側のrecommend_earnings_aware_actionは実際には未接続の
+    # ため競合しない)。買い候補向けのフォーマット(予想配当利回り等)を保有銘柄の
+    # 通知に誤って使わないよう、PROFIT_TAKING_SIGNALへ送る。
+    RecommendationType.WATCH_BEFORE_EARNINGS: NotificationType.PROFIT_TAKING_SIGNAL,
     RecommendationType.PARTIAL_RISK_REDUCTION: NotificationType.PROFIT_TAKING_SIGNAL,
     RecommendationType.REVIEW_AFTER_EARNINGS: NotificationType.PROFIT_TAKING_SIGNAL,
     # --- 売却判定エンジンの再設計(2026-07仕様)で追加 ---
     RecommendationType.REVIEW: NotificationType.SELL_SIGNAL,
     RecommendationType.MANUAL_REVIEW_REQUIRED: NotificationType.MANUAL_REVIEW_REQUIRED,
+    # --- 利確判定エンジン再レビュー対応(2026-07)で追加(要求仕様§4) ---
+    RecommendationType.REVIEW_BEFORE_EARNINGS: NotificationType.PROFIT_TAKING_SIGNAL,
+    RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW: NotificationType.PROFIT_TAKING_SIGNAL,
 }
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
@@ -82,17 +89,22 @@ def _yen(value: Decimal | int | float | str | None) -> str:
 _RECOMMENDATION_TYPE_LABELS: dict[RecommendationType, str] = {
     RecommendationType.BUY: "買い推奨",
     RecommendationType.WATCH_BUY: "買い候補(監視)",
-    RecommendationType.WATCH_BEFORE_EARNINGS: "買い候補(決算発表待ち)",
     RecommendationType.HOLD: "保有継続",
     RecommendationType.WATCH: "保有継続(監視)",
-    RecommendationType.REVIEW: "保有継続(要確認)",
-    RecommendationType.REVIEW_AFTER_EARNINGS: "保有継続(決算後要確認)",
-    RecommendationType.MANUAL_REVIEW_REQUIRED: "保有継続(要人的確認)",
+    # 2026-07仕様レビュー対応: WATCH_BEFORE_EARNINGSは利確判定エンジン専用のため
+    # 「保有継続」系の語彙を使う(以前の「買い候補」表記は買い候補通知向けの
+    # 誤った流用だった)。
+    RecommendationType.WATCH_BEFORE_EARNINGS: "保有継続(決算待ち)",
+    RecommendationType.REVIEW: "要確認",
+    RecommendationType.REVIEW_AFTER_EARNINGS: "要確認(決算後)",
+    RecommendationType.REVIEW_BEFORE_EARNINGS: "要確認(決算前)",
+    RecommendationType.MANUAL_REVIEW_REQUIRED: "人的確認が必要",
     RecommendationType.PARTIAL_PROFIT_TAKE: "一部売却を検討",
-    RecommendationType.PARTIAL_RISK_REDUCTION: "一部売却を検討(決算前縮小)",
+    RecommendationType.PARTIAL_RISK_REDUCTION: "一部縮小を検討",
     RecommendationType.FULL_PROFIT_TAKE: "全部売却を検討",
-    RecommendationType.SELL: "全部売却を検討",
-    RecommendationType.URGENT_REVIEW: "全部売却を検討(至急確認)",
+    RecommendationType.SELL: "売却を検討",
+    RecommendationType.URGENT_REVIEW: "至急確認",
+    RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW: "保有比率を確認",
 }
 
 
@@ -341,6 +353,29 @@ def _fair_value_range_lines(recommendation: Recommendation) -> list[str]:
     return lines
 
 
+def _current_price_position_lines(recommendation: Recommendation) -> list[str]:
+    """現在株価が中立/強気適正価格に対してどの位置にあるかを表示する(要求仕様§1)。
+
+    以前は監視開始価格(閾値ベースの価格)を使って割高率を計算しており、どの銘柄でも
+    ほぼ同じ%になる不具合があった。必ず実際の現在株価とfair_value_neutral/bullの
+    比率から算出する。
+    """
+    lines: list[str] = []
+    neutral_pct = recommendation.current_price_vs_neutral_fair_value_pct
+    bull_pct = recommendation.current_price_vs_bull_fair_value_pct
+    if neutral_pct is not None:
+        if neutral_pct >= 0:
+            lines.append(f"・中立適正価格を{neutral_pct:.1f}%上回る")
+        else:
+            lines.append(f"・中立適正価格を{abs(neutral_pct):.1f}%下回る")
+    if bull_pct is not None:
+        if bull_pct >= 0:
+            lines.append(f"・強気適正価格を{bull_pct:.1f}%上回る")
+        else:
+            lines.append(f"・強気適正価格を{abs(bull_pct):.1f}%下回る(強気シナリオの想定範囲内)")
+    return lines
+
+
 def _dividend_increase_lines(recommendation: Recommendation) -> list[str]:
     lines: list[str] = []
     years = recommendation.consecutive_actual_dividend_increase_years
@@ -383,19 +418,14 @@ def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
         lines.append("")
 
     sp = recommendation.sell_prices
-    if sp is not None and sp.partial_profit_start_price is not None:
-        p = sp.partial_profit_start_price
-        excess_pct = (
-            float(p.price / recommendation.fair_value_neutral - 1) * 100
-            if recommendation.fair_value_neutral is not None
-            and recommendation.fair_value_neutral > 0
-            else None
-        )
+    position_lines = _current_price_position_lines(recommendation)
+    if position_lines:
+        lines.append("現在株価の位置:")
+        lines.extend(position_lines)
+        lines.append("")
+    elif sp is not None and sp.partial_profit_start_price is not None:
         lines.append("割高懸念:")
-        if excess_pct is not None:
-            lines.append(f"現在値は中立適正価格を{excess_pct:.1f}%上回る")
-        else:
-            lines.append(f"監視開始水準({_price_display(p)})に到達")
+        lines.append(f"監視開始水準({_price_display(sp.partial_profit_start_price)})に到達")
         lines.append("")
 
     if recommendation.counter_factors:
@@ -445,9 +475,46 @@ def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
     return "\n".join(lines)
 
 
+def _format_earnings_suppressed_message(recommendation: Recommendation) -> str:
+    """決算直前のためPARTIAL/FULL_PROFIT_TAKE提案を保留した場合の通知
+    (要求仕様§4)。通常のPARTIAL/FULL向けの価格提案は表示しない
+    (sell_prices自体がサービス層で空にされている)。
+    """
+    lines = [
+        f"【要確認・決算直前】{recommendation.stock_code} {recommendation.stock_name}",
+        "判定:",
+        _recommendation_type_label(recommendation.recommendation_type),
+        "",
+        f"【保有状況】{recommendation.shares_at_recommendation}株 / "
+        f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
+        f"現在 {_yen(recommendation.price_at_recommendation)}",
+        "",
+    ]
+    if recommendation.not_yet_action_reasons or recommendation.reasons:
+        lines.append("理由:")
+        for r in recommendation.not_yet_action_reasons or recommendation.reasons:
+            lines.append(f"・{r}")
+        lines.append("")
+    if recommendation.next_earnings_date:
+        lines.append(f"次回決算: {recommendation.next_earnings_date}")
+    lines.append(
+        "判断: 適正価格上は割高な可能性がありますが、決算内容を確認後に再評価します。"
+    )
+    lines.extend(_confirmation_lines(recommendation))
+    lines.append(f"判定の信頼度: {recommendation.confidence.value}")
+    lines.append(f"通知ID: {recommendation.recommendation_id}")
+    lines.append(_DISCLAIMER)
+    return "\n".join(lines)
+
+
 def _format_profit_taking_message(recommendation: Recommendation) -> str:
-    if recommendation.recommendation_type == RecommendationType.WATCH:
+    if recommendation.recommendation_type in (
+        RecommendationType.WATCH,
+        RecommendationType.WATCH_BEFORE_EARNINGS,
+    ):
         return _format_watch_profit_taking_message(recommendation)
+    if recommendation.recommendation_type == RecommendationType.REVIEW_BEFORE_EARNINGS:
+        return _format_earnings_suppressed_message(recommendation)
 
     lines = [
         f"【利確検討】{recommendation.stock_code} {recommendation.stock_name}",

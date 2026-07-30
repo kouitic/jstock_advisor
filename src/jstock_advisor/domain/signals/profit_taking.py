@@ -96,6 +96,17 @@ class ProfitTakingConditionInputs:
     # 判定できない場合はNone(判定不能をFalse=反映していない、と扱わない)。
     fair_value_reflects_latest_earnings: bool | None = None
 
+    # --- 利確判定エンジン再レビュー対応(2026-07)で追加(要求仕様§3・§5・§7) ---
+    # 業種別適正価格モデルが適用済みか(現行データソースでは恒久的にFalseとなる
+    # ことが多い。適正価格単独での強い判定を許すゲートの1つ)。
+    industry_model_applied: bool = False
+    # 保有株数・売買単位から一部売却が実行可能か。
+    partial_sale_executable: bool = True
+    # 次回決算までの営業日数(取得できない場合はNone)。
+    days_to_next_earnings_business_days: int | None = None
+    # 増益・増配等、利確判定に対する強い反対材料があるか。
+    has_strong_counter_material: bool = False
+
 
 @dataclass(frozen=True)
 class ProfitTakingResult:
@@ -111,6 +122,11 @@ class ProfitTakingResult:
     # --- 利確判定レビュー対応で追加: 信頼度計算に必要な補助情報 ---
     independent_condition_count: int
     fair_value_used_as_sole_strong_basis: bool
+    # --- 利確判定エンジン再レビュー対応(2026-07)で追加 ---
+    # 現在株価が中立/強気適正価格をどれだけ超過(または下回る)しているか(%)。
+    # 監視開始価格等の閾値ベースの価格ではなく、必ず実際の現在株価から算出する。
+    current_price_vs_neutral_fair_value_pct: float | None
+    current_price_vs_bull_fair_value_pct: float | None
 
 
 def compute_unrealized_pnl(
@@ -151,16 +167,58 @@ def _level_from_gain(gain_pct: float, config: ProfitTakingRulesConfig) -> _Level
 
 
 def _level_from_fair_value_excess(
-    excess_pct: float | None, config: ProfitTakingRulesConfig
+    current_price: Decimal,
+    fv_range: FairValueRange | None,
+    config: ProfitTakingRulesConfig,
 ) -> _Level:
-    if excess_pct is None:
+    """適正価格ベースの候補水準(要求仕様§6: 強気適正価格を主軸とする)。
+
+    中立適正価格以下なら懸念なし(HOLD)。中立超過〜強気適正価格以下はWATCH。
+    強気適正価格をfair_value_excess_partial_pct(既定25%)以上超過でPARTIAL、
+    fair_value_excess_full_pct(既定40%)以上超過でFULLの候補水準とする。
+    ここでの「候補水準」は価格フィールド算出(_compute_sell_prices)専用の補助値であり、
+    実際の判定レベル自体は複数条件・MEDIUM信頼度ゲート等を経て別途決定する。
+    """
+    if (
+        fv_range is None
+        or not fv_range.usable_for_trading_judgment
+        or fv_range.neutral is None
+        or fv_range.neutral <= 0
+    ):
         return _Level.HOLD
+    if current_price <= fv_range.neutral:
+        return _Level.HOLD
+    if fv_range.bull is None or fv_range.bull <= 0:
+        return _Level.WATCH
     t = config.thresholds
-    if excess_pct >= t.fair_value_excess_full_pct:
+    bull_excess_pct = float(current_price / fv_range.bull - 1) * 100
+    if bull_excess_pct >= t.fair_value_excess_full_pct:
         return _Level.FULL
-    if excess_pct >= t.fair_value_excess_partial_pct:
+    if bull_excess_pct >= t.fair_value_excess_partial_pct:
         return _Level.PARTIAL
-    return _Level.HOLD
+    return _Level.WATCH
+
+
+def _fair_value_excess_pcts(
+    current_price: Decimal, fv_range: FairValueRange | None
+) -> tuple[float | None, float | None]:
+    """現在株価が中立/強気適正価格をどれだけ超過しているか(%)。
+
+    要求仕様§1: 監視開始価格等の閾値ベースの価格ではなく、必ず実際の現在株価を使う。
+    """
+    if fv_range is None or current_price <= 0:
+        return None, None
+    neutral_pct = (
+        float(current_price / fv_range.neutral - 1) * 100
+        if fv_range.neutral is not None and fv_range.neutral > 0
+        else None
+    )
+    bull_pct = (
+        float(current_price / fv_range.bull - 1) * 100
+        if fv_range.bull is not None and fv_range.bull > 0
+        else None
+    )
+    return neutral_pct, bull_pct
 
 
 def _apply_mitigating_factors(
@@ -208,7 +266,7 @@ def _apply_mitigating_factors(
 
 def _count_partial_conditions(
     pnl: UnrealizedPnl,
-    fair_value_excess_pct: float | None,
+    bull_fair_value_excess_pct: float | None,
     current_total_yield_pct: float | None,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
@@ -217,6 +275,7 @@ def _count_partial_conditions(
     """一部利確(PARTIAL)の根拠となる独立条件を数える(要求仕様9節)。
 
     含み益率単独ではPARTIALへ到達できない設計(min_conditions_for_partial以上が必要)。
+    bull_fair_value_excess_pctは強気適正価格に対する現在値の超過率(要求仕様§6)。
     """
     t = config.thresholds
     is_growth = StockType.GROWTH in inputs.stock_types
@@ -226,22 +285,24 @@ def _count_partial_conditions(
         reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%が一部利確閾値に到達")
 
     # FairValueRangeが渡されていない場合(呼び出し側が単純なスカラーfair_valueのみを
-    # 使っている場合)は従来通りfair_value_excess_pctをそのまま使う。FairValueRangeが
+    # 使っている場合)は従来通りbull_fair_value_excess_pctをそのまま使う。FairValueRangeが
     # 渡されている場合のみ、使用不可(usable_for_trading_judgment=False)なら無視する
     # (要求仕様7節: 適正価格を売買判定に使用不可の場合は使用しない)。
     fv_range = inputs.fair_value_range
     fv_condition_usable = fv_range is None or fv_range.usable_for_trading_judgment
-    if (
+    bull_excess_triggered = (
         fv_condition_usable
-        and fair_value_excess_pct is not None
-        and fair_value_excess_pct >= t.fair_value_excess_partial_pct
-    ):
-        reasons.append(f"適正価格レンジ上限を{fair_value_excess_pct:.1f}%超過")
-
-    # 中立適正価格基準の期待リターンが閾値以下だが、強い条件としての要件(手法数・
-    # 手法間一致度・信頼度等)を満たさない場合は、PARTIALの根拠の1つとしてのみ数える
-    # (要求仕様レビュー対応: 中立適正価格単独でFULLの強条件にしない)。
-    if weak_fair_value_forward_return_reason is not None:
+        and bull_fair_value_excess_pct is not None
+        and bull_fair_value_excess_pct >= t.fair_value_excess_partial_pct
+    )
+    if bull_excess_triggered:
+        reasons.append(f"強気適正価格を{bull_fair_value_excess_pct:.1f}%超過")
+    elif weak_fair_value_forward_return_reason is not None:
+        # 中立適正価格基準の期待リターンが閾値以下だが、強い条件としての要件(手法数・
+        # 手法間一致度・信頼度等)を満たさない場合は、PARTIALの根拠の1つとしてのみ数える
+        # (要求仕様レビュー対応: 中立適正価格単独でFULLの強条件にしない)。
+        # bull_excess_triggeredと同じ適正価格データに由来する非独立の観測のため、
+        # bull_excess条件が既に成立している場合は二重計上しない(要求仕様§5レビュー対応)。
         reasons.append(weak_fair_value_forward_return_reason)
 
     # 成長株は業績予想の下方修正・急激な業績悪化があった場合のみ「成長鈍化」を条件化する
@@ -272,12 +333,75 @@ def _count_partial_conditions(
     return len(reasons), reasons
 
 
+def _extra_action_gates_met(
+    inputs: ProfitTakingConditionInputs,
+    min_earnings_business_days: int,
+) -> bool:
+    """適正価格ベースの強い判定(PARTIAL/FULL)に共通で要求する追加ゲート
+    (要求仕様§5)。実行可能性・タイミング・反対材料の観点から、適正価格の
+    数値条件だけでは強い判定を出さない。
+
+    含み益率の基準(§5「含み益率が一部利確基準以上」)はMEDIUM信頼度専用の
+    _fair_value_partial_gate_metのみで課す。HIGH信頼度の強いFULL条件
+    (_fair_value_strong_condition)は、含み益がわずかでも適正価格が著しく
+    乖離していれば成立するという既存の設計を維持するため、ここには含めない。
+    """
+    return (
+        inputs.industry_model_applied
+        and inputs.days_to_next_earnings_business_days is not None
+        and inputs.days_to_next_earnings_business_days >= min_earnings_business_days
+        and inputs.partial_sale_executable
+        and not inputs.has_strong_counter_material
+    )
+
+
+def _fair_value_partial_gate_met(
+    current_price: Decimal,
+    pnl: UnrealizedPnl,
+    inputs: ProfitTakingConditionInputs,
+    config: ProfitTakingRulesConfig,
+) -> tuple[bool, float | None]:
+    """MEDIUM信頼度でも適正価格(強気基準)ベースでPARTIAL相当を許可するための
+    厳格ゲート(要求仕様§5)。列挙された条件をすべて満たす場合にのみTrueを返す。
+    満たさない場合はWATCHへ格下げする(呼び出し側の責務)。
+    """
+    fv_range = inputs.fair_value_range
+    if fv_range is None or not fv_range.usable_for_trading_judgment:
+        return False, None
+    if fv_range.bull is None or fv_range.bull <= 0:
+        return False, None
+    bull_excess_pct = float(current_price / fv_range.bull - 1) * 100
+    t = config.thresholds
+    cbj = config.condition_based_judgment
+    if bull_excess_pct < t.fair_value_excess_partial_pct:
+        return False, bull_excess_pct
+
+    spread_ratio = (
+        float(fv_range.bull / fv_range.bear)
+        if fv_range.bear is not None and fv_range.bear > 0
+        else None
+    )
+    gate_ok = (
+        inputs.fair_value_reflects_latest_earnings is True
+        and len(fv_range.methods_used) >= cbj.min_fair_value_methods_for_partial
+        and spread_ratio is not None
+        and spread_ratio <= cbj.max_fair_value_spread_ratio_for_partial
+        # 要求仕様§5「含み益率が一部利確基準以上」: MEDIUM信頼度専用ゲートでのみ課す。
+        and pnl.unrealized_pnl_pct >= t.unrealized_gain_partial_pct
+        and _extra_action_gates_met(
+            inputs, cbj.min_business_days_to_earnings_for_fair_value_action
+        )
+    )
+    return gate_ok, bull_excess_pct
+
+
 def _fair_value_strong_condition(
     current_price: Decimal,
+    pnl: UnrealizedPnl,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
 ) -> tuple[str | None, str | None]:
-    """適正価格基準の強いFULL条件を評価する(要求仕様レビュー対応)。
+    """適正価格基準の強いFULL条件を評価する(要求仕様レビュー対応・§5)。
 
     中立適正価格基準の期待リターンが閾値以下であっても、それだけではFULLの強い
     条件にしない。以下をすべて満たす場合にのみ強い条件(1件目の戻り値)として扱う:
@@ -288,6 +412,10 @@ def _fair_value_strong_condition(
     - 手法間乖離(bull/bear)が設定値以下
     - 業績予想の鈍化または下方修正が確認されている
     - 適正価格入力値が最新決算を反映している
+    - 業種別適正価格モデル適用済み・決算まで一定営業日以上・一部売却実行可能・
+      強い反対材料がない(要求仕様§5の追加ゲート。含み益率の基準はMEDIUM信頼度専用の
+      _fair_value_partial_gate_metのみで課し、含み益がわずかでも適正価格の乖離だけで
+      成立するというHIGH信頼度側の既存設計は維持する)
 
     要件を満たさない場合は、2件目の戻り値としてPARTIAL候補用の弱い理由文を返す
     (中立適正価格ベースの期待リターンが閾値以下、という観測自体は無かったことに
@@ -329,6 +457,9 @@ def _fair_value_strong_condition(
         and spread_ratio <= cbj.max_fair_value_spread_ratio_for_full
         and (inputs.guidance_revision_disclosed or inputs.severe_earnings_decline)
         and inputs.fair_value_reflects_latest_earnings is True
+        and _extra_action_gates_met(
+            inputs, cbj.min_business_days_to_earnings_for_fair_value_action
+        )
     )
     if strong_ok:
         return (
@@ -404,7 +535,7 @@ def _count_full_moderate_conditions(
         and fair_value_excess_pct is not None
         and fair_value_excess_pct >= t.fair_value_excess_full_pct
     ):
-        reasons.append(f"適正価格レンジ上限を{fair_value_excess_pct:.1f}%超過(全株利確水準)")
+        reasons.append(f"強気適正価格を{fair_value_excess_pct:.1f}%超過(全株利確水準)")
 
     if (
         not is_growth
@@ -487,7 +618,7 @@ def _price_range(price: Decimal, width_pct: float = 1.5) -> tuple[Decimal, Decim
 def _compute_sell_prices(
     current_price: Decimal,
     average_purchase_price: Decimal,
-    fair_value: Decimal | None,
+    fair_value_range: FairValueRange | None,
     forecast_annual_dividend_per_share: Decimal | None,
     annual_benefit_value_at_min_lot: Decimal | None,
     benefit_min_shares_required: int | None,
@@ -513,6 +644,11 @@ def _compute_sell_prices(
         return SellPriceLevels()
 
     t = config.thresholds
+    fv_bull = (
+        fair_value_range.bull
+        if fair_value_range is not None and fair_value_range.bull is not None
+        else None
+    )
 
     gain_partial_price = round_yen(
         average_purchase_price * (1 + Decimal(str(t.unrealized_gain_partial_pct)) / 100)
@@ -521,14 +657,16 @@ def _compute_sell_prices(
         average_purchase_price * (1 + Decimal(str(t.unrealized_gain_full_pct)) / 100)
     )
 
+    # 一部/全部利確の価格候補は、要求仕様§6により強気適正価格を主軸として算出する
+    # (中立適正価格ベースの旧算出は割高判定の起点としてのみ使う)。
     fv_partial_price = (
-        round_yen(fair_value * (1 + Decimal(str(t.fair_value_excess_partial_pct)) / 100))
-        if fair_value is not None
+        round_yen(fv_bull * (1 + Decimal(str(t.fair_value_excess_partial_pct)) / 100))
+        if fv_bull is not None
         else None
     )
     fv_full_price = (
-        round_yen(fair_value * (1 + Decimal(str(t.fair_value_excess_full_pct)) / 100))
-        if fair_value is not None
+        round_yen(fv_bull * (1 + Decimal(str(t.fair_value_excess_full_pct)) / 100))
+        if fv_bull is not None
         else None
     )
 
@@ -546,7 +684,7 @@ def _compute_sell_prices(
     if final_level == _Level.WATCH:
         partial_field = _wrap(
             partial_start,
-            f"含み益{t.unrealized_gain_partial_pct}%到達、または適正価格超過"
+            f"含み益{t.unrealized_gain_partial_pct}%到達、または強気適正価格超過"
             f"{t.fair_value_excess_partial_pct}%到達の早い方(監視開始水準。"
             "即時売却を意味しない)",
             basis=PriceFieldBasis.MONITORING_ONLY_NOT_A_SELL_TARGET,
@@ -575,7 +713,7 @@ def _compute_sell_prices(
 
     partial_field = _wrap(
         partial_start,
-        f"含み益{t.unrealized_gain_partial_pct}%到達、または適正価格超過"
+        f"含み益{t.unrealized_gain_partial_pct}%到達、または強気適正価格超過"
         f"{t.fair_value_excess_partial_pct}%到達の早い方",
         basis=(
             PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE
@@ -586,7 +724,7 @@ def _compute_sell_prices(
     )
     recommended_field = _wrap(
         recommended,
-        "利確検討水準に実際に到達した軸(含み益・適正価格超過)から算出した指値候補レンジ。"
+        "利確検討水準に実際に到達した軸(含み益・強気適正価格超過)から算出した指値候補レンジ。"
         "総合利回り低下のみが根拠の場合は具体的な指値を算出しない",
         basis=recommended_basis,
         basis_type=recommended_basis_type,
@@ -614,7 +752,7 @@ def _compute_sell_prices(
     )
     full_field = _wrap(
         full_take,
-        f"含み益{t.unrealized_gain_full_pct}%かつ適正価格超過{t.fair_value_excess_full_pct}%の"
+        f"含み益{t.unrealized_gain_full_pct}%かつ強気適正価格超過{t.fair_value_excess_full_pct}%の"
         "両方を満たす、より強い確信が持てる参考水準(現在値を上回っていても矛盾ではない)",
         basis_type=full_take_basis_type,
     )
@@ -688,7 +826,6 @@ def evaluate_profit_taking(
     total_purchase_amount: Decimal,
     cumulative_dividend_received: Decimal,
     cumulative_benefit_value_received: Decimal,
-    fair_value: Decimal | None,
     current_total_yield_pct: float | None,
     forecast_annual_dividend_per_share: Decimal | None,
     mitigating_inputs: MitigatingFactorInputs,
@@ -716,11 +853,8 @@ def evaluate_profit_taking(
         cumulative_benefit_value_received,
     )
 
-    fair_value_excess_pct = (
-        float(current_price / fair_value - 1) * 100
-        if fair_value is not None and fair_value > 0
-        else None
-    )
+    fv_range = condition_inputs.fair_value_range
+    neutral_excess_pct, bull_excess_pct = _fair_value_excess_pcts(current_price, fv_range)
 
     # 「利確」は含み益があって初めて成立する概念のため、含み損の状態では
     # 適正価格超過・総合利回り低下・その他の条件による判定は考慮しない
@@ -732,7 +866,7 @@ def evaluate_profit_taking(
     # 適正価格超過だけで指値候補が出てしまわないよう、level_fvもHOLDに固定する。
     level_gain = _level_from_gain(pnl.unrealized_pnl_pct, config)
     level_fv = (
-        _level_from_fair_value_excess(fair_value_excess_pct, config)
+        _level_from_fair_value_excess(current_price, fv_range, config)
         if has_unrealized_gain
         else _Level.HOLD
     )
@@ -741,11 +875,14 @@ def evaluate_profit_taking(
     fair_value_used_as_sole_strong_basis = False
     if has_unrealized_gain:
         fv_strong_reason, fv_weak_reason = _fair_value_strong_condition(
-            current_price, condition_inputs, config
+            current_price, pnl, condition_inputs, config
+        )
+        fv_partial_gate_ok, _ = _fair_value_partial_gate_met(
+            current_price, pnl, condition_inputs, config
         )
         partial_count, partial_reasons = _count_partial_conditions(
             pnl,
-            fair_value_excess_pct,
+            bull_excess_pct,
             current_total_yield_pct,
             condition_inputs,
             config,
@@ -755,10 +892,11 @@ def evaluate_profit_taking(
             current_price, pnl, condition_inputs, config, fv_strong_reason
         )
         full_moderate_count, full_moderate_reasons = _count_full_moderate_conditions(
-            pnl, fair_value_excess_pct, current_total_yield_pct, condition_inputs, config
+            pnl, bull_excess_pct, current_total_yield_pct, condition_inputs, config
         )
     else:
         fv_strong_reason = None
+        fv_partial_gate_ok = False
         partial_count, partial_reasons = 0, []
         full_strong_reasons = []
         full_moderate_count, full_moderate_reasons = 0, []
@@ -770,16 +908,33 @@ def evaluate_profit_taking(
         fair_value_used_as_sole_strong_basis = (
             len(full_strong_reasons) == 1 and full_strong_reasons[0] == fv_strong_reason
         )
-    elif partial_count >= cbj.min_conditions_for_partial:
+    elif partial_count >= cbj.min_conditions_for_partial or fv_partial_gate_ok:
         raw_level = _Level.PARTIAL
         triggered_reasons.extend(partial_reasons)
+        if fv_partial_gate_ok and bull_excess_pct is not None:
+            gate_reason = (
+                f"強気適正価格を{bull_excess_pct:.1f}%超過しており、業種別モデル適用・"
+                "決算までの余裕・一部売却の実行可能性・反対材料の不在を含め複数条件で確認できる"
+            )
+            if gate_reason not in triggered_reasons:
+                triggered_reasons.append(gate_reason)
     elif (
-        partial_count >= 1 or pnl.unrealized_pnl_pct >= config.thresholds.unrealized_gain_watch_pct
+        partial_count >= 1
+        or pnl.unrealized_pnl_pct >= config.thresholds.unrealized_gain_watch_pct
+        or (has_unrealized_gain and neutral_excess_pct is not None and neutral_excess_pct > 0)
     ):
+        # 強気適正価格の超過閾値には届かない、または中立適正価格をわずかに上回るのみの
+        # 場合でも、監視開始(WATCH)の起点としては扱う(要求仕様§6)。ただしPARTIALへの
+        # 到達に必要な独立条件数(partial_count)には数えない(gain単独でのPARTIAL誤到達を防ぐ)。
+        # 含み損の場合は「利確」自体が成立しないため、この分岐はhas_unrealized_gainを
+        # 必ず条件に含める(含み損なのに適正価格超過だけでWATCHにしない)。
         raw_level = _Level.WATCH
         triggered_reasons.extend(partial_reasons)
         if not partial_reasons:
-            triggered_reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%が監視水準に到達")
+            if has_unrealized_gain and neutral_excess_pct is not None and neutral_excess_pct > 0:
+                triggered_reasons.append(f"中立適正価格を{neutral_excess_pct:.1f}%上回る")
+            else:
+                triggered_reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%が監視水準に到達")
     else:
         raw_level = _Level.HOLD
 
@@ -830,7 +985,7 @@ def evaluate_profit_taking(
     sell_prices = _compute_sell_prices(
         current_price,
         average_purchase_price,
-        fair_value,
+        fv_range,
         forecast_annual_dividend_per_share,
         annual_benefit_value_at_min_lot,
         benefit_min_shares_required,
@@ -869,4 +1024,6 @@ def evaluate_profit_taking(
             partial_count, full_moderate_count, len(full_strong_reasons)
         ),
         fair_value_used_as_sole_strong_basis=fair_value_used_as_sole_strong_basis,
+        current_price_vs_neutral_fair_value_pct=neutral_excess_pct,
+        current_price_vs_bull_fair_value_pct=bull_excess_pct,
     )

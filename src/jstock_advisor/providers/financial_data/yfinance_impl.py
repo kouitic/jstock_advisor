@@ -127,10 +127,14 @@ class YFinanceFinancialDataProvider:
             or info.get("shortName")
         )
 
+        fiscal_period_end = self._latest_annual_period_end(ticker) or self._now.date()
+        fiscal_year_end_month = self._fiscal_year_end_month(info, ticker)
+
         return FinancialSummary(
             stock_code=stock_code,
             stock_name=stock_name,
-            fiscal_period_end=self._now.date(),
+            fiscal_period_end=fiscal_period_end,
+            fiscal_year_end_month=fiscal_year_end_month,
             security_type=security_type,
             market_segment=None,  # yfinanceは市場区分(プライム/スタンダード等)を提供しない
             industry=info.get("industry"),
@@ -178,6 +182,42 @@ class YFinanceFinancialDataProvider:
 
     def _latest_annual_value(self, ticker: yf.Ticker, attr: str, row_name: str) -> Decimal | None:
         return self._latest_value(ticker, attr, row_name)
+
+    def _latest_annual_period_end(self, ticker: yf.Ticker) -> dt.date | None:
+        """直近の年次決算(income_stmt)の対象期間末日(2026-07仕様レビュー対応)。
+
+        以前はfiscal_period_endにデータ取得日時(self._now)をそのまま設定しており、
+        データ鮮度判定が常に「最新」と誤判定される不具合があったため、実際の
+        開示期間末日を取得する。
+        """
+        try:
+            df = ticker.income_stmt
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty or len(df.columns) == 0:
+            return None
+        try:
+            period_end: dt.date = df.columns[0].date()
+        except (AttributeError, TypeError):
+            return None
+        return period_end
+
+    def _fiscal_year_end_month(self, info: dict[str, Any], ticker: yf.Ticker) -> int | None:
+        """企業の正式な決算期末月(2026-07仕様レビュー対応)。
+
+        yfinanceのlastFiscalYearEnd(直近の確定済み決算期末、unixタイムスタンプ)を
+        優先的に使う。取得できない場合のみ、年次決算(income_stmt)の最新列の月を
+        代替として使う(いずれも直近四半期末ではなく年次決算の期末という点で
+        配当基準日推定の目的に沿う)。
+        """
+        raw = info.get("lastFiscalYearEnd")
+        if raw is not None:
+            try:
+                return dt.datetime.fromtimestamp(float(raw), dt.UTC).date().month
+            except (TypeError, ValueError, OSError):
+                pass
+        period_end = self._latest_annual_period_end(ticker)
+        return period_end.month if period_end is not None else None
 
     def _recent_periods(self, ticker: yf.Ticker, stock_code: str) -> list[QuarterlyFinancials]:
         """直近の期別(四半期が取得できない銘柄では年次)営業利益・営業CFの推移。"""

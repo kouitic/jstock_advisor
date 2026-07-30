@@ -77,7 +77,15 @@ class QuarterlyFinancials(ImmutableSnapshot):
 class FinancialSummary(ImmutableSnapshot):
     stock_code: str
     stock_name: str | None = None
+    # 直近で取得できた財務諸表(年次)の対象期間末日。データ鮮度の判定に使う
+    # (2026-07仕様レビュー対応: 以前はデータ取得日時そのものが入っており、鮮度判定が
+    # 常に「最新」と誤判定される不具合があった。必ず実際の開示期間末日を設定する)。
     fiscal_period_end: dt.date
+    # 企業の正式な決算期末月(例: 3月決算なら3)。配当・優待基準日の周期推定にのみ使う。
+    # 直近開示期間末(fiscal_period_end、四半期の場合がある)と混同しない
+    # (2026-07仕様レビュー対応: 以前はfiscal_period_end=直近四半期末を決算期末として
+    # 誤って使い、3月決算企業が「1月末・7月末」等と誤表示される不具合があった)。
+    fiscal_year_end_month: int | None = None
     security_type: str = "STOCK"  # "STOCK" / "REIT" / "ETF"
     market_segment: str | None = None
     industry: str | None = None

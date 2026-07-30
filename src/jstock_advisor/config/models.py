@@ -129,7 +129,10 @@ class ProfitTakingThresholds(StrictModel):
     unrealized_gain_watch_pct: float
     unrealized_gain_partial_pct: float
     unrealized_gain_full_pct: float
+    # --- 利確判定レビュー再対応(2026-07): 中立値ではなく強気適正価格を主軸にする ---
+    # 強気適正価格をこの%以上超過した場合にPARTIAL候補水準とする
     fair_value_excess_partial_pct: float
+    # 強気適正価格をこの%以上超過した場合にFULL候補水準とする
     fair_value_excess_full_pct: float
     total_yield_caution_pct: float
     total_yield_strong_caution_pct: float
@@ -173,6 +176,24 @@ class ConditionBasedJudgment(StrictModel):
     min_fair_value_methods_for_full: int
     max_fair_value_spread_ratio_for_full: float
     bull_excess_margin_pct_for_full: float
+    # --- 利確判定エンジン再レビュー対応(2026-07)で追加: MEDIUM信頼度でも
+    # 適正価格ベースでPARTIAL相当を許可するための追加ゲート(要求仕様§5) ---
+    min_business_days_to_earnings_for_fair_value_action: int
+    min_fair_value_methods_for_partial: int
+    max_fair_value_spread_ratio_for_partial: float
+
+
+class TradingUnitRules(StrictModel):
+    """保有株数・売買単位を考慮した実行可能性(2026-07仕様レビュー対応)。
+
+    TSE上場銘柄の単元株数は2018年10月に全銘柄100株へ統一済みであり、
+    Providerから個別に取得する手段が無いためこの既知の制度的事実を既定値とする。
+    単元未満株取引(証券会社のミニ株サービス等)が実際に利用可能かどうかは
+    銘柄・口座ごとに異なり自動判定できないため、既定はFalse(捏造しない)とする。
+    """
+
+    default_trading_unit: int
+    default_odd_lot_trading_available: bool
 
 
 class ProfitTakingRulesConfig(StrictModel):
@@ -181,6 +202,7 @@ class ProfitTakingRulesConfig(StrictModel):
     mitigating_factors: MitigatingFactors
     event_proximity_notice: EventProximityNotice
     condition_based_judgment: ConditionBasedJudgment
+    trading_unit: TradingUnitRules
 
 
 # --- sell_rules.yaml --------------------------------------------------------
@@ -495,6 +517,10 @@ class EarningsWindowRulesConfig(StrictModel):
     version: int
     approaching_window_business_days: int
     recently_reported_calendar_days: int
+    # --- 利確判定エンジン再レビュー対応(2026-07)で追加: 決算までこの営業日数以内の
+    # 場合、通常のPARTIAL/FULL_PROFIT_TAKE提案を保留してREVIEW_BEFORE_EARNINGSへ、
+    # WATCHをWATCH_BEFORE_EARNINGSへ調整する(公式確認済みの即時criticalは例外) ---
+    profit_taking_suppression_business_days: int
 
 
 # --- 集約 --------------------------------------------------------------------

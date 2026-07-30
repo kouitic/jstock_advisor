@@ -8,9 +8,10 @@ thresholds:
   unrealized_gain_partial_pct: 30.0      # 一部利確を検討
   unrealized_gain_full_pct: 50.0         # 全株または大部分の利確を検討
 
-  # 最終適正価格に対する超過率(%)
-  fair_value_excess_partial_pct: 15.0    # 一部利確を検討
-  fair_value_excess_full_pct: 30.0       # 全株利確を検討
+  # 強気適正価格に対する超過率(%)(利確判定エンジン再レビュー対応: 中立値ではなく
+  # 強気適正価格を主軸とする。中立適正価格超過はWATCH開始条件としてのみ使う)
+  fair_value_excess_partial_pct: 25.0    # 一部利確候補水準
+  fair_value_excess_full_pct: 40.0       # 全株利確候補水準
 
   # 総合利回りの低下によるシグナル(%)
   total_yield_caution_pct: 2.5           # 利確を検討
@@ -56,5 +57,19 @@ condition_based_judgment:
   # 中立適正価格基準の期待リターン単独ではFULLの強条件にしない(レビュー対応)。
   # 以下も併せて満たす場合のみ、適正価格ベースの強いFULL条件として成立する。
   min_fair_value_methods_for_full: 3
-  max_fair_value_spread_ratio_for_full: 1.5
-  bull_excess_margin_pct_for_full: 0.0
+  max_fair_value_spread_ratio_for_full: 1.30
+  # 強気適正価格をこの%以上超過している場合のみFULLの強条件候補とする(40%)
+  bull_excess_margin_pct_for_full: 40.0
+  # --- 利確判定エンジン再レビュー対応(2026-07): MEDIUM信頼度でも適正価格ベースで
+  # PARTIAL相当を許可するための追加ゲート(要求仕様§5) ---
+  min_business_days_to_earnings_for_fair_value_action: 4
+  min_fair_value_methods_for_partial: 3
+  max_fair_value_spread_ratio_for_partial: 1.30
+
+# 保有株数・売買単位を考慮した実行可能性(要求仕様レビュー対応)。
+# TSE上場銘柄の単元株数は2018年10月に全銘柄100株へ統一済み(制度上の既知の事実)。
+# 単元未満株取引が利用可能かどうかは銘柄・口座ごとに異なり自動判定できないため、
+# 既定はFalse(捏造しない)。
+trading_unit:
+  default_trading_unit: 100
+  default_odd_lot_trading_available: false
