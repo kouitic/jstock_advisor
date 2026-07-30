@@ -97,6 +97,65 @@ def test_first_notification_is_sent(service_and_repos) -> None:
     assert "最終的な投資判断は利用者が行って" in client.sent[0]
 
 
+def test_evaluate_notification_status_does_not_send(service_and_repos) -> None:
+    """買い候補の優先度付け通知(2026-07仕様追加): evaluate_notification_statusは
+    判定のみ行い、実際の送信(push_message)は一切行わないことを確認する。
+    """
+    service, repo, client = service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    repo.save(rec)
+
+    from jstock_advisor.domain.entities.enums import NotificationStatus
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+    assert outcome.status == NotificationStatus.SENT
+    assert outcome.sent is False
+    assert client.sent == []
+
+
+def test_send_recommendation_notification_sends_unconditionally(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    repo.save(rec)
+
+    service.send_recommendation_notification(rec, _NOW)
+    assert len(client.sent) == 1
+    assert "2914" in client.sent[0]
+
+
+def test_evaluate_then_send_matches_notify_recommendation_with_status(service_and_repos) -> None:
+    """evaluate_notification_status→send_recommendation_notificationの2段階呼び出しが、
+    従来のnotify_recommendation_with_status一括呼び出しと同じ結果(送信内容・
+    通知ログ記録)になることを確認する回帰テスト。
+    """
+    service, repo, client = service_and_repos
+    rec_a = _make_recommendation(
+        recommendation_id="rec-a", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    rec_a = rec_a.model_copy(update={"stock_code": "1111"})
+    repo.save(rec_a)
+    rec_b = _make_recommendation(
+        recommendation_id="rec-b", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    rec_b = rec_b.model_copy(update={"stock_code": "2222"})
+    repo.save(rec_b)
+
+    # rec_a: 一括呼び出し
+    combined_outcome = service.notify_recommendation_with_status(rec_a, _NOW)
+    # rec_b: 2段階呼び出し
+    outcome = service.evaluate_notification_status(rec_b, _NOW)
+    assert outcome.status == combined_outcome.status
+    service.send_recommendation_notification(rec_b, _NOW)
+
+    assert len(client.sent) == 2
+    assert "1111" in client.sent[0]
+    assert "2222" in client.sent[1]
+
+
 def test_duplicate_same_day_is_suppressed(service_and_repos) -> None:
     service, repo, client = service_and_repos
     rec1 = _make_recommendation(

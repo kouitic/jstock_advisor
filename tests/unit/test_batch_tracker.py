@@ -142,3 +142,39 @@ def test_record_result_accumulates_stock_codes_across_calls(
     assert progress is not None
     assert progress.category_counts["data_insufficient"] == 2
     assert sorted(progress.data_insufficient_stock_codes) == ["1111", "2222"]
+
+
+def test_record_result_accumulates_ranking_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """買い候補の優先度付け通知(2026-07仕様追加)向け: ranking_entryを渡した銘柄が
+    文字列セットへ原子的に蓄積され、record_resultの戻り値から取得できることを確認する。
+    """
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.record_result(
+        "batch-1", "candidate_not_ranked", ranking_entry="72.5|1234|rec-a"
+    )
+    batch_tracker.record_result(
+        "batch-1", "candidate_not_ranked", ranking_entry="90.0|5678|rec-b"
+    )
+    progress = batch_tracker.record_result("batch-1", "hold")
+
+    assert progress is not None
+    assert progress.category_counts["candidate_not_ranked"] == 2
+    assert sorted(progress.ranking_entries) == ["72.5|1234|rec-a", "90.0|5678|rec-b"]
+
+
+def test_record_result_without_ranking_entry_leaves_ranking_entries_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 1, _NOW)
+    progress = batch_tracker.record_result("batch-1", "hold")
+
+    assert progress is not None
+    assert progress.ranking_entries == []

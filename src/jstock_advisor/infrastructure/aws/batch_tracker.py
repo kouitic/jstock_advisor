@@ -33,6 +33,11 @@ class BatchProgress:
     category_counts: dict[str, int]
     data_insufficient_stock_codes: list[str]
     failed_stock_codes: list[str]
+    # 買い候補分析の優先度付け通知(2026-07仕様追加)向け。record_resultに
+    # ranking_entryを渡した銘柄が、生の"score|stock_code|recommendation_id"
+    # 文字列のまま集約される(順序はDynamoDBの文字列セットのため保証されない。
+    # 呼び出し側でパース・ソートすること)。
+    ranking_entries: list[str]
 
     @property
     def is_complete(self) -> bool:
@@ -55,14 +60,22 @@ def start_batch(batch_id: str, total: int, now: dt.datetime) -> None:
 
 
 def record_result(
-    batch_id: str, category: str, stock_code: str | None = None
+    batch_id: str,
+    category: str,
+    stock_code: str | None = None,
+    ranking_entry: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
 
-    categoryは"sent"/"hold"/"review"/"data_insufficient"/"suppressed"/"failed"
-    (domain/entities/evaluation_audit.pyのSUMMARY_CATEGORIESと同じ集合)。
-    data_insufficient/failedの場合、stock_codeを渡すとDynamoDBの文字列セットへ
-    原子的に追加し、バッチサマリーで銘柄コードを表示できるようにする。
+    categoryは"sent"/"hold"/"review"/"data_insufficient"/"suppressed"/"failed"/
+    "candidate_not_ranked"(domain/entities/evaluation_audit.pyのSUMMARY_CATEGORIES
+    と同じ集合)。data_insufficient/failedの場合、stock_codeを渡すとDynamoDBの
+    文字列セットへ原子的に追加し、バッチサマリーで銘柄コードを表示できるようにする。
+
+    ranking_entryを渡すと、優先度付け通知(要求仕様2026-07追加)向けに、任意の
+    文字列(呼び出し側でスコア等を含めてエンコードする)をDynamoDBの文字列セットへ
+    原子的に追加する。バッチ完了検知後、呼び出し側がこの一覧をパース・ソートして
+    上位N件のみ通知する用途を想定している。
     """
     if not running_on_lambda():
         return None
@@ -79,6 +92,10 @@ def record_result(
         names["#category_codes"] = f"{category}_codes"
         update_expr += ", #category_codes :codes"
         values[":codes"] = {stock_code}
+    if ranking_entry is not None:
+        names["#ranking_entries"] = "ranking_entries"
+        update_expr += ", #ranking_entries :ranking_entries"
+        values[":ranking_entries"] = {ranking_entry}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -94,4 +111,5 @@ def record_result(
         category_counts={category: int(item.get(category, 0)) for category in SUMMARY_CATEGORIES},
         data_insufficient_stock_codes=sorted(item.get("data_insufficient_codes", set())),
         failed_stock_codes=sorted(item.get("failed_codes", set())),
+        ranking_entries=sorted(item.get("ranking_entries", set())),
     )

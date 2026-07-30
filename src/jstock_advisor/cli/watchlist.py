@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 import typer
 
 from jstock_advisor.domain.entities.enums import Priority
+from jstock_advisor.services.watchlist_csv_import_service import WatchlistCsvImportService
 from jstock_advisor.services.watchlist_service import WatchlistService
 
 app = typer.Typer(help="ウォッチリストの登録・編集・削除")
@@ -121,3 +123,27 @@ def delete_item(
     service = WatchlistService()
     deleted = service.delete_item(stock_code)
     typer.echo("削除しました。" if deleted else "該当する項目は見つかりませんでした。")
+
+
+@app.command("import-csv")
+def import_csv(
+    path: Path = typer.Argument(..., exists=True, readable=True, help="取り込むCSVファイルのパス"),
+) -> None:
+    """ウォッチリストCSVを一括登録する(既存登録があれば上書きされる)。"""
+    service = WatchlistCsvImportService()
+    try:
+        summary = service.import_file(path)
+    except ValueError as e:
+        typer.echo(f"CSV取り込みに失敗しました: {e}")
+        raise typer.Exit(code=1) from e
+
+    for result in summary.results:
+        marker = "OK" if result.status.value == "SUCCESS" else "NG"
+        typer.echo(f"[{marker}] 行{result.row_number} {result.stock_code or '-'}: {result.message}")
+
+    typer.echo(
+        f"--- 合計{summary.total_rows}行 (成功:{summary.success_count} "
+        f"エラー:{summary.error_count}) ---"
+    )
+    if summary.error_count > 0:
+        raise typer.Exit(code=1)

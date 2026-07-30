@@ -300,6 +300,7 @@ class NotificationRulesConfig(StrictModel):
     version: int
     resend_after_days: int
     price_change_resend_threshold_pct: float
+    buy_candidate_max_notifications_per_run: int
 
 
 # --- data_validation_rules.yaml -------------------------------------------
