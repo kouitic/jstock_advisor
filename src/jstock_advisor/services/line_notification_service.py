@@ -15,7 +15,7 @@ import datetime as dt
 import hashlib
 import logging
 import uuid
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.data_quality_alert import DataQualityAlert
@@ -59,6 +59,46 @@ _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType]
 }
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
+
+
+def _yen(value: Decimal | int | float | str | None) -> str:
+    """金額を円単位の整数・カンマ区切りで表示する(要求仕様レビュー対応: 小数点以下は表示しない)。
+
+    Decimalが指数表記(例: Decimal('5.5E+2'))を内部的に保持している場合、
+    to_integral_value()だけでは指数表記が残り "5.5E+2円" のように表示されてしまうため、
+    Python組み込みのintへ変換して指数表記を確実に解消してから整形する。
+    """
+    if value is None:
+        return "不明"
+    amount = int(Decimal(str(value)).to_integral_value(rounding=ROUND_HALF_UP))
+    return f"{amount:,}円"
+
+
+# 判定区分の表示ラベル(要求仕様レビュー対応)。
+# RecommendationTypeは業務ロジック上13種類に分かれるが、通知で読む側にとって重要なのは
+# 「買い候補」「保有継続(様子見)」「一部売却を検討」「全部売却を検討」という
+# おおまかな3区分+買い候補で、英語の生の列挙値(PARTIAL_PROFIT_TAKE等)は意味が伝わらない。
+# 括弧内に元のニュアンス(決算前縮小・至急確認等)を残しつつ、基本語彙を3つに絞る。
+_RECOMMENDATION_TYPE_LABELS: dict[RecommendationType, str] = {
+    RecommendationType.BUY: "買い推奨",
+    RecommendationType.WATCH_BUY: "買い候補(監視)",
+    RecommendationType.WATCH_BEFORE_EARNINGS: "買い候補(決算発表待ち)",
+    RecommendationType.HOLD: "保有継続",
+    RecommendationType.WATCH: "保有継続(監視)",
+    RecommendationType.REVIEW: "保有継続(要確認)",
+    RecommendationType.REVIEW_AFTER_EARNINGS: "保有継続(決算後要確認)",
+    RecommendationType.MANUAL_REVIEW_REQUIRED: "保有継続(要人的確認)",
+    RecommendationType.PARTIAL_PROFIT_TAKE: "一部売却を検討",
+    RecommendationType.PARTIAL_RISK_REDUCTION: "一部売却を検討(決算前縮小)",
+    RecommendationType.FULL_PROFIT_TAKE: "全部売却を検討",
+    RecommendationType.SELL: "全部売却を検討",
+    RecommendationType.URGENT_REVIEW: "全部売却を検討(至急確認)",
+}
+
+
+def _recommendation_type_label(recommendation_type: RecommendationType) -> str:
+    return _RECOMMENDATION_TYPE_LABELS.get(recommendation_type, recommendation_type.value)
+
 
 _RECORD_DATE_UNKNOWN_REASON_LABELS: dict[RecordDateUnknownReason, str] = {
     RecordDateUnknownReason.SOURCE_NOT_FOUND: "未登録(要ユーザー登録)",
@@ -217,8 +257,8 @@ def _format_buy_message(recommendation: Recommendation, notification_type: Notif
     )
     lines = [
         f"【{title}】{recommendation.stock_code} {recommendation.stock_name}",
-        f"判定: {recommendation.recommendation_type.value}",
-        f"現在株価: {recommendation.price_at_recommendation}円",
+        f"判定: {_recommendation_type_label(recommendation.recommendation_type)}",
+        f"現在株価: {_yen(recommendation.price_at_recommendation)}",
     ]
     if recommendation.dividend_yield_pct_at_recommendation is not None:
         lines.append(f"予想配当利回り: {recommendation.dividend_yield_pct_at_recommendation:.2f}%")
@@ -230,10 +270,10 @@ def _format_buy_message(recommendation: Recommendation, notification_type: Notif
     bp = recommendation.buy_prices
     if bp is not None and bp.tentative and bp.standard and bp.aggressive:
         lines.append(
-            f"打診買い:{bp.tentative.price}円 標準買い:{bp.standard.price}円 "
-            f"積極買い:{bp.aggressive.price}円"
+            f"打診買い:{_yen(bp.tentative.price)} 標準買い:{_yen(bp.standard.price)} "
+            f"積極買い:{_yen(bp.aggressive.price)}"
         )
-        lines.append(f"次の判断条件: 標準買い価格({bp.standard.price}円)到達時に再検討")
+        lines.append(f"次の判断条件: 標準買い価格({_yen(bp.standard.price)})到達時に再検討")
     lines.append(f"総合スコア: {recommendation.total_score}")
     if recommendation.reasons:
         lines.append("推奨理由: " + " / ".join(recommendation.reasons))
@@ -272,8 +312,8 @@ def _price_display(field: object) -> str:
     low = getattr(field, "price_low", None)
     high = getattr(field, "price_high", None)
     if low is not None and high is not None:
-        return f"{low}〜{high}円"
-    return f"{price}円"
+        return f"{_yen(low)}〜{_yen(high)}"
+    return _yen(price)
 
 
 def _fair_value_range_lines(recommendation: Recommendation) -> list[str]:
@@ -285,15 +325,15 @@ def _fair_value_range_lines(recommendation: Recommendation) -> list[str]:
         return []
     lines = [
         "適正価格レンジ:",
-        f"弱気：{recommendation.fair_value_bear}円 ／ "
-        f"中立：{recommendation.fair_value_neutral}円 ／ "
-        f"強気：{recommendation.fair_value_bull}円",
+        f"弱気：{_yen(recommendation.fair_value_bear)} ／ "
+        f"中立：{_yen(recommendation.fair_value_neutral)} ／ "
+        f"強気：{_yen(recommendation.fair_value_bull)}",
     ]
     used_methods = [m for m in recommendation.fair_value_methods if m.get("fair_value") is not None]
     if used_methods:
         lines.append("算出手法:")
         for m in used_methods:
-            lines.append(f"・{m['method']}：{m['fair_value']}円")
+            lines.append(f"・{m['method']}：{_yen(m['fair_value'])}")
     if recommendation.fair_value_spread_ratio is not None:
         lines.append(f"手法間乖離(強気/弱気): {recommendation.fair_value_spread_ratio:.2f}倍")
     if recommendation.fair_value_overall_confidence is not None:
@@ -326,15 +366,15 @@ def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
     shares = recommendation.shares_at_recommendation
     avg = recommendation.average_purchase_price_at_recommendation
     price = recommendation.price_at_recommendation
-    lines.append(f"{shares}株／平均取得{avg}円")
-    lines.append(f"現在値{price}円")
+    lines.append(f"{shares}株／平均取得{_yen(avg)}")
+    lines.append(f"現在値{_yen(price)}")
     if shares is not None and avg is not None:
         gain = (price - avg) * shares
         gain_pct = float(price / avg - 1) * 100 if avg > 0 else 0.0
-        lines.append(f"含み益{gain:,.0f}円({gain_pct:+.1f}%)")
+        lines.append(f"含み益{_yen(gain)}({gain_pct:+.1f}%)")
     lines.append("")
     lines.append("判定:")
-    lines.append(recommendation.recommendation_type.value)
+    lines.append(_recommendation_type_label(recommendation.recommendation_type))
     lines.append("")
 
     fv_lines = _fair_value_range_lines(recommendation)
@@ -412,9 +452,9 @@ def _format_profit_taking_message(recommendation: Recommendation) -> str:
     lines = [
         f"【利確検討】{recommendation.stock_code} {recommendation.stock_name}",
         f"【保有状況】{recommendation.shares_at_recommendation}株 / "
-        f"平均取得 {recommendation.average_purchase_price_at_recommendation}円 → "
-        f"現在 {recommendation.price_at_recommendation}円",
-        f"判定: {recommendation.recommendation_type.value}",
+        f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
+        f"現在 {_yen(recommendation.price_at_recommendation)}",
+        f"判定: {_recommendation_type_label(recommendation.recommendation_type)}",
     ]
     if recommendation.reasons:
         lines.append("利確を検討する理由: " + " / ".join(recommendation.reasons))
@@ -471,13 +511,14 @@ def _format_profit_taking_message(recommendation: Recommendation) -> str:
 
 
 def _format_sell_message(recommendation: Recommendation) -> str:
+    label = _recommendation_type_label(recommendation.recommendation_type)
     lines = [
-        f"【{recommendation.recommendation_type.value}】{recommendation.stock_code} "
+        f"【{label}】{recommendation.stock_code} "
         f"{recommendation.stock_name}(投資前提悪化の可能性)",
-        f"判定: {recommendation.recommendation_type.value}",
+        f"判定: {label}",
         f"【保有状況】{recommendation.shares_at_recommendation}株 / "
-        f"平均取得 {recommendation.average_purchase_price_at_recommendation}円 → "
-        f"現在 {recommendation.price_at_recommendation}円",
+        f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
+        f"現在 {_yen(recommendation.price_at_recommendation)}",
     ]
     if recommendation.reasons:
         lines.append("悪化懸念(投資前提が悪化した理由): " + " / ".join(recommendation.reasons))
@@ -487,9 +528,9 @@ def _format_sell_message(recommendation: Recommendation) -> str:
         lines.append("判定内容: " + recommendation.recommended_action_summary)
     sp = recommendation.sell_prices
     if sp is not None and sp.immediate_execution_price:
-        lines.append(f"即時執行目安価格: {sp.immediate_execution_price.price}円")
+        lines.append(f"即時執行目安価格: {_yen(sp.immediate_execution_price.price)}")
     if sp is not None and sp.stop_review_price:
-        lines.append(f"売却目安価格: {sp.stop_review_price.price}円")
+        lines.append(f"売却目安価格: {_yen(sp.stop_review_price.price)}")
     if recommendation.next_review_conditions:
         lines.append("次の判断条件: " + " / ".join(recommendation.next_review_conditions))
     if recommendation.holding_risks:
@@ -676,7 +717,7 @@ class LineNotificationService:
             "いずれかの項目が含まれています。",
             "検出内容:",
             *[f"・{c}" for c in alert.contradictions],
-            f"自動判定結果: {recommendation.recommendation_type.value}",
+            f"自動判定結果: {_recommendation_type_label(recommendation.recommendation_type)}",
             "自動売却推奨: 停止(手動確認が完了するまで自動での売却推奨は行いません)",
             "確認事項:",
         ]
