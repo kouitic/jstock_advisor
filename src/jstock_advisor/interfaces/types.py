@@ -180,6 +180,12 @@ class BenefitDetail(ImmutableSnapshot):
     min_shares_for_tier: int
     long_term_holding_condition_months: int | None = None
 
+    # --- 保有株数×保有期間のマトリクス型優待対応(2026-07仕様追加) ---
+    # 同一tier_groupを持つ明細は「保有株数・保有期間の両方を満たす中で最も条件の
+    # 良い1件のみ」を採用する(段階制優待の重複加算を防ぐ)。Noneの場合は従来通り
+    # 各明細を独立した優待として個別に加算する(複数の優待が同時に併存する銘柄向け)。
+    tier_group: str | None = None
+
 
 class ShareholderBenefit(ImmutableSnapshot):
     stock_code: str
@@ -196,6 +202,12 @@ class ShareholderBenefit(ImmutableSnapshot):
     benefit_ex_date: dt.date | None = None
     long_term_holding_requirement: str | None = None
     benefit_record_date_unknown_reason: RecordDateUnknownReason | None = None
+
+    # --- 権利確定日の周期管理(2026-07仕様追加) ---
+    # 「毎年3月末・9月末」のような周期を月単位で保持し、次回の権利確定日を
+    # カレンダー上の実際の月末日から自動算出する(閏年の2月末等も正しく扱う)。
+    benefit_record_date_recurrence_months: list[int] = []
+    next_benefit_record_date: dt.date | None = None
 
 
 class CorporateActionEvent(ImmutableSnapshot):

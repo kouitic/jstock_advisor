@@ -23,6 +23,7 @@ from jstock_advisor.domain.entities.enums import (
     RecordDateUnknownReason,
     SourceType,
 )
+from jstock_advisor.domain.valuation.shareholder_benefit_matching import compute_next_record_date
 from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
     ShareholderBenefitRegistryRepository,
 )
@@ -215,12 +216,42 @@ class ShareholderBenefitCsvImportService:
             row.get("long_term_holding_requirement") or ""
         ).strip() or None
 
+        tier_group = (row.get("tier_group") or "").strip() or None
+
+        recurrence_raw = (row.get("benefit_record_date_recurrence_months") or "").strip()
+        recurrence_months: list[int] = []
+        if recurrence_raw:
+            try:
+                recurrence_months = [
+                    int(m.strip()) for m in recurrence_raw.split(";") if m.strip()
+                ]
+            except ValueError:
+                return (
+                    _error(
+                        row_number,
+                        stock_code,
+                        "benefit_record_date_recurrence_monthsは1〜12の整数を"
+                        "セミコロン区切りで指定してください",
+                    ),
+                    None,
+                )
+            if any(m < 1 or m > 12 for m in recurrence_months):
+                return (
+                    _error(
+                        row_number,
+                        stock_code,
+                        "benefit_record_date_recurrence_monthsは1〜12の範囲で指定してください",
+                    ),
+                    None,
+                )
+
         detail = BenefitDetail(
             category=category,
             description=description,
             estimated_value=estimated_value,
             min_shares_for_tier=min_shares_for_tier,
             long_term_holding_condition_months=long_term_months,
+            tier_group=tier_group,
         )
         source = DataSourceReference(
             provider=_PROVIDER_NAME,
@@ -249,6 +280,10 @@ class ShareholderBenefitCsvImportService:
                 long_term_holding_requirement=long_term_holding_requirement,
                 benefit_record_date_unknown_reason=(
                     None if record_dates else RecordDateUnknownReason.SOURCE_NOT_FOUND
+                ),
+                benefit_record_date_recurrence_months=recurrence_months,
+                next_benefit_record_date=compute_next_record_date(
+                    recurrence_months, fetched_at.date()
                 ),
             )
 

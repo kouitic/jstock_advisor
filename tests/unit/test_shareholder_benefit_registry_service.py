@@ -225,6 +225,84 @@ def test_delete_removes_registration(service: ShareholderBenefitRegistryService)
     assert service.delete("2914") is False
 
 
+def test_register_with_recurrence_months_computes_next_record_date(
+    service: ShareholderBenefitRegistryService,
+) -> None:
+    benefit = service.register(
+        stock_code="2914",
+        min_shares_required=100,
+        frequency_per_year=2,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="x",
+        min_shares_for_tier=100,
+        benefit_record_date_recurrence_months=[3, 9],
+        now=_NOW,
+    )
+    # _NOWは2026-07-24なので、直近の権利確定日は2026-09-30
+    assert benefit.next_benefit_record_date == dt.date(2026, 9, 30)
+
+
+def test_register_with_tier_group_persists_it(
+    service: ShareholderBenefitRegistryService,
+) -> None:
+    benefit = service.register(
+        stock_code="5139",
+        min_shares_required=100,
+        frequency_per_year=2,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="デジタルギフト500円分",
+        min_shares_for_tier=100,
+        tier_group="digital_gift",
+        now=_NOW,
+    )
+    assert benefit.benefits[0].tier_group == "digital_gift"
+
+
+def test_set_record_date_recurrence_updates_existing_registration(
+    service: ShareholderBenefitRegistryService,
+) -> None:
+    service.register(
+        stock_code="2914",
+        min_shares_required=100,
+        frequency_per_year=1,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="x",
+        min_shares_for_tier=100,
+        now=_NOW,
+    )
+    updated = service.set_record_date_recurrence("2914", [3], now=_NOW)
+    assert updated.benefit_record_date_recurrence_months == [3]
+    assert updated.next_benefit_record_date == dt.date(2027, 3, 31)
+
+
+def test_get_refreshes_stale_next_record_date(
+    service: ShareholderBenefitRegistryService,
+) -> None:
+    service.register(
+        stock_code="2914",
+        min_shares_required=100,
+        frequency_per_year=1,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="x",
+        min_shares_for_tier=100,
+        benefit_record_date_recurrence_months=[3],
+        now=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+    )
+    # 登録時点(2026-01-01)では次回は2026-03-31のはず
+    stored = service.get("2914", now=dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
+    assert stored is not None
+    assert stored.next_benefit_record_date == dt.date(2026, 3, 31)
+
+    # 2026-03-31を過ぎた後にgetすると、次回日付が2027-03-31へ更新されて保存される
+    refreshed = service.get("2914", now=dt.datetime(2026, 4, 1, tzinfo=dt.UTC))
+    assert refreshed is not None
+    assert refreshed.next_benefit_record_date == dt.date(2027, 3, 31)
+
+    persisted = service.get("2914", now=dt.datetime(2026, 4, 1, tzinfo=dt.UTC))
+    assert persisted is not None
+    assert persisted.next_benefit_record_date == dt.date(2027, 3, 31)
+
+
 def test_local_registry_provider_returns_registered_benefit(
     repository: ShareholderBenefitRegistryRepository,
     service: ShareholderBenefitRegistryService,

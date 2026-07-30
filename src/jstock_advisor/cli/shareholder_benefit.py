@@ -43,6 +43,18 @@ def _parse_decimal(value: str | None, field_name: str) -> Decimal | None:
         raise typer.BadParameter(f"{field_name}は数値で指定してください") from e
 
 
+def _parse_month_list(value: str | None) -> list[int]:
+    if not value:
+        return []
+    try:
+        months = [int(v.strip()) for v in value.split(",") if v.strip()]
+    except ValueError as e:
+        raise typer.BadParameter("権利確定月はカンマ区切りの整数(1-12)で指定してください") from e
+    if any(m < 1 or m > 12 for m in months):
+        raise typer.BadParameter("権利確定月は1〜12の範囲で指定してください")
+    return months
+
+
 @app.command("add")
 def add(
     stock_code: str = typer.Argument(..., help="銘柄コード"),
@@ -53,8 +65,21 @@ def add(
     min_shares_for_tier: int = typer.Option(..., "--min-shares-for-tier"),
     estimated_value: str = typer.Option(None, "--estimated-value"),
     long_term_months: int = typer.Option(None, "--long-term-months"),
+    tier_group: str = typer.Option(
+        None,
+        "--tier-group",
+        help="保有株数×保有期間のマトリクス優待で、段階同士が排他的な選択肢である"
+        "ことを示すグループ名(例: digital_gift)。同一グループ内は最も条件の良い"
+        "1件のみが有効になる(未指定なら他の明細と独立して常に加算される)",
+    ),
     record_dates: str = typer.Option(
         None, "--record-dates", help="権利確定日(カンマ区切り、YYYY-MM-DD)"
+    ),
+    record_date_recurrence_months: str = typer.Option(
+        None,
+        "--record-date-recurrence-months",
+        help="毎年の権利確定月(カンマ区切り、例: 3,9)。指定すると次回権利確定日を"
+        "カレンダー上の実際の月末日から自動算出して保持する",
     ),
     ex_date: str = typer.Option(
         None, "--ex-date", help="権利落ち日(YYYY-MM-DD、権利確定日とは別概念)"
@@ -83,11 +108,20 @@ def add(
         min_shares_for_tier=min_shares_for_tier,
         estimated_value=_parse_decimal(estimated_value, "estimated_value"),
         long_term_holding_condition_months=long_term_months,
+        tier_group=tier_group,
         benefit_record_dates=_parse_date_list(record_dates),
+        benefit_record_date_recurrence_months=_parse_month_list(record_date_recurrence_months),
         benefit_ex_date=ex_date_parsed,
         long_term_holding_requirement=long_term_holding_requirement,
     )
-    typer.echo(f"登録しました: {benefit.stock_code} ({len(benefit.benefits)}件の優待内容)")
+    next_date = (
+        f"、次回権利確定日:{benefit.next_benefit_record_date}"
+        if benefit.next_benefit_record_date
+        else ""
+    )
+    typer.echo(
+        f"登録しました: {benefit.stock_code} ({len(benefit.benefits)}件の優待内容){next_date}"
+    )
 
 
 @app.command("add-tier")
@@ -98,6 +132,9 @@ def add_tier(
     min_shares_for_tier: int = typer.Option(..., "--min-shares-for-tier"),
     estimated_value: str = typer.Option(None, "--estimated-value"),
     long_term_months: int = typer.Option(None, "--long-term-months"),
+    tier_group: str = typer.Option(
+        None, "--tier-group", help="registerコマンドの--tier-groupを参照"
+    ),
 ) -> None:
     """既存登録に、保有株数に応じた別の優待段階を追加する。"""
     service = ShareholderBenefitRegistryService()
@@ -109,11 +146,32 @@ def add_tier(
             min_shares_for_tier=min_shares_for_tier,
             estimated_value=_parse_decimal(estimated_value, "estimated_value"),
             long_term_holding_condition_months=long_term_months,
+            tier_group=tier_group,
         )
     except ValueError as e:
         typer.echo(str(e))
         raise typer.Exit(code=1) from e
     typer.echo(f"追加しました: {benefit.stock_code} ({len(benefit.benefits)}件の優待内容)")
+
+
+@app.command("set-record-date-recurrence")
+def set_record_date_recurrence(
+    stock_code: str = typer.Argument(...),
+    months: str = typer.Argument(..., help="毎年の権利確定月(カンマ区切り、例: 3,9)"),
+) -> None:
+    """「毎年◯月末」の周期を登録し、次回権利確定日をカレンダー上の実際の月末日から
+    自動算出する。"""
+    service = ShareholderBenefitRegistryService()
+    try:
+        benefit = service.set_record_date_recurrence(
+            stock_code=stock_code, recurrence_months=_parse_month_list(months)
+        )
+    except ValueError as e:
+        typer.echo(str(e))
+        raise typer.Exit(code=1) from e
+    typer.echo(
+        f"更新しました: {benefit.stock_code} 次回権利確定日={benefit.next_benefit_record_date}"
+    )
 
 
 @app.command("update-status")
@@ -155,11 +213,16 @@ def list_benefits() -> None:
             status = " [廃止]"
         elif b.is_major_downgrade:
             status = " [大幅改悪]"
+        next_date = (
+            f"、次回権利確定日:{b.next_benefit_record_date}" if b.next_benefit_record_date else ""
+        )
         typer.echo(
-            f"{b.stock_code}: 最低{b.min_shares_required}株、年{b.frequency_per_year}回{status}"
+            f"{b.stock_code}: 最低{b.min_shares_required}株、年{b.frequency_per_year}回"
+            f"{status}{next_date}"
         )
         for detail in b.benefits:
-            typer.echo(f"  {detail.min_shares_for_tier}株〜: {detail.description}")
+            group = f" [{detail.tier_group}]" if detail.tier_group else ""
+            typer.echo(f"  {detail.min_shares_for_tier}株〜: {detail.description}{group}")
 
 
 @app.command("show")
