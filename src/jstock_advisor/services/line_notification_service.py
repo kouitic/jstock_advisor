@@ -585,7 +585,31 @@ class LineNotificationService:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
         全体件数・正常件数・異常件数のサマリー通知。個別のデータ取得エラー・データ品質
         アラートはこれに集約され、個別には送信しない。
+
+        ファンアウトの起動元(スケジューラ・手動実行)が何らかの理由で二重ディスパッチ
+        された場合、独立した2つのbatch_idがそれぞれ完了を検知してこのメソッドを
+        呼び出しうる。それぞれのbatch_idの完了自体は正しい検知だが、結果として
+        まったく同一内容のサマリーがLINEへ二重送信されることを防ぐため、同一日付・
+        同一内容(件数)の通知が既に送信済みの場合は送信をスキップする。
         """
+        pseudo_stock_code = f"__batch__:{process_name}"
+        content_hash = hashlib.sha256(
+            f"{process_name}|{now.date().isoformat()}|{total}|{succeeded}|{failed}".encode()
+        ).hexdigest()[:16]
+        latest = self._log_repo.latest_by_stock_and_type(
+            pseudo_stock_code, NotificationType.BATCH_SUMMARY
+        )
+        if latest is not None and latest.content_hash == content_hash:
+            logger.info(
+                "batch_summary duplicate suppressed process_name=%s total=%d succeeded=%d "
+                "failed=%d",
+                process_name,
+                total,
+                succeeded,
+                failed,
+            )
+            return False
+
         lines = [
             f"【処理完了】{process_name}",
             f"全体処理件数: {total}",
@@ -595,6 +619,16 @@ class LineNotificationService:
             _DISCLAIMER,
         ]
         self._client.push_message("\n".join(lines))
+        self._log_repo.save(
+            NotificationLog(
+                notification_id=str(uuid.uuid4()),
+                notification_type=NotificationType.BATCH_SUMMARY,
+                stock_code=pseudo_stock_code,
+                content_hash=content_hash,
+                sent_at=now,
+                related_recommendation_id=None,
+            )
+        )
         return True
 
     def _previous_recommendation(
