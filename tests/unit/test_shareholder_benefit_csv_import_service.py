@@ -1,3 +1,4 @@
+import datetime as dt
 from decimal import Decimal
 from pathlib import Path
 
@@ -126,6 +127,54 @@ def test_import_without_record_dates_sets_unknown_reason(
     saved = repository.get("2914")
     assert saved is not None
     assert saved.benefit_record_date_unknown_reason == RecordDateUnknownReason.SOURCE_NOT_FOUND
+
+
+def test_import_tier_group_column(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER},tier_group\n"
+        "5139,100,2,CASH_EQUIVALENT,100株/6ヶ月,100,digital_gift\n"
+        "5139,100,2,CASH_EQUIVALENT,1000株/6ヶ月,1000,digital_gift\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.success_count == 2
+    saved = repository.get("5139")
+    assert saved is not None
+    assert [d.tier_group for d in saved.benefits] == ["digital_gift", "digital_gift"]
+
+
+def test_import_record_date_recurrence_months_computes_next_date(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER},benefit_record_date_recurrence_months\n2914,100,1,CASH_EQUIVALENT,x,100,3;9\n",
+    )
+    summary = import_service.import_file(
+        csv_path, now=dt.datetime(2026, 7, 30, tzinfo=dt.UTC)
+    )
+    assert summary.success_count == 1
+    saved = repository.get("2914")
+    assert saved is not None
+    assert saved.benefit_record_date_recurrence_months == [3, 9]
+    assert saved.next_benefit_record_date == dt.date(2026, 9, 30)
+
+
+def test_import_record_date_recurrence_months_out_of_range_is_row_error(
+    import_service: ShareholderBenefitCsvImportService, tmp_path: Path
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER},benefit_record_date_recurrence_months\n2914,100,1,CASH_EQUIVALENT,x,100,13\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.error_count == 1
 
 
 def test_import_missing_required_column_raises(

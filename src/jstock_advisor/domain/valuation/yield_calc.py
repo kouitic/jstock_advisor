@@ -11,7 +11,7 @@ from jstock_advisor.domain.entities.common import BenefitUtilityCoefficients
 from jstock_advisor.domain.entities.enums import BenefitUtilityCategory
 from jstock_advisor.interfaces.types import ShareholderBenefit
 
-_COEFFICIENT_FIELD_BY_CATEGORY: dict[BenefitUtilityCategory, str] = {
+COEFFICIENT_FIELD_BY_CATEGORY: dict[BenefitUtilityCategory, str] = {
     BenefitUtilityCategory.CASH_EQUIVALENT: "cash_equivalent",
     BenefitUtilityCategory.VERSATILE_POINT: "versatile_point",
     BenefitUtilityCategory.IN_HOUSE_SERVICE: "in_house_service",
@@ -51,7 +51,7 @@ def compute_annual_benefit_value(
             continue
         if detail.estimated_value is None:
             continue
-        field_name = _COEFFICIENT_FIELD_BY_CATEGORY[detail.category]
+        field_name = COEFFICIENT_FIELD_BY_CATEGORY[detail.category]
         coefficient = getattr(utility_coefficients, field_name)
         total += detail.estimated_value * Decimal(str(coefficient))
 
