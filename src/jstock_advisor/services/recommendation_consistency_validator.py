@@ -13,13 +13,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from jstock_advisor.config.models import ConsistencyValidationConfig
+from jstock_advisor.config.models import BuyDecisionRulesConfig, ConsistencyValidationConfig
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     PriceFieldBasis,
     RecommendationType,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
 
 
 @dataclass(frozen=True)
@@ -337,11 +338,44 @@ def _check_price_equals_current_with_wrong_basis(
     return None
 
 
+def _check_buy_consistency(
+    r: Recommendation, buy_decision_config: BuyDecisionRulesConfig | None
+) -> ConsistencyViolation | None:
+    """BUYパイプライン(2026-07再設計)の整合性チェック(要求仕様20節)。
+
+    buy_signal_service.py側でも同じ検証を行い不整合時にbuy_action=MANUAL_REVIEWへ
+    切り替えているが、通知直前の本モジュールでも独立して再検証する(二重の安全策)。
+    """
+    if r.buy_action is None or buy_decision_config is None:
+        return None
+    violations = validate_buy_recommendation(
+        action=r.buy_action,
+        current_price=r.price_at_recommendation,
+        entry_price=r.entry_buy_price,
+        standard_price=r.standard_buy_price,
+        strong_price=r.strong_buy_price,
+        confidence=r.confidence,
+        business_days_to_earnings=r.business_days_to_earnings,
+        valuation_dispersion_ratio=float(r.valuation_dispersion_ratio)
+        if r.valuation_dispersion_ratio is not None
+        else None,
+        config=buy_decision_config,
+    )
+    if not violations:
+        return None
+    return ConsistencyViolation(
+        "buy_action_consistency_violation",
+        "; ".join(v.message for v in violations),
+        manual_review_required=True,
+    )
+
+
 def validate_recommendation(
     recommendation: Recommendation,
     config: ConsistencyValidationConfig,
     gain_full_threshold_pct: float = 50.0,
     min_yield_pct: float = 2.5,
+    buy_decision_config: BuyDecisionRulesConfig | None = None,
 ) -> ConsistencyCheckResult:
     checks = [
         _check_full_take_extreme_margin(recommendation, config),
@@ -358,6 +392,7 @@ def validate_recommendation(
         _check_sell_based_on_yfinance_only(recommendation),
         _check_sell_price_equals_current_as_future_condition(recommendation),
         _check_review_retains_immediate_execution_price(recommendation),
+        _check_buy_consistency(recommendation, buy_decision_config),
     ]
     violations = [c for c in checks if c is not None]
     return ConsistencyCheckResult(passed=not violations, violations=violations)

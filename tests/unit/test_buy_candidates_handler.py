@@ -6,6 +6,7 @@ import pytest
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
 from jstock_advisor.domain.entities.enums import (
+    BuyAction,
     ConfidenceLevel,
     NotificationStatus,
     RecommendationType,
@@ -97,6 +98,8 @@ def test_task_buy_candidate_processes_only_requested_stock(
     class _FakeOutcome:
         data_error = "テストエラー"
         recommendation = None
+        buy_action = None
+        ranking_group = None
 
     monkeypatch.setattr(
         handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
@@ -110,7 +113,12 @@ def test_task_buy_candidate_processes_only_requested_stock(
 
 
 def _make_recommendation(
-    stock_code: str, total_score: float, recommendation_id: str = "rec-1"
+    stock_code: str,
+    company_quality_score: float,
+    recommendation_id: str = "rec-1",
+    buy_action: BuyAction = BuyAction.BUY,
+    purchase_attractiveness_score: float = 50.0,
+    current_vs_entry_price_pct: str | None = None,
 ) -> Recommendation:
     return Recommendation(
         recommendation_id=recommendation_id,
@@ -119,14 +127,34 @@ def _make_recommendation(
         recommended_at=_NOW,
         recommendation_type=RecommendationType.BUY,
         buy_prices=BuyPriceLevels(
-            tentative=PriceWithRationale(price=Decimal("3500"), rationale="x"),
+            entry=PriceWithRationale(price=Decimal("3500"), rationale="x"),
             standard=PriceWithRationale(price=Decimal("3300"), rationale="x"),
-            aggressive=PriceWithRationale(price=Decimal("3100"), rationale="x"),
+            strong=PriceWithRationale(price=Decimal("3100"), rationale="x"),
         ),
         price_at_recommendation=Decimal("4200"),
-        total_score=total_score,
+        total_score=company_quality_score,
         confidence=ConfidenceLevel.HIGH,
         rule_version="v1-mvp",
+        buy_action=buy_action,
+        company_quality_score=company_quality_score,
+        purchase_attractiveness_score=purchase_attractiveness_score,
+        current_vs_entry_price_pct=Decimal(current_vs_entry_price_pct)
+        if current_vs_entry_price_pct is not None
+        else None,
+    )
+
+
+def _outcome(recommendation: Recommendation, ranking_group: str | None):
+    from jstock_advisor.services.buy_signal_service import BuyAnalysisOutcome
+
+    return BuyAnalysisOutcome(
+        stock_code=recommendation.stock_code,
+        recommendation=recommendation,
+        screening_passed=True,
+        exclusion_reasons=[],
+        data_error=None,
+        buy_action=recommendation.buy_action,
+        ranking_group=ranking_group,
     )
 
 
@@ -161,32 +189,30 @@ class _FakeNotificationServiceForRanking:
         now: dt.datetime,
         data_insufficient_stock_codes: list[str] | None = None,
         failed_stock_codes: list[str] | None = None,
+        buy_candidates_sent_count: int | None = None,
     ) -> bool:
         self.batch_summary_calls.append(
-            {"total": total, "category_counts": dict(category_counts)}
+            {
+                "total": total,
+                "category_counts": dict(category_counts),
+                "buy_candidates_sent_count": buy_candidates_sent_count,
+            }
         )
         return True
 
 
-def test_process_single_candidate_defers_send_and_records_ranking_entry(
+def test_process_single_candidate_defers_send_and_records_buy_ranking_entry(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """買いシグナルが成立しても、ワーカー単体ではLINE送信せず、スコアとともに
-    ランキング候補として登録するだけであることを確認する(2026-07仕様追加)。
+    """買い候補判定が成立しても、ワーカー単体ではLINE送信せず、ランキング候補として
+    登録するだけであることを確認する(2026-07 BUYパイプライン再設計)。
     """
-    from jstock_advisor.services.buy_signal_service import BuyAnalysisOutcome
-
-    recommendation = _make_recommendation("2914", total_score=72.5, recommendation_id="rec-1")
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
     monkeypatch.setattr(
-        handler_module.BuySignalService,
-        "analyze",
-        lambda self, *a, **kw: BuyAnalysisOutcome(
-            stock_code="2914",
-            recommendation=recommendation,
-            screening_passed=True,
-            exclusion_reasons=[],
-            data_error=None,
-        ),
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
     )
     fake_service = _FakeNotificationServiceForRanking(
         {"2914": NotificationOutcome(status=NotificationStatus.SENT, sent=False)}
@@ -202,22 +228,51 @@ def test_process_single_candidate_defers_send_and_records_ranking_entry(
     assert repo.get("rec-1") is not None
 
 
+def test_process_single_candidate_defers_send_and_records_watch_ranking_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    recommendation = _make_recommendation(
+        "7239",
+        company_quality_score=46.4,
+        recommendation_id="rec-2",
+        buy_action=BuyAction.WATCH_FOR_PRICE,
+        current_vs_entry_price_pct="19.7",
+    )
+    outcome = _outcome(recommendation, ranking_group="watch_price")
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
+    )
+    fake_service = _FakeNotificationServiceForRanking(
+        {"7239": NotificationOutcome(status=NotificationStatus.SENT, sent=False)}
+    )
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda batch_id, category, stock_code=None, ranking_entry=None: captured.update(
+            category=category, ranking_entry=ranking_entry
+        ),
+    )
+
+    handler_module._process_single_candidate(
+        "7239", "batch-1", _NOW, object(), _CONFIG, object(), repo, fake_service
+    )
+
+    assert captured["category"] == "watch_not_ranked"
+    assert captured["ranking_entry"].startswith("WATCH|")
+
+
 def test_process_single_candidate_suppressed_when_not_eligible(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    from jstock_advisor.services.buy_signal_service import BuyAnalysisOutcome
-
-    recommendation = _make_recommendation("2914", total_score=72.5, recommendation_id="rec-1")
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1"
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
     monkeypatch.setattr(
-        handler_module.BuySignalService,
-        "analyze",
-        lambda self, *a, **kw: BuyAnalysisOutcome(
-            stock_code="2914",
-            recommendation=recommendation,
-            screening_passed=True,
-            exclusion_reasons=[],
-            data_error=None,
-        ),
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
     )
     fake_service = _FakeNotificationServiceForRanking(
         {
@@ -248,19 +303,12 @@ def test_process_single_candidate_suppressed_when_not_eligible(
 def test_process_single_candidate_review_when_data_quality_blocked(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    from jstock_advisor.services.buy_signal_service import BuyAnalysisOutcome
-
-    recommendation = _make_recommendation("2914", total_score=72.5, recommendation_id="rec-1")
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1"
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
     monkeypatch.setattr(
-        handler_module.BuySignalService,
-        "analyze",
-        lambda self, *a, **kw: BuyAnalysisOutcome(
-            stock_code="2914",
-            recommendation=recommendation,
-            screening_passed=True,
-            exclusion_reasons=[],
-            data_error=None,
-        ),
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
     )
     fake_service = _FakeNotificationServiceForRanking(
         {
@@ -288,29 +336,141 @@ def test_process_single_candidate_review_when_data_quality_blocked(
     assert captured["ranking_entry"] is None
 
 
-def test_finalize_batch_notifies_only_top_n_by_score(tmp_path) -> None:
-    """買い候補スコア上位N件(config.notification.buy_candidate_max_notifications_per_run)
-    のみを実際に送信し、残りはcandidate_not_rankedのまま通知しないことを確認する。
+def test_process_single_candidate_review_when_manual_review_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """buy_action=MANUAL_REVIEW(整合性検証違反)の場合、data_quality_blockedでなくても
+    reviewカテゴリへ振り分ける(要求仕様20節)。
+    """
+    recommendation = _make_recommendation(
+        "2914",
+        company_quality_score=72.5,
+        recommendation_id="rec-1",
+        buy_action=BuyAction.MANUAL_REVIEW,
+    )
+    outcome = _outcome(recommendation, ranking_group="excluded")
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
+    )
+    fake_service = _FakeNotificationServiceForRanking(
+        {"2914": NotificationOutcome(status=NotificationStatus.SENT, sent=False)}
+    )
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda batch_id, category, stock_code=None, ranking_entry=None: captured.update(
+            category=category, ranking_entry=ranking_entry
+        ),
+    )
+
+    handler_module._process_single_candidate(
+        "2914", "batch-1", _NOW, object(), _CONFIG, object(), repo, fake_service
+    )
+
+    assert captured["category"] == "review"
+
+
+def test_process_single_candidate_excluded_maps_to_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jstock_advisor.services.buy_signal_service import BuyAnalysisOutcome
+
+    outcome = BuyAnalysisOutcome(
+        stock_code="9861",
+        recommendation=None,
+        screening_passed=False,
+        exclusion_reasons=["総合利回りが基準未満"],
+        data_error=None,
+        buy_action=BuyAction.EXCLUDED,
+        ranking_group="excluded",
+    )
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
+    )
+    fake_service = _FakeNotificationServiceForRanking({})
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda batch_id, category, stock_code=None, ranking_entry=None: captured.update(
+            category=category
+        ),
+    )
+
+    # EXCLUDEDパスはrecommendation_repo.saveを呼ばないことを、saveされたら
+    # 失敗するダミーリポジトリで直接検証する。
+    class _NoSaveRepo:
+        def save(self, *_a, **_kw):
+            raise AssertionError("EXCLUDEDの場合はRecommendationを保存しないはず")
+
+        def get(self, *_a, **_kw):
+            return None
+
+    handler_module._process_single_candidate(
+        "9861", "batch-1", _NOW, object(), _CONFIG, object(), _NoSaveRepo(), fake_service
+    )
+
+    assert captured["category"] == "hold"
+
+
+def test_finalize_batch_ranks_buy_and_watch_candidates_separately(tmp_path) -> None:
+    """購入候補ランキングは(action_priority, purchase_attractiveness_score,
+    company_quality_score)、価格待ちランキングは(company_quality_score,
+    -distance_to_entry_price_pct)の降順で、それぞれ独立に上位N件のみ通知する
+    (要求仕様17節)。
     """
     repo = RecommendationRepository(store_dir=tmp_path)
-    scores = {"1111": 90.0, "2222": 30.0, "3333": 60.0, "4444": 10.0, "5555": 50.0, "6666": 80.0}
+
+    buy_specs = [
+        ("1111", BuyAction.STRONG_BUY, 90.0, 60.0),  # action_priority最大
+        ("2222", BuyAction.BUY, 30.0, 60.0),
+        ("3333", BuyAction.BUY, 60.0, 60.0),
+        ("4444", BuyAction.SMALL_ENTRY, 10.0, 60.0),
+        ("5555", BuyAction.BUY, 50.0, 60.0),
+    ]
     ranking_entries = []
-    for i, (code, score) in enumerate(scores.items()):
-        rec_id = f"rec-{i}"
-        repo.save(_make_recommendation(code, total_score=score, recommendation_id=rec_id))
-        ranking_entries.append(handler_module._encode_ranking_entry(score, code, rec_id))
+    for i, (code, action, purchase_score, quality_score) in enumerate(buy_specs):
+        rec_id = f"buy-{i}"
+        rec = _make_recommendation(
+            code,
+            company_quality_score=quality_score,
+            recommendation_id=rec_id,
+            buy_action=action,
+            purchase_attractiveness_score=purchase_score,
+        )
+        repo.save(rec)
+        ranking_entries.append(handler_module._encode_buy_ranking_entry(rec))
+
+    watch_specs = [
+        ("7239", 46.4, "19.7"),
+        ("4246", 46.0, "43.4"),
+        ("1384", 45.2, "26.2"),
+    ]
+    for i, (code, quality_score, distance) in enumerate(watch_specs):
+        rec_id = f"watch-{i}"
+        rec = _make_recommendation(
+            code,
+            company_quality_score=quality_score,
+            recommendation_id=rec_id,
+            buy_action=BuyAction.WATCH_FOR_PRICE,
+            current_vs_entry_price_pct=distance,
+        )
+        repo.save(rec)
+        ranking_entries.append(handler_module._encode_watch_ranking_entry(rec))
 
     config = _CONFIG.model_copy(
         update={
             "notification": _CONFIG.notification.model_copy(
-                update={"buy_candidate_max_notifications_per_run": 3}
+                update={"buy_candidate_max_notifications_per_run": 2}
             )
         }
     )
     progress = handler_module.BatchProgress(
-        total=6,
-        completed=6,
-        category_counts={"candidate_not_ranked": 6},
+        total=8,
+        completed=8,
+        category_counts={"candidate_not_ranked": 5, "watch_not_ranked": 3},
         data_insufficient_stock_codes=[],
         failed_stock_codes=[],
         ranking_entries=ranking_entries,
@@ -319,10 +479,39 @@ def test_finalize_batch_notifies_only_top_n_by_score(tmp_path) -> None:
 
     handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
 
-    sent_codes = sorted(r.stock_code for r in fake_service.sent_recommendations)
-    assert sent_codes == ["1111", "3333", "6666"]  # スコア90, 60, 80の上位3件
+    sent_codes = {r.stock_code for r in fake_service.sent_recommendations}
+    # 購入候補: STRONG_BUY(1111)が最優先、次点はBUY同士でpurchase_attractiveness_score
+    # が高い方(3333=60 > 5555=50 > 2222=30)。上位2件は1111, 3333。
+    assert "1111" in sent_codes
+    assert "3333" in sent_codes
+    assert "2222" not in sent_codes
+    assert "5555" not in sent_codes
+    assert "4444" not in sent_codes
+    # 価格待ち: company_quality_score降順で上位2件(7239=46.4, 4246=46.0)。
+    assert "7239" in sent_codes
+    assert "4246" in sent_codes
+    assert "1384" not in sent_codes
 
     assert len(fake_service.batch_summary_calls) == 1
-    counts = fake_service.batch_summary_calls[0]["category_counts"]
-    assert counts["sent"] == 3
-    assert counts["candidate_not_ranked"] == 3
+    call = fake_service.batch_summary_calls[0]
+    assert call["category_counts"]["sent"] == 4  # 2(買い候補)+2(価格待ち)
+    assert call["category_counts"]["candidate_not_ranked"] == 3  # 5-2
+    assert call["category_counts"]["watch_not_ranked"] == 1  # 3-2
+    assert call["buy_candidates_sent_count"] == 2
+
+
+def test_finalize_batch_reports_zero_buy_candidates_sent_when_none_ranked(tmp_path) -> None:
+    repo = RecommendationRepository(store_dir=tmp_path)
+    progress = handler_module.BatchProgress(
+        total=3,
+        completed=3,
+        category_counts={"hold": 1, "watch_not_ranked": 2},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+    )
+    fake_service = _FakeNotificationServiceForRanking({})
+
+    handler_module._finalize_batch(progress, _CONFIG, _NOW, repo, fake_service)
+
+    assert fake_service.batch_summary_calls[0]["buy_candidates_sent_count"] == 0

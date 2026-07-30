@@ -4,6 +4,7 @@ from decimal import Decimal
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.common import PriceWithRationale, SellPriceLevels
 from jstock_advisor.domain.entities.enums import (
+    BuyAction,
     ConfidenceLevel,
     PriceFieldBasis,
     RecommendationType,
@@ -300,3 +301,56 @@ def test_review_without_immediate_execution_price_not_flagged() -> None:
     assert not any(
         v.check_name == "review_retains_immediate_execution_price" for v in result.violations
     )
+
+
+# --- BUYパイプライン整合性チェックの配線(2026-07 BUYパイプライン再設計) --------
+
+_BUY_DECISION_CONFIG = load_config().buy_decision
+
+
+def _buy_recommendation(
+    action: BuyAction, current_price: Decimal, **overrides: object
+) -> Recommendation:
+    base = dict(
+        recommendation_id="rec-buy-1",
+        stock_code="4516",
+        stock_name="日本新薬",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.BUY,
+        price_at_recommendation=current_price,
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+        buy_action=action,
+        entry_buy_price=Decimal("1000"),
+        standard_buy_price=Decimal("900"),
+        strong_buy_price=Decimal("800"),
+        business_days_to_earnings=30,
+        valuation_dispersion_ratio=Decimal("1.1"),
+    )
+    base.update(overrides)
+    return Recommendation(**base)  # type: ignore[arg-type]
+
+
+def test_buy_action_not_flagged_when_consistent() -> None:
+    r = _buy_recommendation(BuyAction.BUY, Decimal("900"))
+    result = validate_recommendation(r, _CONFIG, buy_decision_config=_BUY_DECISION_CONFIG)
+    assert not any(v.check_name == "buy_action_consistency_violation" for v in result.violations)
+
+
+def test_buy_action_flagged_when_current_price_above_entry() -> None:
+    r = _buy_recommendation(BuyAction.BUY, Decimal("1200"))
+    result = validate_recommendation(r, _CONFIG, buy_decision_config=_BUY_DECISION_CONFIG)
+    assert result.requires_manual_review
+    assert any(v.check_name == "buy_action_consistency_violation" for v in result.violations)
+
+
+def test_buy_action_not_checked_without_buy_decision_config() -> None:
+    r = _buy_recommendation(BuyAction.BUY, Decimal("1200"))
+    result = validate_recommendation(r, _CONFIG)  # buy_decision_config省略
+    assert not any(v.check_name == "buy_action_consistency_violation" for v in result.violations)
+
+
+def test_non_buy_recommendation_skips_buy_check() -> None:
+    r = _recommendation(RecommendationType.SELL, Decimal("1000"))
+    result = validate_recommendation(r, _CONFIG, buy_decision_config=_BUY_DECISION_CONFIG)
+    assert not any(v.check_name == "buy_action_consistency_violation" for v in result.violations)

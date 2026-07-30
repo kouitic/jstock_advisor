@@ -15,6 +15,7 @@ import yaml
 
 from jstock_advisor.config.models import (
     AppConfig,
+    BuyDecisionRulesConfig,
     ConfidenceRulesConfig,
     DataValidationRulesConfig,
     EarningsWindowRulesConfig,
@@ -109,6 +110,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     portfolio_concentration = PortfolioConcentrationRulesConfig.model_validate(
         _load_yaml(directory / "portfolio_concentration_rules.yaml")
     )
+    buy_decision = BuyDecisionRulesConfig.model_validate(
+        _load_yaml(directory / "buy_decision_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -126,4 +130,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         confidence=confidence,
         earnings_window=earnings_window,
         portfolio_concentration=portfolio_concentration,
+        buy_decision=buy_decision,
     )

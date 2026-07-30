@@ -1,7 +1,6 @@
 import datetime as dt
 from decimal import Decimal
 
-from jstock_advisor.domain.valuation.buy_price import compute_recommended_buy_prices
 from jstock_advisor.domain.valuation.fair_value import (
     aggregate_fair_value,
     compute_historical_range_price,
@@ -96,17 +95,6 @@ def test_aggregate_fair_value_weighted() -> None:
     assert result == Decimal("3000")
 
 
-class _Ratios:
-    tentative_buy_ratio = 0.95
-    standard_buy_ratio = 0.90
-    aggressive_buy_ratio = 0.85
-
-
-def test_compute_recommended_buy_prices_ordering() -> None:
-    levels = compute_recommended_buy_prices(Decimal("10000"), _Ratios())
-    assert (
-        levels.aggressive.price < levels.standard.price < levels.tentative.price < Decimal("10000")
-    )
-    assert levels.tentative.price == Decimal("9500")
-    assert levels.standard.price == Decimal("9000")
-    assert levels.aggressive.price == Decimal("8500")
+# 旧: 固定95%/90%/85%比率でのcompute_recommended_buy_prices()は2026-07 BUY
+# パイプライン再設計で廃止した。買付価格3段階のテストは
+# tests/unit/test_margin_of_safety.py(compute_buy_price_levels)を参照。

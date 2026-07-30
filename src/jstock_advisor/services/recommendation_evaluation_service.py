@@ -204,9 +204,9 @@ class RecommendationEvaluationService:
 
         standard_price = buy_prices.standard.price if buy_prices.standard else None
         return (
-            _reached(buy_prices.tentative.price if buy_prices.tentative else None),
+            _reached(buy_prices.entry.price if buy_prices.entry else None),
             _reached(standard_price),
-            _reached(buy_prices.aggressive.price if buy_prices.aggressive else None),
+            _reached(buy_prices.strong.price if buy_prices.strong else None),
             _first_reach_business_days(standard_price),
         )
 

@@ -1,22 +1,19 @@
-"""買い判定(要求仕様9節・10節)。
+"""買い判定の統計ヘルパー(要求仕様9節)。
 
-screening_ruleを通過した銘柄について、割安条件・スコアを踏まえて買い候補として
-提示すべきかを判定する。急落中というだけの理由で割安評価を高くしないよう、
-業績が重大に悪化している場合は価格系の割安シグナルを無効化する。
+割安条件・急落判定等の純粋なデータ変換関数を提供する。BuyAction判定の
+オーケストレーションは`domain/signals/buy_decision.py`が担う(2026-07
+BUYパイプライン再設計により、旧`evaluate_buy_signal()`/`determine_confidence()`/
+`BuySignalResult`は`buy_decision.py`/`valuation_confidence.py`へ置き換えられた)。
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
 from decimal import Decimal
 
 from jstock_advisor.config.models import ScoringWeightsConfig
-from jstock_advisor.domain.entities.common import BuyPriceLevels
-from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.domain.scoring.score import ScoreResult, UndervaluationSignals
-from jstock_advisor.domain.screening.rules import ScreeningResult
-from jstock_advisor.interfaces.types import PriceBar, ShareholderBenefit
+from jstock_advisor.interfaces.types import PriceBar
 
 # 以下はいずれもMVPの初期値。バックテスト(要求仕様44節)を通じて見直す対象とする。
 _EARNINGS_SEVERE_DECLINE_THRESHOLD_PCT = -30.0
@@ -34,16 +31,6 @@ _SCORE_LABELS: dict[str, str] = {
     "earnings_stability": "業績安定性",
     "price_stability": "株価安定性",
 }
-
-
-@dataclass(frozen=True)
-class BuySignalResult:
-    recommended: bool
-    exclusion_reasons: list[str]
-    positive_reasons: list[str]
-    counter_factors: list[str]
-    key_risks: list[str]
-    confidence: ConfidenceLevel
 
 
 def has_severe_earnings_decline(quarterly_operating_incomes: list[Decimal]) -> bool:
@@ -122,7 +109,7 @@ def compute_undervaluation_signals(
     current_dividend_yield_pct: float | None,
     historical_average_dividend_yield_pct: float | None,
     drawdown_from_52w_high_pct: float | None,
-    buy_prices: BuyPriceLevels | None,
+    valuation_anchor: Decimal | None,
     recent_price_change_pct: float | None,
     earnings_trend_non_decreasing: bool | None,
     severe_earnings_decline: bool,
@@ -146,8 +133,8 @@ def compute_undervaluation_signals(
         drawdown_signal = drawdown_from_52w_high_pct <= _DRAWDOWN_FROM_HIGH_THRESHOLD_PCT
 
     below_fair_value = None
-    if buy_prices is not None and buy_prices.standard is not None:
-        below_fair_value = current_price <= buy_prices.standard.price
+    if valuation_anchor is not None:
+        below_fair_value = current_price <= valuation_anchor
 
     price_down_despite_stable_earnings = None
     if (
@@ -178,9 +165,12 @@ def compute_undervaluation_signals(
     )
 
 
-def _score_areas(
+def score_areas(
     score_result: ScoreResult, config: ScoringWeightsConfig, ratio: float, above: bool
 ) -> list[str]:
+    """スコア内訳のうち、配点比でratio以上(above=True)/未満(above=False)の
+    項目をラベル付きで返す(通知文の「主な評価理由」「弱み」表示に使う)。
+    """
     weights = config.weights
     areas = []
     for field_name, label in _SCORE_LABELS.items():
@@ -194,68 +184,3 @@ def _score_areas(
     return areas
 
 
-def determine_confidence(
-    fair_value_methods_used_count: int,
-    data_sources_count: int,
-    has_stale_data_warning: bool,
-) -> ConfidenceLevel:
-    if has_stale_data_warning or fair_value_methods_used_count == 0:
-        return ConfidenceLevel.LOW
-    if fair_value_methods_used_count >= 3 and data_sources_count >= 3:
-        return ConfidenceLevel.HIGH
-    return ConfidenceLevel.MEDIUM
-
-
-def evaluate_buy_signal(
-    screening_result: ScreeningResult,
-    severe_earnings_decline: bool,
-    benefit: ShareholderBenefit | None,
-    score_result: ScoreResult,
-    scoring_config: ScoringWeightsConfig,
-    fair_value: Decimal | None,
-    buy_prices: BuyPriceLevels | None,
-    fair_value_methods_used_count: int,
-    data_sources_count: int,
-    has_stale_data_warning: bool,
-) -> BuySignalResult:
-    exclusion_reasons = list(screening_result.exclusion_reasons)
-    if severe_earnings_decline:
-        exclusion_reasons.append("直近決算で重大な業績悪化(営業利益が前期比30%超悪化)")
-    if benefit is not None and benefit.is_abolished:
-        exclusion_reasons.append("株主優待の廃止が発表されている")
-    if fair_value is None or buy_prices is None:
-        exclusion_reasons.append("適正価格を算出できるデータがない")
-
-    recommended = not exclusion_reasons
-
-    counter_factors = list(screening_result.warnings)
-    if benefit is not None and benefit.is_major_downgrade:
-        counter_factors.append("株主優待の内容が改悪された可能性がある")
-    counter_factors.extend(
-        f"{area}が弱い"
-        for area in _score_areas(score_result, scoring_config, _WEAK_SCORE_RATIO, above=False)
-    )
-
-    positive_reasons: list[str] = []
-    if recommended:
-        positive_reasons.extend(
-            f"{area}が高評価"
-            for area in _score_areas(score_result, scoring_config, _STRONG_SCORE_RATIO, above=True)
-        )
-        if not positive_reasons:
-            positive_reasons.append("必須条件を満たし、総合利回り基準をクリア")
-
-    key_risks = list(counter_factors)
-
-    confidence = determine_confidence(
-        fair_value_methods_used_count, data_sources_count, has_stale_data_warning
-    )
-
-    return BuySignalResult(
-        recommended=recommended,
-        exclusion_reasons=exclusion_reasons,
-        positive_reasons=positive_reasons,
-        counter_factors=counter_factors,
-        key_risks=key_risks,
-        confidence=confidence,
-    )

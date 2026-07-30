@@ -17,7 +17,6 @@ from jstock_advisor.domain.classification.stock_type import classify_stock_type
 from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.domain.entities.common import (
     BenefitUtilityCoefficients,
-    BuyPriceLevels,
     DataSourceReference,
 )
 from jstock_advisor.domain.entities.enums import ConfidenceLevel
@@ -34,7 +33,6 @@ from jstock_advisor.domain.screening.rules import (
 )
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.signals.momentum import compute_momentum_snapshot
-from jstock_advisor.domain.valuation.buy_price import compute_recommended_buy_prices
 from jstock_advisor.domain.valuation.fair_value import (
     aggregate_fair_value,
     compute_dcf_price,
@@ -81,7 +79,6 @@ class StockSnapshot:
     annual_benefit_value: Decimal | None
     total_yield_pct: float
     fair_value: Decimal | None
-    buy_prices: BuyPriceLevels | None
     fair_value_methods_used_count: int
     data_sources: list[DataSourceReference]
     data_fetched_at: dt.datetime
@@ -201,11 +198,6 @@ def build_stock_snapshot(
         config.valuation.fair_value_methods.aggregation_method,
         config.valuation.fair_value_methods.method_weights,
     )
-    buy_prices = (
-        compute_recommended_buy_prices(fair_value, config.valuation.recommended_buy_price)
-        if fair_value is not None
-        else None
-    )
 
     method_confidence = {
         "target_yield": ConfidenceLevel.HIGH,
@@ -304,7 +296,6 @@ def build_stock_snapshot(
         annual_benefit_value=annual_benefit_value,
         total_yield_pct=total_yield_pct,
         fair_value=fair_value,
-        buy_prices=buy_prices,
         fair_value_methods_used_count=fair_value_methods_used_count,
         data_sources=data_sources,
         data_fetched_at=data_fetched_at,

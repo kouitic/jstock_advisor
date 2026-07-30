@@ -22,6 +22,13 @@ class FairValueMethodResult(ImmutableSnapshot):
     confidence: ConfidenceLevel
     exclusion_reason: str | None = None
 
+    # --- BUYパイプライン再設計(2026-07)で追加。算出できたことと、その結果を
+    # 適正価格集計に採用してよいことは別(要求仕様9節・10節)。不適切な前提
+    # (EPS負数・分割未調整・特別配当の恒常化等)の場合はapplicable=Falseとし、
+    # exclusion_reasonへ理由を残したうえで集計(min/max/median/mean)から除外する ---
+    applicable: bool = True
+    source_date: dt.date | None = None
+
 
 class FairValueRange(ImmutableSnapshot):
     bear: Decimal | None
@@ -32,3 +39,13 @@ class FairValueRange(ImmutableSnapshot):
     methods_excluded: list[FairValueMethodResult]
     usable_for_trading_judgment: bool
     unusable_reason: str | None = None
+
+    # --- BUYパイプライン再設計(2026-07)で追加。単一の「最終適正価格」ではなく
+    # 手法間のバラつきを扱えるようにする(要求仕様9節)。SELL側の
+    # usable_for_trading_judgmentはそのまま維持し、これらは追加情報として扱う ---
+    valuation_min: Decimal | None = None
+    valuation_max: Decimal | None = None
+    valuation_median: Decimal | None = None
+    valuation_mean: Decimal | None = None
+    valuation_dispersion_ratio: float | None = None  # = valuation_max / valuation_min
+    methods_used_count: int | None = None

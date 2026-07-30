@@ -11,6 +11,7 @@ from jstock_advisor.domain.entities.common import (
     SellPriceLevels,
 )
 from jstock_advisor.domain.entities.enums import (
+    BuyAction,
     ConfidenceLevel,
     DividendComparisonOutcome,
     RecommendationType,
@@ -53,9 +54,9 @@ def _make_recommendation(
         recommended_at=_NOW,
         recommendation_type=recommendation_type,
         buy_prices=BuyPriceLevels(
-            tentative=PriceWithRationale(price=Decimal("3500"), rationale="x"),
+            tentative=PriceWithRationale(price=Decimal("3600"), rationale="x"),
             standard=PriceWithRationale(price=Decimal(standard_price), rationale="x"),
-            aggressive=PriceWithRationale(price=Decimal("3100"), rationale="x"),
+            aggressive=PriceWithRationale(price=Decimal("2900"), rationale="x"),
         ),
         price_at_recommendation=Decimal("4200"),
         dividend_yield_pct_at_recommendation=4.5,
@@ -533,7 +534,14 @@ def test_data_quality_alert_logs_stock_name_and_recommended_action_instead_of_se
 
 
 def _counts(
-    sent=0, hold=0, review=0, data_insufficient=0, suppressed=0, failed=0
+    sent=0,
+    hold=0,
+    review=0,
+    data_insufficient=0,
+    suppressed=0,
+    failed=0,
+    candidate_not_ranked=0,
+    watch_not_ranked=0,
 ) -> dict[str, int]:
     return {
         "sent": sent,
@@ -542,6 +550,8 @@ def _counts(
         "data_insufficient": data_insufficient,
         "suppressed": suppressed,
         "failed": failed,
+        "candidate_not_ranked": candidate_not_ranked,
+        "watch_not_ranked": watch_not_ranked,
     }
 
 
@@ -711,3 +721,130 @@ def test_watch_recommendation_type_shown_as_japanese_label() -> None:
 
     assert "保有継続(監視)" in message
     assert "WATCH" not in message
+
+
+# --- BUYパイプライン再設計(2026-07)の通知フォーマット ---------------------------
+
+
+def _make_buy_pipeline_recommendation(
+    *, buy_action: BuyAction, recommendation_type: RecommendationType = RecommendationType.BUY
+) -> Recommendation:
+    return Recommendation(
+        recommendation_id="rec-buy-1",
+        stock_code="4516",
+        stock_name="日本新薬",
+        recommended_at=_NOW,
+        recommendation_type=recommendation_type,
+        buy_prices=BuyPriceLevels(
+            entry=PriceWithRationale(price=Decimal("3440"), rationale="x"),
+            standard=PriceWithRationale(price=Decimal("3225"), rationale="x"),
+            strong=PriceWithRationale(price=Decimal("3010"), rationale="x"),
+        ),
+        price_at_recommendation=Decimal("3495"),
+        total_yield_pct_at_recommendation=3.55,
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        buy_action=buy_action,
+        company_quality_score=48.67,
+        purchase_attractiveness_score=30.0,
+        valuation_anchor=Decimal("3620"),
+        valuation_min=Decimal("3400"),
+        valuation_max=Decimal("3900"),
+        valuation_dispersion_ratio=Decimal("1.15"),
+        current_vs_entry_price_pct=Decimal("1.6"),
+        reasons=["財務健全性が高評価"],
+    )
+
+
+def test_buy_candidate_message_includes_valuation_anchor_and_price_levels() -> None:
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.SMALL_ENTRY)
+    message = render_notification_preview(rec)
+
+    assert "打診購入候補" in message
+    assert "適正価格レンジ: 3,400円〜3,900円" in message
+    assert "購入判断基準価格: 3,620円" in message
+    assert "打診買い:3,440円 標準買い:3,225円 積極買い:3,010円" in message
+    assert "企業魅力度: 48.7点" in message
+    assert "購入魅力度: 30.0点" in message
+
+
+def test_watch_for_price_message_distinct_from_buy_message() -> None:
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.WATCH_FOR_PRICE)
+    message = render_notification_preview(rec)
+
+    assert "監視継続(価格待ち)" in message
+    assert "打診買い価格まで" in message
+    assert "今回の購入候補には含めません" in message
+    assert "購入魅力度" not in message  # 価格待ち通知には購入魅力度は表示しない
+
+
+def test_watch_before_earnings_buy_action_does_not_collide_with_profit_taking_type() -> None:
+    """RecommendationType.WATCH_BEFORE_EARNINGSは利確判定エンジン専用のため、
+    BUYパイプラインはrecommendation_typeを書き換えず、buy_actionのみで
+    「監視継続(決算待ち)」表示に分岐する(通知フォーマットの衝突回帰テスト)。
+    """
+    rec = _make_buy_pipeline_recommendation(
+        buy_action=BuyAction.WATCH_BEFORE_EARNINGS,
+        recommendation_type=RecommendationType.BUY,
+    )
+    message = render_notification_preview(rec)
+
+    assert "監視継続(決算待ち)" in message
+    assert "決算内容を確認してから再評価" in message
+
+
+def test_buy_action_label_used_instead_of_recommendation_type_label() -> None:
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)
+    message = render_notification_preview(rec)
+    assert "積極購入候補" in message
+
+
+def test_batch_summary_no_buy_candidates_renders_none_found(service_and_repos) -> None:
+    # 通知本文に「該当なし」が表示されることを確認する。
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=10,
+        category_counts=_counts(hold=5, watch_not_ranked=5),
+        now=_NOW,
+        buy_candidates_sent_count=0,
+    )
+
+    message = client.sent[0]
+    assert "該当なし" in message
+    assert "現在価格で安全余裕を満たす銘柄はありませんでした" in message
+
+
+def test_batch_summary_shows_buy_and_watch_breakdown_separately(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=68,
+        category_counts=_counts(
+            sent=6, hold=40, data_insufficient=5, candidate_not_ranked=17, watch_not_ranked=0
+        ),
+        now=_NOW,
+        buy_candidates_sent_count=1,
+    )
+
+    message = client.sent[0]
+    assert "買い候補(通知上限により見送り)：17件" in message
+    assert "価格待ち(通知上限により見送り)：" not in message  # 0件なので非表示
+
+
+def test_batch_summary_never_says_top_priority_n_stocks(service_and_repos) -> None:
+    # 「優先順位の高い5件」という表現が通知本文に含まれないことを確認する。
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=68,
+        category_counts=_counts(sent=5, candidate_not_ranked=22, watch_not_ranked=3),
+        now=_NOW,
+        buy_candidates_sent_count=5,
+    )
+
+    message = client.sent[0]
+    assert "優先順位の高い" not in message

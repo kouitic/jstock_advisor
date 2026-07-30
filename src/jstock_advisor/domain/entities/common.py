@@ -46,12 +46,73 @@ class PriceWithRationale(ImmutableSnapshot):
     price_high: Decimal | None = None  # レンジ表示時の上限
 
 
-class BuyPriceLevels(ImmutableSnapshot):
-    """推奨買値3段階(要求仕様10節)。"""
+# PriceWithRationaleの別名。買付価格3段階の各フィールドの型として使う
+# (2026-07 BUYパイプライン再設計で導入。仕様上の名称は"PriceLevel"だが、
+# 既存の"PriceWithRationale"と構造が同一のため新規クラスは作らない)。
+PriceLevel = PriceWithRationale
 
-    tentative: PriceWithRationale | None = None  # 打診買い価格
-    standard: PriceWithRationale | None = None  # 標準買い価格
-    aggressive: PriceWithRationale | None = None  # 積極買い価格
+
+_BUY_PRICE_LEVELS_LEGACY_FIELD_MAP = {
+    "tentative": "entry",
+    "aggressive": "strong",
+}
+
+
+class BuyPriceLevels(ImmutableSnapshot):
+    """推奨買値3段階(2026-07 BUYパイプライン再設計。要求仕様10節)。
+
+    固定95%/90%/85%方式は廃止し、安全余裕率(margin_of_safety)から算出する。
+    - entry: 打診買い価格(少額で購入を開始できる上限価格)
+    - standard: 標準買い価格(通常の予定数量を購入できる価格)
+    - strong: 積極買い価格(安全余裕が大きく、追加購入を検討できる価格)
+
+    価格順序は必ず entry >= standard >= strong (名称と価格順序の矛盾を防ぐ)。
+    旧フィールド名(tentative/aggressive)は`_remap_legacy_field_names`で
+    entry/strongへ読み替え、保存済みレコードの後方互換を保つ。
+    """
+
+    entry: PriceLevel | None = None
+    standard: PriceLevel | None = None
+    strong: PriceLevel | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_legacy_field_names(cls, data: object) -> object:
+        return remap_legacy_fields(data, _BUY_PRICE_LEVELS_LEGACY_FIELD_MAP)
+
+    @model_validator(mode="after")
+    def _check_price_order(self) -> BuyPriceLevels:
+        if (
+            self.entry is not None
+            and self.standard is not None
+            and self.entry.price < self.standard.price
+        ):
+            raise ValueError("BuyPriceLevels: entry価格はstandard価格以上である必要があります")
+        if (
+            self.standard is not None
+            and self.strong is not None
+            and self.standard.price < self.strong.price
+        ):
+            raise ValueError("BuyPriceLevels: standard価格はstrong価格以上である必要があります")
+        if (
+            self.entry is not None
+            and self.strong is not None
+            and self.entry.price < self.strong.price
+        ):
+            raise ValueError("BuyPriceLevels: entry価格はstrong価格以上である必要があります")
+        return self
+
+
+class MarginAdjustment(ImmutableSnapshot):
+    """必要安全余裕率への加算理由(2026-07 BUYパイプライン再設計。要求仕様8節)。
+
+    基本安全余裕率に対するリスク調整1件を表す。通知には主要な調整理由のみを
+    表示するが、監査ログにはすべて保存する。
+    """
+
+    code: str
+    adjustment: Decimal
+    reason: str
 
 
 _SELL_PRICE_LEVELS_LEGACY_FIELD_MAP = {

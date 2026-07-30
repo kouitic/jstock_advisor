@@ -47,6 +47,9 @@ _SUMMARY_CATEGORY_FAILED = "failed"
 # 買い候補分析専用: 買いシグナル自体は成立したが、1回あたりの通知上限
 # (スコア上位N件)により今回は通知を見送った銘柄(2026-07仕様追加)。
 _SUMMARY_CATEGORY_CANDIDATE_NOT_RANKED = "candidate_not_ranked"
+# 買い候補分析専用: 価格待ち(WATCH_FOR_PRICE/WATCH_BEFORE_EARNINGS)判定だが、
+# 1回あたりの通知上限により今回は通知を見送った銘柄(BUYパイプライン再設計§17)。
+_SUMMARY_CATEGORY_WATCH_NOT_RANKED = "watch_not_ranked"
 
 SUMMARY_CATEGORIES = (
     _SUMMARY_CATEGORY_SENT,
@@ -56,6 +59,7 @@ SUMMARY_CATEGORIES = (
     _SUMMARY_CATEGORY_SUPPRESSED,
     _SUMMARY_CATEGORY_FAILED,
     _SUMMARY_CATEGORY_CANDIDATE_NOT_RANKED,
+    _SUMMARY_CATEGORY_WATCH_NOT_RANKED,
 )
 
 
