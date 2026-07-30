@@ -7,3 +7,8 @@ resend_after_days: 5
 
 # 推奨価格(買値/売値の代表値)がこの割合(%)以上変化したら再通知する
 price_change_resend_threshold_pct: 3.0
+
+# 買い候補分析で、1回の実行あたり実際にLINE通知する上限件数。
+# 買い候補スコア(100点満点)が高い順に上位N件のみ通知し、残りは通知を見送る
+# (要求仕様2026-07追加: 通知の一斉大量送信を防ぐため)
+buy_candidate_max_notifications_per_run: 5

@@ -711,6 +711,25 @@ class LineNotificationService:
         """notify_recommendationと同じ処理を行い、送信有無だけでなく送信しなかった
         理由(NotificationStatus)まで返す(要求仕様§12・§13: バッチサマリーの内訳集計に使う)。
         """
+        outcome = self.evaluate_notification_status(recommendation, now)
+        if outcome.status != NotificationStatus.SENT or outcome.data_quality_blocked:
+            return outcome
+        self.send_recommendation_notification(recommendation, now)
+        return NotificationOutcome(status=NotificationStatus.SENT, sent=True)
+
+    def evaluate_notification_status(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationOutcome:
+        """notify_recommendation_with_statusと同じ判定を行うが、実際の送信
+        (send_recommendation_notification)は行わない(2026-07仕様追加: 買い候補の
+        優先度付け通知のように、一旦すべての候補を評価してから上位N件だけ送信したい
+        呼び出し元向け)。
+
+        status==SENTかつdata_quality_blocked=Falseの場合のみ、呼び出し側が
+        send_recommendation_notificationを呼んで実際に送信する責任を持つ。
+        データ品質アラート・要手動確認メッセージは例外的な安全経路のため、
+        従来通りここで即時送信する(優先度付けの対象外)。
+        """
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         previous = self._previous_recommendation(recommendation.stock_code, notification_type)
 
@@ -731,9 +750,18 @@ class LineNotificationService:
             )
 
         status = self._notification_status_for_send(recommendation, previous, now)
-        if status != NotificationStatus.SENT:
-            return NotificationOutcome(status=status, sent=False)
+        return NotificationOutcome(status=status, sent=False)
 
+    def send_recommendation_notification(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> None:
+        """recommendationの通知メッセージを条件判定なしで送信する。
+
+        呼び出し前にevaluate_notification_statusでstatus==SENTかつ
+        data_quality_blocked=Falseであることを確認していること
+        (このメソッド自体は再通知抑止・データ品質チェックを一切行わない)。
+        """
+        notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         message = _format_message(recommendation, notification_type)
         self._client.push_message(message)
         self._log_repo.save(
@@ -746,7 +774,6 @@ class LineNotificationService:
                 related_recommendation_id=recommendation.recommendation_id,
             )
         )
-        return NotificationOutcome(status=NotificationStatus.SENT, sent=True)
 
     def _check_data_quality(
         self,
@@ -1007,6 +1034,11 @@ class LineNotificationService:
             f"再通知抑止：{counts['suppressed']}件",
             f"処理失敗：{counts['failed']}件",
         ]
+        # 買い候補の優先度付け通知(2026-07仕様追加)向け: シグナル自体は成立したが
+        # 1回あたりの通知上限により今回は通知を見送った件数。他のバッチ(保有銘柄・
+        # 適時開示等)ではこのカテゴリを使わない(常に0)ため、0件のときは表示しない。
+        if counts["candidate_not_ranked"] > 0:
+            lines.append(f"優先度により見送り：{counts['candidate_not_ranked']}件")
         if not is_consistent:
             lines.append("")
             lines.append(f"※内訳合計({counts_sum}件)が対象銘柄数と一致していません。")
