@@ -18,6 +18,7 @@ def _detail(
     *,
     shares: int,
     months: int | None = None,
+    max_months: int | None = None,
     value: str = "1000",
     group: str | None = None,
     category: BenefitUtilityCategory = BenefitUtilityCategory.CASH_EQUIVALENT,
@@ -28,6 +29,7 @@ def _detail(
         estimated_value=Decimal(value),
         min_shares_for_tier=shares,
         long_term_holding_condition_months=months,
+        long_term_holding_condition_max_months=max_months,
         tier_group=group,
     )
 
@@ -41,6 +43,19 @@ class TestComputeHoldingDurationMonths:
 
     def test_before_purchase_returns_zero(self) -> None:
         assert compute_holding_duration_months(dt.date(2024, 5, 1), dt.date(2024, 1, 1)) == 0
+
+    def test_day_31_purchase_completes_on_shorter_months_own_last_day(self) -> None:
+        # 4月は30日までしかないため、1/31購入は4/30時点で3ヶ月経過とみなす
+        # (4/30を待たずに5/1になるまでカウントが遅れてはいけない)
+        assert compute_holding_duration_months(dt.date(2024, 1, 31), dt.date(2024, 4, 30)) == 3
+        assert compute_holding_duration_months(dt.date(2024, 1, 31), dt.date(2024, 5, 1)) == 3
+        assert compute_holding_duration_months(dt.date(2024, 1, 31), dt.date(2024, 5, 31)) == 4
+
+    def test_leap_day_purchase_reaches_full_year_on_non_leap_february_end(self) -> None:
+        # 2/29購入は、翌年が閏年でなければ2/28時点で満12ヶ月とみなす
+        assert compute_holding_duration_months(dt.date(2024, 2, 29), dt.date(2025, 2, 28)) == 12
+        assert compute_holding_duration_months(dt.date(2024, 2, 29), dt.date(2025, 3, 1)) == 12
+        assert compute_holding_duration_months(dt.date(2024, 2, 29), dt.date(2025, 3, 29)) == 13
 
     def test_same_day_returns_zero(self) -> None:
         assert compute_holding_duration_months(dt.date(2024, 5, 1), dt.date(2024, 5, 1)) == 0
@@ -91,6 +106,29 @@ class TestSelectEffectiveBenefitDetails:
             details, shares_held=100, holding_duration_months=0
         )
         assert len(effective) == 2
+
+    def test_upper_bound_excludes_holder_past_the_qualifying_window(self) -> None:
+        # NTT型: 「2年以上3年未満」「5年以上6年未満」のように上限つきの期間区分。
+        # 上限を超えた保有者(例: 4年保有)はどちらの区分にも該当しないはず。
+        details = [
+            _detail(shares=100, months=24, max_months=35, value="1500", group="dpoint_gift"),
+            _detail(shares=100, months=60, max_months=71, value="3000", group="dpoint_gift"),
+        ]
+        effective = select_effective_benefit_details(
+            details, shares_held=100, holding_duration_months=48
+        )
+        assert effective == []
+
+    def test_upper_bound_still_matches_within_window(self) -> None:
+        details = [
+            _detail(shares=100, months=24, max_months=35, value="1500", group="dpoint_gift"),
+            _detail(shares=100, months=60, max_months=71, value="3000", group="dpoint_gift"),
+        ]
+        effective = select_effective_benefit_details(
+            details, shares_held=100, holding_duration_months=30
+        )
+        assert len(effective) == 1
+        assert effective[0].estimated_value == Decimal("1500")
 
 
 class TestComputeAnnualBenefitValueForHolding:

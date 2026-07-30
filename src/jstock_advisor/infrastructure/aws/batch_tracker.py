@@ -69,15 +69,21 @@ def record_result(
     if category not in SUMMARY_CATEGORIES:
         raise ValueError(f"unknown batch result category: {category}")
 
-    update_expr = f"ADD {category} :one, completed :one"
+    # categoryは"hold"等、DynamoDBの予約語と衝突しうる文字列をそのまま属性名に使うため、
+    # ExpressionAttributeNamesで必ずプレースホルダ経由にする(直書きするとUpdateItemが
+    # ValidationException: reserved keywordで失敗する)。
+    names: dict[str, str] = {"#category": category, "#completed": "completed"}
+    update_expr = "ADD #category :one, #completed :one"
     values: dict[str, Any] = {":one": 1}
     if stock_code is not None and category in _CATEGORIES_WITH_STOCK_CODES:
-        update_expr += f", {category}_codes :codes"
+        names["#category_codes"] = f"{category}_codes"
+        update_expr += ", #category_codes :codes"
         values[":codes"] = {stock_code}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
         UpdateExpression=update_expr,
+        ExpressionAttributeNames=names,
         ExpressionAttributeValues=values,
         ReturnValues="ALL_NEW",
     )

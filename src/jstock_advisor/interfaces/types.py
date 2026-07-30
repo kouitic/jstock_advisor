@@ -186,6 +186,11 @@ class BenefitDetail(ImmutableSnapshot):
     # 各明細を独立した優待として個別に加算する(複数の優待が同時に併存する銘柄向け)。
     tier_group: str | None = None
 
+    # long_term_holding_condition_months(下限)のみでは「◯年以上◯年未満」のように
+    # 上限が定められた優待(NTTのdポイント進呈等)を正しく表現できず、対象期間を
+    # 過ぎても該当し続けてしまうバグの原因になっていた。Noneの場合は従来通り上限なし。
+    long_term_holding_condition_max_months: int | None = None
+
 
 class ShareholderBenefit(ImmutableSnapshot):
     stock_code: str

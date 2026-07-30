@@ -65,6 +65,13 @@ def add(
     min_shares_for_tier: int = typer.Option(..., "--min-shares-for-tier"),
     estimated_value: str = typer.Option(None, "--estimated-value"),
     long_term_months: int = typer.Option(None, "--long-term-months"),
+    long_term_months_max: int = typer.Option(
+        None,
+        "--long-term-months-max",
+        help="長期保有条件の上限(例: 「2年以上3年未満」なら--long-term-months 24 "
+        "--long-term-months-max 35)。未指定なら上限なし(--long-term-months以上は"
+        "ずっと該当し続ける)",
+    ),
     tier_group: str = typer.Option(
         None,
         "--tier-group",
@@ -108,6 +115,7 @@ def add(
         min_shares_for_tier=min_shares_for_tier,
         estimated_value=_parse_decimal(estimated_value, "estimated_value"),
         long_term_holding_condition_months=long_term_months,
+        long_term_holding_condition_max_months=long_term_months_max,
         tier_group=tier_group,
         benefit_record_dates=_parse_date_list(record_dates),
         benefit_record_date_recurrence_months=_parse_month_list(record_date_recurrence_months),
@@ -132,6 +140,9 @@ def add_tier(
     min_shares_for_tier: int = typer.Option(..., "--min-shares-for-tier"),
     estimated_value: str = typer.Option(None, "--estimated-value"),
     long_term_months: int = typer.Option(None, "--long-term-months"),
+    long_term_months_max: int = typer.Option(
+        None, "--long-term-months-max", help="registerコマンドの--long-term-months-maxを参照"
+    ),
     tier_group: str = typer.Option(
         None, "--tier-group", help="registerコマンドの--tier-groupを参照"
     ),
@@ -146,6 +157,7 @@ def add_tier(
             min_shares_for_tier=min_shares_for_tier,
             estimated_value=_parse_decimal(estimated_value, "estimated_value"),
             long_term_holding_condition_months=long_term_months,
+            long_term_holding_condition_max_months=long_term_months_max,
             tier_group=tier_group,
         )
     except ValueError as e:

@@ -20,7 +20,6 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
-from jstock_advisor.domain.entities.valuation import FairValueRange
 
 
 @dataclass(frozen=True)
@@ -256,14 +255,21 @@ def _check_reevaluation_unreasonably_above_full_take(
     return None
 
 
-def _check_low_fair_value_confidence_full_take(
-    r: Recommendation, fair_value_range: FairValueRange | None
-) -> ConsistencyViolation | None:
+def _check_low_fair_value_confidence_full_take(r: Recommendation) -> ConsistencyViolation | None:
+    """Recommendation自身が保持するfair_value_overall_confidenceを直接見る。
+
+    以前は別途FairValueRangeを引数で受け取る設計だったが、通知直前の
+    validate_recommendation呼び出し元(line_notification_service.py)は
+    永続化されたRecommendationしか持っておらず、計算過程の完全なFairValueRange
+    オブジェクトを保持していないため、実際には常にNoneが渡され本チェックが
+    恒久的に無効化されていた。Recommendationにこのチェックに必要な値
+    (fair_value_overall_confidence)が既に保存されているため、それを直接使う。
+    """
     if r.recommendation_type != RecommendationType.FULL_PROFIT_TAKE:
         return None
-    if fair_value_range is None:
+    if r.fair_value_overall_confidence is None:
         return None
-    if fair_value_range.overall_confidence == ConfidenceLevel.LOW and any(
+    if r.fair_value_overall_confidence == ConfidenceLevel.LOW and any(
         "適正価格" in reason for reason in r.reasons
     ):
         return ConsistencyViolation(
@@ -334,7 +340,6 @@ def _check_price_equals_current_with_wrong_basis(
 def validate_recommendation(
     recommendation: Recommendation,
     config: ConsistencyValidationConfig,
-    fair_value_range: FairValueRange | None = None,
     gain_full_threshold_pct: float = 50.0,
     min_yield_pct: float = 2.5,
 ) -> ConsistencyCheckResult:
@@ -344,7 +349,7 @@ def validate_recommendation(
         _check_watch_immediate_execution(recommendation),
         _check_three_or_more_equal_prices(recommendation),
         _check_reevaluation_unreasonably_above_full_take(recommendation, config),
-        _check_low_fair_value_confidence_full_take(recommendation, fair_value_range),
+        _check_low_fair_value_confidence_full_take(recommendation),
         _check_gain_below_threshold_full_take(recommendation, config, gain_full_threshold_pct),
         _check_yield_sufficient_full_take_on_yield_alone(recommendation, min_yield_pct),
         _check_price_equals_current_with_wrong_basis(recommendation),

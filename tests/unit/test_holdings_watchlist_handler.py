@@ -228,3 +228,38 @@ def test_task_holding_hold_category_and_portfolio_concentration_notified(
     assert concentration_recommendation.portfolio_acquisition_cost_weight_pct == pytest.approx(
         100.0
     )
+
+
+class _RaisingThenOkMarketData:
+    """1銘柄目の価格取得で例外を発生させ、2銘柄目は正常応答するフェイク。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def get_latest_price(self, stock_code: str) -> object:
+        self.calls.append(stock_code)
+        if stock_code == "2914":
+            raise RuntimeError("yfinance boom")
+        return type("_Snap", (), {"close_price": Decimal("1000")})()
+
+
+class _RaisingProviders:
+    def __init__(self, market_data: _RaisingThenOkMarketData) -> None:
+        self.market_data = market_data
+
+
+def test_estimate_portfolio_totals_isolates_single_holding_price_fetch_error() -> None:
+    """1銘柄の価格取得が例外を投げても、他の銘柄の処理を止めず、時価総額のみを
+    算出不能(None)として扱う(取得価格総額は影響を受けない)。"""
+    holdings = [_holding("2914"), _holding("8136")]
+    market_data = _RaisingThenOkMarketData()
+    providers = _RaisingProviders(market_data)
+
+    total_market_value, total_acquisition_cost = handler_module._estimate_portfolio_totals(
+        holdings, providers
+    )
+
+    assert total_market_value is None
+    assert total_acquisition_cost == Decimal("200000")
+    # 例外が発生した銘柄で処理が止まらず、2銘柄目も呼び出されていることを確認する
+    assert market_data.calls == ["2914", "8136"]

@@ -178,6 +178,21 @@ class ShareholderBenefitCsvImportService:
                     None,
                 )
 
+        long_term_max_raw = (row.get("long_term_holding_condition_max_months") or "").strip()
+        long_term_max_months: int | None = None
+        if long_term_max_raw:
+            try:
+                long_term_max_months = int(long_term_max_raw)
+            except ValueError:
+                return (
+                    _error(
+                        row_number,
+                        stock_code,
+                        "long_term_holding_condition_max_monthsは整数で指定してください",
+                    ),
+                    None,
+                )
+
         record_dates_raw = (row.get("benefit_record_dates") or "").strip()
         record_dates: list[dt.date] = []
         if record_dates_raw:
@@ -251,6 +266,7 @@ class ShareholderBenefitCsvImportService:
             estimated_value=estimated_value,
             min_shares_for_tier=min_shares_for_tier,
             long_term_holding_condition_months=long_term_months,
+            long_term_holding_condition_max_months=long_term_max_months,
             tier_group=tier_group,
         )
         source = DataSourceReference(

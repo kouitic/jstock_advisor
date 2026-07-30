@@ -1,9 +1,17 @@
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 
-from jstock_advisor.domain.entities.enums import RecordDateUnknownReason
+from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import (
+    CorporateActionType,
+    DividendComparisonOutcome,
+    RecordDateUnknownReason,
+)
+from jstock_advisor.interfaces.types import CorporateActionEvent
 from jstock_advisor.providers.dividend_data.yfinance_impl import YFinanceDividendDataProvider
+from jstock_advisor.services.corporate_action_service import CorporateActionService
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 
@@ -58,3 +66,58 @@ def test_inferred_decrease_never_sets_official_dividend_cut_announced(
     assert info.inferred_dividend_decrease is True
     assert info.official_dividend_cut_announced is False
     assert info.dividend_breakdown_confirmed is False
+
+
+class _FixedCorporateActionProvider:
+    def __init__(self, events: list[CorporateActionEvent]) -> None:
+        self._events = events
+
+    def get_corporate_actions(self, stock_code: str, since: dt.date) -> list[CorporateActionEvent]:
+        return [e for e in self._events if e.stock_code == stock_code]
+
+
+def test_real_dividend_cut_is_not_hidden_by_double_split_adjustment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_sum_by_calendar_yearが各支払いを既にself._now.date()基準へ調整済みの値を、
+    classify_dividend_change呼び出し時にさらに調整してしまう回帰テスト(修正前は
+    分割係数が二重に適用され、実際の減配が見かけ上の増配として隠れていた)。
+
+    FY2025の配当実績(分割前基準)は25円×2回=50円。2026年4月1日に1:5分割が
+    発生しているため、分割後基準では50/5=10円に相当する。予想配当(分割後基準、
+    yfinanceの現在値なので既に分割後)が9円なら、これは約10%の実質減配であり、
+    増配(DIVIDEND_INCREASE)と誤判定されてはならない。
+    """
+    import jstock_advisor.providers.dividend_data.yfinance_impl as module
+
+    class _TickerWithSplitStraddlingDividends(_FakeTicker):
+        def __init__(self, symbol: str) -> None:
+            super().__init__(symbol)
+            self.info = {"regularMarketPrice": 1000, "dividendRate": 9}
+            self.dividends = {
+                dt.datetime(2025, 6, 27): 25.0,
+                dt.datetime(2025, 12, 29): 25.0,
+            }
+
+    monkeypatch.setattr(module.yf, "Ticker", _TickerWithSplitStraddlingDividends)
+
+    split_event = CorporateActionEvent(
+        stock_code="5401",
+        event_type=CorporateActionType.SPLIT,
+        announced_date=dt.date(2026, 4, 1),
+        effective_date=dt.date(2026, 4, 1),
+        ratio=Decimal("5"),
+        source=DataSourceReference(provider="test", fetched_at=_NOW),
+    )
+    corporate_action = CorporateActionService(
+        _FixedCorporateActionProvider([split_event]), now=_NOW
+    )
+    provider = YFinanceDividendDataProvider(now=_NOW, corporate_action_service=corporate_action)
+
+    info = provider.get_dividend_info("5401")
+
+    assert info is not None
+    # 修正前は二重調整により src=2円(10円をさらに5で割った値)となり、
+    # forecast(9円) > src(2円)でDIVIDEND_INCREASEに誤判定されていた。
+    assert info.dividend_comparison_outcome == DividendComparisonOutcome.FORECAST_DIVIDEND_CUT
+    assert info.inferred_dividend_decrease is True

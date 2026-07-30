@@ -129,6 +129,24 @@ def test_import_without_record_dates_sets_unknown_reason(
     assert saved.benefit_record_date_unknown_reason == RecordDateUnknownReason.SOURCE_NOT_FOUND
 
 
+def test_import_long_term_holding_condition_max_months_column(
+    import_service: ShareholderBenefitCsvImportService,
+    repository: ShareholderBenefitRegistryRepository,
+    tmp_path: Path,
+) -> None:
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER},long_term_holding_condition_months,long_term_holding_condition_max_months\n"
+        "9432,100,1,VERSATILE_POINT,x,100,24,35\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.success_count == 1
+    saved = repository.get("9432")
+    assert saved is not None
+    assert saved.benefits[0].long_term_holding_condition_months == 24
+    assert saved.benefits[0].long_term_holding_condition_max_months == 35
+
+
 def test_import_tier_group_column(
     import_service: ShareholderBenefitCsvImportService,
     repository: ShareholderBenefitRegistryRepository,
