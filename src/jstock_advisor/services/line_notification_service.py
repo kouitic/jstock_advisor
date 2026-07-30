@@ -21,11 +21,14 @@ from decimal import ROUND_HALF_UP, Decimal
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.data_quality_alert import DataQualityAlert
 from jstock_advisor.domain.entities.enums import (
+    BUY_FAMILY_ACTIONS,
+    BuyAction,
     DividendComparisonOutcome,
     NotificationStatus,
     NotificationType,
     RecommendationType,
     RecordDateUnknownReason,
+    buy_action_label,
 )
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.domain.entities.notification import NotificationLog
@@ -268,43 +271,144 @@ def _confirmation_lines(recommendation: Recommendation) -> list[str]:
     return lines
 
 
-def _format_buy_message(recommendation: Recommendation, notification_type: NotificationType) -> str:
-    title = (
-        "買い候補"
-        if notification_type == NotificationType.DAILY_BUY_CANDIDATES
-        else "ウォッチリスト買い時"
-    )
-    lines = [
-        f"【{title}】{recommendation.stock_code} {recommendation.stock_name}",
-        f"判定: {_recommendation_type_label(recommendation.recommendation_type)}",
-        f"現在株価: {_yen(recommendation.price_at_recommendation)}",
-    ]
-    if recommendation.dividend_yield_pct_at_recommendation is not None:
-        lines.append(f"予想配当利回り: {recommendation.dividend_yield_pct_at_recommendation:.2f}%")
-    if recommendation.shareholder_benefit_yield_pct_at_recommendation is not None:
+# 購入判断における業種別モデルの区分表示(2026-07 BUYパイプライン再設計。要求仕様12節・22節)。
+_BUY_INDUSTRY_SECTOR_LABELS: dict[str, str] = {
+    "BANK": "銀行",
+    "LEASE_FINANCE": "リース・金融",
+    "PHARMACEUTICAL": "医薬品",
+    "AUTOMOTIVE_PARTS": "自動車部品",
+    "CYCLICAL_MATERIALS": "素材(景気循環)",
+    "UTILITY": "電気・ガス",
+    "FOOD": "食品",
+    "GENERAL_MANUFACTURING": "一般製造業",
+    "SMALL_GROWTH": "小型成長株",
+    "GENERAL": "一般事業会社",
+    "UNKNOWN": "業種不明",
+}
+
+
+def _buy_industry_label(recommendation: Recommendation) -> str:
+    sector = recommendation.buy_industry_sector
+    key = sector.value if sector is not None else "UNKNOWN"
+    return _BUY_INDUSTRY_SECTOR_LABELS.get(key, "業種不明")
+
+
+def _dispersion_display(recommendation: Recommendation) -> str:
+    ratio = recommendation.valuation_dispersion_ratio
+    if ratio is None:
+        return "算出不可"
+    return f"{float(ratio):.2f}倍"
+
+
+def _valuation_range_lines(recommendation: Recommendation) -> list[str]:
+    """適正価格レンジ・購入判断基準価格(要求仕様9節・11節)。単一の「最終適正価格」を
+    断定的に表示する旧設計は廃止した。
+    """
+    lines = []
+    if recommendation.valuation_min is not None and recommendation.valuation_max is not None:
         lines.append(
-            f"株主優待利回り: {recommendation.shareholder_benefit_yield_pct_at_recommendation:.2f}%"
+            f"適正価格レンジ: {_yen(recommendation.valuation_min)}〜"
+            f"{_yen(recommendation.valuation_max)}"
         )
-    lines.append(f"総合利回り: {recommendation.total_yield_pct_at_recommendation:.2f}%")
+    if recommendation.valuation_anchor is not None:
+        lines.append(f"購入判断基準価格: {_yen(recommendation.valuation_anchor)}")
+    return lines
+
+
+def _buy_price_levels_line(recommendation: Recommendation) -> str | None:
     bp = recommendation.buy_prices
-    if bp is not None and bp.tentative and bp.standard and bp.aggressive:
-        lines.append(
-            f"打診買い:{_yen(bp.tentative.price)} 標準買い:{_yen(bp.standard.price)} "
-            f"積極買い:{_yen(bp.aggressive.price)}"
-        )
-        lines.append(f"次の判断条件: 標準買い価格({_yen(bp.standard.price)})到達時に再検討")
-    lines.append(f"総合スコア: {recommendation.total_score}")
-    if recommendation.reasons:
-        lines.append("推奨理由: " + " / ".join(recommendation.reasons))
-    if recommendation.key_risks:
-        lines.append("主なリスク: " + " / ".join(recommendation.key_risks))
+    if bp is None or not (bp.entry and bp.standard and bp.strong):
+        return None
+    return (
+        f"打診買い:{_yen(bp.entry.price)} 標準買い:{_yen(bp.standard.price)} "
+        f"積極買い:{_yen(bp.strong.price)}"
+    )
+
+
+def _margin_adjustment_reasons_line(recommendation: Recommendation) -> str | None:
+    """必要安全余裕を拡大した主な理由(要求仕様8節)。内部値すべては表示しない。"""
+    if not recommendation.margin_adjustments:
+        return None
+    reasons = "\n".join(f"・{a.reason}" for a in recommendation.margin_adjustments)
+    return f"必要安全余裕を拡大した理由:\n{reasons}"
+
+
+def _format_buy_candidate_message(recommendation: Recommendation) -> str:
+    """購入候補通知(STRONG_BUY/BUY/SMALL_ENTRY、2026-07 BUYパイプライン再設計。要求仕様22節)。"""
+    action = recommendation.buy_action
+    title = buy_action_label(action) if action is not None else "購入候補"
+    lines = [f"【{title}】{recommendation.stock_code} {recommendation.stock_name}"]
+    lines.append(f"現在値: {_yen(recommendation.price_at_recommendation)}")
+    lines.extend(_valuation_range_lines(recommendation))
+    price_line = _buy_price_levels_line(recommendation)
+    if price_line is not None:
+        lines.append(price_line)
+    if recommendation.current_vs_entry_price_pct is not None:
+        pct = float(recommendation.current_vs_entry_price_pct)
+        direction = "上回る" if pct >= 0 else "下回る"
+        lines.append(f"現在値と打診買い価格の差: 約{abs(pct):.1f}%{direction}")
+    if recommendation.company_quality_score is not None:
+        lines.append(f"企業魅力度: {recommendation.company_quality_score:.1f}点")
+    if recommendation.purchase_attractiveness_score is not None:
+        lines.append(f"購入魅力度: {recommendation.purchase_attractiveness_score:.1f}点")
+    if recommendation.total_yield_pct_at_recommendation is not None:
+        lines.append(f"総合利回り: {recommendation.total_yield_pct_at_recommendation:.2f}%")
     if recommendation.next_earnings_date:
         lines.append(f"次回決算予定日: {recommendation.next_earnings_date}")
+    lines.append(f"適正価格信頼度: {recommendation.confidence.value}")
+    lines.append(f"算出手法間のばらつき: {_dispersion_display(recommendation)}")
+    applied = "適用" if recommendation.industry_model_applied else "未適用"
+    lines.append(f"業種別モデル: {_buy_industry_label(recommendation)}({applied})")
+    if recommendation.reasons:
+        lines.append("主な評価理由: " + " / ".join(recommendation.reasons))
+    if recommendation.counter_factors:
+        lines.append("弱み: " + " / ".join(recommendation.counter_factors))
+    margin_line = _margin_adjustment_reasons_line(recommendation)
+    if margin_line is not None:
+        lines.append(margin_line)
     lines.extend(_confirmation_lines(recommendation))
     if recommendation.data_sources:
         fetched_at = min(s.fetched_at for s in recommendation.data_sources)
         lines.append(f"データ取得日時: {format_jst(fetched_at)}")
-    lines.append(f"判定の信頼度: {recommendation.confidence.value}")
+    lines.append(f"通知ID: {recommendation.recommendation_id}")
+    lines.append(_DISCLAIMER)
+    return "\n".join(lines)
+
+
+def _format_watch_for_price_message(recommendation: Recommendation) -> str:
+    """価格待ち通知(WATCH_FOR_PRICE/WATCH_BEFORE_EARNINGS、2026-07 BUYパイプライン
+    再設計。要求仕様17節・22節)。「企業として魅力があること」と「現在価格で
+    購入すべきこと」を分け、良い企業でも価格が高ければ購入候補には含めない。
+    """
+    action = recommendation.buy_action
+    title = buy_action_label(action) if action is not None else "監視継続"
+    lines = [f"【{title}】{recommendation.stock_code} {recommendation.stock_name}"]
+    lines.append(f"現在値: {_yen(recommendation.price_at_recommendation)}")
+    lines.extend(_valuation_range_lines(recommendation))
+    price_line = _buy_price_levels_line(recommendation)
+    if price_line is not None:
+        lines.append(price_line)
+    if recommendation.current_vs_entry_price_pct is not None:
+        pct = float(recommendation.current_vs_entry_price_pct)
+        lines.append(f"打診買い価格まで: 約{abs(pct):.1f}%")
+    if recommendation.company_quality_score is not None:
+        lines.append(f"企業魅力度: {recommendation.company_quality_score:.1f}点")
+    if recommendation.total_yield_pct_at_recommendation is not None:
+        lines.append(f"総合利回り: {recommendation.total_yield_pct_at_recommendation:.2f}%")
+    if recommendation.reasons:
+        lines.append("企業評価: " + " / ".join(recommendation.reasons))
+    if action == BuyAction.WATCH_BEFORE_EARNINGS:
+        judgment = "購入判断: 次回決算が近いため、決算内容を確認してから再評価します。"
+    else:
+        judgment = (
+            "購入判断: 現在値が打診買い価格を上回っているため、"
+            "今回の購入候補には含めません。"
+        )
+    lines.append(judgment)
+    if recommendation.next_earnings_date:
+        lines.append(f"次回決算予定日: {recommendation.next_earnings_date}")
+    lines.append(f"算出手法間のばらつき: {_dispersion_display(recommendation)}")
+    lines.extend(_confirmation_lines(recommendation))
     lines.append(f"通知ID: {recommendation.recommendation_id}")
     lines.append(_DISCLAIMER)
     return "\n".join(lines)
@@ -650,11 +754,24 @@ def _format_sell_message(recommendation: Recommendation) -> str:
 
 
 def _format_message(recommendation: Recommendation, notification_type: NotificationType) -> str:
+    # BUYパイプライン再設計(2026-07)以降のRecommendationはbuy_actionを持つ。
+    # notification_type(recommendation_type由来)より先にこちらで分岐することで、
+    # RecommendationType.WATCH_BEFORE_EARNINGS(利確判定エンジンのWATCH抑制専用)との
+    # 意味の衝突を避ける(buy_action is not Noneなレコードのrecommendation_typeは
+    # 常にBUY/WATCH_BUYのまま、呼び出し元の文脈を保持するだけの値)。
+    if recommendation.buy_action is not None:
+        if recommendation.buy_action in BUY_FAMILY_ACTIONS:
+            return _format_buy_candidate_message(recommendation)
+        if recommendation.buy_action in {
+            BuyAction.WATCH_FOR_PRICE,
+            BuyAction.WATCH_BEFORE_EARNINGS,
+        }:
+            return _format_watch_for_price_message(recommendation)
     if notification_type in (
         NotificationType.DAILY_BUY_CANDIDATES,
         NotificationType.WATCHLIST_BUY_SIGNAL,
     ):
-        return _format_buy_message(recommendation, notification_type)
+        return _format_buy_candidate_message(recommendation)
     if notification_type == NotificationType.PROFIT_TAKING_SIGNAL:
         return _format_profit_taking_message(recommendation)
     return _format_sell_message(recommendation)
@@ -788,7 +905,9 @@ class LineNotificationService:
         check_names: list[str] = []
 
         consistency_result = validate_recommendation(
-            recommendation, self._config.data_validation.consistency_validation
+            recommendation,
+            self._config.data_validation.consistency_validation,
+            buy_decision_config=self._config.buy_decision,
         )
         for violation in consistency_result.violations:
             contradictions.append(f"[{violation.check_name}] {violation.description}")
@@ -975,6 +1094,7 @@ class LineNotificationService:
         now: dt.datetime,
         data_insufficient_stock_codes: list[str] | None = None,
         failed_stock_codes: list[str] | None = None,
+        buy_candidates_sent_count: int | None = None,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
         全体件数・区分別内訳のサマリー通知(要求仕様§13)。個別のデータ取得エラー・
@@ -984,6 +1104,10 @@ class LineNotificationService:
         をキーとする内訳件数。合計が対象銘柄数(total)と一致するか整合性チェックし、
         一致しない場合は警告ログを出したうえで、通知本文にもその旨を明記する
         (件数の不整合自体を隠さない)。
+
+        buy_candidates_sent_countは買い候補分析(2026-07 BUYパイプライン再設計)専用。
+        0が渡された場合、「今回の購入候補: 該当なし」を明示する(要求仕様17節:
+        購入候補が0件の場合も無理に上位銘柄を買い候補として出さない)。
 
         ファンアウトの起動元(スケジューラ・手動実行)が何らかの理由で二重ディスパッチ
         された場合、独立した2つのbatch_idがそれぞれ完了を検知してこのメソッドを
@@ -1034,11 +1158,20 @@ class LineNotificationService:
             f"再通知抑止：{counts['suppressed']}件",
             f"処理失敗：{counts['failed']}件",
         ]
-        # 買い候補の優先度付け通知(2026-07仕様追加)向け: シグナル自体は成立したが
-        # 1回あたりの通知上限により今回は通知を見送った件数。他のバッチ(保有銘柄・
-        # 適時開示等)ではこのカテゴリを使わない(常に0)ため、0件のときは表示しない。
+        # 買い候補分析(2026-07 BUYパイプライン再設計)専用: 購入候補・価格待ちの
+        # いずれもシグナル自体は成立したが、1回あたりの通知上限により今回は通知を
+        # 見送った件数。他のバッチ(保有銘柄・適時開示等)ではこれらのカテゴリを
+        # 使わない(常に0)ため、0件のときは表示しない。
+        # 「優先順位の高いN件」という表現は使わず、購入候補/価格待ちを明示して区別する。
         if counts["candidate_not_ranked"] > 0:
-            lines.append(f"優先度により見送り：{counts['candidate_not_ranked']}件")
+            lines.append(f"買い候補(通知上限により見送り)：{counts['candidate_not_ranked']}件")
+        if counts["watch_not_ranked"] > 0:
+            lines.append(f"価格待ち(通知上限により見送り)：{counts['watch_not_ranked']}件")
+        if buy_candidates_sent_count == 0:
+            lines.append("")
+            lines.append("【今回の購入候補】")
+            lines.append("該当なし")
+            lines.append("現在価格で安全余裕を満たす銘柄はありませんでした。")
         if not is_consistent:
             lines.append("")
             lines.append(f"※内訳合計({counts_sum}件)が対象銘柄数と一致していません。")

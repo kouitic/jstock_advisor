@@ -401,3 +401,70 @@ class BenefitUtilityCategory(StrEnum):
     IN_HOUSE_PRODUCT = "IN_HOUSE_PRODUCT"
     DISCOUNT_VOUCHER = "DISCOUNT_VOUCHER"
     LOTTERY_OR_COMMEMORATIVE = "LOTTERY_OR_COMMEMORATIVE"
+
+
+class BuyAction(StrEnum):
+    """購入対象判定の正本(2026-07 BUYパイプライン再設計)。
+
+    「企業として投資候補になり得るか(company_quality_score)」と「現在の株価で
+    実際に購入すべきか」を分離するための判定区分。旧`recommended: bool`は
+    このBuyActionから導出される派生値(プロパティ)とし、直接更新しない。
+    """
+
+    STRONG_BUY = "STRONG_BUY"
+    BUY = "BUY"
+    SMALL_ENTRY = "SMALL_ENTRY"
+    WATCH_FOR_PRICE = "WATCH_FOR_PRICE"
+    WATCH_BEFORE_EARNINGS = "WATCH_BEFORE_EARNINGS"
+    MANUAL_REVIEW = "MANUAL_REVIEW"
+    NOT_ATTRACTIVE = "NOT_ATTRACTIVE"
+    EXCLUDED = "EXCLUDED"
+    DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
+
+
+_BUY_ACTION_LABELS: dict[BuyAction, str] = {
+    BuyAction.STRONG_BUY: "積極購入候補",
+    BuyAction.BUY: "購入候補",
+    BuyAction.SMALL_ENTRY: "打診購入候補",
+    BuyAction.WATCH_FOR_PRICE: "監視継続(価格待ち)",
+    BuyAction.WATCH_BEFORE_EARNINGS: "監視継続(決算待ち)",
+    BuyAction.MANUAL_REVIEW: "要確認",
+    BuyAction.NOT_ATTRACTIVE: "購入見送り",
+    BuyAction.EXCLUDED: "対象外",
+    BuyAction.DATA_INSUFFICIENT: "データ不足",
+}
+
+# 購入候補ランキングに含めるBuyAction(価格条件を満たしている状態)。
+BUY_FAMILY_ACTIONS = frozenset(
+    {BuyAction.STRONG_BUY, BuyAction.BUY, BuyAction.SMALL_ENTRY}
+)
+# 価格待ちランキングに含めるBuyAction。
+WATCH_FAMILY_ACTIONS = frozenset(
+    {BuyAction.WATCH_FOR_PRICE, BuyAction.WATCH_BEFORE_EARNINGS}
+)
+
+
+def buy_action_label(action: BuyAction) -> str:
+    return _BUY_ACTION_LABELS[action]
+
+
+class BuyIndustrySector(StrEnum):
+    """購入判断における業種別適正価格モデルの区分(2026-07 BUYパイプライン再設計)。
+
+    利確判定用の`ProfitTakingIndustrySector`とはメンバー構成・用途が異なるため
+    統合せず独立させる(統合すると利確側の既存キーワード判定・ゲートを壊す
+    リスクがあるため)。専用の多変量モデル自体は未実装であり、区分の識別と
+    信頼度HIGH禁止ゲート・安全余裕率加算のみを行う(推測で補完しない方針)。
+    """
+
+    BANK = "BANK"
+    LEASE_FINANCE = "LEASE_FINANCE"
+    PHARMACEUTICAL = "PHARMACEUTICAL"
+    AUTOMOTIVE_PARTS = "AUTOMOTIVE_PARTS"
+    CYCLICAL_MATERIALS = "CYCLICAL_MATERIALS"
+    UTILITY = "UTILITY"
+    FOOD = "FOOD"
+    GENERAL_MANUFACTURING = "GENERAL_MANUFACTURING"
+    SMALL_GROWTH = "SMALL_GROWTH"
+    GENERAL = "GENERAL"
+    UNKNOWN = "UNKNOWN"

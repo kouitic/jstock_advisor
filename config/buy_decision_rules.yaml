@@ -1,0 +1,67 @@
+# 購入対象判定・購入判断基準価格の設定(2026-07 BUYパイプライン再設計)
+#
+# 「企業として投資候補になり得るか(company_quality_score)」と
+# 「現在の株価で実際に購入すべきか(purchase_attractiveness_score + BuyAction)」を
+# 分離するための閾値・安全余裕率を定義する。固定95%/90%/85%方式は廃止し、
+# 適正価格の信頼度・手法間バラつき・決算接近・業種モデル未適用等に応じて
+# 動的に安全余裕率を決定する。
+
+version: 1
+
+# company_quality_scoreに対する絶対基準(相対順位だけで「優先銘柄」としない)。
+# 価格条件を満たしていてもスコアが基準未満なら格下げする(昇格には使わない)。
+score_thresholds:
+  strong_buy: 70.0
+  buy: 60.0
+  small_entry: 55.0
+  watch: 45.0
+
+# 適正価格の算出手法間バラつき率(= valuation_max / valuation_min)の判定基準。
+valuation_dispersion:
+  low_max: 1.30 # これ以下: ばらつき小
+  medium_max: 1.60 # これ以下: ばらつき中(超えたら信頼度HIGH禁止)
+  auto_buy_block: 2.00 # これを超えたら自動購入判定を禁止(原則MANUAL_REVIEW)
+
+# 決算直前の購入判定調整(ローリスク・長期保有方針のため、決算直前の新規購入は
+# 原則待つ)。決算前でも買い推奨を許可する例外ルールは設けない。
+earnings_window:
+  block_buy_business_days: 3 # これ以内: BUY系をWATCH_BEFORE_EARNINGSへ変更
+  add_margin_business_days: 7 # これ以内(4〜7営業日): 必要安全余裕率を加算
+  added_margin: 0.03
+
+# 必要安全余裕率(= 1 - 買付価格/valuation_anchor)。適正価格は「買ってよい上限価格」
+# ではなく企業価値の中心値として扱い、実際の買付価格にはここで安全余裕を適用する。
+margin_of_safety:
+  confidence:
+    high:
+      entry: 0.10
+      standard: 0.15
+      strong: 0.20
+    medium:
+      entry: 0.20
+      standard: 0.25
+      strong: 0.30
+  # 信頼度LOWの場合は自動の買い推奨価格を生成しない(MANUAL_REVIEW / DATA_INSUFFICIENT /
+  # WATCH_FOR_PRICEのいずれかとする)。
+  maximum: 0.45
+  # 基本安全余裕率に対するリスク調整の加算値。複数該当する場合は合算し、maximumで頭打ちする。
+  adjustments:
+    earnings_within_3_business_days: 0.05
+    earnings_within_7_business_days: 0.03
+    high_valuation_dispersion: 0.05
+    very_high_valuation_dispersion: 0.10
+    industry_model_not_applied: 0.05
+    cyclical_industry: 0.05
+    small_cap_or_low_liquidity: 0.05
+    volatile_earnings: 0.05
+    temporary_earnings_boost_risk: 0.05
+    major_customer_dependency: 0.03
+    data_quality_warning: 0.05
+
+# 割安度スコアのカテゴリ別上限点(合計20点)。PER/PBR/配当利回り/適正価格/株価下落は
+# 相互に強く関連するため、カテゴリ分けして二重加点を防ぐ。
+undervaluation_category_caps:
+  valuation_multiple: 6.0 # PER・PBRが過去中央値以下
+  yield: 4.0 # 配当利回りが過去平均以上
+  fair_value: 8.0 # 現在値が適正価格(購入判断基準価格)以下
+  market_price_action: 2.0 # 52週高値からの下落・直近下落(財務悪化が理由でない場合のみ)

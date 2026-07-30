@@ -11,8 +11,11 @@ import statistics
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from jstock_advisor.config.models import ScoringWeightsConfig
+from jstock_advisor.config.models import ScoringWeightsConfig, UndervaluationCategoryCaps
 from jstock_advisor.domain.entities.common import ScoreBreakdown
+from jstock_advisor.domain.scoring.undervaluation_categories import (
+    score_undervaluation_categories,
+)
 from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, PriceBar
 
 # 株主優待利回りがこの値(%)以上で株主優待スコアが満点になる基準値。
@@ -123,17 +126,6 @@ def score_financial_health(
     return score, formula
 
 
-def score_undervaluation(signals: UndervaluationSignals, weight: float) -> tuple[float, str]:
-    available = signals.available()
-    if not available:
-        return 0.0, "割安条件を判定するデータがないため0点"
-    met = sum(1 for v in available.values() if v)
-    total = len(available)
-    score = weight * (met / total)
-    formula = f"割安条件{met}/{total}件該当 × 配点{weight}点"
-    return score, formula
-
-
 def score_shareholder_benefit_value(
     benefit_yield_pct: float | None, weight: float
 ) -> tuple[float, str]:
@@ -199,6 +191,7 @@ def compute_score(
     min_equity_ratio_pct: float,
     max_payout_ratio_pct: float,
     config: ScoringWeightsConfig,
+    undervaluation_category_caps: UndervaluationCategoryCaps,
 ) -> ScoreResult:
     w = config.weights
     yield_score, yield_formula = score_total_yield_attractiveness(total_yield_pct, config)
@@ -208,8 +201,8 @@ def compute_score(
     health_score, health_formula = score_financial_health(
         financial, min_equity_ratio_pct, w.financial_health
     )
-    undervaluation_score, undervaluation_formula = score_undervaluation(
-        undervaluation_signals, w.undervaluation
+    undervaluation_score, undervaluation_formula = score_undervaluation_categories(
+        undervaluation_signals, undervaluation_category_caps
     )
     benefit_score, benefit_formula = score_shareholder_benefit_value(
         benefit_yield_pct, w.shareholder_benefit_value

@@ -42,14 +42,9 @@ historical_range_method:
   use_52_week_low: true
   use_support_levels: true
 
-recommended_buy_price:
-  # 最終適正価格に対する割引率
-  tentative_buy_ratio: 0.95     # 打診買い価格
-  standard_buy_ratio: 0.90      # 標準買い価格
-  aggressive_buy_ratio: 0.85    # 積極買い価格
-  # 拡張ポイント: 現在株価・直近安値・値幅制限・移動平均線等を用いた補正を
-  # domain/valuation 層のプラグインとして追加可能な設計とする(初期値は無効)
-  enable_price_context_adjustment: false
+# 旧: recommended_buy_price(固定95%/90%/85%方式)は2026-07 BUYパイプライン再設計で
+# 廃止した。買付価格3段階は config/buy_decision_rules.yaml の margin_of_safety
+# (信頼度・リスクに応じた動的な安全余裕率)から算出する。
 
 dcf_method:
   # 完全なCAPM(リスクフリーレート・株式リスクプレミアム・ベータ)を算出する

@@ -7,7 +7,7 @@ Pythonのデフォルトとしては持たせず、YAMLの値のみを正とす�
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -90,13 +90,6 @@ class HistoricalRangeMethod(StrictModel):
     use_support_levels: bool
 
 
-class RecommendedBuyPrice(StrictModel):
-    tentative_buy_ratio: float
-    standard_buy_ratio: float
-    aggressive_buy_ratio: float
-    enable_price_context_adjustment: bool
-
-
 class DcfMethod(StrictModel):
     # 完全なCAPMは金利・ベータ等のデータソースが無いため実装不可(要求仕様8節の
     # フィージビリティ制約)。固定割引率による簡易DCFとし、信頼度はMEDIUM上限とする。
@@ -117,7 +110,6 @@ class ValuationRulesConfig(StrictModel):
     per_method: PerMethod
     pbr_method: PbrMethod
     historical_range_method: HistoricalRangeMethod
-    recommended_buy_price: RecommendedBuyPrice
     dcf_method: DcfMethod
     fair_value_usability: FairValueUsability
 
@@ -531,6 +523,123 @@ class PortfolioConcentrationRulesConfig(StrictModel):
     single_stock_weight_threshold_pct: float
 
 
+# --- buy_decision_rules.yaml (2026-07 BUYパイプライン再設計) ------------------
+
+
+class BuyScoreThresholds(StrictModel):
+    strong_buy: float
+    buy: float
+    small_entry: float
+    watch: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> BuyScoreThresholds:
+        if not (self.strong_buy >= self.buy >= self.small_entry >= self.watch):
+            raise ValueError(
+                "score_thresholdsはstrong_buy >= buy >= small_entry >= watchの順序が必要です"
+            )
+        return self
+
+
+class ValuationDispersionThresholds(StrictModel):
+    low_max: float
+    medium_max: float
+    auto_buy_block: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> ValuationDispersionThresholds:
+        if not (0 < self.low_max < self.medium_max < self.auto_buy_block):
+            raise ValueError(
+                "valuation_dispersionはlow_max < medium_max < auto_buy_blockの順序が必要です"
+            )
+        return self
+
+
+class BuyEarningsWindowConfig(StrictModel):
+    block_buy_business_days: int
+    add_margin_business_days: int
+    added_margin: float
+
+    @model_validator(mode="after")
+    def _check_values(self) -> BuyEarningsWindowConfig:
+        if self.block_buy_business_days >= self.add_margin_business_days:
+            raise ValueError(
+                "earnings_windowはblock_buy_business_days < add_margin_business_daysが必要です"
+            )
+        if not (0 <= self.added_margin < 1):
+            raise ValueError("added_marginは0以上1未満である必要があります")
+        return self
+
+
+class MarginOfSafetyTier(StrictModel):
+    entry: float
+    standard: float
+    strong: float
+
+    @model_validator(mode="after")
+    def _check_order_and_range(self) -> MarginOfSafetyTier:
+        for value in (self.entry, self.standard, self.strong):
+            if not (0 <= value < 1):
+                raise ValueError("安全余裕率は0以上1未満である必要があります")
+        if not (self.entry <= self.standard <= self.strong):
+            raise ValueError("安全余裕率はentry <= standard <= strongの順序が必要です")
+        return self
+
+
+class MarginOfSafetyConfidenceTiers(StrictModel):
+    high: MarginOfSafetyTier
+    medium: MarginOfSafetyTier
+
+
+class MarginAdjustments(StrictModel):
+    earnings_within_3_business_days: float
+    earnings_within_7_business_days: float
+    high_valuation_dispersion: float
+    very_high_valuation_dispersion: float
+    industry_model_not_applied: float
+    cyclical_industry: float
+    small_cap_or_low_liquidity: float
+    volatile_earnings: float
+    temporary_earnings_boost_risk: float
+    major_customer_dependency: float
+    data_quality_warning: float
+
+
+class MarginOfSafetyConfig(StrictModel):
+    confidence: MarginOfSafetyConfidenceTiers
+    maximum: float
+    adjustments: MarginAdjustments
+
+    @model_validator(mode="after")
+    def _check_maximum(self) -> MarginOfSafetyConfig:
+        if not (0 < self.maximum <= 0.45):
+            raise ValueError("maximumは0.45以下である必要があります")
+        return self
+
+
+class UndervaluationCategoryCaps(StrictModel):
+    valuation_multiple: float
+    yield_: float = Field(alias="yield")
+    fair_value: float
+    market_price_action: float
+
+    @model_validator(mode="after")
+    def _check_sum(self) -> UndervaluationCategoryCaps:
+        total = self.valuation_multiple + self.yield_ + self.fair_value + self.market_price_action
+        if abs(total - 20.0) > 1e-9:
+            raise ValueError("undervaluation_category_capsの合計は20点である必要があります")
+        return self
+
+
+class BuyDecisionRulesConfig(StrictModel):
+    version: int
+    score_thresholds: BuyScoreThresholds
+    valuation_dispersion: ValuationDispersionThresholds
+    earnings_window: BuyEarningsWindowConfig
+    margin_of_safety: MarginOfSafetyConfig
+    undervaluation_category_caps: UndervaluationCategoryCaps
+
+
 # --- 集約 --------------------------------------------------------------------
 
 
@@ -550,3 +659,4 @@ class AppConfig(StrictModel):
     confidence: ConfidenceRulesConfig
     earnings_window: EarningsWindowRulesConfig
     portfolio_concentration: PortfolioConcentrationRulesConfig
+    buy_decision: BuyDecisionRulesConfig

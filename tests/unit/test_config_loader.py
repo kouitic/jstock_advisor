@@ -24,10 +24,13 @@ def test_scoring_weights_sum_to_100() -> None:
     assert sum(weights.values()) == pytest.approx(100.0)
 
 
-def test_recommended_buy_price_ratios_are_ordered() -> None:
+def test_margin_of_safety_ratios_are_ordered() -> None:
+    """固定95%/90%/85%方式(旧recommended_buy_price)は2026-07 BUYパイプライン
+    再設計で廃止し、信頼度別のmargin_of_safety(安全余裕率)へ置き換えた。
+    """
     config = load_config()
-    p = config.valuation.recommended_buy_price
-    assert p.aggressive_buy_ratio < p.standard_buy_ratio < p.tentative_buy_ratio < 1.0
+    high = config.buy_decision.margin_of_safety.confidence.high
+    assert high.entry < high.standard < high.strong < 1.0
 
 
 def test_config_rejects_unknown_fields(tmp_path: Path) -> None:

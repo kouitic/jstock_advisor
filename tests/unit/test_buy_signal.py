@@ -2,22 +2,15 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.common import (
-    BuyPriceLevels,
-    DataSourceReference,
-    PriceWithRationale,
-)
-from jstock_advisor.domain.entities.enums import ConfidenceLevel
+from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.scoring.score import ScoreResult, UndervaluationSignals, compute_score
-from jstock_advisor.domain.screening.rules import ScreeningResult
 from jstock_advisor.domain.signals.buy_signal import (
     compute_drawdown_from_52w_high_pct,
     compute_recent_price_change_pct,
     compute_undervaluation_signals,
-    determine_confidence,
-    evaluate_buy_signal,
     has_severe_earnings_decline,
     is_earnings_trend_non_decreasing,
+    score_areas,
 )
 from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, PriceBar
 
@@ -75,7 +68,6 @@ def test_compute_recent_price_change_pct() -> None:
 
 
 def test_undervaluation_signals_disabled_when_severe_earnings_decline() -> None:
-    buy_prices = BuyPriceLevels(standard=PriceWithRationale(price=Decimal("900"), rationale="test"))
     signals = compute_undervaluation_signals(
         current_price=Decimal("800"),
         current_per=None,
@@ -85,7 +77,7 @@ def test_undervaluation_signals_disabled_when_severe_earnings_decline() -> None:
         current_dividend_yield_pct=None,
         historical_average_dividend_yield_pct=None,
         drawdown_from_52w_high_pct=-30.0,
-        buy_prices=buy_prices,
+        valuation_anchor=Decimal("900"),
         recent_price_change_pct=None,
         earnings_trend_non_decreasing=None,
         severe_earnings_decline=True,
@@ -96,7 +88,6 @@ def test_undervaluation_signals_disabled_when_severe_earnings_decline() -> None:
 
 
 def test_undervaluation_signals_positive_when_healthy() -> None:
-    buy_prices = BuyPriceLevels(standard=PriceWithRationale(price=Decimal("900"), rationale="test"))
     signals = compute_undervaluation_signals(
         current_price=Decimal("800"),
         current_per=Decimal("10"),
@@ -106,7 +97,7 @@ def test_undervaluation_signals_positive_when_healthy() -> None:
         current_dividend_yield_pct=4.0,
         historical_average_dividend_yield_pct=3.0,
         drawdown_from_52w_high_pct=-20.0,
-        buy_prices=buy_prices,
+        valuation_anchor=Decimal("900"),
         recent_price_change_pct=-15.0,
         earnings_trend_non_decreasing=True,
         severe_earnings_decline=False,
@@ -119,11 +110,22 @@ def test_undervaluation_signals_positive_when_healthy() -> None:
     assert signals.price_down_despite_stable_earnings is True
 
 
-def test_determine_confidence_levels() -> None:
-    assert determine_confidence(3, 3, False) == ConfidenceLevel.HIGH
-    assert determine_confidence(1, 1, False) == ConfidenceLevel.MEDIUM
-    assert determine_confidence(0, 3, False) == ConfidenceLevel.LOW
-    assert determine_confidence(3, 3, True) == ConfidenceLevel.LOW
+def test_undervaluation_signals_below_fair_value_uses_valuation_anchor() -> None:
+    signals = compute_undervaluation_signals(
+        current_price=Decimal("950"),
+        current_per=None,
+        historical_per_median=None,
+        current_pbr=None,
+        historical_pbr_median=None,
+        current_dividend_yield_pct=None,
+        historical_average_dividend_yield_pct=None,
+        drawdown_from_52w_high_pct=None,
+        valuation_anchor=Decimal("900"),  # 現在値950 > anchor900 なので割安ではない
+        recent_price_change_pct=None,
+        earnings_trend_non_decreasing=None,
+        severe_earnings_decline=False,
+    )
+    assert signals.below_fair_value is False
 
 
 def _score_result(total_yield_pct: float = 5.0) -> ScoreResult:
@@ -146,90 +148,17 @@ def _score_result(total_yield_pct: float = 5.0) -> ScoreResult:
         min_equity_ratio_pct=30.0,
         max_payout_ratio_pct=70.0,
         config=_CONFIG.scoring,
+        undervaluation_category_caps=_CONFIG.buy_decision.undervaluation_category_caps,
     )
 
 
-def test_evaluate_buy_signal_recommended_when_no_exclusions() -> None:
-    screening = ScreeningResult(passed=True, exclusion_reasons=[], warnings=[])
-    buy_prices = BuyPriceLevels(standard=PriceWithRationale(price=Decimal("900"), rationale="x"))
-    result = evaluate_buy_signal(
-        screening_result=screening,
-        severe_earnings_decline=False,
-        benefit=None,
-        score_result=_score_result(),
-        scoring_config=_CONFIG.scoring,
-        fair_value=Decimal("1000"),
-        buy_prices=buy_prices,
-        fair_value_methods_used_count=3,
-        data_sources_count=3,
-        has_stale_data_warning=False,
-    )
-    assert result.recommended is True
-    assert result.exclusion_reasons == []
-    assert result.confidence == ConfidenceLevel.HIGH
+def test_score_areas_above_returns_strong_components() -> None:
+    result = _score_result(total_yield_pct=10.0)
+    areas = score_areas(result, _CONFIG.scoring, ratio=0.7, above=True)
+    assert any("財務健全性" in a for a in areas)
 
 
-def test_evaluate_buy_signal_excluded_by_screening() -> None:
-    screening = ScreeningResult(
-        passed=False, exclusion_reasons=["総合利回りが基準未満"], warnings=[]
-    )
-    result = evaluate_buy_signal(
-        screening_result=screening,
-        severe_earnings_decline=False,
-        benefit=None,
-        score_result=_score_result(),
-        scoring_config=_CONFIG.scoring,
-        fair_value=Decimal("1000"),
-        buy_prices=BuyPriceLevels(),
-        fair_value_methods_used_count=3,
-        data_sources_count=3,
-        has_stale_data_warning=False,
-    )
-    assert result.recommended is False
-    assert "総合利回りが基準未満" in result.exclusion_reasons
-
-
-def test_evaluate_buy_signal_excluded_when_benefit_abolished() -> None:
-    from jstock_advisor.interfaces.types import ShareholderBenefit
-
-    screening = ScreeningResult(passed=True, exclusion_reasons=[], warnings=[])
-    benefit = ShareholderBenefit(
-        stock_code="8136",
-        min_shares_required=100,
-        benefits=[],
-        frequency_per_year=1,
-        is_abolished=True,
-        source=_SOURCE,
-    )
-    result = evaluate_buy_signal(
-        screening_result=screening,
-        severe_earnings_decline=False,
-        benefit=benefit,
-        score_result=_score_result(),
-        scoring_config=_CONFIG.scoring,
-        fair_value=Decimal("1000"),
-        buy_prices=BuyPriceLevels(standard=PriceWithRationale(price=Decimal("900"), rationale="x")),
-        fair_value_methods_used_count=3,
-        data_sources_count=3,
-        has_stale_data_warning=False,
-    )
-    assert result.recommended is False
-    assert any("優待の廃止" in r for r in result.exclusion_reasons)
-
-
-def test_evaluate_buy_signal_excluded_without_fair_value() -> None:
-    screening = ScreeningResult(passed=True, exclusion_reasons=[], warnings=[])
-    result = evaluate_buy_signal(
-        screening_result=screening,
-        severe_earnings_decline=False,
-        benefit=None,
-        score_result=_score_result(),
-        scoring_config=_CONFIG.scoring,
-        fair_value=None,
-        buy_prices=None,
-        fair_value_methods_used_count=0,
-        data_sources_count=1,
-        has_stale_data_warning=False,
-    )
-    assert result.recommended is False
-    assert result.confidence == ConfidenceLevel.LOW
+def test_score_areas_below_returns_weak_components() -> None:
+    result = _score_result(total_yield_pct=0.0)
+    areas = score_areas(result, _CONFIG.scoring, ratio=0.3, above=False)
+    assert any("総合利回り" in a for a in areas)

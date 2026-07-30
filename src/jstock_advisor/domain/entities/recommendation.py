@@ -7,19 +7,25 @@ from decimal import Decimal
 from typing import Any
 
 from jstock_advisor.domain.entities.base import ImmutableSnapshot
+from jstock_advisor.domain.entities.buy_decision import BuyDecisionReason
 from jstock_advisor.domain.entities.common import (
     BuyPriceLevels,
     DataSourceReference,
+    MarginAdjustment,
     ScoreBreakdown,
     SellPriceLevels,
 )
 from jstock_advisor.domain.entities.enums import (
+    BUY_FAMILY_ACTIONS,
+    BuyAction,
+    BuyIndustrySector,
     ConfidenceLevel,
     DividendComparisonOutcome,
     ProfitTakingIndustrySector,
     RecommendationType,
     RecordDateUnknownReason,
 )
+from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 
 
 class Recommendation(ImmutableSnapshot):
@@ -124,3 +130,62 @@ class Recommendation(ImmutableSnapshot):
     # ポートフォリオ内保有比率(企業価値判断とは別の集中リスク通知に使う)
     portfolio_weight_pct: float | None = None
     portfolio_acquisition_cost_weight_pct: float | None = None
+
+    # --- BUYパイプライン再設計(2026-07)で追加。要求仕様18節。
+    # 「企業として投資候補になり得るか(company_quality_score)」と「現在の株価で
+    # 実際に購入すべきか(purchase_attractiveness_score + buy_action)」を分離する ---
+    buy_action: BuyAction | None = None
+    # 格下げ・決算直前調整前の生の判定。格下げが無かった場合はbuy_actionと同じ値になる。
+    raw_buy_action: BuyAction | None = None
+
+    company_quality_score: float | None = None
+    purchase_attractiveness_score: float | None = None
+
+    # 適正価格の集約値。単一の「最終適正価格」を断定的に扱わず、レンジと
+    # 購入判断基準価格(valuation_anchor)を分けて保持する。
+    valuation_anchor: Decimal | None = None
+    valuation_min: Decimal | None = None
+    valuation_max: Decimal | None = None
+    valuation_dispersion_ratio: Decimal | None = None
+
+    entry_buy_price: Decimal | None = None
+    standard_buy_price: Decimal | None = None
+    strong_buy_price: Decimal | None = None
+
+    current_vs_valuation_pct: Decimal | None = None
+    current_vs_entry_price_pct: Decimal | None = None
+
+    required_margin_of_safety_entry: Decimal | None = None
+    required_margin_of_safety_standard: Decimal | None = None
+    required_margin_of_safety_strong: Decimal | None = None
+    margin_adjustments: tuple[MarginAdjustment, ...] = ()
+
+    business_days_to_earnings: int | None = None
+
+    # 購入判断における業種別モデルの区分(利確判定用industry_sectorとは別軸)。
+    # industry_model_appliedは既存フィールドをBUY側でも共通利用する。
+    buy_industry_sector: BuyIndustrySector | None = None
+
+    # 平準化EPS(要求仕様13節)。景気循環銘柄等で単年度予想EPSのみに依らないため。
+    forecast_eps: Decimal | None = None
+    normalized_eps: Decimal | None = None
+    eps_normalization_method: str | None = None
+
+    # 適正価格の算出方式別結果(目標配当利回り/PER/PBR/過去株価レンジ/DCF/業種別)。
+    valuation_methods: tuple[FairValueMethodResult, ...] = ()
+
+    # 構造化された購入判断理由。通知層はこれを再計算せずそのまま表示する。
+    buy_decision_reasons: tuple[BuyDecisionReason, ...] = ()
+
+    @property
+    def recommended(self) -> bool:
+        """買い候補として現在購入可能かどうかの派生値(直接設定不可)。
+
+        判定の正本はbuy_actionであり、このプロパティはbuy_actionから導出する
+        だけの読み取り専用値とする(要求仕様2節: recommendedを直接更新する
+        設計は廃止)。BUY系以外の推奨タイプ(利確・売却等)ではbuy_actionが
+        Noneのため常にFalseを返す。
+        """
+        if self.buy_action is None:
+            return False
+        return self.buy_action in BUY_FAMILY_ACTIONS

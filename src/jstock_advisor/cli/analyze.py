@@ -9,7 +9,7 @@ import typer
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.enums import RecommendationType
+from jstock_advisor.domain.entities.enums import RecommendationType, buy_action_label
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.line.client import LineClient, build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
@@ -280,22 +280,23 @@ def analyze_disclosure_check(
 
 
 def _print_buy_recommendation(r: Recommendation) -> None:
-    typer.echo(f"[{r.recommendation_type.value}] {r.stock_code} {r.stock_name}")
+    label = (
+        buy_action_label(r.buy_action) if r.buy_action is not None else r.recommendation_type.value
+    )
+    typer.echo(f"[{label}] {r.stock_code} {r.stock_name}")
     typer.echo(
         f"  現在株価: {r.price_at_recommendation}円 / "
         f"総合利回り: {r.total_yield_pct_at_recommendation:.2f}%"
     )
-    if (
-        r.buy_prices
-        and r.buy_prices.tentative
-        and r.buy_prices.standard
-        and r.buy_prices.aggressive
-    ):
+    if r.buy_prices and r.buy_prices.entry and r.buy_prices.standard and r.buy_prices.strong:
         typer.echo(
-            f"  打診買い:{r.buy_prices.tentative.price}円 標準買い:{r.buy_prices.standard.price}円 "
-            f"積極買い:{r.buy_prices.aggressive.price}円"
+            f"  打診買い:{r.buy_prices.entry.price}円 標準買い:{r.buy_prices.standard.price}円 "
+            f"積極買い:{r.buy_prices.strong.price}円"
         )
-    typer.echo(f"  総合スコア: {r.total_score} / 信頼度: {r.confidence.value}")
+    typer.echo(
+        f"  企業魅力度: {r.company_quality_score} / 購入魅力度: {r.purchase_attractiveness_score} "
+        f"/ 信頼度: {r.confidence.value}"
+    )
     for reason in r.reasons:
         typer.echo(f"  理由: {reason}")
     for risk in r.key_risks:

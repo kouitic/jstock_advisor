@@ -57,6 +57,7 @@ def test_score_breakdown_sums_to_total() -> None:
         min_equity_ratio_pct=30.0,
         max_payout_ratio_pct=70.0,
         config=_CONFIG.scoring,
+        undervaluation_category_caps=_CONFIG.buy_decision.undervaluation_category_caps,
     )
     component_sum = (
         result.breakdown.total_yield_attractiveness
@@ -83,6 +84,7 @@ def test_score_is_zero_or_low_for_weak_stock() -> None:
         min_equity_ratio_pct=30.0,
         max_payout_ratio_pct=70.0,
         config=_CONFIG.scoring,
+        undervaluation_category_caps=_CONFIG.buy_decision.undervaluation_category_caps,
     )
     assert result.breakdown.total_yield_attractiveness == 0.0
     assert result.breakdown.financial_health == 0.0
@@ -116,6 +118,7 @@ def test_score_full_marks_for_excellent_stock() -> None:
         min_equity_ratio_pct=30.0,
         max_payout_ratio_pct=70.0,
         config=_CONFIG.scoring,
+        undervaluation_category_caps=_CONFIG.buy_decision.undervaluation_category_caps,
     )
     assert result.breakdown.total == 100.0
 
@@ -132,6 +135,7 @@ def test_formulas_are_populated_for_every_component() -> None:
         min_equity_ratio_pct=30.0,
         max_payout_ratio_pct=70.0,
         config=_CONFIG.scoring,
+        undervaluation_category_caps=_CONFIG.buy_decision.undervaluation_category_caps,
     )
     assert set(result.formulas.keys()) == {
         "total_yield_attractiveness",

@@ -1,7 +1,16 @@
-"""買い判定サービス(要求仕様3節 buy_signal_service)。
+"""買い判定サービス(2026-07 BUYパイプライン再設計)。
 
-stock_snapshot_serviceで取得したデータをもとに、screening/scoring/buy_signalの
-各ドメインロジックを組み合わせてRecommendationスナップショットを生成する。
+「企業として投資候補になり得るか(company_quality_score)」と「現在の株価で
+実際に購入すべきか(purchase_attractiveness_score + BuyAction)」を分離した
+3段階パイプラインをオーケストレーションする。処理順序は以下の22ステップ:
+
+1. データ品質検証 2. 投資対象スクリーニング 3. 業種分類 4. 利益/EPSの平準化
+5. 各方式の適正価格算出 6. 不適用方式と外れ値の除外 7. 適正価格のばらつき判定
+8. valuation_anchor算出 9. 適正価格信頼度決定 10. 必要安全余裕率算出
+11. 3段階買付価格算出 12. company_quality_score算出 13. purchase_attractiveness_score算出
+14. 現在価格によるBuyAction仮判定 15. スコアによる格下げ 16. 決算直前調整
+17. データ品質・業種モデルによる格下げ(margin加算に反映済み) 18. 整合性検証
+19-20. 購入候補/価格待ちランキング用の情報確定 21. 通知生成(通知層) 22. 監査ログ保存
 """
 
 from __future__ import annotations
@@ -9,22 +18,61 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.enums import RecommendationType
+from jstock_advisor.domain.classification.buy_industry import (
+    CYCLICAL_SECTORS,
+    buy_industry_model_missing_reason,
+    classify_buy_industry_sector,
+)
+from jstock_advisor.domain.entities.buy_decision import BuyDecisionReason
+from jstock_advisor.domain.entities.enums import (
+    BUY_FAMILY_ACTIONS,
+    BuyAction,
+    BuyIndustrySector,
+    ConfidenceLevel,
+    RecommendationType,
+    StockType,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 from jstock_advisor.domain.scoring.score import compute_score
 from jstock_advisor.domain.screening.rules import evaluate_screening
+from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
+from jstock_advisor.domain.signals.buy_decision import (
+    compute_purchase_attractiveness_score,
+    decide_buy_action,
+    screen_investment_universe,
+)
 from jstock_advisor.domain.signals.buy_signal import (
     compute_drawdown_from_52w_high_pct,
     compute_recent_price_change_pct,
     compute_undervaluation_signals,
     estimate_historical_average_dividend_yield_pct,
-    evaluate_buy_signal,
     is_earnings_trend_non_decreasing,
+    score_areas,
 )
-from jstock_advisor.domain.valuation.fair_value import median_historical_pbr, median_historical_per
+from jstock_advisor.domain.signals.eps_normalization import normalize_eps
+from jstock_advisor.domain.valuation.buy_price_levels import compute_buy_price_levels
+from jstock_advisor.domain.valuation.fair_value import (
+    compute_dcf_price,
+    compute_historical_range_price,
+    compute_pbr_price,
+    compute_per_price,
+    compute_target_yield_price,
+    median_historical_pbr,
+    median_historical_per,
+)
+from jstock_advisor.domain.valuation.margin_of_safety import compute_margin_of_safety
+from jstock_advisor.domain.valuation.valuation_confidence import determine_valuation_confidence
+from jstock_advisor.domain.valuation.valuation_methods import (
+    apply_dcf_divergence_filter,
+    build_valuation_summary,
+    compute_valuation_anchor,
+    determine_dispersion_band,
+)
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
@@ -32,6 +80,9 @@ from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
 # アクティブなRuleVersionが未登録の場合(初期運用時)のフォールバック値
 RULE_VERSION_PLACEHOLDER = "v1-mvp"
+
+_STRONG_SCORE_RATIO = 0.7
+_WEAK_SCORE_RATIO = 0.3
 
 
 @dataclass(frozen=True)
@@ -41,6 +92,10 @@ class BuyAnalysisOutcome:
     screening_passed: bool
     exclusion_reasons: list[str]
     data_error: str | None
+    # --- BUYパイプライン再設計(2026-07)で追加 ---
+    buy_action: BuyAction | None = None
+    # "buy_candidate" | "watch_price" | "excluded" | None(データ不足等)
+    ranking_group: str | None = None
 
 
 class BuySignalService:
@@ -67,6 +122,7 @@ class BuySignalService:
         now: dt.datetime,
         recommendation_type: RecommendationType = RecommendationType.BUY,
     ) -> BuyAnalysisOutcome:
+        # --- 1. データ品質検証(スナップショット取得) ---
         snapshot, error = build_stock_snapshot(self._providers, stock_code, now, self._config)
         if snapshot is None:
             self._audit.record(
@@ -74,13 +130,30 @@ class BuySignalService:
                 stock_code=stock_code,
                 input_values={},
                 calculation_formulas={},
-                output_values={"data_error": error},
+                output_values={
+                    "data_error": error,
+                    "final_buy_action": BuyAction.DATA_INSUFFICIENT.value,
+                },
                 data_sources=[],
                 rule_version=self._active_rule_version(),
                 timestamp=now,
             )
-            return BuyAnalysisOutcome(stock_code, None, False, [], error)
+            return BuyAnalysisOutcome(
+                stock_code,
+                None,
+                False,
+                [],
+                error,
+                buy_action=BuyAction.DATA_INSUFFICIENT,
+                ranking_group=None,
+            )
 
+        data_age_days = self._calendar.business_days_between(
+            snapshot.data_fetched_at.date(), now.date()
+        )
+        has_stale_data_warning = data_age_days > 1
+
+        # --- 2. 投資対象スクリーニング(第1段階) ---
         screening_result = evaluate_screening(
             financial=snapshot.financial,
             dividend=snapshot.dividend,
@@ -92,12 +165,248 @@ class BuySignalService:
             business_calendar=self._calendar,
             config=self._config.screening,
         )
+        screening_outcome = screen_investment_universe(
+            screening_result, snapshot.severe_earnings_decline, snapshot.benefit
+        )
 
+        if not screening_outcome.passed:
+            self._audit.record(
+                decision_type="buy_signal",
+                stock_code=stock_code,
+                input_values={"current_price": str(snapshot.current_price)},
+                calculation_formulas={},
+                output_values={
+                    "screening_passed": False,
+                    "exclusion_reasons": screening_outcome.exclusion_reasons,
+                    "final_buy_action": BuyAction.EXCLUDED.value,
+                    "ranking_group": "excluded",
+                    "notification_suppression_reason": "SCREENING_EXCLUDED",
+                },
+                data_sources=list(snapshot.data_sources),
+                rule_version=self._active_rule_version(),
+                timestamp=now,
+            )
+            return BuyAnalysisOutcome(
+                stock_code,
+                None,
+                screening_result.passed,
+                screening_outcome.exclusion_reasons,
+                None,
+                buy_action=BuyAction.EXCLUDED,
+                ranking_group="excluded",
+            )
+
+        financial = snapshot.financial
+        current_price = snapshot.current_price
+
+        # --- 3. 業種分類 ---
+        is_growth_stock = StockType.GROWTH in snapshot.stock_type_classification.types
+        buy_industry_sector = classify_buy_industry_sector(
+            financial.industry, financial.sector, is_growth_stock
+        )
+        # 専用の多変量モデルは未実装のため常にFalse(推測で補完しない方針、
+        # profit_taking_industry.pyと同じ設計)。
+        industry_model_applied = False
+        is_cyclical_industry = (
+            buy_industry_sector in CYCLICAL_SECTORS
+            or StockType.CYCLICAL in snapshot.stock_type_classification.types
+        )
+
+        # --- 4. 利益/EPSの平準化 ---
+        eps_result = normalize_eps(
+            financial.forecast_eps, snapshot.historical_valuations, is_cyclical_industry
+        )
+
+        # --- 5. 各方式の適正価格算出(PERは平準化EPS対応) ---
+        per_median = median_historical_per(snapshot.historical_valuations)
+        pbr_median = median_historical_pbr(snapshot.historical_valuations)
+        target_price = compute_target_yield_price(
+            snapshot.dividend.forecast_annual_dividend_per_share,
+            self._config.valuation.target_yield_method.target_dividend_yield_pct,
+        )
+        per_price = compute_per_price(eps_result.normalized_eps, per_median)
+        pbr_price = compute_pbr_price(financial.forecast_bps, pbr_median)
+        range_price = compute_historical_range_price(
+            snapshot.bars,
+            now.date(),
+            self._config.valuation.historical_range_method.lookback_years,
+            self._config.valuation.historical_range_method.use_52_week_low,
+        )
+        dcf_price = compute_dcf_price(
+            financial.operating_cashflow,
+            financial.capital_expenditure,
+            financial.shares_outstanding,
+            self._config.valuation.dcf_method.discount_rate_pct,
+            self._config.valuation.dcf_method.terminal_growth_rate_pct,
+            self._config.valuation.dcf_method.projection_years,
+        )
+
+        method_results = [
+            FairValueMethodResult(
+                method="target_yield",
+                fair_value=target_price,
+                confidence=ConfidenceLevel.HIGH,
+                exclusion_reason=None
+                if target_price is not None
+                else "予想配当が取得できないため算出不可",
+                source_date=financial.fiscal_period_end,
+            ),
+            FairValueMethodResult(
+                method="per",
+                fair_value=per_price,
+                confidence=ConfidenceLevel.MEDIUM,
+                exclusion_reason=None
+                if per_price is not None
+                else "平準化EPSまたは過去PER中央値が取得できない、もしくはEPSが負数のため算出不可",
+                source_date=financial.fiscal_period_end,
+            ),
+            FairValueMethodResult(
+                method="pbr",
+                fair_value=pbr_price,
+                confidence=ConfidenceLevel.MEDIUM,
+                exclusion_reason=None
+                if pbr_price is not None
+                else "予想BPSまたは過去PBR中央値が取得できないため算出不可",
+                source_date=financial.fiscal_period_end,
+            ),
+            FairValueMethodResult(
+                method="historical_range",
+                fair_value=range_price,
+                confidence=ConfidenceLevel.MEDIUM,
+                exclusion_reason=None
+                if range_price is not None
+                else "過去株価データが取得できないため算出不可",
+            ),
+            FairValueMethodResult(
+                method="dcf",
+                fair_value=dcf_price,
+                # 固定割引率の簡易DCFのためMEDIUM上限(要求仕様8節・10節)。
+                confidence=ConfidenceLevel.MEDIUM,
+                exclusion_reason=None
+                if dcf_price is not None
+                else (
+                    "営業CF・設備投資・発行済株式数のいずれかが取得できない、"
+                    "またはFCFが負のため算出不可"
+                ),
+            ),
+            # 業種別方式: 専用モデル未実装のため常に不適用(要求仕様9節・12節、正直に記録)。
+            FairValueMethodResult(
+                method="industry",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason=buy_industry_model_missing_reason(buy_industry_sector),
+            ),
+        ]
+
+        # --- 6. 不適用方式と外れ値の除外(DCFの上方乖離フィルタ) ---
+        dcf_result = next(r for r in method_results if r.method == "dcf")
+        other_results = [r for r in method_results if r.method != "dcf"]
+        filtered_dcf = apply_dcf_divergence_filter(dcf_result, other_results)
+        method_results = [filtered_dcf if r.method == "dcf" else r for r in method_results]
+
+        valuation_summary = build_valuation_summary(
+            method_results,
+            self._config.valuation.fair_value_methods.aggregation_method,
+            self._config.valuation.fair_value_methods.method_weights,
+            self._config.valuation.fair_value_usability,
+        )
+
+        # --- 7. 適正価格のばらつき判定 ---
+        dispersion_band = determine_dispersion_band(
+            valuation_summary.valuation_dispersion_ratio,
+            self._config.buy_decision.valuation_dispersion,
+        )
+
+        # --- 9. 適正価格信頼度決定(anchor算出より先に必要) ---
+        valuation_confidence_result = determine_valuation_confidence(
+            methods_used_count=valuation_summary.methods_used_count or 0,
+            dispersion_ratio=valuation_summary.valuation_dispersion_ratio,
+            dispersion_medium_max=self._config.buy_decision.valuation_dispersion.medium_max,
+            dispersion_auto_buy_block=self._config.buy_decision.valuation_dispersion.auto_buy_block,
+            industry_model_applied=industry_model_applied,
+            uses_simplified_dcf=filtered_dcf.applicable,
+            normalized_eps_confidence=eps_result.confidence if is_cyclical_industry else None,
+        )
+        valuation_confidence = valuation_confidence_result.level
+
+        # --- 8. valuation_anchor算出 ---
+        valuation_anchor = compute_valuation_anchor(
+            valuation_summary,
+            valuation_confidence,
+            dispersion_band,
+            self._config.valuation.fair_value_methods.method_weights,
+        )
+
+        # 次回決算までの営業日数(§16)
+        business_days_to_earnings = (
+            self._calendar.business_days_between(now.date(), snapshot.next_earnings_date)
+            if snapshot.next_earnings_date is not None
+            else None
+        )
+        data_quality_warning = has_stale_data_warning or business_days_to_earnings is None
+
+        avg_trading_value = snapshot.avg_trading_value
+        small_cap_or_low_liquidity = (
+            avg_trading_value is not None
+            and avg_trading_value
+            < Decimal(2)
+            * Decimal(str(self._config.screening.universe.min_avg_trading_value_20d_yen))
+        )
         earnings_trend_non_decreasing = is_earnings_trend_non_decreasing(
             snapshot.quarterly_operating_incomes
         )
-        financial = snapshot.financial
-        current_price = snapshot.current_price
+        volatile_earnings = earnings_trend_non_decreasing is False
+        temporary_earnings_boost_risk = (
+            is_cyclical_industry
+            and eps_result.normalized_eps is not None
+            and financial.forecast_eps is not None
+            and eps_result.normalized_eps < financial.forecast_eps * Decimal("0.95")
+        )
+        # 主要顧客への依存は自動車部品業種に構造的な特徴として一律加算する
+        # (個社別の依存度データが無いため、業種特性に基づく判断に留める)。
+        major_customer_dependency = buy_industry_sector == BuyIndustrySector.AUTOMOTIVE_PARTS
+
+        # --- 10. 必要安全余裕率算出 ---
+        adjustment_codes: list[str] = []
+        earnings_config = self._config.buy_decision.earnings_window
+        if business_days_to_earnings is not None:
+            if business_days_to_earnings <= earnings_config.block_buy_business_days:
+                adjustment_codes.append("earnings_within_3_business_days")
+            elif business_days_to_earnings <= earnings_config.add_margin_business_days:
+                adjustment_codes.append("earnings_within_7_business_days")
+        dispersion_auto_block = self._config.buy_decision.valuation_dispersion.auto_buy_block
+        if dispersion_band == "HIGH":
+            if (
+                valuation_summary.valuation_dispersion_ratio is not None
+                and valuation_summary.valuation_dispersion_ratio > dispersion_auto_block
+            ):
+                adjustment_codes.append("very_high_valuation_dispersion")
+            else:
+                adjustment_codes.append("high_valuation_dispersion")
+        if not industry_model_applied:
+            adjustment_codes.append("industry_model_not_applied")
+        if is_cyclical_industry:
+            adjustment_codes.append("cyclical_industry")
+        if small_cap_or_low_liquidity:
+            adjustment_codes.append("small_cap_or_low_liquidity")
+        if volatile_earnings:
+            adjustment_codes.append("volatile_earnings")
+        if temporary_earnings_boost_risk:
+            adjustment_codes.append("temporary_earnings_boost_risk")
+        if major_customer_dependency:
+            adjustment_codes.append("major_customer_dependency")
+        if data_quality_warning:
+            adjustment_codes.append("data_quality_warning")
+
+        margin_result = compute_margin_of_safety(
+            valuation_confidence, adjustment_codes, self._config.buy_decision.margin_of_safety
+        )
+
+        # --- 11. 3段階買付価格算出 ---
+        buy_price_levels = compute_buy_price_levels(valuation_anchor, margin_result)
+
+        # --- 12. company_quality_score算出(第2段階: 企業魅力度) ---
         current_per = (
             current_price / financial.forecast_eps
             if financial.forecast_eps is not None and financial.forecast_eps > 0
@@ -108,14 +417,11 @@ class BuySignalService:
             if financial.forecast_bps is not None and financial.forecast_bps > 0
             else None
         )
-        per_median = median_historical_per(snapshot.historical_valuations)
-        pbr_median = median_historical_pbr(snapshot.historical_valuations)
         historical_avg_dividend_yield_pct = estimate_historical_average_dividend_yield_pct(
             snapshot.dividend.previous_fiscal_year_dividend_per_share, snapshot.bars
         )
         drawdown_pct = compute_drawdown_from_52w_high_pct(current_price, snapshot.bars, now.date())
         recent_price_change_pct = compute_recent_price_change_pct(snapshot.bars, now.date(), 60)
-
         undervaluation_signals = compute_undervaluation_signals(
             current_price=current_price,
             current_per=current_per,
@@ -125,12 +431,11 @@ class BuySignalService:
             current_dividend_yield_pct=snapshot.dividend_yield_pct,
             historical_average_dividend_yield_pct=historical_avg_dividend_yield_pct,
             drawdown_from_52w_high_pct=drawdown_pct,
-            buy_prices=snapshot.buy_prices,
+            valuation_anchor=valuation_anchor,
             recent_price_change_pct=recent_price_change_pct,
             earnings_trend_non_decreasing=earnings_trend_non_decreasing,
             severe_earnings_decline=snapshot.severe_earnings_decline,
         )
-
         score_result = compute_score(
             total_yield_pct=snapshot.total_yield_pct,
             dividend=snapshot.dividend,
@@ -142,97 +447,194 @@ class BuySignalService:
             min_equity_ratio_pct=self._config.screening.financial_health.min_equity_ratio_pct,
             max_payout_ratio_pct=self._config.screening.financial_health.max_payout_ratio_pct,
             config=self._config.scoring,
+            undervaluation_category_caps=self._config.buy_decision.undervaluation_category_caps,
+        )
+        company_quality_score = score_result.breakdown.total
+
+        # --- 13. purchase_attractiveness_score算出 ---
+        purchase_attractiveness_score = compute_purchase_attractiveness_score(
+            current_price=current_price,
+            buy_price_levels=buy_price_levels,
+            valuation_confidence=valuation_confidence,
+            dispersion_band=dispersion_band,
+            business_days_to_earnings=business_days_to_earnings,
+            recent_price_change_pct=recent_price_change_pct,
+            industry_model_applied=industry_model_applied,
+            data_quality_warning=data_quality_warning,
+            config=self._config.buy_decision,
         )
 
-        data_age_days = self._calendar.business_days_between(
-            snapshot.data_fetched_at.date(), now.date()
+        # --- 14〜17. BuyAction決定(価格条件→スコア格下げ→決算調整→分散度格下げ) ---
+        decision = decide_buy_action(
+            current_price=current_price,
+            buy_price_levels=buy_price_levels,
+            company_quality_score=company_quality_score,
+            business_days_to_earnings=business_days_to_earnings,
+            valuation_dispersion_ratio=valuation_summary.valuation_dispersion_ratio,
+            config=self._config.buy_decision,
         )
-        has_stale_data_warning = data_age_days > 1
+        buy_action = decision.action
+        raw_buy_action = decision.raw_action
+        buy_decision_reasons = list(decision.reasons)
 
-        buy_result = evaluate_buy_signal(
-            screening_result=screening_result,
-            severe_earnings_decline=snapshot.severe_earnings_decline,
-            benefit=snapshot.benefit,
-            score_result=score_result,
-            scoring_config=self._config.scoring,
-            fair_value=snapshot.fair_value,
-            buy_prices=snapshot.buy_prices,
-            fair_value_methods_used_count=snapshot.fair_value_methods_used_count,
-            data_sources_count=len(snapshot.data_sources),
-            has_stale_data_warning=has_stale_data_warning,
+        # --- 18. 整合性検証(二重の安全策) ---
+        violations = validate_buy_recommendation(
+            action=buy_action,
+            current_price=current_price,
+            entry_price=buy_price_levels.entry.price if buy_price_levels.entry else None,
+            standard_price=buy_price_levels.standard.price if buy_price_levels.standard else None,
+            strong_price=buy_price_levels.strong.price if buy_price_levels.strong else None,
+            confidence=valuation_confidence,
+            business_days_to_earnings=business_days_to_earnings,
+            valuation_dispersion_ratio=valuation_summary.valuation_dispersion_ratio,
+            config=self._config.buy_decision,
+        )
+        if violations:
+            buy_action = BuyAction.MANUAL_REVIEW
+            buy_decision_reasons.append(
+                BuyDecisionReason(
+                    code="CONSISTENCY_VIOLATION",
+                    message="; ".join(v.message for v in violations),
+                )
+            )
+
+        # --- 19〜20. ランキング区分の確定 ---
+        if buy_action in BUY_FAMILY_ACTIONS:
+            ranking_group = "buy_candidate"
+        elif buy_action in {BuyAction.WATCH_FOR_PRICE, BuyAction.WATCH_BEFORE_EARNINGS}:
+            ranking_group = "watch_price"
+        else:
+            ranking_group = "excluded"
+
+        # recommendation_typeは常に呼び出し元の文脈(BUY/WATCH_BUY)のまま保つ。
+        # RecommendationType.WATCH_BEFORE_EARNINGSは利確判定エンジンのWATCH抑制専用
+        # として既に使われており、ここで転用すると通知テンプレート・再通知抑止の
+        # 判定キー(notification_type)が衝突する。BUYパイプライン側の決算待ち表示は
+        # buy_action(BuyAction.WATCH_BEFORE_EARNINGS)のみで判別する
+        # (line_notification_service.py側もbuy_actionを優先して分岐する)。
+
+        positive_reasons = [
+            f"{area}が高評価"
+            for area in score_areas(
+                score_result, self._config.scoring, _STRONG_SCORE_RATIO, above=True
+            )
+        ]
+        counter_factors = list(screening_result.warnings)
+        if snapshot.benefit is not None and snapshot.benefit.is_major_downgrade:
+            counter_factors.append("株主優待の内容が改悪された可能性がある")
+        counter_factors.extend(
+            f"{area}が弱い"
+            for area in score_areas(
+                score_result, self._config.scoring, _WEAK_SCORE_RATIO, above=False
+            )
         )
 
+        dividend = snapshot.dividend
+        benefit = snapshot.benefit
+        current_vs_valuation_pct = (
+            (current_price / valuation_anchor - 1) * 100 if valuation_anchor else None
+        )
+        current_vs_entry_price_pct = (
+            (current_price / buy_price_levels.entry.price - 1) * 100
+            if buy_price_levels.entry is not None
+            else None
+        )
+
+        # --- 22. 監査ログ保存(買い候補にならなかった銘柄も含め全件記録) ---
         self._audit.record(
             decision_type="buy_signal",
             stock_code=stock_code,
             input_values={
                 "current_price": str(current_price),
-                "forecast_annual_dividend_per_share": (
-                    str(snapshot.dividend.forecast_annual_dividend_per_share)
-                    if snapshot.dividend.forecast_annual_dividend_per_share is not None
-                    else None
-                ),
                 "forecast_eps": str(financial.forecast_eps) if financial.forecast_eps else None,
-                "forecast_bps": str(financial.forecast_bps) if financial.forecast_bps else None,
-                "equity_ratio_pct": financial.equity_ratio_pct,
-                "payout_ratio_pct": financial.payout_ratio_pct,
-                "avg_trading_value": str(snapshot.avg_trading_value)
-                if snapshot.avg_trading_value is not None
+                "normalized_eps": str(eps_result.normalized_eps)
+                if eps_result.normalized_eps is not None
                 else None,
+                "equity_ratio_pct": financial.equity_ratio_pct,
                 "total_yield_pct": snapshot.total_yield_pct,
-                "dividend_yield_pct": snapshot.dividend_yield_pct,
-                "benefit_yield_pct": snapshot.benefit_yield_pct,
-                "severe_earnings_decline": snapshot.severe_earnings_decline,
                 "data_age_business_days": data_age_days,
             },
             calculation_formulas={
-                "fair_value_aggregation": (
-                    self._config.valuation.fair_value_methods.aggregation_method
-                ),
+                "eps_normalization_method": eps_result.method,
                 **score_result.formulas,
             },
             output_values={
-                "screening_passed": screening_result.passed,
-                "exclusion_reasons": screening_result.exclusion_reasons,
-                "fair_value": str(snapshot.fair_value) if snapshot.fair_value is not None else None,
-                "total_score": score_result.breakdown.total,
-                "recommended": buy_result.recommended,
-                "recommendation_exclusion_reasons": buy_result.exclusion_reasons,
-                "confidence": buy_result.confidence.value,
+                "raw_company_quality_score": company_quality_score,
+                "raw_purchase_attractiveness_score": purchase_attractiveness_score,
+                "raw_buy_action": raw_buy_action.value,
+                "final_buy_action": buy_action.value,
+                "action_adjustment_reasons": [r.message for r in buy_decision_reasons],
+                "valuation_anchor": str(valuation_anchor) if valuation_anchor is not None else None,
+                "valuation_min": str(valuation_summary.valuation_min)
+                if valuation_summary.valuation_min is not None
+                else None,
+                "valuation_max": str(valuation_summary.valuation_max)
+                if valuation_summary.valuation_max is not None
+                else None,
+                "valuation_dispersion_ratio": valuation_summary.valuation_dispersion_ratio,
+                "entry_buy_price": str(buy_price_levels.entry.price)
+                if buy_price_levels.entry
+                else None,
+                "standard_buy_price": str(buy_price_levels.standard.price)
+                if buy_price_levels.standard
+                else None,
+                "strong_buy_price": str(buy_price_levels.strong.price)
+                if buy_price_levels.strong
+                else None,
+                "required_margin_of_safety": {
+                    "entry": str(margin_result.entry_margin)
+                    if margin_result.entry_margin
+                    else None,
+                    "standard": str(margin_result.standard_margin)
+                    if margin_result.standard_margin
+                    else None,
+                    "strong": str(margin_result.strong_margin)
+                    if margin_result.strong_margin
+                    else None,
+                },
+                "margin_adjustments": [
+                    {"code": a.code, "adjustment": str(a.adjustment), "reason": a.reason}
+                    for a in margin_result.adjustments
+                ],
+                "business_days_to_earnings": business_days_to_earnings,
+                "industry_model_applied": industry_model_applied,
+                "industry_model_name": buy_industry_sector.value,
+                "valuation_confidence": valuation_confidence.value,
+                "ranking_group": ranking_group,
+                "notification_suppression_reason": (
+                    None
+                    if ranking_group == "buy_candidate"
+                    else (
+                        "CURRENT_PRICE_ABOVE_ENTRY_PRICE"
+                        if buy_action == BuyAction.WATCH_FOR_PRICE
+                        else buy_action.value
+                    )
+                ),
             },
             data_sources=list(snapshot.data_sources),
             rule_version=self._active_rule_version(),
             timestamp=now,
         )
 
-        if not buy_result.recommended:
-            return BuyAnalysisOutcome(
-                stock_code, None, screening_result.passed, buy_result.exclusion_reasons, None
-            )
-
-        if snapshot.fair_value is None or snapshot.buy_prices is None:
-            raise AssertionError("recommended=Trueのときfair_value/buy_pricesはNoneにならない想定")
-
-        dividend = snapshot.dividend
-        benefit = snapshot.benefit
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
             stock_code=stock_code,
             stock_name=financial.stock_name or stock_code,
             recommended_at=now,
             recommendation_type=recommendation_type,
-            buy_prices=snapshot.buy_prices,
+            raw_recommendation_type=recommendation_type,
+            buy_prices=buy_price_levels,
             price_at_recommendation=current_price,
             dividend_yield_pct_at_recommendation=snapshot.dividend_yield_pct,
             shareholder_benefit_yield_pct_at_recommendation=snapshot.benefit_yield_pct,
             total_yield_pct_at_recommendation=snapshot.total_yield_pct,
-            fair_value_at_recommendation=snapshot.fair_value,
-            total_score=score_result.breakdown.total,
+            fair_value_at_recommendation=valuation_anchor,
+            total_score=company_quality_score,
             score_breakdown=score_result.breakdown,
-            reasons=buy_result.positive_reasons,
-            counter_factors=buy_result.counter_factors,
-            key_risks=buy_result.key_risks,
-            confidence=buy_result.confidence,
+            reasons=positive_reasons,
+            counter_factors=counter_factors,
+            key_risks=counter_factors,
+            confidence=valuation_confidence,
             next_earnings_date=snapshot.next_earnings_date,
             dividend_record_date=dividend.dividend_record_dates[0]
             if dividend.dividend_record_dates
@@ -253,6 +655,44 @@ class BuySignalService:
                 "aggregation_method": self._config.valuation.fair_value_methods.aggregation_method,
             },
             data_sources=list(snapshot.data_sources),
+            industry_model_applied=industry_model_applied,
+            industry_model_missing_reason=buy_industry_model_missing_reason(buy_industry_sector),
+            buy_action=buy_action,
+            raw_buy_action=raw_buy_action,
+            company_quality_score=company_quality_score,
+            purchase_attractiveness_score=purchase_attractiveness_score,
+            valuation_anchor=valuation_anchor,
+            valuation_min=valuation_summary.valuation_min,
+            valuation_max=valuation_summary.valuation_max,
+            valuation_dispersion_ratio=Decimal(str(valuation_summary.valuation_dispersion_ratio))
+            if valuation_summary.valuation_dispersion_ratio is not None
+            else None,
+            entry_buy_price=buy_price_levels.entry.price if buy_price_levels.entry else None,
+            standard_buy_price=buy_price_levels.standard.price
+            if buy_price_levels.standard
+            else None,
+            strong_buy_price=buy_price_levels.strong.price if buy_price_levels.strong else None,
+            current_vs_valuation_pct=current_vs_valuation_pct,
+            current_vs_entry_price_pct=current_vs_entry_price_pct,
+            required_margin_of_safety_entry=margin_result.entry_margin,
+            required_margin_of_safety_standard=margin_result.standard_margin,
+            required_margin_of_safety_strong=margin_result.strong_margin,
+            margin_adjustments=tuple(margin_result.adjustments),
+            business_days_to_earnings=business_days_to_earnings,
+            buy_industry_sector=buy_industry_sector,
+            forecast_eps=financial.forecast_eps,
+            normalized_eps=eps_result.normalized_eps,
+            eps_normalization_method=eps_result.method,
+            valuation_methods=tuple(method_results),
+            buy_decision_reasons=tuple(buy_decision_reasons),
         )
 
-        return BuyAnalysisOutcome(stock_code, recommendation, True, [], None)
+        return BuyAnalysisOutcome(
+            stock_code,
+            recommendation,
+            True,
+            [],
+            None,
+            buy_action=buy_action,
+            ranking_group=ranking_group,
+        )
