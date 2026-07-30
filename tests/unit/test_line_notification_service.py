@@ -483,3 +483,46 @@ def test_notify_batch_summary_sends_counts(service_and_repos) -> None:
     assert "全体処理件数: 27" in message
     assert "正常件数: 24" in message
     assert "異常件数: 3" in message
+
+
+def test_notify_batch_summary_suppresses_duplicate_same_day_same_content(
+    service_and_repos,
+) -> None:
+    # ディスパッチが二重化され、2つの独立したbatch_idが同一内容で完了を検知した場合でも、
+    # 同一日付・同一件数のサマリーは1通しか送らない。
+    service, _repo, client = service_and_repos
+
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析", total=27, succeeded=24, failed=3, now=_NOW
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=27,
+        succeeded=24,
+        failed=3,
+        now=_NOW + dt.timedelta(seconds=15),
+    )
+
+    assert first is True
+    assert second is False
+    assert len(client.sent) == 1
+
+
+def test_notify_batch_summary_sends_again_when_content_differs(service_and_repos) -> None:
+    # 同日でも件数が異なる(=新しい情報がある)場合は改めて送信する。
+    service, _repo, client = service_and_repos
+
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析", total=27, succeeded=24, failed=3, now=_NOW
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=27,
+        succeeded=27,
+        failed=0,
+        now=_NOW + dt.timedelta(hours=1),
+    )
+
+    assert first is True
+    assert second is True
+    assert len(client.sent) == 2
