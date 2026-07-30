@@ -22,6 +22,7 @@ from jstock_advisor.config.models import (
     HolidayCalendarConfig,
     MomentumRulesConfig,
     NotificationRulesConfig,
+    PortfolioConcentrationRulesConfig,
     ProfitTakingRulesConfig,
     ScheduleConfig,
     ScoringWeightsConfig,
@@ -105,6 +106,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     earnings_window = EarningsWindowRulesConfig.model_validate(
         _load_yaml(directory / "earnings_window_rules.yaml")
     )
+    portfolio_concentration = PortfolioConcentrationRulesConfig.model_validate(
+        _load_yaml(directory / "portfolio_concentration_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -121,4 +125,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         momentum=momentum,
         confidence=confidence,
         earnings_window=earnings_window,
+        portfolio_concentration=portfolio_concentration,
     )

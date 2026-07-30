@@ -15,16 +15,19 @@ import datetime as dt
 import hashlib
 import logging
 import uuid
+from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.data_quality_alert import DataQualityAlert
 from jstock_advisor.domain.entities.enums import (
     DividendComparisonOutcome,
+    NotificationStatus,
     NotificationType,
     RecommendationType,
     RecordDateUnknownReason,
 )
+from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import format_jst
@@ -66,6 +69,10 @@ _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType]
 }
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
+
+# バッチサマリーの内訳区分(要求仕様§13)。domain/entities/evaluation_audit.pyの
+# SUMMARY_CATEGORIESと同じキー集合を使う。
+_BATCH_SUMMARY_CATEGORIES = SUMMARY_CATEGORIES
 
 
 def _yen(value: Decimal | int | float | str | None) -> str:
@@ -507,6 +514,35 @@ def _format_earnings_suppressed_message(recommendation: Recommendation) -> str:
     return "\n".join(lines)
 
 
+def _format_portfolio_concentration_message(recommendation: Recommendation) -> str:
+    """ポートフォリオ集中リスク通知(要求仕様§14)。
+
+    企業価値判断(sell_signal/profit_taking)とは独立した通知であることを明示し、
+    「売却シグナルはない」ことを明確に述べたうえで保有比率の高さのみを伝える。
+    """
+    lines = [
+        f"【保有比率を確認】{recommendation.stock_code} {recommendation.stock_name}",
+        "",
+        "企業評価上の売却シグナルはありませんが、ポートフォリオ内の保有比率が"
+        "高くなっています。",
+        "",
+    ]
+    if recommendation.portfolio_weight_pct is not None:
+        lines.append(f"時価ベースの保有比率: {recommendation.portfolio_weight_pct:.1f}%")
+    if recommendation.portfolio_acquisition_cost_weight_pct is not None:
+        lines.append(
+            f"取得価格ベースの保有比率: {recommendation.portfolio_acquisition_cost_weight_pct:.1f}%"
+        )
+    if recommendation.reasons:
+        lines.append("")
+        lines.append("検出内容:")
+        lines.extend(f"・{r}" for r in recommendation.reasons)
+    lines.append("")
+    lines.append(f"通知ID: {recommendation.recommendation_id}")
+    lines.append(_DISCLAIMER)
+    return "\n".join(lines)
+
+
 def _format_profit_taking_message(recommendation: Recommendation) -> str:
     if recommendation.recommendation_type in (
         RecommendationType.WATCH,
@@ -515,6 +551,8 @@ def _format_profit_taking_message(recommendation: Recommendation) -> str:
         return _format_watch_profit_taking_message(recommendation)
     if recommendation.recommendation_type == RecommendationType.REVIEW_BEFORE_EARNINGS:
         return _format_earnings_suppressed_message(recommendation)
+    if recommendation.recommendation_type == RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW:
+        return _format_portfolio_concentration_message(recommendation)
 
     lines = [
         f"【利確検討】{recommendation.stock_code} {recommendation.stock_name}",
@@ -628,6 +666,21 @@ def render_notification_preview(recommendation: Recommendation) -> str:
     return _format_message(recommendation, notification_type)
 
 
+@dataclass(frozen=True)
+class NotificationOutcome:
+    """notify_recommendation_with_statusの戻り値(要求仕様§12・§13)。
+
+    data_quality_blockedは、整合性検証・異常値検知でBLOCKING相当の問題が検出され
+    (DATA_QUALITY_ALERTまたはMANUAL_REVIEW_REQUIREDへ切り替わった)場合にTrueとなる。
+    この場合、たとえ手動確認メッセージ自体はLINEへ送信されていても(sent=True)、
+    評価結果としては「要確認」区分として扱う(呼び出し側の責務)。
+    """
+
+    status: NotificationStatus
+    sent: bool
+    data_quality_blocked: bool = False
+
+
 class LineNotificationService:
     def __init__(
         self,
@@ -650,6 +703,14 @@ class LineNotificationService:
         必ず実行し、いずれかでBLOCKING相当の問題を検出した場合は通常の推奨通知を送らず
         DATA_QUALITY_ALERTへ切り替える。
         """
+        return self.notify_recommendation_with_status(recommendation, now).sent
+
+    def notify_recommendation_with_status(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationOutcome:
+        """notify_recommendationと同じ処理を行い、送信有無だけでなく送信しなかった
+        理由(NotificationStatus)まで返す(要求仕様§12・§13: バッチサマリーの内訳集計に使う)。
+        """
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         previous = self._previous_recommendation(recommendation.stock_code, notification_type)
 
@@ -658,11 +719,20 @@ class LineNotificationService:
         )
         if alert is not None:
             if requires_manual_review:
-                return self.notify_manual_review_required(recommendation, alert, now)
-            return self.notify_data_quality_alert(alert, now)
+                sent = self.notify_manual_review_required(recommendation, alert, now)
+                return NotificationOutcome(
+                    status=NotificationStatus.SENT if sent else NotificationStatus.NOT_REQUIRED,
+                    sent=sent,
+                    data_quality_blocked=True,
+                )
+            self.notify_data_quality_alert(alert, now)
+            return NotificationOutcome(
+                status=NotificationStatus.NOT_REQUIRED, sent=False, data_quality_blocked=True
+            )
 
-        if not self._should_send(recommendation, previous, now):
-            return False
+        status = self._notification_status_for_send(recommendation, previous, now)
+        if status != NotificationStatus.SENT:
+            return NotificationOutcome(status=status, sent=False)
 
         message = _format_message(recommendation, notification_type)
         self._client.push_message(message)
@@ -676,7 +746,7 @@ class LineNotificationService:
                 related_recommendation_id=recommendation.recommendation_id,
             )
         )
-        return True
+        return NotificationOutcome(status=NotificationStatus.SENT, sent=True)
 
     def _check_data_quality(
         self,
@@ -871,11 +941,22 @@ class LineNotificationService:
         return False
 
     def notify_batch_summary(
-        self, process_name: str, total: int, succeeded: int, failed: int, now: dt.datetime
+        self,
+        process_name: str,
+        total: int,
+        category_counts: dict[str, int],
+        now: dt.datetime,
+        data_insufficient_stock_codes: list[str] | None = None,
+        failed_stock_codes: list[str] | None = None,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
-        全体件数・正常件数・異常件数のサマリー通知。個別のデータ取得エラー・データ品質
-        アラートはこれに集約され、個別には送信しない。
+        全体件数・区分別内訳のサマリー通知(要求仕様§13)。個別のデータ取得エラー・
+        データ品質アラートはこれに集約され、個別には送信しない。
+
+        category_countsは"sent"/"hold"/"review"/"data_insufficient"/"suppressed"/"failed"
+        をキーとする内訳件数。合計が対象銘柄数(total)と一致するか整合性チェックし、
+        一致しない場合は警告ログを出したうえで、通知本文にもその旨を明記する
+        (件数の不整合自体を隠さない)。
 
         ファンアウトの起動元(スケジューラ・手動実行)が何らかの理由で二重ディスパッチ
         された場合、独立した2つのbatch_idがそれぞれ完了を検知してこのメソッドを
@@ -883,32 +964,63 @@ class LineNotificationService:
         まったく同一内容のサマリーがLINEへ二重送信されることを防ぐため、同一日付・
         同一内容(件数)の通知が既に送信済みの場合は送信をスキップする。
         """
+        counts = {
+            category: category_counts.get(category, 0) for category in _BATCH_SUMMARY_CATEGORIES
+        }
+        counts_sum = sum(counts.values())
+        is_consistent = counts_sum == total
+        if not is_consistent:
+            logger.warning(
+                "batch_summary category count mismatch process_name=%s total=%d "
+                "counts_sum=%d counts=%s",
+                process_name,
+                total,
+                counts_sum,
+                counts,
+            )
+
         pseudo_stock_code = f"__batch__:{process_name}"
         content_hash = hashlib.sha256(
-            f"{process_name}|{now.date().isoformat()}|{total}|{succeeded}|{failed}".encode()
+            f"{process_name}|{now.date().isoformat()}|{total}|"
+            f"{sorted(counts.items())}".encode()
         ).hexdigest()[:16]
         latest = self._log_repo.latest_by_stock_and_type(
             pseudo_stock_code, NotificationType.BATCH_SUMMARY
         )
         if latest is not None and latest.content_hash == content_hash:
             logger.info(
-                "batch_summary duplicate suppressed process_name=%s total=%d succeeded=%d "
-                "failed=%d",
+                "batch_summary duplicate suppressed process_name=%s total=%d counts=%s",
                 process_name,
                 total,
-                succeeded,
-                failed,
+                counts,
             )
             return False
 
         lines = [
-            f"【処理完了】{process_name}",
-            f"全体処理件数: {total}",
-            f"正常件数: {succeeded}",
-            f"異常件数: {failed}",
-            f"完了日時: {format_jst(now)}",
-            _DISCLAIMER,
+            f"【{process_name}完了】",
+            "",
+            f"対象銘柄：{total}件",
+            f"通知送信：{counts['sent']}件",
+            f"保有継続：{counts['hold']}件",
+            f"要確認：{counts['review']}件",
+            f"データ不足：{counts['data_insufficient']}件",
+            f"再通知抑止：{counts['suppressed']}件",
+            f"処理失敗：{counts['failed']}件",
         ]
+        if not is_consistent:
+            lines.append("")
+            lines.append(f"※内訳合計({counts_sum}件)が対象銘柄数と一致していません。")
+        if data_insufficient_stock_codes:
+            lines.append("")
+            lines.append("データ不足：")
+            lines.extend(f"・{code}" for code in data_insufficient_stock_codes)
+        if failed_stock_codes:
+            lines.append("")
+            lines.append("処理失敗：")
+            lines.extend(f"・{code}" for code in failed_stock_codes)
+        lines.append("")
+        lines.append(f"評価日時：{format_jst(now)}")
+        lines.append(_DISCLAIMER)
         self._client.push_message("\n".join(lines))
         self._log_repo.save(
             NotificationLog(
@@ -930,30 +1042,43 @@ class LineNotificationService:
             return None
         return self._recommendation_repo.get(latest_log.related_recommendation_id)
 
-    def _should_send(
+    def _notification_status_for_send(
         self,
         recommendation: Recommendation,
         previous: Recommendation | None,
         now: dt.datetime,
-    ) -> bool:
+    ) -> NotificationStatus:
+        """送信するかどうかに加えて、送信しない場合の理由も返す(要求仕様§12)。"""
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         latest_log = self._log_repo.latest_by_stock_and_type(
             recommendation.stock_code, notification_type
         )
         if latest_log is None:
-            return True
+            return NotificationStatus.SENT
         if previous is None:
-            return True
+            return NotificationStatus.SENT
 
         if previous.recommendation_type != recommendation.recommendation_type:
-            return True
+            return NotificationStatus.SENT
 
         prev_price = _representative_price(previous)
         new_price = _representative_price(recommendation)
-        if prev_price is not None and new_price is not None and prev_price > 0:
-            change_pct = abs(float(new_price / prev_price - 1) * 100)
+        price_comparable = prev_price is not None and new_price is not None and prev_price > 0
+        if price_comparable:
+            change_pct = abs(float(new_price / prev_price - 1) * 100)  # type: ignore[operator]
             if change_pct >= self._config.notification.price_change_resend_threshold_pct:
-                return True
+                return NotificationStatus.SENT
 
         days_elapsed = (now.date() - latest_log.sent_at.date()).days
-        return days_elapsed >= self._config.notification.resend_after_days
+        if days_elapsed >= self._config.notification.resend_after_days:
+            return NotificationStatus.SENT
+
+        # 判定区分・価格いずれも実質的に変化していない、まったく同一内容の再送とみなせる
+        # 場合はDUPLICATE_SUPPRESSED、価格を比較できたが閾値未満だった場合は
+        # PRICE_CHANGE_BELOW_THRESHOLD、価格を比較できず日数のみで判断した場合は
+        # RESEND_INTERVAL_NOT_REACHEDとする。
+        if price_comparable:
+            return NotificationStatus.PRICE_CHANGE_BELOW_THRESHOLD
+        if prev_price is None and new_price is None:
+            return NotificationStatus.DUPLICATE_SUPPRESSED
+        return NotificationStatus.RESEND_INTERVAL_NOT_REACHED

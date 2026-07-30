@@ -1,7 +1,7 @@
 """Lambda銘柄単位ファンアウト(lambda_handlers/_fanout.py)の完了検知用カウンタ。
 
-DynamoDBの原子的なADD操作(UpdateItem)で完了件数をカウントし、最後の1件を
-処理したワーカーが「自分が最後だった」と検知してサマリー通知を送信する
+DynamoDBの原子的なADD操作(UpdateItem)で完了件数・区分別内訳をカウントし、
+最後の1件を処理したワーカーが「自分が最後だった」と検知してサマリー通知を送信する
 (Step Functions等の追加インフラを使わない軽量な集約方式)。
 
 ローカル(非Lambda)環境では常にNoneを返す。_fanout.py自体がLambda上でのみ
@@ -16,18 +16,23 @@ from typing import Any
 
 import boto3
 
+from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.infrastructure.collection_store import resolve_table_name, running_on_lambda
 
 _TABLE_FILE_NAME = "batch_runs.json"  # resolve_table_nameの命名規則(jstock-batch_runs)に合わせる
 _TTL_HOURS = 6  # 集計用の一時データのため、数時間で自動削除する
 
+# 銘柄コード一覧を記録する区分(要求仕様§13: 処理失敗・データ不足は銘柄コードも表示する)
+_CATEGORIES_WITH_STOCK_CODES = ("data_insufficient", "failed")
+
 
 @dataclass(frozen=True)
 class BatchProgress:
     total: int
-    succeeded: int
-    failed: int
     completed: int
+    category_counts: dict[str, int]
+    data_insufficient_stock_codes: list[str]
+    failed_stock_codes: list[str]
 
     @property
     def is_complete(self) -> bool:
@@ -43,33 +48,44 @@ def start_batch(batch_id: str, total: int, now: dt.datetime) -> None:
     if total <= 0 or not running_on_lambda():
         return
     ttl = int((now + dt.timedelta(hours=_TTL_HOURS)).timestamp())
-    _table().put_item(
-        Item={
-            "batch_id": batch_id,
-            "total": total,
-            "succeeded": 0,
-            "failed": 0,
-            "completed": 0,
-            "ttl": ttl,
-        }
-    )
+    item: dict[str, Any] = {"batch_id": batch_id, "total": total, "completed": 0, "ttl": ttl}
+    for category in SUMMARY_CATEGORIES:
+        item[category] = 0
+    _table().put_item(Item=item)
 
 
-def record_result(batch_id: str, succeeded: bool) -> BatchProgress | None:
-    """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。"""
+def record_result(
+    batch_id: str, category: str, stock_code: str | None = None
+) -> BatchProgress | None:
+    """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
+
+    categoryは"sent"/"hold"/"review"/"data_insufficient"/"suppressed"/"failed"
+    (domain/entities/evaluation_audit.pyのSUMMARY_CATEGORIESと同じ集合)。
+    data_insufficient/failedの場合、stock_codeを渡すとDynamoDBの文字列セットへ
+    原子的に追加し、バッチサマリーで銘柄コードを表示できるようにする。
+    """
     if not running_on_lambda():
         return None
-    field = "succeeded" if succeeded else "failed"
+    if category not in SUMMARY_CATEGORIES:
+        raise ValueError(f"unknown batch result category: {category}")
+
+    update_expr = f"ADD {category} :one, completed :one"
+    values: dict[str, Any] = {":one": 1}
+    if stock_code is not None and category in _CATEGORIES_WITH_STOCK_CODES:
+        update_expr += f", {category}_codes :codes"
+        values[":codes"] = {stock_code}
+
     response = _table().update_item(
         Key={"batch_id": batch_id},
-        UpdateExpression=f"ADD {field} :one, completed :one",
-        ExpressionAttributeValues={":one": 1},
+        UpdateExpression=update_expr,
+        ExpressionAttributeValues=values,
         ReturnValues="ALL_NEW",
     )
     item = response["Attributes"]
     return BatchProgress(
         total=int(item["total"]),
-        succeeded=int(item["succeeded"]),
-        failed=int(item["failed"]),
         completed=int(item["completed"]),
+        category_counts={category: int(item.get(category, 0)) for category in SUMMARY_CATEGORIES},
+        data_insufficient_stock_codes=sorted(item.get("data_insufficient_codes", set())),
+        failed_stock_codes=sorted(item.get("failed_codes", set())),
     )

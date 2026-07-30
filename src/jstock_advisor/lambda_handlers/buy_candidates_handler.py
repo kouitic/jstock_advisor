@@ -60,7 +60,7 @@ def _process_single_candidate(
     notification_service: LineNotificationService,
 ) -> dict[str, Any]:
     service = BuySignalService(providers=providers, config=config, business_calendar=calendar)
-    succeeded = False
+    category = "failed"
     try:
         outcome = service.analyze(stock_code, now)
         if outcome.data_error:
@@ -68,24 +68,32 @@ def _process_single_candidate(
             notification_service.notify_data_error(
                 stock_code, outcome.data_error, now, stock_name=item.stock_name if item else None
             )
+            category = "data_insufficient"
             result = {"stock_code": stock_code, "recommended": False, "notified": False}
         elif outcome.recommendation is None:
-            succeeded = True
+            category = "hold"
             result = {"stock_code": stock_code, "recommended": False, "notified": False}
         else:
-            succeeded = True
             recommendation_repo.save(outcome.recommendation)
             notified = notification_service.notify_recommendation(outcome.recommendation, now)
+            category = "sent" if notified else "suppressed"
             result = {"stock_code": stock_code, "recommended": True, "notified": notified}
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
         logger.exception("buy candidate analysis failed unexpectedly stock_code=%s", stock_code)
         result = {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
 
     if batch_id is not None:
-        progress = record_result(batch_id, succeeded)
+        needs_code = category in ("data_insufficient", "failed")
+        stock_code_for_category = stock_code if needs_code else None
+        progress = record_result(batch_id, category, stock_code=stock_code_for_category)
         if progress is not None and progress.is_complete:
             notification_service.notify_batch_summary(
-                _PROCESS_NAME, progress.total, progress.succeeded, progress.failed, now
+                _PROCESS_NAME,
+                progress.total,
+                progress.category_counts,
+                now,
+                data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
+                failed_stock_codes=progress.failed_stock_codes,
             )
     return result
 

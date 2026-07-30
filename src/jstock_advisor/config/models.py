@@ -523,6 +523,13 @@ class EarningsWindowRulesConfig(StrictModel):
     profit_taking_suppression_business_days: int
 
 
+class PortfolioConcentrationRulesConfig(StrictModel):
+    """ポートフォリオ集中リスク判定(2026-07仕様レビュー対応・要求仕様§14)。"""
+
+    version: int
+    single_stock_weight_threshold_pct: float
+
+
 # --- 集約 --------------------------------------------------------------------
 
 
@@ -541,3 +548,4 @@ class AppConfig(StrictModel):
     momentum: MomentumRulesConfig
     confidence: ConfidenceRulesConfig
     earnings_window: EarningsWindowRulesConfig
+    portfolio_concentration: PortfolioConcentrationRulesConfig

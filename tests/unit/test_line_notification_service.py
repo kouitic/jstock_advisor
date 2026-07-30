@@ -473,19 +473,73 @@ def test_data_quality_alert_logs_stock_name_and_recommended_action_instead_of_se
     assert "適正価格算出の入力データ" in caplog.text
 
 
+def _counts(
+    sent=0, hold=0, review=0, data_insufficient=0, suppressed=0, failed=0
+) -> dict[str, int]:
+    return {
+        "sent": sent,
+        "hold": hold,
+        "review": review,
+        "data_insufficient": data_insufficient,
+        "suppressed": suppressed,
+        "failed": failed,
+    }
+
+
 def test_notify_batch_summary_sends_counts(service_and_repos) -> None:
     service, _repo, client = service_and_repos
 
     sent = service.notify_batch_summary(
-        "保有銘柄・ウォッチリスト分析", total=27, succeeded=24, failed=3, now=_NOW
+        "保有銘柄・ウォッチリスト分析",
+        total=27,
+        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        now=_NOW,
     )
 
     assert sent is True
     assert len(client.sent) == 1
     message = client.sent[0]
-    assert "全体処理件数: 27" in message
-    assert "正常件数: 24" in message
-    assert "異常件数: 3" in message
+    assert "対象銘柄：27件" in message
+    assert "通知送信：6件" in message
+    assert "保有継続：18件" in message
+    assert "要確認：0件" in message
+    assert "データ不足：1件" in message
+    assert "再通知抑止：2件" in message
+    assert "処理失敗：0件" in message
+    assert "内訳合計" not in message  # 6+18+0+1+2+0=27で一致するため不整合の注記は出ない
+
+
+def test_notify_batch_summary_flags_inconsistent_counts(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=27,
+        category_counts=_counts(sent=6, hold=18),  # 合計24 != 27
+        now=_NOW,
+    )
+
+    message = client.sent[0]
+    assert "内訳合計(24件)が対象銘柄数と一致していません" in message
+
+
+def test_notify_batch_summary_lists_data_insufficient_and_failed_stock_codes(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=2,
+        category_counts=_counts(data_insufficient=1, failed=1),
+        now=_NOW,
+        data_insufficient_stock_codes=["7042"],
+        failed_stock_codes=["1234"],
+    )
+
+    message = client.sent[0]
+    assert "データ不足：\n・7042" in message
+    assert "処理失敗：\n・1234" in message
 
 
 def test_notify_batch_summary_suppresses_duplicate_same_day_same_content(
@@ -496,13 +550,15 @@ def test_notify_batch_summary_suppresses_duplicate_same_day_same_content(
     service, _repo, client = service_and_repos
 
     first = service.notify_batch_summary(
-        "保有銘柄・ウォッチリスト分析", total=27, succeeded=24, failed=3, now=_NOW
+        "保有銘柄・ウォッチリスト分析",
+        total=27,
+        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        now=_NOW,
     )
     second = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=27,
-        succeeded=24,
-        failed=3,
+        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
         now=_NOW + dt.timedelta(seconds=15),
     )
 
@@ -516,13 +572,15 @@ def test_notify_batch_summary_sends_again_when_content_differs(service_and_repos
     service, _repo, client = service_and_repos
 
     first = service.notify_batch_summary(
-        "保有銘柄・ウォッチリスト分析", total=27, succeeded=24, failed=3, now=_NOW
+        "保有銘柄・ウォッチリスト分析",
+        total=27,
+        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        now=_NOW,
     )
     second = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=27,
-        succeeded=27,
-        failed=0,
+        category_counts=_counts(sent=9, hold=18),
         now=_NOW + dt.timedelta(hours=1),
     )
 
