@@ -33,6 +33,52 @@ def test_margin_of_safety_ratios_are_ordered() -> None:
     assert high.entry < high.standard < high.strong < 1.0
 
 
+def test_maximum_margin_is_ordered_and_within_bounds() -> None:
+    """BUYパイプライン第2次修正(2026-07)。要求仕様5節: 段階別上限は
+    entry <= standard <= strong <= 0.45を満たす必要がある。
+    """
+    config = load_config()
+    maximum_margin = config.buy_decision.margin_of_safety.maximum_margin
+    assert 0 < maximum_margin.entry <= maximum_margin.standard <= maximum_margin.strong <= 0.45
+
+
+def test_adjustment_multipliers_are_ordered() -> None:
+    config = load_config()
+    multipliers = config.buy_decision.margin_of_safety.adjustment_multipliers
+    assert 0 <= multipliers.entry <= multipliers.standard <= multipliers.strong
+
+
+def test_minimum_margin_gap_is_within_bounds() -> None:
+    config = load_config()
+    assert 0 <= config.buy_decision.margin_of_safety.minimum_margin_gap < 0.45
+
+
+def test_notification_send_empty_summary_is_boolean() -> None:
+    config = load_config()
+    assert isinstance(config.notification.send_empty_summary, bool)
+
+
+def test_maximum_margin_rejects_descending_order() -> None:
+    from jstock_advisor.config.models import MarginOfSafetyMaximumTiers
+
+    with pytest.raises(ValidationError):
+        MarginOfSafetyMaximumTiers(entry=0.40, standard=0.30, strong=0.45)
+
+
+def test_maximum_margin_rejects_value_above_0_45() -> None:
+    from jstock_advisor.config.models import MarginOfSafetyMaximumTiers
+
+    with pytest.raises(ValidationError):
+        MarginOfSafetyMaximumTiers(entry=0.30, standard=0.38, strong=0.50)
+
+
+def test_adjustment_multipliers_reject_descending_order() -> None:
+    from jstock_advisor.config.models import MarginOfSafetyAdjustmentMultipliers
+
+    with pytest.raises(ValidationError):
+        MarginOfSafetyAdjustmentMultipliers(entry=1.0, standard=0.75, strong=0.50)
+
+
 def test_config_rejects_unknown_fields(tmp_path: Path) -> None:
     broken_dir = tmp_path / "config"
     shutil.copytree(DEFAULT_CONFIG_DIR, broken_dir)

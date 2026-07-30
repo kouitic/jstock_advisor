@@ -215,6 +215,18 @@ class ShareholderBenefit(ImmutableSnapshot):
     next_benefit_record_date: dt.date | None = None
 
 
+class StockNameOverride(ImmutableSnapshot):
+    """銘柄名の手動オーバーライド(2026-07 BUYパイプライン第2次修正。要求仕様19節)。
+
+    EDINET提出書類のfilerNameが取得できない、または表記の見直しが必要な
+    銘柄のみ、運用者が手動で正式な日本語社名を登録する(株主優待・企業行動と
+    同じ「自動取得できない情報は手動登録する」という設計方針)。
+    """
+
+    stock_code: str
+    stock_name: str
+
+
 class CorporateActionEvent(ImmutableSnapshot):
     stock_code: str
     event_type: CorporateActionType

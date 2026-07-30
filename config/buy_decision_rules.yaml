@@ -31,6 +31,13 @@ earnings_window:
 
 # 必要安全余裕率(= 1 - 買付価格/valuation_anchor)。適正価格は「買ってよい上限価格」
 # ではなく企業価値の中心値として扱い、実際の買付価格にはここで安全余裕を適用する。
+#
+# BUYパイプライン第2次修正(2026-07。要求仕様3節・4節・5節): リスク加算は
+# カテゴリ内で最大値のみを採用(単純合算による二重加点を防ぐ、カテゴリ構成は
+# domain/valuation/margin_of_safety.pyにコードで固定)し、3段階(entry/standard/
+# strong)へは同額ではなくadjustment_multipliersで感応度を変えて反映する。
+# 上限もmaximum_marginで段階別に分離し、リスクが大きい銘柄でも3段階が
+# 同一価格へ潰れないようminimum_margin_gapで最小差を保証する。
 margin_of_safety:
   confidence:
     high:
@@ -43,8 +50,20 @@ margin_of_safety:
       strong: 0.30
   # 信頼度LOWの場合は自動の買い推奨価格を生成しない(MANUAL_REVIEW / DATA_INSUFFICIENT /
   # WATCH_FOR_PRICEのいずれかとする)。
-  maximum: 0.45
-  # 基本安全余裕率に対するリスク調整の加算値。複数該当する場合は合算し、maximumで頭打ちする。
+  # 段階別の安全余裕率上限(entry <= standard <= strong)。
+  maximum_margin:
+    entry: 0.30
+    standard: 0.38
+    strong: 0.45
+  # 上限適用後もentry < standard < strongの順序を維持するための最小差。
+  minimum_margin_gap: 0.05
+  # カテゴリ集約後のリスク加算合計を、entry/standard/strongへ反映する際の感応度倍率。
+  adjustment_multipliers:
+    entry: 0.50
+    standard: 0.75
+    strong: 1.00
+  # 基本安全余裕率に対するリスク調整の加算値。同一カテゴリ内では最大値のみを
+  # 採用し(単純合算しない)、カテゴリ間は合算する。
   adjustments:
     earnings_within_3_business_days: 0.05
     earnings_within_7_business_days: 0.03

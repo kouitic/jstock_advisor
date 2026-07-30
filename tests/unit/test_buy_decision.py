@@ -2,7 +2,12 @@ from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
-from jstock_advisor.domain.entities.enums import BUY_FAMILY_ACTIONS, BuyAction, ConfidenceLevel
+from jstock_advisor.domain.entities.enums import (
+    BUY_FAMILY_ACTIONS,
+    BuyAction,
+    BuyPriceReliability,
+    ConfidenceLevel,
+)
 from jstock_advisor.domain.screening.rules import ScreeningResult
 from jstock_advisor.domain.signals.buy_decision import (
     compute_purchase_attractiveness_score,
@@ -49,6 +54,51 @@ def test_current_price_above_entry_price_never_buy_family() -> None:
         config=_CONFIG,
     )
     assert decision.action not in BUY_FAMILY_ACTIONS
+    assert decision.action == BuyAction.WATCH_FOR_PRICE
+
+
+def test_low_buy_price_reliability_downgrades_buy_family_to_watch() -> None:
+    decision = decide_buy_action(
+        current_price=Decimal("800"),
+        buy_price_levels=_LEVELS,
+        company_quality_score=90.0,
+        business_days_to_earnings=30,
+        valuation_dispersion_ratio=1.1,
+        buy_price_reliability=BuyPriceReliability.LOW,
+        config=_CONFIG,
+    )
+    assert decision.action == BuyAction.WATCH_FOR_PRICE
+    assert decision.action not in BUY_FAMILY_ACTIONS
+    # raw_actionは価格条件のみによる仮判定のため、信頼性ゲートの影響を受けない。
+    assert decision.raw_action == BuyAction.STRONG_BUY
+    assert any(r.code == "BUY_PRICE_RELIABILITY_LOW" for r in decision.reasons)
+
+
+def test_ok_buy_price_reliability_does_not_downgrade() -> None:
+    decision = decide_buy_action(
+        current_price=Decimal("800"),
+        buy_price_levels=_LEVELS,
+        company_quality_score=90.0,
+        business_days_to_earnings=30,
+        valuation_dispersion_ratio=1.1,
+        buy_price_reliability=BuyPriceReliability.OK,
+        config=_CONFIG,
+    )
+    assert decision.action == BuyAction.STRONG_BUY
+
+
+def test_low_buy_price_reliability_does_not_escalate_watch() -> None:
+    # 元々価格条件を満たしていない銘柄は、信頼性ゲートによって新たに
+    # 何かへ「昇格」することはない(格下げのみに使う設計)。
+    decision = decide_buy_action(
+        current_price=Decimal("1001"),
+        buy_price_levels=_LEVELS,
+        company_quality_score=90.0,
+        business_days_to_earnings=30,
+        valuation_dispersion_ratio=1.1,
+        buy_price_reliability=BuyPriceReliability.LOW,
+        config=_CONFIG,
+    )
     assert decision.action == BuyAction.WATCH_FOR_PRICE
 
 

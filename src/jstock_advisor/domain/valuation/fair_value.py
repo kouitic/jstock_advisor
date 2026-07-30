@@ -145,6 +145,15 @@ def _low_over_window(
     return min(lows)
 
 
+def compute_52_week_low(bars: list[PriceBar], as_of_date: dt.date) -> Decimal | None:
+    """直近52週安値(2026-07 BUYパイプライン第2次修正で追加)。
+
+    下方外れ値フィルタ(valuation_methods.py::apply_outlier_filters)が
+    「52週安値より大幅に低い算出値」を検出するための基準値として使う。
+    """
+    return _low_over_window(bars, as_of_date, 365)
+
+
 def compute_historical_range_price(
     bars: list[PriceBar],
     as_of_date: dt.date,

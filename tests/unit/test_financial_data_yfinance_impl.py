@@ -6,6 +6,9 @@ import pandas as pd
 import pytest
 
 from jstock_advisor.infrastructure.edinet.document_finder import EdinetFilingCacheRepository
+from jstock_advisor.infrastructure.local_repository.stock_name_override_repository import (
+    StockNameOverrideRepository,
+)
 from jstock_advisor.providers.financial_data.yfinance_impl import (
     YFinanceFinancialDataProvider,
     _strip_corporate_suffix,
@@ -36,8 +39,13 @@ class _NotConfiguredClient:
         return None
 
 
-def test_resolve_japanese_stock_name_returns_none_without_edinet_client() -> None:
-    provider = YFinanceFinancialDataProvider(now=_NOW)
+def test_resolve_japanese_stock_name_returns_none_without_edinet_client(
+    tmp_path: Path,
+) -> None:
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW,
+        stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path),
+    )
     assert provider._resolve_japanese_stock_name("8136") is None  # noqa: SLF001
 
 
@@ -48,8 +56,25 @@ def test_resolve_japanese_stock_name_returns_none_when_edinet_not_configured(
         now=_NOW,
         edinet_client=_NotConfiguredClient(),  # type: ignore[arg-type]
         edinet_cache_repository=EdinetFilingCacheRepository(store_dir=tmp_path),
+        stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path),
     )
     assert provider._resolve_japanese_stock_name("8136") is None  # noqa: SLF001
+
+
+def test_resolve_japanese_stock_name_prefers_manual_override_over_edinet(
+    tmp_path: Path,
+) -> None:
+    # BUYパイプライン第2次修正(2026-07)。要求仕様19節: 手動オーバーライドは
+    # EDINET filerNameより優先される。
+    override_repo = StockNameOverrideRepository(store_dir=tmp_path)
+    override_repo.save("4246", "ダイキョーニシカワ")
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW,
+        edinet_client=_NotConfiguredClient(),  # type: ignore[arg-type]
+        edinet_cache_repository=EdinetFilingCacheRepository(store_dir=tmp_path),
+        stock_name_override_repository=override_repo,
+    )
+    assert provider._resolve_japanese_stock_name("4246") == "ダイキョーニシカワ"  # noqa: SLF001
 
 
 def test_nearest_price_picks_closest_trading_day() -> None:

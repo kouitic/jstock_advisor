@@ -73,6 +73,11 @@ _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType]
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
 
+# 購入候補まとめ通知(notify_buy_candidates_digest)を分割する目安の文字数
+# (LINEのメッセージ長上限に対して余裕を持たせた値。BUYパイプライン第2次修正
+# 2026-07で追加。要求仕様17節)。
+_BUY_DIGEST_MAX_CHARS = 4500
+
 # バッチサマリーの内訳区分(要求仕様§13)。domain/entities/evaluation_audit.pyの
 # SUMMARY_CATEGORIESと同じキー集合を使う。
 _BATCH_SUMMARY_CATEGORIES = SUMMARY_CATEGORIES
@@ -303,12 +308,20 @@ def _dispersion_display(recommendation: Recommendation) -> str:
 def _valuation_range_lines(recommendation: Recommendation) -> list[str]:
     """適正価格レンジ・購入判断基準価格(要求仕様9節・11節)。単一の「最終適正価格」を
     断定的に表示する旧設計は廃止した。
+
+    --- BUYパイプライン第2次修正(2026-07)で変更。要求仕様9節・10節 ---
+    下方外れ値(DCFの単年度キャッシュフロー歪み等)を除外した「決定用」レンジ
+    (decision_valuation_min/max)を表示する。外れ値込みの全手法参考値
+    (valuation_min/max)は監査ログのみで確認できるようにし、通知には表示しない。
     """
     lines = []
-    if recommendation.valuation_min is not None and recommendation.valuation_max is not None:
+    if (
+        recommendation.decision_valuation_min is not None
+        and recommendation.decision_valuation_max is not None
+    ):
         lines.append(
-            f"適正価格レンジ: {_yen(recommendation.valuation_min)}〜"
-            f"{_yen(recommendation.valuation_max)}"
+            f"適正価格レンジ: {_yen(recommendation.decision_valuation_min)}〜"
+            f"{_yen(recommendation.decision_valuation_max)}"
         )
     if recommendation.valuation_anchor is not None:
         lines.append(f"購入判断基準価格: {_yen(recommendation.valuation_anchor)}")
@@ -331,6 +344,52 @@ def _margin_adjustment_reasons_line(recommendation: Recommendation) -> str | Non
         return None
     reasons = "\n".join(f"・{a.reason}" for a in recommendation.margin_adjustments)
     return f"必要安全余裕を拡大した理由:\n{reasons}"
+
+
+_PRICE_CONDITION_LABELS: dict[BuyAction, str] = {
+    BuyAction.STRONG_BUY: "積極買い価格以下",
+    BuyAction.BUY: "標準買い価格以下",
+    BuyAction.SMALL_ENTRY: "打診買い価格以下",
+}
+
+
+def _buy_candidate_digest_block(rank: int, recommendation: Recommendation) -> str:
+    """購入候補まとめ通知(notify_buy_candidates_digest)の1銘柄分のブロック
+    (BUYパイプライン第2次修正2026-07で追加。要求仕様17節・18節)。1銘柄1通では
+    なく、最大5銘柄を1通(または分割時のみ複数通)にまとめるための本文断片。
+    """
+    action = recommendation.buy_action
+    lines = [
+        f"{rank}位 {recommendation.stock_code} {recommendation.stock_name}",
+        f"判定: {buy_action_label(action) if action is not None else '購入候補'}",
+        f"現在値: {_yen(recommendation.price_at_recommendation)}",
+    ]
+    price_line = _buy_price_levels_line(recommendation)
+    if price_line is not None:
+        lines.append(price_line)
+    if action is not None and action in _PRICE_CONDITION_LABELS:
+        lines.append(f"価格条件: {_PRICE_CONDITION_LABELS[action]}")
+    if (
+        recommendation.purchase_attractiveness_score is not None
+        and recommendation.company_quality_score is not None
+    ):
+        lines.append(
+            f"購入魅力度: {recommendation.purchase_attractiveness_score:.1f}点"
+            f"　企業魅力度: {recommendation.company_quality_score:.1f}点"
+        )
+    if recommendation.total_yield_pct_at_recommendation is not None:
+        lines.append(f"総合利回り: {recommendation.total_yield_pct_at_recommendation:.2f}%")
+    lines.append(
+        f"次回決算日: {recommendation.next_earnings_date}"
+        if recommendation.next_earnings_date
+        else "次回決算日: 不明"
+    )
+    lines.append(f"適正価格信頼度: {recommendation.confidence.value}")
+    if recommendation.reasons:
+        lines.append("主な理由: " + " / ".join(recommendation.reasons))
+    if recommendation.counter_factors:
+        lines.append("主なリスク: " + " / ".join(recommendation.counter_factors))
+    return "\n".join(lines)
 
 
 def _format_buy_candidate_message(recommendation: Recommendation) -> str:
@@ -388,9 +447,13 @@ def _format_watch_for_price_message(recommendation: Recommendation) -> str:
     price_line = _buy_price_levels_line(recommendation)
     if price_line is not None:
         lines.append(price_line)
-    if recommendation.current_vs_entry_price_pct is not None:
-        pct = float(recommendation.current_vs_entry_price_pct)
-        lines.append(f"打診買い価格まで: 約{abs(pct):.1f}%")
+    # 「打診買い価格まで」はあと何%の下落が必要かを示す指標であり、現在値が
+    # entryを何%上回っているか(current_vs_entry_price_pct)とは意味が異なる
+    # (BUYパイプライン第2次修正2026-07で修正。旧実装は現在値がentryを上回る
+    # 割合をそのまま「まで」の文言で表示しており、数式と文言が矛盾していた)。
+    if recommendation.required_decline_to_entry_pct is not None:
+        pct = float(recommendation.required_decline_to_entry_pct)
+        lines.append(f"打診買い価格まで: 約{abs(pct):.1f}%の下落が必要")
     if recommendation.company_quality_score is not None:
         lines.append(f"企業魅力度: {recommendation.company_quality_score:.1f}点")
     if recommendation.total_yield_pct_at_recommendation is not None:
@@ -846,7 +909,23 @@ class LineNotificationService:
         send_recommendation_notificationを呼んで実際に送信する責任を持つ。
         データ品質アラート・要手動確認メッセージは例外的な安全経路のため、
         従来通りここで即時送信する(優先度付けの対象外)。
+
+        --- BUYパイプライン第2次修正(2026-07)で追加。要求仕様13節・16節 ---
+        buy_action(BUYパイプライン由来のRecommendationにのみ設定される。
+        SELL/利確系のRecommendationでは常にNone)がBUY_FAMILY_ACTIONS以外の
+        場合、監視継続・購入見送り・要確認・データ不足・対象外はLINE通知
+        しない(分析結果・監査ログへの記録は`BuySignalService.analyze()`側で
+        既に完了している)。データ品質アラート・要手動確認の安全弁チェックより
+        前にこのゲートを置くことで、BUY系以外のbuy_actionでは重い整合性検証・
+        異常値検知を実行せず、要手動確認LINE送信(notify_manual_review_required)
+        も発生させない(MANUAL_REVIEWはLINE通知しないという要求仕様6節と一致)。
         """
+        if (
+            recommendation.buy_action is not None
+            and recommendation.buy_action not in BUY_FAMILY_ACTIONS
+        ):
+            return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
+
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         previous = self._previous_recommendation(recommendation.stock_code, notification_type)
 
@@ -891,6 +970,74 @@ class LineNotificationService:
                 related_recommendation_id=recommendation.recommendation_id,
             )
         )
+
+    def notify_buy_candidates_digest(
+        self, winners: list[Recommendation], now: dt.datetime
+    ) -> int:
+        """購入候補(BUY_FAMILY_ACTIONS)の上位銘柄を1通(長すぎる場合のみ複数通)に
+        まとめて送信する(BUYパイプライン第2次修正2026-07で追加。要求仕様17節・18節)。
+
+        1銘柄1通ずつ`send_recommendation_notification`を呼ぶ旧方式を廃止し、
+        優先順位順に並んだ購入候補だけをまとめて1回のバッチで送信する。
+        個別のNotificationLogは引き続き銘柄ごとに1件ずつ保存し、再送判定の
+        粒度(銘柄単位)は変えない。呼び出し前にwinnersの各要素が
+        evaluate_notification_status経由でstatus==SENTと判定済みであることを
+        呼び出し側が保証すること(このメソッド自体は再通知抑止を行わない)。
+        """
+        if not winners:
+            return 0
+
+        blocks = [
+            _buy_candidate_digest_block(rank, rec) for rank, rec in enumerate(winners, start=1)
+        ]
+        footer = [
+            "",
+            f"対象: 最大{len(winners)}銘柄",
+            f"評価日時: {format_jst(now)}",
+            _DISCLAIMER,
+        ]
+
+        chunks: list[list[str]] = []
+        current_chunk: list[str] = []
+        current_len = 0
+        for block in blocks:
+            block_len = len(block) + 2  # 区切りの空行分
+            if current_chunk and current_len + block_len > _BUY_DIGEST_MAX_CHARS:
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_len = 0
+            current_chunk.append(block)
+            current_len += block_len
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        total_chunks = len(chunks)
+        for index, chunk_blocks in enumerate(chunks, start=1):
+            header = (
+                "【本日の購入候補】"
+                if total_chunks == 1
+                else f"【本日の購入候補】({index}/{total_chunks})"
+            )
+            message = "\n\n".join([header, *chunk_blocks])
+            if index == total_chunks:
+                message = "\n\n".join([message, "\n".join(footer)])
+            self._client.push_message(message)
+
+        for recommendation in winners:
+            notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[
+                recommendation.recommendation_type
+            ]
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=str(uuid.uuid4()),
+                    notification_type=notification_type,
+                    stock_code=recommendation.stock_code,
+                    content_hash=_compute_content_hash(recommendation.recommendation_type),
+                    sent_at=now,
+                    related_recommendation_id=recommendation.recommendation_id,
+                )
+            )
+        return len(winners)
 
     def _check_data_quality(
         self,
@@ -1095,6 +1242,7 @@ class LineNotificationService:
         data_insufficient_stock_codes: list[str] | None = None,
         failed_stock_codes: list[str] | None = None,
         buy_candidates_sent_count: int | None = None,
+        send_empty_summary: bool = True,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
         全体件数・区分別内訳のサマリー通知(要求仕様§13)。個別のデータ取得エラー・
@@ -1106,8 +1254,11 @@ class LineNotificationService:
         (件数の不整合自体を隠さない)。
 
         buy_candidates_sent_countは買い候補分析(2026-07 BUYパイプライン再設計)専用。
-        0が渡された場合、「今回の購入候補: 該当なし」を明示する(要求仕様17節:
-        購入候補が0件の場合も無理に上位銘柄を買い候補として出さない)。
+        0が渡され、かつsend_empty_summary=False(BUYパイプライン第2次修正2026-07で
+        追加。要求仕様16節)の場合、このメソッドは何も送信せずFalseを返す
+        (購入候補が1件も無い日に「該当なし」の完了通知すら送らない設定)。
+        send_empty_summary=True(既定値、他のバッチ処理からの呼び出しはこちらの
+        まま)の場合は従来どおり「今回の購入候補: 該当なし」を明示する。
 
         ファンアウトの起動元(スケジューラ・手動実行)が何らかの理由で二重ディスパッチ
         された場合、独立した2つのbatch_idがそれぞれ完了を検知してこのメソッドを
@@ -1115,6 +1266,15 @@ class LineNotificationService:
         まったく同一内容のサマリーがLINEへ二重送信されることを防ぐため、同一日付・
         同一内容(件数)の通知が既に送信済みの場合は送信をスキップする。
         """
+        if buy_candidates_sent_count == 0 and not send_empty_summary:
+            logger.info(
+                "batch_summary suppressed (no buy candidates, send_empty_summary=False) "
+                "process_name=%s total=%d",
+                process_name,
+                total,
+            )
+            return False
+
         counts = {
             category: category_counts.get(category, 0) for category in _BATCH_SUMMARY_CATEGORIES
         }

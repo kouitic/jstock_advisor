@@ -5,6 +5,7 @@ from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 from jstock_advisor.domain.valuation.valuation_methods import (
     apply_dcf_divergence_filter,
+    apply_outlier_filters,
     build_valuation_summary,
     compute_valuation_anchor,
     determine_dispersion_band,
@@ -80,6 +81,64 @@ def test_dcf_divergence_filter_keeps_close_dcf() -> None:
     others = [_result("target_yield", "100"), _result("per", "110")]
     filtered = apply_dcf_divergence_filter(dcf, others)
     assert filtered.applicable is True
+
+
+def test_apply_outlier_filters_excludes_far_below_median() -> None:
+    # クリヤマ3355の実データ: DCF=115.31円が他4方式の中央値(約1073円)の
+    # 40%未満のため下方外れ値として除外される。
+    results = [
+        _result("target_yield", "1525"),
+        _result("per", "977.11"),
+        _result("pbr", "1170.98"),
+        _result("historical_range", "1169"),
+        _result("dcf", "115.31", confidence=ConfidenceLevel.MEDIUM),
+    ]
+    filtered = apply_outlier_filters(results, current_price=Decimal("1675"))
+    dcf_result = next(r for r in filtered if r.method == "dcf")
+    assert dcf_result.applicable is False
+    assert dcf_result.fair_value is None
+    assert dcf_result.exclusion_detail is not None
+    assert dcf_result.exclusion_detail.code == "EXTREME_LOW_RELATIVE_TO_CURRENT_PRICE"
+    others = [r for r in filtered if r.method != "dcf"]
+    assert all(r.applicable for r in others)
+
+
+def test_apply_outlier_filters_keeps_close_values() -> None:
+    results = [
+        _result("target_yield", "100"),
+        _result("per", "105"),
+        _result("pbr", "95"),
+    ]
+    filtered = apply_outlier_filters(results, current_price=Decimal("100"))
+    assert all(r.applicable for r in filtered)
+
+
+def test_apply_outlier_filters_noop_when_fewer_than_2_applicable() -> None:
+    results = [_result("target_yield", "10")]
+    filtered = apply_outlier_filters(results, current_price=Decimal("1000"))
+    assert filtered[0].applicable is True
+
+
+def test_build_valuation_summary_separates_all_methods_from_decision_range() -> None:
+    # 東洋電機6505の実データ: 全手法参考値(valuation_min/max)は外れ値込みの
+    # 38.29円〜2900円のまま、decision_valuation_min/maxは外れ値除外後の
+    # 926.74円〜1337円になる。
+    results = [
+        _result("target_yield", "2900"),
+        _result("per", "926.74"),
+        _result("pbr", "1113.59"),
+        _result("historical_range", "1337"),
+        _result("dcf", "38.29", confidence=ConfidenceLevel.MEDIUM),
+    ]
+    summary = build_valuation_summary(
+        results, "median", None, _USABILITY_CONFIG, current_price=Decimal("2328")
+    )
+    assert summary.valuation_min == Decimal("38.29")
+    assert summary.valuation_max == Decimal("2900")
+    assert summary.decision_valuation_min == Decimal("926.74")
+    assert summary.decision_valuation_max == Decimal("1337")
+    assert summary.valuation_dispersion_ratio is not None
+    assert summary.valuation_dispersion_ratio < 2.0
 
 
 def test_valuation_anchor_none_when_confidence_low() -> None:

@@ -17,7 +17,12 @@ from decimal import Decimal
 from jstock_advisor.config.models import BuyDecisionRulesConfig
 from jstock_advisor.domain.entities.buy_decision import BuyDecisionReason
 from jstock_advisor.domain.entities.common import BuyPriceLevels
-from jstock_advisor.domain.entities.enums import BUY_FAMILY_ACTIONS, BuyAction, ConfidenceLevel
+from jstock_advisor.domain.entities.enums import (
+    BUY_FAMILY_ACTIONS,
+    BuyAction,
+    BuyPriceReliability,
+    ConfidenceLevel,
+)
 from jstock_advisor.domain.screening.rules import ScreeningResult
 from jstock_advisor.domain.valuation.valuation_methods import DispersionBand
 from jstock_advisor.interfaces.types import ShareholderBenefit
@@ -85,6 +90,7 @@ def decide_buy_action(
     company_quality_score: float,
     business_days_to_earnings: int | None,
     valuation_dispersion_ratio: float | None,
+    buy_price_reliability: BuyPriceReliability | None = None,
     config: BuyDecisionRulesConfig,
 ) -> BuyActionDecision:
     """第3段階: 現在価格での購入判断。
@@ -148,6 +154,19 @@ def decide_buy_action(
                 message="次回決算が近いため、新規購入を決算後まで待つ",
                 actual_value=business_days_to_earnings,
                 threshold_value=earnings_config.block_buy_business_days,
+            )
+        )
+
+    if buy_price_reliability == BuyPriceReliability.LOW and action in BUY_FAMILY_ACTIONS:
+        action = BuyAction.WATCH_FOR_PRICE
+        reasons.append(
+            BuyDecisionReason(
+                code="BUY_PRICE_RELIABILITY_LOW",
+                message=(
+                    "買付価格の信頼性が低い(安全余裕率が上限に張り付いた、"
+                    "手法間バラつきが大きい、有効な算出方式が少ない等)ため、"
+                    "機械的に算出した買付価格をそのまま購入判断に使わない"
+                ),
             )
         )
 

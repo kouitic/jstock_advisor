@@ -14,6 +14,7 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     ConfidenceLevel,
     DividendComparisonOutcome,
+    NotificationStatus,
     RecommendationType,
     RecordDateUnknownReason,
 )
@@ -750,8 +751,11 @@ def _make_buy_pipeline_recommendation(
         valuation_anchor=Decimal("3620"),
         valuation_min=Decimal("3400"),
         valuation_max=Decimal("3900"),
+        decision_valuation_min=Decimal("3400"),
+        decision_valuation_max=Decimal("3900"),
         valuation_dispersion_ratio=Decimal("1.15"),
         current_vs_entry_price_pct=Decimal("1.6"),
+        required_decline_to_entry_pct=Decimal("1.6"),
         reasons=["財務健全性が高評価"],
     )
 
@@ -848,3 +852,154 @@ def test_batch_summary_never_says_top_priority_n_stocks(service_and_repos) -> No
 
     message = client.sent[0]
     assert "優先順位の高い" not in message
+
+
+# --- BUYパイプライン第2次修正(2026-07)で追加 ---
+
+
+@pytest.mark.parametrize(
+    "buy_action",
+    [
+        BuyAction.WATCH_FOR_PRICE,
+        BuyAction.WATCH_BEFORE_EARNINGS,
+        BuyAction.MANUAL_REVIEW,
+        BuyAction.NOT_ATTRACTIVE,
+        BuyAction.EXCLUDED,
+        BuyAction.DATA_INSUFFICIENT,
+    ],
+)
+def test_evaluate_notification_status_never_sends_non_buy_family_actions(
+    service_and_repos, buy_action: BuyAction
+) -> None:
+    service, _repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=buy_action)
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+
+    assert outcome.status == NotificationStatus.NOT_REQUIRED
+    assert outcome.sent is False
+    assert client.sent == []
+
+
+@pytest.mark.parametrize(
+    "buy_action", [BuyAction.STRONG_BUY, BuyAction.BUY, BuyAction.SMALL_ENTRY]
+)
+def test_evaluate_notification_status_allows_buy_family_actions(
+    service_and_repos, buy_action: BuyAction
+) -> None:
+    service, _repo, _client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=buy_action)
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+
+    assert outcome.status == NotificationStatus.SENT
+
+
+def test_notify_buy_candidates_digest_sends_one_message_for_multiple_winners(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+    winners = [
+        _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY),
+        _make_buy_pipeline_recommendation(buy_action=BuyAction.SMALL_ENTRY),
+    ]
+
+    sent_count = service.notify_buy_candidates_digest(winners, _NOW)
+
+    assert sent_count == 2
+    assert len(client.sent) == 1
+    message = client.sent[0]
+    assert "【本日の購入候補】" in message
+    assert "1位 4516 日本新薬" in message
+    assert "2位 4516 日本新薬" in message
+    assert "対象: 最大2銘柄" in message
+
+
+def test_notify_buy_candidates_digest_records_notification_log_per_stock(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "local_store"
+    recommendation_repo = RecommendationRepository(store_dir=store_dir)
+    notification_log_repo = NotificationLogRepository(store_dir=store_dir)
+    client = _FakeLineClient()
+    service = LineNotificationService(
+        line_client=client,
+        notification_log_repository=notification_log_repo,
+        recommendation_repository=recommendation_repo,
+        config=_CONFIG,
+    )
+    winners = [_make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)]
+
+    service.notify_buy_candidates_digest(winners, _NOW)
+
+    from jstock_advisor.domain.entities.enums import NotificationType
+
+    latest = notification_log_repo.latest_by_stock_and_type(
+        "4516", NotificationType.DAILY_BUY_CANDIDATES
+    )
+    assert latest is not None
+    assert latest.related_recommendation_id == "rec-buy-1"
+
+
+def test_notify_buy_candidates_digest_no_winners_sends_nothing(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+
+    sent_count = service.notify_buy_candidates_digest([], _NOW)
+
+    assert sent_count == 0
+    assert client.sent == []
+
+
+def test_notify_batch_summary_suppressed_when_empty_and_send_empty_summary_false(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_batch_summary(
+        "買い候補分析",
+        total=68,
+        category_counts=_counts(hold=68),
+        now=_NOW,
+        buy_candidates_sent_count=0,
+        send_empty_summary=False,
+    )
+
+    assert sent is False
+    assert client.sent == []
+
+
+def test_notify_batch_summary_sent_when_empty_and_send_empty_summary_true(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_batch_summary(
+        "買い候補分析",
+        total=68,
+        category_counts=_counts(hold=68),
+        now=_NOW,
+        buy_candidates_sent_count=0,
+        send_empty_summary=True,
+    )
+
+    assert sent is True
+    assert len(client.sent) == 1
+    assert "該当なし" in client.sent[0]
+
+
+def test_notify_batch_summary_default_still_sends_for_non_buy_callers(
+    service_and_repos,
+) -> None:
+    # buy_candidates_sent_count=None(保有銘柄バッチ等)の場合、send_empty_summaryの
+    # 既定値(True)は既存呼び出し元の挙動に一切影響しない。
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_batch_summary(
+        "保有銘柄評価",
+        total=10,
+        category_counts=_counts(hold=10),
+        now=_NOW,
+    )
+
+    assert sent is True
+    assert len(client.sent) == 1
