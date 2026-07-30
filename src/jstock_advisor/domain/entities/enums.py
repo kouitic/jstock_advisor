@@ -180,6 +180,21 @@ class StockType(StrEnum):
     EVENT_DRIVEN = "EVENT_DRIVEN"
 
 
+class PriceBasisType(StrEnum):
+    """価格フィールドがどの算定軸から導出されたかを明示する(利確判定レビュー対応)。
+
+    異なる軸の価格(適正価格基準・取得価格基準・配当利回り基準等)を、
+    根拠を示さずに同列の「売却価格」として並べない。
+    """
+
+    FAIR_VALUE_THRESHOLD = "FAIR_VALUE_THRESHOLD"
+    PURCHASE_PRICE_RETURN_TARGET = "PURCHASE_PRICE_RETURN_TARGET"
+    DIVIDEND_YIELD_THRESHOLD = "DIVIDEND_YIELD_THRESHOLD"
+    TOTAL_YIELD_THRESHOLD = "TOTAL_YIELD_THRESHOLD"
+    TECHNICAL_PRICE_LEVEL = "TECHNICAL_PRICE_LEVEL"
+    USER_DEFINED_TARGET = "USER_DEFINED_TARGET"
+
+
 class PriceFieldBasis(StrEnum):
     """価格フィールドが現在値と一致する場合の意味を明示する(要求仕様11節)。"""
 

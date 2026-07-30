@@ -190,14 +190,28 @@ def _check_full_take_missing_all_price_guidance(r: Recommendation) -> Consistenc
 
 
 def _check_watch_immediate_execution(r: Recommendation) -> ConsistencyViolation | None:
+    """WATCH(監視)判定に、即時売却・即時利確を意味する価格が残っていないか確認する
+    (要求仕様レビュー対応: recommended_limit_priceだけでなく、partial_profit_start_price・
+    immediate_execution_price・stop_review_priceも確認する)。
+    """
     if r.recommendation_type != RecommendationType.WATCH or r.sell_prices is None:
         return None
-    p = r.sell_prices.recommended_limit_price
-    if p is not None and p.basis == PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE:
+    sp = r.sell_prices
+    if sp.immediate_execution_price is not None:
         return ConsistencyViolation(
             "watch_recommends_immediate_sell",
-            "WATCH(監視)判定なのに、指値候補が即時執行目安として提示されている",
+            "WATCH(監視)判定なのに、即時執行価格が設定されている",
         )
+    for name, field in (
+        ("partial_profit_start_price", sp.partial_profit_start_price),
+        ("recommended_limit_price", sp.recommended_limit_price),
+        ("stop_review_price", sp.stop_review_price),
+    ):
+        if field is not None and field.basis == PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE:
+            return ConsistencyViolation(
+                "watch_recommends_immediate_sell",
+                f"WATCH(監視)判定なのに、{name}が即時執行目安として提示されている",
+            )
     return None
 
 

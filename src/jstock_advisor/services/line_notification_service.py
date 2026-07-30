@@ -163,21 +163,35 @@ def _compute_content_hash(recommendation_type: RecommendationType) -> str:
     return hashlib.sha256(recommendation_type.value.encode()).hexdigest()[:16]
 
 
-def _record_date_display(date: dt.date | None, reason: RecordDateUnknownReason | None) -> str:
+def _record_date_display(
+    date: dt.date | None,
+    reason: RecordDateUnknownReason | None,
+    recurring_label: str | None = None,
+) -> str:
     if date is not None:
         return date.isoformat()
+    if recurring_label is not None:
+        return recurring_label
     if reason is not None:
         return f"不明({_RECORD_DATE_UNKNOWN_REASON_LABELS[reason]})"
     return "不明"
 
 
 def _confirmation_lines(recommendation: Recommendation) -> list[str]:
-    """確認事項(要求仕様16節): 権利確定情報は理由コード付き、配当比較は比較年度付きで表示する。"""
+    """確認事項(要求仕様16節): 権利確定情報は理由コード付き、配当比較は比較年度付きで表示する。
+
+    正確な次回日付が不明でも、決算期末等から推定できる周期パターン(recurring_label)が
+    あれば単なる「不明」の代わりに表示する(要求仕様レビュー対応)。
+    """
     dividend_record = _record_date_display(
-        recommendation.dividend_record_date, recommendation.dividend_record_date_unknown_reason
+        recommendation.dividend_record_date,
+        recommendation.dividend_record_date_unknown_reason,
+        recommendation.dividend_record_date_recurring_label,
     )
     benefit_record = _record_date_display(
-        recommendation.benefit_record_date, recommendation.benefit_record_date_unknown_reason
+        recommendation.benefit_record_date,
+        recommendation.benefit_record_date_unknown_reason,
+        recommendation.benefit_record_date_recurring_label,
     )
     lines = [
         "【確認事項】",
@@ -237,7 +251,164 @@ def _format_buy_message(recommendation: Recommendation, notification_type: Notif
     return "\n".join(lines)
 
 
+_BASIS_TYPE_LABELS: dict[str, str] = {
+    "FAIR_VALUE_THRESHOLD": "バリュエーション基準",
+    "PURCHASE_PRICE_RETURN_TARGET": "取得価格基準",
+    "DIVIDEND_YIELD_THRESHOLD": "配当利回り基準",
+    "TOTAL_YIELD_THRESHOLD": "総合利回り基準",
+    "TECHNICAL_PRICE_LEVEL": "テクニカル基準",
+    "USER_DEFINED_TARGET": "ユーザー設定目標",
+}
+
+
+def _basis_label(basis_type: object) -> str:
+    if basis_type is None:
+        return ""
+    return _BASIS_TYPE_LABELS.get(getattr(basis_type, "value", str(basis_type)), "")
+
+
+def _price_display(field: object) -> str:
+    price = getattr(field, "price", None)
+    low = getattr(field, "price_low", None)
+    high = getattr(field, "price_high", None)
+    if low is not None and high is not None:
+        return f"{low}〜{high}円"
+    return f"{price}円"
+
+
+def _fair_value_range_lines(recommendation: Recommendation) -> list[str]:
+    if (
+        recommendation.fair_value_bear is None
+        and recommendation.fair_value_neutral is None
+        and recommendation.fair_value_bull is None
+    ):
+        return []
+    lines = [
+        "適正価格レンジ:",
+        f"弱気：{recommendation.fair_value_bear}円 ／ "
+        f"中立：{recommendation.fair_value_neutral}円 ／ "
+        f"強気：{recommendation.fair_value_bull}円",
+    ]
+    used_methods = [m for m in recommendation.fair_value_methods if m.get("fair_value") is not None]
+    if used_methods:
+        lines.append("算出手法:")
+        for m in used_methods:
+            lines.append(f"・{m['method']}：{m['fair_value']}円")
+    if recommendation.fair_value_spread_ratio is not None:
+        lines.append(f"手法間乖離(強気/弱気): {recommendation.fair_value_spread_ratio:.2f}倍")
+    if recommendation.fair_value_overall_confidence is not None:
+        lines.append(f"適正価格の信頼度: {recommendation.fair_value_overall_confidence.value}")
+    return lines
+
+
+def _dividend_increase_lines(recommendation: Recommendation) -> list[str]:
+    lines: list[str] = []
+    years = recommendation.consecutive_actual_dividend_increase_years
+    if years is not None and years > 0:
+        lines.append(f"実績で{years}期連続増配")
+    if recommendation.forecast_dividend_increase is True:
+        rate = recommendation.forecast_dividend_increase_rate
+        rate_text = f"(前期比+{rate:.1f}%)" if rate is not None else ""
+        lines.append(f"今期も増配予想{rate_text}")
+    elif recommendation.forecast_dividend_increase is False:
+        lines.append("今期の予想配当は前期実績を下回る")
+    return lines
+
+
+def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
+    """WATCH(監視)判定専用のフォーマット(要求仕様レビュー対応)。
+
+    即時執行を意味する価格は表示しない。適正価格レンジ・保有継続を支持する要因・
+    直ちに利確しない理由・監視条件を明示する。
+    """
+    lines = [f"【割高水準を監視】{recommendation.stock_code} {recommendation.stock_name}", ""]
+    lines.append("保有状況:")
+    shares = recommendation.shares_at_recommendation
+    avg = recommendation.average_purchase_price_at_recommendation
+    price = recommendation.price_at_recommendation
+    lines.append(f"{shares}株／平均取得{avg}円")
+    lines.append(f"現在値{price}円")
+    if shares is not None and avg is not None:
+        gain = (price - avg) * shares
+        gain_pct = float(price / avg - 1) * 100 if avg > 0 else 0.0
+        lines.append(f"含み益{gain:,.0f}円({gain_pct:+.1f}%)")
+    lines.append("")
+    lines.append("判定:")
+    lines.append(recommendation.recommendation_type.value)
+    lines.append("")
+
+    fv_lines = _fair_value_range_lines(recommendation)
+    if fv_lines:
+        lines.extend(fv_lines)
+        lines.append("")
+
+    sp = recommendation.sell_prices
+    if sp is not None and sp.partial_profit_start_price is not None:
+        p = sp.partial_profit_start_price
+        excess_pct = (
+            float(p.price / recommendation.fair_value_neutral - 1) * 100
+            if recommendation.fair_value_neutral is not None
+            and recommendation.fair_value_neutral > 0
+            else None
+        )
+        lines.append("割高懸念:")
+        if excess_pct is not None:
+            lines.append(f"現在値は中立適正価格を{excess_pct:.1f}%上回る")
+        else:
+            lines.append(f"監視開始水準({_price_display(p)})に到達")
+        lines.append("")
+
+    if recommendation.counter_factors:
+        lines.append("保有継続を支持する要因:")
+        lines.extend(f"・{f}" for f in recommendation.counter_factors)
+        lines.append("")
+
+    if recommendation.not_yet_action_reasons:
+        lines.append("直ちに利確しない理由:")
+        lines.extend(f"・{r}" for r in recommendation.not_yet_action_reasons)
+        lines.append("")
+
+    if recommendation.next_review_conditions:
+        lines.append("監視条件:")
+        lines.extend(f"・{c}" for c in recommendation.next_review_conditions)
+        lines.append("")
+
+    if sp is not None and sp.full_profit_consideration_price is not None:
+        p = sp.full_profit_consideration_price
+        label = _basis_label(p.basis_type) or "参考"
+        lines.append(f"{label}の全株利確目標:")
+        full_gain_pct = float(p.price / avg - 1) * 100 if avg is not None and avg > 0 else None
+        suffix = f"(含み益+{full_gain_pct:.0f}%)" if full_gain_pct is not None else ""
+        lines.append(f"{_price_display(p)}{suffix}")
+        lines.append("")
+
+    dividend_record = _record_date_display(
+        recommendation.dividend_record_date,
+        recommendation.dividend_record_date_unknown_reason,
+        recommendation.dividend_record_date_recurring_label,
+    )
+    benefit_record = _record_date_display(
+        recommendation.benefit_record_date,
+        recommendation.benefit_record_date_unknown_reason,
+        recommendation.benefit_record_date_recurring_label,
+    )
+    lines.append("配当基準日:")
+    lines.append(dividend_record)
+    lines.append("")
+    lines.append("優待基準日:")
+    lines.append(benefit_record)
+    lines.append("")
+    lines.append("信頼度:")
+    lines.append(recommendation.confidence.value)
+    lines.append(f"通知ID: {recommendation.recommendation_id}")
+    lines.append(_DISCLAIMER)
+    return "\n".join(lines)
+
+
 def _format_profit_taking_message(recommendation: Recommendation) -> str:
+    if recommendation.recommendation_type == RecommendationType.WATCH:
+        return _format_watch_profit_taking_message(recommendation)
+
     lines = [
         f"【利確検討】{recommendation.stock_code} {recommendation.stock_name}",
         f"【保有状況】{recommendation.shares_at_recommendation}株 / "
@@ -248,31 +419,43 @@ def _format_profit_taking_message(recommendation: Recommendation) -> str:
     if recommendation.reasons:
         lines.append("利確を検討する理由: " + " / ".join(recommendation.reasons))
     if recommendation.counter_factors:
-        lines.append("直ちに売却としない理由: " + " / ".join(recommendation.counter_factors))
+        lines.append("反対材料: " + " / ".join(recommendation.counter_factors))
+    dividend_lines = _dividend_increase_lines(recommendation)
+    if dividend_lines:
+        lines.append("配当動向: " + " / ".join(dividend_lines))
+    fv_lines = _fair_value_range_lines(recommendation)
+    lines.extend(fv_lines)
     sp = recommendation.sell_prices
     next_decision_lines: list[str] = []
     if sp is not None:
         if sp.partial_profit_start_price:
             p = sp.partial_profit_start_price
             suffix = "(即時執行目安)" if p.basis.name == "IMMEDIATE_EXECUTION_REFERENCE" else ""
-            lines.append(f"一部利確開始価格: {p.price}円{suffix}")
+            label = _basis_label(p.basis_type)
+            lines.append(f"一部利確開始価格({label}): {_price_display(p)}{suffix}")
         if sp.recommended_limit_price:
             p = sp.recommended_limit_price
             suffix = "(即時執行目安)" if p.basis.name == "IMMEDIATE_EXECUTION_REFERENCE" else ""
-            lines.append(f"利確推奨価格(指値候補): {p.price}円{suffix}")
+            label = _basis_label(p.basis_type)
+            lines.append(f"利確推奨価格候補({label}): {_price_display(p)}{suffix}")
         elif recommendation.recommendation_type in (
             RecommendationType.PARTIAL_PROFIT_TAKE,
             RecommendationType.FULL_PROFIT_TAKE,
         ):
             lines.append("利確推奨価格(指値候補): 算出不能(総合利回り低下のみが根拠のため)")
         if sp.full_profit_consideration_price:
-            price = sp.full_profit_consideration_price.price
-            lines.append(f"全株利確検討価格(参考水準): {price}円")
-            next_decision_lines.append(f"全株利確検討価格({price}円)到達時に再検討")
+            p = sp.full_profit_consideration_price
+            label = _basis_label(p.basis_type)
+            lines.append(f"{label}の全株利確目標: {_price_display(p)}")
+            next_decision_lines.append(f"全株利確目標({_price_display(p)})到達時に再検討")
+        if sp.immediate_execution_price:
+            p = sp.immediate_execution_price
+            lines.append(f"即時執行目安価格: {_price_display(p)}")
         if sp.reevaluation_price_upside:
-            price = sp.reevaluation_price_upside.price
-            lines.append(f"再評価価格(上昇時): {price}円")
-            next_decision_lines.append(f"上昇時再評価価格({price}円)到達時に再検討")
+            p = sp.reevaluation_price_upside
+            label = _basis_label(p.basis_type)
+            lines.append(f"{label}の再評価水準(上昇時): {_price_display(p)}")
+            next_decision_lines.append(f"{label}の再評価水準({_price_display(p)})到達時に再検討")
     if next_decision_lines:
         lines.append("次の判断条件: " + " / ".join(next_decision_lines))
     if recommendation.next_earnings_date:

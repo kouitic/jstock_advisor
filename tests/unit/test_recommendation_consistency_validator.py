@@ -267,6 +267,28 @@ def test_review_with_immediate_execution_price_flagged() -> None:
     )
 
 
+def test_watch_with_immediate_partial_profit_start_price_flagged() -> None:
+    # partial_profit_start_priceがIMMEDIATE_EXECUTION_REFERENCEの場合も検出する
+    # (recommended_limit_priceのみを確認していた旧実装のギャップ、レビュー対応)。
+    sell_prices = SellPriceLevels(
+        partial_profit_start_price=PriceWithRationale(
+            price=Decimal("637"), rationale="x", basis=PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE
+        )
+    )
+    r = _recommendation(RecommendationType.WATCH, Decimal("637"), sell_prices=sell_prices)
+    result = validate_recommendation(r, _CONFIG)
+    assert any(v.check_name == "watch_recommends_immediate_sell" for v in result.violations)
+
+
+def test_watch_with_immediate_execution_price_field_flagged() -> None:
+    sell_prices = SellPriceLevels(
+        immediate_execution_price=PriceWithRationale(price=Decimal("637"), rationale="x")
+    )
+    r = _recommendation(RecommendationType.WATCH, Decimal("637"), sell_prices=sell_prices)
+    result = validate_recommendation(r, _CONFIG)
+    assert any(v.check_name == "watch_recommends_immediate_sell" for v in result.violations)
+
+
 def test_review_without_immediate_execution_price_not_flagged() -> None:
     r = _recommendation(RecommendationType.REVIEW, Decimal("1000"), sell_prices=SellPriceLevels())
     result = validate_recommendation(r, _CONFIG)

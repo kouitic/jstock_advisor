@@ -1,7 +1,10 @@
-"""利確判定サービス(要求仕様3節 profit_taking_service)。
+"""利確判定サービス(要求仕様3節 profit_taking_service、2026-07仕様レビュー対応)。
 
 保有銘柄についてstock_snapshot_serviceでデータを取得し、profit_takingドメイン
 ロジックで判定したうえでRecommendationスナップショットを生成する。
+
+信頼度はfair_value_methods_used_countだけで決め打ちせず、sell_signalと共通の
+confidence_scoring機構を使って算出する。
 """
 
 from __future__ import annotations
@@ -12,24 +15,37 @@ import uuid
 from dataclasses import dataclass
 
 from jstock_advisor.config.models import AppConfig
-from jstock_advisor.domain.entities.enums import AccountType, ConfidenceLevel, RecommendationType
+from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.entities.enums import (
+    AccountType,
+    RecommendationType,
+    RecordDateUnknownReason,
+)
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.financial_decomposition import (
     has_guidance_revision_disclosure,
     is_fundamentally_driven,
 )
+from jstock_advisor.domain.signals.confidence_scoring import (
+    ConfidenceFactors,
+    ConfidenceScoreResult,
+    compute_confidence,
+)
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
+    ProfitTakingResult,
     evaluate_profit_taking,
 )
-from jstock_advisor.interfaces.types import ShareholderBenefit
+from jstock_advisor.interfaces.types import DividendInfo, ShareholderBenefit
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+
+_MONTH_END_FISCAL_LABEL = "{month}月末"
 
 
 @dataclass(frozen=True)
@@ -39,6 +55,82 @@ class ProfitTakingOutcome:
     data_error: str | None
 
 
+def _dividend_record_date_recurring_label(
+    dividend: DividendInfo, fiscal_period_end: dt.date | None
+) -> str | None:
+    """配当基準日の正確な次回日付が不明でも、決算期末から推定される周期パターンを
+    ラベル化する(要求仕様レビュー対応: 単なる「不明」表示を避ける)。
+
+    日本企業の多くは期末配当(決算期末基準)と中間配当(決算期末の6ヶ月前基準)の
+    年2回、または期末配当のみ年1回の構成であるという一般的な慣行に基づく推定
+    であり、当該銘柄固有の確定情報ではないことを明示する。
+    """
+    if (
+        dividend.dividend_record_date_unknown_reason
+        != RecordDateUnknownReason.DATA_PROVIDER_MISSING
+    ):
+        return None
+    if fiscal_period_end is None:
+        return None
+    year_end_month = fiscal_period_end.month
+    interim_month = (year_end_month - 6 - 1) % 12 + 1
+    months = sorted({interim_month, year_end_month})
+    labels = "・".join(_MONTH_END_FISCAL_LABEL.format(month=m) for m in months)
+    return f"毎年{labels}(決算期末を基準とした一般的な慣行からの推定、確定情報ではない)"
+
+
+def _benefit_record_date_recurring_label(
+    benefit: ShareholderBenefit | None, fiscal_period_end: dt.date | None
+) -> str | None:
+    if benefit is None:
+        return None
+    if benefit.benefit_record_date_unknown_reason != RecordDateUnknownReason.DATA_PROVIDER_MISSING:
+        return None
+    if fiscal_period_end is None:
+        return None
+    year_end_month = fiscal_period_end.month
+    if benefit.frequency_per_year >= 2:
+        interim_month = (year_end_month - 6 - 1) % 12 + 1
+        months = sorted({interim_month, year_end_month})
+    else:
+        months = [year_end_month]
+    labels = "・".join(_MONTH_END_FISCAL_LABEL.format(month=m) for m in months)
+    return f"毎年{labels}(決算期末を基準とした一般的な慣行からの推定、確定情報ではない)"
+
+
+def _build_next_review_conditions(
+    result: ProfitTakingResult, next_earnings_date: dt.date | None
+) -> list[str]:
+    conditions: list[str] = []
+    sp = result.sell_prices
+    if sp.recommended_limit_price is not None:
+        p = sp.recommended_limit_price
+        if p.price_low is not None and p.price_high is not None:
+            conditions.append(f"{p.price_low}〜{p.price_high}円到達時に一部利確の要否を再評価")
+        else:
+            conditions.append(f"{p.price}円到達時に一部利確の要否を再評価")
+    conditions.append("業績下方修正")
+    conditions.append("EPS成長率鈍化")
+    if next_earnings_date is not None:
+        conditions.append(f"次回決算({next_earnings_date})後に適正価格を再計算")
+    else:
+        conditions.append("次回決算後に適正価格を再計算")
+    return conditions
+
+
+def _build_not_yet_action_reasons(result: ProfitTakingResult, config: AppConfig) -> list[str]:
+    reasons: list[str] = []
+    t = config.profit_taking.thresholds
+    if result.final_action in (RecommendationType.WATCH, RecommendationType.HOLD):
+        reasons.append(f"含み益率は一部利確基準({t.unrealized_gain_partial_pct:.0f}%)未満")
+    if result.fair_value_used_as_sole_strong_basis:
+        reasons.append(
+            "適正価格モデルの手法間一致度・強気適正価格との関係が強い確信の水準に達していない"
+        )
+    reasons.append("適正価格モデルには手法間のばらつき等の不確実性がある")
+    return reasons
+
+
 class ProfitTakingService:
     def __init__(
         self,
@@ -46,14 +138,66 @@ class ProfitTakingService:
         config: AppConfig,
         audit_service: AuditService | None = None,
         rule_version_service: RuleVersionService | None = None,
+        business_calendar: BusinessCalendar | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
         self._audit = audit_service or AuditService()
         self._rule_version_service = rule_version_service or RuleVersionService()
+        self._calendar = business_calendar or BusinessCalendar.from_config(config.holiday_calendar)
 
     def _active_rule_version(self) -> str:
         return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
+
+    def _fair_value_reflects_latest_earnings(self, snapshot: StockSnapshot) -> bool | None:
+        """適正価格算出の入力が最新決算を反映しているかの簡易判定(要求仕様レビュー対応)。
+
+        手法別の入力日付を個別に厳密照合する手段が無いため、決算期末
+        (fiscal_period_end)が一定期間内(データ鮮度の許容日数を年換算した目安)で
+        あることを代理指標とする。fiscal_period_endが取得できない場合は判定不能。
+        """
+        if not snapshot.fair_value_range.methods_used:
+            return None
+        fiscal_period_end = snapshot.financial.fiscal_period_end
+        if fiscal_period_end is None:
+            return None
+        age_days = (snapshot.data_fetched_at.date() - fiscal_period_end).days
+        return 0 <= age_days <= 400
+
+    def _compute_confidence(
+        self, result: ProfitTakingResult, snapshot: StockSnapshot, now: dt.datetime
+    ) -> ConfidenceScoreResult:
+        fv_range = snapshot.fair_value_range
+        spread_ratio = (
+            float(fv_range.bull / fv_range.bear)
+            if fv_range.bear is not None and fv_range.bull is not None and fv_range.bear > 0
+            else None
+        )
+        days_to_earnings = None
+        if snapshot.next_earnings_date is not None:
+            days_to_earnings = self._calendar.business_days_between(
+                now.date(), snapshot.next_earnings_date
+            )
+        is_benefit_eligible = snapshot.benefit is not None
+        benefit_value_missing = is_benefit_eligible and snapshot.annual_benefit_value is None
+
+        factors = ConfidenceFactors(
+            data_freshness_days=(now - snapshot.data_fetched_at).days,
+            fair_value_methods_used_count=len(fv_range.methods_used),
+            fair_value_method_spread_ratio=spread_ratio,
+            days_to_next_earnings_business_days=days_to_earnings,
+            latest_quarter_fetched=bool(snapshot.quarterly_operating_incomes),
+            record_date_known=(
+                snapshot.dividend.dividend_record_date is not None
+                or (snapshot.benefit is not None and snapshot.benefit.benefit_ex_date is not None)
+            ),
+            key_metric_missing=snapshot.fair_value is None,
+            one_time_factors_identified=is_fundamentally_driven(snapshot.cashflow_decomposition),
+            counter_factors_evaluated=True,
+            benefit_eligible_but_value_unavailable=benefit_value_missing,
+            fair_value_is_sole_strong_basis=result.fair_value_used_as_sole_strong_basis,
+        )
+        return compute_confidence(factors, self._config.confidence)
 
     def analyze(
         self, holding: Holding, now: dt.datetime, snapshot: StockSnapshot | None = None
@@ -106,15 +250,15 @@ class ProfitTakingService:
             fair_value_range=snapshot.fair_value_range,
             momentum=snapshot.momentum,
             dividend_comparison_outcome=snapshot.dividend.dividend_comparison_outcome,
-            cashflow_fundamentally_driven=is_fundamentally_driven(
-                snapshot.cashflow_decomposition
-            ),
+            cashflow_fundamentally_driven=is_fundamentally_driven(snapshot.cashflow_decomposition),
             guidance_revision_disclosed=has_guidance_revision_disclosure(snapshot.disclosures),
             severe_earnings_decline=snapshot.severe_earnings_decline,
             profit_target_price=holding.profit_target_price,
             profit_target_rate=holding.profit_target_rate,
+            fair_value_reflects_latest_earnings=self._fair_value_reflects_latest_earnings(snapshot),
         )
 
+        is_benefit_eligible = snapshot.benefit is not None
         result = evaluate_profit_taking(
             current_price=snapshot.current_price,
             average_purchase_price=holding.average_purchase_price,
@@ -128,7 +272,14 @@ class ProfitTakingService:
             mitigating_inputs=mitigating_inputs,
             config=self._config.profit_taking,
             condition_inputs=condition_inputs,
+            annual_benefit_value_at_min_lot=snapshot.annual_benefit_value,
+            benefit_min_shares_required=(
+                snapshot.benefit.min_shares_required if snapshot.benefit is not None else None
+            ),
+            is_benefit_eligible=is_benefit_eligible,
         )
+
+        confidence_result = self._compute_confidence(result, snapshot, now)
 
         self._audit.record(
             decision_type="profit_taking",
@@ -163,6 +314,9 @@ class ProfitTakingService:
                 "mitigating_factors_applied": result.mitigating_factors_applied,
                 "unrealized_pnl_pct": result.pnl.unrealized_pnl_pct,
                 "total_return_pct": result.pnl.total_return_pct,
+                "confidence": confidence_result.level.value,
+                "confidence_score": confidence_result.score,
+                "confidence_reasons": confidence_result.reasons_not_high,
             },
             data_sources=list(snapshot.data_sources),
             rule_version=self._active_rule_version(),
@@ -183,12 +337,41 @@ class ProfitTakingService:
         if result.recommendation_type == RecommendationType.HOLD:
             return ProfitTakingOutcome(holding.stock_code, None, None)
 
+        dividend = snapshot.dividend
+        forecast_increase = None
+        forecast_increase_rate = None
+        if (
+            dividend.forecast_annual_dividend_per_share is not None
+            and dividend.actual_annual_dividend_per_share is not None
+            and dividend.actual_annual_dividend_per_share > 0
+        ):
+            forecast_increase = (
+                dividend.forecast_annual_dividend_per_share
+                > dividend.actual_annual_dividend_per_share
+            )
+            forecast_increase_rate = (
+                float(
+                    dividend.forecast_annual_dividend_per_share
+                    / dividend.actual_annual_dividend_per_share
+                    - 1
+                )
+                * 100
+            )
+
+        fv_range = snapshot.fair_value_range
+        spread_ratio = (
+            float(fv_range.bull / fv_range.bear)
+            if fv_range.bear is not None and fv_range.bull is not None and fv_range.bear > 0
+            else None
+        )
+
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
             stock_code=holding.stock_code,
             stock_name=snapshot.financial.stock_name or holding.stock_name,
             recommended_at=now,
             recommendation_type=result.recommendation_type,
+            raw_recommendation_type=result.fundamental_action,
             sell_prices=result.sell_prices,
             price_at_recommendation=snapshot.current_price,
             average_purchase_price_at_recommendation=holding.average_purchase_price,
@@ -203,7 +386,7 @@ class ProfitTakingService:
                 f"含み損益率{result.pnl.unrealized_pnl_pct:.1f}%",
                 f"配当・優待込み累計利益率{result.pnl.total_return_pct:.1f}%",
             ],
-            confidence=_confidence_for(snapshot.fair_value_methods_used_count),
+            confidence=confidence_result.level,
             next_earnings_date=snapshot.next_earnings_date,
             dividend_record_date=snapshot.dividend.dividend_record_dates[0]
             if snapshot.dividend.dividend_record_dates
@@ -219,18 +402,43 @@ class ProfitTakingService:
                 "total_yield_strong_caution_pct": (
                     self._config.profit_taking.thresholds.total_yield_strong_caution_pct
                 ),
+                "independent_condition_count": result.independent_condition_count,
+                "fair_value_used_as_sole_strong_basis": (
+                    result.fair_value_used_as_sole_strong_basis
+                ),
             },
             data_sources=list(snapshot.data_sources),
+            next_review_conditions=_build_next_review_conditions(
+                result, snapshot.next_earnings_date
+            ),
+            not_yet_action_reasons=_build_not_yet_action_reasons(result, self._config),
+            fair_value_bear=fv_range.bear,
+            fair_value_neutral=fv_range.neutral,
+            fair_value_bull=fv_range.bull,
+            fair_value_overall_confidence=fv_range.overall_confidence,
+            fair_value_methods=[
+                {
+                    "method": m.method,
+                    "fair_value": str(m.fair_value) if m.fair_value is not None else None,
+                    "confidence": m.confidence.value,
+                    "exclusion_reason": m.exclusion_reason,
+                }
+                for m in (fv_range.methods_used + fv_range.methods_excluded)
+            ],
+            fair_value_spread_ratio=spread_ratio,
+            consecutive_actual_dividend_increase_years=(
+                dividend.consecutive_dividend_increase_years
+            ),
+            forecast_dividend_increase=forecast_increase,
+            forecast_dividend_increase_rate=forecast_increase_rate,
+            dividend_record_date_recurring_label=_dividend_record_date_recurring_label(
+                dividend, snapshot.financial.fiscal_period_end
+            ),
+            benefit_record_date_recurring_label=_benefit_record_date_recurring_label(
+                snapshot.benefit, snapshot.financial.fiscal_period_end
+            ),
         )
         return ProfitTakingOutcome(holding.stock_code, recommendation, None)
-
-
-def _confidence_for(fair_value_methods_used_count: int) -> ConfidenceLevel:
-    if fair_value_methods_used_count >= 3:
-        return ConfidenceLevel.HIGH
-    if fair_value_methods_used_count >= 1:
-        return ConfidenceLevel.MEDIUM
-    return ConfidenceLevel.LOW
 
 
 def _is_long_term_benefit_imminent(

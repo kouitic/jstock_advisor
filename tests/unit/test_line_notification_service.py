@@ -314,7 +314,7 @@ def test_clean_full_profit_take_is_sent_normally(service_and_repos) -> None:
     assert sent is True
     assert len(client.sent) == 1
     assert "データ品質アラート" not in client.sent[0]
-    assert "全株利確検討価格" in client.sent[0]
+    assert "全株利確目標" in client.sent[0]
     assert f"通知ID: {rec.recommendation_id}" in client.sent[0]
 
 
