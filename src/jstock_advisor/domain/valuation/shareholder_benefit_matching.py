@@ -26,13 +26,19 @@ def compute_holding_duration_months(first_purchase_date: dt.date, as_of: dt.date
     暦月単位で、first_purchase_dateの「日」を迎えるまでは1ヶ月とカウントしない
     (例: 1/31購入→3/1時点はまだ1ヶ月; 3/31時点で2ヶ月)。as_ofがfirst_purchase_date
     より前の場合は0を返す。
+
+    first_purchase_dateが29〜31日の場合、対象月の日数がそれより少なければ
+    (例: 4月30日、2月28日)その月の末日を「その月の応当日」とみなす
+    (例: 1/31購入は4/30時点で3ヶ月経過、2/29購入は翌年2/28時点で12ヶ月経過。
+    月の日数分だけ機械的に1日ずれてカウントが遅れることを防ぐ)。
     """
     if as_of < first_purchase_date:
         return 0
     months = (as_of.year - first_purchase_date.year) * 12 + (
         as_of.month - first_purchase_date.month
     )
-    if as_of.day < first_purchase_date.day:
+    anniversary_day = min(first_purchase_date.day, calendar.monthrange(as_of.year, as_of.month)[1])
+    if as_of.day < anniversary_day:
         months -= 1
     return max(months, 0)
 
@@ -79,9 +85,14 @@ def select_effective_benefit_details(
 def _qualifies(detail: BenefitDetail, shares_held: int, holding_duration_months: int) -> bool:
     if detail.min_shares_for_tier > shares_held:
         return False
-    return not (
+    if (
         detail.long_term_holding_condition_months is not None
         and detail.long_term_holding_condition_months > holding_duration_months
+    ):
+        return False
+    return not (
+        detail.long_term_holding_condition_max_months is not None
+        and holding_duration_months > detail.long_term_holding_condition_max_months
     )
 
 

@@ -70,6 +70,7 @@ class ShareholderBenefitRegistryService:
         min_shares_for_tier: int,
         estimated_value: Decimal | None = None,
         long_term_holding_condition_months: int | None = None,
+        long_term_holding_condition_max_months: int | None = None,
         tier_group: str | None = None,
         benefit_record_dates: list[dt.date] | None = None,
         benefit_record_date_recurrence_months: list[int] | None = None,
@@ -95,6 +96,7 @@ class ShareholderBenefitRegistryService:
                     estimated_value=estimated_value,
                     min_shares_for_tier=min_shares_for_tier,
                     long_term_holding_condition_months=long_term_holding_condition_months,
+                    long_term_holding_condition_max_months=long_term_holding_condition_max_months,
                     tier_group=tier_group,
                 )
             ],
@@ -118,6 +120,7 @@ class ShareholderBenefitRegistryService:
         min_shares_for_tier: int,
         estimated_value: Decimal | None = None,
         long_term_holding_condition_months: int | None = None,
+        long_term_holding_condition_max_months: int | None = None,
         tier_group: str | None = None,
         now: dt.datetime | None = None,
     ) -> ShareholderBenefit:
@@ -133,6 +136,7 @@ class ShareholderBenefitRegistryService:
             estimated_value=estimated_value,
             min_shares_for_tier=min_shares_for_tier,
             long_term_holding_condition_months=long_term_holding_condition_months,
+            long_term_holding_condition_max_months=long_term_holding_condition_max_months,
             tier_group=tier_group,
         )
         updated = existing.model_copy(

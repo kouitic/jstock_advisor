@@ -107,7 +107,12 @@ class YFinanceDividendDataProvider:
             comparison = classify_dividend_change(
                 stock_code=stock_code,
                 source_dps_raw=actual_annual,
-                source_date=dt.date(actual_fiscal_year, 12, 31),
+                # actual_annualは_sum_by_calendar_yearの時点で各支払いごとに
+                # 既にself._now.date()基準へ分割調整済みのため、ここでの
+                # source_dateもself._now.date()を渡す(実際の支払年の12/31を
+                # 渡すと、既に調整済みの値へさらに分割係数を掛けてしまい、
+                # 実際の減配が見かけ上の増配として隠れるバグになる)。
+                source_date=self._now.date(),
                 source_period_label=f"{actual_fiscal_year}年(実績)",
                 target_dps_raw=forecast_annual,
                 target_date=self._now.date(),

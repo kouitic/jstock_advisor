@@ -9,7 +9,6 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
-from jstock_advisor.domain.entities.valuation import FairValueRange
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
 
 _NOW = dt.datetime(2026, 7, 27, tzinfo=dt.UTC)
@@ -133,23 +132,29 @@ def test_reevaluation_unreasonably_above_full_take_flagged() -> None:
 
 
 def test_low_fair_value_confidence_full_take_flagged() -> None:
+    # 通知直前のvalidate_recommendation呼び出し元は永続化されたRecommendationしか
+    # 持たないため、fair_value_overall_confidenceはRecommendation自身のフィールド
+    # から読む(以前はFairValueRangeを別途渡す設計で、実際の呼び出し元では常に
+    # Noneになりチェックが無効化されていたバグの回帰テスト)。
+    r = _recommendation(
+        RecommendationType.FULL_PROFIT_TAKE,
+        Decimal("6531"),
+        reasons=["最終適正価格を大幅に超過"],
+    ).model_copy(update={"fair_value_overall_confidence": ConfidenceLevel.LOW})
+    result = validate_recommendation(r, _CONFIG)
+    assert any(
+        v.check_name == "low_fair_value_confidence_full_take" for v in result.violations
+    )
+
+
+def test_low_fair_value_confidence_full_take_not_flagged_when_confidence_missing() -> None:
     r = _recommendation(
         RecommendationType.FULL_PROFIT_TAKE,
         Decimal("6531"),
         reasons=["最終適正価格を大幅に超過"],
     )
-    fv_range = FairValueRange(
-        bear=None,
-        neutral=None,
-        bull=None,
-        overall_confidence=ConfidenceLevel.LOW,
-        methods_used=[],
-        methods_excluded=[],
-        usable_for_trading_judgment=False,
-        unusable_reason="手法不足",
-    )
-    result = validate_recommendation(r, _CONFIG, fair_value_range=fv_range)
-    assert any(
+    result = validate_recommendation(r, _CONFIG)
+    assert not any(
         v.check_name == "low_fair_value_confidence_full_take" for v in result.violations
     )
 

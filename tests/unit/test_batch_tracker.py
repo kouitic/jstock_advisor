@@ -18,12 +18,15 @@ class _FakeTable:
         key = kwargs["Key"]["batch_id"]  # type: ignore[index]
         expr = kwargs["UpdateExpression"]  # type: ignore[index]
         values = kwargs["ExpressionAttributeValues"]  # type: ignore[index]
+        names = kwargs.get("ExpressionAttributeNames") or {}  # type: ignore[union-attr]
         item = self.items[key]
-        # "ADD field1 :val1, field2 :val2, ..." を簡易パースし、DynamoDBのADD意味論
-        # (数値は加算、文字列セットは和集合)を模倣する。
+        # "ADD #field1 :val1, #field2 :val2, ..." を簡易パースし、DynamoDBのADD意味論
+        # (数値は加算、文字列セットは和集合)を模倣する。#で始まる名前は
+        # ExpressionAttributeNames経由で実際の属性名に解決する(予約語対策の検証用)。
         assignments = expr.split("ADD ", 1)[1]  # type: ignore[union-attr]
         for pair in assignments.split(","):
-            field, placeholder = pair.strip().split()
+            field_ref, placeholder = pair.strip().split()
+            field = names[field_ref] if field_ref.startswith("#") else field_ref  # type: ignore[index]
             value = values[placeholder]  # type: ignore[index]
             if isinstance(value, set):
                 current = item.get(field, set())
@@ -91,6 +94,38 @@ def test_record_result_tracks_category_breakdown_and_detects_completion(
     assert p3.is_complete is True
     assert p3.failed_stock_codes == ["1234"]
     assert p3.data_insufficient_stock_codes == []
+
+
+def test_record_result_never_uses_raw_category_name_in_update_expression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DynamoDBの予約語(例: "hold")対策として、UpdateExpressionには常に
+    ExpressionAttributeNamesのプレースホルダ(#...)のみを使い、カテゴリ名を
+    直書きしないことを保証する回帰テスト(hold単体を通すだけでは、たまたま
+    "hold"以外の予約語が将来増えても検知できないため、全カテゴリを検証する)。
+    """
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    captured_exprs: list[str] = []
+
+    class _RecordingTable(_FakeTable):
+        def update_item(self, **kwargs: object) -> dict[str, object]:
+            captured_exprs.append(kwargs["UpdateExpression"])  # type: ignore[arg-type]
+            return super().update_item(**kwargs)
+
+    table = _RecordingTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
+
+    batch_tracker.start_batch("batch-1", len(SUMMARY_CATEGORIES), _NOW)
+    for category in SUMMARY_CATEGORIES:
+        batch_tracker.record_result("batch-1", category, stock_code="1234")
+
+    for category in SUMMARY_CATEGORIES:
+        for expr in captured_exprs:
+            assert category not in expr.replace(f"#{category}", ""), (
+                f"category '{category}' appears unaliased in UpdateExpression: {expr}"
+            )
 
 
 def test_record_result_accumulates_stock_codes_across_calls(

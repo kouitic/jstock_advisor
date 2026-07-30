@@ -427,7 +427,13 @@ def _estimate_portfolio_totals(
     total_acquisition_cost = sum((h.total_purchase_amount for h in holdings), start=Decimal("0"))
     total_market_value: Decimal | None = Decimal("0")
     for holding in holdings:
-        snap = providers.market_data.get_latest_price(holding.stock_code)
+        try:
+            snap = providers.market_data.get_latest_price(holding.stock_code)
+        except Exception:  # noqa: BLE001 - 1銘柄の株価取得エラーでバッチ全体を落とさない
+            logger.exception(
+                "portfolio total estimation: price fetch failed stock_code=%s", holding.stock_code
+            )
+            snap = None
         if snap is None:
             total_market_value = None
             continue
