@@ -1,0 +1,15 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "jstock-advisor"
+resolve_s3 = true
+s3_prefix = "jstock-advisor"
+region = "ap-northeast-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+parameter_overrides = "TablePrefix=\"jstock\" EdinetApiKeySecretArn=\"arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:jstock/edinet-api-key-XXXXXX\" LineChannelAccessTokenSecretArn=\"arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:jstock/line-channel-access-token-XXXXXX\" LineUserIdSecretArn=\"arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:jstock/line-user-id-XXXXXX\" LineChannelSecretSecretArn=\"arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:jstock/line-channel-secret-XXXXXX\""
+image_repositories = []
+
+[default.global.parameters]
+region = "ap-northeast-1"
