@@ -442,6 +442,7 @@ class BuySignalService:
             data_quality_warning=data_quality_warning,
             earnings_date_status=earnings_date_status,
             excluded_outlier_count=excluded_outlier_count,
+            outlier_filter_blocking_reason=valuation_summary.outlier_filter_blocking_reason,
         )
         buy_price_reliability = reliability_result.reliability
 

@@ -288,6 +288,28 @@ class ScheduleConfig(StrictModel):
 # --- notification_rules.yaml --------------------------------------------------
 
 
+class BuyCandidatesNotificationConfig(StrictModel):
+    """BUY候補バッチ専用の通知設定(BUYパイプライン第3次修正2026-07で追加)。
+
+    notify_data_errors: 個別銘柄のデータ取得エラーをLINEへ個別送信するか
+    (既定false。「今日買える銘柄だけを通知する」方針のため、データ取得エラーは
+    CloudWatch警告ログ+バッチサマリーの内訳件数のみとし、個別LINE送信はしない)。
+    """
+
+    notify_data_errors: bool
+
+
+class OperationsNotificationConfig(StrictModel):
+    """運用障害通知の設定(BUYパイプライン第3次修正2026-07で追加)。
+
+    notify_batch_failure: バッチ全体が異常終了した場合の運用向け通知を
+    行うかどうか。BUY候補の個別データ取得エラー(buy_candidates.notify_data_errors)
+    とは目的が異なるため、意図的に別設定として分離している。
+    """
+
+    notify_batch_failure: bool
+
+
 class NotificationRulesConfig(StrictModel):
     version: int
     resend_after_days: int
@@ -297,6 +319,8 @@ class NotificationRulesConfig(StrictModel):
     # 0件の場合、原則としてバッチ完了サマリー自体をLINEへ送らない
     # (運用確認のため送りたい場合のみtrueにする) ---
     send_empty_summary: bool
+    buy_candidates: BuyCandidatesNotificationConfig
+    operations: OperationsNotificationConfig
 
 
 # --- data_validation_rules.yaml -------------------------------------------

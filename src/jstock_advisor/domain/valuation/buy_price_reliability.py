@@ -34,6 +34,7 @@ def determine_buy_price_reliability(
     data_quality_warning: bool,
     earnings_date_status: EarningsDateStatus | None,
     excluded_outlier_count: int,
+    outlier_filter_blocking_reason: str | None = None,
 ) -> BuyPriceReliabilityResult:
     """要求仕様6節の判定基準。
 
@@ -44,6 +45,15 @@ def determine_buy_price_reliability(
         該当した場合にLOWとする(業種別モデル未適用は現状すべての業種で
         常にTrueのため、単独では発火条件に数えない — さもないと毎回LOWに
         なってしまう)。
+
+    --- BUYパイプライン第3次修正(2026-07)で追加 ---
+    outlier_filter_blocking_reason(valuation_methods.py::apply_outlier_filters()
+    が外れ値除外の結果を採用できず除外前へフォールバックした場合に設定される)
+    がNoneでない場合、(a)と同様に単独でLOWとする。除外前の全方式をそのまま
+    使っているため、methods_used_countだけでは「除外が破綻した」事実が
+    見えなくなる(例: 3方式が互いを外れ値とみなし合い全滅した場合、
+    フォールバック後のmethods_used_countは3のままでTOO_FEW_VALUATION_METHODS
+    が発火しない)ため、この明示的なシグナルで確実にLOWへ倒す。
     """
     concerns: list[str] = []
 
@@ -67,9 +77,15 @@ def determine_buy_price_reliability(
         concerns.append("STALE_EARNINGS_DATE")
     if excluded_outlier_count >= 1:
         concerns.append("VALUATION_OUTLIER_EXCLUDED")
+    if outlier_filter_blocking_reason is not None:
+        concerns.append(outlier_filter_blocking_reason)
 
     secondary_concerns = [c for c in concerns if c != "ENTRY_MARGIN_EXCEEDS_CAP"]
-    is_low = exceeds_entry_cap or len(secondary_concerns) >= _MIN_CONCERNS_FOR_LOW
+    is_low = (
+        exceeds_entry_cap
+        or outlier_filter_blocking_reason is not None
+        or len(secondary_concerns) >= _MIN_CONCERNS_FOR_LOW
+    )
 
     return BuyPriceReliabilityResult(
         reliability=BuyPriceReliability.LOW if is_low else BuyPriceReliability.OK,

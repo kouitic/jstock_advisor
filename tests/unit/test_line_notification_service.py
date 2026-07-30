@@ -895,6 +895,70 @@ def test_evaluate_notification_status_allows_buy_family_actions(
     assert outcome.status == NotificationStatus.SENT
 
 
+def _alert_stub(rec: Recommendation):
+    from jstock_advisor.domain.entities.data_quality_alert import DataQualityAlert
+
+    return DataQualityAlert(
+        stock_code=rec.stock_code,
+        stock_name=rec.stock_name,
+        detected_at=_NOW,
+        process="notify_recommendation",
+        contradictions=["[test] テスト用の矛盾"],
+        suppressed_values={},
+        recalculation_result=None,
+        action_required=True,
+        recommended_action="要確認",
+    )
+
+
+def test_evaluate_notification_status_buy_candidate_batch_suppresses_manual_review_line(
+    service_and_repos, monkeypatch
+) -> None:
+    """BUY_CANDIDATE_BATCHコンテキストでは、データ品質アラートがrequires_manual_review
+    相当であっても、notify_manual_review_requiredによるLINE送信は行わない
+    (BUYパイプライン第3次修正2026-07)。data_quality_blocked=Trueは維持する
+    (異常自体は_check_data_quality内で監査ログへ記録済み)。
+    """
+    from jstock_advisor.domain.entities.enums import NotificationContext
+
+    service, repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.BUY)
+    repo.save(rec)
+    monkeypatch.setattr(
+        service, "_check_data_quality", lambda *a, **kw: (_alert_stub(rec), True)
+    )
+
+    outcome = service.evaluate_notification_status(
+        rec, _NOW, context=NotificationContext.BUY_CANDIDATE_BATCH
+    )
+
+    assert outcome.status == NotificationStatus.NOT_REQUIRED
+    assert outcome.sent is False
+    assert outcome.data_quality_blocked is True
+    assert client.sent == []
+
+
+def test_evaluate_notification_status_default_context_still_sends_manual_review_line(
+    service_and_repos, monkeypatch
+) -> None:
+    """DEFAULT/HOLDING_REVIEWコンテキスト(SELL・保有銘柄レビュー系)では、
+    要手動確認LINEの安全弁は従来通り動作する(抑止対象はBUY_CANDIDATE_BATCHのみ)。
+    """
+    service, repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.BUY)
+    repo.save(rec)
+    monkeypatch.setattr(
+        service, "_check_data_quality", lambda *a, **kw: (_alert_stub(rec), True)
+    )
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+
+    assert outcome.data_quality_blocked is True
+    assert outcome.sent is True
+    assert len(client.sent) == 1
+    assert "【要手動確認】" in client.sent[0]
+
+
 def test_notify_buy_candidates_digest_sends_one_message_for_multiple_winners(
     service_and_repos,
 ) -> None:
@@ -1003,3 +1067,80 @@ def test_notify_batch_summary_default_still_sends_for_non_buy_callers(
 
     assert sent is True
     assert len(client.sent) == 1
+
+
+# --- BUYパイプライン第3次修正(2026-07): 採用済み安全余裕理由のみ表示 ------------
+
+
+def test_buy_candidate_message_shows_only_adopted_margin_adjustments() -> None:
+    """カテゴリ内で不採用(superseded_by設定あり)になった安全余裕調整は、LINE本文の
+    「必要安全余裕を拡大した理由」には表示しない(BUYパイプライン第3次修正2026-07)。
+    採用済み(superseded_by=None)のもののみ表示する。
+    """
+    from decimal import Decimal as _Decimal
+
+    from jstock_advisor.domain.entities.common import MarginAdjustment
+    from jstock_advisor.domain.entities.enums import MarginRiskCategory
+
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.BUY).model_copy(
+        update={
+            "margin_adjustments": [
+                MarginAdjustment(
+                    code="cyclical_industry",
+                    adjustment=_Decimal("0.05"),
+                    reason="景気循環業種のため",
+                    category=MarginRiskCategory.INDUSTRY_AND_BUSINESS,
+                    superseded_by=None,
+                ),
+                MarginAdjustment(
+                    code="major_customer_dependency",
+                    adjustment=_Decimal("0.03"),
+                    reason="主要顧客への依存度が高いため",
+                    category=MarginRiskCategory.INDUSTRY_AND_BUSINESS,
+                    superseded_by="cyclical_industry",
+                ),
+                MarginAdjustment(
+                    code="data_quality_warning",
+                    adjustment=_Decimal("0.05"),
+                    reason="データ品質に懸念があるため",
+                    category=MarginRiskCategory.DATA_QUALITY,
+                    superseded_by=None,
+                ),
+            ]
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "必要安全余裕を拡大した理由" in message
+    assert "・景気循環業種のため" in message
+    assert "・データ品質に懸念があるため" in message
+    assert "・主要顧客への依存度が高いため" not in message
+
+
+def test_buy_candidate_message_omits_margin_line_when_all_adjustments_superseded() -> None:
+    """全ての調整が不採用(superseded_by設定あり)の場合、「必要安全余裕を拡大した
+    理由」の行自体を表示しない(空の見出しだけ出すことを避ける)。
+    """
+    from decimal import Decimal as _Decimal
+
+    from jstock_advisor.domain.entities.common import MarginAdjustment
+    from jstock_advisor.domain.entities.enums import MarginRiskCategory
+
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.BUY).model_copy(
+        update={
+            "margin_adjustments": [
+                MarginAdjustment(
+                    code="major_customer_dependency",
+                    adjustment=_Decimal("0.03"),
+                    reason="主要顧客への依存度が高いため",
+                    category=MarginRiskCategory.INDUSTRY_AND_BUSINESS,
+                    superseded_by="cyclical_industry",
+                ),
+            ]
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "必要安全余裕を拡大した理由" not in message

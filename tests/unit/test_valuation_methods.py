@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.enums import ConfidenceLevel
+from jstock_advisor.domain.entities.enums import BuyPriceReliability, ConfidenceLevel
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 from jstock_advisor.domain.valuation.valuation_methods import (
     apply_dcf_divergence_filter,
@@ -93,7 +93,8 @@ def test_apply_outlier_filters_excludes_far_below_median() -> None:
         _result("historical_range", "1169"),
         _result("dcf", "115.31", confidence=ConfidenceLevel.MEDIUM),
     ]
-    filtered = apply_outlier_filters(results, current_price=Decimal("1675"))
+    outlier_result = apply_outlier_filters(results, current_price=Decimal("1675"))
+    filtered = outlier_result.results
     dcf_result = next(r for r in filtered if r.method == "dcf")
     assert dcf_result.applicable is False
     assert dcf_result.fair_value is None
@@ -101,6 +102,8 @@ def test_apply_outlier_filters_excludes_far_below_median() -> None:
     assert dcf_result.exclusion_detail.code == "EXTREME_LOW_RELATIVE_TO_CURRENT_PRICE"
     others = [r for r in filtered if r.method != "dcf"]
     assert all(r.applicable for r in others)
+    assert outlier_result.reliability == BuyPriceReliability.OK
+    assert outlier_result.blocking_reason is None
 
 
 def test_apply_outlier_filters_keeps_close_values() -> None:
@@ -109,14 +112,139 @@ def test_apply_outlier_filters_keeps_close_values() -> None:
         _result("per", "105"),
         _result("pbr", "95"),
     ]
-    filtered = apply_outlier_filters(results, current_price=Decimal("100"))
-    assert all(r.applicable for r in filtered)
+    outlier_result = apply_outlier_filters(results, current_price=Decimal("100"))
+    assert all(r.applicable for r in outlier_result.results)
 
 
 def test_apply_outlier_filters_noop_when_fewer_than_2_applicable() -> None:
     results = [_result("target_yield", "10")]
-    filtered = apply_outlier_filters(results, current_price=Decimal("1000"))
-    assert filtered[0].applicable is True
+    outlier_result = apply_outlier_filters(results, current_price=Decimal("1000"))
+    assert outlier_result.results[0].applicable is True
+
+
+# --- BUYパイプライン第3次修正(2026-07): 最小方式数を3件に引き上げ ----------------
+
+
+def test_apply_outlier_filters_does_not_mutually_exclude_two_methods() -> None:
+    """有効な方式が2件しかない場合、外れ値検知そのものを行わない
+    (2件では互いが唯一の比較対象になり、双方を機械的に外れ値とみなし合って
+    全滅してしまう不具合を防ぐ)。methods_used_count<=2の低信頼シグナルは
+    既存のTOO_FEW_VALUATION_METHODSゲートに委ねる。
+    """
+    results = [_result("target_yield", "500"), _result("per", "1500")]
+    outlier_result = apply_outlier_filters(results)
+    assert outlier_result.excluded_count == 0
+    assert all(r.applicable for r in outlier_result.results)
+    assert outlier_result.remaining_count == 2
+    assert outlier_result.reliability == BuyPriceReliability.OK
+    assert outlier_result.blocking_reason is None
+
+
+def test_apply_outlier_filters_three_methods_all_excluded_falls_back_with_low_reliability() -> (
+    None
+):
+    """3方式が互いを極端な外れ値とみなし合い全滅するケース(38円・100円・2900円)。
+    中央値(100円)だけを機械的に「正しい」適正価格として採用してはならない
+    (=除外を採用せず、除外前の3件へフォールバックする)。この場合、
+    methods_used_countだけでは3のままになり低信頼を検出できないため、
+    blocking_reasonで明示的にLOWを立てる。
+    """
+    results = [
+        _result("target_yield", "38"),
+        _result("per", "100"),
+        _result("pbr", "2900"),
+    ]
+    outlier_result = apply_outlier_filters(results)
+    assert outlier_result.blocking_reason == "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER"
+    assert outlier_result.reliability == BuyPriceReliability.LOW
+    # 除外前へフォールバックしているため、3件とも引き続きapplicable=Trueのまま。
+    assert all(r.applicable for r in outlier_result.results)
+    assert {r.fair_value for r in outlier_result.results} == {
+        Decimal("38"),
+        Decimal("100"),
+        Decimal("2900"),
+    }
+
+
+def test_apply_outlier_filters_four_methods_excludes_only_high_outlier() -> None:
+    """4方式(1000/1050/1100/3000)のうち、3000のみが上方外れ値として除外され、
+    残り3件は影響を受けない。"""
+    results = [
+        _result("target_yield", "1000"),
+        _result("per", "1050"),
+        _result("pbr", "1100"),
+        _result("historical_range", "3000"),
+    ]
+    outlier_result = apply_outlier_filters(results)
+    excluded = [r for r in outlier_result.results if not r.applicable]
+    kept = [r for r in outlier_result.results if r.applicable]
+    assert {r.method for r in excluded} == {"historical_range"}
+    assert {r.fair_value for r in kept} == {Decimal("1000"), Decimal("1050"), Decimal("1100")}
+    assert outlier_result.blocking_reason is None
+    assert outlier_result.reliability == BuyPriceReliability.OK
+
+
+def test_apply_outlier_filters_four_methods_excludes_only_low_outlier() -> None:
+    """4方式(50/950/1000/1050)のうち、50のみが下方外れ値として除外され、
+    残り3件は影響を受けない。"""
+    results = [
+        _result("target_yield", "50"),
+        _result("per", "950"),
+        _result("pbr", "1000"),
+        _result("historical_range", "1050"),
+    ]
+    outlier_result = apply_outlier_filters(results)
+    excluded = [r for r in outlier_result.results if not r.applicable]
+    kept = [r for r in outlier_result.results if r.applicable]
+    assert {r.method for r in excluded} == {"target_yield"}
+    assert {r.fair_value for r in kept} == {Decimal("950"), Decimal("1000"), Decimal("1050")}
+    assert outlier_result.blocking_reason is None
+    assert outlier_result.reliability == BuyPriceReliability.OK
+
+
+def test_build_valuation_summary_propagates_outlier_filter_blocking_reason() -> None:
+    """外れ値除外が破綻してフォールバックした場合、build_valuation_summary()の
+    戻り値(FairValueRange)にもblocking_reasonが伝播する
+    (buy_signal_service.py側でdetermine_buy_price_reliability()へ渡すため)。
+    """
+    results = [
+        _result("target_yield", "38"),
+        _result("per", "100"),
+        _result("pbr", "2900"),
+    ]
+    summary = build_valuation_summary(results, "median", None, _USABILITY_CONFIG)
+    assert summary.outlier_filter_blocking_reason == "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER"
+
+
+def test_determine_buy_price_reliability_forces_low_on_outlier_filter_blocking_reason() -> None:
+    """outlier_filter_blocking_reasonが設定されている場合、他の懸念件数に
+    かかわらず単独でLOWとなることを確認する(明示的な低信頼シグナル)。
+    """
+    from jstock_advisor.domain.valuation.buy_price_reliability import (
+        determine_buy_price_reliability,
+    )
+    from jstock_advisor.domain.valuation.margin_of_safety import MarginOfSafetyResult
+
+    margin_result = MarginOfSafetyResult(
+        entry_margin=Decimal("0.20"),
+        standard_margin=Decimal("0.25"),
+        strong_margin=Decimal("0.30"),
+        entry_margin_before_cap=Decimal("0.20"),
+        adjustments=[],
+    )
+    result = determine_buy_price_reliability(
+        margin_result=margin_result,
+        maximum_entry_margin=0.30,
+        valuation_dispersion_ratio=1.1,
+        dispersion_medium_max=1.60,
+        methods_used_count=3,
+        data_quality_warning=False,
+        earnings_date_status=None,
+        excluded_outlier_count=0,
+        outlier_filter_blocking_reason="TOO_FEW_METHODS_AFTER_OUTLIER_FILTER",
+    )
+    assert result.reliability == BuyPriceReliability.LOW
+    assert "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER" in result.concerns
 
 
 def test_build_valuation_summary_separates_all_methods_from_decision_range() -> None:

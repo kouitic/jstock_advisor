@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
     BuyAction,
     DividendComparisonOutcome,
+    NotificationContext,
     NotificationStatus,
     NotificationType,
     RecommendationType,
@@ -339,10 +340,21 @@ def _buy_price_levels_line(recommendation: Recommendation) -> str | None:
 
 
 def _margin_adjustment_reasons_line(recommendation: Recommendation) -> str | None:
-    """必要安全余裕を拡大した主な理由(要求仕様8節)。内部値すべては表示しない。"""
-    if not recommendation.margin_adjustments:
+    """必要安全余裕を拡大した主な理由(要求仕様8節)。内部値すべては表示しない。
+
+    カテゴリ内で不採用(superseded_by設定あり)になった調整はLINE本文には表示しない
+    (監査ログには引き続きすべて保存される。BuySignalService.analyze()側の
+    self._audit.record()呼び出しはrecommendation.margin_adjustmentsをそのまま
+    渡しており、このフィルタは表示専用でaudit記録には影響しない)。
+    """
+    adopted_adjustments = [
+        adjustment
+        for adjustment in recommendation.margin_adjustments
+        if adjustment.superseded_by is None
+    ]
+    if not adopted_adjustments:
         return None
-    reasons = "\n".join(f"・{a.reason}" for a in recommendation.margin_adjustments)
+    reasons = "\n".join(f"・{a.reason}" for a in adopted_adjustments)
     return f"必要安全余裕を拡大した理由:\n{reasons}"
 
 
@@ -898,7 +910,10 @@ class LineNotificationService:
         return NotificationOutcome(status=NotificationStatus.SENT, sent=True)
 
     def evaluate_notification_status(
-        self, recommendation: Recommendation, now: dt.datetime
+        self,
+        recommendation: Recommendation,
+        now: dt.datetime,
+        context: NotificationContext = NotificationContext.DEFAULT,
     ) -> NotificationOutcome:
         """notify_recommendation_with_statusと同じ判定を行うが、実際の送信
         (send_recommendation_notification)は行わない(2026-07仕様追加: 買い候補の
@@ -919,6 +934,15 @@ class LineNotificationService:
         前にこのゲートを置くことで、BUY系以外のbuy_actionでは重い整合性検証・
         異常値検知を実行せず、要手動確認LINE送信(notify_manual_review_required)
         も発生させない(MANUAL_REVIEWはLINE通知しないという要求仕様6節と一致)。
+
+        --- BUYパイプライン第3次修正(2026-07)で追加 ---
+        context=BUY_CANDIDATE_BATCHの場合、データ品質アラートがrequires_manual_review
+        (要手動確認)相当であっても`notify_manual_review_required`によるLINE送信は
+        行わない(「今日、現在の株価で実際に購入条件を満たした銘柄だけを通知する」
+        というBUY候補バッチの方針を、要手動確認の安全弁が上書きしてしまうのを防ぐ)。
+        異常自体は`_check_data_quality`内で監査ログへ記録済みのため、ここでは
+        data_quality_blocked=Trueのみ返して黙って除外する。SELL/HOLDING_REVIEW/
+        DEFAULTでは従来通りLINE送信する。
         """
         if (
             recommendation.buy_action is not None
@@ -933,14 +957,15 @@ class LineNotificationService:
             recommendation, previous, notification_type, now
         )
         if alert is not None:
-            if requires_manual_review:
+            if requires_manual_review and context is not NotificationContext.BUY_CANDIDATE_BATCH:
                 sent = self.notify_manual_review_required(recommendation, alert, now)
                 return NotificationOutcome(
                     status=NotificationStatus.SENT if sent else NotificationStatus.NOT_REQUIRED,
                     sent=sent,
                     data_quality_blocked=True,
                 )
-            self.notify_data_quality_alert(alert, now)
+            if not requires_manual_review:
+                self.notify_data_quality_alert(alert, now)
             return NotificationOutcome(
                 status=NotificationStatus.NOT_REQUIRED, sent=False, data_quality_blocked=True
             )

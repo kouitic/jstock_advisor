@@ -19,19 +19,24 @@ EventBridge Scheduler経由で自動実行する薄いアダプタ。
 完了している)。各ワーカーはBuyAction判定が確定した時点で、購入候補
 (STRONG_BUY/BUY/SMALL_ENTRY)のみをランキング候補としてバッチトラッカーへ登録する
 (価格待ちは件数カウントのみ行い、送信対象のランキングには載せない)。全銘柄の
-処理が完了した時点(最後のワーカーが検知)で、購入候補ランキング上位
-config.notification.buy_candidate_max_notifications_per_run件についてのみ
-再通知抑止・データ品質チェックを実行し(要求仕様15節: 全銘柄一律ではなく上位N件
-だけを評価する)、条件を満たしたものだけを1通(長すぎる場合のみ複数通)にまとめて
-送信する。「優先順位の高いN件」という単一ランキングでの表現は行わない。
+処理が完了した時点(最後のワーカーが検知)で、購入候補ランキング順に1件ずつ
+再通知抑止・データ品質チェックを実行し(要求仕様15節)、条件を満たしたものを
+config.notification.buy_candidate_max_notifications_per_run件に達するまで、
+または全件評価し終えるまで繰り上げながら集める(BUYパイプライン第3次修正
+2026-07: 上位候補が抑止された場合に下位の適格候補を繰り上げず送信数が
+目標件数を割り込む不具合を修正)。条件を満たしたものだけを1通(長すぎる場合の
+み複数通)にまとめて送信する。「優先順位の高いN件」という単一ランキングでの
+表現は行わない。
 
 購入候補が1件も無い場合、config.notification.send_empty_summaryがfalseなら
 バッチ完了サマリー自体を送信しない(要求仕様16節: 無理に候補を作らず、
 何も無い日は通知しない)。
 
-個別のデータ取得エラーはLINEへ配信せず、全銘柄の処理が完了した時点で
-全体件数・正常件数・異常件数のサマリーを1通だけ送信する
-(batch_tracker.pyのDynamoDB原子カウンタで完了を検知する)。
+個別のデータ取得エラーは既定でLINEへ配信せず(config.notification.
+buy_candidates.notify_data_errorsで制御。BUYパイプライン第3次修正2026-07)、
+CloudWatch警告ログとバッチサマリーのdata_insufficient件数にのみ記録する。
+全銘柄の処理が完了した時点で全体件数・正常件数・異常件数のサマリーを1通だけ
+送信する(batch_tracker.pyのDynamoDB原子カウンタで完了を検知する)。
 """
 
 from __future__ import annotations
@@ -45,7 +50,11 @@ from typing import Any
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.enums import BuyAction, NotificationStatus
+from jstock_advisor.domain.entities.enums import (
+    BuyAction,
+    NotificationContext,
+    NotificationStatus,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     BatchProgress,
@@ -141,10 +150,29 @@ def _process_single_candidate(
     try:
         outcome = service.analyze(stock_code, now)
         if outcome.data_error:
+            # --- BUYパイプライン第3次修正(2026-07)。要求仕様: 個別のデータ取得
+            # エラーは購入候補通知パイプラインからLINE個別送信しない(既定)。
+            # CloudWatch警告ログとバッチ完了サマリーのdata_insufficient件数への
+            # 集計のみとする。監査ログへの記録はBuySignalService.analyze()側
+            # (snapshot is Noneの分岐)で既に完了している。運用上どうしても
+            # 個別のLINE通知が必要な場合のみ、config.notification.buy_candidates.
+            # notify_data_errorsをtrueにすることで有効化できる。
             item = WatchlistService().get_item(stock_code)
-            notification_service.notify_data_error(
-                stock_code, outcome.data_error, now, stock_name=item.stock_name if item else None
-            )
+            if config.notification.buy_candidates.notify_data_errors:
+                notification_service.notify_data_error(
+                    stock_code,
+                    outcome.data_error,
+                    now,
+                    stock_name=item.stock_name if item else None,
+                )
+            else:
+                name_part = f" {item.stock_name}" if item and item.stock_name else ""
+                logger.warning(
+                    "buy_candidate_data_error stock_code=%s%s message=%s",
+                    stock_code,
+                    name_part,
+                    outcome.data_error,
+                )
             category = "data_insufficient"
             result = {"stock_code": stock_code, "recommended": False, "notified": False}
         elif outcome.buy_action == BuyAction.EXCLUDED or outcome.recommendation is None:
@@ -202,10 +230,20 @@ def _finalize_batch(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
 ) -> None:
-    """全銘柄の処理完了を検知したワーカーが1回だけ呼ぶ。購入候補ランキング上位
-    N件についてのみ再通知抑止・データ品質チェックを行い(要求仕様15節ステップ7)、
-    条件を満たしたものだけを1通にまとめて送信する(要求仕様15節ステップ8)。
-    価格待ちはランキング・送信の対象外(件数のみバッチサマリーに反映する)。
+    """全銘柄の処理完了を検知したワーカーが1回だけ呼ぶ。購入候補ランキング順に
+    1件ずつ再通知抑止・データ品質チェックを行い(要求仕様15節ステップ7)、
+    条件を満たしたものを送信対象数(既定5件)に達するまで、または全件評価し
+    終えるまで繰り上げながら集める(要求仕様15節ステップ8)。価格待ちは
+    ランキング・送信の対象外(件数のみバッチサマリーに反映する)。
+
+    --- BUYパイプライン第3次修正(2026-07)で修正 ---
+    従来は「上位N件を先に切り出してから適格性を判定する」実装だったため、
+    上位N件のうち一部が再送抑止・データ品質チェックで除外されると、下位に
+    適格な候補が残っていても繰り上げられず、送信数がN件を割り込んでいた。
+    ランキング全件を順番に評価し、適格と判定したものから送信対象へ加える
+    (=繰り上げ方式)ことでこれを解消する。通知本文の表示順位は
+    (notify_buy_candidates_digest側の実装により)最終的な送信順で1..Nへ
+    振り直される。
     """
     max_notifications = config.notification.buy_candidate_max_notifications_per_run
 
@@ -214,12 +252,12 @@ def _finalize_batch(
     ]
     # 降順ソート。同点時は銘柄コード昇順で決定性を確保する(要求仕様15節)。
     buy_entries.sort(key=lambda item: (tuple(-v for v in item[0]), item[1]))
-    buy_winners = buy_entries[:max_notifications]
 
     eligible_winners: list[Recommendation] = []
     quality_blocked_count = 0
     suppressed_count = 0
-    for _sort_key, stock_code, recommendation_id in buy_winners:
+    evaluated_count = 0
+    for _sort_key, stock_code, recommendation_id in buy_entries:
         recommendation = recommendation_repo.get(recommendation_id)
         if recommendation is None:
             logger.warning(
@@ -229,15 +267,21 @@ def _finalize_batch(
                 recommendation_id,
             )
             continue
-        eligibility = notification_service.evaluate_notification_status(recommendation, now)
+        evaluated_count += 1
+        eligibility = notification_service.evaluate_notification_status(
+            recommendation, now, context=NotificationContext.BUY_CANDIDATE_BATCH
+        )
         if eligibility.data_quality_blocked:
             # 要手動確認・データ品質アラートはevaluate_notification_status内で
-            # 即時に処理済み(要求仕様§16の安全弁は購入候補上位N件にのみ適用される)。
+            # 判定済み(BUY_CANDIDATE_BATCHコンテキストのためLINE送信はされない)。
             quality_blocked_count += 1
-        elif eligibility.status != NotificationStatus.SENT:
+            continue
+        if eligibility.status != NotificationStatus.SENT:
             suppressed_count += 1
-        else:
-            eligible_winners.append(recommendation)
+            continue
+        eligible_winners.append(recommendation)
+        if len(eligible_winners) >= max_notifications:
+            break
 
     sent_count = notification_service.notify_buy_candidates_digest(eligible_winners, now)
 
@@ -248,7 +292,7 @@ def _finalize_batch(
     adjusted_counts["suppressed"] = (
         progress.category_counts.get("suppressed", 0) + suppressed_count
     )
-    adjusted_counts["candidate_not_ranked"] = total_buy_candidates - len(buy_winners)
+    adjusted_counts["candidate_not_ranked"] = total_buy_candidates - evaluated_count
 
     notification_service.notify_batch_summary(
         _PROCESS_NAME,
