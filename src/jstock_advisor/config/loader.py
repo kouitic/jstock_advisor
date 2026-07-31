@@ -14,6 +14,7 @@ from typing import Any, cast
 import yaml
 
 from jstock_advisor.config.models import (
+    AddOnRulesConfig,
     AppConfig,
     BuyDecisionRulesConfig,
     ConfidenceRulesConfig,
@@ -113,6 +114,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     buy_decision = BuyDecisionRulesConfig.model_validate(
         _load_yaml(directory / "buy_decision_rules.yaml")
     )
+    add_on = AddOnRulesConfig.model_validate(_load_yaml(directory / "add_on_rules.yaml"))
 
     return AppConfig(
         screening=screening,
@@ -131,4 +133,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         earnings_window=earnings_window,
         portfolio_concentration=portfolio_concentration,
         buy_decision=buy_decision,
+        add_on=add_on,
     )

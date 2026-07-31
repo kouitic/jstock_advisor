@@ -529,3 +529,63 @@ class NotificationContext(StrEnum):
     DEFAULT = "DEFAULT"
     BUY_CANDIDATE_BATCH = "BUY_CANDIDATE_BATCH"
     HOLDING_REVIEW = "HOLDING_REVIEW"
+
+
+class CandidateSource(StrEnum):
+    """統合BUY候補パイプライン(気になる銘柄+保有銘柄の統合)における評価対象の由来。
+
+    同一銘柄が気になる銘柄(ウォッチリスト)と保有銘柄の両方に登録されている場合は
+    BOTHとし、評価・ランキング・通知・再送防止キーはすべて1件に統合する
+    (登録元の違いによる二重評価・二重通知は行わない)。
+    """
+
+    WATCHLIST = "WATCHLIST"
+    HOLDING = "HOLDING"
+    BOTH = "BOTH"
+
+
+class AddOnEligibility(StrEnum):
+    """保有銘柄の買い増し固有リスクゲートの判定結果。
+
+    共通購入判断(BuySignalService)がBUY系判定を出しても、保有銘柄については
+    集中度・売却判定との競合等の買い増し固有リスクを追加確認する。ELIGIBLEの
+    場合のみ最終的にBUY系として通知対象になりうる。気になる銘柄単独(保有情報
+    なし)の場合はNOT_APPLICABLE(ゲート自体が適用対象外)。
+    """
+
+    ELIGIBLE = "ELIGIBLE"
+    BLOCKED = "BLOCKED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class EligibilityBlockCategory(StrEnum):
+    """統合BUY候補パイプラインで通知対象外となった理由の分類(監査用)。
+
+    集中度超過(ポートフォリオ制約)とデータ異常(データ品質)を混同しないよう、
+    また「比率計算に使うデータそのものが信頼できない」場合(PORTFOLIO_DATA_
+    RELIABILITY)と「比率は正常に計算できたが上限を超えた」場合(POSITION_
+    CONCENTRATION/SECTOR_CONCENTRATION)を区別する。
+    """
+
+    DATA_QUALITY = "DATA_QUALITY"
+    CONFLICTING_HOLDING_ACTION = "CONFLICTING_HOLDING_ACTION"
+    HOLDING_DATA_INCONSISTENT = "HOLDING_DATA_INCONSISTENT"
+    PORTFOLIO_DATA_RELIABILITY = "PORTFOLIO_DATA_RELIABILITY"
+    POSITION_CONCENTRATION = "POSITION_CONCENTRATION"
+    SECTOR_CONCENTRATION = "SECTOR_CONCENTRATION"
+    EARNINGS_PROXIMITY = "EARNINGS_PROXIMITY"
+    RECENTLY_NOTIFIED = "RECENTLY_NOTIFIED"
+    OUTSIDE_TOP_5 = "OUTSIDE_TOP_5"
+
+
+class PortfolioValuationBasis(StrEnum):
+    """ポートフォリオ集中度計算に使った評価基準。
+
+    保有銘柄全員分の現在値が取得できた場合のみMARKET_VALUE(時価総額ベース)
+    とし、1件でも欠落・内容競合があればUNAVAILABLEとして時価ベースの比率を
+    信頼できないものとして扱う(時価と取得金額を混在させない)。
+    """
+
+    MARKET_VALUE = "MARKET_VALUE"
+    ACQUISITION_COST = "ACQUISITION_COST"
+    UNAVAILABLE = "UNAVAILABLE"
