@@ -17,6 +17,7 @@ from jstock_advisor.providers.shareholder_benefit.local_registry_impl import (
 )
 from jstock_advisor.services.shareholder_benefit_registry_service import (
     ShareholderBenefitRegistryService,
+    check_registry_health,
 )
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
@@ -301,6 +302,66 @@ def test_get_refreshes_stale_next_record_date(
     persisted = service.get("2914", now=dt.datetime(2026, 4, 1, tzinfo=dt.UTC))
     assert persisted is not None
     assert persisted.next_benefit_record_date == dt.date(2027, 3, 31)
+
+
+def test_check_registry_health_always_logs_count_info(
+    service: ShareholderBenefitRegistryService, caplog: pytest.LogCaptureFixture
+) -> None:
+    service.register(
+        stock_code="2914",
+        min_shares_required=100,
+        frequency_per_year=1,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="x",
+        min_shares_for_tier=100,
+        now=_NOW,
+    )
+    with caplog.at_level("INFO"):
+        check_registry_health(min_expected_entries=1, service=service)
+    assert any("loaded 1 entries" in r.message.lower() for r in caplog.records)
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_check_registry_health_warns_when_below_threshold(
+    service: ShareholderBenefitRegistryService, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO"):
+        check_registry_health(min_expected_entries=1, service=service)
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+    assert any("loaded 0 entries" in r.message.lower() for r in caplog.records)
+
+
+def test_check_registry_health_disabled_threshold_still_logs_info_but_no_warning(
+    service: ShareholderBenefitRegistryService, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO"):
+        check_registry_health(min_expected_entries=0, service=service)
+    assert any("loaded 0 entries" in r.message.lower() for r in caplog.records)
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_check_registry_health_no_warning_when_count_meets_threshold(
+    service: ShareholderBenefitRegistryService, caplog: pytest.LogCaptureFixture
+) -> None:
+    service.register(
+        stock_code="2914",
+        min_shares_required=100,
+        frequency_per_year=1,
+        category=BenefitUtilityCategory.CASH_EQUIVALENT,
+        description="x",
+        min_shares_for_tier=100,
+        now=_NOW,
+    )
+    with caplog.at_level("INFO"):
+        check_registry_health(min_expected_entries=1, service=service)
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_check_registry_health_does_not_raise(
+    service: ShareholderBenefitRegistryService,
+) -> None:
+    # レジストリが空でも例外を投げず、バッチ処理を止めない
+    check_registry_health(min_expected_entries=100, service=service)
 
 
 def test_local_registry_provider_returns_registered_benefit(

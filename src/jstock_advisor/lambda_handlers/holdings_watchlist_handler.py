@@ -72,6 +72,7 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
+from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
 logger = logging.getLogger(__name__)
@@ -436,6 +437,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # (900秒)を超えうるため)。ウォッチリストの買いシグナル評価はbuy_candidates_
     # handler.pyの統合BUY候補パイプラインへ一本化済みのため、ここでは保有銘柄の
     # 売却・利確判定のみをdispatchする。
+    # 株主優待レジストリの読み込み件数チェックは、銘柄ごとのワーカー呼び出しでは
+    # なくバッチ開始時(ここ)で1回だけ行う(2026-07仕様レビュー対応)。
+    check_registry_health(
+        config.notification.operations.shareholder_benefit_registry_min_expected_entries
+    )
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
     holdings = PortfolioService().list_holdings()
     total = len(holdings)

@@ -104,6 +104,7 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
+from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 from jstock_advisor.services.watchlist_service import WatchlistService
 
@@ -910,6 +911,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # 通常のスケジュール起動(ディスパッチのみ行い、銘柄ごとの実処理は非同期の
     # 自己再帰呼び出しに委ねる。気になる銘柄と保有銘柄を銘柄コード単位で統合し、
     # 両方に登録されている銘柄は1回だけ評価する)
+    # 株主優待レジストリの読み込み件数チェックは、銘柄ごとのワーカー呼び出しでは
+    # なくバッチ開始時(ここ)で1回だけ行う(2026-07仕様レビュー対応)。
+    check_registry_health(
+        config.notification.operations.shareholder_benefit_registry_min_expected_entries
+    )
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
     targets = _build_unified_targets(config, now)
     holding_count = sum(

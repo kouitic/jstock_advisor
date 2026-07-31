@@ -232,7 +232,10 @@ def _apply_mitigating_factors(
         and inputs.fair_value_rising_with_earnings_growth
     ):
         total_downgrade += config.fair_value_rising_with_earnings_growth.downgrade_levels
-        applied.append("業績成長により適正価格自体が上昇している")
+        # 2026-07仕様レビュー対応: 前回評価値との実比較データが無いため、「上昇している」
+        # と断定せず、根拠(直近四半期の営業利益が非減少)から言える範囲まで弱めた表現に
+        # とどめる(トリガー条件・downgrade_levelsの適用自体は変更しない)。
+        applied.append("現在の利益水準を考慮すると、適正価格を一定程度支えている可能性があります")
 
     cdi = config.continuous_dividend_increase
     min_years = cdi.min_consecutive_years or 0

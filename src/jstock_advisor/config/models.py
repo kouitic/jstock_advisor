@@ -305,9 +305,15 @@ class OperationsNotificationConfig(StrictModel):
     notify_batch_failure: バッチ全体が異常終了した場合の運用向け通知を
     行うかどうか。BUY候補の個別データ取得エラー(buy_candidates.notify_data_errors)
     とは目的が異なるため、意図的に別設定として分離している。
+
+    shareholder_benefit_registry_min_expected_entries: 株主優待レジストリの
+    読み込み件数がこれ未満の場合にWARNINGログを出す(2026-07仕様レビュー対応:
+    CSVは用意されているのにレジストリへ未反映という運用ミスをすぐ検知できる
+    ようにするため)。0で無効化(WARNINGのみ無効化。件数のINFOログは常に出る)。
     """
 
     notify_batch_failure: bool
+    shareholder_benefit_registry_min_expected_entries: int
 
 
 class NotificationRulesConfig(StrictModel):
@@ -325,6 +331,10 @@ class NotificationRulesConfig(StrictModel):
     # 保有銘柄それぞれをBUY候補評価対象へ含めるかを個別に制御できるようにする ---
     include_watchlist: bool
     include_holdings: bool
+    # --- 通知の正確性・説明可能性の修正(2026-07仕様レビュー対応)で追加。
+    # WATCH通知で手法間乖離が大きい/信頼度が低い場合に注意書きを表示する閾値
+    # (強気/弱気の比率がこの値以上で「手法間の推定差が大きい」とみなす) ---
+    fair_value_large_spread_ratio: float
 
 
 # --- data_validation_rules.yaml -------------------------------------------

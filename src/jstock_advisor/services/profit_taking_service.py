@@ -27,7 +27,6 @@ from jstock_advisor.domain.entities.enums import (
     DividendComparisonOutcome,
     ProfitTakingIndustrySector,
     RecommendationType,
-    RecordDateUnknownReason,
     StockType,
     TrendClassification,
 )
@@ -48,6 +47,12 @@ from jstock_advisor.domain.signals.profit_taking import (
     ProfitTakingResult,
     evaluate_profit_taking,
 )
+from jstock_advisor.domain.signals.record_date_resolution import (
+    resolve_benefit_record_date_recurring_label,
+    resolve_benefit_record_date_source_type,
+    resolve_dividend_record_date_recurring_label,
+    resolve_dividend_record_date_source_type,
+)
 from jstock_advisor.domain.signals.trading_unit_feasibility import (
     TradingUnitFeasibility,
     evaluate_trading_unit_feasibility,
@@ -58,8 +63,6 @@ from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
-
-_MONTH_END_FISCAL_LABEL = "{month}月末"
 
 # 決算直前は原則として通常のPARTIAL/FULL_PROFIT_TAKE提案を保留する(要求仕様§4)。
 _EARNINGS_SUPPRESSIBLE_TO_REVIEW = (
@@ -73,51 +76,6 @@ class ProfitTakingOutcome:
     stock_code: str
     recommendation: Recommendation | None
     data_error: str | None
-
-
-def _dividend_record_date_recurring_label(
-    dividend: DividendInfo, fiscal_year_end_month: int | None
-) -> str | None:
-    """配当基準日の正確な次回日付が不明でも、決算期末から推定される周期パターンを
-    ラベル化する(要求仕様レビュー対応: 単なる「不明」表示を避ける)。
-
-    日本企業の多くは期末配当(決算期末基準)と中間配当(決算期末の6ヶ月前基準)の
-    年2回、または期末配当のみ年1回の構成であるという一般的な慣行に基づく推定
-    であり、当該銘柄固有の確定情報ではないことを明示する。
-
-    2026-07仕様レビュー対応: 直近開示期間末(四半期の場合がある)ではなく、必ず
-    企業の正式な決算期末月(fiscal_year_end_month)を使う。以前は直近四半期末を
-    誤って使っており、3月決算企業が「1月末・7月末」等と誤表示される不具合があった。
-    """
-    if (
-        dividend.dividend_record_date_unknown_reason
-        != RecordDateUnknownReason.DATA_PROVIDER_MISSING
-    ):
-        return None
-    if fiscal_year_end_month is None:
-        return None
-    interim_month = (fiscal_year_end_month - 6 - 1) % 12 + 1
-    months = sorted({interim_month, fiscal_year_end_month})
-    labels = "・".join(_MONTH_END_FISCAL_LABEL.format(month=m) for m in months)
-    return f"毎年{labels}(決算期末を基準とした一般的な慣行からの推定、確定情報ではない)"
-
-
-def _benefit_record_date_recurring_label(
-    benefit: ShareholderBenefit | None, fiscal_year_end_month: int | None
-) -> str | None:
-    if benefit is None:
-        return None
-    if benefit.benefit_record_date_unknown_reason != RecordDateUnknownReason.DATA_PROVIDER_MISSING:
-        return None
-    if fiscal_year_end_month is None:
-        return None
-    if benefit.frequency_per_year >= 2:
-        interim_month = (fiscal_year_end_month - 6 - 1) % 12 + 1
-        months = sorted({interim_month, fiscal_year_end_month})
-    else:
-        months = [fiscal_year_end_month]
-    labels = "・".join(_MONTH_END_FISCAL_LABEL.format(month=m) for m in months)
-    return f"毎年{labels}(決算期末を基準とした一般的な慣行からの推定、確定情報ではない)"
 
 
 def _dividend_decrease_explanation(
@@ -193,8 +151,23 @@ def _build_not_yet_action_reasons(
     if fair_value_overall_confidence == ConfidenceLevel.MEDIUM:
         reasons.append("適正価格モデルの信頼度がMEDIUM")
     if not industry_model_applied:
-        label = _INDUSTRY_SECTOR_LABELS.get(industry_sector, "業種別")
-        reasons.append(f"{label}専用モデルが未適用")
+        # 利用者向け通知では内部設計用語(「専用モデルが未適用」)をそのまま使わず、
+        # 業種名が安全に取得できる場合だけそれを含めた自然な文言にする
+        # (2026-07仕様レビュー対応)。Recommendation.industry_sector/
+        # industry_model_appliedという構造化フィールド自体は変更しないため、
+        # 監査ログ側の詳細な内部理由は引き続き追跡できる。
+        if industry_sector in (
+            ProfitTakingIndustrySector.GENERAL,
+            ProfitTakingIndustrySector.UNKNOWN,
+        ):
+            reasons.append(
+                "現在の適正価格は汎用モデルによる参考値です"
+                if industry_sector == ProfitTakingIndustrySector.GENERAL
+                else "業種特性を反映した専用評価モデルではありません"
+            )
+        else:
+            label = _INDUSTRY_SECTOR_LABELS[industry_sector]
+            reasons.append(f"{label}の事業特性を十分に反映した専用評価モデルではありません")
     if (
         days_to_next_earnings_business_days is not None
         and days_to_next_earnings_business_days
@@ -606,12 +579,17 @@ class ProfitTakingService:
             ),
             forecast_dividend_increase=forecast_increase,
             forecast_dividend_increase_rate=forecast_increase_rate,
-            dividend_record_date_recurring_label=_dividend_record_date_recurring_label(
+            dividend_record_date_recurring_label=resolve_dividend_record_date_recurring_label(
                 dividend, snapshot.financial.fiscal_year_end_month
             ),
-            benefit_record_date_recurring_label=_benefit_record_date_recurring_label(
+            benefit_record_date_recurring_label=resolve_benefit_record_date_recurring_label(
                 snapshot.benefit, snapshot.financial.fiscal_year_end_month
             ),
+            dividend_record_date_source_type=resolve_dividend_record_date_source_type(dividend),
+            benefit_record_date_source_type=resolve_benefit_record_date_source_type(
+                snapshot.benefit
+            ),
+            business_days_to_earnings=days_to_earnings,
         )
         return ProfitTakingOutcome(holding.stock_code, recommendation, None)
 
