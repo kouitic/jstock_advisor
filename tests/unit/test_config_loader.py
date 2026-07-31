@@ -88,3 +88,93 @@ def test_config_rejects_unknown_fields(tmp_path: Path) -> None:
     )
     with pytest.raises(ValidationError):
         load_config(broken_dir)
+
+
+# --- watchlist_screening_rules.yaml(ウォッチリスト自動追加機能) --------------
+
+
+def test_watchlist_screening_defaults_are_loaded() -> None:
+    config = load_config().watchlist_screening
+    assert config.enabled is True
+    assert config.candidate_universe.provider == "csv"
+    assert config.max_watchlist_additions_per_run == 20
+
+
+def test_watchlist_screening_scoring_weights_sum_to_100() -> None:
+    scoring = load_config().watchlist_screening.scoring
+    total = (
+        scoring.dividend_yield.weight
+        + scoring.equity_ratio.weight
+        + scoring.payout_ratio.weight
+        + scoring.dividend_growth.weight
+        + scoring.shareholder_benefit.weight
+    )
+    assert total == pytest.approx(100.0)
+
+
+def test_watchlist_screening_scoring_rejects_weights_not_summing_to_100() -> None:
+    from jstock_advisor.config.models import (
+        DividendGrowthScoringConfig,
+        DividendYieldScoringConfig,
+        EquityRatioScoringConfig,
+        PayoutRatioScoringConfig,
+        ShareholderBenefitScoringConfig,
+        WatchlistScreeningScoringConfig,
+    )
+
+    with pytest.raises(ValidationError, match="配点合計は100点"):
+        WatchlistScreeningScoringConfig(
+            minimum_total_score=60.0,
+            dividend_yield=DividendYieldScoringConfig(
+                weight=10.0, zero_at_pct=3.5, full_at_pct=6.0
+            ),
+            equity_ratio=EquityRatioScoringConfig(
+                weight=10.0, zero_at_pct=40.0, full_at_pct=70.0
+            ),
+            payout_ratio=PayoutRatioScoringConfig(
+                weight=10.0, healthy_min_pct=20.0, healthy_max_pct=60.0
+            ),
+            dividend_growth=DividendGrowthScoringConfig(
+                weight=10.0, zero_at_years=0, full_at_years=10
+            ),
+            shareholder_benefit=ShareholderBenefitScoringConfig(
+                weight=10.0, yield_full_at_pct=2.0, presence_only_score_ratio=0.5
+            ),
+        )
+
+
+def test_watchlist_screening_rejects_zero_max_watchlist_additions_per_run() -> None:
+    from jstock_advisor.config.models import WatchlistScreeningRulesConfig
+
+    base = load_config().watchlist_screening
+    with pytest.raises(ValidationError):
+        WatchlistScreeningRulesConfig(
+            **{**base.model_dump(), "max_watchlist_additions_per_run": 0}
+        )
+
+
+def test_watchlist_screening_rejects_negative_minimum_market_cap() -> None:
+    from jstock_advisor.config.models import WatchlistScreeningThresholds
+
+    base = load_config().watchlist_screening.thresholds
+    with pytest.raises(ValidationError):
+        WatchlistScreeningThresholds(
+            **{**base.model_dump(), "minimum_market_cap_yen": -1}
+        )
+
+
+def test_watchlist_screening_rejects_unknown_candidate_universe_provider() -> None:
+    from jstock_advisor.config.models import CandidateUniverseConfig
+
+    with pytest.raises(ValidationError):
+        CandidateUniverseConfig(provider="prime_market", csv_path="data/universe/x.csv")
+
+
+def test_watchlist_screening_rejects_unknown_screening_policy() -> None:
+    from jstock_advisor.config.models import WatchlistScreeningRulesConfig
+
+    base = load_config().watchlist_screening
+    with pytest.raises(ValidationError):
+        WatchlistScreeningRulesConfig(
+            **{**base.model_dump(), "screening_policy": "some_future_policy"}
+        )

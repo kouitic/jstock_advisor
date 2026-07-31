@@ -79,3 +79,17 @@ class JsonCollectionStore[T: BaseModel]:
 
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
         return [item for item in self._read_all().values() if predicate(item)]
+
+    def insert_if_absent(self, item: T) -> bool:
+        """既存があれば触らずFalse、無ければ追加してTrue。
+
+        単一プロセスでのCLI利用を前提とし(モジュール冒頭のdocstring参照)、
+        read→writeの間の排他制御は行わない(check-then-act)。
+        """
+        items = self._read_all()
+        item_id = str(getattr(item, self._id_field))
+        if item_id in items:
+            return False
+        items[item_id] = item
+        self._write_all(items)
+        return True

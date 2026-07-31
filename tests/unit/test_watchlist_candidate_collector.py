@@ -1,0 +1,140 @@
+import datetime as dt
+from decimal import Decimal
+from pathlib import Path
+
+from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
+from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
+    WatchlistRepository,
+)
+from jstock_advisor.interfaces.candidate_universe import CandidateUniverseResult
+from jstock_advisor.services.screening_data_provider import (
+    ScreeningDataResult,
+    ScreeningDataStatus,
+)
+from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
+
+_NOW = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
+
+
+class _FakeUniverseProvider:
+    def __init__(self, result: CandidateUniverseResult) -> None:
+        self._result = result
+
+    def get_candidate_universe(self) -> CandidateUniverseResult:
+        return self._result
+
+
+class _FakeScreeningDataProvider:
+    def __init__(self) -> None:
+        self.requested_codes: list[str] = []
+
+    def get_screening_input(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:
+        self.requested_codes.append(stock_code)
+        return ScreeningDataResult(
+            status=ScreeningDataStatus.NOT_FOUND, input=None, missing_fields=[], error_message=None
+        )
+
+
+def _holding(stock_code: str) -> Holding:
+    return Holding(
+        stock_code=stock_code,
+        stock_name=f"銘柄{stock_code}",
+        shares=100,
+        average_purchase_price=Decimal("1000"),
+        total_purchase_amount=Decimal("100000"),
+        first_purchase_date=dt.date(2024, 1, 1),
+        last_purchase_date=dt.date(2024, 1, 1),
+        account_type=AccountType.SPECIFIC,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def _watchlist_item(stock_code: str) -> WatchlistItem:
+    return WatchlistItem(stock_code=stock_code, created_at=_NOW, updated_at=_NOW)
+
+
+def test_collect_target_codes_excludes_held_and_watchlisted(tmp_path: Path) -> None:
+    store_dir = tmp_path / "local_store"
+    holding_repo = HoldingRepository(store_dir=store_dir)
+    watchlist_repo = WatchlistRepository(store_dir=store_dir)
+    holding_repo.upsert(_holding("1111"))
+    watchlist_repo.upsert(_watchlist_item("2222"))
+
+    universe = CandidateUniverseResult(
+        stock_codes=["1111", "2222", "3333"],
+        raw_row_count=3,
+        duplicate_count=0,
+        invalid_code_count=0,
+    )
+    collector = WatchlistCandidateCollector(
+        _FakeUniverseProvider(universe),
+        _FakeScreeningDataProvider(),
+        holding_repository=holding_repo,
+        watchlist_repository=watchlist_repo,
+    )
+
+    result = collector.collect_target_codes()
+
+    assert result.stock_codes == ["3333"]
+    assert result.universe_count == 3
+    assert result.holding_excluded_count == 1
+    assert result.watchlist_excluded_count == 1
+
+
+def test_collect_target_codes_passes_through_universe_diagnostics(tmp_path: Path) -> None:
+    store_dir = tmp_path / "local_store"
+    universe = CandidateUniverseResult(
+        stock_codes=["1111"], raw_row_count=5, duplicate_count=3, invalid_code_count=1
+    )
+    collector = WatchlistCandidateCollector(
+        _FakeUniverseProvider(universe),
+        _FakeScreeningDataProvider(),
+        holding_repository=HoldingRepository(store_dir=store_dir),
+        watchlist_repository=WatchlistRepository(store_dir=store_dir),
+    )
+
+    result = collector.collect_target_codes()
+
+    assert result.duplicate_count == 3
+    assert result.invalid_code_count == 1
+
+
+def test_collect_target_codes_with_no_exclusions_returns_full_universe(tmp_path: Path) -> None:
+    store_dir = tmp_path / "local_store"
+    universe = CandidateUniverseResult(
+        stock_codes=["1111", "2222"], raw_row_count=2, duplicate_count=0, invalid_code_count=0
+    )
+    collector = WatchlistCandidateCollector(
+        _FakeUniverseProvider(universe),
+        _FakeScreeningDataProvider(),
+        holding_repository=HoldingRepository(store_dir=store_dir),
+        watchlist_repository=WatchlistRepository(store_dir=store_dir),
+    )
+
+    result = collector.collect_target_codes()
+
+    assert result.stock_codes == ["1111", "2222"]
+    assert result.holding_excluded_count == 0
+    assert result.watchlist_excluded_count == 0
+
+
+def test_fetch_screening_data_delegates_to_injected_provider(tmp_path: Path) -> None:
+    store_dir = tmp_path / "local_store"
+    universe = CandidateUniverseResult(
+        stock_codes=[], raw_row_count=0, duplicate_count=0, invalid_code_count=0
+    )
+    screening_data_provider = _FakeScreeningDataProvider()
+    collector = WatchlistCandidateCollector(
+        _FakeUniverseProvider(universe),
+        screening_data_provider,
+        holding_repository=HoldingRepository(store_dir=store_dir),
+        watchlist_repository=WatchlistRepository(store_dir=store_dir),
+    )
+
+    collector.fetch_screening_data("1234", _NOW)
+
+    assert screening_data_provider.requested_codes == ["1234"]

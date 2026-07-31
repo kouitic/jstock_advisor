@@ -40,7 +40,9 @@ from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.domain.jst import format_jst
+from jstock_advisor.domain.signals.watchlist_screening import describe_matched_criteria
 from jstock_advisor.infrastructure.line.client import LineClient
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -51,6 +53,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.data_quality_service import DataQualityIssueSeverity, detect_anomalies
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
+from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningResult
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +96,13 @@ _BUY_DIGEST_MAX_CHARS = 4500
 # バッチサマリーの内訳区分(要求仕様§13)。domain/entities/evaluation_audit.pyの
 # SUMMARY_CATEGORIESと同じキー集合を使う。
 _BATCH_SUMMARY_CATEGORIES = SUMMARY_CATEGORIES
+
+_WATCHLIST_SCREENING_POLICY_LABELS: dict[str, str] = {
+    "high_dividend_financial_health": "高配当・財務健全性",
+}
+
+# LINEの文字数上限を考慮し、追加銘柄の詳細表示は上位10件までとする(要求仕様§12)。
+_WATCHLIST_ADDITION_DETAIL_LIMIT = 10
 
 
 def _yen(value: Decimal | int | float | str | None) -> str:
@@ -1727,6 +1737,83 @@ class LineNotificationService:
                 stock_code=pseudo_stock_code,
                 content_hash=content_hash,
                 sent_at=now,
+                related_recommendation_id=None,
+            )
+        )
+        return True
+
+    def notify_watchlist_additions(
+        self,
+        added_items: list[WatchlistItem],
+        results_by_code: dict[str, WatchlistScreeningResult],
+        policy_name: str,
+        evaluated_at: dt.datetime,
+    ) -> bool:
+        """週次スクリーニングでウォッチリストへ実際に追加された銘柄の通知
+        (ウォッチリスト自動追加機能、要求仕様§12)。
+
+        表示対象はWatchlistRepository.add_if_new()が実際にTrueを返した銘柄のみ
+        (スコア合格でも上限超過/既登録/Repository失敗だった銘柄は表示しない)。
+        追加が1件も無い場合は送信しない。
+        """
+        if not added_items:
+            return False
+
+        ranked = sorted(
+            added_items,
+            key=lambda item: (-results_by_code[item.stock_code].total_score, item.stock_code),
+        )
+
+        pseudo_stock_code = "__batch__:watchlist_auto_addition"
+        content_hash = hashlib.sha256(
+            f"{evaluated_at.date().isoformat()}|"
+            f"{sorted(item.stock_code for item in ranked)}".encode()
+        ).hexdigest()[:16]
+        latest = self._log_repo.latest_by_stock_and_type(
+            pseudo_stock_code, NotificationType.WATCHLIST_AUTO_ADDITION
+        )
+        if latest is not None and latest.content_hash == content_hash:
+            logger.info("watchlist_auto_addition duplicate suppressed count=%d", len(ranked))
+            return False
+
+        policy_label = _WATCHLIST_SCREENING_POLICY_LABELS.get(policy_name, policy_name)
+        lines = [
+            "【ウォッチリスト追加】",
+            "",
+            "週次スクリーニングにより",
+            f"新たに{len(ranked)}銘柄を追加しました。",
+            "",
+            "評価ポリシー：",
+            policy_label,
+        ]
+
+        detail_items = ranked[:_WATCHLIST_ADDITION_DETAIL_LIMIT]
+        for rank, item in enumerate(detail_items, start=1):
+            result = results_by_code[item.stock_code]
+            display_name = item.stock_name or item.stock_code
+            lines.append("")
+            lines.append(f"{rank}. {display_name}（{item.stock_code}）")
+            lines.append(f"・総合スコア：{result.total_score:.0f}点")
+            lines.extend(f"・{label}：{value}" for label, value in result.main_metrics.items())
+            lines.append(f"・追加理由：{describe_matched_criteria(result.matched_criteria)}")
+
+        remaining = len(ranked) - len(detail_items)
+        if remaining > 0:
+            lines.append("")
+            lines.append(f"ほか{remaining}銘柄を追加しました。")
+
+        lines.append("")
+        lines.append("評価日時：")
+        lines.append(format_jst(evaluated_at))
+
+        self._client.push_message("\n".join(lines))
+        self._log_repo.save(
+            NotificationLog(
+                notification_id=str(uuid.uuid4()),
+                notification_type=NotificationType.WATCHLIST_AUTO_ADDITION,
+                stock_code=pseudo_stock_code,
+                content_hash=content_hash,
+                sent_at=evaluated_at,
                 related_recommendation_id=None,
             )
         )

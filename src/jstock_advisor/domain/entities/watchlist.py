@@ -6,7 +6,7 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.base import Entity
-from jstock_advisor.domain.entities.enums import Priority
+from jstock_advisor.domain.entities.enums import Priority, WatchlistRegistrationSource
 
 
 class WatchlistItem(Entity):
@@ -21,3 +21,8 @@ class WatchlistItem(Entity):
     memo: str | None = None
     created_at: dt.datetime
     updated_at: dt.datetime
+
+    # --- ウォッチリスト自動追加機能で追加。既存レコードには存在しないため、
+    # 後方互換のためデフォルト値(手動登録)を持たせる ---
+    registration_source: WatchlistRegistrationSource = WatchlistRegistrationSource.MANUAL
+    registration_policy: str | None = None

@@ -15,11 +15,14 @@ EDINET提出書類のfilerName(日本語)を優先する(financial_dataとdivide
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.disclosure_finder import EdinetDisclosureCacheRepository
 from jstock_advisor.infrastructure.edinet.document_finder import EdinetFilingCacheRepository
+from jstock_advisor.interfaces.candidate_universe import CandidateUniverseProvider
+from jstock_advisor.providers.candidate_universe.csv_impl import CsvCandidateUniverseProvider
 from jstock_advisor.providers.corporate_action.local_registry_impl import (
     LocalRegistryCorporateActionProvider,
 )
@@ -95,3 +98,16 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
         ),
         corporate_action=corporate_action,
     )
+
+
+def build_candidate_universe_provider(config: AppConfig) -> CandidateUniverseProvider:
+    """ウォッチリスト自動追加機能向けの候補銘柄ユニバースProviderを選択する。
+
+    v1では"csv"のみサポートする。将来"topix"等を追加する際は、この関数へ
+    branchを1つ追加するだけでよい(呼び出し側は無変更)。
+    """
+    provider_name = config.watchlist_screening.candidate_universe.provider
+    if provider_name == "csv":
+        csv_path = Path(config.watchlist_screening.candidate_universe.csv_path)
+        return CsvCandidateUniverseProvider(csv_path)
+    raise ValueError(f"unknown candidate_universe provider: {provider_name}")

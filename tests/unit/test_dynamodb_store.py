@@ -83,3 +83,25 @@ def test_upsert_many_writes_all_items(store: DynamoDbCollectionStore[_Item]) -> 
         ]
     )
     assert len(store.list_all()) == 2
+
+
+def test_insert_if_absent_adds_new_item_and_returns_true(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    added = store.insert_if_absent(_Item(item_id="1", name="foo", value=10))
+    assert added is True
+    assert store.get("1") == _Item(item_id="1", name="foo", value=10)
+
+
+def test_insert_if_absent_does_not_overwrite_existing_item(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    store.upsert(_Item(item_id="1", name="original", value=10))
+
+    added = store.insert_if_absent(_Item(item_id="1", name="attempted-overwrite", value=99))
+
+    assert added is False
+    fetched = store.get("1")
+    assert fetched is not None
+    assert fetched.name == "original"
+    assert fetched.value == 10

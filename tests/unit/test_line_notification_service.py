@@ -18,9 +18,12 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
+    WatchlistRegistrationSource,
 )
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.signals.watchlist_screening import MatchedCriterion
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -31,6 +34,7 @@ from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     render_notification_preview,
 )
+from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningResult
 
 _CONFIG = load_config()
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
@@ -1485,4 +1489,170 @@ def test_check_resend_eligibility_does_not_write_notification_log(service_and_re
     after = len(service._log_repo.list_all())
 
     assert before == after == 0
+
+
+# --- notify_watchlist_additions(ウォッチリスト自動追加機能) --------------------
+
+
+def _watchlist_item(stock_code: str, stock_name: str | None = None) -> WatchlistItem:
+    return WatchlistItem(
+        stock_code=stock_code,
+        stock_name=stock_name,
+        reason="高配当、財務健全",
+        registration_source=WatchlistRegistrationSource.AUTO_SCREENING,
+        registration_policy="high_dividend_financial_health",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def _watchlist_screening_result(
+    stock_code: str,
+    stock_name: str | None,
+    total_score: float,
+    matched_criteria: list[MatchedCriterion] | None = None,
+    main_metrics: dict[str, str] | None = None,
+) -> WatchlistScreeningResult:
+    return WatchlistScreeningResult(
+        stock_code=stock_code,
+        stock_name=stock_name,
+        passed=True,
+        policy_results=[],
+        total_score=total_score,
+        matched_criteria=matched_criteria or [MatchedCriterion.HIGH_DIVIDEND_YIELD],
+        exclusion_reasons=[],
+        missing_required_fields=[],
+        missing_scoring_fields=[],
+        evaluated_at=_NOW,
+        main_metrics=main_metrics or {"配当利回り": "4.2%", "自己資本比率": "55.0%"},
+    )
+
+
+def test_notify_watchlist_additions_returns_false_and_sends_nothing_when_empty(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_watchlist_additions(
+        [], {}, "high_dividend_financial_health", _NOW
+    )
+
+    assert sent is False
     assert client.sent == []
+
+
+def test_notify_watchlist_additions_sends_and_shows_rank_score_and_reason(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+    item = _watchlist_item("1234", "テスト株式会社")
+    result = _watchlist_screening_result(
+        "1234",
+        "テスト株式会社",
+        87.0,
+        matched_criteria=[
+            MatchedCriterion.HIGH_DIVIDEND_YIELD,
+            MatchedCriterion.SOLID_EQUITY_RATIO,
+        ],
+    )
+
+    sent = service.notify_watchlist_additions(
+        [item], {"1234": result}, "high_dividend_financial_health", _NOW
+    )
+
+    assert sent is True
+    message = client.sent[0]
+    assert "【ウォッチリスト追加】" in message
+    assert "新たに1銘柄を追加しました。" in message
+    assert "高配当・財務健全性" in message
+    assert "1. テスト株式会社（1234）" in message
+    assert "・総合スコア：87点" in message
+    assert "・配当利回り：4.2%" in message
+    assert "・自己資本比率：55.0%" in message
+    assert "・追加理由：高配当、財務健全" in message
+
+
+def test_notify_watchlist_additions_only_shows_actually_added_items(
+    service_and_repos,
+) -> None:
+    """スコア合格でも上限超過/既登録だった銘柄はresults_by_code/added_itemsに
+    含まれない前提であり、渡されたadded_itemsのみが表示されることを確認する。
+    """
+    service, _repo, client = service_and_repos
+    item = _watchlist_item("1234")
+    result = _watchlist_screening_result("1234", None, 80.0)
+
+    service.notify_watchlist_additions(
+        [item], {"1234": result}, "high_dividend_financial_health", _NOW
+    )
+
+    message = client.sent[0]
+    assert "1234" in message
+    assert "新たに1銘柄を追加しました" in message
+
+
+def test_notify_watchlist_additions_orders_by_score_descending(service_and_repos) -> None:
+    service, _repo, client = service_and_repos
+    low = _watchlist_item("1111", "ロー")
+    high = _watchlist_item("2222", "ハイ")
+    results = {
+        "1111": _watchlist_screening_result("1111", "ロー", 60.0),
+        "2222": _watchlist_screening_result("2222", "ハイ", 90.0),
+    }
+
+    service.notify_watchlist_additions(
+        [low, high], results, "high_dividend_financial_health", _NOW
+    )
+
+    message = client.sent[0]
+    assert message.index("1. ハイ") < message.index("2. ロー")
+
+
+def test_notify_watchlist_additions_shows_only_top_ten_with_remainder_summary(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+    items = [_watchlist_item(f"{1000 + i}") for i in range(13)]
+    results = {
+        item.stock_code: _watchlist_screening_result(item.stock_code, None, 100.0 - i)
+        for i, item in enumerate(items)
+    }
+
+    service.notify_watchlist_additions(
+        items, results, "high_dividend_financial_health", _NOW
+    )
+
+    message = client.sent[0]
+    assert "11." not in message
+    assert "ほか3銘柄を追加しました。" in message
+
+
+def test_notify_watchlist_additions_suppresses_duplicate_same_day_same_content(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+    item = _watchlist_item("1234")
+    result = _watchlist_screening_result("1234", None, 80.0)
+
+    first = service.notify_watchlist_additions(
+        [item], {"1234": result}, "high_dividend_financial_health", _NOW
+    )
+    second = service.notify_watchlist_additions(
+        [item], {"1234": result}, "high_dividend_financial_health", _NOW + dt.timedelta(minutes=5)
+    )
+
+    assert first is True
+    assert second is False
+    assert len(client.sent) == 1
+
+
+def test_notify_watchlist_additions_unknown_policy_name_falls_back_to_raw_value(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+    item = _watchlist_item("1234")
+    result = _watchlist_screening_result("1234", None, 80.0)
+
+    service.notify_watchlist_additions([item], {"1234": result}, "some_future_policy", _NOW)
+
+    assert "some_future_policy" in client.sent[0]

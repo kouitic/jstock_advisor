@@ -108,6 +108,15 @@ CSVを用意しただけでは反映されません。必ず`import-csv`を実�
 設定した状態で同じコマンドを実行)、`jstock shareholder-benefit list`で
 登録件数を確認してください。取込漏れは4節の起動時ログ(`WARNING`)でも検知できます。
 
+### 3.4 ウォッチリスト自動追加の候補銘柄一覧(2026-08-01追加)
+
+`data/universe/candidate_universe.csv`(列: `stock_code`、任意で`memo`)に、
+週次スクリーニング(5.7節)の評価対象としたい証券コードを登録してください。
+このファイルに載っていない銘柄は自動追加の対象になりません(東証全銘柄の
+自動スキャンは行いません)。初期値には、既存の`watchlist_candidates_2026-07-30.csv`
+(低PER/PBRスクリーニング結果)の証券コード列を流用しています。追加・削除は
+CSVを直接編集するだけで反映されます(取込コマンドの実行は不要)。
+
 ---
 
 ## 4. 日次運用
@@ -132,6 +141,31 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 - `--notify` 時、前回と同一内容の推奨は再送されません(「前回と同内容のため通知をスキップしました」)
 - `BuyCandidatesFunction`・`HoldingsWatchlistFunction`は同じ08:00起動でも別々のLambda関数として完全に独立しており、それぞれ別の「まとめ通知」を送ります。保有銘柄側のまとめ通知に買い候補の結果が含まれないのは意図した設計です(2026-07-31確認)。買い候補が0件の日は既定でまとめ通知自体を送信しません(`notification_rules.yaml`の`send_empty_summary`)
 - 両関数とも起動時に株主優待レジストリの読み込み件数をCloudWatch Logsへ`INFO`で常時記録し、`notification_rules.yaml`の`operations.shareholder_benefit_registry_min_expected_entries`(既定1)未満の場合は`WARNING`を追加で出します(2026-07-31追加。CSV取込漏れ等の運用ミスを検知するため。バッチ処理自体は止めません)
+
+---
+
+## 4.1 ウォッチリスト自動追加(週次、2026-08-01追加)
+
+| 時刻 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 |
+|---|---|---|---|
+| 毎週土曜07:00 | (未登録。`infra/template.yaml`にcron直書き) | `jstock watchlist-screening run` | `WatchlistAutoAdditionFunction` |
+
+候補銘柄一覧(3.4節)を評価し、条件を満たした銘柄をウォッチリストへ自動追加します。
+`config/watchlist_screening_rules.yaml`の`enabled`/`weekly_schedule_enabled`が
+両方`true`の場合のみ実行されます(`enabled=false`でも後述の`--dry-run`は実行可能)。
+
+実際に登録・通知を行わずに結果だけ確認したい場合は、次のコマンドを使ってください
+(WatchlistRepositoryへの書き込み・LINE通知・監査ログ記録は一切行いません)。
+
+```bash
+jstock watchlist-screening run --dry-run
+```
+
+`--dry-run`を付けずに実行すると、CLIを実行した端末上で(Lambdaの並列処理と
+違い単一プロセスで)候補銘柄すべてを評価し、実際にウォッチリストへ追加します。
+ローカル運用でこの機能を使いたい場合は、このコマンドを`config/schedule.yaml`の
+想定どおり毎週土曜朝に実行するようタスクスケジューラ等へ登録してください
+(9節相当、AWS版は自動実行されます)。
 
 ---
 
