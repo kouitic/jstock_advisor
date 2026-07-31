@@ -167,6 +167,33 @@ jstock watchlist-screening run --dry-run
 想定どおり毎週土曜朝に実行するようタスクスケジューラ等へ登録してください
 (9節相当、AWS版は自動実行されます)。
 
+**AWS版(Lambda fan-out)の集計処理(finalize)が失敗した場合(2026-08-01追加)**:
+`WatchlistAutoAdditionFunction`は、全銘柄の評価が終わった最後のワーカーが
+集計処理(ウォッチリストへの実登録・LINE通知・実行結果の記録)を1回だけ担当する
+仕組みになっています。この集計処理自体が例外で失敗した場合、DynamoDBの
+`jstock-batch_runs`テーブルの該当`batch_id`項目の`status`が`FINALIZE_FAILED`に
+なり(`finalize_error_message`にエラー概要、`finalize_failed_at`に失敗時刻が
+記録されます)、CloudWatch Logsにも`ERROR`ログが残ります。この状態から
+自動的に復旧する仕組みはなく、同一`batch_id`での再試行もサポートしていません。
+`FINALIZE_FAILED`を確認した場合は、原因を確認したうえで、次回の週次スケジュール
+(翌週土曜)を待つか、`jstock watchlist-screening run`で手動実行してください
+(いずれも新しい`batch_id`で最初から実行し直す形になります)。
+
+**候補銘柄数が上限(300件)を超えた場合**: `MAX_RANKING_ENTRIES`
+(`src/jstock_advisor/infrastructure/aws/batch_tracker.py`)を超える場合、
+その週はdispatch前に処理を中止し(CloudWatch Logsに`ERROR`ログ、AuditLogに
+`execution_result: ranking_capacity_exceeded`を記録)、LINE通知も送りません。
+候補銘柄一覧(3.4節)を300件以上に拡張する予定がある場合は、事前にこの上限値の
+引き上げを検討してください。
+
+**銘柄ごとのウォッチリスト登録結果の確認**: `decision_type=
+watchlist_auto_addition_repository_result`のAuditLogに、`batch_id`ごとに
+各銘柄が実際に追加された(`added`)・既に登録済みで見送られた(`skipped_existing`)・
+追加件数上限外で見送られた(`skipped_over_limit`)・書き込みに失敗した
+(`repository_failed`)のいずれかが記録されます。同じ`batch_id`の
+`decision_type=watchlist_auto_addition_candidate_evaluation`(スクリーニング
+評価結果)と突き合わせることで、ある銘柄がなぜ追加されなかったのかを追跡できます。
+
 ---
 
 ## 5. 週次・月次・四半期レビュー

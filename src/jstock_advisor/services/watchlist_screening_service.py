@@ -22,8 +22,10 @@ from jstock_advisor.services.screening_data_provider import WatchlistScreeningIn
 
 # RankingEntryはDynamoDBの文字列セット(ranking_entries)へJSON文字列として格納する。
 # 既存のsector_entries機構(batch_tracker.py)が採用している「1件あたりの上限バイト数を
-# 事前検証してから渡す」という既存パターンを踏襲する。
-_MAX_RANKING_ENTRY_BYTES = 500
+# 事前検証してから渡す」という既存パターンを踏襲する。infrastructure/aws/batch_tracker.py
+# のMAX_RANKING_ENTRY_BYTES(dispatch前のMAX_RANKING_ENTRIES算出根拠)と同じ値を
+# 前提とする(レイヤ分離のためimportはせず、値を変更する場合は両方揃えて変更すること)。
+MAX_RANKING_ENTRY_BYTES = 500
 _MAIN_METRICS_TRIM_COUNT = 3
 
 
@@ -67,11 +69,29 @@ def _build_policy(policy_name: str) -> ScreeningPolicy:
     raise ValueError(f"unknown screening policy: {policy_name}")
 
 
-def _shrink_ranking_entry_if_needed(entry: RankingEntry) -> RankingEntry:
-    if len(entry.model_dump_json().encode("utf-8")) <= _MAX_RANKING_ENTRY_BYTES:
+def _entry_byte_size(entry: RankingEntry) -> int:
+    return len(entry.model_dump_json().encode("utf-8"))
+
+
+def _shrink_ranking_entry_if_needed(entry: RankingEntry) -> RankingEntry | None:
+    """MAX_RANKING_ENTRY_BYTES以内に収まるよう段階的にmain_metricsを縮退させる。
+
+    main_metricsを空にしてもなお上限を超える場合(stock_code/policy_scores/
+    matched_criteria自体が大きい場合。v1の単一Policyでは実質発生しないが、将来の
+    複数Policy化に備えた安全策)は、この銘柄をランキングへ算入できないものとして
+    Noneを返す。呼び出し側はこの銘柄を"passed"ではなく処理失敗として扱うこと。
+    """
+    if _entry_byte_size(entry) <= MAX_RANKING_ENTRY_BYTES:
         return entry
-    trimmed_metrics = dict(list(entry.main_metrics.items())[:_MAIN_METRICS_TRIM_COUNT])
-    return entry.model_copy(update={"main_metrics": trimmed_metrics})
+    trimmed = entry.model_copy(
+        update={"main_metrics": dict(list(entry.main_metrics.items())[:_MAIN_METRICS_TRIM_COUNT])}
+    )
+    if _entry_byte_size(trimmed) <= MAX_RANKING_ENTRY_BYTES:
+        return trimmed
+    emptied = trimmed.model_copy(update={"main_metrics": {}})
+    if _entry_byte_size(emptied) <= MAX_RANKING_ENTRY_BYTES:
+        return emptied
+    return None
 
 
 class WatchlistScreeningService:
@@ -113,7 +133,11 @@ class WatchlistScreeningService:
             main_metrics=_build_main_metrics(input),
         )
 
-    def to_ranking_entry(self, result: WatchlistScreeningResult) -> RankingEntry:
+    def to_ranking_entry(self, result: WatchlistScreeningResult) -> RankingEntry | None:
+        """RankingEntryを組み立てる。MAX_RANKING_ENTRY_BYTESを超過し、main_metricsを
+        空にしても収まらない場合はNoneを返す(呼び出し側はこの銘柄を"passed"として
+        扱わず、処理失敗(failed)として記録すること)。
+        """
         entry = RankingEntry(
             stock_code=result.stock_code,
             total_score=result.total_score,
@@ -124,7 +148,15 @@ class WatchlistScreeningService:
         return _shrink_ranking_entry_if_needed(entry)
 
     @staticmethod
+    def rank(entries: list[RankingEntry]) -> list[RankingEntry]:
+        """総合スコア降順、同点は証券コード昇順で安定ソートした全件を返す(上限適用なし)。
+
+        追加件数上限適用「前」の全合格ランキングが必要な場合(上限外銘柄をRepository結果
+        AuditLogへskipped_over_limitとして記録する場合等)に使う。
+        """
+        return sorted(entries, key=lambda entry: (-entry.total_score, entry.stock_code))
+
+    @staticmethod
     def rank_and_limit(entries: list[RankingEntry], limit: int) -> list[RankingEntry]:
-        """総合スコア降順、同点は証券コード昇順で安定ソートし、上限件数までを返す。"""
-        ranked = sorted(entries, key=lambda entry: (-entry.total_score, entry.stock_code))
-        return ranked[:limit]
+        """rank()の結果に追加件数上限を適用する。"""
+        return WatchlistScreeningService.rank(entries)[:limit]

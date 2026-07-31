@@ -35,8 +35,10 @@ from jstock_advisor.domain.signals.watchlist_screening import (
     describe_matched_criteria,
 )
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    MAX_RANKING_ENTRIES,
     BatchProgress,
     mark_finalize_complete,
+    mark_finalize_failed,
     record_result,
     start_batch,
     try_acquire_finalize,
@@ -65,8 +67,13 @@ from jstock_advisor.services.screening_data_provider import (
 )
 from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
 from jstock_advisor.services.watchlist_screening_audit import (
+    REPOSITORY_RESULT_ADDED,
+    REPOSITORY_RESULT_FAILED,
+    REPOSITORY_RESULT_SKIPPED_EXISTING,
+    REPOSITORY_RESULT_SKIPPED_OVER_LIMIT,
     record_batch_audit,
     record_candidate_audit,
+    record_repository_result_audit,
 )
 from jstock_advisor.services.watchlist_screening_service import (
     WatchlistScreeningResult,
@@ -95,7 +102,7 @@ def _process_single_candidate(
             screening_data.status,
             screening_data.error_message,
         )
-        record_candidate_audit(stock_code, None, "DATA_INSUFFICIENT", now)
+        record_candidate_audit(stock_code, None, "DATA_INSUFFICIENT", now, batch_id=batch_id)
         progress = record_result(batch_id, "data_insufficient", stock_code=stock_code)
         return "data_insufficient", progress
 
@@ -104,11 +111,24 @@ def _process_single_candidate(
         stock_code, screening_data.input.stock_name, screening_data.input, now
     )
     category, evaluation_result = categorize_exclusion_reasons(result.exclusion_reasons)
-    record_candidate_audit(stock_code, result, evaluation_result, now)
 
     ranking_entry_json = None
-    if result.passed:
-        ranking_entry_json = screening_service.to_ranking_entry(result).model_dump_json()
+    if category == "passed":
+        entry = screening_service.to_ranking_entry(result)
+        if entry is None:
+            # MAX_RANKING_ENTRY_BYTESを超過し、main_metricsを空にしても収まらない
+            # (v1の単一Policyでは実質発生しないが、将来の複数Policy化への安全策)。
+            # ランキングへ算入できないため"passed"ではなく処理失敗として扱う。
+            logger.error(
+                "watchlist ranking entry exceeds size limit even after trimming stock_code=%s",
+                stock_code,
+            )
+            category = "failed"
+            evaluation_result = "PASSED_RANKING_ENTRY_TOO_LARGE"
+        else:
+            ranking_entry_json = entry.model_dump_json()
+
+    record_candidate_audit(stock_code, result, evaluation_result, now, batch_id=batch_id)
 
     progress = record_result(
         batch_id, category, stock_code=stock_code, ranking_entry=ranking_entry_json
@@ -136,7 +156,11 @@ def _finalize(
 ) -> None:
     entries = [RankingEntry.model_validate_json(raw) for raw in progress.ranking_entries]
     limit = config.watchlist_screening.max_watchlist_additions_per_run
-    ranked = WatchlistScreeningService.rank_and_limit(entries, limit)
+    all_ranked = WatchlistScreeningService.rank(entries)
+    ranked = all_ranked[:limit]
+    over_limit = all_ranked[limit:]
+    registration_source = WatchlistRegistrationSource.AUTO_SCREENING.value
+    registration_policy = config.watchlist_screening.screening_policy
 
     repository = WatchlistRepository()
     added_items: list[WatchlistItem] = []
@@ -144,25 +168,50 @@ def _finalize(
     concurrent_duplicate_count = 0
     repository_failure_count = 0
 
-    for entry in ranked:
+    for rank, entry in enumerate(ranked, start=1):
         stock_name = _fetch_stock_name(providers, entry.stock_code)
         item = WatchlistItem(
             stock_code=entry.stock_code,
             stock_name=stock_name,
             reason=describe_matched_criteria(entry.matched_criteria),
             registration_source=WatchlistRegistrationSource.AUTO_SCREENING,
-            registration_policy=config.watchlist_screening.screening_policy,
+            registration_policy=registration_policy,
             created_at=now,
             updated_at=now,
         )
         try:
             added = repository.add_if_new(item)
-        except Exception:  # noqa: BLE001 - 1銘柄のRepository書き込み失敗で全体を止めない
+        except Exception as exc:  # noqa: BLE001 - 1銘柄のRepository書き込み失敗で全体を止めない
             logger.exception("watchlist add_if_new failed stock_code=%s", entry.stock_code)
             repository_failure_count += 1
+            record_repository_result_audit(
+                batch_id,
+                entry.stock_code,
+                stock_name,
+                rank,
+                entry.total_score,
+                REPOSITORY_RESULT_FAILED,
+                False,
+                registration_source,
+                registration_policy,
+                now,
+                error=exc,
+            )
             continue
         if not added:
             concurrent_duplicate_count += 1
+            record_repository_result_audit(
+                batch_id,
+                entry.stock_code,
+                stock_name,
+                rank,
+                entry.total_score,
+                REPOSITORY_RESULT_SKIPPED_EXISTING,
+                False,
+                registration_source,
+                registration_policy,
+                now,
+            )
             continue
         added_items.append(item)
         results_by_code[item.stock_code] = WatchlistScreeningResult(
@@ -177,6 +226,35 @@ def _finalize(
             missing_scoring_fields=[],
             evaluated_at=now,
             main_metrics=entry.main_metrics,
+        )
+        record_repository_result_audit(
+            batch_id,
+            entry.stock_code,
+            stock_name,
+            rank,
+            entry.total_score,
+            REPOSITORY_RESULT_ADDED,
+            True,
+            registration_source,
+            registration_policy,
+            now,
+        )
+
+    # 上限外の合格銘柄も、後から追跡できるようskipped_over_limitとして記録する
+    # (stock_nameは追加のfinancial_data呼び出しが必要になるため、追加もされず
+    # 通知もされない銘柄のために取得はしない)。
+    for rank, entry in enumerate(over_limit, start=len(ranked) + 1):
+        record_repository_result_audit(
+            batch_id,
+            entry.stock_code,
+            None,
+            rank,
+            entry.total_score,
+            REPOSITORY_RESULT_SKIPPED_OVER_LIMIT,
+            False,
+            registration_source,
+            registration_policy,
+            now,
         )
 
     notification_sent = False
@@ -266,7 +344,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 _finalize(
                     progress, batch_id, started_at, now, providers, config, notification_service
                 )
-            finally:
+            except Exception as exc:  # noqa: BLE001 - 失敗を記録してから再送出する
+                logger.exception("watchlist_auto_addition finalize failed batch_id=%s", batch_id)
+                mark_finalize_failed(batch_id, str(exc))
+                raise
+            else:
                 mark_finalize_complete(batch_id)
 
         return {"stock_code": stock_code, "category": category}
@@ -303,6 +385,32 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
     total = len(collector_result.stock_codes)
     batch_id = f"watchlist-auto-addition-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+    # 事前ガード(レビュー対応): 評価対象銘柄数がMAX_RANKING_ENTRIESを超える場合、
+    # 全銘柄が合格した場合にranking_entries(DynamoDB文字列セット)の書き込み上限に
+    # 達する恐れがあるため、dispatch前にバッチを中止する(既存buy_candidates_handler.py
+    # のMAX_SECTOR_ENTRIESガードと同じ考え方)。LINE通知は送らない。
+    if total > MAX_RANKING_ENTRIES:
+        logger.error(
+            "watchlist_auto_addition: evaluation_target_count=%d exceeds "
+            "MAX_RANKING_ENTRIES=%d; aborting before dispatch batch_id=%s",
+            total,
+            MAX_RANKING_ENTRIES,
+            batch_id,
+        )
+        record_batch_audit(
+            execution_mode="scheduled",
+            universe_provider=watchlist_config.candidate_universe.provider,
+            screening_policies=[watchlist_config.screening_policy],
+            output_values={
+                "execution_result": "ranking_capacity_exceeded",
+                "evaluation_target_count": total,
+                "max_ranking_entries": MAX_RANKING_ENTRIES,
+            },
+            now=now,
+            batch_id=batch_id,
+        )
+        return {"error": "ranking_capacity_exceeded"}
 
     if total == 0:
         logger.info("watchlist_auto_addition: no candidates to evaluate batch_id=%s", batch_id)

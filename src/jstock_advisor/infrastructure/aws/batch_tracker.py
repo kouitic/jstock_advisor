@@ -36,6 +36,23 @@ _CATEGORIES_WITH_STOCK_CODES = ("data_insufficient", "failed")
 MAX_SECTOR_ENTRY_BYTES = 80
 MAX_SECTOR_ENTRIES = 2000
 
+# --- ウォッチリスト自動追加機能(2026-08)で追加。合格銘柄のRankingEntry(JSON文字列)を
+# ranking_entriesとして集約する。1件あたりの上限バイト数は、実際にJSON化を行う
+# services/watchlist_screening_service.MAX_RANKING_ENTRY_BYTESと同じ値(500バイト)を
+# 前提とする(レイヤ分離のためこのモジュールからはimportしない。値を変更する場合は
+# 両方を揃えて変更すること)。MAX_RANKING_ENTRY_BYTES x MAX_RANKING_ENTRIES =
+# 150,000バイト(約146KB)。評価対象銘柄数はdispatch前にMAX_RANKING_ENTRIESを超えないか
+# 検証される(watchlist_auto_addition_handler.py)ため、data_insufficient_codes/
+# failed_codes等の銘柄コード集合を合算してもDynamoDB項目上限400KBに対し十分な余裕がある
+# (既存のsector_entries機構と同じ考え方)。 ---
+MAX_RANKING_ENTRY_BYTES = 500
+MAX_RANKING_ENTRIES = 300
+
+# finalize失敗時にDynamoDB項目へ保存するエラーメッセージの最大文字数(機密情報混入の
+# リスクとDynamoDB項目サイズの両方を考慮し、詳細はCloudWatch Logs側のlogger.exception
+# に譲り、ここには概要のみを保存する)。
+MAX_FINALIZE_ERROR_MESSAGE_LENGTH = 500
+
 
 class BatchFinalizeStatus(StrEnum):
     """永続データ更新を伴うバッチのfinalize排他制御用状態(ウォッチリスト自動追加機能)。
@@ -44,11 +61,20 @@ class BatchFinalizeStatus(StrEnum):
     原子的な条件付き遷移(try_acquire_finalize)に成功した1ワーカーだけがfinalize
     処理へ進めるようにする。読み取り専用の集計・通知処理のみを行うBUY/holdings等の
     既存バッチは、このステータスを一切参照しない(対象外)。
+
+    RUNNING→FINALIZING→COMPLETED(成功)またはFINALIZING→FINALIZE_FAILED(失敗)へ
+    遷移する。FINALIZE_FAILEDは同一batch_idに対して終端状態として扱う(try_acquire_finalize
+    はFINALIZE_FAILEDからの自動的な再取得を許可しない。通常の重複ワーカーによる
+    再取得を防ぐため)。復旧は新しいbatch_idでのバッチ再実行(次回の週次スケジュール、
+    または手動でのCLI/EventBridge再実行)によって行う想定であり、同一batch_idを
+    そのまま再開する仕組みは実装しない(record_result等の他の仕組みと同様、
+    batch_idは常に新規生成される前提のため)。
     """
 
     RUNNING = "RUNNING"
     FINALIZING = "FINALIZING"
     COMPLETED = "COMPLETED"
+    FINALIZE_FAILED = "FINALIZE_FAILED"
 
 
 @dataclass(frozen=True)
@@ -206,8 +232,12 @@ def try_acquire_finalize(batch_id: str) -> bool:
 
 
 def mark_finalize_complete(batch_id: str) -> None:
-    """finalize処理の成功・失敗にかかわらずtry/finallyで必ず呼び、statusをCOMPLETEDへ
-    遷移する(FINALIZINGのまま放置しない。放置されてもTTL6時間で自動失効するため実害はない)。
+    """finalize処理が正常に完了した場合にのみ呼び、statusをCOMPLETEDへ遷移する。
+
+    finalize処理が例外を送出した場合はmark_finalize_failed()を呼ぶこと(このため
+    呼び出し側はtry/exceptで両者を明示的に使い分ける。以前はtry/finallyで常に
+    COMPLETEDへ遷移させていたが、finalize失敗時にも成功扱いになってしまう不具合が
+    あったため、FINALIZE_FAILEDという独立した終端状態を導入した)。
     """
     if not running_on_lambda():
         return
@@ -216,4 +246,40 @@ def mark_finalize_complete(batch_id: str) -> None:
         UpdateExpression="SET #status = :completed",
         ExpressionAttributeNames={"#status": "status"},
         ExpressionAttributeValues={":completed": BatchFinalizeStatus.COMPLETED.value},
+    )
+
+
+def mark_finalize_failed(batch_id: str, error_message: str | None = None) -> None:
+    """finalize処理が例外で失敗した場合に呼び、statusをFINALIZE_FAILEDへ遷移する。
+
+    finalize_failed_at/finalize_error_message/updated_atを合わせて記録する。
+    error_messageはMAX_FINALIZE_ERROR_MESSAGE_LENGTHで切り詰めてから保存する
+    (DynamoDB項目サイズの節約に加え、詳細なスタックトレース等の機密情報を
+    含みうる長い例外メッセージをそのまま保存しないための安全策。詳細な原因調査は
+    CloudWatch Logs側のlogger.exceptionを参照する)。
+    """
+    if not running_on_lambda():
+        return
+    now_iso = dt.datetime.now(dt.UTC).isoformat()
+    truncated_message = (
+        (error_message or "")[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH] if error_message else None
+    )
+    _table().update_item(
+        Key={"batch_id": batch_id},
+        UpdateExpression=(
+            "SET #status = :failed, #failed_at = :failed_at, "
+            "#error_message = :error_message, #updated_at = :updated_at"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+            "#failed_at": "finalize_failed_at",
+            "#error_message": "finalize_error_message",
+            "#updated_at": "updated_at",
+        },
+        ExpressionAttributeValues={
+            ":failed": BatchFinalizeStatus.FINALIZE_FAILED.value,
+            ":failed_at": now_iso,
+            ":error_message": truncated_message,
+            ":updated_at": now_iso,
+        },
     )
