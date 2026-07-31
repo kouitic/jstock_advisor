@@ -247,3 +247,58 @@ def test_try_acquire_finalize_returns_true_locally_without_dynamodb_call(
 def test_mark_finalize_complete_is_noop_locally(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: False)
     batch_tracker.mark_finalize_complete("batch-1")  # 例外を出さずに何もしない
+
+
+# --- mark_finalize_failed(レビュー対応: finalize失敗時にCOMPLETEDへ遷移させない) ---
+
+
+def test_mark_finalize_failed_transitions_to_finalize_failed(moto_dynamodb: None) -> None:
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.try_acquire_finalize("batch-1")
+
+    batch_tracker.mark_finalize_failed("batch-1", "boom")
+
+    table = boto3.resource("dynamodb", region_name=_REGION).Table("jstock-batch_runs")
+    item = table.get_item(Key={"batch_id": "batch-1"})["Item"]
+    assert item["status"] == "FINALIZE_FAILED"
+    assert item["finalize_error_message"] == "boom"
+    assert "finalize_failed_at" in item
+    assert "updated_at" in item
+
+
+def test_mark_finalize_failed_truncates_long_error_message(moto_dynamodb: None) -> None:
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.try_acquire_finalize("batch-1")
+    long_message = "x" * 10_000
+
+    batch_tracker.mark_finalize_failed("batch-1", long_message)
+
+    table = boto3.resource("dynamodb", region_name=_REGION).Table("jstock-batch_runs")
+    item = table.get_item(Key={"batch_id": "batch-1"})["Item"]
+    assert len(item["finalize_error_message"]) == batch_tracker.MAX_FINALIZE_ERROR_MESSAGE_LENGTH
+
+
+def test_mark_finalize_failed_is_noop_locally(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: False)
+    batch_tracker.mark_finalize_failed("batch-1", "boom")  # 例外を出さずに何もしない
+
+
+def test_try_acquire_finalize_does_not_allow_retry_after_finalize_failed(
+    moto_dynamodb: None,
+) -> None:
+    """通常の重複ワーカーはFINALIZE_FAILEDから再取得できない(終端状態として扱う)。"""
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.try_acquire_finalize("batch-1")
+    batch_tracker.mark_finalize_failed("batch-1", "boom")
+
+    assert batch_tracker.try_acquire_finalize("batch-1") is False
+
+
+def test_max_ranking_entries_capacity_is_documented_and_positive() -> None:
+    """MAX_RANKING_ENTRY_BYTES x MAX_RANKING_ENTRIESがDynamoDB項目上限400KBに対し
+    十分な余裕を持つことを回帰的に確認する(レビュー対応の算出根拠)。
+    """
+    assert batch_tracker.MAX_RANKING_ENTRIES > 0
+    total_budget_bytes = batch_tracker.MAX_RANKING_ENTRY_BYTES * batch_tracker.MAX_RANKING_ENTRIES
+    dynamodb_item_limit_bytes = 400_000
+    assert total_budget_bytes < dynamodb_item_limit_bytes * 0.5

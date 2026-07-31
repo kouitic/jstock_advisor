@@ -134,6 +134,14 @@ class _FakeWatchlistScreeningService:
         )
 
     @staticmethod
+    def rank(entries):
+        from jstock_advisor.services.watchlist_screening_service import (
+            WatchlistScreeningService,
+        )
+
+        return WatchlistScreeningService.rank(entries)
+
+    @staticmethod
     def rank_and_limit(entries, limit):
         from jstock_advisor.services.watchlist_screening_service import (
             WatchlistScreeningService,
@@ -184,8 +192,17 @@ def test_dry_run_does_not_write_repository_or_send_notification(
         ),
     )
     audit_calls: list[Any] = []
-    monkeypatch.setattr(cli_module, "record_candidate_audit", lambda *a: audit_calls.append(a))
+    monkeypatch.setattr(
+        cli_module, "record_candidate_audit", lambda *a, **kw: audit_calls.append((a, kw))
+    )
     monkeypatch.setattr(cli_module, "record_batch_audit", lambda **kw: audit_calls.append(kw))
+    monkeypatch.setattr(
+        cli_module,
+        "record_repository_result_audit",
+        lambda *a, **kw: pytest.fail(
+            "record_repository_result_audit should not be called during dry-run"
+        ),
+    )
 
     result = _runner.invoke(cli_module.app, ["--dry-run"])
 
@@ -198,7 +215,7 @@ def test_dry_run_does_not_write_repository_or_send_notification(
 
 def test_dry_run_disabled_by_config_is_still_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_common(monkeypatch, _fake_config(enabled=False))
-    monkeypatch.setattr(cli_module, "record_candidate_audit", lambda *a: None)
+    monkeypatch.setattr(cli_module, "record_candidate_audit", lambda *a, **kw: None)
 
     result = _runner.invoke(cli_module.app, ["--dry-run"])
 
@@ -242,8 +259,19 @@ def test_real_run_adds_to_watchlist_and_sends_notification(
 
     monkeypatch.setattr(cli_module, "LineNotificationService", _FakeNotificationService)
     audit_calls: list[Any] = []
-    monkeypatch.setattr(cli_module, "record_candidate_audit", lambda *a: audit_calls.append(a))
+    candidate_audit_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli_module,
+        "record_candidate_audit",
+        lambda *a, **kw: (audit_calls.append((a, kw)), candidate_audit_calls.append(kw)),
+    )
     monkeypatch.setattr(cli_module, "record_batch_audit", lambda **kw: audit_calls.append(kw))
+    repo_result_calls: list[tuple] = []
+    monkeypatch.setattr(
+        cli_module,
+        "record_repository_result_audit",
+        lambda *a, **kw: repo_result_calls.append(a),
+    )
 
     result = _runner.invoke(cli_module.app, [])
 
@@ -255,6 +283,14 @@ def test_real_run_adds_to_watchlist_and_sends_notification(
     # 通常実行(非dry-run)ではrecord_candidate_audit/record_batch_auditの両方が
     # 呼ばれる(dry-runでは一切呼ばれない、別テストで確認済み)。
     assert len(audit_calls) >= 2
+    # 実追加件数(1件)とrepository_result="added"の監査件数が一致する
+    added_calls = [c for c in repo_result_calls if c[5] == "added"]
+    assert len(added_calls) == len(fake_repo.added) == 1
+    # batch_id経由で評価AuditLog(record_candidate_audit)とRepository結果AuditLog
+    # (record_repository_result_audit)を関連付けられる
+    candidate_batch_id = candidate_audit_calls[0]["batch_id"]
+    repository_result_batch_id = repo_result_calls[0][0]
+    assert candidate_batch_id == repository_result_batch_id
 
 
 def test_real_run_reports_candidate_universe_error(monkeypatch: pytest.MonkeyPatch) -> None:

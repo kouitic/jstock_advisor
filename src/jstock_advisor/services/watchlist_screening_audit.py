@@ -15,6 +15,17 @@ from jstock_advisor.services.watchlist_screening_service import WatchlistScreeni
 
 DECISION_TYPE_BATCH = "watchlist_auto_addition_batch"
 DECISION_TYPE_CANDIDATE = "watchlist_auto_addition_candidate_evaluation"
+# finalize後の銘柄単位Repository書き込み結果専用のdecision_type(レビュー対応)。
+# DECISION_TYPE_CANDIDATE(スクリーニング評価結果)とは別のAuditLogとして記録し、
+# 既存のDECISION_TYPE_CANDIDATEの内容・意味は変更しない。
+DECISION_TYPE_REPOSITORY_RESULT = "watchlist_auto_addition_repository_result"
+
+REPOSITORY_RESULT_ADDED = "added"
+REPOSITORY_RESULT_SKIPPED_EXISTING = "skipped_existing"
+REPOSITORY_RESULT_SKIPPED_OVER_LIMIT = "skipped_over_limit"
+REPOSITORY_RESULT_FAILED = "repository_failed"
+
+_MAX_ERROR_SUMMARY_LENGTH = 300
 
 
 def record_candidate_audit(
@@ -22,13 +33,20 @@ def record_candidate_audit(
     result: WatchlistScreeningResult | None,
     evaluation_result: str,
     now: dt.datetime,
+    batch_id: str | None,
 ) -> None:
     """銘柄ごとのスクリーニング結果を記録する。
 
     実際にウォッチリストへ追加されたかどうか(added_to_watchlist)は、全銘柄の
     評価が完了した後のランキング・上限適用で初めて確定するため、この記録には
-    含めない。最終的にどの銘柄が追加されたかは、バッチ単位の監査記録・LINE通知・
+    含めない。最終的にどの銘柄が追加されたかは、record_repository_result_audit()
+    (DECISION_TYPE_REPOSITORY_RESULT)・バッチ単位の監査記録・LINE通知・
     WatchlistItem.registration_source/registration_policyから確認できる。
+
+    batch_idはrecord_repository_result_audit()と同じ値を渡すことで、後から
+    「この評価結果が最終的にどう処理されたか」をbatch_id経由で突き合わせられる
+    ようにする(Lambda fan-out・CLI単一プロセス実行のいずれも、実行1回につき
+    1つのbatch_idを発行して両方の記録へ一貫して渡すこと)。
     """
     output_values: dict[str, Any] = {"evaluation_result": evaluation_result}
     if result is not None:
@@ -55,7 +73,66 @@ def record_candidate_audit(
     AuditService().record(
         decision_type=DECISION_TYPE_CANDIDATE,
         stock_code=stock_code,
-        input_values={},
+        input_values={"batch_id": batch_id, "stock_code": stock_code},
+        calculation_formulas={},
+        output_values=output_values,
+        data_sources=[],
+        rule_version=RULE_VERSION_PLACEHOLDER,
+        timestamp=now,
+    )
+
+
+def _safe_error_summary(exc: Exception) -> str:
+    """AuditLogへ保存可能な長さへ切り詰めたエラー概要を作る。
+
+    詳細なスタックトレースはCloudWatch Logs側のlogger.exceptionに譲り、ここには
+    例外の型名+メッセージの概要のみを保存する(機密情報混入・AuditLog肥大化対策)。
+    """
+    return f"{type(exc).__name__}: {str(exc)}"[:_MAX_ERROR_SUMMARY_LENGTH]
+
+
+def record_repository_result_audit(
+    batch_id: str,
+    stock_code: str,
+    stock_name: str | None,
+    rank: int,
+    total_score: float,
+    repository_result: str,
+    added_to_watchlist: bool,
+    registration_source: str,
+    registration_policy: str,
+    now: dt.datetime,
+    error: Exception | None = None,
+) -> None:
+    """finalize後、銘柄ごとのWatchlistRepository書き込み結果を記録する。
+
+    repository_resultは以下のいずれか:
+    - REPOSITORY_RESULT_ADDED: 実際にウォッチリストへ追加された
+    - REPOSITORY_RESULT_SKIPPED_EXISTING: 追加を試みたが既に登録済みだった
+      (add_if_newの冪等性チェック、または並行実行による競合)
+    - REPOSITORY_RESULT_SKIPPED_OVER_LIMIT: 合格しランキングされたが、
+      追加件数上限(max_watchlist_additions_per_run)の外だったため追加されなかった
+    - REPOSITORY_RESULT_FAILED: Repository書き込み自体が例外で失敗した
+
+    rankは追加件数上限適用「前」の全合格ランキングにおける順位(1始まり)。
+    skipped_over_limitの銘柄も含め、合格した全銘柄について呼ぶこと。
+    """
+    output_values: dict[str, Any] = {
+        "stock_name": stock_name,
+        "rank": rank,
+        "total_score": total_score,
+        "repository_result": repository_result,
+        "added_to_watchlist": added_to_watchlist,
+        "registration_source": registration_source,
+        "registration_policy": registration_policy,
+        "processed_at": now.isoformat(),
+    }
+    if error is not None:
+        output_values["error_summary"] = _safe_error_summary(error)
+    AuditService().record(
+        decision_type=DECISION_TYPE_REPOSITORY_RESULT,
+        stock_code=stock_code,
+        input_values={"batch_id": batch_id, "stock_code": stock_code},
         calculation_formulas={},
         output_values=output_values,
         data_sources=[],

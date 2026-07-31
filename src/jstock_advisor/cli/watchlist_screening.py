@@ -10,6 +10,7 @@ services/watchlist_screening_service.py)を使う。
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 import typer
 
@@ -17,6 +18,7 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.domain.signals.watchlist_screening import (
+    RankingEntry,
     categorize_exclusion_reasons,
     describe_matched_criteria,
 )
@@ -42,8 +44,13 @@ from jstock_advisor.services.screening_data_provider import (
 )
 from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
 from jstock_advisor.services.watchlist_screening_audit import (
+    REPOSITORY_RESULT_ADDED,
+    REPOSITORY_RESULT_FAILED,
+    REPOSITORY_RESULT_SKIPPED_EXISTING,
+    REPOSITORY_RESULT_SKIPPED_OVER_LIMIT,
     record_batch_audit,
     record_candidate_audit,
+    record_repository_result_audit,
 )
 from jstock_advisor.services.watchlist_screening_service import (
     WatchlistScreeningResult,
@@ -63,6 +70,10 @@ def run(
 ) -> None:
     """候補銘柄ユニバースを評価し、条件を満たした銘柄をウォッチリストへ追加する。"""
     now = dt.datetime.now(dt.UTC)
+    # Lambda側のbatch_idと同様、この実行1回につき1つ発行する。record_candidate_audit
+    # とrecord_repository_result_audit(dry-runでは呼ばない)の両方へ同じ値を渡すことで、
+    # 後からbatch_id経由で評価結果とRepository結果を突き合わせられるようにする。
+    batch_id = f"watchlist-screening-cli-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
     config = load_config()
     wc = config.watchlist_screening
 
@@ -90,22 +101,37 @@ def run(
     data_failure_count = 0
     required_failed_count = 0
     score_failed_count = 0
+    unrankable_count = 0
     passed_results: list[WatchlistScreeningResult] = []
+    passed_entries: list[RankingEntry] = []
 
     for stock_code in collector_result.stock_codes:
         screening_data = screening_data_provider.get_screening_input(stock_code, now)
         if screening_data.status != ScreeningDataStatus.OK or screening_data.input is None:
             data_failure_count += 1
             if not dry_run:
-                record_candidate_audit(stock_code, None, "DATA_INSUFFICIENT", now)
+                record_candidate_audit(
+                    stock_code, None, "DATA_INSUFFICIENT", now, batch_id=batch_id
+                )
             continue
 
         result = screening_service.evaluate(
             stock_code, screening_data.input.stock_name, screening_data.input, now
         )
         category, evaluation_result = categorize_exclusion_reasons(result.exclusion_reasons)
+
+        ranking_entry = None
+        if category == "passed":
+            ranking_entry = screening_service.to_ranking_entry(result)
+            if ranking_entry is None:
+                # MAX_RANKING_ENTRY_BYTESを超過し、main_metricsを空にしても収まらない
+                # (v1の単一Policyでは実質発生しないが、将来の複数Policy化への安全策)。
+                category = "failed"
+                evaluation_result = "PASSED_RANKING_ENTRY_TOO_LARGE"
+                unrankable_count += 1
+
         if not dry_run:
-            record_candidate_audit(stock_code, result, evaluation_result, now)
+            record_candidate_audit(stock_code, result, evaluation_result, now, batch_id=batch_id)
 
         if category == "data_insufficient":
             data_failure_count += 1
@@ -116,22 +142,29 @@ def run(
         elif category == "score_failed":
             score_failed_count += 1
         elif category == "passed":
+            # categoryが"passed"のままであれば、上のブロックでranking_entryは
+            # 必ずNoneでない(Noneの場合はcategoryを"failed"へ書き換えている)。
+            assert ranking_entry is not None
             passed_results.append(result)
+            passed_entries.append(ranking_entry)
+        # "failed"(unrankable)はdata_success_count/unrankable_countのみ計上し、
+        # ランキング・登録の対象外とする。
 
     results_by_code = {result.stock_code: result for result in passed_results}
-    entries = [screening_service.to_ranking_entry(result) for result in passed_results]
-    ranked_entries = WatchlistScreeningService.rank_and_limit(
-        entries, wc.max_watchlist_additions_per_run
-    )
-    over_limit_count = len(passed_results) - len(ranked_entries)
+    all_ranked = WatchlistScreeningService.rank(passed_entries)
+    limit = wc.max_watchlist_additions_per_run
+    ranked_entries = all_ranked[:limit]
+    over_limit_entries = all_ranked[limit:]
+    over_limit_count = len(over_limit_entries)
 
+    registration_source = WatchlistRegistrationSource.AUTO_SCREENING.value
     added_items: list[WatchlistItem] = []
     added_results: dict[str, WatchlistScreeningResult] = {}
     watchlist_repo = None if dry_run else WatchlistRepository()
     concurrent_duplicate_count = 0
     repository_failure_count = 0
 
-    for entry in ranked_entries:
+    for rank, entry in enumerate(ranked_entries, start=1):
         result = results_by_code[entry.stock_code]
         item = WatchlistItem(
             stock_code=entry.stock_code,
@@ -151,12 +184,65 @@ def run(
         except Exception as e:  # noqa: BLE001 - 1銘柄の書き込み失敗で全体を止めない
             typer.echo(f"追加に失敗しました: {entry.stock_code}: {e}")
             repository_failure_count += 1
+            record_repository_result_audit(
+                batch_id,
+                entry.stock_code,
+                result.stock_name,
+                rank,
+                entry.total_score,
+                REPOSITORY_RESULT_FAILED,
+                False,
+                registration_source,
+                wc.screening_policy,
+                now,
+                error=e,
+            )
             continue
         if not added:
             concurrent_duplicate_count += 1
+            record_repository_result_audit(
+                batch_id,
+                entry.stock_code,
+                result.stock_name,
+                rank,
+                entry.total_score,
+                REPOSITORY_RESULT_SKIPPED_EXISTING,
+                False,
+                registration_source,
+                wc.screening_policy,
+                now,
+            )
             continue
         added_items.append(item)
         added_results[item.stock_code] = result
+        record_repository_result_audit(
+            batch_id,
+            entry.stock_code,
+            result.stock_name,
+            rank,
+            entry.total_score,
+            REPOSITORY_RESULT_ADDED,
+            True,
+            registration_source,
+            wc.screening_policy,
+            now,
+        )
+
+    if not dry_run:
+        for rank, entry in enumerate(over_limit_entries, start=len(ranked_entries) + 1):
+            over_limit_result = results_by_code[entry.stock_code]
+            record_repository_result_audit(
+                batch_id,
+                entry.stock_code,
+                over_limit_result.stock_name,
+                rank,
+                entry.total_score,
+                REPOSITORY_RESULT_SKIPPED_OVER_LIMIT,
+                False,
+                registration_source,
+                wc.screening_policy,
+                now,
+            )
 
     _print_summary(
         dry_run=dry_run,
@@ -172,6 +258,7 @@ def run(
         data_failure_count=data_failure_count,
         required_failed_count=required_failed_count,
         score_failed_count=score_failed_count,
+        unrankable_count=unrankable_count,
         passed_count=len(passed_results),
         addition_limit=wc.max_watchlist_additions_per_run,
         over_limit_count=over_limit_count,
@@ -227,6 +314,7 @@ def run(
             "notification_failure": notification_failure,
         },
         now=now,
+        batch_id=batch_id,
     )
 
     typer.echo(f"\nウォッチリストへ{len(added_items)}件追加しました。")
@@ -248,6 +336,7 @@ def _print_summary(
     data_failure_count: int,
     required_failed_count: int,
     score_failed_count: int,
+    unrankable_count: int,
     passed_count: int,
     addition_limit: int,
     over_limit_count: int,
@@ -271,6 +360,8 @@ def _print_summary(
     typer.echo(f"データ取得失敗: {data_failure_count}件")
     typer.echo(f"必須条件不一致: {required_failed_count}件")
     typer.echo(f"スコア不足: {score_failed_count}件")
+    if unrankable_count:
+        typer.echo(f"ランキング算入不可(データ超過): {unrankable_count}件")
     typer.echo(f"合格: {passed_count}件")
     typer.echo(f"追加上限: {addition_limit}件")
     label = "追加予定" if dry_run else "追加"
