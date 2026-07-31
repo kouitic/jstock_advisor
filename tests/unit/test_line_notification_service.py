@@ -18,6 +18,7 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     RecordDateUnknownReason,
 )
+from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -965,18 +966,66 @@ def test_notify_buy_candidates_digest_sends_one_message_for_multiple_winners(
     service, _repo, client = service_and_repos
     winners = [
         _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY),
-        _make_buy_pipeline_recommendation(buy_action=BuyAction.SMALL_ENTRY),
+        _make_buy_pipeline_recommendation(buy_action=BuyAction.SMALL_ENTRY).model_copy(
+            update={"stock_code": "1111", "recommendation_id": "rec-buy-2"}
+        ),
     ]
 
-    sent_count = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW)
 
-    assert sent_count == 2
+    assert results == {"4516": "SENT_AND_RECORDED", "1111": "SENT_AND_RECORDED"}
     assert len(client.sent) == 1
     message = client.sent[0]
     assert "【本日の購入候補】" in message
     assert "1位 4516 日本新薬" in message
-    assert "2位 4516 日本新薬" in message
+    assert "2位 1111 日本新薬" in message
     assert "対象: 最大2銘柄" in message
+
+
+def test_notify_buy_candidates_digest_shows_holding_info_for_holding_source(
+    service_and_repos,
+) -> None:
+    """統合BUY候補パイプライン(2026-07)。実際に送信されるダイジェスト本文
+    (notify_buy_candidates_digest → _buy_candidate_digest_block)自体に、
+    保有銘柄の種別・保有株数・平均取得単価・評価損益(参考)が表示されることを
+    確認する(_format_buy_candidate_message側だけの表示漏れの再発防止)。
+    """
+    from decimal import Decimal
+
+    from jstock_advisor.domain.entities.enums import CandidateSource
+
+    service, _repo, client = service_and_repos
+    winner = _make_buy_pipeline_recommendation(buy_action=BuyAction.BUY).model_copy(
+        update={
+            "candidate_source": CandidateSource.HOLDING,
+            "holding_quantity": 300,
+            "average_acquisition_price": Decimal("2100"),
+            "unrealized_profit_loss": Decimal("75000"),
+            "unrealized_profit_loss_pct": Decimal("11.9"),
+        }
+    )
+
+    service.notify_buy_candidates_digest([winner], _NOW)
+
+    message = client.sent[0]
+    assert "種別: 保有銘柄・買い増し候補" in message
+    assert "現在の保有: 300株" in message
+    assert "平均取得単価: 2,100円" in message
+    assert "評価損益(参考): 75,000円(+11.9%)" in message
+
+
+def test_notify_buy_candidates_digest_omits_holding_info_for_watchlist_source(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+    winner = _make_buy_pipeline_recommendation(buy_action=BuyAction.BUY)
+
+    service.notify_buy_candidates_digest([winner], _NOW)
+
+    message = client.sent[0]
+    assert "種別: 気になる銘柄" in message
+    assert "現在の保有" not in message
+    assert "平均取得単価" not in message
 
 
 def test_notify_buy_candidates_digest_records_notification_log_per_stock(
@@ -1008,10 +1057,49 @@ def test_notify_buy_candidates_digest_records_notification_log_per_stock(
 def test_notify_buy_candidates_digest_no_winners_sends_nothing(service_and_repos) -> None:
     service, _repo, client = service_and_repos
 
-    sent_count = service.notify_buy_candidates_digest([], _NOW)
+    results = service.notify_buy_candidates_digest([], _NOW)
 
-    assert sent_count == 0
+    assert results == {}
     assert client.sent == []
+
+
+def test_notify_buy_candidates_digest_line_send_failure_marks_send_failed(
+    service_and_repos, monkeypatch
+) -> None:
+    """LINE送信(push_message)自体が失敗した場合、SENT_AND_RECORDEDにはならず
+    SEND_FAILEDとして扱われ、NotificationLogは保存されない
+    (統合BUY候補パイプライン2026-07)。"""
+    service, _repo, client = service_and_repos
+    winners = [_make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)]
+
+    def _raise(_message: str) -> None:
+        raise RuntimeError("LINE API down")
+
+    monkeypatch.setattr(client, "push_message", _raise)
+
+    results = service.notify_buy_candidates_digest(winners, _NOW)
+
+    assert results == {"4516": "SEND_FAILED"}
+
+
+def test_notify_buy_candidates_digest_log_save_failure_marks_sent_log_failed(
+    service_and_repos, monkeypatch
+) -> None:
+    """push_messageは成功したがNotificationLog保存が失敗した場合、二重送信を
+    避けるため未送信扱いにせず、SENT_LOG_FAILEDとして区別する
+    (統合BUY候補パイプライン2026-07)。"""
+    service, _repo, client = service_and_repos
+    winners = [_make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)]
+
+    def _raise(_entry: object) -> None:
+        raise RuntimeError("DynamoDB write failed")
+
+    monkeypatch.setattr(service._log_repo, "save", _raise)
+
+    results = service.notify_buy_candidates_digest(winners, _NOW)
+
+    assert results == {"4516": "SENT_LOG_FAILED"}
+    assert len(client.sent) == 1  # LINEへは実際に送信されている
 
 
 def test_notify_batch_summary_suppressed_when_empty_and_send_empty_summary_false(
@@ -1144,3 +1232,128 @@ def test_buy_candidate_message_omits_margin_line_when_all_adjustments_superseded
     message = render_notification_preview(rec)
 
     assert "必要安全余裕を拡大した理由" not in message
+
+
+# --- 統合BUY候補パイプライン(2026-07): check_data_quality_eligibility /
+# check_resend_eligibilityの読み取り専用性・判定内容のテスト ---
+
+
+def test_check_data_quality_eligibility_is_eligible_for_clean_data(service_and_repos) -> None:
+    # _make_buy_pipeline_recommendationは価格帯が意図的に不整合(現在値が全買付
+    # 価格帯を上回る)なテストフィクスチャのため、ここでは整合性検証を通過する
+    # _make_recommendation(buy_action未設定)を使う。
+    service, repo, client = service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    repo.save(rec)
+
+    eligibility = service.check_data_quality_eligibility(rec, _NOW)
+
+    assert eligibility.eligible is True
+    assert eligibility.block_category is None
+
+
+def test_check_data_quality_eligibility_blocks_with_data_quality_category(
+    service_and_repos, monkeypatch
+) -> None:
+    from jstock_advisor.domain.entities.enums import EligibilityBlockCategory
+
+    service, repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)
+    repo.save(rec)
+    monkeypatch.setattr(service, "_check_data_quality", lambda *a, **kw: (_alert_stub(rec), False))
+
+    eligibility = service.check_data_quality_eligibility(rec, _NOW)
+
+    assert eligibility.eligible is False
+    assert eligibility.block_category == EligibilityBlockCategory.DATA_QUALITY
+
+
+def test_check_data_quality_eligibility_does_not_write_notification_log(
+    service_and_repos, monkeypatch
+) -> None:
+    """データ品質チェックはNotificationLogへ一切書き込まない(読み取り専用)。
+    ブロックされるケース・されないケースの両方で、呼び出し前後で件数が変化しない
+    ことを確認する。
+    """
+    service, repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)
+    repo.save(rec)
+    monkeypatch.setattr(service, "_check_data_quality", lambda *a, **kw: (_alert_stub(rec), False))
+
+    before = len(service._log_repo.list_all())
+    service.check_data_quality_eligibility(rec, _NOW)
+    after = len(service._log_repo.list_all())
+
+    assert before == after == 0
+    assert client.sent == []  # notify_data_quality_alertはログのみ、LINE送信もしない
+
+
+def test_check_data_quality_eligibility_buy_candidate_batch_suppresses_manual_review_line(
+    service_and_repos, monkeypatch
+) -> None:
+    """BUY_CANDIDATE_BATCHコンテキストでは要手動確認LINEを送らない
+    (evaluate_notification_statusと同じ規約)。"""
+    from jstock_advisor.domain.entities.enums import NotificationContext
+
+    service, repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)
+    repo.save(rec)
+    monkeypatch.setattr(service, "_check_data_quality", lambda *a, **kw: (_alert_stub(rec), True))
+
+    eligibility = service.check_data_quality_eligibility(
+        rec, _NOW, context=NotificationContext.BUY_CANDIDATE_BATCH
+    )
+
+    assert eligibility.eligible is False
+    assert client.sent == []
+
+
+def test_check_resend_eligibility_is_eligible_for_first_notification(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)
+    repo.save(rec)
+
+    eligibility = service.check_resend_eligibility(rec, _NOW)
+
+    assert eligibility.eligible is True
+
+
+def test_check_resend_eligibility_blocks_recently_notified_with_correct_category(
+    service_and_repos,
+) -> None:
+    from jstock_advisor.domain.entities.enums import EligibilityBlockCategory, NotificationType
+
+    service, repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)
+    repo.save(rec)
+    # 直近に同一銘柄・同一種別の通知を送信済みという状態を作る
+    service._log_repo.save(
+        NotificationLog(
+            notification_id="log-1",
+            notification_type=NotificationType.DAILY_BUY_CANDIDATES,
+            stock_code=rec.stock_code,
+            content_hash="dummy",
+            sent_at=_NOW,
+            related_recommendation_id=rec.recommendation_id,
+        )
+    )
+
+    eligibility = service.check_resend_eligibility(rec, _NOW)
+
+    assert eligibility.eligible is False
+    assert eligibility.block_category == EligibilityBlockCategory.RECENTLY_NOTIFIED
+
+
+def test_check_resend_eligibility_does_not_write_notification_log(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)
+    repo.save(rec)
+
+    before = len(service._log_repo.list_all())
+    service.check_resend_eligibility(rec, _NOW)
+    after = len(service._log_repo.list_all())
+
+    assert before == after == 0
+    assert client.sent == []

@@ -321,6 +321,10 @@ class NotificationRulesConfig(StrictModel):
     send_empty_summary: bool
     buy_candidates: BuyCandidatesNotificationConfig
     operations: OperationsNotificationConfig
+    # --- 統合BUY候補パイプライン(2026-07)で追加。要求仕様§15: 気になる銘柄・
+    # 保有銘柄それぞれをBUY候補評価対象へ含めるかを個別に制御できるようにする ---
+    include_watchlist: bool
+    include_holdings: bool
 
 
 # --- data_validation_rules.yaml -------------------------------------------
@@ -720,6 +724,31 @@ class BuyDecisionRulesConfig(StrictModel):
 # --- 集約 --------------------------------------------------------------------
 
 
+class AddOnRulesConfig(StrictModel):
+    """保有銘柄の買い増し固有リスクゲート(2026-07 統合BUY候補パイプライン)。
+
+    既存のportfolio_concentration.single_stock_weight_threshold_pctは
+    レビュー通知向けの警告閾値であり、買い増し禁止の判断には転用しない
+    (意味が異なるため)。買い増し禁止に使う閾値はここで別途定義する。
+    """
+
+    version: int
+    enabled: bool
+    # 銘柄集中上限(比率0-1)。買い増し後の構成比がこれを超える場合、
+    # add_on_eligibility=BLOCKED(POSITION_CONCENTRATION)とする。
+    block_add_on_single_stock_ratio: float
+    # 業種集中上限(比率0-1)。
+    block_add_on_sector_ratio: float
+    # 売却・利確判定と競合する場合に買い増し通知を禁止するか。
+    block_on_sell_signal: bool
+    # 保有データ(株数・平均取得単価)の整合性チェックを必須とするか。
+    require_holding_data_consistency: bool
+    # 単元未満株(端株)を保有データ不整合として買い増し禁止にするか
+    # (既定False。単元未満株・株式分割等で正当に発生しうるため、
+    # 即座にブロックはしない)。
+    block_add_on_on_odd_lot: bool
+
+
 class AppConfig(StrictModel):
     screening: ScreeningRulesConfig
     valuation: ValuationRulesConfig
@@ -737,3 +766,4 @@ class AppConfig(StrictModel):
     earnings_window: EarningsWindowRulesConfig
     portfolio_concentration: PortfolioConcentrationRulesConfig
     buy_decision: BuyDecisionRulesConfig
+    add_on: AddOnRulesConfig

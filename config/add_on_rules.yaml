@@ -1,0 +1,32 @@
+# 保有銘柄の買い増し固有リスクゲート設定(2026-07 統合BUY候補パイプライン)
+#
+# 既存のportfolio_concentration_rules.yamlのsingle_stock_weight_threshold_pct
+# はレビュー通知向けの警告閾値であり、ここでの買い増し禁止判定には転用しない
+# (意味が異なるため。警告閾値と禁止閾値を混同しない)。
+
+version: 1
+
+# 買い増し固有リスクゲート自体を有効にするか。falseの場合、保有銘柄は
+# 気になる銘柄と同じ共通購入判断のみで評価される(集中度・売却競合チェックを
+# 行わない。動作確認・移行期のみの使用を想定)。
+enabled: true
+
+# 銘柄集中上限(比率0-1)。買い増し後(最低売買単位1単元を仮定)の
+# 一銘柄あたり構成比がこれを超える場合、買い増し通知を禁止する。
+block_add_on_single_stock_ratio: 0.20
+
+# 業種集中上限(比率0-1)。買い増し後の業種別構成比がこれを超える場合、
+# 買い増し通知を禁止する。
+block_add_on_sector_ratio: 0.35
+
+# 売却・利確判定(SELL/URGENT_REVIEW/PARTIAL_PROFIT_TAKE/FULL_PROFIT_TAKE/
+# PARTIAL_RISK_REDUCTION)と競合する場合、買い増し通知を禁止するか。
+block_on_sell_signal: true
+
+# 保有データ(株数・平均取得単価)の整合性チェックを必須とするか。
+require_holding_data_consistency: true
+
+# 単元未満株(端株)を保有データ不整合として買い増し禁止にするか。
+# 既定false: 単元未満株・株式分割等で正当に発生しうるため、それだけを
+# 理由に機械的にブロックしない(警告としては記録する)。
+block_add_on_on_odd_lot: false

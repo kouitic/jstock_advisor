@@ -310,6 +310,9 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref RecommendationsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
         - DynamoDBReadPolicy: { TableName: !Ref WatchlistTable }
+        # 統合BUY候補パイプライン(2026-07)で保有銘柄を購入判断対象へ統合したため追加
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref PurchaseLotsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }

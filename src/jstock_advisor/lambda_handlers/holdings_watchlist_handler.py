@@ -1,11 +1,21 @@
-"""保有銘柄・ウォッチリスト分析Lambda(schedule.yaml daily_holdings_watchlist_analysis、平日16:30)。
+"""保有銘柄分析Lambda(schedule.yaml daily_holdings_watchlist_analysis、平日16:30)。
 
-CLIの`jstock analyze holdings --source real --notify`および
-`jstock analyze watchlist --source real --notify`と同じロジックを
+CLIの`jstock analyze holdings --source real --notify`と同じロジックを
 EventBridge Scheduler経由で自動実行する薄いアダプタ。
 
+【統合BUY候補パイプライン(2026-07)への移行について】
+以前はウォッチリスト銘柄の買いシグナル評価(task="watchlist")もこのハンドラが
+別経路(recommendation_type=WATCH_BUY、ランキングなしの個別即時通知)として
+実施していたが、`buy_candidates_handler.py`の統合BUY候補パイプラインへ
+吸収・一本化したため、この経路(および対応するdispatch)は廃止した。
+本ハンドラが担うのは保有銘柄の**売却・利確判定**(task="holding")のみで、
+ウォッチリストのCRUD(services/watchlist_service.py)・保有銘柄の**買い増し判定**
+(buy_candidates_handler.py側)には一切影響しない。`RecommendationType.WATCH_BUY`/
+`NotificationType.WATCHLIST_BUY_SIGNAL`のenum値自体は過去データとの後方互換の
+ため残しているが、新規発行はもう行われない。
+
 銘柄単位のファンアウト(_fanout.py)を採用しており、通常のスケジュール起動では
-銘柄一覧を取得して銘柄ごとに自分自身を非同期再帰呼び出しするだけで即座に戻る。
+保有銘柄一覧を取得して銘柄ごとに自分自身を非同期再帰呼び出しするだけで即座に戻る。
 実際のデータ取得・判定・通知は、"task"付きで再帰呼び出しされた各インスタンスが
 1銘柄のみを担当して行う。
 
@@ -30,7 +40,6 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
-from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EvaluationStatus,
@@ -50,7 +59,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
-from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
+from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
@@ -59,12 +68,11 @@ from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
-from jstock_advisor.services.watchlist_service import WatchlistService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-_PROCESS_NAME = "保有銘柄・ウォッチリスト分析"
+_PROCESS_NAME = "保有銘柄分析"
 
 
 @dataclass(frozen=True)
@@ -350,70 +358,6 @@ def _process_single_holding(
     }
 
 
-def _process_single_watchlist_item(
-    stock_code: str,
-    batch_id: str | None,
-    now: dt.datetime,
-    providers: ProviderBundle,
-    config: AppConfig,
-    calendar: BusinessCalendar,
-    recommendation_repo: RecommendationRepository,
-    notification_service: LineNotificationService,
-) -> dict[str, Any]:
-    item = WatchlistService().get_item(stock_code)
-    if item is None:
-        logger.warning("dispatched watchlist item not found stock_code=%s", stock_code)
-        _finish_batch_item(batch_id, "failed", stock_code, now, notification_service)
-        return {"stock_code": stock_code, "recommended": False, "notified": False, "found": False}
-
-    service = BuySignalService(providers=providers, config=config, business_calendar=calendar)
-    try:
-        outcome = service.analyze(
-            item.stock_code, now, recommendation_type=RecommendationType.WATCH_BUY
-        )
-        if outcome.data_error:
-            notification_service.notify_data_error(
-                item.stock_code, outcome.data_error, now, stock_name=item.stock_name
-            )
-            _finish_batch_item(batch_id, "data_insufficient", stock_code, now, notification_service)
-            return {"stock_code": stock_code, "recommended": False, "notified": False}
-        if outcome.recommendation is None:
-            _finish_batch_item(batch_id, "hold", stock_code, now, notification_service)
-            return {"stock_code": stock_code, "recommended": False, "notified": False}
-        recommendation_repo.save(outcome.recommendation)
-        outcome_status = notification_service.notify_recommendation_with_status(
-            outcome.recommendation, now
-        )
-        category = summary_category(
-            HoldingEvaluationAudit(
-                stock_code=stock_code,
-                evaluated_at=now,
-                evaluation_status=(
-                    EvaluationStatus.DATA_QUALITY_BLOCKED
-                    if outcome_status.data_quality_blocked
-                    else EvaluationStatus.COMPLETED
-                ),
-                raw_sell_recommendation_type=None,
-                raw_profit_recommendation_type=None,
-                final_recommendation_type=outcome.recommendation.recommendation_type,
-                notification_status=outcome_status.status,
-                notification_suppression_reason=None,
-                sell_signal_status="NOT_APPLICABLE",
-                profit_taking_status="NOT_APPLICABLE",
-                fair_value_status="NOT_AVAILABLE",
-                data_quality_status="BLOCKED" if outcome_status.data_quality_blocked else "OK",
-                confidence=outcome.recommendation.confidence,
-                error_code=None,
-            )
-        )
-        _finish_batch_item(batch_id, category, stock_code, now, notification_service)
-        return {"stock_code": stock_code, "recommended": True, "notified": outcome_status.sent}
-    except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
-        logger.exception("watchlist analysis failed unexpectedly stock_code=%s", stock_code)
-        _finish_batch_item(batch_id, "failed", stock_code, now, notification_service)
-        return {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
-
-
 def _estimate_portfolio_totals(
     holdings: list[Holding], providers: ProviderBundle
 ) -> tuple[Decimal | None, Decimal | None]:
@@ -482,28 +426,14 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         logger.info("holdings_watchlist_handler single holding done: %s", result)
         return result
 
-    if task == "watchlist":
-        calendar = BusinessCalendar.from_config(config.holiday_calendar)
-        result = _process_single_watchlist_item(
-            event["stock_code"],
-            event.get("batch_id"),
-            now,
-            providers,
-            config,
-            calendar,
-            recommendation_repo,
-            notification_service,
-        )
-        logger.info("holdings_watchlist_handler single watchlist item done: %s", result)
-        return result
-
     # 通常のスケジュール起動(ディスパッチのみ行い、銘柄ごとの実処理は非同期の
     # 自己再帰呼び出しに委ねる。全銘柄を直列処理するとLambdaの最大タイムアウト
-    # (900秒)を超えうるため)
+    # (900秒)を超えうるため)。ウォッチリストの買いシグナル評価はbuy_candidates_
+    # handler.pyの統合BUY候補パイプラインへ一本化済みのため、ここでは保有銘柄の
+    # 売却・利確判定のみをdispatchする。
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
     holdings = PortfolioService().list_holdings()
-    items = WatchlistService().list_items()
-    total = len(holdings) + len(items)
+    total = len(holdings)
     batch_id = f"holdings-watchlist-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
     start_batch(batch_id, total, now)
 
@@ -526,16 +456,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 "portfolio_total_acquisition_cost": str(portfolio_total_acquisition_cost),
             },
         )
-    for item in items:
-        dispatch_async(
-            function_name,
-            {"task": "watchlist", "stock_code": item.stock_code, "batch_id": batch_id},
-        )
 
     logger.info(
-        "holdings_watchlist_handler dispatched: holdings=%d watchlist=%d batch_id=%s",
+        "holdings_watchlist_handler dispatched: holdings=%d batch_id=%s",
         len(holdings),
-        len(items),
         batch_id,
     )
-    return {"dispatched_holdings": len(holdings), "dispatched_watchlist": len(items)}
+    return {"dispatched_holdings": len(holdings)}

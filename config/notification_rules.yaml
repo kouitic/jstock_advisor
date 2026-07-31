@@ -32,3 +32,9 @@ buy_candidates:
 operations:
   # バッチ全体が異常終了した場合に運用向け通知を行うか。
   notify_batch_failure: true
+
+# 統合BUY候補パイプライン(2026-07追加)。気になる銘柄・保有銘柄それぞれを
+# BUY候補評価対象へ含めるかを個別に制御する。両方trueの場合、同一銘柄は
+# 統合され1回だけ評価される(要求仕様§2)。
+include_watchlist: true
+include_holdings: true

@@ -82,7 +82,7 @@ from jstock_advisor.domain.valuation.valuation_methods import (
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
-from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 
 # アクティブなRuleVersionが未登録の場合(初期運用時)のフォールバック値
 RULE_VERSION_PLACEHOLDER = "v1-mvp"
@@ -127,9 +127,16 @@ class BuySignalService:
         stock_code: str,
         now: dt.datetime,
         recommendation_type: RecommendationType = RecommendationType.BUY,
+        snapshot: StockSnapshot | None = None,
     ) -> BuyAnalysisOutcome:
+        """snapshotを渡すと再取得を省略する(SellSignalService/ProfitTakingServiceと
+        同じ規約。統合BUY候補パイプラインで保有銘柄を評価する際、同一銘柄の売却・
+        利確判定と現在値・財務データを完全に一致させるために使う)。
+        """
         # --- 1. データ品質検証(スナップショット取得) ---
-        snapshot, error = build_stock_snapshot(self._providers, stock_code, now, self._config)
+        error: str | None = None
+        if snapshot is None:
+            snapshot, error = build_stock_snapshot(self._providers, stock_code, now, self._config)
         if snapshot is None:
             self._audit.record(
                 decision_type="buy_signal",

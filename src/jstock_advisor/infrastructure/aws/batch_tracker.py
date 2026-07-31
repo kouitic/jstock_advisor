@@ -25,6 +25,15 @@ _TTL_HOURS = 6  # 集計用の一時データのため、数時間で自動削�
 # 銘柄コード一覧を記録する区分(要求仕様§13: 処理失敗・データ不足は銘柄コードも表示する)
 _CATEGORIES_WITH_STOCK_CODES = ("data_insufficient", "failed")
 
+# --- 統合BUY候補パイプライン(2026-07)で追加。保有銘柄の業種・時価をsector_entries
+# として集約し、ポートフォリオ集中度判定に使う(要求仕様§5後半・§8)。
+# MAX_SECTOR_ENTRY_BYTES x MAX_SECTOR_ENTRIES = 160,000バイト(約156KB)。
+# DynamoDB項目上限400KBに対し、ranking_entries等の他属性を含めても十分な余裕がある。
+# MAX_SECTOR_ENTRIESはfinalize時の読み込み上限だけでなく、buy_candidates_handler.py
+# 側のdispatch前ガード(保有銘柄数がこれを超える場合はfan-outしない)としても使う。 ---
+MAX_SECTOR_ENTRY_BYTES = 80
+MAX_SECTOR_ENTRIES = 2000
+
 
 @dataclass(frozen=True)
 class BatchProgress:
@@ -38,6 +47,16 @@ class BatchProgress:
     # 文字列のまま集約される(順序はDynamoDBの文字列セットのため保証されない。
     # 呼び出し側でパース・ソートすること)。
     ranking_entries: list[str]
+    # 統合BUY候補パイプライン(2026-07)向け。保有銘柄ワーカーが報告する
+    # "{sector}|{market_value}|{stock_code}"文字列の集合(全保有銘柄が対象、
+    # BUY_FAMILY以外も含む)。finalize側でポートフォリオ総額・業種別総額を
+    # 導出するために使う(順序保証なし、呼び出し側でパース・集計すること)。
+    sector_entries: list[str]
+    # dispatch時に確定した保有銘柄の総数(統合BUY候補パイプライン2026-07)。
+    # finalize側がsector_entriesの集計件数と比較し、全保有銘柄分のエントリが
+    # 揃っているか(=PortfolioValuationBasis.MARKET_VALUEとして信頼できるか)を
+    # 判定するために使う。
+    holding_count: int
 
     @property
     def is_complete(self) -> bool:
@@ -48,12 +67,23 @@ def _table() -> Any:
     return boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
 
 
-def start_batch(batch_id: str, total: int, now: dt.datetime) -> None:
-    """ファンアウト開始時に呼ぶ。ローカル環境・対象0件の場合は何もしない。"""
+def start_batch(batch_id: str, total: int, now: dt.datetime, holding_count: int = 0) -> None:
+    """ファンアウト開始時に呼ぶ。ローカル環境・対象0件の場合は何もしない。
+
+    holding_count(統合BUY候補パイプライン2026-07で追加)は、このバッチで
+    dispatchされた保有銘柄(HOLDING/BOTH)の総数。finalize側がsector_entriesの
+    集計件数と比較し、ポートフォリオ集中度計算の信頼性を判定するために使う。
+    """
     if total <= 0 or not running_on_lambda():
         return
     ttl = int((now + dt.timedelta(hours=_TTL_HOURS)).timestamp())
-    item: dict[str, Any] = {"batch_id": batch_id, "total": total, "completed": 0, "ttl": ttl}
+    item: dict[str, Any] = {
+        "batch_id": batch_id,
+        "total": total,
+        "completed": 0,
+        "ttl": ttl,
+        "holding_count": holding_count,
+    }
     for category in SUMMARY_CATEGORIES:
         item[category] = 0
     _table().put_item(Item=item)
@@ -64,6 +94,7 @@ def record_result(
     category: str,
     stock_code: str | None = None,
     ranking_entry: str | None = None,
+    sector_entry: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
 
@@ -76,6 +107,11 @@ def record_result(
     文字列(呼び出し側でスコア等を含めてエンコードする)をDynamoDBの文字列セットへ
     原子的に追加する。バッチ完了検知後、呼び出し側がこの一覧をパース・ソートして
     上位N件のみ通知する用途を想定している。
+
+    sector_entryを渡すと、統合BUY候補パイプライン(2026-07追加)向けに、保有銘柄の
+    業種・時価総額の集計用文字列をDynamoDBの文字列セットへ原子的に追加する。
+    呼び出し側でMAX_SECTOR_ENTRY_BYTESを超えないことを事前に検証してから渡すこと
+    (本関数はサイズ検証を行わない)。
     """
     if not running_on_lambda():
         return None
@@ -96,6 +132,10 @@ def record_result(
         names["#ranking_entries"] = "ranking_entries"
         update_expr += ", #ranking_entries :ranking_entries"
         values[":ranking_entries"] = {ranking_entry}
+    if sector_entry is not None:
+        names["#sector_entries"] = "sector_entries"
+        update_expr += ", #sector_entries :sector_entries"
+        values[":sector_entries"] = {sector_entry}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -112,4 +152,6 @@ def record_result(
         data_insufficient_stock_codes=sorted(item.get("data_insufficient_codes", set())),
         failed_stock_codes=sorted(item.get("failed_codes", set())),
         ranking_entries=sorted(item.get("ranking_entries", set())),
+        sector_entries=sorted(item.get("sector_entries", set())),
+        holding_count=int(item.get("holding_count", 0)),
     )

@@ -17,13 +17,16 @@ import logging
 import uuid
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Literal
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.data_quality_alert import DataQualityAlert
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
     BuyAction,
+    CandidateSource,
     DividendComparisonOutcome,
+    EligibilityBlockCategory,
     NotificationContext,
     NotificationStatus,
     NotificationType,
@@ -33,6 +36,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.domain.entities.notification import NotificationLog
+from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import format_jst
 from jstock_advisor.infrastructure.line.client import LineClient
@@ -47,6 +51,11 @@ from jstock_advisor.services.data_quality_service import DataQualityIssueSeverit
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
 
 logger = logging.getLogger(__name__)
+
+# notify_buy_candidates_digest()のチャンク単位送信結果(統合BUY候補パイプライン
+# 2026-07で追加)。外部LINE APIとDynamoDBを1つのトランザクションにはできないため、
+# 「LINE送信は成功したがログ保存に失敗した」中間状態を明示的に区別する。
+BuyDigestSendOutcome = Literal["SENT_AND_RECORDED", "SENT_LOG_FAILED", "SEND_FAILED"]
 
 _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType] = {
     RecommendationType.BUY: NotificationType.DAILY_BUY_CANDIDATES,
@@ -369,13 +378,35 @@ def _buy_candidate_digest_block(rank: int, recommendation: Recommendation) -> st
     """購入候補まとめ通知(notify_buy_candidates_digest)の1銘柄分のブロック
     (BUYパイプライン第2次修正2026-07で追加。要求仕様17節・18節)。1銘柄1通では
     なく、最大5銘柄を1通(または分割時のみ複数通)にまとめるための本文断片。
+
+    統合BUY候補パイプライン(2026-07)で気になる銘柄・保有銘柄の種別表示を追加。
+    このダイジェストが実際の日次バッチ通知の本文そのものであるため、
+    _format_buy_candidate_message(単独送信用)と同じ表示をここにも反映する。
     """
     action = recommendation.buy_action
     lines = [
         f"{rank}位 {recommendation.stock_code} {recommendation.stock_name}",
         f"判定: {buy_action_label(action) if action is not None else '購入候補'}",
-        f"現在値: {_yen(recommendation.price_at_recommendation)}",
     ]
+    # candidate_source欠落の既存レコードは気になる銘柄として安全にフォールバックする。
+    source = recommendation.candidate_source or CandidateSource.WATCHLIST
+    lines.append(f"種別: {_CANDIDATE_SOURCE_LABELS[source]}")
+    if source in (CandidateSource.HOLDING, CandidateSource.BOTH):
+        if recommendation.holding_quantity is not None:
+            lines.append(f"現在の保有: {recommendation.holding_quantity}株")
+        if recommendation.average_acquisition_price is not None:
+            lines.append(f"平均取得単価: {_yen(recommendation.average_acquisition_price)}")
+        # 含み損益は参考情報としてのみ表示する(買い増し理由には使わない)。
+        if recommendation.unrealized_profit_loss is not None:
+            pct_part = (
+                f"({recommendation.unrealized_profit_loss_pct:+.1f}%)"
+                if recommendation.unrealized_profit_loss_pct is not None
+                else ""
+            )
+            lines.append(
+                f"評価損益(参考): {_yen(recommendation.unrealized_profit_loss)}{pct_part}"
+            )
+    lines.append(f"現在値: {_yen(recommendation.price_at_recommendation)}")
     price_line = _buy_price_levels_line(recommendation)
     if price_line is not None:
         lines.append(price_line)
@@ -404,11 +435,39 @@ def _buy_candidate_digest_block(rank: int, recommendation: Recommendation) -> st
     return "\n".join(lines)
 
 
+_CANDIDATE_SOURCE_LABELS: dict[CandidateSource, str] = {
+    CandidateSource.WATCHLIST: "気になる銘柄",
+    CandidateSource.HOLDING: "保有銘柄・買い増し候補",
+    CandidateSource.BOTH: "保有銘柄・気になる銘柄",
+}
+
+
 def _format_buy_candidate_message(recommendation: Recommendation) -> str:
-    """購入候補通知(STRONG_BUY/BUY/SMALL_ENTRY、2026-07 BUYパイプライン再設計。要求仕様22節)。"""
+    """購入候補通知(STRONG_BUY/BUY/SMALL_ENTRY、2026-07 BUYパイプライン再設計。要求仕様22節。
+    統合BUY候補パイプライン2026-07で気になる銘柄・保有銘柄の種別表示を追加)。
+    """
     action = recommendation.buy_action
     title = buy_action_label(action) if action is not None else "購入候補"
     lines = [f"【{title}】{recommendation.stock_code} {recommendation.stock_name}"]
+    # candidate_source欠落の既存レコードは気になる銘柄として安全にフォールバックする。
+    source = recommendation.candidate_source or CandidateSource.WATCHLIST
+    lines.append(f"種別: {_CANDIDATE_SOURCE_LABELS[source]}")
+    if source in (CandidateSource.HOLDING, CandidateSource.BOTH):
+        if recommendation.holding_quantity is not None:
+            lines.append(f"現在の保有: {recommendation.holding_quantity}株")
+        if recommendation.average_acquisition_price is not None:
+            lines.append(f"平均取得単価: {_yen(recommendation.average_acquisition_price)}")
+        # 含み損益は参考情報としてのみ表示する(買い増し理由には使わない。
+        # 通知理由は現在値と適正価格・企業品質・購入魅力度・安全余裕・集中リスクに基づく)。
+        if recommendation.unrealized_profit_loss is not None:
+            pct_part = (
+                f"({recommendation.unrealized_profit_loss_pct:+.1f}%)"
+                if recommendation.unrealized_profit_loss_pct is not None
+                else ""
+            )
+            lines.append(
+                f"評価損益(参考): {_yen(recommendation.unrealized_profit_loss)}{pct_part}"
+            )
     lines.append(f"現在値: {_yen(recommendation.price_at_recommendation)}")
     lines.extend(_valuation_range_lines(recommendation))
     price_line = _buy_price_levels_line(recommendation)
@@ -973,6 +1032,55 @@ class LineNotificationService:
         status = self._notification_status_for_send(recommendation, previous, now)
         return NotificationOutcome(status=status, sent=False)
 
+    def check_data_quality_eligibility(
+        self,
+        recommendation: Recommendation,
+        now: dt.datetime,
+        context: NotificationContext = NotificationContext.DEFAULT,
+    ) -> NotificationEligibility:
+        """統合BUY候補パイプライン(2026-07)向け。データ品質(整合性検証・異常値検知)
+        による通知可否だけを判定する読み取り専用メソッド。
+
+        BUY_CANDIDATE_BATCHコンテキストではnotify_manual_review_requiredを呼ばない
+        (evaluate_notification_statusと同じ規約)。notify_data_quality_alertは
+        ログのみでLINE送信・NotificationLog書き込みを行わないため、読み取り専用の
+        枠内で呼んでも副作用にならない。再送防止(前回通知からの経過)の判定は
+        含まない(check_resend_eligibilityが別途行う。買い増し固有リスクの
+        チェックより前にデータ品質だけを先に確認するための分離)。
+        """
+        notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
+        previous = self._previous_recommendation(recommendation.stock_code, notification_type)
+        alert, requires_manual_review = self._check_data_quality(
+            recommendation, previous, notification_type, now
+        )
+        if alert is None:
+            return NotificationEligibility(eligible=True)
+        if not requires_manual_review:
+            self.notify_data_quality_alert(alert, now)
+        return NotificationEligibility(
+            eligible=False,
+            block_category=EligibilityBlockCategory.DATA_QUALITY,
+            block_reason="DATA_QUALITY_BLOCKED",
+        )
+
+    def check_resend_eligibility(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationEligibility:
+        """統合BUY候補パイプライン(2026-07)向け。再送防止(前回通知からの経過日数・
+        価格変動)による通知可否だけを判定する読み取り専用メソッド(NotificationLogを
+        書き込まない)。
+        """
+        notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
+        previous = self._previous_recommendation(recommendation.stock_code, notification_type)
+        status = self._notification_status_for_send(recommendation, previous, now)
+        if status == NotificationStatus.SENT:
+            return NotificationEligibility(eligible=True)
+        return NotificationEligibility(
+            eligible=False,
+            block_category=EligibilityBlockCategory.RECENTLY_NOTIFIED,
+            block_reason=status.value,
+        )
+
     def send_recommendation_notification(
         self, recommendation: Recommendation, now: dt.datetime
     ) -> None:
@@ -998,19 +1106,29 @@ class LineNotificationService:
 
     def notify_buy_candidates_digest(
         self, winners: list[Recommendation], now: dt.datetime
-    ) -> int:
+    ) -> dict[str, BuyDigestSendOutcome]:
         """購入候補(BUY_FAMILY_ACTIONS)の上位銘柄を1通(長すぎる場合のみ複数通)に
-        まとめて送信する(BUYパイプライン第2次修正2026-07で追加。要求仕様17節・18節)。
+        まとめて送信する(BUYパイプライン第2次修正2026-07で追加。要求仕様17節・18節。
+        統合BUY候補パイプライン2026-07でチャンク単位の3状態管理に変更)。
 
         1銘柄1通ずつ`send_recommendation_notification`を呼ぶ旧方式を廃止し、
         優先順位順に並んだ購入候補だけをまとめて1回のバッチで送信する。
         個別のNotificationLogは引き続き銘柄ごとに1件ずつ保存し、再送判定の
         粒度(銘柄単位)は変えない。呼び出し前にwinnersの各要素が
-        evaluate_notification_status経由でstatus==SENTと判定済みであることを
-        呼び出し側が保証すること(このメソッド自体は再通知抑止を行わない)。
+        評価済みであることを呼び出し側が保証すること(このメソッド自体は
+        再通知抑止を行わない)。
+
+        戻り値は銘柄コードごとの送信結果。LINE送信(push_message)自体が例外を
+        投げた場合、そのチャンク以降はすべて"SEND_FAILED"とし、以降のチャンクの
+        送信を中断する(未送信のため次回バッチで通常の再送防止ロジックに従って
+        自然に再評価される)。push_messageは成功したがNotificationLog保存が
+        例外を投げた場合、LINEは既に届いているため"SEND_FAILED"にはせず
+        "SENT_LOG_FAILED"とする(二重送信を避けるため、このバッチ内では
+        再送しない)。呼び出し側はSENT_LOG_FAILEDが1件でもあればLambda呼び出しを
+        失敗させ、CloudWatch Logsで運用検知できるようにすること。
         """
         if not winners:
-            return 0
+            return {}
 
         blocks = [
             _buy_candidate_digest_block(rank, rec) for rank, rec in enumerate(winners, start=1)
@@ -1022,47 +1140,70 @@ class LineNotificationService:
             _DISCLAIMER,
         ]
 
-        chunks: list[list[str]] = []
-        current_chunk: list[str] = []
+        pairs = list(zip(winners, blocks, strict=True))
+        chunks: list[list[tuple[Recommendation, str]]] = []
+        current_chunk: list[tuple[Recommendation, str]] = []
         current_len = 0
-        for block in blocks:
-            block_len = len(block) + 2  # 区切りの空行分
+        for pair in pairs:
+            block_len = len(pair[1]) + 2  # 区切りの空行分
             if current_chunk and current_len + block_len > _BUY_DIGEST_MAX_CHARS:
                 chunks.append(current_chunk)
                 current_chunk = []
                 current_len = 0
-            current_chunk.append(block)
+            current_chunk.append(pair)
             current_len += block_len
         if current_chunk:
             chunks.append(current_chunk)
 
         total_chunks = len(chunks)
-        for index, chunk_blocks in enumerate(chunks, start=1):
+        results: dict[str, BuyDigestSendOutcome] = {}
+        for index, chunk in enumerate(chunks, start=1):
             header = (
                 "【本日の購入候補】"
                 if total_chunks == 1
                 else f"【本日の購入候補】({index}/{total_chunks})"
             )
-            message = "\n\n".join([header, *chunk_blocks])
+            message = "\n\n".join([header, *(block for _, block in chunk)])
             if index == total_chunks:
                 message = "\n\n".join([message, "\n".join(footer)])
-            self._client.push_message(message)
 
-        for recommendation in winners:
-            notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[
-                recommendation.recommendation_type
-            ]
-            self._log_repo.save(
-                NotificationLog(
-                    notification_id=str(uuid.uuid4()),
-                    notification_type=notification_type,
-                    stock_code=recommendation.stock_code,
-                    content_hash=_compute_content_hash(recommendation.recommendation_type),
-                    sent_at=now,
-                    related_recommendation_id=recommendation.recommendation_id,
+            try:
+                self._client.push_message(message)
+            except Exception:  # noqa: BLE001 - LINE送信失敗は未送信として扱い処理を継続する
+                logger.exception(
+                    "notify_buy_candidates_digest: push_message failed chunk=%d/%d",
+                    index,
+                    total_chunks,
                 )
-            )
-        return len(winners)
+                for remaining_chunk in chunks[index - 1 :]:
+                    for rec, _ in remaining_chunk:
+                        results[rec.stock_code] = "SEND_FAILED"
+                break
+
+            for recommendation, _ in chunk:
+                notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[
+                    recommendation.recommendation_type
+                ]
+                try:
+                    self._log_repo.save(
+                        NotificationLog(
+                            notification_id=str(uuid.uuid4()),
+                            notification_type=notification_type,
+                            stock_code=recommendation.stock_code,
+                            content_hash=_compute_content_hash(recommendation.recommendation_type),
+                            sent_at=now,
+                            related_recommendation_id=recommendation.recommendation_id,
+                        )
+                    )
+                    results[recommendation.stock_code] = "SENT_AND_RECORDED"
+                except Exception:  # noqa: BLE001 - LINEは届いているため未送信扱いにしない
+                    logger.exception(
+                        "notify_buy_candidates_digest: NotificationLog save failed "
+                        "stock_code=%s (LINE送信自体は成功済み)",
+                        recommendation.stock_code,
+                    )
+                    results[recommendation.stock_code] = "SENT_LOG_FAILED"
+        return results
 
     def _check_data_quality(
         self,

@@ -68,17 +68,22 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_dispatch_mode_dispatches_one_call_per_holding_and_watchlist_item(
+def test_dispatch_mode_dispatches_one_call_per_holding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """統合BUY候補パイプライン(2026-07)への移行後、本ハンドラは保有銘柄の
+    売却・利確判定(task="holding")のみをdispatchする。ウォッチリストの
+    買いシグナル評価(旧task="watchlist")はbuy_candidates_handler.pyへ
+    一本化されたため、このハンドラはもうWatchlistServiceを参照しない
+    (回帰確認)。
+    """
     _patch_common(monkeypatch)
     holdings = [_holding("2914"), _holding("8136")]
-    items = [_watchlist_item("7203")]
 
     monkeypatch.setattr(
         handler_module.PortfolioService, "list_holdings", lambda self: holdings
     )
-    monkeypatch.setattr(handler_module.WatchlistService, "list_items", lambda self: items)
+    assert not hasattr(handler_module, "WatchlistService")
 
     dispatched: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -89,8 +94,8 @@ def test_dispatch_mode_dispatches_one_call_per_holding_and_watchlist_item(
 
     result = handler_module.handler({}, _FakeContext())
 
-    assert result == {"dispatched_holdings": 2, "dispatched_watchlist": 1}
-    assert len(dispatched) == 3
+    assert result == {"dispatched_holdings": 2}
+    assert len(dispatched) == 2
     # 全ディスパッチが同一のbatch_idを共有していることを確認する
     batch_ids = {d["batch_id"] for d in dispatched}
     assert len(batch_ids) == 1
@@ -115,11 +120,6 @@ def test_dispatch_mode_dispatches_one_call_per_holding_and_watchlist_item(
         "stock_code": "8136",
         "portfolio_total_market_value": None,
         "portfolio_total_acquisition_cost": "200000",
-    } in stripped
-    assert {
-        "fn": "jstock-advisor-holdings-watchlist",
-        "task": "watchlist",
-        "stock_code": "7203",
     } in stripped
 
 

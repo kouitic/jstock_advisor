@@ -17,9 +17,11 @@ from jstock_advisor.domain.entities.common import (
 )
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
+    AddOnEligibility,
     BuyAction,
     BuyIndustrySector,
     BuyPriceReliability,
+    CandidateSource,
     ConfidenceLevel,
     DividendComparisonOutcome,
     EarningsDateStatus,
@@ -199,6 +201,43 @@ class Recommendation(ImmutableSnapshot):
     # (監査用、STALE_PAST_DATEの場合でもnext_earnings_dateはNoneのまま)。
     earnings_date_status: EarningsDateStatus | None = None
     earnings_date_raw: dt.date | None = None
+
+    # --- 気になる銘柄と保有銘柄の統合BUY候補パイプライン(2026-07)で追加。
+    # 既存レコード(candidate_source欠落)は表示層でWATCHLIST扱いにフォールバック
+    # する(データ自体は書き換えない、後方互換)---
+    candidate_source: CandidateSource | None = None
+
+    # 保有由来フィールド(sourceがHOLDING/BOTHの場合のみ設定。表示・買い増し
+    # リスク判定の参考情報としてのみ使い、適正価格算出へは一切使用しない)。
+    holding_quantity: int | None = None
+    average_acquisition_price: Decimal | None = None
+    current_market_value: Decimal | None = None
+    unrealized_profit_loss: Decimal | None = None
+    unrealized_profit_loss_pct: Decimal | None = None
+
+    # 買い増し後構成比の前提(最低売買単位1単元を仮定。資金余力が不明なため
+    # 2単元以上は仮定しない)。
+    projection_basis: str | None = None
+    projected_add_on_quantity: int | None = None
+    projected_add_on_price: Decimal | None = None
+    projected_add_on_amount: Decimal | None = None
+    projected_investment_amount: Decimal | None = None
+    current_position_ratio: Decimal | None = None
+    projected_position_ratio: Decimal | None = None
+    current_sector_ratio: Decimal | None = None
+    projected_sector_ratio: Decimal | None = None
+
+    # 共通購入判断の生の結果(買い増し固有リスクゲート適用前)。buy_actionは
+    # 引き続き最終判定(final_buy_action)として使う。
+    base_buy_action: BuyAction | None = None
+    add_on_eligibility: AddOnEligibility | None = None
+    add_on_block_reasons: tuple[str, ...] = ()
+    conflicting_holding_action: RecommendationType | None = None
+
+    # 安全な資金配分ロジックが存在しないため、常にNoneのまま保持する
+    # (推奨購入数量の自動提案は今回のスコープ外。将来拡張用に予約)。
+    recommended_add_on_quantity: int | None = None
+    recommended_add_on_amount: Decimal | None = None
 
     @property
     def recommended(self) -> bool:
