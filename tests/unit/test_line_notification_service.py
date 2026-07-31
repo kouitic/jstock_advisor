@@ -17,6 +17,7 @@ from jstock_advisor.domain.entities.enums import (
     NotificationStatus,
     RecommendationType,
     RecordDateUnknownReason,
+    SourceType,
 )
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
@@ -570,13 +571,14 @@ def test_notify_batch_summary_sends_counts(service_and_repos) -> None:
     assert sent is True
     assert len(client.sent) == 1
     message = client.sent[0]
+    assert "処理結果:" in message
     assert "対象銘柄：27件" in message
-    assert "通知送信：6件" in message
-    assert "保有継続：18件" in message
-    assert "要確認：0件" in message
-    assert "データ不足：1件" in message
-    assert "再通知抑止：2件" in message
-    assert "処理失敗：0件" in message
+    assert "・個別通知送信：6件" in message
+    assert "・通知不要（保有継続）：18件" in message
+    assert "・要確認：0件" in message
+    assert "・データ不足：1件" in message
+    assert "・再通知抑止：2件" in message
+    assert "・処理失敗：0件" in message
     assert "内訳合計" not in message  # 6+18+0+1+2+0=27で一致するため不整合の注記は出ない
 
 
@@ -723,6 +725,133 @@ def test_watch_recommendation_type_shown_as_japanese_label() -> None:
 
     assert "保有継続(監視)" in message
     assert "WATCH" not in message
+
+
+# --- 2026-07仕様レビュー対応: 基準日情報区分・信頼度分離・暫定判定・見出し出し分け ---
+
+
+def test_watch_message_shows_five_distinct_record_date_categories() -> None:
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(
+        update={
+            "recommendation_type": RecommendationType.WATCH,
+            "dividend_record_date": None,
+            "dividend_record_date_recurring_label": "毎年3月末(登録済みの権利確定周期に基づく)",
+            "dividend_record_date_source_type": SourceType.COMPANY_IR,
+            "benefit_record_date": None,
+            "benefit_record_date_recurring_label": "毎年3月末(登録済みの権利確定周期に基づく)",
+            "benefit_record_date_source_type": SourceType.MANUAL_REGISTRY,
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "情報区分：会社公式情報" in message
+    assert "情報区分：手動登録データ" in message
+
+
+def test_watch_message_shows_data_provider_and_inferred_categories_separately() -> None:
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(
+        update={
+            "recommendation_type": RecommendationType.WATCH,
+            "dividend_record_date": None,
+            "dividend_record_date_recurring_label": (
+                "毎年3月末(決算期末を基準とした一般的な慣行からの推定、確定情報ではない)"
+            ),
+            "dividend_record_date_source_type": None,
+            "benefit_record_date": None,
+            "benefit_record_date_recurring_label": "毎年3月末(登録済みの権利確定周期に基づく)",
+            "benefit_record_date_source_type": SourceType.CONTRACTED_PROVIDER,
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "情報区分：決算期末等からの推定" in message
+    assert "情報区分：データ提供元" in message
+    # 統合ラベルにはならず、5区分が別々に扱われていることの確認
+    assert "情報区分：会社公式情報" not in message
+
+
+def test_watch_before_earnings_shows_provisional_judgment_and_reason() -> None:
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(
+        update={
+            "recommendation_type": RecommendationType.WATCH_BEFORE_EARNINGS,
+            "business_days_to_earnings": 6,
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "暫定判定:" in message
+    assert "判断保留理由: 次回決算まで6営業日のため、決算内容確認後に再評価" in message
+    assert "【適正価格超過・決算後に再評価】" in message
+
+
+def test_watch_normal_does_not_show_provisional_judgment() -> None:
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(update={"recommendation_type": RecommendationType.WATCH})
+
+    message = render_notification_preview(rec)
+
+    assert "暫定判定:" not in message
+    assert "判断保留理由" not in message
+    assert "判定:" in message
+
+
+def test_watch_message_separates_fair_value_and_holding_confidence_labels() -> None:
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(
+        update={
+            "recommendation_type": RecommendationType.WATCH,
+            "fair_value_bear": Decimal("3000"),
+            "fair_value_neutral": Decimal("3300"),
+            "fair_value_bull": Decimal("3600"),
+            "fair_value_overall_confidence": ConfidenceLevel.HIGH,
+            "confidence": ConfidenceLevel.MEDIUM,
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "適正価格算出の信頼度: HIGH" in message
+    assert "保有継続判定の信頼度: MEDIUM" in message
+    # ラベル無しの単独「信頼度:」行が残っていないことを確認
+    assert "\n信頼度:\n" not in message
+
+
+def test_watch_message_suppresses_bullish_scenario_note_when_dispersion_large() -> None:
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="4600"
+    ).model_copy(
+        update={
+            "recommendation_type": RecommendationType.WATCH,
+            "price_at_recommendation": Decimal("3200"),
+            "fair_value_bear": Decimal("3000"),
+            "fair_value_neutral": Decimal("3300"),
+            "fair_value_bull": Decimal("4500"),
+            "fair_value_overall_confidence": ConfidenceLevel.LOW,
+            "fair_value_methods": [
+                {"method": "PER", "fair_value": Decimal("3100")},
+                {"method": "PBR", "fair_value": Decimal("3200")},
+                {"method": "DCF", "fair_value": Decimal("4500")},
+            ],
+        }
+    )
+
+    message = render_notification_preview(rec)
+
+    assert "強気シナリオの想定範囲内" not in message
+    assert "適正価格に関する注意:" in message
+    assert "DCFを除く適正価格は" in message
+    assert "【適正価格のばらつき大・継続監視】" in message
 
 
 # --- BUYパイプライン再設計(2026-07)の通知フォーマット ---------------------------

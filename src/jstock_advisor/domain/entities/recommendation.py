@@ -28,6 +28,7 @@ from jstock_advisor.domain.entities.enums import (
     ProfitTakingIndustrySector,
     RecommendationType,
     RecordDateUnknownReason,
+    SourceType,
 )
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 
@@ -103,6 +104,14 @@ class Recommendation(ImmutableSnapshot):
     # 単なる「不明」ではなくこのラベルを表示する ---
     dividend_record_date_recurring_label: str | None = None
     benefit_record_date_recurring_label: str | None = None
+
+    # --- 基準日情報の情報源区分(2026-07仕様レビュー対応)。確定日または
+    # 登録済み周期(=実データ)がある場合のみ設定する。Noneは「自己推定または
+    # 情報なし」を意味する(通知層での「データ提供元」との誤表示を防ぐため、
+    # 推定値には付与しない)。表示ラベルへの変換は通知層(line_notification_service.py)
+    # に閉じ込め、ここでは既存のSourceTypeをそのまま保持する ---
+    dividend_record_date_source_type: SourceType | None = None
+    benefit_record_date_source_type: SourceType | None = None
 
     # --- WATCH通知フォーマット刷新(2026-07仕様レビュー対応)。「保有継続を支持する
     # 要因」(counter_factors)とは別に、「直ちに利確しない理由」(まだ強い判定へ

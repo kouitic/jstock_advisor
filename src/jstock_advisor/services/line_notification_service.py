@@ -25,6 +25,7 @@ from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
     BuyAction,
     CandidateSource,
+    ConfidenceLevel,
     DividendComparisonOutcome,
     EligibilityBlockCategory,
     NotificationContext,
@@ -32,6 +33,7 @@ from jstock_advisor.domain.entities.enums import (
     NotificationType,
     RecommendationType,
     RecordDateUnknownReason,
+    SourceType,
     buy_action_label,
 )
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
@@ -254,27 +256,86 @@ def _record_date_display(
     return "不明"
 
 
-def _confirmation_lines(recommendation: Recommendation) -> list[str]:
-    """確認事項(要求仕様16節): 権利確定情報は理由コード付き、配当比較は比較年度付きで表示する。
+# 基準日情報の情報区分表示(2026-07仕様レビュー対応)。SourceTypeの各値を
+# 「会社公式情報」「手動登録データ」「データ提供元」の3区分いずれかへ写像する
+# (Recommendation側は既存のSourceTypeをそのまま保持し、表示ラベルへの変換は
+# ここに閉じ込める。統合ラベルにはせず5区分を明確に区別する)。
+_RECORD_DATE_SOURCE_TYPE_LABELS: dict[SourceType, str] = {
+    SourceType.COMPANY_IR: "会社公式情報",
+    SourceType.TDNET_EDINET: "会社公式情報",
+    SourceType.EXCHANGE: "会社公式情報",
+    SourceType.MANUAL_REGISTRY: "手動登録データ",
+    SourceType.CONTRACTED_PROVIDER: "データ提供元",
+    SourceType.SECONDARY: "データ提供元",
+    SourceType.OTHER_WEB: "データ提供元",
+}
 
-    正確な次回日付が不明でも、決算期末等から推定できる周期パターン(recurring_label)が
-    あれば単なる「不明」の代わりに表示する(要求仕様レビュー対応)。
+
+def _record_date_category_label(
+    date: dt.date | None,
+    recurring_label: str | None,
+    source_type: SourceType | None,
+) -> str | None:
+    """基準日表示の情報区分(会社公式情報/手動登録データ/データ提供元/
+    決算期末等からの推定)を返す。日付・推定ラベルのいずれも無ければNone
+    (呼び出し側で「情報なし」の理由表示にフォールバックする)。
     """
-    dividend_record = _record_date_display(
-        recommendation.dividend_record_date,
-        recommendation.dividend_record_date_unknown_reason,
-        recommendation.dividend_record_date_recurring_label,
+    if date is None and recurring_label is None:
+        return None
+    if source_type is not None:
+        return _RECORD_DATE_SOURCE_TYPE_LABELS[source_type]
+    return "決算期末等からの推定"
+
+
+def _record_date_lines(
+    label: str,
+    date: dt.date | None,
+    reason: RecordDateUnknownReason | None,
+    recurring_label: str | None,
+    source_type: SourceType | None,
+) -> list[str]:
+    """基準日1件分の表示(要求仕様§1: 単に「不明」とだけ通知しない)。
+
+    値に加えて、情報区分(会社公式情報/手動登録データ/データ提供元/決算期末等
+    からの推定)、または情報が無い場合はその理由を明示する。
+    """
+    text = _record_date_display(date, reason, recurring_label)
+    lines = [f"{label}:", text]
+    category = _record_date_category_label(date, recurring_label, source_type)
+    if category is not None:
+        lines.append(f"情報区分：{category}")
+    elif reason is not None:
+        lines.append(f"理由：{_RECORD_DATE_UNKNOWN_REASON_LABELS[reason]}")
+    return lines
+
+
+def _confirmation_lines(recommendation: Recommendation) -> list[str]:
+    """確認事項(要求仕様16節): 権利確定情報は情報区分・理由付き、配当比較は
+    比較年度付きで表示する。
+
+    正確な次回日付が不明でも、決算期末等から推定できる周期パターン
+    (recurring_label)があれば単なる「不明」の代わりに表示する
+    (要求仕様レビュー対応)。
+    """
+    lines = ["【確認事項】"]
+    lines.extend(
+        _record_date_lines(
+            "配当権利確定日",
+            recommendation.dividend_record_date,
+            recommendation.dividend_record_date_unknown_reason,
+            recommendation.dividend_record_date_recurring_label,
+            recommendation.dividend_record_date_source_type,
+        )
     )
-    benefit_record = _record_date_display(
-        recommendation.benefit_record_date,
-        recommendation.benefit_record_date_unknown_reason,
-        recommendation.benefit_record_date_recurring_label,
+    lines.extend(
+        _record_date_lines(
+            "優待権利確定日",
+            recommendation.benefit_record_date,
+            recommendation.benefit_record_date_unknown_reason,
+            recommendation.benefit_record_date_recurring_label,
+            recommendation.benefit_record_date_source_type,
+        )
     )
-    lines = [
-        "【確認事項】",
-        f"配当権利確定日: {dividend_record}",
-        f"優待権利確定日: {benefit_record}",
-    ]
     outcome = recommendation.dividend_comparison_outcome
     if outcome is not None:
         source_year = recommendation.dividend_comparison_source_fiscal_year or "不明"
@@ -594,20 +655,43 @@ def _fair_value_range_lines(recommendation: Recommendation) -> list[str]:
     if recommendation.fair_value_spread_ratio is not None:
         lines.append(f"手法間乖離(強気/弱気): {recommendation.fair_value_spread_ratio:.2f}倍")
     if recommendation.fair_value_overall_confidence is not None:
-        lines.append(f"適正価格の信頼度: {recommendation.fair_value_overall_confidence.value}")
+        # 2026-07仕様レビュー対応: 判定全体の信頼度(Recommendation.confidence)と
+        # 混同されないよう、「何の信頼度か」を明示するラベルにする。
+        lines.append(f"適正価格算出の信頼度: {recommendation.fair_value_overall_confidence.value}")
     return lines
 
 
-def _current_price_position_lines(recommendation: Recommendation) -> list[str]:
+def _is_fair_value_dispersion_large(
+    recommendation: Recommendation, large_spread_ratio_threshold: float
+) -> bool:
+    """適正価格の信頼度がLOW、または手法間乖離が閾値以上かどうか(要求仕様§7)。
+
+    このいずれかに該当する場合、「強気シナリオの想定範囲内」等、強気価格を
+    根拠に保有継続を支持するような楽観的な文言を抑止する。
+    """
+    ratio = recommendation.fair_value_spread_ratio
+    return recommendation.fair_value_overall_confidence == ConfidenceLevel.LOW or (
+        ratio is not None and ratio >= large_spread_ratio_threshold
+    )
+
+
+def _current_price_position_lines(
+    recommendation: Recommendation, large_spread_ratio_threshold: float
+) -> list[str]:
     """現在株価が中立/強気適正価格に対してどの位置にあるかを表示する(要求仕様§1)。
 
     以前は監視開始価格(閾値ベースの価格)を使って割高率を計算しており、どの銘柄でも
     ほぼ同じ%になる不具合があった。必ず実際の現在株価とfair_value_neutral/bullの
     比率から算出する。
+
+    2026-07仕様レビュー対応: 適正価格の信頼度がLOW、または手法間乖離が大きい
+    場合は「強気シナリオの想定範囲内」という楽観的な補足を付けない(手法間の
+    推定差が大きいことの注意書きは別途_fair_value_dispersion_warning_linesが担う)。
     """
     lines: list[str] = []
     neutral_pct = recommendation.current_price_vs_neutral_fair_value_pct
     bull_pct = recommendation.current_price_vs_bull_fair_value_pct
+    dispersion_large = _is_fair_value_dispersion_large(recommendation, large_spread_ratio_threshold)
     if neutral_pct is not None:
         if neutral_pct >= 0:
             lines.append(f"・中立適正価格を{neutral_pct:.1f}%上回る")
@@ -616,6 +700,8 @@ def _current_price_position_lines(recommendation: Recommendation) -> list[str]:
     if bull_pct is not None:
         if bull_pct >= 0:
             lines.append(f"・強気適正価格を{bull_pct:.1f}%上回る")
+        elif dispersion_large:
+            lines.append(f"・強気適正価格を{abs(bull_pct):.1f}%下回る")
         else:
             lines.append(f"・強気適正価格を{abs(bull_pct):.1f}%下回る(強気シナリオの想定範囲内)")
     return lines
@@ -635,13 +721,88 @@ def _dividend_increase_lines(recommendation: Recommendation) -> list[str]:
     return lines
 
 
-def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
+_WATCH_TITLE_EARNINGS_PENDING = "適正価格超過・決算後に再評価"
+_WATCH_TITLE_DISPERSION_LARGE = "適正価格のばらつき大・継続監視"
+_WATCH_TITLE_DEFAULT = "割高水準を監視"
+_WATCH_TITLE_DATA_INSUFFICIENT = "保有継続・データ確認待ち"
+
+
+def _resolve_watch_profit_taking_title(
+    recommendation: Recommendation, large_spread_ratio_threshold: float
+) -> str:
+    """WATCH(監視)判定通知の見出しを状態別に出し分ける(要求仕様§4)。
+
+    以前は「割高水準を監視」に固定されており、決算待ちで暫定判定であることや
+    適正価格のばらつきが大きく信頼度が低いことが見出しから分からなかった。
+    recommendation_type等の構造化フィールドのみで判定し、文字列一致は使わない。
+    """
+    if recommendation.recommendation_type == RecommendationType.WATCH_BEFORE_EARNINGS:
+        return _WATCH_TITLE_EARNINGS_PENDING
+    has_fair_value = any(
+        v is not None
+        for v in (
+            recommendation.fair_value_bear,
+            recommendation.fair_value_neutral,
+            recommendation.fair_value_bull,
+        )
+    )
+    if not has_fair_value:
+        return _WATCH_TITLE_DATA_INSUFFICIENT
+    if _is_fair_value_dispersion_large(recommendation, large_spread_ratio_threshold):
+        return _WATCH_TITLE_DISPERSION_LARGE
+    return _WATCH_TITLE_DEFAULT
+
+
+def _fair_value_dispersion_warning_lines(
+    recommendation: Recommendation, large_spread_ratio_threshold: float
+) -> list[str]:
+    """適正価格の信頼度がLOW、または手法間乖離が大きい場合、どの手法が突出して
+    強気価格を作っているかを補足する(要求仕様§7)。
+
+    特定の手法名(DCF等)をハードコードせず、実際にfair_value_methods内で
+    最大値を持つ手法を動的に特定する。手法数が少ない、または最大値が他の
+    手法から突出していない場合は無理に表示しない。
+    """
+    methods = [m for m in recommendation.fair_value_methods if m.get("fair_value") is not None]
+    if len(methods) < 3:
+        return []
+    if not _is_fair_value_dispersion_large(recommendation, large_spread_ratio_threshold):
+        return []
+    values = sorted((Decimal(str(m["fair_value"])), str(m["method"])) for m in methods)
+    max_value, max_method = values[-1]
+    rest_values = [v for v, _ in values[:-1]]
+    if not rest_values or max_value <= max(rest_values):
+        return []
+    rest_min, rest_max = min(rest_values), max(rest_values)
+    price = recommendation.price_at_recommendation
+    if price > rest_max:
+        direction = "上回っています"
+    elif price < rest_min:
+        direction = "下回っています"
+    else:
+        direction = "範囲内です"
+    return [
+        "適正価格に関する注意:",
+        "・手法間の推定差が大きいため、強気価格だけを根拠に保有継続を判断できません",
+        f"・{max_method}を除く適正価格は{_yen(rest_min)}〜{_yen(rest_max)}で、"
+        f"現在値{_yen(price)}はその{direction}",
+    ]
+
+
+_DEFAULT_FAIR_VALUE_LARGE_SPREAD_RATIO = 2.0
+
+
+def _format_watch_profit_taking_message(
+    recommendation: Recommendation,
+    large_spread_ratio_threshold: float = _DEFAULT_FAIR_VALUE_LARGE_SPREAD_RATIO,
+) -> str:
     """WATCH(監視)判定専用のフォーマット(要求仕様レビュー対応)。
 
     即時執行を意味する価格は表示しない。適正価格レンジ・保有継続を支持する要因・
     直ちに利確しない理由・監視条件を明示する。
     """
-    lines = [f"【割高水準を監視】{recommendation.stock_code} {recommendation.stock_name}", ""]
+    title = _resolve_watch_profit_taking_title(recommendation, large_spread_ratio_threshold)
+    lines = [f"【{title}】{recommendation.stock_code} {recommendation.stock_name}", ""]
     lines.append("保有状況:")
     shares = recommendation.shares_at_recommendation
     avg = recommendation.average_purchase_price_at_recommendation
@@ -653,9 +814,25 @@ def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
         gain_pct = float(price / avg - 1) * 100 if avg > 0 else 0.0
         lines.append(f"含み益{_yen(gain)}({gain_pct:+.1f}%)")
     lines.append("")
-    lines.append("判定:")
-    lines.append(_recommendation_type_label(recommendation.recommendation_type))
-    lines.append("")
+    is_earnings_pending = (
+        recommendation.recommendation_type == RecommendationType.WATCH_BEFORE_EARNINGS
+    )
+    if is_earnings_pending:
+        # 2026-07仕様レビュー対応(§5): 決算待ちで最終判定ではないことを明示する。
+        # RecommendationType/判定ロジック自体は変更せず、表示のみ「暫定判定」に区別する。
+        lines.append("暫定判定:")
+        lines.append(_recommendation_type_label(recommendation.recommendation_type))
+        lines.append("")
+        days = recommendation.business_days_to_earnings
+        if days is not None:
+            lines.append(
+                f"判断保留理由: 次回決算まで{days}営業日のため、決算内容確認後に再評価"
+            )
+            lines.append("")
+    else:
+        lines.append("判定:")
+        lines.append(_recommendation_type_label(recommendation.recommendation_type))
+        lines.append("")
 
     fv_lines = _fair_value_range_lines(recommendation)
     if fv_lines:
@@ -663,7 +840,7 @@ def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
         lines.append("")
 
     sp = recommendation.sell_prices
-    position_lines = _current_price_position_lines(recommendation)
+    position_lines = _current_price_position_lines(recommendation, large_spread_ratio_threshold)
     if position_lines:
         lines.append("現在株価の位置:")
         lines.extend(position_lines)
@@ -671,6 +848,13 @@ def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
     elif sp is not None and sp.partial_profit_start_price is not None:
         lines.append("割高懸念:")
         lines.append(f"監視開始水準({_price_display(sp.partial_profit_start_price)})に到達")
+        lines.append("")
+
+    dispersion_lines = _fair_value_dispersion_warning_lines(
+        recommendation, large_spread_ratio_threshold
+    )
+    if dispersion_lines:
+        lines.extend(dispersion_lines)
         lines.append("")
 
     if recommendation.counter_factors:
@@ -697,24 +881,30 @@ def _format_watch_profit_taking_message(recommendation: Recommendation) -> str:
         lines.append(f"{_price_display(p)}{suffix}")
         lines.append("")
 
-    dividend_record = _record_date_display(
-        recommendation.dividend_record_date,
-        recommendation.dividend_record_date_unknown_reason,
-        recommendation.dividend_record_date_recurring_label,
+    lines.extend(
+        _record_date_lines(
+            "配当基準日",
+            recommendation.dividend_record_date,
+            recommendation.dividend_record_date_unknown_reason,
+            recommendation.dividend_record_date_recurring_label,
+            recommendation.dividend_record_date_source_type,
+        )
     )
-    benefit_record = _record_date_display(
-        recommendation.benefit_record_date,
-        recommendation.benefit_record_date_unknown_reason,
-        recommendation.benefit_record_date_recurring_label,
+    lines.append("")
+    lines.extend(
+        _record_date_lines(
+            "優待基準日",
+            recommendation.benefit_record_date,
+            recommendation.benefit_record_date_unknown_reason,
+            recommendation.benefit_record_date_recurring_label,
+            recommendation.benefit_record_date_source_type,
+        )
     )
-    lines.append("配当基準日:")
-    lines.append(dividend_record)
     lines.append("")
-    lines.append("優待基準日:")
-    lines.append(benefit_record)
-    lines.append("")
-    lines.append("信頼度:")
-    lines.append(recommendation.confidence.value)
+    # 「適正価格算出の信頼度」(_fair_value_range_lines)とは別軸の、この保有継続
+    # 判定自体の信頼度であることをラベルで明示する(要求仕様§6、旧「信頼度:」の
+    # ラベル無し表示を解消)。
+    lines.append(f"保有継続判定の信頼度: {recommendation.confidence.value}")
     lines.append(f"通知ID: {recommendation.recommendation_id}")
     lines.append(_DISCLAIMER)
     return "\n".join(lines)
@@ -781,12 +971,15 @@ def _format_portfolio_concentration_message(recommendation: Recommendation) -> s
     return "\n".join(lines)
 
 
-def _format_profit_taking_message(recommendation: Recommendation) -> str:
+def _format_profit_taking_message(
+    recommendation: Recommendation,
+    large_spread_ratio_threshold: float = _DEFAULT_FAIR_VALUE_LARGE_SPREAD_RATIO,
+) -> str:
     if recommendation.recommendation_type in (
         RecommendationType.WATCH,
         RecommendationType.WATCH_BEFORE_EARNINGS,
     ):
-        return _format_watch_profit_taking_message(recommendation)
+        return _format_watch_profit_taking_message(recommendation, large_spread_ratio_threshold)
     if recommendation.recommendation_type == RecommendationType.REVIEW_BEFORE_EARNINGS:
         return _format_earnings_suppressed_message(recommendation)
     if recommendation.recommendation_type == RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW:
@@ -887,7 +1080,11 @@ def _format_sell_message(recommendation: Recommendation) -> str:
     return "\n".join(lines)
 
 
-def _format_message(recommendation: Recommendation, notification_type: NotificationType) -> str:
+def _format_message(
+    recommendation: Recommendation,
+    notification_type: NotificationType,
+    large_spread_ratio_threshold: float = _DEFAULT_FAIR_VALUE_LARGE_SPREAD_RATIO,
+) -> str:
     # BUYパイプライン再設計(2026-07)以降のRecommendationはbuy_actionを持つ。
     # notification_type(recommendation_type由来)より先にこちらで分岐することで、
     # RecommendationType.WATCH_BEFORE_EARNINGS(利確判定エンジンのWATCH抑制専用)との
@@ -907,7 +1104,7 @@ def _format_message(recommendation: Recommendation, notification_type: Notificat
     ):
         return _format_buy_candidate_message(recommendation)
     if notification_type == NotificationType.PROFIT_TAKING_SIGNAL:
-        return _format_profit_taking_message(recommendation)
+        return _format_profit_taking_message(recommendation, large_spread_ratio_threshold)
     return _format_sell_message(recommendation)
 
 
@@ -1091,7 +1288,11 @@ class LineNotificationService:
         (このメソッド自体は再通知抑止・データ品質チェックを一切行わない)。
         """
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
-        message = _format_message(recommendation, notification_type)
+        message = _format_message(
+            recommendation,
+            notification_type,
+            self._config.notification.fair_value_large_spread_ratio,
+        )
         self._client.push_message(message)
         self._log_repo.save(
             NotificationLog(
@@ -1473,16 +1674,20 @@ class LineNotificationService:
             )
             return False
 
+        # 2026-07仕様レビュー対応(§10): 「判定結果」(保有継続/要確認等)と「通知処理の
+        # 結果」(送信した/抑止した等)が同じ並びで表示され意味が伝わりにくいという
+        # 指摘を受け、「処理結果:」見出し+「・」箇条書きへ整理する。集計方法
+        # (category_countsの分類自体)は変更しない。
         lines = [
             f"【{process_name}完了】",
             "",
-            f"対象銘柄：{total}件",
-            f"通知送信：{counts['sent']}件",
-            f"保有継続：{counts['hold']}件",
-            f"要確認：{counts['review']}件",
-            f"データ不足：{counts['data_insufficient']}件",
-            f"再通知抑止：{counts['suppressed']}件",
-            f"処理失敗：{counts['failed']}件",
+            "処理結果:",
+            f"・個別通知送信：{counts['sent']}件",
+            f"・通知不要（保有継続）：{counts['hold']}件",
+            f"・要確認：{counts['review']}件",
+            f"・データ不足：{counts['data_insufficient']}件",
+            f"・再通知抑止：{counts['suppressed']}件",
+            f"・処理失敗：{counts['failed']}件",
         ]
         # 買い候補分析(2026-07 BUYパイプライン再設計)専用: 購入候補・価格待ちの
         # いずれもシグナル自体は成立したが、1回あたりの通知上限により今回は通知を
@@ -1490,9 +1695,11 @@ class LineNotificationService:
         # 使わない(常に0)ため、0件のときは表示しない。
         # 「優先順位の高いN件」という表現は使わず、購入候補/価格待ちを明示して区別する。
         if counts["candidate_not_ranked"] > 0:
-            lines.append(f"買い候補(通知上限により見送り)：{counts['candidate_not_ranked']}件")
+            lines.append(f"・買い候補(通知上限により見送り)：{counts['candidate_not_ranked']}件")
         if counts["watch_not_ranked"] > 0:
-            lines.append(f"価格待ち(通知上限により見送り)：{counts['watch_not_ranked']}件")
+            lines.append(f"・価格待ち(通知上限により見送り)：{counts['watch_not_ranked']}件")
+        lines.append("")
+        lines.append(f"対象銘柄：{total}件")
         if buy_candidates_sent_count == 0:
             lines.append("")
             lines.append("【今回の購入候補】")

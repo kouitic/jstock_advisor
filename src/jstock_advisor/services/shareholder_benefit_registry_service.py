@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.common import DataSourceReference
@@ -22,6 +23,8 @@ from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry
     ShareholderBenefitRegistryRepository,
 )
 from jstock_advisor.interfaces.types import BenefitDetail, ShareholderBenefit
+
+logger = logging.getLogger(__name__)
 
 _PROVIDER_NAME = "manual_registry"
 
@@ -216,3 +219,31 @@ class ShareholderBenefitRegistryService:
         if refreshed is not benefit:
             self._repo.save(refreshed)
         return refreshed
+
+
+def check_registry_health(
+    min_expected_entries: int, service: ShareholderBenefitRegistryService | None = None
+) -> None:
+    """優待レジストリの読み込み件数をINFOで常時記録し、想定より少ない場合は
+    追加でWARNINGを出す(2026-07仕様レビュー対応: CSVは用意されているのに
+    レジストリへ未反映という運用ミスをすぐ検知できるようにするため)。
+    判定・通知の処理自体は止めない(ログのみ、例外は投げない)。
+
+    min_expected_entries<=0でもINFOログ(件数記録)は常に出す(監視用途では
+    「無効化された」ことと「0件登録されている」ことを区別できたほうが良いため)。
+    WARNING条件のみmin_expected_entriesで制御する。
+
+    serviceは主にテスト用(任意のリポジトリを注入できるようにするため)。
+    未指定時は既定のリポジトリ(Lambda環境ではDynamoDB、それ以外はローカル
+    JSON)を使う。
+    """
+    count = len((service or ShareholderBenefitRegistryService()).list_all())
+    logger.info("ShareholderBenefitRegistry loaded %d entries.", count)
+    if min_expected_entries > 0 and count < min_expected_entries:
+        logger.warning(
+            "ShareholderBenefitRegistry loaded %d entries (expected at least %d). "
+            "株主優待レジストリが空または想定より少ない可能性があります。"
+            "CSV取込漏れの可能性があるためjstock shareholder-benefit list等で確認してください。",
+            count,
+            min_expected_entries,
+        )

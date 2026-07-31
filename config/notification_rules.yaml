@@ -32,9 +32,18 @@ buy_candidates:
 operations:
   # バッチ全体が異常終了した場合に運用向け通知を行うか。
   notify_batch_failure: true
+  # 株主優待レジストリの読み込み件数がこれ未満ならWARNINGログを出す
+  # (2026-07仕様レビュー対応: CSV取込漏れ等の運用ミスをすぐ検知するため)。
+  # 0でWARNINGを無効化する(件数のINFOログは常に出る)。
+  shareholder_benefit_registry_min_expected_entries: 1
 
 # 統合BUY候補パイプライン(2026-07追加)。気になる銘柄・保有銘柄それぞれを
 # BUY候補評価対象へ含めるかを個別に制御する。両方trueの場合、同一銘柄は
 # 統合され1回だけ評価される(要求仕様§2)。
 include_watchlist: true
 include_holdings: true
+
+# WATCH通知(保有継続・監視)で、適正価格の手法間乖離が大きい/信頼度が低い
+# 場合に注意書きを表示する閾値(2026-07仕様レビュー対応)。強気/弱気の比率が
+# この値以上のとき「手法間の推定差が大きい」とみなす。
+fair_value_large_spread_ratio: 2.0

@@ -59,6 +59,12 @@ from jstock_advisor.domain.signals.buy_signal import (
     score_areas,
 )
 from jstock_advisor.domain.signals.eps_normalization import normalize_eps
+from jstock_advisor.domain.signals.record_date_resolution import (
+    resolve_benefit_record_date_recurring_label,
+    resolve_benefit_record_date_source_type,
+    resolve_dividend_record_date_recurring_label,
+    resolve_dividend_record_date_source_type,
+)
 from jstock_advisor.domain.valuation.buy_price_levels import compute_buy_price_levels
 from jstock_advisor.domain.valuation.buy_price_reliability import determine_buy_price_reliability
 from jstock_advisor.domain.valuation.fair_value import (
@@ -772,6 +778,14 @@ class BuySignalService:
             eps_normalization_method=eps_result.method,
             valuation_methods=tuple(method_results),
             buy_decision_reasons=tuple(buy_decision_reasons),
+            dividend_record_date_recurring_label=resolve_dividend_record_date_recurring_label(
+                dividend, financial.fiscal_year_end_month
+            ),
+            benefit_record_date_recurring_label=resolve_benefit_record_date_recurring_label(
+                benefit, financial.fiscal_year_end_month
+            ),
+            dividend_record_date_source_type=resolve_dividend_record_date_source_type(dividend),
+            benefit_record_date_source_type=resolve_benefit_record_date_source_type(benefit),
         )
 
         return BuyAnalysisOutcome(
