@@ -19,6 +19,7 @@ from jstock_advisor.cli import (
     shareholder_benefit,
     transactions,
     watchlist,
+    watchlist_screening,
 )
 
 # プロジェクトルートの .env を読み込む(LINE_CHANNEL_ACCESS_TOKEN等)。
@@ -37,6 +38,7 @@ app.add_typer(feedback.app, name="feedback")
 app.add_typer(rules.app, name="rules")
 app.add_typer(review.app, name="review")
 app.add_typer(shareholder_benefit.app, name="shareholder-benefit")
+app.add_typer(watchlist_screening.app, name="watchlist-screening")
 
 
 @app.callback()

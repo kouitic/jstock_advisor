@@ -7,6 +7,8 @@ Pythonのデフォルトとしては持たせず、YAMLの値のみを正とす�
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -731,6 +733,90 @@ class BuyDecisionRulesConfig(StrictModel):
     undervaluation_category_caps: UndervaluationCategoryCaps
 
 
+# --- watchlist_screening_rules.yaml(ウォッチリスト自動追加機能) -------------
+
+
+class CandidateUniverseConfig(StrictModel):
+    provider: Literal["csv"]
+    csv_path: str
+
+
+class WatchlistScreeningThresholds(StrictModel):
+    minimum_market_cap_yen: int = Field(gt=0)
+    require_positive_operating_cash_flow: bool
+    exclude_dividend_cut_announced: bool
+    exclude_debt_excess: bool
+    exclude_deficit: bool
+    exclude_going_concern_doubt: bool
+    exclude_etf: bool
+    exclude_reit: bool
+
+
+class DividendYieldScoringConfig(StrictModel):
+    weight: float = Field(gt=0)
+    zero_at_pct: float
+    full_at_pct: float
+
+
+class EquityRatioScoringConfig(StrictModel):
+    weight: float = Field(gt=0)
+    zero_at_pct: float
+    full_at_pct: float
+
+
+class PayoutRatioScoringConfig(StrictModel):
+    weight: float = Field(gt=0)
+    healthy_min_pct: float
+    healthy_max_pct: float
+
+
+class DividendGrowthScoringConfig(StrictModel):
+    weight: float = Field(gt=0)
+    zero_at_years: int
+    full_at_years: int
+
+
+class ShareholderBenefitScoringConfig(StrictModel):
+    weight: float = Field(gt=0)
+    yield_full_at_pct: float
+    presence_only_score_ratio: float = Field(ge=0, le=1)
+
+
+class WatchlistScreeningScoringConfig(StrictModel):
+    minimum_total_score: float
+    dividend_yield: DividendYieldScoringConfig
+    equity_ratio: EquityRatioScoringConfig
+    payout_ratio: PayoutRatioScoringConfig
+    dividend_growth: DividendGrowthScoringConfig
+    shareholder_benefit: ShareholderBenefitScoringConfig
+
+    @model_validator(mode="after")
+    def _check_weights_sum_to_100(self) -> WatchlistScreeningScoringConfig:
+        total = (
+            self.dividend_yield.weight
+            + self.equity_ratio.weight
+            + self.payout_ratio.weight
+            + self.dividend_growth.weight
+            + self.shareholder_benefit.weight
+        )
+        if abs(total - 100.0) > 0.01:
+            raise ValueError(f"配点合計は100点である必要があります(現在{total}点)")
+        return self
+
+
+class WatchlistScreeningRulesConfig(StrictModel):
+    enabled: bool
+    weekly_schedule_enabled: bool
+    notification_enabled: bool
+    candidate_universe: CandidateUniverseConfig
+    screening_data_provider: Literal["stock_snapshot"]
+    screening_policy: Literal["high_dividend_financial_health"]
+    max_watchlist_additions_per_run: int = Field(gt=0)
+    max_missing_fields: int = Field(ge=0)
+    thresholds: WatchlistScreeningThresholds
+    scoring: WatchlistScreeningScoringConfig
+
+
 # --- 集約 --------------------------------------------------------------------
 
 
@@ -777,3 +863,4 @@ class AppConfig(StrictModel):
     portfolio_concentration: PortfolioConcentrationRulesConfig
     buy_decision: BuyDecisionRulesConfig
     add_on: AddOnRulesConfig
+    watchlist_screening: WatchlistScreeningRulesConfig

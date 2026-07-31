@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import boto3
+from botocore.exceptions import ClientError
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -69,3 +70,21 @@ class DynamoDbCollectionStore[T: BaseModel]:
 
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
         return [item for item in self.list_all() if predicate(item)]
+
+    def insert_if_absent(self, item: T) -> bool:
+        """条件付きput_item(attribute_not_exists)で原子的に新規追加のみを許可する。
+
+        既に同一キーの項目が存在すればConditionalCheckFailedExceptionを捕捉し
+        Falseを返す(既存項目は一切変更しない)。
+        """
+        try:
+            self._table.put_item(
+                Item=self._to_item(item),
+                ConditionExpression="attribute_not_exists(#pk)",
+                ExpressionAttributeNames={"#pk": self._id_field},
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise

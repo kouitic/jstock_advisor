@@ -17,6 +17,13 @@ class Priority(StrEnum):
     LOW = "LOW"
 
 
+class WatchlistRegistrationSource(StrEnum):
+    """ウォッチリスト項目がどのように登録されたか(ウォッチリスト自動追加機能で追加)。"""
+
+    MANUAL = "MANUAL"
+    AUTO_SCREENING = "AUTO_SCREENING"
+
+
 class ConfidenceLevel(StrEnum):
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
@@ -155,6 +162,7 @@ class NotificationType(StrEnum):
     QUARTERLY_LOGIC_REVIEW = "QUARTERLY_LOGIC_REVIEW"
     OUTLIER_REVIEW = "OUTLIER_REVIEW"
     LOGIC_CHANGE_PROPOSAL = "LOGIC_CHANGE_PROPOSAL"
+    WATCHLIST_AUTO_ADDITION = "WATCHLIST_AUTO_ADDITION"
 
 
 class CorporateActionType(StrEnum):

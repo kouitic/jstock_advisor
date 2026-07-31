@@ -1,0 +1,71 @@
+# ウォッチリスト自動追加機能(週次スクリーニング)の設定。
+# すべてユーザーが変更可能。単位はコメントに明記。
+
+# 機能全体のON/OFF。CLI通常実行(非dry-run)・EventBridge実行の両方で
+# 実書き込み前にチェックする。--dry-runはfalseでも実行可能。
+enabled: true
+
+# EventBridge(週次自動実行)からの起動だけをON/OFFする。CLI手動実行には影響しない。
+weekly_schedule_enabled: true
+
+# ウォッチリストへ1件以上追加があった場合のLINE通知のON/OFF。
+notification_enabled: true
+
+candidate_universe:
+  # v1では"csv"のみ有効。将来: "topix" / "prime_market" / "jpx400"
+  provider: "csv"
+  csv_path: "data/universe/candidate_universe.csv"
+
+# v1では"stock_snapshot"のみ有効。将来: "lightweight"
+screening_data_provider: "stock_snapshot"
+
+# v1では単一文字列。将来は複数Policyのlist化を検討する。
+screening_policy: "high_dividend_financial_health"
+
+# 1回の実行でウォッチリストへ追加する最大件数。
+max_watchlist_additions_per_run: 20
+
+# スコア計算に使う項目(missing_scoring_fields)の欠損許容数。
+# これを超えるとスコアが合格基準以上でもデータ不足として不合格にする。
+max_missing_fields: 1
+
+thresholds:
+  # 時価総額(円)の下限。shares_outstanding * current_priceで算出。
+  minimum_market_cap_yen: 50_000_000_000
+  require_positive_operating_cash_flow: true
+  exclude_dividend_cut_announced: true
+  exclude_debt_excess: true
+  exclude_deficit: true
+  exclude_going_concern_doubt: true
+  exclude_etf: true
+  exclude_reit: true
+
+scoring:
+  # 合計スコア(100点満点)がこの値以上で合格。
+  minimum_total_score: 60.0
+
+  dividend_yield:
+    weight: 30.0
+    zero_at_pct: 3.5
+    full_at_pct: 6.0
+
+  equity_ratio:
+    weight: 25.0
+    zero_at_pct: 40.0
+    full_at_pct: 70.0
+
+  payout_ratio:
+    weight: 15.0
+    healthy_min_pct: 20.0
+    healthy_max_pct: 60.0
+
+  dividend_growth:
+    weight: 15.0
+    zero_at_years: 0
+    full_at_years: 10
+
+  shareholder_benefit:
+    weight: 15.0
+    yield_full_at_pct: 2.0
+    # 優待はあるが利回りが確認できない場合、満点に対してこの割合を付与する。
+    presence_only_score_ratio: 0.5

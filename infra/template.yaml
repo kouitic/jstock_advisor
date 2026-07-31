@@ -427,6 +427,46 @@ Resources:
             FlexibleTimeWindow:
               Mode: "OFF"
 
+  WatchlistAutoAdditionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-watchlist-auto-addition"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.watchlist_auto_addition_handler.handler
+      # 銘柄単位のファンアウトで各Providerからのデータ取得を行うため、他の
+      # ファンアウト系ハンドラ(buy-candidates/holdings-watchlist)と同じく
+      # Lambdaの最大値(900秒)まで引き上げる
+      Timeout: 900
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        # 本機能はウォッチリストへの永続データ更新(add_if_new)を伴うためCrud
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
+        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
+        # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
+        - Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-auto-addition"
+      Events:
+        # 市場取引時間外、既存の土曜実行バッチ(WeeklyReview 09:00/MonthlyReview 10:00/
+        # QuarterlyReview 11:00 JST)と重ならず、翌営業日である月曜08:00のBUY候補
+        # バッチより十分前に完了できる時間帯として毎週土曜07:00 JSTを選定した
+        # (実装プラン§11)。
+        SaturdayEarlyMorning:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 7 ? * SAT *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
   WeeklyReviewFunction:
     Type: AWS::Serverless::Function
     Properties:

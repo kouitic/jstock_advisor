@@ -50,6 +50,12 @@ _SUMMARY_CATEGORY_CANDIDATE_NOT_RANKED = "candidate_not_ranked"
 # 買い候補分析専用: 価格待ち(WATCH_FOR_PRICE/WATCH_BEFORE_EARNINGS)判定だが、
 # 1回あたりの通知上限により今回は通知を見送った銘柄(BUYパイプライン再設計§17)。
 _SUMMARY_CATEGORY_WATCH_NOT_RANKED = "watch_not_ranked"
+# ウォッチリスト自動追加機能専用: スクリーニング(必須条件+スコア条件)に合格した銘柄。
+_SUMMARY_CATEGORY_PASSED = "passed"
+# ウォッチリスト自動追加機能専用: 必須条件(時価総額・営業CF等)を満たさず不合格。
+_SUMMARY_CATEGORY_REQUIRED_CONDITION_FAILED = "required_condition_failed"
+# ウォッチリスト自動追加機能専用: 必須条件は満たすがスコアが合格基準未満で不合格。
+_SUMMARY_CATEGORY_SCORE_FAILED = "score_failed"
 
 SUMMARY_CATEGORIES = (
     _SUMMARY_CATEGORY_SENT,
@@ -60,6 +66,9 @@ SUMMARY_CATEGORIES = (
     _SUMMARY_CATEGORY_FAILED,
     _SUMMARY_CATEGORY_CANDIDATE_NOT_RANKED,
     _SUMMARY_CATEGORY_WATCH_NOT_RANKED,
+    _SUMMARY_CATEGORY_PASSED,
+    _SUMMARY_CATEGORY_REQUIRED_CONDITION_FAILED,
+    _SUMMARY_CATEGORY_SCORE_FAILED,
 )
 
 

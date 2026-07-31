@@ -30,6 +30,13 @@ class CollectionStore[T: BaseModel](Protocol):
     def upsert_many(self, new_items: Iterable[T]) -> None: ...
     def delete(self, item_id: str) -> bool: ...
     def find(self, predicate: Callable[[T], bool]) -> list[T]: ...
+    def insert_if_absent(self, item: T) -> bool:
+        """既存の項目がなければ追加してTrue、既に存在すればFalse(冪等な新規追加専用)。
+
+        DynamoDB実装は条件付き書き込みで原子的にこれを保証する。ウォッチリスト
+        自動追加機能のように、永続データへの重複追加を確実に防ぎたい場合に使う。
+        """
+        ...
 
 
 def running_on_lambda() -> bool:

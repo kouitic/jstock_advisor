@@ -32,6 +32,7 @@ from jstock_advisor.config.models import (
     SellRulesConfig,
     StockClassificationRulesConfig,
     ValuationRulesConfig,
+    WatchlistScreeningRulesConfig,
 )
 
 # Lambda環境ではconfig/がリポジトリ構成のまま同梱されないため、
@@ -115,6 +116,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         _load_yaml(directory / "buy_decision_rules.yaml")
     )
     add_on = AddOnRulesConfig.model_validate(_load_yaml(directory / "add_on_rules.yaml"))
+    watchlist_screening = WatchlistScreeningRulesConfig.model_validate(
+        _load_yaml(directory / "watchlist_screening_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -134,4 +138,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         portfolio_concentration=portfolio_concentration,
         buy_decision=buy_decision,
         add_on=add_on,
+        watchlist_screening=watchlist_screening,
     )

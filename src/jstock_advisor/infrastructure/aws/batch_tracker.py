@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.infrastructure.collection_store import resolve_table_name, running_on_lambda
@@ -33,6 +35,20 @@ _CATEGORIES_WITH_STOCK_CODES = ("data_insufficient", "failed")
 # 側のdispatch前ガード(保有銘柄数がこれを超える場合はfan-outしない)としても使う。 ---
 MAX_SECTOR_ENTRY_BYTES = 80
 MAX_SECTOR_ENTRIES = 2000
+
+
+class BatchFinalizeStatus(StrEnum):
+    """永続データ更新を伴うバッチのfinalize排他制御用状態(ウォッチリスト自動追加機能)。
+
+    複数ワーカーが同時にis_complete==Trueを観測しても、RUNNING→FINALIZINGへの
+    原子的な条件付き遷移(try_acquire_finalize)に成功した1ワーカーだけがfinalize
+    処理へ進めるようにする。読み取り専用の集計・通知処理のみを行うBUY/holdings等の
+    既存バッチは、このステータスを一切参照しない(対象外)。
+    """
+
+    RUNNING = "RUNNING"
+    FINALIZING = "FINALIZING"
+    COMPLETED = "COMPLETED"
 
 
 @dataclass(frozen=True)
@@ -83,6 +99,10 @@ def start_batch(batch_id: str, total: int, now: dt.datetime, holding_count: int 
         "completed": 0,
         "ttl": ttl,
         "holding_count": holding_count,
+        # ウォッチリスト自動追加機能のfinalize排他制御(try_acquire_finalize)向け。
+        # 既存のBUY/holdingsハンドラはこの属性を一切参照しないため、追加しても
+        # 既存動作に影響しない。
+        "status": BatchFinalizeStatus.RUNNING.value,
     }
     for category in SUMMARY_CATEGORIES:
         item[category] = 0
@@ -154,4 +174,46 @@ def record_result(
         ranking_entries=sorted(item.get("ranking_entries", set())),
         sector_entries=sorted(item.get("sector_entries", set())),
         holding_count=int(item.get("holding_count", 0)),
+    )
+
+
+def try_acquire_finalize(batch_id: str) -> bool:
+    """複数ワーカーが同時にis_complete==Trueを観測しても、1ワーカーだけが
+    RUNNING→FINALIZINGへの原子的な条件付き遷移に成功する(ウォッチリスト自動追加機能)。
+
+    永続データ(WatchlistRepository等)を更新するバッチでのみ使用する。BUY/holdings等の
+    既存バッチは読み取り専用の集計・通知処理のみのため対象外(呼び出さない)。
+    ローカル(非Lambda)環境では常にTrueを返す(単一プロセスのため排他不要)。
+    """
+    if not running_on_lambda():
+        return True
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET #status = :finalizing",
+            ConditionExpression="attribute_not_exists(#status) OR #status = :running",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":finalizing": BatchFinalizeStatus.FINALIZING.value,
+                ":running": BatchFinalizeStatus.RUNNING.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def mark_finalize_complete(batch_id: str) -> None:
+    """finalize処理の成功・失敗にかかわらずtry/finallyで必ず呼び、statusをCOMPLETEDへ
+    遷移する(FINALIZINGのまま放置しない。放置されてもTTL6時間で自動失効するため実害はない)。
+    """
+    if not running_on_lambda():
+        return
+    _table().update_item(
+        Key={"batch_id": batch_id},
+        UpdateExpression="SET #status = :completed",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={":completed": BatchFinalizeStatus.COMPLETED.value},
     )

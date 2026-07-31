@@ -1,10 +1,13 @@
 import datetime as dt
 
+import boto3
 import pytest
+from moto import mock_aws
 
 from jstock_advisor.infrastructure.aws import batch_tracker
 
 _NOW = dt.datetime(2026, 7, 28, 7, 0, tzinfo=dt.UTC)
+_REGION = "ap-northeast-1"
 
 
 class _FakeTable:
@@ -178,3 +181,69 @@ def test_record_result_without_ranking_entry_leaves_ranking_entries_empty(
 
     assert progress is not None
     assert progress.ranking_entries == []
+
+
+# --- try_acquire_finalize / mark_finalize_complete(ウォッチリスト自動追加機能) ---
+# ConditionExpressionの実際の意味論を検証する必要があるため、_FakeTableの簡易ADD
+# パーサではなくmoto(実DynamoDB相当の挙動)を使う。
+
+
+@pytest.fixture
+def moto_dynamodb(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("DYNAMODB_TABLE_PREFIX", "jstock")
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name=_REGION)
+        client.create_table(
+            TableName="jstock-batch_runs",
+            KeySchema=[{"AttributeName": "batch_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "batch_id", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield
+
+
+def test_try_acquire_finalize_succeeds_after_start_batch(moto_dynamodb: None) -> None:
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    assert batch_tracker.try_acquire_finalize("batch-1") is True
+
+
+def test_try_acquire_finalize_only_succeeds_once_for_concurrent_workers(
+    moto_dynamodb: None,
+) -> None:
+    """複数ワーカーが同時にis_complete==Trueを観測しても、1ワーカーだけが
+    finalize権限を取得できることを検証する(実装プラン§7)。
+    """
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+
+    first = batch_tracker.try_acquire_finalize("batch-1")
+    second = batch_tracker.try_acquire_finalize("batch-1")
+    third = batch_tracker.try_acquire_finalize("batch-1")
+
+    assert [first, second, third] == [True, False, False]
+
+
+def test_mark_finalize_complete_transitions_to_completed(moto_dynamodb: None) -> None:
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.try_acquire_finalize("batch-1")
+
+    batch_tracker.mark_finalize_complete("batch-1")
+
+    table = boto3.resource("dynamodb", region_name=_REGION).Table("jstock-batch_runs")
+    item = table.get_item(Key={"batch_id": "batch-1"})["Item"]
+    assert item["status"] == "COMPLETED"
+
+
+def test_try_acquire_finalize_returns_true_locally_without_dynamodb_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: False)
+    assert batch_tracker.try_acquire_finalize("batch-1") is True
+
+
+def test_mark_finalize_complete_is_noop_locally(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: False)
+    batch_tracker.mark_finalize_complete("batch-1")  # 例外を出さずに何もしない
