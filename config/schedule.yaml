@@ -13,10 +13,13 @@ jobs:
     time: "08:00"
 
   daily_holdings_watchlist_analysis:
-    description: "当日終値を用いた保有銘柄およびウォッチリスト分析"
+    # 2026-07-31改訂: 買い候補分析(daily_buy_candidates_analysis)と処理条件・
+    # 通知タイミングを揃えるため16:30から08:00へ変更。両ジョブとも前営業日終値を
+    # 基準に評価する(以前は当日終値を使っていたが、買い判定側と条件を揃えた)。
+    description: "前営業日終値を用いた保有銘柄の利確・売却判定"
     enabled: true
     days: ["mon", "tue", "wed", "thu", "fri"]
-    time: "16:30"
+    time: "08:00"
 
   disclosure_check:
     description: "適時開示の確認(平日数回)"

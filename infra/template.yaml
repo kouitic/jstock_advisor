@@ -364,10 +364,13 @@ Resources:
               Action: lambda:InvokeFunction
               Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-holdings-watchlist"
       Events:
-        DailyAfternoon:
+        # 買い候補分析(BuyCandidatesFunction)と処理条件・通知タイミングを揃えるため
+        # 08:00に変更(2026-07-31改訂)。以前は16:30(当日終値)だったが、買い判定と
+        # 同時刻にすることで両方とも前営業日終値を基準に同じ条件で評価するようになる。
+        DailyMorning:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: "cron(30 16 ? * MON-FRI *)"
+            ScheduleExpression: "cron(0 8 ? * MON-FRI *)"
             ScheduleExpressionTimezone: Asia/Tokyo
             FlexibleTimeWindow:
               Mode: "OFF"

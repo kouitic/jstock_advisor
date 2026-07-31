@@ -115,9 +115,9 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 
 | 時刻 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 | 備考 |
 |---|---|---|---|---|
-| 08:00 | `daily_buy_candidates_analysis` | `jstock analyze buy-candidates <銘柄コード...> --source real --notify` | `BuyCandidatesFunction` | ★Lambda版はウォッチリスト登録銘柄のみを走査対象とする(全上場銘柄の自動スクリーニングではない。CLIも`--source real`時はコード指定必須) |
+| 08:00 | `daily_buy_candidates_analysis` | `jstock analyze buy-candidates <銘柄コード...> --source real --notify` | `BuyCandidatesFunction` | ウォッチリスト+保有銘柄を統合して買い判定(新規購入・買い増し)を行う(2026-07-31改訂)。全上場銘柄の自動スクリーニングではない |
+| 08:00 | `daily_holdings_watchlist_analysis` | `jstock analyze holdings --source real --notify` | `HoldingsWatchlistFunction` | 保有銘柄の利確・売却判定、ポートフォリオ集中チェック(2026-07-31改訂: 16:30から08:00へ変更。買い候補分析と処理条件・通知タイミングを揃えるため)。保有銘柄は全件自動対象 |
 | 10:00/12:30/15:30 | `disclosure_check` | `jstock analyze disclosure-check --source real --notify` | `DisclosureCheckFunction` | 保有銘柄の新規開示にリスクキーワードが検出された場合のみ速報通知する |
-| 16:30 | `daily_holdings_watchlist_analysis` | `jstock analyze holdings --source real --notify`<br>`jstock analyze watchlist --source real --notify` | `HoldingsWatchlistFunction` | 保有銘柄・ウォッチリストは全件自動対象 |
 | 18:00 | `point_in_time_evaluation` | `jstock evaluation run --source real` | `EvaluationFunction` | 評価期限(営業日数)を迎えた推奨のみ処理。通知機能は無く、結果はコンソール/CloudWatch Logs表示のみ |
 
 ### 実行結果の確認ポイント

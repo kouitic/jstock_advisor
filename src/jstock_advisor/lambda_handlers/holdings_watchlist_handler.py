@@ -1,4 +1,9 @@
-"""保有銘柄分析Lambda(schedule.yaml daily_holdings_watchlist_analysis、平日16:30)。
+"""保有銘柄分析Lambda(schedule.yaml daily_holdings_watchlist_analysis、平日08:00)。
+
+【実行時刻の変更について(2026-07-31改訂)】
+以前は平日16:30(当日終値)に実行していたが、買い候補分析(buy_candidates_handler.py、
+平日08:00)と処理条件・通知タイミングを揃えるため08:00へ変更した。両ジョブとも
+実行時点で取得できる最新の終値(前営業日終値)を基準に評価する。
 
 CLIの`jstock analyze holdings --source real --notify`と同じロジックを
 EventBridge Scheduler経由で自動実行する薄いアダプタ。
