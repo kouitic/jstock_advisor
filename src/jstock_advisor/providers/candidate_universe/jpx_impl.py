@@ -365,7 +365,8 @@ class JpxCandidateUniverseProvider:
 
         cache_age_hours = (
             (
-                self._now - dt.datetime.combine(listed_metadata.source_date, dt.time())
+                self._now
+                - dt.datetime.combine(listed_metadata.source_date, dt.time(), tzinfo=dt.UTC)
             ).total_seconds()
             / 3600
             if listed_metadata.source_date is not None
@@ -392,7 +393,7 @@ class JpxCandidateUniverseProvider:
                 f"{label}のソース日付が不明なためキャッシュを利用できません"
             )
         age_hours = (
-            self._now - dt.datetime.combine(source_date, dt.time())
+            self._now - dt.datetime.combine(source_date, dt.time(), tzinfo=dt.UTC)
         ).total_seconds() / 3600
         if age_hours > max_stale_hours:
             raise CandidateUniverseError(
