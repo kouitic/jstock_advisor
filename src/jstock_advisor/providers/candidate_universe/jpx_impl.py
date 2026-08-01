@@ -108,9 +108,14 @@ def _resolve_jpx400_weight_column(fieldnames: list[str]) -> str | None:
 
 def _extract_excel_date(value: object, datemode: int) -> dt.date | None:
     if isinstance(value, float):
+        # data_j.xlsの「日付」列はExcelのシリアル値ではなく、YYYYMMDD形式の数値が
+        # 数値セルとして格納されている(例: 20260630.0)。シリアル値として解釈すると
+        # 桁数が大きすぎてOverflowErrorになるため、YYYYMMDD形式を先に判定する。
+        if value.is_integer() and 19000101 <= value <= 99991231:
+            return _parse_date_string(str(int(value)))
         try:
             excel_date: dt.date = xlrd.xldate.xldate_as_datetime(value, datemode).date()
-        except (xlrd.xldate.XLDateError, ValueError):
+        except (xlrd.xldate.XLDateError, ValueError, OverflowError):
             return None
         else:
             return excel_date
