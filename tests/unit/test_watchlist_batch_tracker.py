@@ -532,21 +532,36 @@ def test_mark_watchlist_batch_completed_normal_vs_high_throttle(dynamo) -> None:
     assert item2["execution_result"] == batch_tracker.EXECUTION_RESULT_HIGH_THROTTLE_RATE
 
 
-def test_mark_watchlist_batch_completed_provider_data_quality_degraded_is_aborted(
+def test_mark_watchlist_batch_completed_scoring_data_quality_degraded_is_aborted(
     dynamo,
 ) -> None:
     """運用ハードニング3節: 主要項目欠損率によるABORTEDもHIGH_THROTTLE_RATEと
     同じくstatus=ABORTEDへ揃うこと(20節のstatus/execution_result分離パターン)。"""
     batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
     batch_tracker.mark_watchlist_batch_completed(
-        "batch-1", batch_tracker.EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED, _NOW
+        "batch-1", batch_tracker.EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED, _NOW
     )
     item = batch_tracker.get_watchlist_batch("batch-1")
     assert item is not None
     assert item["status"] == WatchlistBatchStatus.ABORTED.value
     assert item["execution_result"] == (
-        batch_tracker.EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED
+        batch_tracker.EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED
     )
+
+
+def test_mark_watchlist_batch_completed_composite_execution_result_is_aborted(dynamo) -> None:
+    """運用ハードニング第2弾5節: 複数の安全弁に同時該当した場合、execution_resultが
+    "|"区切りの複合文字列になってもstatus=ABORTEDと判定されること。"""
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
+    composite = (
+        f"{batch_tracker.EXECUTION_RESULT_HIGH_THROTTLE_RATE}|"
+        f"{batch_tracker.EXECUTION_RESULT_EXCESSIVE_DATA_ERRORS}"
+    )
+    batch_tracker.mark_watchlist_batch_completed("batch-1", composite, _NOW)
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.ABORTED.value
+    assert item["execution_result"] == composite
 
 
 # --- 運用ハードニング5節: finalize再実行性(FINALIZING/FINALIZE_FAILED) ----------
@@ -563,7 +578,7 @@ def test_try_retry_finalize_succeeds_from_finalize_failed(dynamo) -> None:
     assert ok is True
     item = batch_tracker.get_watchlist_batch("batch-1")
     assert item is not None
-    assert item["status"] == WatchlistBatchStatus.FINALIZING.value
+    assert item["status"] == WatchlistBatchStatus.FINALIZE_PREPARING.value
 
 
 def test_try_retry_finalize_fails_conditional_check_when_not_finalize_failed(dynamo) -> None:
@@ -600,7 +615,7 @@ def test_mark_watchlist_finalize_failed_increments_attempt_count(dynamo) -> None
     assert int(item2["finalize_attempt_count"]) == 2
 
 
-def _drive_batch_to_finalizing(now: dt.datetime) -> None:
+def _drive_batch_to_finalize_preparing(now: dt.datetime) -> None:
     batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", now, 360, 72)
     batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, now)
     batch_tracker.create_missing_candidate_progress_rows("batch-1", ["1111"], now, 72)
@@ -622,7 +637,7 @@ def _drive_batch_to_finalizing(now: dt.datetime) -> None:
 
 
 def test_mark_finalizing_stuck_as_failed_transitions_when_past_threshold(dynamo) -> None:
-    _drive_batch_to_finalizing(_NOW)  # finalizing_started_at = _NOW
+    _drive_batch_to_finalize_preparing(_NOW)  # finalizing_started_at = _NOW
 
     later = _NOW + dt.timedelta(minutes=16)
     ok = batch_tracker.mark_finalizing_stuck_as_failed("batch-1", later, 15)
@@ -635,14 +650,14 @@ def test_mark_finalizing_stuck_as_failed_transitions_when_past_threshold(dynamo)
 def test_mark_finalizing_stuck_as_failed_no_op_when_within_threshold(dynamo) -> None:
     """ConditionalCheckFailedException相当: 閾値未満(まだ正常に進行中かもしれない)
     場合は遷移しないこと。"""
-    _drive_batch_to_finalizing(_NOW)
+    _drive_batch_to_finalize_preparing(_NOW)
 
     soon = _NOW + dt.timedelta(minutes=5)
     ok = batch_tracker.mark_finalizing_stuck_as_failed("batch-1", soon, 15)
     assert ok is False
     item = batch_tracker.get_watchlist_batch("batch-1")
     assert item is not None
-    assert item["status"] == WatchlistBatchStatus.FINALIZING.value
+    assert item["status"] == WatchlistBatchStatus.FINALIZE_PREPARING.value
 
 
 # --- 運用ハードニング6節: 運用者によるバッチ中断(CLI abort) --------------------

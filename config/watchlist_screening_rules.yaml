@@ -119,10 +119,22 @@ staged_rollout:
 # --- 運用ハードニング(2026-08、本番運用レビュー対応)で追加 -------------------
 
 # 429疑い件数/処理対象件数(既存)に加えて、主要スコア項目の欠損率がこの値(%)を
-# 超えた場合もABORTED(execution_result=PROVIDER_DATA_QUALITY_DEGRADED)とし、
+# 超えた場合もABORTED(execution_result=SCORING_DATA_QUALITY_DEGRADED)とし、
 # ウォッチリスト追加・LINE通知を行わない。429疑い率が20%未満でも、データ提供元
 # 障害でスコア項目が軒並み欠損している週を検知するための独立したしきい値。
-max_field_missing_rate_pct: 30.0
+# 母数はscreening_input_created_count(ScreeningDataResult.inputが作られた行数、
+# 運用ハードニング第2弾3節)。
+max_scoring_field_missing_rate_pct: 30.0
+
+# --- 運用ハードニング第2弾(2026-08、レビュー対応)で追加 ----------------------
+# いずれもevaluation_attempted_count(またはtotal_candidate_count)を母数とした
+# 独立の安全弁。provider_failure_classifierが分類できない未知の障害パターンでも
+# 安全に中止できるようにする(5節)。閾値超過時はウォッチリスト追加・通知を
+# 行わず、該当した理由をすべて監査ログのabort_reasonsへ記録する。
+max_data_error_rate_pct: 15.0
+max_not_found_rate_pct: 10.0
+max_terminal_failure_rate_pct: 5.0
+max_required_field_missing_rate_pct: 20.0
 
 # finalize処理(合否ランキング確定・ウォッチリスト書き込み・LINE通知)が
 # FINALIZINGのまま応答が無い場合、この分数を超えたらReconcilerが異常とみなし
@@ -140,3 +152,6 @@ data_cache:
   # 7日(168時間)以上のTTLとし、株価とは独立して設定する(運用ハードニング4節)。
   price_cache_ttl_hours: 24
   financial_cache_ttl_hours: 168
+  # None・DEGRADED(必須項目が大幅欠損)な値の短期キャッシュTTL(分、運用ハードニング
+  # 第2弾1節)。一時的な取得失敗を7日間キャッシュしてしまわないための上限。
+  negative_cache_ttl_minutes: 15

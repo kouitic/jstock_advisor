@@ -833,6 +833,9 @@ class WatchlistDataCacheConfig(StrictModel):
 
     price_cache_ttl_hours: int = Field(gt=0)
     financial_cache_ttl_hours: int = Field(gt=0)
+    # 運用ハードニング第2弾1節: None・DEGRADEDな値の短期キャッシュTTL(分単位)。
+    # 5〜30分程度を想定。VALIDな値にはこのTTLは使わない(price/financial_cache_ttl_hoursを使う)。
+    negative_cache_ttl_minutes: int = Field(gt=0)
 
 
 class WatchlistScreeningRulesConfig(StrictModel):
@@ -863,12 +866,20 @@ class WatchlistScreeningRulesConfig(StrictModel):
 
     # --- 運用ハードニング(2026-08、本番運用レビュー対応)で追加 ---------------
     # 主要スコア項目の欠損率がこれを超えるとABORTEDとする(429疑い率とは独立、3節)。
-    max_field_missing_rate_pct: float = Field(ge=0, le=100)
+    max_scoring_field_missing_rate_pct: float = Field(ge=0, le=100)
     # finalizeがFINALIZINGのまま応答が無い場合の異常判定しきい値(分、5節)。
     finalizing_stuck_threshold_minutes: int = Field(gt=0)
     # FINALIZE_FAILEDに対するReconcilerの自動再試行上限回数(5節)。
     max_finalize_retry_attempts: int = Field(gt=0)
     data_cache: WatchlistDataCacheConfig
+
+    # --- 運用ハードニング第2弾(2026-08、レビュー対応)で追加 -----------------
+    # provider_failure_classifierが分類できない未知の障害パターンでも安全に
+    # 中止できるようにする独立の安全弁(5節)。母数の定義はcompute_batch_metrics参照。
+    max_data_error_rate_pct: float = Field(ge=0, le=100)
+    max_not_found_rate_pct: float = Field(ge=0, le=100)
+    max_terminal_failure_rate_pct: float = Field(ge=0, le=100)
+    max_required_field_missing_rate_pct: float = Field(ge=0, le=100)
 
 
 # --- 集約 --------------------------------------------------------------------

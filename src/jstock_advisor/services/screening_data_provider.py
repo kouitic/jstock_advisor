@@ -24,8 +24,8 @@ from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_ret
 # WatchlistScreeningInputの必須項目・スコア項目の分類(要求仕様§5・§8)。
 # 必須条件用フィールド(is_debt_excess等)はStockSnapshot取得できた時点で常にbool値
 # (デフォルトFalse)を持つため、実際に欠損しうるのはこの2つのみ。
-_REQUIRED_FIELD_NAMES = ("shares_outstanding", "operating_cashflow")
-_SCORING_FIELD_NAMES = (
+REQUIRED_FIELD_NAMES = ("shares_outstanding", "operating_cashflow")
+SCORING_FIELD_NAMES = (
     "dividend_yield_pct",
     "equity_ratio_pct",
     "payout_ratio_pct",
@@ -107,7 +107,7 @@ def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
 
     missing_required = [
         name
-        for name in _REQUIRED_FIELD_NAMES
+        for name in REQUIRED_FIELD_NAMES
         if getattr(financial, name, None) is None
     ]
 
@@ -119,7 +119,19 @@ def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
         "consecutive_dividend_increase_years": consecutive_increase_years,
         "shareholder_benefit_yield_pct": snapshot.benefit_yield_pct,
     }
-    missing_scoring = [name for name in _SCORING_FIELD_NAMES if scoring_values[name] is None]
+    # 運用ハードニング第2弾4節: 株主優待制度自体が無い銘柄(snapshot.benefit is None、
+    # 市場の大多数を占める)のshareholder_benefit_yield_pct=Noneは「正常に値が
+    # 存在しない」ケースであり、データ品質低下(欠損)として数えない。優待はあるが
+    # 利回りが算出できない場合(snapshot.benefit is not None)のみ欠損として扱う。
+    # この区別が無いと、優待の無い銘柄が他に1項目でも欠損した場合に
+    # max_missing_fields(既定1)を超えてDATA_INSUFFICIENT除外されてしまう
+    # (HighDividendFinancialHealthPolicyの除外判定に影響する既知の不具合の修正)。
+    missing_scoring = [
+        name
+        for name in SCORING_FIELD_NAMES
+        if scoring_values[name] is None
+        and not (name == "shareholder_benefit_yield_pct" and snapshot.benefit is None)
+    ]
 
     return WatchlistScreeningInput(
         stock_code=snapshot.stock_code,

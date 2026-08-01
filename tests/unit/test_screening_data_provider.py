@@ -136,6 +136,9 @@ def test_missing_operating_cashflow_marks_required_field_missing(
 def test_missing_scoring_fields_are_reported_separately_from_required(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # benefit=None(デフォルト、優待制度自体が無い)のため、
+    # shareholder_benefit_yield_pct=Noneは欠損として数えない(運用ハードニング
+    # 第2弾4節、下のtest_shareholder_benefit_yield_missing_*で区別を確認する)。
     snap = _fake_snapshot(dividend_yield_pct=None, benefit_yield_pct=None)
     snap.financial.equity_ratio_pct = None
     monkeypatch.setattr(sdp_module, "build_stock_snapshot", lambda *a, **kw: (snap, None))
@@ -144,12 +147,40 @@ def test_missing_scoring_fields_are_reported_separately_from_required(
 
     assert result.input is not None
     assert result.input.missing_required_fields == []
-    assert set(result.input.missing_scoring_fields) >= {
+    assert set(result.input.missing_scoring_fields) == {
         "dividend_yield_pct",
         "equity_ratio_pct",
-        "shareholder_benefit_yield_pct",
     }
     assert set(result.missing_fields) == set(result.input.missing_scoring_fields)
+
+
+def test_shareholder_benefit_yield_missing_without_benefit_program_is_not_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """運用ハードニング第2弾4節: 優待制度自体が無い銘柄(benefit=None)は
+    shareholder_benefit_yield_pct=Noneでも欠損として数えないこと
+    (max_missing_fieldsによる誤ったDATA_INSUFFICIENT除外を防ぐための修正)。
+    """
+    snap = _fake_snapshot(benefit=None, benefit_yield_pct=None)
+    monkeypatch.setattr(sdp_module, "build_stock_snapshot", lambda *a, **kw: (snap, None))
+
+    result = _make_provider().get_screening_input("1234", _NOW)
+
+    assert result.input is not None
+    assert "shareholder_benefit_yield_pct" not in result.input.missing_scoring_fields
+
+
+def test_shareholder_benefit_yield_missing_with_benefit_program_is_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """優待制度はあるが利回りが算出できない場合は、引き続き欠損として扱うこと。"""
+    snap = _fake_snapshot(benefit=SimpleNamespace(), benefit_yield_pct=None)
+    monkeypatch.setattr(sdp_module, "build_stock_snapshot", lambda *a, **kw: (snap, None))
+
+    result = _make_provider().get_screening_input("1234", _NOW)
+
+    assert result.input is not None
+    assert "shareholder_benefit_yield_pct" in result.input.missing_scoring_fields
 
 
 def test_shareholder_benefit_exists_flag_reflects_benefit_presence(

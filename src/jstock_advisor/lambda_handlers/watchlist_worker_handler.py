@@ -74,16 +74,23 @@ def _evaluate_candidate(
     screening_data = screening_data_provider.get_screening_input(stock_code, now)
 
     if screening_data.status != ScreeningDataStatus.OK or screening_data.input is None:
+        # 運用ハードニング第2弾3節: DATA_ERROR(取得エラー)とNOT_FOUND(データが
+        # 無かった)を区別する。両方とも旧"DATA_INSUFFICIENT"に丸めていたのを分離し、
+        # compute_batch_metrics()の母数計算(screening_input_created_count)から
+        # 両方を除外できるようにする。
+        evaluation_result = (
+            "DATA_ERROR" if screening_data.status == ScreeningDataStatus.DATA_ERROR else "NOT_FOUND"
+        )
         logger.info(
             "watchlist screening data unavailable stock_code=%s status=%s error=%s",
             stock_code,
             screening_data.status,
             screening_data.error_message,
         )
-        record_candidate_audit(stock_code, None, "DATA_INSUFFICIENT", now, batch_id=batch_id)
+        record_candidate_audit(stock_code, None, evaluation_result, now, batch_id=batch_id)
         return _EvaluationOutcome(
             WatchlistProgressStatus.COMPLETED,
-            "DATA_INSUFFICIENT",
+            evaluation_result,
             None,
             screening_data.is_provider_failure_suspected,
             screening_data.missing_fields,
