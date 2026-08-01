@@ -148,7 +148,14 @@ def record_batch_audit(
     output_values: dict[str, Any],
     now: dt.datetime,
     batch_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> None:
+    """idempotency_keyを指定すると、AuditService.record_if_absent()経由で
+    決定的なaudit_idを使い保存する(運用ハードニング第3弾3節: batch audit保存
+    成功後・呼び出し側のフラグ更新前に中断・再試行しても、audit本体が重複
+    記録されないようにするため)。未指定時は従来どおりrecord()(ランダムな
+    audit_id、重複記録の防止なし)を使う。
+    """
     input_values: dict[str, Any] = {
         "execution_mode": execution_mode,
         "universe_provider": universe_provider,
@@ -156,6 +163,19 @@ def record_batch_audit(
     }
     if batch_id is not None:
         input_values["batch_id"] = batch_id
+    if idempotency_key is not None:
+        AuditService().record_if_absent(
+            audit_id=idempotency_key,
+            decision_type=DECISION_TYPE_BATCH,
+            stock_code=None,
+            input_values=input_values,
+            calculation_formulas={},
+            output_values=output_values,
+            data_sources=[],
+            rule_version=RULE_VERSION_PLACEHOLDER,
+            timestamp=now,
+        )
+        return
     AuditService().record(
         decision_type=DECISION_TYPE_BATCH,
         stock_code=None,

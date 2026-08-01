@@ -253,15 +253,20 @@ def _compute_content_hash(recommendation_type: RecommendationType) -> str:
 
 
 def compute_watchlist_addition_content_hash(
-    stock_codes: list[str], evaluated_at: dt.datetime
+    batch_id: str, stock_codes: list[str], screening_policy: str, evaluation_date: dt.date
 ) -> str:
     """ウォッチリスト自動追加通知の重複抑止に使うcontent hash(運用ハードニング
     第2弾2節: watchlist_batch_finalizer.pyがBatchRunsTable項目へ同じ値を
-    永続化するために公開関数として切り出す。notify_watchlist_additions()の
-    算出式と必ず一致させること、送信内容・dedup判定ロジック自体は変更しない)。
+    永続化するために公開関数として切り出す。呼び出し元はこの関数の戻り値を
+    notify_watchlist_additions()のcontent_hash引数へそのまま渡すこと)。
+
+    運用ハードニング第3弾4節: 算出式にbatch_id・screening_policyを追加し、
+    evaluation_dateは呼び出し元がバッチ開始時点(started_at)等の固定値を渡す
+    前提とする(再試行時のnow()を渡さない)。これにより、finalizeが日付を
+    またいで再試行されても同一batch_idであれば必ず同じhashになる。
     """
     return hashlib.sha256(
-        f"{evaluated_at.date().isoformat()}|{sorted(stock_codes)}".encode()
+        f"{batch_id}|{evaluation_date.isoformat()}|{screening_policy}|{sorted(stock_codes)}".encode()
     ).hexdigest()[:16]
 
 
@@ -1761,6 +1766,7 @@ class LineNotificationService:
         results_by_code: dict[str, WatchlistScreeningResult],
         policy_name: str,
         evaluated_at: dt.datetime,
+        content_hash: str,
     ) -> bool:
         """週次スクリーニングでウォッチリストへ実際に追加された銘柄の通知
         (ウォッチリスト自動追加機能、要求仕様§12)。
@@ -1768,6 +1774,13 @@ class LineNotificationService:
         表示対象はWatchlistRepository.add_if_new()が実際にTrueを返した銘柄のみ
         (スコア合格でも上限超過/既登録/Repository失敗だった銘柄は表示しない)。
         追加が1件も無い場合は送信しない。
+
+        運用ハードニング第3弾4節: content_hashは呼び出し元が
+        compute_watchlist_addition_content_hash()で算出した固定値を渡すこと
+        (この関数自体はhashを再計算しない。再試行のたびに同じ値が渡されることで
+        重複送信抑止が安定する)。evaluated_atは通知本文の「評価日時：」表示にのみ
+        使う(呼び出し元はバッチ開始時点等の固定値を渡し、再試行時のnow()を
+        渡さないこと)。
         """
         if not added_items:
             return False
@@ -1778,9 +1791,6 @@ class LineNotificationService:
         )
 
         pseudo_stock_code = "__batch__:watchlist_auto_addition"
-        content_hash = compute_watchlist_addition_content_hash(
-            [item.stock_code for item in ranked], evaluated_at
-        )
         latest = self._log_repo.latest_by_stock_and_type(
             pseudo_stock_code, NotificationType.WATCHLIST_AUTO_ADDITION
         )

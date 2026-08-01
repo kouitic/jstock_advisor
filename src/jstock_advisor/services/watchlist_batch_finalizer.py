@@ -20,14 +20,35 @@ WATCHLIST_WRITE_COMPLETED→NOTIFICATION_PENDING→NOTIFICATION_SENT→COMPLETED
   ため、この処理の途中でLambdaが異常終了しても、次回は未処理の銘柄のみを再処理する
   (`add_if_new`自体も条件付き書き込みのため、たとえ永続化自体が欠落しても実際の
   重複追加は発生しない、二重の安全策)。
-- `finalize_notified_stock_codes`が無ければ、LINE通知を試みてから永続化する。
-  「送信成功後・永続化前にLambdaが異常終了」した場合、再試行時に同じ内容で
-  再度`notify_watchlist_additions()`を呼ぶことになるが、同関数自体が持つ
-  content hashベースの重複抑止(`NotificationLog`との突き合わせ)により実際の
+- `finalize_notification_outcome`が無ければ、通知フェーズを解決する。追加0件なら
+  `NOT_REQUIRED`、`notification_enabled=false`なら`SKIPPED`として即座に解決する。
+  それ以外は`notify_watchlist_additions()`を試みる。**運用ハードニング第3弾1節**:
+  この呼び出しが例外を送出した場合、Phase3は例外を自分自身で捕捉し
+  `NOTIFICATION_FAILED`(通知失敗回数+1、エラー概要を保存)として記録したうえで
+  **`_finalize_completed`自体は正常returnする**(finalize全体をFINALIZE_FAILEDに
+  しない。ウォッチリスト追加結果は既にPhase2で確定・保持済みのため失われない)。
+  Reconciler/CLIの`retry_notification()`が、通知失敗回数が上限
+  (`max_notification_retry_attempts`)未満の間はNOTIFICATION_FAILED→
+  NOTIFICATION_PENDINGへ戻して通知のみを再試行する(Phase1/2は
+  finalize_target_stock_codes/repository_resultsが既に存在するため
+  スキップされ、ウォッチリスト書込みは再実行されない)。上限に達した場合のみ
+  `COMPLETED_WITH_NOTIFICATION_FAILURE`として終端する。送信成功時は
+  `finalize_notified_stock_codes`へ実際に通知した銘柄一覧を永続化する。
+  content hashは`batch_id`・`screening_policy`・バッチ開始日(`started_at`、
+  再試行時の`now`ではない)から算出し、最初の解決試行時に永続化して以後の
+  再試行では再計算せず再利用する(運用ハードニング第3弾4節: 日付をまたぐ
+  再試行でも重複抑止が機能するようにするため)。「送信成功後・
+  finalize_notified_stock_codes永続化前にLambdaが異常終了」した場合、再試行時に
+  同じcontent_hashで再度`notify_watchlist_additions()`を呼ぶことになるが、
+  同関数自体が持つ重複抑止(`NotificationLog`との突き合わせ)により実際の
   再送は抑止される(完全なexactly-onceではなく、この既存の重複抑止機構と
   組み合わせて実質的な重複防止を実現する設計)。
 - 最後に`finalize_batch_audit_recorded`が未設定の場合のみ`record_batch_audit`を
-  呼ぶ(batch audit重複防止)。
+  呼ぶ(batch audit重複防止の最適化)。安全性自体は`record_batch_audit`が
+  決定的なaudit_id(`f"watchlist_batch_audit:{batch_id}"`)による
+  `insert_if_absent`で担保するため、このフラグと実際の書き込みが競合・
+  順序不整合を起こしても実際に重複記録されることはない(運用ハードニング
+  第3弾3節)。
 
 `TIMED_OUT`(17節)はこのモジュールのfinalize経路を使わない(判定条件・処理内容が
 異なる別経路のため、lambda_handlers/watchlist_batch_reconciler_handler.pyが
@@ -60,6 +81,9 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     EXECUTION_RESULT_NORMAL,
     EXECUTION_RESULT_REQUIRED_DATA_QUALITY_DEGRADED,
     EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED,
+    NOTIFICATION_OUTCOME_NOT_REQUIRED,
+    NOTIFICATION_OUTCOME_SENT,
+    NOTIFICATION_OUTCOME_SKIPPED,
     CandidateProgressRecord,
     WatchlistProgressStatus,
     get_watchlist_batch,
@@ -69,11 +93,13 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     mark_watchlist_write_completed,
     query_all_candidate_progress,
     record_finalize_target,
+    record_notification_failed,
     record_notification_pending,
-    record_notification_sent,
+    record_notification_resolved,
     record_repository_result_item,
     try_finalize_if_ready,
     try_retry_finalize,
+    try_retry_notification,
 )
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
     WatchlistRepository,
@@ -379,6 +405,7 @@ def _write_watchlist_additions(
             reason=describe_matched_criteria(entry.matched_criteria),
             registration_source=WatchlistRegistrationSource.AUTO_SCREENING,
             registration_policy=registration_policy,
+            registration_batch_id=batch_id,
             created_at=now,
             updated_at=now,
         )
@@ -403,18 +430,33 @@ def _write_watchlist_additions(
             )
             continue
         if not added:
-            newly_resolved[entry.stock_code] = REPOSITORY_RESULT_SKIPPED_EXISTING
-            record_repository_result_item(
-                batch_id, now, entry.stock_code, REPOSITORY_RESULT_SKIPPED_EXISTING
-            )
+            # 運用ハードニング第3弾2節: add_if_new()==True後・
+            # record_repository_result_item()永続化前に障害が起きた場合、再試行時
+            # ここへ到達しadd_if_new()はFalseを返す。既存項目がこのバッチ自身の
+            # AUTO_SCREENING追加(registration_batch_id一致)であれば、今回追加した
+            # 事実を見失わずADDEDとして復元する(通知対象からの漏れを防ぐ)。
+            # 別バッチの追加・手動登録・batch_id未設定の旧レコードは復元しない。
+            existing = repository.get(entry.stock_code)
+            if (
+                existing is not None
+                and existing.registration_source == WatchlistRegistrationSource.AUTO_SCREENING
+                and existing.registration_batch_id == batch_id
+            ):
+                repository_result = REPOSITORY_RESULT_ADDED
+                added_to_watchlist = True
+            else:
+                repository_result = REPOSITORY_RESULT_SKIPPED_EXISTING
+                added_to_watchlist = False
+            newly_resolved[entry.stock_code] = repository_result
+            record_repository_result_item(batch_id, now, entry.stock_code, repository_result)
             record_repository_result_audit(
                 batch_id,
                 entry.stock_code,
                 stock_name,
                 rank,
                 entry.total_score,
-                REPOSITORY_RESULT_SKIPPED_EXISTING,
-                False,
+                repository_result,
+                added_to_watchlist,
                 registration_source,
                 registration_policy,
                 now,
@@ -475,10 +517,14 @@ def _finish_batch(
     added_stock_codes: list[str],
     notification_sent: bool,
     notification_failure: bool,
+    notification_permanently_failed: bool = False,
 ) -> None:
-    """COMPLETEDフェーズ。`finalize_batch_audit_recorded`が既に立っている場合は
-    `record_batch_audit`を呼ばない(batch audit重複防止、運用ハードニング
-    第2弾2節)。
+    """COMPLETED(またはCOMPLETED_WITH_NOTIFICATION_FAILURE)フェーズ。
+    `finalize_batch_audit_recorded`が既に立っている場合は`record_batch_audit`を
+    呼ばない(無駄な呼び出しを避ける最適化、運用ハードニング第2弾2節)。安全性
+    自体は決定的なaudit_id(`f"watchlist_batch_audit:{batch_id}"`)による
+    `insert_if_absent`が担保するため、このフラグの有無に関わらず実際に重複
+    記録されることはない(運用ハードニング第3弾3節)。
     """
     if not batch_item.get("finalize_batch_audit_recorded"):
         record_batch_audit(
@@ -495,6 +541,7 @@ def _finish_batch(
                 "actual_added_count": len(added_stock_codes),
                 "notification_sent": notification_sent,
                 "notification_failure": notification_failure,
+                "notification_permanently_failed": notification_permanently_failed,
                 # 運用ハードニング1節: 段階導入で実際に適用された設定値をfinalize
                 # 時点の監査ログからも追跡できるようにする(Dispatcher側で記録済みの
                 # 値を参照)。
@@ -508,14 +555,19 @@ def _finish_batch(
             },
             now=now,
             batch_id=batch_id,
+            idempotency_key=f"watchlist_batch_audit:{batch_id}",
         )
         mark_batch_audit_recorded(batch_id, now)
-    mark_watchlist_batch_completed(batch_id, execution_result, now)
+    mark_watchlist_batch_completed(
+        batch_id, execution_result, now, notification_permanently_failed
+    )
     logger.info(
-        "watchlist_screening finalized batch_id=%s execution_result=%s added=%d",
+        "watchlist_screening finalized batch_id=%s execution_result=%s added=%d "
+        "notification_permanently_failed=%s",
         batch_id,
         execution_result,
         len(added_stock_codes),
+        notification_permanently_failed,
     )
 
 
@@ -597,35 +649,83 @@ def _finalize_completed(
         code for code, result in repository_results.items() if result == REPOSITORY_RESULT_ADDED
     ]
 
-    # --- Phase 3: NOTIFICATION_PENDING -> NOTIFICATION_SENT ---
-    notified_raw = batch_item.get("finalize_notified_stock_codes")
-    if notified_raw is None:
+    # --- Phase 3: NOTIFICATION_PENDING -> NOTIFICATION_SENT/NOTIFICATION_FAILED ---
+    # 運用ハードニング第3弾1節: このフェーズは自己完結的に例外を処理する。
+    # notify_watchlist_additions()が例外を送出しても、この関数自体は正常return
+    # する(NOTIFICATION_FAILEDとして記録するのみ)。maybe_finalize/retry_finalize
+    # の外側try/exceptへは伝播させず、finalize全体をFINALIZE_FAILEDにしない
+    # (ウォッチリスト追加結果はPhase2で既に確定・保持済みのため失われない)。
+    if "finalize_notification_outcome" not in batch_item:
         pending_notification_codes = list(added_stock_codes)
-        notification_sent = False
-        notification_failure = False
-        if pending_notification_codes and wc.notification_enabled:
-            content_hash = compute_watchlist_addition_content_hash(pending_notification_codes, now)
-            record_notification_pending(batch_id, now, content_hash)
+        if not pending_notification_codes:
+            record_notification_resolved(batch_id, now, [], NOTIFICATION_OUTCOME_NOT_REQUIRED)
+            notification_outcome = NOTIFICATION_OUTCOME_NOT_REQUIRED
+        elif not wc.notification_enabled:
+            record_notification_resolved(batch_id, now, [], NOTIFICATION_OUTCOME_SKIPPED)
+            notification_outcome = NOTIFICATION_OUTCOME_SKIPPED
+        else:
+            if "finalize_notification_content_hash" in batch_item:
+                content_hash = batch_item["finalize_notification_content_hash"]
+            else:
+                # 運用ハードニング第3弾4節: 再試行時のnow()ではなく、バッチ開始日
+                # (started_at)を評価基準日として使う(日付をまたぐ再試行でも
+                # 同じhashになるようにするため)。この値はrecord_notification_pending
+                # で永続化し、以後の再試行では再計算せずそのまま再利用する。
+                content_hash = compute_watchlist_addition_content_hash(
+                    batch_id, pending_notification_codes, wc.screening_policy, started_at.date()
+                )
+                record_notification_pending(batch_id, now, content_hash)
             pending_items, pending_results_by_code = _build_watchlist_items_for_codes(
-                pending_notification_codes, ranked, providers, now, wc.screening_policy
+                pending_notification_codes, ranked, providers, started_at, wc.screening_policy
             )
             try:
-                notification_sent = notification_service.notify_watchlist_additions(
-                    pending_items, pending_results_by_code, wc.screening_policy, now
+                notification_service.notify_watchlist_additions(
+                    pending_items,
+                    pending_results_by_code,
+                    wc.screening_policy,
+                    started_at,
+                    content_hash,
                 )
-            except Exception:  # noqa: BLE001 - 通知失敗はバッチ失敗にしない(ベストエフォート)
+            except Exception as exc:  # noqa: BLE001 - NOTIFICATION_FAILEDとして記録しfinalize全体は失敗にしない
                 logger.exception(
                     "watchlist_screening notification failed batch_id=%s", batch_id
                 )
-                notification_failure = True
-        record_notification_sent(batch_id, now, pending_notification_codes)
-        notified_stock_codes = pending_notification_codes
+                failure_count = record_notification_failed(batch_id, now, str(exc))
+                permanently_failed = failure_count >= wc.max_notification_retry_attempts
+                logger.warning(
+                    "watchlist_screening notification failed batch_id=%s "
+                    "failure_count=%d max_notification_retry_attempts=%d permanently_failed=%s",
+                    batch_id,
+                    failure_count,
+                    wc.max_notification_retry_attempts,
+                    permanently_failed,
+                )
+                if permanently_failed:
+                    _finish_batch(
+                        batch_id,
+                        now,
+                        started_at,
+                        batch_item,
+                        records,
+                        metrics,
+                        config,
+                        EXECUTION_RESULT_NORMAL,
+                        [],
+                        added_stock_codes,
+                        False,
+                        True,
+                        notification_permanently_failed=True,
+                    )
+                return
+            record_notification_resolved(
+                batch_id, now, pending_notification_codes, NOTIFICATION_OUTCOME_SENT
+            )
+            notification_outcome = NOTIFICATION_OUTCOME_SENT
     else:
-        notified_stock_codes = list(notified_raw)
-        notification_sent = len(notified_stock_codes) > 0
-        notification_failure = False
+        notification_outcome = batch_item["finalize_notification_outcome"]
 
     # --- Phase 4: COMPLETED ---
+    notification_sent = notification_outcome == NOTIFICATION_OUTCOME_SENT
     _finish_batch(
         batch_id,
         now,
@@ -638,7 +738,7 @@ def _finalize_completed(
         [],
         added_stock_codes,
         notification_sent,
-        notification_failure,
+        False,
     )
 
 
@@ -690,6 +790,38 @@ def retry_finalize(
         _finalize_completed(batch_id, now, providers, config, notification_service)
     except Exception as exc:  # noqa: BLE001 - 失敗を記録してから再送出する
         logger.exception("watchlist_screening finalize retry failed batch_id=%s", batch_id)
+        mark_watchlist_finalize_failed(batch_id, now, str(exc))
+        raise
+    return True
+
+
+def retry_notification(
+    batch_id: str,
+    now: dt.datetime,
+    providers: ProviderBundle,
+    config: AppConfig,
+    notification_service: LineNotificationService,
+) -> bool:
+    """運用ハードニング第3弾1節: NOTIFICATION_FAILED状態のバッチに対する、通知
+    のみの再試行版`maybe_finalize`。`try_retry_notification`
+    (NOTIFICATION_FAILED→NOTIFICATION_PENDING)に成功した場合のみ
+    `_finalize_completed`を実行する。
+
+    Phase1(対象決定)・Phase2(ウォッチリスト書込み)はfinalize_target_stock_codes/
+    repository_resultsが既に永続化されているため即座にスキップされ、
+    **ウォッチリスト書込みは再実行されない**。Phase3(通知)自体が送出する例外は
+    `_finalize_completed`内部で処理され外へ伝播しないため、この関数の外側
+    try/exceptはPhase3以外での想定外の例外(監査記録失敗等)のみを捕捉して
+    FINALIZE_FAILEDへ落とす。呼び出し元(Reconciler/CLI)はそれぞれの方針で
+    再試行回数を制御すること(本関数自体は無制限に呼び出し可能)。
+    """
+    if not try_retry_notification(batch_id, now):
+        return False
+
+    try:
+        _finalize_completed(batch_id, now, providers, config, notification_service)
+    except Exception as exc:  # noqa: BLE001 - 失敗を記録してから再送出する
+        logger.exception("watchlist_screening notification retry failed batch_id=%s", batch_id)
         mark_watchlist_finalize_failed(batch_id, now, str(exc))
         raise
     return True

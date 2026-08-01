@@ -168,6 +168,7 @@ pip-auditによる依存脆弱性スキャンを実行する。
 jstock watchlist-screening batch-status <batch_id>       # 状態確認(読み取り専用)
 jstock watchlist-screening list-incomplete <batch_id>    # 未完了銘柄の一覧(読み取り専用)
 jstock watchlist-screening retry-finalize <batch_id> --execute   # finalize再試行
+jstock watchlist-screening retry-notification <batch_id> --execute  # LINE通知のみ再試行(NOTIFICATION_FAILED状態)
 jstock watchlist-screening retry-stock <batch_id> <stock_code> --execute  # 銘柄単体の再評価
 jstock watchlist-screening abort <batch_id> --reason "..." --execute     # 手動中断
 ```
@@ -198,8 +199,12 @@ Managerのコストは小さい。
   `SCORING_DATA_QUALITY_DEGRADED`・`REQUIRED_DATA_QUALITY_DEGRADED`・
   `EXCESSIVE_DATA_ERRORS`・`EXCESSIVE_NOT_FOUND`・`EXCESSIVE_TERMINAL_FAILURES`・
   `OPERATOR_ABORTED`のいずれでもない)。
-- Reconcilerによる`FINALIZE_FAILED`の自動復旧が発生していない、または発生していても
-  再試行で正常完了していること。
+- `status`が`COMPLETED`であること(`COMPLETED_WITH_NOTIFICATION_FAILURE`ではない
+  ことも確認する。ウォッチリスト追加自体は成功しているがLINE通知が
+  `max_notification_retry_attempts`回失敗した状態であり、通知経路側の問題を
+  切り分けたうえで次の段階へ進めるかどうか判断する)。
+- Reconcilerによる`FINALIZE_FAILED`・`NOTIFICATION_FAILED`の自動復旧が発生して
+  いない、または発生していても再試行で正常完了していること。
 - CloudWatch Logsでyfinance側の429/403/5xx等の障害疑いログが目立って増えていないこと。
 - 実行時間がLambda Timeoutに対して十分な余裕を持って完了していること
   (Worker/Dispatcherのタイムアウト設計値は`docs/functional_spec.md`参照)。

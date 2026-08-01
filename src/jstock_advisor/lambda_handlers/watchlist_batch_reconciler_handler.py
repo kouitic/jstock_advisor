@@ -13,6 +13,9 @@ EventBridge毎時トリガー。`batch_processing_timeout_hours`を超えて`DIS
   救済する)。救済できずタイムアウトしていれば`TIMEOUT_FINALIZING`へ。
 - `TIMEOUT_FINALIZING`/`TIMEOUT_FINALIZE_FAILED`: 17節の再計算方式(案C)で
   `completed`を補正しながら、未完了行を件数上限まで`FAILED`確定する。
+- `NOTIFICATION_FAILED`(運用ハードニング第3弾1節): LINE送信のみが例外で
+  失敗した状態。`notification_failure_count`が上限未満なら`retry_notification`で
+  通知のみを再試行する(ウォッチリスト書込みは再実行されない)。
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from jstock_advisor.services.watchlist_batch_finalizer import (
     compute_batch_metrics,
     maybe_finalize,
     retry_finalize,
+    retry_notification,
 )
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 from jstock_advisor.services.watchlist_screening_audit import record_batch_audit
@@ -66,6 +70,9 @@ _RECONCILE_TARGET_STATUSES = [
     WatchlistBatchStatus.NOTIFICATION_PENDING,
     WatchlistBatchStatus.NOTIFICATION_SENT,
     WatchlistBatchStatus.FINALIZE_FAILED,
+    # 運用ハードニング第3弾1節: 通知送信のみが例外で失敗した状態
+    # (finalize全体はFINALIZE_FAILEDにならない、通知のみ再試行する)。
+    WatchlistBatchStatus.NOTIFICATION_FAILED,
     WatchlistBatchStatus.TIMEOUT_FINALIZING,
     WatchlistBatchStatus.TIMEOUT_FINALIZE_FAILED,
 ]
@@ -182,6 +189,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     finalizing_marked_stuck = 0
     finalize_retried = 0
     finalize_retry_exhausted = 0
+    notification_retried = 0
+    notification_retry_exhausted = 0
     to_process_timeout: list[str] = []
 
     for batch_item in candidates:
@@ -243,6 +252,33 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 )
             continue
 
+        if status == WatchlistBatchStatus.NOTIFICATION_FAILED.value:
+            # 運用ハードニング第3弾1節: LINE送信のみが例外で失敗した状態。
+            # finalize全体(ウォッチリスト追加結果)は既に確定・保持されているため、
+            # 通知のみを再試行する(finalize_attempt_countとは独立した
+            # notification_failure_countで上限を判定する)。
+            notification_attempt_count = int(batch_item.get("notification_failure_count", 0) or 0)
+            if notification_attempt_count >= wc.max_notification_retry_attempts:
+                notification_retry_exhausted += 1
+                logger.warning(
+                    "watchlist reconciler: NOTIFICATION_FAILED retry attempts exhausted "
+                    "batch_id=%s notification_failure_count=%d "
+                    "(should already be COMPLETED_WITH_NOTIFICATION_FAILURE; manual "
+                    "intervention required if not)",
+                    batch_id,
+                    notification_attempt_count,
+                )
+                continue
+            try:
+                if retry_notification(batch_id, now, providers, config, notification_service):
+                    notification_retried += 1
+            except Exception:  # noqa: BLE001 - 1バッチの想定外エラーで他バッチの処理を止めない
+                logger.exception(
+                    "watchlist reconciler: retry_notification unexpected error batch_id=%s",
+                    batch_id,
+                )
+            continue
+
         if status == WatchlistBatchStatus.TIMEOUT_FINALIZE_FAILED.value:
             if try_acquire_timeout_finalization(batch_id):
                 to_process_timeout.append(batch_id)
@@ -263,13 +299,15 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     logger.info(
         "watchlist reconciler completed: candidates=%d dispatch_failed=%d rescued=%d "
         "finalizing_marked_stuck=%d finalize_retried=%d finalize_retry_exhausted=%d "
-        "timeout_processed=%d",
+        "notification_retried=%d notification_retry_exhausted=%d timeout_processed=%d",
         len(candidates),
         dispatch_failed,
         rescued,
         finalizing_marked_stuck,
         finalize_retried,
         finalize_retry_exhausted,
+        notification_retried,
+        notification_retry_exhausted,
         timeout_processed,
     )
     return {
@@ -279,5 +317,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "finalizing_marked_stuck": finalizing_marked_stuck,
         "finalize_retried": finalize_retried,
         "finalize_retry_exhausted": finalize_retry_exhausted,
+        "notification_retried": notification_retried,
+        "notification_retry_exhausted": notification_retry_exhausted,
         "timeout_processed": timeout_processed,
     }
