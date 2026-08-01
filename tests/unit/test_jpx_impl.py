@@ -82,6 +82,19 @@ def test_extract_excel_date_returns_none_for_other_types() -> None:
     assert _extract_excel_date(None, datemode=0) is None
 
 
+def test_extract_excel_date_from_yyyymmdd_numeric_cell() -> None:
+    # data_j.xlsの実データはExcelシリアル値ではなくYYYYMMDD形式の数値
+    # (例: 20260630.0)が数値セルとして格納されている。シリアル値として
+    # 解釈するとOverflowErrorになるため、YYYYMMDD形式を先に判定する必要がある。
+    assert _extract_excel_date(20260630.0, datemode=0) == dt.date(2026, 6, 30)
+
+
+def test_extract_excel_date_handles_overflow_gracefully() -> None:
+    # YYYYMMDD形式にもExcelシリアル値の妥当範囲にも該当しない巨大な数値は、
+    # OverflowErrorを送出せずNoneを返す(呼び出し元は次の行で再試行する)。
+    assert _extract_excel_date(1e20, datemode=0) is None
+
+
 # --- JPX400ウェイト列のエイリアス解決 --------------------------------------------
 
 
