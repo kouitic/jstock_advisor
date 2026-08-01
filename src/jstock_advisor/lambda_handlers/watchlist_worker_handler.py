@@ -41,6 +41,7 @@ from jstock_advisor.services.screening_data_provider import (
     StockSnapshotScreeningDataProvider,
 )
 from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize
+from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 from jstock_advisor.services.watchlist_screening_audit import record_candidate_audit
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningService
 
@@ -50,13 +51,20 @@ logger.setLevel(logging.INFO)
 # 7節: Lambda Timeout(180秒、3節)+60秒安全余裕。
 _WORKER_LEASE_SECONDS = 240
 
+# screening_data_provider.WatchlistScreeningInputのスコア項目総数(dividend_yield_pct/
+# equity_ratio_pct/payout_ratio_pct/consecutive_dividend_increase_years/
+# shareholder_benefit_yield_pctの5件)。この件数すべてが同時欠損している場合、
+# 個別銘柄のデータ欠落ではなくデータ提供元側の障害を疑う(運用ハードニング3節)。
+_TOTAL_SCORING_FIELD_COUNT = 5
+
 
 @dataclass(frozen=True)
 class _EvaluationOutcome:
     terminal_status: WatchlistProgressStatus
     evaluation_result: str
     ranking_entry_json: str | None
-    is_rate_limit_suspected: bool
+    is_provider_failure_suspected: bool
+    missing_field_names: list[str]
 
 
 def _evaluate_candidate(
@@ -77,7 +85,8 @@ def _evaluate_candidate(
             WatchlistProgressStatus.COMPLETED,
             "DATA_INSUFFICIENT",
             None,
-            screening_data.is_rate_limit_suspected,
+            screening_data.is_provider_failure_suspected,
+            screening_data.missing_fields,
         )
 
     screening_service = WatchlistScreeningService(config)
@@ -101,12 +110,22 @@ def _evaluate_candidate(
         else:
             ranking_entry_json = entry.model_dump_json()
 
+    # 運用ハードニング3節: 例外は無かった(HTTP応答自体は成立した)が、スコア項目が
+    # 1件も取得できていない場合は、通常の一部欠損(この銘柄固有のデータ欠落)とは
+    # 区別してデータ提供元障害の疑いに算入する。
+    missing_scoring_count = len(screening_data.input.missing_scoring_fields)
+    is_provider_failure_suspected = (
+        screening_data.is_provider_failure_suspected
+        or missing_scoring_count >= _TOTAL_SCORING_FIELD_COUNT
+    )
+
     record_candidate_audit(stock_code, result, evaluation_result, now, batch_id=batch_id)
     return _EvaluationOutcome(
         WatchlistProgressStatus.COMPLETED,
         evaluation_result,
         ranking_entry_json,
-        screening_data.is_rate_limit_suspected,
+        is_provider_failure_suspected,
+        screening_data.missing_fields,
     )
 
 
@@ -121,7 +140,8 @@ def _build_notification_service(config: AppConfig) -> LineNotificationService:
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     config = load_config()
-    providers = build_real_provider_bundle(dt.datetime.now(dt.UTC), config)
+    now = dt.datetime.now(dt.UTC)
+    providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
     notification_service = _build_notification_service(config)
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
 
@@ -155,7 +175,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 stock_code,
             )
             outcome = _EvaluationOutcome(
-                WatchlistProgressStatus.FAILED, "UNEXPECTED_ERROR", None, False
+                WatchlistProgressStatus.FAILED, "UNEXPECTED_ERROR", None, False, []
             )
 
         completion_time = dt.datetime.now(dt.UTC)
@@ -167,7 +187,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             terminal_status=outcome.terminal_status,
             evaluation_result=outcome.evaluation_result,
             ranking_entry=outcome.ranking_entry_json,
-            is_rate_limit_suspected=outcome.is_rate_limit_suspected,
+            is_provider_failure_suspected=outcome.is_provider_failure_suspected,
+            missing_field_names=outcome.missing_field_names,
             processing_duration_ms=duration_ms,
             now=completion_time,
         )

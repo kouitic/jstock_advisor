@@ -65,6 +65,24 @@ _REQUIRED_LISTED_ISSUES_COLUMNS = {
 _JPX400_COL_DATE = "日付"
 _JPX400_COL_CODE = "コード"
 
+# 運用ハードニング7節: data_j.xlsの"市場・商品区分"列で実際に取りうる既知の値
+# (JPX公開資料で確認済み)。この集合に無い値が現れた場合、対象外市場区分の想定内の
+# 行(グロース等)ではなく、パース対象列がずれた・ファイル形式が変わった等の
+# 異常を疑う根拠として`unknown_market_segment_count`に計上する(除外の可否自体は
+# 従来どおりtarget_market_segmentsのみで決める、この集合は異常検知専用)。
+_KNOWN_MARKET_SEGMENTS = frozenset(
+    {
+        "プライム（内国株式）",
+        "スタンダード（内国株式）",
+        "グロース（内国株式）",
+        "PRO Market",
+        "ETF・ETN",
+        "REIT・ベンチャーファンド・カントリーファンド・インフラファンド",
+        "出資証券",
+        "外国株式",
+    }
+)
+
 
 def _normalize_stock_code(raw: object) -> str | None:
     """9節の5ステップで正規化する。不正な場合はNoneを返す。"""
@@ -116,6 +134,8 @@ class ParsedListedIssues:
     items: list[CandidateUniverseItem]
     raw_row_count: int
     invalid_code_count: int
+    duplicate_count: int
+    unknown_market_segment_count: int
     source_date: dt.date | None
 
 
@@ -127,7 +147,9 @@ def parse_listed_issues_xls(
     target_market_segmentsが指定されている場合、市場・商品区分がこの集合に
     含まれる行のみをitemsへ残す(プライム+スタンダードへの絞り込み)。除外された
     行はraw_row_count/invalid_code_countのいずれにもカウントしない(形式不正では
-    なく対象外の市場区分のため)。
+    なく対象外の市場区分のため)。unknown_market_segment_countのみ、
+    target_market_segmentsによる絞り込みより前の全行を対象に集計する(運用
+    ハードニング7節: 対象外市場区分による正常な除外と、列ずれ等の異常を区別する)。
     """
     book = xlrd.open_workbook(file_contents=data)
     sheet = book.sheet_by_index(0)
@@ -140,6 +162,8 @@ def parse_listed_issues_xls(
     items: list[CandidateUniverseItem] = []
     raw_row_count = 0
     invalid_code_count = 0
+    duplicate_count = 0
+    unknown_market_segment_count = 0
     source_date: dt.date | None = None
     seen: set[str] = set()
 
@@ -149,6 +173,8 @@ def parse_listed_issues_xls(
             continue  # 空行
 
         market_segment = str(sheet.cell_value(row, col_index[_COL_MARKET_SEGMENT])).strip()
+        if market_segment not in _KNOWN_MARKET_SEGMENTS:
+            unknown_market_segment_count += 1
         if target_market_segments is not None and market_segment not in target_market_segments:
             continue  # 対象外市場区分(raw_row_countに含めない)
 
@@ -160,8 +186,11 @@ def parse_listed_issues_xls(
             )
 
         stock_code = _normalize_stock_code(code_cell)
-        if stock_code is None or stock_code in seen:
+        if stock_code is None:
             invalid_code_count += 1
+            continue
+        if stock_code in seen:
+            duplicate_count += 1
             continue
         seen.add(stock_code)
 
@@ -191,6 +220,8 @@ def parse_listed_issues_xls(
         items=items,
         raw_row_count=raw_row_count,
         invalid_code_count=invalid_code_count,
+        duplicate_count=duplicate_count,
+        unknown_market_segment_count=unknown_market_segment_count,
         source_date=source_date,
     )
 
@@ -200,6 +231,7 @@ class ParsedJpx400Membership:
     member_codes: set[str]
     raw_row_count: int
     invalid_code_count: int
+    duplicate_count: int
     source_date: dt.date | None
 
 
@@ -231,6 +263,7 @@ def parse_jpx400_weight_csv(data: bytes) -> ParsedJpx400Membership:
     member_codes: set[str] = set()
     raw_row_count = 0
     invalid_code_count = 0
+    duplicate_count = 0
     source_date: dt.date | None = None
 
     for row in reader:
@@ -246,12 +279,16 @@ def parse_jpx400_weight_csv(data: bytes) -> ParsedJpx400Membership:
         if stock_code is None:
             invalid_code_count += 1
             continue
+        if stock_code in member_codes:
+            duplicate_count += 1
+            continue
         member_codes.add(stock_code)
 
     return ParsedJpx400Membership(
         member_codes=member_codes,
         raw_row_count=raw_row_count,
         invalid_code_count=invalid_code_count,
+        duplicate_count=duplicate_count,
         source_date=source_date,
     )
 
@@ -333,7 +370,7 @@ class JpxCandidateUniverseProvider:
         return CandidateUniverseResult(
             items=items,
             raw_row_count=listed.raw_row_count,
-            duplicate_count=0,
+            duplicate_count=listed.duplicate_count,
             invalid_code_count=listed.invalid_code_count,
             selected_count=len(items),
             source_date=listed_metadata.source_date,

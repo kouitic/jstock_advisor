@@ -181,7 +181,8 @@ def test_complete_candidate_increments_completed_and_sets_terminal_fields(dynamo
         terminal_status=WatchlistProgressStatus.COMPLETED,
         evaluation_result="PASSED",
         ranking_entry='{"stock_code": "1111"}',
-        is_rate_limit_suspected=False,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
         processing_duration_ms=1500,
         now=_NOW,
     )
@@ -216,7 +217,8 @@ def test_complete_candidate_fails_when_owner_does_not_match(dynamo) -> None:
         terminal_status=WatchlistProgressStatus.COMPLETED,
         evaluation_result="PASSED",
         ranking_entry=None,
-        is_rate_limit_suspected=False,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
         processing_duration_ms=1000,
         now=later,
     )
@@ -283,19 +285,20 @@ def test_try_finalize_if_ready_false_until_dispatch_completed_and_all_done(dynam
         terminal_status=WatchlistProgressStatus.COMPLETED,
         evaluation_result="PASSED",
         ranking_entry=None,
-        is_rate_limit_suspected=False,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
         processing_duration_ms=100,
         now=_NOW,
     )
 
     # completed>=totalだが、dispatch_completedがまだfalse(status=DISPATCHING)。
-    assert batch_tracker.try_finalize_if_ready("batch-1") is False
+    assert batch_tracker.try_finalize_if_ready("batch-1", _NOW) is False
 
     batch_tracker.mark_dispatch_completed("batch-1", _NOW)
-    assert batch_tracker.try_finalize_if_ready("batch-1") is True
+    assert batch_tracker.try_finalize_if_ready("batch-1", _NOW) is True
 
     # 一度FINALIZINGへ遷移した後は、再度呼んでもFalse(排他制御)。
-    assert batch_tracker.try_finalize_if_ready("batch-1") is False
+    assert batch_tracker.try_finalize_if_ready("batch-1", _NOW) is False
 
 
 def test_try_finalize_if_ready_only_one_winner_among_concurrent_callers(dynamo) -> None:
@@ -312,12 +315,13 @@ def test_try_finalize_if_ready_only_one_winner_among_concurrent_callers(dynamo) 
         terminal_status=WatchlistProgressStatus.COMPLETED,
         evaluation_result="PASSED",
         ranking_entry=None,
-        is_rate_limit_suspected=False,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
         processing_duration_ms=100,
         now=_NOW,
     )
 
-    results = [batch_tracker.try_finalize_if_ready("batch-1") for _ in range(5)]
+    results = [batch_tracker.try_finalize_if_ready("batch-1", _NOW) for _ in range(5)]
     assert results.count(True) == 1
 
 
@@ -362,7 +366,8 @@ def test_run_timeout_finalization_pass_preserves_completed_rows_and_fails_incomp
         terminal_status=WatchlistProgressStatus.COMPLETED,
         evaluation_result="PASSED",
         ranking_entry='{"stock_code": "1111"}',
-        is_rate_limit_suspected=False,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
         processing_duration_ms=2000,
         now=_NOW,
     )
@@ -465,7 +470,8 @@ def test_worker_and_reconciler_race_only_one_terminal_state_wins(dynamo) -> None
         terminal_status=WatchlistProgressStatus.COMPLETED,
         evaluation_result="PASSED",
         ranking_entry=None,
-        is_rate_limit_suspected=False,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
         processing_duration_ms=100,
         now=_NOW,
     )
@@ -524,3 +530,261 @@ def test_mark_watchlist_batch_completed_normal_vs_high_throttle(dynamo) -> None:
     assert item2 is not None
     assert item2["status"] == WatchlistBatchStatus.ABORTED.value
     assert item2["execution_result"] == batch_tracker.EXECUTION_RESULT_HIGH_THROTTLE_RATE
+
+
+def test_mark_watchlist_batch_completed_provider_data_quality_degraded_is_aborted(
+    dynamo,
+) -> None:
+    """運用ハードニング3節: 主要項目欠損率によるABORTEDもHIGH_THROTTLE_RATEと
+    同じくstatus=ABORTEDへ揃うこと(20節のstatus/execution_result分離パターン)。"""
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
+    batch_tracker.mark_watchlist_batch_completed(
+        "batch-1", batch_tracker.EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED, _NOW
+    )
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.ABORTED.value
+    assert item["execution_result"] == (
+        batch_tracker.EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED
+    )
+
+
+# --- 運用ハードニング5節: finalize再実行性(FINALIZING/FINALIZE_FAILED) ----------
+
+
+def test_try_retry_finalize_succeeds_from_finalize_failed(dynamo) -> None:
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
+    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, _NOW)
+    batch_tracker.mark_dispatch_completed("batch-1", _NOW)
+    batch_tracker.try_finalize_if_ready("batch-1", _NOW)
+    batch_tracker.mark_watchlist_finalize_failed("batch-1", _NOW, "boom")
+
+    ok = batch_tracker.try_retry_finalize("batch-1")
+    assert ok is True
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.FINALIZING.value
+
+
+def test_try_retry_finalize_fails_conditional_check_when_not_finalize_failed(dynamo) -> None:
+    """ConditionalCheckFailedException相当: FINALIZE_FAILED以外(例: RUNNING)からは
+    遷移しないこと。"""
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
+    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, _NOW)
+    batch_tracker.mark_dispatch_completed("batch-1", _NOW)
+
+    ok = batch_tracker.try_retry_finalize("batch-1")
+    assert ok is False
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.RUNNING.value
+
+
+def test_mark_watchlist_finalize_failed_increments_attempt_count(dynamo) -> None:
+    """Reconcilerの再試行回数上限判定に使うfinalize_attempt_countが、
+    finalize失敗のたびに加算されること。"""
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
+    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, _NOW)
+    batch_tracker.mark_dispatch_completed("batch-1", _NOW)
+    batch_tracker.try_finalize_if_ready("batch-1", _NOW)
+
+    batch_tracker.mark_watchlist_finalize_failed("batch-1", _NOW, "boom-1")
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert int(item["finalize_attempt_count"]) == 1
+
+    batch_tracker.try_retry_finalize("batch-1")
+    batch_tracker.mark_watchlist_finalize_failed("batch-1", _NOW, "boom-2")
+    item2 = batch_tracker.get_watchlist_batch("batch-1")
+    assert item2 is not None
+    assert int(item2["finalize_attempt_count"]) == 2
+
+
+def _drive_batch_to_finalizing(now: dt.datetime) -> None:
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", now, 360, 72)
+    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, now)
+    batch_tracker.create_missing_candidate_progress_rows("batch-1", ["1111"], now, 72)
+    batch_tracker.mark_dispatch_completed("batch-1", now)
+    batch_tracker.claim_candidate_lease("batch-1", "1111", "owner-a", now, 240)
+    batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=WatchlistProgressStatus.COMPLETED,
+        evaluation_result="PASSED",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=now,
+    )
+    assert batch_tracker.try_finalize_if_ready("batch-1", now) is True
+
+
+def test_mark_finalizing_stuck_as_failed_transitions_when_past_threshold(dynamo) -> None:
+    _drive_batch_to_finalizing(_NOW)  # finalizing_started_at = _NOW
+
+    later = _NOW + dt.timedelta(minutes=16)
+    ok = batch_tracker.mark_finalizing_stuck_as_failed("batch-1", later, 15)
+    assert ok is True
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.FINALIZE_FAILED.value
+
+
+def test_mark_finalizing_stuck_as_failed_no_op_when_within_threshold(dynamo) -> None:
+    """ConditionalCheckFailedException相当: 閾値未満(まだ正常に進行中かもしれない)
+    場合は遷移しないこと。"""
+    _drive_batch_to_finalizing(_NOW)
+
+    soon = _NOW + dt.timedelta(minutes=5)
+    ok = batch_tracker.mark_finalizing_stuck_as_failed("batch-1", soon, 15)
+    assert ok is False
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.FINALIZING.value
+
+
+# --- 運用ハードニング6節: 運用者によるバッチ中断(CLI abort) --------------------
+
+
+def test_try_operator_abort_succeeds_from_non_terminal_status(dynamo) -> None:
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
+    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, _NOW)
+    batch_tracker.mark_dispatch_completed("batch-1", _NOW)
+
+    ok = batch_tracker.try_operator_abort("batch-1", "運用者判断による中断", _NOW)
+    assert ok is True
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.ABORTED.value
+    assert "運用者判断による中断" in item["execution_result"]
+
+
+def test_try_operator_abort_fails_conditional_check_when_already_terminal(dynamo) -> None:
+    """ConditionalCheckFailedException相当: 既に終端状態(COMPLETED等)からは
+    遷移しないこと。"""
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
+    batch_tracker.mark_watchlist_batch_completed(
+        "batch-1", batch_tracker.EXECUTION_RESULT_NORMAL, _NOW
+    )
+
+    ok = batch_tracker.try_operator_abort("batch-1", "後から中断しようとした", _NOW)
+    assert ok is False
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.COMPLETED.value
+
+
+# --- SQS再配信・Lambda途中終了の模擬テスト ---------------------------------------
+
+
+def test_same_sqs_message_processed_twice_only_reflected_once(dynamo) -> None:
+    """同一SQSメッセージ(同一batch_id/stock_code)がWorkerで2回処理されても
+    (可視性タイムアウト経過前の重複配信を想定、ownerは同一)、completedが
+    1回しか加算されないこと。"""
+    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, _NOW)
+    batch_tracker.create_missing_candidate_progress_rows("batch-1", ["1111"], _NOW, 72)
+    batch_tracker.claim_candidate_lease("batch-1", "1111", "owner-a", _NOW, 240)
+
+    first = batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=WatchlistProgressStatus.COMPLETED,
+        evaluation_result="PASSED",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+    second = batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=WatchlistProgressStatus.COMPLETED,
+        evaluation_result="PASSED",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+    assert first is True
+    assert second is False  # 既にstatus=COMPLETEDのため条件不成立
+    batch = batch_tracker.get_watchlist_batch("batch-1")
+    assert batch is not None
+    assert int(batch["completed"]) == 1
+
+
+def test_lambda_terminated_after_lease_before_completion_allows_reclaim(dynamo) -> None:
+    """Worker Lambdaがリース取得直後(complete_candidate呼び出し前)に打ち切られた
+    場合、リース期限切れ後に別のWorker実行が再クレームできること。"""
+    batch_tracker.create_missing_candidate_progress_rows("batch-1", ["1111"], _NOW, 72)
+    batch_tracker.claim_candidate_lease("batch-1", "1111", "owner-a", _NOW, 240)
+    # ここでLambdaが打ち切られたと想定(complete_candidateが一度も呼ばれない)。
+
+    later = _NOW + dt.timedelta(seconds=241)
+    reclaimed = batch_tracker.claim_candidate_lease("batch-1", "1111", "owner-b", later, 240)
+    assert reclaimed is True
+    rows = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    assert rows[0].lease_owner_id == "owner-b"
+    assert rows[0].attempt_count == 2
+
+
+def test_lambda_terminated_after_completion_before_finalize_call_is_safe_to_resume(
+    dynamo,
+) -> None:
+    """complete_candidate成功直後、maybe_finalize呼び出し前にLambdaが打ち切られた
+    場合を想定。completedは既に加算済みのため、後続の実行(次のWorker呼び出しや
+    Reconciler)がtry_finalize_if_readyを呼べば正しく進行できること(二重加算なし)。"""
+    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
+    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, _NOW)
+    batch_tracker.mark_dispatch_completed("batch-1", _NOW)
+    batch_tracker.create_missing_candidate_progress_rows("batch-1", ["1111"], _NOW, 72)
+    batch_tracker.claim_candidate_lease("batch-1", "1111", "owner-a", _NOW, 240)
+    batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=WatchlistProgressStatus.COMPLETED,
+        evaluation_result="PASSED",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+    # ここでLambdaが打ち切られたと想定(maybe_finalizeが一度も呼ばれない)。
+
+    # 別実行(次のイベント、またはReconciler)がfinalizeを試みる。
+    ok = batch_tracker.try_finalize_if_ready("batch-1", _NOW)
+    assert ok is True
+    batch = batch_tracker.get_watchlist_batch("batch-1")
+    assert batch is not None
+    assert int(batch["completed"]) == 1  # 二重加算されていない
+
+
+# --- 運用ハードニング8節: DynamoDBアイテムサイズの回帰確認 -----------------------
+
+
+def test_create_missing_candidate_progress_rows_scales_to_full_market_without_400kb_risk(
+    dynamo,
+) -> None:
+    """東証プライム+スタンダード全銘柄相当(約3,200件)を投入しても、DynamoDBの
+    単一アイテム400KB上限に抵触しないこと(銘柄単位の行設計で構造的に解消済み、
+    旧設計(単一アイテムへのranking_entries集約)にあったリスクの回帰確認)。"""
+    stock_codes = [f"{1000 + i:04d}" for i in range(3200)]
+    batch_tracker.set_watchlist_batch_total("batch-1", len(stock_codes), 72, _NOW)
+    batch_tracker.create_missing_candidate_progress_rows("batch-1", stock_codes, _NOW, 72)
+
+    rows = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    assert len(rows) == 3200
+
+    # BatchRunsTableのアイテム自体も小さい(件数のみを持つ設計のため)。
+    batch_item = batch_tracker.get_watchlist_batch("batch-1")
+    assert batch_item is not None
+    import json
+
+    assert len(json.dumps(batch_item, default=str).encode("utf-8")) < 10_000

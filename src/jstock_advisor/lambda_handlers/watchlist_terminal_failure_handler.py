@@ -31,6 +31,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize
+from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -48,7 +49,7 @@ def _build_notification_service(config: AppConfig) -> LineNotificationService:
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     now = dt.datetime.now(dt.UTC)
     config = load_config()
-    providers = build_real_provider_bundle(now, config)
+    providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
     notification_service = _build_notification_service(config)
 
     processed: list[dict[str, str]] = []

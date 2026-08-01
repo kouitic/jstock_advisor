@@ -824,6 +824,17 @@ class WatchlistScreeningScoringConfig(StrictModel):
         return self
 
 
+class WatchlistDataCacheConfig(StrictModel):
+    """ウォッチリスト専用の株価/財務/配当データキャッシュTTL(運用ハードニング4節)。
+
+    共有yfinance Provider実装は変更せず、ウォッチリストLambdaハンドラ内でのみ
+    ProviderBundleをラップして適用する(services/watchlist_data_cache.py)。
+    """
+
+    price_cache_ttl_hours: int = Field(gt=0)
+    financial_cache_ttl_hours: int = Field(gt=0)
+
+
 class WatchlistScreeningRulesConfig(StrictModel):
     enabled: bool
     weekly_schedule_enabled: bool
@@ -849,6 +860,15 @@ class WatchlistScreeningRulesConfig(StrictModel):
     high_throttle_rate_threshold_pct: float = Field(ge=0, le=100)
     # 15節: 段階導入(100→500→プライムのみ→全件)。
     staged_rollout: StagedRolloutConfig
+
+    # --- 運用ハードニング(2026-08、本番運用レビュー対応)で追加 ---------------
+    # 主要スコア項目の欠損率がこれを超えるとABORTEDとする(429疑い率とは独立、3節)。
+    max_field_missing_rate_pct: float = Field(ge=0, le=100)
+    # finalizeがFINALIZINGのまま応答が無い場合の異常判定しきい値(分、5節)。
+    finalizing_stuck_threshold_minutes: int = Field(gt=0)
+    # FINALIZE_FAILEDに対するReconcilerの自動再試行上限回数(5節)。
+    max_finalize_retry_attempts: int = Field(gt=0)
+    data_cache: WatchlistDataCacheConfig
 
 
 # --- 集約 --------------------------------------------------------------------

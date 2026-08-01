@@ -12,7 +12,7 @@ from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_ret
 def test_call_with_rate_limit_retry_returns_value_on_immediate_success() -> None:
     result = call_with_rate_limit_retry(lambda: 42)
     assert result.value == 42
-    assert result.is_rate_limit_suspected is False
+    assert result.is_provider_failure_suspected is False
     assert result.error is None
 
 
@@ -56,7 +56,7 @@ def test_call_with_rate_limit_retry_detects_429_from_message_pattern(
         raise Exception("HTTP Error: Too Many Requests")
 
     result = call_with_rate_limit_retry(_raise)
-    assert result.is_rate_limit_suspected is True
+    assert result.is_provider_failure_suspected is True
     assert result.value is None
     assert result.error is not None
 
@@ -73,7 +73,7 @@ def test_call_with_rate_limit_retry_exhausts_retries_and_reports_suspected(
 
     result = call_with_rate_limit_retry(_always_429)
     assert result.value is None
-    assert result.is_rate_limit_suspected is True
+    assert result.is_provider_failure_suspected is True
     assert attempts["count"] == 4  # 初回+最大3回再試行
 
 

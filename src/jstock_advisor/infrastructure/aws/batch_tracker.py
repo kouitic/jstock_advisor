@@ -354,6 +354,12 @@ class WatchlistProgressStatus(StrEnum):
 
 EXECUTION_RESULT_NORMAL = "NORMAL"
 EXECUTION_RESULT_HIGH_THROTTLE_RATE = "HIGH_THROTTLE_RATE"
+# 運用ハードニング3節: 429疑い率以外に、主要スコア項目の欠損率が閾値を超えた
+# 場合のABORTED理由。statusはHIGH_THROTTLE_RATEと同じくABORTEDへ揃える。
+EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED = "PROVIDER_DATA_QUALITY_DEGRADED"
+_ABORTED_EXECUTION_RESULTS = frozenset(
+    {EXECUTION_RESULT_HIGH_THROTTLE_RATE, EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED}
+)
 
 # Reconcilerのタイムアウト確定処理(17節)専用のevaluation_result。
 EVALUATION_RESULT_BATCH_TIMED_OUT = "BATCH_TIMED_OUT"
@@ -379,7 +385,12 @@ class CandidateProgressRecord:
     lease_owner_id: str | None
     attempt_count: int
     total_processing_duration_ms: int
-    is_rate_limit_suspected: bool
+    # 運用ハードニング3節: 429だけでなく403/5xx/タイムアウト/接続切断/yfinance
+    # 固有例外等を広く「データ提供元障害の疑い」として扱う(旧is_rate_limit_suspected
+    # を実態に合わせて改名。本番未デプロイのため後方互換は不要)。
+    is_provider_failure_suspected: bool
+    # 欠損したスコア項目名(最大7件程度の短い文字列)。主要項目ごとの取得率集計に使う。
+    missing_field_names: list[str]
 
 
 def _to_progress_record(item: dict[str, Any]) -> CandidateProgressRecord:
@@ -393,7 +404,8 @@ def _to_progress_record(item: dict[str, Any]) -> CandidateProgressRecord:
         lease_owner_id=item.get("lease_owner_id"),
         attempt_count=int(item.get("attempt_count", 0)),
         total_processing_duration_ms=int(item.get("total_processing_duration_ms", 0)),
-        is_rate_limit_suspected=bool(item.get("is_rate_limit_suspected", False)),
+        is_provider_failure_suspected=bool(item.get("is_provider_failure_suspected", False)),
+        missing_field_names=list(item.get("missing_field_names", [])),
     )
 
 
@@ -491,7 +503,8 @@ def create_missing_candidate_progress_rows(
                         "dispatched": _ser(False),
                         "attempt_count": _ser(0),
                         "total_processing_duration_ms": _ser(0),
-                        "is_rate_limit_suspected": _ser(False),
+                        "is_provider_failure_suspected": _ser(False),
+                        "missing_field_names": _ser([]),
                         "ttl": _ser(ttl),
                     }
                 }
@@ -550,18 +563,47 @@ def try_acquire_dispatch_lease(
         raise
 
 
-def set_watchlist_batch_total(batch_id: str, total: int, ttl_hours: int, now: dt.datetime) -> None:
+def set_watchlist_batch_total(
+    batch_id: str,
+    total: int,
+    ttl_hours: int,
+    now: dt.datetime,
+    *,
+    staged_rollout_candidate_limit: int | None = None,
+    staged_rollout_market_segment_filter: list[str] | None = None,
+    universe_count: int = 0,
+    staged_rollout_excluded_count: int = 0,
+) -> None:
     """1節ステップ2: 候補リスト確定後にtotalを設定し、dispatch_completedを
-    falseで初期化する(この時点ではまだSQS送信を開始していないため)。"""
+    falseで初期化する(この時点ではまだSQS送信を開始していないため)。
+
+    運用ハードニング1節: 実際に適用された段階導入設定(candidate_limit・
+    market_segment_filter)・絞り込み前の候補総数・除外件数もあわせて記録する。
+    finalize時点の監査ログ(watchlist_batch_finalizer._finalize_completed)が
+    この値を参照する。
+    """
     ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
     _table().update_item(
         Key={"batch_id": batch_id},
         UpdateExpression=(
             "SET #total = :total, dispatch_completed = :false, "
-            "completed = if_not_exists(completed, :zero), #ttl = :ttl"
+            "completed = if_not_exists(completed, :zero), #ttl = :ttl, "
+            "staged_rollout_candidate_limit = :candidate_limit, "
+            "staged_rollout_market_segment_filter = :market_segment_filter, "
+            "universe_count = :universe_count, "
+            "staged_rollout_excluded_count = :staged_rollout_excluded_count"
         ),
         ExpressionAttributeNames={"#total": "total", "#ttl": "ttl"},
-        ExpressionAttributeValues={":total": total, ":false": False, ":zero": 0, ":ttl": ttl},
+        ExpressionAttributeValues={
+            ":total": total,
+            ":false": False,
+            ":zero": 0,
+            ":ttl": ttl,
+            ":candidate_limit": staged_rollout_candidate_limit,
+            ":market_segment_filter": staged_rollout_market_segment_filter,
+            ":universe_count": universe_count,
+            ":staged_rollout_excluded_count": staged_rollout_excluded_count,
+        },
     )
 
 
@@ -676,7 +718,8 @@ def complete_candidate(
     terminal_status: WatchlistProgressStatus,
     evaluation_result: str,
     ranking_entry: str | None,
-    is_rate_limit_suspected: bool,
+    is_provider_failure_suspected: bool,
+    missing_field_names: list[str],
     processing_duration_ms: int,
     now: dt.datetime,
 ) -> bool:
@@ -689,7 +732,8 @@ def complete_candidate(
     """
     update_expression = (
         "SET #status = :status, evaluation_result = :eval_result, completed_at = :now, "
-        "is_rate_limit_suspected = :rate_limited"
+        "is_provider_failure_suspected = :provider_failure, "
+        "missing_field_names = :missing_fields"
         + (", ranking_entry = :ranking_entry" if ranking_entry is not None else "")
         + " ADD total_processing_duration_ms :duration_ms"
         + " REMOVE lease_owner_id, lease_expires_at"
@@ -698,7 +742,8 @@ def complete_candidate(
         ":status": terminal_status.value,
         ":eval_result": evaluation_result,
         ":now": now.isoformat(),
-        ":rate_limited": is_rate_limit_suspected,
+        ":provider_failure": is_provider_failure_suspected,
+        ":missing_fields": missing_field_names,
         ":duration_ms": processing_duration_ms,
         ":processing": WatchlistProgressStatus.PROCESSING.value,
         ":owner": owner_id,
@@ -825,7 +870,7 @@ def record_terminal_failure(batch_id: str, stock_code: str, now: dt.datetime) ->
         raise
 
 
-def try_finalize_if_ready(batch_id: str) -> bool:
+def try_finalize_if_ready(batch_id: str, now: dt.datetime) -> bool:
     """11節: dispatch_completed AND completed>=total AND status=RUNNINGの場合のみ、
     RUNNING→FINALIZINGへの排他遷移を試みる。Worker/Dispatcher/Terminal Failure
     Handler/Reconcilerのすべてから、それぞれが担当する完了確定の直後に呼ぶこと。
@@ -834,11 +879,14 @@ def try_finalize_if_ready(batch_id: str) -> bool:
     (このモジュールはDynamoDB上の排他制御のみを担う)。
 
     TIMED_OUTはこの関数を使わない(17節: 判定条件・処理内容が異なる別経路)。
+    finalizing_started_atは呼び出し側から渡された`now`をそのまま使う(運用
+    ハードニング5節: mark_finalizing_stuck_as_failedのスタック検知が同じ時刻軸で
+    比較できるようにするため、この関数の内部でdt.datetime.now()を独自に取得しない)。
     """
     try:
         _table().update_item(
             Key={"batch_id": batch_id},
-            UpdateExpression="SET #status = :finalizing",
+            UpdateExpression="SET #status = :finalizing, finalizing_started_at = :now",
             ConditionExpression=(
                 "#status = :running AND dispatch_completed = :true AND completed >= #total"
             ),
@@ -847,6 +895,105 @@ def try_finalize_if_ready(batch_id: str) -> bool:
                 ":finalizing": WatchlistBatchStatus.FINALIZING.value,
                 ":running": WatchlistBatchStatus.RUNNING.value,
                 ":true": True,
+                ":now": now.isoformat(),
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def try_retry_finalize(batch_id: str) -> bool:
+    """運用ハードニング5節: FINALIZE_FAILED→FINALIZINGへの再試行遷移。
+
+    finalizing_started_atをあわせて更新し(スタック検知の起点をリセットする)、
+    Reconciler(試行回数上限あり)・CLI(`retry-finalize --execute`、上限を無視して
+    1回試みる)の両方から呼ぶ。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET #status = :finalizing, finalizing_started_at = :now",
+            ConditionExpression="#status = :failed",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":finalizing": WatchlistBatchStatus.FINALIZING.value,
+                ":failed": WatchlistBatchStatus.FINALIZE_FAILED.value,
+                ":now": dt.datetime.now(dt.UTC).isoformat(),
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def mark_finalizing_stuck_as_failed(
+    batch_id: str, now: dt.datetime, stuck_threshold_minutes: int
+) -> bool:
+    """運用ハードニング5節: finalizing_started_atから閾値分を超えてFINALIZINGの
+    ままのバッチを、Reconcilerが異常とみなしFINALIZE_FAILEDへ強制遷移する
+    (finalizeは少数銘柄のみを処理するため短時間で完了するはずという前提。
+    これにより`try_retry_finalize`による自動復旧の対象になる)。
+    """
+    threshold_iso = (now - dt.timedelta(minutes=stuck_threshold_minutes)).isoformat()
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET #status = :failed, finalize_failed_at = :now, "
+                "finalize_error_message = :reason, updated_at = :now"
+            ),
+            ConditionExpression="#status = :finalizing AND finalizing_started_at < :threshold",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":failed": WatchlistBatchStatus.FINALIZE_FAILED.value,
+                ":finalizing": WatchlistBatchStatus.FINALIZING.value,
+                ":threshold": threshold_iso,
+                ":now": now.isoformat(),
+                ":reason": (
+                    f"finalizing stuck past {stuck_threshold_minutes} minutes "
+                    "(Lambda likely terminated mid-finalize)"
+                ),
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def try_operator_abort(batch_id: str, reason: str, now: dt.datetime) -> bool:
+    """運用ハードニング6節: 運用者がCLI(`abort --execute`)経由で、終端状態
+    でないバッチを強制的にABORTEDへ遷移させる(手動介入用)。
+    """
+    terminal_statuses = {
+        WatchlistBatchStatus.COMPLETED.value,
+        WatchlistBatchStatus.DISPATCH_FAILED.value,
+        WatchlistBatchStatus.TIMED_OUT.value,
+        WatchlistBatchStatus.ABORTED.value,
+    }
+    now_iso = now.isoformat()
+    truncated_reason = f"OPERATOR_ABORTED: {reason}"[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH]
+    values = {f":s{i}": status for i, status in enumerate(terminal_statuses)}
+    condition = " AND ".join(f"#status <> {placeholder}" for placeholder in values)
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET #status = :aborted, execution_result = :reason, updated_at = :now"
+            ),
+            ConditionExpression=condition,
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                **values,
+                ":aborted": WatchlistBatchStatus.ABORTED.value,
+                ":reason": truncated_reason,
+                ":now": now_iso,
             },
         )
         return True
@@ -859,13 +1006,14 @@ def try_finalize_if_ready(batch_id: str) -> bool:
 def mark_watchlist_batch_completed(batch_id: str, execution_result: str, now: dt.datetime) -> None:
     """11節: _finalize_completed相当の後続処理が成功した後に呼ぶ。
 
-    execution_resultはEXECUTION_RESULT_NORMAL(通常完了)または
-    EXECUTION_RESULT_HIGH_THROTTLE_RATE(10節のスロットリング率判定該当時)の
-    いずれか(20節: statusとexecution_resultの責務分離)。
+    execution_resultはEXECUTION_RESULT_NORMAL(通常完了)、または
+    _ABORTED_EXECUTION_RESULTSのいずれか(10/3節のスロットリング率・主要項目
+    欠損率判定該当時)。いずれの場合もstatusはABORTEDへ揃え、理由は
+    execution_resultで区別する(20節: statusとexecution_resultの責務分離)。
     """
     status = (
         WatchlistBatchStatus.ABORTED
-        if execution_result == EXECUTION_RESULT_HIGH_THROTTLE_RATE
+        if execution_result in _ABORTED_EXECUTION_RESULTS
         else WatchlistBatchStatus.COMPLETED
     )
     _table().update_item(
@@ -883,6 +1031,9 @@ def mark_watchlist_batch_completed(batch_id: str, execution_result: str, now: dt
 def mark_watchlist_finalize_failed(
     batch_id: str, now: dt.datetime, error_message: str | None
 ) -> None:
+    """FINALIZING→FINALIZE_FAILEDへ遷移し、finalize_attempt_countを+1する
+    (運用ハードニング5節: Reconcilerの自動再試行回数の上限判定に使う)。
+    """
     now_iso = now.isoformat()
     truncated = (
         (error_message or "")[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH] if error_message else None
@@ -891,13 +1042,15 @@ def mark_watchlist_finalize_failed(
         Key={"batch_id": batch_id},
         UpdateExpression=(
             "SET #status = :status, finalize_failed_at = :now, "
-            "finalize_error_message = :error_message, updated_at = :now"
+            "finalize_error_message = :error_message, updated_at = :now "
+            "ADD finalize_attempt_count :one"
         ),
         ExpressionAttributeNames={"#status": "status"},
         ExpressionAttributeValues={
             ":status": WatchlistBatchStatus.FINALIZE_FAILED.value,
             ":now": now_iso,
             ":error_message": truncated,
+            ":one": 1,
         },
     )
 

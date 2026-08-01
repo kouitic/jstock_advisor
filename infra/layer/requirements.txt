@@ -1,15 +1,27 @@
-# Lambda Layer用の依存パッケージ一覧。
-# boto3/botocoreはLambdaマネージドランタイムに標準搭載されているため含めない
-# (パッケージサイズ削減のためAWS推奨のプラクティスに従う)。
-# typer/python-dotenvはCLI専用の依存であり、lambda_handlers/services/domainからは
-# 参照されないため含めない。
-pydantic>=2.7
-pyyaml>=6.0
-python-dateutil>=2.9
-jpholiday>=0.1.9
-yfinance>=0.2.40
-# 候補ユニバース本格対応(2026-08): JPX上場銘柄一覧(.xls)のパースに使う。
-# pyproject.tomlのrealdata extraにも同じバージョンを追加済み(このファイルと
-# pyproject.tomlは独立して管理されており、実際にLambdaへデプロイされる依存関係を
-# 決めるのはこのファイルのため、片方だけの追加では本番で欠落する)。
-xlrd>=2.0
+# Lambda Layer dependency list.
+# boto3/botocore ship with the Lambda managed runtime, so they are excluded here
+# (reduces package size, per AWS's recommended practice).
+# typer/python-dotenv are CLI-only dependencies not referenced from
+# lambda_handlers/services/domain, so they are excluded here too.
+#
+# Operational hardening item 8: version ranges are capped to the verified range
+# (matches pyproject.toml's ranges; keep both files in sync, since this file is
+# what actually determines what ships in the deployed Lambda artifact).
+#
+# Kept ASCII-only intentionally: some pip build steps (SAM CLI's
+# PythonPipBuilder on Windows, requirements-file parsers used by CI tooling)
+# default to a non-UTF-8 codec and fail on non-ASCII bytes in this file.
+pydantic>=2.13,<3.0
+pyyaml>=6.0,<7.0
+python-dateutil>=2.9,<3.0
+jpholiday>=1.0,<2.0
+# yfinance is an unofficial library and the most prone to breaking changes,
+# so its range is kept the narrowest.
+yfinance>=1.5.2,<1.6.0
+# Full-scale candidate universe support (2026-08): used to parse the JPX
+# listed-issues file (.xls). Also added to pyproject.toml's realdata extra
+# with the same version (this file and pyproject.toml are managed
+# independently; this file is what actually determines the deployed Lambda
+# dependencies, so adding it to only one of the two would silently drop it in
+# production).
+xlrd>=2.0,<3.0

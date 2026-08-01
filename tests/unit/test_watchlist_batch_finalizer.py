@@ -13,7 +13,8 @@ def _record(
     evaluation_result: str | None = "PASSED",
     duration_ms: int = 1000,
     attempt_count: int = 1,
-    is_rate_limit_suspected: bool = False,
+    is_provider_failure_suspected: bool = False,
+    missing_field_names: list[str] | None = None,
 ) -> CandidateProgressRecord:
     return CandidateProgressRecord(
         batch_id="batch-1",
@@ -25,7 +26,8 @@ def _record(
         lease_owner_id=None,
         attempt_count=attempt_count,
         total_processing_duration_ms=duration_ms,
-        is_rate_limit_suspected=is_rate_limit_suspected,
+        is_provider_failure_suspected=is_provider_failure_suspected,
+        missing_field_names=missing_field_names or [],
     )
 
 
@@ -36,17 +38,29 @@ def test_compute_batch_metrics_ignores_non_terminal_rows() -> None:
     assert metrics["p50_processing_duration_ms"] is None
 
 
-def test_compute_batch_metrics_counts_rate_limit_suspected_rate() -> None:
+def test_compute_batch_metrics_counts_provider_failure_suspected_rate() -> None:
     records = [
-        _record("1111", is_rate_limit_suspected=True),
-        _record("2222", is_rate_limit_suspected=True),
-        _record("3333", is_rate_limit_suspected=False),
-        _record("4444", is_rate_limit_suspected=False),
+        _record("1111", is_provider_failure_suspected=True),
+        _record("2222", is_provider_failure_suspected=True),
+        _record("3333", is_provider_failure_suspected=False),
+        _record("4444", is_provider_failure_suspected=False),
     ]
     metrics = compute_batch_metrics(records)
     assert metrics["processed_count"] == 4
-    assert metrics["rate_limit_suspected_count"] == 2
-    assert metrics["rate_limit_suspected_rate_pct"] == 50.0
+    assert metrics["provider_failure_suspected_count"] == 2
+    assert metrics["provider_failure_suspected_rate_pct"] == 50.0
+
+
+def test_compute_batch_metrics_computes_field_coverage_rate() -> None:
+    records = [
+        _record("1111", missing_field_names=["dividend_yield_pct"]),
+        _record("2222", missing_field_names=["dividend_yield_pct"]),
+        _record("3333"),
+        _record("4444"),
+    ]
+    metrics = compute_batch_metrics(records)
+    assert metrics["field_coverage_rate"]["dividend_yield_pct"] == 0.5
+    assert metrics["worst_field_missing_rate_pct"] == 50.0
 
 
 def test_compute_batch_metrics_counts_data_error_and_redelivery() -> None:
