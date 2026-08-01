@@ -30,3 +30,11 @@ class AuditLogRepository:
 
     def save(self, entry: AuditLogEntry) -> None:
         self._store.upsert(entry)
+
+    def save_if_absent(self, entry: AuditLogEntry) -> bool:
+        """運用ハードニング第3弾3節: 既にaudit_idが存在すればFalse(何もしない)、
+        無ければ保存してTrue(冪等な新規記録専用)。決定的なaudit_idと組み合わせて
+        呼び出し側の重複記録防止に使う(CollectionStore.insert_if_absentの
+        条件付き書き込みで原子的に保証される)。
+        """
+        return self._store.insert_if_absent(entry)

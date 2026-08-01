@@ -32,6 +32,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
+    compute_watchlist_addition_content_hash,
     render_notification_preview,
 )
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningResult
@@ -1494,6 +1495,17 @@ def test_check_resend_eligibility_does_not_write_notification_log(service_and_re
 # --- notify_watchlist_additions(ウォッチリスト自動追加機能) --------------------
 
 
+def _hash_for(
+    stock_codes: list[str],
+    policy_name: str = "high_dividend_financial_health",
+    evaluation_date: dt.date | None = None,
+    batch_id: str = "test-batch",
+) -> str:
+    return compute_watchlist_addition_content_hash(
+        batch_id, stock_codes, policy_name, evaluation_date or _NOW.date()
+    )
+
+
 def _watchlist_item(stock_code: str, stock_name: str | None = None) -> WatchlistItem:
     return WatchlistItem(
         stock_code=stock_code,
@@ -1534,7 +1546,7 @@ def test_notify_watchlist_additions_returns_false_and_sends_nothing_when_empty(
     service, _repo, client = service_and_repos
 
     sent = service.notify_watchlist_additions(
-        [], {}, "high_dividend_financial_health", _NOW
+        [], {}, "high_dividend_financial_health", _NOW, _hash_for([])
     )
 
     assert sent is False
@@ -1557,7 +1569,7 @@ def test_notify_watchlist_additions_sends_and_shows_rank_score_and_reason(
     )
 
     sent = service.notify_watchlist_additions(
-        [item], {"1234": result}, "high_dividend_financial_health", _NOW
+        [item], {"1234": result}, "high_dividend_financial_health", _NOW, _hash_for(["1234"])
     )
 
     assert sent is True
@@ -1583,7 +1595,7 @@ def test_notify_watchlist_additions_only_shows_actually_added_items(
     result = _watchlist_screening_result("1234", None, 80.0)
 
     service.notify_watchlist_additions(
-        [item], {"1234": result}, "high_dividend_financial_health", _NOW
+        [item], {"1234": result}, "high_dividend_financial_health", _NOW, _hash_for(["1234"])
     )
 
     message = client.sent[0]
@@ -1601,7 +1613,7 @@ def test_notify_watchlist_additions_orders_by_score_descending(service_and_repos
     }
 
     service.notify_watchlist_additions(
-        [low, high], results, "high_dividend_financial_health", _NOW
+        [low, high], results, "high_dividend_financial_health", _NOW, _hash_for(["1111", "2222"])
     )
 
     message = client.sent[0]
@@ -1619,7 +1631,11 @@ def test_notify_watchlist_additions_shows_only_top_ten_with_remainder_summary(
     }
 
     service.notify_watchlist_additions(
-        items, results, "high_dividend_financial_health", _NOW
+        items,
+        results,
+        "high_dividend_financial_health",
+        _NOW,
+        _hash_for([item.stock_code for item in items]),
     )
 
     message = client.sent[0]
@@ -1634,11 +1650,16 @@ def test_notify_watchlist_additions_suppresses_duplicate_same_day_same_content(
     item = _watchlist_item("1234")
     result = _watchlist_screening_result("1234", None, 80.0)
 
+    content_hash = _hash_for(["1234"])
     first = service.notify_watchlist_additions(
-        [item], {"1234": result}, "high_dividend_financial_health", _NOW
+        [item], {"1234": result}, "high_dividend_financial_health", _NOW, content_hash
     )
     second = service.notify_watchlist_additions(
-        [item], {"1234": result}, "high_dividend_financial_health", _NOW + dt.timedelta(minutes=5)
+        [item],
+        {"1234": result},
+        "high_dividend_financial_health",
+        _NOW + dt.timedelta(minutes=5),
+        content_hash,
     )
 
     assert first is True
@@ -1653,6 +1674,12 @@ def test_notify_watchlist_additions_unknown_policy_name_falls_back_to_raw_value(
     item = _watchlist_item("1234")
     result = _watchlist_screening_result("1234", None, 80.0)
 
-    service.notify_watchlist_additions([item], {"1234": result}, "some_future_policy", _NOW)
+    service.notify_watchlist_additions(
+        [item],
+        {"1234": result},
+        "some_future_policy",
+        _NOW,
+        _hash_for(["1234"], policy_name="some_future_policy"),
+    )
 
     assert "some_future_policy" in client.sent[0]

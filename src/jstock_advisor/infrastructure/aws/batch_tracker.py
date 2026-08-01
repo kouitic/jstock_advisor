@@ -351,7 +351,16 @@ class WatchlistBatchStatus(StrEnum):
     WATCHLIST_WRITE_COMPLETED = "WATCHLIST_WRITE_COMPLETED"
     NOTIFICATION_PENDING = "NOTIFICATION_PENDING"
     NOTIFICATION_SENT = "NOTIFICATION_SENT"
+    # 運用ハードニング第3弾1節: 通知送信が例外になった場合の専用状態。
+    # finalize全体をFINALIZE_FAILEDにはせず、通知のみをReconciler/CLIが
+    # 再試行できるようにする(ウォッチリスト追加結果はWATCHLIST_WRITE_COMPLETED
+    # 時点で既に確定・保持されたまま)。
+    NOTIFICATION_FAILED = "NOTIFICATION_FAILED"
     COMPLETED = "COMPLETED"
+    # 運用ハードニング第3弾1節: 通知再試行が上限(max_notification_retry_attempts)に
+    # 達しても送信できなかった場合の終端状態。ウォッチリスト追加自体は正常完了
+    # している(execution_result=NORMAL)ため、ABORTEDとは区別する。
+    COMPLETED_WITH_NOTIFICATION_FAILURE = "COMPLETED_WITH_NOTIFICATION_FAILURE"
     DISPATCH_FAILED = "DISPATCH_FAILED"
     FINALIZE_FAILED = "FINALIZE_FAILED"
     TIMEOUT_FINALIZING = "TIMEOUT_FINALIZING"
@@ -1138,11 +1147,22 @@ def record_notification_pending(batch_id: str, now: dt.datetime, content_hash: s
         raise
 
 
-def record_notification_sent(
-    batch_id: str, now: dt.datetime, notified_stock_codes: list[str]
+NOTIFICATION_OUTCOME_SENT = "SENT"
+NOTIFICATION_OUTCOME_SKIPPED = "SKIPPED"
+NOTIFICATION_OUTCOME_NOT_REQUIRED = "NOT_REQUIRED"
+NOTIFICATION_OUTCOME_FAILED = "FAILED"
+
+
+def record_notification_resolved(
+    batch_id: str, now: dt.datetime, notified_stock_codes: list[str], outcome: str
 ) -> bool:
-    """運用ハードニング第2弾2節: NOTIFICATION_PENDING→NOTIFICATION_SENT。
-    通知対象が無かった場合(追加0件、またはnotification_enabled=false)は
+    """運用ハードニング第2弾2節・第3弾1節: NOTIFICATION_PENDING/
+    WATCHLIST_WRITE_COMPLETED→NOTIFICATION_SENT。通知フェーズが例外を送出せずに
+    解決した場合にのみ呼ぶ(送信成功・送信対象0件・notification_enabled=false・
+    重複抑止による送信スキップのいずれも含む)。outcome
+    (NOTIFICATION_OUTCOME_*)をfinalize_notification_outcomeへ永続化し、
+    後から「実際に送信したのか、そもそも対象が無かったのか」を区別できるように
+    する。通知対象が無かった場合(追加0件、またはnotification_enabled=false)は
     NOTIFICATION_PENDINGを経由せずWATCHLIST_WRITE_COMPLETEDから直接ここへ
     遷移してよい(その場合notified_stock_codes=[])。
     """
@@ -1150,16 +1170,76 @@ def record_notification_sent(
         _table().update_item(
             Key={"batch_id": batch_id},
             UpdateExpression=(
-                "SET #status = :sent, finalize_notified_stock_codes = :codes, updated_at = :now"
+                "SET #status = :sent, finalize_notified_stock_codes = :codes, "
+                "finalize_notification_outcome = :outcome, updated_at = :now"
             ),
             ConditionExpression="#status = :pending OR #status = :write_completed",
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={
                 ":sent": WatchlistBatchStatus.NOTIFICATION_SENT.value,
                 ":codes": notified_stock_codes,
+                ":outcome": outcome,
                 ":now": now.isoformat(),
                 ":pending": WatchlistBatchStatus.NOTIFICATION_PENDING.value,
                 ":write_completed": WatchlistBatchStatus.WATCHLIST_WRITE_COMPLETED.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+_MAX_NOTIFICATION_ERROR_MESSAGE_LENGTH = 500
+
+
+def record_notification_failed(batch_id: str, now: dt.datetime, error_message: str) -> int:
+    """運用ハードニング第3弾1節: NOTIFICATION_PENDING→NOTIFICATION_FAILED。
+    notify_watchlist_additions()が例外を送出した場合に呼ぶ。finalize全体は
+    FINALIZE_FAILEDにしない(呼び出し側であるwatchlist_batch_finalizer.pyが
+    この例外を外へ伝播させない設計のため)。notification_failure_countを+1し、
+    更新後の値を返す(呼び出し側がmax_notification_retry_attempts以上かを
+    判定するために使う)。
+    """
+    truncated = error_message[:_MAX_NOTIFICATION_ERROR_MESSAGE_LENGTH]
+    response = _table().update_item(
+        Key={"batch_id": batch_id},
+        UpdateExpression=(
+            "SET #status = :failed, last_notification_error = :error, updated_at = :now "
+            "ADD notification_failure_count :one"
+        ),
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":failed": WatchlistBatchStatus.NOTIFICATION_FAILED.value,
+            ":error": truncated,
+            ":now": now.isoformat(),
+            ":one": 1,
+        },
+        ReturnValues="UPDATED_NEW",
+    )
+    return int(response["Attributes"]["notification_failure_count"])
+
+
+def try_retry_notification(batch_id: str, now: dt.datetime) -> bool:
+    """運用ハードニング第3弾1節: NOTIFICATION_FAILED→NOTIFICATION_PENDINGへの
+    再試行遷移。Phase1(対象決定)・Phase2(ウォッチリスト書込み)は
+    finalize_target_stock_codes/repository_resultsが既に存在するため
+    watchlist_batch_finalizer.py側で自動的にスキップされ、通知のみが
+    再試行される(ウォッチリスト書込みは再実行されない)。Reconciler
+    (試行回数上限あり)・CLI(`retry-notification --execute`、上限を無視して
+    1回試みる)の両方から呼ぶ。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET #status = :pending, updated_at = :now",
+            ConditionExpression="#status = :failed",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":pending": WatchlistBatchStatus.NOTIFICATION_PENDING.value,
+                ":failed": WatchlistBatchStatus.NOTIFICATION_FAILED.value,
+                ":now": now.isoformat(),
             },
         )
         return True
@@ -1217,7 +1297,12 @@ def try_operator_abort(batch_id: str, reason: str, now: dt.datetime) -> bool:
         raise
 
 
-def mark_watchlist_batch_completed(batch_id: str, execution_result: str, now: dt.datetime) -> None:
+def mark_watchlist_batch_completed(
+    batch_id: str,
+    execution_result: str,
+    now: dt.datetime,
+    notification_permanently_failed: bool = False,
+) -> None:
     """11節: _finalize_completed相当の後続処理が成功した後に呼ぶ。
 
     execution_resultはEXECUTION_RESULT_NORMAL(通常完了)、または
@@ -1230,12 +1315,18 @@ def mark_watchlist_batch_completed(batch_id: str, execution_result: str, now: dt
     _ABORTED_EXECUTION_RESULTSのいずれかのため、EXECUTION_RESULT_NORMALと
     完全一致するかどうかでCOMPLETED/ABORTEDを判定する方が複合文字列に対して
     頑健)。
+
+    運用ハードニング第3弾1節: notification_permanently_failed=Trueの場合
+    (通知再試行が上限に達した場合のみ、execution_result=NORMALの時に限り呼ばれる
+    想定)、statusをCOMPLETEDではなくCOMPLETED_WITH_NOTIFICATION_FAILUREにする。
+    ウォッチリスト追加自体は正常完了しているため、ABORTEDとは区別する。
     """
-    status = (
-        WatchlistBatchStatus.COMPLETED
-        if execution_result == EXECUTION_RESULT_NORMAL
-        else WatchlistBatchStatus.ABORTED
-    )
+    if notification_permanently_failed and execution_result == EXECUTION_RESULT_NORMAL:
+        status = WatchlistBatchStatus.COMPLETED_WITH_NOTIFICATION_FAILURE
+    elif execution_result == EXECUTION_RESULT_NORMAL:
+        status = WatchlistBatchStatus.COMPLETED
+    else:
+        status = WatchlistBatchStatus.ABORTED
     _table().update_item(
         Key={"batch_id": batch_id},
         UpdateExpression="SET #status = :status, execution_result = :result, updated_at = :now",

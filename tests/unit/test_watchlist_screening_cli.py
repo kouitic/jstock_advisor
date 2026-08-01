@@ -256,7 +256,9 @@ def test_real_run_adds_to_watchlist_and_sends_notification(
         def __init__(self, **kwargs: object) -> None:
             pass
 
-        def notify_watchlist_additions(self, added_items, results_by_code, policy_name, now):
+        def notify_watchlist_additions(
+            self, added_items, results_by_code, policy_name, now, content_hash
+        ):
             notify_calls.append(added_items)
             return True
 

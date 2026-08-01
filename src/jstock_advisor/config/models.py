@@ -881,6 +881,10 @@ class WatchlistScreeningRulesConfig(StrictModel):
     max_terminal_failure_rate_pct: float = Field(ge=0, le=100)
     max_required_field_missing_rate_pct: float = Field(ge=0, le=100)
 
+    # --- 運用ハードニング第3弾(2026-08、レビュー対応)で追加 -----------------
+    # NOTIFICATION_FAILEDに対するReconciler/CLIの自動再試行上限回数(1節)。
+    max_notification_retry_attempts: int = Field(gt=0)
+
 
 # --- 集約 --------------------------------------------------------------------
 

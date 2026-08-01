@@ -155,3 +155,10 @@ data_cache:
   # None・DEGRADED(必須項目が大幅欠損)な値の短期キャッシュTTL(分、運用ハードニング
   # 第2弾1節)。一時的な取得失敗を7日間キャッシュしてしまわないための上限。
   negative_cache_ttl_minutes: 15
+
+# --- 運用ハードニング第3弾(2026-08、レビュー対応)で追加 ----------------------
+# LINE通知(notify_watchlist_additions)が例外になりNOTIFICATION_FAILEDになった
+# バッチに対し、Reconciler/CLIが自動的に再試行する最大回数。ウォッチリストへの
+# 追加自体はNOTIFICATION_FAILED中も維持され、超過後はCOMPLETED_WITH_NOTIFICATION_
+# FAILUREとして終端する(1節)。
+max_notification_retry_attempts: 3

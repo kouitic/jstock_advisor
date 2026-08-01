@@ -47,7 +47,10 @@ from jstock_advisor.lambda_handlers.watchlist_worker_handler import (
     _WORKER_LEASE_SECONDS,
     _evaluate_candidate,
 )
-from jstock_advisor.services.line_notification_service import LineNotificationService
+from jstock_advisor.services.line_notification_service import (
+    LineNotificationService,
+    compute_watchlist_addition_content_hash,
+)
 from jstock_advisor.services.provider_factory import (
     build_candidate_universe_provider,
     build_real_provider_bundle,
@@ -56,7 +59,11 @@ from jstock_advisor.services.screening_data_provider import (
     ScreeningDataStatus,
     StockSnapshotScreeningDataProvider,
 )
-from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize, retry_finalize
+from jstock_advisor.services.watchlist_batch_finalizer import (
+    maybe_finalize,
+    retry_finalize,
+    retry_notification,
+)
 from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 from jstock_advisor.services.watchlist_screening_audit import (
@@ -311,9 +318,12 @@ def run(
             recommendation_repository=RecommendationRepository(),
             config=config,
         )
+        content_hash = compute_watchlist_addition_content_hash(
+            batch_id, [item.stock_code for item in added_items], wc.screening_policy, now.date()
+        )
         try:
             notification_sent = notification_service.notify_watchlist_additions(
-                added_items, added_results, wc.screening_policy, now
+                added_items, added_results, wc.screening_policy, now, content_hash
             )
         except Exception as e:  # noqa: BLE001 - 通知失敗はバッチ失敗にしない(ベストエフォート)
             typer.echo(f"LINE通知に失敗しました: {e}")
@@ -485,6 +495,43 @@ def retry_finalize_command(
     notification_service = _build_notification_service(config)
     if retry_finalize(batch_id, now, providers, config, notification_service):
         typer.echo("finalizeの再試行に成功しました。")
+    else:
+        typer.echo("再試行条件が不成立でした(既に他の主体が処理済み、または状態が変化しています)。")
+
+
+@app.command("retry-notification")
+def retry_notification_command(
+    batch_id: str,
+    execute: bool = typer.Option(
+        False, "--execute", help="実際に通知のみを再試行する(既定はdry-run)"
+    ),
+) -> None:
+    """NOTIFICATION_FAILED状態のバッチに対して、LINE通知のみを再試行する
+    (運用ハードニング第3弾1節)。
+
+    ウォッチリスト追加自体は既に確定・保持されているため、この再試行では
+    WatchlistRepositoryへの書き込みは行わない(通知のみ)。Reconcilerによる
+    自動再試行が上限(max_notification_retry_attempts)に達した後の手動介入用。
+    """
+    batch_item = get_watchlist_batch(batch_id)
+    if batch_item is None:
+        typer.echo(f"batch_id={batch_id} は見つかりませんでした。")
+        raise typer.Exit(code=1)
+    status = batch_item.get("status")
+    typer.echo(f"batch_id={batch_id}: 現在の状態 status={status}")
+    if status != WatchlistBatchStatus.NOTIFICATION_FAILED.value:
+        typer.echo("NOTIFICATION_FAILED状態ではないため、retry-notificationの対象外です。")
+        raise typer.Exit(code=1)
+    if not execute:
+        typer.echo("--executeを指定すると、通知のみの再試行を行います(dry-run)。")
+        return
+
+    now = dt.datetime.now(dt.UTC)
+    config = load_config()
+    providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
+    notification_service = _build_notification_service(config)
+    if retry_notification(batch_id, now, providers, config, notification_service):
+        typer.echo("通知の再試行に成功しました。")
     else:
         typer.echo("再試行条件が不成立でした(既に他の主体が処理済み、または状態が変化しています)。")
 
