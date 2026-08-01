@@ -32,6 +32,10 @@ aws-dev = [
 ]
 realdata = [
     "yfinance>=0.2.40",
+    # 候補ユニバース本格対応(2026-08): JPX上場銘柄一覧(.xls、旧形式Excelバイナリ)の
+    # パースに使う。openpyxlは.xlsx専用で.xlsは読めないため必要(pandasは既存依存に
+    # 含めない方針のため使わない)。
+    "xlrd>=2.0",
 ]
 
 [project.scripts]
@@ -74,4 +78,8 @@ disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
 module = "yfinance.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "xlrd.*"
 ignore_missing_imports = true

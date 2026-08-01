@@ -108,14 +108,27 @@ CSVを用意しただけでは反映されません。必ず`import-csv`を実�
 設定した状態で同じコマンドを実行)、`jstock shareholder-benefit list`で
 登録件数を確認してください。取込漏れは4節の起動時ログ(`WARNING`)でも検知できます。
 
-### 3.4 ウォッチリスト自動追加の候補銘柄一覧(2026-08-01追加)
+### 3.4 ウォッチリスト自動追加の候補銘柄一覧(2026-08-01・候補ユニバース本格対応で全面変更)
 
-`data/universe/candidate_universe.csv`(列: `stock_code`、任意で`memo`)に、
-週次スクリーニング(5.7節)の評価対象としたい証券コードを登録してください。
-このファイルに載っていない銘柄は自動追加の対象になりません(東証全銘柄の
-自動スキャンは行いません)。初期値には、既存の`watchlist_candidates_2026-07-30.csv`
-(低PER/PBRスクリーニング結果)の証券コード列を流用しています。追加・削除は
-CSVを直接編集するだけで反映されます(取込コマンドの実行は不要)。
+候補ユニバース本格対応(2026-08-01)により、固定CSV(`data/universe/candidate_universe.csv`)
+から、東証(JPX)・日本経済新聞社が公開する銘柄一覧を毎週自動取得する方式へ変更しました。
+`config/watchlist_screening_rules.yaml`の`candidate_universe.provider`を`"jpx"`(既定)に
+設定していれば、事前の候補登録作業は不要です。CSV方式(`"csv"`)は小規模な動作検証用に
+残しています。
+
+**キャッシュの取得元とローカル管理コマンド**: 取得したデータはS3(本番)またはローカル
+ファイル(`data/cache/candidate_universe/`)へキャッシュされます。週次`WatchlistDispatcherFunction`
+が起動のたびに自動で取得・検証・更新するため、**通常運用では以下のコマンドを使う必要は
+ありません**。ローカルでの事前確認・リハーサル用の任意ツールとして提供しています(常に
+ローカルキャッシュのみを読み書きし、本番S3には一切アクセスしません)。
+
+```bash
+jstock candidate-universe refresh   # ローカルキャッシュを取得・検証・更新
+jstock candidate-universe status    # ローカルキャッシュの現在の状態(source_date・件数等)を表示
+```
+
+**本番S3キャッシュを週次スケジュール外で手動更新したい場合**: ローカルCLIからは行えません。
+`WatchlistDispatcherFunction`を直接手動起動してください(4.1節参照)。
 
 ---
 
@@ -144,47 +157,91 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 
 ---
 
-## 4.1 ウォッチリスト自動追加(週次、2026-08-01追加)
+## 4.1 ウォッチリスト自動追加(週次、2026-08-01追加・候補ユニバース本格対応で全面改訂)
 
 | 時刻 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 |
 |---|---|---|---|
-| 毎週土曜07:00 | (未登録。`infra/template.yaml`にcron直書き) | `jstock watchlist-screening run` | `WatchlistAutoAdditionFunction` |
+| 毎週土曜07:00 | (未登録。`infra/template.yaml`にcron直書き) | `jstock watchlist-screening run` | `WatchlistDispatcherFunction` |
+| 毎時 | (未登録。`infra/template.yaml`にcron直書き) | ― | `WatchlistBatchReconcilerFunction` |
 
-候補銘柄一覧(3.4節)を評価し、条件を満たした銘柄をウォッチリストへ自動追加します。
-`config/watchlist_screening_rules.yaml`の`enabled`/`weekly_schedule_enabled`が
-両方`true`の場合のみ実行されます(`enabled=false`でも後述の`--dry-run`は実行可能)。
+候補ユニバース本格対応(2026-08-01)で、単一Lambdaの自己再帰fan-outから、
+4つのLambda関数+SQSキューによる構成へ全面的に作り直しました。
 
-実際に登録・通知を行わずに結果だけ確認したい場合は、次のコマンドを使ってください
-(WatchlistRepositoryへの書き込み・LINE通知・監査ログ記録は一切行いません)。
+| Lambda関数 | 役割 |
+|---|---|
+| `WatchlistDispatcherFunction` | 週次起動。候補ユニバースの取得(Downloader)・確定・銘柄ごとの進捗行作成・SQSへの投入のみを行う |
+| `WatchlistWorkerFunction` | メインキュー(`WatchlistScreeningQueue`)のトリガー。1メッセージ=1銘柄を評価する |
+| `WatchlistTerminalFailureHandlerFunction` | メインキューで3回失敗したメッセージの移動先(`WatchlistTerminalFailureQueue`)のトリガー。該当銘柄をFAILED確定する |
+| `WatchlistBatchReconcilerFunction` | 毎時起動。長時間RUNNINGのまま/DISPATCHINGのままのバッチのタイムアウト検知・終端確定を行う |
+
+CLIでの手動実行・dry-run確認方法は変更ありません。
 
 ```bash
-jstock watchlist-screening run --dry-run
+jstock watchlist-screening run --dry-run   # 登録・通知・監査ログ記録を一切行わず結果のみ表示
+jstock watchlist-screening run             # 実際にウォッチリストへ登録・LINE通知
 ```
 
-`--dry-run`を付けずに実行すると、CLIを実行した端末上で(Lambdaの並列処理と
-違い単一プロセスで)候補銘柄すべてを評価し、実際にウォッチリストへ追加します。
-ローカル運用でこの機能を使いたい場合は、このコマンドを`config/schedule.yaml`の
-想定どおり毎週土曜朝に実行するようタスクスケジューラ等へ登録してください
-(9節相当、AWS版は自動実行されます)。
+**バッチの状態遷移**: DynamoDBの`jstock-batch_runs`テーブルの`status`属性で
+確認できます。
 
-**AWS版(Lambda fan-out)の集計処理(finalize)が失敗した場合(2026-08-01追加)**:
-`WatchlistAutoAdditionFunction`は、全銘柄の評価が終わった最後のワーカーが
-集計処理(ウォッチリストへの実登録・LINE通知・実行結果の記録)を1回だけ担当する
-仕組みになっています。この集計処理自体が例外で失敗した場合、DynamoDBの
-`jstock-batch_runs`テーブルの該当`batch_id`項目の`status`が`FINALIZE_FAILED`に
-なり(`finalize_error_message`にエラー概要、`finalize_failed_at`に失敗時刻が
-記録されます)、CloudWatch Logsにも`ERROR`ログが残ります。この状態から
-自動的に復旧する仕組みはなく、同一`batch_id`での再試行もサポートしていません。
-`FINALIZE_FAILED`を確認した場合は、原因を確認したうえで、次回の週次スケジュール
-(翌週土曜)を待つか、`jstock watchlist-screening run`で手動実行してください
-(いずれも新しい`batch_id`で最初から実行し直す形になります)。
+```
+DISPATCHING → RUNNING → FINALIZING → COMPLETED (execution_result=NORMAL)
+     ↓                                   ↘ ABORTED (execution_result=HIGH_THROTTLE_RATE)
+DISPATCH_FAILED                       FINALIZING → FINALIZE_FAILED
 
-**候補銘柄数が上限(300件)を超えた場合**: `MAX_RANKING_ENTRIES`
-(`src/jstock_advisor/infrastructure/aws/batch_tracker.py`)を超える場合、
-その週はdispatch前に処理を中止し(CloudWatch Logsに`ERROR`ログ、AuditLogに
-`execution_result: ranking_capacity_exceeded`を記録)、LINE通知も送りません。
-候補銘柄一覧(3.4節)を300件以上に拡張する予定がある場合は、事前にこの上限値の
-引き上げを検討してください。
+RUNNING → TIMEOUT_FINALIZING → TIMED_OUT
+              ↘ TIMEOUT_FINALIZE_FAILED → (Reconcilerが毎時自動で再試行)
+```
+
+- **`COMPLETED`**: 通常の正常完了。`execution_result=NORMAL`。
+- **`ABORTED`**(`execution_result=HIGH_THROTTLE_RATE`): 全銘柄の処理完了後、
+  データ取得元(Yahoo Finance)へのアクセス集中が疑われた件数の割合が閾値
+  (既定20%、`high_throttle_rate_threshold_pct`)を超えた場合。ウォッチリスト
+  追加・LINE通知は行われません(合否判定自体の結果は監査用に保持されます)。
+- **`DISPATCH_FAILED`**: 候補ユニバースの取得・進捗行の作成に失敗した、または
+  `WatchlistDispatcherFunction`自体が`batch_processing_timeout_hours`(既定24時間)
+  以内に応答しなかった場合。候補リスト自体が確定していないため、この状態から
+  finalize処理は一切行われません。**自動的な再開はしません**。次回の週次
+  スケジュール(翌週土曜)が新しい`batch_id`で最初からやり直します。
+- **`FINALIZE_FAILED`**: 全銘柄の評価は完了したが、集計処理(ウォッチリストへの
+  実登録・LINE通知・実行結果の記録)自体が例外で失敗した場合。`finalize_error_message`
+  にエラー概要、`finalize_failed_at`に失敗時刻が記録されます。自動復旧の仕組みは
+  なく、次回の週次スケジュールを待つか、`jstock watchlist-screening run`で
+  手動実行してください(新しい`batch_id`で最初からやり直す形になります)。
+- **`TIMED_OUT`**: 処理開始から`batch_processing_timeout_hours`(既定24時間)
+  以内に全銘柄の評価が終わらなかった場合。`WatchlistBatchReconcilerFunction`が
+  毎時のチェックで検知し、未完了銘柄をまとめてFAILED確定します。**この場合、
+  途中まで合格していた銘柄も含めてウォッチリストへの追加・LINE通知は一切
+  行いません**(全銘柄評価が終わっていない状態のランキングは実際の実力順とは
+  限らないため)。途中結果・完了率(`completion_rate`)はAuditLogに記録されます。
+- **`TIMEOUT_FINALIZE_FAILED`**: タイムアウト確定処理自体が想定外の理由で
+  失敗した一時的な状態。`WatchlistBatchReconcilerFunction`が次回(1時間後)の
+  実行で自動的に再試行するため、通常は運用者の対応は不要です。長時間
+  (数時間以上)この状態のままの場合はCloudWatch Logsのエラー内容を確認してください。
+
+**候補銘柄数の上限について**: 旧仕様にあった評価対象件数の上限(300件)は、
+候補ユニバース本格対応でSQSベースの銘柄単位処理へ全面的に作り直したことに伴い
+撤廃しました。約3,122銘柄の全件処理には数時間規模の時間がかかります(1銘柄
+あたり30〜45秒 ÷ 同時実行数3)。
+
+**段階導入(全件処理へ移行する前の実測)**: `config/watchlist_screening_rules.yaml`の
+`staged_rollout`で、評価対象を一時的に絞り込めます。
+
+```yaml
+staged_rollout:
+  candidate_limit: 100          # 先頭100件のみ評価(nullで無制限)
+  market_segment_filter: null   # 例: ["プライム（内国株式）"]で市場区分を絞り込み
+```
+
+100→500→プライム市場のみ→全件、の順に実測し、以下をすべて満たすことを
+確認してから全件(両方`null`)へ戻すことを推奨します(実測値は`record_batch_audit`の
+出力値、またはCloudWatch Logsで確認できます)。
+
+- 429疑い率(`rate_limit_suspected_rate_pct`)が5%未満
+- データ取得失敗率(`data_error_rate_pct`)が5%未満
+- p95処理時間(`p95_processing_duration_ms`)がWorkerのLambda Timeout(180秒)以内
+- `batch_processing_timeout_hours`(既定24時間)以内に95%以上完了
+- Terminal Failure率(`terminal_failure_rate_pct`)が5%未満
 
 **銘柄ごとのウォッチリスト登録結果の確認**: `decision_type=
 watchlist_auto_addition_repository_result`のAuditLogに、`batch_id`ごとに

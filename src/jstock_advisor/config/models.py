@@ -737,8 +737,28 @@ class BuyDecisionRulesConfig(StrictModel):
 
 
 class CandidateUniverseConfig(StrictModel):
-    provider: Literal["csv"]
+    provider: Literal["csv", "jpx"]
     csv_path: str
+    # --- 候補ユニバース本格対応(2026-08)で追加。provider="jpx"の場合のみ使用する ---
+    jpx_listed_issues_url: str | None = None
+    jpx_400_weight_url: str | None = None
+    target_market_segments: list[str] | None = None
+    # v1では実質的に定数(45日/90日)だが、運用中に配信元の更新頻度が変わった場合に
+    # コード変更なしで調整できるようconfig化する(8節)。
+    listed_issues_max_stale_hours: int | None = None
+    jpx400_max_stale_hours: int | None = None
+
+
+class StagedRolloutConfig(StrictModel):
+    """候補ユニバース本格対応(2026-08)の段階導入設定(15節)。
+
+    3,122銘柄規模への全件移行前に、100→500→プライムのみ→全件の順で実測するための
+    設定。candidate_limit/market_segment_filterのいずれもnull(未設定)であれば
+    段階導入なし(=全件)として通常どおり動作する。
+    """
+
+    candidate_limit: int | None = Field(default=None, gt=0)
+    market_segment_filter: list[str] | None = None
 
 
 class WatchlistScreeningThresholds(StrictModel):
@@ -815,6 +835,20 @@ class WatchlistScreeningRulesConfig(StrictModel):
     max_missing_fields: int = Field(ge=0)
     thresholds: WatchlistScreeningThresholds
     scoring: WatchlistScreeningScoringConfig
+
+    # --- 候補ユニバース本格対応(2026-08、第6版修正プラン)で追加 -------------
+    # 2節: 処理タイムアウト(業務判定)とDynamoDB TTL(物理削除)は独立した値。
+    batch_processing_timeout_hours: int = Field(gt=0)
+    batch_record_ttl_hours: int = Field(gt=0)
+    candidate_progress_ttl_hours: int = Field(gt=0)
+    # 17節: Reconcilerのタイムアウト確定処理1回あたりの処理件数上限。
+    max_timeout_finalize_rows_per_run: int = Field(gt=0)
+    # 14節: TIMED_OUT時に部分結果をウォッチリスト追加・通知に使うか(既定false)。
+    allow_partial_result_on_timeout: bool
+    # 10節: スロットリング率(429疑い件数/処理対象件数)がこれを超えるとABORTEDとする。
+    high_throttle_rate_threshold_pct: float = Field(ge=0, le=100)
+    # 15節: 段階導入(100→500→プライムのみ→全件)。
+    staged_rollout: StagedRolloutConfig
 
 
 # --- 集約 --------------------------------------------------------------------

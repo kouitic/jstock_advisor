@@ -12,9 +12,21 @@ weekly_schedule_enabled: true
 notification_enabled: true
 
 candidate_universe:
-  # v1では"csv"のみ有効。将来: "topix" / "prime_market" / "jpx400"
-  provider: "csv"
+  # "csv": 固定CSV(旧v1、テスト・小規模検証用に残す)。
+  # "jpx": 東証プライム+スタンダード全銘柄を自動取得(候補ユニバース本格対応・2026-08)。
+  provider: "jpx"
   csv_path: "data/universe/candidate_universe.csv"
+  # JPX上場銘柄一覧(.xls、無料・月次更新)とJPX400構成銘柄CSV(Nikkei、無料・年1回+随時)。
+  # provider="jpx"の場合のみ使用する。
+  jpx_listed_issues_url: "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+  jpx_400_weight_url: "https://indexes.nikkei.co.jp/nkave/archives/file/jpx_nikkei_index_400_weight_jp.csv"
+  # 東証上場銘柄一覧の「市場・商品区分」列でこの値に一致する行のみ候補とする(プライム+スタンダード)。
+  target_market_segments:
+    - "プライム（内国株式）"
+    - "スタンダード（内国株式）"
+  # キャッシュの最大許容経過時間(8節)。source_date基準。超過すると処理中断。
+  listed_issues_max_stale_hours: 1080  # 45日
+  jpx400_max_stale_hours: 2160  # 90日
 
 # v1では"stock_snapshot"のみ有効。将来: "lightweight"
 screening_data_provider: "stock_snapshot"
@@ -69,3 +81,33 @@ scoring:
     yield_full_at_pct: 2.0
     # 優待はあるが利回りが確認できない場合、満点に対してこの割合を付与する。
     presence_only_score_ratio: 0.5
+
+# --- 候補ユニバース本格対応(2026-08、第6版修正プラン)で追加 -----------------
+
+# ビジネスロジック上の「これ以上RUNNINGなら異常」判定(時間)。3,122銘柄 x 30〜45秒 ÷
+# ReservedConcurrentExecutions(3) = 約8.7〜13.0時間という試算に、429再試行・SQS
+# 再配信・コールドスタート等の余裕を載せた値(15節)。
+batch_processing_timeout_hours: 24
+
+# DynamoDB TTL(物理削除)。処理タイムアウトより十分長く(3倍)設定する。
+batch_record_ttl_hours: 72
+candidate_progress_ttl_hours: 72
+
+# Reconcilerのタイムアウト確定処理(TIMEOUT_FINALIZING)1回あたりの処理件数上限。
+# 件数ベースの上限とすることで、Reconciler自身のLambda Timeout内で確実に完了できる
+# 範囲に収める(17節)。
+max_timeout_finalize_rows_per_run: 1000
+
+# TIMED_OUT確定時、途中までの評価結果をウォッチリスト追加・LINE通知に使うか。
+# 未評価銘柄がある状態でのランキングは処理順序に依存するため、既定false(14節)。
+allow_partial_result_on_timeout: false
+
+# 429疑い件数/処理対象件数がこの値(%)を超えた場合、ABORTED
+# (execution_result=HIGH_THROTTLE_RATE)としウォッチリスト追加・通知を行わない(10節)。
+high_throttle_rate_threshold_pct: 20.0
+
+staged_rollout:
+  # 段階導入用の候補数上限。未設定(null)なら無制限。
+  # 例: 100 → 500 → プライムのみ(market_segment_filterで絞り込み) → 全件(両方null)。
+  candidate_limit: null
+  market_segment_filter: null

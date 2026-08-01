@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from jstock_advisor.cli import (
     analyze,
     audit,
+    candidate_universe,
     evaluation,
     feedback,
     holdings,
@@ -39,6 +40,7 @@ app.add_typer(rules.app, name="rules")
 app.add_typer(review.app, name="review")
 app.add_typer(shareholder_benefit.app, name="shareholder-benefit")
 app.add_typer(watchlist_screening.app, name="watchlist-screening")
+app.add_typer(candidate_universe.app, name="candidate-universe")
 
 
 @app.callback()

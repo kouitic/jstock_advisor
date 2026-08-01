@@ -49,6 +49,33 @@ def resolve_table_name(file_name: str) -> str:
     return f"{prefix}-{base}"
 
 
+# --- 候補ユニバース本格対応(2026-08)向け、S3/ローカルファイルの二重化ヘルパー ---
+# running_on_lambda()/resolve_table_name()と同じ「実行環境に応じてバックエンドを
+# 選択する」パターンを、DynamoDBではなくS3(候補ユニバースキャッシュ)へ適用する。
+# 実際のオブジェクト読み書き・staging/current/archiveレイアウトの構築は
+# services/candidate_universe_downloader.py側の責務とし、このモジュールは
+# 環境変数解決とローカルキャッシュディレクトリの決定のみを担う。
+
+_CANDIDATE_UNIVERSE_BUCKET_ENV = "CANDIDATE_UNIVERSE_CACHE_BUCKET"
+
+
+def resolve_candidate_universe_bucket() -> str:
+    """候補ユニバースキャッシュ用S3バケット名(Lambda環境でのみ呼ぶこと)。"""
+    bucket = os.environ.get(_CANDIDATE_UNIVERSE_BUCKET_ENV)
+    if not bucket:
+        raise RuntimeError(f"{_CANDIDATE_UNIVERSE_BUCKET_ENV}環境変数が設定されていません")
+    return bucket
+
+
+def resolve_candidate_universe_local_cache_dir() -> Path:
+    """ローカル(非Lambda)環境での候補ユニバースキャッシュ保存先。
+
+    ローカルCLIは常にこのディレクトリのみを読み書きし、本番S3へは(環境変数トリック
+    等があっても)一切アクセスしない(6節: 誤操作防止のため意図的な設計)。
+    """
+    return Path(__file__).resolve().parents[3] / "data" / "cache" / "candidate_universe"
+
+
 def build_collection_store[T: BaseModel](
     model_type: type[T],
     file_name: str,

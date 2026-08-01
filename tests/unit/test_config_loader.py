@@ -96,7 +96,7 @@ def test_config_rejects_unknown_fields(tmp_path: Path) -> None:
 def test_watchlist_screening_defaults_are_loaded() -> None:
     config = load_config().watchlist_screening
     assert config.enabled is True
-    assert config.candidate_universe.provider == "csv"
+    assert config.candidate_universe.provider == "jpx"
     assert config.max_watchlist_additions_per_run == 20
 
 

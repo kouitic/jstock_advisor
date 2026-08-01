@@ -85,9 +85,11 @@ def run(
         raise typer.Exit(code=1)
 
     providers = build_real_provider_bundle(now, config)
-    universe_provider = build_candidate_universe_provider(config)
+    universe_provider = build_candidate_universe_provider(config, now)
     screening_data_provider = StockSnapshotScreeningDataProvider(providers, config)
-    collector = WatchlistCandidateCollector(universe_provider, screening_data_provider)
+    collector = WatchlistCandidateCollector(
+        universe_provider, screening_data_provider, staged_rollout=wc.staged_rollout
+    )
 
     try:
         collector_result = collector.collect_target_codes()
