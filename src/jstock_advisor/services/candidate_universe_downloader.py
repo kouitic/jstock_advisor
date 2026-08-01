@@ -51,6 +51,11 @@ _MIN_RESPONSE_BYTES = {"listed_issues": 100_000, "jpx400": 5_000}
 _ROW_COUNT_BOUNDS = {"listed_issues": (2500, 4000), "jpx400": (300, 450)}
 _MAX_INVALID_CODE_RATE = 0.01
 _MAX_SELECTED_COUNT_CHANGE_RATE = 0.10
+# 運用ハードニング7節。
+_MAX_DUPLICATE_RATE = 0.01
+_MAX_UNKNOWN_SEGMENT_RATE = 0.01
+_HTML_SNIFF_BYTES = 512
+_HTML_MARKERS = (b"<html", b"<!doctype html", b"<body")
 
 
 class CacheMetadata(BaseModel):
@@ -157,27 +162,52 @@ def _fetch(url: str) -> bytes:
         return cast(bytes, response.read())
 
 
+def _looks_like_html(data: bytes) -> bool:
+    """運用ハードニング7節: プロキシ/認証エラー等でHTMLエラーページが返された
+    ケースを検知する(先頭バイトのみを緩く走査、xlrd/csvパース失敗より前に弾く)。
+    """
+    head = data[:_HTML_SNIFF_BYTES].lower()
+    return any(marker in head for marker in _HTML_MARKERS)
+
+
 def _validate(
     source: str,
     data: bytes,
     raw_row_count: int,
     invalid_code_count: int,
+    duplicate_count: int,
+    unknown_market_segment_count: int | None,
     selected_count: int,
     source_date: dt.date | None,
     previous_selected_count: int | None,
+    now: dt.datetime,
 ) -> str | None:
     """検証失敗時は理由文字列、成功時はNoneを返す。"""
+    if _looks_like_html(data):
+        return "レスポンスがHTMLエラーページと判定されました"
     min_bytes = _MIN_RESPONSE_BYTES[source]
     if len(data) < min_bytes:
         return f"レスポンスサイズが小さすぎます: {len(data)}バイト(最小{min_bytes}バイト)"
     if source_date is None:
         return "ソース日付を取得できませんでした"
+    if source_date > now.date():
+        return f"ソース日付が未来です: {source_date}"
     low, high = _ROW_COUNT_BOUNDS[source]
     if not (low <= raw_row_count <= high):
         return f"行数が想定範囲外です: {raw_row_count}件(想定{low}〜{high}件)"
     if raw_row_count > 0 and invalid_code_count / raw_row_count > _MAX_INVALID_CODE_RATE:
         rate = invalid_code_count / raw_row_count
         return f"不正コード率が高すぎます: {rate:.1%}(上限{_MAX_INVALID_CODE_RATE:.0%})"
+    if raw_row_count > 0 and duplicate_count / raw_row_count > _MAX_DUPLICATE_RATE:
+        rate = duplicate_count / raw_row_count
+        return f"重複率が高すぎます: {rate:.1%}(上限{_MAX_DUPLICATE_RATE:.0%})"
+    if (
+        unknown_market_segment_count is not None
+        and raw_row_count > 0
+        and unknown_market_segment_count / raw_row_count > _MAX_UNKNOWN_SEGMENT_RATE
+    ):
+        rate = unknown_market_segment_count / raw_row_count
+        return f"未知の市場区分率が高すぎます: {rate:.1%}(上限{_MAX_UNKNOWN_SEGMENT_RATE:.0%})"
     if previous_selected_count is not None and previous_selected_count > 0:
         change_rate = abs(selected_count - previous_selected_count) / previous_selected_count
         if change_rate > _MAX_SELECTED_COUNT_CHANGE_RATE:
@@ -215,9 +245,12 @@ def _download_listed_issues(
         data,
         parsed.raw_row_count,
         parsed.invalid_code_count,
+        parsed.duplicate_count,
+        parsed.unknown_market_segment_count,
         len(parsed.items),
         parsed.source_date,
         previous_selected,
+        now,
     )
     if reason is not None:
         logger.error("candidate universe validation failed source=%s reason=%s", source, reason)
@@ -267,9 +300,12 @@ def _download_jpx400(
         data,
         parsed.raw_row_count,
         parsed.invalid_code_count,
+        parsed.duplicate_count,
+        None,  # jpx400には市場区分列が無いため未知区分チェックの対象外
         len(parsed.member_codes),
         parsed.source_date,
         previous_selected,
+        now,
     )
     if reason is not None:
         logger.error("candidate universe validation failed source=%s reason=%s", source, reason)

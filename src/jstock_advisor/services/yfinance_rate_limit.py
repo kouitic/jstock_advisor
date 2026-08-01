@@ -1,4 +1,4 @@
-"""Yahoo Finance 429(レート制限)対応(候補ユニバース本格対応・5節、案B)。
+"""Yahoo Financeデータ提供元障害への再試行対応(候補ユニバース本格対応・5節、案B)。
 
 `services/screening_data_provider.py`の`StockSnapshotScreeningDataProvider`
 **専用**の再試行ヘルパー。既存の`market_data`/`financial_data`/`dividend_data`
@@ -10,6 +10,10 @@
 yfinance呼び出しの一部が成功していても、再試行時に再度すべて実行される。
 共有コードへ手を入れないことの代償として、Yahoo Financeへの実効リクエスト数は
 呼び出し単位の再試行より多くなるが、この欠点は許容する。
+
+障害の疑いがあるかどうかの判定自体(429/403/5xx・タイムアウト・接続切断・
+yfinance固有例外の検知)は`services/provider_failure_classifier.py`に集約する
+(運用ハードニング3節。このモジュールは再試行ループの制御にのみ責務を絞る)。
 """
 
 from __future__ import annotations
@@ -19,22 +23,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from jstock_advisor.services.provider_failure_classifier import classify_provider_failure
+
 _BASE_DELAY_SECONDS = 2.0
 _MAX_DELAY_SECONDS = 10.0
 _MAX_RETRIES = 3
 _JITTER_RATIO = 0.3
-
-_RATE_LIMIT_MESSAGE_PATTERNS = ("429", "too many requests", "rate limit")
-
-
-def _is_rate_limit_suspected(exc: Exception) -> bool:
-    """response.status_code == 429を優先し、無ければ例外メッセージのパターン推測へ
-    フォールバックする(この層からは個々のHTTPレスポンスへ確実にアクセスできる
-    保証がないため)。"""
-    status_code = getattr(getattr(exc, "response", None), "status_code", None)
-    if status_code is not None:
-        return bool(status_code == 429)
-    return any(pattern in str(exc).lower() for pattern in _RATE_LIMIT_MESSAGE_PATTERNS)
 
 
 def _retry_after_seconds(exc: Exception) -> float | None:
@@ -53,24 +47,26 @@ def _retry_after_seconds(exc: Exception) -> float | None:
 @dataclass(frozen=True)
 class RateLimitRetryResult[T]:
     value: T | None
-    is_rate_limit_suspected: bool
+    is_provider_failure_suspected: bool
     error: Exception | None
 
 
 def call_with_rate_limit_retry[T](func: Callable[[], T]) -> RateLimitRetryResult[T]:
-    """funcを最大`_MAX_RETRIES`回、429疑いの例外に対してのみ再試行する。
+    """funcを最大`_MAX_RETRIES`回、データ提供元障害疑いの例外に対してのみ再試行する。
 
-    429疑いでない例外は再試行せずそのまま送出する(呼び出し側の既存の
-    `except Exception`処理へ委ねる)。429疑いのまま再試行上限に達した場合は
+    障害疑いでない例外は再試行せずそのまま送出する(呼び出し側の既存の
+    `except Exception`処理へ委ねる)。障害疑いのまま再試行上限に達した場合は
     例外を送出せず、`error`にセットして返す(呼び出し側で
-    `ScreeningDataStatus.DATA_ERROR` + `is_rate_limit_suspected=True`として扱う)。
+    `ScreeningDataStatus.DATA_ERROR` + `is_provider_failure_suspected=True`として扱う)。
     """
     last_exception: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            return RateLimitRetryResult(value=func(), is_rate_limit_suspected=False, error=None)
-        except Exception as exc:  # noqa: BLE001 - 429判定のため一旦すべて捕捉する
-            if not _is_rate_limit_suspected(exc):
+            return RateLimitRetryResult(
+                value=func(), is_provider_failure_suspected=False, error=None
+            )
+        except Exception as exc:  # noqa: BLE001 - 障害判定のため一旦すべて捕捉する
+            if not classify_provider_failure(exc):
                 raise
             last_exception = exc
             if attempt >= _MAX_RETRIES:
@@ -82,4 +78,6 @@ def call_with_rate_limit_retry[T](func: Callable[[], T]) -> RateLimitRetryResult
             time.sleep(max(0.0, delay))
 
     assert last_exception is not None  # ループはbreak前に必ず1回は例外を捕捉している
-    return RateLimitRetryResult(value=None, is_rate_limit_suspected=True, error=last_exception)
+    return RateLimitRetryResult(
+        value=None, is_provider_failure_suspected=True, error=last_exception
+    )

@@ -28,6 +28,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     get_watchlist_batch,
     list_watchlist_batches_by_status,
     mark_dispatch_failed,
+    mark_finalizing_stuck_as_failed,
     run_timeout_finalization_pass,
     set_timeout_finalize_completed_count,
     transition_timeout_finalizing_to_failed,
@@ -44,7 +45,12 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
-from jstock_advisor.services.watchlist_batch_finalizer import compute_batch_metrics, maybe_finalize
+from jstock_advisor.services.watchlist_batch_finalizer import (
+    compute_batch_metrics,
+    maybe_finalize,
+    retry_finalize,
+)
+from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 from jstock_advisor.services.watchlist_screening_audit import record_batch_audit
 
 logger = logging.getLogger(__name__)
@@ -53,6 +59,8 @@ logger.setLevel(logging.INFO)
 _RECONCILE_TARGET_STATUSES = [
     WatchlistBatchStatus.DISPATCHING,
     WatchlistBatchStatus.RUNNING,
+    WatchlistBatchStatus.FINALIZING,
+    WatchlistBatchStatus.FINALIZE_FAILED,
     WatchlistBatchStatus.TIMEOUT_FINALIZING,
     WatchlistBatchStatus.TIMEOUT_FINALIZE_FAILED,
 ]
@@ -147,13 +155,18 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     wc = config.watchlist_screening
-    providers: ProviderBundle = build_real_provider_bundle(now, config)
+    providers: ProviderBundle = build_cached_provider_bundle(
+        build_real_provider_bundle(now, config), config, now
+    )
     notification_service = _build_notification_service(config)
 
     candidates = list_watchlist_batches_by_status(_RECONCILE_TARGET_STATUSES)
 
     dispatch_failed = 0
     rescued = 0
+    finalizing_marked_stuck = 0
+    finalize_retried = 0
+    finalize_retry_exhausted = 0
     to_process_timeout: list[str] = []
 
     for batch_item in candidates:
@@ -177,6 +190,40 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 to_process_timeout.append(batch_id)
             continue
 
+        if status == WatchlistBatchStatus.FINALIZING.value:
+            # 通常のRUNNING→FINALIZING遷移後、Lambdaが異常終了して二度と進まなく
+            # なったケース(運用ハードニング5節)。閾値未満なら正常に進行中の可能性が
+            # あるため何もしない。
+            if mark_finalizing_stuck_as_failed(
+                batch_id, now, wc.finalizing_stuck_threshold_minutes
+            ):
+                finalizing_marked_stuck += 1
+                logger.warning(
+                    "watchlist reconciler: FINALIZING stuck, marked FINALIZE_FAILED batch_id=%s",
+                    batch_id,
+                )
+            continue
+
+        if status == WatchlistBatchStatus.FINALIZE_FAILED.value:
+            attempt_count = int(batch_item.get("finalize_attempt_count", 0) or 0)
+            if attempt_count >= wc.max_finalize_retry_attempts:
+                finalize_retry_exhausted += 1
+                logger.warning(
+                    "watchlist reconciler: FINALIZE_FAILED retry attempts exhausted "
+                    "batch_id=%s attempt_count=%d (manual intervention required, see CLI)",
+                    batch_id,
+                    attempt_count,
+                )
+                continue
+            try:
+                if retry_finalize(batch_id, now, providers, config, notification_service):
+                    finalize_retried += 1
+            except Exception:  # noqa: BLE001 - 1バッチの想定外エラーで他バッチの処理を止めない
+                logger.exception(
+                    "watchlist reconciler: retry_finalize unexpected error batch_id=%s", batch_id
+                )
+            continue
+
         if status == WatchlistBatchStatus.TIMEOUT_FINALIZE_FAILED.value:
             if try_acquire_timeout_finalization(batch_id):
                 to_process_timeout.append(batch_id)
@@ -196,15 +243,22 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
     logger.info(
         "watchlist reconciler completed: candidates=%d dispatch_failed=%d rescued=%d "
+        "finalizing_marked_stuck=%d finalize_retried=%d finalize_retry_exhausted=%d "
         "timeout_processed=%d",
         len(candidates),
         dispatch_failed,
         rescued,
+        finalizing_marked_stuck,
+        finalize_retried,
+        finalize_retry_exhausted,
         timeout_processed,
     )
     return {
         "candidates": len(candidates),
         "dispatch_failed": dispatch_failed,
         "rescued": rescued,
+        "finalizing_marked_stuck": finalizing_marked_stuck,
+        "finalize_retried": finalize_retried,
+        "finalize_retry_exhausted": finalize_retry_exhausted,
         "timeout_processed": timeout_processed,
     }

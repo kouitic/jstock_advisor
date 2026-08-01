@@ -57,6 +57,7 @@ from jstock_advisor.services.provider_factory import (
 from jstock_advisor.services.screening_data_provider import StockSnapshotScreeningDataProvider
 from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize
 from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
+from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 from jstock_advisor.services.watchlist_screening_audit import record_batch_audit
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,26 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         )
         return {"skipped": True}
 
+    # 運用ハードニング2節: candidate_limit=null(全件処理)は、運用者が明示的に
+    # ALLOW_FULL_MARKET_SCREENING=trueを設定した場合のみ許可する。この時点では
+    # dispatch leaseもBatchRunsTable行も未作成のため、SQS投入・LINE通知は発生しない
+    # (universe_load_failed/no_candidatesと同じ「開始前に中止する」パターン)。
+    if wc.staged_rollout.candidate_limit is None and os.environ.get(
+        "ALLOW_FULL_MARKET_SCREENING"
+    ) != "true":
+        logger.error(
+            "watchlist dispatcher: full market screening blocked "
+            "(candidate_limit=null but ALLOW_FULL_MARKET_SCREENING is not 'true')"
+        )
+        record_batch_audit(
+            execution_mode="scheduled",
+            universe_provider=cu.provider,
+            screening_policies=[wc.screening_policy],
+            output_values={"execution_result": "full_market_screening_blocked"},
+            now=now,
+        )
+        return {"error": "full_market_screening_blocked"}
+
     batch_id = f"watchlist-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
 
@@ -155,7 +176,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     outcome.reason,
                 )
 
-    providers = build_real_provider_bundle(now, config)
+    providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
     universe_provider = build_candidate_universe_provider(config, now)
     screening_data_provider = StockSnapshotScreeningDataProvider(providers, config)
     collector = WatchlistCandidateCollector(
@@ -195,7 +216,28 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         )
         return {"dispatched": 0}
 
-    set_watchlist_batch_total(batch_id, total, wc.candidate_progress_ttl_hours, now)
+    # 運用ハードニング1節: 実際に適用された段階導入設定を明示的にログ出力する
+    # (staged_rollout_excluded件数だけでなく、適用値そのものも運用者が追跡できるように)。
+    logger.info(
+        "watchlist dispatcher: staged_rollout applied candidate_limit=%s "
+        "market_segment_filter=%s universe_count=%d staged_rollout_excluded=%d total=%d",
+        wc.staged_rollout.candidate_limit,
+        wc.staged_rollout.market_segment_filter,
+        collector_result.universe_count,
+        collector_result.staged_rollout_excluded_count,
+        total,
+    )
+
+    set_watchlist_batch_total(
+        batch_id,
+        total,
+        wc.candidate_progress_ttl_hours,
+        now,
+        staged_rollout_candidate_limit=wc.staged_rollout.candidate_limit,
+        staged_rollout_market_segment_filter=wc.staged_rollout.market_segment_filter,
+        universe_count=collector_result.universe_count,
+        staged_rollout_excluded_count=collector_result.staged_rollout_excluded_count,
+    )
     create_missing_candidate_progress_rows(
         batch_id, collector_result.stock_codes, now, wc.candidate_progress_ttl_hours
     )

@@ -5,12 +5,15 @@ description = "日本株 長期・高配当・株主優待重視の売買支援�
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pydantic>=2.7",
-    "pyyaml>=6.0",
-    "typer>=0.12",
-    "python-dateutil>=2.9",
-    "jpholiday>=0.1.9",
-    "python-dotenv>=1.0",
+    # 運用ハードニング8節: 検証済みバージョン範囲に上限を設定する(2026-08時点の
+    # .venv実測値を基準)。実際のLambda成果物を決めるのは`infra/layer/requirements.txt`
+    # (deploy時はそちらを参照)。ここは開発時のインストール範囲。
+    "pydantic>=2.13,<3.0",
+    "pyyaml>=6.0,<7.0",
+    "typer>=0.27,<1.0",
+    "python-dateutil>=2.9,<3.0",
+    "jpholiday>=1.0,<2.0",
+    "python-dotenv>=1.2,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -24,18 +27,19 @@ dev = [
     "freezegun>=1.5",
 ]
 aws = [
-    "boto3>=1.34",
+    "boto3>=1.43,<2.0",
 ]
 aws-dev = [
-    "boto3-stubs[dynamodb]>=1.34",
-    "moto[dynamodb]>=5.0",
+    "boto3-stubs[dynamodb]>=1.43,<2.0",
+    "moto[dynamodb]>=5.0,<6.0",
 ]
 realdata = [
-    "yfinance>=0.2.40",
+    # 非公式ライブラリのため最も破壊的変更が起きやすい。範囲を最も狭くする(運用ハードニング8節)。
+    "yfinance>=1.5.2,<1.6.0",
     # 候補ユニバース本格対応(2026-08): JPX上場銘柄一覧(.xls、旧形式Excelバイナリ)の
     # パースに使う。openpyxlは.xlsx専用で.xlsは読めないため必要(pandasは既存依存に
     # 含めない方針のため使わない)。
-    "xlrd>=2.0",
+    "xlrd>=2.0,<3.0",
 ]
 
 [project.scripts]

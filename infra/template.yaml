@@ -37,6 +37,15 @@ Parameters:
     Description: >
       候補ユニバース本格対応(2026-08)。WatchlistScreeningQueueのLambdaトリガー
       BatchSize。初期値は1(3節)、安定稼働後に引き上げ可能。
+  AllowFullMarketScreening:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      本番運用ハードニング(2節)。"true"の場合のみ、staged_rollout.candidate_limitが
+      null(全件処理)の週次バッチ開始を許可する。運用者が明示的に
+      `--parameter-overrides AllowFullMarketScreening=true`を指定しない限り、
+      全件処理は起動時に拒否される(段階導入の安全側デフォルトと対になる二重の安全策)。
 
 Globals:
   Function:
@@ -407,6 +416,37 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # 本番運用ハードニング(4節)。yfinance系データ(価格/財務・配当)のキャッシュ。
+  # services/watchlist_data_cache.pyのCachingProviderBundleが読み書きする
+  # (PK: cache_key、汎用CacheEntryをpayload_jsonとして格納)。ウォッチリストの
+  # 4Lambdaハンドラのみが使用し、BUY候補・保有銘柄分析パイプラインは対象外。
+  # DynamoDBネイティブTTLは設定しない(キー空間が銘柄コード数で自然に有界なため、
+  # EdinetFilingCacheTable等の既存キャッシュテーブルと同じ方針。鮮度判定は
+  # get_or_fetch側のcached_at比較のみで行う)。
+  WatchlistPriceCacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-watchlist_price_cache"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cache_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cache_key
+          KeyType: HASH
+
+  WatchlistFinancialCacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-watchlist_financial_cache"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cache_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cache_key
+          KeyType: HASH
+
   # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
 
   BuyCandidatesFunction:
@@ -558,6 +598,7 @@ Resources:
         Variables:
           WATCHLIST_SCREENING_QUEUE_URL: !Ref WatchlistScreeningQueue
           CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
+          ALLOW_FULL_MARKET_SCREENING: !Ref AllowFullMarketScreening
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
         - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
@@ -567,6 +608,8 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistPriceCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistFinancialCacheTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
@@ -601,6 +644,8 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistPriceCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistFinancialCacheTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
@@ -628,6 +673,8 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistPriceCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistFinancialCacheTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
@@ -654,6 +701,8 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistPriceCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistFinancialCacheTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }

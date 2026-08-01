@@ -207,7 +207,7 @@ def test_dry_run_does_not_write_repository_or_send_notification(
         ),
     )
 
-    result = _runner.invoke(cli_module.app, ["--dry-run"])
+    result = _runner.invoke(cli_module.app, ["run", "--dry-run"])
 
     assert result.exit_code == 0, result.output
     assert audit_calls == []
@@ -220,7 +220,7 @@ def test_dry_run_disabled_by_config_is_still_allowed(monkeypatch: pytest.MonkeyP
     _patch_common(monkeypatch, _fake_config(enabled=False))
     monkeypatch.setattr(cli_module, "record_candidate_audit", lambda *a, **kw: None)
 
-    result = _runner.invoke(cli_module.app, ["--dry-run"])
+    result = _runner.invoke(cli_module.app, ["run", "--dry-run"])
 
     assert result.exit_code == 0, result.output
 
@@ -228,7 +228,7 @@ def test_dry_run_disabled_by_config_is_still_allowed(monkeypatch: pytest.MonkeyP
 def test_real_run_rejects_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_common(monkeypatch, _fake_config(enabled=False))
 
-    result = _runner.invoke(cli_module.app, [])
+    result = _runner.invoke(cli_module.app, ["run"])
 
     assert result.exit_code == 1
     assert "無効化" in result.output
@@ -276,7 +276,7 @@ def test_real_run_adds_to_watchlist_and_sends_notification(
         lambda *a, **kw: repo_result_calls.append(a),
     )
 
-    result = _runner.invoke(cli_module.app, [])
+    result = _runner.invoke(cli_module.app, ["run"])
 
     assert result.exit_code == 0, result.output
     assert len(fake_repo.added) == 1
@@ -307,7 +307,7 @@ def test_real_run_reports_candidate_universe_error(monkeypatch: pytest.MonkeyPat
         cli_module, "WatchlistCandidateCollector", lambda *a, **kw: _RaisingCollector()
     )
 
-    result = _runner.invoke(cli_module.app, ["--dry-run"])
+    result = _runner.invoke(cli_module.app, ["run", "--dry-run"])
 
     assert result.exit_code == 1
     assert "見つかりません" in result.output

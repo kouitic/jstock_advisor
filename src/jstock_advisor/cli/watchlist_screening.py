@@ -15,12 +15,22 @@ import uuid
 import typer
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.domain.signals.watchlist_screening import (
     RankingEntry,
     categorize_exclusion_reasons,
     describe_matched_criteria,
+)
+from jstock_advisor.infrastructure.aws.batch_tracker import (
+    WatchlistBatchStatus,
+    WatchlistProgressStatus,
+    claim_candidate_lease,
+    complete_candidate,
+    get_watchlist_batch,
+    query_all_candidate_progress,
+    try_operator_abort,
 )
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
@@ -33,6 +43,10 @@ from jstock_advisor.infrastructure.local_repository.watchlist_repository import 
     WatchlistRepository,
 )
 from jstock_advisor.interfaces.candidate_universe import CandidateUniverseError
+from jstock_advisor.lambda_handlers.watchlist_worker_handler import (
+    _WORKER_LEASE_SECONDS,
+    _evaluate_candidate,
+)
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_factory import (
     build_candidate_universe_provider,
@@ -42,7 +56,9 @@ from jstock_advisor.services.screening_data_provider import (
     ScreeningDataStatus,
     StockSnapshotScreeningDataProvider,
 )
+from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize, retry_finalize
 from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
+from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 from jstock_advisor.services.watchlist_screening_audit import (
     REPOSITORY_RESULT_ADDED,
     REPOSITORY_RESULT_FAILED,
@@ -57,7 +73,21 @@ from jstock_advisor.services.watchlist_screening_service import (
     WatchlistScreeningService,
 )
 
-app = typer.Typer(help="ウォッチリスト自動追加(週次スクリーニング)の手動実行")
+# 運用ハードニング6節: batch-status/list-incomplete/retry-finalize/retry-stock/abortは
+# SQSベース分散処理(Dispatcher/Worker/...)が使う本番DynamoDB(BatchRunsTable/
+# WatchlistCandidateProgressTable)を直接操作する。ローカル実行時にこれらへ接続する
+# には、運用手順書記載のAWS_LAMBDA_FUNCTION_NAME環境変数トリック(ローカルCLIから
+# 本番相当のDynamoDBバックエンドを選択させる)が必要。
+app = typer.Typer(help="ウォッチリスト自動追加(週次スクリーニング)の手動実行・運用コマンド")
+
+
+def _build_notification_service(config: AppConfig) -> LineNotificationService:
+    return LineNotificationService(
+        line_client=build_line_client_from_env(),
+        notification_log_repository=NotificationLogRepository(),
+        recommendation_repository=RecommendationRepository(),
+        config=config,
+    )
 
 
 @app.command("run")
@@ -385,3 +415,169 @@ def _print_summary(
         if metrics_line:
             typer.echo(f"   {metrics_line}")
         typer.echo(f"   一致条件: {describe_matched_criteria(result.matched_criteria)}")
+
+
+# --- 運用ハードニング6節: SQSベース分散処理のバッチ運用コマンド ------------------
+
+
+@app.command("batch-status")
+def batch_status(batch_id: str) -> None:
+    """指定batch_idのBatchRunsTable上の現在の状態を表示する(読み取り専用)。"""
+    batch_item = get_watchlist_batch(batch_id)
+    if batch_item is None:
+        typer.echo(f"batch_id={batch_id} は見つかりませんでした。")
+        raise typer.Exit(code=1)
+    typer.echo("=" * 50)
+    typer.echo(f"batch_id: {batch_id}")
+    typer.echo("=" * 50)
+    for key in sorted(batch_item):
+        if key == "batch_id":
+            continue
+        typer.echo(f"{key}: {batch_item[key]}")
+
+
+@app.command("list-incomplete")
+def list_incomplete(batch_id: str) -> None:
+    """指定batch_id配下で未完了(PENDING/PROCESSING)の進捗行を一覧表示する(読み取り専用)。"""
+    records = query_all_candidate_progress(batch_id, consistent_read=True)
+    incomplete = [
+        r
+        for r in records
+        if r.status
+        in (WatchlistProgressStatus.PENDING.value, WatchlistProgressStatus.PROCESSING.value)
+    ]
+    typer.echo(f"batch_id={batch_id}: 未完了 {len(incomplete)}/{len(records)}件")
+    for r in incomplete:
+        typer.echo(
+            f"  {r.stock_code}: status={r.status} attempt_count={r.attempt_count} "
+            f"lease_owner_id={r.lease_owner_id}"
+        )
+
+
+@app.command("retry-finalize")
+def retry_finalize_command(
+    batch_id: str,
+    execute: bool = typer.Option(
+        False, "--execute", help="実際にfinalize処理を再試行する(既定はdry-run)"
+    ),
+) -> None:
+    """FINALIZE_FAILED状態のバッチに対してfinalize処理を再試行する。
+
+    Reconciler(運用ハードニング5節)による自動再試行が上限(max_finalize_retry_attempts)に
+    達した後の手動介入用。Reconcilerの試行回数上限とは独立に、1回のみ試みる。
+    """
+    batch_item = get_watchlist_batch(batch_id)
+    if batch_item is None:
+        typer.echo(f"batch_id={batch_id} は見つかりませんでした。")
+        raise typer.Exit(code=1)
+    status = batch_item.get("status")
+    typer.echo(f"batch_id={batch_id}: 現在の状態 status={status}")
+    if status != WatchlistBatchStatus.FINALIZE_FAILED.value:
+        typer.echo("FINALIZE_FAILED状態ではないため、retry-finalizeの対象外です。")
+        raise typer.Exit(code=1)
+    if not execute:
+        typer.echo("--executeを指定すると、finalize処理の再試行を行います(dry-run)。")
+        return
+
+    now = dt.datetime.now(dt.UTC)
+    config = load_config()
+    providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
+    notification_service = _build_notification_service(config)
+    if retry_finalize(batch_id, now, providers, config, notification_service):
+        typer.echo("finalizeの再試行に成功しました。")
+    else:
+        typer.echo("再試行条件が不成立でした(既に他の主体が処理済み、または状態が変化しています)。")
+
+
+@app.command("retry-stock")
+def retry_stock(
+    batch_id: str,
+    stock_code: str,
+    execute: bool = typer.Option(
+        False, "--execute", help="実際にこの銘柄の評価を再実行する(既定はdry-run)"
+    ),
+) -> None:
+    """指定銘柄をWorkerと同じロジックでローカルプロセス内から直接再評価する。
+
+    SQSは経由しない(既存Worker評価関数`_evaluate_candidate`を直接呼び出す)。
+    """
+    records = query_all_candidate_progress(batch_id, consistent_read=True)
+    target = next((r for r in records if r.stock_code == stock_code), None)
+    if target is None:
+        typer.echo(f"batch_id={batch_id} stock_code={stock_code} の進捗行が見つかりませんでした。")
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"現在の状態: status={target.status} attempt_count={target.attempt_count} "
+        f"evaluation_result={target.evaluation_result}"
+    )
+    if not execute:
+        typer.echo("--executeを指定すると、この銘柄をWorkerと同じロジックで再評価します。")
+        return
+
+    now = dt.datetime.now(dt.UTC)
+    owner_id = f"cli-retry-{uuid.uuid4().hex[:8]}"
+    if not claim_candidate_lease(batch_id, stock_code, owner_id, now, _WORKER_LEASE_SECONDS):
+        typer.echo("リースを取得できませんでした(他のWorker/Reconcilerが処理中の可能性があります)。")
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
+    outcome = _evaluate_candidate(stock_code, batch_id, now, providers, config)
+    completion_time = dt.datetime.now(dt.UTC)
+    duration_ms = int((completion_time - now).total_seconds() * 1000)
+    completed = complete_candidate(
+        batch_id,
+        stock_code,
+        owner_id,
+        terminal_status=outcome.terminal_status,
+        evaluation_result=outcome.evaluation_result,
+        ranking_entry=outcome.ranking_entry_json,
+        is_provider_failure_suspected=outcome.is_provider_failure_suspected,
+        missing_field_names=outcome.missing_field_names,
+        processing_duration_ms=duration_ms,
+        now=completion_time,
+    )
+    typer.echo(f"評価結果: {outcome.evaluation_result} (completed={completed})")
+    if completed:
+        notification_service = _build_notification_service(config)
+        finalized = maybe_finalize(
+            batch_id, completion_time, providers, config, notification_service
+        )
+        finalize_label = "実行しました" if finalized else "対象外でした(未完了行が他にあります)"
+        typer.echo(f"finalize結果: {finalize_label}")
+
+
+@app.command("abort")
+def abort(
+    batch_id: str,
+    reason: str = typer.Option(..., "--reason", help="中断理由(execution_result・監査ログに記録)"),
+    execute: bool = typer.Option(
+        False, "--execute", help="実際にABORTEDへ強制遷移する(既定はdry-run)"
+    ),
+) -> None:
+    """終端状態でないバッチを、運用者判断でABORTEDへ強制遷移させる。"""
+    batch_item = get_watchlist_batch(batch_id)
+    if batch_item is None:
+        typer.echo(f"batch_id={batch_id} は見つかりませんでした。")
+        raise typer.Exit(code=1)
+    status = batch_item.get("status")
+    typer.echo(f"batch_id={batch_id}: 現在の状態 status={status}")
+
+    terminal_statuses = {
+        WatchlistBatchStatus.COMPLETED.value,
+        WatchlistBatchStatus.DISPATCH_FAILED.value,
+        WatchlistBatchStatus.TIMED_OUT.value,
+        WatchlistBatchStatus.ABORTED.value,
+    }
+    if status in terminal_statuses:
+        typer.echo("既に終端状態のため、abortの対象外です。")
+        raise typer.Exit(code=1)
+    if not execute:
+        typer.echo(f"--executeを指定すると、ABORTEDへ強制遷移します(理由: {reason})。")
+        return
+
+    now = dt.datetime.now(dt.UTC)
+    if try_operator_abort(batch_id, reason, now):
+        typer.echo("ABORTEDへ遷移しました。")
+    else:
+        typer.echo("遷移条件が不成立でした(既に終端状態へ変化していた可能性があります)。")

@@ -77,10 +77,12 @@ class ScreeningDataResult:
     input: WatchlistScreeningInput | None
     missing_fields: list[str]
     error_message: str | None
-    # --- 候補ユニバース本格対応(2026-08、5節)で追加。DATA_ERRORが429疑いによる
-    # ものかどうかを区別し、バッチ集計で「429疑い件数/率」を算出できるようにする
-    # (10節のABORTED判定に使う)。429以外の理由によるDATA_ERRORでは常にFalse。
-    is_rate_limit_suspected: bool = False
+    # --- 候補ユニバース本格対応(2026-08、5節)で追加、運用ハードニング3節で
+    # 429以外(403/5xx/タイムアウト/接続切断/yfinance固有例外等)へ一般化。
+    # DATA_ERRORがデータ提供元障害の疑いによるものかどうかを区別し、バッチ集計で
+    # 「障害疑い件数/率」を算出できるようにする(10節のABORTED判定に使う)。
+    # 提供元障害以外の理由によるDATA_ERRORでは常にFalse。
+    is_provider_failure_suspected: bool = False
 
 
 class ScreeningDataProvider(Protocol):
@@ -178,7 +180,7 @@ class StockSnapshotScreeningDataProvider:
                 input=None,
                 missing_fields=[],
                 error_message=str(retry_result.error),
-                is_rate_limit_suspected=retry_result.is_rate_limit_suspected,
+                is_provider_failure_suspected=retry_result.is_provider_failure_suspected,
             )
         assert retry_result.value is not None
         snapshot, error = retry_result.value

@@ -109,5 +109,34 @@ high_throttle_rate_threshold_pct: 20.0
 staged_rollout:
   # 段階導入用の候補数上限。未設定(null)なら無制限。
   # 例: 100 → 500 → プライムのみ(market_segment_filterで絞り込み) → 全件(両方null)。
-  candidate_limit: null
-  market_segment_filter: null
+  # 安全側のデフォルトとして100件+プライム市場のみに制限している。全件処理へ
+  # 拡大する場合は、運用者が明示的にcandidate_limit: nullへ変更したうえで、
+  # infra/template.yamlのALLOW_FULL_MARKET_SCREENING環境変数(既定未設定=ブロック)
+  # も有効化する必要がある(二重の安全策、運用ハードニング1/2節)。
+  candidate_limit: 100
+  market_segment_filter: ["プライム（内国株式）"]
+
+# --- 運用ハードニング(2026-08、本番運用レビュー対応)で追加 -------------------
+
+# 429疑い件数/処理対象件数(既存)に加えて、主要スコア項目の欠損率がこの値(%)を
+# 超えた場合もABORTED(execution_result=PROVIDER_DATA_QUALITY_DEGRADED)とし、
+# ウォッチリスト追加・LINE通知を行わない。429疑い率が20%未満でも、データ提供元
+# 障害でスコア項目が軒並み欠損している週を検知するための独立したしきい値。
+max_field_missing_rate_pct: 30.0
+
+# finalize処理(合否ランキング確定・ウォッチリスト書き込み・LINE通知)が
+# FINALIZINGのまま応答が無い場合、この分数を超えたらReconcilerが異常とみなし
+# FINALIZE_FAILEDへ強制遷移する(finalize自体は少数銘柄のみを処理するため
+# 短い時間で完了するはずという前提)。
+finalizing_stuck_threshold_minutes: 15
+
+# FINALIZE_FAILEDになったバッチに対し、Reconcilerが自動的に再試行する最大回数。
+# 超過後はCLI(jstock watchlist-screening retry-finalize --execute)による
+# 手動対応を待つ(自動再試行は停止する)。
+max_finalize_retry_attempts: 3
+
+data_cache:
+  # 株価は日次で変わるため短めのTTL。財務・配当情報は週次実行と整合する
+  # 7日(168時間)以上のTTLとし、株価とは独立して設定する(運用ハードニング4節)。
+  price_cache_ttl_hours: 24
+  financial_cache_ttl_hours: 168
