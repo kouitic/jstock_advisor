@@ -23,6 +23,7 @@ from jstock_advisor.infrastructure.edinet.disclosure_finder import EdinetDisclos
 from jstock_advisor.infrastructure.edinet.document_finder import EdinetFilingCacheRepository
 from jstock_advisor.interfaces.candidate_universe import CandidateUniverseProvider
 from jstock_advisor.providers.candidate_universe.csv_impl import CsvCandidateUniverseProvider
+from jstock_advisor.providers.candidate_universe.jpx_impl import JpxCandidateUniverseProvider
 from jstock_advisor.providers.corporate_action.local_registry_impl import (
     LocalRegistryCorporateActionProvider,
 )
@@ -100,14 +101,32 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
     )
 
 
-def build_candidate_universe_provider(config: AppConfig) -> CandidateUniverseProvider:
+def build_candidate_universe_provider(
+    config: AppConfig, now: dt.datetime | None = None
+) -> CandidateUniverseProvider:
     """ウォッチリスト自動追加機能向けの候補銘柄ユニバースProviderを選択する。
 
-    v1では"csv"のみサポートする。将来"topix"等を追加する際は、この関数へ
-    branchを1つ追加するだけでよい(呼び出し側は無変更)。
+    "csv": 固定CSV(小規模検証用)。"jpx": 東証プライム+スタンダード全銘柄を
+    自動取得(候補ユニバース本格対応・2026-08)。JpxCandidateUniverseProviderは
+    S3/ローカルのキャッシュのみを読み、ネットワークアクセスは行わない(6節)。
+    キャッシュの取得・検証・昇格はservices/candidate_universe_downloader.pyの
+    Downloaderが週次Dispatcher起動時に別途行う。
     """
-    provider_name = config.watchlist_screening.candidate_universe.provider
-    if provider_name == "csv":
-        csv_path = Path(config.watchlist_screening.candidate_universe.csv_path)
-        return CsvCandidateUniverseProvider(csv_path)
-    raise ValueError(f"unknown candidate_universe provider: {provider_name}")
+    cu = config.watchlist_screening.candidate_universe
+    if cu.provider == "csv":
+        return CsvCandidateUniverseProvider(Path(cu.csv_path))
+    if cu.provider == "jpx":
+        if cu.target_market_segments is None:
+            raise ValueError("candidate_universe.target_market_segmentsが未設定です")
+        if cu.listed_issues_max_stale_hours is None or cu.jpx400_max_stale_hours is None:
+            raise ValueError(
+                "candidate_universe.listed_issues_max_stale_hours/"
+                "jpx400_max_stale_hoursが未設定です"
+            )
+        return JpxCandidateUniverseProvider(
+            target_market_segments=set(cu.target_market_segments),
+            listed_issues_max_stale_hours=cu.listed_issues_max_stale_hours,
+            jpx400_max_stale_hours=cu.jpx400_max_stale_hours,
+            now=now or dt.datetime.now(dt.UTC),
+        )
+    raise ValueError(f"unknown candidate_universe provider: {cu.provider}")

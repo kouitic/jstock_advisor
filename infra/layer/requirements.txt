@@ -8,3 +8,8 @@ pyyaml>=6.0
 python-dateutil>=2.9
 jpholiday>=0.1.9
 yfinance>=0.2.40
+# 候補ユニバース本格対応(2026-08): JPX上場銘柄一覧(.xls)のパースに使う。
+# pyproject.tomlのrealdata extraにも同じバージョンを追加済み(このファイルと
+# pyproject.tomlは独立して管理されており、実際にLambdaへデプロイされる依存関係を
+# 決めるのはこのファイルのため、片方だけの追加では本番で欠落する)。
+xlrd>=2.0

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from jstock_advisor.interfaces.candidate_universe import (
     CandidateUniverseError,
+    CandidateUniverseItem,
     CandidateUniverseResult,
 )
 
@@ -47,7 +48,7 @@ class CsvCandidateUniverseProvider:
             duplicate_count = 0
             invalid_code_count = 0
             seen: set[str] = set()
-            stock_codes: list[str] = []
+            items: list[CandidateUniverseItem] = []
 
             for row in reader:
                 stock_code = (row.get("stock_code") or "").strip()
@@ -64,11 +65,14 @@ class CsvCandidateUniverseProvider:
                     continue
 
                 seen.add(stock_code)
-                stock_codes.append(stock_code)
+                # CSVはstock_code以外のメタデータを持たないため、他フィールドは
+                # 常にNone/Falseとする(候補ユニバース本格対応でのItem化対応)。
+                items.append(CandidateUniverseItem(stock_code=stock_code))
 
         return CandidateUniverseResult(
-            stock_codes=stock_codes,
+            items=items,
             raw_row_count=raw_row_count,
             duplicate_count=duplicate_count,
             invalid_code_count=invalid_code_count,
+            selected_count=len(items),
         )

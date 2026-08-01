@@ -31,6 +31,7 @@ def _fake_config(*, enabled: bool = True) -> SimpleNamespace:
         screening_data_provider="stock_snapshot",
         max_watchlist_additions_per_run=20,
         notification_enabled=True,
+        staged_rollout=SimpleNamespace(candidate_limit=None, market_segment_filter=None),
     )
     return SimpleNamespace(watchlist_screening=watchlist_screening)
 
@@ -155,7 +156,9 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, config: SimpleNamespace | Non
     monkeypatch.setattr(
         cli_module, "build_real_provider_bundle", lambda now, cfg: SimpleNamespace()
     )
-    monkeypatch.setattr(cli_module, "build_candidate_universe_provider", lambda cfg: object())
+    monkeypatch.setattr(
+        cli_module, "build_candidate_universe_provider", lambda cfg, now: object()
+    )
     monkeypatch.setattr(cli_module, "build_line_client_from_env", lambda: object())
     monkeypatch.setattr(
         cli_module,

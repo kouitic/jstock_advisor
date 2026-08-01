@@ -11,11 +11,15 @@ DynamoDBの原子的なADD操作(UpdateItem)で完了件数・区分別内訳を
 from __future__ import annotations
 
 import datetime as dt
+import random
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 import boto3
+from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
@@ -283,3 +287,821 @@ def mark_finalize_failed(batch_id: str, error_message: str | None = None) -> Non
             ":updated_at": now_iso,
         },
     )
+
+
+# ============================================================================
+# ウォッチリスト自動追加(候補ユニバース本格対応・2026-08、第6版修正プラン)専用の
+# 関数群。上記のBUY/holdings向け関数群(record_result/BatchProgress等)とは独立した
+# コード経路とする。本機能のバッチはDISPATCHING/TIMEOUT_FINALIZING等、BUY/holdings
+# には存在しない状態を持ち、SUMMARY_CATEGORIESベースの集計ではなく銘柄単位テーブル
+# (WatchlistCandidateProgressTable)で進捗を追跡するため、既存関数の流用ではなく
+# 新規に書き起こす。
+# ============================================================================
+
+_PROGRESS_TABLE_FILE_NAME = "watchlist_candidate_progress.json"
+
+_serializer = TypeSerializer()
+
+
+def _ser(value: Any) -> Any:
+    return _serializer.serialize(value)
+
+
+def _progress_table() -> Any:
+    return boto3.resource("dynamodb").Table(resolve_table_name(_PROGRESS_TABLE_FILE_NAME))
+
+
+def _progress_table_name() -> str:
+    return resolve_table_name(_PROGRESS_TABLE_FILE_NAME)
+
+
+def _batch_runs_table_name() -> str:
+    return resolve_table_name(_TABLE_FILE_NAME)
+
+
+class WatchlistBatchStatus(StrEnum):
+    """候補ユニバース本格対応(第6版修正プラン1節)のバッチ状態。
+
+    DISPATCHING → RUNNING → FINALIZING → COMPLETED/ABORTED
+         ↓                       ↘ FINALIZE_FAILED
+    DISPATCH_FAILED
+    RUNNING → TIMEOUT_FINALIZING → TIMED_OUT
+                  ↘ TIMEOUT_FINALIZE_FAILED → (Reconciler再試行)TIMEOUT_FINALIZING
+
+    20節: statusは処理ライフサイクルのみを表す。終了理由はexecution_result属性
+    (COMPLETED時のみEXECUTION_RESULT_NORMAL、ABORTED時のみ
+    EXECUTION_RESULT_HIGH_THROTTLE_RATE)で区別する。
+    """
+
+    DISPATCHING = "DISPATCHING"
+    RUNNING = "RUNNING"
+    FINALIZING = "FINALIZING"
+    COMPLETED = "COMPLETED"
+    DISPATCH_FAILED = "DISPATCH_FAILED"
+    FINALIZE_FAILED = "FINALIZE_FAILED"
+    TIMEOUT_FINALIZING = "TIMEOUT_FINALIZING"
+    TIMED_OUT = "TIMED_OUT"
+    TIMEOUT_FINALIZE_FAILED = "TIMEOUT_FINALIZE_FAILED"
+    ABORTED = "ABORTED"
+
+
+class WatchlistProgressStatus(StrEnum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+EXECUTION_RESULT_NORMAL = "NORMAL"
+EXECUTION_RESULT_HIGH_THROTTLE_RATE = "HIGH_THROTTLE_RATE"
+
+# Reconcilerのタイムアウト確定処理(17節)専用のevaluation_result。
+EVALUATION_RESULT_BATCH_TIMED_OUT = "BATCH_TIMED_OUT"
+# Dispatcherが3回再送してもSendMessageBatchが成功しなかった銘柄(1節)。
+EVALUATION_RESULT_DISPATCH_SEND_FAILED = "DISPATCH_SEND_FAILED"
+# SQSのmaxReceiveCountを使い果たしTerminalFailureQueueへ回った銘柄(4節)。
+EVALUATION_RESULT_SQS_MAX_RECEIVE_EXCEEDED = "SQS_MAX_RECEIVE_EXCEEDED"
+
+_TRANSACTION_CONDITION_FAILURE_CODES = (
+    "TransactionCanceledException",
+    "ConditionalCheckFailedException",
+)
+
+
+@dataclass(frozen=True)
+class CandidateProgressRecord:
+    batch_id: str
+    stock_code: str
+    status: str
+    dispatched: bool
+    evaluation_result: str | None
+    ranking_entry: str | None
+    lease_owner_id: str | None
+    attempt_count: int
+    total_processing_duration_ms: int
+    is_rate_limit_suspected: bool
+
+
+def _to_progress_record(item: dict[str, Any]) -> CandidateProgressRecord:
+    return CandidateProgressRecord(
+        batch_id=item["batch_id"],
+        stock_code=item["stock_code"],
+        status=item["status"],
+        dispatched=bool(item.get("dispatched", False)),
+        evaluation_result=item.get("evaluation_result"),
+        ranking_entry=item.get("ranking_entry"),
+        lease_owner_id=item.get("lease_owner_id"),
+        attempt_count=int(item.get("attempt_count", 0)),
+        total_processing_duration_ms=int(item.get("total_processing_duration_ms", 0)),
+        is_rate_limit_suspected=bool(item.get("is_rate_limit_suspected", False)),
+    )
+
+
+def query_all_candidate_progress(
+    batch_id: str, *, consistent_read: bool = False
+) -> list[CandidateProgressRecord]:
+    """batch_id配下の全進捗行を、LastEvaluatedKeyが無くなるまでQueryして返す(16節)。
+
+    WatchlistCandidateProgressTableは約3,122行を保持し1回のQuery応答サイズ上限
+    (1MB)を超えうるため、全ページ取得を必須とする(13/11/17/15節の各用途で使う)。
+    consistent_read=Trueは、自分自身が直前に書き込んだ内容を確実に読み取る必要が
+    ある箇所(進捗行作成直後の件数照合、finalize直前の結果取得、17節のタイムアウト
+    確定処理内の未完了行抽出・再確認)でのみ指定すること。
+    """
+    table = _progress_table()
+    records: list[CandidateProgressRecord] = []
+    query_kwargs: dict[str, Any] = {
+        "KeyConditionExpression": Key("batch_id").eq(batch_id),
+        "ConsistentRead": consistent_read,
+    }
+    while True:
+        response = table.query(**query_kwargs)
+        records.extend(_to_progress_record(item) for item in response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        query_kwargs["ExclusiveStartKey"] = last_key
+    return records
+
+
+def _chunked(values: list[str], size: int) -> list[list[str]]:
+    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
+def _batch_write_with_retry(
+    table_name: str,
+    requests: Any,
+    *,
+    base_delay_seconds: float = 0.5,
+    max_delay_seconds: float = 5.0,
+    max_retries: int = 5,
+) -> None:
+    """13節: BatchWriteItemのUnprocessedItemsを指数バックオフ+ジッターで再送する。
+
+    最大再試行回数を超えても残る場合はRuntimeErrorを送出し、呼び出し側
+    (Dispatcher)がSQS送信を開始せずDISPATCH_FAILEDへ遷移できるようにする。
+    requestsは低レベルDynamoDB API形式のPutRequest辞書列(TypeSerializerで
+    シリアライズ済み)であり、boto3-stubsのTypedDict群と厳密に型付けせず
+    Anyのまま扱う(この関数はDynamoDB低レベルAPIへの薄いラッパーのため)。
+    """
+    client = boto3.client("dynamodb")
+    pending = requests
+    attempt = 0
+    while pending:
+        response = client.batch_write_item(RequestItems={table_name: pending})
+        pending = response.get("UnprocessedItems", {}).get(table_name, [])
+        if not pending:
+            return
+        attempt += 1
+        if attempt > max_retries:
+            raise RuntimeError(
+                f"BatchWriteItem: UnprocessedItemsが{max_retries}回の再送後も"
+                f"残っています table={table_name} remaining={len(pending)}"
+            )
+        delay = min(max_delay_seconds, base_delay_seconds * (2 ** (attempt - 1)))
+        delay *= 1 + random.uniform(-0.2, 0.2)
+        time.sleep(max(0.0, delay))
+
+
+def create_missing_candidate_progress_rows(
+    batch_id: str, stock_codes: list[str], now: dt.datetime, ttl_hours: int
+) -> None:
+    """13/18節: 既存進捗行との差分(未作成分)のみをPENDING行として作成する。
+
+    差分計算を先に行うことで、BatchWriteItemが項目単位のConditionExpressionを
+    指定できない制約があっても、既存の(PROCESSING/COMPLETED/FAILEDへ進んでいる
+    可能性がある)行を無条件のPutRequestで上書きしない(18節「対策2」、dispatch
+    leaseによる多重実行排除(対策1)とは独立の安全策として両方実装する)。
+    """
+    existing = {r.stock_code for r in query_all_candidate_progress(batch_id, consistent_read=True)}
+    missing = [code for code in stock_codes if code not in existing]
+    if not missing:
+        return
+
+    ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
+    table_name = _progress_table_name()
+    for chunk in _chunked(missing, 25):
+        requests = [
+            {
+                "PutRequest": {
+                    "Item": {
+                        "batch_id": _ser(batch_id),
+                        "stock_code": _ser(code),
+                        "status": _ser(WatchlistProgressStatus.PENDING.value),
+                        "dispatched": _ser(False),
+                        "attempt_count": _ser(0),
+                        "total_processing_duration_ms": _ser(0),
+                        "is_rate_limit_suspected": _ser(False),
+                        "ttl": _ser(ttl),
+                    }
+                }
+            }
+            for code in chunk
+        ]
+        _batch_write_with_retry(table_name, requests)
+
+
+def try_acquire_dispatch_lease(
+    batch_id: str, owner_id: str, now: dt.datetime, lease_seconds: int, ttl_hours: int
+) -> bool:
+    """1節ステップ0/18節「対策1」: 同一batch_idのDispatcher多重実行を排除する。
+
+    項目が未作成の場合はConditionExpressionが自明に真となりUpdateItemがそのまま
+    新規作成する(DISPATCHINGへの初回遷移も兼ねる)。started_atは初回のみ設定し
+    (if_not_exists)、リース再取得(再開)時にタイムアウト判定の起点がリセット
+    されないようにする。ttlはここでは仮の初期値としてのみ設定し(if_not_exists)、
+    set_watchlist_batch_total()が正式なcandidate_progress_ttl_hours基準の値で
+    上書きする。
+    """
+    lease_expires_at = (now + dt.timedelta(seconds=lease_seconds)).isoformat()
+    now_iso = now.isoformat()
+    fallback_ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET dispatch_owner_id = :owner, "
+                "dispatch_lease_acquired_at = :now, "
+                "dispatch_lease_expires_at = :expires, "
+                "dispatch_attempt_count = if_not_exists(dispatch_attempt_count, :zero) + :one, "
+                "started_at = if_not_exists(started_at, :now), "
+                "#ttl = if_not_exists(#ttl, :fallback_ttl), "
+                "#status = :dispatching"
+            ),
+            ConditionExpression=(
+                "(attribute_not_exists(dispatch_owner_id) OR dispatch_lease_expires_at < :now) "
+                "AND (attribute_not_exists(#status) OR #status = :dispatching)"
+            ),
+            ExpressionAttributeNames={"#status": "status", "#ttl": "ttl"},
+            ExpressionAttributeValues={
+                ":owner": owner_id,
+                ":now": now_iso,
+                ":expires": lease_expires_at,
+                ":zero": 0,
+                ":one": 1,
+                ":fallback_ttl": fallback_ttl,
+                ":dispatching": WatchlistBatchStatus.DISPATCHING.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def set_watchlist_batch_total(batch_id: str, total: int, ttl_hours: int, now: dt.datetime) -> None:
+    """1節ステップ2: 候補リスト確定後にtotalを設定し、dispatch_completedを
+    falseで初期化する(この時点ではまだSQS送信を開始していないため)。"""
+    ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
+    _table().update_item(
+        Key={"batch_id": batch_id},
+        UpdateExpression=(
+            "SET #total = :total, dispatch_completed = :false, "
+            "completed = if_not_exists(completed, :zero), #ttl = :ttl"
+        ),
+        ExpressionAttributeNames={"#total": "total", "#ttl": "ttl"},
+        ExpressionAttributeValues={":total": total, ":false": False, ":zero": 0, ":ttl": ttl},
+    )
+
+
+def mark_dispatch_completed(batch_id: str, now: dt.datetime) -> None:
+    """1節ステップ5: 全候補がdispatched=trueまたはFAILED確定のいずれかになった
+    時点でDISPATCHING→RUNNINGへ遷移する。"""
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET dispatch_completed = :true, #status = :running, updated_at = :now"
+            ),
+            ConditionExpression="#status = :dispatching",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":true": True,
+                ":running": WatchlistBatchStatus.RUNNING.value,
+                ":dispatching": WatchlistBatchStatus.DISPATCHING.value,
+                ":now": now.isoformat(),
+            },
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return  # 既にDISPATCH_FAILED等へ遷移済み(想定外だが致命的ではない)
+        raise
+
+
+def mark_dispatch_failed(batch_id: str, now: dt.datetime) -> bool:
+    """2節ステップ4(Reconciler): DISPATCHINGのままタイムアウトしたバッチを終端確定する。"""
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET #status = :failed, updated_at = :now",
+            ConditionExpression="#status = :dispatching",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":failed": WatchlistBatchStatus.DISPATCH_FAILED.value,
+                ":dispatching": WatchlistBatchStatus.DISPATCHING.value,
+                ":now": now.isoformat(),
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def mark_candidate_dispatched(batch_id: str, stock_code: str, now: dt.datetime) -> None:
+    """12節: SendMessageBatch成功後、statusに依存しない条件式でdispatchedを記録する。
+
+    SQS送信はat-least-once配信であり、この更新前にDispatcherが停止すると次回
+    再開時に同じ銘柄が再送される可能性があるが、これは設計上許容し、銘柄評価側の
+    冪等性(7節のリース機構)によって重複を吸収する。
+    """
+    try:
+        _progress_table().update_item(
+            Key={"batch_id": batch_id, "stock_code": stock_code},
+            UpdateExpression="SET dispatched = :true, dispatched_at = :now",
+            ConditionExpression="attribute_not_exists(dispatched) OR dispatched = :false",
+            ExpressionAttributeValues={":true": True, ":false": False, ":now": now.isoformat()},
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return  # 既にdispatched=true(SQS再送・重複処理等)。冪等スキップ。
+        raise
+
+
+def claim_candidate_lease(
+    batch_id: str, stock_code: str, owner_id: str, now: dt.datetime, lease_seconds: int
+) -> bool:
+    """7節: Workerが銘柄1件分のPROCESSINGリースを取得する。"""
+    lease_expires_at = (now + dt.timedelta(seconds=lease_seconds)).isoformat()
+    now_iso = now.isoformat()
+    try:
+        _progress_table().update_item(
+            Key={"batch_id": batch_id, "stock_code": stock_code},
+            UpdateExpression=(
+                "SET #status = :processing, lease_owner_id = :owner, "
+                "lease_acquired_at = :now, lease_expires_at = :expires, "
+                "attempt_count = if_not_exists(attempt_count, :zero) + :one, "
+                "last_attempt_started_at = :now, "
+                "first_started_at = if_not_exists(first_started_at, :now)"
+            ),
+            ConditionExpression=(
+                "attribute_not_exists(stock_code) OR #status = :pending OR "
+                "(#status = :processing AND lease_expires_at < :now)"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":processing": WatchlistProgressStatus.PROCESSING.value,
+                ":pending": WatchlistProgressStatus.PENDING.value,
+                ":owner": owner_id,
+                ":now": now_iso,
+                ":expires": lease_expires_at,
+                ":zero": 0,
+                ":one": 1,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def complete_candidate(
+    batch_id: str,
+    stock_code: str,
+    owner_id: str,
+    *,
+    terminal_status: WatchlistProgressStatus,
+    evaluation_result: str,
+    ranking_entry: str | None,
+    is_rate_limit_suspected: bool,
+    processing_duration_ms: int,
+    now: dt.datetime,
+) -> bool:
+    """7/11節: Workerの通常完了経路。TransactWriteItemsで進捗行の終端確定と
+    BatchRunsTable.completedの+1を原子的に行う(通常経路。17節のタイムアウト
+    確定処理専用の再計算方式(案C)とは別のまま維持する、17節参照)。
+
+    完了条件(owner一致)が不成立の場合はFalseを返す(リース失効後に別Workerが
+    再クレームしていた、Reconcilerが先にタイムアウト確定していた等)。
+    """
+    update_expression = (
+        "SET #status = :status, evaluation_result = :eval_result, completed_at = :now, "
+        "is_rate_limit_suspected = :rate_limited"
+        + (", ranking_entry = :ranking_entry" if ranking_entry is not None else "")
+        + " ADD total_processing_duration_ms :duration_ms"
+        + " REMOVE lease_owner_id, lease_expires_at"
+    )
+    values: dict[str, Any] = {
+        ":status": terminal_status.value,
+        ":eval_result": evaluation_result,
+        ":now": now.isoformat(),
+        ":rate_limited": is_rate_limit_suspected,
+        ":duration_ms": processing_duration_ms,
+        ":processing": WatchlistProgressStatus.PROCESSING.value,
+        ":owner": owner_id,
+    }
+    if ranking_entry is not None:
+        values[":ranking_entry"] = ranking_entry
+
+    client = boto3.client("dynamodb")
+    try:
+        client.transact_write_items(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": _progress_table_name(),
+                        "Key": {"batch_id": _ser(batch_id), "stock_code": _ser(stock_code)},
+                        "UpdateExpression": update_expression,
+                        "ConditionExpression": "#status = :processing AND lease_owner_id = :owner",
+                        "ExpressionAttributeNames": {"#status": "status"},
+                        "ExpressionAttributeValues": {k: _ser(v) for k, v in values.items()},
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": _batch_runs_table_name(),
+                        "Key": {"batch_id": _ser(batch_id)},
+                        "UpdateExpression": "ADD completed :one",
+                        "ExpressionAttributeValues": {":one": _ser(1)},
+                    }
+                },
+            ]
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
+def record_dispatch_send_failure(batch_id: str, stock_code: str, now: dt.datetime) -> bool:
+    """1節ステップ4: SendMessageBatchが3回再送しても成功しなかった銘柄を直接
+    FAILED確定する(SQSに乗らなかった銘柄がいつまでも未完了扱いにならないようにする)。
+    """
+    client = boto3.client("dynamodb")
+    values = {
+        ":status": WatchlistProgressStatus.FAILED.value,
+        ":eval_result": EVALUATION_RESULT_DISPATCH_SEND_FAILED,
+        ":now": now.isoformat(),
+        ":pending": WatchlistProgressStatus.PENDING.value,
+    }
+    try:
+        client.transact_write_items(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": _progress_table_name(),
+                        "Key": {"batch_id": _ser(batch_id), "stock_code": _ser(stock_code)},
+                        "UpdateExpression": (
+                            "SET #status = :status, evaluation_result = :eval_result, "
+                            "completed_at = :now"
+                        ),
+                        "ConditionExpression": "#status = :pending",
+                        "ExpressionAttributeNames": {"#status": "status"},
+                        "ExpressionAttributeValues": {k: _ser(v) for k, v in values.items()},
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": _batch_runs_table_name(),
+                        "Key": {"batch_id": _ser(batch_id)},
+                        "UpdateExpression": "ADD completed :one",
+                        "ExpressionAttributeValues": {":one": _ser(1)},
+                    }
+                },
+            ]
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
+def record_terminal_failure(batch_id: str, stock_code: str, now: dt.datetime) -> bool:
+    """4節: SQSのmaxReceiveCountを使い果たしTerminalFailureQueueへ回った銘柄を
+    FAILED確定する(WatchlistTerminalFailureHandlerから呼ぶ)。"""
+    client = boto3.client("dynamodb")
+    values = {
+        ":status": WatchlistProgressStatus.FAILED.value,
+        ":eval_result": EVALUATION_RESULT_SQS_MAX_RECEIVE_EXCEEDED,
+        ":now": now.isoformat(),
+        ":pending": WatchlistProgressStatus.PENDING.value,
+        ":processing": WatchlistProgressStatus.PROCESSING.value,
+    }
+    try:
+        client.transact_write_items(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": _progress_table_name(),
+                        "Key": {"batch_id": _ser(batch_id), "stock_code": _ser(stock_code)},
+                        "UpdateExpression": (
+                            "SET #status = :status, evaluation_result = :eval_result, "
+                            "completed_at = :now REMOVE lease_owner_id, lease_expires_at"
+                        ),
+                        "ConditionExpression": "#status = :pending OR #status = :processing",
+                        "ExpressionAttributeNames": {"#status": "status"},
+                        "ExpressionAttributeValues": {k: _ser(v) for k, v in values.items()},
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": _batch_runs_table_name(),
+                        "Key": {"batch_id": _ser(batch_id)},
+                        "UpdateExpression": "ADD completed :one",
+                        "ExpressionAttributeValues": {":one": _ser(1)},
+                    }
+                },
+            ]
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
+def try_finalize_if_ready(batch_id: str) -> bool:
+    """11節: dispatch_completed AND completed>=total AND status=RUNNINGの場合のみ、
+    RUNNING→FINALIZINGへの排他遷移を試みる。Worker/Dispatcher/Terminal Failure
+    Handler/Reconcilerのすべてから、それぞれが担当する完了確定の直後に呼ぶこと。
+    条件付き更新に成功した1回の呼び出しだけがTrueを返し、呼び出し側はその場合
+    のみ後続のfinalize処理(合格銘柄のウォッチリスト追加・LINE通知等)を実行する
+    (このモジュールはDynamoDB上の排他制御のみを担う)。
+
+    TIMED_OUTはこの関数を使わない(17節: 判定条件・処理内容が異なる別経路)。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET #status = :finalizing",
+            ConditionExpression=(
+                "#status = :running AND dispatch_completed = :true AND completed >= #total"
+            ),
+            ExpressionAttributeNames={"#status": "status", "#total": "total"},
+            ExpressionAttributeValues={
+                ":finalizing": WatchlistBatchStatus.FINALIZING.value,
+                ":running": WatchlistBatchStatus.RUNNING.value,
+                ":true": True,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def mark_watchlist_batch_completed(batch_id: str, execution_result: str, now: dt.datetime) -> None:
+    """11節: _finalize_completed相当の後続処理が成功した後に呼ぶ。
+
+    execution_resultはEXECUTION_RESULT_NORMAL(通常完了)または
+    EXECUTION_RESULT_HIGH_THROTTLE_RATE(10節のスロットリング率判定該当時)の
+    いずれか(20節: statusとexecution_resultの責務分離)。
+    """
+    status = (
+        WatchlistBatchStatus.ABORTED
+        if execution_result == EXECUTION_RESULT_HIGH_THROTTLE_RATE
+        else WatchlistBatchStatus.COMPLETED
+    )
+    _table().update_item(
+        Key={"batch_id": batch_id},
+        UpdateExpression="SET #status = :status, execution_result = :result, updated_at = :now",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":status": status.value,
+            ":result": execution_result,
+            ":now": now.isoformat(),
+        },
+    )
+
+
+def mark_watchlist_finalize_failed(
+    batch_id: str, now: dt.datetime, error_message: str | None
+) -> None:
+    now_iso = now.isoformat()
+    truncated = (
+        (error_message or "")[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH] if error_message else None
+    )
+    _table().update_item(
+        Key={"batch_id": batch_id},
+        UpdateExpression=(
+            "SET #status = :status, finalize_failed_at = :now, "
+            "finalize_error_message = :error_message, updated_at = :now"
+        ),
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":status": WatchlistBatchStatus.FINALIZE_FAILED.value,
+            ":now": now_iso,
+            ":error_message": truncated,
+        },
+    )
+
+
+def get_watchlist_batch(batch_id: str) -> dict[str, Any] | None:
+    response = _table().get_item(Key={"batch_id": batch_id})
+    item: dict[str, Any] | None = response.get("Item")
+    return item
+
+
+def list_watchlist_batches_by_status(statuses: list[WatchlistBatchStatus]) -> list[dict[str, Any]]:
+    """Reconciler(毎時起動)向け。バッチは週1件程度のためフルスキャンで十分(2節)。"""
+    table = _table()
+    values = {f":s{i}": status.value for i, status in enumerate(statuses)}
+    filter_expr = " OR ".join(f"#status = {placeholder}" for placeholder in values)
+    items: list[dict[str, Any]] = []
+    scan_kwargs: dict[str, Any] = {
+        "FilterExpression": filter_expr,
+        "ExpressionAttributeNames": {"#status": "status"},
+        "ExpressionAttributeValues": values,
+    }
+    while True:
+        response = table.scan(**scan_kwargs)
+        items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_kwargs["ExclusiveStartKey"] = last_key
+    return items
+
+
+def try_acquire_timeout_finalization(batch_id: str) -> bool:
+    """17節: RUNNING(タイムアウト新規検出時)、またはTIMEOUT_FINALIZE_FAILED(再試行)
+    からTIMEOUT_FINALIZINGへの排他遷移を試みる。既にTIMEOUT_FINALIZINGのバッチを
+    そのまま続行する場合、この関数を呼ぶ必要はない(状態遷移が不要なため)。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET #status = :timeout_finalizing",
+            ConditionExpression="#status = :running OR #status = :timeout_finalize_failed",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":timeout_finalizing": WatchlistBatchStatus.TIMEOUT_FINALIZING.value,
+                ":running": WatchlistBatchStatus.RUNNING.value,
+                ":timeout_finalize_failed": WatchlistBatchStatus.TIMEOUT_FINALIZE_FAILED.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def _try_mark_row_timed_out(batch_id: str, stock_code: str, now: dt.datetime) -> bool:
+    """17節ステップ3/4: 個別の条件付きUpdateItem(BatchWriteItemは使わない。
+    既存項目の部分更新ができずattempt_count等を失うため)。条件不成立は他の主体が
+    先に終端状態へ確定済みという意味であり、冪等スキップする。
+    """
+    try:
+        _progress_table().update_item(
+            Key={"batch_id": batch_id, "stock_code": stock_code},
+            UpdateExpression=(
+                "SET #status = :failed, evaluation_result = :reason, "
+                "completed_at = :now REMOVE lease_owner_id, lease_expires_at"
+            ),
+            ConditionExpression="#status = :pending OR #status = :processing",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":failed": WatchlistProgressStatus.FAILED.value,
+                ":reason": EVALUATION_RESULT_BATCH_TIMED_OUT,
+                ":now": now.isoformat(),
+                ":pending": WatchlistProgressStatus.PENDING.value,
+                ":processing": WatchlistProgressStatus.PROCESSING.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+@dataclass(frozen=True)
+class TimeoutFinalizationPassResult:
+    all_records: list[CandidateProgressRecord]
+    terminal_count: int
+    total: int
+    newly_failed_count: int
+
+
+def run_timeout_finalization_pass(
+    batch_id: str, now: dt.datetime, max_rows_per_run: int
+) -> TimeoutFinalizationPassResult:
+    """17節ステップ1〜6: 未完了行を条件付きUpdateItemで(上限件数まで)FAILED確定し、
+    終端行数(terminal_count)を再計算して返す。completedカウンタへのSET補正
+    (ステップ7、set_timeout_finalize_completed_count)・TIMED_OUT/
+    TIMEOUT_FINALIZE_FAILEDへの遷移判定(ステップ8〜10)は、AuditLog記録・
+    メトリクス集計と合わせて行う必要があるため、呼び出し側(Reconciler)が
+    本関数の戻り値を見て行う。
+    """
+    batch_item = get_watchlist_batch(batch_id) or {}
+    total = int(batch_item.get("total", 0))
+
+    all_records = query_all_candidate_progress(batch_id, consistent_read=True)
+    incomplete = [
+        r
+        for r in all_records
+        if r.status
+        in (WatchlistProgressStatus.PENDING.value, WatchlistProgressStatus.PROCESSING.value)
+    ]
+
+    newly_failed = 0
+    for record in incomplete[:max_rows_per_run]:
+        if _try_mark_row_timed_out(batch_id, record.stock_code, now):
+            newly_failed += 1
+
+    all_records_after = query_all_candidate_progress(batch_id, consistent_read=True)
+    terminal_count = sum(
+        1
+        for r in all_records_after
+        if r.status
+        in (WatchlistProgressStatus.COMPLETED.value, WatchlistProgressStatus.FAILED.value)
+    )
+    return TimeoutFinalizationPassResult(
+        all_records=all_records_after,
+        terminal_count=terminal_count,
+        total=total,
+        newly_failed_count=newly_failed,
+    )
+
+
+def set_timeout_finalize_completed_count(
+    batch_id: str, terminal_count: int, now: dt.datetime
+) -> bool:
+    """17節ステップ7: 案C(終端行数からの再計算)によるcompletedのSET補正
+    (既存のADDではなく上書き)。terminal_countは直前のQuery時点での正の値であり、
+    各進捗行の終端状態はConditionExpressionにより一意に確定しているため、この
+    SETによる二重加算・カウント漏れは構造上発生しない(17節参照)。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET completed = :terminal_count, updated_at = :now",
+            ConditionExpression="#status = :timeout_finalizing",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":terminal_count": terminal_count,
+                ":now": now.isoformat(),
+                ":timeout_finalizing": WatchlistBatchStatus.TIMEOUT_FINALIZING.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def transition_timeout_finalizing_to_timed_out(batch_id: str, now: dt.datetime) -> bool:
+    """17節ステップ9。"""
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET #status = :timed_out, updated_at = :now",
+            ConditionExpression="#status = :timeout_finalizing",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":timed_out": WatchlistBatchStatus.TIMED_OUT.value,
+                ":timeout_finalizing": WatchlistBatchStatus.TIMEOUT_FINALIZING.value,
+                ":now": now.isoformat(),
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def transition_timeout_finalizing_to_failed(batch_id: str, now: dt.datetime, reason: str) -> None:
+    """17節ステップ10: terminal_count>totalのデータ不整合、または想定外の例外を
+    検出した場合に呼ぶ。ベストエフォート(この遷移自体が失敗しても、次回
+    Reconciler実行がTIMEOUT_FINALIZINGのまま放置されたバッチとして手順1から
+    再開できる)。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET #status = :failed, finalize_failed_at = :now, "
+                "finalize_error_message = :reason, updated_at = :now"
+            ),
+            ConditionExpression="#status = :timeout_finalizing",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":failed": WatchlistBatchStatus.TIMEOUT_FINALIZE_FAILED.value,
+                ":now": now.isoformat(),
+                ":reason": reason[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH],
+                ":timeout_finalizing": WatchlistBatchStatus.TIMEOUT_FINALIZING.value,
+            },
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return
+        raise

@@ -19,6 +19,7 @@ from typing import Protocol
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_retry
 
 # WatchlistScreeningInputの必須項目・スコア項目の分類(要求仕様§5・§8)。
 # 必須条件用フィールド(is_debt_excess等)はStockSnapshot取得できた時点で常にbool値
@@ -76,6 +77,10 @@ class ScreeningDataResult:
     input: WatchlistScreeningInput | None
     missing_fields: list[str]
     error_message: str | None
+    # --- 候補ユニバース本格対応(2026-08、5節)で追加。DATA_ERRORが429疑いによる
+    # ものかどうかを区別し、バッチ集計で「429疑い件数/率」を算出できるようにする
+    # (10節のABORTED判定に使う)。429以外の理由によるDATA_ERRORでは常にFalse。
+    is_rate_limit_suspected: bool = False
 
 
 class ScreeningDataProvider(Protocol):
@@ -151,15 +156,32 @@ class StockSnapshotScreeningDataProvider:
         self._config = config
 
     def get_screening_input(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:
+        # 429対応(案B、5節): build_stock_snapshot()全体をcall_with_rate_limit_retry()で
+        # 包み、429疑いの例外のみ再試行する。build_stock_snapshot()自体・共有yfinance
+        # Provider実装は一切変更しない(欠点は同関数のdocstring参照)。429疑いでない
+        # 例外はcall_with_rate_limit_retry()が再送出するため、従来どおりここで
+        # 捕捉してDATA_ERRORとして扱う(この層の例外処理契約自体は変更しない)。
         try:
-            snapshot, error = build_stock_snapshot(self._providers, stock_code, now, self._config)
-        except Exception as exc:  # 将来のretry判定用にstatusで区別するため意図的に捕捉
+            retry_result = call_with_rate_limit_retry(
+                lambda: build_stock_snapshot(self._providers, stock_code, now, self._config)
+            )
+        except Exception as exc:  # noqa: BLE001 - 将来のretry判定用にstatusで区別するため意図的に捕捉
             return ScreeningDataResult(
                 status=ScreeningDataStatus.DATA_ERROR,
                 input=None,
                 missing_fields=[],
                 error_message=str(exc),
             )
+        if retry_result.error is not None:
+            return ScreeningDataResult(
+                status=ScreeningDataStatus.DATA_ERROR,
+                input=None,
+                missing_fields=[],
+                error_message=str(retry_result.error),
+                is_rate_limit_suspected=retry_result.is_rate_limit_suspected,
+            )
+        assert retry_result.value is not None
+        snapshot, error = retry_result.value
 
         if snapshot is None:
             return ScreeningDataResult(

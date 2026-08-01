@@ -25,6 +25,18 @@ Parameters:
   LineChannelSecretSecretArn:
     Type: String
     Description: LINE_CHANNEL_SECRETを保持するSecrets ManagerシークレットのARN(Webhook署名検証用)
+  WatchlistReservedConcurrentExecutions:
+    Type: Number
+    Default: 3
+    Description: >
+      候補ユニバース本格対応(2026-08)。WatchlistWorkerFunctionの同時実行数上限。
+      Yahoo Financeへの同時アクセスを抑制する(3節)。
+  WatchlistSqsBatchSize:
+    Type: Number
+    Default: 1
+    Description: >
+      候補ユニバース本格対応(2026-08)。WatchlistScreeningQueueのLambdaトリガー
+      BatchSize。初期値は1(3節)、安定稼働後に引き上げ可能。
 
 Globals:
   Function:
@@ -44,6 +56,85 @@ Globals:
         LINE_USER_ID: !Sub "{{resolve:secretsmanager:${LineUserIdSecretArn}:SecretString}}"
 
 Resources:
+  # --- 候補ユニバース本格対応(2026-08): S3キャッシュバケット ------------------
+  # 東証上場銘柄一覧・JPX400構成銘柄のcurrent/archiveレイアウトを保存する
+  # (services/candidate_universe_downloader.py)。非機能要件: 暗号化・バージョニング・
+  # TLS-onlyポリシー・パブリックアクセスブロック・ライフサイクル(archive/の
+  # 世代を1年で失効、非最新バージョンを90日で失効)。
+
+  CandidateUniverseCacheBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-candidate-universe-cache"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldArchiveGenerations
+            Status: Enabled
+            Prefix: archive/
+            ExpirationInDays: 365
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
+
+  CandidateUniverseCacheBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CandidateUniverseCacheBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt CandidateUniverseCacheBucket.Arn
+              - !Sub "${CandidateUniverseCacheBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # --- 候補ユニバース本格対応(2026-08): SQSキュー ----------------------------
+  # WatchlistScreeningQueue(メイン、BatchSize=1) → maxReceiveCount 3回失敗で
+  # WatchlistTerminalFailureQueue(作業用、自動消費してFAILED確定) →
+  # Handler自体が3回失敗した場合のみWatchlistTerminalFailureDLQ(真正のDLQ、
+  # 何も自動消費しない、ApproximateNumberOfMessagesVisibleへのCloudWatch Alarmを
+  # 運用側で設定すること、4節)。
+
+  WatchlistTerminalFailureDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-watchlist-terminal-failure-dlq"
+      MessageRetentionPeriod: 1209600 # 14日(運用調査用に長めに保持)
+
+  WatchlistTerminalFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-watchlist-terminal-failure"
+      VisibilityTimeout: 120 # WatchlistTerminalFailureHandlerFunctionのTimeout(60秒)+余裕
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt WatchlistTerminalFailureDLQ.Arn
+        maxReceiveCount: 3
+
+  WatchlistScreeningQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-watchlist-screening"
+      VisibilityTimeout: 1080 # 3節: WatchlistWorkerFunctionのLambda Timeout(180秒)の6倍
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt WatchlistTerminalFailureQueue.Arn
+        maxReceiveCount: 3
+
   # --- Lambda Layer(依存パッケージ) -------------------------------------
 
   DependenciesLayer:
@@ -294,6 +385,28 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # 候補ユニバース本格対応(2026-08)。銘柄単位の進捗・冪等性・リース状態を保持する
+  # (PK: batch_id, SK: stock_code)。infrastructure/aws/batch_tracker.pyの
+  # ウォッチリスト専用関数群(query_all_candidate_progress等)が操作する。
+  WatchlistCandidateProgressTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-watchlist_candidate_progress"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: batch_id
+          AttributeType: S
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: batch_id
+          KeyType: HASH
+        - AttributeName: stock_code
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
 
   BuyCandidatesFunction:
@@ -427,43 +540,128 @@ Resources:
             FlexibleTimeWindow:
               Mode: "OFF"
 
-  WatchlistAutoAdditionFunction:
+  # --- ウォッチリスト自動追加(候補ユニバース本格対応・2026-08) ---------------
+  # 旧WatchlistAutoAdditionFunction(単一Lambdaの自己再帰fan-out)を、
+  # Dispatcher→SQS→Worker、TerminalFailureQueue→Handler、毎時Reconcilerという
+  # 4つのLambdaへ分割した(第6版修正プラン)。共通のDynamoDBポリシー・IAM構成:
+  # AuditLog/BatchRuns/WatchlistCandidateProgress/WatchlistへのCRUD、Holdings等の
+  # 除外判定・データ取得用テーブルへの読み取り。
+
+  WatchlistDispatcherFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub "${AWS::StackName}-watchlist-auto-addition"
+      FunctionName: !Sub "${AWS::StackName}-watchlist-dispatcher"
       CodeUri: ../src/
-      Handler: jstock_advisor.lambda_handlers.watchlist_auto_addition_handler.handler
-      # 銘柄単位のファンアウトで各Providerからのデータ取得を行うため、他の
-      # ファンアウト系ハンドラ(buy-candidates/holdings-watchlist)と同じく
-      # Lambdaの最大値(900秒)まで引き上げる
-      Timeout: 900
+      Handler: jstock_advisor.lambda_handlers.watchlist_dispatcher_handler.handler
+      Timeout: 300 # 3/18節: dispatch leaseの算出根拠(300秒+60秒余裕=360秒)
+      Environment:
+        Variables:
+          WATCHLIST_SCREENING_QUEUE_URL: !Ref WatchlistScreeningQueue
+          CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
-        # 本機能はウォッチリストへの永続データ更新(add_if_new)を伴うためCrud
+        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistCandidateProgressTable }
         - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
         - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
-        # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
-        - Statement:
-            - Effect: Allow
-              Action: lambda:InvokeFunction
-              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-auto-addition"
+        - S3CrudPolicy: { BucketName: !Ref CandidateUniverseCacheBucket }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt WatchlistScreeningQueue.QueueName }
       Events:
         # 市場取引時間外、既存の土曜実行バッチ(WeeklyReview 09:00/MonthlyReview 10:00/
         # QuarterlyReview 11:00 JST)と重ならず、翌営業日である月曜08:00のBUY候補
-        # バッチより十分前に完了できる時間帯として毎週土曜07:00 JSTを選定した
-        # (実装プラン§11)。
+        # バッチより十分前に完了できる時間帯として毎週土曜07:00 JSTを選定した。
         SaturdayEarlyMorning:
           Type: ScheduleV2
           Properties:
             ScheduleExpression: "cron(0 7 ? * SAT *)"
             ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  WatchlistWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-watchlist-worker"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.watchlist_worker_handler.handler
+      Timeout: 180 # 3節
+      ReservedConcurrentExecutions: !Ref WatchlistReservedConcurrentExecutions
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistCandidateProgressTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
+        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+      Events:
+        ScreeningQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt WatchlistScreeningQueue.Arn
+            BatchSize: !Ref WatchlistSqsBatchSize
+            MaximumBatchingWindowInSeconds: 0
+
+  WatchlistTerminalFailureHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-watchlist-terminal-failure-handler"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.watchlist_terminal_failure_handler.handler
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistCandidateProgressTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
+        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+      Events:
+        TerminalFailureQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt WatchlistTerminalFailureQueue.Arn
+            BatchSize: 10
+
+  WatchlistBatchReconcilerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-watchlist-batch-reconciler"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.watchlist_batch_reconciler_handler.handler
+      Timeout: 300
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistCandidateProgressTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
+        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+      Events:
+        Hourly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "rate(1 hour)"
             FlexibleTimeWindow:
               Mode: "OFF"
 
