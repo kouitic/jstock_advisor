@@ -14,6 +14,7 @@ import pytest
 
 from jstock_advisor.interfaces.candidate_universe import CandidateUniverseError
 from jstock_advisor.providers.candidate_universe.jpx_impl import (
+    JpxCandidateUniverseProvider,
     _extract_excel_date,
     _normalize_stock_code,
     _parse_date_string,
@@ -154,3 +155,29 @@ def test_parse_jpx400_weight_csv_missing_weight_column_raises() -> None:
     csv_bytes = "日付,銘柄名,コード\n2026/07/31,テスト,1301\n".encode("utf-8-sig")
     with pytest.raises(CandidateUniverseError):
         parse_jpx400_weight_csv(csv_bytes)
+
+
+# --- 経過時間チェック(タイムゾーン整合性) -----------------------------------------
+
+
+def _make_provider(now: dt.datetime) -> JpxCandidateUniverseProvider:
+    return JpxCandidateUniverseProvider(
+        target_market_segments=None,
+        listed_issues_max_stale_hours=24,
+        jpx400_max_stale_hours=24,
+        now=now,
+    )
+
+
+def test_check_staleness_does_not_raise_for_aware_now_and_fresh_date() -> None:
+    # self._nowはaware(dt.UTC)で渡される(実運用ではdt.datetime.now(dt.UTC))。
+    # 素朴にdt.datetime.combine(source_date, dt.time())と比較するとnaiveとの
+    # 減算になりTypeErrorになっていた不具合の再現・修正確認。
+    provider = _make_provider(dt.datetime(2026, 8, 1, 12, 0, tzinfo=dt.UTC))
+    provider._check_staleness("listed_issues", dt.date(2026, 8, 1), max_stale_hours=24)
+
+
+def test_check_staleness_raises_when_stale() -> None:
+    provider = _make_provider(dt.datetime(2026, 8, 10, 12, 0, tzinfo=dt.UTC))
+    with pytest.raises(CandidateUniverseError):
+        provider._check_staleness("listed_issues", dt.date(2026, 8, 1), max_stale_hours=24)
