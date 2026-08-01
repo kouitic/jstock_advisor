@@ -252,6 +252,19 @@ def _compute_content_hash(recommendation_type: RecommendationType) -> str:
     return hashlib.sha256(recommendation_type.value.encode()).hexdigest()[:16]
 
 
+def compute_watchlist_addition_content_hash(
+    stock_codes: list[str], evaluated_at: dt.datetime
+) -> str:
+    """ウォッチリスト自動追加通知の重複抑止に使うcontent hash(運用ハードニング
+    第2弾2節: watchlist_batch_finalizer.pyがBatchRunsTable項目へ同じ値を
+    永続化するために公開関数として切り出す。notify_watchlist_additions()の
+    算出式と必ず一致させること、送信内容・dedup判定ロジック自体は変更しない)。
+    """
+    return hashlib.sha256(
+        f"{evaluated_at.date().isoformat()}|{sorted(stock_codes)}".encode()
+    ).hexdigest()[:16]
+
+
 def _record_date_display(
     date: dt.date | None,
     reason: RecordDateUnknownReason | None,
@@ -1765,10 +1778,9 @@ class LineNotificationService:
         )
 
         pseudo_stock_code = "__batch__:watchlist_auto_addition"
-        content_hash = hashlib.sha256(
-            f"{evaluated_at.date().isoformat()}|"
-            f"{sorted(item.stock_code for item in ranked)}".encode()
-        ).hexdigest()[:16]
+        content_hash = compute_watchlist_addition_content_hash(
+            [item.stock_code for item in ranked], evaluated_at
+        )
         latest = self._log_repo.latest_by_stock_and_type(
             pseudo_stock_code, NotificationType.WATCHLIST_AUTO_ADDITION
         )

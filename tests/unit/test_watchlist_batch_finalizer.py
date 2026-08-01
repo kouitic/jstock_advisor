@@ -1,4 +1,5 @@
-"""候補ユニバース本格対応(15/19節)のバッチメトリクス集計のテスト。"""
+"""候補ユニバース本格対応(15/19節)・運用ハードニング第2弾3/4節の
+バッチメトリクス集計のテスト。"""
 
 from __future__ import annotations
 
@@ -35,10 +36,11 @@ def test_compute_batch_metrics_ignores_non_terminal_rows() -> None:
     records = [_record("1111", status="PENDING"), _record("2222", status="PROCESSING")]
     metrics = compute_batch_metrics(records)
     assert metrics["processed_count"] == 0
+    assert metrics["terminal_count"] == 0
     assert metrics["p50_processing_duration_ms"] is None
 
 
-def test_compute_batch_metrics_counts_provider_failure_suspected_rate() -> None:
+def test_compute_batch_metrics_counts_provider_failure_rate() -> None:
     records = [
         _record("1111", is_provider_failure_suspected=True),
         _record("2222", is_provider_failure_suspected=True),
@@ -47,8 +49,9 @@ def test_compute_batch_metrics_counts_provider_failure_suspected_rate() -> None:
     ]
     metrics = compute_batch_metrics(records)
     assert metrics["processed_count"] == 4
-    assert metrics["provider_failure_suspected_count"] == 2
-    assert metrics["provider_failure_suspected_rate_pct"] == 50.0
+    assert metrics["evaluation_attempted_count"] == 4
+    assert metrics["provider_failure_count"] == 2
+    assert metrics["provider_failure_rate_pct"] == 50.0
 
 
 def test_compute_batch_metrics_computes_field_coverage_rate() -> None:
@@ -60,18 +63,85 @@ def test_compute_batch_metrics_computes_field_coverage_rate() -> None:
     ]
     metrics = compute_batch_metrics(records)
     assert metrics["field_coverage_rate"]["dividend_yield_pct"] == 0.5
-    assert metrics["worst_field_missing_rate_pct"] == 50.0
+    assert metrics["worst_scoring_field_missing_rate_pct"] == 50.0
 
 
-def test_compute_batch_metrics_counts_data_error_and_redelivery() -> None:
+def test_compute_batch_metrics_field_coverage_rate_always_includes_all_known_fields() -> None:
+    """運用ハードニング第2弾4節: 一度も欠損しなかったフィールドも含め、
+    既知の全フィールド(必須2件+スコア5件)が必ず出力されること。"""
+    records = [_record("1111")]  # 欠損なし
+    metrics = compute_batch_metrics(records)
+    expected_fields = {
+        "shares_outstanding",
+        "operating_cashflow",
+        "dividend_yield_pct",
+        "equity_ratio_pct",
+        "payout_ratio_pct",
+        "consecutive_dividend_increase_years",
+        "shareholder_benefit_yield_pct",
+    }
+    assert set(metrics["field_coverage_rate"]) == expected_fields
+    assert all(rate == 1.0 for rate in metrics["field_coverage_rate"].values())
+    assert metrics["worst_required_field_missing_rate_pct"] == 0.0
+    assert metrics["worst_scoring_field_missing_rate_pct"] == 0.0
+
+
+def test_compute_batch_metrics_separates_required_and_scoring_field_missing_rates() -> None:
     records = [
-        _record("1111", evaluation_result="DATA_INSUFFICIENT"),
-        _record("2222", attempt_count=3),
+        _record("1111", missing_field_names=["shares_outstanding"]),
+        _record("2222", missing_field_names=["dividend_yield_pct", "equity_ratio_pct"]),
         _record("3333"),
+        _record("4444"),
+    ]
+    metrics = compute_batch_metrics(records)
+    # shares_outstanding: 1/4=25%(必須項目)。
+    # dividend_yield_pct/equity_ratio_pct: 各1/4=25%(スコア項目)。
+    assert metrics["worst_required_field_missing_rate_pct"] == 25.0
+    assert metrics["worst_scoring_field_missing_rate_pct"] == 25.0
+
+
+def test_compute_batch_metrics_counts_data_error_and_not_found_separately() -> None:
+    records = [
+        _record("1111", evaluation_result="DATA_ERROR"),
+        _record("2222", evaluation_result="NOT_FOUND"),
+        _record("3333", attempt_count=3),
+        _record("4444"),
     ]
     metrics = compute_batch_metrics(records)
     assert metrics["data_error_count"] == 1
+    assert metrics["not_found_count"] == 1
     assert metrics["sqs_redelivery_count"] == 1
+
+
+def test_compute_batch_metrics_screening_input_created_excludes_data_error_and_not_found() -> None:
+    """運用ハードニング第2弾3節: DATA_ERROR/NOT_FOUND行はScreeningDataResult.input
+    が作られていないため、screening_input_created_count(field_coverage_rateの母数)
+    から除外されること。"""
+    records = [
+        _record("1111", evaluation_result="DATA_ERROR"),
+        _record("2222", evaluation_result="NOT_FOUND"),
+        _record("3333"),
+        _record("4444"),
+    ]
+    metrics = compute_batch_metrics(records)
+    assert metrics["evaluation_attempted_count"] == 4
+    assert metrics["screening_input_created_count"] == 2
+    assert metrics["screening_completed_count"] == 2
+
+
+def test_compute_batch_metrics_field_missing_rate_unaffected_by_data_error_volume() -> None:
+    """DATA_ERROR行を大量に混ぜても、母数がscreening_input_created_countの
+    ままであるため欠損率の数値が変わらないこと(母数分離の直接的な回帰確認)。"""
+    records = [_record(f"err{i:03d}", evaluation_result="DATA_ERROR") for i in range(96)]
+    records += [
+        _record("1111", missing_field_names=["dividend_yield_pct"]),
+        _record("2222", missing_field_names=["dividend_yield_pct"]),
+        _record("3333"),
+        _record("4444"),
+    ]
+    metrics = compute_batch_metrics(records)
+    assert metrics["field_coverage_rate"]["dividend_yield_pct"] == 0.5
+    assert metrics["worst_scoring_field_missing_rate_pct"] == 50.0
 
 
 def test_compute_batch_metrics_counts_terminal_failure_reasons() -> None:
@@ -85,6 +155,10 @@ def test_compute_batch_metrics_counts_terminal_failure_reasons() -> None:
     metrics = compute_batch_metrics(records)
     assert metrics["terminal_failure_count"] == 3
     assert metrics["processed_count"] == 5
+    assert metrics["total_candidate_count"] == 5
+    # UNEXPECTED_ERROR(1件)+PASSED(1件)のみがevaluation_attempted_countに含まれる
+    # (terminal_failureの3件は除外)。
+    assert metrics["evaluation_attempted_count"] == 2
 
 
 def test_compute_batch_metrics_p50_p95_use_total_processing_duration_ms() -> None:

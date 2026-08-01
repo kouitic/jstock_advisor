@@ -195,7 +195,9 @@ Managerのコストは小さい。
 満たす場合に次の段階へ進める:
 
 - `execution_result`が`NORMAL`であること(`HIGH_THROTTLE_RATE`・
-  `PROVIDER_DATA_QUALITY_DEGRADED`・`OPERATOR_ABORTED`ではない)。
+  `SCORING_DATA_QUALITY_DEGRADED`・`REQUIRED_DATA_QUALITY_DEGRADED`・
+  `EXCESSIVE_DATA_ERRORS`・`EXCESSIVE_NOT_FOUND`・`EXCESSIVE_TERMINAL_FAILURES`・
+  `OPERATOR_ABORTED`のいずれでもない)。
 - Reconcilerによる`FINALIZE_FAILED`の自動復旧が発生していない、または発生していても
   再試行で正常完了していること。
 - CloudWatch Logsでyfinance側の429/403/5xx等の障害疑いログが目立って増えていないこと。

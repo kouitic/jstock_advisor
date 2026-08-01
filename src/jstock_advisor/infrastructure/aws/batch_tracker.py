@@ -11,6 +11,7 @@ DynamoDBの原子的なADD操作(UpdateItem)で完了件数・区分別内訳を
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import random
 import time
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.infrastructure.collection_store import resolve_table_name, running_on_lambda
+
+logger = logging.getLogger(__name__)
 
 _TABLE_FILE_NAME = "batch_runs.json"  # resolve_table_nameの命名規則(jstock-batch_runs)に合わせる
 _TTL_HOURS = 6  # 集計用の一時データのため、数時間で自動削除する
@@ -322,20 +325,32 @@ def _batch_runs_table_name() -> str:
 class WatchlistBatchStatus(StrEnum):
     """候補ユニバース本格対応(第6版修正プラン1節)のバッチ状態。
 
-    DISPATCHING → RUNNING → FINALIZING → COMPLETED/ABORTED
-         ↓                       ↘ FINALIZE_FAILED
-    DISPATCH_FAILED
+    運用ハードニング第2弾2節: finalize処理を4段階(FINALIZE_PREPARING→
+    WATCHLIST_WRITE_COMPLETED→NOTIFICATION_PENDING→NOTIFICATION_SENT)へ
+    細分化し、各段階の成果物をBatchRunsTable項目へ永続化する(旧FINALIZING単一
+    状態を改名・分割)。これにより、どの段階でLambdaが異常終了しても、
+    再試行(retry_finalize)がフィールドの有無から再開地点を判定できる
+    (statusはあくまで進捗表示用のマーカーであり、再開ロジックの分岐条件には
+    使わない。詳細はwatchlist_batch_finalizer.pyのdocstring参照)。
+
+    DISPATCHING → RUNNING → FINALIZE_PREPARING → WATCHLIST_WRITE_COMPLETED
+         ↓             ↓  (429/欠損率閾値超過時はここからCOMPLETED/ABORTEDへ直行)
+    DISPATCH_FAILED    → NOTIFICATION_PENDING → NOTIFICATION_SENT → COMPLETED/ABORTED
+                     (いずれの段階でも例外時 ↘ FINALIZE_FAILED)
     RUNNING → TIMEOUT_FINALIZING → TIMED_OUT
                   ↘ TIMEOUT_FINALIZE_FAILED → (Reconciler再試行)TIMEOUT_FINALIZING
 
     20節: statusは処理ライフサイクルのみを表す。終了理由はexecution_result属性
-    (COMPLETED時のみEXECUTION_RESULT_NORMAL、ABORTED時のみ
-    EXECUTION_RESULT_HIGH_THROTTLE_RATE)で区別する。
+    (COMPLETED時のみEXECUTION_RESULT_NORMAL、ABORTED時は
+    _ABORTED_EXECUTION_RESULTSのいずれか)で区別する。
     """
 
     DISPATCHING = "DISPATCHING"
     RUNNING = "RUNNING"
-    FINALIZING = "FINALIZING"
+    FINALIZE_PREPARING = "FINALIZE_PREPARING"
+    WATCHLIST_WRITE_COMPLETED = "WATCHLIST_WRITE_COMPLETED"
+    NOTIFICATION_PENDING = "NOTIFICATION_PENDING"
+    NOTIFICATION_SENT = "NOTIFICATION_SENT"
     COMPLETED = "COMPLETED"
     DISPATCH_FAILED = "DISPATCH_FAILED"
     FINALIZE_FAILED = "FINALIZE_FAILED"
@@ -356,9 +371,23 @@ EXECUTION_RESULT_NORMAL = "NORMAL"
 EXECUTION_RESULT_HIGH_THROTTLE_RATE = "HIGH_THROTTLE_RATE"
 # 運用ハードニング3節: 429疑い率以外に、主要スコア項目の欠損率が閾値を超えた
 # 場合のABORTED理由。statusはHIGH_THROTTLE_RATEと同じくABORTEDへ揃える。
-EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED = "PROVIDER_DATA_QUALITY_DEGRADED"
+# 運用ハードニング第2弾5節でSCORING_DATA_QUALITY_DEGRADEDへ改名
+# (REQUIRED_DATA_QUALITY_DEGRADEDと対にするため、対象がスコア項目であることを明示)。
+EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED = "SCORING_DATA_QUALITY_DEGRADED"
+# --- 運用ハードニング第2弾5節: 未知の障害パターンでも安全に中止できる独立の安全弁 ---
+EXECUTION_RESULT_EXCESSIVE_DATA_ERRORS = "EXCESSIVE_DATA_ERRORS"
+EXECUTION_RESULT_EXCESSIVE_NOT_FOUND = "EXCESSIVE_NOT_FOUND"
+EXECUTION_RESULT_EXCESSIVE_TERMINAL_FAILURES = "EXCESSIVE_TERMINAL_FAILURES"
+EXECUTION_RESULT_REQUIRED_DATA_QUALITY_DEGRADED = "REQUIRED_DATA_QUALITY_DEGRADED"
 _ABORTED_EXECUTION_RESULTS = frozenset(
-    {EXECUTION_RESULT_HIGH_THROTTLE_RATE, EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED}
+    {
+        EXECUTION_RESULT_HIGH_THROTTLE_RATE,
+        EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED,
+        EXECUTION_RESULT_EXCESSIVE_DATA_ERRORS,
+        EXECUTION_RESULT_EXCESSIVE_NOT_FOUND,
+        EXECUTION_RESULT_EXCESSIVE_TERMINAL_FAILURES,
+        EXECUTION_RESULT_REQUIRED_DATA_QUALITY_DEGRADED,
+    }
 )
 
 # Reconcilerのタイムアウト確定処理(17節)専用のevaluation_result。
@@ -872,11 +901,11 @@ def record_terminal_failure(batch_id: str, stock_code: str, now: dt.datetime) ->
 
 def try_finalize_if_ready(batch_id: str, now: dt.datetime) -> bool:
     """11節: dispatch_completed AND completed>=total AND status=RUNNINGの場合のみ、
-    RUNNING→FINALIZINGへの排他遷移を試みる。Worker/Dispatcher/Terminal Failure
-    Handler/Reconcilerのすべてから、それぞれが担当する完了確定の直後に呼ぶこと。
-    条件付き更新に成功した1回の呼び出しだけがTrueを返し、呼び出し側はその場合
-    のみ後続のfinalize処理(合格銘柄のウォッチリスト追加・LINE通知等)を実行する
-    (このモジュールはDynamoDB上の排他制御のみを担う)。
+    RUNNING→FINALIZE_PREPARINGへの排他遷移を試みる。Worker/Dispatcher/Terminal
+    Failure Handler/Reconcilerのすべてから、それぞれが担当する完了確定の直後に
+    呼ぶこと。条件付き更新に成功した1回の呼び出しだけがTrueを返し、呼び出し側は
+    その場合のみ後続のfinalize処理(合格銘柄のウォッチリスト追加・LINE通知等)を
+    実行する(このモジュールはDynamoDB上の排他制御のみを担う)。
 
     TIMED_OUTはこの関数を使わない(17節: 判定条件・処理内容が異なる別経路)。
     finalizing_started_atは呼び出し側から渡された`now`をそのまま使う(運用
@@ -886,13 +915,13 @@ def try_finalize_if_ready(batch_id: str, now: dt.datetime) -> bool:
     try:
         _table().update_item(
             Key={"batch_id": batch_id},
-            UpdateExpression="SET #status = :finalizing, finalizing_started_at = :now",
+            UpdateExpression="SET #status = :preparing, finalizing_started_at = :now",
             ConditionExpression=(
                 "#status = :running AND dispatch_completed = :true AND completed >= #total"
             ),
             ExpressionAttributeNames={"#status": "status", "#total": "total"},
             ExpressionAttributeValues={
-                ":finalizing": WatchlistBatchStatus.FINALIZING.value,
+                ":preparing": WatchlistBatchStatus.FINALIZE_PREPARING.value,
                 ":running": WatchlistBatchStatus.RUNNING.value,
                 ":true": True,
                 ":now": now.isoformat(),
@@ -906,7 +935,15 @@ def try_finalize_if_ready(batch_id: str, now: dt.datetime) -> bool:
 
 
 def try_retry_finalize(batch_id: str) -> bool:
-    """運用ハードニング5節: FINALIZE_FAILED→FINALIZINGへの再試行遷移。
+    """運用ハードニング5節: FINALIZE_FAILED→FINALIZE_PREPARINGへの再試行遷移。
+
+    運用ハードニング第2弾2節: 実際にどの段階(FINALIZE_PREPARING/
+    WATCHLIST_WRITE_COMPLETED/NOTIFICATION_PENDING/NOTIFICATION_SENT)で失敗して
+    いたかに関わらず、statusは一律FINALIZE_PREPARINGへ戻す。既に完了している
+    段階はwatchlist_batch_finalizer.py側がBatchRunsTable項目のフィールドの
+    有無から判定して読み飛ばし、同じ呼び出し内で残りの段階まで進める
+    (このDynamoDB関数自体は排他制御のみを担い、どこから再開するかの判断は
+    persistedフィールドを見るfinalizer側の責務とする)。
 
     finalizing_started_atをあわせて更新し(スタック検知の起点をリセットする)、
     Reconciler(試行回数上限あり)・CLI(`retry-finalize --execute`、上限を無視して
@@ -915,11 +952,11 @@ def try_retry_finalize(batch_id: str) -> bool:
     try:
         _table().update_item(
             Key={"batch_id": batch_id},
-            UpdateExpression="SET #status = :finalizing, finalizing_started_at = :now",
+            UpdateExpression="SET #status = :preparing, finalizing_started_at = :now",
             ConditionExpression="#status = :failed",
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={
-                ":finalizing": WatchlistBatchStatus.FINALIZING.value,
+                ":preparing": WatchlistBatchStatus.FINALIZE_PREPARING.value,
                 ":failed": WatchlistBatchStatus.FINALIZE_FAILED.value,
                 ":now": dt.datetime.now(dt.UTC).isoformat(),
             },
@@ -931,15 +968,27 @@ def try_retry_finalize(batch_id: str) -> bool:
         raise
 
 
+_FINALIZE_IN_PROGRESS_STATUSES = (
+    WatchlistBatchStatus.FINALIZE_PREPARING,
+    WatchlistBatchStatus.WATCHLIST_WRITE_COMPLETED,
+    WatchlistBatchStatus.NOTIFICATION_PENDING,
+    WatchlistBatchStatus.NOTIFICATION_SENT,
+)
+
+
 def mark_finalizing_stuck_as_failed(
     batch_id: str, now: dt.datetime, stuck_threshold_minutes: int
 ) -> bool:
-    """運用ハードニング5節: finalizing_started_atから閾値分を超えてFINALIZINGの
-    ままのバッチを、Reconcilerが異常とみなしFINALIZE_FAILEDへ強制遷移する
-    (finalizeは少数銘柄のみを処理するため短時間で完了するはずという前提。
-    これにより`try_retry_finalize`による自動復旧の対象になる)。
+    """運用ハードニング5節・第2弾2節: finalizing_started_atから閾値分を超えて
+    finalize処理中の状態(FINALIZE_PREPARING/WATCHLIST_WRITE_COMPLETED/
+    NOTIFICATION_PENDING/NOTIFICATION_SENTのいずれか)のままのバッチを、
+    Reconcilerが異常とみなしFINALIZE_FAILEDへ強制遷移する(finalizeは少数銘柄の
+    みを処理するため短時間で完了するはずという前提。これにより
+    `try_retry_finalize`による自動復旧の対象になる)。
     """
     threshold_iso = (now - dt.timedelta(minutes=stuck_threshold_minutes)).isoformat()
+    status_values = {f":s{i}": s.value for i, s in enumerate(_FINALIZE_IN_PROGRESS_STATUSES)}
+    status_condition = " OR ".join(f"#status = {placeholder}" for placeholder in status_values)
     try:
         _table().update_item(
             Key={"batch_id": batch_id},
@@ -947,11 +996,11 @@ def mark_finalizing_stuck_as_failed(
                 "SET #status = :failed, finalize_failed_at = :now, "
                 "finalize_error_message = :reason, updated_at = :now"
             ),
-            ConditionExpression="#status = :finalizing AND finalizing_started_at < :threshold",
+            ConditionExpression=f"({status_condition}) AND finalizing_started_at < :threshold",
             ExpressionAttributeNames={"#status": "status"},
             ExpressionAttributeValues={
                 ":failed": WatchlistBatchStatus.FINALIZE_FAILED.value,
-                ":finalizing": WatchlistBatchStatus.FINALIZING.value,
+                **status_values,
                 ":threshold": threshold_iso,
                 ":now": now.isoformat(),
                 ":reason": (
@@ -965,6 +1014,171 @@ def mark_finalizing_stuck_as_failed(
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
             return False
         raise
+
+
+def record_finalize_target(
+    batch_id: str, now: dt.datetime, target_stock_codes: list[str], ranking_json: str
+) -> bool:
+    """運用ハードニング第2弾2節: FINALIZE_PREPARING段階で、対象銘柄コード一覧
+    (合格銘柄をランキングし追加件数上限を適用した後の対象、ウォッチリスト書き込み
+    対象そのもの)とランキング情報を永続化する(まだ書き込み前)。呼び出し側
+    (watchlist_batch_finalizer.py)は、既にこのフィールドが存在する場合は
+    再計算せずそのまま再利用し、この関数を呼ばない(再試行のたびに異なる
+    ランキングが計算されることを防ぐ)。
+
+    同時にrepository_resultsを空のmapとして初期化する(record_repository_result_item
+    が銘柄コード単位でこのmapへ追記していく、後述)。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET finalize_target_stock_codes = :codes, "
+                "finalize_ranking_json = :ranking, repository_results = :empty_results, "
+                "updated_at = :now"
+            ),
+            ConditionExpression="#status = :preparing",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":codes": target_stock_codes,
+                ":ranking": ranking_json,
+                ":empty_results": {},
+                ":now": now.isoformat(),
+                ":preparing": WatchlistBatchStatus.FINALIZE_PREPARING.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def record_repository_result_item(
+    batch_id: str, now: dt.datetime, stock_code: str, result: str
+) -> None:
+    """運用ハードニング第2弾2節: WatchlistRepository.add_if_new()の結果が確定した
+    銘柄1件ごとに、repository_results(銘柄コード→REPOSITORY_RESULT_*文字列)へ
+    即座に追記する(finalize_target_stock_codesのうち何件が処理済みかを銘柄単位で
+    永続化することで、この関数を含むループの途中でLambdaが異常終了しても、次回は
+    未処理の銘柄のみを再処理できるようにする)。ベストエフォート(この更新自体が
+    失敗しても、次回`add_if_new`が再度呼ばれるだけで実害はない、
+    WatchlistRepository自体の冪等性により重複追加は起きないため)。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET repository_results.#code = :result, updated_at = :now",
+            ExpressionAttributeNames={"#code": stock_code},
+            ExpressionAttributeValues={":result": result, ":now": now.isoformat()},
+        )
+    except ClientError:
+        logger.exception(
+            "watchlist finalize: record_repository_result_item failed batch_id=%s stock_code=%s",
+            batch_id,
+            stock_code,
+        )
+
+
+def mark_watchlist_write_completed(batch_id: str, now: dt.datetime) -> bool:
+    """運用ハードニング第2弾2節: FINALIZE_PREPARING→WATCHLIST_WRITE_COMPLETED。
+    finalize_target_stock_codesの全件についてrepository_resultsへの記録
+    (record_repository_result_item)が完了した後に呼ぶ、純粋な状態遷移
+    (データは既に銘柄単位で永続化済みのため、ここでは運びません)。再開時に
+    (前回の実行で既に全件処理済みだった場合)ここへ到達しても、その時点で
+    既にWATCHLIST_WRITE_COMPLETED以降へ進んでいればConditionExpression不成立で
+    Falseを返すのみで、呼び出し側はこの戻り値を再開ロジックの分岐には使わない
+    (再開の判定はrepository_resultsのフィールドの有無で行う)。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET #status = :write_completed, updated_at = :now",
+            ConditionExpression="#status = :preparing",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":write_completed": WatchlistBatchStatus.WATCHLIST_WRITE_COMPLETED.value,
+                ":now": now.isoformat(),
+                ":preparing": WatchlistBatchStatus.FINALIZE_PREPARING.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def record_notification_pending(batch_id: str, now: dt.datetime, content_hash: str) -> bool:
+    """運用ハードニング第2弾2節: WATCHLIST_WRITE_COMPLETED→NOTIFICATION_PENDING。
+    LINE送信を試みる直前に呼ぶ(content_hashは実際に送信する内容から算出した値、
+    line_notification_service.compute_watchlist_addition_content_hashで算出した
+    ものと同じ値を渡すこと)。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET #status = :pending, finalize_notification_content_hash = :hash, "
+                "updated_at = :now"
+            ),
+            ConditionExpression="#status = :write_completed",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":pending": WatchlistBatchStatus.NOTIFICATION_PENDING.value,
+                ":hash": content_hash,
+                ":now": now.isoformat(),
+                ":write_completed": WatchlistBatchStatus.WATCHLIST_WRITE_COMPLETED.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def record_notification_sent(
+    batch_id: str, now: dt.datetime, notified_stock_codes: list[str]
+) -> bool:
+    """運用ハードニング第2弾2節: NOTIFICATION_PENDING→NOTIFICATION_SENT。
+    通知対象が無かった場合(追加0件、またはnotification_enabled=false)は
+    NOTIFICATION_PENDINGを経由せずWATCHLIST_WRITE_COMPLETEDから直接ここへ
+    遷移してよい(その場合notified_stock_codes=[])。
+    """
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET #status = :sent, finalize_notified_stock_codes = :codes, updated_at = :now"
+            ),
+            ConditionExpression="#status = :pending OR #status = :write_completed",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":sent": WatchlistBatchStatus.NOTIFICATION_SENT.value,
+                ":codes": notified_stock_codes,
+                ":now": now.isoformat(),
+                ":pending": WatchlistBatchStatus.NOTIFICATION_PENDING.value,
+                ":write_completed": WatchlistBatchStatus.WATCHLIST_WRITE_COMPLETED.value,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def mark_batch_audit_recorded(batch_id: str, now: dt.datetime) -> None:
+    """運用ハードニング第2弾2節: record_batch_auditを呼ぶ直前にセットする
+    (batch audit重複防止フラグ)。ベストエフォート(この更新自体が失敗しても
+    致命的ではないため条件チェックは行わない)。
+    """
+    _table().update_item(
+        Key={"batch_id": batch_id},
+        UpdateExpression="SET finalize_batch_audit_recorded = :true, updated_at = :now",
+        ExpressionAttributeValues={":true": True, ":now": now.isoformat()},
+    )
 
 
 def try_operator_abort(batch_id: str, reason: str, now: dt.datetime) -> bool:
@@ -1010,11 +1224,17 @@ def mark_watchlist_batch_completed(batch_id: str, execution_result: str, now: dt
     _ABORTED_EXECUTION_RESULTSのいずれか(10/3節のスロットリング率・主要項目
     欠損率判定該当時)。いずれの場合もstatusはABORTEDへ揃え、理由は
     execution_resultで区別する(20節: statusとexecution_resultの責務分離)。
+
+    運用ハードニング第2弾5節: 複数の安全弁に同時該当した場合、execution_resultは
+    該当理由を"|"区切りで連結した複合文字列になりうる(個々の理由は必ず
+    _ABORTED_EXECUTION_RESULTSのいずれかのため、EXECUTION_RESULT_NORMALと
+    完全一致するかどうかでCOMPLETED/ABORTEDを判定する方が複合文字列に対して
+    頑健)。
     """
     status = (
-        WatchlistBatchStatus.ABORTED
-        if execution_result in _ABORTED_EXECUTION_RESULTS
-        else WatchlistBatchStatus.COMPLETED
+        WatchlistBatchStatus.COMPLETED
+        if execution_result == EXECUTION_RESULT_NORMAL
+        else WatchlistBatchStatus.ABORTED
     )
     _table().update_item(
         Key={"batch_id": batch_id},

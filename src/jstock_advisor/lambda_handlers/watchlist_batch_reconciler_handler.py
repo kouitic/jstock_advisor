@@ -59,11 +59,26 @@ logger.setLevel(logging.INFO)
 _RECONCILE_TARGET_STATUSES = [
     WatchlistBatchStatus.DISPATCHING,
     WatchlistBatchStatus.RUNNING,
-    WatchlistBatchStatus.FINALIZING,
+    # 運用ハードニング第2弾2節: finalize処理中の4段階すべてをスタック検知の対象に
+    # する(旧FINALIZING単一状態を細分化)。
+    WatchlistBatchStatus.FINALIZE_PREPARING,
+    WatchlistBatchStatus.WATCHLIST_WRITE_COMPLETED,
+    WatchlistBatchStatus.NOTIFICATION_PENDING,
+    WatchlistBatchStatus.NOTIFICATION_SENT,
     WatchlistBatchStatus.FINALIZE_FAILED,
     WatchlistBatchStatus.TIMEOUT_FINALIZING,
     WatchlistBatchStatus.TIMEOUT_FINALIZE_FAILED,
 ]
+
+# 運用ハードニング第2弾2節: finalize処理中とみなす状態一覧(スタック検知の対象)。
+_FINALIZE_IN_PROGRESS_STATUSES = frozenset(
+    {
+        WatchlistBatchStatus.FINALIZE_PREPARING.value,
+        WatchlistBatchStatus.WATCHLIST_WRITE_COMPLETED.value,
+        WatchlistBatchStatus.NOTIFICATION_PENDING.value,
+        WatchlistBatchStatus.NOTIFICATION_SENT.value,
+    }
+)
 
 
 def _build_notification_service(config: AppConfig) -> LineNotificationService:
@@ -190,16 +205,20 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 to_process_timeout.append(batch_id)
             continue
 
-        if status == WatchlistBatchStatus.FINALIZING.value:
-            # 通常のRUNNING→FINALIZING遷移後、Lambdaが異常終了して二度と進まなく
-            # なったケース(運用ハードニング5節)。閾値未満なら正常に進行中の可能性が
-            # あるため何もしない。
+        if status in _FINALIZE_IN_PROGRESS_STATUSES:
+            # 通常のRUNNING→FINALIZE_PREPARING遷移後、finalize処理中の4段階
+            # (FINALIZE_PREPARING/WATCHLIST_WRITE_COMPLETED/NOTIFICATION_PENDING/
+            # NOTIFICATION_SENT)のいずれかでLambdaが異常終了して二度と進まなく
+            # なったケース(運用ハードニング5節・第2弾2節)。閾値未満なら正常に
+            # 進行中の可能性があるため何もしない。
             if mark_finalizing_stuck_as_failed(
                 batch_id, now, wc.finalizing_stuck_threshold_minutes
             ):
                 finalizing_marked_stuck += 1
                 logger.warning(
-                    "watchlist reconciler: FINALIZING stuck, marked FINALIZE_FAILED batch_id=%s",
+                    "watchlist reconciler: finalize stuck (status=%s), marked "
+                    "FINALIZE_FAILED batch_id=%s",
+                    status,
                     batch_id,
                 )
             continue

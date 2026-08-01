@@ -1,10 +1,33 @@
 """ウォッチリスト自動追加(候補ユニバース本格対応)のfinalize共通処理(11節)。
 
-`batch_tracker.try_finalize_if_ready(batch_id)`がRUNNING→FINALIZINGへの排他遷移に
-成功した実行だけが、`maybe_finalize()`経由で実際のfinalize処理(合格銘柄の
-ランキング・WatchlistRepository書き込み・LINE通知・AuditLog記録)を行う。
+`batch_tracker.try_finalize_if_ready(batch_id)`がRUNNING→FINALIZE_PREPARINGへの
+排他遷移に成功した実行だけが、`maybe_finalize()`経由で実際のfinalize処理(合格
+銘柄のランキング・WatchlistRepository書き込み・LINE通知・AuditLog記録)を行う。
 Worker/Dispatcher/Terminal Failure Handler/Reconcilerのすべてが、それぞれの
 完了確定の直後にこの関数を呼ぶ(dispatch/watchlist_dispatcher_handler.py等)。
+
+運用ハードニング第2弾2節: finalize処理を4段階(FINALIZE_PREPARING→
+WATCHLIST_WRITE_COMPLETED→NOTIFICATION_PENDING→NOTIFICATION_SENT→COMPLETED)へ
+分割し、`_finalize_completed()`は**状態のstatus文字列ではなくBatchRunsTable項目の
+フィールドの有無**を見て、どこまで完了しているかを判定して再開する。
+
+- `finalize_target_stock_codes`/`finalize_ranking_json`が無ければ、abort判定
+  (`_evaluate_abort_reasons`)を行い、非該当ならランキングを計算して永続化する
+  (既に存在すれば再計算せずそのまま再利用する)。
+- `finalize_target_stock_codes`のうち`repository_results`(銘柄コード→
+  `REPOSITORY_RESULT_*`)に未登録の銘柄だけを`WatchlistRepository.add_if_new()`で
+  処理する。結果は1銘柄処理するたびに即座に永続化する(`record_repository_result_item`)
+  ため、この処理の途中でLambdaが異常終了しても、次回は未処理の銘柄のみを再処理する
+  (`add_if_new`自体も条件付き書き込みのため、たとえ永続化自体が欠落しても実際の
+  重複追加は発生しない、二重の安全策)。
+- `finalize_notified_stock_codes`が無ければ、LINE通知を試みてから永続化する。
+  「送信成功後・永続化前にLambdaが異常終了」した場合、再試行時に同じ内容で
+  再度`notify_watchlist_additions()`を呼ぶことになるが、同関数自体が持つ
+  content hashベースの重複抑止(`NotificationLog`との突き合わせ)により実際の
+  再送は抑止される(完全なexactly-onceではなく、この既存の重複抑止機構と
+  組み合わせて実質的な重複防止を実現する設計)。
+- 最後に`finalize_batch_audit_recorded`が未設定の場合のみ`record_batch_audit`を
+  呼ぶ(batch audit重複防止)。
 
 `TIMED_OUT`(17節)はこのモジュールのfinalize経路を使わない(判定条件・処理内容が
 異なる別経路のため、lambda_handlers/watchlist_batch_reconciler_handler.pyが
@@ -17,6 +40,8 @@ import datetime as dt
 import logging
 from typing import Any
 
+from pydantic import TypeAdapter
+
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
@@ -28,23 +53,40 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     EVALUATION_RESULT_BATCH_TIMED_OUT,
     EVALUATION_RESULT_DISPATCH_SEND_FAILED,
     EVALUATION_RESULT_SQS_MAX_RECEIVE_EXCEEDED,
+    EXECUTION_RESULT_EXCESSIVE_DATA_ERRORS,
+    EXECUTION_RESULT_EXCESSIVE_NOT_FOUND,
+    EXECUTION_RESULT_EXCESSIVE_TERMINAL_FAILURES,
     EXECUTION_RESULT_HIGH_THROTTLE_RATE,
     EXECUTION_RESULT_NORMAL,
-    EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED,
+    EXECUTION_RESULT_REQUIRED_DATA_QUALITY_DEGRADED,
+    EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED,
     CandidateProgressRecord,
     WatchlistProgressStatus,
     get_watchlist_batch,
+    mark_batch_audit_recorded,
     mark_watchlist_batch_completed,
     mark_watchlist_finalize_failed,
+    mark_watchlist_write_completed,
     query_all_candidate_progress,
+    record_finalize_target,
+    record_notification_pending,
+    record_notification_sent,
+    record_repository_result_item,
     try_finalize_if_ready,
     try_retry_finalize,
 )
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
     WatchlistRepository,
 )
-from jstock_advisor.services.line_notification_service import LineNotificationService
+from jstock_advisor.services.line_notification_service import (
+    LineNotificationService,
+    compute_watchlist_addition_content_hash,
+)
 from jstock_advisor.services.provider_bundle import ProviderBundle
+from jstock_advisor.services.screening_data_provider import (
+    REQUIRED_FIELD_NAMES,
+    SCORING_FIELD_NAMES,
+)
 from jstock_advisor.services.watchlist_screening_audit import (
     REPOSITORY_RESULT_ADDED,
     REPOSITORY_RESULT_FAILED,
@@ -57,6 +99,8 @@ from jstock_advisor.services.watchlist_screening_service import (
     WatchlistScreeningResult,
     WatchlistScreeningService,
 )
+
+_ranking_entry_list_adapter: TypeAdapter[list[RankingEntry]] = TypeAdapter(list[RankingEntry])
 
 logger = logging.getLogger(__name__)
 
@@ -79,17 +123,23 @@ def _percentile(sorted_values: list[int], pct: float) -> int | None:
     return sorted_values[idx]
 
 
+_ALL_KNOWN_FIELD_NAMES = REQUIRED_FIELD_NAMES + SCORING_FIELD_NAMES
+
+
 def compute_batch_metrics(records: list[CandidateProgressRecord]) -> dict[str, Any]:
     """15/19節: 段階導入の実測・全件有効化判定に使うバッチメトリクスを集計する。
 
     p50/p95等はtotal_processing_duration_ms(実処理時間の累積、SQS再配信待ち・
     リース待ち時間を含まない)を基準とする(19節)。
 
-    運用ハードニング3節: is_provider_failure_suspected(429/403/5xx/タイムアウト/
-    接続切断/yfinance固有例外等、旧is_rate_limit_suspectedを一般化)と、
-    missing_field_names(欠損したスコア項目名)の項目別欠損率(field_coverage_rate、
-    観測された項目名についてのみ「1-欠損率」を計算する。一度も欠損しなかった
-    項目はこの辞書に現れない=実質100%)を追加集計する。
+    運用ハードニング第2弾3節: `ScreeningDataResult.input`が作られなかった行
+    (DATA_ERROR/NOT_FOUND/terminal_failure/UNEXPECTED_ERROR)をfield_coverage_rate
+    等の母数から除外する(screening_input_created_count)。DATA_ERROR/NOT_FOUNDは
+    旧"DATA_INSUFFICIENT"を分離したもの(watchlist_worker_handler.py参照)。
+
+    運用ハードニング第2弾4節: field_coverage_rateは既知の全フィールド名
+    (REQUIRED_FIELD_NAMES+SCORING_FIELD_NAMES)を必ずキーとして持ち、一度も
+    欠損しなかった項目は1.0を出力する。
     """
     terminal_statuses = (
         WatchlistProgressStatus.COMPLETED.value,
@@ -97,46 +147,99 @@ def compute_batch_metrics(records: list[CandidateProgressRecord]) -> dict[str, A
     )
     terminal = [r for r in records if r.status in terminal_statuses]
     durations = sorted(r.total_processing_duration_ms for r in terminal)
-    processed = len(terminal)
 
-    provider_failure = sum(1 for r in terminal if r.is_provider_failure_suspected)
-    data_error = sum(1 for r in terminal if r.evaluation_result == "DATA_INSUFFICIENT")
+    total_candidate_count = len(records)
+    terminal_count = len(terminal)
+    terminal_failure_count = sum(
+        1 for r in terminal if r.evaluation_result in _TERMINAL_FAILURE_REASONS
+    )
+    evaluation_attempted_count = terminal_count - terminal_failure_count
+
+    data_error_count = sum(1 for r in terminal if r.evaluation_result == "DATA_ERROR")
+    not_found_count = sum(1 for r in terminal if r.evaluation_result == "NOT_FOUND")
+    unexpected_error_count = sum(1 for r in terminal if r.evaluation_result == "UNEXPECTED_ERROR")
+    provider_failure_count = sum(1 for r in terminal if r.is_provider_failure_suspected)
+
+    provider_call_completed_count = (
+        evaluation_attempted_count - provider_failure_count - unexpected_error_count
+    )
+    # ScreeningDataResult.inputが実際に作られた行数(missing_field_namesが意味を
+    # 持つ行数)。field_coverage_rate等の母数はこれを使う(processed/terminal_count
+    # ではない、運用ハードニング第2弾3節)。
+    screening_input_created_count = (
+        evaluation_attempted_count - data_error_count - not_found_count - unexpected_error_count
+    )
+    # 現行アーキテクチャでは「入力が作れた行は必ず評価まで完了する」ため恒等だが、
+    # 将来入力作成後に評価自体が独立して失敗しうる変更が入った場合に分離できるよう、
+    # 別名の指標として先に用意しておく。
+    screening_completed_count = screening_input_created_count
+
     redelivery = sum(1 for r in terminal if r.attempt_count > 1)
-    terminal_failure = sum(1 for r in terminal if r.evaluation_result in _TERMINAL_FAILURE_REASONS)
     total_duration_ms = sum(durations)
 
-    missing_field_counts: dict[str, int] = {}
+    missing_field_counts: dict[str, int] = dict.fromkeys(_ALL_KNOWN_FIELD_NAMES, 0)
     for record in terminal:
         for field_name in record.missing_field_names:
             missing_field_counts[field_name] = missing_field_counts.get(field_name, 0) + 1
+    denom = screening_input_created_count
     field_coverage_rate = {
-        field_name: 1.0 - (count / processed if processed else 0.0)
+        field_name: 1.0 - (count / denom if denom else 0.0)
         for field_name, count in missing_field_counts.items()
     }
-    worst_field_missing_rate_pct = (
-        (max(missing_field_counts.values()) / processed * 100)
-        if processed and missing_field_counts
-        else 0.0
-    )
+
+    def _worst_rate_pct(field_names: tuple[str, ...]) -> float:
+        if not denom:
+            return 0.0
+        counts = [missing_field_counts[name] for name in field_names]
+        return (max(counts) / denom * 100) if counts else 0.0
+
+    worst_required_field_missing_rate_pct = _worst_rate_pct(REQUIRED_FIELD_NAMES)
+    worst_scoring_field_missing_rate_pct = _worst_rate_pct(SCORING_FIELD_NAMES)
 
     return {
-        "processed_count": processed,
-        "avg_processing_duration_ms": (total_duration_ms / processed) if processed else None,
+        "total_candidate_count": total_candidate_count,
+        "terminal_count": terminal_count,
+        "evaluation_attempted_count": evaluation_attempted_count,
+        "provider_call_completed_count": provider_call_completed_count,
+        "screening_input_created_count": screening_input_created_count,
+        "screening_completed_count": screening_completed_count,
+        # 後方互換用(15/19節の既存利用箇所向け、processed_count=terminal_count)。
+        "processed_count": terminal_count,
+        "avg_processing_duration_ms": (
+            (total_duration_ms / terminal_count) if terminal_count else None
+        ),
         "p50_processing_duration_ms": _percentile(durations, 0.50),
         "p95_processing_duration_ms": _percentile(durations, 0.95),
-        "provider_failure_suspected_count": provider_failure,
-        "provider_failure_suspected_rate_pct": (
-            (provider_failure / processed * 100) if processed else 0.0
+        "provider_failure_count": provider_failure_count,
+        "provider_failure_rate_pct": (
+            (provider_failure_count / evaluation_attempted_count * 100)
+            if evaluation_attempted_count
+            else 0.0
         ),
-        "data_error_count": data_error,
-        "data_error_rate_pct": (data_error / processed * 100) if processed else 0.0,
+        "data_error_count": data_error_count,
+        "data_error_rate_pct": (
+            (data_error_count / evaluation_attempted_count * 100)
+            if evaluation_attempted_count
+            else 0.0
+        ),
+        "not_found_count": not_found_count,
+        "not_found_rate_pct": (
+            (not_found_count / evaluation_attempted_count * 100)
+            if evaluation_attempted_count
+            else 0.0
+        ),
         "sqs_redelivery_count": redelivery,
-        "terminal_failure_count": terminal_failure,
-        "terminal_failure_rate_pct": (terminal_failure / processed * 100) if processed else 0.0,
+        "terminal_failure_count": terminal_failure_count,
+        "terminal_failure_rate_pct": (
+            (terminal_failure_count / total_candidate_count * 100) if total_candidate_count else 0.0
+        ),
         "field_coverage_rate": field_coverage_rate,
-        "worst_field_missing_rate_pct": worst_field_missing_rate_pct,
+        "worst_required_field_missing_rate_pct": worst_required_field_missing_rate_pct,
+        "worst_scoring_field_missing_rate_pct": worst_scoring_field_missing_rate_pct,
         "estimated_lambda_total_duration_ms": total_duration_ms,
-        "estimated_yahoo_finance_requests": processed * _ESTIMATED_YAHOO_FINANCE_REQUESTS_PER_STOCK,
+        "estimated_yahoo_finance_requests": (
+            terminal_count * _ESTIMATED_YAHOO_FINANCE_REQUESTS_PER_STOCK
+        ),
     }
 
 
@@ -149,13 +252,15 @@ def _fetch_stock_name(providers: ProviderBundle, stock_code: str) -> str | None:
     return summary.stock_name if summary is not None else None
 
 
-def _add_passed_candidates_to_watchlist(
-    batch_id: str,
-    records: list[CandidateProgressRecord],
-    config: AppConfig,
-    providers: ProviderBundle,
-    now: dt.datetime,
-) -> tuple[list[WatchlistItem], dict[str, WatchlistScreeningResult]]:
+def _compute_finalize_target(
+    records: list[CandidateProgressRecord], config: AppConfig
+) -> tuple[list[RankingEntry], list[RankingEntry]]:
+    """PASSED行からランキングを計算し、(追加上限内, 上限外)を返す。
+
+    `records`は既に全終端状態(finalize開始時点で確定済み)であるため、この関数は
+    純粋にrecordsのみに依存する冪等な計算であり、再開時に何度呼び直しても同じ
+    結果になる(運用ハードニング第2弾2節)。
+    """
     entries = [
         RankingEntry.model_validate_json(r.ranking_entry)
         for r in records
@@ -163,16 +268,110 @@ def _add_passed_candidates_to_watchlist(
     ]
     limit = config.watchlist_screening.max_watchlist_additions_per_run
     all_ranked = WatchlistScreeningService.rank(entries)
-    ranked = all_ranked[:limit]
-    over_limit = all_ranked[limit:]
+    return all_ranked[:limit], all_ranked[limit:]
+
+
+def _record_over_limit_audit(
+    batch_id: str,
+    ranked: list[RankingEntry],
+    over_limit: list[RankingEntry],
+    wc: Any,
+    now: dt.datetime,
+) -> None:
+    registration_source = WatchlistRegistrationSource.AUTO_SCREENING.value
+    for rank, entry in enumerate(over_limit, start=len(ranked) + 1):
+        record_repository_result_audit(
+            batch_id,
+            entry.stock_code,
+            None,
+            rank,
+            entry.total_score,
+            REPOSITORY_RESULT_SKIPPED_OVER_LIMIT,
+            False,
+            registration_source,
+            wc.screening_policy,
+            now,
+        )
+
+
+def _build_watchlist_items_for_codes(
+    stock_codes: list[str],
+    ranked: list[RankingEntry],
+    providers: ProviderBundle,
+    now: dt.datetime,
+    registration_policy: str,
+) -> tuple[list[WatchlistItem], dict[str, WatchlistScreeningResult]]:
+    """通知フェーズ再開時、`stock_codes`(追加成功済みだが未通知)について
+    `WatchlistItem`/`WatchlistScreeningResult`を`ranked`(永続化済みのランキング
+    JSONから復元)+都度取得する銘柄名から再構築する(stock_name自体は
+    BatchRunsTableへ永続化しない、運用ハードニング第2弾2節)。
+    """
+    entries_by_code = {entry.stock_code: entry for entry in ranked}
+    items: list[WatchlistItem] = []
+    results_by_code: dict[str, WatchlistScreeningResult] = {}
+    for stock_code in stock_codes:
+        entry = entries_by_code.get(stock_code)
+        if entry is None:
+            logger.warning(
+                "watchlist_screening finalize: stock_code=%s not in ranked entries, skipping "
+                "notification rebuild",
+                stock_code,
+            )
+            continue
+        stock_name = _fetch_stock_name(providers, stock_code)
+        items.append(
+            WatchlistItem(
+                stock_code=stock_code,
+                stock_name=stock_name,
+                reason=describe_matched_criteria(entry.matched_criteria),
+                registration_source=WatchlistRegistrationSource.AUTO_SCREENING,
+                registration_policy=registration_policy,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        results_by_code[stock_code] = WatchlistScreeningResult(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            passed=True,
+            policy_results=[],
+            total_score=entry.total_score,
+            matched_criteria=entry.matched_criteria,
+            exclusion_reasons=[],
+            missing_required_fields=[],
+            missing_scoring_fields=[],
+            evaluated_at=now,
+            main_metrics=entry.main_metrics,
+        )
+    return items, results_by_code
+
+
+def _write_watchlist_additions(
+    batch_id: str,
+    pending_entries: list[RankingEntry],
+    rank_by_code: dict[str, int],
+    config: AppConfig,
+    providers: ProviderBundle,
+    now: dt.datetime,
+) -> dict[str, str]:
+    """WATCHLIST_WRITE_COMPLETEDフェーズ本体。`pending_entries`は
+    `finalize_target_stock_codes`のうち、まだ`repository_results`に結果が
+    永続化されていない銘柄のみ(呼び出し側が絞り込み済み、運用ハードニング
+    第2弾2節)。1銘柄処理するたびに`record_repository_result_item`で即座に
+    永続化するため、この関数の途中でLambdaが異常終了しても、次回は未処理の
+    銘柄のみが`pending_entries`として渡される(`add_if_new()`自体も条件付き
+    書き込みのため、たとえ永続化自体が欠落しても実際の重複追加は発生しない、
+    二重の安全策)。戻り値は今回処理した銘柄分のみのdict(呼び出し側が
+    既存のrepository_resultsへマージする)。
+    """
     registration_source = WatchlistRegistrationSource.AUTO_SCREENING.value
     registration_policy = config.watchlist_screening.screening_policy
-
     repository = WatchlistRepository()
-    added_items: list[WatchlistItem] = []
-    results_by_code: dict[str, WatchlistScreeningResult] = {}
 
-    for rank, entry in enumerate(ranked, start=1):
+    newly_resolved: dict[str, str] = {}
+
+    for entry in pending_entries:
+        rank = rank_by_code[entry.stock_code]
         stock_name = _fetch_stock_name(providers, entry.stock_code)
         item = WatchlistItem(
             stock_code=entry.stock_code,
@@ -187,6 +386,8 @@ def _add_passed_candidates_to_watchlist(
             added = repository.add_if_new(item)
         except Exception as exc:  # noqa: BLE001 - 1銘柄のRepository書き込み失敗で全体を止めない
             logger.exception("watchlist add_if_new failed stock_code=%s", entry.stock_code)
+            newly_resolved[entry.stock_code] = REPOSITORY_RESULT_FAILED
+            record_repository_result_item(batch_id, now, entry.stock_code, REPOSITORY_RESULT_FAILED)
             record_repository_result_audit(
                 batch_id,
                 entry.stock_code,
@@ -202,6 +403,10 @@ def _add_passed_candidates_to_watchlist(
             )
             continue
         if not added:
+            newly_resolved[entry.stock_code] = REPOSITORY_RESULT_SKIPPED_EXISTING
+            record_repository_result_item(
+                batch_id, now, entry.stock_code, REPOSITORY_RESULT_SKIPPED_EXISTING
+            )
             record_repository_result_audit(
                 batch_id,
                 entry.stock_code,
@@ -215,20 +420,8 @@ def _add_passed_candidates_to_watchlist(
                 now,
             )
             continue
-        added_items.append(item)
-        results_by_code[item.stock_code] = WatchlistScreeningResult(
-            stock_code=entry.stock_code,
-            stock_name=stock_name,
-            passed=True,
-            policy_results=[],
-            total_score=entry.total_score,
-            matched_criteria=entry.matched_criteria,
-            exclusion_reasons=[],
-            missing_required_fields=[],
-            missing_scoring_fields=[],
-            evaluated_at=now,
-            main_metrics=entry.main_metrics,
-        )
+        newly_resolved[entry.stock_code] = REPOSITORY_RESULT_ADDED
+        record_repository_result_item(batch_id, now, entry.stock_code, REPOSITORY_RESULT_ADDED)
         record_repository_result_audit(
             batch_id,
             entry.stock_code,
@@ -242,21 +435,88 @@ def _add_passed_candidates_to_watchlist(
             now,
         )
 
-    for rank, entry in enumerate(over_limit, start=len(ranked) + 1):
-        record_repository_result_audit(
-            batch_id,
-            entry.stock_code,
-            None,
-            rank,
-            entry.total_score,
-            REPOSITORY_RESULT_SKIPPED_OVER_LIMIT,
-            False,
-            registration_source,
-            registration_policy,
-            now,
-        )
+    return newly_resolved
 
-    return added_items, results_by_code
+
+def _evaluate_abort_reasons(metrics: dict[str, Any], wc: Any) -> list[str]:
+    """運用ハードニング第2弾5節: 未知の障害パターンでも安全に中止できる独立の
+    安全弁。該当した理由を全て返す(複数該当しうる、監査ログのabort_reasonsへ
+    そのまま保存する)。
+    """
+    reasons: list[str] = []
+    if metrics["provider_failure_rate_pct"] > wc.high_throttle_rate_threshold_pct:
+        # 10節: ABORTED。ウォッチリスト追加・LINE通知は行わない。
+        reasons.append(EXECUTION_RESULT_HIGH_THROTTLE_RATE)
+    if metrics["worst_scoring_field_missing_rate_pct"] > wc.max_scoring_field_missing_rate_pct:
+        # 運用ハードニング3節: 429疑い率が閾値未満でも、主要スコア項目の欠損率が
+        # 高い週(データ提供元障害の疑い)はABORTEDとし、部分結果を採用しない。
+        reasons.append(EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED)
+    if metrics["data_error_rate_pct"] > wc.max_data_error_rate_pct:
+        reasons.append(EXECUTION_RESULT_EXCESSIVE_DATA_ERRORS)
+    if metrics["not_found_rate_pct"] > wc.max_not_found_rate_pct:
+        reasons.append(EXECUTION_RESULT_EXCESSIVE_NOT_FOUND)
+    if metrics["terminal_failure_rate_pct"] > wc.max_terminal_failure_rate_pct:
+        reasons.append(EXECUTION_RESULT_EXCESSIVE_TERMINAL_FAILURES)
+    if metrics["worst_required_field_missing_rate_pct"] > wc.max_required_field_missing_rate_pct:
+        reasons.append(EXECUTION_RESULT_REQUIRED_DATA_QUALITY_DEGRADED)
+    return reasons
+
+
+def _finish_batch(
+    batch_id: str,
+    now: dt.datetime,
+    started_at: dt.datetime,
+    batch_item: dict[str, Any],
+    records: list[CandidateProgressRecord],
+    metrics: dict[str, Any],
+    config: AppConfig,
+    execution_result: str,
+    abort_reasons: list[str],
+    added_stock_codes: list[str],
+    notification_sent: bool,
+    notification_failure: bool,
+) -> None:
+    """COMPLETEDフェーズ。`finalize_batch_audit_recorded`が既に立っている場合は
+    `record_batch_audit`を呼ばない(batch audit重複防止、運用ハードニング
+    第2弾2節)。
+    """
+    if not batch_item.get("finalize_batch_audit_recorded"):
+        record_batch_audit(
+            execution_mode="scheduled",
+            universe_provider=config.watchlist_screening.candidate_universe.provider,
+            screening_policies=[config.watchlist_screening.screening_policy],
+            output_values={
+                "execution_result": execution_result,
+                "abort_reasons": abort_reasons,
+                "started_at": started_at.isoformat(),
+                "completed_at": now.isoformat(),
+                "duration_seconds": (now - started_at).total_seconds(),
+                "evaluation_target_count": len(records),
+                "actual_added_count": len(added_stock_codes),
+                "notification_sent": notification_sent,
+                "notification_failure": notification_failure,
+                # 運用ハードニング1節: 段階導入で実際に適用された設定値をfinalize
+                # 時点の監査ログからも追跡できるようにする(Dispatcher側で記録済みの
+                # 値を参照)。
+                "staged_rollout_candidate_limit": batch_item.get("staged_rollout_candidate_limit"),
+                "staged_rollout_market_segment_filter": batch_item.get(
+                    "staged_rollout_market_segment_filter"
+                ),
+                "universe_count": batch_item.get("universe_count"),
+                "staged_rollout_excluded_count": batch_item.get("staged_rollout_excluded_count"),
+                **metrics,
+            },
+            now=now,
+            batch_id=batch_id,
+        )
+        mark_batch_audit_recorded(batch_id, now)
+    mark_watchlist_batch_completed(batch_id, execution_result, now)
+    logger.info(
+        "watchlist_screening finalized batch_id=%s execution_result=%s added=%d",
+        batch_id,
+        execution_result,
+        len(added_stock_codes),
+    )
 
 
 def _finalize_completed(
@@ -266,79 +526,119 @@ def _finalize_completed(
     config: AppConfig,
     notification_service: LineNotificationService,
 ) -> None:
+    """運用ハードニング第2弾2節: 4段階(FINALIZE_PREPARING→
+    WATCHLIST_WRITE_COMPLETED→NOTIFICATION_PENDING→NOTIFICATION_SENT→
+    COMPLETED)の再開可能なfinalize処理。各`if`はBatchRunsTable項目の
+    フィールドの有無で「そのフェーズが既に完了しているか」を判定する
+    (statusの文字列そのものは分岐条件に使わない)。
+    """
     batch_item = get_watchlist_batch(batch_id) or {}
     started_at_raw = batch_item.get("started_at")
     started_at = dt.datetime.fromisoformat(started_at_raw) if started_at_raw else now
 
     records = query_all_candidate_progress(batch_id, consistent_read=True)
     metrics = compute_batch_metrics(records)
-    processed = metrics["processed_count"]
     wc = config.watchlist_screening
-    throttle_threshold = wc.high_throttle_rate_threshold_pct
-    field_missing_threshold = wc.max_field_missing_rate_pct
 
-    added_items: list[WatchlistItem] = []
-    results_by_code: dict[str, WatchlistScreeningResult] = {}
-    if processed > 0 and metrics["provider_failure_suspected_rate_pct"] > throttle_threshold:
-        # 10節: ABORTED。ウォッチリスト追加・LINE通知は行わない。
-        execution_result = EXECUTION_RESULT_HIGH_THROTTLE_RATE
-    elif processed > 0 and metrics["worst_field_missing_rate_pct"] > field_missing_threshold:
-        # 運用ハードニング3節: 429疑い率が閾値未満でも、主要スコア項目の欠損率が
-        # 高い週(データ提供元障害の疑い)はABORTEDとし、部分結果を採用しない。
-        execution_result = EXECUTION_RESULT_PROVIDER_DATA_QUALITY_DEGRADED
+    # --- Phase 1: FINALIZE_PREPARING ---
+    if "finalize_target_stock_codes" in batch_item:
+        target_codes: list[str] = list(batch_item["finalize_target_stock_codes"])
+        ranked = _ranking_entry_list_adapter.validate_json(batch_item["finalize_ranking_json"])
     else:
-        execution_result = EXECUTION_RESULT_NORMAL
-        added_items, results_by_code = _add_passed_candidates_to_watchlist(
-            batch_id, records, config, providers, now
-        )
-
-    notification_sent = False
-    notification_failure = False
-    if (
-        execution_result == EXECUTION_RESULT_NORMAL
-        and added_items
-        and config.watchlist_screening.notification_enabled
-    ):
-        try:
-            notification_sent = notification_service.notify_watchlist_additions(
-                added_items, results_by_code, config.watchlist_screening.screening_policy, now
+        abort_reasons = _evaluate_abort_reasons(metrics, wc)
+        if abort_reasons:
+            # 複数条件に同時該当する場合、execution_resultは"|"区切りの複合
+            # 文字列になる(監査ログのabort_reasons配列には該当理由を全て
+            # 個別に保存する)。ウォッチリスト追加・LINE通知は行わない。
+            execution_result = "|".join(abort_reasons)
+            _finish_batch(
+                batch_id,
+                now,
+                started_at,
+                batch_item,
+                records,
+                metrics,
+                config,
+                execution_result,
+                abort_reasons,
+                [],
+                False,
+                False,
             )
-        except Exception:  # noqa: BLE001 - 通知失敗はバッチ失敗にしない(ベストエフォート)
-            logger.exception("watchlist_screening notification failed batch_id=%s", batch_id)
-            notification_failure = True
+            return
+        ranked, over_limit = _compute_finalize_target(records, config)
+        target_codes = [entry.stock_code for entry in ranked]
+        ranking_json = _ranking_entry_list_adapter.dump_json(ranked).decode("utf-8")
+        record_finalize_target(batch_id, now, target_codes, ranking_json)
+        _record_over_limit_audit(batch_id, ranked, over_limit, wc, now)
+        batch_item["finalize_target_stock_codes"] = target_codes
+        batch_item["finalize_ranking_json"] = ranking_json
 
-    record_batch_audit(
-        execution_mode="scheduled",
-        universe_provider=config.watchlist_screening.candidate_universe.provider,
-        screening_policies=[config.watchlist_screening.screening_policy],
-        output_values={
-            "execution_result": execution_result,
-            "started_at": started_at.isoformat(),
-            "completed_at": now.isoformat(),
-            "duration_seconds": (now - started_at).total_seconds(),
-            "evaluation_target_count": len(records),
-            "actual_added_count": len(added_items),
-            "notification_sent": notification_sent,
-            "notification_failure": notification_failure,
-            # 運用ハードニング1節: 段階導入で実際に適用された設定値をfinalize時点の
-            # 監査ログからも追跡できるようにする(Dispatcher側で記録済みの値を参照)。
-            "staged_rollout_candidate_limit": batch_item.get("staged_rollout_candidate_limit"),
-            "staged_rollout_market_segment_filter": batch_item.get(
-                "staged_rollout_market_segment_filter"
-            ),
-            "universe_count": batch_item.get("universe_count"),
-            "staged_rollout_excluded_count": batch_item.get("staged_rollout_excluded_count"),
-            **metrics,
-        },
-        now=now,
-        batch_id=batch_id,
-    )
-    mark_watchlist_batch_completed(batch_id, execution_result, now)
-    logger.info(
-        "watchlist_screening finalized batch_id=%s execution_result=%s added=%d",
+    # --- Phase 2: WATCHLIST_WRITE_COMPLETED ---
+    # 運用ハードニング第2弾2節: finalize_target_stock_codesのうちrepository_results
+    # に未登録のものだけを処理する(1銘柄処理するたびに即座に永続化されるため、
+    # 再開時は前回処理済みの銘柄をadd_if_newへ渡し直さない)。
+    repository_results: dict[str, str] = dict(batch_item.get("repository_results", {}))
+    pending_codes = [code for code in target_codes if code not in repository_results]
+    if pending_codes:
+        entries_by_code = {entry.stock_code: entry for entry in ranked}
+        rank_by_code = {entry.stock_code: i for i, entry in enumerate(ranked, start=1)}
+        pending_entries = [entries_by_code[code] for code in pending_codes]
+        newly_resolved = _write_watchlist_additions(
+            batch_id, pending_entries, rank_by_code, config, providers, now
+        )
+        repository_results.update(newly_resolved)
+        batch_item["repository_results"] = repository_results
+    # 純粋な状態遷移(データは銘柄単位で既に永続化済み)。前回既にこのフェーズを
+    # 完了していた場合はConditionExpression不成立でFalseになるだけで、再開ロジック
+    # はこの戻り値を分岐条件に使わない。
+    mark_watchlist_write_completed(batch_id, now)
+    added_stock_codes = [
+        code for code, result in repository_results.items() if result == REPOSITORY_RESULT_ADDED
+    ]
+
+    # --- Phase 3: NOTIFICATION_PENDING -> NOTIFICATION_SENT ---
+    notified_raw = batch_item.get("finalize_notified_stock_codes")
+    if notified_raw is None:
+        pending_notification_codes = list(added_stock_codes)
+        notification_sent = False
+        notification_failure = False
+        if pending_notification_codes and wc.notification_enabled:
+            content_hash = compute_watchlist_addition_content_hash(pending_notification_codes, now)
+            record_notification_pending(batch_id, now, content_hash)
+            pending_items, pending_results_by_code = _build_watchlist_items_for_codes(
+                pending_notification_codes, ranked, providers, now, wc.screening_policy
+            )
+            try:
+                notification_sent = notification_service.notify_watchlist_additions(
+                    pending_items, pending_results_by_code, wc.screening_policy, now
+                )
+            except Exception:  # noqa: BLE001 - 通知失敗はバッチ失敗にしない(ベストエフォート)
+                logger.exception(
+                    "watchlist_screening notification failed batch_id=%s", batch_id
+                )
+                notification_failure = True
+        record_notification_sent(batch_id, now, pending_notification_codes)
+        notified_stock_codes = pending_notification_codes
+    else:
+        notified_stock_codes = list(notified_raw)
+        notification_sent = len(notified_stock_codes) > 0
+        notification_failure = False
+
+    # --- Phase 4: COMPLETED ---
+    _finish_batch(
         batch_id,
-        execution_result,
-        len(added_items),
+        now,
+        started_at,
+        batch_item,
+        records,
+        metrics,
+        config,
+        EXECUTION_RESULT_NORMAL,
+        [],
+        added_stock_codes,
+        notification_sent,
+        notification_failure,
     )
 
 
@@ -349,9 +649,9 @@ def maybe_finalize(
     config: AppConfig,
     notification_service: LineNotificationService,
 ) -> bool:
-    """11節: try_finalize_if_ready()がRUNNING→FINALIZINGへの遷移に成功した場合の
-    みfinalize処理を実行してTrueを返す。条件不成立(まだ完了していない、または
-    他の実行に競り負けた)の場合はFalseを返す(エラーではない)。
+    """11節: try_finalize_if_ready()がRUNNING→FINALIZE_PREPARINGへの遷移に成功
+    した場合のみfinalize処理を実行してTrueを返す。条件不成立(まだ完了していない、
+    または他の実行に競り負けた)の場合はFalseを返す(エラーではない)。
     """
     if not try_finalize_if_ready(batch_id, now):
         return False
@@ -372,15 +672,16 @@ def retry_finalize(
     config: AppConfig,
     notification_service: LineNotificationService,
 ) -> bool:
-    """運用ハードニング5節: FINALIZE_FAILED状態のバッチに対する再試行版
-    `maybe_finalize`。`try_retry_finalize`(FINALIZE_FAILED→FINALIZING)に成功した
-    場合のみ`_finalize_completed`を実行する。
+    """運用ハードニング5節/第2弾2節: FINALIZE_FAILED状態のバッチに対する再試行版
+    `maybe_finalize`。`try_retry_finalize`(FINALIZE_FAILED→FINALIZE_PREPARING)に
+    成功した場合のみ`_finalize_completed`を実行する。
 
-    `_finalize_completed`は冪等な設計(WatchlistRepository.add_if_new()による
-    重複追加防止、completedカウンタを一切更新しない、通知は「この実行で新規に
-    追加された銘柄」のみを対象にする)であるため、途中まで進んでいた前回の
-    実行結果を安全に引き継いで再実行できる。呼び出し元(Reconciler/CLI)は
-    それぞれの方針で再試行回数を制御すること(本関数自体は無制限に呼び出し可能)。
+    `_finalize_completed`はBatchRunsTable項目のフィールドの有無で段階的に再開
+    可能な設計(FINALIZE_PREPARING/WATCHLIST_WRITE_COMPLETED/
+    NOTIFICATION_PENDING/NOTIFICATION_SENTの4段階、詳細はモジュールdocstring
+    参照)であるため、途中まで進んでいた前回の実行結果を安全に引き継いで
+    再実行できる。呼び出し元(Reconciler/CLI)はそれぞれの方針で再試行回数を
+    制御すること(本関数自体は無制限に呼び出し可能)。
     """
     if not try_retry_finalize(batch_id):
         return False
