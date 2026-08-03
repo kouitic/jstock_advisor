@@ -18,8 +18,10 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.ranking import RankingCalculator
 from jstock_advisor.domain.signals.watchlist_screening import (
     RankingEntry,
+    WatchlistScoreDetail,
     categorize_exclusion_reasons,
     describe_matched_criteria,
 )
@@ -59,6 +61,10 @@ from jstock_advisor.services.screening_data_provider import (
     ScreeningDataStatus,
     StockSnapshotScreeningDataProvider,
 )
+from jstock_advisor.services.watchlist_addition_summary_builder import (
+    WatchlistAdditionSummary,
+    build_watchlist_addition_summary,
+)
 from jstock_advisor.services.watchlist_batch_finalizer import (
     maybe_finalize,
     retry_finalize,
@@ -66,6 +72,8 @@ from jstock_advisor.services.watchlist_batch_finalizer import (
 )
 from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
+from jstock_advisor.services.watchlist_display_name import build_stock_display_name_resolver
+from jstock_advisor.services.watchlist_score_detail import build_notification_detail
 from jstock_advisor.services.watchlist_screening_audit import (
     REPOSITORY_RESULT_ADDED,
     REPOSITORY_RESULT_FAILED,
@@ -143,6 +151,10 @@ def run(
     unrankable_count = 0
     passed_results: list[WatchlistScreeningResult] = []
     passed_entries: list[RankingEntry] = []
+    # LINE通知品質改善(2026-08 修正①): total_score_by_codeはevaluate()実行済み
+    # の全銘柄(passed以外も含む)、notification_detail_by_codeはpassed銘柄のみ。
+    total_score_by_code: dict[str, float] = {}
+    notification_detail_by_code: dict[str, WatchlistScoreDetail] = {}
 
     for stock_code in collector_result.stock_codes:
         screening_data = screening_data_provider.get_screening_input(stock_code, now)
@@ -157,6 +169,7 @@ def run(
         result = screening_service.evaluate(
             stock_code, screening_data.input.stock_name, screening_data.input, now
         )
+        total_score_by_code[stock_code] = result.total_score
         category, evaluation_result = categorize_exclusion_reasons(result.exclusion_reasons)
 
         ranking_entry = None
@@ -168,6 +181,12 @@ def run(
                 category = "failed"
                 evaluation_result = "PASSED_RANKING_ENTRY_TOO_LARGE"
                 unrankable_count += 1
+            else:
+                detail = build_notification_detail(
+                    stock_code, result.policy_results[0].score_breakdown, screening_data.input
+                )
+                if detail is not None:
+                    notification_detail_by_code[stock_code] = detail
 
         if not dry_run:
             record_candidate_audit(stock_code, result, evaluation_result, now, batch_id=batch_id)
@@ -202,12 +221,18 @@ def run(
     watchlist_repo = None if dry_run else WatchlistRepository()
     concurrent_duplicate_count = 0
     repository_failure_count = 0
+    resolver = build_stock_display_name_resolver(
+        wc.stock_display_name.jpx_name_negative_cache_ttl_seconds
+    )
 
     for rank, entry in enumerate(ranked_entries, start=1):
         result = results_by_code[entry.stock_code]
+        # LINE通知品質改善(2026-08 修正②): result.stock_nameは既に評価済みで
+        # 追加のI/Oを伴わないため、fallback_name(即値)として渡す
+        # (fallback_name_providerは指定しない)。
         item = WatchlistItem(
             stock_code=entry.stock_code,
-            stock_name=result.stock_name,
+            stock_name=resolver.resolve(entry.stock_code, fallback_name=result.stock_name),
             reason=describe_matched_criteria(entry.matched_criteria),
             registration_source=WatchlistRegistrationSource.AUTO_SCREENING,
             registration_policy=wc.screening_policy,
@@ -321,9 +346,22 @@ def run(
         content_hash = compute_watchlist_addition_content_hash(
             batch_id, [item.stock_code for item in added_items], wc.screening_policy, now.date()
         )
+        summary: WatchlistAdditionSummary = build_watchlist_addition_summary(
+            added_items=added_items,
+            total_score_by_code=total_score_by_code,
+            notification_detail_by_code=notification_detail_by_code,
+            rank_by_code=RankingCalculator.rank(total_score_by_code),
+            total_target_count=len(collector_result.stock_codes),
+            ranked_count=len(total_score_by_code),
+            data_unavailable_count=data_failure_count,
+            policy_name=wc.screening_policy,
+            scoring_config=wc.scoring,
+            thresholds_config=wc.thresholds,
+            evaluated_at=now,
+        )
         try:
             notification_sent = notification_service.notify_watchlist_additions(
-                added_items, added_results, wc.screening_policy, now, content_hash
+                summary, content_hash
             )
         except Exception as e:  # noqa: BLE001 - 通知失敗はバッチ失敗にしない(ベストエフォート)
             typer.echo(f"LINE通知に失敗しました: {e}")
@@ -583,6 +621,8 @@ def retry_stock(
         missing_field_names=outcome.missing_field_names,
         processing_duration_ms=duration_ms,
         now=completion_time,
+        total_score=outcome.total_score,
+        notification_detail=outcome.notification_detail,
     )
     typer.echo(f"評価結果: {outcome.evaluation_result} (completed={completed})")
     if completed:

@@ -40,9 +40,7 @@ from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
-from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.domain.jst import format_jst
-from jstock_advisor.domain.signals.watchlist_screening import describe_matched_criteria
 from jstock_advisor.infrastructure.line.client import LineClient
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -53,7 +51,10 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.data_quality_service import DataQualityIssueSeverity, detect_anomalies
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
-from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningResult
+from jstock_advisor.services.watchlist_addition_summary_builder import (
+    WatchlistAdditionItemView,
+    WatchlistAdditionSummary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +98,14 @@ _BUY_DIGEST_MAX_CHARS = 4500
 # SUMMARY_CATEGORIESと同じキー集合を使う。
 _BATCH_SUMMARY_CATEGORIES = SUMMARY_CATEGORIES
 
-_WATCHLIST_SCREENING_POLICY_LABELS: dict[str, str] = {
-    "high_dividend_financial_health": "高配当・財務健全性",
-}
-
 # LINEの文字数上限を考慮し、追加銘柄の詳細表示は上位10件までとする(要求仕様§12)。
 _WATCHLIST_ADDITION_DETAIL_LIMIT = 10
+
+# ウォッチリスト追加通知本文の文字数予算(LINE通知品質改善2026-08、修正⑩)。
+# LINEメッセージ本文の実測上限(5000文字程度)に対する安全マージン。
+# render_watchlist_addition_message()は、末尾の「ほかN銘柄」・評価日時等を
+# 含めた最終本文がこの予算に収まることを保証する(先読み方式)。
+_LINE_ADDITION_MESSAGE_CHAR_BUDGET = 4500
 
 
 def _yen(value: Decimal | int | float | str | None) -> str:
@@ -268,6 +271,110 @@ def compute_watchlist_addition_content_hash(
     return hashlib.sha256(
         f"{batch_id}|{evaluation_date.isoformat()}|{screening_policy}|{sorted(stock_codes)}".encode()
     ).hexdigest()[:16]
+
+
+def _render_watchlist_addition_header(summary: WatchlistAdditionSummary) -> list[str]:
+    return [
+        "【ウォッチリスト追加】",
+        "",
+        "週次スクリーニングにより",
+        f"新たに{summary.added_count}銘柄を追加しました。",
+        "",
+        f"対象：{summary.total_target_count}銘柄",
+        f"評価可能：{summary.ranked_count}銘柄",
+        f"データ未検出：{summary.data_unavailable_count}銘柄",
+        f"追加：{summary.added_count}銘柄",
+        f"追加率：{summary.addition_rate_pct:.1f}%",
+        "",
+        "評価ポリシー：",
+        summary.policy_label,
+        *[f"・{condition}" for condition in summary.policy_conditions],
+    ]
+
+
+def _render_watchlist_addition_footer(summary: WatchlistAdditionSummary) -> list[str]:
+    return ["", "評価日時：", format_jst(summary.evaluated_at)]
+
+
+def _render_watchlist_addition_item_lines(
+    item: WatchlistAdditionItemView, list_position: int, summary: WatchlistAdditionSummary
+) -> list[str]:
+    lines = [
+        "",
+        f"{list_position}. {item.display_name}（{item.stock_code}）",
+        f"・総合スコア：{item.total_score:.0f}点",
+        f"・順位：評価可能{summary.ranked_count}銘柄中{item.rank}位",
+    ]
+    if item.highlights:
+        lines.append("・高評価項目：")
+        lines.extend(f"  {highlight.label} {highlight.detail}" for highlight in item.highlights)
+    return lines
+
+
+def _render_watchlist_addition_omitted_line(omitted_count: int) -> list[str]:
+    if omitted_count <= 0:
+        return []
+    return ["", f"ほか{omitted_count}銘柄を追加しました。"]
+
+
+def _render_watchlist_addition_minimal_message(summary: WatchlistAdditionSummary) -> str:
+    """必須部分(タイトル・件数サマリー・評価日時)だけで文字数予算を超過する
+    異常ケース向けの短縮フォーマット(修正⑩)。評価ポリシー詳細・個別銘柄の
+    ハイライトは省くが、件数サマリーと評価日時は必ず残す。
+    """
+    lines = [
+        "【ウォッチリスト追加】",
+        f"新たに{summary.added_count}銘柄を追加しました。",
+        f"対象：{summary.total_target_count}銘柄 評価可能：{summary.ranked_count}銘柄 "
+        f"データ未検出：{summary.data_unavailable_count}銘柄 "
+        f"追加率：{summary.addition_rate_pct:.1f}%",
+        "評価日時：",
+        format_jst(summary.evaluated_at),
+    ]
+    return "\n".join(lines)
+
+
+def render_watchlist_addition_message(summary: WatchlistAdditionSummary) -> str:
+    """ウォッチリスト追加通知の本文をレンダリングする(LINE向け、修正⑩)。
+
+    各銘柄の詳細行を追加する前に、「もしこの銘柄を追加し、かつ残りを省略表示・
+    評価日時で締めた場合の最終本文」を仮組み立てして文字数を判定する(先読み
+    方式)。既存の`_WATCHLIST_ADDITION_DETAIL_LIMIT`(10件)と
+    `_LINE_ADDITION_MESSAGE_CHAR_BUDGET`(文字数)のいずれか先に達した方で
+    詳細表示を打ち切る。戻り値は必ず`_LINE_ADDITION_MESSAGE_CHAR_BUDGET`
+    以内に収まることを保証する。
+    """
+    header_lines = _render_watchlist_addition_header(summary)
+    footer_lines = _render_watchlist_addition_footer(summary)
+
+    def _assemble(included_count: int) -> str:
+        item_lines: list[str] = []
+        for position, item in enumerate(summary.items[:included_count], start=1):
+            item_lines.extend(_render_watchlist_addition_item_lines(item, position, summary))
+        omitted_lines = _render_watchlist_addition_omitted_line(
+            len(summary.items) - included_count
+        )
+        return "\n".join(header_lines + item_lines + omitted_lines + footer_lines)
+
+    included_count = 0
+    max_candidates = min(len(summary.items), _WATCHLIST_ADDITION_DETAIL_LIMIT)
+    for candidate_count in range(1, max_candidates + 1):
+        trial_message = _assemble(candidate_count)
+        if len(trial_message) > _LINE_ADDITION_MESSAGE_CHAR_BUDGET:
+            break
+        included_count = candidate_count
+
+    message = _assemble(included_count)
+    if len(message) > _LINE_ADDITION_MESSAGE_CHAR_BUDGET:
+        # ヘッダー・評価ポリシー等の必須部分だけで予算超過する異常ケース。
+        message = _render_watchlist_addition_minimal_message(summary)
+        logger.error(
+            "watchlist addition message exceeds char budget even in minimal form "
+            "len=%d budget=%d",
+            len(message),
+            _LINE_ADDITION_MESSAGE_CHAR_BUDGET,
+        )
+    return message
 
 
 def _record_date_display(
@@ -1761,81 +1868,46 @@ class LineNotificationService:
         return True
 
     def notify_watchlist_additions(
-        self,
-        added_items: list[WatchlistItem],
-        results_by_code: dict[str, WatchlistScreeningResult],
-        policy_name: str,
-        evaluated_at: dt.datetime,
-        content_hash: str,
+        self, summary: WatchlistAdditionSummary, content_hash: str
     ) -> bool:
         """週次スクリーニングでウォッチリストへ実際に追加された銘柄の通知
         (ウォッチリスト自動追加機能、要求仕様§12)。
 
-        表示対象はWatchlistRepository.add_if_new()が実際にTrueを返した銘柄のみ
-        (スコア合格でも上限超過/既登録/Repository失敗だった銘柄は表示しない)。
-        追加が1件も無い場合は送信しない。
+        `summary`(Presentation DTO、通知チャネル非依存)はwatchlist_addition_
+        summary_builder.build_watchlist_addition_summary()が組み立てたものを
+        渡すこと。表示対象はWatchlistRepository.add_if_new()が実際にTrueを
+        返した銘柄のみ。追加が1件も無い場合は送信しない。
 
         運用ハードニング第3弾4節: content_hashは呼び出し元が
         compute_watchlist_addition_content_hash()で算出した固定値を渡すこと
         (この関数自体はhashを再計算しない。再試行のたびに同じ値が渡されることで
-        重複送信抑止が安定する)。evaluated_atは通知本文の「評価日時：」表示にのみ
-        使う(呼び出し元はバッチ開始時点等の固定値を渡し、再試行時のnow()を
-        渡さないこと)。
+        重複送信抑止が安定する)。content_hashはbatch_id・評価基準日・
+        screening_policy・追加銘柄コード一覧のみに依存し、表示文言(順位・
+        ハイライト等)には依存しない(方針B: 同じバッチ・同じ追加銘柄なら
+        表示文言が変わっても同一通知として重複抑止する)。
         """
-        if not added_items:
+        if not summary.items:
             return False
-
-        ranked = sorted(
-            added_items,
-            key=lambda item: (-results_by_code[item.stock_code].total_score, item.stock_code),
-        )
 
         pseudo_stock_code = "__batch__:watchlist_auto_addition"
         latest = self._log_repo.latest_by_stock_and_type(
             pseudo_stock_code, NotificationType.WATCHLIST_AUTO_ADDITION
         )
         if latest is not None and latest.content_hash == content_hash:
-            logger.info("watchlist_auto_addition duplicate suppressed count=%d", len(ranked))
+            logger.info(
+                "watchlist_auto_addition duplicate suppressed count=%d", len(summary.items)
+            )
             return False
 
-        policy_label = _WATCHLIST_SCREENING_POLICY_LABELS.get(policy_name, policy_name)
-        lines = [
-            "【ウォッチリスト追加】",
-            "",
-            "週次スクリーニングにより",
-            f"新たに{len(ranked)}銘柄を追加しました。",
-            "",
-            "評価ポリシー：",
-            policy_label,
-        ]
-
-        detail_items = ranked[:_WATCHLIST_ADDITION_DETAIL_LIMIT]
-        for rank, item in enumerate(detail_items, start=1):
-            result = results_by_code[item.stock_code]
-            display_name = item.stock_name or item.stock_code
-            lines.append("")
-            lines.append(f"{rank}. {display_name}（{item.stock_code}）")
-            lines.append(f"・総合スコア：{result.total_score:.0f}点")
-            lines.extend(f"・{label}：{value}" for label, value in result.main_metrics.items())
-            lines.append(f"・追加理由：{describe_matched_criteria(result.matched_criteria)}")
-
-        remaining = len(ranked) - len(detail_items)
-        if remaining > 0:
-            lines.append("")
-            lines.append(f"ほか{remaining}銘柄を追加しました。")
-
-        lines.append("")
-        lines.append("評価日時：")
-        lines.append(format_jst(evaluated_at))
-
-        self._client.push_message("\n".join(lines))
+        message = render_watchlist_addition_message(summary)
+        self._client.push_message(message)
         self._log_repo.save(
             NotificationLog(
                 notification_id=str(uuid.uuid4()),
                 notification_type=NotificationType.WATCHLIST_AUTO_ADDITION,
                 stock_code=pseudo_stock_code,
                 content_hash=content_hash,
-                sent_at=evaluated_at,
+                sent_at=summary.evaluated_at,
                 related_recommendation_id=None,
             )
         )

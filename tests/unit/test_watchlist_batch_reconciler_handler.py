@@ -60,6 +60,32 @@ def dynamo(monkeypatch: pytest.MonkeyPatch):
         yield client
 
 
+def _fake_scoring_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        minimum_total_score=60.0,
+        dividend_yield=SimpleNamespace(weight=30.0, zero_at_pct=3.5, full_at_pct=6.0),
+        equity_ratio=SimpleNamespace(weight=25.0, zero_at_pct=40.0, full_at_pct=70.0),
+        payout_ratio=SimpleNamespace(weight=15.0, healthy_min_pct=20.0, healthy_max_pct=60.0),
+        dividend_growth=SimpleNamespace(weight=15.0, zero_at_years=0, full_at_years=10),
+        shareholder_benefit=SimpleNamespace(
+            weight=15.0, yield_full_at_pct=2.0, presence_only_score_ratio=0.5
+        ),
+    )
+
+
+def _fake_thresholds_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        minimum_market_cap_yen=50_000_000_000,
+        require_positive_operating_cash_flow=True,
+        exclude_dividend_cut_announced=True,
+        exclude_debt_excess=True,
+        exclude_deficit=True,
+        exclude_going_concern_doubt=True,
+        exclude_etf=True,
+        exclude_reit=True,
+    )
+
+
 def _fake_config(
     *, max_finalize_retry_attempts: int = 3, max_notification_retry_attempts: int = 3
 ) -> SimpleNamespace:
@@ -79,8 +105,25 @@ def _fake_config(
         max_finalize_retry_attempts=max_finalize_retry_attempts,
         max_notification_retry_attempts=max_notification_retry_attempts,
         max_timeout_finalize_rows_per_run=500,
+        scoring=_fake_scoring_config(),
+        thresholds=_fake_thresholds_config(),
+        stock_display_name=SimpleNamespace(jpx_name_negative_cache_ttl_seconds=60),
     )
     return SimpleNamespace(watchlist_screening=watchlist_screening)
+
+
+class _FakeStockDisplayNameResolver:
+    """テストではJPX/override/既存Watchlistの実I/Oを避け、fallbackのみで
+    解決する(このリポジトリの既存テストの慣例に合わせる)。"""
+
+    def resolve(self, stock_code, fallback_name=None, fallback_name_provider=None):  # noqa: ANN001, ANN201
+        if fallback_name:
+            return fallback_name
+        if fallback_name_provider is not None:
+            provided = fallback_name_provider()
+            if provided:
+                return provided
+        return stock_code
 
 
 class _FakeWatchlistRepository:
@@ -99,13 +142,11 @@ class _FakeNotificationService:
         self.calls: list[Any] = []
         self.fail_next = False
 
-    def notify_watchlist_additions(
-        self, added_items, results_by_code, policy_name, now, content_hash
-    ):
+    def notify_watchlist_additions(self, summary, content_hash):  # noqa: ANN001, ANN201
         if self.fail_next:
             self.fail_next = False
             raise RuntimeError("LINE push failed (simulated)")
-        self.calls.append(added_items)
+        self.calls.append(list(summary.items))
         return True
 
 
@@ -124,6 +165,11 @@ def _stub_expensive_dependencies(monkeypatch: pytest.MonkeyPatch) -> SimpleNames
     monkeypatch.setattr(finalizer_module, "record_batch_audit", lambda **kw: None)
     fake_repo = _FakeWatchlistRepository()
     monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: fake_repo)
+    monkeypatch.setattr(
+        finalizer_module,
+        "build_stock_display_name_resolver",
+        lambda *_a, **_kw: _FakeStockDisplayNameResolver(),
+    )
     return SimpleNamespace(repo=fake_repo, notification=fake_notification)
 
 
@@ -175,6 +221,7 @@ def _drive_batch_to_running_with_passed_candidate(batch_id: str, now: dt.datetim
         missing_field_names=[],
         processing_duration_ms=100,
         now=now,
+        total_score=80.0,
     )
 
 

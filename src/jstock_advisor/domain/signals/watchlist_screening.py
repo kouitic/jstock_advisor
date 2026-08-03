@@ -137,6 +137,27 @@ class RankingEntry(BaseModel):
     main_metrics: dict[str, str]
 
 
+class ScoreCriterionValue(BaseModel):
+    """通知品質改善(2026-08)で追加。1銘柄・1配点項目あたりのスコア根拠。"""
+
+    criterion_key: str
+    label: str
+    score: float
+    metric_value: str | None
+
+
+class WatchlistScoreDetail(BaseModel):
+    """通知品質改善(2026-08)で追加。合格銘柄の通知再構築用スコア詳細。
+
+    infrastructure/aws/batch_tracker.pyのCandidateProgressRecord.notification_detail
+    (passed銘柄のみ)へモデルのまま保持し、JSON化はbatch_tracker.py内部でのみ行う。
+    RankingEntry(既存、無変更)とは独立したDynamoDB列・バイト予算を持つ。
+    """
+
+    stock_code: str
+    criteria: list[ScoreCriterionValue]
+
+
 def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 

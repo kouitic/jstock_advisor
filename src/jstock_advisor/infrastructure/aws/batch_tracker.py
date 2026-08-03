@@ -15,6 +15,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
@@ -24,6 +25,7 @@ from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
+from jstock_advisor.domain.signals.watchlist_screening import WatchlistScoreDetail
 from jstock_advisor.infrastructure.collection_store import resolve_table_name, running_on_lambda
 
 logger = logging.getLogger(__name__)
@@ -429,9 +431,28 @@ class CandidateProgressRecord:
     is_provider_failure_suspected: bool
     # 欠損したスコア項目名(最大7件程度の短い文字列)。主要項目ごとの取得率集計に使う。
     missing_field_names: list[str]
+    # --- LINE通知品質改善(2026-08)で追加 ---------------------------------------
+    # evaluate()が実行された全銘柄(PASSED/FAILED_SCORE/FAILED_REQUIRED等)で
+    # セットされる(NOT_FOUND/DATA_ERRORの場合のみNone)。表示順位(RankingCalculator)
+    # の算出母数として使う。RankingEntry.total_score(passed銘柄のみ)とは別物。
+    total_score: float | None
+    # passed銘柄のみセットされる、通知再構築用のスコア詳細(モデル型のまま保持、
+    # JSON化はこのファイル内部にのみ存在する)。
+    notification_detail: WatchlistScoreDetail | None
+
+
+def _parse_notification_detail(raw: str | None) -> WatchlistScoreDetail | None:
+    if raw is None:
+        return None
+    try:
+        return WatchlistScoreDetail.model_validate_json(raw)
+    except Exception:
+        logger.exception("watchlist notification_detail parse failed, treating as absent")
+        return None
 
 
 def _to_progress_record(item: dict[str, Any]) -> CandidateProgressRecord:
+    total_score_raw = item.get("total_score")
     return CandidateProgressRecord(
         batch_id=item["batch_id"],
         stock_code=item["stock_code"],
@@ -444,6 +465,8 @@ def _to_progress_record(item: dict[str, Any]) -> CandidateProgressRecord:
         total_processing_duration_ms=int(item.get("total_processing_duration_ms", 0)),
         is_provider_failure_suspected=bool(item.get("is_provider_failure_suspected", False)),
         missing_field_names=list(item.get("missing_field_names", [])),
+        total_score=(float(total_score_raw) if total_score_raw is not None else None),
+        notification_detail=_parse_notification_detail(item.get("notification_detail")),
     )
 
 
@@ -760,6 +783,8 @@ def complete_candidate(
     missing_field_names: list[str],
     processing_duration_ms: int,
     now: dt.datetime,
+    total_score: float | None = None,
+    notification_detail: WatchlistScoreDetail | None = None,
 ) -> bool:
     """7/11節: Workerの通常完了経路。TransactWriteItemsで進捗行の終端確定と
     BatchRunsTable.completedの+1を原子的に行う(通常経路。17節のタイムアウト
@@ -767,12 +792,26 @@ def complete_candidate(
 
     完了条件(owner一致)が不成立の場合はFalseを返す(リース失効後に別Workerが
     再クレームしていた、Reconcilerが先にタイムアウト確定していた等)。
+
+    total_score/notification_detail(LINE通知品質改善、2026-08)は`ranking_entry`
+    と同じ「Noneでなければconditionally SET」パターンでDynamoDBへ書く。
+    notification_detailはモデル型のまま引数として受け取り、JSON化はこの関数の
+    内部にのみ存在する(呼び出し側はJSON文字列を一切扱わない)。
     """
+    notification_detail_json = (
+        notification_detail.model_dump_json() if notification_detail is not None else None
+    )
     update_expression = (
         "SET #status = :status, evaluation_result = :eval_result, completed_at = :now, "
         "is_provider_failure_suspected = :provider_failure, "
         "missing_field_names = :missing_fields"
         + (", ranking_entry = :ranking_entry" if ranking_entry is not None else "")
+        + (", total_score = :total_score" if total_score is not None else "")
+        + (
+            ", notification_detail = :notification_detail"
+            if notification_detail_json is not None
+            else ""
+        )
         + " ADD total_processing_duration_ms :duration_ms"
         + " REMOVE lease_owner_id, lease_expires_at"
     )
@@ -788,6 +827,13 @@ def complete_candidate(
     }
     if ranking_entry is not None:
         values[":ranking_entry"] = ranking_entry
+    if total_score is not None:
+        # DynamoDBはPython float型を直接扱えないため(boto3 TypeSerializerが
+        # TypeErrorを送出する)、Decimalへ変換してから渡す(既存コードの
+        # Decimal(str(value))パターンを踏襲)。
+        values[":total_score"] = Decimal(str(total_score))
+    if notification_detail_json is not None:
+        values[":notification_detail"] = notification_detail_json
 
     client = boto3.client("dynamodb")
     try:

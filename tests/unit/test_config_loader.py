@@ -178,3 +178,38 @@ def test_watchlist_screening_rejects_unknown_screening_policy() -> None:
         WatchlistScreeningRulesConfig(
             **{**base.model_dump(), "screening_policy": "some_future_policy"}
         )
+
+
+# --- StockDisplayNameConfig(LINE通知品質改善: negative cache TTL) --------------
+
+
+def test_stock_display_name_config_default_ttl_is_60_seconds() -> None:
+    from jstock_advisor.config.models import StockDisplayNameConfig
+
+    assert StockDisplayNameConfig().jpx_name_negative_cache_ttl_seconds == 60
+
+
+def test_stock_display_name_config_loaded_from_yaml() -> None:
+    config = load_config().watchlist_screening.stock_display_name
+    assert config.jpx_name_negative_cache_ttl_seconds == 60
+
+
+def test_stock_display_name_config_rejects_zero_ttl() -> None:
+    from jstock_advisor.config.models import StockDisplayNameConfig
+
+    with pytest.raises(ValidationError):
+        StockDisplayNameConfig(jpx_name_negative_cache_ttl_seconds=0)
+
+
+def test_stock_display_name_config_rejects_negative_ttl() -> None:
+    from jstock_advisor.config.models import StockDisplayNameConfig
+
+    with pytest.raises(ValidationError):
+        StockDisplayNameConfig(jpx_name_negative_cache_ttl_seconds=-1)
+
+
+def test_stock_display_name_config_accepts_custom_ttl() -> None:
+    from jstock_advisor.config.models import StockDisplayNameConfig
+
+    config = StockDisplayNameConfig(jpx_name_negative_cache_ttl_seconds=300)
+    assert config.jpx_name_negative_cache_ttl_seconds == 300

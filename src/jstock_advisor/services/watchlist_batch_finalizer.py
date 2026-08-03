@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import TypeAdapter
@@ -66,8 +67,10 @@ from pydantic import TypeAdapter
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.ranking import RankingCalculator
 from jstock_advisor.domain.signals.watchlist_screening import (
     RankingEntry,
+    WatchlistScoreDetail,
     describe_matched_criteria,
 )
 from jstock_advisor.infrastructure.aws.batch_tracker import (
@@ -113,6 +116,14 @@ from jstock_advisor.services.screening_data_provider import (
     REQUIRED_FIELD_NAMES,
     SCORING_FIELD_NAMES,
 )
+from jstock_advisor.services.watchlist_addition_summary_builder import (
+    WatchlistAdditionSummary,
+    build_watchlist_addition_summary,
+)
+from jstock_advisor.services.watchlist_display_name import (
+    StockDisplayNameResolver,
+    build_stock_display_name_resolver,
+)
 from jstock_advisor.services.watchlist_screening_audit import (
     REPOSITORY_RESULT_ADDED,
     REPOSITORY_RESULT_FAILED,
@@ -121,10 +132,7 @@ from jstock_advisor.services.watchlist_screening_audit import (
     record_batch_audit,
     record_repository_result_audit,
 )
-from jstock_advisor.services.watchlist_screening_service import (
-    WatchlistScreeningResult,
-    WatchlistScreeningService,
-)
+from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningService
 
 _ranking_entry_list_adapter: TypeAdapter[list[RankingEntry]] = TypeAdapter(list[RankingEntry])
 
@@ -254,6 +262,10 @@ def compute_batch_metrics(records: list[CandidateProgressRecord]) -> dict[str, A
             if evaluation_attempted_count
             else 0.0
         ),
+        # LINE通知品質改善(2026-08、修正⑦): data_unavailable_countの算出に
+        # 必要なため返り値へ追加する(第7版まではこの値が返されず、
+        # data_unavailable_countの算出式から漏れていたバグがあった)。
+        "unexpected_error_count": unexpected_error_count,
         "sqs_redelivery_count": redelivery,
         "terminal_failure_count": terminal_failure_count,
         "terminal_failure_rate_pct": (
@@ -276,6 +288,17 @@ def _fetch_stock_name(providers: ProviderBundle, stock_code: str) -> str | None:
         logger.exception("stock name lookup failed stock_code=%s", stock_code)
         return None
     return summary.stock_name if summary is not None else None
+
+
+def _fallback_name_provider(
+    providers: ProviderBundle, stock_code: str
+) -> Callable[[], str | None]:
+    """StockDisplayNameResolver.resolve()のfallback_name_provider向けの遅延
+    評価クロージャを作る。stock_codeを関数引数として束縛することで、
+    ループ内でのlambda遅延束縛バグ(全クロージャが最後のループ変数を参照して
+    しまう問題)を避ける。
+    """
+    return lambda: _fetch_stock_name(providers, stock_code)
 
 
 def _compute_finalize_target(
@@ -324,17 +347,21 @@ def _build_watchlist_items_for_codes(
     stock_codes: list[str],
     ranked: list[RankingEntry],
     providers: ProviderBundle,
+    resolver: StockDisplayNameResolver,
     now: dt.datetime,
     registration_policy: str,
-) -> tuple[list[WatchlistItem], dict[str, WatchlistScreeningResult]]:
+) -> list[WatchlistItem]:
     """通知フェーズ再開時、`stock_codes`(追加成功済みだが未通知)について
-    `WatchlistItem`/`WatchlistScreeningResult`を`ranked`(永続化済みのランキング
-    JSONから復元)+都度取得する銘柄名から再構築する(stock_name自体は
-    BatchRunsTableへ永続化しない、運用ハードニング第2弾2節)。
+    `WatchlistItem`を`ranked`(永続化済みのランキングJSONから復元)+
+    日本語表示名解決から再構築する(stock_name自体はBatchRunsTableへ
+    永続化しない、運用ハードニング第2弾2節)。
+
+    stock_nameはStockDisplayNameResolver.resolve()で解決する(JPX/override/
+    既存Watchlistで解決できれば`_fetch_stock_name`(外部Provider呼び出しを
+    伴う重い処理)は呼ばれない、LINE通知品質改善2026-08 修正②)。
     """
     entries_by_code = {entry.stock_code: entry for entry in ranked}
     items: list[WatchlistItem] = []
-    results_by_code: dict[str, WatchlistScreeningResult] = {}
     for stock_code in stock_codes:
         entry = entries_by_code.get(stock_code)
         if entry is None:
@@ -344,7 +371,10 @@ def _build_watchlist_items_for_codes(
                 stock_code,
             )
             continue
-        stock_name = _fetch_stock_name(providers, stock_code)
+        stock_name = resolver.resolve(
+            stock_code,
+            fallback_name_provider=_fallback_name_provider(providers, stock_code),
+        )
         items.append(
             WatchlistItem(
                 stock_code=stock_code,
@@ -356,20 +386,7 @@ def _build_watchlist_items_for_codes(
                 updated_at=now,
             )
         )
-        results_by_code[stock_code] = WatchlistScreeningResult(
-            stock_code=stock_code,
-            stock_name=stock_name,
-            passed=True,
-            policy_results=[],
-            total_score=entry.total_score,
-            matched_criteria=entry.matched_criteria,
-            exclusion_reasons=[],
-            missing_required_fields=[],
-            missing_scoring_fields=[],
-            evaluated_at=now,
-            main_metrics=entry.main_metrics,
-        )
-    return items, results_by_code
+    return items
 
 
 def _write_watchlist_additions(
@@ -378,6 +395,7 @@ def _write_watchlist_additions(
     rank_by_code: dict[str, int],
     config: AppConfig,
     providers: ProviderBundle,
+    resolver: StockDisplayNameResolver,
     now: dt.datetime,
 ) -> dict[str, str]:
     """WATCHLIST_WRITE_COMPLETEDフェーズ本体。`pending_entries`は
@@ -398,7 +416,12 @@ def _write_watchlist_additions(
 
     for entry in pending_entries:
         rank = rank_by_code[entry.stock_code]
-        stock_name = _fetch_stock_name(providers, entry.stock_code)
+        # LINE通知品質改善(2026-08 修正②): JPX/override/既存Watchlistで解決
+        # できれば_fetch_stock_name(外部Provider呼び出しを伴う)は呼ばれない。
+        stock_name = resolver.resolve(
+            entry.stock_code,
+            fallback_name_provider=_fallback_name_provider(providers, entry.stock_code),
+        )
         item = WatchlistItem(
             stock_code=entry.stock_code,
             stock_name=stock_name,
@@ -591,6 +614,31 @@ def _finalize_completed(
     records = query_all_candidate_progress(batch_id, consistent_read=True)
     metrics = compute_batch_metrics(records)
     wc = config.watchlist_screening
+    resolver = build_stock_display_name_resolver(
+        wc.stock_display_name.jpx_name_negative_cache_ttl_seconds
+    )
+    # LINE通知品質改善(2026-08 修正⑦): total_score_by_codeはevaluate()実行済み
+    # の全銘柄(passed以外も含む)、notification_detail_by_codeはpassed銘柄のみ。
+    # いずれもrecordsから直接組み立てるため追加のDynamoDB読み取りは発生しない。
+    total_score_by_code: dict[str, float] = {
+        r.stock_code: r.total_score for r in records if r.total_score is not None
+    }
+    notification_detail_by_code: dict[str, WatchlistScoreDetail] = {
+        r.stock_code: r.notification_detail for r in records if r.notification_detail is not None
+    }
+    # data_unavailable_countは4分類(NOT_FOUND/DATA_ERROR/UNEXPECTED_ERROR/
+    # terminal_failure)の合算とし、引き算では算出しない。これら4分類は
+    # evaluation_resultが単一文字列であるため相互排他的で二重計上は起きない。
+    # total_target_count == ranked_count + data_unavailable_countが常に成立する
+    # (不変条件)。
+    data_unavailable_count = (
+        metrics["not_found_count"]
+        + metrics["data_error_count"]
+        + metrics["unexpected_error_count"]
+        + metrics["terminal_failure_count"]
+    )
+    ranked_count = metrics["screening_completed_count"]
+    total_target_count = metrics["total_candidate_count"]
 
     # --- Phase 1: FINALIZE_PREPARING ---
     if "finalize_target_stock_codes" in batch_item:
@@ -637,7 +685,7 @@ def _finalize_completed(
         rank_by_code = {entry.stock_code: i for i, entry in enumerate(ranked, start=1)}
         pending_entries = [entries_by_code[code] for code in pending_codes]
         newly_resolved = _write_watchlist_additions(
-            batch_id, pending_entries, rank_by_code, config, providers, now
+            batch_id, pending_entries, rank_by_code, config, providers, resolver, now
         )
         repository_results.update(newly_resolved)
         batch_item["repository_results"] = repository_results
@@ -675,17 +723,29 @@ def _finalize_completed(
                     batch_id, pending_notification_codes, wc.screening_policy, started_at.date()
                 )
                 record_notification_pending(batch_id, now, content_hash)
-            pending_items, pending_results_by_code = _build_watchlist_items_for_codes(
-                pending_notification_codes, ranked, providers, started_at, wc.screening_policy
+            pending_items = _build_watchlist_items_for_codes(
+                pending_notification_codes,
+                ranked,
+                providers,
+                resolver,
+                started_at,
+                wc.screening_policy,
+            )
+            summary: WatchlistAdditionSummary = build_watchlist_addition_summary(
+                added_items=pending_items,
+                total_score_by_code=total_score_by_code,
+                notification_detail_by_code=notification_detail_by_code,
+                rank_by_code=RankingCalculator.rank(total_score_by_code),
+                total_target_count=total_target_count,
+                ranked_count=ranked_count,
+                data_unavailable_count=data_unavailable_count,
+                policy_name=wc.screening_policy,
+                scoring_config=wc.scoring,
+                thresholds_config=wc.thresholds,
+                evaluated_at=started_at,
             )
             try:
-                notification_service.notify_watchlist_additions(
-                    pending_items,
-                    pending_results_by_code,
-                    wc.screening_policy,
-                    started_at,
-                    content_hash,
-                )
+                notification_service.notify_watchlist_additions(summary, content_hash)
             except Exception as exc:  # noqa: BLE001 - NOTIFICATION_FAILEDとして記録しfinalize全体は失敗にしない
                 logger.exception(
                     "watchlist_screening notification failed batch_id=%s", batch_id

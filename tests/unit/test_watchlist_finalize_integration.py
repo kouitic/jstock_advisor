@@ -50,6 +50,17 @@ _BATCH_TABLE = "jstock-batch_runs"
 _PROGRESS_TABLE = "jstock-watchlist_candidate_progress"
 
 
+@pytest.fixture(autouse=True)
+def _stub_display_name_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """テストではJPX/override/既存Watchlistの実I/Oを避ける
+    (このリポジトリの既存テストの慣例に合わせる)。"""
+    monkeypatch.setattr(
+        finalizer_module,
+        "build_stock_display_name_resolver",
+        lambda *_a, **_kw: _FakeStockDisplayNameResolver(),
+    )
+
+
 @pytest.fixture
 def dynamo(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
@@ -78,6 +89,32 @@ def dynamo(monkeypatch: pytest.MonkeyPatch):
         yield client
 
 
+def _fake_scoring_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        minimum_total_score=60.0,
+        dividend_yield=SimpleNamespace(weight=30.0, zero_at_pct=3.5, full_at_pct=6.0),
+        equity_ratio=SimpleNamespace(weight=25.0, zero_at_pct=40.0, full_at_pct=70.0),
+        payout_ratio=SimpleNamespace(weight=15.0, healthy_min_pct=20.0, healthy_max_pct=60.0),
+        dividend_growth=SimpleNamespace(weight=15.0, zero_at_years=0, full_at_years=10),
+        shareholder_benefit=SimpleNamespace(
+            weight=15.0, yield_full_at_pct=2.0, presence_only_score_ratio=0.5
+        ),
+    )
+
+
+def _fake_thresholds_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        minimum_market_cap_yen=50_000_000_000,
+        require_positive_operating_cash_flow=True,
+        exclude_dividend_cut_announced=True,
+        exclude_debt_excess=True,
+        exclude_deficit=True,
+        exclude_going_concern_doubt=True,
+        exclude_etf=True,
+        exclude_reit=True,
+    )
+
+
 def _fake_config(
     *,
     high_throttle_rate_threshold_pct: float = 20.0,
@@ -101,8 +138,25 @@ def _fake_config(
         max_terminal_failure_rate_pct=max_terminal_failure_rate_pct,
         max_required_field_missing_rate_pct=max_required_field_missing_rate_pct,
         max_notification_retry_attempts=max_notification_retry_attempts,
+        scoring=_fake_scoring_config(),
+        thresholds=_fake_thresholds_config(),
+        stock_display_name=SimpleNamespace(jpx_name_negative_cache_ttl_seconds=60),
     )
     return SimpleNamespace(watchlist_screening=watchlist_screening)
+
+
+class _FakeStockDisplayNameResolver:
+    """テストではJPX/override/既存Watchlistの実I/Oを避け、fallbackのみで
+    解決する(このリポジトリの既存テストの慣例に合わせる)。"""
+
+    def resolve(self, stock_code, fallback_name=None, fallback_name_provider=None):  # noqa: ANN001, ANN201
+        if fallback_name:
+            return fallback_name
+        if fallback_name_provider is not None:
+            provided = fallback_name_provider()
+            if provided:
+                return provided
+        return stock_code
 
 
 class _FakeWatchlistRepository:
@@ -123,10 +177,8 @@ class _FakeNotificationService:
     def __init__(self) -> None:
         self.calls: list[list[Any]] = []
 
-    def notify_watchlist_additions(
-        self, added_items, results_by_code, policy_name, evaluated_at, content_hash
-    ):
-        self.calls.append(list(added_items))
+    def notify_watchlist_additions(self, summary, content_hash):  # noqa: ANN001, ANN201
+        self.calls.append(list(summary.items))
         return True
 
 
@@ -158,6 +210,7 @@ def _drive_batch_with_two_passed_candidates(now: dt.datetime, batch_id: str = "b
             missing_field_names=[],
             processing_duration_ms=100,
             now=now,
+            total_score=80.0,
         )
 
 
