@@ -20,7 +20,10 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
-from jstock_advisor.domain.signals.watchlist_screening import categorize_exclusion_reasons
+from jstock_advisor.domain.signals.watchlist_screening import (
+    WatchlistScoreDetail,
+    categorize_exclusion_reasons,
+)
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     WatchlistProgressStatus,
     claim_candidate_lease,
@@ -42,6 +45,7 @@ from jstock_advisor.services.screening_data_provider import (
 )
 from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
+from jstock_advisor.services.watchlist_score_detail import build_notification_detail
 from jstock_advisor.services.watchlist_screening_audit import record_candidate_audit
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningService
 
@@ -65,6 +69,11 @@ class _EvaluationOutcome:
     ranking_entry_json: str | None
     is_provider_failure_suspected: bool
     missing_field_names: list[str]
+    # --- LINE通知品質改善(2026-08)で追加 ---------------------------------------
+    # evaluate()が実行された全銘柄でセットする(total_scoreの保存条件と
+    # notification_detailの保存条件を分離する、修正①)。
+    total_score: float | None = None
+    notification_detail: WatchlistScoreDetail | None = None
 
 
 def _evaluate_candidate(
@@ -100,9 +109,15 @@ def _evaluate_candidate(
     result = screening_service.evaluate(
         stock_code, screening_data.input.stock_name, screening_data.input, now
     )
+    # LINE通知品質改善(2026-08、修正①): total_scoreはevaluate()が実行された
+    # 全銘柄(PASSED/FAILED_SCORE/FAILED_REQUIRED等)で即座にセットする。
+    # notification_detailはこの後のcategory=="passed"判定の中でのみ追加でセットし、
+    # 両者の保存条件を明確に分離する。
+    total_score = result.total_score
     category, evaluation_result = categorize_exclusion_reasons(result.exclusion_reasons)
 
     ranking_entry_json = None
+    notification_detail: WatchlistScoreDetail | None = None
     if category == "passed":
         entry = screening_service.to_ranking_entry(result)
         if entry is None:
@@ -116,6 +131,9 @@ def _evaluate_candidate(
             evaluation_result = "PASSED_RANKING_ENTRY_TOO_LARGE"
         else:
             ranking_entry_json = entry.model_dump_json()
+            notification_detail = build_notification_detail(
+                stock_code, result.policy_results[0].score_breakdown, screening_data.input
+            )
 
     # 運用ハードニング3節: 例外は無かった(HTTP応答自体は成立した)が、スコア項目が
     # 1件も取得できていない場合は、通常の一部欠損(この銘柄固有のデータ欠落)とは
@@ -133,6 +151,8 @@ def _evaluate_candidate(
         ranking_entry_json,
         is_provider_failure_suspected,
         screening_data.missing_fields,
+        total_score=total_score,
+        notification_detail=notification_detail,
     )
 
 
@@ -198,6 +218,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             missing_field_names=outcome.missing_field_names,
             processing_duration_ms=duration_ms,
             now=completion_time,
+            total_score=outcome.total_score,
+            notification_detail=outcome.notification_detail,
         )
         if completed:
             maybe_finalize(batch_id, completion_time, providers, config, notification_service)

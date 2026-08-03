@@ -20,6 +20,46 @@ _NOW = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
 _runner = CliRunner()
 
 
+def _fake_scoring_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        minimum_total_score=60.0,
+        dividend_yield=SimpleNamespace(weight=30.0, zero_at_pct=3.5, full_at_pct=6.0),
+        equity_ratio=SimpleNamespace(weight=25.0, zero_at_pct=40.0, full_at_pct=70.0),
+        payout_ratio=SimpleNamespace(weight=15.0, healthy_min_pct=20.0, healthy_max_pct=60.0),
+        dividend_growth=SimpleNamespace(weight=15.0, zero_at_years=0, full_at_years=10),
+        shareholder_benefit=SimpleNamespace(
+            weight=15.0, yield_full_at_pct=2.0, presence_only_score_ratio=0.5
+        ),
+    )
+
+
+def _fake_thresholds_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        minimum_market_cap_yen=50_000_000_000,
+        require_positive_operating_cash_flow=True,
+        exclude_dividend_cut_announced=True,
+        exclude_debt_excess=True,
+        exclude_deficit=True,
+        exclude_going_concern_doubt=True,
+        exclude_etf=True,
+        exclude_reit=True,
+    )
+
+
+class _FakeStockDisplayNameResolver:
+    """テストではJPX/override/既存Watchlistの実I/Oを避け、fallbackのみで
+    解決する(このリポジトリの既存テストの慣例に合わせる)。"""
+
+    def resolve(self, stock_code, fallback_name=None, fallback_name_provider=None):  # noqa: ANN001, ANN201
+        if fallback_name:
+            return fallback_name
+        if fallback_name_provider is not None:
+            provided = fallback_name_provider()
+            if provided:
+                return provided
+        return stock_code
+
+
 def _fake_config(*, enabled: bool = True) -> SimpleNamespace:
     watchlist_screening = SimpleNamespace(
         enabled=enabled,
@@ -32,6 +72,9 @@ def _fake_config(*, enabled: bool = True) -> SimpleNamespace:
         max_watchlist_additions_per_run=20,
         notification_enabled=True,
         staged_rollout=SimpleNamespace(candidate_limit=None, market_segment_filter=None),
+        scoring=_fake_scoring_config(),
+        thresholds=_fake_thresholds_config(),
+        stock_display_name=SimpleNamespace(jpx_name_negative_cache_ttl_seconds=60),
     )
     return SimpleNamespace(watchlist_screening=watchlist_screening)
 
@@ -99,14 +142,28 @@ class _FakeScreeningDataProvider:
 
 
 def _screening_result(passed: bool) -> WatchlistScreeningResult:
-    from jstock_advisor.domain.signals.watchlist_screening import MatchedCriterion
+    from jstock_advisor.domain.signals.watchlist_screening import (
+        MatchedCriterion,
+        ScreeningPolicyResult,
+    )
 
+    total_score = 80.0 if passed else 30.0
+    policy_result = ScreeningPolicyResult(
+        policy_name="high_dividend_financial_health",
+        passed=passed,
+        score=total_score,
+        matched_criteria=[MatchedCriterion.HIGH_DIVIDEND_YIELD] if passed else [],
+        exclusion_reasons=[],
+        missing_required_fields=[],
+        missing_scoring_fields=[],
+        score_breakdown={"dividend_yield": total_score},
+    )
     return WatchlistScreeningResult(
         stock_code="1234",
         stock_name="テスト株式会社",
         passed=passed,
-        policy_results=[],
-        total_score=80.0 if passed else 30.0,
+        policy_results=[policy_result],
+        total_score=total_score,
         matched_criteria=[MatchedCriterion.HIGH_DIVIDEND_YIELD] if passed else [],
         exclusion_reasons=[],
         missing_required_fields=[],
@@ -175,6 +232,11 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, config: SimpleNamespace | Non
     monkeypatch.setattr(cli_module, "WatchlistScreeningService", _FakeWatchlistScreeningService)
     monkeypatch.setattr(
         cli_module, "WatchlistCandidateCollector", lambda *a, **kw: _FakeCollector(["1234"])
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_stock_display_name_resolver",
+        lambda *_a, **_kw: _FakeStockDisplayNameResolver(),
     )
 
 
@@ -256,10 +318,8 @@ def test_real_run_adds_to_watchlist_and_sends_notification(
         def __init__(self, **kwargs: object) -> None:
             pass
 
-        def notify_watchlist_additions(
-            self, added_items, results_by_code, policy_name, now, content_hash
-        ):
-            notify_calls.append(added_items)
+        def notify_watchlist_additions(self, summary, content_hash):  # noqa: ANN001, ANN201
+            notify_calls.append(list(summary.items))
             return True
 
     monkeypatch.setattr(cli_module, "LineNotificationService", _FakeNotificationService)

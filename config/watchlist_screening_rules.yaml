@@ -162,3 +162,10 @@ data_cache:
 # 追加自体はNOTIFICATION_FAILED中も維持され、超過後はCOMPLETED_WITH_NOTIFICATION_
 # FAILUREとして終端する(1節)。
 max_notification_retry_attempts: 3
+
+# --- LINE通知品質改善(2026-08)で追加 ------------------------------------------
+stock_display_name:
+  # JPX銘柄名キャッシュ(上場銘柄一覧)の取得・パースに失敗した際、直後の連続
+  # リトライを防ぐnegative cacheの有効期間(秒)。1以上の整数。本番運用での
+  # 調整・テストでの短縮のためconfig化している(固定値のコード内埋め込みは行わない)。
+  jpx_name_negative_cache_ttl_seconds: 60

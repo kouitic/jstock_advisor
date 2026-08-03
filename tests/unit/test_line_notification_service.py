@@ -18,24 +18,27 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
-    WatchlistRegistrationSource,
 )
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
-from jstock_advisor.domain.entities.watchlist import WatchlistItem
-from jstock_advisor.domain.signals.watchlist_screening import MatchedCriterion
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from jstock_advisor.services import line_notification_service as line_notification_service_module
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     compute_watchlist_addition_content_hash,
     render_notification_preview,
+    render_watchlist_addition_message,
 )
-from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningResult
+from jstock_advisor.services.watchlist_addition_summary_builder import (
+    EvaluationHighlight,
+    WatchlistAdditionItemView,
+    WatchlistAdditionSummary,
+)
 
 _CONFIG = load_config()
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
@@ -1506,37 +1509,55 @@ def _hash_for(
     )
 
 
-def _watchlist_item(stock_code: str, stock_name: str | None = None) -> WatchlistItem:
-    return WatchlistItem(
+def _summary_item(
+    stock_code: str,
+    display_name: str | None,
+    rank: int,
+    total_score: float,
+    highlights: list[EvaluationHighlight] | None = None,
+) -> WatchlistAdditionItemView:
+    return WatchlistAdditionItemView(
         stock_code=stock_code,
-        stock_name=stock_name,
-        reason="高配当、財務健全",
-        registration_source=WatchlistRegistrationSource.AUTO_SCREENING,
-        registration_policy="high_dividend_financial_health",
-        created_at=_NOW,
-        updated_at=_NOW,
+        display_name=display_name or stock_code,
+        rank=rank,
+        total_score=total_score,
+        highlights=(
+            highlights
+            if highlights is not None
+            else [
+                EvaluationHighlight(label="配当利回り", detail="4.2%", score=total_score),
+                EvaluationHighlight(label="自己資本比率", detail="55.0%", score=total_score),
+            ]
+        ),
     )
 
 
-def _watchlist_screening_result(
-    stock_code: str,
-    stock_name: str | None,
-    total_score: float,
-    matched_criteria: list[MatchedCriterion] | None = None,
-    main_metrics: dict[str, str] | None = None,
-) -> WatchlistScreeningResult:
-    return WatchlistScreeningResult(
-        stock_code=stock_code,
-        stock_name=stock_name,
-        passed=True,
-        policy_results=[],
-        total_score=total_score,
-        matched_criteria=matched_criteria or [MatchedCriterion.HIGH_DIVIDEND_YIELD],
-        exclusion_reasons=[],
-        missing_required_fields=[],
-        missing_scoring_fields=[],
-        evaluated_at=_NOW,
-        main_metrics=main_metrics or {"配当利回り": "4.2%", "自己資本比率": "55.0%"},
+def _summary(
+    items: list[WatchlistAdditionItemView],
+    *,
+    policy_name: str = "high_dividend_financial_health",
+    policy_label: str | None = None,
+    policy_conditions: list[str] | None = None,
+    total_target_count: int | None = None,
+    ranked_count: int | None = None,
+    data_unavailable_count: int = 0,
+    evaluated_at: dt.datetime = _NOW,
+) -> WatchlistAdditionSummary:
+    added_count = len(items)
+    target = total_target_count if total_target_count is not None else added_count
+    return WatchlistAdditionSummary(
+        policy_name=policy_name,
+        policy_label=policy_label if policy_label is not None else policy_name,
+        policy_conditions=(
+            policy_conditions if policy_conditions is not None else ["配当利回り6.0%以上(満点)"]
+        ),
+        total_target_count=target,
+        ranked_count=ranked_count if ranked_count is not None else added_count,
+        data_unavailable_count=data_unavailable_count,
+        added_count=added_count,
+        addition_rate_pct=(added_count / target * 100) if target else 0.0,
+        evaluated_at=evaluated_at,
+        items=items,
     )
 
 
@@ -1545,76 +1566,67 @@ def test_notify_watchlist_additions_returns_false_and_sends_nothing_when_empty(
 ) -> None:
     service, _repo, client = service_and_repos
 
-    sent = service.notify_watchlist_additions(
-        [], {}, "high_dividend_financial_health", _NOW, _hash_for([])
-    )
+    sent = service.notify_watchlist_additions(_summary([]), _hash_for([]))
 
     assert sent is False
     assert client.sent == []
 
 
-def test_notify_watchlist_additions_sends_and_shows_rank_score_and_reason(
+def test_notify_watchlist_additions_sends_and_shows_rank_score_and_highlights(
     service_and_repos,
 ) -> None:
     service, _repo, client = service_and_repos
-    item = _watchlist_item("1234", "テスト株式会社")
-    result = _watchlist_screening_result(
-        "1234",
-        "テスト株式会社",
-        87.0,
-        matched_criteria=[
-            MatchedCriterion.HIGH_DIVIDEND_YIELD,
-            MatchedCriterion.SOLID_EQUITY_RATIO,
-        ],
+    summary = _summary(
+        [_summary_item("1234", "テスト株式会社", rank=1, total_score=87.0)],
+        policy_label="高配当・財務健全性",
+        total_target_count=1,
+        ranked_count=1,
     )
 
-    sent = service.notify_watchlist_additions(
-        [item], {"1234": result}, "high_dividend_financial_health", _NOW, _hash_for(["1234"])
-    )
+    sent = service.notify_watchlist_additions(summary, _hash_for(["1234"]))
 
     assert sent is True
     message = client.sent[0]
     assert "【ウォッチリスト追加】" in message
     assert "新たに1銘柄を追加しました。" in message
     assert "高配当・財務健全性" in message
+    assert "対象：1銘柄" in message
+    assert "評価可能：1銘柄" in message
+    assert "追加率：100.0%" in message
     assert "1. テスト株式会社（1234）" in message
     assert "・総合スコア：87点" in message
-    assert "・配当利回り：4.2%" in message
-    assert "・自己資本比率：55.0%" in message
-    assert "・追加理由：高配当、財務健全" in message
+    assert "・順位：評価可能1銘柄中1位" in message
+    assert "・高評価項目：" in message
+    assert "配当利回り 4.2%" in message
+    assert "自己資本比率 55.0%" in message
 
 
 def test_notify_watchlist_additions_only_shows_actually_added_items(
     service_and_repos,
 ) -> None:
-    """スコア合格でも上限超過/既登録だった銘柄はresults_by_code/added_itemsに
-    含まれない前提であり、渡されたadded_itemsのみが表示されることを確認する。
-    """
+    """summary.itemsに含まれる銘柄のみが表示されることを確認する
+    (上限超過/既登録だった銘柄はbuild_watchlist_addition_summary側で
+    既に除外されている前提)。"""
     service, _repo, client = service_and_repos
-    item = _watchlist_item("1234")
-    result = _watchlist_screening_result("1234", None, 80.0)
+    summary = _summary([_summary_item("1234", None, rank=1, total_score=80.0)])
 
-    service.notify_watchlist_additions(
-        [item], {"1234": result}, "high_dividend_financial_health", _NOW, _hash_for(["1234"])
-    )
+    service.notify_watchlist_additions(summary, _hash_for(["1234"]))
 
     message = client.sent[0]
     assert "1234" in message
     assert "新たに1銘柄を追加しました" in message
 
 
-def test_notify_watchlist_additions_orders_by_score_descending(service_and_repos) -> None:
+def test_notify_watchlist_additions_renders_items_in_summary_order(service_and_repos) -> None:
+    """順位付け(スコア降順への並べ替え)はbuild_watchlist_addition_summary()側の
+    責務であり、レンダリング側はsummary.itemsの並び順をそのまま表示する
+    (通知チャネルとPresentation生成の責務分離)。"""
     service, _repo, client = service_and_repos
-    low = _watchlist_item("1111", "ロー")
-    high = _watchlist_item("2222", "ハイ")
-    results = {
-        "1111": _watchlist_screening_result("1111", "ロー", 60.0),
-        "2222": _watchlist_screening_result("2222", "ハイ", 90.0),
-    }
+    high = _summary_item("2222", "ハイ", rank=1, total_score=90.0)
+    low = _summary_item("1111", "ロー", rank=2, total_score=60.0)
+    summary = _summary([high, low], total_target_count=2, ranked_count=2)
 
-    service.notify_watchlist_additions(
-        [low, high], results, "high_dividend_financial_health", _NOW, _hash_for(["1111", "2222"])
-    )
+    service.notify_watchlist_additions(summary, _hash_for(["1111", "2222"]))
 
     message = client.sent[0]
     assert message.index("1. ハイ") < message.index("2. ロー")
@@ -1624,18 +1636,13 @@ def test_notify_watchlist_additions_shows_only_top_ten_with_remainder_summary(
     service_and_repos,
 ) -> None:
     service, _repo, client = service_and_repos
-    items = [_watchlist_item(f"{1000 + i}") for i in range(13)]
-    results = {
-        item.stock_code: _watchlist_screening_result(item.stock_code, None, 100.0 - i)
-        for i, item in enumerate(items)
-    }
+    items = [
+        _summary_item(f"{1000 + i}", None, rank=i + 1, total_score=100.0 - i) for i in range(13)
+    ]
+    summary = _summary(items, total_target_count=13, ranked_count=13)
 
     service.notify_watchlist_additions(
-        items,
-        results,
-        "high_dividend_financial_health",
-        _NOW,
-        _hash_for([item.stock_code for item in items]),
+        summary, _hash_for([item.stock_code for item in items])
     )
 
     message = client.sent[0]
@@ -1647,18 +1654,15 @@ def test_notify_watchlist_additions_suppresses_duplicate_same_day_same_content(
     service_and_repos,
 ) -> None:
     service, _repo, client = service_and_repos
-    item = _watchlist_item("1234")
-    result = _watchlist_screening_result("1234", None, 80.0)
+    summary = _summary([_summary_item("1234", None, rank=1, total_score=80.0)])
 
     content_hash = _hash_for(["1234"])
-    first = service.notify_watchlist_additions(
-        [item], {"1234": result}, "high_dividend_financial_health", _NOW, content_hash
-    )
+    first = service.notify_watchlist_additions(summary, content_hash)
     second = service.notify_watchlist_additions(
-        [item],
-        {"1234": result},
-        "high_dividend_financial_health",
-        _NOW + dt.timedelta(minutes=5),
+        _summary(
+            [_summary_item("1234", None, rank=1, total_score=80.0)],
+            evaluated_at=_NOW + dt.timedelta(minutes=5),
+        ),
         content_hash,
     )
 
@@ -1671,15 +1675,155 @@ def test_notify_watchlist_additions_unknown_policy_name_falls_back_to_raw_value(
     service_and_repos,
 ) -> None:
     service, _repo, client = service_and_repos
-    item = _watchlist_item("1234")
-    result = _watchlist_screening_result("1234", None, 80.0)
+    summary = _summary(
+        [_summary_item("1234", None, rank=1, total_score=80.0)],
+        policy_name="some_future_policy",
+        policy_label="some_future_policy",
+    )
 
     service.notify_watchlist_additions(
-        [item],
-        {"1234": result},
-        "some_future_policy",
-        _NOW,
-        _hash_for(["1234"], policy_name="some_future_policy"),
+        summary, _hash_for(["1234"], policy_name="some_future_policy")
     )
 
     assert "some_future_policy" in client.sent[0]
+
+
+# --- render_watchlist_addition_message: 文字数予算(LINE通知品質改善、修正⑩) -----
+
+
+def test_render_watchlist_addition_message_normal_case_fits_in_one_message() -> None:
+    summary = _summary(
+        [_summary_item("1234", "テスト株式会社", rank=1, total_score=80.0)],
+        total_target_count=1,
+        ranked_count=1,
+    )
+
+    message = render_watchlist_addition_message(summary)
+
+    assert len(message) <= line_notification_service_module._LINE_ADDITION_MESSAGE_CHAR_BUDGET
+    assert "1. テスト株式会社（1234）" in message
+
+
+def test_render_watchlist_addition_message_zero_items_returns_placeholder_call() -> None:
+    """summary.itemsが空の場合はnotify_watchlist_additions側で早期returnするため
+    render自体は呼ばれない設計だが、render関数単体としても予算内に収まること。"""
+    summary = _summary([])
+
+    message = render_watchlist_addition_message(summary)
+
+    assert len(message) <= line_notification_service_module._LINE_ADDITION_MESSAGE_CHAR_BUDGET
+
+
+def test_render_watchlist_addition_message_at_max_additions_stays_within_budget() -> None:
+    """max_watchlist_additions_per_run既定値(20件)まで追加が発生した極端な
+    ケースでも、最終本文が文字数予算に収まること。"""
+    items = [
+        _summary_item(f"{1000 + i}", f"テスト株式会社{i:02d}", rank=i + 1, total_score=100.0 - i)
+        for i in range(20)
+    ]
+    summary = _summary(items, total_target_count=100, ranked_count=90)
+
+    message = render_watchlist_addition_message(summary)
+
+    assert len(message) <= line_notification_service_module._LINE_ADDITION_MESSAGE_CHAR_BUDGET
+
+
+def test_render_watchlist_addition_message_truncates_beyond_detail_limit() -> None:
+    items = [
+        _summary_item(f"{1000 + i}", None, rank=i + 1, total_score=100.0 - i) for i in range(13)
+    ]
+    summary = _summary(items, total_target_count=13, ranked_count=13)
+
+    message = render_watchlist_addition_message(summary)
+
+    assert "11." not in message
+    assert "ほか3銘柄を追加しました。" in message
+
+
+def test_render_watchlist_addition_message_excludes_item_that_would_exceed_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """次の銘柄を詳細表示に含めると最終本文が予算を超えるフィクスチャで、
+    その銘柄が詳細表示から除外され省略件数へ計上されること。"""
+    monkeypatch.setattr(line_notification_service_module, "_LINE_ADDITION_MESSAGE_CHAR_BUDGET", 600)
+    items = [
+        _summary_item(f"{1000 + i}", "とても長い会社名" * 3, rank=i + 1, total_score=100.0 - i)
+        for i in range(5)
+    ]
+    summary = _summary(items, total_target_count=5, ranked_count=5)
+
+    message = render_watchlist_addition_message(summary)
+
+    assert len(message) <= 600
+    assert "ほか" in message
+
+
+def test_render_watchlist_addition_message_handles_full_width_characters() -> None:
+    """日本語の全角文字を含む場合でも文字数(Python文字列長)ベースで正しく
+    予算判定されること(UTF-8バイト数との混同がないこと)。"""
+    items = [
+        _summary_item(f"{1000 + i}", "全角銘柄名株式会社", rank=i + 1, total_score=100.0 - i)
+        for i in range(10)
+    ]
+    summary = _summary(items, total_target_count=10, ranked_count=10)
+
+    message = render_watchlist_addition_message(summary)
+
+    assert len(message) <= line_notification_service_module._LINE_ADDITION_MESSAGE_CHAR_BUDGET
+    assert "全角銘柄名株式会社" in message
+
+
+def test_render_watchlist_addition_message_minimal_fallback_when_required_parts_exceed_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """タイトル・件数サマリー・評価ポリシーだけで予算を超過する異常ケースでは、
+    短縮フォーマットへ切り替わり、それでも件数サマリー・評価日時は残ること。"""
+    monkeypatch.setattr(line_notification_service_module, "_LINE_ADDITION_MESSAGE_CHAR_BUDGET", 100)
+    long_conditions = [f"非常に長い評価ポリシー条件文その{i}" * 5 for i in range(10)]
+    summary = _summary(
+        [_summary_item("1234", None, rank=1, total_score=80.0)],
+        policy_conditions=long_conditions,
+        total_target_count=1,
+        ranked_count=1,
+    )
+
+    message = render_watchlist_addition_message(summary)
+
+    assert len(message) <= 100
+    assert "対象" in message
+    assert "評価日時" in message
+
+
+def test_render_watchlist_addition_message_logs_error_on_minimal_fallback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    monkeypatch.setattr(line_notification_service_module, "_LINE_ADDITION_MESSAGE_CHAR_BUDGET", 50)
+    long_conditions = [f"非常に長い評価ポリシー条件文その{i}" * 5 for i in range(10)]
+    summary = _summary(
+        [_summary_item("1234", None, rank=1, total_score=80.0)],
+        policy_conditions=long_conditions,
+        total_target_count=1,
+        ranked_count=1,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        render_watchlist_addition_message(summary)
+
+    assert any("exceeds char budget" in r.message for r in caplog.records)
+
+
+def test_render_watchlist_addition_message_always_within_budget_across_sizes() -> None:
+    """様々な追加件数・文言長の組み合わせで、戻り値が常に文字数予算以内に
+    収まることを確認する。"""
+    for count in (0, 1, 5, 10, 15, 20):
+        items = [
+            _summary_item(
+                f"{2000 + i}", f"銘柄{i}" * (i % 5 + 1), rank=i + 1, total_score=100.0 - i
+            )
+            for i in range(count)
+        ]
+        summary = _summary(items, total_target_count=max(count, 1), ranked_count=count)
+        message = render_watchlist_addition_message(summary)
+        assert len(message) <= line_notification_service_module._LINE_ADDITION_MESSAGE_CHAR_BUDGET

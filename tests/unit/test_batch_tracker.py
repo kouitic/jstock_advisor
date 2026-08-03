@@ -302,3 +302,137 @@ def test_max_ranking_entries_capacity_is_documented_and_positive() -> None:
     total_budget_bytes = batch_tracker.MAX_RANKING_ENTRY_BYTES * batch_tracker.MAX_RANKING_ENTRIES
     dynamodb_item_limit_bytes = 400_000
     assert total_budget_bytes < dynamodb_item_limit_bytes * 0.5
+
+
+# --- complete_candidate: total_score/notification_detail(LINE通知品質改善) ------
+
+
+@pytest.fixture
+def moto_progress_dynamodb(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("DYNAMODB_TABLE_PREFIX", "jstock")
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name=_REGION)
+        client.create_table(
+            TableName="jstock-batch_runs",
+            KeySchema=[{"AttributeName": "batch_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "batch_id", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        client.create_table(
+            TableName="jstock-watchlist_candidate_progress",
+            KeySchema=[
+                {"AttributeName": "batch_id", "KeyType": "HASH"},
+                {"AttributeName": "stock_code", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "batch_id", "AttributeType": "S"},
+                {"AttributeName": "stock_code", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield
+
+
+def _prepare_pending_row(batch_id: str, stock_code: str, owner_id: str) -> None:
+    batch_tracker.try_acquire_dispatch_lease(batch_id, "dispatcher", _NOW, 360, 72)
+    batch_tracker.set_watchlist_batch_total(batch_id, 1, 72, _NOW)
+    batch_tracker.create_missing_candidate_progress_rows(batch_id, [stock_code], _NOW, 72)
+    batch_tracker.mark_dispatch_completed(batch_id, _NOW)
+    batch_tracker.claim_candidate_lease(batch_id, stock_code, owner_id, _NOW, 240)
+
+
+def test_complete_candidate_persists_total_score_for_non_passed_category(
+    moto_progress_dynamodb: None,
+) -> None:
+    """total_scoreはPASSED以外(FAILED_SCORE等)でも保存される(修正①、
+    evaluate()が実行された全銘柄で保存する設計)。"""
+    _prepare_pending_row("batch-1", "1111", "owner-a")
+
+    batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=batch_tracker.WatchlistProgressStatus.COMPLETED,
+        evaluation_result="FAILED_SCORE",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+        total_score=45.5,
+    )
+
+    records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    assert records[0].total_score == pytest.approx(45.5)
+    assert records[0].notification_detail is None
+
+
+def test_complete_candidate_persists_notification_detail_as_model(
+    moto_progress_dynamodb: None,
+) -> None:
+    """notification_detailはWatchlistScoreDetailのまま渡し、内部でJSON化・
+    復元される(呼び出し元はJSON文字列を一切扱わない)。"""
+    from jstock_advisor.domain.signals.watchlist_screening import (
+        ScoreCriterionValue,
+        WatchlistScoreDetail,
+    )
+
+    _prepare_pending_row("batch-1", "1111", "owner-a")
+    detail = WatchlistScoreDetail(
+        stock_code="1111",
+        criteria=[
+            ScoreCriterionValue(
+                criterion_key="dividend_yield", label="配当利回り", score=30.0, metric_value="6.6%"
+            )
+        ],
+    )
+
+    batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=batch_tracker.WatchlistProgressStatus.COMPLETED,
+        evaluation_result="PASSED",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+        total_score=87.0,
+        notification_detail=detail,
+    )
+
+    records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    restored = records[0].notification_detail
+    assert restored is not None
+    assert restored.stock_code == "1111"
+    assert restored.criteria[0].criterion_key == "dividend_yield"
+    assert restored.criteria[0].metric_value == "6.6%"
+
+
+def test_complete_candidate_without_total_score_leaves_it_none(
+    moto_progress_dynamodb: None,
+) -> None:
+    """total_scoreを渡さない場合(NOT_FOUND/DATA_ERROR等、evaluate()が
+    実行されなかった銘柄)はNoneのまま保存される。"""
+    _prepare_pending_row("batch-1", "1111", "owner-a")
+
+    batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=batch_tracker.WatchlistProgressStatus.COMPLETED,
+        evaluation_result="NOT_FOUND",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+
+    records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    assert records[0].total_score is None

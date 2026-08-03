@@ -824,6 +824,18 @@ class WatchlistScreeningScoringConfig(StrictModel):
         return self
 
 
+class StockDisplayNameConfig(StrictModel):
+    """銘柄表示名解決(通知品質改善、2026-08)向けの運用設定。
+
+    既定値(60)の責務はこのモデルのみが持つ(StockDisplayNameResolver/
+    JpxStockNameSource側にデフォルト値は重複定義しない)。
+    """
+
+    # JPX銘柄名キャッシュの取得・パースに失敗した際、直後の連続リトライを防ぐ
+    # negative cacheの有効期間(秒)。1以上の整数。
+    jpx_name_negative_cache_ttl_seconds: int = Field(default=60, ge=1)
+
+
 class WatchlistDataCacheConfig(StrictModel):
     """ウォッチリスト専用の株価/財務/配当データキャッシュTTL(運用ハードニング4節)。
 
@@ -884,6 +896,9 @@ class WatchlistScreeningRulesConfig(StrictModel):
     # --- 運用ハードニング第3弾(2026-08、レビュー対応)で追加 -----------------
     # NOTIFICATION_FAILEDに対するReconciler/CLIの自動再試行上限回数(1節)。
     max_notification_retry_attempts: int = Field(gt=0)
+
+    # --- LINE通知品質改善(2026-08)で追加 --------------------------------------
+    stock_display_name: StockDisplayNameConfig = Field(default_factory=StockDisplayNameConfig)
 
 
 # --- 集約 --------------------------------------------------------------------

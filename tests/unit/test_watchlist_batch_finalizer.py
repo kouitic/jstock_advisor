@@ -16,6 +16,7 @@ def _record(
     attempt_count: int = 1,
     is_provider_failure_suspected: bool = False,
     missing_field_names: list[str] | None = None,
+    total_score: float | None = None,
 ) -> CandidateProgressRecord:
     return CandidateProgressRecord(
         batch_id="batch-1",
@@ -29,6 +30,8 @@ def _record(
         total_processing_duration_ms=duration_ms,
         is_provider_failure_suspected=is_provider_failure_suspected,
         missing_field_names=missing_field_names or [],
+        total_score=total_score,
+        notification_detail=None,
     )
 
 
@@ -169,3 +172,93 @@ def test_compute_batch_metrics_p50_p95_use_total_processing_duration_ms() -> Non
     assert metrics["p95_processing_duration_ms"] == 500
     assert metrics["estimated_lambda_total_duration_ms"] == sum(durations)
     assert metrics["estimated_yahoo_finance_requests"] == 5 * 11
+
+
+# --- data_unavailable_countの4分類合算(LINE通知品質改善、修正⑦) -----------------
+
+
+def _data_unavailable_count(metrics: dict[str, object]) -> int:
+    return (
+        metrics["not_found_count"]
+        + metrics["data_error_count"]
+        + metrics["unexpected_error_count"]
+        + metrics["terminal_failure_count"]
+    )
+
+
+def test_compute_batch_metrics_returns_unexpected_error_count() -> None:
+    """第7版まではunexpected_error_countが返り値dictに含まれておらず、
+    data_unavailable_countの算出式から漏れるバグがあった(修正⑦の回帰テスト)。"""
+    records = [
+        _record("1111", evaluation_result="UNEXPECTED_ERROR"),
+        _record("2222"),
+    ]
+    metrics = compute_batch_metrics(records)
+    assert metrics["unexpected_error_count"] == 1
+
+
+def test_data_unavailable_count_invariant_holds_with_real_batch_breakdown() -> None:
+    """今回の実績値(対象98・合格2・不合格88[FAILED_SCORE50+FAILED_REQUIRED38]・
+    データ未検出8)で、total_target_count == ranked_count + data_unavailable_count
+    が成立すること。"""
+    records = (
+        [_record(f"pass{i:03d}", total_score=70.0) for i in range(2)]
+        + [
+            _record(f"score{i:03d}", evaluation_result="FAILED_SCORE", total_score=40.0)
+            for i in range(50)
+        ]
+        + [
+            _record(f"req{i:03d}", evaluation_result="FAILED_REQUIRED", total_score=20.0)
+            for i in range(38)
+        ]
+        + [_record(f"nf{i:03d}", evaluation_result="NOT_FOUND") for i in range(8)]
+    )
+    metrics = compute_batch_metrics(records)
+
+    ranked_count = metrics["screening_completed_count"]
+    data_unavailable_count = _data_unavailable_count(metrics)
+
+    assert metrics["total_candidate_count"] == 98
+    assert ranked_count == 90
+    assert data_unavailable_count == 8
+    assert metrics["total_candidate_count"] == ranked_count + data_unavailable_count
+
+
+def test_data_unavailable_count_invariant_holds_with_unexpected_error_included() -> None:
+    """UNEXPECTED_ERRORを含む場合でも不変条件が成立すること(修正⑦の主目的)。"""
+    records = (
+        [_record(f"pass{i:03d}", total_score=70.0) for i in range(2)]
+        + [
+            _record(f"score{i:03d}", evaluation_result="FAILED_SCORE", total_score=40.0)
+            for i in range(49)
+        ]
+        + [
+            _record(f"req{i:03d}", evaluation_result="FAILED_REQUIRED", total_score=20.0)
+            for i in range(38)
+        ]
+        + [_record(f"nf{i:03d}", evaluation_result="NOT_FOUND") for i in range(8)]
+        + [_record("unexpected001", evaluation_result="UNEXPECTED_ERROR")]
+    )
+    metrics = compute_batch_metrics(records)
+
+    ranked_count = metrics["screening_completed_count"]
+    data_unavailable_count = _data_unavailable_count(metrics)
+
+    assert metrics["total_candidate_count"] == 98
+    assert ranked_count == 89
+    assert data_unavailable_count == 9
+    assert metrics["total_candidate_count"] == ranked_count + data_unavailable_count
+
+
+def test_data_unavailable_count_invariant_holds_with_terminal_failure_included() -> None:
+    records = [
+        _record("1111", total_score=70.0),
+        _record("2222", status="FAILED", evaluation_result="DISPATCH_SEND_FAILED"),
+    ]
+    metrics = compute_batch_metrics(records)
+
+    ranked_count = metrics["screening_completed_count"]
+    data_unavailable_count = _data_unavailable_count(metrics)
+
+    assert metrics["total_candidate_count"] == ranked_count + data_unavailable_count
+    assert data_unavailable_count == 1
