@@ -4,15 +4,19 @@
 # against the exact set of versions that has actually been verified.
 #
 # Regenerate with (from the verified .venv):
-#   pip freeze | findstr /v /b "jstock" > requirements-lock.txt
-# (jstock-advisor itself is excluded as a self-reference.)
+#   pip freeze | findstr /v /c:"jstock" > requirements-lock.txt
+# (jstock-advisor itself is excluded as a self-reference. Use /c: substring
+# match, not /b: once the package is installed editable (`pip install -e .`)
+# from this git-tracked directory, pip freeze emits it as
+# `-e git+https://github.com/...@<commit>#egg=jstock_advisor`, which does not
+# start with "jstock" so a /b prefix-anchored match silently fails to filter it.)
 #
 # Note: pywin32 is a Windows-only transitive dependency (pulled in by the
 # `docker` package only when sys_platform == "win32"). The environment marker
 # below was added by hand so this file also resolves on Linux CI runners;
 # do not let a plain re-freeze on Windows silently drop that marker.
 #
-# Generated: 2026-08-01
+# Generated: 2026-08-04
 # Kept ASCII-only intentionally: some requirements-file parsers (used by CI
 # security/audit tooling) default to a non-UTF-8 codec on Windows and fail on
 # non-ASCII bytes in this file.
@@ -30,7 +34,7 @@ cffi==2.1.0
 charset-normalizer==3.4.9
 colorama==0.4.6
 coverage==7.15.2
-cryptography==49.0.0
+cryptography==50.0.0
 curl_cffi==0.15.0
 docker==7.2.0
 freezegun==1.5.5
