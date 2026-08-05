@@ -1,0 +1,14 @@
+# 個別購入理由(CustomThesisCondition)が未登録の銘柄向けの共通投資ストーリー
+# テンプレート。標準5軸(配当方針・総合利回り・優待条件・利益CF前提・財務健全性)
+# にのみ適用し、個別購入理由軸(5点)の代用には使わない。
+
+version: 1
+
+# ユーザーの投資スタンス(高配当長期保有)における配当+優待の最低総合利回り基準。
+min_total_yield_pct: 3.5
+
+# 減配の許容度。noneは公式確認済みの減配を一切許容しない。
+dividend_cut_tolerance: none
+
+# 中長期的な利益・CF前提の維持には、営業CFのトレンドが悪化していないことを要する。
+require_positive_operating_cashflow_trend: true

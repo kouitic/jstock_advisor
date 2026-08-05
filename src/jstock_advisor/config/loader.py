@@ -22,6 +22,11 @@ from jstock_advisor.config.models import (
     EarningsWindowRulesConfig,
     EvaluationRulesConfig,
     HolidayCalendarConfig,
+    HoldingDecisionRatioRulesConfig,
+    HoldingDecisionRiskRulesConfig,
+    HoldingDecisionRulesConfig,
+    IndustryScoringPolicyConfig,
+    InvestmentThesisTemplateConfig,
     MomentumRulesConfig,
     NotificationRulesConfig,
     PortfolioConcentrationRulesConfig,
@@ -119,6 +124,21 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     watchlist_screening = WatchlistScreeningRulesConfig.model_validate(
         _load_yaml(directory / "watchlist_screening_rules.yaml")
     )
+    holding_decision = HoldingDecisionRulesConfig.model_validate(
+        _load_yaml(directory / "holding_decision_rules.yaml")
+    )
+    holding_decision_risk = HoldingDecisionRiskRulesConfig.model_validate(
+        _load_yaml(directory / "holding_decision_risk_rules.yaml")
+    )
+    holding_decision_ratio = HoldingDecisionRatioRulesConfig.model_validate(
+        _load_yaml(directory / "holding_decision_ratio_rules.yaml")
+    )
+    investment_thesis_template = InvestmentThesisTemplateConfig.model_validate(
+        _load_yaml(directory / "investment_thesis_template.yaml")
+    )
+    industry_scoring_policy = IndustryScoringPolicyConfig.model_validate(
+        _load_yaml(directory / "industry_scoring_policy.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -139,4 +159,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         buy_decision=buy_decision,
         add_on=add_on,
         watchlist_screening=watchlist_screening,
+        holding_decision=holding_decision,
+        holding_decision_risk=holding_decision_risk,
+        holding_decision_ratio=holding_decision_ratio,
+        investment_thesis_template=investment_thesis_template,
+        industry_scoring_policy=industry_scoring_policy,
     )

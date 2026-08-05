@@ -68,6 +68,9 @@ class SellSignalOutcome:
     stock_code: str
     recommendation: Recommendation | None
     data_error: str | None
+    # 保有判断スコアのShadow比較用監査情報(実装プラン15節)。旧エンジンが
+    # 判定根拠とした個別ルール名(TRIGGERED分)。データ取得失敗時は空。
+    triggered_rule_names: tuple[str, ...] = ()
 
 
 def _evidence_detail_dict(e: SellRuleEvaluation) -> dict[str, object]:
@@ -368,7 +371,9 @@ class SellSignalService:
         )
 
         if recommendation_type == RecommendationType.HOLD:
-            return SellSignalOutcome(holding.stock_code, None, None)
+            return SellSignalOutcome(
+                holding.stock_code, None, None, tuple(result.triggered_rules)
+            )
 
         evidence_details = result.evidence_details
 
@@ -415,4 +420,6 @@ class SellSignalService:
             evidence_details=[_evidence_detail_dict(e) for e in evidence_details],
             independent_evidence_group_count=result.independent_evidence_group_count,
         )
-        return SellSignalOutcome(holding.stock_code, recommendation, None)
+        return SellSignalOutcome(
+            holding.stock_code, recommendation, None, tuple(result.triggered_rules)
+        )

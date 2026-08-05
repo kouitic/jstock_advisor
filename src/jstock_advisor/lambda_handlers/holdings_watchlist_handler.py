@@ -45,6 +45,7 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EvaluationStatus,
@@ -54,9 +55,16 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.evaluation_audit import HoldingEvaluationAudit, summary_category
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.signals.holding_decision_execution_plan import (
+    resolve_execution_plan,
+    resolve_financial_deferred_policy,
+)
 from jstock_advisor.domain.signals.portfolio_concentration import evaluate_portfolio_concentration
 from jstock_advisor.infrastructure.aws.batch_tracker import record_result, start_batch
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
+    HoldingDecisionResultRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -65,6 +73,14 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
+from jstock_advisor.services.holding_decision_notification_builder import (
+    build_holding_decision_recommendation,
+)
+from jstock_advisor.services.holding_decision_runtime_config_service import (
+    HoldingDecisionRuntimeConfigService,
+)
+from jstock_advisor.services.holding_decision_service import HoldingDecisionService
+from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
@@ -143,6 +159,96 @@ def _evaluate_portfolio_concentration_and_notify(
     notification_service.notify_recommendation(recommendation, now)
 
 
+def _notify_legacy_sell_and_build_result(
+    holding: Holding,
+    now: dt.datetime,
+    recommendation: Recommendation,
+    recommendation_repo: RecommendationRepository,
+    notification_service: LineNotificationService,
+) -> _HoldingResult:
+    recommendation_repo.save(recommendation)
+    outcome = notification_service.notify_recommendation_with_status(recommendation, now)
+    audit = HoldingEvaluationAudit(
+        stock_code=holding.stock_code,
+        evaluated_at=now,
+        evaluation_status=(
+            EvaluationStatus.DATA_QUALITY_BLOCKED
+            if outcome.data_quality_blocked
+            else EvaluationStatus.COMPLETED
+        ),
+        raw_sell_recommendation_type=recommendation.raw_recommendation_type,
+        raw_profit_recommendation_type=None,
+        final_recommendation_type=recommendation.recommendation_type,
+        notification_status=outcome.status,
+        notification_suppression_reason=None if outcome.sent else outcome.status.value,
+        sell_signal_status="TRIGGERED",
+        profit_taking_status="NOT_EVALUATED",
+        fair_value_status="NOT_AVAILABLE",
+        data_quality_status="BLOCKED" if outcome.data_quality_blocked else "OK",
+        confidence=recommendation.confidence,
+        error_code=None,
+    )
+    return _HoldingResult(
+        recommended=True,
+        notified=outcome.sent,
+        succeeded=True,
+        category=summary_category(audit),
+        audit=audit,
+    )
+
+
+def _notify_holding_decision_and_build_result(
+    holding: Holding,
+    now: dt.datetime,
+    result,
+    snapshot,
+    config: AppConfig,
+    holding_decision_result_repo: HoldingDecisionResultRepository,
+    recommendation_repo: RecommendationRepository,
+    notification_service: LineNotificationService,
+) -> tuple[_HoldingResult, object]:
+    """保有判断スコアの通知を行い、(_HoldingResult, 保存用に更新したHoldingDecisionResult)を返す。"""
+    recommendation_id = str(uuid.uuid4())
+    recommendation = build_holding_decision_recommendation(
+        holding,
+        result,
+        snapshot,
+        str(config.holding_decision.scoring_model_version),
+        recommendation_id=recommendation_id,
+    )
+    linked_result = result.model_copy(update={"recommendation_id": recommendation_id})
+    recommendation_repo.save(recommendation)
+    outcome = notification_service.notify_recommendation_with_status(recommendation, now)
+    audit = HoldingEvaluationAudit(
+        stock_code=holding.stock_code,
+        evaluated_at=now,
+        evaluation_status=(
+            EvaluationStatus.DATA_QUALITY_BLOCKED
+            if outcome.data_quality_blocked
+            else EvaluationStatus.COMPLETED
+        ),
+        raw_sell_recommendation_type=None,
+        raw_profit_recommendation_type=None,
+        final_recommendation_type=recommendation.recommendation_type,
+        notification_status=outcome.status,
+        notification_suppression_reason=None if outcome.sent else outcome.status.value,
+        sell_signal_status="TRIGGERED",
+        profit_taking_status="NOT_EVALUATED",
+        fair_value_status="NOT_AVAILABLE",
+        data_quality_status="BLOCKED" if outcome.data_quality_blocked else "OK",
+        confidence=recommendation.confidence,
+        error_code=None,
+    )
+    holding_result = _HoldingResult(
+        recommended=True,
+        notified=outcome.sent,
+        succeeded=True,
+        category=summary_category(audit),
+        audit=audit,
+    )
+    return holding_result, linked_result
+
+
 def _analyze_one_holding(
     holding: Holding,
     now: dt.datetime,
@@ -150,6 +256,9 @@ def _analyze_one_holding(
     config: AppConfig,
     profit_service: ProfitTakingService,
     sell_service: SellSignalService,
+    holding_decision_service: HoldingDecisionService,
+    runtime_config_service: HoldingDecisionRuntimeConfigService,
+    holding_decision_result_repo: HoldingDecisionResultRepository,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     rule_version_service: RuleVersionService,
@@ -199,38 +308,116 @@ def _analyze_one_holding(
         now,
     )
 
-    sell_outcome = sell_service.analyze(holding, now, snapshot=snapshot)
-    if sell_outcome.recommendation is not None:
-        recommendation_repo.save(sell_outcome.recommendation)
-        outcome = notification_service.notify_recommendation_with_status(
-            sell_outcome.recommendation, now
+    # --- 新旧エンジンの排他制御(実装プラン11節) ---------------------------
+    runtime_lookup = runtime_config_service.get_config(now)
+    industry = classify_industry(snapshot.financial.sector, snapshot.financial.industry)
+    financial_deferred_policy = resolve_financial_deferred_policy(
+        runtime_lookup.config, config.industry_scoring_policy.financial_industry_policy
+    )
+    plan = resolve_execution_plan(
+        runtime_lookup.config.mode,
+        industry.classification,
+        industry.financial_category,
+        financial_deferred_policy,
+    )
+
+    legacy_result: _HoldingResult | None = None
+    legacy_reason_codes: tuple[str, ...] = ()
+    if plan.run_legacy_sell_evaluation:
+        sell_outcome = sell_service.analyze(holding, now, snapshot=snapshot)
+        legacy_reason_codes = sell_outcome.triggered_rule_names
+        if (
+            sell_outcome.recommendation is not None
+            and plan.allow_legacy_sell_notification
+        ):
+            legacy_result = _notify_legacy_sell_and_build_result(
+                holding, now, sell_outcome.recommendation, recommendation_repo, notification_service
+            )
+
+    holding_decision_result_notified: _HoldingResult | None = None
+    if plan.run_holding_decision_evaluation:
+        hd_outcome = holding_decision_service.evaluate(
+            holding,
+            now,
+            plan.execution_reason,
+            snapshot=snapshot,
+            runtime_config_version=runtime_lookup.effective_runtime_config_version,
+            legacy_reason_codes=legacy_reason_codes,
+            financial_model_version_used=(
+                config.industry_scoring_policy.financial_industry_policy.financial_model_version
+            ),
         )
+        if hd_outcome.integrity_error:
+            integrity_audit = HoldingEvaluationAudit(
+                stock_code=holding.stock_code,
+                evaluated_at=now,
+                evaluation_status=EvaluationStatus.ANALYSIS_FAILED,
+                raw_sell_recommendation_type=None,
+                raw_profit_recommendation_type=None,
+                final_recommendation_type=None,
+                notification_status=NotificationStatus.ANALYSIS_FAILED,
+                notification_suppression_reason="DATA_INTEGRITY_ERROR",
+                sell_signal_status="NOT_EVALUATED",
+                profit_taking_status="NOT_EVALUATED",
+                fair_value_status="NOT_AVAILABLE",
+                data_quality_status="NOT_EVALUATED",
+                confidence=None,
+                error_code="DATA_INTEGRITY_ERROR",
+            )
+            if legacy_result is None:
+                return _HoldingResult(
+                    recommended=False,
+                    notified=False,
+                    succeeded=False,
+                    category=summary_category(integrity_audit),
+                    audit=integrity_audit,
+                )
+            # 旧エンジンが既にこのサイクルの通知を確定させている場合、新エンジン側の
+            # shadow計算失敗によってその成功結果を上書きしない(ログにのみ残す)。
+            logger.warning(
+                "holding_decision DATA_INTEGRITY_ERROR (shadow, legacy already notified) "
+                "stock_code=%s",
+                holding.stock_code,
+            )
+        elif hd_outcome.result is not None:
+            hd_result = hd_outcome.result
+            if plan.allow_holding_decision_notification and hd_result.should_notify:
+                holding_decision_result_notified, hd_result = _notify_holding_decision_and_build_result(
+                    holding,
+                    now,
+                    hd_result,
+                    snapshot,
+                    config,
+                    holding_decision_result_repo,
+                    recommendation_repo,
+                    notification_service,
+                )
+            holding_decision_result_repo.save(hd_result)
+
+    if legacy_result is not None:
+        return legacy_result
+    if holding_decision_result_notified is not None:
+        return holding_decision_result_notified
+
+    if not plan.run_profit_taking_when_no_sell_notification:
         audit = HoldingEvaluationAudit(
             stock_code=holding.stock_code,
             evaluated_at=now,
-            evaluation_status=(
-                EvaluationStatus.DATA_QUALITY_BLOCKED
-                if outcome.data_quality_blocked
-                else EvaluationStatus.COMPLETED
-            ),
-            raw_sell_recommendation_type=sell_outcome.recommendation.raw_recommendation_type,
+            evaluation_status=EvaluationStatus.COMPLETED,
+            raw_sell_recommendation_type=None,
             raw_profit_recommendation_type=None,
-            final_recommendation_type=sell_outcome.recommendation.recommendation_type,
-            notification_status=outcome.status,
-            notification_suppression_reason=None if outcome.sent else outcome.status.value,
-            sell_signal_status="TRIGGERED",
+            final_recommendation_type=None,
+            notification_status=NotificationStatus.NOT_REQUIRED,
+            notification_suppression_reason=None,
+            sell_signal_status="NO_SIGNAL",
             profit_taking_status="NOT_EVALUATED",
             fair_value_status="NOT_AVAILABLE",
-            data_quality_status="BLOCKED" if outcome.data_quality_blocked else "OK",
-            confidence=sell_outcome.recommendation.confidence,
+            data_quality_status="OK",
+            confidence=None,
             error_code=None,
         )
         return _HoldingResult(
-            recommended=True,
-            notified=outcome.sent,
-            succeeded=True,
-            category=summary_category(audit),
-            audit=audit,
+            recommended=False, notified=False, succeeded=True, category="hold", audit=audit
         )
 
     pt_outcome = profit_service.analyze(holding, now, snapshot=snapshot)
@@ -334,6 +521,16 @@ def _process_single_holding(
 
     profit_service = ProfitTakingService(providers=providers, config=config)
     sell_service = SellSignalService(providers=providers, config=config)
+    runtime_config_service = HoldingDecisionRuntimeConfigService(
+        cache_ttl_seconds=config.holding_decision.runtime_config_cache_ttl_seconds
+    )
+    holding_decision_service = HoldingDecisionService(
+        providers,
+        config,
+        investment_thesis_service=InvestmentThesisService(),
+        runtime_config_service=runtime_config_service,
+    )
+    holding_decision_result_repo = HoldingDecisionResultRepository()
     try:
         result = _analyze_one_holding(
             holding,
@@ -342,6 +539,9 @@ def _process_single_holding(
             config,
             profit_service,
             sell_service,
+            holding_decision_service,
+            runtime_config_service,
+            holding_decision_result_repo,
             recommendation_repo,
             notification_service,
             rule_version_service,

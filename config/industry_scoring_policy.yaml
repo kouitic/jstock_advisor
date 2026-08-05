@@ -1,0 +1,25 @@
+# 企業品質スコアの業種別ポリシー。金融業(銀行/保険/証券/その他金融)は
+# BankRegulatoryMetricsが恒久的にNoneであり専用データソースが無いため、
+# 専用モデル完成まで旧SellSignalServiceが通知を担当し続け、
+# HoldingDecisionServiceはshadow(算出・保存のみ)で運用する。
+#
+# ここがActive移行状況の正の設定元。RuntimeConfig.financial_policy_overrideは
+# 緊急退避方向(FORCE_DEFER_ALL)にのみこの設定を上書きできる。
+# RuntimeConfigから金融業をActiveへ強制する経路は存在しない。
+
+version: 1
+
+financial_industry_policy:
+  # 金融業専用モデルの版。専用データソース・専用モデルが未実装の間はnull。
+  financial_model_version: null
+  # 専用モデルが対応済みの業種一覧(現時点は0件)。
+  supported_financial_categories: []
+  categories:
+    BANKING:
+      deferred: true
+    INSURANCE:
+      deferred: true
+    SECURITIES:
+      deferred: true
+    OTHER_FINANCIAL:
+      deferred: true

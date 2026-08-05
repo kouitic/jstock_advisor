@@ -1,0 +1,24 @@
+# 企業品質スコアの比率指標(営業CF/営業利益比率・簡易予想ROE・変動係数)の
+# 期間・分母最低値・clamp・異常ケース処理係数。
+
+version: 1
+
+clamp:
+  ratio_clamp_min: -2.0
+  ratio_clamp_max: 3.0
+  roe_clamp_min: -1.0
+  roe_clamp_max: 0.5
+
+# 営業CF/営業利益比率の分母(operating_income)絶対値がこれ未満の場合はNOT_EVALUATED
+# (極小分母による比率の異常な拡大を防ぐ)。単位: 円。
+min_operating_income_absolute_yen: 10000000
+
+# 変動係数(安定性指標)の平均値がこれ以下の場合、通常の変動係数の代わりに
+# 黒字期数の割合を使う。単位: 円。
+min_mean_for_cv_yen: 10000000
+
+# 変動係数算出前の外れ値クリップに使うz-score。
+outlier_clip_zscore: 3.0
+
+# 変動係数・安定性スコアに最低限必要な期間数。これ未満はNOT_EVALUATED。
+min_periods_for_stability_score: 3

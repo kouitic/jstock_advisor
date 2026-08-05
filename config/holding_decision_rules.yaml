@@ -1,0 +1,112 @@
+# 保有判断スコア方式(2026-08仕様)。企業品質(0-50)+投資ストーリー維持(0-50)
+# -リスク控除(0-100)を統合した単一スコアで、保有銘柄の売却判定を行う。
+
+version: 1
+
+# 採点モデルの構造版(どの指標が存在するか)。Phase0でデータ層を拡張し
+# 新しい指標(ROE/ROA等)を追加する際にインクリメントする。
+scoring_model_version: 1
+
+# 企業品質スコア(0-50点)の評価項目別配点。合計は50点。
+company_quality_weights:
+  financial_health_equity_ratio: 10
+  financial_health_debt_excess: 5
+  cash_generation_cf_income_ratio: 5
+  cash_generation_cf_streak: 5
+  profitability_roe: 6
+  profitability_eps_stability: 4
+  stability_operating_income: 6
+  stability_deficit: 4
+  governance_going_concern: 3
+  governance_listing_risk: 2
+
+# 企業品質スコアの各採点式が使う0点/満点閾値(_linear_score()方式)。
+# zero_at > full_atの項目は「値が小さいほど高得点」の向き(変動係数等)。
+company_quality_score_thresholds:
+  equity_ratio_pct:
+    zero_at: 0
+    full_at: 60
+  cf_income_ratio:
+    zero_at: 0.0
+    full_at: 1.5
+  cf_streak_quarters:
+    zero_at: 0
+    full_at: 4
+  roe:
+    zero_at: 0.0
+    full_at: 0.15
+  cv_based_stability:
+    zero_at: 0.5
+    full_at: 0.05
+  profit_quarter_ratio:
+    zero_at: 0.0
+    full_at: 1.0
+
+# 投資ストーリー維持スコア(0-50点)の評価項目別配点。合計は50点。
+investment_thesis_weights:
+  dividend_policy: 15
+  total_yield: 10
+  benefit_condition: 5
+  profit_cf_premise: 10
+  financial_premise: 5
+  custom_conditions: 5
+
+# 判定区分の境界値(final_holding_decision_scoreで判定)。
+judgment_category_thresholds:
+  strong_hold_min: 70
+  hold_min: 40
+  caution_min: 20
+  partial_sell_consideration_min: 0
+  sell_watch_min: -1
+  sell_consideration_min: -30
+
+# 通知条件: final_holding_decision_score < notify_below_score の場合のみLINE通知する。
+# judgment_category_thresholds.sell_watch_minと一致していること。
+notify_below_score: -1.0
+
+# ハードゲート発動時、final_score = min(base_score, score_cap)。
+# notify_below_score未満であることを起動時検証する。
+hard_gate:
+  score_cap: -30.0
+
+# component別coverage_ratioの通知閾値。risk_deductionのみblock/confidenceの2段階。
+coverage_thresholds:
+  overall_minimum: 0.60
+  company_quality_minimum: 0.60
+  investment_thesis_minimum: 0.60
+  risk_deduction_block_minimum: 0.30
+  risk_deduction_confidence_minimum: 0.70
+
+# overall_coverageからHoldingDecisionConfidenceLevelを決める閾値。
+# 0.6未満はINSUFFICIENT_EVIDENCE(通常の売却通知を禁止)。
+confidence_thresholds:
+  high_minimum: 0.95
+  medium_minimum: 0.80
+  low_minimum: 0.60
+
+# 再通知抑止条件。
+renotification:
+  renotify_score_deterioration: 10.0
+  renotify_on_decision_change: true
+  renotify_on_new_hard_gate: true
+  renotify_after_earnings: true
+  renotify_on_sell_price_change_pct: 5.0
+
+# CustomThesisCondition(個別購入理由)の鮮度2段階。
+# fresh_within_days以内は通常confidence、stale_after_daysを超えるとNOT_EVALUATED。
+fresh_within_days: 180
+stale_after_days: 365
+
+# Baseline活性化(activate())が競合した場合の最大リトライ回数。
+baseline_activation_max_retries: 3
+
+# 主な加点・減点要因(positive_reasons/negative_reasons)の保存件数上限。
+top_positive_reasons_count: 3
+top_negative_reasons_count: 5
+
+# ランタイムConfig(HoldingDecisionRuntimeConfig)のキャッシュTTL(秒)。
+runtime_config_cache_ttl_seconds: 60
+
+# 投資ストーリー維持スコアがこの値未満、かつHUMAN_APPROVEDのInvestmentThesisが
+# 存在する場合のみ、ハードゲート「中核となる投資ストーリーの完全消失」を機械判定する。
+investment_thesis_collapse_threshold: 5.0

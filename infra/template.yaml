@@ -219,6 +219,82 @@ Resources:
         - AttributeName: recommendation_id
           KeyType: HASH
 
+  # --- 保有判断スコア方式(2026-08仕様)で追加 ------------------------------
+
+  HoldingDecisionResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-holding_decision_results"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_decision_result_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_decision_result_id
+          KeyType: HASH
+
+  InvestmentThesesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-investment_theses"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: investment_thesis_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: investment_thesis_id
+          KeyType: HASH
+
+  InvestmentThesisBaselinesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-investment_thesis_baselines"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: baseline_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: baseline_id
+          KeyType: HASH
+
+  InvestmentThesisBaselineSequencesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-investment_thesis_baseline_sequences"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_id
+          KeyType: HASH
+
+  InvestmentThesisBaselinePointersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-investment_thesis_baseline_pointers"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_id
+          KeyType: HASH
+
+  # notification_enabled=false等の安全側フォールバックが機能するよう、書き込みは
+  # CLI経由の人間のみに限定する(HoldingsWatchlistFunction等へはReadPolicyのみ付与)。
+  HoldingDecisionRuntimeConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-holding_decision_runtime_config"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: config_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: config_id
+          KeyType: HASH
+
   TransactionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -511,6 +587,14 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # --- 保有判断スコア方式(2026-08仕様)で追加。RuntimeConfigのみ読み取り専用
+        # (書き込みはCLI経由の人間のみ、1節)。他5テーブルは通常のCRUD ---
+        - DynamoDBCrudPolicy: { TableName: !Ref HoldingDecisionResultsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesisBaselinesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesisBaselineSequencesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesisBaselinePointersTable }
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingDecisionRuntimeConfigTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow

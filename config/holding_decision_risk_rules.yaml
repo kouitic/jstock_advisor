@@ -1,0 +1,77 @@
+# リスク控除スコア(0-100点)の係数・シグナル定義。
+# risk_points = base_points × severity_factor × persistence_factor × confidence_factor
+# (severity_factorは各シグナルの実測値から動的に算出するためconfig化しない)
+
+version: 1
+
+# カテゴリ別控除上限。合計は100点。
+category_caps:
+  business_cashflow_deterioration: 25
+  shareholder_return_deterioration: 25
+  financial_crisis: 20
+  governance_and_listing_risk: 20
+  structural_change: 10
+
+# persistence/confidence係数の共通テーブル。
+factors:
+  persistence_single_occurrence: 0.5
+  persistence_two_periods: 0.8
+  persistence_structural: 1.0
+  confidence_primary_source_confirmed: 1.0
+  confidence_secondary_source_only: 0.5
+
+# 個別シグナル定義。hard_gate_excluded=trueのシグナルは7節のハードゲート該当
+# イベントであり、リスク控除の対象から除外する(ハードゲートとの三重評価防止)。
+signals:
+  dividend_cut:
+    base_points: 15
+    category: shareholder_return_deterioration
+  dividend_omission:
+    base_points: 25
+    category: shareholder_return_deterioration
+  shareholder_benefit_abolished:
+    base_points: 10
+    category: shareholder_return_deterioration
+  shareholder_benefit_major_downgrade:
+    base_points: 6
+    category: shareholder_return_deterioration
+  unfavorable_dividend_policy_change:
+    base_points: 8
+    category: shareholder_return_deterioration
+  continuous_operating_income_decline:
+    base_points: 15
+    category: business_cashflow_deterioration
+  continuous_operating_cashflow_decline:
+    base_points: 15
+    category: business_cashflow_deterioration
+  large_earnings_guidance_downgrade:
+    base_points: 10
+    category: business_cashflow_deterioration
+  interest_bearing_debt_surge:
+    base_points: 12
+    category: financial_crisis
+  financial_health_severe_deterioration:
+    base_points: 12
+    category: financial_crisis
+  balance_sheet_insolvency:
+    base_points: 20
+    category: financial_crisis
+    hard_gate_excluded: true
+  major_scandal:
+    base_points: 20
+    category: governance_and_listing_risk
+    hard_gate_excluded: true
+  accounting_problem:
+    base_points: 20
+    category: governance_and_listing_risk
+    hard_gate_excluded: true
+  listing_maintenance_risk:
+    base_points: 20
+    category: governance_and_listing_risk
+    hard_gate_excluded: true
+  long_term_holding_condition_unfavorable_change:
+    base_points: 8
+    category: structural_change
+  investment_premise_broken:
+    base_points: 10
+    category: structural_change

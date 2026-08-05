@@ -1,5 +1,5 @@
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 import pytest
@@ -162,13 +162,21 @@ def test_task_holding_not_found_reports_found_false(monkeypatch: pytest.MonkeyPa
 
 
 @dataclass(frozen=True)
+class _FakeFinancial:
+    sector: str | None = None
+    industry: str | None = None
+
+
+@dataclass(frozen=True)
 class _FakeSnapshot:
     current_price: Decimal
+    financial: _FakeFinancial = field(default_factory=_FakeFinancial)
 
 
 class _NoSignalOutcome:
     recommendation = None
     data_error = None
+    triggered_rule_names: tuple[str, ...] = ()
 
 
 def test_task_holding_hold_category_and_portfolio_concentration_notified(

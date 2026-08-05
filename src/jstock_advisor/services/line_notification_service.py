@@ -85,6 +85,10 @@ _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType]
     # --- 利確判定エンジン再レビュー対応(2026-07)で追加(要求仕様§4) ---
     RecommendationType.REVIEW_BEFORE_EARNINGS: NotificationType.PROFIT_TAKING_SIGNAL,
     RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW: NotificationType.PROFIT_TAKING_SIGNAL,
+    # --- 保有判断スコア方式(2026-08仕様)で追加。旧SELL/URGENT_REVIEWを段階的に置き換える ---
+    RecommendationType.SELL_CONSIDERATION: NotificationType.SELL_SIGNAL,
+    RecommendationType.STRONG_SELL_CONSIDERATION: NotificationType.SELL_SIGNAL,
+    RecommendationType.URGENT_HOLDING_REVIEW: NotificationType.SELL_SIGNAL,
 }
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
@@ -145,6 +149,10 @@ _RECOMMENDATION_TYPE_LABELS: dict[RecommendationType, str] = {
     RecommendationType.SELL: "売却を検討",
     RecommendationType.URGENT_REVIEW: "至急確認",
     RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW: "保有比率を確認",
+    # --- 保有判断スコア方式(2026-08仕様)で追加。「自動売却」「売却確定」は使わない ---
+    RecommendationType.SELL_CONSIDERATION: "売却を検討",
+    RecommendationType.STRONG_SELL_CONSIDERATION: "全部売却を強く検討",
+    RecommendationType.URGENT_HOLDING_REVIEW: "重大リスクのため緊急確認",
 }
 
 
@@ -1215,6 +1223,100 @@ def _format_sell_message(recommendation: Recommendation) -> str:
     return "\n".join(lines)
 
 
+_HOLDING_DECISION_RECOMMENDATION_TYPES = frozenset(
+    {
+        RecommendationType.SELL_CONSIDERATION,
+        RecommendationType.STRONG_SELL_CONSIDERATION,
+        RecommendationType.URGENT_HOLDING_REVIEW,
+    }
+)
+
+
+def _format_holding_decision_message(recommendation: Recommendation) -> str:
+    """保有判断スコア方式(2026-08仕様)の売却検討通知(実装プラン16節)。
+
+    ユーザーが最初に見る項目(保有判断スコア→判定→主な減点要因→保有を支持する
+    要因)を冒頭に配置し、スコア内訳は説明責任のため後段に表示する。
+    """
+    label = _recommendation_type_label(recommendation.recommendation_type)
+    cfg = recommendation.config_values_used
+
+    lines = [
+        f"【{label}】{recommendation.stock_code} {recommendation.stock_name}",
+        "",
+        f"保有判断スコア：{round(cfg.get('final_score', 0.0)):+d}点",
+        f"判定：{label}",
+        "",
+        "保有状況：",
+    ]
+    if recommendation.shares_at_recommendation is not None:
+        lines.append(
+            f"{recommendation.shares_at_recommendation}株／平均取得"
+            f"{_yen(recommendation.average_purchase_price_at_recommendation)}"
+        )
+    lines.append(f"現在値{_yen(recommendation.price_at_recommendation)}")
+    if (
+        recommendation.average_purchase_price_at_recommendation is not None
+        and recommendation.shares_at_recommendation is not None
+    ):
+        avg = recommendation.average_purchase_price_at_recommendation
+        shares = recommendation.shares_at_recommendation
+        pnl = (recommendation.price_at_recommendation - avg) * shares
+        pnl_pct = float((recommendation.price_at_recommendation / avg - 1) * 100) if avg else 0.0
+        lines.append(f"含み損益：{pnl:+,.0f}円（{pnl_pct:+.1f}%）")
+
+    lines.append("")
+    if recommendation.reasons:
+        lines.append("主な減点要因：")
+        lines.extend(f"・{r}" for r in recommendation.reasons)
+        lines.append("")
+    if recommendation.counter_factors:
+        lines.append("保有を支持する要因：")
+        lines.extend(f"・{r}" for r in recommendation.counter_factors)
+        lines.append("")
+
+    lines.append("スコア内訳：")
+    lines.append(f"・企業品質：{round(cfg.get('company_quality_score', 0.0))}／50")
+    lines.append(f"・投資ストーリー維持：{round(cfg.get('investment_thesis_score', 0.0))}／50")
+    lines.append(f"・リスク控除：{round(cfg.get('risk_deduction_score', 0.0))}／100")
+    if cfg.get("hard_gate_adjustment_applied"):
+        base_score = cfg.get("base_score", 0.0)
+        lines.append(
+            f"・重大条件のため保有判断スコアへ上限補正を適用（補正前: {round(base_score):+d}点）"
+        )
+    lines.append("")
+
+    sp = recommendation.sell_prices
+    price_lines: list[str] = []
+    if sp is not None:
+        if sp.immediate_execution_price:
+            price_lines.append(f"即時執行目安：{_yen(sp.immediate_execution_price.price)}")
+        if sp.partial_profit_start_price:
+            price_lines.append(f"一部売却：{_yen(sp.partial_profit_start_price.price)}")
+        if sp.full_profit_consideration_price:
+            price_lines.append(f"全部売却検討：{_yen(sp.full_profit_consideration_price.price)}")
+        if sp.stop_review_price:
+            price_lines.append(f"投資前提再確認の目安：{_yen(sp.stop_review_price.price)}")
+    if price_lines:
+        lines.append("売却価格候補：")
+        lines.extend(f"・{p}" for p in price_lines)
+        lines.append("")
+
+    if recommendation.next_review_conditions:
+        lines.append("次の判断条件：")
+        lines.extend(f"・{c}" for c in recommendation.next_review_conditions)
+        lines.append("")
+
+    lines.append(f"判定の信頼度：{recommendation.confidence.value}")
+    if recommendation.data_sources:
+        fetched_at = min(s.fetched_at for s in recommendation.data_sources)
+        lines.append(f"データ取得日時：{format_jst(fetched_at)}")
+    lines.append(f"通知ID：{recommendation.recommendation_id}")
+    lines.append("")
+    lines.append(_DISCLAIMER)
+    return "\n".join(lines)
+
+
 def _format_message(
     recommendation: Recommendation,
     notification_type: NotificationType,
@@ -1240,6 +1342,8 @@ def _format_message(
         return _format_buy_candidate_message(recommendation)
     if notification_type == NotificationType.PROFIT_TAKING_SIGNAL:
         return _format_profit_taking_message(recommendation, large_spread_ratio_threshold)
+    if recommendation.recommendation_type in _HOLDING_DECISION_RECOMMENDATION_TYPES:
+        return _format_holding_decision_message(recommendation)
     return _format_sell_message(recommendation)
 
 

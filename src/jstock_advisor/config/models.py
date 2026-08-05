@@ -901,6 +901,438 @@ class WatchlistScreeningRulesConfig(StrictModel):
     stock_display_name: StockDisplayNameConfig = Field(default_factory=StockDisplayNameConfig)
 
 
+# --- holding_decision_rules.yaml ---------------------------------------------
+# 保有判断スコア方式(2026-08仕様)。企業品質(0-50)+投資ストーリー維持(0-50)
+# -リスク控除(0-100)を統合した単一スコアで保有銘柄の売却判定を行う。
+
+
+class CompanyQualityWeights(StrictModel):
+    """企業品質スコア(0-50点)の評価項目別配点。合計は50点。"""
+
+    financial_health_equity_ratio: float
+    financial_health_debt_excess: float
+    cash_generation_cf_income_ratio: float
+    cash_generation_cf_streak: float
+    profitability_roe: float
+    profitability_eps_stability: float
+    stability_operating_income: float
+    stability_deficit: float
+    governance_going_concern: float
+    governance_listing_risk: float
+
+    @model_validator(mode="after")
+    def _check_sum(self) -> CompanyQualityWeights:
+        total = (
+            self.financial_health_equity_ratio
+            + self.financial_health_debt_excess
+            + self.cash_generation_cf_income_ratio
+            + self.cash_generation_cf_streak
+            + self.profitability_roe
+            + self.profitability_eps_stability
+            + self.stability_operating_income
+            + self.stability_deficit
+            + self.governance_going_concern
+            + self.governance_listing_risk
+        )
+        if abs(total - 50.0) > 0.01:
+            raise ValueError(f"企業品質スコアの配点合計は50点である必要があります(現在{total}点)")
+        return self
+
+
+class InvestmentThesisWeights(StrictModel):
+    """投資ストーリー維持スコア(0-50点)の評価項目別配点。合計は50点。"""
+
+    dividend_policy: float
+    total_yield: float
+    benefit_condition: float
+    profit_cf_premise: float
+    financial_premise: float
+    custom_conditions: float
+
+    @model_validator(mode="after")
+    def _check_sum(self) -> InvestmentThesisWeights:
+        total = (
+            self.dividend_policy
+            + self.total_yield
+            + self.benefit_condition
+            + self.profit_cf_premise
+            + self.financial_premise
+            + self.custom_conditions
+        )
+        if abs(total - 50.0) > 0.01:
+            raise ValueError(
+                f"投資ストーリー維持スコアの配点合計は50点である必要があります(現在{total}点)"
+            )
+        return self
+
+
+class JudgmentCategoryThresholds(StrictModel):
+    """HoldingDecisionCategoryの境界値(final_holding_decision_scoreで判定)。"""
+
+    strong_hold_min: float
+    hold_min: float
+    caution_min: float
+    partial_sell_consideration_min: float
+    sell_watch_min: float
+    sell_consideration_min: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> JudgmentCategoryThresholds:
+        if not (
+            self.strong_hold_min
+            > self.hold_min
+            > self.caution_min
+            > self.partial_sell_consideration_min
+            > self.sell_watch_min
+            > self.sell_consideration_min
+        ):
+            raise ValueError(
+                "JudgmentCategoryThresholds: "
+                "strong_hold_min > hold_min > caution_min > partial_sell_consideration_min "
+                "> sell_watch_min > sell_consideration_min である必要があります"
+            )
+        return self
+
+
+class HardGateConfig(StrictModel):
+    """ハードゲート発動時のfinal_scoreへの上限補正(7節)。"""
+
+    score_cap: float
+
+
+class CoverageThresholds(StrictModel):
+    """component別coverage_ratioの通知閾値(5節・8節)。"""
+
+    overall_minimum: float
+    company_quality_minimum: float
+    investment_thesis_minimum: float
+    risk_deduction_block_minimum: float
+    risk_deduction_confidence_minimum: float
+
+    @model_validator(mode="after")
+    def _check_range_and_order(self) -> CoverageThresholds:
+        for name, value in (
+            ("overall_minimum", self.overall_minimum),
+            ("company_quality_minimum", self.company_quality_minimum),
+            ("investment_thesis_minimum", self.investment_thesis_minimum),
+            ("risk_deduction_block_minimum", self.risk_deduction_block_minimum),
+            ("risk_deduction_confidence_minimum", self.risk_deduction_confidence_minimum),
+        ):
+            if not (0.0 < value <= 1.0):
+                raise ValueError(f"CoverageThresholds.{name}は0より大きく1以下である必要があります")
+        if self.risk_deduction_block_minimum > self.risk_deduction_confidence_minimum:
+            raise ValueError(
+                "risk_deduction_block_minimumはrisk_deduction_confidence_minimum以下である必要があります"
+            )
+        return self
+
+
+class ConfidenceThresholds(StrictModel):
+    """overall_coverageからHoldingDecisionConfidenceLevelを決める閾値(8節)。"""
+
+    high_minimum: float
+    medium_minimum: float
+    low_minimum: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> ConfidenceThresholds:
+        if not (self.high_minimum > self.medium_minimum > self.low_minimum > 0.0):
+            raise ValueError(
+                "ConfidenceThresholds: high_minimum > medium_minimum > low_minimum > 0 "
+                "である必要があります"
+            )
+        return self
+
+
+class LinearScoreThreshold(StrictModel):
+    """`_linear_score()`(domain/scoring/score.py)の0点/満点閾値1組。
+
+    zero_at > full_atの場合は「値が小さいほど高得点」という向きになる
+    (例: 変動係数は低いほど安定=高得点)。
+    """
+
+    zero_at: float
+    full_at: float
+
+
+class CompanyQualityScoreThresholds(StrictModel):
+    """企業品質スコアの各採点式が使う0点/満点閾値。"""
+
+    equity_ratio_pct: LinearScoreThreshold
+    cf_income_ratio: LinearScoreThreshold
+    cf_streak_quarters: LinearScoreThreshold
+    roe: LinearScoreThreshold
+    cv_based_stability: LinearScoreThreshold
+    profit_quarter_ratio: LinearScoreThreshold
+
+
+class RenotificationConfig(StrictModel):
+    """再通知抑止条件(14節)。"""
+
+    renotify_score_deterioration: float
+    renotify_on_decision_change: bool
+    renotify_on_new_hard_gate: bool
+    renotify_after_earnings: bool
+    renotify_on_sell_price_change_pct: float
+
+
+class HoldingDecisionRulesConfig(StrictModel):
+    version: int
+    scoring_model_version: int
+    company_quality_weights: CompanyQualityWeights
+    company_quality_score_thresholds: CompanyQualityScoreThresholds
+    investment_thesis_weights: InvestmentThesisWeights
+    judgment_category_thresholds: JudgmentCategoryThresholds
+    notify_below_score: float
+    hard_gate: HardGateConfig
+    coverage_thresholds: CoverageThresholds
+    confidence_thresholds: ConfidenceThresholds
+    renotification: RenotificationConfig
+    # CustomThesisConditionの鮮度2段階(3節)。
+    fresh_within_days: int
+    stale_after_days: int
+    # Baseline活性化(activate())の最大リトライ回数(2節)。
+    baseline_activation_max_retries: int
+    # 主な加点・減点要因(15節)の保存件数上限。
+    top_positive_reasons_count: int
+    top_negative_reasons_count: int
+    # ランタイムConfigのキャッシュTTL(1節)。
+    runtime_config_cache_ttl_seconds: int
+    # 投資ストーリー維持スコアがこの値未満、かつHUMAN_APPROVEDのInvestmentThesisが
+    # 存在する場合のみ、ハードゲート「中核となる投資ストーリーの完全消失」を機械判定する(7節)。
+    investment_thesis_collapse_threshold: float
+
+    @model_validator(mode="after")
+    def _check_notify_below_score_matches_boundary(self) -> HoldingDecisionRulesConfig:
+        if abs(self.notify_below_score - self.judgment_category_thresholds.sell_watch_min) > 0.001:
+            raise ValueError(
+                "notify_below_scoreはjudgment_category_thresholds.sell_watch_minと"
+                "一致している必要があります(判定区分境界との矛盾防止)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_hard_gate_cap_below_notify_threshold(self) -> HoldingDecisionRulesConfig:
+        if self.hard_gate.score_cap >= self.notify_below_score:
+            raise ValueError(
+                "hard_gate.score_capはnotify_below_score未満である必要があります"
+                "(ハードゲート発動時に必ず通知条件を満たすことを保証するため)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_fresh_stale_order(self) -> HoldingDecisionRulesConfig:
+        if self.fresh_within_days >= self.stale_after_days:
+            raise ValueError("fresh_within_daysはstale_after_days未満である必要があります")
+        return self
+
+    @model_validator(mode="after")
+    def _check_positive_counts(self) -> HoldingDecisionRulesConfig:
+        if self.baseline_activation_max_retries < 1:
+            raise ValueError("baseline_activation_max_retriesは1以上である必要があります")
+        if self.top_positive_reasons_count < 1 or self.top_negative_reasons_count < 1:
+            raise ValueError(
+                "top_positive_reasons_count/top_negative_reasons_countは1以上である必要があります"
+            )
+        return self
+
+
+# --- holding_decision_risk_rules.yaml -----------------------------------------
+
+
+class RiskCategoryCaps(StrictModel):
+    """リスク控除カテゴリ別上限(4節)。合計は100点。"""
+
+    business_cashflow_deterioration: float
+    shareholder_return_deterioration: float
+    financial_crisis: float
+    governance_and_listing_risk: float
+    structural_change: float
+
+    @model_validator(mode="after")
+    def _check_sum(self) -> RiskCategoryCaps:
+        total = (
+            self.business_cashflow_deterioration
+            + self.shareholder_return_deterioration
+            + self.financial_crisis
+            + self.governance_and_listing_risk
+            + self.structural_change
+        )
+        if abs(total - 100.0) > 0.01:
+            raise ValueError(f"リスク控除カテゴリ上限の合計は100点である必要があります(現在{total}点)")
+        return self
+
+
+class RiskFactorTable(StrictModel):
+    """severity/persistence/confidence係数(9節: risk_points = base_points × 各係数)。"""
+
+    persistence_single_occurrence: float
+    persistence_two_periods: float
+    persistence_structural: float
+    confidence_primary_source_confirmed: float
+    confidence_secondary_source_only: float
+
+    @model_validator(mode="after")
+    def _check_non_negative(self) -> RiskFactorTable:
+        for name, value in (
+            ("persistence_single_occurrence", self.persistence_single_occurrence),
+            ("persistence_two_periods", self.persistence_two_periods),
+            ("persistence_structural", self.persistence_structural),
+            ("confidence_primary_source_confirmed", self.confidence_primary_source_confirmed),
+            ("confidence_secondary_source_only", self.confidence_secondary_source_only),
+        ):
+            if value < 0:
+                raise ValueError(f"RiskFactorTable.{name}は負値にできません")
+        return self
+
+
+class RiskSignal(StrictModel):
+    """リスク控除の個別シグナル1件の定義。
+
+    hard_gate_excluded=Trueのシグナルは、7節のハードゲートに該当するイベントであり、
+    リスク控除の対象から除外する(4節: ハードゲートとの三重評価防止)。
+    """
+
+    base_points: float
+    category: Literal[
+        "business_cashflow_deterioration",
+        "shareholder_return_deterioration",
+        "financial_crisis",
+        "governance_and_listing_risk",
+        "structural_change",
+    ]
+    hard_gate_excluded: bool = False
+
+
+class HoldingDecisionRiskRulesConfig(StrictModel):
+    version: int
+    category_caps: RiskCategoryCaps
+    factors: RiskFactorTable
+    signals: dict[str, RiskSignal]
+
+    @model_validator(mode="after")
+    def _check_signal_categories_have_caps(self) -> HoldingDecisionRiskRulesConfig:
+        valid_categories = {
+            "business_cashflow_deterioration",
+            "shareholder_return_deterioration",
+            "financial_crisis",
+            "governance_and_listing_risk",
+            "structural_change",
+        }
+        for name, signal in self.signals.items():
+            if signal.category not in valid_categories:
+                raise ValueError(f"signals.{name}.categoryが不正です: {signal.category}")
+        return self
+
+
+# --- holding_decision_ratio_rules.yaml -----------------------------------------
+
+
+class RatioClampRange(StrictModel):
+    ratio_clamp_min: float
+    ratio_clamp_max: float
+    roe_clamp_min: float
+    roe_clamp_max: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> RatioClampRange:
+        if self.ratio_clamp_min >= self.ratio_clamp_max:
+            raise ValueError("ratio_clamp_minはratio_clamp_max未満である必要があります")
+        if self.roe_clamp_min >= self.roe_clamp_max:
+            raise ValueError("roe_clamp_minはroe_clamp_max未満である必要があります")
+        return self
+
+
+class HoldingDecisionRatioRulesConfig(StrictModel):
+    version: int
+    clamp: RatioClampRange
+    min_operating_income_absolute_yen: float
+    min_mean_for_cv_yen: float
+    outlier_clip_zscore: float
+    min_periods_for_stability_score: int
+
+    @model_validator(mode="after")
+    def _check_positive(self) -> HoldingDecisionRatioRulesConfig:
+        for name, value in (
+            ("min_operating_income_absolute_yen", self.min_operating_income_absolute_yen),
+            ("min_mean_for_cv_yen", self.min_mean_for_cv_yen),
+            ("outlier_clip_zscore", self.outlier_clip_zscore),
+        ):
+            if value <= 0:
+                raise ValueError(f"HoldingDecisionRatioRulesConfig.{name}は正値である必要があります")
+        if self.min_periods_for_stability_score < 2:
+            raise ValueError("min_periods_for_stability_scoreは2以上である必要があります")
+        return self
+
+
+# --- investment_thesis_template.yaml -------------------------------------------
+
+
+class InvestmentThesisTemplateConfig(StrictModel):
+    """個別購入理由が未登録の銘柄向けの共通投資ストーリーテンプレート(3節)。
+
+    個別購入理由軸(5点)の代用には使わない。標準5軸のみに適用する。
+    """
+
+    version: int
+    min_total_yield_pct: float
+    dividend_cut_tolerance: Literal["none", "minor_only"]
+    require_positive_operating_cashflow_trend: bool
+
+
+# --- industry_scoring_policy.yaml -----------------------------------------------
+
+
+class FinancialCategoryPolicy(StrictModel):
+    deferred: bool
+
+
+class FinancialIndustryPolicy(StrictModel):
+    """金融業(銀行/保険/証券/その他金融)のActive移行状況の正の設定元(3節)。
+
+    RuntimeConfig.financial_policy_overrideはこのYAMLを緊急退避方向にのみ
+    上書きできる(FORCE_DEFER_ALL)。Active化を強制する経路は存在しない。
+    """
+
+    financial_model_version: int | None = None
+    supported_financial_categories: list[
+        Literal["BANKING", "INSURANCE", "SECURITIES", "OTHER_FINANCIAL"]
+    ] = []
+    categories: dict[
+        Literal["BANKING", "INSURANCE", "SECURITIES", "OTHER_FINANCIAL"],
+        FinancialCategoryPolicy,
+    ]
+
+    @model_validator(mode="after")
+    def _check_all_categories_defined(self) -> FinancialIndustryPolicy:
+        required = {"BANKING", "INSURANCE", "SECURITIES", "OTHER_FINANCIAL"}
+        missing = required - set(self.categories.keys())
+        if missing:
+            raise ValueError(f"industry_scoring_policy.categoriesに未定義の業種があります: {missing}")
+        return self
+
+    @model_validator(mode="after")
+    def _check_supported_categories_consistency(self) -> FinancialIndustryPolicy:
+        for category in self.supported_financial_categories:
+            policy = self.categories.get(category)
+            if policy is None or policy.deferred:
+                raise ValueError(
+                    f"supported_financial_categoriesに含まれる{category}は"
+                    "categories側でdeferred:falseである必要があります"
+                )
+            if self.financial_model_version is None:
+                raise ValueError(
+                    "supported_financial_categoriesが1件以上ある場合、"
+                    "financial_model_versionは非nullである必要があります"
+                )
+        return self
+
+
+class IndustryScoringPolicyConfig(StrictModel):
+    version: int
+    financial_industry_policy: FinancialIndustryPolicy
+
+
 # --- 集約 --------------------------------------------------------------------
 
 
@@ -948,3 +1380,9 @@ class AppConfig(StrictModel):
     buy_decision: BuyDecisionRulesConfig
     add_on: AddOnRulesConfig
     watchlist_screening: WatchlistScreeningRulesConfig
+    # --- 保有判断スコア方式(2026-08仕様)で追加 ---
+    holding_decision: HoldingDecisionRulesConfig
+    holding_decision_risk: HoldingDecisionRiskRulesConfig
+    holding_decision_ratio: HoldingDecisionRatioRulesConfig
+    investment_thesis_template: InvestmentThesisTemplateConfig
+    industry_scoring_policy: IndustryScoringPolicyConfig
