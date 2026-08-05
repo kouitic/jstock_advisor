@@ -218,8 +218,12 @@ def score_investment_thesis(
                 )
             )
 
-    evaluated_weight = sum(i.weight for i in items if i.status == EvidenceCoverageStatus.EVALUATED)
-    available_weight = sum(i.weight for i in items if i.status != EvidenceCoverageStatus.NOT_APPLICABLE)
+    evaluated_weight = sum(
+        i.weight for i in items if i.status == EvidenceCoverageStatus.EVALUATED
+    )
+    available_weight = sum(
+        i.weight for i in items if i.status != EvidenceCoverageStatus.NOT_APPLICABLE
+    )
     raw_points = sum(i.points_earned for i in items)
 
     score = (raw_points / available_weight * 50.0) if available_weight > 0 else 0.0

@@ -7,10 +7,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from jstock_advisor.config.models import HoldingDecisionRulesConfig
-from jstock_advisor.domain.entities.enums import HoldingDecisionCategory, HoldingDecisionConfidenceLevel
+from jstock_advisor.domain.entities.enums import (
+    HoldingDecisionCategory,
+    HoldingDecisionConfidenceLevel,
+)
 from jstock_advisor.domain.entities.holding_decision import (
-    ComponentCoverage,
     CompanyQualityScore,
+    ComponentCoverage,
     HoldingDecisionHardGate,
     InvestmentThesisScore,
     RiskDeductionScore,
@@ -37,7 +40,7 @@ class HoldingDecisionOutcome:
 
 
 def _category_for_score(
-    score: float, t: "HoldingDecisionRulesConfig"
+    score: float, t: HoldingDecisionRulesConfig
 ) -> HoldingDecisionCategory:
     thresholds = t.judgment_category_thresholds
     if score >= thresholds.strong_hold_min:

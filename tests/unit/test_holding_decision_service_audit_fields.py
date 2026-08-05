@@ -8,6 +8,7 @@ negative_reasonsが件数上限を超えずscore_impact降順で並ぶことを�
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 from pathlib import Path
 
 from jstock_advisor.config.loader import load_config
@@ -21,7 +22,6 @@ from jstock_advisor.services.holding_decision_runtime_config_service import (
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
 from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
-from decimal import Decimal
 
 _CFG = load_config()
 _NOW = dt.datetime.now(dt.UTC)

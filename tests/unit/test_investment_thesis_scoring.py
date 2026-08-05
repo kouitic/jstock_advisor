@@ -9,7 +9,10 @@ from __future__ import annotations
 import datetime as dt
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.enums import EvidenceCoverageStatus, ThesisConditionAttestationStatus
+from jstock_advisor.domain.entities.enums import (
+    EvidenceCoverageStatus,
+    ThesisConditionAttestationStatus,
+)
 from jstock_advisor.domain.entities.holding_decision import (
     CustomThesisCondition,
     InvestmentThesis,
@@ -148,7 +151,10 @@ def test_custom_conditions_scored_by_attestation_ratio():
 
 def test_custom_conditions_not_evaluated_when_no_usable_attestation():
     condition = CustomThesisCondition(
-        condition_id="c1", description="事業ポートフォリオ", registered_at=_NOW, last_attestation=None
+        condition_id="c1",
+        description="事業ポートフォリオ",
+        registered_at=_NOW,
+        last_attestation=None,
     )
     thesis = InvestmentThesis(
         investment_thesis_id="t1", holding_id="7203", stock_code="7203",

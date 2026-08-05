@@ -158,7 +158,9 @@ def score_company_quality(
                 axis="financial_health",
                 weight=weights.financial_health_debt_excess,
                 status=EvidenceCoverageStatus.EVALUATED,
-                points_earned=0.0 if financial.is_debt_excess else weights.financial_health_debt_excess,
+                points_earned=(
+                    0.0 if financial.is_debt_excess else weights.financial_health_debt_excess
+                ),
             )
         )
     else:
@@ -181,7 +183,9 @@ def score_company_quality(
                 axis="financial_health",
                 weight=weights.financial_health_debt_excess,
                 status=EvidenceCoverageStatus.EVALUATED,
-                points_earned=0.0 if financial.is_debt_excess else weights.financial_health_debt_excess,
+                points_earned=(
+                    0.0 if financial.is_debt_excess else weights.financial_health_debt_excess
+                ),
             )
         )
 
@@ -196,7 +200,8 @@ def score_company_quality(
         missing_required.append("working_capital_dominant_period")
     if (
         financial.operating_income is not None
-        and abs(financial.operating_income) < Decimal(str(ratio_rules.min_operating_income_absolute_yen))
+        and abs(financial.operating_income)
+        < Decimal(str(ratio_rules.min_operating_income_absolute_yen))
     ):
         missing_required.append("operating_income_absolute_value_too_small")
 
@@ -217,8 +222,12 @@ def score_company_quality(
             )
         )
     else:
-        raw_ratio = float(financial.operating_cashflow) / float(financial.operating_income)  # type: ignore[arg-type]
-        clamped = _clip(raw_ratio, ratio_rules.clamp.ratio_clamp_min, ratio_rules.clamp.ratio_clamp_max)
+        operating_cashflow: Decimal = financial.operating_cashflow  # type: ignore[assignment]
+        operating_income: Decimal = financial.operating_income  # type: ignore[assignment]
+        raw_ratio = float(operating_cashflow) / float(operating_income)
+        clamped = _clip(
+            raw_ratio, ratio_rules.clamp.ratio_clamp_min, ratio_rules.clamp.ratio_clamp_max
+        )
         missing_optional = []
         if is_fundamentally_driven(inputs.cashflow_decomposition) is None:
             missing_optional.append("cashflow_decomposition_breakdown")
@@ -269,7 +278,11 @@ def score_company_quality(
         )
 
     # --- 収益力: 簡易予想ROE ---
-    if financial.forecast_eps is None or financial.forecast_bps is None or financial.forecast_bps <= 0:
+    if (
+        financial.forecast_eps is None
+        or financial.forecast_bps is None
+        or financial.forecast_bps <= 0
+    ):
         items.append(
             ScoreItemDetail(
                 item_code="profitability_roe",
@@ -287,7 +300,9 @@ def score_company_quality(
         )
     else:
         raw_roe = float(financial.forecast_eps) / float(financial.forecast_bps)
-        clamped_roe = _clip(raw_roe, ratio_rules.clamp.roe_clamp_min, ratio_rules.clamp.roe_clamp_max)
+        clamped_roe = _clip(
+            raw_roe, ratio_rules.clamp.roe_clamp_min, ratio_rules.clamp.roe_clamp_max
+        )
         items.append(
             ScoreItemDetail(
                 item_code="profitability_roe",
@@ -362,7 +377,9 @@ def score_company_quality(
             axis="governance",
             weight=weights.governance_going_concern,
             status=EvidenceCoverageStatus.EVALUATED,
-            points_earned=0.0 if financial.is_going_concern_doubt else weights.governance_going_concern,
+            points_earned=(
+                0.0 if financial.is_going_concern_doubt else weights.governance_going_concern
+            ),
         )
     )
     items.append(
@@ -377,8 +394,12 @@ def score_company_quality(
         )
     )
 
-    evaluated_weight = sum(i.weight for i in items if i.status == EvidenceCoverageStatus.EVALUATED)
-    available_weight = sum(i.weight for i in items if i.status != EvidenceCoverageStatus.NOT_APPLICABLE)
+    evaluated_weight = sum(
+        i.weight for i in items if i.status == EvidenceCoverageStatus.EVALUATED
+    )
+    available_weight = sum(
+        i.weight for i in items if i.status != EvidenceCoverageStatus.NOT_APPLICABLE
+    )
     raw_points = sum(i.points_earned for i in items)
 
     score = (raw_points / available_weight * 50.0) if available_weight > 0 else 0.0

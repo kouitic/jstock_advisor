@@ -80,7 +80,9 @@ def score_risk_deduction(
             if evaluation.primary_source_confirmed
             else risk_config.factors.confidence_secondary_source_only
         )
-        points = signal_config.base_points * severity_factor * persistence_factor * confidence_factor
+        points = (
+            signal_config.base_points * severity_factor * persistence_factor * confidence_factor
+        )
         category_totals[signal_config.category] += points
         category_signals[signal_config.category].append(rule_name)
 

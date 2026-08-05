@@ -1159,7 +1159,9 @@ class RiskCategoryCaps(StrictModel):
             + self.structural_change
         )
         if abs(total - 100.0) > 0.01:
-            raise ValueError(f"リスク控除カテゴリ上限の合計は100点である必要があります(現在{total}点)")
+            raise ValueError(
+                f"リスク控除カテゴリ上限の合計は100点である必要があります(現在{total}点)"
+            )
         return self
 
 
@@ -1259,7 +1261,9 @@ class HoldingDecisionRatioRulesConfig(StrictModel):
             ("outlier_clip_zscore", self.outlier_clip_zscore),
         ):
             if value <= 0:
-                raise ValueError(f"HoldingDecisionRatioRulesConfig.{name}は正値である必要があります")
+                raise ValueError(
+                    f"HoldingDecisionRatioRulesConfig.{name}は正値である必要があります"
+                )
         if self.min_periods_for_stability_score < 2:
             raise ValueError("min_periods_for_stability_scoreは2以上である必要があります")
         return self
@@ -1308,7 +1312,9 @@ class FinancialIndustryPolicy(StrictModel):
         required = {"BANKING", "INSURANCE", "SECURITIES", "OTHER_FINANCIAL"}
         missing = required - set(self.categories.keys())
         if missing:
-            raise ValueError(f"industry_scoring_policy.categoriesに未定義の業種があります: {missing}")
+            raise ValueError(
+                f"industry_scoring_policy.categoriesに未定義の業種があります: {missing}"
+            )
         return self
 
     @model_validator(mode="after")

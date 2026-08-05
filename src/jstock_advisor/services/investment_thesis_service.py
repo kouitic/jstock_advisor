@@ -236,6 +236,8 @@ class InvestmentThesisService:
         if not found:
             raise ValueError(f"condition_id={condition_id}が見つかりません")
 
-        updated = thesis.model_copy(update={"conditions": new_conditions, "updated_at": current_time})
+        updated = thesis.model_copy(
+            update={"conditions": new_conditions, "updated_at": current_time}
+        )
         self._thesis_repo.save(updated)
         return updated

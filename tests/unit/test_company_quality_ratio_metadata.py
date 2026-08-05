@@ -9,8 +9,12 @@ from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.classification.financial_industry import IndustryClassificationResult
-from jstock_advisor.domain.entities.enums import EvidenceCoverageStatus, IndustryClassification, PeriodType
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import (
+    EvidenceCoverageStatus,
+    IndustryClassification,
+    PeriodType,
+)
 from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.domain.signals.company_quality_scoring import (
     CompanyQualityInputs,
@@ -44,8 +48,12 @@ def _financial(**overrides) -> FinancialSummary:
     return FinancialSummary(**base)
 
 
-def _period(value: str, period_end: dt.date, period_type: PeriodType = PeriodType.ANNUAL) -> FinancialPeriodValue:
-    return FinancialPeriodValue(value=Decimal(value), period_end=period_end, period_type=period_type)
+def _period(
+    value: str, period_end: dt.date, period_type: PeriodType = PeriodType.ANNUAL
+) -> FinancialPeriodValue:
+    return FinancialPeriodValue(
+        value=Decimal(value), period_end=period_end, period_type=period_type
+    )
 
 
 def _inputs(**overrides) -> CompanyQualityInputs:
@@ -139,7 +147,10 @@ def test_cf_income_ratio_not_evaluated_when_working_capital_dominant():
 
 def test_roe_not_evaluated_when_forecast_bps_non_positive():
     result = score_company_quality(
-        _inputs(financial=_financial(forecast_bps=Decimal("0"))), _WEIGHTS, _THRESHOLDS, _RATIO_RULES
+        _inputs(financial=_financial(forecast_bps=Decimal("0"))),
+        _WEIGHTS,
+        _THRESHOLDS,
+        _RATIO_RULES,
     )
     item = _item(result, "profitability_roe")
     assert item.status == EvidenceCoverageStatus.NOT_EVALUATED
@@ -152,7 +163,9 @@ def test_roe_evaluated_and_clamped_within_configured_bounds():
     )
     item = _item(result, "profitability_roe")
     assert item.status == EvidenceCoverageStatus.EVALUATED
-    detail = next(d for d in result.ratio_metric_details if d.metric_name == "simplified_forecast_roe")
+    detail = next(
+        d for d in result.ratio_metric_details if d.metric_name == "simplified_forecast_roe"
+    )
     assert detail.clamped_input_value == _RATIO_RULES.clamp.roe_clamp_max
 
 
