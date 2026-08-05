@@ -2,7 +2,10 @@
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import EvidenceGroup, TriggerStatus
-from jstock_advisor.domain.signals.risk_deduction_scoring import RiskDeductionInputs, score_risk_deduction
+from jstock_advisor.domain.signals.risk_deduction_scoring import (
+    RiskDeductionInputs,
+    score_risk_deduction,
+)
 from jstock_advisor.domain.signals.sell_signal import SellRuleEvaluation, SellRuleTriggerInputs
 
 _CFG = load_config().holding_decision_risk
@@ -119,7 +122,9 @@ def test_category_total_is_capped_at_category_maximum():
         ),
     )
     result = score_risk_deduction(inputs, _CFG)
-    category = next(c for c in result.categories if c.category == "shareholder_return_deterioration")
+    category = next(
+        c for c in result.categories if c.category == "shareholder_return_deterioration"
+    )
     assert category.points <= category.cap
 
 

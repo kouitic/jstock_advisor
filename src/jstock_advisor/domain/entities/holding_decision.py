@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+from pydantic import model_validator
+
 from jstock_advisor.domain.entities.base import Entity, ImmutableSnapshot
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import (
@@ -22,7 +24,6 @@ from jstock_advisor.domain.entities.enums import (
     RuntimeConfigMode,
     ThesisConditionAttestationStatus,
 )
-from pydantic import model_validator
 
 # ============================================================================
 # 比率指標・スコア項目の詳細内訳
