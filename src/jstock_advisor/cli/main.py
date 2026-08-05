@@ -13,6 +13,7 @@ from jstock_advisor.cli import (
     candidate_universe,
     evaluation,
     feedback,
+    holding_decision,
     holdings,
     performance,
     review,
@@ -41,6 +42,7 @@ app.add_typer(review.app, name="review")
 app.add_typer(shareholder_benefit.app, name="shareholder-benefit")
 app.add_typer(watchlist_screening.app, name="watchlist-screening")
 app.add_typer(candidate_universe.app, name="candidate-universe")
+app.add_typer(holding_decision.app, name="holding-decision")
 
 
 @app.callback()

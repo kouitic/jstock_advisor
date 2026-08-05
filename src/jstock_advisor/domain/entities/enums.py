@@ -59,6 +59,34 @@ class RecommendationType(StrEnum):
     # 銘柄単体の企業価値評価とは独立した、ポートフォリオ内保有比率の高さに基づく通知。
     PORTFOLIO_CONCENTRATION_REVIEW = "PORTFOLIO_CONCENTRATION_REVIEW"
 
+    # --- 保有判断スコア方式への移行(2026-08仕様)で追加 ---
+    # SELL/URGENT_REVIEW/REVIEW(個別悪化シグナル方式)を段階的に置き換える。
+    # 移行期間中は新旧の値が両方発行され得るため、SELL/URGENT_REVIEWは廃止せず残す。
+    SELL_CONSIDERATION = "SELL_CONSIDERATION"  # 保有判断スコアに基づく「売却を検討」
+    STRONG_SELL_CONSIDERATION = "STRONG_SELL_CONSIDERATION"  # 「全部売却を強く検討」
+    URGENT_HOLDING_REVIEW = "URGENT_HOLDING_REVIEW"  # ハードゲート発動「重大リスクのため緊急確認」
+
+
+# 売却系(投資前提悪化)の通知として扱うべきRecommendationTypeの唯一の判定ソース。
+# 通知マッピング・整合性検証・買い増しゲート等、複数箇所が個別にenum値を列挙する
+# 代わりにis_sell_like()を呼ぶことで、判定区分が増減しても呼び出し側の変更を不要にする
+# (BUY_FAMILY_ACTIONSと同じパターン)。旧3値(SELL/URGENT_REVIEW/REVIEW)は新方式への
+# 移行完了後も、過去データの再判定・監査のため削除しない。
+SELL_LIKE_RECOMMENDATION_TYPES = frozenset(
+    {
+        RecommendationType.SELL,
+        RecommendationType.URGENT_REVIEW,
+        RecommendationType.REVIEW,
+        RecommendationType.SELL_CONSIDERATION,
+        RecommendationType.STRONG_SELL_CONSIDERATION,
+        RecommendationType.URGENT_HOLDING_REVIEW,
+    }
+)
+
+
+def is_sell_like(recommendation_type: RecommendationType) -> bool:
+    return recommendation_type in SELL_LIKE_RECOMMENDATION_TYPES
+
 
 class EvaluationStatus(StrEnum):
     """保有銘柄1件ごとの評価処理の結果区分(2026-07仕様レビュー対応)。
@@ -597,3 +625,122 @@ class PortfolioValuationBasis(StrEnum):
     MARKET_VALUE = "MARKET_VALUE"
     ACQUISITION_COST = "ACQUISITION_COST"
     UNAVAILABLE = "UNAVAILABLE"
+
+
+# ============================================================================
+# 保有判断スコア方式(2026-08仕様)で追加
+# ============================================================================
+
+
+class EvidenceCoverageStatus(StrEnum):
+    """企業品質・投資ストーリー維持スコアの評価軸1件ごとの算出状況。
+
+    NOT_EVALUATED(評価対象だがデータ不足で算出不能)とNOT_APPLICABLE(当該銘柄・
+    投資前提では評価対象外)を区別する。前者はcomponent_scoreの分母(available_points)
+    に残り不足として計上され、後者は分母から除外される(欠損項目を0点として
+    扱わない、算出可能な項目だけで正規化する、という既存方針の実装)。
+    """
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class HoldingDecisionCategory(StrEnum):
+    """保有判断スコア(final_holding_decision_score)から決定する判定区分。
+
+    通知対象はSELL_CONSIDERATION/STRONG_SELL_CONSIDERATIONのみ
+    (score < notify_below_score、かつcoverage_gate_passed)。
+    """
+
+    STRONG_HOLD = "STRONG_HOLD"
+    HOLD = "HOLD"
+    CAUTION = "CAUTION"
+    PARTIAL_SELL_CONSIDERATION = "PARTIAL_SELL_CONSIDERATION"
+    SELL_WATCH = "SELL_WATCH"
+    SELL_CONSIDERATION = "SELL_CONSIDERATION"
+    STRONG_SELL_CONSIDERATION = "STRONG_SELL_CONSIDERATION"
+
+
+class BaselineOrigin(StrEnum):
+    """投資ストーリー維持スコアのbaseline(比較基準)がどう確定したかの由来。
+
+    優先順位: HUMAN_APPROVED > PURCHASE_SNAPSHOT/HOLDING_REGISTRATION_SNAPSHOT
+    > HISTORICAL_RECONSTRUCTED > COMMON_TEMPLATE > SYSTEM_INITIALIZED。
+    """
+
+    HUMAN_APPROVED = "HUMAN_APPROVED"
+    PURCHASE_SNAPSHOT = "PURCHASE_SNAPSHOT"
+    HOLDING_REGISTRATION_SNAPSHOT = "HOLDING_REGISTRATION_SNAPSHOT"
+    HISTORICAL_RECONSTRUCTED = "HISTORICAL_RECONSTRUCTED"
+    COMMON_TEMPLATE = "COMMON_TEMPLATE"
+    SYSTEM_INITIALIZED = "SYSTEM_INITIALIZED"
+
+
+class BaselineStatus(StrEnum):
+    """InvestmentThesisBaseline専用の状態(人間承認の進行状態のみを表す)。
+
+    既存のApprovalStatus(RuleVersion/RuleProposal共用)を拡張せず専用enumとして
+    分離する。「現在有効なbaselineかどうか」はこのステータスではなく
+    InvestmentThesisBaselinePointerが唯一の情報源として判定する
+    (ACTIVE/SUPERSEDED/ROLLED_BACKに相当する値をここに持たせない)。
+    """
+
+    DRAFT = "DRAFT"
+    PROPOSED = "PROPOSED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class ThesisConditionAttestationStatus(StrEnum):
+    """CustomThesisCondition(個別購入理由)に対する人間の定期申告状態。
+
+    自由記述の解釈やLLMによる自動判定ではなく、人間が明示的に申告した値のみを使う。
+    """
+
+    MAINTAINED = "MAINTAINED"
+    BROKEN = "BROKEN"
+    UNCERTAIN = "UNCERTAIN"
+
+
+class HoldingDecisionConfidenceLevel(StrEnum):
+    """保有判断スコアのcoverage_ratioから決まる信頼度(既存ConfidenceLevelとは別概念)。
+
+    coverage_ratio < 0.6はINSUFFICIENT_EVIDENCEとし、通常の売却通知を禁止する
+    (一次情報で確認できたハードゲートがある場合のみ例外的に緊急通知可)。
+    """
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+
+class ExecutionPlanReason(StrEnum):
+    """HoldingDecisionExecutionPlanがこの組み合わせになった理由(監査用)。"""
+
+    NORMAL_LEGACY = "NORMAL_LEGACY"
+    NORMAL_SHADOW = "NORMAL_SHADOW"
+    NORMAL_ACTIVE = "NORMAL_ACTIVE"
+    FINANCIAL_MODEL_DEFERRED = "FINANCIAL_MODEL_DEFERRED"
+
+
+class RuntimeConfigMode(StrEnum):
+    """HoldingDecisionRuntimeConfig.modeの許容値。"""
+
+    LEGACY = "legacy"
+    SHADOW = "shadow"
+    ACTIVE = "active"
+
+
+class FinancialPolicyOverride(StrEnum):
+    """HoldingDecisionRuntimeConfig.financial_policy_overrideの許容値。
+
+    DEFAULTはYAML(industry_scoring_policy.yaml)のカテゴリ別deferred設定をそのまま使う。
+    FORCE_DEFER_ALLはYAML側の解除状況に関わらず全金融業カテゴリを即座に退避させる
+    緊急オーバーライド。RuntimeConfigから金融業をActiveへ強制する値は存在しない
+    (Active化はYAML改版を伴う設計変更としてのみ実施する)。
+    """
+
+    DEFAULT = "DEFAULT"
+    FORCE_DEFER_ALL = "FORCE_DEFER_ALL"

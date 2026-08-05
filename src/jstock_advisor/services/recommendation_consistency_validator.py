@@ -18,6 +18,7 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     PriceFieldBasis,
     RecommendationType,
+    is_sell_like,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
@@ -40,9 +41,6 @@ class ConsistencyCheckResult:
         return any(v.manual_review_required for v in self.violations)
 
 
-_SELL_LIKE_TYPES = (RecommendationType.SELL, RecommendationType.URGENT_REVIEW)
-
-
 def _check_sell_single_evidence(r: Recommendation) -> ConsistencyViolation | None:
     """SELL/URGENT_REVIEWが独立根拠グループ2件未満に基づいていないか(要求仕様§15、
     レビュー対応でTRIGGERED件数ではなくindependent_evidence_group_countを使用)。
@@ -50,7 +48,7 @@ def _check_sell_single_evidence(r: Recommendation) -> ConsistencyViolation | Non
     ただし、一次情報確認済みの即時性criticalが存在する場合は、単一グループでも
     URGENT_REVIEWを許可する(要求仕様レビュー対応の例外)。
     """
-    if r.recommendation_type not in _SELL_LIKE_TYPES:
+    if not is_sell_like(r.recommendation_type):
         return None
 
     has_confirmed_immediate_critical = any(
@@ -94,7 +92,7 @@ def _check_high_confidence_insufficient_groups(r: Recommendation) -> Consistency
 
 def _check_sell_based_on_yfinance_only(r: Recommendation) -> ConsistencyViolation | None:
     """SELL/URGENT_REVIEWの根拠がyfinance等の二次情報のみでないか(要求仕様§12・§15)。"""
-    if r.recommendation_type not in _SELL_LIKE_TYPES:
+    if not is_sell_like(r.recommendation_type):
         return None
     triggered = [e for e in r.evidence_details if e.get("status") == "TRIGGERED"]
     if not triggered:

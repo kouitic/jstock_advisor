@@ -146,6 +146,16 @@ def evaluate_add_on_eligibility(
     # 優先順位: 売却競合 → 保有データ整合性(単元未満株を含む) →
     # ポートフォリオデータ信頼性 → 銘柄集中 → 業種集中。最初に該当した
     # 1件だけを理由として返す。
+    #
+    # 【保有判断スコア方式移行に伴う既知の未対応事項】conflicting_holding_actionは
+    # buy_candidates_handler.pyがSellSignalService(旧エンジン)を直接呼んで
+    # 得た値であり、旧エンジンが返すrecommendation_typeであれば種類を問わず
+    # ここでブロック対象になる(is_sell_like()等のフィルタは介在しない)。
+    # mode=legacy/shadowの間はSellSignalServiceが引き続き権威であるため問題ないが、
+    # mode=active移行後(HoldingDecisionServiceが権威になった後)は
+    # buy_candidates_handler.py側もHoldingDecisionServiceの結果(SELL_CONSIDERATION/
+    # STRONG_SELL_CONSIDERATION/URGENT_HOLDING_REVIEW)を参照するよう更新が必要。
+    # Phase3切替の一部として別途対応する。
     if conflicting_holding_action is not None and config.block_on_sell_signal:
         return assessment, NotificationEligibility(
             eligible=False,
