@@ -105,8 +105,37 @@ class HoldingDecisionRuntimeConfigService:
             logger.warning("RuntimeConfig取得失敗、直近のキャッシュ値を使用します")
             return RuntimeConfigLookup(config=_cached_config, is_fallback=False)
 
-        logger.warning("RuntimeConfig取得失敗、正常取得履歴も無いため安全側の既定値へフォールバックします")
+        logger.warning(
+            "RuntimeConfig取得失敗、正常取得履歴も無いため安全側の既定値へフォールバックします"
+        )
         return RuntimeConfigLookup(config=_build_fallback_config(current_time), is_fallback=True)
+
+    def get_notification_enabled(self) -> bool:
+        """kill switch(notification_enabled)を、TTLキャッシュを経由せず毎回取得する。
+
+        kill switchは緊急停止用途(実装プラン修正2)のため、mode等と同じ
+        `_cache_ttl_seconds`(既定60秒)のキャッシュに乗せてしまうと、運用者が
+        `holding-decision kill-switch on`で停止させても、既に稼働中のバッチが
+        最大でキャッシュ有効期間ぶん停止操作に気づかない恐れがある。この
+        メソッドはget_config()のモジュールレベルキャッシュを一切参照せず、
+        呼び出しのたびにリポジトリへ直接問い合わせる。取得に失敗した場合は
+        安全側(通知しない)へフォールバックする(get_config()のフォールバック
+        方針と同じ考え方)。
+        """
+        try:
+            fetched = _repo.get(self._store_dir)
+        except Exception:
+            logger.exception(
+                "kill switch(notification_enabled)の取得に失敗しました。"
+                "安全側(通知しない)へフォールバックします"
+            )
+            return _FALLBACK_NOTIFICATION_ENABLED
+        if fetched is None:
+            logger.warning(
+                "RuntimeConfig未初期化のため、kill switchは安全側(通知しない)として扱います"
+            )
+            return _FALLBACK_NOTIFICATION_ENABLED
+        return fetched.notification_enabled
 
     def init_config(
         self,
@@ -199,6 +228,5 @@ class HoldingDecisionRuntimeConfigService:
             )
         except Exception:
             logger.exception(
-                "RuntimeConfig変更の監査ログ記録に失敗しました"
-                "(設定変更自体は正常に反映済みです)"
+                "RuntimeConfig変更の監査ログ記録に失敗しました(設定変更自体は正常に反映済みです)"
             )

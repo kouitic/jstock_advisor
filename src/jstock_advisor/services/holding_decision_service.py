@@ -19,11 +19,12 @@ from jstock_advisor.domain.classification.financial_industry import classify_ind
 from jstock_advisor.domain.entities.enums import (
     BaselineOrigin,
     BaselineStatus,
+    EvidenceCoverageStatus,
     ExecutionPlanReason,
+    PeriodType,
     TriggerStatus,
 )
 from jstock_advisor.domain.entities.holding import Holding
-from jstock_advisor.domain.entities.enums import EvidenceCoverageStatus
 from jstock_advisor.domain.entities.holding_decision import (
     BaselineValueSnapshot,
     CompanyQualityScore,
@@ -33,7 +34,6 @@ from jstock_advisor.domain.entities.holding_decision import (
     RiskDeductionScore,
 )
 from jstock_advisor.domain.financial_series import FinancialPeriodValue
-from jstock_advisor.domain.entities.enums import PeriodType
 from jstock_advisor.domain.signals.company_quality_scoring import (
     CompanyQualityInputs,
     score_company_quality,
@@ -86,10 +86,14 @@ def _build_reason_impacts(
             continue
         gap = item.points_earned - item.weight
         if gap < 0:
-            impacts.append(ReasonImpact(reason_code=item.item_code, category=item.axis, score_impact=gap))
+            impacts.append(
+                ReasonImpact(reason_code=item.item_code, category=item.axis, score_impact=gap)
+            )
         elif item.points_earned >= item.weight:
             impacts.append(
-                ReasonImpact(reason_code=item.item_code, category=item.axis, score_impact=item.weight)
+                ReasonImpact(
+                    reason_code=item.item_code, category=item.axis, score_impact=item.weight
+                )
             )
     for category in risk_deduction.categories:
         if category.points > 0:
@@ -203,7 +207,8 @@ class HoldingDecisionService:
             material_event_keywords_found=snapshot.material_event_keywords_found,
         )
         risk_deduction = score_risk_deduction(
-            RiskDeductionInputs(sell_rule_inputs=sell_rule_inputs), self._config.holding_decision_risk
+            RiskDeductionInputs(sell_rule_inputs=sell_rule_inputs),
+            self._config.holding_decision_risk,
         )
         new_reason_codes = tuple(
             name
@@ -224,9 +229,7 @@ class HoldingDecisionService:
                 rule_version=str(rules.scoring_model_version),
                 timestamp=now,
             )
-            return HoldingDecisionEvaluationOutcome(
-                holding.stock_code, None, integrity_error=True
-            )
+            return HoldingDecisionEvaluationOutcome(holding.stock_code, None, integrity_error=True)
 
         has_benefit = snapshot.benefit is not None and not snapshot.benefit.is_abolished
         is_first_evaluation = lookup.baseline is None
@@ -254,9 +257,8 @@ class HoldingDecisionService:
             profit_cf_premise_broken = None
             financial_premise_broken = None
         else:
-            benefit_abolished_or_downgraded = (
-                snapshot.benefit is not None
-                and (snapshot.benefit.is_abolished or snapshot.benefit.is_major_downgrade)
+            benefit_abolished_or_downgraded = snapshot.benefit is not None and (
+                snapshot.benefit.is_abolished or snapshot.benefit.is_major_downgrade
             )
             profit_cf_premise_broken = any(
                 sell_rule_inputs.evaluations.get(name, None) is not None
@@ -267,10 +269,9 @@ class HoldingDecisionService:
                 )
             )
             financial_premise_broken = (
-                sell_rule_inputs.evaluations.get("financial_health_severe_deterioration") is not None
-                and sell_rule_inputs.evaluations[
-                    "financial_health_severe_deterioration"
-                ].status
+                sell_rule_inputs.evaluations.get("financial_health_severe_deterioration")
+                is not None
+                and sell_rule_inputs.evaluations["financial_health_severe_deterioration"].status
                 == TriggerStatus.TRIGGERED
             )
 
@@ -340,7 +341,9 @@ class HoldingDecisionService:
             )
         )
 
-        outcome = combine_holding_decision(company_quality, investment_thesis, risk_deduction, hard_gate, rules)
+        outcome = combine_holding_decision(
+            company_quality, investment_thesis, risk_deduction, hard_gate, rules
+        )
 
         positive_reasons, negative_reasons = _build_reason_impacts(
             company_quality,
@@ -394,7 +397,9 @@ class HoldingDecisionService:
             input_values={"industry": industry.classification.value},
             calculation_formulas={
                 "base_score": "company_quality + investment_thesis - risk_deduction",
-                "final_score": "min(base_score, hard_gate_score_cap) if hard_gate_triggered else base_score",
+                "final_score": (
+                    "min(base_score, hard_gate_score_cap) if hard_gate_triggered else base_score"
+                ),
             },
             output_values={
                 "base_score": outcome.base_score,

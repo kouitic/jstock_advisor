@@ -22,19 +22,16 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
-import re
-import unicodedata
 from dataclasses import dataclass
 
 import xlrd
 
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.interfaces.candidate_universe import (
     CandidateUniverseError,
     CandidateUniverseItem,
     CandidateUniverseResult,
 )
-
-_STOCK_CODE_PATTERN = re.compile(r"^[0-9A-Z]{4}$")
 
 # data_j.xlsの列名(実データで確認済み)。
 _COL_DATE = "日付"
@@ -85,21 +82,16 @@ _KNOWN_MARKET_SEGMENTS = frozenset(
 
 
 def _normalize_stock_code(raw: object) -> str | None:
-    """9節の5ステップで正規化する。不正な場合はNoneを返す。"""
-    if isinstance(raw, float):
-        if raw != int(raw):
-            return None
-        code = str(int(raw)).zfill(4)
-    else:
-        code = str(raw).strip()
+    """9節の5ステップで正規化する。不正な場合はNoneを返す。
 
-    code = unicodedata.normalize("NFKC", code)
-    code = code.upper()
-    return code if _STOCK_CODE_PATTERN.match(code) else None
+    実体はExternalValueParser.stock_code()へ委譲する(全銘柄コード正規化の
+    共通実装。infrastructure/external_value_parser.py参照)。
+    """
+    return ExternalValueParser.stock_code(raw)
 
 
 def _resolve_jpx400_weight_column(fieldnames: list[str]) -> str | None:
-    """"JPX日経400"と"ウェイト"の両方を部分文字列として含む列名を探す(9節)。"""
+    """ "JPX日経400"と"ウェイト"の両方を部分文字列として含む列名を探す(9節)。"""
     for name in fieldnames:
         if "JPX日経400" in name and "ウェイト" in name:
             return name
@@ -125,13 +117,8 @@ def _extract_excel_date(value: object, datemode: int) -> dt.date | None:
 
 
 def _parse_date_string(value: str) -> dt.date | None:
-    value = value.strip()
-    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y%m%d"):
-        try:
-            return dt.datetime.strptime(value, fmt).date()
-        except ValueError:
-            continue
-    return None
+    """ExternalValueParser.date()へ委譲する(書式優先順位は従来と同一)。"""
+    return ExternalValueParser.date(value)
 
 
 @dataclass(frozen=True)
@@ -204,17 +191,21 @@ def parse_listed_issues_xls(
                 stock_code=stock_code,
                 stock_name=str(sheet.cell_value(row, col_index[_COL_NAME])).strip() or None,
                 market_segment=market_segment or None,
-                industry_33_code=str(sheet.cell_value(row, col_index[_COL_INDUSTRY_33_CODE]))
-                .strip()
+                industry_33_code=str(
+                    sheet.cell_value(row, col_index[_COL_INDUSTRY_33_CODE])
+                ).strip()
                 or None,
-                industry_33_name=str(sheet.cell_value(row, col_index[_COL_INDUSTRY_33_NAME]))
-                .strip()
+                industry_33_name=str(
+                    sheet.cell_value(row, col_index[_COL_INDUSTRY_33_NAME])
+                ).strip()
                 or None,
-                industry_17_code=str(sheet.cell_value(row, col_index[_COL_INDUSTRY_17_CODE]))
-                .strip()
+                industry_17_code=str(
+                    sheet.cell_value(row, col_index[_COL_INDUSTRY_17_CODE])
+                ).strip()
                 or None,
-                industry_17_name=str(sheet.cell_value(row, col_index[_COL_INDUSTRY_17_NAME]))
-                .strip()
+                industry_17_name=str(
+                    sheet.cell_value(row, col_index[_COL_INDUSTRY_17_NAME])
+                ).strip()
                 or None,
                 size_code=str(sheet.cell_value(row, col_index[_COL_SIZE_CODE])).strip() or None,
                 size_name=str(sheet.cell_value(row, col_index[_COL_SIZE_NAME])).strip() or None,
@@ -326,8 +317,7 @@ class JpxCandidateUniverseProvider:
         listed_cached = cache_io.read_current("listed_issues")
         if listed_cached is None:
             raise CandidateUniverseError(
-                "東証上場銘柄一覧のキャッシュが存在しません(初回のDownloader実行が"
-                "未完了です)"
+                "東証上場銘柄一覧のキャッシュが存在しません(初回のDownloader実行が未完了です)"
             )
         listed_data, listed_metadata = listed_cached
         self._check_staleness(

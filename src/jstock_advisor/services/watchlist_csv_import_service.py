@@ -6,14 +6,14 @@
 from __future__ import annotations
 
 import csv
-import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.enums import Priority
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.watchlist_service import WatchlistService
 
 REQUIRED_COLUMNS = {"stock_code"}
@@ -28,8 +28,6 @@ OPTIONAL_COLUMNS = {
     "memo",
 }
 ALL_COLUMNS = REQUIRED_COLUMNS | OPTIONAL_COLUMNS
-
-_STOCK_CODE_PATTERN = re.compile(r"^[0-9A-Za-z]{4}$")
 
 
 class CsvRowStatus(StrEnum):
@@ -84,26 +82,26 @@ class WatchlistCsvImportService:
         return summary
 
     def _process_row(self, row_number: int, row: dict[str, str | None]) -> CsvImportRowResult:
-        stock_code = (row.get("stock_code") or "").strip()
-        if not stock_code or not _STOCK_CODE_PATTERN.match(stock_code):
-            return _error(row_number, stock_code or None, "銘柄コードが不正です")
+        stock_code = ExternalValueParser.stock_code(row.get("stock_code"))
+        if stock_code is None:
+            raw_stock_code = (row.get("stock_code") or "").strip()
+            return _error(row_number, raw_stock_code or None, "銘柄コードが不正です")
 
         desired_yield_raw = (row.get("desired_total_yield_pct") or "").strip()
         desired_yield: float | None = None
         if desired_yield_raw:
-            try:
-                desired_yield = float(desired_yield_raw)
-            except ValueError:
+            desired_yield_decimal = ExternalValueParser.decimal(desired_yield_raw)
+            if desired_yield_decimal is None:
                 return _error(
                     row_number, stock_code, "desired_total_yield_pctは数値で指定してください"
                 )
+            desired_yield = float(desired_yield_decimal)
 
         desired_price_raw = (row.get("desired_buy_price") or "").strip()
         desired_price: Decimal | None = None
         if desired_price_raw:
-            try:
-                desired_price = Decimal(desired_price_raw)
-            except InvalidOperation:
+            desired_price = ExternalValueParser.decimal(desired_price_raw)
+            if desired_price is None:
                 return _error(row_number, stock_code, "desired_buy_priceは数値で指定してください")
 
         priority_raw = (row.get("priority") or "").strip().upper()

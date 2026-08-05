@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
 import typer
 
 from jstock_advisor.domain.entities.enums import Priority
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.watchlist_csv_import_service import WatchlistCsvImportService
 from jstock_advisor.services.watchlist_service import WatchlistService
 
@@ -15,10 +16,10 @@ app = typer.Typer(help="ウォッチリストの登録・編集・削除")
 
 
 def _parse_decimal(value: str, field_name: str) -> Decimal:
-    try:
-        return Decimal(value)
-    except InvalidOperation as e:
-        raise typer.BadParameter(f"{field_name}は数値で指定してください") from e
+    parsed = ExternalValueParser.decimal(value)
+    if parsed is None:
+        raise typer.BadParameter(f"{field_name}は数値で指定してください")
+    return parsed
 
 
 @app.command("list")

@@ -15,9 +15,9 @@ import csv
 import datetime as dt
 import io
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 
 from jstock_advisor.domain.entities.enums import AccountType, TransactionType
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 from jstock_advisor.services.watchlist_service import WatchlistService
@@ -81,20 +81,18 @@ class ChatCommandService:
             return ChatCommandResult(
                 f"{command}は「{command},銘柄コード,株数,単価」の形式で送信してください", False
             )
-        stock_code, shares_raw, price_raw = args
+        stock_code_raw, shares_raw, price_raw = args
 
-        try:
-            shares = int(shares_raw)
-            if shares <= 0:
-                raise ValueError
-        except ValueError:
+        stock_code = ExternalValueParser.stock_code(stock_code_raw)
+        if stock_code is None:
+            return ChatCommandResult("銘柄コードが不正です(4桁の英数字が必要です)", False)
+
+        shares = ExternalValueParser.integer(shares_raw)
+        if shares is None or shares <= 0:
             return ChatCommandResult("株数は正の整数で指定してください", False)
 
-        try:
-            price = Decimal(price_raw)
-            if price <= 0:
-                raise InvalidOperation
-        except InvalidOperation:
+        price = ExternalValueParser.decimal(price_raw)
+        if price is None or price <= 0:
             return ChatCommandResult("単価は正の数値で指定してください", False)
 
         holding = self._portfolio.get_holding(stock_code)
@@ -148,6 +146,8 @@ class ChatCommandService:
             return ChatCommandResult(
                 "ウォッチは「ウォッチ,銘柄コード」の形式で送信してください", False
             )
-        stock_code = args[0]
+        stock_code = ExternalValueParser.stock_code(args[0])
+        if stock_code is None:
+            return ChatCommandResult("銘柄コードが不正です(4桁の英数字が必要です)", False)
         item = self._watchlist.add_item(stock_code=stock_code)
         return ChatCommandResult(f"ウォッチリストに追加しました: {item.stock_code}", True)

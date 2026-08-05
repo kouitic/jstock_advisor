@@ -114,10 +114,24 @@ def test_import_invalid_date_is_row_error(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER}\n2914,BUY,2026/07/20,100,3400\n",
+        f"{_HEADER}\n2914,BUY,2026-13-40,100,3400\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.error_count == 1
+
+
+def test_import_slash_style_date_is_accepted(
+    import_service: TransactionCsvImportService, tmp_path: Path
+) -> None:
+    """ExternalValueParser導入により、YYYY/MM/DD形式の日付も受理できるようになった
+    (実装プラン外部データ正規化レイヤー・修正1)。"""
+    csv_path = _write_csv(
+        tmp_path,
+        f"{_HEADER}\n2914,BUY,2026/07/20,100,3400\n",
+    )
+    summary = import_service.import_file(csv_path)
+    assert summary.error_count == 0
+    assert summary.success_count == 1
 
 
 def test_import_non_positive_shares_is_row_error(

@@ -17,7 +17,6 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult, ReasonImpact
 from jstock_advisor.domain.entities.recommendation import Recommendation
-from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.sell_price_recommendation_service import recommend_sell_prices
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot
 
@@ -89,7 +88,10 @@ def build_holding_decision_recommendation(
     action_summary = (
         "重大条件のため保有判断スコアへ上限補正を適用しています。速やかに内容を確認してください。"
         if result.hard_gate.triggered
-        else f"保有判断スコア{result.display_value}点。投資前提の悪化が疑われるため売却を検討してください。"
+        else (
+            f"保有判断スコア{result.display_value}点。"
+            "投資前提の悪化が疑われるため売却を検討してください。"
+        )
     )
 
     next_review_conditions = ["次回決算発表後に再評価する"]

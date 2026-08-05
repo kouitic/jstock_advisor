@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import Any
 
 from jstock_advisor.domain.entities.enums import FinancialPolicyOverride, RuntimeConfigMode
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionRuntimeConfig
@@ -145,7 +146,7 @@ def _update_dynamodb(
     import boto3
     from botocore.exceptions import ClientError
 
-    table = boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
+    table: Any = boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
     now_value = now or dt.datetime.now(dt.UTC)
     try:
         response = table.update_item(
