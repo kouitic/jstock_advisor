@@ -7,19 +7,14 @@
 from __future__ import annotations
 
 import csv
-import re
 from pathlib import Path
 
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.interfaces.candidate_universe import (
     CandidateUniverseError,
     CandidateUniverseItem,
     CandidateUniverseResult,
 )
-
-# services/csv_import_service.py・watchlist_csv_import_service.pyと同じ正規表現・
-# 正規化方針(.strip()のみ)を踏襲する(このリポジトリに証券コード正規化の共通関数は
-# 存在せず、両ファイルとも同一定数を独自に重複定義しているため、その既存の流儀に合わせる)。
-_STOCK_CODE_PATTERN = re.compile(r"^[0-9A-Za-z]{4}$")
 
 REQUIRED_COLUMNS = {"stock_code"}
 
@@ -30,9 +25,7 @@ class CsvCandidateUniverseProvider:
 
     def get_candidate_universe(self) -> CandidateUniverseResult:
         if not self._csv_path.exists():
-            raise CandidateUniverseError(
-                f"候補銘柄ユニバースCSVが見つかりません: {self._csv_path}"
-            )
+            raise CandidateUniverseError(f"候補銘柄ユニバースCSVが見つかりません: {self._csv_path}")
 
         with self._csv_path.open(encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
@@ -51,12 +44,13 @@ class CsvCandidateUniverseProvider:
             items: list[CandidateUniverseItem] = []
 
             for row in reader:
-                stock_code = (row.get("stock_code") or "").strip()
-                if not stock_code:
+                raw_stock_code = (row.get("stock_code") or "").strip()
+                if not raw_stock_code:
                     continue  # 空行はraw_row_countにも含めない
                 raw_row_count += 1
 
-                if not _STOCK_CODE_PATTERN.match(stock_code):
+                stock_code = ExternalValueParser.stock_code(raw_stock_code)
+                if stock_code is None:
                     invalid_code_count += 1
                     continue
 

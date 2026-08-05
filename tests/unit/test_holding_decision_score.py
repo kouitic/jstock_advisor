@@ -1,7 +1,10 @@
 """保有判断スコアのbase/final合成・判定区分境界・通知条件のテスト(実装プラン20節)。"""
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.enums import HoldingDecisionCategory, HoldingDecisionConfidenceLevel
+from jstock_advisor.domain.entities.enums import (
+    HoldingDecisionCategory,
+    HoldingDecisionConfidenceLevel,
+)
 from jstock_advisor.domain.entities.holding_decision import (
     CompanyQualityScore,
     HoldingDecisionHardGate,
@@ -49,7 +52,9 @@ def test_representative_mixed_case_minus_12():
     assert out.should_notify is True
 
 
-def _score_for_target(target: float) -> tuple[CompanyQualityScore, InvestmentThesisScore, RiskDeductionScore]:
+def _score_for_target(
+    target: float,
+) -> tuple[CompanyQualityScore, InvestmentThesisScore, RiskDeductionScore]:
     # cq=25 + it=25 - rd=(50-target) -> final = target
     return _scores(25, 25, 50 - target)
 
@@ -175,3 +180,56 @@ def test_display_value_rounding_matches_expectation():
     q, i, r = _score_for_target(-0.6)
     out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
     assert out.display_value == -1
+
+
+# ===== 修正3: notify_below_score境界値テスト =====
+#
+# 仕様(実装プラン5節)は score_threshold_met = final_score < notify_below_score
+# (既定-1.0)。< であって <= ではない点、および浮動小数点誤差で境界がぶれない
+# ことを、-0.99/-1.0/-1.0001/-30の4点で直接検証する。
+
+
+def test_notify_below_score_boundary_minus_0_99_does_not_meet_threshold():
+    q, i, r = _score_for_target(-0.99)
+    out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
+    assert out.score_threshold_met is False
+    assert out.should_notify is False
+
+
+def test_notify_below_score_boundary_minus_1_0_exactly_does_not_meet_threshold():
+    """final_score == notify_below_score(ちょうど-1.0)は「未満」ではないため
+    通知しない(5節: "final_score == -1.0ちょうどは通知しない")。"""
+    q, i, r = _score_for_target(_RULES.notify_below_score)
+    out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
+    assert out.final_score == _RULES.notify_below_score
+    assert out.score_threshold_met is False
+    assert out.should_notify is False
+
+
+def test_notify_below_score_boundary_minus_1_0001_meets_threshold():
+    """notify_below_scoreをわずかに(0.0001)下回るだけで、確実に閾値を
+    満たす(<a>=</a>ではなく<であることの精度確認)。"""
+    q, i, r = _score_for_target(-1.0001)
+    out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
+    assert out.final_score < _RULES.notify_below_score
+    assert out.score_threshold_met is True
+    assert out.should_notify is True
+
+
+def test_notify_below_score_boundary_minus_30_meets_threshold():
+    q, i, r = _score_for_target(-30)
+    out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
+    assert out.final_score < _RULES.notify_below_score
+    assert out.score_threshold_met is True
+    assert out.should_notify is True
+
+
+def test_score_threshold_met_is_always_exactly_score_less_than_notify_below_score():
+    """score_threshold_metが常に`final_score < notify_below_score`という
+    仕様どおりの式であることを、複数の代表値で直接突き合わせて確認する。"""
+    for target in (-100.0, -30.0, -1.0001, -1.0, -0.9999, 0.0, 50.0, 100.0):
+        q, i, r = _score_for_target(target)
+        out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
+        assert out.score_threshold_met == (out.final_score < _RULES.notify_below_score), (
+            f"target={target}"
+        )

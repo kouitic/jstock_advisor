@@ -164,9 +164,7 @@ def _evaluate_counter_factors(
             snapshot.financial.equity_ratio_pct is not None
             and snapshot.financial.equity_ratio_pct >= 40.0
         ):
-            factors.append(
-                f"自己資本比率({snapshot.financial.equity_ratio_pct:.1f}%)は良好な水準"
-            )
+            factors.append(f"自己資本比率({snapshot.financial.equity_ratio_pct:.1f}%)は良好な水準")
     elif industry.classification == IndustryClassification.FINANCIAL:
         # 銀行の規制資本余力: データソースが無いため常に未評価
         evaluated["bank_regulatory_capital_buffer"] = False
@@ -371,9 +369,7 @@ class SellSignalService:
         )
 
         if recommendation_type == RecommendationType.HOLD:
-            return SellSignalOutcome(
-                holding.stock_code, None, None, tuple(result.triggered_rules)
-            )
+            return SellSignalOutcome(holding.stock_code, None, None, tuple(result.triggered_rules))
 
         evidence_details = result.evidence_details
 

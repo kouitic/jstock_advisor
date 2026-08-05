@@ -362,3 +362,164 @@ jstock feedback add --recommendation-id <推奨ID> --satisfaction-score 4
 | `BuyCandidatesFunction`のスキャン対象 | 全上場銘柄の自動スクリーニングではなく、ウォッチリスト登録銘柄のみを対象とする(市場全体をスキャンする実データ取得元が未接続のため) |
 | `QuarterlyReviewFunction` | ルール改善提案の自動生成は行わない(人間承認が必須な自由記述項目があるため)。レビュー時期のLINEリマインドのみ |
 | LINEチャット登録(6.1節) | 推奨ID・手数料・税額・メモ等は指定不可(最小限の項目のみ)。詳細な記録はCLIを使用 |
+
+---
+
+## 10. 保有判断スコア方式の運用(2026-08-06追加)
+
+保有銘柄の「投資した前提が崩れていないか」の判定を、従来方式
+(`SellSignalService`)から新方式(保有判断スコア、`HoldingDecisionService`)へ
+段階的に切り替えるための運用手順です(判定方式自体の考え方は
+[機能仕様書6.9節](functional_spec.md)を参照)。利益確定(利確)判定は対象外で、
+常に従来どおりです。
+
+### 10.1 RuntimeConfigの初回作成
+
+新方式の稼働モード(`mode`)・kill switch(`notification_enabled`)は、
+再デプロイ不要で切り替えられるよう専用のRuntimeConfigレコード(DynamoDB、
+ローカル運用時はJSONファイル)で管理します。**運用開始前に必ず1回だけ**
+初期化してください(2回目以降はエラーになります)。
+
+```bash
+jstock holding-decision init-runtime-config --changed-by <あなたの名前> --mode legacy
+# 本番(AWS)環境に対して初期化する場合は --target aws を追加
+jstock holding-decision init-runtime-config --changed-by <あなたの名前> --mode legacy --target aws
+```
+
+既定は`mode=legacy`(現行と完全同一動作)・`notification_enabled=False`
+(kill switch ON相当)です。現在の設定は次のコマンドで確認できます。
+
+```bash
+jstock holding-decision show-runtime-config --target aws
+```
+
+### 10.2 Shadow運用手順(新旧を並行計算し、通知は旧方式のみ)
+
+```bash
+jstock holding-decision set-mode shadow --changed-by <あなたの名前> \
+  --reason "新方式の並行検証を開始" --target aws
+```
+
+`mode=shadow`にすると、実際のLINE通知は引き続き旧方式のみが行いますが、
+新方式(`HoldingDecisionService`)も毎回計算・保存されるようになります
+(`HoldingDecisionResult`)。数日〜数週間このモードで運用し、10.6節の
+`compare`コマンドで新旧の判定差分を定期的に確認してください。
+
+### 10.3 Active切替手順(新方式が実際の通知を担当する)
+
+Shadow運用で新旧の乖離に問題が無いことを確認できたら、本稼働へ切り替えます。
+
+```bash
+jstock holding-decision set-mode active --changed-by <あなたの名前> \
+  --reason "Shadow検証完了、本稼働へ切替" --target aws
+```
+
+`mode=active`にすると、一般事業会社の銘柄は新方式が実際の通知を担当し、
+旧方式(`SellSignalService`)は通知を出さなくなります(判定自体は行われなく
+なります)。**銀行・保険・証券などの金融業銘柄は、`mode=active`に切り替えた
+後も自動的に旧方式のまま**です(10.5節)。
+
+ロールバックは`set-mode legacy`の1コマンドで即座に行えます(再デプロイ不要)。
+
+```bash
+jstock holding-decision set-mode legacy --changed-by <あなたの名前> \
+  --reason "問題を確認したため旧方式へ戻す" --target aws
+```
+
+### 10.4 kill switch運用(緊急停止)
+
+`mode`とは独立して、新旧どちらの通知も即座に停止できる緊急スイッチです。
+`mode`を切り替えずに「今すぐ通知だけ止めたい」場合に使います。
+
+```bash
+jstock holding-decision kill-switch on --changed-by <あなたの名前> \
+  --reason "誤判定の疑いがあるため一時停止" --target aws
+# 解除
+jstock holding-decision kill-switch off --changed-by <あなたの名前> \
+  --reason "原因を確認し再開" --target aws
+```
+
+`mode`等の他の設定値は、DynamoDBの読み取り頻度を抑えるため60秒
+(`runtime_config_cache_ttl_seconds`)キャッシュされますが、**kill switchの
+状態だけはこのキャッシュを経由せず、判定のたびに必ず最新値を取得します**
+(緊急停止操作が最大60秒遅れて反映される事態を避けるため)。切り替え後は
+次回の判定サイクルから確実に反映されます。判定・記録自体は止まらず、
+通知のみが止まる点に注意してください(空振りではなく、`HoldingDecisionResult`
+は引き続き保存され続けます)。
+
+### 10.5 金融業移行手順
+
+銀行・保険・証券・その他金融業の銘柄は、`BankRegulatoryMetrics`(自己資本
+比率規制等)を評価する専用データソース・専用モデルが未実装のため、
+`mode=active`に切り替えた後も**当面は自動的に旧方式のまま**通知を継続します
+(`config/industry_scoring_policy.yaml`の`financial_industry_policy`が正の
+設定元)。新方式はこれらの銘柄についてもshadow相当で計算・保存は継続し、
+将来のモデル検証データとして蓄積されます。
+
+金融業を新方式へ移行するには、以下がすべて完了している必要があります
+(現時点ではいずれも未着手です)。
+
+1. 専用データソースの実装(`BankRegulatoryMetrics`の実データ取得)
+2. 専用スコアリングモデルの実装・`financial_model_version`の採番
+3. 最低1四半期程度のshadow運用相当での試験運用・人間レビュー
+4. `config/industry_scoring_policy.yaml`の該当カテゴリの`deferred: false`への
+   変更(コード変更を伴うためデプロイが必要)
+
+**緊急退避**: 何らかの理由で金融業の判定に問題が疑われる場合、
+`financial_policy_override`を`FORCE_DEFER_ALL`にすると、YAML側の設定に
+関わらず全金融業カテゴリを即座に旧方式へ退避させられます(再デプロイ不要)。
+
+```bash
+jstock holding-decision init-runtime-config --changed-by <あなたの名前> \
+  --mode active --financial-policy-override FORCE_DEFER_ALL --target aws
+```
+
+既に初期化済みの場合は`set-mode`と同様、`get-config`で現在値を取得してから
+`update_config`相当の操作が必要です(現状CLIに`financial-policy-override`
+単体を変更するコマンドは無く、`init-runtime-config`の初回作成時のみ指定
+可能です。運用中に変更したい場合はPythonから直接
+`HoldingDecisionRuntimeConfigService.update_config()`を呼び出してください)。
+
+### 10.6 compare実行方法(Shadow比較レポート)
+
+Shadow運用中に新旧の判定差分を確認するためのコマンドです。指定銘柄
+(または全保有銘柄)を現在のデータで両エンジンにかけ、判定・score・
+通知差分に加えて、coverage・ハードゲート・主な加点/減点理由を表示します。
+
+```bash
+jstock holding-decision compare --stock-code 2914 --stock-code 8306
+# 保有銘柄すべてを対象にする場合は --stock-code を省略
+jstock holding-decision compare
+# 実データで比較する場合(既定はmock)
+jstock holding-decision compare --source real
+# CSVへ出力
+jstock holding-decision compare --csv compare_result.csv
+```
+
+出力の「差分」欄が「一致」以外(旧のみ検討/新のみ検討)の銘柄は、判定根拠
+(「主な減点要因」「保有を支持する要因」)を確認し、必要であれば
+`config/holding_decision_rules.yaml`等の閾値調整を検討してください
+(調整自体は本書7節のルール改善承認フローに準じ、根拠を残しながら行うことを
+推奨します)。
+
+### 10.7 バックテスト手順
+
+過去に実際に保存された判定結果を再生する`backtest`コマンドです。**このシステムは
+財務・配当・優待データを現在値としてのみ保持しており、過去の任意時点の
+財務スナップショットは保存していないため、真の意味での過去時点シミュレーション
+はできません**(Phase0前提)。
+
+```bash
+# liveモード(--start-date省略時): 指定銘柄を現在のデータで新旧比較
+jstock holding-decision backtest --stock-code 2914
+
+# replayモード(--start-date指定時): 過去に保存された評価結果を期間指定で再生
+jstock holding-decision backtest --start-date 2026-08-01 --end-date 2026-08-31
+
+# 保有銘柄すべてを対象にCSV出力
+jstock holding-decision backtest --csv backtest_result.csv
+```
+
+replayモードは`mode=shadow`で運用した蓄積データが無い期間を指定すると、
+推測で埋め合わせず素直に「該当するデータがありません」と表示します。
+運用開始直後で蓄積が無い場合は、まずliveモードで現状の判定を確認してください。

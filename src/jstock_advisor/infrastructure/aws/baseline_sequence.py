@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import Any
 
 from jstock_advisor.domain.entities.base import Entity
 from jstock_advisor.infrastructure.collection_store import (
@@ -57,7 +58,7 @@ def _allocate_next_baseline_version_local(holding_id: str, store_dir: Path | Non
 def _allocate_next_baseline_version_dynamodb(holding_id: str) -> int:
     import boto3
 
-    table = boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
+    table: Any = boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
     response = table.update_item(
         Key={"holding_id": holding_id},
         UpdateExpression="ADD current_version :inc SET updated_at = :now",

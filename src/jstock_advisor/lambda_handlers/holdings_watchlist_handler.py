@@ -54,6 +54,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.evaluation_audit import HoldingEvaluationAudit, summary_category
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.signals.holding_decision_execution_plan import (
     resolve_execution_plan,
@@ -89,7 +90,7 @@ from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
-from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -200,14 +201,17 @@ def _notify_legacy_sell_and_build_result(
 def _notify_holding_decision_and_build_result(
     holding: Holding,
     now: dt.datetime,
-    result,
-    snapshot,
+    result: HoldingDecisionResult,
+    snapshot: StockSnapshot,
     config: AppConfig,
     holding_decision_result_repo: HoldingDecisionResultRepository,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
-) -> tuple[_HoldingResult, object]:
-    """保有判断スコアの通知を行い、(_HoldingResult, 保存用に更新したHoldingDecisionResult)を返す。"""
+) -> tuple[_HoldingResult, HoldingDecisionResult]:
+    """保有判断スコアの通知を行う。
+
+    戻り値は(_HoldingResult, 保存用に更新したHoldingDecisionResult)。
+    """
     recommendation_id = str(uuid.uuid4())
     recommendation = build_holding_decision_recommendation(
         holding,
@@ -292,7 +296,10 @@ def _analyze_one_holding(
             error_code="DATA_FETCH_FAILED",
         )
         return _HoldingResult(
-            recommended=False, notified=False, succeeded=False, category="data_insufficient",
+            recommended=False,
+            notified=False,
+            succeeded=False,
+            category="data_insufficient",
             audit=audit,
         )
 
@@ -310,6 +317,9 @@ def _analyze_one_holding(
 
     # --- 新旧エンジンの排他制御(実装プラン11節) ---------------------------
     runtime_lookup = runtime_config_service.get_config(now)
+    # kill switchは緊急停止用途のため、mode等のTTLキャッシュを経由せず毎回
+    # 最新値を取得する(実装プラン修正2)。
+    notification_enabled = runtime_config_service.get_notification_enabled()
     industry = classify_industry(snapshot.financial.sector, snapshot.financial.industry)
     financial_deferred_policy = resolve_financial_deferred_policy(
         runtime_lookup.config, config.industry_scoring_policy.financial_industry_policy
@@ -319,6 +329,7 @@ def _analyze_one_holding(
         industry.classification,
         industry.financial_category,
         financial_deferred_policy,
+        notification_enabled=notification_enabled,
     )
 
     legacy_result: _HoldingResult | None = None
@@ -326,10 +337,7 @@ def _analyze_one_holding(
     if plan.run_legacy_sell_evaluation:
         sell_outcome = sell_service.analyze(holding, now, snapshot=snapshot)
         legacy_reason_codes = sell_outcome.triggered_rule_names
-        if (
-            sell_outcome.recommendation is not None
-            and plan.allow_legacy_sell_notification
-        ):
+        if sell_outcome.recommendation is not None and plan.allow_legacy_sell_notification:
             legacy_result = _notify_legacy_sell_and_build_result(
                 holding, now, sell_outcome.recommendation, recommendation_repo, notification_service
             )
@@ -382,7 +390,8 @@ def _analyze_one_holding(
         elif hd_outcome.result is not None:
             hd_result = hd_outcome.result
             if plan.allow_holding_decision_notification and hd_result.should_notify:
-                holding_decision_result_notified, hd_result = _notify_holding_decision_and_build_result(
+                notify_fn = _notify_holding_decision_and_build_result
+                holding_decision_result_notified, hd_result = notify_fn(
                     holding,
                     now,
                     hd_result,

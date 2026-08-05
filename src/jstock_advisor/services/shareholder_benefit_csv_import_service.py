@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 
@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.enums import (
     SourceType,
 )
 from jstock_advisor.domain.valuation.shareholder_benefit_matching import compute_next_record_date
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
     ShareholderBenefitRegistryRepository,
 )
@@ -108,25 +109,19 @@ class ShareholderBenefitCsvImportService:
         grouped: dict[str, ShareholderBenefit],
         fetched_at: dt.datetime,
     ) -> tuple[CsvImportRowResult, ShareholderBenefit | None]:
-        stock_code = (row.get("stock_code") or "").strip()
-        if not stock_code:
+        stock_code = ExternalValueParser.stock_code(row.get("stock_code"))
+        if stock_code is None:
             return _error(row_number, None, "銘柄コードが未指定です"), None
 
-        try:
-            min_shares_required = int((row.get("min_shares_required") or "").strip())
-            if min_shares_required <= 0:
-                raise ValueError
-        except ValueError:
+        min_shares_required = ExternalValueParser.integer(row.get("min_shares_required"))
+        if min_shares_required is None or min_shares_required <= 0:
             return (
                 _error(row_number, stock_code, "min_shares_requiredは正の整数である必要があります"),
                 None,
             )
 
-        try:
-            frequency_per_year = int((row.get("frequency_per_year") or "").strip())
-            if frequency_per_year <= 0:
-                raise ValueError
-        except ValueError:
+        frequency_per_year = ExternalValueParser.integer(row.get("frequency_per_year"))
+        if frequency_per_year is None or frequency_per_year <= 0:
             return (
                 _error(row_number, stock_code, "frequency_per_yearは正の整数である必要があります"),
                 None,
@@ -142,11 +137,8 @@ class ShareholderBenefitCsvImportService:
         if not description:
             return _error(row_number, stock_code, "descriptionが未指定です"), None
 
-        try:
-            min_shares_for_tier = int((row.get("min_shares_for_tier") or "").strip())
-            if min_shares_for_tier <= 0:
-                raise ValueError
-        except ValueError:
+        min_shares_for_tier = ExternalValueParser.integer(row.get("min_shares_for_tier"))
+        if min_shares_for_tier is None or min_shares_for_tier <= 0:
             return (
                 _error(row_number, stock_code, "min_shares_for_tierは正の整数である必要があります"),
                 None,
@@ -155,9 +147,8 @@ class ShareholderBenefitCsvImportService:
         estimated_value_raw = (row.get("estimated_value") or "").strip()
         estimated_value: Decimal | None = None
         if estimated_value_raw:
-            try:
-                estimated_value = Decimal(estimated_value_raw)
-            except InvalidOperation:
+            estimated_value = ExternalValueParser.decimal(estimated_value_raw)
+            if estimated_value is None:
                 return (
                     _error(row_number, stock_code, "estimated_valueは数値で指定してください"),
                     None,
@@ -166,9 +157,8 @@ class ShareholderBenefitCsvImportService:
         long_term_raw = (row.get("long_term_holding_condition_months") or "").strip()
         long_term_months: int | None = None
         if long_term_raw:
-            try:
-                long_term_months = int(long_term_raw)
-            except ValueError:
+            long_term_months = ExternalValueParser.integer(long_term_raw)
+            if long_term_months is None:
                 return (
                     _error(
                         row_number,
@@ -181,9 +171,8 @@ class ShareholderBenefitCsvImportService:
         long_term_max_raw = (row.get("long_term_holding_condition_max_months") or "").strip()
         long_term_max_months: int | None = None
         if long_term_max_raw:
-            try:
-                long_term_max_months = int(long_term_max_raw)
-            except ValueError:
+            long_term_max_months = ExternalValueParser.integer(long_term_max_raw)
+            if long_term_max_months is None:
                 return (
                     _error(
                         row_number,
@@ -196,13 +185,12 @@ class ShareholderBenefitCsvImportService:
         record_dates_raw = (row.get("benefit_record_dates") or "").strip()
         record_dates: list[dt.date] = []
         if record_dates_raw:
-            try:
-                record_dates = [
-                    dt.date.fromisoformat(d.strip())
-                    for d in record_dates_raw.split(";")
-                    if d.strip()
-                ]
-            except ValueError:
+            parsed_dates = [
+                ExternalValueParser.date(d.strip())
+                for d in record_dates_raw.split(";")
+                if d.strip()
+            ]
+            if any(d is None for d in parsed_dates):
                 return (
                     _error(
                         row_number,
@@ -211,13 +199,13 @@ class ShareholderBenefitCsvImportService:
                     ),
                     None,
                 )
+            record_dates = [d for d in parsed_dates if d is not None]
 
         ex_date_raw = (row.get("benefit_ex_date") or "").strip()
         ex_date: dt.date | None = None
         if ex_date_raw:
-            try:
-                ex_date = dt.date.fromisoformat(ex_date_raw)
-            except ValueError:
+            ex_date = ExternalValueParser.date(ex_date_raw)
+            if ex_date is None:
                 return (
                     _error(
                         row_number,
@@ -236,11 +224,12 @@ class ShareholderBenefitCsvImportService:
         recurrence_raw = (row.get("benefit_record_date_recurrence_months") or "").strip()
         recurrence_months: list[int] = []
         if recurrence_raw:
-            try:
-                recurrence_months = [
-                    int(m.strip()) for m in recurrence_raw.split(";") if m.strip()
-                ]
-            except ValueError:
+            parsed_months = [
+                ExternalValueParser.integer(m.strip())
+                for m in recurrence_raw.split(";")
+                if m.strip()
+            ]
+            if any(m is None for m in parsed_months):
                 return (
                     _error(
                         row_number,
@@ -250,6 +239,7 @@ class ShareholderBenefitCsvImportService:
                     ),
                     None,
                 )
+            recurrence_months = [m for m in parsed_months if m is not None]
             if any(m < 1 or m > 12 for m in recurrence_months):
                 return (
                     _error(

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import Any
 
 from jstock_advisor.domain.entities.holding_decision import InvestmentThesisBaselinePointer
 from jstock_advisor.infrastructure.collection_store import (
@@ -85,7 +86,12 @@ def update_pointer(
     """
     if running_on_lambda():
         return _update_pointer_dynamodb(
-            holding_id, new_baseline_id, new_baseline_version, expected_pointer_version, updated_by, now
+            holding_id,
+            new_baseline_id,
+            new_baseline_version,
+            expected_pointer_version,
+            updated_by,
+            now,
         )
     return _update_pointer_local(
         holding_id,
@@ -139,7 +145,7 @@ def _update_pointer_dynamodb(
     import boto3
     from botocore.exceptions import ClientError
 
-    table = boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
+    table: Any = boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
     now_value = now or dt.datetime.now(dt.UTC)
     try:
         response = table.update_item(

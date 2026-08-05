@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
-import re
-from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -17,6 +15,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.portfolio_service import PortfolioService
 
 REQUIRED_COLUMNS = {"stock_code", "shares", "purchase_price"}
@@ -29,8 +28,6 @@ OPTIONAL_COLUMNS = {
     "memo",
 }
 ALL_COLUMNS = REQUIRED_COLUMNS | OPTIONAL_COLUMNS
-
-_STOCK_CODE_PATTERN = re.compile(r"^[0-9A-Za-z]{4}$")
 
 DuplicatePolicy = Literal["additional_purchase", "overwrite"]
 
@@ -101,21 +98,18 @@ class HoldingsCsvImportService:
         on_duplicate: DuplicatePolicy,
         overwritten_stock_codes: set[str],
     ) -> CsvImportRowResult:
-        stock_code = (row.get("stock_code") or "").strip()
-        if not stock_code or not _STOCK_CODE_PATTERN.match(stock_code):
+        stock_code = ExternalValueParser.stock_code(row.get("stock_code"))
+        if stock_code is None:
+            raw_stock_code = (row.get("stock_code") or "").strip()
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,
-                stock_code=stock_code or None,
+                stock_code=raw_stock_code or None,
                 message="銘柄コードが不正です(4桁の英数字が必要です)",
             )
 
-        shares_raw = (row.get("shares") or "").strip()
-        try:
-            shares = int(shares_raw)
-            if shares <= 0:
-                raise ValueError
-        except ValueError:
+        shares = ExternalValueParser.integer(row.get("shares"))
+        if shares is None or shares <= 0:
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,
@@ -123,12 +117,8 @@ class HoldingsCsvImportService:
                 message="株数は正の整数である必要があります",
             )
 
-        price_raw = (row.get("purchase_price") or "").strip()
-        try:
-            purchase_price = Decimal(price_raw)
-            if purchase_price <= 0:
-                raise InvalidOperation
-        except (InvalidOperation, ValueError):
+        purchase_price = ExternalValueParser.decimal(row.get("purchase_price"))
+        if purchase_price is None or purchase_price <= 0:
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,
@@ -138,9 +128,8 @@ class HoldingsCsvImportService:
 
         purchase_date_raw = (row.get("purchase_date") or "").strip()
         if purchase_date_raw:
-            try:
-                purchase_date = dt.date.fromisoformat(purchase_date_raw)
-            except ValueError:
+            purchase_date = ExternalValueParser.date(purchase_date_raw)
+            if purchase_date is None:
                 return CsvImportRowResult(
                     row_number=row_number,
                     status=CsvRowStatus.ERROR,

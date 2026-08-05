@@ -84,7 +84,6 @@ def test_financial_industry_excludes_financial_health_from_denominator():
 
     weights = _CFG.holding_decision.company_quality_weights
     excluded_weight = weights.financial_health_equity_ratio + weights.financial_health_debt_excess
-    total_weight = 50.0
     # NOT_APPLICABLE分はavailable_pointsから除外されるため、denominatorはtotalより小さい。
     # scoreは0-50の範囲を維持する(正規化により再スケールされる)。
     assert 0.0 <= result.score <= 50.0

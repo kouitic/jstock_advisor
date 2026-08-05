@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
 import typer
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.corporate_action_service import CorporateActionService
 from jstock_advisor.services.csv_import_service import HoldingsCsvImportService
@@ -27,17 +28,17 @@ _SOURCE_HELP = "企業行動データの取得元: mock(既定)/ real(yfinance+�
 def _parse_date(value: str | None) -> dt.date:
     if not value:
         return dt.date.today()
-    try:
-        return dt.date.fromisoformat(value)
-    except ValueError as e:
-        raise typer.BadParameter("日付はYYYY-MM-DD形式で指定してください") from e
+    parsed = ExternalValueParser.date(value)
+    if parsed is None:
+        raise typer.BadParameter("日付はYYYY-MM-DD形式で指定してください")
+    return parsed
 
 
 def _parse_decimal(value: str, field_name: str) -> Decimal:
-    try:
-        return Decimal(value)
-    except InvalidOperation as e:
-        raise typer.BadParameter(f"{field_name}は数値で指定してください") from e
+    parsed = ExternalValueParser.decimal(value)
+    if parsed is None:
+        raise typer.BadParameter(f"{field_name}は数値で指定してください")
+    return parsed
 
 
 @app.command("list")

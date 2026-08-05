@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 import datetime as dt
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
 import typer
 
 from jstock_advisor.domain.entities.enums import BenefitUtilityCategory
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.shareholder_benefit_csv_import_service import (
     ShareholderBenefitCsvImportService,
 )
@@ -26,21 +27,19 @@ app = typer.Typer(help="株主優待の手動登録(自動取得非対応のた�
 def _parse_date_list(value: str | None) -> list[dt.date]:
     if not value:
         return []
-    try:
-        return [dt.date.fromisoformat(v.strip()) for v in value.split(",") if v.strip()]
-    except ValueError as e:
-        raise typer.BadParameter(
-            "権利確定日はYYYY-MM-DD形式をカンマ区切りで指定してください"
-        ) from e
+    parsed = [ExternalValueParser.date(v.strip()) for v in value.split(",") if v.strip()]
+    if any(d is None for d in parsed):
+        raise typer.BadParameter("権利確定日はYYYY-MM-DD形式をカンマ区切りで指定してください")
+    return [d for d in parsed if d is not None]
 
 
 def _parse_decimal(value: str | None, field_name: str) -> Decimal | None:
     if value is None:
         return None
-    try:
-        return Decimal(value)
-    except InvalidOperation as e:
-        raise typer.BadParameter(f"{field_name}は数値で指定してください") from e
+    parsed = ExternalValueParser.decimal(value)
+    if parsed is None:
+        raise typer.BadParameter(f"{field_name}は数値で指定してください")
+    return parsed
 
 
 def _parse_month_list(value: str | None) -> list[int]:

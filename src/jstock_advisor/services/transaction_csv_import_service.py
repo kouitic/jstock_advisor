@@ -6,14 +6,14 @@
 from __future__ import annotations
 
 import csv
-import datetime as dt
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.enums import AccountType, TransactionType
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 
 REQUIRED_COLUMNS = {"stock_code", "transaction_type", "execution_date", "shares", "execution_price"}
@@ -71,8 +71,8 @@ class TransactionCsvImportService:
         return summary
 
     def _process_row(self, row_number: int, row: dict[str, str | None]) -> CsvImportRowResult:
-        stock_code = (row.get("stock_code") or "").strip()
-        if not stock_code:
+        stock_code = ExternalValueParser.stock_code(row.get("stock_code"))
+        if stock_code is None:
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,
@@ -91,10 +91,8 @@ class TransactionCsvImportService:
                 message=f"transaction_typeが不正です: {type_raw}",
             )
 
-        date_raw = (row.get("execution_date") or "").strip()
-        try:
-            execution_date = dt.date.fromisoformat(date_raw)
-        except ValueError:
+        execution_date = ExternalValueParser.date(row.get("execution_date"))
+        if execution_date is None:
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,
@@ -102,12 +100,8 @@ class TransactionCsvImportService:
                 message="execution_dateはYYYY-MM-DD形式で指定してください",
             )
 
-        shares_raw = (row.get("shares") or "").strip()
-        try:
-            shares = int(shares_raw)
-            if shares <= 0:
-                raise ValueError
-        except ValueError:
+        shares = ExternalValueParser.integer(row.get("shares"))
+        if shares is None or shares <= 0:
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,
@@ -115,12 +109,8 @@ class TransactionCsvImportService:
                 message="sharesは正の整数である必要があります",
             )
 
-        price_raw = (row.get("execution_price") or "").strip()
-        try:
-            execution_price = Decimal(price_raw)
-            if execution_price <= 0:
-                raise InvalidOperation
-        except (InvalidOperation, ValueError):
+        execution_price = ExternalValueParser.decimal(row.get("execution_price"))
+        if execution_price is None or execution_price <= 0:
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,
@@ -131,9 +121,8 @@ class TransactionCsvImportService:
         messages: list[str] = []
 
         fee_raw = (row.get("fee") or "").strip()
-        try:
-            fee = Decimal(fee_raw) if fee_raw else Decimal("0")
-        except InvalidOperation:
+        fee = ExternalValueParser.decimal(fee_raw) if fee_raw else Decimal("0")
+        if fee is None:
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,
@@ -142,9 +131,8 @@ class TransactionCsvImportService:
             )
 
         tax_raw = (row.get("tax") or "").strip()
-        try:
-            tax = Decimal(tax_raw) if tax_raw else Decimal("0")
-        except InvalidOperation:
+        tax = ExternalValueParser.decimal(tax_raw) if tax_raw else Decimal("0")
+        if tax is None:
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.ERROR,

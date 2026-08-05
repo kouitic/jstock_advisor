@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import datetime as dt
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
 import typer
 
 from jstock_advisor.domain.entities.enums import AccountType, SkipReason, TransactionType
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.transaction_csv_import_service import TransactionCsvImportService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
@@ -19,17 +20,17 @@ app = typer.Typer(help="実際の売買記録(推奨に基づく執行結果・�
 def _parse_date(value: str | None) -> dt.date:
     if not value:
         return dt.date.today()
-    try:
-        return dt.date.fromisoformat(value)
-    except ValueError as e:
-        raise typer.BadParameter("日付はYYYY-MM-DD形式で指定してください") from e
+    parsed = ExternalValueParser.date(value)
+    if parsed is None:
+        raise typer.BadParameter("日付はYYYY-MM-DD形式で指定してください")
+    return parsed
 
 
 def _parse_decimal(value: str, field_name: str) -> Decimal:
-    try:
-        return Decimal(value)
-    except InvalidOperation as e:
-        raise typer.BadParameter(f"{field_name}は数値で指定してください") from e
+    parsed = ExternalValueParser.decimal(value)
+    if parsed is None:
+        raise typer.BadParameter(f"{field_name}は数値で指定してください")
+    return parsed
 
 
 @app.command("buy-executed")

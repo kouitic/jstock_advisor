@@ -14,8 +14,15 @@ from decimal import Decimal
 from pathlib import Path
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.enums import AccountType, FinancialPolicyOverride, RuntimeConfigMode
+from jstock_advisor.domain.entities.enums import (
+    AccountType,
+    ConfidenceLevel,
+    FinancialPolicyOverride,
+    RecommendationType,
+    RuntimeConfigMode,
+)
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
     HoldingDecisionResultRepository,
@@ -37,7 +44,7 @@ from jstock_advisor.services.line_notification_service import LineNotificationSe
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
-from jstock_advisor.services.sell_signal_service import SellSignalService
+from jstock_advisor.services.sell_signal_service import SellSignalOutcome, SellSignalService
 
 _CFG = load_config()
 _NOW = dt.datetime.now(dt.UTC)
@@ -56,7 +63,9 @@ def _build_services(store_dir: Path, mode: RuntimeConfigMode):
     thesis_service = InvestmentThesisService(store_dir=store_dir)
     runtime_config_service = HoldingDecisionRuntimeConfigService(store_dir=store_dir)
     runtime_config_service.init_config(
-        "tester", mode=mode, notification_enabled=True,
+        "tester",
+        mode=mode,
+        notification_enabled=True,
         financial_policy_override=FinancialPolicyOverride.DEFAULT,
     )
     audit_service = AuditService(AuditLogRepository(store_dir))
@@ -167,3 +176,103 @@ def test_no_double_notification_across_modes(store_dir: Path):
         result, services = _run(sub_dir, mode)
         saved_recommendations = services["recommendation_repo"].list_all()
         assert len(saved_recommendations) <= 1
+
+
+def _fake_sell_recommendation(stock_code: str) -> Recommendation:
+    return Recommendation(
+        recommendation_id="fake-rec-id",
+        stock_code=stock_code,
+        stock_name="test",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL,
+        price_at_recommendation=Decimal("1000"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1",
+    )
+
+
+def test_kill_switch_on_suppresses_legacy_notification(store_dir: Path, monkeypatch):
+    """kill switch ON(notification_enabled=False)の場合、legacyモードで売却
+    シグナルが実際に成立していても、その売却推奨は保存・通知されない
+    (実装プラン修正2)。ProfitTakingService(利確判定、kill switchの対象外)が
+    独立に別の推奨を出すことはあり得るため、「送信メッセージが0件」ではなく
+    「売却推奨(fake-rec-id)が保存・通知されていないこと」で厳密に検証する。
+    """
+    services = _build_services(store_dir, RuntimeConfigMode.LEGACY)
+
+    def _fake_analyze(self, holding, now, snapshot=None):
+        return SellSignalOutcome(
+            holding.stock_code, _fake_sell_recommendation(holding.stock_code), None
+        )
+
+    monkeypatch.setattr(SellSignalService, "analyze", _fake_analyze)
+
+    # kill switchをON(notification_enabled=False)にする。
+    from jstock_advisor.infrastructure.local_repository import (
+        holding_decision_runtime_config_repository as repo,
+    )
+
+    repo.update(
+        expected_config_version=1,
+        mode=RuntimeConfigMode.LEGACY,
+        notification_enabled=False,
+        financial_policy_override=FinancialPolicyOverride.DEFAULT,
+        updated_by="operator",
+        change_reason="emergency stop",
+        store_dir=store_dir,
+    )
+
+    _analyze_one_holding(
+        _holding("2914"),
+        _NOW,
+        _PROVIDERS,
+        _CFG,
+        services["profit_service"],
+        services["sell_service"],
+        services["holding_decision_service"],
+        services["runtime_config_service"],
+        services["holding_decision_result_repo"],
+        services["recommendation_repo"],
+        services["notification_service"],
+        services["rule_version_service"],
+        None,
+        None,
+    )
+
+    saved_ids = {r.recommendation_id for r in services["recommendation_repo"].list_all()}
+    assert "fake-rec-id" not in saved_ids
+    assert not any("fake-rec-id" in msg for msg in services["line_client"].sent_messages)
+
+
+def test_kill_switch_off_allows_legacy_notification(store_dir: Path, monkeypatch):
+    """比較対照: kill switch OFF(notification_enabled=True、既定)であれば
+    従来どおり売却推奨が保存・通知される。"""
+    services = _build_services(store_dir, RuntimeConfigMode.LEGACY)
+
+    def _fake_analyze(self, holding, now, snapshot=None):
+        return SellSignalOutcome(
+            holding.stock_code, _fake_sell_recommendation(holding.stock_code), None
+        )
+
+    monkeypatch.setattr(SellSignalService, "analyze", _fake_analyze)
+
+    result = _analyze_one_holding(
+        _holding("2914"),
+        _NOW,
+        _PROVIDERS,
+        _CFG,
+        services["profit_service"],
+        services["sell_service"],
+        services["holding_decision_service"],
+        services["runtime_config_service"],
+        services["holding_decision_result_repo"],
+        services["recommendation_repo"],
+        services["notification_service"],
+        services["rule_version_service"],
+        None,
+        None,
+    )
+
+    saved_ids = {r.recommendation_id for r in services["recommendation_repo"].list_all()}
+    assert "fake-rec-id" in saved_ids
+    assert result.notified is True
