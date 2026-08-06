@@ -558,6 +558,14 @@ class EarningsWindowRulesConfig(StrictModel):
     # 場合、通常のPARTIAL/FULL_PROFIT_TAKE提案を保留してREVIEW_BEFORE_EARNINGSへ、
     # WATCHをWATCH_BEFORE_EARNINGSへ調整する(公式確認済みの即時criticalは例外) ---
     profit_taking_suppression_business_days: int
+    # --- 決算待ち判定ロジック修正(コードレビュー対応)で追加 ---
+    # 決算予定日から想定される決算期末日までの報告ラグ日数。fiscal_period_endが
+    # この日数以内に更新されていれば、決算発表が財務データへ反映されたとみなす
+    # (実際の決算発表日そのものの厳密な突合ではなく近似判定)。
+    fiscal_period_reporting_lag_days: int
+    # 決算予定日経過後、財務データの更新確認をこの時間(時間単位)待っても
+    # 確認できない場合はDELAYEDへ遷移させる。
+    maximum_data_reflection_wait_hours: int
 
 
 class PortfolioConcentrationRulesConfig(StrictModel):

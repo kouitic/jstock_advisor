@@ -25,6 +25,7 @@ from jstock_advisor.domain.entities.enums import (
     AccountType,
     ConfidenceLevel,
     DividendComparisonOutcome,
+    EarningsReleaseConfirmationState,
     ProfitTakingIndustrySector,
     RecommendationType,
     StockType,
@@ -41,6 +42,7 @@ from jstock_advisor.domain.signals.confidence_scoring import (
     ConfidenceScoreResult,
     compute_confidence,
 )
+from jstock_advisor.domain.signals.earnings_window import resolve_earnings_release_confirmation
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
@@ -97,7 +99,11 @@ def _dividend_decrease_explanation(
 
 
 def _build_next_review_conditions(
-    result: ProfitTakingResult, next_earnings_date: dt.date | None
+    result: ProfitTakingResult,
+    next_earnings_date: dt.date | None,
+    release_confirmation_state: EarningsReleaseConfirmationState = (
+        EarningsReleaseConfirmationState.NOT_APPLICABLE
+    ),
 ) -> list[str]:
     conditions: list[str] = []
     sp = result.sell_prices
@@ -111,6 +117,16 @@ def _build_next_review_conditions(
     conditions.append("EPS成長率鈍化")
     if next_earnings_date is not None:
         conditions.append(f"次回決算({next_earnings_date})後に適正価格を再計算")
+    elif release_confirmation_state == EarningsReleaseConfirmationState.DELAYED:
+        conditions.append(
+            "決算発表予定日を経過し、最新財務データの反映確認が長引いています。"
+            "確認でき次第、適正価格を再計算します"
+        )
+    elif release_confirmation_state == EarningsReleaseConfirmationState.AWAITING_CONFIRMATION:
+        conditions.append(
+            "決算発表予定日を経過していますが、無償データから実際の発表状況を確認できて"
+            "いません。最新財務データの更新を確認後に適正価格を再計算します"
+        )
     else:
         conditions.append("次回決算後に適正価格を再計算")
     return conditions
@@ -377,6 +393,16 @@ class ProfitTakingService:
             or condition_inputs.investment_premise_broken
         )
         suppression_days = self._config.earnings_window.profit_taking_suppression_business_days
+        # 決算発表確認待ち(コードレビュー対応: 明治ホールディングス(2269)事例)。
+        # 決算予定日を経過したが無償データで発表実績を確認できない期間は、
+        # 財務データが更新されるまで通常のPARTIAL/FULL_PROFIT_TAKE提案を保留する。
+        release_confirmation_state = resolve_earnings_release_confirmation(
+            snapshot.earnings_date_status,
+            snapshot.earnings_date_raw,
+            snapshot.financial.fiscal_period_end,
+            now,
+            self._config.earnings_window,
+        )
         effective_recommendation_type = result.recommendation_type
         effective_sell_prices = result.sell_prices
         if (
@@ -389,6 +415,17 @@ class ProfitTakingService:
                 effective_sell_prices = SellPriceLevels()
             elif effective_recommendation_type == RecommendationType.WATCH:
                 effective_recommendation_type = RecommendationType.WATCH_BEFORE_EARNINGS
+        elif (
+            not is_confirmed_critical
+            and release_confirmation_state
+            in (
+                EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
+                EarningsReleaseConfirmationState.DELAYED,
+            )
+            and effective_recommendation_type in _EARNINGS_SUPPRESSIBLE_TO_REVIEW
+        ):
+            effective_recommendation_type = RecommendationType.REVIEW_AFTER_EARNINGS
+            effective_sell_prices = SellPriceLevels()
 
         confidence_result = self._compute_confidence(result, snapshot, now)
 
@@ -533,7 +570,7 @@ class ProfitTakingService:
             },
             data_sources=list(snapshot.data_sources),
             next_review_conditions=_build_next_review_conditions(
-                result, snapshot.next_earnings_date
+                result, snapshot.next_earnings_date, release_confirmation_state
             ),
             not_yet_action_reasons=_build_not_yet_action_reasons(
                 result,

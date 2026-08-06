@@ -31,6 +31,7 @@ from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
     BuyAction,
     ConfidenceLevel,
+    EarningsDateStatus,
     RecommendationType,
     StockType,
     TrendClassification,
@@ -170,6 +171,20 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
     )
     dividend = _dividend(fx.stock_code, fx.forecast_dividend)
     dividend_yield_pct = float(fx.forecast_dividend / fx.current_price * 100)
+    # build_stock_snapshot()と同じ決算日検証ロジック(コードレビュー対応)。この
+    # フィクスチャはbuild_stock_snapshot()自体をモックしてStockSnapshotを直接
+    # 構築するため、検証済みのnext_earnings_date/earnings_date_status/
+    # earnings_date_rawを自前で整合させる必要がある。
+    earnings_date_raw = fx.next_earnings_date
+    if earnings_date_raw is None:
+        earnings_date_status = EarningsDateStatus.UNAVAILABLE
+        resolved_next_earnings_date = None
+    elif earnings_date_raw < _NOW.date():
+        earnings_date_status = EarningsDateStatus.STALE_PAST_DATE
+        resolved_next_earnings_date = None
+    else:
+        earnings_date_status = EarningsDateStatus.CONFIRMED
+        resolved_next_earnings_date = earnings_date_raw
     return StockSnapshot(
         stock_code=fx.stock_code,
         current_price=fx.current_price,
@@ -180,7 +195,9 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         historical_valuations=_historical_per_only(fx.per_median, fx.pbr_median),
         avg_trading_value=Decimal("100000000"),
         disclosures=[],
-        next_earnings_date=fx.next_earnings_date,
+        next_earnings_date=resolved_next_earnings_date,
+        earnings_date_status=earnings_date_status,
+        earnings_date_raw=earnings_date_raw,
         dividend_yield_pct=dividend_yield_pct,
         benefit_yield_pct=None,
         annual_benefit_value=None,
