@@ -88,6 +88,69 @@ def is_sell_like(recommendation_type: RecommendationType) -> bool:
     return recommendation_type in SELL_LIKE_RECOMMENDATION_TYPES
 
 
+class BacktestRecommendationSource(StrEnum):
+    """backtest/compareのhistory replayが、あるRecommendationTypeを新旧どちらの
+    エンジン由来として扱うかの分類(コードレビュー対応)。
+
+    分類はrecommendation_type単独では決定できないため、実装箇所をgrepで全数確認した
+    生成元(docs/functional_spec.md該当節参照)に基づき、3集合すべてを明示的に列挙する
+    (差集合は使わない)。未知のRecommendationTypeを暗黙にLEGACY_SELLへ含めないための
+    安全側設計であり、3集合いずれにも属さない新規メンバーは自動的にEXCLUDEDとなる。
+    """
+
+    LEGACY_SELL = "LEGACY_SELL"
+    HOLDING_DECISION = "HOLDING_DECISION"
+    EXCLUDED = "EXCLUDED"
+
+
+# 旧SellSignalService(domain/signals/sell_signal.py)のみが生成することをgrepで
+# 全数確認済み(他に代入箇所なし)。
+_LEGACY_SELL_RECOMMENDATION_TYPES = frozenset(
+    {
+        RecommendationType.SELL,
+        RecommendationType.URGENT_REVIEW,
+        RecommendationType.REVIEW,
+    }
+)
+# 新holding_decision_notification_builder.pyのみが生成することをgrepで全数確認済み
+# (他に代入箇所なし)。
+_HOLDING_DECISION_RECOMMENDATION_TYPES = frozenset(
+    {
+        RecommendationType.SELL_CONSIDERATION,
+        RecommendationType.STRONG_SELL_CONSIDERATION,
+        RecommendationType.URGENT_HOLDING_REVIEW,
+    }
+)
+# 売却方式比較に無関係(BUY候補・利確・ポートフォリオ集中リスク)、または
+# MANUAL_REVIEW_REQUIREDのようにどのサービスも生成していない値。
+_EXCLUDED_RECOMMENDATION_TYPES = frozenset(
+    {
+        RecommendationType.BUY,
+        RecommendationType.WATCH_BUY,
+        RecommendationType.HOLD,
+        RecommendationType.WATCH,
+        RecommendationType.PARTIAL_PROFIT_TAKE,
+        RecommendationType.FULL_PROFIT_TAKE,
+        RecommendationType.WATCH_BEFORE_EARNINGS,
+        RecommendationType.PARTIAL_RISK_REDUCTION,
+        RecommendationType.REVIEW_AFTER_EARNINGS,
+        RecommendationType.REVIEW_BEFORE_EARNINGS,
+        RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
+        RecommendationType.MANUAL_REVIEW_REQUIRED,
+    }
+)
+
+
+def classify_recommendation_source(
+    recommendation_type: RecommendationType,
+) -> BacktestRecommendationSource:
+    if recommendation_type in _LEGACY_SELL_RECOMMENDATION_TYPES:
+        return BacktestRecommendationSource.LEGACY_SELL
+    if recommendation_type in _HOLDING_DECISION_RECOMMENDATION_TYPES:
+        return BacktestRecommendationSource.HOLDING_DECISION
+    return BacktestRecommendationSource.EXCLUDED
+
+
 class EvaluationStatus(StrEnum):
     """保有銘柄1件ごとの評価処理の結果区分(2026-07仕様レビュー対応)。
 
@@ -111,6 +174,9 @@ class NotificationStatus(StrEnum):
     PRICE_CHANGE_BELOW_THRESHOLD = "PRICE_CHANGE_BELOW_THRESHOLD"
     DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
     ANALYSIS_FAILED = "ANALYSIS_FAILED"
+    # kill switch(notification_enabled=False)により送信を見送った場合(コードレビュー対応)。
+    # 判定・Recommendation保存自体は継続するが、LINE送信のみを止めたことを示す。
+    KILL_SWITCH_SUPPRESSED = "KILL_SWITCH_SUPPRESSED"
 
 
 class ProfitTakingIndustrySector(StrEnum):

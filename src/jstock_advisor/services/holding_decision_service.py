@@ -148,6 +148,17 @@ class HoldingDecisionService:
         financial_model_version_used: int | None = None,
         legacy_reason_codes: tuple[str, ...] = (),
     ) -> HoldingDecisionEvaluationOutcome:
+        """保有判断スコアを算出する。
+
+        現時点の実装では、`holding`引数から読むのは`holding.stock_code`のみであり、
+        `shares`/`average_purchase_price`/`total_purchase_amount`/`first_purchase_date`/
+        `last_purchase_date`/`account_type`等の保有固有情報は一切参照しない
+        (コードレビュー対応: これにより非保有銘柄でもダミー保有データを渡して
+        安全に評価できる。backtest/compareの`placeholder_holding`が前提とする
+        性質であり、`test_holding_decision_service_ignores_holding_specific_fields`
+        で回帰確認している)。ただし、これは現時点の実装事実であり永続的な仕様として
+        固定するものではない(将来、保有固有情報を使う設計変更があり得る)。
+        """
         start = time.monotonic()
         rules = self._config.holding_decision
 

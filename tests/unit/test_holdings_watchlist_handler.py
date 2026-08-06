@@ -4,10 +4,15 @@ from decimal import Decimal
 
 import pytest
 
-from jstock_advisor.domain.entities.enums import AccountType, RecommendationType
+from jstock_advisor.domain.entities.enums import (
+    AccountType,
+    NotificationStatus,
+    RecommendationType,
+)
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.lambda_handlers import holdings_watchlist_handler as handler_module
+from jstock_advisor.services.line_notification_service import NotificationOutcome
 
 _NOW = dt.datetime(2026, 7, 29, 7, 0, tzinfo=dt.UTC)
 
@@ -200,8 +205,22 @@ def test_task_holding_hold_category_and_portfolio_concentration_notified(
     monkeypatch.setattr(
         handler_module.ProfitTakingService, "analyze", lambda self, *a, **kw: _NoSignalOutcome()
     )
+    # このテストの関心事はkill switchではなく集中リスク通知そのものであるため、
+    # RuntimeConfig未初期化時の安全側フォールバック(notification_enabled=False)の
+    # 影響を受けないよう明示的にTrueへ固定する(コードレビュー対応でkill switchが
+    # 集中リスク通知にも適用されるようになったため)。
+    monkeypatch.setattr(
+        handler_module.HoldingDecisionRuntimeConfigService,
+        "get_notification_enabled",
+        lambda self: True,
+    )
 
     notified: list[object] = []
+
+    def _fake_notify_with_status(self, rec, now):
+        notified.append(rec)
+        return NotificationOutcome(status=NotificationStatus.SENT, sent=True)
+
     monkeypatch.setattr(
         handler_module,
         "LineNotificationService",
@@ -211,7 +230,7 @@ def test_task_holding_hold_category_and_portfolio_concentration_notified(
             {
                 "notify_data_error": lambda self, *a, **kw: False,
                 "notify_recommendation": lambda self, rec, now: notified.append(rec) or True,
-                "notify_recommendation_with_status": lambda self, *a, **kw: None,
+                "notify_recommendation_with_status": _fake_notify_with_status,
             },
         )(),
     )

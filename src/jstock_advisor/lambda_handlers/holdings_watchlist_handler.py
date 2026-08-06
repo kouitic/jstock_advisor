@@ -82,7 +82,10 @@ from jstock_advisor.services.holding_decision_runtime_config_service import (
 )
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
 from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
-from jstock_advisor.services.line_notification_service import LineNotificationService
+from jstock_advisor.services.line_notification_service import (
+    LineNotificationService,
+    NotificationOutcome,
+)
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
 from jstock_advisor.services.provider_bundle import ProviderBundle
@@ -107,6 +110,34 @@ class _HoldingResult:
     audit: HoldingEvaluationAudit
 
 
+_KILL_SWITCH_SUPPRESSED_OUTCOME = NotificationOutcome(
+    status=NotificationStatus.KILL_SWITCH_SUPPRESSED, sent=False, data_quality_blocked=False
+)
+
+
+def _send_or_suppress_notification(
+    recommendation: Recommendation,
+    notification_enabled: bool,
+    notification_service: LineNotificationService,
+    now: dt.datetime,
+) -> NotificationOutcome:
+    """kill switch(コードレビュー対応)。Recommendationの生成・保存はkill switchの
+    影響を受けず常に継続する(呼び出し側で保証する)。この関数はLINE送信の可否のみを
+    制御する。旧売却・新保有判断・利確・ポートフォリオ集中リスクの4経路すべてが
+    この1関数を経由することで、抑止結果(KILL_SWITCH_SUPPRESSED)を統一する。
+    """
+    if not notification_enabled:
+        logger.info(
+            "kill_switch_suppressed: stock_code=%s recommendation_id=%s "
+            "recommendation_type=%s notification_enabled=False",
+            recommendation.stock_code,
+            recommendation.recommendation_id,
+            recommendation.recommendation_type.value,
+        )
+        return _KILL_SWITCH_SUPPRESSED_OUTCOME
+    return notification_service.notify_recommendation_with_status(recommendation, now)
+
+
 def _evaluate_portfolio_concentration_and_notify(
     holding: Holding,
     current_price: Decimal,
@@ -117,9 +148,13 @@ def _evaluate_portfolio_concentration_and_notify(
     notification_service: LineNotificationService,
     rule_version_service: RuleVersionService,
     now: dt.datetime,
+    notification_enabled: bool,
 ) -> None:
     """企業価値判断とは独立に、ポートフォリオ内保有比率が高い場合に別途通知する
     (要求仕様§14)。銘柄単体の判定結果には影響しない(常に別のRecommendationとして扱う)。
+
+    kill switch(notification_enabled=False)中でもRecommendationの生成・保存は継続し、
+    LINE送信のみを止める(コードレビュー対応)。
     """
     holding_market_value = current_price * holding.shares
     portfolio_weight_pct = (
@@ -157,7 +192,7 @@ def _evaluate_portfolio_concentration_and_notify(
         portfolio_acquisition_cost_weight_pct=result.acquisition_cost_weight_pct,
     )
     recommendation_repo.save(recommendation)
-    notification_service.notify_recommendation(recommendation, now)
+    _send_or_suppress_notification(recommendation, notification_enabled, notification_service, now)
 
 
 def _notify_legacy_sell_and_build_result(
@@ -166,9 +201,14 @@ def _notify_legacy_sell_and_build_result(
     recommendation: Recommendation,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
+    notification_enabled: bool,
 ) -> _HoldingResult:
+    """Recommendation保存はkill switchの影響を受けず常に行う(コードレビュー対応)。
+    LINE送信のみ`notification_enabled`で制御する。"""
     recommendation_repo.save(recommendation)
-    outcome = notification_service.notify_recommendation_with_status(recommendation, now)
+    outcome = _send_or_suppress_notification(
+        recommendation, notification_enabled, notification_service, now
+    )
     audit = HoldingEvaluationAudit(
         stock_code=holding.stock_code,
         evaluated_at=now,
@@ -207,10 +247,13 @@ def _notify_holding_decision_and_build_result(
     holding_decision_result_repo: HoldingDecisionResultRepository,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
+    notification_enabled: bool,
 ) -> tuple[_HoldingResult, HoldingDecisionResult]:
     """保有判断スコアの通知を行う。
 
     戻り値は(_HoldingResult, 保存用に更新したHoldingDecisionResult)。
+    Recommendation生成・保存・recommendation_id設定はkill switchの影響を受けず常に行う
+    (コードレビュー対応)。LINE送信のみ`notification_enabled`で制御する。
     """
     recommendation_id = str(uuid.uuid4())
     recommendation = build_holding_decision_recommendation(
@@ -222,7 +265,9 @@ def _notify_holding_decision_and_build_result(
     )
     linked_result = result.model_copy(update={"recommendation_id": recommendation_id})
     recommendation_repo.save(recommendation)
-    outcome = notification_service.notify_recommendation_with_status(recommendation, now)
+    outcome = _send_or_suppress_notification(
+        recommendation, notification_enabled, notification_service, now
+    )
     audit = HoldingEvaluationAudit(
         stock_code=holding.stock_code,
         evaluated_at=now,
@@ -303,6 +348,13 @@ def _analyze_one_holding(
             audit=audit,
         )
 
+    # kill switchは緊急停止用途のため、mode等のTTLキャッシュを経由せず毎回
+    # 最新値を取得する(実装プラン修正2)。ポートフォリオ集中リスク通知より前に取得し、
+    # このサイクル内のすべての通知経路(集中リスク・旧売却・新保有判断・利確)へ
+    # 同一の値を渡す(コードレビュー対応: kill switchの適用範囲を保有銘柄分析の
+    # 全通知経路へ拡張する)。
+    notification_enabled = runtime_config_service.get_notification_enabled()
+
     _evaluate_portfolio_concentration_and_notify(
         holding,
         snapshot.current_price,
@@ -313,13 +365,11 @@ def _analyze_one_holding(
         notification_service,
         rule_version_service,
         now,
+        notification_enabled,
     )
 
     # --- 新旧エンジンの排他制御(実装プラン11節) ---------------------------
     runtime_lookup = runtime_config_service.get_config(now)
-    # kill switchは緊急停止用途のため、mode等のTTLキャッシュを経由せず毎回
-    # 最新値を取得する(実装プラン修正2)。
-    notification_enabled = runtime_config_service.get_notification_enabled()
     industry = classify_industry(snapshot.financial.sector, snapshot.financial.industry)
     financial_deferred_policy = resolve_financial_deferred_policy(
         runtime_lookup.config, config.industry_scoring_policy.financial_industry_policy
@@ -331,15 +381,32 @@ def _analyze_one_holding(
         financial_deferred_policy,
         notification_enabled=notification_enabled,
     )
+    # kill switchの影響を受けない「modeが今回の通知担当をどちらに割り当てたか」を得る
+    # (コードレビュー対応: kill switch中でもRecommendationの生成・保存自体は継続する
+    # ため、その要否判定はkill switch適用前の値で行う。notification_enabled=Trueの
+    # 場合はplanと完全に同一になる)。run_*/execution_reasonはnotification_enabledの
+    # 値に関わらず同一のためplan側を使い続ける。
+    mode_plan = resolve_execution_plan(
+        runtime_lookup.config.mode,
+        industry.classification,
+        industry.financial_category,
+        financial_deferred_policy,
+        notification_enabled=True,
+    )
 
     legacy_result: _HoldingResult | None = None
     legacy_reason_codes: tuple[str, ...] = ()
     if plan.run_legacy_sell_evaluation:
         sell_outcome = sell_service.analyze(holding, now, snapshot=snapshot)
         legacy_reason_codes = sell_outcome.triggered_rule_names
-        if sell_outcome.recommendation is not None and plan.allow_legacy_sell_notification:
+        if sell_outcome.recommendation is not None and mode_plan.allow_legacy_sell_notification:
             legacy_result = _notify_legacy_sell_and_build_result(
-                holding, now, sell_outcome.recommendation, recommendation_repo, notification_service
+                holding,
+                now,
+                sell_outcome.recommendation,
+                recommendation_repo,
+                notification_service,
+                notification_enabled,
             )
 
     holding_decision_result_notified: _HoldingResult | None = None
@@ -389,7 +456,7 @@ def _analyze_one_holding(
             )
         elif hd_outcome.result is not None:
             hd_result = hd_outcome.result
-            if plan.allow_holding_decision_notification and hd_result.should_notify:
+            if mode_plan.allow_holding_decision_notification and hd_result.should_notify:
                 notify_fn = _notify_holding_decision_and_build_result
                 holding_decision_result_notified, hd_result = notify_fn(
                     holding,
@@ -400,6 +467,7 @@ def _analyze_one_holding(
                     holding_decision_result_repo,
                     recommendation_repo,
                     notification_service,
+                    notification_enabled,
                 )
             holding_decision_result_repo.save(hd_result)
 
@@ -432,8 +500,8 @@ def _analyze_one_holding(
     pt_outcome = profit_service.analyze(holding, now, snapshot=snapshot)
     if pt_outcome.recommendation is not None:
         recommendation_repo.save(pt_outcome.recommendation)
-        outcome = notification_service.notify_recommendation_with_status(
-            pt_outcome.recommendation, now
+        outcome = _send_or_suppress_notification(
+            pt_outcome.recommendation, notification_enabled, notification_service, now
         )
         audit = HoldingEvaluationAudit(
             stock_code=holding.stock_code,
@@ -494,20 +562,32 @@ def _finish_batch_item(
     stock_code: str,
     now: dt.datetime,
     notification_service: LineNotificationService,
+    runtime_config_service: HoldingDecisionRuntimeConfigService,
 ) -> None:
+    """バッチ進捗の確定(record_result)はkill switchの影響を受けず常に行う。
+    最終1件目の完了によるバッチサマリーLINE送信のみ、その時点のkill switch状態で
+    ガードする(コードレビュー対応: 通知抑止がバッチ完了判定へ影響しないことを保証する)。
+    """
     if batch_id is None:
         return
     needs_code = category in ("data_insufficient", "failed")
     progress = record_result(batch_id, category, stock_code=stock_code if needs_code else None)
-    if progress is not None and progress.is_complete:
-        notification_service.notify_batch_summary(
-            _PROCESS_NAME,
-            progress.total,
-            progress.category_counts,
-            now,
-            data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
-            failed_stock_codes=progress.failed_stock_codes,
+    if progress is None or not progress.is_complete:
+        return
+    if not runtime_config_service.get_notification_enabled():
+        logger.info(
+            "kill_switch_suppressed: batch_summary batch_id=%s notification_enabled=False",
+            batch_id,
         )
+        return
+    notification_service.notify_batch_summary(
+        _PROCESS_NAME,
+        progress.total,
+        progress.category_counts,
+        now,
+        data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
+        failed_stock_codes=progress.failed_stock_codes,
+    )
 
 
 def _process_single_holding(
@@ -522,17 +602,19 @@ def _process_single_holding(
     portfolio_total_market_value: Decimal | None,
     portfolio_total_acquisition_cost: Decimal | None,
 ) -> dict[str, Any]:
+    runtime_config_service = HoldingDecisionRuntimeConfigService(
+        cache_ttl_seconds=config.holding_decision.runtime_config_cache_ttl_seconds
+    )
     holding = PortfolioService().get_holding(stock_code)
     if holding is None:
         logger.warning("dispatched holding not found stock_code=%s", stock_code)
-        _finish_batch_item(batch_id, "failed", stock_code, now, notification_service)
+        _finish_batch_item(
+            batch_id, "failed", stock_code, now, notification_service, runtime_config_service
+        )
         return {"stock_code": stock_code, "recommended": False, "notified": False, "found": False}
 
     profit_service = ProfitTakingService(providers=providers, config=config)
     sell_service = SellSignalService(providers=providers, config=config)
-    runtime_config_service = HoldingDecisionRuntimeConfigService(
-        cache_ttl_seconds=config.holding_decision.runtime_config_cache_ttl_seconds
-    )
     holding_decision_service = HoldingDecisionService(
         providers,
         config,
@@ -559,11 +641,15 @@ def _process_single_holding(
         )
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
         logger.exception("holding analysis failed unexpectedly stock_code=%s", stock_code)
-        _finish_batch_item(batch_id, "failed", stock_code, now, notification_service)
+        _finish_batch_item(
+            batch_id, "failed", stock_code, now, notification_service, runtime_config_service
+        )
         return {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
 
     logger.info("holding_evaluation_audit: %s", result.audit)
-    _finish_batch_item(batch_id, result.category, stock_code, now, notification_service)
+    _finish_batch_item(
+        batch_id, result.category, stock_code, now, notification_service, runtime_config_service
+    )
     return {
         "stock_code": stock_code,
         "recommended": result.recommended,

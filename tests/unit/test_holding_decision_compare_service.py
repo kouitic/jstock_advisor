@@ -1,4 +1,4 @@
-"""Shadow比較レポートのテスト(実装プラン修正6)。"""
+"""Shadow比較レポートのテスト(実装プラン修正6、コードレビュー対応)。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import datetime as dt
 from pathlib import Path
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.services.holding_decision_compare_service import (
     CompareRow,
+    ShouldNotifyComparison,
     run_compare,
     write_compare_csv,
 )
+from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 
 _CFG = load_config()
@@ -35,99 +38,100 @@ def test_run_compare_row_carries_detailed_fields():
     assert isinstance(row.negative_reasons, tuple)
 
 
-def test_category_diff_matches_both_pass():
-    row = CompareRow(
+def test_run_compare_non_holding_stock_does_not_evaluate_legacy(store_dir: Path):
+    """非保有銘柄は旧方式(SellSignalService)を評価しない(コードレビュー対応)。"""
+    portfolio = PortfolioService(holding_repository=HoldingRepository(store_dir=store_dir))
+    rows = run_compare(["2914"], _PROVIDERS, _CFG, _NOW, portfolio_service=portfolio)
+    row = rows[0]
+    assert row.legacy_category == "NOT_EVALUATED_NON_HOLDING"
+    assert row.legacy_should_notify is None
+    # 新方式は非保有でも評価される。
+    assert row.new_score is not None
+    assert row.should_notify_diff == ShouldNotifyComparison.NOT_COMPARABLE
+    assert row.category_diff == "対象外(非保有・比較不能)"
+
+
+def _row(
+    *,
+    legacy_category: str = "HOLD",
+    legacy_should_notify: bool | None = False,
+    new_category: str | None = "STRONG_HOLD",
+    new_score: float | None = 90.0,
+    new_should_notify: bool | None = False,
+    data_error: str | None = None,
+) -> CompareRow:
+    return CompareRow(
         stock_code="2914",
-        legacy_category="HOLD",
-        legacy_notified=False,
+        legacy_category=legacy_category,
+        legacy_should_notify=legacy_should_notify,
         legacy_reason_codes=(),
-        new_category="STRONG_HOLD",
-        new_score=90.0,
-        new_notified=False,
+        new_category=new_category,
+        new_score=new_score,
+        new_should_notify=new_should_notify,
         coverage_overall=1.0,
         hard_gate_triggered=False,
         hard_gate_reason_codes=(),
         positive_reasons=(),
         negative_reasons=(),
+        data_error=data_error,
     )
+
+
+def test_category_diff_matches_both_pass():
+    row = _row(legacy_should_notify=False, new_should_notify=False)
     assert row.category_diff == "一致(両方見送り)"
-    assert row.notification_diff is False
+    assert row.should_notify_diff == ShouldNotifyComparison.MATCH
 
 
 def test_category_diff_matches_both_notify():
-    row = CompareRow(
-        stock_code="2914",
+    row = _row(
         legacy_category="SELL",
-        legacy_notified=True,
-        legacy_reason_codes=("dividend_cut",),
+        legacy_should_notify=True,
         new_category="SELL_CONSIDERATION",
         new_score=-12.0,
-        new_notified=True,
-        coverage_overall=1.0,
-        hard_gate_triggered=False,
-        hard_gate_reason_codes=(),
-        positive_reasons=(),
-        negative_reasons=(),
+        new_should_notify=True,
     )
     assert row.category_diff == "一致(両方検討)"
-    assert row.notification_diff is False
+    assert row.should_notify_diff == ShouldNotifyComparison.MATCH
 
 
 def test_category_diff_legacy_only():
-    row = CompareRow(
-        stock_code="2914",
-        legacy_category="SELL",
-        legacy_notified=True,
-        legacy_reason_codes=("dividend_cut",),
-        new_category="STRONG_HOLD",
-        new_score=90.0,
-        new_notified=False,
-        coverage_overall=1.0,
-        hard_gate_triggered=False,
-        hard_gate_reason_codes=(),
-        positive_reasons=(),
-        negative_reasons=(),
-    )
+    row = _row(legacy_category="SELL", legacy_should_notify=True, new_should_notify=False)
     assert row.category_diff == "差分(旧のみ検討)"
-    assert row.notification_diff is True
+    assert row.should_notify_diff == ShouldNotifyComparison.DIFFERENT
 
 
 def test_category_diff_new_only():
-    row = CompareRow(
-        stock_code="2914",
-        legacy_category="HOLD",
-        legacy_notified=False,
-        legacy_reason_codes=(),
+    row = _row(
+        legacy_should_notify=False,
         new_category="SELL_CONSIDERATION",
         new_score=-12.0,
-        new_notified=True,
-        coverage_overall=1.0,
-        hard_gate_triggered=False,
-        hard_gate_reason_codes=(),
-        positive_reasons=(),
-        negative_reasons=(),
+        new_should_notify=True,
     )
     assert row.category_diff == "差分(新のみ検討)"
-    assert row.notification_diff is True
+    assert row.should_notify_diff == ShouldNotifyComparison.DIFFERENT
 
 
 def test_category_diff_data_error_takes_precedence():
-    row = CompareRow(
-        stock_code="2914",
+    row = _row(
         legacy_category="DATA_ERROR",
-        legacy_notified=False,
-        legacy_reason_codes=(),
+        legacy_should_notify=False,
         new_category=None,
         new_score=None,
-        new_notified=False,
-        coverage_overall=None,
-        hard_gate_triggered=False,
-        hard_gate_reason_codes=(),
-        positive_reasons=(),
-        negative_reasons=(),
+        new_should_notify=False,
         data_error="株価データを取得できません",
     )
     assert row.category_diff == "データ取得エラー"
+
+
+def test_category_diff_not_comparable_when_legacy_is_none():
+    row = _row(
+        legacy_category="NOT_EVALUATED_NON_HOLDING",
+        legacy_should_notify=None,
+        new_should_notify=True,
+    )
+    assert row.category_diff == "対象外(非保有・比較不能)"
+    assert row.should_notify_diff == ShouldNotifyComparison.NOT_COMPARABLE
 
 
 def test_write_compare_csv_round_trips(tmp_path: Path):
@@ -139,7 +143,7 @@ def test_write_compare_csv_round_trips(tmp_path: Path):
     lines = content.strip().splitlines()
     assert lines[0] == (
         "stock_code,legacy_category,new_category,score,category_diff,"
-        "notification_diff,coverage_overall,hard_gate_triggered,"
+        "should_notify_diff,coverage_overall,hard_gate_triggered,"
         "hard_gate_reason_codes,positive_reasons,negative_reasons"
     )
     assert len(lines) == 2
