@@ -193,10 +193,11 @@ def _fake_sell_recommendation(stock_code: str) -> Recommendation:
 
 def test_kill_switch_on_suppresses_legacy_notification(store_dir: Path, monkeypatch):
     """kill switch ON(notification_enabled=False)の場合、legacyモードで売却
-    シグナルが実際に成立していても、その売却推奨は保存・通知されない
-    (実装プラン修正2)。ProfitTakingService(利確判定、kill switchの対象外)が
-    独立に別の推奨を出すことはあり得るため、「送信メッセージが0件」ではなく
-    「売却推奨(fake-rec-id)が保存・通知されていないこと」で厳密に検証する。
+    シグナルが実際に成立していても、そのLINE通知は送信されない
+    (実装プラン修正2)。ただしRecommendationの生成・保存自体はkill switch
+    中でも継続する(コードレビュー対応: 判定・保存は止めず送信のみ止める)ため、
+    「fake-rec-idが保存されていないこと」ではなく「fake-rec-idを含むLINE
+    メッセージが送信されていないこと」で検証する。
     """
     services = _build_services(store_dir, RuntimeConfigMode.LEGACY)
 
@@ -240,7 +241,7 @@ def test_kill_switch_on_suppresses_legacy_notification(store_dir: Path, monkeypa
     )
 
     saved_ids = {r.recommendation_id for r in services["recommendation_repo"].list_all()}
-    assert "fake-rec-id" not in saved_ids
+    assert "fake-rec-id" in saved_ids
     assert not any("fake-rec-id" in msg for msg in services["line_client"].sent_messages)
 
 

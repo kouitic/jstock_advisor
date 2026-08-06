@@ -32,5 +32,12 @@ class NotificationLogRepository:
         items = self.list_by_stock_and_type(stock_code, notification_type)
         return items[-1] if items else None
 
+    def list_by_recommendation_id(self, recommendation_id: str) -> list[NotificationLog]:
+        """backtest/compareのhistory replayが「実際にLINE送信が成功したか」を
+        判定するために使う(コードレビュー対応)。複数件ある場合は重複送信の
+        可能性があるため、呼び出し側で件数を確認すること。"""
+        items = self._store.find(lambda n: n.related_recommendation_id == recommendation_id)
+        return sorted(items, key=lambda n: n.sent_at)
+
     def save(self, log: NotificationLog) -> None:
         self._store.upsert(log)

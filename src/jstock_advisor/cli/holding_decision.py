@@ -18,17 +18,21 @@ import typer
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import (
+    AccountType,
     FinancialPolicyOverride,
     RuntimeConfigMode,
     ThesisConditionAttestationStatus,
 )
+from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import ReasonImpact
 from jstock_advisor.infrastructure.aws.baseline_pointer import BaselinePointerConflictError
+from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.local_repository import (
     holding_decision_runtime_config_repository as runtime_config_repo,
 )
 from jstock_advisor.services.holding_decision_backtest_service import (
     BacktestRow,
+    business_date,
     resolve_target_stock_codes,
     run_history_replay,
     run_live_comparison,
@@ -148,7 +152,16 @@ def kill_switch(
     reason: str = typer.Option(..., "--reason"),
     target: str = typer.Option("local", "--target", help="local | aws"),
 ) -> None:
-    """新旧どちらの売却系LINE通知も停止する緊急スイッチ(modeとは独立)。"""
+    """保有銘柄分析に関するLINE通知をすべて停止する緊急スイッチ(modeとは独立)。
+
+    停止対象: 旧売却通知・新保有判断通知・利確通知・ポートフォリオ集中リスク通知・
+    バッチ完了サマリー通知(コードレビュー対応で適用範囲を拡張)。
+    停止しないもの: 判定処理そのもの・Recommendation/HoldingDecisionResultの保存・
+    監査ログの記録(空振りにはならない)。
+
+    `on`は`notification_enabled=False`(通知停止)、`off`は`notification_enabled=True`
+    (通知許可)に対応する。
+    """
     if state not in ("on", "off"):
         typer.echo("stateはon/offのいずれかを指定してください。")
         raise typer.Exit(code=1)
@@ -206,15 +219,74 @@ def _print_backtest_rows(rows: list[BacktestRow]) -> None:
         return
     typer.echo(
         f"{'date':<12}{'stock_code':<12}{'source':<9}"
-        f"{'legacy':<20}{'legacy通知':<10}{'new_score':<11}{'new_category':<28}new通知"
+        f"{'legacy':<20}{'legacy要通知':<12}{'legacy作成':<10}{'legacy送信':<10}"
+        f"{'new_score':<11}{'new_category':<28}{'new要通知':<10}{'new作成':<8}{'new送信':<8}"
+        f"{'legacy match':<20}new match"
     )
     for row in rows:
         typer.echo(
             f"{row.evaluated_at.date().isoformat():<12}{row.stock_code:<12}{row.source:<9}"
-            f"{(row.legacy_recommendation_type or '-'):<20}{str(row.legacy_notified):<10}"
+            f"{(row.legacy_recommendation_type or '-'):<20}"
+            f"{str(row.legacy_should_notify):<12}{str(row.legacy_recommendation_created):<10}"
+            f"{str(row.legacy_notification_sent):<10}"
             f"{('-' if row.new_score is None else f'{row.new_score:.2f}'):<11}"
-            f"{(row.new_category or '-'):<28}{row.new_notified}"
+            f"{(row.new_category or '-'):<28}"
+            f"{str(row.new_should_notify):<10}{str(row.new_recommendation_created):<8}"
+            f"{str(row.new_notification_sent):<8}"
+            f"{row.legacy_match_method:<20}{row.new_match_method}"
         )
+        for warning in (
+            row.legacy_match_warning,
+            row.legacy_notification_warning,
+            row.new_match_warning,
+            row.new_notification_warning,
+        ):
+            if warning:
+                typer.echo(f"    ! {warning}")
+
+
+def _build_holding_override(
+    stock_code: str,
+    purchase_price: str,
+    purchase_date: str,
+    shares: str,
+    now: dt.datetime,
+) -> Holding:
+    """--purchase-price等から非保有銘柄用の仮Holdingを構築する(コードレビュー対応)。
+
+    ExternalValueParserで解析する(全角・カンマ・".0"付き入力に対応するため、
+    Typer側で先にDecimal/date/intへ変換させない)。妥当性検証もここで行う。
+    """
+    price = ExternalValueParser.decimal(purchase_price)
+    date_value = ExternalValueParser.date(purchase_date)
+    shares_value = ExternalValueParser.integer(shares)
+    if price is None or date_value is None or shares_value is None:
+        typer.echo(
+            "--purchase-price/--purchase-date/--sharesの形式が不正です"
+            "(price=数値、date=YYYY-MM-DD等、shares=整数)。"
+        )
+        raise typer.Exit(code=1)
+    if price <= 0:
+        typer.echo("--purchase-priceは正の値で指定してください。")
+        raise typer.Exit(code=1)
+    if shares_value <= 0:
+        typer.echo("--sharesは正の値で指定してください。")
+        raise typer.Exit(code=1)
+    if date_value > business_date(now):
+        typer.echo("--purchase-dateは評価基準日(JST)以前の日付を指定してください。")
+        raise typer.Exit(code=1)
+    return Holding(
+        stock_code=stock_code,
+        stock_name=stock_code,
+        shares=shares_value,
+        average_purchase_price=price,
+        total_purchase_amount=price * shares_value,
+        first_purchase_date=date_value,
+        last_purchase_date=date_value,
+        account_type=AccountType.GENERAL,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 @app.command("backtest")
@@ -233,6 +305,27 @@ def backtest(
     source: str = typer.Option(
         "mock", "--source", help="liveモード(期間未指定時)のデータ取得元: mock(既定)/ real"
     ),
+    allow_same_day_fallback: bool = typer.Option(
+        False,
+        "--allow-same-day-fallback",
+        help=(
+            "replayモード専用。旧方式Recommendationとの対応付けで、近接時刻"
+            "(既定5分)候補が無い場合に同一日候補での対応付け(信頼度中程度)を"
+            "許容する(既定False。有効時はSAME_DAY_FALLBACK行をActive移行判断"
+            "の集計から除外すること)"
+        ),
+    ),
+    purchase_price: str | None = typer.Option(
+        None,
+        "--purchase-price",
+        help="非保有銘柄をliveモードで評価する場合の取得単価(単一銘柄限定)",
+    ),
+    purchase_date: str | None = typer.Option(
+        None, "--purchase-date", help="非保有銘柄をliveモードで評価する場合の取得日(単一銘柄限定)"
+    ),
+    shares: str | None = typer.Option(
+        None, "--shares", help="非保有銘柄をliveモードで評価する場合の株数(単一銘柄限定)"
+    ),
     csv_path: Path = typer.Option(None, "--csv", help="結果をCSVへ出力するパス"),
 ) -> None:
     """保有判断スコア方式のバックテスト/リプレイ(実装プラン修正5)。
@@ -243,10 +336,30 @@ def backtest(
     このシステムは財務・配当・優待データの過去時点スナップショットを保持して
     いないため、真の意味での過去時点シミュレーションはできない。詳細は
     運用手順書のバックテスト手順を参照)。
+
+    非保有銘柄はliveモードで新方式のみ評価され、旧方式は評価されない
+    (架空の取得単価による誤評価を防ぐため)。--purchase-price/--purchase-date/
+    --sharesをすべて指定した場合に限り、単一銘柄指定時だけ旧方式も評価する。
     """
     stock_codes = resolve_target_stock_codes(stock_code)
     if not stock_codes:
         typer.echo("対象銘柄がありません(--stock-codeを指定するか、保有銘柄を登録してください)。")
+        raise typer.Exit(code=1)
+
+    purchase_options = (purchase_price, purchase_date, shares)
+    if any(o is not None for o in purchase_options) and not all(
+        o is not None for o in purchase_options
+    ):
+        typer.echo(
+            "--purchase-price/--purchase-date/--sharesはすべて指定するか、"
+            "すべて省略してください(一部のみの指定はできません)。"
+        )
+        raise typer.Exit(code=1)
+    if all(o is not None for o in purchase_options) and len(stock_codes) != 1:
+        typer.echo("--purchase-price等は単一銘柄(--stock-codeを1件のみ指定)の場合のみ使用できます。")
+        raise typer.Exit(code=1)
+    if all(o is not None for o in purchase_options) and start_date is not None:
+        typer.echo("--purchase-price等はreplayモード(--start-date指定時)では使用できません。")
         raise typer.Exit(code=1)
 
     if start_date is not None:
@@ -256,7 +369,9 @@ def backtest(
         except ValueError as e:
             typer.echo("--start-date/--end-dateはYYYY-MM-DD形式で指定してください。")
             raise typer.Exit(code=1) from e
-        rows = run_history_replay(stock_codes, parsed_start, parsed_end)
+        rows = run_history_replay(
+            stock_codes, parsed_start, parsed_end, allow_same_day_fallback=allow_same_day_fallback
+        )
     else:
         now = dt.datetime.now(dt.UTC)
         config = load_config()
@@ -265,7 +380,18 @@ def backtest(
             if source == "real"
             else build_mock_provider_bundle(now)
         )
-        rows = run_live_comparison(stock_codes, providers, config, now)
+        holding_overrides = None
+        if all(o is not None for o in purchase_options):
+            assert purchase_price is not None
+            assert purchase_date is not None
+            assert shares is not None
+            override = _build_holding_override(
+                stock_codes[0], purchase_price, purchase_date, shares, now
+            )
+            holding_overrides = {stock_codes[0]: override}
+        rows = run_live_comparison(
+            stock_codes, providers, config, now, holding_overrides=holding_overrides
+        )
 
     _print_backtest_rows(rows)
 
@@ -287,13 +413,13 @@ def _print_compare_rows(rows: list[CompareRow]) -> None:
         return
     for row in rows:
         typer.echo(f"■ {row.stock_code}")
-        typer.echo(f"  旧方式判定: {row.legacy_category}(通知={row.legacy_notified})")
+        typer.echo(f"  旧方式判定: {row.legacy_category}(要通知={row.legacy_should_notify})")
         typer.echo(
             f"  新方式判定: {row.new_category or '-'}"
             f"(score={'−' if row.new_score is None else f'{row.new_score:.2f}'}, "
-            f"通知={row.new_notified})"
+            f"要通知={row.new_should_notify})"
         )
-        typer.echo(f"  差分: {row.category_diff} / 通知差分: {row.notification_diff}")
+        typer.echo(f"  差分: {row.category_diff} / 通知差分: {row.should_notify_diff.value}")
         coverage = "-" if row.coverage_overall is None else f"{row.coverage_overall:.2f}"
         typer.echo(f"  coverage(overall): {coverage}")
         typer.echo(

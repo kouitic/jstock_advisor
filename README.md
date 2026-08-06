@@ -43,7 +43,21 @@ jstock analyze buy-candidates --notify
 jstock analyze holdings --notify
 jstock analyze watchlist --notify
 jstock watchlist-screening run --dry-run
+
+# 保有判断スコア方式(段階移行中)の運用・検証コマンド
+jstock holding-decision kill-switch on --changed-by <名前> --reason "一時停止"
+jstock holding-decision compare --stock-code 2914
+jstock holding-decision backtest --stock-code 2914
 ```
+
+`holding-decision backtest`はliveモード(現在のデータでの新旧比較)と
+replayモード(`--start-date`指定時、過去に保存された評価結果の再生)を
+持つが、財務・配当・優待データの過去時点スナップショットは保持していない
+ため真の過去時点シミュレーションではない。非保有銘柄はliveモードで新方式
+のみ評価される(旧方式は架空の取得単価による誤評価を避けるため評価しない)。
+`kill-switch`は保有銘柄分析に関するLINE通知(旧売却・新保有判断・利確・
+集中リスク・バッチサマリー)をすべて停止する緊急スイッチで、判定・記録自体
+は止めない。詳細は[運用手順書](docs/operations_manual.md)10節を参照。
 
 ## アーキテクチャ概要
 

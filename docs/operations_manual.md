@@ -428,8 +428,8 @@ jstock holding-decision set-mode legacy --changed-by <あなたの名前> \
 
 ### 10.4 kill switch運用(緊急停止)
 
-`mode`とは独立して、新旧どちらの通知も即座に停止できる緊急スイッチです。
-`mode`を切り替えずに「今すぐ通知だけ止めたい」場合に使います。
+`mode`とは独立して、保有銘柄分析に関するLINE通知を即座に停止できる緊急
+スイッチです。`mode`を切り替えずに「今すぐ通知だけ止めたい」場合に使います。
 
 ```bash
 jstock holding-decision kill-switch on --changed-by <あなたの名前> \
@@ -439,13 +439,40 @@ jstock holding-decision kill-switch off --changed-by <あなたの名前> \
   --reason "原因を確認し再開" --target aws
 ```
 
+**`kill-switch on` ↔ `notification_enabled`の対応関係**(取り違えやすいため明記):
+
+| CLI指定 | 内部値 | 意味 |
+|---|---|---|
+| `kill-switch on` | `notification_enabled=False` | 通知停止 |
+| `kill-switch off` | `notification_enabled=True` | 通知許可(既定) |
+
+**停止対象(コードレビュー対応で全経路へ適用範囲を拡張、2026-08版)**:
+
+- 旧売却通知(SellSignalService)
+- 新保有判断通知(HoldingDecisionService)
+- 利確通知(ProfitTakingService)
+- ポートフォリオ集中リスク通知(PORTFOLIO_CONCENTRATION_REVIEW)
+- 保有銘柄分析バッチ完了サマリー通知
+
+**停止しないもの**: 判定処理そのもの・Recommendation/HoldingDecisionResultの
+保存・監査ログの記録。空振りにはならず、kill switch中でも通常どおり
+Recommendationは作成・保存されます(LINE送信だけが行われません)。
+
 `mode`等の他の設定値は、DynamoDBの読み取り頻度を抑えるため60秒
 (`runtime_config_cache_ttl_seconds`)キャッシュされますが、**kill switchの
 状態だけはこのキャッシュを経由せず、判定のたびに必ず最新値を取得します**
 (緊急停止操作が最大60秒遅れて反映される事態を避けるため)。切り替え後は
-次回の判定サイクルから確実に反映されます。判定・記録自体は止まらず、
-通知のみが止まる点に注意してください(空振りではなく、`HoldingDecisionResult`
-は引き続き保存され続けます)。
+次回の判定サイクルから確実に反映されます。
+
+**kill switch抑止状態の可観測性の制約**: kill switchにより送信を見送った
+事実そのものは、CloudWatch Logsの構造化ログ(`kill_switch_suppressed: ...`)
+以外には永続化されません。`NotificationLog`は実送信成功時にのみ書き込まれる
+既存仕様のため、`backtest`コマンドのhistory replayでは「送信ログが無い」
+ケースを`UNKNOWN`としてしか判定できず、「kill switchにより抑止された」と
+断定することはできません(抑止か記録漏れかを過去データから区別する手段が
+現状無いため)。将来この区別をhistory replayで確定表示したい場合は、
+専用の`NotificationAttempt`/監査テーブルの新設が別途必要です(現時点では
+未実装、残課題)。
 
 ### 10.5 金融業移行手順
 
@@ -496,6 +523,14 @@ jstock holding-decision compare --source real
 jstock holding-decision compare --csv compare_result.csv
 ```
 
+**列名の意味(コードレビュー対応で改名、2026-08版)**: `legacy_should_notify`/
+`new_should_notify`は「実際に通知したか」ではなく「通知条件に該当するか」を
+表します(compareはliveモードのみで何も送信しないため)。`should_notify_diff`は
+`MATCH`(一致)/`DIFFERENT`(不一致)/`NOT_COMPARABLE`(比較不能)の三値です。
+非保有銘柄では旧方式を評価しないため`legacy_should_notify`が`None`となり、
+その場合`should_notify_diff`は必ず`NOT_COMPARABLE`になります(bool比較による
+誤った差分表示を避けるための設計)。
+
 出力の「差分」欄が「一致」以外(旧のみ検討/新のみ検討)の銘柄は、判定根拠
 (「主な減点要因」「保有を支持する要因」)を確認し、必要であれば
 `config/holding_decision_rules.yaml`等の閾値調整を検討してください
@@ -523,3 +558,55 @@ jstock holding-decision backtest --csv backtest_result.csv
 replayモードは`mode=shadow`で運用した蓄積データが無い期間を指定すると、
 推測で埋め合わせず素直に「該当するデータがありません」と表示します。
 運用開始直後で蓄積が無い場合は、まずliveモードで現状の判定を確認してください。
+
+**非保有銘柄の扱い**: liveモードの非保有銘柄は、旧方式(SellSignalService)を
+評価しません(架空の取得単価・保有期間による誤評価を防ぐため)。
+`legacy_recommendation_type=NOT_EVALUATED_NON_HOLDING`と表示されます。
+新方式は取得単価等を入力に使わないため非保有銘柄でも評価されます。
+単一銘柄指定時に限り、以下のオプションをすべて指定することで旧方式も
+評価できます(一部のみの指定・複数銘柄指定・replayモードとの併用はエラーに
+なります)。
+
+```bash
+jstock holding-decision backtest --stock-code 2914 \
+  --purchase-price 1500 --purchase-date 2024-01-15 --shares 100
+```
+
+この仮の保有データはどのRepositoryへも保存されません(検証専用)。
+
+**history replayの対応付け(コードレビュー対応で全面再設計、2026-08版)**:
+
+旧方式のRecommendationにはHoldingDecisionResultから参照できるFK(ID)が
+存在しないため、以下の優先順位で対応付けます。
+
+1. 近接時刻(評価時刻との差が5分以内)による対応付け(`NEAREST_TIMESTAMP`)
+2. 同一日(JST基準の暦日)による対応付け(`SAME_DAY_FALLBACK`。**既定では
+   無効**。`--allow-same-day-fallback`を指定した場合のみ有効になり、信頼度は
+   中程度として扱われます。有効化した場合、`SAME_DAY_FALLBACK`行はActive
+   移行判断の集計から除外してください)
+3. いずれも一意に定まらない場合は対応付けを行わず`AMBIGUOUS_MATCH`とする
+   (近接時刻内・同一日のいずれかに複数候補がある場合。最も近い1件を
+   自動採用することはしません)
+
+対応付け候補が全く見つからない場合(`NO_MATCH`)、`execution_plan_reason`から
+「旧方式がそもそも実行されなかった」(`mode=active`の一般事業会社)ことが
+分かる場合のみ`legacy_should_notify=False`と確定します。旧方式が実行予定
+だった(`legacy/shadow`モード等)にもかかわらず候補が見つからない場合は、
+`HoldingEvaluationAudit`(実行完了の証跡)が永続化されていないため過去データ
+から実行完了を証明できず、`legacy_recommendation_type=UNKNOWN_NO_MATCH`
+として「HOLDだった」と断定しません。
+
+新方式側は`HoldingDecisionResult.recommendation_id`という明示的なFKがある
+ため対応付けは決定論的ですが、IDが設定されていてもRecommendationの保存が
+失敗・欠落している可能性があるため実在確認まで行います。
+`RECOMMENDATION_ID_MISSING`(レコード欠落または銘柄コード不一致)、
+`RECOMMENDATION_ID_TYPE_MISMATCH`(recommendation_typeが新方式の想定型と
+不一致)という2種類のデータ不整合を区別して表示します。
+
+**Recommendation作成と通知実績の分離**: `*_recommendation_created`(作成有無)
+と`*_notification_sent`(実送信成功有無)は別の概念です。`NotificationLog`は
+実送信成功時にのみ書き込まれるため、Recommendationは作成されたが送信ログが
+無い場合は`*_notification_status=UNKNOWN`とし、`False`(未送信と確定)とは
+判定しません(kill switch抑止・記録漏れ等を過去データから区別できないため)。
+liveモードは何も永続化・送信しないため、`*_recommendation_created`は常に
+`False`、`*_notification_status=NOT_EXECUTED_LIVE_MODE`となります。

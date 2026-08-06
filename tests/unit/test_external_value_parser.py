@@ -46,6 +46,10 @@ def test_stock_code_normal_cases(raw: object, expected: str) -> None:
         "あいう",
         "1301,5",
         float("nan"),
+        True,  # boolはintのサブクラスだがstr(True)=="TRUE"化を防ぐため明示的に拒否
+        False,
+        "ABCD",  # 先頭が数字でない4文字英字は東証の実際のコード体系にないため拒否
+        "TRUE",  # 文字列としての"TRUE"も先頭が数字でないため拒否
     ],
 )
 def test_stock_code_invalid_cases(raw: object) -> None:
@@ -62,6 +66,7 @@ def test_stock_code_invalid_cases(raw: object) -> None:
         ("100.0", 100),  # Excel由来
         (100.0, 100),  # float型
         ("1,000", 1000),  # カンマ区切り
+        ("12,345", 12345),  # 2桁+3桁の正しい区切り
         ("１，０００", 1000),  # 全角
         (" 100 ", 100),
         (100, 100),
@@ -69,6 +74,7 @@ def test_stock_code_invalid_cases(raw: object) -> None:
         (Decimal("100.0"), 100),
         ("0", 0),
         ("-5", -5),
+        ("+1000", 1000),
     ],
 )
 def test_integer_normal_cases(raw: object, expected: int) -> None:
@@ -88,6 +94,7 @@ def test_integer_normal_cases(raw: object, expected: int) -> None:
         float("nan"),
         float("inf"),
         True,  # boolはintのサブクラスだが明示的に拒否する
+        "1e10",  # 指数表記は安全側デフォルトとして拒否
     ],
 )
 def test_integer_invalid_cases(raw: object) -> None:
@@ -99,10 +106,21 @@ def test_integer_none_and_empty() -> None:
     assert ExternalValueParser.integer("") is None
 
 
-def test_integer_strips_commas_regardless_of_grouping_position() -> None:
-    """桁区切りカンマの位置は検証せず、除去してから整数化する仕様であることの
-    明示的な確認(位置が不正な"1,00,0"のようなケースも含む)。"""
-    assert ExternalValueParser.integer("1,00,0") == 1000
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "1,00,0",  # 桁区切り位置が不正(最初の区切りが3桁でない)
+        "10,00",  # 桁区切り位置が不正
+        "1,2,3",  # 桁区切り位置が不正
+        "12,34.5",  # 桁区切り位置が不正
+        ",100",  # 先頭カンマ
+        "100,",  # 末尾カンマ
+        "1,,000",  # 連続カンマ
+    ],
+)
+def test_integer_rejects_incorrectly_positioned_commas(raw: str) -> None:
+    """桁区切りカンマの位置が3桁区切りとして不正な場合は受理しない(過剰補正の防止)。"""
+    assert ExternalValueParser.integer(raw) is None
 
 
 # ===== decimal =====
@@ -114,6 +132,9 @@ def test_integer_strips_commas_regardless_of_grouping_position() -> None:
         ("1234", Decimal("1234")),
         ("1234.5", Decimal("1234.5")),
         ("1,234.5", Decimal("1234.5")),
+        ("12,345", Decimal("12345")),
+        ("-1,234.5", Decimal("-1234.5")),
+        ("＋1，234", Decimal("1234")),
         ("１，２３４．５", Decimal("1234.5")),  # 全角
         (" 1234.5 ", Decimal("1234.5")),
         (1234, Decimal(1234)),
@@ -139,9 +160,26 @@ def test_decimal_normal_cases(raw: object, expected: Decimal) -> None:
         float("inf"),
         Decimal("NaN"),
         True,
+        "1e10",  # 指数表記は安全側デフォルトとして拒否
     ],
 )
 def test_decimal_invalid_cases(raw: object) -> None:
+    assert ExternalValueParser.decimal(raw) is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "1,00,0",
+        "10,00",
+        "1,2,3",
+        "12,34.5",
+        ",100",
+        "100,",
+        "1,,000",
+    ],
+)
+def test_decimal_rejects_incorrectly_positioned_commas(raw: str) -> None:
     assert ExternalValueParser.decimal(raw) is None
 
 
@@ -159,6 +197,12 @@ def test_decimal_invalid_cases(raw: object) -> None:
         ("２０２６-０７-３１", dt.date(2026, 7, 31)),  # 全角
         (dt.date(2026, 7, 31), dt.date(2026, 7, 31)),
         (dt.datetime(2026, 7, 31, 12, 0), dt.date(2026, 7, 31)),
+        (20260731, dt.date(2026, 7, 31)),  # int型のYYYYMMDD
+        (20260731.0, dt.date(2026, 7, 31)),  # float型のYYYYMMDD
+        (Decimal("20260731"), dt.date(2026, 7, 31)),  # Decimal型のYYYYMMDD
+        (Decimal("20260731.0"), dt.date(2026, 7, 31)),
+        ("20260731.0", dt.date(2026, 7, 31)),  # ".0"付き文字列
+        ("２０２６０７３１．０", dt.date(2026, 7, 31)),  # 全角".0"付き文字列
     ],
 )
 def test_date_normal_cases(raw: object, expected: dt.date) -> None:
@@ -175,6 +219,16 @@ def test_date_normal_cases(raw: object, expected: dt.date) -> None:
         "2026年7月31日",
         "not a date",
         "20260732",  # 存在しない日
+        "20260230",  # 2月30日は存在しない
+        "20261301",  # 月が13
+        "99999999",  # 桁数はYYYYMMDD範囲内だが月日が不正
+        1e20,  # 巨大すぎる数値(YYYYMMDD範囲外)
+        float("nan"),
+        float("inf"),
+        True,
+        False,
+        46234,  # Excelシリアル値(YYYYMMDD範囲外、jpx_impl.py側で個別処理する)
+        46234.0,
     ],
 )
 def test_date_invalid_cases(raw: object) -> None:

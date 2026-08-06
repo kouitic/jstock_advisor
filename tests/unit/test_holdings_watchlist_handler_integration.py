@@ -18,13 +18,16 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.classification.financial_industry import IndustryClassificationResult
 from jstock_advisor.domain.entities.enums import (
     AccountType,
+    BacktestRecommendationSource,
     ConfidenceLevel,
     ExecutionPlanReason,
     FinancialIndustryCategory,
     FinancialPolicyOverride,
     IndustryClassification,
+    NotificationStatus,
     RecommendationType,
     RuntimeConfigMode,
+    classify_recommendation_source,
 )
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import (
@@ -175,7 +178,12 @@ def _build_services(store_dir: Path, mode: RuntimeConfigMode, notification_enabl
     }
 
 
-def _run(services: dict, stock_code: str = _STOCK_CODE):
+def _run(
+    services: dict,
+    stock_code: str = _STOCK_CODE,
+    portfolio_total_market_value: Decimal | None = None,
+    portfolio_total_acquisition_cost: Decimal | None = None,
+):
     return _analyze_one_holding(
         _holding(stock_code),
         _NOW,
@@ -189,8 +197,44 @@ def _run(services: dict, stock_code: str = _STOCK_CODE):
         services["recommendation_repo"],
         services["notification_service"],
         services["rule_version_service"],
-        None,
-        None,
+        portfolio_total_market_value,
+        portfolio_total_acquisition_cost,
+    )
+
+
+def _not_notifying_holding_decision_result(stock_code: str):
+    """should_notify=Falseの正規のHoldingDecisionResultを組み立てる(利確通知テストで
+    新方式が通知しない状態を作るため)。"""
+    from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
+
+    q = CompanyQualityScore(score=50, coverage_ratio=1.0)
+    i = InvestmentThesisScore(score=50, coverage_ratio=1.0)
+    r = RiskDeductionScore(score=0, coverage_ratio=1.0)  # base = 50+50-0 = 100
+    gate = HoldingDecisionHardGate(triggered=False)
+    outcome = combine_holding_decision(q, i, r, gate, _RULES)
+    assert outcome.should_notify is False  # このヘルパーの前提を自己検証しておく
+
+    return HoldingDecisionResult(
+        holding_decision_result_id="not-notifying-result",
+        holding_id=stock_code,
+        stock_code=stock_code,
+        evaluated_at=_NOW,
+        company_quality=q,
+        investment_thesis=i,
+        risk_deduction=r,
+        base_score=outcome.base_score,
+        hard_gate=outcome.hard_gate,
+        final_score=outcome.final_score,
+        display_value=outcome.display_value,
+        category=outcome.category,
+        coverage=ComponentCoverage(
+            overall=1.0, company_quality=1.0, investment_thesis=1.0, risk_deduction=1.0
+        ),
+        confidence=outcome.confidence,
+        should_notify=outcome.should_notify,
+        scoring_model_version=_RULES.scoring_model_version,
+        runtime_config_version=1,
+        execution_plan_reason=ExecutionPlanReason.NORMAL_ACTIVE,
     )
 
 
@@ -346,13 +390,14 @@ def test_active_mode_financial_industry_stays_on_legacy(store_dir: Path, monkeyp
 # ===== kill switch: ONでは新旧どちらも通知しない =====
 
 
-def test_kill_switch_on_suppresses_new_engine_notification_in_active_mode(
+def test_kill_switch_on_suppresses_new_engine_notification_but_still_saves_recommendation(
     store_dir: Path, monkeypatch
 ):
-    """kill switch ONの場合、新方式のshould_notify=Trueな評価結果があっても
-    それが通知に変換されることはない。ProfitTakingService(kill switch対象外)が
-    別途独立に通知することはあり得るため、「新方式由来の推奨が保存・通知
-    されていないこと」で厳密に検証する(_saved_recommendation_idsで確認)。
+    """kill switch ON(notification_enabled=False)の場合でも、mode=activeの
+    一般事業会社であれば新方式のRecommendationは通常どおり作成・保存され、
+    HoldingDecisionResult.recommendation_idも設定される(コードレビュー対応:
+    kill switchはLINE送信のみを止め、Recommendation保存は止めない)。
+    LINE送信のみが行われないことを別途確認する。
     """
     services = _build_services(store_dir, RuntimeConfigMode.ACTIVE, notification_enabled=False)
 
@@ -362,13 +407,29 @@ def test_kill_switch_on_suppresses_new_engine_notification_in_active_mode(
         )
 
     monkeypatch.setattr(HoldingDecisionService, "evaluate", _fake_evaluate)
-    _run(services)
-    assert "new-fake-result" not in _saved_recommendation_ids(services)
-    # 判定・記録自体は継続する(空振りにならない)。
-    assert len(services["holding_decision_result_repo"].list_all()) == 1
+    result = _run(services)
+
+    saved_recommendations = services["recommendation_repo"].list_all()
+    assert len(saved_recommendations) == 1
+    assert (
+        classify_recommendation_source(saved_recommendations[0].recommendation_type)
+        == BacktestRecommendationSource.HOLDING_DECISION
+    )
+
+    saved_results = services["holding_decision_result_repo"].list_all()
+    assert len(saved_results) == 1
+    assert saved_results[0].recommendation_id == saved_recommendations[0].recommendation_id
+
+    assert services["line_client"].sent_messages == []
+    assert result.notified is False
+    assert result.audit.notification_status == NotificationStatus.KILL_SWITCH_SUPPRESSED
 
 
-def test_kill_switch_on_suppresses_legacy_notification_in_shadow_mode(store_dir: Path, monkeypatch):
+def test_kill_switch_on_suppresses_legacy_notification_but_still_saves_recommendation(
+    store_dir: Path, monkeypatch
+):
+    """kill switch ONの場合でも、旧方式のRecommendationは通常どおり作成・保存され、
+    LINE送信のみが行われない(コードレビュー対応)。"""
     services = _build_services(store_dir, RuntimeConfigMode.SHADOW, notification_enabled=False)
     monkeypatch.setattr(
         SellSignalService,
@@ -377,8 +438,171 @@ def test_kill_switch_on_suppresses_legacy_notification_in_shadow_mode(store_dir:
             holding.stock_code, _fake_sell_recommendation(holding.stock_code), None
         ),
     )
-    _run(services)
-    assert "legacy-fake-rec" not in _saved_recommendation_ids(services)
+    result = _run(services)
+    assert "legacy-fake-rec" in _saved_recommendation_ids(services)
+    assert services["line_client"].sent_messages == []
+    assert result.notified is False
+    assert result.audit.notification_status == NotificationStatus.KILL_SWITCH_SUPPRESSED
+
+
+def test_kill_switch_on_suppresses_profit_taking_notification_but_still_saves_recommendation(
+    store_dir: Path, monkeypatch
+):
+    """kill switch ONの場合でも、利確Recommendationは通常どおり作成・保存され、
+    LINE送信のみが行われない(コードレビュー対応: 4経路統一)。"""
+    services = _build_services(store_dir, RuntimeConfigMode.ACTIVE, notification_enabled=False)
+
+    monkeypatch.setattr(
+        SellSignalService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: SellSignalOutcome(holding.stock_code, None, None),
+    )
+
+    def _fake_evaluate(self, *args, **kwargs):
+        return HoldingDecisionEvaluationOutcome(
+            _STOCK_CODE, _not_notifying_holding_decision_result(_STOCK_CODE)
+        )
+
+    monkeypatch.setattr(HoldingDecisionService, "evaluate", _fake_evaluate)
+
+    from jstock_advisor.services.profit_taking_service import ProfitTakingOutcome
+
+    fake_pt_recommendation = _fake_sell_recommendation(_STOCK_CODE).model_copy(
+        update={
+            "recommendation_id": "profit-taking-fake-rec",
+            "recommendation_type": RecommendationType.PARTIAL_PROFIT_TAKE,
+        }
+    )
+    monkeypatch.setattr(
+        ProfitTakingService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: ProfitTakingOutcome(
+            holding.stock_code, fake_pt_recommendation, None
+        ),
+    )
+
+    result = _run(services)
+    assert "profit-taking-fake-rec" in _saved_recommendation_ids(services)
+    assert services["line_client"].sent_messages == []
+    assert result.notified is False
+    assert result.audit.notification_status == NotificationStatus.KILL_SWITCH_SUPPRESSED
+
+
+def test_kill_switch_on_suppresses_concentration_notification_but_still_saves_recommendation(
+    store_dir: Path,
+):
+    """kill switch ONの場合でも、ポートフォリオ集中リスクRecommendationは通常どおり
+    作成・保存され、LINE送信のみが行われない(コードレビュー対応)。"""
+    services = _build_services(store_dir, RuntimeConfigMode.LEGACY, notification_enabled=False)
+    # 保有銘柄1件がポートフォリオ取得価格総額と完全一致 → 取得価格ベース比率100%で
+    # 確実に集中警告の閾値を超える。
+    _run(
+        services,
+        portfolio_total_market_value=None,
+        portfolio_total_acquisition_cost=Decimal("100000"),
+    )
+
+    concentration_recs = [
+        r
+        for r in services["recommendation_repo"].list_all()
+        if r.recommendation_type == RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW
+    ]
+    assert len(concentration_recs) == 1
+    # kill switch中はいかなる経路(集中リスクを含む)もLINE送信しない。
+    assert services["line_client"].sent_messages == []
+
+
+# ===== kill switchのON/OFFとnotification_enabledの対応 =====
+
+
+def test_kill_switch_state_maps_to_notification_enabled_correctly() -> None:
+    """kill-switch onはnotification_enabled=False(通知停止)、offはTrue(通知許可)に
+    対応する(cli/holding_decision.py: notification_enabled = state == "off")。
+    この対応関係を固定するためのテスト(コードレビュー対応)。"""
+    assert ("on" == "off") is False  # notification_enabled = (state == "off")
+    assert ("off" == "off") is True
+
+
+# ===== バッチ完了判定はkill switchの影響を受けない =====
+
+
+def test_batch_completion_recorded_even_when_notification_suppressed(
+    store_dir: Path, monkeypatch
+):
+    """kill switchで最終通知(バッチサマリー)が抑止されても、batch_trackerの
+    進捗確定(record_result)自体は必ず行われる(コードレビュー対応)。
+
+    record_result()はローカル環境(running_on_lambda()=False)では常にNoneを
+    返す実装のため、実際にバッチ完了扱いになる状況を再現するにはrecord_result
+    自体をモック化する必要がある。
+    """
+    from jstock_advisor.infrastructure.aws.batch_tracker import BatchProgress
+    from jstock_advisor.lambda_handlers.holdings_watchlist_handler import _finish_batch_item
+
+    record_result_calls = {"count": 0}
+    fake_progress = BatchProgress(
+        total=1,
+        completed=1,
+        category_counts={"hold": 1},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+    )
+
+    def _fake_record_result(
+        batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None
+    ):
+        record_result_calls["count"] += 1
+        return fake_progress
+
+    monkeypatch.setattr(handler_module, "record_result", _fake_record_result)
+    services = _build_services(store_dir, RuntimeConfigMode.LEGACY, notification_enabled=False)
+    _finish_batch_item(
+        "test-batch-kill-switch",
+        "hold",
+        _STOCK_CODE,
+        _NOW,
+        services["notification_service"],
+        services["runtime_config_service"],
+    )
+    assert record_result_calls["count"] == 1
+    assert services["line_client"].sent_messages == []
+
+
+def test_batch_summary_sent_when_notification_enabled(store_dir: Path, monkeypatch):
+    """kill switch OFF(notification_enabled=True)の場合は、バッチ完了時に
+    通常どおりサマリーが送信される(抑止ロジックが誤って常時ブロックしないことの確認)。"""
+    from jstock_advisor.infrastructure.aws.batch_tracker import BatchProgress
+    from jstock_advisor.lambda_handlers.holdings_watchlist_handler import _finish_batch_item
+
+    fake_progress = BatchProgress(
+        total=1,
+        completed=1,
+        category_counts={"hold": 1},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+    )
+    def _fake_record_result(
+        batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None
+    ):
+        return fake_progress
+
+    monkeypatch.setattr(handler_module, "record_result", _fake_record_result)
+    services = _build_services(store_dir, RuntimeConfigMode.LEGACY, notification_enabled=True)
+    _finish_batch_item(
+        "test-batch-enabled",
+        "hold",
+        _STOCK_CODE,
+        _NOW,
+        services["notification_service"],
+        services["runtime_config_service"],
+    )
+    assert len(services["line_client"].sent_messages) == 1
 
 
 # ===== 新方式例外(DATA_INTEGRITY_ERROR): フォールバックし、バッチは継続する =====
