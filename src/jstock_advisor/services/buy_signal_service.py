@@ -36,7 +36,6 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     BuyIndustrySector,
     ConfidenceLevel,
-    EarningsDateStatus,
     RecommendationType,
     StockType,
 )
@@ -360,20 +359,12 @@ class BuySignalService:
             self._config.valuation.fair_value_methods.method_weights,
         )
 
-        # --- 決算日の妥当性検証(要求仕様12節)。データ提供元(yfinance等)の
-        # 更新遅延により、評価日より過去の日付が「次回決算予定日」として
-        # 返ってくることがある。過去日をそのまま次回決算日として使わず、
-        # 検証済みの値(resolved_next_earnings_date)のみを以降のステップで使う ---
-        earnings_date_raw = snapshot.next_earnings_date
-        if earnings_date_raw is None:
-            earnings_date_status = EarningsDateStatus.UNAVAILABLE
-            resolved_next_earnings_date = None
-        elif earnings_date_raw < now.date():
-            earnings_date_status = EarningsDateStatus.STALE_PAST_DATE
-            resolved_next_earnings_date = None
-        else:
-            earnings_date_status = EarningsDateStatus.CONFIRMED
-            resolved_next_earnings_date = earnings_date_raw
+        # --- 決算日の妥当性検証(要求仕様12節)。コードレビュー対応により
+        # build_stock_snapshot()へ一元化された(過去日はnext_earnings_date=None
+        # として既に検証済み)。ここではsnapshotの検証済みフィールドをそのまま使う ---
+        earnings_date_raw = snapshot.earnings_date_raw
+        earnings_date_status = snapshot.earnings_date_status
+        resolved_next_earnings_date = snapshot.next_earnings_date
 
         # 次回決算までの営業日数(§16)
         business_days_to_earnings = (

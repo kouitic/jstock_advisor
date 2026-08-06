@@ -78,6 +78,29 @@ def _make_recommendation(
     )
 
 
+def _make_earnings_review_recommendation(
+    *, recommendation_id: str, next_review_conditions: list[str]
+) -> Recommendation:
+    """決算発表確認待ち通知(REVIEW_AFTER_EARNINGS)用のRecommendation(コードレビュー
+    対応: 明治HD事例)。sell_pricesが空のため価格比較による再送判定ができず、
+    next_review_conditions(状態別の待機文言)の変化のみが再送のシグナルになる。
+    """
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code="2914",
+        stock_name="日本たばこ産業",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.REVIEW_AFTER_EARNINGS,
+        sell_prices=SellPriceLevels(),
+        price_at_recommendation=Decimal("4200"),
+        average_purchase_price_at_recommendation=Decimal("4000"),
+        shares_at_recommendation=100,
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        next_review_conditions=next_review_conditions,
+    )
+
+
 @pytest.fixture
 def service_and_repos(
     tmp_path: Path,
@@ -258,6 +281,75 @@ def test_resend_after_days_elapsed(service_and_repos) -> None:
     repo.save(rec2)
     later = _NOW + dt.timedelta(days=_CONFIG.notification.resend_after_days)
     sent = service.notify_recommendation(rec2, later)
+
+    assert sent is True
+    assert len(client.sent) == 2
+
+
+def test_earnings_review_pending_notification_is_sent_with_expected_content(
+    service_and_repos,
+) -> None:
+    """REVIEW_AFTER_EARNINGSの初回通知が正しくフォーマットされ送信されることの確認
+    (コードレビュー対応: 明治HD事例)。"決算未発表"/"決算発表済み"と断定しない。
+    """
+    service, repo, client = service_and_repos
+    rec = _make_earnings_review_recommendation(
+        recommendation_id="rec-1",
+        next_review_conditions=["決算発表予定日を経過していますが、無償データから..."],
+    )
+    repo.save(rec)
+
+    sent = service.notify_recommendation(rec, _NOW)
+
+    assert sent is True
+    assert len(client.sent) == 1
+    assert "決算発表状況確認待ち" in client.sent[0]
+    assert "決算未発表" not in client.sent[0]
+    assert "決算発表済み" not in client.sent[0]
+
+
+def test_earnings_review_pending_notification_not_resent_for_same_state(
+    service_and_repos,
+) -> None:
+    """同一のnext_review_conditions(=同一の確認待ち状態)が続く間は再送しない。"""
+    service, repo, client = service_and_repos
+    conditions = ["決算発表予定日を経過していますが、無償データから実際の発表状況を確認できて"]
+    rec1 = _make_earnings_review_recommendation(
+        recommendation_id="rec-1", next_review_conditions=conditions
+    )
+    repo.save(rec1)
+    service.notify_recommendation(rec1, _NOW)
+
+    rec2 = _make_earnings_review_recommendation(
+        recommendation_id="rec-2", next_review_conditions=conditions
+    )
+    repo.save(rec2)
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+
+    assert sent is False
+    assert len(client.sent) == 1
+
+
+def test_earnings_review_pending_notification_resent_when_state_transitions_to_delayed(
+    service_and_repos,
+) -> None:
+    """AWAITING_CONFIRMATION→DELAYEDのような状態変化はnext_review_conditionsの
+    文言変化として現れるため、価格情報が無くても再送資格ありとみなす。
+    """
+    service, repo, client = service_and_repos
+    rec1 = _make_earnings_review_recommendation(
+        recommendation_id="rec-1",
+        next_review_conditions=["決算発表予定日を経過していますが、無償データから..."],
+    )
+    repo.save(rec1)
+    service.notify_recommendation(rec1, _NOW)
+
+    rec2 = _make_earnings_review_recommendation(
+        recommendation_id="rec-2",
+        next_review_conditions=["決算発表予定日を経過し、最新財務データの反映確認が長引いています。"],
+    )
+    repo.save(rec2)
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
 
     assert sent is True
     assert len(client.sent) == 2

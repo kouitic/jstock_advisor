@@ -414,6 +414,23 @@ class EarningsWindowStatus(StrEnum):
     RECENTLY_REPORTED = "RECENTLY_REPORTED"
 
 
+class EarningsReleaseConfirmationState(StrEnum):
+    """決算予定日を経過した後、無償データで発表実績を確認できない期間の状態
+    (コードレビュー対応: 明治ホールディングス(2269)事例)。
+
+    予定日前(EarningsDateStatus.CONFIRMED)の抑制は既存の
+    profit_taking_suppression_business_daysロジックが担当するため対象外。
+    DATA_UPDATEDの判定はfiscal_period_endの近似(想定報告ラグ以内かどうか)で
+    あり、実際の決算発表日そのものを厳密に突合するものではない
+    (EarningsWindowStatus.RECENTLY_REPORTEDと同種の近似)。
+    """
+
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
+    DATA_UPDATED = "DATA_UPDATED"
+    DELAYED = "DELAYED"
+
+
 class TriggerStatus(StrEnum):
     """売却ルール1件ごとの該当有無を表現する(2026-07仕様§3、レビュー対応で拡張)。
 

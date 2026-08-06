@@ -16,7 +16,12 @@ from dataclasses import dataclass
 
 from jstock_advisor.config.models import EarningsWindowRulesConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.enums import EarningsWindowStatus, RecommendationType
+from jstock_advisor.domain.entities.enums import (
+    EarningsDateStatus,
+    EarningsReleaseConfirmationState,
+    EarningsWindowStatus,
+    RecommendationType,
+)
 
 _BUY_LIKE = (RecommendationType.BUY, RecommendationType.WATCH_BUY)
 _PROFIT_TAKE_LIKE = (RecommendationType.PARTIAL_PROFIT_TAKE, RecommendationType.FULL_PROFIT_TAKE)
@@ -86,3 +91,36 @@ def recommend_earnings_aware_action(
             return RecommendationType.REVIEW_AFTER_EARNINGS
         return base_recommendation
     return base_recommendation
+
+
+def resolve_earnings_release_confirmation(
+    earnings_date_status: EarningsDateStatus,
+    earnings_date_raw: dt.date | None,
+    fiscal_period_end: dt.date,
+    now: dt.datetime,
+    config: EarningsWindowRulesConfig,
+) -> EarningsReleaseConfirmationState:
+    """決算予定日を経過した後、無償データで発表実績を確認できない期間の状態を
+    判定する(コードレビュー対応: 明治ホールディングス(2269)事例)。
+
+    予定日前(CONFIRMED)・取得不能(UNAVAILABLE)はNOT_APPLICABLEとする
+    (前者は既存のapproaching_window/profit_taking_suppressionロジックが
+    別途担当、後者は判断材料が無いため安全側で通常判定を止めない)。
+
+    「財務データが決算発表を反映したか」は、fiscal_period_endが決算予定日
+    (earnings_date_raw)からの想定報告ラグ(fiscal_period_reporting_lag_days)
+    以内かどうかで近似する。EarningsWindowStatus.RECENTLY_REPORTEDと同種の
+    近似判定であり、決算発表日そのものの厳密な突合ではない。
+    """
+    if earnings_date_status != EarningsDateStatus.STALE_PAST_DATE or earnings_date_raw is None:
+        return EarningsReleaseConfirmationState.NOT_APPLICABLE
+
+    lag = dt.timedelta(days=config.fiscal_period_reporting_lag_days)
+    if fiscal_period_end >= earnings_date_raw - lag:
+        return EarningsReleaseConfirmationState.DATA_UPDATED
+
+    earnings_date_start = dt.datetime.combine(earnings_date_raw, dt.time.min, tzinfo=now.tzinfo)
+    hours_since = (now - earnings_date_start).total_seconds() / 3600
+    if hours_since >= config.maximum_data_reflection_wait_hours:
+        return EarningsReleaseConfirmationState.DELAYED
+    return EarningsReleaseConfirmationState.AWAITING_CONFIRMATION

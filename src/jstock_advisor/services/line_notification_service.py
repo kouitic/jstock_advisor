@@ -1085,6 +1085,36 @@ def _format_earnings_suppressed_message(recommendation: Recommendation) -> str:
     return "\n".join(lines)
 
 
+def _format_earnings_release_pending_message(recommendation: Recommendation) -> str:
+    """決算発表確認待ち通知(コードレビュー対応: 明治ホールディングス(2269)事例)。
+
+    決算予定日を経過したが無償データで発表実績を確認できない期間、通常の
+    PARTIAL/FULL_PROFIT_TAKE提案を保留した場合の通知。"決算未発表"とも
+    "決算発表済み"とも断定しない(過去の決算予定日を次回決算として表示しない)。
+    """
+    lines = [
+        f"【決算発表状況確認待ち】{recommendation.stock_code} {recommendation.stock_name}",
+        "",
+        f"【保有状況】{recommendation.shares_at_recommendation}株 / "
+        f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
+        f"現在 {_yen(recommendation.price_at_recommendation)}",
+        "",
+        "決算発表予定日を迎えていますが、無償データから実際の発表状況を確認できて"
+        "いません。過去の決算予定日を次回決算として使用せず、最新財務データの"
+        "更新を確認後に判断を更新します。",
+    ]
+    if recommendation.next_review_conditions:
+        lines.append("")
+        lines.append("次の確認条件:")
+        for c in recommendation.next_review_conditions:
+            lines.append(f"・{c}")
+    lines.extend(_confirmation_lines(recommendation))
+    lines.append(f"判定の信頼度: {recommendation.confidence.value}")
+    lines.append(f"通知ID: {recommendation.recommendation_id}")
+    lines.append(_DISCLAIMER)
+    return "\n".join(lines)
+
+
 def _format_portfolio_concentration_message(recommendation: Recommendation) -> str:
     """ポートフォリオ集中リスク通知(要求仕様§14)。
 
@@ -1125,6 +1155,8 @@ def _format_profit_taking_message(
         return _format_watch_profit_taking_message(recommendation, large_spread_ratio_threshold)
     if recommendation.recommendation_type == RecommendationType.REVIEW_BEFORE_EARNINGS:
         return _format_earnings_suppressed_message(recommendation)
+    if recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS:
+        return _format_earnings_release_pending_message(recommendation)
     if recommendation.recommendation_type == RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW:
         return _format_portfolio_concentration_message(recommendation)
 
@@ -2051,6 +2083,17 @@ class LineNotificationService:
             change_pct = abs(float(new_price / prev_price - 1) * 100)  # type: ignore[operator]
             if change_pct >= self._config.notification.price_change_resend_threshold_pct:
                 return NotificationStatus.SENT
+
+        # 決算発表確認待ち通知(コードレビュー対応)。REVIEW_AFTER_EARNINGSは
+        # sell_prices=SellPriceLevels()(価格情報なし)のためprice_comparableに
+        # ならず、AWAITING_CONFIRMATION→DELAYEDのような同一recommendation_type内の
+        # 状態変化を価格変化だけでは検知できない。next_review_conditions(状態別の
+        # 待機文言)が変化していれば、再送資格ありとみなす(待機通知の再送抑止)。
+        if (
+            recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
+            and previous.next_review_conditions != recommendation.next_review_conditions
+        ):
+            return NotificationStatus.SENT
 
         days_elapsed = (now.date() - latest_log.sent_at.date()).days
         if days_elapsed >= self._config.notification.resend_after_days:

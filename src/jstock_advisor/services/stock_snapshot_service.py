@@ -19,7 +19,7 @@ from jstock_advisor.domain.entities.common import (
     BenefitUtilityCoefficients,
     DataSourceReference,
 )
-from jstock_advisor.domain.entities.enums import ConfidenceLevel
+from jstock_advisor.domain.entities.enums import ConfidenceLevel, EarningsDateStatus
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
 from jstock_advisor.domain.financial_series import (
@@ -73,7 +73,13 @@ class StockSnapshot:
     historical_valuations: list[HistoricalValuation]
     avg_trading_value: Decimal | None
     disclosures: list[Disclosure]
+    # next_earnings_dateは検証済みの値(過去日・取得不能時はNone)。生値は
+    # earnings_date_rawで別途保持する(コードレビュー対応: 明治HD事例、
+    # データ提供元の更新遅延により過去日がそのまま返ってくることがあるため、
+    # buy/sell/profit_takingの3消費者すべてで一元的に検証する)。
     next_earnings_date: dt.date | None
+    earnings_date_status: EarningsDateStatus
+    earnings_date_raw: dt.date | None
     dividend_yield_pct: float | None
     benefit_yield_pct: float | None
     annual_benefit_value: Decimal | None
@@ -148,7 +154,20 @@ def build_stock_snapshot(
     disclosures = providers.disclosure.get_disclosures(
         stock_code, now.date() - dt.timedelta(days=30)
     )
-    next_earnings_date = providers.disclosure.get_next_earnings_date(stock_code)
+    # 決算日の妥当性検証(コードレビュー対応: 明治HD事例)。データ提供元(yfinance等)の
+    # 更新遅延により、評価日より過去の日付が「次回決算予定日」として返ってくることが
+    # ある。過去日をそのまま次回決算日として使わず、検証済みの値のみをnext_earnings_date
+    # へ格納する(buy/sell/profit_takingの3消費者すべてがここで一元的に検証される)。
+    earnings_date_raw = providers.disclosure.get_next_earnings_date(stock_code)
+    if earnings_date_raw is None:
+        earnings_date_status = EarningsDateStatus.UNAVAILABLE
+        next_earnings_date = None
+    elif earnings_date_raw < now.date():
+        earnings_date_status = EarningsDateStatus.STALE_PAST_DATE
+        next_earnings_date = None
+    else:
+        earnings_date_status = EarningsDateStatus.CONFIRMED
+        next_earnings_date = earnings_date_raw
 
     coefficients = BenefitUtilityCoefficients(
         **config.scoring.shareholder_benefit_value.utility_coefficients_default.model_dump()
@@ -291,6 +310,8 @@ def build_stock_snapshot(
         avg_trading_value=avg_trading_value,
         disclosures=disclosures,
         next_earnings_date=next_earnings_date,
+        earnings_date_status=earnings_date_status,
+        earnings_date_raw=earnings_date_raw,
         dividend_yield_pct=dividend_yield_pct,
         benefit_yield_pct=benefit_yield_pct,
         annual_benefit_value=annual_benefit_value,
