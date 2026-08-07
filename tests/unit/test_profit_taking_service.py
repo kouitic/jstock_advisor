@@ -16,16 +16,21 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+from collections.abc import Sequence
 from decimal import Decimal
 
 import pytest
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.common import PriceWithRationale, SellPriceLevels
+from jstock_advisor.domain.entities.common import (
+    DataSourceReference,
+    PriceWithRationale,
+    SellPriceLevels,
+)
 from jstock_advisor.domain.entities.enums import AccountType, RecommendationType, TimingAction
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.signals.profit_taking import ProfitTakingResult, UnrealizedPnl
-from jstock_advisor.interfaces.types import Disclosure, FinancialSummary
+from jstock_advisor.interfaces.types import Disclosure, FinancialSummary, QuarterlyFinancials
 from jstock_advisor.providers.corporate_action.mock_impl import MockCorporateActionProvider
 from jstock_advisor.providers.disclosure.mock_impl import MockDisclosureProvider
 from jstock_advisor.providers.dividend_data.mock_impl import MockDividendDataProvider
@@ -54,18 +59,41 @@ class _FixedEarningsDateDisclosureProvider:
         return self._next_earnings_date
 
 
-class _FixedFiscalPeriodEndFinancialDataProvider:
-    """fiscal_period_endだけを固定値で上書きするフェイク(他は委譲元へ委譲)。"""
+class _FixedFinancialPeriodFinancialDataProvider:
+    """fiscal_period_end・recent_quarters・fetched_atを固定値で上書きするフェイク
+    (他は委譲元へ委譲、デプロイ前対応)。
 
-    def __init__(self, delegate: object, fiscal_period_end: dt.date) -> None:
+    MockFinancialDataProvider.get_financial_summary()は既定でrecent_quartersへ
+    評価時刻に近い(=常に新しい)期末日を入れるため、fiscal_period_endだけを
+    上書きしてもresolve_latest_financial_period_end()はrecent_quarters側を
+    優先してしまう。既定でrecent_quarters=[]へ上書きすることで、従来通り
+    fiscal_period_end(年次フォールバック)単独でデータ鮮度を制御できるように
+    する。recent_quartersを明示的に渡した場合はそちらが使われる。
+    """
+
+    def __init__(
+        self,
+        delegate: object,
+        fiscal_period_end: dt.date | None,
+        recent_quarters: Sequence[QuarterlyFinancials] = (),
+        fetched_at: dt.datetime | None = None,
+    ) -> None:
         self._delegate = delegate
         self._fiscal_period_end = fiscal_period_end
+        self._recent_quarters = list(recent_quarters)
+        self._fetched_at = fetched_at
 
     def get_financial_summary(self, stock_code: str) -> FinancialSummary | None:
         summary = self._delegate.get_financial_summary(stock_code)  # type: ignore[attr-defined]
         if summary is None:
             return None
-        return summary.model_copy(update={"fiscal_period_end": self._fiscal_period_end})
+        update: dict[str, object] = {
+            "fiscal_period_end": self._fiscal_period_end,
+            "recent_quarters": self._recent_quarters,
+        }
+        if self._fetched_at is not None:
+            update["source"] = summary.source.model_copy(update={"fetched_at": self._fetched_at})
+        return summary.model_copy(update=update)
 
     def get_historical_valuation(self, stock_code: str, years: int) -> list[object]:
         return self._delegate.get_historical_valuation(stock_code, years)  # type: ignore[attr-defined]
@@ -74,8 +102,21 @@ class _FixedFiscalPeriodEndFinancialDataProvider:
         return self._delegate.get_cashflow_decomposition(stock_code)  # type: ignore[attr-defined]
 
 
+_TEST_FINANCIAL_SOURCE = DataSourceReference(provider="test-fixture", fetched_at=_NOW)
+
+
+def _quarter(quarter_end: dt.date, stock_code: str = "2914") -> QuarterlyFinancials:
+    return QuarterlyFinancials(
+        stock_code=stock_code, quarter_end=quarter_end, source=_TEST_FINANCIAL_SOURCE
+    )
+
+
 def _providers(
-    next_earnings_date: dt.date | None, fiscal_period_end: dt.date, now: dt.datetime = _NOW
+    next_earnings_date: dt.date | None,
+    fiscal_period_end: dt.date | None,
+    now: dt.datetime = _NOW,
+    recent_quarters: Sequence[QuarterlyFinancials] = (),
+    fetched_at: dt.datetime | None = None,
 ) -> ProviderBundle:
     base = ProviderBundle(
         market_data=MockMarketDataProvider(now=now),
@@ -88,8 +129,8 @@ def _providers(
     return dataclasses.replace(
         base,
         disclosure=_FixedEarningsDateDisclosureProvider(base.disclosure, next_earnings_date),
-        financial_data=_FixedFiscalPeriodEndFinancialDataProvider(
-            base.financial_data, fiscal_period_end
+        financial_data=_FixedFinancialPeriodFinancialDataProvider(
+            base.financial_data, fiscal_period_end, recent_quarters, fetched_at
         ),
     )
 
@@ -189,6 +230,143 @@ def test_stale_earnings_date_with_reflected_financials_keeps_original_recommenda
     rec = outcome.recommendation
     assert rec.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
     assert rec.sell_prices.recommended_limit_price is not None
+
+
+def test_recent_quarter_update_and_fetched_after_earnings_becomes_data_updated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """デプロイ前対応(4ケース必須テーブル・正常更新): 年次fiscal_period_endは
+    古いままでも、recent_quartersに決算予定日からの想定報告ラグ以内の四半期実績
+    (2026-06-30)があり、かつfetched_atが決算予定日以後であれば、DATA_UPDATED
+    として通常のPARTIAL_PROFIT_TAKE判定を維持する(四半期決算の反映を年次
+    fiscal_period_endだけでは検知できなかったバグの回帰)。
+    """
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+    )
+    providers = _providers(
+        _STALE_EARNINGS_DATE,
+        dt.date(2026, 3, 31),
+        recent_quarters=[_quarter(dt.date(2026, 3, 31)), _quarter(dt.date(2026, 6, 30))],
+        fetched_at=dt.datetime(2026, 8, 6, 7, 0, tzinfo=dt.UTC),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    assert outcome.recommendation.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+
+
+def test_fetched_at_alone_being_recent_does_not_become_data_updated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """デプロイ前対応(4ケース必須テーブル・fetched_atのみ新しい): 財務データの
+    取得時刻が決算予定日以後でも、最新財務期間末(recent_quarters/年次とも
+    2026-03-31のまま)が古ければDATA_UPDATEDにしない。
+    """
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+    )
+    providers = _providers(
+        _STALE_EARNINGS_DATE,
+        dt.date(2026, 3, 31),
+        recent_quarters=[_quarter(dt.date(2026, 3, 31))],
+        fetched_at=dt.datetime(2026, 8, 6, 7, 0, tzinfo=dt.UTC),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    assert outcome.recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
+
+
+def test_period_alone_being_recent_does_not_become_data_updated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """デプロイ前対応(4ケース必須テーブル・periodのみ新しい): 最新財務期間末
+    (recent_quarters内に2026-06-30)が十分新しくても、fetched_atが決算予定日
+    (2026-08-05)より前(2026-08-04)であれば、決算発表前から保持していた
+    データの可能性があるためDATA_UPDATEDにしない。
+    """
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+    )
+    providers = _providers(
+        _STALE_EARNINGS_DATE,
+        dt.date(2026, 3, 31),
+        recent_quarters=[_quarter(dt.date(2026, 3, 31)), _quarter(dt.date(2026, 6, 30))],
+        fetched_at=dt.datetime(2026, 8, 4, 7, 0, tzinfo=dt.UTC),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    assert outcome.recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
+
+
+def test_both_period_and_fetched_at_unconfirmable_does_not_become_data_updated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """デプロイ前対応(4ケース必須テーブル・両方確認不能): recent_quartersが空、
+    年次fiscal_period_endも取得できない(None)場合、最新財務期間末が解決できず
+    DATA_UPDATEDにしない(取得不能時に取得日で代替しない)。
+    """
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+    )
+    providers = _providers(
+        _STALE_EARNINGS_DATE,
+        None,
+        recent_quarters=[],
+        fetched_at=dt.datetime(2026, 8, 6, 7, 0, tzinfo=dt.UTC),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    assert outcome.recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
+
+
+def test_future_quarter_end_is_ignored_for_data_reflection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """デプロイ前対応: recent_quartersに評価日より未来の期末日(2026-09-30)が
+    混入しても、それを決算反映済みの証拠として採用しない。有効な最大値
+    (2026-06-30)がDATA_UPDATED判定に使われる。
+    """
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+    )
+    providers = _providers(
+        _STALE_EARNINGS_DATE,
+        dt.date(2026, 3, 31),
+        recent_quarters=[
+            _quarter(dt.date(2026, 3, 31)),
+            _quarter(dt.date(2026, 6, 30)),
+            _quarter(dt.date(2026, 9, 30)),  # 評価日(2026-08-06)より未来
+        ],
+        fetched_at=dt.datetime(2026, 8, 6, 7, 0, tzinfo=dt.UTC),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    assert outcome.recommendation.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
 
 
 def test_far_past_earnings_date_does_not_trigger_before_earnings_suppression(

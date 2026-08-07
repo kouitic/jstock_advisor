@@ -47,6 +47,7 @@ from jstock_advisor.domain.signals.confidence_scoring import (
 from jstock_advisor.domain.signals.earnings_window import (
     resolve_earnings_decision_relevance,
     resolve_earnings_release_confirmation,
+    resolve_latest_financial_period_end,
 )
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
@@ -397,10 +398,18 @@ class ProfitTakingService:
         # 決算発表確認待ち(コードレビュー対応: 明治ホールディングス(2269)事例)。
         # 決算予定日を経過したが無償データで発表実績を確認できない期間は、
         # 財務データが更新されるまで通常のPARTIAL/FULL_PROFIT_TAKE提案を保留する。
+        # 評価日(JST)は1回だけ計算し、期間末解決・関連性判定の両方で使い回す
+        # (デプロイ前対応: 各所で個別にnow.date()/evaluation_date_jst(now)を
+        # 再計算しない)。
+        evaluation_date = evaluation_date_jst(now)
+        # 決算反映確認には年次のfiscal_period_endではなく、recent_quartersを
+        # 優先した最新財務期間末を使う(デプロイ前対応: 四半期決算の反映を
+        # 検知できないバグの修正)。評価日より未来のperiod_endは候補から除外する。
+        resolved_period = resolve_latest_financial_period_end(snapshot.financial, evaluation_date)
         release_confirmation_state = resolve_earnings_release_confirmation(
             snapshot.earnings_date_status,
             snapshot.earnings_date_raw,
-            snapshot.financial.fiscal_period_end,
+            resolved_period.period_end,
             snapshot.financial.source.fetched_at,
             now,
             self._config.earnings_window,
@@ -411,7 +420,7 @@ class ProfitTakingService:
             snapshot.earnings_date_status,
             snapshot.earnings_date_raw,
             release_confirmation_state,
-            evaluation_date_jst(now),
+            evaluation_date,
             self._config.earnings_window,
         )
         effective_recommendation_type = result.recommendation_type
@@ -489,6 +498,21 @@ class ProfitTakingService:
                 "confidence": confidence_result.level.value,
                 "confidence_score": confidence_result.score,
                 "confidence_reasons": confidence_result.reasons_not_high,
+                # --- デプロイ前対応: 決算反映確認の由来を監査可能にする ---
+                "resolved_financial_period_end": (
+                    resolved_period.period_end.isoformat()
+                    if resolved_period.period_end is not None
+                    else None
+                ),
+                "financial_period_end_source": resolved_period.source.value,
+                "earnings_date_raw": (
+                    snapshot.earnings_date_raw.isoformat()
+                    if snapshot.earnings_date_raw is not None
+                    else None
+                ),
+                "financial_fetched_at": snapshot.financial.source.fetched_at.isoformat(),
+                "release_confirmation_state": release_confirmation_state.value,
+                "earnings_decision_relevance": decision_relevance.value,
             },
             data_sources=list(snapshot.data_sources),
             rule_version=self._active_rule_version(),

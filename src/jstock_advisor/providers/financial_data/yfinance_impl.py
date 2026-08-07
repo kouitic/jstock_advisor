@@ -140,7 +140,9 @@ class YFinanceFinancialDataProvider:
             or info.get("shortName")
         )
 
-        fiscal_period_end = self._latest_annual_period_end(ticker) or self._now.date()
+        # デプロイ前対応: 年次決算期末を取得できない場合、データ取得日時を代替値
+        # として使わない(Noneのまま。決算反映確認の誤判定を防止)。
+        fiscal_period_end = self._latest_annual_period_end(ticker)
         fiscal_year_end_month = self._fiscal_year_end_month(info, ticker)
 
         return FinancialSummary(
@@ -259,6 +261,10 @@ class YFinanceFinancialDataProvider:
         columns = sorted(income_df.columns)
         results: list[QuarterlyFinancials] = []
         for column in columns:
+            # デプロイ前対応: 列から実際の期間末日を取得できない場合はこの期を
+            # スキップする(データ取得日時を代替の期末日として使わない)。
+            if not hasattr(column, "date"):
+                continue
             operating_income = _to_decimal(income_df.loc["Operating Income", column])
             operating_cashflow = None
             if (
@@ -268,7 +274,7 @@ class YFinanceFinancialDataProvider:
                 and column in cf_df.columns
             ):
                 operating_cashflow = _to_decimal(cf_df.loc["Operating Cash Flow", column])
-            period_end = column.date() if hasattr(column, "date") else self._now.date()
+            period_end = column.date()
             results.append(
                 QuarterlyFinancials(
                     stock_code=stock_code,

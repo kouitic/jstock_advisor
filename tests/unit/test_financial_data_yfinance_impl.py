@@ -98,3 +98,101 @@ def test_nearest_price_returns_none_when_no_date_within_window() -> None:
 def test_nearest_price_returns_none_for_empty_history() -> None:
     price = YFinanceFinancialDataProvider._nearest_price(None, dt.date(2026, 3, 31))  # noqa: SLF001
     assert price is None
+
+
+# ===== デプロイ前対応: 年次期末取得不能時に取得日時を代替値として使わないこと =====
+
+
+class _FakeTickerFinancials:
+    def __init__(
+        self,
+        symbol: str,
+        income_stmt: pd.DataFrame | None = None,
+        quarterly_income_stmt: pd.DataFrame | None = None,
+        cashflow: pd.DataFrame | None = None,
+        quarterly_cashflow: pd.DataFrame | None = None,
+        balance_sheet: pd.DataFrame | None = None,
+        quarterly_balance_sheet: pd.DataFrame | None = None,
+        info: dict[str, object] | None = None,
+    ) -> None:
+        self.symbol = symbol
+        self.income_stmt = income_stmt if income_stmt is not None else pd.DataFrame()
+        self.quarterly_income_stmt = (
+            quarterly_income_stmt if quarterly_income_stmt is not None else pd.DataFrame()
+        )
+        self.cashflow = cashflow if cashflow is not None else pd.DataFrame()
+        self.quarterly_cashflow = (
+            quarterly_cashflow if quarterly_cashflow is not None else pd.DataFrame()
+        )
+        self.balance_sheet = balance_sheet if balance_sheet is not None else pd.DataFrame()
+        self.quarterly_balance_sheet = (
+            quarterly_balance_sheet if quarterly_balance_sheet is not None else pd.DataFrame()
+        )
+        self.info = info if info is not None else {"regularMarketPrice": 1000.0}
+
+
+def test_get_financial_summary_leaves_fiscal_period_end_none_when_annual_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """デプロイ前対応の回帰: 年次決算期末(income_stmt)を取得できない場合、
+    データ取得日時(self._now)を代替のfiscal_period_endとして使わない(None)。
+    """
+    import jstock_advisor.providers.financial_data.yfinance_impl as module
+
+    fake_ticker = _FakeTickerFinancials("7203.T")  # income_stmt空(取得不能を模擬)
+    monkeypatch.setattr(module.yf, "Ticker", lambda symbol: fake_ticker)
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+
+    summary = provider.get_financial_summary("7203")
+
+    assert summary is not None
+    assert summary.fiscal_period_end is None
+
+
+def test_get_financial_summary_recent_quarters_reflect_newer_quarterly_period(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """四半期(quarterly_income_stmt)に年次(income_stmt)より新しい列がある場合、
+    recent_quartersの最新quarter_endはその日付を反映する(fiscal_period_end
+    (年次)自体は変わらない)。
+    """
+    import jstock_advisor.providers.financial_data.yfinance_impl as module
+
+    annual_income_stmt = pd.DataFrame({pd.Timestamp("2026-03-31"): {"Operating Income": 1000.0}})
+    quarterly_income_stmt = pd.DataFrame(
+        {
+            pd.Timestamp("2026-03-31"): {"Operating Income": 300.0},
+            pd.Timestamp("2026-06-30"): {"Operating Income": 320.0},
+        }
+    )
+    fake_ticker = _FakeTickerFinancials(
+        "7203.T", income_stmt=annual_income_stmt, quarterly_income_stmt=quarterly_income_stmt
+    )
+    monkeypatch.setattr(module.yf, "Ticker", lambda symbol: fake_ticker)
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+
+    summary = provider.get_financial_summary("7203")
+
+    assert summary is not None
+    assert summary.fiscal_period_end == dt.date(2026, 3, 31)
+    quarter_ends = [q.quarter_end for q in summary.recent_quarters]
+    assert max(quarter_ends) == dt.date(2026, 6, 30)
+
+
+def test_recent_periods_skips_columns_without_valid_date() -> None:
+    """デプロイ前対応の回帰: 列(period)が実際の日付を持たない場合、その期を
+    スキップする(データ取得日時self._now.date()で代替しない)。
+    """
+    quarterly_income_stmt = pd.DataFrame(
+        {"period-1": {"Operating Income": 100.0}, "period-2": {"Operating Income": 200.0}}
+    )
+    fake_ticker = _FakeTickerFinancials("7203.T", quarterly_income_stmt=quarterly_income_stmt)
+    provider = YFinanceFinancialDataProvider(now=_NOW)
+
+    results = provider._recent_periods(fake_ticker, "7203")  # noqa: SLF001
+
+    assert results == []

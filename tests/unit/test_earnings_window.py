@@ -2,11 +2,13 @@ import datetime as dt
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import (
     EarningsDateStatus,
     EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsWindowStatus,
+    FinancialPeriodEndSource,
     RecommendationType,
 )
 from jstock_advisor.domain.signals.earnings_window import (
@@ -14,7 +16,27 @@ from jstock_advisor.domain.signals.earnings_window import (
     recommend_earnings_aware_action,
     resolve_earnings_decision_relevance,
     resolve_earnings_release_confirmation,
+    resolve_latest_financial_period_end,
 )
+from jstock_advisor.interfaces.types import FinancialSummary, QuarterlyFinancials
+
+_TEST_SOURCE = DataSourceReference(
+    provider="test-fixture", fetched_at=dt.datetime(2026, 8, 6, tzinfo=dt.UTC)
+)
+
+
+def _financial(
+    fiscal_period_end: dt.date | None, quarter_ends: list[dt.date]
+) -> FinancialSummary:
+    return FinancialSummary(
+        stock_code="2914",
+        fiscal_period_end=fiscal_period_end,
+        recent_quarters=[
+            QuarterlyFinancials(stock_code="2914", quarter_end=q, source=_TEST_SOURCE)
+            for q in quarter_ends
+        ],
+        source=_TEST_SOURCE,
+    )
 
 _CONFIG = load_config().earnings_window
 _APP_CONFIG = load_config()
@@ -234,6 +256,75 @@ def test_release_confirmation_not_yet_delayed_just_before_max_wait_hours() -> No
         just_before,
         _CONFIG,
     )
+    assert result == EarningsReleaseConfirmationState.AWAITING_CONFIRMATION
+
+
+# ===== resolve_latest_financial_period_end(デプロイ前対応) =====
+
+_EVAL_DATE = dt.date(2026, 8, 6)
+
+
+def test_resolve_latest_period_prefers_recent_quarter_within_evaluation_date() -> None:
+    financial = _financial(dt.date(2026, 3, 31), [dt.date(2026, 3, 31), dt.date(2026, 6, 30)])
+    result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+    assert result.period_end == dt.date(2026, 6, 30)
+    assert result.source == FinancialPeriodEndSource.RECENT_PERIODS
+
+
+def test_resolve_latest_period_ignores_future_quarter_end() -> None:
+    """recent_quartersに評価日より未来(2026-09-30)の期末日が混入しても、
+    有効な最大値(2026-06-30)が採用される(未来日をProvider異常等で
+    決算反映済みの証拠として採用しないための必須テスト)。
+    """
+    financial = _financial(
+        dt.date(2026, 3, 31),
+        [dt.date(2026, 3, 31), dt.date(2026, 6, 30), dt.date(2026, 9, 30)],
+    )
+    result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+    assert result.period_end == dt.date(2026, 6, 30)
+    assert result.source == FinancialPeriodEndSource.RECENT_PERIODS
+
+
+def test_resolve_latest_period_falls_back_to_annual_when_all_quarters_future() -> None:
+    financial = _financial(dt.date(2026, 3, 31), [dt.date(2026, 9, 30)])
+    result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+    assert result.period_end == dt.date(2026, 3, 31)
+    assert result.source == FinancialPeriodEndSource.ANNUAL_FISCAL_PERIOD_END
+
+
+def test_resolve_latest_period_unavailable_when_annual_also_future() -> None:
+    financial = _financial(dt.date(2026, 9, 30), [dt.date(2026, 9, 30)])
+    result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+    assert result.period_end is None
+    assert result.source == FinancialPeriodEndSource.UNAVAILABLE
+
+
+def test_resolve_latest_period_falls_back_to_annual_when_no_quarters() -> None:
+    financial = _financial(dt.date(2026, 3, 31), [])
+    result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+    assert result.period_end == dt.date(2026, 3, 31)
+    assert result.source == FinancialPeriodEndSource.ANNUAL_FISCAL_PERIOD_END
+
+
+def test_resolve_latest_period_unavailable_when_no_data_at_all() -> None:
+    financial = _financial(None, [])
+    result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+    assert result.period_end is None
+    assert result.source == FinancialPeriodEndSource.UNAVAILABLE
+
+
+def test_release_confirmation_not_data_updated_when_period_end_unavailable() -> None:
+    """latest_financial_period_end=None(取得不能)の場合、DATA_UPDATEDにならない
+    (取得不能を取得日で代替しない)。"""
+    result = resolve_earnings_release_confirmation(
+        EarningsDateStatus.STALE_PAST_DATE,
+        dt.date(2026, 8, 5),
+        None,
+        _NOW,
+        _NOW,
+        _CONFIG,
+    )
+    assert result != EarningsReleaseConfirmationState.DATA_UPDATED
     assert result == EarningsReleaseConfirmationState.AWAITING_CONFIRMATION
 
 
