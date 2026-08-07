@@ -27,7 +27,12 @@ from jstock_advisor.domain.entities.common import (
     PriceWithRationale,
     SellPriceLevels,
 )
-from jstock_advisor.domain.entities.enums import AccountType, RecommendationType, TimingAction
+from jstock_advisor.domain.entities.enums import (
+    AccountType,
+    RecentPeriodsSource,
+    RecommendationType,
+    TimingAction,
+)
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.signals.profit_taking import ProfitTakingResult, UnrealizedPnl
 from jstock_advisor.interfaces.types import Disclosure, FinancialSummary, QuarterlyFinancials
@@ -90,6 +95,13 @@ class _FixedFinancialPeriodFinancialDataProvider:
         update: dict[str, object] = {
             "fiscal_period_end": self._fiscal_period_end,
             "recent_quarters": self._recent_quarters,
+            # 由来精緻化対応: recent_quartersを明示的に渡した場合は四半期実績
+            # 由来として扱う(テストの意図に合わせる)。既定(空)はUNAVAILABLE。
+            "recent_periods_source": (
+                RecentPeriodsSource.QUARTERLY
+                if self._recent_quarters
+                else RecentPeriodsSource.UNAVAILABLE
+            ),
         }
         if self._fetched_at is not None:
             update["source"] = summary.source.model_copy(update={"fetched_at": self._fetched_at})

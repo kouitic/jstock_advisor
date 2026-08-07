@@ -505,6 +505,7 @@ class ProfitTakingService:
                     else None
                 ),
                 "financial_period_end_source": resolved_period.source.value,
+                "recent_periods_source": snapshot.financial.recent_periods_source.value,
                 "earnings_date_raw": (
                     snapshot.earnings_date_raw.isoformat()
                     if snapshot.earnings_date_raw is not None

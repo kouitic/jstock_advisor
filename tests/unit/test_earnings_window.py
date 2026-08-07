@@ -9,6 +9,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     EarningsWindowStatus,
     FinancialPeriodEndSource,
+    RecentPeriodsSource,
     RecommendationType,
 )
 from jstock_advisor.domain.signals.earnings_window import (
@@ -26,7 +27,9 @@ _TEST_SOURCE = DataSourceReference(
 
 
 def _financial(
-    fiscal_period_end: dt.date | None, quarter_ends: list[dt.date]
+    fiscal_period_end: dt.date | None,
+    quarter_ends: list[dt.date],
+    recent_periods_source: RecentPeriodsSource = RecentPeriodsSource.UNAVAILABLE,
 ) -> FinancialSummary:
     return FinancialSummary(
         stock_code="2914",
@@ -35,6 +38,7 @@ def _financial(
             QuarterlyFinancials(stock_code="2914", quarter_end=q, source=_TEST_SOURCE)
             for q in quarter_ends
         ],
+        recent_periods_source=recent_periods_source,
         source=_TEST_SOURCE,
     )
 
@@ -265,10 +269,14 @@ _EVAL_DATE = dt.date(2026, 8, 6)
 
 
 def test_resolve_latest_period_prefers_recent_quarter_within_evaluation_date() -> None:
-    financial = _financial(dt.date(2026, 3, 31), [dt.date(2026, 3, 31), dt.date(2026, 6, 30)])
+    financial = _financial(
+        dt.date(2026, 3, 31),
+        [dt.date(2026, 3, 31), dt.date(2026, 6, 30)],
+        recent_periods_source=RecentPeriodsSource.QUARTERLY,
+    )
     result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
     assert result.period_end == dt.date(2026, 6, 30)
-    assert result.source == FinancialPeriodEndSource.RECENT_PERIODS
+    assert result.source == FinancialPeriodEndSource.RECENT_QUARTERLY_PERIOD
 
 
 def test_resolve_latest_period_ignores_future_quarter_end() -> None:
@@ -279,10 +287,43 @@ def test_resolve_latest_period_ignores_future_quarter_end() -> None:
     financial = _financial(
         dt.date(2026, 3, 31),
         [dt.date(2026, 3, 31), dt.date(2026, 6, 30), dt.date(2026, 9, 30)],
+        recent_periods_source=RecentPeriodsSource.QUARTERLY,
     )
     result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
     assert result.period_end == dt.date(2026, 6, 30)
-    assert result.source == FinancialPeriodEndSource.RECENT_PERIODS
+    assert result.source == FinancialPeriodEndSource.RECENT_QUARTERLY_PERIOD
+
+
+def test_resolve_latest_period_annual_fallback_source_is_labeled_distinctly() -> None:
+    """由来精緻化対応: recent_quartersが実際には年次データへのフォールバック
+    由来(Provider側でquarterly取得不能)だった場合、RECENT_QUARTERLY_PERIODと
+    誤表示せず、RECENT_ANNUAL_FALLBACKとして区別する。
+    """
+    financial = _financial(
+        dt.date(2026, 3, 31),
+        [dt.date(2025, 3, 31), dt.date(2026, 3, 31)],
+        recent_periods_source=RecentPeriodsSource.ANNUAL_FALLBACK,
+    )
+    result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+    assert result.period_end == dt.date(2026, 3, 31)
+    assert result.source == FinancialPeriodEndSource.RECENT_ANNUAL_FALLBACK
+
+
+def test_resolve_latest_period_inconsistent_source_becomes_unknown() -> None:
+    """由来精緻化対応: recent_quartersに有効な期間末があるのに
+    recent_periods_source=UNAVAILABLEというデータ不整合が起きた場合、
+    RECENT_QUARTERLY_PERIOD/RECENT_ANNUAL_FALLBACKのいずれとも誤認せずUNKNOWNと
+    する(period_end自体は引き続き有効な最大値を返す。DATA_UPDATED判定条件は
+    変更しないため、この状態でもDATA_UPDATEDになりうる)。
+    """
+    financial = _financial(
+        dt.date(2026, 3, 31),
+        [dt.date(2026, 6, 30)],
+        recent_periods_source=RecentPeriodsSource.UNAVAILABLE,
+    )
+    result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+    assert result.period_end == dt.date(2026, 6, 30)
+    assert result.source == FinancialPeriodEndSource.UNKNOWN
 
 
 def test_resolve_latest_period_falls_back_to_annual_when_all_quarters_future() -> None:

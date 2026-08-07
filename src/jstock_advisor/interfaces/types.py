@@ -16,6 +16,7 @@ from jstock_advisor.domain.entities.enums import (
     BenefitUtilityCategory,
     CorporateActionType,
     DividendComparisonOutcome,
+    RecentPeriodsSource,
     RecordDateUnknownReason,
 )
 
@@ -107,6 +108,10 @@ class FinancialSummary(ImmutableSnapshot):
     is_deficit: bool = False
     is_debt_excess: bool = False
     recent_quarters: list[QuarterlyFinancials] = []
+    # recent_quartersの実際の生成元(由来精緻化対応)。四半期実績データ由来か、
+    # 四半期データを取得できず年次決算へフォールバックしたのかを区別する
+    # (recent_quartersという名前だけでは四半期実績由来と限らないため)。
+    recent_periods_source: RecentPeriodsSource = RecentPeriodsSource.UNAVAILABLE
     source: DataSourceReference
 
     # --- 業種別分類+金融業向け財務健全性ルール(2026-07仕様§2)で追加 ---
