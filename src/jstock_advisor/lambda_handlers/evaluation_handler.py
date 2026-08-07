@@ -35,7 +35,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     )
 
     outcome = service.run_due_evaluations(now)
-    calendar_outcome = service.run_due_calendar_evaluations(now)
+    calendar_outcome = service.run_due_calendar_evaluations(
+        now, horizon_days=config.review_improvement.evaluation_horizon_days
+    )
     logger.info(
         "evaluation_handler done: evaluated=%d skipped=%d calendar_evaluated=%d "
         "calendar_skipped=%d",

@@ -197,6 +197,23 @@ def test_malformed_secret_is_configuration_error(
     assert status == ImprovementTaskStatus.CONFIGURATION_ERROR
 
 
+@pytest.mark.parametrize(("repo_owner", "repo_name"), [("", "repo"), ("owner", ""), ("", "")])
+def test_empty_repo_owner_or_name_is_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, aws_env: str, config, repo_owner: str, repo_name: str
+) -> None:
+    """issue_creation_enabled=trueでもrepo owner/repo nameが空の場合は
+    CONFIGURATION_ERRORとし、GitHub APIを一切呼ばないこと(レビュー指摘④)。"""
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(github_client_module.urllib.request, "urlopen", fake)
+
+    status = github_issue_service.process_candidate(
+        _candidate(), "2026-W32", _NOW, config, repo_owner, repo_name, aws_env
+    )
+
+    assert status == ImprovementTaskStatus.CONFIGURATION_ERROR
+    assert fake.requests == []
+
+
 # --- 新規Issue作成 -------------------------------------------------------
 
 

@@ -56,7 +56,9 @@ def run_due_evaluations(
     )
 
     outcome = service.run_due_evaluations(now)
-    calendar_outcome = service.run_due_calendar_evaluations(now)
+    calendar_outcome = service.run_due_calendar_evaluations(
+        now, horizon_days=config.review_improvement.evaluation_horizon_days
+    )
     all_evaluated = outcome.evaluated + calendar_outcome.evaluated
     all_skipped = outcome.skipped_due_to_data_error + calendar_outcome.skipped_due_to_data_error
     if not all_evaluated and not all_skipped:

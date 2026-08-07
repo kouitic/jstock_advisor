@@ -86,12 +86,16 @@ def repos(tmp_path: Path):
 
 
 def _build_service(
-    repos: dict, line_client=None, issue_creation_enabled: bool = False
+    repos: dict,
+    line_client=None,
+    issue_creation_enabled: bool = False,
+    evaluation_horizon_days: int | None = None,
 ) -> WeeklyImprovementReviewService:
     config = load_config()
-    review_config = config.review_improvement.model_copy(
-        update={"issue_creation_enabled": issue_creation_enabled}
-    )
+    review_config_updates: dict = {"issue_creation_enabled": issue_creation_enabled}
+    if evaluation_horizon_days is not None:
+        review_config_updates["evaluation_horizon_days"] = evaluation_horizon_days
+    review_config = config.review_improvement.model_copy(update=review_config_updates)
     config = config.model_copy(update={"review_improvement": review_config})
     return WeeklyImprovementReviewService(
         config=config,
@@ -133,11 +137,12 @@ def _evaluation(
     evaluated_at: dt.datetime,
     price_return_pct: float = 1.0,
     excess_return_pct: float | None = 1.0,
+    horizon_calendar_days: int = 7,
 ) -> EvaluationResult:
     return EvaluationResult(
         evaluation_id=eval_id,
         recommendation_id=rec_id,
-        horizon_calendar_days=7,
+        horizon_calendar_days=horizon_calendar_days,
         evaluated_at=evaluated_at,
         evaluation_date=evaluated_at.date(),
         price_at_evaluation=Decimal("1010"),
@@ -619,6 +624,31 @@ def test_excess_return_just_above_threshold_does_not_trigger_reason_code(aws_env
     outcome = service.run(_RUN_AT)
 
     assert outcome.candidates_detected == 0
+
+
+# --- evaluation_horizon_days設定値の反映(レビュー指摘③) ---------------------
+
+
+def test_only_evaluations_matching_configured_horizon_are_aggregated(aws_env, repos) -> None:
+    """evaluation_horizon_daysを10へ変更した場合、同じ対象週内であっても
+    horizon_calendar_days=7の評価結果は集計対象から除外され、10のものだけが
+    週次集計に使われること(ハードコードされた7を使わない)。"""
+    period_start, _, _ = _resolve_review_period(_RUN_AT)
+    mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
+    repos["recommendation"].save(_recommendation("r7", RecommendationType.BUY, "v1", mid_week))
+    repos["evaluation"].save(
+        _evaluation("e7", "r7", EvaluationLabel.SUCCESS, mid_week, horizon_calendar_days=7)
+    )
+    repos["recommendation"].save(_recommendation("r10", RecommendationType.BUY, "v1", mid_week))
+    repos["evaluation"].save(
+        _evaluation("e10", "r10", EvaluationLabel.SUCCESS, mid_week, horizon_calendar_days=10)
+    )
+
+    service = _build_service(repos, evaluation_horizon_days=10)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.total_evaluation_results == 1
+    assert outcome.joined_count == 1
 
 
 # --- join欠損の監査記録 ---------------------------------------------------

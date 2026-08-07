@@ -210,11 +210,18 @@ class GithubIssueClient:
         マーカー(<!-- improvement_candidate_key: XXX -->)で既存Issueを検索する
         (通常時の主たる冪等制御はDynamoDB側が担う、このメソッドはあくまで
         「GitHubには作成済みだがDynamoDB更新だけ失敗した」場合の復旧用)。
+
+        Closed Issueは復旧対象に含めない(Closed後の再発は新規Issue作成の扱いと
+        するため、決定事項12参照)。検索クエリ自体もis:openで絞り込んだうえで、
+        Search APIのインデックス反映遅延を考慮し、返ってきた各itemのstateも
+        念のため確認する。
         """
-        query = {"q": f'repo:{self._owner}/{self._repo} is:issue label:{label} "{marker}"'}
+        query = {
+            "q": f'repo:{self._owner}/{self._repo} is:issue is:open label:{label} "{marker}"'
+        }
         data = self._authed_request("GET", "/search/issues", now, query=query)
         for item in data.get("items", []):
-            if marker in (item.get("body") or ""):
+            if item.get("state") == "open" and marker in (item.get("body") or ""):
                 return self._to_issue(item)
         return None
 
@@ -241,8 +248,22 @@ class GithubIssueClient:
         self, issue_number: int, marker: str, now: dt.datetime
     ) -> bool:
         """stale comment claim復旧専用。指定Issueのコメント一覧からマーカーが
-        既に投稿されているかを確認する。"""
-        data = self._authed_request(
-            "GET", f"/repos/{self._owner}/{self._repo}/issues/{issue_number}/comments", now
-        )
-        return any(marker in (item.get("body") or "") for item in data)
+        既に投稿されているかを確認する。
+
+        長期間運用されるIssueはコメント数がper_page(100)を超えうるため、
+        マーカーが見つかるまで次ページを取得する。見つかり次第即座に打ち切り、
+        GitHub API呼び出し回数を最小限にする。
+        """
+        page = 1
+        while True:
+            data = self._authed_request(
+                "GET",
+                f"/repos/{self._owner}/{self._repo}/issues/{issue_number}/comments",
+                now,
+                query={"per_page": "100", "page": str(page)},
+            )
+            if any(marker in (item.get("body") or "") for item in data):
+                return True
+            if len(data) < 100:
+                return False
+            page += 1
