@@ -12,6 +12,7 @@ RECENTLY_REPORTEDの判定は、実際の決算発表日ではなく取得でき
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass
 
 from jstock_advisor.config.models import EarningsWindowRulesConfig
@@ -27,6 +28,8 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.jst import JST, require_timezone_aware, to_jst
 from jstock_advisor.interfaces.types import FinancialSummary
+
+logger = logging.getLogger(__name__)
 
 _BUY_LIKE = (RecommendationType.BUY, RecommendationType.WATCH_BUY)
 _PROFIT_TAKE_LIKE = (RecommendationType.PARTIAL_PROFIT_TAKE, RecommendationType.FULL_PROFIT_TAKE)
@@ -131,7 +134,9 @@ def resolve_latest_financial_period_end(
     RECENT_PERIODSは廃止)。recent_quartersに有効値があるのに
     recent_periods_source=UNAVAILABLEというデータ不整合が発生した場合は、
     period_end自体は引き続き有効な最大値を使いつつ(DATA_UPDATED判定条件は
-    変更しない)、由来ラベルのみ安全側のUNKNOWNとする。
+    変更しない)、由来ラベルのみ安全側のUNKNOWNとする。このデータ不整合は
+    通常運用では発生しないはずのため、監査ログとは別にwarningログを出す
+    (運用監視対応)。
     """
     valid_quarter_ends = [
         q.quarter_end for q in financial.recent_quarters if q.quarter_end <= evaluation_date
@@ -142,7 +147,22 @@ def resolve_latest_financial_period_end(
         elif financial.recent_periods_source == RecentPeriodsSource.ANNUAL_FALLBACK:
             source = FinancialPeriodEndSource.RECENT_ANNUAL_FALLBACK
         else:
+            # 通常運用では発生しない内部データ不整合(recent_quartersに有効値が
+            # あるのに由来がQUARTERLY/ANNUAL_FALLBACKのいずれでもない)。
+            # period_end自体は引き続き有効な最大値を使い判定は継続する
+            # (raiseしない)が、CloudWatch等から能動的に検知できるようwarningを
+            # 残す(監査ログのfinancial_period_end_source=UNKNOWNとは別目的)。
             source = FinancialPeriodEndSource.UNKNOWN
+            logger.warning(
+                "financial_period_source_inconsistent: stock_code=%s "
+                "recent_periods_source=%s recent_periods_count=%d "
+                "resolved_period_end=%s evaluation_date=%s",
+                financial.stock_code,
+                financial.recent_periods_source.value,
+                len(financial.recent_quarters),
+                max(valid_quarter_ends).isoformat(),
+                evaluation_date.isoformat(),
+            )
         return ResolvedFinancialPeriodEnd(period_end=max(valid_quarter_ends), source=source)
     if financial.fiscal_period_end is not None and financial.fiscal_period_end <= evaluation_date:
         return ResolvedFinancialPeriodEnd(
