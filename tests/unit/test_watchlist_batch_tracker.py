@@ -11,6 +11,7 @@ import datetime as dt
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from jstock_advisor.infrastructure.aws import batch_tracker
@@ -803,3 +804,137 @@ def test_create_missing_candidate_progress_rows_scales_to_full_market_without_40
     import json
 
     assert len(json.dumps(batch_item, default=str).encode("utf-8")) < 10_000
+
+
+# --- 本番運用ハードニング(2026-08-07): TransactionConflictException対応 -----------
+# 本番のウォッチリスト自動追加パイプラインで、並行Worker実行下でcomplete_candidateの
+# TransactWriteItemsとtry_finalize_if_ready等の単純UpdateItemが同一BatchRunsTable
+# 項目へほぼ同時にアクセスし、TransactionConflictExceptionが未捕捉のままLambda
+# 呼び出し自体が失敗する事象が発生した(SQS再送により最終的にバッチ自体は正常完了)。
+# ConditionalCheckFailedExceptionのみを捕捉していた全箇所を
+# _TRANSACTION_CONDITION_FAILURE_CODES経由の判定へ統一したため、その回帰を確認する。
+# 実DynamoDB(moto)では真の並行競合を再現できないため、_table/_progress_table/
+# boto3.clientをスタブ化してClientErrorを注入する。
+
+
+class _ConflictRaisingTable:
+    """update_itemを呼ぶと常に指定コードのClientErrorを送出するスタブ。"""
+
+    def __init__(self, code: str) -> None:
+        self._code = code
+
+    def update_item(self, **_kwargs):
+        raise ClientError({"Error": {"Code": self._code, "Message": "conflict"}}, "UpdateItem")
+
+
+class _ConflictRaisingDynamoClient:
+    """transact_write_itemsを呼ぶと常に指定コードのClientErrorを送出するスタブ。"""
+
+    def __init__(self, code: str) -> None:
+        self._code = code
+
+    def transact_write_items(self, **_kwargs):
+        raise ClientError(
+            {"Error": {"Code": self._code, "Message": "conflict"}}, "TransactWriteItems"
+        )
+
+
+# batch_id配下のBatchRunsTable項目に対しUpdateItemを行う排他制御関数群
+# (try_finalize_if_readyが実際に本番でTransactionConflictExceptionを observed した箇所)。
+_BATCH_RUNS_TABLE_CALLS: list[tuple[str, tuple]] = [
+    ("try_acquire_dispatch_lease", ("batch-1", "owner-a", _NOW, 360, 72)),
+    ("mark_dispatch_completed", ("batch-1", _NOW)),
+    ("mark_dispatch_failed", ("batch-1", _NOW)),
+    ("try_finalize_if_ready", ("batch-1", _NOW)),
+    ("try_retry_finalize", ("batch-1",)),
+    ("mark_finalizing_stuck_as_failed", ("batch-1", _NOW, 30)),
+    ("record_finalize_target", ("batch-1", _NOW, ["1301"], "[]")),
+    ("mark_watchlist_write_completed", ("batch-1", _NOW)),
+    ("record_notification_pending", ("batch-1", _NOW, "hash")),
+    ("record_notification_resolved", ("batch-1", _NOW, [], "SENT")),
+    ("try_retry_notification", ("batch-1", _NOW)),
+    ("try_operator_abort", ("batch-1", "reason", _NOW)),
+    ("try_acquire_timeout_finalization", ("batch-1",)),
+    ("set_timeout_finalize_completed_count", ("batch-1", 1, _NOW)),
+    ("transition_timeout_finalizing_to_timed_out", ("batch-1", _NOW)),
+    ("transition_timeout_finalizing_to_failed", ("batch-1", _NOW, "reason")),
+]
+
+# WatchlistCandidateProgressTable項目に対しUpdateItemを行う排他制御関数群。
+_PROGRESS_TABLE_CALLS: list[tuple[str, tuple]] = [
+    ("mark_candidate_dispatched", ("batch-1", "1301", _NOW)),
+    ("claim_candidate_lease", ("batch-1", "1301", "owner-a", _NOW, 180)),
+    ("_try_mark_row_timed_out", ("batch-1", "1301", _NOW)),
+]
+
+
+@pytest.mark.parametrize("func_name, args", _BATCH_RUNS_TABLE_CALLS)
+def test_batch_runs_table_functions_treat_transaction_conflict_as_expected_contention(
+    monkeypatch: pytest.MonkeyPatch, func_name: str, args: tuple
+) -> None:
+    """TransactionConflictExceptionはConditionalCheckFailedExceptionと同様、想定内の
+    競合として扱われ(再送出せず)呼び出し元へ制御を返すこと(本番incidentの回帰確認)。"""
+    monkeypatch.setattr(
+        batch_tracker, "_table", lambda: _ConflictRaisingTable("TransactionConflictException")
+    )
+    func = getattr(batch_tracker, func_name)
+    result = func(*args)
+    assert result in (False, None)
+
+
+@pytest.mark.parametrize("func_name, args", _PROGRESS_TABLE_CALLS)
+def test_progress_table_functions_treat_transaction_conflict_as_expected_contention(
+    monkeypatch: pytest.MonkeyPatch, func_name: str, args: tuple
+) -> None:
+    monkeypatch.setattr(
+        batch_tracker,
+        "_progress_table",
+        lambda: _ConflictRaisingTable("TransactionConflictException"),
+    )
+    func = getattr(batch_tracker, func_name)
+    result = func(*args)
+    assert result in (False, None)
+
+
+def test_complete_candidate_treats_transaction_conflict_as_expected_contention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        batch_tracker.boto3,
+        "client",
+        lambda *_a, **_k: _ConflictRaisingDynamoClient("TransactionConflictException"),
+    )
+    ok = batch_tracker.complete_candidate(
+        "batch-1",
+        "1301",
+        "owner-a",
+        terminal_status=WatchlistProgressStatus.COMPLETED,
+        evaluation_result="PASSED",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+    assert ok is False
+
+
+def test_record_terminal_failure_treats_transaction_conflict_as_expected_contention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        batch_tracker.boto3,
+        "client",
+        lambda *_a, **_k: _ConflictRaisingDynamoClient("TransactionConflictException"),
+    )
+    ok = batch_tracker.record_terminal_failure("batch-1", "1301", _NOW)
+    assert ok is False
+
+
+def test_unrelated_client_error_still_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本修正が競合系コード以外(例: ValidationException)まで握りつぶさないことの回帰。"""
+    monkeypatch.setattr(
+        batch_tracker, "_table", lambda: _ConflictRaisingTable("ValidationException")
+    )
+    with pytest.raises(ClientError):
+        batch_tracker.try_finalize_if_ready("batch-1", _NOW)
