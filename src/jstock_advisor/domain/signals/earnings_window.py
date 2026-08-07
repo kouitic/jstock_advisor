@@ -21,9 +21,11 @@ from jstock_advisor.domain.entities.enums import (
     EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsWindowStatus,
+    FinancialPeriodEndSource,
     RecommendationType,
 )
 from jstock_advisor.domain.jst import JST, require_timezone_aware, to_jst
+from jstock_advisor.interfaces.types import FinancialSummary
 
 _BUY_LIKE = (RecommendationType.BUY, RecommendationType.WATCH_BUY)
 _PROFIT_TAKE_LIKE = (RecommendationType.PARTIAL_PROFIT_TAKE, RecommendationType.FULL_PROFIT_TAKE)
@@ -95,10 +97,51 @@ def recommend_earnings_aware_action(
     return base_recommendation
 
 
+@dataclass(frozen=True)
+class ResolvedFinancialPeriodEnd:
+    """決算反映確認に使う最新財務期間末の解決結果(デプロイ前対応)。"""
+
+    period_end: dt.date | None
+    source: FinancialPeriodEndSource
+
+
+def resolve_latest_financial_period_end(
+    financial: FinancialSummary,
+    evaluation_date: dt.date,
+) -> ResolvedFinancialPeriodEnd:
+    """決算反映確認に使う最新の財務期間末を解決する(デプロイ前対応)。
+
+    FinancialSummary.fiscal_period_endは年次決算期末を表す(interfaces/types.py
+    参照)。四半期ごとの決算発表の反映確認にはrecent_quarters内の実際の期末日の
+    うち最新のものを優先する。recent_quartersが取得できない場合のみ年次期末
+    (fiscal_period_end)へフォールバックする(この場合、年次決算より後に発表
+    された四半期決算の反映は検知できない制約がある。QuarterlyFinancialsに
+    四半期/年次を区別するフィールドは無いため、この関数のフォールバック規則が
+    その代替となる)。
+
+    Provider異常・yfinanceレスポンス変更等で評価日より未来のperiod_endが
+    混入した場合に、それを決算反映済みの証拠として採用しないよう、評価日
+    (JST)以前の値のみを候補とする。
+    """
+    valid_quarter_ends = [
+        q.quarter_end for q in financial.recent_quarters if q.quarter_end <= evaluation_date
+    ]
+    if valid_quarter_ends:
+        return ResolvedFinancialPeriodEnd(
+            period_end=max(valid_quarter_ends), source=FinancialPeriodEndSource.RECENT_PERIODS
+        )
+    if financial.fiscal_period_end is not None and financial.fiscal_period_end <= evaluation_date:
+        return ResolvedFinancialPeriodEnd(
+            period_end=financial.fiscal_period_end,
+            source=FinancialPeriodEndSource.ANNUAL_FISCAL_PERIOD_END,
+        )
+    return ResolvedFinancialPeriodEnd(period_end=None, source=FinancialPeriodEndSource.UNAVAILABLE)
+
+
 def resolve_earnings_release_confirmation(
     earnings_date_status: EarningsDateStatus,
     earnings_date_raw: dt.date | None,
-    fiscal_period_end: dt.date,
+    latest_financial_period_end: dt.date | None,
     financial_fetched_at: dt.datetime,
     now: dt.datetime,
     config: EarningsWindowRulesConfig,
@@ -110,16 +153,19 @@ def resolve_earnings_release_confirmation(
     (前者は既存のapproaching_window/profit_taking_suppressionロジックが
     別途担当、後者は判断材料が無いため安全側で通常判定を止めない)。
 
-    「財務データが決算発表を反映したか」は、fiscal_period_endが決算予定日
+    「財務データが決算発表を反映したか」は、latest_financial_period_endが決算予定日
     (earnings_date_raw)からの想定報告ラグ(fiscal_period_reporting_lag_days)
     以内かどうかで近似する。EarningsWindowStatus.RECENTLY_REPORTEDと同種の
     近似判定であり、決算発表日そのものの厳密な突合ではない。
+    latest_financial_period_endはresolve_latest_financial_period_end()の
+    戻り値(.period_end)を渡すこと(四半期実績を優先した解決済みの値。
+    FinancialSummary.fiscal_period_end(年次)をそのまま渡さない)。
 
     --- デプロイ前対応で追加 ---
     financial_fetched_at(財務データ取得元のfetched_at)は、無償Provider
     (yfinance)ではAPI呼び出し時刻でしかなく、決算発表が実際に反映された
     証拠にはならない(前回値を永続化して比較する仕組みも今回は追加しない)。
-    そのため、決算予定日より前に取得したデータのfiscal_period_endが
+    そのため、決算予定日より前に取得したデータのlatest_financial_period_endが
     たまたま報告ラグ条件を満たしていても、それだけではDATA_UPDATEDとしない
     (=決算予定日以後に取得したデータであることを最低条件として追加する)。
     """
@@ -130,7 +176,11 @@ def resolve_earnings_release_confirmation(
 
     lag = dt.timedelta(days=config.fiscal_period_reporting_lag_days)
     fetched_after_earnings_date = to_jst(financial_fetched_at).date() >= earnings_date_raw
-    if fiscal_period_end >= earnings_date_raw - lag and fetched_after_earnings_date:
+    if (
+        latest_financial_period_end is not None
+        and latest_financial_period_end >= earnings_date_raw - lag
+        and fetched_after_earnings_date
+    ):
         return EarningsReleaseConfirmationState.DATA_UPDATED
 
     # 確認待ちの起点は決算予定日の翌日JST 00:00とする(予定日当日はまだ

@@ -444,6 +444,20 @@ class EarningsDecisionRelevance(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class FinancialPeriodEndSource(StrEnum):
+    """決算反映確認に使った最新財務期間末の由来(デプロイ前対応)。
+
+    FinancialSummary.fiscal_period_endは年次決算期末を表すため、四半期ごとの
+    決算発表の反映確認にはrecent_quarters由来の期末日を優先する。将来誤判定が
+    発生した際に、四半期実績由来か年次フォールバックか取得不能だったかを
+    監査ログから追跡できるようにするための区分。
+    """
+
+    RECENT_PERIODS = "RECENT_PERIODS"
+    ANNUAL_FISCAL_PERIOD_END = "ANNUAL_FISCAL_PERIOD_END"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 class TriggerStatus(StrEnum):
     """売却ルール1件ごとの該当有無を表現する(2026-07仕様§3、レビュー対応で拡張)。
 
