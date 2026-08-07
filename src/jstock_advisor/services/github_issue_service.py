@@ -170,6 +170,11 @@ def process_candidate(
 
     try:
         return _process_with_client(client, candidate, review_week, now, config)
+    except GithubConfigurationError:
+        # private_keyのPEM形式不正等、GitHub Client実行時に判明する設定不備
+        # (Secret読込時点では検出できない)もCONFIGURATION_ERRORへ分類する。
+        tracker.mark_configuration_error(candidate.candidate_key, now)
+        return ImprovementTaskStatus.CONFIGURATION_ERROR
     except GithubApiError:
         tracker.mark_issue_creation_failed(candidate.candidate_key, now)
         return ImprovementTaskStatus.ISSUE_CREATION_FAILED
