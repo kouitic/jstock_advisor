@@ -4,6 +4,10 @@
 定義された営業日数が経過した時点の株価実績を計測し、EvaluationResultとして保存する。
 未経過のホライズンはスキップし、既に評価済みのホライズンは再評価しない。
 
+振り返り機能改修(週次改善レビュー)で、営業日ベースとは別軸のJST暦日ベース
+ホライズン(既定7暦日、run_due_calendar_evaluations)を追加した。EvaluationResultの
+horizon_business_days/horizon_calendar_daysはどちらか一方のみが設定される。
+
 配当・手数料等を含む正確な総合リターン(total_return_pct)の算出には、期間中の
 配当受取実績の追跡が必要となるため、MVPでは株価ベースのリターンのみを算出する
 (total_return_amount/total_return_pctはNoneのまま。要求仕様12節「推測で補完しない」
@@ -23,6 +27,7 @@ from jstock_advisor.domain.entities.enums import RecommendationType
 from jstock_advisor.domain.entities.evaluation import EvaluationResult
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.evaluation_rules import determine_evaluation_label
+from jstock_advisor.domain.jst import evaluation_date_jst, require_timezone_aware, to_jst
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
     EvaluationResultRepository,
 )
@@ -33,6 +38,9 @@ from jstock_advisor.interfaces.market_data import MarketDataProvider
 from jstock_advisor.interfaces.types import PriceBar
 
 DEFAULT_BENCHMARK_SYMBOL = "TOPIX"
+# 振り返り機能改修(週次改善レビュー)で使うJST暦日ベースの既定ホライズン。
+# config/review_improvement.yamlのevaluation_horizon_daysと一致させること。
+_CALENDAR_HORIZON_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -75,6 +83,27 @@ class RecommendationEvaluationService:
             self._evaluate_due_horizons(recommendation, now, outcome)
         return outcome
 
+    def run_due_calendar_evaluations(
+        self, now: dt.datetime, horizon_days: int = _CALENDAR_HORIZON_DAYS
+    ) -> EvaluationRunOutcome:
+        """振り返り機能改修: JST暦日ベースの定点評価(既定7暦日後)を実行する。
+
+        既存の営業日ベース評価(run_due_evaluations)とは別軸のホライズンであり、
+        週次改善レビュー(weekly_improvement_review_service)の分析対象データを
+        作る目的で全RecommendationTypeを対象に実行する。JST境界バグ(now.date()を
+        UTC-aware datetimeへ直接呼ぶと深夜0時〜9時の間に前日扱いされる不具合、
+        決算日修正で確立済みの原則)を避けるため、domain.jstのto_jst/
+        evaluation_date_jst経由でのみ暦日を扱う。
+        """
+        require_timezone_aware(now)
+        today_jst = evaluation_date_jst(now)
+        outcome = EvaluationRunOutcome()
+        for recommendation in self._recommendations.list_all():
+            self._evaluate_due_calendar_horizon(
+                recommendation, horizon_days, now, today_jst, outcome
+            )
+        return outcome
+
     def _horizons_for(self, recommendation_type: RecommendationType) -> list[int]:
         horizons_cfg = self._config.schedule.evaluation_horizons_business_days
         specific = horizons_cfg.get(recommendation_type.value, [])
@@ -94,7 +123,9 @@ class RecommendationEvaluationService:
             if self._evaluations.exists_for_horizon(recommendation.recommendation_id, horizon):
                 continue
 
-            result = self._evaluate_one(recommendation, horizon, evaluation_date, now)
+            result = self._evaluate_one(
+                recommendation, evaluation_date, now, horizon_business_days=horizon
+            )
             if result is None:
                 outcome.skipped_due_to_data_error.append(
                     (
@@ -107,12 +138,46 @@ class RecommendationEvaluationService:
             self._evaluations.save(result)
             outcome.evaluated.append(result)
 
+    def _evaluate_due_calendar_horizon(
+        self,
+        recommendation: Recommendation,
+        horizon_days: int,
+        now: dt.datetime,
+        today_jst: dt.date,
+        outcome: EvaluationRunOutcome,
+    ) -> None:
+        recommendation_date_jst = to_jst(recommendation.recommended_at).date()
+        target_evaluation_date = recommendation_date_jst + dt.timedelta(days=horizon_days)
+        if target_evaluation_date > today_jst:
+            return
+        if self._evaluations.exists_for_calendar_horizon(
+            recommendation.recommendation_id, horizon_days
+        ):
+            return
+
+        result = self._evaluate_one(
+            recommendation, target_evaluation_date, now, horizon_calendar_days=horizon_days
+        )
+        if result is None:
+            outcome.skipped_due_to_data_error.append(
+                (
+                    recommendation.stock_code,
+                    horizon_days,
+                    "評価時点の株価データが取得できませんでした",
+                )
+            )
+            return
+        self._evaluations.save(result)
+        outcome.evaluated.append(result)
+
     def _evaluate_one(
         self,
         recommendation: Recommendation,
-        horizon: int,
         evaluation_date: dt.date,
         now: dt.datetime,
+        *,
+        horizon_business_days: int | None = None,
+        horizon_calendar_days: int | None = None,
     ) -> EvaluationResult | None:
         start = recommendation.recommended_at.date()
         history = self._market_data.get_price_history(
@@ -161,7 +226,8 @@ class RecommendationEvaluationService:
         return EvaluationResult(
             evaluation_id=str(uuid.uuid4()),
             recommendation_id=recommendation.recommendation_id,
-            horizon_business_days=horizon,
+            horizon_business_days=horizon_business_days,
+            horizon_calendar_days=horizon_calendar_days,
             evaluated_at=now,
             evaluation_date=evaluation_date,
             price_at_evaluation=price_at_evaluation,

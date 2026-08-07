@@ -63,6 +63,7 @@ Copy-Item .env.example .env
 | `notification_rules.yaml` | LINE再通知条件 |
 | `data_validation_rules.yaml` | データ出典間の乖離許容閾値 |
 | `evaluation_rules.yaml` | 定点評価のラベル判定閾値 |
+| `review_improvement.yaml` | 週次改善レビューの対象期間・改善候補の基準・GitHub Issue自動起票の有効/無効(5.1節) |
 
 これらの値を変更する場合は、原則として第7節の「ルール改善承認フロー」を経てください
 (直接編集での即時反映も技術的には可能ですが、変更履歴・根拠が記録されなくなります)。
@@ -267,20 +268,84 @@ watchlist_auto_addition_repository_result`のAuditLogに、`batch_id`ごとに
 
 ## 5. 週次・月次・四半期レビュー
 
-| 頻度 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 |
-|---|---|---|---|
-| 週次(土09:00) | `weekly_review` | `jstock review report --notify` | `WeeklyReviewFunction` |
-| 月次(第1土10:00) | `monthly_review` | `jstock review report --notify`(全ホライズン合算)<br>必要に応じ `jstock performance summary --horizon <N>` で特定ホライズンを確認 | `MonthlyReviewFunction` |
-| 四半期(1,4,7,10月第1土11:00) | `quarterly_logic_review` | 第7節「ルール改善承認フロー」を参照 | `QuarterlyReviewFunction`(★LINEでリマインドを送るのみ。提案の自動生成はしない) |
+**2026-08 振り返り機能改修**: 従来の週次・月次の全期間合算成績レポート自動送信、
+四半期の固定リマインド送信は廃止した。詳細はdocs/functional_spec.md 12.4節参照。
 
-ローカルCLIには「当月第1土曜日か」を判定する処理はありません(実行タイミングは
-利用者が手動判断してください)。AWS Lambda版(`MonthlyReviewFunction`/
-`QuarterlyReviewFunction`)は毎週土曜に起動したうえで、`lambda_handlers/_scheduling.py`が
-当月第1土曜日かどうかを内部判定し、該当しない場合は何もせず終了します。
-`QuarterlyReviewFunction`はルール改善提案(リスク影響・過学習リスク評価等の自由記述を
-要する)を自動生成しません(要求仕様45節の人間承認必須の原則のため)。レビュー時期が
-来たことをLINEで知らせるのみで、実際の`rules backtest`/`rules propose`は利用者が
-手動で実行してください。
+| 頻度 | schedule.yamlのジョブ | 対応Lambda関数 | 挙動 |
+|---|---|---|---|
+| 週次(月19:00) | `weekly_review` | `WeeklyReviewFunction` | 前週(月〜日 JST)に確定した7暦日評価を分析し、改善候補を検出。GitHub Issue作成成功時のみLINE通知(5.1節) |
+| 月次(第1土10:00) | `monthly_review` | `MonthlyReviewFunction` | 内部記録(ログ)のみ。LINE送信なし |
+| 四半期(1,4,7,10月第1土11:00) | `quarterly_logic_review` | `QuarterlyReviewFunction` | 内部記録(ログ)のみ。LINE送信なし |
+
+全期間合算の成績を手動で確認したい場合は、引き続き
+`jstock review report --notify`(LINE送信)または`jstock review report`
+(標準出力のみ)を使う。必要に応じ`jstock performance summary --horizon <N>`で
+特定ホライズンのみ確認できる。
+
+ローカルCLIには「当月第1土曜日か」を判定する処理はありません。AWS Lambda版
+(`MonthlyReviewFunction`/`QuarterlyReviewFunction`)は毎週土曜に起動したうえで、
+`lambda_handlers/_scheduling.py`が当月第1土曜日かどうかを内部判定し、
+戻り値(`is_monthly_review_day`/`is_quarterly_review_day`)に含めるが、
+いずれの場合もLINE送信は行わない。`QuarterlyReviewFunction`はルール改善提案
+(リスク影響・過学習リスク評価等の自由記述を要する)を自動生成しない
+(要求仕様45節の人間承認必須の原則のため)。実際の`rules backtest`/
+`rules propose`は利用者が手動で実行すること(第7節参照)。
+
+### 5.1 GitHub Issue自動起票の設定(振り返り機能改修、2026-08追加)
+
+週次改善レビュー(`WeeklyReviewFunction`)は、改善候補が十分な証拠とともに
+検出された場合にGitHub Issueを自動作成する。この機能を有効化するには、
+以下の手順が必要(**GitHub App本体の作成・インストールは本システムが
+代行できないため、必ず利用者自身がGitHub UI上で行うこと**)。
+
+1. GitHub Developer Settingsで新しいGitHub Appを作成する。権限は最小限
+   (`Repository permissions > Issues: Read and write`、
+   `Repository permissions > Metadata: Read-only`)のみ付与する
+   (`Contents`等の書き込み権限は不要。本機能はコードを書き換えない)。
+2. 対象リポジトリへこのGitHub Appをインストールする(Installation IDが
+   発行される)。
+3. GitHub Appの秘密鍵(.pemファイル)を生成・ダウンロードする。
+4. AWS Secrets Managerへ、以下のJSON形式でシークレットを作成する
+   (キー名は固定):
+   ```bash
+   aws secretsmanager create-secret \
+     --name jstock/github-app \
+     --secret-string '{"app_id":"<App ID>","installation_id":"<Installation ID>","private_key":"<.pemファイルの中身をそのまま>"}'
+   ```
+5. 作成したシークレットのARNを`infra/samconfig.toml`の
+   `parameter_overrides`へ`GithubAppSecretArn="<ARN>"`として追加し、
+   対象リポジトリ("owner/repo"形式)を`GithubRepository="<owner>/<repo>"`
+   として追加する。
+6. `config/review_improvement.yaml`の`issue_creation_enabled`を`false`から
+   `true`へ変更する。
+7. `sam build && sam deploy`で再デプロイする(**重要**:
+   `config/review_improvement.yaml`はLambda Layer経由で配布される静的設定
+   ファイルであり、YAML編集だけでは反映されない。必ず再デプロイが必要)。
+
+上記1〜7が完了するまでの間は、`issue_creation_enabled=false`のままで安全に
+運用できる(GitHub API・Secrets Managerへは一切アクセスせず、改善候補の検出・
+内部記録のみ継続する。エラー扱いにも運用エラー通知にもならない)。
+
+**動作確認・トラブルシューティング**: 改善候補・Issue対応状況はDynamoDBへ
+直接記録される(CLIは今回未整備)。
+```bash
+# その週に検出された改善候補一覧
+aws dynamodb scan --table-name jstock-improvement_candidates
+
+# candidate_key単位のGitHub Issue対応状況(status: CANDIDATE/
+# SKIPPED_NOT_CONFIGURED/CONFIGURATION_ERROR/ISSUE_CREATING/ISSUE_CREATED/
+# ISSUE_CREATION_FAILED)
+aws dynamodb scan --table-name jstock-improvement_tasks
+
+# 週次の実績集計(Candidateの有無に関わらず毎週保存される)
+aws dynamodb scan --table-name jstock-weekly_review_metrics
+```
+`status=CONFIGURATION_ERROR`が継続する場合、Secrets Managerの値
+(app_id/installation_id/private_keyの3項目すべて)・GitHub App権限
+(Issues: Read and write)・`GithubRepository`パラメータの"owner/repo"形式を
+確認すること。`status=ISSUE_CREATION_FAILED`はGitHub API側の一時的な障害
+(5xx・タイムアウト・レート制限等)の可能性が高く、翌週の週次レビューで
+自動的に再試行される。
 
 ---
 
@@ -353,9 +418,16 @@ jstock rules activate-version v2-mvp
 
 ```bash
 jstock audit show <銘柄コード>                 # 判定の入力値・計算式・出力値・出典を確認
-jstock evaluation list --recommendation-id <推奨ID>  # 定点評価結果の確認
+jstock evaluation list --recommendation-id <推奨ID>  # 定点評価結果の確認(暦日7日評価も同コマンドで確認できる)
 jstock feedback add --recommendation-id <推奨ID> --satisfaction-score 4
 ```
+
+週次改善レビュー(5.1節)は`decision_type=weekly_improvement_review`として
+AuditLogへ毎週1件記録される(対象件数・joinできた件数・
+`weekly_review_recommendation_missing_count`等の欠損件数・検出したCandidate数・
+GitHub連携の結果内訳を含む)。`jstock audit show`は銘柄コード単位の検索のため、
+週次レビューの監査ログはDynamoDB(`jstock-audit_log`テーブル)を
+`decision_type`でフィルタするか、直接スキャンして確認すること。
 
 ---
 

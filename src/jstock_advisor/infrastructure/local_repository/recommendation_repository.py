@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jstock_advisor.domain.entities.enums import RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
@@ -35,3 +36,13 @@ class RecommendationRepository:
     def latest_by_stock(self, stock_code: str) -> Recommendation | None:
         items = self.list_by_stock(stock_code)
         return items[-1] if items else None
+
+    def get_latest_by_type(
+        self, recommendation_type: RecommendationType
+    ) -> Recommendation | None:
+        """振り返り機能改修: 「現在有効なrule_version」の解決(resolve_current_rule_version)で、
+        正式なRuleVersion.ACTIVE版が無い場合のfallbackとして使う。当該
+        RecommendationTypeのうちrecommended_atが最新の1件を返す(無ければNone)。
+        """
+        items = self._store.find(lambda r: r.recommendation_type == recommendation_type)
+        return max(items, key=lambda r: r.recommended_at) if items else None

@@ -30,5 +30,14 @@ class EvaluationResultRepository:
             for e in self._store.list_all()
         )
 
+    def exists_for_calendar_horizon(
+        self, recommendation_id: str, horizon_calendar_days: int
+    ) -> bool:
+        return any(
+            e.recommendation_id == recommendation_id
+            and e.horizon_calendar_days == horizon_calendar_days
+            for e in self._store.list_all()
+        )
+
     def save(self, evaluation: EvaluationResult) -> None:
         self._store.upsert(evaluation)

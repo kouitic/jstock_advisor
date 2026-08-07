@@ -24,6 +24,15 @@ _EXIT_TYPES = (
 _PROFIT_TAKE_TYPES = (RecommendationType.PARTIAL_PROFIT_TAKE, RecommendationType.FULL_PROFIT_TAKE)
 
 
+def is_performance_evaluated_type(recommendation_type: RecommendationType) -> bool:
+    """determine_evaluation_label()がSUCCESS/ACCEPTABLE等の実質的な成績ラベルを
+    付与しうる種別(=INCONCLUSIVE以外になりうる種別)かどうかを返す。振り返り
+    機能改修の週次改善レビューが、成功率ベースの閾値判定(業績系)と
+    評価定義未整備系(常にINCONCLUSIVE)のどちらの経路を使うか判定するために使う。
+    """
+    return recommendation_type in _ENTRY_TYPES or recommendation_type in _EXIT_TYPES
+
+
 def determine_evaluation_label(
     recommendation_type: RecommendationType,
     price_return_pct: float | None,

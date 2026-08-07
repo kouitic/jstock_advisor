@@ -1,7 +1,11 @@
 """月次レビューLambda(schedule.yaml monthly_review、第1土曜10:00)。
 
-EventBridge Schedulerは「毎週土曜」のcronで起動する想定とし、当月第1土曜日
-でなければ何もせず終了する(当初設計の方針通り、序数判定をLambda側で行う)。
+振り返り機能改修: 「ユーザーにアクションが必要な場合のみLINE通知する」という
+方針(週次改善レビュー、weekly_review_handler.py)と矛盾するため、従来の
+全期間合算レポートの自動LINE送信(ReviewReportService.send_report)は廃止した。
+月次の戦略レビュー機能そのものの新規構築は今回のスコープ外(要求仕様3節)のため、
+Lambda・スケジュール自体は残しつつ、内部記録(ログ)のみを行いLINEは送信しない。
+手動で全期間合算レポートを見たい場合は`jstock review report`CLIを使うこと。
 """
 
 from __future__ import annotations
@@ -10,9 +14,7 @@ import datetime as dt
 import logging
 from typing import Any
 
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.lambda_handlers._scheduling import is_first_saturday_of_month
-from jstock_advisor.services.review_report_service import ReviewReportService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -20,11 +22,10 @@ logger.setLevel(logging.INFO)
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     now = dt.datetime.now(dt.UTC)
-    if not is_first_saturday_of_month(now.date()):
-        logger.info("monthly_review_handler skipped: not first saturday")
-        return {"skipped": True}
-
-    service = ReviewReportService(line_client=build_line_client_from_env())
-    text = service.send_report(now=now)
-    logger.info("monthly_review_handler done")
-    return {"skipped": False, "report_length": len(text)}
+    is_monthly_review_day = is_first_saturday_of_month(now.date())
+    logger.info(
+        "monthly_review_handler: LINE通知は行わない(振り返り機能改修)。"
+        "is_monthly_review_day=%s",
+        is_monthly_review_day,
+    )
+    return {"skipped": True, "is_monthly_review_day": is_monthly_review_day}

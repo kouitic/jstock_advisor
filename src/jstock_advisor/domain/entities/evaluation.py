@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
+from pydantic import model_validator
+
 from jstock_advisor.domain.entities.base import Entity
 from jstock_advisor.domain.entities.enums import EvaluationLabel
 
@@ -12,9 +14,26 @@ from jstock_advisor.domain.entities.enums import EvaluationLabel
 class EvaluationResult(Entity):
     evaluation_id: str
     recommendation_id: str
-    horizon_business_days: int
+    # 既存の営業日ベースホライズン(horizon_business_days)と、振り返り機能改修で
+    # 追加したJST暦日ベースホライズン(horizon_calendar_days)は排他的であり、
+    # 1レコードにつき必ずどちらか一方のみを設定する(_validate_horizon参照)。
+    horizon_business_days: int | None = None
+    horizon_calendar_days: int | None = None
+    # evaluation_date: 評価基準日(ホライズンの到来日)。evaluated_at: 実際に処理が
+    # 成功しこの結果が確定した日時。株価取得失敗等により両者はずれることがある
+    # (振り返り機能改修で明確化。週次集計はevaluated_atを基準にする)。
     evaluated_at: dt.datetime
     evaluation_date: dt.date
+
+    @model_validator(mode="after")
+    def _validate_horizon(self) -> EvaluationResult:
+        business = self.horizon_business_days is not None
+        calendar = self.horizon_calendar_days is not None
+        if business == calendar:
+            raise ValueError(
+                "horizon_business_daysとhorizon_calendar_daysはどちらか一方のみ設定してください"
+            )
+        return self
 
     price_at_evaluation: Decimal
     price_return_pct: float

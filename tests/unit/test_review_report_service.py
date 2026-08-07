@@ -104,6 +104,50 @@ def test_build_report_text_includes_summary_and_proposal(
     assert "承認待ち" in text
 
 
+def test_build_report_text_shows_out_of_scope_instead_of_zero_percent(tmp_path: Path) -> None:
+    """WATCHのようにINCONCLUSIVEしか付かない種別は「0%」ではなく「評価対象外」と
+    表示すること(振り返り機能改修での回帰確認)。"""
+    rec_repo = RecommendationRepository(store_dir=tmp_path)
+    eval_repo = EvaluationResultRepository(store_dir=tmp_path)
+    rec_repo.save(
+        Recommendation(
+            recommendation_id="rec-watch",
+            stock_code="2914",
+            stock_name="test",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.WATCH,
+            price_at_recommendation=Decimal("1000"),
+            confidence=ConfidenceLevel.HIGH,
+            rule_version="v1",
+        )
+    )
+    eval_repo.save(
+        EvaluationResult(
+            evaluation_id="e-watch",
+            recommendation_id="rec-watch",
+            horizon_business_days=20,
+            evaluated_at=_NOW,
+            evaluation_date=_NOW.date(),
+            price_at_evaluation=Decimal("1100"),
+            price_return_pct=10.0,
+            evaluation_label=EvaluationLabel.INCONCLUSIVE,
+            label_evidence="x",
+        )
+    )
+    service = ReviewReportService(
+        performance_metrics_service=PerformanceMetricsService(
+            evaluation_repository=eval_repo, recommendation_repository=rec_repo
+        ),
+        rule_proposal_service=RuleProposalService(
+            proposal_repository=RuleProposalRepository(store_dir=tmp_path)
+        ),
+    )
+
+    text = service.build_report_text(now=_NOW)
+    assert "WATCH: 1件 成功率評価対象外" in text
+    assert "WATCH: 1件 成功率0.0%" not in text
+
+
 def test_send_report_requires_line_client(
     build_review_service: Callable[[LineClient | None], ReviewReportService],
 ) -> None:

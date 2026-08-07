@@ -16,7 +16,7 @@
 # below was added by hand so this file also resolves on Linux CI runners;
 # do not let a plain re-freeze on Windows silently drop that marker.
 #
-# Generated: 2026-08-04
+# Generated: 2026-08-07 (weekly improvement review revamp: added PyJWT==2.13.0)
 # Kept ASCII-only intentionally: some requirements-file parsers (used by CI
 # security/audit tooling) default to a non-UTF-8 codec on Windows and fail on
 # non-ASCII bytes in this file.
@@ -64,6 +64,7 @@ pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 Pygments==2.20.0
+PyJWT==2.13.0
 pytest==9.1.1
 pytest-cov==7.1.0
 python-dateutil==2.9.0.post0

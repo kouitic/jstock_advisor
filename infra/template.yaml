@@ -46,6 +46,24 @@ Parameters:
       null(全件処理)の週次バッチ開始を許可する。運用者が明示的に
       `--parameter-overrides AllowFullMarketScreening=true`を指定しない限り、
       全件処理は起動時に拒否される(段階導入の安全側デフォルトと対になる二重の安全策)。
+  GithubAppSecretArn:
+    Type: String
+    Default: "arn:aws:secretsmanager:ap-northeast-1:970547364058:secret:jstock/github-app-not-configured"
+    Description: >
+      振り返り機能改修(2026-08)。週次改善レビューのGitHub Issue自動起票に使う
+      GitHub App認証情報({"app_id","installation_id","private_key"}のJSON)を
+      保持するSecrets ManagerシークレットのARN。GitHub App作成・インストール・
+      Secrets登録完了までは、既定値(未作成のダミーARN)のままでよい
+      (config/review_improvement.yamlのissue_creation_enabled=falseにより、
+      このシークレットは実際には参照されない)。実際のARNへ差し替えたら
+      config/review_improvement.yamlをissue_creation_enabled: trueへ変更し
+      再デプロイすること。
+  GithubRepository:
+    Type: String
+    Default: ""
+    Description: >
+      振り返り機能改修(2026-08)。GitHub Issueを作成する対象リポジトリ
+      ("owner/repo"形式)。未設定の間はGitHub Issue自動起票を行わない。
 
 Globals:
   Function:
@@ -365,6 +383,47 @@ Resources:
           AttributeType: S
       KeySchema:
         - AttributeName: proposal_id
+          KeyType: HASH
+
+  # --- 振り返り機能改修(2026-08): 週次改善レビュー用テーブル3種 -------------
+
+  WeeklyReviewMetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-weekly_review_metrics"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: metrics_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: metrics_id
+          KeyType: HASH
+
+  ImprovementCandidatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-improvement_candidates"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: candidate_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: candidate_id
+          KeyType: HASH
+
+  ImprovementTasksTable:
+    # candidate_key単位で1件のみ存在し、複数週を跨いでGitHub Issue対応状況
+    # (ISSUE_CREATING等)を原子的に更新し続ける(infrastructure.aws.
+    # improvement_task_tracker.py参照)。
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-improvement_tasks"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: candidate_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: candidate_key
           KeyType: HASH
 
   UserFeedbackTable:
@@ -799,20 +858,43 @@ Resources:
               Mode: "OFF"
 
   WeeklyReviewFunction:
+    # 振り返り機能改修(2026-08): 全期間合算レポートのLINE自動送信(旧
+    # ReviewReportService経由)から、前週に確定した評価を分析し改善候補を検出・
+    # GitHub Issue自動起票する週次改善レビュー(WeeklyImprovementReviewService)へ
+    # 置き換えた。RuleProposalsTableは新ロジックでは参照しない(手動CLI
+    # `jstock rules propose`専用のまま)。
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-weekly-review"
       CodeUri: ../src/
       Handler: jstock_advisor.lambda_handlers.weekly_review_handler.handler
+      Environment:
+        Variables:
+          # GitHub App秘密鍵は環境変数へ直接展開せず、ARNのみを渡し実行時に
+          # secretsmanager:GetSecretValueで取得する(値そのものをログ・環境変数へ
+          # 残さないため)。GitHub App未設定の間はissue_creation_enabled=falseに
+          # より参照されない(config/review_improvement.yaml参照)。
+          GITHUB_APP_SECRET_ARN: !Ref GithubAppSecretArn
+          GITHUB_REPOSITORY: !Ref GithubRepository
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref EvaluationResultsTable }
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref RuleProposalsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WeeklyReviewMetricsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ImprovementCandidatesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ImprovementTasksTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref GithubAppSecretArn
       Events:
-        SaturdayMorning:
+        MondayEvening:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: "cron(0 9 ? * SAT *)"
+            # 前週(月〜日 JST)を完全に確定させてから分析するため、その日の
+            # point_in_time_evaluation(平日18:00)完了後に実行する。
+            ScheduleExpression: "cron(0 19 ? * MON *)"
             ScheduleExpressionTimezone: Asia/Tokyo
             FlexibleTimeWindow:
               Mode: "OFF"

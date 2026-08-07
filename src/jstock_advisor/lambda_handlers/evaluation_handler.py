@@ -2,6 +2,10 @@
 
 CLIの`jstock evaluation run --source real`と同じロジックをEventBridge
 Scheduler経由で自動実行する薄いアダプタ。通知は行わない(CLIと同様)。
+
+振り返り機能改修: 既存の営業日ベース評価に加え、週次改善レビューが使うJST暦日
+ベース評価(既定7暦日後)も同じLambda・同じスケジュールで実行する(要求仕様1.1節
+「日次評価」)。
 """
 
 from __future__ import annotations
@@ -31,12 +35,18 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     )
 
     outcome = service.run_due_evaluations(now)
+    calendar_outcome = service.run_due_calendar_evaluations(now)
     logger.info(
-        "evaluation_handler done: evaluated=%d skipped=%d",
+        "evaluation_handler done: evaluated=%d skipped=%d calendar_evaluated=%d "
+        "calendar_skipped=%d",
         len(outcome.evaluated),
         len(outcome.skipped_due_to_data_error),
+        len(calendar_outcome.evaluated),
+        len(calendar_outcome.skipped_due_to_data_error),
     )
     return {
         "evaluated": len(outcome.evaluated),
         "skipped_due_to_data_error": len(outcome.skipped_due_to_data_error),
+        "calendar_evaluated": len(calendar_outcome.evaluated),
+        "calendar_skipped_due_to_data_error": len(calendar_outcome.skipped_due_to_data_error),
     }

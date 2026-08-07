@@ -1,0 +1,78 @@
+# 週次改善レビュー・GitHub Issue自動起票の設定(振り返り機能改修)。
+# 「日次で推奨ごとの成績を確定し、週次でロジック改善が必要かを判定し、
+# 十分な証拠がある場合のみGitHub Issueを自動起票する」運用の閾値をまとめる。
+# すべてユーザーが変更可能。
+
+version: 1
+
+# 日次評価(evaluation_handler.py)で使うJST暦日ベースのホライズン。
+# recommendation_evaluation_service.pyの_CALENDAR_HORIZON_DAYSと一致させること。
+evaluation_horizon_days: 7
+
+# falseにすると週次改善レビュー自体(WeeklyReviewMetrics/ImprovementCandidateの
+# 生成)を行わない。GitHub連携の有効/無効はissue_creation_enabledで別途制御する。
+weekly_review_enabled: true
+
+# GitHub App設定・疎通確認が完了するまではfalseにしておくこと。falseの間は
+# GitHub API・Secrets Manager呼び出しを一切行わず、改善候補の検出・保存のみ行う
+# (正常なスキップ、運用エラー通知は送らない)。trueへ切り替える際は、
+# このYAML編集後にsam build && sam deployによる再デプロイが必要
+# (Lambda Layer経由の静的設定のため、実行中の動的反映はできない)。
+issue_creation_enabled: false
+
+# 前週比較・consecutive_bad_weeks算出に遡る週数。
+history_weeks_for_comparison: 4
+
+# GitHub Issue作成・コメント投稿の原子的claim(DynamoDB ImprovementTasksTable)が
+# 失効したとみなすまでの分数。失効後はGitHub側の実在確認を先に行ってから
+# 再claimする(二重Issue・二重コメント防止)。
+github_issue_claim_timeout_minutes: 10
+
+# RecommendationType(値)ごとの週次最低サンプル数。本番データ(2026-07-27〜
+# 08-07の11日間、528件)の種別分布(BUY 310/WATCH 81/REVIEW 33/
+# WATCH_BEFORE_EARNINGS 32/SELL 30/URGENT_REVIEW 17/PARTIAL_PROFIT_TAKE 15/
+# FULL_PROFIT_TAKE 10)を基に、種別間で1桁以上の出現頻度差があることを踏まえて
+# 初期値を設定した。定義されない種別(WATCH/REVIEW/WATCH_BEFORE_EARNINGS等、
+# 評価定義未整備系)は"default"を使う。
+min_sample_count:
+  BUY: 20
+  WATCH_BUY: 20
+  HOLD: 20
+  SELL: 10
+  URGENT_REVIEW: 5
+  PARTIAL_PROFIT_TAKE: 5
+  FULL_PROFIT_TAKE: 3
+  default: 10
+
+# RecommendationType(値)ごとの最低成功率(0〜100スケール)。業績系
+# (BUY/WATCH_BUY/HOLD/PARTIAL_PROFIT_TAKE/FULL_PROFIT_TAKE/SELL/URGENT_REVIEW)
+# のみで使う(WATCH/REVIEW等の評価定義未整備系は成功率を計算しない)。
+min_success_rate_pct:
+  BUY: 50.0
+  WATCH_BUY: 50.0
+  HOLD: 50.0
+  SELL: 60.0
+  URGENT_REVIEW: 60.0
+  PARTIAL_PROFIT_TAKE: 60.0
+  FULL_PROFIT_TAKE: 60.0
+
+# 平均超過リターン(0〜100スケール、%)がこの値未満ならCandidate化する。
+min_average_excess_return_pct: -1.0
+
+# 前週比の成功率悪化がこのポイント数以上ならCandidate化する(単独ではIssue化しない)。
+success_rate_drop_threshold_points: 10.0
+
+# 以下2つの重大悪化閾値は、運用開始(2026-08-07)からまだ1〜2週分の週次データしか
+# 無く実データに基づく較正ができないため暫定値とする。issue_creation_enabled=false
+# の間に数週間分の実出力(WeeklyReviewMetrics/ImprovementCandidate)を確認したうえで
+# 再検討すること。
+critical_success_rate_drop_threshold_points: 20.0
+critical_average_excess_return_pct: -5.0
+
+# 連続してこの週数以上Candidateに該当した場合、単週ノイズではなくIssue化条件を
+# 満たすとみなす(業績系のみ。評価定義未整備系は初回週からIssue化しうる)。
+consecutive_bad_weeks_for_issue: 2
+
+issue_labels:
+  - rule-improvement
+  - auto-generated

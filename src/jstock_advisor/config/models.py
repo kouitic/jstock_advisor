@@ -388,6 +388,31 @@ class EvaluationRulesConfig(StrictModel):
     exit_evaluation: ExitEvaluationThresholds
 
 
+# --- review_improvement.yaml(振り返り機能改修: 週次改善レビュー) ------------------
+
+
+class ReviewImprovementConfig(StrictModel):
+    version: int
+    evaluation_horizon_days: int
+    weekly_review_enabled: bool
+    # falseの間はGitHub API・Secrets Manager呼び出しを一切行わない(正常状態)。
+    # trueへ切り替える際はconfig/review_improvement.yaml編集後の再デプロイが必要
+    # (Lambda LayerでYAMLを配布する静的設定のため、実行中の動的反映は無い)。
+    issue_creation_enabled: bool
+    history_weeks_for_comparison: int
+    github_issue_claim_timeout_minutes: int
+    # RecommendationType(値)ごとの最低サンプル数。定義されない種別は"default"を使う。
+    min_sample_count: dict[str, int]
+    # RecommendationType(値)ごとの最低成功率(0〜100スケール)。業績系種別のみ持つ。
+    min_success_rate_pct: dict[str, float]
+    min_average_excess_return_pct: float
+    success_rate_drop_threshold_points: float
+    critical_success_rate_drop_threshold_points: float
+    critical_average_excess_return_pct: float
+    consecutive_bad_weeks_for_issue: int
+    issue_labels: list[str]
+
+
 # --- holiday_calendar.json ----------------------------------------------------
 
 
@@ -1405,3 +1430,5 @@ class AppConfig(StrictModel):
     holding_decision_ratio: HoldingDecisionRatioRulesConfig
     investment_thesis_template: InvestmentThesisTemplateConfig
     industry_scoring_policy: IndustryScoringPolicyConfig
+    # --- 振り返り機能改修(2026-08)で追加 ---
+    review_improvement: ReviewImprovementConfig

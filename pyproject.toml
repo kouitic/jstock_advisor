@@ -28,6 +28,8 @@ dev = [
 ]
 aws = [
     "boto3>=1.43,<2.0",
+    # 振り返り機能改修: GitHub App JWT認証(週次改善レビューのGitHub Issue連携)に使用。
+    "PyJWT>=2.10,<3.0",
 ]
 aws-dev = [
     "boto3-stubs[dynamodb]>=1.43,<2.0",

@@ -125,4 +125,30 @@ def test_data_issue_excluded_from_success_rate_denominator(tmp_path: Path) -> No
 
     summary = service.summarize()
     assert summary.overall.count == 1
+    assert summary.overall.conclusive_count == 0
     assert summary.overall.success_rate_pct is None
+
+
+def test_inconclusive_excluded_from_success_rate_denominator(tmp_path: Path) -> None:
+    """WATCH等「自動評価の対象外」種別がINCONCLUSIVEのみでも、成功率0%ではなく
+    Noneになる(=評価対象外)こと。振り返り機能改修での回帰確認。"""
+    rec_repo = RecommendationRepository(store_dir=tmp_path)
+    eval_repo = EvaluationResultRepository(store_dir=tmp_path)
+    rec_repo.save(_recommendation("r1", RecommendationType.WATCH, ConfidenceLevel.HIGH, "v1"))
+    rec_repo.save(_recommendation("r2", RecommendationType.WATCH, ConfidenceLevel.HIGH, "v1"))
+    eval_repo.save(_evaluation("e1", "r1", EvaluationLabel.INCONCLUSIVE, 1.0))
+    eval_repo.save(_evaluation("e2", "r2", EvaluationLabel.INCONCLUSIVE, -1.0))
+    service = PerformanceMetricsService(
+        evaluation_repository=eval_repo, recommendation_repository=rec_repo
+    )
+
+    summary = service.summarize()
+    assert summary.overall.count == 2
+    assert summary.overall.conclusive_count == 0
+    assert summary.overall.success_rate_pct is None
+
+
+def test_conclusive_count_counts_non_excluded_labels(service: PerformanceMetricsService) -> None:
+    summary = service.summarize()
+    assert summary.overall.count == 3
+    assert summary.overall.conclusive_count == 3
