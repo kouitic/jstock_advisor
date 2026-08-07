@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from jstock_advisor.domain.entities.enums import RecentPeriodsSource
 from jstock_advisor.infrastructure.edinet.document_finder import EdinetFilingCacheRepository
 from jstock_advisor.infrastructure.local_repository.stock_name_override_repository import (
     StockNameOverrideRepository,
@@ -181,6 +182,36 @@ def test_get_financial_summary_recent_quarters_reflect_newer_quarterly_period(
     assert summary.fiscal_period_end == dt.date(2026, 3, 31)
     quarter_ends = [q.quarter_end for q in summary.recent_quarters]
     assert max(quarter_ends) == dt.date(2026, 6, 30)
+    assert summary.recent_periods_source == RecentPeriodsSource.QUARTERLY
+
+
+def test_get_financial_summary_recent_periods_source_is_annual_fallback_when_quarterly_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """由来精緻化対応: quarterly_income_stmtが取得できず年次income_stmtへ
+    フォールバックした場合、recent_periods_sourceはANNUAL_FALLBACKとなり、
+    QUARTERLYと誤表示しない。
+    """
+    import jstock_advisor.providers.financial_data.yfinance_impl as module
+
+    annual_income_stmt = pd.DataFrame(
+        {
+            pd.Timestamp("2025-03-31"): {"Operating Income": 900.0},
+            pd.Timestamp("2026-03-31"): {"Operating Income": 1000.0},
+        }
+    )
+    fake_ticker = _FakeTickerFinancials("7203.T", income_stmt=annual_income_stmt)
+    monkeypatch.setattr(module.yf, "Ticker", lambda symbol: fake_ticker)
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+
+    summary = provider.get_financial_summary("7203")
+
+    assert summary is not None
+    assert summary.recent_periods_source == RecentPeriodsSource.ANNUAL_FALLBACK
+    quarter_ends = [q.quarter_end for q in summary.recent_quarters]
+    assert max(quarter_ends) == dt.date(2026, 3, 31)
 
 
 def test_recent_periods_skips_columns_without_valid_date() -> None:
@@ -195,4 +226,5 @@ def test_recent_periods_skips_columns_without_valid_date() -> None:
 
     results = provider._recent_periods(fake_ticker, "7203")  # noqa: SLF001
 
-    assert results == []
+    assert results.periods == []
+    assert results.source == RecentPeriodsSource.UNAVAILABLE

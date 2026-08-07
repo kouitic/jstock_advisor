@@ -22,6 +22,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     EarningsWindowStatus,
     FinancialPeriodEndSource,
+    RecentPeriodsSource,
     RecommendationType,
 )
 from jstock_advisor.domain.jst import JST, require_timezone_aware, to_jst
@@ -122,14 +123,27 @@ def resolve_latest_financial_period_end(
     Provider異常・yfinanceレスポンス変更等で評価日より未来のperiod_endが
     混入した場合に、それを決算反映済みの証拠として採用しないよう、評価日
     (JST)以前の値のみを候補とする。
+
+    --- 由来精緻化対応で追加 ---
+    recent_quartersが四半期実績由来なのか年次フォールバック由来なのかを
+    financial.recent_periods_sourceで判別し、RECENT_QUARTERLY_PERIOD/
+    RECENT_ANNUAL_FALLBACKとして区別する(監査ログでの誤認防止。従来の単一の
+    RECENT_PERIODSは廃止)。recent_quartersに有効値があるのに
+    recent_periods_source=UNAVAILABLEというデータ不整合が発生した場合は、
+    period_end自体は引き続き有効な最大値を使いつつ(DATA_UPDATED判定条件は
+    変更しない)、由来ラベルのみ安全側のUNKNOWNとする。
     """
     valid_quarter_ends = [
         q.quarter_end for q in financial.recent_quarters if q.quarter_end <= evaluation_date
     ]
     if valid_quarter_ends:
-        return ResolvedFinancialPeriodEnd(
-            period_end=max(valid_quarter_ends), source=FinancialPeriodEndSource.RECENT_PERIODS
-        )
+        if financial.recent_periods_source == RecentPeriodsSource.QUARTERLY:
+            source = FinancialPeriodEndSource.RECENT_QUARTERLY_PERIOD
+        elif financial.recent_periods_source == RecentPeriodsSource.ANNUAL_FALLBACK:
+            source = FinancialPeriodEndSource.RECENT_ANNUAL_FALLBACK
+        else:
+            source = FinancialPeriodEndSource.UNKNOWN
+        return ResolvedFinancialPeriodEnd(period_end=max(valid_quarter_ends), source=source)
     if financial.fiscal_period_end is not None and financial.fiscal_period_end <= evaluation_date:
         return ResolvedFinancialPeriodEnd(
             period_end=financial.fiscal_period_end,

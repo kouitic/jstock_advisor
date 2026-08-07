@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import RecentPeriodsSource
 from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.document_finder import (
     EdinetFilingCacheRepository,
@@ -50,6 +52,14 @@ _QUOTE_TYPE_TO_SECURITY_TYPE = {
     "EQUITY": "STOCK",
     "ETF": "ETF",
 }
+
+
+@dataclass(frozen=True)
+class _RecentPeriodsResult:
+    """_recent_periods()の戻り値(由来精緻化対応)。"""
+
+    periods: list[QuarterlyFinancials]
+    source: RecentPeriodsSource
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -144,6 +154,7 @@ class YFinanceFinancialDataProvider:
         # として使わない(Noneのまま。決算反映確認の誤判定を防止)。
         fiscal_period_end = self._latest_annual_period_end(ticker)
         fiscal_year_end_month = self._fiscal_year_end_month(info, ticker)
+        recent_periods_result = self._recent_periods(ticker, stock_code)
 
         return FinancialSummary(
             stock_code=stock_code,
@@ -168,7 +179,8 @@ class YFinanceFinancialDataProvider:
             is_going_concern_doubt=False,  # yfinanceからは判定不可(既知の限界)
             is_deficit=is_deficit,
             is_debt_excess=is_debt_excess,
-            recent_quarters=self._recent_periods(ticker, stock_code),
+            recent_quarters=recent_periods_result.periods,
+            recent_periods_source=recent_periods_result.source,
             source=self._source(),
         )
 
@@ -234,8 +246,12 @@ class YFinanceFinancialDataProvider:
         period_end = self._latest_annual_period_end(ticker)
         return period_end.month if period_end is not None else None
 
-    def _recent_periods(self, ticker: yf.Ticker, stock_code: str) -> list[QuarterlyFinancials]:
-        """直近の期別(四半期が取得できない銘柄では年次)営業利益・営業CFの推移。"""
+    def _recent_periods(self, ticker: yf.Ticker, stock_code: str) -> _RecentPeriodsResult:
+        """直近の期別(四半期が取得できない銘柄では年次)営業利益・営業CFの推移。
+
+        戻り値のsourceは、実際にquarterly_income_stmtから生成できたか、
+        年次income_stmtへフォールバックしたかを区別する(由来精緻化対応)。
+        """
         source = self._source()
         try:
             income_df = ticker.quarterly_income_stmt
@@ -247,7 +263,9 @@ class YFinanceFinancialDataProvider:
         has_quarterly = (
             income_df is not None and not income_df.empty and "Operating Income" in income_df.index
         )
+        recent_periods_source = RecentPeriodsSource.QUARTERLY
         if not has_quarterly:
+            recent_periods_source = RecentPeriodsSource.ANNUAL_FALLBACK
             try:
                 income_df = ticker.income_stmt
                 cf_df = ticker.cashflow
@@ -256,7 +274,7 @@ class YFinanceFinancialDataProvider:
                 cf_df = None
 
         if income_df is None or income_df.empty or "Operating Income" not in income_df.index:
-            return []
+            return _RecentPeriodsResult(periods=[], source=RecentPeriodsSource.UNAVAILABLE)
 
         columns = sorted(income_df.columns)
         results: list[QuarterlyFinancials] = []
@@ -285,7 +303,9 @@ class YFinanceFinancialDataProvider:
                     source=source,
                 )
             )
-        return results
+        if not results:
+            return _RecentPeriodsResult(periods=[], source=RecentPeriodsSource.UNAVAILABLE)
+        return _RecentPeriodsResult(periods=results, source=recent_periods_source)
 
     def get_historical_valuation(self, stock_code: str, years: int) -> list[HistoricalValuation]:
         """過去(通常4年分程度、yfinanceが提供する年次決算の範囲)のEPS/BPS/株価から

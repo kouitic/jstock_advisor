@@ -444,18 +444,38 @@ class EarningsDecisionRelevance(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
-class FinancialPeriodEndSource(StrEnum):
-    """決算反映確認に使った最新財務期間末の由来(デプロイ前対応)。
+class RecentPeriodsSource(StrEnum):
+    """FinancialSummary.recent_quartersの実際の生成元(由来精緻化対応)。
 
-    FinancialSummary.fiscal_period_endは年次決算期末を表すため、四半期ごとの
-    決算発表の反映確認にはrecent_quarters由来の期末日を優先する。将来誤判定が
-    発生した際に、四半期実績由来か年次フォールバックか取得不能だったかを
-    監査ログから追跡できるようにするための区分。
+    yfinanceは四半期データ(quarterly_income_stmt)を取得できない銘柄で年次
+    データ(income_stmt)へフォールバックする場合があり、recent_quartersという
+    名前だけでは四半期実績由来か年次フォールバック由来かを区別できない。
     """
 
-    RECENT_PERIODS = "RECENT_PERIODS"
+    QUARTERLY = "QUARTERLY"
+    ANNUAL_FALLBACK = "ANNUAL_FALLBACK"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class FinancialPeriodEndSource(StrEnum):
+    """決算反映確認に使った最新財務期間末の由来(デプロイ前対応・由来精緻化対応)。
+
+    FinancialSummary.fiscal_period_endは年次決算期末を表すため、四半期ごとの
+    決算発表の反映確認にはrecent_quarters由来の期末日を優先する。ただし
+    recent_quarters自体が四半期実績由来か年次フォールバック由来かを
+    FinancialSummary.recent_periods_sourceで判別し、この2つを区別して報告する
+    (RECENT_PERIODSという曖昧な単一値では、年次フォールバックを四半期実績と
+    誤認してしまう可能性があったため分離した)。
+    """
+
+    RECENT_QUARTERLY_PERIOD = "RECENT_QUARTERLY_PERIOD"
+    RECENT_ANNUAL_FALLBACK = "RECENT_ANNUAL_FALLBACK"
     ANNUAL_FISCAL_PERIOD_END = "ANNUAL_FISCAL_PERIOD_END"
     UNAVAILABLE = "UNAVAILABLE"
+    # recent_quartersに有効な期間末があるのにrecent_periods_source=UNAVAILABLE
+    # というデータ不整合を検知した場合の安全側ラベル(period_end自体は
+    # 引き続き有効な最大値を使う。DATA_UPDATED判定条件は変更しない)。
+    UNKNOWN = "UNKNOWN"
 
 
 class TriggerStatus(StrEnum):

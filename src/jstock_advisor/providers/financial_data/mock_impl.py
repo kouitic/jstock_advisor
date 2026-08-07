@@ -6,6 +6,7 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import RecentPeriodsSource
 from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
     FinancialSummary,
@@ -63,6 +64,9 @@ class MockFinancialDataProvider:
             is_deficit=False,
             is_debt_excess=False,
             recent_quarters=quarters,
+            recent_periods_source=(
+                RecentPeriodsSource.QUARTERLY if quarters else RecentPeriodsSource.UNAVAILABLE
+            ),
             source=source,
         )
 
