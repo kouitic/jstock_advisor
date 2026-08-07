@@ -1,5 +1,7 @@
 import datetime as dt
 
+import pytest
+
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.common import DataSourceReference
@@ -324,6 +326,82 @@ def test_resolve_latest_period_inconsistent_source_becomes_unknown() -> None:
     result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
     assert result.period_end == dt.date(2026, 6, 30)
     assert result.source == FinancialPeriodEndSource.UNKNOWN
+
+
+# ===== 由来不整合時のwarningログ(監査・運用性向上対応) =====
+
+
+def test_resolve_latest_period_inconsistent_source_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """recent_quartersに有効値があるのにrecent_periods_source=UNAVAILABLEという
+    通常運用では発生しないデータ不整合を検知した場合、CloudWatch等から能動的に
+    検知できるようwarningログを出す(判定結果自体はUNKNOWN/有効なperiod_endの
+    まま変更しない)。
+    """
+    financial = _financial(
+        dt.date(2026, 3, 31),
+        [dt.date(2026, 6, 30)],
+        recent_periods_source=RecentPeriodsSource.UNAVAILABLE,
+    )
+    with caplog.at_level("WARNING"):
+        result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+
+    assert result.period_end == dt.date(2026, 6, 30)
+    assert result.source == FinancialPeriodEndSource.UNKNOWN
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "financial_period_source_inconsistent" in message
+    assert "2914" in message  # stock_code
+    assert "UNAVAILABLE" in message  # recent_periods_source
+    assert "2026-06-30" in message  # resolved_period_end
+
+
+def test_resolve_latest_period_quarterly_does_not_log_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    financial = _financial(
+        dt.date(2026, 3, 31),
+        [dt.date(2026, 6, 30)],
+        recent_periods_source=RecentPeriodsSource.QUARTERLY,
+    )
+    with caplog.at_level("WARNING"):
+        result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+
+    assert result.source == FinancialPeriodEndSource.RECENT_QUARTERLY_PERIOD
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_resolve_latest_period_annual_fallback_does_not_log_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    financial = _financial(
+        dt.date(2026, 3, 31),
+        [dt.date(2026, 3, 31)],
+        recent_periods_source=RecentPeriodsSource.ANNUAL_FALLBACK,
+    )
+    with caplog.at_level("WARNING"):
+        result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+
+    assert result.source == FinancialPeriodEndSource.RECENT_ANNUAL_FALLBACK
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_resolve_latest_period_empty_quarters_unavailable_does_not_log_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """recent_quartersが空でrecent_periods_source=UNAVAILABLEは正常な取得不能
+    状態であり、これだけではwarningを出さない(不整合の条件はvalid_quarter_ends
+    が1件以上あることが前提のため)。
+    """
+    financial = _financial(None, [], recent_periods_source=RecentPeriodsSource.UNAVAILABLE)
+    with caplog.at_level("WARNING"):
+        result = resolve_latest_financial_period_end(financial, _EVAL_DATE)
+
+    assert result.period_end is None
+    assert result.source == FinancialPeriodEndSource.UNAVAILABLE
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
 def test_resolve_latest_period_falls_back_to_annual_when_all_quarters_future() -> None:
