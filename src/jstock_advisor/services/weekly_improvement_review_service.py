@@ -216,9 +216,12 @@ class WeeklyImprovementReviewService:
     def _collect_this_week_evaluations(
         self, period_start: dt.date, period_end: dt.date
     ) -> list[EvaluationResult]:
+        # config/review_improvement.yamlのevaluation_horizon_daysと一致するものだけを
+        # 対象にする(値を変更した場合に、異なるホライズンの評価結果が混在しないため)。
+        target_horizon = self._review_config.evaluation_horizon_days
         results = []
         for evaluation in self._evaluations.list_all():
-            if evaluation.horizon_calendar_days is None:
+            if evaluation.horizon_calendar_days != target_horizon:
                 continue
             evaluated_date_jst = to_jst(evaluation.evaluated_at).date()
             if period_start <= evaluated_date_jst <= period_end:

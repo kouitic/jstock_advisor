@@ -155,7 +155,8 @@ def process_candidate(
         tracker.mark_skipped_not_configured(candidate.candidate_key, now)
         return ImprovementTaskStatus.SKIPPED_NOT_CONFIGURED
 
-    if not github_secret_arn:
+    if not github_secret_arn or not repo_owner or not repo_name:
+        # リポジトリ未設定(owner/repoが空)のままGitHub APIを呼ばない。
         tracker.mark_configuration_error(candidate.candidate_key, now)
         return ImprovementTaskStatus.CONFIGURATION_ERROR
 

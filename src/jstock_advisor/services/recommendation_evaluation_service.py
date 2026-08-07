@@ -114,17 +114,16 @@ class RecommendationEvaluationService:
         self, recommendation: Recommendation, now: dt.datetime, outcome: EvaluationRunOutcome
     ) -> None:
         today = now.date()
+        start_date = recommendation.recommended_at.date()
         for horizon in self._horizons_for(recommendation.recommendation_type):
-            evaluation_date = self._calendar.add_business_days(
-                recommendation.recommended_at.date(), horizon
-            )
+            evaluation_date = self._calendar.add_business_days(start_date, horizon)
             if evaluation_date > today:
                 continue
             if self._evaluations.exists_for_horizon(recommendation.recommendation_id, horizon):
                 continue
 
             result = self._evaluate_one(
-                recommendation, evaluation_date, now, horizon_business_days=horizon
+                recommendation, start_date, evaluation_date, now, horizon_business_days=horizon
             )
             if result is None:
                 outcome.skipped_due_to_data_error.append(
@@ -156,7 +155,11 @@ class RecommendationEvaluationService:
             return
 
         result = self._evaluate_one(
-            recommendation, target_evaluation_date, now, horizon_calendar_days=horizon_days
+            recommendation,
+            recommendation_date_jst,
+            target_evaluation_date,
+            now,
+            horizon_calendar_days=horizon_days,
         )
         if result is None:
             outcome.skipped_due_to_data_error.append(
@@ -173,13 +176,17 @@ class RecommendationEvaluationService:
     def _evaluate_one(
         self,
         recommendation: Recommendation,
+        evaluation_start_date: dt.date,
         evaluation_date: dt.date,
         now: dt.datetime,
         *,
         horizon_business_days: int | None = None,
         horizon_calendar_days: int | None = None,
     ) -> EvaluationResult | None:
-        start = recommendation.recommended_at.date()
+        # evaluation_start_dateは呼び出し側が計算基準(営業日評価はUTC暦日、暦日評価は
+        # JST暦日)に応じて算出済みの値をそのまま渡す。ここでrecommended_atから
+        # 独自に日付を導出しない(呼び出し側ごとに基準が異なるタイムゾーンバグを防ぐ)。
+        start = evaluation_start_date
         history = self._market_data.get_price_history(
             recommendation.stock_code, start, evaluation_date
         )

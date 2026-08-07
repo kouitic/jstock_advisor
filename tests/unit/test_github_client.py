@@ -288,6 +288,46 @@ def test_search_open_issue_by_marker_returns_none_when_not_found(
     assert client.search_open_issue_by_marker("marker", "auto-generated", _NOW) is None
 
 
+def test_search_open_issue_by_marker_excludes_closed_only(
+    monkeypatch: pytest.MonkeyPatch, credentials: GithubAppCredentials
+) -> None:
+    """検索APIのインデックス反映遅延等でClosed Issueが結果に混入しても、
+    Closed Issueしか無い場合は復旧対象として選ばない(古いClosed Issueへの
+    誤ったstale復旧を防ぐ、レビュー指摘②)。"""
+    marker = "<!-- improvement_candidate_key: BUY|v1|ALL|PERFORMANCE_DEGRADED -->"
+    search_response = {"items": [_issue_payload(1, state="closed", body=f"text {marker}")]}
+    fake = _FakeUrlopen([_install_token_response(), search_response])
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake)
+    client = GithubIssueClient("owner", "repo", credentials)
+
+    assert client.search_open_issue_by_marker(marker, "auto-generated", _NOW) is None
+
+    search_request = fake.requests[-1]
+    assert "is%3Aopen" in search_request.full_url
+
+
+def test_search_open_issue_by_marker_selects_open_over_closed(
+    monkeypatch: pytest.MonkeyPatch, credentials: GithubAppCredentials
+) -> None:
+    """同一マーカーを含むClosed IssueとOpen Issueが両方結果に含まれる場合、
+    必ずOpen Issueの方を選ぶこと(レビュー指摘②)。"""
+    marker = "<!-- improvement_candidate_key: BUY|v1|ALL|PERFORMANCE_DEGRADED -->"
+    search_response = {
+        "items": [
+            _issue_payload(1, state="closed", body=f"old text {marker}"),
+            _issue_payload(2, state="open", body=f"new text {marker}"),
+        ]
+    }
+    fake = _FakeUrlopen([_install_token_response(), search_response])
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake)
+    client = GithubIssueClient("owner", "repo", credentials)
+
+    found = client.search_open_issue_by_marker(marker, "auto-generated", _NOW)
+    assert found is not None
+    assert found.number == 2
+    assert found.state == "open"
+
+
 def test_create_comment_sends_body(
     monkeypatch: pytest.MonkeyPatch, credentials: GithubAppCredentials
 ) -> None:
@@ -322,6 +362,41 @@ def test_find_comment_by_marker_false_when_absent(
     client = GithubIssueClient("owner", "repo", credentials)
 
     assert client.find_comment_by_marker(5, "marker", _NOW) is False
+
+
+def test_find_comment_by_marker_searches_next_page(
+    monkeypatch: pytest.MonkeyPatch, credentials: GithubAppCredentials
+) -> None:
+    """コメント数がper_page(100)を超える長期運用Issueでも、マーカーが後続ページに
+    しか無い場合を見逃さないこと(レビュー指摘⑤)。"""
+    marker = "<!-- review_week: 2026-W32 -->"
+    first_page = [{"body": "irrelevant"} for _ in range(100)]
+    second_page = [{"body": f"text {marker}"}]
+    fake = _FakeUrlopen([_install_token_response(), first_page, second_page])
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake)
+    client = GithubIssueClient("owner", "repo", credentials)
+
+    assert client.find_comment_by_marker(5, marker, _NOW) is True
+
+    comment_requests = [r for r in fake.requests if "/comments" in r.full_url]
+    assert len(comment_requests) == 2
+
+
+def test_find_comment_by_marker_stops_without_fetching_next_page_once_found(
+    monkeypatch: pytest.MonkeyPatch, credentials: GithubAppCredentials
+) -> None:
+    """1ページ目(100件ちょうど)でマーカーが見つかった場合、2ページ目は取得せず
+    即座に打ち切ること(GitHub API呼び出し回数を最小限にする、レビュー指摘⑤)。"""
+    marker = "<!-- review_week: 2026-W32 -->"
+    first_page = [{"body": "irrelevant"} for _ in range(99)] + [{"body": f"text {marker}"}]
+    fake = _FakeUrlopen([_install_token_response(), first_page])
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake)
+    client = GithubIssueClient("owner", "repo", credentials)
+
+    assert client.find_comment_by_marker(5, marker, _NOW) is True
+
+    comment_requests = [r for r in fake.requests if "/comments" in r.full_url]
+    assert len(comment_requests) == 1
 
 
 # --- エラー処理 ----------------------------------------------------------
