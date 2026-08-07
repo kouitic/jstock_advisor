@@ -243,6 +243,18 @@ staged_rollout:
 - `batch_processing_timeout_hours`(既定24時間)以内に95%以上完了
 - Terminal Failure率(`terminal_failure_rate_pct`)が5%未満
 
+**`TransactionConflictException`について(2026-08-07追加)**: `WatchlistWorkerFunction`の
+CloudWatch Logsで`TransactionConflictException`(`batch_tracker.py`の
+`try_finalize_if_ready`等)が稀に記録されることがありますが、これは複数の
+Worker(同時実行数`WatchlistReservedConcurrentExecutions`、既定3)がほぼ同時に
+`jstock-batch_runs`テーブルの同一項目(`batch_id`)を更新しようとした際の
+DynamoDB側の一時的な競合であり、`ConditionalCheckFailedException`と同様に
+想定内の競合として捕捉・無視する扱いに修正済みです(2026-08-07修正)。
+該当銘柄の評価結果自体は例外発生前に確定保存されているため失われず、SQSの
+再送により数分以内に自動回復します。この文字列でCloudWatch Logsを検索して
+頻発している場合のみ、`WatchlistReservedConcurrentExecutions`を下げるなどの
+対応を検討してください。
+
 **銘柄ごとのウォッチリスト登録結果の確認**: `decision_type=
 watchlist_auto_addition_repository_result`のAuditLogに、`batch_id`ごとに
 各銘柄が実際に追加された(`added`)・既に登録済みで見送られた(`skipped_existing`)・

@@ -235,7 +235,7 @@ def try_acquire_finalize(batch_id: str) -> bool:
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -408,9 +408,17 @@ EVALUATION_RESULT_DISPATCH_SEND_FAILED = "DISPATCH_SEND_FAILED"
 # SQSのmaxReceiveCountを使い果たしTerminalFailureQueueへ回った銘柄(4節)。
 EVALUATION_RESULT_SQS_MAX_RECEIVE_EXCEEDED = "SQS_MAX_RECEIVE_EXCEEDED"
 
+# TransactionConflictExceptionは、本番運用中に実際に観測された(ウォッチリスト
+# 自動追加パイプラインの並行Worker実行下で、complete_candidateのTransactWriteItemsと
+# try_finalize_if_ready等の単純UpdateItemが同一BatchRunsTable項目へほぼ同時に
+# アクセスした際に発生)。ConditionalCheckFailedExceptionと同様「他の呼び出しが
+# 同じ項目を処理中/処理済み」という想定内の競合を意味し、このモジュール全体の
+# 排他制御関数(以下のConditionExpression付きUpdateItem/TransactWriteItems)が
+# 一律Falseを返し呼び出し側の冪等な再試行・Reconciler確認に委ねる対象に含める。
 _TRANSACTION_CONDITION_FAILURE_CODES = (
     "TransactionCanceledException",
     "ConditionalCheckFailedException",
+    "TransactionConflictException",
 )
 
 
@@ -619,7 +627,7 @@ def try_acquire_dispatch_lease(
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -687,7 +695,7 @@ def mark_dispatch_completed(batch_id: str, now: dt.datetime) -> None:
             },
         )
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return  # 既にDISPATCH_FAILED等へ遷移済み(想定外だが致命的ではない)
         raise
 
@@ -708,7 +716,7 @@ def mark_dispatch_failed(batch_id: str, now: dt.datetime) -> bool:
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -728,7 +736,7 @@ def mark_candidate_dispatched(batch_id: str, stock_code: str, now: dt.datetime) 
             ExpressionAttributeValues={":true": True, ":false": False, ":now": now.isoformat()},
         )
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return  # 既にdispatched=true(SQS再送・重複処理等)。冪等スキップ。
         raise
 
@@ -766,7 +774,7 @@ def claim_candidate_lease(
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -984,7 +992,7 @@ def try_finalize_if_ready(batch_id: str, now: dt.datetime) -> bool:
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1018,7 +1026,7 @@ def try_retry_finalize(batch_id: str) -> bool:
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1066,7 +1074,7 @@ def mark_finalizing_stuck_as_failed(
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1104,7 +1112,7 @@ def record_finalize_target(
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1159,7 +1167,7 @@ def mark_watchlist_write_completed(batch_id: str, now: dt.datetime) -> bool:
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1188,7 +1196,7 @@ def record_notification_pending(batch_id: str, now: dt.datetime, content_hash: s
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1232,7 +1240,7 @@ def record_notification_resolved(
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1290,7 +1298,7 @@ def try_retry_notification(batch_id: str, now: dt.datetime) -> bool:
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1338,7 +1346,7 @@ def try_operator_abort(batch_id: str, reason: str, now: dt.datetime) -> bool:
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1458,7 +1466,7 @@ def try_acquire_timeout_finalization(batch_id: str) -> bool:
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1487,7 +1495,7 @@ def _try_mark_row_timed_out(batch_id: str, stock_code: str, now: dt.datetime) ->
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1563,7 +1571,7 @@ def set_timeout_finalize_completed_count(
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1584,7 +1592,7 @@ def transition_timeout_finalizing_to_timed_out(batch_id: str, now: dt.datetime) 
         )
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return False
         raise
 
@@ -1612,6 +1620,6 @@ def transition_timeout_finalizing_to_failed(batch_id: str, now: dt.datetime, rea
             },
         )
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
             return
         raise
