@@ -185,6 +185,11 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
     else:
         earnings_date_status = EarningsDateStatus.CONFIRMED
         resolved_next_earnings_date = earnings_date_raw
+    business_days_to_earnings = (
+        _CALENDAR.business_days_between(_NOW.date(), resolved_next_earnings_date)
+        if resolved_next_earnings_date is not None
+        else None
+    )
     return StockSnapshot(
         stock_code=fx.stock_code,
         current_price=fx.current_price,
@@ -198,6 +203,7 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         next_earnings_date=resolved_next_earnings_date,
         earnings_date_status=earnings_date_status,
         earnings_date_raw=earnings_date_raw,
+        business_days_to_earnings=business_days_to_earnings,
         dividend_yield_pct=dividend_yield_pct,
         benefit_yield_pct=None,
         annual_benefit_value=None,

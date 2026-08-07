@@ -14,6 +14,8 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     ConfidenceLevel,
     DividendComparisonOutcome,
+    EarningsDateStatus,
+    EarningsReleaseConfirmationState,
     NotificationStatus,
     RecommendationType,
     RecordDateUnknownReason,
@@ -79,11 +81,19 @@ def _make_recommendation(
 
 
 def _make_earnings_review_recommendation(
-    *, recommendation_id: str, next_review_conditions: list[str]
+    *,
+    recommendation_id: str,
+    next_review_conditions: list[str],
+    earnings_release_confirmation_state: EarningsReleaseConfirmationState = (
+        EarningsReleaseConfirmationState.AWAITING_CONFIRMATION
+    ),
+    earnings_date_raw: dt.date = dt.date(2026, 8, 5),
 ) -> Recommendation:
     """決算発表確認待ち通知(REVIEW_AFTER_EARNINGS)用のRecommendation(コードレビュー
-    対応: 明治HD事例)。sell_pricesが空のため価格比較による再送判定ができず、
-    next_review_conditions(状態別の待機文言)の変化のみが再送のシグナルになる。
+    対応: 明治HD事例・デプロイ前対応)。sell_pricesが空のため価格比較による再送判定
+    ができず、構造化フィールド(earnings_release_confirmation_state等)の変化のみが
+    再送のシグナルになる(next_review_conditionsは表示文言のみで、dedup判定には
+    使われない)。
     """
     return Recommendation(
         recommendation_id=recommendation_id,
@@ -98,6 +108,9 @@ def _make_earnings_review_recommendation(
         confidence=ConfidenceLevel.MEDIUM,
         rule_version="v1-mvp",
         next_review_conditions=next_review_conditions,
+        earnings_date_status=EarningsDateStatus.STALE_PAST_DATE,
+        earnings_date_raw=earnings_date_raw,
+        earnings_release_confirmation_state=earnings_release_confirmation_state,
     )
 
 
@@ -333,13 +346,16 @@ def test_earnings_review_pending_notification_not_resent_for_same_state(
 def test_earnings_review_pending_notification_resent_when_state_transitions_to_delayed(
     service_and_repos,
 ) -> None:
-    """AWAITING_CONFIRMATION→DELAYEDのような状態変化はnext_review_conditionsの
-    文言変化として現れるため、価格情報が無くても再送資格ありとみなす。
+    """AWAITING_CONFIRMATION→DELAYEDのような状態変化は、構造化フィールド
+    (earnings_release_confirmation_state)の変化として検知され、価格情報が
+    無くても再送資格ありとみなす(デプロイ前対応: 自由文比較から構造化キー
+    比較へ変更)。
     """
     service, repo, client = service_and_repos
     rec1 = _make_earnings_review_recommendation(
         recommendation_id="rec-1",
         next_review_conditions=["決算発表予定日を経過していますが、無償データから..."],
+        earnings_release_confirmation_state=EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
     )
     repo.save(rec1)
     service.notify_recommendation(rec1, _NOW)
@@ -347,6 +363,59 @@ def test_earnings_review_pending_notification_resent_when_state_transitions_to_d
     rec2 = _make_earnings_review_recommendation(
         recommendation_id="rec-2",
         next_review_conditions=["決算発表予定日を経過し、最新財務データの反映確認が長引いています。"],
+        earnings_release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
+    )
+    repo.save(rec2)
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+
+    assert sent is True
+    assert len(client.sent) == 2
+
+
+def test_earnings_review_pending_notification_not_resent_for_same_delayed_state(
+    service_and_repos,
+) -> None:
+    """DELAYED→DELAYEDのように状態が変わらない場合は、最小再通知時間
+    (resend_after_days)を経過するまで再送しない。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_earnings_review_recommendation(
+        recommendation_id="rec-1",
+        next_review_conditions=["決算発表予定日を経過し、最新財務データの反映確認が長引いています。"],
+        earnings_release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
+    )
+    repo.save(rec1)
+    service.notify_recommendation(rec1, _NOW)
+
+    rec2 = _make_earnings_review_recommendation(
+        recommendation_id="rec-2",
+        next_review_conditions=["決算発表予定日を経過し、最新財務データの反映確認が長引いています。"],
+        earnings_release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
+    )
+    repo.save(rec2)
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+
+    assert sent is False
+    assert len(client.sent) == 1
+
+
+def test_earnings_review_pending_notification_resent_when_earnings_date_changes(
+    service_and_repos,
+) -> None:
+    """対象の決算予定日自体が変わった(=別の決算イベントに対する待機)場合は、
+    状態ラベルが同じでも再送資格ありとみなす。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_earnings_review_recommendation(
+        recommendation_id="rec-1",
+        next_review_conditions=["決算発表予定日を経過していますが、無償データから..."],
+        earnings_date_raw=dt.date(2026, 8, 5),
+    )
+    repo.save(rec1)
+    service.notify_recommendation(rec1, _NOW)
+
+    rec2 = _make_earnings_review_recommendation(
+        recommendation_id="rec-2",
+        next_review_conditions=["決算発表予定日を経過していますが、無償データから..."],
+        earnings_date_raw=dt.date(2026, 11, 5),
     )
     repo.save(rec2)
     sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))

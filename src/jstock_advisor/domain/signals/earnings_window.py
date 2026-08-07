@@ -18,10 +18,12 @@ from jstock_advisor.config.models import EarningsWindowRulesConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import (
     EarningsDateStatus,
+    EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsWindowStatus,
     RecommendationType,
 )
+from jstock_advisor.domain.jst import JST, require_timezone_aware, to_jst
 
 _BUY_LIKE = (RecommendationType.BUY, RecommendationType.WATCH_BUY)
 _PROFIT_TAKE_LIKE = (RecommendationType.PARTIAL_PROFIT_TAKE, RecommendationType.FULL_PROFIT_TAKE)
@@ -97,6 +99,7 @@ def resolve_earnings_release_confirmation(
     earnings_date_status: EarningsDateStatus,
     earnings_date_raw: dt.date | None,
     fiscal_period_end: dt.date,
+    financial_fetched_at: dt.datetime,
     now: dt.datetime,
     config: EarningsWindowRulesConfig,
 ) -> EarningsReleaseConfirmationState:
@@ -111,16 +114,58 @@ def resolve_earnings_release_confirmation(
     (earnings_date_raw)からの想定報告ラグ(fiscal_period_reporting_lag_days)
     以内かどうかで近似する。EarningsWindowStatus.RECENTLY_REPORTEDと同種の
     近似判定であり、決算発表日そのものの厳密な突合ではない。
+
+    --- デプロイ前対応で追加 ---
+    financial_fetched_at(財務データ取得元のfetched_at)は、無償Provider
+    (yfinance)ではAPI呼び出し時刻でしかなく、決算発表が実際に反映された
+    証拠にはならない(前回値を永続化して比較する仕組みも今回は追加しない)。
+    そのため、決算予定日より前に取得したデータのfiscal_period_endが
+    たまたま報告ラグ条件を満たしていても、それだけではDATA_UPDATEDとしない
+    (=決算予定日以後に取得したデータであることを最低条件として追加する)。
     """
     if earnings_date_status != EarningsDateStatus.STALE_PAST_DATE or earnings_date_raw is None:
         return EarningsReleaseConfirmationState.NOT_APPLICABLE
+    require_timezone_aware(now)
+    require_timezone_aware(financial_fetched_at)
 
     lag = dt.timedelta(days=config.fiscal_period_reporting_lag_days)
-    if fiscal_period_end >= earnings_date_raw - lag:
+    fetched_after_earnings_date = to_jst(financial_fetched_at).date() >= earnings_date_raw
+    if fiscal_period_end >= earnings_date_raw - lag and fetched_after_earnings_date:
         return EarningsReleaseConfirmationState.DATA_UPDATED
 
-    earnings_date_start = dt.datetime.combine(earnings_date_raw, dt.time.min, tzinfo=now.tzinfo)
-    hours_since = (now - earnings_date_start).total_seconds() / 3600
+    # 確認待ちの起点は決算予定日の翌日JST 00:00とする(予定日当日はまだ
+    # STALE_PAST_DATEにならず、この関数自体が呼ばれないため自然と除外される)。
+    awaiting_started_at = dt.datetime.combine(
+        earnings_date_raw + dt.timedelta(days=1), dt.time.min, tzinfo=JST
+    )
+    hours_since = (now - awaiting_started_at).total_seconds() / 3600
     if hours_since >= config.maximum_data_reflection_wait_hours:
         return EarningsReleaseConfirmationState.DELAYED
     return EarningsReleaseConfirmationState.AWAITING_CONFIRMATION
+
+
+def resolve_earnings_decision_relevance(
+    earnings_date_status: EarningsDateStatus,
+    earnings_date_raw: dt.date | None,
+    release_confirmation_state: EarningsReleaseConfirmationState,
+    evaluation_date: dt.date,
+    config: EarningsWindowRulesConfig,
+) -> EarningsDecisionRelevance:
+    """古い過去の決算予定日で通常判定を無期限に止めないための関連性判定
+    (デプロイ前対応)。
+
+    Providerが何か月も前の過去日を返し続けた場合、release_confirmation_stateが
+    AWAITING_CONFIRMATION/DELAYEDのまま無期限に居座る可能性がある。過去決算日
+    からの経過日数がstale_earnings_relevance_days以内、または財務データが
+    既に決算後まで進んでいる(DATA_UPDATED)場合のみ現在の判断に関連するとみなし、
+    それ以外(経過日数が大きく、かつ財務データの更新も確認できない)はUNKNOWNとして
+    通常判定へ復帰させる(安全側: 判定不能を理由に永久停止しない)。
+    """
+    if earnings_date_status != EarningsDateStatus.STALE_PAST_DATE or earnings_date_raw is None:
+        return EarningsDecisionRelevance.NOT_RELEVANT
+    if release_confirmation_state == EarningsReleaseConfirmationState.DATA_UPDATED:
+        return EarningsDecisionRelevance.NOT_RELEVANT
+    days_since = (evaluation_date - earnings_date_raw).days
+    if days_since <= config.stale_earnings_relevance_days:
+        return EarningsDecisionRelevance.RELEVANT
+    return EarningsDecisionRelevance.UNKNOWN

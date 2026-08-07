@@ -215,6 +215,65 @@ def test_far_past_earnings_date_does_not_trigger_before_earnings_suppression(
     assert rec.business_days_to_earnings is None
 
 
+def test_far_past_earnings_date_resumes_normal_profit_take_when_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """デプロイ前対応の回帰: Providerが何か月も前の過去日を返し続け、財務データも
+    更新されないままの場合、decision_relevance=UNKNOWNとなり、REVIEW_AFTER_EARNINGS
+    へは切り替えず通常のPARTIAL_PROFIT_TAKE判定を維持する(無期限抑制の防止)。
+    """
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+    )
+    # stale_earnings_relevance_days(既定10日)を大幅に超過する過去日。
+    # fiscal_period_endはその過去日からの想定報告ラグ(既定60日)より前の
+    # ままとし、財務データが一切更新されていない状況を表す。
+    far_past = _NOW.date() - dt.timedelta(days=180)
+    providers = _providers(far_past, dt.date(2025, 9, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    rec = outcome.recommendation
+    assert rec.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert rec.earnings_decision_relevance is not None
+    assert rec.earnings_decision_relevance.value == "UNKNOWN"
+
+
+def test_is_confirmed_critical_bypasses_awaiting_confirmation_suppression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上場廃止決定・会計不正等の一次情報確認済みcritical(is_confirmed_critical)が
+    検出されている場合は、AWAITING_CONFIRMATION中でも通常判定を保留しない
+    (§8: 一次情報に基づく確定的シグナルは決算タイミングで抑制しない)。
+    """
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+    )
+    import jstock_advisor.services.profit_taking_service as module
+
+    original_condition_inputs = module.ProfitTakingConditionInputs
+
+    def _forced_critical_condition_inputs(*args: object, **kwargs: object) -> object:
+        kwargs["accounting_or_scandal_or_delisting_risk"] = True
+        return original_condition_inputs(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(module, "ProfitTakingConditionInputs", _forced_critical_condition_inputs)
+
+    providers = _providers(_STALE_EARNINGS_DATE, dt.date(2026, 3, 31))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    assert outcome.recommendation.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+
+
 def test_future_earnings_date_within_suppression_window_still_suppresses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

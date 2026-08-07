@@ -25,6 +25,7 @@ from jstock_advisor.domain.entities.enums import (
     AccountType,
     ConfidenceLevel,
     DividendComparisonOutcome,
+    EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     ProfitTakingIndustrySector,
     RecommendationType,
@@ -37,12 +38,16 @@ from jstock_advisor.domain.financial_decomposition import (
     has_guidance_revision_disclosure,
     is_fundamentally_driven,
 )
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.confidence_scoring import (
     ConfidenceFactors,
     ConfidenceScoreResult,
     compute_confidence,
 )
-from jstock_advisor.domain.signals.earnings_window import resolve_earnings_release_confirmation
+from jstock_advisor.domain.signals.earnings_window import (
+    resolve_earnings_decision_relevance,
+    resolve_earnings_release_confirmation,
+)
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
@@ -250,11 +255,7 @@ class ProfitTakingService:
             if fv_range.bear is not None and fv_range.bull is not None and fv_range.bear > 0
             else None
         )
-        days_to_earnings = None
-        if snapshot.next_earnings_date is not None:
-            days_to_earnings = self._calendar.business_days_between(
-                now.date(), snapshot.next_earnings_date
-            )
+        days_to_earnings = snapshot.business_days_to_earnings
         is_benefit_eligible = snapshot.benefit is not None
         benefit_value_missing = is_benefit_eligible and snapshot.annual_benefit_value is None
 
@@ -284,7 +285,11 @@ class ProfitTakingService:
         error: str | None = None
         if snapshot is None:
             snapshot, error = build_stock_snapshot(
-                self._providers, holding.stock_code, now, self._config
+                self._providers,
+                holding.stock_code,
+                now,
+                self._config,
+                business_calendar=self._calendar,
             )
         if snapshot is None:
             self._audit.record(
@@ -322,11 +327,7 @@ class ProfitTakingService:
             is_nisa_account=holding.account_type == AccountType.NISA,
         )
 
-        days_to_earnings = None
-        if snapshot.next_earnings_date is not None:
-            days_to_earnings = self._calendar.business_days_between(
-                now.date(), snapshot.next_earnings_date
-            )
+        days_to_earnings = snapshot.business_days_to_earnings
 
         trading_unit_config = self._config.profit_taking.trading_unit
         trading_unit_feasibility = evaluate_trading_unit_feasibility(
@@ -400,7 +401,17 @@ class ProfitTakingService:
             snapshot.earnings_date_status,
             snapshot.earnings_date_raw,
             snapshot.financial.fiscal_period_end,
+            snapshot.financial.source.fetched_at,
             now,
+            self._config.earnings_window,
+        )
+        # 過去の決算予定日が現在の判断にまだ関連するか(デプロイ前対応: 何か月も
+        # 前の過去日で無期限に通常判定を止めないための安全策)。
+        decision_relevance = resolve_earnings_decision_relevance(
+            snapshot.earnings_date_status,
+            snapshot.earnings_date_raw,
+            release_confirmation_state,
+            evaluation_date_jst(now),
             self._config.earnings_window,
         )
         effective_recommendation_type = result.recommendation_type
@@ -422,6 +433,7 @@ class ProfitTakingService:
                 EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
                 EarningsReleaseConfirmationState.DELAYED,
             )
+            and decision_relevance == EarningsDecisionRelevance.RELEVANT
             and effective_recommendation_type in _EARNINGS_SUPPRESSIBLE_TO_REVIEW
         ):
             effective_recommendation_type = RecommendationType.REVIEW_AFTER_EARNINGS
@@ -549,6 +561,10 @@ class ProfitTakingService:
             ],
             confidence=confidence_result.level,
             next_earnings_date=snapshot.next_earnings_date,
+            earnings_date_status=snapshot.earnings_date_status,
+            earnings_date_raw=snapshot.earnings_date_raw,
+            earnings_release_confirmation_state=release_confirmation_state,
+            earnings_decision_relevance=decision_relevance,
             dividend_record_date=snapshot.dividend.dividend_record_dates[0]
             if snapshot.dividend.dividend_record_dates
             else None,

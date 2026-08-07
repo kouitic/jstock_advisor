@@ -566,6 +566,11 @@ class EarningsWindowRulesConfig(StrictModel):
     # 決算予定日経過後、財務データの更新確認をこの時間(時間単位)待っても
     # 確認できない場合はDELAYEDへ遷移させる。
     maximum_data_reflection_wait_hours: int
+    # --- デプロイ前対応で追加 ---
+    # 過去の決算予定日からこの日数以内であれば、財務データが未更新でも現在の
+    # 判断に関連するとみなす(RELEVANT)。これを超えて経過してもなお財務データの
+    # 更新が確認できない場合はUNKNOWNとし、通常判定を無期限に停止しない。
+    stale_earnings_relevance_days: int
 
 
 class PortfolioConcentrationRulesConfig(StrictModel):

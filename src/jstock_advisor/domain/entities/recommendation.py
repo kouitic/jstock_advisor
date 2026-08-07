@@ -25,6 +25,8 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     DividendComparisonOutcome,
     EarningsDateStatus,
+    EarningsDecisionRelevance,
+    EarningsReleaseConfirmationState,
     ProfitTakingIndustrySector,
     RecommendationType,
     RecordDateUnknownReason,
@@ -210,6 +212,10 @@ class Recommendation(ImmutableSnapshot):
     # (監査用、STALE_PAST_DATEの場合でもnext_earnings_dateはNoneのまま)。
     earnings_date_status: EarningsDateStatus | None = None
     earnings_date_raw: dt.date | None = None
+    # --- デプロイ前対応で追加。待機通知の重複抑止キー・監査用(既存レコードは
+    # 欠落するため既定None、後方互換) ---
+    earnings_release_confirmation_state: EarningsReleaseConfirmationState | None = None
+    earnings_decision_relevance: EarningsDecisionRelevance | None = None
 
     # --- 気になる銘柄と保有銘柄の統合BUY候補パイプライン(2026-07)で追加。
     # 既存レコード(candidate_source欠落)は表示層でWATCHLIST扱いにフォールバック

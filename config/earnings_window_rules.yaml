@@ -26,3 +26,9 @@ fiscal_period_reporting_lag_days: 60
 # 決算予定日経過後、財務データの更新確認をこの時間(時間単位)待っても確認
 # できない場合はDELAYEDへ遷移させる。
 maximum_data_reflection_wait_hours: 48
+
+# デプロイ前対応: 過去の決算予定日からこの日数以内であれば、財務データが
+# 未更新でも現在の判断に関連するとみなす(RELEVANT)。これを超えて経過しても
+# なお財務データの更新が確認できない場合はUNKNOWNとし、通常判定を無期限に
+# 停止しない(Provider障害・データ提供元の長期停滞への安全策)。
+stale_earnings_relevance_days: 10

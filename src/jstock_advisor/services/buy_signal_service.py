@@ -141,7 +141,9 @@ class BuySignalService:
         # --- 1. データ品質検証(スナップショット取得) ---
         error: str | None = None
         if snapshot is None:
-            snapshot, error = build_stock_snapshot(self._providers, stock_code, now, self._config)
+            snapshot, error = build_stock_snapshot(
+                self._providers, stock_code, now, self._config, business_calendar=self._calendar
+            )
         if snapshot is None:
             self._audit.record(
                 decision_type="buy_signal",
@@ -366,12 +368,8 @@ class BuySignalService:
         earnings_date_status = snapshot.earnings_date_status
         resolved_next_earnings_date = snapshot.next_earnings_date
 
-        # 次回決算までの営業日数(§16)
-        business_days_to_earnings = (
-            self._calendar.business_days_between(now.date(), resolved_next_earnings_date)
-            if resolved_next_earnings_date is not None
-            else None
-        )
+        # 次回決算までの営業日数(§16、デプロイ前対応でsnapshot側の一元計算値を使用)
+        business_days_to_earnings = snapshot.business_days_to_earnings
         data_quality_warning = has_stale_data_warning or business_days_to_earnings is None
 
         avg_trading_value = snapshot.avg_trading_value
