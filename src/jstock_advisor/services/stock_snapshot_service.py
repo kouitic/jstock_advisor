@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.stock_type import classify_stock_type
 from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.domain.entities.common import (
@@ -27,6 +28,7 @@ from jstock_advisor.domain.financial_series import (
     build_financial_period_series,
     to_seasonally_adjusted_series,
 )
+from jstock_advisor.domain.jst import evaluation_date_jst, require_timezone_aware
 from jstock_advisor.domain.screening.rules import (
     detect_disclosure_risk_keywords,
     detect_material_event_keywords,
@@ -80,6 +82,10 @@ class StockSnapshot:
     next_earnings_date: dt.date | None
     earnings_date_status: EarningsDateStatus
     earnings_date_raw: dt.date | None
+    # 次回決算までの営業日数(JST暦日基準、決算日修正デプロイ前対応で新設)。
+    # buy/sell/profit_takingの3消費者が個別に再計算していたのをここへ一元化する
+    # (計算元を1か所にすることで、UTC/JST境界の誤判定を1箇所の修正で解消できる)。
+    business_days_to_earnings: int | None
     dividend_yield_pct: float | None
     benefit_yield_pct: float | None
     annual_benefit_value: Decimal | None
@@ -108,7 +114,15 @@ def build_stock_snapshot(
     stock_code: str,
     now: dt.datetime,
     config: AppConfig,
+    business_calendar: BusinessCalendar | None = None,
 ) -> tuple[StockSnapshot | None, str | None]:
+    # 決算日修正デプロイ前対応: nowはtimezone-aware必須(naiveを暗黙にUTC扱いしない)。
+    require_timezone_aware(now)
+    calendar = business_calendar or BusinessCalendar.from_config(config.holiday_calendar)
+    # 決算日関連の暦日比較は必ずJST基準で行う(UTC-awareなnowに.date()を直接呼ぶと、
+    # JST 00:00-09:00の間は前日のUTC日付になり誤判定する)。
+    evaluation_date = evaluation_date_jst(now)
+
     snap = providers.market_data.get_latest_price(stock_code)
     if snap is None:
         return None, "株価データを取得できません"
@@ -162,12 +176,20 @@ def build_stock_snapshot(
     if earnings_date_raw is None:
         earnings_date_status = EarningsDateStatus.UNAVAILABLE
         next_earnings_date = None
-    elif earnings_date_raw < now.date():
+    elif earnings_date_raw < evaluation_date:
         earnings_date_status = EarningsDateStatus.STALE_PAST_DATE
         next_earnings_date = None
     else:
         earnings_date_status = EarningsDateStatus.CONFIRMED
         next_earnings_date = earnings_date_raw
+    # 次回決算までの営業日数(JST暦日基準)。ここで1回だけ計算し、buy/sell/
+    # profit_takingは全てsnapshot.business_days_to_earningsを読むだけにする
+    # (デプロイ前対応: 計算元の分散によるUTC/JST境界の誤判定を防止)。
+    business_days_to_earnings = (
+        calendar.business_days_between(evaluation_date, next_earnings_date)
+        if next_earnings_date is not None
+        else None
+    )
 
     coefficients = BenefitUtilityCoefficients(
         **config.scoring.shareholder_benefit_value.utility_coefficients_default.model_dump()
@@ -312,6 +334,7 @@ def build_stock_snapshot(
         next_earnings_date=next_earnings_date,
         earnings_date_status=earnings_date_status,
         earnings_date_raw=earnings_date_raw,
+        business_days_to_earnings=business_days_to_earnings,
         dividend_yield_pct=dividend_yield_pct,
         benefit_yield_pct=benefit_yield_pct,
         annual_benefit_value=annual_benefit_value,

@@ -4,6 +4,7 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import (
     EarningsDateStatus,
+    EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsWindowStatus,
     RecommendationType,
@@ -11,6 +12,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.signals.earnings_window import (
     evaluate_earnings_window,
     recommend_earnings_aware_action,
+    resolve_earnings_decision_relevance,
     resolve_earnings_release_confirmation,
 )
 
@@ -135,18 +137,26 @@ def test_no_window_status_passes_through_unchanged() -> None:
 # ===== resolve_earnings_release_confirmation(コードレビュー対応: 明治HD事例) =====
 
 _NOW = dt.datetime(2026, 8, 6, tzinfo=dt.UTC)
+# 48時間起点(デプロイ前対応): 決算予定日(2026-08-05)の翌日JST 00:00
+# = UTC 2026-08-05T15:00。
+_AWAITING_STARTED_AT_UTC = dt.datetime(2026, 8, 5, 15, 0, tzinfo=dt.UTC)
 
 
 def test_release_confirmation_not_applicable_when_confirmed_future_date() -> None:
     result = resolve_earnings_release_confirmation(
-        EarningsDateStatus.CONFIRMED, dt.date(2026, 9, 1), dt.date(2026, 3, 31), _NOW, _CONFIG
+        EarningsDateStatus.CONFIRMED,
+        dt.date(2026, 9, 1),
+        dt.date(2026, 3, 31),
+        _NOW,
+        _NOW,
+        _CONFIG,
     )
     assert result == EarningsReleaseConfirmationState.NOT_APPLICABLE
 
 
 def test_release_confirmation_not_applicable_when_unavailable() -> None:
     result = resolve_earnings_release_confirmation(
-        EarningsDateStatus.UNAVAILABLE, None, dt.date(2026, 3, 31), _NOW, _CONFIG
+        EarningsDateStatus.UNAVAILABLE, None, dt.date(2026, 3, 31), _NOW, _NOW, _CONFIG
     )
     assert result == EarningsReleaseConfirmationState.NOT_APPLICABLE
 
@@ -159,6 +169,7 @@ def test_release_confirmation_awaiting_when_stale_and_fiscal_period_not_updated(
         EarningsDateStatus.STALE_PAST_DATE,
         dt.date(2026, 8, 5),
         dt.date(2026, 3, 31),
+        _NOW,  # financial_fetched_at(決算予定日以後だが期末日が古いため無関係)
         _NOW,  # 8/5の翌日
         _CONFIG,
     )
@@ -167,25 +178,46 @@ def test_release_confirmation_awaiting_when_stale_and_fiscal_period_not_updated(
 
 def test_release_confirmation_data_updated_when_fiscal_period_end_recent() -> None:
     """明治HD回帰: fiscal_period_endが6/30(8/5の想定報告ラグ60日以内)まで
-    進んでいれば、決算発表が財務データへ反映されたとみなしDATA_UPDATED。"""
+    進んでおり、かつ財務データの取得時刻も決算予定日以後であれば、決算発表が
+    財務データへ反映されたとみなしDATA_UPDATED。"""
     result = resolve_earnings_release_confirmation(
         EarningsDateStatus.STALE_PAST_DATE,
         dt.date(2026, 8, 5),
         dt.date(2026, 6, 30),
+        _NOW,  # financial_fetched_at: 8/5以後
         _NOW,
         _CONFIG,
     )
     assert result == EarningsReleaseConfirmationState.DATA_UPDATED
 
 
+def test_release_confirmation_not_data_updated_when_fetched_before_earnings_date() -> None:
+    """デプロイ前対応の回帰: fiscal_period_endが報告ラグ以内でも、財務データの
+    取得時刻(fetched_at)が決算予定日より前であれば、決算発表前から保持していた
+    データの可能性があるためDATA_UPDATEDにしない。
+    """
+    fetched_before_earnings_date = dt.datetime(2026, 8, 4, tzinfo=dt.UTC)
+    result = resolve_earnings_release_confirmation(
+        EarningsDateStatus.STALE_PAST_DATE,
+        dt.date(2026, 8, 5),
+        dt.date(2026, 6, 30),  # 報告ラグ条件自体は満たす
+        fetched_before_earnings_date,
+        _NOW,
+        _CONFIG,
+    )
+    assert result != EarningsReleaseConfirmationState.DATA_UPDATED
+    assert result == EarningsReleaseConfirmationState.AWAITING_CONFIRMATION
+
+
 def test_release_confirmation_delayed_after_maximum_wait_hours() -> None:
     """maximum_data_reflection_wait_hours(既定48時間)を超えてもfiscal_period_end
-    が更新されない場合はDELAYEDへ遷移する。"""
-    later = dt.datetime(2026, 8, 8, 1, 0, tzinfo=dt.UTC)  # 8/5 00:00から49時間後
+    が更新されない場合はDELAYEDへ遷移する(起点は決算予定日翌日JST 00:00)。"""
+    later = _AWAITING_STARTED_AT_UTC + dt.timedelta(hours=49)
     result = resolve_earnings_release_confirmation(
         EarningsDateStatus.STALE_PAST_DATE,
         dt.date(2026, 8, 5),
         dt.date(2026, 3, 31),
+        later,
         later,
         _CONFIG,
     )
@@ -193,12 +225,67 @@ def test_release_confirmation_delayed_after_maximum_wait_hours() -> None:
 
 
 def test_release_confirmation_not_yet_delayed_just_before_max_wait_hours() -> None:
-    just_before = dt.datetime(2026, 8, 6, 23, 0, tzinfo=dt.UTC)  # 8/5 00:00から47時間後
+    just_before = _AWAITING_STARTED_AT_UTC + dt.timedelta(hours=47)
     result = resolve_earnings_release_confirmation(
         EarningsDateStatus.STALE_PAST_DATE,
         dt.date(2026, 8, 5),
         dt.date(2026, 3, 31),
         just_before,
+        just_before,
         _CONFIG,
     )
     assert result == EarningsReleaseConfirmationState.AWAITING_CONFIRMATION
+
+
+# ===== resolve_earnings_decision_relevance(デプロイ前対応: 無期限抑制の防止) =====
+
+
+def test_decision_relevance_not_relevant_when_not_stale() -> None:
+    result = resolve_earnings_decision_relevance(
+        EarningsDateStatus.CONFIRMED,
+        dt.date(2026, 9, 1),
+        EarningsReleaseConfirmationState.NOT_APPLICABLE,
+        dt.date(2026, 8, 6),
+        _CONFIG,
+    )
+    assert result == EarningsDecisionRelevance.NOT_RELEVANT
+
+
+def test_decision_relevance_not_relevant_when_data_updated() -> None:
+    """財務データが既に決算後まで進んでいる場合は、経過日数に関わらずNOT_RELEVANT
+    (通常判定へ復帰してよい)。"""
+    result = resolve_earnings_decision_relevance(
+        EarningsDateStatus.STALE_PAST_DATE,
+        dt.date(2026, 8, 5),
+        EarningsReleaseConfirmationState.DATA_UPDATED,
+        dt.date(2026, 8, 6),
+        _CONFIG,
+    )
+    assert result == EarningsDecisionRelevance.NOT_RELEVANT
+
+
+def test_decision_relevance_relevant_when_recent_and_unconfirmed() -> None:
+    """直近過去日(翌日)で財務更新未確認ならRELEVANT(通常利確提案を保留)。"""
+    result = resolve_earnings_decision_relevance(
+        EarningsDateStatus.STALE_PAST_DATE,
+        dt.date(2026, 8, 5),
+        EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
+        dt.date(2026, 8, 6),
+        _CONFIG,
+    )
+    assert result == EarningsDecisionRelevance.RELEVANT
+
+
+def test_decision_relevance_unknown_when_far_past_and_still_unconfirmed() -> None:
+    """デプロイ前対応の回帰: 6か月前の過去日をProviderが返し続け、財務データも
+    更新されないまま(AWAITING/DELAYED)の場合、stale_earnings_relevance_days
+    (既定10日)を大きく超えているためUNKNOWNとし、通常判定を無期限に止めない。
+    """
+    result = resolve_earnings_decision_relevance(
+        EarningsDateStatus.STALE_PAST_DATE,
+        dt.date(2026, 2, 5),  # 評価日の6か月前
+        EarningsReleaseConfirmationState.DELAYED,
+        dt.date(2026, 8, 6),
+        _CONFIG,
+    )
+    assert result == EarningsDecisionRelevance.UNKNOWN

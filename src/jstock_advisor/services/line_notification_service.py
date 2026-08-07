@@ -27,6 +27,7 @@ from jstock_advisor.domain.entities.enums import (
     CandidateSource,
     ConfidenceLevel,
     DividendComparisonOutcome,
+    EarningsReleaseConfirmationState,
     EligibilityBlockCategory,
     NotificationContext,
     NotificationStatus,
@@ -261,6 +262,36 @@ def _representative_price(recommendation: Recommendation) -> Decimal | None:
 
 def _compute_content_hash(recommendation_type: RecommendationType) -> str:
     return hashlib.sha256(recommendation_type.value.encode()).hexdigest()[:16]
+
+
+def _earnings_waiting_state_key(recommendation: Recommendation) -> str:
+    """決算発表確認待ち通知(REVIEW_AFTER_EARNINGS)専用の重複判定キー
+    (デプロイ前対応)。
+
+    価格情報を持たない(sell_prices=SellPriceLevels())ため、既存の代表価格
+    比較では状態変化(AWAITING_CONFIRMATION→DELAYED等)を検知できない。
+    next_review_conditions(自由文)の比較は文言変更に対して脆いため、構造化
+    フィールドのみで再送判定を行う。nowや取得時刻など毎回変わりうる値は
+    含めない(同一状態が続く限り同じキーになる必要があるため)。
+    """
+    payload = "|".join(
+        [
+            recommendation.stock_code,
+            recommendation.earnings_date_raw.isoformat()
+            if recommendation.earnings_date_raw is not None
+            else "",
+            recommendation.earnings_date_status.value
+            if recommendation.earnings_date_status is not None
+            else "",
+            recommendation.earnings_release_confirmation_state.value
+            if recommendation.earnings_release_confirmation_state is not None
+            else "",
+            recommendation.earnings_decision_relevance.value
+            if recommendation.earnings_decision_relevance is not None
+            else "",
+        ]
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def compute_watchlist_addition_content_hash(
@@ -1091,7 +1122,26 @@ def _format_earnings_release_pending_message(recommendation: Recommendation) -> 
     決算予定日を経過したが無償データで発表実績を確認できない期間、通常の
     PARTIAL/FULL_PROFIT_TAKE提案を保留した場合の通知。"決算未発表"とも
     "決算発表済み"とも断定しない(過去の決算予定日を次回決算として表示しない)。
+
+    --- デプロイ前対応で追加 ---
+    earnings_release_confirmation_state(AWAITING_CONFIRMATION/DELAYED)に応じて
+    文言を分ける。DELAYEDは確認が長引いている旨・データ提供元側の遅延の
+    可能性を明示する(自由文の解析ではなく構造化フィールドで分岐する)。
     """
+    if recommendation.earnings_release_confirmation_state == (
+        EarningsReleaseConfirmationState.DELAYED
+    ):
+        status_line = (
+            "決算発表予定日を経過してから一定時間が経過していますが、最新財務データの"
+            "更新を確認できていません。データ提供元の更新遅延または取得不良の可能性が"
+            "あります。"
+        )
+    else:
+        status_line = (
+            "決算発表予定日を迎えていますが、無償データから実際の発表状況を確認できて"
+            "いません。過去の決算予定日を次回決算として使用せず、最新財務データの"
+            "更新を確認後に判断を更新します。"
+        )
     lines = [
         f"【決算発表状況確認待ち】{recommendation.stock_code} {recommendation.stock_name}",
         "",
@@ -1099,9 +1149,7 @@ def _format_earnings_release_pending_message(recommendation: Recommendation) -> 
         f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
         f"現在 {_yen(recommendation.price_at_recommendation)}",
         "",
-        "決算発表予定日を迎えていますが、無償データから実際の発表状況を確認できて"
-        "いません。過去の決算予定日を次回決算として使用せず、最新財務データの"
-        "更新を確認後に判断を更新します。",
+        status_line,
     ]
     if recommendation.next_review_conditions:
         lines.append("")
@@ -2084,14 +2132,15 @@ class LineNotificationService:
             if change_pct >= self._config.notification.price_change_resend_threshold_pct:
                 return NotificationStatus.SENT
 
-        # 決算発表確認待ち通知(コードレビュー対応)。REVIEW_AFTER_EARNINGSは
-        # sell_prices=SellPriceLevels()(価格情報なし)のためprice_comparableに
-        # ならず、AWAITING_CONFIRMATION→DELAYEDのような同一recommendation_type内の
-        # 状態変化を価格変化だけでは検知できない。next_review_conditions(状態別の
-        # 待機文言)が変化していれば、再送資格ありとみなす(待機通知の再送抑止)。
+        # 決算発表確認待ち通知(コードレビュー対応・デプロイ前対応)。
+        # REVIEW_AFTER_EARNINGSはsell_prices=SellPriceLevels()(価格情報なし)の
+        # ためprice_comparableにならず、AWAITING_CONFIRMATION→DELAYEDのような
+        # 同一recommendation_type内の状態変化を価格変化だけでは検知できない。
+        # 構造化フィールド(_earnings_waiting_state_key)が変化していれば、
+        # 再送資格ありとみなす(自由文の比較は文言変更に対して脆いため使わない)。
         if (
             recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
-            and previous.next_review_conditions != recommendation.next_review_conditions
+            and _earnings_waiting_state_key(previous) != _earnings_waiting_state_key(recommendation)
         ):
             return NotificationStatus.SENT
 

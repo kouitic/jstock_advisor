@@ -431,6 +431,19 @@ class EarningsReleaseConfirmationState(StrEnum):
     DELAYED = "DELAYED"
 
 
+class EarningsDecisionRelevance(StrEnum):
+    """過去の決算予定日が現在の判断にまだ関連しているかどうか(デプロイ前対応)。
+
+    無償データのProviderが何か月も前の過去の決算予定日を返し続けた場合に、
+    利確判定が無期限にREVIEW_AFTER_EARNINGSへ抑制され続けることを防ぐために
+    導入する。RELEVANTの場合のみ通常判定を保留する。
+    """
+
+    RELEVANT = "RELEVANT"
+    NOT_RELEVANT = "NOT_RELEVANT"
+    UNKNOWN = "UNKNOWN"
+
+
 class TriggerStatus(StrEnum):
     """売却ルール1件ごとの該当有無を表現する(2026-07仕様§3、レビュー対応で拡張)。
 

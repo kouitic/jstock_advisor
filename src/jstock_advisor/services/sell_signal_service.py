@@ -241,12 +241,9 @@ class SellSignalService:
             for e in result.evidence_details
         )
         data_freshness_days = (now - snapshot.data_fetched_at).days
-        days_to_earnings = None
-        if snapshot.next_earnings_date is not None:
-            # 営業日ベースで算出する(要求仕様レビュー対応。土日祝日を除く)。
-            days_to_earnings = self._calendar.business_days_between(
-                now.date(), snapshot.next_earnings_date
-            )
+        # 営業日ベース(要求仕様レビュー対応。土日祝日を除く)。デプロイ前対応で
+        # snapshot側の一元計算値(JST基準)を使用する。
+        days_to_earnings = snapshot.business_days_to_earnings
 
         triggered = [e for e in result.evidence_details if e.status == TriggerStatus.TRIGGERED]
         primary_source_fetch_rate = (
@@ -278,7 +275,11 @@ class SellSignalService:
         error: str | None = None
         if snapshot is None:
             snapshot, error = build_stock_snapshot(
-                self._providers, holding.stock_code, now, self._config
+                self._providers,
+                holding.stock_code,
+                now,
+                self._config,
+                business_calendar=self._calendar,
             )
         if snapshot is None:
             self._audit.record(

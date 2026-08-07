@@ -11,7 +11,9 @@ _build_next_review_conditions()はnext_earnings_dateをそのまま表示する�
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 
+from jstock_advisor.services import sell_signal_service as sell_signal_service_module
 from jstock_advisor.services.sell_signal_service import _build_next_review_conditions
 
 
@@ -27,3 +29,17 @@ def test_next_review_conditions_includes_earnings_line_when_confirmed() -> None:
     future = dt.date(2026, 11, 15)
     conditions = _build_next_review_conditions([], future)
     assert f"次回決算発表({future})後に本判定を再評価する" in conditions
+
+
+def test_sell_signal_service_does_not_reference_earnings_release_gating() -> None:
+    """SELL/URGENT_REVIEW系は決算発表確認待ち(AWAITING_CONFIRMATION/DELAYED)による
+    抑制の対象外(デプロイ前対応§8: 投資前提悪化の確定的シグナルは決算タイミングで
+    抑制しない)。sell_signal_service.pyがresolve_earnings_release_confirmation等を
+    一切参照していないことを確認し、将来の変更で誤って組み込まれないための
+    構造的な回帰ガードとする。
+    """
+    source = inspect.getsource(sell_signal_service_module)
+    assert "resolve_earnings_release_confirmation" not in source
+    assert "resolve_earnings_decision_relevance" not in source
+    assert "EarningsReleaseConfirmationState" not in source
+    assert "EarningsDecisionRelevance" not in source

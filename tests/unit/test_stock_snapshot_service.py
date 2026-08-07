@@ -12,6 +12,8 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 
+import pytest
+
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import EarningsDateStatus
 from jstock_advisor.interfaces.types import Disclosure
@@ -86,3 +88,62 @@ def test_missing_earnings_date_is_unavailable() -> None:
     assert snapshot.earnings_date_status == EarningsDateStatus.UNAVAILABLE
     assert snapshot.earnings_date_raw is None
     assert snapshot.next_earnings_date is None
+
+
+# ===== JST基準の境界テスト(デプロイ前対応) =====
+
+
+def test_jst_boundary_rejects_date_that_is_today_in_utc_but_past_in_jst() -> None:
+    """UTC 2026-08-05T23:00 = JST 2026-08-06T08:00。素の.date()(UTC基準)なら
+    8/5になり「当日」と誤判定するが、JST基準では8/6が評価日のため、8/5は
+    過去日として正しくSTALE_PAST_DATEになる。
+    """
+    now_utc_23 = dt.datetime(2026, 8, 5, 23, 0, tzinfo=dt.UTC)
+    providers = _providers_with_fixed_earnings_date(dt.date(2026, 8, 5))
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, now_utc_23, _CFG)
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.earnings_date_status == EarningsDateStatus.STALE_PAST_DATE
+    assert snapshot.next_earnings_date is None
+
+
+def test_jst_boundary_treats_date_as_today_when_jst_date_matches() -> None:
+    """UTC 2026-08-04T23:00 = JST 2026-08-05T08:00。決算予定日が8/5の場合、
+    JST基準では「当日」のためCONFIRMEDのままとなり、営業日数は0になる。
+    """
+    now_utc_23 = dt.datetime(2026, 8, 4, 23, 0, tzinfo=dt.UTC)
+    providers = _providers_with_fixed_earnings_date(dt.date(2026, 8, 5))
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, now_utc_23, _CFG)
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.earnings_date_status == EarningsDateStatus.CONFIRMED
+    assert snapshot.next_earnings_date == dt.date(2026, 8, 5)
+    assert snapshot.business_days_to_earnings == 0
+
+
+def test_naive_now_is_rejected() -> None:
+    providers = _providers_with_fixed_earnings_date(None)
+    naive_now = dt.datetime(2026, 8, 6)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_stock_snapshot(providers, _STOCK_CODE, naive_now, _CFG)
+
+
+def test_business_days_to_earnings_is_computed_once_on_snapshot() -> None:
+    """next_earnings_dateが未来日の場合、business_days_to_earningsがJST暦日
+    基準で1回だけ計算されsnapshotへ格納される(buy/sell/profit_takingが
+    個別に再計算しないための一元化)。"""
+    future = _NOW.date() + dt.timedelta(days=7)
+    providers = _providers_with_fixed_earnings_date(future)
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.business_days_to_earnings is not None
+    assert snapshot.business_days_to_earnings > 0
+
+
+def test_business_days_to_earnings_is_none_when_earnings_date_stale() -> None:
+    providers = _providers_with_fixed_earnings_date(dt.date(2026, 8, 5))
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.business_days_to_earnings is None
