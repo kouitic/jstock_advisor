@@ -282,6 +282,41 @@ def test_github_api_failure_marks_issue_creation_failed(
     assert status == ImprovementTaskStatus.ISSUE_CREATION_FAILED
 
 
+def test_invalid_private_key_pem_is_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, aws_env: str, config
+) -> None:
+    """Secret JSON自体は正常(app_id/installation_id/private_keyすべて存在)だが、
+    private_keyのPEM形式が不正な場合、JWT生成(GithubIssueClient._generate_app_jwt)
+    で初めてGithubConfigurationErrorが判明する。process_candidate()はこれを
+    ISSUE_CREATION_FAILEDではなくCONFIGURATION_ERRORへ分類し、GitHub API呼び出し
+    (Issue作成等)まで到達しないこと、例外がprocess_candidate()の外へ伝播しない
+    ことを確認する。"""
+    secretsmanager = boto3.client("secretsmanager", region_name=_REGION)
+    secretsmanager.create_secret(
+        Name="github-app-bad-key",
+        SecretString=json.dumps(
+            {"app_id": "123", "installation_id": "456", "private_key": "INVALID PRIVATE KEY"}
+        ),
+    )
+    secret_arn = secretsmanager.describe_secret(SecretId="github-app-bad-key")["ARN"]
+
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(github_client_module.urllib.request, "urlopen", fake)
+
+    status = github_issue_service.process_candidate(
+        _candidate(), "2026-W32", _NOW, config, "owner", "repo", secret_arn
+    )
+
+    assert status == ImprovementTaskStatus.CONFIGURATION_ERROR
+    task = tracker.get_improvement_task(_candidate().candidate_key)
+    assert task is not None
+    assert task["status"] == ImprovementTaskStatus.CONFIGURATION_ERROR.value
+    # JWT生成前にHTTP通信は発生しないため、GitHub APIには一切到達していない。
+    assert fake.requests == []
+    for record in caplog.records:
+        assert "INVALID PRIVATE KEY" not in record.getMessage()
+
+
 def test_evaluation_criteria_undefined_candidate_can_create_issue_on_first_week(
     monkeypatch: pytest.MonkeyPatch, aws_env: str, config
 ) -> None:
