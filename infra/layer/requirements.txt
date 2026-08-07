@@ -25,3 +25,8 @@ yfinance>=1.5.2,<1.6.0
 # dependencies, so adding it to only one of the two would silently drop it in
 # production).
 xlrd>=2.0,<3.0
+# Weekly improvement review revamp (2026-08): GitHub App JWT auth for the
+# GitHub Issue integration (infrastructure/github/client.py, used by
+# WeeklyReviewFunction only). The [crypto] extra pulls in the cryptography
+# package needed for RS256 signing (not otherwise present in this layer).
+PyJWT[crypto]>=2.10,<3.0

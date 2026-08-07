@@ -9,6 +9,7 @@ import typer
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.entities.evaluation import EvaluationResult
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
     EvaluationResultRepository,
 )
@@ -21,9 +22,15 @@ from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
 )
 
-app = typer.Typer(help="推奨の定点評価(推奨後N営業日時点の実績計測とラベル付与)")
+app = typer.Typer(help="推奨の定点評価(推奨後N営業日/N暦日時点の実績計測とラベル付与)")
 
 _SOURCE_HELP = "株価データ提供元: mock(既定)/ real(yfinance)"
+
+
+def _format_horizon(result: EvaluationResult) -> str:
+    if result.horizon_business_days is not None:
+        return f"{result.horizon_business_days}営業日"
+    return f"{result.horizon_calendar_days}暦日"
 
 
 def _build_providers(source: str, now: dt.datetime, config: AppConfig) -> ProviderBundle:
@@ -49,20 +56,23 @@ def run_due_evaluations(
     )
 
     outcome = service.run_due_evaluations(now)
-    if not outcome.evaluated and not outcome.skipped_due_to_data_error:
+    calendar_outcome = service.run_due_calendar_evaluations(now)
+    all_evaluated = outcome.evaluated + calendar_outcome.evaluated
+    all_skipped = outcome.skipped_due_to_data_error + calendar_outcome.skipped_due_to_data_error
+    if not all_evaluated and not all_skipped:
         typer.echo("評価期限を迎えた推奨はありませんでした。")
         return
 
-    for result in outcome.evaluated:
+    for result in all_evaluated:
         typer.echo(
             f"[{result.evaluation_label.value}] recommendation_id={result.recommendation_id} "
-            f"horizon={result.horizon_business_days}営業日 "
+            f"horizon={_format_horizon(result)} "
             f"株価リターン={result.price_return_pct:.1f}%"
         )
         typer.echo(f"  根拠: {result.label_evidence}")
 
-    for stock_code, horizon, reason in outcome.skipped_due_to_data_error:
-        typer.echo(f"[DATA_ERROR] {stock_code} horizon={horizon}営業日: {reason}")
+    for stock_code, horizon, reason in all_skipped:
+        typer.echo(f"[DATA_ERROR] {stock_code} horizon={horizon}: {reason}")
 
 
 @app.command("list")
@@ -80,6 +90,6 @@ def list_evaluations(
     for result in results:
         typer.echo(
             f"[{result.evaluation_label.value}] recommendation_id={result.recommendation_id} "
-            f"horizon={result.horizon_business_days}営業日 "
+            f"horizon={_format_horizon(result)} "
             f"評価日={result.evaluation_date} 株価リターン={result.price_return_pct:.1f}%"
         )

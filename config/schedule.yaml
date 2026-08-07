@@ -34,10 +34,14 @@ jobs:
     time: "18:00"
 
   weekly_review:
-    description: "週次レビュー"
+    # 振り返り機能改修(2026-08): 全期間合算レポートのLINE自動送信を廃止し、
+    # 前週(月〜日 JST)に確定した評価を分析する週次改善レビューへ置き換えた。
+    # 前週を完全に確定させてから分析する必要があるため、日曜ではなく月曜(その日の
+    # point_in_time_evaluation 18:00完了後)に実行する。
+    description: "週次改善レビュー(改善候補検出・GitHub Issue自動起票)"
     enabled: true
-    days: ["sat"]
-    time: "09:00"
+    days: ["mon"]
+    time: "19:00"
 
   monthly_review:
     description: "前月の月次レビュー(実行日が当月第1土曜日かどうかはLambda側で判定)"

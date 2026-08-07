@@ -31,6 +31,7 @@ from jstock_advisor.config.models import (
     NotificationRulesConfig,
     PortfolioConcentrationRulesConfig,
     ProfitTakingRulesConfig,
+    ReviewImprovementConfig,
     ScheduleConfig,
     ScoringWeightsConfig,
     ScreeningRulesConfig,
@@ -139,6 +140,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     industry_scoring_policy = IndustryScoringPolicyConfig.model_validate(
         _load_yaml(directory / "industry_scoring_policy.yaml")
     )
+    review_improvement = ReviewImprovementConfig.model_validate(
+        _load_yaml(directory / "review_improvement.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -164,4 +168,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         holding_decision_ratio=holding_decision_ratio,
         investment_thesis_template=investment_thesis_template,
         industry_scoring_policy=industry_scoring_policy,
+        review_improvement=review_improvement,
     )

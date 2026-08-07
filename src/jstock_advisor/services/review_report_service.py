@@ -23,7 +23,15 @@ _DISCLAIMER = "※最終的な投資判断は利用者が行ってください�
 
 
 def _format_bucket_line(bucket: MetricsBucket) -> str:
-    rate = f"{bucket.success_rate_pct:.1f}%" if bucket.success_rate_pct is not None else "-"
+    # conclusive_count==0(=全件がDATA_ISSUE/INCONCLUSIVE)の場合は「0%」ではなく
+    # 「評価対象外」と表示する(WATCH等、自動評価の対象外な種別を誤って
+    # 成績不良と読ませないため)。
+    if bucket.conclusive_count == 0:
+        rate = "評価対象外"
+    elif bucket.success_rate_pct is not None:
+        rate = f"{bucket.success_rate_pct:.1f}%"
+    else:
+        rate = "-"
     return f"  {bucket.key}: {bucket.count}件 成功率{rate}"
 
 

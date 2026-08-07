@@ -241,6 +241,46 @@ class EvaluationLabel(StrEnum):
     INCONCLUSIVE = "INCONCLUSIVE"
 
 
+class ImprovementPriority(StrEnum):
+    """週次改善レビュー(振り返り機能改修)の改善候補優先度。"""
+
+    A = "A"
+    B = "B"
+    C = "C"
+    NONE = "NONE"
+
+
+class ImprovementAction(StrEnum):
+    """週次改善レビューが改善候補へ付与する推奨アクション区分。"""
+
+    ADJUST_THRESHOLD = "ADJUST_THRESHOLD"
+    REVIEW_LOGIC = "REVIEW_LOGIC"
+    # WATCH/REVIEW等、determine_evaluation_label()が無条件にINCONCLUSIVEを返す
+    # (=自動評価の対象外)種別向け。「成績が悪い」ではなく「評価定義そのものが
+    # 未整備」であることを表す。
+    DEFINE_EVALUATION_CRITERIA = "DEFINE_EVALUATION_CRITERIA"
+    INVESTIGATE_SEGMENT = "INVESTIGATE_SEGMENT"
+
+
+class ImprovementTaskStatus(StrEnum):
+    """GitHub Issue化フローの状態(振り返り機能改修)。
+
+    SKIPPED_NOT_CONFIGUREDは issue_creation_enabled=false による正常なスキップ、
+    CONFIGURATION_ERRORはissue_creation_enabled=trueなのにGitHub認証情報が
+    不備・取得失敗している異常状態であり、両者を明確に区別する(前者は運用
+    エラー通知を送らない、後者は送る)。ISSUE_CREATINGは新規Issue作成中の原子的な
+    claim状態を表し、claim期限切れ(stale)を検出した場合もGitHub側の実在確認を
+    先に行ってから復旧・再claimする(batch_tracker.pyと同様の排他制御パターン)。
+    """
+
+    CANDIDATE = "CANDIDATE"
+    SKIPPED_NOT_CONFIGURED = "SKIPPED_NOT_CONFIGURED"
+    CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+    ISSUE_CREATING = "ISSUE_CREATING"
+    ISSUE_CREATED = "ISSUE_CREATED"
+    ISSUE_CREATION_FAILED = "ISSUE_CREATION_FAILED"
+
+
 class NotificationType(StrEnum):
     DAILY_BUY_CANDIDATES = "DAILY_BUY_CANDIDATES"
     WATCHLIST_BUY_SIGNAL = "WATCHLIST_BUY_SIGNAL"

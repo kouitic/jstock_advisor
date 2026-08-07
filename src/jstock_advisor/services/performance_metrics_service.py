@@ -22,8 +22,13 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 
-# 成功率算出の分母から除外するラベル(判断の巧拙ではなくデータ欠如を示すため)
-_EXCLUDED_FROM_SUCCESS_RATE = frozenset({EvaluationLabel.DATA_ISSUE})
+# 成功率算出の分母から除外するラベル(判断の巧拙ではなくデータ欠如・対象外を示すため)。
+# INCONCLUSIVEはdetermine_evaluation_label()がWATCH/REVIEW等「自動評価の対象外」の
+# 種別へ無条件に付与するラベルであり、DATA_ISSUE(データ取得失敗)と同様に「判断の
+# 巧拙を測れない」ケースである。従来はDATA_ISSUEのみ除外しておりINCONCLUSIVEが
+# 分母に残ったまま失敗扱いになる(=対象種別が常に成功率0%になる)不具合があったため、
+# 振り返り機能改修でINCONCLUSIVEも除外対象に追加した。
+_EXCLUDED_FROM_SUCCESS_RATE = frozenset({EvaluationLabel.DATA_ISSUE, EvaluationLabel.INCONCLUSIVE})
 _SUCCESS_LABELS = frozenset({EvaluationLabel.SUCCESS, EvaluationLabel.ACCEPTABLE})
 
 
@@ -31,6 +36,7 @@ _SUCCESS_LABELS = frozenset({EvaluationLabel.SUCCESS, EvaluationLabel.ACCEPTABLE
 class MetricsBucket:
     key: str
     count: int
+    conclusive_count: int
     success_rate_pct: float | None
     avg_price_return_pct: float | None
     avg_excess_return_pct: float | None
@@ -68,6 +74,7 @@ def build_metrics_bucket(key: str, evaluations: list[EvaluationResult]) -> Metri
     return MetricsBucket(
         key=key,
         count=len(evaluations),
+        conclusive_count=len(conclusive),
         success_rate_pct=success_rate_pct,
         avg_price_return_pct=avg_price_return_pct,
         avg_excess_return_pct=avg_excess_return_pct,
