@@ -668,6 +668,8 @@ class ProfitTakingService:
                 snapshot.benefit
             ),
             business_days_to_earnings=days_to_earnings,
+            # 判定精度向上機能Phase B: DecisionSnapshot記録専用(Shadow計測)。
+            historical_valuation_score=snapshot.historical_valuation_score,
         )
         return ProfitTakingOutcome(holding.stock_code, recommendation, None)
 

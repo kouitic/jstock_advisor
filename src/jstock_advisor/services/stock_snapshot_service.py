@@ -34,6 +34,9 @@ from jstock_advisor.domain.screening.rules import (
     detect_material_event_keywords,
 )
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
+from jstock_advisor.domain.signals.historical_valuation import (
+    compute_historical_valuation_score,
+)
 from jstock_advisor.domain.signals.momentum import compute_momentum_snapshot
 from jstock_advisor.domain.valuation.fair_value import (
     aggregate_fair_value,
@@ -107,6 +110,12 @@ class StockSnapshot:
     stock_type_classification: StockTypeClassification
     fair_value_range: FairValueRange
     momentum: MomentumSnapshot
+    # --- 判定精度向上機能Phase B: Historical Valuation Score(2026-08追加) ---
+    # 銘柄自身の過去PER/PBR水準に対する現在値のランクベーススコア
+    # (-100〜+100、算出不可時はNone)。DecisionSnapshot記録専用のShadow計測
+    # であり、BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
+    # LINE通知など既存の判定ロジックからは一切参照されない。
+    historical_valuation_score: float | None
 
 
 def build_stock_snapshot(
@@ -321,6 +330,24 @@ def build_stock_snapshot(
         sector_bars=sector_bars or None,
     )
 
+    # 判定精度向上機能Phase B: Historical Valuation Score(Shadow計測)。
+    # buy_signal_service.py等が使う既存のcurrent_per/current_pbr計算式
+    # (current_price / forecast_eps・forecast_bps)とは独立に、ここでのみ
+    # 再計算する(既存のBUYスクリーニング・銘柄分類ロジックには一切触れない)。
+    current_per = (
+        current_price / financial.forecast_eps
+        if financial.forecast_eps is not None and financial.forecast_eps > 0
+        else None
+    )
+    current_pbr = (
+        current_price / financial.forecast_bps
+        if financial.forecast_bps is not None and financial.forecast_bps > 0
+        else None
+    )
+    historical_valuation_score = compute_historical_valuation_score(
+        historical_valuations, current_per, current_pbr, config.historical_valuation
+    )
+
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
@@ -354,5 +381,6 @@ def build_stock_snapshot(
         stock_type_classification=stock_type_classification,
         fair_value_range=fair_value_range,
         momentum=momentum_snapshot,
+        historical_valuation_score=historical_valuation_score,
     )
     return snapshot, None

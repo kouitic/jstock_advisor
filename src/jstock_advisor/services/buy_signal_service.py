@@ -775,6 +775,8 @@ class BuySignalService:
             ),
             dividend_record_date_source_type=resolve_dividend_record_date_source_type(dividend),
             benefit_record_date_source_type=resolve_benefit_record_date_source_type(benefit),
+            # 判定精度向上機能Phase B: DecisionSnapshot記録専用(Shadow計測)。
+            historical_valuation_score=snapshot.historical_valuation_score,
         )
 
         return BuyAnalysisOutcome(

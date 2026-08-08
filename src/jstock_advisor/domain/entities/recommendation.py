@@ -80,6 +80,14 @@ class Recommendation(ImmutableSnapshot):
     config_values_used: dict[str, Any] = {}
     data_sources: list[DataSourceReference] = []
 
+    # --- 判定精度向上機能Phase B: Historical Valuation Score(2026-08追加、
+    # Shadow計測)。銘柄自身の過去PER/PBR水準に対する現在値のランクベース
+    # スコア(-100〜+100、算出不可時はNone)。StockSnapshot.historical_valuation_
+    # scoreをそのままコピーしたものであり、DecisionSnapshotへ記録する以外の
+    # 用途では一切使わない。BUY候補判定・保有判断スコア・旧売却判定・
+    # ProfitTaking判定・LINE通知など既存の判定ロジックからは参照しないこと ---
+    historical_valuation_score: float | None = None
+
     # --- 通知層の自動生成文言廃止(2026-07仕様§9)で追加。判定結果の文言は
     # 通知層(line_notification_service)で生成せず、ここに判定サービスが直接格納する ---
     recommended_action_summary: str | None = None

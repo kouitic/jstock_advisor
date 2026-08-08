@@ -22,6 +22,7 @@ from jstock_advisor.config.models import (
     DecisionEvaluationConfig,
     EarningsWindowRulesConfig,
     EvaluationRulesConfig,
+    HistoricalValuationRulesConfig,
     HoldingDecisionRatioRulesConfig,
     HoldingDecisionRiskRulesConfig,
     HoldingDecisionRulesConfig,
@@ -147,6 +148,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     decision_evaluation = DecisionEvaluationConfig.model_validate(
         _load_yaml(directory / "decision_evaluation.yaml")
     )
+    historical_valuation = HistoricalValuationRulesConfig.model_validate(
+        _load_yaml(directory / "historical_valuation_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -174,4 +178,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         industry_scoring_policy=industry_scoring_policy,
         review_improvement=review_improvement,
         decision_evaluation=decision_evaluation,
+        historical_valuation=historical_valuation,
     )
