@@ -113,7 +113,7 @@ staged_rollout:
   # 拡大する場合は、運用者が明示的にcandidate_limit: nullへ変更したうえで、
   # infra/template.yamlのALLOW_FULL_MARKET_SCREENING環境変数(既定未設定=ブロック)
   # も有効化する必要がある(二重の安全策、運用ハードニング1/2節)。
-  candidate_limit: 100
+  candidate_limit: 300
   market_segment_filter: ["プライム（内国株式）"]
 
 # --- 運用ハードニング(2026-08、本番運用レビュー対応)で追加 -------------------
