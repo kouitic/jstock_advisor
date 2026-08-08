@@ -1,7 +1,10 @@
 """domain/decision_snapshot_builder.pyのテスト(判定精度向上機能Phase A)。
 
-build_decision_snapshot()が外部I/Oを一切行わない純関数であること、point-in-time
-保証(StockSnapshotに既に存在するデータ以外を取り込まない)を検証する。
+コードレビュー対応: DecisionSnapshotはRecommendationのみから構築する
+(StockSnapshotには依存しない)。市場価格・適正価格はRecommendationに
+保存された「最終判断値」をそのままコピーし、Recommendation側に値が無い
+場合はNoneのまま(補完しない)。decision_idはdecision_type+recommendation_id
+から決定的に生成され、同じ入力なら常に同じIDになること(冪等性)を検証する。
 """
 
 from __future__ import annotations
@@ -10,109 +13,29 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.domain.decision_snapshot_builder import build_decision_snapshot
-from jstock_advisor.domain.entities.classification import StockTypeClassification
-from jstock_advisor.domain.entities.common import (
-    BuyPriceLevels,
-    DataSourceReference,
-    PriceWithRationale,
+from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
+from jstock_advisor.domain.entities.decision_snapshot import (
+    DECISION_SNAPSHOT_MODEL_VERSION,
+    build_decision_id,
 )
-from jstock_advisor.domain.entities.enums import (
-    ConfidenceLevel,
-    DecisionType,
-    EarningsDateStatus,
-    RecommendationType,
-    TrendClassification,
-)
-from jstock_advisor.domain.entities.momentum import MomentumSnapshot
+from jstock_advisor.domain.entities.enums import ConfidenceLevel, DecisionType, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
-from jstock_advisor.domain.entities.valuation import FairValueRange
-from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary
-from jstock_advisor.services.stock_snapshot_service import StockSnapshot
 
-_SOURCE = DataSourceReference(
-    provider="test-fixture", fetched_at=dt.datetime(2026, 8, 8, tzinfo=dt.UTC)
-)
 _STOCK_CODE = "2914"
-
-_MOMENTUM_PLACEHOLDER = MomentumSnapshot(
-    trend_classification=TrendClassification.NEUTRAL, confidence=ConfidenceLevel.LOW
-)
-_STOCK_TYPE_PLACEHOLDER = StockTypeClassification(
-    stock_code=_STOCK_CODE,
-    classified_at=dt.datetime(2026, 8, 8, tzinfo=dt.UTC),
-    types=[],
-    primary_type=None,
-    confidence=ConfidenceLevel.LOW,
-    classification_basis=[],
-    data_sources=[],
-)
-
-
-def _fair_value_range(
-    bear: Decimal | None = Decimal("1000"),
-    neutral: Decimal | None = Decimal("1200"),
-    bull: Decimal | None = Decimal("1400"),
-    confidence: ConfidenceLevel = ConfidenceLevel.HIGH,
-) -> FairValueRange:
-    return FairValueRange(
-        bear=bear,
-        neutral=neutral,
-        bull=bull,
-        overall_confidence=confidence,
-        methods_used=[],
-        methods_excluded=[],
-        usable_for_trading_judgment=True,
-    )
-
-
-def _snapshot(
-    *,
-    current_price: Decimal = Decimal("1150"),
-    fair_value_range: FairValueRange | None = None,
-    data_fetched_at: dt.datetime = dt.datetime(2026, 8, 8, 3, 0, tzinfo=dt.UTC),
-) -> StockSnapshot:
-    return StockSnapshot(
-        stock_code=_STOCK_CODE,
-        current_price=current_price,
-        financial=FinancialSummary(stock_code=_STOCK_CODE, source=_SOURCE),
-        dividend=DividendInfo(stock_code=_STOCK_CODE, fiscal_year="2026", source=_SOURCE),
-        benefit=None,
-        bars=[],
-        historical_valuations=[],
-        avg_trading_value=None,
-        disclosures=[],
-        next_earnings_date=None,
-        earnings_date_status=EarningsDateStatus.UNAVAILABLE,
-        earnings_date_raw=None,
-        business_days_to_earnings=None,
-        dividend_yield_pct=None,
-        benefit_yield_pct=None,
-        annual_benefit_value=None,
-        total_yield_pct=0.0,
-        fair_value=None,
-        fair_value_methods_used_count=0,
-        data_sources=[_SOURCE],
-        data_fetched_at=data_fetched_at,
-        quarterly_operating_incomes=[],
-        quarterly_operating_cashflows=[],
-        quarterly_operating_income_periods=[],
-        quarterly_operating_cashflow_periods=[],
-        severe_earnings_decline=False,
-        disclosure_risk_keywords_found=[],
-        material_event_keywords_found=[],
-        cashflow_decomposition=None,
-        stock_type_classification=_STOCK_TYPE_PLACEHOLDER,
-        fair_value_range=fair_value_range or _fair_value_range(),
-        momentum=_MOMENTUM_PLACEHOLDER,
-    )
 
 
 def _recommendation(
+    recommendation_id: str = "rec-1",
     recommended_at: dt.datetime = dt.datetime(2026, 8, 8, 3, 0, tzinfo=dt.UTC),
     recommendation_type: RecommendationType = RecommendationType.BUY,
+    fair_value_bear: Decimal | None = Decimal("1000"),
+    fair_value_neutral: Decimal | None = Decimal("1200"),
+    fair_value_bull: Decimal | None = Decimal("1400"),
+    fair_value_overall_confidence: ConfidenceLevel | None = ConfidenceLevel.HIGH,
+    config_values_used: dict | None = None,
 ) -> Recommendation:
     return Recommendation(
-        recommendation_id="rec-1",
+        recommendation_id=recommendation_id,
         stock_code=_STOCK_CODE,
         stock_name="テスト銘柄",
         recommended_at=recommended_at,
@@ -123,17 +46,23 @@ def _recommendation(
         price_at_recommendation=Decimal("1150"),
         confidence=ConfidenceLevel.HIGH,
         rule_version="v1-mvp",
+        fair_value_bear=fair_value_bear,
+        fair_value_neutral=fair_value_neutral,
+        fair_value_bull=fair_value_bull,
+        fair_value_overall_confidence=fair_value_overall_confidence,
+        config_values_used=config_values_used or {},
     )
 
 
-def test_build_decision_snapshot_copies_market_price_and_fair_value() -> None:
-    snapshot = _snapshot()
+def test_build_decision_snapshot_uses_recommendation_as_source_of_truth() -> None:
+    """market_price/fair_value_*はRecommendationの最終判断値をそのまま使う
+    (コードレビュー対応、最重要項目)。"""
     recommendation = _recommendation()
 
-    decision = build_decision_snapshot(snapshot, recommendation, DecisionType.BUY)
+    decision = build_decision_snapshot(recommendation, DecisionType.BUY)
 
     assert decision.stock_code == _STOCK_CODE
-    assert decision.market_price == Decimal("1150")
+    assert decision.market_price == recommendation.price_at_recommendation == Decimal("1150")
     assert decision.fair_value_bear == Decimal("1000")
     assert decision.fair_value_neutral == Decimal("1200")
     assert decision.fair_value_bull == Decimal("1400")
@@ -152,36 +81,38 @@ def test_build_decision_snapshot_copies_market_price_and_fair_value() -> None:
     assert decision.environment_score is None
 
 
-def test_build_decision_snapshot_generates_unique_decision_id() -> None:
-    snapshot = _snapshot()
-    recommendation = _recommendation()
+def test_build_decision_snapshot_does_not_fabricate_missing_recommendation_values() -> None:
+    """Recommendationにfair_value_*が保存されていない(旧方式・値未算出等)場合は
+    Noneのまま保存し、他の値から補完・推測しない。"""
+    recommendation = _recommendation(
+        fair_value_bear=None,
+        fair_value_neutral=None,
+        fair_value_bull=None,
+        fair_value_overall_confidence=None,
+    )
 
-    first = build_decision_snapshot(snapshot, recommendation, DecisionType.BUY)
-    second = build_decision_snapshot(snapshot, recommendation, DecisionType.BUY)
-
-    assert first.decision_id != second.decision_id
-
-
-def test_build_decision_snapshot_propagates_partial_fair_value_none() -> None:
-    """fair_value_rangeの一部(bear等)がNoneの場合、DecisionSnapshot側もNoneのまま
-    伝播すること(例外を起こさない、推測で補完しない)。"""
-    snapshot = _snapshot(fair_value_range=_fair_value_range(bear=None, neutral=None, bull=None))
-    recommendation = _recommendation()
-
-    decision = build_decision_snapshot(snapshot, recommendation, DecisionType.SELL)
+    decision = build_decision_snapshot(recommendation, DecisionType.SELL)
 
     assert decision.fair_value_bear is None
     assert decision.fair_value_neutral is None
     assert decision.fair_value_bull is None
+    assert decision.fair_value_confidence is None
+
+
+def test_build_decision_snapshot_copies_config_values_used() -> None:
+    recommendation = _recommendation(config_values_used={"threshold": 50.0, "margin": "HIGH"})
+
+    decision = build_decision_snapshot(recommendation, DecisionType.PROFIT_TAKING)
+
+    assert decision.config_values_used == {"threshold": 50.0, "margin": "HIGH"}
 
 
 def test_build_decision_snapshot_evaluated_at_matches_recommended_at() -> None:
     """evaluated_atはrecommendation.recommended_atと厳密一致する(point-in-time保証)。"""
     recommended_at = dt.datetime(2026, 8, 8, 3, 0, tzinfo=dt.UTC)
-    snapshot = _snapshot()
     recommendation = _recommendation(recommended_at=recommended_at)
 
-    decision = build_decision_snapshot(snapshot, recommendation, DecisionType.BUY)
+    decision = build_decision_snapshot(recommendation, DecisionType.BUY)
 
     assert decision.evaluated_at == recommended_at
 
@@ -190,34 +121,48 @@ def test_build_decision_snapshot_jst_boundary() -> None:
     """UTC深夜帯(JSTでは日付が繰り上がる)でもevaluation_date_jstが正しく
     導出されること(決算日修正で確立したJST境界原則の回帰確認)。"""
     recommended_at = dt.datetime(2026, 8, 7, 20, 0, tzinfo=dt.UTC)  # JST 2026-08-08 05:00
-    snapshot = _snapshot()
     recommendation = _recommendation(recommended_at=recommended_at)
 
-    decision = build_decision_snapshot(snapshot, recommendation, DecisionType.BUY)
+    decision = build_decision_snapshot(recommendation, DecisionType.BUY)
 
     assert decision.evaluation_date_jst == dt.date(2026, 8, 8)
 
 
-def test_build_decision_snapshot_data_fetched_at_matches_snapshot() -> None:
-    """data_fetched_atは渡されたStockSnapshot.data_fetched_atと厳密一致する
-    (別時点のデータが紛れ込んでいないことの検知手段)。"""
-    fetched_at = dt.datetime(2026, 8, 8, 3, 30, tzinfo=dt.UTC)
-    snapshot = _snapshot(data_fetched_at=fetched_at)
-    recommendation = _recommendation()
-
-    decision = build_decision_snapshot(snapshot, recommendation, DecisionType.BUY)
-
-    assert decision.data_fetched_at == fetched_at
-    assert tuple(decision.data_sources) == (_SOURCE,)
-
-
 def test_build_decision_snapshot_model_version_is_phase_a_constant() -> None:
-    from jstock_advisor.domain.entities.decision_snapshot import DECISION_SNAPSHOT_MODEL_VERSION
-
-    snapshot = _snapshot()
     recommendation = _recommendation()
 
-    decision = build_decision_snapshot(snapshot, recommendation, DecisionType.PROFIT_TAKING)
+    decision = build_decision_snapshot(recommendation, DecisionType.HOLDING_DECISION)
 
     assert decision.model_version == DECISION_SNAPSHOT_MODEL_VERSION
-    assert decision.decision_type == DecisionType.PROFIT_TAKING
+
+
+# --- 冪等性(コードレビュー対応、決定的decision_id) -------------------------------
+
+
+def test_build_decision_id_is_deterministic_for_same_inputs() -> None:
+    assert build_decision_id(DecisionType.BUY, "rec-1") == build_decision_id(
+        DecisionType.BUY, "rec-1"
+    )
+
+
+def test_build_decision_id_differs_by_decision_type() -> None:
+    assert build_decision_id(DecisionType.BUY, "rec-1") != build_decision_id(
+        DecisionType.SELL, "rec-1"
+    )
+
+
+def test_build_decision_id_differs_by_recommendation_id() -> None:
+    assert build_decision_id(DecisionType.BUY, "rec-1") != build_decision_id(
+        DecisionType.BUY, "rec-2"
+    )
+
+
+def test_build_decision_snapshot_reexecution_produces_same_decision_id() -> None:
+    """同一Recommendationの保存処理が再実行されても、同じdecision_idになる
+    (Repositoryのupsertと組み合わせて増殖しないことを保証する)。"""
+    recommendation = _recommendation()
+
+    first = build_decision_snapshot(recommendation, DecisionType.BUY)
+    second = build_decision_snapshot(recommendation, DecisionType.BUY)
+
+    assert first.decision_id == second.decision_id == "BUY|rec-1"

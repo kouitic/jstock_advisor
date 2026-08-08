@@ -417,9 +417,12 @@ class ReviewImprovementConfig(StrictModel):
 
 
 class DecisionEvaluationConfig(StrictModel):
-    # DecisionSnapshot専用の営業日ホライズン。既存schedule.yamlの
-    # evaluation_horizons_business_days(RecommendationType別)とは完全に別軸
-    # (既存ロジックには一切影響しない)。
+    # DecisionPerformanceServiceがDecision成績評価の対象とみなす営業日ホライズン。
+    # 専用のEvaluationResultを新規生成するためではなく、既存
+    # recommendation_evaluation_service.pyが既に生成しているEvaluationResultの
+    # うち、この一覧に含まれるhorizon_business_daysの行だけを集計対象として
+    # 絞り込むために使う(既存のevaluation_horizons_business_days自体には
+    # 一切影響しない)。
     horizons_business_days: list[int]
 
 

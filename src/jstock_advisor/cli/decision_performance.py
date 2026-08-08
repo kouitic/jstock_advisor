@@ -41,6 +41,14 @@ def summary(
     result = service.summarize(horizon_business_days=horizon)
 
     _echo_bucket("全体", result.overall)
+    median = (
+        f"{result.median_price_return_pct:.1f}%"
+        if result.median_price_return_pct is not None
+        else "-"
+    )
+    mfe = f"{result.avg_mfe_pct:.1f}%" if result.avg_mfe_pct is not None else "-"
+    mae = f"{result.avg_mae_pct:.1f}%" if result.avg_mae_pct is not None else "-"
+    typer.echo(f"  中央値リターン={median} 平均MFE(最大値幅)={mfe} 平均MAE(最大逆行幅)={mae}")
 
     if result.by_decision_type:
         typer.echo("--- パイプラインごと ---")

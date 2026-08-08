@@ -39,14 +39,5 @@ class EvaluationResultRepository:
             for e in self._store.list_all()
         )
 
-    # --- 判定精度向上機能(Phase A)で追加。既存のrecommendation_idベースの
-    # 冪等性チェック(exists_for_horizon/exists_for_calendar_horizon)とは独立した
-    # decision_idベースの新しい軸。既存メソッドは一切変更しない。 ---
-    def exists_for_decision_horizon(self, decision_id: str, horizon_business_days: int) -> bool:
-        return any(
-            e.decision_id == decision_id and e.horizon_business_days == horizon_business_days
-            for e in self._store.list_all()
-        )
-
     def save(self, evaluation: EvaluationResult) -> None:
         self._store.upsert(evaluation)

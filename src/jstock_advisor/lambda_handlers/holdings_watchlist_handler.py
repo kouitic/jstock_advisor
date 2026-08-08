@@ -204,7 +204,6 @@ def _notify_legacy_sell_and_build_result(
     holding: Holding,
     now: dt.datetime,
     recommendation: Recommendation,
-    snapshot: StockSnapshot,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     notification_enabled: bool,
@@ -215,7 +214,7 @@ def _notify_legacy_sell_and_build_result(
     # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
     # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
     save_decision_snapshot_safely(
-        DecisionSnapshotRepository(), snapshot, recommendation, DecisionType.SELL, logger
+        DecisionSnapshotRepository(), recommendation, DecisionType.SELL, logger
     )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
@@ -279,11 +278,7 @@ def _notify_holding_decision_and_build_result(
     # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
     # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
     save_decision_snapshot_safely(
-        DecisionSnapshotRepository(),
-        snapshot,
-        recommendation,
-        DecisionType.HOLDING_DECISION,
-        logger,
+        DecisionSnapshotRepository(), recommendation, DecisionType.HOLDING_DECISION, logger
     )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
@@ -424,7 +419,6 @@ def _analyze_one_holding(
                 holding,
                 now,
                 sell_outcome.recommendation,
-                snapshot,
                 recommendation_repo,
                 notification_service,
                 notification_enabled,
@@ -525,7 +519,6 @@ def _analyze_one_holding(
         # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
         save_decision_snapshot_safely(
             DecisionSnapshotRepository(),
-            snapshot,
             pt_outcome.recommendation,
             DecisionType.PROFIT_TAKING,
             logger,

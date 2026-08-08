@@ -732,8 +732,6 @@ Resources:
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EvaluationResultsTable }
-        # 判定精度向上機能Phase A(2026-08): DecisionSnapshot専用の営業日評価が読む
-        - DynamoDBReadPolicy: { TableName: !Ref DecisionSnapshotsTable }
       Events:
         DailyEvening:
           Type: ScheduleV2

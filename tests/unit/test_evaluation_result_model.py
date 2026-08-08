@@ -60,28 +60,31 @@ def test_existing_json_with_only_horizon_business_days_still_loads() -> None:
 
 
 # --- 判定精度向上機能Phase A(2026-08)で追加したフィールド ----------------------
+# decision_idフィールドはレビュー対応で廃止した(DecisionPerformanceServiceは
+# recommendation_id経由で既存EvaluationResultをそのまま再利用するため不要に
+# なった。本番データはdecision_id設定済み行が0件であることを確認済み)。
+# sector_*系はPhase D(Market/Sector Environment)まで未使用の予約フィールドとして
+# 維持する。
 
 
-def test_decision_id_and_sector_fields_default_to_none() -> None:
-    """既存データ(decision_id等のフィールドが無いJSON)がそのまま読み込め、
+def test_sector_fields_default_to_none() -> None:
+    """既存データ(sector_*フィールドが無いJSON)がそのまま読み込め、
     デフォルトNoneで埋まること(後方互換、ゼロマイグレーション)。"""
     result = EvaluationResult.model_validate({**_base_kwargs(), "horizon_business_days": 20})
-    assert result.decision_id is None
     assert result.sector_benchmark_symbol is None
     assert result.sector_return_pct is None
     assert result.excess_return_vs_sector_pct is None
 
 
-def test_decision_id_and_sector_fields_can_be_set() -> None:
+def test_sector_fields_can_be_set() -> None:
+    """Phase Dで実際に使われる際の値設定の型検証(Phase A時点では未使用)。"""
     result = EvaluationResult(
         **_base_kwargs(),
         horizon_business_days=20,
-        decision_id="dec-1",
         sector_benchmark_symbol="1615.T",
         sector_return_pct=1.5,
         excess_return_vs_sector_pct=2.3,
     )
-    assert result.decision_id == "dec-1"
     assert result.sector_benchmark_symbol == "1615.T"
     assert result.sector_return_pct == 1.5
     assert result.excess_return_vs_sector_pct == 2.3
