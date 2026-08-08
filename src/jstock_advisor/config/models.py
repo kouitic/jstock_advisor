@@ -413,6 +413,16 @@ class ReviewImprovementConfig(StrictModel):
     issue_labels: list[str]
 
 
+# --- decision_evaluation.yaml(判定精度向上機能Phase A) -------------------------
+
+
+class DecisionEvaluationConfig(StrictModel):
+    # DecisionSnapshot専用の営業日ホライズン。既存schedule.yamlの
+    # evaluation_horizons_business_days(RecommendationType別)とは完全に別軸
+    # (既存ロジックには一切影響しない)。
+    horizons_business_days: list[int]
+
+
 # --- holiday_calendar.json ----------------------------------------------------
 
 
@@ -1432,3 +1442,5 @@ class AppConfig(StrictModel):
     industry_scoring_policy: IndustryScoringPolicyConfig
     # --- 振り返り機能改修(2026-08)で追加 ---
     review_improvement: ReviewImprovementConfig
+    # --- 判定精度向上機能Phase A(2026-08)で追加 ---
+    decision_evaluation: DecisionEvaluationConfig

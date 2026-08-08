@@ -16,6 +16,7 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.services.decision_evaluation_service import DecisionEvaluationService
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
@@ -38,17 +39,27 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     calendar_outcome = service.run_due_calendar_evaluations(
         now, horizon_days=config.review_improvement.evaluation_horizon_days
     )
+    # 判定精度向上機能Phase A: DecisionSnapshot専用の営業日ホライズン評価
+    # (既存の営業日/暦日評価とは完全に別軸)。
+    decision_service = DecisionEvaluationService(
+        market_data_provider=providers.market_data, config=config, business_calendar=calendar
+    )
+    decision_outcome = decision_service.run_due_decision_evaluations(now)
     logger.info(
         "evaluation_handler done: evaluated=%d skipped=%d calendar_evaluated=%d "
-        "calendar_skipped=%d",
+        "calendar_skipped=%d decision_evaluated=%d decision_skipped=%d",
         len(outcome.evaluated),
         len(outcome.skipped_due_to_data_error),
         len(calendar_outcome.evaluated),
         len(calendar_outcome.skipped_due_to_data_error),
+        len(decision_outcome.evaluated),
+        len(decision_outcome.skipped_due_to_data_error),
     )
     return {
         "evaluated": len(outcome.evaluated),
         "skipped_due_to_data_error": len(outcome.skipped_due_to_data_error),
         "calendar_evaluated": len(calendar_outcome.evaluated),
         "calendar_skipped_due_to_data_error": len(calendar_outcome.skipped_due_to_data_error),
+        "decision_evaluated": len(decision_outcome.evaluated),
+        "decision_skipped_due_to_data_error": len(decision_outcome.skipped_due_to_data_error),
     }

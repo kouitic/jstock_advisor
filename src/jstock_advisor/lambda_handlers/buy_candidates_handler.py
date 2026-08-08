@@ -71,6 +71,7 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     BuyIndustrySector,
     CandidateSource,
+    DecisionType,
     EligibilityBlockCategory,
     NotificationContext,
     PortfolioValuationBasis,
@@ -88,6 +89,9 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     start_batch,
 )
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
+    DecisionSnapshotRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -97,6 +101,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
+from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
@@ -504,6 +509,18 @@ def _process_single_candidate(
                 )
 
             recommendation_repo.save(final_recommendation)
+            # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
+            # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
+            # このelse節に到達している時点でsnapshotは必ず取得済み(data_error/
+            # EXCLUDED分岐は上でreturnまたはelifで処理済み)。
+            assert snapshot is not None  # noqa: S101
+            save_decision_snapshot_safely(
+                DecisionSnapshotRepository(),
+                snapshot,
+                final_recommendation,
+                DecisionType.BUY,
+                logger,
+            )
 
             if final_recommendation.buy_action == BuyAction.MANUAL_REVIEW:
                 category = "review"

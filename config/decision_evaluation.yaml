@@ -1,0 +1,4 @@
+# DecisionSnapshot専用の営業日評価ホライズン(判定精度向上機能Phase A)。
+# config/schedule.yamlのevaluation_horizons_business_days(RecommendationType別、
+# 既存BUY/SELL/ProfitTaking等の評価)とは完全に別軸であり、互いに影響しない。
+horizons_business_days: [5, 20, 60, 120, 250]

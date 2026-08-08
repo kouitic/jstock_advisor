@@ -57,3 +57,12 @@ class EvaluationResult(Entity):
     evaluation_label: EvaluationLabel
     label_evidence: str
     notes: str | None = None
+
+    # --- 判定精度向上機能(Phase A)で追加。既存recommendation_idベースの
+    # 冪等性ロジック(exists_for_horizon/exists_for_calendar_horizon)とは独立した
+    # 新しい軸。decision_idはDecisionSnapshotに紐づく評価のみ設定される
+    # (recommendation_idベースの既存評価では常にNoneのまま)。 ---
+    decision_id: str | None = None
+    sector_benchmark_symbol: str | None = None
+    sector_return_pct: float | None = None
+    excess_return_vs_sector_pct: float | None = None
