@@ -3,14 +3,17 @@
 コードレビュー対応: DecisionSnapshotはRecommendationのみから構築する
 (StockSnapshotには依存しない)。市場価格・適正価格はRecommendationに
 保存された「最終判断値」をそのままコピーし、Recommendation側に値が無い
-場合はNoneのまま(補完しない)。decision_idはdecision_type+recommendation_id
-から決定的に生成され、同じ入力なら常に同じIDになること(冪等性)を検証する。
+場合はNoneのまま(補完しない)。decision_idはrecommendation_idのみから
+決定的に生成され(1 Recommendation = 1 DecisionSnapshot、decision_typeは
+IDに含めない)、同じ入力なら常に同じIDになること(冪等性)を検証する。
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
+
+import pytest
 
 from jstock_advisor.domain.decision_snapshot_builder import build_decision_snapshot
 from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
@@ -136,33 +139,66 @@ def test_build_decision_snapshot_model_version_is_phase_a_constant() -> None:
     assert decision.model_version == DECISION_SNAPSHOT_MODEL_VERSION
 
 
+# --- RecommendationType/DecisionTypeの現行対応関係(コードレビュー対応item 12) ---
+# decision_snapshot_builder.pyのモジュールdocstring参照。生産コードの横断調査の結果、
+# 各パイプラインは常に単一のRecommendationType集合・単一のDecisionTypeとのみ対応する。
+_RECOMMENDATION_TYPE_TO_DECISION_TYPE = [
+    (RecommendationType.BUY, DecisionType.BUY),
+    (RecommendationType.WATCH_BUY, DecisionType.BUY),
+    (RecommendationType.SELL, DecisionType.SELL),
+    (RecommendationType.PARTIAL_PROFIT_TAKE, DecisionType.PROFIT_TAKING),
+    (RecommendationType.FULL_PROFIT_TAKE, DecisionType.PROFIT_TAKING),
+    (RecommendationType.URGENT_HOLDING_REVIEW, DecisionType.HOLDING_DECISION),
+]
+
+
+@pytest.mark.parametrize(
+    ("recommendation_type", "decision_type"), _RECOMMENDATION_TYPE_TO_DECISION_TYPE
+)
+def test_recommendation_type_to_decision_type_mapping(
+    recommendation_type: RecommendationType, decision_type: DecisionType
+) -> None:
+    """現行生産コードのRecommendationType→DecisionType対応関係(横断調査結果)を
+    回帰的に固定する。同一recommendation_idが複数のDecisionTypeへ保存される経路は
+    存在しないため、existing_action(=recommendation_type)とdecision_typeの組は
+    常にこの対応表どおりになる。"""
+    recommendation = _recommendation(recommendation_type=recommendation_type)
+
+    decision = build_decision_snapshot(recommendation, decision_type)
+
+    assert decision.existing_action == recommendation_type
+    assert decision.decision_type == decision_type
+
+
 # --- 冪等性(コードレビュー対応、決定的decision_id) -------------------------------
 
 
 def test_build_decision_id_is_deterministic_for_same_inputs() -> None:
-    assert build_decision_id(DecisionType.BUY, "rec-1") == build_decision_id(
-        DecisionType.BUY, "rec-1"
-    )
-
-
-def test_build_decision_id_differs_by_decision_type() -> None:
-    assert build_decision_id(DecisionType.BUY, "rec-1") != build_decision_id(
-        DecisionType.SELL, "rec-1"
-    )
+    assert build_decision_id("rec-1") == build_decision_id("rec-1")
 
 
 def test_build_decision_id_differs_by_recommendation_id() -> None:
-    assert build_decision_id(DecisionType.BUY, "rec-1") != build_decision_id(
-        DecisionType.BUY, "rec-2"
-    )
+    assert build_decision_id("rec-1") != build_decision_id("rec-2")
+
+
+def test_build_decision_id_does_not_depend_on_decision_type() -> None:
+    """コードレビュー対応: 横断調査の結果、生産コードでは1つのRecommendationは
+    常に単一のDecisionTypeでのみDecisionSnapshotを保存するため、decision_idは
+    recommendation_idのみから決定される(decision_typeを含めない)。"""
+    recommendation = _recommendation()
+
+    buy_decision = build_decision_snapshot(recommendation, DecisionType.BUY)
+    sell_decision = build_decision_snapshot(recommendation, DecisionType.SELL)
+
+    assert buy_decision.decision_id == sell_decision.decision_id
 
 
 def test_build_decision_snapshot_reexecution_produces_same_decision_id() -> None:
     """同一Recommendationの保存処理が再実行されても、同じdecision_idになる
-    (Repositoryのupsertと組み合わせて増殖しないことを保証する)。"""
+    (Repositoryのinsert_if_absentと組み合わせて増殖しないことを保証する)。"""
     recommendation = _recommendation()
 
     first = build_decision_snapshot(recommendation, DecisionType.BUY)
     second = build_decision_snapshot(recommendation, DecisionType.BUY)
 
-    assert first.decision_id == second.decision_id == "BUY|rec-1"
+    assert first.decision_id == second.decision_id == "decision|rec-1"

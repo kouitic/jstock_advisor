@@ -7,6 +7,27 @@ BUYパイプライン等ではStockSnapshot取得後に補正・ゲート適用�
 Recommendationを作るため、StockSnapshotの値と最終Recommendationの値は将来
 一致しなくなる可能性がある。「後から現在ロジックで過去判断を復元する」のではなく
 「当時実際に確定した判断値」を保存するというPhase Aの目的に忠実であるため)。
+
+コードレビュー対応(RecommendationType/DecisionType対応関係の明示): 生産コードの
+横断調査(cli/analyze.py, buy_candidates_handler.py, holdings_watchlist_handler.py
+の全9箇所のsave_decision_snapshot_safely()呼び出し)の結果、以下の対応が常に
+1対1で成立している(同一recommendation_idが複数のDecisionTypeへ保存される経路は
+存在しない。各Recommendationはuuid4で都度新規発行されるrecommendation_idを持ち、
+1つのRecommendationインスタンスに対しsave_decision_snapshot_safely()が呼ばれる
+のは常に1回のみ)。
+
+    BUY / WATCH_BUY 系Recommendation(買い候補パイプライン)
+        -> DecisionType.BUY
+    legacy SELL系Recommendation(投資前提悪化売却パイプライン)
+        -> DecisionType.SELL
+    HoldingDecision由来Recommendation(保有判断スコアパイプライン)
+        -> DecisionType.HOLDING_DECISION
+    ProfitTaking由来Recommendation(利益確定パイプライン)
+        -> DecisionType.PROFIT_TAKING
+
+このため「1 Recommendation = 1 DecisionSnapshot」をモデルとして採用し、
+decision_idはrecommendation_idのみから決定的に生成する
+(domain/entities/decision_snapshot.pyのbuild_decision_id()参照)。
 """
 
 from __future__ import annotations
@@ -33,7 +54,7 @@ def build_decision_snapshot(
     """
     evaluated_at = recommendation.recommended_at
     return DecisionSnapshot(
-        decision_id=build_decision_id(decision_type, recommendation.recommendation_id),
+        decision_id=build_decision_id(recommendation.recommendation_id),
         decision_type=decision_type,
         stock_code=recommendation.stock_code,
         evaluated_at=evaluated_at,

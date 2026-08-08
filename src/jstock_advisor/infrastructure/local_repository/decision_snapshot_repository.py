@@ -1,4 +1,9 @@
-"""DecisionSnapshot(判定精度向上機能Phase A)のローカルリポジトリ。"""
+"""DecisionSnapshot(判定精度向上機能Phase A)のローカルリポジトリ。
+
+コードレビュー対応: DecisionSnapshotはinsert-onlyとする(一度保存された記録は
+後から絶対に上書きしない)。upsert()は使用せず、CollectionStore.insert_if_absent()
+(DynamoDBでは条件付き書き込みによる原子的なinsert-only)のみを使う。
+"""
 
 from __future__ import annotations
 
@@ -20,5 +25,9 @@ class DecisionSnapshotRepository:
     def get(self, decision_id: str) -> DecisionSnapshot | None:
         return self._store.get(decision_id)
 
-    def save(self, decision: DecisionSnapshot) -> None:
-        self._store.upsert(decision)
+    def insert_if_absent(self, decision: DecisionSnapshot) -> bool:
+        """decision_idが未存在の場合のみ追加してTrue、既に存在すればFalse。
+
+        DecisionSnapshotに対してupsert()は使用しない(insert-only保証)。
+        """
+        return self._store.insert_if_absent(decision)

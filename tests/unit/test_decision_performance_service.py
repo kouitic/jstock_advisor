@@ -3,13 +3,20 @@
 コードレビュー対応: DecisionSnapshot専用のEvaluationResultは生成しないため、
 joinはEvaluationResult.recommendation_id == DecisionSnapshot.recommendation_id
 で行い、Phase A対象ホライズン(既定5/20/60/120/250営業日)のみへ絞り込む。
+
+再レビュー対応: モデル上「1 Recommendation = 1 DecisionSnapshot」だが、不正な
+データ投入等で同一recommendation_idに複数のDecisionSnapshotが存在した場合、
+list順に依存して結果が変わらないこと・黙って最後の1件を採用しないことを検証する。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from decimal import Decimal
 from pathlib import Path
+
+import pytest
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig, DecisionEvaluationConfig
@@ -26,7 +33,10 @@ from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
     EvaluationResultRepository,
 )
-from jstock_advisor.services.decision_performance_service import DecisionPerformanceService
+from jstock_advisor.services.decision_performance_service import (
+    DECISION_PERFORMANCE_DUPLICATE_SNAPSHOT_EVENT,
+    DecisionPerformanceService,
+)
 
 _NOW = dt.datetime(2026, 8, 8, tzinfo=dt.UTC)
 
@@ -48,7 +58,7 @@ def _decision(
     existing_action: RecommendationType = RecommendationType.BUY,
 ) -> DecisionSnapshot:
     return DecisionSnapshot(
-        decision_id=build_decision_id(decision_type, recommendation_id),
+        decision_id=build_decision_id(recommendation_id),
         decision_type=decision_type,
         stock_code="2914",
         evaluated_at=_NOW,
@@ -104,8 +114,10 @@ def test_summarize_joins_via_recommendation_id_and_groups(tmp_path: Path) -> Non
     decision_repo = DecisionSnapshotRepository(store_dir=tmp_path)
     eval_repo = EvaluationResultRepository(store_dir=tmp_path)
 
-    decision_repo.save(_decision("rec-1", DecisionType.BUY, RecommendationType.BUY))
-    decision_repo.save(_decision("rec-2", DecisionType.PROFIT_TAKING, RecommendationType.SELL))
+    decision_repo.insert_if_absent(_decision("rec-1", DecisionType.BUY, RecommendationType.BUY))
+    decision_repo.insert_if_absent(
+        _decision("rec-2", DecisionType.PROFIT_TAKING, RecommendationType.SELL)
+    )
     eval_repo.save(_evaluation("e1", "rec-1", horizon_business_days=5))
     eval_repo.save(_evaluation("e2", "rec-2", horizon_business_days=5))
 
@@ -141,7 +153,7 @@ def test_summarize_only_includes_phase_a_horizons(tmp_path: Path) -> None:
     DecisionPerformanceへ混入しない(既定horizons_business_days=[5,20,60,120,250])。"""
     decision_repo = DecisionSnapshotRepository(store_dir=tmp_path)
     eval_repo = EvaluationResultRepository(store_dir=tmp_path)
-    decision_repo.save(_decision("rec-1"))
+    decision_repo.insert_if_absent(_decision("rec-1"))
 
     eval_repo.save(_evaluation("e-1d", "rec-1", horizon_business_days=1))  # 対象外
     eval_repo.save(
@@ -161,7 +173,7 @@ def test_summarize_only_includes_phase_a_horizons(tmp_path: Path) -> None:
 def test_summarize_filters_by_specific_horizon(tmp_path: Path) -> None:
     decision_repo = DecisionSnapshotRepository(store_dir=tmp_path)
     eval_repo = EvaluationResultRepository(store_dir=tmp_path)
-    decision_repo.save(_decision("rec-1"))
+    decision_repo.insert_if_absent(_decision("rec-1"))
     eval_repo.save(_evaluation("e1", "rec-1", horizon_business_days=5))
     eval_repo.save(_evaluation("e2", "rec-1", horizon_business_days=20))
 
@@ -176,8 +188,8 @@ def test_summarize_filters_by_specific_horizon(tmp_path: Path) -> None:
 def test_summarize_computes_median_mfe_mae(tmp_path: Path) -> None:
     decision_repo = DecisionSnapshotRepository(store_dir=tmp_path)
     eval_repo = EvaluationResultRepository(store_dir=tmp_path)
-    decision_repo.save(_decision("rec-1"))
-    decision_repo.save(_decision("rec-2"))
+    decision_repo.insert_if_absent(_decision("rec-1"))
+    decision_repo.insert_if_absent(_decision("rec-2"))
     eval_repo.save(
         _evaluation(
             "e1", "rec-1", horizon_business_days=5,
@@ -199,3 +211,69 @@ def test_summarize_computes_median_mfe_mae(tmp_path: Path) -> None:
     assert summary.median_price_return_pct == 4.0
     assert summary.avg_mfe_pct == 6.0
     assert summary.avg_mae_pct == -2.0
+
+
+def test_summarize_excludes_recommendation_with_duplicate_decision_snapshots(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """モデル上「1 Recommendation = 1 DecisionSnapshot」のはずだが、不正なデータ
+    投入等で同一recommendation_idに複数のDecisionSnapshotが存在した場合、黙って
+    最後の1件を採用せず、対象recommendation_idごと集計から除外する。overall.countが
+    既存EvaluationResult件数を超えて増えないことも合わせて確認する。"""
+    decision_repo = DecisionSnapshotRepository(store_dir=tmp_path)
+    eval_repo = EvaluationResultRepository(store_dir=tmp_path)
+
+    # 不正データ: 同一recommendation_id="rec-dup"に対しdecision_idの異なる
+    # DecisionSnapshotを2件直接投入する(通常の生産コードでは発生しない想定外ケース)。
+    dup_a = _decision("rec-dup").model_copy(update={"decision_id": "dup-a"})
+    dup_b = _decision("rec-dup").model_copy(
+        update={"decision_id": "dup-b", "market_price": Decimal("1999")}
+    )
+    decision_repo.insert_if_absent(dup_a)
+    decision_repo.insert_if_absent(dup_b)
+    decision_repo.insert_if_absent(_decision("rec-1"))
+
+    eval_repo.save(_evaluation("e-dup", "rec-dup", horizon_business_days=5))
+    eval_repo.save(_evaluation("e1", "rec-1", horizon_business_days=5))
+
+    service = DecisionPerformanceService(
+        evaluation_repository=eval_repo, decision_repository=decision_repo, config=_config()
+    )
+    with caplog.at_level(logging.WARNING):
+        summary = service.summarize(now=_NOW)
+
+    assert summary.overall.count == 1  # rec-dupは除外され、rec-1のみ集計される
+    assert any(
+        DECISION_PERFORMANCE_DUPLICATE_SNAPSHOT_EVENT in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_summarize_duplicate_exclusion_is_order_independent(tmp_path: Path) -> None:
+    """同一recommendation_idの重複DecisionSnapshotをどちらの順序で保存しても、
+    集計結果(除外されること)が変わらない(list順で結果が変わる設計を禁止)。"""
+    decision_repo_a = DecisionSnapshotRepository(store_dir=tmp_path / "a")
+    decision_repo_b = DecisionSnapshotRepository(store_dir=tmp_path / "b")
+    eval_repo_a = EvaluationResultRepository(store_dir=tmp_path / "a")
+    eval_repo_b = EvaluationResultRepository(store_dir=tmp_path / "b")
+
+    dup_a = _decision("rec-dup").model_copy(update={"decision_id": "dup-a"})
+    dup_b = _decision("rec-dup").model_copy(update={"decision_id": "dup-b"})
+
+    decision_repo_a.insert_if_absent(dup_a)
+    decision_repo_a.insert_if_absent(dup_b)
+    decision_repo_b.insert_if_absent(dup_b)
+    decision_repo_b.insert_if_absent(dup_a)
+    eval_repo_a.save(_evaluation("e-dup", "rec-dup", horizon_business_days=5))
+    eval_repo_b.save(_evaluation("e-dup", "rec-dup", horizon_business_days=5))
+
+    service_a = DecisionPerformanceService(
+        evaluation_repository=eval_repo_a, decision_repository=decision_repo_a, config=_config()
+    )
+    service_b = DecisionPerformanceService(
+        evaluation_repository=eval_repo_b, decision_repository=decision_repo_b, config=_config()
+    )
+
+    count_a = service_a.summarize(now=_NOW).overall.count
+    count_b = service_b.summarize(now=_NOW).overall.count
+    assert count_a == count_b == 0

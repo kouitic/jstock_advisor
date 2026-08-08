@@ -34,6 +34,8 @@ import datetime as dt
 from decimal import Decimal
 from typing import Any
 
+from pydantic import Field
+
 from jstock_advisor.domain.entities.base import ImmutableSnapshot
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, DecisionType, RecommendationType
@@ -45,9 +47,16 @@ DECISION_SNAPSHOT_MODEL_VERSION = "phase_a_unscored_v1"
 
 
 class DecisionSnapshot(ImmutableSnapshot):
-    # decision_type+recommendation_idから決定的に生成する(build_decision_id()参照)。
-    # 同一Recommendation・同一DecisionTypeの再実行が同じdecision_idになり、
-    # Repositoryのupsertと組み合わせて冪等性(増殖しないこと)を保証する。
+    # recommendation_idから決定的に生成する(build_decision_id()参照)。横断調査の結果、
+    # 生産コードでは1つのRecommendationは常に単一のDecisionTypeでのみDecisionSnapshotを
+    # 保存する(recommendation_idはRecommendation構築時にuuid4で都度新規発行され、以降
+    # 同じRecommendationインスタンスに対してsave_decision_snapshot_safely()が呼ばれるのは
+    # 1回のみ)。そのため「1 Recommendation = 1 DecisionSnapshot」をモデルとして採用し、
+    # decision_idはrecommendation_idのみから決定的に生成する(decision_typeは含めない)。
+    # RepositoryはDecisionSnapshotに対してupsertを行わず、insert_if_absentのみを使う
+    # (コードレビュー対応: 一度保存された記録は後から絶対に上書きしない。同一
+    # decision_idの再実行は「完全に同一内容」の場合のみ正常な冪等再実行として扱い、
+    # 内容が異なる場合はdecision_snapshot_conflictとして検知し既存の値を保持する)。
     decision_id: str
     decision_type: DecisionType
     stock_code: str
@@ -79,14 +88,16 @@ class DecisionSnapshot(ImmutableSnapshot):
     # --- 監査・バージョニング(モジュールdocstring参照) ---
     rule_version: str
     model_version: str
-    config_values_used: dict[str, Any] = {}
+    config_values_used: dict[str, Any] = Field(default_factory=dict)
 
     # --- データ出所(Recommendation.data_sourcesのコピー) ---
     data_sources: tuple[DataSourceReference, ...] = ()
 
 
-def build_decision_id(decision_type: DecisionType, recommendation_id: str) -> str:
-    """decision_typeとrecommendation_idから決定的なdecision_idを生成する
-    (コードレビュー対応: 同一Recommendationの保存処理が再実行されてもDecisionSnapshotが
-    増殖しないようにするため、毎回uuid4せず決定的IDにする)。"""
-    return f"{decision_type.value}|{recommendation_id}"
+def build_decision_id(recommendation_id: str) -> str:
+    """recommendation_idから決定的なdecision_idを生成する(コードレビュー対応:
+    同一Recommendationの保存処理が再実行されてもDecisionSnapshotが増殖しないよう、
+    毎回uuid4せず決定的IDにする)。「decision|」は名前空間を明確にするための固定
+    プレフィックスであり、decision_typeは含めない(1 Recommendation = 1
+    DecisionSnapshotのため、decision_typeをIDに含める必要がない)。"""
+    return f"decision|{recommendation_id}"
