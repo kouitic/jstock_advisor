@@ -55,6 +55,22 @@ def test_get_returns_none_when_missing(tmp_path: Path) -> None:
     assert repo.get("does-not-exist") is None
 
 
+def test_get_consistent_round_trips(tmp_path: Path) -> None:
+    """再レビュー対応: get_consistent()(strongly consistent read用)もget()と
+    同じ値を返す(ローカルJSONは常に最新を読むため区別不要)。"""
+    repo = DecisionSnapshotRepository(store_dir=tmp_path)
+    repo.insert_if_absent(_decision())
+
+    fetched = repo.get_consistent("dec-1")
+    assert fetched is not None
+    assert fetched.market_price == Decimal("1150")
+
+
+def test_get_consistent_returns_none_when_missing(tmp_path: Path) -> None:
+    repo = DecisionSnapshotRepository(store_dir=tmp_path)
+    assert repo.get_consistent("does-not-exist") is None
+
+
 def test_list_all_returns_all_saved(tmp_path: Path) -> None:
     repo = DecisionSnapshotRepository(store_dir=tmp_path)
     repo.insert_if_absent(_decision("dec-1"))

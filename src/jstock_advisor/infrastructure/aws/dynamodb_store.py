@@ -56,6 +56,17 @@ class DynamoDbCollectionStore[T: BaseModel]:
         item = response.get("Item")
         return self._from_item(item) if item is not None else None
 
+    def get_consistent(self, item_id: str) -> T | None:
+        """get()のstrongly consistent read版(ConsistentRead=True)。
+
+        insert_if_absent()の競合後にレコード内容を比較する等、結果整合性読み取り
+        による一時的なNoneを避けたい限定用途でのみ使うこと(通常のget()はコスト・
+        挙動を変えないため結果整合性読み取りのまま維持する)。
+        """
+        response = self._table.get_item(Key={self._id_field: item_id}, ConsistentRead=True)
+        item = response.get("Item")
+        return self._from_item(item) if item is not None else None
+
     def upsert(self, item: T) -> None:
         self._table.put_item(Item=self._to_item(item))
 

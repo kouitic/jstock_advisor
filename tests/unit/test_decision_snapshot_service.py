@@ -9,6 +9,11 @@ CloudWatchで検索・メトリクスフィルタ可能な固定イベントキ�
 再レビュー対応(insert-only保証): 同一decision_idの再実行が「完全に同一内容」
 なら正常な冪等再実行(warning不要)、「内容が異なる」ならdecision_snapshot_conflict
 として検知し既存の記録を上書きしないことを検証する。
+
+再々レビュー対応(誤conflict検知の解消): insert_if_absent()に負けた直後の内容
+比較にはget_consistent()(strongly consistent read)を使うため、DynamoDBの
+結果整合性読み取りによる一時的なNoneを正常な冪等再実行と誤ってconflict扱い
+しないことを、フェイクRepositoryによる並行実行シミュレーションで検証する。
 """
 
 from __future__ import annotations
@@ -132,7 +137,7 @@ def test_save_decision_snapshot_safely_swallows_exception(
     LINE通知フローをブロックしない、Shadow導入の保証)。"""
 
     class _FailingRepository:
-        def get(self, decision_id: str) -> None:
+        def get_consistent(self, decision_id: str) -> None:
             raise RuntimeError("boom")
 
         def insert_if_absent(self, decision: object) -> bool:
@@ -153,7 +158,7 @@ def test_save_decision_snapshot_safely_logs_fixed_event_key_on_failure(
     stock_code/recommendation_id/decision_typeを構造化ログへ残すこと。"""
 
     class _FailingRepository:
-        def get(self, decision_id: str) -> None:
+        def get_consistent(self, decision_id: str) -> None:
             raise RuntimeError("boom")
 
         def insert_if_absent(self, decision: object) -> bool:
@@ -182,7 +187,7 @@ def test_save_decision_snapshot_safely_does_not_log_config_values(
     )
 
     class _FailingRepository:
-        def get(self, decision_id: str) -> None:
+        def get_consistent(self, decision_id: str) -> None:
             raise RuntimeError("boom")
 
         def insert_if_absent(self, decision: object) -> bool:
@@ -199,10 +204,12 @@ def test_save_decision_snapshot_safely_does_not_log_config_values(
 
 
 class _RaceRepository:
-    """1回目のget()はNone(未挿入に見える)、insert_if_absent()は常にFalse
-    (並行実行で他プロセスが先にinsertした=raceに負けたことを模す)、2回目の
-    get()で初めて「先に書き込まれた側」の内容が見える、という並行実行を模した
-    フェイクRepository(item 17: insert_if_absentの並行競合相当ケースのテスト用)。
+    """1回目のget_consistent()はNone(未挿入に見える)、insert_if_absent()は常に
+    False(並行実行で他プロセスが先にinsertした=raceに負けたことを模す)、2回目の
+    get_consistent()で初めて「先に書き込まれた側」の内容が見える、という並行実行を
+    模したフェイクRepository(item 6.2/6.3: insert_if_absentの並行競合相当ケースの
+    テスト用。strongly consistent readを使うため、DynamoDBの結果整合性読み取りに
+    よる一時的なNoneでこの2回目の呼び出しがNoneになることは想定しない)。
     """
 
     def __init__(self, winner: DecisionSnapshot) -> None:
@@ -210,7 +217,7 @@ class _RaceRepository:
         self.get_call_count = 0
         self.insert_if_absent_called = False
 
-    def get(self, decision_id: str) -> DecisionSnapshot | None:
+    def get_consistent(self, decision_id: str) -> DecisionSnapshot | None:
         self.get_call_count += 1
         if self.get_call_count == 1:
             return None
@@ -218,6 +225,21 @@ class _RaceRepository:
 
     def insert_if_absent(self, decision: DecisionSnapshot) -> bool:
         self.insert_if_absent_called = True
+        return False
+
+
+class _RaceRepositoryPermanentlyMissing:
+    """insert_if_absent()は常にFalse(競合したように見える)だが、その後の
+    get_consistent()も常にNoneを返す、通常は起こり得ない想定外状態を模した
+    フェイクRepository(item 6.4: insert_if_absent=Falseなのにstrongly consistent
+    readでも存在しない場合は、内容不一致conflictではなく保存系障害として扱う
+    ことを検証する)。
+    """
+
+    def get_consistent(self, decision_id: str) -> DecisionSnapshot | None:
+        return None
+
+    def insert_if_absent(self, decision: DecisionSnapshot) -> bool:
         return False
 
 
@@ -256,3 +278,21 @@ def test_save_decision_snapshot_safely_race_with_conflicting_winner_logs_conflic
     assert repo.insert_if_absent_called is True
     assert len(caplog.records) == 1
     assert DECISION_SNAPSHOT_CONFLICT_EVENT in caplog.records[0].getMessage()
+
+
+def test_save_decision_snapshot_safely_treats_permanently_missing_as_save_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """insert_if_absent()=Falseなのにstrongly consistent readでも存在しない
+    (通常は起こり得ない想定外状態)場合、decision_snapshot_conflictにはせず、
+    decision_snapshot_save_failedとして扱う(item 6.4)。"""
+    repo = _RaceRepositoryPermanentlyMissing()
+    logger = logging.getLogger("test.permanently_missing")
+
+    with caplog.at_level(logging.WARNING, logger="test.permanently_missing"):
+        save_decision_snapshot_safely(repo, _recommendation(), DecisionType.BUY, logger)
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert DECISION_SNAPSHOT_SAVE_FAILED_EVENT in message
+    assert DECISION_SNAPSHOT_CONFLICT_EVENT not in message

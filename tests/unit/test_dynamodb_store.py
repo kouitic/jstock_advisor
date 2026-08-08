@@ -105,3 +105,53 @@ def test_insert_if_absent_does_not_overwrite_existing_item(
     assert fetched is not None
     assert fetched.name == "original"
     assert fetched.value == 10
+
+
+def test_get_consistent_round_trips(store: DynamoDbCollectionStore[_Item]) -> None:
+    store.upsert(_Item(item_id="1", name="foo", value=10))
+    assert store.get_consistent("1") == _Item(item_id="1", name="foo", value=10)
+
+
+def test_get_consistent_returns_none_for_missing_item(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    assert store.get_consistent("does-not-exist") is None
+
+
+def test_get_consistent_uses_consistent_read(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """コードレビュー対応: get_consistent()はConsistentRead=TrueでGetItemを呼ぶこと
+    (通常のget()は結果整合性読み取りのまま変更せず、こちらだけ強い整合性で読む)。"""
+    calls: list[dict] = []
+    original_get_item = store._table.get_item
+
+    def _spy_get_item(**kwargs):
+        calls.append(kwargs)
+        return original_get_item(**kwargs)
+
+    monkeypatch.setattr(store._table, "get_item", _spy_get_item)
+
+    store.get_consistent("does-not-exist")
+
+    assert len(calls) == 1
+    assert calls[0].get("ConsistentRead") is True
+
+
+def test_get_does_not_use_consistent_read(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """通常のget()は今回の修正で変更しない(ConsistentReadを指定しないまま)。"""
+    calls: list[dict] = []
+    original_get_item = store._table.get_item
+
+    def _spy_get_item(**kwargs):
+        calls.append(kwargs)
+        return original_get_item(**kwargs)
+
+    monkeypatch.setattr(store._table, "get_item", _spy_get_item)
+
+    store.get("does-not-exist")
+
+    assert len(calls) == 1
+    assert "ConsistentRead" not in calls[0]

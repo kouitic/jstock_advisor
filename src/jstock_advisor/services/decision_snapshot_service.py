@@ -8,6 +8,13 @@ Repositoryを扱うこの薄いラッパーはservices層に置く。
 同一なら正常な冪等再実行として何もしない、(b)内容が異なるなら既存の記録を
 正として保持し、データ不整合の可能性としてWARNINGログを残す(内容不一致を
 検知しても既存Recommendation保存・LINE通知は一切ブロックしない)。
+
+再レビュー対応(誤conflict検知の解消): insert_if_absent()がFalse(既に存在、
+または並行実行によるrace)を返した直後の内容比較には、通常のget()ではなく
+repo.get_consistent()(DynamoDBではConsistentRead=True)を使う。通常のget()は
+結果整合性読み取りのため、並行実行でinsert_if_absentに負けた直後の読み取りが
+一時的にNoneを返す可能性があり、これを内容不一致(decision_snapshot_conflict)と
+誤検知しないようにするため。
 """
 
 from __future__ import annotations
@@ -43,18 +50,34 @@ def save_decision_snapshot_safely(
 
     insert-only保証: 真正な重複防止の正はrepo.insert_if_absent()の条件付き
     書き込みとする(get→insertのcheck-then-actを排他制御として信用しない)。
-    get()は既存値との内容比較のためだけに使う。insert_if_absentがFalseを返した
-    場合(既に存在、または並行実行によるrace)は、再度get()して内容を比較する。
+    内容比較にはrepo.get_consistent()(strongly consistent read)を使う。
+    insert_if_absentがFalseを返した場合(既に存在、または並行実行によるrace)は、
+    再度get_consistent()して内容を比較する。
     """
     try:
         new_snapshot = build_decision_snapshot(recommendation, decision_type)
-        existing = repo.get(new_snapshot.decision_id)
+        existing = repo.get_consistent(new_snapshot.decision_id)
         if existing is None:
             if repo.insert_if_absent(new_snapshot):
                 return
-            existing = repo.get(new_snapshot.decision_id)
+            # 並行実行で他プロセスが先にinsertしたため、strongly consistent read
+            # でその値を取得する(通常のget()だと結果整合性読み取りにより一時的に
+            # Noneが返り、正常な冪等再実行を誤ってconflict扱いする恐れがあるため)。
+            existing = repo.get_consistent(new_snapshot.decision_id)
         if existing == new_snapshot:
             # 同一内容の正常な冪等再実行(warning不要)。
+            return
+        if existing is None:
+            # insert_if_absent=Falseなのにstrongly consistent readでも存在しない
+            # のは通常想定できない(削除操作は存在しない)。内容不一致conflictでは
+            # なく、ストレージ側の想定外状態として保存失敗扱いにする。
+            logger.warning(
+                "%s stock_code=%s recommendation_id=%s decision_type=%s",
+                DECISION_SNAPSHOT_SAVE_FAILED_EVENT,
+                recommendation.stock_code,
+                recommendation.recommendation_id,
+                decision_type.value,
+            )
             return
         logger.warning(
             "%s stock_code=%s recommendation_id=%s decision_id=%s decision_type=%s",

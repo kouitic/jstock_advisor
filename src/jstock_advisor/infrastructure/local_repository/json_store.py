@@ -57,6 +57,10 @@ class JsonCollectionStore[T: BaseModel]:
     def get(self, item_id: str) -> T | None:
         return self._read_all().get(item_id)
 
+    def get_consistent(self, item_id: str) -> T | None:
+        """ローカルJSONは常に最新のファイル内容を読むため、get()と同じでよい。"""
+        return self.get(item_id)
+
     def upsert(self, item: T) -> None:
         items = self._read_all()
         item_id = str(getattr(item, self._id_field))

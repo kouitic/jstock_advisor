@@ -37,6 +37,16 @@ class CollectionStore[T: BaseModel](Protocol):
         自動追加機能のように、永続データへの重複追加を確実に防ぎたい場合に使う。
         """
         ...
+    def get_consistent(self, item_id: str) -> T | None:
+        """get()のstrongly consistent read版。
+
+        DynamoDB実装はConsistentRead=Trueで読む(結果整合性読み取りによる
+        一時的なNoneを避ける)。JSON実装はget()と同じ(ローカルJSONは常に
+        最新を読むため区別不要)。insert_if_absent()の競合後にレコード内容を
+        比較する等、強い整合性が必要な限定的な用途でのみ使うこと(通常のget()を
+        一律これへ置き換えない。DynamoDBの読み取りコスト増加・挙動変更を避けるため)。
+        """
+        ...
 
 
 def running_on_lambda() -> bool:
