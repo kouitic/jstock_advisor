@@ -511,15 +511,8 @@ def _process_single_candidate(
             recommendation_repo.save(final_recommendation)
             # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
             # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
-            # このelse節に到達している時点でsnapshotは必ず取得済み(data_error/
-            # EXCLUDED分岐は上でreturnまたはelifで処理済み)。
-            assert snapshot is not None  # noqa: S101
             save_decision_snapshot_safely(
-                DecisionSnapshotRepository(),
-                snapshot,
-                final_recommendation,
-                DecisionType.BUY,
-                logger,
+                DecisionSnapshotRepository(), final_recommendation, DecisionType.BUY, logger
             )
 
             if final_recommendation.buy_action == BuyAction.MANUAL_REVIEW:

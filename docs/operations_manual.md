@@ -64,6 +64,7 @@ Copy-Item .env.example .env
 | `data_validation_rules.yaml` | データ出典間の乖離許容閾値 |
 | `evaluation_rules.yaml` | 定点評価のラベル判定閾値 |
 | `review_improvement.yaml` | 週次改善レビューの対象期間・改善候補の基準・GitHub Issue自動起票の有効/無効(5.1節) |
+| `decision_evaluation.yaml` | 判定精度向上機能・自己評価基盤(Phase A)がDecisionSnapshotの成績集計対象とみなす営業日ホライズン(5.2節) |
 
 これらの値を変更する場合は、原則として第7節の「ルール改善承認フロー」を経てください
 (直接編集での即時反映も技術的には可能ですが、変更履歴・根拠が記録されなくなります)。
@@ -346,6 +347,40 @@ aws dynamodb scan --table-name jstock-weekly_review_metrics
 確認すること。`status=ISSUE_CREATION_FAILED`はGitHub API側の一時的な障害
 (5xx・タイムアウト・レート制限等)の可能性が高く、翌週の週次レビューで
 自動的に再試行される。
+
+### 5.2 判定精度向上機能・自己評価基盤(Phase A)の運用(2026-08追加)
+
+買い候補・売却・保有判断・利益確定の各判定が確定するたびに、その時点の
+最終判断値をDecisionSnapshotとして自動記録する(詳細はdocs/functional_spec.md
+12.5節参照)。運用者が個別に設定・起動する必要はなく、既存の
+`BuyCandidatesFunction`/`HoldingsWatchlistFunction`(またはローカル実行時は
+`jstock analyze buy-candidates`等)の実行に付随して自動的に動作する。
+
+**記録された判断の成績確認**:
+```bash
+# 記録済み全DecisionSnapshotの成績(件数・成功率・平均/中央値リターン・平均MFE/MAE)
+jstock decision-performance summary
+
+# 特定ホライズン(営業日数)のみに絞り込む場合
+jstock decision-performance summary --horizon 60
+```
+本コマンドが集計する対象は、既存の振り返り機能(12.1節)が既に算出済みの
+EvaluationResultのうち、`config/decision_evaluation.yaml`の
+`horizons_business_days`(既定5・20・60・120・250営業日)に含まれる行のみ。
+専用の振り返り処理を別途動かすものではないため、本コマンドを実行しても
+新たな株価取得・LINE通知は発生しない。
+
+**保存失敗時の確認方法**: DecisionSnapshotの保存に失敗した場合、
+CloudWatch Logsに固定イベントキー`decision_snapshot_save_failed`
+(`stock_code`/`recommendation_id`/`decision_type`付き)でWARNINGログが
+記録される(`BuyCandidatesFunction`/`HoldingsWatchlistFunction`のロググループを
+このキーで検索・メトリクスフィルタ可能)。
+
+**既存機能への影響について**: 本機能はShadow計測基盤であり、
+(1) LINE通知の内容・頻度には一切変更がなく通知件数も増えない、
+(2) DecisionSnapshotの保存に失敗しても、買い候補判定・売却判定・
+保有判断・利益確定判定やLINE通知の送信は一切ブロックされない
+(失敗は上記CloudWatchログにのみ記録される)。
 
 ---
 

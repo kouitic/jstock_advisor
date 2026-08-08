@@ -58,11 +58,12 @@ class EvaluationResult(Entity):
     label_evidence: str
     notes: str | None = None
 
-    # --- 判定精度向上機能(Phase A)で追加。既存recommendation_idベースの
-    # 冪等性ロジック(exists_for_horizon/exists_for_calendar_horizon)とは独立した
-    # 新しい軸。decision_idはDecisionSnapshotに紐づく評価のみ設定される
-    # (recommendation_idベースの既存評価では常にNoneのまま)。 ---
-    decision_id: str | None = None
+    # --- 判定精度向上機能(Phase A)で追加。セクターETF proxy(config.sector_etf_map)
+    # による指数比較用の予約フィールド。セクターproxy選定・安定取得可否の検証は
+    # Phase D(Market/Sector Environment)で行うため、Phase Aでは常にNoneのまま
+    # (推測で埋めない)。DecisionSnapshot/DecisionPerformanceServiceとは無関係で、
+    # 既存の営業日/暦日ホライズン評価(benchmark_symbol/benchmark_return_pct/
+    # excess_return_pctがTOPIX固定で使うのと同型のセクター版拡張)。 ---
     sector_benchmark_symbol: str | None = None
     sector_return_pct: float | None = None
     excess_return_vs_sector_pct: float | None = None

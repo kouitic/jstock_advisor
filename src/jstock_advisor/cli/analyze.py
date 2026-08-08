@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 import typer
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.enums import RecommendationType, buy_action_label
+from jstock_advisor.domain.entities.enums import DecisionType, RecommendationType, buy_action_label
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.line.client import LineClient, build_line_client_from_env
+from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
+    DecisionSnapshotRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -20,6 +24,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.providers.mock_fixtures import MOCK_STOCKS
 from jstock_advisor.services.buy_signal_service import BuySignalService
+from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
 from jstock_advisor.services.disclosure_check_service import DisclosureCheckService
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.portfolio_service import PortfolioService
@@ -31,6 +36,8 @@ from jstock_advisor.services.provider_factory import (
 )
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.watchlist_service import WatchlistService
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="買い候補・保有銘柄・ウォッチリストの分析(--sourceでmock/realを切替)")
 
@@ -100,6 +107,11 @@ def analyze_buy_candidates(
             continue
         found_any = True
         repo.save(outcome.recommendation)
+        # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
+        # 全てNone)。失敗しても既存の保存・通知には一切影響しない。
+        save_decision_snapshot_safely(
+            DecisionSnapshotRepository(), outcome.recommendation, DecisionType.BUY, logger
+        )
         _print_buy_recommendation(outcome.recommendation)
         if notification_service is not None:
             sent = notification_service.notify_recommendation(outcome.recommendation, now)
@@ -150,6 +162,11 @@ def analyze_watchlist(
             continue
         found_any = True
         repo.save(outcome.recommendation)
+        # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
+        # 全てNone)。失敗しても既存の保存・通知には一切影響しない。
+        save_decision_snapshot_safely(
+            DecisionSnapshotRepository(), outcome.recommendation, DecisionType.BUY, logger
+        )
         _print_buy_recommendation(outcome.recommendation)
         if notification_service is not None:
             sent = notification_service.notify_recommendation(outcome.recommendation, now)
@@ -199,6 +216,11 @@ def analyze_holdings(
         if sell_outcome.recommendation is not None:
             found_any = True
             repo.save(sell_outcome.recommendation)
+            # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
+            # Phase Bまで全てNone)。失敗しても既存の保存・通知には一切影響しない。
+            save_decision_snapshot_safely(
+                DecisionSnapshotRepository(), sell_outcome.recommendation, DecisionType.SELL, logger
+            )
             _print_sell_recommendation(sell_outcome.recommendation)
             if notification_service is not None:
                 sent = notification_service.notify_recommendation(sell_outcome.recommendation, now)
@@ -220,6 +242,14 @@ def analyze_holdings(
         if pt_outcome.recommendation is not None:
             found_any = True
             repo.save(pt_outcome.recommendation)
+            # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
+            # Phase Bまで全てNone)。失敗しても既存の保存・通知には一切影響しない。
+            save_decision_snapshot_safely(
+                DecisionSnapshotRepository(),
+                pt_outcome.recommendation,
+                DecisionType.PROFIT_TAKING,
+                logger,
+            )
             _print_profit_taking_recommendation(pt_outcome.recommendation)
             if notification_service is not None:
                 sent = notification_service.notify_recommendation(pt_outcome.recommendation, now)

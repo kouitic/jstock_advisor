@@ -14,12 +14,16 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
     DecisionSnapshotRepository,
 )
-from jstock_advisor.services.stock_snapshot_service import StockSnapshot
+
+# CloudWatch Logsで固定文字列として検索・メトリクスフィルタ可能にするための
+# イベントキー(コードレビュー対応: 自己評価基盤が長期間壊れていても既存の
+# Recommendation保存・LINE通知は正常に動き続けるため、専用の監視手段が無いと
+# 気づけない)。ログ末尾のkey=value群には秘匿情報・巨大オブジェクトを含めない。
+DECISION_SNAPSHOT_SAVE_FAILED_EVENT = "decision_snapshot_save_failed"
 
 
 def save_decision_snapshot_safely(
     repo: DecisionSnapshotRepository,
-    snapshot: StockSnapshot,
     recommendation: Recommendation,
     decision_type: DecisionType,
     logger: logging.Logger,
@@ -28,11 +32,13 @@ def save_decision_snapshot_safely(
     絶対にブロックしないためのラッパー。例外はWARNINGログのみに留め、呼び出し元へ
     伝播させない。"""
     try:
-        repo.save(build_decision_snapshot(snapshot, recommendation, decision_type))
+        repo.save(build_decision_snapshot(recommendation, decision_type))
     except Exception:
         logger.warning(
-            "decision_snapshot_save_failed stock_code=%s recommendation_id=%s",
+            "%s stock_code=%s recommendation_id=%s decision_type=%s",
+            DECISION_SNAPSHOT_SAVE_FAILED_EVENT,
             recommendation.stock_code,
             recommendation.recommendation_id,
+            decision_type.value,
             exc_info=True,
         )
