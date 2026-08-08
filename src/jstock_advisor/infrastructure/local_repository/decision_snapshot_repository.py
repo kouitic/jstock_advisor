@@ -25,6 +25,15 @@ class DecisionSnapshotRepository:
     def get(self, decision_id: str) -> DecisionSnapshot | None:
         return self._store.get(decision_id)
 
+    def get_consistent(self, decision_id: str) -> DecisionSnapshot | None:
+        """get()のstrongly consistent read版。
+
+        insert_if_absent()がFalse(既存または並行実行による競合)を返した直後に
+        内容を比較する用途専用(DynamoDBの結果整合性読み取りによる一時的なNoneで
+        正常な冪等再実行をdecision_snapshot_conflictと誤検知しないようにするため)。
+        """
+        return self._store.get_consistent(decision_id)
+
     def insert_if_absent(self, decision: DecisionSnapshot) -> bool:
         """decision_idが未存在の場合のみ追加してTrue、既に存在すればFalse。
 
