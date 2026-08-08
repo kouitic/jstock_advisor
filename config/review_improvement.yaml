@@ -18,7 +18,7 @@ weekly_review_enabled: true
 # (正常なスキップ、運用エラー通知は送らない)。trueへ切り替える際は、
 # このYAML編集後にsam build && sam deployによる再デプロイが必要
 # (Lambda Layer経由の静的設定のため、実行中の動的反映はできない)。
-issue_creation_enabled: false
+issue_creation_enabled: true
 
 # 前週比較・consecutive_bad_weeks算出に遡る週数。
 history_weeks_for_comparison: 4
