@@ -241,6 +241,17 @@ class EvaluationLabel(StrEnum):
     INCONCLUSIVE = "INCONCLUSIVE"
 
 
+class DecisionType(StrEnum):
+    """判定精度向上機能(Phase A)。DecisionSnapshotがどのパイプラインで生成されたかの
+    粗い分類。実際のRecommendationType(既存)はDecisionSnapshot.existing_actionに
+    別途保持する。"""
+
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLDING_DECISION = "HOLDING_DECISION"
+    PROFIT_TAKING = "PROFIT_TAKING"
+
+
 class ImprovementPriority(StrEnum):
     """週次改善レビュー(振り返り機能改修)の改善候補優先度。"""
 

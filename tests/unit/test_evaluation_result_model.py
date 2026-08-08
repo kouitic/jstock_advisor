@@ -57,3 +57,31 @@ def test_existing_json_with_only_horizon_business_days_still_loads() -> None:
     result = EvaluationResult.model_validate(payload)
     assert result.horizon_business_days == 60
     assert result.horizon_calendar_days is None
+
+
+# --- 判定精度向上機能Phase A(2026-08)で追加したフィールド ----------------------
+
+
+def test_decision_id_and_sector_fields_default_to_none() -> None:
+    """既存データ(decision_id等のフィールドが無いJSON)がそのまま読み込め、
+    デフォルトNoneで埋まること(後方互換、ゼロマイグレーション)。"""
+    result = EvaluationResult.model_validate({**_base_kwargs(), "horizon_business_days": 20})
+    assert result.decision_id is None
+    assert result.sector_benchmark_symbol is None
+    assert result.sector_return_pct is None
+    assert result.excess_return_vs_sector_pct is None
+
+
+def test_decision_id_and_sector_fields_can_be_set() -> None:
+    result = EvaluationResult(
+        **_base_kwargs(),
+        horizon_business_days=20,
+        decision_id="dec-1",
+        sector_benchmark_symbol="1615.T",
+        sector_return_pct=1.5,
+        excess_return_vs_sector_pct=2.3,
+    )
+    assert result.decision_id == "dec-1"
+    assert result.sector_benchmark_symbol == "1615.T"
+    assert result.sector_return_pct == 1.5
+    assert result.excess_return_vs_sector_pct == 2.3

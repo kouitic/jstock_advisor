@@ -426,6 +426,20 @@ Resources:
         - AttributeName: candidate_key
           KeyType: HASH
 
+  # --- 判定精度向上機能Phase A(2026-08): 自己評価基盤 -------------------------
+
+  DecisionSnapshotsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-decision_snapshots"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: decision_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: decision_id
+          KeyType: HASH
+
   UserFeedbackTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -608,6 +622,8 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # 判定精度向上機能Phase A(2026-08): DecisionSnapshot記録用
+        - DynamoDBCrudPolicy: { TableName: !Ref DecisionSnapshotsTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow
@@ -654,6 +670,8 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesisBaselineSequencesTable }
         - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesisBaselinePointersTable }
         - DynamoDBReadPolicy: { TableName: !Ref HoldingDecisionRuntimeConfigTable }
+        # 判定精度向上機能Phase A(2026-08): DecisionSnapshot記録用
+        - DynamoDBCrudPolicy: { TableName: !Ref DecisionSnapshotsTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow
@@ -714,6 +732,8 @@ Resources:
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EvaluationResultsTable }
+        # 判定精度向上機能Phase A(2026-08): DecisionSnapshot専用の営業日評価が読む
+        - DynamoDBReadPolicy: { TableName: !Ref DecisionSnapshotsTable }
       Events:
         DailyEvening:
           Type: ScheduleV2

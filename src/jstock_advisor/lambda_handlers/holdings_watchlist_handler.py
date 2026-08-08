@@ -48,6 +48,7 @@ from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
+    DecisionType,
     EvaluationStatus,
     NotificationStatus,
     RecommendationType,
@@ -63,6 +64,9 @@ from jstock_advisor.domain.signals.holding_decision_execution_plan import (
 from jstock_advisor.domain.signals.portfolio_concentration import evaluate_portfolio_concentration
 from jstock_advisor.infrastructure.aws.batch_tracker import record_result, start_batch
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
+    DecisionSnapshotRepository,
+)
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
     HoldingDecisionResultRepository,
 )
@@ -74,6 +78,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
+from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
 from jstock_advisor.services.holding_decision_notification_builder import (
     build_holding_decision_recommendation,
 )
@@ -199,6 +204,7 @@ def _notify_legacy_sell_and_build_result(
     holding: Holding,
     now: dt.datetime,
     recommendation: Recommendation,
+    snapshot: StockSnapshot,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     notification_enabled: bool,
@@ -206,6 +212,11 @@ def _notify_legacy_sell_and_build_result(
     """Recommendation保存はkill switchの影響を受けず常に行う(コードレビュー対応)。
     LINE送信のみ`notification_enabled`で制御する。"""
     recommendation_repo.save(recommendation)
+    # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
+    # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
+    save_decision_snapshot_safely(
+        DecisionSnapshotRepository(), snapshot, recommendation, DecisionType.SELL, logger
+    )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
     )
@@ -265,6 +276,15 @@ def _notify_holding_decision_and_build_result(
     )
     linked_result = result.model_copy(update={"recommendation_id": recommendation_id})
     recommendation_repo.save(recommendation)
+    # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
+    # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
+    save_decision_snapshot_safely(
+        DecisionSnapshotRepository(),
+        snapshot,
+        recommendation,
+        DecisionType.HOLDING_DECISION,
+        logger,
+    )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
     )
@@ -404,6 +424,7 @@ def _analyze_one_holding(
                 holding,
                 now,
                 sell_outcome.recommendation,
+                snapshot,
                 recommendation_repo,
                 notification_service,
                 notification_enabled,
@@ -500,6 +521,15 @@ def _analyze_one_holding(
     pt_outcome = profit_service.analyze(holding, now, snapshot=snapshot)
     if pt_outcome.recommendation is not None:
         recommendation_repo.save(pt_outcome.recommendation)
+        # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
+        # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
+        save_decision_snapshot_safely(
+            DecisionSnapshotRepository(),
+            snapshot,
+            pt_outcome.recommendation,
+            DecisionType.PROFIT_TAKING,
+            logger,
+        )
         outcome = _send_or_suppress_notification(
             pt_outcome.recommendation, notification_enabled, notification_service, now
         )

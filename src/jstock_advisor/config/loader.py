@@ -19,6 +19,7 @@ from jstock_advisor.config.models import (
     BuyDecisionRulesConfig,
     ConfidenceRulesConfig,
     DataValidationRulesConfig,
+    DecisionEvaluationConfig,
     EarningsWindowRulesConfig,
     EvaluationRulesConfig,
     HoldingDecisionRatioRulesConfig,
@@ -143,6 +144,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     review_improvement = ReviewImprovementConfig.model_validate(
         _load_yaml(directory / "review_improvement.yaml")
     )
+    decision_evaluation = DecisionEvaluationConfig.model_validate(
+        _load_yaml(directory / "decision_evaluation.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -169,4 +173,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         investment_thesis_template=investment_thesis_template,
         industry_scoring_policy=industry_scoring_policy,
         review_improvement=review_improvement,
+        decision_evaluation=decision_evaluation,
     )

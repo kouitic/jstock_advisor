@@ -11,6 +11,7 @@ from jstock_advisor.cli import (
     analyze,
     audit,
     candidate_universe,
+    decision_performance,
     evaluation,
     feedback,
     holding_decision,
@@ -36,6 +37,7 @@ app.add_typer(audit.app, name="audit")
 app.add_typer(transactions.app, name="transactions")
 app.add_typer(evaluation.app, name="evaluation")
 app.add_typer(performance.app, name="performance")
+app.add_typer(decision_performance.app, name="decision-performance")
 app.add_typer(feedback.app, name="feedback")
 app.add_typer(rules.app, name="rules")
 app.add_typer(review.app, name="review")
