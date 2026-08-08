@@ -228,6 +228,7 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         stock_type_classification=_stock_type(fx.stock_code, fx.stock_types),
         fair_value_range=_EMPTY_FAIR_VALUE_RANGE,
         momentum=_MOMENTUM_PLACEHOLDER,
+        historical_valuation_score=None,
     )
 
 

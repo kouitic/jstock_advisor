@@ -131,12 +131,33 @@ def test_build_decision_snapshot_jst_boundary() -> None:
     assert decision.evaluation_date_jst == dt.date(2026, 8, 8)
 
 
-def test_build_decision_snapshot_model_version_is_phase_a_constant() -> None:
+def test_build_decision_snapshot_model_version_matches_constant() -> None:
     recommendation = _recommendation()
 
     decision = build_decision_snapshot(recommendation, DecisionType.HOLDING_DECISION)
 
     assert decision.model_version == DECISION_SNAPSHOT_MODEL_VERSION
+
+
+def test_build_decision_snapshot_copies_historical_valuation_score() -> None:
+    """判定精度向上機能Phase B: Recommendation.historical_valuation_scoreが
+    DecisionSnapshot.historical_valuation_scoreへそのままコピーされる
+    (Shadow計測。既存の判定ロジックはこの値を一切参照しない)。"""
+    recommendation = _recommendation(config_values_used={}).model_copy(
+        update={"historical_valuation_score": 42.5}
+    )
+
+    decision = build_decision_snapshot(recommendation, DecisionType.BUY)
+
+    assert decision.historical_valuation_score == 42.5
+
+
+def test_build_decision_snapshot_historical_valuation_score_none_when_unset() -> None:
+    recommendation = _recommendation()
+
+    decision = build_decision_snapshot(recommendation, DecisionType.BUY)
+
+    assert decision.historical_valuation_score is None
 
 
 # --- RecommendationType/DecisionTypeの現行対応関係(コードレビュー対応item 12) ---

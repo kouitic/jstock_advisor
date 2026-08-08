@@ -147,3 +147,19 @@ def test_business_days_to_earnings_is_none_when_earnings_date_stale() -> None:
     assert error is None
     assert snapshot is not None
     assert snapshot.business_days_to_earnings is None
+
+
+# ===== 判定精度向上機能Phase B: Historical Valuation Score配線確認 =====
+
+
+def test_historical_valuation_score_is_computed_when_data_available() -> None:
+    """モックプロバイダの過去バリュエーションデータ・予想EPS/BPSが揃っていれば、
+    -100〜+100の範囲でhistorical_valuation_scoreが計算されること(配線確認。
+    スコアの計算ロジック自体の詳細はtest_historical_valuation_score.pyで検証)。
+    """
+    providers = build_mock_provider_bundle(_NOW)
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.historical_valuation_score is not None
+    assert -100.0 <= snapshot.historical_valuation_score <= 100.0

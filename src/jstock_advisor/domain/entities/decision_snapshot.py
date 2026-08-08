@@ -1,9 +1,13 @@
-"""判定精度向上機能Phase A: DecisionSnapshot(自己評価基盤)。
+"""判定精度向上機能Phase A/B: DecisionSnapshot(自己評価基盤)。
 
-企業評価・タイミング判定等のスコアリングロジック自体はPhase B以降で追加する。
 Phase Aでは、判断が確定した時点で「実際に確定した最終判断値」だけを不変
 スナップショットとして保存し、将来スコアが埋まった際の追跡・検証基盤を先に
-用意する(スコア項目は全てNoneのまま)。
+用意した(スコア項目は全てNoneのまま)。Phase B第一弾として
+historical_valuation_score(銘柄自身の過去PER/PBR水準に対する現在値のランク
+ベーススコア)を実装済み(domain/signals/historical_valuation.py参照)。
+これはShadow計測専用であり、BUY候補判定・保有判断スコア・旧売却判定・
+ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
+他のスコア項目(timing_score等)はPhase B以降の別ステップで追加していく。
 
 重要な設計原則(コードレビュー対応): DecisionSnapshotはRecommendationを唯一の
 正本とする。StockSnapshot(判定処理の中間生成物)を直接参照しない。BUYパイプライン
@@ -41,9 +45,10 @@ from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, DecisionType, RecommendationType
 
 # DecisionSnapshot自体のスキーマ/スコアリング方式のバージョン(rule_versionとは別物、
-# rule_versionはBUY/SELL判定ロジック自体のバージョンを指す)。Phase Bでスコアが
-# 実装され始めたら値を上げる。
-DECISION_SNAPSHOT_MODEL_VERSION = "phase_a_unscored_v1"
+# rule_versionはBUY/SELL判定ロジック自体のバージョンを指す)。Phase B第一弾
+# (historical_valuation_score実装)に伴い値を上げた。他のスコア項目が実装され
+# 始めたらさらに値を上げる。
+DECISION_SNAPSHOT_MODEL_VERSION = "phase_b_historical_valuation_v1"
 
 
 class DecisionSnapshot(ImmutableSnapshot):
@@ -76,8 +81,11 @@ class DecisionSnapshot(ImmutableSnapshot):
     fair_value_bull: Decimal | None = None
     fair_value_confidence: ConfidenceLevel | None = None
 
-    # --- スコア項目(Phase Aでは全件None。Phase B/C/D/Eが埋める) ---
+    # --- スコア項目 ---
     timing_score: float | None = None
+    # 銘柄自身の過去PER/PBR水準に対する現在値のランクベーススコア
+    # (-100〜+100、算出不可時はNone)。Phase B第一弾で実装済み
+    # (domain/signals/historical_valuation.py参照、Shadow計測専用)。
     historical_valuation_score: float | None = None
     earnings_surprise_score: float | None = None
     earnings_trend_score: float | None = None

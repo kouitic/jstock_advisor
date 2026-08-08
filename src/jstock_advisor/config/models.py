@@ -426,6 +426,18 @@ class DecisionEvaluationConfig(StrictModel):
     horizons_business_days: list[int]
 
 
+# --- historical_valuation_rules.yaml(判定精度向上機能Phase B) ----------------
+
+
+class HistoricalValuationRulesConfig(StrictModel):
+    # PER/PBRそれぞれについて、この点数以上の有効な過去データが無い場合は
+    # その指標をスコア対象から除外する(yfinance実質年次数点程度という制約を
+    # 踏まえ、少なすぎるデータでのランク付けを避ける)。
+    min_data_points_required: int
+    per_weight: float
+    pbr_weight: float
+
+
 # --- holiday_calendar.json ----------------------------------------------------
 
 
@@ -1447,3 +1459,5 @@ class AppConfig(StrictModel):
     review_improvement: ReviewImprovementConfig
     # --- 判定精度向上機能Phase A(2026-08)で追加 ---
     decision_evaluation: DecisionEvaluationConfig
+    # --- 判定精度向上機能Phase B: Historical Valuation Score(2026-08)で追加 ---
+    historical_valuation: HistoricalValuationRulesConfig

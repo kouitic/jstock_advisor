@@ -131,4 +131,6 @@ def build_holding_decision_recommendation(
         recommended_action_summary=action_summary,
         next_review_conditions=next_review_conditions,
         holding_risks=reasons,
+        # 判定精度向上機能Phase B: DecisionSnapshot記録専用(Shadow計測)。
+        historical_valuation_score=snapshot.historical_valuation_score,
     )

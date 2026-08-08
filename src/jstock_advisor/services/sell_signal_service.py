@@ -416,6 +416,8 @@ class SellSignalService:
             holding_risks=_build_holding_risks(evidence_details),
             evidence_details=[_evidence_detail_dict(e) for e in evidence_details],
             independent_evidence_group_count=result.independent_evidence_group_count,
+            # 判定精度向上機能Phase B: DecisionSnapshot記録専用(Shadow計測)。
+            historical_valuation_score=snapshot.historical_valuation_score,
         )
         return SellSignalOutcome(
             holding.stock_code, recommendation, None, tuple(result.triggered_rules)

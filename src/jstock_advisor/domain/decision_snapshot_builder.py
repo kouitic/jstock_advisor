@@ -70,4 +70,5 @@ def build_decision_snapshot(
         model_version=DECISION_SNAPSHOT_MODEL_VERSION,
         config_values_used=dict(recommendation.config_values_used),
         data_sources=tuple(recommendation.data_sources),
+        historical_valuation_score=recommendation.historical_valuation_score,
     )
