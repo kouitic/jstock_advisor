@@ -19,6 +19,7 @@ Phase B以降で本格的に活用される)。
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -35,6 +36,14 @@ from jstock_advisor.infrastructure.local_repository.evaluation_repository import
 )
 from jstock_advisor.services.performance_metrics_service import MetricsBucket, build_metrics_bucket
 
+logger = logging.getLogger(__name__)
+
+# CloudWatch Logsで固定文字列として検索可能なイベントキー(コードレビュー対応:
+# モデル上「1 Recommendation = 1 DecisionSnapshot」のはずだが、不正なデータ投入等で
+# 同一recommendation_idに複数のDecisionSnapshotが存在した場合、list順によって
+# 集計結果が変わってしまうのを防ぐため、黙って1件を採用せず対象を集計除外する)。
+DECISION_PERFORMANCE_DUPLICATE_SNAPSHOT_EVENT = "decision_performance_duplicate_snapshot"
+
 
 @dataclass(frozen=True)
 class DecisionPerformanceSummary:
@@ -49,6 +58,34 @@ class DecisionPerformanceSummary:
     by_decision_type: list[MetricsBucket] = field(default_factory=list)
     by_existing_action: list[MetricsBucket] = field(default_factory=list)
     by_model_version: list[MetricsBucket] = field(default_factory=list)
+
+
+def _build_decision_index(decisions: list[DecisionSnapshot]) -> dict[str, DecisionSnapshot]:
+    """recommendation_id -> DecisionSnapshotのインデックスを構築する。
+
+    モデル上は「1 Recommendation = 1 DecisionSnapshot」だが、不正なデータ投入等で
+    同一recommendation_idに複数件存在した場合、list順に依存して結果が変わらないよう、
+    該当recommendation_idはインデックスから完全に除外する(黙って最後の1件を
+    採用しない)。除外対象はWARNINGログへ1件ずつ記録する。
+    """
+    index: dict[str, DecisionSnapshot] = {}
+    duplicate_recommendation_ids: set[str] = set()
+    for decision in decisions:
+        recommendation_id = decision.recommendation_id
+        if recommendation_id is None:
+            continue
+        if recommendation_id in index or recommendation_id in duplicate_recommendation_ids:
+            duplicate_recommendation_ids.add(recommendation_id)
+            index.pop(recommendation_id, None)
+            continue
+        index[recommendation_id] = decision
+    for recommendation_id in sorted(duplicate_recommendation_ids):
+        logger.warning(
+            "%s recommendation_id=%s",
+            DECISION_PERFORMANCE_DUPLICATE_SNAPSHOT_EVENT,
+            recommendation_id,
+        )
+    return index
 
 
 def _group_bucket(
@@ -89,9 +126,7 @@ class DecisionPerformanceService:
                 e for e in evaluations if e.horizon_business_days == horizon_business_days
             ]
 
-        decisions_by_recommendation_id = {
-            d.recommendation_id: d for d in self._decisions.list_all() if d.recommendation_id
-        }
+        decisions_by_recommendation_id = _build_decision_index(self._decisions.list_all())
         pairs: list[tuple[EvaluationResult, DecisionSnapshot]] = []
         for evaluation in evaluations:
             decision = decisions_by_recommendation_id.get(evaluation.recommendation_id)

@@ -64,7 +64,7 @@ def _make_recommendation(recommendation_id: str = "rec-1") -> Recommendation:
 
 def _make_decision_snapshot(recommendation: Recommendation) -> DecisionSnapshot:
     return DecisionSnapshot(
-        decision_id=build_decision_id(DecisionType.BUY, recommendation.recommendation_id),
+        decision_id=build_decision_id(recommendation.recommendation_id),
         decision_type=DecisionType.BUY,
         stock_code=recommendation.stock_code,
         evaluated_at=recommendation.recommended_at,
@@ -106,7 +106,7 @@ def test_decision_snapshot_presence_does_not_change_evaluation_result_count(
 
     # DecisionSnapshotを追加してから、まっさらな状態で再度評価しても件数は同じになる
     # (recommendation_evaluation_service.py自体はDecisionSnapshotの有無を一切見ない)。
-    decision_repo.save(_make_decision_snapshot(recommendation))
+    decision_repo.insert_if_absent(_make_decision_snapshot(recommendation))
     evaluation_repo_2 = EvaluationResultRepository(store_dir=tmp_path / "with_decision")
     recommendation_repo_2 = RecommendationRepository(store_dir=tmp_path / "with_decision")
     recommendation_repo_2.save(recommendation)
@@ -153,7 +153,7 @@ def test_performance_metrics_unaffected_by_decision_snapshot_presence(tmp_path: 
 
     # DecisionSnapshotを追加(既存のevaluation_repo/recommendation_repoには一切触れない)。
     decision_repo = DecisionSnapshotRepository(store_dir=tmp_path)
-    decision_repo.save(_make_decision_snapshot(recommendation))
+    decision_repo.insert_if_absent(_make_decision_snapshot(recommendation))
 
     summary_after = metrics_service.summarize(now=now)
 

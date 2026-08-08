@@ -376,6 +376,24 @@ CloudWatch Logsに固定イベントキー`decision_snapshot_save_failed`
 記録される(`BuyCandidatesFunction`/`HoldingsWatchlistFunction`のロググループを
 このキーで検索・メトリクスフィルタ可能)。
 
+**記録の不変性(2026-08再レビュー対応)**: DecisionSnapshotは一度保存されたら
+後から絶対に上書きされない(insert-only)。同じ判定の保存処理が偶然もう一度
+走った場合、記録内容が完全に同一であれば何もしない(正常な冪等再実行)。
+万一、同じ判定のはずなのに記録内容が食い違う異常なケース(想定される原因は
+ほぼ無いが、不正なデータ操作等)を検知した場合、既存の記録をそのまま保持し
+(新しい値では上書きしない)、CloudWatch Logsに固定イベントキー
+`decision_snapshot_conflict`(`stock_code`/`recommendation_id`/`decision_id`/
+`decision_type`付き)でWARNINGログを残す。`decision_snapshot_save_failed`
+(ストレージ障害等の予期しない失敗)とは原因が異なるため、イベントキーを
+分けて検索できるようにしてある。いずれの場合も既存の買い候補判定・売却判定・
+保有判断・利益確定判定やLINE通知には一切影響しない。
+
+**成績集計側の異常データ検知**: `jstock decision-performance summary`の集計対象は
+「1件の判定につきDecisionSnapshotは常に1件」を前提としている。万一この前提に
+反するデータが混入した場合、集計結果が不安定にならないよう該当の判定は集計から
+除外され、CloudWatch Logsに固定イベントキー`decision_performance_duplicate_snapshot`
+(`recommendation_id`付き)でWARNINGログが残る。
+
 **既存機能への影響について**: 本機能はShadow計測基盤であり、
 (1) LINE通知の内容・頻度には一切変更がなく通知件数も増えない、
 (2) DecisionSnapshotの保存に失敗しても、買い候補判定・売却判定・

@@ -1,4 +1,8 @@
-"""DecisionSnapshotRepositoryのテスト(判定精度向上機能Phase A)。"""
+"""DecisionSnapshotRepositoryのテスト(判定精度向上機能Phase A)。
+
+コードレビュー対応(insert-only保証): DecisionSnapshotは一度保存されたら
+後から絶対に上書きしない。upsert()は使用せず、insert_if_absent()のみを使う。
+"""
 
 from __future__ import annotations
 
@@ -35,9 +39,10 @@ def _decision(
     )
 
 
-def test_save_and_get(tmp_path: Path) -> None:
+def test_insert_if_absent_succeeds_on_first_insert(tmp_path: Path) -> None:
     repo = DecisionSnapshotRepository(store_dir=tmp_path)
-    repo.save(_decision())
+
+    assert repo.insert_if_absent(_decision()) is True
 
     fetched = repo.get("dec-1")
     assert fetched is not None
@@ -52,34 +57,39 @@ def test_get_returns_none_when_missing(tmp_path: Path) -> None:
 
 def test_list_all_returns_all_saved(tmp_path: Path) -> None:
     repo = DecisionSnapshotRepository(store_dir=tmp_path)
-    repo.save(_decision("dec-1"))
-    repo.save(_decision("dec-2"))
+    repo.insert_if_absent(_decision("dec-1"))
+    repo.insert_if_absent(_decision("dec-2"))
 
     items = repo.list_all()
     assert {d.decision_id for d in items} == {"dec-1", "dec-2"}
 
 
-def test_save_upserts_existing_id(tmp_path: Path) -> None:
-    repo = DecisionSnapshotRepository(store_dir=tmp_path)
-    repo.save(_decision("dec-1"))
-    updated = _decision("dec-1", market_price=Decimal("1200"))
-    repo.save(updated)
-
-    items = repo.list_all()
-    assert len(items) == 1
-    assert items[0].market_price == Decimal("1200")
-
-
-def test_same_recommendation_and_decision_type_saved_twice_yields_one_record(
+def test_insert_if_absent_returns_false_and_does_not_overwrite_existing_id(
     tmp_path: Path,
 ) -> None:
-    """コードレビュー対応(冪等性): 決定的decision_idにより、同一Recommendation・
-    同一DecisionTypeの保存処理が再実行されてもDecisionSnapshotが増殖しない。"""
+    """コードレビュー対応(insert-only): 同一decision_idへの2回目のinsert_if_absentは
+    Falseを返し、既存の記録は一切変更されない(upsertのような上書きは発生しない)。
+    「最初に記録された事実が永続的に正であること」を保証する。"""
     repo = DecisionSnapshotRepository(store_dir=tmp_path)
-    decision_id = build_decision_id(DecisionType.BUY, "rec-1")
-    repo.save(_decision(decision_id, market_price=Decimal("1150")))
-    repo.save(_decision(decision_id, market_price=Decimal("1160")))  # 再実行(値は微差)
+    assert repo.insert_if_absent(_decision("dec-1", market_price=Decimal("1150"))) is True
+    assert repo.insert_if_absent(_decision("dec-1", market_price=Decimal("1200"))) is False
 
     items = repo.list_all()
     assert len(items) == 1
-    assert items[0].market_price == Decimal("1160")
+    assert items[0].market_price == Decimal("1150")
+
+
+def test_same_recommendation_saved_twice_yields_one_record_with_first_value(
+    tmp_path: Path,
+) -> None:
+    """コードレビュー対応(冪等性): 決定的decision_idにより、同一Recommendationの
+    保存処理が再実行されてもDecisionSnapshotが増殖せず、かつ最初に記録された
+    値が上書きされない(単に件数が1件のままというだけでは不十分)。"""
+    repo = DecisionSnapshotRepository(store_dir=tmp_path)
+    decision_id = build_decision_id("rec-1")
+    repo.insert_if_absent(_decision(decision_id, market_price=Decimal("1150")))
+    repo.insert_if_absent(_decision(decision_id, market_price=Decimal("1160")))  # 再実行(値は微差)
+
+    items = repo.list_all()
+    assert len(items) == 1
+    assert items[0].market_price == Decimal("1150")
