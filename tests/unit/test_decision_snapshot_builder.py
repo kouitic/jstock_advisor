@@ -184,6 +184,46 @@ def test_build_decision_snapshot_historical_valuation_fields_default_when_unset(
     assert decision.historical_valuation_metrics == {}
 
 
+def test_build_decision_snapshot_copies_timing_score_fields() -> None:
+    """判定精度向上機能Phase B第二弾: Recommendationのtiming_*5フィールド
+    (score/confidence/coverage/reason_codes/metrics)がDecisionSnapshotへ
+    そのままコピーされる(historical_valuation_*と同じパターン)。"""
+    recommendation = _recommendation(config_values_used={}).model_copy(
+        update={
+            "timing_score": -30.5,
+            "timing_confidence": ConfidenceLevel.MEDIUM,
+            "timing_coverage": 0.5,
+            "timing_reason_codes": ("MACD_UNAVAILABLE",),
+            "timing_metrics": {"trend_component": -50.0, "model_version": "timing_test_v1"},
+        }
+    )
+
+    decision = build_decision_snapshot(recommendation, DecisionType.SELL)
+
+    assert decision.timing_score == -30.5
+    assert decision.timing_confidence == ConfidenceLevel.MEDIUM
+    assert decision.timing_coverage == 0.5
+    assert decision.timing_reason_codes == ("MACD_UNAVAILABLE",)
+    assert decision.timing_metrics == {
+        "trend_component": -50.0,
+        "model_version": "timing_test_v1",
+    }
+
+
+def test_build_decision_snapshot_timing_score_fields_default_when_unset() -> None:
+    """Recommendation側に値が無い場合、DecisionSnapshot側で推測・再計算せず
+    未設定のまま(None/空)保存する。"""
+    recommendation = _recommendation()
+
+    decision = build_decision_snapshot(recommendation, DecisionType.BUY)
+
+    assert decision.timing_score is None
+    assert decision.timing_confidence is None
+    assert decision.timing_coverage is None
+    assert decision.timing_reason_codes == ()
+    assert decision.timing_metrics == {}
+
+
 # --- RecommendationType/DecisionTypeの現行対応関係(コードレビュー対応item 12) ---
 # decision_snapshot_builder.pyのモジュールdocstring参照。生産コードの横断調査の結果、
 # 各パイプラインは常に単一のRecommendationType集合・単一のDecisionTypeとのみ対応する。

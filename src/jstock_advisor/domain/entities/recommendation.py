@@ -94,6 +94,18 @@ class Recommendation(ImmutableSnapshot):
     historical_valuation_reason_codes: tuple[str, ...] = ()
     historical_valuation_metrics: dict[str, Any] = Field(default_factory=dict)
 
+    # --- 判定精度向上機能Phase B第二弾: Timing Score(2026-08追加、Shadow計測
+    # 専用)。既存MomentumSnapshotを基にしたモメンタムベースの技術的タイミング
+    # 評価結果。StockSnapshot.timingをそのままコピーしたものであり、
+    # DecisionSnapshotへ記録する以外の用途では一切使わない。BUY候補判定・
+    # 保有判断スコア・旧売却判定・ProfitTaking判定・LINE通知など既存の判定
+    # ロジックからは参照しないこと ---
+    timing_score: float | None = None
+    timing_confidence: ConfidenceLevel | None = None
+    timing_coverage: float | None = None
+    timing_reason_codes: tuple[str, ...] = ()
+    timing_metrics: dict[str, Any] = Field(default_factory=dict)
+
     # --- 通知層の自動生成文言廃止(2026-07仕様§9)で追加。判定結果の文言は
     # 通知層(line_notification_service)で生成せず、ここに判定サービスが直接格納する ---
     recommended_action_summary: str | None = None

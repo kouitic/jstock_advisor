@@ -42,6 +42,10 @@ from jstock_advisor.domain.signals.sell_signal import (
     build_sell_rule_inputs_from_data,
     evaluate_sell_signal,
 )
+from jstock_advisor.domain.signals.timing_score import (
+    timing_score_config_values,
+    timing_score_result_to_metrics,
+)
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.provider_bundle import ProviderBundle
@@ -414,6 +418,7 @@ class SellSignalService:
                 "historical_valuation": historical_valuation_config_values(
                     self._config.historical_valuation
                 ),
+                "timing_score": timing_score_config_values(self._config.timing_score),
             },
             data_sources=list(snapshot.data_sources),
             recommended_action_summary=_build_action_summary(recommendation_type),
@@ -431,6 +436,12 @@ class SellSignalService:
             historical_valuation_metrics=historical_valuation_result_to_metrics(
                 snapshot.historical_valuation
             ),
+            # 判定精度向上機能Phase B第二弾: DecisionSnapshot記録専用(Shadow計測)。
+            timing_score=snapshot.timing.score,
+            timing_confidence=snapshot.timing.confidence,
+            timing_coverage=snapshot.timing.coverage,
+            timing_reason_codes=snapshot.timing.reason_codes,
+            timing_metrics=timing_score_result_to_metrics(snapshot.timing),
         )
         return SellSignalOutcome(
             holding.stock_code, recommendation, None, tuple(result.triggered_rules)

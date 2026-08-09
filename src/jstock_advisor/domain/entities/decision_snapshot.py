@@ -5,9 +5,12 @@ Phase Aでは、判断が確定した時点で「実際に確定した最終判�
 用意した(スコア項目は全てNoneのまま)。Phase B第一弾として
 historical_valuation_score(銘柄自身の過去PER/PBR水準に対する現在値のランク
 ベーススコア)を実装済み(domain/signals/historical_valuation.py参照)。
-これはShadow計測専用であり、BUY候補判定・保有判断スコア・旧売却判定・
-ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
-他のスコア項目(timing_score等)はPhase B以降の別ステップで追加していく。
+Phase B第二弾としてtiming_score(既存MomentumSnapshotを基にしたモメンタム
+ベースの技術的タイミングスコア)を実装済み(domain/signals/timing_score.py
+参照)。いずれもShadow計測専用であり、BUY候補判定・保有判断スコア・旧売却
+判定・ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
+他のスコア項目(earnings_surprise_score等)はPhase B以降の別ステップで
+追加していく。
 
 重要な設計原則(コードレビュー対応): DecisionSnapshotはRecommendationを唯一の
 正本とする。StockSnapshot(判定処理の中間生成物)を直接参照しない。BUYパイプライン
@@ -82,7 +85,6 @@ class DecisionSnapshot(ImmutableSnapshot):
     fair_value_confidence: ConfidenceLevel | None = None
 
     # --- スコア項目 ---
-    timing_score: float | None = None
     # 銘柄自身の過去PER/PBR水準に対する現在値のランクベーススコア
     # (-100〜+100、算出不可時はNone)。Phase B第一弾で実装済み
     # (domain/signals/historical_valuation.py参照、Shadow計測専用)。
@@ -93,6 +95,14 @@ class DecisionSnapshot(ImmutableSnapshot):
     historical_valuation_coverage: float | None = None
     historical_valuation_reason_codes: tuple[str, ...] = ()
     historical_valuation_metrics: dict[str, Any] = Field(default_factory=dict)
+    # モメンタムベースの技術的タイミングスコア(-100〜+100、算出不可時はNone)。
+    # Phase B第二弾で実装済み(domain/signals/timing_score.py参照、
+    # Shadow計測専用)。historical_valuation_*と同じ5フィールドパターン。
+    timing_score: float | None = None
+    timing_confidence: ConfidenceLevel | None = None
+    timing_coverage: float | None = None
+    timing_reason_codes: tuple[str, ...] = ()
+    timing_metrics: dict[str, Any] = Field(default_factory=dict)
     earnings_surprise_score: float | None = None
     earnings_trend_score: float | None = None
     market_score: float | None = None

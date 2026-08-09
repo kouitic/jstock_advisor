@@ -23,6 +23,7 @@ from jstock_advisor.domain.entities.common import (
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, EarningsDateStatus, ValuationBasis
 from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
+from jstock_advisor.domain.entities.timing_score import TimingScoreResult
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
 from jstock_advisor.domain.financial_series import (
     FinancialPeriodValue,
@@ -37,6 +38,7 @@ from jstock_advisor.domain.screening.rules import (
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.signals.historical_valuation import evaluate_historical_valuation
 from jstock_advisor.domain.signals.momentum import compute_momentum_snapshot
+from jstock_advisor.domain.signals.timing_score import evaluate_timing_score
 from jstock_advisor.domain.valuation.fair_value import (
     aggregate_fair_value,
     compute_dcf_price,
@@ -115,6 +117,11 @@ class StockSnapshot:
     # 記録専用のShadow計測であり、BUY候補判定・保有判断スコア・旧売却判定・
     # ProfitTaking判定・LINE通知など既存の判定ロジックからは一切参照されない。
     historical_valuation: HistoricalValuationResult
+    # --- 判定精度向上機能Phase B第二弾: Timing Score(2026-08追加) ---
+    # momentum(上記)を基にしたモメンタムベースの技術的タイミング評価結果。
+    # 同じくDecisionSnapshot記録専用のShadow計測であり、既存の判定ロジックには
+    # 一切影響しない。
+    timing: TimingScoreResult
 
 
 def build_stock_snapshot(
@@ -364,6 +371,11 @@ def build_stock_snapshot(
         config.historical_valuation,
     )
 
+    # 判定精度向上機能Phase B第二弾: Timing Score(Shadow計測)。既に計算済みの
+    # momentum_snapshotを基に算出する派生値であり、既存のBUY/保有/売却/
+    # ProfitTaking判定・LINE通知には一切影響しない。
+    timing = evaluate_timing_score(momentum_snapshot, now, config.timing_score)
+
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
@@ -398,5 +410,6 @@ def build_stock_snapshot(
         fair_value_range=fair_value_range,
         momentum=momentum_snapshot,
         historical_valuation=historical_valuation,
+        timing=timing,
     )
     return snapshot, None

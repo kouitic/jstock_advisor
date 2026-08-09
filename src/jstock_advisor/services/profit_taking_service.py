@@ -65,6 +65,10 @@ from jstock_advisor.domain.signals.record_date_resolution import (
     resolve_dividend_record_date_recurring_label,
     resolve_dividend_record_date_source_type,
 )
+from jstock_advisor.domain.signals.timing_score import (
+    timing_score_config_values,
+    timing_score_result_to_metrics,
+)
 from jstock_advisor.domain.signals.trading_unit_feasibility import (
     TradingUnitFeasibility,
     evaluate_trading_unit_feasibility,
@@ -615,6 +619,7 @@ class ProfitTakingService:
                 "historical_valuation": historical_valuation_config_values(
                     self._config.historical_valuation
                 ),
+                "timing_score": timing_score_config_values(self._config.timing_score),
             },
             data_sources=list(snapshot.data_sources),
             next_review_conditions=_build_next_review_conditions(
@@ -683,6 +688,12 @@ class ProfitTakingService:
             historical_valuation_metrics=historical_valuation_result_to_metrics(
                 snapshot.historical_valuation
             ),
+            # 判定精度向上機能Phase B第二弾: DecisionSnapshot記録専用(Shadow計測)。
+            timing_score=snapshot.timing.score,
+            timing_confidence=snapshot.timing.confidence,
+            timing_coverage=snapshot.timing.coverage,
+            timing_reason_codes=snapshot.timing.reason_codes,
+            timing_metrics=timing_score_result_to_metrics(snapshot.timing),
         )
         return ProfitTakingOutcome(holding.stock_code, recommendation, None)
 

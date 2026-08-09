@@ -291,6 +291,25 @@ class HistoricalValuationCategory(StrEnum):
     VERY_EXPENSIVE = "VERY_EXPENSIVE"
 
 
+class TimingScoreEvaluationState(StrEnum):
+    """Timing Scoreが実際に算出されたか、データ不足で算出不可だったかの区分
+    (判定精度向上機能Phase B第二弾)。"""
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
+class TimingScoreCategory(StrEnum):
+    """Timing Scoreを人間が読みやすいカテゴリへ丸めたもの
+    (Shadow記録専用、BUY/SELL等の判定ロジックには使わない)。"""
+
+    STRONG_TAILWIND = "STRONG_TAILWIND"
+    TAILWIND = "TAILWIND"
+    NEUTRAL = "NEUTRAL"
+    HEADWIND = "HEADWIND"
+    STRONG_HEADWIND = "STRONG_HEADWIND"
+
+
 class ImprovementPriority(StrEnum):
     """週次改善レビュー(振り返り機能改修)の改善候補優先度。"""
 
