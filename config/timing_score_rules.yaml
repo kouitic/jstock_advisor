@@ -1,0 +1,42 @@
+# 判定精度向上機能Phase B第二弾(Timing Score)の設定。
+# 既存のMomentumSnapshot(domain/signals/momentum.py、trend/RSI/MACD/相対強度/
+# 直近高値からの下落率)を基に、現在が技術的モメンタムの観点から良いタイミング
+# かどうかを-100(逆風)〜+100(追い風)の点数で計算する(自己過去比較ではなく
+# 現在時点の技術指標の合成)。DecisionSnapshot.timing_score等(Shadow計測専用)
+# へのみ記録され、BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
+# LINE通知など既存の判定ロジックには一切影響しない。
+
+# アルゴリズム自体(成分の重み・スケール変換・coverage/confidence計算式)の
+# バージョン。計算方式を変更した場合はここを更新する。
+model_version: "timing_score_v1"
+
+# 各成分の加重平均に使う重み。利用不可な成分は0扱いとし、利用可能な成分の
+# 重みだけで正規化する。
+trend_weight: 1.0
+rsi_weight: 1.0
+macd_weight: 1.0
+topix_relative_strength_weight: 1.0
+sector_relative_strength_weight: 1.0
+drawdown_weight: 1.0
+
+# relative_strength_vs_topix_pct/vs_sector_pctを-100〜+100へ換算する際の
+# フルスケール(この%ポイント差でスコア±100に達する)。
+relative_strength_full_scale_pct: 15.0
+
+# drawdown_from_recent_high_pctを-100〜+100へ換算する際のフルスケール
+# (直近高値からの下落率がこの%に達するとスコアが中立点0まで下がる)。
+drawdown_full_scale_pct: 20.0
+
+# coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする
+# (trend成分は常に利用可能なため、他の成分が軒並み欠損していてもスコアが
+# 出てしまうことを防ぐ最小データ量ゲート)。
+min_coverage_required: 0.3
+coverage_high_threshold: 0.8
+coverage_medium_threshold: 0.4
+
+# スコア(-100〜+100)をカテゴリへ丸めるための閾値(Shadow記録専用)。
+category_thresholds:
+  strong_tailwind: 60.0
+  tailwind: 20.0
+  headwind: -20.0
+  strong_headwind: -60.0

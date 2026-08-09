@@ -75,4 +75,9 @@ def build_decision_snapshot(
         historical_valuation_coverage=recommendation.historical_valuation_coverage,
         historical_valuation_reason_codes=recommendation.historical_valuation_reason_codes,
         historical_valuation_metrics=dict(recommendation.historical_valuation_metrics),
+        timing_score=recommendation.timing_score,
+        timing_confidence=recommendation.timing_confidence,
+        timing_coverage=recommendation.timing_coverage,
+        timing_reason_codes=recommendation.timing_reason_codes,
+        timing_metrics=dict(recommendation.timing_metrics),
     )

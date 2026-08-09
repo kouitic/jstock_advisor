@@ -39,6 +39,7 @@ from jstock_advisor.config.models import (
     ScreeningRulesConfig,
     SellRulesConfig,
     StockClassificationRulesConfig,
+    TimingScoreRulesConfig,
     ValuationRulesConfig,
     WatchlistScreeningRulesConfig,
 )
@@ -151,6 +152,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     historical_valuation = HistoricalValuationRulesConfig.model_validate(
         _load_yaml(directory / "historical_valuation_rules.yaml")
     )
+    timing_score = TimingScoreRulesConfig.model_validate(
+        _load_yaml(directory / "timing_score_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -179,4 +183,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         review_improvement=review_improvement,
         decision_evaluation=decision_evaluation,
         historical_valuation=historical_valuation,
+        timing_score=timing_score,
     )

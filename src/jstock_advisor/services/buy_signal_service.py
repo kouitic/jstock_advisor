@@ -68,6 +68,10 @@ from jstock_advisor.domain.signals.record_date_resolution import (
     resolve_dividend_record_date_recurring_label,
     resolve_dividend_record_date_source_type,
 )
+from jstock_advisor.domain.signals.timing_score import (
+    timing_score_config_values,
+    timing_score_result_to_metrics,
+)
 from jstock_advisor.domain.valuation.buy_price_levels import compute_buy_price_levels
 from jstock_advisor.domain.valuation.buy_price_reliability import determine_buy_price_reliability
 from jstock_advisor.domain.valuation.fair_value import (
@@ -736,6 +740,7 @@ class BuySignalService:
                 "historical_valuation": historical_valuation_config_values(
                     self._config.historical_valuation
                 ),
+                "timing_score": timing_score_config_values(self._config.timing_score),
             },
             data_sources=list(snapshot.data_sources),
             industry_model_applied=industry_model_applied,
@@ -790,6 +795,12 @@ class BuySignalService:
             historical_valuation_metrics=historical_valuation_result_to_metrics(
                 snapshot.historical_valuation
             ),
+            # 判定精度向上機能Phase B第二弾: DecisionSnapshot記録専用(Shadow計測)。
+            timing_score=snapshot.timing.score,
+            timing_confidence=snapshot.timing.confidence,
+            timing_coverage=snapshot.timing.coverage,
+            timing_reason_codes=snapshot.timing.reason_codes,
+            timing_metrics=timing_score_result_to_metrics(snapshot.timing),
         )
 
         return BuyAnalysisOutcome(

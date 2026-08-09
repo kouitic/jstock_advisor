@@ -499,6 +499,79 @@ class HistoricalValuationRulesConfig(StrictModel):
         return self
 
 
+# --- timing_score_rules.yaml(判定精度向上機能Phase B第二弾) -----------------
+
+
+class TimingScoreCategoryThresholds(StrictModel):
+    # スコア(-100〜+100)をTimingScoreCategoryへ丸めるための閾値。
+    # Shadow記録専用(BUY/SELL等の判定ロジックには使わない)。
+    strong_tailwind: float
+    tailwind: float
+    headwind: float
+    strong_headwind: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> TimingScoreCategoryThresholds:
+        if not (self.strong_tailwind > self.tailwind > self.headwind > self.strong_headwind):
+            raise ValueError(
+                "category_thresholdsはstrong_tailwind > tailwind > headwind > "
+                "strong_headwindの順である必要があります"
+            )
+        return self
+
+
+class TimingScoreRulesConfig(StrictModel):
+    # アルゴリズム自体(成分の重み・スケール変換・coverage/confidence計算式)の
+    # バージョン。計算方式を変更した場合はここを更新する。
+    model_version: str
+    # 各成分(trend/rsi/macd/topix相対強度/sector相対強度/drawdown)の加重平均に
+    # 使う重み。利用不可な成分は0扱いとし、利用可能な成分の重みだけで正規化する。
+    trend_weight: float
+    rsi_weight: float
+    macd_weight: float
+    topix_relative_strength_weight: float
+    sector_relative_strength_weight: float
+    drawdown_weight: float
+    # relative_strength_vs_topix_pct/vs_sector_pctを-100〜+100へ換算する際の
+    # フルスケール(この%ポイント差でスコア±100に達する)。
+    relative_strength_full_scale_pct: float
+    # drawdown_from_recent_high_pctを-100〜+100へ換算する際のフルスケール。
+    drawdown_full_scale_pct: float
+    # coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする
+    # (trend成分は常に利用可能なため、他の成分が軒並み欠損していても
+    # スコアが出てしまうことを防ぐ最小データ量ゲート)。
+    min_coverage_required: float
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
+    category_thresholds: TimingScoreCategoryThresholds
+
+    @model_validator(mode="after")
+    def _check_values(self) -> TimingScoreRulesConfig:
+        weights = (
+            self.trend_weight,
+            self.rsi_weight,
+            self.macd_weight,
+            self.topix_relative_strength_weight,
+            self.sector_relative_strength_weight,
+            self.drawdown_weight,
+        )
+        if any(w < 0 for w in weights):
+            raise ValueError("各成分の重みは0以上である必要があります")
+        if sum(weights) <= 0:
+            raise ValueError("各成分の重みの合計は0より大きい必要があります")
+        if self.relative_strength_full_scale_pct <= 0:
+            raise ValueError("relative_strength_full_scale_pctは正の値である必要があります")
+        if self.drawdown_full_scale_pct <= 0:
+            raise ValueError("drawdown_full_scale_pctは正の値である必要があります")
+        if not (0 < self.min_coverage_required <= 1):
+            raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
+        if self.coverage_medium_threshold >= self.coverage_high_threshold:
+            raise ValueError(
+                "coverage_medium_thresholdはcoverage_high_threshold未満である必要があります"
+            )
+        return self
+
+
 # --- holiday_calendar.json ----------------------------------------------------
 
 
@@ -1522,3 +1595,5 @@ class AppConfig(StrictModel):
     decision_evaluation: DecisionEvaluationConfig
     # --- 判定精度向上機能Phase B: Historical Valuation Score(2026-08)で追加 ---
     historical_valuation: HistoricalValuationRulesConfig
+    # --- 判定精度向上機能Phase B第二弾: Timing Score(2026-08)で追加 ---
+    timing_score: TimingScoreRulesConfig
