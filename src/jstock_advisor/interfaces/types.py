@@ -10,6 +10,8 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
+from pydantic import model_validator
+
 from jstock_advisor.domain.entities.base import ImmutableSnapshot
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import (
@@ -20,6 +22,7 @@ from jstock_advisor.domain.entities.enums import (
     RecordDateUnknownReason,
     ValuationBasis,
 )
+from jstock_advisor.domain.jst import require_timezone_aware
 
 
 class BankRegulatoryMetrics(ImmutableSnapshot):
@@ -153,6 +156,15 @@ class HistoricalValuation(ImmutableSnapshot):
     # よう制約するために使う。
     pbr_is_approximate: bool = False
     source: DataSourceReference
+
+    # コードレビュー対応(第3回): available_atはtimezone-aware必須とする
+    # (evaluate_historical_valuation()側でavailable_at > evaluation_atを比較
+    # しており、naiveが混入するとTypeErrorになりうるため)。naiveをUTCと
+    # 推測して補完することはしない(require_timezone_aware()と同じ原則)。
+    @model_validator(mode="after")
+    def _check_available_at_timezone_aware(self) -> HistoricalValuation:
+        require_timezone_aware(self.available_at)
+        return self
 
 
 class DividendInfo(ImmutableSnapshot):

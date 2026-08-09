@@ -78,27 +78,82 @@ def test_resolve_japanese_stock_name_prefers_manual_override_over_edinet(
     assert provider._resolve_japanese_stock_name("4246") == "ダイキョーニシカワ"  # noqa: SLF001
 
 
-def test_nearest_price_picks_closest_trading_day() -> None:
+def test_latest_price_on_or_before_picks_exact_match_when_available() -> None:
     index = pd.to_datetime(["2026-03-30", "2026-03-31", "2026-04-01"])
     price_history = pd.DataFrame({"Close": [1000.0, 1010.0, 1020.0]}, index=index)
-    price = YFinanceFinancialDataProvider._nearest_price(  # noqa: SLF001
+    price = YFinanceFinancialDataProvider._latest_price_on_or_before(  # noqa: SLF001
         price_history, dt.date(2026, 3, 31)
     )
     assert price == Decimal("1010")
 
 
-def test_nearest_price_returns_none_when_no_date_within_window() -> None:
+def test_latest_price_on_or_before_returns_none_when_no_date_within_window() -> None:
     index = pd.to_datetime(["2026-01-01"])
     price_history = pd.DataFrame({"Close": [1000.0]}, index=index)
-    price = YFinanceFinancialDataProvider._nearest_price(  # noqa: SLF001
+    price = YFinanceFinancialDataProvider._latest_price_on_or_before(  # noqa: SLF001
         price_history, dt.date(2026, 3, 31)
     )
     assert price is None
 
 
-def test_nearest_price_returns_none_for_empty_history() -> None:
-    price = YFinanceFinancialDataProvider._nearest_price(None, dt.date(2026, 3, 31))  # noqa: SLF001
+def test_latest_price_on_or_before_returns_none_for_empty_history() -> None:
+    price = YFinanceFinancialDataProvider._latest_price_on_or_before(  # noqa: SLF001
+        None, dt.date(2026, 3, 31)
+    )
     assert price is None
+
+
+# ===== look-ahead bias防止(コードレビュー第3回対応) =====
+
+
+def test_latest_price_on_or_before_never_uses_future_price() -> None:
+    """レビュー指摘の具体例(3/29金曜1000円・3/31期末日(日曜)・4/1月曜1200円)を
+    そのまま再現する。旧実装(絶対日数最近傍)では4/1(1日差)の方が3/29(2日差)
+    より近く1200円が採用されてしまっていたが、期末日より後の株価は使用しない。
+    """
+    index = pd.to_datetime(["2026-03-27", "2026-03-29", "2026-04-01"])
+    price_history = pd.DataFrame({"Close": [990.0, 1000.0, 1200.0]}, index=index)
+    price = YFinanceFinancialDataProvider._latest_price_on_or_before(  # noqa: SLF001
+        price_history, dt.date(2026, 3, 31)  # 日曜(非営業日)
+    )
+    assert price == Decimal("1000")  # 直前営業日(3/29金曜)の終値
+
+
+def test_latest_price_on_or_before_uses_same_day_price_when_present() -> None:
+    index = pd.to_datetime(["2026-03-30", "2026-03-31", "2026-04-01"])
+    price_history = pd.DataFrame({"Close": [1000.0, 1010.0, 1200.0]}, index=index)
+    price = YFinanceFinancialDataProvider._latest_price_on_or_before(  # noqa: SLF001
+        price_history, dt.date(2026, 3, 31)
+    )
+    assert price == Decimal("1010")
+
+
+def test_latest_price_on_or_before_returns_none_when_only_future_prices_exist() -> None:
+    index = pd.to_datetime(["2026-04-01", "2026-04-02"])
+    price_history = pd.DataFrame({"Close": [1200.0, 1210.0]}, index=index)
+    price = YFinanceFinancialDataProvider._latest_price_on_or_before(  # noqa: SLF001
+        price_history, dt.date(2026, 3, 31)
+    )
+    assert price is None
+
+
+def test_latest_price_on_or_before_returns_none_when_past_price_exceeds_lookback_window() -> None:
+    # 3/31の15日以上前(3/15)のPriceBarしかない場合はNone(未来側で補完しない)。
+    index = pd.to_datetime(["2026-03-15"])
+    price_history = pd.DataFrame({"Close": [900.0]}, index=index)
+    price = YFinanceFinancialDataProvider._latest_price_on_or_before(  # noqa: SLF001
+        price_history, dt.date(2026, 3, 31)
+    )
+    assert price is None
+
+
+def test_latest_price_on_or_before_picks_most_recent_among_multiple_past_prices() -> None:
+    index = pd.to_datetime(["2026-03-25", "2026-03-27", "2026-03-29"])
+    price_history = pd.DataFrame({"Close": [950.0, 970.0, 990.0]}, index=index)
+    price = YFinanceFinancialDataProvider._latest_price_on_or_before(  # noqa: SLF001
+        price_history, dt.date(2026, 3, 31)
+    )
+    assert price == Decimal("990")
 
 
 # ===== デプロイ前対応: 年次期末取得不能時に取得日時を代替値として使わないこと =====
@@ -212,6 +267,40 @@ def test_get_financial_summary_recent_periods_source_is_annual_fallback_when_qua
     assert summary.recent_periods_source == RecentPeriodsSource.ANNUAL_FALLBACK
     quarter_ends = [q.quarter_end for q in summary.recent_quarters]
     assert max(quarter_ends) == dt.date(2026, 3, 31)
+
+
+def test_get_historical_valuation_never_uses_future_price_for_per(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """look-ahead bias回帰確認(コードレビュー第3回対応): 決算期末日
+    (2026-03-31、非営業日の日曜)より後の株価(4/1の1200円)ではなく、
+    直前営業日(3/29の1000円)がget_historical_valuation()経由でPER算出に
+    使われることを確認する(per = price / epsという算出式自体は無変更)。
+    """
+    import jstock_advisor.providers.financial_data.yfinance_impl as module
+
+    income_stmt = pd.DataFrame({pd.Timestamp("2026-03-31"): {"Diluted EPS": 100.0}})
+    balance_sheet = pd.DataFrame({pd.Timestamp("2026-03-31"): {"Stockholders Equity": 500000.0}})
+    fake_ticker = _FakeTickerFinancials(
+        "7203.T",
+        income_stmt=income_stmt,
+        balance_sheet=balance_sheet,
+        info={"sharesOutstanding": 1000.0},
+    )
+    price_index = pd.to_datetime(["2026-03-27", "2026-03-29", "2026-04-01"])
+    price_history = pd.DataFrame({"Close": [990.0, 1000.0, 1200.0]}, index=price_index)
+    fake_ticker.history = lambda **_kwargs: price_history  # type: ignore[attr-defined]
+    monkeypatch.setattr(module.yf, "Ticker", lambda symbol: fake_ticker)
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+
+    results = provider.get_historical_valuation("7203", years=1)
+
+    assert len(results) == 1
+    assert results[0].price == Decimal("1000")
+    assert results[0].per == Decimal("10")  # 1000 / 100(未来側の1200円は使わない)
+    assert results[0].available_at.tzinfo is not None  # timezone-aware必須(コードレビュー対応)
 
 
 def test_recent_periods_skips_columns_without_valid_date() -> None:
