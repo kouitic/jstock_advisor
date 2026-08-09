@@ -139,25 +139,49 @@ def test_build_decision_snapshot_model_version_matches_constant() -> None:
     assert decision.model_version == DECISION_SNAPSHOT_MODEL_VERSION
 
 
-def test_build_decision_snapshot_copies_historical_valuation_score() -> None:
-    """判定精度向上機能Phase B: Recommendation.historical_valuation_scoreが
-    DecisionSnapshot.historical_valuation_scoreへそのままコピーされる
-    (Shadow計測。既存の判定ロジックはこの値を一切参照しない)。"""
+def test_build_decision_snapshot_copies_historical_valuation_fields() -> None:
+    """判定精度向上機能Phase B(コードレビュー対応): Recommendationの
+    historical_valuation_*5フィールド(score/confidence/coverage/
+    reason_codes/metrics)がDecisionSnapshotへそのままコピーされる
+    (Shadow計測。既存の判定ロジックはこの値を一切参照しない)。DecisionSnapshot
+    はRecommendationからのみコピーし、StockSnapshotを直接参照しないこと
+    (再計算しないこと)も間接的に確認する。"""
     recommendation = _recommendation(config_values_used={}).model_copy(
-        update={"historical_valuation_score": 42.5}
+        update={
+            "historical_valuation_score": 42.5,
+            "historical_valuation_confidence": ConfidenceLevel.HIGH,
+            "historical_valuation_coverage": 0.75,
+            "historical_valuation_reason_codes": ("PBR_INSUFFICIENT_DATA_OR_BASIS_MISMATCH",),
+            "historical_valuation_metrics": {"per_score": 42.5, "model_version": "test_v2"},
+        }
     )
 
     decision = build_decision_snapshot(recommendation, DecisionType.BUY)
 
     assert decision.historical_valuation_score == 42.5
+    assert decision.historical_valuation_confidence == ConfidenceLevel.HIGH
+    assert decision.historical_valuation_coverage == 0.75
+    assert decision.historical_valuation_reason_codes == (
+        "PBR_INSUFFICIENT_DATA_OR_BASIS_MISMATCH",
+    )
+    assert decision.historical_valuation_metrics == {
+        "per_score": 42.5,
+        "model_version": "test_v2",
+    }
 
 
-def test_build_decision_snapshot_historical_valuation_score_none_when_unset() -> None:
+def test_build_decision_snapshot_historical_valuation_fields_default_when_unset() -> None:
+    """Recommendation側に値が無い場合、DecisionSnapshot側で推測・再計算せず
+    未設定のまま(None/空)保存する。"""
     recommendation = _recommendation()
 
     decision = build_decision_snapshot(recommendation, DecisionType.BUY)
 
     assert decision.historical_valuation_score is None
+    assert decision.historical_valuation_confidence is None
+    assert decision.historical_valuation_coverage is None
+    assert decision.historical_valuation_reason_codes == ()
+    assert decision.historical_valuation_metrics == {}
 
 
 # --- RecommendationType/DecisionTypeの現行対応関係(コードレビュー対応item 12) ---

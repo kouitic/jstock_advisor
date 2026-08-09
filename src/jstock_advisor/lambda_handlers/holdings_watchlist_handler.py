@@ -271,6 +271,7 @@ def _notify_holding_decision_and_build_result(
         result,
         snapshot,
         str(config.holding_decision.scoring_model_version),
+        config,
         recommendation_id=recommendation_id,
     )
     linked_result = result.model_copy(update={"recommendation_id": recommendation_id})

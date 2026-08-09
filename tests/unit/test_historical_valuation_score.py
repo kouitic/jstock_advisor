@@ -1,7 +1,10 @@
-"""domain/signals/historical_valuation.pyのテスト(判定精度向上機能Phase B)。
+"""domain/signals/historical_valuation.pyのテスト(判定精度向上機能Phase B、
+コードレビュー対応で全面改修)。
 
-銘柄自身の過去PER/PBR水準に対する現在値のランクベーススコア(-100〜+100)を
-検証する。同業他社・市場平均との比較は行わない(自己過去比較のみ)。
+銘柄自身の過去PER/PBR水準に対する現在値のランクベース評価(mid-rank
+percentile)、basis(TRAILING/FORWARD)整合性チェック、データ品質フィルタ
+(None/0以下/basis不一致/未来日/銘柄コード不一致/絶対レンジ外/外れ値/重複日付)、
+coverage/confidence判定を検証する。
 """
 
 from __future__ import annotations
@@ -9,143 +12,369 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.signals.historical_valuation import (
-    compute_historical_valuation_score,
+from jstock_advisor.config.models import (
+    HistoricalValuationCategoryThresholds,
+    HistoricalValuationRulesConfig,
 )
+from jstock_advisor.domain.entities.enums import (
+    ConfidenceLevel,
+    HistoricalValuationCategory,
+    HistoricalValuationEvaluationState,
+    ValuationBasis,
+)
+from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
+from jstock_advisor.domain.signals.historical_valuation import evaluate_historical_valuation
 from jstock_advisor.interfaces.types import DataSourceReference, HistoricalValuation
 
-_CONFIG = load_config().historical_valuation
-_SOURCE = DataSourceReference(provider="test", fetched_at=dt.datetime(2026, 8, 9, tzinfo=dt.UTC))
+_STOCK_CODE = "2914"
+_NOW = dt.datetime(2026, 8, 10, tzinfo=dt.UTC)
+_SOURCE = DataSourceReference(provider="test", fetched_at=_NOW)
 
 
-def _historical(
-    pers: list[Decimal | None], pbrs: list[Decimal | None]
-) -> list[HistoricalValuation]:
-    assert len(pers) == len(pbrs)
+def _config(**overrides: object) -> HistoricalValuationRulesConfig:
+    defaults: dict[str, object] = dict(
+        model_version="historical_valuation_v2",
+        min_data_points_required=2,
+        per_weight=0.5,
+        pbr_weight=0.5,
+        outlier_detection_min_data_points=5,
+        outlier_mad_threshold=3.5,
+        per_absolute_min=0.0,
+        per_absolute_max=500.0,
+        pbr_absolute_min=0.0,
+        pbr_absolute_max=50.0,
+        full_confidence_data_points=4,
+        coverage_high_threshold=0.8,
+        coverage_medium_threshold=0.4,
+        category_thresholds=HistoricalValuationCategoryThresholds(
+            very_cheap=60.0, cheap=20.0, expensive=-20.0, very_expensive=-60.0
+        ),
+    )
+    defaults.update(overrides)
+    return HistoricalValuationRulesConfig.model_validate(defaults)
+
+
+_CONFIG = _config()
+
+
+def _hv(
+    *,
+    per: Decimal | None = None,
+    pbr: Decimal | None = None,
+    date: dt.date = dt.date(2023, 3, 31),
+    per_basis: ValuationBasis = ValuationBasis.TRAILING,
+    pbr_basis: ValuationBasis = ValuationBasis.TRAILING,
+    stock_code: str = _STOCK_CODE,
+) -> HistoricalValuation:
+    return HistoricalValuation(
+        stock_code=stock_code,
+        date=date,
+        per=per,
+        pbr=pbr,
+        per_basis=per_basis,
+        pbr_basis=pbr_basis,
+        source=_SOURCE,
+    )
+
+
+def _per_series(values: list[Decimal | None], start_year: int = 2020) -> list[HistoricalValuation]:
     return [
-        HistoricalValuation(
-            stock_code="2914",
-            date=dt.date(2020 + i, 3, 31),
-            per=per,
-            pbr=pbr,
-            source=_SOURCE,
-        )
-        for i, (per, pbr) in enumerate(zip(pers, pbrs, strict=True))
+        _hv(per=v, date=dt.date(start_year + i, 3, 31))
+        for i, v in enumerate(values)
     ]
 
 
-def test_no_data_and_no_current_values_returns_none() -> None:
-    score = compute_historical_valuation_score([], None, None, _CONFIG)
-    assert score is None
-
-
-def test_current_values_present_but_no_historical_data_returns_none() -> None:
-    score = compute_historical_valuation_score([], Decimal("15"), Decimal("1.2"), _CONFIG)
-    assert score is None
-
-
-def test_per_only_available_uses_per_component_alone() -> None:
-    """PBR側のcurrent値が無い場合、PERコンポーネントのみでスコアを算出する
-    (0埋めせず、片方だけの重みで正規化する)。"""
-    historical = _historical(
-        pers=[Decimal("10"), Decimal("15"), Decimal("20")],
-        pbrs=[Decimal("1.0"), Decimal("1.5"), Decimal("2.0")],
+def _evaluate(
+    historical: list[HistoricalValuation],
+    current_per: Decimal | None = None,
+    current_pbr: Decimal | None = None,
+    current_per_basis: ValuationBasis = ValuationBasis.TRAILING,
+    current_pbr_basis: ValuationBasis = ValuationBasis.UNKNOWN,
+    config: HistoricalValuationRulesConfig | None = None,
+    evaluation_at: dt.datetime = _NOW,
+) -> HistoricalValuationResult:
+    return evaluate_historical_valuation(
+        historical,
+        _STOCK_CODE,
+        current_per,
+        current_per_basis,
+        current_pbr,
+        current_pbr_basis,
+        evaluation_at,
+        config or _CONFIG,
     )
-    score = compute_historical_valuation_score(historical, Decimal("10"), None, _CONFIG)
-    assert score is not None
-    # current_per(10)は過去3件すべて以上(10自身含む) -> p=1.0 -> (1.0-0.5)*200=100
-    assert score == 100.0
 
 
-def test_pbr_only_available_uses_pbr_component_alone() -> None:
-    historical = _historical(
-        pers=[Decimal("10"), Decimal("15"), Decimal("20")],
-        pbrs=[Decimal("1.0"), Decimal("1.5"), Decimal("2.0")],
+# ===== percentile(1-6) =====
+
+
+def test_percentile_cheapest_value_scores_positive_100() -> None:
+    """過去の値と重複しない最安値は+100(過去レンジより安い場合と同じ扱い)。"""
+    hist = _per_series([Decimal("20"), Decimal("30"), Decimal("40")])
+    result = _evaluate(hist, current_per=Decimal("10"))
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert result.score == 100.0
+
+
+def test_percentile_most_expensive_value_scores_negative_100() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20"), Decimal("30")])
+    result = _evaluate(hist, current_per=Decimal("40"))
+    assert result.score == -100.0
+
+
+def test_percentile_median_scores_near_zero() -> None:
+    hist = _per_series([Decimal("10"), Decimal("15"), Decimal("20")])
+    result = _evaluate(hist, current_per=Decimal("15"))
+    assert result.score == 0.0
+
+
+def test_percentile_tie_uses_mid_rank() -> None:
+    """タイがある場合、単純な0/100ではなくmid-rankで按分される。"""
+    hist = _per_series([Decimal("10"), Decimal("10"), Decimal("20"), Decimal("30")])
+    result = _evaluate(hist, current_per=Decimal("10"))
+    # lower_count=0, equal_count=2, n=4 -> percentile=0.25 -> score=50
+    assert result.score == 50.0
+
+
+def test_percentile_below_historical_range_scores_positive_100() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20"), Decimal("30"), Decimal("40")])
+    result = _evaluate(hist, current_per=Decimal("1"))
+    assert result.score == 100.0
+
+
+def test_percentile_above_historical_range_scores_negative_100() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20"), Decimal("30"), Decimal("40")])
+    result = _evaluate(hist, current_per=Decimal("1000"))
+    assert result.score == -100.0
+
+
+# ===== basis整合性(7-11) =====
+
+
+def test_basis_match_is_evaluated() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20")], start_year=2024)
+    result = _evaluate(hist, current_per=Decimal("15"), current_per_basis=ValuationBasis.TRAILING)
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert result.per_score is not None
+
+
+def test_basis_mismatch_excludes_component() -> None:
+    """現在値がFORWARD basisの場合、TRAILING basisの過去データとは比較しない
+    (推測でbasisを補完しない)。"""
+    hist = _per_series([Decimal("10"), Decimal("20")], start_year=2024)
+    result = _evaluate(hist, current_per=Decimal("15"), current_per_basis=ValuationBasis.FORWARD)
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+    assert result.per_data_count_used == 0
+    assert "BASIS_MISMATCH_EXCLUDED" in result.excluded_data_reasons
+
+
+def test_basis_unknown_is_not_evaluated() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20")], start_year=2024)
+    result = _evaluate(hist, current_per=Decimal("15"), current_per_basis=ValuationBasis.UNKNOWN)
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+
+
+def test_per_unavailable_pbr_available_uses_pbr_only() -> None:
+    hist = [
+        _hv(pbr=Decimal("1.0"), date=dt.date(2024, 3, 31)),
+        _hv(pbr=Decimal("2.0"), date=dt.date(2025, 3, 31)),
+    ]
+    result = _evaluate(
+        hist,
+        current_per=None,
+        current_pbr=Decimal("1.0"),
+        current_pbr_basis=ValuationBasis.TRAILING,
     )
-    score = compute_historical_valuation_score(historical, None, Decimal("2.0"), _CONFIG)
-    assert score is not None
-    # current_pbr(2.0)は過去3件のうち自分自身のみ以上 -> p=1/3 -> (1/3-0.5)*200 = -33.33...
-    assert round(score, 2) == round((1 / 3 - 0.5) * 200, 2)
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert result.per_score is None
+    assert result.pbr_score is not None
 
 
-def test_both_available_combines_with_configured_weights() -> None:
-    historical = _historical(
-        pers=[Decimal("10"), Decimal("20"), Decimal("30"), Decimal("40")],
-        pbrs=[Decimal("1.0"), Decimal("2.0"), Decimal("3.0"), Decimal("4.0")],
+def test_pbr_unavailable_per_available_uses_per_only() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20")], start_year=2024)
+    result = _evaluate(hist, current_per=Decimal("15"))
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert result.pbr_score is None
+    assert result.per_score is not None
+
+
+# ===== データ品質(12-20) =====
+
+
+def test_none_values_are_excluded() -> None:
+    hist = [
+        _hv(per=None, date=dt.date(2022, 3, 31)),
+        _hv(per=Decimal("10"), date=dt.date(2023, 3, 31)),
+        _hv(per=Decimal("20"), date=dt.date(2024, 3, 31)),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"))
+    assert result.per_data_count_raw == 2  # Noneはraw集計にも含めない(値が存在しない)
+    assert result.per_data_count_used == 2
+
+
+def test_zero_or_negative_values_are_excluded() -> None:
+    hist = [
+        _hv(per=Decimal("-5"), date=dt.date(2022, 3, 31)),
+        _hv(per=Decimal("0"), date=dt.date(2023, 3, 31)),
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31)),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"))
+    assert result.per_data_count_used == 2
+    assert "NONE_OR_NON_POSITIVE_EXCLUDED" in result.excluded_data_reasons
+
+
+def test_future_date_data_is_excluded() -> None:
+    """look-ahead bias防止: evaluation_atより後の日付を持つ過去データは除外する。"""
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31)),
+        _hv(per=Decimal("30"), date=dt.date(2099, 3, 31)),  # 未来日
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), evaluation_at=_NOW)
+    assert result.per_data_count_used == 2
+    assert "FUTURE_DATE_EXCLUDED" in result.excluded_data_reasons
+
+
+def test_stock_code_mismatch_is_excluded() -> None:
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31)),
+        _hv(per=Decimal("30"), date=dt.date(2026, 3, 31), stock_code="9999"),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"))
+    assert result.per_data_count_used == 2
+    assert "STOCK_CODE_MISMATCH_EXCLUDED" in result.excluded_data_reasons
+
+
+def test_absolute_range_exclusion() -> None:
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31)),
+        _hv(per=Decimal("9999"), date=dt.date(2026, 3, 31)),  # 明らかな異常値
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), config=_config(per_absolute_max=500.0))
+    assert result.per_data_count_used == 2
+    assert "ABSOLUTE_RANGE_EXCLUDED" in result.excluded_data_reasons
+
+
+def test_outlier_exclusion_via_mad() -> None:
+    hist = [
+        _hv(per=Decimal(str(v)), date=dt.date(2020 + i, 3, 31))
+        for i, v in enumerate([10, 11, 9, 10, 200])  # 200が明確な外れ値
+    ]
+    result = _evaluate(
+        hist, current_per=Decimal("10"), config=_config(outlier_detection_min_data_points=5)
     )
-    # PER=10(最安、過去4件すべて以上) -> p=1.0 -> +100
-    # PBR=4.0(最高、過去4件のうち自分のみ以上) -> p=1/4 -> (0.25-0.5)*200=-50
-    score = compute_historical_valuation_score(
-        historical, Decimal("10"), Decimal("4.0"), _CONFIG
+    assert "OUTLIER_EXCLUDED" in result.excluded_data_reasons
+    assert result.per_data_count_used == 4
+
+
+def test_insufficient_data_points_excludes_component() -> None:
+    """有効データがmin_data_points_required未満の場合はNOT_EVALUATED。"""
+    hist = [_hv(per=Decimal("10"), date=dt.date(2024, 3, 31))]
+    result = _evaluate(hist, current_per=Decimal("15"), config=_config(min_data_points_required=2))
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+    assert result.per_data_count_used == 1
+
+
+def test_exclusion_can_drop_below_minimum_after_filtering() -> None:
+    """絶対レンジ・basis等の除外の結果、元は十分な件数でも閾値未満に落ちる場合、
+    その指標はNOT_EVALUATEDになる(黙って少ないデータで評価しない)。"""
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31), per_basis=ValuationBasis.FORWARD),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), config=_config(min_data_points_required=2))
+    assert result.per_data_count_used == 1  # 1件はbasis不一致で除外
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+
+
+def test_duplicate_date_rows_are_excluded() -> None:
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("15"), date=dt.date(2024, 3, 31)),  # 同一日付の重複
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31)),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"))
+    assert result.per_data_count_used == 1  # 重複日付2件は両方除外され、残るのは1件
+    assert "DUPLICATE_DATE_EXCLUDED" in result.excluded_data_reasons
+
+
+# ===== coverage/confidence(21-24) =====
+
+
+def test_high_coverage_and_confidence_when_both_components_sufficient() -> None:
+    hist = [
+        _hv(per=Decimal(str(v)), pbr=Decimal(str(v / 10)), date=dt.date(2020 + i, 3, 31))
+        for i, v in enumerate([10, 20, 30, 40])
+    ]
+    result = _evaluate(
+        hist,
+        current_per=Decimal("15"),
+        current_pbr=Decimal("1.5"),
+        current_pbr_basis=ValuationBasis.TRAILING,
     )
-    assert score is not None
-    expected = 100.0 * _CONFIG.per_weight + (-50.0) * _CONFIG.pbr_weight
-    expected /= _CONFIG.per_weight + _CONFIG.pbr_weight
-    assert round(score, 6) == round(expected, 6)
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert result.coverage == 1.0
+    assert result.confidence == ConfidenceLevel.HIGH
 
 
-def test_current_value_cheapest_in_history_scores_near_positive_100() -> None:
-    historical = _historical(
-        pers=[Decimal("20"), Decimal("25"), Decimal("30")], pbrs=[None, None, None]
+def test_coverage_lower_when_only_one_component_available() -> None:
+    hist = [
+        _hv(per=Decimal(str(v)), date=dt.date(2020 + i, 3, 31))
+        for i, v in enumerate([10, 20, 30, 40])
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"))
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert 0.0 < result.coverage < 1.0
+
+
+def test_minimum_data_points_yields_low_or_medium_confidence() -> None:
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31)),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), config=_config(min_data_points_required=2))
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert result.confidence in (ConfidenceLevel.LOW, ConfidenceLevel.MEDIUM)
+
+
+def test_no_evaluable_data_returns_not_evaluated_with_none_score() -> None:
+    result = _evaluate([], current_per=None, current_pbr=None)
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+    assert result.score is None
+    assert result.confidence is None
+
+
+# ===== weighted combination・カテゴリ・model_version =====
+
+
+def test_both_components_combine_with_configured_weights() -> None:
+    hist = [
+        _hv(per=Decimal(str(p)), pbr=Decimal(str(b)), date=dt.date(2020 + i, 3, 31))
+        for i, (p, b) in enumerate([(10, 1.0), (20, 2.0), (30, 3.0), (40, 4.0)])
+    ]
+    # PER=10は過去4件中の最小値自身(tie) -> lower=0,equal=1,n=4 -> percentile=0.125 -> +75
+    # PBR=4.0は過去4件中の最大値自身(tie) -> lower=3,equal=1,n=4 -> percentile=0.875 -> -75
+    result = _evaluate(
+        hist,
+        current_per=Decimal("10"),
+        current_pbr=Decimal("4.0"),
+        current_pbr_basis=ValuationBasis.TRAILING,
+        config=_config(per_weight=0.5, pbr_weight=0.5),
     )
-    score = compute_historical_valuation_score(historical, Decimal("5"), None, _CONFIG)
-    assert score == 100.0
+    assert result.score is not None
+    assert round(result.score, 6) == round(75.0 * 0.5 + (-75.0) * 0.5, 6)
 
 
-def test_current_value_most_expensive_in_history_scores_near_negative_100() -> None:
-    historical = _historical(
-        pers=[Decimal("10"), Decimal("15"), Decimal("20")], pbrs=[None, None, None]
-    )
-    score = compute_historical_valuation_score(historical, Decimal("100"), None, _CONFIG)
-    # current(100)以上の過去値は0件 -> p=0.0 -> (0.0-0.5)*200=-100
-    assert score == -100.0
+def test_category_classification_matches_thresholds() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20"), Decimal("30"), Decimal("40")])
+    result = _evaluate(hist, current_per=Decimal("1"))  # score=100
+    assert result.category == HistoricalValuationCategory.HISTORICALLY_VERY_CHEAP
 
 
-def test_current_value_at_median_scores_near_zero() -> None:
-    historical = _historical(
-        pers=[Decimal("10"), Decimal("15"), Decimal("20")], pbrs=[None, None, None]
-    )
-    # current(15)以上の過去値は{15,20}の2件 -> p=2/3
-    score = compute_historical_valuation_score(historical, Decimal("15"), None, _CONFIG)
-    assert score is not None
-    assert round(score, 2) == round((2 / 3 - 0.5) * 200, 2)
-
-
-def test_insufficient_data_points_excludes_that_component() -> None:
-    """過去データ点数がmin_data_points_required未満の指標は、その指標だけを
-    スコア対象から除外する(0埋めしない)。既定min_data_points_required=2の
-    ため、PER側が1件しかない場合はPERを除外し、PBR側のみで算出する。"""
-    historical = _historical(
-        pers=[Decimal("10")],
-        pbrs=[Decimal("1.0")],
-    )
-    assert _CONFIG.min_data_points_required >= 2
-    score_per_only_data = compute_historical_valuation_score(
-        historical, Decimal("5"), None, _CONFIG
-    )
-    assert score_per_only_data is None  # PER側データが1件のみ(閾値未満)のため算出不可
-
-    historical_two_points = _historical(
-        pers=[Decimal("10"), Decimal("20")], pbrs=[Decimal("1.0"), None]
-    )
-    score = compute_historical_valuation_score(
-        historical_two_points, Decimal("5"), Decimal("2.0"), _CONFIG
-    )
-    assert score is not None
-    # PER側(2件、閾値以上)のみ採用され、PBR側(1件、閾値未満)は除外される。
-    assert score == 100.0  # PER=5は過去{10,20}すべて以上 -> p=1.0 -> +100
-
-
-def test_zero_or_negative_or_missing_historical_values_are_excluded() -> None:
-    """過去データにPER/PBRが0以下・Noneの行が混在する場合、それらを除外してから
-    計算する(fair_value.py::median_historical_per/pbrと同じ除外方針)。"""
-    historical = _historical(
-        pers=[Decimal("10"), Decimal("-5"), None, Decimal("30")],
-        pbrs=[None, None, None, None],
-    )
-    # 有効な過去PERは{10, 30}の2件(閾値2件と一致)。
-    score = compute_historical_valuation_score(historical, Decimal("10"), None, _CONFIG)
-    assert score is not None
-    # current(10)以上の有効な過去値は{10,30}の2件 -> p=1.0 -> +100
-    assert score == 100.0
+def test_model_version_matches_config() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20")], start_year=2024)
+    result = _evaluate(hist, current_per=Decimal("15"), config=_config(model_version="test_v99"))
+    assert result.model_version == "test_v99"

@@ -252,6 +252,45 @@ class DecisionType(StrEnum):
     PROFIT_TAKING = "PROFIT_TAKING"
 
 
+class ValuationBasis(StrEnum):
+    """PER/PBR等のバリュエーション倍率が、どのEPS/BPSを分母として算出されたか
+    (判定精度向上機能Phase B: Historical Valuation Scoreのコードレビュー対応)。
+
+    TRAILING = 実績値(既に確定した決算数値)ベース。
+    FORWARD = 予想値(アナリスト予想等)ベース。
+    UNKNOWN = 由来不明・算出不可(この場合は他のbasisと比較しない)。
+
+    現在値と過去値を比較する際、basisが一致する場合のみ意味のある比較とみなす
+    (forward基準の現在PERとtrailing基準の過去PERを単純比較しない)。
+    """
+
+    TRAILING = "TRAILING"
+    FORWARD = "FORWARD"
+    UNKNOWN = "UNKNOWN"
+
+
+class HistoricalValuationEvaluationState(StrEnum):
+    """Historical Valuation Scoreが実際に算出されたか、対象外か、算出不可
+    だったかの区分(判定精度向上機能Phase Bコードレビュー対応)。"""
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    # 将来、金融業等PER/PBRそのものが意味を持ちにくい銘柄区分向けに使う想定
+    # (現時点では判定ロジックが無いため未使用)。
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class HistoricalValuationCategory(StrEnum):
+    """Historical Valuation Scoreを人間が読みやすいカテゴリへ丸めたもの
+    (Shadow記録専用、BUY/SELL等の判定ロジックには使わない)。"""
+
+    HISTORICALLY_VERY_CHEAP = "HISTORICALLY_VERY_CHEAP"
+    CHEAP = "CHEAP"
+    NORMAL = "NORMAL"
+    EXPENSIVE = "EXPENSIVE"
+    VERY_EXPENSIVE = "VERY_EXPENSIVE"
+
+
 class ImprovementPriority(StrEnum):
     """週次改善レビュー(振り返り機能改修)の改善候補優先度。"""
 

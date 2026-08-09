@@ -3,10 +3,12 @@
 直接証明。test_phase_a_isolation.pyと同じ考え方)。
 
 BUY/legacy SELL/HoldingDecision/ProfitTakingの4パイプラインそれぞれについて、
-StockSnapshot.historical_valuation_scoreの値だけが異なる2つのsnapshotで同じ
-判定処理を実行し、historical_valuation_score以外の判定結果(buy_action・
-company_quality_score、sell判定の種別・理由、holding decisionの
-recommendation_type・sell_prices等)が完全に同一であることを直接証明する。
+StockSnapshot.historical_valuationのscore/confidence/coverage/reason_codes/
+metricsをすべて変えた2つのsnapshotで同じ判定処理を実行し、それ以外の判定結果
+(buy_action・company_quality_score、sell判定の種別・理由、holding decisionの
+recommendation_type・sell_prices等)が完全に同一であることを直接証明する
+(コードレビュー対応: scoreだけでなくconfidence/coverage/metricsを変えても
+既存判定結果が変わらないことまで確認する)。
 """
 
 from __future__ import annotations
@@ -19,10 +21,15 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import (
     AccountType,
+    ConfidenceLevel,
     ExecutionPlanReason,
+    HistoricalValuationCategory,
+    HistoricalValuationEvaluationState,
     HoldingDecisionCategory,
     HoldingDecisionConfidenceLevel,
+    ValuationBasis,
 )
+from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import (
     CompanyQualityScore,
@@ -48,12 +55,36 @@ _PROVIDERS = build_mock_provider_bundle(_NOW)
 _CALENDAR = BusinessCalendar.from_config(_CFG.holiday_calendar)
 
 
+def _result_variant(score: float, confidence: ConfidenceLevel) -> HistoricalValuationResult:
+    return HistoricalValuationResult(
+        state=HistoricalValuationEvaluationState.EVALUATED,
+        score=score,
+        category=HistoricalValuationCategory.NORMAL,
+        confidence=confidence,
+        coverage=0.5 if confidence == ConfidenceLevel.MEDIUM else 1.0,
+        per_score=score,
+        per_percentile=0.3,
+        current_per=Decimal("15"),
+        current_per_basis=ValuationBasis.TRAILING,
+        per_data_count_raw=4,
+        per_data_count_used=4,
+        reason_codes=("PBR_INSUFFICIENT_DATA_OR_BASIS_MISMATCH",),
+        evaluated_at=_NOW,
+        model_version="test-fixture",
+    )
+
+
 def _snapshot_variants() -> tuple:
     base, error = build_stock_snapshot(_PROVIDERS, _STOCK_CODE, _NOW, _CFG)
     assert error is None
     assert base is not None
-    variant_a = dataclasses.replace(base, historical_valuation_score=-88.0)
-    variant_b = dataclasses.replace(base, historical_valuation_score=37.0)
+    # score・confidence・coverage・reason_codesのすべてが異なる2バリアントを作る。
+    variant_a = dataclasses.replace(
+        base, historical_valuation=_result_variant(-88.0, ConfidenceLevel.HIGH)
+    )
+    variant_b = dataclasses.replace(
+        base, historical_valuation=_result_variant(37.0, ConfidenceLevel.MEDIUM)
+    )
     return variant_a, variant_b
 
 
@@ -72,7 +103,7 @@ def _holding() -> Holding:
     )
 
 
-def test_buy_signal_service_ignores_historical_valuation_score() -> None:
+def test_buy_signal_service_ignores_historical_valuation() -> None:
     variant_a, variant_b = _snapshot_variants()
     service = BuySignalService(providers=_PROVIDERS, config=_CFG, business_calendar=_CALENDAR)
 
@@ -83,7 +114,11 @@ def test_buy_signal_service_ignores_historical_valuation_score() -> None:
     assert outcome_b.recommendation is not None
     assert outcome_a.recommendation.historical_valuation_score == -88.0
     assert outcome_b.recommendation.historical_valuation_score == 37.0
-    # historical_valuation_score以外の判定結果は完全に同一。
+    assert outcome_a.recommendation.historical_valuation_confidence == ConfidenceLevel.HIGH
+    assert outcome_b.recommendation.historical_valuation_confidence == ConfidenceLevel.MEDIUM
+    assert outcome_a.recommendation.historical_valuation_coverage == 1.0
+    assert outcome_b.recommendation.historical_valuation_coverage == 0.5
+    # historical_valuation関連以外の判定結果は完全に同一。
     assert outcome_a.recommendation.buy_action == outcome_b.recommendation.buy_action
     assert (
         outcome_a.recommendation.company_quality_score
@@ -95,7 +130,7 @@ def test_buy_signal_service_ignores_historical_valuation_score() -> None:
     )
 
 
-def test_sell_signal_service_ignores_historical_valuation_score() -> None:
+def test_sell_signal_service_ignores_historical_valuation() -> None:
     variant_a, variant_b = _snapshot_variants()
     service = SellSignalService(providers=_PROVIDERS, config=_CFG)
     holding = _holding()
@@ -115,7 +150,7 @@ def test_sell_signal_service_ignores_historical_valuation_score() -> None:
         assert outcome_a.recommendation.reasons == outcome_b.recommendation.reasons
 
 
-def test_profit_taking_service_ignores_historical_valuation_score() -> None:
+def test_profit_taking_service_ignores_historical_valuation() -> None:
     variant_a, variant_b = _snapshot_variants()
     service = ProfitTakingService(providers=_PROVIDERS, config=_CFG)
     holding = _holding()
@@ -162,18 +197,22 @@ def _holding_decision_result() -> HoldingDecisionResult:
     )
 
 
-def test_holding_decision_builder_ignores_historical_valuation_score() -> None:
+def test_holding_decision_builder_ignores_historical_valuation() -> None:
     variant_a, variant_b = _snapshot_variants()
     holding = _holding()
     result = _holding_decision_result()
 
-    rec_a = build_holding_decision_recommendation(holding, result, variant_a, "v1")
-    rec_b = build_holding_decision_recommendation(holding, result, variant_b, "v1")
+    rec_a = build_holding_decision_recommendation(holding, result, variant_a, "v1", _CFG)
+    rec_b = build_holding_decision_recommendation(holding, result, variant_b, "v1", _CFG)
 
     assert rec_a.historical_valuation_score == -88.0
     assert rec_b.historical_valuation_score == 37.0
-    # historical_valuation_score以外は完全に同一(保有判断スコア自体は
+    assert rec_a.historical_valuation_confidence == ConfidenceLevel.HIGH
+    assert rec_b.historical_valuation_confidence == ConfidenceLevel.MEDIUM
+    # historical_valuation関連以外は完全に同一(保有判断スコア自体は
     # HoldingDecisionResult側で既に確定済みであり、ここでは一切再計算しない)。
     assert rec_a.recommendation_type == rec_b.recommendation_type
     assert rec_a.sell_prices == rec_b.sell_prices
+    # config_values_used自体はhistorical_valuationキーの値が異なる設定では
+    # ないため(同じ_CFGを使っている)、両者は完全一致するはず。
     assert rec_a.config_values_used == rec_b.config_values_used

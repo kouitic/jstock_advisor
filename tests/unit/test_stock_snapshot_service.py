@@ -15,7 +15,11 @@ import datetime as dt
 import pytest
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.enums import EarningsDateStatus
+from jstock_advisor.domain.entities.enums import (
+    EarningsDateStatus,
+    HistoricalValuationEvaluationState,
+    ValuationBasis,
+)
 from jstock_advisor.interfaces.types import Disclosure
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
@@ -153,13 +157,27 @@ def test_business_days_to_earnings_is_none_when_earnings_date_stale() -> None:
 
 
 def test_historical_valuation_score_is_computed_when_data_available() -> None:
-    """モックプロバイダの過去バリュエーションデータ・予想EPS/BPSが揃っていれば、
-    -100〜+100の範囲でhistorical_valuation_scoreが計算されること(配線確認。
-    スコアの計算ロジック自体の詳細はtest_historical_valuation_score.pyで検証)。
-    """
+    """モックプロバイダの過去バリュエーションデータ・trailing_eps/forecast_bpsが
+    揃っていれば、-100〜+100の範囲でhistorical_valuation.scoreが計算されること
+    (配線確認。スコアの計算ロジック自体の詳細はtest_historical_valuation_score.py
+    で検証)。"""
     providers = build_mock_provider_bundle(_NOW)
     snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
     assert error is None
     assert snapshot is not None
-    assert snapshot.historical_valuation_score is not None
-    assert -100.0 <= snapshot.historical_valuation_score <= 100.0
+    assert snapshot.historical_valuation.state == HistoricalValuationEvaluationState.EVALUATED
+    assert snapshot.historical_valuation.score is not None
+    assert -100.0 <= snapshot.historical_valuation.score <= 100.0
+
+
+def test_historical_valuation_current_per_uses_trailing_basis() -> None:
+    """current PERはforecast_eps(forward)ではなくtrailing_epsから算出され、
+    TRAILING basisとして記録される(コードレビュー対応: basis整合性)。"""
+    providers = build_mock_provider_bundle(_NOW)
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.historical_valuation.current_per_basis == ValuationBasis.TRAILING
+    assert snapshot.historical_valuation.current_per == (
+        snapshot.current_price / snapshot.financial.trailing_eps
+    )

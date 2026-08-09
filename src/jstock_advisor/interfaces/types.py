@@ -18,6 +18,7 @@ from jstock_advisor.domain.entities.enums import (
     DividendComparisonOutcome,
     RecentPeriodsSource,
     RecordDateUnknownReason,
+    ValuationBasis,
 )
 
 
@@ -103,6 +104,12 @@ class FinancialSummary(ImmutableSnapshot):
     interest_bearing_debt: Decimal | None = None
     forecast_eps: Decimal | None = None
     forecast_bps: Decimal | None = None
+    # 判定精度向上機能Phase B(Historical Valuation Score)専用。実績(trailing)
+    # EPS。forecast_eps(予想EPS、FORWARD basis)とは意味が異なり、既存のBUY
+    # スクリーニング・適正価格計算・銘柄分類ロジックからは一切参照しない
+    # (HistoricalValuationの過去PER系列がtrailing basisであるため、現在PERを
+    # 同一basisで比較する目的のみに新設した)。
+    trailing_eps: Decimal | None = None
     shares_outstanding: Decimal | None = None  # 簡易DCF法のFCF按分用(要求仕様8節)
     is_going_concern_doubt: bool = False
     is_deficit: bool = False
@@ -128,6 +135,11 @@ class HistoricalValuation(ImmutableSnapshot):
     price: Decimal | None = None
     per: Decimal | None = None
     pbr: Decimal | None = None
+    # per/pbrの算出basis(判定精度向上機能Phase B: Historical Valuation Score
+    # コードレビュー対応)。現在値と比較する際、basisが一致する行のみを対象と
+    # するために使う(推測でbasisを補完しない。不明な場合はUNKNOWNのまま)。
+    per_basis: ValuationBasis = ValuationBasis.UNKNOWN
+    pbr_basis: ValuationBasis = ValuationBasis.UNKNOWN
     source: DataSourceReference
 
 

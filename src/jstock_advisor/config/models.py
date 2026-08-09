@@ -429,13 +429,74 @@ class DecisionEvaluationConfig(StrictModel):
 # --- historical_valuation_rules.yaml(判定精度向上機能Phase B) ----------------
 
 
+class HistoricalValuationCategoryThresholds(StrictModel):
+    # スコア(-100〜+100)をHistoricalValuationCategoryへ丸めるための閾値。
+    # Shadow記録専用(BUY/SELL等の判定ロジックには使わない)。
+    very_cheap: float
+    cheap: float
+    expensive: float
+    very_expensive: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> HistoricalValuationCategoryThresholds:
+        if not (self.very_cheap > self.cheap > self.expensive > self.very_expensive):
+            raise ValueError(
+                "category_thresholdsはvery_cheap > cheap > expensive > "
+                "very_expensiveの順である必要があります"
+            )
+        return self
+
+
 class HistoricalValuationRulesConfig(StrictModel):
+    # アルゴリズム自体(percentile定義・品質フィルタ・coverage/confidence計算式)
+    # のバージョン。DECISION_SNAPSHOT_MODEL_VERSIONとは別物(こちらはHistorical
+    # Valuation Score単体のバージョニング)。
+    model_version: str
     # PER/PBRそれぞれについて、この点数以上の有効な過去データが無い場合は
     # その指標をスコア対象から除外する(yfinance実質年次数点程度という制約を
     # 踏まえ、少なすぎるデータでのランク付けを避ける)。
     min_data_points_required: int
     per_weight: float
     pbr_weight: float
+    # 外れ値検出(MAD方式)を行うために必要な最低データ件数。これ未満の場合は
+    # 外れ値判定自体が不安定なため行わない。
+    outlier_detection_min_data_points: int
+    outlier_mad_threshold: float
+    # 明らかなデータ異常(取得元の不具合等)を機械的に除外するための絶対レンジ。
+    per_absolute_min: float
+    per_absolute_max: float
+    pbr_absolute_min: float
+    pbr_absolute_max: float
+    # coverage計算の基準データ件数(この件数以上使えていれば当該コンポーネントの
+    # データ充足度を1.0とみなす)。
+    full_confidence_data_points: int
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
+    category_thresholds: HistoricalValuationCategoryThresholds
+
+    @model_validator(mode="after")
+    def _check_values(self) -> HistoricalValuationRulesConfig:
+        if self.min_data_points_required < 2:
+            raise ValueError("min_data_points_requiredは2以上である必要があります")
+        if self.per_weight < 0 or self.pbr_weight < 0:
+            raise ValueError("per_weight/pbr_weightは0以上である必要があります")
+        if self.per_weight + self.pbr_weight <= 0:
+            raise ValueError("per_weightとpbr_weightの合計は0より大きい必要があります")
+        if self.outlier_detection_min_data_points < 2:
+            raise ValueError("outlier_detection_min_data_pointsは2以上である必要があります")
+        if self.outlier_mad_threshold <= 0:
+            raise ValueError("outlier_mad_thresholdは正の値である必要があります")
+        if self.per_absolute_min >= self.per_absolute_max:
+            raise ValueError("per_absolute_minはper_absolute_max未満である必要があります")
+        if self.pbr_absolute_min >= self.pbr_absolute_max:
+            raise ValueError("pbr_absolute_minはpbr_absolute_max未満である必要があります")
+        if self.full_confidence_data_points < 1:
+            raise ValueError("full_confidence_data_pointsは1以上である必要があります")
+        if self.coverage_medium_threshold >= self.coverage_high_threshold:
+            raise ValueError(
+                "coverage_medium_thresholdはcoverage_high_threshold未満である必要があります"
+            )
+        return self
 
 
 # --- holiday_calendar.json ----------------------------------------------------

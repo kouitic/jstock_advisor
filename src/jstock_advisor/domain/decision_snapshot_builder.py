@@ -71,4 +71,8 @@ def build_decision_snapshot(
         config_values_used=dict(recommendation.config_values_used),
         data_sources=tuple(recommendation.data_sources),
         historical_valuation_score=recommendation.historical_valuation_score,
+        historical_valuation_confidence=recommendation.historical_valuation_confidence,
+        historical_valuation_coverage=recommendation.historical_valuation_coverage,
+        historical_valuation_reason_codes=recommendation.historical_valuation_reason_codes,
+        historical_valuation_metrics=dict(recommendation.historical_valuation_metrics),
     )

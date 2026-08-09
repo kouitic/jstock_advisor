@@ -32,6 +32,10 @@ from jstock_advisor.domain.signals.confidence_scoring import (
     ConfidenceScoreResult,
     compute_confidence,
 )
+from jstock_advisor.domain.signals.historical_valuation import (
+    historical_valuation_config_values,
+    historical_valuation_result_to_metrics,
+)
 from jstock_advisor.domain.signals.sell_signal import (
     SellRuleEvaluation,
     SellSignalResult,
@@ -407,6 +411,9 @@ class SellSignalService:
                 "downgraded_reason": downgraded_reason,
                 "raw_recommendation_type": raw_recommendation_type.value,
                 "counter_factors_evaluated": counter_factors_evaluated,
+                "historical_valuation": historical_valuation_config_values(
+                    self._config.historical_valuation
+                ),
             },
             data_sources=list(snapshot.data_sources),
             recommended_action_summary=_build_action_summary(recommendation_type),
@@ -417,7 +424,13 @@ class SellSignalService:
             evidence_details=[_evidence_detail_dict(e) for e in evidence_details],
             independent_evidence_group_count=result.independent_evidence_group_count,
             # 判定精度向上機能Phase B: DecisionSnapshot記録専用(Shadow計測)。
-            historical_valuation_score=snapshot.historical_valuation_score,
+            historical_valuation_score=snapshot.historical_valuation.score,
+            historical_valuation_confidence=snapshot.historical_valuation.confidence,
+            historical_valuation_coverage=snapshot.historical_valuation.coverage,
+            historical_valuation_reason_codes=snapshot.historical_valuation.reason_codes,
+            historical_valuation_metrics=historical_valuation_result_to_metrics(
+                snapshot.historical_valuation
+            ),
         )
         return SellSignalOutcome(
             holding.stock_code, recommendation, None, tuple(result.triggered_rules)
