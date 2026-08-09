@@ -86,7 +86,13 @@ class DecisionSnapshot(ImmutableSnapshot):
     # 銘柄自身の過去PER/PBR水準に対する現在値のランクベーススコア
     # (-100〜+100、算出不可時はNone)。Phase B第一弾で実装済み
     # (domain/signals/historical_valuation.py参照、Shadow計測専用)。
+    # confidence/coverage/reason_codes/metricsは「なぜこの点数だったか」を
+    # 後から再現・検証できるようにするための監査情報(コードレビュー対応)。
     historical_valuation_score: float | None = None
+    historical_valuation_confidence: ConfidenceLevel | None = None
+    historical_valuation_coverage: float | None = None
+    historical_valuation_reason_codes: tuple[str, ...] = ()
+    historical_valuation_metrics: dict[str, Any] = Field(default_factory=dict)
     earnings_surprise_score: float | None = None
     earnings_trend_score: float | None = None
     market_score: float | None = None

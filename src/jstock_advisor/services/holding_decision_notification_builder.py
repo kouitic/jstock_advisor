@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 
+from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     HoldingDecisionCategory,
@@ -17,6 +18,10 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult, ReasonImpact
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.signals.historical_valuation import (
+    historical_valuation_config_values,
+    historical_valuation_result_to_metrics,
+)
 from jstock_advisor.services.sell_price_recommendation_service import recommend_sell_prices
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot
 
@@ -65,9 +70,15 @@ def build_holding_decision_recommendation(
     result: HoldingDecisionResult,
     snapshot: StockSnapshot,
     rule_version: str,
+    config: AppConfig,
     recommendation_id: str | None = None,
 ) -> Recommendation:
-    """should_notify=true(=このHoldingDecisionResultは通知対象)の場合にのみ呼ぶ。"""
+    """should_notify=true(=このHoldingDecisionResultは通知対象)の場合にのみ呼ぶ。
+
+    configは判定精度向上機能Phase B(Historical Valuation Score)のconfig_values_
+    used記録専用(コードレビュー対応)。保有判断スコア自体の算出には一切使わない
+    (15節の既存原則を維持)。
+    """
     if result.hard_gate.triggered:
         recommendation_type = RecommendationType.URGENT_HOLDING_REVIEW
     else:
@@ -126,11 +137,20 @@ def build_holding_decision_recommendation(
             "company_quality_score": result.company_quality.score,
             "investment_thesis_score": result.investment_thesis.score,
             "risk_deduction_score": result.risk_deduction.score,
+            "historical_valuation": historical_valuation_config_values(
+                config.historical_valuation
+            ),
         },
         data_sources=list(snapshot.data_sources),
         recommended_action_summary=action_summary,
         next_review_conditions=next_review_conditions,
         holding_risks=reasons,
         # 判定精度向上機能Phase B: DecisionSnapshot記録専用(Shadow計測)。
-        historical_valuation_score=snapshot.historical_valuation_score,
+        historical_valuation_score=snapshot.historical_valuation.score,
+        historical_valuation_confidence=snapshot.historical_valuation.confidence,
+        historical_valuation_coverage=snapshot.historical_valuation.coverage,
+        historical_valuation_reason_codes=snapshot.historical_valuation.reason_codes,
+        historical_valuation_metrics=historical_valuation_result_to_metrics(
+            snapshot.historical_valuation
+        ),
     )

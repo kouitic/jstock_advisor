@@ -6,7 +6,7 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.common import DataSourceReference
-from jstock_advisor.domain.entities.enums import RecentPeriodsSource
+from jstock_advisor.domain.entities.enums import RecentPeriodsSource, ValuationBasis
 from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
     FinancialSummary,
@@ -60,6 +60,11 @@ class MockFinancialDataProvider:
             interest_bearing_debt=None,
             forecast_eps=profile.forecast_eps,
             forecast_bps=profile.forecast_bps,
+            # モックはforecast/trailingを区別する実データを持たないため、
+            # 判定精度向上機能Phase B用にforecast_epsをそのまま流用する
+            # (基本設計上の簡略化。実データ(yfinance_impl.py)ではtrailingEpsを
+            # 別途取得する)。
+            trailing_eps=profile.forecast_eps,
             is_going_concern_doubt=False,
             is_deficit=False,
             is_debt_excess=False,
@@ -97,6 +102,8 @@ class MockFinancialDataProvider:
                     price=price,
                     per=per,
                     pbr=pbr,
+                    per_basis=ValuationBasis.TRAILING,
+                    pbr_basis=ValuationBasis.TRAILING,
                     source=source,
                 )
             )

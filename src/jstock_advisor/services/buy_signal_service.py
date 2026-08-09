@@ -58,6 +58,10 @@ from jstock_advisor.domain.signals.buy_signal import (
     score_areas,
 )
 from jstock_advisor.domain.signals.eps_normalization import normalize_eps
+from jstock_advisor.domain.signals.historical_valuation import (
+    historical_valuation_config_values,
+    historical_valuation_result_to_metrics,
+)
 from jstock_advisor.domain.signals.record_date_resolution import (
     resolve_benefit_record_date_recurring_label,
     resolve_benefit_record_date_source_type,
@@ -729,6 +733,9 @@ class BuySignalService:
             config_values_used={
                 "min_total_yield_pct": self._config.screening.total_yield.min_total_yield_pct,
                 "aggregation_method": self._config.valuation.fair_value_methods.aggregation_method,
+                "historical_valuation": historical_valuation_config_values(
+                    self._config.historical_valuation
+                ),
             },
             data_sources=list(snapshot.data_sources),
             industry_model_applied=industry_model_applied,
@@ -776,7 +783,13 @@ class BuySignalService:
             dividend_record_date_source_type=resolve_dividend_record_date_source_type(dividend),
             benefit_record_date_source_type=resolve_benefit_record_date_source_type(benefit),
             # 判定精度向上機能Phase B: DecisionSnapshot記録専用(Shadow計測)。
-            historical_valuation_score=snapshot.historical_valuation_score,
+            historical_valuation_score=snapshot.historical_valuation.score,
+            historical_valuation_confidence=snapshot.historical_valuation.confidence,
+            historical_valuation_coverage=snapshot.historical_valuation.coverage,
+            historical_valuation_reason_codes=snapshot.historical_valuation.reason_codes,
+            historical_valuation_metrics=historical_valuation_result_to_metrics(
+                snapshot.historical_valuation
+            ),
         )
 
         return BuyAnalysisOutcome(

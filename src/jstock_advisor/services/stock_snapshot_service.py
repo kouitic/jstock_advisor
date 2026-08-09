@@ -20,7 +20,8 @@ from jstock_advisor.domain.entities.common import (
     BenefitUtilityCoefficients,
     DataSourceReference,
 )
-from jstock_advisor.domain.entities.enums import ConfidenceLevel, EarningsDateStatus
+from jstock_advisor.domain.entities.enums import ConfidenceLevel, EarningsDateStatus, ValuationBasis
+from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
 from jstock_advisor.domain.financial_series import (
@@ -34,9 +35,7 @@ from jstock_advisor.domain.screening.rules import (
     detect_material_event_keywords,
 )
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
-from jstock_advisor.domain.signals.historical_valuation import (
-    compute_historical_valuation_score,
-)
+from jstock_advisor.domain.signals.historical_valuation import evaluate_historical_valuation
 from jstock_advisor.domain.signals.momentum import compute_momentum_snapshot
 from jstock_advisor.domain.valuation.fair_value import (
     aggregate_fair_value,
@@ -111,11 +110,11 @@ class StockSnapshot:
     fair_value_range: FairValueRange
     momentum: MomentumSnapshot
     # --- 判定精度向上機能Phase B: Historical Valuation Score(2026-08追加) ---
-    # 銘柄自身の過去PER/PBR水準に対する現在値のランクベーススコア
-    # (-100〜+100、算出不可時はNone)。DecisionSnapshot記録専用のShadow計測
-    # であり、BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
-    # LINE通知など既存の判定ロジックからは一切参照されない。
-    historical_valuation_score: float | None
+    # 銘柄自身の過去PER/PBR水準に対する現在値のランクベース評価結果
+    # (score/confidence/coverage/内訳を含む構造化Result)。DecisionSnapshot
+    # 記録専用のShadow計測であり、BUY候補判定・保有判断スコア・旧売却判定・
+    # ProfitTaking判定・LINE通知など既存の判定ロジックからは一切参照されない。
+    historical_valuation: HistoricalValuationResult
 
 
 def build_stock_snapshot(
@@ -334,18 +333,35 @@ def build_stock_snapshot(
     # buy_signal_service.py等が使う既存のcurrent_per/current_pbr計算式
     # (current_price / forecast_eps・forecast_bps)とは独立に、ここでのみ
     # 再計算する(既存のBUYスクリーニング・銘柄分類ロジックには一切触れない)。
+    # コードレビュー対応(basis整合性): get_historical_valuation()が返す過去PER
+    # 系列はTRAILING(実績)basisのため、現在PERも同一basisのtrailing_eps
+    # (forecast_eps=forwardEpsとは別物)から算出する。PBRはforecast_bpsの実体が
+    # 既にtrailing bookValueであるため、そのままTRAILING basisとして扱う。
     current_per = (
-        current_price / financial.forecast_eps
-        if financial.forecast_eps is not None and financial.forecast_eps > 0
+        current_price / financial.trailing_eps
+        if financial.trailing_eps is not None and financial.trailing_eps > 0
         else None
+    )
+    current_per_basis = (
+        ValuationBasis.TRAILING if current_per is not None else ValuationBasis.UNKNOWN
     )
     current_pbr = (
         current_price / financial.forecast_bps
         if financial.forecast_bps is not None and financial.forecast_bps > 0
         else None
     )
-    historical_valuation_score = compute_historical_valuation_score(
-        historical_valuations, current_per, current_pbr, config.historical_valuation
+    current_pbr_basis = (
+        ValuationBasis.TRAILING if current_pbr is not None else ValuationBasis.UNKNOWN
+    )
+    historical_valuation = evaluate_historical_valuation(
+        historical_valuations,
+        stock_code,
+        current_per,
+        current_per_basis,
+        current_pbr,
+        current_pbr_basis,
+        now,
+        config.historical_valuation,
     )
 
     snapshot = StockSnapshot(
@@ -381,6 +397,6 @@ def build_stock_snapshot(
         stock_type_classification=stock_type_classification,
         fair_value_range=fair_value_range,
         momentum=momentum_snapshot,
-        historical_valuation_score=historical_valuation_score,
+        historical_valuation=historical_valuation,
     )
     return snapshot, None

@@ -20,7 +20,7 @@ from typing import Any
 import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
-from jstock_advisor.domain.entities.enums import RecentPeriodsSource
+from jstock_advisor.domain.entities.enums import RecentPeriodsSource, ValuationBasis
 from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.document_finder import (
     EdinetFilingCacheRepository,
@@ -131,6 +131,11 @@ class YFinanceFinancialDataProvider:
 
         forecast_eps = _to_decimal(info.get("forwardEps"))
         forecast_bps = _to_decimal(info.get("bookValue"))
+        # 判定精度向上機能Phase B(Historical Valuation Score)専用。既存の
+        # forecast_eps(forwardEps、FORWARD basis)とは別に、実績(trailing)EPSを
+        # 取得する(get_historical_valuation()が返す過去PER系列はtrailing basis
+        # であり、現在値も同一basisで比較する必要があるため)。
+        trailing_eps = _to_decimal(info.get("trailingEps"))
         shares_outstanding = _to_decimal(info.get("sharesOutstanding"))
         payout_ratio_pct = None
         if info.get("payoutRatio") is not None:
@@ -175,6 +180,7 @@ class YFinanceFinancialDataProvider:
             interest_bearing_debt=None,
             forecast_eps=forecast_eps,
             forecast_bps=forecast_bps,
+            trailing_eps=trailing_eps,
             shares_outstanding=shares_outstanding,
             is_going_concern_doubt=False,  # yfinanceからは判定不可(既知の限界)
             is_deficit=is_deficit,
@@ -316,7 +322,15 @@ class YFinanceFinancialDataProvider:
         分割の影響を受けない(分割調整不要)。ただし、BPSは各期の発行済株式数の
         履歴が安定して取得できないため、現在の発行済株式数で近似する
         (自己株買い・増資等で株式数が変動している場合は誤差が生じうる既知の制約。
-        confidenceをMEDIUM上限とする理由となる)。
+        confidenceをMEDIUM上限とする理由となる)。株式分割の未検知・一時的
+        特殊要因(減損等)による異常値は、無償データから確実には検知できないため
+        v1では能動的な検知を行わない(判定精度向上機能Phase Bコードレビュー対応、
+        domain/signals/historical_valuation.pyの外れ値フィルタで部分的に緩和する)。
+
+        eps/equity(bps算出元)はいずれもticker.income_stmt/balance_sheetの
+        既に確定した決算実績値であり、予想値ではない(TRAILING basis)。
+        判定精度向上機能Phase Bコードレビュー対応で、per_basis/pbr_basisを
+        明示的にTRAILINGとして記録する(現在値と比較する側がbasis一致を検証する)。
         """
         ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
         try:
@@ -378,6 +392,8 @@ class YFinanceFinancialDataProvider:
                     price=price,
                     per=per,
                     pbr=pbr,
+                    per_basis=ValuationBasis.TRAILING,
+                    pbr_basis=ValuationBasis.TRAILING,
                     source=source,
                 )
             )

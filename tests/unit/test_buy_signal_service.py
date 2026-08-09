@@ -32,10 +32,12 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     ConfidenceLevel,
     EarningsDateStatus,
+    HistoricalValuationEvaluationState,
     RecommendationType,
     StockType,
     TrendClassification,
 )
+from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.valuation import FairValueRange
 from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, HistoricalValuation
@@ -144,6 +146,12 @@ _MOMENTUM_PLACEHOLDER = MomentumSnapshot(
     confidence=ConfidenceLevel.LOW,
 )
 
+_HISTORICAL_VALUATION_PLACEHOLDER = HistoricalValuationResult(
+    state=HistoricalValuationEvaluationState.NOT_EVALUATED,
+    evaluated_at=_NOW,
+    model_version="test-fixture",
+)
+
 
 @dataclass(frozen=True)
 class _StockFixture:
@@ -228,7 +236,7 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         stock_type_classification=_stock_type(fx.stock_code, fx.stock_types),
         fair_value_range=_EMPTY_FAIR_VALUE_RANGE,
         momentum=_MOMENTUM_PLACEHOLDER,
-        historical_valuation_score=None,
+        historical_valuation=_HISTORICAL_VALUATION_PLACEHOLDER,
     )
 
 

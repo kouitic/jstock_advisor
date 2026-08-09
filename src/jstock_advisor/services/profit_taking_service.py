@@ -49,6 +49,10 @@ from jstock_advisor.domain.signals.earnings_window import (
     resolve_earnings_release_confirmation,
     resolve_latest_financial_period_end,
 )
+from jstock_advisor.domain.signals.historical_valuation import (
+    historical_valuation_config_values,
+    historical_valuation_result_to_metrics,
+)
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
@@ -608,6 +612,9 @@ class ProfitTakingService:
                 "fair_value_used_as_sole_strong_basis": (
                     result.fair_value_used_as_sole_strong_basis
                 ),
+                "historical_valuation": historical_valuation_config_values(
+                    self._config.historical_valuation
+                ),
             },
             data_sources=list(snapshot.data_sources),
             next_review_conditions=_build_next_review_conditions(
@@ -669,7 +676,13 @@ class ProfitTakingService:
             ),
             business_days_to_earnings=days_to_earnings,
             # 判定精度向上機能Phase B: DecisionSnapshot記録専用(Shadow計測)。
-            historical_valuation_score=snapshot.historical_valuation_score,
+            historical_valuation_score=snapshot.historical_valuation.score,
+            historical_valuation_confidence=snapshot.historical_valuation.confidence,
+            historical_valuation_coverage=snapshot.historical_valuation.coverage,
+            historical_valuation_reason_codes=snapshot.historical_valuation.reason_codes,
+            historical_valuation_metrics=historical_valuation_result_to_metrics(
+                snapshot.historical_valuation
+            ),
         )
         return ProfitTakingOutcome(holding.stock_code, recommendation, None)
 
