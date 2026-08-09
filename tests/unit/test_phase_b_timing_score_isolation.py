@@ -59,7 +59,7 @@ def _result_variant(score: float, confidence: ConfidenceLevel) -> TimingScoreRes
         category=TimingScoreCategory.NEUTRAL,
         confidence=confidence,
         coverage=0.5 if confidence == ConfidenceLevel.MEDIUM else 1.0,
-        trend_component=score,
+        trend_quality_component=score,
         reason_codes=("MACD_UNAVAILABLE",),
         evaluated_at=_NOW,
         model_version="test-fixture",

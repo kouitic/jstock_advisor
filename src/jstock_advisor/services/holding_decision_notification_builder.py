@@ -163,5 +163,7 @@ def build_holding_decision_recommendation(
         timing_confidence=snapshot.timing.confidence,
         timing_coverage=snapshot.timing.coverage,
         timing_reason_codes=snapshot.timing.reason_codes,
-        timing_metrics=timing_score_result_to_metrics(snapshot.timing),
+        timing_metrics=timing_score_result_to_metrics(
+            snapshot.timing, snapshot.momentum, snapshot.current_price
+        ),
     )

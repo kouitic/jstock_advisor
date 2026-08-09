@@ -187,12 +187,11 @@ def test_historical_valuation_current_per_uses_trailing_basis() -> None:
 
 
 def test_timing_score_is_computed_from_momentum_snapshot() -> None:
-    """StockSnapshot.timingがmomentumを基に計算され、trend成分は常に利用可能
-    なため状態がEVALUATED/NOT_EVALUATEDのいずれであってもtrend_componentが
-    設定されること(配線確認。算出式自体の詳細はtest_timing_score.pyで検証)。"""
+    """StockSnapshot.timingがmomentum・current_priceを基に計算されること
+    (配線確認。算出式自体の詳細はtest_timing_score.pyで検証)。"""
     providers = build_mock_provider_bundle(_NOW)
     snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
     assert error is None
     assert snapshot is not None
-    assert snapshot.timing.trend_component is not None
+    assert snapshot.timing.trend_quality_component is not None
     assert snapshot.timing.model_version == _CFG.timing_score.model_version
