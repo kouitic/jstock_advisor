@@ -525,22 +525,26 @@ class TimingScoreCategoryThresholds(StrictModel):
 
 
 class TimingScoreRulesConfig(StrictModel):
-    """Timing Score v2(判定精度向上機能Phase B第二弾、コードレビュー対応で
+    """Timing Score v3(判定精度向上機能Phase B第二弾、コードレビュー対応で
     「モメンタムの強さ」から「エントリータイミングの質」へ再設計)の設定。
 
-    trend_quality/price_vs_ma20/price_vs_ma60/rsi/macd/drawdown/volume/
-    overheat_penaltyの8成分を加重平均する。RSIはtrend_quality算出には
-    一切使わない(TrendClassificationのSTRONG判定にRSIが使われているため、
-    trend_quality自体はcurrent_price/ma20/ma60/ma20_slope_pctのみから独立算出し、
-    RSIの二重評価を構造的に防ぐ)。
+    trend_quality/price_vs_ma20/price_vs_ma60/rsi/macd/drawdown/volumeの
+    7成分を加重平均してbase_scoreを算出する(overheat_penaltyはこの加重平均に
+    含めない。コードレビュー対応v3: 過熱情報の欠損によってweightごと分母から
+    消えスコアが底上げされる不整合を防ぐため、base_score算出後に適用する
+    modifierとして分離した。score(final_score)=clamp(base_score -
+    overheat_penalty_points)、過熱情報欠損時はpenalty=0=base_scoreのまま)。
+    RSIはtrend_quality算出には一切使わない(TrendClassificationのSTRONG判定に
+    RSIが使われているため、trend_quality自体はcurrent_price/ma20/ma60/
+    ma20_slope_pctのみから独立算出し、RSIの二重評価を構造的に防ぐ)。
     """
 
     # アルゴリズム自体(成分の定義・区分境界・coverage/confidence計算式)の
     # バージョン。計算方式を変更した場合はここを更新する。
     model_version: str
 
-    # 各成分の加重平均に使う重み。利用不可な成分はcoverageの分母からも除外する
-    # (0点として加算しない)。
+    # base_score算出に使う7成分の加重平均の重み。利用不可な成分はcoverageの
+    # 分母からも除外する(0点として加算しない)。
     trend_quality_weight: float
     price_vs_ma20_weight: float
     price_vs_ma60_weight: float
@@ -548,7 +552,6 @@ class TimingScoreRulesConfig(StrictModel):
     macd_weight: float
     drawdown_weight: float
     volume_weight: float
-    overheat_penalty_weight: float
 
     # trend_quality: ma20_slope_pctを-100〜+100へ換算する際のフルスケール
     # (この%でスコア±100に達する)。
@@ -589,10 +592,12 @@ class TimingScoreRulesConfig(StrictModel):
     volume_extreme_threshold: float
 
     # 短期急騰・過熱の複合ペナルティ条件(5日リターン・RSI・drawdownの3条件が
-    # すべて成立した場合のみ発火)。
+    # すべて成立した場合のみ発火)。overheat_penalty_pointsはbase_scoreから
+    # 差し引く点数(通常の加重平均成分ではなくmodifier、コードレビュー対応v3)。
     overheat_five_day_return_pct_threshold: float
     overheat_rsi_threshold: float
     overheat_drawdown_pct_threshold: float
+    overheat_penalty_points: float
 
     # coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする。
     min_coverage_required: float
@@ -610,7 +615,6 @@ class TimingScoreRulesConfig(StrictModel):
             self.macd_weight,
             self.drawdown_weight,
             self.volume_weight,
-            self.overheat_penalty_weight,
         )
         if any(w < 0 for w in weights):
             raise ValueError("各成分の重みは0以上である必要があります")
@@ -632,11 +636,12 @@ class TimingScoreRulesConfig(StrictModel):
         if self.drawdown_near_high_pct > 0:
             raise ValueError("drawdown_near_high_pctは0以下である必要があります")
         if not (
-            self.drawdown_near_high_pct >= self.drawdown_pullback_pct
-            >= self.drawdown_neutral_pct
+            self.drawdown_near_high_pct > self.drawdown_pullback_pct
+            > self.drawdown_neutral_pct
         ):
             raise ValueError(
-                "drawdown区分境界はnear_high >= pullback >= neutralの順である必要があります"
+                "drawdown区分境界はnear_high > pullback > neutralの順(同値不可)"
+                "である必要があります"
             )
 
         if not (
@@ -673,6 +678,8 @@ class TimingScoreRulesConfig(StrictModel):
             raise ValueError("overheat_rsi_thresholdは0〜100の範囲である必要があります")
         if self.overheat_drawdown_pct_threshold > 0:
             raise ValueError("overheat_drawdown_pct_thresholdは0以下である必要があります")
+        if self.overheat_penalty_points <= 0:
+            raise ValueError("overheat_penalty_pointsは正の値である必要があります")
 
         if not (0 < self.min_coverage_required <= 1):
             raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")

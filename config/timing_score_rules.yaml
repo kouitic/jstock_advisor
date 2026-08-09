@@ -1,4 +1,4 @@
-# Timing Score v2(判定精度向上機能Phase B第二弾)の設定。
+# Timing Score v3(判定精度向上機能Phase B第二弾)の設定。
 #
 # 「モメンタムが強いほど高得点」ではなく、「良いトレンドを維持しながら、
 # 過熱しておらず、エントリーしやすい価格位置にあるか」を-100(逆風)〜
@@ -10,12 +10,16 @@
 # classify_trend()はSTRONG_UPTREND/STRONG_DOWNTREND判定にRSIを使っているため、
 # trend_quality成分はcurrent_price/ma20/ma60/ma20_slope_pctのみから独立算出し、
 # RSIの二重評価を構造的に防ぐ)。
+#
+# コードレビュー対応(v3): overheat_penaltyは通常の加重平均成分ではなく、
+# 7成分(trend_quality/price_vs_ma20/price_vs_ma60/rsi/macd/drawdown/volume)
+# から算出したbase_score算出後に適用するmodifier。過熱情報が欠損している
+# だけでスコアが底上げされることはない(欠損時はpenalty=0=base_scoreのまま)。
 
-model_version: "timing_score_v2"
+model_version: "timing_score_v3"
 
-# 各成分の加重平均に使う重み。trend_quality/price_vs_ma20/price_vs_ma60/rsi/
-# drawdownを主要成分、macd/volumeを補助成分、overheat_penaltyは過熱時のみ
-# 効くペナルティ専用成分として重みを設定する。
+# base_score算出に使う7成分の加重平均の重み。trend_quality/price_vs_ma20/
+# price_vs_ma60/rsi/drawdownを主要成分、macd/volumeを補助成分とする。
 trend_quality_weight: 1.5
 price_vs_ma20_weight: 1.0
 price_vs_ma60_weight: 0.75
@@ -23,7 +27,6 @@ rsi_weight: 1.0
 macd_weight: 0.5
 drawdown_weight: 1.0
 volume_weight: 0.5
-overheat_penalty_weight: 0.75
 
 # trend_quality: ma20_slope_pctをスコア化する際のフルスケール
 # (この変化率(%)でスコア±100に達する)。
@@ -39,15 +42,17 @@ rsi_caution_boundary: 70.0
 rsi_overheat_boundary: 80.0
 
 # drawdown_from_recent_high_pct(直近高値からの下落率、0以下)の区分境界。
-# 「適度な押し目」区分の正のスコアは、trend_quality成分が0以下の場合は
-# 0へキャップされる(下降トレンド中の下落を押し目と呼ばない)。
+# 正のスコア区分(高値圏・適度な押し目のいずれも)は、trend_quality成分が
+# 0以下の場合は0へキャップされる(下降トレンド中の価格位置だけを理由に
+# 追い風点を与えない、コードレビュー対応v3で全正区分へ拡大適用)。
 drawdown_near_high_pct: -2.0
 drawdown_pullback_pct: -8.0
 drawdown_neutral_pct: -15.0
 
 # MA20/MA60からのsigned乖離(%)の区分境界(符号付き)。MAより上/下は
-# 意味が異なるためabs()による対称評価は採用しない。「適正位置」区分の
-# 正のスコアはtrend_quality成分が0以下の場合は0へキャップされる。
+# 意味が異なるためabs()による対称評価は採用しない。正のスコア区分(適正位置・
+# やや過熱気味のいずれも)はtrend_quality成分が0以下の場合は0へキャップされる
+# (コードレビュー対応v3で全正区分へ拡大適用)。
 ma20_breakdown_pct: -15.0
 ma20_pullback_low_pct: -8.0
 ma20_near_high_pct: 3.0
@@ -65,14 +70,16 @@ volume_moderate_high: 2.5
 volume_extreme_threshold: 3.0
 
 # 短期急騰・過熱の複合ペナルティ条件。5日リターン・RSI・drawdownの3条件が
-# すべて成立した場合のみ発火する。
+# すべて成立した場合のみ発火する。overheat_penalty_pointsはbase_scoreから
+# 差し引く点数(通常の加重平均成分ではなくmodifier)。
 overheat_five_day_return_pct_threshold: 15.0
 overheat_rsi_threshold: 80.0
 overheat_drawdown_pct_threshold: -2.0
+overheat_penalty_points: 25.0
 
-# coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする
-# (trend_quality成分はデータ不足時に除外されるため、他の成分が軒並み欠損して
-# いてもスコアが出てしまうことを防ぐ最小データ量ゲート)。
+# coverage(利用可能なbase成分の重み比率)がこの値未満の場合はNOT_EVALUATEDと
+# する(trend_quality成分はデータ不足時に除外されるため、他の成分が軒並み
+# 欠損していてもスコアが出てしまうことを防ぐ最小データ量ゲート)。
 min_coverage_required: 0.3
 coverage_high_threshold: 0.8
 coverage_medium_threshold: 0.4

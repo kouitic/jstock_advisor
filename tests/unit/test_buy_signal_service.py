@@ -147,6 +147,7 @@ _EMPTY_FAIR_VALUE_RANGE = FairValueRange(
 _MOMENTUM_PLACEHOLDER = MomentumSnapshot(
     trend_classification=TrendClassification.NEUTRAL,
     trend_evaluable=False,
+    price_history_aligned=True,
     confidence=ConfidenceLevel.LOW,
 )
 

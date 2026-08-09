@@ -1,10 +1,10 @@
-"""判定精度向上機能Phase B第二弾: Timing Score v2(モメンタムベースの
+"""判定精度向上機能Phase B第二弾: Timing Score v3(モメンタムベースの
 エントリータイミング品質スコア)。
 
 コードレビュー対応: v1は「モメンタムが強いほど高得点」になっており
 (RSI高値・直近高値ぴったり・STRONG_UPTREND満点が最高評価)、意図していた
 「良いトレンドを維持しながら、過熱しておらず、エントリーしやすい価格位置に
-あるか」という評価になっていなかった。v2では以下の設計で再構成する。
+あるか」という評価になっていなかった。v2で以下の設計へ再構成した。
 
 - trend_quality_component: 既存classify_trend()(RSIをSTRONG判定に使う)は
   変更せず、Timing Score専用にcurrent_price/ma20/ma60/ma20_slope_pctのみから
@@ -12,25 +12,47 @@
 - rsi_component: RSIが高いほど加点、という単調評価を廃止し、過熱・
   エントリー適性のみを見る段階評価(45〜60をピークとし、70超は過熱として
   明確にペナルティ化)とする。
-- price_vs_ma20/ma60_component: current_priceとMAのsigned乖離(abs()による
-  対称評価は使わない、MAより上/下は意味が異なるため)を段階評価する。
-  「適正位置」区分の正のスコアはtrend_quality_componentが0以下の場合0へ
-  キャップし、下降トレンド中の下方乖離を積極評価しない。
-- drawdown_component: 「直近高値ぴったり」を最高評価とせず、「適度な
-  押し目」区分を最高評価とする。この正のスコアもtrend_quality_componentが
-  0以下の場合は0へキャップし、「高値から下がった」ことを無条件に「押し目」
-  と呼ばない。
+- price_vs_ma20/ma60_component・drawdown_component: current_priceとMAの
+  signed乖離・直近高値からの下落率を段階評価する(abs()による対称評価・
+  「直近高値ぴったり最高評価」は採用しない)。正のスコア区分は全て
+  trend_quality_componentが0以下の場合0へキャップし、下降トレンド中の
+  価格位置だけを理由に追い風点を与えない。
 - volume_component: 単純に出来高が多いほど加点する設計を廃止。
-- overheat_penalty_component: 5日リターン・RSI・drawdownの3条件がすべて
-  過熱を示す場合のみ発火する複合ペナルティ。
 - TOPIX/セクター相対強度はTiming Scoreの算出対象から除外する(将来の
   Market/Sector Environment Scoreとの二重評価を避けるため。
   MomentumSnapshot側のフィールド自体は温存する)。
 
+v3(追加コードレビュー対応)でさらに以下を修正した。
+
+- overheat penaltyを、他7成分と同じ加重平均成分から「base_score算出後に
+  適用するmodifier」へ分離した。7成分(trend_quality/price_vs_ma20/
+  price_vs_ma60/rsi/macd/drawdown/volume)の加重平均でbase_scoreを算出し、
+  score(final_score)=clamp(base_score - overheat_penalty_points)とする。
+  過熱情報が欠損している場合はpenalty=0(base_scoreのまま)とし、
+  **過熱情報の欠損によってscoreがbase_scoreより上がることはない**
+  (旧実装は欠損時にweightごと分母から消え、スコアが底上げされる不整合が
+  あった)。coverageも7 base成分の重みのみで算出する。
+- 過熱判定が不能な場合、confidenceはHIGHへ到達しない(coverageからHIGHと
+  算出されてもMEDIUMへキャップする。短期急騰を確認できない状態で
+  エントリータイミングの信頼度を最高評価にしないため)。
+- drawdown/MA乖離の正のスコア区分について、以前は一部区分(押し目・適正
+  位置)のみtrend_quality条件付けの対象だったが、残りの正区分(高値圏・
+  やや過熱気味)も含め全ての正区分をtrend_quality<=0で0以下へキャップする
+  よう拡張した。
+- current_price(get_latest_price()由来)とbars(get_price_history()由来)は
+  別Provider呼び出しであり時点一致の保証がコード上に無いため、
+  compute_momentum_snapshot()側でbars[-1].dateとcurrent_priceのas-of日付の
+  一致を確認するようにした(MomentumSnapshot.price_history_aligned)。
+  一致しない場合はone_day_return_pct/five_day_return_pctを補完せずNoneの
+  ままとし、本モジュールは`price_history_aligned=False`の場合に理由コード
+  PRICE_HISTORY_NOT_ALIGNED_WITH_CURRENT_PRICEを記録する。
+
 外部I/Oを一切行わない純関数(domain/signals/momentum.pyと同じパターン)。
 MomentumSnapshotは既にpoint-in-time安全な株価バーから計算済みのため、この
-関数自体は独自のlook-ahead bias対策を必要としない(前回レビュー対応と同じ
-前提)。
+関数自体は独自のlook-ahead bias対策を必要としない。ただし、StockSnapshotを
+任意の過去時点へ再構築する正式なpoint-in-time backtest経路は現状未検証で
+あり、ライブ評価(現在時点)での安全性のみ確認済みである(推測で過去時点
+評価に安全と断定しない)。
 
 コードレビュー対応(Shadow計測): この評価結果はDecisionSnapshotへ記録する
 専用のものであり、BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking
@@ -61,6 +83,7 @@ REASON_MACD_UNAVAILABLE = "MACD_UNAVAILABLE"
 REASON_DRAWDOWN_UNAVAILABLE = "DRAWDOWN_UNAVAILABLE"
 REASON_VOLUME_UNAVAILABLE = "VOLUME_UNAVAILABLE"
 REASON_OVERHEAT_PENALTY_UNAVAILABLE = "OVERHEAT_PENALTY_UNAVAILABLE"
+REASON_PRICE_HISTORY_NOT_ALIGNED = "PRICE_HISTORY_NOT_ALIGNED_WITH_CURRENT_PRICE"
 
 
 def _clamp(value: float, low: float = -100.0, high: float = 100.0) -> float:
@@ -107,6 +130,19 @@ def _rsi_component(rsi: float, config: TimingScoreRulesConfig) -> float:
     return -100.0
 
 
+def _cap_positive_when_trend_not_positive(
+    score: float, trend_quality_component: float | None
+) -> float:
+    """正のスコアは、trend_quality_componentがNoneまたは0以下の場合0へ
+    キャップする(コードレビュー対応v3: 下降トレンド中に価格位置だけを
+    理由に追い風点を与えないため、正のスコア区分すべてに適用する)。"""
+    if score <= 0:
+        return score
+    if trend_quality_component is None or trend_quality_component <= 0:
+        return min(score, 0.0)
+    return score
+
+
 def _signed_deviation_component(
     dev_pct: float,
     breakdown_pct: float,
@@ -116,39 +152,37 @@ def _signed_deviation_component(
     trend_quality_component: float | None,
 ) -> float:
     """current_priceとMAのsigned乖離を段階評価する(abs()による対称評価は
-    採用しない)。「適正位置」区分の正のスコアはtrend_quality_componentが
-    Noneまたは0以下の場合0へキャップする。"""
+    採用しない)。正のスコア区分(適正位置・やや過熱気味)はいずれも
+    trend_quality_componentがNoneまたは0以下の場合0へキャップする。"""
     if dev_pct < breakdown_pct:
-        return -100.0
-    if dev_pct < pullback_low_pct:
-        return -20.0
-    if dev_pct < near_high_pct:
+        score = -100.0
+    elif dev_pct < pullback_low_pct:
+        score = -20.0
+    elif dev_pct < near_high_pct:
         score = 80.0
-        if trend_quality_component is None or trend_quality_component <= 0:
-            return min(score, 0.0)
-        return score
-    if dev_pct < overheat_pct:
-        return 30.0
-    return -100.0
+    elif dev_pct < overheat_pct:
+        score = 30.0
+    else:
+        score = -100.0
+    return _cap_positive_when_trend_not_positive(score, trend_quality_component)
 
 
 def _drawdown_component(
     pct: float, config: TimingScoreRulesConfig, trend_quality_component: float | None
 ) -> float:
     """「直近高値ぴったり」を最高評価とせず、「適度な押し目」区分を最高評価
-    とする。押し目区分の正のスコアはtrend_quality_componentがNoneまたは
-    0以下の場合0へキャップし、「高値から下がった」ことを無条件に「押し目」
-    と呼ばない。"""
+    とする。正のスコア区分(高値圏・適度な押し目)はいずれもtrend_quality_
+    componentがNoneまたは0以下の場合0へキャップし、「高値から下がった」
+    ことを無条件に「押し目」と呼ばない。"""
     if pct > config.drawdown_near_high_pct:
-        return 20.0
-    if pct > config.drawdown_pullback_pct:
+        score = 20.0
+    elif pct > config.drawdown_pullback_pct:
         score = 80.0
-        if trend_quality_component is None or trend_quality_component <= 0:
-            return min(score, 0.0)
-        return score
-    if pct > config.drawdown_neutral_pct:
+    elif pct > config.drawdown_neutral_pct:
         return 0.0
-    return -80.0
+    else:
+        return -80.0
+    return _cap_positive_when_trend_not_positive(score, trend_quality_component)
 
 
 def _volume_component(volume_ratio: float, config: TimingScoreRulesConfig) -> float:
@@ -181,17 +215,27 @@ def evaluate_timing_score(
     evaluated_at: dt.datetime,
     config: TimingScoreRulesConfig,
 ) -> TimingScoreResult:
-    """MomentumSnapshotとcurrent_priceを基にTiming Score v2を算出する。
+    """MomentumSnapshotとcurrent_priceを基にTiming Score v3を算出する。
 
-    trend_quality/price_vs_ma20/price_vs_ma60/rsi/macd/drawdown/volume/
-    overheat_penaltyの8成分を、利用可能な成分の重みだけで正規化して
-    加重平均する。coverageが`config.min_coverage_required`未満の場合は
-    NOT_EVALUATEDを返す。
+    trend_quality/price_vs_ma20/price_vs_ma60/rsi/macd/drawdown/volumeの
+    7成分を、利用可能な成分の重みだけで正規化して加重平均しbase_scoreとする
+    (coverageもこの7成分の重みのみで算出)。coverageが
+    `config.min_coverage_required`未満の場合はNOT_EVALUATEDを返す。
+
+    overheat penaltyは上記7成分の加重平均に含めない(コードレビュー対応v3)。
+    五日リターン・RSI・drawdownの3条件が全て過熱を示す場合のみ
+    `config.overheat_penalty_points`をbase_scoreから差し引いてfinal_score
+    (=score)とする。過熱情報が欠損している場合は減点なし(base_scoreの
+    まま)とし、過熱情報の欠損によってscoreが上がることはない。過熱判定が
+    不能な場合、confidenceはHIGHへ到達しない。
     """
     require_timezone_aware(evaluated_at)
 
     reason_codes: set[str] = set()
     components: list[tuple[float, float]] = []  # (score, weight)
+
+    if not momentum.price_history_aligned:
+        reason_codes.add(REASON_PRICE_HISTORY_NOT_ALIGNED)
 
     trend_quality = _trend_quality_component(momentum, current_price, config)
     if trend_quality is not None:
@@ -260,20 +304,31 @@ def evaluate_timing_score(
     else:
         reason_codes.add(REASON_VOLUME_UNAVAILABLE)
 
-    overheat_penalty_component: float | None = None
-    if (
+    # overheat penalty(コードレビュー対応v3): 通常の加重平均成分ではなく、
+    # base_score算出後に適用するmodifier。欠損時はpenalty=0(base_scoreの
+    # まま)とし、欠損によってscoreが上がることはない。
+    overheat_evaluable = (
         momentum.five_day_return_pct is not None
         and momentum.rsi is not None
         and momentum.drawdown_from_recent_high_pct is not None
-    ):
-        overheated = (
+    )
+    overheat_penalty_applied: bool | None
+    overheat_penalty_points: float | None
+    if overheat_evaluable:
+        assert momentum.five_day_return_pct is not None  # noqa: S101
+        assert momentum.rsi is not None  # noqa: S101
+        assert momentum.drawdown_from_recent_high_pct is not None  # noqa: S101
+        overheat_penalty_applied = (
             momentum.five_day_return_pct >= config.overheat_five_day_return_pct_threshold
             and momentum.rsi >= config.overheat_rsi_threshold
             and momentum.drawdown_from_recent_high_pct >= config.overheat_drawdown_pct_threshold
         )
-        overheat_penalty_component = -100.0 if overheated else 0.0
-        components.append((overheat_penalty_component, config.overheat_penalty_weight))
+        overheat_penalty_points = (
+            config.overheat_penalty_points if overheat_penalty_applied else 0.0
+        )
     else:
+        overheat_penalty_applied = None
+        overheat_penalty_points = None
         reason_codes.add(REASON_OVERHEAT_PENALTY_UNAVAILABLE)
 
     total_config_weight = (
@@ -284,7 +339,6 @@ def evaluate_timing_score(
         + config.macd_weight
         + config.drawdown_weight
         + config.volume_weight
-        + config.overheat_penalty_weight
     )
     available_weight = sum(weight for _, weight in components)
     coverage = available_weight / total_config_weight if total_config_weight > 0 else 0.0
@@ -300,14 +354,16 @@ def evaluate_timing_score(
             macd_component=macd_component,
             drawdown_component=drawdown_component,
             volume_component=volume_component,
-            overheat_penalty_component=overheat_penalty_component,
+            overheat_penalty_applied=overheat_penalty_applied,
+            overheat_penalty_points=overheat_penalty_points,
             reason_codes=tuple(sorted(reason_codes)),
             evaluated_at=evaluated_at,
             model_version=config.model_version,
         )
 
-    score = sum(s * weight for s, weight in components) / available_weight
-    category = _classify_category(score, config)
+    base_score = sum(s * weight for s, weight in components) / available_weight
+    final_score = _clamp(base_score - (overheat_penalty_points or 0.0))
+    category = _classify_category(final_score, config)
 
     if coverage >= config.coverage_high_threshold:
         confidence = ConfidenceLevel.HIGH
@@ -316,9 +372,14 @@ def evaluate_timing_score(
     else:
         confidence = ConfidenceLevel.LOW
 
+    # コードレビュー対応(v3): 過熱判定が不能な場合、confidenceはHIGHへ
+    # 到達しない(短期急騰を確認できない状態を最高評価にしないため)。
+    if not overheat_evaluable and confidence == ConfidenceLevel.HIGH:
+        confidence = ConfidenceLevel.MEDIUM
+
     return TimingScoreResult(
         state=TimingScoreEvaluationState.EVALUATED,
-        score=score,
+        score=final_score,
         category=category,
         confidence=confidence,
         coverage=coverage,
@@ -329,7 +390,9 @@ def evaluate_timing_score(
         macd_component=macd_component,
         drawdown_component=drawdown_component,
         volume_component=volume_component,
-        overheat_penalty_component=overheat_penalty_component,
+        base_score=base_score,
+        overheat_penalty_applied=overheat_penalty_applied,
+        overheat_penalty_points=overheat_penalty_points,
         reason_codes=tuple(sorted(reason_codes)),
         evaluated_at=evaluated_at,
         model_version=config.model_version,
@@ -343,7 +406,8 @@ def timing_score_result_to_metrics(
 ) -> dict[str, Any]:
     """TimingScoreResultを、Recommendation.timing_metrics(延いては
     DecisionSnapshot.timing_metrics)へ保存する監査用dictへ変換する
-    (後から「どの成分が実効性を持ったか」を分析できるようにするため)。
+    (後から「どの成分が実効性を持ったか」「base_scoreからoverheat penaltyで
+    何点落としたか」を分析できるようにするため)。
 
     momentum・current_priceを渡した場合、成分のスコアだけでなく元になった
     生値(raw metrics)もあわせて記録する。
@@ -358,7 +422,10 @@ def timing_score_result_to_metrics(
         "macd_component": result.macd_component,
         "drawdown_component": result.drawdown_component,
         "volume_component": result.volume_component,
-        "overheat_penalty_component": result.overheat_penalty_component,
+        "base_score": result.base_score,
+        "overheat_penalty_applied": result.overheat_penalty_applied,
+        "overheat_penalty_points": result.overheat_penalty_points,
+        "final_score": result.score,
         "model_version": result.model_version,
     }
     if momentum is not None:
@@ -367,6 +434,7 @@ def timing_score_result_to_metrics(
         metrics["volume_ratio"] = momentum.volume_ratio
         metrics["one_day_return_pct"] = momentum.one_day_return_pct
         metrics["five_day_return_pct"] = momentum.five_day_return_pct
+        metrics["price_history_aligned"] = momentum.price_history_aligned
         if current_price is not None:
             metrics["current_vs_ma20_pct"] = (
                 float(current_price / momentum.ma20 - 1) * 100.0
@@ -393,7 +461,6 @@ def timing_score_config_values(config: TimingScoreRulesConfig) -> dict[str, Any]
         "macd_weight": config.macd_weight,
         "drawdown_weight": config.drawdown_weight,
         "volume_weight": config.volume_weight,
-        "overheat_penalty_weight": config.overheat_penalty_weight,
         "trend_slope_full_scale_pct": config.trend_slope_full_scale_pct,
         "rsi_oversold_boundary": config.rsi_oversold_boundary,
         "rsi_neutral_boundary": config.rsi_neutral_boundary,
@@ -418,6 +485,7 @@ def timing_score_config_values(config: TimingScoreRulesConfig) -> dict[str, Any]
         "overheat_five_day_return_pct_threshold": config.overheat_five_day_return_pct_threshold,
         "overheat_rsi_threshold": config.overheat_rsi_threshold,
         "overheat_drawdown_pct_threshold": config.overheat_drawdown_pct_threshold,
+        "overheat_penalty_points": config.overheat_penalty_points,
         "min_coverage_required": config.min_coverage_required,
         "coverage_high_threshold": config.coverage_high_threshold,
         "coverage_medium_threshold": config.coverage_medium_threshold,

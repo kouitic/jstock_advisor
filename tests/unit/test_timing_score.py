@@ -1,12 +1,15 @@
 """domain/signals/timing_score.pyのテスト(判定精度向上機能Phase B第二弾、
-コードレビュー対応でv2へ全面改修)。
+コードレビュー対応でv2→v3へ全面改修)。
 
 v1は「モメンタムが強いほど高得点」になっていた(RSI高値・直近高値ぴったり・
 STRONG_UPTREND満点が最高評価)。v2では「良いトレンドを維持しながら、過熱して
 おらず、エントリーしやすい価格位置にあるか」を評価する。trend_qualityは
 RSIを使わず(既存classify_trend()のSTRONG判定にRSIが使われているため、
 二重評価を防ぐためTiming Score専用に独立算出)、price_vs_ma20/ma60・
-drawdownの「適度な押し目」評価はtrend_qualityが0以下の場合0へキャップされる。
+drawdownの正のスコア区分は全てtrend_qualityが0以下の場合0以下へキャップ
+される。v3ではoverheat penaltyを通常の加重平均成分からbase_score算出後の
+modifierへ分離し(過熱情報欠損時にスコアが底上げされる不整合を解消)、
+current_priceとPriceBarの時点整合性チェック(price_history_aligned)を追加した。
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ _NOW = dt.datetime(2026, 8, 10, tzinfo=dt.UTC)
 
 def _config(**overrides: object) -> TimingScoreRulesConfig:
     defaults: dict[str, object] = dict(
-        model_version="timing_score_v2",
+        model_version="timing_score_v3",
         trend_quality_weight=1.5,
         price_vs_ma20_weight=1.0,
         price_vs_ma60_weight=0.75,
@@ -42,7 +45,6 @@ def _config(**overrides: object) -> TimingScoreRulesConfig:
         macd_weight=0.5,
         drawdown_weight=1.0,
         volume_weight=0.5,
-        overheat_penalty_weight=0.75,
         trend_slope_full_scale_pct=10.0,
         rsi_oversold_boundary=30.0,
         rsi_neutral_boundary=45.0,
@@ -67,6 +69,7 @@ def _config(**overrides: object) -> TimingScoreRulesConfig:
         overheat_five_day_return_pct_threshold=15.0,
         overheat_rsi_threshold=80.0,
         overheat_drawdown_pct_threshold=-2.0,
+        overheat_penalty_points=25.0,
         min_coverage_required=0.3,
         coverage_high_threshold=0.8,
         coverage_medium_threshold=0.4,
@@ -95,6 +98,7 @@ def _momentum(
     five_day_return_pct: float | None = None,
     relative_strength_vs_topix_pct: float | None = None,
     relative_strength_vs_sector_pct: float | None = None,
+    price_history_aligned: bool = True,
 ) -> MomentumSnapshot:
     from jstock_advisor.domain.entities.enums import TrendClassification
 
@@ -117,6 +121,7 @@ def _momentum(
         five_day_return_pct=five_day_return_pct,
         relative_strength_vs_topix_pct=relative_strength_vs_topix_pct,
         relative_strength_vs_sector_pct=relative_strength_vs_sector_pct,
+        price_history_aligned=price_history_aligned,
         confidence=ConfidenceLevel.HIGH,
     )
 
@@ -294,6 +299,20 @@ def test_drawdown_strong_downtrend_deep_drop_scores_low() -> None:
     assert result.drawdown_component == -80.0
 
 
+def test_drawdown_near_high_is_capped_when_trend_not_positive() -> None:
+    """高値圏区分(+20)もtrend_quality<=0の場合0以下へキャップする
+    (コードレビュー対応v3で全正区分へ拡張)。"""
+    result = _evaluate(
+        _momentum(
+            ma20=Decimal("1050"), ma60=Decimal("1100"), ma20_slope_pct=-10.0,
+            drawdown_from_recent_high_pct=-1.0,
+        ),
+        current_price=Decimal("1000"),
+    )
+    assert result.drawdown_component is not None
+    assert result.drawdown_component <= 0.0
+
+
 # ===== MA20/MA60成分・trend条件付け(21-27) =====
 
 
@@ -351,6 +370,17 @@ def test_ma60_none_is_unavailable() -> None:
     assert "MA60_UNAVAILABLE" in result.reason_codes
 
 
+def test_ma20_slightly_overheat_zone_is_capped_when_trend_not_positive() -> None:
+    """やや過熱気味区分(+30)もtrend_quality<=0の場合0以下へキャップする
+    (コードレビュー対応v3で全正区分へ拡張)。"""
+    result = _evaluate(
+        _momentum(ma20=Decimal("934"), ma60=Decimal("1100"), ma20_slope_pct=-10.0),
+        current_price=Decimal("1000"),  # dev≈+7.07%(near_high3〜overheat10の間)
+    )
+    assert result.price_vs_ma20_component is not None
+    assert result.price_vs_ma20_component <= 0.0
+
+
 # ===== volume成分(28-30) =====
 
 
@@ -371,29 +401,102 @@ def test_volume_extreme_surge_alone_is_not_rewarded() -> None:
     assert result.volume_component == -50.0
 
 
-# ===== overheat_penalty成分(31-33) =====
+# ===== overheat penalty modifier(コードレビュー対応v3、31-38) =====
 
 
-def test_overheat_penalty_unavailable_when_input_missing() -> None:
-    result = _evaluate(
-        _momentum(five_day_return_pct=None, rsi=85.0, drawdown_from_recent_high_pct=-1.0)
+def _full_base_momentum(**overrides: object) -> MomentumSnapshot:
+    """7 base成分(trend/ma20/ma60/rsi/macd/drawdown/volume)が全て揃った
+    momentum(overheatは条件を満たさない中立値)。"""
+    base = dict(
+        ma20=Decimal("990"),
+        ma60=Decimal("950"),
+        ma20_slope_pct=5.0,
+        rsi=55.0,
+        macd=_macd("0.5"),
+        drawdown_from_recent_high_pct=-5.0,
+        volume_ratio=1.5,
     )
-    assert result.overheat_penalty_component is None
+    base.update(overrides)
+    return _momentum(**base)  # type: ignore[arg-type]
+
+
+def test_overheat_unavailable_does_not_raise_score_above_base() -> None:
+    """過熱情報欠損時、final_score(score)はbase_scoreと一致する(欠損に
+    よってスコアが有利になることを禁止する、コードレビュー対応v3の最重要
+    指摘)。"""
+    result = _evaluate(
+        _full_base_momentum(five_day_return_pct=None), current_price=Decimal("1000")
+    )
+    assert result.base_score is not None
+    assert result.score == result.base_score
+    assert result.overheat_penalty_applied is None
+    assert result.overheat_penalty_points is None
     assert "OVERHEAT_PENALTY_UNAVAILABLE" in result.reason_codes
 
 
-def test_overheat_penalty_triggers_when_all_conditions_met() -> None:
+def test_overheat_not_triggered_final_equals_base() -> None:
     result = _evaluate(
-        _momentum(five_day_return_pct=18.0, rsi=85.0, drawdown_from_recent_high_pct=-0.5)
+        _full_base_momentum(five_day_return_pct=3.0), current_price=Decimal("1000")
     )
-    assert result.overheat_penalty_component == -100.0
+    assert result.overheat_penalty_applied is False
+    assert result.overheat_penalty_points == 0.0
+    assert result.score == result.base_score
 
 
-def test_overheat_penalty_does_not_trigger_when_not_all_conditions_met() -> None:
+def test_overheat_triggered_final_lower_than_base() -> None:
     result = _evaluate(
-        _momentum(five_day_return_pct=3.0, rsi=85.0, drawdown_from_recent_high_pct=-0.5)
+        _full_base_momentum(
+            rsi=85.0, drawdown_from_recent_high_pct=-0.5, five_day_return_pct=18.0
+        ),
+        current_price=Decimal("1000"),
     )
-    assert result.overheat_penalty_component == 0.0
+    assert result.overheat_penalty_applied is True
+    assert result.overheat_penalty_points == _CONFIG.overheat_penalty_points
+    assert result.base_score is not None
+    assert result.score is not None
+    assert result.score < result.base_score
+    assert result.score == pytest.approx(
+        max(-100.0, result.base_score - _CONFIG.overheat_penalty_points)
+    )
+
+
+def test_overheat_penalty_result_is_clamped_to_score_range() -> None:
+    result = _evaluate(
+        _momentum(
+            ma20=Decimal("1050"),
+            ma60=Decimal("1100"),
+            ma20_slope_pct=-10.0,
+            rsi=85.0,
+            drawdown_from_recent_high_pct=-0.5,
+            five_day_return_pct=18.0,
+        ),
+        current_price=Decimal("1000"),
+    )
+    assert result.score is not None
+    assert -100.0 <= result.score <= 100.0
+
+
+def test_confidence_capped_at_medium_when_overheat_unavailable() -> None:
+    """過熱判定が不能な場合、coverageがHIGH相当でもconfidenceはHIGHへ
+    到達しない(コードレビュー対応v3)。"""
+    result = _evaluate(
+        _full_base_momentum(five_day_return_pct=None), current_price=Decimal("1000")
+    )
+    assert result.coverage == 1.0  # 7 base成分は全て揃っている
+    assert result.confidence == ConfidenceLevel.MEDIUM
+
+
+def test_confidence_reaches_high_when_overheat_evaluable_and_not_triggered() -> None:
+    result = _evaluate(
+        _full_base_momentum(five_day_return_pct=3.0), current_price=Decimal("1000")
+    )
+    assert result.coverage == 1.0
+    assert result.confidence == ConfidenceLevel.HIGH
+
+
+def test_price_history_misaligned_reason_code_recorded() -> None:
+    result = _evaluate(_momentum(rsi=50.0, price_history_aligned=False))
+    assert "PRICE_HISTORY_NOT_ALIGNED_WITH_CURRENT_PRICE" in result.reason_codes
 
 
 # ===== TOPIX/セクター相対強度の非影響(34-35) =====
@@ -415,8 +518,8 @@ def test_sector_relative_strength_does_not_affect_score() -> None:
 
 
 def test_min_coverage_gate_returns_not_evaluated() -> None:
-    """rsiのみ利用可能(coverage=1.0/7.0≈0.14)はmin_coverage_required(0.3)未満
-    のためNOT_EVALUATED。"""
+    """rsiのみ利用可能(coverage=rsi_weight/7成分合計weight)はmin_coverage_
+    required(0.3)未満のためNOT_EVALUATED。"""
     result = _evaluate(_momentum(trend_evaluable=False, rsi=50.0))
     assert result.state == TimingScoreEvaluationState.NOT_EVALUATED
     assert result.score is None
@@ -624,5 +727,16 @@ def test_config_rejects_zero_weight_sum() -> None:
             macd_weight=0.0,
             drawdown_weight=0.0,
             volume_weight=0.0,
-            overheat_penalty_weight=0.0,
         )
+
+
+def test_config_rejects_equal_drawdown_boundaries() -> None:
+    """drawdown区分境界は同値を許容しない(near_high > pullback > neutral、
+    コードレビュー対応v3で厳格化)。"""
+    with pytest.raises(ValidationError):
+        _config(drawdown_near_high_pct=-2.0, drawdown_pullback_pct=-2.0)
+
+
+def test_config_rejects_non_positive_overheat_penalty_points() -> None:
+    with pytest.raises(ValidationError):
+        _config(overheat_penalty_points=0.0)
