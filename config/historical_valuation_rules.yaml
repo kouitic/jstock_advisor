@@ -8,7 +8,7 @@
 
 # アルゴリズム自体(percentile定義・品質フィルタ・coverage/confidence計算式)の
 # バージョン。計算方式を変更した場合はここを更新する。
-model_version: "historical_valuation_v2"
+model_version: "historical_valuation_v3"
 
 # PER/PBRそれぞれについて、この点数以上の有効な過去データ(0より大きく、
 # 現在値とbasisが一致する値)が無い場合は、その指標をスコア対象から除外する

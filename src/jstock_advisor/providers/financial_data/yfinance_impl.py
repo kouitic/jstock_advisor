@@ -394,6 +394,15 @@ class YFinanceFinancialDataProvider:
                     pbr=pbr,
                     per_basis=ValuationBasis.TRAILING,
                     pbr_basis=ValuationBasis.TRAILING,
+                    # look-ahead bias防止(コードレビュー対応): yfinanceからは実際の
+                    # 決算開示日時を取得できないため、少なくとも「この時点では取得
+                    # できていた」ことが保証できるsource.fetched_atを保守的な
+                    # available_atとして使う(period_end(決算期末日)は使わない。
+                    # 過去のバックテストではこの値によりevaluation_atより後の
+                    # フェッチデータは使用不可となり、NOT_EVALUATEDとなりうる)。
+                    available_at=source.fetched_at,
+                    # BPSは常に現在の発行済株式数で近似しているため、恒常的に近似扱い。
+                    pbr_is_approximate=True,
                     source=source,
                 )
             )

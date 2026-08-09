@@ -45,6 +45,11 @@ class HistoricalValuationResult(ImmutableSnapshot):
     pbr_data_count_raw: int = 0
     pbr_data_count_used: int = 0
 
+    # PBR算出に使った過去データに株式数近似(HistoricalValuation.pbr_is_approximate)
+    # が1件でも含まれ、かつPBRコンポーネントが実際にスコアへ使われた場合True
+    # (コードレビュー対応)。この場合confidenceはHIGHへ到達しない。
+    pbr_is_approximate: bool = False
+
     # データ品質フィルタで除外した理由コード群(重複なし)。
     # 例: "BASIS_MISMATCH_EXCLUDED", "FUTURE_DATE_EXCLUDED", "OUTLIER_EXCLUDED"。
     excluded_data_reasons: tuple[str, ...] = ()

@@ -112,6 +112,7 @@ def _historical_per_only(
             bps=None,
             per=per_median,
             pbr=pbr_median,
+            available_at=_SOURCE.fetched_at,
             source=_SOURCE,
         )
         for i in range(1, count + 1)
