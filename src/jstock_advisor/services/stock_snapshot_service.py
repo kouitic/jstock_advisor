@@ -374,7 +374,7 @@ def build_stock_snapshot(
     # 判定精度向上機能Phase B第二弾: Timing Score(Shadow計測)。既に計算済みの
     # momentum_snapshotを基に算出する派生値であり、既存のBUY/保有/売却/
     # ProfitTaking判定・LINE通知には一切影響しない。
-    timing = evaluate_timing_score(momentum_snapshot, now, config.timing_score)
+    timing = evaluate_timing_score(momentum_snapshot, current_price, now, config.timing_score)
 
     snapshot = StockSnapshot(
         stock_code=stock_code,

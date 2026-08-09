@@ -358,6 +358,7 @@ def test_recommended_limit_price_is_none_when_only_non_price_axes_trigger() -> N
     # 2条件でFULLへ到達した場合、無関係な指値候補を捏造せずNone(算出不能)とする。
     momentum = MomentumSnapshot(
         trend_classification=TrendClassification.STRONG_DOWNTREND,
+        trend_evaluable=True,
         confidence=ConfidenceLevel.MEDIUM,
     )
     result = evaluate_profit_taking(
@@ -534,7 +535,9 @@ def test_uptrend_downgrades_fundamental_action_by_one_level() -> None:
     # ここでは適正価格と無関係な強い条件(投資前提が崩れた)でFULLへ到達させ、
     # 緩和自体の1段階ダウングレードのみを検証する。
     momentum = MomentumSnapshot(
-        trend_classification=TrendClassification.UPTREND, confidence=ConfidenceLevel.MEDIUM
+        trend_classification=TrendClassification.UPTREND,
+        trend_evaluable=True,
+        confidence=ConfidenceLevel.MEDIUM,
     )
     result = evaluate_profit_taking(
         current_price=Decimal("1600"),
@@ -563,7 +566,9 @@ def test_uptrend_does_not_override_confirmed_hard_overvaluation() -> None:
     # 上昇トレンドによる判定緩和は禁止する(トレンドだけで割高評価を無効化しない)。
 
     momentum = MomentumSnapshot(
-        trend_classification=TrendClassification.STRONG_UPTREND, confidence=ConfidenceLevel.HIGH
+        trend_classification=TrendClassification.STRONG_UPTREND,
+        trend_evaluable=True,
+        confidence=ConfidenceLevel.HIGH,
     )
     fair_value_range = FairValueRange(
         bear=Decimal("1100"),
@@ -605,6 +610,7 @@ def test_uptrend_does_not_override_confirmed_hard_overvaluation() -> None:
 def test_trailing_stop_reference_price_surfaced_from_momentum() -> None:
     momentum = MomentumSnapshot(
         trend_classification=TrendClassification.NEUTRAL,
+        trend_evaluable=True,
         confidence=ConfidenceLevel.MEDIUM,
         trailing_stop_reference_price=Decimal("1400"),
     )

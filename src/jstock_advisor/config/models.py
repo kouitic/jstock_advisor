@@ -517,29 +517,84 @@ class TimingScoreCategoryThresholds(StrictModel):
                 "category_thresholdsはstrong_tailwind > tailwind > headwind > "
                 "strong_headwindの順である必要があります"
             )
+        if not (self.strong_headwind >= -100 and self.strong_tailwind <= 100):
+            raise ValueError(
+                "category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります"
+            )
         return self
 
 
 class TimingScoreRulesConfig(StrictModel):
-    # アルゴリズム自体(成分の重み・スケール変換・coverage/confidence計算式)の
+    """Timing Score v2(判定精度向上機能Phase B第二弾、コードレビュー対応で
+    「モメンタムの強さ」から「エントリータイミングの質」へ再設計)の設定。
+
+    trend_quality/price_vs_ma20/price_vs_ma60/rsi/macd/drawdown/volume/
+    overheat_penaltyの8成分を加重平均する。RSIはtrend_quality算出には
+    一切使わない(TrendClassificationのSTRONG判定にRSIが使われているため、
+    trend_quality自体はcurrent_price/ma20/ma60/ma20_slope_pctのみから独立算出し、
+    RSIの二重評価を構造的に防ぐ)。
+    """
+
+    # アルゴリズム自体(成分の定義・区分境界・coverage/confidence計算式)の
     # バージョン。計算方式を変更した場合はここを更新する。
     model_version: str
-    # 各成分(trend/rsi/macd/topix相対強度/sector相対強度/drawdown)の加重平均に
-    # 使う重み。利用不可な成分は0扱いとし、利用可能な成分の重みだけで正規化する。
-    trend_weight: float
+
+    # 各成分の加重平均に使う重み。利用不可な成分はcoverageの分母からも除外する
+    # (0点として加算しない)。
+    trend_quality_weight: float
+    price_vs_ma20_weight: float
+    price_vs_ma60_weight: float
     rsi_weight: float
     macd_weight: float
-    topix_relative_strength_weight: float
-    sector_relative_strength_weight: float
     drawdown_weight: float
-    # relative_strength_vs_topix_pct/vs_sector_pctを-100〜+100へ換算する際の
-    # フルスケール(この%ポイント差でスコア±100に達する)。
-    relative_strength_full_scale_pct: float
-    # drawdown_from_recent_high_pctを-100〜+100へ換算する際のフルスケール。
-    drawdown_full_scale_pct: float
-    # coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする
-    # (trend成分は常に利用可能なため、他の成分が軒並み欠損していても
-    # スコアが出てしまうことを防ぐ最小データ量ゲート)。
+    volume_weight: float
+    overheat_penalty_weight: float
+
+    # trend_quality: ma20_slope_pctを-100〜+100へ換算する際のフルスケール
+    # (この%でスコア±100に達する)。
+    trend_slope_full_scale_pct: float
+
+    # RSI: 過熱・エントリー適性のみを見る段階評価の区分境界(昇順)。
+    # RSIが高いほど加点、という単調評価は採用しない(過熱を明確にペナルティ化する)。
+    rsi_oversold_boundary: float
+    rsi_neutral_boundary: float
+    rsi_sweet_spot_boundary: float
+    rsi_caution_boundary: float
+    rsi_overheat_boundary: float
+
+    # drawdown_from_recent_high_pct(0以下)の区分境界。適度な押し目区分の
+    # 正のスコアは、trend_quality_componentが0以下の場合は0へキャップされる
+    # (「高値から下がった」だけを理由に押し目扱いしない)。
+    drawdown_near_high_pct: float
+    drawdown_pullback_pct: float
+    drawdown_neutral_pct: float
+
+    # MA20/MA60からのsigned乖離(%)の区分境界(符号付き、昇順)。abs()による
+    # 対称評価は採用しない(MAより上/下は意味が異なるため)。適正位置区分の
+    # 正のスコアはtrend_quality_componentが0以下の場合は0へキャップされる。
+    ma20_breakdown_pct: float
+    ma20_pullback_low_pct: float
+    ma20_near_high_pct: float
+    ma20_overheat_pct: float
+    ma60_breakdown_pct: float
+    ma60_pullback_low_pct: float
+    ma60_near_high_pct: float
+    ma60_overheat_pct: float
+
+    # volume_ratio(短期/長期平均出来高比)の区分境界。単純に出来高が多いほど
+    # 加点する設計は採用しない。
+    volume_low_threshold: float
+    volume_moderate_low: float
+    volume_moderate_high: float
+    volume_extreme_threshold: float
+
+    # 短期急騰・過熱の複合ペナルティ条件(5日リターン・RSI・drawdownの3条件が
+    # すべて成立した場合のみ発火)。
+    overheat_five_day_return_pct_threshold: float
+    overheat_rsi_threshold: float
+    overheat_drawdown_pct_threshold: float
+
+    # coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする。
     min_coverage_required: float
     coverage_high_threshold: float
     coverage_medium_threshold: float
@@ -548,26 +603,92 @@ class TimingScoreRulesConfig(StrictModel):
     @model_validator(mode="after")
     def _check_values(self) -> TimingScoreRulesConfig:
         weights = (
-            self.trend_weight,
+            self.trend_quality_weight,
+            self.price_vs_ma20_weight,
+            self.price_vs_ma60_weight,
             self.rsi_weight,
             self.macd_weight,
-            self.topix_relative_strength_weight,
-            self.sector_relative_strength_weight,
             self.drawdown_weight,
+            self.volume_weight,
+            self.overheat_penalty_weight,
         )
         if any(w < 0 for w in weights):
             raise ValueError("各成分の重みは0以上である必要があります")
         if sum(weights) <= 0:
             raise ValueError("各成分の重みの合計は0より大きい必要があります")
-        if self.relative_strength_full_scale_pct <= 0:
-            raise ValueError("relative_strength_full_scale_pctは正の値である必要があります")
-        if self.drawdown_full_scale_pct <= 0:
-            raise ValueError("drawdown_full_scale_pctは正の値である必要があります")
+        if self.trend_slope_full_scale_pct <= 0:
+            raise ValueError("trend_slope_full_scale_pctは正の値である必要があります")
+
+        if not (
+            0 <= self.rsi_oversold_boundary < self.rsi_neutral_boundary
+            < self.rsi_sweet_spot_boundary < self.rsi_caution_boundary
+            < self.rsi_overheat_boundary <= 100
+        ):
+            raise ValueError(
+                "RSI区分境界は0 <= oversold < neutral < sweet_spot < caution "
+                "< overheat <= 100の順である必要があります"
+            )
+
+        if self.drawdown_near_high_pct > 0:
+            raise ValueError("drawdown_near_high_pctは0以下である必要があります")
+        if not (
+            self.drawdown_near_high_pct >= self.drawdown_pullback_pct
+            >= self.drawdown_neutral_pct
+        ):
+            raise ValueError(
+                "drawdown区分境界はnear_high >= pullback >= neutralの順である必要があります"
+            )
+
+        if not (
+            self.ma20_breakdown_pct < self.ma20_pullback_low_pct
+            < self.ma20_near_high_pct < self.ma20_overheat_pct
+        ):
+            raise ValueError(
+                "ma20区分境界はbreakdown < pullback_low < near_high < overheatの"
+                "順である必要があります"
+            )
+        if not (
+            self.ma60_breakdown_pct < self.ma60_pullback_low_pct
+            < self.ma60_near_high_pct < self.ma60_overheat_pct
+        ):
+            raise ValueError(
+                "ma60区分境界はbreakdown < pullback_low < near_high < overheatの"
+                "順である必要があります"
+            )
+
+        if not (
+            0 <= self.volume_low_threshold < self.volume_moderate_low
+            <= self.volume_moderate_high < self.volume_extreme_threshold
+        ):
+            raise ValueError(
+                "volume区分境界は0 <= low < moderate_low <= moderate_high < extremeの"
+                "順である必要があります"
+            )
+
+        if self.overheat_five_day_return_pct_threshold <= 0:
+            raise ValueError(
+                "overheat_five_day_return_pct_thresholdは正の値である必要があります"
+            )
+        if not (0 <= self.overheat_rsi_threshold <= 100):
+            raise ValueError("overheat_rsi_thresholdは0〜100の範囲である必要があります")
+        if self.overheat_drawdown_pct_threshold > 0:
+            raise ValueError("overheat_drawdown_pct_thresholdは0以下である必要があります")
+
         if not (0 < self.min_coverage_required <= 1):
             raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
-        if self.coverage_medium_threshold >= self.coverage_high_threshold:
+        if not (0 <= self.coverage_medium_threshold <= 1):
+            raise ValueError("coverage_medium_thresholdは0〜1の範囲である必要があります")
+        if not (0 <= self.coverage_high_threshold <= 1):
+            raise ValueError("coverage_high_thresholdは0〜1の範囲である必要があります")
+        if not (
+            self.min_coverage_required <= self.coverage_medium_threshold
+            < self.coverage_high_threshold <= 1
+        ):
             raise ValueError(
-                "coverage_medium_thresholdはcoverage_high_threshold未満である必要があります"
+                "min_coverage_required <= coverage_medium_threshold < "
+                "coverage_high_threshold <= 1である必要があります"
+                "(coverage∈[min_coverage_required, coverage_medium_threshold)は"
+                "意図的にLOW confidence帯として許容する)"
             )
         return self
 

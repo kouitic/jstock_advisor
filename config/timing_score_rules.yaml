@@ -1,35 +1,78 @@
-# 判定精度向上機能Phase B第二弾(Timing Score)の設定。
-# 既存のMomentumSnapshot(domain/signals/momentum.py、trend/RSI/MACD/相対強度/
-# 直近高値からの下落率)を基に、現在が技術的モメンタムの観点から良いタイミング
-# かどうかを-100(逆風)〜+100(追い風)の点数で計算する(自己過去比較ではなく
-# 現在時点の技術指標の合成)。DecisionSnapshot.timing_score等(Shadow計測専用)
-# へのみ記録され、BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
+# Timing Score v2(判定精度向上機能Phase B第二弾)の設定。
+#
+# 「モメンタムが強いほど高得点」ではなく、「良いトレンドを維持しながら、
+# 過熱しておらず、エントリーしやすい価格位置にあるか」を-100(逆風)〜
+# +100(追い風)で評価する。DecisionSnapshot.timing_score等(Shadow計測専用)へ
+# のみ記録され、BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
 # LINE通知など既存の判定ロジックには一切影響しない。
+#
+# コードレビュー対応: RSIはtrend_quality成分の算出には使わない(既存の
+# classify_trend()はSTRONG_UPTREND/STRONG_DOWNTREND判定にRSIを使っているため、
+# trend_quality成分はcurrent_price/ma20/ma60/ma20_slope_pctのみから独立算出し、
+# RSIの二重評価を構造的に防ぐ)。
 
-# アルゴリズム自体(成分の重み・スケール変換・coverage/confidence計算式)の
-# バージョン。計算方式を変更した場合はここを更新する。
-model_version: "timing_score_v1"
+model_version: "timing_score_v2"
 
-# 各成分の加重平均に使う重み。利用不可な成分は0扱いとし、利用可能な成分の
-# 重みだけで正規化する。
-trend_weight: 1.0
+# 各成分の加重平均に使う重み。trend_quality/price_vs_ma20/price_vs_ma60/rsi/
+# drawdownを主要成分、macd/volumeを補助成分、overheat_penaltyは過熱時のみ
+# 効くペナルティ専用成分として重みを設定する。
+trend_quality_weight: 1.5
+price_vs_ma20_weight: 1.0
+price_vs_ma60_weight: 0.75
 rsi_weight: 1.0
-macd_weight: 1.0
-topix_relative_strength_weight: 1.0
-sector_relative_strength_weight: 1.0
+macd_weight: 0.5
 drawdown_weight: 1.0
+volume_weight: 0.5
+overheat_penalty_weight: 0.75
 
-# relative_strength_vs_topix_pct/vs_sector_pctを-100〜+100へ換算する際の
-# フルスケール(この%ポイント差でスコア±100に達する)。
-relative_strength_full_scale_pct: 15.0
+# trend_quality: ma20_slope_pctをスコア化する際のフルスケール
+# (この変化率(%)でスコア±100に達する)。
+trend_slope_full_scale_pct: 10.0
 
-# drawdown_from_recent_high_pctを-100〜+100へ換算する際のフルスケール
-# (直近高値からの下落率がこの%に達するとスコアが中立点0まで下がる)。
-drawdown_full_scale_pct: 20.0
+# RSI: 過熱・エントリー適性のみを見る段階評価の区分境界。RSIが高いほど
+# 加点する単調評価は採用しない(45〜60を「高評価」のピークとし、70超は
+# 過熱として明確にペナルティ化する)。
+rsi_oversold_boundary: 30.0
+rsi_neutral_boundary: 45.0
+rsi_sweet_spot_boundary: 60.0
+rsi_caution_boundary: 70.0
+rsi_overheat_boundary: 80.0
+
+# drawdown_from_recent_high_pct(直近高値からの下落率、0以下)の区分境界。
+# 「適度な押し目」区分の正のスコアは、trend_quality成分が0以下の場合は
+# 0へキャップされる(下降トレンド中の下落を押し目と呼ばない)。
+drawdown_near_high_pct: -2.0
+drawdown_pullback_pct: -8.0
+drawdown_neutral_pct: -15.0
+
+# MA20/MA60からのsigned乖離(%)の区分境界(符号付き)。MAより上/下は
+# 意味が異なるためabs()による対称評価は採用しない。「適正位置」区分の
+# 正のスコアはtrend_quality成分が0以下の場合は0へキャップされる。
+ma20_breakdown_pct: -15.0
+ma20_pullback_low_pct: -8.0
+ma20_near_high_pct: 3.0
+ma20_overheat_pct: 10.0
+ma60_breakdown_pct: -20.0
+ma60_pullback_low_pct: -10.0
+ma60_near_high_pct: 5.0
+ma60_overheat_pct: 15.0
+
+# volume_ratio(短期/長期平均出来高比)の区分境界。単純に出来高が多いほど
+# 加点する設計は採用しない。
+volume_low_threshold: 0.7
+volume_moderate_low: 1.2
+volume_moderate_high: 2.5
+volume_extreme_threshold: 3.0
+
+# 短期急騰・過熱の複合ペナルティ条件。5日リターン・RSI・drawdownの3条件が
+# すべて成立した場合のみ発火する。
+overheat_five_day_return_pct_threshold: 15.0
+overheat_rsi_threshold: 80.0
+overheat_drawdown_pct_threshold: -2.0
 
 # coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする
-# (trend成分は常に利用可能なため、他の成分が軒並み欠損していてもスコアが
-# 出てしまうことを防ぐ最小データ量ゲート)。
+# (trend_quality成分はデータ不足時に除外されるため、他の成分が軒並み欠損して
+# いてもスコアが出てしまうことを防ぐ最小データ量ゲート)。
 min_coverage_required: 0.3
 coverage_high_threshold: 0.8
 coverage_medium_threshold: 0.4

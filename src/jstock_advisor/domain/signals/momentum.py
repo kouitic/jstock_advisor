@@ -119,6 +119,19 @@ def compute_macd(
     )
 
 
+def compute_n_day_return_pct(bars: list[PriceBar], n: int) -> float | None:
+    """直近n営業日リターン(%)。bars[-1]を最新、bars[-(n+1)]をn営業日前の終値と
+    する(barsが日付昇順であることが前提。compute_moving_average等、本モジュールの
+    既存関数群と同じ前提を踏襲する)。n+1本に満たない場合はNone。
+
+    Timing Score(判定精度向上機能Phase B第二弾)専用。既存barsのみから算出し、
+    新規Provider呼び出しは行わない。
+    """
+    if len(bars) < n + 1:
+        return None
+    return float(bars[-1].close / bars[-(n + 1)].close - 1) * 100
+
+
 def compute_relative_strength_pct(
     bars: list[PriceBar], benchmark_bars: list[PriceBar], window_days: int
 ) -> float | None:
@@ -208,6 +221,9 @@ def compute_momentum_snapshot(
         rsi,
         config.trend_classification.strong_trend_rsi_threshold,
     )
+    trend_evaluable = ma20 is not None and ma60 is not None and ma20_slope_pct is not None
+    one_day_return_pct = compute_n_day_return_pct(bars, 1)
+    five_day_return_pct = compute_n_day_return_pct(bars, 5)
     available_signals = sum(
         1 for v in (ma20, ma60, ma120, ma200, rsi, macd) if v is not None
     )
@@ -235,5 +251,8 @@ def compute_momentum_snapshot(
         relative_strength_vs_sector_pct=relative_strength_sector,
         trailing_stop_reference_price=trailing_stop,
         trend_classification=trend,
+        trend_evaluable=trend_evaluable,
+        one_day_return_pct=one_day_return_pct,
+        five_day_return_pct=five_day_return_pct,
         confidence=confidence,
     )
