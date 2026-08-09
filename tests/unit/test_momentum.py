@@ -1,6 +1,8 @@
 import datetime as dt
 from decimal import Decimal
 
+import pytest
+
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import TrendClassification
 from jstock_advisor.domain.signals.momentum import (
@@ -10,6 +12,7 @@ from jstock_advisor.domain.signals.momentum import (
     compute_macd,
     compute_momentum_snapshot,
     compute_moving_average,
+    compute_n_day_return_pct,
     compute_relative_strength_pct,
     compute_rsi,
     compute_trailing_stop_reference_price,
@@ -158,3 +161,82 @@ def test_compute_momentum_snapshot_end_to_end() -> None:
         TrendClassification.UPTREND,
         TrendClassification.STRONG_UPTREND,
     )
+
+
+# ===== compute_n_day_return_pct(コードレビュー対応: Timing Score v3、直接テスト) =====
+
+
+def test_compute_n_day_return_pct_five_day_uses_sixth_from_last_bar() -> None:
+    bars = _bars([100, 102, 104, 106, 108, 110])  # 6本
+    result = compute_n_day_return_pct(bars, 5)
+    assert result == pytest.approx((110 / 100 - 1) * 100)
+
+
+def test_compute_n_day_return_pct_returns_none_when_insufficient_bars_for_n() -> None:
+    bars = _bars([100, 102, 104, 106, 108])  # 5本(n=5にはn+1=6本必要)
+    assert compute_n_day_return_pct(bars, 5) is None
+
+
+def test_compute_n_day_return_pct_one_day_uses_second_from_last_bar() -> None:
+    bars = _bars([100, 110])  # 2本
+    result = compute_n_day_return_pct(bars, 1)
+    assert result == pytest.approx((110 / 100 - 1) * 100)
+
+
+def test_compute_n_day_return_pct_returns_none_with_single_bar() -> None:
+    bars = _bars([100])  # 1本(n=1にはn+1=2本必要)
+    assert compute_n_day_return_pct(bars, 1) is None
+
+
+def test_compute_n_day_return_pct_negative_for_declining_prices() -> None:
+    bars = _bars([100, 90])
+    result = compute_n_day_return_pct(bars, 1)
+    assert result is not None
+    assert result < 0
+
+
+# ===== current_priceとbarsの時点整合性(コードレビュー対応: Timing Score v3) =====
+
+
+def test_compute_momentum_snapshot_aligned_dates_computes_short_term_returns() -> None:
+    closes = [100 + i for i in range(10)]
+    bars = _bars(closes)
+    as_of_date = bars[-1].date  # bars最新日と一致
+    snapshot = compute_momentum_snapshot(bars, Decimal(str(closes[-1])), as_of_date, _CONFIG)
+    assert snapshot.price_history_aligned is True
+    assert snapshot.one_day_return_pct is not None
+    assert snapshot.five_day_return_pct is not None
+
+
+def test_compute_momentum_snapshot_history_behind_current_price_suppresses_returns() -> None:
+    """current_priceのas-of日付がbars最新日より後(historyが古い)の場合、
+    補完せずone_day/five_day returnをNoneのままにする。"""
+    closes = [100 + i for i in range(10)]
+    bars = _bars(closes)
+    as_of_date = bars[-1].date + dt.timedelta(days=1)
+    snapshot = compute_momentum_snapshot(bars, Decimal(str(closes[-1])), as_of_date, _CONFIG)
+    assert snapshot.price_history_aligned is False
+    assert snapshot.one_day_return_pct is None
+    assert snapshot.five_day_return_pct is None
+
+
+def test_compute_momentum_snapshot_history_ahead_of_current_price_suppresses_returns() -> None:
+    """bars最新日がcurrent_priceのas-of日付より後(データ不整合)の場合も、
+    短期要素を利用しない。"""
+    closes = [100 + i for i in range(10)]
+    bars = _bars(closes)
+    as_of_date = bars[-1].date - dt.timedelta(days=1)
+    snapshot = compute_momentum_snapshot(bars, Decimal(str(closes[-1])), as_of_date, _CONFIG)
+    assert snapshot.price_history_aligned is False
+    assert snapshot.one_day_return_pct is None
+    assert snapshot.five_day_return_pct is None
+
+
+def test_compute_momentum_snapshot_empty_bars_is_not_treated_as_misaligned() -> None:
+    """barsが空(データ取得不能)の場合は「不整合」ではなく単なるデータ不足
+    として扱い、price_history_alignedはTrueのまま(one_day/five_day returnは
+    既存どおりNone)。"""
+    snapshot = compute_momentum_snapshot([], Decimal("1000"), dt.date(2026, 1, 1), _CONFIG)
+    assert snapshot.price_history_aligned is True
+    assert snapshot.one_day_return_pct is None
+    assert snapshot.five_day_return_pct is None

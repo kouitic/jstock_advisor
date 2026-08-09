@@ -40,3 +40,9 @@ class MomentumSnapshot(ImmutableSnapshot):
     # Timing Score用(既存PriceBarのみから算出、新規Provider呼び出しは行わない)。
     one_day_return_pct: float | None = None
     five_day_return_pct: float | None = None
+    # Timing Score(コードレビュー対応v3): current_price(get_latest_price()由来)と
+    # bars(get_price_history()由来)は別Provider呼び出しであり、時点が一致する
+    # 保証がコード上に無い。bars[-1].dateとcurrent_priceのas-of日付が一致しない
+    # 場合はFalse(この場合one_day_return_pct/five_day_return_pctは補完せずNoneの
+    # まま。barsが空でそもそも比較対象が無い場合はTrueのまま)。
+    price_history_aligned: bool

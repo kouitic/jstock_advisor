@@ -330,7 +330,11 @@ def build_stock_snapshot(
     momentum_snapshot = compute_momentum_snapshot(
         bars,
         current_price,
-        now.date(),
+        # コードレビュー対応(Timing Score v3): current_priceの実際のas-of日付
+        # (snap.as_of_date)を渡す。get_latest_price()由来のsnapとget_price_history()
+        # 由来のbarsは別Provider呼び出しであり時点一致の保証が無いため、
+        # compute_momentum_snapshot()内でbars[-1].dateとの整合性を確認する。
+        snap.as_of_date,
         config.momentum,
         benchmark_bars=topix_bars or None,
         sector_bars=sector_bars or None,

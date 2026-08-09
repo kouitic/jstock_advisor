@@ -6,11 +6,18 @@
 あるか」を評価する。trend_qualityはRSIを使わず(既存のトレンド分類は
 STRONG判定にRSIを使うため、二重評価を避けるためTiming Score専用に
 current_price/ma20/ma60/ma20_slope_pctのみから独立算出する)、rsi_component
-は過熱・エントリー適性のみを見る。price_vs_ma20/ma60・drawdownの「適度な
-押し目」評価はtrend_qualityが0以下の場合0へキャップされ、下降トレンド中の
-下落を押し目として評価しない。TOPIX/セクター相対強度は将来のMarket/Sector
-Environment Scoreとの二重評価を避けるためTiming Scoreの算出対象から除外する
-(MomentumSnapshot側のフィールド自体は温存)。
+は過熱・エントリー適性のみを見る。price_vs_ma20/ma60・drawdownの正のスコア
+区分は全てtrend_qualityが0以下の場合0以下へキャップされ、下降トレンド中の
+価格位置だけを理由に追い風点を与えない。TOPIX/セクター相対強度は将来の
+Market/Sector Environment Scoreとの二重評価を避けるためTiming Scoreの
+算出対象から除外する(MomentumSnapshot側のフィールド自体は温存)。
+
+コードレビュー対応(v3): 短期急騰・過熱ペナルティ(overheat)は、他7成分と
+同じ加重平均成分ではなく、base_score算出後に適用するmodifierとして分離した
+(過熱情報が欠損しているだけでスコアが底上げされる不整合を解消するため)。
+score(final_score)はbase_scoreからoverheat_penalty_pointsを差し引いた値。
+過熱判定が不能な場合、confidenceはHIGHへ到達しない(短期急騰を確認できない
+状態でエントリータイミングの信頼度を最高評価にしないため)。
 
 Historical Valuation Score(domain/entities/historical_valuation.py)と同じ
 設計: 単なる`float | None`ではなく、後から「なぜこの点数だったか」を
@@ -39,7 +46,8 @@ class TimingScoreResult(ImmutableSnapshot):
     confidence: ConfidenceLevel | None = None
     coverage: float = 0.0
 
-    # 成分別スコア(-100〜+100、算出不可の成分はNone)。
+    # base成分別スコア(-100〜+100、算出不可の成分はNone)。overheatはここに
+    # 含まれない(コードレビュー対応v3、下記base_score/overheat_*参照)。
     trend_quality_component: float | None = None
     price_vs_ma20_component: float | None = None
     price_vs_ma60_component: float | None = None
@@ -47,7 +55,16 @@ class TimingScoreResult(ImmutableSnapshot):
     macd_component: float | None = None
     drawdown_component: float | None = None
     volume_component: float | None = None
-    overheat_penalty_component: float | None = None
+
+    # コードレビュー対応(v3): overheat penaltyは通常の加重平均成分ではなく、
+    # base_score算出後に適用するmodifier。base_score=7成分(trend_quality/
+    # price_vs_ma20/price_vs_ma60/rsi/macd/drawdown/volume)の加重平均。
+    # score(final_score)=clamp(base_score - overheat_penalty_points)。
+    # overheat_penalty_applied: True=発動・False=評価可能だが不発動・
+    # None=評価不能(過熱情報欠損によりscoreが上がることはない)。
+    base_score: float | None = None
+    overheat_penalty_applied: bool | None = None
+    overheat_penalty_points: float | None = None
 
     # 評価全体に関する注記コード(例: "RSI_UNAVAILABLE")。
     reason_codes: tuple[str, ...] = ()

@@ -120,9 +120,19 @@ def compute_macd(
 
 
 def compute_n_day_return_pct(bars: list[PriceBar], n: int) -> float | None:
-    """直近n営業日リターン(%)。bars[-1]を最新、bars[-(n+1)]をn営業日前の終値と
-    する(barsが日付昇順であることが前提。compute_moving_average等、本モジュールの
-    既存関数群と同じ前提を踏襲する)。n+1本に満たない場合はNone。
+    """直近n営業日リターン(%)。
+
+    1営業日リターン(n=1) = 直近のhistorical close / 1本前のhistorical close - 1
+    5営業日リターン(n=5) = 直近のhistorical close / 5本前のhistorical close - 1
+
+    bars[-1]を最新のhistorical close、bars[-(n+1)]をn営業日前のhistorical close
+    とする(barsが日付昇順であることが前提。compute_moving_average等、本モジュール
+    の既存関数群と同じ前提を踏襲する)。算出にはn+1本が必要で、満たない場合はNone。
+
+    コードレビュー対応(v3): この関数自体はcurrent_price(ライブの最新値)との
+    時点整合性を一切保証しない(barsのみから算出する純粋な過去バー間の変化率)。
+    current_priceとbars[-1]が同一時点のデータかどうかの検証は、呼び出し側
+    (compute_momentum_snapshot())の責務とする。
 
     Timing Score(判定精度向上機能Phase B第二弾)専用。既存barsのみから算出し、
     新規Provider呼び出しは行わない。
@@ -183,6 +193,12 @@ def compute_momentum_snapshot(
     benchmark_bars: list[PriceBar] | None = None,
     sector_bars: list[PriceBar] | None = None,
 ) -> MomentumSnapshot:
+    """as_of_dateはcurrent_priceの実際のas-of日付(例: PriceSnapshot.as_of_date)。
+    current_priceとbars(いずれも別Provider呼び出し由来であり、時点が一致する
+    保証はコード上に無い。コードレビュー対応v3)の時点整合性を、bars[-1].dateと
+    as_of_dateの一致で確認する。一致しない場合、one_day_return_pct/
+    five_day_return_pctは補完せずNoneのまま(推測で同一時点とみなさない)。
+    """
     ma20 = compute_moving_average(bars, 20)
     ma60 = compute_moving_average(bars, 60)
     ma120 = compute_moving_average(bars, 120)
@@ -222,8 +238,12 @@ def compute_momentum_snapshot(
         config.trend_classification.strong_trend_rsi_threshold,
     )
     trend_evaluable = ma20 is not None and ma60 is not None and ma20_slope_pct is not None
-    one_day_return_pct = compute_n_day_return_pct(bars, 1)
-    five_day_return_pct = compute_n_day_return_pct(bars, 5)
+    # コードレビュー対応(v3): barsが空でない場合のみ「不整合」の判定対象となる
+    # (空の場合は単なるデータ不足であり、不整合ではない)。
+    price_history_misaligned = bool(bars) and bars[-1].date != as_of_date
+    price_history_aligned = not price_history_misaligned
+    one_day_return_pct = None if price_history_misaligned else compute_n_day_return_pct(bars, 1)
+    five_day_return_pct = None if price_history_misaligned else compute_n_day_return_pct(bars, 5)
     available_signals = sum(
         1 for v in (ma20, ma60, ma120, ma200, rsi, macd) if v is not None
     )
@@ -254,5 +274,6 @@ def compute_momentum_snapshot(
         trend_evaluable=trend_evaluable,
         one_day_return_pct=one_day_return_pct,
         five_day_return_pct=five_day_return_pct,
+        price_history_aligned=price_history_aligned,
         confidence=confidence,
     )
