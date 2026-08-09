@@ -12,6 +12,9 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
 from jstock_advisor.config.models import (
     HistoricalValuationCategoryThresholds,
     HistoricalValuationRulesConfig,
@@ -33,7 +36,7 @@ _SOURCE = DataSourceReference(provider="test", fetched_at=_NOW)
 
 def _config(**overrides: object) -> HistoricalValuationRulesConfig:
     defaults: dict[str, object] = dict(
-        model_version="historical_valuation_v3",
+        model_version="historical_valuation_v4",
         min_data_points_required=2,
         per_weight=0.5,
         pbr_weight=0.5,
@@ -578,6 +581,20 @@ def test_approximate_pbr_flag_recorded_in_result_and_reason_codes() -> None:
     )
     assert result.pbr_is_approximate is True
     assert "HISTORICAL_PBR_SHARE_COUNT_APPROXIMATED" in result.reason_codes
+
+
+def test_available_at_aware_utc_is_accepted() -> None:
+    _hv(per=Decimal("10"), available_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
+
+
+def test_available_at_aware_jst_is_accepted() -> None:
+    jst = dt.timezone(dt.timedelta(hours=9))
+    _hv(per=Decimal("10"), available_at=dt.datetime(2026, 1, 1, tzinfo=jst))
+
+
+def test_available_at_naive_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _hv(per=Decimal("10"), available_at=dt.datetime(2026, 1, 1))  # noqa: DTZ001
 
 
 def test_approximate_pbr_flag_has_no_effect_when_pbr_not_evaluated() -> None:

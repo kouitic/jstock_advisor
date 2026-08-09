@@ -6,7 +6,9 @@ from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.domain.signals.eps_normalization import normalize_eps
 from jstock_advisor.interfaces.types import HistoricalValuation
 
-_SOURCE = DataSourceReference(provider="yfinance", fetched_at=dt.datetime(2026, 1, 1))
+_SOURCE = DataSourceReference(
+    provider="yfinance", fetched_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+)
 
 
 def _point(year: int, eps: str) -> HistoricalValuation:

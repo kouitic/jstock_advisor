@@ -45,6 +45,12 @@ def _strip_corporate_suffix(name: str) -> str:
 
 _PROVIDER_NAME = "yfinance"
 _TICKER_SUFFIX = ".T"
+# Historical Valuation用の株価探索を許容する、決算期末日からの最大遡及日数
+# (コードレビュー対応: 非営業日の期末日でも直前営業日の終値を拾えるようにする
+# ための実装上の許容誤差。スコアの意味を左右する閾値ではなく、決算期末日と
+# 株価データの対応付けというProvider内部の技術的な仕様のため、config化せず
+# 定数として保持する)。
+_MAX_PRICE_LOOKBACK_DAYS = 14
 
 # yfinance(Yahoo! Finance)のquoteTypeからsecurity_typeへの対応。
 # J-REITはYahoo上でも"EQUITY"と分類されることが多く判別できないため、既知の限界とする。
@@ -378,7 +384,7 @@ class YFinanceFinancialDataProvider:
                 if equity is not None and shares_outstanding is not None and shares_outstanding > 0
                 else None
             )
-            price = self._nearest_price(price_history, period_end)
+            price = self._latest_price_on_or_before(price_history, period_end)
             per = price / eps if price is not None and eps is not None and eps > 0 else None
             pbr = price / bps if price is not None and bps is not None and bps > 0 else None
             if per is None and pbr is None:
@@ -409,23 +415,36 @@ class YFinanceFinancialDataProvider:
         return results
 
     @staticmethod
-    def _nearest_price(price_history: Any, target_date: dt.date) -> Decimal | None:
+    def _latest_price_on_or_before(price_history: Any, target_date: dt.date) -> Decimal | None:
+        """target_date以前(target_date当日を含む)の最新終値を返す。
+
+        コードレビュー対応(look-ahead bias防止): 旧実装(_nearest_price)は
+        target_dateとの絶対日数のみで最近傍のPriceBarを選んでいたため、
+        target_dateより後の株価(未来情報)が採用されうる不具合があった。
+        HistoricalValuation.date(決算期末日)と実際にPER/PBR算出へ使った
+        価格の時点を一致させるため、target_dateより後のPriceBarは候補から
+        除外し、target_date以前で最も新しい日付のみを採用する
+        (services/recommendation_evaluation_service.pyの
+        _latest_bar_on_or_before()と同じ設計思想)。非営業日の期末日は、
+        直前の営業日の終値が自然に採用される。target_date以前に有効な
+        価格が_MAX_PRICE_LOOKBACK_DAYS以内に無い場合はNone(未来側価格での
+        補完はしない)。
+        """
         if price_history is None or price_history.empty:
             return None
         best_price: Decimal | None = None
-        best_diff: int | None = None
+        best_date: dt.date | None = None
         for index, row in price_history.iterrows():
             index_date = index.date() if hasattr(index, "date") else None
-            if index_date is None:
+            if index_date is None or index_date > target_date:
                 continue
-            diff = abs((index_date - target_date).days)
-            if diff > 14:
+            if (target_date - index_date).days > _MAX_PRICE_LOOKBACK_DAYS:
                 continue
-            if best_diff is None or diff < best_diff:
+            if best_date is None or index_date > best_date:
                 close = _to_decimal(row.get("Close"))
                 if close is not None:
                     best_price = close
-                    best_diff = diff
+                    best_date = index_date
         return best_price
 
     def get_cashflow_decomposition(self, stock_code: str) -> CashflowDecomposition | None:
