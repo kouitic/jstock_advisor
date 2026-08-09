@@ -33,7 +33,7 @@ _SOURCE = DataSourceReference(provider="test", fetched_at=_NOW)
 
 def _config(**overrides: object) -> HistoricalValuationRulesConfig:
     defaults: dict[str, object] = dict(
-        model_version="historical_valuation_v2",
+        model_version="historical_valuation_v3",
         min_data_points_required=2,
         per_weight=0.5,
         pbr_weight=0.5,
@@ -65,6 +65,8 @@ def _hv(
     per_basis: ValuationBasis = ValuationBasis.TRAILING,
     pbr_basis: ValuationBasis = ValuationBasis.TRAILING,
     stock_code: str = _STOCK_CODE,
+    available_at: dt.datetime = _NOW,
+    pbr_is_approximate: bool = False,
 ) -> HistoricalValuation:
     return HistoricalValuation(
         stock_code=stock_code,
@@ -73,6 +75,8 @@ def _hv(
         pbr=pbr,
         per_basis=per_basis,
         pbr_basis=pbr_basis,
+        available_at=available_at,
+        pbr_is_approximate=pbr_is_approximate,
         source=_SOURCE,
     )
 
@@ -143,8 +147,11 @@ def test_percentile_below_historical_range_scores_positive_100() -> None:
 
 
 def test_percentile_above_historical_range_scores_negative_100() -> None:
+    # コードレビュー対応(第2回、現在値の絶対レンジチェック追加)で、レンジ外の
+    # current_per(旧テストの1000はper_absolute_max=500超過)は評価除外される
+    # ようになったため、レンジ内かつ過去レンジより高い値(450)を使う。
     hist = _per_series([Decimal("10"), Decimal("20"), Decimal("30"), Decimal("40")])
-    result = _evaluate(hist, current_per=Decimal("1000"))
+    result = _evaluate(hist, current_per=Decimal("450"))
     assert result.score == -100.0
 
 
@@ -378,3 +385,210 @@ def test_model_version_matches_config() -> None:
     hist = _per_series([Decimal("10"), Decimal("20")], start_year=2024)
     result = _evaluate(hist, current_per=Decimal("15"), config=_config(model_version="test_v99"))
     assert result.model_version == "test_v99"
+
+
+# ===== available_at(look-ahead bias防止、コードレビュー第2回対応、25-29) =====
+
+
+def test_available_at_after_evaluation_at_excludes_data() -> None:
+    """period_endが評価日より前でも、available_at(データが実際に利用可能に
+    なった日時)がevaluation_atより後なら使用しない(look-ahead bias防止)。"""
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31), available_at=_NOW),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31), available_at=_NOW),
+        _hv(
+            per=Decimal("30"),
+            date=dt.date(2020, 3, 31),  # period_endは評価日よりずっと前
+            available_at=_NOW + dt.timedelta(days=1),  # だがavailable_atは評価時点より後
+        ),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), evaluation_at=_NOW)
+    assert result.per_data_count_used == 2
+    assert "DATA_NOT_AVAILABLE_AT_EVALUATION_TIME_EXCLUDED" in result.excluded_data_reasons
+
+
+def test_available_at_equal_to_evaluation_at_is_usable() -> None:
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31), available_at=_NOW),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31), available_at=_NOW),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), evaluation_at=_NOW)
+    assert result.per_data_count_used == 2
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+
+
+def test_available_at_before_evaluation_at_is_usable() -> None:
+    hist = [
+        _hv(
+            per=Decimal("10"),
+            date=dt.date(2024, 3, 31),
+            available_at=_NOW - dt.timedelta(days=10),
+        ),
+        _hv(
+            per=Decimal("20"),
+            date=dt.date(2025, 3, 31),
+            available_at=_NOW - dt.timedelta(days=5),
+        ),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), evaluation_at=_NOW)
+    assert result.per_data_count_used == 2
+
+
+def test_available_at_filter_can_drop_below_minimum() -> None:
+    """available_atフィルタの結果、有効データがmin_data_points_required未満に
+    落ちる場合はNOT_EVALUATED(「未来情報で高精度に見える結果」より
+    「評価できない」ことを優先する)。"""
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31), available_at=_NOW),
+        _hv(
+            per=Decimal("20"),
+            date=dt.date(2025, 3, 31),
+            available_at=_NOW + dt.timedelta(days=1),
+        ),
+    ]
+    result = _evaluate(
+        hist,
+        current_per=Decimal("15"),
+        evaluation_at=_NOW,
+        config=_config(min_data_points_required=2),
+    )
+    assert result.per_data_count_used == 1
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+
+
+def test_available_at_exclusion_reason_code_recorded_precisely() -> None:
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31), available_at=_NOW),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31), available_at=_NOW),
+        _hv(
+            per=Decimal("30"),
+            date=dt.date(2020, 3, 31),
+            available_at=_NOW + dt.timedelta(hours=1),
+        ),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), evaluation_at=_NOW)
+    assert result.excluded_data_reasons == ("DATA_NOT_AVAILABLE_AT_EVALUATION_TIME_EXCLUDED",)
+
+
+# ===== 現在値PER/PBRの絶対レンジチェック(コードレビュー第2回対応、30-34) =====
+
+
+def test_current_per_above_absolute_max_excludes_component() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20")], start_year=2024)
+    result = _evaluate(hist, current_per=Decimal("600"), config=_config(per_absolute_max=500.0))
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+    assert "CURRENT_PER_OUT_OF_RANGE" in result.reason_codes
+
+
+def test_current_per_below_absolute_min_excludes_component() -> None:
+    hist = _per_series([Decimal("10"), Decimal("20")], start_year=2024)
+    result = _evaluate(hist, current_per=Decimal("-5"), config=_config(per_absolute_min=0.0))
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+    assert "CURRENT_PER_OUT_OF_RANGE" in result.reason_codes
+
+
+def test_current_pbr_above_absolute_max_excludes_component() -> None:
+    hist = [
+        _hv(pbr=Decimal("1.0"), date=dt.date(2024, 3, 31)),
+        _hv(pbr=Decimal("2.0"), date=dt.date(2025, 3, 31)),
+    ]
+    result = _evaluate(
+        hist,
+        current_per=None,
+        current_pbr=Decimal("100"),
+        current_pbr_basis=ValuationBasis.TRAILING,
+        config=_config(pbr_absolute_max=50.0),
+    )
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+    assert "CURRENT_PBR_OUT_OF_RANGE" in result.reason_codes
+
+
+def test_current_per_out_of_range_falls_back_to_pbr_only() -> None:
+    """既存の片側フォールバック設計は維持: PERのみレンジ外でもPBRが正常なら
+    PBR単独での評価を継続する。"""
+    hist = [
+        _hv(per=Decimal("10"), pbr=Decimal("1.0"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), pbr=Decimal("2.0"), date=dt.date(2025, 3, 31)),
+    ]
+    result = _evaluate(
+        hist,
+        current_per=Decimal("600"),
+        current_pbr=Decimal("1.5"),
+        current_pbr_basis=ValuationBasis.TRAILING,
+        config=_config(per_absolute_max=500.0),
+    )
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert result.per_score is None
+    assert result.pbr_score is not None
+    assert "CURRENT_PER_OUT_OF_RANGE" in result.reason_codes
+
+
+def test_current_per_and_pbr_both_out_of_range_returns_not_evaluated() -> None:
+    hist = [
+        _hv(per=Decimal("10"), pbr=Decimal("1.0"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), pbr=Decimal("2.0"), date=dt.date(2025, 3, 31)),
+    ]
+    result = _evaluate(
+        hist,
+        current_per=Decimal("600"),
+        current_pbr=Decimal("100"),
+        current_pbr_basis=ValuationBasis.TRAILING,
+        config=_config(per_absolute_max=500.0, pbr_absolute_max=50.0),
+    )
+    assert result.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+    assert "CURRENT_PER_OUT_OF_RANGE" in result.reason_codes
+    assert "CURRENT_PBR_OUT_OF_RANGE" in result.reason_codes
+
+
+# ===== PBR近似(株式数近似)とconfidenceの整合(コードレビュー第2回対応、35-37) =====
+
+
+def test_approximate_pbr_only_never_yields_high_confidence() -> None:
+    """近似PBR(株式数近似)がスコアに使われた場合、coverageがHIGH閾値を満たし
+    excluded_data_reasonsが無くても、confidenceはHIGHへ到達しない(MEDIUMへ
+    強制的に引き下げられる)。"""
+    hist = [
+        _hv(pbr=Decimal(str(v)), date=dt.date(2020 + i, 3, 31), pbr_is_approximate=True)
+        for i, v in enumerate(["1.0", "2.0", "3.0", "4.0"])
+    ]
+    result = _evaluate(
+        hist,
+        current_per=None,
+        current_pbr=Decimal("2.5"),
+        current_pbr_basis=ValuationBasis.TRAILING,
+        config=_config(full_confidence_data_points=4, coverage_high_threshold=0.5),
+    )
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    # coverage=0.5はcoverage_high_threshold=0.5を満たすため、近似PBRの制約が
+    # 無ければHIGHになるはずの条件で、実際にはMEDIUMへ制約されることを確認する。
+    assert result.coverage >= 0.5
+    assert result.confidence == ConfidenceLevel.MEDIUM
+
+
+def test_approximate_pbr_flag_recorded_in_result_and_reason_codes() -> None:
+    hist = [
+        _hv(pbr=Decimal(str(v)), date=dt.date(2020 + i, 3, 31), pbr_is_approximate=True)
+        for i, v in enumerate(["1.0", "2.0"])
+    ]
+    result = _evaluate(
+        hist,
+        current_per=None,
+        current_pbr=Decimal("1.5"),
+        current_pbr_basis=ValuationBasis.TRAILING,
+    )
+    assert result.pbr_is_approximate is True
+    assert "HISTORICAL_PBR_SHARE_COUNT_APPROXIMATED" in result.reason_codes
+
+
+def test_approximate_pbr_flag_has_no_effect_when_pbr_not_evaluated() -> None:
+    """PBRが評価に使われない(current_pbr未指定)場合、過去データに近似PBR行が
+    存在してもpbr_is_approximate/理由コードへ影響しない。"""
+    hist = [
+        _hv(per=Decimal("10"), date=dt.date(2024, 3, 31)),
+        _hv(per=Decimal("20"), date=dt.date(2025, 3, 31)),
+        _hv(pbr=Decimal("1.0"), date=dt.date(2024, 3, 31), pbr_is_approximate=True),
+    ]
+    result = _evaluate(hist, current_per=Decimal("15"), current_pbr=None)
+    assert result.state == HistoricalValuationEvaluationState.EVALUATED
+    assert result.pbr_is_approximate is False
+    assert "HISTORICAL_PBR_SHARE_COUNT_APPROXIMATED" not in result.reason_codes

@@ -104,6 +104,12 @@ class MockFinancialDataProvider:
                     pbr=pbr,
                     per_basis=ValuationBasis.TRAILING,
                     pbr_basis=ValuationBasis.TRAILING,
+                    # look-ahead bias防止(コードレビュー対応): 実データ実装と同様、
+                    # source.fetched_atを保守的なavailable_atとして使う。
+                    available_at=source.fetched_at,
+                    # モックは固定フィクスチャ値であり、実データの株式数近似という
+                    # 制約自体をモデル化していないための簡略化(Falseのまま)。
+                    pbr_is_approximate=False,
                     source=source,
                 )
             )

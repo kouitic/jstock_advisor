@@ -11,7 +11,11 @@ _SOURCE = DataSourceReference(provider="yfinance", fetched_at=dt.datetime(2026, 
 
 def _point(year: int, eps: str) -> HistoricalValuation:
     return HistoricalValuation(
-        stock_code="1384", date=dt.date(year, 3, 31), eps=Decimal(eps), source=_SOURCE
+        stock_code="1384",
+        date=dt.date(year, 3, 31),
+        eps=Decimal(eps),
+        available_at=_SOURCE.fetched_at,
+        source=_SOURCE,
     )
 
 

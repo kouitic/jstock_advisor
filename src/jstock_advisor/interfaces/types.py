@@ -140,6 +140,18 @@ class HistoricalValuation(ImmutableSnapshot):
     # するために使う(推測でbasisを補完しない。不明な場合はUNKNOWNのまま)。
     per_basis: ValuationBasis = ValuationBasis.UNKNOWN
     pbr_basis: ValuationBasis = ValuationBasis.UNKNOWN
+    # コードレビュー対応(look-ahead bias防止): このデータが実際に判定ロジックから
+    # 利用可能になった日時。dateが表す「対象期間(決算期末日)」とは別概念であり、
+    # 混同してはならない。実開示日時を無償データから再構成できない場合は、
+    # source.fetched_at(このデータを取得した日時、少なくともこの時点では存在が
+    # 確認できる)を保守的な代替値として使う。period_endをこの値の代わりに使う
+    # ことは禁止(未来情報を過去時点評価へ混入させる=look-ahead biasの原因となる)。
+    available_at: dt.datetime
+    # PBR算出に使ったBPSが、対象期の実際の発行済株式数ではなく現在の発行済株式数
+    # で近似されている場合True(コードレビュー対応)。近似PBRが評価に使われた場合、
+    # domain/signals/historical_valuation.pyのconfidence計算がHIGHへ到達しない
+    # よう制約するために使う。
+    pbr_is_approximate: bool = False
     source: DataSourceReference
 
 
