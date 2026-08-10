@@ -80,20 +80,21 @@ class QuarterlyFinancials(ImmutableSnapshot):
 
 
 class EarningsSurpriseRecord(ImmutableSnapshot):
-    """1四半期分の実績EPS・(決算発表前)アナリストコンセンサスEPS予想
+    """1四半期分の実績EPS・Yahoo Finance Earnings Historyが返すEPS estimate
     (判定精度向上機能Phase C: Earnings Surprise Score専用)。
 
     quarter_end(四半期末日)はQuarterlyFinancials.quarter_endと同一の期末日
     規約を用いる(呼び出し側で突合してよい)。
 
-    重要な制約(調査結果): この記録はYahoo Financeの決算サプライズ履歴
-    (quoteSummary.earningsHistory)由来であり、通常直近4四半期分のみ取得
-    できる。当該予想値(eps_estimate)が「その決算発表直前に実際に市場が
-    参照していたコンセンサス予想」であることの証跡(公開されたタイムスタンプ等)
-    はデータ提供元から得られないため、この記録単体に`available_at`は持たせない
-    (捏造しない、という既存方針)。この記録は「ライブ評価時点で取得・保存した
-    値をその後のDecisionOutcome分析に使う」用途(LIVE_SHADOW_ONLY)専用であり、
-    過去の評価日を指定してこの記録を再構成すること(バックテスト用途)はできない。
+    重要な制約(調査結果、コードレビュー対応v3で表現を厳密化): この記録は
+    Yahoo Financeの決算サプライズ履歴(quoteSummary.earningsHistory)由来で
+    あり、通常直近4四半期分のみ取得できる。eps_estimateが「決算発表直前
+    時点のコンセンサスであったこと」を独立に検証できるタイムスタンプ証跡は
+    無償データから取得できないため、「決算発表前アナリストコンセンサス」と
+    断定はしない(この記録単体に`available_at`も持たせない、捏造しない、
+    という既存方針)。この記録は「ライブ評価時点で取得・保存した値をその後の
+    DecisionOutcome分析に使う」用途(LIVE_SHADOW_ONLY)専用であり、過去の
+    評価日を指定してこの記録を再構成すること(バックテスト用途)はできない。
     最新決算が確定反映されたかどうかの判定は、この記録単体では行わず、呼び出し側
     (domain/signals/earnings_surprise.py)がEarningsReleaseConfirmationState
     (domain/signals/earnings_window.py)と突合して判断する。

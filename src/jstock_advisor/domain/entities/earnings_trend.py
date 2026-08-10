@@ -31,6 +31,11 @@ Earnings Surprise Score(earnings_surprise.py)とは完全に独立した評価�
 悪化逆転)バグを修正し、成分算出に使った生値(latest/previous・変化率・
 四半期実績の由来)を監査用に保持するようにした
 (domain/signals/earnings_trend.py参照)。
+
+コードレビュー対応(v3): NOT_APPLICABLE判定へ既存のEarningsDecisionRelevance
+を組み合わせ(古い決算予定日で無期限に評価停止しないため)、成分算出に
+使った値がどの期間のものか(period_end/period_type)を監査情報として
+追加保持するようにした。
 """
 
 from __future__ import annotations
@@ -41,8 +46,10 @@ from decimal import Decimal
 from jstock_advisor.domain.entities.base import ImmutableSnapshot
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
+    EarningsDecisionRelevance,
     EarningsTrendCategory,
     EarningsTrendEvaluationState,
+    PeriodType,
     RecentPeriodsSource,
 )
 
@@ -77,6 +84,26 @@ class EarningsTrendResult(ImmutableSnapshot):
     # 由来か(FinancialSummary.recent_periods_source)。confidence算出に
     # 反映する(domain/signals/earnings_trend.py参照)。
     recent_periods_source: RecentPeriodsSource | None = None
+
+    # コードレビュー対応(v3): 「その値がどの期間の値なのか」をvalueと
+    # 分離せず後から復元できるよう、成分算出に使ったFinancialPeriodValueの
+    # period_end/period_typeを保持する(index対応ではなく、値と期間の対応が
+    # 直接分かる形にするため)。算出不可の場合はNone(evaluated_at等の
+    # 現在日時で代替しない)。
+    latest_operating_income_period_end: dt.date | None = None
+    previous_operating_income_period_end: dt.date | None = None
+    operating_income_period_type: PeriodType | None = None
+    latest_operating_cashflow_period_end: dt.date | None = None
+    previous_operating_cashflow_period_end: dt.date | None = None
+    operating_cashflow_period_type: PeriodType | None = None
+    # acceleration成分に使った3四半期分(prev2, prev1, curr)のperiod_end。
+    # 営業利益系列由来(acceleration自体が営業利益系列のみを使うため)。
+    acceleration_period_ends: tuple[dt.date, dt.date, dt.date] | None = None
+
+    # コードレビュー対応(v3): 古い決算予定日が現在の判断にまだ関連するか
+    # (resolve_earnings_decision_relevance()の戻り値、domain/signals/
+    # earnings_window.py参照)。EarningsSurpriseResultと同じ監査目的。
+    earnings_decision_relevance: EarningsDecisionRelevance | None = None
 
     # 評価全体に関する注記コード(例: "OPERATING_INCOME_TREND_UNAVAILABLE")。
     reason_codes: tuple[str, ...] = ()

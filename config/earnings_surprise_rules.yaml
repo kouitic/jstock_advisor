@@ -1,12 +1,14 @@
-# Earnings Surprise Score v2(判定精度向上機能Phase C)の設定。
+# Earnings Surprise Score v3(判定精度向上機能Phase C)の設定。
 #
 # 「直近決算が事前の期待に対して良かったか」を-100(強い悪材料サプライズ)〜
 # +100(強い好材料サプライズ)で評価する。DecisionSnapshot.earnings_surprise_score等
 # (Shadow計測専用)へのみ記録され、BUY候補判定・保有判断スコア・旧売却判定・
 # ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
 #
-# 実装前調査の結果、Analyst Consensus Surprise(決算実績 vs 決算発表前アナリスト
-# コンセンサス予想)のみで構成する。Historical Progress Surprise(今回の進捗率
+# 実装前調査の結果、Analyst Consensus Surprise(決算実績 vs Yahoo Finance
+# Earnings Historyが返すEPS estimate。当該値が決算発表直前時点のコンセンサス
+# であったことを独立に検証できるtimestamp証跡は無償データから取得できないため
+# LIVE_SHADOW_ONLYとする)のみで構成する。Historical Progress Surprise(今回の進捗率
 # vs 過去3〜5年の同一四半期平均)は四半期実績データが直近5四半期(約1.25年)分
 # しか取得できず根本的にデータ不足のため実装しない。Guidance Revision(業績予想
 # の上方/下方修正)は、開示情報自体がTDnet専用であり本システムの開示Provider
@@ -26,8 +28,14 @@
 # 使えない(既知の制約)。判定当時に実際に使用した生値(実績EPS・コンセンサス
 # 予想EPS・突合した四半期末日・データ出所)はDecisionSnapshot.earnings_surprise_metrics
 # へ保存し、後から再現できるようにしている。
+#
+# コードレビュー対応(v3): NOT_APPLICABLE(決算反映待ち)判定に既存の
+# EarningsDecisionRelevance(ProfitTakingが既に使用している、古い決算予定日を
+# 無期限に判定停止理由としないための仕組み)を組み合わせるようにした。この
+# 設定ファイル自体に新規フィールドは追加していない(domain/signals/
+# earnings_surprise.py参照)。
 
-model_version: "earnings_surprise_v2"
+model_version: "earnings_surprise_v3"
 
 # 単一成分だが、他の判定精度向上機能スコアと同じ重み付きcoverage機構を踏襲する。
 analyst_consensus_weight: 1.0

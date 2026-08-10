@@ -1,6 +1,6 @@
 """domain/signals/earnings_trend.pyのテスト(判定精度向上機能Phase C、
-コードレビュー対応でv2へ再設計: 符号跨ぎバグ修正・raw metrics追加・
-recent_periods_source反映)。
+コードレビュー対応でv2/v3へ再設計: 符号跨ぎバグ修正・raw metrics追加・
+recent_periods_source反映・EarningsDecisionRelevance統合・period_end監査)。
 """
 
 from __future__ import annotations
@@ -18,12 +18,14 @@ from jstock_advisor.config.models import (
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     DividendComparisonOutcome,
-    EarningsDateStatus,
+    EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsTrendCategory,
     EarningsTrendEvaluationState,
+    PeriodType,
     RecentPeriodsSource,
 )
+from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.domain.signals.earnings_trend import (
     earnings_trend_config_values,
     earnings_trend_result_to_metrics,
@@ -63,24 +65,45 @@ def _config(**overrides: object) -> EarningsTrendRulesConfig:
 _CONFIG = _config()
 
 
+def _periods(
+    values: list[Decimal],
+    period_type: PeriodType = PeriodType.TTM,
+    start: dt.date = dt.date(2025, 3, 31),
+) -> list[FinancialPeriodValue]:
+    """コードレビュー対応(v3): テスト用に、値と対応するperiod_end/period_type
+    を組にしたFinancialPeriodValueの系列を組み立てる(indexだけに頼らず、
+    実運用と同じ「値と期間が対になった」入力形状でevaluate_earnings_trend()を
+    検証するため)。"""
+    result: list[FinancialPeriodValue] = []
+    period_end = start
+    for value in values:
+        result.append(
+            FinancialPeriodValue(value=value, period_end=period_end, period_type=period_type)
+        )
+        period_end = period_end + dt.timedelta(days=91)
+    return result
+
+
 def _evaluate(
     incomes: list[Decimal],
     cashflows: list[Decimal] | None = None,
     dividend_comparison_outcome: DividendComparisonOutcome | None = None,
     recent_periods_source: RecentPeriodsSource = RecentPeriodsSource.QUARTERLY,
-    earnings_date_status: EarningsDateStatus = EarningsDateStatus.UNAVAILABLE,
     release_confirmation_state: EarningsReleaseConfirmationState = (
         EarningsReleaseConfirmationState.NOT_APPLICABLE
     ),
+    decision_relevance: EarningsDecisionRelevance = EarningsDecisionRelevance.NOT_RELEVANT,
     config: EarningsTrendRulesConfig | None = None,
+    income_period_type: PeriodType = PeriodType.TTM,
+    cashflow_period_type: PeriodType = PeriodType.TTM,
 ):
     return evaluate_earnings_trend(
-        incomes,
-        cashflows if cashflows is not None else [],
+        _periods(incomes, income_period_type),
+        _periods(cashflows if cashflows is not None else [], cashflow_period_type),
         dividend_comparison_outcome,
         recent_periods_source,
-        earnings_date_status,
         release_confirmation_state,
+        decision_relevance,
         _NOW,
         config or _CONFIG,
     )
@@ -258,6 +281,23 @@ def test_acceleration_with_sign_crossing_in_first_pair_is_unavailable() -> None:
     assert result.acceleration_component is None
 
 
+# ===== acceleration期間監査(コードレビュー対応v3) =====
+
+
+def test_acceleration_period_ends_recorded_when_available() -> None:
+    incomes = [Decimal("100"), Decimal("105"), Decimal("126")]
+    result = _evaluate(incomes)
+    assert result.acceleration_period_ends is not None
+    assert len(result.acceleration_period_ends) == 3
+    assert result.acceleration_period_ends[2] == result.latest_operating_income_period_end
+    assert result.acceleration_period_ends[1] == result.previous_operating_income_period_end
+
+
+def test_acceleration_period_ends_none_with_two_quarters() -> None:
+    result = _evaluate([Decimal("100"), Decimal("110")])
+    assert result.acceleration_period_ends is None
+
+
 # ===== Dividend Direction成分 =====
 
 
@@ -283,7 +323,8 @@ def test_dividend_direction_component_unavailable_when_none() -> None:
     assert "DIVIDEND_DIRECTION_UNAVAILABLE" in result.reason_codes
 
 
-# ===== NOT_APPLICABLE(決算反映未確認)ゲート =====
+# ===== NOT_APPLICABLE(決算反映未確認)ゲート(コードレビュー対応v3:
+# EarningsDecisionRelevance統合) =====
 
 
 @pytest.mark.parametrize(
@@ -293,17 +334,55 @@ def test_dividend_direction_component_unavailable_when_none() -> None:
         EarningsReleaseConfirmationState.DELAYED,
     ],
 )
-def test_not_applicable_when_awaiting_earnings_confirmation(
+def test_not_applicable_when_awaiting_earnings_confirmation_and_relevant(
     state: EarningsReleaseConfirmationState,
 ) -> None:
+    """1. STALE_PAST_DATE + AWAITING_CONFIRMATION + RELEVANT → NOT_APPLICABLE
+    2. STALE_PAST_DATE + DELAYED + RELEVANT → NOT_APPLICABLE"""
     result = _evaluate(
         [Decimal("100"), Decimal("110")],
-        earnings_date_status=EarningsDateStatus.STALE_PAST_DATE,
         release_confirmation_state=state,
+        decision_relevance=EarningsDecisionRelevance.RELEVANT,
     )
     assert result.state == EarningsTrendEvaluationState.NOT_APPLICABLE
     assert result.reason_codes == ("AWAITING_EARNINGS_CONFIRMATION",)
     assert result.score is None
+    assert result.earnings_decision_relevance == EarningsDecisionRelevance.RELEVANT
+
+
+def test_not_applicable_when_unknown_relevance_still_continues() -> None:
+    """3. STALE_PAST_DATE + DELAYED + UNKNOWN → NOT_APPLICABLEにならず評価継続。"""
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
+        decision_relevance=EarningsDecisionRelevance.UNKNOWN,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+    )
+    assert result.state == EarningsTrendEvaluationState.EVALUATED
+    assert result.earnings_decision_relevance == EarningsDecisionRelevance.UNKNOWN
+
+
+def test_not_applicable_when_not_relevant_still_continues() -> None:
+    """4. STALE_PAST_DATE + AWAITING_CONFIRMATION + NOT_RELEVANT → 評価継続。"""
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        release_confirmation_state=EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
+        decision_relevance=EarningsDecisionRelevance.NOT_RELEVANT,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+    )
+    assert result.state == EarningsTrendEvaluationState.EVALUATED
+    assert result.earnings_decision_relevance == EarningsDecisionRelevance.NOT_RELEVANT
+
+
+def test_evaluated_when_data_updated_even_if_relevant() -> None:
+    """5. DATA_UPDATED → 通常評価。"""
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        release_confirmation_state=EarningsReleaseConfirmationState.DATA_UPDATED,
+        decision_relevance=EarningsDecisionRelevance.RELEVANT,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+    )
+    assert result.state == EarningsTrendEvaluationState.EVALUATED
 
 
 # ===== coverage/confidence/NOT_EVALUATEDゲート =====
@@ -412,9 +491,12 @@ def test_unavailable_source_forces_financial_components_unavailable_not_zero() -
     assert "ACCELERATION_UNAVAILABLE" in result.reason_codes
     # 配当方向のみ残るためcoverage不足でNOT_EVALUATED(0点として加算しない)。
     assert result.state == EarningsTrendEvaluationState.NOT_EVALUATED
+    # UNAVAILABLE時は期間情報も推測補完せずNoneのまま(コードレビュー対応v3)。
+    assert result.latest_operating_income_period_end is None
+    assert result.previous_operating_income_period_end is None
 
 
-# ===== raw metrics(コードレビュー対応v2) =====
+# ===== raw metrics(コードレビュー対応v2/v3) =====
 
 
 def test_result_holds_raw_before_after_values() -> None:
@@ -438,6 +520,7 @@ def test_result_to_metrics_contains_raw_values() -> None:
         [Decimal("50"), Decimal("60")],
         dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
         recent_periods_source=RecentPeriodsSource.QUARTERLY,
+        decision_relevance=EarningsDecisionRelevance.NOT_RELEVANT,
     )
     metrics = earnings_trend_result_to_metrics(result)
     assert metrics["latest_operating_income"] == "120"
@@ -448,11 +531,87 @@ def test_result_to_metrics_contains_raw_values() -> None:
     assert metrics["operating_cashflow_change_pct"] == pytest.approx(20.0)
     assert metrics["recent_periods_source"] == "QUARTERLY"
     assert metrics["state"] == "EVALUATED"
+    # 6. metricsへearnings_decision_relevanceが保存される(コードレビュー対応v3)。
+    assert metrics["earnings_decision_relevance"] == "NOT_RELEVANT"
 
 
 def test_config_values_include_category_thresholds() -> None:
     values = earnings_trend_config_values(_CONFIG)
     assert values["category_thresholds"] == _CONFIG.category_thresholds.model_dump()
+
+
+# ===== period_end/period_type監査(コードレビュー対応v3) =====
+
+
+def test_period_ends_recorded_for_ttm_series() -> None:
+    """1. TTM系列で、latest/previous operating income period_endがmetricsへ
+    保存される。"""
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        income_period_type=PeriodType.TTM,
+    )
+    assert result.latest_operating_income_period_end == dt.date(2025, 6, 30)
+    assert result.previous_operating_income_period_end == dt.date(2025, 3, 31)
+    assert result.operating_income_period_type == PeriodType.TTM
+    metrics = earnings_trend_result_to_metrics(result)
+    assert metrics["latest_operating_income_period_end"] == "2025-06-30"
+    assert metrics["previous_operating_income_period_end"] == "2025-03-31"
+    assert metrics["operating_income_period_type"] == "TTM"
+
+
+def test_period_type_annual_retained_for_annual_fallback() -> None:
+    """2. ANNUAL_FALLBACKで、period_type=ANNUALが監査情報に残る。"""
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        recent_periods_source=RecentPeriodsSource.ANNUAL_FALLBACK,
+        income_period_type=PeriodType.ANNUAL,
+    )
+    assert result.operating_income_period_type == PeriodType.ANNUAL
+    metrics = earnings_trend_result_to_metrics(result)
+    assert metrics["operating_income_period_type"] == "ANNUAL"
+
+
+def test_cashflow_period_ends_recorded() -> None:
+    """3. operating cashflowもperiod_endが保存される。"""
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        [Decimal("50"), Decimal("60")],
+    )
+    assert result.latest_operating_cashflow_period_end == dt.date(2025, 6, 30)
+    assert result.previous_operating_cashflow_period_end == dt.date(2025, 3, 31)
+    assert result.operating_cashflow_period_type == PeriodType.TTM
+
+
+def test_missing_period_info_not_backfilled_with_current_date() -> None:
+    """4. 欠損期間情報を現在日で補完しない(単一四半期のみの場合、trend自体が
+    算出不可のためperiod_endもNoneのまま。evaluated_atや現在日を代入しない)。"""
+    result = _evaluate([Decimal("100")])
+    assert result.latest_operating_income_period_end is None
+    assert result.previous_operating_income_period_end is None
+    assert result.operating_income_period_type is None
+
+
+def test_score_and_confidence_unchanged_by_period_info_addition() -> None:
+    """6. 既存のscore/category/confidenceは期間情報追加だけでは変化しない
+    (period_typeを変えてもTTM/ANNUALいずれでも同じ入力なら同じ結果になる)。"""
+    incomes, cashflows = _full_income_cashflow()
+    ttm_result = _evaluate(
+        incomes,
+        cashflows,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        income_period_type=PeriodType.TTM,
+        cashflow_period_type=PeriodType.TTM,
+    )
+    annual_result = _evaluate(
+        incomes,
+        cashflows,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        income_period_type=PeriodType.ANNUAL,
+        cashflow_period_type=PeriodType.ANNUAL,
+    )
+    assert ttm_result.score == annual_result.score
+    assert ttm_result.category == annual_result.category
+    assert ttm_result.confidence == annual_result.confidence
 
 
 # ===== Config validation =====

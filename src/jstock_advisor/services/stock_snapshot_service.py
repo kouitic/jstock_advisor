@@ -41,6 +41,7 @@ from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.signals.earnings_surprise import evaluate_earnings_surprise
 from jstock_advisor.domain.signals.earnings_trend import evaluate_earnings_trend
 from jstock_advisor.domain.signals.earnings_window import (
+    resolve_earnings_decision_relevance,
     resolve_earnings_release_confirmation,
     resolve_latest_financial_period_end,
 )
@@ -409,6 +410,17 @@ def build_stock_snapshot(
         now,
         config.earnings_window,
     )
+    # コードレビュー対応(v3): 古い決算予定日が現在の判断にまだ関連するかを
+    # profit_taking_service.pyと全く同じ関数・同じ引数で解決する(既存の
+    # 無期限停止防止設計をPhase Cでも踏襲する。呼び出しを分けても副作用の
+    # 無い純関数のため、既存のProfitTaking側の判定結果には一切影響しない)。
+    decision_relevance = resolve_earnings_decision_relevance(
+        earnings_date_status,
+        earnings_date_raw,
+        release_confirmation_state,
+        evaluation_date,
+        config.earnings_window,
+    )
     earnings_surprise_history = providers.financial_data.get_earnings_surprise_history(stock_code)
     # コードレビュー対応(v2): Dividend Revisionは意味の異なるデータ
     # (前年度実績 vs 現在予想の比較)であるためEarnings Surpriseからは
@@ -417,20 +429,23 @@ def build_stock_snapshot(
     earnings_surprise = evaluate_earnings_surprise(
         earnings_surprise_history,
         resolved_period.period_end,
-        earnings_date_status,
         release_confirmation_state,
+        decision_relevance,
         now,
         config.earnings_surprise,
     )
     earnings_trend = evaluate_earnings_trend(
-        quarterly_operating_incomes,
-        quarterly_operating_cashflows,
+        # コードレビュー対応(v3): 値とperiod_end/period_typeの対応を
+        # indexに依存させないよう、裸のlist[Decimal]ではなく
+        # FinancialPeriodValueの系列を渡す。
+        quarterly_operating_income_periods,
+        quarterly_operating_cashflow_periods,
         dividend.dividend_comparison_outcome,
         # コードレビュー対応(v2): 四半期実績由来か年次決算へのフォール
         # バック由来かをconfidence算出へ反映する。
         financial.recent_periods_source,
-        earnings_date_status,
         release_confirmation_state,
+        decision_relevance,
         now,
         config.earnings_trend,
     )

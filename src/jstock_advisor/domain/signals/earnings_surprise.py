@@ -1,4 +1,4 @@
-"""判定精度向上機能Phase C: Earnings Surprise Score v2(決算サプライズスコア)。
+"""判定精度向上機能Phase C: Earnings Surprise Score v3(決算サプライズスコア)。
 
 実装前調査(調査結果はセッション内の計画書参照)により、当初検討した4要素の
 うちAnalyst Consensus Surpriseのみで構成する(Historical Progress
@@ -12,6 +12,14 @@ earnings_window.py)を解決したうえで渡す。決算予定日を経過し�
 財務データへの反映が未確認(AWAITING_CONFIRMATION/DELAYED)の場合、この関数は
 NOT_APPLICABLEを返し評価を意図的に見送る(古い決算データを最新として使わない、
 という既存方針を踏襲)。
+
+コードレビュー対応(v3): 上記のNOT_APPLICABLE判定に、既存の
+`EarningsDecisionRelevance`(resolve_earnings_decision_relevance()、
+domain/signals/earnings_window.py参照、ProfitTakingが既に使用している
+仕組み)を追加で組み合わせるようにした。Providerが何か月も前の過去の決算
+予定日を返し続けた場合、decision_relevance=UNKNOWNとなり、決算待ちだけを
+理由にShadow計測を無期限停止しない(ProfitTaking側の無期限停止防止設計と
+意味を揃える。UNKNOWNは「悪材料」ではないため減点しない)。
 
 コードレビュー対応(v2): Analyst Consensusが取得できない銘柄で、他の
 データ(例: 配当方向)だけを根拠にEVALUATEDにしてしまわないよう、
@@ -36,7 +44,7 @@ from jstock_advisor.config.models import EarningsSurpriseRulesConfig
 from jstock_advisor.domain.entities.earnings_surprise import EarningsSurpriseResult
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
-    EarningsDateStatus,
+    EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsSurpriseCategory,
     EarningsSurpriseEvaluationState,
@@ -83,14 +91,14 @@ def _classify_category(
 def evaluate_earnings_surprise(
     earnings_surprise_history: list[EarningsSurpriseRecord],
     resolved_period_end: dt.date | None,
-    earnings_date_status: EarningsDateStatus,
     release_confirmation_state: EarningsReleaseConfirmationState,
+    decision_relevance: EarningsDecisionRelevance,
     evaluated_at: dt.datetime,
     config: EarningsSurpriseRulesConfig,
 ) -> EarningsSurpriseResult:
-    """Analyst Consensus Surprise(直近確定四半期の実績EPS vs 決算発表前
-    コンセンサス予想)のみでEarnings Surprise Scoreを算出する
-    (コードレビュー対応v2: Dividend Revisionは除外済み、モジュール
+    """Analyst Consensus Surprise(直近確定四半期の実績EPS vs Yahoo Finance
+    Earnings Historyが返すEPS estimate)のみでEarnings Surprise Scoreを
+    算出する(コードレビュー対応v2: Dividend Revisionは除外済み、モジュール
     docstring参照)。
 
     resolved_period_endは`resolve_latest_financial_period_end()`
@@ -99,21 +107,27 @@ def evaluate_earnings_surprise(
     を持つ記録のみを対象とする(古い四半期・未確定の四半期を誤って使わない
     ため)。
 
-    earnings_date_status/release_confirmation_stateがともに「決算予定日を
-    経過したが財務データへの反映が未確認」を示す場合、NOT_APPLICABLEを返し
-    評価を意図的に見送る。Analyst Consensusが取得できない場合はNOT_EVALUATED
-    とする(他のデータだけを根拠にEVALUATEDにしない)。
+    release_confirmation_stateが「決算予定日を経過したが財務データへの反映が
+    未確認」(AWAITING_CONFIRMATION/DELAYED)を示し、かつdecision_relevanceが
+    RELEVANT(古い決算予定日が現在の判断にまだ関連する、コードレビュー対応
+    v3)の場合のみNOT_APPLICABLEを返し評価を意図的に見送る。decision_relevance
+    がUNKNOWN(何か月も前の過去日でProviderが更新されておらず関連性を確認
+    できない)の場合は、決算待ちだけを理由にShadow計測を無期限停止しない
+    (既存のresolve_earnings_decision_relevance()の設計思想を踏襲、
+    UNKNOWNを悪材料として減点しない)。Analyst Consensusが取得できない場合は
+    NOT_EVALUATEDとする(他のデータだけを根拠にEVALUATEDにしない)。
     """
     require_timezone_aware(evaluated_at)
 
     if (
-        earnings_date_status == EarningsDateStatus.STALE_PAST_DATE
-        and release_confirmation_state in _AWAITING_STATES
+        release_confirmation_state in _AWAITING_STATES
+        and decision_relevance == EarningsDecisionRelevance.RELEVANT
     ):
         return EarningsSurpriseResult(
             state=EarningsSurpriseEvaluationState.NOT_APPLICABLE,
             resolved_financial_period_end=resolved_period_end,
             release_confirmation_state=release_confirmation_state,
+            earnings_decision_relevance=decision_relevance,
             reason_codes=(REASON_AWAITING_EARNINGS_CONFIRMATION,),
             evaluated_at=evaluated_at,
             model_version=config.model_version,
@@ -156,6 +170,7 @@ def evaluate_earnings_surprise(
             earnings_surprise_source_provider=source_provider,
             earnings_surprise_source_fetched_at=source_fetched_at,
             release_confirmation_state=release_confirmation_state,
+            earnings_decision_relevance=decision_relevance,
             reason_codes=tuple(sorted(reason_codes)),
             evaluated_at=evaluated_at,
             model_version=config.model_version,
@@ -186,6 +201,7 @@ def evaluate_earnings_surprise(
         earnings_surprise_source_provider=source_provider,
         earnings_surprise_source_fetched_at=source_fetched_at,
         release_confirmation_state=release_confirmation_state,
+        earnings_decision_relevance=decision_relevance,
         reason_codes=tuple(sorted(reason_codes)),
         evaluated_at=evaluated_at,
         model_version=config.model_version,
@@ -227,6 +243,11 @@ def earnings_surprise_result_to_metrics(
         "release_confirmation_state": (
             result.release_confirmation_state.value
             if result.release_confirmation_state is not None
+            else None
+        ),
+        "earnings_decision_relevance": (
+            result.earnings_decision_relevance.value
+            if result.earnings_decision_relevance is not None
             else None
         ),
         "model_version": result.model_version,
