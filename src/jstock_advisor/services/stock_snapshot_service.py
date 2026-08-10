@@ -22,7 +22,13 @@ from jstock_advisor.domain.entities.common import (
 )
 from jstock_advisor.domain.entities.earnings_surprise import EarningsSurpriseResult
 from jstock_advisor.domain.entities.earnings_trend import EarningsTrendResult
-from jstock_advisor.domain.entities.enums import ConfidenceLevel, EarningsDateStatus, ValuationBasis
+from jstock_advisor.domain.entities.enums import (
+    ConfidenceLevel,
+    EarningsDateStatus,
+    EarningsDecisionRelevance,
+    EarningsReleaseConfirmationState,
+    ValuationBasis,
+)
 from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.timing_score import TimingScoreResult
@@ -131,11 +137,13 @@ class StockSnapshot:
     # 同じくDecisionSnapshot記録専用のShadow計測であり、既存の判定ロジックには
     # 一切影響しない。
     timing: TimingScoreResult
-    # --- 判定精度向上機能Phase C: Earnings Surprise/Trend Score(2026-08追加) ---
-    # 直近確定四半期のアナリストコンセンサス実績乖離+配当予想改定を基にした
-    # 決算サプライズ評価結果、および営業利益/営業CFトレンド+配当方向を基にした
-    # 業績トレンド評価結果。いずれもDecisionSnapshot記録専用のShadow計測であり、
-    # 既存の判定ロジックには一切影響しない。
+    # --- 判定精度向上機能Phase C: Earnings Surprise/Trend Score(2026-08追加、
+    # コードレビュー対応でv3へ再設計) ---
+    # 直近確定四半期のYahoo Finance Earnings Historyが返すEPS実績/予想値の
+    # 乖離(Analyst Consensus Surprise単一成分)を基にした決算サプライズ評価
+    # 結果、および営業利益/営業CFトレンド+配当方向を基にした業績トレンド評価
+    # 結果。いずれもDecisionSnapshot記録専用のShadow計測であり、既存の判定
+    # ロジックには一切影響しない。
     earnings_surprise: EarningsSurpriseResult
     earnings_trend: EarningsTrendResult
 
@@ -421,7 +429,28 @@ def build_stock_snapshot(
         evaluation_date,
         config.earnings_window,
     )
-    earnings_surprise_history = providers.financial_data.get_earnings_surprise_history(stock_code)
+    # コードレビュー対応(第3回): release_confirmation_state/decision_relevanceの
+    # 組み合わせがevaluate_earnings_surprise()自身のNOT_APPLICABLE条件と完全に
+    # 一致する場合、Earnings Surpriseは必ずNOT_APPLICABLEになることが呼び出し前
+    # から分かっている。この場合のみ、不要なYahoo Finance問い合わせ(既存
+    # Lambdaのレイテンシ・Provider負荷・タイムアウトリスクに影響しうる外部I/O)
+    # を省略する(判定ロジックの最適化ではなく、外部I/O呼び出しの抑止のみが
+    # 目的。NOT_APPLICABLE判定そのものの正はevaluate_earnings_surprise()に
+    # 置いたまま変更しない。条件式はevaluate_earnings_surprise()内の判定式と
+    # 完全に同じものを保つこと)。
+    phase_c_earnings_blocked = (
+        release_confirmation_state
+        in (
+            EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
+            EarningsReleaseConfirmationState.DELAYED,
+        )
+        and decision_relevance == EarningsDecisionRelevance.RELEVANT
+    )
+    earnings_surprise_history = (
+        []
+        if phase_c_earnings_blocked
+        else providers.financial_data.get_earnings_surprise_history(stock_code)
+    )
     # コードレビュー対応(v2): Dividend Revisionは意味の異なるデータ
     # (前年度実績 vs 現在予想の比較)であるためEarnings Surpriseからは
     # 除外した(dividend_comparison_outcomeを渡さない)。Earnings Trend側の

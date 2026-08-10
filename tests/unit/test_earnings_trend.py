@@ -348,6 +348,7 @@ def test_not_applicable_when_awaiting_earnings_confirmation_and_relevant(
     assert result.reason_codes == ("AWAITING_EARNINGS_CONFIRMATION",)
     assert result.score is None
     assert result.earnings_decision_relevance == EarningsDecisionRelevance.RELEVANT
+    assert result.release_confirmation_state == state
 
 
 def test_not_applicable_when_unknown_relevance_still_continues() -> None:
@@ -532,6 +533,59 @@ def test_result_to_metrics_contains_raw_values() -> None:
     assert metrics["recent_periods_source"] == "QUARTERLY"
     assert metrics["state"] == "EVALUATED"
     # 6. metricsへearnings_decision_relevanceが保存される(コードレビュー対応v3)。
+    assert metrics["earnings_decision_relevance"] == "NOT_RELEVANT"
+
+
+# ===== release_confirmation_stateの監査保存(コードレビュー対応 第3回) =====
+
+
+def test_release_confirmation_state_retained_when_not_applicable() -> None:
+    result = _evaluate(
+        [Decimal("100"), Decimal("110")],
+        release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
+        decision_relevance=EarningsDecisionRelevance.RELEVANT,
+    )
+    assert result.state == EarningsTrendEvaluationState.NOT_APPLICABLE
+    assert result.release_confirmation_state == EarningsReleaseConfirmationState.DELAYED
+
+
+def test_release_confirmation_state_retained_when_not_evaluated() -> None:
+    result = _evaluate(
+        [],
+        [],
+        dividend_comparison_outcome=None,
+        release_confirmation_state=EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
+        decision_relevance=EarningsDecisionRelevance.NOT_RELEVANT,
+    )
+    assert result.state == EarningsTrendEvaluationState.NOT_EVALUATED
+    assert (
+        result.release_confirmation_state
+        == EarningsReleaseConfirmationState.AWAITING_CONFIRMATION
+    )
+
+
+def test_release_confirmation_state_retained_when_evaluated() -> None:
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        release_confirmation_state=EarningsReleaseConfirmationState.DATA_UPDATED,
+        decision_relevance=EarningsDecisionRelevance.NOT_RELEVANT,
+    )
+    assert result.state == EarningsTrendEvaluationState.EVALUATED
+    assert result.release_confirmation_state == EarningsReleaseConfirmationState.DATA_UPDATED
+
+
+def test_result_to_metrics_contains_release_confirmation_state_and_decision_relevance() -> None:
+    """2. earnings_trend_result_to_metrics()へrelease_confirmation_state・
+    earnings_decision_relevanceの両方が保存される。"""
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        release_confirmation_state=EarningsReleaseConfirmationState.DATA_UPDATED,
+        decision_relevance=EarningsDecisionRelevance.NOT_RELEVANT,
+    )
+    metrics = earnings_trend_result_to_metrics(result)
+    assert metrics["release_confirmation_state"] == "DATA_UPDATED"
     assert metrics["earnings_decision_relevance"] == "NOT_RELEVANT"
 
 

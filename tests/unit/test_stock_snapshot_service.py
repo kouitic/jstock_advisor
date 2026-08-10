@@ -17,6 +17,10 @@ import pytest
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import (
     EarningsDateStatus,
+    EarningsDecisionRelevance,
+    EarningsReleaseConfirmationState,
+    EarningsSurpriseEvaluationState,
+    EarningsTrendEvaluationState,
     HistoricalValuationEvaluationState,
     ValuationBasis,
 )
@@ -195,3 +199,126 @@ def test_timing_score_is_computed_from_momentum_snapshot() -> None:
     assert snapshot is not None
     assert snapshot.timing.trend_quality_component is not None
     assert snapshot.timing.model_version == _CFG.timing_score.model_version
+
+
+# ===== 判定精度向上機能Phase C: build_stock_snapshot()統合配線確認
+# (コードレビュー対応 第3回)。EarningsDecisionRelevance判定・Earnings
+# Surprise履歴取得のI/O抑止(phase_c_earnings_blocked)の本番配線を検証する。
+# 単体のdecision_relevance挙動自体はtest_earnings_surprise.py/
+# test_earnings_trend.pyで検証済みのため、ここではbuild_stock_snapshot()
+# ↓resolve_earnings_release_confirmation()↓resolve_earnings_decision_
+# relevance()↓evaluate_earnings_surprise()/evaluate_earnings_trend()という
+# 実際の配線経路のみを対象とする。 =====
+
+
+class _SpyFinancialDataProvider:
+    """financial_data providerのフェイクラッパー。get_financial_summary()の
+    fetched_atを固定値へ差し替えて決算反映確認(DATA_UPDATED)の誤発火を防ぎ、
+    get_earnings_surprise_history()の呼び出し回数を数える(Medium対応の
+    回帰テスト用)。他のメソッドは委譲元へそのまま委譲する。"""
+
+    def __init__(self, delegate: object, fetched_at_override: dt.datetime) -> None:
+        self._delegate = delegate
+        self._fetched_at_override = fetched_at_override
+        self.earnings_surprise_history_call_count = 0
+
+    def get_financial_summary(self, stock_code: str):
+        summary = self._delegate.get_financial_summary(stock_code)  # type: ignore[attr-defined]
+        if summary is None:
+            return None
+        source = summary.source.model_copy(update={"fetched_at": self._fetched_at_override})
+        return summary.model_copy(update={"source": source})
+
+    def get_historical_valuation(self, stock_code: str, years: int):
+        return self._delegate.get_historical_valuation(stock_code, years)  # type: ignore[attr-defined]
+
+    def get_cashflow_decomposition(self, stock_code: str):
+        return self._delegate.get_cashflow_decomposition(stock_code)  # type: ignore[attr-defined]
+
+    def get_earnings_surprise_history(self, stock_code: str):
+        self.earnings_surprise_history_call_count += 1
+        return self._delegate.get_earnings_surprise_history(stock_code)  # type: ignore[attr-defined]
+
+
+def _providers_for_phase_c_earnings_window(
+    earnings_date_raw: dt.date, fetched_at_override: dt.datetime
+) -> tuple[object, _SpyFinancialDataProvider]:
+    base = build_mock_provider_bundle(_NOW)
+    fake_disclosure = _FixedEarningsDateDisclosureProvider(base.disclosure, earnings_date_raw)
+    spy_financial = _SpyFinancialDataProvider(base.financial_data, fetched_at_override)
+    providers = dataclasses.replace(base, disclosure=fake_disclosure, financial_data=spy_financial)
+    return providers, spy_financial
+
+
+def test_unknown_relevance_does_not_block_shadow_evaluation_indefinitely() -> None:
+    """4.1: 古すぎる決算予定日(stale_earnings_relevance_days=10日を超える)
+    かつ財務データの更新が確認できない場合、release_confirmation_stateは
+    AWAITING_CONFIRMATION/DELAYED、decision_relevanceはUNKNOWNとなり、
+    決算待ちだけを理由にEarnings Surprise/TrendがNOT_APPLICABLEへ無期限
+    停止しないことを確認する(データ不足によるNOT_EVALUATEDは許容)。"""
+    earnings_date_raw = _NOW.date() - dt.timedelta(days=30)
+    fetched_at_override = _NOW - dt.timedelta(days=40)
+    providers, _spy = _providers_for_phase_c_earnings_window(earnings_date_raw, fetched_at_override)
+
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.earnings_date_status == EarningsDateStatus.STALE_PAST_DATE
+    assert snapshot.earnings_surprise.release_confirmation_state in (
+        EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
+        EarningsReleaseConfirmationState.DELAYED,
+    )
+    assert (
+        snapshot.earnings_surprise.earnings_decision_relevance == EarningsDecisionRelevance.UNKNOWN
+    )
+    assert snapshot.earnings_trend.earnings_decision_relevance == EarningsDecisionRelevance.UNKNOWN
+    assert snapshot.earnings_trend.release_confirmation_state == (
+        snapshot.earnings_surprise.release_confirmation_state
+    )
+    assert snapshot.earnings_surprise.state != EarningsSurpriseEvaluationState.NOT_APPLICABLE
+    assert snapshot.earnings_trend.state != EarningsTrendEvaluationState.NOT_APPLICABLE
+
+
+def test_relevant_stale_earnings_makes_phase_c_not_applicable() -> None:
+    """4.2: 直近(stale_earnings_relevance_days以内)の過去決算予定日で
+    財務データの更新が確認できない場合、decision_relevance=RELEVANTとなり
+    Earnings Surprise/TrendがNOT_APPLICABLEになる。あわせてMedium対応
+    (外部I/O抑止)の証明として、get_earnings_surprise_history()が
+    一度も呼ばれないことを確認する(今回最重要の回帰テスト)。"""
+    earnings_date_raw = _NOW.date() - dt.timedelta(days=1)
+    fetched_at_override = _NOW - dt.timedelta(days=10)
+    providers, spy = _providers_for_phase_c_earnings_window(earnings_date_raw, fetched_at_override)
+
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.earnings_date_status == EarningsDateStatus.STALE_PAST_DATE
+    assert snapshot.earnings_surprise.release_confirmation_state in (
+        EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
+        EarningsReleaseConfirmationState.DELAYED,
+    )
+    assert (
+        snapshot.earnings_surprise.earnings_decision_relevance == EarningsDecisionRelevance.RELEVANT
+    )
+    assert snapshot.earnings_surprise.state == EarningsSurpriseEvaluationState.NOT_APPLICABLE
+    assert snapshot.earnings_trend.state == EarningsTrendEvaluationState.NOT_APPLICABLE
+    # Medium対応: 必ずNOT_APPLICABLEになると分かっている場合、不要な
+    # Yahoo Finance問い合わせ(get_earnings_surprise_history())を行わない。
+    assert spy.earnings_surprise_history_call_count == 0
+
+
+def test_normal_case_still_fetches_earnings_surprise_history() -> None:
+    """4.3: phase_c_earnings_blocked=Falseの通常ケース(決算待ちで
+    ブロックされていない)では、従来どおりget_earnings_surprise_history()
+    が呼ばれる(最適化により一切取得されなくなる回帰を防ぐ)。"""
+    base = build_mock_provider_bundle(_NOW)
+    spy_financial = _SpyFinancialDataProvider(base.financial_data, _NOW)
+    providers = dataclasses.replace(base, financial_data=spy_financial)
+
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    assert spy_financial.earnings_surprise_history_call_count == 1

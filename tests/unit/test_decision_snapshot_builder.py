@@ -280,11 +280,12 @@ def test_build_decision_snapshot_earnings_surprise_fields_default_when_unset() -
 
 
 def test_build_decision_snapshot_copies_earnings_trend_fields() -> None:
-    """判定精度向上機能Phase C(コードレビュー対応v2/v3): Recommendationの
+    """判定精度向上機能Phase C(コードレビュー対応v2/v3・第3回): Recommendationの
     earnings_trend_*5フィールドがDecisionSnapshotへそのままコピーされる。
     metricsにはraw監査情報(before/after値・change_pct・recent_periods_source・
-    period_end/period_type・earnings_decision_relevance)が欠落せず含まれる
-    ことを確認する。"""
+    period_end/period_type・earnings_decision_relevance・
+    release_confirmation_state)が欠落せず含まれることを確認する
+    (dict丸ごとコピーのため、新規キーを追加した第3回対応でも失われない)。"""
     recommendation = _recommendation(config_values_used={}).model_copy(
         update={
             "earnings_trend_score": -30.0,
@@ -302,6 +303,7 @@ def test_build_decision_snapshot_copies_earnings_trend_fields() -> None:
                 "previous_operating_income_period_end": "2025-03-31",
                 "operating_income_period_type": "ANNUAL",
                 "earnings_decision_relevance": "NOT_RELEVANT",
+                "release_confirmation_state": "DATA_UPDATED",
                 "model_version": "earnings_trend_v3",
             },
         }
@@ -321,6 +323,7 @@ def test_build_decision_snapshot_copies_earnings_trend_fields() -> None:
     assert decision.earnings_trend_metrics["previous_operating_income_period_end"] == "2025-03-31"
     assert decision.earnings_trend_metrics["operating_income_period_type"] == "ANNUAL"
     assert decision.earnings_trend_metrics["earnings_decision_relevance"] == "NOT_RELEVANT"
+    assert decision.earnings_trend_metrics["release_confirmation_state"] == "DATA_UPDATED"
 
 
 def test_build_decision_snapshot_earnings_trend_fields_default_when_unset() -> None:
