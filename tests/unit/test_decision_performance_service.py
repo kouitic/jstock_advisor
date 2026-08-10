@@ -25,7 +25,12 @@ from jstock_advisor.domain.entities.decision_snapshot import (
     DecisionSnapshot,
     build_decision_id,
 )
-from jstock_advisor.domain.entities.enums import DecisionType, EvaluationLabel, RecommendationType
+from jstock_advisor.domain.entities.enums import (
+    ConfidenceLevel,
+    DecisionType,
+    EvaluationLabel,
+    RecommendationType,
+)
 from jstock_advisor.domain.entities.evaluation import EvaluationResult
 from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
     DecisionSnapshotRepository,
@@ -35,8 +40,19 @@ from jstock_advisor.infrastructure.local_repository.evaluation_repository import
 )
 from jstock_advisor.services.decision_performance_service import (
     DECISION_PERFORMANCE_DUPLICATE_SNAPSHOT_EVENT,
+    DECISION_PERFORMANCE_INVALID_COVERAGE_THRESHOLD_EVENT,
     DecisionPerformanceService,
+    score_predicate,
 )
+
+# config_values_used内のキー名(decision_performance_service.pyの_CONFIG_VALUES_KEYと
+# 同じマッピング。timingのみフィールドprefixと異なる"timing_score"を使う)。
+_CONFIG_VALUES_KEY = {
+    "historical_valuation": "historical_valuation",
+    "timing": "timing_score",
+    "earnings_surprise": "earnings_surprise",
+    "earnings_trend": "earnings_trend",
+}
 
 _NOW = dt.datetime(2026, 8, 8, tzinfo=dt.UTC)
 
@@ -95,6 +111,36 @@ def _evaluation(
         evaluation_label=label,
         label_evidence="x",
     )
+
+
+def _decision_with_score(
+    recommendation_id: str,
+    score_name: str,
+    *,
+    score: float | None = None,
+    confidence: ConfidenceLevel | None = None,
+    coverage: float | None = None,
+    metrics: dict[str, object] | None = None,
+    coverage_high_threshold: float | None = None,
+    coverage_medium_threshold: float | None = None,
+) -> DecisionSnapshot:
+    """1スコア分のscore/confidence/coverage/metrics(+config_values_used内の
+    coverage閾値)を設定したDecisionSnapshotを組み立てる。"""
+    base = _decision(recommendation_id)
+    update: dict[str, object] = {
+        f"{score_name}_score": score,
+        f"{score_name}_confidence": confidence,
+        f"{score_name}_coverage": coverage,
+        f"{score_name}_metrics": metrics or {},
+    }
+    if coverage_high_threshold is not None or coverage_medium_threshold is not None:
+        update["config_values_used"] = {
+            _CONFIG_VALUES_KEY[score_name]: {
+                "coverage_high_threshold": coverage_high_threshold,
+                "coverage_medium_threshold": coverage_medium_threshold,
+            }
+        }
+    return base.model_copy(update=update)
 
 
 def test_summarize_with_no_data_returns_empty_overall(tmp_path: Path) -> None:
@@ -277,3 +323,335 @@ def test_summarize_duplicate_exclusion_is_order_independent(tmp_path: Path) -> N
     count_a = service_a.summarize(now=_NOW).overall.count
     count_b = service_b.summarize(now=_NOW).overall.count
     assert count_a == count_b == 0
+
+
+# ===== DecisionPerformance分析強化: summarize_score_segments() =====
+
+
+def _service_with(
+    tmp_path: Path, decisions: list[DecisionSnapshot], evaluations: list[EvaluationResult]
+) -> DecisionPerformanceService:
+    decision_repo = DecisionSnapshotRepository(store_dir=tmp_path)
+    eval_repo = EvaluationResultRepository(store_dir=tmp_path)
+    for d in decisions:
+        decision_repo.insert_if_absent(d)
+    for e in evaluations:
+        eval_repo.save(e)
+    return DecisionPerformanceService(
+        evaluation_repository=eval_repo, decision_repository=decision_repo, config=_config()
+    )
+
+
+@pytest.mark.parametrize(
+    "score_name", ["historical_valuation", "timing", "earnings_surprise", "earnings_trend"]
+)
+def test_summarize_score_segments_groups_by_category(tmp_path: Path, score_name: str) -> None:
+    decisions = [
+        _decision_with_score("rec-cheap", score_name, metrics={"category": "CHEAP"}),
+        _decision_with_score("rec-expensive", score_name, metrics={"category": "EXPENSIVE"}),
+    ]
+    evaluations = [
+        _evaluation("e1", "rec-cheap", horizon_business_days=60, price_return_pct=8.0),
+        _evaluation("e2", "rec-expensive", horizon_business_days=60, price_return_pct=-2.0),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments(score_name, horizon_business_days=60, now=_NOW)
+
+    assert {s.bucket_key for s in result.by_category} == {"CHEAP", "EXPENSIVE"}
+    cheap = next(s for s in result.by_category if s.bucket_key == "CHEAP")
+    assert cheap.sample_count == 1
+    assert cheap.average_return_pct == 8.0
+
+
+def test_summarize_score_segments_accepts_category_not_in_current_enum(tmp_path: Path) -> None:
+    """コードレビュー対応(第4回): 保存済みcategory文字列は現在のEnumで
+    再検証しない。将来Enumのメンバー名が変わっても(または過去に一時的に
+    存在した値でも)、過去の事実としてそのままbucketに使われることを確認する。"""
+    decisions = [_decision_with_score("rec-1", "timing", metrics={"category": "SOME_FUTURE_LABEL"})]
+    evaluations = [_evaluation("e1", "rec-1", horizon_business_days=60)]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert {s.bucket_key for s in result.by_category} == {"SOME_FUTURE_LABEL"}
+
+
+def test_summarize_score_segments_excludes_missing_category(tmp_path: Path) -> None:
+    decisions = [_decision_with_score("rec-1", "timing", metrics={})]
+    evaluations = [_evaluation("e1", "rec-1", horizon_business_days=60)]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert result.by_category == []
+
+
+def test_summarize_score_segments_groups_by_confidence(tmp_path: Path) -> None:
+    decisions = [
+        _decision_with_score("rec-high", "timing", confidence=ConfidenceLevel.HIGH),
+        _decision_with_score("rec-low", "timing", confidence=ConfidenceLevel.LOW),
+        _decision_with_score("rec-none", "timing", confidence=None),
+    ]
+    evaluations = [
+        _evaluation("e1", "rec-high", horizon_business_days=60),
+        _evaluation("e2", "rec-low", horizon_business_days=60),
+        _evaluation("e3", "rec-none", horizon_business_days=60),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert {s.bucket_key for s in result.by_confidence} == {"HIGH", "LOW"}
+
+
+def test_coverage_tier_low_is_not_conflated_with_missing(tmp_path: Path) -> None:
+    """coverage=0.0(実際に計算された低coverage)は"LOW"へ正しく分類され、
+    coverage=None(未計算)とは区別されて除外されないことを確認する。"""
+    decisions = [
+        _decision_with_score(
+            "rec-zero", "timing", coverage=0.0,
+            coverage_high_threshold=0.9, coverage_medium_threshold=0.5,
+        ),
+        _decision_with_score("rec-missing", "timing", coverage=None),
+    ]
+    evaluations = [
+        _evaluation("e1", "rec-zero", horizon_business_days=60),
+        _evaluation("e2", "rec-missing", horizon_business_days=60),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert {s.bucket_key for s in result.by_coverage_tier} == {"LOW"}
+    assert result.by_coverage_tier[0].sample_count == 1
+
+
+def test_coverage_tier_uses_point_in_time_thresholds_not_current_config(tmp_path: Path) -> None:
+    """コードレビュー対応(最重要): 過去DecisionSnapshotをconfig_values_used
+    に保存された当時のcoverage閾値で分類し、現在ロードされたAppConfigの
+    閾値は一切参照しない。同一coverage値でも、保存済み閾値が異なれば
+    異なるtierになることを直接確認する。"""
+    decisions = [
+        _decision_with_score(
+            "rec-old-threshold", "timing", coverage=0.6,
+            coverage_high_threshold=0.5, coverage_medium_threshold=0.3,  # 0.6は当時基準でHIGH
+        ),
+        _decision_with_score(
+            "rec-new-threshold", "timing", coverage=0.6,
+            coverage_high_threshold=0.9, coverage_medium_threshold=0.5,  # 0.6は当時基準でMEDIUM
+        ),
+    ]
+    evaluations = [
+        _evaluation("e1", "rec-old-threshold", horizon_business_days=60),
+        _evaluation("e2", "rec-new-threshold", horizon_business_days=60),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    tiers = {s.bucket_key: s.sample_count for s in result.by_coverage_tier}
+    assert tiers == {"HIGH": 1, "MEDIUM": 1}
+
+
+@pytest.mark.parametrize(
+    ("high", "medium"),
+    [
+        (None, 0.5),  # 欠損
+        ("bad", 0.5),  # 型不正
+        (0.5, 0.7),  # medium >= high
+        (1.5, 0.5),  # high > 1
+        (0.9, -0.1),  # medium < 0
+    ],
+)
+def test_coverage_tier_excludes_invalid_threshold_and_logs_warning(
+    tmp_path: Path, high: object, medium: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """異常なconfig_values_used(欠損/型不正/範囲外/medium>=high)は
+    coverage_tier分析からのみ除外し、warningログを出す。レポート全体は
+    落ちない。"""
+    decision = _decision("rec-1").model_copy(
+        update={
+            "timing_score": 10.0,
+            "timing_confidence": ConfidenceLevel.HIGH,
+            "timing_coverage": 0.6,
+            "timing_metrics": {"category": "TAILWIND", "model_version": "timing_v4"},
+            "config_values_used": {
+                "timing_score": {
+                    "coverage_high_threshold": high,
+                    "coverage_medium_threshold": medium,
+                }
+            },
+        }
+    )
+    evaluations = [_evaluation("e1", "rec-1", horizon_business_days=60)]
+    service = _service_with(tmp_path, [decision], evaluations)
+
+    with caplog.at_level(logging.WARNING):
+        result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert result.by_coverage_tier == []
+    assert any(
+        DECISION_PERFORMANCE_INVALID_COVERAGE_THRESHOLD_EVENT in r.getMessage()
+        for r in caplog.records
+    )
+    # 同じ異常データでも他の分析軸(category/confidence/model_version)は継続する。
+    assert {s.bucket_key for s in result.by_category} == {"TAILWIND"}
+    assert {s.bucket_key for s in result.by_confidence} == {"HIGH"}
+    assert {s.bucket_key for s in result.by_model_version} == {"timing_v4"}
+
+
+def test_summarize_score_segments_groups_by_individual_model_version(tmp_path: Path) -> None:
+    """DecisionSnapshot.model_version(Decision Enhancement Layer全体)ではなく、
+    スコア個別のmodel_version(timing_v3 vs timing_v4)で分離できることを確認する。"""
+    decisions = [
+        _decision_with_score("rec-v3", "timing", metrics={"model_version": "timing_v3"}),
+        _decision_with_score("rec-v4", "timing", metrics={"model_version": "timing_v4"}),
+        _decision_with_score("rec-none", "timing", metrics={}),
+    ]
+    evaluations = [
+        _evaluation("e1", "rec-v3", horizon_business_days=60),
+        _evaluation("e2", "rec-v4", horizon_business_days=60),
+        _evaluation("e3", "rec-none", horizon_business_days=60),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert {s.bucket_key for s in result.by_model_version} == {"timing_v3", "timing_v4"}
+
+
+def test_summarize_score_segments_rejects_invalid_score_name(tmp_path: Path) -> None:
+    service = _service_with(tmp_path, [], [])
+    with pytest.raises(ValueError, match="score_name"):
+        service.summarize_score_segments("not_a_score", horizon_business_days=60, now=_NOW)  # type: ignore[arg-type]
+
+
+def test_summarize_score_segments_rejects_non_phase_a_horizon(tmp_path: Path) -> None:
+    service = _service_with(tmp_path, [], [])
+    with pytest.raises(ValueError, match="horizon_business_days"):
+        service.summarize_score_segments("timing", horizon_business_days=7, now=_NOW)
+
+
+def test_summarize_score_segments_excludes_non_phase_a_evaluations(tmp_path: Path) -> None:
+    """summarize()と同じhorizon許可リスト(1営業日・7暦日の除外)を
+    summarize_score_segments()も共有していることを確認する。"""
+    decisions = [_decision_with_score("rec-1", "timing", metrics={"category": "TAILWIND"})]
+    evaluations = [
+        _evaluation("e-1d", "rec-1", horizon_business_days=1),
+        _evaluation("e-7cal", "rec-1", horizon_business_days=None, horizon_calendar_days=7),
+        _evaluation("e-60d", "rec-1", horizon_business_days=60),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert result.by_category[0].sample_count == 1
+
+
+def test_summarize_score_segments_excludes_join_and_duplicate_failures(tmp_path: Path) -> None:
+    eval_repo_only = EvaluationResultRepository(store_dir=tmp_path)
+    eval_repo_only.save(_evaluation("e-orphan", "rec-without-decision", horizon_business_days=60))
+    service = DecisionPerformanceService(
+        evaluation_repository=eval_repo_only,
+        decision_repository=DecisionSnapshotRepository(store_dir=tmp_path),
+        config=_config(),
+    )
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+    assert result.by_category == []
+    assert result.by_confidence == []
+
+
+def test_summarize_score_segments_median_and_excess_return(tmp_path: Path) -> None:
+    decisions = [
+        _decision_with_score("rec-1", "timing", metrics={"category": "TAILWIND"}),
+        _decision_with_score("rec-2", "timing", metrics={"category": "TAILWIND"}),
+    ]
+    evaluations = [
+        EvaluationResult(
+            evaluation_id="e1", recommendation_id="rec-1", horizon_business_days=60,
+            evaluated_at=_NOW, evaluation_date=_NOW.date(), price_at_evaluation=Decimal("1200"),
+            price_return_pct=2.0, excess_return_pct=1.0, max_gain_pct=3.0, max_drawdown_pct=-1.0,
+            evaluation_label=EvaluationLabel.SUCCESS, label_evidence="x",
+        ),
+        EvaluationResult(
+            evaluation_id="e2", recommendation_id="rec-2", horizon_business_days=60,
+            evaluated_at=_NOW, evaluation_date=_NOW.date(), price_at_evaluation=Decimal("1200"),
+            price_return_pct=6.0, excess_return_pct=5.0, max_gain_pct=9.0, max_drawdown_pct=-3.0,
+            evaluation_label=EvaluationLabel.SUCCESS, label_evidence="x",
+        ),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    segment = result.by_category[0]
+    assert segment.median_return_pct == 4.0
+    assert segment.median_excess_return_pct == 3.0
+    assert segment.average_mfe_pct == 6.0
+    assert segment.average_mae_pct == -2.0
+
+
+# ===== DecisionPerformance分析強化: compare_segments() =====
+
+
+def test_compare_segments_returns_two_groups_with_overlap_count(tmp_path: Path) -> None:
+    decisions = [
+        _decision_with_score("rec-good", "timing", score=40.0),
+        _decision_with_score("rec-poor", "timing", score=-40.0),
+    ]
+    evaluations = [
+        _evaluation("e1", "rec-good", horizon_business_days=60, price_return_pct=10.0),
+        _evaluation("e2", "rec-poor", horizon_business_days=60, price_return_pct=-5.0),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.compare_segments(
+        "good", score_predicate("timing", minimum=20),
+        "poor", score_predicate("timing", maximum=-20),
+        horizon_business_days=60, now=_NOW,
+    )
+
+    assert result.group_a.bucket_key == "good"
+    assert result.group_a.sample_count == 1
+    assert result.group_a.average_return_pct == 10.0
+    assert result.group_b.bucket_key == "poor"
+    assert result.group_b.sample_count == 1
+    assert result.overlap_count == 0
+
+
+def test_compare_segments_reports_overlap_when_ranges_overlap(tmp_path: Path) -> None:
+    decisions = [_decision_with_score("rec-1", "timing", score=25.0)]
+    evaluations = [_evaluation("e1", "rec-1", horizon_business_days=60)]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.compare_segments(
+        "a", score_predicate("timing", minimum=20),
+        "b", score_predicate("timing", maximum=30),
+        horizon_business_days=60, now=_NOW,
+    )
+
+    assert result.overlap_count == 1
+
+
+def test_compare_segments_rejects_non_phase_a_horizon(tmp_path: Path) -> None:
+    service = _service_with(tmp_path, [], [])
+    with pytest.raises(ValueError, match="horizon_business_days"):
+        service.compare_segments(
+            "a", score_predicate("timing", minimum=20),
+            "b", score_predicate("timing", maximum=-20),
+            horizon_business_days=999, now=_NOW,
+        )
+
+
+def test_score_predicate_boundaries_are_inclusive_and_excludes_none(tmp_path: Path) -> None:
+    predicate = score_predicate("timing", minimum=10.0, maximum=20.0)
+    at_min = _decision_with_score("rec-min", "timing", score=10.0)
+    at_max = _decision_with_score("rec-max", "timing", score=20.0)
+    below = _decision_with_score("rec-below", "timing", score=9.9)
+    missing = _decision_with_score("rec-missing", "timing", score=None)
+
+    assert predicate(at_min) is True
+    assert predicate(at_max) is True
+    assert predicate(below) is False
+    assert predicate(missing) is False
