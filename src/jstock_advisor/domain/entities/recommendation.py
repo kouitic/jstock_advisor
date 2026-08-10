@@ -29,6 +29,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsDateStatus,
     EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
+    PriceRangeEvaluationState,
     ProfitTakingIndustrySector,
     RecommendationType,
     RecordDateUnknownReason,
@@ -131,6 +132,46 @@ class Recommendation(ImmutableSnapshot):
     earnings_trend_coverage: float | None = None
     earnings_trend_reason_codes: tuple[str, ...] = ()
     earnings_trend_metrics: dict[str, Any] = Field(default_factory=dict)
+
+    # --- 判定精度向上機能次フェーズSTEP2: Entry Price Range Shadow(2026-08
+    # 追加、Shadow計測専用)。4段階の目安買付価格帯(strong/preferred/starter/
+    # max)とstop_review_price。StockSnapshot.entry_price_rangeをそのまま
+    # コピーしたものであり、DecisionSnapshotへ記録する以外の用途では一切
+    # 使わない。既存のentry_buy_price/standard_buy_price/strong_buy_price・
+    # buy_prices・BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
+    # LINE通知など既存の判定ロジックからは参照しないこと。stateは他4スコアの
+    # ようなscoreフィールドを持たないEntry/Exitにとって、DecisionPerformance
+    # 分析等が「評価済みレコードだけを安全に抽出する」ための主要な識別子 ---
+    entry_price_range_state: PriceRangeEvaluationState | None = None
+    entry_price_range_confidence: ConfidenceLevel | None = None
+    entry_price_range_coverage: float | None = None
+    entry_price_range_reason_codes: tuple[str, ...] = ()
+    entry_price_range_metrics: dict[str, Any] = Field(default_factory=dict)
+    entry_price_range_starter_price: Decimal | None = None
+    entry_price_range_preferred_price: Decimal | None = None
+    entry_price_range_strong_price: Decimal | None = None
+    entry_price_range_max_price: Decimal | None = None
+    entry_price_range_stop_review_price: Decimal | None = None
+
+    # --- 判定精度向上機能次フェーズSTEP2: Exit Price Range Shadow(2026-08
+    # 追加、Shadow計測専用)。一部利確ゾーン(partial_low/high)・強気利確価格
+    # (strong)・取得単価基準レビューライン(downside_review/exit_review)。
+    # SELL(legacy)/ProfitTaking/HoldingDecisionの各パイプラインが個別に
+    # 算出した結果をそのままコピーしたものであり(Builder自身は算出しない)、
+    # DecisionSnapshotへ記録する以外の用途では一切使わない。既存の
+    # sell_prices・旧売却判定・ProfitTaking判定・LINE通知など既存の判定
+    # ロジックからは参照しないこと。BUYパイプラインはExitを計算しないため
+    # 常にNone ---
+    exit_price_range_state: PriceRangeEvaluationState | None = None
+    exit_price_range_confidence: ConfidenceLevel | None = None
+    exit_price_range_coverage: float | None = None
+    exit_price_range_reason_codes: tuple[str, ...] = ()
+    exit_price_range_metrics: dict[str, Any] = Field(default_factory=dict)
+    exit_price_range_partial_low_price: Decimal | None = None
+    exit_price_range_partial_high_price: Decimal | None = None
+    exit_price_range_strong_price: Decimal | None = None
+    exit_price_range_downside_review_price: Decimal | None = None
+    exit_price_range_exit_review_price: Decimal | None = None
 
     # --- 通知層の自動生成文言廃止(2026-07仕様§9)で追加。判定結果の文言は
     # 通知層(line_notification_service)で生成せず、ここに判定サービスが直接格納する ---

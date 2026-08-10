@@ -328,6 +328,29 @@ def test_summarize_duplicate_exclusion_is_order_independent(tmp_path: Path) -> N
 # ===== DecisionPerformance分析強化: summarize_score_segments() =====
 
 
+class _StaticDecisionRepo:
+    """DecisionSnapshotRepositoryのJSON永続化(ラウンドトリップ)を経由しない
+    in-memoryスタブ。json_store.pyの保存/再読込では、NaN/InfinityはNoneへ、
+    bool/数値文字列は通常のfloatへPydanticにより自動的に丸められてしまうため、
+    coverage自身が本当に壊れているケース(_is_valid_coverage()のテスト対象)を
+    検証するには、この経路を迂回して生の値をそのまま_extract_coverage_tier()
+    へ渡す必要がある。"""
+
+    def __init__(self, decisions: list[DecisionSnapshot]) -> None:
+        self._decisions = decisions
+
+    def list_all(self) -> list[DecisionSnapshot]:
+        return list(self._decisions)
+
+
+class _StaticEvaluationRepo:
+    def __init__(self, evaluations: list[EvaluationResult]) -> None:
+        self._evaluations = evaluations
+
+    def list_all(self) -> list[EvaluationResult]:
+        return list(self._evaluations)
+
+
 def _service_with(
     tmp_path: Path, decisions: list[DecisionSnapshot], evaluations: list[EvaluationResult]
 ) -> DecisionPerformanceService:
@@ -499,6 +522,104 @@ def test_coverage_tier_excludes_invalid_threshold_and_logs_warning(
     assert {s.bucket_key for s in result.by_category} == {"TAILWIND"}
     assert {s.bucket_key for s in result.by_confidence} == {"HIGH"}
     assert {s.bucket_key for s in result.by_model_version} == {"timing_v4"}
+
+
+@pytest.mark.parametrize(
+    "broken_config_values",
+    [
+        "broken",  # 文字列(Mappingでない)
+        None,  # キー自体が存在しない(config_values_used自体は空dict)
+        ["not", "a", "mapping"],  # list
+        123,  # int
+    ],
+)
+def test_coverage_tier_excludes_when_config_values_used_entry_is_not_a_mapping(
+    tmp_path: Path, broken_config_values: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """コードレビュー対応: config_values_used["timing_score"]自体がdict
+    (Mapping)でない壊れたデータ(文字列・list・数値等)の場合、
+    "broken".get(...)のようなAttributeErrorでレポート全体を落とさず、
+    coverage_tier分析からのみ安全に除外する。他の分析軸は継続する。"""
+    config_values_used = (
+        {} if broken_config_values is None else {"timing_score": broken_config_values}
+    )
+    decision = _decision("rec-1").model_copy(
+        update={
+            "timing_confidence": ConfidenceLevel.HIGH,
+            "timing_coverage": 0.6,
+            "timing_metrics": {"category": "TAILWIND", "model_version": "timing_v4"},
+            "config_values_used": config_values_used,
+        }
+    )
+    evaluations = [_evaluation("e1", "rec-1", horizon_business_days=60)]
+    service = _service_with(tmp_path, [decision], evaluations)
+
+    with caplog.at_level(logging.WARNING):
+        result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert result.by_coverage_tier == []
+    assert any(
+        DECISION_PERFORMANCE_INVALID_COVERAGE_THRESHOLD_EVENT in r.getMessage()
+        for r in caplog.records
+    )
+    assert {s.bucket_key for s in result.by_category} == {"TAILWIND"}
+    assert {s.bucket_key for s in result.by_confidence} == {"HIGH"}
+    assert {s.bucket_key for s in result.by_model_version} == {"timing_v4"}
+
+
+@pytest.mark.parametrize(
+    "invalid_coverage",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        -0.1,
+        1.1,
+        True,  # bool(int派生だが除外)
+        "0.5",  # 文字列
+    ],
+)
+def test_coverage_tier_excludes_invalid_coverage_value(
+    invalid_coverage: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """コードレビュー対応: coverage自身がNaN/Infinity/範囲外/bool/非数値の
+    場合、coverage_tier分析からのみ除外する。特にNaNは比較演算が常にFalseに
+    なるため、検証しないと誤ってLOWへ分類されてしまう不具合を防ぐ。
+
+    JSON永続化を経由するとNaN/Infinityは自動的にNoneへ、bool/数値文字列は
+    通常のfloatへ丸められてしまい、この検証をすり抜けてしまうため、
+    _StaticDecisionRepoでラウンドトリップを迂回し生の値を直接検証する。"""
+    decision = _decision("rec-1").model_copy(
+        update={
+            "timing_confidence": ConfidenceLevel.HIGH,
+            "timing_coverage": invalid_coverage,
+            "timing_metrics": {"category": "TAILWIND", "model_version": "timing_v4"},
+            "config_values_used": {
+                "timing_score": {
+                    "coverage_high_threshold": 0.9,
+                    "coverage_medium_threshold": 0.5,
+                }
+            },
+        }
+    )
+    evaluations = [_evaluation("e1", "rec-1", horizon_business_days=60)]
+    service = DecisionPerformanceService(
+        evaluation_repository=_StaticEvaluationRepo(evaluations),
+        decision_repository=_StaticDecisionRepo([decision]),
+        config=_config(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = service.summarize_score_segments("timing", horizon_business_days=60, now=_NOW)
+
+    assert result.by_coverage_tier == []
+    assert any(
+        DECISION_PERFORMANCE_INVALID_COVERAGE_THRESHOLD_EVENT in r.getMessage()
+        for r in caplog.records
+    )
+    # 異常値をLOW/HIGHへ丸めない(誤ってLOWへ分類されていないことも直接確認)。
+    assert "LOW" not in {s.bucket_key for s in result.by_coverage_tier}
+    assert {s.bucket_key for s in result.by_category} == {"TAILWIND"}
 
 
 def test_summarize_score_segments_groups_by_individual_model_version(tmp_path: Path) -> None:

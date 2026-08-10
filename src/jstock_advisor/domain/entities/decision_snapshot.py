@@ -48,15 +48,24 @@ from pydantic import Field
 
 from jstock_advisor.domain.entities.base import ImmutableSnapshot
 from jstock_advisor.domain.entities.common import DataSourceReference
-from jstock_advisor.domain.entities.enums import ConfidenceLevel, DecisionType, RecommendationType
+from jstock_advisor.domain.entities.enums import (
+    ConfidenceLevel,
+    DecisionType,
+    PriceRangeEvaluationState,
+    RecommendationType,
+)
 
 # DecisionSnapshot自体のスキーマ/スコアリング方式のバージョン(rule_versionとは別物、
 # rule_versionはBUY/SELL判定ロジック自体のバージョンを指す)。Phase B第一弾
 # (historical_valuation_score実装)、Phase B第二弾(timing_score実装・v2/v3/v4への
 # 再設計、コードレビュー対応)、Phase C(earnings_surprise_score/
-# earnings_trend_score実装・v2/v3への再設計、コードレビュー対応)に伴い値を
-# 上げた。他のスコア項目が実装され始めたらさらに値を上げる。
-DECISION_SNAPSHOT_MODEL_VERSION = "phase_c_earnings_v3"
+# earnings_trend_score実装・v2/v3への再設計、コードレビュー対応)、判定精度向上
+# 機能次フェーズSTEP2(Entry/Exit Price Range Shadow実装)に伴い値を上げた。
+# このバージョン名は累積スキーマを表す(Phase A〜Cの全スコアフィールドは本
+# バージョンでも保持したままであり、失われたわけではない。「Decision
+# Enhancement Layer」全体としての通しバージョンのため、特定フェーズの名前を
+# 冠さない)。他のスコア項目が実装され始めたらさらに値を上げる。
+DECISION_SNAPSHOT_MODEL_VERSION = "decision_enhancement_entry_exit_v1"
 
 
 class DecisionSnapshot(ImmutableSnapshot):
@@ -124,6 +133,34 @@ class DecisionSnapshot(ImmutableSnapshot):
     earnings_trend_coverage: float | None = None
     earnings_trend_reason_codes: tuple[str, ...] = ()
     earnings_trend_metrics: dict[str, Any] = Field(default_factory=dict)
+    # Entry Price Range(4段階の目安買付価格帯)。判定精度向上機能次フェーズ
+    # STEP2で実装済み(domain/signals/entry_price_range.py参照、Shadow計測
+    # 専用)。他4スコアと異なりscoreフィールドを持たないため、stateが
+    # 「評価済みレコードだけを安全に抽出する」ための主要な識別子となる。
+    entry_price_range_state: PriceRangeEvaluationState | None = None
+    entry_price_range_confidence: ConfidenceLevel | None = None
+    entry_price_range_coverage: float | None = None
+    entry_price_range_reason_codes: tuple[str, ...] = ()
+    entry_price_range_metrics: dict[str, Any] = Field(default_factory=dict)
+    entry_price_range_starter_price: Decimal | None = None
+    entry_price_range_preferred_price: Decimal | None = None
+    entry_price_range_strong_price: Decimal | None = None
+    entry_price_range_max_price: Decimal | None = None
+    entry_price_range_stop_review_price: Decimal | None = None
+    # Exit Price Range(一部利確ゾーン・強気利確価格・取得単価基準レビュー
+    # ライン)。判定精度向上機能次フェーズSTEP2で実装済み
+    # (domain/signals/exit_price_range.py参照、Shadow計測専用)。BUY
+    # パイプラインはExitを計算しないため常にNone。
+    exit_price_range_state: PriceRangeEvaluationState | None = None
+    exit_price_range_confidence: ConfidenceLevel | None = None
+    exit_price_range_coverage: float | None = None
+    exit_price_range_reason_codes: tuple[str, ...] = ()
+    exit_price_range_metrics: dict[str, Any] = Field(default_factory=dict)
+    exit_price_range_partial_low_price: Decimal | None = None
+    exit_price_range_partial_high_price: Decimal | None = None
+    exit_price_range_strong_price: Decimal | None = None
+    exit_price_range_downside_review_price: Decimal | None = None
+    exit_price_range_exit_review_price: Decimal | None = None
     market_score: float | None = None
     sector_score: float | None = None
     environment_score: float | None = None

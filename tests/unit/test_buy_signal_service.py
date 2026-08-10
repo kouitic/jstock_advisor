@@ -29,6 +29,7 @@ from jstock_advisor.domain.entities.classification import StockTypeClassificatio
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.earnings_surprise import EarningsSurpriseResult
 from jstock_advisor.domain.entities.earnings_trend import EarningsTrendResult
+from jstock_advisor.domain.entities.entry_price_range import EntryPriceRangeResult
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
     BuyAction,
@@ -37,6 +38,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsSurpriseEvaluationState,
     EarningsTrendEvaluationState,
     HistoricalValuationEvaluationState,
+    PriceRangeEvaluationState,
     RecommendationType,
     StockType,
     TimingScoreEvaluationState,
@@ -180,6 +182,13 @@ _EARNINGS_TREND_PLACEHOLDER = EarningsTrendResult(
     model_version="test-fixture",
 )
 
+_ENTRY_PRICE_RANGE_PLACEHOLDER = EntryPriceRangeResult(
+    state=PriceRangeEvaluationState.NOT_EVALUATED,
+    current_price=Decimal("1000"),
+    evaluated_at=_NOW,
+    model_version="test-fixture",
+)
+
 
 @dataclass(frozen=True)
 class _StockFixture:
@@ -268,6 +277,7 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         timing=_TIMING_PLACEHOLDER,
         earnings_surprise=_EARNINGS_SURPRISE_PLACEHOLDER,
         earnings_trend=_EARNINGS_TREND_PLACEHOLDER,
+        entry_price_range=_ENTRY_PRICE_RANGE_PLACEHOLDER,
     )
 
 

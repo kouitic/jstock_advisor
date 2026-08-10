@@ -23,6 +23,7 @@ from jstock_advisor.config.models import (
     EarningsSurpriseRulesConfig,
     EarningsTrendRulesConfig,
     EarningsWindowRulesConfig,
+    EntryExitPriceRulesConfig,
     EvaluationRulesConfig,
     HistoricalValuationRulesConfig,
     HoldingDecisionRatioRulesConfig,
@@ -163,6 +164,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     earnings_trend = EarningsTrendRulesConfig.model_validate(
         _load_yaml(directory / "earnings_trend_rules.yaml")
     )
+    entry_exit_price = EntryExitPriceRulesConfig.model_validate(
+        _load_yaml(directory / "entry_exit_price_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -194,4 +198,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         timing_score=timing_score,
         earnings_surprise=earnings_surprise,
         earnings_trend=earnings_trend,
+        entry_exit_price=entry_exit_price,
     )
