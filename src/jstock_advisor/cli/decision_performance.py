@@ -160,6 +160,16 @@ def compare(
             f"エラー: --scoreは{_VALID_SCORE_NAMES}のいずれかを指定してください", err=True
         )
         raise typer.Exit(code=1)
+    if min_a is not None and max_a is not None and min_a > max_a:
+        typer.echo(
+            f"エラー: 比較群Aの範囲が不正です(--min-a={min_a} > --max-a={max_a})", err=True
+        )
+        raise typer.Exit(code=1)
+    if min_b is not None and max_b is not None and min_b > max_b:
+        typer.echo(
+            f"エラー: 比較群Bの範囲が不正です(--min-b={min_b} > --max-b={max_b})", err=True
+        )
+        raise typer.Exit(code=1)
     if _ranges_overlap(min_a, max_a, min_b, max_b):
         typer.echo(
             f"エラー: 比較群A([{min_a}, {max_a}])と比較群B([{min_b}, {max_b}])の"

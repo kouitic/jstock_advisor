@@ -7,6 +7,7 @@ Pythonのデフォルトとしては持たせず、YAMLの値のみを正とす�
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -518,9 +519,7 @@ class TimingScoreCategoryThresholds(StrictModel):
                 "strong_headwindの順である必要があります"
             )
         if not (self.strong_headwind >= -100 and self.strong_tailwind <= 100):
-            raise ValueError(
-                "category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります"
-            )
+            raise ValueError("category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります")
         return self
 
 
@@ -624,9 +623,13 @@ class TimingScoreRulesConfig(StrictModel):
             raise ValueError("trend_slope_full_scale_pctは正の値である必要があります")
 
         if not (
-            0 <= self.rsi_oversold_boundary < self.rsi_neutral_boundary
-            < self.rsi_sweet_spot_boundary < self.rsi_caution_boundary
-            < self.rsi_overheat_boundary <= 100
+            0
+            <= self.rsi_oversold_boundary
+            < self.rsi_neutral_boundary
+            < self.rsi_sweet_spot_boundary
+            < self.rsi_caution_boundary
+            < self.rsi_overheat_boundary
+            <= 100
         ):
             raise ValueError(
                 "RSI区分境界は0 <= oversold < neutral < sweet_spot < caution "
@@ -636,25 +639,27 @@ class TimingScoreRulesConfig(StrictModel):
         if self.drawdown_near_high_pct > 0:
             raise ValueError("drawdown_near_high_pctは0以下である必要があります")
         if not (
-            self.drawdown_near_high_pct > self.drawdown_pullback_pct
-            > self.drawdown_neutral_pct
+            self.drawdown_near_high_pct > self.drawdown_pullback_pct > self.drawdown_neutral_pct
         ):
             raise ValueError(
-                "drawdown区分境界はnear_high > pullback > neutralの順(同値不可)"
-                "である必要があります"
+                "drawdown区分境界はnear_high > pullback > neutralの順(同値不可)である必要があります"
             )
 
         if not (
-            self.ma20_breakdown_pct < self.ma20_pullback_low_pct
-            < self.ma20_near_high_pct < self.ma20_overheat_pct
+            self.ma20_breakdown_pct
+            < self.ma20_pullback_low_pct
+            < self.ma20_near_high_pct
+            < self.ma20_overheat_pct
         ):
             raise ValueError(
                 "ma20区分境界はbreakdown < pullback_low < near_high < overheatの"
                 "順である必要があります"
             )
         if not (
-            self.ma60_breakdown_pct < self.ma60_pullback_low_pct
-            < self.ma60_near_high_pct < self.ma60_overheat_pct
+            self.ma60_breakdown_pct
+            < self.ma60_pullback_low_pct
+            < self.ma60_near_high_pct
+            < self.ma60_overheat_pct
         ):
             raise ValueError(
                 "ma60区分境界はbreakdown < pullback_low < near_high < overheatの"
@@ -662,8 +667,11 @@ class TimingScoreRulesConfig(StrictModel):
             )
 
         if not (
-            0 <= self.volume_low_threshold < self.volume_moderate_low
-            <= self.volume_moderate_high < self.volume_extreme_threshold
+            0
+            <= self.volume_low_threshold
+            < self.volume_moderate_low
+            <= self.volume_moderate_high
+            < self.volume_extreme_threshold
         ):
             raise ValueError(
                 "volume区分境界は0 <= low < moderate_low <= moderate_high < extremeの"
@@ -671,9 +679,7 @@ class TimingScoreRulesConfig(StrictModel):
             )
 
         if self.overheat_five_day_return_pct_threshold <= 0:
-            raise ValueError(
-                "overheat_five_day_return_pct_thresholdは正の値である必要があります"
-            )
+            raise ValueError("overheat_five_day_return_pct_thresholdは正の値である必要があります")
         if not (0 <= self.overheat_rsi_threshold <= 100):
             raise ValueError("overheat_rsi_thresholdは0〜100の範囲である必要があります")
         if self.overheat_drawdown_pct_threshold > 0:
@@ -688,8 +694,10 @@ class TimingScoreRulesConfig(StrictModel):
         if not (0 <= self.coverage_high_threshold <= 1):
             raise ValueError("coverage_high_thresholdは0〜1の範囲である必要があります")
         if not (
-            self.min_coverage_required <= self.coverage_medium_threshold
-            < self.coverage_high_threshold <= 1
+            self.min_coverage_required
+            <= self.coverage_medium_threshold
+            < self.coverage_high_threshold
+            <= 1
         ):
             raise ValueError(
                 "min_coverage_required <= coverage_medium_threshold < "
@@ -716,9 +724,7 @@ class EarningsSurpriseCategoryThresholds(StrictModel):
                 "strong_negativeの順である必要があります"
             )
         if not (self.strong_negative >= -100 and self.strong_positive <= 100):
-            raise ValueError(
-                "category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります"
-            )
+            raise ValueError("category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります")
         return self
 
 
@@ -776,8 +782,10 @@ class EarningsSurpriseRulesConfig(StrictModel):
         if not (0 <= self.coverage_high_threshold <= 1):
             raise ValueError("coverage_high_thresholdは0〜1の範囲である必要があります")
         if not (
-            self.min_coverage_required <= self.coverage_medium_threshold
-            < self.coverage_high_threshold <= 1
+            self.min_coverage_required
+            <= self.coverage_medium_threshold
+            < self.coverage_high_threshold
+            <= 1
         ):
             raise ValueError(
                 "min_coverage_required <= coverage_medium_threshold < "
@@ -797,17 +805,14 @@ class EarningsTrendCategoryThresholds(StrictModel):
     @model_validator(mode="after")
     def _check_order(self) -> EarningsTrendCategoryThresholds:
         if not (
-            self.strong_improving > self.improving
-            > self.deteriorating > self.strong_deteriorating
+            self.strong_improving > self.improving > self.deteriorating > self.strong_deteriorating
         ):
             raise ValueError(
                 "category_thresholdsはstrong_improving > improving > deteriorating > "
                 "strong_deterioratingの順である必要があります"
             )
         if not (self.strong_deteriorating >= -100 and self.strong_improving <= 100):
-            raise ValueError(
-                "category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります"
-            )
+            raise ValueError("category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります")
         return self
 
 
@@ -871,8 +876,10 @@ class EarningsTrendRulesConfig(StrictModel):
             raise ValueError("各成分の重みの合計は0より大きい必要があります")
 
         if not (
-            self.trend_strong_decline_pct < self.trend_decline_pct
-            < self.trend_improve_pct < self.trend_strong_improve_pct
+            self.trend_strong_decline_pct
+            < self.trend_decline_pct
+            < self.trend_improve_pct
+            < self.trend_strong_improve_pct
         ):
             raise ValueError(
                 "trend区分境界はstrong_decline < decline < improve < strong_improveの"
@@ -907,8 +914,10 @@ class EarningsTrendRulesConfig(StrictModel):
         if not (0 <= self.coverage_high_threshold <= 1):
             raise ValueError("coverage_high_thresholdは0〜1の範囲である必要があります")
         if not (
-            self.min_coverage_required <= self.coverage_medium_threshold
-            < self.coverage_high_threshold <= 1
+            self.min_coverage_required
+            <= self.coverage_medium_threshold
+            < self.coverage_high_threshold
+            <= 1
         ):
             raise ValueError(
                 "min_coverage_required <= coverage_medium_threshold < "
@@ -1208,9 +1217,7 @@ class MarginOfSafetyAdjustmentMultipliers(StrictModel):
             if value < 0:
                 raise ValueError("adjustment_multipliersは0以上である必要があります")
         if not (self.entry <= self.standard <= self.strong):
-            raise ValueError(
-                "adjustment_multipliersはentry <= standard <= strongの順序が必要です"
-            )
+            raise ValueError("adjustment_multipliersはentry <= standard <= strongの順序が必要です")
         return self
 
 
@@ -1232,9 +1239,7 @@ class MarginOfSafetyMaximumTiers(StrictModel):
             if not (0 < value <= 0.45):
                 raise ValueError("maximum_marginは0.45以下である必要があります")
         if not (self.entry <= self.standard <= self.strong):
-            raise ValueError(
-                "maximum_marginはentry <= standard <= strongの順序が必要です"
-            )
+            raise ValueError("maximum_marginはentry <= standard <= strongの順序が必要です")
         return self
 
 
@@ -1909,6 +1914,289 @@ class AddOnRulesConfig(StrictModel):
     block_add_on_on_odd_lot: bool
 
 
+# --- entry_exit_price_rules.yaml(判定精度向上機能次フェーズSTEP2、Entry/Exit
+# Price Range Shadow) ---------------------------------------------------
+
+
+class EntryMarginByConfidenceTier(StrictModel):
+    """信頼度tier1つ分の、4レベル(max/starter/preferred/strong)ベースmargin
+    (fraction、Historical Valuation調整前)。price = anchor * (1 - margin)の
+    marginであり、値が大きいほど価格は下がる(=より安く買う設定)。"""
+
+    max: float
+    starter: float
+    preferred: float
+    strong: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> EntryMarginByConfidenceTier:
+        if not (self.max < self.starter < self.preferred < self.strong):
+            raise ValueError(
+                "margin_by_confidence_fractionはmax < starter < preferred < strongの"
+                "順である必要があります"
+            )
+        if self.max < 0:
+            raise ValueError("max marginは0以上である必要があります")
+        return self
+
+
+class EntryMarginByConfidence(StrictModel):
+    high: EntryMarginByConfidenceTier
+    medium: EntryMarginByConfidenceTier
+
+
+class HistoricalValuationMarginAdjustmentConfig(StrictModel):
+    """Historical Valuation Categoryごとの、Entry margin調整量(fraction、
+    4レベル全てへ同一加算)。CHEAP系は負(margin縮小=高めに買っても良い)、
+    EXPENSIVE系は正(margin拡大=より安くならないと買わない)。
+
+    category→config値の対応はdict[Category, str]による型安全なlookup
+    (domain/signals/entry_price_range.py)を介して行い、Category.valueでの
+    暗黙dictインデックスは行わない(将来のCategory追加時に無条件でNORMAL
+    扱いされることを防ぐため)。
+    """
+
+    historically_very_cheap: float
+    cheap: float
+    normal: float
+    expensive: float
+    very_expensive: float
+
+    @model_validator(mode="after")
+    def _check_finite(self) -> HistoricalValuationMarginAdjustmentConfig:
+        for name, value in self.model_dump().items():
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"historical_valuation_margin_adjustment_fraction.{name}は"
+                    "有限の値である必要があります"
+                )
+        return self
+
+
+class TimingNudgeStrengthConfig(StrictModel):
+    """Timing Categoryごとの、preferred_entry_priceへのnudge強度(fraction、
+    非負)。方向(現在値側/技術的target側)はcategory自体(TAILWIND系/
+    HEADWIND系)から決定するため、ここでは符号付き値を許可しない(符号付き
+    直接blendは外挿になりうるため設計上禁止)。"""
+
+    strong_tailwind: float
+    tailwind: float
+    neutral: float
+    headwind: float
+    strong_headwind: float
+
+    @model_validator(mode="after")
+    def _check_non_negative_and_finite(self) -> TimingNudgeStrengthConfig:
+        for name, value in self.model_dump().items():
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"timing_nudge_strength_fraction.{name}は有限の値である必要があります"
+                )
+            if value < 0:
+                raise ValueError(
+                    "timing_nudge_strength_fractionは全て0以上(非負の強度)である"
+                    "必要があります(方向はcategoryから決定するため符号付き値は禁止)"
+                )
+        return self
+
+
+class EntryPriceRangeConfig(StrictModel):
+    """Entry Price Range Shadow(判定精度向上機能次フェーズSTEP2)の設定。
+
+    アルゴリズム全体: 信頼度tier別base margin表 → Historical Valuation
+    adjustmentを4レベル全てへ同一加算(floor 0) → Timing nudge(preferredの
+    みtarget+strength方式) → top-down正規化(max→starter→preferred→strongへ
+    min()による一方向キャップ、valuation_ceiling=fair_value_range.neutralを
+    絶対上限とする)。
+    """
+
+    model_version: str
+    margin_by_confidence_fraction: EntryMarginByConfidence
+    historical_valuation_margin_adjustment_fraction: HistoricalValuationMarginAdjustmentConfig
+    timing_nudge_strength_fraction: TimingNudgeStrengthConfig
+    min_price_gap_fraction: float
+    historical_valuation_overlay_weight: float
+    timing_overlay_weight: float
+    technical_ma_overlay_weight: float
+    min_coverage_required: float
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
+
+    @model_validator(mode="after")
+    def _check_values(self) -> EntryPriceRangeConfig:
+        if not (math.isfinite(self.min_price_gap_fraction) and self.min_price_gap_fraction > 0):
+            raise ValueError("min_price_gap_fractionは正の有限値である必要があります")
+        if self.min_price_gap_fraction >= 1:
+            raise ValueError("min_price_gap_fractionは1未満である必要があります")
+        weights = (
+            self.historical_valuation_overlay_weight,
+            self.timing_overlay_weight,
+            self.technical_ma_overlay_weight,
+        )
+        if any((not math.isfinite(w)) or w < 0 for w in weights):
+            raise ValueError("overlay weightは全て0以上の有限値である必要があります")
+        if not math.isclose(sum(weights), 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError(
+                "historical_valuation/timing/technical_ma のoverlay weight合計は"
+                "1.0である必要があります"
+            )
+        if not (0 < self.min_coverage_required <= 1):
+            raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
+        if not (
+            self.min_coverage_required
+            <= self.coverage_medium_threshold
+            < self.coverage_high_threshold
+            <= 1
+        ):
+            raise ValueError(
+                "min_coverage_required <= coverage_medium_threshold < "
+                "coverage_high_threshold <= 1である必要があります"
+            )
+        # コードレビュー対応(STEP2 §7): adjusted_margin = max(0, base_margin +
+        # historical_adjustment)がどの信頼度tier・どのHistorical Valuation
+        # categoryの組み合わせでも1未満であることを起動時に保証する(1以上に
+        # なるとEntry priceが0以下になり得るため)。floorは0側のみなので、
+        # 起こりうる最悪ケースは「最大のadjustment値」を加算した場合。
+        max_adjustment = max(
+            self.historical_valuation_margin_adjustment_fraction.model_dump().values()
+        )
+        for tier in (
+            self.margin_by_confidence_fraction.high,
+            self.margin_by_confidence_fraction.medium,
+        ):
+            for base_margin in (tier.max, tier.starter, tier.preferred, tier.strong):
+                worst_case_margin = max(0.0, base_margin + max_adjustment)
+                if worst_case_margin >= 1:
+                    raise ValueError(
+                        "margin_by_confidence_fractionとhistorical_valuation_margin_"
+                        "adjustment_fractionの組み合わせで、adjusted_marginが1以上に"
+                        "なり得ます(Entry priceが0以下になるため設定を見直してください)"
+                    )
+        return self
+
+
+class HistoricalValuationExitAdjustmentConfig(StrictModel):
+    """Historical Valuation Categoryごとの、Exit adjustment量(fraction、
+    neutral/bull両方のfair valueへ同一適用)。CHEAP系は正(=遅める)、
+    EXPENSIVE系は負(=早める)。"""
+
+    historically_very_cheap: float
+    cheap: float
+    normal: float
+    expensive: float
+    very_expensive: float
+
+    @model_validator(mode="after")
+    def _check_finite(self) -> HistoricalValuationExitAdjustmentConfig:
+        for name, value in self.model_dump().items():
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"historical_valuation_adjustment_fraction.{name}は有限の値である必要があります"
+                )
+        return self
+
+
+class TimingExitAdjustmentConfig(StrictModel):
+    """Timing Categoryごとの、Exit adjustment量(fraction、neutral/bull両方の
+    fair valueへ同一適用)。TAILWIND系は正(=遅める)、HEADWIND系は負
+    (=早める)。"""
+
+    strong_tailwind: float
+    tailwind: float
+    neutral: float
+    headwind: float
+    strong_headwind: float
+
+    @model_validator(mode="after")
+    def _check_finite(self) -> TimingExitAdjustmentConfig:
+        for name, value in self.model_dump().items():
+            if not math.isfinite(value):
+                raise ValueError(f"timing_adjustment_fraction.{name}は有限の値である必要があります")
+        return self
+
+
+class ExitPriceRangeConfig(StrictModel):
+    """Exit Price Range Shadow(判定精度向上機能次フェーズSTEP2)の設定。
+
+    アルゴリズム全体: neutral/bull fair valueへHistorical Valuation/Timing
+    adjustmentを同一適用しadjusted_neutral_fv/adjusted_bull_fvを算出 →
+    partial_low/high(adjusted_neutral_fv基準)・strong(adjusted_bull_fv基準)の
+    3価格算出 → 防御的な下限方向のみの正規化。downside_review_price/
+    exit_review_priceはaverage_purchase_price基準の別系統(loss_tolerance/
+    review_return_thresholdのみに依存し、上記3価格には一切影響しない)。
+    """
+
+    model_version: str
+    historical_valuation_adjustment_fraction: HistoricalValuationExitAdjustmentConfig
+    timing_adjustment_fraction: TimingExitAdjustmentConfig
+    partial_zone_width_fraction: float
+    min_price_gap_fraction: float
+    loss_tolerance_fraction: float
+    review_return_threshold_fraction: float
+    historical_valuation_overlay_weight: float
+    timing_overlay_weight: float
+    min_coverage_required: float
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
+
+    @model_validator(mode="after")
+    def _check_values(self) -> ExitPriceRangeConfig:
+        if not (
+            math.isfinite(self.partial_zone_width_fraction)
+            and 0 <= self.partial_zone_width_fraction < 1
+        ):
+            raise ValueError("partial_zone_width_fractionは0以上1未満の有限値である必要があります")
+        if not (math.isfinite(self.min_price_gap_fraction) and 0 < self.min_price_gap_fraction < 1):
+            raise ValueError("min_price_gap_fractionは0より大きく1未満の有限値である必要があります")
+        if not (
+            math.isfinite(self.loss_tolerance_fraction) and 0 <= self.loss_tolerance_fraction < 1
+        ):
+            raise ValueError("loss_tolerance_fractionは0以上1未満の有限値である必要があります")
+        if not (
+            math.isfinite(self.review_return_threshold_fraction)
+            and self.review_return_threshold_fraction >= 0
+        ):
+            raise ValueError("review_return_threshold_fractionは0以上の有限値である必要があります")
+        weights = (self.historical_valuation_overlay_weight, self.timing_overlay_weight)
+        if any((not math.isfinite(w)) or w < 0 for w in weights):
+            raise ValueError("overlay weightは全て0以上の有限値である必要があります")
+        if not math.isclose(sum(weights), 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError(
+                "historical_valuation/timing のoverlay weight合計は1.0である必要があります"
+            )
+        if not (0 < self.min_coverage_required <= 1):
+            raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
+        if not (
+            self.min_coverage_required
+            <= self.coverage_medium_threshold
+            < self.coverage_high_threshold
+            <= 1
+        ):
+            raise ValueError(
+                "min_coverage_required <= coverage_medium_threshold < "
+                "coverage_high_threshold <= 1である必要があります"
+            )
+        # コードレビュー対応(STEP2 §8): 1 + historical_adjustment +
+        # timing_adjustmentがどのcategoryの組み合わせでも0より大きいことを
+        # 起動時に保証する(0以下になるとExit priceが0以下になり得るため)。
+        # 最悪ケースは両方の最小値を同時に採用した場合。
+        min_hv_adjustment = min(self.historical_valuation_adjustment_fraction.model_dump().values())
+        min_timing_adjustment = min(self.timing_adjustment_fraction.model_dump().values())
+        if not (1 + min_hv_adjustment + min_timing_adjustment > 0):
+            raise ValueError(
+                "historical_valuation_adjustment_fractionとtiming_adjustment_"
+                "fractionの最小値同士を同時に適用した場合でも、1+adjustment合計は"
+                "0より大きい必要があります(Exit priceが0以下になるため設定を"
+                "見直してください)"
+            )
+        return self
+
+
+class EntryExitPriceRulesConfig(StrictModel):
+    entry: EntryPriceRangeConfig
+    exit: ExitPriceRangeConfig
+
+
 class AppConfig(StrictModel):
     screening: ScreeningRulesConfig
     valuation: ValuationRulesConfig
@@ -1945,3 +2233,6 @@ class AppConfig(StrictModel):
     # --- 判定精度向上機能Phase C: Earnings Surprise/Trend Score(2026-08)で追加 ---
     earnings_surprise: EarningsSurpriseRulesConfig
     earnings_trend: EarningsTrendRulesConfig
+    # --- 判定精度向上機能次フェーズSTEP2: Entry/Exit Price Range Shadow
+    # (2026-08)で追加 ---
+    entry_exit_price: EntryExitPriceRulesConfig

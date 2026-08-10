@@ -22,6 +22,7 @@ from jstock_advisor.domain.entities.common import (
 )
 from jstock_advisor.domain.entities.earnings_surprise import EarningsSurpriseResult
 from jstock_advisor.domain.entities.earnings_trend import EarningsTrendResult
+from jstock_advisor.domain.entities.entry_price_range import EntryPriceRangeResult
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EarningsDateStatus,
@@ -51,6 +52,7 @@ from jstock_advisor.domain.signals.earnings_window import (
     resolve_earnings_release_confirmation,
     resolve_latest_financial_period_end,
 )
+from jstock_advisor.domain.signals.entry_price_range import evaluate_entry_price_range
 from jstock_advisor.domain.signals.historical_valuation import evaluate_historical_valuation
 from jstock_advisor.domain.signals.momentum import compute_momentum_snapshot
 from jstock_advisor.domain.signals.timing_score import evaluate_timing_score
@@ -146,6 +148,14 @@ class StockSnapshot:
     # ロジックには一切影響しない。
     earnings_surprise: EarningsSurpriseResult
     earnings_trend: EarningsTrendResult
+    # --- 判定精度向上機能次フェーズSTEP2: Entry Price Range Shadow(2026-08
+    # 追加) ---
+    # fair_value_range.neutralを絶対上限とした4段階の目安買付価格帯。
+    # DecisionSnapshot記録専用のShadow計測であり、既存のBUY候補判定・
+    # entry_buy_price/standard_buy_price/strong_buy_price・保有判断スコア・
+    # 旧売却判定・ProfitTaking判定・LINE通知など既存の判定ロジックからは
+    # 一切参照されない。
+    entry_price_range: EntryPriceRangeResult
 
 
 def build_stock_snapshot(
@@ -479,6 +489,21 @@ def build_stock_snapshot(
         config.earnings_trend,
     )
 
+    # 判定精度向上機能次フェーズSTEP2: Entry Price Range(Shadow計測)。
+    # fair_value_range/historical_valuation/timing/momentumは全て既に算出済みの
+    # 値をそのまま使う(新規Provider呼び出しは行わない)。既存のBUY候補判定・
+    # entry_buy_price/standard_buy_price/strong_buy_price・保有判断スコア・
+    # 旧売却判定・ProfitTaking判定・LINE通知には一切影響しない。
+    entry_price_range = evaluate_entry_price_range(
+        fair_value_range,
+        historical_valuation,
+        timing,
+        momentum_snapshot,
+        current_price,
+        now,
+        config.entry_exit_price.entry,
+    )
+
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
@@ -516,5 +541,6 @@ def build_stock_snapshot(
         timing=timing,
         earnings_surprise=earnings_surprise,
         earnings_trend=earnings_trend,
+        entry_price_range=entry_price_range,
     )
     return snapshot, None

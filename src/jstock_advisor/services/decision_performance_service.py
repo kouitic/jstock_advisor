@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
 import statistics
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -261,20 +262,55 @@ def _is_valid_threshold_pair(medium: object, high: object) -> bool:
         return False
     if not isinstance(medium, int | float) or not isinstance(high, int | float):
         return False
+    if not (math.isfinite(medium) and math.isfinite(high)):
+        return False
     return 0 <= medium < high <= 1
+
+
+def _is_valid_coverage(value: object) -> bool:
+    """coverage自身がNaN/Infinity/範囲外/bool/非数値でないことを検証する。
+    コードレビュー対応: NaNは比較演算がすべてFalseになるため、検証せずに
+    素通しすると`coverage >= high`/`coverage >= medium`がいずれもFalseとなり
+    誤ってLOWへ分類されてしまう(異常値を勝手にLOW/HIGHへ丸めない)。"""
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, int | float):
+        return False
+    numeric = float(value)
+    return math.isfinite(numeric) and 0 <= numeric <= 1
 
 
 def _extract_coverage_tier(decision: DecisionSnapshot, score_name: ScoreName) -> str | None:
     """当時実際に使われたcoverage閾値(DecisionSnapshot.config_values_used)から
     分類する。現在ロードしたAppConfigの閾値は一切使わない(過去判断を現在
-    ロジックで再計算しない、というPhase Aの原則を厳守する)。閾値が当時
-    保存されていない、または壊れている(型不正・範囲外・medium>=high等)場合は
+    ロジックで再計算しない、というPhase Aの原則を厳守する)。coverage自身、
+    config_values_usedのネスト値の型、閾値ペアのいずれかが壊れている
+    (欠損・型不正・Mapping以外・NaN/Infinity・範囲外・medium>=high等)場合は
     推測せず、当該DecisionSnapshotをcoverage_tier分析からのみ除外する
-    (他の分析軸には影響しない)。"""
+    (category/confidence/model_version等の他の分析軸には影響しない。1件の
+    異常な過去Snapshotでレポート全体を失敗させない)。"""
     coverage = getattr(decision, f"{score_name}_coverage", None)
     if coverage is None:
         return None
-    score_values = decision.config_values_used.get(_CONFIG_VALUES_KEY[score_name], {})
+    if not _is_valid_coverage(coverage):
+        logger.warning(
+            "%s score=%s decision_id=%s coverage=%r",
+            DECISION_PERFORMANCE_INVALID_COVERAGE_THRESHOLD_EVENT,
+            score_name,
+            decision.decision_id,
+            coverage,
+        )
+        return None
+    score_values = decision.config_values_used.get(_CONFIG_VALUES_KEY[score_name])
+    if not isinstance(score_values, Mapping):
+        logger.warning(
+            "%s score=%s decision_id=%s config_values=%r",
+            DECISION_PERFORMANCE_INVALID_COVERAGE_THRESHOLD_EVENT,
+            score_name,
+            decision.decision_id,
+            score_values,
+        )
+        return None
     high = score_values.get("coverage_high_threshold")
     medium = score_values.get("coverage_medium_threshold")
     if not _is_valid_threshold_pair(medium, high):

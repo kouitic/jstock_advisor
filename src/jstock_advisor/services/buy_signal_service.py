@@ -65,6 +65,10 @@ from jstock_advisor.domain.signals.earnings_trend import (
     earnings_trend_config_values,
     earnings_trend_result_to_metrics,
 )
+from jstock_advisor.domain.signals.entry_price_range import (
+    entry_price_range_config_values,
+    entry_price_range_result_to_metrics,
+)
 from jstock_advisor.domain.signals.eps_normalization import normalize_eps
 from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
@@ -753,6 +757,9 @@ class BuySignalService:
                     self._config.earnings_surprise
                 ),
                 "earnings_trend": earnings_trend_config_values(self._config.earnings_trend),
+                "entry_price_range": entry_price_range_config_values(
+                    self._config.entry_exit_price.entry
+                ),
             },
             data_sources=list(snapshot.data_sources),
             industry_model_applied=industry_model_applied,
@@ -828,6 +835,26 @@ class BuySignalService:
             earnings_trend_coverage=snapshot.earnings_trend.coverage,
             earnings_trend_reason_codes=snapshot.earnings_trend.reason_codes,
             earnings_trend_metrics=earnings_trend_result_to_metrics(snapshot.earnings_trend),
+            # 判定精度向上機能次フェーズSTEP2: DecisionSnapshot記録専用(Shadow
+            # 計測)。BUYパイプラインはExit Price Rangeを計算しないため
+            # exit_price_range_*は全てNoneのまま(デフォルト)。
+            entry_price_range_state=snapshot.entry_price_range.state,
+            entry_price_range_confidence=snapshot.entry_price_range.confidence,
+            entry_price_range_coverage=snapshot.entry_price_range.coverage,
+            entry_price_range_reason_codes=snapshot.entry_price_range.reason_codes,
+            entry_price_range_metrics=entry_price_range_result_to_metrics(
+                snapshot.entry_price_range,
+                snapshot.fair_value_range,
+                snapshot.historical_valuation,
+                snapshot.timing,
+                snapshot.momentum,
+                self._config.entry_exit_price.entry,
+            ),
+            entry_price_range_starter_price=snapshot.entry_price_range.starter_entry_price,
+            entry_price_range_preferred_price=snapshot.entry_price_range.preferred_entry_price,
+            entry_price_range_strong_price=snapshot.entry_price_range.strong_entry_price,
+            entry_price_range_max_price=snapshot.entry_price_range.max_entry_price,
+            entry_price_range_stop_review_price=snapshot.entry_price_range.stop_review_price,
         )
 
         return BuyAnalysisOutcome(

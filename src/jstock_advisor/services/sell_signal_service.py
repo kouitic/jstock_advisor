@@ -40,6 +40,15 @@ from jstock_advisor.domain.signals.earnings_trend import (
     earnings_trend_config_values,
     earnings_trend_result_to_metrics,
 )
+from jstock_advisor.domain.signals.entry_price_range import (
+    entry_price_range_config_values,
+    entry_price_range_result_to_metrics,
+)
+from jstock_advisor.domain.signals.exit_price_range import (
+    evaluate_exit_price_range,
+    exit_price_range_config_values,
+    exit_price_range_result_to_metrics,
+)
 from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
     historical_valuation_result_to_metrics,
@@ -390,6 +399,22 @@ class SellSignalService:
 
         evidence_details = result.evidence_details
 
+        # 判定精度向上機能次フェーズSTEP2: Exit Price Range(Shadow計測)。
+        # SELL(legacy)判定が実際にRecommendationを構築すると決まった時点
+        # (HOLD等の早期returnより後)でのみ計算する。既存の早期return・
+        # 判定条件分岐の実行順は一切変更しない。Builder(holding_decision_
+        # notification_builder.py)は算出せずコピーのみ行う設計のため、ここが
+        # 唯一の算出箇所。
+        exit_price_range = evaluate_exit_price_range(
+            snapshot.fair_value_range,
+            snapshot.historical_valuation,
+            snapshot.timing,
+            holding.average_purchase_price,
+            snapshot.current_price,
+            now,
+            self._config.entry_exit_price.exit,
+        )
+
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
             stock_code=holding.stock_code,
@@ -431,6 +456,12 @@ class SellSignalService:
                     self._config.earnings_surprise
                 ),
                 "earnings_trend": earnings_trend_config_values(self._config.earnings_trend),
+                "entry_price_range": entry_price_range_config_values(
+                    self._config.entry_exit_price.entry
+                ),
+                "exit_price_range": exit_price_range_config_values(
+                    self._config.entry_exit_price.exit
+                ),
             },
             data_sources=list(snapshot.data_sources),
             recommended_action_summary=_build_action_summary(recommendation_type),
@@ -469,6 +500,43 @@ class SellSignalService:
             earnings_trend_coverage=snapshot.earnings_trend.coverage,
             earnings_trend_reason_codes=snapshot.earnings_trend.reason_codes,
             earnings_trend_metrics=earnings_trend_result_to_metrics(snapshot.earnings_trend),
+            # 判定精度向上機能次フェーズSTEP2: DecisionSnapshot記録専用
+            # (Shadow計測)。Entryはsnapshot算出済みの値をそのままコピー、
+            # Exitは上記で算出済みのexit_price_rangeをコピーする。
+            entry_price_range_state=snapshot.entry_price_range.state,
+            entry_price_range_confidence=snapshot.entry_price_range.confidence,
+            entry_price_range_coverage=snapshot.entry_price_range.coverage,
+            entry_price_range_reason_codes=snapshot.entry_price_range.reason_codes,
+            entry_price_range_metrics=entry_price_range_result_to_metrics(
+                snapshot.entry_price_range,
+                snapshot.fair_value_range,
+                snapshot.historical_valuation,
+                snapshot.timing,
+                snapshot.momentum,
+                self._config.entry_exit_price.entry,
+            ),
+            entry_price_range_starter_price=snapshot.entry_price_range.starter_entry_price,
+            entry_price_range_preferred_price=snapshot.entry_price_range.preferred_entry_price,
+            entry_price_range_strong_price=snapshot.entry_price_range.strong_entry_price,
+            entry_price_range_max_price=snapshot.entry_price_range.max_entry_price,
+            entry_price_range_stop_review_price=snapshot.entry_price_range.stop_review_price,
+            exit_price_range_state=exit_price_range.state,
+            exit_price_range_confidence=exit_price_range.confidence,
+            exit_price_range_coverage=exit_price_range.coverage,
+            exit_price_range_reason_codes=exit_price_range.reason_codes,
+            exit_price_range_metrics=exit_price_range_result_to_metrics(
+                exit_price_range,
+                snapshot.fair_value_range,
+                snapshot.historical_valuation,
+                snapshot.timing,
+                holding.average_purchase_price,
+                self._config.entry_exit_price.exit,
+            ),
+            exit_price_range_partial_low_price=exit_price_range.partial_profit_take_low_price,
+            exit_price_range_partial_high_price=exit_price_range.partial_profit_take_high_price,
+            exit_price_range_strong_price=exit_price_range.strong_profit_take_price,
+            exit_price_range_downside_review_price=exit_price_range.downside_review_price,
+            exit_price_range_exit_review_price=exit_price_range.exit_review_price,
         )
         return SellSignalOutcome(
             holding.stock_code, recommendation, None, tuple(result.triggered_rules)

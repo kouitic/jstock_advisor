@@ -1,0 +1,81 @@
+# 判定精度向上機能次フェーズSTEP2: Entry/Exit Price Range Shadowの設定。
+#
+# 既存のBUY/保有判断スコア/旧SELL/ProfitTaking判定、および
+# entry_buy_price/standard_buy_price/strong_buy_price/buy_prices/sell_prices
+# には一切影響しない、DecisionSnapshot記録専用のShadow計測値の算出に
+# 使われる設定値。
+
+entry:
+  model_version: "entry_price_range_v1"
+  # 信頼度tier(HIGH/MEDIUM)別、4レベル(max/starter/preferred/strong)の
+  # ベースmargin(fraction、Historical Valuation調整前)。
+  margin_by_confidence_fraction:
+    high:
+      max: 0.02
+      starter: 0.05
+      preferred: 0.10
+      strong: 0.18
+    medium:
+      max: 0.04
+      starter: 0.08
+      preferred: 0.14
+      strong: 0.24
+  # Historical Valuation Categoryごとの、Entry margin調整量(4レベル全てへ
+  # 同一加算)。CHEAP系は負(margin縮小)、EXPENSIVE系は正(margin拡大)。
+  historical_valuation_margin_adjustment_fraction:
+    historically_very_cheap: -0.03
+    cheap: -0.015
+    normal: 0.0
+    expensive: 0.02
+    very_expensive: 0.04
+  # Timing Categoryごとの、preferred_entry_priceへのnudge強度(非負)。
+  timing_nudge_strength_fraction:
+    strong_tailwind: 0.20
+    tailwind: 0.10
+    neutral: 0.0
+    headwind: 0.10
+    strong_headwind: 0.20
+  # top-down正規化(min()による一方向キャップ)で使う、隣接レベル間の
+  # 最低限のギャップ(fraction)。
+  min_price_gap_fraction: 0.02
+  # coverage算出用のoverlay weight(合計1.0)。
+  historical_valuation_overlay_weight: 0.34
+  timing_overlay_weight: 0.33
+  technical_ma_overlay_weight: 0.33
+  min_coverage_required: 0.34
+  coverage_high_threshold: 0.9
+  coverage_medium_threshold: 0.34
+
+exit:
+  model_version: "exit_price_range_v1"
+  # Historical Valuation Categoryごとの、Exit adjustment量(neutral/bull
+  # 両方のfair valueへ同一適用)。CHEAP系は正(遅める)、EXPENSIVE系は負
+  # (早める)。
+  historical_valuation_adjustment_fraction:
+    historically_very_cheap: 0.02
+    cheap: 0.01
+    normal: 0.0
+    expensive: -0.02
+    very_expensive: -0.04
+  # Timing Categoryごとの、Exit adjustment量(neutral/bull両方のfair value
+  # へ同一適用)。TAILWIND系は正(遅める)、HEADWIND系は負(早める)。
+  timing_adjustment_fraction:
+    strong_tailwind: 0.02
+    tailwind: 0.01
+    neutral: 0.0
+    headwind: -0.01
+    strong_headwind: -0.02
+  # adjusted_neutral_fvを中心にした一部利確ゾーンの幅(fraction、片側)。
+  partial_zone_width_fraction: 0.015
+  # 防御的な下限方向のみの正規化で使う、隣接価格間の最低限のギャップ。
+  min_price_gap_fraction: 0.02
+  # average_purchase_price基準のdownside_review_price算出用(fraction)。
+  loss_tolerance_fraction: 0.08
+  # average_purchase_price基準のexit_review_price算出用(fraction)。
+  review_return_threshold_fraction: 0.05
+  # coverage算出用のoverlay weight(合計1.0)。
+  historical_valuation_overlay_weight: 0.5
+  timing_overlay_weight: 0.5
+  min_coverage_required: 0.5
+  coverage_high_threshold: 0.9
+  coverage_medium_threshold: 0.5

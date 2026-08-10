@@ -57,6 +57,7 @@ from jstock_advisor.domain.entities.evaluation_audit import HoldingEvaluationAud
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.signals.exit_price_range import evaluate_exit_price_range
 from jstock_advisor.domain.signals.holding_decision_execution_plan import (
     resolve_execution_plan,
     resolve_financial_deferred_policy,
@@ -266,12 +267,25 @@ def _notify_holding_decision_and_build_result(
     (コードレビュー対応)。LINE送信のみ`notification_enabled`で制御する。
     """
     recommendation_id = str(uuid.uuid4())
+    # 判定精度向上機能次フェーズSTEP2: Exit Price Range(Shadow計測)。
+    # HoldingDecisionパイプラインではここ(holdingとsnapshotが揃う唯一の
+    # 箇所)で1回だけ計算し、Builderへ渡す(Builder自身は算出しない)。
+    exit_price_range = evaluate_exit_price_range(
+        snapshot.fair_value_range,
+        snapshot.historical_valuation,
+        snapshot.timing,
+        holding.average_purchase_price,
+        snapshot.current_price,
+        now,
+        config.entry_exit_price.exit,
+    )
     recommendation = build_holding_decision_recommendation(
         holding,
         result,
         snapshot,
         str(config.holding_decision.scoring_model_version),
         config,
+        exit_price_range,
         recommendation_id=recommendation_id,
     )
     linked_result = result.model_copy(update={"recommendation_id": recommendation_id})

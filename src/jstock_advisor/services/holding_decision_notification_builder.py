@@ -15,6 +15,7 @@ from jstock_advisor.domain.entities.enums import (
     HoldingDecisionConfidenceLevel,
     RecommendationType,
 )
+from jstock_advisor.domain.entities.exit_price_range import ExitPriceRangeResult
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult, ReasonImpact
 from jstock_advisor.domain.entities.recommendation import Recommendation
@@ -25,6 +26,14 @@ from jstock_advisor.domain.signals.earnings_surprise import (
 from jstock_advisor.domain.signals.earnings_trend import (
     earnings_trend_config_values,
     earnings_trend_result_to_metrics,
+)
+from jstock_advisor.domain.signals.entry_price_range import (
+    entry_price_range_config_values,
+    entry_price_range_result_to_metrics,
+)
+from jstock_advisor.domain.signals.exit_price_range import (
+    exit_price_range_config_values,
+    exit_price_range_result_to_metrics,
 )
 from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
@@ -83,6 +92,7 @@ def build_holding_decision_recommendation(
     snapshot: StockSnapshot,
     rule_version: str,
     config: AppConfig,
+    exit_price_range: ExitPriceRangeResult,
     recommendation_id: str | None = None,
 ) -> Recommendation:
     """should_notify=true(=このHoldingDecisionResultは通知対象)の場合にのみ呼ぶ。
@@ -90,6 +100,11 @@ def build_holding_decision_recommendation(
     configは判定精度向上機能Phase B(Historical Valuation Score)のconfig_values_
     used記録専用(コードレビュー対応)。保有判断スコア自体の算出には一切使わない
     (15節の既存原則を維持)。
+
+    exit_price_range(判定精度向上機能次フェーズSTEP2)は呼び出し元
+    (lambda_handlers/holdings_watchlist_handler.py)が既に算出済みの値を
+    そのまま受け取る。本関数自身はEntry/Exit Price Rangeを一切算出しない
+    (Shadow計測の算出責務は呼び出し元に一元化する設計原則)。
     """
     if result.hard_gate.triggered:
         recommendation_type = RecommendationType.URGENT_HOLDING_REVIEW
@@ -155,6 +170,8 @@ def build_holding_decision_recommendation(
             "timing_score": timing_score_config_values(config.timing_score),
             "earnings_surprise": earnings_surprise_config_values(config.earnings_surprise),
             "earnings_trend": earnings_trend_config_values(config.earnings_trend),
+            "entry_price_range": entry_price_range_config_values(config.entry_exit_price.entry),
+            "exit_price_range": exit_price_range_config_values(config.entry_exit_price.exit),
         },
         data_sources=list(snapshot.data_sources),
         recommended_action_summary=action_summary,
@@ -189,4 +206,42 @@ def build_holding_decision_recommendation(
         earnings_trend_coverage=snapshot.earnings_trend.coverage,
         earnings_trend_reason_codes=snapshot.earnings_trend.reason_codes,
         earnings_trend_metrics=earnings_trend_result_to_metrics(snapshot.earnings_trend),
+        # 判定精度向上機能次フェーズSTEP2: DecisionSnapshot記録専用
+        # (Shadow計測)。Entryはsnapshot算出済みの値をそのままコピー、
+        # Exitは呼び出し元が算出済みのexit_price_rangeをコピーする
+        # (本関数自身は算出しない)。
+        entry_price_range_state=snapshot.entry_price_range.state,
+        entry_price_range_confidence=snapshot.entry_price_range.confidence,
+        entry_price_range_coverage=snapshot.entry_price_range.coverage,
+        entry_price_range_reason_codes=snapshot.entry_price_range.reason_codes,
+        entry_price_range_metrics=entry_price_range_result_to_metrics(
+            snapshot.entry_price_range,
+            snapshot.fair_value_range,
+            snapshot.historical_valuation,
+            snapshot.timing,
+            snapshot.momentum,
+            config.entry_exit_price.entry,
+        ),
+        entry_price_range_starter_price=snapshot.entry_price_range.starter_entry_price,
+        entry_price_range_preferred_price=snapshot.entry_price_range.preferred_entry_price,
+        entry_price_range_strong_price=snapshot.entry_price_range.strong_entry_price,
+        entry_price_range_max_price=snapshot.entry_price_range.max_entry_price,
+        entry_price_range_stop_review_price=snapshot.entry_price_range.stop_review_price,
+        exit_price_range_state=exit_price_range.state,
+        exit_price_range_confidence=exit_price_range.confidence,
+        exit_price_range_coverage=exit_price_range.coverage,
+        exit_price_range_reason_codes=exit_price_range.reason_codes,
+        exit_price_range_metrics=exit_price_range_result_to_metrics(
+            exit_price_range,
+            snapshot.fair_value_range,
+            snapshot.historical_valuation,
+            snapshot.timing,
+            holding.average_purchase_price,
+            config.entry_exit_price.exit,
+        ),
+        exit_price_range_partial_low_price=exit_price_range.partial_profit_take_low_price,
+        exit_price_range_partial_high_price=exit_price_range.partial_profit_take_high_price,
+        exit_price_range_strong_price=exit_price_range.strong_profit_take_price,
+        exit_price_range_downside_review_price=exit_price_range.downside_review_price,
+        exit_price_range_exit_review_price=exit_price_range.exit_review_price,
     )

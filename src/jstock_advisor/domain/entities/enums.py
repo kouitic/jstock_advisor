@@ -353,6 +353,20 @@ class EarningsTrendCategory(StrEnum):
     STRONG_DETERIORATING = "STRONG_DETERIORATING"
 
 
+class PriceRangeEvaluationState(StrEnum):
+    """Entry/Exit Price Range(判定精度向上機能次フェーズSTEP2)が実際に
+    算出されたか、算出不可だったか、対象外だったかの区分。Entry/Exitには
+    他の4スコアのような単一のscoreが無いため、DecisionPerformance等が
+    「評価済みレコードだけを安全に抽出する」ための主要な識別子となる
+    (Recommendation/DecisionSnapshotへ明示フィールドとして保存する)。"""
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    # 将来、決算反映待ち等の理由でPrice Range自体を意図的に見送る場合に
+    # 使う想定で予約(v1では未使用でも他4スコアと同じ3区分構造に揃える)。
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
 class ImprovementPriority(StrEnum):
     """週次改善レビュー(振り返り機能改修)の改善候補優先度。"""
 

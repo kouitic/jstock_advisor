@@ -370,6 +370,22 @@ EvaluationResultのうち、`config/decision_evaluation.yaml`の
 専用の振り返り処理を別途動かすものではないため、本コマンドを実行しても
 新たな株価取得・LINE通知は発生しない。
 
+**スコア別の詳細分析(2026-08追加、functional_spec.md 12.10節)**:
+```bash
+# 過去バリュエーション比較スコアをカテゴリ・信頼度・カバレッジ・
+# model_version別に分析(--horizonは必須)
+jstock decision-performance segments --score historical_valuation --horizon 60
+
+# 2つのスコア範囲グループの成績を比較(範囲が重複する場合はエラー終了)
+jstock decision-performance compare --score timing \
+  --label-a "TAILWIND寄り" --min-a 20 \
+  --label-b "HEADWIND寄り" --max-b -20 --horizon 60
+```
+`--score`には`historical_valuation`/`timing`/`earnings_surprise`/
+`earnings_trend`のいずれかを指定する。分析は各DecisionSnapshotに保存
+された「判定当時に実際に使用した設定値」のみを使い、現在の設定・現在の
+カテゴリ定義では再解釈しない。
+
 **保存失敗時の確認方法**: DecisionSnapshotの保存に失敗した場合、
 CloudWatch Logsに固定イベントキー`decision_snapshot_save_failed`
 (`stock_code`/`recommendation_id`/`decision_type`付き)でWARNINGログが

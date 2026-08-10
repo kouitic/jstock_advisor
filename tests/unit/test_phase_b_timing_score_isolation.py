@@ -23,9 +23,11 @@ from jstock_advisor.domain.entities.enums import (
     ExecutionPlanReason,
     HoldingDecisionCategory,
     HoldingDecisionConfidenceLevel,
+    PriceRangeEvaluationState,
     TimingScoreCategory,
     TimingScoreEvaluationState,
 )
+from jstock_advisor.domain.entities.exit_price_range import ExitPriceRangeResult
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import (
     CompanyQualityScore,
@@ -50,6 +52,12 @@ _NOW = dt.datetime(2026, 8, 9, tzinfo=dt.UTC)
 _STOCK_CODE = "2914"
 _PROVIDERS = build_mock_provider_bundle(_NOW)
 _CALENDAR = BusinessCalendar.from_config(_CFG.holiday_calendar)
+_NOT_EVALUATED_EXIT_PRICE_RANGE = ExitPriceRangeResult(
+    state=PriceRangeEvaluationState.NOT_EVALUATED,
+    current_price=Decimal("1000"),
+    evaluated_at=_NOW,
+    model_version="exit_price_range_v1",
+)
 
 
 def _result_variant(score: float, confidence: ConfidenceLevel) -> TimingScoreResult:
@@ -190,8 +198,12 @@ def test_holding_decision_builder_ignores_timing_score() -> None:
     holding = _holding()
     result = _holding_decision_result()
 
-    rec_a = build_holding_decision_recommendation(holding, result, variant_a, "v1", _CFG)
-    rec_b = build_holding_decision_recommendation(holding, result, variant_b, "v1", _CFG)
+    rec_a = build_holding_decision_recommendation(
+        holding, result, variant_a, "v1", _CFG, _NOT_EVALUATED_EXIT_PRICE_RANGE
+    )
+    rec_b = build_holding_decision_recommendation(
+        holding, result, variant_b, "v1", _CFG, _NOT_EVALUATED_EXIT_PRICE_RANGE
+    )
 
     assert rec_a.timing_score == -77.0
     assert rec_b.timing_score == 41.0
