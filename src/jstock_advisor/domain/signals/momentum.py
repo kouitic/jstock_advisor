@@ -193,41 +193,79 @@ def compute_momentum_snapshot(
     benchmark_bars: list[PriceBar] | None = None,
     sector_bars: list[PriceBar] | None = None,
 ) -> MomentumSnapshot:
-    """as_of_dateはcurrent_priceの実際のas-of日付(例: PriceSnapshot.as_of_date)。
-    current_priceとbars(いずれも別Provider呼び出し由来であり、時点が一致する
-    保証はコード上に無い。コードレビュー対応v3)の時点整合性を、bars[-1].dateと
-    as_of_dateの一致で確認する。一致しない場合、one_day_return_pct/
-    five_day_return_pctは補完せずNoneのまま(推測で同一時点とみなさない)。
+    """MomentumSnapshotを算出する(コードレビュー対応v4でlook-ahead bias対策を
+    強化)。
+
+    入力前提:
+    - bars/benchmark_bars/sector_barsはいずれも日付昇順であることが前提
+      (compute_moving_average等、本モジュールの既存関数群と同じ前提)。
+    - as_of_dateはcurrent_priceの実際のas-of日付(例: PriceSnapshot.as_of_date)。
+      current_priceとbars(いずれも別Provider呼び出し由来であり、時点が一致する
+      保証はコード上に無い。コードレビュー対応v3)。
+
+    未来バーの扱い(コードレビュー対応v4): as_of_dateより未来の日付を持つ
+    PriceBarがbarsへ混入していた場合、MA20/60/120/200・MA20 slope・high・
+    drawdown・volume_ratio・RSI・MACD・trailing_stop・relative strength(TOPIX/
+    セクター)を含む**全てのtechnical計算**から内部的に除外する
+    (`effective_bars`/`effective_benchmark_bars`/`effective_sector_bars`のみを
+    使う)。以前のバージョンはone_day_return_pct/five_day_return_pctのみを
+    無効化し、他のtechnical指標は未来バーを含んだまま計算していたため
+    look-ahead biasとなっていた。current_price自体はas-of日付の実測値であり、
+    未来バーの有無によって補正・書き換えは行わない。
+
+    未来バー除外後の整合性判定: effective_bars[-1].dateがas_of_dateと一致
+    しない(=historyがcurrent_priceより古い、behind)場合、one_day_return_pct/
+    five_day_return_pctは算出せずNoneのまま(推測で同一時点とみなさない)。
+    未来バーを除外した結果effective_bars[-1].date == as_of_dateとなった場合は
+    (未来バーが存在したこと自体を理由に)無条件でNoneにはしない。
     """
-    ma20 = compute_moving_average(bars, 20)
-    ma60 = compute_moving_average(bars, 60)
-    ma120 = compute_moving_average(bars, 120)
-    ma200 = compute_moving_average(bars, 200)
-    ma20_slope_pct = compute_ma_slope_pct(bars, 20, config.moving_averages.slope_lookback_days)
-    high_20d = compute_high_over_window(bars, config.high_low.high_window_days_short)
-    high_60d = compute_high_over_window(bars, config.high_low.high_window_days_long)
+    effective_bars = [b for b in bars if b.date <= as_of_date]
+    price_history_has_future_bars = len(effective_bars) < len(bars)
+    effective_benchmark_bars = (
+        [b for b in benchmark_bars if b.date <= as_of_date] if benchmark_bars else None
+    )
+    effective_sector_bars = (
+        [b for b in sector_bars if b.date <= as_of_date] if sector_bars else None
+    )
+
+    ma20 = compute_moving_average(effective_bars, 20)
+    ma60 = compute_moving_average(effective_bars, 60)
+    ma120 = compute_moving_average(effective_bars, 120)
+    ma200 = compute_moving_average(effective_bars, 200)
+    ma20_slope_pct = compute_ma_slope_pct(
+        effective_bars, 20, config.moving_averages.slope_lookback_days
+    )
+    high_20d = compute_high_over_window(effective_bars, config.high_low.high_window_days_short)
+    high_60d = compute_high_over_window(effective_bars, config.high_low.high_window_days_long)
     drawdown = compute_drawdown_from_recent_high_pct(
-        bars, current_price, config.high_low.drawdown_window_days
+        effective_bars, current_price, config.high_low.drawdown_window_days
     )
     volume_ratio = compute_volume_ratio(
-        bars, config.volume.short_window_days, config.volume.long_window_days
+        effective_bars, config.volume.short_window_days, config.volume.long_window_days
     )
-    rsi = compute_rsi(bars, config.rsi.period)
+    rsi = compute_rsi(effective_bars, config.rsi.period)
     macd = compute_macd(
-        bars, config.macd.fast_period, config.macd.slow_period, config.macd.signal_period
+        effective_bars,
+        config.macd.fast_period,
+        config.macd.slow_period,
+        config.macd.signal_period,
     )
     relative_strength_topix = (
-        compute_relative_strength_pct(bars, benchmark_bars, config.high_low.high_window_days_long)
-        if benchmark_bars
+        compute_relative_strength_pct(
+            effective_bars, effective_benchmark_bars, config.high_low.high_window_days_long
+        )
+        if effective_benchmark_bars
         else None
     )
     relative_strength_sector = (
-        compute_relative_strength_pct(bars, sector_bars, config.high_low.high_window_days_long)
-        if sector_bars
+        compute_relative_strength_pct(
+            effective_bars, effective_sector_bars, config.high_low.high_window_days_long
+        )
+        if effective_sector_bars
         else None
     )
     trailing_stop = compute_trailing_stop_reference_price(
-        bars, config.high_low.high_window_days_long, config.trailing_stop.trailing_pct
+        effective_bars, config.high_low.high_window_days_long, config.trailing_stop.trailing_pct
     )
     trend = classify_trend(
         current_price,
@@ -238,12 +276,17 @@ def compute_momentum_snapshot(
         config.trend_classification.strong_trend_rsi_threshold,
     )
     trend_evaluable = ma20 is not None and ma60 is not None and ma20_slope_pct is not None
-    # コードレビュー対応(v3): barsが空でない場合のみ「不整合」の判定対象となる
-    # (空の場合は単なるデータ不足であり、不整合ではない)。
-    price_history_misaligned = bool(bars) and bars[-1].date != as_of_date
-    price_history_aligned = not price_history_misaligned
-    one_day_return_pct = None if price_history_misaligned else compute_n_day_return_pct(bars, 1)
-    five_day_return_pct = None if price_history_misaligned else compute_n_day_return_pct(bars, 5)
+    # コードレビュー対応(v4): 未来バー除外後のeffective_bars基準で判定する。
+    # effective_barsが空の場合は単なるデータ不足であり「historyが古い」わけ
+    # ではないため、price_history_aligned=Trueのまま(既存方針を踏襲)。
+    price_history_behind = bool(effective_bars) and effective_bars[-1].date < as_of_date
+    price_history_aligned = not price_history_behind
+    one_day_return_pct = (
+        None if price_history_behind else compute_n_day_return_pct(effective_bars, 1)
+    )
+    five_day_return_pct = (
+        None if price_history_behind else compute_n_day_return_pct(effective_bars, 5)
+    )
     available_signals = sum(
         1 for v in (ma20, ma60, ma120, ma200, rsi, macd) if v is not None
     )
@@ -275,5 +318,6 @@ def compute_momentum_snapshot(
         one_day_return_pct=one_day_return_pct,
         five_day_return_pct=five_day_return_pct,
         price_history_aligned=price_history_aligned,
+        price_history_has_future_bars=price_history_has_future_bars,
         confidence=confidence,
     )

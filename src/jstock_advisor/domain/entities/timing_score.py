@@ -19,6 +19,13 @@ score(final_score)はbase_scoreからoverheat_penalty_pointsを差し引いた�
 過熱判定が不能な場合、confidenceはHIGHへ到達しない(短期急騰を確認できない
 状態でエントリータイミングの信頼度を最高評価にしないため)。
 
+コードレビュー対応(v4): current_priceのas_of_dateより未来のPriceBarが
+入力へ混入した場合、MomentumSnapshot側(domain/signals/momentum.py)で
+technical指標の計算全体から除外するようにした(look-ahead bias対策)。
+本エンティティ自体にフィールド追加は無いが、reason_codesへ
+PRICE_HISTORY_FUTURE_BARS_EXCLUDED/PRICE_HISTORY_BEHIND_CURRENT_PRICEが
+追加されうる(domain/signals/timing_score.py参照)。
+
 Historical Valuation Score(domain/entities/historical_valuation.py)と同じ
 設計: 単なる`float | None`ではなく、後から「なぜこの点数だったか」を
 再現・検証できるよう、score/confidence/coverage/内訳(成分別スコア)を
