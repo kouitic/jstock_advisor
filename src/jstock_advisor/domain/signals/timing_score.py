@@ -47,6 +47,21 @@ v3(追加コードレビュー対応)でさらに以下を修正した。
   ままとし、本モジュールは`price_history_aligned=False`の場合に理由コード
   PRICE_HISTORY_NOT_ALIGNED_WITH_CURRENT_PRICEを記録する。
 
+v4(2回目の追加コードレビュー対応)でさらに以下を修正した。
+
+- current_priceのas_of_dateより未来の日付を持つPriceBarがbarsへ混入した
+  場合、one_day/five_day returnだけでなくMA・RSI・MACD・high・drawdown・
+  volume_ratio・relative strengthを含む全technical指標の計算からも当該
+  バーを除外するよう、compute_momentum_snapshot()側を修正した(未来バーを
+  除外したeffective_barsのみを使う。以前のバージョンはreturnのみを無効化し
+  他の指標は未来バー込みのまま計算しており、look-ahead biasになっていた)。
+  未来バーを除外したかどうかはMomentumSnapshot.price_history_has_future_bars
+  で示され、本モジュールは`True`の場合に理由コード
+  PRICE_HISTORY_FUTURE_BARS_EXCLUDEDを追加する。「historyが古い(behind)」
+  場合は既存のPRICE_HISTORY_NOT_ALIGNED_WITH_CURRENT_PRICEに加えて
+  PRICE_HISTORY_BEHIND_CURRENT_PRICEも追加し、「未来バー混入」と「historyが
+  古い」を監査上区別できるようにした。
+
 外部I/Oを一切行わない純関数(domain/signals/momentum.pyと同じパターン)。
 MomentumSnapshotは既にpoint-in-time安全な株価バーから計算済みのため、この
 関数自体は独自のlook-ahead bias対策を必要としない。ただし、StockSnapshotを
@@ -84,6 +99,11 @@ REASON_DRAWDOWN_UNAVAILABLE = "DRAWDOWN_UNAVAILABLE"
 REASON_VOLUME_UNAVAILABLE = "VOLUME_UNAVAILABLE"
 REASON_OVERHEAT_PENALTY_UNAVAILABLE = "OVERHEAT_PENALTY_UNAVAILABLE"
 REASON_PRICE_HISTORY_NOT_ALIGNED = "PRICE_HISTORY_NOT_ALIGNED_WITH_CURRENT_PRICE"
+# コードレビュー対応(v4): 「未来バー混入」と「historyが古い(behind)」を
+# 監査上区別するため、REASON_PRICE_HISTORY_NOT_ALIGNED(互換目的で維持)に
+# 加えて用途別のreason codeを追加する。
+REASON_PRICE_HISTORY_FUTURE_BARS_EXCLUDED = "PRICE_HISTORY_FUTURE_BARS_EXCLUDED"
+REASON_PRICE_HISTORY_BEHIND_CURRENT_PRICE = "PRICE_HISTORY_BEHIND_CURRENT_PRICE"
 
 
 def _clamp(value: float, low: float = -100.0, high: float = 100.0) -> float:
@@ -234,8 +254,11 @@ def evaluate_timing_score(
     reason_codes: set[str] = set()
     components: list[tuple[float, float]] = []  # (score, weight)
 
+    if momentum.price_history_has_future_bars:
+        reason_codes.add(REASON_PRICE_HISTORY_FUTURE_BARS_EXCLUDED)
     if not momentum.price_history_aligned:
         reason_codes.add(REASON_PRICE_HISTORY_NOT_ALIGNED)
+        reason_codes.add(REASON_PRICE_HISTORY_BEHIND_CURRENT_PRICE)
 
     trend_quality = _trend_quality_component(momentum, current_price, config)
     if trend_quality is not None:
@@ -435,6 +458,7 @@ def timing_score_result_to_metrics(
         metrics["one_day_return_pct"] = momentum.one_day_return_pct
         metrics["five_day_return_pct"] = momentum.five_day_return_pct
         metrics["price_history_aligned"] = momentum.price_history_aligned
+        metrics["price_history_has_future_bars"] = momentum.price_history_has_future_bars
         if current_price is not None:
             metrics["current_vs_ma20_pct"] = (
                 float(current_price / momentum.ma20 - 1) * 100.0
@@ -489,4 +513,7 @@ def timing_score_config_values(config: TimingScoreRulesConfig) -> dict[str, Any]
         "min_coverage_required": config.min_coverage_required,
         "coverage_high_threshold": config.coverage_high_threshold,
         "coverage_medium_threshold": config.coverage_medium_threshold,
+        # コードレビュー対応(v4、Low改善): categoryがどの閾値で分類されたかを
+        # 完全に監査できるよう、category_thresholds自体も保存する。
+        "category_thresholds": config.category_thresholds.model_dump(),
     }

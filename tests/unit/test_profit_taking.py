@@ -360,6 +360,7 @@ def test_recommended_limit_price_is_none_when_only_non_price_axes_trigger() -> N
         trend_classification=TrendClassification.STRONG_DOWNTREND,
         trend_evaluable=True,
         price_history_aligned=True,
+        price_history_has_future_bars=False,
         confidence=ConfidenceLevel.MEDIUM,
     )
     result = evaluate_profit_taking(
@@ -539,6 +540,7 @@ def test_uptrend_downgrades_fundamental_action_by_one_level() -> None:
         trend_classification=TrendClassification.UPTREND,
         trend_evaluable=True,
         price_history_aligned=True,
+        price_history_has_future_bars=False,
         confidence=ConfidenceLevel.MEDIUM,
     )
     result = evaluate_profit_taking(
@@ -571,6 +573,7 @@ def test_uptrend_does_not_override_confirmed_hard_overvaluation() -> None:
         trend_classification=TrendClassification.STRONG_UPTREND,
         trend_evaluable=True,
         price_history_aligned=True,
+        price_history_has_future_bars=False,
         confidence=ConfidenceLevel.HIGH,
     )
     fair_value_range = FairValueRange(
@@ -615,6 +618,7 @@ def test_trailing_stop_reference_price_surfaced_from_momentum() -> None:
         trend_classification=TrendClassification.NEUTRAL,
         trend_evaluable=True,
         price_history_aligned=True,
+        price_history_has_future_bars=False,
         confidence=ConfidenceLevel.MEDIUM,
         trailing_stop_reference_price=Decimal("1400"),
     )

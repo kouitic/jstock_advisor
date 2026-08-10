@@ -148,6 +148,7 @@ _MOMENTUM_PLACEHOLDER = MomentumSnapshot(
     trend_classification=TrendClassification.NEUTRAL,
     trend_evaluable=False,
     price_history_aligned=True,
+    price_history_has_future_bars=False,
     confidence=ConfidenceLevel.LOW,
 )
 

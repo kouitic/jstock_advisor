@@ -204,6 +204,7 @@ def test_compute_momentum_snapshot_aligned_dates_computes_short_term_returns() -
     as_of_date = bars[-1].date  # bars最新日と一致
     snapshot = compute_momentum_snapshot(bars, Decimal(str(closes[-1])), as_of_date, _CONFIG)
     assert snapshot.price_history_aligned is True
+    assert snapshot.price_history_has_future_bars is False
     assert snapshot.one_day_return_pct is not None
     assert snapshot.five_day_return_pct is not None
 
@@ -216,18 +217,51 @@ def test_compute_momentum_snapshot_history_behind_current_price_suppresses_retur
     as_of_date = bars[-1].date + dt.timedelta(days=1)
     snapshot = compute_momentum_snapshot(bars, Decimal(str(closes[-1])), as_of_date, _CONFIG)
     assert snapshot.price_history_aligned is False
+    assert snapshot.price_history_has_future_bars is False
     assert snapshot.one_day_return_pct is None
     assert snapshot.five_day_return_pct is None
 
 
-def test_compute_momentum_snapshot_history_ahead_of_current_price_suppresses_returns() -> None:
-    """bars最新日がcurrent_priceのas-of日付より後(データ不整合)の場合も、
-    短期要素を利用しない。"""
-    closes = [100 + i for i in range(10)]
+def test_compute_momentum_snapshot_future_bar_excluded_computes_return_from_effective() -> None:
+    """コードレビュー対応(v4): bars最新日がcurrent_priceのas-of日付より未来の
+    場合、その未来バーはtechnical計算全体から除外される(旧設計は「returnは
+    常にNoneになる」だったが、これは誤り)。未来バーを除外した結果
+    effective_bars[-1].date == as_of_dateとなるため、1日/5日returnは
+    (未来バー抜きの)effective_barsから正しく算出される。"""
+    closes = [100 + i for i in range(10)]  # 10本、最後の1本(index9)が未来バー
     bars = _bars(closes)
-    as_of_date = bars[-1].date - dt.timedelta(days=1)
+    as_of_date = bars[-1].date - dt.timedelta(days=1)  # index8の日付(未来バーの前日)
     snapshot = compute_momentum_snapshot(bars, Decimal(str(closes[-1])), as_of_date, _CONFIG)
-    assert snapshot.price_history_aligned is False
+    assert snapshot.price_history_has_future_bars is True
+    assert snapshot.price_history_aligned is True  # 未来バー除外後は整合する
+    effective_bars = bars[:-1]  # index0..8(9本)
+    assert snapshot.one_day_return_pct == pytest.approx(
+        compute_n_day_return_pct(effective_bars, 1)
+    )
+    assert snapshot.five_day_return_pct == pytest.approx(
+        compute_n_day_return_pct(effective_bars, 5)
+    )
+
+
+def test_compute_momentum_snapshot_future_bar_and_behind_history_suppresses_returns() -> None:
+    """未来バーを除外してもなお、残ったeffective_bars最新日がas_of_dateより
+    過去(behind)の場合は、returnを算出しない(未来バー除外とbehind判定は
+    独立に成立しうる複合ケース)。"""
+    bars = [
+        PriceBar(
+            date=dt.date(2026, 1, 1) + dt.timedelta(days=offset),
+            open=Decimal("100"),
+            high=Decimal("100"),
+            low=Decimal("100"),
+            close=Decimal("100"),
+            volume=1000,
+        )
+        for offset in (0, 1, 2, 4)  # day3が欠落、day4は未来バーに相当
+    ]
+    as_of_date = dt.date(2026, 1, 1) + dt.timedelta(days=3)  # day3(bars中に無い日)
+    snapshot = compute_momentum_snapshot(bars, Decimal("100"), as_of_date, _CONFIG)
+    assert snapshot.price_history_has_future_bars is True  # day4が除外される
+    assert snapshot.price_history_aligned is False  # 除外後の最新日はday2 < day3
     assert snapshot.one_day_return_pct is None
     assert snapshot.five_day_return_pct is None
 
@@ -238,5 +272,99 @@ def test_compute_momentum_snapshot_empty_bars_is_not_treated_as_misaligned() -> 
     既存どおりNone)。"""
     snapshot = compute_momentum_snapshot([], Decimal("1000"), dt.date(2026, 1, 1), _CONFIG)
     assert snapshot.price_history_aligned is True
+    assert snapshot.price_history_has_future_bars is False
     assert snapshot.one_day_return_pct is None
     assert snapshot.five_day_return_pct is None
+
+
+# ===== 未来バーのtechnical指標からの除外(コードレビュー対応: Timing Score v4) =====
+
+
+def test_compute_momentum_snapshot_ma20_excludes_future_bar() -> None:
+    closes = [100 + i for i in range(20)] + [100000]  # 21本、最後の1本が未来バー
+    bars = _bars(closes)
+    as_of_date = bars[19].date  # 20本目(未来バーの前日)
+    snapshot = compute_momentum_snapshot(bars, Decimal("119"), as_of_date, _CONFIG)
+    assert snapshot.price_history_has_future_bars is True
+    assert snapshot.ma20 == compute_moving_average(bars[:20], 20)
+    assert snapshot.ma20 != compute_moving_average(bars, 20)
+
+
+def test_compute_momentum_snapshot_rsi_excludes_future_bar() -> None:
+    closes = [100 + i * 10 for i in range(15)] + [1]  # 全て上昇の後、未来バーで暴落
+    bars = _bars(closes)
+    as_of_date = bars[14].date
+    snapshot = compute_momentum_snapshot(bars, Decimal("1"), as_of_date, _CONFIG)
+    assert snapshot.price_history_has_future_bars is True
+    # 未来バー(暴落)を除外すれば「全て上昇」のままなのでRSI=100のはず
+    assert snapshot.rsi == 100.0
+    assert snapshot.rsi != compute_rsi(bars, 14)
+
+
+def test_compute_momentum_snapshot_macd_excludes_future_bar() -> None:
+    closes = [100 + (i**1.05) for i in range(60)] + [1.0]  # 61本、最後が未来の暴落バー
+    bars = _bars(closes)
+    as_of_date = bars[59].date
+    snapshot = compute_momentum_snapshot(bars, Decimal("1"), as_of_date, _CONFIG)
+    assert snapshot.price_history_has_future_bars is True
+    assert snapshot.macd == compute_macd(bars[:60], 12, 26, 9)
+    assert snapshot.macd != compute_macd(bars, 12, 26, 9)
+
+
+def test_compute_momentum_snapshot_high_and_drawdown_exclude_future_bar() -> None:
+    closes = [100 + i for i in range(20)] + [99999]  # 21本、最後が未来の急騰バー
+    bars = _bars(closes)
+    as_of_date = bars[19].date
+    current_price = Decimal("119")
+    snapshot = compute_momentum_snapshot(bars, current_price, as_of_date, _CONFIG)
+    assert snapshot.price_history_has_future_bars is True
+    assert snapshot.high_20d == Decimal("119")
+    assert snapshot.drawdown_from_recent_high_pct == pytest.approx(0.0)
+
+
+def test_compute_momentum_snapshot_volume_ratio_excludes_future_bar() -> None:
+    volumes = [100] * 15 + [1000] * 5 + [10_000_000]  # 最後の1本が未来の異常出来高バー
+    bars = [
+        PriceBar(
+            date=dt.date(2026, 1, 1) + dt.timedelta(days=i),
+            open=Decimal("100"),
+            high=Decimal("100"),
+            low=Decimal("100"),
+            close=Decimal("100"),
+            volume=v,
+        )
+        for i, v in enumerate(volumes)
+    ]
+    as_of_date = bars[19].date
+    snapshot = compute_momentum_snapshot(bars, Decimal("100"), as_of_date, _CONFIG)
+    assert snapshot.price_history_has_future_bars is True
+    assert snapshot.volume_ratio == compute_volume_ratio(bars[:20], 5, 20)
+    assert snapshot.volume_ratio != compute_volume_ratio(bars, 5, 20)
+
+
+def test_compute_momentum_snapshot_benchmark_relative_strength_excludes_future_bar() -> None:
+    stock_bars = _bars([100 + i * 2 for i in range(61)])  # 61本(未来バーなし)
+    benchmark_bars = _bars([100 + i for i in range(61)] + [1.0])  # 62本、最後が未来の暴落バー
+    as_of_date = stock_bars[-1].date
+    snapshot = compute_momentum_snapshot(
+        stock_bars,
+        Decimal(str(stock_bars[-1].close)),
+        as_of_date,
+        _CONFIG,
+        benchmark_bars=benchmark_bars,
+    )
+    assert snapshot.relative_strength_vs_topix_pct == pytest.approx(60.0)
+
+
+def test_compute_momentum_snapshot_sector_relative_strength_excludes_future_bar() -> None:
+    stock_bars = _bars([100 + i * 2 for i in range(61)])  # 61本(未来バーなし)
+    sector_bars = _bars([100 + i for i in range(61)] + [1.0])  # 62本、最後が未来の暴落バー
+    as_of_date = stock_bars[-1].date
+    snapshot = compute_momentum_snapshot(
+        stock_bars,
+        Decimal(str(stock_bars[-1].close)),
+        as_of_date,
+        _CONFIG,
+        sector_bars=sector_bars,
+    )
+    assert snapshot.relative_strength_vs_sector_pct == pytest.approx(60.0)

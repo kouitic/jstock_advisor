@@ -30,14 +30,17 @@ from jstock_advisor.domain.entities.enums import (
     TimingScoreEvaluationState,
 )
 from jstock_advisor.domain.entities.momentum import MacdResult, MomentumSnapshot
-from jstock_advisor.domain.signals.timing_score import evaluate_timing_score
+from jstock_advisor.domain.signals.timing_score import (
+    evaluate_timing_score,
+    timing_score_config_values,
+)
 
 _NOW = dt.datetime(2026, 8, 10, tzinfo=dt.UTC)
 
 
 def _config(**overrides: object) -> TimingScoreRulesConfig:
     defaults: dict[str, object] = dict(
-        model_version="timing_score_v3",
+        model_version="timing_score_v4",
         trend_quality_weight=1.5,
         price_vs_ma20_weight=1.0,
         price_vs_ma60_weight=0.75,
@@ -99,6 +102,7 @@ def _momentum(
     relative_strength_vs_topix_pct: float | None = None,
     relative_strength_vs_sector_pct: float | None = None,
     price_history_aligned: bool = True,
+    price_history_has_future_bars: bool = False,
 ) -> MomentumSnapshot:
     from jstock_advisor.domain.entities.enums import TrendClassification
 
@@ -122,6 +126,7 @@ def _momentum(
         relative_strength_vs_topix_pct=relative_strength_vs_topix_pct,
         relative_strength_vs_sector_pct=relative_strength_vs_sector_pct,
         price_history_aligned=price_history_aligned,
+        price_history_has_future_bars=price_history_has_future_bars,
         confidence=ConfidenceLevel.HIGH,
     )
 
@@ -497,6 +502,21 @@ def test_confidence_reaches_high_when_overheat_evaluable_and_not_triggered() -> 
 def test_price_history_misaligned_reason_code_recorded() -> None:
     result = _evaluate(_momentum(rsi=50.0, price_history_aligned=False))
     assert "PRICE_HISTORY_NOT_ALIGNED_WITH_CURRENT_PRICE" in result.reason_codes
+    # コードレビュー対応(v4): 「historyが古い(behind)」であることを示す
+    # 専用reason codeも併せて記録される。
+    assert "PRICE_HISTORY_BEHIND_CURRENT_PRICE" in result.reason_codes
+
+
+def test_price_history_future_bars_excluded_reason_code_recorded() -> None:
+    """未来バーを除外した場合(price_history_has_future_bars=True)、除外後も
+    整合している(price_history_aligned=True)ケースであっても専用reason code
+    が記録される(コードレビュー対応v4)。"""
+    result = _evaluate(
+        _momentum(rsi=50.0, price_history_aligned=True, price_history_has_future_bars=True)
+    )
+    assert "PRICE_HISTORY_FUTURE_BARS_EXCLUDED" in result.reason_codes
+    assert "PRICE_HISTORY_NOT_ALIGNED_WITH_CURRENT_PRICE" not in result.reason_codes
+    assert "PRICE_HISTORY_BEHIND_CURRENT_PRICE" not in result.reason_codes
 
 
 # ===== TOPIX/セクター相対強度の非影響(34-35) =====
@@ -740,3 +760,13 @@ def test_config_rejects_equal_drawdown_boundaries() -> None:
 def test_config_rejects_non_positive_overheat_penalty_points() -> None:
     with pytest.raises(ValidationError):
         _config(overheat_penalty_points=0.0)
+
+
+# ===== timing_score_config_valuesの監査情報(コードレビュー対応v4、Low改善) =====
+
+
+def test_config_values_include_category_thresholds() -> None:
+    """categoryがどの閾値で分類されたかを完全に監査できるよう、
+    category_thresholds自体もconfig_values_usedへ保存する。"""
+    values = timing_score_config_values(_CONFIG)
+    assert values["category_thresholds"] == _CONFIG.category_thresholds.model_dump()

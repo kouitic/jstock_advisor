@@ -42,7 +42,16 @@ class MomentumSnapshot(ImmutableSnapshot):
     five_day_return_pct: float | None = None
     # Timing Score(コードレビュー対応v3): current_price(get_latest_price()由来)と
     # bars(get_price_history()由来)は別Provider呼び出しであり、時点が一致する
-    # 保証がコード上に無い。bars[-1].dateとcurrent_priceのas-of日付が一致しない
-    # 場合はFalse(この場合one_day_return_pct/five_day_return_pctは補完せずNoneの
-    # まま。barsが空でそもそも比較対象が無い場合はTrueのまま)。
+    # 保証がコード上に無い。判定はas_of_date以前のバーだけに絞ったeffective_bars
+    # 基準で行う(コードレビュー対応v4、下記price_history_has_future_bars参照)。
+    # effective_bars[-1].dateがas_of_dateと一致しない(=historyがcurrent_priceより
+    # 古い)場合はFalse(この場合one_day_return_pct/five_day_return_pctは補完せず
+    # Noneのまま。effective_barsが空でそもそも比較対象が無い場合はTrueのまま)。
     price_history_aligned: bool
+    # Timing Score(コードレビュー対応v4): barsにas_of_date(current_priceの
+    # 実際のas-of日付)より未来の日付を持つPriceBarが混入していたためtechnical
+    # 計算から除外した場合True。price_history_alignedとは独立した情報であり
+    # (未来バーを除外した結果、残りのeffective_barsがas_of_dateと整合する
+    # ケースもある)、監査上「未来バー混入」と「historyが古い」を区別するために
+    # 保持する。
+    price_history_has_future_bars: bool

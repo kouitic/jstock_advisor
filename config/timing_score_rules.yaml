@@ -1,4 +1,4 @@
-# Timing Score v3(判定精度向上機能Phase B第二弾)の設定。
+# Timing Score v4(判定精度向上機能Phase B第二弾)の設定。
 #
 # 「モメンタムが強いほど高得点」ではなく、「良いトレンドを維持しながら、
 # 過熱しておらず、エントリーしやすい価格位置にあるか」を-100(逆風)〜
@@ -15,8 +15,13 @@
 # 7成分(trend_quality/price_vs_ma20/price_vs_ma60/rsi/macd/drawdown/volume)
 # から算出したbase_score算出後に適用するmodifier。過熱情報が欠損している
 # だけでスコアが底上げされることはない(欠損時はpenalty=0=base_scoreのまま)。
+#
+# コードレビュー対応(v4): current_priceのas_of_dateより未来のPriceBarが
+# 入力へ混入した場合、MA/RSI/MACD/high/drawdown/volume/relative strengthを
+# 含む全technical計算から除外する(domain/signals/momentum.py参照、
+# look-ahead bias対策)。この設定ファイル自体に新規閾値は追加していない。
 
-model_version: "timing_score_v3"
+model_version: "timing_score_v4"
 
 # base_score算出に使う7成分の加重平均の重み。trend_quality/price_vs_ma20/
 # price_vs_ma60/rsi/drawdownを主要成分、macd/volumeを補助成分とする。
