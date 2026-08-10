@@ -225,11 +225,12 @@ def test_build_decision_snapshot_timing_score_fields_default_when_unset() -> Non
 
 
 def test_build_decision_snapshot_copies_earnings_surprise_fields() -> None:
-    """判定精度向上機能Phase C(コードレビュー対応v2): Recommendationの
+    """判定精度向上機能Phase C(コードレビュー対応v2/v3): Recommendationの
     earnings_surprise_*5フィールド(score/confidence/coverage/reason_codes/
     metrics)がDecisionSnapshotへそのままコピーされる。metricsにはraw監査
-    情報(matched_quarter_end・eps_actual・eps_estimate等)が欠落せず含まれる
-    ことを確認する(historical_valuation_*/timing_*と同じパターン)。"""
+    情報(matched_quarter_end・eps_actual・eps_estimate・earnings_decision_
+    relevance等)が欠落せず含まれることを確認する(historical_valuation_*/
+    timing_*と同じパターン)。"""
     recommendation = _recommendation(config_values_used={}).model_copy(
         update={
             "earnings_surprise_score": 50.0,
@@ -247,7 +248,8 @@ def test_build_decision_snapshot_copies_earnings_surprise_fields() -> None:
                 "earnings_surprise_source_provider": "yfinance",
                 "earnings_surprise_source_fetched_at": "2026-08-10T00:00:00+00:00",
                 "release_confirmation_state": "NOT_APPLICABLE",
-                "model_version": "earnings_surprise_v2",
+                "earnings_decision_relevance": "NOT_RELEVANT",
+                "model_version": "earnings_surprise_v3",
             },
         }
     )
@@ -262,6 +264,7 @@ def test_build_decision_snapshot_copies_earnings_surprise_fields() -> None:
     assert decision.earnings_surprise_metrics["eps_estimate"] == "100"
     assert decision.earnings_surprise_metrics["surprise_pct"] == 0.1
     assert decision.earnings_surprise_metrics["earnings_surprise_source_provider"] == "yfinance"
+    assert decision.earnings_surprise_metrics["earnings_decision_relevance"] == "NOT_RELEVANT"
 
 
 def test_build_decision_snapshot_earnings_surprise_fields_default_when_unset() -> None:
@@ -277,10 +280,11 @@ def test_build_decision_snapshot_earnings_surprise_fields_default_when_unset() -
 
 
 def test_build_decision_snapshot_copies_earnings_trend_fields() -> None:
-    """判定精度向上機能Phase C(コードレビュー対応v2): Recommendationの
+    """判定精度向上機能Phase C(コードレビュー対応v2/v3): Recommendationの
     earnings_trend_*5フィールドがDecisionSnapshotへそのままコピーされる。
-    metricsにはraw監査情報(before/after値・change_pct・recent_periods_source)
-    が欠落せず含まれることを確認する。"""
+    metricsにはraw監査情報(before/after値・change_pct・recent_periods_source・
+    period_end/period_type・earnings_decision_relevance)が欠落せず含まれる
+    ことを確認する。"""
     recommendation = _recommendation(config_values_used={}).model_copy(
         update={
             "earnings_trend_score": -30.0,
@@ -294,7 +298,11 @@ def test_build_decision_snapshot_copies_earnings_trend_fields() -> None:
                 "previous_operating_income": "100",
                 "operating_income_change_pct": -20.0,
                 "recent_periods_source": "ANNUAL_FALLBACK",
-                "model_version": "earnings_trend_v2",
+                "latest_operating_income_period_end": "2026-03-31",
+                "previous_operating_income_period_end": "2025-03-31",
+                "operating_income_period_type": "ANNUAL",
+                "earnings_decision_relevance": "NOT_RELEVANT",
+                "model_version": "earnings_trend_v3",
             },
         }
     )
@@ -309,6 +317,10 @@ def test_build_decision_snapshot_copies_earnings_trend_fields() -> None:
     assert decision.earnings_trend_metrics["previous_operating_income"] == "100"
     assert decision.earnings_trend_metrics["operating_income_change_pct"] == -20.0
     assert decision.earnings_trend_metrics["recent_periods_source"] == "ANNUAL_FALLBACK"
+    assert decision.earnings_trend_metrics["latest_operating_income_period_end"] == "2026-03-31"
+    assert decision.earnings_trend_metrics["previous_operating_income_period_end"] == "2025-03-31"
+    assert decision.earnings_trend_metrics["operating_income_period_type"] == "ANNUAL"
+    assert decision.earnings_trend_metrics["earnings_decision_relevance"] == "NOT_RELEVANT"
 
 
 def test_build_decision_snapshot_earnings_trend_fields_default_when_unset() -> None:

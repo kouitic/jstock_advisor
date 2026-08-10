@@ -1,4 +1,4 @@
-# Earnings Trend Score v2(判定精度向上機能Phase C)の設定。
+# Earnings Trend Score v3(判定精度向上機能Phase C)の設定。
 #
 # 「直近決算が期待に対して良かったか」(Earnings Surprise Score)ではなく、
 # 「複数四半期にわたって業績が改善傾向にあるか」を-100(強い悪化トレンド)〜
@@ -19,8 +19,14 @@
 # フォールバック時はMEDIUM上限、由来不明時は財務トレンド系成分を強制的に
 # 評価不能とする)。この設定ファイル自体に新規フィールドは追加していない
 # (domain/signals/earnings_trend.py参照)。
+#
+# コードレビュー対応(v3): NOT_APPLICABLE(決算反映待ち)判定に既存の
+# EarningsDecisionRelevance(ProfitTakingが既に使用している、古い決算予定日を
+# 無期限に判定停止理由としないための仕組み)を組み合わせ、成分算出に使った
+# 値がどの期間のものか(period_end/period_type)を監査情報として追加保持
+# するようにした。この設定ファイル自体に新規フィールドは追加していない。
 
-model_version: "earnings_trend_v2"
+model_version: "earnings_trend_v3"
 
 # 4成分の加重平均の重み。accelerationはデータが薄い(直近5四半期程度)ため
 # 信頼度が低い補助成分として小さい重みにする。

@@ -48,6 +48,7 @@ from decimal import Decimal
 from jstock_advisor.domain.entities.base import ImmutableSnapshot
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
+    EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsSurpriseCategory,
     EarningsSurpriseEvaluationState,
@@ -80,6 +81,11 @@ class EarningsSurpriseResult(ImmutableSnapshot):
     # 評価時点で参照したEarningsReleaseConfirmationState(なぜNOT_APPLICABLE
     # だったか等を後から確認できるようにするための監査情報)。
     release_confirmation_state: EarningsReleaseConfirmationState | None = None
+    # コードレビュー対応(v3): 古い決算予定日が現在の判断にまだ関連するか
+    # (resolve_earnings_decision_relevance()の戻り値、domain/signals/
+    # earnings_window.py参照)。何か月も前の過去日でNOT_APPLICABLEを無期限に
+    # 継続しないための判定に使った値を後から確認できるようにする。
+    earnings_decision_relevance: EarningsDecisionRelevance | None = None
 
     # 評価全体に関する注記コード(例: "ANALYST_CONSENSUS_UNAVAILABLE")。
     reason_codes: tuple[str, ...] = ()

@@ -27,8 +27,11 @@ class FinancialDataProvider(Protocol):
         ...
 
     def get_earnings_surprise_history(self, stock_code: str) -> list[EarningsSurpriseRecord]:
-        """判定精度向上機能Phase C: 直近数四半期分の実績EPS・決算発表前コンセンサス
-        EPS予想の履歴を取得する(通常直近4四半期程度、アナリストカバレッジが薄い
-        銘柄はeps_estimate/surprise_pctがNoneのままの場合がある)。データが無ければ
-        空リスト。LIVE_SHADOW_ONLY用途専用(EarningsSurpriseRecordのdocstring参照)。"""
+        """判定精度向上機能Phase C: 直近数四半期分の実績EPS・Yahoo Finance
+        Earnings Historyが返すEPS estimateの履歴を取得する(通常直近4四半期程度、
+        アナリストカバレッジが薄い銘柄はeps_estimate/surprise_pctがNoneのままの
+        場合がある)。データが無ければ空リスト。LIVE_SHADOW_ONLY用途専用
+        (EarningsSurpriseRecordのdocstring参照、コードレビュー対応v3:
+        当該値が決算発表直前時点のコンセンサスであったことを独立に検証できる
+        timestamp証跡は無償データから取得できないため断定的な表現を避けた)。"""
         ...

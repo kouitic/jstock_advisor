@@ -1,5 +1,6 @@
 """domain/signals/earnings_surprise.pyのテスト(判定精度向上機能Phase C、
-コードレビュー対応でv2へ再設計: Dividend Revision除去・raw metrics追加)。
+コードレビュー対応でv2/v3へ再設計: Dividend Revision除去・raw metrics追加・
+EarningsDecisionRelevance統合)。
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from jstock_advisor.config.models import (
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
-    EarningsDateStatus,
+    EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsSurpriseCategory,
     EarningsSurpriseEvaluationState,
@@ -79,17 +80,17 @@ def _record(
 def _evaluate(
     history: list[EarningsSurpriseRecord],
     resolved_period_end: dt.date | None = _PERIOD_END,
-    earnings_date_status: EarningsDateStatus = EarningsDateStatus.UNAVAILABLE,
     release_confirmation_state: EarningsReleaseConfirmationState = (
         EarningsReleaseConfirmationState.NOT_APPLICABLE
     ),
+    decision_relevance: EarningsDecisionRelevance = EarningsDecisionRelevance.NOT_RELEVANT,
     config: EarningsSurpriseRulesConfig | None = None,
 ):
     return evaluate_earnings_surprise(
         history,
         resolved_period_end,
-        earnings_date_status,
         release_confirmation_state,
+        decision_relevance,
         _NOW,
         config or _CONFIG,
     )
@@ -151,7 +152,8 @@ def test_analyst_component_unavailable_when_surprise_pct_missing() -> None:
     assert "ANALYST_CONSENSUS_UNAVAILABLE" in result.reason_codes
 
 
-# ===== NOT_APPLICABLE(決算反映未確認)ゲート =====
+# ===== NOT_APPLICABLE(決算反映未確認)ゲート(コードレビュー対応v3:
+# EarningsDecisionRelevance統合) =====
 
 
 @pytest.mark.parametrize(
@@ -161,28 +163,61 @@ def test_analyst_component_unavailable_when_surprise_pct_missing() -> None:
         EarningsReleaseConfirmationState.DELAYED,
     ],
 )
-def test_not_applicable_when_awaiting_earnings_confirmation(
+def test_not_applicable_when_awaiting_earnings_confirmation_and_relevant(
     state: EarningsReleaseConfirmationState,
 ) -> None:
+    """1. STALE_PAST_DATE + AWAITING_CONFIRMATION + RELEVANT → NOT_APPLICABLE
+    2. STALE_PAST_DATE + DELAYED + RELEVANT → NOT_APPLICABLE
+    (STALE_PAST_DATEはrelease_confirmation_stateがAWAITING/DELAYEDになる
+    前提条件であり、この関数自体はearnings_date_statusを受け取らない)。"""
     result = _evaluate(
         [_record()],
-        earnings_date_status=EarningsDateStatus.STALE_PAST_DATE,
         release_confirmation_state=state,
+        decision_relevance=EarningsDecisionRelevance.RELEVANT,
     )
     assert result.state == EarningsSurpriseEvaluationState.NOT_APPLICABLE
     assert result.reason_codes == ("AWAITING_EARNINGS_CONFIRMATION",)
     assert result.score is None
     assert result.release_confirmation_state == state
     assert result.resolved_financial_period_end == _PERIOD_END
+    assert result.earnings_decision_relevance == EarningsDecisionRelevance.RELEVANT
     # NOT_APPLICABLEでは突合自体を行わないためmatched_*はNoneのまま。
     assert result.matched_quarter_end is None
 
 
-def test_evaluated_when_data_updated_even_if_stale_past_date() -> None:
+def test_not_applicable_when_unknown_relevance_still_continues() -> None:
+    """3. STALE_PAST_DATE + DELAYED + UNKNOWN → NOT_APPLICABLEにならず評価継続
+    (古すぎる決算予定日でProviderが更新されない場合、決算待ちだけを理由に
+    Shadow計測を無期限停止しない)。"""
     result = _evaluate(
         [_record(surprise_pct=0.10)],
-        earnings_date_status=EarningsDateStatus.STALE_PAST_DATE,
+        release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
+        decision_relevance=EarningsDecisionRelevance.UNKNOWN,
+    )
+    assert result.state == EarningsSurpriseEvaluationState.EVALUATED
+    assert result.earnings_decision_relevance == EarningsDecisionRelevance.UNKNOWN
+    # UNKNOWNは悪材料ではないため、通常どおりのスコアになる(減点されない)。
+    assert result.score == 50.0
+
+
+def test_not_applicable_when_not_relevant_still_continues() -> None:
+    """4. STALE_PAST_DATE + AWAITING_CONFIRMATION + NOT_RELEVANT → 評価継続。"""
+    result = _evaluate(
+        [_record(surprise_pct=0.10)],
+        release_confirmation_state=EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
+        decision_relevance=EarningsDecisionRelevance.NOT_RELEVANT,
+    )
+    assert result.state == EarningsSurpriseEvaluationState.EVALUATED
+    assert result.earnings_decision_relevance == EarningsDecisionRelevance.NOT_RELEVANT
+
+
+def test_evaluated_when_data_updated_even_if_relevant() -> None:
+    """5. DATA_UPDATED → 通常評価(AWAITING_STATESに含まれないため
+    decision_relevanceの値に関わらずNOT_APPLICABLEにならない)。"""
+    result = _evaluate(
+        [_record(surprise_pct=0.10)],
         release_confirmation_state=EarningsReleaseConfirmationState.DATA_UPDATED,
+        decision_relevance=EarningsDecisionRelevance.RELEVANT,
     )
     assert result.state == EarningsSurpriseEvaluationState.EVALUATED
 
@@ -226,7 +261,7 @@ def test_category_neutral() -> None:
     assert result.category == EarningsSurpriseCategory.NEUTRAL
 
 
-# ===== raw metrics監査情報(コードレビュー対応v2) =====
+# ===== raw metrics監査情報(コードレビュー対応v2/v3) =====
 
 
 def test_result_holds_raw_input_values_used_for_scoring() -> None:
@@ -261,7 +296,8 @@ def test_result_to_metrics_contains_raw_input_values() -> None:
                 surprise_pct=0.10,
                 source=source,
             )
-        ]
+        ],
+        decision_relevance=EarningsDecisionRelevance.NOT_RELEVANT,
     )
     metrics = earnings_surprise_result_to_metrics(result)
     assert metrics["analyst_consensus_component"] == 50.0
@@ -274,6 +310,8 @@ def test_result_to_metrics_contains_raw_input_values() -> None:
     assert metrics["earnings_surprise_source_provider"] == "yfinance"
     assert metrics["earnings_surprise_source_fetched_at"] == _NOW.isoformat()
     assert metrics["release_confirmation_state"] == "NOT_APPLICABLE"
+    # 6. metricsへearnings_decision_relevanceが保存される(コードレビュー対応v3)。
+    assert metrics["earnings_decision_relevance"] == "NOT_RELEVANT"
     # コードレビュー対応(v2): Dividend Revisionはmetricsに含まれない。
     assert "dividend_revision_component" not in metrics
 

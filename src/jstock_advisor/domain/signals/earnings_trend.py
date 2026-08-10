@@ -1,4 +1,4 @@
-"""判定精度向上機能Phase C: Earnings Trend Score v2(業績トレンドスコア)。
+"""判定精度向上機能Phase C: Earnings Trend Score v3(業績トレンドスコア)。
 
 Earnings Surprise Score(earnings_surprise.py)とは独立した評価軸。実装前
 調査の結果、営業利益トレンド・営業CFトレンド・配当方向の3要素を中心に
@@ -9,6 +9,16 @@ look-ahead bias防止: Earnings Surprise Scoreと同様、最新決算が確定�
 されたかどうかはこの関数では判定せず、呼び出し側が
 `EarningsReleaseConfirmationState`を解決したうえで渡す。決算予定日を経過
 していながら財務データへの反映が未確認の場合、NOT_APPLICABLEを返す。
+
+コードレビュー対応(v3): 上記のNOT_APPLICABLE判定に、既存の
+`EarningsDecisionRelevance`(resolve_earnings_decision_relevance()、
+domain/signals/earnings_window.py参照、ProfitTakingが既に使用している
+仕組み)を追加で組み合わせるようにした(Earnings Surprise Scoreと同じ
+理由、earnings_surprise.pyのモジュールdocstring参照)。あわせて、成分算出に
+使った値がどの期間のものかをlist[Decimal]の裸の系列ではなく
+FinancialPeriodValue(value/period_end/period_typeが対応した構造)で
+受け取るようにし、period_end/period_typeを監査情報として保持する(index
+依存で値と期間の対応が曖昧になることを避けるため)。
 
 コードレビュー対応(v2): 変化率計算`(latest-previous)/abs(previous)*100`は
 previousが負(赤字・マイナスCF)の場合でも改善/悪化の方向を正しく評価する
@@ -30,6 +40,7 @@ MEDIUM上限、UNAVAILABLEは財務トレンド系成分を強制的に評価不
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from decimal import Decimal
 
 from jstock_advisor.config.models import EarningsTrendRulesConfig
@@ -37,12 +48,14 @@ from jstock_advisor.domain.entities.earnings_trend import EarningsTrendResult
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     DividendComparisonOutcome,
-    EarningsDateStatus,
+    EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
     EarningsTrendCategory,
     EarningsTrendEvaluationState,
+    PeriodType,
     RecentPeriodsSource,
 )
+from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.domain.jst import require_timezone_aware
 
 REASON_AWAITING_EARNINGS_CONFIRMATION = "AWAITING_EARNINGS_CONFIRMATION"
@@ -65,6 +78,30 @@ _DIVIDEND_SCORE_MAP_KEYS = (
     DividendComparisonOutcome.DIVIDEND_MAINTAINED,
     DividendComparisonOutcome.DIVIDEND_INCREASE,
 )
+
+
+@dataclass(frozen=True)
+class _TrendComponentResult:
+    """_trend_component()の戻り値。値と、その値がどの期間のものかを
+    (period_end/period_type)を組にして保持する(コードレビュー対応v3)。"""
+
+    score: float | None
+    previous_value: Decimal | None
+    latest_value: Decimal | None
+    change_pct: float | None
+    previous_period_end: dt.date | None
+    latest_period_end: dt.date | None
+    period_type: PeriodType | None
+
+
+@dataclass(frozen=True)
+class _AccelerationResult:
+    """_acceleration_component()の戻り値。period_endsは(prev2, prev1, curr)
+    の3点の期末日(直近の2区間比較に使った3四半期分)。"""
+
+    score: float | None
+    raw_delta2: float | None
+    period_ends: tuple[dt.date, dt.date, dt.date] | None
 
 
 def _clamp(value: float, low: float = -100.0, high: float = 100.0) -> float:
@@ -108,11 +145,15 @@ def _banded_score(change_pct: float, config: EarningsTrendRulesConfig) -> float:
 
 
 def _trend_component(
-    series: list[Decimal], config: EarningsTrendRulesConfig
-) -> tuple[float | None, Decimal | None, Decimal | None, float | None]:
+    series: list[FinancialPeriodValue], config: EarningsTrendRulesConfig
+) -> _TrendComponentResult:
     """seriesは時系列昇順(最後が最新)を前提とする(domain/financial_series.py
-    のto_seasonally_adjusted_series()と同じ規約)。直近期の前期比変化率を
-    段階評価する。戻り値は(段階評価スコア, previous, latest, change_pct)。
+    のbuild_financial_period_series()と同じ規約)。直近期の前期比変化率を
+    段階評価する。
+
+    コードレビュー対応(v3): 裸のlist[Decimal]ではなくFinancialPeriodValue
+    の系列を受け取ることで、valueとperiod_end/period_typeの対応をindexに
+    依存せず直接保持する。
 
     previous=0の場合(コードレビュー対応v2)、0除算となるパーセント計算は
     行わず、latestの符号に応じて明示的に評価する(推測による極端な変化率を
@@ -122,8 +163,12 @@ def _trend_component(
     なく中位に留める)。
     """
     if len(series) < 2:
-        return None, None, None, None
-    previous, latest = series[-2], series[-1]
+        return _TrendComponentResult(None, None, None, None, None, None, None)
+    previous_point, latest_point = series[-2], series[-1]
+    previous, latest = previous_point.value, latest_point.value
+    period_type = latest_point.period_type
+    previous_period_end = previous_point.period_end
+    latest_period_end = latest_point.period_end
     if previous == 0:
         if latest == 0:
             score = 0.0
@@ -131,38 +176,57 @@ def _trend_component(
             score = 50.0
         else:
             score = -50.0
-        return score, previous, latest, None
+        return _TrendComponentResult(
+            score, previous, latest, None, previous_period_end, latest_period_end, period_type
+        )
     change_pct = _change_pct(previous, latest)
     if change_pct is None:
-        return None, previous, latest, None
-    return _banded_score(change_pct, config), previous, latest, change_pct
+        return _TrendComponentResult(
+            None, previous, latest, None, previous_period_end, latest_period_end, period_type
+        )
+    return _TrendComponentResult(
+        _banded_score(change_pct, config),
+        previous,
+        latest,
+        change_pct,
+        previous_period_end,
+        latest_period_end,
+        period_type,
+    )
 
 
 def _acceleration_component(
-    series: list[Decimal], config: EarningsTrendRulesConfig
-) -> tuple[float | None, float | None]:
+    series: list[FinancialPeriodValue], config: EarningsTrendRulesConfig
+) -> _AccelerationResult:
     """直近の前期比変化率と、その1つ前の前期比変化率の差(2階差分)を評価する。
     最低3四半期分のデータが必要(データが薄いため補助成分として扱う)。
-    戻り値は(段階評価スコア, raw delta2(%ポイント、クランプ前))。
 
     コードレビュー対応(v2): 隣接する2区間(t-2→t-1、t-1→t)のいずれかで
     黒字/赤字(またはCFプラス/マイナス)の符号跨ぎが起きている場合、2階差分は
     比較可能な意味を持たない(_change_pct()の分母基準が区間ごとに大きく
     異なりうる)ため、無理に2階差分を作らずNoneを返す。
+
+    コードレビュー対応(v3): 3四半期分のperiod_end(prev2, prev1, curr)を
+    period_endsとして保持する(スコアが算出不能な場合も、少なくとも
+    「どの3四半期を比較しようとしたか」は監査可能にする)。
     """
     if len(series) < 3:
-        return None, None
-    prev2, prev1, curr = series[-3], series[-2], series[-1]
+        return _AccelerationResult(None, None, None)
+    p2, p1, p0 = series[-3], series[-2], series[-1]
+    prev2, prev1, curr = p2.value, p1.value, p0.value
+    period_ends = (p2.period_end, p1.period_end, p0.period_end)
     if prev2 == 0 or prev1 == 0:
-        return None, None
+        return _AccelerationResult(None, None, period_ends)
     if _is_sign_crossing(prev2, prev1) or _is_sign_crossing(prev1, curr):
-        return None, None
+        return _AccelerationResult(None, None, period_ends)
     change_previous = _change_pct(prev2, prev1)
     change_latest = _change_pct(prev1, curr)
     if change_previous is None or change_latest is None:
-        return None, None
+        return _AccelerationResult(None, None, period_ends)
     delta2 = change_latest - change_previous
-    return _clamp(delta2 / config.acceleration_full_scale_pct * 100.0), delta2
+    return _AccelerationResult(
+        _clamp(delta2 / config.acceleration_full_scale_pct * 100.0), delta2, period_ends
+    )
 
 
 def _dividend_component(
@@ -199,12 +263,12 @@ def _classify_category(score: float, config: EarningsTrendRulesConfig) -> Earnin
 
 
 def evaluate_earnings_trend(
-    quarterly_operating_incomes: list[Decimal],
-    quarterly_operating_cashflows: list[Decimal],
+    quarterly_operating_incomes: list[FinancialPeriodValue],
+    quarterly_operating_cashflows: list[FinancialPeriodValue],
     dividend_comparison_outcome: DividendComparisonOutcome | None,
     recent_periods_source: RecentPeriodsSource,
-    earnings_date_status: EarningsDateStatus,
     release_confirmation_state: EarningsReleaseConfirmationState,
+    decision_relevance: EarningsDecisionRelevance,
     evaluated_at: dt.datetime,
     config: EarningsTrendRulesConfig,
 ) -> EarningsTrendResult:
@@ -212,8 +276,11 @@ def evaluate_earnings_trend(
     加重平均でEarnings Trend Scoreを算出する。
 
     quarterly_operating_incomes/quarterly_operating_cashflowsは季節調整済み
-    (TTM)系列(StockSnapshot.quarterly_operating_incomes/
-    quarterly_operating_cashflows、時系列昇順)を渡すこと。
+    (TTM)系列をFinancialPeriodValueとして渡すこと(StockSnapshot.
+    quarterly_operating_income_periods/quarterly_operating_cashflow_periods、
+    時系列昇順。コードレビュー対応v3: 値とperiod_end/period_typeの対応を
+    indexに依存させないため、裸のlist[Decimal]ではなくFinancialPeriodValue
+    を受け取る)。
 
     recent_periods_sourceはFinancialSummary.recent_periods_sourceを渡す
     こと(コードレビュー対応v2)。QUARTERLY(四半期実績由来)は通常どおり
@@ -224,15 +291,17 @@ def evaluate_earnings_trend(
     無し)は財務トレンド系成分(営業利益/営業CF/acceleration)を入力系列の
     中身に関わらず強制的に評価不能とする(古い/不整合なデータを信頼しない)。
 
-    earnings_date_status/release_confirmation_stateがともに「決算予定日を
-    経過したが財務データへの反映が未確認」を示す場合、NOT_APPLICABLEを返し
-    評価を意図的に見送る(Earnings Surprise Scoreと同じ前提条件)。
+    release_confirmation_stateが「決算予定日を経過したが財務データへの反映が
+    未確認」(AWAITING_CONFIRMATION/DELAYED)を示し、かつdecision_relevanceが
+    RELEVANTの場合のみNOT_APPLICABLEを返し評価を意図的に見送る
+    (コードレビュー対応v3、Earnings Surprise Scoreと同じ前提条件・同じ
+    EarningsDecisionRelevance判定を使う)。
     """
     require_timezone_aware(evaluated_at)
 
     if (
-        earnings_date_status == EarningsDateStatus.STALE_PAST_DATE
-        and release_confirmation_state in _AWAITING_STATES
+        release_confirmation_state in _AWAITING_STATES
+        and decision_relevance == EarningsDecisionRelevance.RELEVANT
     ):
         return EarningsTrendResult(
             state=EarningsTrendEvaluationState.NOT_APPLICABLE,
@@ -240,6 +309,7 @@ def evaluate_earnings_trend(
             evaluated_at=evaluated_at,
             model_version=config.model_version,
             recent_periods_source=recent_periods_source,
+            earnings_decision_relevance=decision_relevance,
         )
 
     reason_codes: set[str] = set()
@@ -249,37 +319,57 @@ def evaluate_earnings_trend(
     prev_income: Decimal | None = None
     latest_income: Decimal | None = None
     income_change_pct: float | None = None
+    prev_income_period_end: dt.date | None = None
+    latest_income_period_end: dt.date | None = None
+    income_period_type: PeriodType | None = None
+
     cashflow_component: float | None = None
     prev_cashflow: Decimal | None = None
     latest_cashflow: Decimal | None = None
     cashflow_change_pct: float | None = None
+    prev_cashflow_period_end: dt.date | None = None
+    latest_cashflow_period_end: dt.date | None = None
+    cashflow_period_type: PeriodType | None = None
+
     acceleration_component: float | None = None
     acceleration_raw_pct: float | None = None
+    acceleration_period_ends: tuple[dt.date, dt.date, dt.date] | None = None
 
     if recent_periods_source == RecentPeriodsSource.UNAVAILABLE:
         reason_codes.add(REASON_OPERATING_INCOME_TREND_UNAVAILABLE)
         reason_codes.add(REASON_OPERATING_CASHFLOW_TREND_UNAVAILABLE)
         reason_codes.add(REASON_ACCELERATION_UNAVAILABLE)
     else:
-        income_component, prev_income, latest_income, income_change_pct = _trend_component(
-            quarterly_operating_incomes, config
-        )
+        income_result = _trend_component(quarterly_operating_incomes, config)
+        income_component = income_result.score
+        prev_income = income_result.previous_value
+        latest_income = income_result.latest_value
+        income_change_pct = income_result.change_pct
+        prev_income_period_end = income_result.previous_period_end
+        latest_income_period_end = income_result.latest_period_end
+        income_period_type = income_result.period_type
         if income_component is not None:
             components.append((income_component, config.operating_income_trend_weight))
         else:
             reason_codes.add(REASON_OPERATING_INCOME_TREND_UNAVAILABLE)
 
-        cashflow_component, prev_cashflow, latest_cashflow, cashflow_change_pct = (
-            _trend_component(quarterly_operating_cashflows, config)
-        )
+        cashflow_result = _trend_component(quarterly_operating_cashflows, config)
+        cashflow_component = cashflow_result.score
+        prev_cashflow = cashflow_result.previous_value
+        latest_cashflow = cashflow_result.latest_value
+        cashflow_change_pct = cashflow_result.change_pct
+        prev_cashflow_period_end = cashflow_result.previous_period_end
+        latest_cashflow_period_end = cashflow_result.latest_period_end
+        cashflow_period_type = cashflow_result.period_type
         if cashflow_component is not None:
             components.append((cashflow_component, config.operating_cashflow_trend_weight))
         else:
             reason_codes.add(REASON_OPERATING_CASHFLOW_TREND_UNAVAILABLE)
 
-        acceleration_component, acceleration_raw_pct = _acceleration_component(
-            quarterly_operating_incomes, config
-        )
+        acceleration_result = _acceleration_component(quarterly_operating_incomes, config)
+        acceleration_component = acceleration_result.score
+        acceleration_raw_pct = acceleration_result.raw_delta2
+        acceleration_period_ends = acceleration_result.period_ends
         if acceleration_component is not None:
             components.append((acceleration_component, config.acceleration_weight))
         else:
@@ -319,6 +409,14 @@ def evaluate_earnings_trend(
             operating_cashflow_change_pct=cashflow_change_pct,
             acceleration_raw_pct=acceleration_raw_pct,
             recent_periods_source=recent_periods_source,
+            latest_operating_income_period_end=latest_income_period_end,
+            previous_operating_income_period_end=prev_income_period_end,
+            operating_income_period_type=income_period_type,
+            latest_operating_cashflow_period_end=latest_cashflow_period_end,
+            previous_operating_cashflow_period_end=prev_cashflow_period_end,
+            operating_cashflow_period_type=cashflow_period_type,
+            acceleration_period_ends=acceleration_period_ends,
+            earnings_decision_relevance=decision_relevance,
             reason_codes=tuple(sorted(reason_codes)),
             evaluated_at=evaluated_at,
             model_version=config.model_version,
@@ -359,6 +457,14 @@ def evaluate_earnings_trend(
         operating_cashflow_change_pct=cashflow_change_pct,
         acceleration_raw_pct=acceleration_raw_pct,
         recent_periods_source=recent_periods_source,
+        latest_operating_income_period_end=latest_income_period_end,
+        previous_operating_income_period_end=prev_income_period_end,
+        operating_income_period_type=income_period_type,
+        latest_operating_cashflow_period_end=latest_cashflow_period_end,
+        previous_operating_cashflow_period_end=prev_cashflow_period_end,
+        operating_cashflow_period_type=cashflow_period_type,
+        acceleration_period_ends=acceleration_period_ends,
+        earnings_decision_relevance=decision_relevance,
         reason_codes=tuple(sorted(reason_codes)),
         evaluated_at=evaluated_at,
         model_version=config.model_version,
@@ -368,8 +474,9 @@ def evaluate_earnings_trend(
 def earnings_trend_result_to_metrics(result: EarningsTrendResult) -> dict[str, object]:
     """EarningsTrendResultを、Recommendation.earnings_trend_metrics
     (延いてはDecisionSnapshot.earnings_trend_metrics)へ保存する監査用dict
-    へ変換する。DecimalはJSON安全のためstr化、enumは.valueで保存する
-    (コードレビュー対応v2: 判定当時の入力生値を後から検証できるようにする)。
+    へ変換する。DecimalはJSON安全のためstr化、日付はISO8601文字列化、enumは
+    .valueで保存する(コードレビュー対応v2/v3: 判定当時の入力生値・期間情報
+    を後から検証できるようにする)。
     """
     return {
         "state": result.state.value,
@@ -403,6 +510,46 @@ def earnings_trend_result_to_metrics(result: EarningsTrendResult) -> dict[str, o
         "acceleration_raw_pct": result.acceleration_raw_pct,
         "recent_periods_source": (
             result.recent_periods_source.value if result.recent_periods_source is not None else None
+        ),
+        "latest_operating_income_period_end": (
+            result.latest_operating_income_period_end.isoformat()
+            if result.latest_operating_income_period_end is not None
+            else None
+        ),
+        "previous_operating_income_period_end": (
+            result.previous_operating_income_period_end.isoformat()
+            if result.previous_operating_income_period_end is not None
+            else None
+        ),
+        "operating_income_period_type": (
+            result.operating_income_period_type.value
+            if result.operating_income_period_type is not None
+            else None
+        ),
+        "latest_operating_cashflow_period_end": (
+            result.latest_operating_cashflow_period_end.isoformat()
+            if result.latest_operating_cashflow_period_end is not None
+            else None
+        ),
+        "previous_operating_cashflow_period_end": (
+            result.previous_operating_cashflow_period_end.isoformat()
+            if result.previous_operating_cashflow_period_end is not None
+            else None
+        ),
+        "operating_cashflow_period_type": (
+            result.operating_cashflow_period_type.value
+            if result.operating_cashflow_period_type is not None
+            else None
+        ),
+        "acceleration_period_ends": (
+            [d.isoformat() for d in result.acceleration_period_ends]
+            if result.acceleration_period_ends is not None
+            else None
+        ),
+        "earnings_decision_relevance": (
+            result.earnings_decision_relevance.value
+            if result.earnings_decision_relevance is not None
+            else None
         ),
         "model_version": result.model_version,
     }
