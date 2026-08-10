@@ -20,6 +20,8 @@ from jstock_advisor.domain.entities.common import (
     BenefitUtilityCoefficients,
     DataSourceReference,
 )
+from jstock_advisor.domain.entities.earnings_surprise import EarningsSurpriseResult
+from jstock_advisor.domain.entities.earnings_trend import EarningsTrendResult
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, EarningsDateStatus, ValuationBasis
 from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
@@ -36,6 +38,12 @@ from jstock_advisor.domain.screening.rules import (
     detect_material_event_keywords,
 )
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
+from jstock_advisor.domain.signals.earnings_surprise import evaluate_earnings_surprise
+from jstock_advisor.domain.signals.earnings_trend import evaluate_earnings_trend
+from jstock_advisor.domain.signals.earnings_window import (
+    resolve_earnings_release_confirmation,
+    resolve_latest_financial_period_end,
+)
 from jstock_advisor.domain.signals.historical_valuation import evaluate_historical_valuation
 from jstock_advisor.domain.signals.momentum import compute_momentum_snapshot
 from jstock_advisor.domain.signals.timing_score import evaluate_timing_score
@@ -122,6 +130,13 @@ class StockSnapshot:
     # 同じくDecisionSnapshot記録専用のShadow計測であり、既存の判定ロジックには
     # 一切影響しない。
     timing: TimingScoreResult
+    # --- 判定精度向上機能Phase C: Earnings Surprise/Trend Score(2026-08追加) ---
+    # 直近確定四半期のアナリストコンセンサス実績乖離+配当予想改定を基にした
+    # 決算サプライズ評価結果、および営業利益/営業CFトレンド+配当方向を基にした
+    # 業績トレンド評価結果。いずれもDecisionSnapshot記録専用のShadow計測であり、
+    # 既存の判定ロジックには一切影響しない。
+    earnings_surprise: EarningsSurpriseResult
+    earnings_trend: EarningsTrendResult
 
 
 def build_stock_snapshot(
@@ -380,6 +395,40 @@ def build_stock_snapshot(
     # ProfitTaking判定・LINE通知には一切影響しない。
     timing = evaluate_timing_score(momentum_snapshot, current_price, now, config.timing_score)
 
+    # 判定精度向上機能Phase C: Earnings Surprise/Trend Score(Shadow計測)。
+    # 決算反映確認(EarningsReleaseConfirmationState)はprofit_taking_service.py
+    # と同じ関数呼び出しで独立に解決する(既存パイプラインの計算経路には触れず、
+    # 副作用の無い純関数呼び出しをこちらでも行うのみ。同じ入力からは同じ結果に
+    # なるため、既存のprofit_taking判定結果には一切影響しない)。
+    resolved_period = resolve_latest_financial_period_end(financial, evaluation_date)
+    release_confirmation_state = resolve_earnings_release_confirmation(
+        earnings_date_status,
+        earnings_date_raw,
+        resolved_period.period_end,
+        financial.source.fetched_at,
+        now,
+        config.earnings_window,
+    )
+    earnings_surprise_history = providers.financial_data.get_earnings_surprise_history(stock_code)
+    earnings_surprise = evaluate_earnings_surprise(
+        earnings_surprise_history,
+        resolved_period.period_end,
+        dividend.dividend_comparison_outcome,
+        earnings_date_status,
+        release_confirmation_state,
+        now,
+        config.earnings_surprise,
+    )
+    earnings_trend = evaluate_earnings_trend(
+        quarterly_operating_incomes,
+        quarterly_operating_cashflows,
+        dividend.dividend_comparison_outcome,
+        earnings_date_status,
+        release_confirmation_state,
+        now,
+        config.earnings_trend,
+    )
+
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
@@ -415,5 +464,7 @@ def build_stock_snapshot(
         momentum=momentum_snapshot,
         historical_valuation=historical_valuation,
         timing=timing,
+        earnings_surprise=earnings_surprise,
+        earnings_trend=earnings_trend,
     )
     return snapshot, None

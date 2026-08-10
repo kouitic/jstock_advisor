@@ -27,11 +27,15 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.earnings_surprise import EarningsSurpriseResult
+from jstock_advisor.domain.entities.earnings_trend import EarningsTrendResult
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
     BuyAction,
     ConfidenceLevel,
     EarningsDateStatus,
+    EarningsSurpriseEvaluationState,
+    EarningsTrendEvaluationState,
     HistoricalValuationEvaluationState,
     RecommendationType,
     StockType,
@@ -164,6 +168,18 @@ _TIMING_PLACEHOLDER = TimingScoreResult(
     model_version="test-fixture",
 )
 
+_EARNINGS_SURPRISE_PLACEHOLDER = EarningsSurpriseResult(
+    state=EarningsSurpriseEvaluationState.NOT_EVALUATED,
+    evaluated_at=_NOW,
+    model_version="test-fixture",
+)
+
+_EARNINGS_TREND_PLACEHOLDER = EarningsTrendResult(
+    state=EarningsTrendEvaluationState.NOT_EVALUATED,
+    evaluated_at=_NOW,
+    model_version="test-fixture",
+)
+
 
 @dataclass(frozen=True)
 class _StockFixture:
@@ -250,6 +266,8 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         momentum=_MOMENTUM_PLACEHOLDER,
         historical_valuation=_HISTORICAL_VALUATION_PLACEHOLDER,
         timing=_TIMING_PLACEHOLDER,
+        earnings_surprise=_EARNINGS_SURPRISE_PLACEHOLDER,
+        earnings_trend=_EARNINGS_TREND_PLACEHOLDER,
     )
 
 

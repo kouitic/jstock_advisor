@@ -9,6 +9,7 @@ from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import RecentPeriodsSource, ValuationBasis
 from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
+    EarningsSurpriseRecord,
     FinancialSummary,
     HistoricalValuation,
     QuarterlyFinancials,
@@ -119,3 +120,52 @@ class MockFinancialDataProvider:
         # モックフィクスチャは営業CFの要因分解に必要な内訳データ(運転資本の
         # 各項目等)を保持していないため、未対応(None)とする。
         return None
+
+    def get_earnings_surprise_history(self, stock_code: str) -> list[EarningsSurpriseRecord]:
+        """判定精度向上機能Phase C用の合成データ。実データ実装
+        (yfinance_impl.py)は直近4四半期分のみ返すため、同じ件数に揃える。
+        quarter_endはget_financial_summary()のrecent_quartersと同一の期末日
+        規約(90日刻み)で算出し、突合可能にする。eps_actual/eps_estimateは
+        既存のordinary_incomeプロファイルから合成し、四半期ごとに交互で
+        プラス/マイナスのサプライズが生じるようにする(テストデータの多様性
+        確保が目的であり、実在企業の実績値ではない)。"""
+        profile = MOCK_STOCKS.get(stock_code)
+        if profile is None or not profile.quarters:
+            return []
+
+        source = self._source()
+        recent = profile.quarters[-4:]
+        offset = len(profile.quarters) - len(recent)
+        latest_ordinary_income = profile.quarters[-1].ordinary_income
+        results: list[EarningsSurpriseRecord] = []
+        for i, q in enumerate(recent):
+            quarter_index = offset + i
+            quarter_end = self._now.date() - dt.timedelta(
+                days=90 * (len(profile.quarters) - quarter_index)
+            )
+            if latest_ordinary_income == 0:
+                eps_actual = None
+            else:
+                eps_actual = (
+                    profile.forecast_eps / 4 * (q.ordinary_income / latest_ordinary_income)
+                )
+            eps_estimate = None
+            surprise_pct = None
+            if eps_actual is not None:
+                # 偶数四半期はプラスサプライズ(実績>予想)、奇数四半期はマイナス
+                # サプライズ(実績<予想)となるよう合成する。
+                ratio = Decimal("0.92") if quarter_index % 2 == 0 else Decimal("1.05")
+                eps_estimate = eps_actual * ratio
+                if eps_estimate != 0:
+                    surprise_pct = float((eps_actual - eps_estimate) / eps_estimate)
+            results.append(
+                EarningsSurpriseRecord(
+                    stock_code=stock_code,
+                    quarter_end=quarter_end,
+                    eps_actual=eps_actual,
+                    eps_estimate=eps_estimate,
+                    surprise_pct=surprise_pct,
+                    source=source,
+                )
+            )
+        return results

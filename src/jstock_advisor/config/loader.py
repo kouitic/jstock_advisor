@@ -20,6 +20,8 @@ from jstock_advisor.config.models import (
     ConfidenceRulesConfig,
     DataValidationRulesConfig,
     DecisionEvaluationConfig,
+    EarningsSurpriseRulesConfig,
+    EarningsTrendRulesConfig,
     EarningsWindowRulesConfig,
     EvaluationRulesConfig,
     HistoricalValuationRulesConfig,
@@ -155,6 +157,12 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     timing_score = TimingScoreRulesConfig.model_validate(
         _load_yaml(directory / "timing_score_rules.yaml")
     )
+    earnings_surprise = EarningsSurpriseRulesConfig.model_validate(
+        _load_yaml(directory / "earnings_surprise_rules.yaml")
+    )
+    earnings_trend = EarningsTrendRulesConfig.model_validate(
+        _load_yaml(directory / "earnings_trend_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -184,4 +192,6 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         decision_evaluation=decision_evaluation,
         historical_valuation=historical_valuation,
         timing_score=timing_score,
+        earnings_surprise=earnings_surprise,
+        earnings_trend=earnings_trend,
     )

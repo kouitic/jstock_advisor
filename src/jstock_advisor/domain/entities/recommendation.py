@@ -106,6 +106,30 @@ class Recommendation(ImmutableSnapshot):
     timing_reason_codes: tuple[str, ...] = ()
     timing_metrics: dict[str, Any] = Field(default_factory=dict)
 
+    # --- 判定精度向上機能Phase C: Earnings Surprise Score(2026-08追加、
+    # Shadow計測専用)。直近確定四半期のアナリストコンセンサス実績乖離+配当
+    # 予想改定を基にした決算サプライズ評価結果。StockSnapshot.earnings_surprise
+    # をそのままコピーしたものであり、DecisionSnapshotへ記録する以外の用途では
+    # 一切使わない。BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
+    # LINE通知など既存の判定ロジックからは参照しないこと ---
+    earnings_surprise_score: float | None = None
+    earnings_surprise_confidence: ConfidenceLevel | None = None
+    earnings_surprise_coverage: float | None = None
+    earnings_surprise_reason_codes: tuple[str, ...] = ()
+    earnings_surprise_metrics: dict[str, Any] = Field(default_factory=dict)
+
+    # --- 判定精度向上機能Phase C: Earnings Trend Score(2026-08追加、Shadow
+    # 計測専用)。営業利益/営業CFトレンド+配当方向を基にした業績トレンド評価
+    # 結果。StockSnapshot.earnings_trendをそのままコピーしたものであり、
+    # DecisionSnapshotへ記録する以外の用途では一切使わない。BUY候補判定・
+    # 保有判断スコア・旧売却判定・ProfitTaking判定・LINE通知など既存の判定
+    # ロジックからは参照しないこと ---
+    earnings_trend_score: float | None = None
+    earnings_trend_confidence: ConfidenceLevel | None = None
+    earnings_trend_coverage: float | None = None
+    earnings_trend_reason_codes: tuple[str, ...] = ()
+    earnings_trend_metrics: dict[str, Any] = Field(default_factory=dict)
+
     # --- 通知層の自動生成文言廃止(2026-07仕様§9)で追加。判定結果の文言は
     # 通知層(line_notification_service)で生成せず、ここに判定サービスが直接格納する ---
     recommended_action_summary: str | None = None

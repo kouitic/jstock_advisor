@@ -317,3 +317,102 @@ def test_recent_periods_skips_columns_without_valid_date() -> None:
 
     assert results.periods == []
     assert results.source == RecentPeriodsSource.UNAVAILABLE
+
+
+# ===== 判定精度向上機能Phase C: get_earnings_surprise_history() =====
+
+
+def test_get_earnings_surprise_history_parses_earnings_history_dataframe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import jstock_advisor.providers.financial_data.yfinance_impl as module
+
+    earnings_history = pd.DataFrame(
+        {
+            "epsActual": {
+                pd.Timestamp("2025-09-30"): 71.51,
+                pd.Timestamp("2025-12-31"): 96.48,
+            },
+            "epsEstimate": {
+                pd.Timestamp("2025-09-30"): 50.08,
+                pd.Timestamp("2025-12-31"): 74.05,
+            },
+            "surprisePercent": {
+                pd.Timestamp("2025-09-30"): 0.428,
+                pd.Timestamp("2025-12-31"): 0.303,
+            },
+        }
+    )
+    fake_ticker = _FakeTickerFinancials("7203.T")
+    fake_ticker.get_earnings_history = lambda: earnings_history  # type: ignore[attr-defined]
+    monkeypatch.setattr(module.yf, "Ticker", lambda symbol: fake_ticker)
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+
+    results = provider.get_earnings_surprise_history("7203")
+
+    assert len(results) == 2
+    assert results[0].quarter_end == dt.date(2025, 9, 30)
+    assert results[0].eps_actual == Decimal("71.51")
+    assert results[0].eps_estimate == Decimal("50.08")
+    assert results[0].surprise_pct == pytest.approx(0.428)
+
+
+def test_get_earnings_surprise_history_handles_missing_estimate_columns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """アナリストカバレッジが薄い銘柄はepsEstimate/surprisePercent列自体が
+    存在しないことがある(実測確認済み)。エラーにせずeps_estimate/surprise_pct
+    をNoneのままにする。"""
+    import jstock_advisor.providers.financial_data.yfinance_impl as module
+
+    earnings_history = pd.DataFrame({"epsActual": {pd.Timestamp("2025-06-30"): 14.31}})
+    fake_ticker = _FakeTickerFinancials("3900.T")
+    fake_ticker.get_earnings_history = lambda: earnings_history  # type: ignore[attr-defined]
+    monkeypatch.setattr(module.yf, "Ticker", lambda symbol: fake_ticker)
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+
+    results = provider.get_earnings_surprise_history("3900")
+
+    assert len(results) == 1
+    assert results[0].eps_actual == Decimal("14.31")
+    assert results[0].eps_estimate is None
+    assert results[0].surprise_pct is None
+
+
+def test_get_earnings_surprise_history_returns_empty_when_dataframe_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import jstock_advisor.providers.financial_data.yfinance_impl as module
+
+    fake_ticker = _FakeTickerFinancials("0000.T")
+    fake_ticker.get_earnings_history = lambda: pd.DataFrame()  # type: ignore[attr-defined]
+    monkeypatch.setattr(module.yf, "Ticker", lambda symbol: fake_ticker)
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+
+    assert provider.get_earnings_surprise_history("0000") == []
+
+
+def test_get_earnings_surprise_history_returns_empty_on_exception(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """get_earnings_history()は非公式ライブラリの内部実装に依存するため、
+    例外発生時は空リストへフォールバックする(既存Provider実装の広い例外捕捉
+    パターンを踏襲)。"""
+    import jstock_advisor.providers.financial_data.yfinance_impl as module
+
+    class _RaisingTicker:
+        def get_earnings_history(self) -> pd.DataFrame:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(module.yf, "Ticker", lambda symbol: _RaisingTicker())
+    provider = YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+
+    assert provider.get_earnings_surprise_history("7203") == []

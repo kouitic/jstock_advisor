@@ -1,0 +1,50 @@
+# Earnings Surprise Score v1(判定精度向上機能Phase C)の設定。
+#
+# 「直近決算が事前の期待に対して良かったか」を-100(強い悪材料サプライズ)〜
+# +100(強い好材料サプライズ)で評価する。DecisionSnapshot.earnings_surprise_score等
+# (Shadow計測専用)へのみ記録され、BUY候補判定・保有判断スコア・旧売却判定・
+# ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
+#
+# 実装前調査の結果、Analyst Consensus Surprise(決算実績 vs 決算発表前アナリスト
+# コンセンサス予想)とDividend Surprise/Revision(配当予想の増額/減額)の2成分の
+# みで構成する。Historical Progress Surprise(今回の進捗率 vs 過去3〜5年の同一
+# 四半期平均)は四半期実績データが直近5四半期(約1.25年)分しか取得できず根本的に
+# データ不足のため実装しない。Guidance Revision(業績予想の上方/下方修正)は、
+# 開示情報自体がTDnet専用であり本システムの開示Provider(EDINET臨時報告書のみ
+# 対応)からは構造的に取得できないため実装しない。
+#
+# 重要な制約: Analyst Consensus成分に使うEarningsSurpriseRecordは、ライブ評価
+# 時点で取得・保存した値をその後のDecisionOutcome分析に使うことのみ安全であり
+# (LIVE_SHADOW_ONLY)、過去の評価日を指定して再構成する用途(バックテスト)には
+# 使えない(既知の制約)。
+
+model_version: "earnings_surprise_v1"
+
+# 2成分の加重平均の重み。
+analyst_consensus_weight: 1.0
+dividend_revision_weight: 0.5
+
+# Analyst Consensus成分: surprise_pct(実績EPSがコンセンサス予想を上回った/
+# 下回った割合。例0.05=5%上振れ)の段階評価区分(符号付き、昇順)。
+analyst_consensus_strong_negative_pct: -0.20
+analyst_consensus_negative_pct: -0.05
+analyst_consensus_positive_pct: 0.05
+analyst_consensus_strong_positive_pct: 0.20
+
+# Dividend Revision成分: 既存DividendComparisonOutcome区分に対応する固定点数。
+dividend_actual_cut_score: -100.0
+dividend_forecast_cut_score: -50.0
+dividend_maintained_score: 0.0
+dividend_increase_score: 80.0
+
+# coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする。
+min_coverage_required: 0.3
+coverage_high_threshold: 0.9
+coverage_medium_threshold: 0.5
+
+# スコア(-100〜+100)をカテゴリへ丸めるための閾値(Shadow記録専用)。
+category_thresholds:
+  strong_positive: 50.0
+  positive: 15.0
+  negative: -15.0
+  strong_negative: -50.0

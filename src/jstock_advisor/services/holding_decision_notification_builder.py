@@ -18,6 +18,14 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult, ReasonImpact
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.signals.earnings_surprise import (
+    earnings_surprise_config_values,
+    earnings_surprise_result_to_metrics,
+)
+from jstock_advisor.domain.signals.earnings_trend import (
+    earnings_trend_config_values,
+    earnings_trend_result_to_metrics,
+)
 from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
     historical_valuation_result_to_metrics,
@@ -145,6 +153,8 @@ def build_holding_decision_recommendation(
                 config.historical_valuation
             ),
             "timing_score": timing_score_config_values(config.timing_score),
+            "earnings_surprise": earnings_surprise_config_values(config.earnings_surprise),
+            "earnings_trend": earnings_trend_config_values(config.earnings_trend),
         },
         data_sources=list(snapshot.data_sources),
         recommended_action_summary=action_summary,
@@ -166,4 +176,17 @@ def build_holding_decision_recommendation(
         timing_metrics=timing_score_result_to_metrics(
             snapshot.timing, snapshot.momentum, snapshot.current_price
         ),
+        # 判定精度向上機能Phase C: DecisionSnapshot記録専用(Shadow計測)。
+        earnings_surprise_score=snapshot.earnings_surprise.score,
+        earnings_surprise_confidence=snapshot.earnings_surprise.confidence,
+        earnings_surprise_coverage=snapshot.earnings_surprise.coverage,
+        earnings_surprise_reason_codes=snapshot.earnings_surprise.reason_codes,
+        earnings_surprise_metrics=earnings_surprise_result_to_metrics(
+            snapshot.earnings_surprise
+        ),
+        earnings_trend_score=snapshot.earnings_trend.score,
+        earnings_trend_confidence=snapshot.earnings_trend.confidence,
+        earnings_trend_coverage=snapshot.earnings_trend.coverage,
+        earnings_trend_reason_codes=snapshot.earnings_trend.reason_codes,
+        earnings_trend_metrics=earnings_trend_result_to_metrics(snapshot.earnings_trend),
     )

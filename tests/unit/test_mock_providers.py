@@ -48,6 +48,37 @@ def test_financial_data_provider_unknown_stock_returns_none() -> None:
     assert provider.get_historical_valuation("0000", years=3) == []
 
 
+def test_financial_data_provider_earnings_surprise_history_unknown_stock_returns_empty() -> None:
+    provider = MockFinancialDataProvider(now=_NOW)
+    assert provider.get_earnings_surprise_history("0000") == []
+
+
+def test_financial_data_provider_earnings_surprise_history_matches_recent_quarters() -> None:
+    """判定精度向上機能Phase C: quarter_endはget_financial_summary()の
+    recent_quartersと同一の期末日規約を用いる(evaluate_earnings_surprise()側の
+    突合に必要)。"""
+    provider = MockFinancialDataProvider(now=_NOW)
+    summary = provider.get_financial_summary("2914")
+    assert summary is not None
+    history = provider.get_earnings_surprise_history("2914")
+    assert len(history) == 4
+    assert [r.quarter_end for r in history] == [q.quarter_end for q in summary.recent_quarters[-4:]]
+
+
+def test_financial_data_provider_earnings_surprise_history_has_alternating_surprise_sign() -> None:
+    """テストデータの多様性確保のため、四半期ごとに交互でプラス/マイナスの
+    サプライズが生じる合成データになっていることを確認する。"""
+    provider = MockFinancialDataProvider(now=_NOW)
+    history = provider.get_earnings_surprise_history("2914")
+    assert len(history) == 4
+    for record in history:
+        assert record.eps_actual is not None
+        assert record.eps_estimate is not None
+        assert record.surprise_pct is not None
+    assert history[0].surprise_pct is not None and history[0].surprise_pct > 0
+    assert history[1].surprise_pct is not None and history[1].surprise_pct < 0
+
+
 def test_dividend_data_provider_returns_forecast() -> None:
     provider = MockDividendDataProvider(now=_NOW)
     info = provider.get_dividend_info("2914")

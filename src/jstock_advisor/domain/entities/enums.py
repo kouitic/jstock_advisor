@@ -310,6 +310,49 @@ class TimingScoreCategory(StrEnum):
     STRONG_HEADWIND = "STRONG_HEADWIND"
 
 
+class EarningsSurpriseEvaluationState(StrEnum):
+    """Earnings Surprise Scoreが実際に算出されたか、対象外か、算出不可
+    だったかの区分(判定精度向上機能Phase C)。"""
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    # 決算予定日を未経過等、そもそも評価対象外の場合(データ不足による
+    # NOT_EVALUATEDとは区別する。HistoricalValuationEvaluationStateと同じ
+    # 3区分パターン)。
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class EarningsSurpriseCategory(StrEnum):
+    """Earnings Surprise Scoreを人間が読みやすいカテゴリへ丸めたもの
+    (Shadow記録専用、BUY/SELL等の判定ロジックには使わない)。"""
+
+    STRONG_POSITIVE_SURPRISE = "STRONG_POSITIVE_SURPRISE"
+    POSITIVE_SURPRISE = "POSITIVE_SURPRISE"
+    NEUTRAL = "NEUTRAL"
+    NEGATIVE_SURPRISE = "NEGATIVE_SURPRISE"
+    STRONG_NEGATIVE_SURPRISE = "STRONG_NEGATIVE_SURPRISE"
+
+
+class EarningsTrendEvaluationState(StrEnum):
+    """Earnings Trend Scoreが実際に算出されたか、対象外か、算出不可だった
+    かの区分(判定精度向上機能Phase C)。"""
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class EarningsTrendCategory(StrEnum):
+    """Earnings Trend Scoreを人間が読みやすいカテゴリへ丸めたもの
+    (Shadow記録専用、BUY/SELL等の判定ロジックには使わない)。"""
+
+    STRONG_IMPROVING = "STRONG_IMPROVING"
+    IMPROVING = "IMPROVING"
+    STABLE = "STABLE"
+    DETERIORATING = "DETERIORATING"
+    STRONG_DETERIORATING = "STRONG_DETERIORATING"
+
+
 class ImprovementPriority(StrEnum):
     """週次改善レビュー(振り返り機能改修)の改善候補優先度。"""
 

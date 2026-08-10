@@ -1,4 +1,4 @@
-"""判定精度向上機能Phase A/B: DecisionSnapshot(自己評価基盤)。
+"""判定精度向上機能Phase A/B/C: DecisionSnapshot(自己評価基盤)。
 
 Phase Aでは、判断が確定した時点で「実際に確定した最終判断値」だけを不変
 スナップショットとして保存し、将来スコアが埋まった際の追跡・検証基盤を先に
@@ -7,10 +7,13 @@ historical_valuation_score(銘柄自身の過去PER/PBR水準に対する現在�
 ベーススコア)を実装済み(domain/signals/historical_valuation.py参照)。
 Phase B第二弾としてtiming_score(既存MomentumSnapshotを基にしたモメンタム
 ベースの技術的タイミングスコア)を実装済み(domain/signals/timing_score.py
-参照)。いずれもShadow計測専用であり、BUY候補判定・保有判断スコア・旧売却
-判定・ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
-他のスコア項目(earnings_surprise_score等)はPhase B以降の別ステップで
-追加していく。
+参照)。Phase Cとしてearnings_surprise_score(決算サプライズスコア、
+domain/signals/earnings_surprise.py参照)・earnings_trend_score(業績
+トレンドスコア、domain/signals/earnings_trend.py参照)を実装済み。いずれも
+Shadow計測専用であり、BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking
+判定・LINE通知など既存の判定ロジックには一切影響しない。market_score/
+sector_score/environment_scoreは将来のPhase D(Market/Sector Environment
+Score)で追加していく。
 
 重要な設計原則(コードレビュー対応): DecisionSnapshotはRecommendationを唯一の
 正本とする。StockSnapshot(判定処理の中間生成物)を直接参照しない。BUYパイプライン
@@ -50,9 +53,10 @@ from jstock_advisor.domain.entities.enums import ConfidenceLevel, DecisionType, 
 # DecisionSnapshot自体のスキーマ/スコアリング方式のバージョン(rule_versionとは別物、
 # rule_versionはBUY/SELL判定ロジック自体のバージョンを指す)。Phase B第一弾
 # (historical_valuation_score実装)、Phase B第二弾(timing_score実装・v2/v3/v4への
-# 再設計、コードレビュー対応)に伴い値を上げた。他のスコア項目が実装され
+# 再設計、コードレビュー対応)、Phase C(earnings_surprise_score/
+# earnings_trend_score実装)に伴い値を上げた。他のスコア項目が実装され
 # 始めたらさらに値を上げる。
-DECISION_SNAPSHOT_MODEL_VERSION = "phase_b_timing_score_v4"
+DECISION_SNAPSHOT_MODEL_VERSION = "phase_c_earnings_v1"
 
 
 class DecisionSnapshot(ImmutableSnapshot):
@@ -104,8 +108,22 @@ class DecisionSnapshot(ImmutableSnapshot):
     timing_coverage: float | None = None
     timing_reason_codes: tuple[str, ...] = ()
     timing_metrics: dict[str, Any] = Field(default_factory=dict)
+    # 決算サプライズスコア(-100〜+100、算出不可時はNone)。Phase Cで実装済み
+    # (domain/signals/earnings_surprise.py参照、Shadow計測専用)。
+    # historical_valuation_*と同じ5フィールドパターン。
     earnings_surprise_score: float | None = None
+    earnings_surprise_confidence: ConfidenceLevel | None = None
+    earnings_surprise_coverage: float | None = None
+    earnings_surprise_reason_codes: tuple[str, ...] = ()
+    earnings_surprise_metrics: dict[str, Any] = Field(default_factory=dict)
+    # 業績トレンドスコア(-100〜+100、算出不可時はNone)。Phase Cで実装済み
+    # (domain/signals/earnings_trend.py参照、Shadow計測専用)。
+    # historical_valuation_*と同じ5フィールドパターン。
     earnings_trend_score: float | None = None
+    earnings_trend_confidence: ConfidenceLevel | None = None
+    earnings_trend_coverage: float | None = None
+    earnings_trend_reason_codes: tuple[str, ...] = ()
+    earnings_trend_metrics: dict[str, Any] = Field(default_factory=dict)
     market_score: float | None = None
     sector_score: float | None = None
     environment_score: float | None = None

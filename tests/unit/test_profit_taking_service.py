@@ -113,6 +113,9 @@ class _FixedFinancialPeriodFinancialDataProvider:
     def get_cashflow_decomposition(self, stock_code: str) -> object | None:
         return self._delegate.get_cashflow_decomposition(stock_code)  # type: ignore[attr-defined]
 
+    def get_earnings_surprise_history(self, stock_code: str) -> list[object]:
+        return self._delegate.get_earnings_surprise_history(stock_code)  # type: ignore[attr-defined]
+
 
 _TEST_FINANCIAL_SOURCE = DataSourceReference(provider="test-fixture", fetched_at=_NOW)
 

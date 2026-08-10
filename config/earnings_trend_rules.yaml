@@ -1,0 +1,51 @@
+# Earnings Trend Score v1(判定精度向上機能Phase C)の設定。
+#
+# 「直近決算が期待に対して良かったか」(Earnings Surprise Score)ではなく、
+# 「複数四半期にわたって業績が改善傾向にあるか」を-100(強い悪化トレンド)〜
+# +100(強い改善トレンド)で評価する。DecisionSnapshot.earnings_trend_score等
+# (Shadow計測専用)へのみ記録され、BUY候補判定・保有判断スコア・旧売却判定・
+# ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
+#
+# 実装前調査の結果、営業利益トレンド・営業CFトレンド・配当方向の3成分
+# (+補助的なacceleration成分)で構成する。売上トレンド・EPSトレンド・利益率
+# 改善・会社予想方向(上方/下方修正の方向)は現行Providerでは算出できないため
+# 対象外(将来Provider拡張により対応可能になり次第、別途検討する)。
+
+model_version: "earnings_trend_v1"
+
+# 4成分の加重平均の重み。accelerationはデータが薄い(直近5四半期程度)ため
+# 信頼度が低い補助成分として小さい重みにする。
+operating_income_trend_weight: 1.0
+operating_cashflow_trend_weight: 0.75
+dividend_direction_weight: 0.5
+acceleration_weight: 0.25
+
+# 営業利益/営業CFトレンド共通: 直近期の前期比変化率(%)の段階評価区分
+# (符号付き、昇順)。
+trend_strong_decline_pct: -15.0
+trend_decline_pct: -5.0
+trend_improve_pct: 5.0
+trend_strong_improve_pct: 15.0
+
+# acceleration成分: 前期比変化率の変化(2階差分、%ポイント)をこの値で±100へ
+# 換算する。
+acceleration_full_scale_pct: 10.0
+
+# Dividend Direction成分: 既存DividendComparisonOutcome区分に対応する固定点数
+# (Earnings Surprise Scoreと意味が異なるため独立して設定する)。
+dividend_actual_cut_score: -100.0
+dividend_forecast_cut_score: -50.0
+dividend_maintained_score: 0.0
+dividend_increase_score: 80.0
+
+# coverage(利用可能な成分の重み比率)がこの値未満の場合はNOT_EVALUATEDとする。
+min_coverage_required: 0.3
+coverage_high_threshold: 0.9
+coverage_medium_threshold: 0.5
+
+# スコア(-100〜+100)をカテゴリへ丸めるための閾値(Shadow記録専用)。
+category_thresholds:
+  strong_improving: 50.0
+  improving: 15.0
+  deteriorating: -15.0
+  strong_deteriorating: -50.0
