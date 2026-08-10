@@ -1,15 +1,24 @@
-"""判定精度向上機能Phase C: Earnings Trend Score v1(業績トレンドスコア)。
+"""判定精度向上機能Phase C: Earnings Trend Score v2(業績トレンドスコア)。
 
 Earnings Surprise Score(earnings_surprise.py)とは独立した評価軸。実装前
-調査の結果、営業利益トレンド・営業CFトレンド・配当方向の3成分(+補助的な
-acceleration成分)で構成する(売上トレンド・EPSトレンド・利益率改善・会社
-予想方向は現行Providerでは算出できないため対象外。domain/entities/
-earnings_trend.py参照)。
+調査の結果、営業利益トレンド・営業CFトレンド・配当方向の3要素を中心に
+構成する(売上トレンド・EPSトレンド・利益率改善・会社予想方向は現行
+Providerでは算出できないため対象外。domain/entities/earnings_trend.py参照)。
 
 look-ahead bias防止: Earnings Surprise Scoreと同様、最新決算が確定反映
 されたかどうかはこの関数では判定せず、呼び出し側が
 `EarningsReleaseConfirmationState`を解決したうえで渡す。決算予定日を経過
 していながら財務データへの反映が未確認の場合、NOT_APPLICABLEを返す。
+
+コードレビュー対応(v2): 変化率計算`(latest-previous)/abs(previous)*100`は
+previousが負(赤字・マイナスCF)の場合でも改善/悪化の方向を正しく評価する
+(旧式`latest/previous-1`はpreviousが負の場合に符号が逆転する不具合が
+あった)。previous=0は0除算となるため、パーセントを介さずlatestの符号で
+直接評価する。acceleration成分は、隣接する2区間のいずれかで黒字/赤字の
+符号跨ぎが起きている場合、2階差分が比較可能な意味を持たないため評価不能
+とする。また、FinancialSummary.recent_periods_source(四半期実績由来か
+年次フォールバック由来か)をconfidenceへ反映する(ANNUAL_FALLBACKは
+MEDIUM上限、UNAVAILABLEは財務トレンド系成分を強制的に評価不能とする)。
 
 外部I/Oを一切行わない純関数(domain/signals/timing_score.pyと同じパターン)。
 
@@ -32,6 +41,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     EarningsTrendCategory,
     EarningsTrendEvaluationState,
+    RecentPeriodsSource,
 )
 from jstock_advisor.domain.jst import require_timezone_aware
 
@@ -40,6 +50,9 @@ REASON_OPERATING_INCOME_TREND_UNAVAILABLE = "OPERATING_INCOME_TREND_UNAVAILABLE"
 REASON_OPERATING_CASHFLOW_TREND_UNAVAILABLE = "OPERATING_CASHFLOW_TREND_UNAVAILABLE"
 REASON_DIVIDEND_DIRECTION_UNAVAILABLE = "DIVIDEND_DIRECTION_UNAVAILABLE"
 REASON_ACCELERATION_UNAVAILABLE = "ACCELERATION_UNAVAILABLE"
+# コードレビュー対応(v2): 四半期実績ではなく年次決算へフォールバックした
+# データを使った場合に付与する(confidence上限キャップと対になる)。
+REASON_ANNUAL_FALLBACK_USED = "ANNUAL_FALLBACK_USED"
 
 _AWAITING_STATES = (
     EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
@@ -58,10 +71,28 @@ def _clamp(value: float, low: float = -100.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
 
+def _is_sign_crossing(previous: Decimal, latest: Decimal) -> bool:
+    """黒字/赤字(またはCFプラス/マイナス)の符号が跨いだかどうか。0は
+    非負側として扱う(previous>=0 and latest<0、previous<0 and latest>=0の
+    いずれか)。"""
+    return (previous < 0) != (latest < 0)
+
+
 def _change_pct(previous: Decimal, latest: Decimal) -> float | None:
+    """符号付き変化率(%)。
+
+    コードレビュー対応(v2): `(latest - previous) / abs(previous) * 100`と
+    いう共通の式を使うことで、previousが負(赤字・マイナスCF)の場合でも
+    改善/悪化の方向が逆転しない(旧式の`latest / previous - 1`はpreviousが
+    負の場合に符号が反転する不具合があった)。黒字転換
+    (previous<0<=latest)・赤字転落(previous>=0>latest)もこの式のまま
+    自然に大きな正/負の値となり、追加の分岐なしで強い改善/悪化として
+    評価される。previous=0は0除算となるためNoneを返す(呼び出し側で
+    符号に応じた明示的な評価に切り替える)。
+    """
     if previous == 0:
         return None
-    return float(latest / previous - 1) * 100.0
+    return float((latest - previous) / abs(previous)) * 100.0
 
 
 def _banded_score(change_pct: float, config: EarningsTrendRulesConfig) -> float:
@@ -78,31 +109,60 @@ def _banded_score(change_pct: float, config: EarningsTrendRulesConfig) -> float:
 
 def _trend_component(
     series: list[Decimal], config: EarningsTrendRulesConfig
-) -> float | None:
+) -> tuple[float | None, Decimal | None, Decimal | None, float | None]:
     """seriesは時系列昇順(最後が最新)を前提とする(domain/financial_series.py
     のto_seasonally_adjusted_series()と同じ規約)。直近期の前期比変化率を
-    段階評価する。"""
+    段階評価する。戻り値は(段階評価スコア, previous, latest, change_pct)。
+
+    previous=0の場合(コードレビュー対応v2)、0除算となるパーセント計算は
+    行わず、latestの符号に応じて明示的に評価する(推測による極端な変化率を
+    作らない)。0へ到達した後latest>0なら改善方向、latest<0なら悪化方向と
+    し、_banded_score()と同じ固定の離散値(改善/悪化の中位=50.0/-50.0)を
+    使う(起点が0のため変化の大きさは不明であり、最上位の100.0/-100.0では
+    なく中位に留める)。
+    """
     if len(series) < 2:
-        return None
-    change_pct = _change_pct(series[-2], series[-1])
+        return None, None, None, None
+    previous, latest = series[-2], series[-1]
+    if previous == 0:
+        if latest == 0:
+            score = 0.0
+        elif latest > 0:
+            score = 50.0
+        else:
+            score = -50.0
+        return score, previous, latest, None
+    change_pct = _change_pct(previous, latest)
     if change_pct is None:
-        return None
-    return _banded_score(change_pct, config)
+        return None, previous, latest, None
+    return _banded_score(change_pct, config), previous, latest, change_pct
 
 
 def _acceleration_component(
     series: list[Decimal], config: EarningsTrendRulesConfig
-) -> float | None:
+) -> tuple[float | None, float | None]:
     """直近の前期比変化率と、その1つ前の前期比変化率の差(2階差分)を評価する。
-    最低3四半期分のデータが必要(データが薄いため補助成分として扱う)。"""
+    最低3四半期分のデータが必要(データが薄いため補助成分として扱う)。
+    戻り値は(段階評価スコア, raw delta2(%ポイント、クランプ前))。
+
+    コードレビュー対応(v2): 隣接する2区間(t-2→t-1、t-1→t)のいずれかで
+    黒字/赤字(またはCFプラス/マイナス)の符号跨ぎが起きている場合、2階差分は
+    比較可能な意味を持たない(_change_pct()の分母基準が区間ごとに大きく
+    異なりうる)ため、無理に2階差分を作らずNoneを返す。
+    """
     if len(series) < 3:
-        return None
-    change_latest = _change_pct(series[-2], series[-1])
-    change_previous = _change_pct(series[-3], series[-2])
-    if change_latest is None or change_previous is None:
-        return None
+        return None, None
+    prev2, prev1, curr = series[-3], series[-2], series[-1]
+    if prev2 == 0 or prev1 == 0:
+        return None, None
+    if _is_sign_crossing(prev2, prev1) or _is_sign_crossing(prev1, curr):
+        return None, None
+    change_previous = _change_pct(prev2, prev1)
+    change_latest = _change_pct(prev1, curr)
+    if change_previous is None or change_latest is None:
+        return None, None
     delta2 = change_latest - change_previous
-    return _clamp(delta2 / config.acceleration_full_scale_pct * 100.0)
+    return _clamp(delta2 / config.acceleration_full_scale_pct * 100.0), delta2
 
 
 def _dividend_component(
@@ -142,6 +202,7 @@ def evaluate_earnings_trend(
     quarterly_operating_incomes: list[Decimal],
     quarterly_operating_cashflows: list[Decimal],
     dividend_comparison_outcome: DividendComparisonOutcome | None,
+    recent_periods_source: RecentPeriodsSource,
     earnings_date_status: EarningsDateStatus,
     release_confirmation_state: EarningsReleaseConfirmationState,
     evaluated_at: dt.datetime,
@@ -153,6 +214,15 @@ def evaluate_earnings_trend(
     quarterly_operating_incomes/quarterly_operating_cashflowsは季節調整済み
     (TTM)系列(StockSnapshot.quarterly_operating_incomes/
     quarterly_operating_cashflows、時系列昇順)を渡すこと。
+
+    recent_periods_sourceはFinancialSummary.recent_periods_sourceを渡す
+    こと(コードレビュー対応v2)。QUARTERLY(四半期実績由来)は通常どおり
+    coverageベースでconfidenceを算出する。ANNUAL_FALLBACK(年次決算への
+    フォールバック由来)はスコア自体は通常どおり算出するが、情報粒度が
+    粗いことを踏まえconfidenceをMEDIUM上限にキャップし、理由コード
+    ANNUAL_FALLBACK_USEDを付与する。UNAVAILABLE(由来不明・実質データ
+    無し)は財務トレンド系成分(営業利益/営業CF/acceleration)を入力系列の
+    中身に関わらず強制的に評価不能とする(古い/不整合なデータを信頼しない)。
 
     earnings_date_status/release_confirmation_stateがともに「決算予定日を
     経過したが財務データへの反映が未確認」を示す場合、NOT_APPLICABLEを返し
@@ -169,34 +239,60 @@ def evaluate_earnings_trend(
             reason_codes=(REASON_AWAITING_EARNINGS_CONFIRMATION,),
             evaluated_at=evaluated_at,
             model_version=config.model_version,
+            recent_periods_source=recent_periods_source,
         )
 
     reason_codes: set[str] = set()
     components: list[tuple[float, float]] = []
 
-    income_component = _trend_component(quarterly_operating_incomes, config)
-    if income_component is not None:
-        components.append((income_component, config.operating_income_trend_weight))
-    else:
-        reason_codes.add(REASON_OPERATING_INCOME_TREND_UNAVAILABLE)
+    income_component: float | None = None
+    prev_income: Decimal | None = None
+    latest_income: Decimal | None = None
+    income_change_pct: float | None = None
+    cashflow_component: float | None = None
+    prev_cashflow: Decimal | None = None
+    latest_cashflow: Decimal | None = None
+    cashflow_change_pct: float | None = None
+    acceleration_component: float | None = None
+    acceleration_raw_pct: float | None = None
 
-    cashflow_component = _trend_component(quarterly_operating_cashflows, config)
-    if cashflow_component is not None:
-        components.append((cashflow_component, config.operating_cashflow_trend_weight))
-    else:
+    if recent_periods_source == RecentPeriodsSource.UNAVAILABLE:
+        reason_codes.add(REASON_OPERATING_INCOME_TREND_UNAVAILABLE)
         reason_codes.add(REASON_OPERATING_CASHFLOW_TREND_UNAVAILABLE)
+        reason_codes.add(REASON_ACCELERATION_UNAVAILABLE)
+    else:
+        income_component, prev_income, latest_income, income_change_pct = _trend_component(
+            quarterly_operating_incomes, config
+        )
+        if income_component is not None:
+            components.append((income_component, config.operating_income_trend_weight))
+        else:
+            reason_codes.add(REASON_OPERATING_INCOME_TREND_UNAVAILABLE)
+
+        cashflow_component, prev_cashflow, latest_cashflow, cashflow_change_pct = (
+            _trend_component(quarterly_operating_cashflows, config)
+        )
+        if cashflow_component is not None:
+            components.append((cashflow_component, config.operating_cashflow_trend_weight))
+        else:
+            reason_codes.add(REASON_OPERATING_CASHFLOW_TREND_UNAVAILABLE)
+
+        acceleration_component, acceleration_raw_pct = _acceleration_component(
+            quarterly_operating_incomes, config
+        )
+        if acceleration_component is not None:
+            components.append((acceleration_component, config.acceleration_weight))
+        else:
+            reason_codes.add(REASON_ACCELERATION_UNAVAILABLE)
+
+        if recent_periods_source == RecentPeriodsSource.ANNUAL_FALLBACK:
+            reason_codes.add(REASON_ANNUAL_FALLBACK_USED)
 
     dividend_component = _dividend_component(dividend_comparison_outcome, config)
     if dividend_component is not None:
         components.append((dividend_component, config.dividend_direction_weight))
     else:
         reason_codes.add(REASON_DIVIDEND_DIRECTION_UNAVAILABLE)
-
-    acceleration_component = _acceleration_component(quarterly_operating_incomes, config)
-    if acceleration_component is not None:
-        components.append((acceleration_component, config.acceleration_weight))
-    else:
-        reason_codes.add(REASON_ACCELERATION_UNAVAILABLE)
 
     total_config_weight = (
         config.operating_income_trend_weight
@@ -215,6 +311,14 @@ def evaluate_earnings_trend(
             operating_cashflow_trend_component=cashflow_component,
             dividend_direction_component=dividend_component,
             acceleration_component=acceleration_component,
+            latest_operating_income=latest_income,
+            previous_operating_income=prev_income,
+            operating_income_change_pct=income_change_pct,
+            latest_operating_cashflow=latest_cashflow,
+            previous_operating_cashflow=prev_cashflow,
+            operating_cashflow_change_pct=cashflow_change_pct,
+            acceleration_raw_pct=acceleration_raw_pct,
+            recent_periods_source=recent_periods_source,
             reason_codes=tuple(sorted(reason_codes)),
             evaluated_at=evaluated_at,
             model_version=config.model_version,
@@ -230,6 +334,13 @@ def evaluate_earnings_trend(
     else:
         confidence = ConfidenceLevel.LOW
 
+    # コードレビュー対応(v2): 年次決算へのフォールバックデータを使った場合、
+    # 情報粒度が粗いためconfidenceはHIGHへ到達しない。
+    if recent_periods_source == RecentPeriodsSource.ANNUAL_FALLBACK and confidence == (
+        ConfidenceLevel.HIGH
+    ):
+        confidence = ConfidenceLevel.MEDIUM
+
     return EarningsTrendResult(
         state=EarningsTrendEvaluationState.EVALUATED,
         score=score,
@@ -240,6 +351,14 @@ def evaluate_earnings_trend(
         operating_cashflow_trend_component=cashflow_component,
         dividend_direction_component=dividend_component,
         acceleration_component=acceleration_component,
+        latest_operating_income=latest_income,
+        previous_operating_income=prev_income,
+        operating_income_change_pct=income_change_pct,
+        latest_operating_cashflow=latest_cashflow,
+        previous_operating_cashflow=prev_cashflow,
+        operating_cashflow_change_pct=cashflow_change_pct,
+        acceleration_raw_pct=acceleration_raw_pct,
+        recent_periods_source=recent_periods_source,
         reason_codes=tuple(sorted(reason_codes)),
         evaluated_at=evaluated_at,
         model_version=config.model_version,
@@ -249,7 +368,9 @@ def evaluate_earnings_trend(
 def earnings_trend_result_to_metrics(result: EarningsTrendResult) -> dict[str, object]:
     """EarningsTrendResultを、Recommendation.earnings_trend_metrics
     (延いてはDecisionSnapshot.earnings_trend_metrics)へ保存する監査用dict
-    へ変換する。"""
+    へ変換する。DecimalはJSON安全のためstr化、enumは.valueで保存する
+    (コードレビュー対応v2: 判定当時の入力生値を後から検証できるようにする)。
+    """
     return {
         "state": result.state.value,
         "category": result.category.value if result.category is not None else None,
@@ -257,6 +378,32 @@ def earnings_trend_result_to_metrics(result: EarningsTrendResult) -> dict[str, o
         "operating_cashflow_trend_component": result.operating_cashflow_trend_component,
         "dividend_direction_component": result.dividend_direction_component,
         "acceleration_component": result.acceleration_component,
+        "latest_operating_income": (
+            str(result.latest_operating_income)
+            if result.latest_operating_income is not None
+            else None
+        ),
+        "previous_operating_income": (
+            str(result.previous_operating_income)
+            if result.previous_operating_income is not None
+            else None
+        ),
+        "operating_income_change_pct": result.operating_income_change_pct,
+        "latest_operating_cashflow": (
+            str(result.latest_operating_cashflow)
+            if result.latest_operating_cashflow is not None
+            else None
+        ),
+        "previous_operating_cashflow": (
+            str(result.previous_operating_cashflow)
+            if result.previous_operating_cashflow is not None
+            else None
+        ),
+        "operating_cashflow_change_pct": result.operating_cashflow_change_pct,
+        "acceleration_raw_pct": result.acceleration_raw_pct,
+        "recent_periods_source": (
+            result.recent_periods_source.value if result.recent_periods_source is not None else None
+        ),
         "model_version": result.model_version,
     }
 

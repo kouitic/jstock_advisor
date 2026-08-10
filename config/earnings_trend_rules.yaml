@@ -1,4 +1,4 @@
-# Earnings Trend Score v1(判定精度向上機能Phase C)の設定。
+# Earnings Trend Score v2(判定精度向上機能Phase C)の設定。
 #
 # 「直近決算が期待に対して良かったか」(Earnings Surprise Score)ではなく、
 # 「複数四半期にわたって業績が改善傾向にあるか」を-100(強い悪化トレンド)〜
@@ -10,8 +10,17 @@
 # (+補助的なacceleration成分)で構成する。売上トレンド・EPSトレンド・利益率
 # 改善・会社予想方向(上方/下方修正の方向)は現行Providerでは算出できないため
 # 対象外(将来Provider拡張により対応可能になり次第、別途検討する)。
+#
+# コードレビュー対応(v2): 変化率計算(latest/previous-1)がpreviousが負
+# (赤字・マイナスCF)の場合に改善/悪化の方向を逆転させる不具合を修正した
+# ((latest-previous)/abs(previous)*100という符号跨ぎに対応した式へ変更)。
+# あわせて、FinancialSummary.recent_periods_source(四半期実績由来か年次
+# 決算へのフォールバック由来か)をconfidenceへ反映するようにした(年次
+# フォールバック時はMEDIUM上限、由来不明時は財務トレンド系成分を強制的に
+# 評価不能とする)。この設定ファイル自体に新規フィールドは追加していない
+# (domain/signals/earnings_trend.py参照)。
 
-model_version: "earnings_trend_v1"
+model_version: "earnings_trend_v2"
 
 # 4成分の加重平均の重み。accelerationはデータが薄い(直近5四半期程度)ため
 # 信頼度が低い補助成分として小さい重みにする。
