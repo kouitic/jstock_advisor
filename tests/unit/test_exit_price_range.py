@@ -366,6 +366,78 @@ def test_entity_rejects_not_evaluated_with_nonnull_review_price() -> None:
         )
 
 
+def test_entity_rejects_evaluated_without_anchors() -> None:
+    with pytest.raises(ValidationError):
+        ExitPriceRangeResult(
+            state=PriceRangeEvaluationState.EVALUATED,
+            current_price=Decimal("1100"),
+            neutral_anchor=None,  # EVALUATEDなのに欠損
+            bull_anchor=None,
+            partial_profit_take_low_price=Decimal("1150"),
+            partial_profit_take_high_price=Decimal("1180"),
+            strong_profit_take_price=Decimal("1300"),
+            downside_review_price=Decimal("1000"),
+            exit_review_price=Decimal("1150"),
+            confidence=ConfidenceLevel.MEDIUM,
+            evaluated_at=_NOW,
+            model_version="exit_price_range_v1",
+        )
+
+
+def test_entity_rejects_nonpositive_anchor() -> None:
+    with pytest.raises(ValidationError):
+        ExitPriceRangeResult(
+            state=PriceRangeEvaluationState.EVALUATED,
+            current_price=Decimal("1100"),
+            neutral_anchor=Decimal("0"),
+            bull_anchor=Decimal("1300"),
+            partial_profit_take_low_price=Decimal("1150"),
+            partial_profit_take_high_price=Decimal("1180"),
+            strong_profit_take_price=Decimal("1300"),
+            downside_review_price=Decimal("1000"),
+            exit_review_price=Decimal("1150"),
+            confidence=ConfidenceLevel.MEDIUM,
+            evaluated_at=_NOW,
+            model_version="exit_price_range_v1",
+        )
+
+
+def test_entity_rejects_evaluated_without_review_prices() -> None:
+    with pytest.raises(ValidationError):
+        ExitPriceRangeResult(
+            state=PriceRangeEvaluationState.EVALUATED,
+            current_price=Decimal("1100"),
+            neutral_anchor=Decimal("1200"),
+            bull_anchor=Decimal("1300"),
+            partial_profit_take_low_price=Decimal("1150"),
+            partial_profit_take_high_price=Decimal("1180"),
+            strong_profit_take_price=Decimal("1300"),
+            downside_review_price=None,  # EVALUATEDなのに欠損
+            exit_review_price=None,
+            confidence=ConfidenceLevel.MEDIUM,
+            evaluated_at=_NOW,
+            model_version="exit_price_range_v1",
+        )
+
+
+def test_entity_rejects_nonpositive_review_price() -> None:
+    with pytest.raises(ValidationError):
+        ExitPriceRangeResult(
+            state=PriceRangeEvaluationState.EVALUATED,
+            current_price=Decimal("1100"),
+            neutral_anchor=Decimal("1200"),
+            bull_anchor=Decimal("1300"),
+            partial_profit_take_low_price=Decimal("1150"),
+            partial_profit_take_high_price=Decimal("1180"),
+            strong_profit_take_price=Decimal("1300"),
+            downside_review_price=Decimal("0"),
+            exit_review_price=Decimal("1150"),
+            confidence=ConfidenceLevel.MEDIUM,
+            evaluated_at=_NOW,
+            model_version="exit_price_range_v1",
+        )
+
+
 def test_entity_accepts_not_evaluated_with_all_none() -> None:
     result = ExitPriceRangeResult(
         state=PriceRangeEvaluationState.NOT_EVALUATED,

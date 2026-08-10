@@ -382,9 +382,28 @@ jstock decision-performance compare --score timing \
   --label-b "HEADWIND寄り" --max-b -20 --horizon 60
 ```
 `--score`には`historical_valuation`/`timing`/`earnings_surprise`/
-`earnings_trend`のいずれかを指定する。分析は各DecisionSnapshotに保存
-された「判定当時に実際に使用した設定値」のみを使い、現在の設定・現在の
-カテゴリ定義では再解釈しない。
+`earnings_trend`/`market`/`sector`/`environment`のいずれかを指定する。
+分析は各DecisionSnapshotに保存された「判定当時に実際に使用した設定値」
+のみを使い、現在の設定・現在のカテゴリ定義では再解釈しない。
+
+```bash
+# 市場全体の地合いスコアをカテゴリ・信頼度・カバレッジ・model_version別に分析
+jstock decision-performance segments --score market --horizon 60
+
+# 所属セクターの地合いスコア(functional_spec.md 12.12節)。sector_etf_mapに
+# 対応が無い業種(NOT_APPLICABLE)は自動的に対象dimensionから除外される
+jstock decision-performance segments --score sector --horizon 60
+
+# 市場+セクターを統合したEnvironment Composite Score
+jstock decision-performance segments --score environment --horizon 60
+```
+`environment`スコアはMarket/Sectorの信頼度から合成する設計のため、
+独自のcoverage閾値を持たない(`config_values_used["environment"]`に
+`coverage_high_threshold`/`coverage_medium_threshold`が存在しない)。
+そのため`segments --score environment`のcoverage tier別分析は常に空になり、
+CloudWatch Logsへ`decision_performance_invalid_coverage_threshold`の
+WARNINGログが出るが、これは想定内の挙動であり異常ではない
+(category/confidence/model_version別の分析には影響しない)。
 
 **保存失敗時の確認方法**: DecisionSnapshotの保存に失敗した場合、
 CloudWatch Logsに固定イベントキー`decision_snapshot_save_failed`

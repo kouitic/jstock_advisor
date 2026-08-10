@@ -4,12 +4,15 @@
 既存のSELL(legacy)判定・ProfitTaking判定(sell_prices)には一切影響しない、
 DecisionSnapshot記録専用のShadow計測値。
 
-不変条件(model_validator、コードレビュー対応STEP2 §8・§11・§12・§14):
+不変条件(model_validator、コードレビュー対応STEP2 §8・§11・§12・§14、
+および残Medium対応でneutral_anchor/bull_anchor自体・downside_review_price/
+exit_review_priceの必須・正値検証を追加):
 - state=EVALUATEDならpartial_profit_take_low_price<=partial_profit_take_
   high_price<=strong_profit_take_priceの順序を満たし、全て正である必要がある。
+  neutral_anchor/bull_anchorも必須・正である必要がある。
 - downside_review_price/exit_review_priceは、上記3価格とは意味の異なる
   average_purchase_price基準の別系統であり、順序不変条件の対象外だが、
-  state=EVALUATEDの場合は正であることを検証する。
+  state=EVALUATEDの場合は必須・正であることを検証する。
 - state=NOT_EVALUATED/NOT_APPLICABLEなら、downside_review_price/exit_
   review_priceを含む5価格すべてがNoneである必要がある(コードレビュー
   対応STEP2 §11: これら2価格はaverage_purchase_priceのみから技術的には
@@ -91,9 +94,17 @@ class ExitPriceRangeResult(ImmutableSnapshot):
                     "partial_profit_take_low_price<=partial_profit_take_high_price"
                     "<=strong_profit_take_priceである必要があります"
                 )
+            if self.neutral_anchor is None or self.bull_anchor is None:
+                raise ValueError("state=EVALUATEDならneutral_anchor/bull_anchorは必須です")
+            if self.neutral_anchor <= 0 or self.bull_anchor <= 0:
+                raise ValueError("neutral_anchor/bull_anchorは正である必要があります")
+            if any(p is None for p in review_prices):
+                raise ValueError(
+                    "state=EVALUATEDならdownside_review_price/exit_review_priceは必須です"
+                )
             if any(p is not None and p <= 0 for p in review_prices):
                 raise ValueError(
-                    "downside_review_price/exit_review_priceを設定する場合は正である必要があります"
+                    "downside_review_price/exit_review_priceは正である必要があります"
                 )
         else:
             if any(p is not None for p in core_prices) or any(p is not None for p in review_prices):

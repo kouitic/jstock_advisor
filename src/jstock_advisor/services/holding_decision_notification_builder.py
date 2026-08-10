@@ -31,6 +31,10 @@ from jstock_advisor.domain.signals.entry_price_range import (
     entry_price_range_config_values,
     entry_price_range_result_to_metrics,
 )
+from jstock_advisor.domain.signals.environment import (
+    environment_config_values,
+    environment_result_to_metrics,
+)
 from jstock_advisor.domain.signals.exit_price_range import (
     exit_price_range_config_values,
     exit_price_range_result_to_metrics,
@@ -38,6 +42,14 @@ from jstock_advisor.domain.signals.exit_price_range import (
 from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
     historical_valuation_result_to_metrics,
+)
+from jstock_advisor.domain.signals.market_environment import (
+    market_environment_config_values,
+    market_environment_result_to_metrics,
+)
+from jstock_advisor.domain.signals.sector_environment import (
+    sector_environment_config_values,
+    sector_environment_result_to_metrics,
 )
 from jstock_advisor.domain.signals.timing_score import (
     timing_score_config_values,
@@ -164,14 +176,19 @@ def build_holding_decision_recommendation(
             "company_quality_score": result.company_quality.score,
             "investment_thesis_score": result.investment_thesis.score,
             "risk_deduction_score": result.risk_deduction.score,
-            "historical_valuation": historical_valuation_config_values(
-                config.historical_valuation
-            ),
+            "historical_valuation": historical_valuation_config_values(config.historical_valuation),
             "timing_score": timing_score_config_values(config.timing_score),
             "earnings_surprise": earnings_surprise_config_values(config.earnings_surprise),
             "earnings_trend": earnings_trend_config_values(config.earnings_trend),
             "entry_price_range": entry_price_range_config_values(config.entry_exit_price.entry),
             "exit_price_range": exit_price_range_config_values(config.entry_exit_price.exit),
+            "market_environment": market_environment_config_values(
+                config.market_sector_environment.market
+            ),
+            "sector_environment": sector_environment_config_values(
+                config.market_sector_environment.sector
+            ),
+            "environment": environment_config_values(config.market_sector_environment.environment),
         },
         data_sources=list(snapshot.data_sources),
         recommended_action_summary=action_summary,
@@ -198,9 +215,7 @@ def build_holding_decision_recommendation(
         earnings_surprise_confidence=snapshot.earnings_surprise.confidence,
         earnings_surprise_coverage=snapshot.earnings_surprise.coverage,
         earnings_surprise_reason_codes=snapshot.earnings_surprise.reason_codes,
-        earnings_surprise_metrics=earnings_surprise_result_to_metrics(
-            snapshot.earnings_surprise
-        ),
+        earnings_surprise_metrics=earnings_surprise_result_to_metrics(snapshot.earnings_surprise),
         earnings_trend_score=snapshot.earnings_trend.score,
         earnings_trend_confidence=snapshot.earnings_trend.confidence,
         earnings_trend_coverage=snapshot.earnings_trend.coverage,
@@ -244,4 +259,24 @@ def build_holding_decision_recommendation(
         exit_price_range_strong_price=exit_price_range.strong_profit_take_price,
         exit_price_range_downside_review_price=exit_price_range.downside_review_price,
         exit_price_range_exit_review_price=exit_price_range.exit_review_price,
+        # 判定精度向上機能Phase D: DecisionSnapshot記録専用(Shadow計測)。
+        # Entry/Exit同様、snapshotで算出済みの値をコピーするだけ(本Builder
+        # 自身は算出しない)。
+        market_score=snapshot.market_environment.score,
+        market_confidence=snapshot.market_environment.confidence,
+        market_coverage=snapshot.market_environment.coverage,
+        market_reason_codes=snapshot.market_environment.reason_codes,
+        market_metrics=market_environment_result_to_metrics(snapshot.market_environment),
+        sector_score=snapshot.sector_environment.score,
+        sector_confidence=snapshot.sector_environment.confidence,
+        sector_coverage=snapshot.sector_environment.coverage,
+        sector_reason_codes=snapshot.sector_environment.reason_codes,
+        sector_metrics=sector_environment_result_to_metrics(snapshot.sector_environment),
+        environment_score=snapshot.environment.score,
+        environment_confidence=snapshot.environment.confidence,
+        environment_coverage=snapshot.environment.coverage,
+        environment_reason_codes=snapshot.environment.reason_codes,
+        environment_metrics=environment_result_to_metrics(
+            snapshot.environment, snapshot.market_environment, snapshot.sector_environment
+        ),
     )

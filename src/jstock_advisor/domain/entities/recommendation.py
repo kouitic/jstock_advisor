@@ -173,6 +173,32 @@ class Recommendation(ImmutableSnapshot):
     exit_price_range_downside_review_price: Decimal | None = None
     exit_price_range_exit_review_price: Decimal | None = None
 
+    # --- 判定精度向上機能Phase D: Market/Sector Environment Shadow(2026-08
+    # 追加、Shadow計測専用)。TOPIX/所属セクターETFの地合いをそれぞれ独立に
+    # 評価した結果、および両者を統合したEnvironment Composite。StockSnapshot.
+    # market_environment/sector_environment/environmentをそのままコピーした
+    # ものであり、DecisionSnapshotへ記録する以外の用途では一切使わない。
+    # BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・Entry/Exit
+    # Price Range・LINE通知など既存の判定ロジックからは参照しないこと。
+    # 他4スコア(historical_valuation/timing/earnings_surprise/earnings_trend)
+    # と同じ5フィールドパターン(state相当の情報はmetrics内に保存し、scoreの
+    # 非None判定を評価済みの識別子とする既存規約に揃える) ---
+    market_score: float | None = None
+    market_confidence: ConfidenceLevel | None = None
+    market_coverage: float | None = None
+    market_reason_codes: tuple[str, ...] = ()
+    market_metrics: dict[str, Any] = Field(default_factory=dict)
+    sector_score: float | None = None
+    sector_confidence: ConfidenceLevel | None = None
+    sector_coverage: float | None = None
+    sector_reason_codes: tuple[str, ...] = ()
+    sector_metrics: dict[str, Any] = Field(default_factory=dict)
+    environment_score: float | None = None
+    environment_confidence: ConfidenceLevel | None = None
+    environment_coverage: float | None = None
+    environment_reason_codes: tuple[str, ...] = ()
+    environment_metrics: dict[str, Any] = Field(default_factory=dict)
+
     # --- 通知層の自動生成文言廃止(2026-07仕様§9)で追加。判定結果の文言は
     # 通知層(line_notification_service)で生成せず、ここに判定サービスが直接格納する ---
     recommended_action_summary: str | None = None

@@ -69,16 +69,28 @@ from jstock_advisor.domain.signals.entry_price_range import (
     entry_price_range_config_values,
     entry_price_range_result_to_metrics,
 )
+from jstock_advisor.domain.signals.environment import (
+    environment_config_values,
+    environment_result_to_metrics,
+)
 from jstock_advisor.domain.signals.eps_normalization import normalize_eps
 from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
     historical_valuation_result_to_metrics,
+)
+from jstock_advisor.domain.signals.market_environment import (
+    market_environment_config_values,
+    market_environment_result_to_metrics,
 )
 from jstock_advisor.domain.signals.record_date_resolution import (
     resolve_benefit_record_date_recurring_label,
     resolve_benefit_record_date_source_type,
     resolve_dividend_record_date_recurring_label,
     resolve_dividend_record_date_source_type,
+)
+from jstock_advisor.domain.signals.sector_environment import (
+    sector_environment_config_values,
+    sector_environment_result_to_metrics,
 )
 from jstock_advisor.domain.signals.timing_score import (
     timing_score_config_values,
@@ -393,12 +405,9 @@ class BuySignalService:
         data_quality_warning = has_stale_data_warning or business_days_to_earnings is None
 
         avg_trading_value = snapshot.avg_trading_value
-        small_cap_or_low_liquidity = (
-            avg_trading_value is not None
-            and avg_trading_value
-            < Decimal(2)
-            * Decimal(str(self._config.screening.universe.min_avg_trading_value_20d_yen))
-        )
+        small_cap_or_low_liquidity = avg_trading_value is not None and avg_trading_value < Decimal(
+            2
+        ) * Decimal(str(self._config.screening.universe.min_avg_trading_value_20d_yen))
         earnings_trend_non_decreasing = is_earnings_trend_non_decreasing(
             snapshot.quarterly_operating_incomes
         )
@@ -760,6 +769,15 @@ class BuySignalService:
                 "entry_price_range": entry_price_range_config_values(
                     self._config.entry_exit_price.entry
                 ),
+                "market_environment": market_environment_config_values(
+                    self._config.market_sector_environment.market
+                ),
+                "sector_environment": sector_environment_config_values(
+                    self._config.market_sector_environment.sector
+                ),
+                "environment": environment_config_values(
+                    self._config.market_sector_environment.environment
+                ),
             },
             data_sources=list(snapshot.data_sources),
             industry_model_applied=industry_model_applied,
@@ -855,6 +873,24 @@ class BuySignalService:
             entry_price_range_strong_price=snapshot.entry_price_range.strong_entry_price,
             entry_price_range_max_price=snapshot.entry_price_range.max_entry_price,
             entry_price_range_stop_review_price=snapshot.entry_price_range.stop_review_price,
+            # 判定精度向上機能Phase D: DecisionSnapshot記録専用(Shadow計測)。
+            market_score=snapshot.market_environment.score,
+            market_confidence=snapshot.market_environment.confidence,
+            market_coverage=snapshot.market_environment.coverage,
+            market_reason_codes=snapshot.market_environment.reason_codes,
+            market_metrics=market_environment_result_to_metrics(snapshot.market_environment),
+            sector_score=snapshot.sector_environment.score,
+            sector_confidence=snapshot.sector_environment.confidence,
+            sector_coverage=snapshot.sector_environment.coverage,
+            sector_reason_codes=snapshot.sector_environment.reason_codes,
+            sector_metrics=sector_environment_result_to_metrics(snapshot.sector_environment),
+            environment_score=snapshot.environment.score,
+            environment_confidence=snapshot.environment.confidence,
+            environment_coverage=snapshot.environment.coverage,
+            environment_reason_codes=snapshot.environment.reason_codes,
+            environment_metrics=environment_result_to_metrics(
+                snapshot.environment, snapshot.market_environment, snapshot.sector_environment
+            ),
         )
 
         return BuyAnalysisOutcome(

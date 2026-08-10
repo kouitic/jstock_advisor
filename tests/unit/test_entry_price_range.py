@@ -606,6 +606,38 @@ def test_entity_rejects_not_evaluated_with_nonnull_stop_review_price() -> None:
         )
 
 
+def test_entity_rejects_evaluated_without_valuation_ceiling() -> None:
+    with pytest.raises(ValidationError):
+        EntryPriceRangeResult(
+            state=PriceRangeEvaluationState.EVALUATED,
+            current_price=Decimal("1000"),
+            valuation_ceiling=None,  # EVALUATEDなのに欠損
+            starter_entry_price=Decimal("1100"),
+            preferred_entry_price=Decimal("1050"),
+            strong_entry_price=Decimal("900"),
+            max_entry_price=Decimal("1150"),
+            confidence=ConfidenceLevel.MEDIUM,
+            evaluated_at=_NOW,
+            model_version="entry_price_range_v1",
+        )
+
+
+def test_entity_rejects_nonpositive_valuation_ceiling() -> None:
+    with pytest.raises(ValidationError):
+        EntryPriceRangeResult(
+            state=PriceRangeEvaluationState.EVALUATED,
+            current_price=Decimal("1000"),
+            valuation_ceiling=Decimal("0"),
+            starter_entry_price=Decimal("1100"),
+            preferred_entry_price=Decimal("1050"),
+            strong_entry_price=Decimal("900"),
+            max_entry_price=Decimal("1150"),
+            confidence=ConfidenceLevel.MEDIUM,
+            evaluated_at=_NOW,
+            model_version="entry_price_range_v1",
+        )
+
+
 def test_entity_accepts_not_evaluated_with_all_none() -> None:
     result = EntryPriceRangeResult(
         state=PriceRangeEvaluationState.NOT_EVALUATED,

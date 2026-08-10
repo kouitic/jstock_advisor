@@ -2197,6 +2197,215 @@ class EntryExitPriceRulesConfig(StrictModel):
     exit: ExitPriceRangeConfig
 
 
+class EnvironmentCategoryThresholds(StrictModel):
+    """scoreからEnvironmentCategoryへ変換する閾値(Market/Sector/Environment
+    それぞれ独立に持つ)。strong_headwind < headwind < 0 < tailwind <
+    strong_tailwindの順序をvalidatorで保証する。"""
+
+    strong_tailwind: float
+    tailwind: float
+    headwind: float
+    strong_headwind: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> EnvironmentCategoryThresholds:
+        values = (self.strong_tailwind, self.tailwind, self.headwind, self.strong_headwind)
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError("category_thresholdsは全て有限値である必要があります")
+        if not (self.strong_headwind < self.headwind < 0 < self.tailwind < self.strong_tailwind):
+            raise ValueError(
+                "strong_headwind < headwind < 0 < tailwind < strong_tailwind"
+                "である必要があります"
+            )
+        return self
+
+
+class TrendClassificationScoreConfig(StrictModel):
+    """TrendClassification(momentum.pyのclassify_trend()が返す5区分)を
+    そのままtrend_structure_componentの点数へ変換する対応表。"""
+
+    strong_uptrend: float
+    uptrend: float
+    neutral: float
+    downtrend: float
+    strong_downtrend: float
+
+    @model_validator(mode="after")
+    def _check_finite(self) -> TrendClassificationScoreConfig:
+        for name, value in self.model_dump().items():
+            if not math.isfinite(value):
+                raise ValueError(f"trend_classification_score.{name}は有限の値である必要があります")
+        return self
+
+
+class MarketEnvironmentComponentWeights(StrictModel):
+    trend_structure: float
+    medium_term_return: float
+    drawdown: float
+
+
+class SectorEnvironmentComponentWeights(StrictModel):
+    trend_structure: float
+    medium_term_return: float
+    relative_strength: float
+
+
+class EnvironmentCompositeWeights(StrictModel):
+    market: float
+    sector: float
+
+
+class MarketEnvironmentConfig(StrictModel):
+    """Market Environment Score(判定精度向上機能Phase D)の設定。TOPIX bars
+    のみを使用し、trend_structure(MA20/60・slopeをclassify_trend()で分類)・
+    medium_term_return(20d/60d return)・drawdown(直近高値からの下落率)の
+    3成分の加重平均でscoreを算出する(評価可能成分のみで再正規化)。
+    """
+
+    model_version: str
+    component_weights: MarketEnvironmentComponentWeights
+    trend_classification_score: TrendClassificationScoreConfig
+    ma_slope_lookback_days: int
+    return_score_scale_pct: float
+    drawdown_window_days: int
+    drawdown_neutral_threshold_pct: float
+    drawdown_scale_pct: float
+    min_bars_ma60: int
+    min_bars_return_60d: int
+    max_bar_staleness_business_days: int
+    min_coverage_required: float
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
+    category_thresholds: EnvironmentCategoryThresholds
+
+    @model_validator(mode="after")
+    def _check_values(self) -> MarketEnvironmentConfig:
+        weights = (
+            self.component_weights.trend_structure,
+            self.component_weights.medium_term_return,
+            self.component_weights.drawdown,
+        )
+        if any((not math.isfinite(w)) or w < 0 for w in weights):
+            raise ValueError("component_weightsは全て0以上の有限値である必要があります")
+        if not math.isclose(sum(weights), 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError("component_weightsの合計は1.0である必要があります")
+        if not (0 < self.min_coverage_required <= 1):
+            raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
+        if not (
+            self.min_coverage_required
+            <= self.coverage_medium_threshold
+            < self.coverage_high_threshold
+            <= 1
+        ):
+            raise ValueError(
+                "min_coverage_required <= coverage_medium_threshold < "
+                "coverage_high_threshold <= 1である必要があります"
+            )
+        if not (math.isfinite(self.return_score_scale_pct) and self.return_score_scale_pct > 0):
+            raise ValueError("return_score_scale_pctは正の有限値である必要があります")
+        if not (math.isfinite(self.drawdown_scale_pct) and self.drawdown_scale_pct > 0):
+            raise ValueError("drawdown_scale_pctは正の有限値である必要があります")
+        if not math.isfinite(self.drawdown_neutral_threshold_pct):
+            raise ValueError("drawdown_neutral_threshold_pctは有限値である必要があります")
+        if self.ma_slope_lookback_days <= 0:
+            raise ValueError("ma_slope_lookback_daysは正の整数である必要があります")
+        if self.drawdown_window_days <= 0:
+            raise ValueError("drawdown_window_daysは正の整数である必要があります")
+        if self.min_bars_ma60 <= 0 or self.min_bars_return_60d <= 0:
+            raise ValueError("min_bars_ma60/min_bars_return_60dは正の整数である必要があります")
+        if self.max_bar_staleness_business_days < 0:
+            raise ValueError("max_bar_staleness_business_daysは0以上の整数である必要があります")
+        return self
+
+
+class SectorEnvironmentConfig(StrictModel):
+    """Sector Environment Score(判定精度向上機能Phase D)の設定。
+    config.momentum.sector_etf_mapに対応ETFが登録されている業種のみ評価する。
+    trend_structure/medium_term_returnはMarketと同じ算出方式をsector barsへ
+    適用し、drawdown成分の代わりにTOPIXへの相対強度(relative_strength)を
+    主要成分として持つ。
+    """
+
+    model_version: str
+    component_weights: SectorEnvironmentComponentWeights
+    trend_classification_score: TrendClassificationScoreConfig
+    ma_slope_lookback_days: int
+    return_score_scale_pct: float
+    relative_strength_scale_pct: float
+    min_bars_return_60d: int
+    max_bar_staleness_business_days: int
+    min_coverage_required: float
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
+    category_thresholds: EnvironmentCategoryThresholds
+
+    @model_validator(mode="after")
+    def _check_values(self) -> SectorEnvironmentConfig:
+        weights = (
+            self.component_weights.trend_structure,
+            self.component_weights.medium_term_return,
+            self.component_weights.relative_strength,
+        )
+        if any((not math.isfinite(w)) or w < 0 for w in weights):
+            raise ValueError("component_weightsは全て0以上の有限値である必要があります")
+        if not math.isclose(sum(weights), 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError("component_weightsの合計は1.0である必要があります")
+        if not (0 < self.min_coverage_required <= 1):
+            raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
+        if not (
+            self.min_coverage_required
+            <= self.coverage_medium_threshold
+            < self.coverage_high_threshold
+            <= 1
+        ):
+            raise ValueError(
+                "min_coverage_required <= coverage_medium_threshold < "
+                "coverage_high_threshold <= 1である必要があります"
+            )
+        if not (math.isfinite(self.return_score_scale_pct) and self.return_score_scale_pct > 0):
+            raise ValueError("return_score_scale_pctは正の有限値である必要があります")
+        if not (
+            math.isfinite(self.relative_strength_scale_pct)
+            and self.relative_strength_scale_pct > 0
+        ):
+            raise ValueError("relative_strength_scale_pctは正の有限値である必要があります")
+        if self.ma_slope_lookback_days <= 0:
+            raise ValueError("ma_slope_lookback_daysは正の整数である必要があります")
+        if self.min_bars_return_60d <= 0:
+            raise ValueError("min_bars_return_60dは正の整数である必要があります")
+        if self.max_bar_staleness_business_days < 0:
+            raise ValueError("max_bar_staleness_business_daysは0以上の整数である必要があります")
+        return self
+
+
+class EnvironmentCompositeConfig(StrictModel):
+    """Environment Composite Score(判定精度向上機能Phase D)の設定。Marketを
+    必須バックボーンとし、Sectorが評価可能なら加重平均、評価不能ならMarket
+    のみで評価を継続する(sector_missing_confidence_capでconfidence上限を
+    キャップする)。
+    """
+
+    model_version: str
+    composite_weights: EnvironmentCompositeWeights
+    sector_missing_confidence_cap: Literal["LOW", "MEDIUM", "HIGH"]
+    category_thresholds: EnvironmentCategoryThresholds
+
+    @model_validator(mode="after")
+    def _check_values(self) -> EnvironmentCompositeConfig:
+        weights = (self.composite_weights.market, self.composite_weights.sector)
+        if any((not math.isfinite(w)) or w < 0 for w in weights):
+            raise ValueError("composite_weightsは全て0以上の有限値である必要があります")
+        if not math.isclose(sum(weights), 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError("composite_weightsの合計は1.0である必要があります")
+        return self
+
+
+class MarketSectorEnvironmentRulesConfig(StrictModel):
+    market: MarketEnvironmentConfig
+    sector: SectorEnvironmentConfig
+    environment: EnvironmentCompositeConfig
+
+
 class AppConfig(StrictModel):
     screening: ScreeningRulesConfig
     valuation: ValuationRulesConfig
@@ -2236,3 +2445,6 @@ class AppConfig(StrictModel):
     # --- 判定精度向上機能次フェーズSTEP2: Entry/Exit Price Range Shadow
     # (2026-08)で追加 ---
     entry_exit_price: EntryExitPriceRulesConfig
+    # --- 判定精度向上機能Phase D: Market/Sector Environment Shadow
+    # (2026-08)で追加 ---
+    market_sector_environment: MarketSectorEnvironmentRulesConfig

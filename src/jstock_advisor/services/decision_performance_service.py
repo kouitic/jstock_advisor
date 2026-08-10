@@ -67,12 +67,23 @@ DECISION_PERFORMANCE_INVALID_COVERAGE_THRESHOLD_EVENT = (
     "decision_performance_invalid_coverage_threshold"
 )
 
-ScoreName = Literal["historical_valuation", "timing", "earnings_surprise", "earnings_trend"]
+ScoreName = Literal[
+    "historical_valuation",
+    "timing",
+    "earnings_surprise",
+    "earnings_trend",
+    "market",
+    "sector",
+    "environment",
+]
 _SCORE_NAMES: tuple[ScoreName, ...] = (
     "historical_valuation",
     "timing",
     "earnings_surprise",
     "earnings_trend",
+    "market",
+    "sector",
+    "environment",
 )
 
 # DecisionSnapshot.config_values_used内のキー名。{name}_confidence等のフィールド名
@@ -83,6 +94,9 @@ _CONFIG_VALUES_KEY: dict[ScoreName, str] = {
     "timing": "timing_score",
     "earnings_surprise": "earnings_surprise",
     "earnings_trend": "earnings_trend",
+    "market": "market_environment",
+    "sector": "sector_environment",
+    "environment": "environment",
 }
 
 
