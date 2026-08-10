@@ -107,11 +107,13 @@ class Recommendation(ImmutableSnapshot):
     timing_metrics: dict[str, Any] = Field(default_factory=dict)
 
     # --- 判定精度向上機能Phase C: Earnings Surprise Score(2026-08追加、
-    # Shadow計測専用)。直近確定四半期のアナリストコンセンサス実績乖離+配当
-    # 予想改定を基にした決算サプライズ評価結果。StockSnapshot.earnings_surprise
-    # をそのままコピーしたものであり、DecisionSnapshotへ記録する以外の用途では
-    # 一切使わない。BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
-    # LINE通知など既存の判定ロジックからは参照しないこと ---
+    # Shadow計測専用、コードレビュー対応でv3へ再設計)。直近確定四半期の
+    # Yahoo Finance Earnings Historyが返すEPS実績/予想値の乖離(Analyst
+    # Consensus Surprise単一成分)を基にした決算サプライズ評価結果。
+    # StockSnapshot.earnings_surpriseをそのままコピーしたものであり、
+    # DecisionSnapshotへ記録する以外の用途では一切使わない。BUY候補判定・
+    # 保有判断スコア・旧売却判定・ProfitTaking判定・LINE通知など既存の判定
+    # ロジックからは参照しないこと ---
     earnings_surprise_score: float | None = None
     earnings_surprise_confidence: ConfidenceLevel | None = None
     earnings_surprise_coverage: float | None = None

@@ -36,6 +36,12 @@ Earnings Surprise Score(earnings_surprise.py)とは完全に独立した評価�
 を組み合わせ(古い決算予定日で無期限に評価停止しないため)、成分算出に
 使った値がどの期間のものか(period_end/period_type)を監査情報として
 追加保持するようにした。
+
+コードレビュー対応(第3回): NOT_APPLICABLE判定に使うもう一方の入力である
+release_confirmation_stateも(EarningsSurpriseResultと同様)監査情報として
+保持するようにした。スコア算出式・NOT_APPLICABLE判定条件自体の変更は無く、
+model_version(earnings_trend_v3)も据え置きとした(監査情報の追加のみで
+スコアリング方式自体は変わっていないため)。
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ from jstock_advisor.domain.entities.base import ImmutableSnapshot
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EarningsDecisionRelevance,
+    EarningsReleaseConfirmationState,
     EarningsTrendCategory,
     EarningsTrendEvaluationState,
     PeriodType,
@@ -104,6 +111,12 @@ class EarningsTrendResult(ImmutableSnapshot):
     # (resolve_earnings_decision_relevance()の戻り値、domain/signals/
     # earnings_window.py参照)。EarningsSurpriseResultと同じ監査目的。
     earnings_decision_relevance: EarningsDecisionRelevance | None = None
+    # コードレビュー対応(第3回): NOT_APPLICABLE判定は
+    # release_confirmation_state+earnings_decision_relevanceの組み合わせで
+    # 決まるため、evaluate_earnings_trend()が実際に受け取った
+    # release_confirmation_stateも(補完・再計算せず)そのまま保持する
+    # (EarningsSurpriseResultと同じ2値セットを監査可能にする)。
+    release_confirmation_state: EarningsReleaseConfirmationState | None = None
 
     # 評価全体に関する注記コード(例: "OPERATING_INCOME_TREND_UNAVAILABLE")。
     reason_codes: tuple[str, ...] = ()

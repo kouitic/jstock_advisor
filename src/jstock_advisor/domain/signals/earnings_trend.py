@@ -20,6 +20,13 @@ FinancialPeriodValue(value/period_end/period_typeが対応した構造)で
 受け取るようにし、period_end/period_typeを監査情報として保持する(index
 依存で値と期間の対応が曖昧になることを避けるため)。
 
+コードレビュー対応(第3回): NOT_APPLICABLE判定条件はrelease_confirmation_
+state/earnings_decision_relevanceの組み合わせで決まるため、Result側には
+既にearnings_decision_relevanceのみ保持していたのをrelease_confirmation_
+stateも合わせて保持するようにした(EarningsSurpriseResultと同じ2値
+セット)。判定条件・スコア算出式自体の変更は無く、model_versionは
+据え置き(earnings_trend_v3)。
+
 コードレビュー対応(v2): 変化率計算`(latest-previous)/abs(previous)*100`は
 previousが負(赤字・マイナスCF)の場合でも改善/悪化の方向を正しく評価する
 (旧式`latest/previous-1`はpreviousが負の場合に符号が逆転する不具合が
@@ -310,6 +317,7 @@ def evaluate_earnings_trend(
             model_version=config.model_version,
             recent_periods_source=recent_periods_source,
             earnings_decision_relevance=decision_relevance,
+            release_confirmation_state=release_confirmation_state,
         )
 
     reason_codes: set[str] = set()
@@ -417,6 +425,7 @@ def evaluate_earnings_trend(
             operating_cashflow_period_type=cashflow_period_type,
             acceleration_period_ends=acceleration_period_ends,
             earnings_decision_relevance=decision_relevance,
+            release_confirmation_state=release_confirmation_state,
             reason_codes=tuple(sorted(reason_codes)),
             evaluated_at=evaluated_at,
             model_version=config.model_version,
@@ -465,6 +474,7 @@ def evaluate_earnings_trend(
         operating_cashflow_period_type=cashflow_period_type,
         acceleration_period_ends=acceleration_period_ends,
         earnings_decision_relevance=decision_relevance,
+        release_confirmation_state=release_confirmation_state,
         reason_codes=tuple(sorted(reason_codes)),
         evaluated_at=evaluated_at,
         model_version=config.model_version,
@@ -549,6 +559,11 @@ def earnings_trend_result_to_metrics(result: EarningsTrendResult) -> dict[str, o
         "earnings_decision_relevance": (
             result.earnings_decision_relevance.value
             if result.earnings_decision_relevance is not None
+            else None
+        ),
+        "release_confirmation_state": (
+            result.release_confirmation_state.value
+            if result.release_confirmation_state is not None
             else None
         ),
         "model_version": result.model_version,
