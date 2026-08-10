@@ -12,6 +12,12 @@ model_config(extra="forbid")が設定されているため、実際にJSONファ
 20フィールドも同様に全てOptional/デフォルト値持ちであるため、entry_price_
 range_*/exit_price_range_*キーを一切持たない旧形式JSONが引き続き読み込める
 ことを確認する(コードレビュー対応STEP2 §17)。
+
+判定精度向上機能Phase D(Market/Sector Environment Shadow)で追加した
+market_*/sector_*/environment_*フィールドも同様。DecisionSnapshotは
+market_score/sector_score/environment_scoreのみ以前から予約済みだったが、
+confidence/coverage/reason_codes/metricsは新規追加であるため、これらを
+一切持たない旧形式JSONが引き続き読み込めることを確認する。
 """
 
 from __future__ import annotations
@@ -74,6 +80,21 @@ def test_old_shape_recommendation_without_new_earnings_fields_loads(tmp_path: Pa
     assert rec.exit_price_range_strong_price is None
     assert rec.exit_price_range_downside_review_price is None
     assert rec.exit_price_range_exit_review_price is None
+    assert rec.market_score is None
+    assert rec.market_confidence is None
+    assert rec.market_coverage is None
+    assert rec.market_reason_codes == ()
+    assert rec.market_metrics == {}
+    assert rec.sector_score is None
+    assert rec.sector_confidence is None
+    assert rec.sector_coverage is None
+    assert rec.sector_reason_codes == ()
+    assert rec.sector_metrics == {}
+    assert rec.environment_score is None
+    assert rec.environment_confidence is None
+    assert rec.environment_coverage is None
+    assert rec.environment_reason_codes == ()
+    assert rec.environment_metrics == {}
 
 
 _OLD_SHAPE_DECISION_SNAPSHOT = {
@@ -122,3 +143,18 @@ def test_old_shape_decision_snapshot_without_entry_exit_price_range_fields_loads
     assert snapshot.exit_price_range_strong_price is None
     assert snapshot.exit_price_range_downside_review_price is None
     assert snapshot.exit_price_range_exit_review_price is None
+    assert snapshot.market_score is None
+    assert snapshot.market_confidence is None
+    assert snapshot.market_coverage is None
+    assert snapshot.market_reason_codes == ()
+    assert snapshot.market_metrics == {}
+    assert snapshot.sector_score is None
+    assert snapshot.sector_confidence is None
+    assert snapshot.sector_coverage is None
+    assert snapshot.sector_reason_codes == ()
+    assert snapshot.sector_metrics == {}
+    assert snapshot.environment_score is None
+    assert snapshot.environment_confidence is None
+    assert snapshot.environment_coverage is None
+    assert snapshot.environment_reason_codes == ()
+    assert snapshot.environment_metrics == {}

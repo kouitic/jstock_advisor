@@ -367,6 +367,51 @@ class PriceRangeEvaluationState(StrEnum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+class EnvironmentCategory(StrEnum):
+    """Market/Sector/Environment Composite Score(判定精度向上機能Phase D)を
+    人間が読みやすいカテゴリへ丸めたもの(Shadow記録専用、BUY/SELL等の判定
+    ロジックには使わない)。TimingScoreCategoryとラベルは同型だが、Market/
+    Sector/Compositeの3つは「環境の追い風/逆風度」という同一概念を異なる
+    スコープ(市場全体/セクター/統合)へ適用したものであるため、共有Enumと
+    して1つにまとめ、不必要な3重複を避ける(個別銘柄のエントリー適性を
+    表すTimingScoreCategoryとは意味的に別概念のため、そちらとは共有しない)。"""
+
+    STRONG_TAILWIND = "STRONG_TAILWIND"
+    TAILWIND = "TAILWIND"
+    NEUTRAL = "NEUTRAL"
+    HEADWIND = "HEADWIND"
+    STRONG_HEADWIND = "STRONG_HEADWIND"
+
+
+class MarketEnvironmentEvaluationState(StrEnum):
+    """Market Environment Score(判定精度向上機能Phase D)が実際に算出された
+    か、データ不足で算出不可だったかの区分。TOPIXは常に評価対象のため
+    NOT_APPLICABLEは持たない。"""
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
+class SectorEnvironmentEvaluationState(StrEnum):
+    """Sector Environment Score(判定精度向上機能Phase D)が実際に算出された
+    か、データ不足で算出不可だったか、対象外だったかの区分。"""
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    # config.momentum.sector_etf_mapに対応ETFが無い業種(0点/NEUTRAL扱いには
+    # せず、明示的に対象外として区別する)。
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class EnvironmentEvaluationState(StrEnum):
+    """Environment Composite Score(判定精度向上機能Phase D)が実際に算出さ
+    れたか、算出不可だったかの区分。Marketが必須バックボーンのため
+    NOT_APPLICABLEは持たない。"""
+
+    EVALUATED = "EVALUATED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
 class ImprovementPriority(StrEnum):
     """週次改善レビュー(振り返り機能改修)の改善候補優先度。"""
 

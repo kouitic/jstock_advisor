@@ -1,0 +1,87 @@
+# 判定精度向上機能Phase D: Market/Sector Environment Shadowの設定。
+#
+# 既存のBUY/保有判断スコア/旧SELL/ProfitTaking判定、LINE通知、Entry/Exit
+# Price Rangeには一切影響しない、DecisionSnapshot記録専用のShadow計測値の
+# 算出に使われる設定値。全数値は初期仮説であり、DecisionPerformanceで
+# Outcomeを確認したうえで将来調整する前提。
+
+market:
+  model_version: "market_environment_v1"
+  # trend_structure/medium_term_return/drawdownの3成分weight(合計1.0)。
+  component_weights:
+    trend_structure: 0.4
+    medium_term_return: 0.3
+    drawdown: 0.3
+  # classify_trend()(momentum.py既存関数)が返す5区分をそのまま点数化する
+  # 対応表。
+  trend_classification_score:
+    strong_uptrend: 100.0
+    uptrend: 50.0
+    neutral: 0.0
+    downtrend: -50.0
+    strong_downtrend: -100.0
+  ma_slope_lookback_days: 5
+  # 20d/60d returnの加重平均を±100へスケーリングする基準(%)。
+  return_score_scale_pct: 15.0
+  drawdown_window_days: 60
+  # drawdown(直近高値からの下落率、%、0以下)がこの値のとき0点になる基準。
+  drawdown_neutral_threshold_pct: -3.0
+  drawdown_scale_pct: 15.0
+  min_bars_ma60: 60
+  min_bars_return_60d: 61
+  # TOPIX最新barが評価基準日よりこの営業日数より古い場合、confidenceを
+  # キャップする(NOT_EVALUATEDにはしない)。
+  max_bar_staleness_business_days: 5
+  min_coverage_required: 0.3
+  coverage_high_threshold: 0.9
+  coverage_medium_threshold: 0.5
+  category_thresholds:
+    strong_tailwind: 60.0
+    tailwind: 20.0
+    headwind: -20.0
+    strong_headwind: -60.0
+
+sector:
+  model_version: "sector_environment_v1"
+  # trend_structure/medium_term_return/relative_strengthの3成分weight
+  # (合計1.0)。relative_strengthを重視する(市場全体+セクター単純上昇の
+  # 二重評価を避けるため)。
+  component_weights:
+    trend_structure: 0.3
+    medium_term_return: 0.3
+    relative_strength: 0.4
+  trend_classification_score:
+    strong_uptrend: 100.0
+    uptrend: 50.0
+    neutral: 0.0
+    downtrend: -50.0
+    strong_downtrend: -100.0
+  ma_slope_lookback_days: 5
+  return_score_scale_pct: 15.0
+  # セクターの対TOPIX相対強度(pp)を±100へスケーリングする基準。
+  relative_strength_scale_pct: 10.0
+  min_bars_return_60d: 61
+  max_bar_staleness_business_days: 5
+  min_coverage_required: 0.3
+  coverage_high_threshold: 0.9
+  coverage_medium_threshold: 0.5
+  category_thresholds:
+    strong_tailwind: 60.0
+    tailwind: 20.0
+    headwind: -20.0
+    strong_headwind: -60.0
+
+environment:
+  model_version: "environment_v1"
+  # Market/Sector両方評価済みの場合の加重平均weight(合計1.0)。
+  composite_weights:
+    market: 0.6
+    sector: 0.4
+  # Sector評価不能時、confidenceの上限をこの値にキャップする(Sectorを
+  # 0点として混ぜる代わりに、情報が薄いことをconfidenceで表現する)。
+  sector_missing_confidence_cap: "MEDIUM"
+  category_thresholds:
+    strong_tailwind: 60.0
+    tailwind: 20.0
+    headwind: -20.0
+    strong_headwind: -60.0

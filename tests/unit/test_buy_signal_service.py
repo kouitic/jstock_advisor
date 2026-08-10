@@ -37,15 +37,21 @@ from jstock_advisor.domain.entities.enums import (
     EarningsDateStatus,
     EarningsSurpriseEvaluationState,
     EarningsTrendEvaluationState,
+    EnvironmentEvaluationState,
     HistoricalValuationEvaluationState,
+    MarketEnvironmentEvaluationState,
     PriceRangeEvaluationState,
     RecommendationType,
+    SectorEnvironmentEvaluationState,
     StockType,
     TimingScoreEvaluationState,
     TrendClassification,
 )
+from jstock_advisor.domain.entities.environment import EnvironmentResult
 from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
+from jstock_advisor.domain.entities.market_environment import MarketEnvironmentResult
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
+from jstock_advisor.domain.entities.sector_environment import SectorEnvironmentResult
 from jstock_advisor.domain.entities.timing_score import TimingScoreResult
 from jstock_advisor.domain.entities.valuation import FairValueRange
 from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, HistoricalValuation
@@ -189,6 +195,24 @@ _ENTRY_PRICE_RANGE_PLACEHOLDER = EntryPriceRangeResult(
     model_version="test-fixture",
 )
 
+_MARKET_ENVIRONMENT_PLACEHOLDER = MarketEnvironmentResult(
+    state=MarketEnvironmentEvaluationState.NOT_EVALUATED,
+    evaluated_at=_NOW,
+    model_version="test-fixture",
+)
+
+_SECTOR_ENVIRONMENT_PLACEHOLDER = SectorEnvironmentResult(
+    state=SectorEnvironmentEvaluationState.NOT_APPLICABLE,
+    evaluated_at=_NOW,
+    model_version="test-fixture",
+)
+
+_ENVIRONMENT_PLACEHOLDER = EnvironmentResult(
+    state=EnvironmentEvaluationState.NOT_EVALUATED,
+    evaluated_at=_NOW,
+    model_version="test-fixture",
+)
+
 
 @dataclass(frozen=True)
 class _StockFixture:
@@ -278,6 +302,9 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         earnings_surprise=_EARNINGS_SURPRISE_PLACEHOLDER,
         earnings_trend=_EARNINGS_TREND_PLACEHOLDER,
         entry_price_range=_ENTRY_PRICE_RANGE_PLACEHOLDER,
+        market_environment=_MARKET_ENVIRONMENT_PLACEHOLDER,
+        sector_environment=_SECTOR_ENVIRONMENT_PLACEHOLDER,
+        environment=_ENVIRONMENT_PLACEHOLDER,
     )
 
 

@@ -107,11 +107,12 @@ def segments(
     score: str = typer.Option(
         ...,
         "--score",
-        help="対象スコア(historical_valuation/timing/earnings_surprise/earnings_trend)",
+        help=(
+            "対象スコア(historical_valuation/timing/earnings_surprise/earnings_trend/"
+            "market/sector/environment)"
+        ),
     ),
-    horizon: int = typer.Option(
-        ..., "--horizon", help="営業日数(5/20/60/120/250のいずれか、必須)"
-    ),
+    horizon: int = typer.Option(..., "--horizon", help="営業日数(5/20/60/120/250のいずれか、必須)"),
 ) -> None:
     """1つのShadow Scoreをcategory/confidence/coverage tier/個別model_version別に
     分析する。異なるhorizonのOutcomeを混在させないため--horizonは必須。"""
@@ -148,27 +149,19 @@ def compare(
     label_b: str = typer.Option(..., "--label-b", help="比較群Bのラベル"),
     min_b: float = typer.Option(None, "--min-b", help="比較群Bのscore下限(この値以上)"),
     max_b: float = typer.Option(None, "--max-b", help="比較群Bのscore上限(この値以下)"),
-    horizon: int = typer.Option(
-        ..., "--horizon", help="営業日数(5/20/60/120/250のいずれか、必須)"
-    ),
+    horizon: int = typer.Option(..., "--horizon", help="営業日数(5/20/60/120/250のいずれか、必須)"),
 ) -> None:
     """2つの母集団(スコアの数値レンジで指定)の成績を比較する。--min-a/--max-a/
     --min-b/--max-bで指定した範囲が重複する場合は、比較結果が誤解を招くため
     事前にエラーとする(範囲を分けて指定し直してください)。"""
     if score not in _VALID_SCORE_NAMES:
-        typer.echo(
-            f"エラー: --scoreは{_VALID_SCORE_NAMES}のいずれかを指定してください", err=True
-        )
+        typer.echo(f"エラー: --scoreは{_VALID_SCORE_NAMES}のいずれかを指定してください", err=True)
         raise typer.Exit(code=1)
     if min_a is not None and max_a is not None and min_a > max_a:
-        typer.echo(
-            f"エラー: 比較群Aの範囲が不正です(--min-a={min_a} > --max-a={max_a})", err=True
-        )
+        typer.echo(f"エラー: 比較群Aの範囲が不正です(--min-a={min_a} > --max-a={max_a})", err=True)
         raise typer.Exit(code=1)
     if min_b is not None and max_b is not None and min_b > max_b:
-        typer.echo(
-            f"エラー: 比較群Bの範囲が不正です(--min-b={min_b} > --max-b={max_b})", err=True
-        )
+        typer.echo(f"エラー: 比較群Bの範囲が不正です(--min-b={min_b} > --max-b={max_b})", err=True)
         raise typer.Exit(code=1)
     if _ranges_overlap(min_a, max_a, min_b, max_b):
         typer.echo(

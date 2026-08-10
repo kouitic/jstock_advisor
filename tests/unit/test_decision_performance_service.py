@@ -52,6 +52,9 @@ _CONFIG_VALUES_KEY = {
     "timing": "timing_score",
     "earnings_surprise": "earnings_surprise",
     "earnings_trend": "earnings_trend",
+    "market": "market_environment",
+    "sector": "sector_environment",
+    "environment": "environment",
 }
 
 _NOW = dt.datetime(2026, 8, 8, tzinfo=dt.UTC)
@@ -238,14 +241,22 @@ def test_summarize_computes_median_mfe_mae(tmp_path: Path) -> None:
     decision_repo.insert_if_absent(_decision("rec-2"))
     eval_repo.save(
         _evaluation(
-            "e1", "rec-1", horizon_business_days=5,
-            price_return_pct=2.0, max_gain_pct=4.0, max_drawdown_pct=-1.0,
+            "e1",
+            "rec-1",
+            horizon_business_days=5,
+            price_return_pct=2.0,
+            max_gain_pct=4.0,
+            max_drawdown_pct=-1.0,
         )
     )
     eval_repo.save(
         _evaluation(
-            "e2", "rec-2", horizon_business_days=5,
-            price_return_pct=6.0, max_gain_pct=8.0, max_drawdown_pct=-3.0,
+            "e2",
+            "rec-2",
+            horizon_business_days=5,
+            price_return_pct=6.0,
+            max_gain_pct=8.0,
+            max_drawdown_pct=-3.0,
         )
     )
 
@@ -366,7 +377,16 @@ def _service_with(
 
 
 @pytest.mark.parametrize(
-    "score_name", ["historical_valuation", "timing", "earnings_surprise", "earnings_trend"]
+    "score_name",
+    [
+        "historical_valuation",
+        "timing",
+        "earnings_surprise",
+        "earnings_trend",
+        "market",
+        "sector",
+        "environment",
+    ],
 )
 def test_summarize_score_segments_groups_by_category(tmp_path: Path, score_name: str) -> None:
     decisions = [
@@ -433,8 +453,11 @@ def test_coverage_tier_low_is_not_conflated_with_missing(tmp_path: Path) -> None
     coverage=None(未計算)とは区別されて除外されないことを確認する。"""
     decisions = [
         _decision_with_score(
-            "rec-zero", "timing", coverage=0.0,
-            coverage_high_threshold=0.9, coverage_medium_threshold=0.5,
+            "rec-zero",
+            "timing",
+            coverage=0.0,
+            coverage_high_threshold=0.9,
+            coverage_medium_threshold=0.5,
         ),
         _decision_with_score("rec-missing", "timing", coverage=None),
     ]
@@ -457,12 +480,18 @@ def test_coverage_tier_uses_point_in_time_thresholds_not_current_config(tmp_path
     異なるtierになることを直接確認する。"""
     decisions = [
         _decision_with_score(
-            "rec-old-threshold", "timing", coverage=0.6,
-            coverage_high_threshold=0.5, coverage_medium_threshold=0.3,  # 0.6は当時基準でHIGH
+            "rec-old-threshold",
+            "timing",
+            coverage=0.6,
+            coverage_high_threshold=0.5,
+            coverage_medium_threshold=0.3,  # 0.6は当時基準でHIGH
         ),
         _decision_with_score(
-            "rec-new-threshold", "timing", coverage=0.6,
-            coverage_high_threshold=0.9, coverage_medium_threshold=0.5,  # 0.6は当時基準でMEDIUM
+            "rec-new-threshold",
+            "timing",
+            coverage=0.6,
+            coverage_high_threshold=0.9,
+            coverage_medium_threshold=0.5,  # 0.6は当時基準でMEDIUM
         ),
     ]
     evaluations = [
@@ -642,6 +671,48 @@ def test_summarize_score_segments_groups_by_individual_model_version(tmp_path: P
     assert {s.bucket_key for s in result.by_model_version} == {"timing_v3", "timing_v4"}
 
 
+@pytest.mark.parametrize("score_name", ["market", "sector"])
+def test_phase_d_coverage_tier_uses_own_config_values_key(tmp_path: Path, score_name: str) -> None:
+    """Phase D(market/sector)のcoverage_tierも、config_values_used内の専用
+    キー(market_environment/sector_environment)から当時の閾値を復元できる
+    ことを確認する(STEP1のcoverage_tier分析がPhase Dでも実データで機能する)。"""
+    decisions = [
+        _decision_with_score(
+            "rec-high",
+            score_name,
+            coverage=0.95,
+            coverage_high_threshold=0.9,
+            coverage_medium_threshold=0.5,
+        ),
+    ]
+    evaluations = [_evaluation("e1", "rec-high", horizon_business_days=60)]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments(score_name, horizon_business_days=60, now=_NOW)
+
+    assert {s.bucket_key for s in result.by_coverage_tier} == {"HIGH"}
+
+
+def test_phase_d_sector_not_evaluated_excluded_from_all_dimensions(tmp_path: Path) -> None:
+    """Sector NOT_EVALUATED/NOT_APPLICABLEレコード(sector_score=None)は、
+    既存仕様どおりcategory/confidence/coverage_tier全ての分析軸から除外される
+    (score is Noneのため対象外)。"""
+    decisions = [
+        _decision_with_score("rec-evaluated", "sector", score=10.0, coverage=0.9),
+        _decision_with_score("rec-not-applicable", "sector", score=None, coverage=None),
+    ]
+    evaluations = [
+        _evaluation("e1", "rec-evaluated", horizon_business_days=60),
+        _evaluation("e2", "rec-not-applicable", horizon_business_days=60),
+    ]
+    service = _service_with(tmp_path, decisions, evaluations)
+
+    result = service.summarize_score_segments("sector", horizon_business_days=60, now=_NOW)
+
+    total_segment_samples = sum(s.sample_count for s in result.by_coverage_tier)
+    assert total_segment_samples <= 1
+
+
 def test_summarize_score_segments_rejects_invalid_score_name(tmp_path: Path) -> None:
     service = _service_with(tmp_path, [], [])
     with pytest.raises(ValueError, match="score_name"):
@@ -690,16 +761,32 @@ def test_summarize_score_segments_median_and_excess_return(tmp_path: Path) -> No
     ]
     evaluations = [
         EvaluationResult(
-            evaluation_id="e1", recommendation_id="rec-1", horizon_business_days=60,
-            evaluated_at=_NOW, evaluation_date=_NOW.date(), price_at_evaluation=Decimal("1200"),
-            price_return_pct=2.0, excess_return_pct=1.0, max_gain_pct=3.0, max_drawdown_pct=-1.0,
-            evaluation_label=EvaluationLabel.SUCCESS, label_evidence="x",
+            evaluation_id="e1",
+            recommendation_id="rec-1",
+            horizon_business_days=60,
+            evaluated_at=_NOW,
+            evaluation_date=_NOW.date(),
+            price_at_evaluation=Decimal("1200"),
+            price_return_pct=2.0,
+            excess_return_pct=1.0,
+            max_gain_pct=3.0,
+            max_drawdown_pct=-1.0,
+            evaluation_label=EvaluationLabel.SUCCESS,
+            label_evidence="x",
         ),
         EvaluationResult(
-            evaluation_id="e2", recommendation_id="rec-2", horizon_business_days=60,
-            evaluated_at=_NOW, evaluation_date=_NOW.date(), price_at_evaluation=Decimal("1200"),
-            price_return_pct=6.0, excess_return_pct=5.0, max_gain_pct=9.0, max_drawdown_pct=-3.0,
-            evaluation_label=EvaluationLabel.SUCCESS, label_evidence="x",
+            evaluation_id="e2",
+            recommendation_id="rec-2",
+            horizon_business_days=60,
+            evaluated_at=_NOW,
+            evaluation_date=_NOW.date(),
+            price_at_evaluation=Decimal("1200"),
+            price_return_pct=6.0,
+            excess_return_pct=5.0,
+            max_gain_pct=9.0,
+            max_drawdown_pct=-3.0,
+            evaluation_label=EvaluationLabel.SUCCESS,
+            label_evidence="x",
         ),
     ]
     service = _service_with(tmp_path, decisions, evaluations)
@@ -728,9 +815,12 @@ def test_compare_segments_returns_two_groups_with_overlap_count(tmp_path: Path) 
     service = _service_with(tmp_path, decisions, evaluations)
 
     result = service.compare_segments(
-        "good", score_predicate("timing", minimum=20),
-        "poor", score_predicate("timing", maximum=-20),
-        horizon_business_days=60, now=_NOW,
+        "good",
+        score_predicate("timing", minimum=20),
+        "poor",
+        score_predicate("timing", maximum=-20),
+        horizon_business_days=60,
+        now=_NOW,
     )
 
     assert result.group_a.bucket_key == "good"
@@ -747,9 +837,12 @@ def test_compare_segments_reports_overlap_when_ranges_overlap(tmp_path: Path) ->
     service = _service_with(tmp_path, decisions, evaluations)
 
     result = service.compare_segments(
-        "a", score_predicate("timing", minimum=20),
-        "b", score_predicate("timing", maximum=30),
-        horizon_business_days=60, now=_NOW,
+        "a",
+        score_predicate("timing", minimum=20),
+        "b",
+        score_predicate("timing", maximum=30),
+        horizon_business_days=60,
+        now=_NOW,
     )
 
     assert result.overlap_count == 1
@@ -759,9 +852,12 @@ def test_compare_segments_rejects_non_phase_a_horizon(tmp_path: Path) -> None:
     service = _service_with(tmp_path, [], [])
     with pytest.raises(ValueError, match="horizon_business_days"):
         service.compare_segments(
-            "a", score_predicate("timing", minimum=20),
-            "b", score_predicate("timing", maximum=-20),
-            horizon_business_days=999, now=_NOW,
+            "a",
+            score_predicate("timing", minimum=20),
+            "b",
+            score_predicate("timing", maximum=-20),
+            horizon_business_days=999,
+            now=_NOW,
         )
 
 

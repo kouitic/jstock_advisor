@@ -32,6 +32,7 @@ from jstock_advisor.config.models import (
     HolidayCalendarConfig,
     IndustryScoringPolicyConfig,
     InvestmentThesisTemplateConfig,
+    MarketSectorEnvironmentRulesConfig,
     MomentumRulesConfig,
     NotificationRulesConfig,
     PortfolioConcentrationRulesConfig,
@@ -167,6 +168,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     entry_exit_price = EntryExitPriceRulesConfig.model_validate(
         _load_yaml(directory / "entry_exit_price_rules.yaml")
     )
+    market_sector_environment = MarketSectorEnvironmentRulesConfig.model_validate(
+        _load_yaml(directory / "market_sector_environment_rules.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -199,4 +203,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         earnings_surprise=earnings_surprise,
         earnings_trend=earnings_trend,
         entry_exit_price=entry_exit_price,
+        market_sector_environment=market_sector_environment,
     )

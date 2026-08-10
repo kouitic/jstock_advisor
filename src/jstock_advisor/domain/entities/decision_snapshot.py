@@ -9,11 +9,14 @@ Phase B第二弾としてtiming_score(既存MomentumSnapshotを基にしたモ�
 ベースの技術的タイミングスコア)を実装済み(domain/signals/timing_score.py
 参照)。Phase Cとしてearnings_surprise_score(決算サプライズスコア、
 domain/signals/earnings_surprise.py参照)・earnings_trend_score(業績
-トレンドスコア、domain/signals/earnings_trend.py参照)を実装済み。いずれも
-Shadow計測専用であり、BUY候補判定・保有判断スコア・旧売却判定・ProfitTaking
-判定・LINE通知など既存の判定ロジックには一切影響しない。market_score/
-sector_score/environment_scoreは将来のPhase D(Market/Sector Environment
-Score)で追加していく。
+トレンドスコア、domain/signals/earnings_trend.py参照)を実装済み。判定
+精度向上機能次フェーズSTEP2としてEntry/Exit Price Range Shadow(目安買付
+価格帯・目安利確価格帯、domain/signals/entry_price_range.py・
+exit_price_range.py参照)を実装済み。Phase DとしてMarket/Sector
+Environment Score(市場全体・所属セクターの地合いスコア、domain/signals/
+market_environment.py・sector_environment.py・environment.py参照)を実装
+済み。いずれもShadow計測専用であり、BUY候補判定・保有判断スコア・旧売却
+判定・ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
 
 重要な設計原則(コードレビュー対応): DecisionSnapshotはRecommendationを唯一の
 正本とする。StockSnapshot(判定処理の中間生成物)を直接参照しない。BUYパイプライン
@@ -60,12 +63,13 @@ from jstock_advisor.domain.entities.enums import (
 # (historical_valuation_score実装)、Phase B第二弾(timing_score実装・v2/v3/v4への
 # 再設計、コードレビュー対応)、Phase C(earnings_surprise_score/
 # earnings_trend_score実装・v2/v3への再設計、コードレビュー対応)、判定精度向上
-# 機能次フェーズSTEP2(Entry/Exit Price Range Shadow実装)に伴い値を上げた。
-# このバージョン名は累積スキーマを表す(Phase A〜Cの全スコアフィールドは本
-# バージョンでも保持したままであり、失われたわけではない。「Decision
-# Enhancement Layer」全体としての通しバージョンのため、特定フェーズの名前を
-# 冠さない)。他のスコア項目が実装され始めたらさらに値を上げる。
-DECISION_SNAPSHOT_MODEL_VERSION = "decision_enhancement_entry_exit_v1"
+# 機能次フェーズSTEP2(Entry/Exit Price Range Shadow実装)、Phase D(Market/
+# Sector Environment Shadow実装)に伴い値を上げた。このバージョン名は累積
+# スキーマを表す(Phase A〜C・STEP2の全スコアフィールドは本バージョンでも
+# 保持したままであり、失われたわけではない。「Decision Enhancement Layer」
+# 全体としての通しバージョンのため、特定フェーズの名前を冠さない)。他の
+# スコア項目が実装され始めたらさらに値を上げる。
+DECISION_SNAPSHOT_MODEL_VERSION = "decision_enhancement_environment_v1"
 
 
 class DecisionSnapshot(ImmutableSnapshot):
@@ -161,9 +165,32 @@ class DecisionSnapshot(ImmutableSnapshot):
     exit_price_range_strong_price: Decimal | None = None
     exit_price_range_downside_review_price: Decimal | None = None
     exit_price_range_exit_review_price: Decimal | None = None
+    # 市場全体(TOPIX)の地合いスコア(-100〜+100、算出不可時はNone)。判定
+    # 精度向上機能Phase Dで実装済み(domain/signals/market_environment.py
+    # 参照、Shadow計測専用)。historical_valuation_*と同じ5フィールド
+    # パターン。
     market_score: float | None = None
+    market_confidence: ConfidenceLevel | None = None
+    market_coverage: float | None = None
+    market_reason_codes: tuple[str, ...] = ()
+    market_metrics: dict[str, Any] = Field(default_factory=dict)
+    # 所属セクターETFの地合いスコア(-100〜+100、算出不可・対応ETF未登録時は
+    # None)。Phase Dで実装済み(domain/signals/sector_environment.py参照、
+    # Shadow計測専用)。
     sector_score: float | None = None
+    sector_confidence: ConfidenceLevel | None = None
+    sector_coverage: float | None = None
+    sector_reason_codes: tuple[str, ...] = ()
+    sector_metrics: dict[str, Any] = Field(default_factory=dict)
+    # Market/Sectorを統合したEnvironment Composite Score(-100〜+100、算出
+    # 不可時はNone)。Phase Dで実装済み(domain/signals/environment.py参照、
+    # Shadow計測専用)。Sector欠損時はMarketのみで評価継続する(0点として
+    # 混ぜない)。
     environment_score: float | None = None
+    environment_confidence: ConfidenceLevel | None = None
+    environment_coverage: float | None = None
+    environment_reason_codes: tuple[str, ...] = ()
+    environment_metrics: dict[str, Any] = Field(default_factory=dict)
 
     # --- 監査・バージョニング(モジュールdocstring参照) ---
     rule_version: str

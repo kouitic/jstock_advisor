@@ -30,8 +30,11 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     ValuationBasis,
 )
+from jstock_advisor.domain.entities.environment import EnvironmentResult
 from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
+from jstock_advisor.domain.entities.market_environment import MarketEnvironmentResult
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
+from jstock_advisor.domain.entities.sector_environment import SectorEnvironmentResult
 from jstock_advisor.domain.entities.timing_score import TimingScoreResult
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
 from jstock_advisor.domain.financial_series import (
@@ -53,8 +56,11 @@ from jstock_advisor.domain.signals.earnings_window import (
     resolve_latest_financial_period_end,
 )
 from jstock_advisor.domain.signals.entry_price_range import evaluate_entry_price_range
+from jstock_advisor.domain.signals.environment import evaluate_environment
 from jstock_advisor.domain.signals.historical_valuation import evaluate_historical_valuation
+from jstock_advisor.domain.signals.market_environment import evaluate_market_environment
 from jstock_advisor.domain.signals.momentum import compute_momentum_snapshot
+from jstock_advisor.domain.signals.sector_environment import evaluate_sector_environment
 from jstock_advisor.domain.signals.timing_score import evaluate_timing_score
 from jstock_advisor.domain.valuation.fair_value import (
     aggregate_fair_value,
@@ -156,6 +162,15 @@ class StockSnapshot:
     # 旧売却判定・ProfitTaking判定・LINE通知など既存の判定ロジックからは
     # 一切参照されない。
     entry_price_range: EntryPriceRangeResult
+    # --- 判定精度向上機能Phase D: Market/Sector Environment Shadow(2026-08
+    # 追加) ---
+    # TOPIX/所属セクターETFの地合いをそれぞれ独立に評価したShadow計測結果、
+    # および両者を統合したEnvironment Composite。DecisionSnapshot記録専用で
+    # あり、既存のBUY候補判定・保有判断スコア・旧売却判定・ProfitTaking判定・
+    # LINE通知・Entry/Exit Price Rangeからは一切参照されない。
+    market_environment: MarketEnvironmentResult
+    sector_environment: SectorEnvironmentResult
+    environment: EnvironmentResult
 
 
 def build_stock_snapshot(
@@ -504,6 +519,26 @@ def build_stock_snapshot(
         config.entry_exit_price.entry,
     )
 
+    # 判定精度向上機能Phase D: Market/Sector Environment Score(Shadow計測)。
+    # topix_bars/sector_barsは既にmomentum_snapshot算出のために取得済みの
+    # ものをそのまま使う(新規Provider呼び出しは行わない)。既存のBUY候補判定・
+    # 保有判断スコア・旧売却判定・ProfitTaking判定・LINE通知・Entry/Exit
+    # Price Rangeには一切影響しない。
+    market_environment = evaluate_market_environment(
+        topix_bars, snap.as_of_date, now, config.market_sector_environment.market
+    )
+    sector_environment = evaluate_sector_environment(
+        sector_bars or None,
+        topix_bars,
+        sector_etf,
+        snap.as_of_date,
+        now,
+        config.market_sector_environment.sector,
+    )
+    environment = evaluate_environment(
+        market_environment, sector_environment, now, config.market_sector_environment.environment
+    )
+
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
@@ -542,5 +577,8 @@ def build_stock_snapshot(
         earnings_surprise=earnings_surprise,
         earnings_trend=earnings_trend,
         entry_price_range=entry_price_range,
+        market_environment=market_environment,
+        sector_environment=sector_environment,
+        environment=environment,
     )
     return snapshot, None

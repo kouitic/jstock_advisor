@@ -8,8 +8,9 @@ Historical Valuation Score/Timing Scoreのような単一のscoreフィールド
 priceを持つため、DecisionPerformance分析等が「評価済みレコードだけを
 安全に抽出する」ための識別子としてstateを明示フィールド化している。
 
-不変条件(model_validator、コードレビュー対応STEP2 §7・§12・§14):
-- state=EVALUATEDなら4価格すべて必須・正であり、
+不変条件(model_validator、コードレビュー対応STEP2 §7・§12・§14、および
+残Medium対応でvaluation_ceiling自体の必須・正値検証を追加):
+- state=EVALUATEDなら4価格・valuation_ceilingすべて必須・正であり、
   strong<=preferred<=starter<=max<=valuation_ceilingの順序を満たす。
 - state=NOT_EVALUATED/NOT_APPLICABLEなら4価格・confidenceはすべてNone
   (Entry Price Range全体が評価不能な場合、stop_review_priceも含め全ての
@@ -93,7 +94,11 @@ class EntryPriceRangeResult(ImmutableSnapshot):
                     "strong_entry_price<=preferred_entry_price<=starter_entry_price"
                     "<=max_entry_priceである必要があります"
                 )
-            if self.valuation_ceiling is not None and max_price > self.valuation_ceiling:
+            if self.valuation_ceiling is None:
+                raise ValueError("state=EVALUATEDならvaluation_ceilingは必須です")
+            if self.valuation_ceiling <= 0:
+                raise ValueError("valuation_ceilingは正である必要があります")
+            if max_price > self.valuation_ceiling:
                 raise ValueError("max_entry_priceはvaluation_ceilingを超えてはいけません")
             if self.stop_review_price is not None and self.stop_review_price <= 0:
                 raise ValueError("stop_review_priceを設定する場合は正である必要があります")
