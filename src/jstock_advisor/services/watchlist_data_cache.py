@@ -45,6 +45,7 @@ from jstock_advisor.interfaces.market_data import MarketDataProvider
 from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
     DividendInfo,
+    EarningsSurpriseRecord,
     FinancialSummary,
     HistoricalValuation,
     PriceHistory,
@@ -72,6 +73,9 @@ _historical_valuation_list_adapter: TypeAdapter[list[HistoricalValuation]] = Typ
 )
 _cashflow_decomposition_adapter: TypeAdapter[CashflowDecomposition | None] = TypeAdapter(
     CashflowDecomposition | None
+)
+_earnings_surprise_record_list_adapter: TypeAdapter[list[EarningsSurpriseRecord]] = TypeAdapter(
+    list[EarningsSurpriseRecord]
 )
 _dividend_info_adapter: TypeAdapter[DividendInfo | None] = TypeAdapter(DividendInfo | None)
 
@@ -108,6 +112,12 @@ def _classify_price_history(value: PriceHistory | None) -> CacheQualityStatus:
 
 
 def _classify_historical_valuation_list(value: list[HistoricalValuation]) -> CacheQualityStatus:
+    return CacheQualityStatus.NEGATIVE if not value else CacheQualityStatus.VALID
+
+
+def _classify_earnings_surprise_record_list(
+    value: list[EarningsSurpriseRecord],
+) -> CacheQualityStatus:
     return CacheQualityStatus.NEGATIVE if not value else CacheQualityStatus.VALID
 
 
@@ -292,6 +302,22 @@ class _CachingFinancialDataProvider:
             _cashflow_decomposition_adapter,
             _classify_optional,
             "get_cashflow_decomposition",
+        )
+
+    def get_earnings_surprise_history(self, stock_code: str) -> list[EarningsSurpriseRecord]:
+        # ウォッチリスト自動追加パイプラインはbuild_stock_snapshot()を使わない
+        # ため実際には呼ばれないが、FinancialDataProviderプロトコルを満たすため
+        # 実装する(モジュールdocstring参照)。
+        return get_or_fetch(
+            self.repo,
+            f"earnings_surprise_history:{stock_code}",
+            self.ttl_hours,
+            self.negative_ttl_minutes,
+            self.now,
+            lambda: self.inner.get_earnings_surprise_history(stock_code),
+            _earnings_surprise_record_list_adapter,
+            _classify_earnings_surprise_record_list,
+            "get_earnings_surprise_history",
         )
 
 

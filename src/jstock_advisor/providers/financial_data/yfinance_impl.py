@@ -31,6 +31,7 @@ from jstock_advisor.infrastructure.local_repository.stock_name_override_reposito
 )
 from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
+    EarningsSurpriseRecord,
     FinancialSummary,
     HistoricalValuation,
     QuarterlyFinancials,
@@ -493,3 +494,48 @@ class YFinanceFinancialDataProvider:
             ),
             source=self._source(),
         )
+
+    def get_earnings_surprise_history(self, stock_code: str) -> list[EarningsSurpriseRecord]:
+        """判定精度向上機能Phase C: Yahoo Finance公式quoteSummaryの
+        `earningsHistory`モジュール(`Ticker.get_earnings_history()`)を用いる。
+
+        調査済みの制約(実装前の調査結果): このAPIは非公式スクレイピングでは
+        なくYahoo公式モジュールでlxml等の追加依存を必要としないが、通常直近
+        4四半期分しか取得できず、アナリストカバレッジが薄い銘柄では
+        epsEstimate/surprisePercent列自体が存在しないことがある(その場合
+        eps_estimate/surprise_pctはNoneのまま。エラーにはしない)。決算発表日
+        そのもの・予想値が確定した時刻の情報はこのAPIからは得られないため、
+        `available_at`は持たせない(EarningsSurpriseRecordのdocstring参照)。
+        """
+        ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
+        try:
+            df = ticker.get_earnings_history()
+        except Exception:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
+            return []
+        if df is None or df.empty:
+            return []
+
+        source = self._source()
+        results: list[EarningsSurpriseRecord] = []
+        for quarter_end, row in df.iterrows():
+            if not hasattr(quarter_end, "date"):
+                continue
+            surprise_pct_raw = row.get("surprisePercent")
+            surprise_pct = None
+            if surprise_pct_raw is not None:
+                try:
+                    surprise_pct_f = float(surprise_pct_raw)
+                    surprise_pct = None if surprise_pct_f != surprise_pct_f else surprise_pct_f
+                except (TypeError, ValueError):
+                    surprise_pct = None
+            results.append(
+                EarningsSurpriseRecord(
+                    stock_code=stock_code,
+                    quarter_end=quarter_end.date(),
+                    eps_actual=_to_decimal(row.get("epsActual")),
+                    eps_estimate=_to_decimal(row.get("epsEstimate")),
+                    surprise_pct=surprise_pct,
+                    source=source,
+                )
+            )
+        return results

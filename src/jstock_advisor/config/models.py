@@ -700,6 +700,243 @@ class TimingScoreRulesConfig(StrictModel):
         return self
 
 
+class EarningsSurpriseCategoryThresholds(StrictModel):
+    # スコア(-100〜+100)をEarningsSurpriseCategoryへ丸めるための閾値。
+    # Shadow記録専用(BUY/SELL等の判定ロジックには使わない)。
+    strong_positive: float
+    positive: float
+    negative: float
+    strong_negative: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> EarningsSurpriseCategoryThresholds:
+        if not (self.strong_positive > self.positive > self.negative > self.strong_negative):
+            raise ValueError(
+                "category_thresholdsはstrong_positive > positive > negative > "
+                "strong_negativeの順である必要があります"
+            )
+        if not (self.strong_negative >= -100 and self.strong_positive <= 100):
+            raise ValueError(
+                "category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります"
+            )
+        return self
+
+
+class EarningsSurpriseRulesConfig(StrictModel):
+    """Earnings Surprise Score v1(判定精度向上機能Phase C)の設定。
+
+    実装前調査の結果、Analyst Consensus Surprise(決算実績 vs 決算発表前
+    アナリストコンセンサス予想)とDividend Surprise/Revision(配当予想の
+    増額/減額)の2成分のみで構成する(Historical Progress Surprise・
+    Guidance Revisionは現行データソースでは実装しない。
+    domain/entities/earnings_surprise.py参照)。
+    """
+
+    model_version: str
+
+    analyst_consensus_weight: float
+    dividend_revision_weight: float
+
+    # Analyst Consensus成分: surprise_pct(実績EPSがコンセンサス予想を
+    # 上回った/下回った割合、例0.05=5%上振れ)の段階評価区分(符号付き、昇順)。
+    analyst_consensus_strong_negative_pct: float
+    analyst_consensus_negative_pct: float
+    analyst_consensus_positive_pct: float
+    analyst_consensus_strong_positive_pct: float
+
+    # Dividend Revision成分: DividendComparisonOutcomeの各区分に対応する固定点数。
+    dividend_actual_cut_score: float
+    dividend_forecast_cut_score: float
+    dividend_maintained_score: float
+    dividend_increase_score: float
+
+    min_coverage_required: float
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
+    category_thresholds: EarningsSurpriseCategoryThresholds
+
+    @model_validator(mode="after")
+    def _check_values(self) -> EarningsSurpriseRulesConfig:
+        weights = (self.analyst_consensus_weight, self.dividend_revision_weight)
+        if any(w < 0 for w in weights):
+            raise ValueError("各成分の重みは0以上である必要があります")
+        if sum(weights) <= 0:
+            raise ValueError("各成分の重みの合計は0より大きい必要があります")
+
+        if not (
+            self.analyst_consensus_strong_negative_pct
+            < self.analyst_consensus_negative_pct
+            < self.analyst_consensus_positive_pct
+            < self.analyst_consensus_strong_positive_pct
+        ):
+            raise ValueError(
+                "analyst_consensus区分境界はstrong_negative < negative < positive "
+                "< strong_positiveの順(同値不可)である必要があります"
+            )
+
+        dividend_scores = (
+            self.dividend_actual_cut_score,
+            self.dividend_forecast_cut_score,
+            self.dividend_maintained_score,
+            self.dividend_increase_score,
+        )
+        if any(not (-100 <= s <= 100) for s in dividend_scores):
+            raise ValueError("dividend区分の各スコアは-100〜100の範囲である必要があります")
+        if not (
+            self.dividend_actual_cut_score
+            < self.dividend_forecast_cut_score
+            < self.dividend_maintained_score
+            < self.dividend_increase_score
+        ):
+            raise ValueError(
+                "dividend区分スコアはactual_cut < forecast_cut < maintained < increase"
+                "の順(同値不可)である必要があります"
+            )
+
+        if not (0 < self.min_coverage_required <= 1):
+            raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
+        if not (0 <= self.coverage_medium_threshold <= 1):
+            raise ValueError("coverage_medium_thresholdは0〜1の範囲である必要があります")
+        if not (0 <= self.coverage_high_threshold <= 1):
+            raise ValueError("coverage_high_thresholdは0〜1の範囲である必要があります")
+        if not (
+            self.min_coverage_required <= self.coverage_medium_threshold
+            < self.coverage_high_threshold <= 1
+        ):
+            raise ValueError(
+                "min_coverage_required <= coverage_medium_threshold < "
+                "coverage_high_threshold <= 1である必要があります"
+            )
+        return self
+
+
+class EarningsTrendCategoryThresholds(StrictModel):
+    # スコア(-100〜+100)をEarningsTrendCategoryへ丸めるための閾値。
+    # Shadow記録専用(BUY/SELL等の判定ロジックには使わない)。
+    strong_improving: float
+    improving: float
+    deteriorating: float
+    strong_deteriorating: float
+
+    @model_validator(mode="after")
+    def _check_order(self) -> EarningsTrendCategoryThresholds:
+        if not (
+            self.strong_improving > self.improving
+            > self.deteriorating > self.strong_deteriorating
+        ):
+            raise ValueError(
+                "category_thresholdsはstrong_improving > improving > deteriorating > "
+                "strong_deterioratingの順である必要があります"
+            )
+        if not (self.strong_deteriorating >= -100 and self.strong_improving <= 100):
+            raise ValueError(
+                "category_thresholdsはスコアの定義域[-100, 100]に収まる必要があります"
+            )
+        return self
+
+
+class EarningsTrendRulesConfig(StrictModel):
+    """Earnings Trend Score v1(判定精度向上機能Phase C)の設定。
+
+    実装前調査の結果、営業利益トレンド・営業CFトレンド・配当方向の3成分
+    (+補助的なacceleration成分)で構成する(売上トレンド・EPSトレンド・
+    利益率改善・会社予想方向は現行Providerでは算出できないため対象外。
+    domain/entities/earnings_trend.py参照)。
+    """
+
+    model_version: str
+
+    operating_income_trend_weight: float
+    operating_cashflow_trend_weight: float
+    dividend_direction_weight: float
+    # データが薄い(直近5四半期程度)ため信頼度が低い補助成分。他成分より
+    # 小さい重みを設定すること(validatorでは強制しない、運用判断)。
+    acceleration_weight: float
+
+    # 営業利益/営業CFトレンド共通: 直近期の前期比変化率(%)の段階評価区分
+    # (符号付き、昇順)。
+    trend_strong_decline_pct: float
+    trend_decline_pct: float
+    trend_improve_pct: float
+    trend_strong_improve_pct: float
+
+    # acceleration成分: 前期比変化率の変化(2階差分、%ポイント)をこの値で
+    # ±100へ換算する(この%ポイントでスコア±100に達する)。
+    acceleration_full_scale_pct: float
+
+    # Dividend Direction成分: Earnings Surprise Scoreと同じ
+    # DividendComparisonOutcome区分に対応する固定点数(意味が異なるため
+    # 独立して設定できるようにする)。
+    dividend_actual_cut_score: float
+    dividend_forecast_cut_score: float
+    dividend_maintained_score: float
+    dividend_increase_score: float
+
+    min_coverage_required: float
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
+    category_thresholds: EarningsTrendCategoryThresholds
+
+    @model_validator(mode="after")
+    def _check_values(self) -> EarningsTrendRulesConfig:
+        weights = (
+            self.operating_income_trend_weight,
+            self.operating_cashflow_trend_weight,
+            self.dividend_direction_weight,
+            self.acceleration_weight,
+        )
+        if any(w < 0 for w in weights):
+            raise ValueError("各成分の重みは0以上である必要があります")
+        if sum(weights) <= 0:
+            raise ValueError("各成分の重みの合計は0より大きい必要があります")
+
+        if not (
+            self.trend_strong_decline_pct < self.trend_decline_pct
+            < self.trend_improve_pct < self.trend_strong_improve_pct
+        ):
+            raise ValueError(
+                "trend区分境界はstrong_decline < decline < improve < strong_improveの"
+                "順(同値不可)である必要があります"
+            )
+        if self.acceleration_full_scale_pct <= 0:
+            raise ValueError("acceleration_full_scale_pctは正の値である必要があります")
+
+        dividend_scores = (
+            self.dividend_actual_cut_score,
+            self.dividend_forecast_cut_score,
+            self.dividend_maintained_score,
+            self.dividend_increase_score,
+        )
+        if any(not (-100 <= s <= 100) for s in dividend_scores):
+            raise ValueError("dividend区分の各スコアは-100〜100の範囲である必要があります")
+        if not (
+            self.dividend_actual_cut_score
+            < self.dividend_forecast_cut_score
+            < self.dividend_maintained_score
+            < self.dividend_increase_score
+        ):
+            raise ValueError(
+                "dividend区分スコアはactual_cut < forecast_cut < maintained < increase"
+                "の順(同値不可)である必要があります"
+            )
+
+        if not (0 < self.min_coverage_required <= 1):
+            raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
+        if not (0 <= self.coverage_medium_threshold <= 1):
+            raise ValueError("coverage_medium_thresholdは0〜1の範囲である必要があります")
+        if not (0 <= self.coverage_high_threshold <= 1):
+            raise ValueError("coverage_high_thresholdは0〜1の範囲である必要があります")
+        if not (
+            self.min_coverage_required <= self.coverage_medium_threshold
+            < self.coverage_high_threshold <= 1
+        ):
+            raise ValueError(
+                "min_coverage_required <= coverage_medium_threshold < "
+                "coverage_high_threshold <= 1である必要があります"
+            )
+        return self
+
+
 # --- holiday_calendar.json ----------------------------------------------------
 
 
@@ -1725,3 +1962,6 @@ class AppConfig(StrictModel):
     historical_valuation: HistoricalValuationRulesConfig
     # --- 判定精度向上機能Phase B第二弾: Timing Score(2026-08)で追加 ---
     timing_score: TimingScoreRulesConfig
+    # --- 判定精度向上機能Phase C: Earnings Surprise/Trend Score(2026-08)で追加 ---
+    earnings_surprise: EarningsSurpriseRulesConfig
+    earnings_trend: EarningsTrendRulesConfig
