@@ -723,19 +723,23 @@ class EarningsSurpriseCategoryThresholds(StrictModel):
 
 
 class EarningsSurpriseRulesConfig(StrictModel):
-    """Earnings Surprise Score v1(判定精度向上機能Phase C)の設定。
+    """Earnings Surprise Score v2(判定精度向上機能Phase C)の設定。
 
     実装前調査の結果、Analyst Consensus Surprise(決算実績 vs 決算発表前
-    アナリストコンセンサス予想)とDividend Surprise/Revision(配当予想の
-    増額/減額)の2成分のみで構成する(Historical Progress Surprise・
-    Guidance Revisionは現行データソースでは実装しない。
-    domain/entities/earnings_surprise.py参照)。
+    アナリストコンセンサス予想)のみで構成する(Historical Progress
+    Surprise・Guidance Revisionは現行データソースでは実装しない。
+    Dividend Surprise/Revisionはコードレビュー対応でv2にて除外した
+    (既存DividendComparisonOutcomeは「前年度実績 vs 現在予想」の比較で
+    あり「今回決算のサプライズ」ではないため、意味の異なるデータを流用
+    しない)。いずれもdomain/entities/earnings_surprise.py参照)。
     """
 
     model_version: str
 
+    # 単一成分のみだが、他の判定精度向上機能スコアと同じ重み付きcoverage
+    # 機構を踏襲する(coverageは実質0か1の二値になり、「analyst consensus
+    # が無ければNOT_EVALUATED」という仕様と自然に一致する)。
     analyst_consensus_weight: float
-    dividend_revision_weight: float
 
     # Analyst Consensus成分: surprise_pct(実績EPSがコンセンサス予想を
     # 上回った/下回った割合、例0.05=5%上振れ)の段階評価区分(符号付き、昇順)。
@@ -744,12 +748,6 @@ class EarningsSurpriseRulesConfig(StrictModel):
     analyst_consensus_positive_pct: float
     analyst_consensus_strong_positive_pct: float
 
-    # Dividend Revision成分: DividendComparisonOutcomeの各区分に対応する固定点数。
-    dividend_actual_cut_score: float
-    dividend_forecast_cut_score: float
-    dividend_maintained_score: float
-    dividend_increase_score: float
-
     min_coverage_required: float
     coverage_high_threshold: float
     coverage_medium_threshold: float
@@ -757,11 +755,8 @@ class EarningsSurpriseRulesConfig(StrictModel):
 
     @model_validator(mode="after")
     def _check_values(self) -> EarningsSurpriseRulesConfig:
-        weights = (self.analyst_consensus_weight, self.dividend_revision_weight)
-        if any(w < 0 for w in weights):
-            raise ValueError("各成分の重みは0以上である必要があります")
-        if sum(weights) <= 0:
-            raise ValueError("各成分の重みの合計は0より大きい必要があります")
+        if self.analyst_consensus_weight <= 0:
+            raise ValueError("analyst_consensus_weightは正の値である必要があります")
 
         if not (
             self.analyst_consensus_strong_negative_pct
@@ -772,25 +767,6 @@ class EarningsSurpriseRulesConfig(StrictModel):
             raise ValueError(
                 "analyst_consensus区分境界はstrong_negative < negative < positive "
                 "< strong_positiveの順(同値不可)である必要があります"
-            )
-
-        dividend_scores = (
-            self.dividend_actual_cut_score,
-            self.dividend_forecast_cut_score,
-            self.dividend_maintained_score,
-            self.dividend_increase_score,
-        )
-        if any(not (-100 <= s <= 100) for s in dividend_scores):
-            raise ValueError("dividend区分の各スコアは-100〜100の範囲である必要があります")
-        if not (
-            self.dividend_actual_cut_score
-            < self.dividend_forecast_cut_score
-            < self.dividend_maintained_score
-            < self.dividend_increase_score
-        ):
-            raise ValueError(
-                "dividend区分スコアはactual_cut < forecast_cut < maintained < increase"
-                "の順(同値不可)である必要があります"
             )
 
         if not (0 < self.min_coverage_required <= 1):
@@ -836,12 +812,16 @@ class EarningsTrendCategoryThresholds(StrictModel):
 
 
 class EarningsTrendRulesConfig(StrictModel):
-    """Earnings Trend Score v1(判定精度向上機能Phase C)の設定。
+    """Earnings Trend Score v2(判定精度向上機能Phase C)の設定。
 
     実装前調査の結果、営業利益トレンド・営業CFトレンド・配当方向の3成分
     (+補助的なacceleration成分)で構成する(売上トレンド・EPSトレンド・
     利益率改善・会社予想方向は現行Providerでは算出できないため対象外。
-    domain/entities/earnings_trend.py参照)。
+    domain/entities/earnings_trend.py参照)。コードレビュー対応(v2):
+    変化率計算の符号跨ぎ(赤字・マイナスCF時の改善/悪化逆転)バグを修正、
+    FinancialSummary.recent_periods_source(四半期実績由来か年次フォール
+    バック由来か)をconfidenceへ反映するようにした(この設定ファイル自体に
+    新規フィールドは追加していない、domain/signals/earnings_trend.py参照)。
     """
 
     model_version: str

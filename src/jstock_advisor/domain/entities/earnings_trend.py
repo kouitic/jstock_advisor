@@ -26,17 +26,24 @@ Earnings Surprise Score(earnings_surprise.py)とは完全に独立した評価�
 増減方向)までは無理なく算出できるが、ACCELERATION(増減の加速・減速)は
 最低3四半期の差分比較が必要で信頼度が低い。そのためacceleration成分は
 補助成分として軽い重みで扱う(config側で他成分より小さい重みを設定する)。
+
+コードレビュー対応(v2): 変化率計算の符号跨ぎ(赤字・マイナスCF時の改善/
+悪化逆転)バグを修正し、成分算出に使った生値(latest/previous・変化率・
+四半期実績の由来)を監査用に保持するようにした
+(domain/signals/earnings_trend.py参照)。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 
 from jstock_advisor.domain.entities.base import ImmutableSnapshot
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EarningsTrendCategory,
     EarningsTrendEvaluationState,
+    RecentPeriodsSource,
 )
 
 
@@ -54,6 +61,22 @@ class EarningsTrendResult(ImmutableSnapshot):
     # 補助成分(直近5四半期程度の薄いデータのため信頼度が低く、他成分より
     # 軽い重みを持つ)。
     acceleration_component: float | None = None
+
+    # コードレビュー対応(v2): LIVE_SHADOW_ONLYではないが、後から「なぜこの
+    # 点数だったか」を再現できるよう、成分算出に使った生値(判定当時の四半期
+    # 実績値そのもの)を保持する。算出不可の場合はNone。
+    latest_operating_income: Decimal | None = None
+    previous_operating_income: Decimal | None = None
+    operating_income_change_pct: float | None = None
+    latest_operating_cashflow: Decimal | None = None
+    previous_operating_cashflow: Decimal | None = None
+    operating_cashflow_change_pct: float | None = None
+    # acceleration成分の2階差分の生値(%ポイント、クランプ前)。
+    acceleration_raw_pct: float | None = None
+    # コードレビュー対応(v2): 四半期実績由来か年次決算へのフォールバック
+    # 由来か(FinancialSummary.recent_periods_source)。confidence算出に
+    # 反映する(domain/signals/earnings_trend.py参照)。
+    recent_periods_source: RecentPeriodsSource | None = None
 
     # 評価全体に関する注記コード(例: "OPERATING_INCOME_TREND_UNAVAILABLE")。
     reason_codes: tuple[str, ...] = ()

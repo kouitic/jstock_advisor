@@ -1,4 +1,7 @@
-"""domain/signals/earnings_trend.pyのテスト(判定精度向上機能Phase C)。"""
+"""domain/signals/earnings_trend.pyのテスト(判定精度向上機能Phase C、
+コードレビュー対応でv2へ再設計: 符号跨ぎバグ修正・raw metrics追加・
+recent_periods_source反映)。
+"""
 
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     EarningsTrendCategory,
     EarningsTrendEvaluationState,
+    RecentPeriodsSource,
 )
 from jstock_advisor.domain.signals.earnings_trend import (
     earnings_trend_config_values,
@@ -63,6 +67,7 @@ def _evaluate(
     incomes: list[Decimal],
     cashflows: list[Decimal] | None = None,
     dividend_comparison_outcome: DividendComparisonOutcome | None = None,
+    recent_periods_source: RecentPeriodsSource = RecentPeriodsSource.QUARTERLY,
     earnings_date_status: EarningsDateStatus = EarningsDateStatus.UNAVAILABLE,
     release_confirmation_state: EarningsReleaseConfirmationState = (
         EarningsReleaseConfirmationState.NOT_APPLICABLE
@@ -73,6 +78,7 @@ def _evaluate(
         incomes,
         cashflows if cashflows is not None else [],
         dividend_comparison_outcome,
+        recent_periods_source,
         earnings_date_status,
         release_confirmation_state,
         _NOW,
@@ -98,7 +104,7 @@ def test_all_components_evaluated_for_improving_trend() -> None:
     assert result.confidence == ConfidenceLevel.HIGH
 
 
-# ===== 営業利益/営業CFトレンド成分の段階評価 =====
+# ===== 営業利益/営業CFトレンド成分の段階評価(通常、正数→正数) =====
 
 
 @pytest.mark.parametrize(
@@ -122,9 +128,85 @@ def test_trend_component_unavailable_with_single_quarter() -> None:
     assert "OPERATING_INCOME_TREND_UNAVAILABLE" in result.reason_codes
 
 
-def test_trend_component_unavailable_when_previous_is_zero() -> None:
-    result = _evaluate([Decimal("0"), Decimal("100")])
-    assert result.operating_income_trend_component is None
+# ===== コードレビュー対応(v2): 赤字・マイナスCF時の符号跨ぎ =====
+
+
+@pytest.mark.parametrize(
+    ("previous", "latest", "expect_positive"),
+    [
+        (Decimal("-100"), Decimal("-50"), True),  # 赤字縮小 = 改善
+        (Decimal("-50"), Decimal("-100"), False),  # 赤字拡大 = 悪化
+        (Decimal("-100"), Decimal("10"), True),  # 黒字転換 = 強い改善
+        (Decimal("100"), Decimal("-10"), False),  # 赤字転落 = 強い悪化
+    ],
+)
+def test_operating_income_sign_crossing_directions(
+    previous: Decimal, latest: Decimal, expect_positive: bool
+) -> None:
+    result = _evaluate([previous, latest])
+    assert result.operating_income_trend_component is not None
+    if expect_positive:
+        assert result.operating_income_trend_component > 0
+    else:
+        assert result.operating_income_trend_component < 0
+
+
+@pytest.mark.parametrize(
+    ("previous", "latest", "expect_positive"),
+    [
+        (Decimal("-100"), Decimal("-50"), True),  # CFマイナス縮小 = 改善
+        (Decimal("-50"), Decimal("-100"), False),  # CFマイナス拡大 = 悪化
+        (Decimal("-100"), Decimal("10"), True),  # CFプラス転換 = 強い改善
+        (Decimal("100"), Decimal("-10"), False),  # CFマイナス転落 = 強い悪化
+    ],
+)
+def test_operating_cashflow_sign_crossing_directions(
+    previous: Decimal, latest: Decimal, expect_positive: bool
+) -> None:
+    result = _evaluate([Decimal("0"), Decimal("0")], [previous, latest])
+    assert result.operating_cashflow_trend_component is not None
+    if expect_positive:
+        assert result.operating_cashflow_trend_component > 0
+    else:
+        assert result.operating_cashflow_trend_component < 0
+
+
+def test_black_turn_is_strong_improvement() -> None:
+    result = _evaluate([Decimal("-100"), Decimal("10")])
+    assert result.operating_income_trend_component == 100.0
+
+
+def test_red_fall_is_strong_deterioration() -> None:
+    result = _evaluate([Decimal("100"), Decimal("-10")])
+    assert result.operating_income_trend_component == -100.0
+
+
+def test_loss_shrink_is_improvement() -> None:
+    result = _evaluate([Decimal("-100"), Decimal("-50")])
+    assert result.operating_income_trend_component == 100.0  # +50% >= strong_improve
+
+
+def test_loss_expand_is_deterioration() -> None:
+    result = _evaluate([Decimal("-50"), Decimal("-100")])
+    assert result.operating_income_trend_component == -100.0  # -100% <= strong_decline
+
+
+# ===== previous=0の明示評価(コードレビュー対応v2) =====
+
+
+def test_previous_zero_latest_positive_is_explicit_improvement() -> None:
+    result = _evaluate([Decimal("0"), Decimal("50")])
+    assert result.operating_income_trend_component == 50.0
+
+
+def test_previous_zero_latest_negative_is_explicit_deterioration() -> None:
+    result = _evaluate([Decimal("0"), Decimal("-50")])
+    assert result.operating_income_trend_component == -50.0
+
+
+def test_previous_zero_latest_zero_is_neutral() -> None:
+    result = _evaluate([Decimal("0"), Decimal("0")])
+    assert result.operating_income_trend_component == 0.0
 
 
 # ===== acceleration成分 =====
@@ -157,6 +239,23 @@ def test_acceleration_component_clamped_to_range() -> None:
     result = _evaluate(incomes)
     assert result.acceleration_component is not None
     assert -100.0 <= result.acceleration_component <= 100.0
+
+
+def test_acceleration_with_sign_crossing_is_unavailable_not_extreme() -> None:
+    """コードレビュー対応(v2): 黒字/赤字の符号跨ぎを含む3四半期では、
+    2階差分が比較可能な意味を持たないため誤って強い正負スコアにならず、
+    評価不能(None)として扱う。"""
+    incomes = [Decimal("-100"), Decimal("-50"), Decimal("10")]
+    result = _evaluate(incomes)
+    assert result.acceleration_component is None
+    assert result.acceleration_raw_pct is None
+    assert "ACCELERATION_UNAVAILABLE" in result.reason_codes
+
+
+def test_acceleration_with_sign_crossing_in_first_pair_is_unavailable() -> None:
+    incomes = [Decimal("100"), Decimal("-10"), Decimal("5")]
+    result = _evaluate(incomes)
+    assert result.acceleration_component is None
 
 
 # ===== Dividend Direction成分 =====
@@ -244,17 +343,110 @@ def test_category_stable() -> None:
     assert result.category == EarningsTrendCategory.STABLE
 
 
-# ===== 監査情報 =====
+# ===== RecentPeriodsSourceとconfidence(コードレビュー対応v2) =====
 
 
-def test_result_to_metrics_contains_components() -> None:
+def _full_income_cashflow() -> tuple[list[Decimal], list[Decimal]]:
+    incomes = [Decimal("100"), Decimal("105"), Decimal("112"), Decimal("120"), Decimal("140")]
+    cashflows = [Decimal("90"), Decimal("93"), Decimal("96"), Decimal("100"), Decimal("108")]
+    return incomes, cashflows
+
+
+def test_quarterly_source_reaches_high_confidence() -> None:
+    incomes, cashflows = _full_income_cashflow()
+    result = _evaluate(
+        incomes,
+        cashflows,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        recent_periods_source=RecentPeriodsSource.QUARTERLY,
+    )
+    assert result.coverage == 1.0
+    assert result.confidence == ConfidenceLevel.HIGH
+    assert "ANNUAL_FALLBACK_USED" not in result.reason_codes
+
+
+def test_annual_fallback_caps_confidence_at_medium() -> None:
+    incomes, cashflows = _full_income_cashflow()
+    result = _evaluate(
+        incomes,
+        cashflows,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        recent_periods_source=RecentPeriodsSource.ANNUAL_FALLBACK,
+    )
+    assert result.coverage == 1.0
+    assert result.confidence == ConfidenceLevel.MEDIUM
+    assert "ANNUAL_FALLBACK_USED" in result.reason_codes
+
+
+def test_score_unchanged_between_quarterly_and_annual_fallback() -> None:
+    incomes, cashflows = _full_income_cashflow()
+    quarterly = _evaluate(
+        incomes,
+        cashflows,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        recent_periods_source=RecentPeriodsSource.QUARTERLY,
+    )
+    annual = _evaluate(
+        incomes,
+        cashflows,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        recent_periods_source=RecentPeriodsSource.ANNUAL_FALLBACK,
+    )
+    assert quarterly.score == annual.score
+    assert quarterly.operating_income_trend_component == annual.operating_income_trend_component
+
+
+def test_unavailable_source_forces_financial_components_unavailable_not_zero() -> None:
+    incomes, cashflows = _full_income_cashflow()
+    result = _evaluate(
+        incomes,
+        cashflows,
+        dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        recent_periods_source=RecentPeriodsSource.UNAVAILABLE,
+    )
+    assert result.operating_income_trend_component is None
+    assert result.operating_cashflow_trend_component is None
+    assert result.acceleration_component is None
+    assert "OPERATING_INCOME_TREND_UNAVAILABLE" in result.reason_codes
+    assert "OPERATING_CASHFLOW_TREND_UNAVAILABLE" in result.reason_codes
+    assert "ACCELERATION_UNAVAILABLE" in result.reason_codes
+    # 配当方向のみ残るためcoverage不足でNOT_EVALUATED(0点として加算しない)。
+    assert result.state == EarningsTrendEvaluationState.NOT_EVALUATED
+
+
+# ===== raw metrics(コードレビュー対応v2) =====
+
+
+def test_result_holds_raw_before_after_values() -> None:
     result = _evaluate(
         [Decimal("100"), Decimal("120")],
+        [Decimal("50"), Decimal("60")],
+        recent_periods_source=RecentPeriodsSource.QUARTERLY,
+    )
+    assert result.previous_operating_income == Decimal("100")
+    assert result.latest_operating_income == Decimal("120")
+    assert result.operating_income_change_pct == pytest.approx(20.0)
+    assert result.previous_operating_cashflow == Decimal("50")
+    assert result.latest_operating_cashflow == Decimal("60")
+    assert result.operating_cashflow_change_pct == pytest.approx(20.0)
+    assert result.recent_periods_source == RecentPeriodsSource.QUARTERLY
+
+
+def test_result_to_metrics_contains_raw_values() -> None:
+    result = _evaluate(
+        [Decimal("100"), Decimal("120")],
+        [Decimal("50"), Decimal("60")],
         dividend_comparison_outcome=DividendComparisonOutcome.DIVIDEND_INCREASE,
+        recent_periods_source=RecentPeriodsSource.QUARTERLY,
     )
     metrics = earnings_trend_result_to_metrics(result)
-    assert metrics["operating_income_trend_component"] == 100.0
-    assert metrics["dividend_direction_component"] == 80.0
+    assert metrics["latest_operating_income"] == "120"
+    assert metrics["previous_operating_income"] == "100"
+    assert metrics["operating_income_change_pct"] == pytest.approx(20.0)
+    assert metrics["latest_operating_cashflow"] == "60"
+    assert metrics["previous_operating_cashflow"] == "50"
+    assert metrics["operating_cashflow_change_pct"] == pytest.approx(20.0)
+    assert metrics["recent_periods_source"] == "QUARTERLY"
     assert metrics["state"] == "EVALUATED"
 
 

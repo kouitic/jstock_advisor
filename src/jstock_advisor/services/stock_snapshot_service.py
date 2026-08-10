@@ -410,10 +410,13 @@ def build_stock_snapshot(
         config.earnings_window,
     )
     earnings_surprise_history = providers.financial_data.get_earnings_surprise_history(stock_code)
+    # コードレビュー対応(v2): Dividend Revisionは意味の異なるデータ
+    # (前年度実績 vs 現在予想の比較)であるためEarnings Surpriseからは
+    # 除外した(dividend_comparison_outcomeを渡さない)。Earnings Trend側の
+    # dividend_directionとしては引き続き渡す。
     earnings_surprise = evaluate_earnings_surprise(
         earnings_surprise_history,
         resolved_period.period_end,
-        dividend.dividend_comparison_outcome,
         earnings_date_status,
         release_confirmation_state,
         now,
@@ -423,6 +426,9 @@ def build_stock_snapshot(
         quarterly_operating_incomes,
         quarterly_operating_cashflows,
         dividend.dividend_comparison_outcome,
+        # コードレビュー対応(v2): 四半期実績由来か年次決算へのフォール
+        # バック由来かをconfidence算出へ反映する。
+        financial.recent_periods_source,
         earnings_date_status,
         release_confirmation_state,
         now,

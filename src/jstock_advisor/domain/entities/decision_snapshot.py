@@ -54,9 +54,9 @@ from jstock_advisor.domain.entities.enums import ConfidenceLevel, DecisionType, 
 # rule_versionはBUY/SELL判定ロジック自体のバージョンを指す)。Phase B第一弾
 # (historical_valuation_score実装)、Phase B第二弾(timing_score実装・v2/v3/v4への
 # 再設計、コードレビュー対応)、Phase C(earnings_surprise_score/
-# earnings_trend_score実装)に伴い値を上げた。他のスコア項目が実装され
-# 始めたらさらに値を上げる。
-DECISION_SNAPSHOT_MODEL_VERSION = "phase_c_earnings_v1"
+# earnings_trend_score実装・v2への再設計、コードレビュー対応)に伴い値を
+# 上げた。他のスコア項目が実装され始めたらさらに値を上げる。
+DECISION_SNAPSHOT_MODEL_VERSION = "phase_c_earnings_v2"
 
 
 class DecisionSnapshot(ImmutableSnapshot):
