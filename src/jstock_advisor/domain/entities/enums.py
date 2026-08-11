@@ -30,6 +30,18 @@ class ConfidenceLevel(StrEnum):
     LOW = "LOW"
 
 
+class ExecutionMode(StrEnum):
+    """通知検証モード機能(2026-08追加)。Lambdaイベントのexecution_modeキーで指定する。
+
+    NORMAL: 通常運用(既定)。VALIDATION: 本番データ・本番ロジックを使いつつ
+    再送防止のみを無効化し、通常運用の永続履歴を汚さずに実LINE送信で通知文面を
+    確認できる検証専用モード(AWS Console/CLIからの明示的な手動起動のみを想定)。
+    """
+
+    NORMAL = "NORMAL"
+    VALIDATION = "VALIDATION"
+
+
 class RecommendationType(StrEnum):
     """要求仕様26節。買い判定・保有判定・売却判定を一つの列挙で表現する。"""
 

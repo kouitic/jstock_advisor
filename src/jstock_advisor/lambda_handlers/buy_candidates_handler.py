@@ -77,6 +77,7 @@ from jstock_advisor.domain.entities.enums import (
     PortfolioValuationBasis,
     RecommendationType,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
@@ -98,6 +99,7 @@ from jstock_advisor.infrastructure.local_repository.notification_log_repository 
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from jstock_advisor.lambda_handlers._execution_mode import resolve_execution_context
 from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
@@ -117,6 +119,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 _PROCESS_NAME = "買い候補分析"
+# handler()は常に明示的にexecution_contextを渡す(NORMAL/VALIDATIONを問わず)。
+# このデフォルトは_process_single_candidate/_finalize_batchを直接呼ぶ既存テスト
+# コード(白箱テスト)向けの後方互換専用で、本番の呼び出し経路では使われない。
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 _RANKING_ENTRY_DELIMITER = "|"
 _SECTOR_ENTRY_DELIMITER = "|"
 _STOCK_CODE_PATTERN = re.compile(r"^[0-9]{4,5}$")
@@ -337,6 +343,7 @@ def _process_single_candidate(
     calendar: BusinessCalendar,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
+    execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> dict[str, Any]:
     service = BuySignalService(providers=providers, config=config, business_calendar=calendar)
     audit_service = AuditService()
@@ -344,6 +351,7 @@ def _process_single_candidate(
     category = "failed"
     ranking_entry: str | None = None
     sector_entry: str | None = None
+    validation_recommendation_id: str | None = None
     try:
         # --- 統合BUY候補パイプライン(2026-07)。購入判定と、保有銘柄の場合の
         # 売却・利確判定(後段)とで同一のスナップショット(現在値・財務データ)を
@@ -509,11 +517,19 @@ def _process_single_candidate(
                 )
 
             recommendation_repo.save(final_recommendation)
+            if execution_context.is_validation:
+                # 通知検証モード機能(2026-08追加): _finalize_batchが正常完了後に
+                # 検証用テーブルから削除するため、このバッチで保存した
+                # recommendation_idをrecord_result経由で報告する(4.2節参照)。
+                validation_recommendation_id = final_recommendation.recommendation_id
             # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
             # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
-            save_decision_snapshot_safely(
-                DecisionSnapshotRepository(), final_recommendation, DecisionType.BUY, logger
-            )
+            # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
+            # 汚さないため保存自体をスキップする。
+            if not execution_context.is_validation:
+                save_decision_snapshot_safely(
+                    DecisionSnapshotRepository(), final_recommendation, DecisionType.BUY, logger
+                )
 
             if final_recommendation.buy_action == BuyAction.MANUAL_REVIEW:
                 category = "review"
@@ -560,9 +576,12 @@ def _process_single_candidate(
             stock_code=stock_code_for_category,
             ranking_entry=ranking_entry,
             sector_entry=sector_entry,
+            validation_recommendation_id=validation_recommendation_id,
         )
         if progress is not None and progress.is_complete:
-            _finalize_batch(progress, config, now, recommendation_repo, notification_service)
+            _finalize_batch(
+                progress, config, now, recommendation_repo, notification_service, execution_context
+            )
     return result
 
 
@@ -677,6 +696,7 @@ def _finalize_batch(
     now: dt.datetime,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
+    execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> None:
     """全銘柄の処理完了を検知したワーカーが1回だけ呼ぶ。購入候補ランキング順に
     以下の固定順序でゲートを評価する(breakしない。全件をループし尽くす):
@@ -826,7 +846,9 @@ def _finalize_batch(
     sent_count = 0
     for unified_rank, rec in eligible_winners:
         outcome = send_result.get(rec.stock_code, "SEND_FAILED")
-        if outcome == "SENT_AND_RECORDED":
+        # 通知検証モード機能(2026-08追加): SENT_VALIDATIONもLINE送信に成功した
+        # 銘柄数として扱う(NotificationLog未保存を理由に0件扱いにしない)。
+        if outcome in ("SENT_AND_RECORDED", "SENT_VALIDATION"):
             notification_rank += 1
             sent_count += 1
             _record_notification_outcome_audit(
@@ -872,6 +894,22 @@ def _finalize_batch(
         send_empty_summary=config.notification.send_empty_summary,
     )
 
+    if execution_context.is_validation:
+        # 通知検証モード機能(2026-08追加): 通知送信が正常終了した後、このバッチで
+        # 保存した全Recommendationを検証用テーブルから削除する(使い捨て
+        # テーブルのため。異常終了時はTTL(2時間)が安全網となる)。個別の削除
+        # 失敗はバッチの成功可否・LINE送信結果に影響させないベストエフォート処理。
+        for recommendation_id in progress.validation_recommendation_ids:
+            try:
+                recommendation_repo.delete(recommendation_id)
+            except Exception:  # noqa: BLE001 - TTLで最終的に解消されるため処理は継続する
+                logger.warning(
+                    "buy_candidates_handler: failed to delete validation recommendation "
+                    "recommendation_id=%s (TTLで自動削除されます)",
+                    recommendation_id,
+                    exc_info=True,
+                )
+
     if log_failed:
         # LINE送信自体は成功済みだがNotificationLog保存に失敗した銘柄がある。
         # 二重送信を避けるためこのバッチ内では再送しないが、記録漏れを見逃さない
@@ -884,19 +922,32 @@ def _finalize_batch(
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    # 通知検証モード機能(2026-08追加)。不正なexecution_modeは他の一切の処理より
+    # 前にここで例外を送出し、Lambda呼び出し自体を失敗させる(NORMALへフォール
+    # バックしない)。
+    execution_context = resolve_execution_context(event)
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     calendar = BusinessCalendar.from_config(config.holiday_calendar)
     providers = build_real_provider_bundle(now, config)
-    recommendation_repo = RecommendationRepository()
+    recommendation_repo = RecommendationRepository.for_execution_context(execution_context)
     notification_service = LineNotificationService(
         line_client=build_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
         recommendation_repository=recommendation_repo,
         config=config,
+        execution_context=execution_context,
     )
 
     if event.get("task") == "buy_candidate":
+        # 子Lambda: batch_idはevent由来なのでこの時点で既に確定している。
+        if execution_context.is_validation:
+            logger.info(
+                "VALIDATION MODE task=buy_candidate execution_mode=VALIDATION "
+                "validation_run_id=%s stock_code=%s",
+                event.get("batch_id"),
+                event["stock_code"],
+            )
         average_acquisition_price = (
             Decimal(event["average_acquisition_price"])
             if event.get("average_acquisition_price") is not None
@@ -914,6 +965,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             calendar,
             recommendation_repo,
             notification_service,
+            execution_context,
         )
         logger.info("buy_candidates_handler single candidate done: %s", result)
         return result
@@ -933,6 +985,14 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     )
     batch_id = f"buy-candidates-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
     start_batch(batch_id, len(targets), now, holding_count=holding_count)
+    if execution_context.is_validation:
+        # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、
+        # イベント解析直後ではなくこの時点でVALIDATION開始ログを出す。
+        logger.info(
+            "VALIDATION MODE START execution_mode=VALIDATION validation_run_id=%s target_count=%d",
+            batch_id,
+            len(targets),
+        )
 
     for target in targets:
         dispatch_async(
@@ -948,6 +1008,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     if target.average_acquisition_price is not None
                     else None
                 ),
+                "execution_mode": execution_context.mode.value,
             },
         )
 

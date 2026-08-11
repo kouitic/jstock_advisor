@@ -14,6 +14,7 @@ id_fieldの値をそのまま使う単純な設計とする(単一ユーザー�
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -26,15 +27,26 @@ if TYPE_CHECKING:
 
 
 class DynamoDbCollectionStore[T: BaseModel]:
-    def __init__(self, model_type: type[T], table_name: str, id_field: str) -> None:
+    def __init__(
+        self, model_type: type[T], table_name: str, id_field: str, ttl_seconds: int | None = None
+    ) -> None:
+        """ttl_secondsを指定すると、保存する各アイテムへDynamoDB Native TTL用の
+        ttl属性(現在時刻+ttl_seconds、UNIX秒)を付与する(通知検証モード機能
+        2026-08追加。使い捨てテーブル向けの任意機能で、未指定(既定)なら
+        既存の全リポジトリと同様ttl属性は付与されない)。
+        """
         self._model_type = model_type
         self._id_field = id_field
+        self._ttl_seconds = ttl_seconds
         resource = boto3.resource("dynamodb")
         self._table: Table = resource.Table(table_name)
 
     def _to_item(self, model: T) -> dict[str, Any]:
         item_id = str(getattr(model, self._id_field))
-        return {self._id_field: item_id, "data": model.model_dump_json()}
+        item: dict[str, Any] = {self._id_field: item_id, "data": model.model_dump_json()}
+        if self._ttl_seconds is not None:
+            item["ttl"] = int(time.time()) + self._ttl_seconds
+        return item
 
     def _from_item(self, item: dict[str, Any]) -> T:
         return self._model_type.model_validate_json(item["data"])

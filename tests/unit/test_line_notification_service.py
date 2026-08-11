@@ -16,11 +16,13 @@ from jstock_advisor.domain.entities.enums import (
     DividendComparisonOutcome,
     EarningsDateStatus,
     EarningsReleaseConfirmationState,
+    ExecutionMode,
     NotificationStatus,
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
@@ -127,6 +129,26 @@ def service_and_repos(
         notification_log_repository=notification_log_repo,
         recommendation_repository=recommendation_repo,
         config=_CONFIG,
+    )
+    return service, recommendation_repo, client
+
+
+@pytest.fixture
+def validation_service_and_repos(
+    tmp_path: Path,
+) -> tuple[LineNotificationService, RecommendationRepository, _FakeLineClient]:
+    """通知検証モード機能(2026-08追加)。execution_context=VALIDATIONで構築した
+    サービス版(service_and_reposと同じ流儀)。"""
+    store_dir = tmp_path / "local_store"
+    recommendation_repo = RecommendationRepository(store_dir=store_dir)
+    notification_log_repo = NotificationLogRepository(store_dir=store_dir)
+    client = _FakeLineClient()
+    service = LineNotificationService(
+        line_client=client,
+        notification_log_repository=notification_log_repo,
+        recommendation_repository=recommendation_repo,
+        config=_CONFIG,
+        execution_context=ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
     return service, recommendation_repo, client
 
@@ -1988,3 +2010,152 @@ def test_render_watchlist_addition_message_always_within_budget_across_sizes() -
         summary = _summary(items, total_target_count=max(count, 1), ranked_count=count)
         message = render_watchlist_addition_message(summary)
         assert len(message) <= line_notification_service_module._LINE_ADDITION_MESSAGE_CHAR_BUDGET
+
+
+# --- 通知検証モード機能(2026-08追加) -------------------------------------
+
+
+def test_validation_mode_bypasses_resend_suppression(
+    validation_service_and_repos,
+) -> None:
+    """NORMALなら再送防止で抑止される条件(直近同一内容)でも、VALIDATIONでは
+    LINE送信されること(_notification_status_for_sendのバイパス)。"""
+    service, repo, client = validation_service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    repo.save(rec1)
+    service.notify_recommendation(rec1, _NOW)
+
+    rec2 = _make_recommendation(
+        recommendation_id="rec-2", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    repo.save(rec2)
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+
+    assert sent is True
+    assert len(client.sent) == 2
+
+
+def test_validation_mode_does_not_save_notification_log(
+    validation_service_and_repos,
+) -> None:
+    service, repo, client = validation_service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    repo.save(rec)
+
+    sent = service.notify_recommendation(rec, _NOW)
+
+    assert sent is True
+    assert len(client.sent) == 1
+    assert service._log_repo.list_all() == []
+
+
+def test_validation_mode_prepends_banner_to_line_body(
+    validation_service_and_repos,
+) -> None:
+    service, repo, client = validation_service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    assert client.sent[0].startswith("【🧪 検証モードで送信】")
+
+
+def test_normal_mode_does_not_prepend_banner(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    )
+    repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    assert "【🧪 検証モードで送信】" not in client.sent[0]
+
+
+def test_validation_mode_notify_batch_summary_bypasses_own_dedup(
+    validation_service_and_repos,
+) -> None:
+    """notify_batch_summaryが独自に持つ同日・同内容dedupも、VALIDATIONでは
+    バイパスされ、直近と同一内容でも送信されること。"""
+    service, _repo, client = validation_service_and_repos
+
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=27,
+        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        now=_NOW,
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=27,
+        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        now=_NOW + dt.timedelta(seconds=15),
+    )
+
+    assert first is True
+    assert second is True
+    assert len(client.sent) == 2
+    assert all(msg.startswith("【🧪 検証モードで送信】") for msg in client.sent)
+
+
+def test_validation_mode_buy_candidates_digest_returns_sent_validation(
+    validation_service_and_repos,
+) -> None:
+    """VALIDATIONでは常にSENT_VALIDATIONを返し、SENT_AND_RECORDED/SENT_LOG_FAILED
+    は発生しない(NotificationLogを保存しないため)。"""
+    service, _repo, client = validation_service_and_repos
+    winners = [_make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)]
+
+    results = service.notify_buy_candidates_digest(winners, _NOW)
+
+    assert results == {"4516": "SENT_VALIDATION"}
+    assert len(client.sent) == 1
+    assert client.sent[0].startswith("【🧪 検証モードで送信】")
+    assert service._log_repo.list_all() == []
+
+
+def test_validation_mode_buy_candidates_digest_never_marks_sent_log_failed(
+    validation_service_and_repos, monkeypatch
+) -> None:
+    """VALIDATIONではNotificationLog.save自体を呼ばないため、その保存が例外を
+    投げるよう仕込んでもSENT_LOG_FAILEDには絶対にならない。"""
+    service, _repo, _client = validation_service_and_repos
+    winners = [_make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)]
+
+    def _raise(_entry: object) -> None:
+        raise RuntimeError("DynamoDB write failed")
+
+    monkeypatch.setattr(service._log_repo, "save", _raise)
+
+    results = service.notify_buy_candidates_digest(winners, _NOW)
+
+    assert results == {"4516": "SENT_VALIDATION"}
+
+
+def test_validation_mode_preserves_manual_review_diversion(
+    validation_service_and_repos, monkeypatch
+) -> None:
+    """データ品質チェックで人的確認が必要と判定された場合、VALIDATIONでも
+    通常の売却等通知を強制送信せず、NORMAL同様notify_manual_review_requiredへ
+    分岐すること(検証banner付きで実送信される)。「VALIDATIONだから元の判定
+    通知を強制送信する」動作になっていないことを保証する回帰テスト。
+    """
+    service, repo, client = validation_service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.BUY)
+    repo.save(rec)
+    monkeypatch.setattr(service, "_check_data_quality", lambda *a, **kw: (_alert_stub(rec), True))
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+
+    assert outcome.data_quality_blocked is True
+    assert outcome.sent is True
+    assert len(client.sent) == 1
+    assert "【要手動確認】" in client.sent[0]
+    assert client.sent[0].startswith("【🧪 検証モードで送信】")

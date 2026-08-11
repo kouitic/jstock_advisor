@@ -14,7 +14,7 @@ import datetime as dt
 import logging
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -108,6 +108,12 @@ class BatchProgress:
     # 揃っているか(=PortfolioValuationBasis.MARKET_VALUEとして信頼できるか)を
     # 判定するために使う。
     holding_count: int
+    # 通知検証モード機能(2026-08追加)。VALIDATION実行時のみ、_process_single_candidateが
+    # 保存したRecommendationのrecommendation_idを報告する(このバッチ=1回の
+    # VALIDATION実行で保存された全件を把握し、_finalize_batch完了後に検証用
+    # テーブルから削除するため)。NORMAL実行では常に空。デフォルト空リストとし、
+    # 既存のBatchProgress()呼び出し(テスト含む)を変更不要にする。
+    validation_recommendation_ids: list[str] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -150,6 +156,7 @@ def record_result(
     stock_code: str | None = None,
     ranking_entry: str | None = None,
     sector_entry: str | None = None,
+    validation_recommendation_id: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
 
@@ -167,6 +174,12 @@ def record_result(
     業種・時価総額の集計用文字列をDynamoDBの文字列セットへ原子的に追加する。
     呼び出し側でMAX_SECTOR_ENTRY_BYTESを超えないことを事前に検証してから渡すこと
     (本関数はサイズ検証を行わない)。
+
+    validation_recommendation_idを渡すと、通知検証モード機能(2026-08追加)向けに、
+    VALIDATION実行時に保存されたRecommendationのrecommendation_idをDynamoDBの
+    文字列セットへ原子的に追加する。_finalize_batchが正常完了後にこの一覧を
+    走査し、検証用テーブルから削除する(functional_spec.md参照)。NORMAL実行では
+    渡さない。
     """
     if not running_on_lambda():
         return None
@@ -191,6 +204,10 @@ def record_result(
         names["#sector_entries"] = "sector_entries"
         update_expr += ", #sector_entries :sector_entries"
         values[":sector_entries"] = {sector_entry}
+    if validation_recommendation_id is not None:
+        names["#validation_ids"] = "validation_recommendation_ids"
+        update_expr += ", #validation_ids :validation_ids"
+        values[":validation_ids"] = {validation_recommendation_id}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -209,6 +226,7 @@ def record_result(
         ranking_entries=sorted(item.get("ranking_entries", set())),
         sector_entries=sorted(item.get("sector_entries", set())),
         holding_count=int(item.get("holding_count", 0)),
+        validation_recommendation_ids=sorted(item.get("validation_recommendation_ids", set())),
     )
 
 

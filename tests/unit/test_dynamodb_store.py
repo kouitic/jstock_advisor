@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import boto3
 import pytest
 from moto import mock_aws
@@ -31,6 +33,24 @@ def store(monkeypatch: pytest.MonkeyPatch):
             BillingMode="PAY_PER_REQUEST",
         )
         yield DynamoDbCollectionStore(_Item, _TABLE_NAME, "item_id")
+
+
+@pytest.fixture
+def store_with_ttl(monkeypatch: pytest.MonkeyPatch):
+    """通知検証モード機能(2026-08追加)。ttl_seconds指定時のみttl属性が付与される
+    ことを確認するための、既存storeフィクスチャと同一テーブルを使うTTL付き版。"""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name=_REGION)
+        client.create_table(
+            TableName=_TABLE_NAME,
+            KeySchema=[{"AttributeName": "item_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "item_id", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield DynamoDbCollectionStore(_Item, _TABLE_NAME, "item_id", ttl_seconds=7200)
 
 
 def test_upsert_and_get_round_trips(store: DynamoDbCollectionStore[_Item]) -> None:
@@ -136,6 +156,29 @@ def test_get_consistent_uses_consistent_read(
 
     assert len(calls) == 1
     assert calls[0].get("ConsistentRead") is True
+
+
+def test_upsert_without_ttl_seconds_omits_ttl_attribute(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """既存の全リポジトリ呼び出し(ttl_seconds未指定)はttl属性が付与されないまま
+    (通知検証モード機能2026-08追加、NORMAL挙動の無変更確認)。"""
+    store.upsert(_Item(item_id="1", name="foo", value=10))
+    raw_item = store._table.get_item(Key={"item_id": "1"})["Item"]
+    assert "ttl" not in raw_item
+
+
+def test_upsert_with_ttl_seconds_sets_ttl_attribute(
+    store_with_ttl: DynamoDbCollectionStore[_Item],
+) -> None:
+    """通知検証モード機能(2026-08追加): ttl_seconds指定時のみttl属性(UNIX秒)を
+    付与する(ValidationRecommendationsTable等の使い捨てテーブル向け)。"""
+    before = int(time.time())
+    store_with_ttl.upsert(_Item(item_id="1", name="foo", value=10))
+    raw_item = store_with_ttl._table.get_item(Key={"item_id": "1"})["Item"]
+    assert "ttl" in raw_item
+    assert int(raw_item["ttl"]) >= before + 7200 - 5
+    assert int(raw_item["ttl"]) <= before + 7200 + 30
 
 
 def test_get_does_not_use_consistent_read(

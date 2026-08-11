@@ -237,6 +237,28 @@ Resources:
         - AttributeName: recommendation_id
           KeyType: HASH
 
+  # 通知検証モード機能(2026-08追加)。投資判断の履歴テーブルではなく、BUY候補
+  # fan-out(buy_candidates_handler.py)の各Lambda呼び出し間でVALIDATION実行時の
+  # Recommendationを受け渡すための一時的な作業領域。本番RecommendationsTableとは
+  # 物理的に分離し、評価/バックテスト/DecisionPerformance等の消費者側コードから
+  # は一切参照されない。_finalize_batch正常完了後に明示的に削除されるが、
+  # Lambda異常終了等で削除されなかった場合の安全網としてTTLで自動削除する
+  # (RecommendationRepository.for_execution_context()参照)。
+  ValidationRecommendationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-validation_recommendations"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: recommendation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: recommendation_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # --- 保有判断スコア方式(2026-08仕様)で追加 ------------------------------
 
   HoldingDecisionResultsTable:
@@ -527,7 +549,10 @@ Resources:
 
   # 銘柄単位ファンアウト(_fanout.py)の完了検知用。原子的なADDカウンタとして
   # infrastructure/aws/batch_tracker.pyから直接操作するため、他テーブルと異なり
-  # {id_field, data: JSON}形式ではなく数値属性を直接持つ。TTLで数時間後に自動削除する
+  # {id_field, data: JSON}形式ではなく数値属性を直接持つ。TTLで数時間後に自動削除する。
+  # 通知検証モード機能(2026-08追加)のvalidation_recommendation_ids属性もこのテーブルへ
+  # 追記するが、あくまでfan-out完了検知のための一時的な実行制御データであり、
+  # 通常運用の投資判断履歴(Recommendation/DecisionSnapshot等)とは性質が異なる。
   BatchRunsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -610,6 +635,8 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
         - DynamoDBCrudPolicy: { TableName: !Ref RecommendationsTable }
+        # 通知検証モード機能(2026-08追加): VALIDATION実行時のみ使用する一時テーブル
+        - DynamoDBCrudPolicy: { TableName: !Ref ValidationRecommendationsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
         - DynamoDBReadPolicy: { TableName: !Ref WatchlistTable }
         # 統合BUY候補パイプライン(2026-07)で保有銘柄を購入判断対象へ統合したため追加
