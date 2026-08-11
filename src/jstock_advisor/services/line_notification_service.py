@@ -38,6 +38,7 @@ from jstock_advisor.domain.entities.enums import (
     buy_action_label,
 )
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
@@ -62,7 +63,15 @@ logger = logging.getLogger(__name__)
 # notify_buy_candidates_digest()のチャンク単位送信結果(統合BUY候補パイプライン
 # 2026-07で追加)。外部LINE APIとDynamoDBを1つのトランザクションにはできないため、
 # 「LINE送信は成功したがログ保存に失敗した」中間状態を明示的に区別する。
-BuyDigestSendOutcome = Literal["SENT_AND_RECORDED", "SENT_LOG_FAILED", "SEND_FAILED"]
+# SENT_VALIDATIONは通知検証モード機能(2026-08追加)専用。VALIDATIONでは
+# NotificationLogを保存しないため、「記録された」ことを含意するSENT_AND_RECORDEDを
+# 返さない(SENT_LOG_FAILEDもVALIDATIONでは構造的に発生しない)。
+BuyDigestSendOutcome = Literal[
+    "SENT_AND_RECORDED", "SENT_VALIDATION", "SENT_LOG_FAILED", "SEND_FAILED"
+]
+
+_VALIDATION_BANNER = "【🧪 検証モードで送信】\n※本通知は通知仕様確認用です。\n\n"
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
 _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType] = {
     RecommendationType.BUY: NotificationType.DAILY_BUY_CANDIDATES,
@@ -1456,11 +1465,13 @@ class LineNotificationService:
         recommendation_repository: RecommendationRepository,
         config: AppConfig,
         audit_service: AuditService | None = None,
+        execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     ) -> None:
         self._client = line_client
         self._log_repo = notification_log_repository
         self._recommendation_repo = recommendation_repository
         self._config = config
+        self._execution_context = execution_context
         self._audit = audit_service or AuditService()
 
     def notify_recommendation(self, recommendation: Recommendation, now: dt.datetime) -> bool:
@@ -1597,6 +1608,16 @@ class LineNotificationService:
             block_reason=status.value,
         )
 
+    def _push(self, text: str) -> None:
+        """全てのLINE送信箇所が経由する唯一の送信ヘルパー(通知検証モード機能
+        2026-08追加)。VALIDATIONでは本文冒頭に検証banner を付与してから送信する。
+        今後通知種別が増えても、push_messageを直接呼ばずこのヘルパーを経由する
+        規約さえ守ればbanner表示漏れが構造的に起きない。
+        """
+        if self._execution_context.is_validation:
+            text = _VALIDATION_BANNER + text
+        self._client.push_message(text)
+
     def send_recommendation_notification(
         self, recommendation: Recommendation, now: dt.datetime
     ) -> None:
@@ -1612,17 +1633,18 @@ class LineNotificationService:
             notification_type,
             self._config.notification.fair_value_large_spread_ratio,
         )
-        self._client.push_message(message)
-        self._log_repo.save(
-            NotificationLog(
-                notification_id=str(uuid.uuid4()),
-                notification_type=notification_type,
-                stock_code=recommendation.stock_code,
-                content_hash=_compute_content_hash(recommendation.recommendation_type),
-                sent_at=now,
-                related_recommendation_id=recommendation.recommendation_id,
+        self._push(message)
+        if not self._execution_context.is_validation:
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=str(uuid.uuid4()),
+                    notification_type=notification_type,
+                    stock_code=recommendation.stock_code,
+                    content_hash=_compute_content_hash(recommendation.recommendation_type),
+                    sent_at=now,
+                    related_recommendation_id=recommendation.recommendation_id,
+                )
             )
-        )
 
     def notify_buy_candidates_digest(
         self, winners: list[Recommendation], now: dt.datetime
@@ -1688,7 +1710,7 @@ class LineNotificationService:
                 message = "\n\n".join([message, "\n".join(footer)])
 
             try:
-                self._client.push_message(message)
+                self._push(message)
             except Exception:  # noqa: BLE001 - LINE送信失敗は未送信として扱い処理を継続する
                 logger.exception(
                     "notify_buy_candidates_digest: push_message failed chunk=%d/%d",
@@ -1701,6 +1723,12 @@ class LineNotificationService:
                 break
 
             for recommendation, _ in chunk:
+                if self._execution_context.is_validation:
+                    # NotificationLogを保存しないため「記録された」ことを含意する
+                    # SENT_AND_RECORDEDは返さない(SENT_LOG_FAILEDもこの分岐を
+                    # 通らないため構造的に発生しない)。
+                    results[recommendation.stock_code] = "SENT_VALIDATION"
+                    continue
                 notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[
                     recommendation.recommendation_type
                 ]
@@ -1843,18 +1871,19 @@ class LineNotificationService:
         if recommendation.next_earnings_date:
             lines.append(f"・次回決算({recommendation.next_earnings_date})の内容")
         lines.append(_DISCLAIMER)
-        self._client.push_message("\n".join(lines))
+        self._push("\n".join(lines))
 
-        self._log_repo.save(
-            NotificationLog(
-                notification_id=str(uuid.uuid4()),
-                notification_type=NotificationType.MANUAL_REVIEW_REQUIRED,
-                stock_code=recommendation.stock_code,
-                content_hash=_compute_content_hash(recommendation.recommendation_type),
-                sent_at=now,
-                related_recommendation_id=recommendation.recommendation_id,
+        if not self._execution_context.is_validation:
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=str(uuid.uuid4()),
+                    notification_type=NotificationType.MANUAL_REVIEW_REQUIRED,
+                    stock_code=recommendation.stock_code,
+                    content_hash=_compute_content_hash(recommendation.recommendation_type),
+                    sent_at=now,
+                    related_recommendation_id=recommendation.recommendation_id,
+                )
             )
-        )
         return True
 
     def notify_disclosure_risk(
@@ -1869,7 +1898,11 @@ class LineNotificationService:
     ) -> bool:
         """適時開示からリスクキーワードが検出された場合に速報として送信する。
 
-        同一開示(published_at+タイトルで識別)は再送しない。
+        同一開示(published_at+タイトルで識別)は再送しない。この再送抑止は
+        通知検証モード機能(2026-08追加)の対象外(個別銘柄の売買判断通知では
+        なく、適時開示の存在を知らせる事実通知のため)。現時点で本メソッドを
+        呼び出すハンドラ(disclosure_check_handler.py)はexecution_modeを扱わず
+        常にNORMALで動くため、この分岐に到達することはない。
         """
         content_hash = hashlib.sha256(
             f"{stock_code}|{published_at.isoformat()}|{disclosure_title}".encode()
@@ -1891,18 +1924,19 @@ class LineNotificationService:
         lines.append("対応内容: 開示内容を確認し、投資前提に影響がないか確認してください。")
         lines.append(f"開示日時: {format_jst(published_at)}")
         lines.append(_DISCLAIMER)
-        self._client.push_message("\n".join(lines))
+        self._push("\n".join(lines))
 
-        self._log_repo.save(
-            NotificationLog(
-                notification_id=str(uuid.uuid4()),
-                notification_type=NotificationType.IMPORTANT_DISCLOSURE,
-                stock_code=stock_code,
-                content_hash=content_hash,
-                sent_at=now,
-                related_recommendation_id=None,
+        if not self._execution_context.is_validation:
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=str(uuid.uuid4()),
+                    notification_type=NotificationType.IMPORTANT_DISCLOSURE,
+                    stock_code=stock_code,
+                    content_hash=content_hash,
+                    sent_at=now,
+                    related_recommendation_id=None,
+                )
             )
-        )
         return True
 
     def notify_data_error(
@@ -1981,17 +2015,21 @@ class LineNotificationService:
             f"{process_name}|{now.date().isoformat()}|{total}|"
             f"{sorted(counts.items())}".encode()
         ).hexdigest()[:16]
-        latest = self._log_repo.latest_by_stock_and_type(
-            pseudo_stock_code, NotificationType.BATCH_SUMMARY
-        )
-        if latest is not None and latest.content_hash == content_hash:
-            logger.info(
-                "batch_summary duplicate suppressed process_name=%s total=%d counts=%s",
-                process_name,
-                total,
-                counts,
+        # 通知検証モード機能(2026-08追加): このdedupは_notification_status_for_send
+        # とは別に自前で持つ同日・同内容抑止のため、VALIDATIONでは別途バイパスする
+        # (再送防止によって通知が抑止されないという要求を満たすため)。
+        if not self._execution_context.is_validation:
+            latest = self._log_repo.latest_by_stock_and_type(
+                pseudo_stock_code, NotificationType.BATCH_SUMMARY
             )
-            return False
+            if latest is not None and latest.content_hash == content_hash:
+                logger.info(
+                    "batch_summary duplicate suppressed process_name=%s total=%d counts=%s",
+                    process_name,
+                    total,
+                    counts,
+                )
+                return False
 
         # 2026-07仕様レビュー対応(§10): 「判定結果」(保有継続/要確認等)と「通知処理の
         # 結果」(送信した/抑止した等)が同じ並びで表示され意味が伝わりにくいという
@@ -2038,17 +2076,18 @@ class LineNotificationService:
         lines.append("")
         lines.append(f"評価日時：{format_jst(now)}")
         lines.append(_DISCLAIMER)
-        self._client.push_message("\n".join(lines))
-        self._log_repo.save(
-            NotificationLog(
-                notification_id=str(uuid.uuid4()),
-                notification_type=NotificationType.BATCH_SUMMARY,
-                stock_code=pseudo_stock_code,
-                content_hash=content_hash,
-                sent_at=now,
-                related_recommendation_id=None,
+        self._push("\n".join(lines))
+        if not self._execution_context.is_validation:
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=str(uuid.uuid4()),
+                    notification_type=NotificationType.BATCH_SUMMARY,
+                    stock_code=pseudo_stock_code,
+                    content_hash=content_hash,
+                    sent_at=now,
+                    related_recommendation_id=None,
+                )
             )
-        )
         return True
 
     def notify_watchlist_additions(
@@ -2084,17 +2123,18 @@ class LineNotificationService:
             return False
 
         message = render_watchlist_addition_message(summary)
-        self._client.push_message(message)
-        self._log_repo.save(
-            NotificationLog(
-                notification_id=str(uuid.uuid4()),
-                notification_type=NotificationType.WATCHLIST_AUTO_ADDITION,
-                stock_code=pseudo_stock_code,
-                content_hash=content_hash,
-                sent_at=summary.evaluated_at,
-                related_recommendation_id=None,
+        self._push(message)
+        if not self._execution_context.is_validation:
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=str(uuid.uuid4()),
+                    notification_type=NotificationType.WATCHLIST_AUTO_ADDITION,
+                    stock_code=pseudo_stock_code,
+                    content_hash=content_hash,
+                    sent_at=summary.evaluated_at,
+                    related_recommendation_id=None,
+                )
             )
-        )
         return True
 
     def _previous_recommendation(
@@ -2111,7 +2151,18 @@ class LineNotificationService:
         previous: Recommendation | None,
         now: dt.datetime,
     ) -> NotificationStatus:
-        """送信するかどうかに加えて、送信しない場合の理由も返す(要求仕様§12)。"""
+        """送信するかどうかに加えて、送信しない場合の理由も返す(要求仕様§12)。
+
+        通知検証モード機能(2026-08追加): VALIDATIONでは再送防止のみを無効化する。
+        check_resend_eligibility()(BUY候補finalize側)・evaluate_notification_status()
+        (保有銘柄側)は両方ともこの関数を経由するため、この1行で両パイプラインの
+        再送防止が同時にバイパスされる。データ品質チェック(呼び出し元の
+        _check_data_quality)・買い増しリスク判定・ランキング・通知上限はこの関数の
+        範囲外であり、一切影響を受けない。
+        """
+        if self._execution_context.is_validation:
+            return NotificationStatus.SENT
+
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         latest_log = self._log_repo.latest_by_stock_and_type(
             recommendation.stock_code, notification_type

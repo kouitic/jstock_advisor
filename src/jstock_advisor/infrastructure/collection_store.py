@@ -91,9 +91,15 @@ def build_collection_store[T: BaseModel](
     file_name: str,
     id_field: str,
     store_dir: Path | None = None,
+    ttl_seconds: int | None = None,
 ) -> CollectionStore[T]:
+    """ttl_secondsはDynamoDBバックエンド向けの任意引数(通知検証モード機能2026-08追加、
+    ValidationRecommendationsTable等の使い捨てテーブル専用)。ローカルJSON実装には
+    TTL概念が無いため無視される。"""
     if running_on_lambda():
         from jstock_advisor.infrastructure.aws.dynamodb_store import DynamoDbCollectionStore
 
-        return DynamoDbCollectionStore(model_type, resolve_table_name(file_name), id_field)
+        return DynamoDbCollectionStore(
+            model_type, resolve_table_name(file_name), id_field, ttl_seconds=ttl_seconds
+        )
     return JsonCollectionStore(model_type, file_name, id_field, store_dir)

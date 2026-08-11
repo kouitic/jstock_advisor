@@ -4,12 +4,17 @@ from decimal import Decimal
 
 import pytest
 
+from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
 from jstock_advisor.domain.entities.enums import (
     AccountType,
+    ConfidenceLevel,
+    ExecutionMode,
     NotificationStatus,
     RecommendationType,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.lambda_handlers import holdings_watchlist_handler as handler_module
 from jstock_advisor.services.line_notification_service import NotificationOutcome
@@ -118,6 +123,7 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
         "stock_code": "2914",
         "portfolio_total_market_value": None,
         "portfolio_total_acquisition_cost": "200000",
+        "execution_mode": "NORMAL",
     } in stripped
     assert {
         "fn": "jstock-advisor-holdings-watchlist",
@@ -125,6 +131,7 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
         "stock_code": "8136",
         "portfolio_total_market_value": None,
         "portfolio_total_acquisition_cost": "200000",
+        "execution_mode": "NORMAL",
     } in stripped
 
 
@@ -290,3 +297,211 @@ def test_estimate_portfolio_totals_isolates_single_holding_price_fetch_error() -
     assert total_acquisition_cost == Decimal("200000")
     # 例外が発生した銘柄で処理が止まらず、2銘柄目も呼び出されていることを確認する
     assert market_data.calls == ["2914", "8136"]
+
+
+# --- 通知検証モード機能(2026-08追加) -------------------------------------
+
+
+def _minimal_recommendation(recommendation_id: str = "rec-1") -> Recommendation:
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code="2914",
+        stock_name="銘柄2914",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL,
+        sell_prices=None,
+        buy_prices=BuyPriceLevels(
+            entry=PriceWithRationale(price=Decimal("1000"), rationale="x"),
+            standard=PriceWithRationale(price=Decimal("950"), rationale="x"),
+            strong=PriceWithRationale(price=Decimal("900"), rationale="x"),
+        ),
+        price_at_recommendation=Decimal("1200"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+
+
+class _SpyRecommendationRepository:
+    def __init__(self) -> None:
+        self.saved: list[Recommendation] = []
+
+    def save(self, recommendation: Recommendation) -> None:
+        self.saved.append(recommendation)
+
+    def get(self, recommendation_id: str) -> Recommendation | None:
+        return None
+
+
+class _SpyHoldingDecisionResultRepository:
+    def __init__(self) -> None:
+        self.saved: list[object] = []
+
+    def save(self, result: object) -> None:
+        self.saved.append(result)
+
+
+class _AlwaysSendsNotificationService:
+    def __init__(self) -> None:
+        self.notified: list[Recommendation] = []
+
+    def notify_recommendation_with_status(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationOutcome:
+        self.notified.append(recommendation)
+        return NotificationOutcome(status=NotificationStatus.SENT, sent=True)
+
+
+def test_dispatch_mode_propagates_validation_execution_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.PortfolioService, "list_holdings", lambda self: [_holding("2914")]
+    )
+
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_async",
+        lambda function_name, payload: dispatched.append(payload),
+    )
+
+    result = handler_module.handler({"execution_mode": "VALIDATION"}, _FakeContext())
+
+    assert result == {"dispatched_holdings": 1}
+    assert dispatched[0]["execution_mode"] == "VALIDATION"
+
+
+def test_dispatch_mode_unspecified_execution_mode_propagates_normal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.PortfolioService, "list_holdings", lambda self: [_holding("2914")]
+    )
+
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_async",
+        lambda function_name, payload: dispatched.append(payload),
+    )
+
+    handler_module.handler({}, _FakeContext())
+
+    assert dispatched[0]["execution_mode"] == "NORMAL"
+
+
+def test_handler_invalid_execution_mode_raises_before_any_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(
+        handler_module, "load_config", lambda: called.append("load_config")
+    )
+
+    with pytest.raises(ValueError, match="unknown execution_mode"):
+        handler_module.handler({"execution_mode": "BOGUS"}, _FakeContext())
+
+    assert called == []
+
+
+def test_evaluate_portfolio_concentration_and_notify_validation_mode_skips_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    holding = _holding("2914")
+    repo = _SpyRecommendationRepository()
+    notification_service = _AlwaysSendsNotificationService()
+
+    handler_module._evaluate_portfolio_concentration_and_notify(
+        holding,
+        Decimal("1000"),
+        None,
+        Decimal("100000"),
+        handler_module.load_config(),
+        repo,
+        notification_service,
+        handler_module.RuleVersionService(),
+        _NOW,
+        True,
+        ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    assert repo.saved == []
+    assert len(notification_service.notified) == 1
+
+
+def test_evaluate_portfolio_concentration_and_notify_normal_mode_still_saves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NORMAL回帰確認: VALIDATION対応追加後もRecommendation保存は従来通り行われる。"""
+    holding = _holding("2914")
+    repo = _SpyRecommendationRepository()
+    notification_service = _AlwaysSendsNotificationService()
+
+    handler_module._evaluate_portfolio_concentration_and_notify(
+        holding,
+        Decimal("1000"),
+        None,
+        Decimal("100000"),
+        handler_module.load_config(),
+        repo,
+        notification_service,
+        handler_module.RuleVersionService(),
+        _NOW,
+        True,
+    )
+
+    assert len(repo.saved) == 1
+
+
+def test_notify_legacy_sell_validation_mode_skips_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    holding = _holding("2914")
+    repo = _SpyRecommendationRepository()
+    notification_service = _AlwaysSendsNotificationService()
+    recommendation = _minimal_recommendation()
+
+    snapshot_calls: list[object] = []
+    monkeypatch.setattr(
+        handler_module,
+        "save_decision_snapshot_safely",
+        lambda *a, **kw: snapshot_calls.append(a),
+    )
+
+    result = handler_module._notify_legacy_sell_and_build_result(
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        True,
+        ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    assert repo.saved == []
+    assert snapshot_calls == []
+    assert result.notified is True  # LINE送信自体は行われる
+
+
+def test_notify_legacy_sell_normal_mode_still_persists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NORMAL回帰確認。"""
+    holding = _holding("2914")
+    repo = _SpyRecommendationRepository()
+    notification_service = _AlwaysSendsNotificationService()
+    recommendation = _minimal_recommendation()
+
+    snapshot_calls: list[object] = []
+    monkeypatch.setattr(
+        handler_module,
+        "save_decision_snapshot_safely",
+        lambda *a, **kw: snapshot_calls.append(a),
+    )
+
+    handler_module._notify_legacy_sell_and_build_result(
+        holding, _NOW, recommendation, repo, notification_service, True,
+    )
+
+    assert len(repo.saved) == 1
+    assert len(snapshot_calls) == 1

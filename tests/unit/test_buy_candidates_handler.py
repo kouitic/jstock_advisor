@@ -12,14 +12,17 @@ from jstock_advisor.domain.entities.enums import (
     CandidateSource,
     ConfidenceLevel,
     EligibilityBlockCategory,
+    ExecutionMode,
     PortfolioValuationBasis,
     RecommendationType,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
+    VALIDATION_FILE_NAME,
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers import buy_candidates_handler as handler_module
@@ -146,6 +149,7 @@ def test_dispatch_mode_dispatches_one_call_per_unified_target(
         "source": "WATCHLIST",
         "holding_quantity": None,
         "average_acquisition_price": None,
+        "execution_mode": "NORMAL",
     } in stripped
     assert {
         "fn": "jstock-advisor-buy-candidates",
@@ -154,6 +158,7 @@ def test_dispatch_mode_dispatches_one_call_per_unified_target(
         "source": "WATCHLIST",
         "holding_quantity": None,
         "average_acquisition_price": None,
+        "execution_mode": "NORMAL",
     } in stripped
 
 
@@ -449,7 +454,8 @@ def test_process_single_candidate_watch_price_counted_without_ranking_entry(
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None: (
+        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
+        validation_recommendation_id=None: (
             captured.update(category=category, ranking_entry=ranking_entry)
         ),
     )
@@ -486,7 +492,8 @@ def test_process_single_candidate_review_when_manual_review_action(
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None: (
+        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
+        validation_recommendation_id=None: (
             captured.update(category=category, ranking_entry=ranking_entry)
         ),
     )
@@ -524,7 +531,8 @@ def test_process_single_candidate_excluded_maps_to_hold(
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None: (
+        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
+        validation_recommendation_id=None: (
             captured.update(category=category)
         ),
     )
@@ -702,7 +710,8 @@ def test_process_single_candidate_data_error_does_not_notify_line_by_default(
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None: (
+        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
+        validation_recommendation_id=None: (
             captured.update(category=category)
         ),
     )
@@ -855,6 +864,7 @@ def _progress(
     category_counts: dict[str, int],
     sector_entries: list[str] | None = None,
     holding_count: int = 0,
+    validation_recommendation_ids: list[str] | None = None,
 ):
     return handler_module.BatchProgress(
         total=total,
@@ -865,6 +875,7 @@ def _progress(
         ranking_entries=ranking_entries,
         sector_entries=sector_entries or [],
         holding_count=holding_count,
+        validation_recommendation_ids=validation_recommendation_ids or [],
     )
 
 
@@ -1596,3 +1607,296 @@ def test_build_unified_targets_skips_holdings_when_exceeding_max_sector_entries(
     aborted = [r for r in recorded if r["decision_type"] == "unified_buy_candidate_batch_aborted"]
     assert len(aborted) == 1
     assert aborted[0]["output_values"]["reason"] == "SECTOR_ENTRIES_LIMIT_EXCEEDED"
+
+
+# --- 通知検証モード機能(2026-08追加) -------------------------------------
+
+
+def test_dispatch_mode_propagates_validation_execution_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.WatchlistService, "list_items", lambda self: [_watchlist_item("2914")]
+    )
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: [])
+
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_async",
+        lambda function_name, payload: dispatched.append(payload),
+    )
+
+    result = handler_module.handler({"execution_mode": "VALIDATION"}, _FakeContext())
+
+    assert result == {"dispatched": 1}
+    assert dispatched[0]["execution_mode"] == "VALIDATION"
+
+
+def test_dispatch_mode_unspecified_execution_mode_propagates_normal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.WatchlistService, "list_items", lambda self: [_watchlist_item("2914")]
+    )
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: [])
+
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_async",
+        lambda function_name, payload: dispatched.append(payload),
+    )
+
+    handler_module.handler({}, _FakeContext())
+
+    assert dispatched[0]["execution_mode"] == "NORMAL"
+
+
+def test_handler_invalid_execution_mode_raises_before_any_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不正なexecution_modeはNORMALへフォールバックせず例外を送出する
+    (要求仕様)。他の一切の処理(config読み込み等)より前に検知されること。"""
+    called: list[str] = []
+    monkeypatch.setattr(
+        handler_module, "load_config", lambda: called.append("load_config") or _CONFIG
+    )
+
+    with pytest.raises(ValueError, match="unknown execution_mode"):
+        handler_module.handler({"execution_mode": "BOGUS"}, _FakeContext())
+
+    assert called == []
+
+
+def test_task_buy_candidate_validation_mode_logs_validation_marker(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(handler_module.WatchlistService, "get_item", lambda self, code: None)
+
+    class _FakeOutcome:
+        data_error = "テストエラー"
+        recommendation = None
+        buy_action = None
+        ranking_group = None
+
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
+    )
+
+    with caplog.at_level("INFO"):
+        handler_module.handler(
+            {
+                "task": "buy_candidate",
+                "stock_code": "2914",
+                "source": "WATCHLIST",
+                "batch_id": "batch-validation-1",
+                "execution_mode": "VALIDATION",
+            },
+            _FakeContext(),
+        )
+
+    assert any(
+        "VALIDATION MODE" in r.message and "batch-validation-1" in r.message
+        for r in caplog.records
+    )
+
+
+def test_process_single_candidate_validation_mode_saves_to_validation_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """VALIDATION時、RecommendationRepository.for_execution_context()経由の
+    検証用リポジトリへ保存され、file_nameが本番用と異なること。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    execution_context = ExecutionContext(mode=ExecutionMode.VALIDATION)
+    repo = RecommendationRepository.for_execution_context(execution_context, store_dir=tmp_path)
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, None, _NOW, object(), _CONFIG,
+        object(), repo, fake_service, execution_context,
+    )
+
+    assert repo.file_name == VALIDATION_FILE_NAME
+    assert repo.get("rec-1") is not None
+
+
+def test_process_single_candidate_validation_mode_skips_decision_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    snapshot_calls: list[object] = []
+    monkeypatch.setattr(
+        handler_module,
+        "save_decision_snapshot_safely",
+        lambda *a, **kw: snapshot_calls.append(a),
+    )
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, None, _NOW, object(), _CONFIG,
+        object(), repo, fake_service, ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    assert snapshot_calls == []
+
+
+def test_process_single_candidate_normal_mode_still_calls_decision_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """NORMAL回帰確認: VALIDATION対応追加後もsave_decision_snapshot_safelyは
+    従来通り呼ばれ続ける。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    snapshot_calls: list[object] = []
+    monkeypatch.setattr(
+        handler_module,
+        "save_decision_snapshot_safely",
+        lambda *a, **kw: snapshot_calls.append(a),
+    )
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, None, _NOW, object(), _CONFIG,
+        object(), repo, fake_service,
+    )
+
+    assert len(snapshot_calls) == 1
+
+
+def test_process_single_candidate_validation_mode_reports_validation_recommendation_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
+        validation_recommendation_id=None: captured.update(
+            validation_recommendation_id=validation_recommendation_id
+        ),
+    )
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(), _CONFIG,
+        object(), repo, fake_service, ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    assert captured["validation_recommendation_id"] == "rec-1"
+
+
+def test_process_single_candidate_normal_mode_reports_no_validation_recommendation_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """NORMAL回帰確認: record_resultへvalidation_recommendation_idは渡らない(常にNone)。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
+        validation_recommendation_id=None: captured.update(
+            validation_recommendation_id=validation_recommendation_id
+        ),
+    )
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(), _CONFIG,
+        object(), repo, fake_service,
+    )
+
+    assert captured["validation_recommendation_id"] is None
+
+
+def test_finalize_batch_validation_mode_deletes_validation_recommendations(
+    monkeypatch, tmp_path
+) -> None:
+    """_finalize_batch正常完了後、当該バッチで保存された全recommendation_idが
+    検証用リポジトリから削除される(通知検証モード機能2026-08追加、4.2節(a))。"""
+    _patch_audit(monkeypatch)
+    execution_context = ExecutionContext(mode=ExecutionMode.VALIDATION)
+    repo = RecommendationRepository.for_execution_context(execution_context, store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    _add_ranked_candidate(repo, ranking_entries, "1111", 90.0)
+    # ランキング対象外の"hold"銘柄もVALIDATION実行では保存される想定を模擬する
+    # (_finalize_batchはranking_entriesだけでなくvalidation_recommendation_ids
+    # 全件を走査して削除する)。
+    unranked = _make_recommendation(
+        "2222", company_quality_score=10.0, recommendation_id="rec-unranked",
+    )
+    repo.save(unranked)
+
+    config = _config_with_max_notifications(5)
+    progress = _progress(
+        ranking_entries,
+        total=2,
+        category_counts={"candidate_not_ranked": 1, "hold": 1},
+        validation_recommendation_ids=["rec-1111", "rec-unranked"],
+    )
+    fake_service = _FakeNotificationServiceForRanking()
+
+    handler_module._finalize_batch(
+        progress, config, _NOW, repo, fake_service, execution_context
+    )
+
+    assert repo.get("rec-1111") is None
+    assert repo.get("rec-unranked") is None
+
+
+def test_finalize_batch_normal_mode_does_not_delete_recommendations(monkeypatch, tmp_path) -> None:
+    """NORMAL回帰確認: 削除処理自体がNORMALでは一切実行されない。"""
+    _patch_audit(monkeypatch)
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    _add_ranked_candidate(repo, ranking_entries, "1111", 90.0)
+
+    config = _config_with_max_notifications(5)
+    progress = _progress(ranking_entries, total=1, category_counts={"candidate_not_ranked": 1})
+    fake_service = _FakeNotificationServiceForRanking()
+
+    handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
+
+    assert repo.get("rec-1111") is not None

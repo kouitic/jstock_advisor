@@ -54,6 +54,7 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
 )
 from jstock_advisor.domain.entities.evaluation_audit import HoldingEvaluationAudit, summary_category
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
 from jstock_advisor.domain.entities.recommendation import Recommendation
@@ -77,6 +78,7 @@ from jstock_advisor.infrastructure.local_repository.notification_log_repository 
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from jstock_advisor.lambda_handlers._execution_mode import resolve_execution_context
 from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
@@ -105,6 +107,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 _PROCESS_NAME = "保有銘柄分析"
+# handler()は常に明示的にexecution_contextを渡す(NORMAL/VALIDATIONを問わず)。
+# このデフォルトは内部関数を直接呼ぶ既存テストコード(白箱テスト)向けの
+# 後方互換専用で、本番の呼び出し経路では使われない。
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
 
 @dataclass(frozen=True)
@@ -155,6 +161,7 @@ def _evaluate_portfolio_concentration_and_notify(
     rule_version_service: RuleVersionService,
     now: dt.datetime,
     notification_enabled: bool,
+    execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> None:
     """企業価値判断とは独立に、ポートフォリオ内保有比率が高い場合に別途通知する
     (要求仕様§14)。銘柄単体の判定結果には影響しない(常に別のRecommendationとして扱う)。
@@ -197,7 +204,10 @@ def _evaluate_portfolio_concentration_and_notify(
         portfolio_weight_pct=result.portfolio_weight_pct,
         portfolio_acquisition_cost_weight_pct=result.acquisition_cost_weight_pct,
     )
-    recommendation_repo.save(recommendation)
+    # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
+    # 汚さないため保存自体をスキップする(kill switchとは独立した別の抑止軸)。
+    if not execution_context.is_validation:
+        recommendation_repo.save(recommendation)
     _send_or_suppress_notification(recommendation, notification_enabled, notification_service, now)
 
 
@@ -208,15 +218,19 @@ def _notify_legacy_sell_and_build_result(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     notification_enabled: bool,
+    execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> _HoldingResult:
     """Recommendation保存はkill switchの影響を受けず常に行う(コードレビュー対応)。
-    LINE送信のみ`notification_enabled`で制御する。"""
-    recommendation_repo.save(recommendation)
-    # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
-    # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
-    save_decision_snapshot_safely(
-        DecisionSnapshotRepository(), recommendation, DecisionType.SELL, logger
-    )
+    LINE送信のみ`notification_enabled`で制御する。通知検証モード機能(2026-08追加)
+    ではkill switchとは独立に、Recommendation/DecisionSnapshot保存自体をスキップする。
+    """
+    if not execution_context.is_validation:
+        recommendation_repo.save(recommendation)
+        # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
+        # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
+        save_decision_snapshot_safely(
+            DecisionSnapshotRepository(), recommendation, DecisionType.SELL, logger
+        )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
     )
@@ -259,6 +273,7 @@ def _notify_holding_decision_and_build_result(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     notification_enabled: bool,
+    execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> tuple[_HoldingResult, HoldingDecisionResult]:
     """保有判断スコアの通知を行う。
 
@@ -289,12 +304,15 @@ def _notify_holding_decision_and_build_result(
         recommendation_id=recommendation_id,
     )
     linked_result = result.model_copy(update={"recommendation_id": recommendation_id})
-    recommendation_repo.save(recommendation)
-    # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
-    # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
-    save_decision_snapshot_safely(
-        DecisionSnapshotRepository(), recommendation, DecisionType.HOLDING_DECISION, logger
-    )
+    # 通知検証モード機能(2026-08追加): kill switchとは独立に、VALIDATIONでは
+    # Recommendation/DecisionSnapshot保存自体をスキップする。
+    if not execution_context.is_validation:
+        recommendation_repo.save(recommendation)
+        # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
+        # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
+        save_decision_snapshot_safely(
+            DecisionSnapshotRepository(), recommendation, DecisionType.HOLDING_DECISION, logger
+        )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
     )
@@ -343,6 +361,7 @@ def _analyze_one_holding(
     rule_version_service: RuleVersionService,
     portfolio_total_market_value: Decimal | None,
     portfolio_total_acquisition_cost: Decimal | None,
+    execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> _HoldingResult:
     """1銘柄を判定・通知する。
 
@@ -396,6 +415,7 @@ def _analyze_one_holding(
         rule_version_service,
         now,
         notification_enabled,
+        execution_context,
     )
 
     # --- 新旧エンジンの排他制御(実装プラン11節) ---------------------------
@@ -437,6 +457,7 @@ def _analyze_one_holding(
                 recommendation_repo,
                 notification_service,
                 notification_enabled,
+                execution_context,
             )
 
     holding_decision_result_notified: _HoldingResult | None = None
@@ -498,8 +519,12 @@ def _analyze_one_holding(
                     recommendation_repo,
                     notification_service,
                     notification_enabled,
+                    execution_context,
                 )
-            holding_decision_result_repo.save(hd_result)
+            # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
+            # 汚さないため保存自体をスキップする。
+            if not execution_context.is_validation:
+                holding_decision_result_repo.save(hd_result)
 
     if legacy_result is not None:
         return legacy_result
@@ -529,15 +554,18 @@ def _analyze_one_holding(
 
     pt_outcome = profit_service.analyze(holding, now, snapshot=snapshot)
     if pt_outcome.recommendation is not None:
-        recommendation_repo.save(pt_outcome.recommendation)
-        # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
-        # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
-        save_decision_snapshot_safely(
-            DecisionSnapshotRepository(),
-            pt_outcome.recommendation,
-            DecisionType.PROFIT_TAKING,
-            logger,
-        )
+        # 通知検証モード機能(2026-08追加): kill switchとは独立に、VALIDATIONでは
+        # Recommendation/DecisionSnapshot保存自体をスキップする。
+        if not execution_context.is_validation:
+            recommendation_repo.save(pt_outcome.recommendation)
+            # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
+            # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
+            save_decision_snapshot_safely(
+                DecisionSnapshotRepository(),
+                pt_outcome.recommendation,
+                DecisionType.PROFIT_TAKING,
+                logger,
+            )
         outcome = _send_or_suppress_notification(
             pt_outcome.recommendation, notification_enabled, notification_service, now
         )
@@ -639,6 +667,7 @@ def _process_single_holding(
     rule_version_service: RuleVersionService,
     portfolio_total_market_value: Decimal | None,
     portfolio_total_acquisition_cost: Decimal | None,
+    execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> dict[str, Any]:
     runtime_config_service = HoldingDecisionRuntimeConfigService(
         cache_ttl_seconds=config.holding_decision.runtime_config_cache_ttl_seconds
@@ -676,6 +705,7 @@ def _process_single_holding(
             rule_version_service,
             portfolio_total_market_value,
             portfolio_total_acquisition_cost,
+            execution_context,
         )
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
         logger.exception("holding analysis failed unexpectedly stock_code=%s", stock_code)
@@ -726,20 +756,34 @@ def _estimate_portfolio_totals(
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    # 通知検証モード機能(2026-08追加)。不正なexecution_modeは他の一切の処理より
+    # 前にここで例外を送出し、Lambda呼び出し自体を失敗させる(NORMALへフォール
+    # バックしない)。
+    execution_context = resolve_execution_context(event)
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     providers = build_real_provider_bundle(now, config)
+    # 常に本番テーブル(同一実行内でRecommendationを再読込みする経路が無いため)
     recommendation_repo = RecommendationRepository()
     notification_service = LineNotificationService(
         line_client=build_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
         recommendation_repository=recommendation_repo,
         config=config,
+        execution_context=execution_context,
     )
     rule_version_service = RuleVersionService()
 
     task = event.get("task")
     if task == "holding":
+        # 子Lambda: batch_idはevent由来なのでこの時点で既に確定している。
+        if execution_context.is_validation:
+            logger.info(
+                "VALIDATION MODE task=holding execution_mode=VALIDATION "
+                "validation_run_id=%s stock_code=%s",
+                event.get("batch_id"),
+                event["stock_code"],
+            )
         portfolio_total_market_value = (
             Decimal(event["portfolio_total_market_value"])
             if event.get("portfolio_total_market_value") is not None
@@ -761,6 +805,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             rule_version_service,
             portfolio_total_market_value,
             portfolio_total_acquisition_cost,
+            execution_context,
         )
         logger.info("holdings_watchlist_handler single holding done: %s", result)
         return result
@@ -780,6 +825,14 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     total = len(holdings)
     batch_id = f"holdings-watchlist-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
     start_batch(batch_id, total, now)
+    if execution_context.is_validation:
+        # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、
+        # イベント解析直後ではなくこの時点でVALIDATION開始ログを出す。
+        logger.info(
+            "VALIDATION MODE START execution_mode=VALIDATION validation_run_id=%s target_count=%d",
+            batch_id,
+            total,
+        )
 
     portfolio_total_market_value, portfolio_total_acquisition_cost = _estimate_portfolio_totals(
         holdings, providers
@@ -798,6 +851,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     else None
                 ),
                 "portfolio_total_acquisition_cost": str(portfolio_total_acquisition_cost),
+                "execution_mode": execution_context.mode.value,
             },
         )
 
