@@ -391,19 +391,20 @@ jstock decision-performance compare --score timing \
 jstock decision-performance segments --score market --horizon 60
 
 # 所属セクターの地合いスコア(functional_spec.md 12.12節)。sector_etf_mapに
-# 対応が無い業種(NOT_APPLICABLE)は自動的に対象dimensionから除外される
+# 対応が無い業種(NOT_APPLICABLE)・データ不足で今回は算出できなかった業種
+# (NOT_EVALUATED)はいずれも自動的に対象dimensionから除外される
 jstock decision-performance segments --score sector --horizon 60
 
 # 市場+セクターを統合したEnvironment Composite Score
 jstock decision-performance segments --score environment --horizon 60
 ```
-`environment`スコアはMarket/Sectorの信頼度から合成する設計のため、
-独自のcoverage閾値を持たない(`config_values_used["environment"]`に
-`coverage_high_threshold`/`coverage_medium_threshold`が存在しない)。
-そのため`segments --score environment`のcoverage tier別分析は常に空になり、
-CloudWatch Logsへ`decision_performance_invalid_coverage_threshold`の
-WARNINGログが出るが、これは想定内の挙動であり異常ではない
-(category/confidence/model_version別の分析には影響しない)。
+`environment`スコアも独自のcoverage閾値(`min_coverage_required`/
+`coverage_high_threshold`/`coverage_medium_threshold`)を持つため
+(コードレビュー対応、2026-08)、`segments --score environment`の
+coverage tier別分析が実際に機能する。本番運用では`sector_etf_map`が
+未整備のため所属セクターのスコアは全銘柄でNOT_APPLICABLEとなり、
+Environment Compositeは実質的にMarketのみのcoverageで判定され続ける
+点に留意すること(functional_spec.md 12.12節「既知の制約」参照)。
 
 **保存失敗時の確認方法**: DecisionSnapshotの保存に失敗した場合、
 CloudWatch Logsに固定イベントキー`decision_snapshot_save_failed`
