@@ -16,7 +16,10 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.lambda_handlers import holdings_watchlist_handler as handler_module
+from jstock_advisor.services import holding_decision_service as holding_decision_service_module
+from jstock_advisor.services.audit_service import AuditService as RealAuditService
 from jstock_advisor.services.line_notification_service import NotificationOutcome
 
 _NOW = dt.datetime(2026, 7, 29, 7, 0, tzinfo=dt.UTC)
@@ -262,6 +265,74 @@ def test_task_holding_hold_category_and_portfolio_concentration_notified(
     assert concentration_recommendation.portfolio_acquisition_cost_weight_pct == pytest.approx(
         100.0
     )
+
+
+def test_task_holding_validation_mode_does_not_grow_production_audit_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """通知検証モード コードレビュー対応(Issue 2): 保有銘柄分析(task="holding")を
+    VALIDATIONで実行し、HoldingDecisionService.evaluate()が最後まで完了して
+    self._audit.record()を実際に経由しても、本番AuditLogRepositoryへは一切
+    保存されないことを、実物のAuditService/AuditLogRepositoryを使って(保存先の
+    みtmp_pathへ差し替えて)検証する。
+    """
+    _patch_common(monkeypatch)
+    target = _holding("2914")
+    monkeypatch.setattr(handler_module.PortfolioService, "get_holding", lambda self, code: target)
+    monkeypatch.setattr(
+        handler_module,
+        "build_stock_snapshot",
+        lambda *a, **kw: (_FakeSnapshot(current_price=Decimal("1200")), None),
+    )
+    monkeypatch.setattr(
+        handler_module.SellSignalService, "analyze", lambda self, *a, **kw: _NoSignalOutcome()
+    )
+    monkeypatch.setattr(
+        handler_module.ProfitTakingService, "analyze", lambda self, *a, **kw: _NoSignalOutcome()
+    )
+    monkeypatch.setattr(
+        handler_module.HoldingDecisionRuntimeConfigService,
+        "get_notification_enabled",
+        lambda self: True,
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "LineNotificationService",
+        lambda **kwargs: type(
+            "_Svc",
+            (),
+            {
+                "notify_data_error": lambda self, *a, **kw: False,
+                "notify_recommendation": lambda self, rec, now: True,
+                "notify_recommendation_with_status": lambda self, rec, now: NotificationOutcome(
+                    status=NotificationStatus.SENT, sent=True
+                ),
+            },
+        )(),
+    )
+
+    audit_repo = AuditLogRepository(store_dir=tmp_path)
+    monkeypatch.setattr(
+        holding_decision_service_module,
+        "AuditService",
+        lambda *a, **kw: RealAuditService(
+            repository=audit_repo, execution_context=kw.get("execution_context")
+        ),
+    )
+
+    result = handler_module.handler(
+        {
+            "task": "holding",
+            "stock_code": "2914",
+            "portfolio_total_market_value": None,
+            "portfolio_total_acquisition_cost": "100000",
+            "execution_mode": "VALIDATION",
+        },
+        _FakeContext(),
+    )
+
+    assert result["evaluation_status"] == "COMPLETED"
+    assert audit_repo.list_all() == []
 
 
 class _RaisingThenOkMarketData:

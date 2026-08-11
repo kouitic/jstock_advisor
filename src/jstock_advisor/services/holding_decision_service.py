@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.enums import (
     PeriodType,
     TriggerStatus,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import (
     BaselineValueSnapshot,
@@ -59,6 +60,8 @@ from jstock_advisor.services.holding_decision_runtime_config_service import (
 from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
 _HARD_GATE_RULE_NAMES = (
     "balance_sheet_insolvency",
@@ -126,17 +129,28 @@ class HoldingDecisionService:
         investment_thesis_service: InvestmentThesisService | None = None,
         runtime_config_service: HoldingDecisionRuntimeConfigService | None = None,
         audit_service: AuditService | None = None,
+        execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     ) -> None:
+        """通知検証モード機能(2026-08)コードレビュー対応: `investment_thesis_service`/
+        `audit_service`を呼び出し元が明示的に注入しない場合、ここで生成する
+        デフォルトインスタンスへ`execution_context`を伝播する。呼び出し元が
+        独自インスタンスを注入する場合は、その生成時に自分で`execution_context`を
+        渡す責任を持つ(holdings_watchlist_handler.pyは注入せずこのデフォルト経路を
+        使うことで、伝播漏れが構造的に発生しないようにしている)。
+        """
         self._providers = providers
         self._config = config
-        self._thesis_service = investment_thesis_service or InvestmentThesisService()
+        self._execution_context = execution_context
+        self._thesis_service = investment_thesis_service or InvestmentThesisService(
+            execution_context=execution_context
+        )
         self._runtime_config_service = (
             runtime_config_service
             or HoldingDecisionRuntimeConfigService(
                 cache_ttl_seconds=config.holding_decision.runtime_config_cache_ttl_seconds
             )
         )
-        self._audit = audit_service or AuditService()
+        self._audit = audit_service or AuditService(execution_context=execution_context)
 
     def evaluate(
         self,

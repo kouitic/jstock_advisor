@@ -32,6 +32,7 @@ from jstock_advisor.domain.entities.enums import (
     StockType,
     TrendClassification,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.financial_decomposition import (
@@ -251,6 +252,9 @@ def _build_not_yet_action_reasons(
     return reasons
 
 
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
+
+
 class ProfitTakingService:
     def __init__(
         self,
@@ -259,10 +263,11 @@ class ProfitTakingService:
         audit_service: AuditService | None = None,
         rule_version_service: RuleVersionService | None = None,
         business_calendar: BusinessCalendar | None = None,
+        execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     ) -> None:
         self._providers = providers
         self._config = config
-        self._audit = audit_service or AuditService()
+        self._audit = audit_service or AuditService(execution_context=execution_context)
         self._rule_version_service = rule_version_service or RuleVersionService()
         self._calendar = business_calendar or BusinessCalendar.from_config(config.holiday_calendar)
 

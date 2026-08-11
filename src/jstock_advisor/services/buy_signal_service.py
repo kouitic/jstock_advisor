@@ -39,6 +39,7 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     StockType,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 from jstock_advisor.domain.scoring.score import compute_score
@@ -123,6 +124,7 @@ from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_
 
 # アクティブなRuleVersionが未登録の場合(初期運用時)のフォールバック値
 RULE_VERSION_PLACEHOLDER = "v1-mvp"
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
 _STRONG_SCORE_RATIO = 0.7
 _WEAK_SCORE_RATIO = 0.3
@@ -149,11 +151,12 @@ class BuySignalService:
         business_calendar: BusinessCalendar,
         audit_service: AuditService | None = None,
         rule_version_service: RuleVersionService | None = None,
+        execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     ) -> None:
         self._providers = providers
         self._config = config
         self._calendar = business_calendar
-        self._audit = audit_service or AuditService()
+        self._audit = audit_service or AuditService(execution_context=execution_context)
         self._rule_version_service = rule_version_service or RuleVersionService()
 
     def _active_rule_version(self) -> str:

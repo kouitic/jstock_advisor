@@ -1472,7 +1472,11 @@ class LineNotificationService:
         self._recommendation_repo = recommendation_repository
         self._config = config
         self._execution_context = execution_context
-        self._audit = audit_service or AuditService()
+        # 通知検証モード コードレビュー対応(2026-08): audit_serviceを呼び出し元が
+        # 明示注入しない場合、自分のexecution_contextを伝播したデフォルトを生成する
+        # (呼び出し元がaudit_service注入を忘れてもVALIDATIONが本番AuditLogへ
+        # 漏れないようにする)。
+        self._audit = audit_service or AuditService(execution_context=execution_context)
 
     def notify_recommendation(self, recommendation: Recommendation, now: dt.datetime) -> bool:
         """再通知条件を満たす場合のみLINEへ送信する。送信した場合Trueを返す。

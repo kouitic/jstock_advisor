@@ -12,9 +12,16 @@ from decimal import Decimal
 from pathlib import Path
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.entities.enums import AccountType, ExecutionPlanReason
+from jstock_advisor.domain.entities.enums import AccountType, ExecutionMode, ExecutionPlanReason
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
+from jstock_advisor.infrastructure.local_repository.investment_thesis_baseline_repository import (
+    InvestmentThesisBaselineRepository,
+)
+from jstock_advisor.infrastructure.local_repository.investment_thesis_repository import (
+    InvestmentThesisRepository,
+)
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.holding_decision_runtime_config_service import (
     HoldingDecisionRuntimeConfigService,
@@ -22,6 +29,7 @@ from jstock_advisor.services.holding_decision_runtime_config_service import (
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
 from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
+from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
 _CFG = load_config()
 _NOW = dt.datetime.now(dt.UTC)
@@ -111,3 +119,52 @@ def test_reason_impacts_have_structured_fields(store_dir: Path):
         assert reason.reason_code
         assert reason.category
         assert isinstance(reason.score_impact, float)
+
+
+def test_validation_mode_still_produces_same_result_without_persisting(
+    store_dir: Path, tmp_path: Path
+):
+    """通知検証モード コードレビュー対応: baseline未存在・InvestmentThesis未存在の
+    保有銘柄をVALIDATIONで評価しても、NORMALと同一ロジックでHoldingDecisionResultを
+    生成できる(=検証banner付きLINE通知本文も同じ内容で組み立てられる)一方、
+    本番InvestmentThesisBaseline/InvestmentThesis/AuditLogのいずれへも一切
+    保存されないことを検証する。
+    """
+    # mockプロバイダは呼び出しごとに一部の値をランダム生成するため、NORMAL/VALIDATION
+    # 両方に同一のsnapshotを渡すことで「モードの違いだけ」を検証対象にする。
+    snapshot, error = build_stock_snapshot(_PROVIDERS, "2914", _NOW, _CFG)
+    assert error is None and snapshot is not None
+
+    normal_outcome = _service(store_dir).evaluate(
+        _holding(), _NOW, ExecutionPlanReason.NORMAL_ACTIVE, snapshot=snapshot
+    )
+    assert normal_outcome.result is not None
+
+    validation_store_dir = tmp_path / "validation_store"
+    validation_context = ExecutionContext(mode=ExecutionMode.VALIDATION)
+    validation_service = HoldingDecisionService(
+        _PROVIDERS,
+        _CFG,
+        investment_thesis_service=InvestmentThesisService(
+            store_dir=validation_store_dir, execution_context=validation_context
+        ),
+        runtime_config_service=HoldingDecisionRuntimeConfigService(store_dir=validation_store_dir),
+        audit_service=AuditService(
+            AuditLogRepository(validation_store_dir), execution_context=validation_context
+        ),
+        execution_context=validation_context,
+    )
+    validation_outcome = validation_service.evaluate(
+        _holding(), _NOW, ExecutionPlanReason.NORMAL_ACTIVE, snapshot=snapshot
+    )
+
+    assert validation_outcome.result is not None
+    # 本番と全く同じ判定ロジックで同一の結果が生成できる
+    assert validation_outcome.result.final_score == normal_outcome.result.final_score
+    assert validation_outcome.result.should_notify == normal_outcome.result.should_notify
+    assert validation_outcome.result.category == normal_outcome.result.category
+
+    # 本番baseline/thesis/AuditLogのいずれへも保存されない
+    assert InvestmentThesisBaselineRepository(validation_store_dir).list_by_holding("2914") == []
+    assert InvestmentThesisRepository(validation_store_dir).get_by_holding("2914") is None
+    assert AuditLogRepository(validation_store_dir).list_all() == []

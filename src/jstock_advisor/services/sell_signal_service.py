@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     TriggerStatus,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
@@ -247,6 +248,9 @@ def _build_holding_risks(evidence_details: list[SellRuleEvaluation]) -> list[str
     ]
 
 
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
+
+
 class SellSignalService:
     def __init__(
         self,
@@ -255,10 +259,11 @@ class SellSignalService:
         audit_service: AuditService | None = None,
         rule_version_service: RuleVersionService | None = None,
         business_calendar: BusinessCalendar | None = None,
+        execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     ) -> None:
         self._providers = providers
         self._config = config
-        self._audit = audit_service or AuditService()
+        self._audit = audit_service or AuditService(execution_context=execution_context)
         self._rule_version_service = rule_version_service or RuleVersionService()
         self._calendar = business_calendar or BusinessCalendar.from_config(config.holiday_calendar)
 

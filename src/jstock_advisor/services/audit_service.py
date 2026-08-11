@@ -9,17 +9,32 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 from typing import Any
 
 from jstock_advisor.domain.entities.audit import AuditLogEntry
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
+
+logger = logging.getLogger(__name__)
+
+# 通知検証モード機能(2026-08)コードレビュー対応: 呼び出し元(HoldingDecisionService等)
+# ごとにif not validationガードを散在させず、AuditServiceのrecord()/record_if_absent()と
+# いう2つの永続化choke pointだけをexecution_context対応させることで、監査ログ書き込み
+# 漏れが構造的に発生しにくい設計にする(LineNotificationServiceと同じ流儀)。
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
 
 class AuditService:
-    def __init__(self, repository: AuditLogRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: AuditLogRepository | None = None,
+        execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+    ) -> None:
         self._repository = repository or AuditLogRepository()
+        self._execution_context = execution_context
 
     def record(
         self,
@@ -65,6 +80,15 @@ class AuditService:
             notification_values=notification_values,
             source_metadata=source_metadata,
         )
+        if self._execution_context.is_validation:
+            logger.info(
+                "VALIDATION MODE audit suppressed (not persisted) decision_type=%s stock_code=%s "
+                "audit_id=%s",
+                decision_type,
+                stock_code,
+                entry.audit_id,
+            )
+            return entry
         self._repository.save(entry)
         return entry
 
@@ -120,6 +144,15 @@ class AuditService:
             notification_values=notification_values,
             source_metadata=source_metadata,
         )
+        if self._execution_context.is_validation:
+            logger.info(
+                "VALIDATION MODE audit suppressed (not persisted) decision_type=%s stock_code=%s "
+                "audit_id=%s",
+                decision_type,
+                stock_code,
+                audit_id,
+            )
+            return entry
         if not self._repository.save_if_absent(entry):
             return None
         return entry

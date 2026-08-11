@@ -220,7 +220,11 @@ def _holding_data_consistency(
     return False, is_odd_lot
 
 
-def _build_unified_targets(config: AppConfig, now: dt.datetime) -> list[BuyEvaluationTarget]:
+def _build_unified_targets(
+    config: AppConfig,
+    now: dt.datetime,
+    execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+) -> list[BuyEvaluationTarget]:
     """気になる銘柄と保有銘柄を銘柄コード単位で統合する(要求仕様§2)。
 
     事前ガード(要求仕様§8): 保有銘柄数がMAX_SECTOR_ENTRIESを超える場合、
@@ -242,7 +246,7 @@ def _build_unified_targets(config: AppConfig, now: dt.datetime) -> list[BuyEvalu
                 len(holdings),
                 MAX_SECTOR_ENTRIES,
             )
-            AuditService().record(
+            AuditService(execution_context=execution_context).record(
                 decision_type="unified_buy_candidate_batch_aborted",
                 stock_code=None,
                 input_values={"holding_count": len(holdings)},
@@ -345,8 +349,13 @@ def _process_single_candidate(
     notification_service: LineNotificationService,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> dict[str, Any]:
-    service = BuySignalService(providers=providers, config=config, business_calendar=calendar)
-    audit_service = AuditService()
+    service = BuySignalService(
+        providers=providers,
+        config=config,
+        business_calendar=calendar,
+        execution_context=execution_context,
+    )
+    audit_service = AuditService(execution_context=execution_context)
     rule_version = RuleVersionService().get_active_version_or(RULE_VERSION_PLACEHOLDER)
     category = "failed"
     ranking_entry: str | None = None
@@ -459,7 +468,10 @@ def _process_single_candidate(
                     holding = PortfolioService().get_holding(stock_code)
                     if holding is not None:
                         sell_service = SellSignalService(
-                            providers=providers, config=config, business_calendar=calendar
+                            providers=providers,
+                            config=config,
+                            business_calendar=calendar,
+                            execution_context=execution_context,
                         )
                         sell_outcome = sell_service.analyze(holding, now, snapshot=snapshot)
                         if sell_outcome.recommendation is not None:
@@ -468,7 +480,10 @@ def _process_single_candidate(
                             )
                         if conflicting_holding_action is None:
                             profit_service = ProfitTakingService(
-                                providers=providers, config=config, business_calendar=calendar
+                                providers=providers,
+                                config=config,
+                                business_calendar=calendar,
+                                execution_context=execution_context,
                             )
                             profit_outcome = profit_service.analyze(holding, now, snapshot=snapshot)
                             if profit_outcome.recommendation is not None:
@@ -706,7 +721,7 @@ def _finalize_batch(
     6位以下だけをOUTSIDE_TOP_5として扱う(統合BUY候補パイプライン2026-07)。
     """
     max_notifications = config.notification.buy_candidate_max_notifications_per_run
-    audit_service = AuditService()
+    audit_service = AuditService(execution_context=execution_context)
     rule_version = RuleVersionService().get_active_version_or(RULE_VERSION_PLACEHOLDER)
 
     buy_entries: list[tuple[tuple[float, ...], str, str]] = [
@@ -979,7 +994,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         config.notification.operations.shareholder_benefit_registry_min_expected_entries
     )
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
-    targets = _build_unified_targets(config, now)
+    targets = _build_unified_targets(config, now, execution_context)
     holding_count = sum(
         1 for t in targets if t.source in (CandidateSource.HOLDING, CandidateSource.BOTH)
     )
