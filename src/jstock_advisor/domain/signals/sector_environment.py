@@ -7,6 +7,13 @@ topix_bars(build_stock_snapshot()で既に取得済み、新規Provider I/Oな�
 をsector_barsへ適用)に加え、relative_strength(セクターの対TOPIX相対強度、
 compute_relative_strength_pct(sector_bars, topix_bars, window)を新規引数で
 呼び出す — 個別株の対TOPIX/対セクター相対強度とは別物)を主要成分とする。
+
+コードレビュー対応(2026-08、Phase D初版からの修正): sector_etf_symbolが
+Noneの場合(その業種自体が評価対象外)のみNOT_APPLICABLEとし、mapping済み
+だがデータ取得できない場合はNOT_EVALUATEDとして明確に区別する。bar
+staleness判定・min_bars_return_60dの扱いはmarket_environment.pyと同じ
+(BusinessCalendarによる営業日判定、60d return/relative_strength_60dは
+config.min_bars_return_60d未満でNone扱い)。
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 
 from jstock_advisor.config.models import SectorEnvironmentConfig
+from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EnvironmentCategory,
@@ -64,12 +72,23 @@ def evaluate_sector_environment(
     as_of_date: dt.date,
     now: dt.datetime,
     config: SectorEnvironmentConfig,
+    calendar: BusinessCalendar,
 ) -> SectorEnvironmentResult:
-    if sector_etf_symbol is None or not sector_bars:
+    # コードレビュー対応: 「その業種自体が評価対象外」(NOT_APPLICABLE)と
+    # 「評価対象ではあるがデータ取得できない」(NOT_EVALUATED)を区別する。
+    if sector_etf_symbol is None:
         return SectorEnvironmentResult(
             state=SectorEnvironmentEvaluationState.NOT_APPLICABLE,
-            sector_etf_symbol=sector_etf_symbol,
+            sector_etf_symbol=None,
             reason_codes=(REASON_SECTOR_ETF_NOT_MAPPED,),
+            evaluated_at=now,
+            model_version=config.model_version,
+        )
+    if not sector_bars:
+        return SectorEnvironmentResult(
+            state=SectorEnvironmentEvaluationState.NOT_EVALUATED,
+            sector_etf_symbol=sector_etf_symbol,
+            reason_codes=(REASON_SECTOR_DATA_UNAVAILABLE,),
             evaluated_at=now,
             model_version=config.model_version,
         )
@@ -77,7 +96,9 @@ def evaluate_sector_environment(
     effective_sector_bars, sector_bars_filtered = filter_future_bars(sector_bars, as_of_date)
     effective_topix_bars, _ = filter_future_bars(topix_bars, as_of_date)
     latest_bar_date = effective_sector_bars[-1].date if effective_sector_bars else None
-    bars_stale = is_bars_stale(latest_bar_date, as_of_date, config.max_bar_staleness_business_days)
+    bars_stale = is_bars_stale(
+        latest_bar_date, as_of_date, config.max_bar_staleness_business_days, calendar
+    )
 
     reason_codes: list[str] = []
     if bars_stale:
@@ -105,8 +126,14 @@ def evaluate_sector_environment(
         reason_codes.append(REASON_TREND_STRUCTURE_UNAVAILABLE)
 
     # --- B. medium_term_return_component ---
+    # コードレビュー対応: 60d returnはconfig.min_bars_return_60dを満たさない
+    # 場合Noneとして扱う(20dは必要本数があれば単独で利用可能)。
     return_20d = compute_n_day_return_pct(effective_sector_bars, 20)
-    return_60d = compute_n_day_return_pct(effective_sector_bars, 60)
+    return_60d = (
+        compute_n_day_return_pct(effective_sector_bars, 60)
+        if len(effective_sector_bars) >= config.min_bars_return_60d
+        else None
+    )
     available_returns = [r for r in (return_20d, return_60d) if r is not None]
     medium_term_return_component: float | None = None
     if available_returns:
@@ -118,11 +145,16 @@ def evaluate_sector_environment(
         reason_codes.append(REASON_RETURN_UNAVAILABLE)
 
     # --- C. relative_strength_component(セクター vs TOPIX) ---
+    # コードレビュー対応: relative_strength_60dもsector/TOPIX双方が
+    # config.min_bars_return_60dを満たす場合のみ算出する。
     relative_strength_20d = compute_relative_strength_pct(
         effective_sector_bars, effective_topix_bars, 20
     )
-    relative_strength_60d = compute_relative_strength_pct(
-        effective_sector_bars, effective_topix_bars, 60
+    relative_strength_60d = (
+        compute_relative_strength_pct(effective_sector_bars, effective_topix_bars, 60)
+        if len(effective_sector_bars) >= config.min_bars_return_60d
+        and len(effective_topix_bars) >= config.min_bars_return_60d
+        else None
     )
     available_relative_strength = [
         r for r in (relative_strength_20d, relative_strength_60d) if r is not None

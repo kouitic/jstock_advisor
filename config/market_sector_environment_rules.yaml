@@ -6,7 +6,7 @@
 # Outcomeを確認したうえで将来調整する前提。
 
 market:
-  model_version: "market_environment_v1"
+  model_version: "market_environment_v2"
   # trend_structure/medium_term_return/drawdownの3成分weight(合計1.0)。
   component_weights:
     trend_structure: 0.4
@@ -27,10 +27,15 @@ market:
   # drawdown(直近高値からの下落率、%、0以下)がこの値のとき0点になる基準。
   drawdown_neutral_threshold_pct: -3.0
   drawdown_scale_pct: 15.0
+  # trend_structure_componentの評価にはeffective_barsがmin_bars_ma60本
+  # 以上必要(v2で実際の評価条件として有効化)。
   min_bars_ma60: 60
+  # 60d returnの算出にはeffective_barsがmin_bars_return_60d本以上必要
+  # (v2で実際の評価条件として有効化。20dはこの制約を受けない)。
   min_bars_return_60d: 61
   # TOPIX最新barが評価基準日よりこの営業日数より古い場合、confidenceを
-  # キャップする(NOT_EVALUATEDにはしない)。
+  # キャップする(NOT_EVALUATEDにはしない。v2でBusinessCalendarによる
+  # 実際の営業日カウントへ修正、それ以前は暦日差だった)。
   max_bar_staleness_business_days: 5
   min_coverage_required: 0.3
   coverage_high_threshold: 0.9
@@ -42,7 +47,7 @@ market:
     strong_headwind: -60.0
 
 sector:
-  model_version: "sector_environment_v1"
+  model_version: "sector_environment_v2"
   # trend_structure/medium_term_return/relative_strengthの3成分weight
   # (合計1.0)。relative_strengthを重視する(市場全体+セクター単純上昇の
   # 二重評価を避けるため)。
@@ -60,7 +65,11 @@ sector:
   return_score_scale_pct: 15.0
   # セクターの対TOPIX相対強度(pp)を±100へスケーリングする基準。
   relative_strength_scale_pct: 10.0
+  # 60d return/relative_strength_60dの算出にはsector(・TOPIX)双方の
+  # effective barsがmin_bars_return_60d本以上必要(v2で実際の評価条件
+  # として有効化。20dはこの制約を受けない)。
   min_bars_return_60d: 61
+  # v2でBusinessCalendarによる実際の営業日カウントへ修正(それ以前は暦日差)。
   max_bar_staleness_business_days: 5
   min_coverage_required: 0.3
   coverage_high_threshold: 0.9
@@ -72,7 +81,7 @@ sector:
     strong_headwind: -60.0
 
 environment:
-  model_version: "environment_v1"
+  model_version: "environment_v2"
   # Market/Sector両方評価済みの場合の加重平均weight(合計1.0)。
   composite_weights:
     market: 0.6
@@ -80,6 +89,12 @@ environment:
   # Sector評価不能時、confidenceの上限をこの値にキャップする(Sectorを
   # 0点として混ぜる代わりに、情報が薄いことをconfidenceで表現する)。
   sector_missing_confidence_cap: "MEDIUM"
+  # Environment自身のcoverage(Market/Sectorのcoverageから合成した値)が
+  # この値未満ならNOT_EVALUATEDとする。coverage_high/medium_thresholdは
+  # DecisionPerformanceのcoverage tier分析用(v2で追加)。
+  min_coverage_required: 0.3
+  coverage_high_threshold: 0.9
+  coverage_medium_threshold: 0.5
   category_thresholds:
     strong_tailwind: 60.0
     tailwind: 20.0

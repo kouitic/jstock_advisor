@@ -525,7 +525,7 @@ def build_stock_snapshot(
     # 保有判断スコア・旧売却判定・ProfitTaking判定・LINE通知・Entry/Exit
     # Price Rangeには一切影響しない。
     market_environment = evaluate_market_environment(
-        topix_bars, snap.as_of_date, now, config.market_sector_environment.market
+        topix_bars, snap.as_of_date, now, config.market_sector_environment.market, calendar
     )
     sector_environment = evaluate_sector_environment(
         sector_bars or None,
@@ -534,6 +534,7 @@ def build_stock_snapshot(
         snap.as_of_date,
         now,
         config.market_sector_environment.sector,
+        calendar,
     )
     environment = evaluate_environment(
         market_environment, sector_environment, now, config.market_sector_environment.environment

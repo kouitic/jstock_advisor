@@ -15,6 +15,12 @@ MACD成分・trend_qualityの重み付け式など、個別銘柄のエントリ
 
 Shadow計測専用。既存のBUY/SELL/HoldingDecision/ProfitTaking判定・LINE通知
 には一切影響しない。
+
+コードレビュー対応(2026-08、Phase D初版からの修正): bar staleness判定は
+暦日差ではなく既存BusinessCalendar(domain/business_calendar.py)による
+営業日差で行う(GW・年末年始等の連休をまたぐ際の意味のずれを解消)。また、
+config.min_bars_ma60/min_bars_return_60dを、内部計算関数の暗黙の最低本数
+要件任せにせず、明示的な評価可否条件として使用する。
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import datetime as dt
 from typing import Any
 
 from jstock_advisor.config.models import EnvironmentCategoryThresholds, MarketEnvironmentConfig
+from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EnvironmentCategory,
@@ -85,15 +92,20 @@ def confidence_from_coverage(
 
 
 def is_bars_stale(
-    latest_bar_date: dt.date | None, as_of_date: dt.date, max_staleness_days: int
+    latest_bar_date: dt.date | None,
+    as_of_date: dt.date,
+    max_staleness_business_days: int,
+    calendar: BusinessCalendar,
 ) -> bool:
-    """最新barの日付が評価基準日よりmax_staleness_days(暦日。domain/signals
-    層はBusinessCalendarに依存しない既存方針(momentum.py等)を踏襲し、営業日
-    の近似として暦日差で判定する)より古いか。バーが無ければ判定不能なので
-    False(NOT_EVALUATED側の判定は別途coverageで行う)。"""
+    """最新barの日付が評価基準日よりmax_staleness_business_days(営業日、
+    BusinessCalendarによる実際の営業日カウント)より古いか。バーが無ければ
+    判定不能なのでFalse(NOT_EVALUATED側の判定は別途coverageで行う)。
+    金曜最新bar・月曜評価は通常1営業日として扱われ、連休・年末年始をまたいでも
+    実際に開いていた営業日の本数のみでカウントする。"""
     if latest_bar_date is None:
         return False
-    return (as_of_date - latest_bar_date).days > max_staleness_days
+    business_days_stale = calendar.business_days_between(latest_bar_date, as_of_date)
+    return business_days_stale > max_staleness_business_days
 
 
 def evaluate_market_environment(
@@ -101,10 +113,13 @@ def evaluate_market_environment(
     as_of_date: dt.date,
     now: dt.datetime,
     config: MarketEnvironmentConfig,
+    calendar: BusinessCalendar,
 ) -> MarketEnvironmentResult:
     effective_bars, future_bars_filtered = filter_future_bars(bars, as_of_date)
     latest_bar_date = effective_bars[-1].date if effective_bars else None
-    bars_stale = is_bars_stale(latest_bar_date, as_of_date, config.max_bar_staleness_business_days)
+    bars_stale = is_bars_stale(
+        latest_bar_date, as_of_date, config.max_bar_staleness_business_days, calendar
+    )
 
     reason_codes: list[str] = []
     if bars_stale:
@@ -115,10 +130,18 @@ def evaluate_market_environment(
     market_current_price = effective_bars[-1].close if effective_bars else None
 
     # --- A. trend_structure_component ---
+    # コードレビュー対応: ma20/ma60/slopeの個別計算結果がたまたま得られても、
+    # config.min_bars_ma60(最低本数条件)を満たさない場合は評価しない
+    # (config_values_usedに保存した値と実際の評価条件を一致させるため)。
     ma20 = compute_moving_average(effective_bars, 20)
     ma60 = compute_moving_average(effective_bars, 60)
     ma20_slope_pct = compute_ma_slope_pct(effective_bars, 20, config.ma_slope_lookback_days)
-    trend_evaluable = ma20 is not None and ma60 is not None and ma20_slope_pct is not None
+    trend_evaluable = (
+        ma20 is not None
+        and ma60 is not None
+        and ma20_slope_pct is not None
+        and len(effective_bars) >= config.min_bars_ma60
+    )
     trend_classification: TrendClassification | None = None
     trend_structure_component: float | None = None
     if trend_evaluable:
@@ -132,8 +155,15 @@ def evaluate_market_environment(
         reason_codes.append(REASON_TREND_STRUCTURE_UNAVAILABLE)
 
     # --- B. medium_term_return_component ---
+    # コードレビュー対応: 60d returnはconfig.min_bars_return_60dを満たさない
+    # 場合Noneとして扱う(20dは必要本数があれば単独で利用可能。60dだけ不足
+    # している場合は20dのみでmedium_term_return_componentを算出する)。
     return_20d = compute_n_day_return_pct(effective_bars, 20)
-    return_60d = compute_n_day_return_pct(effective_bars, 60)
+    return_60d = (
+        compute_n_day_return_pct(effective_bars, 60)
+        if len(effective_bars) >= config.min_bars_return_60d
+        else None
+    )
     available_returns = [r for r in (return_20d, return_60d) if r is not None]
     medium_term_return_component: float | None = None
     if available_returns:

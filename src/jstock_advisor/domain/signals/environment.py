@@ -5,6 +5,15 @@ Marketを必須バックボーンとし、Sectorが評価可能なら加重平�
 (NOT_EVALUATED/NOT_APPLICABLE)ならMarketのみで評価を継続する(Sectorを
 0点として混ぜない)。Sector欠損時はconfidenceの上限をsector_missing_
 confidence_capへキャップする。
+
+コードレビュー対応(2026-08、Phase D初版からの修正): Environment自身の
+coverage(Market/Sectorのcoverageから合成した値)がconfig.min_coverage_
+required未満の場合はEnvironment自体をNOT_EVALUATEDとする(historical_
+valuation等の既存4スコアと同じ「coverage不足ならNOT_EVALUATED」原則に
+揃える)。またfinal confidenceは、(a)Market/Sector由来のconfidence
+(Sector欠損時はsector_missing_confidence_capを適用済み)、(b)Environment
+自身のcoverageから導出したconfidence、の弱い方とする(weaker_confidence
+は「弱い方を採用する」演算のため適用順序に依らず結果は同じ)。
 """
 
 from __future__ import annotations
@@ -22,10 +31,14 @@ from jstock_advisor.domain.signals._environment_shared import (
     clamp_score,
     weaker_confidence,
 )
-from jstock_advisor.domain.signals.market_environment import category_from_score
+from jstock_advisor.domain.signals.market_environment import (
+    category_from_score,
+    confidence_from_coverage,
+)
 
 REASON_MARKET_UNAVAILABLE_FOR_COMPOSITE = "MARKET_UNAVAILABLE_FOR_COMPOSITE"
 REASON_SECTOR_UNAVAILABLE_FOR_COMPOSITE = "SECTOR_UNAVAILABLE_FOR_COMPOSITE"
+REASON_COVERAGE_BELOW_MINIMUM = "COVERAGE_BELOW_MINIMUM"
 
 
 def evaluate_environment(
@@ -50,18 +63,32 @@ def evaluate_environment(
         market_weight = config.composite_weights.market
         sector_weight = config.composite_weights.sector
         score = clamp_score(market.score * market_weight + sector.score * sector_weight)
-        confidence = weaker_confidence(market.confidence, sector.confidence)
+        base_confidence = weaker_confidence(market.confidence, sector.confidence)
         coverage = market.coverage * market_weight + sector.coverage * sector_weight
     else:
         reason_codes.append(REASON_SECTOR_UNAVAILABLE_FOR_COMPOSITE)
         market_weight = 1.0
         sector_weight = None
         score = market.score
-        confidence = cap_confidence(
+        base_confidence = cap_confidence(
             market.confidence, ConfidenceLevel(config.sector_missing_confidence_cap)
         )
         coverage = market.coverage
 
+    if coverage < config.min_coverage_required:
+        reason_codes.append(REASON_COVERAGE_BELOW_MINIMUM)
+        return EnvironmentResult(
+            state=EnvironmentEvaluationState.NOT_EVALUATED,
+            coverage=coverage,
+            reason_codes=tuple(reason_codes),
+            evaluated_at=now,
+            model_version=config.model_version,
+        )
+
+    coverage_confidence = confidence_from_coverage(
+        coverage, config.coverage_high_threshold, config.coverage_medium_threshold
+    )
+    confidence = weaker_confidence(base_confidence, coverage_confidence)
     category = category_from_score(score, config.category_thresholds)
 
     return EnvironmentResult(
@@ -109,5 +136,8 @@ def environment_config_values(config: EnvironmentCompositeConfig) -> dict[str, o
         "model_version": config.model_version,
         "composite_weights": config.composite_weights.model_dump(),
         "sector_missing_confidence_cap": config.sector_missing_confidence_cap,
+        "min_coverage_required": config.min_coverage_required,
+        "coverage_high_threshold": config.coverage_high_threshold,
+        "coverage_medium_threshold": config.coverage_medium_threshold,
         "category_thresholds": config.category_thresholds.model_dump(),
     }

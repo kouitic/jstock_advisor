@@ -64,12 +64,18 @@ from jstock_advisor.domain.entities.enums import (
 # 再設計、コードレビュー対応)、Phase C(earnings_surprise_score/
 # earnings_trend_score実装・v2/v3への再設計、コードレビュー対応)、判定精度向上
 # 機能次フェーズSTEP2(Entry/Exit Price Range Shadow実装)、Phase D(Market/
-# Sector Environment Shadow実装)に伴い値を上げた。このバージョン名は累積
+# Sector Environment Shadow実装)、Phase Dコードレビュー対応(Sector NOT_
+# APPLICABLE/NOT_EVALUATED分離・bar staleness判定の営業日化・min_bars_*の
+# 実評価条件化・Environment Composite coverage閾値追加により、既存4スコアと
+# 同様「スコアリング方式の再設計時は値を上げる」既存運用ルールに従って
+# 値を上げた。過去記録のconfig_values_used/model_versionと当時の実際の
+# 判定ロジックの対応関係を維持するための措置であり、DecisionSnapshotの
+# フィールド構成自体は変わっていない)に伴い値を上げた。このバージョン名は累積
 # スキーマを表す(Phase A〜C・STEP2の全スコアフィールドは本バージョンでも
 # 保持したままであり、失われたわけではない。「Decision Enhancement Layer」
 # 全体としての通しバージョンのため、特定フェーズの名前を冠さない)。他の
 # スコア項目が実装され始めたらさらに値を上げる。
-DECISION_SNAPSHOT_MODEL_VERSION = "decision_enhancement_environment_v1"
+DECISION_SNAPSHOT_MODEL_VERSION = "decision_enhancement_environment_v2"
 
 
 class DecisionSnapshot(ImmutableSnapshot):

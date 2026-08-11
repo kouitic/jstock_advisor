@@ -2214,8 +2214,7 @@ class EnvironmentCategoryThresholds(StrictModel):
             raise ValueError("category_thresholdsは全て有限値である必要があります")
         if not (self.strong_headwind < self.headwind < 0 < self.tailwind < self.strong_tailwind):
             raise ValueError(
-                "strong_headwind < headwind < 0 < tailwind < strong_tailwind"
-                "である必要があります"
+                "strong_headwind < headwind < 0 < tailwind < strong_tailwindである必要があります"
             )
         return self
 
@@ -2365,8 +2364,7 @@ class SectorEnvironmentConfig(StrictModel):
         if not (math.isfinite(self.return_score_scale_pct) and self.return_score_scale_pct > 0):
             raise ValueError("return_score_scale_pctは正の有限値である必要があります")
         if not (
-            math.isfinite(self.relative_strength_scale_pct)
-            and self.relative_strength_scale_pct > 0
+            math.isfinite(self.relative_strength_scale_pct) and self.relative_strength_scale_pct > 0
         ):
             raise ValueError("relative_strength_scale_pctは正の有限値である必要があります")
         if self.ma_slope_lookback_days <= 0:
@@ -2383,11 +2381,19 @@ class EnvironmentCompositeConfig(StrictModel):
     必須バックボーンとし、Sectorが評価可能なら加重平均、評価不能ならMarket
     のみで評価を継続する(sector_missing_confidence_capでconfidence上限を
     キャップする)。
+
+    コードレビュー対応(2026-08): Environment自身のcoverage(Market/Sectorの
+    coverageから合成した値)が低い場合にNOT_EVALUATEDとする閾値、および
+    DecisionPerformanceのcoverage tier分析(historical_valuation等の既存
+    4スコアと同様の仕組み)を機能させるためのcoverage閾値を追加した。
     """
 
     model_version: str
     composite_weights: EnvironmentCompositeWeights
     sector_missing_confidence_cap: Literal["LOW", "MEDIUM", "HIGH"]
+    min_coverage_required: float
+    coverage_high_threshold: float
+    coverage_medium_threshold: float
     category_thresholds: EnvironmentCategoryThresholds
 
     @model_validator(mode="after")
@@ -2397,6 +2403,18 @@ class EnvironmentCompositeConfig(StrictModel):
             raise ValueError("composite_weightsは全て0以上の有限値である必要があります")
         if not math.isclose(sum(weights), 1.0, rel_tol=1e-9, abs_tol=1e-9):
             raise ValueError("composite_weightsの合計は1.0である必要があります")
+        if not (0 < self.min_coverage_required <= 1):
+            raise ValueError("min_coverage_requiredは0より大きく1以下である必要があります")
+        if not (
+            self.min_coverage_required
+            <= self.coverage_medium_threshold
+            < self.coverage_high_threshold
+            <= 1
+        ):
+            raise ValueError(
+                "min_coverage_required <= coverage_medium_threshold < "
+                "coverage_high_threshold <= 1である必要があります"
+            )
         return self
 
 
