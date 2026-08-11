@@ -21,11 +21,13 @@ from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     VALIDATION_FILE_NAME,
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers import buy_candidates_handler as handler_module
+from jstock_advisor.services.audit_service import AuditService as RealAuditService
 
 _NOW = dt.datetime(2026, 7, 29, 7, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -1900,3 +1902,80 @@ def test_finalize_batch_normal_mode_does_not_delete_recommendations(monkeypatch,
     handler_module._finalize_batch(progress, config, _NOW, repo, fake_service)
 
     assert repo.get("rec-1111") is not None
+
+
+def test_process_single_candidate_validation_mode_does_not_grow_production_audit_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """通知検証モード コードレビュー対応(Issue 2): _process_single_candidateの
+    unified_buy_candidate_evaluation監査(buy_candidates_handlerのevaluation audit)を
+    VALIDATIONで実行しても、実際のAuditService/AuditLogRepositoryを使って(保存先の
+    みtmp_pathへ差し替えて)本番AuditLogが一切増えないことを検証する。_patch_audit
+    (Noopダブル)ではなく実物のAuditServiceを使うことで、execution_context guardの
+    実効性そのものを確認する。
+    """
+    _patch_snapshot(monkeypatch)
+    monkeypatch.setattr(handler_module.WatchlistService, "get_item", lambda self, code: None)
+
+    class _FakeOutcome:
+        data_error = "テストエラー"
+        recommendation = None
+        buy_action = None
+        ranking_group = None
+
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
+    )
+    audit_repo = AuditLogRepository(store_dir=tmp_path)
+    monkeypatch.setattr(
+        handler_module,
+        "AuditService",
+        lambda *a, **kw: RealAuditService(
+            repository=audit_repo, execution_context=kw.get("execution_context")
+        ),
+    )
+    fake_service = _FakeNotificationServiceForRanking()
+    execution_context = ExecutionContext(mode=ExecutionMode.VALIDATION)
+    repo = RecommendationRepository.for_execution_context(execution_context, store_dir=tmp_path)
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, None, _NOW, object(), _CONFIG,
+        object(), repo, fake_service, execution_context,
+    )
+
+    assert audit_repo.list_all() == []
+
+
+def test_process_single_candidate_normal_mode_still_grows_audit_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """NORMAL回帰確認: 上記と同じ経路でもNORMALでは従来どおりAuditLogへ記録される。"""
+    _patch_snapshot(monkeypatch)
+    monkeypatch.setattr(handler_module.WatchlistService, "get_item", lambda self, code: None)
+
+    class _FakeOutcome:
+        data_error = "テストエラー"
+        recommendation = None
+        buy_action = None
+        ranking_group = None
+
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
+    )
+    audit_repo = AuditLogRepository(store_dir=tmp_path)
+    monkeypatch.setattr(
+        handler_module,
+        "AuditService",
+        lambda *a, **kw: RealAuditService(
+            repository=audit_repo, execution_context=kw.get("execution_context")
+        ),
+    )
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, None, _NOW, object(), _CONFIG,
+        object(), repo, fake_service,
+    )
+
+    assert len(audit_repo.list_all()) == 1

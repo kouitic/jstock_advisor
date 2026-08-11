@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from jstock_advisor.domain.entities.enums import (
     BaselineStatus,
     ThesisConditionAttestationStatus,
 )
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding_decision import (
     BaselineValueSnapshot,
     CustomThesisCondition,
@@ -38,7 +40,15 @@ from jstock_advisor.infrastructure.local_repository.investment_thesis_repository
     InvestmentThesisRepository,
 )
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_MAX_RETRIES = 3
+# 通知検証モード機能(2026-08)コードレビュー対応: VALIDATIONではbaseline/thesisの
+# 本番書き込み(baseline repository save・version採番・pointer作成/更新・
+# thesis repository save)を一切行わず、プロセス内限りのtransientオブジェクトを
+# 返す(LineNotificationService/AuditServiceと同じ、コンストラクタ注入+
+# choke point guardの流儀)。
+_DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
 
 class BaselineActivationExhaustedError(Exception):
@@ -66,11 +76,13 @@ class InvestmentThesisService:
         thesis_repository: InvestmentThesisRepository | None = None,
         default_max_retries: int = _DEFAULT_MAX_RETRIES,
         store_dir: Path | None = None,
+        execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     ) -> None:
         self._baseline_repo = baseline_repository or InvestmentThesisBaselineRepository(store_dir)
         self._thesis_repo = thesis_repository or InvestmentThesisRepository(store_dir)
         self._default_max_retries = default_max_retries
         self._store_dir = store_dir
+        self._execution_context = execution_context
 
     # --- Baseline ------------------------------------------------------------
 
@@ -104,9 +116,14 @@ class InvestmentThesisService:
         baseline本体の作成は1回のみ行い、ポインタ更新のみを競合時にリトライする
         (「同一操作を再試行する」という2節の方針。version自体は再採番しない)。
         """
-        retries = max_retries if max_retries is not None else self._default_max_retries
         current_time = now or dt.datetime.now(dt.UTC)
 
+        if self._execution_context.is_validation:
+            return self._build_transient_baseline(
+                holding_id, stock_code, origin, baseline_values, status, approved_by, current_time
+            )
+
+        retries = max_retries if max_retries is not None else self._default_max_retries
         version = allocate_next_baseline_version(holding_id, self._store_dir)
         baseline_id = f"{holding_id}:v{version}"
         existing_pointer = get_pointer(holding_id, self._store_dir)
@@ -158,6 +175,48 @@ class InvestmentThesisService:
             f"(最終エラー: {last_error})。最新状態を確認し、改めて実行してください。"
         ) from last_error
 
+    def _build_transient_baseline(
+        self,
+        holding_id: str,
+        stock_code: str,
+        origin: BaselineOrigin,
+        baseline_values: BaselineValueSnapshot,
+        status: BaselineStatus,
+        approved_by: str | None,
+        current_time: dt.datetime,
+    ) -> InvestmentThesisBaseline:
+        """VALIDATION専用: 本番のbaseline sequence/pointer/repositoryへ一切
+        書き込まず、本番の初回生成ルールと同等のbaselineをプロセス内でのみ生成する。
+
+        activate_baseline()はHoldingDecisionService.evaluate()からlookup.baseline
+        がNoneかつintegrity_error=False(=history自体が0件)の場合にのみ呼ばれる
+        (BaselineLookupResultのdocstring参照)ため、versionは常に1になる。
+        allocate_next_baseline_version()もholding_idごとの初回呼び出しでは1を
+        返すため、この値は本番の初回採番結果と一致する。
+        """
+        version = 1
+        baseline_id = f"{holding_id}:v{version}"
+        baseline = InvestmentThesisBaseline(
+            baseline_id=baseline_id,
+            holding_id=holding_id,
+            stock_code=stock_code,
+            version=version,
+            origin=origin,
+            status=status,
+            created_at=current_time,
+            approved_at=current_time if status == BaselineStatus.APPROVED else None,
+            approved_by=approved_by,
+            supersedes_baseline_id=None,
+            baseline_values=baseline_values,
+        )
+        logger.info(
+            "VALIDATION MODE baseline activation transient (not persisted) holding_id=%s "
+            "baseline_id=%s",
+            holding_id,
+            baseline_id,
+        )
+        return baseline
+
     # --- InvestmentThesis / CustomThesisCondition -----------------------------
 
     def get_thesis(self, holding_id: str) -> InvestmentThesis | None:
@@ -176,6 +235,12 @@ class InvestmentThesisService:
             conditions=[],
             updated_at=now or dt.datetime.now(dt.UTC),
         )
+        if self._execution_context.is_validation:
+            logger.info(
+                "VALIDATION MODE investment thesis transient (not persisted) holding_id=%s",
+                holding_id,
+            )
+            return thesis
         self._thesis_repo.save(thesis)
         return thesis
 

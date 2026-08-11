@@ -4,7 +4,8 @@ from pathlib import Path
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.common import DataSourceReference
-from jstock_advisor.domain.entities.enums import AccountType, BuyAction
+from jstock_advisor.domain.entities.enums import AccountType, BuyAction, ExecutionMode
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import (
     AuditLogRepository,
@@ -273,3 +274,71 @@ def test_sell_signal_service_records_audit(tmp_path: Path) -> None:
     assert len(entries) == 1
     assert entries[0].stock_code == "2914"
     assert "triggered_rules" in entries[0].output_values
+
+
+def test_validation_record_does_not_persist_to_repository(tmp_path: Path) -> None:
+    """通知検証モード コードレビュー対応: execution_context=VALIDATIONでは
+    record()が呼び出し元へ通常どおりAuditLogEntryを返しつつ、本番
+    AuditLogRepositoryへは一切保存しない(単一choke pointのguard)。
+    """
+    repo = AuditLogRepository(store_dir=tmp_path)
+    audit = AuditService(
+        repository=repo, execution_context=ExecutionContext(mode=ExecutionMode.VALIDATION)
+    )
+
+    entry = audit.record(
+        decision_type="buy_signal",
+        stock_code="8136",
+        input_values={},
+        calculation_formulas={},
+        output_values={"recommended": True},
+        data_sources=[],
+        rule_version="v1-mvp",
+        timestamp=_NOW,
+    )
+
+    assert entry.stock_code == "8136"
+    assert repo.list_all() == []
+    assert repo.get(entry.audit_id) is None
+
+
+def test_validation_record_if_absent_does_not_persist_to_repository(tmp_path: Path) -> None:
+    repo = AuditLogRepository(store_dir=tmp_path)
+    audit = AuditService(
+        repository=repo, execution_context=ExecutionContext(mode=ExecutionMode.VALIDATION)
+    )
+
+    entry = audit.record_if_absent(
+        audit_id="deterministic-1",
+        decision_type="watchlist_batch_audit",
+        stock_code=None,
+        input_values={},
+        calculation_formulas={},
+        output_values={},
+        data_sources=[],
+        rule_version="v1-mvp",
+        timestamp=_NOW,
+    )
+
+    assert entry is not None
+    assert repo.list_all() == []
+
+
+def test_normal_execution_context_explicit_still_persists(tmp_path: Path) -> None:
+    """NORMAL回帰確認: ExecutionContext.normal()を明示的に渡した場合も
+    従来どおり本番AuditLogRepositoryへ保存される。"""
+    repo = AuditLogRepository(store_dir=tmp_path)
+    audit = AuditService(repository=repo, execution_context=ExecutionContext.normal())
+
+    entry = audit.record(
+        decision_type="buy_signal",
+        stock_code="8136",
+        input_values={},
+        calculation_formulas={},
+        output_values={"recommended": True},
+        data_sources=[],
+        rule_version="v1-mvp",
+        timestamp=_NOW,
+    )
+
+    assert repo.get(entry.audit_id) is not None

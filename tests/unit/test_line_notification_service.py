@@ -25,6 +25,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -32,6 +33,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services import line_notification_service as line_notification_service_module
+from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     compute_watchlist_addition_content_hash,
@@ -2159,3 +2161,65 @@ def test_validation_mode_preserves_manual_review_diversion(
     assert len(client.sent) == 1
     assert "【要手動確認】" in client.sent[0]
     assert client.sent[0].startswith("【🧪 検証モードで送信】")
+
+
+def test_validation_manual_review_does_not_grow_production_audit_log(tmp_path: Path) -> None:
+    """通知検証モード コードレビュー対応(Issue 2): データ品質チェックで人的確認が
+    必要と判定されnotify_manual_review_requiredへ分岐した場合でも、_check_data_quality
+    内のself._audit.record()(実物のAuditService/AuditLogRepository、保存先のみ
+    tmp_pathへ差し替え)がVALIDATIONでは本番AuditLogへ一切保存しないことを、
+    _check_data_qualityをモックせず実ロジックを経由させて検証する。
+    """
+    store_dir = tmp_path / "local_store"
+    audit_repo = AuditLogRepository(store_dir=store_dir)
+    recommendation_repo = RecommendationRepository(store_dir=store_dir)
+    notification_log_repo = NotificationLogRepository(store_dir=store_dir)
+    client = _FakeLineClient()
+    validation_context = ExecutionContext(mode=ExecutionMode.VALIDATION)
+    service = LineNotificationService(
+        line_client=client,
+        notification_log_repository=notification_log_repo,
+        recommendation_repository=recommendation_repo,
+        config=_CONFIG,
+        audit_service=AuditService(audit_repo, execution_context=validation_context),
+        execution_context=validation_context,
+    )
+    # 独立根拠グループが1件のみのSELLは自動確定させず手動確認へ回る
+    # (_check_data_qualityの実ロジックがrequires_manual_review=Trueを返す)。
+    rec = _make_sell_recommendation(
+        recommendation_id="rec-1", reasons=["減配(major)"], independent_evidence_group_count=1
+    )
+    recommendation_repo.save(rec)
+
+    sent = service.notify_recommendation(rec, _NOW)
+
+    assert sent is True
+    message = client.sent[0]
+    assert "【要手動確認】4631 ＤＩＣ" in message
+    assert message.startswith("【🧪 検証モードで送信】")
+    assert audit_repo.list_all() == []
+
+
+def test_normal_manual_review_still_grows_audit_log(tmp_path: Path) -> None:
+    """NORMAL回帰確認: 同じ経路でもNORMALでは従来どおり監査ログが記録される。"""
+    store_dir = tmp_path / "local_store"
+    audit_repo = AuditLogRepository(store_dir=store_dir)
+    recommendation_repo = RecommendationRepository(store_dir=store_dir)
+    notification_log_repo = NotificationLogRepository(store_dir=store_dir)
+    client = _FakeLineClient()
+    service = LineNotificationService(
+        line_client=client,
+        notification_log_repository=notification_log_repo,
+        recommendation_repository=recommendation_repo,
+        config=_CONFIG,
+        audit_service=AuditService(audit_repo),
+    )
+    rec = _make_sell_recommendation(
+        recommendation_id="rec-1", reasons=["減配(major)"], independent_evidence_group_count=1
+    )
+    recommendation_repo.save(rec)
+
+    service.notify_recommendation(rec, _NOW)
+
+    assert len(audit_repo.list_all()) == 1
+    assert "【要手動確認】" in client.sent[0]

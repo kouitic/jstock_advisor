@@ -89,7 +89,6 @@ from jstock_advisor.services.holding_decision_runtime_config_service import (
     HoldingDecisionRuntimeConfigService,
 )
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
-from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     NotificationOutcome,
@@ -680,13 +679,17 @@ def _process_single_holding(
         )
         return {"stock_code": stock_code, "recommended": False, "notified": False, "found": False}
 
-    profit_service = ProfitTakingService(providers=providers, config=config)
-    sell_service = SellSignalService(providers=providers, config=config)
+    profit_service = ProfitTakingService(
+        providers=providers, config=config, execution_context=execution_context
+    )
+    sell_service = SellSignalService(
+        providers=providers, config=config, execution_context=execution_context
+    )
     holding_decision_service = HoldingDecisionService(
         providers,
         config,
-        investment_thesis_service=InvestmentThesisService(),
         runtime_config_service=runtime_config_service,
+        execution_context=execution_context,
     )
     holding_decision_result_repo = HoldingDecisionResultRepository()
     try:
