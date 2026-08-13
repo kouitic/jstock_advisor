@@ -35,6 +35,22 @@ def _split_event(stock_code: str, effective_date: dt.date, ratio: str) -> Corpor
     )
 
 
+def _event(
+    stock_code: str,
+    event_type: CorporateActionType,
+    effective_date: dt.date,
+    ratio: str | None,
+) -> CorporateActionEvent:
+    return CorporateActionEvent(
+        stock_code=stock_code,
+        event_type=event_type,
+        announced_date=effective_date,
+        effective_date=effective_date,
+        ratio=Decimal(ratio) if ratio is not None else None,
+        source=_SOURCE,
+    )
+
+
 def test_cumulative_split_factor_is_one_when_no_split_in_range() -> None:
     service = CorporateActionService(_FakeCorporateActionProvider([]), now=_NOW)
     factor = service.cumulative_split_factor("5401", dt.date(2026, 1, 1), dt.date(2026, 7, 27))
@@ -211,3 +227,62 @@ def test_adjust_total_metric_never_adjusted_by_splits() -> None:
     )
     assert result.adjustment_factor == Decimal("1")
     assert result.adjusted_value == result.raw_value
+
+
+# ===== コードレビュー修正1: 1株当たり指標の調整対象イベント判定の一元化 =====
+# クロスバリデーション側が独自にratio有無だけで「配当基準を変更するイベント」を
+# 分類していたため、cumulative_split_factor()が対象とする種別(SPLIT/
+# REVERSE_SPLIT/FREE_ALLOTMENT)と定義がズレる可能性があった。判定をここへ
+# 一元化するpublic APIを追加する。
+
+
+def test_is_per_share_adjustment_event_true_for_split_reverse_split_free_allotment() -> None:
+    service = CorporateActionService(_FakeCorporateActionProvider([]), now=_NOW)
+    for event_type in (
+        CorporateActionType.SPLIT,
+        CorporateActionType.REVERSE_SPLIT,
+        CorporateActionType.FREE_ALLOTMENT,
+    ):
+        event = _event("5401", event_type, dt.date(2026, 3, 1), "2")
+        assert service.is_per_share_adjustment_event(event) is True
+
+
+def test_is_per_share_adjustment_event_false_for_merger_even_with_ratio() -> None:
+    """MERGER等、ratioを持っていてもSPLIT/REVERSE_SPLIT/FREE_ALLOTMENT以外の
+    イベント種別は1株当たり指標の調整対象ではない。"""
+    service = CorporateActionService(_FakeCorporateActionProvider([]), now=_NOW)
+    event = _event("5401", CorporateActionType.MERGER, dt.date(2026, 3, 1), "2")
+    assert service.is_per_share_adjustment_event(event) is False
+
+
+def test_is_per_share_adjustment_event_false_without_ratio_or_effective_date() -> None:
+    service = CorporateActionService(_FakeCorporateActionProvider([]), now=_NOW)
+    no_ratio = _event("5401", CorporateActionType.SPLIT, dt.date(2026, 3, 1), None)
+    assert service.is_per_share_adjustment_event(no_ratio) is False
+
+
+def test_get_ratio_adjustment_events_filters_out_non_ratio_event_types() -> None:
+    service = CorporateActionService(_FakeCorporateActionProvider([]), now=_NOW)
+    split = _event("5401", CorporateActionType.SPLIT, dt.date(2026, 3, 1), "2")
+    reverse_split = _event("5401", CorporateActionType.REVERSE_SPLIT, dt.date(2026, 4, 1), "0.5")
+    free_allotment = _event("5401", CorporateActionType.FREE_ALLOTMENT, dt.date(2026, 5, 1), "1.1")
+    merger = _event("5401", CorporateActionType.MERGER, dt.date(2026, 6, 1), "3")
+    ticker_change = _event("5401", CorporateActionType.TICKER_CHANGE, dt.date(2026, 7, 1), None)
+
+    result = service.get_ratio_adjustment_events(
+        [split, reverse_split, free_allotment, merger, ticker_change]
+    )
+
+    assert result == [split, reverse_split, free_allotment]
+
+
+def test_cumulative_split_factor_ignores_merger_ratio() -> None:
+    """cumulative_split_factor()もget_ratio_adjustment_events()経由で判定するため、
+    MERGERイベントのratioは分割係数へ混入しない(既存の分割係数計算ロジックの回帰確認)。"""
+    events = [
+        _split_event("5401", dt.date(2026, 3, 1), "2"),
+        _event("5401", CorporateActionType.MERGER, dt.date(2026, 4, 1), "3"),
+    ]
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    factor = service.cumulative_split_factor("5401", dt.date(2026, 1, 1), dt.date(2026, 7, 27))
+    assert factor == Decimal("2")  # MERGERの3倍は無視され、SPLITの2倍のみ反映

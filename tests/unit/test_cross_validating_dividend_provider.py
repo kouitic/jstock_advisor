@@ -57,6 +57,19 @@ def _split(effective_date: dt.date, ratio: str) -> CorporateActionEvent:
     )
 
 
+def _action(
+    event_type: CorporateActionType, effective_date: dt.date, ratio: str
+) -> CorporateActionEvent:
+    return CorporateActionEvent(
+        stock_code="8136",
+        event_type=event_type,
+        announced_date=effective_date,
+        effective_date=effective_date,
+        ratio=Decimal(ratio),
+        source=_SOURCE_A,
+    )
+
+
 def _actual(
     period_end: dt.date,
     raw: str,
@@ -415,6 +428,83 @@ def test_8136_pattern_split_after_period_end_is_validated() -> None:
 
     assert result is not None
     assert result.validation_status == DividendValidationStatus.VALIDATED
+
+
+def test_merger_within_period_is_not_treated_as_dividend_basis_split() -> None:
+    """【コードレビュー修正1】ratioを持つがDPS正規化対象ではないCorporateAction
+    (MERGER等)は、決算期内に発生していてもcorporate_action_within_dividend_period
+    扱いにならず、通常通り(分割無しとして)正規化・比較されること。"""
+    period_start = dt.date(2025, 4, 1)
+    period_end = dt.date(2026, 3, 31)
+    primary_info = _primary_info(
+        [
+            _actual(
+                period_end, "16", normalized="16", basis_date=_BASIS_DATE,
+                period_start=period_start,
+            )
+        ]
+    )
+    secondary_info = _secondary_info(
+        [_actual(period_end, "16", basis=DividendPeriodEndBasis.REPORTED)]
+    )
+    merger_event = _action(CorporateActionType.MERGER, dt.date(2025, 10, 1), "3")
+    provider = _provider(primary_info, secondary_info, [merger_event])
+
+    result = provider.get_dividend_info("8136")
+
+    assert result is not None
+    assert result.validation_status == DividendValidationStatus.VALIDATED
+    assert result.validated_period_end == period_end
+
+
+def test_reverse_split_within_period_is_still_not_yet_validatable() -> None:
+    """SPLIT以外でも、REVERSE_SPLIT(1株当たり指標の調整対象)が決算期内に
+    発生していれば従来通りNOT_YET_VALIDATABLEになること。"""
+    period_start = dt.date(2025, 4, 1)
+    period_end = dt.date(2026, 3, 31)
+    primary_info = _primary_info(
+        [
+            _actual(
+                period_end, "40", normalized="40", basis_date=_BASIS_DATE,
+                period_start=period_start,
+            )
+        ]
+    )
+    secondary_info = _secondary_info(
+        [_actual(period_end, "120", basis=DividendPeriodEndBasis.REPORTED)]
+    )
+    reverse_split_event = _action(CorporateActionType.REVERSE_SPLIT, dt.date(2025, 10, 1), "0.5")
+    provider = _provider(primary_info, secondary_info, [reverse_split_event])
+
+    result = provider.get_dividend_info("8136")
+
+    assert result is not None
+    assert result.validation_status == DividendValidationStatus.NOT_YET_VALIDATABLE
+
+
+def test_free_allotment_within_period_is_still_not_yet_validatable() -> None:
+    """FREE_ALLOTMENT(無償割当、1株当たり指標の調整対象)が決算期内に発生していれば
+    従来通りNOT_YET_VALIDATABLEになること。"""
+    period_start = dt.date(2025, 4, 1)
+    period_end = dt.date(2026, 3, 31)
+    primary_info = _primary_info(
+        [
+            _actual(
+                period_end, "40", normalized="40", basis_date=_BASIS_DATE,
+                period_start=period_start,
+            )
+        ]
+    )
+    secondary_info = _secondary_info(
+        [_actual(period_end, "120", basis=DividendPeriodEndBasis.REPORTED)]
+    )
+    free_allotment_event = _action(CorporateActionType.FREE_ALLOTMENT, dt.date(2025, 10, 1), "1.1")
+    provider = _provider(primary_info, secondary_info, [free_allotment_event])
+
+    result = provider.get_dividend_info("8136")
+
+    assert result is not None
+    assert result.validation_status == DividendValidationStatus.NOT_YET_VALIDATABLE
 
 
 def test_8136_pattern_split_within_period_is_not_yet_validatable() -> None:

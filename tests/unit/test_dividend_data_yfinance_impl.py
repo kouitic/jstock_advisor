@@ -24,13 +24,39 @@ class _FakeTicker:
         self.dividends: dict[object, float] = {}
 
 
+class _NoOpCorporateActionProvider:
+    """株式分割等が一切発生しないことを明示するためのフェイク
+    (コードレビュー修正2: corporate_action_serviceを必須依存にしたことに伴い、
+    分割調整が不要なテストでも暗黙のNoneではなく明示的な「分割無し」を表現する)。"""
+
+    def get_corporate_actions(self, stock_code: str, since: dt.date) -> list[CorporateActionEvent]:
+        return []
+
+
+def _no_op_corporate_action_service() -> CorporateActionService:
+    return CorporateActionService(_NoOpCorporateActionProvider(), now=_NOW)
+
+
+def test_corporate_action_service_is_a_required_dependency() -> None:
+    """【コードレビュー修正2】corporate_action_serviceを渡さずに
+    YFinanceDividendDataProviderを生成しようとするとTypeErrorになること。
+
+    分割調整を一切行っていない生値を「基準日へ正規化済み」とAPI上誤って
+    表現してしまう余地を、実行時のNoneチェックではなく型(必須引数)で
+    構造的に無くすための確認(推奨案A)。"""
+    with pytest.raises(TypeError):
+        YFinanceDividendDataProvider(now=_NOW)  # type: ignore[call-arg]
+
+
 def test_get_dividend_info_marks_record_date_as_permanently_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import jstock_advisor.providers.dividend_data.yfinance_impl as module
 
     monkeypatch.setattr(module.yf, "Ticker", _FakeTicker)
-    provider = YFinanceDividendDataProvider(now=_NOW)
+    provider = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
 
     info = provider.get_dividend_info("7203")
 
@@ -59,7 +85,9 @@ def test_inferred_decrease_never_sets_official_dividend_cut_announced(
             }
 
     monkeypatch.setattr(module.yf, "Ticker", _TickerWithDividends)
-    provider = YFinanceDividendDataProvider(now=_NOW)
+    provider = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
 
     info = provider.get_dividend_info("4631")
 
@@ -143,7 +171,9 @@ def test_fiscal_year_aggregation_separates_periods_correctly(
             }
 
     monkeypatch.setattr(module.yf, "Ticker", _TickerWithFiscalYearStraddlingDividends)
-    provider = YFinanceDividendDataProvider(now=_NOW)
+    provider = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
 
     info = provider.get_dividend_info("4193", fiscal_year_end_month=3)
 
@@ -175,7 +205,9 @@ def test_december_fiscal_year_end_matches_calendar_year_aggregation(
             }
 
     monkeypatch.setattr(module.yf, "Ticker", _TickerWithCalendarYearDividends)
-    provider = YFinanceDividendDataProvider(now=_NOW)
+    provider = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
 
     info = provider.get_dividend_info("2914", fiscal_year_end_month=12)
 
@@ -203,7 +235,9 @@ def test_interim_and_final_dividend_not_merged_by_calendar_year(
             }
 
     monkeypatch.setattr(module.yf, "Ticker", _TickerWithSameCalendarYearButDifferentFiscalYears)
-    provider = YFinanceDividendDataProvider(now=_NOW)
+    provider = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
 
     info = provider.get_dividend_info("5195", fiscal_year_end_month=3)
 
@@ -233,8 +267,12 @@ def test_none_fiscal_year_end_month_falls_back_to_calendar_year(
             }
 
     monkeypatch.setattr(module.yf, "Ticker", _TickerWithDividends)
-    provider_without = YFinanceDividendDataProvider(now=_NOW)
-    provider_with_12 = YFinanceDividendDataProvider(now=_NOW)
+    provider_without = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
+    provider_with_12 = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
 
     info_without = provider_without.get_dividend_info("2914")
     info_with_12 = provider_with_12.get_dividend_info("2914", fiscal_year_end_month=12)
@@ -270,7 +308,9 @@ def test_annual_dividend_actual_period_boundaries_are_correct(
             self.dividends = {dt.datetime(2025, 9, 26): 15.0, dt.datetime(2026, 3, 26): 18.0}
 
     monkeypatch.setattr(module.yf, "Ticker", _TickerWithDividends)
-    provider = YFinanceDividendDataProvider(now=_NOW)
+    provider = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
 
     info = provider.get_dividend_info("4193", fiscal_year_end_month=3)
 

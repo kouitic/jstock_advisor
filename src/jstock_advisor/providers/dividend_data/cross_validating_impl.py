@@ -128,7 +128,9 @@ class CrossValidatingDividendDataProvider:
         # 検証対象期間(period_start, matched_end]と、その後(matched_end, basis_date]の
         # 両方をカバーする1回のfetchで済ませる(sinceは事後フィルタのみのためAPIコスト増なし)
         events = self._corporate_action_service.get_effective_events(stock_code, period_start)
-        split_events = [e for e in events if e.ratio is not None and e.ratio > 0]
+        # 1株当たり指標(DPS)の調整対象かどうかの判定はCorporateActionServiceへ一元化する
+        # (SPLIT/REVERSE_SPLIT/FREE_ALLOTMENTのみ。MERGER等はratioを持っていても対象外)。
+        split_events = self._corporate_action_service.get_ratio_adjustment_events(events)
 
         split_within_period = any(
             e.effective_date is not None and period_start < e.effective_date <= matched_end

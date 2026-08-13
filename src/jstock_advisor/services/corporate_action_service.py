@@ -44,6 +44,25 @@ class CorporateActionService:
     def get_effective_events(self, stock_code: str, since: dt.date) -> list[CorporateActionEvent]:
         return self._provider.get_corporate_actions(stock_code, since)
 
+    def is_per_share_adjustment_event(self, event: CorporateActionEvent) -> bool:
+        """1株当たり指標(株価・EPS・BPS・DPS・平均取得単価等)の基準日調整対象と
+        なるイベントか判定する。cumulative_split_factor()が対象とするSPLIT/
+        REVERSE_SPLIT/FREE_ALLOTMENTのみを対象とし、それ以外(MERGER等)は
+        ratioを保持していても対象外とする(判定定義をここへ一元化し、呼び出し側が
+        独自にratio有無だけで分類しないようにするため)。
+        """
+        return (
+            event.event_type in _RATIO_EVENT_TYPES
+            and event.ratio is not None
+            and event.effective_date is not None
+        )
+
+    def get_ratio_adjustment_events(
+        self, events: list[CorporateActionEvent]
+    ) -> list[CorporateActionEvent]:
+        """与えられたイベント群から、1株当たり指標の調整対象となるものだけを抽出する。"""
+        return [e for e in events if self.is_per_share_adjustment_event(e)]
+
     def cumulative_split_factor(
         self,
         stock_code: str,
@@ -65,11 +84,9 @@ class CorporateActionService:
         if events is None:
             events = self.get_effective_events(stock_code, lo)
         factor = Decimal("1")
-        for event in events:
-            if event.event_type not in _RATIO_EVENT_TYPES:
-                continue
-            if event.ratio is None or event.effective_date is None:
-                continue
+        for event in self.get_ratio_adjustment_events(events):
+            if event.effective_date is None or event.ratio is None:
+                continue  # is_per_share_adjustment_eventで除外済みのはずだが型上はOptional
             if lo < event.effective_date <= hi:
                 factor *= event.ratio
         # from_date > to_date(過去の基準日へ逆方向に調整する)場合、raw_value/factorが

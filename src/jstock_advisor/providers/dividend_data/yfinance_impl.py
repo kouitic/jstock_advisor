@@ -82,15 +82,23 @@ class _FiscalYearTotal:
 class YFinanceDividendDataProvider:
     def __init__(
         self,
+        corporate_action_service: CorporateActionService,
         now: dt.datetime | None = None,
-        corporate_action_service: CorporateActionService | None = None,
     ) -> None:
-        """corporate_action_serviceを渡すと、決算期集計の前に各配当イベントを
-        評価日(JST)基準へ分割調整する(渡さない場合は従来通り無調整の生値を集計する)。
-        分割が決算期の途中で発生した場合、無調整の集計は分割前後の額面が
-        同一決算期内に混在するため、誤った減配判定を招く(根本原因レポート原因1)。
-        この個々のイベント単位での正規化は、決算期の集計方法(暦年→決算期単位)を
-        変更した後も変わらず維持する(配当データクロスバリデーション根本修正)。
+        """corporate_action_serviceで、決算期集計の前に各配当イベントを
+        評価日(JST)基準へ分割調整する。分割が決算期の途中で発生した場合、
+        無調整の集計は分割前後の額面が同一決算期内に混在するため、誤った減配判定を
+        招く(根本原因レポート原因1)。この個々のイベント単位での正規化は、決算期の
+        集計方法(暦年→決算期単位)を変更した後も変わらず維持する
+        (配当データクロスバリデーション根本修正)。
+
+        corporate_action_serviceを必須依存とするのは、これが無いと
+        annual_dividend_actuals.normalized_dividend_per_shareが実際には
+        株式分割調整を一切行っていない生値であるにもかかわらず「基準日へ正規化済み」
+        とAPI上誤って表現されてしまうため(コードレビュー修正2)。分割が実際には
+        存在しない用途(モック・一部テスト)でも、分割が無いことを明示的な
+        CorporateActionService(空のCorporateActionProviderをラップしたもの)で
+        表現し、暗黙のNoneに頼らない。
         """
         self._now = now or dt.datetime.now(dt.UTC)
         self._corporate_action = corporate_action_service
@@ -264,12 +272,10 @@ class YFinanceDividendDataProvider:
             amount = float(value)
             raw_totals[fy_label] = raw_totals.get(fy_label, 0.0) + amount
 
-            normalized_amount = amount
-            if self._corporate_action is not None:
-                adjusted = self._corporate_action.adjust_per_share_metric(
-                    Decimal(str(amount)), stock_code, dividend_event_date, basis_date, source
-                )
-                normalized_amount = float(adjusted.adjusted_value)
+            adjusted = self._corporate_action.adjust_per_share_metric(
+                Decimal(str(amount)), stock_code, dividend_event_date, basis_date, source
+            )
+            normalized_amount = float(adjusted.adjusted_value)
             normalized_totals[fy_label] = normalized_totals.get(fy_label, 0.0) + normalized_amount
         return {
             fy: _FiscalYearTotal(raw=raw_totals[fy], normalized=normalized_totals[fy])
