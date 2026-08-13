@@ -259,6 +259,86 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # --- BUY候補裾野拡大・NEAR BUY監視・通知制御の再設計(2026-08)で追加 -------
+
+  # NEAR BUYの継続監視状態(watch_state_service.py参照)。
+  WatchStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-watch_states"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: watch_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: watch_id
+          KeyType: HASH
+
+  # 通知検証モード機能との整合(2026-08追加): VALIDATION実行では本番の
+  # WatchStateを一切書き換えないよう分離する(WatchStateRepository.
+  # for_execution_context()参照)。
+  ValidationWatchStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-validation_watch_states"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: watch_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: watch_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # 保有銘柄の前回スナップショット。売買イベント検知の差分基準とクールダウン
+  # 期限を保持する(trade_cooldown_service.py参照)。
+  HoldingsSnapshotTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-holdings_snapshots"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+
+  ValidationHoldingsSnapshotTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-validation_holdings_snapshots"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # 売買イベント検知処理(TradeCooldownService.detect_and_apply)の実行順序
+  # 非依存化・冪等性担保用ロック(infrastructure/aws/trade_detection_lock.py
+  # 参照)。PK=business_date、TTLで自動失効する一時データ。
+  TradeDetectionRunLockTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-trade_detection_run_locks"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: business_date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: business_date
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # --- 保有判断スコア方式(2026-08仕様)で追加 ------------------------------
 
   HoldingDecisionResultsTable:
@@ -651,6 +731,12 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
         # 判定精度向上機能Phase A(2026-08): DecisionSnapshot記録用
         - DynamoDBCrudPolicy: { TableName: !Ref DecisionSnapshotsTable }
+        # BUY候補裾野拡大・NEAR BUY監視・通知制御の再設計(2026-08)で追加
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchStateTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ValidationWatchStateTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref HoldingsSnapshotTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ValidationHoldingsSnapshotTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref TradeDetectionRunLockTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow
@@ -699,6 +785,12 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref HoldingDecisionRuntimeConfigTable }
         # 判定精度向上機能Phase A(2026-08): DecisionSnapshot記録用
         - DynamoDBCrudPolicy: { TableName: !Ref DecisionSnapshotsTable }
+        # BUY候補裾野拡大・NEAR BUY監視・通知制御の再設計(2026-08)で追加
+        - DynamoDBCrudPolicy: { TableName: !Ref WatchStateTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ValidationWatchStateTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref HoldingsSnapshotTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ValidationHoldingsSnapshotTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref TradeDetectionRunLockTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow

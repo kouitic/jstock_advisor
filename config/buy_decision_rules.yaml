@@ -41,7 +41,9 @@ earnings_window:
 margin_of_safety:
   confidence:
     high:
-      entry: 0.10
+      # BUY候補裾野拡大機能(2026-08): 打診買い(SMALL_ENTRY)の初期安全余裕率を
+      # 0.10から0.05へ緩和。standard/strongは既存挙動を維持するため変更しない。
+      entry: 0.05
       standard: 0.15
       strong: 0.20
     medium:
@@ -84,3 +86,24 @@ undervaluation_category_caps:
   yield: 4.0 # 配当利回りが過去平均以上
   fair_value: 8.0 # 現在値が適正価格(購入判断基準価格)以下
   market_price_action: 2.0 # 52週高値からの下落・直近下落(財務悪化が理由でない場合のみ)
+
+# NEAR BUY(BuyAction.WATCH_FOR_PRICEのうち積極監視・毎営業日通知の対象と
+# なる銘柄)の閾値(BUY候補裾野拡大機能2026-08)。BuyAction自体には
+# NEAR_BUYを追加せず、Recommendation.watch_typeという付帯属性で表現する。
+near_buy:
+  # 開始条件: company_quality_score >= min_company_quality_score かつ
+  # 必要下落率(required_decline_to_entry_pct) <= start_required_decline_pct
+  start_required_decline_pct: 10.0
+  # 継続条件: 開始後、必要下落率がこの値を超えるまで監視を継続する
+  # (start <= continueのヒステリシスでフラッピングを防ぐ)。
+  continue_required_decline_pct: 12.0
+  min_company_quality_score: 60.0
+  # 1営業日あたりのNEAR BUY通知上限件数。超過分はWatchState自体は
+  # 継続するが、その日のLINE通知からは除外する。
+  daily_max_notifications: 5
+  # 「監視終了」通知を送るかどうかの閾値はnotification_rules.yamlの
+  # watch_end_notificationが正本(通知可否は通知ポリシーの責務のため、
+  # 同じ意味の閾値をここに重複定義しない)。
+  # データ取得エラー等で評価不能な状態がこの営業日数を超えて続いた場合は
+  # WatchStateを終了する(安全弁)。
+  max_stale_business_days: 5

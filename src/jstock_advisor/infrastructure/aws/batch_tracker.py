@@ -114,6 +114,10 @@ class BatchProgress:
     # テーブルから削除するため)。NORMAL実行では常に空。デフォルト空リストとし、
     # 既存のBatchProgress()呼び出し(テスト含む)を変更不要にする。
     validation_recommendation_ids: list[str] = field(default_factory=list)
+    # NEAR BUY/WATCH_BEFORE_EARNINGS用のランキングエントリ(BUY候補裾野拡大
+    # 機能2026-08)。ranking_entriesとは別集計とし、finalize側で独立した
+    # ループ(日次上限5件等)を回す。
+    near_buy_ranking_entries: list[str] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -157,6 +161,7 @@ def record_result(
     ranking_entry: str | None = None,
     sector_entry: str | None = None,
     validation_recommendation_id: str | None = None,
+    near_buy_ranking_entry: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
 
@@ -208,6 +213,10 @@ def record_result(
         names["#validation_ids"] = "validation_recommendation_ids"
         update_expr += ", #validation_ids :validation_ids"
         values[":validation_ids"] = {validation_recommendation_id}
+    if near_buy_ranking_entry is not None:
+        names["#near_buy_ranking_entries"] = "near_buy_ranking_entries"
+        update_expr += ", #near_buy_ranking_entries :near_buy_ranking_entries"
+        values[":near_buy_ranking_entries"] = {near_buy_ranking_entry}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -227,6 +236,7 @@ def record_result(
         sector_entries=sorted(item.get("sector_entries", set())),
         holding_count=int(item.get("holding_count", 0)),
         validation_recommendation_ids=sorted(item.get("validation_recommendation_ids", set())),
+        near_buy_ranking_entries=sorted(item.get("near_buy_ranking_entries", set())),
     )
 
 

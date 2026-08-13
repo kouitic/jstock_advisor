@@ -26,6 +26,9 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
+from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
+    HoldingsSnapshotRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -131,6 +134,9 @@ def service_and_repos(
         notification_log_repository=notification_log_repo,
         recommendation_repository=recommendation_repo,
         config=_CONFIG,
+        # BUY候補裾野拡大機能(2026-08): クールダウン判定用リポジトリも
+        # 他のリポジトリと同じtmp_pathで分離し、実データへ影響しないようにする。
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
     )
     return service, recommendation_repo, client
 
@@ -151,6 +157,7 @@ def validation_service_and_repos(
         recommendation_repository=recommendation_repo,
         config=_CONFIG,
         execution_context=ExecutionContext(mode=ExecutionMode.VALIDATION),
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
     )
     return service, recommendation_repo, client
 
@@ -1183,8 +1190,11 @@ def test_batch_summary_never_says_top_priority_n_stocks(service_and_repos) -> No
 @pytest.mark.parametrize(
     "buy_action",
     [
+        # BUY候補裾野拡大機能(2026-08): WATCH_BEFORE_EARNINGSはNOT_NOTIFIABLEでは
+        # なくなったため、このリストから除外した(下のtest_watch_before_earnings_*
+        # で個別に検証する)。通常のWATCH_FOR_PRICE(watch_type未設定=NEAR_BUY非該当)
+        # は引き続き通知対象外のまま。
         BuyAction.WATCH_FOR_PRICE,
-        BuyAction.WATCH_BEFORE_EARNINGS,
         BuyAction.MANUAL_REVIEW,
         BuyAction.NOT_ATTRACTIVE,
         BuyAction.EXCLUDED,
@@ -1202,6 +1212,21 @@ def test_evaluate_notification_status_never_sends_non_buy_family_actions(
     assert outcome.status == NotificationStatus.NOT_REQUIRED
     assert outcome.sent is False
     assert client.sent == []
+
+
+def test_watch_before_earnings_reaches_evaluate_notification_status(service_and_repos) -> None:
+    """BUY候補裾野拡大機能(2026-08、指摘1): 旧ゲート(buy_action not in
+    BUY_FAMILY_ACTIONS)ではWATCH_BEFORE_EARNINGSが誤って抑止されていた。
+    resolve_notification_category()経由の新ゲートでは通知評価まで到達し、
+    notification_policy.watch_before_earnings.notify_every_business_day=trueの
+    ため毎営業日SENTになる。"""
+    service, _repo, client = service_and_repos
+    rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.WATCH_BEFORE_EARNINGS)
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+
+    assert outcome.status == NotificationStatus.SENT
+    assert outcome.sent is False  # evaluate_notification_status自体は送信しない(呼び出し側の責務)
 
 
 @pytest.mark.parametrize(

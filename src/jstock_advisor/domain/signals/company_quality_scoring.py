@@ -26,6 +26,7 @@ from jstock_advisor.domain.entities.holding_decision import (
 )
 from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
 from jstock_advisor.domain.financial_series import FinancialPeriodValue
+from jstock_advisor.domain.signals.simple_roe import compute_simple_forecast_roe
 from jstock_advisor.interfaces.types import CashflowDecomposition, FinancialSummary
 
 
@@ -277,12 +278,11 @@ def score_company_quality(
             )
         )
 
-    # --- 収益力: 簡易予想ROE ---
-    if (
-        financial.forecast_eps is None
-        or financial.forecast_bps is None
-        or financial.forecast_bps <= 0
-    ):
+    # --- 収益力: 簡易予想ROE(domain/signals/simple_roe.pyの共通関数を利用。
+    # StockType分類(QUALITY/GROWTH)からも同じ関数を呼ぶことで計算式の
+    # 重複実装を避ける) ---
+    roe_result = compute_simple_forecast_roe(financial.forecast_eps, financial.forecast_bps)
+    if roe_result.status is EvidenceCoverageStatus.NOT_EVALUATED or roe_result.value is None:
         items.append(
             ScoreItemDetail(
                 item_code="profitability_roe",
@@ -299,7 +299,7 @@ def score_company_quality(
             )
         )
     else:
-        raw_roe = float(financial.forecast_eps) / float(financial.forecast_bps)
+        raw_roe = roe_result.value
         clamped_roe = _clip(
             raw_roe, ratio_rules.clamp.roe_clamp_min, ratio_rules.clamp.roe_clamp_max
         )

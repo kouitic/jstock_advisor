@@ -10,23 +10,34 @@ universe:
   min_avg_trading_value_20d_yen: 30_000_000
 
 total_yield:
-  # 総合利回り(配当利回り+株主優待利回り)の下限(%)。これを下回る銘柄は一次スクリーニングで除外
+  # BUY候補裾野拡大機能(2026-08): この値はevaluate_screening()から
+  # 参照されなくなった(一次スクリーニングのハード除外条件からは削除済み)。
+  # HIGH_DIVIDEND(=StockType.INCOME)の分類条件にも流用しない(配当利回り
+  # 単体基準を維持するため)。将来の補助情報表示用に値のみ残す。
   min_total_yield_pct: 3.5
 
 financial_health:
+  # BUY候補裾野拡大機能(2026-08): 以下4項目はもはやハード除外
+  # (evaluate_screeningのreasons)には使わず、ScreeningResult.warningsの
+  # 生成にのみ使う(タイプ別の可否はclassify_stock_type()側で判定する)。
+  # ただしmax_payout_ratio_pct/min_equity_ratio_ptはdomain/scoring/score.py
+  # ::compute_score()がスコアリング係数として直接参照しているため、値・
+  # フィールド名は変更しない(削除・リネーム不可)。
+  #
   # 配当性向の上限(%)
   max_payout_ratio_pct: 70.0
   # 自己資本比率の下限(%)
   min_equity_ratio_pct: 30.0
-  # 営業キャッシュフローがマイナスの場合は除外
+  # 営業キャッシュフローがマイナスの場合はwarningsへ記録
   require_positive_operating_cashflow: true
-  # 債務超過(自己資本がマイナス)の企業は除外
+  # 債務超過(自己資本がマイナス)の企業は除外(全タイプ共通ハード除外、変更なし)
   exclude_negative_equity: true
-  # 赤字企業(直近期純利益がマイナス)は原則除外
+  # 赤字企業(直近期純利益がマイナス)はwarningsへ記録(ハード除外ではない)
   exclude_deficit_companies: true
 
 corporate_events:
-  # 直近で減配発表があった銘柄は一次スクリーニングで除外(買い候補としない。売り判定側では別途評価)
+  # 直近で減配発表があった銘柄はwarningsへ記録(ハード除外ではない。
+  # 売り判定側では別途評価)
   exclude_recent_dividend_cut_announced: true
   # 継続企業の前提に重大な疑義がある(GC注記)銘柄は除外
   exclude_going_concern_doubt: true

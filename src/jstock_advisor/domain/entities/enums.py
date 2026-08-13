@@ -100,6 +100,24 @@ def is_sell_like(recommendation_type: RecommendationType) -> bool:
     return recommendation_type in SELL_LIKE_RECOMMENDATION_TYPES
 
 
+# 「重大リスクのため緊急確認」相当のRecommendationType(BUY候補裾野拡大機能
+# 2026-08で新設)。ハードゲート発動時のURGENT_HOLDING_REVIEW(新方式、
+# holding_decision_notification_builder.py)と、旧SellSignalService由来の
+# URGENT_REVIEW(移行期間中も併存)の両方を指す。売買クールダウン・
+# TradeDetection未確定時の抑止(fail-closed)のいずれも、この判定だけは
+# 貫通させる(要求仕様: 重大リスク > 売買クールダウン > 通常の再送防止)。
+CRITICAL_RISK_RECOMMENDATION_TYPES = frozenset(
+    {
+        RecommendationType.URGENT_HOLDING_REVIEW,
+        RecommendationType.URGENT_REVIEW,
+    }
+)
+
+
+def is_critical_risk(recommendation_type: RecommendationType) -> bool:
+    return recommendation_type in CRITICAL_RISK_RECOMMENDATION_TYPES
+
+
 class BacktestRecommendationSource(StrEnum):
     """backtest/compareのhistory replayが、あるRecommendationTypeを新旧どちらの
     エンジン由来として扱うかの分類(コードレビュー対応)。
@@ -575,7 +593,12 @@ class DividendPeriodEndBasis(StrEnum):
 
 
 class StockType(StrEnum):
-    """銘柄タイプ分類(要求仕様7節)。複合タイプはlist[StockType]で表現する。"""
+    """銘柄タイプ分類(要求仕様7節)。複合タイプはlist[StockType]で表現する。
+
+    INCOMEは「高配当株」の表示ラベルとして再利用する(配当利回り単体基準、
+    HIGH_DIVIDENDという別メンバーは新設しない)。DIVIDEND_GROWTH(連続増配株)
+    ・QUALITY(優良株)はBUY候補裾野拡大機能(2026-08)で追加。
+    """
 
     INCOME = "INCOME"
     GROWTH = "GROWTH"
@@ -585,6 +608,27 @@ class StockType(StrEnum):
     TURNAROUND = "TURNAROUND"
     ASSET_PLAY = "ASSET_PLAY"
     EVENT_DRIVEN = "EVENT_DRIVEN"
+    DIVIDEND_GROWTH = "DIVIDEND_GROWTH"
+    QUALITY = "QUALITY"
+
+
+_STOCK_TYPE_LABELS: dict[StockType, str] = {
+    StockType.INCOME: "高配当",
+    StockType.GROWTH: "成長株",
+    StockType.VALUE: "割安株",
+    StockType.CYCLICAL: "景気敏感株",
+    StockType.DEFENSIVE: "ディフェンシブ株",
+    StockType.TURNAROUND: "ターンアラウンド株",
+    StockType.ASSET_PLAY: "資産株",
+    StockType.EVENT_DRIVEN: "イベント関連株",
+    StockType.DIVIDEND_GROWTH: "連続増配株",
+    StockType.QUALITY: "優良株",
+}
+
+
+def stock_type_label(stock_type: StockType) -> str:
+    """通知等で使う表示ラベル。INCOMEは内部enum値のまま「高配当」と表示する。"""
+    return _STOCK_TYPE_LABELS.get(stock_type, stock_type.value)
 
 
 class PriceBasisType(StrEnum):
@@ -863,6 +907,37 @@ WATCH_FAMILY_ACTIONS = frozenset(
 )
 
 
+class WatchType(StrEnum):
+    """BuyAction.WATCH_FOR_PRICEのうち、積極監視・毎営業日通知の対象と
+    なっている理由を表す付帯属性(BUY候補裾野拡大機能2026-08で新設)。
+
+    `decide_buy_action()`が返す`BuyAction`自体は変更しない設計とし、
+    NEAR BUYを新しいBuyActionメンバーとしては追加しない(既存の
+    BUY_FAMILY_ACTIONS/WATCH_FAMILY_ACTIONS・raw_buy_action/
+    final_buy_actionの意味を変えないため)。`Recommendation.watch_type`
+    が`buy_action=WATCH_FOR_PRICE`の銘柄にのみ設定され得る。
+    """
+
+    NEAR_BUY = "NEAR_BUY"
+
+
+class NotificationCategory(StrEnum):
+    """通知テンプレート・優先度・再送ポリシー選択のためだけに使う表示層の
+    分類(BUY候補裾野拡大機能2026-08で新設)。`resolve_notification_category()`
+    (line_notification_service.py)が`Recommendation`から一意に決定する
+    唯一の分類ソースであり、`buy_action`/`watch_type`/`recommendation_type`
+    を個別に参照する判定を各所に重複させないためのenum。
+    """
+
+    CRITICAL_RISK = "CRITICAL_RISK"
+    BUY = "BUY"
+    NEAR_BUY = "NEAR_BUY"
+    WATCH_BEFORE_EARNINGS = "WATCH_BEFORE_EARNINGS"
+    SELL = "SELL"
+    OTHER = "OTHER"
+    NOT_NOTIFIABLE = "NOT_NOTIFIABLE"
+
+
 def buy_action_label(action: BuyAction) -> str:
     return _BUY_ACTION_LABELS[action]
 
@@ -995,6 +1070,22 @@ class EligibilityBlockCategory(StrEnum):
     EARNINGS_PROXIMITY = "EARNINGS_PROXIMITY"
     RECENTLY_NOTIFIED = "RECENTLY_NOTIFIED"
     OUTSIDE_TOP_5 = "OUTSIDE_TOP_5"
+
+    # --- BUY候補裾野拡大・NEAR BUY監視・通知制御の再設計(2026-08)で追加 ---
+    # 売買直後の通常クールダウン抑止(重大リスクは貫通する)。
+    TRADE_COOLDOWN = "TRADE_COOLDOWN"
+    # TradeDetectionRunLockがCOMPLETEDへ遷移したことを確認できなかった
+    # (fail-closed)ため、当該実行では通常通知を抑止した場合。
+    TRADE_DETECTION_IN_PROGRESS = "TRADE_DETECTION_IN_PROGRESS"
+    # cross-pipeline重複抑止: 自分より優先度が高い/同等の通知が本日
+    # 既に送信済みのため見送った場合。
+    LOW_PRIORITY = "LOW_PRIORITY"
+    # NEAR BUYの日次通知上限(既定5件)超過。
+    DAILY_LIMIT_NEAR_BUY = "DAILY_LIMIT_NEAR_BUY"
+    # NEAR BUY継続条件(continue_required_decline_pct)から外れた。
+    WATCH_OUT_OF_RANGE = "WATCH_OUT_OF_RANGE"
+    # 同一銘柄について同一バッチ内で既に別の通知を送信済み。
+    DUPLICATE_STOCK_NOTIFICATION = "DUPLICATE_STOCK_NOTIFICATION"
 
 
 class PortfolioValuationBasis(StrEnum):

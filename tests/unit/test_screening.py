@@ -49,7 +49,6 @@ def test_healthy_stock_passes_screening() -> None:
     result = evaluate_screening(
         financial=_healthy_financial(),
         dividend=_healthy_dividend(),
-        total_yield_pct=4.0,
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=_NOW,
@@ -61,27 +60,12 @@ def test_healthy_stock_passes_screening() -> None:
     assert result.exclusion_reasons == []
 
 
-def test_low_total_yield_excluded() -> None:
-    result = evaluate_screening(
-        financial=_healthy_financial(),
-        dividend=_healthy_dividend(),
-        total_yield_pct=2.0,
-        average_trading_value_yen=Decimal("50_000_000"),
-        disclosure_risk_keywords_found=[],
-        data_fetched_at=_NOW,
-        now=_NOW,
-        business_calendar=_CALENDAR,
-        config=_CONFIG.screening,
-    )
-    assert not result.passed
-    assert any("総合利回り" in r for r in result.exclusion_reasons)
-
-
-def test_deficit_company_excluded() -> None:
+def test_deficit_company_not_excluded_but_warned() -> None:
+    """BUY候補裾野拡大機能(2026-08): 単年度赤字は全銘柄共通ハード除外から
+    warningsへ格下げされた(GROWTH/VALUE等の他タイプでは評価継続するため)。"""
     result = evaluate_screening(
         financial=_healthy_financial(is_deficit=True),
         dividend=_healthy_dividend(),
-        total_yield_pct=4.0,
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=_NOW,
@@ -89,15 +73,16 @@ def test_deficit_company_excluded() -> None:
         business_calendar=_CALENDAR,
         config=_CONFIG.screening,
     )
-    assert not result.passed
-    assert any("赤字企業" in r for r in result.exclusion_reasons)
+    assert result.passed
+    assert result.exclusion_reasons == []
+    assert any("赤字" in w for w in result.warnings)
 
 
 def test_debt_excess_excluded() -> None:
+    """債務超過は継続企業疑義と並ぶ重大リスクとして、全タイプ共通ハード除外を維持する。"""
     result = evaluate_screening(
         financial=_healthy_financial(is_debt_excess=True),
         dividend=_healthy_dividend(),
-        total_yield_pct=4.0,
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=_NOW,
@@ -109,7 +94,9 @@ def test_debt_excess_excluded() -> None:
     assert any("債務超過" in r for r in result.exclusion_reasons)
 
 
-def test_dividend_cut_excluded() -> None:
+def test_dividend_cut_not_excluded_but_warned() -> None:
+    """BUY候補裾野拡大機能(2026-08): 直近減配発表は全銘柄共通ハード除外から
+    warningsへ格下げされた(HIGH_DIVIDEND/DIVIDEND_GROWTH分類条件側で個別に判定する)。"""
     dividend = DividendInfo(
         stock_code="8136",
         fiscal_year="2026",
@@ -119,7 +106,6 @@ def test_dividend_cut_excluded() -> None:
     result = evaluate_screening(
         financial=_healthy_financial(),
         dividend=dividend,
-        total_yield_pct=4.0,
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=_NOW,
@@ -127,15 +113,15 @@ def test_dividend_cut_excluded() -> None:
         business_calendar=_CALENDAR,
         config=_CONFIG.screening,
     )
-    assert not result.passed
-    assert any("減配" in r for r in result.exclusion_reasons)
+    assert result.passed
+    assert result.exclusion_reasons == []
+    assert any("減配" in w for w in result.warnings)
 
 
 def test_low_liquidity_excluded() -> None:
     result = evaluate_screening(
         financial=_healthy_financial(),
         dividend=_healthy_dividend(),
-        total_yield_pct=4.0,
         average_trading_value_yen=Decimal("1_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=_NOW,
@@ -151,7 +137,6 @@ def test_financial_sector_excluded_with_warning_config() -> None:
     result = evaluate_screening(
         financial=_healthy_financial(industry="銀行業", equity_ratio_pct=6.0),
         dividend=_healthy_dividend(),
-        total_yield_pct=4.0,
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=_NOW,
@@ -168,7 +153,6 @@ def test_stale_data_excluded() -> None:
     result = evaluate_screening(
         financial=_healthy_financial(),
         dividend=_healthy_dividend(),
-        total_yield_pct=4.0,
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=old_fetch,
@@ -184,7 +168,6 @@ def test_reit_excluded() -> None:
     result = evaluate_screening(
         financial=_healthy_financial(security_type="REIT"),
         dividend=_healthy_dividend(),
-        total_yield_pct=5.0,
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=_NOW,
@@ -213,7 +196,6 @@ def test_scandal_keyword_excludes_when_configured() -> None:
     result = evaluate_screening(
         financial=_healthy_financial(),
         dividend=_healthy_dividend(),
-        total_yield_pct=4.0,
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=["第三者委員会"],
         data_fetched_at=_NOW,
@@ -222,3 +204,67 @@ def test_scandal_keyword_excludes_when_configured() -> None:
         config=_CONFIG.screening,
     )
     assert not result.passed  # 初期設定はexclude
+
+
+def test_high_payout_ratio_not_excluded_but_warned() -> None:
+    """BUY候補裾野拡大機能(2026-08): 配当性向上限もwarningsへ格下げされた
+    (screening.financial_health.max_payout_ratio_ptはcompute_score()が
+    引き続きスコアリング係数として参照するため、値・フィールド名は変更しない)。"""
+    result = evaluate_screening(
+        financial=_healthy_financial(payout_ratio_pct=90.0),
+        dividend=_healthy_dividend(),
+        average_trading_value_yen=Decimal("50_000_000"),
+        disclosure_risk_keywords_found=[],
+        data_fetched_at=_NOW,
+        now=_NOW,
+        business_calendar=_CALENDAR,
+        config=_CONFIG.screening,
+    )
+    assert result.passed
+    assert any("配当性向" in w for w in result.warnings)
+
+
+def test_low_equity_ratio_not_excluded_but_warned() -> None:
+    result = evaluate_screening(
+        financial=_healthy_financial(equity_ratio_pct=5.0),
+        dividend=_healthy_dividend(),
+        average_trading_value_yen=Decimal("50_000_000"),
+        disclosure_risk_keywords_found=[],
+        data_fetched_at=_NOW,
+        now=_NOW,
+        business_calendar=_CALENDAR,
+        config=_CONFIG.screening,
+    )
+    assert result.passed
+    assert any("自己資本比率" in w for w in result.warnings)
+
+
+def test_negative_operating_cashflow_not_excluded_but_warned() -> None:
+    result = evaluate_screening(
+        financial=_healthy_financial(operating_cashflow=Decimal("-10")),
+        dividend=_healthy_dividend(),
+        average_trading_value_yen=Decimal("50_000_000"),
+        disclosure_risk_keywords_found=[],
+        data_fetched_at=_NOW,
+        now=_NOW,
+        business_calendar=_CALENDAR,
+        config=_CONFIG.screening,
+    )
+    assert result.passed
+    assert any("キャッシュフロー" in w for w in result.warnings)
+
+
+def test_going_concern_doubt_still_excluded() -> None:
+    """継続企業の前提に重大な疑義は全タイプ共通ハード除外を維持する(変更なし)。"""
+    result = evaluate_screening(
+        financial=_healthy_financial(is_going_concern_doubt=True),
+        dividend=_healthy_dividend(),
+        average_trading_value_yen=Decimal("50_000_000"),
+        disclosure_risk_keywords_found=[],
+        data_fetched_at=_NOW,
+        now=_NOW,
+        business_calendar=_CALENDAR,
+        config=_CONFIG.screening,
+    )
+    assert not result.passed
+    assert any("継続企業" in r for r in result.exclusion_reasons)

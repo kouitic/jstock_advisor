@@ -65,7 +65,6 @@ def detect_material_event_keywords(disclosures: list[Disclosure]) -> list[str]:
 def evaluate_screening(
     financial: FinancialSummary,
     dividend: DividendInfo | None,
-    total_yield_pct: float,
     average_trading_value_yen: Decimal | None,
     disclosure_risk_keywords_found: list[str],
     data_fetched_at: dt.datetime,
@@ -73,6 +72,22 @@ def evaluate_screening(
     business_calendar: BusinessCalendar,
     config: ScreeningRulesConfig,
 ) -> ScreeningResult:
+    """一次スクリーニング(BUY候補裾野拡大機能2026-08で再整理)。
+
+    全タイプ共通ハード除外(企業存続・実務上の売買可否に関わるもの)のみを
+    `reasons`(除外理由)として扱う。配当性向・自己資本比率・営業CF・
+    単年度赤字・直近減配は、投資スタイル(StockType)によって許容度が
+    異なるためハード除外から外し、`warnings`(留意事項)として記録するに
+    留める。実際のタイプ別可否は`classify_stock_type()`側の各条件で判定
+    する。総合利回り(旧: 3.5%ハードゲート)は削除し、呼び出し元では一切
+    受け取らない(HIGH_DIVIDEND/INCOME分類には配当利回り単体基準を使う
+    ため、ここへ引き継がない)。
+
+    `financial_health.min_equity_ratio_pct`/`max_payout_ratio_pct`は
+    `domain/scoring/score.py::compute_score()`がスコアリング係数として
+    別途参照しているため、値・フィールド名は変更しない(用途をハード除外
+    からwarnings生成へ変えるのみ)。
+    """
     reasons: list[str] = []
     warnings: list[str] = []
 
@@ -81,26 +96,21 @@ def evaluate_screening(
     if config.universe.exclude_etf and financial.security_type == "ETF":
         reasons.append("ETFは対象外です")
 
-    if total_yield_pct < config.total_yield.min_total_yield_pct:
-        reasons.append(
-            f"総合利回り{total_yield_pct:.2f}%が基準{config.total_yield.min_total_yield_pct}%未満"
-        )
-
     fh = config.financial_health
     if (
         financial.payout_ratio_pct is not None
         and financial.payout_ratio_pct > fh.max_payout_ratio_pct
     ):
-        reasons.append(
-            f"配当性向{financial.payout_ratio_pct:.1f}%が上限{fh.max_payout_ratio_pct}%超"
+        warnings.append(
+            f"配当性向{financial.payout_ratio_pct:.1f}%が基準{fh.max_payout_ratio_pct}%超"
         )
 
     if (
         financial.equity_ratio_pct is not None
         and financial.equity_ratio_pct < fh.min_equity_ratio_pct
     ):
-        reasons.append(
-            f"自己資本比率{financial.equity_ratio_pct:.1f}%が下限{fh.min_equity_ratio_pct}%未満"
+        warnings.append(
+            f"自己資本比率{financial.equity_ratio_pct:.1f}%が基準{fh.min_equity_ratio_pct}%未満"
         )
 
     if (
@@ -108,13 +118,13 @@ def evaluate_screening(
         and financial.operating_cashflow is not None
         and financial.operating_cashflow <= 0
     ):
-        reasons.append("営業キャッシュフローがマイナス")
+        warnings.append("営業キャッシュフローがマイナス")
 
     if fh.exclude_negative_equity and financial.is_debt_excess:
         reasons.append("債務超過")
 
     if fh.exclude_deficit_companies and financial.is_deficit:
-        reasons.append("赤字企業")
+        warnings.append("今期赤字")
 
     ce = config.corporate_events
     if ce.exclude_going_concern_doubt and financial.is_going_concern_doubt:
@@ -125,7 +135,7 @@ def evaluate_screening(
         and dividend is not None
         and (dividend.is_dividend_cut_announced or dividend.is_dividend_omission_announced)
     ):
-        reasons.append("直近で減配・無配転落の発表あり")
+        warnings.append("直近で減配・無配転落の発表あり")
 
     if average_trading_value_yen is not None:
         min_value = config.universe.min_avg_trading_value_20d_yen

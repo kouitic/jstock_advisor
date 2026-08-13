@@ -27,6 +27,9 @@ from jstock_advisor.infrastructure.local_repository.audit_log_repository import 
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
     HoldingDecisionResultRepository,
 )
+from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
+    HoldingsSnapshotRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -76,7 +79,12 @@ def _build_services(store_dir: Path, mode: RuntimeConfigMode):
     recommendation_repo = RecommendationRepository(store_dir)
     line_client = _FakeLineClient()
     notification_service = LineNotificationService(
-        line_client, NotificationLogRepository(store_dir), recommendation_repo, _CFG, audit_service
+        line_client,
+        NotificationLogRepository(store_dir),
+        recommendation_repo,
+        _CFG,
+        audit_service,
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
     )
     return {
         "profit_service": ProfitTakingService(providers=_PROVIDERS, config=_CFG),
