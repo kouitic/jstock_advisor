@@ -40,6 +40,9 @@ from jstock_advisor.domain.entities.holding_decision import (
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.signals.holding_decision_score import combine_holding_decision
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
+from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
+    DailyNotificationPriorityRepository,
+)
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
     HoldingDecisionResultRepository,
 )
@@ -172,6 +175,9 @@ def _build_services(store_dir: Path, mode: RuntimeConfigMode, notification_enabl
         _CFG,
         audit_service,
         holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
     )
     return {
         "profit_service": ProfitTakingService(providers=_PROVIDERS, config=_CFG),

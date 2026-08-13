@@ -498,6 +498,8 @@ class NotificationType(StrEnum):
     OUTLIER_REVIEW = "OUTLIER_REVIEW"
     LOGIC_CHANGE_PROPOSAL = "LOGIC_CHANGE_PROPOSAL"
     WATCHLIST_AUTO_ADDITION = "WATCHLIST_AUTO_ADDITION"
+    # NEAR BUY監視の終了通知(コードレビュー対応2026-08、§3)。
+    WATCH_END = "WATCH_END"
 
 
 class CorporateActionType(StrEnum):
@@ -919,6 +921,28 @@ class WatchType(StrEnum):
     """
 
     NEAR_BUY = "NEAR_BUY"
+
+
+class WatchTransitionType(StrEnum):
+    """WatchStateService.evaluate_and_update()が返す当日の遷移種別
+    (コードレビュー対応2026-08: WatchState/通知層へ「4日監視後にBUY到達」
+    「PAUSED後の監視再開」等の情報を伝播するため構造化)。
+
+    STARTED: 当日新規に監視開始。CONTINUED: 前営業日から連続して継続。
+    RESUMED: 評価不能を挟んだ後、連続日数を1へリセットして継続再開
+    (PAUSED明け)。PROMOTED_TO_BUY: 監視中の銘柄がBUY家族へ昇格し監視終了。
+    ENDED: PRICE_OUT_OF_RANGE/NOT_ATTRACTIVE/STALEのいずれかで監視終了
+    (TRADE_EVENTによる終了はWatchStateService.end_for_trade_events()が
+    別途担当し、この戻り値には現れない)。NONE: 監視に一切関与しなかった
+    (元々対象外、または開始条件を満たさなかった)。
+    """
+
+    STARTED = "STARTED"
+    CONTINUED = "CONTINUED"
+    RESUMED = "RESUMED"
+    PROMOTED_TO_BUY = "PROMOTED_TO_BUY"
+    ENDED = "ENDED"
+    NONE = "NONE"
 
 
 class NotificationCategory(StrEnum):

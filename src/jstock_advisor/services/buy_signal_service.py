@@ -38,6 +38,7 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     RecommendationType,
     StockType,
+    WatchTransitionType,
     WatchType,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
@@ -652,6 +653,9 @@ class BuySignalService:
         # 既に完了している前提で、ここではHoldingsSnapshotEntryを読むだけ ---
         watch_type: WatchType | None = None
         near_buy_consecutive_business_days: int | None = None
+        watch_transition_type: str | None = None
+        watch_previous_consecutive_business_days: int | None = None
+        watch_end_reason: str | None = None
         cooldown_entry = self._holdings_snapshot_repo.get(stock_code)
         in_trade_cooldown = (
             cooldown_entry is not None
@@ -659,18 +663,34 @@ class BuySignalService:
             and now.date() <= cooldown_entry.cooldown_until_date
         )
         if not in_trade_cooldown:
-            watch_type, near_buy_consecutive_business_days = (
-                self._watch_state_service.evaluate_and_update(
-                    stock_code=stock_code,
-                    buy_action=buy_action,
-                    company_quality_score=company_quality_score,
-                    required_decline_to_entry_pct=required_decline_to_entry_pct,
-                    current_price=current_price,
-                    entry_price=buy_price_levels.entry.price if buy_price_levels.entry else None,
-                    today=now.date(),
-                    config=self._config.buy_decision.near_buy,
-                )
+            transition = self._watch_state_service.evaluate_and_update(
+                stock_code=stock_code,
+                buy_action=buy_action,
+                company_quality_score=company_quality_score,
+                required_decline_to_entry_pct=required_decline_to_entry_pct,
+                current_price=current_price,
+                entry_price=buy_price_levels.entry.price if buy_price_levels.entry else None,
+                today=now.date(),
+                config=self._config.buy_decision.near_buy,
             )
+            # 現在アクティブに監視中(=NEAR BUY通知の対象)なのはSTARTED/
+            # CONTINUED/RESUMEDのみ。PROMOTED_TO_BUY/ENDEDでは監視は終了済み
+            # だが、その旨(watch_transition_type等)はRecommendationへ残し、
+            # 通知層が「4日監視後にBUY到達」「6日継続して終了」を表示できる
+            # ようにする(コードレビュー対応2026-08)。
+            if transition.transition_type in (
+                WatchTransitionType.STARTED,
+                WatchTransitionType.CONTINUED,
+                WatchTransitionType.RESUMED,
+            ):
+                watch_type = transition.watch_type
+                near_buy_consecutive_business_days = transition.consecutive_business_days
+            if transition.transition_type is not WatchTransitionType.NONE:
+                watch_transition_type = transition.transition_type.value
+                watch_previous_consecutive_business_days = (
+                    transition.previous_consecutive_business_days
+                )
+                watch_end_reason = transition.end_reason
 
         # --- 22. 監査ログ保存(買い候補にならなかった銘柄も含め全件記録) ---
         self._audit.record(
@@ -852,6 +872,9 @@ class BuySignalService:
             stock_types=list(snapshot.stock_type_classification.types),
             watch_type=watch_type,
             near_buy_consecutive_business_days=near_buy_consecutive_business_days,
+            watch_transition_type=watch_transition_type,
+            watch_previous_consecutive_business_days=watch_previous_consecutive_business_days,
+            watch_end_reason=watch_end_reason,
             buy_price_reliability=buy_price_reliability,
             decision_valuation_min=valuation_summary.decision_valuation_min,
             decision_valuation_max=valuation_summary.decision_valuation_max,

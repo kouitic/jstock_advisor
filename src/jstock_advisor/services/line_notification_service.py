@@ -20,6 +20,10 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.entities.daily_notification_priority import (
+    DailyNotificationPriorityRecord,
+    build_daily_notification_priority_id,
+)
 from jstock_advisor.domain.entities.data_quality_alert import DataQualityAlert
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
@@ -36,6 +40,7 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
+    WatchTransitionType,
     WatchType,
     buy_action_label,
     is_critical_risk,
@@ -47,7 +52,16 @@ from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import format_jst
+from jstock_advisor.domain.notification.message_formatter import format_notification_text
+from jstock_advisor.domain.notification.recommendation_adapter import (
+    SHORT_TEXT_CATEGORIES,
+    build_notification_text_input,
+    build_watch_end_text_input,
+)
 from jstock_advisor.infrastructure.line.client import LineClient
+from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
+    DailyNotificationPriorityRepository,
+)
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
 )
@@ -142,6 +156,32 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
     # buy_action=Noneの残り(ポートフォリオ集中通知・保有判断スコア方式の
     # WATCH等)は既存どおり通知対象として扱う。
     return NotificationCategory.OTHER
+
+
+# cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)の優先度表。
+# 数値が大きいほど優先度が高い。「BUY到達」(NEAR BUY監視からの昇格)は通常の
+# BUYより優先度を上げる(要求仕様の優先順位: CRITICAL_RISK > BUY到達 > SELL >
+# BUY > NEAR_BUY > WATCH_BEFORE_EARNINGS)。OTHER/NOT_NOTIFIABLEはこの
+# 仕組みの対象外(0を返し、実質的に比較対象にならない)。
+_NOTIFICATION_PRIORITY: dict[NotificationCategory, int] = {
+    NotificationCategory.CRITICAL_RISK: 6,
+    NotificationCategory.SELL: 4,
+    NotificationCategory.BUY: 3,
+    NotificationCategory.NEAR_BUY: 2,
+    NotificationCategory.WATCH_BEFORE_EARNINGS: 1,
+}
+_PROMOTED_TO_BUY_PRIORITY = 5
+
+
+def _notification_priority(recommendation: Recommendation) -> int:
+    category = resolve_notification_category(recommendation)
+    if (
+        category is NotificationCategory.BUY
+        and recommendation.watch_transition_type == WatchTransitionType.PROMOTED_TO_BUY.value
+    ):
+        return _PROMOTED_TO_BUY_PRIORITY
+    return _NOTIFICATION_PRIORITY.get(category, 0)
+
 
 # 購入候補まとめ通知(notify_buy_candidates_digest)を分割する目安の文字数
 # (LINEのメッセージ長上限に対して余裕を持たせた値。BUYパイプライン第2次修正
@@ -663,60 +703,18 @@ def _buy_candidate_digest_block(rank: int, recommendation: Recommendation) -> st
     (BUYパイプライン第2次修正2026-07で追加。要求仕様17節・18節)。1銘柄1通では
     なく、最大5銘柄を1通(または分割時のみ複数通)にまとめるための本文断片。
 
-    統合BUY候補パイプライン(2026-07)で気になる銘柄・保有銘柄の種別表示を追加。
-    このダイジェストが実際の日次バッチ通知の本文そのものであるため、
-    _format_buy_candidate_message(単独送信用)と同じ表示をここにも反映する。
+    通知簡潔化のコードレビュー対応(2026-08、指摘1)により、1銘柄分のブロックも
+    format_notification_text()(50/70文字ルール)で生成する(旧来の
+    項目網羅型の長文ブロックは廃止。詳細情報はRecommendation本体・監査ログに
+    引き続き完全な形で保持される)。rank(順位)は本文には含めず、送信順序
+    (優先度順に並んだwinnersのリスト順)で表現する。
     """
-    action = recommendation.buy_action
-    lines = [
-        f"{rank}位 {recommendation.stock_code} {recommendation.stock_name}",
-        f"判定: {buy_action_label(action) if action is not None else '購入候補'}",
-    ]
-    # candidate_source欠落の既存レコードは気になる銘柄として安全にフォールバックする。
-    source = recommendation.candidate_source or CandidateSource.WATCHLIST
-    lines.append(f"種別: {_CANDIDATE_SOURCE_LABELS[source]}")
-    if source in (CandidateSource.HOLDING, CandidateSource.BOTH):
-        if recommendation.holding_quantity is not None:
-            lines.append(f"現在の保有: {recommendation.holding_quantity}株")
-        if recommendation.average_acquisition_price is not None:
-            lines.append(f"平均取得単価: {_yen(recommendation.average_acquisition_price)}")
-        # 含み損益は参考情報としてのみ表示する(買い増し理由には使わない)。
-        if recommendation.unrealized_profit_loss is not None:
-            pct_part = (
-                f"({recommendation.unrealized_profit_loss_pct:+.1f}%)"
-                if recommendation.unrealized_profit_loss_pct is not None
-                else ""
-            )
-            lines.append(
-                f"評価損益(参考): {_yen(recommendation.unrealized_profit_loss)}{pct_part}"
-            )
-    lines.append(f"現在値: {_yen(recommendation.price_at_recommendation)}")
-    price_line = _buy_price_levels_line(recommendation)
-    if price_line is not None:
-        lines.append(price_line)
-    if action is not None and action in _PRICE_CONDITION_LABELS:
-        lines.append(f"価格条件: {_PRICE_CONDITION_LABELS[action]}")
-    if (
-        recommendation.purchase_attractiveness_score is not None
-        and recommendation.company_quality_score is not None
-    ):
-        lines.append(
-            f"購入魅力度: {recommendation.purchase_attractiveness_score:.1f}点"
-            f"　企業魅力度: {recommendation.company_quality_score:.1f}点"
-        )
-    if recommendation.total_yield_pct_at_recommendation is not None:
-        lines.append(f"総合利回り: {recommendation.total_yield_pct_at_recommendation:.2f}%")
-    lines.append(
-        f"次回決算日: {recommendation.next_earnings_date}"
-        if recommendation.next_earnings_date
-        else "次回決算日: 不明"
-    )
-    lines.append(f"適正価格信頼度: {recommendation.confidence.value}")
-    if recommendation.reasons:
-        lines.append("主な理由: " + " / ".join(recommendation.reasons))
-    if recommendation.counter_factors:
-        lines.append("主なリスク: " + " / ".join(recommendation.counter_factors))
-    return "\n".join(lines)
+    del rank  # 順位は本文へ含めない(送信順序で表現する)。引数は既存呼び出し元との互換のため維持
+    category = resolve_notification_category(recommendation)
+    if category not in SHORT_TEXT_CATEGORIES:
+        category = NotificationCategory.BUY
+    text_input = build_notification_text_input(recommendation, category)
+    return format_notification_text(text_input)
 
 
 _CANDIDATE_SOURCE_LABELS: dict[CandidateSource, str] = {
@@ -1476,10 +1474,49 @@ def _format_message(
     return _format_sell_message(recommendation)
 
 
-def render_notification_preview(recommendation: Recommendation) -> str:
-    """実際に送信されるLINE通知本文と同じ内容を、送信せずに生成する(before/afterレポート用)。"""
+def _render_notification_body(
+    recommendation: Recommendation,
+    large_spread_ratio_threshold: float = _DEFAULT_FAIR_VALUE_LARGE_SPREAD_RATIO,
+) -> str:
+    """実際に送信されるLINE通知本文を生成する(コードレビュー対応2026-08、
+    最優先)。`send_recommendation_notification()`が必ずこの関数を経由する
+    ことで、旧`_format_message()`(長文)を直接呼び続けて50/70文字ルールが
+    未接続のままになる、という不備の再発を防ぐ。
+
+    `resolve_notification_category()`がSHORT_TEXT_CATEGORIES(BUY/NEAR_BUY/
+    WATCH_BEFORE_EARNINGS/SELL/CRITICAL_RISK)に分類する通知のみ、50/70文字
+    ルールの`format_notification_text()`へ接続する。OTHER相当(利確・
+    ポートフォリオ集中リスク等)は従来どおり`_format_message()`の長文
+    フォーマットを維持する(レビュー指摘1が対象とするのはNotificationCategory
+    で明示的に分類される通知のみのため)。
+
+    `render_notification_preview()`(before/afterレポート専用、config変更の
+    影響を診断するための完全な理由・価格情報が必要)はこの関数を使わず、
+    意図的に`_format_message()`をそのまま呼ぶ(実際に送信される簡潔な本文とは
+    別に、診断用の完全な内容を提供し続けるため)。
+    """
+    category = resolve_notification_category(recommendation)
+    if category in SHORT_TEXT_CATEGORIES:
+        text_input = build_notification_text_input(recommendation, category)
+        return format_notification_text(
+            text_input, is_critical_risk=category is NotificationCategory.CRITICAL_RISK
+        )
     notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
-    return _format_message(recommendation, notification_type)
+    return _format_message(recommendation, notification_type, large_spread_ratio_threshold)
+
+
+def render_notification_preview(recommendation: Recommendation) -> str:
+    """before/afterレポート(config変更の影響診断)用に、完全な内容の通知本文を
+    生成する(送信はしない)。実際にLINEへ送信される本文(BUY/NEAR_BUY/
+    WATCH_BEFORE_EARNINGS/SELL/重大リスクは50/70文字へ簡潔化される)とは
+    意図的に異なる。実送信本文そのものを確認したい場合は
+    `send_recommendation_notification()`の呼び出し結果(FakeLineClient等)を
+    直接検証すること。
+    """
+    notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
+    return _format_message(
+        recommendation, notification_type, _DEFAULT_FAIR_VALUE_LARGE_SPREAD_RATIO
+    )
 
 
 @dataclass(frozen=True)
@@ -1508,6 +1545,7 @@ class LineNotificationService:
         execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
         holdings_snapshot_repository: HoldingsSnapshotRepository | None = None,
         trade_detection_confirmed: bool = True,
+        daily_notification_priority_repository: DailyNotificationPriorityRepository | None = None,
     ) -> None:
         self._client = line_client
         self._log_repo = notification_log_repository
@@ -1529,6 +1567,11 @@ class LineNotificationService:
         # そのまま渡す)。Falseの場合、check_trade_cooldown_eligibility()は
         # 重大リスク以外の通常通知をfail-closedで抑止する。
         self._trade_detection_confirmed = trade_detection_confirmed
+        # --- cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5) ---
+        self._daily_priority_repo = (
+            daily_notification_priority_repository
+            or DailyNotificationPriorityRepository.for_execution_context(execution_context)
+        )
 
     def notify_recommendation(self, recommendation: Recommendation, now: dt.datetime) -> bool:
         """再通知条件を満たす場合のみLINEへ送信する。送信した場合Trueを返す。
@@ -1617,6 +1660,10 @@ class LineNotificationService:
         if not cooldown.eligible:
             return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
 
+        priority = self.check_cross_pipeline_priority_eligibility(recommendation, now)
+        if not priority.eligible:
+            return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
+
         status = self._notification_status_for_send(recommendation, previous, now)
         return NotificationOutcome(status=status, sent=False)
 
@@ -1689,6 +1736,72 @@ class LineNotificationService:
             )
         return NotificationEligibility(eligible=True)
 
+    def check_cross_pipeline_priority_eligibility(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationEligibility:
+        """§5: cross-pipeline重複抑止(コードレビュー対応2026-08、best-effort)。
+
+        BUY候補Lambda・保有銘柄Lambdaは別Lambdaのため共有の排他制御を持たない。
+        当日・同一銘柄について、既に送信済みの通知の優先度(_notification_priority)
+        と比較し、既送優先度 >= 今回優先度なら抑止する(既送と同優先度なら
+        DUPLICATE_STOCK_NOTIFICATION、既送より低優先度ならLOW_PRIORITY)。
+        既送より高優先度(例: NEAR BUY送信済みの銘柄に重大リスク/SELLが発生)は
+        必ず貫通させる。重大リスクはこのチェック自体をスキップし常に貫通する
+        (§6のクールダウンと同じ方針)。
+
+        読み取り専用(他のcheck_*_eligibilityと同じ規約)。実際に送信した後の
+        記録は`_record_daily_priority()`が担う。
+        """
+        if is_critical_risk(recommendation.recommendation_type):
+            return NotificationEligibility(eligible=True)
+
+        this_priority = _notification_priority(recommendation)
+        if this_priority <= 0:
+            return NotificationEligibility(eligible=True)
+
+        record_id = build_daily_notification_priority_id(recommendation.stock_code, now.date())
+        existing = self._daily_priority_repo.get(record_id)
+        if existing is None:
+            return NotificationEligibility(eligible=True)
+        if existing.priority > this_priority:
+            return NotificationEligibility(
+                eligible=False,
+                block_category=EligibilityBlockCategory.LOW_PRIORITY,
+                block_reason="LOW_PRIORITY",
+            )
+        if existing.priority == this_priority:
+            return NotificationEligibility(
+                eligible=False,
+                block_category=EligibilityBlockCategory.DUPLICATE_STOCK_NOTIFICATION,
+                block_reason="DUPLICATE_STOCK_NOTIFICATION",
+            )
+        return NotificationEligibility(eligible=True)
+
+    def _record_daily_priority(self, recommendation: Recommendation, now: dt.datetime) -> None:
+        """実際に送信した通知の優先度を記録する(cross-pipeline重複抑止用)。
+
+        既存記録より低い優先度で上書きしない(モノトニックに非減少を保つ)。
+        VALIDATIONでは検証用のDailyNotificationPriorityRepositoryへ記録され、
+        本番の重複抑止状態には一切影響しない(他の§5-1系リポジトリと同じ分離方針)。
+        """
+        priority = _notification_priority(recommendation)
+        if priority <= 0:
+            return
+        record_id = build_daily_notification_priority_id(recommendation.stock_code, now.date())
+        existing = self._daily_priority_repo.get(record_id)
+        if existing is not None and existing.priority >= priority:
+            return
+        category = resolve_notification_category(recommendation)
+        self._daily_priority_repo.upsert(
+            DailyNotificationPriorityRecord(
+                record_id=record_id,
+                stock_code=recommendation.stock_code,
+                business_date=now.date(),
+                priority=priority,
+                category=category.value,
+            )
+        )
+
     def check_resend_eligibility(
         self, recommendation: Recommendation, now: dt.datetime
     ) -> NotificationEligibility:
@@ -1727,17 +1840,45 @@ class LineNotificationService:
         (このメソッド自体は再通知抑止・データ品質チェックを一切行わない)。
         """
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
-        message = _format_message(
-            recommendation,
-            notification_type,
-            self._config.notification.fair_value_large_spread_ratio,
+        message = _render_notification_body(
+            recommendation, self._config.notification.fair_value_large_spread_ratio
         )
         self._push(message)
+        self._record_daily_priority(recommendation, now)
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
                     notification_id=str(uuid.uuid4()),
                     notification_type=notification_type,
+                    stock_code=recommendation.stock_code,
+                    content_hash=_compute_content_hash(recommendation.recommendation_type),
+                    sent_at=now,
+                    related_recommendation_id=recommendation.recommendation_id,
+                )
+            )
+
+    def send_watch_end_notification(self, recommendation: Recommendation, now: dt.datetime) -> None:
+        """NEAR BUY監視の終了通知を送信する(コードレビュー対応2026-08、§3)。
+
+        `recommendation`はその日の通常評価で生成されたRecommendation
+        (watch_transition_type=ENDED、watch_end_reason/
+        watch_previous_consecutive_business_daysが設定済み)。呼び出し前に
+        `check_data_quality_eligibility()`・`check_trade_cooldown_eligibility()`
+        で送信可否を判定していること(このメソッド自体は判定を行わない、
+        `send_recommendation_notification()`と同じ規約)。
+
+        通常のrecommendation_type別本文とは別の専用テキスト
+        (`build_watch_end_text_input()`)を使うため、
+        `send_recommendation_notification()`とは独立したメソッドとする。
+        """
+        text_input = build_watch_end_text_input(recommendation)
+        message = format_notification_text(text_input)
+        self._push(message)
+        if not self._execution_context.is_validation:
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=str(uuid.uuid4()),
+                    notification_type=NotificationType.WATCH_END,
                     stock_code=recommendation.stock_code,
                     content_hash=_compute_content_hash(recommendation.recommendation_type),
                     sent_at=now,
@@ -1820,6 +1961,9 @@ class LineNotificationService:
                     for rec, _ in remaining_chunk:
                         results[rec.stock_code] = "SEND_FAILED"
                 break
+
+            for recommendation, _ in chunk:
+                self._record_daily_priority(recommendation, now)
 
             for recommendation, _ in chunk:
                 if self._execution_context.is_validation:

@@ -323,7 +323,10 @@ Resources:
 
   # 売買イベント検知処理(TradeCooldownService.detect_and_apply)の実行順序
   # 非依存化・冪等性担保用ロック(infrastructure/aws/trade_detection_lock.py
-  # 参照)。PK=business_date、TTLで自動失効する一時データ。
+  # 参照)。PK=business_date(値は"NORMAL:2026-08-14"/"VALIDATION:2026-08-14"の
+  # ようにExecutionModeで名前空間分離される。コードレビュー対応2026-08:
+  # VALIDATIONが先に完了してもNORMALの検知処理をスキップさせないため)。
+  # TTLで自動失効する一時データ。
   TradeDetectionRunLockTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -334,6 +337,40 @@ Resources:
           AttributeType: S
       KeySchema:
         - AttributeName: business_date
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # cross-pipeline通知重複抑止(コードレビュー対応2026-08、指摘5)。
+  # BUY候補Lambda・保有銘柄Lambdaのどちらから送信した通知でも、当日・同一銘柄の
+  # 最も高い優先度をここへ記録し、低優先度の重複通知をbest-effortで抑止する
+  # (完全な排他制御ではない)。当日限りのデータのためTTLで自動失効する。
+  DailyNotificationPriorityTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-daily_notification_priorities"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: record_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: record_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ValidationDailyNotificationPriorityTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-validation_daily_notification_priorities"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: record_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: record_id
           KeyType: HASH
       TimeToLiveSpecification:
         AttributeName: ttl
@@ -737,6 +774,9 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref HoldingsSnapshotTable }
         - DynamoDBCrudPolicy: { TableName: !Ref ValidationHoldingsSnapshotTable }
         - DynamoDBCrudPolicy: { TableName: !Ref TradeDetectionRunLockTable }
+        # cross-pipeline通知重複抑止(コードレビュー対応2026-08、指摘5)
+        - DynamoDBCrudPolicy: { TableName: !Ref DailyNotificationPriorityTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ValidationDailyNotificationPriorityTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow
@@ -791,6 +831,9 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref HoldingsSnapshotTable }
         - DynamoDBCrudPolicy: { TableName: !Ref ValidationHoldingsSnapshotTable }
         - DynamoDBCrudPolicy: { TableName: !Ref TradeDetectionRunLockTable }
+        # cross-pipeline通知重複抑止(コードレビュー対応2026-08、指摘5)
+        - DynamoDBCrudPolicy: { TableName: !Ref DailyNotificationPriorityTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ValidationDailyNotificationPriorityTable }
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow

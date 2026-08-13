@@ -61,6 +61,7 @@ class TradeCooldownService:
     ) -> None:
         self._calendar = business_calendar
         self._config = config
+        self._execution_context = execution_context
         self._repo = repository or HoldingsSnapshotRepository.for_execution_context(
             execution_context
         )
@@ -74,8 +75,17 @@ class TradeCooldownService:
         ロックを獲得して検知処理を実行し、後続呼び出しはCOMPLETEDを
         確認できればスキップ、確認できなければ短いbounded retryの後
         fail-closed(confirmed=False)を返す。
+
+        コードレビュー対応(2026-08): ロックキーはExecutionMode(NORMAL/
+        VALIDATION)ごとに名前空間分離する(例: "NORMAL:2026-08-14"/
+        "VALIDATION:2026-08-14")。分離しない場合、VALIDATIONが先に実行され
+        当日分をCOMPLETEDにしてしまうと、NORMALが同じ日付をCOMPLETED済みと
+        誤認して検知処理自体をスキップし、本番のHoldingsSnapshotが更新され
+        なくなる(通知検証モードの「本番の永続状態・通常運用へ影響させない」
+        という既存方針に反する)。物理テーブルは1つのまま、キー値のみで
+        NORMAL/VALIDATIONを分離する(大規模化を避けるため)。
         """
-        business_date = now.date().isoformat()
+        business_date = f"{self._execution_context.mode.value}:{now.date().isoformat()}"
 
         if trade_detection_lock.try_acquire(business_date, now, _LEASE_SECONDS):
             events = self._do_detect_and_apply(current_holdings, now.date())

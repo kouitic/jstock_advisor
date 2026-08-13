@@ -9,11 +9,17 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from decimal import Decimal
 
 from jstock_advisor.config.models import NearBuyConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.enums import BUY_FAMILY_ACTIONS, BuyAction, WatchType
+from jstock_advisor.domain.entities.enums import (
+    BUY_FAMILY_ACTIONS,
+    BuyAction,
+    WatchTransitionType,
+    WatchType,
+)
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.watch_state import WatchState, build_watch_id
 from jstock_advisor.domain.signals.near_buy import (
@@ -38,6 +44,43 @@ END_REASON_NOT_ATTRACTIVE = "NOT_ATTRACTIVE"
 END_REASON_STALE = "STALE"
 END_REASON_TRADE_EVENT = "TRADE_EVENT"
 
+# WATCH終了通知の対象となり得る終了理由(TRADE_EVENTは対象外。§3コードレビュー対応)。
+WATCH_END_NOTIFIABLE_REASONS = frozenset(
+    {END_REASON_PRICE_OUT_OF_RANGE, END_REASON_NOT_ATTRACTIVE, END_REASON_STALE}
+)
+
+_NONE_TRANSITION = WatchTransitionType.NONE
+
+
+@dataclass(frozen=True)
+class WatchTransitionResult:
+    """evaluate_and_update()の戻り値(コードレビュー対応2026-08: 単なる
+    tupleではなく、通知層が「4日監視後にBUY到達」「PAUSED後の監視再開」
+    「6日継続してPRICE_OUT_OF_RANGEで終了」を表現できるだけの情報を返す)。
+
+    watch_typeはNONE以外の遷移(STARTED/CONTINUED/RESUMED/PROMOTED_TO_BUY/
+    ENDED)ではどの監視種別に関する遷移かを示すため常に設定される
+    (WATCH終了通知の文言生成に必要なため)。「現在アクティブに監視中か」を
+    示すRecommendation.watch_type相当の値は、呼び出し元がtransition_typeが
+    STARTED/CONTINUED/RESUMEDのいずれかであるかどうかで別途判定すること
+    (PROMOTED_TO_BUY/ENDEDでは監視は終了済みのため、watch_typeがNEAR_BUYで
+    あっても「現在アクティブ」を意味しない)。
+    previous_consecutive_business_daysは、終了/昇格時点で「それまで何営業日
+    連続で監視していたか」を保持する(consecutive_business_daysは終了/昇格後の
+    値が無いためNoneになるが、previous_consecutive_business_daysには残る)。
+    """
+
+    watch_type: WatchType | None
+    transition_type: WatchTransitionType
+    consecutive_business_days: int | None = None
+    previous_consecutive_business_days: int | None = None
+    started_at: dt.date | None = None
+    end_reason: str | None = None
+    best_distance_pct: Decimal | None = None
+
+
+_NO_TRANSITION = WatchTransitionResult(watch_type=None, transition_type=_NONE_TRANSITION)
+
 
 class WatchStateService:
     def __init__(
@@ -59,10 +102,9 @@ class WatchStateService:
         entry_price: Decimal | None,
         today: dt.date,
         config: NearBuyConfig,
-    ) -> tuple[WatchType | None, int | None]:
-        """当日の評価結果からWatchStateを開始/継続/終了させ、Recommendationへ
-        設定すべき(watch_type, consecutive_business_days)を返す(いずれも
-        NEAR BUY対象外の場合は(None, None))。
+    ) -> WatchTransitionResult:
+        """当日の評価結果からWatchStateを開始/継続/終了させ、通知層が必要と
+        する遷移情報を`WatchTransitionResult`として返す。
 
         呼び出し側(BuySignalService)は、クールダウン中(HoldingsSnapshotEntry.
         cooldown_until_date >= today)の銘柄についてはこのメソッド自体を
@@ -73,12 +115,35 @@ class WatchStateService:
         if existing is not None:
             gap = self._calendar.business_days_between(existing.last_matched_at, today)
             if evaluate_stale(gap, config.max_stale_business_days):
+                previous_days = existing.consecutive_business_days
+                started_at = existing.started_at
+                best_distance = existing.best_distance_pct
                 self._end(existing, today, END_REASON_STALE)
-                existing = None
+                # コードレビュー対応: STALE終了直後に同一営業日内で新規監視を
+                # 再開させない(終了通知の意味を保つため、既存の「即日再開」
+                # 挙動は廃止し、次回評価から改めて開始条件を満たすか判定する)。
+                return WatchTransitionResult(
+                    watch_type=WatchType.NEAR_BUY,
+                    transition_type=WatchTransitionType.ENDED,
+                    previous_consecutive_business_days=previous_days,
+                    started_at=started_at,
+                    end_reason=END_REASON_STALE,
+                    best_distance_pct=best_distance,
+                )
 
         if existing is not None and buy_action in BUY_FAMILY_ACTIONS:
+            previous_days = existing.consecutive_business_days
+            started_at = existing.started_at
+            best_distance = existing.best_distance_pct
             self._end(existing, today, END_REASON_PROMOTED_TO_BUY)
-            return None, None
+            return WatchTransitionResult(
+                watch_type=WatchType.NEAR_BUY,
+                transition_type=WatchTransitionType.PROMOTED_TO_BUY,
+                previous_consecutive_business_days=previous_days,
+                started_at=started_at,
+                end_reason=END_REASON_PROMOTED_TO_BUY,
+                best_distance_pct=best_distance,
+            )
 
         if existing is not None:
             if not meets_near_buy_continue_conditions(
@@ -89,11 +154,22 @@ class WatchStateService:
                     if buy_action == BuyAction.WATCH_FOR_PRICE
                     else END_REASON_NOT_ATTRACTIVE
                 )
+                previous_days = existing.consecutive_business_days
+                started_at = existing.started_at
+                best_distance = existing.best_distance_pct
                 self._end(existing, today, end_reason)
-                return None, None
+                return WatchTransitionResult(
+                    watch_type=WatchType.NEAR_BUY,
+                    transition_type=WatchTransitionType.ENDED,
+                    previous_consecutive_business_days=previous_days,
+                    started_at=started_at,
+                    end_reason=end_reason,
+                    best_distance_pct=best_distance,
+                )
 
             assert required_decline_to_entry_pct is not None  # noqa: S101 - continue条件で保証済み
             gap = self._calendar.business_days_between(existing.last_matched_at, today)
+            is_resumed = gap >= 2
             consecutive = compute_consecutive_business_days(
                 gap, existing.consecutive_business_days
             )
@@ -110,7 +186,16 @@ class WatchStateService:
                 }
             )
             self._repo.upsert(updated)
-            return WatchType.NEAR_BUY, consecutive
+            return WatchTransitionResult(
+                watch_type=WatchType.NEAR_BUY,
+                transition_type=(
+                    WatchTransitionType.RESUMED if is_resumed else WatchTransitionType.CONTINUED
+                ),
+                consecutive_business_days=consecutive,
+                previous_consecutive_business_days=existing.consecutive_business_days,
+                started_at=existing.started_at,
+                best_distance_pct=updated.best_distance_pct,
+            )
 
         if meets_near_buy_start_conditions(
             buy_action, company_quality_score, required_decline_to_entry_pct, config
@@ -129,15 +214,27 @@ class WatchStateService:
                 best_distance_pct=required_decline_to_entry_pct,
             )
             self._repo.upsert(new_state)
-            return WatchType.NEAR_BUY, 1
+            return WatchTransitionResult(
+                watch_type=WatchType.NEAR_BUY,
+                transition_type=WatchTransitionType.STARTED,
+                consecutive_business_days=1,
+                previous_consecutive_business_days=None,
+                started_at=today,
+                best_distance_pct=required_decline_to_entry_pct,
+            )
 
-        return None, None
+        return _NO_TRANSITION
 
     def end_for_trade_events(self, events: list[TradeEvent], today: dt.date) -> None:
         """売買イベントを検知した銘柄について、既存のアクティブなWatchStateを
         すべて終了する(TradeCooldownServiceからは直接呼ばれない。呼び出し順序は
         オーケストレーション層(handler)がTradeCooldownService.detect_and_apply()
         の戻り値をこのメソッドへ明示的に渡す形で連結する、責務分離のため)。
+
+        TRADE_EVENTによる終了はWATCH終了通知の対象外(§3)であり、この
+        メソッドはRecommendationを一切生成しない(呼び出し元のハンドラは
+        該当銘柄をその日の通常評価から除外済みのため、watch_transition_type
+        フィールドが誤って設定されることもない)。
         """
         for event in events:
             for watch_type in WatchType:

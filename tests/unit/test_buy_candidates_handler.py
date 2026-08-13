@@ -392,8 +392,15 @@ class _FakeNotificationServiceForRanking:
     def check_trade_cooldown_eligibility(
         self, recommendation: Recommendation, now: dt.datetime
     ) -> NotificationEligibility:
-        # BUY候補裾野拡大機能(2026-08)。既存テストはNEAR BUYエントリを持たない
-        # ため通常呼ばれないが、フェイクの完全性のため常に許可を返す。
+        # BUY候補裾野拡大機能(2026-08)。既存テストはクールダウン中の銘柄を
+        # 持たないため通常呼ばれないが、フェイクの完全性のため常に許可を返す。
+        return NotificationEligibility(eligible=True)
+
+    def check_cross_pipeline_priority_eligibility(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationEligibility:
+        # cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)。既存テストは
+        # 優先度競合を再現しないため常に許可を返す。
         return NotificationEligibility(eligible=True)
 
     def send_recommendation_notification(
@@ -489,9 +496,8 @@ def test_process_single_candidate_watch_price_counted_without_ranking_entry(
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None, near_buy_ranking_entry=None: (
-            captured.update(category=category, ranking_entry=ranking_entry)
+        lambda batch_id, category, ranking_entry=None, **kwargs: captured.update(
+            category=category, ranking_entry=ranking_entry
         ),
     )
 
@@ -527,9 +533,8 @@ def test_process_single_candidate_review_when_manual_review_action(
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None, near_buy_ranking_entry=None: (
-            captured.update(category=category, ranking_entry=ranking_entry)
+        lambda batch_id, category, ranking_entry=None, **kwargs: captured.update(
+            category=category, ranking_entry=ranking_entry
         ),
     )
 
@@ -566,10 +571,7 @@ def test_process_single_candidate_excluded_maps_to_hold(
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None, near_buy_ranking_entry=None: (
-            captured.update(category=category)
-        ),
+        lambda batch_id, category, **kwargs: captured.update(category=category),
     )
 
     class _NoSaveRepo:
@@ -745,10 +747,7 @@ def test_process_single_candidate_data_error_does_not_notify_line_by_default(
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None, near_buy_ranking_entry=None: (
-            captured.update(category=category)
-        ),
+        lambda batch_id, category, **kwargs: captured.update(category=category),
     )
 
     with caplog.at_level("WARNING"):
@@ -1840,9 +1839,8 @@ def test_process_single_candidate_validation_mode_reports_validation_recommendat
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None, near_buy_ranking_entry=None: captured.update(
-            validation_recommendation_id=validation_recommendation_id
+        lambda batch_id, category, validation_recommendation_id=None, **kwargs: (
+            captured.update(validation_recommendation_id=validation_recommendation_id)
         ),
     )
 
@@ -1872,9 +1870,8 @@ def test_process_single_candidate_normal_mode_reports_no_validation_recommendati
     monkeypatch.setattr(
         handler_module,
         "record_result",
-        lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None, near_buy_ranking_entry=None: captured.update(
-            validation_recommendation_id=validation_recommendation_id
+        lambda batch_id, category, validation_recommendation_id=None, **kwargs: (
+            captured.update(validation_recommendation_id=validation_recommendation_id)
         ),
     )
 

@@ -5,13 +5,14 @@ from pathlib import Path
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import NearBuyConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.enums import BuyAction, WatchType
+from jstock_advisor.domain.entities.enums import BuyAction, WatchTransitionType, WatchType
 from jstock_advisor.infrastructure.local_repository.watch_state_repository import (
     WatchStateRepository,
 )
 from jstock_advisor.services.watch_state_service import (
     END_REASON_PRICE_OUT_OF_RANGE,
     END_REASON_PROMOTED_TO_BUY,
+    END_REASON_STALE,
     WatchStateService,
 )
 
@@ -37,7 +38,7 @@ def _service(tmp_path: Path) -> WatchStateService:
 
 def test_starts_new_watch_state_on_first_qualifying_day(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    watch_type, days = service.evaluate_and_update(
+    result = service.evaluate_and_update(
         stock_code="9432",
         buy_action=BuyAction.WATCH_FOR_PRICE,
         company_quality_score=65.0,
@@ -47,13 +48,15 @@ def test_starts_new_watch_state_on_first_qualifying_day(tmp_path: Path) -> None:
         today=_MON,
         config=_CONFIG,
     )
-    assert watch_type == WatchType.NEAR_BUY
-    assert days == 1
+    assert result.watch_type == WatchType.NEAR_BUY
+    assert result.consecutive_business_days == 1
+    assert result.transition_type == WatchTransitionType.STARTED
+    assert result.previous_consecutive_business_days is None
 
 
 def test_does_not_start_when_quality_score_below_threshold(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    watch_type, days = service.evaluate_and_update(
+    result = service.evaluate_and_update(
         stock_code="9432",
         buy_action=BuyAction.WATCH_FOR_PRICE,
         company_quality_score=59.9,
@@ -63,8 +66,9 @@ def test_does_not_start_when_quality_score_below_threshold(tmp_path: Path) -> No
         today=_MON,
         config=_CONFIG,
     )
-    assert watch_type is None
-    assert days is None
+    assert result.watch_type is None
+    assert result.consecutive_business_days is None
+    assert result.transition_type == WatchTransitionType.NONE
 
 
 def test_continues_and_increments_on_next_business_day(tmp_path: Path) -> None:
@@ -79,7 +83,7 @@ def test_continues_and_increments_on_next_business_day(tmp_path: Path) -> None:
         today=_MON,
         config=_CONFIG,
     )
-    watch_type, days = service.evaluate_and_update(
+    result = service.evaluate_and_update(
         stock_code="9432",
         buy_action=BuyAction.WATCH_FOR_PRICE,
         company_quality_score=65.0,
@@ -89,8 +93,10 @@ def test_continues_and_increments_on_next_business_day(tmp_path: Path) -> None:
         today=_TUE,
         config=_CONFIG,
     )
-    assert watch_type == WatchType.NEAR_BUY
-    assert days == 2
+    assert result.watch_type == WatchType.NEAR_BUY
+    assert result.consecutive_business_days == 2
+    assert result.transition_type == WatchTransitionType.CONTINUED
+    assert result.previous_consecutive_business_days == 1
 
 
 def test_ends_when_required_decline_exceeds_continue_threshold(tmp_path: Path) -> None:
@@ -105,7 +111,7 @@ def test_ends_when_required_decline_exceeds_continue_threshold(tmp_path: Path) -
         today=_MON,
         config=_CONFIG,
     )
-    watch_type, days = service.evaluate_and_update(
+    result = service.evaluate_and_update(
         stock_code="9432",
         buy_action=BuyAction.WATCH_FOR_PRICE,
         company_quality_score=65.0,
@@ -115,8 +121,11 @@ def test_ends_when_required_decline_exceeds_continue_threshold(tmp_path: Path) -
         today=_TUE,
         config=_CONFIG,
     )
-    assert watch_type is None
-    assert days is None
+    assert result.watch_type == WatchType.NEAR_BUY  # どの監視種別が終了したかは残る
+    assert result.consecutive_business_days is None
+    assert result.transition_type == WatchTransitionType.ENDED
+    assert result.end_reason == END_REASON_PRICE_OUT_OF_RANGE
+    assert result.previous_consecutive_business_days == 1
     state = service._repo.get_active("9432", WatchType.NEAR_BUY)
     assert state is None  # 終了済み
 
@@ -133,7 +142,7 @@ def test_ends_with_promoted_reason_when_buy_family_reached(tmp_path: Path) -> No
         today=_MON,
         config=_CONFIG,
     )
-    watch_type, days = service.evaluate_and_update(
+    result = service.evaluate_and_update(
         stock_code="9432",
         buy_action=BuyAction.BUY,
         company_quality_score=65.0,
@@ -143,8 +152,11 @@ def test_ends_with_promoted_reason_when_buy_family_reached(tmp_path: Path) -> No
         today=_TUE,
         config=_CONFIG,
     )
-    assert watch_type is None
-    assert days is None
+    assert result.watch_type == WatchType.NEAR_BUY  # どの監視種別が終了したかは残る
+    assert result.consecutive_business_days is None
+    assert result.transition_type == WatchTransitionType.PROMOTED_TO_BUY
+    assert result.previous_consecutive_business_days == 1
+    assert result.end_reason == END_REASON_PROMOTED_TO_BUY
     all_states = service._repo.list_all()
     ended = next(s for s in all_states if s.stock_code == "9432")
     assert ended.end_reason == END_REASON_PROMOTED_TO_BUY
@@ -166,7 +178,7 @@ def test_gap_resets_consecutive_days_but_keeps_watch_state(tmp_path: Path) -> No
         config=_CONFIG,
     )
     # TUEはDATA_INSUFFICIENTのため評価自体を呼ばない(呼び出し元の既存動作)。
-    watch_type, days = service.evaluate_and_update(
+    result = service.evaluate_and_update(
         stock_code="9432",
         buy_action=BuyAction.WATCH_FOR_PRICE,
         company_quality_score=65.0,
@@ -176,8 +188,10 @@ def test_gap_resets_consecutive_days_but_keeps_watch_state(tmp_path: Path) -> No
         today=_WED,
         config=_CONFIG,
     )
-    assert watch_type == WatchType.NEAR_BUY
-    assert days == 1  # 連続日数はリセットされる
+    assert result.watch_type == WatchType.NEAR_BUY
+    assert result.consecutive_business_days == 1  # 連続日数はリセットされる
+    assert result.transition_type == WatchTransitionType.RESUMED
+    assert result.previous_consecutive_business_days == 1
     state = service._repo.get_active("9432", WatchType.NEAR_BUY)
     assert state is not None
     assert state.started_at == _MON  # started_atは不変
@@ -207,3 +221,37 @@ def test_price_out_of_range_reason_recorded(tmp_path: Path) -> None:
     )
     ended = next(s for s in service._repo.list_all() if s.stock_code == "9432")
     assert ended.end_reason == END_REASON_PRICE_OUT_OF_RANGE
+
+
+def test_stale_ends_watch_and_does_not_restart_same_day(tmp_path: Path) -> None:
+    """コードレビュー対応2026-08: STALE終了と同一営業日内に開始条件を満たしても
+    即座に再開させない(WATCH終了通知の意味を保つため)。"""
+    service = _service(tmp_path)
+    service.evaluate_and_update(
+        stock_code="9432",
+        buy_action=BuyAction.WATCH_FOR_PRICE,
+        company_quality_score=65.0,
+        required_decline_to_entry_pct=Decimal("8.0"),
+        current_price=Decimal("158"),
+        entry_price=Decimal("150"),
+        today=_MON,
+        config=_CONFIG,
+    )
+    far_future = _MON + dt.timedelta(days=60)
+    result = service.evaluate_and_update(
+        stock_code="9432",
+        buy_action=BuyAction.WATCH_FOR_PRICE,
+        company_quality_score=65.0,
+        required_decline_to_entry_pct=Decimal("8.0"),
+        current_price=Decimal("158"),
+        entry_price=Decimal("150"),
+        today=far_future,
+        config=_CONFIG,
+    )
+    assert result.watch_type == WatchType.NEAR_BUY  # どの監視種別が終了したかは残る
+    assert result.consecutive_business_days is None
+    assert result.transition_type == WatchTransitionType.ENDED
+    assert result.end_reason == END_REASON_STALE
+    assert result.previous_consecutive_business_days == 1
+    state = service._repo.get_active("9432", WatchType.NEAR_BUY)
+    assert state is None

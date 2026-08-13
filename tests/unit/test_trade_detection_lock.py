@@ -129,3 +129,153 @@ def test_get_status_returns_none_when_no_entry(fake_table_on_lambda: _FakeTable)
     status, expires = trade_detection_lock.get_status("2026-08-17")
     assert status is None
     assert expires is None
+
+
+# ============================================================================
+# TradeCooldownService: NORMAL/VALIDATIONのロック名前空間分離(コードレビュー
+# 対応2026-08、指摘4)。VALIDATIONが先に完了しても、NORMALの検知処理自体が
+# スキップされない(=snapshotが更新されない)ことを実際のdetect_and_apply()
+# 経由で確認する(単にロック関数だけを直接呼ぶのではなく、E2Eで検証する)。
+# ============================================================================
+
+
+def _seed_baseline(repo: Any, stock_code: str, shares: int) -> None:
+    from decimal import Decimal
+
+    from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
+
+    repo.upsert(
+        HoldingsSnapshotEntry(
+            stock_code=stock_code,
+            shares=shares,
+            average_purchase_price=Decimal("1000") if shares > 0 else None,
+            recorded_at=dt.date(2026, 8, 14),
+            active_holding=shares > 0,
+        )
+    )
+
+
+def _current_holdings(stock_code: str, shares: int) -> dict[str, Any]:
+    from decimal import Decimal
+
+    from jstock_advisor.domain.entities.enums import AccountType
+    from jstock_advisor.domain.entities.holding import Holding
+
+    return {
+        stock_code: Holding(
+            stock_code=stock_code,
+            stock_name=f"銘柄{stock_code}",
+            shares=shares,
+            average_purchase_price=Decimal("1000"),
+            total_purchase_amount=Decimal("1000") * shares,
+            first_purchase_date=_NOW.date(),
+            last_purchase_date=_NOW.date(),
+            account_type=AccountType.SPECIFIC,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    }
+
+
+def _build_cooldown_services(tmp_path: Any) -> tuple[Any, Any, Any, Any]:
+    from jstock_advisor.config.loader import load_config
+    from jstock_advisor.config.models import TradeCooldownConfig
+    from jstock_advisor.domain.business_calendar import BusinessCalendar
+    from jstock_advisor.domain.entities.enums import ExecutionMode
+    from jstock_advisor.domain.entities.execution_context import ExecutionContext
+    from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
+        HoldingsSnapshotRepository,
+    )
+    from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
+
+    calendar = BusinessCalendar.from_config(load_config().holiday_calendar)
+    config = TradeCooldownConfig(
+        enabled=True, buy_business_days=5, sell_business_days=5, partial_trade_business_days=3
+    )
+    normal_repo = HoldingsSnapshotRepository(
+        store_dir=tmp_path, file_name="holdings_snapshots.json"
+    )
+    validation_repo = HoldingsSnapshotRepository(
+        store_dir=tmp_path, file_name="validation_holdings_snapshots.json"
+    )
+    normal_service = TradeCooldownService(
+        business_calendar=calendar,
+        config=config,
+        repository=normal_repo,
+        execution_context=ExecutionContext.normal(),
+    )
+    validation_service = TradeCooldownService(
+        business_calendar=calendar,
+        config=config,
+        repository=validation_repo,
+        execution_context=ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+    return normal_service, validation_service, normal_repo, validation_repo
+
+
+def test_validation_detection_first_does_not_block_normal_detection(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """VALIDATIONを先に実行してロックをCOMPLETEDにした後、NORMALが
+    (VALIDATIONのCOMPLETEDを自分の完了と誤認せず)独自に検知処理を実行する
+    ことを確認する。"""
+    normal_service, validation_service, normal_repo, validation_repo = _build_cooldown_services(
+        tmp_path
+    )
+    _seed_baseline(normal_repo, "2914", shares=0)
+    _seed_baseline(validation_repo, "2914", shares=0)
+    current_holdings = _current_holdings("2914", shares=100)
+
+    validation_outcome = validation_service.detect_and_apply(current_holdings, _NOW)
+    normal_outcome = normal_service.detect_and_apply(current_holdings, _NOW)
+
+    assert validation_outcome.confirmed is True
+    assert normal_outcome.confirmed is True
+    # 名前空間分離前(不具合時)は、NORMALがVALIDATIONのCOMPLETEDを自分の完了と
+    # 誤認し、検知処理自体をスキップして空のevents・snapshot未更新のままになる。
+    assert len(validation_outcome.events) == 1
+    assert len(normal_outcome.events) == 1
+    assert validation_repo.get("2914") is not None
+    assert validation_repo.get("2914").cooldown_until_date is not None
+    assert normal_repo.get("2914") is not None
+    assert normal_repo.get("2914").cooldown_until_date is not None
+
+
+def test_normal_detection_first_does_not_block_validation_detection(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """NORMALを先に実行後も、VALIDATIONが独自に検知処理を実行することを確認する
+    (逆順でも名前空間分離が機能する)。"""
+    normal_service, validation_service, normal_repo, validation_repo = _build_cooldown_services(
+        tmp_path
+    )
+    _seed_baseline(normal_repo, "2914", shares=0)
+    _seed_baseline(validation_repo, "2914", shares=0)
+    current_holdings = _current_holdings("2914", shares=100)
+
+    normal_outcome = normal_service.detect_and_apply(current_holdings, _NOW)
+    validation_outcome = validation_service.detect_and_apply(current_holdings, _NOW)
+
+    assert normal_outcome.confirmed is True
+    assert validation_outcome.confirmed is True
+    assert len(normal_outcome.events) == 1
+    assert len(validation_outcome.events) == 1
+
+
+def test_normal_and_validation_snapshots_do_not_cross_contaminate(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """NORMAL側で検知したBUYイベントが、VALIDATION側のholdings snapshotへ
+    書き込まれないこと(逆も同様)を確認する。"""
+    normal_service, validation_service, normal_repo, validation_repo = _build_cooldown_services(
+        tmp_path
+    )
+    _seed_baseline(normal_repo, "2914", shares=0)
+    _seed_baseline(validation_repo, "2914", shares=0)
+    current_holdings = _current_holdings("2914", shares=100)
+
+    normal_service.detect_and_apply(current_holdings, _NOW)
+
+    # NORMAL側は更新されるが、VALIDATION側は無関係(まだshares=0のまま)。
+    assert normal_repo.get("2914").shares == 100
+    assert validation_repo.get("2914").shares == 0

@@ -68,6 +68,9 @@ class _FakeNearBuyNotificationService:
     def check_trade_cooldown_eligibility(self, recommendation, now):
         return NotificationEligibility(eligible=True)
 
+    def check_cross_pipeline_priority_eligibility(self, recommendation, now):
+        return NotificationEligibility(eligible=True)
+
     def check_resend_eligibility(self, recommendation, now):
         return NotificationEligibility(eligible=True)
 
