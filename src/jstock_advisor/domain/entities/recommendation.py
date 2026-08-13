@@ -345,6 +345,28 @@ class Recommendation(ImmutableSnapshot):
     # Recommendation側にも残すことで単一レコードから理由を追跡できるようにする。
     notification_suppression_reason: str | None = None
 
+    # --- 通知簡潔化・WATCH終了通知のコードレビュー対応(2026-08)で追加。
+    # すべてOptionalのため既存レコードへの影響なし ---
+    # WatchTransitionResult.transition_type.value(STARTED/CONTINUED/RESUMED/
+    # PROMOTED_TO_BUY/ENDED)。監視に一切関与しなかった場合はNoneのまま
+    # (WatchTransitionType.NONEは保存しない)。watch_type/near_buy_
+    # consecutive_business_daysが「現在アクティブに監視中か」を表すのに対し、
+    # こちらは当日「何が起きたか」の遷移種別を表す(PROMOTED_TO_BUY/ENDEDでは
+    # watch_typeがNoneになった後もこのフィールドで遷移を追跡できる)。
+    watch_transition_type: str | None = None
+    # 終了/昇格時点で、それまで何営業日連続で監視していたか
+    # (「4営業日監視後にBUY到達」「6日継続してPRICE_OUT_OF_RANGEで終了」の
+    # 通知文言生成に使う。継続中(CONTINUED/RESUMED)の場合は
+    # near_buy_consecutive_business_daysと重複するが、ENDED/PROMOTED_TO_BUY後は
+    # near_buy_consecutive_business_daysがNoneになるため、このフィールドのみが
+    # 「監視していた日数」を保持する)。
+    watch_previous_consecutive_business_days: int | None = None
+    # WatchTransitionType.ENDEDの場合の終了理由(PRICE_OUT_OF_RANGE/
+    # NOT_ATTRACTIVE/STALE)。監視終了通知の生成可否判定に使う
+    # (TRADE_EVENTはWatchStateService.end_for_trade_events()経由のため
+    # ここには現れない)。
+    watch_end_reason: str | None = None
+
     # 次回決算予定日の妥当性検証結果(要求仕様12節: 評価日より過去の決算日を
     # 「次回決算予定日」として表示しない)。earnings_date_rawは検証前の生値
     # (監査用、STALE_PAST_DATEの場合でもnext_earnings_dateはNoneのまま)。

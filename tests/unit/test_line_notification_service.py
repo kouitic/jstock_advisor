@@ -26,6 +26,9 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
+from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
+    DailyNotificationPriorityRepository,
+)
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
 )
@@ -137,6 +140,11 @@ def service_and_repos(
         # BUY候補裾野拡大機能(2026-08): クールダウン判定用リポジトリも
         # 他のリポジトリと同じtmp_pathで分離し、実データへ影響しないようにする。
         holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        # cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)用リポジトリも
+        # 同様にtmp_pathで分離する(未分離のまま実データを汚染した不備の再発防止)。
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
     )
     return service, recommendation_repo, client
 
@@ -158,6 +166,9 @@ def validation_service_and_repos(
         config=_CONFIG,
         execution_context=ExecutionContext(mode=ExecutionMode.VALIDATION),
         holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
     )
     return service, recommendation_repo, client
 
@@ -702,10 +713,15 @@ def test_sell_message_with_sufficient_independent_evidence_sends_normally(
 
     service.notify_recommendation(rec, _NOW)
 
+    # 通知簡潔化(コードレビュー対応2026-08)により実送信本文は50/70文字ルールへ
+    # 短縮される(判定内容・保有継続時リスク等の詳細はRecommendation/監査ログの
+    # みに保持され、LINE本文には含まれなくなった)。ここでは「抑止されず実際に
+    # 送信されたこと」と、短縮本文が銘柄・第一理由を含むことのみを検証する。
     message = client.sent[0]
-    assert "判定内容: 複数の独立した根拠に基づき投資前提の悪化が疑われます" in message
-    assert "保有を継続する場合のリスク: 自己資本比率が閾値を下回っている" in message
-    assert "直ちに売却としない理由" not in message
+    assert "売却検討" in message
+    assert rec.stock_code in message
+    assert "減配(major)" in message
+    assert len(message) <= 70
 
 
 def test_data_error_notification_logs_stock_name_instead_of_sending(
@@ -1324,18 +1340,25 @@ def test_notify_buy_candidates_digest_sends_one_message_for_multiple_winners(
     assert len(client.sent) == 1
     message = client.sent[0]
     assert "【本日の購入候補】" in message
-    assert "1位 4516 日本新薬" in message
-    assert "2位 1111 日本新薬" in message
+    # 通知簡潔化(コードレビュー対応2026-08)により、1銘柄分のブロックは
+    # 「順位」ではなくformat_notification_text()の短縮形式(判定 銘柄コード
+    # 銘柄名)になった(送信順序自体が優先度順を表す)。
+    assert "買い 4516 日本新薬" in message
+    assert "買い 1111 日本新薬" in message
     assert "対象: 最大2銘柄" in message
+    blocks = [line for line in message.split("\n\n") if line.startswith("買い ")]
+    assert all(len(block) <= 70 for block in blocks)
 
 
-def test_notify_buy_candidates_digest_shows_holding_info_for_holding_source(
+def test_notify_buy_candidates_digest_block_omits_long_form_detail(
     service_and_repos,
 ) -> None:
-    """統合BUY候補パイプライン(2026-07)。実際に送信されるダイジェスト本文
-    (notify_buy_candidates_digest → _buy_candidate_digest_block)自体に、
-    保有銘柄の種別・保有株数・平均取得単価・評価損益(参考)が表示されることを
-    確認する(_format_buy_candidate_message側だけの表示漏れの再発防止)。
+    """通知簡潔化(コードレビュー対応2026-08、指摘1)。ダイジェストの1銘柄
+    ブロック(notify_buy_candidates_digest → _buy_candidate_digest_block)は
+    保有種別・保有株数・平均取得単価・評価損益等の長文詳細をLINE本文には
+    含めない(詳細情報はRecommendation本体・監査ログに保持され続ける。
+    旧来の項目網羅型ブロックの再発防止)。保有銘柄由来・気になる銘柄由来の
+    いずれでも短縮形式であることを確認する。
     """
     from decimal import Decimal
 
@@ -1355,24 +1378,10 @@ def test_notify_buy_candidates_digest_shows_holding_info_for_holding_source(
     service.notify_buy_candidates_digest([winner], _NOW)
 
     message = client.sent[0]
-    assert "種別: 保有銘柄・買い増し候補" in message
-    assert "現在の保有: 300株" in message
-    assert "平均取得単価: 2,100円" in message
-    assert "評価損益(参考): 75,000円(+11.9%)" in message
-
-
-def test_notify_buy_candidates_digest_omits_holding_info_for_watchlist_source(
-    service_and_repos,
-) -> None:
-    service, _repo, client = service_and_repos
-    winner = _make_buy_pipeline_recommendation(buy_action=BuyAction.BUY)
-
-    service.notify_buy_candidates_digest([winner], _NOW)
-
-    message = client.sent[0]
-    assert "種別: 気になる銘柄" in message
+    assert "種別" not in message
     assert "現在の保有" not in message
     assert "平均取得単価" not in message
+    assert "評価損益" not in message
 
 
 def test_notify_buy_candidates_digest_records_notification_log_per_stock(
@@ -1387,6 +1396,10 @@ def test_notify_buy_candidates_digest_records_notification_log_per_stock(
         notification_log_repository=notification_log_repo,
         recommendation_repository=recommendation_repo,
         config=_CONFIG,
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
     )
     winners = [_make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)]
 
@@ -2208,6 +2221,10 @@ def test_validation_manual_review_does_not_grow_production_audit_log(tmp_path: P
         config=_CONFIG,
         audit_service=AuditService(audit_repo, execution_context=validation_context),
         execution_context=validation_context,
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
     )
     # 独立根拠グループが1件のみのSELLは自動確定させず手動確認へ回る
     # (_check_data_qualityの実ロジックがrequires_manual_review=Trueを返す)。
@@ -2238,6 +2255,10 @@ def test_normal_manual_review_still_grows_audit_log(tmp_path: Path) -> None:
         recommendation_repository=recommendation_repo,
         config=_CONFIG,
         audit_service=AuditService(audit_repo),
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
     )
     rec = _make_sell_recommendation(
         recommendation_id="rec-1", reasons=["減配(major)"], independent_evidence_group_count=1

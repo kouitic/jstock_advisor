@@ -50,6 +50,18 @@ class NotificationTextInput:
     is_watch_end: bool = False
     reason: str | None = None
     stock_types: list[StockType] = field(default_factory=list)
+    # --- 通知簡潔化・WATCH状態遷移伝播のコードレビュー対応(2026-08)で追加 ---
+    # ラベルを既定のカテゴリ表示(例: category=BUYなら「買い」)から差し替える。
+    # NEAR BUY監視からBUYへ昇格した通知を「到達」と表示するために使う。
+    # is_watch_end=Trueの場合は既存どおり「監視終了」が優先される。
+    label_override: str | None = None
+    # WatchStateから昇格した場合の「何営業日監視した後にBUYへ到達したか」。
+    # Noneでない場合、consecutive_business_days/distance_pct由来のセグメントより
+    # 優先して「{N}日監視後」を表示する。
+    promoted_from_watch_days: int | None = None
+    # WATCH終了通知(is_watch_end=True)専用の「何営業日連続で監視していたか」。
+    # 通常の継続監視(「N日連続」)と紛らわしくないよう「N日継続」と表示する。
+    watch_end_days: int | None = None
 
 
 def _fmt_price(price: Decimal) -> str:
@@ -74,7 +86,9 @@ def format_notification_text(
 
     文字数はPython `len()`で判定する(全角/半角・絵文字を区別しない)。
     """
-    label = _WATCH_END_LABEL if data.is_watch_end else _CATEGORY_LABELS.get(data.category, "通知")
+    label = _WATCH_END_LABEL if data.is_watch_end else (
+        data.label_override or _CATEGORY_LABELS.get(data.category, "通知")
+    )
 
     # 優先度1・2は必須(削れない)。
     required = f"{label} {data.stock_code} {data.stock_name}"
@@ -90,6 +104,10 @@ def format_notification_text(
         optional_segments.append(f"あと{data.distance_pct:.1f}%")
     if data.is_resumed_after_gap:
         optional_segments.append("監視再開")
+    elif data.promoted_from_watch_days is not None:
+        optional_segments.append(f"{data.promoted_from_watch_days}日監視後")
+    elif data.is_watch_end and data.watch_end_days is not None:
+        optional_segments.append(f"{data.watch_end_days}日継続")
     elif data.consecutive_business_days is not None:
         optional_segments.append(f"{data.consecutive_business_days}日連続")
     if data.reason:

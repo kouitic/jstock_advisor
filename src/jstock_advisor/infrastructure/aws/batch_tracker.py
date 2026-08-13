@@ -118,6 +118,9 @@ class BatchProgress:
     # 機能2026-08)。ranking_entriesとは別集計とし、finalize側で独立した
     # ループ(日次上限5件等)を回す。
     near_buy_ranking_entries: list[str] = field(default_factory=list)
+    # WATCH終了通知の対象recommendation_id一覧(コードレビュー対応2026-08、§3)。
+    # ランキング(順位)は不要なため、値はrecommendation_idそのもの。
+    watch_end_ranking_entries: list[str] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -162,6 +165,7 @@ def record_result(
     sector_entry: str | None = None,
     validation_recommendation_id: str | None = None,
     near_buy_ranking_entry: str | None = None,
+    watch_end_ranking_entry: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
 
@@ -217,6 +221,10 @@ def record_result(
         names["#near_buy_ranking_entries"] = "near_buy_ranking_entries"
         update_expr += ", #near_buy_ranking_entries :near_buy_ranking_entries"
         values[":near_buy_ranking_entries"] = {near_buy_ranking_entry}
+    if watch_end_ranking_entry is not None:
+        names["#watch_end_ranking_entries"] = "watch_end_ranking_entries"
+        update_expr += ", #watch_end_ranking_entries :watch_end_ranking_entries"
+        values[":watch_end_ranking_entries"] = {watch_end_ranking_entry}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -237,6 +245,7 @@ def record_result(
         holding_count=int(item.get("holding_count", 0)),
         validation_recommendation_ids=sorted(item.get("validation_recommendation_ids", set())),
         near_buy_ranking_entries=sorted(item.get("near_buy_ranking_entries", set())),
+        watch_end_ranking_entries=sorted(item.get("watch_end_ranking_entries", set())),
     )
 
 

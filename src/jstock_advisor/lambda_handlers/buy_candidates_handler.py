@@ -76,6 +76,7 @@ from jstock_advisor.domain.entities.enums import (
     NotificationContext,
     PortfolioValuationBasis,
     RecommendationType,
+    WatchTransitionType,
     WatchType,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
@@ -115,7 +116,10 @@ from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
-from jstock_advisor.services.watch_state_service import WatchStateService
+from jstock_advisor.services.watch_state_service import (
+    WATCH_END_NOTIFIABLE_REASONS,
+    WatchStateService,
+)
 from jstock_advisor.services.watchlist_service import WatchlistService
 
 logger = logging.getLogger(__name__)
@@ -393,6 +397,7 @@ def _process_single_candidate(
     category = "failed"
     ranking_entry: str | None = None
     near_buy_ranking_entry: str | None = None
+    watch_end_ranking_entry: str | None = None
     sector_entry: str | None = None
     validation_recommendation_id: str | None = None
     try:
@@ -580,6 +585,21 @@ def _process_single_candidate(
                     DecisionSnapshotRepository(), final_recommendation, DecisionType.BUY, logger
                 )
 
+            # --- WATCH終了通知(コードレビュー対応2026-08、§3)。
+            # PROMOTED_TO_BUY(BUY到達)はここでは対象にしない(§2の「BUY到達」
+            # 通知へ統合済み、format_notification_text側で「到達」ラベル・
+            # 「N日監視後」を表示する)。TRADE_EVENTによる終了は
+            # WatchStateService.end_for_trade_events()経由のためwatch_
+            # transition_typeが設定されず、ここには現れない。 ---
+            if (
+                final_recommendation.watch_transition_type == WatchTransitionType.ENDED.value
+                and final_recommendation.watch_end_reason in WATCH_END_NOTIFIABLE_REASONS
+                and config.notification.watch_end_notification.enabled
+                and (final_recommendation.watch_previous_consecutive_business_days or 0)
+                >= config.notification.watch_end_notification.min_consecutive_business_days
+            ):
+                watch_end_ranking_entry = final_recommendation.recommendation_id
+
             if final_recommendation.buy_action == BuyAction.MANUAL_REVIEW:
                 category = "review"
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
@@ -636,6 +656,7 @@ def _process_single_candidate(
             sector_entry=sector_entry,
             validation_recommendation_id=validation_recommendation_id,
             near_buy_ranking_entry=near_buy_ranking_entry,
+            watch_end_ranking_entry=watch_end_ranking_entry,
         )
         if progress is not None and progress.is_complete:
             _finalize_batch(
@@ -712,7 +733,7 @@ def _record_notification_outcome_audit(
     rule_version: str,
     now: dt.datetime,
     recommendation: Recommendation,
-    unified_rank: int,
+    unified_rank: int | None,
     notification_rank: int | None,
     notification_status: str,
     eligibility: NotificationEligibility,
@@ -720,7 +741,11 @@ def _record_notification_outcome_audit(
     portfolio_total_market_value: Decimal | None,
     coverage_ratio: float,
 ) -> None:
-    """ランキングに登録された候補(BUY系)について記録する監査(要求仕様§4・§10・§14)。"""
+    """ランキングに登録された候補(BUY系)について記録する監査(要求仕様§4・§10・§14)。
+
+    unified_rank=Noneは、順位付けを行わない一過性の通知(WATCH終了通知等、
+    コードレビュー対応2026-08)を記録する場合に使う。
+    """
     reliable = basis == PortfolioValuationBasis.MARKET_VALUE
     block_category = eligibility.block_category.value if eligibility.block_category else None
     portfolio_total_str = (
@@ -803,6 +828,33 @@ def _finalize_batch(
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 "NOT_REQUIRED", dq, basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
+        # コードレビュー対応(2026-08): このBUYランキングループには売買
+        # クールダウン判定が欠落していた(NEAR BUYループのみcheck_trade_
+        # cooldown_eligibility()を呼んでいた)。買ったばかりの銘柄へ再度
+        # BUY通知が送られてしまう不備のため、あわせて修正する。
+        buy_cooldown = notification_service.check_trade_cooldown_eligibility(recommendation, now)
+        if not buy_cooldown.eligible:
+            suppressed_count += 1
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, recommendation, unified_rank, None,
+                buy_cooldown.block_reason or "NOT_REQUIRED", buy_cooldown,
+                basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
+        # cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)。
+        buy_priority = notification_service.check_cross_pipeline_priority_eligibility(
+            recommendation, now
+        )
+        if not buy_priority.eligible:
+            suppressed_count += 1
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, recommendation, unified_rank, None,
+                buy_priority.block_reason or "NOT_REQUIRED", buy_priority,
+                basis, portfolio_total, coverage_ratio,
             )
             continue
 
@@ -974,6 +1026,18 @@ def _finalize_batch(
             )
             continue
 
+        # cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)。
+        nb_priority = notification_service.check_cross_pipeline_priority_eligibility(
+            nb_recommendation, now
+        )
+        if not nb_priority.eligible:
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
+                nb_priority.block_reason or "NOT_REQUIRED", nb_priority,
+                basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
         nb_resend = notification_service.check_resend_eligibility(nb_recommendation, now)
         if not nb_resend.eligible:
             _record_notification_outcome_audit(
@@ -1006,6 +1070,45 @@ def _finalize_batch(
         _record_notification_outcome_audit(
             audit_service, rule_version, now, nb_recommendation, near_unified_rank,
             near_buy_sent_count, "SENT", NotificationEligibility(eligible=True),
+            basis, portfolio_total, coverage_ratio,
+        )
+
+    # --- WATCH終了通知の実送信経路(コードレビュー対応2026-08、§3)。
+    # ランキングは不要(1銘柄1回のみ発生する一過性イベント)なため、日次上限
+    # ループとは異なり単純な順次処理とする。 ---
+    for we_recommendation_id in progress.watch_end_ranking_entries:
+        we_recommendation = recommendation_repo.get(we_recommendation_id)
+        if we_recommendation is None:
+            logger.warning(
+                "buy_candidates_handler: recommendation not found for watch-end notification "
+                "recommendation_id=%s",
+                we_recommendation_id,
+            )
+            continue
+
+        we_dq = notification_service.check_data_quality_eligibility(
+            we_recommendation, now, context=NotificationContext.BUY_CANDIDATE_BATCH
+        )
+        if not we_dq.eligible:
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, we_recommendation, None, None,
+                "NOT_REQUIRED", we_dq, basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
+        we_cooldown = notification_service.check_trade_cooldown_eligibility(we_recommendation, now)
+        if not we_cooldown.eligible:
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, we_recommendation, None, None,
+                we_cooldown.block_reason or "NOT_REQUIRED", we_cooldown,
+                basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
+        notification_service.send_watch_end_notification(we_recommendation, now)
+        _record_notification_outcome_audit(
+            audit_service, rule_version, now, we_recommendation, None, None,
+            "SENT", NotificationEligibility(eligible=True),
             basis, portfolio_total, coverage_ratio,
         )
 

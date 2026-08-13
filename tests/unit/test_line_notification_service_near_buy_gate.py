@@ -25,6 +25,9 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.line.client import LineClient
+from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
+    DailyNotificationPriorityRepository,
+)
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
 )
@@ -82,6 +85,9 @@ def service(tmp_path: Path) -> LineNotificationService:
         recommendation_repository=RecommendationRepository(store_dir=store_dir),
         config=_CONFIG,
         holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
     )
 
 
