@@ -590,10 +590,16 @@ def _process_single_candidate(
             # 通知へ統合済み、format_notification_text側で「到達」ラベル・
             # 「N日監視後」を表示する)。TRADE_EVENTによる終了は
             # WatchStateService.end_for_trade_events()経由のためwatch_
-            # transition_typeが設定されず、ここには現れない。 ---
+            # transition_typeが設定されず、ここには現れない。
+            # 防御的対策(コードレビュー対応2026-08、指摘1): WatchStateService側で
+            # PROMOTED_TO_BUYをstale判定より優先する修正を行ったが、万一
+            # watch_transition_type=ENDEDのままbuy_actionがBUY家族になっている
+            # 状態が発生しても、BUY到達通知と監視終了通知の二重送信を防ぐため
+            # ここでも同じ条件を明示的に確認する。 ---
             if (
                 final_recommendation.watch_transition_type == WatchTransitionType.ENDED.value
                 and final_recommendation.watch_end_reason in WATCH_END_NOTIFIABLE_REASONS
+                and final_recommendation.buy_action not in BUY_FAMILY_ACTIONS
                 and config.notification.watch_end_notification.enabled
                 and (final_recommendation.watch_previous_consecutive_business_days or 0)
                 >= config.notification.watch_end_notification.min_consecutive_business_days

@@ -41,6 +41,11 @@ class NotificationTextInput:
     stock_name: str
     current_price: Decimal | None = None
     target_price: Decimal | None = None
+    # target_priceの意味を示すラベル(コードレビュー対応2026-08、指摘3)。
+    # Noneの場合は「打診」(BUY/NEAR BUYの打診買い価格、既定・後方互換)。
+    # SELLでは「打診」は買い価格の表現であり売却価格には使わないため、
+    # recommendation_adapter.py側で「即時執行」「見直し」等を明示的に設定する。
+    target_price_label: str | None = None
     # 「あと何%」の接近率(NEAR BUY等)。正の値。
     distance_pct: Decimal | None = None
     consecutive_business_days: int | None = None
@@ -93,13 +98,16 @@ def format_notification_text(
     # 優先度1・2は必須(削れない)。
     required = f"{label} {data.stock_code} {data.stock_name}"
 
+    price_label = data.target_price_label or "打診"
     optional_segments: list[str] = []  # 優先度の高い順
     if data.current_price is not None:
         optional_segments.append(_fmt_price(data.current_price))
     if data.target_price is not None and data.distance_pct is not None:
-        optional_segments.append(f"打診{_fmt_price(data.target_price)}まで{data.distance_pct:.1f}%")
+        optional_segments.append(
+            f"{price_label}{_fmt_price(data.target_price)}まで{data.distance_pct:.1f}%"
+        )
     elif data.target_price is not None:
-        optional_segments.append(f"打診{_fmt_price(data.target_price)}")
+        optional_segments.append(f"{price_label}{_fmt_price(data.target_price)}")
     elif data.distance_pct is not None:
         optional_segments.append(f"あと{data.distance_pct:.1f}%")
     if data.is_resumed_after_gap:

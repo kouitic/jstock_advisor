@@ -252,6 +252,44 @@ def test_stale_ends_watch_and_does_not_restart_same_day(tmp_path: Path) -> None:
     assert result.consecutive_business_days is None
     assert result.transition_type == WatchTransitionType.ENDED
     assert result.end_reason == END_REASON_STALE
+
+
+def test_promoted_to_buy_takes_priority_over_stale_after_gap(tmp_path: Path) -> None:
+    """コードレビュー対応2026-08(指摘1): NEAR BUYを数営業日継続後、評価不能期間が
+    max_staleを超過し、次に評価できた営業日にBUY水準へ到達した場合は、
+    STALE終了ではなくPROMOTED_TO_BUYとして扱う(監視終了通知とBUY到達通知の
+    二重送信を防ぐため)。
+    """
+    service = _service(tmp_path)
+    service.evaluate_and_update(
+        stock_code="9432",
+        buy_action=BuyAction.WATCH_FOR_PRICE,
+        company_quality_score=65.0,
+        required_decline_to_entry_pct=Decimal("8.0"),
+        current_price=Decimal("158"),
+        entry_price=Decimal("150"),
+        today=_MON,
+        config=_CONFIG,
+    )
+    far_future = _MON + dt.timedelta(days=60)  # max_stale_business_daysを確実に超過する間隔
+    result = service.evaluate_and_update(
+        stock_code="9432",
+        buy_action=BuyAction.BUY,  # 評価再開日に買い水準へ到達
+        company_quality_score=65.0,
+        required_decline_to_entry_pct=None,
+        current_price=Decimal("148"),
+        entry_price=Decimal("150"),
+        today=far_future,
+        config=_CONFIG,
+    )
+    assert result.transition_type == WatchTransitionType.PROMOTED_TO_BUY
+    assert result.end_reason == END_REASON_PROMOTED_TO_BUY
+    assert result.previous_consecutive_business_days == 1
+    state = service._repo.get_active("9432", WatchType.NEAR_BUY)
+    assert state is None  # 終了済み(STALEとしては終了していない)
+    all_states = service._repo.list_all()
+    ended = next(s for s in all_states if s.stock_code == "9432")
+    assert ended.end_reason == END_REASON_PROMOTED_TO_BUY
     assert result.previous_consecutive_business_days == 1
     state = service._repo.get_active("9432", WatchType.NEAR_BUY)
     assert state is None

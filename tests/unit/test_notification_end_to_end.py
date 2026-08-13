@@ -195,6 +195,9 @@ def test_buy_notification_actual_pushed_body_within_70_chars(service) -> None:
     assert len(client.sent) == 1
     body = client.sent[0]
     assert rec.stock_code in body
+    # G: BUYでは打診買い価格の「打診」表現が従来どおり使われる
+    # (コードレビュー対応2026-08、指摘3)。
+    assert "打診" in body
     assert len(body) <= _MAX_CHARS
     # 旧長文formatterが誤って使われていないことの確認(旧専用の見出し文言)。
     assert "算出手法間のばらつき" not in body
@@ -213,6 +216,9 @@ def test_near_buy_notification_actual_pushed_body_within_70_chars(service) -> No
     assert "接近" in body
     assert rec.stock_code in body
     assert len(body) <= _MAX_CHARS
+    # G: NEAR BUYでも打診買い価格の「打診」表現が従来どおり使われる
+    # (コードレビュー対応2026-08、指摘3)。
+    assert "打診" in body
 
 
 def test_watch_before_earnings_notification_actual_pushed_body_within_70_chars(
@@ -239,6 +245,11 @@ def test_sell_notification_actual_pushed_body_within_70_chars(service) -> None:
     assert rec.stock_code in body
     assert len(body) <= _MAX_CHARS
     assert "投資前提悪化の可能性" not in body  # 旧_format_sell_messageのタイトル文言
+    # F: SELLでは「打診」を使わず、価格フィールドの業務的意味に応じた
+    # ラベル(このfixtureはstop_review_price設定のため「見直し」)を使う
+    # (コードレビュー対応2026-08、指摘3)。
+    assert "打診" not in body
+    assert "見直し" in body
 
 
 def test_critical_risk_notification_keeps_reason_even_if_over_70_chars(service) -> None:
