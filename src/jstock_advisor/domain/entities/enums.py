@@ -544,6 +544,36 @@ class DividendComparisonOutcome(StrEnum):
     COMPARISON_NOT_POSSIBLE = "COMPARISON_NOT_POSSIBLE"
 
 
+class DividendValidationStatus(StrEnum):
+    """配当実績クロスバリデーション(yfinance×EDINET)の検証状態(配当データ
+    クロスバリデーション根本修正)。
+
+    DISCREPANCYは意図的に定義しない。真の乖離(共通のREPORTED決算期で説明不能な
+    乖離)が生じた場合はDividendInfo全体をNoneで返す既存仕様を維持するため、
+    「返却されたDividendInfoが取りうる状態」としてDISCREPANCYを含めると、
+    呼び出し側が絶対に観測できない状態がAPI契約上存在することになり矛盾する。
+    乖離の事実自体はwarningログでのみ表現する。
+    """
+
+    VALIDATED = "VALIDATED"
+    NOT_YET_VALIDATABLE = "NOT_YET_VALIDATABLE"
+    SECONDARY_UNAVAILABLE = "SECONDARY_UNAVAILABLE"
+
+
+class DividendPeriodEndBasis(StrEnum):
+    """AnnualDividendActual.period_endの由来(配当データクロスバリデーション根本修正)。
+
+    「実測かどうか」の単純な真偽値ではなく由来別に区別する。yfinance側の
+    period_endもfiscal_year_end_month(推定含む)+配当イベント日からシステムが
+    導出した値であり、EDINET当期のような一次情報源からの直接取得値ではないため、
+    「実測」とは表現しない。
+    """
+
+    REPORTED = "REPORTED"  # EDINET当期: 書類一覧APIのperiodEnd実値
+    DERIVED_FROM_FISCAL_YEAR_END = "DERIVED_FROM_FISCAL_YEAR_END"  # yfinance
+    DERIVED_FROM_RELATIVE_PERIOD = "DERIVED_FROM_RELATIVE_PERIOD"  # EDINET前期以前(当期から逆算)
+
+
 class StockType(StrEnum):
     """銘柄タイプ分類(要求仕様7節)。複合タイプはlist[StockType]で表現する。"""
 

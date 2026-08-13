@@ -195,7 +195,9 @@ def build_stock_snapshot(
     if financial is None:
         return None, "財務データを取得できません"
 
-    dividend = providers.dividend_data.get_dividend_info(stock_code)
+    dividend = providers.dividend_data.get_dividend_info(
+        stock_code, fiscal_year_end_month=financial.fiscal_year_end_month
+    )
     if dividend is None:
         return None, (
             "配当データを取得できません"

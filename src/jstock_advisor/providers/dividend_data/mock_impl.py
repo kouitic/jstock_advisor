@@ -15,7 +15,10 @@ class MockDividendDataProvider:
     def __init__(self, now: dt.datetime | None = None) -> None:
         self._now = now or dt.datetime.now(dt.UTC)
 
-    def get_dividend_info(self, stock_code: str) -> DividendInfo | None:
+    def get_dividend_info(
+        self, stock_code: str, fiscal_year_end_month: int | None = None
+    ) -> DividendInfo | None:
+        del fiscal_year_end_month  # モック実装では未使用(Protocol互換のためのみ受け取る)
         profile = MOCK_STOCKS.get(stock_code)
         if profile is None:
             return None

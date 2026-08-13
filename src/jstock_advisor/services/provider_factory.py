@@ -83,7 +83,7 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
         secondary=EdinetDividendDataProvider(
             client=edinet_client, cache_repository=edinet_filing_cache, now=now
         ),
-        corporate_action_provider=corporate_action,
+        corporate_action_service=corporate_action_service,
         config=config.data_validation,
         now=now,
     )
