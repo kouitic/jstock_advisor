@@ -250,6 +250,39 @@ def _providers_for_phase_c_earnings_window(
     return providers, spy_financial
 
 
+class _SpyDividendDataProvider:
+    """dividend_data providerのフェイクラッパー。get_dividend_info()に渡された
+    fiscal_year_end_monthを記録する(配当クロスバリデーション根本修正:
+    financial.fiscal_year_end_monthの配線確認用)。"""
+
+    def __init__(self, delegate: object) -> None:
+        self._delegate = delegate
+        self.fiscal_year_end_month_calls: list[int | None] = []
+
+    def get_dividend_info(self, stock_code: str, fiscal_year_end_month: int | None = None):
+        self.fiscal_year_end_month_calls.append(fiscal_year_end_month)
+        return self._delegate.get_dividend_info(  # type: ignore[attr-defined]
+            stock_code, fiscal_year_end_month=fiscal_year_end_month
+        )
+
+
+def test_dividend_info_is_fetched_with_financial_summary_fiscal_year_end_month() -> None:
+    """build_stock_snapshot()がdividend_data.get_dividend_info()を呼ぶ際、
+    financial_data.get_financial_summary()で取得したfiscal_year_end_monthを
+    正しく引き渡すこと(配当クロスバリデーション根本修正の配線確認)。"""
+    base = build_mock_provider_bundle(_NOW)
+    financial = base.financial_data.get_financial_summary(_STOCK_CODE)
+    assert financial is not None
+    spy_dividend = _SpyDividendDataProvider(base.dividend_data)
+    providers = dataclasses.replace(base, dividend_data=spy_dividend)
+
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    assert spy_dividend.fiscal_year_end_month_calls == [financial.fiscal_year_end_month]
+
+
 def test_unknown_relevance_does_not_block_shadow_evaluation_indefinitely() -> None:
     """4.1: 古すぎる決算予定日(stale_earnings_relevance_days=10日を超える)
     かつ財務データの更新が確認できない場合、release_confirmation_stateは

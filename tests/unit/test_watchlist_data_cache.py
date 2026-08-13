@@ -5,15 +5,17 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from jstock_advisor.infrastructure.collection_store import build_collection_store
-from jstock_advisor.interfaces.types import DataSourceReference, FinancialSummary
+from jstock_advisor.interfaces.types import DataSourceReference, DividendInfo, FinancialSummary
 from jstock_advisor.services.watchlist_data_cache import (
     CacheEntry,
     CacheQualityStatus,
+    _CachingDividendDataProvider,
     _classify_financial_summary,
     _classify_optional,
     get_or_fetch,
@@ -258,3 +260,49 @@ def test_cache_hit_log_includes_quality_status(repo, caplog: pytest.LogCaptureFi
             "test",
         )
     assert any("quality_status=VALID" in record.message for record in caplog.records)
+
+
+class _RecordingDividendDataProvider:
+    """呼び出しごとに異なるDividendInfoを返し、fiscal_year_end_month引数を記録する。"""
+
+    def __init__(self) -> None:
+        self.calls: list[int | None] = []
+
+    def get_dividend_info(
+        self, stock_code: str, fiscal_year_end_month: int | None = None
+    ) -> DividendInfo | None:
+        self.calls.append(fiscal_year_end_month)
+        return DividendInfo(
+            stock_code=stock_code,
+            fiscal_year=str(fiscal_year_end_month),
+            actual_annual_dividend_per_share=Decimal(str(len(self.calls))),
+            source=DataSourceReference(provider="test", fetched_at=_NOW),
+        )
+
+
+def test_dividend_cache_key_does_not_collide_across_fiscal_year_end_month(repo) -> None:
+    """fiscal_year_end_month=3と=12でキャッシュキーが衝突しないこと(結果が
+    この引数に依存するため、引数を握りつぶさずキャッシュキーへ反映する)。"""
+    inner = _RecordingDividendDataProvider()
+    caching = _CachingDividendDataProvider(
+        inner=inner,
+        repo=repo,
+        ttl_hours=_TTL_HOURS,
+        negative_ttl_minutes=_NEGATIVE_TTL_MINUTES,
+        now=_NOW,
+    )
+
+    result_3 = caching.get_dividend_info("2914", fiscal_year_end_month=3)
+    result_12 = caching.get_dividend_info("2914", fiscal_year_end_month=12)
+
+    assert inner.calls == [3, 12]  # 両方ともキャッシュミスで実際にfetchされる(キー衝突なし)
+    assert result_3 is not None
+    assert result_12 is not None
+    assert result_3.fiscal_year == "3"
+    assert result_12.fiscal_year == "12"
+
+    # 同じ引数での再取得はキャッシュヒットし、innerを再度呼ばない
+    result_3_again = caching.get_dividend_info("2914", fiscal_year_end_month=3)
+    assert inner.calls == [3, 12]
+    assert result_3_again is not None
+    assert result_3_again.fiscal_year == "3"

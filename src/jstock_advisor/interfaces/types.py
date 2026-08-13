@@ -18,6 +18,8 @@ from jstock_advisor.domain.entities.enums import (
     BenefitUtilityCategory,
     CorporateActionType,
     DividendComparisonOutcome,
+    DividendPeriodEndBasis,
+    DividendValidationStatus,
     RecentPeriodsSource,
     RecordDateUnknownReason,
     ValuationBasis,
@@ -196,6 +198,26 @@ class HistoricalValuation(ImmutableSnapshot):
         return self
 
 
+class AnnualDividendActual(ImmutableSnapshot):
+    """1決算期分の年間配当実績(配当データクロスバリデーション根本修正)。
+
+    raw_dividend_per_shareは常に設定する(yfinance/EDINETとも生値を持つ)。
+    normalized_dividend_per_share/normalization_basis_dateは、その値が既に
+    株式分割等の基準日調整済みである場合のみ設定する(現状yfinanceのみ。EDINETは
+    常にNone=額面のまま未調整)。基準日が異なる値、または片方が未調整(None)の
+    値同士を直接比較してはならない(CrossValidatingDividendDataProviderが
+    CorporateActionServiceで明示的に同一基準日へ揃えてから比較する)。
+    """
+
+    period_end: dt.date
+    period_end_basis: DividendPeriodEndBasis
+    period_start: dt.date | None = None
+    period_start_is_estimated: bool = False
+    raw_dividend_per_share: Decimal
+    normalized_dividend_per_share: Decimal | None = None
+    normalization_basis_date: dt.date | None = None
+
+
 class DividendInfo(ImmutableSnapshot):
     stock_code: str
     fiscal_year: str
@@ -243,6 +265,22 @@ class DividendInfo(ImmutableSnapshot):
     # --- 無配転落のofficial/inferred分離(2026-07仕様レビュー対応) ---
     official_dividend_omission_announced: bool = False
     inferred_dividend_omission: bool = False
+
+    # --- 配当データクロスバリデーション根本修正(2026-08)で追加 ---
+    # yfinance(暦年集計)とEDINET(決算期単位)で比較対象期間がそもそもズレていた
+    # 不具合の是正。「最新値の利用」と「検証済みかどうか」を分離する: 以下の
+    # actual_annual_dividend_per_share等の"最新値"はannual_dividend_actualsの
+    # 最新エントリから常に導出し、EDINET側がまだ追いついていなくても最新の
+    # yfinance値をそのまま反映する。何が実際にクロスバリデーション済みかは
+    # validation_status/validated_period_endが別途示す。
+    annual_dividend_actuals: list[AnnualDividendActual] = []
+    validation_status: DividendValidationStatus | None = None
+    validated_period_end: dt.date | None = None
+    validated_period_basis: DividendPeriodEndBasis | None = None
+    # fiscal_year_end_month不明のためyfinance側が暦年集計にフォールバックした場合True。
+    # この場合EDINETとの突き合わせ自体を行わない(偶然のperiod_end一致を「同じ決算期」と
+    # 断定しないため)。
+    calendar_year_fallback_used: bool = False
 
 
 class BenefitDetail(ImmutableSnapshot):

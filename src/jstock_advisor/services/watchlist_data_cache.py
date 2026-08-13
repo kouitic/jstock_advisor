@@ -329,14 +329,20 @@ class _CachingDividendDataProvider:
     negative_ttl_minutes: int
     now: dt.datetime
 
-    def get_dividend_info(self, stock_code: str) -> DividendInfo | None:
+    def get_dividend_info(
+        self, stock_code: str, fiscal_year_end_month: int | None = None
+    ) -> DividendInfo | None:
+        # fiscal_year_end_monthは結果(決算期単位の集計)に直接影響するため、キャッシュキーへ
+        # 含める(配当データクロスバリデーション根本修正: 引数を握りつぶさずキー衝突を防ぐ)。
         return get_or_fetch(
             self.repo,
-            f"dividend_info:{stock_code}",
+            f"dividend_info:{stock_code}:{fiscal_year_end_month}",
             self.ttl_hours,
             self.negative_ttl_minutes,
             self.now,
-            lambda: self.inner.get_dividend_info(stock_code),
+            lambda: self.inner.get_dividend_info(
+                stock_code, fiscal_year_end_month=fiscal_year_end_month
+            ),
             _dividend_info_adapter,
             _classify_optional,
             "get_dividend_info",
