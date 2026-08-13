@@ -29,13 +29,17 @@ from jstock_advisor.domain.entities.enums import (
     DividendComparisonOutcome,
     EarningsReleaseConfirmationState,
     EligibilityBlockCategory,
+    NotificationCategory,
     NotificationContext,
     NotificationStatus,
     NotificationType,
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
+    WatchType,
     buy_action_label,
+    is_critical_risk,
+    is_sell_like,
 )
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
@@ -44,6 +48,9 @@ from jstock_advisor.domain.entities.notification_eligibility import Notification
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import format_jst
 from jstock_advisor.infrastructure.line.client import LineClient
+from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
+    HoldingsSnapshotRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -102,6 +109,39 @@ _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType]
 }
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
+
+
+def resolve_notification_category(recommendation: Recommendation) -> NotificationCategory:
+    """通知テンプレート・優先度・再送ポリシー選択のための唯一の分類ソース
+    (BUY候補裾野拡大機能2026-08)。`evaluate_notification_status()`の前段
+    ゲート・`_notification_status_for_send()`のNEAR BUY/WATCH_BEFORE_EARNINGS
+    早期リターン・優先度比較のすべてがこの関数の結果だけを見る(buy_action/
+    watch_type/recommendation_typeを個別に参照する判定を各所に重複させない)。
+
+    WATCH_BEFORE_EARNINGSの判定は必ず`recommendation.buy_action`を見る
+    (`recommendation_type`側の同名メンバーは利確判定エンジンのWATCH抑制専用、
+    buy_signal_service.pyのコメント参照)。
+    """
+    if is_critical_risk(recommendation.recommendation_type):
+        return NotificationCategory.CRITICAL_RISK
+    if recommendation.buy_action is not None:
+        if recommendation.buy_action in BUY_FAMILY_ACTIONS:
+            return NotificationCategory.BUY
+        if (
+            recommendation.buy_action == BuyAction.WATCH_FOR_PRICE
+            and recommendation.watch_type == WatchType.NEAR_BUY
+        ):
+            return NotificationCategory.NEAR_BUY
+        if recommendation.buy_action == BuyAction.WATCH_BEFORE_EARNINGS:
+            return NotificationCategory.WATCH_BEFORE_EARNINGS
+        # 通常のWATCH_FOR_PRICE(NEAR BUY非該当)・MANUAL_REVIEW・NOT_ATTRACTIVE・
+        # EXCLUDED・DATA_INSUFFICIENTはいずれも通知対象外(要求仕様6節)。
+        return NotificationCategory.NOT_NOTIFIABLE
+    if is_sell_like(recommendation.recommendation_type):
+        return NotificationCategory.SELL
+    # buy_action=Noneの残り(ポートフォリオ集中通知・保有判断スコア方式の
+    # WATCH等)は既存どおり通知対象として扱う。
+    return NotificationCategory.OTHER
 
 # 購入候補まとめ通知(notify_buy_candidates_digest)を分割する目安の文字数
 # (LINEのメッセージ長上限に対して余裕を持たせた値。BUYパイプライン第2次修正
@@ -1466,6 +1506,8 @@ class LineNotificationService:
         config: AppConfig,
         audit_service: AuditService | None = None,
         execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+        holdings_snapshot_repository: HoldingsSnapshotRepository | None = None,
+        trade_detection_confirmed: bool = True,
     ) -> None:
         self._client = line_client
         self._log_repo = notification_log_repository
@@ -1477,6 +1519,16 @@ class LineNotificationService:
         # (呼び出し元がaudit_service注入を忘れてもVALIDATIONが本番AuditLogへ
         # 漏れないようにする)。
         self._audit = audit_service or AuditService(execution_context=execution_context)
+        # --- BUY候補裾野拡大機能(2026-08) ---
+        self._holdings_snapshot_repo = (
+            holdings_snapshot_repository
+            or HoldingsSnapshotRepository.for_execution_context(execution_context)
+        )
+        # §5-1: 当日のTradeCooldownService.detect_and_apply()完了をこの実行で
+        # 確認できたか(呼び出し元のハンドラがTradeDetectionOutcome.confirmedを
+        # そのまま渡す)。Falseの場合、check_trade_cooldown_eligibility()は
+        # 重大リスク以外の通常通知をfail-closedで抑止する。
+        self._trade_detection_confirmed = trade_detection_confirmed
 
     def notify_recommendation(self, recommendation: Recommendation, now: dt.datetime) -> bool:
         """再通知条件を満たす場合のみLINEへ送信する。送信した場合Trueを返す。
@@ -1534,10 +1586,11 @@ class LineNotificationService:
         data_quality_blocked=Trueのみ返して黙って除外する。SELL/HOLDING_REVIEW/
         DEFAULTでは従来通りLINE送信する。
         """
-        if (
-            recommendation.buy_action is not None
-            and recommendation.buy_action not in BUY_FAMILY_ACTIONS
-        ):
+        # BUY候補裾野拡大機能(2026-08): NEAR BUY/WATCH_BEFORE_EARNINGSが
+        # buy_action not in BUY_FAMILY_ACTIONSのみを見る旧ゲートで誤って
+        # 抑止されないよう、唯一の分類ソースresolve_notification_category()を
+        # 使う(BUY_FAMILY・SELL系・OTHER系の既存動作は完全に不変)。
+        if resolve_notification_category(recommendation) is NotificationCategory.NOT_NOTIFIABLE:
             return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
 
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
@@ -1559,6 +1612,10 @@ class LineNotificationService:
             return NotificationOutcome(
                 status=NotificationStatus.NOT_REQUIRED, sent=False, data_quality_blocked=True
             )
+
+        cooldown = self.check_trade_cooldown_eligibility(recommendation, now)
+        if not cooldown.eligible:
+            return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
 
         status = self._notification_status_for_send(recommendation, previous, now)
         return NotificationOutcome(status=status, sent=False)
@@ -1593,6 +1650,44 @@ class LineNotificationService:
             block_category=EligibilityBlockCategory.DATA_QUALITY,
             block_reason="DATA_QUALITY_BLOCKED",
         )
+
+    def check_trade_cooldown_eligibility(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationEligibility:
+        """§6: 売買イベント検知後の通常通知クールダウン(BUY候補裾野拡大機能2026-08)。
+
+        判定順序: 1. 重大リスク(is_critical_risk)は常に貫通(通知可能)。
+        2. TradeCooldownService.detect_and_apply()の完了をこの実行で確認
+        できなかった場合(self._trade_detection_confirmed=False)、fail-closed
+        として通常通知をすべて抑止する(§5-1: 完了未確認のままクールダウン
+        未適用で通常通知を送るfail-openは採用しない)。
+        3. それ以外は`HoldingsSnapshotEntry.cooldown_until_date`に基づく
+        通常のクールダウン判定(境界値: 検知営業日の翌営業日からN営業日間、
+        当日を含めて抑止)。
+        """
+        if is_critical_risk(recommendation.recommendation_type):
+            return NotificationEligibility(eligible=True)
+
+        if not self._trade_detection_confirmed:
+            return NotificationEligibility(
+                eligible=False,
+                block_category=EligibilityBlockCategory.TRADE_DETECTION_IN_PROGRESS,
+                block_reason="TRADE_DETECTION_IN_PROGRESS",
+            )
+
+        if not self._config.notification.trade_cooldown.enabled:
+            return NotificationEligibility(eligible=True)
+
+        entry = self._holdings_snapshot_repo.get(recommendation.stock_code)
+        if entry is None or entry.cooldown_until_date is None:
+            return NotificationEligibility(eligible=True)
+        if now.date() <= entry.cooldown_until_date:
+            return NotificationEligibility(
+                eligible=False,
+                block_category=EligibilityBlockCategory.TRADE_COOLDOWN,
+                block_reason="TRADE_COOLDOWN",
+            )
+        return NotificationEligibility(eligible=True)
 
     def check_resend_eligibility(
         self, recommendation: Recommendation, now: dt.datetime
@@ -1966,6 +2061,7 @@ class LineNotificationService:
         data_insufficient_stock_codes: list[str] | None = None,
         failed_stock_codes: list[str] | None = None,
         buy_candidates_sent_count: int | None = None,
+        near_buy_sent_count: int | None = None,
         send_empty_summary: bool = True,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
@@ -1990,9 +2086,13 @@ class LineNotificationService:
         まったく同一内容のサマリーがLINEへ二重送信されることを防ぐため、同一日付・
         同一内容(件数)の通知が既に送信済みの場合は送信をスキップする。
         """
-        if buy_candidates_sent_count == 0 and not send_empty_summary:
+        # BUY候補裾野拡大機能(2026-08): near_buy_sent_countが渡された場合
+        # (BUY候補バッチ)、BUY=0でもNEAR BUYが1件以上あればサマリーを送信する。
+        buy_zero = buy_candidates_sent_count == 0
+        near_buy_zero = near_buy_sent_count is None or near_buy_sent_count == 0
+        if buy_zero and near_buy_zero and not send_empty_summary:
             logger.info(
-                "batch_summary suppressed (no buy candidates, send_empty_summary=False) "
+                "batch_summary suppressed (no buy/near-buy candidates, send_empty_summary=False) "
                 "process_name=%s total=%d",
                 process_name,
                 total,
@@ -2017,7 +2117,7 @@ class LineNotificationService:
         pseudo_stock_code = f"__batch__:{process_name}"
         content_hash = hashlib.sha256(
             f"{process_name}|{now.date().isoformat()}|{total}|"
-            f"{sorted(counts.items())}".encode()
+            f"{sorted(counts.items())}|near_buy={near_buy_sent_count}".encode()
         ).hexdigest()[:16]
         # 通知検証モード機能(2026-08追加): このdedupは_notification_status_for_send
         # とは別に自前で持つ同日・同内容抑止のため、VALIDATIONでは別途バイパスする
@@ -2059,9 +2159,14 @@ class LineNotificationService:
             lines.append(f"・買い候補(通知上限により見送り)：{counts['candidate_not_ranked']}件")
         if counts["watch_not_ranked"] > 0:
             lines.append(f"・価格待ち(通知上限により見送り)：{counts['watch_not_ranked']}件")
+        # BUY候補裾野拡大機能(2026-08): NEAR BUY実通知件数(finalizeループで
+        # 実際に送信された件数。ゲート通過前の候補数ではない)。BUY候補以外の
+        # バッチ呼び出しではnear_buy_sent_count=Noneのため表示しない。
+        if near_buy_sent_count is not None:
+            lines.append(f"・NEAR BUY通知：{near_buy_sent_count}件")
         lines.append("")
         lines.append(f"対象銘柄：{total}件")
-        if buy_candidates_sent_count == 0:
+        if buy_zero and near_buy_zero:
             lines.append("")
             lines.append("【今回の購入候補】")
             lines.append("該当なし")
@@ -2165,6 +2270,22 @@ class LineNotificationService:
         範囲外であり、一切影響を受けない。
         """
         if self._execution_context.is_validation:
+            return NotificationStatus.SENT
+
+        # BUY候補裾野拡大機能(2026-08): NEAR BUY/WATCH_BEFORE_EARNINGSは
+        # notification_policyでnotify_every_business_day=trueの場合、通常の
+        # 再送防止(resend_after_days/price_change_resend_threshold_pct)を
+        # バイパスして毎営業日通知する(buy_actionベースで判定する。
+        # resolve_notification_category()参照)。
+        category = resolve_notification_category(recommendation)
+        policy = self._config.notification.notification_policy
+        if (
+            category is NotificationCategory.NEAR_BUY
+            and policy.near_buy.notify_every_business_day
+        ) or (
+            category is NotificationCategory.WATCH_BEFORE_EARNINGS
+            and policy.watch_before_earnings.notify_every_business_day
+        ):
             return NotificationStatus.SENT
 
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]

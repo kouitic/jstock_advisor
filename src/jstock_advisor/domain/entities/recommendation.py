@@ -34,6 +34,8 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
+    StockType,
+    WatchType,
 )
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 
@@ -325,6 +327,23 @@ class Recommendation(ImmutableSnapshot):
     # 意味が異なる別指標。current_vs_entry_price_pctは「現在値がentryを何%
     # 上回っているか」であり、通知の「まで」という接近方向の文言には使えない)。
     required_decline_to_entry_pct: Decimal | None = None
+
+    # --- BUY候補裾野拡大・NEAR BUY監視・通知制御の再設計(2026-08)で追加。
+    # すべてOptional/デフォルト値付きのため既存レコードの読み込みに影響しない ---
+    # 5タイプ(高配当/成長/割安/連続増配/優良)分類結果。複合タイプを許容する。
+    stock_types: list[StockType] = []
+    # buy_action=WATCH_FOR_PRICEの銘柄のうち、NEAR BUY(積極監視・毎営業日通知
+    # 対象)である場合にのみ設定する付帯属性。BuyAction自体は変更しない
+    # (WatchStateService参照)。
+    watch_type: WatchType | None = None
+    # NEAR BUY WatchStateの表示用連続営業日数(評価不能を挟んだ場合は1へ
+    # リセットされる。WatchStateService参照)。
+    near_buy_consecutive_business_days: int | None = None
+    # 通知が送信されなかった理由(TRADE_COOLDOWN/RESEND_SUPPRESSED/
+    # DAILY_LIMIT_NEAR_BUY等)。最終送信判断時点で
+    # _record_notification_outcome_audit経由の監査ログへも記録されるが、
+    # Recommendation側にも残すことで単一レコードから理由を追跡できるようにする。
+    notification_suppression_reason: str | None = None
 
     # 次回決算予定日の妥当性検証結果(要求仕様12節: 評価日より過去の決算日を
     # 「次回決算予定日」として表示しない)。earnings_date_rawは検証前の生値

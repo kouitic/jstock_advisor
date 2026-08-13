@@ -5,17 +5,39 @@
 
 version: 1
 
+# 「高配当株」の表示ラベルとして再利用する(StockType.INCOME、HIGH_DIVIDENDは
+# 別途新設しない)。配当利回り単体基準を維持する(BUY候補裾野拡大機能2026-08
+# レビュー: 株主優待込みの総合利回りとは区別する)。
 income:
   min_dividend_yield_pct: 3.5
   max_payout_ratio_pct: 80.0
 
+# BUY候補裾野拡大機能(2026-08): 配当利回り条件を撤廃。営業利益トレンドの
+# みで独立判定する(高ROEは補助情報として扱うのみで分類条件には使わない)。
 growth:
   min_consecutive_growth_quarters: 2
-  max_dividend_yield_pct: 2.0
 
+# BUY候補裾野拡大機能(2026-08): 配当利回り条件を撤廃。PBR/PERいずれかの
+# 現在水準のみで独立判定する。
 value:
   max_pbr: 1.0
-  min_dividend_yield_pct: 2.0
+  max_per: 15.0
+
+# 連続増配株(BUY候補裾野拡大機能2026-08で新設)。主条件は連続増配年数。
+# min_dividend_growth_pctはハードなAND条件では使わず、今期予想
+# (forecast_annual_dividend_per_share)と前期実績
+# (previous_fiscal_year_dividend_per_share)の比較による補助表示にのみ使う。
+dividend_growth:
+  min_consecutive_dividend_increase_years: 3
+  min_dividend_growth_pct: 3.0
+
+# 優良株(BUY候補裾野拡大機能2026-08で新設)。自己資本比率はscreening.
+# financial_health.min_equity_ratio_pct(健全性の最低ライン30%)とは別の、
+# より高い「優良」ライン。
+quality:
+  min_equity_ratio_pct: 40.0
+  min_roe_pct: 8.0
+  require_earnings_trend_non_decreasing: true
 
 cyclical:
   industry_keywords: [鉄鋼, 化学, 海運, 空運, 非鉄金属, 卸売, 商社, 石油, 石炭, ゴム, 機械, 造船]

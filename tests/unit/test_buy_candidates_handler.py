@@ -64,11 +64,28 @@ def _holding(
     )
 
 
+class _FakeTradeCooldownService:
+    """本物はデフォルトでは本番のHoldingsSnapshotRepository(data/local_store配下)
+    を読み書きするため、テストがPortfolioService.list_holdings()をモックしていても
+    実データを汚染してしまう。ハンドラのディスパッチ入口テストでは常にこちらへ
+    差し替え、副作用なしでconfirmed=Trueを返す(§5-1のfail-closed経路は
+    line_notification_serviceのテストで別途検証済み)。"""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def detect_and_apply(self, current_holdings: object, now: object) -> object:
+        from jstock_advisor.services.trade_cooldown_service import TradeDetectionOutcome
+
+        return TradeDetectionOutcome(confirmed=True, events=[])
+
+
 def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(handler_module, "build_real_provider_bundle", lambda now, config: object())
     monkeypatch.setattr(handler_module, "build_line_client_from_env", lambda: object())
     monkeypatch.setattr(handler_module, "build_stock_snapshot", lambda *a, **kw: (object(), None))
     monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: _NoopAuditService())
+    monkeypatch.setattr(handler_module, "TradeCooldownService", _FakeTradeCooldownService)
     monkeypatch.setattr(
         handler_module,
         "LineNotificationService",
@@ -152,6 +169,7 @@ def test_dispatch_mode_dispatches_one_call_per_unified_target(
         "holding_quantity": None,
         "average_acquisition_price": None,
         "execution_mode": "NORMAL",
+        "trade_detection_confirmed": True,
     } in stripped
     assert {
         "fn": "jstock-advisor-buy-candidates",
@@ -161,6 +179,7 @@ def test_dispatch_mode_dispatches_one_call_per_unified_target(
         "holding_quantity": None,
         "average_acquisition_price": None,
         "execution_mode": "NORMAL",
+        "trade_detection_confirmed": True,
     } in stripped
 
 
@@ -370,6 +389,18 @@ class _FakeNotificationServiceForRanking:
             recommendation.stock_code, NotificationEligibility(eligible=True)
         )
 
+    def check_trade_cooldown_eligibility(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationEligibility:
+        # BUY候補裾野拡大機能(2026-08)。既存テストはNEAR BUYエントリを持たない
+        # ため通常呼ばれないが、フェイクの完全性のため常に許可を返す。
+        return NotificationEligibility(eligible=True)
+
+    def send_recommendation_notification(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> None:
+        self.digest_calls.append([recommendation])
+
     def notify_buy_candidates_digest(
         self, winners: list[Recommendation], now: dt.datetime
     ) -> dict[str, str]:
@@ -391,6 +422,7 @@ class _FakeNotificationServiceForRanking:
         data_insufficient_stock_codes: list[str] | None = None,
         failed_stock_codes: list[str] | None = None,
         buy_candidates_sent_count: int | None = None,
+        near_buy_sent_count: int | None = None,
         send_empty_summary: bool = True,
     ) -> bool:
         self.batch_summary_calls.append(
@@ -398,6 +430,7 @@ class _FakeNotificationServiceForRanking:
                 "total": total,
                 "category_counts": dict(category_counts),
                 "buy_candidates_sent_count": buy_candidates_sent_count,
+                "near_buy_sent_count": near_buy_sent_count,
                 "send_empty_summary": send_empty_summary,
             }
         )
@@ -457,7 +490,7 @@ def test_process_single_candidate_watch_price_counted_without_ranking_entry(
         handler_module,
         "record_result",
         lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None: (
+        validation_recommendation_id=None, near_buy_ranking_entry=None: (
             captured.update(category=category, ranking_entry=ranking_entry)
         ),
     )
@@ -495,7 +528,7 @@ def test_process_single_candidate_review_when_manual_review_action(
         handler_module,
         "record_result",
         lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None: (
+        validation_recommendation_id=None, near_buy_ranking_entry=None: (
             captured.update(category=category, ranking_entry=ranking_entry)
         ),
     )
@@ -534,7 +567,7 @@ def test_process_single_candidate_excluded_maps_to_hold(
         handler_module,
         "record_result",
         lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None: (
+        validation_recommendation_id=None, near_buy_ranking_entry=None: (
             captured.update(category=category)
         ),
     )
@@ -713,7 +746,7 @@ def test_process_single_candidate_data_error_does_not_notify_line_by_default(
         handler_module,
         "record_result",
         lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None: (
+        validation_recommendation_id=None, near_buy_ranking_entry=None: (
             captured.update(category=category)
         ),
     )
@@ -1808,7 +1841,7 @@ def test_process_single_candidate_validation_mode_reports_validation_recommendat
         handler_module,
         "record_result",
         lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None: captured.update(
+        validation_recommendation_id=None, near_buy_ranking_entry=None: captured.update(
             validation_recommendation_id=validation_recommendation_id
         ),
     )
@@ -1840,7 +1873,7 @@ def test_process_single_candidate_normal_mode_reports_no_validation_recommendati
         handler_module,
         "record_result",
         lambda batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None,
-        validation_recommendation_id=None: captured.update(
+        validation_recommendation_id=None, near_buy_ranking_entry=None: captured.update(
             validation_recommendation_id=validation_recommendation_id
         ),
     )

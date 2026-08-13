@@ -47,3 +47,29 @@ include_holdings: true
 # 場合に注意書きを表示する閾値(2026-07仕様レビュー対応)。強気/弱気の比率が
 # この値以上のとき「手法間の推定差が大きい」とみなす。
 fair_value_large_spread_ratio: 2.0
+
+# --- BUY候補裾野拡大・NEAR BUY監視・通知制御の再設計(2026-08)で追加 ---
+# 上記の既存キー(resend_after_days等)はBUY/SELL系にそのまま適用され続ける
+# (完全後方互換)。NEAR BUY/WATCH_BEFORE_EARNINGSのみ、通常の再送防止を
+# バイパスして毎営業日通知する。
+notification_policy:
+  near_buy:
+    notify_every_business_day: true
+  watch_before_earnings:
+    notify_every_business_day: true
+
+# 保有銘柄リストの変化(新規購入/買い増し/一部売却/全部売却)を検知した後、
+# 通常の売買推奨通知(BUY/買い増し/SELL/一部売却検討/NEAR BUY/
+# WATCH_BEFORE_EARNINGS)を抑止する営業日数。重大リスク通知
+# (URGENT_HOLDING_REVIEW/URGENT_REVIEW)は貫通する。
+trade_cooldown:
+  enabled: true
+  buy_business_days: 5
+  sell_business_days: 5
+  partial_trade_business_days: 3
+
+# NEAR BUYの監視が終了した際、この営業日数以上継続していた場合のみ
+# 「監視終了」通知を送る。
+watch_end_notification:
+  enabled: true
+  min_consecutive_business_days: 5

@@ -319,6 +319,56 @@ class OperationsNotificationConfig(StrictModel):
     shareholder_benefit_registry_min_expected_entries: int
 
 
+class NearBuyNotificationPolicy(StrictModel):
+    notify_every_business_day: bool
+
+
+class WatchBeforeEarningsNotificationPolicy(StrictModel):
+    notify_every_business_day: bool
+
+
+class NotificationPolicyConfig(StrictModel):
+    """通知種別ごとの再送ポリシー分離(BUY候補裾野拡大機能2026-08)。
+
+    BUY/SELL系は既存の`resend_after_days`/`price_change_resend_threshold_pct`
+    (トップレベル、変更なし)をそのまま使い続ける。NEAR BUY/
+    WATCH_BEFORE_EARNINGSのみ、このセクションで`notify_every_business_day`を
+    見て通常の再送防止をバイパスする。
+    """
+
+    near_buy: NearBuyNotificationPolicy
+    watch_before_earnings: WatchBeforeEarningsNotificationPolicy
+
+
+class TradeCooldownConfig(StrictModel):
+    """保有銘柄リストの変化から推定した売買イベント後、通常の売買推奨通知を
+    抑止する営業日数(BUY候補裾野拡大機能2026-08)。重大リスク通知は貫通する。
+    """
+
+    enabled: bool
+    buy_business_days: int
+    sell_business_days: int
+    partial_trade_business_days: int
+
+    @model_validator(mode="after")
+    def _check_values(self) -> TradeCooldownConfig:
+        for value in (
+            self.buy_business_days,
+            self.sell_business_days,
+            self.partial_trade_business_days,
+        ):
+            if value < 1:
+                raise ValueError("trade_cooldownの営業日数はいずれも1以上である必要があります")
+        return self
+
+
+class WatchEndNotificationConfig(StrictModel):
+    """NEAR BUYのWATCH終了通知(長期間監視していた場合のみ送る)の設定。"""
+
+    enabled: bool
+    min_consecutive_business_days: int
+
+
 class NotificationRulesConfig(StrictModel):
     version: int
     resend_after_days: int
@@ -338,6 +388,11 @@ class NotificationRulesConfig(StrictModel):
     # WATCH通知で手法間乖離が大きい/信頼度が低い場合に注意書きを表示する閾値
     # (強気/弱気の比率がこの値以上で「手法間の推定差が大きい」とみなす) ---
     fair_value_large_spread_ratio: float
+    # --- BUY候補裾野拡大機能(2026-08)で追加。既存キー(上記)は意味・既定値を
+    # 変更しないため、BUY/SELL系の再送挙動は完全後方互換 ---
+    notification_policy: NotificationPolicyConfig
+    trade_cooldown: TradeCooldownConfig
+    watch_end_notification: WatchEndNotificationConfig
 
 
 # --- data_validation_rules.yaml -------------------------------------------
@@ -949,18 +1004,43 @@ class HolidayCalendarConfig(BaseModel):
 
 
 class IncomeClassificationRules(StrictModel):
+    # 「高配当株」の主条件(配当利回り単体基準。総合利回りは使わない。
+    # BUY候補裾野拡大機能2026-08レビュー: 株主優待込みの総合利回りは
+    # 「高配当」の定義とは区別する)。
     min_dividend_yield_pct: float
     max_payout_ratio_pct: float
 
 
 class GrowthClassificationRules(StrictModel):
+    # BUY候補裾野拡大機能2026-08: 配当利回り条件は撤廃(成長株が配当を
+    # 出さない/低いことを要求しない)。営業利益トレンドのみを主条件とする。
     min_consecutive_growth_quarters: int
-    max_dividend_yield_pct: float
 
 
 class ValueClassificationRules(StrictModel):
+    # BUY候補裾野拡大機能2026-08: 配当利回り条件は撤廃。PBR/PERいずれかの
+    # 現在水準のみで独立判定する(過去中央値比較=Historical Valuationは
+    # Shadow計測専用のため使わない)。
     max_pbr: float
-    min_dividend_yield_pct: float
+    max_per: float
+
+
+class DividendGrowthClassificationRules(StrictModel):
+    # 主条件は連続増配年数。min_dividend_growth_pctはハードなAND条件では
+    # 使わず、classification_basisの補助表示にのみ用いる(BUY候補裾野
+    # 拡大機能2026-08レビュー: 一時的な増配率の低さで長期連続増配企業を
+    # 分類対象から落とさないため)。
+    min_consecutive_dividend_increase_years: int
+    min_dividend_growth_pct: float
+
+
+class QualityClassificationRules(StrictModel):
+    # screening.financial_health.min_equity_ratio_pct(健全性の最低ライン)
+    # とは意味の異なる、「優良」と呼べる水準の独自閾値(BUY候補裾野拡大
+    # 機能2026-08レビュー: 無理な閾値統合はしない)。
+    min_equity_ratio_pct: float
+    min_roe_pct: float
+    require_earnings_trend_non_decreasing: bool
 
 
 class CyclicalClassificationRules(StrictModel):
@@ -994,6 +1074,8 @@ class StockClassificationRulesConfig(StrictModel):
     turnaround: TurnaroundClassificationRules
     asset_play: AssetPlayClassificationRules
     event_driven: EventDrivenClassificationRules
+    dividend_growth: DividendGrowthClassificationRules
+    quality: QualityClassificationRules
 
 
 # --- momentum_rules.yaml ------------------------------------------------------
@@ -1271,6 +1353,32 @@ class UndervaluationCategoryCaps(StrictModel):
         return self
 
 
+class NearBuyConfig(StrictModel):
+    """NEAR BUY(BuyAction.WATCH_FOR_PRICEのうち積極監視対象)の閾値
+    (BUY候補裾野拡大機能2026-08)。"""
+
+    start_required_decline_pct: float
+    continue_required_decline_pct: float
+    min_company_quality_score: float
+    daily_max_notifications: int
+    # 評価不能(DATA_INSUFFICIENT)が続いた場合にWatchStateを終了させる
+    # までの最大営業日数(安全弁)。「監視終了」通知を送るかどうかの閾値は
+    # notification_rules.yamlのwatch_end_notification.min_consecutive_
+    # business_daysが正本(重複定義しない)。
+    max_stale_business_days: int
+
+    @model_validator(mode="after")
+    def _check_order(self) -> NearBuyConfig:
+        if self.start_required_decline_pct > self.continue_required_decline_pct:
+            raise ValueError(
+                "near_buyはstart_required_decline_pct <= continue_required_decline_pctが必要です"
+            )
+        for value in (self.daily_max_notifications, self.max_stale_business_days):
+            if value < 1:
+                raise ValueError("near_buyの営業日数・件数はいずれも1以上である必要があります")
+        return self
+
+
 class BuyDecisionRulesConfig(StrictModel):
     version: int
     score_thresholds: BuyScoreThresholds
@@ -1278,6 +1386,7 @@ class BuyDecisionRulesConfig(StrictModel):
     earnings_window: BuyEarningsWindowConfig
     margin_of_safety: MarginOfSafetyConfig
     undervaluation_category_caps: UndervaluationCategoryCaps
+    near_buy: NearBuyConfig
 
 
 # --- watchlist_screening_rules.yaml(ウォッチリスト自動追加機能) -------------

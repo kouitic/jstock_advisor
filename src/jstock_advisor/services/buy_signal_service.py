@@ -38,6 +38,7 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     RecommendationType,
     StockType,
+    WatchType,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
@@ -117,10 +118,14 @@ from jstock_advisor.domain.valuation.valuation_methods import (
     compute_valuation_anchor,
     determine_dispersion_band,
 )
+from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
+    HoldingsSnapshotRepository,
+)
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+from jstock_advisor.services.watch_state_service import WatchStateService
 
 # アクティブなRuleVersionが未登録の場合(初期運用時)のフォールバック値
 RULE_VERSION_PLACEHOLDER = "v1-mvp"
@@ -152,12 +157,22 @@ class BuySignalService:
         audit_service: AuditService | None = None,
         rule_version_service: RuleVersionService | None = None,
         execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+        watch_state_service: WatchStateService | None = None,
+        holdings_snapshot_repository: HoldingsSnapshotRepository | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
         self._calendar = business_calendar
         self._audit = audit_service or AuditService(execution_context=execution_context)
         self._rule_version_service = rule_version_service or RuleVersionService()
+        # --- BUY候補裾野拡大機能(2026-08) ---
+        self._watch_state_service = watch_state_service or WatchStateService(
+            business_calendar=business_calendar, execution_context=execution_context
+        )
+        self._holdings_snapshot_repo = (
+            holdings_snapshot_repository
+            or HoldingsSnapshotRepository.for_execution_context(execution_context)
+        )
 
     def _active_rule_version(self) -> str:
         return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
@@ -212,7 +227,6 @@ class BuySignalService:
         screening_result = evaluate_screening(
             financial=snapshot.financial,
             dividend=snapshot.dividend,
-            total_yield_pct=snapshot.total_yield_pct,
             average_trading_value_yen=snapshot.avg_trading_value,
             disclosure_risk_keywords_found=snapshot.disclosure_risk_keywords_found,
             data_fetched_at=snapshot.data_fetched_at,
@@ -442,8 +456,12 @@ class BuySignalService:
                 adjustment_codes.append("very_high_valuation_dispersion")
             else:
                 adjustment_codes.append("high_valuation_dispersion")
-        if not industry_model_applied:
-            adjustment_codes.append("industry_model_not_applied")
+        # BUY候補裾野拡大機能(2026-08): 業種別モデルは現状1つも実装されておらず
+        # 「適用可能なのに適用できなかった」ケースが存在しないため、全銘柄一律の
+        # +5%安全余裕率加算はしない(industry_model_appliedは他の用途
+        # (undervaluation_signals/compute_score/Recommendation記録)では引き続き
+        # 使用する)。MarginAdjustments.industry_model_not_appliedの設定値自体は、
+        # 将来実際に業種別モデルを実装した際に再利用できるよう残す。
         if is_cyclical_industry:
             adjustment_codes.append("cyclical_industry")
         if small_cap_or_low_liquidity:
@@ -626,6 +644,34 @@ class BuySignalService:
             else None
         )
 
+        # --- NEAR BUY判定(BUY候補裾野拡大機能2026-08、要求仕様§5)。
+        # decide_buy_action()自体は変更しない。売買クールダウン中は
+        # WatchStateServiceを一切呼ばない(新規作成・consecutive_business_days
+        # 増加・best_distance_pct更新のいずれも停止する。§5-2)。クールダウンの
+        # 発生自体(TradeCooldownService.detect_and_apply)はハンドラ側の入口で
+        # 既に完了している前提で、ここではHoldingsSnapshotEntryを読むだけ ---
+        watch_type: WatchType | None = None
+        near_buy_consecutive_business_days: int | None = None
+        cooldown_entry = self._holdings_snapshot_repo.get(stock_code)
+        in_trade_cooldown = (
+            cooldown_entry is not None
+            and cooldown_entry.cooldown_until_date is not None
+            and now.date() <= cooldown_entry.cooldown_until_date
+        )
+        if not in_trade_cooldown:
+            watch_type, near_buy_consecutive_business_days = (
+                self._watch_state_service.evaluate_and_update(
+                    stock_code=stock_code,
+                    buy_action=buy_action,
+                    company_quality_score=company_quality_score,
+                    required_decline_to_entry_pct=required_decline_to_entry_pct,
+                    current_price=current_price,
+                    entry_price=buy_price_levels.entry.price if buy_price_levels.entry else None,
+                    today=now.date(),
+                    config=self._config.buy_decision.near_buy,
+                )
+            )
+
         # --- 22. 監査ログ保存(買い候補にならなかった銘柄も含め全件記録) ---
         self._audit.record(
             decision_type="buy_signal",
@@ -803,6 +849,9 @@ class BuySignalService:
             current_vs_valuation_pct=current_vs_valuation_pct,
             current_vs_entry_price_pct=current_vs_entry_price_pct,
             required_decline_to_entry_pct=required_decline_to_entry_pct,
+            stock_types=list(snapshot.stock_type_classification.types),
+            watch_type=watch_type,
+            near_buy_consecutive_business_days=near_buy_consecutive_business_days,
             buy_price_reliability=buy_price_reliability,
             decision_valuation_min=valuation_summary.decision_valuation_min,
             decision_valuation_max=valuation_summary.decision_valuation_max,

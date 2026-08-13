@@ -45,6 +45,7 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
@@ -101,6 +102,8 @@ from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
+from jstock_advisor.services.watch_state_service import WatchStateService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -768,12 +771,17 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     providers = build_real_provider_bundle(now, config)
     # 常に本番テーブル(同一実行内でRecommendationを再読込みする経路が無いため)
     recommendation_repo = RecommendationRepository()
+    # BUY候補裾野拡大機能(2026-08、§5-1): 子Lambda(task=holding)は親Lambdaが
+    # detect_and_apply()の結果をイベントペイロード経由で伝播した
+    # trade_detection_confirmedをそのまま使う。
+    trade_detection_confirmed = event.get("trade_detection_confirmed", True)
     notification_service = LineNotificationService(
         line_client=build_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
         recommendation_repository=recommendation_repo,
         config=config,
         execution_context=execution_context,
+        trade_detection_confirmed=trade_detection_confirmed,
     )
     rule_version_service = RuleVersionService()
 
@@ -825,6 +833,30 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     )
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
     holdings = PortfolioService().list_holdings()
+
+    # --- BUY候補裾野拡大機能(2026-08、§5-1・§5-2): 売買イベント検知を
+    # BUY候補Lambda・保有銘柄Lambdaの起動順序に依存させない。両ハンドラの
+    # 入口でTradeCooldownService.detect_and_apply()を呼ぶ(冪等・PROCESSING/
+    # COMPLETEDロックにより当日1回だけ実際の検知処理が走る)。
+    calendar = BusinessCalendar.from_config(config.holiday_calendar)
+    trade_cooldown_service = TradeCooldownService(
+        business_calendar=calendar,
+        config=config.notification.trade_cooldown,
+        execution_context=execution_context,
+    )
+    current_holdings_by_code = {h.stock_code: h for h in holdings}
+    detection_outcome = trade_cooldown_service.detect_and_apply(current_holdings_by_code, now)
+    if detection_outcome.confirmed:
+        watch_state_service = WatchStateService(
+            business_calendar=calendar, execution_context=execution_context
+        )
+        watch_state_service.end_for_trade_events(detection_outcome.events, now.date())
+    else:
+        logger.warning(
+            "holdings_watchlist_handler: trade detection not confirmed this run "
+            "(TRADE_DETECTION_IN_PROGRESSとして通常通知をfail-closedする)"
+        )
+
     total = len(holdings)
     batch_id = f"holdings-watchlist-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
     start_batch(batch_id, total, now)
@@ -855,6 +887,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 ),
                 "portfolio_total_acquisition_cost": str(portfolio_total_acquisition_cost),
                 "execution_mode": execution_context.mode.value,
+                "trade_detection_confirmed": detection_outcome.confirmed,
             },
         )
 

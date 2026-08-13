@@ -76,6 +76,7 @@ from jstock_advisor.domain.entities.enums import (
     NotificationContext,
     PortfolioValuationBasis,
     RecommendationType,
+    WatchType,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
@@ -113,6 +114,8 @@ from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
+from jstock_advisor.services.watch_state_service import WatchStateService
 from jstock_advisor.services.watchlist_service import WatchlistService
 
 logger = logging.getLogger(__name__)
@@ -178,6 +181,36 @@ def _decode_buy_ranking_entry(entry: str) -> tuple[tuple[float, ...], str, str]:
         float(quality_score),
         float(discount_pct),
     )
+    return sort_key, stock_code, recommendation_id
+
+
+def _encode_near_buy_ranking_entry(recommendation: Recommendation) -> str:
+    """NEAR BUY/WATCH_BEFORE_EARNINGS用のランキングキー(BUY候補裾野拡大機能2026-08、
+    要求仕様: NEAR BUY日次上限の超過分選択は1st distance_pct昇順、2nd
+    company_quality_score降順)。WATCH_BEFORE_EARNINGSは日次上限の対象外だが、
+    同じランキング機構を共用するためここでもエンコードする。
+    """
+    distance_pct = (
+        float(recommendation.required_decline_to_entry_pct)
+        if recommendation.required_decline_to_entry_pct is not None
+        else float("inf")
+    )
+    quality_score = recommendation.company_quality_score or 0.0
+    return _RANKING_ENTRY_DELIMITER.join(
+        [
+            str(distance_pct),
+            str(-quality_score),
+            recommendation.stock_code,
+            recommendation.recommendation_id,
+        ]
+    )
+
+
+def _decode_near_buy_ranking_entry(entry: str) -> tuple[tuple[float, ...], str, str]:
+    distance_pct, neg_quality_score, stock_code, recommendation_id = entry.split(
+        _RANKING_ENTRY_DELIMITER
+    )
+    sort_key = (float(distance_pct), float(neg_quality_score))
     return sort_key, stock_code, recommendation_id
 
 
@@ -359,6 +392,7 @@ def _process_single_candidate(
     rule_version = RuleVersionService().get_active_version_or(RULE_VERSION_PLACEHOLDER)
     category = "failed"
     ranking_entry: str | None = None
+    near_buy_ranking_entry: str | None = None
     sector_entry: str | None = None
     validation_recommendation_id: str | None = None
     try:
@@ -557,6 +591,15 @@ def _process_single_candidate(
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
             elif outcome.ranking_group == "watch_price":
                 category = "watch_not_ranked"
+                # BUY候補裾野拡大機能(2026-08): NEAR BUY(watch_type=NEAR_BUY)
+                # またはWATCH_BEFORE_EARNINGSのみ、毎営業日通知フローに乗せる
+                # ための専用ランキングエントリを作る(通常のWATCH_FOR_PRICEは
+                # 従来どおり通知対象外のまま)。
+                if (
+                    final_recommendation.watch_type is not None
+                    or final_recommendation.buy_action == BuyAction.WATCH_BEFORE_EARNINGS
+                ):
+                    near_buy_ranking_entry = _encode_near_buy_ranking_entry(final_recommendation)
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
             else:
                 category = "hold"
@@ -592,6 +635,7 @@ def _process_single_candidate(
             ranking_entry=ranking_entry,
             sector_entry=sector_entry,
             validation_recommendation_id=validation_recommendation_id,
+            near_buy_ranking_entry=near_buy_ranking_entry,
         )
         if progress is not None and progress.is_complete:
             _finalize_batch(
@@ -886,6 +930,85 @@ def _finalize_batch(
             sorted(log_failed),
         )
 
+    # --- NEAR BUY/WATCH_BEFORE_EARNINGS専用ランキング→finalizeループ
+    # (BUY候補裾野拡大機能2026-08、要求仕様§1-B)。BUYループとは独立した
+    # 集計・日次上限を持つ。data quality → trade cooldown → resend →
+    # (NEAR BUYのみ)日次上限、の順でゲートを評価する。 ---
+    near_buy_entries: list[tuple[tuple[float, ...], str, str]] = [
+        _decode_near_buy_ranking_entry(entry) for entry in progress.near_buy_ranking_entries
+    ]
+    near_buy_entries.sort(key=lambda item: item[0])  # distance_pct昇順、同点は-quality_score昇順
+    near_buy_max = config.buy_decision.near_buy.daily_max_notifications
+    near_buy_daily_count = 0
+    near_buy_sent_count = 0
+
+    for near_unified_rank, (_nb_sort_key, nb_stock_code, nb_recommendation_id) in enumerate(
+        near_buy_entries, start=1
+    ):
+        nb_recommendation = recommendation_repo.get(nb_recommendation_id)
+        if nb_recommendation is None:
+            logger.warning(
+                "buy_candidates_handler: recommendation not found for near-buy winner "
+                "stock_code=%s recommendation_id=%s",
+                nb_stock_code,
+                nb_recommendation_id,
+            )
+            continue
+
+        nb_dq = notification_service.check_data_quality_eligibility(
+            nb_recommendation, now, context=NotificationContext.BUY_CANDIDATE_BATCH
+        )
+        if not nb_dq.eligible:
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
+                "NOT_REQUIRED", nb_dq, basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
+        nb_cooldown = notification_service.check_trade_cooldown_eligibility(nb_recommendation, now)
+        if not nb_cooldown.eligible:
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
+                nb_cooldown.block_reason or "NOT_REQUIRED", nb_cooldown,
+                basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
+        nb_resend = notification_service.check_resend_eligibility(nb_recommendation, now)
+        if not nb_resend.eligible:
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
+                nb_resend.block_reason or "SUPPRESSED", nb_resend,
+                basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
+        # 日次上限はNEAR_BUYカテゴリのみに適用する(WATCH_BEFORE_EARNINGSは
+        # 元々対象銘柄数が少ないため上限を設けない)。
+        is_near_buy = nb_recommendation.watch_type == WatchType.NEAR_BUY
+        if is_near_buy and near_buy_daily_count >= near_buy_max:
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
+                "NOT_REQUIRED",
+                NotificationEligibility(
+                    eligible=False,
+                    block_category=EligibilityBlockCategory.DAILY_LIMIT_NEAR_BUY,
+                    block_reason="DAILY_LIMIT_NEAR_BUY",
+                ),
+                basis, portfolio_total, coverage_ratio,
+            )
+            continue
+
+        notification_service.send_recommendation_notification(nb_recommendation, now)
+        near_buy_sent_count += 1
+        if is_near_buy:
+            near_buy_daily_count += 1
+        _record_notification_outcome_audit(
+            audit_service, rule_version, now, nb_recommendation, near_unified_rank,
+            near_buy_sent_count, "SENT", NotificationEligibility(eligible=True),
+            basis, portfolio_total, coverage_ratio,
+        )
+
     total_buy_candidates = progress.category_counts.get("candidate_not_ranked", 0)
     evaluated_count = len(buy_entries)
     adjusted_counts = dict(progress.category_counts)
@@ -906,6 +1029,7 @@ def _finalize_batch(
         data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
         failed_stock_codes=progress.failed_stock_codes,
         buy_candidates_sent_count=sent_count,
+        near_buy_sent_count=near_buy_sent_count,
         send_empty_summary=config.notification.send_empty_summary,
     )
 
@@ -946,12 +1070,18 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     calendar = BusinessCalendar.from_config(config.holiday_calendar)
     providers = build_real_provider_bundle(now, config)
     recommendation_repo = RecommendationRepository.for_execution_context(execution_context)
+    # BUY候補裾野拡大機能(2026-08、§5-1): 子Lambda(task=buy_candidate)は
+    # 親Lambdaがdetect_and_apply()の結果をイベントペイロード経由で伝播した
+    # trade_detection_confirmedをそのまま使う(親自身は通知を送らないため
+    # このフラグ自体は不要、既定Trueのままでよい)。
+    trade_detection_confirmed = event.get("trade_detection_confirmed", True)
     notification_service = LineNotificationService(
         line_client=build_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
         recommendation_repository=recommendation_repo,
         config=config,
         execution_context=execution_context,
+        trade_detection_confirmed=trade_detection_confirmed,
     )
 
     if event.get("task") == "buy_candidate":
@@ -993,6 +1123,32 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     check_registry_health(
         config.notification.operations.shareholder_benefit_registry_min_expected_entries
     )
+
+    # --- BUY候補裾野拡大機能(2026-08、§5-1・§5-2): 売買イベント検知を
+    # BUY候補Lambda・保有銘柄Lambdaの起動順序に依存させない。両ハンドラの
+    # 入口でTradeCooldownService.detect_and_apply()を呼ぶ(冪等・PROCESSING/
+    # COMPLETEDロックにより当日1回だけ実際の検知処理が走る)。検知した
+    # TradeEventをWatchStateService.end_for_trade_events()へ明示的に渡し、
+    # 該当銘柄のWatchStateを終了する(TradeCooldownServiceとWatchStateServiceは
+    # 直接依存しない、責務分離)。
+    trade_cooldown_service = TradeCooldownService(
+        business_calendar=calendar,
+        config=config.notification.trade_cooldown,
+        execution_context=execution_context,
+    )
+    current_holdings_by_code = {h.stock_code: h for h in PortfolioService().list_holdings()}
+    detection_outcome = trade_cooldown_service.detect_and_apply(current_holdings_by_code, now)
+    if detection_outcome.confirmed:
+        watch_state_service = WatchStateService(
+            business_calendar=calendar, execution_context=execution_context
+        )
+        watch_state_service.end_for_trade_events(detection_outcome.events, now.date())
+    else:
+        logger.warning(
+            "buy_candidates_handler: trade detection not confirmed this run "
+            "(TRADE_DETECTION_IN_PROGRESSとして通常通知をfail-closedする)"
+        )
+
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
     targets = _build_unified_targets(config, now, execution_context)
     holding_count = sum(
@@ -1024,6 +1180,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     else None
                 ),
                 "execution_mode": execution_context.mode.value,
+                "trade_detection_confirmed": detection_outcome.confirmed,
             },
         )
 

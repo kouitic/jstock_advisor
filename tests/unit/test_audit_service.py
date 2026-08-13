@@ -152,15 +152,21 @@ def test_buy_signal_service_records_audit_even_when_excluded(tmp_path: Path) -> 
         audit_service=audit_service,
     )
 
-    # 9861(吉野家)は総合利回りが基準未満で除外される想定(既存の分析結果より)
+    # 9861(吉野家)は総合利回りが低いが、BUY候補裾野拡大機能(2026-08)で
+    # 総合利回りは一次スクリーニングのハード除外条件では無くなったため、
+    # 一次スクリーニングは通過し、後続の評価でNOT_ATTRACTIVEとなる想定
+    # (既存の分析結果より)。screening自体の除外挙動(REIT/ETF/債務超過/
+    # 継続企業疑義/流動性/データ鮮度/開示リスク)はtest_screening.pyで
+    # 個別に検証済みのため、ここではEXCLUDED以外の判定でも監査が
+    # 記録されることを確認する。
     outcome = service.analyze("9861", _NOW)
-    assert outcome.recommendation is None
-    assert outcome.buy_action == BuyAction.EXCLUDED
+    assert outcome.recommendation is not None
+    assert outcome.buy_action == BuyAction.NOT_ATTRACTIVE
 
     entries = audit_repo.list_by_stock("9861")
     assert len(entries) == 1
     assert entries[0].decision_type == "buy_signal"
-    assert entries[0].output_values["final_buy_action"] == BuyAction.EXCLUDED.value
+    assert entries[0].output_values["final_buy_action"] == BuyAction.NOT_ATTRACTIVE.value
     assert entries[0].rule_version == "v1-mvp"
 
 

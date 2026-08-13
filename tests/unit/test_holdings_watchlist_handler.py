@@ -62,11 +62,28 @@ class _FakeProviders:
     market_data = _FakeMarketData()
 
 
+class _FakeTradeCooldownService:
+    """本物はデフォルトでは本番のHoldingsSnapshotRepository(data/local_store配下)
+    を読み書きするため、テストがPortfolioService.list_holdings()をモックしていても
+    実データを汚染してしまう。ハンドラのディスパッチ入口テストでは常にこちらへ
+    差し替え、副作用なしでconfirmed=Trueを返す(§5-1のfail-closed経路は
+    line_notification_serviceのテストで別途検証済み)。"""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def detect_and_apply(self, current_holdings: object, now: object) -> object:
+        from jstock_advisor.services.trade_cooldown_service import TradeDetectionOutcome
+
+        return TradeDetectionOutcome(confirmed=True, events=[])
+
+
 def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         handler_module, "build_real_provider_bundle", lambda now, config: _FakeProviders()
     )
     monkeypatch.setattr(handler_module, "build_line_client_from_env", lambda: object())
+    monkeypatch.setattr(handler_module, "TradeCooldownService", _FakeTradeCooldownService)
     monkeypatch.setattr(
         handler_module,
         "LineNotificationService",
@@ -127,6 +144,7 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
         "portfolio_total_market_value": None,
         "portfolio_total_acquisition_cost": "200000",
         "execution_mode": "NORMAL",
+        "trade_detection_confirmed": True,
     } in stripped
     assert {
         "fn": "jstock-advisor-holdings-watchlist",
@@ -135,6 +153,7 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
         "portfolio_total_market_value": None,
         "portfolio_total_acquisition_cost": "200000",
         "execution_mode": "NORMAL",
+        "trade_detection_confirmed": True,
     } in stripped
 
 

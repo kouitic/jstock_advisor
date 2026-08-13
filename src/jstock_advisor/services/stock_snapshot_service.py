@@ -377,6 +377,7 @@ def build_stock_snapshot(
         now=now,
         config=config.stock_classification,
         data_sources=data_sources,
+        dividend=dividend,
     )
     momentum_snapshot = compute_momentum_snapshot(
         bars,

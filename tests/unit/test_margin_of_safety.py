@@ -10,9 +10,11 @@ _CONFIG = load_config().buy_decision.margin_of_safety
 
 
 def test_high_confidence_base_margins_no_adjustments() -> None:
+    # BUY候補裾野拡大機能(2026-08): 打診買い(entry)の初期安全余裕率を
+    # 0.10から0.05へ緩和(config/buy_decision_rules.yaml)。standard/strongは不変。
     result = compute_margin_of_safety(ConfidenceLevel.HIGH, [], _CONFIG)
     assert result.allowed is True
-    assert result.entry_margin == Decimal("0.10")
+    assert result.entry_margin == Decimal("0.05")
     assert result.standard_margin == Decimal("0.15")
     assert result.strong_margin == Decimal("0.20")
     assert result.adjustments == ()
@@ -35,13 +37,14 @@ def test_low_confidence_does_not_generate_automatic_price() -> None:
 def test_adjustments_stack_and_are_recorded_with_reasons() -> None:
     # industry_model_not_applied(VALUATION_UNCERTAINTY)とearnings_within_7_business_days
     # (EVENT_TIMING)は別カテゴリのため合算される。entryへは加算感応度倍率(0.50)が
-    # かかるため、単純加算(0.10+0.05+0.03)ではなく0.10+(0.05+0.03)*0.50になる。
+    # かかるため、単純加算ではなくentry基準値(0.05、2026-08で0.10から緩和)+
+    # (0.05+0.03)*0.50になる。
     result = compute_margin_of_safety(
         ConfidenceLevel.HIGH,
         ["industry_model_not_applied", "earnings_within_7_business_days"],
         _CONFIG,
     )
-    assert result.entry_margin == Decimal("0.10") + (Decimal("0.05") + Decimal("0.03")) * Decimal(
+    assert result.entry_margin == Decimal("0.05") + (Decimal("0.05") + Decimal("0.03")) * Decimal(
         "0.50"
     )
     assert len(result.adjustments) == 2
@@ -61,7 +64,7 @@ def test_same_category_adjustments_only_max_value_adopted() -> None:
         ["high_valuation_dispersion", "very_high_valuation_dispersion"],
         _CONFIG,
     )
-    assert result.entry_margin == Decimal("0.10") + Decimal("0.10") * Decimal("0.50")
+    assert result.entry_margin == Decimal("0.05") + Decimal("0.10") * Decimal("0.50")
     adopted = next(a for a in result.adjustments if a.code == "very_high_valuation_dispersion")
     superseded = next(a for a in result.adjustments if a.code == "high_valuation_dispersion")
     assert adopted.superseded_by is None
@@ -156,7 +159,7 @@ def test_minimum_margin_gap_raises_upper_tier_when_too_close() -> None:
 def test_buy_price_levels_ordering_from_margins() -> None:
     margin_result = compute_margin_of_safety(ConfidenceLevel.HIGH, [], _CONFIG)
     levels = compute_buy_price_levels(Decimal("1000"), margin_result)
-    assert levels.entry.price == Decimal("900")  # 1000 * (1-0.10)
+    assert levels.entry.price == Decimal("950")  # 1000 * (1-0.05)、2026-08で0.10から緩和
     assert levels.standard.price == Decimal("850")  # 1000 * (1-0.15)
     assert levels.strong.price == Decimal("800")  # 1000 * (1-0.20)
     assert levels.entry.price >= levels.standard.price >= levels.strong.price
