@@ -1527,11 +1527,20 @@ class NotificationOutcome:
     (DATA_QUALITY_ALERTまたはMANUAL_REVIEW_REQUIREDへ切り替わった)場合にTrueとなる。
     この場合、たとえ手動確認メッセージ自体はLINEへ送信されていても(sent=True)、
     評価結果としては「要確認」区分として扱う(呼び出し側の責務)。
+
+    block_category/block_reason(コードレビュー対応2026-08、指摘2): 通常の
+    NotificationStatus(NOT_REQUIRED等)だけでは、TRADE_COOLDOWN・
+    TRADE_DETECTION_IN_PROGRESS・LOW_PRIORITY・DUPLICATE_STOCK_NOTIFICATION
+    といった具体的な抑止理由を監査から追跡できなかったため追加した。
+    各check_*_eligibility()が返すNotificationEligibilityの値をそのまま
+    引き継ぐ(該当しない場合はNone)。
     """
 
     status: NotificationStatus
     sent: bool
     data_quality_blocked: bool = False
+    block_category: EligibilityBlockCategory | None = None
+    block_reason: str | None = None
 
 
 class LineNotificationService:
@@ -1658,11 +1667,21 @@ class LineNotificationService:
 
         cooldown = self.check_trade_cooldown_eligibility(recommendation, now)
         if not cooldown.eligible:
-            return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
+            return NotificationOutcome(
+                status=NotificationStatus.NOT_REQUIRED,
+                sent=False,
+                block_category=cooldown.block_category,
+                block_reason=cooldown.block_reason,
+            )
 
         priority = self.check_cross_pipeline_priority_eligibility(recommendation, now)
         if not priority.eligible:
-            return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
+            return NotificationOutcome(
+                status=NotificationStatus.NOT_REQUIRED,
+                sent=False,
+                block_category=priority.block_category,
+                block_reason=priority.block_reason,
+            )
 
         status = self._notification_status_for_send(recommendation, previous, now)
         return NotificationOutcome(status=status, sent=False)

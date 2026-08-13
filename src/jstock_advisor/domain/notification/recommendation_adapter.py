@@ -79,27 +79,41 @@ def _build_watch_before_earnings(recommendation: Recommendation) -> Notification
     )
 
 
-def _sell_target_price(recommendation: Recommendation) -> Decimal | None:
+def _sell_target_price_and_label(
+    recommendation: Recommendation,
+) -> tuple[Decimal | None, str | None]:
+    """SELL側の価格ラベル(コードレビュー対応2026-08、指摘3)。「打診」は買い
+    価格の表現であり、売却価格にそのまま流用すると意味的に不自然になる
+    (common.pyのSellPriceLevelsドキュストリング参照)ため、価格フィールドの
+    業務的意味に応じたラベルを個別に設定する。
+
+    immediate_execution_price: 即時執行が真に必要な場合(URGENT_REVIEW等)の
+    現在値ベースの参考価格 → 「即時執行」。
+    stop_review_price: 損切り・投資前提再確認価格(将来の再評価条件) →
+    「見直し」。
+    """
     sp = recommendation.sell_prices
     if sp is None:
-        return None
+        return None, None
     if sp.immediate_execution_price is not None:
-        return sp.immediate_execution_price.price
+        return sp.immediate_execution_price.price, "即時執行"
     if sp.stop_review_price is not None:
-        return sp.stop_review_price.price
-    return None
+        return sp.stop_review_price.price, "見直し"
+    return None, None
 
 
 def _build_sell(recommendation: Recommendation) -> NotificationTextInput:
     reason = recommendation.reasons[0] if recommendation.reasons else None
     if reason is None:
         reason = recommendation.recommended_action_summary
+    target_price, target_price_label = _sell_target_price_and_label(recommendation)
     return NotificationTextInput(
         category=NotificationCategory.SELL,
         stock_code=recommendation.stock_code,
         stock_name=recommendation.stock_name,
         current_price=recommendation.price_at_recommendation,
-        target_price=_sell_target_price(recommendation),
+        target_price=target_price,
+        target_price_label=target_price_label,
         reason=reason,
     )
 

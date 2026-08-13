@@ -152,6 +152,26 @@ def _send_or_suppress_notification(
     return notification_service.notify_recommendation_with_status(recommendation, now)
 
 
+def _resolve_suppression_reason(outcome: NotificationOutcome) -> str | None:
+    """監査用のnotification_suppression_reasonを、可能な限り具体的な理由で
+    解決する(コードレビュー対応2026-08、指摘2)。
+
+    優先順位: 1. block_reason(TRADE_COOLDOWN/TRADE_DETECTION_IN_PROGRESS/
+    LOW_PRIORITY/DUPLICATE_STOCK_NOTIFICATION等、check_*_eligibility()由来の
+    具体的な理由) 2. block_category.value(block_reasonが無い場合の分類名)
+    3. status.value(具体的理由が無い通常のNOT_REQUIRED等)。送信済みの場合は
+    Noneを返す(既存動作どおり)。BUY候補側の監査(_record_notification_
+    outcome_audit)がblock_reasonを最優先で使うのと意味を揃えている。
+    """
+    if outcome.sent:
+        return None
+    if outcome.block_reason:
+        return outcome.block_reason
+    if outcome.block_category is not None:
+        return outcome.block_category.value
+    return outcome.status.value
+
+
 def _evaluate_portfolio_concentration_and_notify(
     holding: Holding,
     current_price: Decimal,
@@ -248,7 +268,7 @@ def _notify_legacy_sell_and_build_result(
         raw_profit_recommendation_type=None,
         final_recommendation_type=recommendation.recommendation_type,
         notification_status=outcome.status,
-        notification_suppression_reason=None if outcome.sent else outcome.status.value,
+        notification_suppression_reason=_resolve_suppression_reason(outcome),
         sell_signal_status="TRIGGERED",
         profit_taking_status="NOT_EVALUATED",
         fair_value_status="NOT_AVAILABLE",
@@ -330,7 +350,7 @@ def _notify_holding_decision_and_build_result(
         raw_profit_recommendation_type=None,
         final_recommendation_type=recommendation.recommendation_type,
         notification_status=outcome.status,
-        notification_suppression_reason=None if outcome.sent else outcome.status.value,
+        notification_suppression_reason=_resolve_suppression_reason(outcome),
         sell_signal_status="TRIGGERED",
         profit_taking_status="NOT_EVALUATED",
         fair_value_status="NOT_AVAILABLE",
@@ -583,7 +603,7 @@ def _analyze_one_holding(
             raw_profit_recommendation_type=pt_outcome.recommendation.raw_recommendation_type,
             final_recommendation_type=pt_outcome.recommendation.recommendation_type,
             notification_status=outcome.status,
-            notification_suppression_reason=None if outcome.sent else outcome.status.value,
+            notification_suppression_reason=_resolve_suppression_reason(outcome),
             sell_signal_status="NO_SIGNAL",
             profit_taking_status="TRIGGERED",
             fair_value_status=(

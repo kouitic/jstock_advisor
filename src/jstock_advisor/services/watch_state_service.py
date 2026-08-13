@@ -112,6 +112,26 @@ class WatchStateService:
         """
         existing = self._repo.get_active(stock_code, WatchType.NEAR_BUY)
 
+        # コードレビュー対応(2026-08、指摘1): 「今日実際に買い水準へ到達した」
+        # という最新の有効な評価結果を、stale終了より優先する。数営業日の
+        # 評価不能を挟んだ後に評価が再開し、その当日にbuy_actionがBUY家族
+        # だった場合、stale終了を先に判定してしまうと「監視終了」と
+        # 「BUY到達」の二重通知が発生してしまうため、判定順序を入れ替えた
+        # (PROMOTED_TO_BUYの判定にstale・gapは一切関与しない)。
+        if existing is not None and buy_action in BUY_FAMILY_ACTIONS:
+            previous_days = existing.consecutive_business_days
+            started_at = existing.started_at
+            best_distance = existing.best_distance_pct
+            self._end(existing, today, END_REASON_PROMOTED_TO_BUY)
+            return WatchTransitionResult(
+                watch_type=WatchType.NEAR_BUY,
+                transition_type=WatchTransitionType.PROMOTED_TO_BUY,
+                previous_consecutive_business_days=previous_days,
+                started_at=started_at,
+                end_reason=END_REASON_PROMOTED_TO_BUY,
+                best_distance_pct=best_distance,
+            )
+
         if existing is not None:
             gap = self._calendar.business_days_between(existing.last_matched_at, today)
             if evaluate_stale(gap, config.max_stale_business_days):
@@ -130,20 +150,6 @@ class WatchStateService:
                     end_reason=END_REASON_STALE,
                     best_distance_pct=best_distance,
                 )
-
-        if existing is not None and buy_action in BUY_FAMILY_ACTIONS:
-            previous_days = existing.consecutive_business_days
-            started_at = existing.started_at
-            best_distance = existing.best_distance_pct
-            self._end(existing, today, END_REASON_PROMOTED_TO_BUY)
-            return WatchTransitionResult(
-                watch_type=WatchType.NEAR_BUY,
-                transition_type=WatchTransitionType.PROMOTED_TO_BUY,
-                previous_consecutive_business_days=previous_days,
-                started_at=started_at,
-                end_reason=END_REASON_PROMOTED_TO_BUY,
-                best_distance_pct=best_distance,
-            )
 
         if existing is not None:
             if not meets_near_buy_continue_conditions(
