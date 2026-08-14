@@ -80,7 +80,15 @@ def _watch_end_recommendation(stock_code: str, recommendation_id: str) -> Recomm
     )
 
 
-def test_watch_end_notification_reaches_real_line_client(monkeypatch, tmp_path: Path) -> None:
+def test_watch_end_is_recorded_as_non_actionable_without_sending(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """コードレビュー対応(2026-08、LINE通知アクション限定化): 監視終了通知は
+    「監視をやめた」ことの報告であり、ユーザーに売買アクションを促す通知では
+    ないため、全ゲート通過後ももはやLINE送信しない(send_watch_end_notification
+    は呼ばれない)。送らなかったこと自体はNON_ACTIONABLEとしてAuditへ記録する。
+    """
+    audit_repo = AuditLogRepository(store_dir=tmp_path)
     _patch_audit(monkeypatch, tmp_path)
     store_dir = tmp_path / "local_store"
     repo = RecommendationRepository(store_dir=store_dir)
@@ -113,12 +121,11 @@ def test_watch_end_notification_reaches_real_line_client(monkeypatch, tmp_path: 
 
     handler_module._finalize_batch(progress, _CONFIG, _NOW, repo, notification_service)
 
-    assert len(client.sent) == 1
-    body = client.sent[0]
-    assert "監視終了" in body
-    assert "6日継続" in body
-    assert "9432" in body
-    assert len(body) <= 70
+    assert client.sent == []
+    audit_entries = audit_repo.list_by_stock("9432")
+    assert any(
+        e.output_values.get("block_category") == "NON_ACTIONABLE" for e in audit_entries
+    )
 
 
 def test_watch_end_gate_condition_requires_notifiable_reason_and_threshold() -> None:

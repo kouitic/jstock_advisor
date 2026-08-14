@@ -76,7 +76,12 @@ def test_full_take_extreme_margin_flagged() -> None:
     )
     result = validate_recommendation(r, _CONFIG)
     assert result.passed is False
-    assert any(v.check_name == "full_take_extreme_margin" for v in result.violations)
+    violation = next(v for v in result.violations if v.check_name == "full_take_extreme_margin")
+    # コードレビュー対応(2026-08、挙動変更): 内部計算異常(価格算出ロジックの不整合)の
+    # 疑いがあるため証拠品質系とは区別し、安全弁(manual_review_required)を発火させる
+    # (以前はmanual_review_required未指定でFalseのままだった)。
+    assert violation.manual_review_required is True
+    assert result.requires_manual_review is True
 
 
 def test_full_take_missing_all_price_guidance_flagged() -> None:
@@ -216,7 +221,12 @@ def _evidence(*, immediate: bool = False, primary_confirmed: bool = False) -> di
     }
 
 
-def test_sell_with_single_independent_group_flagged_for_manual_review() -> None:
+def test_sell_with_single_independent_group_flagged_as_evidence_quality_issue() -> None:
+    # コードレビュー対応(2026-08、LINE通知アクション限定化): 証拠不足(独立根拠
+    # グループ不足)は内部論理矛盾ではなく証拠の情報源品質の問題であるため、
+    # もはや安全弁(notify_manual_review_required)を発火させない
+    # (is_evidence_quality_issue=True・manual_review_required=False)。該当する
+    # RecommendationはNON_ACTIONABLEゲート経由でAudit記録のみとなる(§10)。
     r = _recommendation(
         RecommendationType.SELL,
         Decimal("1000"),
@@ -224,8 +234,12 @@ def test_sell_with_single_independent_group_flagged_for_manual_review() -> None:
         independent_evidence_group_count=1,
     )
     result = validate_recommendation(r, _CONFIG)
-    assert result.requires_manual_review
-    assert any(v.check_name == "sell_based_on_single_evidence" for v in result.violations)
+    assert not result.requires_manual_review
+    violation = next(
+        v for v in result.violations if v.check_name == "sell_based_on_single_evidence"
+    )
+    assert violation.manual_review_required is False
+    assert violation.is_evidence_quality_issue is True
 
 
 def test_sell_with_two_independent_groups_not_flagged() -> None:
@@ -237,6 +251,27 @@ def test_sell_with_two_independent_groups_not_flagged() -> None:
     )
     result = validate_recommendation(r, _CONFIG)
     assert not any(v.check_name == "sell_based_on_single_evidence" for v in result.violations)
+
+
+def test_sell_based_on_secondary_source_only_is_evidence_quality_issue() -> None:
+    # コードレビュー対応(2026-08、LINE通知アクション限定化): 一次情報未確認
+    # (yfinance等の二次情報のみ)は証拠の情報源品質の問題であり、内部論理矛盾
+    # ではないため、安全弁を発火させない(is_evidence_quality_issue=True・
+    # manual_review_required=False)。independent_evidence_group_count=2として
+    # sell_based_on_single_evidenceとは切り分ける。
+    r = _recommendation(
+        RecommendationType.SELL,
+        Decimal("1000"),
+        evidence_details=[_evidence(primary_confirmed=False), _evidence(primary_confirmed=False)],
+        independent_evidence_group_count=2,
+    )
+    result = validate_recommendation(r, _CONFIG)
+    assert not result.requires_manual_review
+    violation = next(
+        v for v in result.violations if v.check_name == "sell_based_on_secondary_source_only"
+    )
+    assert violation.manual_review_required is False
+    assert violation.is_evidence_quality_issue is True
 
 
 def test_urgent_review_with_unconfirmed_immediate_critical_flagged() -> None:

@@ -190,6 +190,9 @@ def _canned_result(recommendation_type: RecommendationType) -> ProfitTakingResul
         fair_value_used_as_sole_strong_basis=False,
         current_price_vs_neutral_fair_value_pct=10.0,
         current_price_vs_bull_fair_value_pct=5.0,
+        fair_value_action_usable=False,
+        ceiling_price=None,
+        upside_pct=None,
     )
 
 

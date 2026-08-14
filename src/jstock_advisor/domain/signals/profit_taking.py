@@ -21,6 +21,7 @@ from jstock_advisor.domain.entities.enums import (
     DividendComparisonOutcome,
     PriceBasisType,
     PriceFieldBasis,
+    ProfitTakingIndustrySector,
     RecommendationType,
     StockType,
     TimingAction,
@@ -48,6 +49,24 @@ _LEVEL_TO_RECOMMENDATION = {
     _Level.PARTIAL: RecommendationType.PARTIAL_PROFIT_TAKE,
     _Level.FULL: RecommendationType.FULL_PROFIT_TAKE,
 }
+
+
+class _RawLevelOrigin(IntEnum):
+    """raw_levelを実際に押し上げた根拠の種別(コードレビュー対応2026-08、
+    上値余地の導入・mitigating/timing両層のsoftening制御)。
+
+    数値が大きいほど優先順位が高い。同じraw_levelに複数の経路が同時に
+    成立した場合、最も優先順位の高いoriginを採用する(softening制御の
+    強さがoriginごとに異なるため、複数成立時の扱いを曖昧にしない)。
+    """
+
+    NONE = 0  # raw_level == HOLD
+    OTHER_CONDITIONS = 1  # 非価格系の独立条件数のみで到達(現行どおり無制限softening)
+    PRICE_POSITION = 2  # 含み益率×上値余地の基本マトリクス(強候補でないFULL/PARTIAL)
+    # 上記に加え、ユーザー設定目標到達もPRICE_POSITION相当として扱う。
+    FAIR_VALUE_STRONG = 3  # 既存_fair_value_strong_condition/_fair_value_partial_gate_met
+    # (適正価格ベースの強いゲート)。
+    FUNDAMENTAL_CRITICAL_RISK = 4  # 投資前提崩壊・会計不祥事・確定減配+CF悪化(softening対象外)
 
 
 @dataclass(frozen=True)
@@ -100,6 +119,12 @@ class ProfitTakingConditionInputs:
     # 業種別適正価格モデルが適用済みか(現行データソースでは恒久的にFalseとなる
     # ことが多い。適正価格単独での強い判定を許すゲートの1つ)。
     industry_model_applied: bool = False
+    # コードレビュー対応(2026-08、上値余地の導入): profit_taking_industry.pyの
+    # 区分(classify_profit_taking_industry_sector()の戻り値)。ceiling_price
+    # (fair_value_range.bull)を上値余地グリッドの主要根拠として使ってよいかの
+    # 業種別ゲート(_fair_value_action_usable())に使う。呼び出し元が渡さない
+    # 場合はUNKNOWN相当として安全側に扱う。
+    industry_sector: ProfitTakingIndustrySector | None = None
     # 保有株数・売買単位から一部売却が実行可能か。
     partial_sale_executable: bool = True
     # 次回決算までの営業日数(取得できない場合はNone)。
@@ -127,6 +152,11 @@ class ProfitTakingResult:
     # 監視開始価格等の閾値ベースの価格ではなく、必ず実際の現在株価から算出する。
     current_price_vs_neutral_fair_value_pct: float | None
     current_price_vs_bull_fair_value_pct: float | None
+    # --- コードレビュー対応(2026-08、上値余地の導入) ---
+    # ceiling_price(fv_range.bull)を上値余地グリッドの主要根拠として使えたか。
+    fair_value_action_usable: bool
+    ceiling_price: Decimal | None
+    upside_pct: float | None
 
 
 def compute_unrealized_pnl(
@@ -221,9 +251,105 @@ def _fair_value_excess_pcts(
     return neutral_pct, bull_pct
 
 
+# コードレビュー対応(2026-08、上値余地の導入): 汎用PER/PBR/配当利回りモデルの
+# 前提が成り立ちにくい業種(profit_taking_industry.pyが既に識別している銀行・
+# リース金融)、および業種不明(UNKNOWN、sector/industryが欠損・空文字等)は、
+# 業種別モデル適用済み(industry_model_applied=True)でない限りceiling_priceを
+# 上値余地グリッドの主要根拠として使わない。UNKNOWNを「安全な業種」とはみなさない
+# (financial_industry.pyの既存方針と同じ考え方)。FOOD/CHEMICAL/GAS_UTILITY/
+# SMALL_GROWTH/GENERALはこのゲートの対象外(汎用モデルの前提自体は成り立つ)。
+_CEILING_RESTRICTED_INDUSTRY_SECTORS = frozenset(
+    {
+        ProfitTakingIndustrySector.BANKING,
+        ProfitTakingIndustrySector.LEASING_FINANCE,
+        ProfitTakingIndustrySector.UNKNOWN,
+    }
+)
+
+
+def _fair_value_action_usable(
+    fv_range: FairValueRange | None,
+    inputs: ProfitTakingConditionInputs,
+    config: ProfitTakingRulesConfig,
+) -> bool:
+    """ceiling_price(fv_range.bull)を上値余地グリッド(_level_from_price_position）
+    の主要根拠として使ってよいか(コードレビュー対応2026-08)。
+
+    industry_model_applied=Trueであることは、業種別モデル未対応でも汎用モデルの
+    前提自体は成り立つ業種(GENERAL/SMALL_GROWTH/FOOD/CHEMICAL/GAS_UTILITY)
+    については必須にしない(現行はindustry_model_appliedが全銘柄false固定の
+    ため、必須にすると本判定が恒久的に不成立になる)。銀行・リース金融・業種
+    不明のみ、業種別モデル適用済みでない限りceilingを使わない(§_CEILING_
+    RESTRICTED_INDUSTRY_SECTORS参照)。
+    """
+    if fv_range is None or not fv_range.usable_for_trading_judgment or fv_range.bull is None:
+        return False
+    if (
+        inputs.industry_sector in _CEILING_RESTRICTED_INDUSTRY_SECTORS
+        and not inputs.industry_model_applied
+    ):
+        return False
+    cbj = config.condition_based_judgment
+    spread_ratio = (
+        float(fv_range.bull / fv_range.bear)
+        if fv_range.bear is not None and fv_range.bear > 0
+        else None
+    )
+    return (
+        len(fv_range.methods_used) >= cbj.min_fair_value_methods_for_partial
+        and spread_ratio is not None
+        and spread_ratio <= cbj.max_fair_value_spread_ratio_for_partial
+        and inputs.fair_value_reflects_latest_earnings is True
+        and not inputs.has_strong_counter_material
+        and (
+            inputs.days_to_next_earnings_business_days is None
+            or inputs.days_to_next_earnings_business_days
+            >= cbj.min_business_days_to_earnings_for_fair_value_action
+        )
+    )
+
+
+def _level_from_price_position(
+    gain_pct: float,
+    upside_pct: float | None,
+    config: ProfitTakingRulesConfig,
+) -> tuple[_Level, bool]:
+    """含み益率×上値余地(ceiling_priceまでの距離)の基本アクションレベル
+    (コードレビュー対応2026-08、要求仕様: 含み益率単独・適正価格超過率単独では
+    利確判定を決めず、両者の組み合わせを判定の中心に据える)。
+
+    戻り値の2つ目はFULL強候補(現在値がceilingを既に超過している)かどうか。
+    upside_pct=None(ceiling_price利用不能、_fair_value_action_usable=False)の
+    場合、含み益率単独ではPARTIAL/FULLへ到達させない(WATCHが上限)。
+    """
+    pp = config.price_position
+    if gain_pct < pp.watch_gain_pct:
+        return _Level.HOLD, False
+    if upside_pct is None:
+        return _Level.WATCH, False
+    if upside_pct >= pp.partial_upside_max_pct:
+        # 上値余地が大きい(まだ天井に近くない)場合はWATCH据え置き。
+        return _Level.WATCH, False
+    if gain_pct >= pp.full_gain_pct and upside_pct < pp.full_upside_max_pct:
+        return _Level.FULL, upside_pct < pp.ceiling_exceeded_pct
+    if gain_pct >= pp.partial_gain_pct:
+        return _Level.PARTIAL, False
+    return _Level.WATCH, False
+
+
 def _apply_mitigating_factors(
-    level: _Level, inputs: MitigatingFactorInputs, config: MitigatingFactors
+    level: _Level,
+    inputs: MitigatingFactorInputs,
+    config: MitigatingFactors,
+    downgrade_disabled: bool = False,
 ) -> tuple[_Level, list[str]]:
+    """該当する緩和要因のdowngrade_levelsを合算し、判定レベルを弱める。
+
+    downgrade_disabled=True(コードレビュー対応2026-08、origin=
+    FUNDAMENTAL_CRITICAL_RISKの場合に呼び出し元が指定する)の場合、該当した
+    緩和要因自体は引き続き記録・返却するが、実際の降格は行わない(投資前提
+    崩壊等の重大リスク由来の判定を、緩和要因だけで打ち消させないため)。
+    """
     applied: list[str] = []
     total_downgrade = 0
 
@@ -263,49 +389,33 @@ def _apply_mitigating_factors(
         total_downgrade += config.nisa_long_term_benefit.downgrade_levels
         applied.append("NISA口座で長期保有メリットが大きい")
 
+    if downgrade_disabled:
+        total_downgrade = 0
     new_level = _Level(max(0, int(level) - total_downgrade))
     return new_level, applied
 
 
 def _count_partial_conditions(
-    pnl: UnrealizedPnl,
-    bull_fair_value_excess_pct: float | None,
     current_total_yield_pct: float | None,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
     weak_fair_value_forward_return_reason: str | None,
 ) -> tuple[int, list[str]]:
-    """一部利確(PARTIAL)の根拠となる独立条件を数える(要求仕様9節)。
+    """一部利確(PARTIAL)の根拠となる、価格系(含み益率・適正価格超過率)以外の
+    独立条件を数える(要求仕様9節)。
 
-    含み益率単独ではPARTIALへ到達できない設計(min_conditions_for_partial以上が必要)。
-    bull_fair_value_excess_pctは強気適正価格に対する現在値の超過率(要求仕様§6)。
+    コードレビュー対応(2026-08、上値余地の導入): 含み益率・強気適正価格超過率の
+    条件は_level_from_price_position()の2次元マトリクスへ統合したため、本関数
+    からは削除した(二重計上防止)。
     """
     t = config.thresholds
     is_growth = StockType.GROWTH in inputs.stock_types
     reasons: list[str] = []
 
-    if pnl.unrealized_pnl_pct >= t.unrealized_gain_partial_pct:
-        reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%が一部利確閾値に到達")
-
-    # FairValueRangeが渡されていない場合(呼び出し側が単純なスカラーfair_valueのみを
-    # 使っている場合)は従来通りbull_fair_value_excess_pctをそのまま使う。FairValueRangeが
-    # 渡されている場合のみ、使用不可(usable_for_trading_judgment=False)なら無視する
-    # (要求仕様7節: 適正価格を売買判定に使用不可の場合は使用しない)。
-    fv_range = inputs.fair_value_range
-    fv_condition_usable = fv_range is None or fv_range.usable_for_trading_judgment
-    bull_excess_triggered = (
-        fv_condition_usable
-        and bull_fair_value_excess_pct is not None
-        and bull_fair_value_excess_pct >= t.fair_value_excess_partial_pct
-    )
-    if bull_excess_triggered:
-        reasons.append(f"強気適正価格を{bull_fair_value_excess_pct:.1f}%超過")
-    elif weak_fair_value_forward_return_reason is not None:
+    if weak_fair_value_forward_return_reason is not None:
         # 中立適正価格基準の期待リターンが閾値以下だが、強い条件としての要件(手法数・
         # 手法間一致度・信頼度等)を満たさない場合は、PARTIALの根拠の1つとしてのみ数える
         # (要求仕様レビュー対応: 中立適正価格単独でFULLの強条件にしない)。
-        # bull_excess_triggeredと同じ適正価格データに由来する非独立の観測のため、
-        # bull_excess条件が既に成立している場合は二重計上しない(要求仕様§5レビュー対応)。
         reasons.append(weak_fair_value_forward_return_reason)
 
     # 成長株は業績予想の下方修正・急激な業績悪化があった場合のみ「成長鈍化」を条件化する
@@ -480,65 +590,80 @@ def _full_strong_conditions(
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
     fair_value_strong_reason: str | None,
-) -> list[str]:
+) -> list[tuple[str, _RawLevelOrigin]]:
     """全株利確(FULL)を単独で正当化できる強い条件(要求仕様9節)。
 
     「含み益率が高い」というだけの条件はここに含めない(gain単独でFULLに
     到達させないという要求仕様9節の明示的な制約)。
+
+    コードレビュー対応(2026-08、mitigating/timing両層のsoftening制御): 各理由に
+    _RawLevelOriginを付与して返す。投資前提崩壊・会計不祥事・確定減配+CF悪化は
+    FUNDAMENTAL_CRITICAL_RISK(softening対象外)、適正価格ベースの強条件は
+    FAIR_VALUE_STRONG、ユーザー設定目標到達は価格系トリガーのためPRICE_POSITION
+    として扱う。
     """
-    reasons: list[str] = []
+    reasons: list[tuple[str, _RawLevelOrigin]] = []
     is_income = StockType.INCOME in inputs.stock_types
 
     if inputs.investment_premise_broken:
-        reasons.append("投資前提が明確に崩れた")
+        reasons.append(("投資前提が明確に崩れた", _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK))
 
     if inputs.accounting_or_scandal_or_delisting_risk:
-        reasons.append("会計・不祥事・上場維持リスクが発生")
+        reasons.append(
+            ("会計・不祥事・上場維持リスクが発生", _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK)
+        )
 
     if (
         is_income
         and inputs.dividend_comparison_outcome == DividendComparisonOutcome.ACTUAL_DIVIDEND_CUT
         and inputs.cashflow_fundamentally_driven is True
     ):
-        reasons.append("配当投資銘柄で確定的な減配とフリーキャッシュフロー悪化が重なった")
+        reasons.append(
+            (
+                "配当投資銘柄で確定的な減配とフリーキャッシュフロー悪化が重なった",
+                _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK,
+            )
+        )
 
     if fair_value_strong_reason is not None:
-        reasons.append(fair_value_strong_reason)
+        reasons.append((fair_value_strong_reason, _RawLevelOrigin.FAIR_VALUE_STRONG))
 
     if inputs.profit_target_price is not None and current_price >= inputs.profit_target_price:
-        reasons.append(f"ユーザー設定の全利確目標価格({inputs.profit_target_price}円)に到達")
+        reasons.append(
+            (
+                f"ユーザー設定の全利確目標価格({inputs.profit_target_price}円)に到達",
+                _RawLevelOrigin.PRICE_POSITION,
+            )
+        )
     elif (
         inputs.profit_target_rate is not None
         and pnl.unrealized_pnl_pct >= inputs.profit_target_rate
     ):
-        reasons.append(f"ユーザー設定の全利確目標利回り({inputs.profit_target_rate}%)に到達")
+        reasons.append(
+            (
+                f"ユーザー設定の全利確目標利回り({inputs.profit_target_rate}%)に到達",
+                _RawLevelOrigin.PRICE_POSITION,
+            )
+        )
 
     return reasons
 
 
 def _count_full_moderate_conditions(
-    pnl: UnrealizedPnl,
-    fair_value_excess_pct: float | None,
     current_total_yield_pct: float | None,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
 ) -> tuple[int, list[str]]:
-    """全株利確(FULL)を、複数該当した場合にのみ正当化する中程度の条件。"""
+    """全株利確(FULL)を、複数該当した場合にのみ正当化する中程度の条件
+    (価格系(含み益率・適正価格超過率)以外)。
+
+    コードレビュー対応(2026-08、上値余地の導入): 含み益率・強気適正価格超過率の
+    条件は_level_from_price_position()の2次元マトリクスへ統合したため、本関数
+    からは削除した(二重計上防止)。
+    """
     t = config.thresholds
     is_growth = StockType.GROWTH in inputs.stock_types
     reasons: list[str] = []
-
-    if pnl.unrealized_pnl_pct >= t.unrealized_gain_full_pct:
-        reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%が全株利確閾値に到達")
-
-    fv_range = inputs.fair_value_range
-    fv_condition_usable = fv_range is None or fv_range.usable_for_trading_judgment
-    if (
-        fv_condition_usable
-        and fair_value_excess_pct is not None
-        and fair_value_excess_pct >= t.fair_value_excess_full_pct
-    ):
-        reasons.append(f"強気適正価格を{fair_value_excess_pct:.1f}%超過(全株利確水準)")
 
     if (
         not is_growth
@@ -883,7 +1008,28 @@ def evaluate_profit_taking(
         else _Level.HOLD
     )
 
-    triggered_reasons: list[str] = []
+    # コードレビュー対応(2026-08、上値余地の導入): ceiling_price(fv_range.bull)を
+    # 上値余地グリッドの主要根拠として使えるかを判定し、使える場合のみupside_pctを
+    # 算出する。含み損の場合は「利確」自体が成立しないためHOLD/Noneに固定する。
+    fair_value_action_usable = (
+        _fair_value_action_usable(fv_range, condition_inputs, config)
+        if has_unrealized_gain
+        else False
+    )
+    ceiling_price = (
+        fv_range.bull if fair_value_action_usable and fv_range is not None else None
+    )
+    upside_pct = (
+        float(ceiling_price / current_price - 1) * 100
+        if ceiling_price is not None and current_price > 0
+        else None
+    )
+    price_level, price_full_strong = (
+        _level_from_price_position(pnl.unrealized_pnl_pct, upside_pct, config)
+        if has_unrealized_gain
+        else (_Level.HOLD, False)
+    )
+
     fair_value_used_as_sole_strong_basis = False
     if has_unrealized_gain:
         fv_strong_reason, fv_weak_reason = _fair_value_strong_condition(
@@ -893,8 +1039,6 @@ def evaluate_profit_taking(
             current_price, pnl, condition_inputs, config
         )
         partial_count, partial_reasons = _count_partial_conditions(
-            pnl,
-            bull_excess_pct,
             current_total_yield_pct,
             condition_inputs,
             config,
@@ -904,7 +1048,7 @@ def evaluate_profit_taking(
             current_price, pnl, condition_inputs, config, fv_strong_reason
         )
         full_moderate_count, full_moderate_reasons = _count_full_moderate_conditions(
-            pnl, bull_excess_pct, current_total_yield_pct, condition_inputs, config
+            current_total_yield_pct, condition_inputs, config
         )
     else:
         fv_strong_reason = None
@@ -914,49 +1058,122 @@ def evaluate_profit_taking(
         full_moderate_count, full_moderate_reasons = 0, []
 
     cbj = config.condition_based_judgment
-    if full_strong_reasons or full_moderate_count >= cbj.min_moderate_conditions_for_full:
-        raw_level = _Level.FULL
-        triggered_reasons.extend(full_strong_reasons or full_moderate_reasons)
-        fair_value_used_as_sole_strong_basis = (
-            len(full_strong_reasons) == 1 and full_strong_reasons[0] == fv_strong_reason
+
+    # コードレビュー対応(2026-08): raw_levelは「価格系(_level_from_price_position)」と
+    # 「非価格系の独立条件数」の2つの独立した経路から到達しうる候補(level, origin, reasons)
+    # のリストを作り、最大レベル→最大優先度originの順で採用する(複数経路が同時に成立
+    # した場合の扱いを曖昧にしない、レビュー対応)。
+    candidates: list[tuple[_Level, _RawLevelOrigin, list[str]]] = []
+
+    if full_strong_reasons:
+        best_full_strong_origin = max(origin for _, origin in full_strong_reasons)
+        candidates.append(
+            (_Level.FULL, best_full_strong_origin, [r for r, _ in full_strong_reasons])
         )
-    elif partial_count >= cbj.min_conditions_for_partial or fv_partial_gate_ok:
-        raw_level = _Level.PARTIAL
-        triggered_reasons.extend(partial_reasons)
+        fair_value_used_as_sole_strong_basis = (
+            len(full_strong_reasons) == 1 and full_strong_reasons[0][0] == fv_strong_reason
+        )
+
+    if full_moderate_count >= cbj.min_moderate_conditions_for_full:
+        candidates.append(
+            (_Level.FULL, _RawLevelOrigin.OTHER_CONDITIONS, full_moderate_reasons)
+        )
+
+    if price_level == _Level.FULL:
+        assert upside_pct is not None
+        ceiling_note = (
+            "現在値が上限価格(想定ceiling)を上回っており"
+            if price_full_strong
+            else "上限価格(想定ceiling)までの上値余地がほぼ無く"
+        )
+        candidates.append(
+            (
+                _Level.FULL,
+                _RawLevelOrigin.PRICE_POSITION,
+                [
+                    f"含み益率{pnl.unrealized_pnl_pct:.1f}%かつ{ceiling_note}"
+                    f"(上値余地{upside_pct:.1f}%)、全株利確水準に到達"
+                ],
+            )
+        )
+
+    if partial_count >= cbj.min_conditions_for_partial or fv_partial_gate_ok:
+        partial_reasons_with_gate = list(partial_reasons)
+        origin = _RawLevelOrigin.OTHER_CONDITIONS
         if fv_partial_gate_ok and bull_excess_pct is not None:
+            origin = _RawLevelOrigin.FAIR_VALUE_STRONG
             gate_reason = (
                 f"強気適正価格を{bull_excess_pct:.1f}%超過しており、業種別モデル適用・"
                 "決算までの余裕・一部売却の実行可能性・反対材料の不在を含め複数条件で確認できる"
             )
-            if gate_reason not in triggered_reasons:
-                triggered_reasons.append(gate_reason)
-    elif (
+            if gate_reason not in partial_reasons_with_gate:
+                partial_reasons_with_gate.append(gate_reason)
+        candidates.append((_Level.PARTIAL, origin, partial_reasons_with_gate))
+
+    if price_level == _Level.PARTIAL:
+        assert upside_pct is not None
+        candidates.append(
+            (
+                _Level.PARTIAL,
+                _RawLevelOrigin.PRICE_POSITION,
+                [
+                    f"含み益率{pnl.unrealized_pnl_pct:.1f}%かつ上値余地{upside_pct:.1f}%、"
+                    "一部利確水準に到達"
+                ],
+            )
+        )
+
+    # WATCHの起点(要求仕様§6): 強気適正価格の超過閾値には届かない、または中立適正価格を
+    # わずかに上回るのみの場合でも、監視開始としては扱う。PARTIALへの到達に必要な独立
+    # 条件数(partial_count)には数えない(gain単独でのPARTIAL誤到達を防ぐ)。含み損の場合は
+    # 「利確」自体が成立しないため、has_unrealized_gainを必ず条件に含める。
+    watch_reasons = list(partial_reasons)
+    watch_origin = _RawLevelOrigin.OTHER_CONDITIONS
+    if price_level == _Level.WATCH and upside_pct is not None:
+        watch_reasons.append(
+            f"含み益率{pnl.unrealized_pnl_pct:.1f}%・上値余地{upside_pct:.1f}%で監視水準"
+        )
+        watch_origin = _RawLevelOrigin.PRICE_POSITION
+    watch_gain_threshold = config.thresholds.unrealized_gain_watch_pct
+    if (
         partial_count >= 1
-        or pnl.unrealized_pnl_pct >= config.thresholds.unrealized_gain_watch_pct
+        or (has_unrealized_gain and pnl.unrealized_pnl_pct >= watch_gain_threshold)
         or (has_unrealized_gain and neutral_excess_pct is not None and neutral_excess_pct > 0)
+        or price_level == _Level.WATCH
     ):
-        # 強気適正価格の超過閾値には届かない、または中立適正価格をわずかに上回るのみの
-        # 場合でも、監視開始(WATCH)の起点としては扱う(要求仕様§6)。ただしPARTIALへの
-        # 到達に必要な独立条件数(partial_count)には数えない(gain単独でのPARTIAL誤到達を防ぐ)。
-        # 含み損の場合は「利確」自体が成立しないため、この分岐はhas_unrealized_gainを
-        # 必ず条件に含める(含み損なのに適正価格超過だけでWATCHにしない)。
-        raw_level = _Level.WATCH
-        triggered_reasons.extend(partial_reasons)
-        if not partial_reasons:
+        if not watch_reasons:
             if has_unrealized_gain and neutral_excess_pct is not None and neutral_excess_pct > 0:
-                triggered_reasons.append(f"中立適正価格を{neutral_excess_pct:.1f}%上回る")
+                watch_reasons.append(f"中立適正価格を{neutral_excess_pct:.1f}%上回る")
             else:
-                triggered_reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%が監視水準に到達")
+                watch_reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%が監視水準に到達")
+        candidates.append((_Level.WATCH, watch_origin, watch_reasons))
+
+    if candidates:
+        raw_level = max(level for level, _, _ in candidates)
+        top_candidates = [c for c in candidates if c[0] == raw_level]
+        origin = max(o for _, o, _ in top_candidates)
+        triggered_reasons: list[str] = []
+        for _, _, reasons in top_candidates:
+            for r in reasons:
+                if r not in triggered_reasons:
+                    triggered_reasons.append(r)
     else:
         raw_level = _Level.HOLD
+        origin = _RawLevelOrigin.NONE
+        triggered_reasons = []
 
     if raw_level == _Level.HOLD:
         fundamental_level = _Level.HOLD
         applied_factors: list[str] = []
         hold_reasons = ["利確シグナルに該当する条件がない"]
     else:
+        # コードレビュー対応(2026-08): origin=FUNDAMENTAL_CRITICAL_RISK(投資前提崩壊・
+        # 会計不祥事等)は、緩和要因だけで判定を打ち消させない(降格を無効化する)。
         fundamental_level, applied_factors = _apply_mitigating_factors(
-            raw_level, mitigating_inputs, config.mitigating_factors
+            raw_level,
+            mitigating_inputs,
+            config.mitigating_factors,
+            downgrade_disabled=(origin == _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK),
         )
         # 何らかの利確シグナルが実際に発生している場合、緩和要因によってもHOLD(無評価)まで
         # 完全に打ち消すのではなく、最低でもWATCH(監視継続)として可視化する。
@@ -975,21 +1192,34 @@ def evaluate_profit_taking(
         trend = momentum.trend_classification
         if trend in (TrendClassification.STRONG_UPTREND, TrendClassification.UPTREND):
             timing_action = TimingAction.WAIT_UPTREND_CONTINUES
-            margin = config.condition_based_judgment.timing_downgrade_block_margin_pct
-            fv_range = condition_inputs.fair_value_range
-            hard_overvalued = (
-                fv_range is not None
-                and fv_range.usable_for_trading_judgment
-                and fv_range.overall_confidence != ConfidenceLevel.LOW
-                and fv_range.bull is not None
-                and current_price > fv_range.bull * (1 + Decimal(str(margin)) / 100)
-            )
-            if fundamental_level > _Level.HOLD and not hard_overvalued:
-                final_level = _Level(max(0, int(fundamental_level) - 1))
+            # コードレビュー対応(2026-08): origin=FUNDAMENTAL_CRITICAL_RISKはmitigating層と
+            # 同様、タイミング層による降格も適用しない(重大リスク由来の判定を上昇トレンド
+            # だけで打ち消させない)。
+            if origin != _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK:
+                margin = config.condition_based_judgment.timing_downgrade_block_margin_pct
+                fv_range = condition_inputs.fair_value_range
+                hard_overvalued = (
+                    fv_range is not None
+                    and fv_range.usable_for_trading_judgment
+                    and fv_range.overall_confidence != ConfidenceLevel.LOW
+                    and fv_range.bull is not None
+                    and current_price > fv_range.bull * (1 + Decimal(str(margin)) / 100)
+                )
+                if fundamental_level > _Level.HOLD and not hard_overvalued:
+                    final_level = _Level(max(0, int(fundamental_level) - 1))
         elif trend in (TrendClassification.STRONG_DOWNTREND, TrendClassification.DOWNTREND):
             timing_action = TimingAction.ACCELERATE_DOWNTREND_CONFIRMED
         else:
             timing_action = TimingAction.PROCEED_NO_TIMING_SIGNAL
+
+    # コードレビュー対応(2026-08): origin=PRICE_POSITION/FAIR_VALUE_STRONGでraw_levelが
+    # PARTIAL以上の場合、mitigating+timing両層を通した合計softeningでもPARTIAL未満へは
+    # 落とさない(最終floor)。FUNDAMENTAL_CRITICAL_RISKは上記の両層で降格自体を無効化
+    # 済みのため、ここでは対象外(raw_level == final_levelが既に保証されている)。
+    if origin in (_RawLevelOrigin.PRICE_POSITION, _RawLevelOrigin.FAIR_VALUE_STRONG) and (
+        raw_level >= _Level.PARTIAL
+    ):
+        final_level = _Level(max(int(final_level), int(_Level.PARTIAL)))
 
     fundamental_action = _LEVEL_TO_RECOMMENDATION[fundamental_level]
     final_action = _LEVEL_TO_RECOMMENDATION[final_level]
@@ -1038,4 +1268,7 @@ def evaluate_profit_taking(
         fair_value_used_as_sole_strong_basis=fair_value_used_as_sole_strong_basis,
         current_price_vs_neutral_fair_value_pct=neutral_excess_pct,
         current_price_vs_bull_fair_value_pct=bull_excess_pct,
+        fair_value_action_usable=fair_value_action_usable,
+        ceiling_price=ceiling_price,
+        upside_pct=upside_pct,
     )

@@ -405,6 +405,7 @@ class ProfitTakingService:
             profit_target_rate=holding.profit_target_rate,
             fair_value_reflects_latest_earnings=self._fair_value_reflects_latest_earnings(snapshot),
             industry_model_applied=industry_model_applied,
+            industry_sector=industry_sector,
             partial_sale_executable=trading_unit_feasibility.partial_sale_executable,
             days_to_next_earnings_business_days=days_to_earnings,
             has_strong_counter_material=has_strong_counter_material,
@@ -687,6 +688,15 @@ class ProfitTakingService:
                 "environment": environment_config_values(
                     self._config.market_sector_environment.environment
                 ),
+                # コードレビュー対応(2026-08、上値余地の導入): 判定当時に実際に
+                # 使用したprice_position設定値と、算出したceiling_price/upside_pct/
+                # fair_value_action_usableを記録する(§18)。
+                "price_position": self._config.profit_taking.price_position.model_dump(),
+                "ceiling_price": (
+                    float(result.ceiling_price) if result.ceiling_price is not None else None
+                ),
+                "upside_pct": result.upside_pct,
+                "fair_value_action_usable": result.fair_value_action_usable,
             },
             data_sources=list(snapshot.data_sources),
             next_review_conditions=_build_next_review_conditions(

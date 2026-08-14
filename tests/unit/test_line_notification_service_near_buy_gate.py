@@ -91,13 +91,20 @@ def service(tmp_path: Path) -> LineNotificationService:
     )
 
 
-def test_evaluate_notification_status_reaches_sent_for_near_buy(
+def test_evaluate_notification_status_classifies_near_buy_as_non_actionable(
     service: LineNotificationService,
 ) -> None:
+    """コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR BUYは
+    resolve_notification_category()経由で正しくNEAR_BUYへ分類され(旧ゲートの
+    ようにNOT_NOTIFIABLEへ誤って落ちることはない)、評価自体には到達するが、
+    「今すぐ売買アクションを取れる段階ではない」カテゴリのためLINE送信はしない
+    (NON_ACTIONABLE、以前はここでSENTになっていた)。
+    """
     rec = _near_buy_recommendation()
     outcome = service.evaluate_notification_status(rec, _NOW)
-    assert outcome.status == NotificationStatus.SENT
+    assert outcome.status == NotificationStatus.NOT_REQUIRED
     assert outcome.data_quality_blocked is False
+    assert outcome.block_category is not None and outcome.block_category.value == "NON_ACTIONABLE"
 
 
 def test_check_data_quality_eligibility_does_not_block_near_buy(

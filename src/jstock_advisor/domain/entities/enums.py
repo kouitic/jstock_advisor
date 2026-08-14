@@ -1119,6 +1119,10 @@ class EligibilityBlockCategory(StrEnum):
     WATCH_OUT_OF_RANGE = "WATCH_OUT_OF_RANGE"
     # 同一銘柄について同一バッチ内で既に別の通知を送信済み。
     DUPLICATE_STOCK_NOTIFICATION = "DUPLICATE_STOCK_NOTIFICATION"
+    # --- LINE通知アクション限定化(2026-08)で追加 ---
+    # WATCH/REVIEW(証拠品質系)/NEAR BUY等、ユーザーに明確な売買アクションを
+    # 促さない判定のため、LINEへは送信しない(内部評価・Audit記録は継続する)。
+    NON_ACTIONABLE = "NON_ACTIONABLE"
 
 
 class PortfolioValuationBasis(StrEnum):

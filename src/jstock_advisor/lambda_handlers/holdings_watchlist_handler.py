@@ -124,10 +124,15 @@ class _HoldingResult:
     succeeded: bool
     category: str
     audit: HoldingEvaluationAudit
-    # コードレビュー対応(2026-08、LINE通知/監査分離): バッチサマリーの
-    # ユーザー行動中心4分類(売却/監視/要確認/緊急)集計向け。実際に通知が
-    # 送信された場合のみresolve_notification_category()の結果を持つ。
+    # コードレビュー対応(2026-08、LINE通知アクション限定化): バッチサマリーの
+    # 送信済みアクション3分類(一部売却/全部売却/売却)集計向け。実際に通知が
+    # 送信された場合のみ値を持つ。WATCH/MANUAL_REVIEWはNON_ACTIONABLEとして
+    # ここへ到達する前にゲートされるため、送信済みならこの2つにはならない。
     notification_category: NotificationCategory | None = None
+    # NotificationCategory.SELLはFULL_PROFIT_TAKEとSELL/SELL_CONSIDERATION等を
+    # 区別しない表示用の分類のため、「一部売却/全部売却/売却」を分離集計する
+    # にはrecommendation_type自体が必要(§13)。
+    recommendation_type_at_send: RecommendationType | None = None
 
 
 _KILL_SWITCH_SUPPRESSED_OUTCOME = NotificationOutcome(
@@ -291,6 +296,9 @@ def _notify_legacy_sell_and_build_result(
         notification_category=(
             resolve_notification_category(recommendation) if outcome.sent else None
         ),
+        recommendation_type_at_send=(
+            recommendation.recommendation_type if outcome.sent else None
+        ),
     )
 
 
@@ -375,6 +383,9 @@ def _notify_holding_decision_and_build_result(
         audit=audit,
         notification_category=(
             resolve_notification_category(recommendation) if outcome.sent else None
+        ),
+        recommendation_type_at_send=(
+            recommendation.recommendation_type if outcome.sent else None
         ),
     )
     return holding_result, linked_result
@@ -636,6 +647,9 @@ def _analyze_one_holding(
             notification_category=(
                 resolve_notification_category(pt_outcome.recommendation) if outcome.sent else None
             ),
+            recommendation_type_at_send=(
+                pt_outcome.recommendation.recommendation_type if outcome.sent else None
+            ),
         )
 
     audit = HoldingEvaluationAudit(
@@ -666,17 +680,25 @@ def _finish_batch_item(
     now: dt.datetime,
     notification_service: LineNotificationService,
     runtime_config_service: HoldingDecisionRuntimeConfigService,
-    notification_category: NotificationCategory | None = None,
+    recommendation_type: RecommendationType | None = None,
 ) -> None:
     """バッチ進捗の確定(record_result)はkill switchの影響を受けず常に行う。
     最終1件目の完了によるバッチサマリーLINE送信のみ、その時点のkill switch状態で
     ガードする(コードレビュー対応: 通知抑止がバッチ完了判定へ影響しないことを保証する)。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): 以前はresolve_
+    notification_category()の結果(NotificationCategory)を記録していたが、
+    NotificationCategory.SELLはFULL_PROFIT_TAKEとSELL/SELL_CONSIDERATION等を
+    区別しない表示用の分類のため、「一部売却/全部売却/売却」を分離集計する
+    サマリーには使えない。recommendation_type自体を記録する(実際にLINE
+    送信された場合のみ呼び出し元が値を渡す。WATCH/MANUAL_REVIEWはNON_
+    ACTIONABLEとしてLINE送信前にゲートされるため、ここに現れることはない)。
     """
     if batch_id is None:
         return
     needs_code = category in ("data_insufficient", "failed")
     notification_category_entry = (
-        f"{notification_category.value}|{stock_code}" if notification_category is not None else None
+        f"{recommendation_type.value}|{stock_code}" if recommendation_type is not None else None
     )
     progress = record_result(
         batch_id,
@@ -692,18 +714,24 @@ def _finish_batch_item(
             batch_id,
         )
         return
-    # コードレビュー対応(2026-08、LINE通知/監査分離): ユーザー行動中心の
-    # 4分類(売却/監視/要確認/緊急)集計。「売却」はSELL+PARTIAL_SELLの合算
-    # (一部/全部の区別はサマリー上では行わない)、CRITICAL_RISKは独立集計とし
-    # 「売却」には含めない(URGENT_REVIEW/URGENT_HOLDING_REVIEWは必ずしも
-    # 売却判定ではないため)。
-    category_prefixes = [entry.split("|", 1)[0] for entry in progress.notification_categories]
-    sell_n = category_prefixes.count(NotificationCategory.SELL.value) + category_prefixes.count(
-        NotificationCategory.PARTIAL_SELL.value
+    # コードレビュー対応(2026-08、LINE通知アクション限定化): 実際にLINE送信
+    # されたアクション3分類(一部売却/全部売却/売却)+緊急確認の集計(要求仕様
+    # §13)。WATCH/MANUAL_REVIEWはもはやLINE送信されないため、サマリーからも
+    # 除外する(§10のNON_ACTIONABLEゲートにより、ここに到達する時点で既に
+    # 送信対象外)。
+    sent_types = [entry.split("|", 1)[0] for entry in progress.notification_categories]
+    partial_n = sent_types.count(RecommendationType.PARTIAL_PROFIT_TAKE.value) + sent_types.count(
+        RecommendationType.PARTIAL_RISK_REDUCTION.value
     )
-    watch_n = category_prefixes.count(NotificationCategory.WATCH.value)
-    manual_review_n = category_prefixes.count(NotificationCategory.MANUAL_REVIEW.value)
-    critical_risk_n = category_prefixes.count(NotificationCategory.CRITICAL_RISK.value)
+    full_n = sent_types.count(RecommendationType.FULL_PROFIT_TAKE.value)
+    sell_n = (
+        sent_types.count(RecommendationType.SELL.value)
+        + sent_types.count(RecommendationType.SELL_CONSIDERATION.value)
+        + sent_types.count(RecommendationType.STRONG_SELL_CONSIDERATION.value)
+    )
+    critical_risk_n = sent_types.count(RecommendationType.URGENT_REVIEW.value) + sent_types.count(
+        RecommendationType.URGENT_HOLDING_REVIEW.value
+    )
     notification_service.notify_batch_summary(
         _PROCESS_NAME,
         progress.total,
@@ -711,9 +739,9 @@ def _finish_batch_item(
         now,
         data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
         failed_stock_codes=progress.failed_stock_codes,
+        partial_sell_sent_count=partial_n,
+        full_sell_sent_count=full_n,
         sell_sent_count=sell_n,
-        watch_sent_count=watch_n,
-        manual_review_sent_count=manual_review_n,
         critical_risk_sent_count=critical_risk_n,
     )
 
@@ -788,7 +816,7 @@ def _process_single_holding(
         now,
         notification_service,
         runtime_config_service,
-        notification_category=result.notification_category,
+        recommendation_type=result.recommendation_type_at_send,
     )
     return {
         "stock_code": stock_code,

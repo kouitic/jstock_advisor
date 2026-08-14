@@ -196,8 +196,7 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
 
 # cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)の優先度表。
 # 数値が大きいほど優先度が高い。「BUY到達」(NEAR BUY監視からの昇格)は通常の
-# BUYより優先度を上げる(要求仕様の優先順位: CRITICAL_RISK > BUY到達 > SELL >
-# BUY > NEAR_BUY > WATCH_BEFORE_EARNINGS)。
+# BUYより優先度を上げる(要求仕様の優先順位: CRITICAL_RISK > BUY到達 > SELL > BUY)。
 # コードレビュー対応(2026-08、LINE通知/監査分離): WATCH/PARTIAL_SELL/
 # MANUAL_REVIEWは意図的にこの表へ追加しない(=priority 0扱い、cross-pipeline
 # 重複抑止の対象外のまま)。移行前はこれらのRecommendationTypeもOTHER
@@ -206,14 +205,38 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
 # REVIEW_AFTER_EARNINGSのAWAITING_CONFIRMATION→DELAYED)がDUPLICATE_STOCK_
 # NOTIFICATIONとして誤って抑止される回帰を招くため、既存動作を維持する。
 # OTHER/NOT_NOTIFIABLEはこの仕組みの対象外(0を返し、実質的に比較対象にならない)。
+# コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR_BUY/
+# WATCH_BEFORE_EARNINGSは、buy_candidates_handler.py側のfinalizeループが
+# send_recommendation_notification/send_watch_end_notificationを呼ばなく
+# なった(NON_ACTIONABLEとして記録するのみ)ため、_record_daily_priority()が
+# これらのカテゴリで呼ばれることはもう無い。参加させたままにすると読み手を
+# 誤導するため、この表から削除した(0扱い=cross-pipeline重複抑止の対象外)。
 _NOTIFICATION_PRIORITY: dict[NotificationCategory, int] = {
     NotificationCategory.CRITICAL_RISK: 6,
     NotificationCategory.SELL: 4,
     NotificationCategory.BUY: 3,
-    NotificationCategory.NEAR_BUY: 2,
-    NotificationCategory.WATCH_BEFORE_EARNINGS: 1,
 }
 _PROMOTED_TO_BUY_PRIORITY = 5
+
+# LINE通知アクション限定化(2026-08、コードレビュー対応)。WATCH(利確WATCH・決算前後
+# レビュー保留・ポートフォリオ集中リスク)・MANUAL_REVIEW(REVIEW・証拠品質系の
+# 要確認)・NEAR_BUY・WATCH_BEFORE_EARNINGSは、いずれもユーザーに明確な売買
+# アクションを促さないため、LINEへは送信しない。内部評価・Recommendation保存・
+# DecisionSnapshot・Auditは従来どおり継続する(evaluate_notification_status()で
+# 送信直前にNON_ACTIONABLEとして記録するのみ)。
+# NEAR_BUY/WATCH_BEFORE_EARNINGSは実際にはbuy_candidates_handler.py側の
+# finalizeループがcheck_resend_eligibility等を個別に呼び出し、
+# evaluate_notification_status()自体は経由しないが、この関数の呼び出し元に
+# 依存せず「非アクション系カテゴリは送信しない」という保証を単一のchoke point
+# (この関数)で完結させるため、念のためここにも含める(防御的対策)。
+_NON_ACTIONABLE_CATEGORIES = frozenset(
+    {
+        NotificationCategory.WATCH,
+        NotificationCategory.MANUAL_REVIEW,
+        NotificationCategory.NEAR_BUY,
+        NotificationCategory.WATCH_BEFORE_EARNINGS,
+    }
+)
 
 
 def _notification_priority(recommendation: Recommendation) -> int:
@@ -1729,8 +1752,21 @@ class LineNotificationService:
         # buy_action not in BUY_FAMILY_ACTIONSのみを見る旧ゲートで誤って
         # 抑止されないよう、唯一の分類ソースresolve_notification_category()を
         # 使う(BUY_FAMILY・SELL系・OTHER系の既存動作は完全に不変)。
-        if resolve_notification_category(recommendation) is NotificationCategory.NOT_NOTIFIABLE:
+        category_for_action_gate = resolve_notification_category(recommendation)
+        if category_for_action_gate is NotificationCategory.NOT_NOTIFIABLE:
             return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
+
+        # LINE通知アクション限定化(2026-08、コードレビュー対応): WATCH/MANUAL_REVIEW
+        # (証拠品質系の要確認を含む)は、データ品質チェック・安全弁通知より前に
+        # ゲートする。「送らない」という判定自体もNON_ACTIONABLEとしてAuditから
+        # 追跡できるようにする(黙って握りつぶさない)。
+        if category_for_action_gate in _NON_ACTIONABLE_CATEGORIES:
+            return NotificationOutcome(
+                status=NotificationStatus.NOT_REQUIRED,
+                sent=False,
+                block_category=EligibilityBlockCategory.NON_ACTIONABLE,
+                block_reason="NON_ACTIONABLE",
+            )
 
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         previous = self._previous_recommendation(recommendation.stock_code, notification_type)
@@ -2306,16 +2342,23 @@ class LineNotificationService:
         buy_candidates_sent_count: int | None = None,
         near_buy_sent_count: int | None = None,
         send_empty_summary: bool = True,
-        # コードレビュー対応(2026-08、LINE通知/監査分離): 保有銘柄側のバッチ
-        # サマリーをユーザー行動中心の4分類(売却/監視/要確認/緊急)へ切り替える
-        # ための集計値。sell_sent_countはSELL+PARTIAL_SELLの合算(一部/全部の
-        # 分離はサマリー上では行わない)。critical_risk_sent_countを「売却」に
-        # 含めない(URGENT_REVIEW/URGENT_HOLDING_REVIEWは必ずしも売却判定では
-        # ないため)。いずれか1つでも渡された場合、新フォーマットへ切り替える
-        # (buy_candidates_handler.py等、既存呼び出し元は渡さないため従来どおり)。
+        # コードレビュー対応(2026-08、LINE通知アクション限定化): 保有銘柄側の
+        # バッチサマリーを「実際にLINE送信したアクション件数のみ」の3分類
+        # (一部売却/全部売却/売却)へ切り替えるための集計値。WATCH・MANUAL_REVIEW
+        # はもはやLINE送信されない(NON_ACTIONABLE、Audit記録のみ)ため、サマリー
+        # からも除外する。critical_risk_sent_countを「売却」に含めない
+        # (URGENT_REVIEW/URGENT_HOLDING_REVIEWは必ずしも売却判定ではないため)。
+        # partial_sell_sent_count(PARTIAL_PROFIT_TAKE+PARTIAL_RISK_REDUCTION)・
+        # full_sell_sent_count(FULL_PROFIT_TAKE)・sell_sent_count(SELL/
+        # SELL_CONSIDERATION/STRONG_SELL_CONSIDERATION等)はいずれもholdings_
+        # watchlist_handler.py側がrecommendation_type基準で集計して渡す
+        # (NotificationCategory.SELLはFULL_PROFIT_TAKEとSELL系を区別しない
+        # 表示用の分類のため、この集計には使えない)。いずれか1つでも渡された
+        # 場合に新フォーマットへ切り替える(buy_candidates_handler.py等、
+        # 既存呼び出し元は渡さないため従来どおり)。
+        partial_sell_sent_count: int | None = None,
+        full_sell_sent_count: int | None = None,
         sell_sent_count: int | None = None,
-        watch_sent_count: int | None = None,
-        manual_review_sent_count: int | None = None,
         critical_risk_sent_count: int | None = None,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
@@ -2389,23 +2432,25 @@ class LineNotificationService:
                 )
                 return False
 
-        # コードレビュー対応(2026-08、LINE通知/監査分離): 新4分類のいずれかが
-        # 渡された場合、ユーザー行動中心の短い1行サマリーへ切り替える
-        # (holdings_watchlist_handler.py専用。buy_candidates_handler.py等の
-        # 既存呼び出し元は渡さないため、以下の従来フォーマットのまま)。
+        # コードレビュー対応(2026-08、LINE通知アクション限定化): 新3分類の
+        # いずれかが渡された場合、実際に送信したアクション件数のみの短い
+        # 1行サマリーへ切り替える(holdings_watchlist_handler.py専用。
+        # buy_candidates_handler.py等の既存呼び出し元は渡さないため、
+        # 以下の従来フォーマットのまま)。WATCH/MANUAL_REVIEWはもはやLINE
+        # 送信されないため、サマリーにも表示しない(要求仕様§13)。
         if (
-            sell_sent_count is not None
-            or watch_sent_count is not None
-            or manual_review_sent_count is not None
+            partial_sell_sent_count is not None
+            or full_sell_sent_count is not None
+            or sell_sent_count is not None
             or critical_risk_sent_count is not None
         ):
+            partial_n = partial_sell_sent_count or 0
+            full_n = full_sell_sent_count or 0
             sell_n = sell_sent_count or 0
-            watch_n = watch_sent_count or 0
-            review_n = manual_review_sent_count or 0
             critical_n = critical_risk_sent_count or 0
-            summary_line = f"売却{sell_n}｜監視{watch_n}｜要確認{review_n}"
+            summary_line = f"一部売却{partial_n}｜全部売却{full_n}｜売却{sell_n}"
             if critical_n > 0:
-                summary_line += f"｜緊急{critical_n}"
+                summary_line += f"｜緊急確認{critical_n}"
             self._push(f"📊{process_name}\n{summary_line}")
             if not self._execution_context.is_validation:
                 self._log_repo.save(
@@ -2444,11 +2489,13 @@ class LineNotificationService:
             lines.append(f"・買い候補(通知上限により見送り)：{counts['candidate_not_ranked']}件")
         if counts["watch_not_ranked"] > 0:
             lines.append(f"・価格待ち(通知上限により見送り)：{counts['watch_not_ranked']}件")
-        # BUY候補裾野拡大機能(2026-08): NEAR BUY実通知件数(finalizeループで
-        # 実際に送信された件数。ゲート通過前の候補数ではない)。BUY候補以外の
-        # バッチ呼び出しではnear_buy_sent_count=Noneのため表示しない。
+        # BUY候補裾野拡大機能(2026-08)。コードレビュー対応(2026-08、LINE通知
+        # アクション限定化): NEAR BUYはもはやLINE送信しない(NON_ACTIONABLE、
+        # Audit記録のみ)ため、finalizeループを通過した候補数=内部監視・昇格
+        # 判定の対象件数であり、実際にLINE送信された件数ではない(表記を明示)。
+        # BUY候補以外のバッチ呼び出しではnear_buy_sent_count=Noneのため表示しない。
         if near_buy_sent_count is not None:
-            lines.append(f"・NEAR BUY通知：{near_buy_sent_count}件")
+            lines.append(f"・NEAR BUY監視(LINE通知なし)：{near_buy_sent_count}件")
         lines.append("")
         lines.append(f"対象銘柄：{total}件")
         if buy_zero and near_buy_zero:

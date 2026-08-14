@@ -113,6 +113,30 @@ def _near_buy_recommendation(stock_code: str, recommendation_id: str) -> Recomme
     )
 
 
+def _buy_recommendation(stock_code: str, recommendation_id: str) -> Recommendation:
+    from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
+
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code=stock_code,
+        stock_name=f"銘柄{stock_code}",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.BUY,
+        buy_prices=BuyPriceLevels(
+            entry=PriceWithRationale(price=Decimal("150"), rationale="x"),
+            standard=PriceWithRationale(price=Decimal("140"), rationale="x"),
+            strong=PriceWithRationale(price=Decimal("130"), rationale="x"),
+        ),
+        entry_buy_price=Decimal("150"),
+        standard_buy_price=Decimal("140"),
+        strong_buy_price=Decimal("130"),
+        price_at_recommendation=Decimal("125"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        buy_action=BuyAction.BUY,
+    )
+
+
 def test_trade_cooldown_suppression_reason_is_specific(tmp_path: Path) -> None:
     """A: TradeCooldownによる抑止でTRADE_COOLDOWNが監査から確認できる。"""
     store_dir = tmp_path / "local_store"
@@ -152,15 +176,21 @@ def test_trade_detection_in_progress_suppression_reason_is_specific(tmp_path: Pa
 
 
 def test_low_priority_suppression_reason_is_specific_after_sell_sent(tmp_path: Path) -> None:
-    """C: SELL通知済み後のNEAR BUYでLOW_PRIORITYが確認できる。"""
+    """C: SELL通知済み後のBUYでLOW_PRIORITYが確認できる。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR_BUYはもはや
+    cross-pipeline優先度表の対象外(priority=0、NON_ACTIONABLEとして別途ゲート
+    される)になったため、この回帰テストはBUY(priority=3 < SELLのpriority=4)を
+    使って優先度比較のメカニズム自体を検証する。
+    """
     store_dir = tmp_path / "local_store"
     svc, _client = _service(store_dir)
     stock_code = "9432"
     sell = _sell_recommendation(stock_code, "rec-sell-lp-1")
     svc.send_recommendation_notification(sell, _NOW)
 
-    near_buy = _near_buy_recommendation(stock_code, "rec-nb-lp-1")
-    outcome = svc.evaluate_notification_status(near_buy, _NOW)
+    buy = _buy_recommendation(stock_code, "rec-buy-lp-1")
+    outcome = svc.evaluate_notification_status(buy, _NOW)
 
     assert outcome.status == NotificationStatus.NOT_REQUIRED
     assert outcome.block_category == EligibilityBlockCategory.LOW_PRIORITY
@@ -169,14 +199,18 @@ def test_low_priority_suppression_reason_is_specific_after_sell_sent(tmp_path: P
 
 
 def test_duplicate_stock_notification_suppression_reason_is_specific(tmp_path: Path) -> None:
-    """D: 同一優先度の通知が既送の場合、DUPLICATE_STOCK_NOTIFICATIONが確認できる。"""
+    """D: 同一優先度の通知が既送の場合、DUPLICATE_STOCK_NOTIFICATIONが確認できる。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR_BUYはもはや
+    cross-pipeline優先度表の対象外になったため、BUY同士で検証する。
+    """
     store_dir = tmp_path / "local_store"
     svc, _client = _service(store_dir)
     stock_code = "9432"
-    first = _near_buy_recommendation(stock_code, "rec-nb-dup-1")
+    first = _buy_recommendation(stock_code, "rec-buy-dup-1")
     svc.send_recommendation_notification(first, _NOW)
 
-    second = _near_buy_recommendation(stock_code, "rec-nb-dup-2")
+    second = _buy_recommendation(stock_code, "rec-buy-dup-2")
     outcome = svc.evaluate_notification_status(second, _NOW)
 
     assert outcome.status == NotificationStatus.NOT_REQUIRED
