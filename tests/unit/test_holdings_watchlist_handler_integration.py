@@ -566,7 +566,7 @@ def test_batch_completion_recorded_even_when_notification_suppressed(
     )
 
     def _fake_record_result(
-        batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None
+        batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None, **kwargs
     ):
         record_result_calls["count"] += 1
         return fake_progress
@@ -602,7 +602,7 @@ def test_batch_summary_sent_when_notification_enabled(store_dir: Path, monkeypat
         holding_count=0,
     )
     def _fake_record_result(
-        batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None
+        batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None, **kwargs
     ):
         return fake_progress
 

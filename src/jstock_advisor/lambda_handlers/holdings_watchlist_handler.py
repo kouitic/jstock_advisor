@@ -51,6 +51,7 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     DecisionType,
     EvaluationStatus,
+    NotificationCategory,
     NotificationStatus,
     RecommendationType,
 )
@@ -93,6 +94,7 @@ from jstock_advisor.services.holding_decision_service import HoldingDecisionServ
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     NotificationOutcome,
+    resolve_notification_category,
 )
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
@@ -122,6 +124,10 @@ class _HoldingResult:
     succeeded: bool
     category: str
     audit: HoldingEvaluationAudit
+    # コードレビュー対応(2026-08、LINE通知/監査分離): バッチサマリーの
+    # ユーザー行動中心4分類(売却/監視/要確認/緊急)集計向け。実際に通知が
+    # 送信された場合のみresolve_notification_category()の結果を持つ。
+    notification_category: NotificationCategory | None = None
 
 
 _KILL_SWITCH_SUPPRESSED_OUTCOME = NotificationOutcome(
@@ -282,6 +288,9 @@ def _notify_legacy_sell_and_build_result(
         succeeded=True,
         category=summary_category(audit),
         audit=audit,
+        notification_category=(
+            resolve_notification_category(recommendation) if outcome.sent else None
+        ),
     )
 
 
@@ -364,6 +373,9 @@ def _notify_holding_decision_and_build_result(
         succeeded=True,
         category=summary_category(audit),
         audit=audit,
+        notification_category=(
+            resolve_notification_category(recommendation) if outcome.sent else None
+        ),
     )
     return holding_result, linked_result
 
@@ -621,6 +633,9 @@ def _analyze_one_holding(
             succeeded=True,
             category=summary_category(audit),
             audit=audit,
+            notification_category=(
+                resolve_notification_category(pt_outcome.recommendation) if outcome.sent else None
+            ),
         )
 
     audit = HoldingEvaluationAudit(
@@ -651,6 +666,7 @@ def _finish_batch_item(
     now: dt.datetime,
     notification_service: LineNotificationService,
     runtime_config_service: HoldingDecisionRuntimeConfigService,
+    notification_category: NotificationCategory | None = None,
 ) -> None:
     """バッチ進捗の確定(record_result)はkill switchの影響を受けず常に行う。
     最終1件目の完了によるバッチサマリーLINE送信のみ、その時点のkill switch状態で
@@ -659,7 +675,15 @@ def _finish_batch_item(
     if batch_id is None:
         return
     needs_code = category in ("data_insufficient", "failed")
-    progress = record_result(batch_id, category, stock_code=stock_code if needs_code else None)
+    notification_category_entry = (
+        f"{notification_category.value}|{stock_code}" if notification_category is not None else None
+    )
+    progress = record_result(
+        batch_id,
+        category,
+        stock_code=stock_code if needs_code else None,
+        notification_category_entry=notification_category_entry,
+    )
     if progress is None or not progress.is_complete:
         return
     if not runtime_config_service.get_notification_enabled():
@@ -668,6 +692,18 @@ def _finish_batch_item(
             batch_id,
         )
         return
+    # コードレビュー対応(2026-08、LINE通知/監査分離): ユーザー行動中心の
+    # 4分類(売却/監視/要確認/緊急)集計。「売却」はSELL+PARTIAL_SELLの合算
+    # (一部/全部の区別はサマリー上では行わない)、CRITICAL_RISKは独立集計とし
+    # 「売却」には含めない(URGENT_REVIEW/URGENT_HOLDING_REVIEWは必ずしも
+    # 売却判定ではないため)。
+    category_prefixes = [entry.split("|", 1)[0] for entry in progress.notification_categories]
+    sell_n = category_prefixes.count(NotificationCategory.SELL.value) + category_prefixes.count(
+        NotificationCategory.PARTIAL_SELL.value
+    )
+    watch_n = category_prefixes.count(NotificationCategory.WATCH.value)
+    manual_review_n = category_prefixes.count(NotificationCategory.MANUAL_REVIEW.value)
+    critical_risk_n = category_prefixes.count(NotificationCategory.CRITICAL_RISK.value)
     notification_service.notify_batch_summary(
         _PROCESS_NAME,
         progress.total,
@@ -675,6 +711,10 @@ def _finish_batch_item(
         now,
         data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
         failed_stock_codes=progress.failed_stock_codes,
+        sell_sent_count=sell_n,
+        watch_sent_count=watch_n,
+        manual_review_sent_count=manual_review_n,
+        critical_risk_sent_count=critical_risk_n,
     )
 
 
@@ -742,7 +782,13 @@ def _process_single_holding(
 
     logger.info("holding_evaluation_audit: %s", result.audit)
     _finish_batch_item(
-        batch_id, result.category, stock_code, now, notification_service, runtime_config_service
+        batch_id,
+        result.category,
+        stock_code,
+        now,
+        notification_service,
+        runtime_config_service,
+        notification_category=result.notification_category,
     )
     return {
         "stock_code": stock_code,
