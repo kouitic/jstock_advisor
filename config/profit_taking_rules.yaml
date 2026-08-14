@@ -3,19 +3,38 @@
 version: 1
 
 thresholds:
-  # 含み益率(%)によるシグナル
+  # 含み益率(%)によるシグナル。コードレビュー対応(2026-08、上値余地の導入)により、
+  # unrealized_gain_partial_pct/unrealized_gain_full_pctはもはや判定レベル
+  # (raw_level)の決定には使わない(price_positionブロックに置き換えられた)。
+  # _compute_sell_prices()の価格フィールド候補選択(level_gain、どの価格を
+  # 表示するかの補助値)専用として引き続き使うため、値・キー名は変更しない。
   unrealized_gain_watch_pct: 20.0        # 利確候補として監視
-  unrealized_gain_partial_pct: 30.0      # 一部利確を検討
-  unrealized_gain_full_pct: 50.0         # 全株または大部分の利確を検討
+  unrealized_gain_partial_pct: 30.0      # 価格フィールド候補選択専用(判定レベルには不使用)
+  unrealized_gain_full_pct: 50.0         # 価格フィールド候補選択専用(判定レベルには不使用)
 
-  # 強気適正価格に対する超過率(%)(利確判定エンジン再レビュー対応: 中立値ではなく
-  # 強気適正価格を主軸とする。中立適正価格超過はWATCH開始条件としてのみ使う)
-  fair_value_excess_partial_pct: 25.0    # 一部利確候補水準
-  fair_value_excess_full_pct: 40.0       # 全株利確候補水準
+  # 強気適正価格に対する超過率(%)。同様にコードレビュー対応(2026-08)により、
+  # 判定レベルの決定には使わず、_compute_sell_prices()の価格フィールド候補選択
+  # (level_fv)専用として残す(値・キー名は変更しない)。
+  fair_value_excess_partial_pct: 25.0    # 価格フィールド候補選択専用(判定レベルには不使用)
+  fair_value_excess_full_pct: 40.0       # 価格フィールド候補選択専用(判定レベルには不使用)
 
   # 総合利回りの低下によるシグナル(%)
   total_yield_caution_pct: 2.5           # 利確を検討
   total_yield_strong_caution_pct: 2.0    # 強く利確を検討
+
+# 含み益率×上値余地(ceilingまでの距離)の基本アクションレベル判定(コードレビュー
+# 対応2026-08)。ceiling_price(usable_for_trading_judgment=Trueかつ信頼性ゲート
+# 通過済みのfair_value_range.bull)に対する上値余地を、利確判定の中心指標として
+# 導入する。含み益率単独・適正価格超過率単独では判定レベルへ到達しない設計へ
+# 変更したため、上記thresholdsのgain/fair_value_excess系キーは判定レベルの
+# 決定には使わなくなった(このブロックが置き換える)。
+price_position:
+  watch_gain_pct: 20.0            # 内部WATCHトリガー(含み益のみでWATCHへ)
+  partial_gain_pct: 20.0          # PARTIAL候補の含み益閾値
+  full_gain_pct: 25.0             # FULL候補の含み益閾値
+  partial_upside_max_pct: 15.0    # これ以上の上値余地は「まだ余地あり」(WATCH据え置き)
+  full_upside_max_pct: 5.0        # FULL候補の上値余地上限
+  ceiling_exceeded_pct: 0.0       # 上値余地がこれ未満(=ceiling超過)でFULL強候補
 
 # 利確判定を弱める要因。該当する場合、判定レベルを1段階引き下げる(FULL->PARTIAL, PARTIAL->WATCH等)
 mitigating_factors:

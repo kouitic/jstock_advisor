@@ -205,11 +205,18 @@ def test_buy_notification_actual_pushed_body_within_70_chars(service) -> None:
 
 
 def test_near_buy_notification_actual_pushed_body_within_70_chars(service) -> None:
+    """コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR BUYは
+    evaluate_notification_status経由ではもはや送信されない(NON_ACTIONABLE)。
+    本テストの主眼は実送信の可否ではなく、send_recommendation_notification()を
+    直接呼んだ場合の本文フォーマット自体(短文・「接近」「打診」表現)であるため、
+    そちらは従来どおり直接呼び出して検証する。
+    """
     svc, client = service
     rec = _near_buy_recommendation()
 
     outcome = svc.evaluate_notification_status(rec, _NOW)
-    assert outcome.status == NotificationStatus.SENT
+    assert outcome.status == NotificationStatus.NOT_REQUIRED
+    assert outcome.block_category is not None and outcome.block_category.value == "NON_ACTIONABLE"
     svc.send_recommendation_notification(rec, _NOW)
 
     body = client.sent[0]
@@ -306,7 +313,14 @@ def test_near_buy_sent_then_sell_still_sent_higher_priority(service) -> None:
 
 
 def test_sell_sent_then_near_buy_suppressed_lower_priority(service) -> None:
-    """F: 同日SELL通知済み → NEAR BUY発生 → NEAR BUYは重複抑止される。"""
+    """F: 同日SELL通知済み → NEAR BUY発生 → NEAR BUYは送信されない。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR_BUYはもはや
+    LINE送信されない(NON_ACTIONABLE)カテゴリのため、cross-pipeline重複抑止
+    (_NOTIFICATION_PRIORITY)の対象から外れた(priority=0扱い、eligible=True)。
+    抑止の理由がLOW_PRIORITYからNON_ACTIONABLEへ変わっただけで、「NEAR BUYが
+    追加送信されない」という結果自体は変わらない。
+    """
     svc, client = service
     stock_code = "9432"
     sell = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-f")
@@ -316,10 +330,11 @@ def test_sell_sent_then_near_buy_suppressed_lower_priority(service) -> None:
     assert len(client.sent) == 1
 
     priority = svc.check_cross_pipeline_priority_eligibility(near_buy, _NOW)
-    assert priority.eligible is False
-    assert priority.block_reason == "LOW_PRIORITY"
+    assert priority.eligible is True  # NEAR_BUYはcross-pipeline優先度表の対象外(priority=0)
 
-    # evaluate_notification_status経由でもNOT_REQUIREDとなり、実送信されないこと。
+    # evaluate_notification_status経由でNOT_REQUIRED(NON_ACTIONABLE)となり、
+    # 実送信されないこと。
     outcome = svc.evaluate_notification_status(near_buy, _NOW)
     assert outcome.status == NotificationStatus.NOT_REQUIRED
+    assert outcome.block_category is not None and outcome.block_category.value == "NON_ACTIONABLE"
     assert len(client.sent) == 1  # SELLの1件のみ、NEAR BUYは追加送信されない

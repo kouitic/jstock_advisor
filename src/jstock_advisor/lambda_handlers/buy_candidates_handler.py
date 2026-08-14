@@ -1069,13 +1069,23 @@ def _finalize_batch(
             )
             continue
 
-        notification_service.send_recommendation_notification(nb_recommendation, now)
+        # コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR BUY/
+        # WATCH_BEFORE_EARNINGSは「今すぐ売買アクションを取れない」監視系
+        # 判定のため、ここまでの全ゲート通過後もLINEへは送信しない
+        # (WatchStateService側の内部監視・昇格判定自体はこのゲートより前段
+        # で完了済みのため一切影響を受けない)。送らなかったこと自体は
+        # NON_ACTIONABLEとしてAuditへ必ず記録する(黙って握りつぶさない)。
         near_buy_sent_count += 1
         if is_near_buy:
             near_buy_daily_count += 1
         _record_notification_outcome_audit(
             audit_service, rule_version, now, nb_recommendation, near_unified_rank,
-            near_buy_sent_count, "SENT", NotificationEligibility(eligible=True),
+            near_buy_sent_count, "NOT_REQUIRED",
+            NotificationEligibility(
+                eligible=False,
+                block_category=EligibilityBlockCategory.NON_ACTIONABLE,
+                block_reason="NON_ACTIONABLE",
+            ),
             basis, portfolio_total, coverage_ratio,
         )
 
@@ -1111,10 +1121,18 @@ def _finalize_batch(
             )
             continue
 
-        notification_service.send_watch_end_notification(we_recommendation, now)
+        # コードレビュー対応(2026-08、LINE通知アクション限定化): WATCH終了通知は
+        # 「監視をやめた」ことの報告であり、ユーザーに売買アクションを促す通知
+        # ではないため、NEAR BUY/WATCH_BEFORE_EARNINGSと同様にLINE送信をやめ、
+        # NON_ACTIONABLEとしてAuditへ記録するのみとする。
         _record_notification_outcome_audit(
             audit_service, rule_version, now, we_recommendation, None, None,
-            "SENT", NotificationEligibility(eligible=True),
+            "NOT_REQUIRED",
+            NotificationEligibility(
+                eligible=False,
+                block_category=EligibilityBlockCategory.NON_ACTIONABLE,
+                block_reason="NON_ACTIONABLE",
+            ),
             basis, portfolio_total, coverage_ratio,
         )
 

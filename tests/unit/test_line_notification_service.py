@@ -1,4 +1,5 @@
 import datetime as dt
+import uuid
 from decimal import Decimal
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from jstock_advisor.domain.entities.enums import (
     ExecutionMode,
     NotificationCategory,
     NotificationStatus,
+    NotificationType,
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
@@ -343,11 +345,35 @@ def test_resend_after_days_elapsed(service_and_repos) -> None:
     assert len(client.sent) == 2
 
 
-def test_earnings_review_pending_notification_is_sent_with_expected_content(
+def _seed_previous_notification(service, repo, rec, sent_at: dt.datetime) -> None:
+    """コードレビュー対応(2026-08、LINE通知アクション限定化): REVIEW_AFTER_EARNINGS
+    (NotificationCategory.WATCH)はもはやnotify_recommendation経由で実送信されない
+    (NON_ACTIONABLE)ため、再送判定ロジック自体の回帰テストでは「直前に送信済み」
+    状態をNotificationLog/Recommendationへ直接投入して再現する
+    (test_notification_outcome_suppression_reason.pyの既存パターンと同じ)。
+    """
+    repo.save(rec)
+    service._log_repo.save(
+        NotificationLog(
+            notification_id=str(uuid.uuid4()),
+            notification_type=NotificationType.PROFIT_TAKING_SIGNAL,
+            stock_code=rec.stock_code,
+            content_hash="dummy-hash-not-used-by-earnings-waiting-state-key",
+            sent_at=sent_at,
+            related_recommendation_id=rec.recommendation_id,
+        )
+    )
+
+
+def test_earnings_review_pending_notification_is_non_actionable_but_has_expected_content(
     service_and_repos,
 ) -> None:
-    """REVIEW_AFTER_EARNINGSの初回通知が正しくフォーマットされ送信されることの確認
-    (コードレビュー対応: 明治HD事例)。"決算未発表"/"決算発表済み"と断定しない。
+    """REVIEW_AFTER_EARNINGSはNotificationCategory.WATCHに分類されるため、
+    コードレビュー対応(2026-08、LINE通知アクション限定化)によりもはや
+    notify_recommendation経由では送信されない(NON_ACTIONABLE、明治HD事例の
+    決算発表確認待ち通知自体は引き続きAudit/Recommendationへ記録される)。
+    メッセージフォーマット自体("決算発表状況確認待ち"・"決算未発表"/"決算発表済み"
+    と断定しない表現)は、send_recommendation_notification()を直接呼んで確認する。
     """
     service, repo, client = service_and_repos
     rec = _make_earnings_review_recommendation(
@@ -357,8 +383,10 @@ def test_earnings_review_pending_notification_is_sent_with_expected_content(
     repo.save(rec)
 
     sent = service.notify_recommendation(rec, _NOW)
+    assert sent is False
+    assert client.sent == []
 
-    assert sent is True
+    service.send_recommendation_notification(rec, _NOW)
     assert len(client.sent) == 1
     assert "決算発表状況確認待ち" in client.sent[0]
     assert "決算未発表" not in client.sent[0]
@@ -368,23 +396,21 @@ def test_earnings_review_pending_notification_is_sent_with_expected_content(
 def test_earnings_review_pending_notification_not_resent_for_same_state(
     service_and_repos,
 ) -> None:
-    """同一のnext_review_conditions(=同一の確認待ち状態)が続く間は再送しない。"""
-    service, repo, client = service_and_repos
+    """同一のnext_review_conditions(=同一の確認待ち状態)が続く間は再送資格なし。"""
+    service, repo, _client = service_and_repos
     conditions = ["決算発表予定日を経過していますが、無償データから実際の発表状況を確認できて"]
     rec1 = _make_earnings_review_recommendation(
         recommendation_id="rec-1", next_review_conditions=conditions
     )
-    repo.save(rec1)
-    service.notify_recommendation(rec1, _NOW)
+    _seed_previous_notification(service, repo, rec1, _NOW)
 
     rec2 = _make_earnings_review_recommendation(
         recommendation_id="rec-2", next_review_conditions=conditions
     )
     repo.save(rec2)
-    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+    eligibility = service.check_resend_eligibility(rec2, _NOW + dt.timedelta(hours=1))
 
-    assert sent is False
-    assert len(client.sent) == 1
+    assert eligibility.eligible is False
 
 
 def test_earnings_review_pending_notification_resent_when_state_transitions_to_delayed(
@@ -395,14 +421,13 @@ def test_earnings_review_pending_notification_resent_when_state_transitions_to_d
     無くても再送資格ありとみなす(デプロイ前対応: 自由文比較から構造化キー
     比較へ変更)。
     """
-    service, repo, client = service_and_repos
+    service, repo, _client = service_and_repos
     rec1 = _make_earnings_review_recommendation(
         recommendation_id="rec-1",
         next_review_conditions=["決算発表予定日を経過していますが、無償データから..."],
         earnings_release_confirmation_state=EarningsReleaseConfirmationState.AWAITING_CONFIRMATION,
     )
-    repo.save(rec1)
-    service.notify_recommendation(rec1, _NOW)
+    _seed_previous_notification(service, repo, rec1, _NOW)
 
     rec2 = _make_earnings_review_recommendation(
         recommendation_id="rec-2",
@@ -410,25 +435,23 @@ def test_earnings_review_pending_notification_resent_when_state_transitions_to_d
         earnings_release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
     )
     repo.save(rec2)
-    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+    eligibility = service.check_resend_eligibility(rec2, _NOW + dt.timedelta(hours=1))
 
-    assert sent is True
-    assert len(client.sent) == 2
+    assert eligibility.eligible is True
 
 
 def test_earnings_review_pending_notification_not_resent_for_same_delayed_state(
     service_and_repos,
 ) -> None:
     """DELAYED→DELAYEDのように状態が変わらない場合は、最小再通知時間
-    (resend_after_days)を経過するまで再送しない。"""
-    service, repo, client = service_and_repos
+    (resend_after_days)を経過するまで再送資格なし。"""
+    service, repo, _client = service_and_repos
     rec1 = _make_earnings_review_recommendation(
         recommendation_id="rec-1",
         next_review_conditions=["決算発表予定日を経過し、最新財務データの反映確認が長引いています。"],
         earnings_release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
     )
-    repo.save(rec1)
-    service.notify_recommendation(rec1, _NOW)
+    _seed_previous_notification(service, repo, rec1, _NOW)
 
     rec2 = _make_earnings_review_recommendation(
         recommendation_id="rec-2",
@@ -436,10 +459,9 @@ def test_earnings_review_pending_notification_not_resent_for_same_delayed_state(
         earnings_release_confirmation_state=EarningsReleaseConfirmationState.DELAYED,
     )
     repo.save(rec2)
-    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+    eligibility = service.check_resend_eligibility(rec2, _NOW + dt.timedelta(hours=1))
 
-    assert sent is False
-    assert len(client.sent) == 1
+    assert eligibility.eligible is False
 
 
 def test_earnings_review_pending_notification_resent_when_earnings_date_changes(
@@ -447,14 +469,13 @@ def test_earnings_review_pending_notification_resent_when_earnings_date_changes(
 ) -> None:
     """対象の決算予定日自体が変わった(=別の決算イベントに対する待機)場合は、
     状態ラベルが同じでも再送資格ありとみなす。"""
-    service, repo, client = service_and_repos
+    service, repo, _client = service_and_repos
     rec1 = _make_earnings_review_recommendation(
         recommendation_id="rec-1",
         next_review_conditions=["決算発表予定日を経過していますが、無償データから..."],
         earnings_date_raw=dt.date(2026, 8, 5),
     )
-    repo.save(rec1)
-    service.notify_recommendation(rec1, _NOW)
+    _seed_previous_notification(service, repo, rec1, _NOW)
 
     rec2 = _make_earnings_review_recommendation(
         recommendation_id="rec-2",
@@ -462,10 +483,9 @@ def test_earnings_review_pending_notification_resent_when_earnings_date_changes(
         earnings_date_raw=dt.date(2026, 11, 5),
     )
     repo.save(rec2)
-    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+    eligibility = service.check_resend_eligibility(rec2, _NOW + dt.timedelta(hours=1))
 
-    assert sent is True
-    assert len(client.sent) == 2
+    assert eligibility.eligible is True
 
 
 def test_data_error_notification_is_not_sent_to_line(service_and_repos, caplog) -> None:
@@ -560,24 +580,30 @@ def _make_full_profit_take_recommendation(
     )
 
 
-def test_recommendation_with_consistency_violation_suppresses_normal_notification(
-    service_and_repos, caplog
+def test_recommendation_with_consistency_violation_sends_manual_review_alert(
+    service_and_repos,
 ) -> None:
+    """コードレビュー対応(2026-08、full_take_extreme_marginの挙動変更): 全株利確
+    検討価格が現在値から極端に乖離している場合、内部計算異常(価格算出ロジックの
+    不整合)の疑いがあるため、通常の推奨通知の代わりに要確認LINEメッセージを
+    安全弁として送信するようになった(以前はmanual_review_required=Falseの
+    ままログ記録のみで、通常通知だけを黙って抑止していた)。この経路は
+    notify_manual_review_required()を通るため、_check_data_quality内の
+    data_quality_alertログ(notify_data_quality_alert専用)は出ない
+    (検出内容自体はAuditServiceへ別途記録済み、_check_data_quality参照)。
+    """
     service, repo, client = service_and_repos
     # 全株利確検討価格が現在値の100%以上高く、極端な乖離(full_take_extreme_margin)。
-    # データ品質アラートはLINEへ個別送信せず、通常の推奨通知のみを抑止する
     rec = _make_full_profit_take_recommendation(
         recommendation_id="rec-1", full_take_price="9000"
     )
     repo.save(rec)
 
-    with caplog.at_level("WARNING"):
-        sent = service.notify_recommendation(rec, _NOW)
+    sent = service.notify_recommendation(rec, _NOW)
 
-    assert sent is False
-    assert client.sent == []
-    assert "full_take_extreme_margin" in caplog.text
-    assert "stock_code=2914" in caplog.text
+    assert sent is True
+    assert len(client.sent) == 1
+    assert "要確認" in client.sent[0]
 
 
 def test_clean_full_profit_take_is_sent_normally(service_and_repos) -> None:
@@ -700,10 +726,17 @@ def _make_sell_recommendation(
     )
 
 
-def test_sell_message_with_insufficient_evidence_routes_to_manual_review(
+def test_sell_message_with_insufficient_evidence_is_logged_not_sent(
     service_and_repos,
 ) -> None:
-    # 独立根拠グループが1件のみのSELLは、自動確定させず手動確認へ回す(要求仕様§15・§16)。
+    """独立根拠グループが1件のみのSELLは、要求仕様§15・§16により自動確定させない。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): 証拠不足
+    (独立根拠グループ不足)は内部論理矛盾ではなく証拠の情報源品質の問題である
+    ため、もはや要確認LINEの安全弁(notify_manual_review_required)を発火させ
+    ない(is_evidence_quality_issue=True・manual_review_required=False)。
+    ログへは記録されるが、LINEへは何も送信されない。
+    """
     service, repo, client = service_and_repos
     rec = _make_sell_recommendation(
         recommendation_id="rec-1", reasons=["減配(major)"], independent_evidence_group_count=1
@@ -712,10 +745,8 @@ def test_sell_message_with_insufficient_evidence_routes_to_manual_review(
 
     sent = service.notify_recommendation(rec, _NOW)
 
-    assert sent is True
-    message = client.sent[0]
-    assert "要確認 4631 ＤＩＣ" in message
-    assert "売買判断を保留" in message
+    assert sent is False
+    assert client.sent == []
 
 
 def test_sell_message_with_sufficient_independent_evidence_sends_normally(
@@ -758,11 +789,23 @@ def test_data_error_notification_logs_stock_name_instead_of_sending(
     assert "stock_code=9999 テスト銘柄" in caplog.text
 
 
-def test_data_quality_alert_logs_stock_name_and_recommended_action_instead_of_sending(
+def test_data_quality_alert_logs_stock_name_and_recommended_action(
     service_and_repos, caplog
 ) -> None:
+    """証拠品質系(manual_review_required=False)のデータ品質アラートは
+    notify_data_quality_alert()経由でログのみに記録され、LINEへは送信されない
+    (stock_name・recommended_actionを含む)。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): 以前はこのログ
+    経路をfull_take_extreme_marginのシナリオで確認していたが、そちらは
+    manual_review_required=Trueへ挙動変更されnotify_manual_review_required()
+    (別のログを出さない経路)を通るようになったため、代わりに証拠品質系のまま
+    据え置かれたsell_based_on_single_evidenceのシナリオで確認する。
+    """
     service, repo, client = service_and_repos
-    rec = _make_full_profit_take_recommendation(recommendation_id="rec-1", full_take_price="9000")
+    rec = _make_sell_recommendation(
+        recommendation_id="rec-1", reasons=["減配(major)"], independent_evidence_group_count=1
+    )
     repo.save(rec)
 
     with caplog.at_level("WARNING"):
@@ -770,7 +813,7 @@ def test_data_quality_alert_logs_stock_name_and_recommended_action_instead_of_se
 
     assert client.sent == []
     assert f"stock_code={rec.stock_code} {rec.stock_name}" in caplog.text
-    assert "適正価格算出の入力データ" in caplog.text
+    assert "sell_based_on_single_evidence" in caplog.text
 
 
 def _counts(
@@ -1254,16 +1297,22 @@ def test_evaluate_notification_status_never_sends_non_buy_family_actions(
 def test_watch_before_earnings_reaches_evaluate_notification_status(service_and_repos) -> None:
     """BUY候補裾野拡大機能(2026-08、指摘1): 旧ゲート(buy_action not in
     BUY_FAMILY_ACTIONS)ではWATCH_BEFORE_EARNINGSが誤って抑止されていた。
-    resolve_notification_category()経由の新ゲートでは通知評価まで到達し、
-    notification_policy.watch_before_earnings.notify_every_business_day=trueの
-    ため毎営業日SENTになる。"""
+    resolve_notification_category()経由の新ゲートでは正しくWATCH_BEFORE_EARNINGS
+    カテゴリとして分類される(NOT_NOTIFIABLEには落ちない)ことが確認できる。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): ただし
+    WATCH_BEFORE_EARNINGS自体はユーザーに明確な売買アクションを促さない
+    カテゴリのため、もはやLINE送信はしない(NON_ACTIONABLE、旧
+    notify_every_business_day=trueによる毎営業日送信は廃止)。
+    """
     service, _repo, client = service_and_repos
     rec = _make_buy_pipeline_recommendation(buy_action=BuyAction.WATCH_BEFORE_EARNINGS)
 
     outcome = service.evaluate_notification_status(rec, _NOW)
 
-    assert outcome.status == NotificationStatus.SENT
-    assert outcome.sent is False  # evaluate_notification_status自体は送信しない(呼び出し側の責務)
+    assert outcome.status == NotificationStatus.NOT_REQUIRED
+    assert outcome.block_category is not None and outcome.block_category.value == "NON_ACTIONABLE"
+    assert outcome.sent is False
 
 
 @pytest.mark.parametrize(
@@ -2228,6 +2277,11 @@ def test_validation_manual_review_does_not_grow_production_audit_log(tmp_path: P
     内のself._audit.record()(実物のAuditService/AuditLogRepository、保存先のみ
     tmp_pathへ差し替え)がVALIDATIONでは本番AuditLogへ一切保存しないことを、
     _check_data_qualityをモックせず実ロジックを経由させて検証する。
+
+    コードレビュー対応(2026-08、証拠品質系の分離): sell_based_on_single_evidence
+    はもはやmanual_review_requiredを発火させない(is_evidence_quality_issue=True)
+    ため、引き続きmanual_review_required=Trueのfull_take_extreme_marginシナリオ
+    (全株利確検討価格が現在値から極端に乖離)を使う。
     """
     store_dir = tmp_path / "local_store"
     audit_repo = AuditLogRepository(store_dir=store_dir)
@@ -2247,10 +2301,8 @@ def test_validation_manual_review_does_not_grow_production_audit_log(tmp_path: P
             store_dir=store_dir
         ),
     )
-    # 独立根拠グループが1件のみのSELLは自動確定させず手動確認へ回る
-    # (_check_data_qualityの実ロジックがrequires_manual_review=Trueを返す)。
-    rec = _make_sell_recommendation(
-        recommendation_id="rec-1", reasons=["減配(major)"], independent_evidence_group_count=1
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="9000"
     )
     recommendation_repo.save(rec)
 
@@ -2258,7 +2310,8 @@ def test_validation_manual_review_does_not_grow_production_audit_log(tmp_path: P
 
     assert sent is True
     message = client.sent[0]
-    assert "要確認 4631 ＤＩＣ" in message
+    assert "要確認" in message
+    assert "2914" in message
     assert message.startswith("🧪検証｜")
     assert audit_repo.list_all() == []
 
@@ -2281,8 +2334,8 @@ def test_normal_manual_review_still_grows_audit_log(tmp_path: Path) -> None:
             store_dir=store_dir
         ),
     )
-    rec = _make_sell_recommendation(
-        recommendation_id="rec-1", reasons=["減配(major)"], independent_evidence_group_count=1
+    rec = _make_full_profit_take_recommendation(
+        recommendation_id="rec-1", full_take_price="9000"
     )
     recommendation_repo.save(rec)
 
@@ -2479,6 +2532,13 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
     そちらはtest_profit_taking.py::test_full_profit_take_price_excludes_unusable_fair_value
     とtest_sell_price_recommendation_service.pyで「LINEへ捏造された目安価格を
     出さない」側から既に回帰確認済み。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): ケースA(WATCH)・
+    C(REVIEW)はNotificationCategory.WATCH/MANUAL_REVIEWに分類され、もはや
+    notify_recommendation経由では送信されない(NON_ACTIONABLE)。本文の
+    フォーマット自体(判断根拠が漏れないこと)はカテゴリの送信可否とは独立した
+    性質のため、send_recommendation_notification()を直接呼んで確認する
+    (ケースB・Eは実送信経路のまま)。
     """
     service, repo, client = service_and_repos
 
@@ -2505,7 +2565,7 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
         rule_version="v1-mvp",
     )
     repo.save(rec_a)
-    service.notify_recommendation(rec_a, _NOW)
+    service.send_recommendation_notification(rec_a, _NOW)
     message_a = client.sent[-1]
     assert "DCF" not in message_a
     assert "PER倍率" not in message_a
@@ -2559,7 +2619,7 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
         rule_version="v1-mvp",
     )
     repo.save(rec_c)
-    service.notify_recommendation(rec_c, _NOW)
+    service.send_recommendation_notification(rec_c, _NOW)
     message_c = client.sent[-1]
     assert "SINGLE_EVIDENCE_ONLY" not in message_c
     assert "独立根拠数1件のみ" not in message_c
@@ -2585,7 +2645,7 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
         rule_version="v1-mvp",
     )
     repo.save(rec_e)
-    service.notify_recommendation(rec_e, _NOW)
+    service.send_recommendation_notification(rec_e, _NOW)
     message_e = client.sent[-1]
     assert "対象業種の評価モデルが未整備のため標準モデルを使用" not in message_e
     assert "業種モデル" not in message_e
@@ -2598,9 +2658,11 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
 def test_notify_batch_summary_new_format_excludes_critical_risk_from_sell_count(
     service_and_repos,
 ) -> None:
-    """コードレビュー対応(2026-08、LINE通知/監査分離)。バッチサマリー新仕様は
-    売却(SELL+PARTIAL_SELL)・監視・要確認・緊急確認の4分類で出力し、
-    CRITICAL_RISKは「売却」件数に含めない。"""
+    """コードレビュー対応(2026-08、LINE通知アクション限定化)。バッチサマリー新
+    仕様は実際にLINE送信したアクション3分類(一部売却・全部売却・売却)+緊急確認
+    で出力し、CRITICAL_RISKは「売却」件数に含めない。WATCH/MANUAL_REVIEWは
+    もはやLINE送信されないため、サマリーからも除外された(旧「監視」「要確認」
+    分類は廃止)。"""
     service, _repo, client = service_and_repos
 
     sent = service.notify_batch_summary(
@@ -2608,18 +2670,18 @@ def test_notify_batch_summary_new_format_excludes_critical_risk_from_sell_count(
         total=10,
         category_counts=_counts(sent=5, hold=5),
         now=_NOW,
+        partial_sell_sent_count=2,
+        full_sell_sent_count=1,
         sell_sent_count=3,
-        watch_sent_count=2,
-        manual_review_sent_count=1,
         critical_risk_sent_count=1,
     )
 
     assert sent is True
     message = client.sent[0]
+    assert "一部売却2" in message
+    assert "全部売却1" in message
     assert "売却3" in message
-    assert "監視2" in message
-    assert "要確認1" in message
-    assert "緊急1" in message
+    assert "緊急確認1" in message
 
 
 def test_notify_batch_summary_new_format_omits_critical_risk_segment_when_zero(
@@ -2632,9 +2694,9 @@ def test_notify_batch_summary_new_format_omits_critical_risk_segment_when_zero(
         total=10,
         category_counts=_counts(sent=5, hold=5),
         now=_NOW,
+        partial_sell_sent_count=2,
+        full_sell_sent_count=1,
         sell_sent_count=3,
-        watch_sent_count=2,
-        manual_review_sent_count=1,
         critical_risk_sent_count=0,
     )
 
@@ -2686,7 +2748,13 @@ def test_profit_taking_watch_before_earnings_routes_to_short_watch_category(
 ) -> None:
     """再コードレビュー対応(2026-08-14、実装漏れ修正)。上記の分類漏れにより、
     実送信時に旧長文_format_message()が使われ、判断根拠(適正価格レンジ等)が
-    LINE本文へ漏れる可能性があった不具合の回帰テスト(実送信経路まで通す)。
+    LINE本文へ漏れる可能性があった不具合の回帰テスト。
+
+    コードレビュー対応(2026-08、LINE通知アクション限定化): RecommendationType.
+    WATCH_BEFORE_EARNINGS(利確判定エンジンのWATCH抑制専用、buy_action=None)は
+    NotificationCategory.WATCHに分類され、もはやnotify_recommendation経由では
+    送信されない(NON_ACTIONABLE)。短文フォーマット自体の回帰確認(長文漏れが
+    無いこと)は、send_recommendation_notification()を直接呼んで検証する。
     """
     service, repo, client = service_and_repos
     rec = Recommendation(
@@ -2708,8 +2776,10 @@ def test_profit_taking_watch_before_earnings_routes_to_short_watch_category(
     repo.save(rec)
 
     sent = service.notify_recommendation(rec, _NOW)
+    assert sent is False
+    assert client.sent == []
 
-    assert sent is True
+    service.send_recommendation_notification(rec, _NOW)
     message = client.sent[0]
     assert "決算発表接近のため様子見" in message
     assert "適正価格レンジ" not in message

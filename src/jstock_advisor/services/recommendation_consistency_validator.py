@@ -29,6 +29,12 @@ class ConsistencyViolation:
     check_name: str
     description: str
     manual_review_required: bool = False
+    # コードレビュー対応(2026-08、LINE通知アクション限定化): Trueの場合、根拠の
+    # 情報源品質(独立根拠グループ不足・一次情報未確認)に起因する違反であり、
+    # 内部論理・計算異常(future_condition_equals_current_price等)とは区別する。
+    # 証拠品質系はLINEの安全弁(notify_manual_review_required)を発火させない
+    # (NON_ACTIONABLEゲート経由でAudit記録のみに留める)。
+    is_evidence_quality_issue: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,7 +76,8 @@ def _check_sell_single_evidence(r: Recommendation) -> ConsistencyViolation | Non
             "sell_based_on_single_evidence",
             f"{r.recommendation_type.value}の独立根拠グループが"
             f"{r.independent_evidence_group_count}件しかない(独立した複数の根拠が必要)",
-            manual_review_required=True,
+            manual_review_required=False,
+            is_evidence_quality_issue=True,
         )
     return None
 
@@ -85,7 +92,8 @@ def _check_high_confidence_insufficient_groups(r: Recommendation) -> Consistency
         return ConsistencyViolation(
             "high_confidence_insufficient_evidence_groups",
             f"信頼度HIGHだが独立根拠グループが{r.independent_evidence_group_count}件しかない",
-            manual_review_required=True,
+            manual_review_required=False,
+            is_evidence_quality_issue=True,
         )
     return None
 
@@ -101,7 +109,8 @@ def _check_sell_based_on_yfinance_only(r: Recommendation) -> ConsistencyViolatio
         return ConsistencyViolation(
             "sell_based_on_secondary_source_only",
             f"{r.recommendation_type.value}の根拠がすべて一次情報未確認(yfinance等の二次情報)のみ",
-            manual_review_required=True,
+            manual_review_required=False,
+            is_evidence_quality_issue=True,
         )
     return None
 
@@ -171,6 +180,10 @@ def _check_full_take_extreme_margin(
             "full_take_extreme_margin",
             f"全株利確検討価格({full_take.price}円)が現在値"
             f"({r.price_at_recommendation}円)より{margin_pct:.0f}%も高く、極端に乖離している",
+            # コードレビュー対応(2026-08、挙動変更): 内部計算異常(価格算出ロジックの
+            # 不整合)の疑いがあるため、証拠品質系とは区別し安全弁を発火させる
+            # (従来はmanual_review_required未指定でFalseのままだった)。
+            manual_review_required=True,
         )
     return None
 

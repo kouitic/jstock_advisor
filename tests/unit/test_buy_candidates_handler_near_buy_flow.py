@@ -85,9 +85,15 @@ class _FakeNearBuyNotificationService:
         return True
 
 
-def test_near_buy_candidate_reaches_send_recommendation_notification(
+def test_near_buy_candidate_is_recorded_as_non_actionable_without_sending(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR BUYは
+    「今すぐ売買アクションを取れない」監視系判定のため、全ゲート通過後も
+    もはやLINE送信しない(send_recommendation_notificationは呼ばれない)。
+    送らなかったこと自体はNON_ACTIONABLEとしてAuditへ必ず記録する。
+    """
+    audit_repo = AuditLogRepository(store_dir=tmp_path)
     _patch_audit(monkeypatch, tmp_path)
     repo = RecommendationRepository(store_dir=tmp_path)
 
@@ -110,14 +116,23 @@ def test_near_buy_candidate_reaches_send_recommendation_notification(
 
     handler_module._finalize_batch(progress, _CONFIG, _NOW, repo, fake_service)
 
-    assert len(fake_service.sent) == 1
-    assert fake_service.sent[0].stock_code == "9432"
+    assert fake_service.sent == []
     assert fake_service.batch_summary_calls[0]["near_buy_sent_count"] == 1
+    audit_entries = audit_repo.list_by_stock("9432")
+    assert any(
+        e.output_values.get("block_category") == "NON_ACTIONABLE" for e in audit_entries
+    )
 
 
 def test_near_buy_daily_limit_stops_further_sends(monkeypatch, tmp_path: Path) -> None:
-    """NEAR BUYの日次上限(既定5件)を超える分は送信されないが、監査には記録される
-    (WatchState自体の継続はwatch_state_service側の責務のためここでは検証しない)。"""
+    """NEAR BUYの日次上限(既定5件)を超える分は、上限以内の候補とは異なる理由
+    (DAILY_LIMIT_NEAR_BUY)でAuditへ記録される。コードレビュー対応(2026-08、
+    LINE通知アクション限定化)によりNEAR BUYはいずれもLINE送信されなくなったため、
+    「送信」ではなく「日次上限に基づく評価順位付け自体は維持されていること」を
+    Audit記録の理由の違いで確認する(WatchState自体の継続はwatch_state_service側の
+    責務のためここでは検証しない)。
+    """
+    audit_repo = AuditLogRepository(store_dir=tmp_path)
     _patch_audit(monkeypatch, tmp_path)
     repo = RecommendationRepository(store_dir=tmp_path)
 
@@ -154,6 +169,17 @@ def test_near_buy_daily_limit_stops_further_sends(monkeypatch, tmp_path: Path) -
 
     handler_module._finalize_batch(progress, limited_config, _NOW, repo, fake_service)
 
-    assert len(fake_service.sent) == 2
-    # distance_pct昇順(近い順)に送信されるため、最も近い2件が選ばれる
-    assert {r.stock_code for r in fake_service.sent} == {"1000", "1001"}
+    assert fake_service.sent == []
+    # distance_pct昇順(近い順)に評価されるため、最も近い2件のみがNON_ACTIONABLE
+    # (=日次上限内で評価済み)として記録され、残り2件はDAILY_LIMIT_NEAR_BUYとして
+    # 記録される。
+    within_limit = {"1000", "1001"}
+    over_limit = {"1002", "1003"}
+    for stock_code in within_limit:
+        entries = audit_repo.list_by_stock(stock_code)
+        assert any(e.output_values.get("block_category") == "NON_ACTIONABLE" for e in entries)
+    for stock_code in over_limit:
+        entries = audit_repo.list_by_stock(stock_code)
+        assert any(
+            e.output_values.get("block_category") == "DAILY_LIMIT_NEAR_BUY" for e in entries
+        )

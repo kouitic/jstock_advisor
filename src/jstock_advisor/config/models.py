@@ -122,15 +122,34 @@ class ValuationRulesConfig(StrictModel):
 
 class ProfitTakingThresholds(StrictModel):
     unrealized_gain_watch_pct: float
+    # --- コードレビュー対応(2026-08、上値余地の導入): 以下2フィールドは判定
+    # レベル(raw_level)の決定にはもう使わない。_compute_sell_prices()の価格
+    # フィールド候補選択(level_gain)専用として残す(PricePositionThresholds
+    # が判定レベルの主軸を担う) ---
     unrealized_gain_partial_pct: float
     unrealized_gain_full_pct: float
-    # --- 利確判定レビュー再対応(2026-07): 中立値ではなく強気適正価格を主軸にする ---
+    # --- 利確判定レビュー再対応(2026-07): 中立値ではなく強気適正価格を主軸にする。
+    # コードレビュー対応(2026-08)により、以下2フィールドも判定レベルの決定には
+    # 使わず、_compute_sell_prices()の価格フィールド候補選択(level_fv)専用 ---
     # 強気適正価格をこの%以上超過した場合にPARTIAL候補水準とする
     fair_value_excess_partial_pct: float
     # 強気適正価格をこの%以上超過した場合にFULL候補水準とする
     fair_value_excess_full_pct: float
     total_yield_caution_pct: float
     total_yield_strong_caution_pct: float
+
+
+class PricePositionThresholds(StrictModel):
+    """含み益率×上値余地(ceilingまでの距離)の基本アクションレベル判定
+    (コードレビュー対応2026-08)。詳細はprofit_taking.py._level_from_price_position()参照。
+    """
+
+    watch_gain_pct: float
+    partial_gain_pct: float
+    full_gain_pct: float
+    partial_upside_max_pct: float
+    full_upside_max_pct: float
+    ceiling_exceeded_pct: float
 
 
 class MitigatingFactor(StrictModel):
@@ -194,6 +213,7 @@ class TradingUnitRules(StrictModel):
 class ProfitTakingRulesConfig(StrictModel):
     version: int
     thresholds: ProfitTakingThresholds
+    price_position: PricePositionThresholds
     mitigating_factors: MitigatingFactors
     event_proximity_notice: EventProximityNotice
     condition_based_judgment: ConditionBasedJudgment
