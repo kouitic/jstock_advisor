@@ -187,13 +187,21 @@ def _build_critical_risk(recommendation: Recommendation) -> NotificationTextInpu
 
 
 def _build_watch(recommendation: Recommendation) -> NotificationTextInput:
-    """利確WATCH・決算前後のレビュー保留・ポートフォリオ集中リスクをまとめる
-    「監視」カテゴリ(コードレビュー対応2026-08、LINE通知/監査分離)。
+    """利確WATCH・決算前監視・決算前後のレビュー保留・ポートフォリオ集中
+    リスクをまとめる「監視」カテゴリ(コードレビュー対応2026-08、LINE通知/
+    監査分離)。
 
     RecommendationType.WATCH(利確判定エンジン由来)のみ`partial_profit_start_
     price`(利確検討を開始する水準、即時売却を意味しない)を目安価格として
-    持つ。それ以外(決算前後のレビュー保留・ポートフォリオ集中リスク)は
-    価格フィールド自体が存在しない構造のため、reasonのみ表示する。
+    持つ。それ以外(決算前監視・決算前後のレビュー保留・ポートフォリオ集中
+    リスク)は価格フィールド自体が存在しない構造のため、reasonのみ表示する。
+
+    RecommendationType.WATCH_BEFORE_EARNINGS(利確判定エンジンのWATCH抑制
+    専用。買い候補側のBuyAction.WATCH_BEFORE_EARNINGS由来のNotificationCategory.
+    WATCH_BEFORE_EARNINGSとは別物)は、決算接近によりまだ利確検討水準には
+    達していない銘柄の監視を一旦保留している状態のため、REVIEW_BEFORE_
+    EARNINGS(既に利確検討水準へ到達済みで確認待ち)とは異なる文言を使う
+    (再コードレビュー対応2026-08、実装漏れ修正)。
     """
     if recommendation.recommendation_type == RecommendationType.WATCH:
         sp = recommendation.sell_prices
@@ -212,6 +220,14 @@ def _build_watch(recommendation: Recommendation) -> NotificationTextInput:
             target_price_withheld_label=(
                 _WATCH_PRICE_WITHHELD_LABEL if target_price is None else None
             ),
+        )
+    if recommendation.recommendation_type == RecommendationType.WATCH_BEFORE_EARNINGS:
+        return NotificationTextInput(
+            category=NotificationCategory.WATCH,
+            stock_code=recommendation.stock_code,
+            stock_name=recommendation.stock_name,
+            current_price=recommendation.price_at_recommendation,
+            reason="決算発表接近のため様子見",
         )
     if recommendation.recommendation_type == RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW:
         weight = recommendation.portfolio_weight_pct

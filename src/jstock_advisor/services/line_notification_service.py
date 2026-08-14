@@ -54,6 +54,7 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import format_jst
 from jstock_advisor.domain.notification.message_formatter import format_notification_text
 from jstock_advisor.domain.notification.recommendation_adapter import (
+    _FULL_SELL_RECOMMENDATION_TYPES,
     SHORT_TEXT_CATEGORIES,
     build_notification_text_input,
     build_watch_end_text_input,
@@ -138,9 +139,13 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
     早期リターン・優先度比較のすべてがこの関数の結果だけを見る(buy_action/
     watch_type/recommendation_typeを個別に参照する判定を各所に重複させない)。
 
-    WATCH_BEFORE_EARNINGSの判定は必ず`recommendation.buy_action`を見る
-    (`recommendation_type`側の同名メンバーは利確判定エンジンのWATCH抑制専用、
-    buy_signal_service.pyのコメント参照)。
+    NotificationCategory.WATCH_BEFORE_EARNINGS(買い候補側の決算待ち監視)の
+    判定は必ず`recommendation.buy_action`を見る。`recommendation_type`側の
+    同名メンバー(`RecommendationType.WATCH_BEFORE_EARNINGS`)は利確判定
+    エンジンのWATCH抑制専用(buy_signal_service.pyのコメント参照)で、
+    `buy_action=None`のときのみ到達し、NotificationCategory.WATCHへ分類する
+    (コードレビュー対応2026-08: 以前はどの分岐にも一致せずOTHERへ落ち、
+    実送信時に旧長文フォーマットを使ってしまう不備があった)。
     """
     if is_critical_risk(recommendation.recommendation_type):
         return NotificationCategory.CRITICAL_RISK
@@ -178,6 +183,7 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
         return NotificationCategory.PARTIAL_SELL
     if recommendation.recommendation_type in (
         RecommendationType.WATCH,
+        RecommendationType.WATCH_BEFORE_EARNINGS,
         RecommendationType.REVIEW_BEFORE_EARNINGS,
         RecommendationType.REVIEW_AFTER_EARNINGS,
         RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
@@ -373,16 +379,56 @@ def _build_recommended_action(check_names: list[str]) -> str:
 
 
 def _representative_price(recommendation: Recommendation) -> Decimal | None:
+    """再送要否判定(価格3%変動)に使う代表価格(コードレビュー対応2026-08、
+    再送判定と実際の表示目安価格の不一致修正)。
+
+    ユーザーへ実際に提示する目安価格(recommendation_adapter.pyの
+    `_sell_target_price_and_label`/`_build_watch`/`_build_partial_sell`が
+    選ぶ価格)と選択順序を揃える。特にSTRONG_SELL_CONSIDERATION/
+    FULL_PROFIT_TAKE(全部売却検討系)はfull_profit_consideration_price
+    (全部売却目安)を最優先とする。stop_review_priceは常に現在値の監視専用
+    フィールド(実際の目安価格ではない)であり、これを代表価格にすると
+    「表示上の全部売却目安は変わっていないのに、現在値が動いただけで再送
+    される」不具合になるため、全部売却検討系では参照しない。
+    """
     if recommendation.buy_prices is not None and recommendation.buy_prices.standard is not None:
         return recommendation.buy_prices.standard.price
-    if recommendation.sell_prices is not None:
-        for level in (
-            recommendation.sell_prices.recommended_limit_price,
-            recommendation.sell_prices.stop_review_price,
-            recommendation.sell_prices.partial_profit_start_price,
-        ):
-            if level is not None:
-                return level.price
+    sp = recommendation.sell_prices
+    if sp is None:
+        return None
+    if recommendation.recommendation_type in _FULL_SELL_RECOMMENDATION_TYPES:
+        for full_level in (sp.full_profit_consideration_price, sp.immediate_execution_price):
+            if full_level is not None:
+                return full_level.price
+        return None
+    if recommendation.recommendation_type in (
+        RecommendationType.PARTIAL_PROFIT_TAKE,
+        RecommendationType.PARTIAL_RISK_REDUCTION,
+    ):
+        for partial_level in (sp.recommended_limit_price, sp.partial_profit_start_price):
+            if partial_level is not None:
+                return partial_level.price
+        return None
+    if recommendation.recommendation_type in (
+        RecommendationType.WATCH,
+        RecommendationType.WATCH_BEFORE_EARNINGS,
+    ):
+        return (
+            sp.partial_profit_start_price.price
+            if sp.partial_profit_start_price is not None
+            else None
+        )
+    # 通常のSELL/SELL_CONSIDERATION/URGENT_REVIEW/URGENT_HOLDING_REVIEW等:
+    # immediate_execution_price(即時執行が必要な場合)→stop_review_price(見直し)
+    # の順(既存の`_sell_target_price_and_label`と同じ優先順位)。
+    for level in (
+        sp.immediate_execution_price,
+        sp.stop_review_price,
+        sp.recommended_limit_price,
+        sp.partial_profit_start_price,
+    ):
+        if level is not None:
+            return level.price
     return None
 
 
@@ -1520,12 +1566,16 @@ def _render_notification_body(
     ことで、旧`_format_message()`(長文)を直接呼び続けて50/70文字ルールが
     未接続のままになる、という不備の再発を防ぐ。
 
-    `resolve_notification_category()`がSHORT_TEXT_CATEGORIES(BUY/NEAR_BUY/
-    WATCH_BEFORE_EARNINGS/SELL/CRITICAL_RISK)に分類する通知のみ、50/70文字
-    ルールの`format_notification_text()`へ接続する。OTHER相当(利確・
-    ポートフォリオ集中リスク等)は従来どおり`_format_message()`の長文
-    フォーマットを維持する(レビュー指摘1が対象とするのはNotificationCategory
-    で明示的に分類される通知のみのため)。
+    実送信対象となるRecommendationは、原則すべて`SHORT_TEXT_CATEGORIES`
+    (BUY/NEAR_BUY/WATCH_BEFORE_EARNINGS/SELL/CRITICAL_RISK/WATCH/
+    PARTIAL_SELL/MANUAL_REVIEW。recommendation_adapter.py参照)経由の
+    50/70文字ルールで送信される(コードレビュー対応2026-08、LINE通知/監査
+    分離)。OTHER/NOT_NOTIFIABLE(通知対象外)のみがこの経路から外れ、
+    旧`_format_message()`の長文フォーマットへ落ちるが、これらは
+    `notify_recommendation_with_status()`等の呼び出し元がそもそも送信
+    しない区分であり、実送信経路には到達しない。旧長文フォーマットは
+    `render_notification_preview()`(before/afterレポート専用の診断出力)
+    専用として維持している。
 
     `render_notification_preview()`(before/afterレポート専用、config変更の
     影響を診断するための完全な理由・価格情報が必要)はこの関数を使わず、
@@ -1544,11 +1594,11 @@ def _render_notification_body(
 
 def render_notification_preview(recommendation: Recommendation) -> str:
     """before/afterレポート(config変更の影響診断)用に、完全な内容の通知本文を
-    生成する(送信はしない)。実際にLINEへ送信される本文(BUY/NEAR_BUY/
-    WATCH_BEFORE_EARNINGS/SELL/重大リスクは50/70文字へ簡潔化される)とは
-    意図的に異なる。実送信本文そのものを確認したい場合は
-    `send_recommendation_notification()`の呼び出し結果(FakeLineClient等)を
-    直接検証すること。
+    生成する(送信はしない)。実際にLINEへ送信される本文(通知対象となる
+    Recommendationは原則すべて50/70文字ルールへ簡潔化される、
+    `_render_notification_body()`参照)とは意図的に異なる。実送信本文
+    そのものを確認したい場合は`send_recommendation_notification()`の
+    呼び出し結果(FakeLineClient等)を直接検証すること。
     """
     notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
     return _format_message(
