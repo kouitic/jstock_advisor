@@ -27,6 +27,7 @@ def _fair_value_range(
     bear: Decimal,
     overall_confidence: ConfidenceLevel = ConfidenceLevel.MEDIUM,
     method_count: int = 1,
+    usable_for_trading_judgment: bool = True,
 ) -> FairValueRange:
     methods = [
         FairValueMethodResult(
@@ -41,7 +42,7 @@ def _fair_value_range(
         overall_confidence=overall_confidence,
         methods_used=methods,
         methods_excluded=[],
-        usable_for_trading_judgment=True,
+        usable_for_trading_judgment=usable_for_trading_judgment,
     )
 
 
@@ -57,6 +58,22 @@ def _degenerate_fair_value_range(value: Decimal, method_count: int = 1) -> FairV
         bear=value,
         overall_confidence=ConfidenceLevel.MEDIUM,
         method_count=method_count,
+    )
+
+
+def _degenerate_fair_value_range_unusable(value: Decimal, method_count: int = 1) -> FairValueRange:
+    """usable_for_trading_judgment=False版の_degenerate_fair_value_range。
+
+    Fair Value使用不能時の売買目安価格ゲート(コードレビュー対応2026-08)の回帰
+    テスト専用。
+    """
+    return _fair_value_range(
+        neutral=value,
+        bull=value,
+        bear=value,
+        overall_confidence=ConfidenceLevel.MEDIUM,
+        method_count=method_count,
+        usable_for_trading_judgment=False,
     )
 
 
@@ -315,6 +332,40 @@ def test_full_profit_take_shows_full_and_immediate_price_fields() -> None:
     # 一部利確開始価格(1300円)は現在値(1600円)を下回っているためimmediate扱いになりうるが、
     # PARTIAL専用のrecommended_limit_priceはFULL判定でも指値候補として妥当なため表示される。
     assert prices.partial_profit_start_price is not None
+
+
+def test_full_profit_take_price_excludes_unusable_fair_value() -> None:
+    # LINE通知/監査分離のコードレビュー対応回帰テスト(最重要修正)。
+    # test_full_profit_take_shows_full_and_immediate_price_fieldsと同一の入力だが、
+    # 適正価格がusable_for_trading_judgment=Falseの場合、判定ロジック側は既に
+    # この適正価格を無視している(level_fv=HOLD)にもかかわらず、旧実装は目安価格
+    # 構成時だけ無条件にbullを使い、2100円という「判定には使わないと決めた適正
+    # 価格」由来の値を提示してしまっていた。新実装では取得単価ベースの候補
+    # (gain_full_price=1500円)のみが使われることを確認する。
+    result = evaluate_profit_taking(
+        current_price=Decimal("1600"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=_degenerate_fair_value_range_unusable(Decimal("1500")),
+            investment_premise_broken=True,
+        ),
+    )
+    assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
+    prices = result.sell_prices
+    assert prices.full_profit_consideration_price is not None
+    assert prices.full_profit_consideration_price.price == Decimal("1500")
+    # 全株利確条件は取得単価ベースの候補(1500円)のみで成立しており、既に現在値
+    # (1600円)を下回っているため、即時執行目安として現在値が提示される。
+    assert prices.immediate_execution_price is not None
+    assert prices.immediate_execution_price.price == Decimal("1600")
 
 
 def test_full_take_price_never_below_recommended_limit_price() -> None:

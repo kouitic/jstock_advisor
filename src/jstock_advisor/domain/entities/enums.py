@@ -958,6 +958,15 @@ class NotificationCategory(StrEnum):
     NEAR_BUY = "NEAR_BUY"
     WATCH_BEFORE_EARNINGS = "WATCH_BEFORE_EARNINGS"
     SELL = "SELL"
+    # --- LINE通知/監査分離(2026-08、コードレビュー対応)で追加 ---
+    # 利確WATCH・決算前後のレビュー保留・ポートフォリオ集中リスクをまとめる
+    # 「監視」系カテゴリ。価格目安を持たない場合はreasonのみ表示する。
+    WATCH = "WATCH"
+    # 一部利確・決算接近時の一部縮小(表示ラベルのみlabel_overrideで差し替え)。
+    PARTIAL_SELL = "PARTIAL_SELL"
+    # データ品質上の理由で自動判定を保留し、手動確認を促す通知(REVIEW・
+    # MANUAL_REVIEW_REQUIREDの両方がここに分類される)。
+    MANUAL_REVIEW = "MANUAL_REVIEW"
     OTHER = "OTHER"
     NOT_NOTIFIABLE = "NOT_NOTIFIABLE"
 

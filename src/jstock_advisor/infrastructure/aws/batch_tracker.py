@@ -121,6 +121,13 @@ class BatchProgress:
     # WATCH終了通知の対象recommendation_id一覧(コードレビュー対応2026-08、§3)。
     # ランキング(順位)は不要なため、値はrecommendation_idそのもの。
     watch_end_ranking_entries: list[str] = field(default_factory=list)
+    # 保有銘柄バッチサマリーのユーザー行動中心4分類集計向け(コードレビュー
+    # 対応2026-08、LINE通知/監査分離)。実際にLINE送信された銘柄について
+    # "{NotificationCategory.value}|{stock_code}"の形式でDynamoDBの文字列
+    # セットへ集約される(Setは重複を許さないため、stock_codeを含めて銘柄
+    # ごとに一意にする。ranking_entriesと同じ設計パターン)。finalize側で
+    # "|"より前を取り出しCounterで件数化する。
+    notification_categories: list[str] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -166,6 +173,7 @@ def record_result(
     validation_recommendation_id: str | None = None,
     near_buy_ranking_entry: str | None = None,
     watch_end_ranking_entry: str | None = None,
+    notification_category_entry: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
 
@@ -189,6 +197,13 @@ def record_result(
     文字列セットへ原子的に追加する。_finalize_batchが正常完了後にこの一覧を
     走査し、検証用テーブルから削除する(functional_spec.md参照)。NORMAL実行では
     渡さない。
+
+    notification_category_entryを渡すと、保有銘柄バッチサマリーのユーザー
+    行動中心4分類集計(コードレビュー対応2026-08、LINE通知/監査分離)向けに、
+    "{NotificationCategory.value}|{stock_code}"形式の文字列をDynamoDBの
+    文字列セットへ原子的に追加する(stock_codeを含めるのは、Setが重複を
+    許さないため同一カテゴリの複数銘柄がまとめて1件に潰れるのを防ぐため)。
+    実際にLINE送信された銘柄についてのみ呼び出し側が渡すこと。
     """
     if not running_on_lambda():
         return None
@@ -225,6 +240,10 @@ def record_result(
         names["#watch_end_ranking_entries"] = "watch_end_ranking_entries"
         update_expr += ", #watch_end_ranking_entries :watch_end_ranking_entries"
         values[":watch_end_ranking_entries"] = {watch_end_ranking_entry}
+    if notification_category_entry is not None:
+        names["#notification_categories"] = "notification_categories"
+        update_expr += ", #notification_categories :notification_categories"
+        values[":notification_categories"] = {notification_category_entry}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -246,6 +265,7 @@ def record_result(
         validation_recommendation_ids=sorted(item.get("validation_recommendation_ids", set())),
         near_buy_ranking_entries=sorted(item.get("near_buy_ranking_entries", set())),
         watch_end_ranking_entries=sorted(item.get("watch_end_ranking_entries", set())),
+        notification_categories=sorted(item.get("notification_categories", set())),
     )
 
 

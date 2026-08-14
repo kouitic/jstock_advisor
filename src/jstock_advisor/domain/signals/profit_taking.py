@@ -647,9 +647,18 @@ def _compute_sell_prices(
         return SellPriceLevels()
 
     t = config.thresholds
+    # コードレビュー対応(2026-08、LINE通知/監査分離): usable_for_trading_judgment=False
+    # (適正価格を判定に使えないと明示的にマークされた状態)の場合、判定ロジック側
+    # (level_fv算出)は既にこのフラグを見て割高判定を行わないようにしているが、
+    # ここで無条件にfair_value_range.bullを使うと、判定には使わないと決めた適正
+    # 価格をユーザー向け目安価格にだけ使ってしまう矛盾が生じる。取得単価ベースの
+    # 候補(gain_partial_price/gain_full_price)はfv_bullに依存しないため、この
+    # ゲートにより自動的に生き残る(Fair Value使用不能 ≠ 全目安価格が算定不能)。
     fv_bull = (
         fair_value_range.bull
-        if fair_value_range is not None and fair_value_range.bull is not None
+        if fair_value_range is not None
+        and fair_value_range.usable_for_trading_judgment
+        and fair_value_range.bull is not None
         else None
     )
 

@@ -24,8 +24,9 @@ def recommend_sell_prices(
     """category/ハードゲート発動有無に応じて売却価格候補を組み立てる。
 
     - ハードゲート発動時: 即時執行目安価格(現在値ベース)を提示する。
-    - STRONG_SELL_CONSIDERATION: 全部売却検討価格(適正価格弱気水準があればそれ、
-      無ければ現在値)を提示する。
+    - STRONG_SELL_CONSIDERATION: 全部売却検討価格(適正価格弱気水準が使用可能な
+      場合のみ)を提示する。適正価格が使用不能な場合は目安価格を捏造せず
+      Noneのままとする(コードレビュー対応2026-08、LINE通知/監査分離)。
     - SELL_CONSIDERATION: 一部売却開始価格の目安(現在値)と、適正価格弱気水準が
       あれば売却目安価格として併記する。
     """
@@ -39,20 +40,25 @@ def recommend_sell_prices(
             )
         )
 
-    bear_price = fair_value_range.bear if fair_value_range is not None else None
+    # コードレビュー対応(2026-08、LINE通知/監査分離): usable_for_trading_judgment=False
+    # の場合はbearを一切参照しない(判定ロジック側と同じ使用可否基準に揃える)。
+    bear_price = (
+        fair_value_range.bear
+        if fair_value_range is not None and fair_value_range.usable_for_trading_judgment
+        else None
+    )
 
     if category == HoldingDecisionCategory.STRONG_SELL_CONSIDERATION:
-        target_price = bear_price if bear_price is not None else current_price
         return SellPriceLevels(
-            full_profit_consideration_price=PriceWithRationale(
-                price=target_price,
-                rationale=(
-                    "適正価格弱気水準を全部売却検討の目安とする"
-                    if bear_price is not None
-                    else "適正価格が算出できないため現在値を目安とする"
-                ),
-                basis=PriceFieldBasis.TARGET_PRICE,
-                basis_type=None,
+            full_profit_consideration_price=(
+                PriceWithRationale(
+                    price=bear_price,
+                    rationale="適正価格弱気水準を全部売却検討の目安とする",
+                    basis=PriceFieldBasis.TARGET_PRICE,
+                    basis_type=None,
+                )
+                if bear_price is not None
+                else None
             ),
             stop_review_price=PriceWithRationale(
                 price=current_price,

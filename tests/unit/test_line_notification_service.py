@@ -21,6 +21,7 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
+    WatchType,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
@@ -579,6 +580,11 @@ def test_recommendation_with_consistency_violation_suppresses_normal_notificatio
 
 
 def test_clean_full_profit_take_is_sent_normally(service_and_repos) -> None:
+    """コードレビュー対応(2026-08、LINE通知/監査分離): FULL_PROFIT_TAKEは
+    SELLカテゴリ+label_override="全部売却検討"の短文経路で送信される。
+    旧長文フォーマット固有の文言(全株利確目標・通知ID等)はもう出ない
+    (Recommendation自体には引き続き保持される)。
+    """
     service, repo, client = service_and_repos
     # 現在値+10%程度の穏当な価格なので、整合性検証・異常値検知いずれも問題を検出しない
     rec = _make_full_profit_take_recommendation(
@@ -590,14 +596,21 @@ def test_clean_full_profit_take_is_sent_normally(service_and_repos) -> None:
 
     assert sent is True
     assert len(client.sent) == 1
-    assert "データ品質アラート" not in client.sent[0]
-    assert "全株利確目標" in client.sent[0]
-    assert f"通知ID: {rec.recommendation_id}" in client.sent[0]
+    message = client.sent[0]
+    assert "データ品質アラート" not in message
+    assert "全部売却検討" in message
+    assert rec.stock_code in message
+    assert "全株利確目標" not in message
+    assert f"通知ID: {rec.recommendation_id}" not in message
+    assert len(message) <= 70
 
 
-def test_message_shows_record_date_unknown_reason_instead_of_bare_unknown(
+def test_message_does_not_show_record_date_unknown_reason(
     service_and_repos,
 ) -> None:
+    """コードレビュー対応(2026-08、LINE通知/監査分離): 配当基準日不明の
+    詳細理由はLINE本文から削除され、Recommendation側にのみ保持される。
+    """
     service, repo, client = service_and_repos
     rec = _make_full_profit_take_recommendation(
         recommendation_id="rec-1", full_take_price="4600"
@@ -611,10 +624,16 @@ def test_message_shows_record_date_unknown_reason_instead_of_bare_unknown(
 
     service.notify_recommendation(rec, _NOW)
 
-    assert "不明(データ提供元が非対応(恒久的))" in client.sent[0]
+    assert "不明(データ提供元が非対応(恒久的))" not in client.sent[0]
+    assert rec.dividend_record_date_unknown_reason == RecordDateUnknownReason.DATA_PROVIDER_MISSING
 
 
-def test_message_shows_dividend_comparison_with_fiscal_years(service_and_repos) -> None:
+def test_message_does_not_show_dividend_comparison_with_fiscal_years(
+    service_and_repos,
+) -> None:
+    """コードレビュー対応(2026-08、LINE通知/監査分離): 配当比較(期別)の
+    詳細はLINE本文から削除され、Recommendation側にのみ保持される。
+    """
     service, repo, client = service_and_repos
     rec = _make_full_profit_take_recommendation(
         recommendation_id="rec-1", full_take_price="4600"
@@ -629,7 +648,8 @@ def test_message_shows_dividend_comparison_with_fiscal_years(service_and_repos) 
 
     service.notify_recommendation(rec, _NOW)
 
-    assert "配当比較(2025 → 2026): 減配(実績確定)" in client.sent[0]
+    assert "配当比較(2025 → 2026): 減配(実績確定)" not in client.sent[0]
+    assert rec.dividend_comparison_outcome == DividendComparisonOutcome.ACTUAL_DIVIDEND_CUT
 
 
 def _evidence(rule_name: str, group: str, *, primary_source_confirmed: bool = True) -> dict:
@@ -693,8 +713,8 @@ def test_sell_message_with_insufficient_evidence_routes_to_manual_review(
 
     assert sent is True
     message = client.sent[0]
-    assert "【要手動確認】4631 ＤＩＣ" in message
-    assert "自動売却推奨: 停止" in message
+    assert "要確認 4631 ＤＩＣ" in message
+    assert "売買判断を保留" in message
 
 
 def test_sell_message_with_sufficient_independent_evidence_sends_normally(
@@ -927,7 +947,7 @@ def test_recommendation_type_shown_as_japanese_label_not_raw_enum(service_and_re
     service.notify_recommendation(rec, _NOW)
 
     message = client.sent[0]
-    assert "全部売却を検討" in message
+    assert "全部売却検討" in message
     assert "PARTIAL_PROFIT_TAKE" not in message
     assert "FULL_PROFIT_TAKE" not in message
 
@@ -1320,7 +1340,7 @@ def test_evaluate_notification_status_default_context_still_sends_manual_review_
     assert outcome.data_quality_blocked is True
     assert outcome.sent is True
     assert len(client.sent) == 1
-    assert "【要手動確認】" in client.sent[0]
+    assert "要確認" in client.sent[0]
 
 
 def test_notify_buy_candidates_digest_sends_one_message_for_multiple_winners(
@@ -2104,7 +2124,7 @@ def test_validation_mode_prepends_banner_to_line_body(
 
     service.notify_recommendation(rec, _NOW)
 
-    assert client.sent[0].startswith("【🧪 検証モードで送信】")
+    assert client.sent[0].startswith("🧪検証｜")
 
 
 def test_normal_mode_does_not_prepend_banner(service_and_repos) -> None:
@@ -2116,7 +2136,7 @@ def test_normal_mode_does_not_prepend_banner(service_and_repos) -> None:
 
     service.notify_recommendation(rec, _NOW)
 
-    assert "【🧪 検証モードで送信】" not in client.sent[0]
+    assert "🧪検証｜" not in client.sent[0]
 
 
 def test_validation_mode_notify_batch_summary_bypasses_own_dedup(
@@ -2142,7 +2162,7 @@ def test_validation_mode_notify_batch_summary_bypasses_own_dedup(
     assert first is True
     assert second is True
     assert len(client.sent) == 2
-    assert all(msg.startswith("【🧪 検証モードで送信】") for msg in client.sent)
+    assert all(msg.startswith("🧪検証｜") for msg in client.sent)
 
 
 def test_validation_mode_buy_candidates_digest_returns_sent_validation(
@@ -2157,7 +2177,7 @@ def test_validation_mode_buy_candidates_digest_returns_sent_validation(
 
     assert results == {"4516": "SENT_VALIDATION"}
     assert len(client.sent) == 1
-    assert client.sent[0].startswith("【🧪 検証モードで送信】")
+    assert client.sent[0].startswith("🧪検証｜")
     assert service._log_repo.list_all() == []
 
 
@@ -2197,8 +2217,8 @@ def test_validation_mode_preserves_manual_review_diversion(
     assert outcome.data_quality_blocked is True
     assert outcome.sent is True
     assert len(client.sent) == 1
-    assert "【要手動確認】" in client.sent[0]
-    assert client.sent[0].startswith("【🧪 検証モードで送信】")
+    assert "要確認" in client.sent[0]
+    assert client.sent[0].startswith("🧪検証｜")
 
 
 def test_validation_manual_review_does_not_grow_production_audit_log(tmp_path: Path) -> None:
@@ -2237,8 +2257,8 @@ def test_validation_manual_review_does_not_grow_production_audit_log(tmp_path: P
 
     assert sent is True
     message = client.sent[0]
-    assert "【要手動確認】4631 ＤＩＣ" in message
-    assert message.startswith("【🧪 検証モードで送信】")
+    assert "要確認 4631 ＤＩＣ" in message
+    assert message.startswith("🧪検証｜")
     assert audit_repo.list_all() == []
 
 
@@ -2268,4 +2288,367 @@ def test_normal_manual_review_still_grows_audit_log(tmp_path: Path) -> None:
     service.notify_recommendation(rec, _NOW)
 
     assert len(audit_repo.list_all()) == 1
-    assert "【要手動確認】" in client.sent[0]
+    assert "要確認" in client.sent[0]
+
+
+# --- コードレビュー対応(2026-08、LINE通知/監査分離)の回帰テスト ---
+
+_BLACKLISTED_RATIONALE_MARKERS = (
+    "適正価格レンジ",
+    "信頼度",
+    "通知ID",
+    "保有継続を支持する要因",
+    "直ちに利確しない理由",
+    "監視条件",
+)
+
+
+def _rationale_heavy_fields() -> dict:
+    """LINE本文に出てはいけない判断根拠(旧長文フォーマットでのみ表示される
+    フィールド群)をまとめて注入するための共通kwargs。"""
+    return {
+        "counter_factors": ["保有継続を支持する要因: 一時的な悪材料"],
+        "not_yet_action_reasons": ["直ちに利確しない理由: 業績が堅調"],
+        "next_review_conditions": ["監視条件: 株価が3,900円を割り込む"],
+        "fair_value_neutral": Decimal("3800"),
+        "fair_value_bull": Decimal("4100"),
+        "fair_value_bear": Decimal("3500"),
+        "confidence": ConfidenceLevel.HIGH,
+    }
+
+
+def _blacklist_test_recommendations() -> list[Recommendation]:
+    common = _rationale_heavy_fields()
+    return [
+        Recommendation(
+            recommendation_id="bl-buy",
+            stock_code="1001",
+            stock_name="テスト買い",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.BUY,
+            buy_action=BuyAction.BUY,
+            buy_prices=BuyPriceLevels(
+                tentative=PriceWithRationale(price=Decimal("3600"), rationale="x"),
+                standard=PriceWithRationale(price=Decimal("3400"), rationale="x"),
+                aggressive=PriceWithRationale(price=Decimal("2900"), rationale="x"),
+            ),
+            price_at_recommendation=Decimal("3550"),
+            reasons=["株価が打診水準に到達"],
+            rule_version="v1-mvp",
+            **common,
+        ),
+        Recommendation(
+            recommendation_id="bl-near-buy",
+            stock_code="1002",
+            stock_name="テスト打診接近",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.WATCH_BUY,
+            buy_action=BuyAction.WATCH_FOR_PRICE,
+            watch_type=WatchType.NEAR_BUY,
+            buy_prices=BuyPriceLevels(
+                tentative=PriceWithRationale(price=Decimal("3600"), rationale="x")
+            ),
+            price_at_recommendation=Decimal("3650"),
+            required_decline_to_entry_pct=1.4,
+            rule_version="v1-mvp",
+            **common,
+        ),
+        Recommendation(
+            recommendation_id="bl-watch-before-earnings",
+            stock_code="1003",
+            stock_name="テスト決算前監視",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.WATCH_BUY,
+            buy_action=BuyAction.WATCH_BEFORE_EARNINGS,
+            price_at_recommendation=Decimal("2000"),
+            rule_version="v1-mvp",
+            **common,
+        ),
+        Recommendation(
+            recommendation_id="bl-sell",
+            stock_code="1004",
+            stock_name="テスト売却検討",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.SELL_CONSIDERATION,
+            sell_prices=SellPriceLevels(
+                stop_review_price=PriceWithRationale(price=Decimal("4000"), rationale="x")
+            ),
+            price_at_recommendation=Decimal("4384"),
+            reasons=["含み益が閾値を超過"],
+            rule_version="v1-mvp",
+            **common,
+        ),
+        Recommendation(
+            recommendation_id="bl-full-sell",
+            stock_code="1005",
+            stock_name="テスト全部売却検討",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.STRONG_SELL_CONSIDERATION,
+            sell_prices=SellPriceLevels(
+                full_profit_consideration_price=PriceWithRationale(
+                    price=Decimal("4600"), rationale="x"
+                )
+            ),
+            price_at_recommendation=Decimal("4200"),
+            reasons=["含み益が閾値を超過"],
+            rule_version="v1-mvp",
+            **common,
+        ),
+        Recommendation(
+            recommendation_id="bl-critical",
+            stock_code="1006",
+            stock_name="テスト緊急確認",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.URGENT_HOLDING_REVIEW,
+            sell_prices=SellPriceLevels(
+                immediate_execution_price=PriceWithRationale(price=Decimal("1500"), rationale="x")
+            ),
+            price_at_recommendation=Decimal("1500"),
+            reasons=["重大な悪材料を検知"],
+            rule_version="v1-mvp",
+            **common,
+        ),
+        Recommendation(
+            recommendation_id="bl-watch",
+            stock_code="1007",
+            stock_name="テスト監視",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.WATCH,
+            sell_prices=SellPriceLevels(
+                partial_profit_start_price=PriceWithRationale(price=Decimal("2200"), rationale="x")
+            ),
+            price_at_recommendation=Decimal("2100"),
+            rule_version="v1-mvp",
+            **common,
+        ),
+        Recommendation(
+            recommendation_id="bl-partial-sell",
+            stock_code="1008",
+            stock_name="テスト一部売却",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+            sell_prices=SellPriceLevels(
+                recommended_limit_price=PriceWithRationale(price=Decimal("2600"), rationale="x")
+            ),
+            price_at_recommendation=Decimal("2400"),
+            rule_version="v1-mvp",
+            **common,
+        ),
+        Recommendation(
+            recommendation_id="bl-manual-review",
+            stock_code="1009",
+            stock_name="テスト要確認",
+            recommended_at=_NOW,
+            recommendation_type=RecommendationType.REVIEW,
+            price_at_recommendation=Decimal("1800"),
+            reasons=["根拠が単一のため要確認"],
+            rule_version="v1-mvp",
+            **common,
+        ),
+    ]
+
+
+def test_all_short_form_categories_never_leak_judgment_rationale() -> None:
+    """コードレビュー対応(2026-08、LINE通知/監査分離)の受入テスト。
+    counter_factors・not_yet_action_reasons・next_review_conditions・
+    fair_value_neutral/bull/bear・confidence・recommendation_idを埋めても、
+    実送信経路(_render_notification_body)が生成する本文にはそれらの内部判断
+    根拠が一切出ないことを確認する(Audit/Recommendation側には引き続き
+    フィールドとして保持される)。
+    """
+    for rec in _blacklist_test_recommendations():
+        message = line_notification_service_module._render_notification_body(rec)
+        for marker in _BLACKLISTED_RATIONALE_MARKERS:
+            assert marker not in message, (
+                f"{rec.recommendation_type}: '{marker}' leaked into LINE body: {message!r}"
+            )
+        assert rec.recommendation_id not in message
+        assert rec.stock_code in message
+
+
+def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
+    """監査分離の受入テスト(計画§8、A〜E)。LINE本文からは判断根拠を除いても、
+    Recommendation(RecommendationRepository経由で永続化された後も)には引き続き
+    判断根拠が残っていることを、ケースごとに対で確認する。
+
+    ケースDの「FairValueRange.usable_for_trading_judgment=Falseとその理由」は、
+    Recommendationエンティティ自体には持たせていない(FairValueRangeそのものは
+    判定計算時にのみ使う一時オブジェクトで、AuditLogEntry.fair_value_resultsへ
+    upstream(profit_taking_service.py等)が記録する)ため、本テストの対象外。
+    そちらはtest_profit_taking.py::test_full_profit_take_price_excludes_unusable_fair_value
+    とtest_sell_price_recommendation_service.pyで「LINEへ捏造された目安価格を
+    出さない」側から既に回帰確認済み。
+    """
+    service, repo, client = service_and_repos
+
+    # A. ProfitTaking WATCH: 適正価格手法の内訳・confidence・生の適正価格レンジは
+    # LINEに出ないが、Recommendationには引き続き保持される。
+    rec_a = Recommendation(
+        recommendation_id="audit-a-watch",
+        stock_code="2001",
+        stock_name="ケースA監視",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        sell_prices=SellPriceLevels(
+            partial_profit_start_price=PriceWithRationale(price=Decimal("2200"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("2100"),
+        fair_value_neutral=Decimal("1900"),
+        fair_value_bull=Decimal("2300"),
+        fair_value_bear=Decimal("1600"),
+        fair_value_methods=[
+            {"method": "DCF", "fair_value": "2300", "confidence": "HIGH"},
+            {"method": "PER倍率", "fair_value": "2000", "confidence": "MEDIUM"},
+        ],
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+    repo.save(rec_a)
+    service.notify_recommendation(rec_a, _NOW)
+    message_a = client.sent[-1]
+    assert "DCF" not in message_a
+    assert "PER倍率" not in message_a
+    assert "1,900" not in message_a and "2,300" not in message_a and "1,600" not in message_a
+    saved_a = repo.get("audit-a-watch")
+    assert saved_a is not None
+    assert saved_a.fair_value_methods == rec_a.fair_value_methods
+    assert saved_a.fair_value_bull == Decimal("2300")
+
+    # B. PARTIAL_PROFIT_TAKE: 反対材料・監視条件の長文はLINEに出ないが、
+    # Recommendationには保持される。
+    rec_b = Recommendation(
+        recommendation_id="audit-b-partial",
+        stock_code="2002",
+        stock_name="ケースB一部利確",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            recommended_limit_price=PriceWithRationale(price=Decimal("2600"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("2400"),
+        counter_factors=["業績の一時的な悪化が懸念材料"],
+        not_yet_action_reasons=["配当利回りはまだ許容範囲内"],
+        next_review_conditions=["株価が2,700円を超過した場合に再評価"],
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+    repo.save(rec_b)
+    service.notify_recommendation(rec_b, _NOW)
+    message_b = client.sent[-1]
+    assert "業績の一時的な悪化が懸念材料" not in message_b
+    assert "配当利回りはまだ許容範囲内" not in message_b
+    assert "株価が2,700円を超過した場合に再評価" not in message_b
+    saved_b = repo.get("audit-b-partial")
+    assert saved_b is not None
+    assert saved_b.counter_factors == rec_b.counter_factors
+    assert saved_b.not_yet_action_reasons == rec_b.not_yet_action_reasons
+    assert saved_b.next_review_conditions == rec_b.next_review_conditions
+
+    # C. REVIEW(要確認): 検出内容の技術的な詳細(evidence_details)はLINEに
+    # 出ないが、Recommendationには保持される。
+    rec_c = Recommendation(
+        recommendation_id="audit-c-review",
+        stock_code="2003",
+        stock_name="ケースC要確認",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.REVIEW,
+        price_at_recommendation=Decimal("1800"),
+        evidence_details=[{"code": "SINGLE_EVIDENCE_ONLY", "detail": "独立根拠数1件のみ"}],
+        confidence=ConfidenceLevel.LOW,
+        rule_version="v1-mvp",
+    )
+    repo.save(rec_c)
+    service.notify_recommendation(rec_c, _NOW)
+    message_c = client.sent[-1]
+    assert "SINGLE_EVIDENCE_ONLY" not in message_c
+    assert "独立根拠数1件のみ" not in message_c
+    saved_c = repo.get("audit-c-review")
+    assert saved_c is not None
+    assert saved_c.evidence_details == rec_c.evidence_details
+
+    # E. 業種モデル未対応: 未対応である旨の技術説明はLINEに出ないが、
+    # Recommendationには保持される。
+    rec_e = Recommendation(
+        recommendation_id="audit-e-industry",
+        stock_code="2005",
+        stock_name="ケースE業種未対応",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        sell_prices=SellPriceLevels(
+            partial_profit_start_price=PriceWithRationale(price=Decimal("2200"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("2100"),
+        industry_model_applied=False,
+        industry_model_missing_reason="対象業種の評価モデルが未整備のため標準モデルを使用",
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+    repo.save(rec_e)
+    service.notify_recommendation(rec_e, _NOW)
+    message_e = client.sent[-1]
+    assert "対象業種の評価モデルが未整備のため標準モデルを使用" not in message_e
+    assert "業種モデル" not in message_e
+    saved_e = repo.get("audit-e-industry")
+    assert saved_e is not None
+    assert saved_e.industry_model_applied is False
+    assert saved_e.industry_model_missing_reason == rec_e.industry_model_missing_reason
+
+
+def test_notify_batch_summary_new_format_excludes_critical_risk_from_sell_count(
+    service_and_repos,
+) -> None:
+    """コードレビュー対応(2026-08、LINE通知/監査分離)。バッチサマリー新仕様は
+    売却(SELL+PARTIAL_SELL)・監視・要確認・緊急確認の4分類で出力し、
+    CRITICAL_RISKは「売却」件数に含めない。"""
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=5, hold=5),
+        now=_NOW,
+        sell_sent_count=3,
+        watch_sent_count=2,
+        manual_review_sent_count=1,
+        critical_risk_sent_count=1,
+    )
+
+    assert sent is True
+    message = client.sent[0]
+    assert "売却3" in message
+    assert "監視2" in message
+    assert "要確認1" in message
+    assert "緊急1" in message
+
+
+def test_notify_batch_summary_new_format_omits_critical_risk_segment_when_zero(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=5, hold=5),
+        now=_NOW,
+        sell_sent_count=3,
+        watch_sent_count=2,
+        manual_review_sent_count=1,
+        critical_risk_sent_count=0,
+    )
+
+    message = client.sent[0]
+    assert "緊急" not in message
+
+
+def test_normal_and_validation_bodies_differ_only_by_prefix() -> None:
+    """コードレビュー対応(2026-08、LINE通知/監査分離、指摘7の訂正版)。同一の
+    Recommendationをrenderした場合、NORMAL/VALIDATIONの本文差はバナー
+    prefix("🧪検証｜")のみであること(送信件数の一致は本テストの対象外)。
+    """
+    for rec in _blacklist_test_recommendations():
+        body = line_notification_service_module._render_notification_body(rec)
+        normal_text = body
+        validation_text = line_notification_service_module._VALIDATION_BANNER + body
+        assert validation_text == "🧪検証｜" + normal_text
+        assert validation_text.removeprefix("🧪検証｜") == normal_text

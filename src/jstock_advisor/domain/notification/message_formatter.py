@@ -27,7 +27,13 @@ _CATEGORY_LABELS: dict[NotificationCategory, str] = {
     NotificationCategory.NEAR_BUY: "接近",
     NotificationCategory.WATCH_BEFORE_EARNINGS: "決算待ち",
     NotificationCategory.SELL: "売却検討",
-    NotificationCategory.CRITICAL_RISK: "緊急",
+    # コードレビュー対応(2026-08、LINE通知/監査分離): URGENT_REVIEW/
+    # URGENT_HOLDING_REVIEWはいずれも「緊急確認」であり、必ずしも売却判定を
+    # 意味しないことを明確にする(旧「緊急」から変更)。
+    NotificationCategory.CRITICAL_RISK: "緊急確認",
+    NotificationCategory.WATCH: "監視",
+    NotificationCategory.PARTIAL_SELL: "一部売却",
+    NotificationCategory.MANUAL_REVIEW: "要確認",
     NotificationCategory.OTHER: "通知",
 }
 
@@ -46,6 +52,16 @@ class NotificationTextInput:
     # SELLでは「打診」は買い価格の表現であり売却価格には使わないため、
     # recommendation_adapter.py側で「即時執行」「見直し」等を明示的に設定する。
     target_price_label: str | None = None
+    # 目安価格が構造上存在しない/算定不能な場合に、価格の代わりに表示する文言
+    # (コードレビュー対応2026-08、LINE通知/監査分離)。例:「売却目安は算定保留」。
+    # target_priceがNoneの場合のみ意味を持つ。他の任意セグメントと異なり、
+    # 70文字上限でも欠落させない必須セグメントとして扱う(重大リスクのreasonと
+    # 同様、「価格が取れたか算定保留か」はユーザーが必ず知るべき優先度4の情報)。
+    target_price_withheld_label: str | None = None
+    # 打診/通常のように、同じ判定内で2つ目の目安価格を併記する場合に使う
+    # (コードレビュー対応2026-08)。reason文字列への埋め込みはしない。
+    secondary_target_price: Decimal | None = None
+    secondary_target_price_label: str | None = None
     # 「あと何%」の接近率(NEAR BUY等)。正の値。
     distance_pct: Decimal | None = None
     consecutive_business_days: int | None = None
@@ -99,37 +115,48 @@ def format_notification_text(
     required = f"{label} {data.stock_code} {data.stock_name}"
 
     price_label = data.target_price_label or "打診"
-    optional_segments: list[str] = []  # 優先度の高い順
+    # (segment_text, required)のリスト。requiredなセグメントはmax_charsを
+    # 超えても欠落させない(コードレビュー対応2026-08、LINE通知/監査分離:
+    # 「価格が取れたか、算定保留か」はユーザーが必ず知るべき優先度4の情報のため)。
+    optional_segments: list[tuple[str, bool]] = []  # 優先度の高い順
     if data.current_price is not None:
-        optional_segments.append(_fmt_price(data.current_price))
+        optional_segments.append((_fmt_price(data.current_price), False))
     if data.target_price is not None and data.distance_pct is not None:
         optional_segments.append(
-            f"{price_label}{_fmt_price(data.target_price)}まで{data.distance_pct:.1f}%"
+            (f"{price_label}{_fmt_price(data.target_price)}まで{data.distance_pct:.1f}%", False)
         )
     elif data.target_price is not None:
-        optional_segments.append(f"{price_label}{_fmt_price(data.target_price)}")
+        optional_segments.append((f"{price_label}{_fmt_price(data.target_price)}", False))
     elif data.distance_pct is not None:
-        optional_segments.append(f"あと{data.distance_pct:.1f}%")
+        optional_segments.append((f"あと{data.distance_pct:.1f}%", False))
+    elif data.target_price_withheld_label is not None:
+        optional_segments.append((data.target_price_withheld_label, True))
+    if data.target_price is not None and data.secondary_target_price is not None:
+        secondary_label = data.secondary_target_price_label or "目安"
+        optional_segments.append(
+            (f"{secondary_label}{_fmt_price(data.secondary_target_price)}", False)
+        )
     if data.is_resumed_after_gap:
-        optional_segments.append("監視再開")
+        optional_segments.append(("監視再開", False))
     elif data.promoted_from_watch_days is not None:
-        optional_segments.append(f"{data.promoted_from_watch_days}日監視後")
+        optional_segments.append((f"{data.promoted_from_watch_days}日監視後", False))
     elif data.is_watch_end and data.watch_end_days is not None:
-        optional_segments.append(f"{data.watch_end_days}日継続")
+        optional_segments.append((f"{data.watch_end_days}日継続", False))
     elif data.consecutive_business_days is not None:
-        optional_segments.append(f"{data.consecutive_business_days}日連続")
+        optional_segments.append((f"{data.consecutive_business_days}日連続", False))
     if data.reason:
-        optional_segments.append(data.reason)
+        optional_segments.append((data.reason, False))
     type_label = _representative_stock_types(data.stock_types)
     if type_label:
-        optional_segments.append(type_label)
+        optional_segments.append((type_label, False))
 
     text = required
-    for segment in optional_segments:
+    for segment, is_required_segment in optional_segments:
         candidate = f"{text}｜{segment}" if text != required else f"{text}\n{segment}"
-        # 重大リスクはmax_charsを厳密な上限として扱わず、理由情報等を欠落させない
-        # (要求仕様の例外条件)。それ以外は上限を超える最初のセグメントで打ち切る。
-        if is_critical_risk or len(candidate) <= max_chars:
+        # 重大リスク・requiredなセグメント(算定保留の明示)はmax_charsを厳密な
+        # 上限として扱わず欠落させない。それ以外は上限を超える最初のセグメント
+        # で打ち切る(要求仕様の例外条件)。
+        if is_critical_risk or is_required_segment or len(candidate) <= max_chars:
             text = candidate
         else:
             break

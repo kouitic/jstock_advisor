@@ -91,7 +91,13 @@ BuyDigestSendOutcome = Literal[
     "SENT_AND_RECORDED", "SENT_VALIDATION", "SENT_LOG_FAILED", "SEND_FAILED"
 ]
 
-_VALIDATION_BANNER = "【🧪 検証モードで送信】\n※本通知は通知仕様確認用です。\n\n"
+# コードレビュー対応(2026-08、LINE通知/監査分離): 短文通知に対して従来の
+# 2行ブロックは相対的に大きすぎるため、1行内prefixへ短縮する。本文は必ず
+# "{label} {code} {name}"で始まるため、1行目に自然に収まる
+# (例: "🧪検証｜監視 4631 DIC\n現在5,657円｜...")。NORMALとの差は本文の
+# 組み立てロジックではなくこのprefixのみであり、送信経路(_push())の
+# 唯一の合流点で付与されるため全カテゴリへ自動的に一貫適用される。
+_VALIDATION_BANNER = "🧪検証｜"
 _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
 _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType] = {
@@ -151,18 +157,49 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
         # 通常のWATCH_FOR_PRICE(NEAR BUY非該当)・MANUAL_REVIEW・NOT_ATTRACTIVE・
         # EXCLUDED・DATA_INSUFFICIENTはいずれも通知対象外(要求仕様6節)。
         return NotificationCategory.NOT_NOTIFIABLE
+    # コードレビュー対応(2026-08、LINE通知/監査分離): RecommendationType.REVIEWは
+    # enum定義上「単一の根拠のみで、SELL/URGENT_REVIEWへ進めるには不十分」という
+    # 意味であり、is_sell_like()に含まれる(SELL_LIKE_RECOMMENDATION_TYPES自体は
+    # 買い増しゲート・整合性検証・history replay分類など他箇所で使うため変更
+    # しない)が、ユーザー向けには「売却検討」ではなく「要確認」として見せる。
+    # is_sell_like()より前に判定する(is_critical_riskの既存パターンと同じ形)。
+    if recommendation.recommendation_type == RecommendationType.REVIEW:
+        return NotificationCategory.MANUAL_REVIEW
     if is_sell_like(recommendation.recommendation_type):
         return NotificationCategory.SELL
-    # buy_action=Noneの残り(ポートフォリオ集中通知・保有判断スコア方式の
-    # WATCH等)は既存どおり通知対象として扱う。
+    # FULL_PROFIT_TAKEはSELL_LIKE_RECOMMENDATION_TYPESに含まれないため個別に
+    # SELLへ分類する(STRONG_SELL_CONSIDERATIONとともに「全部売却検討」表示)。
+    if recommendation.recommendation_type == RecommendationType.FULL_PROFIT_TAKE:
+        return NotificationCategory.SELL
+    if recommendation.recommendation_type in (
+        RecommendationType.PARTIAL_PROFIT_TAKE,
+        RecommendationType.PARTIAL_RISK_REDUCTION,
+    ):
+        return NotificationCategory.PARTIAL_SELL
+    if recommendation.recommendation_type in (
+        RecommendationType.WATCH,
+        RecommendationType.REVIEW_BEFORE_EARNINGS,
+        RecommendationType.REVIEW_AFTER_EARNINGS,
+        RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
+    ):
+        return NotificationCategory.WATCH
+    # buy_action=Noneの残り(HOLD等)は既存どおりOTHER扱い(通知対象外の判定は
+    # 呼び出し元のnotify_below_score等が別途行う)。
     return NotificationCategory.OTHER
 
 
 # cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)の優先度表。
 # 数値が大きいほど優先度が高い。「BUY到達」(NEAR BUY監視からの昇格)は通常の
 # BUYより優先度を上げる(要求仕様の優先順位: CRITICAL_RISK > BUY到達 > SELL >
-# BUY > NEAR_BUY > WATCH_BEFORE_EARNINGS)。OTHER/NOT_NOTIFIABLEはこの
-# 仕組みの対象外(0を返し、実質的に比較対象にならない)。
+# BUY > NEAR_BUY > WATCH_BEFORE_EARNINGS)。
+# コードレビュー対応(2026-08、LINE通知/監査分離): WATCH/PARTIAL_SELL/
+# MANUAL_REVIEWは意図的にこの表へ追加しない(=priority 0扱い、cross-pipeline
+# 重複抑止の対象外のまま)。移行前はこれらのRecommendationTypeもOTHER
+# (priority 0、対象外)だったため、この仕組みへ新規に参加させると、
+# 同一銘柄・同日内での状態変化に基づく正当な再送(例:
+# REVIEW_AFTER_EARNINGSのAWAITING_CONFIRMATION→DELAYED)がDUPLICATE_STOCK_
+# NOTIFICATIONとして誤って抑止される回帰を招くため、既存動作を維持する。
+# OTHER/NOT_NOTIFIABLEはこの仕組みの対象外(0を返し、実質的に比較対象にならない)。
 _NOTIFICATION_PRIORITY: dict[NotificationCategory, int] = {
     NotificationCategory.CRITICAL_RISK: 6,
     NotificationCategory.SELL: 4,
@@ -2116,24 +2153,17 @@ class LineNotificationService:
         満たさない場合、自動通知の代わりに手動確認を促すメッセージを送信する
         (要求仕様§15・§16)。DATA_QUALITY_ALERTと異なり、これは実際にLINEへ配信する
         (根拠不足のSELL/URGENT_REVIEWは自動で確定させず、必ず人間の確認を経由させるため)。
+
+        コードレビュー対応(2026-08、LINE通知/監査分離): 検出内容(alert.
+        contradictions)・独立根拠不足等の技術的な詳細はLINE本文から削除し
+        「売買判断を保留」のみ短文で伝える(既存の短文エンジンを再利用)。
+        alertオブジェクト自体は呼び出し元で監査ログへ既に記録済みであり、
+        判断根拠はそちらから追跡できる。
         """
-        lines = [
-            f"【要手動確認】{recommendation.stock_code} {recommendation.stock_name}",
-            "自動売却判定の根拠に、業種別評価未対応・独立根拠不足・一次情報未確認の"
-            "いずれかの項目が含まれています。",
-            "検出内容:",
-            *[f"・{c}" for c in alert.contradictions],
-            f"自動判定結果: {_recommendation_type_label(recommendation.recommendation_type)}",
-            "自動売却推奨: 停止(手動確認が完了するまで自動での売却推奨は行いません)",
-            "確認事項:",
-        ]
-        if recommendation.reasons:
-            lines.append(f"・検出された懸念事項: {' / '.join(recommendation.reasons)}")
-        lines.append("・一次情報(EDINET/TDnet等)での事実確認")
-        if recommendation.next_earnings_date:
-            lines.append(f"・次回決算({recommendation.next_earnings_date})の内容")
-        lines.append(_DISCLAIMER)
-        self._push("\n".join(lines))
+        text_input = build_notification_text_input(
+            recommendation, NotificationCategory.MANUAL_REVIEW
+        )
+        self._push(format_notification_text(text_input))
 
         if not self._execution_context.is_validation:
             self._log_repo.save(
@@ -2226,6 +2256,17 @@ class LineNotificationService:
         buy_candidates_sent_count: int | None = None,
         near_buy_sent_count: int | None = None,
         send_empty_summary: bool = True,
+        # コードレビュー対応(2026-08、LINE通知/監査分離): 保有銘柄側のバッチ
+        # サマリーをユーザー行動中心の4分類(売却/監視/要確認/緊急)へ切り替える
+        # ための集計値。sell_sent_countはSELL+PARTIAL_SELLの合算(一部/全部の
+        # 分離はサマリー上では行わない)。critical_risk_sent_countを「売却」に
+        # 含めない(URGENT_REVIEW/URGENT_HOLDING_REVIEWは必ずしも売却判定では
+        # ないため)。いずれか1つでも渡された場合、新フォーマットへ切り替える
+        # (buy_candidates_handler.py等、既存呼び出し元は渡さないため従来どおり)。
+        sell_sent_count: int | None = None,
+        watch_sent_count: int | None = None,
+        manual_review_sent_count: int | None = None,
+        critical_risk_sent_count: int | None = None,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
         全体件数・区分別内訳のサマリー通知(要求仕様§13)。個別のデータ取得エラー・
@@ -2297,6 +2338,37 @@ class LineNotificationService:
                     counts,
                 )
                 return False
+
+        # コードレビュー対応(2026-08、LINE通知/監査分離): 新4分類のいずれかが
+        # 渡された場合、ユーザー行動中心の短い1行サマリーへ切り替える
+        # (holdings_watchlist_handler.py専用。buy_candidates_handler.py等の
+        # 既存呼び出し元は渡さないため、以下の従来フォーマットのまま)。
+        if (
+            sell_sent_count is not None
+            or watch_sent_count is not None
+            or manual_review_sent_count is not None
+            or critical_risk_sent_count is not None
+        ):
+            sell_n = sell_sent_count or 0
+            watch_n = watch_sent_count or 0
+            review_n = manual_review_sent_count or 0
+            critical_n = critical_risk_sent_count or 0
+            summary_line = f"売却{sell_n}｜監視{watch_n}｜要確認{review_n}"
+            if critical_n > 0:
+                summary_line += f"｜緊急{critical_n}"
+            self._push(f"📊{process_name}\n{summary_line}")
+            if not self._execution_context.is_validation:
+                self._log_repo.save(
+                    NotificationLog(
+                        notification_id=str(uuid.uuid4()),
+                        notification_type=NotificationType.BATCH_SUMMARY,
+                        stock_code=pseudo_stock_code,
+                        content_hash=content_hash,
+                        sent_at=now,
+                        related_recommendation_id=None,
+                    )
+                )
+            return True
 
         # 2026-07仕様レビュー対応(§10): 「判定結果」(保有継続/要確認等)と「通知処理の
         # 結果」(送信した/抑止した等)が同じ並びで表示され意味が伝わりにくいという
