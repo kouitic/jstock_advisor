@@ -784,3 +784,32 @@ jstock holding-decision backtest --stock-code 2914 \
 判定しません(kill switch抑止・記録漏れ等を過去データから区別できないため)。
 liveモードは何も永続化・送信しないため、`*_recommendation_created`は常に
 `False`、`*_notification_status=NOT_EXECUTED_LIVE_MODE`となります。
+
+---
+
+## 11. `infra/template.yaml`へDynamoDBテーブルを追加する際の注意(2026-08-14追加)
+
+`BuyCandidatesFunction`/`HoldingsWatchlistFunction`のように多数のテーブルへ
+アクセスするLambda関数へ`Policies:`で`DynamoDBCrudPolicy`/`DynamoDBReadPolicy`
+をテーブルごとに個別指定すると、SAMはエントリごとに個別のインラインIAM
+ポリシー(`AWS::IAM::Policy`)を生成します。テーブルが増えるたびにロールへ
+新規インラインポリシーが積み上がり、IAMロールのインラインポリシー合計
+サイズ上限(10240バイト、拡張不可のハード上限)を超過すると、
+`sam deploy`が`UPDATE_ROLLBACK_COMPLETE`で失敗します
+(`HandlerErrorCode: ServiceLimitExceeded`)。この2関数は既に個別指定を
+やめ、同じアクション集合(CRUD/Read)のテーブル群を`Statement:`の
+`Resource`配列へ集約する形へ変更済みです。**今後この2関数へ新しい
+テーブルへのアクセスを追加する場合は、新規に`DynamoDBCrudPolicy`等の
+エントリを追加するのではなく、既存の集約Statement(`DynamoDbCrudAccess`/
+`DynamoDbReadOnlyAccess`)の`Resource`配列へ`!GetAtt <Table>.Arn`と
+`!Sub "${<Table>.Arn}/index/*"`を追記してください**(付与するアクション
+自体は変更しない)。他の関数(`WatchlistDispatcher`/`Worker`/
+`BatchReconciler`/`TerminalFailureHandler`等)はテーブル数がまだ少ないため
+個別指定のままですが、今後大きく増える場合は同様の集約が必要になります。
+`sam deploy --no-execute-changeset`でchangesetを事前作成し、実行前に
+`Replacement`列がすべて`False`であることを確認してから
+`aws cloudformation execute-change-set`で適用する運用を徹底してください
+(この事故は`sam deploy`の対話的confirm_changesetをバイパスせず、
+changesetの中身を人間が確認していれば防げた種類の問題ではなく、
+IAM側のサイズ上限はCloudFormation実行時まで判明しないため、事前の
+`sam validate`だけでは検知できません)。
