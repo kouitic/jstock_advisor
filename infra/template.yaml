@@ -750,33 +750,79 @@ Resources:
       # 実データ取得件数が増えたため、既定の300秒では銘柄数によってはタイムアウトしうる
       Timeout: 900
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref RecommendationsTable }
-        # 通知検証モード機能(2026-08追加): VALIDATION実行時のみ使用する一時テーブル
-        - DynamoDBCrudPolicy: { TableName: !Ref ValidationRecommendationsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
-        - DynamoDBReadPolicy: { TableName: !Ref WatchlistTable }
-        # 統合BUY候補パイプライン(2026-07)で保有銘柄を購入判断対象へ統合したため追加
-        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref PurchaseLotsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
-        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
-        - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
-        # 判定精度向上機能Phase A(2026-08): DecisionSnapshot記録用
-        - DynamoDBCrudPolicy: { TableName: !Ref DecisionSnapshotsTable }
-        # BUY候補裾野拡大・NEAR BUY監視・通知制御の再設計(2026-08)で追加
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchStateTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref ValidationWatchStateTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref HoldingsSnapshotTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref ValidationHoldingsSnapshotTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref TradeDetectionRunLockTable }
-        # cross-pipeline通知重複抑止(コードレビュー対応2026-08、指摘5)
-        - DynamoDBCrudPolicy: { TableName: !Ref DailyNotificationPriorityTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref ValidationDailyNotificationPriorityTable }
+        # コードレビュー対応(2026-08): テーブル数の増加に伴うIAMロールのインライン
+        # ポリシー合計サイズ上限(10240バイト)超過を避けるため、HoldingsWatchlistFunction
+        # と同様にStatementへ集約する(付与している権限自体はCRUD/Read個別指定時と同一)。
+        - Statement:
+            - Sid: DynamoDbCrudAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
+                - !Sub "${AuditLogTable.Arn}/index/*"
+                - !GetAtt RecommendationsTable.Arn
+                - !Sub "${RecommendationsTable.Arn}/index/*"
+                # 通知検証モード機能(2026-08追加): VALIDATION実行時のみ使用する一時テーブル
+                - !GetAtt ValidationRecommendationsTable.Arn
+                - !Sub "${ValidationRecommendationsTable.Arn}/index/*"
+                - !GetAtt NotificationLogTable.Arn
+                - !Sub "${NotificationLogTable.Arn}/index/*"
+                - !GetAtt EdinetFilingCacheTable.Arn
+                - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDisclosureCacheTable.Arn
+                - !Sub "${EdinetDisclosureCacheTable.Arn}/index/*"
+                - !GetAtt BatchRunsTable.Arn
+                - !Sub "${BatchRunsTable.Arn}/index/*"
+                - !GetAtt DecisionSnapshotsTable.Arn
+                - !Sub "${DecisionSnapshotsTable.Arn}/index/*"
+                - !GetAtt WatchStateTable.Arn
+                - !Sub "${WatchStateTable.Arn}/index/*"
+                - !GetAtt ValidationWatchStateTable.Arn
+                - !Sub "${ValidationWatchStateTable.Arn}/index/*"
+                - !GetAtt HoldingsSnapshotTable.Arn
+                - !Sub "${HoldingsSnapshotTable.Arn}/index/*"
+                - !GetAtt ValidationHoldingsSnapshotTable.Arn
+                - !Sub "${ValidationHoldingsSnapshotTable.Arn}/index/*"
+                - !GetAtt TradeDetectionRunLockTable.Arn
+                - !Sub "${TradeDetectionRunLockTable.Arn}/index/*"
+                - !GetAtt DailyNotificationPriorityTable.Arn
+                - !Sub "${DailyNotificationPriorityTable.Arn}/index/*"
+                - !GetAtt ValidationDailyNotificationPriorityTable.Arn
+                - !Sub "${ValidationDailyNotificationPriorityTable.Arn}/index/*"
+            # 統合BUY候補パイプライン(2026-07)で保有銘柄を購入判断対象へ統合したため追加
+            - Sid: DynamoDbReadOnlyAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt WatchlistTable.Arn
+                - !Sub "${WatchlistTable.Arn}/index/*"
+                - !GetAtt HoldingsTable.Arn
+                - !Sub "${HoldingsTable.Arn}/index/*"
+                - !GetAtt PurchaseLotsTable.Arn
+                - !Sub "${PurchaseLotsTable.Arn}/index/*"
+                - !GetAtt ShareholderBenefitsTable.Arn
+                - !Sub "${ShareholderBenefitsTable.Arn}/index/*"
+                - !GetAtt CorporateActionRegistryTable.Arn
+                - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
+                - !GetAtt RuleVersionsTable.Arn
+                - !Sub "${RuleVersionsTable.Arn}/index/*"
+                - !GetAtt StockNameOverridesTable.Arn
+                - !Sub "${StockNameOverridesTable.Arn}/index/*"
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow
@@ -802,38 +848,92 @@ Resources:
       # 不足する。Lambdaの最大値である900秒まで引き上げる
       Timeout: 900
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref RecommendationsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
-        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref PurchaseLotsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref WatchlistTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
-        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
-        - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
-        # --- 保有判断スコア方式(2026-08仕様)で追加。RuntimeConfigのみ読み取り専用
-        # (書き込みはCLI経由の人間のみ、1節)。他5テーブルは通常のCRUD ---
-        - DynamoDBCrudPolicy: { TableName: !Ref HoldingDecisionResultsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesesTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesisBaselinesTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesisBaselineSequencesTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref InvestmentThesisBaselinePointersTable }
-        - DynamoDBReadPolicy: { TableName: !Ref HoldingDecisionRuntimeConfigTable }
-        # 判定精度向上機能Phase A(2026-08): DecisionSnapshot記録用
-        - DynamoDBCrudPolicy: { TableName: !Ref DecisionSnapshotsTable }
-        # BUY候補裾野拡大・NEAR BUY監視・通知制御の再設計(2026-08)で追加
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchStateTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref ValidationWatchStateTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref HoldingsSnapshotTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref ValidationHoldingsSnapshotTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref TradeDetectionRunLockTable }
-        # cross-pipeline通知重複抑止(コードレビュー対応2026-08、指摘5)
-        - DynamoDBCrudPolicy: { TableName: !Ref DailyNotificationPriorityTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref ValidationDailyNotificationPriorityTable }
+        # コードレビュー対応(2026-08): テーブル数の増加に伴い、DynamoDBCrudPolicy/
+        # DynamoDBReadPolicyをテーブルごとに個別指定すると、各エントリがロールへ
+        # 個別のインラインポリシーとして追加され、IAMロールのインラインポリシー
+        # 合計サイズ上限(10240バイト)を超過してデプロイに失敗する不具合が生じた。
+        # 同じアクション集合を持つテーブル群をStatementへ集約し、ポリシー
+        # エントリ数を削減する(付与している権限自体はCRUD/Read個別指定時と同一)。
+        - Statement:
+            - Sid: DynamoDbCrudAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
+                - !Sub "${AuditLogTable.Arn}/index/*"
+                - !GetAtt RecommendationsTable.Arn
+                - !Sub "${RecommendationsTable.Arn}/index/*"
+                - !GetAtt NotificationLogTable.Arn
+                - !Sub "${NotificationLogTable.Arn}/index/*"
+                - !GetAtt EdinetFilingCacheTable.Arn
+                - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDisclosureCacheTable.Arn
+                - !Sub "${EdinetDisclosureCacheTable.Arn}/index/*"
+                - !GetAtt BatchRunsTable.Arn
+                - !Sub "${BatchRunsTable.Arn}/index/*"
+                - !GetAtt HoldingDecisionResultsTable.Arn
+                - !Sub "${HoldingDecisionResultsTable.Arn}/index/*"
+                - !GetAtt InvestmentThesesTable.Arn
+                - !Sub "${InvestmentThesesTable.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselinesTable.Arn
+                - !Sub "${InvestmentThesisBaselinesTable.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselineSequencesTable.Arn
+                - !Sub "${InvestmentThesisBaselineSequencesTable.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselinePointersTable.Arn
+                - !Sub "${InvestmentThesisBaselinePointersTable.Arn}/index/*"
+                - !GetAtt DecisionSnapshotsTable.Arn
+                - !Sub "${DecisionSnapshotsTable.Arn}/index/*"
+                - !GetAtt WatchStateTable.Arn
+                - !Sub "${WatchStateTable.Arn}/index/*"
+                - !GetAtt ValidationWatchStateTable.Arn
+                - !Sub "${ValidationWatchStateTable.Arn}/index/*"
+                - !GetAtt HoldingsSnapshotTable.Arn
+                - !Sub "${HoldingsSnapshotTable.Arn}/index/*"
+                - !GetAtt ValidationHoldingsSnapshotTable.Arn
+                - !Sub "${ValidationHoldingsSnapshotTable.Arn}/index/*"
+                - !GetAtt TradeDetectionRunLockTable.Arn
+                - !Sub "${TradeDetectionRunLockTable.Arn}/index/*"
+                - !GetAtt DailyNotificationPriorityTable.Arn
+                - !Sub "${DailyNotificationPriorityTable.Arn}/index/*"
+                - !GetAtt ValidationDailyNotificationPriorityTable.Arn
+                - !Sub "${ValidationDailyNotificationPriorityTable.Arn}/index/*"
+            # --- 保有判断スコア方式(2026-08仕様)の補足: HoldingDecisionRuntimeConfigTable
+            # のみ読み取り専用(書き込みはCLI経由の人間のみ、1節)。他は上記CRUDグループへ含む ---
+            - Sid: DynamoDbReadOnlyAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt HoldingsTable.Arn
+                - !Sub "${HoldingsTable.Arn}/index/*"
+                - !GetAtt PurchaseLotsTable.Arn
+                - !Sub "${PurchaseLotsTable.Arn}/index/*"
+                - !GetAtt WatchlistTable.Arn
+                - !Sub "${WatchlistTable.Arn}/index/*"
+                - !GetAtt ShareholderBenefitsTable.Arn
+                - !Sub "${ShareholderBenefitsTable.Arn}/index/*"
+                - !GetAtt CorporateActionRegistryTable.Arn
+                - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
+                - !GetAtt RuleVersionsTable.Arn
+                - !Sub "${RuleVersionsTable.Arn}/index/*"
+                - !GetAtt StockNameOverridesTable.Arn
+                - !Sub "${StockNameOverridesTable.Arn}/index/*"
+                - !GetAtt HoldingDecisionRuntimeConfigTable.Arn
+                - !Sub "${HoldingDecisionRuntimeConfigTable.Arn}/index/*"
         # 銘柄単位のファンアウト(_fanout.py)のため、自分自身を非同期呼び出しする権限が必要
         - Statement:
             - Effect: Allow
