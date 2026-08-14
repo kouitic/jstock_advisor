@@ -19,6 +19,7 @@ from jstock_advisor.domain.entities.common import PriceWithRationale, SellPriceL
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     DividendComparisonOutcome,
+    IndustryClassification,
     PriceBasisType,
     PriceFieldBasis,
     ProfitTakingIndustrySector,
@@ -119,12 +120,17 @@ class ProfitTakingConditionInputs:
     # 業種別適正価格モデルが適用済みか(現行データソースでは恒久的にFalseとなる
     # ことが多い。適正価格単独での強い判定を許すゲートの1つ)。
     industry_model_applied: bool = False
-    # コードレビュー対応(2026-08、上値余地の導入): profit_taking_industry.pyの
-    # 区分(classify_profit_taking_industry_sector()の戻り値)。ceiling_price
-    # (fair_value_range.bull)を上値余地グリッドの主要根拠として使ってよいかの
-    # 業種別ゲート(_fair_value_action_usable())に使う。呼び出し元が渡さない
-    # 場合はUNKNOWN相当として安全側に扱う。
+    # profit_taking_industry.pyの区分(classify_profit_taking_industry_sector()の
+    # 戻り値)。表示用途(_INDUSTRY_SECTOR_LABELS等)にのみ使う。
     industry_sector: ProfitTakingIndustrySector | None = None
+    # 再コードレビュー対応(2026-08、指摘5): ceiling_price(fair_value_range.bull)を
+    # 上値余地グリッドの主要根拠として使ってよいかの業種別ゲート
+    # (_fair_value_action_usable())には、profit_taking_industry.py(銀行・
+    # リース金融のみ識別)ではなく、既存のfinancial_industry.py(保険・証券等
+    # 金融業全般をキーワードで識別し、未知の値は安全側にUNKNOWNとする三値分類)
+    # のIndustryClassificationを使う。呼び出し元が渡さない場合はUNKNOWN相当として
+    # 安全側に扱う。
+    industry_classification: IndustryClassification | None = None
     # 保有株数・売買単位から一部売却が実行可能か。
     partial_sale_executable: bool = True
     # 次回決算までの営業日数(取得できない場合はNone)。
@@ -157,6 +163,12 @@ class ProfitTakingResult:
     fair_value_action_usable: bool
     ceiling_price: Decimal | None
     upside_pct: float | None
+    # 再コードレビュー対応(2026-08、指摘1): raw_levelを実際に押し上げた根拠の
+    # 種別(_RawLevelOrigin.name)。呼び出し元(Recommendation)へ構造化フィールドと
+    # して伝播し、通知直前の整合性検証(recommendation_consistency_validator.py)が
+    # reasons文字列を解析せずに「価格マトリクス由来のFULL/PARTIALか」を判定できる
+    # ようにする。raw_level==HOLDの場合は"NONE"。
+    origin: str
 
 
 def compute_unrealized_pnl(
@@ -251,41 +263,35 @@ def _fair_value_excess_pcts(
     return neutral_pct, bull_pct
 
 
-# コードレビュー対応(2026-08、上値余地の導入): 汎用PER/PBR/配当利回りモデルの
-# 前提が成り立ちにくい業種(profit_taking_industry.pyが既に識別している銀行・
-# リース金融)、および業種不明(UNKNOWN、sector/industryが欠損・空文字等)は、
-# 業種別モデル適用済み(industry_model_applied=True)でない限りceiling_priceを
-# 上値余地グリッドの主要根拠として使わない。UNKNOWNを「安全な業種」とはみなさない
-# (financial_industry.pyの既存方針と同じ考え方)。FOOD/CHEMICAL/GAS_UTILITY/
-# SMALL_GROWTH/GENERALはこのゲートの対象外(汎用モデルの前提自体は成り立つ)。
-_CEILING_RESTRICTED_INDUSTRY_SECTORS = frozenset(
-    {
-        ProfitTakingIndustrySector.BANKING,
-        ProfitTakingIndustrySector.LEASING_FINANCE,
-        ProfitTakingIndustrySector.UNKNOWN,
-    }
-)
-
-
 def _fair_value_action_usable(
     fv_range: FairValueRange | None,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
 ) -> bool:
     """ceiling_price(fv_range.bull)を上値余地グリッド(_level_from_price_position）
-    の主要根拠として使ってよいか(コードレビュー対応2026-08)。
+    の主要根拠として使ってよいか(コードレビュー対応2026-08、再コードレビュー対応)。
 
-    industry_model_applied=Trueであることは、業種別モデル未対応でも汎用モデルの
-    前提自体は成り立つ業種(GENERAL/SMALL_GROWTH/FOOD/CHEMICAL/GAS_UTILITY)
-    については必須にしない(現行はindustry_model_appliedが全銘柄false固定の
-    ため、必須にすると本判定が恒久的に不成立になる)。銀行・リース金融・業種
-    不明のみ、業種別モデル適用済みでない限りceilingを使わない(§_CEILING_
-    RESTRICTED_INDUSTRY_SECTORS参照)。
+    本関数の責務は「ceilingのデータ/モデルが売買判断に利用できる品質か」の
+    判定に限定する(再コードレビュー対応、指摘4)。増配継続・増益等の
+    「売らずに持つ合理性」(has_strong_counter_material)は、ceilingの利用
+    可否ではなくmitigating layer(_apply_mitigating_factors)でのみ評価する。
+    同一材料でceiling利用禁止とaction softeningの二重に効かせない。
+
+    金融業(銀行・保険・証券・リース等)・業種不明(UNKNOWN、sector/industryが
+    欠損・空文字等)は、一般事業会社向けのPER/PBR/配当利回りモデルの前提が
+    成り立ちにくいため、業種別モデル適用済み(industry_model_applied=True)で
+    ない限りceilingを使わない(再コードレビュー対応、指摘5: profit_taking_
+    industry.py(銀行・リース金融のみ識別)ではなく、既存のfinancial_industry.py
+    ベースのIndustryClassificationで判定する。金融業判定ロジックを二重実装
+    しない)。GENERAL_CORPORATEと明確に判定できた場合のみ業種別モデル未対応でも
+    汎用モデルの前提自体は成り立つとみなす(現行はindustry_model_appliedが
+    全銘柄false固定のため、GENERAL_CORPORATEにまで必須にすると本判定が恒久的に
+    不成立になる)。
     """
     if fv_range is None or not fv_range.usable_for_trading_judgment or fv_range.bull is None:
         return False
     if (
-        inputs.industry_sector in _CEILING_RESTRICTED_INDUSTRY_SECTORS
+        inputs.industry_classification != IndustryClassification.GENERAL_CORPORATE
         and not inputs.industry_model_applied
     ):
         return False
@@ -300,7 +306,6 @@ def _fair_value_action_usable(
         and spread_ratio is not None
         and spread_ratio <= cbj.max_fair_value_spread_ratio_for_partial
         and inputs.fair_value_reflects_latest_earnings is True
-        and not inputs.has_strong_counter_material
         and (
             inputs.days_to_next_earnings_business_days is None
             or inputs.days_to_next_earnings_business_days
@@ -743,6 +748,76 @@ def _price_range(price: Decimal, width_pct: float = 1.5) -> tuple[Decimal, Decim
     return low, high
 
 
+_CEILING_AWARE_ORIGINS = frozenset(
+    {
+        _RawLevelOrigin.PRICE_POSITION,
+        _RawLevelOrigin.FAIR_VALUE_STRONG,
+        _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK,
+    }
+)
+
+
+def _ceiling_aware_sell_prices(
+    current_price: Decimal,
+    ceiling_price: Decimal | None,
+    final_level: _Level,
+) -> SellPriceLevels:
+    """PRICE_POSITION/FAIR_VALUE_STRONG/FUNDAMENTAL_CRITICAL_RISK origin向けの
+    価格フィールド算出(再コードレビュー対応2026-08、指摘2)。
+
+    これらのoriginは「現在値がceiling_price(上限価格の想定)にどれだけ近いか」を
+    判定の主要根拠とするため、価格フィールドも同じ基準に揃える。旧来の含み益率・
+    強気適正価格超過率ベースの固定閾値(unrealized_gain_full_pct=50%、
+    fair_value_excess_full_pct=40%等)は、ceiling_priceを大きく超える未来の
+    参考値になりうるため、これらのorigin向けの目安価格には使わない
+    (過去互換の内部参考値としては_compute_sell_prices側のlevel_gain/level_fv
+    ベースの旧算出を他originで引き続き使う)。
+
+    - PARTIAL: 判定は既に成立しているため、現在値付近の実行可能な指値を
+      recommended_limit_priceとする(ceiling_price>現在値である限り、
+      構造的にceiling_price以下になる)。
+    - FULL: 判定が既に成立しているため、現在値付近を即時執行目安
+      (immediate_execution_price)として優先する。全株利確検討価格
+      (full_profit_consideration_price)はceiling_priceが現在値を上回る場合
+      のみそれを使い、ceiling_priceより上へは設定しない。
+    """
+    if final_level == _Level.PARTIAL:
+        partial_field = _wrap(
+            current_price,
+            "含み益率と上限価格(想定ceiling)までの上値余地から一部利確水準に"
+            "到達していると判断。現在値付近での指値・執行を検討する目安",
+            basis=PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE,
+        )
+        return SellPriceLevels(
+            partial_profit_start_price=partial_field,
+            recommended_limit_price=partial_field,
+        )
+
+    # FULL: 上限価格が現在値を上回っている場合のみそれを全株利確検討価格の
+    # 参考上限として使い、それ以外(ceiling_price未使用またはceiling_price<=
+    # 現在値=既に超過)は現在値そのものを使う(未来の遠い参考値を使わない)。
+    full_take = (
+        ceiling_price
+        if ceiling_price is not None and ceiling_price > current_price
+        else current_price
+    )
+    full_field = _wrap(
+        full_take,
+        "含み益率と上限価格(想定ceiling)までの上値余地から全株利確水準に"
+        "到達していると判断した参考水準(上限価格を上回る未来の参考値は使わない)",
+        basis_type=PriceBasisType.FAIR_VALUE_THRESHOLD if ceiling_price is not None else None,
+    )
+    immediate_field = _wrap(
+        current_price,
+        "全株利確条件が既に成立しているため、現在値付近での執行を検討する目安",
+        basis=PriceFieldBasis.IMMEDIATE_EXECUTION_REFERENCE,
+    )
+    return SellPriceLevels(
+        full_profit_consideration_price=full_field,
+        immediate_execution_price=immediate_field,
+    )
+
+
 def _compute_sell_prices(
     current_price: Decimal,
     average_purchase_price: Decimal,
@@ -754,6 +829,8 @@ def _compute_sell_prices(
     level_gain: _Level,
     level_fv: _Level,
     final_level: _Level,
+    origin: _RawLevelOrigin,
+    ceiling_price: Decimal | None,
     config: ProfitTakingRulesConfig,
 ) -> SellPriceLevels:
     """final_action(格下げ後の最終判定)に基づいて価格フィールドを再構成する
@@ -767,9 +844,17 @@ def _compute_sell_prices(
 
     旧実装は判定レベル算出前のraw水準(level_gain/level_fv)だけを使っており、
     緩和要因・タイミング層による格下げ後もその水準の価格が残る矛盾があった。
+
+    再コードレビュー対応(2026-08、指摘2): origin(PRICE_POSITION/FAIR_VALUE_STRONG/
+    FUNDAMENTAL_CRITICAL_RISK)がceiling_priceを判定の主要根拠とする場合、
+    PARTIAL/FULLの価格フィールドは_ceiling_aware_sell_prices()へ委譲し、
+    ceiling_priceを超える・現在値から大きく乖離した未来の参考値を提示しない。
     """
     if final_level == _Level.HOLD:
         return SellPriceLevels()
+
+    if final_level in (_Level.PARTIAL, _Level.FULL) and origin in _CEILING_AWARE_ORIGINS:
+        return _ceiling_aware_sell_prices(current_price, ceiling_price, final_level)
 
     t = config.thresholds
     # コードレビュー対応(2026-08、LINE通知/監査分離): usable_for_trading_judgment=False
@@ -1179,6 +1264,17 @@ def evaluate_profit_taking(
         # 完全に打ち消すのではなく、最低でもWATCH(監視継続)として可視化する。
         if fundamental_level == _Level.HOLD:
             fundamental_level = _Level.WATCH
+        # 再コードレビュー対応(2026-08、指摘6): 最終floor(下記)をfinal_levelにのみ
+        # 適用すると、fundamental_action(mitigating適用後)がタイミング層による降格の
+        # 影響を受けずfinal_actionより弱く見える(fundamental_action=WATCH・
+        # final_action=PARTIALのように、最終判定がfundamentalより強く見える)矛盾が
+        # 生じうる。origin別floorはmitigating層適用直後のfundamental_levelにも同じ
+        # 基準で適用し、各層の意味を一貫させる(このあとのtiming層はfloor済みの
+        # fundamental_levelを起点に計算される)。
+        if origin in (_RawLevelOrigin.PRICE_POSITION, _RawLevelOrigin.FAIR_VALUE_STRONG) and (
+            raw_level >= _Level.PARTIAL
+        ):
+            fundamental_level = _Level(max(int(fundamental_level), int(_Level.PARTIAL)))
         hold_reasons = list(applied_factors)
 
     # タイミング層(要求仕様9節・10節): ファンダメンタル評価とは独立した軸として算出する。
@@ -1235,6 +1331,8 @@ def evaluate_profit_taking(
         level_gain,
         level_fv,
         final_level,
+        origin,
+        ceiling_price,
         config,
     )
     if (
@@ -1271,4 +1369,5 @@ def evaluate_profit_taking(
         fair_value_action_usable=fair_value_action_usable,
         ceiling_price=ceiling_price,
         upside_pct=upside_pct,
+        origin=origin.name,
     )

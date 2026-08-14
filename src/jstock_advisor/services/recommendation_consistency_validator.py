@@ -204,6 +204,14 @@ def _check_watch_immediate_execution(r: Recommendation) -> ConsistencyViolation 
     """WATCH(監視)判定に、即時売却・即時利確を意味する価格が残っていないか確認する
     (要求仕様レビュー対応: recommended_limit_priceだけでなく、partial_profit_start_price・
     immediate_execution_price・stop_review_priceも確認する)。
+
+    再コードレビュー対応(2026-08、指摘3、挙動変更): WATCH/MANUAL_REVIEWは
+    LINE通知アクション限定化によりNON_ACTIONABLEとして通常通知が抑止されるため、
+    この矛盾を検出しても安全弁(notify_manual_review_required)が発火しなければ
+    「送らない」という判定に紛れて黙って握りつぶされてしまう。内部論理矛盾
+    (計算/判定ロジックの不整合)であるため、_check_review_retains_immediate_
+    execution_priceと同様にmanual_review_required=Trueとし、安全弁を維持する
+    (以前はmanual_review_required未指定でFalseのままだった)。
     """
     if r.recommendation_type != RecommendationType.WATCH or r.sell_prices is None:
         return None
@@ -212,6 +220,7 @@ def _check_watch_immediate_execution(r: Recommendation) -> ConsistencyViolation 
         return ConsistencyViolation(
             "watch_recommends_immediate_sell",
             "WATCH(監視)判定なのに、即時執行価格が設定されている",
+            manual_review_required=True,
         )
     for name, field in (
         ("partial_profit_start_price", sp.partial_profit_start_price),
@@ -222,6 +231,7 @@ def _check_watch_immediate_execution(r: Recommendation) -> ConsistencyViolation 
             return ConsistencyViolation(
                 "watch_recommends_immediate_sell",
                 f"WATCH(監視)判定なのに、{name}が即時執行目安として提示されている",
+                manual_review_required=True,
             )
     return None
 
@@ -291,10 +301,28 @@ def _check_low_fair_value_confidence_full_take(r: Recommendation) -> Consistency
     return None
 
 
+_PRICE_MATRIX_ORIGINS = frozenset(
+    {"PRICE_POSITION", "FAIR_VALUE_STRONG", "FUNDAMENTAL_CRITICAL_RISK"}
+)
+
+
 def _check_gain_below_threshold_full_take(
     r: Recommendation, config: ConsistencyValidationConfig, gain_full_threshold_pct: float
 ) -> ConsistencyViolation | None:
+    """含み益率が低いのに根拠数が少ないFULL_PROFIT_TAKEを検出する(旧: 含み益率
+    単独判定の名残)。
+
+    再コードレビュー対応(2026-08、指摘1): 上値余地マトリクス導入後、
+    PRICE_POSITION/FAIR_VALUE_STRONG/FUNDAMENTAL_CRITICAL_RISK origin由来の
+    FULL_PROFIT_TAKEは、含み益率×上値余地(またはFAIR_VALUE_STRONGの複数ゲート、
+    FUNDAMENTAL_CRITICAL_RISKの重大リスク条件)という構造化された判定で既に
+    正当性が検証済みであり、reasons文字列の件数を使った本チェック(旧: 含み益率
+    単独判定の名残)を適用しない。reasons文字列を解析せず、Recommendation側の
+    構造化フィールド(profit_taking_origin)で判定する。
+    """
     if r.recommendation_type != RecommendationType.FULL_PROFIT_TAKE:
+        return None
+    if r.profit_taking_origin in _PRICE_MATRIX_ORIGINS:
         return None
     avg = r.average_purchase_price_at_recommendation
     if avg is None or avg <= 0:

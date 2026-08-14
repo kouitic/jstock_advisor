@@ -22,6 +22,7 @@ from jstock_advisor.domain.entities.common import (
 from jstock_advisor.domain.entities.enums import (
     BuyAction,
     ConfidenceLevel,
+    IndustryClassification,
     NotificationStatus,
     RecommendationType,
     StockType,
@@ -29,6 +30,12 @@ from jstock_advisor.domain.entities.enums import (
     WatchType,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
+from jstock_advisor.domain.signals.profit_taking import (
+    MitigatingFactorInputs,
+    ProfitTakingConditionInputs,
+    evaluate_profit_taking,
+)
 from jstock_advisor.infrastructure.line.client import LineClient
 from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
     DailyNotificationPriorityRepository,
@@ -338,3 +345,191 @@ def test_sell_sent_then_near_buy_suppressed_lower_priority(service) -> None:
     assert outcome.status == NotificationStatus.NOT_REQUIRED
     assert outcome.block_category is not None and outcome.block_category.value == "NON_ACTIONABLE"
     assert len(client.sent) == 1  # SELLの1件のみ、NEAR BUYは追加送信されない
+
+
+# --- C: 上値余地マトリクスとの整合性(再コードレビュー対応2026-08) ---------------
+
+
+def _fv_range(
+    *, neutral: Decimal, bull: Decimal, bear: Decimal, method_count: int = 3
+) -> FairValueRange:
+    methods = [
+        FairValueMethodResult(
+            method=f"method{i}", fair_value=neutral, confidence=ConfidenceLevel.MEDIUM
+        )
+        for i in range(method_count)
+    ]
+    return FairValueRange(
+        bear=bear,
+        neutral=neutral,
+        bull=bull,
+        overall_confidence=ConfidenceLevel.MEDIUM,
+        methods_used=methods,
+        methods_excluded=[],
+        usable_for_trading_judgment=True,
+    )
+
+
+def _profit_taking_recommendation(
+    *,
+    stock_code: str,
+    current_price: Decimal,
+    average_purchase_price: Decimal,
+    fair_value_range: FairValueRange,
+    recommendation_id: str,
+) -> Recommendation:
+    """evaluate_profit_taking()の実結果からRecommendationを組み立てる
+    (profit_taking_service.pyの本番配線を模した最小限のフィクスチャ)。
+    reasons/sell_prices/profit_taking_origin等の構造化フィールドをprofit_taking.py
+    の実際の出力から取るため、通知直前の整合性検証(recommendation_consistency_
+    validator.py)を実データに近い形で検証できる。
+    """
+    result = evaluate_profit_taking(
+        current_price=current_price,
+        average_purchase_price=average_purchase_price,
+        shares=100,
+        total_purchase_amount=average_purchase_price * 100,
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=fair_value_range,
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+        ),
+    )
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code=stock_code,
+        stock_name="テスト水産",
+        recommended_at=_NOW,
+        recommendation_type=result.final_action,
+        sell_prices=result.sell_prices,
+        price_at_recommendation=current_price,
+        average_purchase_price_at_recommendation=average_purchase_price,
+        shares_at_recommendation=100,
+        reasons=result.triggered_reasons,
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        fair_value_overall_confidence=fair_value_range.overall_confidence,
+        profit_taking_origin=result.origin,
+        profit_taking_ceiling_price=result.ceiling_price,
+        profit_taking_upside_pct=result.upside_pct,
+    )
+
+
+def test_full_profit_take_gain28_upside3_reaches_actual_send(service) -> None:
+    """再コードレビュー対応(2026-08、指摘1・回帰テスト): 含み益28%×上値余地約3%は
+    他の独立条件なしで単独でFULLへ到達する(origin=PRICE_POSITION)。
+    通知直前の整合性検証(旧: 含み益率50%未満なら根拠不足とみなす固定閾値)が
+    誤ってブロックせず、実際にLINE送信経路まで到達することを確認する。
+    """
+    svc, client = service
+    rec = _profit_taking_recommendation(
+        stock_code="1301",
+        current_price=Decimal("1280"),  # +28%
+        average_purchase_price=Decimal("1000"),
+        fair_value_range=_fv_range(
+            neutral=Decimal("1250"), bull=Decimal("1318"), bear=Decimal("1200")
+        ),
+        recommendation_id="rec-full-gain28",
+    )
+    assert rec.recommendation_type == RecommendationType.FULL_PROFIT_TAKE
+    assert rec.profit_taking_origin == "PRICE_POSITION"
+
+    outcome = svc.notify_recommendation_with_status(rec, _NOW)
+
+    assert outcome.status == NotificationStatus.SENT
+    assert outcome.sent is True
+    assert outcome.data_quality_blocked is False
+    assert len(client.sent) == 1
+    body = client.sent[0]
+    assert rec.stock_code in body
+    assert "全部売却検討" in body
+
+
+def test_partial_profit_take_price_matrix_body_never_exceeds_ceiling(service) -> None:
+    """再コードレビュー対応(2026-08、指摘2・回帰テストA・D): origin=PRICE_POSITION
+    由来のPARTIALでは、実送信本文の売却目安価格がceiling_price(1,426円)を
+    超えず、旧gain+50%の目安値(1,500円)が使われないことを確認する。
+    """
+    svc, client = service
+    rec = _profit_taking_recommendation(
+        stock_code="1301",
+        current_price=Decimal("1320"),  # +32%
+        average_purchase_price=Decimal("1000"),
+        fair_value_range=_fv_range(
+            neutral=Decimal("1300"), bull=Decimal("1426"), bear=Decimal("1200")
+        ),
+        recommendation_id="rec-partial-ceiling",
+    )
+    assert rec.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert rec.profit_taking_origin == "PRICE_POSITION"
+
+    outcome = svc.notify_recommendation_with_status(rec, _NOW)
+
+    assert outcome.status == NotificationStatus.SENT
+    assert len(client.sent) == 1
+    body = client.sent[0]
+    assert "1,320円" in body
+    assert "1,500円" not in body
+
+
+def test_fundamental_critical_risk_body_uses_current_price_not_future_target(
+    service,
+) -> None:
+    """再コードレビュー対応(2026-08、指摘2・回帰テストC): FUNDAMENTAL_CRITICAL_
+    RISK由来のFULLは、現在値が適正価格レンジを超過していても、実送信本文が
+    旧bull+40%等の遠い未来値ではなく現在値付近を示すことを確認する。
+    """
+    svc, client = service
+    result = evaluate_profit_taking(
+        current_price=Decimal("1600"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=_fv_range(
+                neutral=Decimal("1500"), bull=Decimal("1500"), bear=Decimal("1500")
+            ),
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+            investment_premise_broken=True,
+        ),
+    )
+    assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
+    assert result.origin == "FUNDAMENTAL_CRITICAL_RISK"
+    rec = Recommendation(
+        recommendation_id="rec-fundamental-critical",
+        stock_code="1301",
+        stock_name="テスト水産",
+        recommended_at=_NOW,
+        recommendation_type=result.final_action,
+        sell_prices=result.sell_prices,
+        price_at_recommendation=Decimal("1600"),
+        average_purchase_price_at_recommendation=Decimal("1000"),
+        shares_at_recommendation=100,
+        reasons=result.triggered_reasons,
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        profit_taking_origin=result.origin,
+        profit_taking_ceiling_price=result.ceiling_price,
+        profit_taking_upside_pct=result.upside_pct,
+    )
+
+    outcome = svc.notify_recommendation_with_status(rec, _NOW)
+
+    assert outcome.status == NotificationStatus.SENT
+    assert len(client.sent) == 1
+    body = client.sent[0]
+    assert "1,600円" in body
+    assert "2,100円" not in body

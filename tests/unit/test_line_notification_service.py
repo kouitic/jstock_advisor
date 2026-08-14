@@ -816,6 +816,102 @@ def test_data_quality_alert_logs_stock_name_and_recommended_action(
     assert "sell_based_on_single_evidence" in caplog.text
 
 
+# --- 再コードレビュー対応(2026-08、指摘3): NON_ACTIONABLEゲートより内部論理矛盾の
+# 安全弁を先に評価する ------------------------------------------------------
+
+
+def _make_review_recommendation_with_immediate_execution_price() -> Recommendation:
+    return Recommendation(
+        recommendation_id="rec-review-contradiction",
+        stock_code="4631",
+        stock_name="ＤＩＣ",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.REVIEW,
+        sell_prices=SellPriceLevels(
+            immediate_execution_price=PriceWithRationale(price=Decimal("4200"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("4200"),
+        reasons=["適正価格レンジ上限を超過"],
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+
+
+def test_review_with_immediate_execution_price_contradiction_sends_safety_valve(
+    service_and_repos,
+) -> None:
+    """再コードレビュー対応(2026-08、指摘3): REVIEW判定はNotificationCategory.
+    MANUAL_REVIEW(NON_ACTIONABLE対象)だが、即時執行価格が残存している
+    (_check_review_retains_immediate_execution_price、内部論理矛盾)場合は
+    NON_ACTIONABLEゲートより先に評価され、要確認LINEの安全弁が送信される
+    (以前はNON_ACTIONABLEゲートがデータ品質チェックより前段にあったため、
+    この安全弁自体が構造的に到達不能だった)。
+    """
+    service, repo, client = service_and_repos
+    rec = _make_review_recommendation_with_immediate_execution_price()
+    repo.save(rec)
+
+    sent = service.notify_recommendation(rec, _NOW)
+
+    assert sent is True
+    assert len(client.sent) == 1
+    assert "要確認" in client.sent[0]
+
+
+def test_watch_with_immediate_execution_price_contradiction_sends_safety_valve(
+    service_and_repos,
+) -> None:
+    """再コードレビュー対応(2026-08、指摘3): WATCH判定でも、即時執行価格が
+    残存している内部論理矛盾(_check_watch_immediate_execution、今回
+    manual_review_required=Trueへ挙動変更)はNON_ACTIONABLEゲートより先に
+    評価され、要確認LINEの安全弁が送信される。
+    """
+    service, repo, client = service_and_repos
+    rec = Recommendation(
+        recommendation_id="rec-watch-contradiction",
+        stock_code="4631",
+        stock_name="ＤＩＣ",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        sell_prices=SellPriceLevels(
+            immediate_execution_price=PriceWithRationale(price=Decimal("4200"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("4200"),
+        reasons=["適正価格レンジ上限に接近"],
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+    repo.save(rec)
+
+    sent = service.notify_recommendation(rec, _NOW)
+
+    assert sent is True
+    assert len(client.sent) == 1
+    assert "要確認" in client.sent[0]
+
+
+def test_ordinary_review_with_evidence_quality_issue_only_is_not_sent(
+    service_and_repos,
+) -> None:
+    """通常のREVIEW(証拠不足のみが理由で、内部論理矛盾を伴わない)は、
+    NON_ACTIONABLEゲート順序変更後も引き続きLINE送信されない(Auditのみ)。
+    """
+    service, repo, client = service_and_repos
+    rec = _make_sell_recommendation(
+        recommendation_id="rec-review-evidence-only",
+        reasons=["減配(major)"],
+        independent_evidence_group_count=1,
+    ).model_copy(update={"recommendation_type": RecommendationType.REVIEW})
+    repo.save(rec)
+
+    outcome = service.notify_recommendation_with_status(rec, _NOW)
+
+    assert outcome.sent is False
+    assert outcome.status == NotificationStatus.NOT_REQUIRED
+    assert outcome.block_category is not None and outcome.block_category.value == "NON_ACTIONABLE"
+    assert client.sent == []
+
+
 def _counts(
     sent=0,
     hold=0,
