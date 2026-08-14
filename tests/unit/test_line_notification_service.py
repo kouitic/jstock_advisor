@@ -17,6 +17,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsDateStatus,
     EarningsReleaseConfirmationState,
     ExecutionMode,
+    NotificationCategory,
     NotificationStatus,
     RecommendationType,
     RecordDateUnknownReason,
@@ -2652,3 +2653,204 @@ def test_normal_and_validation_bodies_differ_only_by_prefix() -> None:
         validation_text = line_notification_service_module._VALIDATION_BANNER + body
         assert validation_text == "🧪検証｜" + normal_text
         assert validation_text.removeprefix("🧪検証｜") == normal_text
+
+
+# --- 再コードレビュー対応(2026-08-14、実装漏れ・回帰2件の修正) ---
+
+
+def test_resolve_notification_category_profit_taking_watch_before_earnings() -> None:
+    """RecommendationType.WATCH_BEFORE_EARNINGS(利確判定エンジンのWATCH抑制
+    専用、buy_action=None)がNotificationCategory.WATCHへ分類されること
+    (以前はどの分岐にも一致せずOTHERへ落ちていた)。買い候補側の
+    BuyAction.WATCH_BEFORE_EARNINGS→NotificationCategory.WATCH_BEFORE_EARNINGS
+    という既存経路とは独立していることも確認する。
+    """
+    rec = Recommendation(
+        recommendation_id="cat-watch-before-earnings",
+        stock_code="9434",
+        stock_name="ソフトバンク",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH_BEFORE_EARNINGS,
+        price_at_recommendation=Decimal("235"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+    assert (
+        line_notification_service_module.resolve_notification_category(rec)
+        is NotificationCategory.WATCH
+    )
+
+
+def test_profit_taking_watch_before_earnings_routes_to_short_watch_category(
+    service_and_repos,
+) -> None:
+    """再コードレビュー対応(2026-08-14、実装漏れ修正)。上記の分類漏れにより、
+    実送信時に旧長文_format_message()が使われ、判断根拠(適正価格レンジ等)が
+    LINE本文へ漏れる可能性があった不具合の回帰テスト(実送信経路まで通す)。
+    """
+    service, repo, client = service_and_repos
+    rec = Recommendation(
+        recommendation_id="watch-before-earnings-1",
+        stock_code="9434",
+        stock_name="ソフトバンク",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH_BEFORE_EARNINGS,
+        sell_prices=SellPriceLevels(
+            partial_profit_start_price=PriceWithRationale(price=Decimal("240"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("235"),
+        fair_value_neutral=Decimal("200"),
+        fair_value_bull=Decimal("260"),
+        fair_value_bear=Decimal("180"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+    repo.save(rec)
+
+    sent = service.notify_recommendation(rec, _NOW)
+
+    assert sent is True
+    message = client.sent[0]
+    assert "決算発表接近のため様子見" in message
+    assert "適正価格レンジ" not in message
+    assert "通知ID" not in message
+    assert "信頼度" not in message
+    assert rec.recommendation_id not in message
+
+
+def _make_strong_sell_recommendation(
+    *, recommendation_id: str, full_price: str, stop_review_price: str
+) -> Recommendation:
+    # price_at_recommendationはstop_review_priceと意図的に1円ずらす。実際の
+    # 生成経路(sell_price_recommendation_service.py)ではstop_review_price=
+    # 現在値だが、両者が完全一致すると_check_sell_price_equals_current_as_
+    # future_condition()(要求仕様§8、成立済みの現在値を将来条件として提示
+    # しない)に引っかかり、要手動確認へ切り替わって本テストの対象(通常の
+    # 再送抑止判定)を検証できなくなるため。
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code="1010",
+        stock_name="テスト全部売却",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.STRONG_SELL_CONSIDERATION,
+        sell_prices=SellPriceLevels(
+            full_profit_consideration_price=PriceWithRationale(
+                price=Decimal(full_price), rationale="x"
+            ),
+            stop_review_price=PriceWithRationale(
+                price=Decimal(stop_review_price), rationale="x"
+            ),
+        ),
+        price_at_recommendation=Decimal(stop_review_price) + Decimal("1"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+
+
+def test_representative_price_prefers_full_profit_consideration_for_strong_sell() -> None:
+    # A. STRONG_SELL_CONSIDERATIONの代表価格はfull_profit_consideration_price
+    # (ユーザーへ提示する全部売却目安)を優先し、stop_review_price(現在値の
+    # 監視専用フィールド)は見ない。
+    rec = _make_strong_sell_recommendation(
+        recommendation_id="rp-a", full_price="4000", stop_review_price="5600"
+    )
+    assert line_notification_service_module._representative_price(rec) == Decimal("4000")
+
+
+def test_no_resend_when_only_stop_review_price_moves_for_strong_sell(service_and_repos) -> None:
+    """B. 再コードレビュー対応(2026-08-14、実装漏れ修正)。全部売却検討の代表
+    価格にstop_review_price(常に現在値の監視専用フィールド)を使っていたため、
+    実際にユーザーへ提示する全部売却目安(full_profit_consideration_price)が
+    変わっていなくても、現在値の変動だけで不要な再送が発生していた不具合の
+    回帰テスト。
+    """
+    service, repo, client = service_and_repos
+    rec1 = _make_strong_sell_recommendation(
+        recommendation_id="rp-b1", full_price="4000", stop_review_price="5600"
+    )
+    repo.save(rec1)
+    service.notify_recommendation(rec1, _NOW)
+
+    # 全部売却目安(4000円)は不変、現在値(stop_review_price)だけ5600→5900(+5.4%)。
+    # 翌日にずらすことで、cross-pipeline重複抑止(同日・同優先度カテゴリの
+    # 重複送信抑止、resolve_notification_category()参照)ではなく、価格ベース
+    # の再送閾値判定(_representative_price())自体を検証する。
+    rec2 = _make_strong_sell_recommendation(
+        recommendation_id="rp-b2", full_price="4000", stop_review_price="5900"
+    )
+    repo.save(rec2)
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(days=1))
+
+    assert sent is False
+    assert len(client.sent) == 1
+
+
+def test_resend_when_full_profit_consideration_price_changes(service_and_repos) -> None:
+    # C. 全部売却目安そのものが変化(4000→4300円、+7.5%、閾値3.0%を超過)した
+    # 場合は既存のprice_change_resend_threshold_pctの条件どおり再送される
+    # (Bと同様、翌日にずらしてcross-pipeline重複抑止の影響を避ける)。
+    service, repo, client = service_and_repos
+    rec1 = _make_strong_sell_recommendation(
+        recommendation_id="rp-c1", full_price="4000", stop_review_price="5600"
+    )
+    repo.save(rec1)
+    service.notify_recommendation(rec1, _NOW)
+
+    rec2 = _make_strong_sell_recommendation(
+        recommendation_id="rp-c2", full_price="4300", stop_review_price="5600"
+    )
+    repo.save(rec2)
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(days=1))
+
+    assert sent is True
+    assert len(client.sent) == 2
+
+
+def test_representative_price_selection_unchanged_for_partial_watch_and_normal_sell() -> None:
+    # D. PARTIAL_PROFIT_TAKE/WATCH/通常SELL_CONSIDERATIONの既存の代表価格
+    # 選択(recommendation_adapter.pyの表示価格選択と同じ優先順位)を壊さない。
+    rec_partial = Recommendation(
+        recommendation_id="rp-partial",
+        stock_code="1011",
+        stock_name="テスト一部売却",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            recommended_limit_price=PriceWithRationale(price=Decimal("2600"), rationale="x"),
+            partial_profit_start_price=PriceWithRationale(price=Decimal("2300"), rationale="x"),
+        ),
+        price_at_recommendation=Decimal("2400"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+    assert line_notification_service_module._representative_price(rec_partial) == Decimal("2600")
+
+    rec_watch = Recommendation(
+        recommendation_id="rp-watch",
+        stock_code="1012",
+        stock_name="テスト監視",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        sell_prices=SellPriceLevels(
+            partial_profit_start_price=PriceWithRationale(price=Decimal("2200"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("2100"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+    assert line_notification_service_module._representative_price(rec_watch) == Decimal("2200")
+
+    rec_sell = Recommendation(
+        recommendation_id="rp-sell",
+        stock_code="1013",
+        stock_name="テスト売却検討",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL_CONSIDERATION,
+        sell_prices=SellPriceLevels(
+            stop_review_price=PriceWithRationale(price=Decimal("4000"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("4384"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+    assert line_notification_service_module._representative_price(rec_sell) == Decimal("4000")
