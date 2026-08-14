@@ -247,6 +247,20 @@ class Recommendation(ImmutableSnapshot):
     current_price_vs_neutral_fair_value_pct: float | None = None
     current_price_vs_bull_fair_value_pct: float | None = None
 
+    # --- 再コードレビュー対応(2026-08、上値余地マトリクスとの整合性)で追加 ---
+    # 利確判定エンジン(profit_taking.py)のraw_levelを実際に押し上げた根拠の種別
+    # (_RawLevelOrigin.name。例: "PRICE_POSITION"、"FAIR_VALUE_STRONG"、
+    # "FUNDAMENTAL_CRITICAL_RISK"、"OTHER_CONDITIONS")。利確判定以外の
+    # RecommendationTypeでは常にNone。通知直前の整合性検証
+    # (recommendation_consistency_validator.py)が、reasons文字列を解析せず
+    # 構造化データで「価格マトリクス由来の判定か」を判定するために使う。
+    profit_taking_origin: str | None = None
+    # ceiling_price(fair_value_range.bull、_fair_value_action_usable=True時のみ)。
+    # 利用不能の場合はNone。
+    profit_taking_ceiling_price: Decimal | None = None
+    # 現在値からceiling_priceまでの上値余地(%)。ceiling_price利用不能の場合はNone。
+    profit_taking_upside_pct: float | None = None
+
     # 保有株数・売買単位を考慮した一部売却の実行可能性
     trading_unit: int | None = None
     minimum_sellable_shares: int | None = None

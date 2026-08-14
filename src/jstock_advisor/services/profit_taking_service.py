@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.classification.profit_taking_industry import (
     classify_profit_taking_industry_sector,
     industry_model_missing_reason,
@@ -386,6 +387,14 @@ class ProfitTakingService:
         # 現行データソースでは業種別専用モデル(CET1比率・DOE等)を安定取得できないため、
         # 常にFalse(要求仕様§7: 未対応の場合はHIGH信頼度・適正価格単独でのPARTIAL以上を禁止)。
         industry_model_applied = False
+        # 再コードレビュー対応(2026-08、指摘5): ceiling_price利用可否の金融業ゲート
+        # (_fair_value_action_usable())には、profit_taking_industry.py(銀行・
+        # リース金融のみ識別)ではなく、既存のfinancial_industry.py(保険・証券等
+        # 金融業全般をキーワードで識別し、未知の値は安全側にUNKNOWNとする三値分類)を
+        # 使う。industry_sector(表示・既存ProfitTaking用の業種区分)自体は変更しない。
+        industry_classification = classify_industry(
+            snapshot.financial.sector, snapshot.financial.industry
+        ).classification
 
         has_strong_counter_material = (
             snapshot.dividend.dividend_comparison_outcome
@@ -406,6 +415,7 @@ class ProfitTakingService:
             fair_value_reflects_latest_earnings=self._fair_value_reflects_latest_earnings(snapshot),
             industry_model_applied=industry_model_applied,
             industry_sector=industry_sector,
+            industry_classification=industry_classification,
             partial_sale_executable=trading_unit_feasibility.partial_sale_executable,
             days_to_next_earnings_business_days=days_to_earnings,
             has_strong_counter_material=has_strong_counter_material,
@@ -718,6 +728,9 @@ class ProfitTakingService:
                 result.current_price_vs_neutral_fair_value_pct
             ),
             current_price_vs_bull_fair_value_pct=result.current_price_vs_bull_fair_value_pct,
+            profit_taking_origin=result.origin,
+            profit_taking_ceiling_price=result.ceiling_price,
+            profit_taking_upside_pct=result.upside_pct,
             trading_unit=trading_unit_feasibility.trading_unit,
             minimum_sellable_shares=trading_unit_feasibility.minimum_sellable_shares,
             partial_sale_executable=trading_unit_feasibility.partial_sale_executable,

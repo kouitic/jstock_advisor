@@ -3,6 +3,7 @@ from decimal import Decimal
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
+    IndustryClassification,
     ProfitTakingIndustrySector,
     RecommendationType,
     StockType,
@@ -165,6 +166,7 @@ def test_gain_and_fair_value_excess_together_trigger_full() -> None:
                 neutral=Decimal("1560"), bull=Decimal("1620"), bear=Decimal("1500"), method_count=3
             ),
             fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
         ),
     )
     assert result.recommendation_type == RecommendationType.FULL_PROFIT_TAKE
@@ -172,6 +174,7 @@ def test_gain_and_fair_value_excess_together_trigger_full() -> None:
     assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
     assert result.fair_value_action_usable is True
     assert result.upside_pct is not None and result.upside_pct < 5.0
+    assert result.origin == "PRICE_POSITION"
 
 
 def test_watch_level_for_moderate_gain() -> None:
@@ -233,6 +236,7 @@ def test_mitigating_factors_downgrade_full_to_partial() -> None:
                 neutral=Decimal("1560"), bull=Decimal("1620"), bear=Decimal("1500"), method_count=3
             ),
             fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
         ),
     )
     assert result.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
@@ -288,12 +292,14 @@ def test_mitigating_factors_floor_does_not_apply_when_no_signal() -> None:
 
 
 def test_sell_price_levels_are_populated_for_partial_and_scoped_to_final_action() -> None:
-    # 含み益率32%×上値余地約8%(コードレビュー対応2026-08、価格マトリクスの
-    # PARTIALゾーン: gain>=20%だが、gain>=25%かつupside<5%というFULL条件は
-    # upside>=5%のため満たさない)でPARTIALへ到達する。
-    # PARTIAL判定では一部利確開始価格・推奨指値候補のみを表示し、FULL専用の
-    # full_profit_consideration_price/reevaluation_price_upsideは表示しない
-    # (要求仕様レビュー対応: final_actionに応じて表示可能な価格フィールドを制限する)。
+    # 含み益率32%×上値余地約7.9%(価格マトリクスのPARTIALゾーン: gain>=20%だが、
+    # gain>=25%かつupside<5%というFULL条件はupside>=5%のため満たさない)で
+    # PARTIALへ到達する(origin=PRICE_POSITION)。
+    # 再コードレビュー対応(2026-08、指摘2・回帰テストA): origin=PRICE_POSITION
+    # 由来のPARTIALでは、売却目安価格はceiling_price(1426円)を超えず、現在値
+    # (1320円)付近の実行可能な指値とする(旧gain+50%の1500円は使わない)。
+    # FULL専用のfull_profit_consideration_price/reevaluation_price_upsideは
+    # 表示しない。
     result = evaluate_profit_taking(
         current_price=Decimal("1320"),  # +32%
         average_purchase_price=Decimal("1000"),
@@ -310,25 +316,31 @@ def test_sell_price_levels_are_populated_for_partial_and_scoped_to_final_action(
                 neutral=Decimal("1300"), bull=Decimal("1426"), bear=Decimal("1200"), method_count=3
             ),
             fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
         ),
     )
     assert result.final_action == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.origin == "PRICE_POSITION"
     assert result.fair_value_action_usable is True
+    assert result.ceiling_price == Decimal("1426")
     prices = result.sell_prices
-    assert prices.partial_profit_start_price is not None
-    assert prices.partial_profit_start_price.price == Decimal("1300")
     assert prices.recommended_limit_price is not None
-    assert prices.recommended_limit_price.price == Decimal("1500")
-    assert prices.recommended_limit_price.price_low is not None
-    assert prices.recommended_limit_price.price_high is not None
-    assert prices.recommended_limit_price.price_low < prices.recommended_limit_price.price_high
+    assert prices.recommended_limit_price.price == Decimal("1320")
+    assert prices.recommended_limit_price.price <= result.ceiling_price
+    assert prices.recommended_limit_price.basis.value == "IMMEDIATE_EXECUTION_REFERENCE"
     assert prices.full_profit_consideration_price is None
     assert prices.reevaluation_price_upside is None
     assert prices.immediate_execution_price is None
 
 
 def test_full_profit_take_shows_full_and_immediate_price_fields() -> None:
-    # 投資前提が明確に崩れた、という強い条件でFULLへ到達させる(gain単独ではない)。
+    # 投資前提が明確に崩れた、という強い条件でFULLへ到達させる(gain単独ではない、
+    # origin=FUNDAMENTAL_CRITICAL_RISK)。
+    # 再コードレビュー対応(2026-08、指摘2・回帰テストC): 現在値(1600円)が
+    # ceiling_price(1500円)を既に超過している場合、全株利確検討価格・即時執行
+    # 目安のいずれも現在値付近を優先し、旧gain+40%等の遠い未来値(2100円)は
+    # 使わない。FUNDAMENTAL_CRITICAL_RISK由来は将来の利益目標ではなく現在値
+    # 付近の実行目安を優先する。
     result = evaluate_profit_taking(
         current_price=Decimal("1600"),
         average_purchase_price=Decimal("1000"),
@@ -341,27 +353,30 @@ def test_full_profit_take_shows_full_and_immediate_price_fields() -> None:
         mitigating_inputs=MitigatingFactorInputs(),
         config=_CONFIG.profit_taking,
         condition_inputs=ProfitTakingConditionInputs(
-            fair_value_range=_degenerate_fair_value_range(Decimal("1500")),
+            fair_value_range=_degenerate_fair_value_range(Decimal("1500"), method_count=3),
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
             investment_premise_broken=True,
         ),
     )
     assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
+    assert result.origin == "FUNDAMENTAL_CRITICAL_RISK"
+    assert result.ceiling_price == Decimal("1500")
     prices = result.sell_prices
     assert prices.full_profit_consideration_price is not None
-    assert prices.full_profit_consideration_price.price == Decimal("2100")
-    # 一部利確開始価格(1300円)は現在値(1600円)を下回っているためimmediate扱いになりうるが、
-    # PARTIAL専用のrecommended_limit_priceはFULL判定でも指値候補として妥当なため表示される。
-    assert prices.partial_profit_start_price is not None
+    assert prices.full_profit_consideration_price.price == Decimal("1600")
+    assert prices.immediate_execution_price is not None
+    assert prices.immediate_execution_price.price == Decimal("1600")
 
 
 def test_full_profit_take_price_excludes_unusable_fair_value() -> None:
     # LINE通知/監査分離のコードレビュー対応回帰テスト(最重要修正)。
     # test_full_profit_take_shows_full_and_immediate_price_fieldsと同一の入力だが、
-    # 適正価格がusable_for_trading_judgment=Falseの場合、判定ロジック側は既に
-    # この適正価格を無視している(level_fv=HOLD)にもかかわらず、旧実装は目安価格
-    # 構成時だけ無条件にbullを使い、2100円という「判定には使わないと決めた適正
-    # 価格」由来の値を提示してしまっていた。新実装では取得単価ベースの候補
-    # (gain_full_price=1500円)のみが使われることを確認する。
+    # 適正価格がusable_for_trading_judgment=Falseの場合、ceiling_priceは利用不能
+    # (None)になる。再コードレビュー対応(2026-08、指摘2)後は、ceiling_price
+    # 利用不能時は取得単価ベースの旧候補(gain_full_price等)へもフォールバック
+    # せず、現在値付近を優先する(FUNDAMENTAL_CRITICAL_RISK由来は将来の利益目標
+    # ではなく現在値付近の実行目安を優先する)。
     result = evaluate_profit_taking(
         current_price=Decimal("1600"),
         average_purchase_price=Decimal("1000"),
@@ -379,11 +394,10 @@ def test_full_profit_take_price_excludes_unusable_fair_value() -> None:
         ),
     )
     assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
+    assert result.ceiling_price is None
     prices = result.sell_prices
     assert prices.full_profit_consideration_price is not None
-    assert prices.full_profit_consideration_price.price == Decimal("1500")
-    # 全株利確条件は取得単価ベースの候補(1500円)のみで成立しており、既に現在値
-    # (1600円)を下回っているため、即時執行目安として現在値が提示される。
+    assert prices.full_profit_consideration_price.price == Decimal("1600")
     assert prices.immediate_execution_price is not None
     assert prices.immediate_execution_price.price == Decimal("1600")
 
@@ -916,6 +930,20 @@ def test_benefit_eligible_reevaluation_price_none_when_value_unavailable() -> No
 
 
 def test_benefit_eligible_reevaluation_price_uses_total_yield() -> None:
+    # 再コードレビュー対応(2026-08、指摘2): reevaluation_price_upsideは
+    # ceiling-aware origin(PRICE_POSITION/FAIR_VALUE_STRONG/FUNDAMENTAL_
+    # CRITICAL_RISK)のFULLでは算出しない(ceiling_priceを大きく超える未来値に
+    # なりうるため)。このテストはreevaluation_price_upsideの算出式自体
+    # (総合利回り/配当利回りの選択)を検証したいので、非価格系の独立条件
+    # (総合利回り大幅低下+株価トレンドの強い悪化)2件でFULLへ到達させる
+    # (origin=OTHER_CONDITIONS)。
+    momentum = MomentumSnapshot(
+        trend_classification=TrendClassification.STRONG_DOWNTREND,
+        trend_evaluable=True,
+        price_history_aligned=True,
+        price_history_has_future_bars=False,
+        confidence=ConfidenceLevel.MEDIUM,
+    )
     result = evaluate_profit_taking(
         current_price=Decimal("637"),
         average_purchase_price=Decimal("578"),
@@ -928,13 +956,15 @@ def test_benefit_eligible_reevaluation_price_uses_total_yield() -> None:
         mitigating_inputs=MitigatingFactorInputs(),
         config=_CONFIG.profit_taking,
         condition_inputs=ProfitTakingConditionInputs(
-            investment_premise_broken=True,
+            momentum=momentum,
             fair_value_range=_degenerate_fair_value_range(Decimal("498")),
         ),
         annual_benefit_value_at_min_lot=Decimal("3000"),
         benefit_min_shares_required=100,
         is_benefit_eligible=True,
     )
+    assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
+    assert result.origin == "OTHER_CONDITIONS"
     p = result.sell_prices.reevaluation_price_upside
     assert p is not None
     assert p.basis_type is not None
@@ -942,6 +972,17 @@ def test_benefit_eligible_reevaluation_price_uses_total_yield() -> None:
 
 
 def test_non_benefit_stock_reevaluation_price_uses_dividend_yield_only() -> None:
+    # 再コードレビュー対応(2026-08、指摘2): test_benefit_eligible_reevaluation_
+    # price_uses_total_yieldと同様、ceiling-aware originを避けて非価格系の独立
+    # 条件2件(総合利回り大幅低下+株価トレンドの強い悪化)でFULLへ到達させる
+    # (origin=OTHER_CONDITIONS)。
+    momentum = MomentumSnapshot(
+        trend_classification=TrendClassification.STRONG_DOWNTREND,
+        trend_evaluable=True,
+        price_history_aligned=True,
+        price_history_has_future_bars=False,
+        confidence=ConfidenceLevel.MEDIUM,
+    )
     result = evaluate_profit_taking(
         current_price=Decimal("1000"),
         average_purchase_price=Decimal("900"),
@@ -954,11 +995,13 @@ def test_non_benefit_stock_reevaluation_price_uses_dividend_yield_only() -> None
         mitigating_inputs=MitigatingFactorInputs(),
         config=_CONFIG.profit_taking,
         condition_inputs=ProfitTakingConditionInputs(
-            investment_premise_broken=True,
+            momentum=momentum,
             fair_value_range=_degenerate_fair_value_range(Decimal("900")),
         ),
         is_benefit_eligible=False,
     )
+    assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
+    assert result.origin == "OTHER_CONDITIONS"
     p = result.sell_prices.reevaluation_price_upside
     assert p is not None
     assert p.basis_type is not None
@@ -1128,9 +1171,11 @@ def test_price_position_ceiling_blocked_for_unknown_industry_sector() -> None:
 
 
 def test_price_position_ceiling_allowed_for_general_industry_sector() -> None:
-    # B. GENERAL(業種別モデル未対応でも汎用PER/PBR/配当利回りモデルの前提自体は
-    # 成り立つ業種)は、industry_model_applied=Falseでも他の信頼性ゲート
-    # (手法数・spread・最新決算反映等)を満たせばceiling_priceを使用できる。
+    # B. GENERAL_CORPORATE(業種別モデル未対応でも汎用PER/PBR/配当利回りモデルの
+    # 前提自体は成り立つと明確に判定できた業種)は、industry_model_applied=False
+    # でも他の信頼性ゲート(手法数・spread・最新決算反映等)を満たせばceiling_price
+    # を使用できる(再コードレビュー対応2026-08、指摘5: financial_industry.pyの
+    # IndustryClassificationで判定する)。
     result = evaluate_profit_taking(
         current_price=Decimal("1600"),  # +60%
         average_purchase_price=Decimal("1000"),
@@ -1147,6 +1192,7 @@ def test_price_position_ceiling_allowed_for_general_industry_sector() -> None:
             fair_value_reflects_latest_earnings=True,
             industry_sector=ProfitTakingIndustrySector.GENERAL,
             industry_model_applied=False,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
         ),
     )
     assert result.fair_value_action_usable is True
@@ -1155,7 +1201,8 @@ def test_price_position_ceiling_allowed_for_general_industry_sector() -> None:
 
 def test_price_position_ceiling_blocked_for_financial_industry_without_model() -> None:
     # C. 銀行等(汎用モデルの前提が成り立ちにくい業種)は、業種別モデル適用済み
-    # (industry_model_applied=True)でない限りceiling_priceを使用できない。
+    # (industry_model_applied=True)でない限りceiling_priceを使用できない
+    # (再コードレビュー対応2026-08、指摘5: IndustryClassification.FINANCIALで判定)。
     result = evaluate_profit_taking(
         current_price=Decimal("1600"),  # +60%
         average_purchase_price=Decimal("1000"),
@@ -1172,10 +1219,94 @@ def test_price_position_ceiling_blocked_for_financial_industry_without_model() -
             fair_value_reflects_latest_earnings=True,
             industry_sector=ProfitTakingIndustrySector.BANKING,
             industry_model_applied=False,
+            industry_classification=IndustryClassification.FINANCIAL,
         ),
     )
     assert result.fair_value_action_usable is False
     assert result.recommendation_type == RecommendationType.WATCH
+
+
+def test_price_position_ceiling_blocked_for_insurance_and_securities_industry() -> None:
+    # 再コードレビュー対応(2026-08、指摘5・回帰テスト): profit_taking_industry.py
+    # (銀行・リース金融のみ識別)では保険・証券会社等を金融業として識別できず
+    # generic ceilingを利用可能にしてしまう不備があった。financial_industry.py
+    # ベースのIndustryClassification.FINANCIALであれば、保険・証券会社も
+    # industry_model_applied=Trueでない限りceiling_priceを使用できないことを確認する。
+    for classification in (
+        IndustryClassification.FINANCIAL,
+        IndustryClassification.UNKNOWN,
+    ):
+        result = evaluate_profit_taking(
+            current_price=Decimal("1600"),  # +60%
+            average_purchase_price=Decimal("1000"),
+            shares=100,
+            total_purchase_amount=Decimal("100000"),
+            cumulative_dividend_received=Decimal("0"),
+            cumulative_benefit_value_received=Decimal("0"),
+            current_total_yield_pct=4.0,
+            forecast_annual_dividend_per_share=Decimal("40"),
+            mitigating_inputs=MitigatingFactorInputs(),
+            config=_CONFIG.profit_taking,
+            condition_inputs=ProfitTakingConditionInputs(
+                fair_value_range=_fair_value_range(**_CEILING_FV_RANGE_KWARGS),
+                fair_value_reflects_latest_earnings=True,
+                industry_sector=ProfitTakingIndustrySector.GENERAL,
+                industry_model_applied=False,
+                industry_classification=classification,
+            ),
+        )
+        assert result.fair_value_action_usable is False, classification
+        assert result.ceiling_price is None, classification
+
+
+def test_classify_industry_identifies_insurance_and_securities_as_financial() -> None:
+    # 再コードレビュー対応(2026-08、指摘5): financial_industry.pyのclassify_industry()
+    # が保険・証券会社をFINANCIALとして識別することを確認する(profit_taking_service.py
+    # がこの分類結果をceilingゲートへ渡す前提の単体確認)。
+    from jstock_advisor.domain.classification.financial_industry import classify_industry
+
+    insurance = classify_industry("Financial Services", "Insurance - Life")
+    assert insurance.classification == IndustryClassification.FINANCIAL
+
+    securities = classify_industry("Financial Services", "Capital Markets")
+    assert securities.classification == IndustryClassification.FINANCIAL
+
+
+def test_continuous_dividend_increase_no_longer_blocks_ceiling_usage() -> None:
+    # 再コードレビュー対応(2026-08、指摘4): has_strong_counter_material
+    # (今期増配または2年以上連続増配)は、以前はfair_value_action_usableを
+    # 直接Falseにしていた(ceiling利用禁止とmitigating layerでの二重softening)。
+    # 修正後は、Fair Value自体の品質ゲート(手法数・spread・最新決算反映・
+    # 業種)を満たせばfair_value_action_usable=Trueとなり、連続増配等の
+    # 「売らずに持つ合理性」はmitigating layerでのみ判定を弱める。
+    result = evaluate_profit_taking(
+        current_price=Decimal("1280"),  # +28%、上値余地約3%(FULL上限5%未満)
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(continuous_dividend_increase_years=3),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=_fair_value_range(
+                neutral=Decimal("1250"), bull=Decimal("1318"), bear=Decimal("1200"), method_count=3
+            ),
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+            has_strong_counter_material=True,  # 3年連続増配 -> 反対材料あり
+        ),
+    )
+    # ceiling利用可否は品質ゲートのみで判定され、有効なまま(修正前はFalseだった)。
+    assert result.fair_value_action_usable is True
+    assert result.ceiling_price == Decimal("1318")
+    # raw FULLはmitigating layer(連続増配)で1段階弱められPARTIALになるが、
+    # origin floorによりPARTIAL未満へは落ちない(mitigatingでのsoftening自体は
+    # 引き続き有効、二重計上ではなくmitigating layerに一本化されたことの確認)。
+    assert result.final_action == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.mitigating_factors_applied
 
 
 def test_origin_floor_price_position_full_survives_mitigating_and_timing_combined() -> None:
@@ -1207,6 +1338,7 @@ def test_origin_floor_price_position_full_survives_mitigating_and_timing_combine
                 neutral=Decimal("1250"), bull=Decimal("1318"), bear=Decimal("1200"), method_count=3
             ),
             fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
         ),
     )
     assert result.upside_pct is not None and result.upside_pct < 5.0
@@ -1214,6 +1346,10 @@ def test_origin_floor_price_position_full_survives_mitigating_and_timing_combine
     assert result.timing_action == TimingAction.WAIT_UPTREND_CONTINUES
     assert result.final_action != RecommendationType.WATCH
     assert result.final_action == RecommendationType.PARTIAL_PROFIT_TAKE
+    # 再コードレビュー対応(2026-08、指摘6): origin floorはmitigating適用直後の
+    # fundamental_levelにも適用されるため、fundamental_actionがfinal_actionより
+    # 弱く見える矛盾(fundamental=WATCH・final=PARTIAL)が生じない。
+    assert result.fundamental_action == RecommendationType.PARTIAL_PROFIT_TAKE
 
 
 def test_fundamental_critical_risk_exempt_from_all_softening() -> None:

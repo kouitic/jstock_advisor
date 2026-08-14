@@ -1756,21 +1756,18 @@ class LineNotificationService:
         if category_for_action_gate is NotificationCategory.NOT_NOTIFIABLE:
             return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
 
-        # LINE通知アクション限定化(2026-08、コードレビュー対応): WATCH/MANUAL_REVIEW
-        # (証拠品質系の要確認を含む)は、データ品質チェック・安全弁通知より前に
-        # ゲートする。「送らない」という判定自体もNON_ACTIONABLEとしてAuditから
-        # 追跡できるようにする(黙って握りつぶさない)。
-        if category_for_action_gate in _NON_ACTIONABLE_CATEGORIES:
-            return NotificationOutcome(
-                status=NotificationStatus.NOT_REQUIRED,
-                sent=False,
-                block_category=EligibilityBlockCategory.NON_ACTIONABLE,
-                block_reason="NON_ACTIONABLE",
-            )
-
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         previous = self._previous_recommendation(recommendation.stock_code, notification_type)
 
+        # 再コードレビュー対応(2026-08、指摘3): NON_ACTIONABLEゲートは、内部論理・
+        # 計算異常の安全弁(notify_manual_review_required)より後に評価する。
+        # WATCH/MANUAL_REVIEWをデータ品質チェックより前でゲートすると、
+        # _check_review_retains_immediate_execution_price・_check_watch_
+        # immediate_execution等の安全弁チェック自体が構造的に到達不能になり、
+        # 「安全弁は維持する」という合意に反する。証拠品質系の違反
+        # (is_evidence_quality_issue=True、manual_review_required=False)は
+        # 従来どおりLINE安全弁を発火させず、NON_ACTIONABLE経由でAudit記録のみに
+        # 留める。
         alert, requires_manual_review = self._check_data_quality(
             recommendation, previous, notification_type, now
         )
@@ -1784,8 +1781,27 @@ class LineNotificationService:
                 )
             if not requires_manual_review:
                 self.notify_data_quality_alert(alert, now)
+            if category_for_action_gate in _NON_ACTIONABLE_CATEGORIES:
+                return NotificationOutcome(
+                    status=NotificationStatus.NOT_REQUIRED,
+                    sent=False,
+                    block_category=EligibilityBlockCategory.NON_ACTIONABLE,
+                    block_reason="NON_ACTIONABLE",
+                )
             return NotificationOutcome(
                 status=NotificationStatus.NOT_REQUIRED, sent=False, data_quality_blocked=True
+            )
+
+        # LINE通知アクション限定化(2026-08、コードレビュー対応): WATCH/MANUAL_REVIEW
+        # (証拠品質系の要確認を含む)は、内部論理矛盾が検出されなかった場合のみ
+        # ここでゲートする。「送らない」という判定自体もNON_ACTIONABLEとしてAuditから
+        # 追跡できるようにする(黙って握りつぶさない)。
+        if category_for_action_gate in _NON_ACTIONABLE_CATEGORIES:
+            return NotificationOutcome(
+                status=NotificationStatus.NOT_REQUIRED,
+                sent=False,
+                block_category=EligibilityBlockCategory.NON_ACTIONABLE,
+                block_reason="NON_ACTIONABLE",
             )
 
         cooldown = self.check_trade_cooldown_eligibility(recommendation, now)
@@ -2153,6 +2169,12 @@ class LineNotificationService:
         consistency_result = validate_recommendation(
             recommendation,
             self._config.data_validation.consistency_validation,
+            # 再コードレビュー対応(2026-08、指摘1): 旧来の含み益率単独判定(既定50%)
+            # ではなく、上値余地マトリクスのFULL閾値(既定25%)を渡す。
+            # PRICE_POSITION/FAIR_VALUE_STRONG/FUNDAMENTAL_CRITICAL_RISK origin由来
+            # の場合はorigin自体で本チェックをスキップするため、この値は主に
+            # OTHER_CONDITIONS origin(価格系条件を伴わないFULL)向けの安全網となる。
+            gain_full_threshold_pct=self._config.profit_taking.price_position.full_gain_pct,
             buy_decision_config=self._config.buy_decision,
         )
         for violation in consistency_result.violations:
