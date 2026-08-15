@@ -32,10 +32,12 @@ candidate_universe:
   listed_issues_max_stale_hours: 1080  # 45日
   jpx400_max_stale_hours: 2160  # 90日
 
-# shadow同値性検証(2026-08、150銘柄でDTO差分0件・業務判定差分0件を確認)を経て
-# lightweightへ切替。multi_style_monitoringが参照するフィールドのみを取得する
-# 高速版(計画Part B-2)。stock_snapshotは後方互換・比較用にコードを残す。
-screening_data_provider: "lightweight"
+# 2026-08-16: lightweight本番切替後、本番300銘柄実測でdata_fetch p50が
+# stock_snapshot比で約55倍(560ms→30,680ms)悪化することが判明したため
+# stock_snapshotへロールバック。業務判定(DTO・合否・スコア・除外理由)は
+# shadow検証・本番実行とも完全一致しており、性能面のみの問題。原因調査中
+# (詳細はdocs/operations_manual.md・関連GitHub Issue参照)。
+screening_data_provider: "stock_snapshot"
 
 # v1では単一文字列。将来は複数Policyのlist化を検討する。
 # ウォッチリスト自動追加基準の再設計(2026-08)で本番既定をmulti_style_monitoringへ
