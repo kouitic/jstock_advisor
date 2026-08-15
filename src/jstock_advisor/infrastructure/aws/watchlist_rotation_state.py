@@ -42,6 +42,16 @@ def get_rotation_state(
     return _store(store_dir).get(rotation_id)
 
 
+def get_rotation_state_consistent(
+    rotation_id: str = DEFAULT_ROTATION_ID, store_dir: Path | None = None
+) -> RotationState | None:
+    """rotation commit失敗時の監査ログ用(observed_versionの記録、本番検証
+    2026-08対応)。結果整合性読み取りによる一時的な不一致を避けるため強い
+    整合性で読む(通常のget_rotation_state()を一律これへ置き換えない)。
+    """
+    return _store(store_dir).get_consistent(rotation_id)
+
+
 def create_rotation_state_if_absent(
     now: dt.datetime,
     rotation_id: str = DEFAULT_ROTATION_ID,
@@ -149,37 +159,58 @@ def _commit_dynamodb(
     now: dt.datetime,
     rotation_id: str,
 ) -> bool:
+    """2026-08修正(本番検証で発覚): 以前はpointer_version等をトップレベルの
+    ネイティブ属性として直接update_itemしていたが、このテーブルの実際の
+    アイテムはDynamoDbCollectionStore(get_rotation_state()/
+    create_rotation_state_if_absent()が使う)が書き込む「PK + data(JSON文字列)」
+    スキーマ(dynamodb_store.py:_to_item())であり、トップレベルにpointer_version
+    属性が存在しない。このためConditionExpressionが常にConditionalCheckFailed
+    Exceptionとなり、rotation commitが恒久的に失敗していた(既存本番state・
+    移行不要)。
+
+    修正後は同じ「PK + data」スキーマに合わせ、data属性全体の完全一致を
+    条件とする条件付き更新でCASを実現する(2クライアントが同時に同じ
+    data文字列を読んでいた場合のみ、片方だけが成功する)。
+    """
     import boto3
     from botocore.exceptions import ClientError
 
     table: Any = boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
-    now_iso = now.isoformat()
+    response = table.get_item(Key={"rotation_id": rotation_id}, ConsistentRead=True)
+    item = response.get("Item")
+    if item is None:
+        return False
+
+    current_data = item["data"]
+    current = RotationState.model_validate_json(current_data)
+    if current.pointer_version != expected_version:
+        return False
+
+    updates: dict[str, Any] = {
+        "pointer_version": expected_version + 1,
+        "last_market_segment": new_last_market_segment,
+        "last_stock_code": new_last_stock_code,
+        "last_completed_at": now,
+    }
     if wrapped:
-        update_expression = (
-            "SET pointer_version = pointer_version + :one, "
-            "last_market_segment = :segment, last_stock_code = :code, "
-            "last_completed_at = :now, cycle_number = cycle_number + :one, "
-            "cycle_progress_selected_count = :selected_count, last_started_at = :now"
-        )
+        updates["cycle_number"] = current.cycle_number + 1
+        updates["cycle_progress_selected_count"] = selected_count
+        updates["last_started_at"] = now
     else:
-        update_expression = (
-            "SET pointer_version = pointer_version + :one, "
-            "last_market_segment = :segment, last_stock_code = :code, "
-            "last_completed_at = :now, "
-            "cycle_progress_selected_count = cycle_progress_selected_count + :selected_count"
+        updates["cycle_progress_selected_count"] = (
+            current.cycle_progress_selected_count + selected_count
         )
+    new_state = current.model_copy(update=updates)
+
     try:
         table.update_item(
             Key={"rotation_id": rotation_id},
-            ConditionExpression="pointer_version = :expected_version",
-            UpdateExpression=update_expression,
+            ConditionExpression="#data = :expected_data",
+            UpdateExpression="SET #data = :new_data",
+            ExpressionAttributeNames={"#data": "data"},
             ExpressionAttributeValues={
-                ":expected_version": expected_version,
-                ":segment": new_last_market_segment,
-                ":code": new_last_stock_code,
-                ":now": now_iso,
-                ":one": 1,
-                ":selected_count": selected_count,
+                ":expected_data": current_data,
+                ":new_data": new_state.model_dump_json(),
             },
         )
         return True

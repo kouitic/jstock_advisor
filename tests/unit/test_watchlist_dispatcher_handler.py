@@ -17,7 +17,9 @@ import pytest
 from jstock_advisor.lambda_handlers import watchlist_dispatcher_handler as handler_module
 
 
-def _fake_config(*, candidate_limit: int | None) -> SimpleNamespace:
+def _fake_config(
+    *, candidate_limit: int | None, rotation_enabled: bool = True
+) -> SimpleNamespace:
     watchlist_screening = SimpleNamespace(
         enabled=True,
         weekly_schedule_enabled=True,
@@ -25,6 +27,8 @@ def _fake_config(*, candidate_limit: int | None) -> SimpleNamespace:
         screening_policy="high_dividend_financial_health",
         staged_rollout=SimpleNamespace(candidate_limit=candidate_limit, market_segment_filter=None),
         batch_record_ttl_hours=72,
+        rotation=SimpleNamespace(enabled=rotation_enabled),
+        batch_processing_timeout_hours=24,
     )
     return SimpleNamespace(watchlist_screening=watchlist_screening)
 
@@ -119,3 +123,123 @@ def test_full_market_screening_guard_does_not_apply_when_candidate_limit_is_set(
 
     assert len(lease_calls) == 1
     assert result == {"skipped": "lease_not_acquired"}
+
+
+# --- 本番検証2026-08対応: rotation window二重dispatch防止leaseのテスト -----------
+
+
+def test_new_candidate_screening_skips_when_rotation_lease_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NEW_CANDIDATE_SCREENING + rotation.enabled=trueで、rotation dispatch
+    leaseが取得できない場合、候補選択・SQS投入を一切行わずskipすること。"""
+    monkeypatch.delenv("ALLOW_FULL_MARKET_SCREENING", raising=False)
+    monkeypatch.setattr(
+        handler_module,
+        "load_config",
+        lambda: _fake_config(candidate_limit=300, rotation_enabled=True),
+    )
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", lambda *a, **kw: True)
+
+    audit_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        handler_module, "record_batch_audit", lambda **kw: audit_calls.append(kw)
+    )
+
+    lease_calls: list[tuple[Any, ...]] = []
+
+    def _fake_try_acquire_rotation_lease(*args: Any, **kwargs: Any) -> bool:
+        lease_calls.append(args)
+        return False
+
+    monkeypatch.setattr(
+        handler_module,
+        "try_acquire_rotation_dispatch_lease",
+        _fake_try_acquire_rotation_lease,
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "get_rotation_dispatch_lease_status",
+        lambda *a, **kw: (
+            "watchlist-20260815T121027-9dd0e8c7",
+            "2026-08-15T12:10:27",
+            "2026-08-16T12:10:27",
+        ),
+    )
+
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("candidate selection must not run when the rotation lease is unavailable")
+
+    monkeypatch.setattr(handler_module, "_collect_new_candidate_targets", _fail_if_called)
+    monkeypatch.setattr(handler_module, "set_watchlist_batch_total", _fail_if_called)
+
+    result = handler_module.handler({}, object())
+
+    assert len(lease_calls) == 1
+    assert result == {"skipped": "rotation_dispatch_in_progress"}
+    assert len(audit_calls) == 1
+    output_values = audit_calls[0]["output_values"]
+    assert output_values["execution_result"] == "rotation_dispatch_already_in_progress"
+    assert output_values["block_reason"] == "ROTATION_DISPATCH_ALREADY_IN_PROGRESS"
+    assert output_values["active_batch_id"] == "watchlist-20260815T121027-9dd0e8c7"
+    assert output_values["rotation_id"] == "default"
+
+
+def test_watchlist_maintenance_is_not_blocked_by_rotation_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WATCHLIST_MAINTENANCEはNEW_CANDIDATE_SCREENING用のrotation dispatch
+    leaseの対象外(job_type分岐でtry_acquire_rotation_dispatch_lease自体が
+    呼ばれないこと)。"""
+    monkeypatch.delenv("ALLOW_FULL_MARKET_SCREENING", raising=False)
+    monkeypatch.setattr(
+        handler_module,
+        "load_config",
+        lambda: _fake_config(candidate_limit=300, rotation_enabled=True),
+    )
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", lambda *a, **kw: True)
+    monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
+
+    def _fail_if_called(*args: Any, **kwargs: Any) -> bool:
+        pytest.fail("rotation dispatch lease must not be touched for WATCHLIST_MAINTENANCE")
+
+    monkeypatch.setattr(
+        handler_module, "try_acquire_rotation_dispatch_lease", _fail_if_called
+    )
+    monkeypatch.setattr(
+        handler_module, "_collect_maintenance_targets", lambda: ([], {})
+    )
+
+    result = handler_module.handler({"job_type": "WATCHLIST_MAINTENANCE"}, object())
+
+    assert result == {"dispatched": 0}
+
+
+def test_new_candidate_screening_not_gated_when_rotation_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rotation.enabled=false(固定スライスへのフォールバック)では、rotation
+    dispatch leaseを取得しようとしないこと(候補選択がrotation windowに
+    依存しないため対象外)。"""
+    monkeypatch.delenv("ALLOW_FULL_MARKET_SCREENING", raising=False)
+    monkeypatch.setattr(
+        handler_module,
+        "load_config",
+        lambda: _fake_config(candidate_limit=300, rotation_enabled=False),
+    )
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", lambda *a, **kw: True)
+    monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
+
+    def _fail_if_called(*args: Any, **kwargs: Any) -> bool:
+        pytest.fail("rotation dispatch lease must not be touched when rotation.enabled=false")
+
+    monkeypatch.setattr(
+        handler_module, "try_acquire_rotation_dispatch_lease", _fail_if_called
+    )
+    monkeypatch.setattr(
+        handler_module, "_collect_new_candidate_targets", lambda *a, **kw: ([], {})
+    )
+
+    result = handler_module.handler({}, object())
+
+    assert result == {"dispatched": 0}

@@ -306,6 +306,85 @@ def test_reconciler_processes_same_batch_twice_without_duplicate_side_effects(
     assert batch["status"] == WatchlistBatchStatus.COMPLETED.value
 
 
+# --- 本番検証2026-08対応: DISPATCH_FAILED/TIMED_OUT時のrotation dispatch lease解放 ---
+
+
+def test_reconciler_releases_rotation_lease_when_dispatching_times_out(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DISPATCHINGのままタイムアウトしたバッチをDISPATCH_FAILEDへ遷移させる際、
+    rotation dispatch leaseを明示的に解放すること(_finish_batch()のfinalize
+    経路に一切到達しないため、ここで解放しないと次回dispatchがlease_expires_at
+    の自然失効までブロックされ続ける)。"""
+    far_past = dt.datetime(2000, 1, 1, tzinfo=dt.UTC)
+    batch_tracker.try_acquire_dispatch_lease("batch-stuck", "dispatcher", far_past, 360, 72)
+    batch = batch_tracker.get_watchlist_batch("batch-stuck")
+    assert batch is not None
+    assert batch["status"] == WatchlistBatchStatus.DISPATCHING.value
+
+    release_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "release_rotation_dispatch_lease",
+        lambda rotation_id, batch_id: release_calls.append((rotation_id, batch_id)),
+    )
+
+    result = handler_module.handler({}, object())
+
+    assert result["dispatch_failed"] == 1
+    assert release_calls == [("default", "batch-stuck")]
+    batch_after = batch_tracker.get_watchlist_batch("batch-stuck")
+    assert batch_after is not None
+    assert batch_after["status"] == WatchlistBatchStatus.DISPATCH_FAILED.value
+
+
+def test_process_timeout_finalizing_releases_rotation_lease_on_timed_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TIMED_OUTは_finish_batch()/_maybe_commit_rotation()のfinalize経路を
+    使わないため(モジュールdocstring参照)、_process_timeout_finalizing自身が
+    transition_timeout_finalizing_to_timed_out直後にrotation dispatch leaseを
+    明示的に解放すること。17節の実際のタイムアウト再計算ロジック(FAILED確定・
+    件数照合)は別途batch_tracker側で検証済みのためここではモックし、今回追加した
+    解放呼び出しの発生順序のみを検証する。"""
+    fake_result = batch_tracker.TimeoutFinalizationPassResult(
+        all_records=[], terminal_count=1, total=1, newly_failed_count=1
+    )
+    monkeypatch.setattr(
+        handler_module, "run_timeout_finalization_pass", lambda *a, **kw: fake_result
+    )
+    monkeypatch.setattr(
+        handler_module, "set_timeout_finalize_completed_count", lambda *a, **kw: True
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "get_watchlist_batch",
+        lambda batch_id: {"started_at": _NOW.isoformat()},
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "compute_batch_metrics",
+        lambda records: {"processed_count": 1},
+    )
+    monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
+
+    call_order: list[str] = []
+    monkeypatch.setattr(
+        handler_module,
+        "transition_timeout_finalizing_to_timed_out",
+        lambda batch_id, now: call_order.append("transition"),
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "release_rotation_dispatch_lease",
+        lambda rotation_id, batch_id: call_order.append(f"release:{rotation_id}:{batch_id}"),
+    )
+
+    handler_module._process_timeout_finalizing("batch-timed-out", _NOW, 500, _fake_config())
+
+    assert call_order == ["transition", "release:default:batch-timed-out"]
+
+
 def test_reconciler_retries_notification_failed_without_rewriting_watchlist(
     dynamo, _stub_expensive_dependencies: SimpleNamespace
 ) -> None:
