@@ -141,6 +141,14 @@ def _fake_config(
         scoring=_fake_scoring_config(),
         thresholds=_fake_thresholds_config(),
         stock_display_name=SimpleNamespace(jpx_name_negative_cache_ttl_seconds=60),
+        auto_removal=SimpleNamespace(
+            readd_cooldown_days=30,
+            minimum_age_days=90,
+            consecutive_not_qualified_required=3,
+            minimum_not_qualified_span_days=28,
+            stale_recheck_days=30,
+            maximum_unconfirmed_days=180,
+        ),
     )
     return SimpleNamespace(watchlist_screening=watchlist_screening)
 

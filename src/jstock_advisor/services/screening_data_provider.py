@@ -2,10 +2,20 @@
 
 BUY判定パイプラインが使う`stock_snapshot_service.build_stock_snapshot()`は
 適正価格算出等スクリーニングには不要な計算も含む重い処理だが、既存データ取得
-経路を再利用するという方針(要求仕様§2)に基づき、v1ではこれをそのまま利用する。
-将来より軽量な実装(LightweightScreeningDataProvider)へ差し替える際、この
-ファイル内の変更のみで完結するよう、build_stock_snapshot()の呼び出しは
-StockSnapshotScreeningDataProviderの1箇所に集約する。
+経路を再利用するという方針(要求仕様§2)に基づき、v1ではこれをそのまま利用する
+(`StockSnapshotScreeningDataProvider`)。
+
+ウォッチリスト自動運用の改善(高速化、計画Part B-2)で、`LightweightScreeningDataProvider`
+を追加した。`multi_style_monitoring`Policyが実際に参照する項目のみを取得する
+(株価・財務・配当・平均売買代金20日・開示情報30日の5回のみ。株価ヒストリー・
+ベンチマークヒストリー・Historical Valuation・Fair Value/DCF・Entry/Exit Price
+Range・Market/Sector/Environment・Earnings Surprise/Trend・次回決算日は取得しない)。
+判定ロジックの二重実装を避けるため、`WatchlistScreeningInput`の構築自体は
+両Providerが共通の`_build_screening_input()`を呼ぶ形にし、`classify_stock_type()`・
+`to_seasonally_adjusted_series()`・`has_severe_earnings_decline()`・
+`detect_disclosure_risk_keywords()`・`compute_dividend_yield_pct`/
+`compute_annual_benefit_value`/`compute_benefit_yield_pct`という既存ドメイン層の
+純粋関数(StockSnapshot非依存)をそのまま呼ぶ。
 """
 
 from __future__ import annotations
@@ -17,7 +27,18 @@ from enum import StrEnum
 from typing import Protocol
 
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.classification.stock_type import classify_stock_type
 from jstock_advisor.domain.entities.classification import StockTypeClassification
+from jstock_advisor.domain.entities.common import BenefitUtilityCoefficients, DataSourceReference
+from jstock_advisor.domain.financial_series import to_seasonally_adjusted_series
+from jstock_advisor.domain.screening.rules import detect_disclosure_risk_keywords
+from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
+from jstock_advisor.domain.valuation.yield_calc import (
+    compute_annual_benefit_value,
+    compute_benefit_yield_pct,
+    compute_dividend_yield_pct,
+)
+from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, ShareholderBenefit
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_retry
@@ -99,10 +120,25 @@ class ScreeningDataProvider(Protocol):
     def get_screening_input(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult: ...
 
 
-def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
-    financial = snapshot.financial
-    current_price = snapshot.current_price
-
+def _build_screening_input(
+    *,
+    stock_code: str,
+    financial: FinancialSummary,
+    current_price: Decimal,
+    dividend: DividendInfo,
+    benefit: ShareholderBenefit | None,
+    dividend_yield_pct: float | None,
+    benefit_yield_pct: float | None,
+    next_earnings_date: dt.date | None,
+    stock_type_classification: StockTypeClassification,
+    avg_trading_value: Decimal | None,
+    disclosure_risk_keywords_found: list[str],
+    severe_earnings_decline: bool,
+) -> WatchlistScreeningInput:
+    """`StockSnapshotScreeningDataProvider`/`LightweightScreeningDataProvider`が
+    共通で使う、WatchlistScreeningInput組み立てロジック本体(ロジックの二重実装を
+    避けるため、ここに1箇所だけ存在する)。
+    """
     market_cap: Decimal | None = None
     if financial.shares_outstanding is not None:
         market_cap = financial.shares_outstanding * current_price
@@ -121,18 +157,18 @@ def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
         if getattr(financial, name, None) is None
     ]
 
-    consecutive_increase_years = snapshot.dividend.consecutive_dividend_increase_years
+    consecutive_increase_years = dividend.consecutive_dividend_increase_years
     scoring_values = {
-        "dividend_yield_pct": snapshot.dividend_yield_pct,
+        "dividend_yield_pct": dividend_yield_pct,
         "equity_ratio_pct": financial.equity_ratio_pct,
         "payout_ratio_pct": financial.payout_ratio_pct,
         "consecutive_dividend_increase_years": consecutive_increase_years,
-        "shareholder_benefit_yield_pct": snapshot.benefit_yield_pct,
+        "shareholder_benefit_yield_pct": benefit_yield_pct,
     }
-    # 運用ハードニング第2弾4節: 株主優待制度自体が無い銘柄(snapshot.benefit is None、
+    # 運用ハードニング第2弾4節: 株主優待制度自体が無い銘柄(benefit is None、
     # 市場の大多数を占める)のshareholder_benefit_yield_pct=Noneは「正常に値が
     # 存在しない」ケースであり、データ品質低下(欠損)として数えない。優待はあるが
-    # 利回りが算出できない場合(snapshot.benefit is not None)のみ欠損として扱う。
+    # 利回りが算出できない場合(benefit is not None)のみ欠損として扱う。
     # この区別が無いと、優待の無い銘柄が他に1項目でも欠損した場合に
     # max_missing_fields(既定1)を超えてDATA_INSUFFICIENT除外されてしまう
     # (HighDividendFinancialHealthPolicyの除外判定に影響する既知の不具合の修正)。
@@ -140,11 +176,11 @@ def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
         name
         for name in SCORING_FIELD_NAMES
         if scoring_values[name] is None
-        and not (name == "shareholder_benefit_yield_pct" and snapshot.benefit is None)
+        and not (name == "shareholder_benefit_yield_pct" and benefit is None)
     ]
 
     return WatchlistScreeningInput(
-        stock_code=snapshot.stock_code,
+        stock_code=stock_code,
         stock_name=financial.stock_name,
         security_type=financial.security_type,
         sector=financial.sector,
@@ -160,17 +196,34 @@ def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
         operating_cashflow=financial.operating_cashflow,
         payout_ratio_pct=financial.payout_ratio_pct,
         consecutive_dividend_increase_years=consecutive_increase_years,
-        dividend_yield_pct=snapshot.dividend_yield_pct,
-        shareholder_benefit_exists=snapshot.benefit is not None,
-        shareholder_benefit_yield_pct=snapshot.benefit_yield_pct,
-        is_dividend_cut_announced=snapshot.dividend.is_dividend_cut_announced,
-        is_dividend_omission_announced=snapshot.dividend.is_dividend_omission_announced,
+        dividend_yield_pct=dividend_yield_pct,
+        shareholder_benefit_exists=benefit is not None,
+        shareholder_benefit_yield_pct=benefit_yield_pct,
+        is_dividend_cut_announced=dividend.is_dividend_cut_announced,
+        is_dividend_omission_announced=dividend.is_dividend_omission_announced,
         is_debt_excess=financial.is_debt_excess,
         is_deficit=financial.is_deficit,
         is_going_concern_doubt=financial.is_going_concern_doubt,
-        next_earnings_date=snapshot.next_earnings_date,
+        next_earnings_date=next_earnings_date,
         missing_required_fields=missing_required,
         missing_scoring_fields=missing_scoring,
+        stock_type_classification=stock_type_classification,
+        avg_trading_value=avg_trading_value,
+        disclosure_risk_keywords_found=disclosure_risk_keywords_found,
+        severe_earnings_decline=severe_earnings_decline,
+    )
+
+
+def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
+    return _build_screening_input(
+        stock_code=snapshot.stock_code,
+        financial=snapshot.financial,
+        current_price=snapshot.current_price,
+        dividend=snapshot.dividend,
+        benefit=snapshot.benefit,
+        dividend_yield_pct=snapshot.dividend_yield_pct,
+        benefit_yield_pct=snapshot.benefit_yield_pct,
+        next_earnings_date=snapshot.next_earnings_date,
         stock_type_classification=snapshot.stock_type_classification,
         avg_trading_value=snapshot.avg_trading_value,
         disclosure_risk_keywords_found=snapshot.disclosure_risk_keywords_found,
@@ -226,3 +279,155 @@ class StockSnapshotScreeningDataProvider:
             missing_fields=input_dto.missing_required_fields + input_dto.missing_scoring_fields,
             error_message=None,
         )
+
+
+class LightweightScreeningDataProvider:
+    """計画Part B-2: `multi_style_monitoring`Policyが実際に参照する項目のみを
+    取得する高速版。呼び出しは5回のみ(株価・財務・配当・平均売買代金20日・
+    開示情報30日)+株主優待のローカルレジストリ参照。株価ヒストリー・
+    ベンチマークヒストリー等、build_stock_snapshot()が算出する他の値は
+    一切取得・計算しない。next_earnings_dateは判定に使われないため常にNone。
+    """
+
+    def __init__(self, providers: ProviderBundle, config: AppConfig) -> None:
+        self._providers = providers
+        self._config = config
+
+    def get_screening_input(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:
+        try:
+            retry_result = call_with_rate_limit_retry(
+                lambda: self._fetch_and_build(stock_code, now)
+            )
+        except Exception as exc:  # noqa: BLE001 - 将来のretry判定用にstatusで区別するため意図的に捕捉
+            return ScreeningDataResult(
+                status=ScreeningDataStatus.DATA_ERROR,
+                input=None,
+                missing_fields=[],
+                error_message=str(exc),
+            )
+        if retry_result.error is not None:
+            return ScreeningDataResult(
+                status=ScreeningDataStatus.DATA_ERROR,
+                input=None,
+                missing_fields=[],
+                error_message=str(retry_result.error),
+                is_provider_failure_suspected=retry_result.is_provider_failure_suspected,
+            )
+        assert retry_result.value is not None
+        input_dto, error = retry_result.value
+
+        if input_dto is None:
+            return ScreeningDataResult(
+                status=ScreeningDataStatus.NOT_FOUND,
+                input=None,
+                missing_fields=[],
+                error_message=error,
+            )
+
+        return ScreeningDataResult(
+            status=ScreeningDataStatus.OK,
+            input=input_dto,
+            missing_fields=input_dto.missing_required_fields + input_dto.missing_scoring_fields,
+            error_message=None,
+        )
+
+    def _fetch_and_build(
+        self, stock_code: str, now: dt.datetime
+    ) -> tuple[WatchlistScreeningInput | None, str | None]:
+        snap = self._providers.market_data.get_latest_price(stock_code)
+        if snap is None:
+            return None, "株価データを取得できません"
+
+        financial = self._providers.financial_data.get_financial_summary(stock_code)
+        if financial is None:
+            return None, "財務データを取得できません"
+
+        dividend = self._providers.dividend_data.get_dividend_info(
+            stock_code, fiscal_year_end_month=financial.fiscal_year_end_month
+        )
+        if dividend is None:
+            return None, (
+                "配当データを取得できません"
+                "(データ提供元(yfinance)から取得できなかったか、yfinanceとEDINETの配当額が"
+                "株式分割等で説明できない水準まで乖離しており自動判定できないため除外しています。"
+                "後者の場合、詳細はCloudWatch Logsの該当銘柄のwarningログをご確認ください)"
+            )
+
+        benefit = self._providers.shareholder_benefit.get_shareholder_benefit(stock_code)
+        current_price = snap.close_price
+        avg_trading_value = self._providers.market_data.get_average_trading_value(stock_code, 20)
+        disclosures = self._providers.disclosure.get_disclosures(
+            stock_code, now.date() - dt.timedelta(days=30)
+        )
+
+        coefficients = BenefitUtilityCoefficients(
+            **self._config.scoring.shareholder_benefit_value.utility_coefficients_default.model_dump()
+        )
+        dividend_yield_pct = compute_dividend_yield_pct(
+            dividend.forecast_annual_dividend_per_share, current_price
+        )
+        annual_benefit_value = compute_annual_benefit_value(benefit, coefficients)
+        min_shares_required = benefit.min_shares_required if benefit is not None else 100
+        benefit_yield_pct = compute_benefit_yield_pct(
+            annual_benefit_value, min_shares_required, current_price
+        )
+
+        # multi_style_monitoringのGROWTH判定・severe_earnings_declineが必要とする
+        # 直近四半期営業利益のみを季節調整する(営業CFの季節調整・DCF等、
+        # build_stock_snapshot()の他の用途は不要なため計算しない)。
+        period_ends = [q.quarter_end for q in financial.recent_quarters]
+        raw_operating_incomes = [q.operating_income for q in financial.recent_quarters]
+        adjusted_operating_incomes = to_seasonally_adjusted_series(
+            raw_operating_incomes, period_ends
+        )
+        quarterly_operating_incomes = [v for v in adjusted_operating_incomes if v is not None]
+        severe_earnings_decline = has_severe_earnings_decline(quarterly_operating_incomes)
+
+        data_sources: list[DataSourceReference] = [snap.source, financial.source, dividend.source]
+        if benefit is not None:
+            data_sources.append(benefit.source)
+
+        keywords_found = detect_disclosure_risk_keywords(
+            disclosures, self._config.sell.disclosure_risk_keywords
+        )
+
+        stock_type_classification = classify_stock_type(
+            financial=financial,
+            dividend_yield_pct=dividend_yield_pct,
+            current_price=current_price,
+            quarterly_operating_incomes=quarterly_operating_incomes,
+            disclosures=disclosures,
+            now=now,
+            config=self._config.stock_classification,
+            data_sources=data_sources,
+            dividend=dividend,
+        )
+
+        input_dto = _build_screening_input(
+            stock_code=stock_code,
+            financial=financial,
+            current_price=current_price,
+            dividend=dividend,
+            benefit=benefit,
+            dividend_yield_pct=dividend_yield_pct,
+            benefit_yield_pct=benefit_yield_pct,
+            next_earnings_date=None,
+            stock_type_classification=stock_type_classification,
+            avg_trading_value=avg_trading_value,
+            disclosure_risk_keywords_found=keywords_found,
+            severe_earnings_decline=severe_earnings_decline,
+        )
+        return input_dto, None
+
+
+def build_screening_data_provider(
+    providers: ProviderBundle, config: AppConfig
+) -> ScreeningDataProvider:
+    """`config.watchlist_screening.screening_data_provider`に基づき、実際に
+    使うProviderを生成する(計画Part B-2)。Dispatcher/Worker/CLIの3箇所の
+    生成ロジックをここへ集約する。
+    """
+    provider_name = config.watchlist_screening.screening_data_provider
+    if provider_name == "lightweight":
+        return LightweightScreeningDataProvider(providers, config)
+    return StockSnapshotScreeningDataProvider(providers, config)

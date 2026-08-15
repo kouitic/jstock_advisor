@@ -236,7 +236,7 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, config: SimpleNamespace | Non
     monkeypatch.setattr(cli_module, "build_line_client_from_env", lambda: object())
     monkeypatch.setattr(
         cli_module,
-        "StockSnapshotScreeningDataProvider",
+        "build_screening_data_provider",
         lambda providers, config: _FakeScreeningDataProvider(
             ScreeningDataResult(
                 status=ScreeningDataStatus.OK,

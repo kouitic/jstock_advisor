@@ -66,7 +66,7 @@ from pydantic import TypeAdapter
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
-from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.entities.watchlist import WatchlistItem, WatchlistRemovalHistory
 from jstock_advisor.domain.ranking import RankingCalculator
 from jstock_advisor.domain.signals.watchlist_screening import (
     RankingEntry,
@@ -84,6 +84,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     EXECUTION_RESULT_NORMAL,
     EXECUTION_RESULT_REQUIRED_DATA_QUALITY_DEGRADED,
     EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED,
+    JOB_TYPE_NEW_CANDIDATE_SCREENING,
     NOTIFICATION_OUTCOME_NOT_REQUIRED,
     NOTIFICATION_OUTCOME_SENT,
     NOTIFICATION_OUTCOME_SKIPPED,
@@ -103,6 +104,13 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     try_finalize_if_ready,
     try_retry_finalize,
     try_retry_notification,
+)
+from jstock_advisor.infrastructure.aws.watchlist_rotation_state import (
+    get_rotation_state,
+    try_commit_rotation_advance,
+)
+from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (
+    WatchlistRemovalHistoryRepository,
 )
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
     WatchlistRepository,
@@ -124,13 +132,21 @@ from jstock_advisor.services.watchlist_display_name import (
     StockDisplayNameResolver,
     build_stock_display_name_resolver,
 )
+from jstock_advisor.services.watchlist_maintenance_service import (
+    MaintenanceOutcome,
+    MaintenanceScreeningSummary,
+    evaluate_maintenance_decision,
+)
 from jstock_advisor.services.watchlist_screening_audit import (
     REPOSITORY_RESULT_ADDED,
     REPOSITORY_RESULT_FAILED,
+    REPOSITORY_RESULT_SKIPPED_COOLDOWN,
     REPOSITORY_RESULT_SKIPPED_EXISTING,
     REPOSITORY_RESULT_SKIPPED_OVER_LIMIT,
     record_batch_audit,
+    record_removal_audit,
     record_repository_result_audit,
+    record_rotation_commit_audit,
 )
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningService
 
@@ -181,6 +197,15 @@ def compute_batch_metrics(records: list[CandidateProgressRecord]) -> dict[str, A
     )
     terminal = [r for r in records if r.status in terminal_statuses]
     durations = sorted(r.total_processing_duration_ms for r in terminal)
+    # 計画Part B-1: フェーズ別計測(Before/After比較用)。data_fetch_duration_msは
+    # DATA_ERROR/NOT_FOUNDでもセットされうるが、scoring_duration_msはevaluate()が
+    # 実行できた銘柄のみ(いずれもNoneの行は母数から除外する)。
+    data_fetch_durations = sorted(
+        r.data_fetch_duration_ms for r in terminal if r.data_fetch_duration_ms is not None
+    )
+    scoring_durations = sorted(
+        r.scoring_duration_ms for r in terminal if r.scoring_duration_ms is not None
+    )
 
     total_candidate_count = len(records)
     terminal_count = len(terminal)
@@ -244,6 +269,19 @@ def compute_batch_metrics(records: list[CandidateProgressRecord]) -> dict[str, A
         ),
         "p50_processing_duration_ms": _percentile(durations, 0.50),
         "p95_processing_duration_ms": _percentile(durations, 0.95),
+        # 計画Part B-1: フェーズ別計測(Before/After比較用)。
+        "avg_data_fetch_duration_ms": (
+            (sum(data_fetch_durations) / len(data_fetch_durations))
+            if data_fetch_durations
+            else None
+        ),
+        "p50_data_fetch_duration_ms": _percentile(data_fetch_durations, 0.50),
+        "p95_data_fetch_duration_ms": _percentile(data_fetch_durations, 0.95),
+        "avg_scoring_duration_ms": (
+            (sum(scoring_durations) / len(scoring_durations)) if scoring_durations else None
+        ),
+        "p50_scoring_duration_ms": _percentile(scoring_durations, 0.50),
+        "p95_scoring_duration_ms": _percentile(scoring_durations, 0.95),
         "provider_failure_count": provider_failure_count,
         "provider_failure_rate_pct": (
             (provider_failure_count / evaluation_attempted_count * 100)
@@ -407,10 +445,17 @@ def _write_watchlist_additions(
     書き込みのため、たとえ永続化自体が欠落しても実際の重複追加は発生しない、
     二重の安全策)。戻り値は今回処理した銘柄分のみのdict(呼び出し側が
     既存のrepository_resultsへマージする)。
+
+    計画Part C-4: add_if_new()を試みる前に、自動削除後の再追加クールダウン
+    (`WatchlistRemovalHistory.cooldown_until`)が有効な銘柄は追加をスキップする
+    (削除→即再追加→削除、という振動を防ぐ)。
     """
     registration_source = WatchlistRegistrationSource.AUTO_SCREENING.value
     registration_policy = config.watchlist_screening.screening_policy
     repository = WatchlistRepository()
+    removal_history_repo = WatchlistRemovalHistoryRepository(
+        config.watchlist_screening.auto_removal.readd_cooldown_days
+    )
 
     newly_resolved: dict[str, str] = {}
 
@@ -422,6 +467,24 @@ def _write_watchlist_additions(
             entry.stock_code,
             fallback_name_provider=_fallback_name_provider(providers, entry.stock_code),
         )
+        if removal_history_repo.is_in_cooldown(entry.stock_code, now):
+            newly_resolved[entry.stock_code] = REPOSITORY_RESULT_SKIPPED_COOLDOWN
+            record_repository_result_item(
+                batch_id, now, entry.stock_code, REPOSITORY_RESULT_SKIPPED_COOLDOWN
+            )
+            record_repository_result_audit(
+                batch_id,
+                entry.stock_code,
+                stock_name,
+                rank,
+                entry.total_score,
+                REPOSITORY_RESULT_SKIPPED_COOLDOWN,
+                False,
+                registration_source,
+                registration_policy,
+                now,
+            )
+            continue
         item = WatchlistItem(
             stock_code=entry.stock_code,
             stock_name=stock_name,
@@ -527,6 +590,80 @@ def _evaluate_abort_reasons(metrics: dict[str, Any], wc: Any) -> list[str]:
     return reasons
 
 
+def _maybe_commit_rotation(
+    batch_id: str,
+    batch_item: dict[str, Any],
+    records: list[CandidateProgressRecord],
+    now: dt.datetime,
+) -> None:
+    """計画Part A-5: rotation commitは、この関数の呼び出し元(`_finish_batch`)
+    に到達した時点(=業務処理がCOMPLETED/COMPLETED_WITH_NOTIFICATION_FAILURE/
+    ABORTEDのいずれかとして確定した時点)でのみ行う。銘柄個別の評価失敗
+    (poison stock)は`try_finalize_if_ready`の条件(`completed>=total`)を
+    妨げないため、それだけではrotation commitをブロックしない(計画Part A-6)。
+    一方、ランキング/ウォッチリスト書き込み自体が技術的に失敗した場合は
+    `_finish_batch`へ到達せず(`mark_watchlist_finalize_failed`のみ)、
+    rotationは進まない。
+
+    計画Part A-9: job_type=="NEW_CANDIDATE_SCREENING"以外(WATCHLIST_
+    MAINTENANCE)は専用の`_finalize_maintenance_completed`を経由するため
+    構造的にこの関数へ到達しないが、防御的に明示チェックする。
+    """
+    job_type = batch_item.get("job_type", JOB_TYPE_NEW_CANDIDATE_SCREENING)
+    if job_type != JOB_TYPE_NEW_CANDIDATE_SCREENING:
+        return
+    rotation_end_key = batch_item.get("rotation_end_key")
+    if not rotation_end_key:
+        # rotation.enabled=falseで実行された場合等、rotation window自体が
+        # 記録されていない(従来の固定スライス方式へのフォールバック)。
+        return
+
+    evaluation_result_counts: dict[str, int] = {}
+    for record in records:
+        key = record.evaluation_result or "UNKNOWN"
+        evaluation_result_counts[key] = evaluation_result_counts.get(key, 0) + 1
+
+    rotation_cycle = batch_item.get("rotation_cycle")
+    rotation_start_key = batch_item.get("rotation_start_key")
+    wrapped = bool(batch_item.get("rotation_wrapped", False))
+    selected_count = int(batch_item.get("total", 0))
+
+    state = get_rotation_state()
+    committed = False
+    if state is None:
+        logger.warning(
+            "watchlist rotation commit skipped: rotation state not initialized batch_id=%s",
+            batch_id,
+        )
+    else:
+        committed = try_commit_rotation_advance(
+            state.pointer_version,
+            rotation_end_key[0],
+            rotation_end_key[1],
+            wrapped,
+            selected_count,
+            now,
+        )
+        if not committed:
+            logger.warning(
+                "watchlist rotation commit conflict batch_id=%s expected_version=%d",
+                batch_id,
+                state.pointer_version,
+            )
+
+    record_rotation_commit_audit(
+        batch_id,
+        rotation_cycle,
+        rotation_start_key,
+        rotation_end_key,
+        wrapped,
+        selected_count,
+        evaluation_result_counts,
+        committed,
+        now,
+    )
+
+
 def _finish_batch(
     batch_id: str,
     now: dt.datetime,
@@ -584,6 +721,7 @@ def _finish_batch(
     mark_watchlist_batch_completed(
         batch_id, execution_result, now, notification_permanently_failed
     )
+    _maybe_commit_rotation(batch_id, batch_item, records, now)
     logger.info(
         "watchlist_screening finalized batch_id=%s execution_result=%s added=%d "
         "notification_permanently_failed=%s",
@@ -882,6 +1020,131 @@ def retry_notification(
         _finalize_completed(batch_id, now, providers, config, notification_service)
     except Exception as exc:  # noqa: BLE001 - 失敗を記録してから再送出する
         logger.exception("watchlist_screening notification retry failed batch_id=%s", batch_id)
+        mark_watchlist_finalize_failed(batch_id, now, str(exc))
+        raise
+    return True
+
+
+# --- ウォッチリスト自動運用の改善(自動メンテナンス、計画Part C)----------------
+# WATCHLIST_MAINTENANCEジョブ専用の軽量finalize。ランキング・ウォッチリスト
+# 追加・LINE通知は一切行わない(対象は既に登録済みのAUTO_SCREENING銘柄の
+# 再評価・自動削除のみのため)。rotation commit(_maybe_commit_rotation)も
+# 呼ばない(計画Part A-9、job_type=="NEW_CANDIDATE_SCREENING"専用)。
+
+
+def _parse_maintenance_screening_summary(raw: str | None) -> MaintenanceScreeningSummary | None:
+    if raw is None:
+        return None
+    try:
+        return MaintenanceScreeningSummary.model_validate_json(raw)
+    except Exception:
+        logger.exception(
+            "watchlist maintenance screening_summary_json parse failed, treating as absent"
+        )
+        return None
+
+
+def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: AppConfig) -> None:
+    """計画Part C-3の3段階判定を全銘柄へ適用し、削除・監査記録を行う。"""
+    records = query_all_candidate_progress(batch_id, consistent_read=True)
+    watchlist_repo = WatchlistRepository()
+    auto_removal_config = config.watchlist_screening.auto_removal
+    removal_history_repo = WatchlistRemovalHistoryRepository(
+        auto_removal_config.readd_cooldown_days
+    )
+
+    outcome_counts: dict[str, int] = {}
+    stale_unconfirmed_count = 0
+
+    for record in records:
+        item = watchlist_repo.get(record.stock_code)
+        if item is None:
+            # 手動削除等で既に存在しない。スキップ(このバッチのfinalize対象外)。
+            continue
+
+        summary = _parse_maintenance_screening_summary(record.screening_summary_json)
+        decision = evaluate_maintenance_decision(item, summary, auto_removal_config, now)
+        outcome_counts[decision.outcome.value] = outcome_counts.get(decision.outcome.value, 0) + 1
+        if decision.stale_unconfirmed:
+            stale_unconfirmed_count += 1
+            logger.warning(
+                "watchlist maintenance: stock long unconfirmed stock_code=%s batch_id=%s",
+                item.stock_code,
+                batch_id,
+            )
+
+        if decision.outcome in (
+            MaintenanceOutcome.IMMEDIATE_REMOVAL,
+            MaintenanceOutcome.CONSECUTIVE_NOT_QUALIFIED_REMOVAL,
+        ):
+            removal_category = (
+                "IMMEDIATE"
+                if decision.outcome == MaintenanceOutcome.IMMEDIATE_REMOVAL
+                else "CONSECUTIVE_NOT_QUALIFIED"
+            )
+            watchlist_repo.delete(item.stock_code)
+            removal_history_repo.upsert(
+                WatchlistRemovalHistory(
+                    stock_code=item.stock_code,
+                    removed_at=now,
+                    removal_reason=decision.removal_reason or "",
+                    removal_category=removal_category,
+                    cooldown_until=now
+                    + dt.timedelta(days=auto_removal_config.readd_cooldown_days),
+                )
+            )
+            record_removal_audit(
+                item.stock_code,
+                item.stock_name,
+                item.created_at,
+                item.registration_policy,
+                now,
+                decision.removal_reason or "",
+                removal_category,
+                decision.updated_item.last_monitoring_score,
+                decision.updated_item.last_matched_target_types,
+                decision.updated_item.consecutive_not_qualified_count,
+                summary.hard_exclusion_reasons if summary is not None else [],
+                now,
+                batch_id,
+            )
+        else:
+            watchlist_repo.upsert(decision.updated_item)
+
+    record_batch_audit(
+        execution_mode="scheduled",
+        universe_provider="watchlist_maintenance",
+        screening_policies=[config.watchlist_screening.screening_policy],
+        output_values={
+            "execution_result": EXECUTION_RESULT_NORMAL,
+            "outcome_counts": outcome_counts,
+            "stale_unconfirmed_count": stale_unconfirmed_count,
+        },
+        now=now,
+        batch_id=batch_id,
+        idempotency_key=f"watchlist_maintenance_batch_audit:{batch_id}",
+    )
+    mark_watchlist_batch_completed(batch_id, EXECUTION_RESULT_NORMAL, now)
+    logger.info(
+        "watchlist_maintenance finalized batch_id=%s outcome_counts=%s stale_unconfirmed=%d",
+        batch_id,
+        outcome_counts,
+        stale_unconfirmed_count,
+    )
+
+
+def maybe_finalize_maintenance(batch_id: str, now: dt.datetime, config: AppConfig) -> bool:
+    """計画Part C-7案A: `try_finalize_if_ready()`(既存の排他遷移、共通)が成功
+    した場合のみメンテナンスfinalizeを実行する。`maybe_finalize`(ADD用)と
+    同じ排他制御・再開耐性を持つが、ランキング・通知フェーズは持たない。
+    """
+    if not try_finalize_if_ready(batch_id, now):
+        return False
+
+    try:
+        _finalize_maintenance_completed(batch_id, now, config)
+    except Exception as exc:  # noqa: BLE001 - 失敗を記録してから再送出する
+        logger.exception("watchlist_maintenance finalize failed batch_id=%s", batch_id)
         mark_watchlist_finalize_failed(batch_id, now, str(exc))
         raise
     return True

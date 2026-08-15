@@ -738,6 +738,42 @@ Resources:
         - AttributeName: cache_key
           KeyType: HASH
 
+  # ウォッチリスト自動運用の改善(永続ラウンドロビン方式、2026-08)。新規候補選定の
+  # 唯一の永続カーソル(単一行、rotation_id="default"固定)。infrastructure/aws/
+  # watchlist_rotation_state.pyが楽観ロック(pointer_version)で更新する。TTLは
+  # 設定しない(恒久的な状態のため)。
+  WatchlistScreeningRotationStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-watchlist_screening_rotation_state"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: rotation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: rotation_id
+          KeyType: HASH
+
+  # ウォッチリスト自動運用の改善(自動メンテナンス、計画Part C-4)。AUTO_SCREENING
+  # 銘柄が自動削除された際の再追加クールダウン判定専用。infrastructure/
+  # local_repository/watchlist_removal_history_repository.pyが
+  # readd_cooldown_days基準のDynamoDB Native TTL(ttl属性)で自動失効させる
+  # (クールダウン終了と同時に行が自動的に消える)。
+  WatchlistRemovalHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-watchlist_removal_history"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stock_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stock_code
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
 
   BuyCandidatesFunction:
@@ -1023,19 +1059,65 @@ Resources:
           CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
           ALLOW_FULL_MARKET_SCREENING: !Ref AllowFullMarketScreening
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistCandidateProgressTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
-        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistPriceCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistFinancialCacheTable }
-        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
-        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # ウォッチリスト自動運用の改善(2026-08)でローテーション状態・削除履歴の
+        # 2テーブルを追加するのを機に、docs/operations_manual.md 11節の指針に
+        # 従いCRUD/ReadをStatementへ集約する(個別DynamoDBCrudPolicyエントリの
+        # 積み上げによるIAMロールのインラインポリシー合計サイズ上限(10240バイト)
+        # 超過を予防する。付与している権限自体は個別指定時と同一)。
+        - Statement:
+            - Sid: DynamoDbCrudAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
+                - !Sub "${AuditLogTable.Arn}/index/*"
+                - !GetAtt BatchRunsTable.Arn
+                - !Sub "${BatchRunsTable.Arn}/index/*"
+                - !GetAtt WatchlistCandidateProgressTable.Arn
+                - !Sub "${WatchlistCandidateProgressTable.Arn}/index/*"
+                - !GetAtt WatchlistTable.Arn
+                - !Sub "${WatchlistTable.Arn}/index/*"
+                - !GetAtt NotificationLogTable.Arn
+                - !Sub "${NotificationLogTable.Arn}/index/*"
+                - !GetAtt EdinetFilingCacheTable.Arn
+                - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDisclosureCacheTable.Arn
+                - !Sub "${EdinetDisclosureCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistPriceCacheTable.Arn
+                - !Sub "${WatchlistPriceCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistFinancialCacheTable.Arn
+                - !Sub "${WatchlistFinancialCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistScreeningRotationStateTable.Arn
+                - !Sub "${WatchlistScreeningRotationStateTable.Arn}/index/*"
+                - !GetAtt WatchlistRemovalHistoryTable.Arn
+                - !Sub "${WatchlistRemovalHistoryTable.Arn}/index/*"
+            - Sid: DynamoDbReadOnlyAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt HoldingsTable.Arn
+                - !Sub "${HoldingsTable.Arn}/index/*"
+                - !GetAtt ShareholderBenefitsTable.Arn
+                - !Sub "${ShareholderBenefitsTable.Arn}/index/*"
+                - !GetAtt CorporateActionRegistryTable.Arn
+                - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
+                - !GetAtt StockNameOverridesTable.Arn
+                - !Sub "${StockNameOverridesTable.Arn}/index/*"
         - S3CrudPolicy: { BucketName: !Ref CandidateUniverseCacheBucket }
         - SQSSendMessagePolicy: { QueueName: !GetAtt WatchlistScreeningQueue.QueueName }
       Events:
@@ -1049,6 +1131,19 @@ Resources:
             ScheduleExpressionTimezone: Asia/Tokyo
             FlexibleTimeWindow:
               Mode: "OFF"
+        # ウォッチリスト自動運用の改善(自動メンテナンス、計画Part C-7案A/C-8)。
+        # 既存Dispatcher/Worker/Queue/Reconciler基盤をjob_type="WATCHLIST_
+        # MAINTENANCE"で共用する(新規Lambda/Queue/DLQは追加しない)。既存の
+        # 土曜07:00(新規候補)・WeeklyReview月曜19:00・MonthlyReview/
+        # QuarterlyReview土曜のいずれとも重複しない毎週日曜07:00 JSTを選定した。
+        SundayMaintenanceReview:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 7 ? * SUN *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            FlexibleTimeWindow:
+              Mode: "OFF"
+            Input: '{"job_type": "WATCHLIST_MAINTENANCE"}'
 
   WatchlistWorkerFunction:
     Type: AWS::Serverless::Function
@@ -1059,19 +1154,64 @@ Resources:
       Timeout: 180 # 3節
       ReservedConcurrentExecutions: !Ref WatchlistReservedConcurrentExecutions
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistCandidateProgressTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
-        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistPriceCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistFinancialCacheTable }
-        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
-        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # WatchlistDispatcherFunctionと同じ理由(docs/operations_manual.md 11節)で
+        # CRUD/ReadをStatementへ集約する。rotation commitとremoval historyの
+        # 書き込みはWorker呼び出し連鎖内のfinalizeで発生するため、Worker自身にも
+        # 2テーブルへのCRUD権限が必要(計画Part A-5/C-4)。
+        - Statement:
+            - Sid: DynamoDbCrudAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
+                - !Sub "${AuditLogTable.Arn}/index/*"
+                - !GetAtt BatchRunsTable.Arn
+                - !Sub "${BatchRunsTable.Arn}/index/*"
+                - !GetAtt WatchlistCandidateProgressTable.Arn
+                - !Sub "${WatchlistCandidateProgressTable.Arn}/index/*"
+                - !GetAtt WatchlistTable.Arn
+                - !Sub "${WatchlistTable.Arn}/index/*"
+                - !GetAtt NotificationLogTable.Arn
+                - !Sub "${NotificationLogTable.Arn}/index/*"
+                - !GetAtt EdinetFilingCacheTable.Arn
+                - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDisclosureCacheTable.Arn
+                - !Sub "${EdinetDisclosureCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistPriceCacheTable.Arn
+                - !Sub "${WatchlistPriceCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistFinancialCacheTable.Arn
+                - !Sub "${WatchlistFinancialCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistScreeningRotationStateTable.Arn
+                - !Sub "${WatchlistScreeningRotationStateTable.Arn}/index/*"
+                - !GetAtt WatchlistRemovalHistoryTable.Arn
+                - !Sub "${WatchlistRemovalHistoryTable.Arn}/index/*"
+            - Sid: DynamoDbReadOnlyAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt HoldingsTable.Arn
+                - !Sub "${HoldingsTable.Arn}/index/*"
+                - !GetAtt ShareholderBenefitsTable.Arn
+                - !Sub "${ShareholderBenefitsTable.Arn}/index/*"
+                - !GetAtt CorporateActionRegistryTable.Arn
+                - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
+                - !GetAtt StockNameOverridesTable.Arn
+                - !Sub "${StockNameOverridesTable.Arn}/index/*"
       Events:
         ScreeningQueue:
           Type: SQS

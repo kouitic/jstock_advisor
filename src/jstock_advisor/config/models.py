@@ -1548,12 +1548,52 @@ class WatchlistDataCacheConfig(StrictModel):
     negative_cache_ttl_minutes: int = Field(gt=0)
 
 
+class RotationConfig(StrictModel):
+    """ウォッチリスト新規候補選定の永続ラウンドロビン方式(2026-08)の設定。
+
+    enabled=falseの場合、従来の固定スライス方式(候補ユニバース出現順の
+    先頭からcandidate_limit件)へフォールバックする(移行時の安全弁)。
+    """
+
+    enabled: bool
+
+
+class AutoRemovalConfig(StrictModel):
+    """AUTO_SCREENING銘柄の自動メンテナンス(再評価・自動削除)設定(2026-08)。
+
+    MANUAL登録銘柄はこの設定の対象外(常に保護される、コード側で強制)。
+    """
+
+    enabled: bool
+    # 登録からこの日数が経過するまでは、非該当が続いても削除対象にしない
+    # (企業として長期監視する価値そのものを保護する)。
+    minimum_age_days: int = Field(gt=0)
+    # この回数だけ連続して非該当(対象5タイプいずれにも非該当、またはハード除外)と
+    # 判定された場合に削除候補となる(即時削除対象の理由を除く)。
+    consecutive_not_qualified_required: int = Field(gt=0)
+    # 初回非該当(removal_candidate_since)からこの日数以上経過していることも
+    # 削除の必須条件とする(週次実行回数だけに依存した拙速な削除を防ぐ)。
+    minimum_not_qualified_span_days: int = Field(gt=0)
+    # 運用ドキュメント記載用の目安値(メンテナンス実行間隔)。判定ロジックには
+    # 直接使わない。
+    stale_recheck_days: int = Field(gt=0)
+    # データ取得エラー等で有効な再評価ができないままこの日数を超えた場合、
+    # 削除はせず監査記録・運用警告に留める。
+    maximum_unconfirmed_days: int = Field(gt=0)
+    # 削除された銘柄が同一条件で再追加されるまでの最低待機日数
+    # (削除→即再追加→削除、という振動を防ぐ)。
+    readd_cooldown_days: int = Field(gt=0)
+
+
 class WatchlistScreeningRulesConfig(StrictModel):
     enabled: bool
     weekly_schedule_enabled: bool
     notification_enabled: bool
     candidate_universe: CandidateUniverseConfig
-    screening_data_provider: Literal["stock_snapshot"]
+    # Part B(高速化): "lightweight"は必要最小限の項目のみ取得するProviderへ
+    # 切り替える(既定は引き続き"stock_snapshot"、同値性テスト通過後に本番既定を
+    # 変更する)。
+    screening_data_provider: Literal["stock_snapshot", "lightweight"]
     # multi_style_monitoring: ウォッチリスト自動追加基準の再設計(2026-08)で追加した
     # 本番既定Policy。high_dividend_financial_healthは後方互換・比較用に残す。
     screening_policy: Literal["high_dividend_financial_health", "multi_style_monitoring"]
@@ -1601,6 +1641,10 @@ class WatchlistScreeningRulesConfig(StrictModel):
 
     # --- LINE通知品質改善(2026-08)で追加 --------------------------------------
     stock_display_name: StockDisplayNameConfig = Field(default_factory=StockDisplayNameConfig)
+
+    # --- ウォッチリスト自動運用の改善(ローテーション・自動メンテナンス、2026-08)で追加 ---
+    rotation: RotationConfig
+    auto_removal: AutoRemovalConfig
 
 
 # --- holding_decision_rules.yaml ---------------------------------------------

@@ -12,11 +12,27 @@ WatchlistWorkerFunction(SQSトリガー、watchlist_worker_handler.py)が行う�
 3. 進捗行の差分作成(18節「対策2」)+件数照合(不一致ならDISPATCH_FAILED、13節)
 4. SendMessageBatchで10件ずつSQSへ投入(部分失敗は再送、上限後は直接FAILED確定)
 5. dispatch_completed=trueへ更新し、try_finalize_if_ready(11節)を呼ぶ
+
+ウォッチリスト自動運用の改善(2026-08)で、以下2点を追加した:
+
+- 永続ラウンドロビン方式(計画Part A): job_type="NEW_CANDIDATE_SCREENING"
+  (既定、event未指定時のデフォルト)の場合、`WatchlistScreeningRotationState`
+  の永続カーソルを起点に候補を選択する(rotation.enabled=falseなら従来の
+  固定スライス方式へフォールバック)。rotation cursorの実際の前進(commit)は
+  ここでは行わず、`watchlist_batch_finalizer._finish_batch()`が業務処理の
+  確定を確認した時点でのみ行う(計画Part A-5)。
+- 既存Dispatcher/Worker/Queue/Reconciler基盤の共用(計画Part C-7案A):
+  job_type="WATCHLIST_MAINTENANCE"(EventBridge Schedulerの追加Input経由で
+  指定)の場合、候補ソースをJPXユニバースではなく`WatchlistRepository`の
+  AUTO_SCREENING銘柄一覧に切り替える。この場合、段階導入(staged_rollout)・
+  ALLOW_FULL_MARKET_SCREENINGゲート・ローテーションはいずれも適用しない
+  (対象は既に登録済みの少数銘柄のため無関係)。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
@@ -27,7 +43,9 @@ from typing import Any
 import boto3
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    JOB_TYPE_NEW_CANDIDATE_SCREENING,
     CandidateProgressRecord,
     create_missing_candidate_progress_rows,
     mark_candidate_dispatched,
@@ -38,12 +56,18 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     set_watchlist_batch_total,
     try_acquire_dispatch_lease,
 )
+from jstock_advisor.infrastructure.aws.watchlist_rotation_state import (
+    create_rotation_state_if_absent,
+)
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
+)
+from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
+    WatchlistRepository,
 )
 from jstock_advisor.interfaces.candidate_universe import CandidateUniverseError
 from jstock_advisor.services.candidate_universe_downloader import (
@@ -54,9 +78,15 @@ from jstock_advisor.services.provider_factory import (
     build_candidate_universe_provider,
     build_real_provider_bundle,
 )
-from jstock_advisor.services.screening_data_provider import StockSnapshotScreeningDataProvider
-from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize
-from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
+from jstock_advisor.services.screening_data_provider import build_screening_data_provider
+from jstock_advisor.services.watchlist_batch_finalizer import (
+    maybe_finalize,
+    maybe_finalize_maintenance,
+)
+from jstock_advisor.services.watchlist_candidate_collector import (
+    RotationCursor,
+    WatchlistCandidateCollector,
+)
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 from jstock_advisor.services.watchlist_screening_audit import record_batch_audit
 
@@ -114,50 +144,23 @@ def _build_notification_service(config: Any) -> LineNotificationService:
     )
 
 
-def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
-    now = dt.datetime.now(dt.UTC)
-    config = load_config()
+def _compute_universe_signature(eligible_universe_count: int, selected_codes: list[str]) -> str:
+    """監査専用(rotation選択ロジックには使わない、計画Part A-6)。ユニバースの
+    件数・今回選択された銘柄集合の変化を人間が後から確認するための短いハッシュ。
+    """
+    basis = f"{eligible_universe_count}:{','.join(sorted(selected_codes))}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _collect_new_candidate_targets(
+    config: Any, now: dt.datetime
+) -> tuple[list[str], dict[str, Any]]:
+    """JOB_TYPE_NEW_CANDIDATE_SCREENING: JPXユニバースからローテーション選択する。
+
+    戻り値は(対象銘柄コード一覧, set_watchlist_batch_totalへ渡す追加kwargs)。
+    """
     wc = config.watchlist_screening
     cu = wc.candidate_universe
-
-    if not (wc.enabled and wc.weekly_schedule_enabled):
-        logger.info(
-            "watchlist dispatcher skipped enabled=%s weekly_schedule_enabled=%s",
-            wc.enabled,
-            wc.weekly_schedule_enabled,
-        )
-        return {"skipped": True}
-
-    # 運用ハードニング2節: candidate_limit=null(全件処理)は、運用者が明示的に
-    # ALLOW_FULL_MARKET_SCREENING=trueを設定した場合のみ許可する。この時点では
-    # dispatch leaseもBatchRunsTable行も未作成のため、SQS投入・LINE通知は発生しない
-    # (universe_load_failed/no_candidatesと同じ「開始前に中止する」パターン)。
-    if wc.staged_rollout.candidate_limit is None and os.environ.get(
-        "ALLOW_FULL_MARKET_SCREENING"
-    ) != "true":
-        logger.error(
-            "watchlist dispatcher: full market screening blocked "
-            "(candidate_limit=null but ALLOW_FULL_MARKET_SCREENING is not 'true')"
-        )
-        record_batch_audit(
-            execution_mode="scheduled",
-            universe_provider=cu.provider,
-            screening_policies=[wc.screening_policy],
-            output_values={"execution_result": "full_market_screening_blocked"},
-            now=now,
-        )
-        return {"error": "full_market_screening_blocked"}
-
-    batch_id = f"watchlist-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
-
-    if not try_acquire_dispatch_lease(
-        batch_id, owner_id, now, _DISPATCH_LEASE_SECONDS, wc.batch_record_ttl_hours
-    ):
-        # 通常のスケジュール実行では新規batch_idのため実質的に発生しないが、手動での
-        # 同一batch_id再起動(18節「案B」)が既存の実行と競合した場合にここへ入る。
-        logger.info("watchlist dispatcher: dispatch lease not acquired batch_id=%s", batch_id)
-        return {"skipped": "lease_not_acquired"}
 
     if cu.provider == "jpx":
         # 6節: 週次Dispatcherの通常起動時にDownloaderも実行する(初回キャッシュ
@@ -178,13 +181,135 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
     providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
     universe_provider = build_candidate_universe_provider(config, now)
-    screening_data_provider = StockSnapshotScreeningDataProvider(providers, config)
+    screening_data_provider = build_screening_data_provider(providers, config)
     collector = WatchlistCandidateCollector(
-        universe_provider, screening_data_provider, staged_rollout=wc.staged_rollout
+        universe_provider,
+        screening_data_provider,
+        staged_rollout=wc.staged_rollout,
+        rotation_enabled=wc.rotation.enabled,
     )
 
+    rotation_cursor: RotationCursor | None = None
+    rotation_state = None
+    if wc.rotation.enabled:
+        rotation_state = create_rotation_state_if_absent(now)
+        if rotation_state.last_stock_code is not None:
+            rotation_cursor = (
+                rotation_state.last_market_segment or "",
+                rotation_state.last_stock_code,
+            )
+
+    collector_result = collector.collect_target_codes(rotation_cursor=rotation_cursor)
+
+    extra_kwargs: dict[str, Any] = {
+        "staged_rollout_candidate_limit": wc.staged_rollout.candidate_limit,
+        "staged_rollout_market_segment_filter": wc.staged_rollout.market_segment_filter,
+        "universe_count": collector_result.universe_count,
+        "staged_rollout_excluded_count": collector_result.staged_rollout_excluded_count,
+        "eligible_universe_count": collector_result.eligible_universe_count,
+        "rotation_cycle": rotation_state.cycle_number if rotation_state is not None else None,
+        "rotation_start_key": (
+            list(collector_result.rotation_cursor_before)
+            if collector_result.rotation_cursor_before is not None
+            else None
+        ),
+        "rotation_end_key": (
+            list(collector_result.rotation_cursor_after)
+            if collector_result.rotation_cursor_after is not None
+            else None
+        ),
+        "rotation_wrapped": collector_result.rotation_wrapped,
+        "universe_signature": _compute_universe_signature(
+            collector_result.eligible_universe_count, collector_result.stock_codes
+        ),
+    }
+    logger.info(
+        "watchlist dispatcher: staged_rollout applied candidate_limit=%s "
+        "market_segment_filter=%s universe_count=%d staged_rollout_excluded=%d "
+        "eligible_universe_count=%d rotation_enabled=%s total=%d",
+        wc.staged_rollout.candidate_limit,
+        wc.staged_rollout.market_segment_filter,
+        collector_result.universe_count,
+        collector_result.staged_rollout_excluded_count,
+        collector_result.eligible_universe_count,
+        wc.rotation.enabled,
+        len(collector_result.stock_codes),
+    )
+    return collector_result.stock_codes, extra_kwargs
+
+
+def _collect_maintenance_targets() -> tuple[list[str], dict[str, Any]]:
+    """JOB_TYPE_WATCHLIST_MAINTENANCE: 既存ウォッチリストのAUTO_SCREENING銘柄
+    一覧を対象とする(計画Part C-7案A)。JPXユニバース・段階導入・ローテーション
+    はいずれも無関係(対象は既に登録済みの少数銘柄のため)。
+    """
+    watchlist_repo = WatchlistRepository()
+    codes = [
+        item.stock_code
+        for item in watchlist_repo.list_all()
+        if item.registration_source == WatchlistRegistrationSource.AUTO_SCREENING
+    ]
+    return codes, {}
+
+
+def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    now = dt.datetime.now(dt.UTC)
+    config = load_config()
+    wc = config.watchlist_screening
+    cu = wc.candidate_universe
+    job_type = event.get("job_type", JOB_TYPE_NEW_CANDIDATE_SCREENING)
+
+    if not (wc.enabled and wc.weekly_schedule_enabled):
+        logger.info(
+            "watchlist dispatcher skipped job_type=%s enabled=%s weekly_schedule_enabled=%s",
+            job_type,
+            wc.enabled,
+            wc.weekly_schedule_enabled,
+        )
+        return {"skipped": True}
+
+    # 運用ハードニング2節: candidate_limit=null(全件処理)は、運用者が明示的に
+    # ALLOW_FULL_MARKET_SCREENING=trueを設定した場合のみ許可する。この時点では
+    # dispatch leaseもBatchRunsTable行も未作成のため、SQS投入・LINE通知は発生しない
+    # (universe_load_failed/no_candidatesと同じ「開始前に中止する」パターン)。
+    # WATCHLIST_MAINTENANCEはJPXユニバースを使わないためこのゲートの対象外。
+    if (
+        job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING
+        and wc.staged_rollout.candidate_limit is None
+        and os.environ.get("ALLOW_FULL_MARKET_SCREENING") != "true"
+    ):
+        logger.error(
+            "watchlist dispatcher: full market screening blocked "
+            "(candidate_limit=null but ALLOW_FULL_MARKET_SCREENING is not 'true')"
+        )
+        record_batch_audit(
+            execution_mode="scheduled",
+            universe_provider=cu.provider,
+            screening_policies=[wc.screening_policy],
+            output_values={"execution_result": "full_market_screening_blocked"},
+            now=now,
+        )
+        return {"error": "full_market_screening_blocked"}
+
+    batch_prefix = (
+        "watchlist" if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING else "watchlist-maint"
+    )
+    batch_id = f"{batch_prefix}-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
+
+    if not try_acquire_dispatch_lease(
+        batch_id, owner_id, now, _DISPATCH_LEASE_SECONDS, wc.batch_record_ttl_hours
+    ):
+        # 通常のスケジュール実行では新規batch_idのため実質的に発生しないが、手動での
+        # 同一batch_id再起動(18節「案B」)が既存の実行と競合した場合にここへ入る。
+        logger.info("watchlist dispatcher: dispatch lease not acquired batch_id=%s", batch_id)
+        return {"skipped": "lease_not_acquired"}
+
     try:
-        collector_result = collector.collect_target_codes()
+        if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING:
+            stock_codes, extra_kwargs = _collect_new_candidate_targets(config, now)
+        else:
+            stock_codes, extra_kwargs = _collect_maintenance_targets()
     except CandidateUniverseError:
         logger.exception("watchlist candidate universe load failed batch_id=%s", batch_id)
         record_batch_audit(
@@ -197,49 +322,37 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         )
         return {"error": "universe_load_failed"}
 
-    total = len(collector_result.stock_codes)
+    total = len(stock_codes)
     if total == 0:
-        logger.info("watchlist dispatcher: no candidates to evaluate batch_id=%s", batch_id)
+        logger.info(
+            "watchlist dispatcher: no candidates to evaluate batch_id=%s job_type=%s",
+            batch_id,
+            job_type,
+        )
         record_batch_audit(
             execution_mode="scheduled",
             universe_provider=cu.provider,
             screening_policies=[wc.screening_policy],
             output_values={
                 "execution_result": "no_candidates",
-                "universe_count": collector_result.universe_count,
-                "staged_rollout_excluded_count": collector_result.staged_rollout_excluded_count,
-                "holding_excluded_count": collector_result.holding_excluded_count,
-                "watchlist_excluded_count": collector_result.watchlist_excluded_count,
+                "job_type": job_type,
+                **extra_kwargs,
             },
             now=now,
             batch_id=batch_id,
         )
         return {"dispatched": 0}
 
-    # 運用ハードニング1節: 実際に適用された段階導入設定を明示的にログ出力する
-    # (staged_rollout_excluded件数だけでなく、適用値そのものも運用者が追跡できるように)。
-    logger.info(
-        "watchlist dispatcher: staged_rollout applied candidate_limit=%s "
-        "market_segment_filter=%s universe_count=%d staged_rollout_excluded=%d total=%d",
-        wc.staged_rollout.candidate_limit,
-        wc.staged_rollout.market_segment_filter,
-        collector_result.universe_count,
-        collector_result.staged_rollout_excluded_count,
-        total,
-    )
-
     set_watchlist_batch_total(
         batch_id,
         total,
         wc.candidate_progress_ttl_hours,
         now,
-        staged_rollout_candidate_limit=wc.staged_rollout.candidate_limit,
-        staged_rollout_market_segment_filter=wc.staged_rollout.market_segment_filter,
-        universe_count=collector_result.universe_count,
-        staged_rollout_excluded_count=collector_result.staged_rollout_excluded_count,
+        job_type=job_type,
+        **extra_kwargs,
     )
     create_missing_candidate_progress_rows(
-        batch_id, collector_result.stock_codes, now, wc.candidate_progress_ttl_hours
+        batch_id, stock_codes, now, wc.candidate_progress_ttl_hours
     )
 
     progress_rows = query_all_candidate_progress(batch_id, consistent_read=True)
@@ -267,14 +380,23 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
     queue_url = os.environ["WATCHLIST_SCREENING_QUEUE_URL"]
     sqs = boto3.client("sqs")
+    providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
     notification_service = _build_notification_service(config)
+
+    def _finalize(batch_id: str, now: dt.datetime) -> None:
+        if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING:
+            maybe_finalize(batch_id, now, providers, config, notification_service)
+        else:
+            maybe_finalize_maintenance(batch_id, now, config)
 
     to_dispatch = [row for row in progress_rows if not row.dispatched]
     for chunk in _chunked(to_dispatch, _SQS_SEND_BATCH_SIZE):
         entries = [
             {
                 "Id": row.stock_code,
-                "MessageBody": json.dumps({"batch_id": batch_id, "stock_code": row.stock_code}),
+                "MessageBody": json.dumps(
+                    {"batch_id": batch_id, "stock_code": row.stock_code, "job_type": job_type}
+                ),
             }
             for row in chunk
         ]
@@ -284,19 +406,15 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 mark_candidate_dispatched(batch_id, stock_code, now)
             elif record_dispatch_send_failure(batch_id, stock_code, now):
                 # この銘柄が最後の1件だった場合に対応するため都度finalizeを試みる(1節)。
-                maybe_finalize(batch_id, now, providers, config, notification_service)
+                _finalize(batch_id, now)
 
     mark_dispatch_completed(batch_id, now)
-    maybe_finalize(batch_id, now, providers, config, notification_service)
+    _finalize(batch_id, now)
 
     logger.info(
-        "watchlist dispatcher completed batch_id=%s dispatched=%d universe=%d "
-        "staged_rollout_excluded=%d holding_excluded=%d watchlist_excluded=%d",
+        "watchlist dispatcher completed batch_id=%s job_type=%s dispatched=%d",
         batch_id,
+        job_type,
         total,
-        collector_result.universe_count,
-        collector_result.staged_rollout_excluded_count,
-        collector_result.holding_excluded_count,
-        collector_result.watchlist_excluded_count,
     )
-    return {"dispatched": total, "batch_id": batch_id}
+    return {"dispatched": total, "batch_id": batch_id, "job_type": job_type}

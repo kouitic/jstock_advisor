@@ -92,6 +92,25 @@ class CacheQualityStatus(StrEnum):
     DEGRADED = "DEGRADED"  # 値は返ったが必須項目が大幅に欠損している
 
 
+@dataclass
+class CacheStats:
+    """計画Part B-1: Before/After比較用のキャッシュhit/miss軽量集計。
+
+    Workerの1 Lambda呼び出し(通常1銘柄、BatchSize=1)単位で共有する
+    `build_cached_provider_bundle()`の呼び出し元が生成し、処理後にログへ
+    出力する想定。永続化はしない(計測専用、DynamoDBスキーマは変更しない)。
+    """
+
+    hit_count: int = 0
+    miss_count: int = 0
+
+    def record_hit(self) -> None:
+        self.hit_count += 1
+
+    def record_miss(self) -> None:
+        self.miss_count += 1
+
+
 class CacheEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -139,6 +158,7 @@ def get_or_fetch[T](
     type_adapter: TypeAdapter[T],
     classify_quality: Callable[[T], CacheQualityStatus],
     log_label: str,
+    stats: CacheStats | None = None,
 ) -> T:
     """キャッシュヒット時はCloudWatch Logsへ`cache hit`、ミス/期限切れ時は
     `cache miss`を出力する(運用ハードニング4節、quality_statusも出力する)。
@@ -167,6 +187,8 @@ def get_or_fetch[T](
                 age_hours,
                 cached.quality_status,
             )
+            if stats is not None:
+                stats.record_hit()
             return type_adapter.validate_json(cached.payload_json)
         logger.info(
             "watchlist cache miss(expired) %s cache_key=%s age_hours=%.2f quality_status=%s",
@@ -175,8 +197,12 @@ def get_or_fetch[T](
             age_hours,
             cached.quality_status,
         )
+        if stats is not None:
+            stats.record_miss()
     else:
         logger.info("watchlist cache miss(absent) %s cache_key=%s", log_label, cache_key)
+        if stats is not None:
+            stats.record_miss()
 
     value = fetch_fn()
     quality_status = classify_quality(value)
@@ -199,6 +225,7 @@ class _CachingMarketDataProvider:
     ttl_hours: int
     negative_ttl_minutes: int
     now: dt.datetime
+    stats: CacheStats | None = None
 
     def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
         return get_or_fetch(
@@ -211,6 +238,7 @@ class _CachingMarketDataProvider:
             _price_snapshot_adapter,
             _classify_optional,
             "get_latest_price",
+            stats=self.stats,
         )
 
     def get_price_history(
@@ -226,6 +254,7 @@ class _CachingMarketDataProvider:
             _price_history_adapter,
             _classify_price_history,
             "get_price_history",
+            stats=self.stats,
         )
 
     def get_average_trading_value(self, stock_code: str, business_days: int) -> Decimal | None:
@@ -239,6 +268,7 @@ class _CachingMarketDataProvider:
             _decimal_adapter,
             _classify_optional,
             "get_average_trading_value",
+            stats=self.stats,
         )
 
     def get_benchmark_price_history(
@@ -254,6 +284,7 @@ class _CachingMarketDataProvider:
             _price_history_adapter,
             _classify_price_history,
             "get_benchmark_price_history",
+            stats=self.stats,
         )
 
 
@@ -264,6 +295,7 @@ class _CachingFinancialDataProvider:
     ttl_hours: int
     negative_ttl_minutes: int
     now: dt.datetime
+    stats: CacheStats | None = None
 
     def get_financial_summary(self, stock_code: str) -> FinancialSummary | None:
         return get_or_fetch(
@@ -276,6 +308,7 @@ class _CachingFinancialDataProvider:
             _financial_summary_adapter,
             _classify_financial_summary,
             "get_financial_summary",
+            stats=self.stats,
         )
 
     def get_historical_valuation(self, stock_code: str, years: int) -> list[HistoricalValuation]:
@@ -289,6 +322,7 @@ class _CachingFinancialDataProvider:
             _historical_valuation_list_adapter,
             _classify_historical_valuation_list,
             "get_historical_valuation",
+            stats=self.stats,
         )
 
     def get_cashflow_decomposition(self, stock_code: str) -> CashflowDecomposition | None:
@@ -302,6 +336,7 @@ class _CachingFinancialDataProvider:
             _cashflow_decomposition_adapter,
             _classify_optional,
             "get_cashflow_decomposition",
+            stats=self.stats,
         )
 
     def get_earnings_surprise_history(self, stock_code: str) -> list[EarningsSurpriseRecord]:
@@ -318,6 +353,7 @@ class _CachingFinancialDataProvider:
             _earnings_surprise_record_list_adapter,
             _classify_earnings_surprise_record_list,
             "get_earnings_surprise_history",
+            stats=self.stats,
         )
 
 
@@ -328,6 +364,7 @@ class _CachingDividendDataProvider:
     ttl_hours: int
     negative_ttl_minutes: int
     now: dt.datetime
+    stats: CacheStats | None = None
 
     def get_dividend_info(
         self, stock_code: str, fiscal_year_end_month: int | None = None
@@ -346,6 +383,7 @@ class _CachingDividendDataProvider:
             _dividend_info_adapter,
             _classify_optional,
             "get_dividend_info",
+            stats=self.stats,
         )
 
 
@@ -354,11 +392,18 @@ def _cache_config(config: AppConfig) -> WatchlistDataCacheConfig:
 
 
 def build_cached_provider_bundle(
-    base_bundle: ProviderBundle, config: AppConfig, now: dt.datetime
+    base_bundle: ProviderBundle,
+    config: AppConfig,
+    now: dt.datetime,
+    stats: CacheStats | None = None,
 ) -> ProviderBundle:
     """ウォッチリストの4つのLambdaハンドラのみで使う。`shareholder_benefit`
     (ローカル手動登録データ)・`disclosure`/`corporate_action`(既にEDINET専用
     キャッシュテーブルを持つ)はそのまま素通しする。
+
+    `stats`(計画Part B-1、Before/After比較用)を渡すと、このbundle経由の
+    全get_or_fetch()呼び出しのhit/missを集計できる。省略時は計測を行わない
+    (既存呼び出し元の挙動は変えない)。
     """
     cache_config = _cache_config(config)
     price_repo: CollectionStore[CacheEntry] = build_collection_store(
@@ -374,6 +419,7 @@ def build_cached_provider_bundle(
             cache_config.price_cache_ttl_hours,
             cache_config.negative_cache_ttl_minutes,
             now,
+            stats=stats,
         ),
         financial_data=_CachingFinancialDataProvider(
             base_bundle.financial_data,
@@ -381,6 +427,7 @@ def build_cached_provider_bundle(
             cache_config.financial_cache_ttl_hours,
             cache_config.negative_cache_ttl_minutes,
             now,
+            stats=stats,
         ),
         dividend_data=_CachingDividendDataProvider(
             base_bundle.dividend_data,
@@ -388,6 +435,7 @@ def build_cached_provider_bundle(
             cache_config.financial_cache_ttl_hours,
             cache_config.negative_cache_ttl_minutes,
             now,
+            stats=stats,
         ),
         shareholder_benefit=base_bundle.shareholder_benefit,
         disclosure=base_bundle.disclosure,
