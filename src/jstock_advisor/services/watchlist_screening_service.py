@@ -14,6 +14,7 @@ from jstock_advisor.domain.signals.watchlist_screening import (
     ExclusionReason,
     HighDividendFinancialHealthPolicy,
     MatchedCriterion,
+    MultiStyleMonitoringPolicy,
     RankingEntry,
     ScreeningPolicy,
     ScreeningPolicyResult,
@@ -42,6 +43,11 @@ class WatchlistScreeningResult:
     missing_scoring_fields: list[str]
     evaluated_at: dt.datetime
     main_metrics: dict[str, str]
+    # ウォッチリスト自動追加基準の再設計(2026-08)で追加。StockTypeClassification.
+    # classification_basisをそのまま伝播する(監査から「なぜこの銘柄が対象タイプに
+    # 該当した/しなかったか」を再現可能にするため)。Policyに依存しない汎用情報の
+    # ためactive Policyの種類に関わらず常に設定する。
+    classification_basis: list[str]
 
 
 def _aggregate_total_score(policy_results: list[ScreeningPolicyResult]) -> float:
@@ -63,9 +69,11 @@ def _build_main_metrics(input: WatchlistScreeningInput) -> dict[str, str]:
     return metrics
 
 
-def _build_policy(policy_name: str) -> ScreeningPolicy:
+def _build_policy(policy_name: str, config: AppConfig) -> ScreeningPolicy:
     if policy_name == "high_dividend_financial_health":
         return HighDividendFinancialHealthPolicy()
+    if policy_name == "multi_style_monitoring":
+        return MultiStyleMonitoringPolicy(config.screening)
     raise ValueError(f"unknown screening policy: {policy_name}")
 
 
@@ -97,7 +105,7 @@ def _shrink_ranking_entry_if_needed(entry: RankingEntry) -> RankingEntry | None:
 class WatchlistScreeningService:
     def __init__(self, config: AppConfig, policies: list[ScreeningPolicy] | None = None) -> None:
         self._config: WatchlistScreeningRulesConfig = config.watchlist_screening
-        self._policies = policies or [_build_policy(self._config.screening_policy)]
+        self._policies = policies or [_build_policy(self._config.screening_policy, config)]
 
     def evaluate(
         self,
@@ -119,6 +127,14 @@ class WatchlistScreeningService:
                 if reason not in exclusion_reasons:
                     exclusion_reasons.append(reason)
 
+        # multi_style_monitoring専用の監査用情報(StockTypeClassification.
+        # classification_basis)。テストダブル(SimpleNamespace等)にはこの属性が
+        # 無いことがあるため、無い場合は空リストとする。
+        classification = getattr(input, "stock_type_classification", None)
+        classification_basis = (
+            list(classification.classification_basis) if classification is not None else []
+        )
+
         return WatchlistScreeningResult(
             stock_code=stock_code,
             stock_name=stock_name,
@@ -126,6 +142,7 @@ class WatchlistScreeningService:
             policy_results=policy_results,
             total_score=total_score,
             matched_criteria=matched_criteria,
+            classification_basis=classification_basis,
             exclusion_reasons=exclusion_reasons,
             missing_required_fields=input.missing_required_fields,
             missing_scoring_fields=input.missing_scoring_fields,

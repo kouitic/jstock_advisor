@@ -7,9 +7,12 @@ SCORE_CRITERION_DEFINITIONSがラベル・実測値抽出・config条件文生�
 
 from __future__ import annotations
 
+import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.entities.classification import StockTypeClassification
+from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.services.screening_data_provider import WatchlistScreeningInput
 from jstock_advisor.services.watchlist_score_detail import (
     SCORE_CRITERION_DEFINITIONS,
@@ -18,6 +21,16 @@ from jstock_advisor.services.watchlist_score_detail import (
 
 _CONFIG = load_config()
 _SCORING = _CONFIG.watchlist_screening.scoring
+
+_EMPTY_CLASSIFICATION = StockTypeClassification(
+    stock_code="1234",
+    classified_at=dt.datetime(2026, 8, 1, tzinfo=dt.UTC),
+    types=[],
+    primary_type=None,
+    confidence=ConfidenceLevel.LOW,
+    classification_basis=[],
+    data_sources=[],
+)
 
 
 def _input(**overrides: object) -> WatchlistScreeningInput:
@@ -49,6 +62,10 @@ def _input(**overrides: object) -> WatchlistScreeningInput:
         next_earnings_date=None,
         missing_required_fields=[],
         missing_scoring_fields=[],
+        stock_type_classification=_EMPTY_CLASSIFICATION,
+        avg_trading_value=Decimal("100000000"),
+        disclosure_risk_keywords_found=[],
+        severe_earnings_decline=False,
     )
     defaults.update(overrides)
     return WatchlistScreeningInput(**defaults)  # type: ignore[arg-type]

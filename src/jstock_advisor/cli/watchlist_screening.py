@@ -183,7 +183,10 @@ def run(
                 unrankable_count += 1
             else:
                 detail = build_notification_detail(
-                    stock_code, result.policy_results[0].score_breakdown, screening_data.input
+                    stock_code,
+                    result.policy_results[0].score_breakdown,
+                    screening_data.input,
+                    policy_name=result.policy_results[0].policy_name,
                 )
                 if detail is not None:
                     notification_detail_by_code[stock_code] = detail

@@ -17,6 +17,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_retry
@@ -63,6 +64,15 @@ class WatchlistScreeningInput:
     next_earnings_date: dt.date | None
     missing_required_fields: list[str]
     missing_scoring_fields: list[str]
+    # --- ウォッチリスト自動追加基準の再設計(2026-08)で追加。multi_style_monitoring
+    # Policy専用。既存のBUY一次スクリーニング(domain/screening/rules.py)・
+    # 銘柄タイプ分類(domain/classification/stock_type.py)がStockSnapshot上で
+    # 既に算出済みの値をそのまま伝播するだけで、ここで新たな判定ロジックは
+    # 実装しない(高配当条件に偏らない5タイプ判定・ハード除外の共通化のため)。
+    stock_type_classification: StockTypeClassification
+    avg_trading_value: Decimal | None
+    disclosure_risk_keywords_found: list[str]
+    severe_earnings_decline: bool
 
 
 class ScreeningDataStatus(StrEnum):
@@ -161,6 +171,10 @@ def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
         next_earnings_date=snapshot.next_earnings_date,
         missing_required_fields=missing_required,
         missing_scoring_fields=missing_scoring,
+        stock_type_classification=snapshot.stock_type_classification,
+        avg_trading_value=snapshot.avg_trading_value,
+        disclosure_risk_keywords_found=snapshot.disclosure_risk_keywords_found,
+        severe_earnings_decline=snapshot.severe_earnings_decline,
     )
 
 

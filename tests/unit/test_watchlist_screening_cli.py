@@ -6,6 +6,8 @@ import pytest
 from typer.testing import CliRunner
 
 from jstock_advisor.cli import watchlist_screening as cli_module
+from jstock_advisor.domain.entities.classification import StockTypeClassification
+from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.interfaces.candidate_universe import (
     CandidateUniverseError,
 )
@@ -18,6 +20,16 @@ from jstock_advisor.services.watchlist_screening_service import WatchlistScreeni
 
 _NOW = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
 _runner = CliRunner()
+
+_EMPTY_CLASSIFICATION = StockTypeClassification(
+    stock_code="1234",
+    classified_at=_NOW,
+    types=[],
+    primary_type=None,
+    confidence=ConfidenceLevel.LOW,
+    classification_basis=[],
+    data_sources=[],
+)
 
 
 def _fake_scoring_config() -> SimpleNamespace:
@@ -110,6 +122,10 @@ def _watchlist_input(**overrides: object) -> WatchlistScreeningInput:
         next_earnings_date=None,
         missing_required_fields=[],
         missing_scoring_fields=[],
+        stock_type_classification=_EMPTY_CLASSIFICATION,
+        avg_trading_value=Decimal("100000000"),
+        disclosure_risk_keywords_found=[],
+        severe_earnings_decline=False,
     )
     defaults.update(overrides)
     return WatchlistScreeningInput(**defaults)  # type: ignore[arg-type]
@@ -170,6 +186,7 @@ def _screening_result(passed: bool) -> WatchlistScreeningResult:
         missing_scoring_fields=[],
         evaluated_at=_NOW,
         main_metrics={"配当利回り": "4.2%"},
+        classification_basis=[],
     )
 
 

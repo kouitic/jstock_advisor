@@ -9,7 +9,11 @@ enabled: true
 weekly_schedule_enabled: true
 
 # ウォッチリストへ1件以上追加があった場合のLINE通知のON/OFF。
-notification_enabled: true
+# ウォッチリスト自動追加基準の再設計(2026-08)で既定falseへ変更。ウォッチリスト
+# 追加はユーザーへ即時売買アクションを求めるものではないため(LINEは明確な
+# 売買アクションがある場合のみ送信する方針)。追加結果自体はAudit/CloudWatch/
+# CLIで従来どおり確認できる。
+notification_enabled: false
 
 candidate_universe:
   # "csv": 固定CSV(旧v1、テスト・小規模検証用に残す)。
@@ -32,17 +36,31 @@ candidate_universe:
 screening_data_provider: "stock_snapshot"
 
 # v1では単一文字列。将来は複数Policyのlist化を検討する。
-screening_policy: "high_dividend_financial_health"
+# ウォッチリスト自動追加基準の再設計(2026-08)で本番既定をmulti_style_monitoringへ
+# 変更。旧high_dividend_financial_healthは後方互換・比較用にコードは残すが、
+# 本番では使用しない。
+screening_policy: "multi_style_monitoring"
 
-# 1回の実行でウォッチリストへ追加する最大件数。
-max_watchlist_additions_per_run: 20
+# 1回の実行でウォッチリストへ追加する最大件数。ウォッチリスト自動追加基準の
+# 再設計(2026-08)で対象が5タイプ(高配当/連続増配/成長/割安/優良)へ広がったため、
+# 20→30へ引き上げ(無制限化はしない)。上限外はRANK_OUTSIDE_ADDITION_LIMITとして
+# Auditへ記録し、翌週再評価する。
+max_watchlist_additions_per_run: 30
 
 # スコア計算に使う項目(missing_scoring_fields)の欠損許容数。
-# これを超えるとスコアが合格基準以上でもデータ不足として不合格にする。
+# high_dividend_financial_health(後方互換・比較用Policy)専用。multi_style_monitoring
+# (本番既定)はStockTypeClassification側でタイプごとにデータ不足を吸収するため、
+# この一律件数方式は使わない(ウォッチリスト自動追加基準の再設計、2026-08)。
 max_missing_fields: 1
 
+# --- high_dividend_financial_health(旧Policy)専用。後方互換・比較用に残す。
+# 本番既定Policy(multi_style_monitoring)のハード除外はconfig/screening_rules.yaml
+# (config.screening)を再利用し、ここには専用の閾値を持たない(ウォッチリスト
+# 自動追加基準の再設計、2026-08)。 -----------------------------------------------
 thresholds:
   # 時価総額(円)の下限。shares_outstanding * current_priceで算出。
+  # multi_style_monitoringでは、この値をMonitoringScoreの規模ボーナス(+2点)の
+  # 判定基準としても再利用する(ハード除外としては使わない)。
   minimum_market_cap_yen: 50_000_000_000
   require_positive_operating_cash_flow: true
   exclude_dividend_cut_announced: true
@@ -81,6 +99,23 @@ scoring:
     yield_full_at_pct: 2.0
     # 優待はあるが利回りが確認できない場合、満点に対してこの割合を付与する。
     presence_only_score_ratio: 0.5
+
+# --- multi_style_monitoring(本番既定Policy)専用。ウォッチリスト自動追加基準の
+# 再設計(2026-08)で追加。合否(対象StockTypeへの該当有無)とは独立した、
+# ランキング専用スコア。価格の割安さは一切含めない。自己資本比率の閾値は
+# config/screening_rules.yamlのfinancial_health.min_equity_ratio_pctを、
+# 時価総額の閾値は上記thresholds.minimum_market_cap_yenをそれぞれ再利用する
+# (重複定義しない)。100点が上限(コード側で固定)。 -----------------------------
+monitoring_score:
+  base_score: 60.0
+  # 2タイプ目以降、1タイプにつき加算するボーナス(最大3タイプ分=24点)。
+  additional_type_bonus: 8.0
+  max_type_bonus: 24.0
+  equity_ratio_bonus: 5.0
+  positive_operating_cashflow_bonus: 5.0
+  no_deficit_bonus: 3.0
+  no_recent_dividend_cut_bonus: 3.0
+  market_cap_bonus: 2.0
 
 # --- 候補ユニバース本格対応(2026-08、第6版修正プラン)で追加 -----------------
 

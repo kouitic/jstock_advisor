@@ -60,6 +60,7 @@ def record_candidate_audit(
                         "passed": pr.passed,
                         "score": pr.score,
                         "score_breakdown": pr.score_breakdown,
+                        "hard_exclusion_reasons": pr.hard_exclusion_reasons,
                     }
                     for pr in result.policy_results
                 ],
@@ -68,6 +69,9 @@ def record_candidate_audit(
                 "missing_required_fields": result.missing_required_fields,
                 "missing_scoring_fields": result.missing_scoring_fields,
                 "main_metrics": result.main_metrics,
+                # ウォッチリスト自動追加基準の再設計(2026-08)で追加。「なぜこの銘柄が
+                # 対象タイプに該当した/しなかったか」をAuditだけから再現可能にする。
+                "classification_basis": result.classification_basis,
             }
         )
     AuditService().record(

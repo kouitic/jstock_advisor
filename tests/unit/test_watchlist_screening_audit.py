@@ -58,6 +58,7 @@ def _fake_result() -> WatchlistScreeningResult:
         missing_scoring_fields=[],
         evaluated_at=_NOW,
         main_metrics={},
+        classification_basis=[],
     )
 
 
