@@ -435,6 +435,14 @@ class WatchlistProgressStatus(StrEnum):
     FAILED = "FAILED"
 
 
+# ウォッチリスト自動運用の改善(ローテーション・自動メンテナンス、2026-08)で追加。
+# 同一のDispatcher/Worker/Queue/Reconciler基盤を、新規候補スクリーニングと
+# 既存AUTO_SCREENING銘柄の再評価(メンテナンス)の両方で共用するための識別子
+# (計画Part C-7案A)。rotation commitはJOB_TYPE_NEW_CANDIDATE_SCREENINGの
+# 場合のみ行う(計画Part A-9)。
+JOB_TYPE_NEW_CANDIDATE_SCREENING = "NEW_CANDIDATE_SCREENING"
+JOB_TYPE_WATCHLIST_MAINTENANCE = "WATCHLIST_MAINTENANCE"
+
 EXECUTION_RESULT_NORMAL = "NORMAL"
 EXECUTION_RESULT_HIGH_THROTTLE_RATE = "HIGH_THROTTLE_RATE"
 # 運用ハードニング3節: 429疑い率以外に、主要スコア項目の欠損率が閾値を超えた
@@ -570,6 +578,15 @@ class CandidateProgressRecord:
     # passed銘柄のみセットされる、通知再構築用のスコア詳細(モデル型のまま保持、
     # JSON化はこのファイル内部にのみ存在する)。
     notification_detail: WatchlistScoreDetail | None
+    # --- ウォッチリスト自動運用の改善(2026-08)で追加 ---------------------------
+    # JOB_TYPE_WATCHLIST_MAINTENANCEの場合のみセットされる(ranking_entryの
+    # メンテナンス版、計画Part C-7案A)。
+    screening_summary_json: str | None = None
+    # フェーズ別計測(計画Part B-1)。いずれもevaluate()が実行できた銘柄のみ
+    # セットされる(NOT_FOUND/DATA_ERRORの場合はdata_fetch_duration_msのみ
+    # セットされうる)。
+    data_fetch_duration_ms: int | None = None
+    scoring_duration_ms: int | None = None
 
 
 def _parse_notification_detail(raw: str | None) -> WatchlistScoreDetail | None:
@@ -598,6 +615,17 @@ def _to_progress_record(item: dict[str, Any]) -> CandidateProgressRecord:
         missing_field_names=list(item.get("missing_field_names", [])),
         total_score=(float(total_score_raw) if total_score_raw is not None else None),
         notification_detail=_parse_notification_detail(item.get("notification_detail")),
+        screening_summary_json=item.get("screening_summary_json"),
+        data_fetch_duration_ms=(
+            int(item["data_fetch_duration_ms"])
+            if item.get("data_fetch_duration_ms") is not None
+            else None
+        ),
+        scoring_duration_ms=(
+            int(item["scoring_duration_ms"])
+            if item.get("scoring_duration_ms") is not None
+            else None
+        ),
     )
 
 
@@ -765,6 +793,13 @@ def set_watchlist_batch_total(
     staged_rollout_market_segment_filter: list[str] | None = None,
     universe_count: int = 0,
     staged_rollout_excluded_count: int = 0,
+    job_type: str = "NEW_CANDIDATE_SCREENING",
+    eligible_universe_count: int = 0,
+    rotation_cycle: int | None = None,
+    rotation_start_key: list[str] | None = None,
+    rotation_end_key: list[str] | None = None,
+    rotation_wrapped: bool = False,
+    universe_signature: str | None = None,
 ) -> None:
     """1節ステップ2: 候補リスト確定後にtotalを設定し、dispatch_completedを
     falseで初期化する(この時点ではまだSQS送信を開始していないため)。
@@ -773,6 +808,17 @@ def set_watchlist_batch_total(
     market_segment_filter)・絞り込み前の候補総数・除外件数もあわせて記録する。
     finalize時点の監査ログ(watchlist_batch_finalizer._finalize_completed)が
     この値を参照する。
+
+    ウォッチリスト自動運用の改善(ローテーション・自動メンテナンス、2026-08)で
+    追加: `job_type`("NEW_CANDIDATE_SCREENING"/"WATCHLIST_MAINTENANCE")は
+    Dispatcher/Workerの共通インフラを流用するための識別子(計画Part C-7案A)。
+    rotation commitは`job_type == "NEW_CANDIDATE_SCREENING"`の場合のみ行う
+    (計画Part A-9、`watchlist_batch_finalizer._finish_batch()`が参照する)。
+    `rotation_start_key`/`rotation_end_key`はdispatch時点で選択したwindowの
+    開始・終了キー(`[market_segment, stock_code]`、`RotationCursor`をlist化
+    したもの)で、rotation commit時にそのまま`try_commit_rotation_advance()`
+    へ渡す(計画Part A-5: 業務処理確定までの間はステージングのみに使い、
+    rotation stateへは書き込まない)。
     """
     ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
     _table().update_item(
@@ -783,7 +829,14 @@ def set_watchlist_batch_total(
             "staged_rollout_candidate_limit = :candidate_limit, "
             "staged_rollout_market_segment_filter = :market_segment_filter, "
             "universe_count = :universe_count, "
-            "staged_rollout_excluded_count = :staged_rollout_excluded_count"
+            "staged_rollout_excluded_count = :staged_rollout_excluded_count, "
+            "job_type = :job_type, "
+            "eligible_universe_count = :eligible_universe_count, "
+            "rotation_cycle = :rotation_cycle, "
+            "rotation_start_key = :rotation_start_key, "
+            "rotation_end_key = :rotation_end_key, "
+            "rotation_wrapped = :rotation_wrapped, "
+            "universe_signature = :universe_signature"
         ),
         ExpressionAttributeNames={"#total": "total", "#ttl": "ttl"},
         ExpressionAttributeValues={
@@ -795,6 +848,13 @@ def set_watchlist_batch_total(
             ":market_segment_filter": staged_rollout_market_segment_filter,
             ":universe_count": universe_count,
             ":staged_rollout_excluded_count": staged_rollout_excluded_count,
+            ":job_type": job_type,
+            ":eligible_universe_count": eligible_universe_count,
+            ":rotation_cycle": rotation_cycle,
+            ":rotation_start_key": rotation_start_key,
+            ":rotation_end_key": rotation_end_key,
+            ":rotation_wrapped": rotation_wrapped,
+            ":universe_signature": universe_signature,
         },
     )
 
@@ -916,6 +976,9 @@ def complete_candidate(
     now: dt.datetime,
     total_score: float | None = None,
     notification_detail: WatchlistScoreDetail | None = None,
+    screening_summary_json: str | None = None,
+    data_fetch_duration_ms: int | None = None,
+    scoring_duration_ms: int | None = None,
 ) -> bool:
     """7/11節: Workerの通常完了経路。TransactWriteItemsで進捗行の終端確定と
     BatchRunsTable.completedの+1を原子的に行う(通常経路。17節のタイムアウト
@@ -928,6 +991,14 @@ def complete_candidate(
     と同じ「Noneでなければconditionally SET」パターンでDynamoDBへ書く。
     notification_detailはモデル型のまま引数として受け取り、JSON化はこの関数の
     内部にのみ存在する(呼び出し側はJSON文字列を一切扱わない)。
+
+    ウォッチリスト自動運用の改善(2026-08)で追加:
+    - `screening_summary_json`はJOB_TYPE_WATCHLIST_MAINTENANCEの場合のみ使う
+      (passed/matched_target_types/total_score/exclusion_reasonsをまとめた
+      JSON、`ranking_entry`のメンテナンス版に相当。計画Part C-7案A)。
+    - `data_fetch_duration_ms`/`scoring_duration_ms`はフェーズ別計測
+      (計画Part B-1)。いずれも同じ「Noneでなければconditionally SET」
+      パターンを踏襲する。
     """
     notification_detail_json = (
         notification_detail.model_dump_json() if notification_detail is not None else None
@@ -941,6 +1012,21 @@ def complete_candidate(
         + (
             ", notification_detail = :notification_detail"
             if notification_detail_json is not None
+            else ""
+        )
+        + (
+            ", screening_summary_json = :screening_summary_json"
+            if screening_summary_json is not None
+            else ""
+        )
+        + (
+            ", data_fetch_duration_ms = :data_fetch_duration_ms"
+            if data_fetch_duration_ms is not None
+            else ""
+        )
+        + (
+            ", scoring_duration_ms = :scoring_duration_ms"
+            if scoring_duration_ms is not None
             else ""
         )
         + " ADD total_processing_duration_ms :duration_ms"
@@ -965,6 +1051,12 @@ def complete_candidate(
         values[":total_score"] = Decimal(str(total_score))
     if notification_detail_json is not None:
         values[":notification_detail"] = notification_detail_json
+    if screening_summary_json is not None:
+        values[":screening_summary_json"] = screening_summary_json
+    if data_fetch_duration_ms is not None:
+        values[":data_fetch_duration_ms"] = data_fetch_duration_ms
+    if scoring_duration_ms is not None:
+        values[":scoring_duration_ms"] = scoring_duration_ms
 
     client = boto3.client("dynamodb")
     try:

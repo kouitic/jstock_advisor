@@ -204,3 +204,36 @@ stock_display_name:
   # リトライを防ぐnegative cacheの有効期間(秒)。1以上の整数。本番運用での
   # 調整・テストでの短縮のためconfig化している(固定値のコード内埋め込みは行わない)。
   jpx_name_negative_cache_ttl_seconds: 60
+
+# --- ウォッチリスト自動運用の改善(ローテーション・高速化・自動メンテナンス、2026-08)で追加 ---
+rotation:
+  # true: 永続ラウンドロビン方式(毎回未評価の候補を優先し、全市場を巡回する)。
+  # false: 従来の固定スライス方式(候補ユニバース出現順の先頭からcandidate_limit件)
+  # へフォールバックする(移行時の安全弁)。
+  enabled: true
+
+auto_removal:
+  # AUTO_SCREENING銘柄の自動メンテナンス(再評価・自動削除)自体のON/OFF。
+  # MANUAL登録銘柄は常に対象外(このフラグに関わらず保護される)。
+  enabled: true
+  # 登録からこの日数が経過するまでは、非該当が続いても削除対象にしない
+  # (企業として長期監視する価値そのものを保護するため)。
+  minimum_age_days: 90
+  # この回数だけ連続して非該当(対象5タイプいずれにも非該当、またはハード除外)と
+  # 判定された場合に削除候補となる(即時削除対象の理由=REIT/ETF化・債務超過・
+  # 継続企業の前提への重大な疑義、を除く)。
+  consecutive_not_qualified_required: 3
+  # 初回非該当(removal_candidate_since)からこの日数以上経過していることも
+  # 削除の必須条件とする。週次実行の場合consecutive_not_qualified_required=3だけ
+  # では最短約21日で削除され得るが、この値(既定28日)を追加のAND条件とすることで
+  # 一時的な状態変化による拙速な削除を防ぐ。
+  minimum_not_qualified_span_days: 28
+  # 運用ドキュメント記載用の目安値(メンテナンス実行間隔)。判定ロジックには
+  # 直接使わない。
+  stale_recheck_days: 30
+  # データ取得エラー等で有効な再評価ができないままこの日数を超えた場合、
+  # 削除はせず監査記録・運用警告に留める。
+  maximum_unconfirmed_days: 180
+  # 削除された銘柄が同一条件で再追加されるまでの最低待機日数
+  # (削除→即再追加→削除、という振動を防ぐ)。
+  readd_cooldown_days: 30

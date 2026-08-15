@@ -19,11 +19,17 @@ DECISION_TYPE_CANDIDATE = "watchlist_auto_addition_candidate_evaluation"
 # DECISION_TYPE_CANDIDATE(スクリーニング評価結果)とは別のAuditLogとして記録し、
 # 既存のDECISION_TYPE_CANDIDATEの内容・意味は変更しない。
 DECISION_TYPE_REPOSITORY_RESULT = "watchlist_auto_addition_repository_result"
+# --- ウォッチリスト自動運用の改善(ローテーション・自動メンテナンス、2026-08)で追加 ---
+DECISION_TYPE_REMOVAL = "watchlist_auto_removal"
+DECISION_TYPE_ROTATION_COMMIT = "watchlist_rotation_commit"
 
 REPOSITORY_RESULT_ADDED = "added"
 REPOSITORY_RESULT_SKIPPED_EXISTING = "skipped_existing"
 REPOSITORY_RESULT_SKIPPED_OVER_LIMIT = "skipped_over_limit"
 REPOSITORY_RESULT_FAILED = "repository_failed"
+# 計画Part C-4: 自動削除後の再追加クールダウン(readd_cooldown_days)中のため
+# 追加をスキップした場合。
+REPOSITORY_RESULT_SKIPPED_COOLDOWN = "skipped_cooldown"
 
 _MAX_ERROR_SUMMARY_LENGTH = 300
 
@@ -139,6 +145,87 @@ def record_repository_result_audit(
         input_values={"batch_id": batch_id, "stock_code": stock_code},
         calculation_formulas={},
         output_values=output_values,
+        data_sources=[],
+        rule_version=RULE_VERSION_PLACEHOLDER,
+        timestamp=now,
+    )
+
+
+def record_removal_audit(
+    stock_code: str,
+    stock_name: str | None,
+    registered_at: dt.datetime,
+    registration_policy: str | None,
+    removed_at: dt.datetime,
+    removal_reason: str,
+    removal_category: str,
+    last_monitoring_score: float | None,
+    last_matched_target_types: list[str],
+    consecutive_not_qualified_count: int,
+    hard_exclusion_reasons: list[str],
+    now: dt.datetime,
+    batch_id: str | None,
+) -> None:
+    """AUTO_SCREENING銘柄の自動削除を記録する(計画Part C-6)。
+
+    「なぜ自動で削除されたか」を後からこの記録だけで再現できることを最低限の
+    要件とする。LINE通知は行わない(即時の売買アクションを求めるものではない
+    ため、計画Part C全体の方針)。
+    """
+    AuditService().record(
+        decision_type=DECISION_TYPE_REMOVAL,
+        stock_code=stock_code,
+        input_values={"batch_id": batch_id, "stock_code": stock_code},
+        calculation_formulas={},
+        output_values={
+            "stock_name": stock_name,
+            "registered_at": registered_at.isoformat(),
+            "registration_policy": registration_policy,
+            "removed_at": removed_at.isoformat(),
+            "removal_reason": removal_reason,
+            "removal_category": removal_category,
+            "last_monitoring_score": last_monitoring_score,
+            "last_matched_target_types": last_matched_target_types,
+            "consecutive_not_qualified_count": consecutive_not_qualified_count,
+            "hard_exclusion_reasons": hard_exclusion_reasons,
+        },
+        data_sources=[],
+        rule_version=RULE_VERSION_PLACEHOLDER,
+        timestamp=now,
+    )
+
+
+def record_rotation_commit_audit(
+    batch_id: str,
+    rotation_cycle: int | None,
+    rotation_start_key: list[str] | None,
+    rotation_end_key: list[str] | None,
+    wrapped: bool,
+    selected_count: int,
+    evaluation_result_counts: dict[str, int],
+    committed: bool,
+    now: dt.datetime,
+) -> None:
+    """rotation commitの成否・選択windowの内訳を記録する(計画Part A-6)。
+
+    `evaluation_result_counts`はevaluation_result別の件数(query_all_candidate_
+    progress()の結果を集計したもの、poison stock等の内訳を後から確認できる
+    ようにする。新規の共有アトミックカウンタは追加しない)。
+    """
+    AuditService().record(
+        decision_type=DECISION_TYPE_ROTATION_COMMIT,
+        stock_code=None,
+        input_values={"batch_id": batch_id},
+        calculation_formulas={},
+        output_values={
+            "rotation_cycle": rotation_cycle,
+            "rotation_start_key": rotation_start_key,
+            "rotation_end_key": rotation_end_key,
+            "wrapped": wrapped,
+            "selected_count": selected_count,
+            "evaluation_result_counts": evaluation_result_counts,
+            "committed": committed,
+        },
         data_sources=[],
         rule_version=RULE_VERSION_PLACEHOLDER,
         timestamp=now,

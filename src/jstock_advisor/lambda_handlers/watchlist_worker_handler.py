@@ -7,6 +7,14 @@ try_finalize_if_ready(11節、maybe_finalize経由)、という流れで動作�
 カテゴリ分類(categorize_exclusion_reasons)とAuditLog記録
 (watchlist_screening_audit.record_candidate_audit)は、CLI・Terminal Failure
 Handler等と共通の関数を使う。
+
+ウォッチリスト自動運用の改善(2026-08、計画Part C-7案A)で、既存Dispatcher/
+Worker/Queue/Reconciler基盤をJOB_TYPE_WATCHLIST_MAINTENANCE(既存
+AUTO_SCREENING銘柄の再評価)とも共用するようにした。SQSメッセージ本文の
+`job_type`で分岐するのはデータ取得+評価(`WatchlistScreeningService.evaluate()`)
+の**結果の保存先**のみで、データ取得・評価ロジック自体は両job_typeで完全に
+共通のまま呼ぶ(既存候補選定用の`ranking_entry`/`notification_detail`ではなく、
+メンテナンス用の`screening_summary_json`を保存する)。
 """
 
 from __future__ import annotations
@@ -25,6 +33,8 @@ from jstock_advisor.domain.signals.watchlist_screening import (
     categorize_exclusion_reasons,
 )
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    JOB_TYPE_NEW_CANDIDATE_SCREENING,
+    JOB_TYPE_WATCHLIST_MAINTENANCE,
     WatchlistProgressStatus,
     claim_candidate_lease,
     complete_candidate,
@@ -41,10 +51,16 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.screening_data_provider import (
     ScreeningDataStatus,
-    StockSnapshotScreeningDataProvider,
+    build_screening_data_provider,
 )
-from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize
-from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
+from jstock_advisor.services.watchlist_batch_finalizer import (
+    maybe_finalize,
+    maybe_finalize_maintenance,
+)
+from jstock_advisor.services.watchlist_data_cache import CacheStats, build_cached_provider_bundle
+from jstock_advisor.services.watchlist_maintenance_service import (
+    build_maintenance_screening_summary,
+)
 from jstock_advisor.services.watchlist_score_detail import build_notification_detail
 from jstock_advisor.services.watchlist_screening_audit import record_candidate_audit
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningService
@@ -74,19 +90,38 @@ class _EvaluationOutcome:
     # notification_detailの保存条件を分離する、修正①)。
     total_score: float | None = None
     notification_detail: WatchlistScoreDetail | None = None
+    # --- ウォッチリスト自動運用の改善(2026-08)で追加。JOB_TYPE_WATCHLIST_
+    # MAINTENANCEの場合のみセットされる(ranking_entryのメンテナンス版) ---
+    screening_summary_json: str | None = None
+    # --- ウォッチリスト自動運用の改善(高速化Before計測、計画Part B-1)で追加 ---
+    # data_fetch_duration_msは常にセットされる(DATA_ERROR/NOT_FOUNDでもデータ
+    # 取得自体は試みているため)。scoring_duration_msはデータ取得成功時のみ。
+    data_fetch_duration_ms: int | None = None
+    scoring_duration_ms: int | None = None
 
 
 def _evaluate_candidate(
-    stock_code: str, batch_id: str, now: dt.datetime, providers: ProviderBundle, config: AppConfig
+    stock_code: str,
+    batch_id: str,
+    now: dt.datetime,
+    providers: ProviderBundle,
+    config: AppConfig,
+    job_type: str = JOB_TYPE_NEW_CANDIDATE_SCREENING,
 ) -> _EvaluationOutcome:
-    screening_data_provider = StockSnapshotScreeningDataProvider(providers, config)
+    screening_data_provider = build_screening_data_provider(providers, config)
+    fetch_start = dt.datetime.now(dt.UTC)
     screening_data = screening_data_provider.get_screening_input(stock_code, now)
+    data_fetch_duration_ms = int(
+        (dt.datetime.now(dt.UTC) - fetch_start).total_seconds() * 1000
+    )
 
     if screening_data.status != ScreeningDataStatus.OK or screening_data.input is None:
         # 運用ハードニング第2弾3節: DATA_ERROR(取得エラー)とNOT_FOUND(データが
         # 無かった)を区別する。両方とも旧"DATA_INSUFFICIENT"に丸めていたのを分離し、
         # compute_batch_metrics()の母数計算(screening_input_created_count)から
-        # 両方を除外できるようにする。
+        # 両方を除外できるようにする。JOB_TYPE_WATCHLIST_MAINTENANCEの場合も
+        # 同じ扱い(screening_summary_json=Noneのまま=DATA_UNAVAILABLE、
+        # watchlist_maintenance_service.evaluate_maintenance_decision参照)。
         evaluation_result = (
             "DATA_ERROR" if screening_data.status == ScreeningDataStatus.DATA_ERROR else "NOT_FOUND"
         )
@@ -103,8 +138,10 @@ def _evaluate_candidate(
             None,
             screening_data.is_provider_failure_suspected,
             screening_data.missing_fields,
+            data_fetch_duration_ms=data_fetch_duration_ms,
         )
 
+    scoring_start = dt.datetime.now(dt.UTC)
     screening_service = WatchlistScreeningService(config)
     result = screening_service.evaluate(
         stock_code, screening_data.input.stock_name, screening_data.input, now
@@ -115,6 +152,32 @@ def _evaluate_candidate(
     # 両者の保存条件を明確に分離する。
     total_score = result.total_score
     category, evaluation_result = categorize_exclusion_reasons(result.exclusion_reasons)
+
+    # 運用ハードニング3節: 例外は無かった(HTTP応答自体は成立した)が、スコア項目が
+    # 1件も取得できていない場合は、通常の一部欠損(この銘柄固有のデータ欠落)とは
+    # 区別してデータ提供元障害の疑いに算入する。
+    missing_scoring_count = len(screening_data.input.missing_scoring_fields)
+    is_provider_failure_suspected = (
+        screening_data.is_provider_failure_suspected
+        or missing_scoring_count >= _TOTAL_SCORING_FIELD_COUNT
+    )
+
+    record_candidate_audit(stock_code, result, evaluation_result, now, batch_id=batch_id)
+
+    if job_type == JOB_TYPE_WATCHLIST_MAINTENANCE:
+        summary = build_maintenance_screening_summary(result)
+        scoring_duration_ms = int((dt.datetime.now(dt.UTC) - scoring_start).total_seconds() * 1000)
+        return _EvaluationOutcome(
+            WatchlistProgressStatus.COMPLETED,
+            evaluation_result,
+            None,
+            is_provider_failure_suspected,
+            screening_data.missing_fields,
+            total_score=total_score,
+            screening_summary_json=summary.model_dump_json(),
+            data_fetch_duration_ms=data_fetch_duration_ms,
+            scoring_duration_ms=scoring_duration_ms,
+        )
 
     ranking_entry_json = None
     notification_detail: WatchlistScoreDetail | None = None
@@ -138,16 +201,7 @@ def _evaluate_candidate(
                 policy_name=result.policy_results[0].policy_name,
             )
 
-    # 運用ハードニング3節: 例外は無かった(HTTP応答自体は成立した)が、スコア項目が
-    # 1件も取得できていない場合は、通常の一部欠損(この銘柄固有のデータ欠落)とは
-    # 区別してデータ提供元障害の疑いに算入する。
-    missing_scoring_count = len(screening_data.input.missing_scoring_fields)
-    is_provider_failure_suspected = (
-        screening_data.is_provider_failure_suspected
-        or missing_scoring_count >= _TOTAL_SCORING_FIELD_COUNT
-    )
-
-    record_candidate_audit(stock_code, result, evaluation_result, now, batch_id=batch_id)
+    scoring_duration_ms = int((dt.datetime.now(dt.UTC) - scoring_start).total_seconds() * 1000)
     return _EvaluationOutcome(
         WatchlistProgressStatus.COMPLETED,
         evaluation_result,
@@ -156,6 +210,8 @@ def _evaluate_candidate(
         screening_data.missing_fields,
         total_score=total_score,
         notification_detail=notification_detail,
+        data_fetch_duration_ms=data_fetch_duration_ms,
+        scoring_duration_ms=scoring_duration_ms,
     )
 
 
@@ -171,7 +227,12 @@ def _build_notification_service(config: AppConfig) -> LineNotificationService:
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     config = load_config()
     now = dt.datetime.now(dt.UTC)
-    providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
+    # 計画Part B-1: Before/After比較用のキャッシュhit/miss計測(この1回のLambda
+    # 呼び出し内、通常SQS BatchSize=1のため1銘柄分)。永続化はせずログのみ。
+    cache_stats = CacheStats()
+    providers = build_cached_provider_bundle(
+        build_real_provider_bundle(now, config), config, now, stats=cache_stats
+    )
     notification_service = _build_notification_service(config)
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
 
@@ -180,6 +241,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         body = json.loads(record["body"])
         batch_id = body["batch_id"]
         stock_code = body["stock_code"]
+        job_type = body.get("job_type", JOB_TYPE_NEW_CANDIDATE_SCREENING)
         claim_time = dt.datetime.now(dt.UTC)
 
         lease_acquired = claim_candidate_lease(
@@ -197,7 +259,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             continue
 
         try:
-            outcome = _evaluate_candidate(stock_code, batch_id, claim_time, providers, config)
+            outcome = _evaluate_candidate(
+                stock_code, batch_id, claim_time, providers, config, job_type
+            )
         except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーでバッチ全体を止めない
             logger.exception(
                 "watchlist worker: unexpected evaluation error batch_id=%s stock_code=%s",
@@ -223,9 +287,15 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             now=completion_time,
             total_score=outcome.total_score,
             notification_detail=outcome.notification_detail,
+            screening_summary_json=outcome.screening_summary_json,
+            data_fetch_duration_ms=outcome.data_fetch_duration_ms,
+            scoring_duration_ms=outcome.scoring_duration_ms,
         )
         if completed:
-            maybe_finalize(batch_id, completion_time, providers, config, notification_service)
+            if job_type == JOB_TYPE_WATCHLIST_MAINTENANCE:
+                maybe_finalize_maintenance(batch_id, completion_time, config)
+            else:
+                maybe_finalize(batch_id, completion_time, providers, config, notification_service)
         else:
             # リース失効後に別Workerが再クレームしていた、またはReconcilerが先に
             # タイムアウト確定していた(17節「WorkerとReconcilerの競合」)。
@@ -236,4 +306,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             )
         processed.append({"stock_code": stock_code, "claimed": True, "completed": completed})
 
+    logger.info(
+        "watchlist worker cache stats hit=%d miss=%d",
+        cache_stats.hit_count,
+        cache_stats.miss_count,
+    )
     return {"processed": processed}

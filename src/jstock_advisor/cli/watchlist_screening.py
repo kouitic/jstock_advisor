@@ -34,6 +34,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     query_all_candidate_progress,
     try_operator_abort,
 )
+from jstock_advisor.infrastructure.aws.watchlist_rotation_state import get_rotation_state
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -59,7 +60,7 @@ from jstock_advisor.services.provider_factory import (
 )
 from jstock_advisor.services.screening_data_provider import (
     ScreeningDataStatus,
-    StockSnapshotScreeningDataProvider,
+    build_screening_data_provider,
 )
 from jstock_advisor.services.watchlist_addition_summary_builder import (
     WatchlistAdditionSummary,
@@ -70,7 +71,10 @@ from jstock_advisor.services.watchlist_batch_finalizer import (
     retry_finalize,
     retry_notification,
 )
-from jstock_advisor.services.watchlist_candidate_collector import WatchlistCandidateCollector
+from jstock_advisor.services.watchlist_candidate_collector import (
+    RotationCursor,
+    WatchlistCandidateCollector,
+)
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 from jstock_advisor.services.watchlist_display_name import build_stock_display_name_resolver
 from jstock_advisor.services.watchlist_score_detail import build_notification_detail
@@ -131,7 +135,7 @@ def run(
 
     providers = build_real_provider_bundle(now, config)
     universe_provider = build_candidate_universe_provider(config, now)
-    screening_data_provider = StockSnapshotScreeningDataProvider(providers, config)
+    screening_data_provider = build_screening_data_provider(providers, config)
     collector = WatchlistCandidateCollector(
         universe_provider, screening_data_provider, staged_rollout=wc.staged_rollout
     )
@@ -671,3 +675,75 @@ def abort(
         typer.echo("ABORTEDへ遷移しました。")
     else:
         typer.echo("遷移条件が不成立でした(既に終端状態へ変化していた可能性があります)。")
+
+
+@app.command("rotation-status")
+def rotation_status() -> None:
+    """永続ラウンドロビン方式(計画Part A)の現在の進捗を表示する(読み取り専用)。
+
+    cycle_number・概算進捗・現在のカーソル位置に加え、現時点のユニバースへ
+    実際にcollect_target_codes()を(rotation cursorをコミットせずに)適用した
+    次回選択プレビューを表示する。実行間にユニバースや除外対象(保有/
+    ウォッチリスト)が変化した場合、次回Dispatcher実行時の実際の選択結果とは
+    ずれ得る(あくまで参考表示、状態は一切書き換えない)。
+    """
+    config = load_config()
+    wc = config.watchlist_screening
+    if not wc.rotation.enabled:
+        typer.echo(
+            "rotation.enabled=false のため、ローテーションは無効です"
+            "(固定スライス方式で動作中)。"
+        )
+        raise typer.Exit(code=1)
+
+    state = get_rotation_state()
+    if state is None:
+        typer.echo("ローテーション状態は未作成です(初回Dispatcher実行時に作成されます)。")
+        raise typer.Exit(code=1)
+
+    now = dt.datetime.now(dt.UTC)
+    providers = build_real_provider_bundle(now, config)
+    universe_provider = build_candidate_universe_provider(config, now)
+    screening_data_provider = build_screening_data_provider(providers, config)
+    collector = WatchlistCandidateCollector(
+        universe_provider,
+        screening_data_provider,
+        staged_rollout=wc.staged_rollout,
+        rotation_enabled=True,
+    )
+    cursor: RotationCursor | None = None
+    if state.last_stock_code is not None:
+        cursor = (state.last_market_segment or "", state.last_stock_code)
+
+    try:
+        preview = collector.collect_target_codes(rotation_cursor=cursor)
+    except CandidateUniverseError as e:
+        typer.echo(f"候補銘柄ユニバースの取得に失敗しました: {e}")
+        raise typer.Exit(code=1) from e
+
+    eligible = preview.eligible_universe_count
+    progress_pct = (state.cycle_progress_selected_count / eligible * 100) if eligible else 0.0
+
+    typer.echo("=" * 50)
+    typer.echo("ウォッチリスト ローテーション状態")
+    typer.echo("=" * 50)
+    typer.echo(f"cycle_number: {state.cycle_number}周目")
+    typer.echo(
+        f"cycle進捗(概算): {state.cycle_progress_selected_count}/{eligible}件"
+        f" ({progress_pct:.1f}%)"
+    )
+    typer.echo(
+        "現在のカーソル: "
+        f"market_segment={state.last_market_segment or '-'} "
+        f"stock_code={state.last_stock_code or '(先頭から開始)'}"
+    )
+    typer.echo(f"last_started_at: {state.last_started_at}")
+    typer.echo(f"last_completed_at: {state.last_completed_at}")
+    typer.echo()
+    typer.echo(
+        f"次回選択プレビュー: {len(preview.stock_codes)}件"
+        f" (ラップ={'あり' if preview.rotation_wrapped else 'なし'})"
+    )
+    preview_codes = preview.stock_codes[:10]
+    if preview_codes:
+        typer.echo(f"  先頭{len(preview_codes)}件: {', '.join(preview_codes)}")

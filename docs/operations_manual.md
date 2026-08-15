@@ -163,7 +163,8 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 
 | 時刻 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 |
 |---|---|---|---|
-| 毎週土曜07:00 | (未登録。`infra/template.yaml`にcron直書き) | `jstock watchlist-screening run` | `WatchlistDispatcherFunction` |
+| 毎週土曜07:00 | (未登録。`infra/template.yaml`にcron直書き) | `jstock watchlist-screening run` | `WatchlistDispatcherFunction`(`job_type=NEW_CANDIDATE_SCREENING`) |
+| 毎週日曜07:00 | (未登録。`infra/template.yaml`にcron直書き) | ― | `WatchlistDispatcherFunction`(`job_type=WATCHLIST_MAINTENANCE`、2026-08-15追加) |
 | 毎時 | (未登録。`infra/template.yaml`にcron直書き) | ― | `WatchlistBatchReconcilerFunction` |
 
 候補ユニバース本格対応(2026-08-01)で、単一Lambdaの自己再帰fan-outから、
@@ -260,10 +261,63 @@ DynamoDB側の一時的な競合であり、`ConditionalCheckFailedException`と
 **銘柄ごとのウォッチリスト登録結果の確認**: `decision_type=
 watchlist_auto_addition_repository_result`のAuditLogに、`batch_id`ごとに
 各銘柄が実際に追加された(`added`)・既に登録済みで見送られた(`skipped_existing`)・
-追加件数上限外で見送られた(`skipped_over_limit`)・書き込みに失敗した
+追加件数上限外で見送られた(`skipped_over_limit`)・削除後の再追加クールダウン中
+のため見送られた(`skipped_cooldown`、2026-08-15追加)・書き込みに失敗した
 (`repository_failed`)のいずれかが記録されます。同じ`batch_id`の
 `decision_type=watchlist_auto_addition_candidate_evaluation`(スクリーニング
 評価結果)と突き合わせることで、ある銘柄がなぜ追加されなかったのかを追跡できます。
+
+### 4.1.1 永続ローテーション・自動メンテナンス(2026-08-15追加)
+
+**永続ローテーション**: 毎回固定300銘柄(先頭側のみ)しか評価していなかった
+問題を解消するため、前回どこまで評価したかを`WatchlistScreeningRotationState`
+テーブル(単一行、`rotation_id=default`)へ永続化し、次回はその続きから
+評価する巡回方式に変更した。現在の巡回状況(何周目か・概算進捗・現在の
+カーソル位置・次回選択プレビュー)は以下で確認できる。
+
+```bash
+jstock watchlist-screening rotation-status
+```
+
+`config/watchlist_screening_rules.yaml`の`rotation.enabled`を`false`にすると、
+巡回を行わず旧来の固定300件スライス方式へフォールバックできる(移行時の
+安全弁)。ローテーションの前進(コミット)は、その回の候補銘柄に対する
+ランキング・ウォッチリスト追加・通知までの業務処理が確定した時点
+(`_finish_batch()`到達時)にのみ行われる。個別銘柄の評価エラー(poison
+stock)はローテーションの前進を妨げないが、finalize処理自体(ランキング
+計算・ウォッチリスト書き込み)が技術的に失敗した場合(`FINALIZE_FAILED`)は
+その回のローテーションは前進しない(次回同じwindowから再開する)。
+
+**自動メンテナンス(自動削除)**: 毎週日曜07:00、`registration_source=
+AUTO_SCREENING`の銘柄のみを対象に再評価し、以下の条件に該当する銘柄を
+自動でウォッチリストから削除する(手動登録銘柄は対象外)。
+
+- **即時削除**: REIT/ETFへの分類変更・債務超過・継続企業の前提への重大な
+  疑義のいずれか1つでも該当すれば1回の再評価で削除する。
+- **3回連続非該当+最低継続期間**: 上記以外の理由による非該当が3週連続し、
+  かつ最初に非該当となってから`minimum_not_qualified_span_days`(既定28日)
+  以上経過した場合にのみ削除する(件数条件・期間条件は独立したAND条件)。
+- **長期確認不能**: データ取得エラー等で`maximum_unconfirmed_days`(既定
+  180日)を超えて再評価できない場合、削除はせず`decision_type=
+  watchlist_auto_removal`のAuditLogとCloudWatch Logsの警告記録に留める。
+
+削除は`decision_type=watchlist_auto_removal`のAuditLogに理由とともに
+記録される(LINE通知は行わない)。削除から`readd_cooldown_days`(既定30日)は
+`WatchlistRemovalHistoryTable`(DynamoDB Native TTLで自動失効)により同一
+銘柄の自動再追加をスキップする。この自動メンテナンスジョブは新規候補
+スクリーニングと同じDispatcher/Worker/SQSキュー/毎時Reconcilerを共用しており
+(SQSメッセージ本文の`job_type`で分岐)、専用のランキング・ウォッチリスト
+書き込み・通知フェーズは持たず、`WatchlistScreeningRotationState`も一切
+変更しない(ローテーションの前進は`job_type=NEW_CANDIDATE_SCREENING`
+専用)。
+
+**スクリーニング高速化(計測のみ、2026-08-15追加)**: `WatchlistCandidateProgressTable`の
+各行へ`data_fetch_duration_ms`/`scoring_duration_ms`(データ取得・判定計算の
+所要時間)を記録するようになり、`record_batch_audit`のfinalize集計へ
+p50/p95・平均値が追加された。判定に必要な最小限の項目のみ取得する軽量版
+Provider(`LightweightScreeningDataProvider`)も実装済みだが、
+`config/watchlist_screening_rules.yaml`の`screening_data_provider`の本番既定値は
+引き続き`stock_snapshot`のまま(`lightweight`への切替は同値性検証後に別途判断)。
 
 ---
 
