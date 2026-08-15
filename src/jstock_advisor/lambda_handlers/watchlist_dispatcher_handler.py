@@ -56,7 +56,13 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     set_watchlist_batch_total,
     try_acquire_dispatch_lease,
 )
+from jstock_advisor.infrastructure.aws.watchlist_rotation_dispatch_lease import (
+    get_rotation_dispatch_lease_status,
+    release_rotation_dispatch_lease,
+    try_acquire_rotation_dispatch_lease,
+)
 from jstock_advisor.infrastructure.aws.watchlist_rotation_state import (
+    DEFAULT_ROTATION_ID,
     create_rotation_state_if_absent,
 )
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
@@ -305,6 +311,49 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         logger.info("watchlist dispatcher: dispatch lease not acquired batch_id=%s", batch_id)
         return {"skipped": "lease_not_acquired"}
 
+    # 本番検証2026-08で発覚した二重起動対応: rotation cursorのCAS(pointer_version
+    # 楽観ロック)だけでは「同じrotation windowの二重選択・二重dispatch」自体は
+    # 防げない(cursorはfinalize時にしか前進しないため、50秒差の2回のDispatcher
+    # 起動が両方とも同じ未前進cursorを読める)。job_type=="NEW_CANDIDATE_SCREENING"
+    # かつrotation.enabled=trueの場合のみ、実際の候補選択・dispatch前に専用lease
+    # (watchlist_rotation_dispatch_lease.py)を取得し、同一windowの並行dispatchを
+    # 排他する。WATCHLIST_MAINTENANCEやrotation.enabled=false(固定スライス
+    # フォールバック)はこのleaseの対象外(候補選択がrotation windowに依存しない)。
+    rotation_lease_held = job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING and wc.rotation.enabled
+    if rotation_lease_held:
+        rotation_lease_seconds = int(wc.batch_processing_timeout_hours * 3600)
+        if not try_acquire_rotation_dispatch_lease(
+            DEFAULT_ROTATION_ID, batch_id, now, rotation_lease_seconds
+        ):
+            active_batch_id, lease_started_at, lease_expires_at = (
+                get_rotation_dispatch_lease_status(DEFAULT_ROTATION_ID)
+            )
+            logger.info(
+                "watchlist dispatcher: rotation dispatch lease unavailable, skipping "
+                "attempted_batch_id=%s active_batch_id=%s lease_expires_at=%s",
+                batch_id,
+                active_batch_id,
+                lease_expires_at,
+            )
+            record_batch_audit(
+                execution_mode="scheduled",
+                universe_provider=cu.provider,
+                screening_policies=[wc.screening_policy],
+                output_values={
+                    "execution_result": "rotation_dispatch_already_in_progress",
+                    "job_type": job_type,
+                    "block_reason": "ROTATION_DISPATCH_ALREADY_IN_PROGRESS",
+                    "attempted_batch_id": batch_id,
+                    "active_batch_id": active_batch_id,
+                    "rotation_id": DEFAULT_ROTATION_ID,
+                    "lease_started_at": lease_started_at,
+                    "lease_expires_at": lease_expires_at,
+                },
+                now=now,
+                batch_id=batch_id,
+            )
+            return {"skipped": "rotation_dispatch_in_progress"}
+
     try:
         if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING:
             stock_codes, extra_kwargs = _collect_new_candidate_targets(config, now)
@@ -312,6 +361,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             stock_codes, extra_kwargs = _collect_maintenance_targets()
     except CandidateUniverseError:
         logger.exception("watchlist candidate universe load failed batch_id=%s", batch_id)
+        if rotation_lease_held:
+            release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
             execution_mode="scheduled",
             universe_provider=cu.provider,
@@ -329,6 +380,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             batch_id,
             job_type,
         )
+        if rotation_lease_held:
+            release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
             execution_mode="scheduled",
             universe_provider=cu.provider,
@@ -364,6 +417,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             len(progress_rows),
         )
         mark_dispatch_failed(batch_id, now)
+        if rotation_lease_held:
+            release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
             execution_mode="scheduled",
             universe_provider=cu.provider,

@@ -288,6 +288,37 @@ stock)はローテーションの前進を妨げないが、finalize処理自体
 計算・ウォッチリスト書き込み)が技術的に失敗した場合(`FINALIZE_FAILED`)は
 その回のローテーションは前進しない(次回同じwindowから再開する)。
 
+**本番検証(2026-08-15)で発覚・修正した不具合**: 上記のローテーション前進
+(`try_commit_rotation_advance`/`_commit_dynamodb`)は、`WatchlistScreeningRotationState`
+テーブルの実際の保存形式(1項目全体を単一の`data`属性(JSON文字列)へ保存する、
+`infrastructure/aws/dynamodb_store.py`の`DynamoDbCollectionStore`方式)と、
+更新処理側が前提としていたスキーマ(`pointer_version`等を項目の
+トップレベル属性として直接更新)が一致しておらず、DynamoDB上では
+`ConditionExpression`が常に`ConditionalCheckFailedException`となり
+**commitが恒久的に失敗していた**(=巡回が一度も前進していなかった)。
+`data`属性全体の一致を条件とする条件付き更新へ修正し、既存の本番state
+(移行不要)のままそのまま前進できるようにした。
+
+あわせて、Dispatcherがほぼ同時に2回起動された場合、両方が同じ未前進の
+cursorを読み同一rotation windowを二重にdispatchできる問題も本番検証で
+確認された(rotation cursorのCASは「cursorの二重前進」は防ぐが「同じ
+windowの二重選択・二重dispatch」自体は防げないため)。これを防ぐため、
+`job_type="NEW_CANDIDATE_SCREENING"`かつ`rotation.enabled=true`の場合のみ、
+候補選択前に専用の軽量lease(`WatchlistRotationDispatchLeaseTable`、
+`infrastructure/aws/watchlist_rotation_dispatch_lease.py`、
+`trade_detection_run_locks`テーブルと同じ単一行・条件付き更新パターン)を
+取得するようにした。取得できなかった場合、Dispatcherは候補選択・SQS投入を
+一切行わず`{"skipped": "rotation_dispatch_in_progress"}`を返し、監査ログへ
+`block_reason=ROTATION_DISPATCH_ALREADY_IN_PROGRESS`として記録する。この
+leaseはバッチが正常/異常いずれの終端状態(COMPLETED/COMPLETED_WITH_
+NOTIFICATION_FAILURE/ABORTED/DISPATCH_FAILED/TIMED_OUT)に至った場合も
+解放されるが、万一解放されなかった場合(Lambda異常終了等)も
+`batch_processing_timeout_hours`(既定24時間)経過で自動的に失効し、次回の
+取得を妨げない。rotation cursorのCAS(前進の排他制御)とこのdispatch lease
+(同一windowの二重評価防止)は別責務であり、どちらか一方を欠かすと不具合が
+再発するため両方を維持している。`WATCHLIST_MAINTENANCE`はこのleaseの対象外
+(候補選択がrotation windowに依存しないため)。
+
 **自動メンテナンス(自動削除)**: 毎週日曜07:00、`registration_source=
 AUTO_SCREENING`の銘柄のみを対象に再評価し、以下の条件に該当する銘柄を
 自動でウォッチリストから削除する(手動登録銘柄は対象外)。
@@ -850,15 +881,17 @@ liveモードは何も永続化・送信しないため、`*_recommendation_crea
 新規インラインポリシーが積み上がり、IAMロールのインラインポリシー合計
 サイズ上限(10240バイト、拡張不可のハード上限)を超過すると、
 `sam deploy`が`UPDATE_ROLLBACK_COMPLETE`で失敗します
-(`HandlerErrorCode: ServiceLimitExceeded`)。この2関数は既に個別指定を
-やめ、同じアクション集合(CRUD/Read)のテーブル群を`Statement:`の
-`Resource`配列へ集約する形へ変更済みです。**今後この2関数へ新しい
-テーブルへのアクセスを追加する場合は、新規に`DynamoDBCrudPolicy`等の
-エントリを追加するのではなく、既存の集約Statement(`DynamoDbCrudAccess`/
-`DynamoDbReadOnlyAccess`)の`Resource`配列へ`!GetAtt <Table>.Arn`と
-`!Sub "${<Table>.Arn}/index/*"`を追記してください**(付与するアクション
-自体は変更しない)。他の関数(`WatchlistDispatcher`/`Worker`/
-`BatchReconciler`/`TerminalFailureHandler`等)はテーブル数がまだ少ないため
+(`HandlerErrorCode: ServiceLimitExceeded`)。`BuyCandidatesFunction`/
+`HoldingsWatchlistFunction`/`WatchlistDispatcherFunction`/
+`WatchlistWorkerFunction`/`WatchlistBatchReconcilerFunction`(2026-08-15、
+rotation dispatch leaseテーブル追加を機に集約)は既に個別指定をやめ、
+同じアクション集合(CRUD/Read)のテーブル群を`Statement:`の`Resource`配列へ
+集約する形へ変更済みです。**今後これらの関数へ新しいテーブルへのアクセスを
+追加する場合は、新規に`DynamoDBCrudPolicy`等のエントリを追加するのではなく、
+既存の集約Statement(`DynamoDbCrudAccess`/`DynamoDbReadOnlyAccess`)の
+`Resource`配列へ`!GetAtt <Table>.Arn`と`!Sub "${<Table>.Arn}/index/*"`を
+追記してください**(付与するアクション自体は変更しない)。
+`WatchlistTerminalFailureHandlerFunction`はテーブル数がまだ少ないため
 個別指定のままですが、今後大きく増える場合は同様の集約が必要になります。
 `sam deploy --no-execute-changeset`でchangesetを事前作成し、実行前に
 `Replacement`列がすべて`False`であることを確認してから

@@ -38,6 +38,10 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     transition_timeout_finalizing_to_timed_out,
     try_acquire_timeout_finalization,
 )
+from jstock_advisor.infrastructure.aws.watchlist_rotation_dispatch_lease import (
+    release_rotation_dispatch_lease,
+)
+from jstock_advisor.infrastructure.aws.watchlist_rotation_state import DEFAULT_ROTATION_ID
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -166,6 +170,11 @@ def _process_timeout_finalizing(
         batch_id=batch_id,
     )
     transition_timeout_finalizing_to_timed_out(batch_id, now)
+    # 本番検証2026-08対応: TIMED_OUTは_finish_batch()/_maybe_commit_rotation()の
+    # finalize経路を使わないため(モジュールdocstring参照)、rotation dispatch
+    # leaseはここで明示的に解放する(未解放のままだとlease_expires_atの自然
+    # 失効まで次のNEW_CANDIDATE_SCREENING dispatchがブロックされ続ける)。
+    release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
     logger.warning(
         "watchlist reconciler: batch timed out batch_id=%s completion_rate=%.1f%%",
         batch_id,
@@ -201,6 +210,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             timed_out = _is_timed_out(batch_item, wc.batch_processing_timeout_hours, now)
             if timed_out and mark_dispatch_failed(batch_id, now):
                 dispatch_failed += 1
+                # 本番検証2026-08対応: Dispatcher Lambdaが候補選択・SQS投入の
+                # 途中で異常終了しDISPATCHINGのまま放置された場合、rotation
+                # dispatch leaseはfinalize経路(_maybe_commit_rotation)に到達
+                # しないため明示的に解放する。
+                release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
                 logger.warning("watchlist reconciler: DISPATCH_FAILED batch_id=%s", batch_id)
             continue
 

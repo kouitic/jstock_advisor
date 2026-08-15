@@ -205,12 +205,20 @@ def record_rotation_commit_audit(
     evaluation_result_counts: dict[str, int],
     committed: bool,
     now: dt.datetime,
+    rotation_id: str | None = None,
+    expected_version: int | None = None,
+    observed_version: int | None = None,
 ) -> None:
     """rotation commitの成否・選択windowの内訳を記録する(計画Part A-6)。
 
     `evaluation_result_counts`はevaluation_result別の件数(query_all_candidate_
     progress()の結果を集計したもの、poison stock等の内訳を後から確認できる
     ようにする。新規の共有アトミックカウンタは追加しない)。
+
+    `expected_version`/`observed_version`(本番検証2026-08対応): commit失敗時に
+    「単なるconflict」だけでなく、期待したpointer_versionと実際に観測された
+    pointer_versionを両方記録し、原因調査(実際の競合かバグか)を後から
+    区別できるようにする。取得できなかった場合はNone。
     """
     AuditService().record(
         decision_type=DECISION_TYPE_ROTATION_COMMIT,
@@ -218,6 +226,7 @@ def record_rotation_commit_audit(
         input_values={"batch_id": batch_id},
         calculation_formulas={},
         output_values={
+            "rotation_id": rotation_id,
             "rotation_cycle": rotation_cycle,
             "rotation_start_key": rotation_start_key,
             "rotation_end_key": rotation_end_key,
@@ -225,6 +234,8 @@ def record_rotation_commit_audit(
             "selected_count": selected_count,
             "evaluation_result_counts": evaluation_result_counts,
             "committed": committed,
+            "expected_version": expected_version,
+            "observed_version": observed_version,
         },
         data_sources=[],
         rule_version=RULE_VERSION_PLACEHOLDER,

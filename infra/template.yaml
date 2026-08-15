@@ -774,6 +774,26 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # 本番検証(2026-08)で発覚した二重起動対応: 約50秒差の2回のDispatcher起動が
+  # 同一rotation windowを二重にSQSへdispatchした事象を受け、rotation cursorの
+  # CAS(WatchlistScreeningRotationStateTable.pointer_version)とは別責務の軽量
+  # leaseを追加した(infrastructure/aws/watchlist_rotation_dispatch_lease.py、
+  # trade_detection_run_locksテーブルと同じ単一行・条件付き更新パターン)。
+  WatchlistRotationDispatchLeaseTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-watchlist_rotation_dispatch_lease"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: rotation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: rotation_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
 
   BuyCandidatesFunction:
@@ -1101,6 +1121,8 @@ Resources:
                 - !Sub "${WatchlistScreeningRotationStateTable.Arn}/index/*"
                 - !GetAtt WatchlistRemovalHistoryTable.Arn
                 - !Sub "${WatchlistRemovalHistoryTable.Arn}/index/*"
+                - !GetAtt WatchlistRotationDispatchLeaseTable.Arn
+                - !Sub "${WatchlistRotationDispatchLeaseTable.Arn}/index/*"
             - Sid: DynamoDbReadOnlyAccess
               Effect: Allow
               Action:
@@ -1195,6 +1217,8 @@ Resources:
                 - !Sub "${WatchlistScreeningRotationStateTable.Arn}/index/*"
                 - !GetAtt WatchlistRemovalHistoryTable.Arn
                 - !Sub "${WatchlistRemovalHistoryTable.Arn}/index/*"
+                - !GetAtt WatchlistRotationDispatchLeaseTable.Arn
+                - !Sub "${WatchlistRotationDispatchLeaseTable.Arn}/index/*"
             - Sid: DynamoDbReadOnlyAccess
               Effect: Allow
               Action:
@@ -1256,19 +1280,70 @@ Resources:
       Handler: jstock_advisor.lambda_handlers.watchlist_batch_reconciler_handler.handler
       Timeout: 300
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistCandidateProgressTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
-        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistPriceCacheTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistFinancialCacheTable }
-        - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
-        - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
-        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # 本番検証(2026-08)で発覚: retry_finalize()経由でDispatcher/Worker
+        # と同じ_finalize_completed()/_maybe_commit_rotation()を呼ぶため、
+        # 従来から本来はWatchlistScreeningRotationStateTable/
+        # WatchlistRemovalHistoryTableへのCRUD権限が必要だったが付与漏れが
+        # あった(今回、二重dispatch防止leaseテーブルの追加を機に同時是正)。
+        # Dispatcher/Worker同様、個別DynamoDBCrudPolicy積み上げによるIAM
+        # インラインポリシーサイズ上限予防のためStatementへ集約する
+        # (docs/operations_manual.md 11節)。
+        - Statement:
+            - Sid: DynamoDbCrudAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
+                - !Sub "${AuditLogTable.Arn}/index/*"
+                - !GetAtt BatchRunsTable.Arn
+                - !Sub "${BatchRunsTable.Arn}/index/*"
+                - !GetAtt WatchlistCandidateProgressTable.Arn
+                - !Sub "${WatchlistCandidateProgressTable.Arn}/index/*"
+                - !GetAtt WatchlistTable.Arn
+                - !Sub "${WatchlistTable.Arn}/index/*"
+                - !GetAtt NotificationLogTable.Arn
+                - !Sub "${NotificationLogTable.Arn}/index/*"
+                - !GetAtt EdinetFilingCacheTable.Arn
+                - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDisclosureCacheTable.Arn
+                - !Sub "${EdinetDisclosureCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistPriceCacheTable.Arn
+                - !Sub "${WatchlistPriceCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistFinancialCacheTable.Arn
+                - !Sub "${WatchlistFinancialCacheTable.Arn}/index/*"
+                - !GetAtt WatchlistScreeningRotationStateTable.Arn
+                - !Sub "${WatchlistScreeningRotationStateTable.Arn}/index/*"
+                - !GetAtt WatchlistRemovalHistoryTable.Arn
+                - !Sub "${WatchlistRemovalHistoryTable.Arn}/index/*"
+                - !GetAtt WatchlistRotationDispatchLeaseTable.Arn
+                - !Sub "${WatchlistRotationDispatchLeaseTable.Arn}/index/*"
+            - Sid: DynamoDbReadOnlyAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt HoldingsTable.Arn
+                - !Sub "${HoldingsTable.Arn}/index/*"
+                - !GetAtt ShareholderBenefitsTable.Arn
+                - !Sub "${ShareholderBenefitsTable.Arn}/index/*"
+                - !GetAtt CorporateActionRegistryTable.Arn
+                - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
+                - !GetAtt StockNameOverridesTable.Arn
+                - !Sub "${StockNameOverridesTable.Arn}/index/*"
       Events:
         Hourly:
           Type: ScheduleV2

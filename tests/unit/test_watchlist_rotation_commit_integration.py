@@ -321,6 +321,40 @@ def test_poison_stock_does_not_block_rotation_commit(
     assert state.pointer_version == 2  # 1(初期作成)→2(commit成功)
 
 
+# --- 本番検証2026-08対応: _maybe_commit_rotation到達時にrotation dispatch ------
+# --- leaseを解放すること(rotation cursor CASとは別責務、両方維持する) ----------
+
+
+def test_finish_batch_releases_rotation_dispatch_lease(
+    dynamo, rotation_store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """業務処理の確定(_finish_batch到達)は、rotation cursor commitの成否に
+    かかわらず、rotation dispatch leaseを解放する唯一の正規経路でもある。"""
+    create_rotation_state_if_absent(_NOW, store_dir=rotation_store)
+    _drive_rotation_batch(
+        _NOW,
+        "batch-1",
+        [("1111", "PASSED")],
+        rotation_start_key=None,
+        rotation_end_key=["Prime", "1111"],
+    )
+    fake_repo = _FakeWatchlistRepository()
+    monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: fake_repo)
+    fake_notification = _FakeNotificationService()
+
+    release_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        finalizer_module,
+        "release_rotation_dispatch_lease",
+        lambda rotation_id, batch_id: release_calls.append((rotation_id, batch_id)),
+    )
+
+    finalized = maybe_finalize("batch-1", _NOW, _providers(), _fake_config(), fake_notification)
+    assert finalized is True
+
+    assert release_calls == [("default", "batch-1")]
+
+
 # --- テストG: ランキング処理の技術的失敗はrotation commitをブロックする ----------
 
 

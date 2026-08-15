@@ -105,8 +105,13 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     try_retry_finalize,
     try_retry_notification,
 )
+from jstock_advisor.infrastructure.aws.watchlist_rotation_dispatch_lease import (
+    release_rotation_dispatch_lease,
+)
 from jstock_advisor.infrastructure.aws.watchlist_rotation_state import (
+    DEFAULT_ROTATION_ID,
     get_rotation_state,
+    get_rotation_state_consistent,
     try_commit_rotation_advance,
 )
 from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (
@@ -608,10 +613,21 @@ def _maybe_commit_rotation(
     計画Part A-9: job_type=="NEW_CANDIDATE_SCREENING"以外(WATCHLIST_
     MAINTENANCE)は専用の`_finalize_maintenance_completed`を経由するため
     構造的にこの関数へ到達しないが、防御的に明示チェックする。
+
+    本番検証2026-08対応: この関数への到達(=業務処理の確定)は、rotation
+    dispatch leaseを解放する唯一の正規経路でもある(watchlist_rotation_
+    dispatch_lease.py)。rotation.enabled=falseでleaseがそもそも未取得の
+    バッチに対しても安全な no-op として呼んでよい。leaseの解放とcursorの
+    前進(pointer_version CAS)は別責務であり、どちらか一方を欠かすと
+    「次回dispatchが永久にブロックされる」または「同じwindowを再度dispatch
+    できてしまう」のいずれかにつながるため、両方を必ず行う。
     """
     job_type = batch_item.get("job_type", JOB_TYPE_NEW_CANDIDATE_SCREENING)
     if job_type != JOB_TYPE_NEW_CANDIDATE_SCREENING:
         return
+
+    release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
+
     rotation_end_key = batch_item.get("rotation_end_key")
     if not rotation_end_key:
         # rotation.enabled=falseで実行された場合等、rotation window自体が
@@ -630,6 +646,7 @@ def _maybe_commit_rotation(
 
     state = get_rotation_state()
     committed = False
+    observed_version: int | None = None
     if state is None:
         logger.warning(
             "watchlist rotation commit skipped: rotation state not initialized batch_id=%s",
@@ -645,10 +662,17 @@ def _maybe_commit_rotation(
             now,
         )
         if not committed:
+            conflict_state = get_rotation_state_consistent()
+            observed_version = (
+                conflict_state.pointer_version if conflict_state is not None else None
+            )
             logger.warning(
-                "watchlist rotation commit conflict batch_id=%s expected_version=%d",
+                "watchlist rotation commit conflict batch_id=%s rotation_id=%s "
+                "expected_version=%d observed_version=%s",
                 batch_id,
+                DEFAULT_ROTATION_ID,
                 state.pointer_version,
+                observed_version,
             )
 
     record_rotation_commit_audit(
@@ -661,6 +685,9 @@ def _maybe_commit_rotation(
         evaluation_result_counts,
         committed,
         now,
+        rotation_id=DEFAULT_ROTATION_ID,
+        expected_version=(state.pointer_version if state is not None else None),
+        observed_version=observed_version,
     )
 
 
