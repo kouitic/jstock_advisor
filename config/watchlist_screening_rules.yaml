@@ -32,8 +32,10 @@ candidate_universe:
   listed_issues_max_stale_hours: 1080  # 45日
   jpx400_max_stale_hours: 2160  # 90日
 
-# v1では"stock_snapshot"のみ有効。将来: "lightweight"
-screening_data_provider: "stock_snapshot"
+# shadow同値性検証(2026-08、150銘柄でDTO差分0件・業務判定差分0件を確認)を経て
+# lightweightへ切替。multi_style_monitoringが参照するフィールドのみを取得する
+# 高速版(計画Part B-2)。stock_snapshotは後方互換・比較用にコードを残す。
+screening_data_provider: "lightweight"
 
 # v1では単一文字列。将来は複数Policyのlist化を検討する。
 # ウォッチリスト自動追加基準の再設計(2026-08)で本番既定をmulti_style_monitoringへ
