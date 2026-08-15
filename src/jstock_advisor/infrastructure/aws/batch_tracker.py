@@ -478,6 +478,72 @@ _TRANSACTION_CONDITION_FAILURE_CODES = (
     "TransactionConflictException",
 )
 
+# 障害対応(2026-08-15、本番incident対応): 上記コメントの前提
+# 「呼び出し側の冪等な再試行に委ねる」が、complete_candidate()の実際の呼び出し元
+# (watchlist_worker_handler.py)では成立していなかった。TransactWriteItemsが
+# WatchlistCandidateProgressTable項目(所有権チェック付き、正当)とBatchRunsTable
+# 項目(`ADD completed :one`、条件なし・全Workerが同一項目へ同時書き込み)の
+# 2項目を1トランザクションにまとめているため、複数Workerがほぼ同時に完了報告した
+# だけでBatchRunsTable項目側がTransactionConflictExceptionを起こし、
+# トランザクション全体(進捗行の正当な条件付き更新も含む)がロールバックされる
+# ことが確認された(本番286件中1件で発生、進捗行がPROCESSINGのまま完了せず
+# 手動復旧が必要だった)。TransactionConflictExceptionは「別のWorkerが既に
+# この銘柄を完了させた」という意味ではなく、無関係なトランザクション同士が
+# たまたま同じ共有カウンタ項目に触れた一時的な競合であり、リトライすれば
+# 高確率で成功する。ConditionalCheckFailedException(本物の所有権喪失、
+# リトライすべきでない)とは区別し、_transact_write_items_with_conflict_retry()
+# 経由でのみ短いバックオフ付きリトライを行う。
+_RETRYABLE_TRANSACTION_CONFLICT_CODES = frozenset({"TransactionConflictException"})
+_MAX_TRANSACTION_CONFLICT_RETRY_ATTEMPTS = 4
+_TRANSACTION_CONFLICT_RETRY_BASE_DELAY_SECONDS = 0.05
+
+
+def _is_retryable_transaction_conflict(error: ClientError) -> bool:
+    """TransactionConflictExceptionによる失敗かどうかを判定する。
+
+    TransactWriteItemsは以下2種類の例外を投げうる:
+    - 単独の`TransactionConflictException`: 同一項目への別トランザクションの
+      同時実行によるもの。本物の条件不成立ではないため、リトライ対象。
+    - `TransactionCanceledException`: 各TransactItemごとの`CancellationReasons`
+      (Code)を持つ。`ConditionalCheckFailed`が1件でも含まれる場合は本物の
+      条件不成立(所有権喪失等)のためリトライしない。`TransactionConflict`
+      のみが理由の場合はリトライ対象とする。
+    """
+    code = error.response["Error"]["Code"]
+    if code in _RETRYABLE_TRANSACTION_CONFLICT_CODES:
+        return True
+    if code != "TransactionCanceledException":
+        return False
+    reasons = error.response.get("CancellationReasons") or []
+    reason_codes = {reason.get("Code") for reason in reasons}
+    if "ConditionalCheckFailed" in reason_codes:
+        return False
+    return "TransactionConflict" in reason_codes
+
+
+def _transact_write_items_with_conflict_retry(
+    client: Any, transact_items: list[dict[str, Any]]
+) -> None:
+    """TransactWriteItemsを実行し、一時的なTransactionConflictExceptionのみ
+    短いバックオフ(指数バックオフ+ジッター)でリトライする。
+
+    本物の条件不成立(ConditionalCheckFailedException、または
+    CancellationReasonsにConditionalCheckFailedを含むTransactionCanceledException)
+    はリトライせず、呼び出し元(このモジュールの各関数)がこれまでどおり
+    _TRANSACTION_CONDITION_FAILURE_CODES経由でFalseを返す経路へそのまま伝播させる。
+    """
+    delay = _TRANSACTION_CONFLICT_RETRY_BASE_DELAY_SECONDS
+    for attempt in range(1, _MAX_TRANSACTION_CONFLICT_RETRY_ATTEMPTS + 1):
+        try:
+            client.transact_write_items(TransactItems=transact_items)
+            return
+        except ClientError as e:
+            is_last_attempt = attempt >= _MAX_TRANSACTION_CONFLICT_RETRY_ATTEMPTS
+            if is_last_attempt or not _is_retryable_transaction_conflict(e):
+                raise
+            time.sleep(delay + random.uniform(0, delay))
+            delay *= 2
+
 
 @dataclass(frozen=True)
 class CandidateProgressRecord:
@@ -902,8 +968,9 @@ def complete_candidate(
 
     client = boto3.client("dynamodb")
     try:
-        client.transact_write_items(
-            TransactItems=[
+        _transact_write_items_with_conflict_retry(
+            client,
+            [
                 {
                     "Update": {
                         "TableName": _progress_table_name(),
@@ -922,7 +989,7 @@ def complete_candidate(
                         "ExpressionAttributeValues": {":one": _ser(1)},
                     }
                 },
-            ]
+            ],
         )
         return True
     except ClientError as e:
@@ -943,8 +1010,9 @@ def record_dispatch_send_failure(batch_id: str, stock_code: str, now: dt.datetim
         ":pending": WatchlistProgressStatus.PENDING.value,
     }
     try:
-        client.transact_write_items(
-            TransactItems=[
+        _transact_write_items_with_conflict_retry(
+            client,
+            [
                 {
                     "Update": {
                         "TableName": _progress_table_name(),
@@ -966,7 +1034,7 @@ def record_dispatch_send_failure(batch_id: str, stock_code: str, now: dt.datetim
                         "ExpressionAttributeValues": {":one": _ser(1)},
                     }
                 },
-            ]
+            ],
         )
         return True
     except ClientError as e:
@@ -987,8 +1055,9 @@ def record_terminal_failure(batch_id: str, stock_code: str, now: dt.datetime) ->
         ":processing": WatchlistProgressStatus.PROCESSING.value,
     }
     try:
-        client.transact_write_items(
-            TransactItems=[
+        _transact_write_items_with_conflict_retry(
+            client,
+            [
                 {
                     "Update": {
                         "TableName": _progress_table_name(),
@@ -1010,7 +1079,7 @@ def record_terminal_failure(batch_id: str, stock_code: str, now: dt.datetime) ->
                         "ExpressionAttributeValues": {":one": _ser(1)},
                     }
                 },
-            ]
+            ],
         )
         return True
     except ClientError as e:

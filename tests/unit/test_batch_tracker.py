@@ -1,7 +1,9 @@
 import datetime as dt
+from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from jstock_advisor.infrastructure.aws import batch_tracker
@@ -436,3 +438,222 @@ def test_complete_candidate_without_total_score_leaves_it_none(
 
     records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
     assert records[0].total_score is None
+
+
+# --- TransactWriteItems: TransactionConflictExceptionリトライ(障害対応2026-08-15) ---
+
+
+class _FlakyTransactClient:
+    """最初の`fail_times`回は指定コードのClientErrorを送出し、以降は実clientへ
+    委譲する薄いラッパー(moto実DynamoDBに対する統合的な動作確認のため)。"""
+
+    def __init__(self, real_client: Any, fail_times: int, error_code: str) -> None:
+        self._real_client = real_client
+        self._fail_times = fail_times
+        self._error_code = error_code
+        self.call_count = 0
+
+    def transact_write_items(self, **kwargs: Any) -> Any:
+        self.call_count += 1
+        if self.call_count <= self._fail_times:
+            raise ClientError(
+                {"Error": {"Code": self._error_code, "Message": "conflict"}},
+                "TransactWriteItems",
+            )
+        return self._real_client.transact_write_items(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real_client, name)
+
+
+def _patch_flaky_transact_client(
+    monkeypatch: pytest.MonkeyPatch, fail_times: int, error_code: str
+) -> _FlakyTransactClient:
+    real_client = boto3.client("dynamodb", region_name=_REGION)
+    flaky = _FlakyTransactClient(real_client, fail_times=fail_times, error_code=error_code)
+    monkeypatch.setattr(batch_tracker.boto3, "client", lambda *a, **kw: flaky)
+    return flaky
+
+
+def test_complete_candidate_retries_transaction_conflict_then_succeeds(
+    moto_progress_dynamodb: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """共有カウンタ項目への一時的なTransactionConflictExceptionは、
+    ConditionalCheckFailedExceptionと違いリトライ後に成功しうる。"""
+    _prepare_pending_row("batch-1", "1111", "owner-a")
+    flaky = _patch_flaky_transact_client(
+        monkeypatch, fail_times=1, error_code="TransactionConflictException"
+    )
+
+    result = batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=batch_tracker.WatchlistProgressStatus.COMPLETED,
+        evaluation_result="FAILED_SCORE",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+
+    assert result is True
+    assert flaky.call_count == 2
+    records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    assert records[0].status == batch_tracker.WatchlistProgressStatus.COMPLETED
+
+
+def test_complete_candidate_returns_false_after_exhausting_conflict_retries(
+    moto_progress_dynamodb: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """リトライ上限まで全てTransactionConflictExceptionが続く場合、最終的に
+    _TRANSACTION_CONDITION_FAILURE_CODES経由でFalseへ落ち(例外は投げない)、
+    呼び出し側の再試行・Reconciler確認に委ねる既存の挙動を維持する。"""
+    _prepare_pending_row("batch-1", "1111", "owner-a")
+    flaky = _patch_flaky_transact_client(
+        monkeypatch,
+        fail_times=batch_tracker._MAX_TRANSACTION_CONFLICT_RETRY_ATTEMPTS,
+        error_code="TransactionConflictException",
+    )
+
+    result = batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=batch_tracker.WatchlistProgressStatus.COMPLETED,
+        evaluation_result="FAILED_SCORE",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+
+    assert result is False
+    assert flaky.call_count == batch_tracker._MAX_TRANSACTION_CONFLICT_RETRY_ATTEMPTS
+    records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    assert records[0].status == batch_tracker.WatchlistProgressStatus.PROCESSING
+
+
+def test_complete_candidate_does_not_retry_genuine_conditional_check_failure(
+    moto_progress_dynamodb: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本物の所有権喪失(ConditionalCheckFailedException)は1回で即Falseへ
+    落ち、リトライされないこと(リースを既に失った別Workerが延々と
+    リトライし続けるのを防ぐ)。"""
+    _prepare_pending_row("batch-1", "1111", "owner-a")
+    flaky = _patch_flaky_transact_client(
+        monkeypatch, fail_times=99, error_code="ConditionalCheckFailedException"
+    )
+
+    result = batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=batch_tracker.WatchlistProgressStatus.COMPLETED,
+        evaluation_result="FAILED_SCORE",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+
+    assert result is False
+    assert flaky.call_count == 1
+
+
+def test_complete_candidate_does_not_retry_transaction_canceled_with_condition_failure(
+    moto_progress_dynamodb: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TransactionCanceledExceptionのCancellationReasonsにConditionalCheckFailed
+    が含まれる場合は、TransactionConflictと紛らわしい例外種別だが本物の
+    条件不成立として即Falseへ落ち、リトライされないこと。"""
+    _prepare_pending_row("batch-1", "1111", "owner-a")
+    real_client = boto3.client("dynamodb", region_name=_REGION)
+    call_count = 0
+
+    def _raise_canceled(**kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        raise ClientError(
+            {
+                "Error": {"Code": "TransactionCanceledException", "Message": "canceled"},
+                "CancellationReasons": [
+                    {"Code": "ConditionalCheckFailed"},
+                    {"Code": "None"},
+                ],
+            },
+            "TransactWriteItems",
+        )
+
+    class _Client:
+        transact_write_items = staticmethod(_raise_canceled)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_client, name)
+
+    monkeypatch.setattr(batch_tracker.boto3, "client", lambda *a, **kw: _Client())
+
+    result = batch_tracker.complete_candidate(
+        "batch-1",
+        "1111",
+        "owner-a",
+        terminal_status=batch_tracker.WatchlistProgressStatus.COMPLETED,
+        evaluation_result="FAILED_SCORE",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=_NOW,
+    )
+
+    assert result is False
+    assert call_count == 1
+
+
+def _prepare_dispatched_pending_row(batch_id: str, stock_code: str) -> None:
+    batch_tracker.try_acquire_dispatch_lease(batch_id, "dispatcher", _NOW, 360, 72)
+    batch_tracker.set_watchlist_batch_total(batch_id, 1, 72, _NOW)
+    batch_tracker.create_missing_candidate_progress_rows(batch_id, [stock_code], _NOW, 72)
+
+
+def test_record_dispatch_send_failure_retries_transaction_conflict_then_succeeds(
+    moto_progress_dynamodb: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_dispatched_pending_row("batch-1", "1111")
+    flaky = _patch_flaky_transact_client(
+        monkeypatch, fail_times=1, error_code="TransactionConflictException"
+    )
+
+    result = batch_tracker.record_dispatch_send_failure("batch-1", "1111", _NOW)
+
+    assert result is True
+    assert flaky.call_count == 2
+    records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    assert records[0].status == batch_tracker.WatchlistProgressStatus.FAILED
+
+
+def test_record_terminal_failure_retries_transaction_conflict_then_succeeds(
+    moto_progress_dynamodb: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_dispatched_pending_row("batch-1", "1111")
+    batch_tracker.mark_dispatch_completed("batch-1", _NOW)
+    batch_tracker.claim_candidate_lease("batch-1", "1111", "owner-a", _NOW, 240)
+    flaky = _patch_flaky_transact_client(
+        monkeypatch, fail_times=1, error_code="TransactionConflictException"
+    )
+
+    result = batch_tracker.record_terminal_failure("batch-1", "1111", _NOW)
+
+    assert result is True
+    assert flaky.call_count == 2
+    records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
+    assert records[0].status == batch_tracker.WatchlistProgressStatus.FAILED
