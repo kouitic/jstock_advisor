@@ -1500,6 +1500,28 @@ class WatchlistScreeningScoringConfig(StrictModel):
         return self
 
 
+class MonitoringScoreConfig(StrictModel):
+    """ウォッチリスト自動追加基準の再設計(2026-08)で追加。
+
+    合否(対象StockTypeへの該当有無)とは独立した、ランキング専用の
+    MonitoringScore(「ウォッチリストへ優先して入れる価値」)の配点。
+    価格の割安さは一切含めない(高い銘柄も将来の下落監視に価値があるため)。
+    自己資本比率の閾値はscreening.financial_health.min_equity_ratio_pctを、
+    時価総額の閾値はWatchlistScreeningThresholds.minimum_market_cap_yenを
+    それぞれ再利用し、ここでは重複定義しない。100点が上限(コード側で固定)。
+    """
+
+    base_score: float = Field(gt=0)
+    # 2タイプ目以降、1タイプにつき加算するボーナス。
+    additional_type_bonus: float = Field(ge=0)
+    max_type_bonus: float = Field(ge=0)
+    equity_ratio_bonus: float = Field(ge=0)
+    positive_operating_cashflow_bonus: float = Field(ge=0)
+    no_deficit_bonus: float = Field(ge=0)
+    no_recent_dividend_cut_bonus: float = Field(ge=0)
+    market_cap_bonus: float = Field(ge=0)
+
+
 class StockDisplayNameConfig(StrictModel):
     """銘柄表示名解決(通知品質改善、2026-08)向けの運用設定。
 
@@ -1532,11 +1554,15 @@ class WatchlistScreeningRulesConfig(StrictModel):
     notification_enabled: bool
     candidate_universe: CandidateUniverseConfig
     screening_data_provider: Literal["stock_snapshot"]
-    screening_policy: Literal["high_dividend_financial_health"]
+    # multi_style_monitoring: ウォッチリスト自動追加基準の再設計(2026-08)で追加した
+    # 本番既定Policy。high_dividend_financial_healthは後方互換・比較用に残す。
+    screening_policy: Literal["high_dividend_financial_health", "multi_style_monitoring"]
     max_watchlist_additions_per_run: int = Field(gt=0)
     max_missing_fields: int = Field(ge=0)
     thresholds: WatchlistScreeningThresholds
     scoring: WatchlistScreeningScoringConfig
+    # ウォッチリスト自動追加基準の再設計(2026-08)で追加。multi_style_monitoring専用。
+    monitoring_score: MonitoringScoreConfig
 
     # --- 候補ユニバース本格対応(2026-08、第6版修正プラン)で追加 -------------
     # 2節: 処理タイムアウト(業務判定)とDynamoDB TTL(物理削除)は独立した値。

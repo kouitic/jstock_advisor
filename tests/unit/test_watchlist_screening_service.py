@@ -184,6 +184,7 @@ def _result_with_main_metrics(main_metrics: dict[str, str]) -> WatchlistScreenin
         missing_scoring_fields=[],
         evaluated_at=_NOW,
         main_metrics=main_metrics,
+        classification_basis=[],
     )
 
 

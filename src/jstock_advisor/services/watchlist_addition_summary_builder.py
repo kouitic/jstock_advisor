@@ -23,6 +23,7 @@ _MAX_HIGHLIGHTS_PER_ITEM = 3
 
 _SCREENING_POLICY_LABELS: dict[str, str] = {
     "high_dividend_financial_health": "高配当・財務健全性",
+    "multi_style_monitoring": "高配当・連続増配・成長・割安・優良(複合スタイル監視)",
 }
 
 
@@ -85,14 +86,28 @@ def build_evaluation_highlights(detail: WatchlistScoreDetail | None) -> list[Eva
     ]
 
 
+_MULTI_STYLE_MONITORING_CONDITIONS: list[str] = [
+    "高配当・連続増配・成長・割安・優良のいずれか1タイプ以上に該当",
+    "重大リスク(債務超過・継続企業の前提に重大な疑義・開示リスクキーワード・"
+    "流動性不足・重大な業績悪化・ETF/REIT)に該当しない",
+]
+
+
 def describe_screening_policy_conditions(
     scoring_config: WatchlistScreeningScoringConfig,
     thresholds_config: WatchlistScreeningThresholds,
+    policy_name: str = "high_dividend_financial_health",
 ) -> list[str]:
     """評価ポリシーの条件をconfig値から動的に生成する。criterion名による
     if分岐は行わず、SCORE_CRITERION_DEFINITIONSのdescribe_conditionを
-    そのまま呼び出すのみ。
+    そのまま呼び出すのみ(high_dividend_financial_health向け)。
+
+    multi_style_monitoringは価格・スコア閾値方式ではなく「対象タイプへの該当
+    有無」で合否判定するため(ウォッチリスト自動追加基準の再設計、2026-08)、
+    scoring_config/thresholds_configには依存しない固定の説明文を返す。
     """
+    if policy_name == "multi_style_monitoring":
+        return list(_MULTI_STYLE_MONITORING_CONDITIONS)
     lines = [
         definition.describe_condition(scoring_config) for definition in SCORE_CRITERION_DEFINITIONS
     ]
@@ -143,7 +158,9 @@ def build_watchlist_addition_summary(
     return WatchlistAdditionSummary(
         policy_name=policy_name,
         policy_label=_policy_label(policy_name),
-        policy_conditions=describe_screening_policy_conditions(scoring_config, thresholds_config),
+        policy_conditions=describe_screening_policy_conditions(
+            scoring_config, thresholds_config, policy_name=policy_name
+        ),
         total_target_count=total_target_count,
         ranked_count=ranked_count,
         data_unavailable_count=data_unavailable_count,

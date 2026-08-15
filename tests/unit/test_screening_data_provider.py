@@ -43,6 +43,10 @@ def _fake_snapshot(**overrides: object) -> SimpleNamespace:
         "dividend_yield_pct": 4.0,
         "benefit_yield_pct": None,
         "next_earnings_date": None,
+        "stock_type_classification": SimpleNamespace(types=[]),
+        "avg_trading_value": Decimal("100000000"),
+        "disclosure_risk_keywords_found": [],
+        "severe_earnings_decline": False,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

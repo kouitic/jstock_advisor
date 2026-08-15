@@ -132,7 +132,10 @@ def _evaluate_candidate(
         else:
             ranking_entry_json = entry.model_dump_json()
             notification_detail = build_notification_detail(
-                stock_code, result.policy_results[0].score_breakdown, screening_data.input
+                stock_code,
+                result.policy_results[0].score_breakdown,
+                screening_data.input,
+                policy_name=result.policy_results[0].policy_name,
             )
 
     # 運用ハードニング3節: 例外は無かった(HTTP応答自体は成立した)が、スコア項目が

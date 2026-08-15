@@ -97,7 +97,9 @@ def test_watchlist_screening_defaults_are_loaded() -> None:
     config = load_config().watchlist_screening
     assert config.enabled is True
     assert config.candidate_universe.provider == "jpx"
-    assert config.max_watchlist_additions_per_run == 20
+    assert config.max_watchlist_additions_per_run == 30
+    assert config.screening_policy == "multi_style_monitoring"
+    assert config.notification_enabled is False
 
 
 def test_watchlist_screening_scoring_weights_sum_to_100() -> None:

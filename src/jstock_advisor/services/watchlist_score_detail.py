@@ -98,26 +98,59 @@ SCORE_CRITERION_DEFINITIONS: list[ScoreCriterionDefinition] = [
 ]
 
 
+# multi_style_monitoring Policy(ウォッチリスト自動追加基準の再設計、2026-08)の
+# MonitoringScore内訳キー(domain/signals/watchlist_screening.py::
+# MultiStyleMonitoringPolicy.evaluate()のbreakdown辞書キーと一致させること)の
+# 表示ラベル。旧PolicyのSCORE_CRITERION_DEFINITIONSとは配点の性質が異なる
+# (「対象タイプへの該当有無」ベースであり、config駆動の実測値抽出を持たない)
+# ため、別のシンプルな辞書として管理する。
+_MULTI_STYLE_MONITORING_SCORE_LABELS: dict[str, str] = {
+    "base": "対象タイプ該当",
+    "type_bonus": "複合タイプ",
+    "equity_ratio_bonus": "自己資本比率良好",
+    "cashflow_bonus": "営業CFプラス",
+    "no_deficit_bonus": "黒字",
+    "no_dividend_cut_bonus": "減配なし",
+    "market_cap_bonus": "時価総額規模",
+}
+
+
 def build_notification_detail(
     stock_code: str,
     score_breakdown: dict[str, float],
     input: WatchlistScreeningInput,
+    policy_name: str = "high_dividend_financial_health",
 ) -> WatchlistScoreDetail | None:
     """score_breakdown(ScreeningPolicyResult.score_breakdown)の値と、configベース
     のメタデータ(SCORE_CRITERION_DEFINITIONS)を組み合わせてWatchlistScoreDetailを
     組み立てる。MAX_NOTIFICATION_DETAIL_BYTESを超過する場合はNoneを返す
     (呼び出し側はnotification_detailをNoneのまま保存し、highlightsが空の通知と
     なるが通知全体は送信される)。
+
+    policy_name="multi_style_monitoring"の場合、score_breakdownのキーをそのまま
+    _MULTI_STYLE_MONITORING_SCORE_LABELSで表示ラベル化する(実測値抽出は行わず、
+    build_evaluation_highlights()側のスコア数値フォールバック表示に委ねる)。
     """
-    criteria = [
-        ScoreCriterionValue(
-            criterion_key=definition.criterion_key,
-            label=definition.label,
-            score=score_breakdown.get(definition.criterion_key, 0.0),
-            metric_value=definition.extract_metric(input),
-        )
-        for definition in SCORE_CRITERION_DEFINITIONS
-    ]
+    if policy_name == "multi_style_monitoring":
+        criteria = [
+            ScoreCriterionValue(
+                criterion_key=key,
+                label=_MULTI_STYLE_MONITORING_SCORE_LABELS.get(key, key),
+                score=value,
+                metric_value=None,
+            )
+            for key, value in score_breakdown.items()
+        ]
+    else:
+        criteria = [
+            ScoreCriterionValue(
+                criterion_key=definition.criterion_key,
+                label=definition.label,
+                score=score_breakdown.get(definition.criterion_key, 0.0),
+                metric_value=definition.extract_metric(input),
+            )
+            for definition in SCORE_CRITERION_DEFINITIONS
+        ]
     detail = WatchlistScoreDetail(stock_code=stock_code, criteria=criteria)
     if len(detail.model_dump_json().encode("utf-8")) > MAX_NOTIFICATION_DETAIL_BYTES:
         return None

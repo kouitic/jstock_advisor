@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
@@ -22,9 +22,11 @@ from jstock_advisor.config.models import (
     DividendYieldScoringConfig,
     EquityRatioScoringConfig,
     PayoutRatioScoringConfig,
+    ScreeningRulesConfig,
     ShareholderBenefitScoringConfig,
     WatchlistScreeningRulesConfig,
 )
+from jstock_advisor.domain.entities.enums import StockType
 from jstock_advisor.services.screening_data_provider import WatchlistScreeningInput
 
 
@@ -34,6 +36,14 @@ class MatchedCriterion(StrEnum):
     HEALTHY_PAYOUT_RATIO = "HEALTHY_PAYOUT_RATIO"
     DIVIDEND_GROWTH_TRACK_RECORD = "DIVIDEND_GROWTH_TRACK_RECORD"
     SHAREHOLDER_BENEFIT = "SHAREHOLDER_BENEFIT"
+    # --- ウォッチリスト自動追加基準の再設計(2026-08)で追加。multi_style_monitoring
+    # Policy専用。StockTypeClassification(既存の銘柄タイプ分類)のうち、
+    # ウォッチリスト追加対象とする5タイプにそのまま対応する ---
+    TARGET_INCOME = "TARGET_INCOME"
+    TARGET_DIVIDEND_GROWTH = "TARGET_DIVIDEND_GROWTH"
+    TARGET_GROWTH = "TARGET_GROWTH"
+    TARGET_VALUE = "TARGET_VALUE"
+    TARGET_QUALITY = "TARGET_QUALITY"
 
 
 class ExclusionReason(StrEnum):
@@ -49,6 +59,13 @@ class ExclusionReason(StrEnum):
     EXCLUDED_SECURITY_TYPE = "EXCLUDED_SECURITY_TYPE"
     SCORE_BELOW_THRESHOLD = "SCORE_BELOW_THRESHOLD"
     RANK_OUTSIDE_ADDITION_LIMIT = "RANK_OUTSIDE_ADDITION_LIMIT"
+    # --- ウォッチリスト自動追加基準の再設計(2026-08)で追加。multi_style_monitoring
+    # Policy専用。個別のハード除外理由はScreeningPolicyResult.hard_exclusion_reasons
+    # (人間可読な文字列)に持たせ、このenumは「重大リスクによる除外だった」という
+    # 事実のみを表す(高配当Policy固有のMARKET_CAP_BELOW_THRESHOLD等とは意味が
+    # 異なるため、既存メンバーを転用せず新設する) ---
+    HARD_EXCLUDED = "HARD_EXCLUDED"
+    FAILED_NO_TARGET_TYPE = "FAILED_NO_TARGET_TYPE"
 
 
 # 必須条件(R1〜R7)由来のExclusionReason。DATA_INSUFFICIENT/SCORE_BELOW_THRESHOLDとは
@@ -72,11 +89,25 @@ def categorize_exclusion_reasons(
 ) -> tuple[str, str]:
     """(batch_tracker用category, AuditLog用evaluation_result)を返す。
 
-    優先順位: データ不足 > 必須条件不成立 > スコア不足 > 合格。
+    優先順位: データ不足 > 必須条件不成立(重大リスクによるハード除外・対象
+    タイプ0件を含む) > スコア不足(旧Policy専用) > 合格。
+
+    HARD_EXCLUDED/FAILED_NO_TARGET_TYPE(multi_style_monitoring専用)は、
+    「必須条件が満たされなかった」という意味では既存の
+    _REQUIRED_CONDITION_REASONSと同じ性質のためcategoryは共通の
+    "required_condition_failed"へ分類する(watchlist_batch_finalizer.py等の
+    既存の集計・分岐はcategory文字列のみに依存しており、個別のExclusionReason
+    メンバーには依存しないため、この分類方式を変えても既存の呼び出し側は
+    影響を受けない)。evaluation_result(2値目)はより具体的な理由文字列を返し、
+    「対象タイプ0件」と「重大リスク除外」を監査ログ上で区別できるようにする。
     """
     reasons = set(exclusion_reasons)
     if ExclusionReason.DATA_INSUFFICIENT in reasons:
         return "data_insufficient", "DATA_INSUFFICIENT"
+    if ExclusionReason.HARD_EXCLUDED in reasons:
+        return "required_condition_failed", "FAILED_REQUIRED"
+    if ExclusionReason.FAILED_NO_TARGET_TYPE in reasons:
+        return "required_condition_failed", "FAILED_NO_TARGET_TYPE"
     if reasons & _REQUIRED_CONDITION_REASONS:
         return "required_condition_failed", "FAILED_REQUIRED"
     if ExclusionReason.SCORE_BELOW_THRESHOLD in reasons:
@@ -94,6 +125,9 @@ class ScreeningPolicyResult:
     missing_required_fields: list[str]
     missing_scoring_fields: list[str]
     score_breakdown: dict[str, float]
+    # ウォッチリスト自動追加基準の再設計(2026-08)で追加。人間可読なハード除外
+    # 理由(BUY一次スクリーニングと同じ文言)。旧Policyは常に空リスト。
+    hard_exclusion_reasons: list[str] = field(default_factory=list)
 
 
 class ScreeningPolicy(Protocol):
@@ -114,6 +148,11 @@ _MATCHED_CRITERIA_LABELS: dict[MatchedCriterion, str] = {
     MatchedCriterion.HEALTHY_PAYOUT_RATIO: "配当性向良好",
     MatchedCriterion.DIVIDEND_GROWTH_TRACK_RECORD: "増配実績あり",
     MatchedCriterion.SHAREHOLDER_BENEFIT: "株主優待あり",
+    MatchedCriterion.TARGET_INCOME: "高配当",
+    MatchedCriterion.TARGET_DIVIDEND_GROWTH: "連続増配",
+    MatchedCriterion.TARGET_GROWTH: "成長",
+    MatchedCriterion.TARGET_VALUE: "割安",
+    MatchedCriterion.TARGET_QUALITY: "優良",
 }
 
 
@@ -334,4 +373,173 @@ class HighDividendFinancialHealthPolicy:
             missing_required_fields=input.missing_required_fields,
             missing_scoring_fields=input.missing_scoring_fields,
             score_breakdown=score_breakdown,
+        )
+
+
+# ウォッチリスト自動追加基準の再設計(2026-08)で追加。「高配当だけでなく、連続増配・
+# 成長・割安・優良株を対象とし、重大リスク以外は過度にハード除外しない」という
+# 下流(BUY候補判定・保有銘柄の売却基準)と同じ方針をウォッチリスト自動追加へも
+# 適用する(HighDividendFinancialHealthPolicyは後方互換・比較用にそのまま残す)。
+_TARGET_STOCK_TYPES: frozenset[StockType] = frozenset(
+    {
+        StockType.INCOME,
+        StockType.DIVIDEND_GROWTH,
+        StockType.GROWTH,
+        StockType.VALUE,
+        StockType.QUALITY,
+    }
+)
+
+_TARGET_TYPE_TO_CRITERION: dict[StockType, MatchedCriterion] = {
+    StockType.INCOME: MatchedCriterion.TARGET_INCOME,
+    StockType.DIVIDEND_GROWTH: MatchedCriterion.TARGET_DIVIDEND_GROWTH,
+    StockType.GROWTH: MatchedCriterion.TARGET_GROWTH,
+    StockType.VALUE: MatchedCriterion.TARGET_VALUE,
+    StockType.QUALITY: MatchedCriterion.TARGET_QUALITY,
+}
+
+
+def _evaluate_hard_exclusions(
+    input: WatchlistScreeningInput, screening_rules: ScreeningRulesConfig
+) -> list[str]:
+    """downstream BUY一次スクリーニング(domain/screening/rules.py::evaluate_screening/
+    domain/signals/buy_decision.py::screen_investment_universe)と同じ設定値
+    (config.screening、config.screening.financial_health.min_equity_ratio_pct等)・
+    同じ判定材料を再利用する(閾値・業種判定ロジックを二重実装しない)。
+
+    以下2点は意図的にBUY側と揃えない:
+    - データ鮮度(screening.data_quality.max_data_age_business_days)。この経路は
+      build_stock_snapshot()直後の値をそのまま使い、営業日をまたぐ長期キャッシュを
+      挟まないため(watchlist_screening_rules.yaml側のdata_cache TTLが別途鮮度を
+      制御する)。
+    - 株主優待の廃止発表(BUY側screen_investment_universe()の追加条件)。優待の
+      有無・廃止は「投資対象として監視する価値」そのものとは無関係なため対象外。
+    """
+    reasons: list[str] = []
+    universe = screening_rules.universe
+    if universe.exclude_reit and input.security_type == "REIT":
+        reasons.append("REITは対象外です")
+    if universe.exclude_etf and input.security_type == "ETF":
+        reasons.append("ETFは対象外です")
+
+    fh = screening_rules.financial_health
+    if fh.exclude_negative_equity and input.is_debt_excess:
+        reasons.append("債務超過")
+
+    ce = screening_rules.corporate_events
+    if ce.exclude_going_concern_doubt and input.is_going_concern_doubt:
+        reasons.append("継続企業の前提に重大な疑義")
+
+    if input.avg_trading_value is not None:
+        min_value = universe.min_avg_trading_value_20d_yen
+        if input.avg_trading_value < min_value:
+            reasons.append(
+                f"平均売買代金{input.avg_trading_value:,.0f}円が基準{min_value:,}円未満"
+            )
+
+    industry_rules = screening_rules.industry_specific_rules
+    if (
+        input.industry in industry_rules.target_industry_classification
+        and industry_rules.financial_sector_action == "exclude_with_warning"
+    ):
+        reasons.append(f"業種({input.industry})は個別評価ルール未実装のため対象外")
+
+    if input.disclosure_risk_keywords_found and ce.scandal_or_delisting_risk_action == "exclude":
+        reasons.append(
+            "開示情報にリスクキーワードを検出: " + ", ".join(input.disclosure_risk_keywords_found)
+        )
+
+    if input.severe_earnings_decline:
+        reasons.append("直近決算で重大な業績悪化(営業利益が前期比30%超悪化)")
+
+    return reasons
+
+
+class MultiStyleMonitoringPolicy:
+    """高配当・連続増配・成長・割安・優良の5タイプのいずれかに該当すれば
+    ウォッチリスト追加候補とするPolicy(ウォッチリスト自動追加基準の再設計、2026-08)。
+
+    合否とランキングを分離する: 合否はStockTypeClassification(既存の銘柄タイプ
+    分類)が対象5タイプへ1件でも該当するかのみで判定し、価格の割安さ・買い
+    タイミングは一切見ない(BuySignalService側の責務のまま変更しない)。
+    ランキング専用のMonitoringScore(「ウォッチリストへ優先して入れる価値」)は
+    BUY側のcompany_quality_score・purchase_attractiveness_score等とは無関係の
+    独自指標。
+    """
+
+    policy_name = "multi_style_monitoring"
+
+    def __init__(self, screening_rules: ScreeningRulesConfig) -> None:
+        self._screening_rules = screening_rules
+
+    def evaluate(
+        self, input: WatchlistScreeningInput, config: WatchlistScreeningRulesConfig
+    ) -> ScreeningPolicyResult:
+        hard_exclusion_reasons = _evaluate_hard_exclusions(input, self._screening_rules)
+        if hard_exclusion_reasons:
+            return ScreeningPolicyResult(
+                policy_name=self.policy_name,
+                passed=False,
+                score=0.0,
+                matched_criteria=[],
+                exclusion_reasons=[ExclusionReason.HARD_EXCLUDED],
+                missing_required_fields=input.missing_required_fields,
+                missing_scoring_fields=input.missing_scoring_fields,
+                score_breakdown={},
+                hard_exclusion_reasons=hard_exclusion_reasons,
+            )
+
+        matched_types = [
+            t for t in input.stock_type_classification.types if t in _TARGET_STOCK_TYPES
+        ]
+        if not matched_types:
+            return ScreeningPolicyResult(
+                policy_name=self.policy_name,
+                passed=False,
+                score=0.0,
+                matched_criteria=[],
+                exclusion_reasons=[ExclusionReason.FAILED_NO_TARGET_TYPE],
+                missing_required_fields=input.missing_required_fields,
+                missing_scoring_fields=input.missing_scoring_fields,
+                score_breakdown={},
+            )
+        matched_criteria = [_TARGET_TYPE_TO_CRITERION[t] for t in matched_types]
+
+        ms = config.monitoring_score
+        breakdown: dict[str, float] = {"base": ms.base_score}
+        additional_types = len(matched_types) - 1
+        if additional_types > 0:
+            breakdown["type_bonus"] = min(
+                additional_types * ms.additional_type_bonus, ms.max_type_bonus
+            )
+
+        fh_screening = self._screening_rules.financial_health
+        if (
+            input.equity_ratio_pct is not None
+            and input.equity_ratio_pct >= fh_screening.min_equity_ratio_pct
+        ):
+            breakdown["equity_ratio_bonus"] = ms.equity_ratio_bonus
+        if input.operating_cashflow is not None and input.operating_cashflow > 0:
+            breakdown["cashflow_bonus"] = ms.positive_operating_cashflow_bonus
+        if not input.is_deficit:
+            breakdown["no_deficit_bonus"] = ms.no_deficit_bonus
+        if not (input.is_dividend_cut_announced or input.is_dividend_omission_announced):
+            breakdown["no_dividend_cut_bonus"] = ms.no_recent_dividend_cut_bonus
+        if (
+            input.market_cap is not None
+            and input.market_cap >= config.thresholds.minimum_market_cap_yen
+        ):
+            breakdown["market_cap_bonus"] = ms.market_cap_bonus
+
+        total_score = min(100.0, sum(breakdown.values()))
+
+        return ScreeningPolicyResult(
+            policy_name=self.policy_name,
+            passed=True,
+            score=total_score,
+            matched_criteria=matched_criteria,
+            exclusion_reasons=[],
+            missing_required_fields=input.missing_required_fields,
+            missing_scoring_fields=input.missing_scoring_fields,
+            score_breakdown=breakdown,
         )
