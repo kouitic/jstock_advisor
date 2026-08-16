@@ -470,6 +470,7 @@ def test_reconciler_retries_stale_maintenance_trigger(
     assert result["maintenance_trigger_retried"] == 1
     assert result["maintenance_trigger_retry_failed"] == 0
     assert result["maintenance_trigger_retry_skipped"] == 0
+    assert result["maintenance_trigger_retry_configuration_error"] == 0
 
 
 def test_reconciler_does_not_count_retried_when_lease_already_taken(
@@ -502,6 +503,7 @@ def test_reconciler_does_not_count_retried_when_lease_already_taken(
     assert result["maintenance_trigger_retried"] == 0
     assert result["maintenance_trigger_retry_failed"] == 0
     assert result["maintenance_trigger_retry_skipped"] == 1
+    assert result["maintenance_trigger_retry_configuration_error"] == 0
 
 
 def test_reconciler_counts_invoke_failure_as_retried_and_retry_failed(
@@ -533,6 +535,41 @@ def test_reconciler_counts_invoke_failure_as_retried_and_retry_failed(
     assert result["maintenance_trigger_retried"] == 1
     assert result["maintenance_trigger_retry_failed"] == 1
     assert result["maintenance_trigger_retry_skipped"] == 0
+    assert result["maintenance_trigger_retry_configuration_error"] == 0
+
+
+def test_reconciler_counts_configuration_error_separately_from_retried(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """再々レビュー修正(Medium、2026-08): leaseの再取得には成功したが、
+    起動先関数名の環境変数未設定(CONFIGURATION_ERROR)によりLambda invoke()
+    自体を呼ぶ前に終了したケースは、「実際にinvokeを試行した」わけではない
+    ため maintenance_trigger_retried へ含めず、専用の
+    maintenance_trigger_retry_configuration_error へのみ計上すること。"""
+    _mark_batch_completed("batch-1")
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=60
+    )
+    much_later = _NOW + dt.timedelta(hours=2)
+
+    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config, final_status):  # noqa: ANN001, ANN201
+        return finalizer_module.MaintenanceTriggerOutcome.CONFIGURATION_ERROR
+
+    monkeypatch.setattr(
+        handler_module, "maybe_trigger_maintenance", _fake_maybe_trigger_maintenance
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "dt",
+        SimpleNamespace(datetime=SimpleNamespace(now=lambda tz=None: much_later), UTC=dt.UTC),
+    )
+
+    result = handler_module.handler({}, object())
+
+    assert result["maintenance_trigger_retried"] == 0
+    assert result["maintenance_trigger_retry_failed"] == 0
+    assert result["maintenance_trigger_retry_skipped"] == 0
+    assert result["maintenance_trigger_retry_configuration_error"] == 1
 
 
 def test_reconciler_does_not_retry_maintenance_trigger_within_lease(

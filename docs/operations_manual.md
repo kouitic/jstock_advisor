@@ -419,19 +419,33 @@ Lambdaを起動しない安全策。この場合`TRIGGERED`へは確定せず、
 まま次回Reconcilerパスの対象になるため、ローカル検証後に本番実行すれば
 正しく起動できる)。
 
-**Reconciler再試行件数の計測(Medium修正、2026-08-16再修正)**:
+**Reconciler再試行件数の計測(Medium修正、2026-08-16再修正・同日再々修正)**:
 毎時Reconcilerの戻り値`maintenance_trigger_retried`は、`list_stale_
 maintenance_triggers()`で取得した各バッチについて`maybe_trigger_
 maintenance()`を呼んだ回数の単純カウントではなく、その戻り値
-(`MaintenanceTriggerOutcome`)を見て「実際にleaseを再取得してinvokeを
-試行した(=`TRIGGERED`/`INVOKE_FAILED`/`CONFIGURATION_ERROR`)」ケースのみを
-数える。他の主体が先にleaseを再取得済みだった場合(`SKIPPED_LEASE_
-UNAVAILABLE`)は「再試行を試みてすらいない」ため計上しない
-(`maintenance_trigger_retry_skipped`へ計上)。`INVOKE_FAILED`/
-`CONFIGURATION_ERROR`は`maintenance_trigger_retry_failed`でも重ねて計上する
-(retriedのうち失敗した件数)。いずれも新規の永続DynamoDBカウンタは
-追加せず、Reconciler実行1回分のin-memory集計のみをログ・戻り値(GitHub
-Issue #8のロールアウト観測で使用)に残す設計としている。
+(`MaintenanceTriggerOutcome`)を見て**「実際にLambda invoke()を試行した
+(=`TRIGGERED`/`INVOKE_FAILED`)」ケースのみ**を数える。4つのカウンタの
+意味は以下のとおり(いずれも新規の永続DynamoDBカウンタは追加せず、
+Reconciler実行1回分のin-memory集計のみをログ・戻り値(GitHub Issue #8の
+ロールアウト観測で使用)に残す設計)。
+
+- `maintenance_trigger_retried`: 実際にLambda invoke()を試行した回数
+  (`TRIGGERED`+`INVOKE_FAILED`)
+- `maintenance_trigger_retry_failed`: そのうちinvoke()自体が失敗した回数
+  (`INVOKE_FAILED`のみ)
+- `maintenance_trigger_retry_skipped`: lease競合(`SKIPPED_LEASE_
+  UNAVAILABLE`、他の主体が先にleaseを再取得済み)・`NOT_APPLICABLE`等で
+  invoke()を試行しなかった回数
+- `maintenance_trigger_retry_configuration_error`: leaseの再取得には
+  成功したが、起動先関数名の環境変数(`WATCHLIST_DISPATCHER_FUNCTION_
+  NAME`)未設定等の設定不備によりLambda invoke()呼び出し自体に到達しな
+  かった回数(`CONFIGURATION_ERROR`)
+
+**再々修正(2026-08-16)**: 当初`CONFIGURATION_ERROR`も`maintenance_trigger_
+retried`(および`retry_failed`)へ含めていたが、`CONFIGURATION_ERROR`は
+invoke()呼び出し前に終了するケースであり、「実際にinvoke()を試行した
+件数」という`retried`の定義と矛盾していたため、専用カウンタ
+(`maintenance_trigger_retry_configuration_error`)へ分離した。
 
 **スクリーニング高速化(計測のみ、2026-08-15追加)**: `WatchlistCandidateProgressTable`の
 各行へ`data_fetch_duration_ms`/`scoring_duration_ms`(データ取得・判定計算の
