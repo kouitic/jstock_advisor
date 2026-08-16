@@ -1587,7 +1587,14 @@ class AutoRemovalConfig(StrictModel):
 
 class WatchlistScreeningRulesConfig(StrictModel):
     enabled: bool
-    weekly_schedule_enabled: bool
+    # EventBridge(スケジュール自動実行)からの起動だけをON/OFFする。CLI手動
+    # 実行には影響しない。横断整合性レビュー対応(2026-08、指摘9)で
+    # weekly_schedule_enabledから改称: このフラグはNEW_CANDIDATE_SCREENING
+    # (平日毎日06:00のEventBridge起動)だけでなく、その正常finalize後に
+    # 自己invokeで起動するWATCHLIST_MAINTENANCE(独立したEventBridge Scheduleは
+    # 2026-08-16改訂で廃止済み)も含め、Dispatcherへのあらゆる起動経路を
+    # 一括で制御しており、特定のcadence(週次/日次)専用ではないため。
+    scheduled_run_enabled: bool
     notification_enabled: bool
     candidate_universe: CandidateUniverseConfig
     # Part B(高速化): "lightweight"は必要最小限の項目のみ取得するProviderへ

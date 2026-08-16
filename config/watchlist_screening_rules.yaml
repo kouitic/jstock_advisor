@@ -1,12 +1,17 @@
-# ウォッチリスト自動追加機能(週次スクリーニング)の設定。
+# ウォッチリスト自動追加機能(新規候補スクリーニング=平日毎日06:00、
+# 既存ウォッチリストのメンテナンス=日曜07:00)の設定。
 # すべてユーザーが変更可能。単位はコメントに明記。
 
 # 機能全体のON/OFF。CLI通常実行(非dry-run)・EventBridge実行の両方で
 # 実書き込み前にチェックする。--dry-runはfalseでも実行可能。
 enabled: true
 
-# EventBridge(週次自動実行)からの起動だけをON/OFFする。CLI手動実行には影響しない。
-weekly_schedule_enabled: true
+# EventBridge(スケジュール自動実行)からの起動だけをON/OFFする。CLI手動
+# 実行には影響しない。新規候補スクリーニング(平日毎日06:00)・その後続で
+# 自己invokeされるメンテナンスの両方を一括制御する(横断整合性レビュー
+# 対応2026-08、指摘9でweekly_schedule_enabledから改称。単一のcadence専用
+# ではないため)。
+scheduled_run_enabled: true
 
 # ウォッチリストへ1件以上追加があった場合のLINE通知のON/OFF。
 # ウォッチリスト自動追加基準の再設計(2026-08)で既定falseへ変更。ウォッチリスト
@@ -187,8 +192,19 @@ finalizing_stuck_threshold_minutes: 15
 max_finalize_retry_attempts: 3
 
 data_cache:
-  # 株価は日次で変わるため短めのTTL。財務・配当情報は週次実行と整合する
-  # 7日(168時間)以上のTTLとし、株価とは独立して設定する(運用ハードニング4節)。
+  # 株価は日次で変わるため短めのTTL。財務・配当情報はより低頻度(四半期毎)にしか
+  # 更新されないため、7日(168時間)以上のTTLとし、株価とは独立して設定する
+  # (運用ハードニング4節)。
+  # 横断整合性レビュー対応(2026-08、指摘2): 平日毎日06:00実行への変更後、
+  # price_cache_ttl_hours(24時間)だけでは「前営業日06:00直後に作成した
+  # キャッシュが翌営業日06:00直前でもまだ有効」という日またぎの取り違えを
+  # 防げないため、watchlist_data_cache.pyのget_latest_price/
+  # get_average_trading_valueのキャッシュキーへJST暦日を含めるよう修正した
+  # (このTTL値自体は「同一JST日内での古いキーの自然な世代交代」の役割のまま
+  # 変更していない)。financial_cache_ttl_hours(168時間)は決算発表頻度が
+  # 低く同種の副作用が比較的軽微なため、本対応では時間TTLのみを維持している
+  # (残存する鮮度課題はGitHub Issue「ウォッチリストcache戦略の最適化検討」
+  # を参照)。
   price_cache_ttl_hours: 24
   financial_cache_ttl_hours: 168
   # None・DEGRADED(必須項目が大幅欠損)な値の短期キャッシュTTL(分、運用ハードニング

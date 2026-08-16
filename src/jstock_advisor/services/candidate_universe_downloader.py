@@ -338,7 +338,7 @@ def refresh_candidate_universe_cache(
 ) -> list[DownloadOutcome]:
     """東証上場銘柄一覧・JPX400構成銘柄の両方を取得・検証・(成功時のみ)昇格する。
 
-    週次Dispatcherの通常起動時、および`jstock candidate-universe refresh`(ローカル
+    Dispatcherの通常起動時、および`jstock candidate-universe refresh`(ローカル
     リハーサル用)の両方から呼ぶ(6節: 初回キャッシュ作成フローの統一)。
     """
     cache_io = CandidateUniverseCacheIO()

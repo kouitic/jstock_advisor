@@ -1031,7 +1031,7 @@ def test_set_watchlist_batch_total_records_triggered_by_batch_id(dynamo) -> None
         5,
         72,
         _NOW,
-        job_type="WATCHLIST_MAINTENANCE",
+        job_type=batch_tracker.WatchlistJobType.WATCHLIST_MAINTENANCE,
         triggered_by_batch_id="batch-1",
         trigger_type="POST_NEW_CANDIDATE_SCREENING",
     )

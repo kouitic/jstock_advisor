@@ -75,7 +75,7 @@ class _FakeStockDisplayNameResolver:
 def _fake_config(*, enabled: bool = True) -> SimpleNamespace:
     watchlist_screening = SimpleNamespace(
         enabled=enabled,
-        weekly_schedule_enabled=True,
+        scheduled_run_enabled=True,
         candidate_universe=SimpleNamespace(
             provider="csv", csv_path="data/universe/candidate_universe.csv"
         ),

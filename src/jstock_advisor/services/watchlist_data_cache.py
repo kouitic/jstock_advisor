@@ -15,7 +15,7 @@ terminal_failure/batch_reconciler_handler.py)のみで、`buy_candidates_handler
 `stock_snapshot_service.py`は一切変更しない。
 
 `get_benchmark_price_history`はシンボル(TOPIX/セクターETF)単位でキャッシュする
-ため、週次バッチ全体で実質1〜数回しか実際のfetchが走らない(最大の削減効果)。
+ため、1回のバッチ全体で実質1〜数回しか実際のfetchが走らない(最大の削減効果)。
 
 運用ハードニング第2弾1節: yfinance系Provider実装は内部で例外を広く捕捉して
 `None`を返す実装になっているため(共有Provider実装は変更しない前提)、
@@ -24,6 +24,22 @@ terminal_failure/batch_reconciler_handler.py)のみで、`buy_candidates_handler
 は`quality_status`をVALID以外に分類し、`negative_cache_ttl_minutes`
 (既定15分)という短いTTLでのみキャッシュする。これにより一時的な取得失敗が
 最長7日間(`financial_cache_ttl_hours`)キャッシュされ続けることを防ぐ。
+
+横断整合性レビュー対応(2026-08、指摘2・High): 本モジュールのキャッシュTTL
+(`price_cache_ttl_hours`=24時間・`financial_cache_ttl_hours`=168時間)は、
+元々は週1回(毎週土曜)実行を前提に設計されており、平日毎日06:00実行への
+変更(同年08月)後もTTL値自体は据え置いたままだった。時間TTLのみに依存する
+設計では、前営業日06:00直後に作成した`get_latest_price`/
+`get_average_trading_value`のキャッシュが翌営業日06:00直前でもまだ24時間
+未満のため、前々営業日のデータを翌日の評価へ誤って再利用しうる欠陥があった。
+これを解消するため、`get_latest_price`/`get_average_trading_value`の
+キャッシュキーへ評価時点のJST暦日(`domain.jst.evaluation_date_jst`)を含め、
+日をまたいだキャッシュの再利用を構造的に防止した(`get_price_history`/
+`get_benchmark_price_history`は元々呼び出し元が指定する`start`/`end`が
+キーに含まれるため、この問題の対象外)。`get_financial_summary`等の財務・
+配当データ(168時間TTL)は決算発表頻度が低く、この日次境界による副作用が
+比較的軽微なため、本対応では時間TTLのみを維持している(残存する鮮度課題は
+GitHub Issue「ウォッチリストcache戦略の最適化検討」を参照)。
 """
 
 from __future__ import annotations
@@ -38,6 +54,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from jstock_advisor.config.models import AppConfig, WatchlistDataCacheConfig
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 from jstock_advisor.interfaces.dividend_data import DividendDataProvider
 from jstock_advisor.interfaces.financial_data import FinancialDataProvider
@@ -228,9 +245,15 @@ class _CachingMarketDataProvider:
     stats: CacheStats | None = None
 
     def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
+        # 横断整合性レビュー対応(2026-08、指摘2・High): 平日毎日06:00実行
+        # への変更に伴い、キャッシュキーへJST暦日(evaluation_date_jst)を
+        # 含めることで、日をまたいだ古いスナップショットの再利用を構造的に
+        # 防止する(時間TTLのみに依存しない)。ttl_hours(24時間)は同一JST日
+        # 内での取り違え防止・古いキーの自然な世代交代用に維持し、日付境界と
+        # 時間TTLの二重の仕組みとする。
         return get_or_fetch(
             self.repo,
-            f"latest_price:{stock_code}",
+            f"latest_price:{stock_code}:{evaluation_date_jst(self.now).isoformat()}",
             self.ttl_hours,
             self.negative_ttl_minutes,
             self.now,
@@ -258,9 +281,13 @@ class _CachingMarketDataProvider:
         )
 
     def get_average_trading_value(self, stock_code: str, business_days: int) -> Decimal | None:
+        # 指摘2対応: get_latest_priceと同じ理由でJST暦日をキャッシュキーへ
+        # 含める(直近N営業日の平均売買代金も「評価対象日を基準とした値」の
+        # ため、日をまたいだ再利用は不適切)。
         return get_or_fetch(
             self.repo,
-            f"avg_trading_value:{stock_code}:{business_days}",
+            f"avg_trading_value:{stock_code}:{business_days}:"
+            f"{evaluation_date_jst(self.now).isoformat()}",
             self.ttl_hours,
             self.negative_ttl_minutes,
             self.now,

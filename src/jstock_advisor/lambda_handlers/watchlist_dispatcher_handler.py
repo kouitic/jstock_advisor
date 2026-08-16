@@ -1,12 +1,15 @@
 """ウォッチリスト自動追加(候補ユニバース本格対応)のDispatcher Lambda(1節)。
 
-EventBridge週次トリガーで起動する。候補ユニバースの取得(Downloader)・確定
-(Collector)・進捗行の作成・SQSへのdispatchのみを行う。銘柄ごとの評価は
-WatchlistWorkerFunction(SQSトリガー、watchlist_worker_handler.py)が行う。
+EventBridgeトリガー(平日毎日06:00 JSTのNEW_CANDIDATE_SCREENING)、または同日の
+NEW_CANDIDATE_SCREENINGが正常finalizeした直後の自己invoke(WATCHLIST_
+MAINTENANCE、2026-08-16改訂で独立したEventBridge Scheduleを廃止し後続処理化)
+で起動する。候補ユニバースの取得(Downloader)・確定(Collector)・進捗行の
+作成・SQSへのdispatchのみを行う。銘柄ごとの評価はWatchlistWorkerFunction
+(SQSトリガー、watchlist_worker_handler.py)が行う。
 
 処理順序(1節):
 0. dispatch leaseの取得(18節「対策1」、同一batch_idの多重実行排除)
-1. Downloader(6節: 週次起動時に毎回実行し初回キャッシュ作成フローと統一)→
+1. Downloader(6節: 起動のたびに毎回実行し初回キャッシュ作成フローと統一)→
    CandidateUniverseProvider→WatchlistCandidateCollectorで候補確定
 2. BatchRunsTableへtotalを設定
 3. 進捗行の差分作成(18節「対策2」)+件数照合(不一致ならDISPATCH_FAILED、13節)
@@ -22,8 +25,10 @@ WatchlistWorkerFunction(SQSトリガー、watchlist_worker_handler.py)が行う�
   ここでは行わず、`watchlist_batch_finalizer._finish_batch()`が業務処理の
   確定を確認した時点でのみ行う(計画Part A-5)。
 - 既存Dispatcher/Worker/Queue/Reconciler基盤の共用(計画Part C-7案A):
-  job_type="WATCHLIST_MAINTENANCE"(EventBridge Schedulerの追加Input経由で
-  指定)の場合、候補ソースをJPXユニバースではなく`WatchlistRepository`の
+  job_type="WATCHLIST_MAINTENANCE"(2026-08-16改訂: 独立したEventBridge
+  Scheduleは廃止し、同日のNEW_CANDIDATE_SCREENINGが正常finalizeした場合のみ
+  `maybe_trigger_maintenance()`がDispatcher自身をLambda自己invokeするpayload
+  経由で指定)の場合、候補ソースをJPXユニバースではなく`WatchlistRepository`の
   AUTO_SCREENING銘柄一覧に切り替える。この場合、段階導入(staged_rollout)・
   ALLOW_FULL_MARKET_SCREENINGゲート・ローテーションはいずれも適用しない
   (対象は既に登録済みの少数銘柄のため無関係)。
@@ -47,12 +52,15 @@ from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
     CandidateProgressRecord,
+    UnknownWatchlistJobTypeError,
+    WatchlistJobType,
     create_missing_candidate_progress_rows,
     mark_candidate_dispatched,
     mark_dispatch_completed,
     mark_dispatch_failed,
     query_all_candidate_progress,
     record_dispatch_send_failure,
+    resolve_watchlist_job_type,
     set_watchlist_batch_total,
     try_acquire_dispatch_lease,
 )
@@ -169,7 +177,7 @@ def _collect_new_candidate_targets(
     cu = wc.candidate_universe
 
     if cu.provider == "jpx":
-        # 6節: 週次Dispatcherの通常起動時にDownloaderも実行する(初回キャッシュ
+        # 6節: Dispatcherの通常起動時にDownloaderも実行する(初回キャッシュ
         # 作成フローの統一)。取得・検証に失敗しても既存キャッシュで処理継続する。
         assert cu.jpx_listed_issues_url is not None
         assert cu.jpx_400_weight_url is not None
@@ -273,14 +281,29 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     config = load_config()
     wc = config.watchlist_screening
     cu = wc.candidate_universe
-    job_type = event.get("job_type", JOB_TYPE_NEW_CANDIDATE_SCREENING)
+    # 横断整合性レビュー対応(2026-08、指摘1・High): job_typeの解釈はここが
+    # 唯一の入口。EventBridge Scheduleのevent未指定時のみNEW_CANDIDATE_
+    # SCREENINGを既定値として許容し、それ以外の既知でない値(typo等)は
+    # fail-closedで即座に処理を中止する(「elseならmaintenance」という暗黙
+    # fallbackを行わない)。この時点ではdispatch leaseもBatchRunsTable行も
+    # 未作成のため、SQS投入・LINE通知は一切発生しない。
+    raw_job_type = event.get("job_type")
+    try:
+        job_type = resolve_watchlist_job_type(
+            raw_job_type, default=WatchlistJobType.NEW_CANDIDATE_SCREENING
+        )
+    except UnknownWatchlistJobTypeError:
+        logger.error(
+            "watchlist dispatcher: unknown job_type=%r, refusing to start", raw_job_type
+        )
+        return {"error": "unknown_job_type", "job_type": raw_job_type}
 
-    if not (wc.enabled and wc.weekly_schedule_enabled):
+    if not (wc.enabled and wc.scheduled_run_enabled):
         logger.info(
-            "watchlist dispatcher skipped job_type=%s enabled=%s weekly_schedule_enabled=%s",
+            "watchlist dispatcher skipped job_type=%s enabled=%s scheduled_run_enabled=%s",
             job_type,
             wc.enabled,
-            wc.weekly_schedule_enabled,
+            wc.scheduled_run_enabled,
         )
         return {"skipped": True}
 
@@ -470,7 +493,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             {
                 "Id": row.stock_code,
                 "MessageBody": json.dumps(
-                    {"batch_id": batch_id, "stock_code": row.stock_code, "job_type": job_type}
+                    {
+                        "batch_id": batch_id,
+                        "stock_code": row.stock_code,
+                        "job_type": job_type.value,
+                    }
                 ),
             }
             for row in chunk

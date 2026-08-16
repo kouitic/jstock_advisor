@@ -234,7 +234,9 @@ def _drive_rotation_batch(
     batch_id: str,
     candidates: list[tuple[str, str]],
     *,
-    job_type: str = "NEW_CANDIDATE_SCREENING",
+    job_type: batch_tracker.WatchlistJobType = (
+        batch_tracker.WatchlistJobType.NEW_CANDIDATE_SCREENING
+    ),
     rotation_cycle: int | None = 3,
     rotation_start_key: list[str] | None = None,
     rotation_end_key: list[str] | None = None,
@@ -546,7 +548,7 @@ def test_maintenance_job_never_touches_rotation_state(
     batch_id = "watchlist-maint-1"
     batch_tracker.try_acquire_dispatch_lease(batch_id, "dispatcher", _NOW, 360, 72)
     batch_tracker.set_watchlist_batch_total(
-        batch_id, 1, 72, _NOW, job_type="WATCHLIST_MAINTENANCE"
+        batch_id, 1, 72, _NOW, job_type=batch_tracker.WatchlistJobType.WATCHLIST_MAINTENANCE
     )
     batch_tracker.create_missing_candidate_progress_rows(batch_id, ["1111"], _NOW, 72)
     batch_tracker.mark_dispatch_completed(batch_id, _NOW)

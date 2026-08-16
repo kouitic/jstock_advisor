@@ -167,6 +167,27 @@ def _sell_recommendation(
     )
 
 
+def _partial_sell_recommendation(
+    stock_code: str = "4631", recommendation_id: str = "rec-partial-1"
+) -> Recommendation:
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code=stock_code,
+        stock_name="ＤＩＣ",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            recommended_limit_price=PriceWithRationale(price=Decimal("4600"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("4384"),
+        average_purchase_price_at_recommendation=Decimal("3745"),
+        shares_at_recommendation=100,
+        reasons=["含み益が閾値を超過"],
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+
+
 def _critical_risk_recommendation(stock_code: str = "1234") -> Recommendation:
     long_reason = (
         "継続企業の前提に重大な疑義が生じたため、緊急に保有内容の見直しを検討してください。"
@@ -345,6 +366,108 @@ def test_sell_sent_then_near_buy_suppressed_lower_priority(service) -> None:
     assert outcome.status == NotificationStatus.NOT_REQUIRED
     assert outcome.block_category is not None and outcome.block_category.value == "NON_ACTIONABLE"
     assert len(client.sent) == 1  # SELLの1件のみ、NEAR BUYは追加送信されない
+
+
+# --- G: PARTIAL_SELLのcross-pipeline優先度統合(横断整合性レビュー対応2026-08、指摘7) ---
+
+
+def test_partial_sell_and_sell_are_same_tier_second_one_suppressed(service) -> None:
+    """G1: 同日SELL通知済み → 同一銘柄のPARTIAL_SELLは同tier(priority 4)の
+    ためDUPLICATE_STOCK_NOTIFICATIONとして抑止される(先着優先)。"""
+    svc, client = service
+    stock_code = "4631"
+    sell = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g1")
+    partial = _partial_sell_recommendation(
+        stock_code=stock_code, recommendation_id="rec-partial-g1"
+    )
+
+    svc.send_recommendation_notification(sell, _NOW)
+    assert len(client.sent) == 1
+
+    eligibility = svc.check_cross_pipeline_priority_eligibility(partial, _NOW)
+    assert eligibility.eligible is False
+    assert eligibility.block_category is not None
+    assert eligibility.block_category.value == "DUPLICATE_STOCK_NOTIFICATION"
+
+
+def test_sell_after_partial_sell_same_tier_also_suppressed(service) -> None:
+    """G2: G1の対称ケース。同日PARTIAL_SELL通知済み → 同一銘柄の通常SELLも
+    同tierのため抑止される(sell-side通知は方向を問わず1日1回で十分という
+    業務判断)。"""
+    svc, client = service
+    stock_code = "4631"
+    partial = _partial_sell_recommendation(
+        stock_code=stock_code, recommendation_id="rec-partial-g2"
+    )
+    sell = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2")
+
+    svc.send_recommendation_notification(partial, _NOW)
+    assert len(client.sent) == 1
+
+    eligibility = svc.check_cross_pipeline_priority_eligibility(sell, _NOW)
+    assert eligibility.eligible is False
+    assert eligibility.block_category is not None
+    assert eligibility.block_category.value == "DUPLICATE_STOCK_NOTIFICATION"
+
+
+def test_partial_sell_outranks_buy_and_is_sent(service) -> None:
+    """G3: 同日BUY通知済み(priority 3) → 同一銘柄のPARTIAL_SELL(priority 4)
+    は高優先度のため貫通・送信される。"""
+    svc, client = service
+    stock_code = "9432"
+    buy = _buy_recommendation(stock_code=stock_code, recommendation_id="rec-buy-g3")
+    partial = _partial_sell_recommendation(
+        stock_code=stock_code, recommendation_id="rec-partial-g3"
+    )
+
+    svc.send_recommendation_notification(buy, _NOW)
+    assert len(client.sent) == 1
+
+    eligibility = svc.check_cross_pipeline_priority_eligibility(partial, _NOW)
+    assert eligibility.eligible is True
+
+    svc.send_recommendation_notification(partial, _NOW)
+    assert len(client.sent) == 2
+
+
+def test_buy_after_partial_sell_suppressed_as_low_priority(service) -> None:
+    """G4: G3の対称ケース。同日PARTIAL_SELL通知済み(priority 4) → 同一銘柄の
+    BUY(priority 3)は低優先度のためLOW_PRIORITYとして抑止される。"""
+    svc, client = service
+    stock_code = "9432"
+    partial = _partial_sell_recommendation(
+        stock_code=stock_code, recommendation_id="rec-partial-g4"
+    )
+    buy = _buy_recommendation(stock_code=stock_code, recommendation_id="rec-buy-g4")
+
+    svc.send_recommendation_notification(partial, _NOW)
+    assert len(client.sent) == 1
+
+    eligibility = svc.check_cross_pipeline_priority_eligibility(buy, _NOW)
+    assert eligibility.eligible is False
+    assert eligibility.block_category is not None
+    assert eligibility.block_category.value == "LOW_PRIORITY"
+
+
+def test_critical_risk_always_passes_even_after_partial_sell(service) -> None:
+    """G5: 同日PARTIAL_SELL通知済みでも、CRITICAL_RISKは優先度比較自体を
+    スキップして必ず貫通する(既存のクールダウン同様の方針、指摘7でも回帰
+    しないことを確認)。"""
+    svc, client = service
+    stock_code = "1234"
+    partial = _partial_sell_recommendation(
+        stock_code=stock_code, recommendation_id="rec-partial-g5"
+    )
+    critical = _critical_risk_recommendation(stock_code=stock_code)
+
+    svc.send_recommendation_notification(partial, _NOW)
+    assert len(client.sent) == 1
+
+    eligibility = svc.check_cross_pipeline_priority_eligibility(critical, _NOW)
+    assert eligibility.eligible is True
+
+    svc.send_recommendation_notification(critical, _NOW)
+    assert len(client.sent) == 2
 
 
 # --- C: 上値余地マトリクスとの整合性(再コードレビュー対応2026-08) ---------------

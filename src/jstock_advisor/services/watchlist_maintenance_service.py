@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from jstock_advisor.config.models import AutoRemovalConfig
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.signals.watchlist_screening import HardExclusionCode
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningResult
 
 
@@ -52,6 +53,11 @@ class MaintenanceScreeningSummary(BaseModel):
     total_score: float
     matched_target_types: list[str] = Field(default_factory=list)
     hard_exclusion_reasons: list[str] = Field(default_factory=list)
+    # 横断整合性レビュー対応(2026-08、指摘4)で追加。hard_exclusion_reasonsと
+    # 同じ順序・同じ長さで対応する構造化コード。ローリングデプロイ中に旧
+    # コードのWorkerが書き込んだJSONにはこのキーが存在しないが、Pydanticの
+    # default_factoryにより空リストとして読み戻される(後方互換)。
+    hard_exclusion_codes: list[HardExclusionCode] = Field(default_factory=list)
     policy_name: str | None = None
 
 
@@ -59,27 +65,31 @@ def build_maintenance_screening_summary(
     result: WatchlistScreeningResult,
 ) -> MaintenanceScreeningSummary:
     hard_exclusion_reasons: list[str] = []
+    hard_exclusion_codes: list[HardExclusionCode] = []
     for policy_result in result.policy_results:
         hard_exclusion_reasons.extend(policy_result.hard_exclusion_reasons)
+        hard_exclusion_codes.extend(policy_result.hard_exclusion_codes)
     return MaintenanceScreeningSummary(
         passed=result.passed,
         total_score=result.total_score,
         matched_target_types=[c.value for c in result.matched_criteria],
         hard_exclusion_reasons=hard_exclusion_reasons,
+        hard_exclusion_codes=hard_exclusion_codes,
         policy_name=result.policy_results[0].policy_name if result.policy_results else None,
     )
 
-# 即時削除(Aルート)対象の理由文字列プレフィックス。
-# domain/signals/watchlist_screening.py::_evaluate_hard_exclusions()が返す
-# 人間可読な文言(ScreeningPolicyResult.hard_exclusion_reasons)と一致させる。
-# 流動性不足("平均売買代金...")・業種未対応("業種(...)は個別評価ルール未実装")・
-# 重大業績悪化("直近決算で重大な業績悪化")・開示リスク("開示情報にリスク
-# キーワードを検出")は意図的に含めない(Bルートで扱う、レビュー修正3)。
-_IMMEDIATE_REMOVAL_REASON_PREFIXES = (
-    "REITは対象外です",
-    "ETFは対象外です",
-    "債務超過",
-    "継続企業の前提に重大な疑義",
+# 即時削除(Aルート)対象の構造化コード(横断整合性レビュー対応2026-08、
+# 指摘4)。以前はhard_exclusion_reasons(人間可読な日本語文言)への
+# str.startswith()で判定しており、文言だけを変更しても判定ロジックが静かに
+# 壊れる脆弱性があった。流動性不足・業種未対応・重大業績悪化・開示リスクは
+# 意図的に含めない(Bルートで扱う、レビュー修正3)。
+_PERMANENT_HARD_EXCLUSION_CODES = frozenset(
+    {
+        HardExclusionCode.REIT_EXCLUDED,
+        HardExclusionCode.ETF_EXCLUDED,
+        HardExclusionCode.NEGATIVE_EQUITY,
+        HardExclusionCode.GOING_CONCERN_DOUBT,
+    }
 )
 
 
@@ -100,9 +110,21 @@ class MaintenanceDecision:
     stale_unconfirmed: bool = False
 
 
-def _immediate_removal_reason(hard_exclusion_reasons: list[str]) -> str | None:
-    for reason in hard_exclusion_reasons:
-        if any(reason.startswith(prefix) for prefix in _IMMEDIATE_REMOVAL_REASON_PREFIXES):
+def _immediate_removal_reason(
+    hard_exclusion_codes: list[HardExclusionCode], hard_exclusion_reasons: list[str]
+) -> str | None:
+    """恒久的な投資対象外理由(HardExclusionCode)による即時削除判定。
+
+    後方互換(横断整合性レビュー対応2026-08、指摘4): hard_exclusion_codesが
+    空(ローリングデプロイ中に旧コードのWorkerが書き込んだscreening_summary_
+    jsonを新コードのFinalizerが読み戻したケース)の場合、hard_exclusion_
+    reasonsに恒久除外理由の文言が含まれていても構造化コードで判定できないため
+    即時削除はしない(zip()はcodesが空なら何も反復しない)。この場合でも
+    Bルート(3回連続非該当+最低継続期間)は引き続き機能するため、削除自体が
+    行われなくなるわけではなく、より安全な遅延削除へフォールバックするだけ。
+    """
+    for code, reason in zip(hard_exclusion_codes, hard_exclusion_reasons, strict=False):
+        if code in _PERMANENT_HARD_EXCLUSION_CODES:
             return reason
     return None
 
@@ -145,7 +167,9 @@ def evaluate_maintenance_decision(
 
     # 非該当(passed=False)。まずAルート(即時削除)を判定する。
     hard_exclusion_reasons = screening_summary.hard_exclusion_reasons
-    immediate_reason = _immediate_removal_reason(hard_exclusion_reasons)
+    immediate_reason = _immediate_removal_reason(
+        screening_summary.hard_exclusion_codes, hard_exclusion_reasons
+    )
 
     new_consecutive_count = item.consecutive_not_qualified_count + 1
     new_removal_candidate_since = item.removal_candidate_since or now

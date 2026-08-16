@@ -1,4 +1,4 @@
-"""ウォッチリスト自動追加(週次スクリーニング)の手動実行・dry-run確認用CLI。
+"""ウォッチリスト自動追加(新規候補スクリーニング)の手動実行・dry-run確認用CLI。
 
 Lambda(watchlist_auto_addition_handler.py)がfan-outで並列実行するのに対し、
 このCLIは単一プロセスで同期的に全銘柄を評価する(手元での確認・小規模ユニバース
@@ -97,7 +97,7 @@ from jstock_advisor.services.watchlist_screening_service import (
 # WatchlistCandidateProgressTable)を直接操作する。ローカル実行時にこれらへ接続する
 # には、運用手順書記載のAWS_LAMBDA_FUNCTION_NAME環境変数トリック(ローカルCLIから
 # 本番相当のDynamoDBバックエンドを選択させる)が必要。
-app = typer.Typer(help="ウォッチリスト自動追加(週次スクリーニング)の手動実行・運用コマンド")
+app = typer.Typer(help="ウォッチリスト自動追加(新規候補スクリーニング)の手動実行・運用コマンド")
 
 
 def _build_notification_service(config: AppConfig) -> LineNotificationService:

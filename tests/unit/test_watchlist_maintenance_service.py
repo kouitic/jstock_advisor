@@ -13,6 +13,7 @@ import datetime as dt
 from jstock_advisor.config.models import AutoRemovalConfig
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.signals.watchlist_screening import HardExclusionCode
 from jstock_advisor.services.watchlist_maintenance_service import (
     MaintenanceOutcome,
     MaintenanceScreeningSummary,
@@ -60,12 +61,14 @@ def _summary(
     total_score: float = 50.0,
     matched_target_types: list[str] | None = None,
     hard_exclusion_reasons: list[str] | None = None,
+    hard_exclusion_codes: list[HardExclusionCode] | None = None,
 ) -> MaintenanceScreeningSummary:
     return MaintenanceScreeningSummary(
         passed=passed,
         total_score=total_score,
         matched_target_types=matched_target_types or [],
         hard_exclusion_reasons=hard_exclusion_reasons or [],
+        hard_exclusion_codes=hard_exclusion_codes or [],
         policy_name="multi_style_monitoring",
     )
 
@@ -206,7 +209,11 @@ def test_f_p_debt_excess_removes_immediately_regardless_of_span_days() -> None:
     """債務超過は1回でも即削除、minimum_not_qualified_span_days(28日)未経過でも
     関係ない(Aルート、計画Part C-3)。"""
     item = _item(created_at=_NOW - dt.timedelta(days=120))  # removal_candidate_since=None
-    summary = _summary(passed=False, hard_exclusion_reasons=["債務超過のため対象外です"])
+    summary = _summary(
+        passed=False,
+        hard_exclusion_reasons=["債務超過のため対象外です"],
+        hard_exclusion_codes=[HardExclusionCode.NEGATIVE_EQUITY],
+    )
     decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
     assert decision.outcome == MaintenanceOutcome.IMMEDIATE_REMOVAL
     assert decision.removal_reason == "債務超過のため対象外です"
@@ -215,16 +222,24 @@ def test_f_p_debt_excess_removes_immediately_regardless_of_span_days() -> None:
 def test_g_going_concern_doubt_removes_immediately() -> None:
     item = _item(created_at=_NOW - dt.timedelta(days=120))
     summary = _summary(
-        passed=False, hard_exclusion_reasons=["継続企業の前提に重大な疑義があります"]
+        passed=False,
+        hard_exclusion_reasons=["継続企業の前提に重大な疑義があります"],
+        hard_exclusion_codes=[HardExclusionCode.GOING_CONCERN_DOUBT],
     )
     decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
     assert decision.outcome == MaintenanceOutcome.IMMEDIATE_REMOVAL
 
 
 def test_reit_and_etf_reasons_also_remove_immediately() -> None:
-    for reason in ("REITは対象外です", "ETFは対象外です"):
+    cases = [
+        ("REITは対象外です", HardExclusionCode.REIT_EXCLUDED),
+        ("ETFは対象外です", HardExclusionCode.ETF_EXCLUDED),
+    ]
+    for reason, code in cases:
         item = _item(created_at=_NOW - dt.timedelta(days=120))
-        summary = _summary(passed=False, hard_exclusion_reasons=[reason])
+        summary = _summary(
+            passed=False, hard_exclusion_reasons=[reason], hard_exclusion_codes=[code]
+        )
         decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
         assert decision.outcome == MaintenanceOutcome.IMMEDIATE_REMOVAL, reason
 
@@ -232,9 +247,31 @@ def test_reit_and_etf_reasons_also_remove_immediately() -> None:
 def test_immediate_removal_does_not_require_minimum_age() -> None:
     """Aルートはminimum_age_daysも無関係(登録直後でも即削除できる)。"""
     item = _item(created_at=_NOW - dt.timedelta(days=1))
-    summary = _summary(passed=False, hard_exclusion_reasons=["債務超過のため対象外です"])
+    summary = _summary(
+        passed=False,
+        hard_exclusion_reasons=["債務超過のため対象外です"],
+        hard_exclusion_codes=[HardExclusionCode.NEGATIVE_EQUITY],
+    )
     decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
     assert decision.outcome == MaintenanceOutcome.IMMEDIATE_REMOVAL
+
+
+def test_immediate_removal_requires_structured_code_not_just_reason_text() -> None:
+    """後方互換のfail-safe確認(横断整合性レビュー対応2026-08、指摘4): ローリング
+    デプロイ中に旧コードのWorkerが書き込んだscreening_summary_jsonには
+    hard_exclusion_codesが存在せず、空リストとして読み戻される。この場合
+    hard_exclusion_reasonsに恒久除外理由の文言(債務超過)が含まれていても、
+    構造化コードが無いため即時削除はせず、Bルート(3回連続非該当+span_days)
+    へフォールバックする(誤って即座に削除しない、fail safe)。"""
+    item = _item(created_at=_NOW - dt.timedelta(days=120))
+    summary = _summary(
+        passed=False,
+        hard_exclusion_reasons=["債務超過のため対象外です"],
+        hard_exclusion_codes=[],
+    )
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.KEEP
+    assert decision.updated_item.consecutive_not_qualified_count == 1
 
 
 # --- テストH: 価格タイミングは削除判定に一切使わない -------------------------------
@@ -323,7 +360,9 @@ def test_a_disclosure_risk_single_failure_does_not_remove_immediately() -> None:
     即削除しないこと(Bルート、3回連続+span_days経過が必要)。"""
     item = _item(created_at=_NOW - dt.timedelta(days=120))
     summary = _summary(
-        passed=False, hard_exclusion_reasons=["開示情報にリスクキーワードを検出しました"]
+        passed=False,
+        hard_exclusion_reasons=["開示情報にリスクキーワードを検出しました"],
+        hard_exclusion_codes=[HardExclusionCode.DISCLOSURE_RISK],
     )
     decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
     assert decision.outcome == MaintenanceOutcome.KEEP
@@ -339,7 +378,9 @@ def test_b_disclosure_risk_three_consecutive_with_age_and_span_removes_via_b_rou
         removal_candidate_since=_NOW - dt.timedelta(days=28),
     )
     summary = _summary(
-        passed=False, hard_exclusion_reasons=["開示情報にリスクキーワードを検出しました"]
+        passed=False,
+        hard_exclusion_reasons=["開示情報にリスクキーワードを検出しました"],
+        hard_exclusion_codes=[HardExclusionCode.DISCLOSURE_RISK],
     )
     decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
     assert decision.outcome == MaintenanceOutcome.CONSECUTIVE_NOT_QUALIFIED_REMOVAL

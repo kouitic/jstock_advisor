@@ -7,6 +7,7 @@ from jstock_advisor.domain.entities.classification import StockTypeClassificatio
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, StockType
 from jstock_advisor.domain.signals.watchlist_screening import (
     ExclusionReason,
+    HardExclusionCode,
     HighDividendFinancialHealthPolicy,
     MatchedCriterion,
     MultiStyleMonitoringPolicy,
@@ -402,6 +403,7 @@ def test_j_debt_excess_fails_even_if_type_matched() -> None:
     assert result.passed is False
     assert result.exclusion_reasons == [ExclusionReason.HARD_EXCLUDED]
     assert "債務超過" in result.hard_exclusion_reasons
+    assert result.hard_exclusion_codes == [HardExclusionCode.NEGATIVE_EQUITY]
 
 
 def test_k_going_concern_doubt_fails() -> None:
@@ -415,6 +417,7 @@ def test_k_going_concern_doubt_fails() -> None:
     )
     assert result.passed is False
     assert any("継続企業" in reason for reason in result.hard_exclusion_reasons)
+    assert result.hard_exclusion_codes == [HardExclusionCode.GOING_CONCERN_DOUBT]
 
 
 def test_l_disclosure_risk_keyword_fails() -> None:
@@ -428,6 +431,7 @@ def test_l_disclosure_risk_keyword_fails() -> None:
     )
     assert result.passed is False
     assert any("リスクキーワード" in reason for reason in result.hard_exclusion_reasons)
+    assert result.hard_exclusion_codes == [HardExclusionCode.DISCLOSURE_RISK]
 
 
 def test_m_illiquid_stock_fails_with_same_hard_condition_as_buy() -> None:
@@ -443,6 +447,7 @@ def test_m_illiquid_stock_fails_with_same_hard_condition_as_buy() -> None:
     )
     assert result.passed is False
     assert any("平均売買代金" in reason for reason in result.hard_exclusion_reasons)
+    assert result.hard_exclusion_codes == [HardExclusionCode.INSUFFICIENT_LIQUIDITY]
 
 
 def test_n_etf_fails() -> None:
@@ -456,6 +461,7 @@ def test_n_etf_fails() -> None:
     )
     assert result.passed is False
     assert any("ETF" in reason for reason in result.hard_exclusion_reasons)
+    assert result.hard_exclusion_codes == [HardExclusionCode.ETF_EXCLUDED]
 
 
 def test_n_reit_fails() -> None:
@@ -468,6 +474,7 @@ def test_n_reit_fails() -> None:
     )
     assert result.passed is False
     assert any("REIT" in reason for reason in result.hard_exclusion_reasons)
+    assert result.hard_exclusion_codes == [HardExclusionCode.REIT_EXCLUDED]
 
 
 def test_o_missing_dividend_data_but_value_classifiable_passes_not_data_insufficient() -> None:
