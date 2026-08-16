@@ -63,6 +63,7 @@ import logging
 import os
 import uuid
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Any
 
 import boto3
@@ -94,6 +95,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     NOTIFICATION_OUTCOME_SENT,
     NOTIFICATION_OUTCOME_SKIPPED,
     CandidateProgressRecord,
+    WatchlistBatchStatus,
     WatchlistProgressStatus,
     get_watchlist_batch,
     mark_batch_audit_recorded,
@@ -107,6 +109,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     record_notification_pending,
     record_notification_resolved,
     record_repository_result_item,
+    resolve_watchlist_batch_completion_status,
     try_acquire_maintenance_trigger,
     try_finalize_if_ready,
     try_retry_finalize,
@@ -706,18 +709,64 @@ def _maybe_commit_rotation(
 _MAINTENANCE_TRIGGER_FUNCTION_NAME_ENV = "WATCHLIST_DISPATCHER_FUNCTION_NAME"
 _MAINTENANCE_TRIGGER_TYPE_POST_NEW_CANDIDATE_SCREENING = "POST_NEW_CANDIDATE_SCREENING"
 
+# 平日毎日起動化 再修正(2026-08)対応: WATCHLIST_MAINTENANCEの起動対象は
+# 「業務処理結果を信頼できる状態で正常finalizeした場合」のみに限定する。
+# ABORTEDは、429率・スコア項目欠損率等の閾値超過(データ品質劣化・外部API
+# 異常の疑い)を理由に発生するため、その直後に同じデータ源を使った自動削除
+# 判定を実行しない(信頼できないデータに基づく削除判定を避けるための安全策)。
+_MAINTENANCE_TRIGGERABLE_STATUSES = frozenset(
+    {
+        WatchlistBatchStatus.COMPLETED,
+        WatchlistBatchStatus.COMPLETED_WITH_NOTIFICATION_FAILURE,
+    }
+)
+
+
+class MaintenanceTriggerOutcome(StrEnum):
+    """`maybe_trigger_maintenance()`の結果種別(運用監視・Reconciler retry計測用、
+    Issue #8のロールアウト観測で使用)。"""
+
+    # 実際にinvoke()まで成功し、TRIGGERED(exactly-once確定)へ遷移した。
+    TRIGGERED = "TRIGGERED"
+    # job_type不一致・auto_removal無効・final_statusが起動対象外(ABORTED等)
+    # のいずれかで、そもそも起動を試みなかった。
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    # 起動権利(lease)を取得できなかった(既にTRIGGERED確定済み、または他の
+    # 主体が未失効leaseを保持中)。
+    SKIPPED_LEASE_UNAVAILABLE = "SKIPPED_LEASE_UNAVAILABLE"
+    # lease取得には成功したが、ローカルCLI実行のため実際のinvoke()は行わなかった
+    # (TRIGGERINGのまま残り、本番Reconcilerが後で再試行できる)。
+    SKIPPED_LOCAL_EXECUTION = "SKIPPED_LOCAL_EXECUTION"
+    # lease取得には成功したが、起動先関数名の環境変数が未設定(設定不備)。
+    CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+    # lease取得には成功したが、Lambda invoke()自体が例外を送出した。
+    INVOKE_FAILED = "INVOKE_FAILED"
+
 
 def maybe_trigger_maintenance(
-    batch_id: str, batch_item: dict[str, Any], now: dt.datetime, config: AppConfig
-) -> None:
-    """平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの業務finalize確定
-    (`_finish_batch`到達、すなわちCOMPLETED/COMPLETED_WITH_NOTIFICATION_FAILURE/
-    ABORTEDのいずれかとして確定した時点)の後続処理として、WATCHLIST_MAINTENANCEを
-    1回だけ起動する。`_maybe_commit_rotation`と全く同じ choke point から呼ばれる
-    ため、DISPATCH_FAILED/TIMED_OUT/FINALIZE_FAILED(finalize技術的失敗が未解消)
-    な場合はこの関数へ到達しない(個別candidateのFAILED_REQUIRED/
-    FAILED_NO_TARGET_TYPE/NOT_FOUNDはバッチ全体の業務finalizeを妨げないため、
-    それらが含まれていても起動される)。
+    batch_id: str,
+    batch_item: dict[str, Any],
+    now: dt.datetime,
+    config: AppConfig,
+    final_status: WatchlistBatchStatus,
+) -> MaintenanceTriggerOutcome:
+    """平日毎日起動化(2026-08)対応・再修正(2026-08): NEW_CANDIDATE_SCREENINGの
+    業務finalizeが**信頼できる状態で正常完了した場合のみ**、後続処理として
+    WATCHLIST_MAINTENANCEを1回だけ起動する。
+
+    `final_status`は、呼び出し元がfinalize前に取得した古い`batch_item`の
+    stateからではなく、その回の`execution_result`/`notification_permanently_
+    failed`から`resolve_watchlist_batch_completion_status()`で直接計算した
+    確定済みのstatus(_finish_batch側)、またはDynamoDBの最新スキャン結果
+    (Reconciler側、`list_stale_maintenance_triggers`は毎回フルスキャンする
+    ため常に最新)から明示的に渡される。起動対象は`COMPLETED`/
+    `COMPLETED_WITH_NOTIFICATION_FAILURE`の2状態のみで、`ABORTED`(429率・
+    スコア項目欠損率等の閾値超過によるデータ品質劣化の疑い)はここで除外する
+    (信頼できないデータに基づく自動削除判定を避けるための安全策)。
+
+    個別candidateのFAILED_REQUIRED/FAILED_NO_TARGET_TYPE/NOT_FOUNDはバッチ
+    全体の業務finalizeを妨げないため、それらが含まれていても`final_status`が
+    起動対象であれば起動される。
 
     WATCHLIST_MAINTENANCE自身のfinalize(`_finalize_maintenance_completed`)は
     この関数を呼ばない(job_typeガードにより、maintenance batchからさらに
@@ -730,15 +779,22 @@ def maybe_trigger_maintenance(
     """
     job_type = batch_item.get("job_type", JOB_TYPE_NEW_CANDIDATE_SCREENING)
     if job_type != JOB_TYPE_NEW_CANDIDATE_SCREENING:
-        return
+        return MaintenanceTriggerOutcome.NOT_APPLICABLE
     if not config.watchlist_screening.auto_removal.enabled:
-        return
+        return MaintenanceTriggerOutcome.NOT_APPLICABLE
+    if final_status not in _MAINTENANCE_TRIGGERABLE_STATUSES:
+        logger.info(
+            "watchlist maintenance trigger not applicable: final_status=%s batch_id=%s",
+            final_status,
+            batch_id,
+        )
+        return MaintenanceTriggerOutcome.NOT_APPLICABLE
 
     maintenance_batch_id = f"watchlist-maint-{batch_id}"
     owner_id = uuid.uuid4().hex
     if not try_acquire_maintenance_trigger(batch_id, maintenance_batch_id, owner_id, now):
         # 既にTRIGGERED(exactly-once)、または他の主体が保持中の未失効lease。
-        return
+        return MaintenanceTriggerOutcome.SKIPPED_LEASE_UNAVAILABLE
 
     if not running_on_lambda():
         # ローカルCLI実行時は実際のLambda invokeを行わない(本番Lambdaへの
@@ -751,7 +807,7 @@ def maybe_trigger_maintenance(
             batch_id,
             maintenance_batch_id,
         )
-        return
+        return MaintenanceTriggerOutcome.SKIPPED_LOCAL_EXECUTION
 
     function_name = os.environ.get(_MAINTENANCE_TRIGGER_FUNCTION_NAME_ENV)
     if not function_name:
@@ -760,7 +816,7 @@ def maybe_trigger_maintenance(
             _MAINTENANCE_TRIGGER_FUNCTION_NAME_ENV,
             batch_id,
         )
-        return
+        return MaintenanceTriggerOutcome.CONFIGURATION_ERROR
 
     try:
         boto3.client("lambda").invoke(
@@ -781,7 +837,7 @@ def maybe_trigger_maintenance(
             batch_id,
             maintenance_batch_id,
         )
-        return
+        return MaintenanceTriggerOutcome.INVOKE_FAILED
 
     mark_maintenance_triggered(batch_id, now)
     logger.info(
@@ -789,6 +845,7 @@ def maybe_trigger_maintenance(
         batch_id,
         maintenance_batch_id,
     )
+    return MaintenanceTriggerOutcome.TRIGGERED
 
 
 def _finish_batch(
@@ -849,7 +906,15 @@ def _finish_batch(
         batch_id, execution_result, now, notification_permanently_failed
     )
     _maybe_commit_rotation(batch_id, batch_item, records, now)
-    maybe_trigger_maintenance(batch_id, batch_item, now, config)
+    # High修正(2026-08 再レビュー): ABORTEDからmaintenanceを起動しないため、
+    # `_finish_batch`へ到達したかどうかではなく、直前に確定させたのと全く同じ
+    # execution_result/notification_permanently_failedから計算した確定済み
+    # final_statusを明示的に渡す(finalize前に取得した古いbatch_itemの
+    # statusは一切参照しない)。
+    final_status = resolve_watchlist_batch_completion_status(
+        execution_result, notification_permanently_failed
+    )
+    maybe_trigger_maintenance(batch_id, batch_item, now, config, final_status)
     logger.info(
         "watchlist_screening finalized batch_id=%s execution_result=%s added=%d "
         "notification_permanently_failed=%s",

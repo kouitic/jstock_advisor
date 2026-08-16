@@ -352,19 +352,40 @@ NOTIFICATION_FAILURE/ABORTED/DISPATCH_FAILED/TIMED_OUT)に至った場合も
 変更しない(ローテーションの前進は`job_type=NEW_CANDIDATE_SCREENING`
 専用)。
 
-**起動方式の平日毎日化(2026-08-16改訂)**: NEW_CANDIDATE_SCREENINGの
+**起動方式の平日毎日化(2026-08-16改訂・同日再修正)**: NEW_CANDIDATE_SCREENINGの
 スケジュールを毎週土曜07:00から平日(月曜〜金曜)06:00へ変更した
 (`infra/template.yaml`の`WeekdayMorning` ScheduleV2、`cron(0 6 ? * MON-FRI *)`、
 日本の祝日は考慮しない)。これに伴いWATCHLIST_MAINTENANCEの独立した
 定期実行(旧`SundayMaintenanceReview`)は廃止し、同日のNEW_CANDIDATE_SCREENING
-バッチが業務finalizeを正常完了した直後(`watchlist_batch_finalizer.
-_finish_batch()`到達時)にのみ、後続処理として自動的に起動する方式へ
-変更した。トリガーは`maybe_trigger_maintenance()`が担い、`_finish_batch()`が
-`_maybe_commit_rotation()`の直後に呼び出す(rotation commitと同じchoke point
-を再利用しているため、`_finish_batch()`へ到達しない経路
-(`FINALIZE_FAILED`・`DISPATCH_FAILED`・`TIMED_OUT`)では構造的にトリガー
-されない)。個別銘柄の評価エラー(`FAILED_REQUIRED`/`FAILED_NO_TARGET_TYPE`/
-`NOT_FOUND`)は、その回の業務finalizeが正常完了する限りトリガーを妨げない。
+バッチが**信頼できる状態で正常finalizeした場合のみ**、後続処理として
+自動的に起動する方式へ変更した。
+
+トリガーは`maybe_trigger_maintenance(batch_id, batch_item, now, config,
+final_status)`が担い、`_finish_batch()`が`_maybe_commit_rotation()`の直後に
+呼び出す。**再修正(High、2026-08-16)**: 当初は`_finish_batch()`へ到達した
+かどうか(=`mark_watchlist_batch_completed()`が呼ばれたかどうか)のみで
+起動可否を判定しており、`ABORTED`(429率・スコア項目欠損率等の閾値超過による
+安全側の見送り判断)を含む全終端状態でトリガーされ得る不整合があった。
+これはデータ品質が疑わしい状態のまま自動削除判定へ流れてしまう恐れがあった
+ため、`final_status`を明示的な引数として受け取り、`WatchlistBatchStatus.
+COMPLETED`/`COMPLETED_WITH_NOTIFICATION_FAILURE`の2状態のみを起動対象とする
+よう修正した。`final_status`は、`_finish_batch()`側では
+`batch_tracker.resolve_watchlist_batch_completion_status(execution_result,
+notification_permanently_failed)`(`mark_watchlist_batch_completed()`自身が
+使う判定ロジックと同一実装を共有)で、その回の`execution_result`から都度
+計算した値を渡す(finalize処理の途中で取得した古い`batch_item`のstatus
+フィールドは一切参照しない)。`ABORTED`・`DISPATCH_FAILED`・`TIMED_OUT`・
+`FINALIZE_FAILED`のいずれも起動対象外(`DISPATCH_FAILED`/`TIMED_OUT`/
+`FINALIZE_FAILED`は`_finish_batch()`へ構造的に到達しないためそもそも
+呼ばれないが、`maybe_trigger_maintenance()`自体もこれらの`final_status`を
+渡された場合は起動しない防御的なガードを持つ)。個別銘柄の評価エラー
+(`FAILED_REQUIRED`/`FAILED_NO_TARGET_TYPE`/`NOT_FOUND`)は、その回の
+業務finalizeが`COMPLETED`として正常完了する限りトリガーを妨げない。
+
+`maybe_trigger_maintenance()`は`MaintenanceTriggerOutcome`(`TRIGGERED`/
+`NOT_APPLICABLE`/`SKIPPED_LEASE_UNAVAILABLE`/`SKIPPED_LOCAL_EXECUTION`/
+`CONFIGURATION_ERROR`/`INVOKE_FAILED`)を返す。運用監視・GitHub Issue #8の
+観測でこの戻り値を使う。
 
 **重複起動防止(exactly-once相当)**: `BatchRunsTable`の該当バッチ項目へ
 `maintenance_trigger_status`(`NOT_TRIGGERED`→`TRIGGERING`→`TRIGGERED`)・
@@ -372,28 +393,45 @@ _finish_batch()`到達時)にのみ、後続処理として自動的に起動す
 `maintenance_trigger_lease_expires_at`を持たせ、`batch_tracker.
 try_acquire_maintenance_trigger()`が既存の`try_acquire_dispatch_lease`/
 `try_acquire_rotation_dispatch_lease`と同じ「lease期限切れなら再取得可」
-条件付き更新パターンで起動権利を排他的に取得する。取得成功後、
-`boto3` Lambda `invoke()`(`InvocationType="Event"`、非同期)で
-`WatchlistDispatcherFunction`自身を`{"job_type": "WATCHLIST_MAINTENANCE",
-"batch_id": <maintenance_batch_id>, "triggered_by_batch_id": <親batch_id>,
-"trigger_type": "POST_NEW_CANDIDATE_SCREENING"}`ペイロードで自己invokeする。
-invoke成功後は`mark_maintenance_triggered()`で`TRIGGERED`へ恒久確定し、
-以後同じ親バッチから二度と起動されない。invoke自体が失敗した場合は
-`TRIGGERING`のまま(lease期限120秒)残し、毎時`WatchlistBatchReconcilerFunction`が
-`list_stale_maintenance_triggers()`経由でlease失効を検知し
-`maybe_trigger_maintenance()`を再試行する(処理の消失を防止)。子バッチ側の
-`batch_id`が親から決定論的に算出されるため、万一起動権利の排他制御を
-すり抜けて`invoke()`が二重に発生しても、2回目は子バッチ自身の
-`try_acquire_dispatch_lease`で棄却される二重の安全策になっている。
+条件付き更新パターンで起動権利を排他的に取得する(この段階に到達するのは
+`final_status`が起動対象の場合のみで、`ABORTED`等では`maintenance_trigger_
+status`自体が一切書き込まれない)。取得成功後、`boto3` Lambda `invoke()`
+(`InvocationType="Event"`、非同期)で`WatchlistDispatcherFunction`自身を
+`{"job_type": "WATCHLIST_MAINTENANCE", "batch_id": <maintenance_batch_id>,
+"triggered_by_batch_id": <親batch_id>, "trigger_type":
+"POST_NEW_CANDIDATE_SCREENING"}`ペイロードで自己invokeする。invoke成功後は
+`mark_maintenance_triggered()`で`TRIGGERED`へ恒久確定し、以後同じ親バッチ
+から二度と起動されない(戻り値`TRIGGERED`)。invoke自体が失敗した場合は
+`TRIGGERING`のまま(lease期限120秒)残し(戻り値`INVOKE_FAILED`)、毎時
+`WatchlistBatchReconcilerFunction`が`list_stale_maintenance_triggers()`経由で
+lease失効を検知し`maybe_trigger_maintenance()`を再試行する(処理の消失を
+防止)。子バッチ側の`batch_id`が親から決定論的に算出されるため、万一起動
+権利の排他制御をすり抜けて`invoke()`が二重に発生しても、2回目は子バッチ
+自身の`try_acquire_dispatch_lease`で棄却される二重の安全策になっている。
 親バッチ側にも`maintenance_batch_id`・`maintenance_triggered_at`が記録
 されるため、`get_watchlist_batch(親batch_id)`で子バッチへの追跡ができる
 (子バッチ側は`triggered_by_batch_id`/`trigger_type`で親を追跡)。
 
 ローカルCLI実行時は`running_on_lambda()`(`AWS_LAMBDA_FUNCTION_NAME`環境
 変数の有無で判定)が偽になるため、起動権利の取得までは行うが実際の
-Lambda `invoke()`は行わない(誤って本番Lambdaを起動しない安全策。この場合
-`TRIGGERED`へは確定せず、`TRIGGERING`のまま次回Reconcilerパスの対象になる
-ため、ローカル検証後に本番実行すれば正しく起動できる)。
+Lambda `invoke()`は行わない(戻り値`SKIPPED_LOCAL_EXECUTION`。誤って本番
+Lambdaを起動しない安全策。この場合`TRIGGERED`へは確定せず、`TRIGGERING`の
+まま次回Reconcilerパスの対象になるため、ローカル検証後に本番実行すれば
+正しく起動できる)。
+
+**Reconciler再試行件数の計測(Medium修正、2026-08-16再修正)**:
+毎時Reconcilerの戻り値`maintenance_trigger_retried`は、`list_stale_
+maintenance_triggers()`で取得した各バッチについて`maybe_trigger_
+maintenance()`を呼んだ回数の単純カウントではなく、その戻り値
+(`MaintenanceTriggerOutcome`)を見て「実際にleaseを再取得してinvokeを
+試行した(=`TRIGGERED`/`INVOKE_FAILED`/`CONFIGURATION_ERROR`)」ケースのみを
+数える。他の主体が先にleaseを再取得済みだった場合(`SKIPPED_LEASE_
+UNAVAILABLE`)は「再試行を試みてすらいない」ため計上しない
+(`maintenance_trigger_retry_skipped`へ計上)。`INVOKE_FAILED`/
+`CONFIGURATION_ERROR`は`maintenance_trigger_retry_failed`でも重ねて計上する
+(retriedのうち失敗した件数)。いずれも新規の永続DynamoDBカウンタは
+追加せず、Reconciler実行1回分のin-memory集計のみをログ・戻り値(GitHub
+Issue #8のロールアウト観測で使用)に残す設計としている。
 
 **スクリーニング高速化(計測のみ、2026-08-15追加)**: `WatchlistCandidateProgressTable`の
 各行へ`data_fetch_duration_ms`/`scoring_duration_ms`(データ取得・判定計算の

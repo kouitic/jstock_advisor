@@ -420,11 +420,25 @@ def test_reconciler_retries_notification_failed_without_rewriting_watchlist(
 # --- 平日毎日起動化(2026-08)対応: WATCHLIST_MAINTENANCE後続起動のstale retry ------
 
 
+def _mark_batch_completed(batch_id: str) -> None:
+    """再試行対象の親バッチについて、実運用と同じ順序(status確定→
+    maintenance_trigger_status付与)を再現する。`maybe_trigger_maintenance`が
+    `_finish_batch`到達時点で計算済みのfinal_statusを渡す設計になったため、
+    Reconciler側は毎回フルスキャンで取得した`batch_item["status"]`から
+    final_statusを復元する(list_stale_maintenance_triggers参照)。"""
+    batch_tracker.mark_watchlist_batch_completed(
+        batch_id, batch_tracker.EXECUTION_RESULT_NORMAL, _NOW
+    )
+
+
 def test_reconciler_retries_stale_maintenance_trigger(
     dynamo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """テスト#6相当: invoke失敗等でTRIGGERINGのままlease失効した親バッチを、
-    毎時Reconcilerがmaybe_trigger_maintenance経由で再試行すること。"""
+    毎時Reconcilerがmaybe_trigger_maintenance経由で再試行すること。
+    Medium修正(2026-08再レビュー): 戻り値TRIGGEREDのみがmaintenance_trigger_
+    retriedへ計上されることも合わせて確認する。"""
+    _mark_batch_completed("batch-1")
     batch_tracker.try_acquire_maintenance_trigger(
         "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=60
     )
@@ -432,8 +446,10 @@ def test_reconciler_retries_stale_maintenance_trigger(
 
     retried: list[str] = []
 
-    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config):  # noqa: ANN001, ANN201
+    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config, final_status):  # noqa: ANN001, ANN201
         retried.append(batch_id)
+        assert final_status is WatchlistBatchStatus.COMPLETED
+        return finalizer_module.MaintenanceTriggerOutcome.TRIGGERED
 
     monkeypatch.setattr(
         handler_module, "maybe_trigger_maintenance", _fake_maybe_trigger_maintenance
@@ -452,6 +468,71 @@ def test_reconciler_retries_stale_maintenance_trigger(
 
     assert retried == ["batch-1"]
     assert result["maintenance_trigger_retried"] == 1
+    assert result["maintenance_trigger_retry_failed"] == 0
+    assert result["maintenance_trigger_retry_skipped"] == 0
+
+
+def test_reconciler_does_not_count_retried_when_lease_already_taken(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Medium修正(2026-08再レビュー)の本体: stale一覧取得後に他の主体が先に
+    trigger leaseを再取得しmaybe_trigger_maintenance()が何もせずreturnした
+    場合(SKIPPED_LEASE_UNAVAILABLE)、maintenance_trigger_retriedを誤って
+    加算しないこと(retry_skippedへ計上すること)。"""
+    _mark_batch_completed("batch-1")
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=60
+    )
+    much_later = _NOW + dt.timedelta(hours=2)
+
+    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config, final_status):  # noqa: ANN001, ANN201
+        return finalizer_module.MaintenanceTriggerOutcome.SKIPPED_LEASE_UNAVAILABLE
+
+    monkeypatch.setattr(
+        handler_module, "maybe_trigger_maintenance", _fake_maybe_trigger_maintenance
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "dt",
+        SimpleNamespace(datetime=SimpleNamespace(now=lambda tz=None: much_later), UTC=dt.UTC),
+    )
+
+    result = handler_module.handler({}, object())
+
+    assert result["maintenance_trigger_retried"] == 0
+    assert result["maintenance_trigger_retry_failed"] == 0
+    assert result["maintenance_trigger_retry_skipped"] == 1
+
+
+def test_reconciler_counts_invoke_failure_as_retried_and_retry_failed(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """leaseの再取得には成功したがinvoke自体が再び失敗したケース
+    (INVOKE_FAILED)は「実際に再試行を試みた」ため retried へ計上しつつ、
+    retry_failed でも区別できること。"""
+    _mark_batch_completed("batch-1")
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=60
+    )
+    much_later = _NOW + dt.timedelta(hours=2)
+
+    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config, final_status):  # noqa: ANN001, ANN201
+        return finalizer_module.MaintenanceTriggerOutcome.INVOKE_FAILED
+
+    monkeypatch.setattr(
+        handler_module, "maybe_trigger_maintenance", _fake_maybe_trigger_maintenance
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "dt",
+        SimpleNamespace(datetime=SimpleNamespace(now=lambda tz=None: much_later), UTC=dt.UTC),
+    )
+
+    result = handler_module.handler({}, object())
+
+    assert result["maintenance_trigger_retried"] == 1
+    assert result["maintenance_trigger_retry_failed"] == 1
+    assert result["maintenance_trigger_retry_skipped"] == 0
 
 
 def test_reconciler_does_not_retry_maintenance_trigger_within_lease(
@@ -459,6 +540,7 @@ def test_reconciler_does_not_retry_maintenance_trigger_within_lease(
 ) -> None:
     """lease未失効(TRIGGERING中だがlease_expires_atが未来)のうちはReconcilerが
     再試行しないこと(invoke処理中の二重起動防止、テスト#6の裏側)。"""
+    _mark_batch_completed("batch-1")
     batch_tracker.try_acquire_maintenance_trigger(
         "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=3600
     )
@@ -466,8 +548,9 @@ def test_reconciler_does_not_retry_maintenance_trigger_within_lease(
 
     retried: list[str] = []
 
-    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config):  # noqa: ANN001, ANN201
+    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config, final_status):  # noqa: ANN001, ANN201
         retried.append(batch_id)
+        return finalizer_module.MaintenanceTriggerOutcome.TRIGGERED
 
     monkeypatch.setattr(
         handler_module, "maybe_trigger_maintenance", _fake_maybe_trigger_maintenance

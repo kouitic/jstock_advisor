@@ -1581,6 +1581,24 @@ def try_operator_abort(batch_id: str, reason: str, now: dt.datetime) -> bool:
         raise
 
 
+def resolve_watchlist_batch_completion_status(
+    execution_result: str, notification_permanently_failed: bool
+) -> WatchlistBatchStatus:
+    """`mark_watchlist_batch_completed()`が実際に書き込むstatusを、書き込みより
+    前の時点で呼び出し元へ明示的に返す(平日毎日起動化2026-08対応の再修正:
+    `maybe_trigger_maintenance()`が、finalize前に取得した古い`batch_item`の
+    stateではなく、この確定済みstatusを直接受け取って起動可否を判断するため)。
+
+    ロジック自体は`mark_watchlist_batch_completed()`と完全に同一(単一の
+    判定箇所へ集約し、二重実装によるドリフトを防ぐ)。
+    """
+    if notification_permanently_failed and execution_result == EXECUTION_RESULT_NORMAL:
+        return WatchlistBatchStatus.COMPLETED_WITH_NOTIFICATION_FAILURE
+    if execution_result == EXECUTION_RESULT_NORMAL:
+        return WatchlistBatchStatus.COMPLETED
+    return WatchlistBatchStatus.ABORTED
+
+
 def mark_watchlist_batch_completed(
     batch_id: str,
     execution_result: str,
@@ -1605,12 +1623,9 @@ def mark_watchlist_batch_completed(
     想定)、statusをCOMPLETEDではなくCOMPLETED_WITH_NOTIFICATION_FAILUREにする。
     ウォッチリスト追加自体は正常完了しているため、ABORTEDとは区別する。
     """
-    if notification_permanently_failed and execution_result == EXECUTION_RESULT_NORMAL:
-        status = WatchlistBatchStatus.COMPLETED_WITH_NOTIFICATION_FAILURE
-    elif execution_result == EXECUTION_RESULT_NORMAL:
-        status = WatchlistBatchStatus.COMPLETED
-    else:
-        status = WatchlistBatchStatus.ABORTED
+    status = resolve_watchlist_batch_completion_status(
+        execution_result, notification_permanently_failed
+    )
     _table().update_item(
         Key={"batch_id": batch_id},
         UpdateExpression="SET #status = :status, execution_result = :result, updated_at = :now",
