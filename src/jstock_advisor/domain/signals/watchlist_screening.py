@@ -46,6 +46,28 @@ class MatchedCriterion(StrEnum):
     TARGET_QUALITY = "TARGET_QUALITY"
 
 
+class HardExclusionCode(StrEnum):
+    """`_evaluate_hard_exclusions()`が返す個別除外理由の構造化コード
+    (横断整合性レビュー対応2026-08、指摘4)。以前はwatchlist_maintenance_
+    service.pyがhard_exclusion_reasons(人間可読な日本語文言)に対して
+    `str.startswith()`で即時削除対象かどうかを判定しており、文言を変更する
+    だけで判定ロジックが静かに壊れる脆弱性があった。判定用のコードと表示用の
+    メッセージを分離し、判定はこのenumのみに依存させる。
+
+    メンバーは`_evaluate_hard_exclusions()`が生成しうる7種類の除外理由と
+    1対1で対応する(このモジュール外では新規に生成しない)。
+    """
+
+    REIT_EXCLUDED = "REIT_EXCLUDED"
+    ETF_EXCLUDED = "ETF_EXCLUDED"
+    NEGATIVE_EQUITY = "NEGATIVE_EQUITY"
+    GOING_CONCERN_DOUBT = "GOING_CONCERN_DOUBT"
+    INSUFFICIENT_LIQUIDITY = "INSUFFICIENT_LIQUIDITY"
+    UNSUPPORTED_INDUSTRY = "UNSUPPORTED_INDUSTRY"
+    DISCLOSURE_RISK = "DISCLOSURE_RISK"
+    SEVERE_EARNINGS_DECLINE = "SEVERE_EARNINGS_DECLINE"
+
+
 class ExclusionReason(StrEnum):
     ALREADY_HELD = "ALREADY_HELD"
     ALREADY_WATCHLISTED = "ALREADY_WATCHLISTED"
@@ -128,6 +150,9 @@ class ScreeningPolicyResult:
     # ウォッチリスト自動追加基準の再設計(2026-08)で追加。人間可読なハード除外
     # 理由(BUY一次スクリーニングと同じ文言)。旧Policyは常に空リスト。
     hard_exclusion_reasons: list[str] = field(default_factory=list)
+    # 横断整合性レビュー対応(2026-08、指摘4)で追加。hard_exclusion_reasonsと
+    # 同じ順序・同じ長さで対応する構造化コード(判定用、文言は表示専用)。
+    hard_exclusion_codes: list[HardExclusionCode] = field(default_factory=list)
 
 
 class ScreeningPolicy(Protocol):
@@ -399,9 +424,15 @@ _TARGET_TYPE_TO_CRITERION: dict[StockType, MatchedCriterion] = {
 }
 
 
+@dataclass(frozen=True)
+class HardExclusionFinding:
+    code: HardExclusionCode
+    message: str
+
+
 def _evaluate_hard_exclusions(
     input: WatchlistScreeningInput, screening_rules: ScreeningRulesConfig
-) -> list[str]:
+) -> list[HardExclusionFinding]:
     """downstream BUY一次スクリーニング(domain/screening/rules.py::evaluate_screening/
     domain/signals/buy_decision.py::screen_investment_universe)と同じ設定値
     (config.screening、config.screening.financial_health.min_equity_ratio_pct等)・
@@ -409,32 +440,48 @@ def _evaluate_hard_exclusions(
 
     以下2点は意図的にBUY側と揃えない:
     - データ鮮度(screening.data_quality.max_data_age_business_days)。この経路は
-      build_stock_snapshot()直後の値をそのまま使い、営業日をまたぐ長期キャッシュを
-      挟まないため(watchlist_screening_rules.yaml側のdata_cache TTLが別途鮮度を
-      制御する)。
+      build_stock_snapshot()を経由しない(screening_data_provider.py参照)。
+      横断整合性レビュー対応(2026-08、指摘2)で判明: 以前の本コメントは
+      「営業日をまたぐ長期キャッシュを挟まない」としていたが誤りで、実際には
+      `watchlist_data_cache.build_cached_provider_bundle()`経由でprice=24時間・
+      financial=168時間(7日)というBUY側より長いTTLのキャッシュを挟んでいる。
+      それでもBUY側のmax_data_age_business_daysをそのまま流用しない理由は、
+      鮮度制御の仕組みが違うため(BUY側は「取得データの日付が古すぎないか」を
+      事後チェックするのに対し、こちら側はキャッシュ層自体がJST暦日境界(price/
+      average_trading_value)とTTLで鮮度を制御する設計であり、二重に閾値を
+      持つと基準が食い違う恐れがあるため一本化していない)。財務データの
+      168時間TTLに起因する残存する鮮度課題(決算更新後の取り込み遅延)は
+      GitHub Issueで追跡している。
     - 株主優待の廃止発表(BUY側screen_investment_universe()の追加条件)。優待の
       有無・廃止は「投資対象として監視する価値」そのものとは無関係なため対象外。
     """
-    reasons: list[str] = []
+    findings: list[HardExclusionFinding] = []
     universe = screening_rules.universe
     if universe.exclude_reit and input.security_type == "REIT":
-        reasons.append("REITは対象外です")
+        findings.append(HardExclusionFinding(HardExclusionCode.REIT_EXCLUDED, "REITは対象外です"))
     if universe.exclude_etf and input.security_type == "ETF":
-        reasons.append("ETFは対象外です")
+        findings.append(HardExclusionFinding(HardExclusionCode.ETF_EXCLUDED, "ETFは対象外です"))
 
     fh = screening_rules.financial_health
     if fh.exclude_negative_equity and input.is_debt_excess:
-        reasons.append("債務超過")
+        findings.append(HardExclusionFinding(HardExclusionCode.NEGATIVE_EQUITY, "債務超過"))
 
     ce = screening_rules.corporate_events
     if ce.exclude_going_concern_doubt and input.is_going_concern_doubt:
-        reasons.append("継続企業の前提に重大な疑義")
+        findings.append(
+            HardExclusionFinding(
+                HardExclusionCode.GOING_CONCERN_DOUBT, "継続企業の前提に重大な疑義"
+            )
+        )
 
     if input.avg_trading_value is not None:
         min_value = universe.min_avg_trading_value_20d_yen
         if input.avg_trading_value < min_value:
-            reasons.append(
-                f"平均売買代金{input.avg_trading_value:,.0f}円が基準{min_value:,}円未満"
+            findings.append(
+                HardExclusionFinding(
+                    HardExclusionCode.INSUFFICIENT_LIQUIDITY,
+                    f"平均売買代金{input.avg_trading_value:,.0f}円が基準{min_value:,}円未満",
+                )
             )
 
     industry_rules = screening_rules.industry_specific_rules
@@ -442,17 +489,31 @@ def _evaluate_hard_exclusions(
         input.industry in industry_rules.target_industry_classification
         and industry_rules.financial_sector_action == "exclude_with_warning"
     ):
-        reasons.append(f"業種({input.industry})は個別評価ルール未実装のため対象外")
+        findings.append(
+            HardExclusionFinding(
+                HardExclusionCode.UNSUPPORTED_INDUSTRY,
+                f"業種({input.industry})は個別評価ルール未実装のため対象外",
+            )
+        )
 
     if input.disclosure_risk_keywords_found and ce.scandal_or_delisting_risk_action == "exclude":
-        reasons.append(
-            "開示情報にリスクキーワードを検出: " + ", ".join(input.disclosure_risk_keywords_found)
+        findings.append(
+            HardExclusionFinding(
+                HardExclusionCode.DISCLOSURE_RISK,
+                "開示情報にリスクキーワードを検出: "
+                + ", ".join(input.disclosure_risk_keywords_found),
+            )
         )
 
     if input.severe_earnings_decline:
-        reasons.append("直近決算で重大な業績悪化(営業利益が前期比30%超悪化)")
+        findings.append(
+            HardExclusionFinding(
+                HardExclusionCode.SEVERE_EARNINGS_DECLINE,
+                "直近決算で重大な業績悪化(営業利益が前期比30%超悪化)",
+            )
+        )
 
-    return reasons
+    return findings
 
 
 class MultiStyleMonitoringPolicy:
@@ -475,8 +536,8 @@ class MultiStyleMonitoringPolicy:
     def evaluate(
         self, input: WatchlistScreeningInput, config: WatchlistScreeningRulesConfig
     ) -> ScreeningPolicyResult:
-        hard_exclusion_reasons = _evaluate_hard_exclusions(input, self._screening_rules)
-        if hard_exclusion_reasons:
+        hard_exclusion_findings = _evaluate_hard_exclusions(input, self._screening_rules)
+        if hard_exclusion_findings:
             return ScreeningPolicyResult(
                 policy_name=self.policy_name,
                 passed=False,
@@ -486,7 +547,8 @@ class MultiStyleMonitoringPolicy:
                 missing_required_fields=input.missing_required_fields,
                 missing_scoring_fields=input.missing_scoring_fields,
                 score_breakdown={},
-                hard_exclusion_reasons=hard_exclusion_reasons,
+                hard_exclusion_reasons=[f.message for f in hard_exclusion_findings],
+                hard_exclusion_codes=[f.code for f in hard_exclusion_findings],
             )
 
         matched_types = [

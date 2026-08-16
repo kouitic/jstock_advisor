@@ -110,7 +110,7 @@ def build_candidate_universe_provider(
     自動取得(候補ユニバース本格対応・2026-08)。JpxCandidateUniverseProviderは
     S3/ローカルのキャッシュのみを読み、ネットワークアクセスは行わない(6節)。
     キャッシュの取得・検証・昇格はservices/candidate_universe_downloader.pyの
-    Downloaderが週次Dispatcher起動時に別途行う。
+    DownloaderがDispatcher起動時に別途行う。
     """
     cu = config.watchlist_screening.candidate_universe
     if cu.provider == "csv":

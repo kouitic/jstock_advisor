@@ -100,6 +100,27 @@ def is_sell_like(recommendation_type: RecommendationType) -> bool:
     return recommendation_type in SELL_LIKE_RECOMMENDATION_TYPES
 
 
+# 横断整合性レビュー対応(2026-08、指摘3): SELL_LIKE_RECOMMENDATION_TYPESの
+# サブセットのうち、「全部売却」に相当するRecommendationTypeの唯一の判定
+# ソース。従来はrecommendation_adapter.py(個別LINE通知本文の「全部売却検討」
+# ラベル付け)だけがこの2値を私的なfrozensetとして持っており、
+# holdings_watchlist_handler.py(1日のまとめ通知の集計)は別途独自に
+# FULL_PROFIT_TAKEのみをfull_sellバケットへ計上していたため、
+# STRONG_SELL_CONSIDERATIONが「個別本文では全部売却検討」「まとめ通知では
+# 通常売却」という矛盾した扱いになっていた。両呼び出し元は必ずこの定数
+# (またはis_full_sell_like())を経由すること。
+FULL_SELL_RECOMMENDATION_TYPES = frozenset(
+    {
+        RecommendationType.FULL_PROFIT_TAKE,
+        RecommendationType.STRONG_SELL_CONSIDERATION,
+    }
+)
+
+
+def is_full_sell_like(recommendation_type: RecommendationType) -> bool:
+    return recommendation_type in FULL_SELL_RECOMMENDATION_TYPES
+
+
 # 「重大リスクのため緊急確認」相当のRecommendationType(BUY候補裾野拡大機能
 # 2026-08で新設)。ハードゲート発動時のURGENT_HOLDING_REVIEW(新方式、
 # holding_decision_notification_builder.py)と、旧SellSignalService由来の

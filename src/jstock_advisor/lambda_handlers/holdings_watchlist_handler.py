@@ -48,6 +48,7 @@ from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.enums import (
+    FULL_SELL_RECOMMENDATION_TYPES,
     ConfidenceLevel,
     DecisionType,
     EvaluationStatus,
@@ -719,15 +720,20 @@ def _finish_batch_item(
     # §13)。WATCH/MANUAL_REVIEWはもはやLINE送信されないため、サマリーからも
     # 除外する(§10のNON_ACTIONABLEゲートにより、ここに到達する時点で既に
     # 送信対象外)。
+    # 横断整合性レビュー対応(2026-08、指摘3): 「全部売却検討」の判定基準を
+    # enums.pyのFULL_SELL_RECOMMENDATION_TYPES(recommendation_adapter.pyの
+    # 個別LINE通知本文と同一の判定ソース)へ統一する。以前はSTRONG_SELL_
+    # CONSIDERATIONをここだけsell_nへ計上していたため、個別本文では
+    # 「全部売却検討」と表示される銘柄が、まとめ通知の集計では「売却」件数に
+    # 混在するという矛盾があった。
     sent_types = [entry.split("|", 1)[0] for entry in progress.notification_categories]
+    _full_sell_values = {rt.value for rt in FULL_SELL_RECOMMENDATION_TYPES}
     partial_n = sent_types.count(RecommendationType.PARTIAL_PROFIT_TAKE.value) + sent_types.count(
         RecommendationType.PARTIAL_RISK_REDUCTION.value
     )
-    full_n = sent_types.count(RecommendationType.FULL_PROFIT_TAKE.value)
-    sell_n = (
-        sent_types.count(RecommendationType.SELL.value)
-        + sent_types.count(RecommendationType.SELL_CONSIDERATION.value)
-        + sent_types.count(RecommendationType.STRONG_SELL_CONSIDERATION.value)
+    full_n = sum(1 for v in sent_types if v in _full_sell_values)
+    sell_n = sent_types.count(RecommendationType.SELL.value) + sent_types.count(
+        RecommendationType.SELL_CONSIDERATION.value
     )
     critical_risk_n = sent_types.count(RecommendationType.URGENT_REVIEW.value) + sent_types.count(
         RecommendationType.URGENT_HOLDING_REVIEW.value

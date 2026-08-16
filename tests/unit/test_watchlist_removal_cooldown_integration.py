@@ -366,7 +366,9 @@ def test_removal_audit_records_full_decision_context(
     config = _fake_config()
     batch_id = "watchlist-maint-1"
     batch_tracker.try_acquire_dispatch_lease(batch_id, "dispatcher", _NOW, 360, 72)
-    batch_tracker.set_watchlist_batch_total(batch_id, 1, 72, _NOW, job_type="WATCHLIST_MAINTENANCE")
+    batch_tracker.set_watchlist_batch_total(
+        batch_id, 1, 72, _NOW, job_type=batch_tracker.WatchlistJobType.WATCHLIST_MAINTENANCE
+    )
     batch_tracker.create_missing_candidate_progress_rows(batch_id, ["1111"], _NOW, 72)
     batch_tracker.mark_dispatch_completed(batch_id, _NOW)
     batch_tracker.claim_candidate_lease(batch_id, "1111", "owner-a", _NOW, 240)

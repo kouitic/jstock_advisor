@@ -8,9 +8,11 @@ from jstock_advisor.domain.entities.enums import (
     _EXCLUDED_RECOMMENDATION_TYPES,
     _HOLDING_DECISION_RECOMMENDATION_TYPES,
     _LEGACY_SELL_RECOMMENDATION_TYPES,
+    FULL_SELL_RECOMMENDATION_TYPES,
     BacktestRecommendationSource,
     RecommendationType,
     classify_recommendation_source,
+    is_full_sell_like,
 )
 
 
@@ -93,3 +95,46 @@ def test_manual_review_required_is_excluded_because_no_service_generates_it() ->
         classify_recommendation_source(RecommendationType.MANUAL_REVIEW_REQUIRED)
         == BacktestRecommendationSource.EXCLUDED
     )
+
+
+# ===== 横断整合性レビュー対応(2026-08、指摘3): 全部売却検討の分類統一 =====
+
+
+def test_full_sell_recommendation_types_is_exactly_strong_sell_and_full_profit_take() -> None:
+    """個別LINE通知本文(recommendation_adapter.py)とまとめ通知集計
+    (holdings_watchlist_handler.py)が同じ判定ソースを共有するための唯一の
+    集合。意図せずメンバーが増減しないことを固定する。"""
+    expected = frozenset(
+        {
+            RecommendationType.FULL_PROFIT_TAKE,
+            RecommendationType.STRONG_SELL_CONSIDERATION,
+        }
+    )
+    assert expected == FULL_SELL_RECOMMENDATION_TYPES
+
+
+@pytest.mark.parametrize(
+    "recommendation_type",
+    [RecommendationType.FULL_PROFIT_TAKE, RecommendationType.STRONG_SELL_CONSIDERATION],
+)
+def test_is_full_sell_like_true_for_full_sell_types(
+    recommendation_type: RecommendationType,
+) -> None:
+    assert is_full_sell_like(recommendation_type) is True
+
+
+@pytest.mark.parametrize(
+    "recommendation_type",
+    [
+        RecommendationType.SELL,
+        RecommendationType.SELL_CONSIDERATION,
+        RecommendationType.PARTIAL_PROFIT_TAKE,
+        RecommendationType.PARTIAL_RISK_REDUCTION,
+        RecommendationType.URGENT_REVIEW,
+        RecommendationType.URGENT_HOLDING_REVIEW,
+    ],
+)
+def test_is_full_sell_like_false_for_non_full_sell_types(
+    recommendation_type: RecommendationType,
+) -> None:
+    assert is_full_sell_like(recommendation_type) is False

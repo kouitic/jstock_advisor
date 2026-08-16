@@ -21,6 +21,7 @@ from jstock_advisor.domain.entities.enums import (
     NotificationCategory,
     RecommendationType,
     WatchTransitionType,
+    is_full_sell_like,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.notification.message_formatter import NotificationTextInput
@@ -33,14 +34,11 @@ _WATCH_END_REASON_LABELS: dict[str, str] = {
 
 _CRITICAL_RISK_DEFAULT_REASON = "重大リスクのため緊急に保有内容の確認が必要です"
 
-# 「全部売却検討」相当のRecommendationType(コードレビュー対応2026-08、
-# LINE通知/監査分離)。SELLカテゴリを共用しつつlabel_overrideで区別する。
-_FULL_SELL_RECOMMENDATION_TYPES = frozenset(
-    {
-        RecommendationType.STRONG_SELL_CONSIDERATION,
-        RecommendationType.FULL_PROFIT_TAKE,
-    }
-)
+# 「全部売却検討」相当のRecommendationType判定は、enums.pyの
+# is_full_sell_like()/FULL_SELL_RECOMMENDATION_TYPESを唯一の判定ソースとして
+# 使う(横断整合性レビュー対応2026-08、指摘3)。以前は本モジュール独自の
+# frozensetを持っていたため、holdings_watchlist_handler.pyのまとめ通知集計と
+# 判定基準が乖離していた。SELLカテゴリを共用しつつlabel_overrideで区別する。
 _FULL_SELL_LABEL = "全部売却検討"
 _FULL_SELL_WITHHELD_LABEL = "全部売却目安は算定保留"
 _SELL_WITHHELD_LABEL = "売却目安は算定保留"
@@ -136,7 +134,7 @@ def _sell_target_price_and_label(
         return None, None
     if sp.immediate_execution_price is not None:
         return sp.immediate_execution_price.price, "即時執行"
-    if recommendation.recommendation_type in _FULL_SELL_RECOMMENDATION_TYPES:
+    if is_full_sell_like(recommendation.recommendation_type):
         if sp.full_profit_consideration_price is not None:
             return sp.full_profit_consideration_price.price, "全部売却目安"
         return None, None
@@ -150,7 +148,7 @@ def _build_sell(recommendation: Recommendation) -> NotificationTextInput:
     if reason is None:
         reason = recommendation.recommended_action_summary
     target_price, target_price_label = _sell_target_price_and_label(recommendation)
-    is_full_sell = recommendation.recommendation_type in _FULL_SELL_RECOMMENDATION_TYPES
+    is_full_sell = is_full_sell_like(recommendation.recommendation_type)
     withheld_label = _FULL_SELL_WITHHELD_LABEL if is_full_sell else _SELL_WITHHELD_LABEL
     return NotificationTextInput(
         category=NotificationCategory.SELL,

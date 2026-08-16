@@ -2800,6 +2800,230 @@ def test_notify_batch_summary_new_format_omits_critical_risk_segment_when_zero(
     assert "緊急" not in message
 
 
+# ===== 横断整合性レビュー対応(2026-08、指摘6): dedup hashへaction counts追加 =====
+
+
+def test_notify_batch_summary_dedup_distinguishes_same_category_counts_different_actions(
+    service_and_repos,
+) -> None:
+    """category_counts(sent/hold等の内訳)が同一でも、実際に送信された
+    アクション種別の構成(一部売却/全部売却/売却/緊急確認)が異なれば別内容
+    として扱い、dedup抑止しない(以前はcontent_hashがcategory_counts等しか
+    見ておらず、構成の違いを無視して2通目を誤って抑止していた)。"""
+    service, _repo, client = service_and_repos
+
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=2, hold=8),
+        now=_NOW,
+        partial_sell_sent_count=2,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=2, hold=8),
+        now=_NOW + dt.timedelta(seconds=15),
+        partial_sell_sent_count=0,
+        full_sell_sent_count=0,
+        sell_sent_count=2,
+        critical_risk_sent_count=0,
+    )
+
+    assert first is True
+    assert second is True
+    assert len(client.sent) == 2
+
+
+def test_notify_batch_summary_dedup_still_suppresses_identical_action_counts(
+    service_and_repos,
+) -> None:
+    """指摘6の回帰確認: category_counts・action counts双方が完全に一致する
+    場合は、従来どおり同一内容としてdedup抑止する(二重ディスパッチ対策)。"""
+    service, _repo, client = service_and_repos
+
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=2, hold=8),
+        now=_NOW,
+        partial_sell_sent_count=2,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=2, hold=8),
+        now=_NOW + dt.timedelta(seconds=15),
+        partial_sell_sent_count=2,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+
+    assert first is True
+    assert second is False
+    assert len(client.sent) == 1
+
+
+# ===== 横断整合性レビュー対応(2026-08、指摘5): action 0件時のholdingsサマリー抑止 =====
+
+
+def test_notify_batch_summary_suppressed_when_all_holdings_action_counts_are_zero(
+    service_and_repos,
+) -> None:
+    """4分類すべてが0件の場合、「一部売却0｜全部売却0｜売却0」という空虚な
+    通知を送らない(LINE送信抑止、戻り値False)。"""
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(hold=10),
+        now=_NOW,
+        partial_sell_sent_count=0,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+
+    assert sent is False
+    assert client.sent == []
+
+
+def test_notify_batch_summary_sends_when_only_partial_sell_is_nonzero(
+    service_and_repos,
+) -> None:
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=1, hold=9),
+        now=_NOW,
+        partial_sell_sent_count=1,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+
+    assert sent is True
+    assert len(client.sent) == 1
+
+
+def test_notify_batch_summary_sends_when_only_critical_risk_is_nonzero(
+    service_and_repos,
+) -> None:
+    """緊急確認のみ1件でも、他3分類が0であればサマリー自体は抑止しない
+    (「一部売却0｜全部売却0｜売却0｜緊急確認1」を送信する)。"""
+    service, _repo, client = service_and_repos
+
+    sent = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=1, hold=9),
+        now=_NOW,
+        partial_sell_sent_count=0,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=1,
+    )
+
+    assert sent is True
+    assert "緊急確認1" in client.sent[0]
+
+
+def test_notify_batch_summary_zero_guard_is_independent_of_send_empty_summary_flag(
+    service_and_repos,
+) -> None:
+    """指摘5要件: このガードはBUY専用のsend_empty_summary(購入候補0件でも
+    「該当なし」を明示送信する設計)とは無関係な別ロジックであることを確認する。
+    send_empty_summary=True(既定)・False いずれを渡しても、holdings4分類が
+    全て0なら抑止される(send_empty_summaryの値に一切左右されない)。"""
+    service, _repo, client = service_and_repos
+
+    for send_empty_summary in (True, False):
+        sent = service.notify_batch_summary(
+            "保有銘柄・ウォッチリスト分析",
+            total=10,
+            category_counts=_counts(hold=10),
+            now=_NOW,
+            send_empty_summary=send_empty_summary,
+            partial_sell_sent_count=0,
+            full_sell_sent_count=0,
+            sell_sent_count=0,
+            critical_risk_sent_count=0,
+        )
+        assert sent is False, send_empty_summary
+    assert client.sent == []
+
+
+def test_notify_batch_summary_suppression_does_not_write_notification_log(
+    service_and_repos,
+) -> None:
+    """抑止時はLINE送信もNotificationLog保存も行わない(dedup用ログを汚さず、
+    翌日以降の実送信判定に影響を与えない)。"""
+    service, _repo, _client = service_and_repos
+
+    service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(hold=10),
+        now=_NOW,
+        partial_sell_sent_count=0,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+
+    assert (
+        service._log_repo.latest_by_stock_and_type(
+            "__batch__:保有銘柄・ウォッチリスト分析", NotificationType.BATCH_SUMMARY
+        )
+        is None
+    )
+
+
+def test_notify_batch_summary_suppression_still_allows_later_nonzero_send_same_day(
+    service_and_repos,
+) -> None:
+    """同日内で最初は0件抑止→後続で非0件になった場合、抑止時にログを書いて
+    いないため、後続呼び出しがdedupに阻まれず正しく送信されることを確認する
+    (batch-completion自体は_finish_batch_item側の責務で本テストの対象外だが、
+    サマリー抑止がその後の正常送信を妨げないことを保証する)。"""
+    service, _repo, client = service_and_repos
+
+    suppressed = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(hold=10),
+        now=_NOW,
+        partial_sell_sent_count=0,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+    assert suppressed is False
+
+    sent = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=1, hold=9),
+        now=_NOW,
+        partial_sell_sent_count=1,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+    assert sent is True
+    assert len(client.sent) == 1
+
+
 def test_normal_and_validation_bodies_differ_only_by_prefix() -> None:
     """コードレビュー対応(2026-08、LINE通知/監査分離、指摘7の訂正版)。同一の
     Recommendationをrenderした場合、NORMAL/VALIDATIONの本文差はバナー

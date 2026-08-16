@@ -74,8 +74,8 @@ class BatchFinalizeStatus(StrEnum):
     RUNNING→FINALIZING→COMPLETED(成功)またはFINALIZING→FINALIZE_FAILED(失敗)へ
     遷移する。FINALIZE_FAILEDは同一batch_idに対して終端状態として扱う(try_acquire_finalize
     はFINALIZE_FAILEDからの自動的な再取得を許可しない。通常の重複ワーカーによる
-    再取得を防ぐため)。復旧は新しいbatch_idでのバッチ再実行(次回の週次スケジュール、
-    または手動でのCLI/EventBridge再実行)によって行う想定であり、同一batch_idを
+    再取得を防ぐため)。復旧は新しいbatch_idでのバッチ再実行(次回のスケジュール
+    起動、または手動でのCLI/EventBridge再実行)によって行う想定であり、同一batch_idを
     そのまま再開する仕組みは実装しない(record_result等の他の仕組みと同様、
     batch_idは常に新規生成される前提のため)。
     """
@@ -440,8 +440,56 @@ class WatchlistProgressStatus(StrEnum):
 # 既存AUTO_SCREENING銘柄の再評価(メンテナンス)の両方で共用するための識別子
 # (計画Part C-7案A)。rotation commitはJOB_TYPE_NEW_CANDIDATE_SCREENINGの
 # 場合のみ行う(計画Part A-9)。
-JOB_TYPE_NEW_CANDIDATE_SCREENING = "NEW_CANDIDATE_SCREENING"
-JOB_TYPE_WATCHLIST_MAINTENANCE = "WATCHLIST_MAINTENANCE"
+#
+# 横断整合性レビュー対応(2026-08、指摘1・High): job_typeを自由文字列として
+# 扱わず、`WatchlistJobType`を唯一の定義元とする。Dispatcher/Worker/
+# Finalizer/Reconciler/BatchTracker/SQSメッセージ生成・復元の全経路が
+# この型(または`resolve_watchlist_job_type()`が返す値)を経由すること。
+# 「未知値はmaintenance扱い」「未知値はnew candidate扱い」という暗黙の
+# else-fallbackを行うと、Dispatcher側とWorker側で解釈が食い違う経路不整合
+# (typo等の未知job_typeがDispatcherではmaintenance、Workerではnew candidate
+# として処理される)が生じるため、全面的に禁止する。
+class WatchlistJobType(StrEnum):
+    NEW_CANDIDATE_SCREENING = "NEW_CANDIDATE_SCREENING"
+    WATCHLIST_MAINTENANCE = "WATCHLIST_MAINTENANCE"
+
+
+# 後方互換のための別名(二重定義ではなく、上記Enumメンバーそのものを指す単なる
+# エイリアス)。StrEnumはstrのサブクラスのため、既存コード中の
+# `job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING`という比較・f-string埋め込み・
+# DynamoDB文字列属性への書き込みはいずれも変更なしでそのまま動作する。
+JOB_TYPE_NEW_CANDIDATE_SCREENING = WatchlistJobType.NEW_CANDIDATE_SCREENING
+JOB_TYPE_WATCHLIST_MAINTENANCE = WatchlistJobType.WATCHLIST_MAINTENANCE
+
+
+class UnknownWatchlistJobTypeError(ValueError):
+    """job_typeが`WatchlistJobType`のいずれの値とも一致しない場合に送出する
+    専用例外(2026-08横断整合性レビュー指摘1)。呼び出し側はこれを捕捉して
+    fail-closed(処理を進めない)に倒すこと。"""
+
+
+def resolve_watchlist_job_type(
+    raw: str | None, *, default: WatchlistJobType | None = None
+) -> WatchlistJobType:
+    """job_type文字列を`WatchlistJobType`へ変換する唯一の関数。
+
+    `raw`がNone(キー自体が存在しない)の場合のみ`default`を返す
+    (EventBridge Scheduleのevent未指定時など、既定値が許される場面専用)。
+    `default`未指定でNoneが来た場合、またはNone以外の既知でない値が来た
+    場合は`UnknownWatchlistJobTypeError`を送出する。呼び出し側で
+    「elseならmaintenance」「elseならnew candidate」のような暗黙fallbackを
+    実装しないための唯一の正規入口とする。
+    """
+    if raw is None:
+        if default is not None:
+            return default
+        raise UnknownWatchlistJobTypeError(
+            "watchlist job_type is missing and no default is allowed here"
+        )
+    try:
+        return WatchlistJobType(raw)
+    except ValueError as exc:
+        raise UnknownWatchlistJobTypeError(f"unknown watchlist job_type: {raw!r}") from exc
 
 EXECUTION_RESULT_NORMAL = "NORMAL"
 EXECUTION_RESULT_HIGH_THROTTLE_RATE = "HIGH_THROTTLE_RATE"
@@ -793,7 +841,7 @@ def set_watchlist_batch_total(
     staged_rollout_market_segment_filter: list[str] | None = None,
     universe_count: int = 0,
     staged_rollout_excluded_count: int = 0,
-    job_type: str = "NEW_CANDIDATE_SCREENING",
+    job_type: WatchlistJobType = WatchlistJobType.NEW_CANDIDATE_SCREENING,
     eligible_universe_count: int = 0,
     rotation_cycle: int | None = None,
     rotation_start_key: list[str] | None = None,
@@ -858,7 +906,7 @@ def set_watchlist_batch_total(
             ":market_segment_filter": staged_rollout_market_segment_filter,
             ":universe_count": universe_count,
             ":staged_rollout_excluded_count": staged_rollout_excluded_count,
-            ":job_type": job_type,
+            ":job_type": job_type.value,
             ":eligible_universe_count": eligible_universe_count,
             ":rotation_cycle": rotation_cycle,
             ":rotation_start_key": rotation_start_key,

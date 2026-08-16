@@ -44,6 +44,7 @@ from jstock_advisor.domain.entities.enums import (
     WatchType,
     buy_action_label,
     is_critical_risk,
+    is_full_sell_like,
     is_sell_like,
 )
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
@@ -54,7 +55,6 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import format_jst
 from jstock_advisor.domain.notification.message_formatter import format_notification_text
 from jstock_advisor.domain.notification.recommendation_adapter import (
-    _FULL_SELL_RECOMMENDATION_TYPES,
     SHORT_TEXT_CATEGORIES,
     build_notification_text_input,
     build_watch_end_text_input,
@@ -197,13 +197,13 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
 # cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)の優先度表。
 # 数値が大きいほど優先度が高い。「BUY到達」(NEAR BUY監視からの昇格)は通常の
 # BUYより優先度を上げる(要求仕様の優先順位: CRITICAL_RISK > BUY到達 > SELL > BUY)。
-# コードレビュー対応(2026-08、LINE通知/監査分離): WATCH/PARTIAL_SELL/
-# MANUAL_REVIEWは意図的にこの表へ追加しない(=priority 0扱い、cross-pipeline
-# 重複抑止の対象外のまま)。移行前はこれらのRecommendationTypeもOTHER
-# (priority 0、対象外)だったため、この仕組みへ新規に参加させると、
-# 同一銘柄・同日内での状態変化に基づく正当な再送(例:
-# REVIEW_AFTER_EARNINGSのAWAITING_CONFIRMATION→DELAYED)がDUPLICATE_STOCK_
-# NOTIFICATIONとして誤って抑止される回帰を招くため、既存動作を維持する。
+# コードレビュー対応(2026-08、LINE通知/監査分離): WATCH/MANUAL_REVIEWは
+# 意図的にこの表へ追加しない(=priority 0扱い、cross-pipeline重複抑止の
+# 対象外のまま)。移行前はこれらのRecommendationTypeもOTHER(priority 0、
+# 対象外)だったため、この仕組みへ新規に参加させると、同一銘柄・同日内での
+# 状態変化に基づく正当な再送(例: REVIEW_AFTER_EARNINGSのAWAITING_
+# CONFIRMATION→DELAYED)がDUPLICATE_STOCK_NOTIFICATIONとして誤って抑止
+# される回帰を招くため、既存動作を維持する。
 # OTHER/NOT_NOTIFIABLEはこの仕組みの対象外(0を返し、実質的に比較対象にならない)。
 # コードレビュー対応(2026-08、LINE通知アクション限定化): NEAR_BUY/
 # WATCH_BEFORE_EARNINGSは、buy_candidates_handler.py側のfinalizeループが
@@ -211,9 +211,27 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
 # なった(NON_ACTIONABLEとして記録するのみ)ため、_record_daily_priority()が
 # これらのカテゴリで呼ばれることはもう無い。参加させたままにすると読み手を
 # 誤導するため、この表から削除した(0扱い=cross-pipeline重複抑止の対象外)。
+#
+# 横断整合性レビュー対応(2026-08、指摘7): PARTIAL_SELLをこの表へ追加する。
+# 従来はpriority 0(対象外)だったため、「保有銘柄パイプラインが一部売却を
+# 通知済みの銘柄に対し、翌時間帯のBUY候補パイプラインが同一銘柄をBUY候補
+# として重ねて通知する」「逆に先にBUYを通知した銘柄へ後から一部売却が
+# 発生しても優先度比較されず常に貫通する(これは許容通り)」という非対称な
+# 抜け穴があった。SELLと同じpriority(4)を与え、同一tierとして扱う:
+# 一部売却/売却いずれも「本日この銘柄について売却方向の通知は済んでいる」
+# という点で意味的に同格であり、後着の同tier通知はDUPLICATE_STOCK_
+# NOTIFICATIONとして抑止する一方、BUY(3)には優先し、CRITICAL_RISK(6)/
+# BUY到達(5)には劣後する。既存優先度レコード(DailyNotificationPriority
+# Record.priority)との後方互換: 本変更は既存メンバー(CRITICAL_RISK=6/
+# PROMOTED_TO_BUY=5/SELL=4/BUY=3)の数値を一切変更せず新規メンバーを追加
+# するのみのため、レコードはdate単位のkey(build_daily_notification_
+# priority_id)で当日限りしか生存せず、ローリングデプロイ中に旧コードが
+# 書いたSELL=4のレコードを新コードがPARTIAL_SELL=4と比較しても、意図通り
+# 同tierとして正しく機能する(数値の意味が変わっていないため)。
 _NOTIFICATION_PRIORITY: dict[NotificationCategory, int] = {
     NotificationCategory.CRITICAL_RISK: 6,
     NotificationCategory.SELL: 4,
+    NotificationCategory.PARTIAL_SELL: 4,
     NotificationCategory.BUY: 3,
 }
 _PROMOTED_TO_BUY_PRIORITY = 5
@@ -419,7 +437,7 @@ def _representative_price(recommendation: Recommendation) -> Decimal | None:
     sp = recommendation.sell_prices
     if sp is None:
         return None
-    if recommendation.recommendation_type in _FULL_SELL_RECOMMENDATION_TYPES:
+    if is_full_sell_like(recommendation.recommendation_type):
         for full_level in (sp.full_profit_consideration_price, sp.immediate_execution_price):
             if full_level is not None:
                 return full_level.price
@@ -511,7 +529,7 @@ def _render_watchlist_addition_header(summary: WatchlistAdditionSummary) -> list
     return [
         "【ウォッチリスト追加】",
         "",
-        "週次スクリーニングにより",
+        "自動スクリーニングにより",
         f"新たに{summary.added_count}銘柄を追加しました。",
         "",
         f"対象：{summary.total_target_count}銘柄",
@@ -2434,9 +2452,18 @@ class LineNotificationService:
             )
 
         pseudo_stock_code = f"__batch__:{process_name}"
+        # 横断整合性レビュー対応(2026-08、指摘6): countsはcategory_counts
+        # (sent/hold/review/data_insufficient/suppressed/failed)のみを表し、
+        # holdings専用の4分類(一部売却/全部売却/売却/緊急確認)の内訳を
+        # 含まない。そのため、category_countsの合計が同じでも構成銘柄の
+        # アクション種別が異なる日(例: 昨日は一部売却2件、今日は売却2件)を
+        # 同一内容として誤ってdedup抑止してしまう恐れがあった。4分類の件数
+        # (holdings専用呼び出し以外は常にNone)もハッシュ入力へ含める。
         content_hash = hashlib.sha256(
             f"{process_name}|{now.date().isoformat()}|{total}|"
-            f"{sorted(counts.items())}|near_buy={near_buy_sent_count}".encode()
+            f"{sorted(counts.items())}|near_buy={near_buy_sent_count}|"
+            f"partial_sell={partial_sell_sent_count}|full_sell={full_sell_sent_count}|"
+            f"sell={sell_sent_count}|critical_risk={critical_risk_sent_count}".encode()
         ).hexdigest()[:16]
         # 通知検証モード機能(2026-08追加): このdedupは_notification_status_for_send
         # とは別に自前で持つ同日・同内容抑止のため、VALIDATIONでは別途バイパスする
@@ -2470,6 +2497,24 @@ class LineNotificationService:
             full_n = full_sell_sent_count or 0
             sell_n = sell_sent_count or 0
             critical_n = critical_risk_sent_count or 0
+            # 横断整合性レビュー対応(2026-08、指摘5): 4分類すべてが0件の場合、
+            # 「一部売却0｜全部売却0｜売却0」という空虚な通知を毎日送らない
+            # ようLINE送信を抑止する。BUY側のsend_empty_summary(購入候補が
+            # 0件でも「該当なし」を明示送信する設計、上記buy_zero/near_buy_zero
+            # 分岐参照)とは意味も呼び出し元も異なるため、このガードはsend_
+            # empty_summaryパラメータを一切参照しない別ロジックとして扱う。
+            # batch進捗の確定(record_result、batch-completion)は呼び出し元の
+            # _finish_batch_item()側で既にこのメソッド呼び出し前に完了して
+            # おり、この抑止による影響を受けない。CloudWatch観測用に
+            # logger.infoのみ残す。
+            if partial_n == 0 and full_n == 0 and sell_n == 0 and critical_n == 0:
+                logger.info(
+                    "batch_summary suppressed (all holdings action counts are zero) "
+                    "process_name=%s total=%d",
+                    process_name,
+                    total,
+                )
+                return False
             summary_line = f"一部売却{partial_n}｜全部売却{full_n}｜売却{sell_n}"
             if critical_n > 0:
                 summary_line += f"｜緊急確認{critical_n}"
@@ -2556,7 +2601,7 @@ class LineNotificationService:
     def notify_watchlist_additions(
         self, summary: WatchlistAdditionSummary, content_hash: str
     ) -> bool:
-        """週次スクリーニングでウォッチリストへ実際に追加された銘柄の通知
+        """自動スクリーニングでウォッチリストへ実際に追加された銘柄の通知
         (ウォッチリスト自動追加機能、要求仕様§12)。
 
         `summary`(Presentation DTO、通知チャネル非依存)はwatchlist_addition_

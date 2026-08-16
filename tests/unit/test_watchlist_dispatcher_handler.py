@@ -22,7 +22,7 @@ def _fake_config(
 ) -> SimpleNamespace:
     watchlist_screening = SimpleNamespace(
         enabled=True,
-        weekly_schedule_enabled=True,
+        scheduled_run_enabled=True,
         candidate_universe=SimpleNamespace(provider="csv"),
         screening_policy="high_dividend_financial_health",
         staged_rollout=SimpleNamespace(candidate_limit=candidate_limit, market_segment_filter=None),
@@ -277,6 +277,59 @@ def test_batch_id_override_from_event_is_used(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert captured_batch_ids == ["watchlist-maint-batch-1"]
+    assert result == {"skipped": "lease_not_acquired"}
+
+
+# --- 横断整合性レビュー対応(2026-08、指摘1・High): job_type解釈の統一 -------
+
+
+def test_unknown_job_type_is_rejected_before_any_side_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """typo等の未知job_typeは、dispatch lease取得・SQS投入・BatchRunsTable
+    書き込みのいずれも行わずfail-closedで即座に拒否すること(「未知値は
+    maintenance扱い」という暗黙fallbackを行わない)。"""
+    monkeypatch.setattr(
+        handler_module,
+        "load_config",
+        lambda: _fake_config(candidate_limit=300, rotation_enabled=True),
+    )
+
+    def _fail_if_called(*_a: Any, **_kw: Any) -> bool:
+        pytest.fail("try_acquire_dispatch_lease should not be called for unknown job_type")
+
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", _fail_if_called)
+
+    result = handler_module.handler({"job_type": "WATCHLIST_MAINTENENCE"}, object())
+
+    assert result == {"error": "unknown_job_type", "job_type": "WATCHLIST_MAINTENENCE"}
+
+
+def test_missing_job_type_defaults_to_new_candidate_screening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """event内にjob_typeキー自体が無い場合(通常のEventBridge Schedule起動)
+    のみ、NEW_CANDIDATE_SCREENINGが既定値として許容されること。"""
+    monkeypatch.setattr(
+        handler_module,
+        "load_config",
+        lambda: _fake_config(candidate_limit=300, rotation_enabled=True),
+    )
+    captured_batch_ids: list[str] = []
+
+    def _capture_and_reject(batch_id: str, *_a: Any, **_kw: Any) -> bool:
+        captured_batch_ids.append(batch_id)
+        return False
+
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", _capture_and_reject)
+
+    result = handler_module.handler({}, object())
+
+    assert len(captured_batch_ids) == 1
+    # NEW_CANDIDATE_SCREENING用のprefix("watchlist-...")であり、maintenance用
+    # のprefix("watchlist-maint-...")ではないこと。
+    assert captured_batch_ids[0].startswith("watchlist-")
+    assert not captured_batch_ids[0].startswith("watchlist-maint-")
     assert result == {"skipped": "lease_not_acquired"}
 
 

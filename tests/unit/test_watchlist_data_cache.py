@@ -11,11 +11,17 @@ from pathlib import Path
 import pytest
 
 from jstock_advisor.infrastructure.collection_store import build_collection_store
-from jstock_advisor.interfaces.types import DataSourceReference, DividendInfo, FinancialSummary
+from jstock_advisor.interfaces.types import (
+    DataSourceReference,
+    DividendInfo,
+    FinancialSummary,
+    PriceSnapshot,
+)
 from jstock_advisor.services.watchlist_data_cache import (
     CacheEntry,
     CacheQualityStatus,
     _CachingDividendDataProvider,
+    _CachingMarketDataProvider,
     _classify_financial_summary,
     _classify_optional,
     get_or_fetch,
@@ -306,3 +312,162 @@ def test_dividend_cache_key_does_not_collide_across_fiscal_year_end_month(repo) 
     assert inner.calls == [3, 12]
     assert result_3_again is not None
     assert result_3_again.fiscal_year == "3"
+
+
+# --- 横断整合性レビュー対応(2026-08、指摘2・High): 平日毎日06:00実行に伴う ---
+# --- price/average_trading_valueキャッシュのJST日付境界テスト --------------
+
+_JST = dt.timezone(dt.timedelta(hours=9))
+# 前日06:00 JST(前営業日を想定)。実際の曜日は問わない(祝日判定は導入しない
+# 要件のため、テストも曜日そのものには依存させない)。
+_DAY1_0600_JST = dt.datetime(2026, 8, 3, 6, 0, tzinfo=_JST)
+# ちょうど24時間後(=旧ロジックのprice_cache_ttl_hoursの境界と一致)の翌日06:00 JST。
+_DAY2_0600_JST = _DAY1_0600_JST + dt.timedelta(hours=24)
+# 同一営業日内の再実行(1時間後)を想定。
+_DAY1_0700_JST = _DAY1_0600_JST + dt.timedelta(hours=1)
+
+
+class _RecordingMarketDataProvider:
+    """呼び出しごとに異なるPriceSnapshot/平均売買代金を返し、呼び出し回数を記録する。"""
+
+    def __init__(self) -> None:
+        self.latest_price_calls = 0
+        self.avg_trading_value_calls = 0
+
+    def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
+        self.latest_price_calls += 1
+        return PriceSnapshot(
+            stock_code=stock_code,
+            as_of_date=dt.date(2026, 8, 3),
+            close_price=Decimal(str(1000 + self.latest_price_calls)),
+            source=DataSourceReference(provider="test", fetched_at=_DAY1_0600_JST),
+        )
+
+    def get_price_history(self, stock_code, start, end):  # noqa: ANN001, ANN201
+        raise NotImplementedError
+
+    def get_average_trading_value(self, stock_code: str, business_days: int) -> Decimal | None:
+        self.avg_trading_value_calls += 1
+        return Decimal(str(500_000 * self.avg_trading_value_calls))
+
+    def get_benchmark_price_history(self, symbol, start, end):  # noqa: ANN001, ANN201
+        raise NotImplementedError
+
+
+def _market_caching(repo, inner: _RecordingMarketDataProvider, now: dt.datetime):
+    return _CachingMarketDataProvider(
+        inner=inner,
+        repo=repo,
+        ttl_hours=24,
+        negative_ttl_minutes=_NEGATIVE_TTL_MINUTES,
+        now=now,
+    )
+
+
+def test_latest_price_cached_on_day1_is_not_reused_on_day2_even_within_24h_ttl(repo) -> None:
+    """前営業日06:00に作成したlatest_priceキャッシュを、ちょうど24時間後
+    (=旧TTLの境界内)の翌営業日06:00評価で誤って再利用しないこと(指摘2の
+    主眼)。JST暦日がキャッシュキーに含まれるため、24時間TTL自体は満たして
+    いても日が変われば必ずcache missとなり再取得されること。"""
+    inner = _RecordingMarketDataProvider()
+
+    day1 = _market_caching(repo, inner, _DAY1_0600_JST)
+    first = day1.get_latest_price("1111")
+    assert inner.latest_price_calls == 1
+    assert first is not None
+    assert first.close_price == Decimal("1001")
+
+    day2 = _market_caching(repo, inner, _DAY2_0600_JST)
+    second = day2.get_latest_price("1111")
+
+    # 経過時間はちょうど24時間(旧ロジックではage_hours<=24でヒットしていた
+    # 境界)だが、日付が変わっているため再取得されること。
+    assert inner.latest_price_calls == 2
+    assert second is not None
+    assert second.close_price == Decimal("1002")
+
+
+def test_latest_price_cache_is_reused_within_the_same_jst_day(repo) -> None:
+    """同一JST営業日内の再実行(例: Reconcilerによる再試行)ではキャッシュを
+    利用できること(日付境界を導入しても同日内の再利用は妨げない)。"""
+    inner = _RecordingMarketDataProvider()
+
+    first_run = _market_caching(repo, inner, _DAY1_0600_JST)
+    first_run.get_latest_price("1111")
+    assert inner.latest_price_calls == 1
+
+    same_day_rerun = _market_caching(repo, inner, _DAY1_0700_JST)
+    same_day_rerun.get_latest_price("1111")
+
+    assert inner.latest_price_calls == 1  # 再取得されていない(キャッシュヒット)
+
+
+def test_average_trading_value_cache_is_date_partitioned_across_days(repo) -> None:
+    """get_average_trading_valueもget_latest_priceと同じ「評価対象日を基準と
+    した値」であるため、同じJST日付境界ルールが効くこと(日が変われば
+    再取得される)。"""
+    inner = _RecordingMarketDataProvider()
+
+    day1 = _market_caching(repo, inner, _DAY1_0600_JST)
+    day1.get_average_trading_value("1111", business_days=20)
+    assert inner.avg_trading_value_calls == 1
+
+    day2 = _market_caching(repo, inner, _DAY2_0600_JST)
+    day2.get_average_trading_value("1111", business_days=20)
+    assert inner.avg_trading_value_calls == 2  # 日が変わったため再取得される
+
+
+def test_average_trading_value_cache_is_reused_within_the_same_jst_day(repo) -> None:
+    """get_average_trading_valueも同一JST営業日内の再実行ではキャッシュを
+    利用できること。"""
+    inner = _RecordingMarketDataProvider()
+
+    first_run = _market_caching(repo, inner, _DAY1_0600_JST)
+    first_run.get_average_trading_value("2222", business_days=20)
+    assert inner.avg_trading_value_calls == 1
+
+    same_day_rerun = _market_caching(repo, inner, _DAY1_0700_JST)
+    same_day_rerun.get_average_trading_value("2222", business_days=20)
+
+    assert inner.avg_trading_value_calls == 1  # 同日内は再取得されない
+
+
+def test_latest_price_negative_cache_15min_ttl_still_applies_within_same_day(repo) -> None:
+    """指摘2の日付境界導入後も、既存のnegative cache(15分)仕様を壊さない
+    こと。Noneが返る場合は同一JST日内でも15分でmiss扱いになること。"""
+
+    class _NoneReturningProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
+            self.calls += 1
+            return None
+
+        def get_price_history(self, stock_code, start, end):  # noqa: ANN001, ANN201
+            raise NotImplementedError
+
+        def get_average_trading_value(self, stock_code, business_days):  # noqa: ANN001, ANN201
+            raise NotImplementedError
+
+        def get_benchmark_price_history(self, symbol, start, end):  # noqa: ANN001, ANN201
+            raise NotImplementedError
+
+    inner = _NoneReturningProvider()
+    first = _market_caching(repo, inner, _DAY1_0600_JST)
+    first.get_latest_price("9999")
+    assert inner.calls == 1
+
+    # 15分未満(同日・negative TTL内)は依然としてキャッシュヒットのまま。
+    within_negative_ttl = _market_caching(
+        repo, inner, _DAY1_0600_JST + dt.timedelta(minutes=10)
+    )
+    within_negative_ttl.get_latest_price("9999")
+    assert inner.calls == 1
+
+    # 15分超過(同日内)はmiss扱いで再取得される。
+    after_negative_ttl = _market_caching(
+        repo, inner, _DAY1_0600_JST + dt.timedelta(minutes=16)
+    )
+    after_negative_ttl.get_latest_price("9999")
+    assert inner.calls == 2

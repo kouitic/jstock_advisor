@@ -587,19 +587,26 @@ def test_batch_completion_recorded_even_when_notification_suppressed(
 
 def test_batch_summary_sent_when_notification_enabled(store_dir: Path, monkeypatch):
     """kill switch OFF(notification_enabled=True)の場合は、バッチ完了時に
-    通常どおりサマリーが送信される(抑止ロジックが誤って常時ブロックしないことの確認)。"""
+    通常どおりサマリーが送信される(抑止ロジックが誤って常時ブロックしないことの確認)。
+
+    横断整合性レビュー対応(2026-08、指摘5)以降、action 4分類がすべて0件の
+    バッチはサマリー自体を送信しなくなったため(意図的な仕様)、本テストの
+    「kill switchが誤ってブロックしていないか」を意味のある形で検証するには
+    notification_categoriesへ実際のアクション1件を含める必要がある。
+    """
     from jstock_advisor.infrastructure.aws.batch_tracker import BatchProgress
     from jstock_advisor.lambda_handlers.holdings_watchlist_handler import _finish_batch_item
 
     fake_progress = BatchProgress(
         total=1,
         completed=1,
-        category_counts={"hold": 1},
+        category_counts={"sent": 1},
         data_insufficient_stock_codes=[],
         failed_stock_codes=[],
         ranking_entries=[],
         sector_entries=[],
         holding_count=0,
+        notification_categories=[f"{RecommendationType.SELL.value}|{_STOCK_CODE}"],
     )
     def _fake_record_result(
         batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None, **kwargs
@@ -610,13 +617,123 @@ def test_batch_summary_sent_when_notification_enabled(store_dir: Path, monkeypat
     services = _build_services(store_dir, RuntimeConfigMode.LEGACY, notification_enabled=True)
     _finish_batch_item(
         "test-batch-enabled",
-        "hold",
+        "sent",
         _STOCK_CODE,
         _NOW,
         services["notification_service"],
         services["runtime_config_service"],
     )
     assert len(services["line_client"].sent_messages) == 1
+
+
+# ===== 横断整合性レビュー対応(2026-08、指摘3): まとめ通知の全部売却検討分類統一 =====
+
+
+def _finish_batch_item_with_notification_categories(
+    store_dir: Path, monkeypatch, notification_categories: list[str]
+) -> dict:
+    """指定したnotification_categories(recommendation_type.value|stock_codeの
+    リスト)でバッチ完了時のnotify_batch_summary呼び出しをキャプチャする。"""
+    from jstock_advisor.infrastructure.aws.batch_tracker import BatchProgress
+    from jstock_advisor.lambda_handlers.holdings_watchlist_handler import _finish_batch_item
+
+    fake_progress = BatchProgress(
+        total=len(notification_categories),
+        completed=len(notification_categories),
+        category_counts={"hold": 0},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+        notification_categories=notification_categories,
+    )
+
+    def _fake_record_result(
+        batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None, **kwargs
+    ):
+        return fake_progress
+
+    monkeypatch.setattr(handler_module, "record_result", _fake_record_result)
+    services = _build_services(store_dir, RuntimeConfigMode.LEGACY, notification_enabled=True)
+    captured = {}
+
+    def _fake_notify_batch_summary(process_name, total, category_counts, now, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        services["notification_service"], "notify_batch_summary", _fake_notify_batch_summary
+    )
+    _finish_batch_item(
+        "test-batch-full-sell",
+        "hold",
+        _STOCK_CODE,
+        _NOW,
+        services["notification_service"],
+        services["runtime_config_service"],
+    )
+    return captured
+
+
+def test_strong_sell_consideration_counts_as_full_sell_not_sell(store_dir: Path, monkeypatch):
+    """STRONG_SELL_CONSIDERATIONは個別LINE通知本文では「全部売却検討」と表示
+    されるため(recommendation_adapter.py)、まとめ通知の集計もfull_sell_
+    sent_countへ計上されなければならない(以前はsell_sent_countへ誤計上して
+    いた不整合の回帰テスト)。"""
+    captured = _finish_batch_item_with_notification_categories(
+        store_dir,
+        monkeypatch,
+        [f"{RecommendationType.STRONG_SELL_CONSIDERATION.value}|1234"],
+    )
+    assert captured["full_sell_sent_count"] == 1
+    assert captured["sell_sent_count"] == 0
+
+
+def test_full_profit_take_counts_as_full_sell(store_dir: Path, monkeypatch):
+    captured = _finish_batch_item_with_notification_categories(
+        store_dir, monkeypatch, [f"{RecommendationType.FULL_PROFIT_TAKE.value}|1234"]
+    )
+    assert captured["full_sell_sent_count"] == 1
+    assert captured["sell_sent_count"] == 0
+
+
+def test_sell_consideration_stays_plain_sell(store_dir: Path, monkeypatch):
+    """SELL_CONSIDERATIONは全部売却検討系ではないため、sell_sent_countのまま
+    でfull_sell_sent_countへ混入しないことを確認する。"""
+    captured = _finish_batch_item_with_notification_categories(
+        store_dir, monkeypatch, [f"{RecommendationType.SELL_CONSIDERATION.value}|1234"]
+    )
+    assert captured["sell_sent_count"] == 1
+    assert captured["full_sell_sent_count"] == 0
+
+
+def test_partial_types_count_as_partial_sell_only(store_dir: Path, monkeypatch):
+    captured = _finish_batch_item_with_notification_categories(
+        store_dir,
+        monkeypatch,
+        [
+            f"{RecommendationType.PARTIAL_PROFIT_TAKE.value}|1234",
+            f"{RecommendationType.PARTIAL_RISK_REDUCTION.value}|5678",
+        ],
+    )
+    assert captured["partial_sell_sent_count"] == 2
+    assert captured["full_sell_sent_count"] == 0
+    assert captured["sell_sent_count"] == 0
+
+
+def test_critical_risk_types_do_not_leak_into_sell_counts(store_dir: Path, monkeypatch):
+    captured = _finish_batch_item_with_notification_categories(
+        store_dir,
+        monkeypatch,
+        [
+            f"{RecommendationType.URGENT_REVIEW.value}|1234",
+            f"{RecommendationType.URGENT_HOLDING_REVIEW.value}|5678",
+        ],
+    )
+    assert captured["critical_risk_sent_count"] == 2
+    assert captured["sell_sent_count"] == 0
+    assert captured["full_sell_sent_count"] == 0
+    assert captured["partial_sell_sent_count"] == 0
 
 
 # ===== 新方式例外(DATA_INTEGRITY_ERROR): フォールバックし、バッチは継続する =====

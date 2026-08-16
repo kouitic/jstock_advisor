@@ -119,7 +119,7 @@ CSVを用意しただけでは反映されません。必ず`import-csv`を実�
 残しています。
 
 **キャッシュの取得元とローカル管理コマンド**: 取得したデータはS3(本番)またはローカル
-ファイル(`data/cache/candidate_universe/`)へキャッシュされます。週次`WatchlistDispatcherFunction`
+ファイル(`data/cache/candidate_universe/`)へキャッシュされます。`WatchlistDispatcherFunction`
 が起動のたびに自動で取得・検証・更新するため、**通常運用では以下のコマンドを使う必要は
 ありません**。ローカルでの事前確認・リハーサル用の任意ツールとして提供しています(常に
 ローカルキャッシュのみを読み書きし、本番S3には一切アクセスしません)。
@@ -129,7 +129,7 @@ jstock candidate-universe refresh   # ローカルキャッシュを取得・検
 jstock candidate-universe status    # ローカルキャッシュの現在の状態(source_date・件数等)を表示
 ```
 
-**本番S3キャッシュを週次スケジュール外で手動更新したい場合**: ローカルCLIからは行えません。
+**本番S3キャッシュを定例スケジュール外で手動更新したい場合**: ローカルCLIからは行えません。
 `WatchlistDispatcherFunction`を直接手動起動してください(4.1節参照)。
 
 ---
@@ -159,7 +159,7 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 
 ---
 
-## 4.1 ウォッチリスト自動追加(週次、2026-08-01追加・候補ユニバース本格対応で全面改訂・2026-08-16平日毎日起動化)
+## 4.1 ウォッチリスト自動追加(2026-08-01追加・候補ユニバース本格対応で全面改訂・2026-08-16平日毎日起動化)
 
 | 時刻 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 |
 |---|---|---|---|
@@ -176,7 +176,7 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 
 | Lambda関数 | 役割 |
 |---|---|
-| `WatchlistDispatcherFunction` | 週次起動。候補ユニバースの取得(Downloader)・確定・銘柄ごとの進捗行作成・SQSへの投入のみを行う |
+| `WatchlistDispatcherFunction` | 平日毎日06:00のEventBridge起動、またはWATCHLIST_MAINTENANCEの自己invoke起動。候補ユニバースの取得(Downloader)・確定・銘柄ごとの進捗行作成・SQSへの投入のみを行う |
 | `WatchlistWorkerFunction` | メインキュー(`WatchlistScreeningQueue`)のトリガー。1メッセージ=1銘柄を評価する |
 | `WatchlistTerminalFailureHandlerFunction` | メインキューで3回失敗したメッセージの移動先(`WatchlistTerminalFailureQueue`)のトリガー。該当銘柄をFAILED確定する |
 | `WatchlistBatchReconcilerFunction` | 毎時起動。長時間RUNNINGのまま/DISPATCHINGのままのバッチのタイムアウト検知・終端確定を行う |
@@ -208,12 +208,12 @@ RUNNING → TIMEOUT_FINALIZING → TIMED_OUT
 - **`DISPATCH_FAILED`**: 候補ユニバースの取得・進捗行の作成に失敗した、または
   `WatchlistDispatcherFunction`自体が`batch_processing_timeout_hours`(既定24時間)
   以内に応答しなかった場合。候補リスト自体が確定していないため、この状態から
-  finalize処理は一切行われません。**自動的な再開はしません**。次回の週次
-  スケジュール(翌週土曜)が新しい`batch_id`で最初からやり直します。
+  finalize処理は一切行われません。**自動的な再開はしません**。次回のスケジュール
+  起動(NEW_CANDIDATE_SCREENINGは翌平日06:00)が新しい`batch_id`で最初からやり直します。
 - **`FINALIZE_FAILED`**: 全銘柄の評価は完了したが、集計処理(ウォッチリストへの
   実登録・LINE通知・実行結果の記録)自体が例外で失敗した場合。`finalize_error_message`
   にエラー概要、`finalize_failed_at`に失敗時刻が記録されます。自動復旧の仕組みは
-  なく、次回の週次スケジュールを待つか、`jstock watchlist-screening run`で
+  なく、次回のスケジュール起動を待つか、`jstock watchlist-screening run`で
   手動実行してください(新しい`batch_id`で最初からやり直す形になります)。
 - **`TIMED_OUT`**: 処理開始から`batch_processing_timeout_hours`(既定24時間)
   以内に全銘柄の評価が終わらなかった場合。`WatchlistBatchReconcilerFunction`が

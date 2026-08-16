@@ -1,9 +1,9 @@
 """候補ユニバース(東証上場銘柄一覧・JPX400構成銘柄)のローカルキャッシュ管理CLI(6節)。
 
 本番前の事前リハーサル・ローカル開発用の**任意**ツール(必須の初回セットアップ
-手順ではない)。週次`WatchlistDispatcherFunction`の通常起動時にも同じDownloaderが
+手順ではない)。`WatchlistDispatcherFunction`の通常起動時にも同じDownloaderが
 自動的にキャッシュを取得・検証・昇格するため、本番運用では通常このCLIを使う
-必要はない。本番のS3キャッシュを週次スケジュール外で手動更新したい場合は、
+必要はない。本番のS3キャッシュを定例スケジュール外で手動更新したい場合は、
 `WatchlistDispatcherFunction`を`aws lambda invoke`で直接手動起動すること
 (運用手順書参照)。ローカルCLIは常にローカルキャッシュ
 (`data/cache/candidate_universe/`)のみを読み書きし、本番S3へは一切アクセスしない。

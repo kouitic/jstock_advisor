@@ -33,11 +33,12 @@ from jstock_advisor.domain.signals.watchlist_screening import (
     categorize_exclusion_reasons,
 )
 from jstock_advisor.infrastructure.aws.batch_tracker import (
-    JOB_TYPE_NEW_CANDIDATE_SCREENING,
     JOB_TYPE_WATCHLIST_MAINTENANCE,
+    WatchlistJobType,
     WatchlistProgressStatus,
     claim_candidate_lease,
     complete_candidate,
+    resolve_watchlist_job_type,
 )
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
@@ -106,7 +107,7 @@ def _evaluate_candidate(
     now: dt.datetime,
     providers: ProviderBundle,
     config: AppConfig,
-    job_type: str = JOB_TYPE_NEW_CANDIDATE_SCREENING,
+    job_type: WatchlistJobType = WatchlistJobType.NEW_CANDIDATE_SCREENING,
 ) -> _EvaluationOutcome:
     screening_data_provider = build_screening_data_provider(providers, config)
     fetch_start = dt.datetime.now(dt.UTC)
@@ -241,7 +242,16 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         body = json.loads(record["body"])
         batch_id = body["batch_id"]
         stock_code = body["stock_code"]
-        job_type = body.get("job_type", JOB_TYPE_NEW_CANDIDATE_SCREENING)
+        # 横断整合性レビュー対応(2026-08、指摘1・High): SQSメッセージ本文の
+        # job_typeは明示値必須とし、欠損・未知値は例外を送出してこの
+        # メッセージの処理だけを失敗させる(fail-closed、「job_type欠損時は
+        # NEW_CANDIDATE_SCREENING扱い」という暗黙fallbackを行わない)。SQS
+        # BatchSize=1のため、この例外は当該1メッセージのLambda呼び出しのみを
+        # 失敗させ、既存のインフラレベル障害用の再送・DLQ・
+        # WatchlistTerminalFailureHandlerFunction経由の終端確定機構(17節)へ
+        # そのまま乗る。Dispatcher側が既に明示値を必ず書き込むため、通常運用
+        # でこの例外が発生することは無い。
+        job_type = resolve_watchlist_job_type(body.get("job_type"))
         claim_time = dt.datetime.now(dt.UTC)
 
         lease_acquired = claim_candidate_lease(
