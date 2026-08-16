@@ -109,6 +109,7 @@ def _fake_config(
         thresholds=_fake_thresholds_config(),
         stock_display_name=SimpleNamespace(jpx_name_negative_cache_ttl_seconds=60),
         auto_removal=SimpleNamespace(
+            enabled=True,
             readd_cooldown_days=30,
             minimum_age_days=90,
             consecutive_not_qualified_required=3,
@@ -414,3 +415,72 @@ def test_reconciler_retries_notification_failed_without_rewriting_watchlist(
     batch_after = batch_tracker.get_watchlist_batch("batch-1")
     assert batch_after is not None
     assert batch_after["status"] == WatchlistBatchStatus.COMPLETED.value
+
+
+# --- 平日毎日起動化(2026-08)対応: WATCHLIST_MAINTENANCE後続起動のstale retry ------
+
+
+def test_reconciler_retries_stale_maintenance_trigger(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """テスト#6相当: invoke失敗等でTRIGGERINGのままlease失効した親バッチを、
+    毎時Reconcilerがmaybe_trigger_maintenance経由で再試行すること。"""
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=60
+    )
+    much_later = _NOW + dt.timedelta(hours=2)
+
+    retried: list[str] = []
+
+    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config):  # noqa: ANN001, ANN201
+        retried.append(batch_id)
+
+    monkeypatch.setattr(
+        handler_module, "maybe_trigger_maintenance", _fake_maybe_trigger_maintenance
+    )
+    # handler_module内の`dt`名(dispatcher/reconcilerが共有するdatetimeモジュールへの
+    # エイリアス)だけを差し替える。dt.datetime自体(実際のstdlibクラス)を書き換えると
+    # 同一プロセス内の他コードにも影響してしまうため、名前解決の付け替えのみを行う
+    # (グローバルなdatetime moduleの改変は避ける)。
+    monkeypatch.setattr(
+        handler_module,
+        "dt",
+        SimpleNamespace(datetime=SimpleNamespace(now=lambda tz=None: much_later), UTC=dt.UTC),
+    )
+
+    result = handler_module.handler({}, object())
+
+    assert retried == ["batch-1"]
+    assert result["maintenance_trigger_retried"] == 1
+
+
+def test_reconciler_does_not_retry_maintenance_trigger_within_lease(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """lease未失効(TRIGGERING中だがlease_expires_atが未来)のうちはReconcilerが
+    再試行しないこと(invoke処理中の二重起動防止、テスト#6の裏側)。"""
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=3600
+    )
+    still_within_lease = _NOW + dt.timedelta(minutes=5)
+
+    retried: list[str] = []
+
+    def _fake_maybe_trigger_maintenance(batch_id, batch_item, now, config):  # noqa: ANN001, ANN201
+        retried.append(batch_id)
+
+    monkeypatch.setattr(
+        handler_module, "maybe_trigger_maintenance", _fake_maybe_trigger_maintenance
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "dt",
+        SimpleNamespace(
+            datetime=SimpleNamespace(now=lambda tz=None: still_within_lease), UTC=dt.UTC
+        ),
+    )
+
+    result = handler_module.handler({}, object())
+
+    assert retried == []
+    assert result["maintenance_trigger_retried"] == 0

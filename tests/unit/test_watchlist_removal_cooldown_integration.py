@@ -183,6 +183,7 @@ def _fake_config(*, readd_cooldown_days: int = 30) -> SimpleNamespace:
         thresholds=_fake_thresholds_config(),
         stock_display_name=SimpleNamespace(jpx_name_negative_cache_ttl_seconds=60),
         auto_removal=SimpleNamespace(
+            enabled=True,
             readd_cooldown_days=readd_cooldown_days,
             minimum_age_days=90,
             consecutive_not_qualified_required=3,

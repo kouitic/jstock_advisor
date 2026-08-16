@@ -938,3 +938,104 @@ def test_unrelated_client_error_still_propagates(monkeypatch: pytest.MonkeyPatch
     )
     with pytest.raises(ClientError):
         batch_tracker.try_finalize_if_ready("batch-1", _NOW)
+
+
+# --- 平日毎日起動化(2026-08)対応: WATCHLIST_MAINTENANCE後続起動トリガー -----------
+
+
+def test_try_acquire_maintenance_trigger_succeeds_on_first_call(dynamo) -> None:
+    ok = batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW
+    )
+    assert ok is True
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["maintenance_trigger_status"] == batch_tracker.MAINTENANCE_TRIGGER_STATUS_TRIGGERING
+    assert item["maintenance_batch_id"] == "watchlist-maint-batch-1"
+
+
+def test_try_acquire_maintenance_trigger_rejects_second_attempt_while_lease_valid(dynamo) -> None:
+    """同じparent finalizerが2回実行されても、leaseが有効な間は再取得できない
+    (exactly-onceの中核)。"""
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW
+    )
+    ok = batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-b", _NOW
+    )
+    assert ok is False
+
+
+def test_try_acquire_maintenance_trigger_allows_reclaim_after_lease_expiry(dynamo) -> None:
+    """invoke失敗時、lease失効後はReconcilerが再取得できる(処理を消失させない)。"""
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=120
+    )
+    later = _NOW + dt.timedelta(seconds=121)
+    ok = batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-b", later
+    )
+    assert ok is True
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["maintenance_trigger_owner_id"] == "owner-b"
+    assert item["maintenance_trigger_attempt_count"] == 2
+
+
+def test_mark_maintenance_triggered_is_permanently_final(dynamo) -> None:
+    """invoke成功後にTRIGGEREDへ確定すると、以後は(leaseが失効していても)
+    二度と再取得できない(exactly-once)。"""
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW
+    )
+    batch_tracker.mark_maintenance_triggered("batch-1", _NOW)
+    item = batch_tracker.get_watchlist_batch("batch-1")
+    assert item is not None
+    assert item["maintenance_trigger_status"] == batch_tracker.MAINTENANCE_TRIGGER_STATUS_TRIGGERED
+    assert item["maintenance_triggered_at"] == _NOW.isoformat()
+
+    much_later = _NOW + dt.timedelta(days=1)
+    ok = batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-b", much_later
+    )
+    assert ok is False
+
+
+def test_list_stale_maintenance_triggers_finds_expired_triggering_only(dynamo) -> None:
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=120
+    )
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-2", "watchlist-maint-batch-2", "owner-a", _NOW, lease_seconds=120
+    )
+    batch_tracker.mark_maintenance_triggered("batch-2", _NOW)  # batch-2は成功済み(対象外)
+
+    just_after_expiry = _NOW + dt.timedelta(seconds=121)
+    stale = batch_tracker.list_stale_maintenance_triggers(just_after_expiry)
+    assert {item["batch_id"] for item in stale} == {"batch-1"}
+
+
+def test_list_stale_maintenance_triggers_empty_before_lease_expires(dynamo) -> None:
+    batch_tracker.try_acquire_maintenance_trigger(
+        "batch-1", "watchlist-maint-batch-1", "owner-a", _NOW, lease_seconds=120
+    )
+    still_within_lease = _NOW + dt.timedelta(seconds=60)
+    assert batch_tracker.list_stale_maintenance_triggers(still_within_lease) == []
+
+
+def test_set_watchlist_batch_total_records_triggered_by_batch_id(dynamo) -> None:
+    """平日毎日起動化(2026-08)対応: parent-child監査用フィールドがchild batchの
+    BatchRunsTableへ正しく記録されること。"""
+    batch_tracker.set_watchlist_batch_total(
+        "watchlist-maint-batch-1",
+        5,
+        72,
+        _NOW,
+        job_type="WATCHLIST_MAINTENANCE",
+        triggered_by_batch_id="batch-1",
+        trigger_type="POST_NEW_CANDIDATE_SCREENING",
+    )
+    item = batch_tracker.get_watchlist_batch("watchlist-maint-batch-1")
+    assert item is not None
+    assert item["triggered_by_batch_id"] == "batch-1"
+    assert item["trigger_type"] == "POST_NEW_CANDIDATE_SCREENING"

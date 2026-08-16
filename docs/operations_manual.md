@@ -159,13 +159,17 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 
 ---
 
-## 4.1 ウォッチリスト自動追加(週次、2026-08-01追加・候補ユニバース本格対応で全面改訂)
+## 4.1 ウォッチリスト自動追加(週次、2026-08-01追加・候補ユニバース本格対応で全面改訂・2026-08-16平日毎日起動化)
 
 | 時刻 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 |
 |---|---|---|---|
-| 毎週土曜07:00 | (未登録。`infra/template.yaml`にcron直書き) | `jstock watchlist-screening run` | `WatchlistDispatcherFunction`(`job_type=NEW_CANDIDATE_SCREENING`) |
-| 毎週日曜07:00 | (未登録。`infra/template.yaml`にcron直書き) | ― | `WatchlistDispatcherFunction`(`job_type=WATCHLIST_MAINTENANCE`、2026-08-15追加) |
+| 平日(月曜〜金曜)06:00(2026-08-16改訂。旧: 毎週土曜07:00。祝日判定なし) | (未登録。`infra/template.yaml`の`WeekdayMorning` ScheduleV2にcron直書き) | `jstock watchlist-screening run` | `WatchlistDispatcherFunction`(`job_type=NEW_CANDIDATE_SCREENING`) |
 | 毎時 | (未登録。`infra/template.yaml`にcron直書き) | ― | `WatchlistBatchReconcilerFunction` |
+
+**WATCHLIST_MAINTENANCEに独立したScheduleは存在しない(2026-08-16改訂)**:
+旧・毎週日曜07:00の独立実行(`SundayMaintenanceReview`)は廃止した。現在は、
+同日のNEW_CANDIDATE_SCREENINGが業務finalizeを正常完了した直後の後続処理
+としてのみ起動する(詳細は4.1.1節「起動方式の平日毎日化」参照)。
 
 候補ユニバース本格対応(2026-08-01)で、単一Lambdaの自己再帰fan-outから、
 4つのLambda関数+SQSキューによる構成へ全面的に作り直しました。
@@ -319,15 +323,21 @@ NOTIFICATION_FAILURE/ABORTED/DISPATCH_FAILED/TIMED_OUT)に至った場合も
 再発するため両方を維持している。`WATCHLIST_MAINTENANCE`はこのleaseの対象外
 (候補選択がrotation windowに依存しないため)。
 
-**自動メンテナンス(自動削除)**: 毎週日曜07:00、`registration_source=
-AUTO_SCREENING`の銘柄のみを対象に再評価し、以下の条件に該当する銘柄を
-自動でウォッチリストから削除する(手動登録銘柄は対象外)。
+**自動メンテナンス(自動削除)**: `registration_source=AUTO_SCREENING`の
+銘柄のみを対象に再評価し、以下の条件に該当する銘柄を自動でウォッチリスト
+から削除する(手動登録銘柄は対象外)。起動タイミングは2026-08-16改訂で
+「毎週日曜07:00の独立実行」から「同日のNEW_CANDIDATE_SCREENINGの後続処理」
+へ変更した(詳細は次項「起動方式の平日毎日化」参照)。
 
 - **即時削除**: REIT/ETFへの分類変更・債務超過・継続企業の前提への重大な
   疑義のいずれか1つでも該当すれば1回の再評価で削除する。
-- **3回連続非該当+最低継続期間**: 上記以外の理由による非該当が3週連続し、
+- **3回連続非該当+最低継続期間**: 上記以外の理由による非該当が3回連続し、
   かつ最初に非該当となってから`minimum_not_qualified_span_days`(既定28日)
   以上経過した場合にのみ削除する(件数条件・期間条件は独立したAND条件)。
+  2026-08-16の起動方式変更により実行頻度が週1回から平日毎日へ変わった
+  ため、「3回連続」が実質的に意味する期間は従来の約3週間から最短で約3
+  営業日相当へ短縮されている(閾値自体は変更していない。GitHub Issue
+  「自動maintenance削除基準の閾値再評価」で実データ蓄積後の再評価を管理)。
 - **長期確認不能**: データ取得エラー等で`maximum_unconfirmed_days`(既定
   180日)を超えて再評価できない場合、削除はせず`decision_type=
   watchlist_auto_removal`のAuditLogとCloudWatch Logsの警告記録に留める。
@@ -341,6 +351,49 @@ AUTO_SCREENING`の銘柄のみを対象に再評価し、以下の条件に該�
 書き込み・通知フェーズは持たず、`WatchlistScreeningRotationState`も一切
 変更しない(ローテーションの前進は`job_type=NEW_CANDIDATE_SCREENING`
 専用)。
+
+**起動方式の平日毎日化(2026-08-16改訂)**: NEW_CANDIDATE_SCREENINGの
+スケジュールを毎週土曜07:00から平日(月曜〜金曜)06:00へ変更した
+(`infra/template.yaml`の`WeekdayMorning` ScheduleV2、`cron(0 6 ? * MON-FRI *)`、
+日本の祝日は考慮しない)。これに伴いWATCHLIST_MAINTENANCEの独立した
+定期実行(旧`SundayMaintenanceReview`)は廃止し、同日のNEW_CANDIDATE_SCREENING
+バッチが業務finalizeを正常完了した直後(`watchlist_batch_finalizer.
+_finish_batch()`到達時)にのみ、後続処理として自動的に起動する方式へ
+変更した。トリガーは`maybe_trigger_maintenance()`が担い、`_finish_batch()`が
+`_maybe_commit_rotation()`の直後に呼び出す(rotation commitと同じchoke point
+を再利用しているため、`_finish_batch()`へ到達しない経路
+(`FINALIZE_FAILED`・`DISPATCH_FAILED`・`TIMED_OUT`)では構造的にトリガー
+されない)。個別銘柄の評価エラー(`FAILED_REQUIRED`/`FAILED_NO_TARGET_TYPE`/
+`NOT_FOUND`)は、その回の業務finalizeが正常完了する限りトリガーを妨げない。
+
+**重複起動防止(exactly-once相当)**: `BatchRunsTable`の該当バッチ項目へ
+`maintenance_trigger_status`(`NOT_TRIGGERED`→`TRIGGERING`→`TRIGGERED`)・
+`maintenance_batch_id`(`f"watchlist-maint-{親batch_id}"`、決定論的に算出)・
+`maintenance_trigger_lease_expires_at`を持たせ、`batch_tracker.
+try_acquire_maintenance_trigger()`が既存の`try_acquire_dispatch_lease`/
+`try_acquire_rotation_dispatch_lease`と同じ「lease期限切れなら再取得可」
+条件付き更新パターンで起動権利を排他的に取得する。取得成功後、
+`boto3` Lambda `invoke()`(`InvocationType="Event"`、非同期)で
+`WatchlistDispatcherFunction`自身を`{"job_type": "WATCHLIST_MAINTENANCE",
+"batch_id": <maintenance_batch_id>, "triggered_by_batch_id": <親batch_id>,
+"trigger_type": "POST_NEW_CANDIDATE_SCREENING"}`ペイロードで自己invokeする。
+invoke成功後は`mark_maintenance_triggered()`で`TRIGGERED`へ恒久確定し、
+以後同じ親バッチから二度と起動されない。invoke自体が失敗した場合は
+`TRIGGERING`のまま(lease期限120秒)残し、毎時`WatchlistBatchReconcilerFunction`が
+`list_stale_maintenance_triggers()`経由でlease失効を検知し
+`maybe_trigger_maintenance()`を再試行する(処理の消失を防止)。子バッチ側の
+`batch_id`が親から決定論的に算出されるため、万一起動権利の排他制御を
+すり抜けて`invoke()`が二重に発生しても、2回目は子バッチ自身の
+`try_acquire_dispatch_lease`で棄却される二重の安全策になっている。
+親バッチ側にも`maintenance_batch_id`・`maintenance_triggered_at`が記録
+されるため、`get_watchlist_batch(親batch_id)`で子バッチへの追跡ができる
+(子バッチ側は`triggered_by_batch_id`/`trigger_type`で親を追跡)。
+
+ローカルCLI実行時は`running_on_lambda()`(`AWS_LAMBDA_FUNCTION_NAME`環境
+変数の有無で判定)が偽になるため、起動権利の取得までは行うが実際の
+Lambda `invoke()`は行わない(誤って本番Lambdaを起動しない安全策。この場合
+`TRIGGERED`へは確定せず、`TRIGGERING`のまま次回Reconcilerパスの対象になる
+ため、ローカル検証後に本番実行すれば正しく起動できる)。
 
 **スクリーニング高速化(計測のみ、2026-08-15追加)**: `WatchlistCandidateProgressTable`の
 各行へ`data_fetch_duration_ms`/`scoring_duration_ms`(データ取得・判定計算の

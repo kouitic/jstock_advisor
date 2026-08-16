@@ -207,7 +207,7 @@ def test_watchlist_maintenance_is_not_blocked_by_rotation_lease(
         handler_module, "try_acquire_rotation_dispatch_lease", _fail_if_called
     )
     monkeypatch.setattr(
-        handler_module, "_collect_maintenance_targets", lambda: ([], {})
+        handler_module, "_collect_maintenance_targets", lambda event: ([], {})
     )
 
     result = handler_module.handler({"job_type": "WATCHLIST_MAINTENANCE"}, object())
@@ -243,3 +243,85 @@ def test_new_candidate_screening_not_gated_when_rotation_disabled(
     result = handler_module.handler({}, object())
 
     assert result == {"dispatched": 0}
+
+
+# --- 平日毎日起動化(2026-08)対応: WATCHLIST_MAINTENANCE後続起動 ------------------
+
+
+def test_batch_id_override_from_event_is_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """maybe_trigger_maintenanceが決定論的に算出したbatch_idをevent["batch_id"]
+    経由で渡した場合、Dispatcherは自動生成せずそれをそのまま使うこと(テスト#9の
+    前提、および二重起動防止の二重の安全策)。"""
+    monkeypatch.delenv("ALLOW_FULL_MARKET_SCREENING", raising=False)
+    monkeypatch.setattr(
+        handler_module,
+        "load_config",
+        lambda: _fake_config(candidate_limit=300, rotation_enabled=True),
+    )
+    captured_batch_ids: list[str] = []
+
+    def _capture_and_reject(batch_id: str, *_a: Any, **_kw: Any) -> bool:
+        captured_batch_ids.append(batch_id)
+        return False
+
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", _capture_and_reject)
+
+    result = handler_module.handler(
+        {
+            "job_type": "WATCHLIST_MAINTENANCE",
+            "batch_id": "watchlist-maint-batch-1",
+            "triggered_by_batch_id": "batch-1",
+            "trigger_type": "POST_NEW_CANDIDATE_SCREENING",
+        },
+        object(),
+    )
+
+    assert captured_batch_ids == ["watchlist-maint-batch-1"]
+    assert result == {"skipped": "lease_not_acquired"}
+
+
+def test_collect_maintenance_targets_propagates_trigger_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """テスト#9: triggered_by_batch_id/trigger_typeがchild batchのextra_kwargs
+    (最終的にset_watchlist_batch_totalへ渡る)へ正しく引き継がれること。"""
+    fake_item = SimpleNamespace(
+        stock_code="1301",
+        registration_source=handler_module.WatchlistRegistrationSource.AUTO_SCREENING,
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRepository",
+        lambda: SimpleNamespace(list_all=lambda: [fake_item]),
+    )
+
+    codes, extra_kwargs = handler_module._collect_maintenance_targets(
+        {
+            "job_type": "WATCHLIST_MAINTENANCE",
+            "triggered_by_batch_id": "batch-1",
+            "trigger_type": "POST_NEW_CANDIDATE_SCREENING",
+        }
+    )
+
+    assert codes == ["1301"]
+    assert extra_kwargs == {
+        "triggered_by_batch_id": "batch-1",
+        "trigger_type": "POST_NEW_CANDIDATE_SCREENING",
+    }
+
+
+def test_collect_maintenance_targets_omits_trigger_metadata_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """triggered_by_batch_idが無いevent(手動CLI等)ではextra_kwargsへ何も
+    追加しないこと(既存の後方互換動作)。"""
+    monkeypatch.setattr(
+        handler_module, "WatchlistRepository", lambda: SimpleNamespace(list_all=lambda: [])
+    )
+
+    codes, extra_kwargs = handler_module._collect_maintenance_targets(
+        {"job_type": "WATCHLIST_MAINTENANCE"}
+    )
+
+    assert codes == []
+    assert extra_kwargs == {}
