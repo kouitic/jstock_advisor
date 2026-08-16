@@ -67,13 +67,14 @@ from jstock_advisor.services.watchlist_screening_audit import record_batch_audit
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Medium修正(2026-08再レビュー): maintenance_trigger_retriedへ計上してよいのは
-# 「実際にleaseを再取得してinvokeを試行した」ケースのみ(handler()内で使用)。
+# Medium修正(2026-08再レビュー・再々レビュー): maintenance_trigger_retriedへ
+# 計上してよいのは「実際にLambda invoke()を試行した」ケースのみ(handler()内で
+# 使用)。CONFIGURATION_ERROR(環境変数未設定によりinvoke()呼び出し自体に
+# 到達しない)はここに含めない(invoke未試行のため、別カウンタで区別する)。
 _MAINTENANCE_RETRY_ATTEMPTED_OUTCOMES = frozenset(
     {
         MaintenanceTriggerOutcome.TRIGGERED,
         MaintenanceTriggerOutcome.INVOKE_FAILED,
-        MaintenanceTriggerOutcome.CONFIGURATION_ERROR,
     }
 )
 
@@ -331,16 +332,22 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # _RECONCILE_TARGET_STATUSESとは別のスキャンで拾う。
     #
     # maintenance_trigger_retriedは、戻り値(MaintenanceTriggerOutcome)を見て
-    # 「実際にleaseを再取得してinvokeを試行した(=TRIGGERED/INVOKE_FAILED/
-    # CONFIGURATION_ERROR)」ケースのみを数える。他主体が先にleaseを再取得
-    # 済みだった場合(SKIPPED_LEASE_UNAVAILABLE)やそもそも対象外だった場合
-    # (NOT_APPLICABLE、ABORTED等)は「再試行を試みてすらいない」ため、
-    # 誤解を招かないようretriedへは加算しない(retry_skippedへ計上する)。
-    # 新規の永続DynamoDBカウンタは追加せず、このReconciler実行1回分の
-    # in-memory集計のみで、ログ・戻り値(運用監視・Issue #8観測用)に残す。
+    # 「実際にLambda invoke()を試行した(=TRIGGERED/INVOKE_FAILED)」ケースの
+    # みを数える。CONFIGURATION_ERROR(lease再取得には成功したが、環境変数
+    # 未設定によりinvoke()呼び出し自体に到達しない設定不備)はinvoke未試行
+    # のため、retriedには含めずmaintenance_trigger_retry_configuration_error
+    # へ個別に計上する(再々レビュー修正: 従来はCONFIGURATION_ERRORもretried
+    # に含めていたが、「実際にinvokeを試行した件数」という定義と矛盾していた)。
+    # 他主体が先にleaseを再取得済みだった場合(SKIPPED_LEASE_UNAVAILABLE)や
+    # そもそも対象外だった場合(NOT_APPLICABLE、ABORTED等)は「再試行を試みて
+    # すらいない」ため、誤解を招かないようretriedへは加算しない
+    # (maintenance_trigger_retry_skippedへ計上する)。新規の永続DynamoDB
+    # カウンタは追加せず、このReconciler実行1回分のin-memory集計のみで、
+    # ログ・戻り値(運用監視・Issue #8観測用)に残す。
     maintenance_trigger_retried = 0
     maintenance_trigger_retry_failed = 0
     maintenance_trigger_retry_skipped = 0
+    maintenance_trigger_retry_configuration_error = 0
     for batch_item in list_stale_maintenance_triggers(now):
         batch_id = batch_item["batch_id"]
         try:
@@ -348,8 +355,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             outcome = maybe_trigger_maintenance(batch_id, batch_item, now, config, final_status)
             if outcome in _MAINTENANCE_RETRY_ATTEMPTED_OUTCOMES:
                 maintenance_trigger_retried += 1
-                if outcome is not MaintenanceTriggerOutcome.TRIGGERED:
+                if outcome is MaintenanceTriggerOutcome.INVOKE_FAILED:
                     maintenance_trigger_retry_failed += 1
+            elif outcome is MaintenanceTriggerOutcome.CONFIGURATION_ERROR:
+                maintenance_trigger_retry_configuration_error += 1
             else:
                 maintenance_trigger_retry_skipped += 1
         except Exception:  # noqa: BLE001 - 1バッチの想定外エラーで他バッチの処理を止めない
@@ -363,7 +372,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "finalizing_marked_stuck=%d finalize_retried=%d finalize_retry_exhausted=%d "
         "notification_retried=%d notification_retry_exhausted=%d timeout_processed=%d "
         "maintenance_trigger_retried=%d maintenance_trigger_retry_failed=%d "
-        "maintenance_trigger_retry_skipped=%d",
+        "maintenance_trigger_retry_skipped=%d maintenance_trigger_retry_configuration_error=%d",
         len(candidates),
         dispatch_failed,
         rescued,
@@ -376,6 +385,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         maintenance_trigger_retried,
         maintenance_trigger_retry_failed,
         maintenance_trigger_retry_skipped,
+        maintenance_trigger_retry_configuration_error,
     )
     return {
         "candidates": len(candidates),
@@ -390,4 +400,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "maintenance_trigger_retried": maintenance_trigger_retried,
         "maintenance_trigger_retry_failed": maintenance_trigger_retry_failed,
         "maintenance_trigger_retry_skipped": maintenance_trigger_retry_skipped,
+        "maintenance_trigger_retry_configuration_error": (
+            maintenance_trigger_retry_configuration_error
+        ),
     }
