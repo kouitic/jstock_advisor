@@ -58,10 +58,14 @@ WATCHLIST_WRITE_COMPLETED→NOTIFICATION_PENDING→NOTIFICATION_SENT→COMPLETED
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+import os
+import uuid
 from collections.abc import Callable
 from typing import Any
 
+import boto3
 from pydantic import TypeAdapter
 
 from jstock_advisor.config.models import AppConfig
@@ -85,6 +89,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     EXECUTION_RESULT_REQUIRED_DATA_QUALITY_DEGRADED,
     EXECUTION_RESULT_SCORING_DATA_QUALITY_DEGRADED,
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
+    JOB_TYPE_WATCHLIST_MAINTENANCE,
     NOTIFICATION_OUTCOME_NOT_REQUIRED,
     NOTIFICATION_OUTCOME_SENT,
     NOTIFICATION_OUTCOME_SKIPPED,
@@ -92,6 +97,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     WatchlistProgressStatus,
     get_watchlist_batch,
     mark_batch_audit_recorded,
+    mark_maintenance_triggered,
     mark_watchlist_batch_completed,
     mark_watchlist_finalize_failed,
     mark_watchlist_write_completed,
@@ -101,6 +107,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     record_notification_pending,
     record_notification_resolved,
     record_repository_result_item,
+    try_acquire_maintenance_trigger,
     try_finalize_if_ready,
     try_retry_finalize,
     try_retry_notification,
@@ -114,6 +121,7 @@ from jstock_advisor.infrastructure.aws.watchlist_rotation_state import (
     get_rotation_state_consistent,
     try_commit_rotation_advance,
 )
+from jstock_advisor.infrastructure.collection_store import running_on_lambda
 from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (
     WatchlistRemovalHistoryRepository,
 )
@@ -691,6 +699,98 @@ def _maybe_commit_rotation(
     )
 
 
+# 平日毎日起動化(2026-08)対応: WATCHLIST_MAINTENANCE後続起動先(既存
+# WatchlistDispatcherFunction自身)の関数名を渡す環境変数。Worker/Dispatcher/
+# Reconcilerのいずれからも`_finish_batch()`(またはReconcilerの再試行)経由で
+# 呼ばれうるため、Lambdaコンテキストではなく環境変数で解決する。
+_MAINTENANCE_TRIGGER_FUNCTION_NAME_ENV = "WATCHLIST_DISPATCHER_FUNCTION_NAME"
+_MAINTENANCE_TRIGGER_TYPE_POST_NEW_CANDIDATE_SCREENING = "POST_NEW_CANDIDATE_SCREENING"
+
+
+def maybe_trigger_maintenance(
+    batch_id: str, batch_item: dict[str, Any], now: dt.datetime, config: AppConfig
+) -> None:
+    """平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの業務finalize確定
+    (`_finish_batch`到達、すなわちCOMPLETED/COMPLETED_WITH_NOTIFICATION_FAILURE/
+    ABORTEDのいずれかとして確定した時点)の後続処理として、WATCHLIST_MAINTENANCEを
+    1回だけ起動する。`_maybe_commit_rotation`と全く同じ choke point から呼ばれる
+    ため、DISPATCH_FAILED/TIMED_OUT/FINALIZE_FAILED(finalize技術的失敗が未解消)
+    な場合はこの関数へ到達しない(個別candidateのFAILED_REQUIRED/
+    FAILED_NO_TARGET_TYPE/NOT_FOUNDはバッチ全体の業務finalizeを妨げないため、
+    それらが含まれていても起動される)。
+
+    WATCHLIST_MAINTENANCE自身のfinalize(`_finalize_maintenance_completed`)は
+    この関数を呼ばない(job_typeガードにより、maintenance batchからさらに
+    maintenanceが連鎖することはない)。
+
+    Reconciler(`list_stale_maintenance_triggers`によるlease失効検知)からの
+    再試行でも同じ関数を呼ぶ想定(`try_acquire_maintenance_trigger`の
+    ConditionExpressionがlease失効時のみ再取得を許すため、初回呼び出しと
+    再試行呼び出しを区別する必要がない=exactly-once)。
+    """
+    job_type = batch_item.get("job_type", JOB_TYPE_NEW_CANDIDATE_SCREENING)
+    if job_type != JOB_TYPE_NEW_CANDIDATE_SCREENING:
+        return
+    if not config.watchlist_screening.auto_removal.enabled:
+        return
+
+    maintenance_batch_id = f"watchlist-maint-{batch_id}"
+    owner_id = uuid.uuid4().hex
+    if not try_acquire_maintenance_trigger(batch_id, maintenance_batch_id, owner_id, now):
+        # 既にTRIGGERED(exactly-once)、または他の主体が保持中の未失効lease。
+        return
+
+    if not running_on_lambda():
+        # ローカルCLI実行時は実際のLambda invokeを行わない(本番Lambdaへの
+        # 誤操作を避ける、rotation dispatch lease等と同じ方針)。maintenance_
+        # trigger_statusはTRIGGERINGのまま残るため、本番Reconcilerが後で
+        # 再試行できる(ローカル実行の副作用として無条件TRIGGERED化はしない)。
+        logger.info(
+            "watchlist maintenance trigger skipped (not running on lambda) "
+            "batch_id=%s maintenance_batch_id=%s",
+            batch_id,
+            maintenance_batch_id,
+        )
+        return
+
+    function_name = os.environ.get(_MAINTENANCE_TRIGGER_FUNCTION_NAME_ENV)
+    if not function_name:
+        logger.error(
+            "watchlist maintenance trigger failed: %s not set batch_id=%s",
+            _MAINTENANCE_TRIGGER_FUNCTION_NAME_ENV,
+            batch_id,
+        )
+        return
+
+    try:
+        boto3.client("lambda").invoke(
+            FunctionName=function_name,
+            InvocationType="Event",
+            Payload=json.dumps(
+                {
+                    "job_type": JOB_TYPE_WATCHLIST_MAINTENANCE,
+                    "batch_id": maintenance_batch_id,
+                    "triggered_by_batch_id": batch_id,
+                    "trigger_type": _MAINTENANCE_TRIGGER_TYPE_POST_NEW_CANDIDATE_SCREENING,
+                }
+            ).encode("utf-8"),
+        )
+    except Exception:  # noqa: BLE001 - invoke失敗はTRIGGERINGのまま残しReconcilerに委ねる(処理を消失させない)
+        logger.exception(
+            "watchlist maintenance trigger invoke failed batch_id=%s maintenance_batch_id=%s",
+            batch_id,
+            maintenance_batch_id,
+        )
+        return
+
+    mark_maintenance_triggered(batch_id, now)
+    logger.info(
+        "watchlist maintenance triggered batch_id=%s maintenance_batch_id=%s",
+        batch_id,
+        maintenance_batch_id,
+    )
+
+
 def _finish_batch(
     batch_id: str,
     now: dt.datetime,
@@ -749,6 +849,7 @@ def _finish_batch(
         batch_id, execution_result, now, notification_permanently_failed
     )
     _maybe_commit_rotation(batch_id, batch_item, records, now)
+    maybe_trigger_maintenance(batch_id, batch_item, now, config)
     logger.info(
         "watchlist_screening finalized batch_id=%s execution_result=%s added=%d "
         "notification_permanently_failed=%s",

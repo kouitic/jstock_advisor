@@ -98,7 +98,7 @@ def test_manual_registration_is_excluded_from_maintenance_targets(
         dispatcher_module, "WatchlistRepository", lambda: _FakeWatchlistRepository()
     )
 
-    codes, extra_kwargs = dispatcher_module._collect_maintenance_targets()
+    codes, extra_kwargs = dispatcher_module._collect_maintenance_targets({})
 
     assert codes == ["1111"]
     assert extra_kwargs == {}
@@ -113,6 +113,20 @@ def test_b_age_below_minimum_keeps_even_with_enough_consecutive_count() -> None:
         created_at=_NOW - dt.timedelta(days=30),
         consecutive_not_qualified_count=2,
         removal_candidate_since=_NOW - dt.timedelta(days=29),
+    )
+    summary = _summary(passed=False)
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.KEEP
+
+
+def test_b2_same_day_added_stock_is_not_removed_even_with_enough_consecutive_count() -> None:
+    """平日毎日起動化(2026-08)対応: age=0日(当日追加)+3回連続非該当でも、
+    minimum_age_days未満のため削除しないこと(テスト#11相当、日次実行で
+    「3営業日」に短縮されても当日追加銘柄が即削除されないことの直接確認)。"""
+    item = _item(
+        created_at=_NOW,
+        consecutive_not_qualified_count=2,
+        removal_candidate_since=_NOW,
     )
     summary = _summary(passed=False)
     decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)

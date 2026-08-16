@@ -29,6 +29,7 @@ from jstock_advisor.config.models import AppConfig
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     WatchlistBatchStatus,
     get_watchlist_batch,
+    list_stale_maintenance_triggers,
     list_watchlist_batches_by_status,
     mark_dispatch_failed,
     mark_finalizing_stuck_as_failed,
@@ -55,6 +56,7 @@ from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.watchlist_batch_finalizer import (
     compute_batch_metrics,
     maybe_finalize,
+    maybe_trigger_maintenance,
     retry_finalize,
     retry_notification,
 )
@@ -310,10 +312,28 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             logger.exception("watchlist reconciler: unexpected error batch_id=%s", batch_id)
             transition_timeout_finalizing_to_failed(batch_id, now, str(exc))
 
+    # 平日毎日起動化(2026-08)対応: WATCHLIST_MAINTENANCE後続起動のinvoke失敗等で
+    # maintenance_trigger_status=TRIGGERINGのままlease失効した親バッチを再試行する
+    # (maybe_trigger_maintenanceのConditionExpressionがlease失効時のみ再取得を
+    # 許すため、初回呼び出しと同じ関数を再度呼ぶだけでよい)。対象はCOMPLETED等の
+    # 終端状態のバッチのため、_RECONCILE_TARGET_STATUSESとは別のスキャンで拾う。
+    maintenance_trigger_retried = 0
+    for batch_item in list_stale_maintenance_triggers(now):
+        batch_id = batch_item["batch_id"]
+        try:
+            maybe_trigger_maintenance(batch_id, batch_item, now, config)
+            maintenance_trigger_retried += 1
+        except Exception:  # noqa: BLE001 - 1バッチの想定外エラーで他バッチの処理を止めない
+            logger.exception(
+                "watchlist reconciler: maintenance trigger retry unexpected error batch_id=%s",
+                batch_id,
+            )
+
     logger.info(
         "watchlist reconciler completed: candidates=%d dispatch_failed=%d rescued=%d "
         "finalizing_marked_stuck=%d finalize_retried=%d finalize_retry_exhausted=%d "
-        "notification_retried=%d notification_retry_exhausted=%d timeout_processed=%d",
+        "notification_retried=%d notification_retry_exhausted=%d timeout_processed=%d "
+        "maintenance_trigger_retried=%d",
         len(candidates),
         dispatch_failed,
         rescued,
@@ -323,6 +343,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         notification_retried,
         notification_retry_exhausted,
         timeout_processed,
+        maintenance_trigger_retried,
     )
     return {
         "candidates": len(candidates),
@@ -334,4 +355,5 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "notification_retried": notification_retried,
         "notification_retry_exhausted": notification_retry_exhausted,
         "timeout_processed": timeout_processed,
+        "maintenance_trigger_retried": maintenance_trigger_retried,
     }

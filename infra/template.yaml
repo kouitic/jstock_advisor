@@ -1078,6 +1078,12 @@ Resources:
           WATCHLIST_SCREENING_QUEUE_URL: !Ref WatchlistScreeningQueue
           CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
           ALLOW_FULL_MARKET_SCREENING: !Ref AllowFullMarketScreening
+          # 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの業務finalize
+          # 確定後にWATCHLIST_MAINTENANCEを後続起動する際、自分自身(この関数)を
+          # 非同期invokeする(watchlist_batch_finalizer.maybe_trigger_maintenance)。
+          # Dispatcher自身がfinalizeの最終呼び出し元になるケース(最後のSQS送信
+          # 失敗時等)向けに自己参照名を渡す。
+          WATCHLIST_DISPATCHER_FUNCTION_NAME: !Sub "${AWS::StackName}-watchlist-dispatcher"
       Policies:
         # ウォッチリスト自動運用の改善(2026-08)でローテーション状態・削除履歴の
         # 2テーブルを追加するのを機に、docs/operations_manual.md 11節の指針に
@@ -1142,30 +1148,33 @@ Resources:
                 - !Sub "${StockNameOverridesTable.Arn}/index/*"
         - S3CrudPolicy: { BucketName: !Ref CandidateUniverseCacheBucket }
         - SQSSendMessagePolicy: { QueueName: !GetAtt WatchlistScreeningQueue.QueueName }
+        # 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの業務finalize確定
+        # 後にWATCHLIST_MAINTENANCEを後続起動するための自己invoke権限。関数ARNを
+        # !GetAttで自己参照すると循環依存になるため、FunctionNameと同じ命名規則
+        # (!Sub)で組み立てる。
+        - Statement:
+            - Sid: SelfInvokeForMaintenanceTrigger
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-dispatcher"
       Events:
-        # 市場取引時間外、既存の土曜実行バッチ(WeeklyReview 09:00/MonthlyReview 10:00/
-        # QuarterlyReview 11:00 JST)と重ならず、翌営業日である月曜08:00のBUY候補
-        # バッチより十分前に完了できる時間帯として毎週土曜07:00 JSTを選定した。
-        SaturdayEarlyMorning:
+        # ウォッチリスト新規候補評価・自動メンテナンスの平日毎日起動化(2026-08)。
+        # NEW_CANDIDATE_SCREENINGは月曜〜金曜06:00 JST(祝日判定なし)に起動する。
+        # 市場取引時間外、既存のBUY候補バッチ(平日08:00 JST)より十分前に完了
+        # できる時間帯として選定した。WATCHLIST_MAINTENANCEはもはや独立した
+        # 定期Scheduleを持たず、当日のNEW_CANDIDATE_SCREENINGが業務finalizeを
+        # 正常に完了した直後の後続処理としてのみ起動する
+        # (watchlist_batch_finalizer.maybe_trigger_maintenance、計画Part C-7案A
+        # の後続起動版)。従来の土曜07:00 NEW_CANDIDATE_SCREENING・日曜07:00
+        # WATCHLIST_MAINTENANCEの独立Scheduleはいずれも廃止した。
+        WeekdayMorning:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: "cron(0 7 ? * SAT *)"
+            ScheduleExpression: "cron(0 6 ? * MON-FRI *)"
             ScheduleExpressionTimezone: Asia/Tokyo
             FlexibleTimeWindow:
               Mode: "OFF"
-        # ウォッチリスト自動運用の改善(自動メンテナンス、計画Part C-7案A/C-8)。
-        # 既存Dispatcher/Worker/Queue/Reconciler基盤をjob_type="WATCHLIST_
-        # MAINTENANCE"で共用する(新規Lambda/Queue/DLQは追加しない)。既存の
-        # 土曜07:00(新規候補)・WeeklyReview月曜19:00・MonthlyReview/
-        # QuarterlyReview土曜のいずれとも重複しない毎週日曜07:00 JSTを選定した。
-        SundayMaintenanceReview:
-          Type: ScheduleV2
-          Properties:
-            ScheduleExpression: "cron(0 7 ? * SUN *)"
-            ScheduleExpressionTimezone: Asia/Tokyo
-            FlexibleTimeWindow:
-              Mode: "OFF"
-            Input: '{"job_type": "WATCHLIST_MAINTENANCE"}'
 
   WatchlistWorkerFunction:
     Type: AWS::Serverless::Function
@@ -1175,6 +1184,13 @@ Resources:
       Handler: jstock_advisor.lambda_handlers.watchlist_worker_handler.handler
       Timeout: 180 # 3節
       ReservedConcurrentExecutions: !Ref WatchlistReservedConcurrentExecutions
+      Environment:
+        Variables:
+          # 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENING最後の候補完了が
+          # このWorkerで確定した場合、maybe_finalize()経由でwatchlist_batch_
+          # finalizer.maybe_trigger_maintenance()がWatchlistDispatcherFunctionを
+          # 非同期invokeする(最も頻度が高い後続起動経路)。
+          WATCHLIST_DISPATCHER_FUNCTION_NAME: !Sub "${AWS::StackName}-watchlist-dispatcher"
       Policies:
         # WatchlistDispatcherFunctionと同じ理由(docs/operations_manual.md 11節)で
         # CRUD/ReadをStatementへ集約する。rotation commitとremoval historyの
@@ -1236,6 +1252,15 @@ Resources:
                 - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
                 - !GetAtt StockNameOverridesTable.Arn
                 - !Sub "${StockNameOverridesTable.Arn}/index/*"
+        # 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENING最後の候補完了時、
+        # maybe_trigger_maintenance()がWatchlistDispatcherFunctionを非同期invoke
+        # する(WatchlistDispatcherFunction定義側の同名Statementと同じ理由)。
+        - Statement:
+            - Sid: InvokeDispatcherForMaintenanceTrigger
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-dispatcher"
       Events:
         ScreeningQueue:
           Type: SQS
@@ -1279,6 +1304,13 @@ Resources:
       CodeUri: ../src/
       Handler: jstock_advisor.lambda_handlers.watchlist_batch_reconciler_handler.handler
       Timeout: 300
+      Environment:
+        Variables:
+          # 平日毎日起動化(2026-08)対応: retry_finalize()経由、または
+          # list_stale_maintenance_triggers()によるinvoke失敗リトライ経由で
+          # maybe_trigger_maintenance()がWatchlistDispatcherFunctionを
+          # 非同期invokeする。
+          WATCHLIST_DISPATCHER_FUNCTION_NAME: !Sub "${AWS::StackName}-watchlist-dispatcher"
       Policies:
         # 本番検証(2026-08)で発覚: retry_finalize()経由でDispatcher/Worker
         # と同じ_finalize_completed()/_maybe_commit_rotation()を呼ぶため、
@@ -1344,6 +1376,14 @@ Resources:
                 - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
                 - !GetAtt StockNameOverridesTable.Arn
                 - !Sub "${StockNameOverridesTable.Arn}/index/*"
+        # 平日毎日起動化(2026-08)対応: WatchlistDispatcherFunction定義側の
+        # 同名Statementと同じ理由(maybe_trigger_maintenanceの再試行invoke)。
+        - Statement:
+            - Sid: InvokeDispatcherForMaintenanceTrigger
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-dispatcher"
       Events:
         Hourly:
           Type: ScheduleV2

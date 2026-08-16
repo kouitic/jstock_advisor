@@ -800,6 +800,8 @@ def set_watchlist_batch_total(
     rotation_end_key: list[str] | None = None,
     rotation_wrapped: bool = False,
     universe_signature: str | None = None,
+    triggered_by_batch_id: str | None = None,
+    trigger_type: str | None = None,
 ) -> None:
     """1節ステップ2: 候補リスト確定後にtotalを設定し、dispatch_completedを
     falseで初期化する(この時点ではまだSQS送信を開始していないため)。
@@ -819,6 +821,12 @@ def set_watchlist_batch_total(
     したもの)で、rotation commit時にそのまま`try_commit_rotation_advance()`
     へ渡す(計画Part A-5: 業務処理確定までの間はステージングのみに使い、
     rotation stateへは書き込まない)。
+
+    平日毎日起動化(2026-08)対応: `triggered_by_batch_id`/`trigger_type`は
+    WATCHLIST_MAINTENANCEがNEW_CANDIDATE_SCREENINGの後続処理として起動された
+    場合の親batch_id・起動種別("POST_NEW_CANDIDATE_SCREENING")を記録する
+    (parent-child関係の監査用)。EventBridge Scheduleからの直接起動(現状は
+    NEW_CANDIDATE_SCREENINGのみ)ではいずれもNoneのまま。
     """
     ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
     _table().update_item(
@@ -836,7 +844,9 @@ def set_watchlist_batch_total(
             "rotation_start_key = :rotation_start_key, "
             "rotation_end_key = :rotation_end_key, "
             "rotation_wrapped = :rotation_wrapped, "
-            "universe_signature = :universe_signature"
+            "universe_signature = :universe_signature, "
+            "triggered_by_batch_id = :triggered_by_batch_id, "
+            "trigger_type = :trigger_type"
         ),
         ExpressionAttributeNames={"#total": "total", "#ttl": "ttl"},
         ExpressionAttributeValues={
@@ -855,6 +865,8 @@ def set_watchlist_batch_total(
             ":rotation_end_key": rotation_end_key,
             ":rotation_wrapped": rotation_wrapped,
             ":universe_signature": universe_signature,
+            ":triggered_by_batch_id": triggered_by_batch_id,
+            ":trigger_type": trigger_type,
         },
     )
 
@@ -1642,6 +1654,116 @@ def get_watchlist_batch(batch_id: str) -> dict[str, Any] | None:
     response = _table().get_item(Key={"batch_id": batch_id})
     item: dict[str, Any] | None = response.get("Item")
     return item
+
+
+# --- 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの業務finalize確定後、
+# WATCHLIST_MAINTENANCEを後続起動するexactly-once相当のトリガー状態機械。
+# try_acquire_dispatch_lease/try_acquire_rotation_dispatch_leaseと同じ
+# 「lease期限切れなら再取得可」パターンを踏襲する(Lambda異常終了時の永久
+# ブロック防止)。TRIGGERED確定後はConditionExpressionが恒久的に不成立となり
+# 二度と再取得できない。 ---
+MAINTENANCE_TRIGGER_STATUS_TRIGGERING = "TRIGGERING"
+MAINTENANCE_TRIGGER_STATUS_TRIGGERED = "TRIGGERED"
+# invoke()呼び出し自体(非同期、通常は数百ミリ秒)のみを保護すればよいため、
+# dispatch_lease(360秒)等より短い値とする。
+MAINTENANCE_TRIGGER_LEASE_SECONDS = 120
+
+
+def try_acquire_maintenance_trigger(
+    batch_id: str,
+    maintenance_batch_id: str,
+    owner_id: str,
+    now: dt.datetime,
+    lease_seconds: int = MAINTENANCE_TRIGGER_LEASE_SECONDS,
+) -> bool:
+    """WATCHLIST_MAINTENANCE後続起動の権利を1回だけ取得する(平日毎日起動化
+    2026-08対応)。`maintenance_batch_id`は呼び出し元が決定論的に算出した値
+    (親batch_idから導出、`f"watchlist-maint-{batch_id}"`)を渡すこと。取得
+    成功時にこの値を即座に記録するため、invoke前でも「どのchild batch_idに
+    なる予定か」を親側から追跡できる。
+
+    invoke失敗時はmaintenance_trigger_status=TRIGGERINGのまま残るため、
+    lease_seconds経過後はlist_stale_maintenance_triggers()経由でReconcilerが
+    再取得・再試行できる(処理を消失させない)。invoke成功後はmark_maintenance_
+    triggered()でTRIGGEREDへ確定し、以後は本関数が恒久的にFalseを返す
+    (exactly-once)。
+    """
+    lease_expires_at = (now + dt.timedelta(seconds=lease_seconds)).isoformat()
+    now_iso = now.isoformat()
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET maintenance_trigger_status = :triggering, "
+                "maintenance_batch_id = :maintenance_batch_id, "
+                "maintenance_trigger_owner_id = :owner, "
+                "maintenance_trigger_lease_expires_at = :expires, "
+                "maintenance_trigger_attempt_count = "
+                "if_not_exists(maintenance_trigger_attempt_count, :zero) + :one, "
+                "updated_at = :now"
+            ),
+            ConditionExpression=(
+                "attribute_not_exists(maintenance_trigger_status) OR "
+                "(maintenance_trigger_status = :triggering AND "
+                "maintenance_trigger_lease_expires_at < :now)"
+            ),
+            ExpressionAttributeValues={
+                ":triggering": MAINTENANCE_TRIGGER_STATUS_TRIGGERING,
+                ":maintenance_batch_id": maintenance_batch_id,
+                ":owner": owner_id,
+                ":expires": lease_expires_at,
+                ":zero": 0,
+                ":one": 1,
+                ":now": now_iso,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
+def mark_maintenance_triggered(batch_id: str, now: dt.datetime) -> None:
+    """invoke成功後にtrigger状態をTRIGGERED(確定・恒久)へ遷移する。"""
+    _table().update_item(
+        Key={"batch_id": batch_id},
+        UpdateExpression=(
+            "SET maintenance_trigger_status = :triggered, "
+            "maintenance_triggered_at = :now, updated_at = :now"
+        ),
+        ExpressionAttributeValues={
+            ":triggered": MAINTENANCE_TRIGGER_STATUS_TRIGGERED,
+            ":now": now.isoformat(),
+        },
+    )
+
+
+def list_stale_maintenance_triggers(now: dt.datetime) -> list[dict[str, Any]]:
+    """毎時Reconciler向け: invoke失敗等でTRIGGERINGのままlease期限切れになった
+    親バッチ一覧(平日毎日起動化2026-08対応)。バッチは1日1件程度のためフル
+    スキャンで十分(list_watchlist_batches_by_statusと同じ方針)。
+    """
+    table = _table()
+    items: list[dict[str, Any]] = []
+    scan_kwargs: dict[str, Any] = {
+        "FilterExpression": (
+            "maintenance_trigger_status = :triggering AND "
+            "maintenance_trigger_lease_expires_at < :now"
+        ),
+        "ExpressionAttributeValues": {
+            ":triggering": MAINTENANCE_TRIGGER_STATUS_TRIGGERING,
+            ":now": now.isoformat(),
+        },
+    }
+    while True:
+        response = table.scan(**scan_kwargs)
+        items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_kwargs["ExclusiveStartKey"] = last_key
+    return items
 
 
 def list_watchlist_batches_by_status(statuses: list[WatchlistBatchStatus]) -> list[dict[str, Any]]:

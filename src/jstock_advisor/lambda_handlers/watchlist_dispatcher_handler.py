@@ -244,10 +244,15 @@ def _collect_new_candidate_targets(
     return collector_result.stock_codes, extra_kwargs
 
 
-def _collect_maintenance_targets() -> tuple[list[str], dict[str, Any]]:
+def _collect_maintenance_targets(event: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     """JOB_TYPE_WATCHLIST_MAINTENANCE: 既存ウォッチリストのAUTO_SCREENING銘柄
     一覧を対象とする(計画Part C-7案A)。JPXユニバース・段階導入・ローテーション
     はいずれも無関係(対象は既に登録済みの少数銘柄のため)。
+
+    平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの後続処理として
+    起動された場合、event経由で渡される`triggered_by_batch_id`/`trigger_type`
+    をBatchRunsTableへ記録するため、そのままextra_kwargsへ透過する
+    (parent-child関係の監査用、6節)。
     """
     watchlist_repo = WatchlistRepository()
     codes = [
@@ -255,7 +260,12 @@ def _collect_maintenance_targets() -> tuple[list[str], dict[str, Any]]:
         for item in watchlist_repo.list_all()
         if item.registration_source == WatchlistRegistrationSource.AUTO_SCREENING
     ]
-    return codes, {}
+    extra_kwargs: dict[str, Any] = {}
+    triggered_by_batch_id = event.get("triggered_by_batch_id")
+    if triggered_by_batch_id is not None:
+        extra_kwargs["triggered_by_batch_id"] = triggered_by_batch_id
+        extra_kwargs["trigger_type"] = event.get("trigger_type")
+    return codes, extra_kwargs
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
@@ -300,7 +310,17 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     batch_prefix = (
         "watchlist" if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING else "watchlist-maint"
     )
-    batch_id = f"{batch_prefix}-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    # 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの業務finalize確定後の
+    # 後続起動(watchlist_batch_finalizer.maybe_trigger_maintenance)は、親batch_id
+    # から決定論的に算出したbatch_idをevent["batch_id"]として渡す。これにより
+    # 「同一parentからのinvoke重複」が万一発生しても、この後のtry_acquire_
+    # dispatch_lease()が同一batch_idへの二重DISPATCHINGを構造的に拒否する
+    # (親側のexactly-onceトリガーに加えた二重の安全策)。通常のEventBridge
+    # Schedule起動(Input未指定)ではevent["batch_id"]は存在せず、従来どおり
+    # 自動生成する。
+    batch_id = event.get("batch_id") or (
+        f"{batch_prefix}-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    )
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
 
     if not try_acquire_dispatch_lease(
@@ -358,7 +378,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING:
             stock_codes, extra_kwargs = _collect_new_candidate_targets(config, now)
         else:
-            stock_codes, extra_kwargs = _collect_maintenance_targets()
+            stock_codes, extra_kwargs = _collect_maintenance_targets(event)
     except CandidateUniverseError:
         logger.exception("watchlist candidate universe load failed batch_id=%s", batch_id)
         if rotation_lease_held:

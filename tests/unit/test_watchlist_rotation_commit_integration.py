@@ -213,6 +213,7 @@ def _fake_config(
         thresholds=_fake_thresholds_config(),
         stock_display_name=SimpleNamespace(jpx_name_negative_cache_ttl_seconds=60),
         auto_removal=SimpleNamespace(
+            enabled=True,
             readd_cooldown_days=30,
             minimum_age_days=90,
             consecutive_not_qualified_required=3,
@@ -527,6 +528,7 @@ def test_maintenance_job_never_touches_rotation_state(
     monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: fake_repo)
 
     auto_removal_config = SimpleNamespace(
+        enabled=True,
         minimum_age_days=90,
         consecutive_not_qualified_required=3,
         minimum_not_qualified_span_days=28,
