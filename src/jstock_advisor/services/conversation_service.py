@@ -71,6 +71,13 @@ _UNKNOWN_POSTBACK = "認識できない操作です。メニューからやり�
 _INVALID_STOCK_CODE = "銘柄コードが不正です(4桁の英数字が必要です)"
 
 
+def _unknown_stock_code_reply(stock_code: str) -> ConversationReply:
+    return ConversationReply(
+        f"{stock_code}に該当する銘柄が見つかりませんでした。銘柄コードをご確認のうえ、"
+        "もう一度送信してください。"
+    )
+
+
 @dataclass(frozen=True)
 class ConversationReply:
     text: str
@@ -204,6 +211,11 @@ class ConversationService:
         stock_code = ExternalValueParser.stock_code(fields[0])
         if stock_code is None:
             return ConversationReply(_INVALID_STOCK_CODE)
+        # 指摘3: 存在しない銘柄コードは確認画面へ進めず、この時点で拒否する。
+        # JPXデータソースが利用できない場合(None)は判定不能として処理を継続
+        # する(一時的なデータ取得失敗を理由に正当な入力をブロックしないため)。
+        if self._display_name_resolver.exists(stock_code) is False:
+            return _unknown_stock_code_reply(stock_code)
         shares = ExternalValueParser.integer(fields[1])
         if shares is None or shares <= 0:
             return ConversationReply("株数は正の整数で指定してください")
@@ -243,6 +255,8 @@ class ConversationService:
         stock_code = ExternalValueParser.stock_code(fields[0])
         if stock_code is None:
             return ConversationReply(_INVALID_STOCK_CODE)
+        if self._display_name_resolver.exists(stock_code) is False:
+            return _unknown_stock_code_reply(stock_code)
 
         if self._watchlist.get_item(stock_code) is not None:
             # コードレビュー2026-08-17 指摘1: build_add_item_plan()は既存項目の
@@ -286,8 +300,8 @@ class ConversationService:
         text_body = (
             "以下の内容で登録します。よろしければ「登録する」を押してください。\n\n"
             f"{display_name}({stock_code})\n"
-            f"買付: {shares}株 @{price}円\n"
-            f"合計: {amount}円"
+            f"買付: {shares:,}株 @{price:,}円\n"
+            f"合計: {amount:,}円"
         )
         return ConversationReply(text_body, quick_reply=_confirm_quick_reply(operation_id))
 
@@ -355,7 +369,7 @@ class ConversationService:
         if not success:
             return ConversationReply(_WRITE_CONFLICT)
         return ConversationReply(
-            f"登録しました: 買付 {state.stock_code} {state.shares}株 @{state.price}円"
+            f"登録しました: 買付 {state.stock_code} {state.shares:,}株 @{state.price:,}円"
         )
 
     def _commit_sell(
@@ -389,7 +403,7 @@ class ConversationService:
         if not success:
             return ConversationReply(_WRITE_CONFLICT)
         return ConversationReply(
-            f"登録しました: 売却 {state.stock_code} {state.shares}株 @{state.price}円"
+            f"登録しました: 売却 {state.stock_code} {state.shares:,}株 @{state.price:,}円"
         )
 
     def _commit_watch(

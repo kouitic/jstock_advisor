@@ -120,6 +120,36 @@ def test_jpx_source_returns_none_for_unknown_stock_code(monkeypatch: pytest.Monk
     assert source.get("9999") is None
 
 
+# --- JpxStockNameSource.is_known(会話型UIの銘柄実在チェック、2026-08追加) ---------
+
+
+def test_is_known_true_for_listed_stock_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_loader(monkeypatch, [{"1301": "テスト水産"}])
+    clock = _FakeClock(dt.datetime(2026, 8, 1, tzinfo=dt.UTC))
+    source = JpxStockNameSource(negative_cache_ttl_seconds=60, clock=clock)
+
+    assert source.is_known("1301") is True
+
+
+def test_is_known_false_for_unlisted_stock_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_loader(monkeypatch, [{"1301": "テスト水産"}])
+    clock = _FakeClock(dt.datetime(2026, 8, 1, tzinfo=dt.UTC))
+    source = JpxStockNameSource(negative_cache_ttl_seconds=60, clock=clock)
+
+    assert source.is_known("9999") is False
+
+
+def test_is_known_none_when_cache_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """キャッシュ取得自体に失敗した場合は「不明」(None)を返し、「実在しない」
+    (False)と区別する(一時的なデータ取得失敗を理由に正当な入力をブロック
+    しないため)。"""
+    _patch_loader(monkeypatch, [None])
+    clock = _FakeClock(dt.datetime(2026, 8, 1, tzinfo=dt.UTC))
+    source = JpxStockNameSource(negative_cache_ttl_seconds=60, clock=clock)
+
+    assert source.is_known("1301") is None
+
+
 # --- StockDisplayNameResolver(遅延評価・例外隔離) --------------------------------
 
 
@@ -355,6 +385,57 @@ def test_resolve_success_case_does_not_emit_final_fallback_warning(
         resolver.resolve("1234")
 
     assert not any("resolution_result=unresolved" in r.message for r in caplog.records)
+
+
+# --- StockDisplayNameResolver.exists()(会話型UIの銘柄実在チェック、2026-08追加) ---
+
+
+class _FakeExistenceSource:
+    def __init__(self, result: bool | None = None, raises: Exception | None = None) -> None:
+        self.calls = 0
+        self._result = result
+        self._raises = raises
+
+    def is_known(self, stock_code: str) -> bool | None:
+        self.calls += 1
+        if self._raises is not None:
+            raise self._raises
+        return self._result
+
+
+def test_exists_returns_true_when_jpx_source_confirms() -> None:
+    jpx = _FakeExistenceSource(result=True)
+    resolver = StockDisplayNameResolver(jpx, _FakeSource(), _FakeWatchlistRepo())
+
+    assert resolver.exists("1301") is True
+    assert jpx.calls == 1
+
+
+def test_exists_returns_false_when_jpx_source_denies() -> None:
+    jpx = _FakeExistenceSource(result=False)
+    resolver = StockDisplayNameResolver(jpx, _FakeSource(), _FakeWatchlistRepo())
+
+    assert resolver.exists("9999") is False
+
+
+def test_exists_returns_none_when_jpx_source_indeterminate() -> None:
+    jpx = _FakeExistenceSource(result=None)
+    resolver = StockDisplayNameResolver(jpx, _FakeSource(), _FakeWatchlistRepo())
+
+    assert resolver.exists("1301") is None
+
+
+def test_exists_returns_none_and_logs_warning_on_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    jpx = _FakeExistenceSource(raises=RuntimeError("boom"))
+    resolver = StockDisplayNameResolver(jpx, _FakeSource(), _FakeWatchlistRepo())
+
+    with caplog.at_level(logging.WARNING):
+        result = resolver.exists("1301")
+
+    assert result is None
+    assert any("stock existence check failed" in r.message for r in caplog.records)
 
 
 def test_resolve_each_source_called_at_most_once_even_on_success() -> None:

@@ -93,6 +93,17 @@ class JpxStockNameSource:
         cache = self._get_or_refresh_success_cache(self._clock())
         return cache.get(stock_code) if cache is not None else None
 
+    def is_known(self, stock_code: str) -> bool | None:
+        """stock_codeがJPX上場銘柄一覧に実在するかを判定する(会話型UIの
+        入力検証専用、2026-08追加)。キャッシュが利用できない場合(未ロード・
+        直近失敗のnegative cache中)はNoneを返す(判定不能)。get()と異なり
+        「不明」と「非該当」を区別する必要があるため、cache自体の有無を返す。
+        """
+        cache = self._get_or_refresh_success_cache(self._clock())
+        if cache is None:
+            return None
+        return stock_code in cache
+
     def _get_or_refresh_success_cache(self, now: dt.datetime) -> dict[str, str] | None:
         if self._success_cache is not None:
             # 既に成功キャッシュがあれば維持する(再取得は試みない、コンテナ
@@ -179,6 +190,25 @@ class StockDisplayNameResolver:
     def _watchlist_name(self, stock_code: str) -> str | None:
         item = self._watchlist_repository.get(stock_code)
         return item.stock_name if item is not None else None
+
+    def exists(self, stock_code: str) -> bool | None:
+        """銘柄コードがJPX上場銘柄一覧に実在するかを判定する(会話型UIの
+        入力検証専用、2026-08追加)。JPXデータソースが利用できない場合は
+        Noneを返す(判定不能)。呼び出し側はNoneを「実在チェックをスキップして
+        処理を継続してよい」と解釈すること(一時的なデータ取得失敗を理由に
+        正当な入力をブロックしないため、名称解決と同じ安全側の方針)。
+        """
+        try:
+            return self._jpx_name_source.is_known(stock_code)
+        except Exception as exc:  # noqa: BLE001 - 実在チェックの失敗で入力全体を止めない
+            logger.warning(
+                "stock existence check failed stock_code=%s error_type=%s error_summary=%s "
+                "treated_as=unknown",
+                stock_code,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
 
     def resolve(
         self,
