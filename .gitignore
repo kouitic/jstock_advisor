@@ -20,3 +20,6 @@ cdk.out/
 *.log
 .claude/settings.local.json
 infra/samconfig.toml
+infra/line_rich_menu/*.png
+infra/line_rich_menu/*.jpg
+infra/line_rich_menu/*.jpeg

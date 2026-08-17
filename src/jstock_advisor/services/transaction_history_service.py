@@ -78,6 +78,52 @@ class TransactionHistoryService:
         memo: str | None = None,
         now: dt.datetime | None = None,
     ) -> Transaction:
+        """build_execution_plan()を呼び出した直後にその場で永続化する薄い
+        ラッパー(LINEボタン起点会話型UI・実装プランv2 3節。挙動・戻り値は
+        従来と完全に同じ)。"""
+        transaction = self.build_execution_plan(
+            transaction_id=str(uuid.uuid4()),
+            stock_code=stock_code,
+            transaction_type=transaction_type,
+            shares=shares,
+            execution_price=execution_price,
+            execution_date=execution_date,
+            recommendation_id=recommendation_id,
+            fee=fee,
+            tax=tax,
+            account_type=account_type,
+            reason=reason,
+            memo=memo,
+            now=now,
+        )
+        self._transactions.save(transaction)
+        return transaction
+
+    def build_execution_plan(
+        self,
+        transaction_id: str,
+        stock_code: str,
+        transaction_type: TransactionType,
+        shares: int,
+        execution_price: Decimal,
+        execution_date: dt.date,
+        recommendation_id: str | None = None,
+        fee: Decimal = Decimal("0"),
+        tax: Decimal = Decimal("0"),
+        account_type: AccountType | None = None,
+        reason: str | None = None,
+        memo: str | None = None,
+        now: dt.datetime | None = None,
+    ) -> Transaction:
+        """record_execution()と同じ計算を行うが、一切の永続化を行わず
+        「計画」のみを返す(LINEボタン起点会話型UI・実装プランv2 3節)。
+
+        transaction_idを呼び出し側から指定できるのは、LINEボタン起点会話型
+        UIがConversationStateのoperation_idをそのままtransaction_idとして
+        使い(実装プランv2 3節「決定的ID化」)、TransactWriteItemsが
+        クラッシュ後に同一postbackで再試行された場合も同一内容で上書きされる
+        だけの安全な冪等操作にするため。
+        """
         if shares <= 0:
             raise ValueError("shares must be positive")
         if execution_price <= 0:
@@ -90,8 +136,8 @@ class TransactionHistoryService:
         reference_price = _reference_price(recommendation, transaction_type)
         price_diff = execution_price - reference_price if reference_price is not None else None
 
-        transaction = Transaction(
-            transaction_id=str(uuid.uuid4()),
+        return Transaction(
+            transaction_id=transaction_id,
             recommendation_id=recommendation_id,
             stock_code=stock_code,
             transaction_type=transaction_type,
@@ -107,8 +153,6 @@ class TransactionHistoryService:
             memo=memo,
             created_at=now or dt.datetime.now(dt.UTC),
         )
-        self._transactions.save(transaction)
-        return transaction
 
     def record_skip(
         self,

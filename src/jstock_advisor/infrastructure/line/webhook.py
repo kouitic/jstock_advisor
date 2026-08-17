@@ -14,6 +14,7 @@ import hmac
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs
 
 
 def verify_line_signature(channel_secret: str, body: bytes, signature: str) -> bool:
@@ -60,4 +61,66 @@ def parse_text_message_events(body: bytes) -> list[LineTextMessageEvent]:
         if not isinstance(user_id, str) or not isinstance(reply_token, str):
             continue
         results.append(LineTextMessageEvent(reply_token=reply_token, user_id=user_id, text=text))
+    return results
+
+
+@dataclass(frozen=True)
+class LinePostbackEvent:
+    reply_token: str
+    user_id: str
+    action: str
+    op: str | None
+
+
+# LINEボタン起点会話型UI(2026-08)・実装プランv2 4節で確定したpostback data値
+# (リッチメニュー3種+Quick Reply3種)。ここに無い値・パースできないdataは
+# 「想定外のaction値」として無視する(推測で補完しない)。
+_VALID_POSTBACK_ACTIONS = frozenset(
+    {"start_buy", "start_sell", "start_watch", "confirm", "retry", "cancel"}
+)
+
+
+def parse_postback_events(body: bytes) -> list[LinePostbackEvent]:
+    """Webhookボディからpostbackイベントのみを抽出する。
+
+    `data`(`action=confirm&op=xxxx`のようなURLクエリ文字列)をパースし、
+    actionが既知の値(4節のpostback data定義)でない場合はそのイベント自体を
+    無視する(不正なdata・パースできないdataも同様)。
+    """
+    try:
+        payload: Any = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+    events = payload.get("events") if isinstance(payload, dict) else None
+    if not isinstance(events, list):
+        return []
+
+    results: list[LinePostbackEvent] = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "postback":
+            continue
+        postback = event.get("postback")
+        if not isinstance(postback, dict):
+            continue
+        data = postback.get("data")
+        source = event.get("source")
+        reply_token = event.get("replyToken")
+        if not isinstance(data, str) or not isinstance(source, dict):
+            continue
+        user_id = source.get("userId")
+        if not isinstance(user_id, str) or not isinstance(reply_token, str):
+            continue
+
+        parsed = parse_qs(data, keep_blank_values=True)
+        action_values = parsed.get("action")
+        if not action_values or action_values[0] not in _VALID_POSTBACK_ACTIONS:
+            continue
+        op_values = parsed.get("op")
+        op = op_values[0] if op_values else None
+        results.append(
+            LinePostbackEvent(
+                reply_token=reply_token, user_id=user_id, action=action_values[0], op=op
+            )
+        )
     return results

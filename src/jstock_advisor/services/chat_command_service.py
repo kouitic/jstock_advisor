@@ -62,6 +62,22 @@ class ChatCommandService:
         self._watchlist = watchlist_service or WatchlistService()
         self._portfolio = portfolio_service or PortfolioService()
 
+    def is_legacy_command(self, text: str) -> bool:
+        """既存のCSV形式フルコマンド(買付/売却/ウォッチで始まる)かどうかを判定する。
+
+        LineEventRouter(LINEボタン起点会話型UI・実装プランv2 5節)が、
+        ConversationStateが無いテキストをChatCommandServiceへ渡すべきか判定
+        するために使う。判定基準はhandle()の分岐条件と完全に同じ(先頭フィールド
+        が_BUY_COMMAND/_SELL_COMMAND/_WATCH_COMMANDのいずれか)であり、
+        ルーター側が日本語コマンド文字列を独自にハードコードして重複判定
+        しないための公開メソッド(私有定数_BUY_COMMAND等はモジュール外から
+        参照できないため)。
+        """
+        fields = _parse_csv_line(text)
+        if not fields:
+            return False
+        return fields[0] in (_BUY_COMMAND, _SELL_COMMAND, _WATCH_COMMAND)
+
     def handle(self, text: str, now: dt.datetime | None = None) -> ChatCommandResult:
         now = now or dt.datetime.now(dt.UTC)
         fields = _parse_csv_line(text)

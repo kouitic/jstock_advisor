@@ -287,3 +287,132 @@ def test_recompute_all_adjusts_shares_and_price_for_past_split(tmp_path: Path) -
     assert len(lots) == 1
     assert lots[0].shares == 100
     assert lots[0].purchase_price == Decimal("3500")
+
+
+# --- LINEボタン起点会話型UI: build_purchase_write_plan/build_sale_write_plan ---
+# (実装プランv2 3節。書き込みを行わず計画のみ返すことを検証する)
+
+
+def test_build_purchase_write_plan_does_not_write_anything(
+    portfolio_service: PortfolioService,
+) -> None:
+    plan = portfolio_service.build_purchase_write_plan(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+        now=_NOW,
+    )
+
+    assert portfolio_service.get_holding("8136") is None
+    assert portfolio_service.list_lots("8136") == []
+    assert plan.lot_put.expected_data is None  # 新規ロット
+    assert plan.holding_put.expected_data is None  # 新規Holding
+    assert plan.resulting_holding.shares == 100
+
+
+def test_build_purchase_write_plan_for_additional_buy_captures_existing_raw_data(
+    portfolio_service: PortfolioService,
+) -> None:
+    portfolio_service.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    before_lots = portfolio_service.list_lots("8136")
+    assert len(before_lots) == 1
+
+    plan = portfolio_service.build_purchase_write_plan(
+        stock_code="8136",
+        stock_name=None,
+        shares=100,
+        purchase_price=Decimal("4025"),
+        purchase_date=dt.date(2025, 9, 1),
+        account_type=AccountType.NISA,
+        now=_NOW,
+    )
+
+    # 計画構築だけでは追加ロットは書き込まれない(既存の1件のみ)。
+    assert len(portfolio_service.list_lots("8136")) == 1
+    assert plan.lot_put.expected_data is None  # 追加ロット自体は新規
+    assert plan.holding_put.expected_data is not None  # 既存Holdingの楽観ロック対象
+    assert plan.resulting_holding.shares == 200
+
+
+def test_build_sale_write_plan_does_not_write_anything(
+    portfolio_service: PortfolioService,
+) -> None:
+    portfolio_service.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+
+    plan = portfolio_service.build_sale_write_plan("8136", 40, now=_NOW)
+
+    # 部分売却の計画構築だけではロット・Holdingとも変更されない。
+    assert portfolio_service.get_holding("8136").shares == 100  # type: ignore[union-attr]
+    assert portfolio_service.list_lots("8136")[0].shares == 100
+    assert plan.lot_deletes == []
+    assert len(plan.lot_puts) == 1
+    assert plan.lot_puts[0].expected_data is not None
+    assert plan.holding_put is not None
+    assert plan.holding_delete is None
+    assert plan.resulting_holding.shares == 60  # type: ignore[union-attr]
+
+
+def test_build_sale_write_plan_full_sell_produces_deletes(
+    portfolio_service: PortfolioService,
+) -> None:
+    portfolio_service.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+
+    plan = portfolio_service.build_sale_write_plan("8136", 100, now=_NOW)
+
+    assert portfolio_service.get_holding("8136") is not None  # まだ書き込まれていない
+    assert len(plan.lot_deletes) == 1
+    assert plan.lot_puts == []
+    assert plan.holding_put is None
+    assert plan.holding_delete is not None
+    assert plan.resulting_holding is None
+
+
+def test_register_purchase_and_sell_shares_behavior_unchanged_via_plan_refactor(
+    portfolio_service: PortfolioService,
+) -> None:
+    """register_purchase()/sell_shares()がbuild_*_write_plan()を呼ぶ薄い
+    ラッパーへ再構成された後も、戻り値・実際の永続化結果が従来と一致すること。"""
+    holding = portfolio_service.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    assert holding.shares == 100
+    assert portfolio_service.get_holding("8136") is not None
+
+    remaining = portfolio_service.sell_shares("8136", 40)
+    assert remaining is not None
+    assert remaining.shares == 60
+    assert portfolio_service.list_lots("8136")[0].shares == 60
+
+    result = portfolio_service.sell_shares("8136", 60)
+    assert result is None
+    assert portfolio_service.get_holding("8136") is None
+    assert portfolio_service.list_lots("8136") == []

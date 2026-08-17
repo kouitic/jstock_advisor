@@ -255,3 +255,29 @@ def test_sell_command_uses_jst_calendar_date_across_utc_midnight(
 
     saved = transactions.list_transactions("8136")
     assert saved[0].execution_date == dt.date(2026, 7, 24)
+
+
+# --- is_legacy_command: LineEventRouter向け(LINEボタン起点会話型UI・実装プランv2 5節) ---
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("買付,8306,100,2500", True),
+        ("売却,8306,100,2500", True),
+        ("ウォッチ,8306", True),
+        ("8306,100,2500", False),  # 操作語のない断片(ConversationState中の入力と同型)
+        ("よくわからない", False),
+        ("", False),
+    ],
+)
+def test_is_legacy_command(service: ChatCommandService, text: str, expected: bool) -> None:
+    assert service.is_legacy_command(text) is expected
+
+
+def test_is_legacy_command_matches_handle_dispatch_decision(service: ChatCommandService) -> None:
+    """is_legacy_command()がTrueを返す入力は、handle()が実際にコマンドとして
+    処理する(ヘルプへ落ちない)ことを保証する(判定基準の重複実装防止)。"""
+    result = service.handle("ウォッチ,8306")
+    assert service.is_legacy_command("ウォッチ,8306") is True
+    assert result.success is True

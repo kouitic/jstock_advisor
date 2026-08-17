@@ -7,13 +7,14 @@ from typing import Any
 
 import pytest
 
+from jstock_advisor.infrastructure.line.client import QuickReplyButton
 from jstock_advisor.lambda_handlers import line_webhook_handler
 from jstock_advisor.lambda_handlers.line_webhook_handler import (
     _extract_body_bytes,
     _extract_signature,
     handler,
 )
-from jstock_advisor.services.chat_command_service import ChatCommandResult
+from jstock_advisor.services.conversation_service import ConversationReply
 
 
 def test_extract_body_bytes_plain_text() -> None:
@@ -59,17 +60,23 @@ class _FakeLineClient:
     def push_message(self, text: str) -> None:
         self.pushed.append(text)
 
-    def reply_message(self, reply_token: str, text: str) -> None:
+    def reply_message(
+        self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
+    ) -> None:
         self.replies.append((reply_token, text))
 
 
-class _FakeChatCommandService:
+class _FakeRouter:
     def __init__(self) -> None:
         self.handled_texts: list[str] = []
 
-    def handle(self, text: str, now: dt.datetime | None = None) -> ChatCommandResult:
+    def route_text(self, event: object, now: dt.datetime) -> ConversationReply:
+        text = event.text  # type: ignore[attr-defined]
         self.handled_texts.append(text)
-        return ChatCommandResult(f"reply-to:{text}", True)
+        return ConversationReply(f"reply-to:{text}")
+
+    def route_postback(self, event: object, now: dt.datetime) -> ConversationReply:
+        return ConversationReply("postback-not-used-in-these-tests")
 
 
 def _sign(body: bytes) -> str:
@@ -102,9 +109,7 @@ def fake_client(monkeypatch: pytest.MonkeyPatch) -> _FakeLineClient:
     monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
     monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
     monkeypatch.setattr(line_webhook_handler, "build_line_client_from_env", lambda: client)
-    monkeypatch.setattr(
-        line_webhook_handler, "ChatCommandService", lambda: _FakeChatCommandService()
-    )
+    monkeypatch.setattr(line_webhook_handler, "build_line_event_router", lambda: _FakeRouter())
     return client
 
 

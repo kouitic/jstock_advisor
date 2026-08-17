@@ -20,6 +20,9 @@ class WatchlistRepository:
     def get(self, stock_code: str) -> WatchlistItem | None:
         return self._store.get(stock_code)
 
+    def get_raw_data(self, stock_code: str) -> str | None:
+        return self._store.get_raw_data(stock_code)
+
     def upsert(self, item: WatchlistItem) -> None:
         self._store.upsert(item)
 

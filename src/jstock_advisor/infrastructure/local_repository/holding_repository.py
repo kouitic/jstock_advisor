@@ -29,6 +29,9 @@ class PurchaseLotRepository:
     def get(self, lot_id: str) -> PurchaseLot | None:
         return self._store.get(lot_id)
 
+    def get_raw_data(self, lot_id: str) -> str | None:
+        return self._store.get_raw_data(lot_id)
+
     def upsert(self, lot: PurchaseLot) -> None:
         self._store.upsert(lot)
 
@@ -53,6 +56,9 @@ class HoldingRepository:
 
     def get(self, stock_code: str) -> Holding | None:
         return self._store.get(stock_code)
+
+    def get_raw_data(self, stock_code: str) -> str | None:
+        return self._store.get_raw_data(stock_code)
 
     def upsert(self, holding: Holding) -> None:
         self._store.upsert(holding)

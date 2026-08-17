@@ -1,0 +1,20 @@
+{
+  "size": { "width": 2500, "height": 843 },
+  "selected": true,
+  "name": "jstock-advisor-main-menu",
+  "chatBarText": "メニュー",
+  "areas": [
+    {
+      "bounds": { "x": 0, "y": 0, "width": 833, "height": 843 },
+      "action": { "type": "postback", "data": "action=start_buy", "displayText": "📈 買った" }
+    },
+    {
+      "bounds": { "x": 833, "y": 0, "width": 834, "height": 843 },
+      "action": { "type": "postback", "data": "action=start_sell", "displayText": "📉 売った" }
+    },
+    {
+      "bounds": { "x": 1667, "y": 0, "width": 833, "height": 843 },
+      "action": { "type": "postback", "data": "action=start_watch", "displayText": "⭐ お気に入り登録" }
+    }
+  ]
+}

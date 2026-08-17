@@ -12,13 +12,47 @@ import json
 import os
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Protocol
+
+
+@dataclass(frozen=True)
+class QuickReplyButton:
+    """LINEのQuick Reply(postbackアクション)1件分(LINEボタン起点会話型UI・
+    実装プランv2 4節)。`display_text`未指定時はlabelをチャット履歴表示用文言
+    として流用する。"""
+
+    label: str
+    postback_data: str
+    display_text: str | None = None
 
 
 class LineClient(Protocol):
     def push_message(self, text: str) -> None: ...
 
-    def reply_message(self, reply_token: str, text: str) -> None: ...
+    def reply_message(
+        self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
+    ) -> None: ...
+
+
+def _build_message(text: str, quick_reply: list[QuickReplyButton] | None) -> dict[str, object]:
+    message: dict[str, object] = {"type": "text", "text": text}
+    if quick_reply:
+        message["quickReply"] = {
+            "items": [
+                {
+                    "type": "action",
+                    "action": {
+                        "type": "postback",
+                        "label": button.label,
+                        "data": button.postback_data,
+                        "displayText": button.display_text or button.label,
+                    },
+                }
+                for button in quick_reply
+            ]
+        }
+    return message
 
 
 def _post_messages(token: str, endpoint: str, payload: dict[str, object]) -> None:
@@ -55,12 +89,14 @@ class LiveLineClient:
             {"to": self._user_id, "messages": [{"type": "text", "text": text}]},
         )
 
-    def reply_message(self, reply_token: str, text: str) -> None:
+    def reply_message(
+        self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
+    ) -> None:
         """Webhookで受信したイベントのreplyTokenを使って返信する(Push枠を消費しない)。"""
         _post_messages(
             self._token,
             self._REPLY_ENDPOINT,
-            {"replyToken": reply_token, "messages": [{"type": "text", "text": text}]},
+            {"replyToken": reply_token, "messages": [_build_message(text, quick_reply)]},
         )
 
 
@@ -76,10 +112,14 @@ class ConsoleLineClient:
         print(text)
         print("--------------------------------------")
 
-    def reply_message(self, reply_token: str, text: str) -> None:
+    def reply_message(
+        self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
+    ) -> None:
         self.sent_messages.append(text)
         print(f"----- [LINE返信(ドライラン・未送信、reply_token={reply_token})] -----")
         print(text)
+        if quick_reply:
+            print(f"  quick_reply: {[b.label for b in quick_reply]}")
         print("--------------------------------------")
 
 
