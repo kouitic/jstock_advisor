@@ -68,6 +68,28 @@ def service() -> ConversationService:
     return ConversationService()
 
 
+class _FakeResolverWithExistence:
+    """銘柄実在チェック(コードレビュー2026-08-17指摘3)専用のフェイク。
+    resolve()はstock_codeをそのまま返す(表示名は本テストの関心事ではない)。"""
+
+    def __init__(self, known: set[str] | None = None, indeterminate: bool = False) -> None:
+        self._known = known or set()
+        self._indeterminate = indeterminate
+
+    def resolve(
+        self,
+        stock_code: str,
+        fallback_name: str | None = None,
+        fallback_name_provider: object | None = None,
+    ) -> str:
+        return stock_code
+
+    def exists(self, stock_code: str) -> bool | None:
+        if self._indeterminate:
+            return None
+        return stock_code in self._known
+
+
 # --- BUY: start → 入力 → confirm ------------------------------------------
 
 
@@ -102,6 +124,29 @@ def test_buy_flow_start_input_confirm(
     assert conversation_state_store.get(_USER, _NOW) is None
 
 
+def test_buy_confirmation_and_success_messages_use_comma_formatting(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """コードレビュー2026-08-17再指摘4: 買付確認画面・登録完了メッセージの
+    株数・単価・合計金額はすべてカンマ区切りで表示する(売却側と統一)。"""
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    input_reply = service.handle_text_input(_USER, state, "8306,10000,1500", _NOW)
+
+    assert "10,000株" in input_reply.text
+    assert "@1,500円" in input_reply.text
+    assert "合計: 15,000,000円" in input_reply.text
+
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+    confirm_reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
+
+    assert "10,000株" in confirm_reply.text
+    assert "@1,500円" in confirm_reply.text
+
+
 def test_buy_input_invalid_stock_code_stays_input_waiting(
     moto_conversation_tables: None, service: ConversationService
 ) -> None:
@@ -113,6 +158,46 @@ def test_buy_input_invalid_stock_code_stays_input_waiting(
     unchanged = conversation_state_store.get(_USER, _NOW)
     assert unchanged is not None
     assert unchanged.state == ConversationStateName.INPUT_WAITING
+
+
+def test_buy_input_unknown_stock_code_does_not_proceed_to_confirmation(
+    moto_conversation_tables: None,
+) -> None:
+    """コードレビュー2026-08-17再指摘3: 実在しない銘柄コードは確認画面へ
+    進めず、入力エラーとして案内する。"""
+    service = ConversationService(
+        stock_display_name_resolver=_FakeResolverWithExistence(known={"8306"})
+    )
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, "9999,100,1500", _NOW)
+
+    assert "9999に該当する銘柄が見つかりませんでした" in reply.text
+    assert reply.quick_reply is None
+    unchanged = conversation_state_store.get(_USER, _NOW)
+    assert unchanged is not None
+    assert unchanged.state == ConversationStateName.INPUT_WAITING
+
+
+def test_buy_input_existence_indeterminate_still_proceeds_to_confirmation(
+    moto_conversation_tables: None,
+) -> None:
+    """JPXデータソースが利用できず実在チェックが判定不能(None)の場合は、
+    安全側としてブロックせず処理を継続する(一時的なデータ取得失敗を理由に
+    正当な入力をブロックしないため)。"""
+    service = ConversationService(
+        stock_display_name_resolver=_FakeResolverWithExistence(indeterminate=True)
+    )
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+
+    assert "登録します" in reply.text
+    assert reply.quick_reply is not None
 
 
 def test_buy_input_wrong_field_count_reprompts(
@@ -219,6 +304,24 @@ def test_sell_input_rejects_when_not_holding(
     assert "保有銘柄として登録されていません" in reply.text
 
 
+def test_sell_input_unknown_stock_code_does_not_proceed_to_confirmation(
+    moto_conversation_tables: None,
+) -> None:
+    """コードレビュー2026-08-17再指摘3: SELLでも実在しない銘柄コードは
+    確認画面へ進めず、入力エラーとして案内する(保有チェックより先に判定)。"""
+    service = ConversationService(
+        stock_display_name_resolver=_FakeResolverWithExistence(known={"8306"})
+    )
+    service.handle_postback(_USER, "start_sell", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, "9999,100,1500", _NOW)
+
+    assert "9999に該当する銘柄が見つかりませんでした" in reply.text
+    assert reply.quick_reply is None
+
+
 # --- WATCH ---------------------------------------------------------------
 
 
@@ -236,6 +339,25 @@ def test_watch_flow(moto_conversation_tables: None, service: ConversationService
     assert "ウォッチリストに追加しました" in confirm_reply.text
     assert WatchlistRepository().get(_STOCK) is not None
     assert conversation_state_store.get(_USER, _NOW) is None
+
+
+def test_watch_input_unknown_stock_code_does_not_proceed_to_confirmation(
+    moto_conversation_tables: None,
+) -> None:
+    """コードレビュー2026-08-17再指摘3: WATCHでも実在しない銘柄コードは
+    確認画面へ進めず、入力エラーとして案内する。"""
+    service = ConversationService(
+        stock_display_name_resolver=_FakeResolverWithExistence(known={"8306"})
+    )
+    service.handle_postback(_USER, "start_watch", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, "9999", _NOW)
+
+    assert "9999に該当する銘柄が見つかりませんでした" in reply.text
+    assert reply.quick_reply is None
+    assert WatchlistRepository().get("9999") is None
 
 
 def test_watch_input_already_registered_does_not_overwrite_existing_item(
