@@ -80,6 +80,10 @@ from jstock_advisor.domain.signals.market_environment import (
     market_environment_config_values,
     market_environment_result_to_metrics,
 )
+from jstock_advisor.domain.signals.profit_protection import (
+    ProfitProtectionMetrics,
+    compute_profit_protection_metrics,
+)
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
@@ -107,6 +111,7 @@ from jstock_advisor.domain.signals.trading_unit_feasibility import (
 from jstock_advisor.interfaces.types import DividendInfo, ShareholderBenefit
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
+from jstock_advisor.services.corporate_action_service import CorporateActionService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
@@ -290,6 +295,35 @@ class ProfitTakingService:
         age_days = (snapshot.data_fetched_at.date() - fiscal_period_end).days
         return 0 <= age_days <= 400
 
+    def _compute_profit_protection_metrics(
+        self, holding: Holding, snapshot: StockSnapshot, now: dt.datetime
+    ) -> ProfitProtectionMetrics:
+        """利益保全(Profit Protection)判定の指標を算出する(要求仕様§1・§9)。
+
+        保有期間中に株式分割・株式併合・無償割当があった場合、raw価格系列
+        (snapshot.bars、auto_adjust=False)と平均取得単価の調整基準が一致しない
+        可能性があるため、CorporateActionServiceで検知しデータ不足として
+        スキップする(誤ったPARTIALを出すより安全側)。
+        """
+        corporate_action_service = CorporateActionService(self._providers.corporate_action, now=now)
+        events = corporate_action_service.get_effective_events(
+            holding.stock_code, holding.first_purchase_date
+        )
+        ratio_events = corporate_action_service.get_ratio_adjustment_events(events)
+        ratio_adjustment_event_since_entry = any(
+            e.effective_date is not None and e.effective_date >= holding.first_purchase_date
+            for e in ratio_events
+        )
+        return compute_profit_protection_metrics(
+            bars=snapshot.bars,
+            current_price=snapshot.current_price,
+            average_purchase_price=holding.average_purchase_price,
+            first_purchase_date=holding.first_purchase_date,
+            as_of_date=evaluation_date_jst(now),
+            ratio_adjustment_event_since_entry=ratio_adjustment_event_since_entry,
+            config=self._config.profit_taking.profit_protection,
+        )
+
     def _compute_confidence(
         self, result: ProfitTakingResult, snapshot: StockSnapshot, now: dt.datetime
     ) -> ConfidenceScoreResult:
@@ -402,6 +436,8 @@ class ProfitTakingService:
             or (snapshot.dividend.consecutive_dividend_increase_years or 0) >= 2
         )
 
+        profit_protection_metrics = self._compute_profit_protection_metrics(holding, snapshot, now)
+
         condition_inputs = ProfitTakingConditionInputs(
             stock_types=snapshot.stock_type_classification.types,
             fair_value_range=snapshot.fair_value_range,
@@ -419,6 +455,7 @@ class ProfitTakingService:
             partial_sale_executable=trading_unit_feasibility.partial_sale_executable,
             days_to_next_earnings_business_days=days_to_earnings,
             has_strong_counter_material=has_strong_counter_material,
+            profit_protection=profit_protection_metrics,
         )
 
         is_benefit_eligible = snapshot.benefit is not None
@@ -567,6 +604,20 @@ class ProfitTakingService:
                 "financial_fetched_at": snapshot.financial.source.fetched_at.isoformat(),
                 "release_confirmation_state": release_confirmation_state.value,
                 "earnings_decision_relevance": decision_relevance.value,
+                "profit_protection_signal": result.profit_protection_signal,
+                "profit_protection_peak_price": (
+                    str(result.profit_protection_peak_price)
+                    if result.profit_protection_peak_price is not None
+                    else None
+                ),
+                "profit_protection_peak_gain_pct": result.profit_protection_peak_gain_pct,
+                "profit_protection_current_gain_pct": result.profit_protection_current_gain_pct,
+                "profit_protection_drawdown_from_peak_pct": (
+                    result.profit_protection_drawdown_from_peak_pct
+                ),
+                "profit_protection_gain_giveback_ratio_pct": (
+                    result.profit_protection_gain_giveback_ratio_pct
+                ),
             },
             data_sources=list(snapshot.data_sources),
             rule_version=self._active_rule_version(),
@@ -707,6 +758,8 @@ class ProfitTakingService:
                 ),
                 "upside_pct": result.upside_pct,
                 "fair_value_action_usable": result.fair_value_action_usable,
+                # 利益保全(Profit Protection)判定当時に実際に使用した閾値(§18)。
+                "profit_protection": self._config.profit_taking.profit_protection.model_dump(),
             },
             data_sources=list(snapshot.data_sources),
             next_review_conditions=_build_next_review_conditions(
@@ -731,6 +784,16 @@ class ProfitTakingService:
             profit_taking_origin=result.origin,
             profit_taking_ceiling_price=result.ceiling_price,
             profit_taking_upside_pct=result.upside_pct,
+            profit_protection_signal=result.profit_protection_signal,
+            profit_protection_peak_price=result.profit_protection_peak_price,
+            profit_protection_peak_gain_pct=result.profit_protection_peak_gain_pct,
+            profit_protection_current_gain_pct=result.profit_protection_current_gain_pct,
+            profit_protection_drawdown_from_peak_pct=(
+                result.profit_protection_drawdown_from_peak_pct
+            ),
+            profit_protection_gain_giveback_ratio_pct=(
+                result.profit_protection_gain_giveback_ratio_pct
+            ),
             trading_unit=trading_unit_feasibility.trading_unit,
             minimum_sellable_shares=trading_unit_feasibility.minimum_sellable_shares,
             partial_sale_executable=trading_unit_feasibility.partial_sale_executable,

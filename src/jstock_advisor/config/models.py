@@ -210,6 +210,32 @@ class TradingUnitRules(StrictModel):
     default_odd_lot_trading_available: bool
 
 
+class ProfitProtectionCandidateThresholds(StrictModel):
+    """通常のProfit Protection候補(§3A)の閾値。単独では無条件にPARTIALとせず、
+    condition_based_judgment.min_conditions_for_partialの一条件として数える。
+    """
+
+    min_current_gain_pct: float
+    min_drawdown_from_peak_pct: float
+    min_gain_giveback_ratio_pct: float
+
+
+class ProfitProtectionStrongThresholds(StrictModel):
+    """Strong Profit Protection(§3B)の閾値。Fair Value confidenceに依存せず、
+    単独でPARTIAL_PROFIT_TAKEを成立可能とする。
+    """
+
+    min_current_gain_pct: float
+    min_drawdown_from_peak_pct: float
+    min_gain_giveback_ratio_pct: float
+
+
+class ProfitProtectionConfig(StrictModel):
+    enabled: bool
+    candidate: ProfitProtectionCandidateThresholds
+    strong: ProfitProtectionStrongThresholds
+
+
 class ProfitTakingRulesConfig(StrictModel):
     version: int
     thresholds: ProfitTakingThresholds
@@ -218,6 +244,7 @@ class ProfitTakingRulesConfig(StrictModel):
     event_proximity_notice: EventProximityNotice
     condition_based_judgment: ConditionBasedJudgment
     trading_unit: TradingUnitRules
+    profit_protection: ProfitProtectionConfig
 
 
 # --- sell_rules.yaml --------------------------------------------------------

@@ -92,3 +92,26 @@ condition_based_judgment:
 trading_unit:
   default_trading_unit: 100
   default_odd_lot_trading_available: false
+
+# 利益保全(Profit Protection)判定(2026-08、サンリオ8136の含み益吐き出し事例対応)。
+# Fair Valueベースの割高判定(condition_based_judgment等)とは独立した軸であり、
+# 「すでに十分な含み益を得ており、その利益を高値から相当量失い始めている」ことを
+# 検出する。Fair Value confidenceがLOW/UNKNOWNであっても、strongの条件を満たせば
+# PARTIAL_PROFIT_TAKEを成立可能とする(候補閾値はサンリオ1銘柄への過学習を避けるため
+# 初期値として設定し、実績蓄積後にGitHub Issueで再評価する)。
+profit_protection:
+  enabled: true
+  # 通常のPARTIAL候補(§3A)。単独では無条件にPARTIALとせず、既存の
+  # condition_based_judgment.min_conditions_for_partialの一条件として数える
+  # (trend悪化等の他条件と組み合わさった場合のみPARTIALへ到達する)。
+  candidate:
+    min_current_gain_pct: 20.0
+    min_drawdown_from_peak_pct: 8.0
+    min_gain_giveback_ratio_pct: 20.0
+  # Strong Profit Protection(§3B)。Fair Value confidenceに依存せず、単独で
+  # PARTIAL_PROFIT_TAKEを成立可能とする(既存のPRICE_POSITION/FAIR_VALUE_STRONGと
+  # 同様、mitigating・timing両層の合計softeningでもPARTIAL未満へは降格しない)。
+  strong:
+    min_current_gain_pct: 25.0
+    min_drawdown_from_peak_pct: 10.0
+    min_gain_giveback_ratio_pct: 30.0

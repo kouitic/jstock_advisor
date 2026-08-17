@@ -29,13 +29,19 @@ from jstock_advisor.domain.entities.common import (
 )
 from jstock_advisor.domain.entities.enums import (
     AccountType,
+    CorporateActionType,
     RecentPeriodsSource,
     RecommendationType,
     TimingAction,
 )
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.signals.profit_taking import ProfitTakingResult, UnrealizedPnl
-from jstock_advisor.interfaces.types import Disclosure, FinancialSummary, QuarterlyFinancials
+from jstock_advisor.interfaces.types import (
+    CorporateActionEvent,
+    Disclosure,
+    FinancialSummary,
+    QuarterlyFinancials,
+)
 from jstock_advisor.providers.corporate_action.mock_impl import MockCorporateActionProvider
 from jstock_advisor.providers.disclosure.mock_impl import MockDisclosureProvider
 from jstock_advisor.providers.dividend_data.mock_impl import MockDividendDataProvider
@@ -194,6 +200,12 @@ def _canned_result(recommendation_type: RecommendationType) -> ProfitTakingResul
         origin="OTHER_CONDITIONS",
         ceiling_price=None,
         upside_pct=None,
+        profit_protection_signal="NONE",
+        profit_protection_peak_price=None,
+        profit_protection_peak_gain_pct=None,
+        profit_protection_current_gain_pct=None,
+        profit_protection_drawdown_from_peak_pct=None,
+        profit_protection_gain_giveback_ratio_pct=None,
     )
 
 
@@ -493,3 +505,130 @@ def test_future_earnings_date_within_suppression_window_still_suppresses(
     assert rec.recommendation_type == RecommendationType.REVIEW_BEFORE_EARNINGS
     assert rec.business_days_to_earnings is not None
     assert rec.business_days_to_earnings >= 0
+
+
+# --- 利益保全(Profit Protection)判定の配線テスト(2026-08追加) ---
+
+
+class _StubCorporateActionProvider:
+    """指定したイベント一覧をそのまま返す企業行動Providerのスタブ。"""
+
+    def __init__(self, events: list[CorporateActionEvent]) -> None:
+        self._events = events
+
+    def get_corporate_actions(
+        self, stock_code: str, since: dt.date
+    ) -> list[CorporateActionEvent]:
+        return self._events
+
+
+def _split_event(effective_date: dt.date, stock_code: str = "2914") -> CorporateActionEvent:
+    return CorporateActionEvent(
+        stock_code=stock_code,
+        event_type=CorporateActionType.SPLIT,
+        announced_date=effective_date - dt.timedelta(days=30),
+        effective_date=effective_date,
+        ratio=Decimal("2"),
+        source=_TEST_FINANCIAL_SOURCE,
+    )
+
+
+def test_ratio_adjustment_event_since_entry_marks_profit_protection_data_insufficient() -> None:
+    """保有開始日以降に株式分割があった場合、Profit Protection判定はデータ不足
+    としてスキップする(要求仕様§9)。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding("2914")
+    providers = _providers(None, dt.date(2026, 6, 30))
+    providers = dataclasses.replace(
+        providers,
+        corporate_action=_StubCorporateActionProvider(
+            [_split_event(dt.date(2025, 6, 1))]  # first_purchase_date(2024-1-1)以降
+        ),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is not None
+    assert metrics.candidate_signal is False
+    assert metrics.strong_signal is False
+
+
+def test_ratio_adjustment_event_before_entry_does_not_block() -> None:
+    """保有開始日より前の株式分割は、Profit Protection判定を妨げない
+    (影響範囲は保有期間中のイベントのみ)。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding("2914")
+    providers = _providers(None, dt.date(2026, 6, 30))
+    providers = dataclasses.replace(
+        providers,
+        corporate_action=_StubCorporateActionProvider(
+            [_split_event(dt.date(2023, 6, 1))]  # first_purchase_date(2024-1-1)より前
+        ),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is None
+
+
+def test_no_corporate_action_events_computes_metrics_normally() -> None:
+    """企業行動イベントが無い通常ケースでは、価格履歴からProfit Protection指標を
+    正常に算出できる(データ不足として扱わない)。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding("2914")
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is None
+    assert metrics.peak_price_since_entry is not None
+
+
+def test_recommendation_exposes_profit_protection_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recommendationへevaluate_profit_taking()の結果由来のProfit Protection
+    フィールドが伝播することを確認する(要求仕様§8: 判定理由の追跡可能性)。"""
+    canned = dataclasses.replace(
+        _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+        origin="PROFIT_PROTECTION_STRONG",
+        profit_protection_signal="STRONG",
+        profit_protection_peak_price=Decimal("1454.5"),
+        profit_protection_peak_gain_pct=58.1,
+        profit_protection_current_gain_pct=33.4,
+        profit_protection_drawdown_from_peak_pct=15.6,
+        profit_protection_gain_giveback_ratio_pct=42.5,
+    )
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.recommendation is not None
+    rec = outcome.recommendation
+    assert rec.profit_protection_signal == "STRONG"
+    assert rec.profit_protection_peak_price == Decimal("1454.5")
+    assert rec.profit_protection_peak_gain_pct == 58.1
+    assert rec.profit_protection_current_gain_pct == 33.4
+    assert rec.profit_protection_drawdown_from_peak_pct == 15.6
+    assert rec.profit_protection_gain_giveback_ratio_pct == 42.5
+    assert "profit_protection" in rec.config_values_used

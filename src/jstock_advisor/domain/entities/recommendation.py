@@ -261,6 +261,15 @@ class Recommendation(ImmutableSnapshot):
     # 現在値からceiling_priceまでの上値余地(%)。ceiling_price利用不能の場合はNone。
     profit_taking_upside_pct: float | None = None
 
+    # --- 利益保全(Profit Protection)判定(2026-08追加、要求仕様§8: 判定理由の
+    # 追跡可能性)。"NONE"/"CANDIDATE"/"STRONG"/"DATA_INSUFFICIENT"のいずれか。
+    profit_protection_signal: str | None = None
+    profit_protection_peak_price: Decimal | None = None
+    profit_protection_peak_gain_pct: float | None = None
+    profit_protection_current_gain_pct: float | None = None
+    profit_protection_drawdown_from_peak_pct: float | None = None
+    profit_protection_gain_giveback_ratio_pct: float | None = None
+
     # 保有株数・売買単位を考慮した一部売却の実行可能性
     trading_unit: int | None = None
     minimum_sellable_shares: int | None = None
