@@ -30,6 +30,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.valuation import FairValueRange
+from jstock_advisor.domain.signals.profit_protection import ProfitProtectionMetrics
 from jstock_advisor.domain.valuation.fair_value import (
     compute_target_total_yield_price,
     compute_target_yield_price,
@@ -65,9 +66,16 @@ class _RawLevelOrigin(IntEnum):
     OTHER_CONDITIONS = 1  # 非価格系の独立条件数のみで到達(現行どおり無制限softening)
     PRICE_POSITION = 2  # 含み益率×上値余地の基本マトリクス(強候補でないFULL/PARTIAL)
     # 上記に加え、ユーザー設定目標到達もPRICE_POSITION相当として扱う。
-    FAIR_VALUE_STRONG = 3  # 既存_fair_value_strong_condition/_fair_value_partial_gate_met
+    # 利益保全(Profit Protection、2026-08追加): 高値からの含み益吐き出し(peak
+    # gainのgiveback)を根拠とする強い一部利確候補。Fair Value confidenceに依存
+    # しないため、FAIR_VALUE_STRONGとは独立した経路として扱う。PRICE_POSITIONと
+    # 同様にorigin floor・ceiling-aware価格算出の対象とする(下記_CEILING_AWARE_
+    # ORIGINS参照。ceiling_price自体は使わないが、PARTIAL時は現在値付近を
+    # 執行目安とする点で同じ算出方針を共有する)。
+    PROFIT_PROTECTION_STRONG = 3
+    FAIR_VALUE_STRONG = 4  # 既存_fair_value_strong_condition/_fair_value_partial_gate_met
     # (適正価格ベースの強いゲート)。
-    FUNDAMENTAL_CRITICAL_RISK = 4  # 投資前提崩壊・会計不祥事・確定減配+CF悪化(softening対象外)
+    FUNDAMENTAL_CRITICAL_RISK = 5  # 投資前提崩壊・会計不祥事・確定減配+CF悪化(softening対象外)
 
 
 @dataclass(frozen=True)
@@ -138,6 +146,12 @@ class ProfitTakingConditionInputs:
     # 増益・増配等、利確判定に対する強い反対材料があるか。
     has_strong_counter_material: bool = False
 
+    # --- 利益保全(Profit Protection)判定(2026-08追加、要求仕様§1〜§9) ---
+    # peak_price_since_entry等から算出したcandidate/strongシグナル。Noneの場合は
+    # 未算出(呼び出し側が算出しない、または算出不能)として扱い、Profit Protection
+    # 軸は一切成立しない(捏造した根拠で判定を出さない原則)。
+    profit_protection: ProfitProtectionMetrics | None = None
+
 
 @dataclass(frozen=True)
 class ProfitTakingResult:
@@ -169,6 +183,15 @@ class ProfitTakingResult:
     # reasons文字列を解析せずに「価格マトリクス由来のFULL/PARTIALか」を判定できる
     # ようにする。raw_level==HOLDの場合は"NONE"。
     origin: str
+    # --- 利益保全(Profit Protection)判定(2026-08追加、要求仕様§8: 判定理由の
+    # 追跡可能性)。condition_inputs.profit_protectionと同一の値をそのまま転記する
+    # (呼び出し側がProfitTakingResultだけを見て理由を再現できるようにする)。
+    profit_protection_signal: str
+    profit_protection_peak_price: Decimal | None
+    profit_protection_peak_gain_pct: float | None
+    profit_protection_current_gain_pct: float | None
+    profit_protection_drawdown_from_peak_pct: float | None
+    profit_protection_gain_giveback_ratio_pct: float | None
 
 
 def compute_unrealized_pnl(
@@ -447,6 +470,18 @@ def _count_partial_conditions(
 
     if inputs.earnings_event_risk_reduction_rationale:
         reasons.append("決算イベントに備えたリスク低減の合理性")
+
+    pp = inputs.profit_protection
+    if pp is not None and pp.candidate_signal:
+        assert pp.peak_gain_pct is not None
+        assert pp.current_gain_pct is not None
+        assert pp.drawdown_from_peak_pct is not None
+        assert pp.gain_giveback_ratio_pct is not None
+        reasons.append(
+            f"最大含み益{pp.peak_gain_pct:.1f}%から現在{pp.current_gain_pct:.1f}%まで低下し、"
+            f"高値から{pp.drawdown_from_peak_pct:.1f}%下落、"
+            f"最大含み益の{pp.gain_giveback_ratio_pct:.1f}%を吐き出した(利益保全シグナル)"
+        )
 
     return len(reasons), reasons
 
@@ -753,6 +788,10 @@ _CEILING_AWARE_ORIGINS = frozenset(
         _RawLevelOrigin.PRICE_POSITION,
         _RawLevelOrigin.FAIR_VALUE_STRONG,
         _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK,
+        # PROFIT_PROTECTION_STRONGはfinal_level==PARTIALにしか到達しないため、
+        # _ceiling_aware_sell_prices()のFULL分岐(ceiling_price使用)は通らない。
+        # PARTIAL分岐は現在値のみを使い、ceiling_price(=None)の有無に影響されない。
+        _RawLevelOrigin.PROFIT_PROTECTION_STRONG,
     }
 )
 
@@ -1208,6 +1247,35 @@ def evaluate_profit_taking(
             )
         )
 
+    # 利益保全(Profit Protection、2026-08追加)のstrong条件(要求仕様§3B)。
+    # Fair Value confidenceに一切依存せず、単独でPARTIAL候補を成立させる。
+    # 業種別モデル・決算までの余裕日数等、適正価格ベースのゲート(_extra_action_
+    # gates_met)は課さない(適正価格を根拠にしないため)。一部売却が実行可能な
+    # 場合のみ成立させる(実行不能な推奨を出さないため)。
+    profit_protection = condition_inputs.profit_protection
+    if (
+        profit_protection is not None
+        and profit_protection.strong_signal
+        and condition_inputs.partial_sale_executable
+    ):
+        assert profit_protection.peak_gain_pct is not None
+        assert profit_protection.current_gain_pct is not None
+        assert profit_protection.drawdown_from_peak_pct is not None
+        assert profit_protection.gain_giveback_ratio_pct is not None
+        candidates.append(
+            (
+                _Level.PARTIAL,
+                _RawLevelOrigin.PROFIT_PROTECTION_STRONG,
+                [
+                    f"最大含み益{profit_protection.peak_gain_pct:.1f}%から現在"
+                    f"{profit_protection.current_gain_pct:.1f}%まで低下。高値から"
+                    f"{profit_protection.drawdown_from_peak_pct:.1f}%下落し、"
+                    f"最大含み益の{profit_protection.gain_giveback_ratio_pct:.1f}%を"
+                    "吐き出したため、Strong Profit Protection条件に該当し、一部利確を推奨"
+                ],
+            )
+        )
+
     # WATCHの起点(要求仕様§6): 強気適正価格の超過閾値には届かない、または中立適正価格を
     # わずかに上回るのみの場合でも、監視開始としては扱う。PARTIALへの到達に必要な独立
     # 条件数(partial_count)には数えない(gain単独でのPARTIAL誤到達を防ぐ)。含み損の場合は
@@ -1271,9 +1339,11 @@ def evaluate_profit_taking(
         # 生じうる。origin別floorはmitigating層適用直後のfundamental_levelにも同じ
         # 基準で適用し、各層の意味を一貫させる(このあとのtiming層はfloor済みの
         # fundamental_levelを起点に計算される)。
-        if origin in (_RawLevelOrigin.PRICE_POSITION, _RawLevelOrigin.FAIR_VALUE_STRONG) and (
-            raw_level >= _Level.PARTIAL
-        ):
+        if origin in (
+            _RawLevelOrigin.PRICE_POSITION,
+            _RawLevelOrigin.FAIR_VALUE_STRONG,
+            _RawLevelOrigin.PROFIT_PROTECTION_STRONG,
+        ) and (raw_level >= _Level.PARTIAL):
             fundamental_level = _Level(max(int(fundamental_level), int(_Level.PARTIAL)))
         hold_reasons = list(applied_factors)
 
@@ -1312,9 +1382,11 @@ def evaluate_profit_taking(
     # PARTIAL以上の場合、mitigating+timing両層を通した合計softeningでもPARTIAL未満へは
     # 落とさない(最終floor)。FUNDAMENTAL_CRITICAL_RISKは上記の両層で降格自体を無効化
     # 済みのため、ここでは対象外(raw_level == final_levelが既に保証されている)。
-    if origin in (_RawLevelOrigin.PRICE_POSITION, _RawLevelOrigin.FAIR_VALUE_STRONG) and (
-        raw_level >= _Level.PARTIAL
-    ):
+    if origin in (
+        _RawLevelOrigin.PRICE_POSITION,
+        _RawLevelOrigin.FAIR_VALUE_STRONG,
+        _RawLevelOrigin.PROFIT_PROTECTION_STRONG,
+    ) and (raw_level >= _Level.PARTIAL):
         final_level = _Level(max(int(final_level), int(_Level.PARTIAL)))
 
     fundamental_action = _LEVEL_TO_RECOMMENDATION[fundamental_level]
@@ -1370,4 +1442,22 @@ def evaluate_profit_taking(
         ceiling_price=ceiling_price,
         upside_pct=upside_pct,
         origin=origin.name,
+        profit_protection_signal=(
+            profit_protection.signal_label if profit_protection is not None else "NONE"
+        ),
+        profit_protection_peak_price=(
+            profit_protection.peak_price_since_entry if profit_protection is not None else None
+        ),
+        profit_protection_peak_gain_pct=(
+            profit_protection.peak_gain_pct if profit_protection is not None else None
+        ),
+        profit_protection_current_gain_pct=(
+            profit_protection.current_gain_pct if profit_protection is not None else None
+        ),
+        profit_protection_drawdown_from_peak_pct=(
+            profit_protection.drawdown_from_peak_pct if profit_protection is not None else None
+        ),
+        profit_protection_gain_giveback_ratio_pct=(
+            profit_protection.gain_giveback_ratio_pct if profit_protection is not None else None
+        ),
     )
