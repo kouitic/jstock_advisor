@@ -211,20 +211,27 @@ class ConversationService:
         if price is None or price <= 0:
             return ConversationReply("単価は正の数値で指定してください")
 
+        current_shares: int | None = None
         if action == ConversationAction.SELL:
             holding = self._portfolio.get_holding(stock_code)
             if holding is None:
                 return ConversationReply(f"{stock_code}は保有銘柄として登録されていません")
             if shares > holding.shares:
                 return ConversationReply(f"保有株数({holding.shares}株)を超える売却はできません")
+            current_shares = holding.shares
 
         new_state = conversation_state_store.record_input(
             user_id, action, stock_code, now, shares=shares, price=price
         )
         if new_state is None:
             return ConversationReply(_STATE_CHANGED)
-        return self._build_trade_confirmation_reply(
-            action, stock_code, shares, price, new_state.operation_id
+        if action == ConversationAction.SELL:
+            assert current_shares is not None
+            return self._build_sell_confirmation_reply(
+                stock_code, current_shares, shares, price, new_state.operation_id
+            )
+        return self._build_buy_confirmation_reply(
+            stock_code, shares, price, new_state.operation_id
         )
 
     def _handle_watch_input(self, user_id: str, text: str, now: dt.datetime) -> ConversationReply:
@@ -234,6 +241,13 @@ class ConversationService:
         stock_code = ExternalValueParser.stock_code(fields[0])
         if stock_code is None:
             return ConversationReply(_INVALID_STOCK_CODE)
+
+        if self._watchlist.get_item(stock_code) is not None:
+            # コードレビュー2026-08-17 指摘1: build_add_item_plan()は既存項目の
+            # reason/priority等をデフォルト値で再構築するため、確認画面へ進めて
+            # しまうと既存設定を失う。確認前にここで終了し、既存WatchlistItemは
+            # 一切変更しない(Legacy CSV側のadd_item()の上書き挙動自体は変更しない)。
+            return ConversationReply(f"{stock_code}はすでにお気に入りに登録されています。")
 
         new_state = conversation_state_store.record_input(
             user_id, ConversationAction.WATCH, stock_code, now
@@ -250,22 +264,47 @@ class ConversationService:
             text_body, quick_reply=_confirm_quick_reply(new_state.operation_id)
         )
 
-    def _build_trade_confirmation_reply(
+    def _build_buy_confirmation_reply(
         self,
-        action: ConversationAction,
         stock_code: str,
         shares: int,
         price: Decimal,
         operation_id: str,
     ) -> ConversationReply:
         display_name = self._display_name_resolver.resolve(stock_code)
-        action_label = "買付" if action == ConversationAction.BUY else "売却"
         amount = shares * price
         text_body = (
             "以下の内容で登録します。よろしければ「登録する」を押してください。\n\n"
             f"{display_name}({stock_code})\n"
-            f"{action_label}: {shares}株 @{price}円\n"
+            f"買付: {shares}株 @{price}円\n"
             f"合計: {amount}円"
+        )
+        return ConversationReply(text_body, quick_reply=_confirm_quick_reply(operation_id))
+
+    def _build_sell_confirmation_reply(
+        self,
+        stock_code: str,
+        current_shares: int,
+        shares: int,
+        price: Decimal,
+        operation_id: str,
+    ) -> ConversationReply:
+        """コードレビュー2026-08-17 指摘2(当初の受入条件): SELL確認画面には
+        現在保有・今回売却・売却後の株数を明示する。確認画面生成時点で読み
+        取ったHolding(current_shares)のみを表示に使い、実際の確定時には
+        conversation_commit側の楽観ロックで別途整合性を保証する。"""
+        display_name = self._display_name_resolver.resolve(stock_code)
+        remaining_shares = current_shares - shares
+        amount = shares * price
+        text_body = (
+            "売却内容をご確認ください。\n\n"
+            f"銘柄：{display_name}（{stock_code}）\n"
+            f"現在保有：{current_shares:,}株\n"
+            f"今回売却：{shares:,}株\n"
+            f"売却後：{remaining_shares:,}株\n"
+            f"売却単価：{price:,}円\n"
+            f"売却金額：{amount:,}円\n\n"
+            "この内容で登録しますか？"
         )
         return ConversationReply(text_body, quick_reply=_confirm_quick_reply(operation_id))
 

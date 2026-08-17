@@ -236,6 +236,43 @@ def test_commit_buy_fails_when_holding_created_concurrently_for_new_stock(
     assert HoldingRepository().get(_STOCK).shares == 10  # type: ignore[union-attr]
 
 
+def test_commit_buy_fails_when_transaction_id_already_exists(
+    moto_conversation_tables: None,
+) -> None:
+    """コードレビュー2026-08-17 指摘4: Transaction Putにも
+    attribute_not_exists(transaction_id)を付与し(Defense in Depth)、
+    operation_id再利用等でtransaction_idが既に存在する場合は失敗させる。"""
+    state = _start_buy_confirm(shares=100, price="1500")
+    assert state is not None
+    portfolio = PortfolioService()
+    plan = portfolio.build_purchase_write_plan(
+        stock_code=_STOCK,
+        stock_name=None,
+        shares=100,
+        purchase_price=Decimal("1500"),
+        purchase_date=dt.date(2026, 8, 17),
+        account_type=AccountType.GENERAL,
+        now=_NOW,
+    )
+    transaction = TransactionHistoryService().build_execution_plan(
+        transaction_id=state.operation_id,
+        stock_code=_STOCK,
+        transaction_type=TransactionType.BUY,
+        shares=100,
+        execution_price=Decimal("1500"),
+        execution_date=dt.date(2026, 8, 17),
+        now=_NOW,
+    )
+    # 同じtransaction_id(=operation_id)のTransactionが既に存在する状況を模擬する。
+    TransactionRepository().save(transaction)
+
+    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+
+    assert ok is False
+    assert HoldingRepository().get(_STOCK) is None
+    assert conversation_state_store.get(_USER, _NOW) is not None
+
+
 def test_commit_buy_fails_on_operation_id_mismatch(moto_conversation_tables: None) -> None:
     state = _start_buy_confirm(shares=100, price="1500")
     assert state is not None
@@ -465,3 +502,71 @@ def test_commit_watch_does_not_retry_genuine_conditional_check_failure(
 
     assert ok is False
     assert flaky.call_count == 1
+
+
+# --- TransactionCanceledExceptionの理由コード別判定(指摘3) ------------------
+
+
+def _canceled_error(reason_codes: list[str]) -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+            "CancellationReasons": [{"Code": code} for code in reason_codes],
+        },
+        "TransactWriteItems",
+    )
+
+
+def test_is_safe_business_conflict_true_for_conditional_check_failed_reasons() -> None:
+    error = _canceled_error(["None", "ConditionalCheckFailed", "None"])
+    assert conversation_commit._is_safe_business_conflict(error) is True
+
+
+def test_is_safe_business_conflict_false_for_validation_error_reason() -> None:
+    error = _canceled_error(["None", "ValidationError", "None"])
+    assert conversation_commit._is_safe_business_conflict(error) is False
+
+
+def test_is_safe_business_conflict_false_for_throttling_reason() -> None:
+    error = _canceled_error(["ThrottlingError", "ConditionalCheckFailed"])
+    assert conversation_commit._is_safe_business_conflict(error) is False
+
+
+def test_is_safe_business_conflict_true_for_top_level_conditional_check_failed() -> None:
+    error = ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "x"}},
+        "TransactWriteItems",
+    )
+    assert conversation_commit._is_safe_business_conflict(error) is True
+
+
+def test_is_safe_business_conflict_false_for_unrelated_error_code() -> None:
+    error = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "x"}},
+        "TransactWriteItems",
+    )
+    assert conversation_commit._is_safe_business_conflict(error) is False
+
+
+def test_commit_watch_propagates_non_business_transaction_canceled_exception(
+    moto_conversation_tables: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """指摘3: スロットリング・内部障害等の非業務エラーをFalseへ握りつぶさず、
+    そのまま例外として上位へ伝播させる。"""
+    state = _start_watch_confirm()
+    assert state is not None
+    watchlist_item = WatchlistService().build_add_item_plan(stock_code=_STOCK)
+
+    class _AlwaysNonBusinessCanceledClient:
+        def transact_write_items(self, **kwargs: Any) -> Any:
+            raise _canceled_error(["None", "ValidationException"])
+
+    monkeypatch.setattr(
+        conversation_commit.boto3, "client", lambda *a, **kw: _AlwaysNonBusinessCanceledClient()
+    )
+
+    with pytest.raises(ClientError):
+        conversation_commit.commit_watch(_USER, state.operation_id, watchlist_item, _NOW)
+
+    # 例外伝播のため状態は変更されない。
+    assert conversation_state_store.get(_USER, _NOW) is not None
