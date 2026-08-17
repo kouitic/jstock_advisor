@@ -198,6 +198,55 @@ def test_cancel_fails_and_keeps_item_on_operation_id_mismatch(
     assert conversation_state_store.get("U1", _NOW) is not None
 
 
+def test_discard_input_deletes_item_on_match(moto_conversation_states: None) -> None:
+    """再レビュー指摘(2026-08-17): INPUT_WAITING中の対話を安全に破棄する
+    discard_input()。action/state=INPUT_WAITING/operation_id/ttlが一致した
+    場合のみ削除される。"""
+    input_state = conversation_state_store.start_or_replace("U1", ConversationAction.WATCH, _NOW)
+    ok = conversation_state_store.discard_input(
+        "U1", ConversationAction.WATCH, input_state.operation_id, _NOW
+    )
+    assert ok is True
+    assert conversation_state_store.get("U1", _NOW) is None
+
+
+def test_discard_input_fails_and_keeps_item_on_operation_id_mismatch(
+    moto_conversation_states: None,
+) -> None:
+    conversation_state_store.start_or_replace("U1", ConversationAction.WATCH, _NOW)
+    ok = conversation_state_store.discard_input(
+        "U1", ConversationAction.WATCH, "wrong-op-id", _NOW
+    )
+    assert ok is False
+    assert conversation_state_store.get("U1", _NOW) is not None
+
+
+def test_discard_input_fails_when_state_is_confirm_waiting(
+    moto_conversation_states: None,
+) -> None:
+    """discard_input()はINPUT_WAITING専用。CONFIRM_WAITING中の対話は
+    破棄できない(そちらはcancel()を使う)。"""
+    conversation_state_store.start_or_replace("U1", ConversationAction.WATCH, _NOW)
+    confirm_state = conversation_state_store.record_input(
+        "U1", ConversationAction.WATCH, "8306", _NOW
+    )
+    assert confirm_state is not None
+    ok = conversation_state_store.discard_input(
+        "U1", ConversationAction.WATCH, confirm_state.operation_id, _NOW
+    )
+    assert ok is False
+    assert conversation_state_store.get("U1", _NOW) is not None
+
+
+def test_discard_input_fails_on_action_mismatch(moto_conversation_states: None) -> None:
+    input_state = conversation_state_store.start_or_replace("U1", ConversationAction.BUY, _NOW)
+    ok = conversation_state_store.discard_input(
+        "U1", ConversationAction.WATCH, input_state.operation_id, _NOW
+    )
+    assert ok is False
+    assert conversation_state_store.get("U1", _NOW) is not None
+
+
 def test_build_confirm_delete_transact_item_executes_and_deletes_on_match(
     moto_conversation_states: None,
 ) -> None:
