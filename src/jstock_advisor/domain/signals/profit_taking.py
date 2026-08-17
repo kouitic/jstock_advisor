@@ -192,6 +192,10 @@ class ProfitTakingResult:
     profit_protection_current_gain_pct: float | None
     profit_protection_drawdown_from_peak_pct: float | None
     profit_protection_gain_giveback_ratio_pct: float | None
+    # コードレビュー対応(2026-08、指摘2): DATA_INSUFFICIENT時の具体的理由
+    # (株式分割・履歴不足等)を監査・原因調査用に永続化する。signal以外の
+    # 場合(NONE/CANDIDATE/STRONG)は常にNone。
+    profit_protection_insufficient_reason: str | None
 
 
 def compute_unrealized_pnl(
@@ -1459,5 +1463,8 @@ def evaluate_profit_taking(
         ),
         profit_protection_gain_giveback_ratio_pct=(
             profit_protection.gain_giveback_ratio_pct if profit_protection is not None else None
+        ),
+        profit_protection_insufficient_reason=(
+            profit_protection.insufficient_data_reason if profit_protection is not None else None
         ),
     )

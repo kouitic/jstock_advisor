@@ -269,6 +269,10 @@ class Recommendation(ImmutableSnapshot):
     profit_protection_current_gain_pct: float | None = None
     profit_protection_drawdown_from_peak_pct: float | None = None
     profit_protection_gain_giveback_ratio_pct: float | None = None
+    # profit_protection_signal="DATA_INSUFFICIENT"の場合の具体的理由(株式分割・
+    # 履歴不足等)。監査・原因調査用であり、LINE通知への表示は必須ではない
+    # (コードレビュー対応2026-08、指摘2)。
+    profit_protection_insufficient_reason: str | None = None
 
     # 保有株数・売買単位を考慮した一部売却の実行可能性
     trading_unit: int | None = None

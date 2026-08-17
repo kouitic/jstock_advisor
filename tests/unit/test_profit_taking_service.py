@@ -206,6 +206,7 @@ def _canned_result(recommendation_type: RecommendationType) -> ProfitTakingResul
         profit_protection_current_gain_pct=None,
         profit_protection_drawdown_from_peak_pct=None,
         profit_protection_gain_giveback_ratio_pct=None,
+        profit_protection_insufficient_reason=None,
     )
 
 
@@ -579,6 +580,120 @@ def test_ratio_adjustment_event_before_entry_does_not_block() -> None:
     metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
 
     assert metrics.insufficient_data_reason is None
+
+
+def _holding_with_buy_more(stock_code: str) -> Holding:
+    """買い増しがあり、first_purchase_date != last_purchase_dateとなる保有
+    (コードレビュー対応2026-08、指摘1: basis_date=last_purchase_dateの回帰確認用)。
+    """
+    return Holding(
+        stock_code=stock_code,
+        stock_name="テスト銘柄",
+        shares=100,
+        average_purchase_price=Decimal("4000"),
+        total_purchase_amount=Decimal("400000"),
+        first_purchase_date=dt.date(2024, 1, 1),
+        last_purchase_date=dt.date(2025, 6, 1),  # 買い増し日
+        account_type=AccountType.SPECIFIC,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def test_corporate_action_between_first_and_last_purchase_does_not_block() -> None:
+    """買い増し前(first_purchase_dateとlast_purchase_dateの間)の株式分割は、
+    basis_date(last_purchase_date)より前であるためProfit Protection判定を
+    妨げない(コードレビュー対応2026-08、指摘1のCase E相当)。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding_with_buy_more("2914")
+    providers = _providers(None, dt.date(2026, 6, 30))
+    providers = dataclasses.replace(
+        providers,
+        corporate_action=_StubCorporateActionProvider(
+            [_split_event(dt.date(2024, 6, 1))]  # first(2024-1-1)〜last(2025-6-1)の間
+        ),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is None
+
+
+def test_corporate_action_on_or_after_last_purchase_date_blocks() -> None:
+    """買い増し日(last_purchase_date)以降の株式分割は、basis_date以降の
+    イベントであるためProfit Protection判定をデータ不足とする
+    (コードレビュー対応2026-08、指摘1のCase E相当)。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding_with_buy_more("2914")
+    providers = _providers(None, dt.date(2026, 6, 30))
+    providers = dataclasses.replace(
+        providers,
+        corporate_action=_StubCorporateActionProvider(
+            [_split_event(dt.date(2025, 6, 1))]  # last_purchase_dateと同日(境界)
+        ),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is not None
+
+
+def test_insufficient_reason_persisted_on_recommendation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DATA_INSUFFICIENT時の具体的理由がRecommendationへ永続化される
+    (コードレビュー対応2026-08、指摘2)。"""
+    canned = dataclasses.replace(
+        _canned_result(RecommendationType.WATCH),
+        profit_protection_signal="DATA_INSUFFICIENT",
+        profit_protection_insufficient_reason="保有期間中に株式分割・併合等があり判定不能",
+    )
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.recommendation is not None
+    rec = outcome.recommendation
+    assert rec.profit_protection_signal == "DATA_INSUFFICIENT"
+    assert rec.profit_protection_insufficient_reason == (
+        "保有期間中に株式分割・併合等があり判定不能"
+    )
+
+
+def test_recommendation_without_new_field_loads_with_none_default() -> None:
+    """既存(本フィールド追加前)のRecommendationデータでも、新規フィールドが
+    無いままロードできる(コードレビュー対応2026-08、指摘2の後方互換確認)。"""
+    from jstock_advisor.domain.entities.recommendation import Recommendation
+
+    rec_dict = {
+        "recommendation_id": "test-id",
+        "stock_code": "2914",
+        "stock_name": "テスト銘柄",
+        "recommended_at": _NOW,
+        "recommendation_type": RecommendationType.WATCH,
+        "price_at_recommendation": Decimal("4200"),
+        "confidence": "MEDIUM",
+        "rule_version": "test",
+    }
+    assert "profit_protection_insufficient_reason" not in rec_dict
+    rec = Recommendation.model_validate(rec_dict)
+    assert rec.profit_protection_insufficient_reason is None
+    assert rec.profit_protection_signal is None
 
 
 def test_no_corporate_action_events_computes_metrics_normally() -> None:

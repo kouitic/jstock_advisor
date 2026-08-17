@@ -173,10 +173,27 @@ def test_no_profit_protection_metrics_does_not_change_existing_behavior() -> Non
 
 def test_data_insufficient_metrics_does_not_trigger_signal() -> None:
     """peak_price算出不能(株式分割等)の場合、candidate/strongいずれも不成立で
-    あるため通常の判定に一切影響しない。"""
+    あるため通常の判定に一切影響しない。insufficient_reasonは監査・原因調査用に
+    ProfitTakingResultへ伝播する(コードレビュー対応2026-08、指摘2)。"""
     result = _evaluate(profit_protection=_insufficient_pp_metrics())
     assert result.profit_protection_signal == "DATA_INSUFFICIENT"
     assert result.recommendation_type != RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.profit_protection_insufficient_reason == (
+        "保有期間中に株式分割・併合等があり判定不能"
+    )
+
+
+def test_normal_strong_signal_has_no_insufficient_reason() -> None:
+    """正常にStrongが成立した場合、insufficient_reasonはNoneのまま
+    (コードレビュー対応2026-08、指摘2)。"""
+    result = _evaluate(profit_protection=_pp_metrics(candidate=True, strong=True))
+    assert result.profit_protection_insufficient_reason is None
+
+
+def test_no_profit_protection_metrics_has_no_insufficient_reason() -> None:
+    """condition_inputs.profit_protection=None(未算出)の場合もNoneのまま。"""
+    result = _evaluate(profit_protection=None)
+    assert result.profit_protection_insufficient_reason is None
 
 
 def test_strong_signal_requires_partial_sale_executable() -> None:
