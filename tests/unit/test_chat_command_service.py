@@ -215,3 +215,43 @@ def test_buy_command_non_positive_price_returns_error(service: ChatCommandServic
 def test_watch_command_wrong_field_count_returns_error(service: ChatCommandService) -> None:
     result = service.handle("ウォッチ", now=_NOW)
     assert result.success is False
+
+
+def test_buy_command_uses_jst_calendar_date_across_utc_midnight(
+    service: ChatCommandService,
+    portfolio: PortfolioService,
+    transactions: TransactionHistoryService,
+) -> None:
+    # UTC 2026-07-23 20:00 = JST 2026-07-24 05:00。素朴なnow.date()だと
+    # 前日(2026-07-23)になってしまう境界(明治HD事例と同種のバグ)。
+    now_near_utc_midnight = dt.datetime(2026, 7, 23, 20, 0, tzinfo=dt.UTC)
+    result = service.handle("買付,8136,100,3775", now=now_near_utc_midnight)
+    assert result.success is True
+
+    saved = transactions.list_transactions("8136")
+    assert saved[0].execution_date == dt.date(2026, 7, 24)
+
+    holding = portfolio.get_holding("8136")
+    assert holding is not None
+    assert holding.first_purchase_date == dt.date(2026, 7, 24)
+
+
+def test_sell_command_uses_jst_calendar_date_across_utc_midnight(
+    service: ChatCommandService,
+    portfolio: PortfolioService,
+    transactions: TransactionHistoryService,
+) -> None:
+    portfolio.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("1000"),
+        purchase_date=dt.date(2026, 1, 1),
+        account_type=AccountType.NISA,
+    )
+    now_near_utc_midnight = dt.datetime(2026, 7, 23, 20, 0, tzinfo=dt.UTC)
+    result = service.handle("売却,8136,30,1500", now=now_near_utc_midnight)
+    assert result.success is True
+
+    saved = transactions.list_transactions("8136")
+    assert saved[0].execution_date == dt.date(2026, 7, 24)

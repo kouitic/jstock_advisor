@@ -17,6 +17,7 @@ import io
 from dataclasses import dataclass
 
 from jstock_advisor.domain.entities.enums import AccountType, TransactionType
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
@@ -113,13 +114,14 @@ class ChatCommandService:
                 else TransactionType.PARTIAL_SELL
             )
 
+        today_jst = evaluation_date_jst(now)
         try:
             self._transactions.record_execution(
                 stock_code=stock_code,
                 transaction_type=transaction_type,
                 shares=shares,
                 execution_price=price,
-                execution_date=now.date(),
+                execution_date=today_jst,
                 now=now,
             )
         except ValueError as e:
@@ -131,7 +133,7 @@ class ChatCommandService:
                 stock_name=None,
                 shares=shares,
                 purchase_price=price,
-                purchase_date=now.date(),
+                purchase_date=today_jst,
                 account_type=AccountType.GENERAL,
             )
         else:

@@ -14,6 +14,7 @@ from typing import Any
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import AccountType
 from jstock_advisor.domain.entities.holding import Holding, PurchaseLot, summarize_lots
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -101,7 +102,7 @@ class PortfolioService:
         adjustment_basis_date: dt.date | None = None
         if self._corporate_action is not None:
             total_shares, avg_price = self._split_adjusted_summary(stock_code, lots, now)
-            adjustment_basis_date = now.date()
+            adjustment_basis_date = evaluation_date_jst(now)
         else:
             total_shares, avg_price, _, _, _ = summarize_lots(lots)
 
@@ -150,7 +151,7 @@ class PortfolioService:
         平均取得単価は「調整後総株数」で購入総額を割り直すことで導出する。
         """
         assert self._corporate_action is not None
-        basis_date = now.date()
+        basis_date = evaluation_date_jst(now)
         source = DataSourceReference(provider="corporate_action_service", fetched_at=now)
         events = self._corporate_action.get_effective_events(
             stock_code, min(lot.purchase_date for lot in lots)
