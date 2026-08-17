@@ -20,6 +20,12 @@ from jstock_advisor.infrastructure.local_repository.holding_repository import (
     PurchaseLotRepository,
 )
 from jstock_advisor.services.corporate_action_service import CorporateActionService
+from jstock_advisor.services.write_plan import (
+    ConditionalDelete,
+    ConditionalPut,
+    PurchaseWritePlan,
+    SaleWritePlan,
+)
 
 
 class PortfolioService:
@@ -60,6 +66,48 @@ class PortfolioService:
         profit_target_rate: float | None = None,
         memo: str | None = None,
     ) -> Holding:
+        """build_purchase_write_plan()を呼び出した直後にその場で適用する薄い
+        ラッパー(LINEボタン起点会話型UI・実装プランv2 3節。挙動・戻り値は
+        従来と完全に同じ)。"""
+        plan = self.build_purchase_write_plan(
+            stock_code,
+            stock_name,
+            shares,
+            purchase_price,
+            purchase_date,
+            account_type,
+            fee=fee,
+            investment_purpose=investment_purpose,
+            sell_policy=sell_policy,
+            profit_target_rate=profit_target_rate,
+            memo=memo,
+        )
+        self._lots.upsert(plan.lot_put.model)  # type: ignore[arg-type]
+        self._holdings.upsert(plan.holding_put.model)  # type: ignore[arg-type]
+        return plan.resulting_holding
+
+    def build_purchase_write_plan(
+        self,
+        stock_code: str,
+        stock_name: str | None,
+        shares: int,
+        purchase_price: Decimal,
+        purchase_date: dt.date,
+        account_type: AccountType,
+        fee: Decimal = Decimal("0"),
+        investment_purpose: str | None = None,
+        sell_policy: str | None = None,
+        profit_target_rate: float | None = None,
+        memo: str | None = None,
+        now: dt.datetime | None = None,
+    ) -> PurchaseWritePlan:
+        """register_purchase()と同じ計算を行うが、一切の永続化を行わず
+        「計画」のみを返す(LINEボタン起点会話型UI・実装プランv2 3節・
+        追加条件1)。TransactWriteItemsのConditionExpression用に、
+        計画構築時点で読み取った既存Holdingの生data文字列(新規追加なら
+        None)をexpected_dataへ含める。
+        """
+        now = now or dt.datetime.now(dt.UTC)
         lot = PurchaseLot(
             lot_id=str(uuid.uuid4()),
             stock_code=stock_code,
@@ -69,9 +117,14 @@ class PortfolioService:
             fee=fee,
             account_type=account_type,
         )
-        self._lots.upsert(lot)
-        return self._recompute_holding(
+        existing_lots = self._lots.list_by_stock(stock_code)
+        existing_holding = self._holdings.get(stock_code)
+        existing_holding_raw = self._holdings.get_raw_data(stock_code)
+        holding = self._compute_holding(
             stock_code,
+            [*existing_lots, lot],
+            existing_holding,
+            now,
             stock_name=stock_name,
             account_type=account_type,
             investment_purpose=investment_purpose,
@@ -79,10 +132,20 @@ class PortfolioService:
             profit_target_rate=profit_target_rate,
             memo=memo,
         )
+        return PurchaseWritePlan(
+            lot_put=ConditionalPut(model=lot, id_field="lot_id", expected_data=None),
+            holding_put=ConditionalPut(
+                model=holding, id_field="stock_code", expected_data=existing_holding_raw
+            ),
+            resulting_holding=holding,
+        )
 
-    def _recompute_holding(
+    def _compute_holding(
         self,
         stock_code: str,
+        lots: list[PurchaseLot],
+        existing: Holding | None,
+        now: dt.datetime,
         *,
         stock_name: str | None = None,
         account_type: AccountType | None = None,
@@ -91,13 +154,15 @@ class PortfolioService:
         profit_target_rate: float | None = None,
         memo: str | None = None,
     ) -> Holding:
-        lots = self._lots.list_by_stock(stock_code)
+        """ロット一覧からHoldingを再計算する純粋な計算部分(永続化を行わない)。
+        _recompute_holding()・build_purchase_write_plan()・build_sale_write_plan()
+        から共通で呼ばれる(実装プランv2: 計画構築と実際の適用を分離するための
+        リファクタ。計算内容は従来のprivate `_recompute_holding()`と同一)。
+        """
         if not lots:
             raise ValueError(f"銘柄コード{stock_code}の購入ロットがありません")
 
         _, _, total_amount, first_date, last_date = summarize_lots(lots)
-        existing = self._holdings.get(stock_code)
-        now = dt.datetime.now(dt.UTC)
 
         adjustment_basis_date: dt.date | None = None
         if self._corporate_action is not None:
@@ -106,7 +171,7 @@ class PortfolioService:
         else:
             total_shares, avg_price, _, _, _ = summarize_lots(lots)
 
-        holding = Holding(
+        return Holding(
             stock_code=stock_code,
             stock_name=stock_name or (existing.stock_name if existing else stock_code),
             market_segment=existing.market_segment if existing else None,
@@ -137,6 +202,33 @@ class PortfolioService:
             memo=memo or (existing.memo if existing else None),
             created_at=existing.created_at if existing else now,
             updated_at=now,
+        )
+
+    def _recompute_holding(
+        self,
+        stock_code: str,
+        *,
+        stock_name: str | None = None,
+        account_type: AccountType | None = None,
+        investment_purpose: str | None = None,
+        sell_policy: str | None = None,
+        profit_target_rate: float | None = None,
+        memo: str | None = None,
+    ) -> Holding:
+        lots = self._lots.list_by_stock(stock_code)
+        existing = self._holdings.get(stock_code)
+        now = dt.datetime.now(dt.UTC)
+        holding = self._compute_holding(
+            stock_code,
+            lots,
+            existing,
+            now,
+            stock_name=stock_name,
+            account_type=account_type,
+            investment_purpose=investment_purpose,
+            sell_policy=sell_policy,
+            profit_target_rate=profit_target_rate,
+            memo=memo,
         )
         self._holdings.upsert(holding)
         return holding
@@ -192,8 +284,36 @@ class PortfolioService:
         return updated
 
     def sell_shares(self, stock_code: str, shares: int) -> Holding | None:
-        """FIFO(購入日が古いロット順)で消費し、保有株数を減らす。
-        全ロットを消費した場合はHoldingも削除しNoneを返す。"""
+        """build_sale_write_plan()を呼び出した直後にその場で適用する薄い
+        ラッパー(LINEボタン起点会話型UI・実装プランv2 3節。挙動・戻り値は
+        従来と完全に同じ)。FIFO(購入日が古いロット順)で消費し、保有株数を
+        減らす。全ロットを消費した場合はHoldingも削除しNoneを返す。"""
+        plan = self.build_sale_write_plan(stock_code, shares)
+        for lot_delete in plan.lot_deletes:
+            self._lots.delete(lot_delete.id_value)
+        for lot_put in plan.lot_puts:
+            self._lots.upsert(lot_put.model)  # type: ignore[arg-type]
+        if plan.holding_delete is not None:
+            self._holdings.delete(stock_code)
+            return None
+        if plan.holding_put is not None:
+            self._holdings.upsert(plan.holding_put.model)  # type: ignore[arg-type]
+            return plan.resulting_holding
+        # 全部売却だが、そもそもHoldingが存在しなかった場合(データ不整合時の
+        # 安全側フォールバック)。何も削除操作を行わずNoneを返す(従来の
+        # self._holdings.delete()が存在しないキーに対してNo-opだったのと同じ)。
+        return None
+
+    def build_sale_write_plan(
+        self, stock_code: str, shares: int, now: dt.datetime | None = None
+    ) -> SaleWritePlan:
+        """sell_shares()と同じ計算(FIFO消費)を行うが、一切の永続化を行わず
+        「計画」のみを返す(LINEボタン起点会話型UI・実装プランv2 3節・
+        追加条件1)。消費対象ロットのDelete/Update・再計算後Holdingの
+        Put/Deleteそれぞれに、計画構築時点で読み取った既存アイテムの生data
+        文字列(楽観ロック用のexpected_data)を含める。
+        """
+        now = now or dt.datetime.now(dt.UTC)
         lots = sorted(self._lots.list_by_stock(stock_code), key=lambda lot: lot.purchase_date)
         if not lots:
             raise ValueError(f"銘柄コード{stock_code}の購入ロットがありません")
@@ -203,20 +323,58 @@ class PortfolioService:
             raise ValueError(f"保有株数({total_held}株)を超える売却はできません")
 
         remaining = shares
+        lot_deletes: list[ConditionalDelete] = []
+        lot_puts: list[ConditionalPut] = []
+        remaining_lots: list[PurchaseLot] = []
         for lot in lots:
             if remaining <= 0:
-                break
+                remaining_lots.append(lot)
+                continue
+            raw = self._lots.get_raw_data(lot.lot_id)
+            if raw is None:
+                raise ValueError(f"ロットID{lot.lot_id}のデータ取得に失敗しました")
             if lot.shares <= remaining:
-                self._lots.delete(lot.lot_id)
+                lot_deletes.append(
+                    ConditionalDelete(id_value=lot.lot_id, id_field="lot_id", expected_data=raw)
+                )
                 remaining -= lot.shares
             else:
-                self._lots.upsert(lot.model_copy(update={"shares": lot.shares - remaining}))
+                updated_lot = lot.model_copy(update={"shares": lot.shares - remaining})
+                lot_puts.append(
+                    ConditionalPut(model=updated_lot, id_field="lot_id", expected_data=raw)
+                )
+                remaining_lots.append(updated_lot)
                 remaining = 0
 
-        if not self._lots.list_by_stock(stock_code):
-            self._holdings.delete(stock_code)
-            return None
-        return self._recompute_holding(stock_code)
+        existing_holding = self._holdings.get(stock_code)
+        existing_holding_raw = self._holdings.get_raw_data(stock_code)
+
+        if not remaining_lots:
+            holding_delete = (
+                ConditionalDelete(
+                    id_value=stock_code, id_field="stock_code", expected_data=existing_holding_raw
+                )
+                if existing_holding_raw is not None
+                else None
+            )
+            return SaleWritePlan(
+                lot_deletes=lot_deletes,
+                lot_puts=lot_puts,
+                holding_put=None,
+                holding_delete=holding_delete,
+                resulting_holding=None,
+            )
+
+        holding = self._compute_holding(stock_code, remaining_lots, existing_holding, now)
+        return SaleWritePlan(
+            lot_deletes=lot_deletes,
+            lot_puts=lot_puts,
+            holding_put=ConditionalPut(
+                model=holding, id_field="stock_code", expected_data=existing_holding_raw
+            ),
+            holding_delete=None,
+            resulting_holding=holding,
+        )
 
     def delete_lot(self, stock_code: str, lot_id: str) -> Holding | None:
         if not self._lots.delete(lot_id):

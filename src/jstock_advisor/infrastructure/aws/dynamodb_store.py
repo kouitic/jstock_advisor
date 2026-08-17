@@ -26,6 +26,23 @@ if TYPE_CHECKING:
     from mypy_boto3_dynamodb.service_resource import Table
 
 
+def to_dynamo_item(
+    model: BaseModel, id_field: str, ttl_seconds: int | None = None
+) -> dict[str, Any]:
+    """`{id_field: id, "data": model.model_dump_json()}`形式のPUT用アイテムを構築する。
+
+    DynamoDbCollectionStore._to_item()と全く同じ形式(LINEボタン起点会話型UI・
+    実装プランv2 3節)。conversation_commit.pyがTransactWriteItems用のPut/Update
+    アイテムを組み立てる際、通常のリポジトリ経由で読み書きする場合と完全に
+    同一のシリアライズ形式であることを保証するために公開する。
+    """
+    item_id = str(getattr(model, id_field))
+    item: dict[str, Any] = {id_field: item_id, "data": model.model_dump_json()}
+    if ttl_seconds is not None:
+        item["ttl"] = int(time.time()) + ttl_seconds
+    return item
+
+
 class DynamoDbCollectionStore[T: BaseModel]:
     def __init__(
         self, model_type: type[T], table_name: str, id_field: str, ttl_seconds: int | None = None
@@ -42,11 +59,7 @@ class DynamoDbCollectionStore[T: BaseModel]:
         self._table: Table = resource.Table(table_name)
 
     def _to_item(self, model: T) -> dict[str, Any]:
-        item_id = str(getattr(model, self._id_field))
-        item: dict[str, Any] = {self._id_field: item_id, "data": model.model_dump_json()}
-        if self._ttl_seconds is not None:
-            item["ttl"] = int(time.time()) + self._ttl_seconds
-        return item
+        return to_dynamo_item(model, self._id_field, self._ttl_seconds)
 
     def _from_item(self, item: dict[str, Any]) -> T:
         return self._model_type.model_validate_json(item["data"])
@@ -67,6 +80,15 @@ class DynamoDbCollectionStore[T: BaseModel]:
         response = self._table.get_item(Key={self._id_field: item_id})
         item = response.get("Item")
         return self._from_item(item) if item is not None else None
+
+    def get_raw_data(self, item_id: str) -> str | None:
+        """`data`属性の生JSON文字列をそのまま返す(モデルを経由した再シリアライズを
+        行わない)。楽観ロックのConditionExpression(#data = :expected_data)に
+        使う値は、実際にDynamoDBへ保存されているバイト列と完全一致している
+        必要があるため、_from_item()を経由しない。"""
+        response = self._table.get_item(Key={self._id_field: item_id})
+        item = response.get("Item")
+        return str(item["data"]) if item is not None else None
 
     def get_consistent(self, item_id: str) -> T | None:
         """get()のstrongly consistent read版(ConsistentRead=True)。

@@ -1,28 +1,32 @@
 """LINE Webhookハンドラ(API Gateway経由)。
 
-チャット起点の売買記録・ウォッチリスト登録を受け付ける。処理の流れ:
+リッチメニュー/Quick Reply起点のボタン操作(会話型UI)と、既存のCSVテキスト
+コマンドの両方を受け付ける。処理の流れ:
 1. 署名検証(X-Line-Signatureヘッダー、LINE_CHANNEL_SECRET環境変数)。
    検証に失敗した場合は403を返し一切処理しない。
 2. 送信者認可(LINE_USER_ID環境変数と一致するuserIdのみ処理する。
    Webhook URLが第三者に知られた場合でも本人以外のメッセージは無視する)。
-3. テキストメッセージイベントをCSVコマンドとして解釈・実行
-   (jstock_advisor.services.chat_command_service参照)。
-4. 実行結果をreplyTokenで返信する。
+3. postback/テキストメッセージイベントをLineEventRouterへ振り分ける
+   (jstock_advisor.services.line_event_router参照。判定ルールはそちらの
+   モジュールdocstringを参照)。
+4. 実行結果をreplyTokenで返信する(Quick Reply付きの場合あり)。
 """
 
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import logging
 import os
 from typing import Any
 
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.line.webhook import (
+    parse_postback_events,
     parse_text_message_events,
     verify_line_signature,
 )
-from jstock_advisor.services.chat_command_service import ChatCommandService
+from jstock_advisor.services.line_event_router import build_line_event_router
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -56,17 +60,27 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         return {"statusCode": 403, "body": "invalid signature"}
 
     line_client = build_line_client_from_env()
-    chat_service = ChatCommandService()
+    router = build_line_event_router()
+    now = dt.datetime.now(dt.UTC)
 
     handled = 0
     ignored = 0
+    for postback_event in parse_postback_events(body_bytes):
+        if postback_event.user_id != authorized_user_id:
+            logger.warning("ignoring postback from unauthorized userId")
+            ignored += 1
+            continue
+        reply = router.route_postback(postback_event, now)
+        line_client.reply_message(postback_event.reply_token, reply.text, reply.quick_reply)
+        handled += 1
+
     for message_event in parse_text_message_events(body_bytes):
         if message_event.user_id != authorized_user_id:
             logger.warning("ignoring message from unauthorized userId")
             ignored += 1
             continue
-        result = chat_service.handle(message_event.text)
-        line_client.reply_message(message_event.reply_token, result.reply_text)
+        reply = router.route_text(message_event, now)
+        line_client.reply_message(message_event.reply_token, reply.text, reply.quick_reply)
         handled += 1
 
     logger.info("line_webhook_handler done: handled=%d ignored=%d", handled, ignored)

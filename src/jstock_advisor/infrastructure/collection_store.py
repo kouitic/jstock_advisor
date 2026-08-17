@@ -47,6 +47,18 @@ class CollectionStore[T: BaseModel](Protocol):
         一律これへ置き換えない。DynamoDBの読み取りコスト増加・挙動変更を避けるため)。
         """
         ...
+    def get_raw_data(self, item_id: str) -> str | None:
+        """DynamoDB実装は`data`属性の生JSON文字列をそのまま返す(モデルを経由した
+        再シリアライズを行わない)。LINEボタン起点会話型UIの楽観ロック
+        (TransactWriteItemsのConditionExpression: #data = :expected_data)が、
+        計画構築時点で実際にDynamoDBへ保存されているバイト列と完全一致する値を
+        条件に使うために必要(再シリアライズ結果は、フィールド順序・Decimalの
+        表現等が偶然一致しない限りバイト単位では一致するとは限らないため、
+        `get()`で取得したモデルを`model_dump_json()`し直した値は使わない)。
+        JSON実装ではDynamoDBへの書き込みを行わないため、get()相当の
+        model_dump_json()を返す(実利用はDynamoDB実装のみ)。項目が無ければNone。
+        """
+        ...
 
 
 def running_on_lambda() -> bool:

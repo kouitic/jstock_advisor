@@ -61,6 +61,12 @@ class JsonCollectionStore[T: BaseModel]:
         """ローカルJSONは常に最新のファイル内容を読むため、get()と同じでよい。"""
         return self.get(item_id)
 
+    def get_raw_data(self, item_id: str) -> str | None:
+        """ローカル実装はDynamoDBへ書き込まないため、get()相当の
+        model_dump_json()を返す(楽観ロックの実利用はDynamoDB実装のみ)。"""
+        item = self.get(item_id)
+        return item.model_dump_json() if item is not None else None
+
     def upsert(self, item: T) -> None:
         items = self._read_all()
         item_id = str(getattr(item, self._id_field))

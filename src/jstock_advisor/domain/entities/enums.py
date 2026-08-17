@@ -1276,3 +1276,33 @@ class FinancialPolicyOverride(StrEnum):
 
     DEFAULT = "DEFAULT"
     FORCE_DEFER_ALL = "FORCE_DEFER_ALL"
+
+
+# ============================================================================
+# LINEボタン起点の会話型UI(2026-08)で追加
+# ============================================================================
+
+
+class ConversationAction(StrEnum):
+    """LINEリッチメニュー/postbackから開始する対話の種別。
+
+    ChatCommandServiceのCSVコマンド語(買付/売却/ウォッチ)とは独立した
+    英語enumとして定義する(postback data値`action=start_buy`等・
+    DynamoDB ConversationStatesテーブルの`action`属性値として使う)。
+    """
+
+    BUY = "BUY"
+    SELL = "SELL"
+    WATCH = "WATCH"
+
+
+class ConversationStateName(StrEnum):
+    """ConversationStateの状態遷移(入力待ち/確認待ちの2段階のみ)。
+
+    BUY/SELL/WATCHいずれも同型の2状態で表現し、どの対話種別かは
+    ConversationAction(`action`属性)側で区別する(状態名自体をBUY_INPUT_
+    WAITING等の複合値にしない設計。実装プランv2 2節)。
+    """
+
+    INPUT_WAITING = "INPUT_WAITING"
+    CONFIRM_WAITING = "CONFIRM_WAITING"

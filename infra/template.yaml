@@ -794,6 +794,26 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # --- LINEボタン起点会話型UI(2026-08)で追加 -------------------------------
+  # BUY/SELL/WATCHのリッチメニュー/postback対話の一時状態(実装プランv2 3節)。
+  # ttlはDynamoDB Native TTL(物理削除・掃除用途のみ)であり、実際の期限判定は
+  # infrastructure/aws/conversation_state_store.pyがアプリ層で`ttl <= now`を
+  # 判定する(物理削除タイミング=最大48時間程度の残存に依存しない設計)。
+  ConversationStatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-conversation_states"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
 
   BuyCandidatesFunction:
@@ -1483,12 +1503,41 @@ Resources:
         Variables:
           LINE_CHANNEL_SECRET: !Sub "{{resolve:secretsmanager:${LineChannelSecretSecretArn}:SecretString}}"
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref TransactionsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref SkippedRecommendationsTable }
+        # LINEボタン起点会話型UI(2026-08)のconversation_commit.pyがTransactWriteItems
+        # で複数テーブルを原子的に更新する(実装プランv2 3節)。TransactWriteItemsは
+        # 各アイテムの個別アクション(PutItem/DeleteItem/UpdateItem/ConditionCheckItem)
+        # のみをIAMが評価し、専用のTransactWriteItemsアクションは存在しない
+        # (watchlist_worker_handler.pyのDynamoDbCrudAccess Statementで確認済みの
+        # 既存パターンをそのまま踏襲)。DynamoDBCrudPolicyショートハンドはConditionCheckItem
+        # を含まないため、カスタムStatementへ集約する。
+        - Statement:
+            - Sid: DynamoDbCrudAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt TransactionsTable.Arn
+                - !Sub "${TransactionsTable.Arn}/index/*"
+                - !GetAtt SkippedRecommendationsTable.Arn
+                - !Sub "${SkippedRecommendationsTable.Arn}/index/*"
+                - !GetAtt WatchlistTable.Arn
+                - !Sub "${WatchlistTable.Arn}/index/*"
+                - !GetAtt HoldingsTable.Arn
+                - !Sub "${HoldingsTable.Arn}/index/*"
+                - !GetAtt PurchaseLotsTable.Arn
+                - !Sub "${PurchaseLotsTable.Arn}/index/*"
+                - !GetAtt ConversationStatesTable.Arn
+                - !Sub "${ConversationStatesTable.Arn}/index/*"
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref HoldingsTable }
-        - DynamoDBCrudPolicy: { TableName: !Ref PurchaseLotsTable }
       Events:
         Webhook:
           Type: HttpApi
