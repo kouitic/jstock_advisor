@@ -20,6 +20,7 @@ from moto import mock_aws
 from jstock_advisor.domain.entities.enums import ConversationStateName, Priority
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.aws import conversation_state_store
+from jstock_advisor.infrastructure.line.webhook import LineTextMessageEvent
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -27,7 +28,9 @@ from jstock_advisor.infrastructure.local_repository.holding_repository import (
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
     WatchlistRepository,
 )
+from jstock_advisor.services.chat_command_service import ChatCommandResult
 from jstock_advisor.services.conversation_service import ConversationService
+from jstock_advisor.services.line_event_router import LineEventRouter
 
 _REGION = "ap-northeast-1"
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
@@ -266,6 +269,53 @@ def test_watch_input_already_registered_does_not_overwrite_existing_item(
     assert unchanged.priority == Priority.HIGH
     assert unchanged.notify_enabled is False
     assert unchanged.memo == "custom memo"
+
+
+class _FakeChatCommandServiceForLegacyRouting:
+    """LineEventRouterの振り分け確認専用の最小フェイク(is_legacy_command/
+    handle以外は使わない)。"""
+
+    def __init__(self) -> None:
+        self.handled: list[str] = []
+
+    def is_legacy_command(self, text: str) -> bool:
+        return text.startswith("買付,")
+
+    def handle(self, text: str, now: dt.datetime | None = None) -> ChatCommandResult:
+        self.handled.append(text)
+        return ChatCommandResult(f"chat-reply:{text}", True)
+
+
+def test_watch_duplicate_ends_conversation_state_and_next_legacy_command_routes_normally(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """再レビュー指摘(2026-08-17): 重複検出時にConversationStateを終了しない
+    と、INPUT_WAITINGが残ったままになり、次の通常テキスト(Legacy CSV
+    コマンド等)が誤ってWATCH入力として処理されてしまう。discard_input()に
+    よる条件付きDeleteで対話を終了し、その後はLineEventRouterがLegacy CSV
+    コマンドを通常どおりChatCommandServiceへルーティングすることを検証する。
+    """
+    WatchlistRepository().upsert(
+        WatchlistItem(stock_code=_STOCK, created_at=_NOW, updated_at=_NOW)
+    )
+    service.handle_postback(_USER, "start_watch", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    assert state.state == ConversationStateName.INPUT_WAITING
+
+    reply = service.handle_text_input(_USER, state, "8306", _NOW)
+
+    assert f"{_STOCK}はすでにお気に入りに登録されています" in reply.text
+    assert conversation_state_store.get(_USER, _NOW) is None
+
+    chat_command = _FakeChatCommandServiceForLegacyRouting()
+    router = LineEventRouter(conversation_service=service, chat_command_service=chat_command)  # type: ignore[arg-type]
+    event = LineTextMessageEvent(reply_token="rt", user_id=_USER, text="買付,7203,100,2000")
+
+    router_reply = router.route_text(event, _NOW)
+
+    assert router_reply.text == "chat-reply:買付,7203,100,2000"
+    assert chat_command.handled == ["買付,7203,100,2000"]
 
 
 # --- retry / cancel --------------------------------------------------------

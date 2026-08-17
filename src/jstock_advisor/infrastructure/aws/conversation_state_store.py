@@ -263,6 +263,44 @@ def retry(
     return get(user_id, now)
 
 
+def discard_input(
+    user_id: str,
+    expected_action: ConversationAction,
+    expected_operation_id: str,
+    now: dt.datetime,
+) -> bool:
+    """INPUT_WAITING中の対話を破棄する(条件付き削除)。cancel()はCONFIRM_WAITING
+    専用の破棄(ボタンの「キャンセル」)のため使えない。既にウォッチリスト
+    登録済みの銘柄が入力された場合等、確認画面へ進めずにINPUT_WAITINGの
+    まま対話を終了させたいケースで使う(コードレビュー2026-08-17再指摘)。"""
+    now_epoch = int(now.timestamp())
+    try:
+        _table().delete_item(
+            Key={"user_id": user_id},
+            ConditionExpression=(
+                "#action = :expected_action AND #state = :input_waiting "
+                "AND #operation_id = :expected_op AND #ttl > :now_epoch"
+            ),
+            ExpressionAttributeNames={
+                "#action": "action",
+                "#state": "state",
+                "#operation_id": "operation_id",
+                "#ttl": "ttl",
+            },
+            ExpressionAttributeValues={
+                ":expected_action": expected_action.value,
+                ":input_waiting": ConversationStateName.INPUT_WAITING.value,
+                ":expected_op": expected_operation_id,
+                ":now_epoch": now_epoch,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
 def cancel(user_id: str, expected_operation_id: str, now: dt.datetime) -> bool:
     """CONFIRM_WAITING中の対話を破棄する(条件付き削除)。"""
     now_epoch = int(now.timestamp())

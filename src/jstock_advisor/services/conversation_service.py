@@ -191,7 +191,7 @@ class ConversationService:
             # 誤登録防止最優先: 想定外のtextでは状態を一切変更しない(実装プランv2 2節)。
             return ConversationReply(_CONFIRM_WAITING_GUIDANCE)
         if state.action == ConversationAction.WATCH:
-            return self._handle_watch_input(user_id, text, now)
+            return self._handle_watch_input(user_id, state, text, now)
         return self._handle_trade_input(user_id, state.action, text, now)
 
     def _handle_trade_input(
@@ -234,7 +234,9 @@ class ConversationService:
             stock_code, shares, price, new_state.operation_id
         )
 
-    def _handle_watch_input(self, user_id: str, text: str, now: dt.datetime) -> ConversationReply:
+    def _handle_watch_input(
+        self, user_id: str, state: ConversationState, text: str, now: dt.datetime
+    ) -> ConversationReply:
         fields = _parse_csv_fields(text)
         if fields is None or len(fields) != 1:
             return ConversationReply(_START_PROMPTS[ConversationAction.WATCH])
@@ -247,6 +249,14 @@ class ConversationService:
             # reason/priority等をデフォルト値で再構築するため、確認画面へ進めて
             # しまうと既存設定を失う。確認前にここで終了し、既存WatchlistItemは
             # 一切変更しない(Legacy CSV側のadd_item()の上書き挙動自体は変更しない)。
+            # 再レビュー指摘: ここで返信するだけではINPUT_WAITINGのConversationState
+            # が残ったままになり、次の通常テキスト(Legacy CSVコマンド等)が誤って
+            # WATCH入力として処理されてしまう。安全な条件付きDeleteで対話自体を
+            # 終了させる(無条件Deleteはせず、action/state/operation_id/ttlが
+            # 一致する場合のみ)。
+            conversation_state_store.discard_input(
+                user_id, ConversationAction.WATCH, state.operation_id, now
+            )
             return ConversationReply(f"{stock_code}はすでにお気に入りに登録されています。")
 
         new_state = conversation_state_store.record_input(
