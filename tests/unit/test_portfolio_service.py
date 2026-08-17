@@ -6,6 +6,7 @@ import pytest
 
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import AccountType, CorporateActionType
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -275,8 +276,11 @@ def test_recompute_all_adjusts_shares_and_price_for_past_split(tmp_path: Path) -
     assert after.average_purchase_price == Decimal("700")  # 3500円 / 5
     assert after.total_purchase_amount == Decimal("350000")  # 支出総額は不変
     # _recompute_holding()は実時刻(dt.datetime.now)を基準日として使うため、_NOWではなく
-    # 実行時の日付と比較する(_NOWはCorporateActionServiceのイベント有効性判定にのみ使用)
-    assert after.shares_and_price_adjustment_basis_date == dt.datetime.now(dt.UTC).date()
+    # 実行時の日付と比較する(_NOWはCorporateActionServiceのイベント有効性判定にのみ使用)。
+    # JST暦日(evaluation_date_jst)基準であり、UTC生日付(.date())とは異なりうる。
+    assert after.shares_and_price_adjustment_basis_date == evaluation_date_jst(
+        dt.datetime.now(dt.UTC)
+    )
 
     # PurchaseLot(購入時の生データ)自体は書き換えられていないことを確認
     lots = adjusting_service.list_lots("5401")
