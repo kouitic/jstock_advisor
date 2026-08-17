@@ -300,27 +300,37 @@ class ProfitTakingService:
     ) -> ProfitProtectionMetrics:
         """利益保全(Profit Protection)判定の指標を算出する(要求仕様§1・§9)。
 
-        保有期間中に株式分割・株式併合・無償割当があった場合、raw価格系列
+        peak探索の基準日にはholding.first_purchase_date(保有開始日)ではなく
+        holding.last_purchase_date(最終購入日)を使う(コードレビュー対応
+        2026-08、指摘1)。holding.average_purchase_priceは複数PurchaseLotの
+        加重平均であり、買い増しがあった場合は最終購入日以降にのみ現在の
+        平均取得単価が成立しているため、保有開始日を基準にすると買い増し前の
+        (現在の平均取得単価とは無関係な)高値をpeakに含めてしまい、実際には
+        存在しなかった含み益吐き出しを検出してしまう。一部売却はFIFO(古い
+        ロットから消費)のため、last_purchase_dateより新しい取得原価を生成
+        せず、この基準日をそのまま使い続けてよい(詳細はprofit_protection.py
+        のcompute_profit_protection_metrics()のdocstring参照)。
+
+        基準日以降に株式分割・株式併合・無償割当があった場合、raw価格系列
         (snapshot.bars、auto_adjust=False)と平均取得単価の調整基準が一致しない
         可能性があるため、CorporateActionServiceで検知しデータ不足として
-        スキップする(誤ったPARTIALを出すより安全側)。
+        スキップする(誤ったPARTIALを出すより安全側)。基準日より前の分割等は
+        判定を妨げない(既に現在の平均取得単価に反映済みであるため)。
         """
+        basis_date = holding.last_purchase_date
         corporate_action_service = CorporateActionService(self._providers.corporate_action, now=now)
-        events = corporate_action_service.get_effective_events(
-            holding.stock_code, holding.first_purchase_date
-        )
+        events = corporate_action_service.get_effective_events(holding.stock_code, basis_date)
         ratio_events = corporate_action_service.get_ratio_adjustment_events(events)
-        ratio_adjustment_event_since_entry = any(
-            e.effective_date is not None and e.effective_date >= holding.first_purchase_date
-            for e in ratio_events
+        ratio_adjustment_event_since_basis = any(
+            e.effective_date is not None and e.effective_date >= basis_date for e in ratio_events
         )
         return compute_profit_protection_metrics(
             bars=snapshot.bars,
             current_price=snapshot.current_price,
             average_purchase_price=holding.average_purchase_price,
-            first_purchase_date=holding.first_purchase_date,
+            basis_date=basis_date,
             as_of_date=evaluation_date_jst(now),
-            ratio_adjustment_event_since_entry=ratio_adjustment_event_since_entry,
+            ratio_adjustment_event_since_basis=ratio_adjustment_event_since_basis,
             config=self._config.profit_taking.profit_protection,
         )
 
@@ -618,6 +628,9 @@ class ProfitTakingService:
                 "profit_protection_gain_giveback_ratio_pct": (
                     result.profit_protection_gain_giveback_ratio_pct
                 ),
+                "profit_protection_insufficient_reason": (
+                    result.profit_protection_insufficient_reason
+                ),
             },
             data_sources=list(snapshot.data_sources),
             rule_version=self._active_rule_version(),
@@ -794,6 +807,7 @@ class ProfitTakingService:
             profit_protection_gain_giveback_ratio_pct=(
                 result.profit_protection_gain_giveback_ratio_pct
             ),
+            profit_protection_insufficient_reason=result.profit_protection_insufficient_reason,
             trading_unit=trading_unit_feasibility.trading_unit,
             minimum_sellable_shares=trading_unit_feasibility.minimum_sellable_shares,
             partial_sale_executable=trading_unit_feasibility.partial_sale_executable,

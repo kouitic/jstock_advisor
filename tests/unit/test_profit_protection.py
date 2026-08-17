@@ -40,18 +40,18 @@ def _metrics(
     current_price: Decimal,
     average_purchase_price: Decimal = Decimal("920"),
     peak_high: Decimal = Decimal("1454.5"),
-    ratio_adjustment_event_since_entry: bool = False,
+    ratio_adjustment_event_since_basis: bool = False,
     bars: list[PriceBar] | None = None,
-    first_purchase_date: dt.date = _ENTRY,
+    basis_date: dt.date = _ENTRY,
     as_of_date: dt.date = _AS_OF,
 ):
     return compute_profit_protection_metrics(
         bars=bars if bars is not None else _bars(peak_high),
         current_price=current_price,
         average_purchase_price=average_purchase_price,
-        first_purchase_date=first_purchase_date,
+        basis_date=basis_date,
         as_of_date=as_of_date,
-        ratio_adjustment_event_since_entry=ratio_adjustment_event_since_entry,
+        ratio_adjustment_event_since_basis=ratio_adjustment_event_since_basis,
         config=_CONFIG,
     )
 
@@ -118,6 +118,102 @@ def test_case_e_current_1227_strong_signal() -> None:
     assert m.candidate_signal is True
 
 
+# --- 買い増し(basis_date)回帰(コードレビュー対応2026-08、指摘1) ---
+# 平均取得単価920円は「買い増し後」の加重平均という想定。basis_date
+# (last_purchase_date相当)を2026-06-15とし、それより前の極端な高値
+# (2000円、買い増し前の取得原価とは無関係)がpeakに混入しないことを確認する。
+
+_BASIS_DATE = dt.date(2026, 6, 15)
+
+
+def _bars_with_pre_and_post_basis_highs() -> list[PriceBar]:
+    return [
+        PriceBar(
+            date=dt.date(2026, 1, 5),
+            open=Decimal("900"),
+            high=Decimal("910"),
+            low=Decimal("890"),
+            close=Decimal("900"),
+            volume=1000,
+        ),
+        # basis_dateより前の極端な高値(買い増し前の価格変動、現在の平均取得単価
+        # 920円とは無関係)。peakに含めてはならない。
+        PriceBar(
+            date=dt.date(2026, 3, 1),
+            open=Decimal("2000"),
+            high=Decimal("2000"),
+            low=Decimal("2000"),
+            close=Decimal("2000"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=_BASIS_DATE,
+            open=Decimal("1000"),
+            high=Decimal("1010"),
+            low=Decimal("990"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+        # basis_date以降の高値(サンリオ回帰と同じ1454.5円)。これがpeakになる
+        # べき。
+        PriceBar(
+            date=dt.date(2026, 7, 1),
+            open=Decimal("1454.5"),
+            high=Decimal("1454.5"),
+            low=Decimal("1454.5"),
+            close=Decimal("1454.5"),
+            volume=1000,
+        ),
+    ]
+
+
+def test_buy_more_case_b_pre_basis_high_excluded_from_peak() -> None:
+    """買い増し前の高値(2000円)はpeakに含めず、basis_date以降の高値
+    (1454.5円)のみをpeakとする(要求仕様§10 Case B相当)。
+    """
+    m = _metrics(
+        current_price=Decimal("1227"),
+        bars=_bars_with_pre_and_post_basis_highs(),
+        basis_date=_BASIS_DATE,
+    )
+    assert m.insufficient_data_reason is None
+    assert m.peak_price_since_entry == Decimal("1454.5")
+    # 買い増し前の2000円が誤って使われていれば、peak_gain_pctはこの値の近くに
+    # なるはずだが、実際にはbasis_date以降の1454.5円基準の値になる。
+    assert m.peak_gain_pct is not None
+    assert round(m.peak_gain_pct, 1) == 58.1
+
+
+def test_buy_more_case_c_only_post_basis_high_used_for_strong_signal() -> None:
+    """basis_date以降の高値のみでpeakを正しく算出し、Strong条件を判定する
+    (要求仕様§10 Case C相当)。買い増し前の2000円を根拠にした場合の
+    (誤った)giveback比率にはならない。
+    """
+    m = _metrics(
+        current_price=Decimal("1227"),
+        bars=_bars_with_pre_and_post_basis_highs(),
+        basis_date=_BASIS_DATE,
+    )
+    assert m.gain_giveback_ratio_pct is not None
+    assert abs(m.gain_giveback_ratio_pct - 42.5) < 0.5
+    assert m.strong_signal is True
+
+
+def test_buy_more_case_d_history_not_reaching_basis_date_is_insufficient() -> None:
+    """買い増し日(basis_date)まで価格履歴が遡れない場合はDATA_INSUFFICIENT
+    とする(要求仕様§10 Case D相当)。
+    """
+    late_bars = [
+        b for b in _bars_with_pre_and_post_basis_highs() if b.date > _BASIS_DATE
+    ]
+    m = _metrics(
+        current_price=Decimal("1227"),
+        bars=late_bars,
+        basis_date=_BASIS_DATE,
+    )
+    assert m.insufficient_data_reason is not None
+
+
 # --- 追加境界値ケース(要求仕様§10) ---
 
 
@@ -179,8 +275,8 @@ def test_peak_gain_zero_or_negative_no_signal() -> None:
 # --- データ品質ガード(要求仕様§9) ---
 
 
-def test_ratio_adjustment_event_since_entry_makes_data_insufficient() -> None:
-    m = _metrics(Decimal("1227"), ratio_adjustment_event_since_entry=True)
+def test_ratio_adjustment_event_since_basis_makes_data_insufficient() -> None:
+    m = _metrics(Decimal("1227"), ratio_adjustment_event_since_basis=True)
     assert m.insufficient_data_reason is not None
     assert m.candidate_signal is False
     assert m.strong_signal is False
@@ -231,7 +327,7 @@ def test_signal_label_property() -> None:
     assert _metrics(Decimal("1300")).signal_label == "CANDIDATE"
     assert _metrics(Decimal("1227")).signal_label == "STRONG"
     assert (
-        _metrics(Decimal("1227"), ratio_adjustment_event_since_entry=True).signal_label
+        _metrics(Decimal("1227"), ratio_adjustment_event_since_basis=True).signal_label
         == "DATA_INSUFFICIENT"
     )
 
@@ -246,9 +342,9 @@ def test_disabled_config_never_signals() -> None:
         bars=_bars(Decimal("1454.5")),
         current_price=Decimal("1227"),
         average_purchase_price=Decimal("920"),
-        first_purchase_date=_ENTRY,
+        basis_date=_ENTRY,
         as_of_date=_AS_OF,
-        ratio_adjustment_event_since_entry=False,
+        ratio_adjustment_event_since_basis=False,
         config=disabled_config,
     )
     assert m.candidate_signal is False

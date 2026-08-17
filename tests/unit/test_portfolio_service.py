@@ -168,6 +168,75 @@ def test_sell_shares_consumes_oldest_lot_first(portfolio_service: PortfolioServi
     assert oldest.shares == 40
 
 
+def test_partial_sale_does_not_change_last_purchase_date(
+    portfolio_service: PortfolioService,
+) -> None:
+    """FIFO売却は最も古いロットから消費するため、部分売却では
+    holding.last_purchase_date(最終購入日)は変化しない(コードレビュー対応
+    2026-08、指摘1: Profit Protectionのpeak探索基準日にlast_purchase_dateを
+    使ってよいことの実証)。average_purchase_priceは残存ロット構成の変化に
+    伴い再計算されて変わりうるが、それは常にlast_purchase_date以前に存在した
+    取得原価の再構成であり、last_purchase_dateより新しい取得原価を新たに
+    生成することはない。
+    """
+    portfolio_service.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    holding_before = portfolio_service.register_purchase(
+        stock_code="8136",
+        stock_name=None,
+        shares=100,
+        purchase_price=Decimal("4025"),
+        purchase_date=dt.date(2025, 9, 1),
+        account_type=AccountType.NISA,
+    )
+    assert holding_before.last_purchase_date == dt.date(2025, 9, 1)
+
+    # 最古ロット(2025-4-1、100株)のうち60株を部分売却する。
+    holding_after = portfolio_service.sell_shares("8136", 60)
+    assert holding_after is not None
+    assert holding_after.last_purchase_date == dt.date(2025, 9, 1)  # 不変
+    # average_purchase_priceは残存構成(40株@3775 + 100株@4025)へ再計算される。
+    assert holding_after.average_purchase_price != holding_before.average_purchase_price
+
+
+def test_full_lot_sale_does_not_change_last_purchase_date(
+    portfolio_service: PortfolioService,
+) -> None:
+    """最古ロットを全量消費する売却でも、last_purchase_date(最終購入日)は
+    変化しない(コードレビュー対応2026-08、指摘1の追加実証。この場合は
+    first_purchase_dateの方が繰り上がるが、Profit Protectionが基準日として
+    使うのはlast_purchase_dateであり、これは常にどちらの売却パターンでも
+    不変であることを確認する)。
+    """
+    portfolio_service.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    portfolio_service.register_purchase(
+        stock_code="8136",
+        stock_name=None,
+        shares=100,
+        purchase_price=Decimal("4025"),
+        purchase_date=dt.date(2025, 9, 1),
+        account_type=AccountType.NISA,
+    )
+
+    # 最古ロット(2025-4-1、100株)を全量消費する売却。
+    holding_after = portfolio_service.sell_shares("8136", 100)
+    assert holding_after is not None
+    assert holding_after.last_purchase_date == dt.date(2025, 9, 1)  # 不変
+
+
 def test_sell_shares_removes_fully_consumed_lot_and_spills_to_next(
     portfolio_service: PortfolioService,
 ) -> None:

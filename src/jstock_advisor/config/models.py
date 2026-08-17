@@ -210,6 +210,31 @@ class TradingUnitRules(StrictModel):
     default_odd_lot_trading_available: bool
 
 
+def _check_profit_protection_threshold_ranges(
+    label: str,
+    min_current_gain_pct: float,
+    min_drawdown_from_peak_pct: float,
+    min_gain_giveback_ratio_pct: float,
+) -> None:
+    """Profit Protection閾値の単体としての妥当性(コードレビュー対応2026-08、
+    指摘3)。min_current_gain_pctは株価が取得価格の2倍・3倍になることも
+    あるため上限を設けない。drawdown/givebackは比率(%)のため0〜100が
+    自然な範囲とする。
+    """
+    if min_current_gain_pct < 0:
+        raise ValueError(
+            f"profit_protection.{label}.min_current_gain_pctは0以上である必要があります"
+        )
+    if not (0 <= min_drawdown_from_peak_pct <= 100):
+        raise ValueError(
+            f"profit_protection.{label}.min_drawdown_from_peak_pctは0〜100の範囲である必要があります"
+        )
+    if not (0 <= min_gain_giveback_ratio_pct <= 100):
+        raise ValueError(
+            f"profit_protection.{label}.min_gain_giveback_ratio_pctは0〜100の範囲である必要があります"
+        )
+
+
 class ProfitProtectionCandidateThresholds(StrictModel):
     """通常のProfit Protection候補(§3A)の閾値。単独では無条件にPARTIALとせず、
     condition_based_judgment.min_conditions_for_partialの一条件として数える。
@@ -218,6 +243,16 @@ class ProfitProtectionCandidateThresholds(StrictModel):
     min_current_gain_pct: float
     min_drawdown_from_peak_pct: float
     min_gain_giveback_ratio_pct: float
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> ProfitProtectionCandidateThresholds:
+        _check_profit_protection_threshold_ranges(
+            "candidate",
+            self.min_current_gain_pct,
+            self.min_drawdown_from_peak_pct,
+            self.min_gain_giveback_ratio_pct,
+        )
+        return self
 
 
 class ProfitProtectionStrongThresholds(StrictModel):
@@ -229,11 +264,45 @@ class ProfitProtectionStrongThresholds(StrictModel):
     min_drawdown_from_peak_pct: float
     min_gain_giveback_ratio_pct: float
 
+    @model_validator(mode="after")
+    def _check_ranges(self) -> ProfitProtectionStrongThresholds:
+        _check_profit_protection_threshold_ranges(
+            "strong",
+            self.min_current_gain_pct,
+            self.min_drawdown_from_peak_pct,
+            self.min_gain_giveback_ratio_pct,
+        )
+        return self
+
 
 class ProfitProtectionConfig(StrictModel):
     enabled: bool
     candidate: ProfitProtectionCandidateThresholds
     strong: ProfitProtectionStrongThresholds
+
+    @model_validator(mode="after")
+    def _check_strong_at_least_as_strict_as_candidate(self) -> ProfitProtectionConfig:
+        """コードレビュー対応(2026-08、指摘3): strongはcandidateより厳しい
+        (以上の)閾値である必要がある。この前提が崩れると「strongの方が
+        candidateより緩い」という設計矛盾が起動時に検出できないまま本番へ
+        流れてしまう。
+        """
+        if self.strong.min_current_gain_pct < self.candidate.min_current_gain_pct:
+            raise ValueError(
+                "profit_protection.strong.min_current_gain_pctは"
+                "candidate.min_current_gain_pct以上である必要があります"
+            )
+        if self.strong.min_drawdown_from_peak_pct < self.candidate.min_drawdown_from_peak_pct:
+            raise ValueError(
+                "profit_protection.strong.min_drawdown_from_peak_pctは"
+                "candidate.min_drawdown_from_peak_pct以上である必要があります"
+            )
+        if self.strong.min_gain_giveback_ratio_pct < self.candidate.min_gain_giveback_ratio_pct:
+            raise ValueError(
+                "profit_protection.strong.min_gain_giveback_ratio_pctは"
+                "candidate.min_gain_giveback_ratio_pct以上である必要があります"
+            )
+        return self
 
 
 class ProfitTakingRulesConfig(StrictModel):

@@ -9,6 +9,10 @@ Fair Valueベースの割高判定(profit_taking.pyのcondition_based_judgment�
 
 peak_price_since_entryの算出は、株式分割・株式併合等で価格系列の調整基準が
 一致しない場合に誤った値を出すより、判定自体をスキップする(安全側)。
+
+peak探索の起点(basis_date)は「保有開始日」ではなく「現在のaverage_purchase_price
+が成立した基準日(=最終購入日)」を使う(コードレビュー対応2026-08、指摘1)。
+詳細はcompute_profit_protection_metrics()のdocstring参照。
 """
 
 from __future__ import annotations
@@ -68,41 +72,59 @@ def compute_profit_protection_metrics(
     bars: list[PriceBar],
     current_price: Decimal,
     average_purchase_price: Decimal,
-    first_purchase_date: dt.date,
+    basis_date: dt.date,
     as_of_date: dt.date,
-    ratio_adjustment_event_since_entry: bool,
+    ratio_adjustment_event_since_basis: bool,
     config: ProfitProtectionConfig,
 ) -> ProfitProtectionMetrics:
     """peak_price_since_entry・peak_gain_pct・drawdown_from_peak_pct・
     gain_giveback_ratio_pctを算出し、candidate/strongシグナルの成立有無を判定する
     (要求仕様§2・§3・§9)。
 
-    peak_price_since_entryは保有開始日(first_purchase_date)以降のPriceBar.high
-    (日次高値)の最大値とする(momentum.pyのcompute_high_over_window()と同じ
-    「日次高値の最大」基準に揃える)。
+    basis_dateは「現在のaverage_purchase_priceが成立した基準日」を表す
+    (コードレビュー対応2026-08、指摘1)。単一購入の保有であれば保有開始日
+    (first_purchase_date)と一致するが、買い増しがある場合はaverage_purchase_price
+    が複数PurchaseLotの加重平均であるため、average_purchase_priceが実際に
+    現在の値になった日(=最終購入日、holding.last_purchase_date)を渡すこと。
+    保有開始日をそのまま使うと、買い増し前の(現在の平均取得単価とは無関係な)
+    高値をpeakに含めてしまい、実際には存在しなかった含み益吐き出しを検出して
+    しまう(過去のレビューで確認された不具合)。
+
+    一部売却時にbasis_dateを再算出する必要が無い理由: 保有株数管理は
+    FIFO(古いロットから消費)であり、売却は直近ロット(last_purchase_date)
+    より新しい日付の取得原価を一切生成しない。そのため、売却後に
+    average_purchase_priceが変化しても、その変化は常にbasis_date以前に
+    存在した取得原価の再構成(古いロットの一部・全部消費)によるものであり、
+    「basis_date以降の価格推移からpeakを見る」という前提はそのまま成立する
+    (実証: test_portfolio_service.pyのFIFO売却テストでlast_purchase_dateが
+    部分売却で変化しないことを確認済み)。
+
+    peak_price_since_entryはbasis_date以降のPriceBar.high(日次高値)の
+    最大値とする(momentum.pyのcompute_high_over_window()と同じ「日次高値の
+    最大」基準に揃える)。
 
     データ品質ガード(要求仕様§9、誤ったPARTIALを出すよりスキップする):
-    - 保有期間中に株式分割・株式併合・無償割当があった場合(raw価格系列
+    - basis_date以降に株式分割・株式併合・無償割当があった場合(raw価格系列
       (auto_adjust=False)と平均取得単価の調整基準が一致しない可能性がある)
-    - 保有開始日以降の価格データが取得できない場合
-    - 価格データが保有開始日まで遡れない場合(真の最高値を見逃す可能性がある)
+    - basis_date以降の価格データが取得できない場合
+    - 価格データがbasis_dateまで遡れない場合(真の最高値を見逃す可能性がある)
     """
     if average_purchase_price <= 0 or current_price <= 0:
         return _insufficient("平均取得単価または現在値が不正なため判定不能")
 
-    if ratio_adjustment_event_since_entry:
+    if ratio_adjustment_event_since_basis:
         return _insufficient(
-            "保有期間中に株式分割・併合等があり、価格系列の調整基準が一致しないため判定不能"
+            "基準日以降に株式分割・併合等があり、価格系列の調整基準が一致しないため判定不能"
         )
 
-    if bars and min(b.date for b in bars) > first_purchase_date:
+    if bars and min(b.date for b in bars) > basis_date:
         return _insufficient(
-            "保有開始日まで遡る価格データが無く、真の最高値を算出できないため判定不能"
+            "基準日まで遡る価格データが無く、真の最高値を算出できないため判定不能"
         )
 
-    entry_bars = [b for b in bars if first_purchase_date <= b.date <= as_of_date]
+    entry_bars = [b for b in bars if basis_date <= b.date <= as_of_date]
     if not entry_bars:
-        return _insufficient("保有開始日以降の価格データが取得できないため判定不能")
+        return _insufficient("基準日以降の価格データが取得できないため判定不能")
 
     peak_price = max(b.high for b in entry_bars)
     if peak_price <= 0:
