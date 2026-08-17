@@ -64,10 +64,28 @@ def _request(
 
 
 def show_current_default(token: str) -> None:
-    result = _request(
-        "GET", f"{_API_HOST}/v2/bot/user/all/richmenu", token, None, "application/json"
+    """現在のデフォルトリッチメニューを表示する。LINE APIは未設定の場合に
+    404("no default richmenu")を返す仕様であり、これは異常ではなく
+    「まだ何も設定されていない(上書きの心配が無い)」ことを示す正常な状態
+    のため、他のAPI呼び出し失敗と区別して扱う(致命的エラーとして
+    終了しない)。"""
+    request = urllib.request.Request(
+        f"{_API_HOST}/v2/bot/user/all/richmenu",
+        method="GET",
+        headers={"Authorization": f"Bearer {token}"},
     )
-    print(f"現在のデフォルトリッチメニュー: {result}")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+            body = response.read()
+            result = json.loads(body) if body else {}
+            print(f"現在のデフォルトリッチメニュー: {result}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print("現在デフォルトのリッチメニューは設定されていません(新規設定で問題ありません)。")
+            return
+        detail = e.read().decode("utf-8", errors="replace")
+        print(f"LINE API呼び出しに失敗しました: {e.code} {e.reason}\n{detail}", file=sys.stderr)
+        sys.exit(1)
 
 
 def create_rich_menu(token: str, definition_path: Path) -> str:

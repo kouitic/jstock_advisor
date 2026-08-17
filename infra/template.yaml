@@ -1502,6 +1502,11 @@ Resources:
       Environment:
         Variables:
           LINE_CHANNEL_SECRET: !Sub "{{resolve:secretsmanager:${LineChannelSecretSecretArn}:SecretString}}"
+          # コードレビュー2026-08-17指摘: 会話型UIの確認画面がbuild_stock_display_name_resolver()
+          # 経由で銘柄名解決を試みるが、本関数にS3/StockNameOverridesTableへのアクセス権が
+          # 無かったため常に全ソース失敗しstock_codeへフォールバックしていた
+          # (画面上「8306(8306)」のように表示される不具合)。JPXソース用のバケット名を渡す。
+          CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
       Policies:
         # LINEボタン起点会話型UI(2026-08)のconversation_commit.pyがTransactWriteItems
         # で複数テーブルを原子的に更新する(実装プランv2 3節)。TransactWriteItemsは
@@ -1538,6 +1543,10 @@ Resources:
                 - !GetAtt ConversationStatesTable.Arn
                 - !Sub "${ConversationStatesTable.Arn}/index/*"
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
+        # StockDisplayNameResolverのoverrideソース(手動上書き名称)・JPXソース用
+        # (指摘対応、上記CANDIDATE_UNIVERSE_CACHE_BUCKET環境変数とあわせて追加)。
+        - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        - S3ReadPolicy: { BucketName: !Ref CandidateUniverseCacheBucket }
       Events:
         Webhook:
           Type: HttpApi
