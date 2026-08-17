@@ -17,7 +17,8 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from jstock_advisor.domain.entities.enums import ConversationStateName
+from jstock_advisor.domain.entities.enums import ConversationStateName, Priority
+from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.aws import conversation_state_store
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
@@ -174,6 +175,25 @@ def test_sell_flow_full_sell(
     assert conversation_state_store.get(_USER, _NOW) is None
 
 
+def test_sell_confirmation_shows_current_and_remaining_shares(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """コードレビュー2026-08-17 指摘2(当初の受入条件): SELL確認画面には
+    現在保有・今回売却・売却後の株数、売却単価・売却金額を明示する。"""
+    _seed_holding(shares=300)
+    service.handle_postback(_USER, "start_sell", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, "8306,100,3800", _NOW)
+
+    assert "現在保有：300株" in reply.text
+    assert "今回売却：100株" in reply.text
+    assert "売却後：200株" in reply.text
+    assert "売却単価：3,800円" in reply.text
+    assert "売却金額：380,000円" in reply.text
+
+
 def test_sell_input_rejects_shares_exceeding_holding(
     moto_conversation_tables: None, service: ConversationService
 ) -> None:
@@ -213,6 +233,39 @@ def test_watch_flow(moto_conversation_tables: None, service: ConversationService
     assert "ウォッチリストに追加しました" in confirm_reply.text
     assert WatchlistRepository().get(_STOCK) is not None
     assert conversation_state_store.get(_USER, _NOW) is None
+
+
+def test_watch_input_already_registered_does_not_overwrite_existing_item(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """コードレビュー2026-08-17 指摘1: 既にWatchlistへ存在する銘柄を
+    Conversation UIから登録しようとした場合、既存設定(reason/priority/
+    notify_enabled/memo等)を一切変更せず、確認画面へ進まずに終了する。"""
+    existing = WatchlistItem(
+        stock_code=_STOCK,
+        stock_name="三菱UFJ",
+        reason="配当利回り重視",
+        priority=Priority.HIGH,
+        notify_enabled=False,
+        memo="custom memo",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    WatchlistRepository().upsert(existing)
+    service.handle_postback(_USER, "start_watch", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, "8306", _NOW)
+
+    assert f"{_STOCK}はすでにお気に入りに登録されています" in reply.text
+    assert reply.quick_reply is None
+    unchanged = WatchlistRepository().get(_STOCK)
+    assert unchanged is not None
+    assert unchanged.reason == "配当利回り重視"
+    assert unchanged.priority == Priority.HIGH
+    assert unchanged.notify_enabled is False
+    assert unchanged.memo == "custom memo"
 
 
 # --- retry / cancel --------------------------------------------------------

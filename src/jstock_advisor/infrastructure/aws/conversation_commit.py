@@ -56,11 +56,12 @@ _PURCHASE_LOTS_TABLE_FILE = "purchase_lots.json"
 _HOLDINGS_TABLE_FILE = "holdings.json"
 _WATCHLIST_TABLE_FILE = "watchlist.json"
 
-_CONDITION_FAILURE_CODES = (
-    "TransactionCanceledException",
-    "ConditionalCheckFailedException",
-    "TransactionConflictException",
+_CONDITION_FAILURE_TOP_LEVEL_CODES = frozenset(
+    {"ConditionalCheckFailedException", "TransactionConflictException"}
 )
+# TransactionCanceledExceptionのCancellationReasons側コード。"None"は当該アイテム
+# 自体は失敗要因ではないことを示すDynamoDBの規約値(実際の理由コードではない)。
+_SAFE_CANCELLATION_REASON_CODES = frozenset({"None", "ConditionalCheckFailed"})
 _RETRYABLE_TRANSACTION_CONFLICT_CODES = frozenset({"TransactionConflictException"})
 _MAX_TRANSACTION_CONFLICT_RETRY_ATTEMPTS = 4
 _TRANSACTION_CONFLICT_RETRY_BASE_DELAY_SECONDS = 0.05
@@ -145,17 +146,40 @@ def _conditional_delete_transact_item(table_name: str, delete: ConditionalDelete
     }
 
 
+def _is_safe_business_conflict(error: ClientError) -> bool:
+    """安全に「もう一度操作してください」へ変換してよい業務競合か判定する
+    (コードレビュー2026-08-17 指摘3)。
+
+    ConditionalCheckFailedException/TransactionConflictException(トップ
+    レベルのエラーコード)はそのままTrue。TransactionCanceledExceptionは
+    CancellationReasonsの中身を見て、すべての理由が"None"(そのアイテム自体
+    は失敗要因ではない)または"ConditionalCheckFailed"(楽観ロック競合・
+    ConversationState条件不成立)である場合のみTrueとする。スロットリング・
+    内部障害・権限不足・ValidationError等、それ以外の理由が1つでも含まれる
+    場合は業務競合として握りつぶさず、呼び出し元へ例外を伝播させる。
+    """
+    code = error.response["Error"]["Code"]
+    if code in _CONDITION_FAILURE_TOP_LEVEL_CODES:
+        return True
+    if code != "TransactionCanceledException":
+        return False
+    reasons = error.response.get("CancellationReasons") or []
+    reason_codes = {reason.get("Code") for reason in reasons}
+    return bool(reason_codes) and reason_codes <= _SAFE_CANCELLATION_REASON_CODES
+
+
 def _commit(transact_items: list[dict[str, Any]]) -> bool:
-    """成功時True。条件不成立(operation_id/state/期限不一致・楽観ロック
+    """成功時True。安全な業務競合(operation_id/state/期限不一致・楽観ロック
     競合・二重押下)時はFalseを返す(呼び出し側が「もう一度操作してください」
-    等の安全側の案内を返す)。それ以外の例外はそのまま伝播する。
+    等の安全側の案内を返す)。スロットリング・内部障害・権限不足等の非業務
+    エラーはFalseへ変換せず、そのまま例外を伝播する(指摘3)。
     """
     client = boto3.client("dynamodb")
     try:
         _transact_write_items_with_conflict_retry(client, transact_items)
         return True
     except ClientError as e:
-        if e.response["Error"]["Code"] in _CONDITION_FAILURE_CODES:
+        if _is_safe_business_conflict(e):
             return False
         raise
 
@@ -171,9 +195,9 @@ def commit_buy(
         conversation_state_store.build_confirm_delete_transact_item(
             user_id, ConversationAction.BUY, expected_operation_id, now
         ),
-        _unconditional_put_transact_item(
+        _conditional_put_transact_item(
             resolve_table_name(_TRANSACTIONS_TABLE_FILE),
-            to_dynamo_item(transaction, "transaction_id"),
+            ConditionalPut(model=transaction, id_field="transaction_id", expected_data=None),
         ),
         _conditional_put_transact_item(resolve_table_name(_PURCHASE_LOTS_TABLE_FILE), plan.lot_put),
         _conditional_put_transact_item(resolve_table_name(_HOLDINGS_TABLE_FILE), plan.holding_put),
@@ -192,9 +216,9 @@ def commit_sell(
         conversation_state_store.build_confirm_delete_transact_item(
             user_id, ConversationAction.SELL, expected_operation_id, now
         ),
-        _unconditional_put_transact_item(
+        _conditional_put_transact_item(
             resolve_table_name(_TRANSACTIONS_TABLE_FILE),
-            to_dynamo_item(transaction, "transaction_id"),
+            ConditionalPut(model=transaction, id_field="transaction_id", expected_data=None),
         ),
     ]
     lots_table = resolve_table_name(_PURCHASE_LOTS_TABLE_FILE)
