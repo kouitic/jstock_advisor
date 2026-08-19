@@ -293,12 +293,24 @@ class PortfolioService:
         self._holdings.upsert(updated)
         return updated
 
-    def sell_shares(self, stock_code: str, shares: int) -> Holding | None:
+    def sell_shares(
+        self, stock_code: str, shares: int, now: dt.datetime | None = None
+    ) -> Holding | None:
         """build_sale_write_plan()を呼び出した直後にその場で適用する薄い
         ラッパー(LINEボタン起点会話型UI・実装プランv2 3節。挙動・戻り値は
         従来と完全に同じ)。FIFO(購入日が古いロット順)で消費し、保有株数を
-        減らす。全ロットを消費した場合はHoldingも削除しNoneを返す。"""
-        plan = self.build_sale_write_plan(stock_code, shares)
+        減らす。全ロットを消費した場合はHoldingも削除しNoneを返す。
+
+        now(省略時はbuild_sale_write_plan()側でdt.datetime.now(dt.UTC)へ
+        フォールバック)は、last_sale_date算出(evaluation_date_jst(now))に
+        使われる(再コードレビュー対応2026-08、指摘3: 以前は本メソッドが
+        nowを一切受け取れず、chat_command_service.py経由の売却では実際の
+        処理時刻(壊れた場合はテスト実行時刻)がlast_sale_dateに使われ、
+        同じ呼び出しのTransactionHistory記録(execution_date)やLINE会話
+        フロー(conversation_service.py、build_sale_write_plan()を直接呼び
+        nowを明示的に渡している)と日付が食い違う可能性があった)。
+        """
+        plan = self.build_sale_write_plan(stock_code, shares, now=now)
         for lot_delete in plan.lot_deletes:
             self._lots.delete(lot_delete.id_value)
         for lot_put in plan.lot_puts:

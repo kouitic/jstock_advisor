@@ -204,3 +204,38 @@ def test_partial_sell_none_suggested_shares_handled() -> None:
     text_input = build_notification_text_input(rec, NotificationCategory.PARTIAL_SELL)
     assert text_input.suggested_sell_shares is None
     assert text_input.suggested_sell_ratio is None
+
+
+def test_case_l_full_sell_and_critical_risk_do_not_forward_suggested_shares() -> None:
+    """FULL_PROFIT_TAKE/SELL/URGENT(CRITICAL_RISK)系のNotificationTextInputには、
+    Recommendationにsuggested_sell_shares/ratioが(誤って)設定されていても
+    転送されない(PARTIAL専用フィールドが他カテゴリへ混入しないことの回帰、
+    再コードレビュー対応2026-08、指摘2 Case L)。_build_sell()/_build_critical_
+    risk()はいずれもsuggested_sell_shares/ratio引数をNotificationTextInputへ
+    一切渡さない(構造上常にNone)ことを確認する。
+    """
+    full_sell_rec = _make_recommendation(
+        recommendation_type=RecommendationType.FULL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            immediate_execution_price=PriceWithRationale(price=Decimal("4200"), rationale="x")
+        ),
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.60,
+    )
+    sell_text_input = build_notification_text_input(full_sell_rec, NotificationCategory.SELL)
+    assert sell_text_input.suggested_sell_shares is None
+    assert sell_text_input.suggested_sell_ratio is None
+
+    critical_rec = _make_recommendation(
+        recommendation_type=RecommendationType.STRONG_SELL_CONSIDERATION,
+        sell_prices=SellPriceLevels(
+            immediate_execution_price=PriceWithRationale(price=Decimal("4200"), rationale="x")
+        ),
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.60,
+    )
+    critical_text_input = build_notification_text_input(
+        critical_rec, NotificationCategory.CRITICAL_RISK
+    )
+    assert critical_text_input.suggested_sell_shares is None
+    assert critical_text_input.suggested_sell_ratio is None

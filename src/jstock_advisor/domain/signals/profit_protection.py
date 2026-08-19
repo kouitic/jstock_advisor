@@ -130,7 +130,14 @@ def compute_profit_protection_metrics(
     - basis_date以降に株式分割・株式併合・無償割当があった場合(raw価格系列
       (auto_adjust=False)と平均取得単価の調整基準が一致しない可能性がある)
     - basis_date翌営業日の価格データが取得できない場合
-    - 価格データがbasis_dateまで遡れない場合(真の最高値を見逃す可能性がある)
+
+    注意: basis_date以前まで価格履歴が遡れているか否かはevaluation_barsの
+    定義(basis_date < date)に無関係であり、要件ではない(コードレビュー
+    対応2026-08、指摘1再修正)。以前存在した`min(bar.date) > basis_date`
+    というチェックは、basis_date当日のbarが無くとも翌営業日以降のbarが
+    揃っていれば正しくpeakを評価できるケースまで誤ってDATA_INSUFFICIENTに
+    してしまうため、完全に廃止した。この条件を別の文言に変えて残すことも
+    禁止する。
     """
     if average_purchase_price <= 0 or current_price <= 0:
         return _insufficient("平均取得単価または現在値が不正なため判定不能")
@@ -139,9 +146,6 @@ def compute_profit_protection_metrics(
         return _insufficient(
             "基準日以降に株式分割・併合等があり、価格系列の調整基準が一致しないため判定不能"
         )
-
-    if bars and min(b.date for b in bars) > basis_date:
-        return _insufficient("基準日までの価格履歴が取得できないため判定不能")
 
     evaluation_bars = [b for b in bars if basis_date < b.date <= as_of_date]
     if not evaluation_bars:
