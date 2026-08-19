@@ -606,7 +606,6 @@ def test_evaluation_bars_not_empty_but_missing_first_business_day() -> None:
     別の理由でスキップする(コードレビュー対応2026-08、指摘1: 理由の明確化)。
     """
     basis = dt.date(2026, 6, 1)  # 月曜
-    next_bd = _CALENDAR.next_business_day(basis)  # 火曜2026-06-02
     bars = [
         PriceBar(
             date=basis,
