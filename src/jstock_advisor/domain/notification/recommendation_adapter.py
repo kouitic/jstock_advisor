@@ -275,6 +275,8 @@ def _build_partial_sell(recommendation: Recommendation) -> NotificationTextInput
         target_price_withheld_label=(
             _PARTIAL_SELL_WITHHELD_LABEL if target_price is None else None
         ),
+        suggested_sell_shares=recommendation.suggested_sell_shares,
+        suggested_sell_ratio=recommendation.suggested_sell_ratio,
         label_override=_PARTIAL_RISK_REDUCTION_LABEL if is_risk_reduction else None,
     )
 

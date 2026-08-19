@@ -1,14 +1,16 @@
-"""通知本文の生成・切り詰めルール(BUY候補裾野拡大機能2026-08、要求仕様§9)。
+"""通知本文の生成・切り詰めルール(BUY候補裾野拡大機能2026-08、要求仕様§9・
+Profit Protection Round 3 コードレビュー対応)。
 
-原則50文字程度・最大70文字程度(Python `len()`基準)。判定・銘柄コード・
-銘柄名は必須(削れない)。優先順位: 1.判定 2.銘柄コード・銘柄名 3.現在値
-4.目標価格/乖離率 5.WATCH連続日数 6.理由 7.StockType(最大2件)。この
-簡潔化はユーザー向けLINE通知本文にのみ適用し、内部データ・監査ログの
-情報量は一切減らさない(呼び出し元は本モジュールを通知テキスト生成にのみ
+原則50文字程度・目安70文字(Python `len()`基準)。判定・銘柄コード・銘柄名は
+必須(削れない)。優先順位: 1.判定 2.銘柄コード・銘柄名 3.現在値 4.売却数量
+(PARTIAL専用、あれば必須) 5.目標価格/乖離率 6.WATCH連続日数 7.理由 8.StockType
+(最大2件)。この簡潔化はユーザー向けLINE通知本文にのみ適用し、内部データ・監査
+ログの情報量は一切減らさない(呼び出し元は本モジュールを通知テキスト生成にのみ
 使い、Recommendation自体は完全な情報を保持したまま保存すること)。
 
-重大リスク(is_critical_risk)の場合のみ、70文字上限を厳密に適用せず、
-理由情報を欠落させない(例外条件)。
+70文字は通常セグメント向けの目安であり、ユーザーアクション(PARTIALの売却数量等)
+に不可欠な必須セグメントは70文字を超えても省略しない(soft limit)。
+重大リスク(is_critical_risk)の場合も同様に理由情報を欠落させない。
 """
 
 from __future__ import annotations
@@ -83,6 +85,14 @@ class NotificationTextInput:
     # WATCH終了通知(is_watch_end=True)専用の「何営業日連続で監視していたか」。
     # 通常の継続監視(「N日連続」)と紛らわしくないよう「N日継続」と表示する。
     watch_end_days: int | None = None
+    # PARTIAL売却の推奨株数(コードレビュー対応2026-08、指摘3)。
+    # Noneの場合はセグメント自体を生成しない。Noneでなく>=0の値。
+    suggested_sell_shares: int | None = None
+    # suggested_sell_sharesに対応する比率(0.0-1.0)。表示時は「300株(60%)」等で使う。
+    # Noneの場合は比率を併記しない。suggested_sell_sharesがNoneでない場合の比率は、
+    # Recommendation生成時点で数量と整合していることを保証すること(通知層では
+    # 独立に再計算せず、保存済みのratio値を信頼)。
+    suggested_sell_ratio: float | None = None
 
 
 def _fmt_price(price: Decimal) -> str:
@@ -121,6 +131,14 @@ def format_notification_text(
     optional_segments: list[tuple[str, bool]] = []  # 優先度の高い順
     if data.current_price is not None:
         optional_segments.append((_fmt_price(data.current_price), False))
+    if data.suggested_sell_shares is not None:
+        ratio_pct = data.suggested_sell_ratio * 100 if data.suggested_sell_ratio is not None else None
+        if ratio_pct is not None:
+            optional_segments.append(
+                (f"{data.suggested_sell_shares}株({ratio_pct:.0f}%)", True)
+            )
+        else:
+            optional_segments.append((f"{data.suggested_sell_shares}株", True))
     if data.target_price is not None and data.distance_pct is not None:
         optional_segments.append(
             (f"{price_label}{_fmt_price(data.target_price)}まで{data.distance_pct:.1f}%", False)
