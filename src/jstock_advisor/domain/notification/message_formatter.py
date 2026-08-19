@@ -132,7 +132,9 @@ def format_notification_text(
     if data.current_price is not None:
         optional_segments.append((_fmt_price(data.current_price), False))
     if data.suggested_sell_shares is not None:
-        ratio_pct = data.suggested_sell_ratio * 100 if data.suggested_sell_ratio is not None else None
+        ratio_pct = (
+            data.suggested_sell_ratio * 100 if data.suggested_sell_ratio is not None else None
+        )
         if ratio_pct is not None:
             optional_segments.append(
                 (f"{data.suggested_sell_shares}株({ratio_pct:.0f}%)", True)
