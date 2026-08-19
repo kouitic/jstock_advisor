@@ -153,7 +153,11 @@ class ChatCommandService:
                 account_type=AccountType.GENERAL,
             )
         else:
-            self._portfolio.sell_shares(stock_code, shares)
+            # nowを明示的に渡し、last_sale_date(Profit Protectionのbasis_date
+            # reset用)がexecution_date/today_jstと同じ評価日になるようにする
+            # (再コードレビュー対応2026-08、指摘3: 以前はnowが渡されず実際の
+            # 処理時刻が使われていた)。
+            self._portfolio.sell_shares(stock_code, shares, now=now)
 
         return ChatCommandResult(
             f"記録しました: {transaction_type.value} {stock_code} {shares}株 @{price}円", True

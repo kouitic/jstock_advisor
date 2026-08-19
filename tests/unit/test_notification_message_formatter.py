@@ -76,33 +76,91 @@ def test_resumed_after_gap_shows_watch_resumed_not_day_count() -> None:
     assert "1日連続" not in text
 
 
-# --- 指摘2対応: 70文字soft limit(コードレビュー対応2026-08) ---
+# --- 指摘2対応: 70文字soft limitとrequiredセグメントのbreak問題
+# (再コードレビュー対応2026-08、指摘2再修正) ---
+#
+# 以前のformat_notification_text()は、必須セグメント(PARTIAL売却数量等)より
+# 手前にある非必須セグメント(現在値等)だけで70文字を超えると即座にbreakし、
+# それより後ろの必須セグメントが本文へ一切到達できない不具合があった。
 
 
-def test_partial_sell_quantity_is_required_segment_exceeding_70_chars() -> None:
-    """PARTIAL売却の売却数量は必須セグメントであり、70文字を超えても
-    省略しない(soft limit対応、コードレビュー対応2026-08、指摘2)。
+def test_case_g_partial_sell_quantity_with_ratio_sanrio() -> None:
+    """サンリオ相当(8136 サンリオ、300株、60%)で「300株(60%)」が表示される
+    (Case G)。
     """
-    # 長い銘柄名と数量セグメントで70文字を超える条件を作る。
-    long_name = "非常に長い銘柄名" * 3  # 24文字
     data = _base(
         category=NotificationCategory.PARTIAL_SELL,
-        stock_name=long_name,
+        stock_code="8136",
+        stock_name="サンリオ",
         suggested_sell_shares=300,
         suggested_sell_ratio=0.60,
-        target_price=Decimal("1500"),  # 売却目安価格
     )
     text = format_notification_text(data)
-    # 数量セグメント「300株(60%)」は欠落しない(必須)。
-    assert "300株" in text
-    assert "(60%)" in text
-    # 結果は70文字を超えてよい(soft limit)。
-    # assert len(text) > MAX_CHARS  # は実施しない(実装が確実なら自然に超過)
+    assert "300株(60%)" in text
 
 
-def test_partial_sell_quantity_without_ratio() -> None:
-    """suggested_sell_ratio がNoneの場合、比率なしで「300株」だけを表示する
-    (コードレビュー対応2026-08、指摘3準備)。
+def test_case_h_quantity_survives_even_when_earlier_segment_alone_overflows() -> None:
+    """非常に長い銘柄名+現在値のセグメントだけで70文字を超える状況を実際に
+    作り、それでも売却数量「300株(60%)」が本文へ残ることを証明する(Case H)。
+
+    以前のように「長い名前を設定しただけ」で暗黙にoverflowを期待するテストは
+    禁止のため、header+current_price時点で明示的にmax_charsを超える前提を
+    assertで固定する。
+    """
+    long_name = "非常に長い銘柄名" * 8  # 64文字
+    data = _base(
+        category=NotificationCategory.PARTIAL_SELL,
+        stock_code="8136",
+        stock_name=long_name,
+        current_price=Decimal("1234567"),
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.60,
+    )
+    header_and_price_len = len(f"一部売却 {data.stock_code} {data.stock_name}\n1,234,567円")
+    # header+current_priceの時点で既にmax_charsを超えることを明示的に証明する
+    # (overflow前提が本物であることの担保。実装の内部書式と厳密一致しなくても、
+    # この長さ自体がMAX_CHARSを優に超えていることが重要)。
+    assert header_and_price_len > MAX_CHARS
+
+    text = format_notification_text(data)
+    assert "300株(60%)" in text
+
+
+def test_case_i_quantity_survives_target_price_may_drop() -> None:
+    """数量あり+売却目安価格あり+70文字制約の場合、数量は必ず残り、
+    必要なら売却目安価格の方が落ちることを確認する(Case I)。
+    """
+    long_name = "非常に長い銘柄名" * 4
+    data = _base(
+        category=NotificationCategory.PARTIAL_SELL,
+        stock_code="8136",
+        stock_name=long_name,
+        current_price=Decimal("1234567"),
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.60,
+        target_price=Decimal("1500"),
+        target_price_label="売却目安",
+    )
+    text = format_notification_text(data)
+    assert "300株(60%)" in text
+
+
+def test_case_j_no_shares_no_quantity_segment() -> None:
+    """suggested_sell_sharesがNoneの場合、空の数量セグメントを出さない
+    (Case J)。
+    """
+    data = _base(
+        category=NotificationCategory.PARTIAL_SELL,
+        suggested_sell_shares=None,
+        suggested_sell_ratio=None,
+    )
+    text = format_notification_text(data)
+    assert "株" not in text
+
+
+def test_case_k_shares_without_ratio_no_bogus_percent() -> None:
+    """suggested_sell_ratioがNoneの場合、「300株」とだけ表示し、
+    「0%」「None%」等の不正な値を出さない(Case K)。
     """
     data = _base(
         category=NotificationCategory.PARTIAL_SELL,

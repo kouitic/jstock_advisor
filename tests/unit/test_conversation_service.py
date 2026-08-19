@@ -263,6 +263,42 @@ def test_sell_flow_full_sell(
     assert conversation_state_store.get(_USER, _NOW) is None
 
 
+def test_case_m_line_conversation_partial_sell_updates_last_sale_date(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """LINE会話フロー(ボタン型UI)で一部売却が成立した場合、
+    holding.last_sale_dateが売却日に更新されることを確認する
+    (再コードレビュー対応2026-08、指摘3 Case M: Profit Protectionの
+    basis_date再算出(max(last_purchase_date, last_sale_date))が正しく
+    機能するための前提を、実際のLINE会話フロー経由で固定する回帰テスト)。
+    last_purchase_dateは不変であること(Case O)もあわせて確認する。
+    """
+    _seed_holding(shares=300)
+    holding_before = HoldingRepository().get(_STOCK)
+    assert holding_before is not None
+    assert holding_before.last_sale_date is None
+    assert holding_before.last_purchase_date == dt.date(2026, 8, 1)
+
+    service.handle_postback(_USER, "start_sell", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    service.handle_text_input(_USER, state, "8306,100,3800", _NOW)
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+
+    confirm_reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
+    assert "登録しました" in confirm_reply.text
+
+    holding_after = HoldingRepository().get(_STOCK)
+    assert holding_after is not None
+    assert holding_after.shares == 200
+    # last_sale_dateが売却日(evaluation_date_jst(_NOW) = 2026-08-17)へ更新される。
+    assert holding_after.last_sale_date == dt.date(2026, 8, 17)
+    # last_purchase_dateは一部売却では不変(Case O、FIFO/average_purchase_price
+    # の既存意味を壊さないことの確認)。
+    assert holding_after.last_purchase_date == dt.date(2026, 8, 1)
+
+
 def test_sell_confirmation_shows_current_and_remaining_shares(
     moto_conversation_tables: None, service: ConversationService
 ) -> None:

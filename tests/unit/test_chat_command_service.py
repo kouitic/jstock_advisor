@@ -126,6 +126,41 @@ def test_sell_command_detects_partial_sell(
     assert holding.shares == 70
 
 
+def test_case_n_sell_command_updates_last_sale_date(
+    service: ChatCommandService,
+    portfolio: PortfolioService,
+) -> None:
+    """LINEテキストコマンド(「売却」、chat_command_service.py経由。CLI
+    typerコマンド(cli/transactions.py sell-executed)はTransactionHistory
+    Serviceのみを呼び出しPortfolioServiceを一切呼ばないため対象外)で
+    一部売却が成立した場合、holding.last_sale_dateが売却日に更新される
+    ことを確認する(再コードレビュー対応2026-08、指摘3 Case N)。
+    last_purchase_dateが不変であること(Case O)もあわせて確認する。
+    """
+    portfolio.register_purchase(
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("1000"),
+        purchase_date=dt.date(2026, 1, 1),
+        account_type=AccountType.NISA,
+    )
+    holding_before = portfolio.get_holding("8136")
+    assert holding_before is not None
+    assert holding_before.last_sale_date is None
+    assert holding_before.last_purchase_date == dt.date(2026, 1, 1)
+
+    result = service.handle("売却,8136,30,1500", now=_NOW)
+    assert result.success is True
+
+    holding_after = portfolio.get_holding("8136")
+    assert holding_after is not None
+    assert holding_after.shares == 70
+    # _NOW = 2026-07-24 00:00 UTC → JST 09:00、暦日は2026-07-24。
+    assert holding_after.last_sale_date == dt.date(2026, 7, 24)
+    assert holding_after.last_purchase_date == dt.date(2026, 1, 1)  # 不変(Case O)
+
+
 def test_sell_command_detects_full_sell(
     service: ChatCommandService,
     portfolio: PortfolioService,

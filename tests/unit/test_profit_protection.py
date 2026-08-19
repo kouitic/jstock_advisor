@@ -293,6 +293,74 @@ def test_a3_case_i_long_gap_right_after_basis_date_is_insufficient() -> None:
     assert m.insufficient_data_reason is not None
 
 
+def test_a3_case_k_no_basis_date_bar_but_next_business_day_present_is_normal() -> None:
+    """basis_date当日のbar自体が存在しなくても、basis_date翌営業日以降のbarが
+    揃っていれば正常に評価できる(再コードレビュー対応2026-08、指摘1再修正
+    Case A相当)。basis_date当日のbarが「無い」場合と「あるが除外される」場合
+    (test_a1_case_a等)の両方を区別して確認する。
+    """
+    basis = dt.date(2026, 6, 1)
+    next_bd = _CALENDAR.next_business_day(basis)
+    bars = [
+        # basis_date当日のbarは存在しない(意図的)。
+        PriceBar(
+            date=next_bd,
+            open=Decimal("1000"),
+            high=Decimal("1010"),
+            low=Decimal("990"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=dt.date(2026, 7, 1),
+            open=Decimal("1454.5"),
+            high=Decimal("1454.5"),
+            low=Decimal("1454.5"),
+            close=Decimal("1454.5"),
+            volume=1000,
+        ),
+    ]
+    m = _metrics(
+        current_price=Decimal("1227"),
+        average_purchase_price=Decimal("920"),
+        bars=bars,
+        basis_date=basis,
+    )
+    assert m.insufficient_data_reason is None
+    assert m.peak_price_since_entry == Decimal("1454.5")
+
+
+def test_a3_case_l_holiday_gap_next_business_day_bar_present_is_normal() -> None:
+    """basis_date翌日が祝日で休場の場合も、暦日+1ではなくBusinessCalendar上の
+    実際の次営業日にbarが存在すれば正常に評価できる(コードレビュー対応2026-08、
+    指摘1: 週末に限らず祝日についても同様の扱いであることを明示的に確認)。
+    """
+    basis = dt.date(2026, 2, 10)  # 火曜
+    next_bd = _CALENDAR.next_business_day(basis)
+    # 2026-02-11(建国記念の日、水曜=平日)が休場のため、暦日+1(2/11)ではなく
+    # 2/12まで次営業日がずれることを確認する(週末ではなく祝日による欠損)。
+    assert (basis + dt.timedelta(days=1)).weekday() < 5
+    assert next_bd > basis + dt.timedelta(days=1)
+    bars = [
+        PriceBar(
+            date=next_bd,
+            open=Decimal("1000"),
+            high=Decimal("1454.5"),
+            low=Decimal("1000"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+    ]
+    m = _metrics(
+        current_price=Decimal("1227"),
+        average_purchase_price=Decimal("920"),
+        bars=bars,
+        basis_date=basis,
+    )
+    assert m.insufficient_data_reason is None
+    assert m.peak_price_since_entry == Decimal("1454.5")
+
+
 def test_a3_case_j_friday_to_monday_is_normal() -> None:
     """basis_dateが金曜、次のbarが月曜(土日は営業日ではないため欠損扱いしない)
     の場合は正常に評価できる。"""
@@ -418,9 +486,13 @@ def test_buy_more_case_c_only_post_basis_high_used_for_strong_signal() -> None:
     assert m.strong_signal is True
 
 
-def test_buy_more_case_d_history_not_reaching_basis_date_is_insufficient() -> None:
-    """買い増し日(basis_date)まで価格履歴が遡れない場合はDATA_INSUFFICIENT
-    とする(要求仕様§10 Case D相当)。
+def test_buy_more_case_d_history_not_reaching_basis_date_is_still_evaluated() -> None:
+    """買い増し日(basis_date)まで価格履歴が遡れなくても、evaluation_bars
+    (basis_date < date <= as_of_date)さえ揃っていれば正常に評価できる
+    (再コードレビュー対応2026-08、指摘1再修正: 「basis_date以前まで価格履歴が
+    遡れること」は要件ではない。以前は`min(bar.date) > basis_date`という
+    独立条件でこのケースを誤ってDATA_INSUFFICIENTにしていたが、その条件は
+    完全に廃止した)。
     """
     late_bars = [b for b in _bars_with_pre_and_post_basis_highs() if b.date > _BASIS_DATE]
     m = _metrics(
@@ -428,7 +500,8 @@ def test_buy_more_case_d_history_not_reaching_basis_date_is_insufficient() -> No
         bars=late_bars,
         basis_date=_BASIS_DATE,
     )
-    assert m.insufficient_data_reason is not None
+    assert m.insufficient_data_reason is None
+    assert m.peak_price_since_entry == Decimal("1454.5")
 
 
 # --- 追加境界値ケース(要求仕様§10) ---
@@ -516,9 +589,12 @@ def test_no_bars_covering_entry_period_is_insufficient() -> None:
     assert m.insufficient_data_reason is not None
 
 
-def test_history_not_reaching_back_to_entry_date_is_insufficient() -> None:
-    """価格データがbasis_dateまで遡れない場合、真の最高値を見逃す可能性がある
-    ためスキップする。
+def test_single_far_bar_missing_next_business_day_is_insufficient() -> None:
+    """basis_date以前まで価格履歴が遡れているか否かは無関係(再コードレビュー
+    対応2026-08、指摘1再修正でこの観点自体を要件から除外)。このケースが
+    DATA_INSUFFICIENTになるのは、唯一のbarがbasis_date翌営業日ではなく
+    ずっと後の日付であり、basis_date直後の営業日のbarが欠落しているため
+    (evaluation_bars coverage Case D相当)。
     """
     late_start_bars = [
         PriceBar(
@@ -532,6 +608,7 @@ def test_history_not_reaching_back_to_entry_date_is_insufficient() -> None:
     ]
     m = _metrics(Decimal("1227"), bars=late_start_bars)
     assert m.insufficient_data_reason is not None
+    assert "基準日直後の営業日から価格データが欠落" in m.insufficient_data_reason
 
 
 def test_empty_bars_is_insufficient() -> None:

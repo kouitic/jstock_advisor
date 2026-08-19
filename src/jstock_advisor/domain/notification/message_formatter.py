@@ -11,6 +11,13 @@ Profit Protection Round 3 コードレビュー対応)。
 70文字は通常セグメント向けの目安であり、ユーザーアクション(PARTIALの売却数量等)
 に不可欠な必須セグメントは70文字を超えても省略しない(soft limit)。
 重大リスク(is_critical_risk)の場合も同様に理由情報を欠落させない。
+
+必須セグメントより手前にある非必須セグメント(例: 現在値)だけで70文字を超えた
+場合でも、必須セグメント(PARTIAL売却数量等)の評価・追加は打ち切らない
+(再コードレビュー対応2026-08、指摘2再修正)。format_notification_text()内の
+ループは、非必須セグメントが上限超過の場合そのセグメントのみをスキップし、
+後続の必須セグメントの判定へ進む(以前は最初の超過セグメントでbreakしており、
+それより後ろの必須セグメントが本文へ一切到達できない不具合があった)。
 """
 
 from __future__ import annotations
@@ -173,11 +180,16 @@ def format_notification_text(
     text = required
     for segment, is_required_segment in optional_segments:
         candidate = f"{text}｜{segment}" if text != required else f"{text}\n{segment}"
-        # 重大リスク・requiredなセグメント(算定保留の明示)はmax_charsを厳密な
-        # 上限として扱わず欠落させない。それ以外は上限を超える最初のセグメント
-        # で打ち切る(要求仕様の例外条件)。
+        # 重大リスク・requiredなセグメント(PARTIAL売却数量・算定保留の明示)は
+        # max_charsを厳密な上限として扱わず欠落させない。それ以外は候補文字列が
+        # 上限を超える場合そのセグメントのみ追加をスキップする(要求仕様の
+        # soft limit)。
+        #
+        # 以前はここでbreakしており、必須セグメントより手前の非必須セグメント
+        # (例: current_price)だけで上限を超えると、それ以降の全セグメント
+        # (必須のPARTIAL売却数量を含む)が本文へ一切到達できなかった
+        # (再コードレビュー対応2026-08、指摘2再修正)。breakをやめてスキップに
+        # 変えることで、後続の必須セグメントの評価を打ち切らないようにする。
         if is_critical_risk or is_required_segment or len(candidate) <= max_chars:
             text = candidate
-        else:
-            break
     return text
