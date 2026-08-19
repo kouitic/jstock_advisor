@@ -207,6 +207,7 @@ def _canned_result(recommendation_type: RecommendationType) -> ProfitTakingResul
         profit_protection_drawdown_from_peak_pct=None,
         profit_protection_gain_giveback_ratio_pct=None,
         profit_protection_insufficient_reason=None,
+        sell_intensity=None,
     )
 
 
@@ -648,6 +649,127 @@ def test_corporate_action_on_or_after_last_purchase_date_blocks() -> None:
     assert metrics.insufficient_data_reason is not None
 
 
+def _holding_with_last_sale_date(
+    stock_code: str, last_purchase_date: dt.date, last_sale_date: dt.date | None
+) -> Holding:
+    """Profit Protection由来の一部売却後を模擬する保有(last_sale_date設定済み、
+    コードレビュー対応2026-08、指摘A-2)。"""
+    return Holding(
+        stock_code=stock_code,
+        stock_name="テスト銘柄",
+        shares=100,
+        average_purchase_price=Decimal("4000"),
+        total_purchase_amount=Decimal("400000"),
+        first_purchase_date=dt.date(2024, 1, 1),
+        last_purchase_date=last_purchase_date,
+        last_sale_date=last_sale_date,
+        account_type=AccountType.SPECIFIC,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def test_last_sale_date_advances_basis_date_beyond_last_purchase_date() -> None:
+    """last_sale_date(直近売却日)がlast_purchase_dateより後の場合、実効
+    basis_dateはlast_sale_dateとなる(コードレビュー対応2026-08、指摘A-2)。
+    last_purchase_date〜last_sale_dateの間の株式分割は、新しい実効basis_date
+    より前であるため判定を妨げない(妨げれば旧basis_date=last_purchase_dateが
+    誤って使われていることになる)。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding_with_last_sale_date(
+        "2914", last_purchase_date=dt.date(2024, 1, 1), last_sale_date=dt.date(2025, 6, 1)
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    providers = dataclasses.replace(
+        providers,
+        corporate_action=_StubCorporateActionProvider(
+            [_split_event(dt.date(2024, 6, 1))]  # last_purchase_date〜last_sale_dateの間
+        ),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is None
+
+
+def test_corporate_action_on_or_after_last_sale_date_blocks() -> None:
+    """last_sale_date以降の株式分割は、新しい実効basis_date(=last_sale_date)
+    以降のイベントであるためデータ不足とする(コードレビュー対応2026-08、
+    指摘A-2)。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding_with_last_sale_date(
+        "2914", last_purchase_date=dt.date(2024, 1, 1), last_sale_date=dt.date(2025, 6, 1)
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    providers = dataclasses.replace(
+        providers,
+        corporate_action=_StubCorporateActionProvider(
+            [_split_event(dt.date(2025, 6, 1))]  # last_sale_dateと同日(境界)
+        ),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is not None
+
+
+def test_last_purchase_date_wins_when_more_recent_than_last_sale_date() -> None:
+    """last_sale_dateよりlast_purchase_dateの方が新しい場合(売却後に買い増し
+    した場合)、実効basis_dateはlast_purchase_date(より新しい方)となる
+    (コードレビュー対応2026-08、指摘A-2。FIFO/last_purchase_dateの意味を
+    壊さないことの確認)。last_sale_date〜last_purchase_dateの間の株式分割は
+    実効basis_dateより前であるため判定を妨げない。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding_with_last_sale_date(
+        "2914", last_purchase_date=dt.date(2025, 6, 1), last_sale_date=dt.date(2024, 1, 1)
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    providers = dataclasses.replace(
+        providers,
+        corporate_action=_StubCorporateActionProvider(
+            [_split_event(dt.date(2024, 6, 1))]  # last_sale_date〜last_purchase_dateの間
+        ),
+    )
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is None
+
+
+def test_no_last_sale_date_uses_last_purchase_date_as_before() -> None:
+    """last_sale_date=None(未売却)の場合、従来どおりlast_purchase_dateのみを
+    基準日として使う(後方互換確認)。"""
+    from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+
+    holding = _holding_with_last_sale_date(
+        "2914", last_purchase_date=dt.date(2024, 1, 1), last_sale_date=None
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    snapshot, error = build_stock_snapshot(providers, "2914", _NOW, _CONFIG)
+    assert error is None
+    assert snapshot is not None
+
+    metrics = service._compute_profit_protection_metrics(holding, snapshot, _NOW)
+
+    assert metrics.insufficient_data_reason is None
+
+
 def test_insufficient_reason_persisted_on_recommendation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -691,9 +813,15 @@ def test_recommendation_without_new_field_loads_with_none_default() -> None:
         "rule_version": "test",
     }
     assert "profit_protection_insufficient_reason" not in rec_dict
+    assert "sell_intensity" not in rec_dict
+    assert "suggested_sell_ratio" not in rec_dict
     rec = Recommendation.model_validate(rec_dict)
     assert rec.profit_protection_insufficient_reason is None
     assert rec.profit_protection_signal is None
+    # コードレビュー対応2026-08、Part B: sell_intensity/suggested_sell_ratioも
+    # Optional/default Noneで後方互換(AK)。
+    assert rec.sell_intensity is None
+    assert rec.suggested_sell_ratio is None
 
 
 def test_no_corporate_action_events_computes_metrics_normally() -> None:
@@ -747,3 +875,71 @@ def test_recommendation_exposes_profit_protection_fields(
     assert rec.profit_protection_drawdown_from_peak_pct == 15.6
     assert rec.profit_protection_gain_giveback_ratio_pct == 42.5
     assert "profit_protection" in rec.config_values_used
+
+
+def test_recommendation_exposes_sell_intensity_and_suggested_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recommendationへ、evaluate_profit_taking()が決定したsell_intensityに
+    応じた売却株数・比率が伝播することを確認する(コードレビュー対応2026-08、
+    指摘Part B)。サンリオ8136相当(500株、Strong)で300株程度を期待する。"""
+    from jstock_advisor.domain.entities.enums import SellIntensity
+
+    canned = dataclasses.replace(
+        _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+        origin="PROFIT_PROTECTION_STRONG",
+        sell_intensity=SellIntensity.STRONG,
+    )
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    holding = _holding("2914").model_copy(
+        update={"shares": 500, "average_purchase_price": Decimal("920")}
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(holding, _NOW)
+
+    assert outcome.recommendation is not None
+    rec = outcome.recommendation
+    assert rec.sell_intensity == "STRONG"
+    assert rec.partial_sale_executable is True
+    assert rec.suggested_sell_shares == 300  # strong比率0.60 -> floor(500*0.6/100)=3単元
+    assert rec.suggested_sell_ratio is not None and abs(rec.suggested_sell_ratio - 0.6) < 1e-9
+
+
+def test_earnings_suppression_clears_sell_intensity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """決算直前抑制でPARTIAL_PROFIT_TAKEがREVIEW_BEFORE_EARNINGSへ格下げされた
+    場合、sell_intensity/suggested_sell_sharesも算出しない(コードレビュー
+    対応2026-08、指摘Part B: 「売るべきか」の格下げに数量ロジックが追従する
+    ことの確認)。"""
+    from jstock_advisor.domain.entities.enums import SellIntensity
+
+    canned = dataclasses.replace(
+        _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+        origin="PROFIT_PROTECTION_STRONG",
+        sell_intensity=SellIntensity.STRONG,
+    )
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    holding = _holding("2914").model_copy(
+        update={"shares": 500, "average_purchase_price": Decimal("920")}
+    )
+    near_future = _NOW.date() + dt.timedelta(days=1)
+    providers = _providers(near_future, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(holding, _NOW)
+
+    assert outcome.recommendation is not None
+    rec = outcome.recommendation
+    assert rec.recommendation_type == RecommendationType.REVIEW_BEFORE_EARNINGS
+    assert rec.sell_intensity is None
+    assert rec.suggested_sell_shares is None
+    assert rec.suggested_sell_ratio is None

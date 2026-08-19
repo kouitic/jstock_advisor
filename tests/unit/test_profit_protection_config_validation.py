@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import (
+    PartialSellRatios,
     ProfitProtectionCandidateThresholds,
     ProfitProtectionConfig,
     ProfitProtectionStrongThresholds,
@@ -104,3 +105,47 @@ def test_current_gain_has_no_upper_bound() -> None:
 def test_strong_exactly_equal_to_candidate_is_allowed() -> None:
     """strong>=candidateの境界(等価)はPASSする。"""
     _config(_DEFAULT_CANDIDATE, dict(_DEFAULT_STRONG, **_DEFAULT_CANDIDATE))
+
+
+# --- PartialSellRatios(コードレビュー対応2026-08、Part B・G) ---
+
+_DEFAULT_RATIOS = {"light": 0.25, "standard": 0.50, "strong": 0.60, "very_strong": 0.80}
+
+
+def test_partial_sell_ratios_current_production_values_pass() -> None:
+    """現行本番値(25/50/60/80%)はPASSする(AG)。"""
+    PartialSellRatios(**_DEFAULT_RATIOS)
+
+
+def test_loaded_partial_sell_ratios_passes_validation() -> None:
+    """実際のYAML(profit_taking_rules.yaml)から読み込んだ値もPASSする。"""
+    cfg = load_config()
+    ratios = cfg.profit_taking.partial_sell_ratios
+    assert 0 < ratios.light <= ratios.standard <= ratios.strong <= ratios.very_strong < 1
+
+
+def test_partial_sell_ratios_reversed_order_rejected() -> None:
+    """strong<standardのような順序逆転はエラーとする(AH)。"""
+    from pydantic import ValidationError
+
+    ratios = dict(_DEFAULT_RATIOS, strong=0.30)  # standard(0.50)より小さい
+    with pytest.raises(ValidationError):
+        PartialSellRatios(**ratios)
+
+
+def test_partial_sell_ratios_zero_or_below_rejected() -> None:
+    """0以下はエラーとする(AI)。"""
+    from pydantic import ValidationError
+
+    ratios = dict(_DEFAULT_RATIOS, light=0.0)
+    with pytest.raises(ValidationError):
+        PartialSellRatios(**ratios)
+
+
+def test_partial_sell_ratios_one_or_above_rejected() -> None:
+    """1以上はエラーとする(AJ)。"""
+    from pydantic import ValidationError
+
+    ratios = dict(_DEFAULT_RATIOS, very_strong=1.0)
+    with pytest.raises(ValidationError):
+        PartialSellRatios(**ratios)

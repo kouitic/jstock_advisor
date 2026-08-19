@@ -210,6 +210,28 @@ class TradingUnitRules(StrictModel):
     default_odd_lot_trading_available: bool
 
 
+class PartialSellRatios(StrictModel):
+    """PARTIAL_PROFIT_TAKE成立後の売却強度(SellIntensity)別の目安売却比率
+    (コードレビュー対応2026-08、指摘Part B)。保有株数に対する比率であり、
+    実際の売却株数は売買単位に切り下げて算出する(trading_unit_feasibility.py
+    のcompute_suggested_sell_shares()参照)。
+    """
+
+    light: float
+    standard: float
+    strong: float
+    very_strong: float
+
+    @model_validator(mode="after")
+    def _check_ordering(self) -> PartialSellRatios:
+        if not (0 < self.light <= self.standard <= self.strong <= self.very_strong < 1):
+            raise ValueError(
+                "partial_sell_ratiosは0 < light <= standard <= strong <= "
+                "very_strong < 1を満たす必要があります"
+            )
+        return self
+
+
 def _check_profit_protection_threshold_ranges(
     label: str,
     min_current_gain_pct: float,
@@ -314,6 +336,7 @@ class ProfitTakingRulesConfig(StrictModel):
     condition_based_judgment: ConditionBasedJudgment
     trading_unit: TradingUnitRules
     profit_protection: ProfitProtectionConfig
+    partial_sell_ratios: PartialSellRatios
 
 
 # --- sell_rules.yaml --------------------------------------------------------

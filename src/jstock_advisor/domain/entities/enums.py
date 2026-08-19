@@ -711,6 +711,28 @@ class TimingAction(StrEnum):
     ACCELERATE_DOWNTREND_CONFIRMED = "ACCELERATE_DOWNTREND_CONFIRMED"
 
 
+class SellIntensity(StrEnum):
+    """PARTIAL_PROFIT_TAKE成立後、何株売るかを決める売却強度(コードレビュー
+    対応2026-08、指摘Part B)。「売るべきか」(RecommendationType/origin)とは
+    別に、「何株売るか」を少数の構造化条件から決める。
+
+    profit_taking.pyのorigin(判定がどの経路で成立したか)から一意に決まる:
+    - LIGHT: origin=OTHER_CONDITIONS(非価格系の複数条件のみで成立した、
+      最も弱い根拠のPARTIAL)
+    - STANDARD: origin=PRICE_POSITION/FAIR_VALUE_STRONG(価格マトリクス・
+      適正価格ベースの通常のPARTIAL)
+    - STRONG: origin=PROFIT_PROTECTION_STRONG(利益保全のStrong条件、上値
+      根拠に依存しない強い一部利確)
+    - VERY_STRONG: STRONGに加え、株価トレンドも悪化している(momentum.
+      trend_classificationがDOWNTREND/STRONG_DOWNTREND)場合
+    """
+
+    LIGHT = "LIGHT"
+    STANDARD = "STANDARD"
+    STRONG = "STRONG"
+    VERY_STRONG = "VERY_STRONG"
+
+
 class TrendClassification(StrEnum):
     """モメンタム・トレンド層の分類(要求仕様9節)。"""
 

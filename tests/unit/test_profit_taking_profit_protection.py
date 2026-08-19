@@ -15,6 +15,7 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     IndustryClassification,
     RecommendationType,
+    SellIntensity,
     TrendClassification,
 )
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
@@ -24,7 +25,9 @@ from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
     evaluate_profit_taking,
+    resolve_sell_intensity,
 )
+from jstock_advisor.domain.signals.trading_unit_feasibility import compute_suggested_sell_shares
 
 _CONFIG = load_config()
 
@@ -300,3 +303,126 @@ def test_result_exposes_profit_protection_metrics_for_traceability() -> None:
     assert result.profit_protection_drawdown_from_peak_pct == 15.6
     assert result.profit_protection_gain_giveback_ratio_pct == 42.5
     assert any("Strong Profit Protection" in r for r in result.triggered_reasons)
+
+
+# --- sell_intensity(コードレビュー対応2026-08、Part B) ---
+
+
+def _momentum(trend: TrendClassification) -> MomentumSnapshot:
+    return MomentumSnapshot(
+        trend_classification=trend,
+        trend_evaluable=True,
+        price_history_aligned=True,
+        price_history_has_future_bars=False,
+        confidence=ConfidenceLevel.MEDIUM,
+    )
+
+
+def test_resolve_sell_intensity_profit_protection_strong_without_downtrend() -> None:
+    assert resolve_sell_intensity("PROFIT_PROTECTION_STRONG", None) == SellIntensity.STRONG
+    assert (
+        resolve_sell_intensity(
+            "PROFIT_PROTECTION_STRONG", _momentum(TrendClassification.UPTREND)
+        )
+        == SellIntensity.STRONG
+    )
+
+
+def test_resolve_sell_intensity_profit_protection_strong_with_downtrend_is_very_strong() -> None:
+    assert (
+        resolve_sell_intensity(
+            "PROFIT_PROTECTION_STRONG", _momentum(TrendClassification.DOWNTREND)
+        )
+        == SellIntensity.VERY_STRONG
+    )
+    assert (
+        resolve_sell_intensity(
+            "PROFIT_PROTECTION_STRONG", _momentum(TrendClassification.STRONG_DOWNTREND)
+        )
+        == SellIntensity.VERY_STRONG
+    )
+
+
+def test_resolve_sell_intensity_other_conditions_is_light() -> None:
+    assert resolve_sell_intensity("OTHER_CONDITIONS", None) == SellIntensity.LIGHT
+
+
+def test_resolve_sell_intensity_price_position_and_fair_value_strong_are_standard() -> None:
+    assert resolve_sell_intensity("PRICE_POSITION", None) == SellIntensity.STANDARD
+    assert resolve_sell_intensity("FAIR_VALUE_STRONG", None) == SellIntensity.STANDARD
+
+
+def test_strong_signal_result_has_strong_sell_intensity() -> None:
+    result = _evaluate(profit_protection=_pp_metrics(candidate=True, strong=True))
+    assert result.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.sell_intensity == SellIntensity.STRONG
+
+
+def test_strong_signal_with_downtrend_has_very_strong_sell_intensity() -> None:
+    result = _evaluate(
+        profit_protection=_pp_metrics(candidate=True, strong=True),
+        momentum=_momentum(TrendClassification.DOWNTREND),
+    )
+    assert result.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.sell_intensity == SellIntensity.VERY_STRONG
+
+
+def test_other_conditions_origin_partial_has_light_sell_intensity() -> None:
+    result = _evaluate(
+        profit_protection=_pp_metrics(candidate=True, strong=False),
+        momentum=_momentum(TrendClassification.DOWNTREND),
+    )
+    assert result.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.origin == "OTHER_CONDITIONS"
+    assert result.sell_intensity == SellIntensity.LIGHT
+
+
+def test_non_partial_result_has_no_sell_intensity() -> None:
+    result = _evaluate(profit_protection=None)
+    assert result.recommendation_type != RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.sell_intensity is None
+
+
+# --- サンリオ8136 A〜E: 判定+数量の一覧(コードレビュー対応2026-08、Part D) ---
+
+
+def test_sanrio_8136_full_table_partial_and_quantity() -> None:
+    """500株保有・平均取得単価920円の回帰ケースについて、判定結果(candidate/
+    strong/RecommendationType/sell_intensity)と、500株保有時の実際の提案
+    株数(suggested_sell_shares/suggested_sell_ratio/remaining_shares)を
+    一覧で確認する。"""
+    ratios = _CONFIG.profit_taking.partial_sell_ratios
+    intensity_ratio = {
+        SellIntensity.LIGHT: ratios.light,
+        SellIntensity.STANDARD: ratios.standard,
+        SellIntensity.STRONG: ratios.strong,
+        SellIntensity.VERY_STRONG: ratios.very_strong,
+    }
+    cases = {
+        "A_1400": (Decimal("1400"), False, False, RecommendationType.WATCH),
+        "B_1350": (Decimal("1350"), False, False, RecommendationType.WATCH),
+        "C_1300": (Decimal("1300"), True, False, RecommendationType.WATCH),
+        "D_1282_5": (Decimal("1282.5"), True, True, RecommendationType.PARTIAL_PROFIT_TAKE),
+        "E_1227": (Decimal("1227"), True, True, RecommendationType.PARTIAL_PROFIT_TAKE),
+    }
+    for label, (price, candidate, strong, expected_type) in cases.items():
+        pp = _pp_metrics(
+            candidate=candidate,
+            strong=strong,
+            current_gain_pct=float(price / Decimal("920") - 1) * 100,
+        )
+        result = _evaluate(current_price=price, profit_protection=pp)
+        assert result.recommendation_type == expected_type, label
+        if expected_type == RecommendationType.PARTIAL_PROFIT_TAKE:
+            assert result.sell_intensity == SellIntensity.STRONG, label
+            suggestion = compute_suggested_sell_shares(
+                shares=500,
+                trading_unit=100,
+                odd_lot_trading_available=False,
+                target_sell_ratio=intensity_ratio[result.sell_intensity],
+            )
+            assert suggestion is not None, label
+            assert suggestion.shares == 300, label  # strong比率0.60 -> floor(500*0.6/100)=3単元
+            assert 500 - suggestion.shares >= 100, label
+        else:
+            assert result.sell_intensity is None, label

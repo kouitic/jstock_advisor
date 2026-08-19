@@ -54,6 +54,12 @@ class Holding(Entity):
     # (ローカルCLIでcorporate_action_serviceを注入していない場合等)を示す。
     shares_and_price_adjustment_basis_date: dt.date | None = None
 
+    # 直近の売却(一部・全部いずれか)が実行された日(コードレビュー対応2026-08、
+    # Profit Protectionのpeak探索基準日再リセット用)。購入では更新されない
+    # (PortfolioService._compute_holding()のis_sale引数参照)。売却後にHoldingが
+    # 削除されず残る場合(一部売却)のみ意味を持つ。
+    last_sale_date: dt.date | None = None
+
 
 def summarize_lots(lots: list[PurchaseLot]) -> tuple[int, Decimal, Decimal, dt.date, dt.date]:
     """購入ロットの一覧から(保有株数合計, 平均購入単価, 総購入金額,
