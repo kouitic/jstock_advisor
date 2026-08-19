@@ -140,22 +140,17 @@ def compute_profit_protection_metrics(
             "基準日以降に株式分割・併合等があり、価格系列の調整基準が一致しないため判定不能"
         )
 
-    if bars and min(b.date for b in bars) > basis_date:
-        return _insufficient(
-            "基準日まで遡る価格データが無く、真の最高値を算出できないため判定不能"
-        )
+    evaluation_bars = [b for b in bars if basis_date < b.date <= as_of_date]
+    if not evaluation_bars:
+        return _insufficient("基準日より後の価格データが取得できないため判定不能")
 
     next_business_day = business_calendar.next_business_day(basis_date)
-    if next_business_day <= as_of_date and not any(b.date == next_business_day for b in bars):
+    if next_business_day <= as_of_date and not any(b.date == next_business_day for b in evaluation_bars):
         return _insufficient(
             "基準日直後の営業日から価格データが欠落しているため判定不能"
         )
 
-    entry_bars = [b for b in bars if basis_date < b.date <= as_of_date]
-    if not entry_bars:
-        return _insufficient("基準日より後の価格データが取得できないため判定不能")
-
-    peak_price = max(b.high for b in entry_bars)
+    peak_price = max(b.high for b in evaluation_bars)
     if peak_price <= 0:
         return _insufficient("最高値データが不正なため判定不能")
 

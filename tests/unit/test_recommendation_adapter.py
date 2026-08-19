@@ -24,6 +24,8 @@ def _make_recommendation(
     recommendation_type: RecommendationType,
     sell_prices: SellPriceLevels | None = None,
     buy_prices: BuyPriceLevels | None = None,
+    suggested_sell_shares: int | None = None,
+    suggested_sell_ratio: float | None = None,
 ) -> Recommendation:
     return Recommendation(
         recommendation_id="rec-1",
@@ -36,6 +38,8 @@ def _make_recommendation(
         price_at_recommendation=Decimal("4200"),
         confidence=ConfidenceLevel.HIGH,
         rule_version="v1-mvp",
+        suggested_sell_shares=suggested_sell_shares,
+        suggested_sell_ratio=suggested_sell_ratio,
     )
 
 
@@ -163,3 +167,40 @@ def test_buy_shows_tentative_and_standard_prices() -> None:
     assert text_input.target_price == Decimal("3600")
     assert text_input.secondary_target_price == Decimal("3400")
     assert text_input.secondary_target_price_label == "通常"
+
+
+# --- 指摘3対応: suggested_sell_shares/ratio 整合性(コードレビュー対応2026-08) ---
+
+
+def test_partial_sell_forwards_suggested_shares_and_ratio() -> None:
+    """_build_partial_sell() がRecommendationのsuggested_sell_shares/
+    suggested_sell_ratioをNotificationTextInputへ正しく転送することを
+    確認する(コードレビュー対応2026-08、指摘3)。
+    """
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            recommended_limit_price=PriceWithRationale(price=Decimal("4600"), rationale="x")
+        ),
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.60,
+    )
+
+    text_input = build_notification_text_input(rec, NotificationCategory.PARTIAL_SELL)
+    assert text_input.suggested_sell_shares == 300
+    assert text_input.suggested_sell_ratio == 0.60
+
+
+def test_partial_sell_none_suggested_shares_handled() -> None:
+    """suggested_sell_shares がNoneの場合も正常に処理される。"""
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            partial_profit_start_price=PriceWithRationale(price=Decimal("4300"), rationale="x")
+        ),
+    )
+    # suggested_sell_shares/ratio を明示的にNoneのまま(既定値)
+
+    text_input = build_notification_text_input(rec, NotificationCategory.PARTIAL_SELL)
+    assert text_input.suggested_sell_shares is None
+    assert text_input.suggested_sell_ratio is None

@@ -567,3 +567,72 @@ def test_disabled_config_never_signals() -> None:
     )
     assert m.candidate_signal is False
     assert m.strong_signal is False
+
+
+# --- 指摘1対応: evaluation_barsの空チェック順序(コードレビュー対応2026-08) ---
+
+
+def test_evaluation_bars_empty_clear_reason() -> None:
+    """evaluation_bars(basis_date < date <= as_of_date)が1件も無い場合、
+    「基準日より後の価格データが取得できない」という明確な理由でスキップする
+    (コードレビュー対応2026-08、指摘1: 空チェックを先行させて理由を区別する)。
+    """
+    # basis_dateが2026-08-14(as_of_date)と同じか後の場合、basis_dateより後の
+    # barが存在しようがない。
+    basis = dt.date(2026, 8, 14)
+    bars = [
+        PriceBar(
+            date=basis,
+            open=Decimal("1000"),
+            high=Decimal("1000"),
+            low=Decimal("1000"),
+            close=Decimal("1000"),
+            volume=1000,
+        )
+    ]
+    m = _metrics(
+        current_price=Decimal("1227"),
+        bars=bars,
+        basis_date=basis,
+        as_of_date=basis,
+    )
+    assert m.insufficient_data_reason is not None
+    assert "基準日より後の価格データが取得できない" in m.insufficient_data_reason
+
+
+def test_evaluation_bars_not_empty_but_missing_first_business_day() -> None:
+    """evaluation_bars は0件ではなく1件以上あるが、basis_date翌営業日の
+    barが欠落している場合は、「基準日直後の営業日から価格データが欠落」という
+    別の理由でスキップする(コードレビュー対応2026-08、指摘1: 理由の明確化)。
+    """
+    basis = dt.date(2026, 6, 1)  # 月曜
+    next_bd = _CALENDAR.next_business_day(basis)  # 火曜2026-06-02
+    bars = [
+        PriceBar(
+            date=basis,
+            open=Decimal("1000"),
+            high=Decimal("1000"),
+            low=Decimal("1000"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+        # next_bd(翌営業日)をスキップし、その後のbarのみを含める。
+        # これはbasis_date < date <= as_of_dateを満たすため
+        # evaluation_barsは0件ではなく1件以上。
+        PriceBar(
+            date=dt.date(2026, 6, 3),  # 水曜、翌営業日から更に1日後
+            open=Decimal("1454.5"),
+            high=Decimal("1454.5"),
+            low=Decimal("1454.5"),
+            close=Decimal("1454.5"),
+            volume=1000,
+        ),
+    ]
+    m = _metrics(
+        current_price=Decimal("1227"),
+        bars=bars,
+        basis_date=basis,
+        as_of_date=dt.date(2026, 8, 14),
+    )
+    assert m.insufficient_data_reason is not None
+    assert "基準日直後の営業日から価格データが欠落" in m.insufficient_data_reason

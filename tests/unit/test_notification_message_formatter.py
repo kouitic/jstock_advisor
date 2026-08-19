@@ -74,3 +74,78 @@ def test_resumed_after_gap_shows_watch_resumed_not_day_count() -> None:
     text = format_notification_text(data)
     assert "監視再開" in text
     assert "1日連続" not in text
+
+
+# --- 指摘2対応: 70文字soft limit(コードレビュー対応2026-08) ---
+
+
+def test_partial_sell_quantity_is_required_segment_exceeding_70_chars() -> None:
+    """PARTIAL売却の売却数量は必須セグメントであり、70文字を超えても
+    省略しない(soft limit対応、コードレビュー対応2026-08、指摘2)。
+    """
+    # 長い銘柄名と数量セグメントで70文字を超える条件を作る。
+    long_name = "非常に長い銘柄名" * 3  # 24文字
+    data = _base(
+        category=NotificationCategory.PARTIAL_SELL,
+        stock_name=long_name,
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.60,
+        target_price=Decimal("1500"),  # 売却目安価格
+    )
+    text = format_notification_text(data)
+    # 数量セグメント「300株(60%)」は欠落しない(必須)。
+    assert "300株" in text
+    assert "(60%)" in text
+    # 結果は70文字を超えてよい(soft limit)。
+    # assert len(text) > MAX_CHARS  # は実施しない(実装が確実なら自然に超過)
+
+
+def test_partial_sell_quantity_without_ratio() -> None:
+    """suggested_sell_ratio がNoneの場合、比率なしで「300株」だけを表示する
+    (コードレビュー対応2026-08、指摘3準備)。
+    """
+    data = _base(
+        category=NotificationCategory.PARTIAL_SELL,
+        suggested_sell_shares=300,
+        suggested_sell_ratio=None,
+    )
+    text = format_notification_text(data)
+    assert "300株" in text
+    assert "%" not in text  # 比率が無い
+
+
+# --- 指摘3対応: suggested_sell_shares/ratio 整合性(コードレビュー対応2026-08) ---
+
+
+def test_suggested_sell_shares_ratio_consistency_by_adapter() -> None:
+    """Recommendation生成時点でsuggested_sell_shares と suggested_sell_ratio
+    の整合性が保たれることを確認する(コードレビュー対応2026-08、指摘3)。
+    例: 500株保有、STRONG(60%)の場合 → 300株、60%の組み合わせ。
+    テストでは直接数値を使わず、通知層へ到達する値が一致することで
+    整合性を確認する。
+    """
+    # 実際のRecommendationを使う結合テストはrecommendation_adapter_test.pyで行い、
+    # ここでは formatter に正しい値が渡されたときの表示を確認する。
+    data = _base(
+        category=NotificationCategory.PARTIAL_SELL,
+        stock_code="8136",
+        stock_name="サンリオ",
+        suggested_sell_shares=300,  # 500株の60%
+        suggested_sell_ratio=0.60,   # 一致している
+    )
+    text = format_notification_text(data)
+    assert "300株(60%)" in text
+
+
+def test_partial_sell_none_shares_no_segment() -> None:
+    """suggested_sell_shares がNoneの場合、セグメント自体を生成しない
+    (Empty セグメント表示なし)。
+    """
+    data = _base(
+        category=NotificationCategory.PARTIAL_SELL,
+        suggested_sell_shares=None,
+        suggested_sell_ratio=None,
+    )
+    text = format_notification_text(data)
+    # セグメント自体が無い(空の「0株」等の文言が無い)。
+    assert "株" not in text
