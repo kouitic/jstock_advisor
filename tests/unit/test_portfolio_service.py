@@ -196,6 +196,7 @@ def test_partial_sale_does_not_change_last_purchase_date(
         account_type=AccountType.NISA,
     )
     assert holding_before.last_purchase_date == dt.date(2025, 9, 1)
+    assert holding_before.last_sale_date is None
 
     # 最古ロット(2025-4-1、100株)のうち60株を部分売却する。
     holding_after = portfolio_service.sell_shares("8136", 60)
@@ -203,6 +204,9 @@ def test_partial_sale_does_not_change_last_purchase_date(
     assert holding_after.last_purchase_date == dt.date(2025, 9, 1)  # 不変
     # average_purchase_priceは残存構成(40株@3775 + 100株@4025)へ再計算される。
     assert holding_after.average_purchase_price != holding_before.average_purchase_price
+    # last_sale_dateは売却実行時に設定される(コードレビュー対応2026-08、
+    # Profit Protectionのpeak探索基準日再リセット用)。
+    assert holding_after.last_sale_date is not None
 
 
 def test_full_lot_sale_does_not_change_last_purchase_date(
@@ -235,6 +239,7 @@ def test_full_lot_sale_does_not_change_last_purchase_date(
     holding_after = portfolio_service.sell_shares("8136", 100)
     assert holding_after is not None
     assert holding_after.last_purchase_date == dt.date(2025, 9, 1)  # 不変
+    assert holding_after.last_sale_date is not None
 
 
 def test_sell_shares_removes_fully_consumed_lot_and_spills_to_next(

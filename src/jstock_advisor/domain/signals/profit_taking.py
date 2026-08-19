@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.enums import (
     PriceFieldBasis,
     ProfitTakingIndustrySector,
     RecommendationType,
+    SellIntensity,
     StockType,
     TimingAction,
     TrendClassification,
@@ -76,6 +77,34 @@ class _RawLevelOrigin(IntEnum):
     FAIR_VALUE_STRONG = 4  # 既存_fair_value_strong_condition/_fair_value_partial_gate_met
     # (適正価格ベースの強いゲート)。
     FUNDAMENTAL_CRITICAL_RISK = 5  # 投資前提崩壊・会計不祥事・確定減配+CF悪化(softening対象外)
+
+
+def resolve_sell_intensity(
+    origin: str, momentum: MomentumSnapshot | None
+) -> SellIntensity:
+    """PARTIAL_PROFIT_TAKE成立後の売却強度を、成立経路(origin)とトレンドから
+    決定する(コードレビュー対応2026-08、指摘Part B)。「売るべきか」
+    (RecommendationType/origin)とは独立して、「何株売るか」を少数の構造化
+    条件のみから説明可能な形で決める(過剰な新スコアモデルは作らない)。
+
+    - origin=PROFIT_PROTECTION_STRONG: 上値根拠に依存しない強い一部利確。
+      さらに株価トレンドも悪化している(DOWNTREND/STRONG_DOWNTREND)場合は
+      VERY_STRONGへ引き上げる(Strong単独では機械的に高比率にしない、
+      要求仕様§B-7)。
+    - origin=OTHER_CONDITIONS: 非価格系の複数条件のみで成立した、相対的に
+      弱い根拠のPARTIAL。上値余地を多く残すためLIGHT。
+    - それ以外(PRICE_POSITION/FAIR_VALUE_STRONG等): 従来からの「通常の
+      PARTIAL」としてSTANDARD(既存の「概ね半分」に近い比率を踏襲)。
+    """
+    if origin == _RawLevelOrigin.PROFIT_PROTECTION_STRONG.name:
+        aggravating_trend = momentum is not None and momentum.trend_classification in (
+            TrendClassification.DOWNTREND,
+            TrendClassification.STRONG_DOWNTREND,
+        )
+        return SellIntensity.VERY_STRONG if aggravating_trend else SellIntensity.STRONG
+    if origin == _RawLevelOrigin.OTHER_CONDITIONS.name:
+        return SellIntensity.LIGHT
+    return SellIntensity.STANDARD
 
 
 @dataclass(frozen=True)
@@ -196,6 +225,10 @@ class ProfitTakingResult:
     # (株式分割・履歴不足等)を監査・原因調査用に永続化する。signal以外の
     # 場合(NONE/CANDIDATE/STRONG)は常にNone。
     profit_protection_insufficient_reason: str | None
+    # コードレビュー対応(2026-08、指摘Part B): final_action==PARTIAL_PROFIT_TAKE
+    # の場合のみ設定する(「何株売るか」の判定強度)。それ以外は常にNone
+    # (WATCH/HOLD/FULLでは適用しない)。
+    sell_intensity: SellIntensity | None
 
 
 def compute_unrealized_pnl(
@@ -1466,5 +1499,10 @@ def evaluate_profit_taking(
         ),
         profit_protection_insufficient_reason=(
             profit_protection.insufficient_data_reason if profit_protection is not None else None
+        ),
+        sell_intensity=(
+            resolve_sell_intensity(origin.name, momentum)
+            if final_level == _Level.PARTIAL
+            else None
         ),
     )

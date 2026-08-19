@@ -115,3 +115,14 @@ profit_protection:
     min_current_gain_pct: 25.0
     min_drawdown_from_peak_pct: 10.0
     min_gain_giveback_ratio_pct: 30.0
+
+# PARTIAL_PROFIT_TAKE成立後、何株売るかの目安比率(2026-08、コードレビュー
+# 対応Part B)。判定強度(SellIntensity、profit_taking.pyのorigin+momentumから
+# 決まる)に応じて、保有株数に対するこの比率を売買単位に切り下げて実際の
+# 売却株数を算出する(trading_unit_feasibility.py)。0 < light <= standard <=
+# strong <= very_strong < 1 を満たす必要がある(起動時validation)。
+partial_sell_ratios:
+  light: 0.25       # 弱いPARTIAL(非価格系条件のみで成立)
+  standard: 0.50    # 通常のPARTIAL(価格マトリクス・適正価格ベース)
+  strong: 0.60      # Strong Profit Protection
+  very_strong: 0.80 # Strong Profit Protection + トレンド悪化

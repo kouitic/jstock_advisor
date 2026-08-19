@@ -6,22 +6,36 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.signals.profit_protection import compute_profit_protection_metrics
 from jstock_advisor.interfaces.types import PriceBar
 
-_CONFIG = load_config().profit_taking.profit_protection
-_ENTRY = dt.date(2026, 1, 5)
+_APP_CONFIG = load_config()
+_CONFIG = _APP_CONFIG.profit_taking.profit_protection
+_CALENDAR = BusinessCalendar.from_config(_APP_CONFIG.holiday_calendar)
+_ENTRY = dt.date(2026, 1, 5)  # 営業日(次の営業日は2026-01-06)
 _AS_OF = dt.date(2026, 8, 14)
 
 
 def _bars(peak_high: Decimal, peak_date: dt.date = dt.date(2026, 6, 1)) -> list[PriceBar]:
-    """保有開始日ちょうどのバーと、指定した高値を含むバーの2本を返す。"""
+    """basis_dateちょうどのバー・basis_date翌営業日のカバレッジ用バー・
+    指定した高値を含むバーの3本を返す(basis_date当日のhighはpeakに含めない
+    仕様のため、basis_date当日バーのhighは常にpeak_highより低く設定する)。
+    """
     return [
         PriceBar(
             date=_ENTRY,
             open=Decimal("900"),
             high=Decimal("910"),
             low=Decimal("890"),
+            close=Decimal("900"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=_CALENDAR.next_business_day(_ENTRY),
+            open=Decimal("900"),
+            high=Decimal("905"),
+            low=Decimal("895"),
             close=Decimal("900"),
             volume=1000,
         ),
@@ -53,6 +67,7 @@ def _metrics(
         as_of_date=as_of_date,
         ratio_adjustment_event_since_basis=ratio_adjustment_event_since_basis,
         config=_CONFIG,
+        business_calendar=_CALENDAR,
     )
 
 
@@ -118,6 +133,201 @@ def test_case_e_current_1227_strong_signal() -> None:
     assert m.candidate_signal is True
 
 
+# --- basis_date当日high除外(コードレビュー対応2026-08、指摘A-1) ---
+
+
+def test_a1_case_a_basis_date_own_day_high_excluded_from_peak() -> None:
+    """basis_date当日の高値(1200円)はpeakに含めず、basis_date翌営業日以降の
+    高値(1050円)のみをpeakとする。
+    """
+    basis = dt.date(2026, 3, 2)  # 月曜(次の営業日は2026-03-03)
+    bars = [
+        PriceBar(
+            date=basis,
+            open=Decimal("800"),
+            high=Decimal("1200"),  # basis_date当日の高値(除外されるべき)
+            low=Decimal("800"),
+            close=Decimal("800"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=_CALENDAR.next_business_day(basis),
+            open=Decimal("1000"),
+            high=Decimal("1010"),
+            low=Decimal("990"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=dt.date(2026, 4, 1),
+            open=Decimal("1050"),
+            high=Decimal("1050"),
+            low=Decimal("1050"),
+            close=Decimal("1050"),
+            volume=1000,
+        ),
+    ]
+    m = _metrics(
+        current_price=Decimal("1000"),
+        average_purchase_price=Decimal("800"),
+        bars=bars,
+        basis_date=basis,
+    )
+    assert m.insufficient_data_reason is None
+    assert m.peak_price_since_entry == Decimal("1050")
+
+
+def test_a1_case_b_pre_and_post_basis_extreme_highs_only_post_used() -> None:
+    """basis_date前・当日いずれの極端な高値も使わず、basis_date翌営業日以降の
+    通常の高値のみを採用する。
+    """
+    basis = dt.date(2026, 3, 2)
+    bars = [
+        PriceBar(
+            date=basis - dt.timedelta(days=60),
+            open=Decimal("5000"),
+            high=Decimal("5000"),
+            low=Decimal("5000"),
+            close=Decimal("5000"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=basis,
+            open=Decimal("800"),
+            high=Decimal("4000"),
+            low=Decimal("800"),
+            close=Decimal("800"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=_CALENDAR.next_business_day(basis),
+            open=Decimal("1000"),
+            high=Decimal("1010"),
+            low=Decimal("990"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=dt.date(2026, 4, 1),
+            open=Decimal("1050"),
+            high=Decimal("1050"),
+            low=Decimal("1050"),
+            close=Decimal("1050"),
+            volume=1000,
+        ),
+    ]
+    m = _metrics(
+        current_price=Decimal("1000"),
+        average_purchase_price=Decimal("800"),
+        bars=bars,
+        basis_date=basis,
+    )
+    assert m.insufficient_data_reason is None
+    assert m.peak_price_since_entry == Decimal("1050")
+
+
+def test_a1_case_c_only_basis_date_bar_exists_is_insufficient() -> None:
+    """basis_date当日のバーしか存在しない場合、basis_date当日は除外される
+    ためDATA_INSUFFICIENTとする。
+    """
+    basis = dt.date(2026, 3, 2)
+    bars = [
+        PriceBar(
+            date=basis,
+            open=Decimal("800"),
+            high=Decimal("1200"),
+            low=Decimal("800"),
+            close=Decimal("800"),
+            volume=1000,
+        )
+    ]
+    m = _metrics(
+        current_price=Decimal("1000"),
+        average_purchase_price=Decimal("800"),
+        bars=bars,
+        basis_date=basis,
+        as_of_date=basis,
+    )
+    assert m.insufficient_data_reason is not None
+
+
+# --- price history coverage(コードレビュー対応2026-08、指摘A-3) ---
+
+
+def test_a3_case_h_bar_on_next_business_day_is_normal() -> None:
+    """basis_date翌営業日のbarがあれば正常に評価できる(_bars()の既定構成で
+    暗黙に確認済みだが、明示的にも確認する)。"""
+    m = _metrics(Decimal("1227"))
+    assert m.insufficient_data_reason is None
+
+
+def test_a3_case_i_long_gap_right_after_basis_date_is_insufficient() -> None:
+    """basis_date直後から長期間価格データが欠落している場合はDATA_INSUFFICIENT
+    とする(basis_date翌営業日に対応するbarが無い)。
+    """
+    basis = dt.date(2026, 6, 1)
+    bars = [
+        PriceBar(
+            date=basis,
+            open=Decimal("1000"),
+            high=Decimal("1000"),
+            low=Decimal("1000"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+        # basis_date翌営業日〜6/29まで欠落し、6/30から再開する。
+        PriceBar(
+            date=dt.date(2026, 6, 30),
+            open=Decimal("1454.5"),
+            high=Decimal("1454.5"),
+            low=Decimal("1454.5"),
+            close=Decimal("1454.5"),
+            volume=1000,
+        ),
+    ]
+    m = _metrics(
+        current_price=Decimal("1227"),
+        bars=bars,
+        basis_date=basis,
+    )
+    assert m.insufficient_data_reason is not None
+
+
+def test_a3_case_j_friday_to_monday_is_normal() -> None:
+    """basis_dateが金曜、次のbarが月曜(土日は営業日ではないため欠損扱いしない)
+    の場合は正常に評価できる。"""
+    friday = dt.date(2026, 3, 6)
+    assert friday.weekday() == 4  # 金曜であることを確認
+    monday = _CALENDAR.next_business_day(friday)
+    assert monday == dt.date(2026, 3, 9)
+    bars = [
+        PriceBar(
+            date=friday,
+            open=Decimal("900"),
+            high=Decimal("2000"),  # basis_date当日(除外されるべき)
+            low=Decimal("900"),
+            close=Decimal("900"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=monday,
+            open=Decimal("1000"),
+            high=Decimal("1454.5"),
+            low=Decimal("1000"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+    ]
+    m = _metrics(
+        current_price=Decimal("1227"),
+        average_purchase_price=Decimal("920"),
+        bars=bars,
+        basis_date=friday,
+    )
+    assert m.insufficient_data_reason is None
+    assert m.peak_price_since_entry == Decimal("1454.5")
+
+
 # --- 買い増し(basis_date)回帰(コードレビュー対応2026-08、指摘1) ---
 # 平均取得単価920円は「買い増し後」の加重平均という想定。basis_date
 # (last_purchase_date相当)を2026-06-15とし、それより前の極端な高値
@@ -149,8 +359,17 @@ def _bars_with_pre_and_post_basis_highs() -> list[PriceBar]:
         PriceBar(
             date=_BASIS_DATE,
             open=Decimal("1000"),
-            high=Decimal("1010"),
+            high=Decimal("1010"),  # basis_date当日(除外されるべき)
             low=Decimal("990"),
+            close=Decimal("1000"),
+            volume=1000,
+        ),
+        # basis_date翌営業日(coverage確認用)。
+        PriceBar(
+            date=_CALENDAR.next_business_day(_BASIS_DATE),
+            open=Decimal("1000"),
+            high=Decimal("1005"),
+            low=Decimal("995"),
             close=Decimal("1000"),
             volume=1000,
         ),
@@ -203,9 +422,7 @@ def test_buy_more_case_d_history_not_reaching_basis_date_is_insufficient() -> No
     """買い増し日(basis_date)まで価格履歴が遡れない場合はDATA_INSUFFICIENT
     とする(要求仕様§10 Case D相当)。
     """
-    late_bars = [
-        b for b in _bars_with_pre_and_post_basis_highs() if b.date > _BASIS_DATE
-    ]
+    late_bars = [b for b in _bars_with_pre_and_post_basis_highs() if b.date > _BASIS_DATE]
     m = _metrics(
         current_price=Decimal("1227"),
         bars=late_bars,
@@ -284,7 +501,7 @@ def test_ratio_adjustment_event_since_basis_makes_data_insufficient() -> None:
 
 
 def test_no_bars_covering_entry_period_is_insufficient() -> None:
-    """保有開始日以降の価格データが取得できない場合はスキップする。"""
+    """basis_date以降の価格データが取得できない場合はスキップする。"""
     stale_bars = [
         PriceBar(
             date=dt.date(2025, 1, 1),
@@ -300,7 +517,7 @@ def test_no_bars_covering_entry_period_is_insufficient() -> None:
 
 
 def test_history_not_reaching_back_to_entry_date_is_insufficient() -> None:
-    """価格データが保有開始日まで遡れない場合、真の最高値を見逃す可能性がある
+    """価格データがbasis_dateまで遡れない場合、真の最高値を見逃す可能性がある
     ためスキップする。
     """
     late_start_bars = [
@@ -346,6 +563,7 @@ def test_disabled_config_never_signals() -> None:
         as_of_date=_AS_OF,
         ratio_adjustment_event_since_basis=False,
         config=disabled_config,
+        business_calendar=_CALENDAR,
     )
     assert m.candidate_signal is False
     assert m.strong_signal is False

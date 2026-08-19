@@ -25,7 +25,6 @@ _FEASIBLE = TradingUnitFeasibility(
     trading_unit=100,
     minimum_sellable_shares=100,
     partial_sale_executable=True,
-    suggested_sell_shares=100,
     odd_lot_trading_available=False,
 )
 

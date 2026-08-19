@@ -280,6 +280,12 @@ class Recommendation(ImmutableSnapshot):
     partial_sale_executable: bool | None = None
     suggested_sell_shares: int | None = None
     odd_lot_trading_available: bool | None = None
+    # PARTIAL_PROFIT_TAKE成立後の売却強度・実際の売却比率(コードレビュー対応
+    # 2026-08、指摘Part B)。PARTIAL_PROFIT_TAKE以外では常にNone。
+    # sell_intensityはSellIntensity.value("LIGHT"/"STANDARD"/"STRONG"/
+    # "VERY_STRONG")のいずれか。
+    sell_intensity: str | None = None
+    suggested_sell_ratio: float | None = None
 
     # 業種別適正価格モデルの適用状況(未対応の場合は信頼度HIGH・適正価格単独での
     # PARTIAL以上を禁止するゲートに使う)

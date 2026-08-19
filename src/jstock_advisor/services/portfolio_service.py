@@ -153,11 +153,16 @@ class PortfolioService:
         sell_policy: str | None = None,
         profit_target_rate: float | None = None,
         memo: str | None = None,
+        is_sale: bool = False,
     ) -> Holding:
         """ロット一覧からHoldingを再計算する純粋な計算部分(永続化を行わない)。
         _recompute_holding()・build_purchase_write_plan()・build_sale_write_plan()
         から共通で呼ばれる(実装プランv2: 計画構築と実際の適用を分離するための
         リファクタ。計算内容は従来のprivate `_recompute_holding()`と同一)。
+
+        is_sale=True(build_sale_write_plan()からのみ指定、コードレビュー対応
+        2026-08)の場合、last_sale_dateを本呼び出しの評価日(JST)へ更新する。
+        購入・メタ情報更新では更新しない(既存値を保持する)。
         """
         if not lots:
             raise ValueError(f"銘柄コード{stock_code}の購入ロットがありません")
@@ -182,6 +187,11 @@ class PortfolioService:
             first_purchase_date=first_date,
             last_purchase_date=last_date,
             shares_and_price_adjustment_basis_date=adjustment_basis_date,
+            last_sale_date=(
+                evaluation_date_jst(now)
+                if is_sale
+                else (existing.last_sale_date if existing else None)
+            ),
             account_type=account_type
             or (existing.account_type if existing else AccountType.GENERAL),
             investment_purpose=investment_purpose
@@ -365,7 +375,9 @@ class PortfolioService:
                 resulting_holding=None,
             )
 
-        holding = self._compute_holding(stock_code, remaining_lots, existing_holding, now)
+        holding = self._compute_holding(
+            stock_code, remaining_lots, existing_holding, now, is_sale=True
+        )
         return SaleWritePlan(
             lot_deletes=lot_deletes,
             lot_puts=lot_puts,

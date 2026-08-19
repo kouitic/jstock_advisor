@@ -30,6 +30,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     ProfitTakingIndustrySector,
     RecommendationType,
+    SellIntensity,
     StockType,
     TrendClassification,
 )
@@ -106,6 +107,7 @@ from jstock_advisor.domain.signals.timing_score import (
 )
 from jstock_advisor.domain.signals.trading_unit_feasibility import (
     TradingUnitFeasibility,
+    compute_suggested_sell_shares,
     evaluate_trading_unit_feasibility,
 )
 from jstock_advisor.interfaces.types import DividendInfo, ShareholderBenefit
@@ -306,10 +308,30 @@ class ProfitTakingService:
         加重平均であり、買い増しがあった場合は最終購入日以降にのみ現在の
         平均取得単価が成立しているため、保有開始日を基準にすると買い増し前の
         (現在の平均取得単価とは無関係な)高値をpeakに含めてしまい、実際には
-        存在しなかった含み益吐き出しを検出してしまう。一部売却はFIFO(古い
-        ロットから消費)のため、last_purchase_dateより新しい取得原価を生成
-        せず、この基準日をそのまま使い続けてよい(詳細はprofit_protection.py
-        のcompute_profit_protection_metrics()のdocstring参照)。
+        存在しなかった含み益吐き出しを検出してしまう。
+
+        さらに、holding.last_sale_date(直近売却日、コードレビュー対応2026-08、
+        指摘A-2)がlast_purchase_dateより後であれば、そちらを基準日として使う。
+        これにより、Strong Profit Protectionが発火して一部売却された後、
+        「新しいpeakが形成される前の、同じ下落局面(peak/drawdown/giveback
+        がほぼ変わらない状態)」を根拠にPARTIALが連続発火することを防ぐ
+        (売却日以降の値動きだけを見る=売却時点までの上昇・下落は「既に
+        一部利確済みの材料」として扱い、新たな判定材料としては使わない)。
+        一部売却はFIFO(古いロットから消費)のため、last_purchase_dateより
+        新しい取得原価を生成せず、last_sale_date自体もaverage_purchase_price
+        の意味を壊さない(詳細はprofit_protection.pyのcompute_profit_
+        protection_metrics()のdocstring参照)。
+
+        新しいpeakが形成された後は、通常どおりbasis_date(=last_sale_date)
+        以降の値動きから再度peak/drawdown/givebackを計算するため、条件を
+        満たせば再度Strong PARTIALへ到達できる(再発火の完全禁止ではない)。
+        通常の(Profit Protection以外の理由による)売却も同様にbasis_dateを
+        進める。手動売却とProfit Protection起因売却を区別する信頼できる
+        手段が現在のデータモデルには無い(Transaction.recommendation_idは
+        任意項目であり、LINE会話型UIの売却フローはTransactionレコード自体を
+        作成しない)ため、あえて区別せず「直近の売却以降のみを見る」という
+        単純で安全側の規則に統一した(売却は常に「その時点までの値動きは
+        判断材料として使い切った」とみなす)。
 
         基準日以降に株式分割・株式併合・無償割当があった場合、raw価格系列
         (snapshot.bars、auto_adjust=False)と平均取得単価の調整基準が一致しない
@@ -318,6 +340,8 @@ class ProfitTakingService:
         判定を妨げない(既に現在の平均取得単価に反映済みであるため)。
         """
         basis_date = holding.last_purchase_date
+        if holding.last_sale_date is not None and holding.last_sale_date > basis_date:
+            basis_date = holding.last_sale_date
         corporate_action_service = CorporateActionService(self._providers.corporate_action, now=now)
         events = corporate_action_service.get_effective_events(holding.stock_code, basis_date)
         ratio_events = corporate_action_service.get_ratio_adjustment_events(events)
@@ -332,6 +356,7 @@ class ProfitTakingService:
             as_of_date=evaluation_date_jst(now),
             ratio_adjustment_event_since_basis=ratio_adjustment_event_since_basis,
             config=self._config.profit_taking.profit_protection,
+            business_calendar=self._calendar,
         )
 
     def _compute_confidence(
@@ -548,6 +573,38 @@ class ProfitTakingService:
             effective_recommendation_type = RecommendationType.REVIEW_AFTER_EARNINGS
             effective_sell_prices = SellPriceLevels()
 
+        # PARTIAL成立後の売却数量決定(コードレビュー対応2026-08、指摘Part B)。
+        # 「売るべきか」(上記のeffective_recommendation_type)とは分離し、
+        # 実際にPARTIAL_PROFIT_TAKEが成立した場合のみ、判定強度(sell_intensity、
+        # profit_taking.pyのorigin+momentumから決定済み)に応じた比率で売却株数を
+        # 算出する。決算直前抑制でREVIEW等へ格下げされた場合は算出しない
+        # (result.sell_intensityはfinal_action基準で計算されており、
+        # effective_recommendation_typeでの格下げを知らないため、ここで
+        # 明示的にNoneへ戻す)。
+        sell_intensity = result.sell_intensity
+        suggested_sell_shares: int | None = None
+        suggested_sell_ratio: float | None = None
+        if effective_recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE:
+            if sell_intensity is not None and trading_unit_feasibility.partial_sale_executable:
+                ratios = self._config.profit_taking.partial_sell_ratios
+                target_ratio = {
+                    SellIntensity.LIGHT: ratios.light,
+                    SellIntensity.STANDARD: ratios.standard,
+                    SellIntensity.STRONG: ratios.strong,
+                    SellIntensity.VERY_STRONG: ratios.very_strong,
+                }[sell_intensity]
+                suggestion = compute_suggested_sell_shares(
+                    shares=holding.shares,
+                    trading_unit=trading_unit_feasibility.trading_unit,
+                    odd_lot_trading_available=trading_unit_feasibility.odd_lot_trading_available,
+                    target_sell_ratio=target_ratio,
+                )
+                if suggestion is not None:
+                    suggested_sell_shares = suggestion.shares
+                    suggested_sell_ratio = suggestion.ratio
+        else:
+            sell_intensity = None
+
         confidence_result = self._compute_confidence(result, snapshot, now)
 
         self._audit.record(
@@ -585,6 +642,9 @@ class ProfitTakingService:
                 "trading_unit_partial_sale_executable": (
                     trading_unit_feasibility.partial_sale_executable
                 ),
+                "sell_intensity": sell_intensity.value if sell_intensity is not None else None,
+                "suggested_sell_shares": suggested_sell_shares,
+                "suggested_sell_ratio": suggested_sell_ratio,
                 "current_price_vs_neutral_fair_value_pct": (
                     result.current_price_vs_neutral_fair_value_pct
                 ),
@@ -811,7 +871,9 @@ class ProfitTakingService:
             trading_unit=trading_unit_feasibility.trading_unit,
             minimum_sellable_shares=trading_unit_feasibility.minimum_sellable_shares,
             partial_sale_executable=trading_unit_feasibility.partial_sale_executable,
-            suggested_sell_shares=trading_unit_feasibility.suggested_sell_shares,
+            suggested_sell_shares=suggested_sell_shares,
+            suggested_sell_ratio=suggested_sell_ratio,
+            sell_intensity=sell_intensity.value if sell_intensity is not None else None,
             odd_lot_trading_available=trading_unit_feasibility.odd_lot_trading_available,
             industry_sector=industry_sector,
             industry_model_applied=industry_model_applied,
