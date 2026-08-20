@@ -8,6 +8,7 @@ profit_protection.py自体の指標算出(境界値・データ品質)はtest_pr
 
 from __future__ import annotations
 
+import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
@@ -44,6 +45,7 @@ def _pp_metrics(
     return ProfitProtectionMetrics(
         insufficient_data_reason=None,
         peak_price_since_entry=Decimal("1454.5"),
+        peak_date=dt.date(2026, 6, 10),
         peak_gain_pct=peak_gain_pct,
         current_gain_pct=current_gain_pct,
         drawdown_from_peak_pct=drawdown_from_peak_pct,
@@ -57,6 +59,7 @@ def _insufficient_pp_metrics() -> ProfitProtectionMetrics:
     return ProfitProtectionMetrics(
         insufficient_data_reason="保有期間中に株式分割・併合等があり判定不能",
         peak_price_since_entry=None,
+        peak_date=None,
         peak_gain_pct=None,
         current_gain_pct=None,
         drawdown_from_peak_pct=None,

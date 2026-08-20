@@ -297,6 +297,19 @@ class ProfitTakingService:
         age_days = (snapshot.data_fetched_at.date() - fiscal_period_end).days
         return 0 <= age_days <= 400
 
+    @staticmethod
+    def _profit_protection_basis_date(holding: Holding) -> dt.date:
+        """Profit Protectionのpeak探索基準日を算出する唯一の正本。
+
+        _compute_profit_protection_metrics()とanalyze()呼び出し側の両方が
+        同じ値を参照するため、ここに切り出す(重複実装を避ける)。判定ロジック
+        自体は変更しない。
+        """
+        basis_date = holding.last_purchase_date
+        if holding.last_sale_date is not None and holding.last_sale_date > basis_date:
+            basis_date = holding.last_sale_date
+        return basis_date
+
     def _compute_profit_protection_metrics(
         self, holding: Holding, snapshot: StockSnapshot, now: dt.datetime
     ) -> ProfitProtectionMetrics:
@@ -339,9 +352,7 @@ class ProfitTakingService:
         スキップする(誤ったPARTIALを出すより安全側)。基準日より前の分割等は
         判定を妨げない(既に現在の平均取得単価に反映済みであるため)。
         """
-        basis_date = holding.last_purchase_date
-        if holding.last_sale_date is not None and holding.last_sale_date > basis_date:
-            basis_date = holding.last_sale_date
+        basis_date = self._profit_protection_basis_date(holding)
         corporate_action_service = CorporateActionService(self._providers.corporate_action, now=now)
         events = corporate_action_service.get_effective_events(holding.stock_code, basis_date)
         ratio_events = corporate_action_service.get_ratio_adjustment_events(events)
@@ -491,6 +502,7 @@ class ProfitTakingService:
             days_to_next_earnings_business_days=days_to_earnings,
             has_strong_counter_material=has_strong_counter_material,
             profit_protection=profit_protection_metrics,
+            profit_protection_basis_date=self._profit_protection_basis_date(holding),
         )
 
         is_benefit_eligible = snapshot.benefit is not None
@@ -675,9 +687,19 @@ class ProfitTakingService:
                 "release_confirmation_state": release_confirmation_state.value,
                 "earnings_decision_relevance": decision_relevance.value,
                 "profit_protection_signal": result.profit_protection_signal,
+                "profit_protection_basis_date": (
+                    result.profit_protection_basis_date.isoformat()
+                    if result.profit_protection_basis_date is not None
+                    else None
+                ),
                 "profit_protection_peak_price": (
                     str(result.profit_protection_peak_price)
                     if result.profit_protection_peak_price is not None
+                    else None
+                ),
+                "profit_protection_peak_date": (
+                    result.profit_protection_peak_date.isoformat()
+                    if result.profit_protection_peak_date is not None
                     else None
                 ),
                 "profit_protection_peak_gain_pct": result.profit_protection_peak_gain_pct,
@@ -858,7 +880,9 @@ class ProfitTakingService:
             profit_taking_ceiling_price=result.ceiling_price,
             profit_taking_upside_pct=result.upside_pct,
             profit_protection_signal=result.profit_protection_signal,
+            profit_protection_basis_date=result.profit_protection_basis_date,
             profit_protection_peak_price=result.profit_protection_peak_price,
+            profit_protection_peak_date=result.profit_protection_peak_date,
             profit_protection_peak_gain_pct=result.profit_protection_peak_gain_pct,
             profit_protection_current_gain_pct=result.profit_protection_current_gain_pct,
             profit_protection_drawdown_from_peak_pct=(

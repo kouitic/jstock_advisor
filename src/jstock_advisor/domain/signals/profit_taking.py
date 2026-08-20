@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from enum import IntEnum
@@ -180,6 +181,10 @@ class ProfitTakingConditionInputs:
     # 未算出(呼び出し側が算出しない、または算出不能)として扱い、Profit Protection
     # 軸は一切成立しない(捏造した根拠で判定を出さない原則)。
     profit_protection: ProfitProtectionMetrics | None = None
+    # compute_profit_protection_metrics()呼び出しに使ったbasis_dateをそのまま
+    # 転記する(2026-08、ATTENTION event identity用途)。判定ロジックには一切
+    # 使わず、ProfitTakingResultへの伝播のみに用いる。
+    profit_protection_basis_date: dt.date | None = None
 
 
 @dataclass(frozen=True)
@@ -216,7 +221,9 @@ class ProfitTakingResult:
     # 追跡可能性)。condition_inputs.profit_protectionと同一の値をそのまま転記する
     # (呼び出し側がProfitTakingResultだけを見て理由を再現できるようにする)。
     profit_protection_signal: str
+    profit_protection_basis_date: dt.date | None
     profit_protection_peak_price: Decimal | None
+    profit_protection_peak_date: dt.date | None
     profit_protection_peak_gain_pct: float | None
     profit_protection_current_gain_pct: float | None
     profit_protection_drawdown_from_peak_pct: float | None
@@ -1482,8 +1489,14 @@ def evaluate_profit_taking(
         profit_protection_signal=(
             profit_protection.signal_label if profit_protection is not None else "NONE"
         ),
+        profit_protection_basis_date=(
+            condition_inputs.profit_protection_basis_date if profit_protection is not None else None
+        ),
         profit_protection_peak_price=(
             profit_protection.peak_price_since_entry if profit_protection is not None else None
+        ),
+        profit_protection_peak_date=(
+            profit_protection.peak_date if profit_protection is not None else None
         ),
         profit_protection_peak_gain_pct=(
             profit_protection.peak_gain_pct if profit_protection is not None else None

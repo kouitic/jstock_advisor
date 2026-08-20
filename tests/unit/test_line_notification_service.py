@@ -19,6 +19,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     ExecutionMode,
     NotificationCategory,
+    NotificationIntent,
     NotificationStatus,
     NotificationType,
     RecommendationType,
@@ -2774,10 +2775,10 @@ def test_notify_batch_summary_new_format_excludes_critical_risk_from_sell_count(
 
     assert sent is True
     message = client.sent[0]
-    assert "一部売却2" in message
-    assert "全部売却1" in message
-    assert "売却3" in message
-    assert "緊急確認1" in message
+    assert "一部売却：2件" in message
+    assert "全部売却：1件" in message
+    assert "売却：3件" in message
+    assert "緊急確認：1件" in message
 
 
 def test_notify_batch_summary_new_format_omits_critical_risk_segment_when_zero(
@@ -2800,16 +2801,22 @@ def test_notify_batch_summary_new_format_omits_critical_risk_segment_when_zero(
     assert "緊急" not in message
 
 
-# ===== 横断整合性レビュー対応(2026-08、指摘6): dedup hashへaction counts追加 =====
+# ===== 通知意図3段階化(2026-08)対応: JST営業日1回保証・常時送信への変更 =====
+#
+# 以前は(1) category_counts+action countsを含むcontent_hashが同一日内で異なれば
+# 別内容として再送を許し、(2) holdings4分類がすべて0件の日はサマリー自体を
+# 送信しなかった。今回の再設計(修正6・Part 7)で、保有株チェック完了サマリーは
+# 【買い候補分析完了】と対称的に「内容に関わらずJST暦日1回のみ」「0件でも必ず
+# 送信」という方針へ変更したため、以下のテストは新方針に合わせて書き換えている。
 
 
-def test_notify_batch_summary_dedup_distinguishes_same_category_counts_different_actions(
+def test_notify_batch_summary_same_jst_business_date_suppresses_even_when_actions_differ(
     service_and_repos,
 ) -> None:
-    """category_counts(sent/hold等の内訳)が同一でも、実際に送信された
-    アクション種別の構成(一部売却/全部売却/売却/緊急確認)が異なれば別内容
-    として扱い、dedup抑止しない(以前はcontent_hashがcategory_counts等しか
-    見ておらず、構成の違いを無視して2通目を誤って抑止していた)。"""
+    """JST暦日が同じであれば、action構成(一部売却/全部売却/売却/緊急確認/
+    利益保全注意)が異なっていても2通目は送信しない(修正6: content_hash一致
+    だけでは、同日内に件数が変わる形で複数回実行された場合に複数回送信されて
+    しまう不備があったため、判定基準をJST暦日一致へ変更した)。"""
     service, _repo, client = service_and_repos
 
     first = service.notify_batch_summary(
@@ -2834,15 +2841,14 @@ def test_notify_batch_summary_dedup_distinguishes_same_category_counts_different
     )
 
     assert first is True
-    assert second is True
-    assert len(client.sent) == 2
+    assert second is False
+    assert len(client.sent) == 1
 
 
-def test_notify_batch_summary_dedup_still_suppresses_identical_action_counts(
+def test_notify_batch_summary_next_jst_business_date_allows_resend(
     service_and_repos,
 ) -> None:
-    """指摘6の回帰確認: category_counts・action counts双方が完全に一致する
-    場合は、従来どおり同一内容としてdedup抑止する(二重ディスパッチ対策)。"""
+    """JST暦日が翌日に変われば、内容が同一でも新しいサマリーとして送信できる。"""
     service, _repo, client = service_and_repos
 
     first = service.notify_batch_summary(
@@ -2859,7 +2865,82 @@ def test_notify_batch_summary_dedup_still_suppresses_identical_action_counts(
         "保有銘柄・ウォッチリスト分析",
         total=10,
         category_counts=_counts(sent=2, hold=8),
-        now=_NOW + dt.timedelta(seconds=15),
+        now=_NOW + dt.timedelta(days=1),
+        partial_sell_sent_count=2,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+
+    assert first is True
+    assert second is True
+    assert len(client.sent) == 2
+
+
+def test_notify_batch_summary_dedup_boundary_utc_same_day_jst_next_day(
+    service_and_repos,
+) -> None:
+    """23:00 UTC(=翌08:00 JST)をまたぐ境界: UTC暦日は同じでもJST暦日が翌日に
+    変わっていれば新しいサマリーとして送信できる(UTC日付でdedupすると本番の
+    バッチ実行時刻(23:00 UTC)付近で誤って同日抑止してしまう回帰を防ぐ)。"""
+    service, _repo, client = service_and_repos
+
+    first_now = dt.datetime(2026, 7, 24, 14, 0, tzinfo=dt.UTC)  # 2026-07-24 23:00 JST
+    second_now = dt.datetime(2026, 7, 24, 16, 0, tzinfo=dt.UTC)  # 2026-07-25 01:00 JST
+    assert first_now.date() == second_now.date()  # UTC暦日は同一(2026-07-24)
+
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=2, hold=8),
+        now=first_now,
+        partial_sell_sent_count=2,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=2, hold=8),
+        now=second_now,
+        partial_sell_sent_count=2,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+
+    assert first is True
+    assert second is True
+    assert len(client.sent) == 2
+
+
+def test_notify_batch_summary_dedup_boundary_jst_same_day_utc_different_day(
+    service_and_repos,
+) -> None:
+    """UTC暦日をまたいでもJST暦日が同じであれば同日扱いとして抑止する
+    (JST 00:00〜09:00の間はUTC上前日日付になる境界の回帰確認)。"""
+    service, _repo, client = service_and_repos
+
+    first_now = dt.datetime(2026, 7, 24, 23, 30, tzinfo=dt.UTC)  # 2026-07-25 08:30 JST
+    second_now = dt.datetime(2026, 7, 25, 0, 30, tzinfo=dt.UTC)  # 2026-07-25 09:30 JST
+    assert first_now.date() != second_now.date()  # UTC暦日は異なる
+
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=2, hold=8),
+        now=first_now,
+        partial_sell_sent_count=2,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=2, hold=8),
+        now=second_now,
         partial_sell_sent_count=2,
         full_sell_sent_count=0,
         sell_sent_count=0,
@@ -2871,14 +2952,12 @@ def test_notify_batch_summary_dedup_still_suppresses_identical_action_counts(
     assert len(client.sent) == 1
 
 
-# ===== 横断整合性レビュー対応(2026-08、指摘5): action 0件時のholdingsサマリー抑止 =====
-
-
-def test_notify_batch_summary_suppressed_when_all_holdings_action_counts_are_zero(
+def test_notify_batch_summary_holdings_always_sends_even_when_all_action_counts_are_zero(
     service_and_repos,
 ) -> None:
-    """4分類すべてが0件の場合、「一部売却0｜全部売却0｜売却0」という空虚な
-    通知を送らない(LINE送信抑止、戻り値False)。"""
+    """全区分(一部売却/全部売却/売却/緊急確認/利益保全注意)が0件でも、
+    【買い候補分析完了】と対称的に常にサマリーを送信する(修正5・Part 7、
+    以前は4分類すべて0件の日はサマリー自体を送信しなかった)。"""
     service, _repo, client = service_and_repos
 
     sent = service.notify_batch_summary(
@@ -2890,10 +2969,13 @@ def test_notify_batch_summary_suppressed_when_all_holdings_action_counts_are_zer
         full_sell_sent_count=0,
         sell_sent_count=0,
         critical_risk_sent_count=0,
+        attention_detected_count=0,
     )
 
-    assert sent is False
-    assert client.sent == []
+    assert sent is True
+    message = client.sent[0]
+    assert "該当なし" in message
+    assert "特に対応が必要な銘柄はありませんでした" in message
 
 
 def test_notify_batch_summary_sends_when_only_partial_sell_is_nonzero(
@@ -2919,8 +3001,7 @@ def test_notify_batch_summary_sends_when_only_partial_sell_is_nonzero(
 def test_notify_batch_summary_sends_when_only_critical_risk_is_nonzero(
     service_and_repos,
 ) -> None:
-    """緊急確認のみ1件でも、他3分類が0であればサマリー自体は抑止しない
-    (「一部売却0｜全部売却0｜売却0｜緊急確認1」を送信する)。"""
+    """緊急確認のみ1件でも、他が0であればサマリー自体は抑止しない。"""
     service, _repo, client = service_and_repos
 
     sent = service.notify_batch_summary(
@@ -2935,40 +3016,78 @@ def test_notify_batch_summary_sends_when_only_critical_risk_is_nonzero(
     )
 
     assert sent is True
-    assert "緊急確認1" in client.sent[0]
+    assert "緊急確認：1件" in client.sent[0]
 
 
-def test_notify_batch_summary_zero_guard_is_independent_of_send_empty_summary_flag(
+def test_notify_batch_summary_holdings_send_is_unaffected_by_send_empty_summary_flag(
     service_and_repos,
 ) -> None:
-    """指摘5要件: このガードはBUY専用のsend_empty_summary(購入候補0件でも
-    「該当なし」を明示送信する設計)とは無関係な別ロジックであることを確認する。
-    send_empty_summary=True(既定)・False いずれを渡しても、holdings4分類が
-    全て0なら抑止される(send_empty_summaryの値に一切左右されない)。"""
+    """send_empty_summaryはBUY専用のガード(購入候補0件でも「該当なし」を明示
+    送信する設計)であり、holdings側の常時送信方針とは無関係な別ロジックである
+    ことを確認する。send_empty_summary=True(既定)・False いずれを渡しても、
+    holdings呼び出し(action countsのいずれかを渡す)では常に送信される。"""
     service, _repo, client = service_and_repos
 
-    for send_empty_summary in (True, False):
+    for i, send_empty_summary in enumerate((True, False)):
         sent = service.notify_batch_summary(
             "保有銘柄・ウォッチリスト分析",
             total=10,
             category_counts=_counts(hold=10),
-            now=_NOW,
+            now=_NOW + dt.timedelta(days=i),
             send_empty_summary=send_empty_summary,
             partial_sell_sent_count=0,
             full_sell_sent_count=0,
             sell_sent_count=0,
             critical_risk_sent_count=0,
         )
-        assert sent is False, send_empty_summary
-    assert client.sent == []
+        assert sent is True, send_empty_summary
+    assert len(client.sent) == 2
+
+
+def test_notify_batch_summary_attention_detected_count_is_shown_and_reused_for_dedup(
+    service_and_repos,
+) -> None:
+    """利益保全注意はattention_detected_count(個別送信の成否を問わない検出件数)
+    をそのまま表示する。ATTENTIONのみ非0件の日も送信され、JST暦日dedupの対象に
+    なることを確認する。"""
+    service, _repo, client = service_and_repos
+
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=0, hold=10),
+        now=_NOW,
+        partial_sell_sent_count=0,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+        attention_detected_count=2,
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        total=10,
+        category_counts=_counts(sent=0, hold=10),
+        now=_NOW + dt.timedelta(minutes=5),
+        partial_sell_sent_count=0,
+        full_sell_sent_count=0,
+        sell_sent_count=0,
+        critical_risk_sent_count=0,
+        # 個別送信がすべてdedupで抑止されても、検出件数(2)は変わらず表示される
+        # 想定を示すため、意図的に同じ値を渡す。
+        attention_detected_count=2,
+    )
+
+    assert first is True
+    assert "利益保全注意：2件" in client.sent[0]
+    assert second is False  # 同一JST暦日のため2通目は抑止
 
 
 def test_notify_batch_summary_suppression_does_not_write_notification_log(
     service_and_repos,
 ) -> None:
-    """抑止時はLINE送信もNotificationLog保存も行わない(dedup用ログを汚さず、
-    翌日以降の実送信判定に影響を与えない)。"""
-    service, _repo, _client = service_and_repos
+    """同一JST暦日での抑止時はLINE送信もNotificationLog保存も行わない
+    (1通目のログのみが残り、2通目の抑止によって上書き・追記されない)。"""
+    service, repo, _client = service_and_repos
 
     service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
@@ -2980,48 +3099,26 @@ def test_notify_batch_summary_suppression_does_not_write_notification_log(
         sell_sent_count=0,
         critical_risk_sent_count=0,
     )
-
-    assert (
-        service._log_repo.latest_by_stock_and_type(
-            "__batch__:保有銘柄・ウォッチリスト分析", NotificationType.BATCH_SUMMARY
-        )
-        is None
+    first_log = service._log_repo.latest_by_stock_and_type(
+        "__batch__:保有銘柄・ウォッチリスト分析", NotificationType.BATCH_SUMMARY
     )
+    assert first_log is not None
 
-
-def test_notify_batch_summary_suppression_still_allows_later_nonzero_send_same_day(
-    service_and_repos,
-) -> None:
-    """同日内で最初は0件抑止→後続で非0件になった場合、抑止時にログを書いて
-    いないため、後続呼び出しがdedupに阻まれず正しく送信されることを確認する
-    (batch-completion自体は_finish_batch_item側の責務で本テストの対象外だが、
-    サマリー抑止がその後の正常送信を妨げないことを保証する)。"""
-    service, _repo, client = service_and_repos
-
-    suppressed = service.notify_batch_summary(
+    service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=10,
-        category_counts=_counts(hold=10),
-        now=_NOW,
-        partial_sell_sent_count=0,
+        category_counts=_counts(sent=5, hold=5),
+        now=_NOW + dt.timedelta(minutes=10),
+        partial_sell_sent_count=3,
         full_sell_sent_count=0,
         sell_sent_count=0,
         critical_risk_sent_count=0,
     )
-    assert suppressed is False
-
-    sent = service.notify_batch_summary(
-        "保有銘柄・ウォッチリスト分析",
-        total=10,
-        category_counts=_counts(sent=1, hold=9),
-        now=_NOW,
-        partial_sell_sent_count=1,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+    second_log = service._log_repo.latest_by_stock_and_type(
+        "__batch__:保有銘柄・ウォッチリスト分析", NotificationType.BATCH_SUMMARY
     )
-    assert sent is True
-    assert len(client.sent) == 1
+    assert second_log is not None
+    assert second_log.notification_id == first_log.notification_id
 
 
 def test_normal_and_validation_bodies_differ_only_by_prefix() -> None:
@@ -3244,3 +3341,247 @@ def test_representative_price_selection_unchanged_for_partial_watch_and_normal_s
         rule_version="v1-mvp",
     )
     assert line_notification_service_module._representative_price(rec_sell) == Decimal("4000")
+
+
+# ===== 通知意図3段階化(2026-08): ATTENTION(Profit Protection candidate/strong) =====
+
+
+def _make_attention_watch_recommendation(
+    *,
+    recommendation_id: str,
+    signal: str = "CANDIDATE",
+    basis_date: dt.date = dt.date(2026, 6, 1),
+    peak_date: dt.date = dt.date(2026, 6, 10),
+    peak_price: Decimal = Decimal("1500"),
+    stock_code: str = "8136",
+) -> Recommendation:
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code=stock_code,
+        stock_name="テスト利益保全",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("1400"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        profit_protection_signal=signal,
+        profit_protection_basis_date=basis_date,
+        profit_protection_peak_price=peak_price,
+        profit_protection_peak_date=peak_date,
+        profit_protection_peak_gain_pct=58.1,
+        profit_protection_current_gain_pct=33.4,
+        profit_protection_drawdown_from_peak_pct=15.6,
+        profit_protection_gain_giveback_ratio_pct=42.5,
+    )
+
+
+def test_watch_candidate_signal_resolves_to_attention_intent(service_and_repos) -> None:
+    service, _repo, _client = service_and_repos
+    rec = _make_attention_watch_recommendation(recommendation_id="att-1")
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+
+    assert outcome.status == NotificationStatus.SENT
+    assert outcome.notification_intent is NotificationIntent.ATTENTION
+    assert outcome.block_category is None
+
+
+def test_watch_strong_signal_resolves_to_attention_intent(service_and_repos) -> None:
+    service, _repo, _client = service_and_repos
+    rec = _make_attention_watch_recommendation(recommendation_id="att-strong", signal="STRONG")
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+
+    assert outcome.notification_intent is NotificationIntent.ATTENTION
+
+
+def test_watch_without_profit_protection_signal_stays_internal_only(service_and_repos) -> None:
+    service, _repo, _client = service_and_repos
+    rec = _make_attention_watch_recommendation(recommendation_id="att-none", signal="NONE")
+
+    outcome = service.evaluate_notification_status(rec, _NOW)
+
+    assert outcome.notification_intent is NotificationIntent.INTERNAL_ONLY
+    assert outcome.status == NotificationStatus.NOT_REQUIRED
+    assert outcome.block_reason == "NON_ACTIONABLE"
+
+
+def test_attention_notification_first_send_via_with_status(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec = _make_attention_watch_recommendation(recommendation_id="att-send-1")
+    repo.save(rec)
+
+    outcome = service.notify_recommendation_with_status(rec, _NOW)
+
+    assert outcome.sent is True
+    assert outcome.notification_intent is NotificationIntent.ATTENTION
+    assert len(client.sent) == 1
+    log = service._log_repo.latest_by_stock_and_type(
+        rec.stock_code, NotificationType.PROFIT_PROTECTION_ATTENTION
+    )
+    assert log is not None
+    assert log.related_recommendation_id == rec.recommendation_id
+
+
+def test_attention_message_never_shows_sell_quantity_fields(service_and_repos) -> None:
+    """ATTENTIONはPARTIAL_PROFIT_TAKEではないため、そもそもsuggested_sell_shares/
+    ratioがRecommendationに設定されないが、念のため本文にも一切現れないことを
+    確認する(build_attention_text_input()がcategory=WATCHを使い、format_
+    notification_text()がPARTIAL_SELL以外で売却数量セグメントを構造上生成
+    しないことの統合確認)。"""
+    service, repo, client = service_and_repos
+    rec = _make_attention_watch_recommendation(recommendation_id="att-no-shares", signal="STRONG")
+    repo.save(rec)
+
+    service.send_attention_notification(rec, _NOW)
+
+    message = client.sent[0]
+    assert "株" not in message
+    assert "利益保全注意" in message
+
+
+def test_attention_origin_differs_between_candidate_and_strong(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec_candidate = _make_attention_watch_recommendation(
+        recommendation_id="att-origin-candidate", signal="CANDIDATE", stock_code="8136"
+    )
+    rec_strong = _make_attention_watch_recommendation(
+        recommendation_id="att-origin-strong", signal="STRONG", stock_code="9101"
+    )
+    repo.save(rec_candidate)
+    repo.save(rec_strong)
+
+    service.send_attention_notification(rec_candidate, _NOW)
+    service.send_attention_notification(rec_strong, _NOW)
+
+    assert "(一部売却見送り)" not in client.sent[0]
+    assert "(一部売却見送り)" in client.sent[1]
+
+
+def test_attention_same_event_identity_is_deduplicated(service_and_repos) -> None:
+    service, repo, client = service_and_repos
+    rec_day1 = _make_attention_watch_recommendation(recommendation_id="att-dedup-1")
+    repo.save(rec_day1)
+    first = service.notify_recommendation_with_status(rec_day1, _NOW)
+    assert first.sent is True
+
+    rec_day2 = _make_attention_watch_recommendation(recommendation_id="att-dedup-2")
+    repo.save(rec_day2)
+    second = service.notify_recommendation_with_status(rec_day2, _NOW + dt.timedelta(days=1))
+
+    assert second.sent is False
+    assert second.status == NotificationStatus.DUPLICATE_SUPPRESSED
+    assert len(client.sent) == 1
+
+
+def test_attention_new_peak_allows_resend(service_and_repos) -> None:
+    """同じbasis_dateのまま高値が更新された(peak_price上昇)場合は新eventとして
+    再送する。"""
+    service, repo, client = service_and_repos
+    rec_day1 = _make_attention_watch_recommendation(
+        recommendation_id="att-newpeak-1", peak_price=Decimal("1500")
+    )
+    repo.save(rec_day1)
+    service.notify_recommendation_with_status(rec_day1, _NOW)
+
+    rec_day2 = _make_attention_watch_recommendation(
+        recommendation_id="att-newpeak-2",
+        peak_price=Decimal("1600"),
+        peak_date=dt.date(2026, 6, 20),
+    )
+    repo.save(rec_day2)
+    second = service.notify_recommendation_with_status(rec_day2, _NOW + dt.timedelta(days=1))
+
+    assert second.sent is True
+    assert len(client.sent) == 2
+
+
+def test_attention_new_basis_date_allows_resend(service_and_repos) -> None:
+    """買い増し・実売却でbasis_dateが進んだ場合は新eventとして再送する
+    (peak_price/peak_dateが偶然同じ値であっても)。"""
+    service, repo, client = service_and_repos
+    rec_day1 = _make_attention_watch_recommendation(recommendation_id="att-newbasis-1")
+    repo.save(rec_day1)
+    service.notify_recommendation_with_status(rec_day1, _NOW)
+
+    rec_day2 = _make_attention_watch_recommendation(
+        recommendation_id="att-newbasis-2", basis_date=dt.date(2026, 7, 1)
+    )
+    repo.save(rec_day2)
+    second = service.notify_recommendation_with_status(rec_day2, _NOW + dt.timedelta(days=1))
+
+    assert second.sent is True
+    assert len(client.sent) == 2
+
+
+def test_attention_missing_basis_date_and_peak_date_does_not_crash(service_and_repos) -> None:
+    """basis_date/peak_dateが欠損している(旧Recommendation・後方互換)場合でも
+    例外を出さない。欠損値は固定文字列"NONE"としてハッシュ化されるため、残りの
+    値(peak_price)が同じであれば従来どおり決定的に同一eventとしてdedupされる
+    (欠損時に無条件で再送を許すと同じ局面を繰り返し通知してしまうため、安全側の
+    デフォルトはdedup継続)。"""
+    service, repo, client = service_and_repos
+    rec_day1 = _make_attention_watch_recommendation(recommendation_id="att-missing-1").model_copy(
+        update={"profit_protection_basis_date": None, "profit_protection_peak_date": None}
+    )
+    repo.save(rec_day1)
+    first = service.notify_recommendation_with_status(rec_day1, _NOW)
+    assert first.sent is True
+
+    # peak_priceも欠損値も同じ→同一eventとして扱われ再送しない。
+    rec_day2_same = _make_attention_watch_recommendation(
+        recommendation_id="att-missing-2"
+    ).model_copy(update={"profit_protection_basis_date": None, "profit_protection_peak_date": None})
+    repo.save(rec_day2_same)
+    second = service.notify_recommendation_with_status(rec_day2_same, _NOW + dt.timedelta(days=1))
+    assert second.sent is False
+    assert second.status == NotificationStatus.DUPLICATE_SUPPRESSED
+
+    # peak_priceが変われば、日付が両方とも欠損したままでも新eventとして再送する。
+    rec_day3_diff = _make_attention_watch_recommendation(
+        recommendation_id="att-missing-3", peak_price=Decimal("1700")
+    ).model_copy(update={"profit_protection_basis_date": None, "profit_protection_peak_date": None})
+    repo.save(rec_day3_diff)
+    third = service.notify_recommendation_with_status(rec_day3_diff, _NOW + dt.timedelta(days=2))
+    assert third.sent is True
+    assert len(client.sent) == 2
+
+
+def test_partial_profit_take_is_actionable_not_attention(service_and_repos) -> None:
+    """PARTIAL_PROFIT_TAKE(strong_signal成立かつpartial_sale_executable=True)は
+    ATTENTIONへ昇格せずACTIONABLEのまま通常経路(send_recommendation_notification)
+    で送信される(ATTENTION→PARTIAL昇格時、ATTENTION専用ロジックには一切触れない
+    ことの確認)。"""
+    service, repo, client = service_and_repos
+    rec = Recommendation(
+        recommendation_id="att-upgraded-partial",
+        stock_code="8136",
+        stock_name="テスト利益保全",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            recommended_limit_price=PriceWithRationale(price=Decimal("1450"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("1400"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        profit_protection_signal="STRONG",
+        profit_protection_basis_date=dt.date(2026, 6, 1),
+        profit_protection_peak_date=dt.date(2026, 6, 10),
+        profit_protection_peak_price=Decimal("1500"),
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.5,
+    )
+    repo.save(rec)
+
+    outcome = service.notify_recommendation_with_status(rec, _NOW)
+
+    assert outcome.sent is True
+    assert outcome.notification_intent is NotificationIntent.ACTIONABLE
+    assert service._log_repo.latest_by_stock_and_type(
+        rec.stock_code, NotificationType.PROFIT_PROTECTION_ATTENTION
+    ) is None
+    log = service._log_repo.latest_by_stock_and_type(
+        rec.stock_code, NotificationType.PROFIT_TAKING_SIGNAL
+    )
+    assert log is not None

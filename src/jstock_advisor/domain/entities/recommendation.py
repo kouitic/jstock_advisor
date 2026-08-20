@@ -264,7 +264,15 @@ class Recommendation(ImmutableSnapshot):
     # --- 利益保全(Profit Protection)判定(2026-08追加、要求仕様§8: 判定理由の
     # 追跡可能性)。"NONE"/"CANDIDATE"/"STRONG"/"DATA_INSUFFICIENT"のいずれか。
     profit_protection_signal: str | None = None
+    # peak探索の基準日(=最終購入日、実売却があればさらにその売却日、コードレビュー
+    # 対応2026-08)。判定ロジックには使わず、ATTENTION通知のevent identity
+    # (line_notification_service.py、2026-08通知意図3段階化)の構成要素として使う。
+    profit_protection_basis_date: dt.date | None = None
     profit_protection_peak_price: Decimal | None = None
+    # peak_price_since_entryを記録した日(同値の高値が複数ある場合は最新日、
+    # profit_protection.pyのcompute_profit_protection_metrics()参照)。用途は
+    # profit_protection_basis_dateと同じくevent identityの構成要素。
+    profit_protection_peak_date: dt.date | None = None
     profit_protection_peak_gain_pct: float | None = None
     profit_protection_current_gain_pct: float | None = None
     profit_protection_drawdown_from_peak_pct: float | None = None

@@ -35,6 +35,7 @@ from jstock_advisor.domain.entities.enums import (
     EligibilityBlockCategory,
     NotificationCategory,
     NotificationContext,
+    NotificationIntent,
     NotificationStatus,
     NotificationType,
     RecommendationType,
@@ -52,10 +53,17 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
-from jstock_advisor.domain.jst import format_jst
+from jstock_advisor.domain.jst import evaluation_date_jst, format_jst
 from jstock_advisor.domain.notification.message_formatter import format_notification_text
+from jstock_advisor.domain.notification.notification_intent import (
+    resolve_attention_origin as _resolve_attention_origin,
+)
+from jstock_advisor.domain.notification.notification_intent import (
+    resolve_notification_intent as _resolve_notification_intent,
+)
 from jstock_advisor.domain.notification.recommendation_adapter import (
     SHORT_TEXT_CATEGORIES,
+    build_attention_text_input,
     build_notification_text_input,
     build_watch_end_text_input,
 )
@@ -192,6 +200,28 @@ def resolve_notification_category(recommendation: Recommendation) -> Notificatio
     # buy_action=Noneの残り(HOLD等)は既存どおりOTHER扱い(通知対象外の判定は
     # 呼び出し元のnotify_below_score等が別途行う)。
     return NotificationCategory.OTHER
+
+
+def resolve_notification_intent_for_recommendation(
+    recommendation: Recommendation,
+) -> NotificationIntent:
+    """Recommendationを直接受け取るresolve_notification_intent()の利便関数。
+
+    domain/notification/notification_intent.pyのresolve_notification_intent()は
+    domain→service方向の逆依存を避けるためNotificationCategoryを直接受け取れず、
+    呼び出し側がresolve_notification_category()で算出したカテゴリを渡す必要が
+    ある。本関数がその橋渡しを一箇所に集約し、送信ゲート(evaluate_notification_
+    status())・監査記録(holdings_watchlist_handler.py)・サマリ集計のいずれも
+    本関数(またはresolve_attention_origin_for_recommendation())だけを呼べば
+    よいようにする(重複実装の禁止)。
+    """
+    category = resolve_notification_category(recommendation)
+    return _resolve_notification_intent(category, recommendation.profit_protection_signal)
+
+
+def resolve_attention_origin_for_recommendation(recommendation: Recommendation) -> str | None:
+    category = resolve_notification_category(recommendation)
+    return _resolve_attention_origin(category, recommendation.profit_protection_signal)
 
 
 # cross-pipeline重複抑止(コードレビュー対応2026-08、指摘5)の優先度表。
@@ -475,6 +505,38 @@ def _representative_price(recommendation: Recommendation) -> Decimal | None:
 
 def _compute_content_hash(recommendation_type: RecommendationType) -> str:
     return hashlib.sha256(recommendation_type.value.encode()).hexdigest()[:16]
+
+
+def _compute_attention_event_identity(recommendation: Recommendation) -> str:
+    """Profit Protection ATTENTIONのevent identity(2026-08、通知意図3段階化)。
+
+    (basis_date, peak_date, peak_price)の組を使う。basis_dateが変わる(買い増し・
+    実売却があった)、またはpeak_dateもしくはpeak_priceが変わる(同じbasis_date内で
+    高値が更新された、または同値の高値が別日に再形成された)場合を「新しい局面」と
+    みなす。3値のいずれかが欠けている場合(basis_date/peak_dateフィールド追加前の
+    旧Recommendation等)は"NONE"という固定文字列でハッシュ化する。これにより
+    例外は発生させず、欠損していない残りの値(通常はpeak_price)だけを根拠に
+    従来どおり決定的にdedupする(欠損時に無条件へ再送を許すと、値が変わらない
+    限り同じ局面を繰り返し通知してしまうため)。NotificationLog.content_hashへ
+    そのまま保存する(専用フィールドを追加せず既存スキーマを再利用)。
+    """
+    basis = (
+        recommendation.profit_protection_basis_date.isoformat()
+        if recommendation.profit_protection_basis_date is not None
+        else "NONE"
+    )
+    peak_date = (
+        recommendation.profit_protection_peak_date.isoformat()
+        if recommendation.profit_protection_peak_date is not None
+        else "NONE"
+    )
+    peak_price = (
+        str(recommendation.profit_protection_peak_price)
+        if recommendation.profit_protection_peak_price is not None
+        else "NONE"
+    )
+    raw = f"{basis}|{peak_date}|{peak_price}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def _earnings_waiting_state_key(recommendation: Recommendation) -> str:
@@ -1669,6 +1731,11 @@ class NotificationOutcome:
     data_quality_blocked: bool = False
     block_category: EligibilityBlockCategory | None = None
     block_reason: str | None = None
+    # 通知意図3段階化(2026-08)。呼び出し側(notify_recommendation_with_status)が
+    # ACTIONABLE/ATTENTIONいずれの送信経路(本文フォーマット・NotificationType)を
+    # 使うか判別するために使う。監査記録(HoldingEvaluationAudit)にもそのまま
+    # 引き継ぐ。
+    notification_intent: NotificationIntent | None = None
 
 
 class LineNotificationService:
@@ -1728,8 +1795,15 @@ class LineNotificationService:
         outcome = self.evaluate_notification_status(recommendation, now)
         if outcome.status != NotificationStatus.SENT or outcome.data_quality_blocked:
             return outcome
-        self.send_recommendation_notification(recommendation, now)
-        return NotificationOutcome(status=NotificationStatus.SENT, sent=True)
+        if outcome.notification_intent is NotificationIntent.ATTENTION:
+            self.send_attention_notification(recommendation, now)
+        else:
+            self.send_recommendation_notification(recommendation, now)
+        return NotificationOutcome(
+            status=NotificationStatus.SENT,
+            sent=True,
+            notification_intent=outcome.notification_intent,
+        )
 
     def evaluate_notification_status(
         self,
@@ -1774,6 +1848,15 @@ class LineNotificationService:
         if category_for_action_gate is NotificationCategory.NOT_NOTIFIABLE:
             return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
 
+        # 通知意図3段階化(2026-08): NON_ACTIONABLEゲートの判定基準をNotificationCategory
+        # 単独からNotificationIntentへ差し替える。ACTIONABLE系カテゴリ(BUY/SELL/
+        # PARTIAL_SELL/CRITICAL_RISK)は元々_NON_ACTIONABLE_CATEGORIESに含まれない
+        # ため挙動は不変。WATCH系のみ、Profit Protectionのcandidate/strongシグナルに
+        # 起因する場合(ATTENTION)は非アクション系ゲートを通過し、それ以外の理由に
+        # よるWATCH(決算待ち・ポートフォリオ集中等、INTERNAL_ONLY)は従来どおり
+        # ゲートされる。
+        intent = resolve_notification_intent_for_recommendation(recommendation)
+
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         previous = self._previous_recommendation(recommendation.stock_code, notification_type)
 
@@ -1799,27 +1882,35 @@ class LineNotificationService:
                 )
             if not requires_manual_review:
                 self.notify_data_quality_alert(alert, now)
-            if category_for_action_gate in _NON_ACTIONABLE_CATEGORIES:
+            if intent is NotificationIntent.INTERNAL_ONLY:
                 return NotificationOutcome(
                     status=NotificationStatus.NOT_REQUIRED,
                     sent=False,
                     block_category=EligibilityBlockCategory.NON_ACTIONABLE,
                     block_reason="NON_ACTIONABLE",
+                    notification_intent=intent,
                 )
             return NotificationOutcome(
-                status=NotificationStatus.NOT_REQUIRED, sent=False, data_quality_blocked=True
+                status=NotificationStatus.NOT_REQUIRED,
+                sent=False,
+                data_quality_blocked=True,
+                notification_intent=intent,
             )
 
         # LINE通知アクション限定化(2026-08、コードレビュー対応): WATCH/MANUAL_REVIEW
         # (証拠品質系の要確認を含む)は、内部論理矛盾が検出されなかった場合のみ
         # ここでゲートする。「送らない」という判定自体もNON_ACTIONABLEとしてAuditから
-        # 追跡できるようにする(黙って握りつぶさない)。
-        if category_for_action_gate in _NON_ACTIONABLE_CATEGORIES:
+        # 追跡できるようにする(黙って握りつぶさない)。通知意図3段階化(2026-08)後は
+        # NotificationCategory単独ではなくNotificationIntent==INTERNAL_ONLYで判定する
+        # (ATTENTIONはこのゲートを通過し、以降の既存安全ゲート(TradeCooldown・
+        # CrossPipelinePriority・dedup)をACTIONABLEと同様に通す)。
+        if intent is NotificationIntent.INTERNAL_ONLY:
             return NotificationOutcome(
                 status=NotificationStatus.NOT_REQUIRED,
                 sent=False,
                 block_category=EligibilityBlockCategory.NON_ACTIONABLE,
                 block_reason="NON_ACTIONABLE",
+                notification_intent=intent,
             )
 
         cooldown = self.check_trade_cooldown_eligibility(recommendation, now)
@@ -1829,6 +1920,7 @@ class LineNotificationService:
                 sent=False,
                 block_category=cooldown.block_category,
                 block_reason=cooldown.block_reason,
+                notification_intent=intent,
             )
 
         priority = self.check_cross_pipeline_priority_eligibility(recommendation, now)
@@ -1838,10 +1930,19 @@ class LineNotificationService:
                 sent=False,
                 block_category=priority.block_category,
                 block_reason=priority.block_reason,
+                notification_intent=intent,
             )
 
-        status = self._notification_status_for_send(recommendation, previous, now)
-        return NotificationOutcome(status=status, sent=False)
+        # 通知意図3段階化(2026-08): ATTENTIONはPROFIT_TAKING_SIGNAL向けの
+        # content_hash/価格変化/resend_after_days方式(_notification_status_for_send)
+        # ではなく、Profit Protectionのevent identity(basis_date/peak_date/
+        # peak_price)に基づく専用dedupを使う(既存PARTIAL/FULL系の再送制御は
+        # 一切変更しない、別経路として追加するのみ)。
+        if intent is NotificationIntent.ATTENTION:
+            status = self._attention_status_for_send(recommendation, now)
+        else:
+            status = self._notification_status_for_send(recommendation, previous, now)
+        return NotificationOutcome(status=status, sent=False, notification_intent=intent)
 
     def check_data_quality_eligibility(
         self,
@@ -2057,6 +2158,39 @@ class LineNotificationService:
                     notification_type=NotificationType.WATCH_END,
                     stock_code=recommendation.stock_code,
                     content_hash=_compute_content_hash(recommendation.recommendation_type),
+                    sent_at=now,
+                    related_recommendation_id=recommendation.recommendation_id,
+                )
+            )
+
+    def send_attention_notification(self, recommendation: Recommendation, now: dt.datetime) -> None:
+        """Profit Protection ATTENTION通知(2026-08、通知意図3段階化)を送信する。
+
+        呼び出し前提: evaluate_notification_statusでnotification_intent==ATTENTION
+        かつstatus==SENTであることを確認していること(このメソッド自体は
+        判定を行わない、send_recommendation_notification()と同じ規約)。
+
+        suggested_sell_shares/suggested_sell_ratio/sell_intensityは一切参照しない
+        (build_attention_text_input()がcategory=WATCHのNotificationTextInputを
+        生成し、format_notification_text()がPARTIAL_SELL以外では売却数量
+        セグメントを構造上生成しないため)。
+        """
+        attention_origin = resolve_attention_origin_for_recommendation(recommendation)
+        if attention_origin is None:
+            raise ValueError(
+                "send_attention_notification called for a non-ATTENTION recommendation: "
+                f"{recommendation.recommendation_id}"
+            )
+        text_input = build_attention_text_input(recommendation, attention_origin)
+        message = format_notification_text(text_input)
+        self._push(message)
+        if not self._execution_context.is_validation:
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=str(uuid.uuid4()),
+                    notification_type=NotificationType.PROFIT_PROTECTION_ATTENTION,
+                    stock_code=recommendation.stock_code,
+                    content_hash=_compute_attention_event_identity(recommendation),
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
                 )
@@ -2400,6 +2534,13 @@ class LineNotificationService:
         full_sell_sent_count: int | None = None,
         sell_sent_count: int | None = None,
         critical_risk_sent_count: int | None = None,
+        # 通知意図3段階化(2026-08)。Profit Protectionのcandidate/strongシグナルに
+        # 起因するATTENTIONの「検出件数」(attention_detected_count、個別送信が
+        # dedupで抑止された銘柄も含む)。attention_sent_count(実際に個別LINE
+        # 送信された件数)ではなくこちらをサマリーへ表示する(継続中のATTENTIONが
+        # 2日目以降、個別送信が無いことで「解消した」ように誤読されるのを防ぐ、
+        # holdings_watchlist_handler.py側で算出)。
+        attention_detected_count: int | None = None,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
         全体件数・区分別内訳のサマリー通知(要求仕様§13)。個別のデータ取得エラー・
@@ -2463,8 +2604,24 @@ class LineNotificationService:
             f"{process_name}|{now.date().isoformat()}|{total}|"
             f"{sorted(counts.items())}|near_buy={near_buy_sent_count}|"
             f"partial_sell={partial_sell_sent_count}|full_sell={full_sell_sent_count}|"
-            f"sell={sell_sent_count}|critical_risk={critical_risk_sent_count}".encode()
+            f"sell={sell_sent_count}|critical_risk={critical_risk_sent_count}|"
+            f"attention={attention_detected_count}".encode()
         ).hexdigest()[:16]
+
+        # コードレビュー対応(2026-08、LINE通知アクション限定化・通知意図3段階化):
+        # 新4分類(一部売却/全部売却/売却/利益保全注意、+緊急確認)のいずれかが
+        # 渡された場合、holdings_watchlist_handler.py専用の書式へ切り替える
+        # (buy_candidates_handler.py等の既存呼び出し元は渡さないため、以下の
+        # 従来フォーマットのまま)。WATCH(利益保全注意以外)/MANUAL_REVIEWは
+        # もはやLINE送信されないため、サマリーにも表示しない(要求仕様§13)。
+        is_holdings_call = (
+            partial_sell_sent_count is not None
+            or full_sell_sent_count is not None
+            or sell_sent_count is not None
+            or critical_risk_sent_count is not None
+            or attention_detected_count is not None
+        )
+
         # 通知検証モード機能(2026-08追加): このdedupは_notification_status_for_send
         # とは別に自前で持つ同日・同内容抑止のため、VALIDATIONでは別途バイパスする
         # (再送防止によって通知が抑止されないという要求を満たすため)。
@@ -2472,7 +2629,25 @@ class LineNotificationService:
             latest = self._log_repo.latest_by_stock_and_type(
                 pseudo_stock_code, NotificationType.BATCH_SUMMARY
             )
-            if latest is not None and latest.content_hash == content_hash:
+            if is_holdings_call:
+                # 保有株チェック完了サマリー(2026-08、通知意図3段階化)は「1営業日
+                # 1回」をJST暦日基準で保証する(UTC日付でdedupすると23:00 UTC=
+                # 翌08:00 JSTのバッチ実行時刻付近で日付境界を誤判定するため)。
+                # 件数が異なっていても同一JST日なら再送しない(修正6: content_hash
+                # 一致だけでは、同日内に件数が変わる形で複数回実行された場合に
+                # 複数回送信されてしまう不備があった)。
+                same_jst_date = latest is not None and (
+                    evaluation_date_jst(latest.sent_at) == evaluation_date_jst(now)
+                )
+                if same_jst_date:
+                    logger.info(
+                        "batch_summary already sent this JST business date, suppressing "
+                        "process_name=%s total=%d",
+                        process_name,
+                        total,
+                    )
+                    return False
+            elif latest is not None and latest.content_hash == content_hash:
                 logger.info(
                     "batch_summary duplicate suppressed process_name=%s total=%d counts=%s",
                     process_name,
@@ -2481,44 +2656,47 @@ class LineNotificationService:
                 )
                 return False
 
-        # コードレビュー対応(2026-08、LINE通知アクション限定化): 新3分類の
-        # いずれかが渡された場合、実際に送信したアクション件数のみの短い
-        # 1行サマリーへ切り替える(holdings_watchlist_handler.py専用。
-        # buy_candidates_handler.py等の既存呼び出し元は渡さないため、
-        # 以下の従来フォーマットのまま)。WATCH/MANUAL_REVIEWはもはやLINE
-        # 送信されないため、サマリーにも表示しない(要求仕様§13)。
-        if (
-            partial_sell_sent_count is not None
-            or full_sell_sent_count is not None
-            or sell_sent_count is not None
-            or critical_risk_sent_count is not None
-        ):
+        if is_holdings_call:
             partial_n = partial_sell_sent_count or 0
             full_n = full_sell_sent_count or 0
             sell_n = sell_sent_count or 0
             critical_n = critical_risk_sent_count or 0
-            # 横断整合性レビュー対応(2026-08、指摘5): 4分類すべてが0件の場合、
-            # 「一部売却0｜全部売却0｜売却0」という空虚な通知を毎日送らない
-            # ようLINE送信を抑止する。BUY側のsend_empty_summary(購入候補が
-            # 0件でも「該当なし」を明示送信する設計、上記buy_zero/near_buy_zero
-            # 分岐参照)とは意味も呼び出し元も異なるため、このガードはsend_
-            # empty_summaryパラメータを一切参照しない別ロジックとして扱う。
-            # batch進捗の確定(record_result、batch-completion)は呼び出し元の
-            # _finish_batch_item()側で既にこのメソッド呼び出し前に完了して
-            # おり、この抑止による影響を受けない。CloudWatch観測用に
-            # logger.infoのみ残す。
-            if partial_n == 0 and full_n == 0 and sell_n == 0 and critical_n == 0:
-                logger.info(
-                    "batch_summary suppressed (all holdings action counts are zero) "
-                    "process_name=%s total=%d",
-                    process_name,
-                    total,
-                )
-                return False
-            summary_line = f"一部売却{partial_n}｜全部売却{full_n}｜売却{sell_n}"
+            attention_n = attention_detected_count or 0
+            # コードレビュー対応(2026-08、通知意図3段階化・要求仕様Part 7・13・14):
+            # 全区分0件でも常に送信する(以前は全4分類0件の日はまとめ通知自体を
+            # 送信しなかったが、【買い候補分析完了】側は0件でも常に送信しており、
+            # 非対称だった)。書式は【買い候補分析完了】(以下の従来フォーマット
+            # ブロック)と同じ見出し・改行・「処理結果:」箇条書き・0件時ブロックの
+            # 構成へ揃える。
+            lines = [
+                f"【{process_name}完了】",
+                "",
+                "処理結果:",
+                f"・一部売却：{partial_n}件",
+                f"・全部売却：{full_n}件",
+                f"・売却：{sell_n}件",
+            ]
             if critical_n > 0:
-                summary_line += f"｜緊急確認{critical_n}"
-            self._push(f"📊{process_name}\n{summary_line}")
+                lines.append(f"・緊急確認：{critical_n}件")
+            lines.append(f"・利益保全注意：{attention_n}件")
+            lines.append("")
+            lines.append(f"対象銘柄：{total}件")
+            all_zero = (
+                partial_n == 0
+                and full_n == 0
+                and sell_n == 0
+                and critical_n == 0
+                and attention_n == 0
+            )
+            if all_zero:
+                lines.append("")
+                lines.append("【本日のアクション】")
+                lines.append("該当なし")
+                lines.append("特に対応が必要な銘柄はありませんでした。")
+            lines.append("")
+            lines.append(f"評価日時：{format_jst(now)}")
+            lines.append(_DISCLAIMER)
+            self._push("\n".join(lines))
             if not self._execution_context.is_validation:
                 self._log_repo.save(
                     NotificationLog(
@@ -2652,6 +2830,28 @@ class LineNotificationService:
         if latest_log is None or latest_log.related_recommendation_id is None:
             return None
         return self._recommendation_repo.get(latest_log.related_recommendation_id)
+
+    def _attention_status_for_send(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationStatus:
+        """Profit Protection ATTENTION専用のdedup(2026-08、通知意図3段階化)。
+
+        PROFIT_TAKING_SIGNAL向けの_notification_status_for_send()(content_hash/
+        価格変化閾値/resend_after_days方式)とは意図的に独立させる。ATTENTIONは
+        「まだ知らせていない利益保全局面かどうか」だけで判断し、日数経過や価格の
+        小さな変動では再送しない(_compute_attention_event_identity()のevent
+        identityが前回送信時から変化した場合のみ再送する)。
+        """
+        if self._execution_context.is_validation:
+            return NotificationStatus.SENT
+        latest_log = self._log_repo.latest_by_stock_and_type(
+            recommendation.stock_code, NotificationType.PROFIT_PROTECTION_ATTENTION
+        )
+        if latest_log is None:
+            return NotificationStatus.SENT
+        if latest_log.content_hash == _compute_attention_event_identity(recommendation):
+            return NotificationStatus.DUPLICATE_SUPPRESSED
+        return NotificationStatus.SENT
 
     def _notification_status_for_send(
         self,

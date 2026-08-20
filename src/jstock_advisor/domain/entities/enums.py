@@ -521,6 +521,10 @@ class NotificationType(StrEnum):
     WATCHLIST_AUTO_ADDITION = "WATCHLIST_AUTO_ADDITION"
     # NEAR BUY監視の終了通知(コードレビュー対応2026-08、§3)。
     WATCH_END = "WATCH_END"
+    # Profit Protection candidate/strong起因のATTENTION通知専用種別(2026-08、
+    # 通知意図3段階化)。PROFIT_TAKING_SIGNAL(ACTIONABLE系PARTIAL/FULL)とは
+    # dedup・再送制御を分離するため独立させる。
+    PROFIT_PROTECTION_ATTENTION = "PROFIT_PROTECTION_ATTENTION"
 
 
 class CorporateActionType(StrEnum):
@@ -1012,6 +1016,29 @@ class NotificationCategory(StrEnum):
     MANUAL_REVIEW = "MANUAL_REVIEW"
     OTHER = "OTHER"
     NOT_NOTIFIABLE = "NOT_NOTIFIABLE"
+
+
+class NotificationIntent(StrEnum):
+    """LINE通知を送るべきかどうかの唯一の判定軸(2026-08、通知意図3段階化)。
+
+    NotificationCategoryが「表示テンプレート選択」のための分類であるのに対し、
+    NotificationIntentは「送るか送らないか」を決める意味論を表す。同じ
+    RecommendationType.WATCHでも、Profit Protectionのcandidate/strongシグナルに
+    起因する場合はATTENTION、決算待ち・ポートフォリオ集中等が理由の場合は
+    INTERNAL_ONLYと、WHYによって異なる意図になる点が本enumの目的。
+    `domain/notification/notification_intent.py`のresolve_notification_intent()
+    が唯一の正本であり、送信ゲート・監査・サマリ集計のいずれもこの関数の結果を
+    参照するのみとし、独自の条件式を重複実装しないこと。
+    """
+
+    # PARTIAL/FULL/SELL/URGENT等、既存のBUY/SELL/CRITICAL_RISK系カテゴリ。
+    # 従来どおり無条件でLINE送信対象。
+    ACTIONABLE = "ACTIONABLE"
+    # まだ明確なアクションではないが、無視すべきでない早期警戒シグナル。
+    # 初期スコープはProfit Protection candidate/strong起因のWATCHのみ。
+    ATTENTION = "ATTENTION"
+    # 現時点でユーザーの判断を要さない、内部監査目的のみの記録。LINE送信しない。
+    INTERNAL_ONLY = "INTERNAL_ONLY"
 
 
 def buy_action_label(action: BuyAction) -> str:
