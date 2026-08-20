@@ -128,6 +128,13 @@ class BatchProgress:
     # ごとに一意にする。ranking_entriesと同じ設計パターン)。finalize側で
     # "|"より前を取り出しCounterで件数化する。
     notification_categories: list[str] = field(default_factory=list)
+    # Profit Protection ATTENTION検出銘柄一覧(2026-08、通知意図3段階化)。
+    # 個別LINE送信がdedupで抑止された銘柄も含む「検出」件数(attention_detected_
+    # count)をサマリーへ表示するために使う(notification_categoriesは実際に
+    # LINE送信された銘柄のみを集約するため、この用途には使えない)。値は
+    # stock_codeそのもの(Setの重複排除のみが目的で、他フィールドと異なり
+    # 種別プレフィックスは不要)。
+    attention_detected_stock_codes: list[str] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -174,6 +181,7 @@ def record_result(
     near_buy_ranking_entry: str | None = None,
     watch_end_ranking_entry: str | None = None,
     notification_category_entry: str | None = None,
+    attention_detected_stock_code: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
 
@@ -204,6 +212,12 @@ def record_result(
     文字列セットへ原子的に追加する(stock_codeを含めるのは、Setが重複を
     許さないため同一カテゴリの複数銘柄がまとめて1件に潰れるのを防ぐため)。
     実際にLINE送信された銘柄についてのみ呼び出し側が渡すこと。
+
+    attention_detected_stock_codeを渡すと、Profit Protection ATTENTION検出件数
+    集計(2026-08、通知意図3段階化)向けに、stock_codeをDynamoDBの文字列セットへ
+    原子的に追加する。notification_category_entryとは異なり、個別LINE送信が
+    dedupで抑止された銘柄も含む「検出」件数を数えるため、呼び出し側は実送信の
+    成否に関わらずATTENTIONと判定した銘柄について常に渡すこと。
     """
     if not running_on_lambda():
         return None
@@ -244,6 +258,10 @@ def record_result(
         names["#notification_categories"] = "notification_categories"
         update_expr += ", #notification_categories :notification_categories"
         values[":notification_categories"] = {notification_category_entry}
+    if attention_detected_stock_code is not None:
+        names["#attention_detected_codes"] = "attention_detected_stock_codes"
+        update_expr += ", #attention_detected_codes :attention_detected_codes"
+        values[":attention_detected_codes"] = {attention_detected_stock_code}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -266,6 +284,7 @@ def record_result(
         near_buy_ranking_entries=sorted(item.get("near_buy_ranking_entries", set())),
         watch_end_ranking_entries=sorted(item.get("watch_end_ranking_entries", set())),
         notification_categories=sorted(item.get("notification_categories", set())),
+        attention_detected_stock_codes=sorted(item.get("attention_detected_stock_codes", set())),
     )
 
 

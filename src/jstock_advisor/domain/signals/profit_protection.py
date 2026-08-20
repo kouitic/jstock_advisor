@@ -40,6 +40,7 @@ class ProfitProtectionMetrics:
 
     insufficient_data_reason: str | None
     peak_price_since_entry: Decimal | None
+    peak_date: dt.date | None
     peak_gain_pct: float | None
     current_gain_pct: float | None
     drawdown_from_peak_pct: float | None
@@ -63,6 +64,7 @@ def _insufficient(reason: str) -> ProfitProtectionMetrics:
     return ProfitProtectionMetrics(
         insufficient_data_reason=reason,
         peak_price_since_entry=None,
+        peak_date=None,
         peak_gain_pct=None,
         current_gain_pct=None,
         drawdown_from_peak_pct=None,
@@ -161,7 +163,12 @@ def compute_profit_protection_metrics(
             "基準日直後の営業日から価格データが欠落しているため判定不能"
         )
 
-    peak_price = max(b.high for b in evaluation_bars)
+    # peak_dateはevent identity(ATTENTION再送判定、line_notification_service.py)の
+    # 構成要素として使う(2026-08追加)。同値の高値が複数日存在する場合、最新日を
+    # 採用する(=直近でその高値局面が再形成されたとみなす。event再形成の検知に自然
+    # なため)。この決定規則は固定であり、test_profit_protection.pyで回帰確認する。
+    peak_bar = max(evaluation_bars, key=lambda b: (b.high, b.date))
+    peak_price = peak_bar.high
     if peak_price <= 0:
         return _insufficient("最高値データが不正なため判定不能")
 
@@ -202,6 +209,7 @@ def compute_profit_protection_metrics(
     return ProfitProtectionMetrics(
         insufficient_data_reason=None,
         peak_price_since_entry=peak_price,
+        peak_date=peak_bar.date,
         peak_gain_pct=peak_gain_pct,
         current_gain_pct=current_gain_pct,
         drawdown_from_peak_pct=drawdown_from_peak_pct,

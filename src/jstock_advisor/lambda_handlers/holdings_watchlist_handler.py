@@ -53,6 +53,7 @@ from jstock_advisor.domain.entities.enums import (
     DecisionType,
     EvaluationStatus,
     NotificationCategory,
+    NotificationIntent,
     NotificationStatus,
     RecommendationType,
 )
@@ -95,7 +96,9 @@ from jstock_advisor.services.holding_decision_service import HoldingDecisionServ
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     NotificationOutcome,
+    resolve_attention_origin_for_recommendation,
     resolve_notification_category,
+    resolve_notification_intent_for_recommendation,
 )
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
@@ -134,6 +137,10 @@ class _HoldingResult:
     # 区別しない表示用の分類のため、「一部売却/全部売却/売却」を分離集計する
     # にはrecommendation_type自体が必要(§13)。
     recommendation_type_at_send: RecommendationType | None = None
+    # 通知意図3段階化(2026-08)。Profit Protection ATTENTIONとして検出された
+    # 銘柄か(個別LINE送信がdedupで抑止された場合もTrue。attention_detected_
+    # countはこの値を集計する、notification_categoryとは別軸)。
+    attention_detected: bool = False
 
 
 _KILL_SWITCH_SUPPRESSED_OUTCOME = NotificationOutcome(
@@ -615,6 +622,18 @@ def _analyze_one_holding(
         outcome = _send_or_suppress_notification(
             pt_outcome.recommendation, notification_enabled, notification_service, now
         )
+        # 通知意図3段階化(2026-08): kill switch抑止時はoutcome.notification_intentが
+        # 設定されない(_KILL_SWITCH_SUPPRESSED_OUTCOMEは判定自体を行わない)ため、
+        # 「検出」件数(attention_detected_count、個別送信の成否を問わない)は
+        # Recommendationから直接再計算する。実送信経路(evaluate_notification_
+        # status内)と同じ唯一の正本(resolve_notification_intent_for_recommendation)
+        # を使うため判定基準の重複は生じない。
+        detected_intent = resolve_notification_intent_for_recommendation(pt_outcome.recommendation)
+        attention_origin = (
+            resolve_attention_origin_for_recommendation(pt_outcome.recommendation)
+            if detected_intent is NotificationIntent.ATTENTION
+            else None
+        )
         audit = HoldingEvaluationAudit(
             stock_code=holding.stock_code,
             evaluated_at=now,
@@ -638,6 +657,8 @@ def _analyze_one_holding(
             data_quality_status="BLOCKED" if outcome.data_quality_blocked else "OK",
             confidence=pt_outcome.recommendation.confidence,
             error_code=None,
+            notification_intent=detected_intent,
+            attention_origin=attention_origin,
         )
         return _HoldingResult(
             recommended=True,
@@ -645,6 +666,7 @@ def _analyze_one_holding(
             succeeded=True,
             category=summary_category(audit),
             audit=audit,
+            attention_detected=detected_intent is NotificationIntent.ATTENTION,
             notification_category=(
                 resolve_notification_category(pt_outcome.recommendation) if outcome.sent else None
             ),
@@ -682,6 +704,7 @@ def _finish_batch_item(
     notification_service: LineNotificationService,
     runtime_config_service: HoldingDecisionRuntimeConfigService,
     recommendation_type: RecommendationType | None = None,
+    attention_detected: bool = False,
 ) -> None:
     """バッチ進捗の確定(record_result)はkill switchの影響を受けず常に行う。
     最終1件目の完了によるバッチサマリーLINE送信のみ、その時点のkill switch状態で
@@ -706,6 +729,7 @@ def _finish_batch_item(
         category,
         stock_code=stock_code if needs_code else None,
         notification_category_entry=notification_category_entry,
+        attention_detected_stock_code=stock_code if attention_detected else None,
     )
     if progress is None or not progress.is_complete:
         return
@@ -738,6 +762,11 @@ def _finish_batch_item(
     critical_risk_n = sent_types.count(RecommendationType.URGENT_REVIEW.value) + sent_types.count(
         RecommendationType.URGENT_HOLDING_REVIEW.value
     )
+    # 通知意図3段階化(2026-08): 個別LINE送信の成否(dedup抑止含む)を問わない
+    # 「検出」件数(attention_detected_stock_codes)を使う。実送信件数
+    # (attention_sent_count)ではないため、継続中のATTENTIONが2日目以降
+    # 個別送信されない日でもサマリー上は0件へ「解消」して見えない。
+    attention_detected_n = len(progress.attention_detected_stock_codes)
     notification_service.notify_batch_summary(
         _PROCESS_NAME,
         progress.total,
@@ -749,6 +778,7 @@ def _finish_batch_item(
         full_sell_sent_count=full_n,
         sell_sent_count=sell_n,
         critical_risk_sent_count=critical_risk_n,
+        attention_detected_count=attention_detected_n,
     )
 
 
@@ -823,6 +853,7 @@ def _process_single_holding(
         notification_service,
         runtime_config_service,
         recommendation_type=result.recommendation_type_at_send,
+        attention_detected=result.attention_detected,
     )
     return {
         "stock_code": stock_code,

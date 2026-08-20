@@ -327,6 +327,46 @@ def build_notification_text_input(
     return _BUILDERS[category](recommendation)
 
 
+_ATTENTION_LABEL = "利益保全注意"
+# 50/70文字ルール(message_formatter.py)に収めるため簡潔な語句にする
+# (「一部売却は保有株数の都合で見送り」等の長い説明は、他の必須セグメントと
+# 合わせると70文字の目安を超えdropされてしまうため)。
+_ATTENTION_STRONG_NOT_EXECUTABLE_REASON_SUFFIX = "(一部売却見送り)"
+
+
+def build_attention_text_input(
+    recommendation: Recommendation, attention_origin: str
+) -> NotificationTextInput:
+    """Profit Protection ATTENTION通知(2026-08、通知意図3段階化)専用。
+
+    category=WATCHを流用する(PARTIAL_SELL以外では売却数量セグメントを一切
+    生成しないformat_notification_text()のdefense-in-depthを、そのまま
+    享受するため、suggested_sell_shares/ratioを構造上表示できない)。
+    label_overrideで「監視」ではなく「利益保全注意」と表示する。
+
+    呼び出し前提: resolve_notification_intent()がATTENTIONと判定した
+    Recommendation(RecommendationType.WATCH、profit_protection_signalが
+    CANDIDATE/STRONGのいずれか)にのみ呼ぶこと。
+    """
+    peak_gain = recommendation.profit_protection_peak_gain_pct
+    drawdown = recommendation.profit_protection_drawdown_from_peak_pct
+    giveback = recommendation.profit_protection_gain_giveback_ratio_pct
+    reason: str | None = None
+    if peak_gain is not None and drawdown is not None and giveback is not None:
+        reason = f"高値比-{drawdown:.1f}%・含み益{giveback:.0f}%減"
+    if attention_origin == "PROFIT_PROTECTION_STRONG_NOT_EXECUTABLE":
+        base = reason or "利益保全の強いシグナル"
+        reason = base + _ATTENTION_STRONG_NOT_EXECUTABLE_REASON_SUFFIX
+    return NotificationTextInput(
+        category=NotificationCategory.WATCH,
+        stock_code=recommendation.stock_code,
+        stock_name=recommendation.stock_name,
+        current_price=recommendation.price_at_recommendation,
+        reason=reason,
+        label_override=_ATTENTION_LABEL,
+    )
+
+
 def build_watch_end_text_input(recommendation: Recommendation) -> NotificationTextInput:
     """WATCH終了通知(§3)専用。watch_end_reason/watch_previous_consecutive_
     business_daysが設定されているRecommendationにのみ呼ぶこと。

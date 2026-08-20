@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EvaluationStatus,
+    NotificationIntent,
     NotificationStatus,
     RecommendationType,
 )
@@ -35,6 +36,12 @@ class HoldingEvaluationAudit:
     data_quality_status: str
     confidence: ConfidenceLevel | None
     error_code: str | None
+    # 通知意図3段階化(2026-08)。ACTIONABLE/ATTENTION/INTERNAL_ONLYのいずれか、
+    # または評価対象外(recommendation自体が無い等)の場合はNone。
+    notification_intent: NotificationIntent | None = None
+    # ATTENTIONの場合のみ設定("PROFIT_PROTECTION_CANDIDATE"/
+    # "PROFIT_PROTECTION_STRONG_NOT_EXECUTABLE")。それ以外は常にNone。
+    attention_origin: str | None = None
 
 
 # バッチサマリーの内訳集計(要求仕様§13)で使う集約カテゴリ。
