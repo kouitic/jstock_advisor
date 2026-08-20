@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from jstock_advisor.domain.entities.enums import NotificationCategory, StockType
 from jstock_advisor.domain.notification.message_formatter import (
     MAX_CHARS,
@@ -173,26 +175,14 @@ def test_case_k_shares_without_ratio_no_bogus_percent() -> None:
 
 
 # --- 指摘3対応: suggested_sell_shares/ratio 整合性(コードレビュー対応2026-08) ---
-
-
-def test_suggested_sell_shares_ratio_consistency_by_adapter() -> None:
-    """Recommendation生成時点でsuggested_sell_shares と suggested_sell_ratio
-    の整合性が保たれることを確認する(コードレビュー対応2026-08、指摘3)。
-    例: 500株保有、STRONG(60%)の場合 → 300株、60%の組み合わせ。
-    テストでは直接数値を使わず、通知層へ到達する値が一致することで
-    整合性を確認する。
-    """
-    # 実際のRecommendationを使う結合テストはrecommendation_adapter_test.pyで行い、
-    # ここでは formatter に正しい値が渡されたときの表示を確認する。
-    data = _base(
-        category=NotificationCategory.PARTIAL_SELL,
-        stock_code="8136",
-        stock_name="サンリオ",
-        suggested_sell_shares=300,  # 500株の60%
-        suggested_sell_ratio=0.60,   # 一致している
-    )
-    text = format_notification_text(data)
-    assert "300株(60%)" in text
+#
+# 「Recommendation生成時点でのsuggested_sell_shares/ratio整合性」自体は、
+# formatter単体Contract(Case G)と重複しないadapter層のテスト
+# (test_recommendation_adapter.py::test_partial_sell_forwards_suggested_shares_
+# and_ratio)・生成→adapter→formatterの一気通貫統合テスト
+# (test_partial_sell_shares_integration.py::test_case_q_sanrio_500_shares_
+# strong_intensity_end_to_end)で別途保証されている(テストコード削減対応
+# 2026-08、AAA分析でCase Gとformatter Contractが完全重複と判断し削除)。
 
 
 # --- 指摘2再修正: formatter defense-in-depth(再コードレビュー対応2026-08) ---
@@ -203,58 +193,63 @@ def test_suggested_sell_shares_ratio_consistency_by_adapter() -> None:
 # 既存のCase G・Case Hがそのまま満たすため、重複テストは追加しない。
 
 
-def test_case_r_sell_category_ignores_stray_suggested_shares() -> None:
-    """category=SELLへ誤ってsuggested_sell_shares/ratioが設定されても、
-    数量セグメントを表示しない(Case R)。current_price・target_price・reason
-    等の他のSELL本文情報は従来どおり正常に表示されることもあわせて確認する。
+@pytest.mark.parametrize(
+    ("category", "is_critical", "base_overrides", "expected_present", "expected_absent"),
+    [
+        (
+            NotificationCategory.SELL,
+            False,
+            {
+                "current_price": Decimal("4200"),
+                "target_price": Decimal("4000"),
+                "target_price_label": "見直し",
+                "reason": "全部売却検討",
+            },
+            ["4,200円", "見直し4,000円", "全部売却検討"],
+            ["300株", "60%"],
+        ),
+        (
+            NotificationCategory.CRITICAL_RISK,
+            True,
+            {
+                "current_price": Decimal("4200"),
+                "target_price": Decimal("4200"),
+                "target_price_label": "即時執行",
+                "reason": "重大な会計問題が確認されたため、緊急に保有内容を確認してください。",
+            },
+            ["重大な会計問題が確認されたため、緊急に保有内容を確認してください。"],
+            ["300株", "60%"],
+        ),
+    ],
+    ids=["sell_ignores_stray_quantity", "critical_risk_ignores_stray_quantity"],
+)
+def test_non_partial_sell_never_displays_stray_quantity(
+    category: NotificationCategory,
+    is_critical: bool,
+    base_overrides: dict[str, object],
+    expected_present: list[str],
+    expected_absent: list[str],
+) -> None:
+    """category!=PARTIAL_SELLへ誤ってsuggested_sell_shares/ratioが設定されても、
+    数量セグメントを表示しない(旧Case R・Case Sを統合、テストコード削減対応
+    2026-08)。SELL/CRITICAL_RISKいずれも、数量以外の本文情報(現在値・目安価格・
+    理由)は従来どおり正常に表示され続けることをあわせて確認する
+    (defense-in-depth Regression、再コードレビュー対応2026-08指摘2は維持)。
     """
     data = _base(
-        category=NotificationCategory.SELL,
-        current_price=Decimal("4200"),
-        target_price=Decimal("4000"),
-        target_price_label="見直し",
-        reason="全部売却検討",
+        category=category,
         suggested_sell_shares=300,
         suggested_sell_ratio=0.60,
+        **base_overrides,
     )
-    text = format_notification_text(data)
-    assert "300株" not in text
-    assert "60%" not in text
-    # 数量以外のSELL本文は正常に表示され続けること。
-    assert "4,200円" in text
-    assert "見直し4,000円" in text
-    assert "全部売却検討" in text
+    text = format_notification_text(data, is_critical_risk=is_critical)
+    for expected in expected_present:
+        assert expected in text
+    for unexpected in expected_absent:
+        assert unexpected not in text
 
 
-def test_case_s_critical_risk_category_ignores_stray_suggested_shares() -> None:
-    """category=CRITICAL_RISKへ誤ってsuggested_sell_shares/ratioが設定されても、
-    数量セグメントを表示しない(Case S)。重大リスク本文の既存必須情報(理由)は
-    is_critical_risk=Trueのもとで従来どおり欠落しないことを確認する。
-    """
-    data = _base(
-        category=NotificationCategory.CRITICAL_RISK,
-        current_price=Decimal("4200"),
-        target_price=Decimal("4200"),
-        target_price_label="即時執行",
-        reason="重大な会計問題が確認されたため、緊急に保有内容を確認してください。",
-        suggested_sell_shares=300,
-        suggested_sell_ratio=0.60,
-    )
-    text = format_notification_text(data, is_critical_risk=True)
-    assert "300株" not in text
-    assert "60%" not in text
-    assert "重大な会計問題が確認されたため、緊急に保有内容を確認してください。" in text
-
-
-def test_partial_sell_none_shares_no_segment() -> None:
-    """suggested_sell_shares がNoneの場合、セグメント自体を生成しない
-    (Empty セグメント表示なし)。
-    """
-    data = _base(
-        category=NotificationCategory.PARTIAL_SELL,
-        suggested_sell_shares=None,
-        suggested_sell_ratio=None,
-    )
-    text = format_notification_text(data)
-    # セグメント自体が無い(空の「0株」等の文言が無い)。
-    assert "株" not in text
+# test_partial_sell_none_shares_no_segment()は上記test_case_j_no_shares_no_
+# quantity_segment()と同一のArrange/Act/Assert(PARTIAL_SELL+shares=None+
+# ratio=None→「株」非表示)であったため削除した(テストコード削減対応2026-08)。
+# 当該観点はCase Jがそのまま維持している。

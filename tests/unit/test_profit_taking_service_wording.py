@@ -9,6 +9,8 @@
 
 from decimal import Decimal
 
+import pytest
+
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, ProfitTakingIndustrySector
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
@@ -74,20 +76,47 @@ def _reasons(
     )
 
 
-def test_general_sector_uses_generic_reference_model_wording() -> None:
-    reasons = _reasons(ProfitTakingIndustrySector.GENERAL, industry_model_applied=False)
-    assert "現在の適正価格は汎用モデルによる参考値です" in reasons
-    assert "専用モデルが未適用" not in " ".join(reasons)
-
-
-def test_unknown_sector_uses_generic_fallback_wording() -> None:
-    reasons = _reasons(ProfitTakingIndustrySector.UNKNOWN, industry_model_applied=False)
-    assert "業種特性を反映した専用評価モデルではありません" in reasons
-
-
-def test_specific_sector_includes_industry_label_when_safely_available() -> None:
-    reasons = _reasons(ProfitTakingIndustrySector.BANKING, industry_model_applied=False)
-    assert "銀行業の事業特性を十分に反映した専用評価モデルではありません" in reasons
+# テストコード削減対応2026-08: model_applied=False時の3関数(GENERAL/UNKNOWN/
+# BANKING)はsector・期待文言だけが違う同一構造のため統合する。GENERALのみ
+# 追加で「専用モデルが未適用」という内部設計用語が漏れないことも検証していた
+# ため、must_not_containでこの観点も失わずに保持する。model_applied=True
+# (test_no_industry_wording_when_model_applied)は逆方向assertのため統合せず
+# 個別関数のまま維持する(要求仕様§8対応、Agent分析での明示的な推奨に従う)。
+@pytest.mark.parametrize(
+    ("sector", "expected_in_reasons", "must_not_contain"),
+    [
+        (
+            ProfitTakingIndustrySector.GENERAL,
+            "現在の適正価格は汎用モデルによる参考値です",
+            ["専用モデルが未適用"],
+        ),
+        (
+            ProfitTakingIndustrySector.UNKNOWN,
+            "業種特性を反映した専用評価モデルではありません",
+            [],
+        ),
+        (
+            ProfitTakingIndustrySector.BANKING,
+            "銀行業の事業特性を十分に反映した専用評価モデルではありません",
+            [],
+        ),
+    ],
+    ids=[
+        "general_uses_generic_reference_model_wording",
+        "unknown_uses_generic_fallback_wording",
+        "specific_sector_includes_industry_label_when_safely_available",
+    ],
+)
+def test_industry_wording_when_model_not_applied(
+    sector: ProfitTakingIndustrySector,
+    expected_in_reasons: str,
+    must_not_contain: list[str],
+) -> None:
+    reasons = _reasons(sector, industry_model_applied=False)
+    assert expected_in_reasons in reasons
+    joined = " ".join(reasons)
+    for forbidden in must_not_contain:
+        assert forbidden not in joined
 
 
 def test_no_industry_wording_when_model_applied() -> None:

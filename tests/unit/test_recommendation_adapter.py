@@ -1,6 +1,8 @@
 import datetime as dt
 from decimal import Decimal
 
+import pytest
+
 from jstock_advisor.domain.entities.common import (
     BuyPriceLevels,
     PriceWithRationale,
@@ -76,55 +78,94 @@ def test_watch_price_withheld_when_no_partial_profit_start_price() -> None:
     assert text_input.target_price_withheld_label == "価格目安は算定保留"
 
 
-def test_partial_sell_prefers_recommended_limit_price_over_partial_start() -> None:
+# テストコード削減対応2026-08: 価格選択ペアをparametrizeへ統合。各ケースが
+# 元々検証していたフィールドの集合(expected_checks)のみをそのまま転記し、
+# 新たなassertは追加しない(例: 全部売却falls_back側はlabel_overrideを
+# 元々検証していなかったため、統合後もそのままにする)。
+@pytest.mark.parametrize(
+    ("sell_prices_kwargs", "expected_checks"),
+    [
+        (
+            {
+                "recommended_limit_price": PriceWithRationale(price=Decimal("4600"), rationale="x"),
+                "partial_profit_start_price": PriceWithRationale(
+                    price=Decimal("4300"), rationale="x"
+                ),
+            },
+            {"target_price": Decimal("4600")},
+        ),
+        (
+            {
+                "partial_profit_start_price": PriceWithRationale(
+                    price=Decimal("4300"), rationale="x"
+                )
+            },
+            {"target_price": Decimal("4300")},
+        ),
+    ],
+    ids=[
+        "prefers_recommended_limit_price_over_partial_start",
+        "falls_back_to_partial_start_price",
+    ],
+)
+def test_partial_sell_target_price_selection(
+    sell_prices_kwargs: dict[str, object], expected_checks: dict[str, object]
+) -> None:
     rec = _make_recommendation(
         recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
-        sell_prices=SellPriceLevels(
-            recommended_limit_price=PriceWithRationale(price=Decimal("4600"), rationale="x"),
-            partial_profit_start_price=PriceWithRationale(price=Decimal("4300"), rationale="x"),
-        ),
+        sell_prices=SellPriceLevels(**sell_prices_kwargs),
     )
     text_input = build_notification_text_input(rec, NotificationCategory.PARTIAL_SELL)
-    assert text_input.target_price == Decimal("4600")
+    for field, expected in expected_checks.items():
+        assert getattr(text_input, field) == expected
 
 
-def test_partial_sell_falls_back_to_partial_start_price() -> None:
-    rec = _make_recommendation(
-        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
-        sell_prices=SellPriceLevels(
-            partial_profit_start_price=PriceWithRationale(price=Decimal("4300"), rationale="x")
+@pytest.mark.parametrize(
+    ("recommendation_type", "sell_prices_kwargs", "expected_checks"),
+    [
+        (
+            RecommendationType.FULL_PROFIT_TAKE,
+            {
+                "immediate_execution_price": PriceWithRationale(
+                    price=Decimal("4200"), rationale="x"
+                ),
+                "full_profit_consideration_price": PriceWithRationale(
+                    price=Decimal("5000"), rationale="x"
+                ),
+            },
+            {
+                "target_price": Decimal("4200"),
+                "target_price_label": "即時執行",
+                "label_override": "全部売却検討",
+            },
         ),
-    )
-    text_input = build_notification_text_input(rec, NotificationCategory.PARTIAL_SELL)
-    assert text_input.target_price == Decimal("4300")
-
-
-def test_full_sell_prefers_immediate_execution_over_full_profit_consideration() -> None:
-    rec = _make_recommendation(
-        recommendation_type=RecommendationType.FULL_PROFIT_TAKE,
-        sell_prices=SellPriceLevels(
-            immediate_execution_price=PriceWithRationale(price=Decimal("4200"), rationale="x"),
-            full_profit_consideration_price=PriceWithRationale(
-                price=Decimal("5000"), rationale="x"
-            ),
+        (
+            RecommendationType.STRONG_SELL_CONSIDERATION,
+            {
+                "full_profit_consideration_price": PriceWithRationale(
+                    price=Decimal("5000"), rationale="x"
+                )
+            },
+            {"target_price": Decimal("5000"), "target_price_label": "全部売却目安"},
         ),
+    ],
+    ids=[
+        "prefers_immediate_execution_over_full_profit_consideration",
+        "falls_back_to_full_profit_consideration_price",
+    ],
+)
+def test_full_sell_target_price_selection(
+    recommendation_type: RecommendationType,
+    sell_prices_kwargs: dict[str, object],
+    expected_checks: dict[str, object],
+) -> None:
+    rec = _make_recommendation(
+        recommendation_type=recommendation_type,
+        sell_prices=SellPriceLevels(**sell_prices_kwargs),
     )
     text_input = build_notification_text_input(rec, NotificationCategory.SELL)
-    assert text_input.target_price == Decimal("4200")
-    assert text_input.target_price_label == "即時執行"
-    assert text_input.label_override == "全部売却検討"
-
-
-def test_full_sell_falls_back_to_full_profit_consideration_price() -> None:
-    rec = _make_recommendation(
-        recommendation_type=RecommendationType.STRONG_SELL_CONSIDERATION,
-        sell_prices=SellPriceLevels(
-            full_profit_consideration_price=PriceWithRationale(price=Decimal("5000"), rationale="x")
-        ),
-    )
-    text_input = build_notification_text_input(rec, NotificationCategory.SELL)
-    assert text_input.target_price == Decimal("5000")
-    assert text_input.target_price_label == "全部売却目安"
+    for field, expected in expected_checks.items():
+        assert getattr(text_input, field) == expected
 
 
 def test_full_sell_never_shows_stop_review_price() -> None:
@@ -172,38 +213,49 @@ def test_buy_shows_tentative_and_standard_prices() -> None:
 # --- 指摘3対応: suggested_sell_shares/ratio 整合性(コードレビュー対応2026-08) ---
 
 
-def test_partial_sell_forwards_suggested_shares_and_ratio() -> None:
+# テストコード削減対応2026-08: 指摘3(コードレビュー対応2026-08)のRegression
+# ペアをparametrizeへ統合。300株/0.60ケースとNoneケースの両方をそのまま維持。
+@pytest.mark.parametrize(
+    ("sell_prices_kwargs", "suggested_sell_shares", "suggested_sell_ratio"),
+    [
+        (
+            {
+                "recommended_limit_price": PriceWithRationale(price=Decimal("4600"), rationale="x")
+            },
+            300,
+            0.60,
+        ),
+        (
+            {
+                "partial_profit_start_price": PriceWithRationale(
+                    price=Decimal("4300"), rationale="x"
+                )
+            },
+            None,
+            None,
+        ),
+    ],
+    ids=["forwards_suggested_shares_and_ratio", "none_suggested_shares_handled"],
+)
+def test_partial_sell_suggested_shares_and_ratio_forwarding(
+    sell_prices_kwargs: dict[str, object],
+    suggested_sell_shares: int | None,
+    suggested_sell_ratio: float | None,
+) -> None:
     """_build_partial_sell() がRecommendationのsuggested_sell_shares/
-    suggested_sell_ratioをNotificationTextInputへ正しく転送することを
-    確認する(コードレビュー対応2026-08、指摘3)。
+    suggested_sell_ratioをNotificationTextInputへ正しく転送する(Noneの場合も
+    含む)ことを確認する(コードレビュー対応2026-08、指摘3)。
     """
     rec = _make_recommendation(
         recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
-        sell_prices=SellPriceLevels(
-            recommended_limit_price=PriceWithRationale(price=Decimal("4600"), rationale="x")
-        ),
-        suggested_sell_shares=300,
-        suggested_sell_ratio=0.60,
+        sell_prices=SellPriceLevels(**sell_prices_kwargs),
+        suggested_sell_shares=suggested_sell_shares,
+        suggested_sell_ratio=suggested_sell_ratio,
     )
 
     text_input = build_notification_text_input(rec, NotificationCategory.PARTIAL_SELL)
-    assert text_input.suggested_sell_shares == 300
-    assert text_input.suggested_sell_ratio == 0.60
-
-
-def test_partial_sell_none_suggested_shares_handled() -> None:
-    """suggested_sell_shares がNoneの場合も正常に処理される。"""
-    rec = _make_recommendation(
-        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
-        sell_prices=SellPriceLevels(
-            partial_profit_start_price=PriceWithRationale(price=Decimal("4300"), rationale="x")
-        ),
-    )
-    # suggested_sell_shares/ratio を明示的にNoneのまま(既定値)
-
-    text_input = build_notification_text_input(rec, NotificationCategory.PARTIAL_SELL)
-    assert text_input.suggested_sell_shares is None
-    assert text_input.suggested_sell_ratio is None
+    assert text_input.suggested_sell_shares == suggested_sell_shares
+    assert text_input.suggested_sell_ratio == suggested_sell_ratio
 
 
 def test_case_l_full_sell_and_critical_risk_do_not_forward_suggested_shares() -> None:
