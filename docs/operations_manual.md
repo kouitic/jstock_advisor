@@ -229,7 +229,7 @@ RUNNING → TIMEOUT_FINALIZING → TIMED_OUT
 **候補銘柄数の上限について**: 旧仕様にあった評価対象件数の上限(300件)は、
 候補ユニバース本格対応でSQSベースの銘柄単位処理へ全面的に作り直したことに伴い
 撤廃しました。約3,122銘柄の全件処理には数時間規模の時間がかかります(1銘柄
-あたり30〜45秒 ÷ 同時実行数3)。
+あたり30〜45秒 ÷ 同時実行数4)。
 
 **段階導入(全件処理へ移行する前の実測)**: `config/watchlist_screening_rules.yaml`の
 `staged_rollout`で、評価対象を一時的に絞り込めます。
@@ -253,7 +253,8 @@ staged_rollout:
 **`TransactionConflictException`について(2026-08-07追加)**: `WatchlistWorkerFunction`の
 CloudWatch Logsで`TransactionConflictException`(`batch_tracker.py`の
 `try_finalize_if_ready`等)が稀に記録されることがありますが、これは複数の
-Worker(同時実行数`WatchlistReservedConcurrentExecutions`、既定3)がほぼ同時に
+Worker(同時実行数`WatchlistReservedConcurrentExecutions`、既定4、2026-08-20に
+Issue #4の実施基準充足確認を経て3から引き上げ)がほぼ同時に
 `jstock-batch_runs`テーブルの同一項目(`batch_id`)を更新しようとした際の
 DynamoDB側の一時的な競合であり、`ConditionalCheckFailedException`と同様に
 想定内の競合として捕捉・無視する扱いに修正済みです(2026-08-07修正)。

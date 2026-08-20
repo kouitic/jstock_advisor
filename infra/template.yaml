@@ -27,10 +27,13 @@ Parameters:
     Description: LINE_CHANNEL_SECRETを保持するSecrets ManagerシークレットのARN(Webhook署名検証用)
   WatchlistReservedConcurrentExecutions:
     Type: Number
-    Default: 3
+    Default: 4
     Description: >
       候補ユニバース本格対応(2026-08)。WatchlistWorkerFunctionの同時実行数上限。
-      Yahoo Financeへの同時アクセスを抑制する(3節)。
+      Yahoo Financeへの同時アクセスを抑制する(3節)。2026-08-20、Issue #4の
+      実施基準充足(SQS OldestMessage最大69分・Throttles最大3,158件/日・
+      429率実質0%)を確認し、3→4へ段階的に引き上げ(検証用、悪化があれば3へ
+      ロールバック)。
   WatchlistSqsBatchSize:
     Type: Number
     Default: 1
