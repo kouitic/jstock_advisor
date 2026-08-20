@@ -18,6 +18,12 @@ Profit Protection Round 3 コードレビュー対応)。
 ループは、非必須セグメントが上限超過の場合そのセグメントのみをスキップし、
 後続の必須セグメントの判定へ進む(以前は最初の超過セグメントでbreakしており、
 それより後ろの必須セグメントが本文へ一切到達できない不具合があった)。
+
+売却数量セグメント(suggested_sell_shares/ratio)は、category==PARTIAL_SELLの
+場合にのみ生成する(再コードレビュー対応2026-08、指摘2 defense-in-depth)。
+adapter層(recommendation_adapter.py)がPARTIAL_SELL以外でこれらのフィールドを
+設定しないことに加え、formatter自身も二重に防御することで、将来の呼び出し元
+の実装ミスでSELL/CRITICAL_RISK等に売却数量が混入することを構造的に防ぐ。
 """
 
 from __future__ import annotations
@@ -138,7 +144,15 @@ def format_notification_text(
     optional_segments: list[tuple[str, bool]] = []  # 優先度の高い順
     if data.current_price is not None:
         optional_segments.append((_fmt_price(data.current_price), False))
-    if data.suggested_sell_shares is not None:
+    # PARTIAL_SELL以外では数量セグメントを一切生成しない(再コードレビュー
+    # 対応2026-08、defense-in-depth)。adapter層(recommendation_adapter.py)は
+    # 既にPARTIAL_SELL以外でsuggested_sell_shares/ratioを設定しないが、
+    # 将来別の呼び出し元がNotificationTextInputを誤って構築した場合でも、
+    # formatter自身がPARTIAL_SELL以外へ数量を混入させないことを保証する。
+    if (
+        data.category == NotificationCategory.PARTIAL_SELL
+        and data.suggested_sell_shares is not None
+    ):
         ratio_pct = (
             data.suggested_sell_ratio * 100 if data.suggested_sell_ratio is not None else None
         )

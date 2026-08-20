@@ -12,8 +12,8 @@ peak_price_since_entryの算出は、株式分割・株式併合等で価格系�
 出すより、判定自体をスキップする(安全側)。
 
 peak探索の起点(basis_date)は「保有開始日」ではなく「現在のaverage_purchase_price
-が成立した基準日(=最終購入日、Profit Protection由来の一部売却後はさらに
-その売却日)」を使い、basis_date当日の値動きはpeak候補に含めない
+が成立した基準日(=最終購入日、理由を問わず実売却が成立した後はさらにその
+売却日のうち新しい方)」を使い、basis_date当日の値動きはpeak候補に含めない
 (コードレビュー対応2026-08、指摘A-1・A-2)。詳細はcompute_profit_protection_
 metrics()のdocstring参照。
 """
@@ -103,10 +103,11 @@ def compute_profit_protection_metrics(
     「basis_date以降の価格推移からpeakを見る」という前提はそのまま成立する
     (実証: test_portfolio_service.pyのFIFO売却テストでlast_purchase_dateが
     部分売却で変化しないことを確認済み)。呼び出し側(profit_taking_service.py)
-    は、実際にProfit Protection由来の一部売却が発生した場合、
-    holding.last_sale_dateを使ってbasis_date自体をより新しい日付へ進める
-    (同一event(同じpeak-drawdown局面)を根拠にしたStrong PARTIALの
-    連続発火を防ぐため。コードレビュー対応2026-08、指摘A-2)。
+    は、理由を問わず実際に一部売却が成立した場合(Profit Protection起因か
+    どうかは区別しない)、holding.last_sale_dateを使ってbasis_date自体を
+    より新しい日付へ進める(同一event(同じpeak-drawdown局面)を根拠にした
+    Strong PARTIALの連続発火を防ぐため。コードレビュー対応2026-08、
+    指摘A-2)。
 
     basis_date当日のhighを含めない理由(コードレビュー対応2026-08、指摘A-1):
     HoldingやPurchaseLotが保持しているのは購入日(dt.date)であり、購入
