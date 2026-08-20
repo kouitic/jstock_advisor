@@ -390,12 +390,15 @@ def test_consecutive_bad_weeks_becomes_issue_eligible(aws_env, repos) -> None:
 
 
 def test_evaluation_undefined_candidate_is_issue_eligible_on_first_week(aws_env, repos) -> None:
+    # WATCHはEXIT型評価基準を持つに至ったため(Rule Improvement対応2026-08、
+    # Issue #9)、ここでは評価基準が引き続き未定義のWATCH_BEFORE_EARNINGSを使う
+    # (Issue #10、2026-08-20時点で保留中)。
     period_start, _, _ = _resolve_review_period(_RUN_AT)
     mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
-    for i in range(15):  # WATCHのdefault閾値=10
+    for i in range(15):  # default閾値=10
         rec_id = f"watch{i}"
         repos["recommendation"].save(
-            _recommendation(rec_id, RecommendationType.WATCH, "v1", mid_week)
+            _recommendation(rec_id, RecommendationType.WATCH_BEFORE_EARNINGS, "v1", mid_week)
         )
         repos["evaluation"].save(
             _evaluation(f"watche{i}", rec_id, EvaluationLabel.INCONCLUSIVE, mid_week)
