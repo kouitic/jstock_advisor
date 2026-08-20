@@ -29,7 +29,7 @@ from jstock_advisor.domain.entities.improvement import (
     ImprovementCandidate,
     WeeklyReviewMetrics,
 )
-from jstock_advisor.domain.evaluation_rules import is_performance_evaluated_type
+from jstock_advisor.domain.evaluation_rules import is_entry_type, is_performance_evaluated_type
 from jstock_advisor.domain.improvement_rules import build_candidate_key
 from jstock_advisor.domain.jst import evaluation_date_jst, require_timezone_aware, to_jst
 from jstock_advisor.infrastructure.aws import improvement_task_tracker as tracker
@@ -322,6 +322,11 @@ class WeeklyImprovementReviewService:
             metrics.recommendation_type.value
         )
         min_excess_return = self._review_config.min_average_excess_return_pct
+        # 超過リターン(自社株リターン-ベンチマークリターン)ベースの悪化検知は
+        # ENTRY型(株価上昇=SUCCESS)にのみ適用する。EXIT型(株価下落=SUCCESS)は
+        # 良好な下落ほど超過リターンが負に振れるため、そのまま使うと方向が逆になり
+        # 誤検出する(2026-08-20、Issue #9・#11のコードレビュー対応)。
+        is_entry = is_entry_type(metrics.recommendation_type)
         reason_codes: list[str] = []
         if (
             min_success_rate is not None
@@ -330,7 +335,8 @@ class WeeklyImprovementReviewService:
         ):
             reason_codes.append("SUCCESS_RATE_LOW")
         if (
-            metrics.average_excess_return_pct is not None
+            is_entry
+            and metrics.average_excess_return_pct is not None
             and metrics.average_excess_return_pct < min_excess_return
         ):
             reason_codes.append("EXCESS_RETURN_LOW")
@@ -354,7 +360,8 @@ class WeeklyImprovementReviewService:
         ):
             reason_codes.append("CRITICAL_DROP")
         if (
-            metrics.average_excess_return_pct is not None
+            is_entry
+            and metrics.average_excess_return_pct is not None
             and metrics.average_excess_return_pct
             <= self._review_config.critical_average_excess_return_pct
             and "CRITICAL_DROP" not in reason_codes
@@ -470,6 +477,10 @@ class WeeklyImprovementReviewService:
             and metrics.success_rate_pct < min_success_rate
         ):
             return True
+        # EXIT型は超過リターンの方向が逆になるため対象外(_detect_performance_
+        # candidate()と同じ理由、2026-08-20、Issue #9・#11のコードレビュー対応)。
+        if not is_entry_type(metrics.recommendation_type):
+            return False
         min_excess_return = self._review_config.min_average_excess_return_pct
         return (
             metrics.average_excess_return_pct is not None

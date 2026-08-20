@@ -390,9 +390,12 @@ def test_consecutive_bad_weeks_becomes_issue_eligible(aws_env, repos) -> None:
 
 
 def test_evaluation_undefined_candidate_is_issue_eligible_on_first_week(aws_env, repos) -> None:
-    # WATCHはEXIT型評価基準を持つに至ったため(Rule Improvement対応2026-08、
-    # Issue #9)、ここでは評価基準が引き続き未定義のWATCH_BEFORE_EARNINGSを使う
-    # (Issue #10、2026-08-20時点で保留中)。
+    """WATCHはEXIT型評価基準を持つに至ったため(Rule Improvement対応2026-08、
+    Issue #9)、ここでは評価基準が引き続き未定義のWATCH_BEFORE_EARNINGSを使う
+    (Issue #10、2026-08-20時点で保留中)。この保留がWATCH/REVIEW対応(Issue #9・
+    #11)の影響を受けず、引き続き「自動評価の対象外」経路
+    (EVALUATION_CRITERIA_UNDEFINED)を使うことの回帰確認を兼ねる。
+    """
     period_start, _, _ = _resolve_review_period(_RUN_AT)
     mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
     for i in range(15):  # default閾値=10
@@ -620,6 +623,155 @@ def test_excess_return_just_above_threshold_does_not_trigger_reason_code(aws_env
                 EvaluationLabel.SUCCESS,
                 mid_week,
                 excess_return_pct=-0.5,
+            )
+        )
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.candidates_detected == 0
+
+
+# --- EXIT型は超過リターンを評価に使わない(コードレビュー対応2026-08-20、
+# WATCH/REVIEWをEXIT型評価に追加したことに伴う指摘) -------------------------
+
+
+def test_watch_decline_is_success_and_not_a_candidate(aws_env, repos) -> None:
+    """WATCH推奨後に株価が下落(SUCCESS)した場合、excess_returnが負に振れても
+    (良好な下落ほど自社株リターンがベンチマークを下回るため)、EXIT型では
+    excess_returnを評価に使わないため候補化しない。"""
+    period_start, _, _ = _resolve_review_period(_RUN_AT)
+    mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
+    for i in range(20):
+        rec_id = f"watchdecline-{i}"
+        repos["recommendation"].save(
+            _recommendation(rec_id, RecommendationType.WATCH, "v1", mid_week)
+        )
+        repos["evaluation"].save(
+            _evaluation(
+                f"watchdecline-e{i}",
+                rec_id,
+                EvaluationLabel.SUCCESS,
+                mid_week,
+                price_return_pct=-8.0,
+                excess_return_pct=-8.0,
+            )
+        )
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.candidates_detected == 0
+
+
+def test_review_decline_is_success_and_not_a_candidate(aws_env, repos) -> None:
+    """REVIEW推奨後に株価が下落(SUCCESS)した場合も、WATCHと同様に候補化しない。"""
+    period_start, _, _ = _resolve_review_period(_RUN_AT)
+    mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
+    for i in range(20):
+        rec_id = f"reviewdecline-{i}"
+        repos["recommendation"].save(
+            _recommendation(rec_id, RecommendationType.REVIEW, "v1", mid_week)
+        )
+        repos["evaluation"].save(
+            _evaluation(
+                f"reviewdecline-e{i}",
+                rec_id,
+                EvaluationLabel.SUCCESS,
+                mid_week,
+                price_return_pct=-8.0,
+                excess_return_pct=-8.0,
+            )
+        )
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.candidates_detected == 0
+
+
+def test_watch_success_rate_low_is_still_detected_via_success_rate(aws_env, repos) -> None:
+    """WATCHはexcess_returnでは検知しないが、成功率(SUCCESS_RATE_LOW)では
+    引き続き検知できること(min_success_rate_pct.WATCH=60.0)。"""
+    period_start, _, _ = _resolve_review_period(_RUN_AT)
+    mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
+    for i in range(5):
+        rec_id = f"watchsrl-s{i}"
+        repos["recommendation"].save(
+            _recommendation(rec_id, RecommendationType.WATCH, "v1", mid_week)
+        )
+        repos["evaluation"].save(
+            _evaluation(f"watchsrl-se{i}", rec_id, EvaluationLabel.SUCCESS, mid_week)
+        )
+    for i in range(15):
+        rec_id = f"watchsrl-f{i}"
+        repos["recommendation"].save(
+            _recommendation(rec_id, RecommendationType.WATCH, "v1", mid_week)
+        )
+        repos["evaluation"].save(
+            _evaluation(f"watchsrl-fe{i}", rec_id, EvaluationLabel.SELL_TOO_SENSITIVE, mid_week)
+        )
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.candidates_detected == 1
+    candidate = repos["candidate"].list_all()[0]
+    assert candidate.success_rate_pct == pytest.approx(25.0)
+    assert "SUCCESS_RATE_LOW" in candidate.reason_codes
+    assert "EXCESS_RETURN_LOW" not in candidate.reason_codes
+
+
+def test_review_success_rate_low_is_still_detected_via_success_rate(aws_env, repos) -> None:
+    """REVIEWも同様にSUCCESS_RATE_LOWでは引き続き検知できること。"""
+    period_start, _, _ = _resolve_review_period(_RUN_AT)
+    mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
+    for i in range(5):
+        rec_id = f"reviewsrl-s{i}"
+        repos["recommendation"].save(
+            _recommendation(rec_id, RecommendationType.REVIEW, "v1", mid_week)
+        )
+        repos["evaluation"].save(
+            _evaluation(f"reviewsrl-se{i}", rec_id, EvaluationLabel.SUCCESS, mid_week)
+        )
+    for i in range(15):
+        rec_id = f"reviewsrl-f{i}"
+        repos["recommendation"].save(
+            _recommendation(rec_id, RecommendationType.REVIEW, "v1", mid_week)
+        )
+        repos["evaluation"].save(
+            _evaluation(f"reviewsrl-fe{i}", rec_id, EvaluationLabel.SELL_TOO_SENSITIVE, mid_week)
+        )
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.candidates_detected == 1
+    candidate = repos["candidate"].list_all()[0]
+    assert candidate.success_rate_pct == pytest.approx(25.0)
+    assert "SUCCESS_RATE_LOW" in candidate.reason_codes
+    assert "EXCESS_RETURN_LOW" not in candidate.reason_codes
+
+
+def test_sell_decline_is_success_and_not_a_candidate_via_excess_return(aws_env, repos) -> None:
+    """WATCH/REVIEW固有の対応ではなく、既存EXIT型(SELL)全体で同じ修正が
+    効いていることを確認する(SELL推奨後に株価が下落しSUCCESSとなった場合、
+    excess_returnが負でもEXCESS_RETURN_LOWとして誤検出しない)。"""
+    period_start, _, _ = _resolve_review_period(_RUN_AT)
+    mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
+    for i in range(20):
+        rec_id = f"selldecline-{i}"
+        repos["recommendation"].save(
+            _recommendation(rec_id, RecommendationType.SELL, "v1", mid_week)
+        )
+        repos["evaluation"].save(
+            _evaluation(
+                f"selldecline-e{i}",
+                rec_id,
+                EvaluationLabel.SUCCESS,
+                mid_week,
+                price_return_pct=-8.0,
+                excess_return_pct=-8.0,
             )
         )
 
