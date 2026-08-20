@@ -6,6 +6,7 @@ recent_periods_source反映・EarningsDecisionRelevance統合・period_end監査
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
@@ -669,43 +670,42 @@ def test_score_and_confidence_unchanged_by_period_info_addition() -> None:
 
 
 # ===== Config validation =====
+# テストコード削減対応2026-08: 6関数はいずれも`pytest.raises(ValidationError)`
+# のみのため、入力ケースを1件も減らさずparametrizeへ統合。呼び出し対象が
+# `_config()`と`EarningsTrendCategoryThresholds()`で異なる(5件目までは
+# _config()経由、最後の1件はThresholds自体の直接検証)ため、"実行するアクション
+# そのもの"をcallableとして渡す(idsで元の関数名相当を維持)。
 
 
-def test_config_rejects_zero_weight_sum() -> None:
-    with pytest.raises(ValidationError):
-        _config(
+@pytest.mark.parametrize(
+    "make_action",
+    [
+        lambda: _config(
             operating_income_trend_weight=0.0,
             operating_cashflow_trend_weight=0.0,
             dividend_direction_weight=0.0,
             acceleration_weight=0.0,
-        )
-
-
-def test_config_rejects_unordered_trend_boundaries() -> None:
-    with pytest.raises(ValidationError):
-        _config(trend_decline_pct=10.0, trend_improve_pct=5.0)
-
-
-def test_config_rejects_non_positive_acceleration_full_scale_pct() -> None:
-    with pytest.raises(ValidationError):
-        _config(acceleration_full_scale_pct=0.0)
-
-
-def test_config_rejects_unordered_dividend_scores() -> None:
-    with pytest.raises(ValidationError):
-        _config(dividend_forecast_cut_score=10.0, dividend_maintained_score=0.0)
-
-
-def test_config_rejects_invalid_coverage_chain() -> None:
-    with pytest.raises(ValidationError):
-        _config(min_coverage_required=0.6, coverage_medium_threshold=0.5)
-
-
-def test_config_category_thresholds_rejects_unordered() -> None:
-    with pytest.raises(ValidationError):
-        EarningsTrendCategoryThresholds(
+        ),
+        lambda: _config(trend_decline_pct=10.0, trend_improve_pct=5.0),
+        lambda: _config(acceleration_full_scale_pct=0.0),
+        lambda: _config(dividend_forecast_cut_score=10.0, dividend_maintained_score=0.0),
+        lambda: _config(min_coverage_required=0.6, coverage_medium_threshold=0.5),
+        lambda: EarningsTrendCategoryThresholds(
             strong_improving=10.0,
             improving=15.0,
             deteriorating=-15.0,
             strong_deteriorating=-50.0,
-        )
+        ),
+    ],
+    ids=[
+        "zero_weight_sum",
+        "unordered_trend_boundaries",
+        "non_positive_acceleration_full_scale_pct",
+        "unordered_dividend_scores",
+        "invalid_coverage_chain",
+        "category_thresholds_unordered",
+    ],
+)
+def test_config_rejects_invalid_values(make_action: Callable[[], object]) -> None:
+    with pytest.raises(ValidationError):
+        make_action()

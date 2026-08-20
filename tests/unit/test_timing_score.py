@@ -15,6 +15,7 @@ current_priceとPriceBarの時点整合性チェック(price_history_aligned)を
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
@@ -682,84 +683,69 @@ def test_extreme_ma20_deviation_lowers_score_versus_moderate_deviation() -> None
 
 
 # ===== Config validation(46-53) =====
+# テストコード削減対応2026-08: 12関数はいずれも`pytest.raises(ValidationError)`
+# のみのため、入力ケースを1件も減らさずparametrizeへ統合(旧関数名をidsに使い、
+# 失敗時にどの境界値ケースかを即座に特定できるようにする)。
 
 
-def test_config_rejects_negative_coverage_medium_threshold() -> None:
-    with pytest.raises(ValidationError):
-        _config(coverage_medium_threshold=-0.1)
-
-
-def test_config_rejects_coverage_high_threshold_above_one() -> None:
-    with pytest.raises(ValidationError):
-        _config(coverage_high_threshold=1.1)
-
-
-def test_config_rejects_category_threshold_above_100() -> None:
-    with pytest.raises(ValidationError):
-        _config(
-            category_thresholds=TimingScoreCategoryThresholds(
+# make_overridesはcallableで渡す(TimingScoreCategoryThresholds自体が
+# コンストラクタ時点でscore範囲[-100,100]を検証するため、parametrizeリスト
+# 構築時=collection時に評価すると期待するValidationErrorがpytest.raises()の
+# 外(collection時)で送出されてしまう。テスト実行時まで評価を遅延させる)。
+@pytest.mark.parametrize(
+    "make_overrides",
+    [
+        lambda: {"coverage_medium_threshold": -0.1},
+        lambda: {"coverage_high_threshold": 1.1},
+        lambda: {
+            "category_thresholds": TimingScoreCategoryThresholds(
                 strong_tailwind=150.0, tailwind=20.0, headwind=-20.0, strong_headwind=-60.0
             )
-        )
-
-
-def test_config_rejects_category_threshold_below_negative_100() -> None:
-    with pytest.raises(ValidationError):
-        _config(
-            category_thresholds=TimingScoreCategoryThresholds(
+        },
+        lambda: {
+            "category_thresholds": TimingScoreCategoryThresholds(
                 strong_tailwind=60.0, tailwind=20.0, headwind=-20.0, strong_headwind=-150.0
             )
-        )
-
-
-def test_config_rejects_unordered_rsi_boundaries() -> None:
+        },
+        lambda: {"rsi_neutral_boundary": 80.0, "rsi_sweet_spot_boundary": 60.0},
+        lambda: {"drawdown_near_high_pct": 1.0},
+        lambda: {"ma20_pullback_low_pct": 5.0, "ma20_near_high_pct": 3.0},
+        lambda: {"volume_moderate_low": 3.0, "volume_moderate_high": 2.5},
+        lambda: {"min_coverage_required": 0.5, "coverage_medium_threshold": 0.4},
+        lambda: {
+            "trend_quality_weight": 0.0,
+            "price_vs_ma20_weight": 0.0,
+            "price_vs_ma60_weight": 0.0,
+            "rsi_weight": 0.0,
+            "macd_weight": 0.0,
+            "drawdown_weight": 0.0,
+            "volume_weight": 0.0,
+        },
+        # drawdown区分境界は同値を許容しない(near_high > pullback > neutral、
+        # コードレビュー対応v3で厳格化)。
+        lambda: {"drawdown_near_high_pct": -2.0, "drawdown_pullback_pct": -2.0},
+        lambda: {"overheat_penalty_points": 0.0},
+    ],
+    ids=[
+        "negative_coverage_medium_threshold",
+        "coverage_high_threshold_above_one",
+        "category_threshold_above_100",
+        "category_threshold_below_negative_100",
+        "unordered_rsi_boundaries",
+        "positive_drawdown_near_high_pct",
+        "unordered_ma20_boundaries",
+        "unordered_volume_boundaries",
+        "min_coverage_above_medium_threshold",
+        "zero_weight_sum",
+        "equal_drawdown_boundaries",
+        "non_positive_overheat_penalty_points",
+    ],
+)
+def test_config_rejects_invalid_values(
+    make_overrides: Callable[[], dict[str, object]],
+) -> None:
     with pytest.raises(ValidationError):
-        _config(rsi_neutral_boundary=80.0, rsi_sweet_spot_boundary=60.0)
-
-
-def test_config_rejects_positive_drawdown_near_high_pct() -> None:
-    with pytest.raises(ValidationError):
-        _config(drawdown_near_high_pct=1.0)
-
-
-def test_config_rejects_unordered_ma20_boundaries() -> None:
-    with pytest.raises(ValidationError):
-        _config(ma20_pullback_low_pct=5.0, ma20_near_high_pct=3.0)
-
-
-def test_config_rejects_unordered_volume_boundaries() -> None:
-    with pytest.raises(ValidationError):
-        _config(volume_moderate_low=3.0, volume_moderate_high=2.5)
-
-
-def test_config_rejects_min_coverage_above_medium_threshold() -> None:
-    with pytest.raises(ValidationError):
-        _config(min_coverage_required=0.5, coverage_medium_threshold=0.4)
-
-
-def test_config_rejects_zero_weight_sum() -> None:
-    with pytest.raises(ValidationError):
-        _config(
-            trend_quality_weight=0.0,
-            price_vs_ma20_weight=0.0,
-            price_vs_ma60_weight=0.0,
-            rsi_weight=0.0,
-            macd_weight=0.0,
-            drawdown_weight=0.0,
-            volume_weight=0.0,
-        )
-
-
-def test_config_rejects_equal_drawdown_boundaries() -> None:
-    """drawdown区分境界は同値を許容しない(near_high > pullback > neutral、
-    コードレビュー対応v3で厳格化)。"""
-    with pytest.raises(ValidationError):
-        _config(drawdown_near_high_pct=-2.0, drawdown_pullback_pct=-2.0)
-
-
-def test_config_rejects_non_positive_overheat_penalty_points() -> None:
-    with pytest.raises(ValidationError):
-        _config(overheat_penalty_points=0.0)
+        _config(**make_overrides())
 
 
 # ===== timing_score_config_valuesの監査情報(コードレビュー対応v4、Low改善) =====

@@ -8,6 +8,8 @@
 import datetime as dt
 from decimal import Decimal
 
+import pytest
+
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.services.line_notification_service import (
@@ -40,34 +42,40 @@ def _make_watch_recommendation(**overrides: object) -> Recommendation:
     return Recommendation(**defaults)
 
 
-def test_title_earnings_pending_overrides_other_conditions() -> None:
-    rec = _make_watch_recommendation(
-        recommendation_type=RecommendationType.WATCH_BEFORE_EARNINGS,
-        fair_value_overall_confidence=ConfidenceLevel.LOW,
-    )
-    assert _resolve_watch_profit_taking_title(rec, _THRESHOLD) == "適正価格超過・決算後に再評価"
-
-
-def test_title_data_insufficient_when_no_fair_value_at_all() -> None:
-    rec = _make_watch_recommendation(
-        fair_value_bear=None, fair_value_neutral=None, fair_value_bull=None
-    )
-    assert _resolve_watch_profit_taking_title(rec, _THRESHOLD) == "保有継続・データ確認待ち"
-
-
-def test_title_dispersion_large_when_confidence_low() -> None:
-    rec = _make_watch_recommendation(fair_value_overall_confidence=ConfidenceLevel.LOW)
-    assert _resolve_watch_profit_taking_title(rec, _THRESHOLD) == "適正価格のばらつき大・継続監視"
-
-
-def test_title_dispersion_large_when_spread_ratio_exceeds_threshold() -> None:
-    rec = _make_watch_recommendation(fair_value_spread_ratio=2.5)
-    assert _resolve_watch_profit_taking_title(rec, _THRESHOLD) == "適正価格のばらつき大・継続監視"
-
-
-def test_title_default_when_confidence_ok_and_spread_small() -> None:
-    rec = _make_watch_recommendation()
-    assert _resolve_watch_profit_taking_title(rec, _THRESHOLD) == "割高水準を監視"
+# テストコード削減対応2026-08: 5関数はいずれも_make_watch_recommendation()の
+# overridesと期待タイトル文字列だけが違う同一構造のため、入力ケースを1件も
+# 減らさずparametrizeへ統合(idsで元の分岐名を維持)。
+@pytest.mark.parametrize(
+    ("overrides", "expected_title"),
+    [
+        (
+            {
+                "recommendation_type": RecommendationType.WATCH_BEFORE_EARNINGS,
+                "fair_value_overall_confidence": ConfidenceLevel.LOW,
+            },
+            "適正価格超過・決算後に再評価",
+        ),
+        (
+            {"fair_value_bear": None, "fair_value_neutral": None, "fair_value_bull": None},
+            "保有継続・データ確認待ち",
+        ),
+        ({"fair_value_overall_confidence": ConfidenceLevel.LOW}, "適正価格のばらつき大・継続監視"),
+        ({"fair_value_spread_ratio": 2.5}, "適正価格のばらつき大・継続監視"),
+        ({}, "割高水準を監視"),
+    ],
+    ids=[
+        "earnings_pending_overrides_other_conditions",
+        "data_insufficient_when_no_fair_value_at_all",
+        "dispersion_large_when_confidence_low",
+        "dispersion_large_when_spread_ratio_exceeds_threshold",
+        "default_when_confidence_ok_and_spread_small",
+    ],
+)
+def test_resolve_watch_profit_taking_title(
+    overrides: dict[str, object], expected_title: str
+) -> None:
+    rec = _make_watch_recommendation(**overrides)
+    assert _resolve_watch_profit_taking_title(rec, _THRESHOLD) == expected_title
 
 
 def test_is_dispersion_large_false_for_medium_confidence_and_small_spread() -> None:
