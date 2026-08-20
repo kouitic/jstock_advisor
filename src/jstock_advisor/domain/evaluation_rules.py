@@ -40,6 +40,22 @@ def is_performance_evaluated_type(recommendation_type: RecommendationType) -> bo
     return recommendation_type in _ENTRY_TYPES or recommendation_type in _EXIT_TYPES
 
 
+def is_entry_type(recommendation_type: RecommendationType) -> bool:
+    """price_return_pctの上昇がSUCCESSを意味する種別(BUY/WATCH_BUY/HOLD)かどうか。
+
+    週次改善レビューが、超過リターン(自社株リターン-ベンチマークリターン)ベースの
+    悪化検知をENTRY型にのみ適用するために使う(EXIT型は下落がSUCCESSを意味する
+    ため、超過リターンは方向が逆になり単純比較できない。2026-08-20、Issue #9・#11
+    のコードレビュー対応)。
+    """
+    return recommendation_type in _ENTRY_TYPES
+
+
+def is_exit_type(recommendation_type: RecommendationType) -> bool:
+    """price_return_pctの下落がSUCCESSを意味する種別かどうか。is_entry_type()の対。"""
+    return recommendation_type in _EXIT_TYPES
+
+
 def determine_evaluation_label(
     recommendation_type: RecommendationType,
     price_return_pct: float | None,

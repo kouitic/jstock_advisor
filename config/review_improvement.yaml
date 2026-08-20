@@ -44,9 +44,11 @@ min_sample_count:
   FULL_PROFIT_TAKE: 3
   default: 10
 
-# RecommendationType(値)ごとの最低成功率(0〜100スケール)。業績系
-# (BUY/WATCH_BUY/HOLD/PARTIAL_PROFIT_TAKE/FULL_PROFIT_TAKE/SELL/URGENT_REVIEW)
-# のみで使う(WATCH/REVIEW等の評価定義未整備系は成功率を計算しない)。
+# RecommendationType(値)ごとの最低成功率(0〜100スケール)。自動評価対象
+# (ENTRY型: BUY/WATCH_BUY/HOLD、EXIT型: SELL/URGENT_REVIEW/PARTIAL_PROFIT_TAKE/
+# FULL_PROFIT_TAKE/WATCH/REVIEW)のみで使う(WATCH_BEFORE_EARNINGS等の評価定義
+# 未整備系は成功率を計算しない)。WATCH/REVIEWはSELL/URGENT_REVIEW等の既存EXIT型
+# と同じ暫定値を流用する(2026-08-20、Issue #9・#11)。
 min_success_rate_pct:
   BUY: 50.0
   WATCH_BUY: 50.0
@@ -55,8 +57,16 @@ min_success_rate_pct:
   URGENT_REVIEW: 60.0
   PARTIAL_PROFIT_TAKE: 60.0
   FULL_PROFIT_TAKE: 60.0
+  WATCH: 60.0
+  REVIEW: 60.0
 
 # 平均超過リターン(0〜100スケール、%)がこの値未満ならCandidate化する。
+# ENTRY型(BUY/WATCH_BUY/HOLD)にのみ適用する。EXIT型(SELL/URGENT_REVIEW/
+# PARTIAL_PROFIT_TAKE/FULL_PROFIT_TAKE/WATCH/REVIEW)はSUCCESSが株価下落を
+# 意味するため、excess_return(=自社株リターン-ベンチマークリターン)は
+# 「良好な下落ほど負に振れる」逆方向の指標になり、そのまま閾値判定に使うと
+# 誤ってCandidate化してしまう(2026-08-20、Issue #9・#11のコードレビュー対応。
+# EXIT型向けの相対評価指標は別途方向を反転して設計する)。
 min_average_excess_return_pct: -1.0
 
 # 前週比の成功率悪化がこのポイント数以上ならCandidate化する(単独ではIssue化しない)。
@@ -65,7 +75,9 @@ success_rate_drop_threshold_points: 10.0
 # 以下2つの重大悪化閾値は、運用開始(2026-08-07)からまだ1〜2週分の週次データしか
 # 無く実データに基づく較正ができないため暫定値とする。issue_creation_enabled=false
 # の間に数週間分の実出力(WeeklyReviewMetrics/ImprovementCandidate)を確認したうえで
-# 再検討すること。
+# 再検討すること。critical_success_rate_drop_threshold_pointsは全自動評価対象型で
+# 使うが、critical_average_excess_return_pctはmin_average_excess_return_pctと同様
+# ENTRY型にのみ適用する(2026-08-20、Issue #9・#11)。
 critical_success_rate_drop_threshold_points: 20.0
 critical_average_excess_return_pct: -5.0
 

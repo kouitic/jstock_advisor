@@ -23,11 +23,12 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 
 # 成功率算出の分母から除外するラベル(判断の巧拙ではなくデータ欠如・対象外を示すため)。
-# INCONCLUSIVEはdetermine_evaluation_label()がWATCH/REVIEW等「自動評価の対象外」の
-# 種別へ無条件に付与するラベルであり、DATA_ISSUE(データ取得失敗)と同様に「判断の
-# 巧拙を測れない」ケースである。従来はDATA_ISSUEのみ除外しておりINCONCLUSIVEが
-# 分母に残ったまま失敗扱いになる(=対象種別が常に成功率0%になる)不具合があったため、
-# 振り返り機能改修でINCONCLUSIVEも除外対象に追加した。
+# INCONCLUSIVEはdetermine_evaluation_label()がWATCH_BEFORE_EARNINGS等「自動評価の
+# 対象外」の種別(2026-08-20時点、Issue #10で継続検討中)へ無条件に付与するラベルで
+# あり、DATA_ISSUE(データ取得失敗)と同様に「判断の巧拙を測れない」ケースである。
+# 従来はDATA_ISSUEのみ除外しておりINCONCLUSIVEが分母に残ったまま失敗扱いになる
+# (=対象種別が常に成功率0%になる)不具合があったため、振り返り機能改修で
+# INCONCLUSIVEも除外対象に追加した。
 _EXCLUDED_FROM_SUCCESS_RATE = frozenset({EvaluationLabel.DATA_ISSUE, EvaluationLabel.INCONCLUSIVE})
 _SUCCESS_LABELS = frozenset({EvaluationLabel.SUCCESS, EvaluationLabel.ACCEPTABLE})
 
