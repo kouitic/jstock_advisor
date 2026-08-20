@@ -20,6 +20,13 @@ _EXIT_TYPES = (
     RecommendationType.FULL_PROFIT_TAKE,
     RecommendationType.SELL,
     RecommendationType.URGENT_REVIEW,
+    # WATCH(利確レベルの梯子でHOLDとPARTIAL_PROFIT_TAKEの間の監視段階)・
+    # REVIEW(懸念1件のみでSELL/URGENT_REVIEWには不十分)は、いずれも実売買を
+    # 伴わない警告にすぎないが、警告の正しさは「警告した事象(株価下落)が
+    # 実際に起きたか」で測れるため、EXIT型と同じ基準を流用する
+    # (Rule Improvement対応2026-08、Issue #9・#11)。
+    RecommendationType.WATCH,
+    RecommendationType.REVIEW,
 )
 _PROFIT_TAKE_TYPES = (RecommendationType.PARTIAL_PROFIT_TAKE, RecommendationType.FULL_PROFIT_TAKE)
 

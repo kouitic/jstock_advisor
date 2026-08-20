@@ -78,6 +78,34 @@ def test_exit_acceptable_when_flat() -> None:
     assert label == EvaluationLabel.ACCEPTABLE
 
 
-def test_inconclusive_for_watch_type() -> None:
-    label, _ = determine_evaluation_label(RecommendationType.WATCH, 5.0, None, None, _CONFIG)
+def test_watch_success_when_price_declines() -> None:
+    # WATCH(利確レベルの梯子でHOLDとPARTIAL_PROFIT_TAKEの間)はEXIT型基準を流用する
+    # (Rule Improvement対応2026-08、Issue #9)。
+    label, _ = determine_evaluation_label(RecommendationType.WATCH, -8.0, None, None, _CONFIG)
+    assert label == EvaluationLabel.SUCCESS
+
+
+def test_watch_too_sensitive_when_price_rallies() -> None:
+    label, _ = determine_evaluation_label(RecommendationType.WATCH, 15.0, None, None, _CONFIG)
+    assert label == EvaluationLabel.SELL_TOO_SENSITIVE
+
+
+def test_review_success_when_price_declines() -> None:
+    # REVIEW(懸念1件のみでSELL/URGENT_REVIEWには不十分)はEXIT型基準を流用する
+    # (Rule Improvement対応2026-08、Issue #11)。
+    label, _ = determine_evaluation_label(RecommendationType.REVIEW, -8.0, None, None, _CONFIG)
+    assert label == EvaluationLabel.SUCCESS
+
+
+def test_review_too_sensitive_when_price_rallies() -> None:
+    label, _ = determine_evaluation_label(RecommendationType.REVIEW, 15.0, None, None, _CONFIG)
+    assert label == EvaluationLabel.SELL_TOO_SENSITIVE
+
+
+def test_inconclusive_for_watch_before_earnings_type() -> None:
+    # WATCH_BEFORE_EARNINGSは評価基準が未確定のため保留中(Issue #10、2026-08-20)。
+    # 評価定義未整備系がINCONCLUSIVEのままであることの回帰。
+    label, _ = determine_evaluation_label(
+        RecommendationType.WATCH_BEFORE_EARNINGS, 5.0, None, None, _CONFIG
+    )
     assert label == EvaluationLabel.INCONCLUSIVE

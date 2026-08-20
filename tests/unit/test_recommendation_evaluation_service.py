@@ -310,7 +310,9 @@ def test_run_due_calendar_evaluations_covers_watch_type(
 
     outcome = service.run_due_calendar_evaluations(now)
     assert len(outcome.evaluated) == 1
-    assert outcome.evaluated[0].evaluation_label.value == "INCONCLUSIVE"
+    # WATCHはEXIT型評価基準を持つため(Rule Improvement対応2026-08、Issue #9)、
+    # INCONCLUSIVEではなく実際の株価推移に基づくラベルが付与される。
+    assert outcome.evaluated[0].evaluation_label.value == "SELL_TOO_SENSITIVE"
 
 
 # --- レビュー指摘対応①: _evaluate_one()の評価起点日をJST基準へ統一 -----------------
