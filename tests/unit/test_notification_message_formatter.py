@@ -195,6 +195,57 @@ def test_suggested_sell_shares_ratio_consistency_by_adapter() -> None:
     assert "300株(60%)" in text
 
 
+# --- 指摘2再修正: formatter defense-in-depth(再コードレビュー対応2026-08) ---
+#
+# adapter層が壊れていなくても、category!=PARTIAL_SELLへ誤ってsuggested_sell_
+# shares/ratioが渡された場合、formatter自身が数量表示を拒否することを確認する。
+# Case T(PARTIAL_SELLで従来どおり表示)・Case U(overflow下でも数量が残る)は
+# 既存のCase G・Case Hがそのまま満たすため、重複テストは追加しない。
+
+
+def test_case_r_sell_category_ignores_stray_suggested_shares() -> None:
+    """category=SELLへ誤ってsuggested_sell_shares/ratioが設定されても、
+    数量セグメントを表示しない(Case R)。current_price・target_price・reason
+    等の他のSELL本文情報は従来どおり正常に表示されることもあわせて確認する。
+    """
+    data = _base(
+        category=NotificationCategory.SELL,
+        current_price=Decimal("4200"),
+        target_price=Decimal("4000"),
+        target_price_label="見直し",
+        reason="全部売却検討",
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.60,
+    )
+    text = format_notification_text(data)
+    assert "300株" not in text
+    assert "60%" not in text
+    # 数量以外のSELL本文は正常に表示され続けること。
+    assert "4,200円" in text
+    assert "見直し4,000円" in text
+    assert "全部売却検討" in text
+
+
+def test_case_s_critical_risk_category_ignores_stray_suggested_shares() -> None:
+    """category=CRITICAL_RISKへ誤ってsuggested_sell_shares/ratioが設定されても、
+    数量セグメントを表示しない(Case S)。重大リスク本文の既存必須情報(理由)は
+    is_critical_risk=Trueのもとで従来どおり欠落しないことを確認する。
+    """
+    data = _base(
+        category=NotificationCategory.CRITICAL_RISK,
+        current_price=Decimal("4200"),
+        target_price=Decimal("4200"),
+        target_price_label="即時執行",
+        reason="重大な会計問題が確認されたため、緊急に保有内容を確認してください。",
+        suggested_sell_shares=300,
+        suggested_sell_ratio=0.60,
+    )
+    text = format_notification_text(data, is_critical_risk=True)
+    assert "300株" not in text
+    assert "60%" not in text
+    assert "重大な会計問題が確認されたため、緊急に保有内容を確認してください。" in text
+
+
 def test_partial_sell_none_shares_no_segment() -> None:
     """suggested_sell_shares がNoneの場合、セグメント自体を生成しない
     (Empty セグメント表示なし)。
