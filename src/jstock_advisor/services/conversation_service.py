@@ -37,6 +37,7 @@ from jstock_advisor.infrastructure.aws.conversation_state_store import Conversat
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.line.client import QuickReplyButton
 from jstock_advisor.services.portfolio_service import PortfolioService
+from jstock_advisor.services.trading_pause_service import TradingPauseService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 from jstock_advisor.services.watchlist_display_name import (
     StockDisplayNameResolver,
@@ -69,6 +70,12 @@ _CANCEL_FAILED = "キャンセルできませんでした。もう一度お試�
 _RETRY_FAILED = "操作をやり直せませんでした。メニューからやり直してください。"
 _UNKNOWN_POSTBACK = "認識できない操作です。メニューからやり直してください。"
 _INVALID_STOCK_CODE = "銘柄コードが不正です(4桁の英数字が必要です)"
+# 保有銘柄オーナー機能移行時の書込停止(TradingPauseConfig)。WATCHには適用しない
+# (commit_watch()はHoldings/PurchaseLotsを一切更新しないため対象外)。
+_TRADING_PAUSED = (
+    "ただいまシステムメンテナンス中のため、購入・売却操作を一時的に停止しています。"
+    "しばらくしてからもう一度お試しください。"
+)
 
 
 def _unknown_stock_code_reply(stock_code: str) -> ConversationReply:
@@ -109,6 +116,7 @@ class ConversationService:
         transaction_history_service: TransactionHistoryService | None = None,
         watchlist_service: WatchlistService | None = None,
         stock_display_name_resolver: StockDisplayNameResolver | None = None,
+        trading_pause_service: TradingPauseService | None = None,
     ) -> None:
         self._portfolio = portfolio_service or PortfolioService()
         self._transactions = transaction_history_service or TransactionHistoryService()
@@ -117,6 +125,7 @@ class ConversationService:
             stock_display_name_resolver
             or build_stock_display_name_resolver(_STOCK_NAME_NEGATIVE_CACHE_TTL_SECONDS)
         )
+        self._trading_pause = trading_pause_service or TradingPauseService()
 
     # --- postback(リッチメニュー起点・Quick Reply起点) ---------------------
 
@@ -140,6 +149,11 @@ class ConversationService:
     def _start(
         self, user_id: str, action: ConversationAction, now: dt.datetime
     ) -> ConversationReply:
+        if action in (
+            ConversationAction.BUY,
+            ConversationAction.SELL,
+        ) and self._trading_pause.is_buy_sell_paused():
+            return ConversationReply(_TRADING_PAUSED)
         conversation_state_store.start_or_replace(user_id, action, now)
         return ConversationReply(_START_PROMPTS[action])
 
@@ -337,6 +351,11 @@ class ConversationService:
     def _commit_buy(
         self, user_id: str, state: ConversationState, now: dt.datetime
     ) -> ConversationReply:
+        # 会話開始後にpauseがtrueへ切り替わった場合の防御(実際の書き込みが
+        # 発生する直前でも必ず再確認する。開始時点(_start)のチェックだけに
+        # 依存しない)。
+        if self._trading_pause.is_buy_sell_paused():
+            return ConversationReply(_TRADING_PAUSED)
         assert state.stock_code is not None
         assert state.shares is not None
         assert state.price is not None
@@ -375,6 +394,8 @@ class ConversationService:
     def _commit_sell(
         self, user_id: str, state: ConversationState, now: dt.datetime
     ) -> ConversationReply:
+        if self._trading_pause.is_buy_sell_paused():
+            return ConversationReply(_TRADING_PAUSED)
         assert state.stock_code is not None
         assert state.shares is not None
         assert state.price is not None

@@ -455,6 +455,22 @@ Resources:
         - AttributeName: config_id
           KeyType: HASH
 
+  # 保有銘柄オーナー機能移行(2026-08)のM0: BUY/SELLの一時停止フラグ。書き込みは
+  # CLI経由の人間のみ(HoldingDecisionRuntimeConfigTableと同じ運用パターン)。
+  # LineWebhookFunctionは読み取り専用(ConversationServiceが起動時・確定直前に
+  # 参照する)。WATCHはHoldings/PurchaseLotsを一切更新しないため対象外。
+  TradingPauseConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-trading_pause_config"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: config_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: config_id
+          KeyType: HASH
+
   TransactionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -1549,6 +1565,9 @@ Resources:
         # StockDisplayNameResolverのoverrideソース(手動上書き名称)・JPXソース用
         # (指摘対応、上記CANDIDATE_UNIVERSE_CACHE_BUCKET環境変数とあわせて追加)。
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # 保有銘柄オーナー機能移行M0: BUY/SELL一時停止フラグの読み取り専用アクセス
+        # (書き込みはCLI経由の人間のみ)。
+        - DynamoDBReadPolicy: { TableName: !Ref TradingPauseConfigTable }
         - S3ReadPolicy: { BucketName: !Ref CandidateUniverseCacheBucket }
       Events:
         Webhook:
