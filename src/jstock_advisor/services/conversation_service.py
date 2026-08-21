@@ -218,6 +218,12 @@ class ConversationService:
     def _handle_trade_input(
         self, user_id: str, action: ConversationAction, text: str, now: dt.datetime
     ) -> ConversationReply:
+        # pause前に開始済みのBUY/SELL(INPUT_WAITING)がCSV入力によりCONFIRM_WAITING
+        # へ進んでしまわないよう、ここでも確認する(_startのチェックだけに
+        # 依存しない。ConversationStateは一切変更しない)。WATCHは対象外
+        # (_handle_watch_inputは別経路のためここには来ない)。
+        if self._trading_pause.is_buy_sell_paused():
+            return ConversationReply(_TRADING_PAUSED)
         fields = _parse_csv_fields(text)
         if fields is None or len(fields) != 3:
             return ConversationReply(_START_PROMPTS[action])

@@ -1,14 +1,18 @@
 """売買記録の一時停止フラグCLI(保有銘柄オーナー機能移行時の書込停止用)。
 
 init/set/statusはTradingPauseConfig(専用DynamoDBテーブル)を直接操作し、
-再デプロイ不要で反映される。ローカル実行時は既定でローカルJSONストアを操作するが、
-`--target aws`を指定すると本番DynamoDBを直接操作する(AWS認証情報が環境に
-設定済みであることが前提。cli/holding_decision.pyと同じパターン)。
+再デプロイ不要で反映される。`--target`(local | aws)は全コマンドで必須指定
+とし、既定値は持たせない(コードレビュー対応: 本番のつもりでの操作忘れ・
+タイプミスによる誤ったバックエンド操作を防ぐため)。`--target aws`を指定
+すると本番DynamoDBを直接操作する(AWS認証情報が環境に設定済みであることが
+前提。cli/holding_decision.pyと同じパターンだが、targetの型はCliTarget
+Enumへ厳密化している点が異なる)。
 """
 
 from __future__ import annotations
 
 import contextlib
+import enum
 import os
 from collections.abc import Iterator
 
@@ -25,10 +29,26 @@ app = typer.Typer(help="売買記録の一時停止フラグ(保有銘柄オー�
 _AWS_OVERRIDE_ENV_VAR = "AWS_LAMBDA_FUNCTION_NAME"
 
 
+class CliTarget(enum.StrEnum):
+    """--targetの許容値を"local"/"aws"の2値のみへ厳密に限定する。
+
+    以前はtarget: strの自由文字列で「target != "aws" は全てlocal」という
+    判定だったため、"--target awss"のようなタイプミスが本番操作のつもりで
+    ローカル操作として黙って成功してしまい、本番を一時停止したと誤認した
+    ままmigrationへ進む重大事故につながりかねなかった(コードレビュー対応)。
+    TyperのEnum検証により、この2値以外は起動時点で非ゼロ終了しコマンドは
+    一切実行されない。また全コマンドで--targetを必須(既定値なし)とし、
+    「指定を忘れたらlocalへ静かにフォールバックする」という事故も防ぐ。
+    """
+
+    LOCAL = "local"
+    AWS = "aws"
+
+
 @contextlib.contextmanager
-def _target_backend(target: str) -> Iterator[None]:
+def _target_backend(target: CliTarget) -> Iterator[None]:
     """--target aws指定時、ローカルCLIから本番DynamoDBバックエンドを直接操作する。"""
-    if target != "aws":
+    if target is not CliTarget.AWS:
         yield
         return
     previous = os.environ.get(_AWS_OVERRIDE_ENV_VAR)
@@ -49,7 +69,7 @@ def init(
     paused: bool = typer.Option(
         False, "--paused", help="初期状態でBUY/SELLを停止するか(既定False)"
     ),
-    target: str = typer.Option("local", "--target", help="local | aws"),
+    target: CliTarget = typer.Option(..., "--target", help="local | aws(必須指定)"),
 ) -> None:
     """TradingPauseConfigの初回作成(既に存在する場合は失敗する)。"""
     with _target_backend(target):
@@ -74,7 +94,7 @@ def set_pause(
     ),
     changed_by: str = typer.Option(..., "--changed-by"),
     reason: str = typer.Option(..., "--reason"),
-    target: str = typer.Option("local", "--target", help="local | aws"),
+    target: CliTarget = typer.Option(..., "--target", help="local | aws(必須指定)"),
 ) -> None:
     """BUY/SELLの一時停止フラグを切り替える。再デプロイ不要。WATCH(ウォッチリスト
     登録)には影響しない(HoldingsもPurchaseLotsも変更しない経路のため)。"""
@@ -101,7 +121,9 @@ def set_pause(
 
 
 @app.command("status")
-def status(target: str = typer.Option("local", "--target", help="local | aws")) -> None:
+def status(
+    target: CliTarget = typer.Option(..., "--target", help="local | aws(必須指定)"),
+) -> None:
     with _target_backend(target):
         service = TradingPauseService()
         config = service.get_config()

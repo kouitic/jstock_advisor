@@ -1088,11 +1088,24 @@ IAM側のサイズ上限はCloudFormation実行時まで判明しないため、
 「⭐ お気に入り登録」はHoldings/PurchaseLotsを一切更新しないため対象外で、
 一時停止中も通常どおり利用できます。
 
+**`--target`は`local`/`aws`のいずれかを必ず明示指定してください(既定値は
+ありません)**。`--target awss`のような入力ミスは値検証の時点でエラー終了し、
+どちらのバックエンドにも一切触れません(コードレビュー対応: 本番を一時停止
+したつもりでタイプミスによりローカルだけを操作してしまい、本番が停止して
+いないままデータ移行へ進んでしまう事故を防ぐため)。
+
+**pause確認と実際のBUY/SELL登録(TransactWriteItems)は原子的です**。
+LINE会話の確認画面表示時点でpause=falseだったとしても、「登録する」を
+押した瞬間の書き込みそのものにTradingPauseConfigの状態確認が含まれるため、
+その間に運用者が`--buy-sell true`へ切り替えた場合は、書き込みの直前で
+確実に失敗し(「最新の保有状況が変更されたため登録できませんでした」と
+案内されます)、Holdings/PurchaseLots/Transactionsのいずれも変更されません。
+
 ### 12.1 初回作成
 
 ```bash
-jstock trading-pause init --changed-by <あなたの名前> --reason "M0導入"
-# 本番(AWS)環境に対して初期化する場合は --target aws を追加
+jstock trading-pause init --changed-by <あなたの名前> --reason "M0導入" --target local
+# 本番(AWS)環境に対して初期化する場合
 jstock trading-pause init --changed-by <あなたの名前> --reason "M0導入" --target aws
 ```
 
