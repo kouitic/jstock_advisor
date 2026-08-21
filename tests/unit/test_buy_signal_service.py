@@ -498,3 +498,88 @@ def test_only_nihon_shinyaku_is_not_excluded_for_price_reasons(
     assert nihon_shinyaku_rec.raw_buy_action in BUY_FAMILY_ACTIONS
     nihon_shinyaku_reasons = [r.code for r in nihon_shinyaku_rec.buy_decision_reasons]
     assert "EARNINGS_WINDOW" in nihon_shinyaku_reasons
+
+
+# ===== 再々コードレビュー対応(2026-08、JST暦日境界修正・指摘4):
+# in_trade_cooldown判定(cooldown_until_date比較)とWatchStateService.
+# evaluate_and_update()への「当日」がJST暦日基準になっていることの回帰。
+# evaluate_and_update()自体の呼び出し有無はbuy_actionの値に関わらず
+# in_trade_cooldown(cooldown_until_dateとの比較)だけで決まるため、
+# WatchStateService.evaluate_and_update()をspyし呼び出し有無で検証する
+# (実際にNEAR BUY監視が開始されるかどうかの判定条件には依存しない)。
+
+
+def _analyze_with_cooldown_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    fx: _StockFixture,
+    now: dt.datetime,
+    cooldown_until_date: dt.date,
+) -> list[dt.date]:
+    import dataclasses
+
+    from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
+    from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
+        HoldingsSnapshotRepository,
+    )
+    from jstock_advisor.services.watch_state_service import WatchStateService
+
+    # data_fetched_atをnowに揃える(このテストの関心事(cooldown判定のJST基準日)とは
+    # 無関係なデータ鮮度ゲートが、_NOWから離れたnowにより誤って発火しないようにする)。
+    snapshot = dataclasses.replace(_build_snapshot(fx), data_fetched_at=now)
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
+
+    calls: list[dt.date] = []
+    original_evaluate_and_update = WatchStateService.evaluate_and_update
+
+    def _spy_evaluate_and_update(self, *args, **kwargs):
+        calls.append(kwargs["today"])
+        return original_evaluate_and_update(self, *args, **kwargs)
+
+    monkeypatch.setattr(WatchStateService, "evaluate_and_update", _spy_evaluate_and_update)
+
+    holdings_snapshot_repo = HoldingsSnapshotRepository(store_dir=tmp_path)
+    holdings_snapshot_repo.upsert(
+        HoldingsSnapshotEntry(
+            stock_code=fx.stock_code,
+            shares=100,
+            average_purchase_price=Decimal("1000"),
+            recorded_at=cooldown_until_date - dt.timedelta(days=10),
+            cooldown_until_date=cooldown_until_date,
+            active_holding=True,
+        )
+    )
+    service = BuySignalService(
+        providers=_providers(),
+        config=_CONFIG,
+        business_calendar=_CALENDAR,
+        holdings_snapshot_repository=holdings_snapshot_repo,
+    )
+    service.analyze(fx.stock_code, now, RecommendationType.BUY)
+    return calls
+
+
+def test_in_trade_cooldown_uses_jst_business_date_not_utc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """指摘4回帰: cooldown_until_date=2026-08-20の銘柄について、
+    2026-08-20 23:30 UTC(=2026-08-21 08:30 JST)時点の評価では、
+    JST暦日(2026-08-21)がcooldown_until_dateを超えているため、既に解除済みと
+    判定されWatchStateService.evaluate_and_update()が呼ばれること(UTC暦日
+    (2026-08-20)のままであれば誤ってまだクールダウン中と判定され、呼ばれない)。
+    """
+    now = dt.datetime(2026, 8, 20, 23, 30, tzinfo=dt.UTC)
+    calls = _analyze_with_cooldown_entry(monkeypatch, tmp_path, _TACHI_S, now, dt.date(2026, 8, 20))
+    assert calls == [dt.date(2026, 8, 21)]
+
+
+def test_in_trade_cooldown_still_blocks_watch_state_within_jst_business_date(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """指摘4回帰(対照ケース): cooldown_until_date=2026-08-21の銘柄について、
+    同じく2026-08-20 23:30 UTC(=2026-08-21 08:30 JST)時点では、JST暦日
+    (2026-08-21)がまだcooldown_until_date以下のため、引き続きクールダウン中と
+    判定されWatchStateService.evaluate_and_update()が呼ばれないこと。"""
+    now = dt.datetime(2026, 8, 20, 23, 30, tzinfo=dt.UTC)
+    calls = _analyze_with_cooldown_entry(monkeypatch, tmp_path, _TACHI_S, now, dt.date(2026, 8, 21))
+    assert calls == []

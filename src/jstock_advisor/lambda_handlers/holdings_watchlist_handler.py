@@ -63,6 +63,7 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.exit_price_range import evaluate_exit_price_range
 from jstock_advisor.domain.signals.holding_decision_execution_plan import (
     resolve_execution_plan,
@@ -1078,7 +1079,13 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         watch_state_service = WatchStateService(
             business_calendar=calendar, execution_context=execution_context
         )
-        watch_state_service.end_for_trade_events(detection_outcome.events, now.date())
+        # 再コードレビュー対応(2026-08、JST暦日境界修正・指摘4): TradeCooldownService
+        # がevaluation_date_jst(now)を基準日として検知・記録するようになったため、
+        # 同じ売買イベントに紐づくWatchState終了もこれと同一のJST暦日を使う
+        # (ended_at/last_evaluated_atはWatchStateの営業日ベースの経過判定
+        # (business_days_between等)に使われる値のため、TradeDetectionと
+        # 異なる基準日にすると同一WatchStateの日付系列が矛盾する)。
+        watch_state_service.end_for_trade_events(detection_outcome.events, evaluation_date_jst(now))
     else:
         logger.warning(
             "holdings_watchlist_handler: trade detection not confirmed this run "

@@ -502,6 +502,64 @@ def test_kill_switch_on_suppresses_profit_taking_notification_but_still_saves_re
     assert result.audit.notification_status == NotificationStatus.KILL_SWITCH_SUPPRESSED
 
 
+def test_notification_disabled_manual_review_data_quality_sends_zero_line_messages(
+    store_dir: Path, monkeypatch
+):
+    """DQ-H(再々コードレビュー対応2026-08、指摘5): notification_enabled=False中に
+    manual-review相当のDataQuality異常(全部利確検討価格が現在値から極端に乖離、
+    test_line_notification_service.pyのfull_take_extreme_marginシナリオと同一)が
+    実際に発生しても、実LineNotificationService+実FakeLineClient経由で
+    LINE送信が0件であることを直接証明する(check_data_quality_eligibility()が
+    notify_manual_review_required()を呼ばない設計であることのE2E確認)。"""
+    services = _build_services(store_dir, RuntimeConfigMode.ACTIVE, notification_enabled=False)
+
+    monkeypatch.setattr(
+        SellSignalService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: SellSignalOutcome(holding.stock_code, None, None),
+    )
+
+    def _fake_evaluate(self, *args, **kwargs):
+        return HoldingDecisionEvaluationOutcome(
+            _STOCK_CODE, _not_notifying_holding_decision_result(_STOCK_CODE)
+        )
+
+    monkeypatch.setattr(HoldingDecisionService, "evaluate", _fake_evaluate)
+
+    from jstock_advisor.domain.entities.common import PriceWithRationale, SellPriceLevels
+    from jstock_advisor.services.profit_taking_service import ProfitTakingOutcome
+
+    manual_review_recommendation = Recommendation(
+        recommendation_id="dq-h-manual-review",
+        stock_code=_STOCK_CODE,
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.FULL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(
+            full_profit_consideration_price=PriceWithRationale(price=Decimal("9000"), rationale="x")
+        ),
+        price_at_recommendation=Decimal("4200"),
+        reasons=["適正価格レンジ上限を超過"],
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+    )
+    monkeypatch.setattr(
+        ProfitTakingService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: ProfitTakingOutcome(
+            holding.stock_code, manual_review_recommendation, None
+        ),
+    )
+
+    result = _run(services)
+
+    assert services["line_client"].sent_messages == []
+    assert result.audit.notification_status == NotificationStatus.KILL_SWITCH_SUPPRESSED
+    assert result.audit.notification_suppression_reason == "KILL_SWITCH_SUPPRESSED"
+    assert result.audit.data_quality_status == "BLOCKED"
+    assert result.detected_recommendation_type is None  # DataQuality BLOCKEDのためdetected対象外
+
+
 def test_kill_switch_on_suppresses_concentration_notification_but_still_saves_recommendation(
     store_dir: Path,
 ):

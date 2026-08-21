@@ -279,3 +279,227 @@ def test_normal_and_validation_snapshots_do_not_cross_contaminate(
     # NORMAL側は更新されるが、VALIDATION側は無関係(まだshares=0のまま)。
     assert normal_repo.get("2914").shares == 100
     assert validation_repo.get("2914").shares == 0
+
+
+# ============================================================================
+# 再々コードレビュー対応(2026-08、JST暦日境界修正・指摘1〜3): TradeCooldownの
+# 基準日が「生成側=UTC暦日」「比較側=JST暦日」で不整合になっていた不備の修正。
+# TradeDetection lock keyもJST暦日基準へ統一する(指摘2)。
+# ============================================================================
+
+# 2026-08-21 08:30 JST(金)。2026-08-20 23:30 UTC。
+_FRIDAY_08_30_JST = dt.datetime(2026, 8, 20, 23, 30, tzinfo=dt.UTC)
+# 2026-08-21 09:10 JST(金、上記と同一JST日だがUTC暦日は異なる)。
+_FRIDAY_09_10_JST = dt.datetime(2026, 8, 21, 0, 10, tzinfo=dt.UTC)
+
+
+def test_td_a_same_jst_day_different_utc_date_shares_lock_key(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """TD-A: 同一JST日(2026-08-21)だがUTC日付が異なる2時刻(08:30 JST/09:10 JST)
+    でも、TradeDetection lock keyが同一(NORMAL:2026-08-21)になること。"""
+    normal_service, _validation_service, normal_repo, _validation_repo = _build_cooldown_services(
+        tmp_path
+    )
+    _seed_baseline(normal_repo, "2914", shares=100)
+    current_holdings = _current_holdings("2914", shares=50)  # 一部売却
+
+    first_outcome = normal_service.detect_and_apply(current_holdings, _FRIDAY_08_30_JST)
+    assert first_outcome.confirmed is True
+    assert "NORMAL:2026-08-21" in fake_table_on_lambda.items
+    assert len(first_outcome.events) == 1
+
+    # 同一JST日の別UTC時刻: 同じlock keyのためCOMPLETED済みとして扱われ、
+    # 検知処理自体は再実行されない(=同一の基準日として扱われている証拠)。
+    second_outcome = normal_service.detect_and_apply(current_holdings, _FRIDAY_09_10_JST)
+    assert second_outcome.confirmed is True
+    assert second_outcome.events == []
+    assert len(fake_table_on_lambda.items) == 1  # 別keyが新規作成されていない
+
+
+def test_td_b_next_jst_day_gets_a_separate_lock_key(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """TD-B: 翌JST日は別のlock key(NORMAL:2026-08-22)になること。"""
+    normal_service, _validation_service, normal_repo, _validation_repo = _build_cooldown_services(
+        tmp_path
+    )
+    _seed_baseline(normal_repo, "2914", shares=100)
+    current_holdings = _current_holdings("2914", shares=50)
+
+    normal_service.detect_and_apply(current_holdings, _FRIDAY_08_30_JST)
+    next_day = _FRIDAY_08_30_JST + dt.timedelta(days=1)  # 2026-08-22 08:30 JST(土)
+    normal_service.detect_and_apply(current_holdings, next_day)
+
+    assert "NORMAL:2026-08-21" in fake_table_on_lambda.items
+    assert "NORMAL:2026-08-22" in fake_table_on_lambda.items
+
+
+def test_td_c_normal_and_validation_namespaces_stay_separated_under_jst_key(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """TD-C: JST暦日key化後もNORMAL/VALIDATIONの名前空間分離は維持される
+    (NORMAL:2026-08-21とVALIDATION:2026-08-21は別ロックとして扱われる)。"""
+    normal_service, validation_service, normal_repo, validation_repo = _build_cooldown_services(
+        tmp_path
+    )
+    _seed_baseline(normal_repo, "2914", shares=0)
+    _seed_baseline(validation_repo, "2914", shares=0)
+    current_holdings = _current_holdings("2914", shares=100)
+
+    normal_outcome = normal_service.detect_and_apply(current_holdings, _FRIDAY_08_30_JST)
+    validation_outcome = validation_service.detect_and_apply(current_holdings, _FRIDAY_08_30_JST)
+
+    assert normal_outcome.confirmed is True
+    assert validation_outcome.confirmed is True
+    assert len(normal_outcome.events) == 1
+    assert len(validation_outcome.events) == 1
+    assert "NORMAL:2026-08-21" in fake_table_on_lambda.items
+    assert "VALIDATION:2026-08-21" in fake_table_on_lambda.items
+
+
+def _build_line_notification_service(tmp_path: Any, holdings_snapshot_repo: Any) -> Any:
+    from jstock_advisor.config.loader import load_config
+    from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (  # noqa: E501
+        DailyNotificationPriorityRepository,
+    )
+    from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
+        NotificationLogRepository,
+    )
+    from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
+        RecommendationRepository,
+    )
+    from jstock_advisor.services.line_notification_service import LineNotificationService
+
+    class _FakeLineClient:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def push_message(self, text: str) -> None:
+            self.sent.append(text)
+
+    return LineNotificationService(
+        line_client=_FakeLineClient(),
+        notification_log_repository=NotificationLogRepository(store_dir=tmp_path),
+        recommendation_repository=RecommendationRepository(store_dir=tmp_path),
+        config=load_config(),
+        holdings_snapshot_repository=holdings_snapshot_repo,
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=tmp_path
+        ),
+    )
+
+
+def _partial_sell_recommendation(now: dt.datetime) -> Any:
+    from decimal import Decimal
+
+    from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
+    from jstock_advisor.domain.entities.recommendation import Recommendation
+
+    return Recommendation(
+        recommendation_id="tc-e2e-partial-sell",
+        stock_code="2914",
+        stock_name="テスト銘柄",
+        recommended_at=now,
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        price_at_recommendation=Decimal("1000"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+
+
+def _run_tc_e2e_scenario(fake_table_on_lambda: _FakeTable, tmp_path: Any, now: dt.datetime) -> Any:
+    """TradeCooldownService.detect_and_apply()(生成側)→check_trade_cooldown_
+    eligibility()(比較側)を実際に一連で通す(受入条件・TC-E/F)。"""
+    normal_service, _validation_service, normal_repo, _validation_repo = _build_cooldown_services(
+        tmp_path
+    )
+    _seed_baseline(normal_repo, "2914", shares=100)
+    current_holdings = _current_holdings("2914", shares=50)  # 一部売却検出
+
+    outcome = normal_service.detect_and_apply(current_holdings, now)
+    assert outcome.confirmed is True
+    assert len(outcome.events) == 1
+
+    entry = normal_repo.get("2914")
+    assert entry is not None
+    assert entry.cooldown_until_date is not None
+
+    notification_service = _build_line_notification_service(tmp_path, normal_repo)
+    return entry.cooldown_until_date, notification_service
+
+
+def test_tc_e_generation_to_comparison_e2e_at_08_30_jst(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """TC-E(最重要受入条件): 2026-08-21 08:30 JST(2026-08-20 23:30 UTC)に
+    PARTIAL_SELLを検出(partial_trade_business_days=3)。
+    cooldown_until_date=2026-08-26(水、土日を挟んで3営業日後)。
+    8/26 JSTはクールダウン中、8/27 JSTで解除されること。"""
+    cooldown_until_date, notification_service = _run_tc_e2e_scenario(
+        fake_table_on_lambda, tmp_path, _FRIDAY_08_30_JST
+    )
+    assert cooldown_until_date == dt.date(2026, 8, 26)
+
+    rec = _partial_sell_recommendation(_FRIDAY_08_30_JST)
+    still_in_cooldown = dt.datetime(2026, 8, 25, 23, 0, tzinfo=dt.UTC)  # 2026-08-26 08:00 JST
+    released = dt.datetime(2026, 8, 26, 23, 0, tzinfo=dt.UTC)  # 2026-08-27 08:00 JST
+
+    eligibility_during = notification_service.check_trade_cooldown_eligibility(
+        rec, still_in_cooldown
+    )
+    eligibility_after = notification_service.check_trade_cooldown_eligibility(rec, released)
+
+    assert eligibility_during.eligible is False
+    assert eligibility_during.block_reason == "TRADE_COOLDOWN"
+    assert eligibility_after.eligible is True
+
+
+def test_tc_f_generation_to_comparison_e2e_at_09_10_jst_matches_tc_e(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """TC-F: 同じ条件を2026-08-21 09:10 JST(2026-08-21 00:10 UTC、UTC暦日は
+    TC-Eと異なる)で実行しても、TradeDetection business date・cooldown_until_date・
+    eligibility判定がTC-Eと完全に一致すること。"""
+    cooldown_until_date, notification_service = _run_tc_e2e_scenario(
+        fake_table_on_lambda, tmp_path, _FRIDAY_09_10_JST
+    )
+    assert cooldown_until_date == dt.date(2026, 8, 26)  # TC-Eと同一
+
+    rec = _partial_sell_recommendation(_FRIDAY_09_10_JST)
+    still_in_cooldown = dt.datetime(2026, 8, 25, 23, 0, tzinfo=dt.UTC)  # 2026-08-26 08:00 JST
+    released = dt.datetime(2026, 8, 26, 23, 0, tzinfo=dt.UTC)  # 2026-08-27 08:00 JST
+
+    eligibility_during = notification_service.check_trade_cooldown_eligibility(
+        rec, still_in_cooldown
+    )
+    eligibility_after = notification_service.check_trade_cooldown_eligibility(rec, released)
+
+    assert eligibility_during.eligible is False
+    assert eligibility_after.eligible is True
+
+
+def test_tc_g_weekend_is_not_counted_as_business_day() -> None:
+    """TC-G: 金曜(2026-08-21)基準+1営業日は、土日(8/22・8/23)を挟んで
+    月曜(8/24)になること(TC-E/Fの3営業日計算にも同じ土日跨ぎが含まれるが、
+    ここでは1営業日のみに絞って単純に確認する。BusinessCalendarの休日設定
+    自体は変更していない)。"""
+    from jstock_advisor.config.loader import load_config
+    from jstock_advisor.domain.business_calendar import BusinessCalendar
+
+    calendar = BusinessCalendar.from_config(load_config().holiday_calendar)
+    assert calendar.add_business_days(dt.date(2026, 8, 21), 1) == dt.date(2026, 8, 24)
+
+
+def test_tc_h_national_holiday_is_not_counted_as_business_day(
+    fake_table_on_lambda: _FakeTable, tmp_path: Any
+) -> None:
+    """TC-H: 2026-08-11(火)は「山の日」(祝日)のため、月曜(8/10)基準+3営業日は
+    祝日を挟んで金曜(8/14)になること(祝日を1営業日として数えていれば8/13になる。
+    既存のBusinessCalendar休日判定(jpholiday)自体は変更していない)。"""
+    from jstock_advisor.config.loader import load_config
+    from jstock_advisor.domain.business_calendar import BusinessCalendar
+
+    calendar = BusinessCalendar.from_config(load_config().holiday_calendar)
+    assert calendar.is_business_day(dt.date(2026, 8, 11)) is False  # 山の日
+    assert calendar.add_business_days(dt.date(2026, 8, 10), 3) == dt.date(2026, 8, 14)

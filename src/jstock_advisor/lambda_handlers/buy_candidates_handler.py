@@ -83,6 +83,7 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.add_on_risk import evaluate_add_on_eligibility
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     MAX_SECTOR_ENTRIES,
@@ -1269,7 +1270,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         watch_state_service = WatchStateService(
             business_calendar=calendar, execution_context=execution_context
         )
-        watch_state_service.end_for_trade_events(detection_outcome.events, now.date())
+        # 再コードレビュー対応(2026-08、JST暦日境界修正・指摘4): 保有銘柄Lambda側
+        # (holdings_watchlist_handler.py)と同じ理由でJST暦日(evaluation_date_jst)
+        # を使う(TradeDetectionの基準日・WatchStateの経過判定基準日を統一する)。
+        watch_state_service.end_for_trade_events(detection_outcome.events, evaluation_date_jst(now))
     else:
         logger.warning(
             "buy_candidates_handler: trade detection not confirmed this run "
