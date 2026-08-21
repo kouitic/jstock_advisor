@@ -816,6 +816,20 @@ jstock holding-decision init-runtime-config --changed-by <あなたの名前> --
 jstock holding-decision show-runtime-config --target aws
 ```
 
+**本番検証で発覚・修正した不具合(2026-08-21)**: 上記の`init-runtime-config`
+(初回作成)後に行う`set-mode`/`kill-switch`(10.2〜10.4節、更新)は、`--target
+aws`実行時、`RuntimeConfig`テーブルの実際の保存形式(1項目全体を単一の`data`
+属性(JSON文字列)へ保存する、`infrastructure/aws/dynamodb_store.py`の
+`DynamoDbCollectionStore`方式)と、更新処理側が前提としていたスキーマ
+(`config_version`等を項目のトップレベル属性として直接更新)が一致しておらず、
+DynamoDB上では`ConditionExpression`が常に`ConditionalCheckFailedException`
+となり、**`--target aws`での`set-mode`/`kill-switch`が一度も成功していな
+かった**(ローカル運用時はJSONファイルを使うため影響なし。`baseline_pointer.py`
+の`update_pointer`にも同一の不整合があり、あわせて修正した)。`data`属性全体
+の一致を条件とする条件付き更新へ修正し、既存の本番state(移行不要)のまま
+そのまま更新できるようにした(watchlist_rotation_state.pyのrotation commit
+で本番検証時に発覚・修正済みの不具合と同じ原因・同じ修正方針)。
+
 ### 10.2 Shadow運用手順(新旧を並行計算し、通知は旧方式のみ)
 
 ```bash
