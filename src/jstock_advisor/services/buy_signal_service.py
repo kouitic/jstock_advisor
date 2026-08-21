@@ -44,6 +44,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.scoring.score import compute_score
 from jstock_advisor.domain.screening.rules import evaluate_screening
 from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
@@ -651,16 +652,22 @@ class BuySignalService:
         # 増加・best_distance_pct更新のいずれも停止する。§5-2)。クールダウンの
         # 発生自体(TradeCooldownService.detect_and_apply)はハンドラ側の入口で
         # 既に完了している前提で、ここではHoldingsSnapshotEntryを読むだけ ---
+        # 再コードレビュー対応(2026-08、JST暦日境界修正・指摘4): cooldown_until_date
+        # との比較、およびWatchStateServiceの「当日」(営業日ベースの経過判定
+        # business_days_between等に使う基準日)は、line_notification_service.
+        # check_trade_cooldown_eligibility()・TradeCooldownService.detect_and_apply()
+        # と同じevaluation_date_jst(now)を使う(生成側・比較側の基準日を統一する)。
         watch_type: WatchType | None = None
         near_buy_consecutive_business_days: int | None = None
         watch_transition_type: str | None = None
         watch_previous_consecutive_business_days: int | None = None
         watch_end_reason: str | None = None
+        evaluation_date = evaluation_date_jst(now)
         cooldown_entry = self._holdings_snapshot_repo.get(stock_code)
         in_trade_cooldown = (
             cooldown_entry is not None
             and cooldown_entry.cooldown_until_date is not None
-            and now.date() <= cooldown_entry.cooldown_until_date
+            and evaluation_date <= cooldown_entry.cooldown_until_date
         )
         if not in_trade_cooldown:
             transition = self._watch_state_service.evaluate_and_update(
@@ -670,7 +677,7 @@ class BuySignalService:
                 required_decline_to_entry_pct=required_decline_to_entry_pct,
                 current_price=current_price,
                 entry_price=buy_price_levels.entry.price if buy_price_levels.entry else None,
-                today=now.date(),
+                today=evaluation_date,
                 config=self._config.buy_decision.near_buy,
             )
             # 現在アクティブに監視中(=NEAR BUY通知の対象)なのはSTARTED/

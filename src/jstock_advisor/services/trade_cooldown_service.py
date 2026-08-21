@@ -20,6 +20,7 @@ from jstock_advisor.domain.entities.enums import TransactionType
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.trade_event_detection import TradeEvent, detect_trade_events
 from jstock_advisor.infrastructure.aws import trade_detection_lock
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
@@ -84,11 +85,23 @@ class TradeCooldownService:
         なくなる(通知検証モードの「本番の永続状態・通常運用へ影響させない」
         という既存方針に反する)。物理テーブルは1つのまま、キー値のみで
         NORMAL/VALIDATIONを分離する(大規模化を避けるため)。
+
+        再コードレビュー対応(2026-08、JST暦日境界修正・指摘1/2): ロックキー
+        (「1日1回」の基準日)・検知/HoldingsSnapshot記録の基準日
+        (_do_detect_and_apply()のtoday、cooldown_until_dateの算出起点)は、
+        いずれもevaluation_date_jst(now)で算出したJST暦日を使う(1回だけ算出し
+        使い回す)。line_notification_service.check_trade_cooldown_eligibility()
+        側の比較もJST暦日で行うため、生成側(ここ)と比較側の基準日を揃える
+        (以前はここがLambdaのUTC now.date()のままで、比較側とのみJST化が
+        先行し、生成/比較で基準日が一致しない状態になっていた)。try_acquire/
+        mark_completed/get_status自体へ渡すnow(リース時刻の実時間比較用)は
+        UTCのまま変更しない(暦日ではなく経過時間の判定のため)。
         """
-        business_date = f"{self._execution_context.mode.value}:{now.date().isoformat()}"
+        evaluation_date = evaluation_date_jst(now)
+        business_date = f"{self._execution_context.mode.value}:{evaluation_date.isoformat()}"
 
         if trade_detection_lock.try_acquire(business_date, now, _LEASE_SECONDS):
-            events = self._do_detect_and_apply(current_holdings, now.date())
+            events = self._do_detect_and_apply(current_holdings, evaluation_date)
             trade_detection_lock.mark_completed(business_date, leased_at_iso=now.isoformat())
             return TradeDetectionOutcome(confirmed=True, events=events)
 
@@ -103,7 +116,7 @@ class TradeCooldownService:
                 and lease_expires_at < now.isoformat()
                 and trade_detection_lock.try_acquire(business_date, now, _LEASE_SECONDS)
             ):
-                events = self._do_detect_and_apply(current_holdings, now.date())
+                events = self._do_detect_and_apply(current_holdings, evaluation_date)
                 trade_detection_lock.mark_completed(business_date, leased_at_iso=now.isoformat())
                 return TradeDetectionOutcome(confirmed=True, events=events)
             time.sleep(_BOUNDED_RETRY_INTERVAL_SECONDS)
