@@ -90,7 +90,9 @@ def init(
 @app.command("set")
 def set_pause(
     buy_sell: bool = typer.Option(
-        ..., "--buy-sell", help="true: BUY/SELLを一時停止する / false: 解除する"
+        ...,
+        "--buy-sell/--no-buy-sell",
+        help="--buy-sell: BUY/SELLを一時停止する / --no-buy-sell: 解除する",
     ),
     changed_by: str = typer.Option(..., "--changed-by"),
     reason: str = typer.Option(..., "--reason"),
