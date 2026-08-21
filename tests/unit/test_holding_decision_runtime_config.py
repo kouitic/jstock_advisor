@@ -1,8 +1,20 @@
-"""RuntimeConfigの初回作成・楽観ロック・フォールバックのテスト(実装プラン1節)。"""
+"""RuntimeConfigの初回作成・楽観ロック・フォールバックのテスト(実装プラン1節)。
+
+`Test*Dynamo*`(2026-08修正、本番検証で発覚)は`AWS_LAMBDA_FUNCTION_NAME`を
+設定して`_update_dynamodb`(Lambda/DynamoDB経路)を実際に駆動する。以前この
+経路は、CollectionStore.insert_if_absent()が実際に書き込む「PK(config_id) +
+data(JSON文字列)」スキーマと異なり、config_version等をトップレベルの
+ネイティブ属性として直接update_itemしていたため、ConditionExpressionが常に
+ConditionalCheckFailedExceptionとなりupdate()が一度も成功していなかった
+(ローカルJSON版のテストだけでは検知できなかった不具合。watchlist_rotation_
+state.pyのrotation commitと同じ不具合パターン)。
+"""
 
 from pathlib import Path
 
+import boto3
 import pytest
+from moto import mock_aws
 
 from jstock_advisor.domain.entities.enums import FinancialPolicyOverride, RuntimeConfigMode
 from jstock_advisor.infrastructure.local_repository import (
@@ -13,6 +25,9 @@ from jstock_advisor.services.holding_decision_runtime_config_service import (
     HoldingDecisionRuntimeConfigService,
     RuntimeConfigAlreadyInitializedError,
 )
+
+_REGION = "ap-northeast-1"
+_TABLE_NAME = "jstock-holding_decision_runtime_config"
 
 
 def _reset_cache() -> None:
@@ -184,3 +199,102 @@ def test_cache_is_used_within_ttl(store_dir: Path):
     )
     cached = service.get_config()
     assert cached.config.mode == RuntimeConfigMode.LEGACY  # まだキャッシュされた値
+
+
+# --- 本番検証2026-08対応: DynamoDB(PK + data JSON文字列)スキーマでの回帰テスト ---
+
+
+@pytest.fixture
+def dynamo_lambda_env(monkeypatch: pytest.MonkeyPatch):
+    """running_on_lambda()==Trueを模擬し、DynamoDbCollectionStoreと同一の
+    テーブル定義(config_idのみHASH key、他は全てdata属性内)を作成する。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "holding-decision-cli")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name=_REGION)
+        client.create_table(
+            TableName=_TABLE_NAME,
+            KeySchema=[{"AttributeName": "config_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "config_id", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield client
+
+
+def test_dynamodb_init_then_update_round_trip(dynamo_lambda_env: object) -> None:
+    """init()が書き込んだ{config_id, data}アイテムに対し、update()が実際に
+    成功しconfig_versionが進むこと(これが以前は常にRuntimeConfigConflictError
+    になっていた、本件の中核回帰テスト)。"""
+    created = runtime_config_repo.init(
+        mode=RuntimeConfigMode.LEGACY,
+        notification_enabled=False,
+        financial_policy_override=FinancialPolicyOverride.FORCE_DEFER_ALL,
+        updated_by="tester",
+        change_reason="initial",
+    )
+    assert created is not None
+    assert created.config_version == 1
+
+    updated = runtime_config_repo.update(
+        expected_config_version=1,
+        mode=RuntimeConfigMode.ACTIVE,
+        notification_enabled=True,
+        financial_policy_override=FinancialPolicyOverride.DEFAULT,
+        updated_by="tester",
+        change_reason="go active",
+    )
+    assert updated.config_version == 2
+    assert updated.mode == RuntimeConfigMode.ACTIVE
+    assert updated.notification_enabled is True
+
+    persisted = runtime_config_repo.get()
+    assert persisted is not None
+    assert persisted.config_version == 2
+    assert persisted.mode == RuntimeConfigMode.ACTIVE
+
+
+def test_dynamodb_update_conflict_on_stale_version(dynamo_lambda_env: object) -> None:
+    runtime_config_repo.init(
+        mode=RuntimeConfigMode.LEGACY,
+        notification_enabled=False,
+        financial_policy_override=FinancialPolicyOverride.FORCE_DEFER_ALL,
+        updated_by="tester",
+        change_reason="initial",
+    )
+    runtime_config_repo.update(
+        expected_config_version=1,
+        mode=RuntimeConfigMode.ACTIVE,
+        notification_enabled=True,
+        financial_policy_override=FinancialPolicyOverride.DEFAULT,
+        updated_by="tester",
+        change_reason="go active",
+    )
+
+    with pytest.raises(runtime_config_repo.RuntimeConfigConflictError):
+        runtime_config_repo.update(
+            expected_config_version=1,  # stale
+            mode=RuntimeConfigMode.LEGACY,
+            notification_enabled=False,
+            financial_policy_override=FinancialPolicyOverride.DEFAULT,
+            updated_by="tester",
+            change_reason="stale update",
+        )
+
+    unchanged = runtime_config_repo.get()
+    assert unchanged is not None
+    assert unchanged.config_version == 2
+    assert unchanged.mode == RuntimeConfigMode.ACTIVE
+
+
+def test_dynamodb_update_conflict_when_unconfigured(dynamo_lambda_env: object) -> None:
+    with pytest.raises(runtime_config_repo.RuntimeConfigConflictError):
+        runtime_config_repo.update(
+            expected_config_version=1,
+            mode=RuntimeConfigMode.ACTIVE,
+            notification_enabled=True,
+            financial_policy_override=FinancialPolicyOverride.DEFAULT,
+            updated_by="tester",
+            change_reason="never initialized",
+        )

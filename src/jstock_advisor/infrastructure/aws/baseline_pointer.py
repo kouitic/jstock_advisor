@@ -9,6 +9,12 @@ CollectionStoreの汎用upsert()は無条件書き込みであり条件付き更
 ため、DynamoDB環境の更新(update_pointer)はこのモジュールが直接boto3を使う。
 初回作成(create_pointer)はCollectionStore.insert_if_absent()で足りる
 (既にDynamoDB/ローカル双方で原子的に実装済み)。
+
+DynamoDB上のアイテムはinsert_if_absent()(CollectionStore経由)が書き込む
+PK + data(JSON文字列)スキーマのため、条件式・更新式はpointer_version等の
+トップレベルのネイティブ属性ではなく、data属性全体の完全一致を条件とする
+CASで表現する(2026-08修正、watchlist_rotation_state.pyと同じ不具合パターン
+・同じ修正方針)。
 """
 
 from __future__ import annotations
@@ -142,30 +148,57 @@ def _update_pointer_dynamodb(
     updated_by: str | None,
     now: dt.datetime | None,
 ) -> InvestmentThesisBaselinePointer:
+    """2026-08修正(本番検証で発覚): create_pointer()が書き込むアイテムは
+    insert_if_absent()経由でPK + data(JSON文字列)スキーマ(dynamodb_store.py:
+    to_dynamo_item())で保存され、トップレベルにpointer_version等のネイティブ
+    属性は存在しない。このため以前の実装はConditionExpressionが常にConditional
+    CheckFailedExceptionとなり、update_pointer()が一度も成功していなかった
+    (watchlist_rotation_state.pyのrotation commitと同じ不具合パターン)。data
+    属性全体の完全一致を条件とするCASへ修正し、既存本番データをmigrationなしで
+    そのまま利用できるようにする。
+    """
     import boto3
     from botocore.exceptions import ClientError
 
     table: Any = boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
     now_value = now or dt.datetime.now(dt.UTC)
+
+    response = table.get_item(Key={"holding_id": holding_id}, ConsistentRead=True)
+    item = response.get("Item")
+    if item is None:
+        raise BaselinePointerConflictError(
+            f"holding_id={holding_id}: ポインタが期待したバージョン"
+            f"(expected={expected_pointer_version})と一致しません(現在=None、未作成)"
+        )
+    current_data = item["data"]
+    current = InvestmentThesisBaselinePointer.model_validate_json(current_data)
+    if current.pointer_version != expected_pointer_version:
+        raise BaselinePointerConflictError(
+            f"holding_id={holding_id}: ポインタが期待したバージョン"
+            f"(expected={expected_pointer_version})と一致しません"
+            f"(現在={current.pointer_version})"
+        )
+
+    updated = current.model_copy(
+        update={
+            "active_baseline_id": new_baseline_id,
+            "active_baseline_version": new_baseline_version,
+            "pointer_version": expected_pointer_version + 1,
+            "updated_at": now_value,
+            "updated_by": updated_by,
+        }
+    )
+
     try:
-        response = table.update_item(
+        table.update_item(
             Key={"holding_id": holding_id},
-            ConditionExpression="pointer_version = :expected_version",
-            UpdateExpression=(
-                "SET active_baseline_id = :baseline_id, "
-                "active_baseline_version = :baseline_version, "
-                "pointer_version = pointer_version + :one, "
-                "updated_at = :now, updated_by = :who"
-            ),
+            ConditionExpression="#data = :expected_data",
+            UpdateExpression="SET #data = :new_data",
+            ExpressionAttributeNames={"#data": "data"},
             ExpressionAttributeValues={
-                ":expected_version": expected_pointer_version,
-                ":baseline_id": new_baseline_id,
-                ":baseline_version": new_baseline_version,
-                ":one": 1,
-                ":now": now_value.isoformat(),
-                ":who": updated_by,
+                ":expected_data": current_data,
+                ":new_data": updated.model_dump_json(),
             },
-            ReturnValues="ALL_NEW",
         )
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
@@ -174,11 +207,4 @@ def _update_pointer_dynamodb(
                 f"(expected={expected_pointer_version})と一致しません(競合)"
             ) from e
         raise
-    return InvestmentThesisBaselinePointer(
-        holding_id=holding_id,
-        active_baseline_id=response["Attributes"]["active_baseline_id"],
-        active_baseline_version=int(response["Attributes"]["active_baseline_version"]),
-        pointer_version=int(response["Attributes"]["pointer_version"]),
-        updated_at=now_value,
-        updated_by=updated_by,
-    )
+    return updated
