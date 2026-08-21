@@ -20,9 +20,14 @@ def build_daily_notification_priority_id(stock_code: str, business_date: dt.date
 class DailyNotificationPriorityRecord(Entity):
     record_id: str
     stock_code: str
+    # このbusiness_date(および上記build_daily_notification_priority_id()へ渡す
+    # business_date)はJST暦日基準(domain/jst.pyのevaluation_date_jst()経由)。
+    # LambdaのnowはUTCのため、この変換を経ずnow.date()を直接使うとJST 08:00〜09:00台で
+    # 別レコード扱いになる(再コードレビュー対応2026-08、JST暦日境界修正)。
     business_date: dt.date
-    # 数値が大きいほど優先度が高い(CRITICAL_RISK > BUY到達 > SELL > BUY >
-    # NEAR_BUY > WATCH_BEFORE_EARNINGS。line_notification_service.py
-    # _notification_priority()参照)。
+    # 数値が大きいほど優先度が高い(CRITICAL_RISK=6 > PROMOTED_TO_BUY=5 >
+    # SELL/PARTIAL_SELL=4 > BUY=3 > ATTENTION=2 > その他=0。NEAR_BUY/
+    # WATCH_BEFORE_EARNINGSは独立した階層ではなく「その他=0」に含まれる。
+    # line_notification_service.py _notification_priority()参照)。
     priority: int
     category: str

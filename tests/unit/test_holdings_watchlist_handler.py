@@ -14,6 +14,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
@@ -609,15 +610,33 @@ def test_notify_legacy_sell_normal_mode_still_persists(monkeypatch: pytest.Monke
 
 
 class _FakeControllableNotificationService:
-    def __init__(self, outcome: NotificationOutcome) -> None:
+    """notification_enabled=Trueの経路(notify_recommendation_with_status)と、
+    notification_enabled=Falseの経路(check_data_quality_eligibility、再コード
+    レビュー対応2026-08・追加修正3)の両方を独立して制御できるフェイク。"""
+
+    def __init__(
+        self,
+        outcome: NotificationOutcome,
+        data_quality_eligibility: NotificationEligibility | None = None,
+    ) -> None:
         self._outcome = outcome
+        self._data_quality_eligibility = data_quality_eligibility or NotificationEligibility(
+            eligible=True
+        )
         self.calls = 0
+        self.data_quality_eligibility_calls = 0
 
     def notify_recommendation_with_status(
         self, recommendation: Recommendation, now: dt.datetime
     ) -> NotificationOutcome:
         self.calls += 1
         return self._outcome
+
+    def check_data_quality_eligibility(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationEligibility:
+        self.data_quality_eligibility_calls += 1
+        return self._data_quality_eligibility
 
 
 def _recommendation_of_type(recommendation_type: RecommendationType) -> Recommendation:
@@ -706,20 +725,24 @@ def test_detected_but_not_sent_when_dedup_blocks() -> None:
     assert result.recommendation_type_at_send is None
 
 
-def test_detected_but_not_sent_when_kill_switch_suppresses() -> None:
-    """指摘10-E: CRITICAL検出+kill switch抑止 → detected=CRITICAL/sent=None。
+def test_notification_disabled_actionable_data_quality_ok_is_detected_but_not_sent() -> None:
+    """指摘10-E→DQ-1(再コードレビュー対応2026-08・追加修正1/3):
+    notification_enabled=False + ACTIONABLE(CRITICAL) + DataQuality OK
+    → detected=CRITICAL/sent=None。
 
-    kill switch中は_send_or_suppress_notification()がnotification_serviceの
-    notify_recommendation_with_status()自体を一切呼ばない(DataQuality判定も
-    未実行)ことを実コードで確認済み。そのためnotification_enabled=Falseを渡す
-    だけで、notification_serviceが呼ばれないことも同時に検証する。
+    notification_enabled=Falseの間、_send_or_suppress_notification()は
+    notify_recommendation_with_status()(実送信経路)を一切呼ばないが、ACTIONABLE/
+    ATTENTION対象についてはcheck_data_quality_eligibility()(副作用の無い読み取り
+    専用メソッド)でDataQualityだけを評価することを確認する。
     """
     holding = _holding("2914")
     repo = _SpyRecommendationRepository()
     outcome = NotificationOutcome(
         status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
     )
-    notification_service = _FakeControllableNotificationService(outcome)
+    notification_service = _FakeControllableNotificationService(
+        outcome, data_quality_eligibility=NotificationEligibility(eligible=True)
+    )
     recommendation = _recommendation_of_type(RecommendationType.URGENT_HOLDING_REVIEW)
 
     result = handler_module._notify_legacy_sell_and_build_result(
@@ -732,8 +755,70 @@ def test_detected_but_not_sent_when_kill_switch_suppresses() -> None:
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
-    assert notification_service.calls == 0  # kill switch中はDataQuality判定まで到達しない
+    # 実送信経路(notify_recommendation_with_status)は呼ばない
+    assert notification_service.calls == 0
+    assert notification_service.data_quality_eligibility_calls == 1
     assert result.detected_recommendation_type == RecommendationType.URGENT_HOLDING_REVIEW
+    assert result.recommendation_type_at_send is None
+
+
+def test_notification_disabled_actionable_data_quality_blocked_is_not_detected() -> None:
+    """DQ-2: notification_enabled=False + ACTIONABLE(SELL) + DataQuality BLOCKED
+    → detected=None/sent=None。"""
+    holding = _holding("2914")
+    repo = _SpyRecommendationRepository()
+    outcome = NotificationOutcome(
+        status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
+    )
+    notification_service = _FakeControllableNotificationService(
+        outcome,
+        data_quality_eligibility=NotificationEligibility(eligible=False),
+    )
+    recommendation = _recommendation_of_type(RecommendationType.SELL)
+
+    result = handler_module._notify_legacy_sell_and_build_result(
+        holding, _NOW, recommendation, repo, notification_service, False,
+        ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    assert notification_service.calls == 0
+    assert notification_service.data_quality_eligibility_calls == 1
+    assert result.detected_recommendation_type is None
+    assert result.recommendation_type_at_send is None
+
+
+def test_notification_disabled_internal_only_skips_data_quality_evaluation() -> None:
+    """DQ-5: notification_enabled=False + INTERNAL_ONLY(通常WATCH) →
+    detected目的の不要なDataQuality評価を行わない
+    (check_data_quality_eligibility()自体を呼ばない)ことを確認する。
+
+    WATCH(INTERNAL_ONLY)はresolve_holding_summary_action()がNoneを返す型のため
+    (test_enums.pyで別途確認済み)、result.detected_recommendation_type自体には
+    値が残っても(data_quality_blocked=Falseのまま、Audit上の意味は不変)、
+    保有株サマリーの一部売却/全部売却/売却/緊急確認のいずれの集計にも含まれない。
+    ここで確認すべきは「DataQuality評価(check_data_quality_eligibility)自体が
+    detected目的では一切呼ばれない」ことである。
+    """
+    holding = _holding("2914")
+    repo = _SpyRecommendationRepository()
+    outcome = NotificationOutcome(
+        status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
+    )
+    notification_service = _FakeControllableNotificationService(outcome)
+    recommendation = _recommendation_of_type(RecommendationType.WATCH)
+
+    result = handler_module._notify_legacy_sell_and_build_result(
+        holding, _NOW, recommendation, repo, notification_service, False,
+        ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    assert notification_service.calls == 0
+    assert notification_service.data_quality_eligibility_calls == 0
+    assert result.detected_recommendation_type == RecommendationType.WATCH
+    summary_action = handler_module.resolve_holding_summary_action(
+        result.detected_recommendation_type
+    )
+    assert summary_action is None
     assert result.recommendation_type_at_send is None
 
 
@@ -800,8 +885,16 @@ class _FakeProfitTakingOutcome:
 
 
 def _run_attention_scenario(
-    monkeypatch: pytest.MonkeyPatch, outcome: NotificationOutcome, signal: str = "CANDIDATE"
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: NotificationOutcome,
+    signal: str = "CANDIDATE",
+    notification_enabled: bool = True,
+    data_quality_eligibility: NotificationEligibility | None = None,
 ) -> dict[str, object]:
+    """data_quality_eligibility: notification_enabled=False時に
+    check_data_quality_eligibility()が返す値(再コードレビュー対応2026-08・
+    追加修正1/3)。notification_enabled=True時は使われない(outcomeがそのまま
+    notify_recommendation_with_status()の戻り値になる)。"""
     _patch_common(monkeypatch)
     target = _holding("2914")
     monkeypatch.setattr(handler_module.PortfolioService, "get_holding", lambda self, code: target)
@@ -822,8 +915,9 @@ def _run_attention_scenario(
     monkeypatch.setattr(
         handler_module.HoldingDecisionRuntimeConfigService,
         "get_notification_enabled",
-        lambda self: True,
+        lambda self: notification_enabled,
     )
+    eligibility = data_quality_eligibility or NotificationEligibility(eligible=True)
     monkeypatch.setattr(
         handler_module,
         "LineNotificationService",
@@ -833,6 +927,7 @@ def _run_attention_scenario(
             {
                 "notify_data_error": lambda self, *a, **kw: False,
                 "notify_recommendation_with_status": lambda self, rec, now: outcome,
+                "check_data_quality_eligibility": lambda self, rec, now: eligibility,
             },
         )(),
     )
@@ -907,3 +1002,228 @@ def test_normal_watch_is_not_counted_as_attention(monkeypatch: pytest.MonkeyPatc
 
     assert captured["attention_detected"] is False
     assert captured["attention_sent"] is False
+
+
+def test_notification_disabled_attention_data_quality_ok_is_detected_but_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DQ-3: notification_enabled=False + ATTENTION + DataQuality OK
+    → attention_detected=True/attention_sent=False。"""
+    outcome = NotificationOutcome(
+        status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
+    )
+    captured = _run_attention_scenario(
+        monkeypatch,
+        outcome,
+        notification_enabled=False,
+        data_quality_eligibility=NotificationEligibility(eligible=True),
+    )
+
+    assert captured["attention_detected"] is True
+    assert captured["attention_sent"] is False
+
+
+def test_notification_disabled_attention_data_quality_blocked_is_not_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DQ-4: notification_enabled=False + ATTENTION + DataQuality BLOCKED
+    → attention_detected=False/attention_sent=False。"""
+    outcome = NotificationOutcome(
+        status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
+    )
+    captured = _run_attention_scenario(
+        monkeypatch,
+        outcome,
+        notification_enabled=False,
+        data_quality_eligibility=NotificationEligibility(eligible=False),
+    )
+
+    assert captured["attention_detected"] is False
+    assert captured["attention_sent"] is False
+
+
+# ===== 追加修正3: _finish_batch_item → record_result() のIF引数を直接検証 =====
+#
+# BatchProgressを偽造してsummaryだけを見るテスト(既存test_holdings_watchlist_
+# handler_integration.pyの_finish_batch_item_with_notification_categories等)とは
+# 別に、判定結果(_HoldingResult/handler()の実行結果)がrecord_result()へ渡す
+# 実引数を直接assertする。record_result()自体(handler_module.record_result)を
+# monkeypatchし、_finish_batch_item()は実物をそのまま実行させる。
+
+
+def _capture_record_result(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    def _fake_record_result(batch_id, category, stock_code=None, **kwargs):
+        captured["batch_id"] = batch_id
+        captured["category"] = category
+        captured["stock_code"] = stock_code
+        captured.update(kwargs)
+        return None  # progress未完了相当。_finish_batch_item()はこの直後に早期returnする
+
+    monkeypatch.setattr(handler_module, "record_result", _fake_record_result)
+    return captured
+
+
+def test_record_result_if_a_notification_disabled_actionable_data_quality_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IF-A: notification_enabled=False + ACTIONABLE(SELL) + DataQuality OK
+    → detected_category_entryは設定され、notification_category_entry/
+    attention_detected_stock_code/attention_sent_stock_codeはいずれもNone。"""
+    holding = _holding("2914")
+    repo = _SpyRecommendationRepository()
+    outcome = NotificationOutcome(
+        status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
+    )
+    notification_service = _FakeControllableNotificationService(
+        outcome, data_quality_eligibility=NotificationEligibility(eligible=True)
+    )
+    recommendation = _recommendation_of_type(RecommendationType.SELL)
+
+    result = handler_module._notify_legacy_sell_and_build_result(
+        holding, _NOW, recommendation, repo, notification_service, False,
+        ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    captured = _capture_record_result(monkeypatch)
+    handler_module._finish_batch_item(
+        "test-batch-if-a",
+        result.category,
+        holding.stock_code,
+        _NOW,
+        None,
+        None,
+        recommendation_type=result.recommendation_type_at_send,
+        detected_recommendation_type=result.detected_recommendation_type,
+        attention_detected=result.attention_detected,
+        attention_sent=result.attention_sent,
+    )
+
+    assert captured["detected_category_entry"] == f"{RecommendationType.SELL.value}|2914"
+    assert captured["notification_category_entry"] is None
+    assert captured["attention_detected_stock_code"] is None
+    assert captured["attention_sent_stock_code"] is None
+
+
+def test_record_result_if_b_notification_disabled_actionable_data_quality_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IF-B: notification_enabled=False + ACTIONABLE(SELL) + DataQuality BLOCKED
+    → detected_category_entry/notification_category_entryともにNone。"""
+    holding = _holding("2914")
+    repo = _SpyRecommendationRepository()
+    outcome = NotificationOutcome(
+        status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
+    )
+    notification_service = _FakeControllableNotificationService(
+        outcome, data_quality_eligibility=NotificationEligibility(eligible=False)
+    )
+    recommendation = _recommendation_of_type(RecommendationType.SELL)
+
+    result = handler_module._notify_legacy_sell_and_build_result(
+        holding, _NOW, recommendation, repo, notification_service, False,
+        ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    captured = _capture_record_result(monkeypatch)
+    handler_module._finish_batch_item(
+        "test-batch-if-b",
+        result.category,
+        holding.stock_code,
+        _NOW,
+        None,
+        None,
+        recommendation_type=result.recommendation_type_at_send,
+        detected_recommendation_type=result.detected_recommendation_type,
+        attention_detected=result.attention_detected,
+        attention_sent=result.attention_sent,
+    )
+
+    assert captured["detected_category_entry"] is None
+    assert captured["notification_category_entry"] is None
+
+
+def _run_attention_scenario_and_capture_record_result(
+    monkeypatch: pytest.MonkeyPatch, eligibility: NotificationEligibility
+) -> dict[str, object]:
+    """_run_attention_scenario()と同じセットアップだが、_finish_batch_item()自体は
+    実物をそのまま実行させ、その内部で呼ばれるrecord_result()の実引数を捕捉する
+    (追加修正3: _finish_batch_item → record_result のIF引数を直接検証)。"""
+    _patch_common(monkeypatch)
+    target = _holding("2914")
+    monkeypatch.setattr(handler_module.PortfolioService, "get_holding", lambda self, code: target)
+    monkeypatch.setattr(
+        handler_module,
+        "build_stock_snapshot",
+        lambda *a, **kw: (_FakeSnapshot(current_price=Decimal("1400")), None),
+    )
+    monkeypatch.setattr(
+        handler_module.SellSignalService, "analyze", lambda self, *a, **kw: _NoSignalOutcome()
+    )
+    recommendation = _attention_watch_recommendation("CANDIDATE")
+    monkeypatch.setattr(
+        handler_module.ProfitTakingService,
+        "analyze",
+        lambda self, *a, **kw: _FakeProfitTakingOutcome(recommendation),
+    )
+    monkeypatch.setattr(
+        handler_module.HoldingDecisionRuntimeConfigService,
+        "get_notification_enabled",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "LineNotificationService",
+        lambda **kwargs: type(
+            "_Svc",
+            (),
+            {
+                "notify_data_error": lambda self, *a, **kw: False,
+                "notify_recommendation_with_status": lambda self, rec, now: NotificationOutcome(
+                    status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
+                ),
+                "check_data_quality_eligibility": lambda self, rec, now: eligibility,
+            },
+        )(),
+    )
+    captured = _capture_record_result(monkeypatch)
+
+    handler_module.handler(
+        {
+            "task": "holding",
+            "stock_code": "2914",
+            "portfolio_total_market_value": "100000",
+            "portfolio_total_acquisition_cost": "100000",
+            "batch_id": "test-batch-if-attention",
+            "execution_mode": "VALIDATION",
+        },
+        _FakeContext(),
+    )
+    return captured
+
+
+def test_record_result_if_c_notification_disabled_attention_data_quality_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IF-C: notification_enabled=False + ATTENTION + DataQuality OK →
+    attention_detected_stock_codeは設定され、attention_sent_stock_codeはNone。"""
+    captured = _run_attention_scenario_and_capture_record_result(
+        monkeypatch, NotificationEligibility(eligible=True)
+    )
+
+    assert captured["attention_detected_stock_code"] == "2914"
+    assert captured["attention_sent_stock_code"] is None
+
+
+def test_record_result_if_d_notification_disabled_attention_data_quality_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IF-D: notification_enabled=False + ATTENTION + DataQuality BLOCKED →
+    attention_detected_stock_code/attention_sent_stock_codeともにNone。"""
+    captured = _run_attention_scenario_and_capture_record_result(
+        monkeypatch, NotificationEligibility(eligible=False)
+    )
+
+    assert captured["attention_detected_stock_code"] is None
+    assert captured["attention_sent_stock_code"] is None

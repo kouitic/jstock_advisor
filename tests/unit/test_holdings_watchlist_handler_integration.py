@@ -682,6 +682,142 @@ def _finish_batch_item_with_notification_categories(
     return captured
 
 
+# ===== 追加修正4: BatchProgress→summaryの途中切替(notification_enabled=False→
+# True)テスト。各workerがrecord_result()へ正しいIF引数を渡すこと自体は
+# test_holdings_watchlist_handler.pyのIF-A〜Dで別途検証済みのため、ここでは
+# 「その結果として蓄積されたBatchProgressの状態が、最終summaryへ正しく反映
+# されるか」を検証する(worker→BatchProgress→summaryの接続点)。
+
+
+def _finish_batch_item_with_progress(
+    store_dir: Path,
+    monkeypatch,
+    *,
+    detected_categories: list[str],
+    notification_categories: list[str],
+    attention_detected_stock_codes: list[str] | None = None,
+    attention_sent_stock_codes: list[str] | None = None,
+    notification_enabled: bool = True,
+) -> dict:
+    """detected_categoriesとnotification_categoriesをあえて非対称にすることで、
+    notification_enabled=False中に検出されたが送信されなかった(または
+    DataQuality BLOCKEDで検出自体から除外された)worker結果が蓄積された後の
+    BatchProgressを模擬する。"""
+    from jstock_advisor.infrastructure.aws.batch_tracker import BatchProgress
+    from jstock_advisor.lambda_handlers.holdings_watchlist_handler import _finish_batch_item
+
+    fake_progress = BatchProgress(
+        total=len(detected_categories) or 1,
+        completed=len(detected_categories) or 1,
+        category_counts={"hold": 0},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+        notification_categories=notification_categories,
+        detected_categories=detected_categories,
+        attention_detected_stock_codes=attention_detected_stock_codes or [],
+        attention_sent_stock_codes=attention_sent_stock_codes or [],
+    )
+
+    def _fake_record_result(
+        batch_id, category, stock_code=None, ranking_entry=None, sector_entry=None, **kwargs
+    ):
+        return fake_progress
+
+    monkeypatch.setattr(handler_module, "record_result", _fake_record_result)
+    services = _build_services(
+        store_dir, RuntimeConfigMode.LEGACY, notification_enabled=notification_enabled
+    )
+    captured: dict = {"summary_sent": False}
+
+    def _fake_notify_batch_summary(process_name, total, category_counts, now, **kwargs):
+        captured["summary_sent"] = True
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        services["notification_service"], "notify_batch_summary", _fake_notify_batch_summary
+    )
+    _finish_batch_item(
+        "test-batch-progress-summary",
+        "hold",
+        _STOCK_CODE,
+        _NOW,
+        services["notification_service"],
+        services["runtime_config_service"],
+    )
+    return captured
+
+
+def test_ks_a_data_quality_blocked_entries_are_excluded_from_summary_detected(
+    store_dir: Path, monkeypatch
+):
+    """KS-A: notification_enabled=False中にDataQuality BLOCKEDだった銘柄
+    (detected_categoriesに含まれない)は、最終summaryの一部売却検出件数へ
+    計上されない。"""
+    captured = _finish_batch_item_with_progress(
+        store_dir,
+        monkeypatch,
+        detected_categories=[],  # DataQuality BLOCKEDのため検出自体に含まれない
+        notification_categories=[],
+        notification_enabled=True,  # 後半workerの時点でnotification_enabledはTrueへ復帰
+    )
+    assert captured["summary_sent"] is True
+    assert captured["partial_sell_detected_count"] == 0
+
+
+def test_ks_b_notification_disabled_data_quality_ok_entries_remain_in_summary_detected(
+    store_dir: Path, monkeypatch
+):
+    """KS-B: notification_enabled=False中でもDataQuality OKだった銘柄は
+    detected_categoriesへ残り、最終summaryの検出件数へ正しく計上される
+    (実際に個別LINE送信されたか=notification_categoriesとは独立)。"""
+    captured = _finish_batch_item_with_progress(
+        store_dir,
+        monkeypatch,
+        detected_categories=[f"{RecommendationType.PARTIAL_PROFIT_TAKE.value}|1234"],
+        notification_categories=[],  # notification_enabled=False中は個別LINE未送信
+        notification_enabled=True,
+    )
+    assert captured["summary_sent"] is True
+    assert captured["partial_sell_detected_count"] == 1
+
+
+def test_ks_c_attention_follows_the_same_detected_vs_sent_separation(
+    store_dir: Path, monkeypatch
+):
+    """KS-C: ATTENTIONも同様に、notification_enabled=False中のDataQuality OKは
+    attention_detectedへ残りattention_sentへは残らない。"""
+    captured = _finish_batch_item_with_progress(
+        store_dir,
+        monkeypatch,
+        detected_categories=[],
+        notification_categories=[],
+        attention_detected_stock_codes=["5678"],
+        attention_sent_stock_codes=[],
+        notification_enabled=True,
+    )
+    assert captured["summary_sent"] is True
+    assert captured["attention_detected_count"] == 1
+
+
+def test_ks_d_notification_disabled_throughout_does_not_send_summary(
+    store_dir: Path, monkeypatch
+):
+    """KS-D: notification_enabledが最後までFalseのまま完了した場合、
+    summary自体を送信しない(既存の_finish_batch_item()のガード条件の回帰確認、
+    notification_enabledの既存の意味は変更しない)。"""
+    captured = _finish_batch_item_with_progress(
+        store_dir,
+        monkeypatch,
+        detected_categories=[f"{RecommendationType.PARTIAL_PROFIT_TAKE.value}|1234"],
+        notification_categories=[],
+        notification_enabled=False,
+    )
+    assert captured["summary_sent"] is False
+
+
 def test_strong_sell_consideration_counts_as_full_sell_not_sell(store_dir: Path, monkeypatch):
     """STRONG_SELL_CONSIDERATIONは個別LINE通知本文では「全部売却検討」と表示
     されるため(recommendation_adapter.py)、まとめ通知の集計もfull_sell_

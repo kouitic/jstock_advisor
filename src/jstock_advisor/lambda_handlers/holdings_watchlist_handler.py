@@ -170,20 +170,41 @@ def _send_or_suppress_notification(
     notification_service: LineNotificationService,
     now: dt.datetime,
 ) -> NotificationOutcome:
-    """kill switch(コードレビュー対応)。Recommendationの生成・保存はkill switchの
-    影響を受けず常に継続する(呼び出し側で保証する)。この関数はLINE送信の可否のみを
-    制御する。旧売却・新保有判断・利確・ポートフォリオ集中リスクの4経路すべてが
-    この1関数を経由することで、抑止結果(KILL_SWITCH_SUPPRESSED)を統一する。
+    """notification_enabled=False(kill switch)。Recommendationの生成・保存は
+    notification_enabledの値に関わらず常に継続する(呼び出し側で保証する)。
+    この関数はLINE送信の可否のみを制御する。旧売却・新保有判断・利確・ポートフォリオ
+    集中リスクの4経路すべてがこの1関数を経由することで、抑止結果
+    (KILL_SWITCH_SUPPRESSED)を統一する。
+
+    再コードレビュー対応(2026-08、追加修正1): notification_enabled=Falseの間も
+    LINE送信は一切行わないが、ユーザー向けサマリーの「検出」件数(detected_
+    recommendation_type/attention_detected)に使うDataQuality判定(整合性検証・
+    異常値検知)だけは、対象がACTIONABLE/ATTENTION(=保有株サマリーの一部売却・
+    全部売却・売却・緊急確認・利益保全注意のいずれかとして計上され得る)の場合に
+    限り、副作用の無い読み取り専用メソッドcheck_data_quality_eligibility()
+    (BUY候補パイプラインで既に実運用されている、manual review LINE送信を
+    一切発生させない判定専用メソッド)で行う。INTERNAL_ONLY(通常WATCH・決算待ち・
+    ポートフォリオ集中レビュー等)はそもそも上記のどのサマリー分類の対象にもならない
+    ため、detected判定目的でDataQuality評価を行う必要が無い(data_quality_blocked=
+    Falseのまま、既存のNON_ACTIONABLE時のAudit上の意味は変更しない)。
     """
     if not notification_enabled:
         logger.info(
-            "kill_switch_suppressed: stock_code=%s recommendation_id=%s "
+            "notification_disabled_suppressed: stock_code=%s recommendation_id=%s "
             "recommendation_type=%s notification_enabled=False",
             recommendation.stock_code,
             recommendation.recommendation_id,
             recommendation.recommendation_type.value,
         )
-        return _KILL_SWITCH_SUPPRESSED_OUTCOME
+        intent = resolve_notification_intent_for_recommendation(recommendation)
+        if intent is NotificationIntent.INTERNAL_ONLY:
+            return _KILL_SWITCH_SUPPRESSED_OUTCOME
+        eligibility = notification_service.check_data_quality_eligibility(recommendation, now)
+        return NotificationOutcome(
+            status=NotificationStatus.KILL_SWITCH_SUPPRESSED,
+            sent=False,
+            data_quality_blocked=not eligibility.eligible,
+        )
     return notification_service.notify_recommendation_with_status(recommendation, now)
 
 
@@ -648,12 +669,13 @@ def _analyze_one_holding(
         outcome = _send_or_suppress_notification(
             pt_outcome.recommendation, notification_enabled, notification_service, now
         )
-        # 通知意図3段階化(2026-08): kill switch抑止時はoutcome.notification_intentが
-        # 設定されない(_KILL_SWITCH_SUPPRESSED_OUTCOMEは判定自体を行わない)ため、
-        # 「検出」件数(attention_detected_count、個別送信の成否を問わない)は
-        # Recommendationから直接再計算する。実送信経路(evaluate_notification_
-        # status内)と同じ唯一の正本(resolve_notification_intent_for_recommendation)
-        # を使うため判定基準の重複は生じない。
+        # 通知意図3段階化(2026-08): _send_or_suppress_notification()が返す
+        # outcome.notification_intentは設定されないため(値を使わない設計、
+        # 上記関数のdocstring参照)、「検出」件数(attention_detected_count、
+        # 個別送信の成否を問わない)の対象判定はRecommendationから直接再計算する。
+        # 実送信経路(evaluate_notification_status内)と同じ唯一の正本
+        # (resolve_notification_intent_for_recommendation)を使うため判定基準の
+        # 重複は生じない。
         detected_intent = resolve_notification_intent_for_recommendation(pt_outcome.recommendation)
         attention_origin = (
             resolve_attention_origin_for_recommendation(pt_outcome.recommendation)
@@ -691,10 +713,13 @@ def _analyze_one_holding(
         # (DataQuality BLOCKED時はrecommendation_type自体は変わらないが、その
         # アクション判定をユーザー向けとして扱ってよい品質かは否定されているため、
         # detected/attention_detected/attention_sentのいずれからも除外し、既存の
-        # summary_category()による「要確認」区分側の集計に委ねる)。kill switch
-        # 抑止時はoutcome.data_quality_blocked=False(DataQuality判定自体が未実行)
-        # のため、detectedはそのままカウントされる(kill switchは送信のみを止める
-        # 緊急停止であり、判定の信頼性自体を否定するものではないため意図した挙動)。
+        # summary_category()による「要確認」区分側の集計に委ねる)。
+        # 再コードレビュー対応(2026-08、追加修正1・notification_enabled=False時の
+        # DataQuality評価): notification_enabled=False中も、ATTENTION対象であれば
+        # _send_or_suppress_notification()がcheck_data_quality_eligibility()経由で
+        # DataQualityを正しく評価し、outcome.data_quality_blockedへ反映する
+        # (notification_enabled=Falseは送信のみを止める仕組みであり、判定の
+        # 信頼性自体を否定するものではないため)。
         data_quality_ok = not outcome.data_quality_blocked
         return _HoldingResult(
             recommended=True,

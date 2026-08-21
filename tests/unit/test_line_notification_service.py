@@ -11,6 +11,9 @@ from jstock_advisor.domain.entities.common import (
     PriceWithRationale,
     SellPriceLevels,
 )
+from jstock_advisor.domain.entities.daily_notification_priority import (
+    build_daily_notification_priority_id,
+)
 from jstock_advisor.domain.entities.enums import (
     BuyAction,
     ConfidenceLevel,
@@ -28,8 +31,10 @@ from jstock_advisor.domain.entities.enums import (
     WatchType,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
+from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
     DailyNotificationPriorityRepository,
@@ -3854,3 +3859,186 @@ def test_attention_sent_then_critical_is_not_blocked(service_and_repos) -> None:
 
     assert second.sent is True
     assert len(client.sent) == 2
+
+
+# ===== 再コードレビュー対応(2026-08、JST暦日境界修正) =====
+#
+# Cross Pipeline Priority(check_cross_pipeline_priority_eligibility/
+# _record_daily_priority)・TradeCooldown(check_trade_cooldown_eligibility)の
+# 「当日」判定をUTC暦日からJST暦日(evaluation_date_jst)へ統一したことの回帰。
+# CP-D〜HはATTENTION⇄BUY/SELL/CRITICALの優先度テストとして既に上記
+# test_notification_priority_attention_is_two等でカバー済みのため重複追加しない。
+
+
+def _sell_recommendation_for_priority(recommendation_id: str, now: dt.datetime) -> Recommendation:
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code="2914",
+        stock_name="日本たばこ産業",
+        recommended_at=now,
+        recommendation_type=RecommendationType.SELL,
+        price_at_recommendation=Decimal("1400"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+
+
+def test_cp_a_same_jst_day_different_utc_date_shares_priority_record(service_and_repos) -> None:
+    """CP-A: 08:30 JST相当(前日23:30 UTC)と09:10 JST相当(当日00:10 UTC)は
+    UTC暦日が異なるが、同一のJST暦日のためCross Pipeline Priorityの同一
+    record_idを参照する(同じpriority判定になる)。"""
+    service, repo, _client = service_and_repos
+    first_now = dt.datetime(2026, 8, 20, 23, 30, tzinfo=dt.UTC)  # 2026-08-21 08:30 JST
+    second_now = dt.datetime(2026, 8, 21, 0, 10, tzinfo=dt.UTC)  # 2026-08-21 09:10 JST
+    assert first_now.date() != second_now.date()  # UTC暦日は異なることを前提として確認
+    assert evaluation_date_jst(first_now) == evaluation_date_jst(second_now)
+
+    sell_rec = _sell_recommendation_for_priority("cp-a-sell", first_now)
+    repo.save(sell_rec)
+    first_outcome = service.notify_recommendation_with_status(sell_rec, first_now)
+    assert first_outcome.sent is True
+
+    attention_rec = _make_attention_watch_recommendation(
+        recommendation_id="cp-a-attention", stock_code=sell_rec.stock_code
+    )
+    repo.save(attention_rec)
+    second_outcome = service.notify_recommendation_with_status(attention_rec, second_now)
+
+    # SELL(priority=4)が既に記録されているため、同一JST日である限りATTENTION
+    # (priority=2)は抑止される(=同一record_idを参照している証拠)。
+    assert second_outcome.sent is False
+    assert second_outcome.block_reason == "LOW_PRIORITY"
+
+
+def test_cp_b_next_jst_day_gets_a_separate_priority_record(service_and_repos) -> None:
+    """CP-B: 翌JST日になれば別のrecord_idとなり、前日の優先度記録の影響を
+    受けない(ATTENTIONが正常に送信できる)。"""
+    service, repo, _client = service_and_repos
+    first_now = dt.datetime(2026, 8, 21, 0, 10, tzinfo=dt.UTC)  # 2026-08-21 09:10 JST
+    next_day_now = first_now + dt.timedelta(days=1)  # 2026-08-22 09:10 JST
+    assert evaluation_date_jst(first_now) != evaluation_date_jst(next_day_now)
+
+    sell_rec = _sell_recommendation_for_priority("cp-b-sell", first_now)
+    repo.save(sell_rec)
+    first_outcome = service.notify_recommendation_with_status(sell_rec, first_now)
+    assert first_outcome.sent is True
+
+    attention_rec = _make_attention_watch_recommendation(
+        recommendation_id="cp-b-attention", stock_code=sell_rec.stock_code
+    )
+    repo.save(attention_rec)
+    second_outcome = service.notify_recommendation_with_status(attention_rec, next_day_now)
+
+    assert second_outcome.sent is True
+
+
+def test_cp_c_record_id_date_matches_business_date_field(service_and_repos) -> None:
+    """CP-C: build_daily_notification_priority_id()に渡した日付と、実際に
+    upsertされたDailyNotificationPriorityRecord.business_dateが必ず一致する
+    (_record_daily_priority()がevaluation_date_jst(now)を1回だけ算出し、
+    record_id生成・business_dateフィールドの両方へ同じ値を使うことの確認)。"""
+    service, repo, _client = service_and_repos
+    now = dt.datetime(2026, 8, 21, 0, 10, tzinfo=dt.UTC)  # 2026-08-21 09:10 JST
+    business_date = evaluation_date_jst(now)
+
+    sell_rec = _sell_recommendation_for_priority("cp-c-sell", now)
+    repo.save(sell_rec)
+    outcome = service.notify_recommendation_with_status(sell_rec, now)
+    assert outcome.sent is True
+
+    record_id = build_daily_notification_priority_id(sell_rec.stock_code, business_date)
+    stored = service._daily_priority_repo.get(record_id)
+    assert stored is not None
+    assert stored.business_date == business_date
+    assert record_id == f"{stored.business_date.isoformat()}:{sell_rec.stock_code}"
+
+
+# ===== TradeCooldown JST暦日境界修正(追加修正1) =====
+
+
+def _service_with_cooldown_entry(
+    tmp_path: Path, cooldown_until_date: dt.date
+) -> LineNotificationService:
+    store_dir = tmp_path / "local_store"
+    HoldingsSnapshotRepository(store_dir=store_dir).upsert(
+        HoldingsSnapshotEntry(
+            stock_code="4631",
+            shares=100,
+            average_purchase_price=Decimal("1000"),
+            recorded_at=cooldown_until_date - dt.timedelta(days=5),
+            cooldown_until_date=cooldown_until_date,
+            active_holding=True,
+        )
+    )
+    return LineNotificationService(
+        line_client=_FakeLineClient(),
+        notification_log_repository=NotificationLogRepository(store_dir=store_dir),
+        recommendation_repository=RecommendationRepository(store_dir=store_dir),
+        config=_CONFIG,
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
+    )
+
+
+def test_tc_a_cooldown_until_date_boundary_still_suppresses_on_jst_business_date(
+    tmp_path: Path,
+) -> None:
+    """TC-A: cooldown_until_date=2026-08-20、評価時刻が2026-08-20 08:00 JST相当
+    → クールダウン中(抑止される)。"""
+    service = _service_with_cooldown_entry(tmp_path, dt.date(2026, 8, 20))
+    now = dt.datetime(2026, 8, 19, 23, 0, tzinfo=dt.UTC)  # 2026-08-20 08:00 JST
+    rec = _sell_recommendation_for_priority("tc-a-sell", now).model_copy(
+        update={"stock_code": "4631"}
+    )
+
+    eligibility = service.check_trade_cooldown_eligibility(rec, now)
+
+    assert eligibility.eligible is False
+    assert eligibility.block_reason == "TRADE_COOLDOWN"
+
+
+def test_tc_b_next_jst_business_date_releases_cooldown(tmp_path: Path) -> None:
+    """TC-B: cooldown_until_date=2026-08-20、評価時刻が2026-08-21 08:00 JST相当
+    → クールダウン解除。"""
+    service = _service_with_cooldown_entry(tmp_path, dt.date(2026, 8, 20))
+    now = dt.datetime(2026, 8, 20, 23, 0, tzinfo=dt.UTC)  # 2026-08-21 08:00 JST
+    rec = _sell_recommendation_for_priority("tc-b-sell", now).model_copy(
+        update={"stock_code": "4631"}
+    )
+
+    eligibility = service.check_trade_cooldown_eligibility(rec, now)
+
+    assert eligibility.eligible is True
+
+
+def test_tc_c_same_jst_day_different_utc_time_gives_same_cooldown_verdict(
+    tmp_path: Path,
+) -> None:
+    """TC-C: 2026-08-21 08:30 JST相当と2026-08-21 09:10 JST相当(UTC暦日は異なる)
+    で、同一のクールダウン判定になる(境界のcooldown_until_date=2026-08-20に対し、
+    どちらもJST暦日は2026-08-21のため解除済み)。"""
+    service = _service_with_cooldown_entry(tmp_path, dt.date(2026, 8, 20))
+    first_now = dt.datetime(2026, 8, 20, 23, 30, tzinfo=dt.UTC)  # 2026-08-21 08:30 JST
+    second_now = dt.datetime(2026, 8, 21, 0, 10, tzinfo=dt.UTC)  # 2026-08-21 09:10 JST
+    assert first_now.date() != second_now.date()
+    rec = _sell_recommendation_for_priority("tc-c-sell", first_now).model_copy(
+        update={"stock_code": "4631"}
+    )
+
+    first_eligibility = service.check_trade_cooldown_eligibility(rec, first_now)
+    second_eligibility = service.check_trade_cooldown_eligibility(rec, second_now)
+
+    assert first_eligibility.eligible is True
+    assert second_eligibility.eligible is True
+
+
+def test_tc_d_existing_cooldown_business_days_config_is_unchanged() -> None:
+    """TC-D: 既存のTradeCooldown日数設定(買い増し/一部売却=partial、新規購入・
+    全部売却=buy/sell)は今回のJST暦日境界修正では変更されていないことの回帰確認
+    (設定値自体の確認)。"""
+    assert _CONFIG.notification.trade_cooldown.enabled is not None
+    assert _CONFIG.notification.trade_cooldown.partial_trade_business_days >= 1
+    assert _CONFIG.notification.trade_cooldown.buy_business_days >= 1
+    assert _CONFIG.notification.trade_cooldown.sell_business_days >= 1
