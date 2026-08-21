@@ -128,6 +128,13 @@ class BatchProgress:
     # ごとに一意にする。ranking_entriesと同じ設計パターン)。finalize側で
     # "|"より前を取り出しCounterで件数化する。
     notification_categories: list[str] = field(default_factory=list)
+    # 再コードレビュー対応(2026-08、detected/sent一元化、追加修正1): 「有効な
+    # アクション検出」件数(DataQuality安全ゲートを通過していればTradeCooldown・
+    # CrossPipelinePriority・resend/event dedup・kill switchによる個別送信抑止
+    # では減らない)。notification_categoriesと同じ"{RecommendationType.value}|
+    # {stock_code}"形式。notification_categories(実際にLINE送信された銘柄のみ、
+    # 既存の意味・用途は変更しない)とは独立した集合として保持する。
+    detected_categories: list[str] = field(default_factory=list)
     # Profit Protection ATTENTION検出銘柄一覧(2026-08、通知意図3段階化)。
     # 個別LINE送信がdedupで抑止された銘柄も含む「検出」件数(attention_detected_
     # count)をサマリーへ表示するために使う(notification_categoriesは実際に
@@ -135,6 +142,11 @@ class BatchProgress:
     # stock_codeそのもの(Setの重複排除のみが目的で、他フィールドと異なり
     # 種別プレフィックスは不要)。
     attention_detected_stock_codes: list[str] = field(default_factory=list)
+    # 再コードレビュー対応(2026-08、追加修正2): ATTENTIONが実際にLINE個別送信
+    # できた銘柄一覧(attention_detected_stock_codesとは別に明示保持し、将来別の
+    # WATCH系通知が追加されてもRecommendationType.WATCHの件数からの推測に
+    # 依存しない構造にする)。
+    attention_sent_stock_codes: list[str] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -181,7 +193,9 @@ def record_result(
     near_buy_ranking_entry: str | None = None,
     watch_end_ranking_entry: str | None = None,
     notification_category_entry: str | None = None,
+    detected_category_entry: str | None = None,
     attention_detected_stock_code: str | None = None,
+    attention_sent_stock_code: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
 
@@ -213,11 +227,24 @@ def record_result(
     許さないため同一カテゴリの複数銘柄がまとめて1件に潰れるのを防ぐため)。
     実際にLINE送信された銘柄についてのみ呼び出し側が渡すこと。
 
+    detected_category_entryを渡すと、保有株サマリーの「有効なアクション検出」
+    集計(2026-08、再コードレビュー対応・追加修正1)向けに、
+    "{RecommendationType.value}|{stock_code}"形式の文字列をDynamoDBの文字列
+    セットへ原子的に追加する。notification_category_entryとは異なり、
+    DataQuality安全ゲートを通過していればTradeCooldown/CrossPipelinePriority/
+    resend dedup/kill switchによる個別送信抑止でも渡すこと(送信結果を問わない
+    「検出」件数のため)。
+
     attention_detected_stock_codeを渡すと、Profit Protection ATTENTION検出件数
     集計(2026-08、通知意図3段階化)向けに、stock_codeをDynamoDBの文字列セットへ
     原子的に追加する。notification_category_entryとは異なり、個別LINE送信が
     dedupで抑止された銘柄も含む「検出」件数を数えるため、呼び出し側は実送信の
     成否に関わらずATTENTIONと判定した銘柄について常に渡すこと。
+
+    attention_sent_stock_codeを渡すと、ATTENTIONが実際にLINE個別送信できた
+    件数集計(2026-08、追加修正2)向けに、stock_codeをDynamoDBの文字列セットへ
+    原子的に追加する。Setの性質上、同一stock_codeを複数回(Lambda retry等で)
+    渡しても件数が膨らむことはない。
     """
     if not running_on_lambda():
         return None
@@ -258,10 +285,18 @@ def record_result(
         names["#notification_categories"] = "notification_categories"
         update_expr += ", #notification_categories :notification_categories"
         values[":notification_categories"] = {notification_category_entry}
+    if detected_category_entry is not None:
+        names["#detected_categories"] = "detected_categories"
+        update_expr += ", #detected_categories :detected_categories"
+        values[":detected_categories"] = {detected_category_entry}
     if attention_detected_stock_code is not None:
         names["#attention_detected_codes"] = "attention_detected_stock_codes"
         update_expr += ", #attention_detected_codes :attention_detected_codes"
         values[":attention_detected_codes"] = {attention_detected_stock_code}
+    if attention_sent_stock_code is not None:
+        names["#attention_sent_codes"] = "attention_sent_stock_codes"
+        update_expr += ", #attention_sent_codes :attention_sent_codes"
+        values[":attention_sent_codes"] = {attention_sent_stock_code}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -284,7 +319,9 @@ def record_result(
         near_buy_ranking_entries=sorted(item.get("near_buy_ranking_entries", set())),
         watch_end_ranking_entries=sorted(item.get("watch_end_ranking_entries", set())),
         notification_categories=sorted(item.get("notification_categories", set())),
+        detected_categories=sorted(item.get("detected_categories", set())),
         attention_detected_stock_codes=sorted(item.get("attention_detected_stock_codes", set())),
+        attention_sent_stock_codes=sorted(item.get("attention_sent_stock_codes", set())),
     )
 
 

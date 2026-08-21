@@ -139,6 +139,46 @@ def is_critical_risk(recommendation_type: RecommendationType) -> bool:
     return recommendation_type in CRITICAL_RISK_RECOMMENDATION_TYPES
 
 
+class HoldingSummaryAction(StrEnum):
+    """保有株サマリ(【保有株チェック完了】)の4分類の唯一の判定ソース(2026-08、
+    detected/sent集計の一元化)。resolve_holding_summary_action()経由でのみ使う。
+
+    ATTENTION(Profit Protection candidate/strong起因のWATCH)はNotificationIntent
+    という別軸のため、ここには含めない(holdings_watchlist_handler.py側で
+    attention_detected_stock_codes/attention_sent_stock_codesとして別集計する)。
+    """
+
+    PARTIAL = "PARTIAL"
+    FULL = "FULL"
+    SELL = "SELL"
+    CRITICAL = "CRITICAL"
+
+
+def resolve_holding_summary_action(
+    recommendation_type: RecommendationType,
+) -> HoldingSummaryAction | None:
+    """保有株サマリの4分類(一部売却/全部売却/売却/緊急確認)へRecommendationTypeを
+    分類する唯一の正本(2026-08、コードレビュー対応)。detected集計・sent集計の
+    両方がこの関数のみを使い、分類ロジックを重複実装しない。
+
+    既存のFULL_SELL_RECOMMENDATION_TYPES/CRITICAL_RISK_RECOMMENDATION_TYPES
+    (個別LINE通知本文のラベル付けと同一の判定ソース)を再利用し、新しい業務判定は
+    追加しない。該当しないRecommendationType(WATCH/REVIEW/HOLD等)はNoneを返す。
+    """
+    if recommendation_type in (
+        RecommendationType.PARTIAL_PROFIT_TAKE,
+        RecommendationType.PARTIAL_RISK_REDUCTION,
+    ):
+        return HoldingSummaryAction.PARTIAL
+    if recommendation_type in FULL_SELL_RECOMMENDATION_TYPES:
+        return HoldingSummaryAction.FULL
+    if recommendation_type in (RecommendationType.SELL, RecommendationType.SELL_CONSIDERATION):
+        return HoldingSummaryAction.SELL
+    if recommendation_type in CRITICAL_RISK_RECOMMENDATION_TYPES:
+        return HoldingSummaryAction.CRITICAL
+    return None
+
+
 class BacktestRecommendationSource(StrEnum):
     """backtest/compareのhistory replayが、あるRecommendationTypeを新旧どちらの
     エンジン由来として扱うかの分類(コードレビュー対応)。

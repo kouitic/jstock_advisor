@@ -48,14 +48,15 @@ from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.enums import (
-    FULL_SELL_RECOMMENDATION_TYPES,
     ConfidenceLevel,
     DecisionType,
     EvaluationStatus,
+    HoldingSummaryAction,
     NotificationCategory,
     NotificationIntent,
     NotificationStatus,
     RecommendationType,
+    resolve_holding_summary_action,
 )
 from jstock_advisor.domain.entities.evaluation_audit import HoldingEvaluationAudit, summary_category
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
@@ -136,11 +137,26 @@ class _HoldingResult:
     # NotificationCategory.SELLはFULL_PROFIT_TAKEとSELL/SELL_CONSIDERATION等を
     # 区別しない表示用の分類のため、「一部売却/全部売却/売却」を分離集計する
     # にはrecommendation_type自体が必要(§13)。
+    # 再コードレビュー対応(2026-08、detected/sent一元化): この値は「実際に
+    # LINE個別通知が送信された」場合のみ設定する(sent集計・CloudWatch Logs用の
+    # 内部監査値。ユーザー向けサマリーの表示にはdetected_recommendation_typeを
+    # 使う、下記)。
     recommendation_type_at_send: RecommendationType | None = None
+    # 再コードレビュー対応(2026-08、detected/sent一元化・追加修正1): 「有効な
+    # アクション検出」の唯一の判定基準。DataQuality安全ゲートでブロックされな
+    # かった(outcome.data_quality_blocked=False)場合のみ、送信結果(outcome.sent)
+    # に関わらずrecommendation.recommendation_typeを設定する。TradeCooldown・
+    # CrossPipelinePriority・resend/event dedup・kill switchによる個別通知抑止は
+    # この値を減らさない。DataQuality BLOCKED時はNoneのままとし、既存の
+    # summary_category()による「要確認」区分側の集計に委ねる(二重計上しない)。
+    detected_recommendation_type: RecommendationType | None = None
     # 通知意図3段階化(2026-08)。Profit Protection ATTENTIONとして検出された
-    # 銘柄か(個別LINE送信がdedupで抑止された場合もTrue。attention_detected_
-    # countはこの値を集計する、notification_categoryとは別軸)。
+    # 銘柄か(上記detected_recommendation_typeと同じDataQuality境界を適用する)。
     attention_detected: bool = False
+    # 再コードレビュー対応(2026-08、追加修正2): ATTENTIONが実際にLINE個別送信
+    # できた場合のみTrue(attention_detectedとは別に明示的に保持し、将来別の
+    # WATCH系通知が追加されてもRecommendationType.WATCHからの推測に依存しない)。
+    attention_sent: bool = False
 
 
 _KILL_SWITCH_SUPPRESSED_OUTCOME = NotificationOutcome(
@@ -305,7 +321,12 @@ def _notify_legacy_sell_and_build_result(
             resolve_notification_category(recommendation) if outcome.sent else None
         ),
         recommendation_type_at_send=(
-            recommendation.recommendation_type if outcome.sent else None
+            recommendation.recommendation_type
+            if outcome.sent and not outcome.data_quality_blocked
+            else None
+        ),
+        detected_recommendation_type=(
+            recommendation.recommendation_type if not outcome.data_quality_blocked else None
         ),
     )
 
@@ -393,7 +414,12 @@ def _notify_holding_decision_and_build_result(
             resolve_notification_category(recommendation) if outcome.sent else None
         ),
         recommendation_type_at_send=(
-            recommendation.recommendation_type if outcome.sent else None
+            recommendation.recommendation_type
+            if outcome.sent and not outcome.data_quality_blocked
+            else None
+        ),
+        detected_recommendation_type=(
+            recommendation.recommendation_type if not outcome.data_quality_blocked else None
         ),
     )
     return holding_result, linked_result
@@ -660,18 +686,36 @@ def _analyze_one_holding(
             notification_intent=detected_intent,
             attention_origin=attention_origin,
         )
+        # 再コードレビュー対応(2026-08、追加修正1): 「有効なアクション検出」は
+        # DataQuality安全ゲートでブロックされなかった場合のみ成立する
+        # (DataQuality BLOCKED時はrecommendation_type自体は変わらないが、その
+        # アクション判定をユーザー向けとして扱ってよい品質かは否定されているため、
+        # detected/attention_detected/attention_sentのいずれからも除外し、既存の
+        # summary_category()による「要確認」区分側の集計に委ねる)。kill switch
+        # 抑止時はoutcome.data_quality_blocked=False(DataQuality判定自体が未実行)
+        # のため、detectedはそのままカウントされる(kill switchは送信のみを止める
+        # 緊急停止であり、判定の信頼性自体を否定するものではないため意図した挙動)。
+        data_quality_ok = not outcome.data_quality_blocked
         return _HoldingResult(
             recommended=True,
             notified=outcome.sent,
             succeeded=True,
             category=summary_category(audit),
             audit=audit,
-            attention_detected=detected_intent is NotificationIntent.ATTENTION,
+            attention_detected=data_quality_ok and detected_intent is NotificationIntent.ATTENTION,
+            attention_sent=(
+                outcome.sent and data_quality_ok and detected_intent is NotificationIntent.ATTENTION
+            ),
             notification_category=(
                 resolve_notification_category(pt_outcome.recommendation) if outcome.sent else None
             ),
             recommendation_type_at_send=(
-                pt_outcome.recommendation.recommendation_type if outcome.sent else None
+                pt_outcome.recommendation.recommendation_type
+                if outcome.sent and data_quality_ok
+                else None
+            ),
+            detected_recommendation_type=(
+                pt_outcome.recommendation.recommendation_type if data_quality_ok else None
             ),
         )
 
@@ -696,6 +740,24 @@ def _analyze_one_holding(
     )
 
 
+def _count_holding_summary_actions(entries: list[str]) -> dict[HoldingSummaryAction, int]:
+    """保有株サマリーの4分類(一部売却/全部売却/売却/緊急確認)の件数集計。
+
+    再コードレビュー対応(2026-08、追加修正4): 分類ロジックの唯一の正本
+    resolve_holding_summary_action()(domain/entities/enums.py)のみを使い、
+    detected集計・sent集計の両方でこの関数を共通利用する(分類の二重実装を
+    避ける)。entriesは"{RecommendationType.value}|{stock_code}"形式
+    (progress.detected_categories/notification_categoriesと同じ形式)。
+    """
+    counts: dict[HoldingSummaryAction, int] = {action: 0 for action in HoldingSummaryAction}
+    for entry in entries:
+        raw_type = entry.split("|", 1)[0]
+        action = resolve_holding_summary_action(RecommendationType(raw_type))
+        if action is not None:
+            counts[action] += 1
+    return counts
+
+
 def _finish_batch_item(
     batch_id: str | None,
     category: str,
@@ -704,19 +766,20 @@ def _finish_batch_item(
     notification_service: LineNotificationService,
     runtime_config_service: HoldingDecisionRuntimeConfigService,
     recommendation_type: RecommendationType | None = None,
+    detected_recommendation_type: RecommendationType | None = None,
     attention_detected: bool = False,
+    attention_sent: bool = False,
 ) -> None:
     """バッチ進捗の確定(record_result)はkill switchの影響を受けず常に行う。
     最終1件目の完了によるバッチサマリーLINE送信のみ、その時点のkill switch状態で
     ガードする(コードレビュー対応: 通知抑止がバッチ完了判定へ影響しないことを保証する)。
 
-    コードレビュー対応(2026-08、LINE通知アクション限定化): 以前はresolve_
-    notification_category()の結果(NotificationCategory)を記録していたが、
-    NotificationCategory.SELLはFULL_PROFIT_TAKEとSELL/SELL_CONSIDERATION等を
-    区別しない表示用の分類のため、「一部売却/全部売却/売却」を分離集計する
-    サマリーには使えない。recommendation_type自体を記録する(実際にLINE
-    送信された場合のみ呼び出し元が値を渡す。WATCH/MANUAL_REVIEWはNON_
-    ACTIONABLEとしてLINE送信前にゲートされるため、ここに現れることはない)。
+    再コードレビュー対応(2026-08、detected/sent一元化): サマリーのユーザー向け
+    表示は「有効なアクション検出件数」(detected_recommendation_type、DataQuality
+    安全ゲートを通過していればTradeCooldown等による個別送信抑止でも減らない)を
+    使う。recommendation_type(実際にLINE送信された場合のみ呼び出し元が渡す、
+    以前からの引数)はsent集計用としてそのまま残し、CloudWatch Logsでの監査・
+    Issue #16評価用途にのみ使う(ユーザー向けサマリーには表示しない)。
     """
     if batch_id is None:
         return
@@ -724,12 +787,19 @@ def _finish_batch_item(
     notification_category_entry = (
         f"{recommendation_type.value}|{stock_code}" if recommendation_type is not None else None
     )
+    detected_category_entry = (
+        f"{detected_recommendation_type.value}|{stock_code}"
+        if detected_recommendation_type is not None
+        else None
+    )
     progress = record_result(
         batch_id,
         category,
         stock_code=stock_code if needs_code else None,
         notification_category_entry=notification_category_entry,
+        detected_category_entry=detected_category_entry,
         attention_detected_stock_code=stock_code if attention_detected else None,
+        attention_sent_stock_code=stock_code if attention_sent else None,
     )
     if progress is None or not progress.is_complete:
         return
@@ -739,34 +809,33 @@ def _finish_batch_item(
             batch_id,
         )
         return
-    # コードレビュー対応(2026-08、LINE通知アクション限定化): 実際にLINE送信
-    # されたアクション3分類(一部売却/全部売却/売却)+緊急確認の集計(要求仕様
-    # §13)。WATCH/MANUAL_REVIEWはもはやLINE送信されないため、サマリーからも
-    # 除外する(§10のNON_ACTIONABLEゲートにより、ここに到達する時点で既に
-    # 送信対象外)。
-    # 横断整合性レビュー対応(2026-08、指摘3): 「全部売却検討」の判定基準を
-    # enums.pyのFULL_SELL_RECOMMENDATION_TYPES(recommendation_adapter.pyの
-    # 個別LINE通知本文と同一の判定ソース)へ統一する。以前はSTRONG_SELL_
-    # CONSIDERATIONをここだけsell_nへ計上していたため、個別本文では
-    # 「全部売却検討」と表示される銘柄が、まとめ通知の集計では「売却」件数に
-    # 混在するという矛盾があった。
-    sent_types = [entry.split("|", 1)[0] for entry in progress.notification_categories]
-    _full_sell_values = {rt.value for rt in FULL_SELL_RECOMMENDATION_TYPES}
-    partial_n = sent_types.count(RecommendationType.PARTIAL_PROFIT_TAKE.value) + sent_types.count(
-        RecommendationType.PARTIAL_RISK_REDUCTION.value
-    )
-    full_n = sum(1 for v in sent_types if v in _full_sell_values)
-    sell_n = sent_types.count(RecommendationType.SELL.value) + sent_types.count(
-        RecommendationType.SELL_CONSIDERATION.value
-    )
-    critical_risk_n = sent_types.count(RecommendationType.URGENT_REVIEW.value) + sent_types.count(
-        RecommendationType.URGENT_HOLDING_REVIEW.value
-    )
-    # 通知意図3段階化(2026-08): 個別LINE送信の成否(dedup抑止含む)を問わない
-    # 「検出」件数(attention_detected_stock_codes)を使う。実送信件数
-    # (attention_sent_count)ではないため、継続中のATTENTIONが2日目以降
-    # 個別送信されない日でもサマリー上は0件へ「解消」して見えない。
+    detected_counts = _count_holding_summary_actions(progress.detected_categories)
+    sent_counts = _count_holding_summary_actions(progress.notification_categories)
     attention_detected_n = len(progress.attention_detected_stock_codes)
+    attention_sent_n = len(progress.attention_sent_stock_codes)
+    # 再コードレビュー対応(2026-08、指摘1・8): ユーザー向けサマリーには表示
+    # しないdetected/sentの内訳をCloudWatch Logsへ構造化出力する(Issue #16の
+    # 「1日平均ATTENTION判定数/個別通知数」評価、および将来のPARTIAL/FULL/SELL/
+    # CRITICAL運用評価に使う)。
+    logger.info(
+        "holdings_summary_action_counts batch_id=%s "
+        "partial_detected=%d partial_sent=%d "
+        "full_detected=%d full_sent=%d "
+        "sell_detected=%d sell_sent=%d "
+        "critical_detected=%d critical_sent=%d "
+        "attention_detected=%d attention_sent=%d",
+        batch_id,
+        detected_counts[HoldingSummaryAction.PARTIAL],
+        sent_counts[HoldingSummaryAction.PARTIAL],
+        detected_counts[HoldingSummaryAction.FULL],
+        sent_counts[HoldingSummaryAction.FULL],
+        detected_counts[HoldingSummaryAction.SELL],
+        sent_counts[HoldingSummaryAction.SELL],
+        detected_counts[HoldingSummaryAction.CRITICAL],
+        sent_counts[HoldingSummaryAction.CRITICAL],
+        attention_detected_n,
+        attention_sent_n,
+    )
     notification_service.notify_batch_summary(
         _PROCESS_NAME,
         progress.total,
@@ -774,11 +843,12 @@ def _finish_batch_item(
         now,
         data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
         failed_stock_codes=progress.failed_stock_codes,
-        partial_sell_sent_count=partial_n,
-        full_sell_sent_count=full_n,
-        sell_sent_count=sell_n,
-        critical_risk_sent_count=critical_risk_n,
+        partial_sell_detected_count=detected_counts[HoldingSummaryAction.PARTIAL],
+        full_sell_detected_count=detected_counts[HoldingSummaryAction.FULL],
+        sell_detected_count=detected_counts[HoldingSummaryAction.SELL],
+        critical_risk_detected_count=detected_counts[HoldingSummaryAction.CRITICAL],
         attention_detected_count=attention_detected_n,
+        display_title="保有株チェック",
     )
 
 
@@ -853,7 +923,9 @@ def _process_single_holding(
         notification_service,
         runtime_config_service,
         recommendation_type=result.recommendation_type_at_send,
+        detected_recommendation_type=result.detected_recommendation_type,
         attention_detected=result.attention_detected,
+        attention_sent=result.attention_sent,
     )
     return {
         "stock_code": stock_code,

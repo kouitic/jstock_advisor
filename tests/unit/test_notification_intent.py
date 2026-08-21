@@ -61,10 +61,13 @@ def test_manual_review_near_buy_watch_before_earnings_are_internal_only_even_wit
         assert intent is NotificationIntent.INTERNAL_ONLY, category
 
 
-def test_other_and_not_notifiable_default_to_actionable_denylist_semantics() -> None:
-    """denylist方式(旧_NON_ACTIONABLE_CATEGORIES)を踏襲するため、明示的に
-    denylistへ含めていないカテゴリ(OTHER/NOT_NOTIFIABLE)はACTIONABLE扱いになる
-    (allowlist方式に変更すると、旧コードで一切ゲートされていなかったOTHER等を
-    新たに誤ってブロックしてしまう、実装中に検出した回帰)。"""
+def test_other_and_not_notifiable_are_internal_only_fail_closed() -> None:
+    """再コードレビュー対応(2026-08): allowlist方式(fail-closed)へ変更した。
+    明示的にACTIONABLEと定義されないカテゴリ(OTHER/NOT_NOTIFIABLE含む)は、
+    未知・未分類であってもINTERNAL_ONLYとして扱う(「送信意図の唯一の正本」が
+    fail-openだと安全側ではないため)。実コード調査により、OTHERカテゴリ経由で
+    実際にLINE送信される本番経路は存在しないことを確認済み(HOLD/WATCH_BUYは
+    送信経路に到達せず、MANUAL_REVIEW_REQUIREDはこのintent判定より前の安全弁
+    経路で処理される)。"""
     for category in (NotificationCategory.OTHER, NotificationCategory.NOT_NOTIFIABLE):
-        assert resolve_notification_intent(category, None) is NotificationIntent.ACTIONABLE
+        assert resolve_notification_intent(category, None) is NotificationIntent.INTERNAL_ONLY
