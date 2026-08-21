@@ -19,7 +19,7 @@ from moto import mock_aws
 
 from jstock_advisor.domain.entities.enums import ConversationStateName, Priority
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
-from jstock_advisor.infrastructure.aws import conversation_state_store
+from jstock_advisor.infrastructure.aws import conversation_state_store, trading_pause_config
 from jstock_advisor.infrastructure.line.webhook import LineTextMessageEvent
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
@@ -53,6 +53,12 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             ("jstock-purchase_lots", "lot_id"),
             ("jstock-holdings", "stock_code"),
             ("jstock-watchlist", "stock_code"),
+            # 保有銘柄オーナー機能移行M0: TradingPauseServiceがBUY/SELL開始・
+            # 確定のたびに参照するため、moto環境にもテーブルが必要
+            # (未初期化=pause_buy_sell False相当として扱われる、テーブル自体が
+            # 無い場合はrepo.get()がClientErrorとなり安全側の一時停止扱いに
+            # フォールバックしてしまうため)。
+            ("jstock-trading_pause_config", "config_id"),
         ):
             client.create_table(
                 TableName=table_name,
@@ -565,3 +571,97 @@ def test_unknown_postback_action_returns_guidance(
 ) -> None:
     reply = service.handle_postback(_USER, "some_unknown_action", None, _NOW)
     assert "認識できない操作です" in reply.text
+
+
+# --- 保有銘柄オーナー機能移行M0: TradingPauseConfig(BUY/SELL一時停止) --------------
+
+
+def _set_trading_paused(paused: bool) -> None:
+    existing = trading_pause_config.get()
+    if existing is None:
+        trading_pause_config.init(
+            pause_buy_sell=paused, updated_by="tester", change_reason="test setup", now=_NOW
+        )
+        return
+    trading_pause_config.update(
+        expected_config_version=existing.config_version,
+        pause_buy_sell=paused,
+        updated_by="tester",
+        change_reason="test setup",
+        now=_NOW,
+    )
+
+
+def test_start_buy_blocked_when_trading_paused(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    _set_trading_paused(True)
+    reply = service.handle_postback(_USER, "start_buy", None, _NOW)
+    assert "メンテナンス中" in reply.text
+    assert conversation_state_store.get(_USER, _NOW) is None
+
+
+def test_start_sell_blocked_when_trading_paused(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    _seed_holding(shares=100)
+    _set_trading_paused(True)
+    reply = service.handle_postback(_USER, "start_sell", None, _NOW)
+    assert "メンテナンス中" in reply.text
+    assert conversation_state_store.get(_USER, _NOW) is None
+
+
+def test_start_watch_not_blocked_when_trading_paused(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """WATCH(ウォッチリスト登録)はHoldings/PurchaseLotsを一切更新しないため、
+    BUY/SELLの一時停止フラグの対象外(commit_watch()参照)。"""
+    _set_trading_paused(True)
+    reply = service.handle_postback(_USER, "start_watch", None, _NOW)
+    assert "ウォッチリスト登録を開始します" in reply.text
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+
+def test_commit_buy_blocked_if_paused_after_conversation_started(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """開始時点ではpause=falseだったが、確認直前にtrueへ切り替わった場合でも
+    実際の書き込みは行わない(_commit_buy側の防御チェック、_startのチェック
+    だけに依存しないことの確認)。"""
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+
+    _set_trading_paused(True)
+
+    reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
+
+    assert "メンテナンス中" in reply.text
+    assert HoldingRepository().get(_STOCK) is None
+    # ConversationStateはまだ消費されていない(実際に書き込みが起きていないことの確認)
+    assert conversation_state_store.get(_USER, _NOW) is not None
+
+
+def test_commit_sell_blocked_if_paused_after_conversation_started(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    _seed_holding(shares=100)
+    service.handle_postback(_USER, "start_sell", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    service.handle_text_input(_USER, state, "8306,50,1800", _NOW)
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+
+    _set_trading_paused(True)
+
+    reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
+
+    assert "メンテナンス中" in reply.text
+    holding = HoldingRepository().get(_STOCK)
+    assert holding is not None
+    assert holding.shares == 100  # 変更されていない

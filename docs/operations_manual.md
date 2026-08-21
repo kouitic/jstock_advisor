@@ -1064,3 +1064,50 @@ rotation dispatch leaseテーブル追加を機に集約)は既に個別指定�
 changesetの中身を人間が確認していれば防げた種類の問題ではなく、
 IAM側のサイズ上限はCloudFormation実行時まで判明しないため、事前の
 `sam validate`だけでは検知できません)。
+
+## 12. 保有銘柄オーナー機能移行の運用(TradingPauseConfig、2026-08追加)
+
+保有銘柄を所有者(本人/子供等)ごとに区別できるようにする機能追加(開発中、
+複数フェーズに分けて実施)の準備として、LINE会話型UIの「📈 買った」
+「📉 売った」操作をCLIから一時停止できる`TradingPauseConfig`を導入しました
+(10節のRuntimeConfigと同じ「再デプロイ不要でCLIから切り替える」設計)。
+「⭐ お気に入り登録」はHoldings/PurchaseLotsを一切更新しないため対象外で、
+一時停止中も通常どおり利用できます。
+
+### 12.1 初回作成
+
+```bash
+jstock trading-pause init --changed-by <あなたの名前> --reason "M0導入"
+# 本番(AWS)環境に対して初期化する場合は --target aws を追加
+jstock trading-pause init --changed-by <あなたの名前> --reason "M0導入" --target aws
+```
+
+既定は`--paused`省略時`pause_buy_sell=False`(通常運用、BUY/SELLとも利用可)
+です。現在の設定は次のコマンドで確認できます。
+
+```bash
+jstock trading-pause status --target aws
+```
+
+### 12.2 データ移行作業の前後での使い方
+
+データ移行(V2テーブルへの切替等)を開始する前に、必ずBUY/SELLを停止して
+ください。
+
+```bash
+jstock trading-pause set --buy-sell true --changed-by <あなたの名前> \
+  --reason "所有者機能移行のためBUY/SELLを一時停止" --target aws
+```
+
+移行・コード切替・VALIDATIONモードでの整合性確認がすべて完了し、問題が
+無いことを確認できてから、初めて解除してください(コードのデプロイと
+本フラグの解除は必ず別々の操作です。デプロイに解除を同梱しないこと)。
+
+```bash
+jstock trading-pause set --buy-sell false --changed-by <あなたの名前> \
+  --reason "移行完了・検証合格のため通常運用を再開" --target aws
+```
+
+解除を忘れたままにすると、移行作業が完了してもLINEから買付・売却が
+できない状態が続くため、`status`コマンドで意図した状態になっているか
+必ず確認してください。
