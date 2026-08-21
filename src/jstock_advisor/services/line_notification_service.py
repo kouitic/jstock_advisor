@@ -280,19 +280,14 @@ _ATTENTION_PRIORITY = 2
 # アクションを促さないため、LINEへは送信しない。内部評価・Recommendation保存・
 # DecisionSnapshot・Auditは従来どおり継続する(evaluate_notification_status()で
 # 送信直前にNON_ACTIONABLEとして記録するのみ)。
-# NEAR_BUY/WATCH_BEFORE_EARNINGSは実際にはbuy_candidates_handler.py側の
-# finalizeループがcheck_resend_eligibility等を個別に呼び出し、
-# evaluate_notification_status()自体は経由しないが、この関数の呼び出し元に
-# 依存せず「非アクション系カテゴリは送信しない」という保証を単一のchoke point
-# (この関数)で完結させるため、念のためここにも含める(防御的対策)。
-_NON_ACTIONABLE_CATEGORIES = frozenset(
-    {
-        NotificationCategory.WATCH,
-        NotificationCategory.MANUAL_REVIEW,
-        NotificationCategory.NEAR_BUY,
-        NotificationCategory.WATCH_BEFORE_EARNINGS,
-    }
-)
+# 通知意図3段階化(2026-08)以降、送信可否の唯一の正本は
+# domain/notification/notification_intent.pyのresolve_notification_intent()
+# (NotificationIntent.ACTIONABLE/ATTENTION/INTERNAL_ONLY)であり、この関数自体が
+# choke pointとなる。かつてはカテゴリ単位の非アクション判定を別途持つ
+# frozenset(_NON_ACTIONABLE_CATEGORIES)が存在したが、WATCH categoryはATTENTION
+# (送信対象)とINTERNAL_ONLY(非送信)の両方になり得るため、カテゴリ単位の一覧では
+# 正しく表現できず、送信可否の正本が2つあるように見える不整合の原因になっていた
+# (再コードレビュー対応2026-08、指摘3で削除)。
 
 
 def _notification_priority(recommendation: Recommendation) -> int:
@@ -1859,10 +1854,10 @@ class LineNotificationService:
         if category_for_action_gate is NotificationCategory.NOT_NOTIFIABLE:
             return NotificationOutcome(status=NotificationStatus.NOT_REQUIRED, sent=False)
 
-        # 通知意図3段階化(2026-08): NON_ACTIONABLEゲートの判定基準をNotificationCategory
-        # 単独からNotificationIntentへ差し替える。ACTIONABLE系カテゴリ(BUY/SELL/
-        # PARTIAL_SELL/CRITICAL_RISK)は元々_NON_ACTIONABLE_CATEGORIESに含まれない
-        # ため挙動は不変。WATCH系のみ、Profit Protectionのcandidate/strongシグナルに
+        # 通知意図3段階化(2026-08): NON_ACTIONABLEゲートの判定基準は
+        # resolve_notification_intent_for_recommendation()の結果(唯一の正本)を使う。
+        # ACTIONABLE系カテゴリ(BUY/SELL/PARTIAL_SELL/CRITICAL_RISK)は常にACTIONABLE
+        # のため挙動は不変。WATCH系のみ、Profit Protectionのcandidate/strongシグナルに
         # 起因する場合(ATTENTION)は非アクション系ゲートを通過し、それ以外の理由に
         # よるWATCH(決算待ち・ポートフォリオ集中等、INTERNAL_ONLY)は従来どおり
         # ゲートされる。
@@ -1999,6 +1994,13 @@ class LineNotificationService:
         3. それ以外は`HoldingsSnapshotEntry.cooldown_until_date`に基づく
         通常のクールダウン判定(境界値: 検知営業日の翌営業日からN営業日間、
         当日を含めて抑止)。
+
+        再コードレビュー対応(2026-08、JST暦日境界修正): `cooldown_until_date`自体は
+        JPX営業日ベースで算出される(TradeCooldownService、算出ロジックは今回変更
+        しない)値だが、この関数の比較側でLambdaのUTC now.date()をそのまま使うと、
+        JST 08:00〜09:00台でUTC日付とJST暦日がずれ、本来解除済みの翌営業日でも
+        クールダウンが継続しうる。比較にはevaluation_date_jst(now)(既存の決算日
+        判定と同じJST暦日変換関数)を使う。
         """
         if is_critical_risk(recommendation.recommendation_type):
             return NotificationEligibility(eligible=True)
@@ -2016,7 +2018,7 @@ class LineNotificationService:
         entry = self._holdings_snapshot_repo.get(recommendation.stock_code)
         if entry is None or entry.cooldown_until_date is None:
             return NotificationEligibility(eligible=True)
-        if now.date() <= entry.cooldown_until_date:
+        if evaluation_date_jst(now) <= entry.cooldown_until_date:
             return NotificationEligibility(
                 eligible=False,
                 block_category=EligibilityBlockCategory.TRADE_COOLDOWN,
@@ -2039,6 +2041,11 @@ class LineNotificationService:
 
         読み取り専用(他のcheck_*_eligibilityと同じ規約)。実際に送信した後の
         記録は`_record_daily_priority()`が担う。
+
+        再コードレビュー対応(2026-08、JST暦日境界修正): 「当日」の判定はLambdaの
+        UTC now.date()ではなくevaluation_date_jst(now)によるJST暦日基準で行う
+        (保有株サマリのdedupと同じ思想。JST 08:00〜09:00台のUTC日跨ぎで別レコード
+        扱いになる不備を修正)。
         """
         if is_critical_risk(recommendation.recommendation_type):
             return NotificationEligibility(eligible=True)
@@ -2047,7 +2054,8 @@ class LineNotificationService:
         if this_priority <= 0:
             return NotificationEligibility(eligible=True)
 
-        record_id = build_daily_notification_priority_id(recommendation.stock_code, now.date())
+        business_date = evaluation_date_jst(now)
+        record_id = build_daily_notification_priority_id(recommendation.stock_code, business_date)
         existing = self._daily_priority_repo.get(record_id)
         if existing is None:
             return NotificationEligibility(eligible=True)
@@ -2071,11 +2079,17 @@ class LineNotificationService:
         既存記録より低い優先度で上書きしない(モノトニックに非減少を保つ)。
         VALIDATIONでは検証用のDailyNotificationPriorityRepositoryへ記録され、
         本番の重複抑止状態には一切影響しない(他の§5-1系リポジトリと同じ分離方針)。
+
+        再コードレビュー対応(2026-08、JST暦日境界修正): business_dateは
+        evaluation_date_jst(now)を1回だけ算出し、record_id生成とレコード自体の
+        business_dateフィールドへ同じ値を使う(check_cross_pipeline_priority_
+        eligibility()と同じ思想)。
         """
         priority = _notification_priority(recommendation)
         if priority <= 0:
             return
-        record_id = build_daily_notification_priority_id(recommendation.stock_code, now.date())
+        business_date = evaluation_date_jst(now)
+        record_id = build_daily_notification_priority_id(recommendation.stock_code, business_date)
         existing = self._daily_priority_repo.get(record_id)
         if existing is not None and existing.priority >= priority:
             return
@@ -2084,7 +2098,7 @@ class LineNotificationService:
             DailyNotificationPriorityRecord(
                 record_id=record_id,
                 stock_code=recommendation.stock_code,
-                business_date=now.date(),
+                business_date=business_date,
                 priority=priority,
                 category=category.value,
             )

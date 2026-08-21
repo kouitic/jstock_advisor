@@ -8,7 +8,11 @@ A) RecommendationType → user-action(is_full_sell_like/is_sell_like/
    formatter-label(recommendation_adapter) → batch-summary-category
    (holdings_watchlist_handlerの4分類集計) → cross-pipeline-priority
    (_notification_priority) → actionable/non-actionable
-   (_NON_ACTIONABLE_CATEGORIES) の一貫性。
+   (resolve_notification_intent_for_recommendation()、送信可否の唯一の正本) の
+   一貫性。かつて存在した_NON_ACTIONABLE_CATEGORIES(カテゴリ単位のfrozenset)は
+   WATCH categoryがATTENTION(送信対象)とINTERNAL_ONLY(非送信)の両方になり得る
+   ことを表現できず、送信可否の正本が2つあるように見える不整合の原因になっていた
+   ため削除した(再コードレビュー対応2026-08、指摘3)。
 
 B) WatchlistJobType → resolve_watchlist_job_type() → Dispatcher/Worker/
    Finalizer(rotation commitゲート)の各分岐が一貫しており、未知値に対して
@@ -28,6 +32,7 @@ from jstock_advisor.domain.entities.enums import (
     SELL_LIKE_RECOMMENDATION_TYPES,
     ConfidenceLevel,
     NotificationCategory,
+    NotificationIntent,
     RecommendationType,
     is_critical_risk,
     is_full_sell_like,
@@ -42,9 +47,9 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
 )
 from jstock_advisor.services import watchlist_batch_finalizer
 from jstock_advisor.services.line_notification_service import (
-    _NON_ACTIONABLE_CATEGORIES,
     _notification_priority,
     resolve_notification_category,
+    resolve_notification_intent_for_recommendation,
 )
 
 _NOW = dt.datetime(2026, 8, 16, 8, 0, tzinfo=dt.UTC)
@@ -115,20 +120,20 @@ def test_a4_critical_risk_types_are_categorized_as_critical_risk(
 
 
 @pytest.mark.parametrize("recommendation_type", list(RecommendationType))
-def test_a5_actionable_and_non_actionable_categories_never_overlap_in_priority(
+def test_a5_internal_only_intent_never_has_positive_priority(
     recommendation_type: RecommendationType,
 ) -> None:
-    """あるRecommendationTypeから得られるNotificationCategoryが
-    _NON_ACTIONABLE_CATEGORIES(LINE非送信)に含まれる場合、cross-pipeline
-    優先度表では常にpriority<=0(比較対象外)であり、逆に優先度が正の値を
-    持つカテゴリは_NON_ACTIONABLE_CATEGORIESに含まれない。両者が同時に
-    真になる(=送信しないのに優先度だけは高く記録される、または送信するのに
-    優先度比較が一切効かない)矛盾が無いことを保証する。"""
+    """あるRecommendationTypeの通知意図(resolve_notification_intent_for_
+    recommendation()、送信可否の唯一の正本)がINTERNAL_ONLY(LINE非送信)の場合、
+    cross-pipeline優先度表では常にpriority<=0(比較対象外)であることを保証する。
+    逆に優先度が正の値を持つ場合は必ずACTIONABLEかATTENTION(送信対象)である
+    (=送信しないのに優先度だけは高く記録される、または送信するのに優先度比較が
+    一切効かない、という矛盾が無いことの確認)。"""
     recommendation = _recommendation(recommendation_type)
-    category = resolve_notification_category(recommendation)
+    intent = resolve_notification_intent_for_recommendation(recommendation)
     priority = _notification_priority(recommendation)
-    if category in _NON_ACTIONABLE_CATEGORIES:
-        assert priority <= 0, (recommendation_type, category, priority)
+    if intent is NotificationIntent.INTERNAL_ONLY:
+        assert priority <= 0, (recommendation_type, intent, priority)
 
 
 def test_a6_sell_and_partial_sell_share_the_same_priority_tier() -> None:
