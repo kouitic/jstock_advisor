@@ -1097,7 +1097,7 @@ IAM側のサイズ上限はCloudFormation実行時まで判明しないため、
 **pause確認と実際のBUY/SELL登録(TransactWriteItems)は原子的です**。
 LINE会話の確認画面表示時点でpause=falseだったとしても、「登録する」を
 押した瞬間の書き込みそのものにTradingPauseConfigの状態確認が含まれるため、
-その間に運用者が`--buy-sell true`へ切り替えた場合は、書き込みの直前で
+その間に運用者が`--buy-sell`へ切り替えた場合は、書き込みの直前で
 確実に失敗し(「最新の保有状況が変更されたため登録できませんでした」と
 案内されます)、Holdings/PurchaseLots/Transactionsのいずれも変更されません。
 
@@ -1122,7 +1122,7 @@ jstock trading-pause status --target aws
 ください。
 
 ```bash
-jstock trading-pause set --buy-sell true --changed-by <あなたの名前> \
+jstock trading-pause set --buy-sell --changed-by <あなたの名前> \
   --reason "所有者機能移行のためBUY/SELLを一時停止" --target aws
 ```
 
@@ -1131,7 +1131,7 @@ jstock trading-pause set --buy-sell true --changed-by <あなたの名前> \
 本フラグの解除は必ず別々の操作です。デプロイに解除を同梱しないこと)。
 
 ```bash
-jstock trading-pause set --buy-sell false --changed-by <あなたの名前> \
+jstock trading-pause set --no-buy-sell --changed-by <あなたの名前> \
   --reason "移行完了・検証合格のため通常運用を再開" --target aws
 ```
 

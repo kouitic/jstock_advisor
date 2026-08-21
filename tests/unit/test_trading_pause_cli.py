@@ -113,8 +113,55 @@ def test_target_missing_exits_nonzero(
 
 def test_set_and_status_also_require_target(moto_trading_pause_table: None) -> None:
     for args in (
-        ["set", "--buy-sell", "true", "--changed-by", "tester", "--reason", "test"],
+        ["set", "--buy-sell", "--changed-by", "tester", "--reason", "test"],
         ["status"],
     ):
         result = _runner.invoke(cli_module.app, args)
         assert result.exit_code != 0, args
+
+
+def test_set_toggles_buy_sell_flag_against_aws(moto_trading_pause_table: None) -> None:
+    """--buy-sell/--no-buy-sellの実際の切替(コードレビュー対応で発覚:
+    boolオプションはtrue/falseという値を取らず、フラグの有無で表現する)。"""
+    init_result = _runner.invoke(
+        cli_module.app,
+        ["init", "--changed-by", "tester", "--reason", "init", "--target", "aws"],
+    )
+    assert init_result.exit_code == 0, init_result.output
+
+    on_result = _runner.invoke(
+        cli_module.app,
+        [
+            "set",
+            "--buy-sell",
+            "--changed-by",
+            "tester",
+            "--reason",
+            "pause on",
+            "--target",
+            "aws",
+        ],
+    )
+    assert on_result.exit_code == 0, on_result.output
+    assert "True" in on_result.output
+
+    client = boto3.client("dynamodb", region_name=_REGION)
+    item = client.get_item(TableName=_TABLE_NAME, Key={"config_id": {"S": "trading_pause"}})
+    assert item["Item"]["pause_buy_sell"]["BOOL"] is True
+
+    off_result = _runner.invoke(
+        cli_module.app,
+        [
+            "set",
+            "--no-buy-sell",
+            "--changed-by",
+            "tester",
+            "--reason",
+            "pause off",
+            "--target",
+            "aws",
+        ],
+    )
+    assert off_result.exit_code == 0, off_result.output
+    item = client.get_item(TableName=_TABLE_NAME, Key={"config_id": {"S": "trading_pause"}})
+    assert item["Item"]["pause_buy_sell"]["BOOL"] is False

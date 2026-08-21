@@ -204,6 +204,24 @@ Resources:
         - AttributeName: stock_code
           KeyType: HASH
 
+  # 保有銘柄オーナー機能移行(データ移行手順M1、2026-08追加): holding_id
+  # (owner×stock_codeの合成キー)をパーティションキーとする新テーブル。
+  # 既存のHoldingsTable(stock_code単一キー)はそのまま残し(削除しない)、
+  # このテーブルはまだどのアプリケーションコードからも参照されない
+  # (M2の移行スクリプトがHoldingsTableから読みこのテーブルへ書き込み、
+  # M3のコード切替でアプリケーションが参照先をこちらへ切り替える)。
+  HoldingsTableV2:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-holdings_v2"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_id
+          KeyType: HASH
+
   PurchaseLotsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -324,6 +342,36 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # 保有銘柄オーナー機能移行(データ移行手順M1、2026-08追加): holding_id単位の
+  # TradeCooldown/売買イベント検知状態。HoldingsTableV2と同様、まだどの
+  # アプリケーションコードからも参照されない(HoldingsTableV2の注記参照)。
+  HoldingsSnapshotTableV2:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-holdings_snapshots_v2"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_id
+          KeyType: HASH
+
+  ValidationHoldingsSnapshotTableV2:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-validation_holdings_snapshots_v2"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # 売買イベント検知処理(TradeCooldownService.detect_and_apply)の実行順序
   # 非依存化・冪等性担保用ロック(infrastructure/aws/trade_detection_lock.py
   # 参照)。PK=business_date(値は"NORMAL:2026-08-14"/"VALIDATION:2026-08-14"の
@@ -429,10 +477,43 @@ Resources:
         - AttributeName: holding_id
           KeyType: HASH
 
+  # 保有銘柄オーナー機能移行(データ移行手順M1、2026-08追加): 既存テーブルの
+  # holding_id値がstock_codeの1:1エイリアスから所有者付き合成キーへ変わる
+  # ため、新holding_id値を採番するための新テーブル(既存の連番はowner概念が
+  # 無かった時点のものであり引き継がない。既存テーブルはそのまま残す)。
+  InvestmentThesisBaselineSequencesTableV2:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-investment_thesis_baseline_sequences_v2"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_id
+          KeyType: HASH
+
   InvestmentThesisBaselinePointersTable:
     Type: AWS::DynamoDB::Table
     Properties:
       TableName: !Sub "${TablePrefix}-investment_thesis_baseline_pointers"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_id
+          KeyType: HASH
+
+  # 保有銘柄オーナー機能移行(データ移行手順M1、2026-08追加): 新holding_id値で
+  # baseline継続性を追跡する新テーブル。あわせて、create/get/updateの永続化
+  # 形式が一致していなかった既知の不整合(baseline_pointer.py参照、本番検証で
+  # 発見・修正済み)を再現しないよう、data属性全体一致のCAS方式(既に修正済み
+  # の実装)をそのまま踏襲する(新テーブル固有の追加対応は不要)。
+  InvestmentThesisBaselinePointersTableV2:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-investment_thesis_baseline_pointers_v2"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: holding_id
