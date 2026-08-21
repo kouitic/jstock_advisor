@@ -2,11 +2,15 @@
 TransactWriteItemsによる単一の原子コミットとして実行する(実装プランv2 3節)。
 
 1回のtransact_write_items呼び出しに以下をすべて含める:
+  0. (BUY/SELLのみ)TradingPauseConfig.pause_buy_sellのConditionCheck(保有銘柄
+     オーナー機能移行のデータ移行中、サービス層でのpause確認とこのトランザクション
+     実行の間に運用者がpauseへ切り替えた場合のTOCTOU競合を排除する)
   1. ConversationStateの消費(Delete、operation_id/state/期限を条件化。追加条件2)
   2. Transaction Put(transaction_id = operation_id、決定的ID化)
   3. PurchaseLotのPut/Update/Delete(BUY/SELLのみ、既存アイテムは楽観ロック。追加条件1)
   4. HoldingのPut/Delete(BUY/SELLのみ、既存アイテムは楽観ロック。追加条件1)
-  または(WATCHの場合)WatchlistItemのPut(冪等なため楽観ロック無し)
+  または(WATCHの場合)WatchlistItemのPut(冪等なため楽観ロック無し。pauseの
+  ConditionCheckも含めない。WATCHはHoldings/PurchaseLotsを更新しないため対象外)
 
 DynamoDBが「全部成功 or 全部不成功」を保証するため、「Transactionのみ登録
 済みでHoldingsが未更新」のような部分状態は構造的に発生しない。
@@ -55,6 +59,8 @@ _TRANSACTIONS_TABLE_FILE = "transactions.json"
 _PURCHASE_LOTS_TABLE_FILE = "purchase_lots.json"
 _HOLDINGS_TABLE_FILE = "holdings.json"
 _WATCHLIST_TABLE_FILE = "watchlist.json"
+_TRADING_PAUSE_CONFIG_TABLE_FILE = "trading_pause_config.json"
+_TRADING_PAUSE_CONFIG_ID = "trading_pause"
 
 _CONDITION_FAILURE_TOP_LEVEL_CODES = frozenset(
     {"ConditionalCheckFailedException", "TransactionConflictException"}
@@ -121,6 +127,29 @@ def _conditional_put_transact_item(table_name: str, put: ConditionalPut) -> dict
             "ConditionExpression": "#data = :expected_data",
             "ExpressionAttributeNames": {"#data": "data"},
             "ExpressionAttributeValues": {":expected_data": _ser(put.expected_data)},
+        }
+    }
+
+
+def _trading_pause_condition_check_item() -> dict[str, Any]:
+    """BUY/SELL確定と同一トランザクションでTradingPauseConfig.pause_buy_sell
+    を検証する(コードレビュー対応: サービス層でのpause確認とTransactWriteItems
+    実行の間に運用者がpauseへ切り替えた場合のTOCTOU競合を排除する)。
+
+    未初期化(レコード自体が存在しない)場合はpause_buy_sell=False相当として
+    許可する(TradingPauseService.is_buy_sell_paused()と同じ既定値)。
+    TradingPauseConfigはトップレベル属性のみで保存されている
+    (trading_pause_config.py参照、data属性を経由しない)ため、pause_buy_sell
+    自体を直接ConditionExpressionで参照できる。
+    """
+    return {
+        "ConditionCheck": {
+            "TableName": resolve_table_name(_TRADING_PAUSE_CONFIG_TABLE_FILE),
+            "Key": {"config_id": _ser(_TRADING_PAUSE_CONFIG_ID)},
+            "ConditionExpression": (
+                "attribute_not_exists(config_id) OR pause_buy_sell = :not_paused"
+            ),
+            "ExpressionAttributeValues": {":not_paused": _ser(False)},
         }
     }
 
@@ -192,6 +221,7 @@ def commit_buy(
     now: dt.datetime,
 ) -> bool:
     items = [
+        _trading_pause_condition_check_item(),
         conversation_state_store.build_confirm_delete_transact_item(
             user_id, ConversationAction.BUY, expected_operation_id, now
         ),
@@ -213,6 +243,7 @@ def commit_sell(
     now: dt.datetime,
 ) -> bool:
     items = [
+        _trading_pause_condition_check_item(),
         conversation_state_store.build_confirm_delete_transact_item(
             user_id, ConversationAction.SELL, expected_operation_id, now
         ),

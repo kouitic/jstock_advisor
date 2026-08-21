@@ -646,6 +646,68 @@ def test_commit_buy_blocked_if_paused_after_conversation_started(
     assert conversation_state_store.get(_USER, _NOW) is not None
 
 
+def test_buy_text_input_blocked_when_paused_after_start_stays_input_waiting(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """pause前に開始済みのBUY(INPUT_WAITING)は、pause後のCSV入力では
+    CONFIRM_WAITINGへ進めない(ConversationStateは一切変更しない)。"""
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    assert state.state == ConversationStateName.INPUT_WAITING
+
+    _set_trading_paused(True)
+
+    reply = service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+
+    assert "メンテナンス中" in reply.text
+    unchanged = conversation_state_store.get(_USER, _NOW)
+    assert unchanged is not None
+    assert unchanged.state == ConversationStateName.INPUT_WAITING
+    assert unchanged.stock_code is None
+
+
+def test_sell_text_input_blocked_when_paused_after_start_stays_input_waiting(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    _seed_holding(shares=100)
+    service.handle_postback(_USER, "start_sell", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    assert state.state == ConversationStateName.INPUT_WAITING
+
+    _set_trading_paused(True)
+
+    reply = service.handle_text_input(_USER, state, "8306,50,1800", _NOW)
+
+    assert "メンテナンス中" in reply.text
+    unchanged = conversation_state_store.get(_USER, _NOW)
+    assert unchanged is not None
+    assert unchanged.state == ConversationStateName.INPUT_WAITING
+    assert unchanged.stock_code is None
+
+
+def test_watch_text_input_not_blocked_when_paused(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """WATCHはpause=trueでも入力・登録可能(HoldingsもPurchaseLotsも
+    更新しない経路のため対象外)。"""
+    service.handle_postback(_USER, "start_watch", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    _set_trading_paused(True)
+
+    input_reply = service.handle_text_input(_USER, state, "8306", _NOW)
+    assert "ウォッチリストに追加します" in input_reply.text
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+
+    confirm_reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
+    assert "ウォッチリストに追加しました" in confirm_reply.text
+    assert WatchlistRepository().get(_STOCK) is not None
+
+
 def test_commit_sell_blocked_if_paused_after_conversation_started(
     moto_conversation_tables: None, service: ConversationService
 ) -> None:

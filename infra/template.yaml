@@ -1565,9 +1565,22 @@ Resources:
         # StockDisplayNameResolverのoverrideソース(手動上書き名称)・JPXソース用
         # (指摘対応、上記CANDIDATE_UNIVERSE_CACHE_BUCKET環境変数とあわせて追加)。
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
-        # 保有銘柄オーナー機能移行M0: BUY/SELL一時停止フラグの読み取り専用アクセス
-        # (書き込みはCLI経由の人間のみ)。
-        - DynamoDBReadPolicy: { TableName: !Ref TradingPauseConfigTable }
+        # 保有銘柄オーナー機能移行: BUY/SELL一時停止フラグ。書き込みはCLI経由の
+        # 人間のみ(DynamoDBReadPolicyでは不足。commit_buy/commit_sellの
+        # TransactWriteItemsがConditionCheckとして参照するためdynamodb:
+        # ConditionCheckItemが必須で、DynamoDBReadPolicyのマネージドポリシー
+        # テンプレートには含まれないため、専用Statementで明示的に付与する
+        # コードレビュー対応)。
+        - Statement:
+            - Sid: TradingPauseConfigConditionCheckAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:ConditionCheckItem
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt TradingPauseConfigTable.Arn
+                - !Sub "${TradingPauseConfigTable.Arn}/index/*"
         - S3ReadPolicy: { BucketName: !Ref CandidateUniverseCacheBucket }
       Events:
         Webhook:

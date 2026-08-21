@@ -61,6 +61,9 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             ("jstock-purchase_lots", "lot_id"),
             ("jstock-holdings", "stock_code"),
             ("jstock-watchlist", "stock_code"),
+            # 保有銘柄オーナー機能移行: commit_buy/commit_sellのTransactWriteItems
+            # がTradingPauseConfigをConditionCheckするため必要(コードレビュー対応)。
+            ("jstock-trading_pause_config", "config_id"),
         ):
             client.create_table(
                 TableName=table_name,
@@ -388,6 +391,133 @@ def test_commit_sell_fails_when_lot_changed_after_plan_built(
     assert ok is False
     assert conversation_state_store.get(_USER, _NOW) is not None
     assert PurchaseLotRepository().get("existing-lot").shares == 40  # type: ignore[union-attr]
+
+
+# --- TradingPauseConfig ConditionCheck(コードレビュー対応、TOCTOU排除) --------
+
+
+def _set_trading_pause(paused: bool) -> None:
+    from jstock_advisor.infrastructure.aws import trading_pause_config
+
+    existing = trading_pause_config.get()
+    if existing is None:
+        trading_pause_config.init(
+            pause_buy_sell=paused, updated_by="tester", change_reason="test setup", now=_NOW
+        )
+        return
+    trading_pause_config.update(
+        expected_config_version=existing.config_version,
+        pause_buy_sell=paused,
+        updated_by="tester",
+        change_reason="test setup",
+        now=_NOW,
+    )
+
+
+def test_commit_buy_succeeds_when_trading_pause_uninitialized(
+    moto_conversation_tables: None,
+) -> None:
+    """TradingPauseConfig未初期化(レコード自体が存在しない)は
+    pause_buy_sell=False相当として許可される(既存の全commit_*テストが
+    これに暗黙に依存しているため、明示的な回帰テストとして追加)。"""
+    state = _start_buy_confirm(shares=100, price="1500")
+    assert state is not None
+    portfolio = PortfolioService()
+    plan = portfolio.build_purchase_write_plan(
+        stock_code=_STOCK,
+        stock_name=None,
+        shares=100,
+        purchase_price=Decimal("1500"),
+        purchase_date=dt.date(2026, 8, 17),
+        account_type=AccountType.GENERAL,
+        now=_NOW,
+    )
+    transaction = TransactionHistoryService().build_execution_plan(
+        transaction_id=state.operation_id,
+        stock_code=_STOCK,
+        transaction_type=TransactionType.BUY,
+        shares=100,
+        execution_price=Decimal("1500"),
+        execution_date=dt.date(2026, 8, 17),
+        now=_NOW,
+    )
+
+    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+
+    assert ok is True
+
+
+def test_commit_buy_rejected_when_trading_paused_after_plan_built(
+    moto_conversation_tables: None,
+) -> None:
+    """TOCTOU回帰テスト: サービス層(ConversationService)がpause=falseを確認
+    した後、運用者がpause=trueへ切り替え、遅れてTransactWriteItemsが到着した
+    場合でも確実に拒否され、Holding/PurchaseLot/Transaction/ConversationState
+    のいずれも変更されないこと。"""
+    _set_trading_pause(False)
+    state = _start_buy_confirm(shares=100, price="1500")
+    assert state is not None
+    portfolio = PortfolioService()
+    plan = portfolio.build_purchase_write_plan(
+        stock_code=_STOCK,
+        stock_name=None,
+        shares=100,
+        purchase_price=Decimal("1500"),
+        purchase_date=dt.date(2026, 8, 17),
+        account_type=AccountType.GENERAL,
+        now=_NOW,
+    )
+    transaction = TransactionHistoryService().build_execution_plan(
+        transaction_id=state.operation_id,
+        stock_code=_STOCK,
+        transaction_type=TransactionType.BUY,
+        shares=100,
+        execution_price=Decimal("1500"),
+        execution_date=dt.date(2026, 8, 17),
+        now=_NOW,
+    )
+
+    # 計画構築後・TransactWriteItems実行前に、運用者がpauseへ切り替えたことを模擬する。
+    _set_trading_pause(True)
+
+    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+
+    assert ok is False
+    assert HoldingRepository().get(_STOCK) is None
+    assert TransactionRepository().get(state.operation_id) is None
+    assert conversation_state_store.get(_USER, _NOW) is not None
+
+
+def test_commit_sell_rejected_when_trading_paused_after_plan_built(
+    moto_conversation_tables: None,
+) -> None:
+    _seed_holding_with_one_lot(shares=100, price="1000")
+    _set_trading_pause(False)
+    state = _start_sell_confirm(shares=100, price="1500")
+    assert state is not None
+    portfolio = PortfolioService()
+    plan = portfolio.build_sale_write_plan(_STOCK, 100, now=_NOW)
+    transaction = TransactionHistoryService().build_execution_plan(
+        transaction_id=state.operation_id,
+        stock_code=_STOCK,
+        transaction_type=TransactionType.FULL_SELL,
+        shares=100,
+        execution_price=Decimal("1500"),
+        execution_date=dt.date(2026, 8, 17),
+        now=_NOW,
+    )
+
+    _set_trading_pause(True)
+
+    ok = conversation_commit.commit_sell(_USER, state.operation_id, plan, transaction, _NOW)
+
+    assert ok is False
+    holding = HoldingRepository().get(_STOCK)
+    assert holding is not None
+    assert holding.shares == 100  # 変更されていない
+    assert PurchaseLotRepository().get("existing-lot") is not None
+    assert TransactionRepository().get(state.operation_id) is None
+    assert conversation_state_store.get(_USER, _NOW) is not None
 
 
 # --- commit_watch ---------------------------------------------------------
