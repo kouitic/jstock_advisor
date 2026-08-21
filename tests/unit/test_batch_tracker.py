@@ -185,6 +185,91 @@ def test_record_result_without_ranking_entry_leaves_ranking_entries_empty(
     assert progress.ranking_entries == []
 
 
+# ===== 再コードレビュー対応(2026-08、detected/sent一元化)============================
+
+
+def test_record_result_accumulates_detected_categories_independently_of_notification_categories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """detected_category_entryはnotification_category_entryとは独立した集合として
+    蓄積される(追加修正1: DataQuality BLOCKEDでnotification_category_entryを渡さ
+    なかった銘柄でも、detected_category_entryだけは残ることを保証する構造)。"""
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 2, _NOW)
+    batch_tracker.record_result(
+        "batch-1", "sent", detected_category_entry="PARTIAL_PROFIT_TAKE|1234"
+    )
+    progress = batch_tracker.record_result(
+        "batch-1",
+        "review",
+        detected_category_entry="SELL|5678",
+        notification_category_entry="SELL|5678",
+    )
+
+    assert progress is not None
+    assert sorted(progress.detected_categories) == ["PARTIAL_PROFIT_TAKE|1234", "SELL|5678"]
+    assert progress.notification_categories == ["SELL|5678"]
+
+
+def test_record_result_attention_sent_is_independent_of_attention_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """追加修正2: attention_sent_stock_codesはattention_detected_stock_codesとは
+    別の集合として保持される。"""
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 2, _NOW)
+    batch_tracker.record_result(
+        "batch-1", "sent", attention_detected_stock_code="1234", attention_sent_stock_code="1234"
+    )
+    progress = batch_tracker.record_result(
+        "batch-1", "sent", attention_detected_stock_code="5678"
+    )
+
+    assert progress is not None
+    assert sorted(progress.attention_detected_stock_codes) == ["1234", "5678"]
+    assert progress.attention_sent_stock_codes == ["1234"]
+
+
+def test_record_result_retry_of_same_stock_code_does_not_inflate_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """指摘10-K: Lambda async retry等で同一stock_codeが複数回record_resultされても、
+    DynamoDBの文字列セット(ADD演算)により重複排除され、detected/sent件数が
+    膨らまないことを確認する。completedカウンタ自体は呼び出し回数ぶん増える
+    (retryは呼び出し回数として現れるが、Set側の要素数は増えない)。"""
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.record_result(
+        "batch-1",
+        "sent",
+        detected_category_entry="PARTIAL_PROFIT_TAKE|1234",
+        attention_detected_stock_code="1234",
+        attention_sent_stock_code="1234",
+    )
+    progress = batch_tracker.record_result(
+        "batch-1",
+        "sent",
+        detected_category_entry="PARTIAL_PROFIT_TAKE|1234",
+        attention_detected_stock_code="1234",
+        attention_sent_stock_code="1234",
+    )
+
+    assert progress is not None
+    assert progress.detected_categories == ["PARTIAL_PROFIT_TAKE|1234"]
+    assert progress.attention_detected_stock_codes == ["1234"]
+    assert progress.attention_sent_stock_codes == ["1234"]
+    assert progress.completed == 2  # completedはretry分だけ増える(既存挙動、変更なし)
+
+
 # --- try_acquire_finalize / mark_finalize_complete(ウォッチリスト自動追加機能) ---
 # ConditionExpressionの実際の意味論を検証する必要があるため、_FakeTableの簡易ADD
 # パーサではなくmoto(実DynamoDB相当の挙動)を使う。

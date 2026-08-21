@@ -10,9 +10,11 @@ from jstock_advisor.domain.entities.enums import (
     _LEGACY_SELL_RECOMMENDATION_TYPES,
     FULL_SELL_RECOMMENDATION_TYPES,
     BacktestRecommendationSource,
+    HoldingSummaryAction,
     RecommendationType,
     classify_recommendation_source,
     is_full_sell_like,
+    resolve_holding_summary_action,
 )
 
 
@@ -138,3 +140,58 @@ def test_is_full_sell_like_false_for_non_full_sell_types(
     recommendation_type: RecommendationType,
 ) -> None:
     assert is_full_sell_like(recommendation_type) is False
+
+
+# ===== 再コードレビュー対応(2026-08、追加修正4): resolve_holding_summary_action =====
+
+
+@pytest.mark.parametrize(
+    ("recommendation_type", "expected_action"),
+    [
+        (RecommendationType.PARTIAL_PROFIT_TAKE, HoldingSummaryAction.PARTIAL),
+        (RecommendationType.PARTIAL_RISK_REDUCTION, HoldingSummaryAction.PARTIAL),
+        (RecommendationType.FULL_PROFIT_TAKE, HoldingSummaryAction.FULL),
+        (RecommendationType.STRONG_SELL_CONSIDERATION, HoldingSummaryAction.FULL),
+        (RecommendationType.SELL, HoldingSummaryAction.SELL),
+        (RecommendationType.SELL_CONSIDERATION, HoldingSummaryAction.SELL),
+        (RecommendationType.URGENT_REVIEW, HoldingSummaryAction.CRITICAL),
+        (RecommendationType.URGENT_HOLDING_REVIEW, HoldingSummaryAction.CRITICAL),
+    ],
+)
+def test_resolve_holding_summary_action_classifies_known_types(
+    recommendation_type: RecommendationType, expected_action: HoldingSummaryAction
+) -> None:
+    assert resolve_holding_summary_action(recommendation_type) is expected_action
+
+
+@pytest.mark.parametrize(
+    "recommendation_type",
+    [
+        RecommendationType.BUY,
+        RecommendationType.WATCH_BUY,
+        RecommendationType.HOLD,
+        RecommendationType.WATCH,
+        RecommendationType.REVIEW,
+        RecommendationType.MANUAL_REVIEW_REQUIRED,
+        RecommendationType.WATCH_BEFORE_EARNINGS,
+        RecommendationType.REVIEW_AFTER_EARNINGS,
+        RecommendationType.REVIEW_BEFORE_EARNINGS,
+        RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
+    ],
+)
+def test_resolve_holding_summary_action_returns_none_for_unrelated_types(
+    recommendation_type: RecommendationType,
+) -> None:
+    """ATTENTION(NotificationIntentという別軸)を含め、保有株サマリーの4分類
+    (一部売却/全部売却/売却/緊急確認)に属さない型はNoneを返す(このRecommendation
+    Typeがholdings_watchlist_handler.pyの4分類集計へ混入しないことを保証する)。
+    """
+    assert resolve_holding_summary_action(recommendation_type) is None
+
+
+def test_resolve_holding_summary_action_covers_every_recommendation_type() -> None:
+    """全RecommendationTypeについて例外なく分類できる(4分類のいずれか、または
+    None)ことを保証する(将来のメンバー追加による無言の分岐漏れを検知する)。"""
+    for recommendation_type in RecommendationType:
+        result = resolve_holding_summary_action(recommendation_type)
+        assert result is None or result in HoldingSummaryAction

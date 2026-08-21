@@ -265,6 +265,14 @@ _NOTIFICATION_PRIORITY: dict[NotificationCategory, int] = {
     NotificationCategory.BUY: 3,
 }
 _PROMOTED_TO_BUY_PRIORITY = 5
+# 再コードレビュー対応(2026-08、通知意図3段階化): ATTENTION(Profit Protection
+# candidate/strong起因のWATCH)をCross Pipeline Priorityへ参加させる。
+# CRITICAL_RISK(6) > PROMOTED_TO_BUY(5) > SELL/PARTIAL_SELL(4) > BUY(3) >
+# ATTENTION(2) > その他(0)。既存メンバーの数値は変更しない。WATCH category
+# 全体をこの表へ追加すると通常WATCH・決算待ちWATCHまで対象になってしまうため、
+# _notification_priority()側でNotificationIntent==ATTENTIONの場合のみこの値を
+# 返す(WATCH categoryの特別扱いとして実装、辞書には追加しない)。
+_ATTENTION_PRIORITY = 2
 
 # LINE通知アクション限定化(2026-08、コードレビュー対応)。WATCH(利確WATCH・決算前後
 # レビュー保留・ポートフォリオ集中リスク)・MANUAL_REVIEW(REVIEW・証拠品質系の
@@ -294,6 +302,9 @@ def _notification_priority(recommendation: Recommendation) -> int:
         and recommendation.watch_transition_type == WatchTransitionType.PROMOTED_TO_BUY.value
     ):
         return _PROMOTED_TO_BUY_PRIORITY
+    if category is NotificationCategory.WATCH:
+        intent = _resolve_notification_intent(category, recommendation.profit_protection_signal)
+        return _ATTENTION_PRIORITY if intent is NotificationIntent.ATTENTION else 0
     return _NOTIFICATION_PRIORITY.get(category, 0)
 
 
@@ -2184,6 +2195,12 @@ class LineNotificationService:
         text_input = build_attention_text_input(recommendation, attention_origin)
         message = format_notification_text(text_input)
         self._push(message)
+        # 再コードレビュー対応(2026-08): send_recommendation_notification()と同様、
+        # 実送信後にCross Pipeline Priority用の当日優先度を記録する(以前はこの
+        # 呼び出しが無く、ATTENTION送信後もpriority 0のまま扱われ、後発の低優先度
+        # 通知(通常WATCH等、priority 0同士)と誤って同格になる/優先度記録が
+        # 一切残らない不備があった)。
+        self._record_daily_priority(recommendation, now)
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
@@ -2516,24 +2533,28 @@ class LineNotificationService:
         buy_candidates_sent_count: int | None = None,
         near_buy_sent_count: int | None = None,
         send_empty_summary: bool = True,
-        # コードレビュー対応(2026-08、LINE通知アクション限定化): 保有銘柄側の
-        # バッチサマリーを「実際にLINE送信したアクション件数のみ」の3分類
-        # (一部売却/全部売却/売却)へ切り替えるための集計値。WATCH・MANUAL_REVIEW
-        # はもはやLINE送信されない(NON_ACTIONABLE、Audit記録のみ)ため、サマリー
-        # からも除外する。critical_risk_sent_countを「売却」に含めない
-        # (URGENT_REVIEW/URGENT_HOLDING_REVIEWは必ずしも売却判定ではないため)。
-        # partial_sell_sent_count(PARTIAL_PROFIT_TAKE+PARTIAL_RISK_REDUCTION)・
-        # full_sell_sent_count(FULL_PROFIT_TAKE)・sell_sent_count(SELL/
-        # SELL_CONSIDERATION/STRONG_SELL_CONSIDERATION等)はいずれもholdings_
-        # watchlist_handler.py側がrecommendation_type基準で集計して渡す
-        # (NotificationCategory.SELLはFULL_PROFIT_TAKEとSELL系を区別しない
-        # 表示用の分類のため、この集計には使えない)。いずれか1つでも渡された
-        # 場合に新フォーマットへ切り替える(buy_candidates_handler.py等、
-        # 既存呼び出し元は渡さないため従来どおり)。
-        partial_sell_sent_count: int | None = None,
-        full_sell_sent_count: int | None = None,
-        sell_sent_count: int | None = None,
-        critical_risk_sent_count: int | None = None,
+        # 再コードレビュー対応(2026-08、detected/sent一元化): 保有銘柄側の
+        # バッチサマリーを「有効なアクション検出件数」の4分類(一部売却/全部売却/
+        # 売却/緊急確認)+利益保全注意へ切り替えるための集計値。以前は
+        # `*_sent_count`という名前だったが、実際にLINE個別通知が送信された件数
+        # ではなく「DataQuality安全ゲートを通過したアクション判定の検出件数」を
+        # 渡す設計へ変更したため、意味を正確に表す`*_detected_count`へ改名した
+        # (内部APIのbreaking renameだが、全呼び出し元を同一commitで更新するため
+        # 許容する)。TradeCooldown/CrossPipelinePriority/dedup/kill switchで
+        # 個別LINE通知が送信されなくても、この値からは減らさない
+        # (holdings_watchlist_handler.py側の算出方法参照)。WATCH(利益保全注意
+        # 以外)・MANUAL_REVIEWはもはやLINE送信されない(NON_ACTIONABLE、Auditの
+        # み)ため、サマリーからも除外する。critical_risk_detected_countを
+        # 「売却」に含めない(URGENT_REVIEW/URGENT_HOLDING_REVIEWは必ずしも
+        # 売却判定ではないため)。分類はdomain/entities/enums.pyの
+        # resolve_holding_summary_action()を唯一の正本として使う
+        # (holdings_watchlist_handler.py側)。いずれか1つでも渡された場合に
+        # 新フォーマットへ切り替える(buy_candidates_handler.py等、既存呼び出し
+        # 元は渡さないため従来どおり)。
+        partial_sell_detected_count: int | None = None,
+        full_sell_detected_count: int | None = None,
+        sell_detected_count: int | None = None,
+        critical_risk_detected_count: int | None = None,
         # 通知意図3段階化(2026-08)。Profit Protectionのcandidate/strongシグナルに
         # 起因するATTENTIONの「検出件数」(attention_detected_count、個別送信が
         # dedupで抑止された銘柄も含む)。attention_sent_count(実際に個別LINE
@@ -2541,6 +2562,11 @@ class LineNotificationService:
         # 2日目以降、個別送信が無いことで「解消した」ように誤読されるのを防ぐ、
         # holdings_watchlist_handler.py側で算出)。
         attention_detected_count: int | None = None,
+        # 再コードレビュー対応(2026-08、指摘5): 表示専用の見出し文言。Noneの場合は
+        # process_nameをそのまま使う(既存呼び出し元は無変更)。dedupキー
+        # (pseudo_stock_code)・content_hashは引き続きprocess_nameのみで計算し、
+        # 既存NotificationLogとの互換性を維持する(表示名だけを分離する)。
+        display_title: str | None = None,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
         全体件数・区分別内訳のサマリー通知(要求仕様§13)。個別のデータ取得エラー・
@@ -2603,8 +2629,8 @@ class LineNotificationService:
         content_hash = hashlib.sha256(
             f"{process_name}|{now.date().isoformat()}|{total}|"
             f"{sorted(counts.items())}|near_buy={near_buy_sent_count}|"
-            f"partial_sell={partial_sell_sent_count}|full_sell={full_sell_sent_count}|"
-            f"sell={sell_sent_count}|critical_risk={critical_risk_sent_count}|"
+            f"partial_sell={partial_sell_detected_count}|full_sell={full_sell_detected_count}|"
+            f"sell={sell_detected_count}|critical_risk={critical_risk_detected_count}|"
             f"attention={attention_detected_count}".encode()
         ).hexdigest()[:16]
 
@@ -2615,10 +2641,10 @@ class LineNotificationService:
         # 従来フォーマットのまま)。WATCH(利益保全注意以外)/MANUAL_REVIEWは
         # もはやLINE送信されないため、サマリーにも表示しない(要求仕様§13)。
         is_holdings_call = (
-            partial_sell_sent_count is not None
-            or full_sell_sent_count is not None
-            or sell_sent_count is not None
-            or critical_risk_sent_count is not None
+            partial_sell_detected_count is not None
+            or full_sell_detected_count is not None
+            or sell_detected_count is not None
+            or critical_risk_detected_count is not None
             or attention_detected_count is not None
         )
 
@@ -2657,10 +2683,10 @@ class LineNotificationService:
                 return False
 
         if is_holdings_call:
-            partial_n = partial_sell_sent_count or 0
-            full_n = full_sell_sent_count or 0
-            sell_n = sell_sent_count or 0
-            critical_n = critical_risk_sent_count or 0
+            partial_n = partial_sell_detected_count or 0
+            full_n = full_sell_detected_count or 0
+            sell_n = sell_detected_count or 0
+            critical_n = critical_risk_detected_count or 0
             attention_n = attention_detected_count or 0
             # コードレビュー対応(2026-08、通知意図3段階化・要求仕様Part 7・13・14):
             # 全区分0件でも常に送信する(以前は全4分類0件の日はまとめ通知自体を
@@ -2669,7 +2695,7 @@ class LineNotificationService:
             # ブロック)と同じ見出し・改行・「処理結果:」箇条書き・0件時ブロックの
             # 構成へ揃える。
             lines = [
-                f"【{process_name}完了】",
+                f"【{display_title or process_name}完了】",
                 "",
                 "処理結果:",
                 f"・一部売却：{partial_n}件",

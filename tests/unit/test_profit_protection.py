@@ -712,3 +712,59 @@ def test_evaluation_bars_not_empty_but_missing_first_business_day() -> None:
     )
     assert m.insufficient_data_reason is not None
     assert "基準日直後の営業日から価格データが欠落" in m.insufficient_data_reason
+
+
+def test_peak_date_picks_latest_day_when_high_is_tied() -> None:
+    """再コードレビュー対応(2026-08、指摘7・5): 同値の最高値が複数日存在する場合、
+    最新日をpeak_dateとして採用する(ATTENTION event identityのevent再形成検知に
+    自然なため。決定規則は固定であり、この回帰テストで固定する)。"""
+    tied_high = Decimal("1454.5")
+    earlier_peak_date = dt.date(2026, 6, 1)
+    later_peak_date = dt.date(2026, 6, 20)
+    bars = [
+        PriceBar(
+            date=_ENTRY,
+            open=Decimal("900"),
+            high=Decimal("910"),
+            low=Decimal("890"),
+            close=Decimal("900"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=_CALENDAR.next_business_day(_ENTRY),
+            open=Decimal("900"),
+            high=Decimal("905"),
+            low=Decimal("895"),
+            close=Decimal("900"),
+            volume=1000,
+        ),
+        PriceBar(
+            date=earlier_peak_date,
+            open=tied_high,
+            high=tied_high,
+            low=tied_high,
+            close=tied_high,
+            volume=1000,
+        ),
+        PriceBar(
+            date=later_peak_date,
+            open=tied_high,
+            high=tied_high,
+            low=tied_high,
+            close=tied_high,
+            volume=1000,
+        ),
+    ]
+
+    m = _metrics(current_price=Decimal("1227"), bars=bars)
+
+    assert m.peak_price_since_entry == tied_high
+    assert m.peak_date == later_peak_date
+
+
+def test_peak_date_matches_single_peak_bar_date() -> None:
+    """高値が1件しかない通常ケースでは、その日がそのままpeak_dateになる
+    (最新日採用ルールが同値でない通常時の挙動を変えないことの確認)。"""
+    m = _metrics(current_price=Decimal("1227"), peak_high=Decimal("1454.5"))
+
+    assert m.peak_date == dt.date(2026, 6, 1)

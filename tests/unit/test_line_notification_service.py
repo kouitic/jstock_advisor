@@ -75,12 +75,31 @@ class _FakeLineClient:
 def _make_recommendation(
     *, recommendation_id: str, recommendation_type: RecommendationType, standard_price: str
 ) -> Recommendation:
+    """再コードレビュー対応(2026-08、NotificationIntent fail-closed化):
+    recommendation_type=BUYの場合はbuy_actionも設定し、実本番のBUY候補
+    パイプライン(統合BUY候補パイプラインが必ずbuy_actionを設定する)と同じ
+    形状にする。fail-closed化前は、buy_action未設定のRecommendationType.BUYが
+    resolve_notification_category()でOTHER(たまたまACTIONABLEのdenylist漏れで
+    送信されていた)に分類されており、本番に存在しない形状へテストが依存していた。
+
+    buy_action=BUYを設定すると、通知直前の整合性検証(_check_buy_consistency、
+    recommendation_consistency_validator.py)がentry_buy_price(打診買い価格)の
+    設定・current_price<=entry_buy_priceを要求するため、あわせて設定する
+    (buy_pricesのtentative/standard/aggressiveはこの検証が実際に参照する
+    フィールドではない、entry_buy_price/standard_buy_price/strong_buy_priceが
+    正本)。
+    """
+    is_buy = recommendation_type == RecommendationType.BUY
     return Recommendation(
         recommendation_id=recommendation_id,
         stock_code="2914",
         stock_name="日本たばこ産業",
         recommended_at=_NOW,
         recommendation_type=recommendation_type,
+        buy_action=BuyAction.BUY if is_buy else None,
+        entry_buy_price=Decimal("4200") if is_buy else None,
+        standard_buy_price=Decimal(standard_price) if is_buy else None,
+        strong_buy_price=Decimal("2900") if is_buy else None,
         buy_prices=BuyPriceLevels(
             tentative=PriceWithRationale(price=Decimal("3600"), rationale="x"),
             standard=PriceWithRationale(price=Decimal(standard_price), rationale="x"),
@@ -179,6 +198,11 @@ def validation_service_and_repos(
 
 
 def test_first_notification_is_sent(service_and_repos) -> None:
+    """再コードレビュー対応(2026-08、NotificationIntent fail-closed化): buy_action
+    設定後はNotificationCategory.BUY(SHORT_TEXT_CATEGORIES)の短文フォーマットで
+    送信されるため、旧来の長文フォーマット専用だったdisclaimer文言のassertは
+    削除した(短文フォーマットにdisclaimerは含まれない、既存仕様どおり)。
+    """
     service, repo, client = service_and_repos
     rec = _make_recommendation(
         recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
@@ -189,7 +213,6 @@ def test_first_notification_is_sent(service_and_repos) -> None:
     assert sent is True
     assert len(client.sent) == 1
     assert "2914" in client.sent[0]
-    assert "最終的な投資判断は利用者が行って" in client.sent[0]
 
 
 def test_evaluate_notification_status_does_not_send(service_and_repos) -> None:
@@ -270,17 +293,42 @@ def test_duplicate_same_day_is_suppressed(service_and_repos) -> None:
 
 
 def test_resend_when_judgment_type_changes(service_and_repos) -> None:
+    """再コードレビュー対応(2026-08、NotificationIntent fail-closed化): 以前は
+    RecommendationType.WATCH_BUY(buy_action未設定、fail-closed化前はOTHER経由で
+    たまたまACTIONABLEだった廃止済みレガシー型)への「型変化」を使っていたが、
+    fail-closed化後はWATCH_BUYが常にINTERNAL_ONLYとなり、この組み合わせでは
+    そもそも「型が変わったから再送する」ロジック自体を検証できなくなった
+    (WATCH_BUY→WATCHLIST_BUY_SIGNALはBUY→DAILY_BUY_CANDIDATESと異なる
+    notification_typeのため、旧テストは実際には_notification_status_for_send()の
+    型変化比較を一度も通っていなかった)。同一notification_type(SELL_SIGNAL)を
+    共有し、かつ両方ともACTIONABLEなSELL→URGENT_REVIEWの組み合わせに差し替える。
+    URGENT_REVIEW(重大リスク)はcheck_cross_pipeline_priority_eligibility()の
+    is_critical_risk早期リターンにより優先度比較自体をスキップするため、同日内の
+    再評価でもCross Pipeline Priorityに阻まれない。
+    """
     service, repo, client = service_and_repos
-    rec1 = _make_recommendation(
-        recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
+    rec1 = Recommendation(
+        recommendation_id="rec-1",
+        stock_code="2914",
+        stock_name="日本たばこ産業",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL,
+        price_at_recommendation=Decimal("4200"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
     )
     repo.save(rec1)
     service.notify_recommendation(rec1, _NOW)
 
-    rec2 = _make_recommendation(
+    rec2 = Recommendation(
         recommendation_id="rec-2",
-        recommendation_type=RecommendationType.WATCH_BUY,
-        standard_price="3359",
+        stock_code="2914",
+        stock_name="日本たばこ産業",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.URGENT_REVIEW,
+        price_at_recommendation=Decimal("4200"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
     )
     repo.save(rec2)
     sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
@@ -290,6 +338,18 @@ def test_resend_when_judgment_type_changes(service_and_repos) -> None:
 
 
 def test_resend_when_price_changes_beyond_threshold(service_and_repos) -> None:
+    """再コードレビュー対応(2026-08、NotificationIntent fail-closed化): fail-closed
+    化前はbuy_action未設定のためBUYがOTHER category(cross-pipeline priority対象外、
+    priority<=0で早期リターン)扱いだったが、fail-closed化後は正しくBUY category
+    (priority=3)として扱われるようになった。そのため同日内の2回目評価はCross
+    Pipeline Priority(DUPLICATE_STOCK_NOTIFICATION、同一優先度は同格の重複とみなす)
+    に先に捕まってしまい、本テストが検証したい価格変化閾値ロジック
+    (_notification_status_for_send())まで到達できなくなった。Cross Pipeline
+    Priorityの重複排除は営業日単位のキー(build_daily_notification_priority_id)の
+    ため、2回目の評価日を翌日にずらして価格変化閾値ロジックを独立して検証する
+    (resend_after_days=5より短いため「日数経過による再送」ではなく「価格変化に
+    よる再送」を検証できている)。
+    """
     service, repo, client = service_and_repos
     rec1 = _make_recommendation(
         recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3000"
@@ -302,7 +362,7 @@ def test_resend_when_price_changes_beyond_threshold(service_and_repos) -> None:
         recommendation_id="rec-2", recommendation_type=RecommendationType.BUY, standard_price="3200"
     )
     repo.save(rec2)
-    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(days=1))
 
     assert sent is True
     assert len(client.sent) == 2
@@ -2226,7 +2286,15 @@ def test_validation_mode_bypasses_resend_suppression(
     validation_service_and_repos,
 ) -> None:
     """NORMALなら再送防止で抑止される条件(直近同一内容)でも、VALIDATIONでは
-    LINE送信されること(_notification_status_for_sendのバイパス)。"""
+    LINE送信されること(_notification_status_for_sendのバイパス)。
+
+    再コードレビュー対応(2026-08、NotificationIntent fail-closed化): buy_action
+    設定後はBUY categoryがCross Pipeline Priority対象(priority=3)になるため、
+    同日内の2回目評価はそちらの重複排除に先に捕まってしまう(Cross Pipeline
+    PriorityはVALIDATIONを特別扱いしない)。2回目の評価日を翌日にずらし、
+    本テストが検証したい_notification_status_for_sendのバイパスを独立して
+    検証する。
+    """
     service, repo, client = validation_service_and_repos
     rec1 = _make_recommendation(
         recommendation_id="rec-1", recommendation_type=RecommendationType.BUY, standard_price="3359"
@@ -2238,7 +2306,7 @@ def test_validation_mode_bypasses_resend_suppression(
         recommendation_id="rec-2", recommendation_type=RecommendationType.BUY, standard_price="3359"
     )
     repo.save(rec2)
-    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(hours=1))
+    sent = service.notify_recommendation(rec2, _NOW + dt.timedelta(days=1))
 
     assert sent is True
     assert len(client.sent) == 2
@@ -2767,10 +2835,10 @@ def test_notify_batch_summary_new_format_excludes_critical_risk_from_sell_count(
         total=10,
         category_counts=_counts(sent=5, hold=5),
         now=_NOW,
-        partial_sell_sent_count=2,
-        full_sell_sent_count=1,
-        sell_sent_count=3,
-        critical_risk_sent_count=1,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=1,
+        sell_detected_count=3,
+        critical_risk_detected_count=1,
     )
 
     assert sent is True
@@ -2791,10 +2859,10 @@ def test_notify_batch_summary_new_format_omits_critical_risk_segment_when_zero(
         total=10,
         category_counts=_counts(sent=5, hold=5),
         now=_NOW,
-        partial_sell_sent_count=2,
-        full_sell_sent_count=1,
-        sell_sent_count=3,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=1,
+        sell_detected_count=3,
+        critical_risk_detected_count=0,
     )
 
     message = client.sent[0]
@@ -2824,20 +2892,20 @@ def test_notify_batch_summary_same_jst_business_date_suppresses_even_when_action
         total=10,
         category_counts=_counts(sent=2, hold=8),
         now=_NOW,
-        partial_sell_sent_count=2,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
     second = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=10,
         category_counts=_counts(sent=2, hold=8),
         now=_NOW + dt.timedelta(seconds=15),
-        partial_sell_sent_count=0,
-        full_sell_sent_count=0,
-        sell_sent_count=2,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=0,
+        full_sell_detected_count=0,
+        sell_detected_count=2,
+        critical_risk_detected_count=0,
     )
 
     assert first is True
@@ -2856,20 +2924,20 @@ def test_notify_batch_summary_next_jst_business_date_allows_resend(
         total=10,
         category_counts=_counts(sent=2, hold=8),
         now=_NOW,
-        partial_sell_sent_count=2,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
     second = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=10,
         category_counts=_counts(sent=2, hold=8),
         now=_NOW + dt.timedelta(days=1),
-        partial_sell_sent_count=2,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
 
     assert first is True
@@ -2894,20 +2962,20 @@ def test_notify_batch_summary_dedup_boundary_utc_same_day_jst_next_day(
         total=10,
         category_counts=_counts(sent=2, hold=8),
         now=first_now,
-        partial_sell_sent_count=2,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
     second = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=10,
         category_counts=_counts(sent=2, hold=8),
         now=second_now,
-        partial_sell_sent_count=2,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
 
     assert first is True
@@ -2931,20 +2999,20 @@ def test_notify_batch_summary_dedup_boundary_jst_same_day_utc_different_day(
         total=10,
         category_counts=_counts(sent=2, hold=8),
         now=first_now,
-        partial_sell_sent_count=2,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
     second = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=10,
         category_counts=_counts(sent=2, hold=8),
         now=second_now,
-        partial_sell_sent_count=2,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=2,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
 
     assert first is True
@@ -2965,10 +3033,10 @@ def test_notify_batch_summary_holdings_always_sends_even_when_all_action_counts_
         total=10,
         category_counts=_counts(hold=10),
         now=_NOW,
-        partial_sell_sent_count=0,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=0,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
         attention_detected_count=0,
     )
 
@@ -2988,10 +3056,10 @@ def test_notify_batch_summary_sends_when_only_partial_sell_is_nonzero(
         total=10,
         category_counts=_counts(sent=1, hold=9),
         now=_NOW,
-        partial_sell_sent_count=1,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=1,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
 
     assert sent is True
@@ -3009,10 +3077,10 @@ def test_notify_batch_summary_sends_when_only_critical_risk_is_nonzero(
         total=10,
         category_counts=_counts(sent=1, hold=9),
         now=_NOW,
-        partial_sell_sent_count=0,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=1,
+        partial_sell_detected_count=0,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=1,
     )
 
     assert sent is True
@@ -3035,10 +3103,10 @@ def test_notify_batch_summary_holdings_send_is_unaffected_by_send_empty_summary_
             category_counts=_counts(hold=10),
             now=_NOW + dt.timedelta(days=i),
             send_empty_summary=send_empty_summary,
-            partial_sell_sent_count=0,
-            full_sell_sent_count=0,
-            sell_sent_count=0,
-            critical_risk_sent_count=0,
+            partial_sell_detected_count=0,
+            full_sell_detected_count=0,
+            sell_detected_count=0,
+            critical_risk_detected_count=0,
         )
         assert sent is True, send_empty_summary
     assert len(client.sent) == 2
@@ -3057,10 +3125,10 @@ def test_notify_batch_summary_attention_detected_count_is_shown_and_reused_for_d
         total=10,
         category_counts=_counts(sent=0, hold=10),
         now=_NOW,
-        partial_sell_sent_count=0,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=0,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
         attention_detected_count=2,
     )
     second = service.notify_batch_summary(
@@ -3068,10 +3136,10 @@ def test_notify_batch_summary_attention_detected_count_is_shown_and_reused_for_d
         total=10,
         category_counts=_counts(sent=0, hold=10),
         now=_NOW + dt.timedelta(minutes=5),
-        partial_sell_sent_count=0,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=0,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
         # 個別送信がすべてdedupで抑止されても、検出件数(2)は変わらず表示される
         # 想定を示すため、意図的に同じ値を渡す。
         attention_detected_count=2,
@@ -3094,10 +3162,10 @@ def test_notify_batch_summary_suppression_does_not_write_notification_log(
         total=10,
         category_counts=_counts(hold=10),
         now=_NOW,
-        partial_sell_sent_count=0,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=0,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
     first_log = service._log_repo.latest_by_stock_and_type(
         "__batch__:保有銘柄・ウォッチリスト分析", NotificationType.BATCH_SUMMARY
@@ -3109,10 +3177,10 @@ def test_notify_batch_summary_suppression_does_not_write_notification_log(
         total=10,
         category_counts=_counts(sent=5, hold=5),
         now=_NOW + dt.timedelta(minutes=10),
-        partial_sell_sent_count=3,
-        full_sell_sent_count=0,
-        sell_sent_count=0,
-        critical_risk_sent_count=0,
+        partial_sell_detected_count=3,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
     )
     second_log = service._log_repo.latest_by_stock_and_type(
         "__batch__:保有銘柄・ウォッチリスト分析", NotificationType.BATCH_SUMMARY
@@ -3496,6 +3564,64 @@ def test_attention_new_peak_allows_resend(service_and_repos) -> None:
     assert len(client.sent) == 2
 
 
+def test_attention_peak_date_only_change_allows_resend(service_and_repos) -> None:
+    """再コードレビュー対応(2026-08、指摘7・追加確認): basis_date・peak_priceが
+    同一のまま、peak_dateだけが変化した場合(同値の高値が別日に再形成された)も
+    新eventとして再送する。event identityが(basis_date, peak_date, peak_price)の
+    3要素すべてを見ていることの直接確認(peak_price/peak_dateいずれか一方だけの
+    変化テストとは別に、peak_date単独の変化を明示的に検証する)。"""
+    service, repo, client = service_and_repos
+    rec_day1 = _make_attention_watch_recommendation(
+        recommendation_id="att-peakdate-1",
+        basis_date=dt.date(2026, 6, 1),
+        peak_price=Decimal("1500"),
+        peak_date=dt.date(2026, 6, 10),
+    )
+    repo.save(rec_day1)
+    first = service.notify_recommendation_with_status(rec_day1, _NOW)
+    assert first.sent is True
+
+    rec_day2 = _make_attention_watch_recommendation(
+        recommendation_id="att-peakdate-2",
+        basis_date=dt.date(2026, 6, 1),
+        peak_price=Decimal("1500"),
+        peak_date=dt.date(2026, 6, 20),
+    )
+    repo.save(rec_day2)
+    second = service.notify_recommendation_with_status(rec_day2, _NOW + dt.timedelta(days=1))
+
+    assert second.sent is True
+    assert len(client.sent) == 2
+
+
+def test_attention_all_three_identical_is_deduplicated(service_and_repos) -> None:
+    """basis_date・peak_date・peak_priceの3要素すべてが完全一致する場合は
+    同一eventとして再送抑止する(new event判定3ケースと対になる回帰確認)。"""
+    service, repo, client = service_and_repos
+    rec_day1 = _make_attention_watch_recommendation(
+        recommendation_id="att-allsame-1",
+        basis_date=dt.date(2026, 6, 1),
+        peak_price=Decimal("1500"),
+        peak_date=dt.date(2026, 6, 10),
+    )
+    repo.save(rec_day1)
+    first = service.notify_recommendation_with_status(rec_day1, _NOW)
+    assert first.sent is True
+
+    rec_day2 = _make_attention_watch_recommendation(
+        recommendation_id="att-allsame-2",
+        basis_date=dt.date(2026, 6, 1),
+        peak_price=Decimal("1500"),
+        peak_date=dt.date(2026, 6, 10),
+    )
+    repo.save(rec_day2)
+    second = service.notify_recommendation_with_status(rec_day2, _NOW + dt.timedelta(days=1))
+
+    assert second.sent is False
+    assert second.status == NotificationStatus.DUPLICATE_SUPPRESSED
+    assert len(client.sent) == 1
+
+
 def test_attention_new_basis_date_allows_resend(service_and_repos) -> None:
     """買い増し・実売却でbasis_dateが進んだ場合は新eventとして再送する
     (peak_price/peak_dateが偶然同じ値であっても)。"""
@@ -3585,3 +3711,146 @@ def test_partial_profit_take_is_actionable_not_attention(service_and_repos) -> N
         rec.stock_code, NotificationType.PROFIT_TAKING_SIGNAL
     )
     assert log is not None
+
+
+# ===== 再コードレビュー対応(2026-08): ATTENTIONのCross Pipeline Priority参加 =====
+
+
+def test_notification_priority_attention_is_two(service_and_repos) -> None:
+    """指摘10-N: ATTENTION(WATCH+Profit Protection candidate/strong)のpriorityは
+    2(CRITICAL_RISK=6 > PROMOTED_TO_BUY=5 > SELL/PARTIAL_SELL=4 > BUY=3 >
+    ATTENTION=2 > その他=0)。"""
+    rec = _make_attention_watch_recommendation(recommendation_id="prio-attention")
+    assert line_notification_service_module._notification_priority(rec) == 2
+
+
+def test_notification_priority_normal_watch_is_zero(service_and_repos) -> None:
+    """指摘10-O: Profit Protectionシグナルの無い通常WATCHはpriority=0のまま
+    (Cross Pipeline Priority対象外)。"""
+    rec = _make_attention_watch_recommendation(recommendation_id="prio-watch-normal", signal="NONE")
+    assert line_notification_service_module._notification_priority(rec) == 0
+
+
+def test_attention_sent_then_buy_is_not_blocked(service_and_repos) -> None:
+    """指摘10-P: ATTENTION送信後にBUY → BUYはpriorityが高いため送信可能。"""
+    service, repo, client = service_and_repos
+    attention_rec = _make_attention_watch_recommendation(recommendation_id="prio-p-attention")
+    repo.save(attention_rec)
+    first = service.notify_recommendation_with_status(attention_rec, _NOW)
+    assert first.sent is True
+
+    buy_rec = _make_recommendation(
+        recommendation_id="prio-p-buy", recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    ).model_copy(update={"stock_code": attention_rec.stock_code})
+    repo.save(buy_rec)
+    second = service.notify_recommendation_with_status(buy_rec, _NOW + dt.timedelta(minutes=5))
+
+    assert second.sent is True
+    assert len(client.sent) == 2
+
+
+def test_buy_sent_then_attention_is_blocked(service_and_repos) -> None:
+    """指摘10-Q: BUY送信後にATTENTION → ATTENTIONはpriorityが低いため抑止される
+    (LOW_PRIORITY)。"""
+    service, repo, client = service_and_repos
+    buy_rec = _make_recommendation(
+        recommendation_id="prio-q-buy", recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(buy_rec)
+    first = service.notify_recommendation_with_status(buy_rec, _NOW)
+    assert first.sent is True
+
+    attention_rec = _make_attention_watch_recommendation(
+        recommendation_id="prio-q-attention", stock_code=buy_rec.stock_code
+    )
+    repo.save(attention_rec)
+    second = service.notify_recommendation_with_status(
+        attention_rec, _NOW + dt.timedelta(minutes=5)
+    )
+
+    assert second.sent is False
+    assert second.block_reason == "LOW_PRIORITY"
+
+
+def test_attention_sent_then_sell_is_not_blocked(service_and_repos) -> None:
+    """指摘10-R: ATTENTION送信後にSELL/一部売却 → priorityが高いため送信可能。"""
+    service, repo, client = service_and_repos
+    attention_rec = _make_attention_watch_recommendation(recommendation_id="prio-r-attention")
+    repo.save(attention_rec)
+    first = service.notify_recommendation_with_status(attention_rec, _NOW)
+    assert first.sent is True
+
+    sell_rec = Recommendation(
+        recommendation_id="prio-r-sell",
+        stock_code=attention_rec.stock_code,
+        stock_name=attention_rec.stock_name,
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL,
+        price_at_recommendation=Decimal("1400"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+    repo.save(sell_rec)
+    second = service.notify_recommendation_with_status(sell_rec, _NOW + dt.timedelta(minutes=5))
+
+    assert second.sent is True
+    assert len(client.sent) == 2
+
+
+def test_sell_sent_then_attention_is_blocked(service_and_repos) -> None:
+    """指摘10-S: SELL/一部売却送信後にATTENTION → priorityが低いため抑止される。"""
+    service, repo, client = service_and_repos
+    sell_rec = Recommendation(
+        recommendation_id="prio-s-sell",
+        stock_code="8136",
+        stock_name="テスト利益保全",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL,
+        price_at_recommendation=Decimal("1400"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+    repo.save(sell_rec)
+    first = service.notify_recommendation_with_status(sell_rec, _NOW)
+    assert first.sent is True
+
+    attention_rec = _make_attention_watch_recommendation(
+        recommendation_id="prio-s-attention", stock_code=sell_rec.stock_code
+    )
+    repo.save(attention_rec)
+    second = service.notify_recommendation_with_status(
+        attention_rec, _NOW + dt.timedelta(minutes=5)
+    )
+
+    assert second.sent is False
+    assert second.block_reason == "LOW_PRIORITY"
+
+
+def test_attention_sent_then_critical_is_not_blocked(service_and_repos) -> None:
+    """指摘10-T: ATTENTION送信後にCRITICAL(至急確認) → 重大リスクは
+    Cross Pipeline Priorityの比較自体をスキップし常に送信可能。"""
+    service, repo, client = service_and_repos
+    attention_rec = _make_attention_watch_recommendation(recommendation_id="prio-t-attention")
+    repo.save(attention_rec)
+    first = service.notify_recommendation_with_status(attention_rec, _NOW)
+    assert first.sent is True
+
+    critical_rec = Recommendation(
+        recommendation_id="prio-t-critical",
+        stock_code=attention_rec.stock_code,
+        stock_name=attention_rec.stock_name,
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.URGENT_HOLDING_REVIEW,
+        price_at_recommendation=Decimal("1400"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+    repo.save(critical_rec)
+    second = service.notify_recommendation_with_status(
+        critical_rec, _NOW + dt.timedelta(minutes=5)
+    )
+
+    assert second.sent is True
+    assert len(client.sent) == 2

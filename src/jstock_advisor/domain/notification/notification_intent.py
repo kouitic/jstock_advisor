@@ -31,19 +31,25 @@ from jstock_advisor.domain.entities.enums import NotificationCategory, Notificat
 # この経路以外から生じない)。
 _ATTENTION_PROFIT_PROTECTION_SIGNALS = frozenset({"CANDIDATE", "STRONG"})
 
-# 2026-08「LINE通知アクション限定化」で導入された非アクション系カテゴリの
-# denylist(line_notification_service.pyの旧_NON_ACTIONABLE_CATEGORIESと同じ
-# 4カテゴリ)。通知意図3段階化ではこのdenylist方式(デフォルト許可・明示的拒否)を
-# そのまま踏襲する。allowlist方式(デフォルト拒否)に変更すると、OTHER(BUY/SELL
-# 系のbuy_action/recommendation_type設定漏れ等、明示的にゲートされてこなかった
-# 残余区分)を新たに誤ってブロックしてしまう(コードレビュー対応2026-08、
-# 実装中の回帰テストで検出)。
-_INTERNAL_ONLY_CATEGORIES = frozenset(
+# 再コードレビュー対応(2026-08): NotificationIntentを「送信意図の唯一の正本」と
+# するため、fail-closed(allowlist)方式へ変更した。明示的にACTIONABLEと定義される
+# カテゴリのみACTIONABLEとし、それ以外(OTHER/NOT_NOTIFIABLE/MANUAL_REVIEW/
+# NEAR_BUY/WATCH_BEFORE_EARNINGS等)はすべてINTERNAL_ONLYとする。
+#
+# 以前はdenylist方式(明示拒否以外はすべてACTIONABLE)だったが、これは「未知・
+# 未分類はACTIONABLE」というfail-openであり、送信意図の唯一の正本としては安全側
+# ではないと判断した。実コード調査の結果、OTHERカテゴリ経由で実際にLINE送信される
+# 本番経路は存在しないことを確認済み(HOLD/WATCH_BUYはRecommendation生成自体が
+# 送信経路に到達せず、MANUAL_REVIEW_REQUIREDはこのintent判定より前の安全弁
+# 経路(notify_manual_review_required)で処理される。buy_action未設定のBUYは
+# テストフィクスチャのみに存在し、実本番のBUY候補パイプラインは必ずbuy_actionを
+# 設定する)。
+_ACTIONABLE_CATEGORIES = frozenset(
     {
-        NotificationCategory.WATCH,
-        NotificationCategory.MANUAL_REVIEW,
-        NotificationCategory.NEAR_BUY,
-        NotificationCategory.WATCH_BEFORE_EARNINGS,
+        NotificationCategory.CRITICAL_RISK,
+        NotificationCategory.BUY,
+        NotificationCategory.SELL,
+        NotificationCategory.PARTIAL_SELL,
     }
 )
 
@@ -62,9 +68,9 @@ def resolve_notification_intent(
         and profit_protection_signal in _ATTENTION_PROFIT_PROTECTION_SIGNALS
     ):
         return NotificationIntent.ATTENTION
-    if category in _INTERNAL_ONLY_CATEGORIES:
-        return NotificationIntent.INTERNAL_ONLY
-    return NotificationIntent.ACTIONABLE
+    if category in _ACTIONABLE_CATEGORIES:
+        return NotificationIntent.ACTIONABLE
+    return NotificationIntent.INTERNAL_ONLY
 
 
 def resolve_attention_origin(
