@@ -324,6 +324,7 @@ def moto_wrong_key_schema(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             ("holdings.json", "stock_code"),
             ("purchase_lots.json", "lot_id"),
             ("holdings_snapshots.json", "stock_code"),
+            ("validation_holdings_snapshots.json", "stock_code"),
             ("recommendations.json", "recommendation_id"),
             ("notification_log.json", "notification_id"),
             ("decision_snapshots.json", "decision_id"),

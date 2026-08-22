@@ -13,12 +13,14 @@ from jstock_advisor.domain.entities.owner import (
     build_holding_id,
     normalize_and_validate_owner,
     normalize_owner,
+    split_holding_id,
 )
 from jstock_advisor.migrations.conversions import (
     DEFAULT_MIGRATION_OWNER,
     convert_holding,
     convert_holdings_snapshot_entry,
     convert_purchase_lot,
+    migrate_holding_id_field_value,
 )
 from jstock_advisor.migrations.legacy_shapes import (
     LegacyHoldingsSnapshotEntryV1,
@@ -149,6 +151,45 @@ def test_convert_holdings_snapshot_entry_backfills_owner_and_holding_id() -> Non
     v2 = convert_holdings_snapshot_entry(legacy)
     assert v2.owner == "本人"
     assert v2.holding_id == "本人#8306"
+
+
+# --- holding_id "field-only"移行(HoldingDecisionResult/InvestmentThesis/
+# InvestmentThesisBaseline共通)の冪等性・fail-closed動作 -----------------------
+
+
+def test_split_holding_id_returns_none_for_bare_stock_code() -> None:
+    assert split_holding_id("8306") is None
+
+
+def test_split_holding_id_splits_owner_and_stock_code() -> None:
+    assert split_holding_id("本人#8306") == ("本人", "8306")
+
+
+def test_split_holding_id_raises_on_multiple_delimiters() -> None:
+    with pytest.raises(InvalidOwnerError):
+        split_holding_id("本人#本人#8306")
+
+
+def test_migrate_holding_id_field_value_converts_legacy_bare_stock_code() -> None:
+    assert migrate_holding_id_field_value("8306", "本人") == "本人#8306"
+
+
+def test_migrate_holding_id_field_value_is_idempotent_for_already_migrated_value() -> None:
+    """2回目以降の実行で"本人#本人#8306"のような二重prefixにならないこと。"""
+    once = migrate_holding_id_field_value("8306", "本人")
+    twice = migrate_holding_id_field_value(once, "本人")
+    assert once == "本人#8306"
+    assert twice == "本人#8306"
+
+
+def test_migrate_holding_id_field_value_fails_closed_on_different_owner_prefix() -> None:
+    with pytest.raises(InvalidOwnerError):
+        migrate_holding_id_field_value("子供#8306", "本人")
+
+
+def test_migrate_holding_id_field_value_fails_closed_on_malformed_multi_prefix() -> None:
+    with pytest.raises(InvalidOwnerError):
+        migrate_holding_id_field_value("本人#本人#8306", "本人")
 
 
 def test_convert_holding_with_custom_owner() -> None:

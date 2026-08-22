@@ -61,3 +61,25 @@ def build_holding_id(owner: str, stock_code: str) -> str:
     ownerを渡すこと(このモジュールはstock_codeの形式検証は行わない)。
     """
     return f"{owner}{_HOLDING_ID_DELIMITER}{stock_code}"
+
+
+def split_holding_id(holding_id: str) -> tuple[str, str] | None:
+    """holding_idを(owner, stock_code)へ分解する。
+
+    区切り文字("#")が1つも含まれない場合は、owner対応前の旧形式
+    (stock_codeそのもの)とみなしNoneを返す。区切り文字がちょうど1つの場合は
+    その形式で分解する。区切り文字が2つ以上含まれる場合は、多重prefix等の
+    不正な形式(例: 移行の再実行時に誤って二重にownerが付与された)として
+    InvalidOwnerErrorを送出する(fail-closed。データ破損を検知して migration
+    を中止させるために使う)。
+    """
+    count = holding_id.count(_HOLDING_ID_DELIMITER)
+    if count == 0:
+        return None
+    if count > 1:
+        raise InvalidOwnerError(
+            f"holding_idの形式が不正です(区切り文字'{_HOLDING_ID_DELIMITER}'が"
+            f"複数含まれています): {holding_id!r}"
+        )
+    owner_part, stock_code = holding_id.split(_HOLDING_ID_DELIMITER, 1)
+    return owner_part, stock_code
