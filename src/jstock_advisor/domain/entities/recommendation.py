@@ -455,6 +455,17 @@ class Recommendation(ImmutableSnapshot):
     recommended_add_on_quantity: int | None = None
     recommended_add_on_amount: Decimal | None = None
 
+    # 保有銘柄オーナー機能(2026-08、移行専用)。SellSignalService/
+    # ProfitTakingService/HoldingDecisionServiceが生成する保有銘柄由来の
+    # Recommendation(shares_at_recommendationが設定されるもの)はholding-scope
+    # であり、移行時にowner/holding_idをバックフィルする。BuySignalServiceが
+    # 生成するBUY候補由来のRecommendation(shares_at_recommendationがNoneの
+    # もの)はstock-scopeのまま、owner/holding_idともにNoneで維持する
+    # (Cross Pipeline Priority等のscope設計と整合させるため、この2種を
+    # 混同してはならない)。
+    owner: str | None = None
+    holding_id: str | None = None
+
     @property
     def recommended(self) -> bool:
         """買い候補として現在購入可能かどうかの派生値(直接設定不可)。

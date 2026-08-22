@@ -478,9 +478,14 @@ Resources:
           KeyType: HASH
 
   # 保有銘柄オーナー機能移行(データ移行手順M1、2026-08追加): 既存テーブルの
-  # holding_id値がstock_codeの1:1エイリアスから所有者付き合成キーへ変わる
-  # ため、新holding_id値を採番するための新テーブル(既存の連番はowner概念が
-  # 無かった時点のものであり引き継がない。既存テーブルはそのまま残す)。
+  # holding_id値がstock_codeの1:1エイリアスから所有者付き合成キー
+  # (例: "8306"→"本人#8306")へ変わるための新テーブル。既存のcurrent_version
+  # はリセットしない — 旧holding_id(stock_code)に紐づくcurrent_versionを、
+  # M2の移行スクリプトが新holding_id(本人#stock_code)へそのままコピーし、
+  # updated_at等の既存情報もあわせて維持する(旧: holding_id="8306"・
+  # current_version=4 → 新: holding_id="本人#8306"・current_version=4 →
+  # 移行後のallocate_next_baseline_version()は5から採番される)。既存
+  # テーブルはそのまま残す。
   InvestmentThesisBaselineSequencesTableV2:
     Type: AWS::DynamoDB::Table
     Properties:

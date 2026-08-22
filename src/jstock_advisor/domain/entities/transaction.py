@@ -26,6 +26,13 @@ class Transaction(Entity):
     memo: str | None = None
     created_at: dt.datetime
 
+    # 保有銘柄オーナー機能(2026-08、移行専用)。Transactionは常に特定の保有に
+    # 対する取引のためholding-scopeだが、owner概念導入以前の既存データは
+    # Noneのまま(過去データは移行時にバックフィルする。新規はowner対応
+    # アプリケーション切替(未実施)後に設定される)。
+    owner: str | None = None
+    holding_id: str | None = None
+
 
 class SkippedRecommendation(Entity):
     """推奨に従わなかった場合の記録(要求仕様27節)。"""

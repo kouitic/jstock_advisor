@@ -1138,3 +1138,34 @@ jstock trading-pause set --no-buy-sell --changed-by <あなたの名前> \
 解除を忘れたままにすると、移行作業が完了してもLINEから買付・売却が
 できない状態が続くため、`status`コマンドで意図した状態になっているか
 必ず確認してください。
+
+### 12.3 データ移行本体(preflight・run、2026-08追加)
+
+owner/holding_idへの実際のデータ移行は`jstock migrate holdings-owner`
+コマンド群で行います。**preflight(検証)とrun(移行本体)は必ず別々に
+実行してください**(1コマンドで連続実行する設計にはしていません)。
+
+```bash
+# 1. まず検証のみを行う(書き込みは一切発生しない)
+jstock migrate holdings-owner preflight --target aws
+```
+
+`PASS`と表示されれば移行を進められます。`FAIL`の場合は表示された各
+チェックの詳細(該当するrecommendation_id・notification_id等)を確認し、
+原因を解消してから再実行してください。
+
+```bash
+# 2. dry-run(既定、書き込みなし)で移行結果の見込みを確認する
+jstock migrate holdings-owner run --target aws
+
+# 3. 内容に問題が無ければ、--no-dry-runを明示して実際に書き込む
+jstock migrate holdings-owner run --target aws --no-dry-run
+```
+
+**移行本体(`run --no-dry-run`)は、`TradingPauseConfig.pause_buy_sell`が
+`true`(12.2節で設定済み)であることをコード自身が確認してから実行します。**
+`false`のまま・未初期化・取得エラーのいずれの場合も、移行は開始されず
+安全側で中止されます(CLIの操作手順だけに頼らない設計です)。
+
+移行は何度実行しても結果が変わらない(重複しない)設計のため、途中で
+失敗した場合は原因を確認のうえ、そのまま再実行して構いません。

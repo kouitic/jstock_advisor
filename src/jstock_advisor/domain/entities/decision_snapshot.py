@@ -100,6 +100,14 @@ class DecisionSnapshot(ImmutableSnapshot):
     recommendation_id: str | None = None
     existing_action: RecommendationType | None = None
 
+    # 保有銘柄オーナー機能(2026-08、移行専用)。recommendation_idが指す先の
+    # Recommendationのscope(owner/holding_id)をそのまま引き継ぐ
+    # (recommendation_idが無い場合はNoneのまま)。DecisionSnapshotRepositoryは
+    # insert_if_absentのみを使い通常運用では上書きしない設計だが、移行時の
+    # backfillはCollectionStore.upsert()を直接使う一度限りの例外的操作である。
+    owner: str | None = None
+    holding_id: str | None = None
+
     # --- market_price / fair_value。Recommendationに保存された「最終判断値」を
     # そのままコピーする(StockSnapshotから補完しない、値が無ければNoneのまま)。---
     market_price: Decimal
