@@ -1234,3 +1234,83 @@ def test_record_result_if_d_notification_disabled_attention_data_quality_blocked
 
     assert captured["attention_detected_stock_code"] is None
     assert captured["attention_sent_stock_code"] is None
+
+
+# ===== M3.1: 複数owner・BatchProgressの命名整理 =====
+
+
+def test_finish_batch_item_sends_single_summary_for_multiple_owners_of_same_stock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本人#8306・子供#8306という2件のholding_idがBatchProgress上で別集計されて
+    いても(test_record_result_counts_two_owners_of_same_stock_as_separate_entries
+    参照)、バッチ完了時のユーザー向けサマリー通知は従来どおり1通だけ送信される
+    (必須テストH)。"""
+    from jstock_advisor.infrastructure.aws.batch_tracker import BatchProgress
+
+    call_count = {"n": 0}
+    honnin_holding_id = build_holding_id(DEFAULT_OWNER, "8306")
+    kodomo_holding_id = build_holding_id("子供", "8306")
+    detected_entries = [
+        f"{RecommendationType.PARTIAL_PROFIT_TAKE.value}|{honnin_holding_id}",
+        f"{RecommendationType.PARTIAL_PROFIT_TAKE.value}|{kodomo_holding_id}",
+    ]
+
+    def _fake_record_result(batch_id, category, stock_code=None, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            return None  # 未完了(1件目)
+        return BatchProgress(
+            total=2,
+            completed=2,
+            category_counts={"sent": 2},
+            data_insufficient_stock_codes=[],
+            failed_stock_codes=[],
+            ranking_entries=[],
+            sector_entries=[],
+            holding_count=1,  # 8306はユニーク銘柄コードとしては1件
+            notification_categories=detected_entries,
+            detected_categories=detected_entries,
+        )
+
+    monkeypatch.setattr(handler_module, "record_result", _fake_record_result)
+
+    summary_calls: list[dict[str, object]] = []
+
+    class _FakeNotificationServiceForSummary:
+        def notify_batch_summary(self, *args: object, **kwargs: object) -> bool:
+            summary_calls.append(kwargs)
+            return True
+
+    class _AlwaysEnabledRuntimeConfigService:
+        def get_notification_enabled(self) -> bool:
+            return True
+
+    notification_service = _FakeNotificationServiceForSummary()
+    runtime_config_service = _AlwaysEnabledRuntimeConfigService()
+
+    handler_module._finish_batch_item(
+        "batch-multi-owner",
+        "sent",
+        honnin_holding_id,
+        _NOW,
+        notification_service,
+        runtime_config_service,
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        detected_recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+    )
+    handler_module._finish_batch_item(
+        "batch-multi-owner",
+        "sent",
+        kodomo_holding_id,
+        _NOW,
+        notification_service,
+        runtime_config_service,
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        detected_recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+    )
+
+    # 2 owner分の検出があっても、物理的なLINE送信(notify_batch_summary呼び出し)は
+    # バッチ完了時に1回だけ。
+    assert len(summary_calls) == 1
+    assert summary_calls[0]["partial_sell_detected_count"] == 2

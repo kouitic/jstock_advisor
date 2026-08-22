@@ -270,7 +270,7 @@ _PROMOTED_TO_BUY_PRIORITY = 5
 # CRITICAL_RISK(6) > PROMOTED_TO_BUY(5) > SELL/PARTIAL_SELL(4) > BUY(3) >
 # ATTENTION(2) > その他(0)。既存メンバーの数値は変更しない。WATCH category
 # 全体をこの表へ追加すると通常WATCH・決算待ちWATCHまで対象になってしまうため、
-# _notification_priority()側でNotificationIntent==ATTENTIONの場合のみこの値を
+# notification_priority_for_recommendation()側でNotificationIntent==ATTENTIONの場合のみこの値を
 # 返す(WATCH categoryの特別扱いとして実装、辞書には追加しない)。
 _ATTENTION_PRIORITY = 2
 
@@ -290,7 +290,11 @@ _ATTENTION_PRIORITY = 2
 # (再コードレビュー対応2026-08、指摘3で削除)。
 
 
-def _notification_priority(recommendation: Recommendation) -> int:
+def notification_priority_for_recommendation(recommendation: Recommendation) -> int:
+    """M3.1: buy_candidates_handler.pyが複数owner分の売却・利確系Recommendation
+    (owner別に独立評価される)から「最も強い」ものを選ぶ際にも、この
+    Cross Pipeline Priorityと同じ優先度表を再利用する(新たな優先順位を
+    新設しない)。"""
     category = resolve_notification_category(recommendation)
     if (
         category is NotificationCategory.BUY
@@ -2047,7 +2051,7 @@ class LineNotificationService:
         """§5: cross-pipeline重複抑止(コードレビュー対応2026-08、best-effort)。
 
         BUY候補Lambda・保有銘柄Lambdaは別Lambdaのため共有の排他制御を持たない。
-        当日・同一銘柄について、既に送信済みの通知の優先度(_notification_priority)
+        当日・同一銘柄について、既に送信済みの通知の優先度(notification_priority_for_recommendation)
         と比較し、既送優先度 >= 今回優先度なら抑止する(既送と同優先度なら
         DUPLICATE_STOCK_NOTIFICATION、既送より低優先度ならLOW_PRIORITY)。
         既送より高優先度(例: NEAR BUY送信済みの銘柄に重大リスク/SELLが発生)は
@@ -2065,7 +2069,7 @@ class LineNotificationService:
         if is_critical_risk(recommendation.recommendation_type):
             return NotificationEligibility(eligible=True)
 
-        this_priority = _notification_priority(recommendation)
+        this_priority = notification_priority_for_recommendation(recommendation)
         if this_priority <= 0:
             return NotificationEligibility(eligible=True)
 
@@ -2117,7 +2121,7 @@ class LineNotificationService:
         business_dateフィールドへ同じ値を使う(check_cross_pipeline_priority_
         eligibility()と同じ思想)。
         """
-        priority = _notification_priority(recommendation)
+        priority = notification_priority_for_recommendation(recommendation)
         if priority <= 0:
             return
         business_date = evaluation_date_jst(now)
@@ -2579,6 +2583,10 @@ class LineNotificationService:
         total: int,
         category_counts: dict[str, int],
         now: dt.datetime,
+        # M3.1: holdings_watchlist_handler.py側はholding_id(= owner + "#" +
+        # stock_code)を渡す(batch_tracker.pyのBatchProgressクラスdocstring
+        # 参照)。holding_id文字列自体がowner・stock_codeの両方を含むため、
+        # そのまま箇条書き表示するだけでどちらも識別できる(表示側の追加対応不要)。
         data_insufficient_stock_codes: list[str] | None = None,
         failed_stock_codes: list[str] | None = None,
         buy_candidates_sent_count: int | None = None,

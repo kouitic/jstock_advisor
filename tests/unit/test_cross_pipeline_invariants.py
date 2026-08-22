@@ -7,7 +7,7 @@ A) RecommendationType → user-action(is_full_sell_like/is_sell_like/
    is_critical_risk) → NotificationCategory(resolve_notification_category) →
    formatter-label(recommendation_adapter) → batch-summary-category
    (holdings_watchlist_handlerの4分類集計) → cross-pipeline-priority
-   (_notification_priority) → actionable/non-actionable
+   (notification_priority_for_recommendation) → actionable/non-actionable
    (resolve_notification_intent_for_recommendation()、送信可否の唯一の正本) の
    一貫性。かつて存在した_NON_ACTIONABLE_CATEGORIES(カテゴリ単位のfrozenset)は
    WATCH categoryがATTENTION(送信対象)とINTERNAL_ONLY(非送信)の両方になり得る
@@ -47,7 +47,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
 )
 from jstock_advisor.services import watchlist_batch_finalizer
 from jstock_advisor.services.line_notification_service import (
-    _notification_priority,
+    notification_priority_for_recommendation,
     resolve_notification_category,
     resolve_notification_intent_for_recommendation,
 )
@@ -131,7 +131,7 @@ def test_a5_internal_only_intent_never_has_positive_priority(
     一切効かない、という矛盾が無いことの確認)。"""
     recommendation = _recommendation(recommendation_type)
     intent = resolve_notification_intent_for_recommendation(recommendation)
-    priority = _notification_priority(recommendation)
+    priority = notification_priority_for_recommendation(recommendation)
     if intent is NotificationIntent.INTERNAL_ONLY:
         assert priority <= 0, (recommendation_type, intent, priority)
 
@@ -140,8 +140,10 @@ def test_a6_sell_and_partial_sell_share_the_same_priority_tier() -> None:
     """横断整合性レビュー対応2026-08指摘7の設計固定: SELLとPARTIAL_SELLは
     「本日この銘柄について売却方向の通知は済んでいる」という点で同格として
     扱うため、cross-pipeline優先度が完全に一致すること。"""
-    sell_priority = _notification_priority(_recommendation(RecommendationType.SELL))
-    partial_priority = _notification_priority(
+    sell_priority = notification_priority_for_recommendation(
+        _recommendation(RecommendationType.SELL)
+    )
+    partial_priority = notification_priority_for_recommendation(
         _recommendation(RecommendationType.PARTIAL_PROFIT_TAKE)
     )
     assert sell_priority > 0
@@ -152,10 +154,12 @@ def test_a7_critical_risk_priority_outranks_all_other_actionable_categories() ->
     """CRITICAL_RISKの優先度が、SELL/PARTIAL_SELL/BUYのいずれよりも高い
     (要求仕様の優先順位: 重大リスク＞買い到達＞売却検討・一部売却検討(同格)
     ＞買い候補、の先頭を固定する)。"""
-    critical_priority = _notification_priority(
+    critical_priority = notification_priority_for_recommendation(
         _recommendation(RecommendationType.URGENT_HOLDING_REVIEW)
     )
-    sell_priority = _notification_priority(_recommendation(RecommendationType.SELL))
+    sell_priority = notification_priority_for_recommendation(
+        _recommendation(RecommendationType.SELL)
+    )
     assert critical_priority > sell_priority
 
 

@@ -3728,14 +3728,14 @@ def test_notification_priority_attention_is_two(service_and_repos) -> None:
     2(CRITICAL_RISK=6 > PROMOTED_TO_BUY=5 > SELL/PARTIAL_SELL=4 > BUY=3 >
     ATTENTION=2 > その他=0)。"""
     rec = _make_attention_watch_recommendation(recommendation_id="prio-attention")
-    assert line_notification_service_module._notification_priority(rec) == 2
+    assert line_notification_service_module.notification_priority_for_recommendation(rec) == 2
 
 
 def test_notification_priority_normal_watch_is_zero(service_and_repos) -> None:
     """指摘10-O: Profit Protectionシグナルの無い通常WATCHはpriority=0のまま
     (Cross Pipeline Priority対象外)。"""
     rec = _make_attention_watch_recommendation(recommendation_id="prio-watch-normal", signal="NONE")
-    assert line_notification_service_module._notification_priority(rec) == 0
+    assert line_notification_service_module.notification_priority_for_recommendation(rec) == 0
 
 
 def test_attention_sent_then_buy_is_not_blocked(service_and_repos) -> None:

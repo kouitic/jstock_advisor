@@ -270,6 +270,47 @@ def test_record_result_retry_of_same_stock_code_does_not_inflate_counts(
     assert progress.completed == 2  # completedはretry分だけ増える(既存挙動、変更なし)
 
 
+def test_record_result_counts_two_owners_of_same_stock_as_separate_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3.1(必須テストG): holdings_watchlist_handler.pyは_finish_batch_item()経由で
+    stock_code引数へholding_id(= owner + "#" + stock_code)を渡す。本人#8306・
+    子供#8306のように同一銘柄コードを複数ownerが保有していても、holding_idの
+    文字列自体が異なるため、DynamoDBの文字列セット上で正しく別件(2件)として
+    集計される(BatchProgressクラスdocstring参照)。"""
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 2, _NOW)
+    batch_tracker.record_result(
+        "batch-1",
+        "sent",
+        notification_category_entry="PARTIAL_PROFIT_TAKE|本人#8306",
+        detected_category_entry="PARTIAL_PROFIT_TAKE|本人#8306",
+        attention_detected_stock_code="本人#8306",
+    )
+    progress = batch_tracker.record_result(
+        "batch-1",
+        "sent",
+        notification_category_entry="PARTIAL_PROFIT_TAKE|子供#8306",
+        detected_category_entry="PARTIAL_PROFIT_TAKE|子供#8306",
+        attention_detected_stock_code="子供#8306",
+    )
+
+    assert progress is not None
+    assert progress.category_counts["sent"] == 2
+    assert sorted(progress.notification_categories) == [
+        "PARTIAL_PROFIT_TAKE|子供#8306",
+        "PARTIAL_PROFIT_TAKE|本人#8306",
+    ]
+    assert sorted(progress.detected_categories) == [
+        "PARTIAL_PROFIT_TAKE|子供#8306",
+        "PARTIAL_PROFIT_TAKE|本人#8306",
+    ]
+    assert sorted(progress.attention_detected_stock_codes) == ["子供#8306", "本人#8306"]
+
+
 # --- try_acquire_finalize / mark_finalize_complete(ウォッチリスト自動追加機能) ---
 # ConditionExpressionの実際の意味論を検証する必要があるため、_FakeTableの簡易ADD
 # パーサではなくmoto(実DynamoDB相当の挙動)を使う。
