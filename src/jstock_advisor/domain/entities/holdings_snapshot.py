@@ -19,6 +19,12 @@ from jstock_advisor.domain.entities.enums import TransactionType
 
 
 class HoldingsSnapshotEntry(Entity):
+    """owner/holding_id(M3): holding_id = owner + "#" + stock_code。同一
+    stock_codeを複数ownerが保有する場合、owner別に別レコードとして保持する。
+    """
+
+    owner: str
+    holding_id: str
     stock_code: str
     shares: int
     average_purchase_price: Decimal | None = None

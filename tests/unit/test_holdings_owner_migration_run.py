@@ -18,7 +18,6 @@ from jstock_advisor.domain.entities.enums import (
     ExecutionMode,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
 from jstock_advisor.domain.entities.holding_decision import (
     BaselineValueSnapshot,
     CompanyQualityScore,
@@ -30,13 +29,13 @@ from jstock_advisor.domain.entities.holding_decision import (
     HoldingDecisionResult,
     InvestmentThesis,
     InvestmentThesisBaseline,
+    InvestmentThesisBaselinePointer,
     InvestmentThesisScore,
     RiskDeductionScore,
 )
 from jstock_advisor.domain.entities.owner import InvalidOwnerError
 from jstock_advisor.infrastructure.aws import (
     baseline_pointer,
-    baseline_sequence,
     trading_pause_config,
 )
 from jstock_advisor.infrastructure.collection_store import build_collection_store
@@ -45,9 +44,9 @@ from jstock_advisor.migrations.holdings_owner_migration import (
     MigrationAbortedError,
     run_migration,
 )
+from jstock_advisor.migrations.legacy_shapes import LegacyHoldingV1, LegacyPurchaseLotV1
 from jstock_advisor.migrations.target import MigrationTarget
 from jstock_advisor.migrations.v2_entities import HoldingV2, PurchaseLotV2
-from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
 
 _NOW = dt.datetime(2026, 8, 22, 0, 0, tzinfo=dt.UTC)
 _STOCK = "8306"
@@ -74,8 +73,8 @@ def _set_pause(store_dir: Path, paused: bool) -> None:
 
 
 def _seed_holding_and_lot(store_dir: Path, stock_code: str = _STOCK, shares: int = 100) -> None:
-    build_collection_store(PurchaseLot, "purchase_lots.json", "lot_id", store_dir).upsert(
-        PurchaseLot(
+    build_collection_store(LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir).upsert(
+        LegacyPurchaseLotV1(
             lot_id="lot-1",
             stock_code=stock_code,
             purchase_date=dt.date(2026, 1, 1),
@@ -84,8 +83,8 @@ def _seed_holding_and_lot(store_dir: Path, stock_code: str = _STOCK, shares: int
             account_type=AccountType.GENERAL,
         )
     )
-    build_collection_store(Holding, "holdings.json", "stock_code", store_dir).upsert(
-        Holding(
+    build_collection_store(LegacyHoldingV1, "holdings.json", "stock_code", store_dir).upsert(
+        LegacyHoldingV1(
             stock_code=stock_code,
             stock_name="三菱UFJ",
             shares=shares,
@@ -162,8 +161,8 @@ def test_migration_refuses_when_pause_get_raises(
 def test_migration_refuses_when_preflight_fails(store_dir: Path) -> None:
     _set_pause(store_dir, True)
     # 孤立したPurchaseLot(対応するHoldingが無い)によりpreflightを失敗させる。
-    build_collection_store(PurchaseLot, "purchase_lots.json", "lot_id", store_dir).upsert(
-        PurchaseLot(
+    build_collection_store(LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir).upsert(
+        LegacyPurchaseLotV1(
             lot_id="lot-orphan",
             stock_code="9999",
             purchase_date=dt.date(2026, 1, 1),
@@ -244,11 +243,28 @@ def test_run_migration_is_idempotent_on_rerun(store_dir: Path) -> None:
 def test_baseline_sequence_current_version_continues_after_migration(store_dir: Path) -> None:
     """旧: holding_id="8306"・current_version=4 → migration →
     新: holding_id="本人#8306"・current_version=4 →
-    allocate_next_baseline_version() → 結果: 5。"""
+    allocate_next_baseline_version() → 結果: 5。
+
+    baseline_sequence.allocate_next_baseline_version()はM3で本番V2ファイルへ
+    直接書き込むよう切り替え済みのため、ここでの「移行前の旧データ」は
+    (他のLegacy*V1シード同様)移行モジュール専用のLegacy形状を使い、
+    旧ファイル(investment_thesis_baseline_sequences.json)へ直接書き込んで
+    再現する。
+    """
     _set_pause(store_dir, True)
     _seed_holding_and_lot(store_dir)
-    for _ in range(4):
-        baseline_sequence.allocate_next_baseline_version("8306", store_dir=store_dir)
+    from jstock_advisor.migrations.legacy_shapes import LegacyBaselineSequenceCounterV1
+
+    build_collection_store(
+        LegacyBaselineSequenceCounterV1,
+        "investment_thesis_baseline_sequences.json",
+        "holding_id",
+        store_dir,
+    ).upsert(
+        LegacyBaselineSequenceCounterV1(
+            holding_id="8306", current_version=4, updated_at=_NOW
+        )
+    )
 
     run_migration(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
@@ -284,15 +300,40 @@ def test_baseline_pointer_migration_then_update_succeeds(
     """migration → get_pointer() → update_pointer() → get_pointer() が
     production側の実関数(baseline_pointer.py)で成立することを確認する
     (本番検証で修正済みのdataブロブCAS形式が、V2テーブルでも維持されている
-    ことの回帰テスト)。"""
+    ことの回帰テスト)。
+
+    InvestmentThesisService.activate_baseline()はM3で本番V2ファイルへ直接
+    書き込むよう切り替え済みのため、ここでの「移行前の旧データ」は
+    InvestmentThesisBaselinePointer自体(M2時点でstorage formatは変更して
+    いない)を使い、旧ファイル(investment_thesis_baseline_pointers.json)へ
+    直接書き込んで再現する。
+    """
     _set_pause(store_dir, True)
     _seed_holding_and_lot(store_dir)
-    thesis_service = InvestmentThesisService(store_dir=store_dir)
-    thesis_service.activate_baseline(
-        "8306",
-        "8306",
-        BaselineOrigin.SYSTEM_INITIALIZED,
-        BaselineValueSnapshot(total_yield_pct=4.0, equity_ratio_pct=45.0),
+    from jstock_advisor.migrations.legacy_shapes import LegacyBaselineSequenceCounterV1
+
+    build_collection_store(
+        LegacyBaselineSequenceCounterV1,
+        "investment_thesis_baseline_sequences.json",
+        "holding_id",
+        store_dir,
+    ).upsert(
+        LegacyBaselineSequenceCounterV1(holding_id="8306", current_version=1, updated_at=_NOW)
+    )
+    build_collection_store(
+        InvestmentThesisBaselinePointer,
+        "investment_thesis_baseline_pointers.json",
+        "holding_id",
+        store_dir,
+    ).upsert(
+        InvestmentThesisBaselinePointer(
+            holding_id="8306",
+            active_baseline_id="8306:v1",
+            active_baseline_version=1,
+            pointer_version=1,
+            updated_at=_NOW,
+            updated_by="tester",
+        )
     )
 
     run_migration(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)

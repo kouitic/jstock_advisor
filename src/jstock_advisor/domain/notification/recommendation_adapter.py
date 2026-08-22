@@ -15,6 +15,7 @@ send_recommendation_notification()`)からは呼ばれておらず、旧来の�
 
 from __future__ import annotations
 
+import dataclasses
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.enums import (
@@ -323,8 +324,15 @@ def build_notification_text_input(
 
     `category`はSHORT_TEXT_CATEGORIESに含まれる値であること(呼び出し元が
     `resolve_notification_category()`の結果を渡す)。
+
+    M3(保有銘柄オーナー機能): holding_idが設定されている(=holding-scope、
+    SELL/PARTIAL_SELL/CRITICAL_RISK/WATCH等)場合のみownerを付与する。
+    holding_id=None(BUY候補、stock-scope)ではownerを表示しない。
     """
-    return _BUILDERS[category](recommendation)
+    result = _BUILDERS[category](recommendation)
+    if recommendation.holding_id is not None:
+        result = dataclasses.replace(result, owner=recommendation.owner)
+    return result
 
 
 _ATTENTION_LABEL = "利益保全注意"
@@ -364,6 +372,8 @@ def build_attention_text_input(
         current_price=recommendation.price_at_recommendation,
         reason=reason,
         label_override=_ATTENTION_LABEL,
+        # ATTENTIONは常にholding-scope(呼び出し前提のとおり保有銘柄由来)。
+        owner=recommendation.owner,
     )
 
 

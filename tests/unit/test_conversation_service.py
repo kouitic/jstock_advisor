@@ -18,6 +18,7 @@ import pytest
 from moto import mock_aws
 
 from jstock_advisor.domain.entities.enums import ConversationStateName, Priority
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.aws import conversation_state_store, trading_pause_config
 from jstock_advisor.infrastructure.line.webhook import LineTextMessageEvent
@@ -36,6 +37,7 @@ _REGION = "ap-northeast-1"
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _USER = "U1"
 _STOCK = "8306"
+_HOLDING_ID = build_holding_id(DEFAULT_OWNER, _STOCK)
 
 
 @pytest.fixture
@@ -51,7 +53,7 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             ("jstock-conversation_states", "user_id"),
             ("jstock-transactions", "transaction_id"),
             ("jstock-purchase_lots", "lot_id"),
-            ("jstock-holdings", "stock_code"),
+            ("jstock-holdings_v2", "holding_id"),
             ("jstock-watchlist", "stock_code"),
             # 保有銘柄オーナー機能移行M0: TradingPauseServiceがBUY/SELL開始・
             # 確定のたびに参照するため、moto環境にもテーブルが必要
@@ -108,7 +110,7 @@ def test_buy_flow_start_input_confirm(
     assert state is not None
     assert state.state == ConversationStateName.INPUT_WAITING
 
-    input_reply = service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    input_reply = service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
     assert "登録します" in input_reply.text
     assert input_reply.quick_reply is not None
     assert {b.postback_data.split("&")[0] for b in input_reply.quick_reply} == {
@@ -123,7 +125,7 @@ def test_buy_flow_start_input_confirm(
 
     confirm_reply = service.handle_postback(_USER, "confirm", op, _NOW)
     assert "登録しました" in confirm_reply.text
-    holding = HoldingRepository().get(_STOCK)
+    holding = HoldingRepository().get(_HOLDING_ID)
     assert holding is not None
     assert holding.shares == 100
     assert PurchaseLotRepository().list_by_stock(_STOCK)[0].purchase_price == Decimal("1500")
@@ -139,7 +141,7 @@ def test_buy_confirmation_and_success_messages_use_comma_formatting(
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
 
-    input_reply = service.handle_text_input(_USER, state, "8306,10000,1500", _NOW)
+    input_reply = service.handle_text_input(_USER, state, "本人,8306,10000,1500", _NOW)
 
     assert "10,000株" in input_reply.text
     assert "@1,500円" in input_reply.text
@@ -159,7 +161,7 @@ def test_buy_input_invalid_stock_code_stays_input_waiting(
     service.handle_postback(_USER, "start_buy", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    reply = service.handle_text_input(_USER, state, "ABC,100,1500", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,ABC,100,1500", _NOW)
     assert "銘柄コードが不正" in reply.text
     unchanged = conversation_state_store.get(_USER, _NOW)
     assert unchanged is not None
@@ -178,7 +180,7 @@ def test_buy_input_unknown_stock_code_does_not_proceed_to_confirmation(
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
 
-    reply = service.handle_text_input(_USER, state, "9999,100,1500", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,9999,100,1500", _NOW)
 
     assert "9999に該当する銘柄が見つかりませんでした" in reply.text
     assert reply.quick_reply is None
@@ -200,7 +202,7 @@ def test_buy_input_existence_indeterminate_still_proceeds_to_confirmation(
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
 
-    reply = service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
 
     assert "登録します" in reply.text
     assert reply.quick_reply is not None
@@ -212,7 +214,7 @@ def test_buy_input_wrong_field_count_reprompts(
     service.handle_postback(_USER, "start_buy", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    reply = service.handle_text_input(_USER, state, "8306,100", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,8306,100", _NOW)
     assert "銘柄コード" in reply.text
     assert conversation_state_store.get(_USER, _NOW).state == ConversationStateName.INPUT_WAITING  # type: ignore[union-attr]
 
@@ -227,6 +229,8 @@ def _seed_holding(shares: int = 100) -> None:
     PurchaseLotRepository().upsert(
         PurchaseLot(
             lot_id="lot-1",
+            owner=DEFAULT_OWNER,
+            holding_id=_HOLDING_ID,
             stock_code=_STOCK,
             purchase_date=dt.date(2026, 8, 1),
             shares=shares,
@@ -236,6 +240,8 @@ def _seed_holding(shares: int = 100) -> None:
     )
     HoldingRepository().upsert(
         Holding(
+            owner=DEFAULT_OWNER,
+            holding_id=_HOLDING_ID,
             stock_code=_STOCK,
             stock_name=_STOCK,
             shares=shares,
@@ -257,7 +263,7 @@ def test_sell_flow_full_sell(
     service.handle_postback(_USER, "start_sell", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    input_reply = service.handle_text_input(_USER, state, "8306,100,1800", _NOW)
+    input_reply = service.handle_text_input(_USER, state, "本人,8306,100,1800", _NOW)
     assert "売却" in input_reply.text
     confirm_state = conversation_state_store.get(_USER, _NOW)
     assert confirm_state is not None
@@ -265,7 +271,7 @@ def test_sell_flow_full_sell(
     confirm_reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
 
     assert "登録しました" in confirm_reply.text
-    assert HoldingRepository().get(_STOCK) is None
+    assert HoldingRepository().get(_HOLDING_ID) is None
     assert conversation_state_store.get(_USER, _NOW) is None
 
 
@@ -280,7 +286,7 @@ def test_case_m_line_conversation_partial_sell_updates_last_sale_date(
     last_purchase_dateは不変であること(Case O)もあわせて確認する。
     """
     _seed_holding(shares=300)
-    holding_before = HoldingRepository().get(_STOCK)
+    holding_before = HoldingRepository().get(_HOLDING_ID)
     assert holding_before is not None
     assert holding_before.last_sale_date is None
     assert holding_before.last_purchase_date == dt.date(2026, 8, 1)
@@ -288,14 +294,14 @@ def test_case_m_line_conversation_partial_sell_updates_last_sale_date(
     service.handle_postback(_USER, "start_sell", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    service.handle_text_input(_USER, state, "8306,100,3800", _NOW)
+    service.handle_text_input(_USER, state, "本人,8306,100,3800", _NOW)
     confirm_state = conversation_state_store.get(_USER, _NOW)
     assert confirm_state is not None
 
     confirm_reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
     assert "登録しました" in confirm_reply.text
 
-    holding_after = HoldingRepository().get(_STOCK)
+    holding_after = HoldingRepository().get(_HOLDING_ID)
     assert holding_after is not None
     assert holding_after.shares == 200
     # last_sale_dateが売却日(evaluation_date_jst(_NOW) = 2026-08-17)へ更新される。
@@ -315,7 +321,7 @@ def test_sell_confirmation_shows_current_and_remaining_shares(
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
 
-    reply = service.handle_text_input(_USER, state, "8306,100,3800", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,8306,100,3800", _NOW)
 
     assert "現在保有：300株" in reply.text
     assert "今回売却：100株" in reply.text
@@ -331,7 +337,7 @@ def test_sell_input_rejects_shares_exceeding_holding(
     service.handle_postback(_USER, "start_sell", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    reply = service.handle_text_input(_USER, state, "8306,100,1800", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,8306,100,1800", _NOW)
     assert "保有株数" in reply.text
     assert conversation_state_store.get(_USER, _NOW).state == ConversationStateName.INPUT_WAITING  # type: ignore[union-attr]
 
@@ -342,7 +348,7 @@ def test_sell_input_rejects_when_not_holding(
     service.handle_postback(_USER, "start_sell", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    reply = service.handle_text_input(_USER, state, "8306,100,1800", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,8306,100,1800", _NOW)
     assert "保有銘柄として登録されていません" in reply.text
 
 
@@ -358,7 +364,7 @@ def test_sell_input_unknown_stock_code_does_not_proceed_to_confirmation(
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
 
-    reply = service.handle_text_input(_USER, state, "9999,100,1500", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,9999,100,1500", _NOW)
 
     assert "9999に該当する銘柄が見つかりませんでした" in reply.text
     assert reply.quick_reply is None
@@ -491,7 +497,7 @@ def test_retry_returns_to_input_waiting(
     service.handle_postback(_USER, "start_buy", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
     confirm_state = conversation_state_store.get(_USER, _NOW)
     assert confirm_state is not None
 
@@ -510,7 +516,7 @@ def test_cancel_deletes_state(
     service.handle_postback(_USER, "start_buy", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
     confirm_state = conversation_state_store.get(_USER, _NOW)
     assert confirm_state is not None
 
@@ -526,7 +532,7 @@ def test_confirm_with_stale_operation_id_returns_no_active_operation(
     service.handle_postback(_USER, "start_buy", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
 
     reply = service.handle_postback(_USER, "confirm", "stale-op-id", _NOW)
 
@@ -553,7 +559,7 @@ def test_unexpected_text_during_confirm_waiting_does_not_change_state(
     service.handle_postback(_USER, "start_buy", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
     confirm_state = conversation_state_store.get(_USER, _NOW)
     assert confirm_state is not None
 
@@ -632,7 +638,7 @@ def test_commit_buy_blocked_if_paused_after_conversation_started(
     service.handle_postback(_USER, "start_buy", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
     confirm_state = conversation_state_store.get(_USER, _NOW)
     assert confirm_state is not None
 
@@ -641,7 +647,7 @@ def test_commit_buy_blocked_if_paused_after_conversation_started(
     reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
 
     assert "メンテナンス中" in reply.text
-    assert HoldingRepository().get(_STOCK) is None
+    assert HoldingRepository().get(_HOLDING_ID) is None
     # ConversationStateはまだ消費されていない(実際に書き込みが起きていないことの確認)
     assert conversation_state_store.get(_USER, _NOW) is not None
 
@@ -658,7 +664,7 @@ def test_buy_text_input_blocked_when_paused_after_start_stays_input_waiting(
 
     _set_trading_paused(True)
 
-    reply = service.handle_text_input(_USER, state, "8306,100,1500", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
 
     assert "メンテナンス中" in reply.text
     unchanged = conversation_state_store.get(_USER, _NOW)
@@ -678,7 +684,7 @@ def test_sell_text_input_blocked_when_paused_after_start_stays_input_waiting(
 
     _set_trading_paused(True)
 
-    reply = service.handle_text_input(_USER, state, "8306,50,1800", _NOW)
+    reply = service.handle_text_input(_USER, state, "本人,8306,50,1800", _NOW)
 
     assert "メンテナンス中" in reply.text
     unchanged = conversation_state_store.get(_USER, _NOW)
@@ -715,7 +721,7 @@ def test_commit_sell_blocked_if_paused_after_conversation_started(
     service.handle_postback(_USER, "start_sell", None, _NOW)
     state = conversation_state_store.get(_USER, _NOW)
     assert state is not None
-    service.handle_text_input(_USER, state, "8306,50,1800", _NOW)
+    service.handle_text_input(_USER, state, "本人,8306,50,1800", _NOW)
     confirm_state = conversation_state_store.get(_USER, _NOW)
     assert confirm_state is not None
 
@@ -724,6 +730,6 @@ def test_commit_sell_blocked_if_paused_after_conversation_started(
     reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
 
     assert "メンテナンス中" in reply.text
-    holding = HoldingRepository().get(_STOCK)
+    holding = HoldingRepository().get(_HOLDING_ID)
     assert holding is not None
     assert holding.shares == 100  # 変更されていない

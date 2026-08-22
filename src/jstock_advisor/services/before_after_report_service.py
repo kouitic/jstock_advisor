@@ -15,6 +15,7 @@ from pathlib import Path
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.audit import AuditLogEntry
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
@@ -70,7 +71,10 @@ class BeforeAfterReportService:
     def build_entry(self, stock_code: str, now: dt.datetime) -> BeforeAfterEntry:
         before_recommendations = self._recommendation_repo.list_by_stock(stock_code)
         before_audit_entries = self._audit_repo.list_by_stock(stock_code)
-        holding = self._holding_repo.get(stock_code)
+        # M3(保有銘柄オーナー機能): HoldingRepositoryのPKはholding_id。本レポートは
+        # owner別の切り替えUIを持たないため、既定owner(DEFAULT_OWNER)の保有のみを
+        # 対象とする。
+        holding = self._holding_repo.get(build_holding_id(DEFAULT_OWNER, stock_code))
 
         if holding is None:
             return BeforeAfterEntry(

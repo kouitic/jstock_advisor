@@ -9,6 +9,7 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
 )
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.interfaces.types import CorporateActionEvent
 from jstock_advisor.services.data_quality_service import (
@@ -26,6 +27,8 @@ def _holding(
     average_purchase_price: Decimal, basis_date: dt.date | None = None
 ) -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "5401"),
         stock_code="5401",
         stock_name="日本製鉄",
         shares=100,

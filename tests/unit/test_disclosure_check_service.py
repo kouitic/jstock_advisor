@@ -7,6 +7,7 @@ import pytest
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -54,6 +55,7 @@ def portfolio_service(tmp_path: Path) -> PortfolioService:
         lot_repository=PurchaseLotRepository(store_dir=tmp_path),
     )
     service.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         stock_name="日本たばこ産業",
         shares=100,

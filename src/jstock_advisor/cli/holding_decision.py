@@ -25,6 +25,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import ReasonImpact
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.infrastructure.aws.baseline_pointer import BaselinePointerConflictError
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.local_repository import (
@@ -276,6 +277,8 @@ def _build_holding_override(
         typer.echo("--purchase-dateは評価基準日(JST)以前の日付を指定してください。")
         raise typer.Exit(code=1)
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name=stock_code,
         shares=shares_value,

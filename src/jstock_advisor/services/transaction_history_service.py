@@ -13,6 +13,7 @@ import uuid
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.enums import AccountType, SkipReason, TransactionType
+from jstock_advisor.domain.entities.owner import build_holding_id, normalize_and_validate_owner
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.transaction import SkippedRecommendation, Transaction
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
@@ -65,6 +66,7 @@ class TransactionHistoryService:
 
     def record_execution(
         self,
+        owner: str,
         stock_code: str,
         transaction_type: TransactionType,
         shares: int,
@@ -83,6 +85,7 @@ class TransactionHistoryService:
         従来と完全に同じ)。"""
         transaction = self.build_execution_plan(
             transaction_id=str(uuid.uuid4()),
+            owner=owner,
             stock_code=stock_code,
             transaction_type=transaction_type,
             shares=shares,
@@ -102,6 +105,7 @@ class TransactionHistoryService:
     def build_execution_plan(
         self,
         transaction_id: str,
+        owner: str,
         stock_code: str,
         transaction_type: TransactionType,
         shares: int,
@@ -123,6 +127,10 @@ class TransactionHistoryService:
         使い(実装プランv2 3節「決定的ID化」)、TransactWriteItemsが
         クラッシュ後に同一postbackで再試行された場合も同一内容で上書きされる
         だけの安全な冪等操作にするため。
+
+        M3(保有銘柄オーナー機能): Transactionは常にholding-scopeのため、
+        owner/holding_idを必ず設定する(holding_idはowner×stock_codeから
+        決定的に導出し、外部からは受け取らない)。
         """
         if shares <= 0:
             raise ValueError("shares must be positive")
@@ -135,6 +143,9 @@ class TransactionHistoryService:
 
         reference_price = _reference_price(recommendation, transaction_type)
         price_diff = execution_price - reference_price if reference_price is not None else None
+
+        normalized_owner = normalize_and_validate_owner(owner)
+        holding_id = build_holding_id(normalized_owner, stock_code)
 
         return Transaction(
             transaction_id=transaction_id,
@@ -152,6 +163,8 @@ class TransactionHistoryService:
             reason=reason,
             memo=memo,
             created_at=now or dt.datetime.now(dt.UTC),
+            owner=normalized_owner,
+            holding_id=holding_id,
         )
 
     def record_skip(

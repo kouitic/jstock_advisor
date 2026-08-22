@@ -7,6 +7,7 @@ from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import AccountType, BuyAction, ExecutionMode
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import (
     AuditLogRepository,
 )
@@ -197,6 +198,8 @@ def test_profit_taking_service_records_audit(tmp_path: Path) -> None:
     )
 
     holding = Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "8136"),
         stock_code="8136",
         stock_name="サンリオ",
         shares=100,
@@ -238,6 +241,8 @@ def test_profit_taking_service_uses_active_rule_version(tmp_path: Path) -> None:
         rule_version_service=rule_version_service,
     )
     holding = Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "8136"),
         stock_code="8136",
         stock_name="サンリオ",
         shares=100,
@@ -263,6 +268,8 @@ def test_sell_signal_service_records_audit(tmp_path: Path) -> None:
     service = SellSignalService(providers=_providers(), config=_CONFIG, audit_service=audit_service)
 
     holding = Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "2914"),
         stock_code="2914",
         stock_name="日本たばこ産業",
         shares=100,

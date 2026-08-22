@@ -32,6 +32,22 @@ class NotificationLogRepository:
         items = self.list_by_stock_and_type(stock_code, notification_type)
         return items[-1] if items else None
 
+    def list_by_holding_and_type(
+        self, holding_id: str, notification_type: NotificationType
+    ) -> list[NotificationLog]:
+        """M3(保有銘柄オーナー機能): holding-scope通知(SELL/PARTIAL/ATTENTION等)の
+        再送判定用。同一stock_codeでも別ownerのholding_idとは互いに影響しない。"""
+        items = self._store.find(
+            lambda n: n.holding_id == holding_id and n.notification_type == notification_type
+        )
+        return sorted(items, key=lambda n: n.sent_at)
+
+    def latest_by_holding_and_type(
+        self, holding_id: str, notification_type: NotificationType
+    ) -> NotificationLog | None:
+        items = self.list_by_holding_and_type(holding_id, notification_type)
+        return items[-1] if items else None
+
     def list_by_recommendation_id(self, recommendation_id: str) -> list[NotificationLog]:
         """backtest/compareのhistory replayが「実際にLINE送信が成功したか」を
         判定するために使う(コードレビュー対応)。複数件ある場合は重複送信の

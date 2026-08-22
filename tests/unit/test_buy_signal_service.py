@@ -519,6 +519,7 @@ def _analyze_with_cooldown_entry(
     import dataclasses
 
     from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
+    from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
     from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
         HoldingsSnapshotRepository,
     )
@@ -541,6 +542,8 @@ def _analyze_with_cooldown_entry(
     holdings_snapshot_repo = HoldingsSnapshotRepository(store_dir=tmp_path)
     holdings_snapshot_repo.upsert(
         HoldingsSnapshotEntry(
+            owner=DEFAULT_OWNER,
+            holding_id=build_holding_id(DEFAULT_OWNER, fx.stock_code),
             stock_code=fx.stock_code,
             shares=100,
             average_purchase_price=Decimal("1000"),

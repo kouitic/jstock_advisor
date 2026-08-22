@@ -1864,7 +1864,7 @@ class LineNotificationService:
         intent = resolve_notification_intent_for_recommendation(recommendation)
 
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
-        previous = self._previous_recommendation(recommendation.stock_code, notification_type)
+        previous = self._previous_recommendation(recommendation, notification_type)
 
         # 再コードレビュー対応(2026-08、指摘3): NON_ACTIONABLEゲートは、内部論理・
         # 計算異常の安全弁(notify_manual_review_required)より後に評価する。
@@ -1967,7 +1967,7 @@ class LineNotificationService:
         チェックより前にデータ品質だけを先に確認するための分離)。
         """
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
-        previous = self._previous_recommendation(recommendation.stock_code, notification_type)
+        previous = self._previous_recommendation(recommendation, notification_type)
         alert, requires_manual_review = self._check_data_quality(
             recommendation, previous, notification_type, now
         )
@@ -2015,10 +2015,25 @@ class LineNotificationService:
         if not self._config.notification.trade_cooldown.enabled:
             return NotificationEligibility(eligible=True)
 
-        entry = self._holdings_snapshot_repo.get(recommendation.stock_code)
-        if entry is None or entry.cooldown_until_date is None:
-            return NotificationEligibility(eligible=True)
-        if evaluation_date_jst(now) <= entry.cooldown_until_date:
+        # M3(保有銘柄オーナー機能): holding-scope(holding_idあり)は自holdingの
+        # クールダウンのみを見る。stock-scope(BUY系、holding_id=None)はowner
+        # 横断で「いずれかのownerにactive cooldownがあるか」を見る
+        # (TradeCooldownService.is_in_cooldown()と同じ設計)。
+        today = evaluation_date_jst(now)
+        if recommendation.holding_id is not None:
+            entry = self._holdings_snapshot_repo.get(recommendation.holding_id)
+            in_cooldown = (
+                entry is not None
+                and entry.cooldown_until_date is not None
+                and today <= entry.cooldown_until_date
+            )
+        else:
+            entries = self._holdings_snapshot_repo.list_by_stock(recommendation.stock_code)
+            in_cooldown = any(
+                entry.cooldown_until_date is not None and today <= entry.cooldown_until_date
+                for entry in entries
+            )
+        if in_cooldown:
             return NotificationEligibility(
                 eligible=False,
                 block_category=EligibilityBlockCategory.TRADE_COOLDOWN,
@@ -2055,17 +2070,34 @@ class LineNotificationService:
             return NotificationEligibility(eligible=True)
 
         business_date = evaluation_date_jst(now)
-        record_id = build_daily_notification_priority_id(recommendation.stock_code, business_date)
-        existing = self._daily_priority_repo.get(record_id)
-        if existing is None:
+        # M3: holding-scope(holding_idあり)は自holding key + stockの
+        # "_STOCK_" keyの両方を見る。stock-scopeは"_STOCK_" keyだけを見る
+        # (holding側からstock側への抑止は行わない設計のため、逆向きの参照は
+        # 発生しない)。
+        stock_record = self._daily_priority_repo.get(
+            build_daily_notification_priority_id(recommendation.stock_code, business_date)
+        )
+        holding_record = (
+            self._daily_priority_repo.get(
+                build_daily_notification_priority_id(
+                    recommendation.stock_code, business_date, holding_id=recommendation.holding_id
+                )
+            )
+            if recommendation.holding_id is not None
+            else None
+        )
+        existing_priority = max(
+            (r.priority for r in (stock_record, holding_record) if r is not None), default=None
+        )
+        if existing_priority is None:
             return NotificationEligibility(eligible=True)
-        if existing.priority > this_priority:
+        if existing_priority > this_priority:
             return NotificationEligibility(
                 eligible=False,
                 block_category=EligibilityBlockCategory.LOW_PRIORITY,
                 block_reason="LOW_PRIORITY",
             )
-        if existing.priority == this_priority:
+        if existing_priority == this_priority:
             return NotificationEligibility(
                 eligible=False,
                 block_category=EligibilityBlockCategory.DUPLICATE_STOCK_NOTIFICATION,
@@ -2089,7 +2121,11 @@ class LineNotificationService:
         if priority <= 0:
             return
         business_date = evaluation_date_jst(now)
-        record_id = build_daily_notification_priority_id(recommendation.stock_code, business_date)
+        # M3: holding-scopeなら自holding keyのみへ、stock-scopeなら"_STOCK_" key
+        # のみへ記録する(相手側のスコープのレコードを書き換えることはない)。
+        record_id = build_daily_notification_priority_id(
+            recommendation.stock_code, business_date, holding_id=recommendation.holding_id
+        )
         existing = self._daily_priority_repo.get(record_id)
         if existing is not None and existing.priority >= priority:
             return
@@ -2098,6 +2134,7 @@ class LineNotificationService:
             DailyNotificationPriorityRecord(
                 record_id=record_id,
                 stock_code=recommendation.stock_code,
+                holding_id=recommendation.holding_id,
                 business_date=business_date,
                 priority=priority,
                 category=category.value,
@@ -2112,7 +2149,7 @@ class LineNotificationService:
         書き込まない)。
         """
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
-        previous = self._previous_recommendation(recommendation.stock_code, notification_type)
+        previous = self._previous_recommendation(recommendation, notification_type)
         status = self._notification_status_for_send(recommendation, previous, now)
         if status == NotificationStatus.SENT:
             return NotificationEligibility(eligible=True)
@@ -2863,10 +2900,24 @@ class LineNotificationService:
             )
         return True
 
+    def _latest_log_for_recommendation_scope(
+        self, recommendation: Recommendation, notification_type: NotificationType
+    ) -> NotificationLog | None:
+        """M3(保有銘柄オーナー機能): holding-scope(SELL/PARTIAL/ATTENTION等、
+        holding_idが設定されている)はholding_id単位で、stock-scope(BUY系、
+        holding_id=None)は従来どおりstock_code単位で直近のNotificationLogを
+        検索する。同一stock_codeを複数ownerが保有していても、一方のownerの
+        通知がもう一方のownerの再送判定を抑止しない。"""
+        if recommendation.holding_id is not None:
+            return self._log_repo.latest_by_holding_and_type(
+                recommendation.holding_id, notification_type
+            )
+        return self._log_repo.latest_by_stock_and_type(recommendation.stock_code, notification_type)
+
     def _previous_recommendation(
-        self, stock_code: str, notification_type: NotificationType
+        self, recommendation: Recommendation, notification_type: NotificationType
     ) -> Recommendation | None:
-        latest_log = self._log_repo.latest_by_stock_and_type(stock_code, notification_type)
+        latest_log = self._latest_log_for_recommendation_scope(recommendation, notification_type)
         if latest_log is None or latest_log.related_recommendation_id is None:
             return None
         return self._recommendation_repo.get(latest_log.related_recommendation_id)
@@ -2881,11 +2932,14 @@ class LineNotificationService:
         「まだ知らせていない利益保全局面かどうか」だけで判断し、日数経過や価格の
         小さな変動では再送しない(_compute_attention_event_identity()のevent
         identityが前回送信時から変化した場合のみ再送する)。
+
+        M3: ATTENTIONはholding-scopeのため、holding_id単位でdedupする
+        (同一stock_codeの別ownerには影響しない)。
         """
         if self._execution_context.is_validation:
             return NotificationStatus.SENT
-        latest_log = self._log_repo.latest_by_stock_and_type(
-            recommendation.stock_code, NotificationType.PROFIT_PROTECTION_ATTENTION
+        latest_log = self._latest_log_for_recommendation_scope(
+            recommendation, NotificationType.PROFIT_PROTECTION_ATTENTION
         )
         if latest_log is None:
             return NotificationStatus.SENT

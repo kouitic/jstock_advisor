@@ -23,6 +23,7 @@ from jstock_advisor.domain.entities.enums import (
     TransactionType,
 )
 from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.infrastructure.aws import conversation_commit, conversation_state_store
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
@@ -42,6 +43,7 @@ _REGION = "ap-northeast-1"
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _USER = "U1"
 _STOCK = "8306"
+_HOLDING_ID = build_holding_id(DEFAULT_OWNER, _STOCK)
 
 
 @pytest.fixture
@@ -59,7 +61,7 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             ("jstock-conversation_states", "user_id"),
             ("jstock-transactions", "transaction_id"),
             ("jstock-purchase_lots", "lot_id"),
-            ("jstock-holdings", "stock_code"),
+            ("jstock-holdings_v2", "holding_id"),
             ("jstock-watchlist", "stock_code"),
             # 保有銘柄オーナー機能移行: commit_buy/commit_sellのTransactWriteItems
             # がTradingPauseConfigをConditionCheckするため必要(コードレビュー対応)。
@@ -77,14 +79,26 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _start_buy_confirm(shares: int = 100, price: str = "1500") -> Any:
     conversation_state_store.start_or_replace(_USER, ConversationAction.BUY, _NOW)
     return conversation_state_store.record_input(
-        _USER, ConversationAction.BUY, _STOCK, _NOW, shares=shares, price=Decimal(price)
+        _USER,
+        ConversationAction.BUY,
+        _STOCK,
+        _NOW,
+        shares=shares,
+        price=Decimal(price),
+        owner=DEFAULT_OWNER,
     )
 
 
 def _start_sell_confirm(shares: int, price: str = "1500") -> Any:
     conversation_state_store.start_or_replace(_USER, ConversationAction.SELL, _NOW)
     return conversation_state_store.record_input(
-        _USER, ConversationAction.SELL, _STOCK, _NOW, shares=shares, price=Decimal(price)
+        _USER,
+        ConversationAction.SELL,
+        _STOCK,
+        _NOW,
+        shares=shares,
+        price=Decimal(price),
+        owner=DEFAULT_OWNER,
     )
 
 
@@ -96,6 +110,8 @@ def _start_watch_confirm() -> Any:
 def _seed_holding_with_one_lot(shares: int, price: str = "1000") -> None:
     lot = PurchaseLot(
         lot_id="existing-lot",
+        owner=DEFAULT_OWNER,
+        holding_id=_HOLDING_ID,
         stock_code=_STOCK,
         purchase_date=dt.date(2026, 8, 1),
         shares=shares,
@@ -104,6 +120,8 @@ def _seed_holding_with_one_lot(shares: int, price: str = "1000") -> None:
     )
     PurchaseLotRepository().upsert(lot)
     holding = Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=_HOLDING_ID,
         stock_code=_STOCK,
         stock_name=_STOCK,
         shares=shares,
@@ -126,6 +144,7 @@ def test_commit_buy_succeeds_for_new_stock(moto_conversation_tables: None) -> No
     assert state is not None
     portfolio = PortfolioService()
     plan = portfolio.build_purchase_write_plan(
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         stock_name=None,
         shares=100,
@@ -136,6 +155,7 @@ def test_commit_buy_succeeds_for_new_stock(moto_conversation_tables: None) -> No
     )
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -147,7 +167,7 @@ def test_commit_buy_succeeds_for_new_stock(moto_conversation_tables: None) -> No
     ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
 
     assert ok is True
-    holding = HoldingRepository().get(_STOCK)
+    holding = HoldingRepository().get(_HOLDING_ID)
     assert holding is not None
     assert holding.shares == 100
     lots = PurchaseLotRepository().list_by_stock(_STOCK)
@@ -166,6 +186,7 @@ def test_commit_buy_fails_when_existing_holding_changed_after_plan_built(
     assert state is not None
     portfolio = PortfolioService()
     plan = portfolio.build_purchase_write_plan(
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         stock_name=None,
         shares=50,
@@ -176,6 +197,7 @@ def test_commit_buy_fails_when_existing_holding_changed_after_plan_built(
     )
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.ADDITIONAL_BUY,
         shares=50,
@@ -185,7 +207,7 @@ def test_commit_buy_fails_when_existing_holding_changed_after_plan_built(
     )
 
     # 計画構築後、別経路(CSV等)でHoldingが変更されたことを模擬する。
-    mutated = HoldingRepository().get(_STOCK)
+    mutated = HoldingRepository().get(_HOLDING_ID)
     assert mutated is not None
     HoldingRepository().upsert(mutated.model_copy(update={"memo": "concurrent edit"}))
 
@@ -196,7 +218,7 @@ def test_commit_buy_fails_when_existing_holding_changed_after_plan_built(
     assert conversation_state_store.get(_USER, _NOW) is not None
     assert TransactionRepository().get(state.operation_id) is None
     # 元の(競合させた側の)変更はそのまま保たれている。
-    assert HoldingRepository().get(_STOCK).memo == "concurrent edit"  # type: ignore[union-attr]
+    assert HoldingRepository().get(_HOLDING_ID).memo == "concurrent edit"  # type: ignore[union-attr]
     # 新規ロットは追加されない(既存の1件のみ)。
     assert len(PurchaseLotRepository().list_by_stock(_STOCK)) == 1
 
@@ -210,6 +232,7 @@ def test_commit_buy_fails_when_holding_created_concurrently_for_new_stock(
     assert state is not None
     portfolio = PortfolioService()
     plan = portfolio.build_purchase_write_plan(
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         stock_name=None,
         shares=100,
@@ -220,6 +243,7 @@ def test_commit_buy_fails_when_holding_created_concurrently_for_new_stock(
     )
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -236,7 +260,7 @@ def test_commit_buy_fails_when_holding_created_concurrently_for_new_stock(
     assert ok is False
     assert conversation_state_store.get(_USER, _NOW) is not None
     # 競合させた側のHoldingが上書きされていないこと。
-    assert HoldingRepository().get(_STOCK).shares == 10  # type: ignore[union-attr]
+    assert HoldingRepository().get(_HOLDING_ID).shares == 10  # type: ignore[union-attr]
 
 
 def test_commit_buy_fails_when_transaction_id_already_exists(
@@ -249,6 +273,7 @@ def test_commit_buy_fails_when_transaction_id_already_exists(
     assert state is not None
     portfolio = PortfolioService()
     plan = portfolio.build_purchase_write_plan(
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         stock_name=None,
         shares=100,
@@ -259,6 +284,7 @@ def test_commit_buy_fails_when_transaction_id_already_exists(
     )
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -272,7 +298,7 @@ def test_commit_buy_fails_when_transaction_id_already_exists(
     ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
 
     assert ok is False
-    assert HoldingRepository().get(_STOCK) is None
+    assert HoldingRepository().get(_HOLDING_ID) is None
     assert conversation_state_store.get(_USER, _NOW) is not None
 
 
@@ -281,6 +307,7 @@ def test_commit_buy_fails_on_operation_id_mismatch(moto_conversation_tables: Non
     assert state is not None
     portfolio = PortfolioService()
     plan = portfolio.build_purchase_write_plan(
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         stock_name=None,
         shares=100,
@@ -291,6 +318,7 @@ def test_commit_buy_fails_on_operation_id_mismatch(moto_conversation_tables: Non
     )
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -302,7 +330,7 @@ def test_commit_buy_fails_on_operation_id_mismatch(moto_conversation_tables: Non
     ok = conversation_commit.commit_buy(_USER, "wrong-op-id", plan, transaction, _NOW)
 
     assert ok is False
-    assert HoldingRepository().get(_STOCK) is None
+    assert HoldingRepository().get(_HOLDING_ID) is None
     assert TransactionRepository().get(state.operation_id) is None
     assert conversation_state_store.get(_USER, _NOW) is not None
 
@@ -315,9 +343,10 @@ def test_commit_sell_full_sell_deletes_lot_and_holding(moto_conversation_tables:
     state = _start_sell_confirm(shares=100, price="1500")
     assert state is not None
     portfolio = PortfolioService()
-    plan = portfolio.build_sale_write_plan(_STOCK, 100, now=_NOW)
+    plan = portfolio.build_sale_write_plan(DEFAULT_OWNER, _STOCK, 100, now=_NOW)
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.FULL_SELL,
         shares=100,
@@ -329,7 +358,7 @@ def test_commit_sell_full_sell_deletes_lot_and_holding(moto_conversation_tables:
     ok = conversation_commit.commit_sell(_USER, state.operation_id, plan, transaction, _NOW)
 
     assert ok is True
-    assert HoldingRepository().get(_STOCK) is None
+    assert HoldingRepository().get(_HOLDING_ID) is None
     assert PurchaseLotRepository().list_by_stock(_STOCK) == []
     assert TransactionRepository().get(state.operation_id) is not None
     assert conversation_state_store.get(_USER, _NOW) is None
@@ -340,9 +369,10 @@ def test_commit_sell_partial_sell_updates_lot_and_holding(moto_conversation_tabl
     state = _start_sell_confirm(shares=30, price="1500")
     assert state is not None
     portfolio = PortfolioService()
-    plan = portfolio.build_sale_write_plan(_STOCK, 30, now=_NOW)
+    plan = portfolio.build_sale_write_plan(DEFAULT_OWNER, _STOCK, 30, now=_NOW)
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.PARTIAL_SELL,
         shares=30,
@@ -354,7 +384,7 @@ def test_commit_sell_partial_sell_updates_lot_and_holding(moto_conversation_tabl
     ok = conversation_commit.commit_sell(_USER, state.operation_id, plan, transaction, _NOW)
 
     assert ok is True
-    holding = HoldingRepository().get(_STOCK)
+    holding = HoldingRepository().get(_HOLDING_ID)
     assert holding is not None
     assert holding.shares == 70
     lots = PurchaseLotRepository().list_by_stock(_STOCK)
@@ -370,9 +400,10 @@ def test_commit_sell_fails_when_lot_changed_after_plan_built(
     state = _start_sell_confirm(shares=100, price="1500")
     assert state is not None
     portfolio = PortfolioService()
-    plan = portfolio.build_sale_write_plan(_STOCK, 100, now=_NOW)
+    plan = portfolio.build_sale_write_plan(DEFAULT_OWNER, _STOCK, 100, now=_NOW)
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.FULL_SELL,
         shares=100,
@@ -424,6 +455,7 @@ def test_commit_buy_succeeds_when_trading_pause_uninitialized(
     assert state is not None
     portfolio = PortfolioService()
     plan = portfolio.build_purchase_write_plan(
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         stock_name=None,
         shares=100,
@@ -434,6 +466,7 @@ def test_commit_buy_succeeds_when_trading_pause_uninitialized(
     )
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -459,6 +492,7 @@ def test_commit_buy_rejected_when_trading_paused_after_plan_built(
     assert state is not None
     portfolio = PortfolioService()
     plan = portfolio.build_purchase_write_plan(
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         stock_name=None,
         shares=100,
@@ -469,6 +503,7 @@ def test_commit_buy_rejected_when_trading_paused_after_plan_built(
     )
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -483,7 +518,7 @@ def test_commit_buy_rejected_when_trading_paused_after_plan_built(
     ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
 
     assert ok is False
-    assert HoldingRepository().get(_STOCK) is None
+    assert HoldingRepository().get(_HOLDING_ID) is None
     assert TransactionRepository().get(state.operation_id) is None
     assert conversation_state_store.get(_USER, _NOW) is not None
 
@@ -496,9 +531,10 @@ def test_commit_sell_rejected_when_trading_paused_after_plan_built(
     state = _start_sell_confirm(shares=100, price="1500")
     assert state is not None
     portfolio = PortfolioService()
-    plan = portfolio.build_sale_write_plan(_STOCK, 100, now=_NOW)
+    plan = portfolio.build_sale_write_plan(DEFAULT_OWNER, _STOCK, 100, now=_NOW)
     transaction = TransactionHistoryService().build_execution_plan(
         transaction_id=state.operation_id,
+        owner=DEFAULT_OWNER,
         stock_code=_STOCK,
         transaction_type=TransactionType.FULL_SELL,
         shares=100,
@@ -512,7 +548,7 @@ def test_commit_sell_rejected_when_trading_paused_after_plan_built(
     ok = conversation_commit.commit_sell(_USER, state.operation_id, plan, transaction, _NOW)
 
     assert ok is False
-    holding = HoldingRepository().get(_STOCK)
+    holding = HoldingRepository().get(_HOLDING_ID)
     assert holding is not None
     assert holding.shares == 100  # 変更されていない
     assert PurchaseLotRepository().get("existing-lot") is not None

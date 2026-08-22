@@ -60,6 +60,12 @@ class NotificationTextInput:
     category: NotificationCategory
     stock_code: str
     stock_name: str
+    # M3(保有銘柄オーナー機能): holding-scope通知(SELL/PARTIAL_SELL/ATTENTION等)
+    # では所有者を必須表示する(例:「一部売却 8306 三菱UFJ（本人）」)。BUY候補
+    # 通知(stock-scope)ではNoneのまま(表示しない)。requiredなsegmentとして
+    # 扱い、50/70文字soft limitでは絶対に落とさない(下記required文字列へ直接
+    # 埋め込むことで保証する)。
+    owner: str | None = None
     current_price: Decimal | None = None
     target_price: Decimal | None = None
     # target_priceの意味を示すラベル(コードレビュー対応2026-08、指摘3)。
@@ -134,8 +140,12 @@ def format_notification_text(
         data.label_override or _CATEGORY_LABELS.get(data.category, "通知")
     )
 
-    # 優先度1・2は必須(削れない)。
+    # 優先度1・2は必須(削れない)。ownerが設定されている場合(holding-scope
+    # 通知)は末尾へ括弧書きで付与する。この時点でrequired文字列へ直接
+    # 埋め込むため、以降のsoft limitループの対象外(絶対に欠落しない)。
     required = f"{label} {data.stock_code} {data.stock_name}"
+    if data.owner is not None:
+        required += f"（{data.owner}）"
 
     price_label = data.target_price_label or "打診"
     # (segment_text, required)のリスト。requiredなセグメントはmax_charsを

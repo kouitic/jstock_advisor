@@ -12,8 +12,6 @@ from jstock_advisor.domain.entities.decision_snapshot import (
     DecisionType,
 )
 from jstock_advisor.domain.entities.enums import AccountType, ConfidenceLevel, RecommendationType
-from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
-from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.collection_store import build_collection_store
@@ -21,6 +19,11 @@ from jstock_advisor.migrations.holdings_owner_preflight import (
     BUY_FAMILY_RECOMMENDATION_TYPES,
     HOLDING_FAMILY_RECOMMENDATION_TYPES,
     run_preflight,
+)
+from jstock_advisor.migrations.legacy_shapes import (
+    LegacyHoldingsSnapshotEntryV1,
+    LegacyHoldingV1,
+    LegacyPurchaseLotV1,
 )
 from jstock_advisor.migrations.target import MigrationTarget
 
@@ -47,8 +50,8 @@ def _make_recommendation(
 
 
 def _seed_holding(store_dir: Path, stock_code: str = "8306", shares: int = 100) -> None:
-    build_collection_store(Holding, "holdings.json", "stock_code", store_dir).upsert(
-        Holding(
+    build_collection_store(LegacyHoldingV1, "holdings.json", "stock_code", store_dir).upsert(
+        LegacyHoldingV1(
             stock_code=stock_code,
             stock_name="テスト銘柄",
             shares=shares,
@@ -186,9 +189,11 @@ def test_preflight_detects_unresolved_decision_snapshot_reference(store_dir: Pat
 
 
 def test_preflight_detects_orphan_purchase_lot(store_dir: Path) -> None:
-    lot_store = build_collection_store(PurchaseLot, "purchase_lots.json", "lot_id", store_dir)
+    lot_store = build_collection_store(
+        LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir
+    )
     lot_store.upsert(
-        PurchaseLot(
+        LegacyPurchaseLotV1(
             lot_id="lot-orphan",
             stock_code="9999",
             purchase_date=dt.date(2026, 1, 1),
@@ -208,10 +213,10 @@ def test_preflight_detects_orphan_purchase_lot(store_dir: Path) -> None:
 
 def test_preflight_detects_active_snapshot_without_holding(store_dir: Path) -> None:
     snapshot_store = build_collection_store(
-        HoldingsSnapshotEntry, "holdings_snapshots.json", "stock_code", store_dir
+        LegacyHoldingsSnapshotEntryV1, "holdings_snapshots.json", "stock_code", store_dir
     )
     snapshot_store.upsert(
-        HoldingsSnapshotEntry(
+        LegacyHoldingsSnapshotEntryV1(
             stock_code="9999",
             shares=10,
             recorded_at=dt.date(2026, 1, 1),
@@ -237,10 +242,10 @@ def test_preflight_v2_table_check_skipped_for_local_target(store_dir: Path) -> N
 
 def test_preflight_detects_active_validation_snapshot_without_holding(store_dir: Path) -> None:
     validation_store = build_collection_store(
-        HoldingsSnapshotEntry, "validation_holdings_snapshots.json", "stock_code", store_dir
+        LegacyHoldingsSnapshotEntryV1, "validation_holdings_snapshots.json", "stock_code", store_dir
     )
     validation_store.upsert(
-        HoldingsSnapshotEntry(
+        LegacyHoldingsSnapshotEntryV1(
             stock_code="9999",
             shares=10,
             recorded_at=dt.date(2026, 1, 1),
@@ -261,10 +266,10 @@ def test_preflight_detects_active_validation_snapshot_without_holding(store_dir:
 def test_preflight_passes_when_validation_snapshot_matches_holding(store_dir: Path) -> None:
     _seed_holding(store_dir, stock_code="8306")
     validation_store = build_collection_store(
-        HoldingsSnapshotEntry, "validation_holdings_snapshots.json", "stock_code", store_dir
+        LegacyHoldingsSnapshotEntryV1, "validation_holdings_snapshots.json", "stock_code", store_dir
     )
     validation_store.upsert(
-        HoldingsSnapshotEntry(
+        LegacyHoldingsSnapshotEntryV1(
             stock_code="8306",
             shares=100,
             recorded_at=dt.date(2026, 1, 1),

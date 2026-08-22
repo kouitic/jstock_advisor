@@ -7,12 +7,15 @@ from pydantic import ValidationError
 from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
 from jstock_advisor.domain.entities.enums import AccountType, ConfidenceLevel, RecommendationType
 from jstock_advisor.domain.entities.holding import PurchaseLot, summarize_lots
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 
 
 def _lot(shares: int, price: str, date: dt.date, lot_id: str = "lot") -> PurchaseLot:
     return PurchaseLot(
         lot_id=lot_id,
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "8136"),
         stock_code="8136",
         purchase_date=date,
         shares=shares,
@@ -73,6 +76,8 @@ def test_purchase_lot_rejects_unknown_field() -> None:
         PurchaseLot.model_validate(
             {
                 "lot_id": "lot-1",
+                "owner": DEFAULT_OWNER,
+                "holding_id": build_holding_id(DEFAULT_OWNER, "8136"),
                 "stock_code": "8136",
                 "purchase_date": "2025-04-01",
                 "shares": 100,

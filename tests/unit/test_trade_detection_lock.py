@@ -12,9 +12,11 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.infrastructure.aws import trade_detection_lock
 
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)  # 月曜
+_HID_2914 = build_holding_id(DEFAULT_OWNER, "2914")
 
 
 class _FakeTable:
@@ -143,9 +145,12 @@ def _seed_baseline(repo: Any, stock_code: str, shares: int) -> None:
     from decimal import Decimal
 
     from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
+    from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 
     repo.upsert(
         HoldingsSnapshotEntry(
+            owner=DEFAULT_OWNER,
+            holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
             stock_code=stock_code,
             shares=shares,
             average_purchase_price=Decimal("1000") if shares > 0 else None,
@@ -160,9 +165,13 @@ def _current_holdings(stock_code: str, shares: int) -> dict[str, Any]:
 
     from jstock_advisor.domain.entities.enums import AccountType
     from jstock_advisor.domain.entities.holding import Holding
+    from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 
+    holding_id = build_holding_id(DEFAULT_OWNER, stock_code)
     return {
-        stock_code: Holding(
+        holding_id: Holding(
+            owner=DEFAULT_OWNER,
+            holding_id=holding_id,
             stock_code=stock_code,
             stock_name=f"銘柄{stock_code}",
             shares=shares,
@@ -235,10 +244,10 @@ def test_validation_detection_first_does_not_block_normal_detection(
     # 誤認し、検知処理自体をスキップして空のevents・snapshot未更新のままになる。
     assert len(validation_outcome.events) == 1
     assert len(normal_outcome.events) == 1
-    assert validation_repo.get("2914") is not None
-    assert validation_repo.get("2914").cooldown_until_date is not None
-    assert normal_repo.get("2914") is not None
-    assert normal_repo.get("2914").cooldown_until_date is not None
+    assert validation_repo.get(_HID_2914) is not None
+    assert validation_repo.get(_HID_2914).cooldown_until_date is not None
+    assert normal_repo.get(_HID_2914) is not None
+    assert normal_repo.get(_HID_2914).cooldown_until_date is not None
 
 
 def test_normal_detection_first_does_not_block_validation_detection(
@@ -277,8 +286,8 @@ def test_normal_and_validation_snapshots_do_not_cross_contaminate(
     normal_service.detect_and_apply(current_holdings, _NOW)
 
     # NORMAL側は更新されるが、VALIDATION側は無関係(まだshares=0のまま)。
-    assert normal_repo.get("2914").shares == 100
-    assert validation_repo.get("2914").shares == 0
+    assert normal_repo.get(_HID_2914).shares == 100
+    assert validation_repo.get(_HID_2914).shares == 0
 
 
 # ============================================================================
@@ -421,7 +430,7 @@ def _run_tc_e2e_scenario(fake_table_on_lambda: _FakeTable, tmp_path: Any, now: d
     assert outcome.confirmed is True
     assert len(outcome.events) == 1
 
-    entry = normal_repo.get("2914")
+    entry = normal_repo.get(_HID_2914)
     assert entry is not None
     assert entry.cooldown_until_date is not None
 

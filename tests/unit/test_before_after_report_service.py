@@ -5,6 +5,7 @@ from pathlib import Path
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType, ConfidenceLevel, RecommendationType
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
@@ -61,6 +62,8 @@ def test_entry_without_holding_skips_after_and_notes_reason(tmp_path: Path) -> N
 def test_entry_with_holding_runs_after_pipeline(tmp_path: Path) -> None:
     holding_repo = HoldingRepository(store_dir=tmp_path)
     holding = Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "2914"),
         stock_code="2914",
         stock_name="日本たばこ産業",
         shares=100,

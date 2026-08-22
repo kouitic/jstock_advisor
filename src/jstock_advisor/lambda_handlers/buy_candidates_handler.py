@@ -82,6 +82,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.add_on_risk import evaluate_add_on_eligibility
@@ -505,7 +506,9 @@ def _process_single_candidate(
                 # 実行しても無意味なため)。共通購入判断と同一snapshotを渡すことで
                 # 現在値・財務データの矛盾を防ぐ ---
                 if base_buy_action in BUY_FAMILY_ACTIONS and not holding_data_inconsistent:
-                    holding = PortfolioService().get_holding(stock_code)
+                    # M3時点ではowner横断の集約評価は未実装(発見事項として報告済み)。
+                    # 従来どおりDEFAULT_OWNERの保有のみを競合チェック対象とする。
+                    holding = PortfolioService().get_holding(DEFAULT_OWNER, stock_code)
                     if holding is not None:
                         sell_service = SellSignalService(
                             providers=providers,
@@ -1264,8 +1267,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         config=config.notification.trade_cooldown,
         execution_context=execution_context,
     )
-    current_holdings_by_code = {h.stock_code: h for h in PortfolioService().list_holdings()}
-    detection_outcome = trade_cooldown_service.detect_and_apply(current_holdings_by_code, now)
+    current_holdings_by_id = {h.holding_id: h for h in PortfolioService().list_holdings()}
+    detection_outcome = trade_cooldown_service.detect_and_apply(current_holdings_by_id, now)
     if detection_outcome.confirmed:
         watch_state_service = WatchStateService(
             business_calendar=calendar, execution_context=execution_context

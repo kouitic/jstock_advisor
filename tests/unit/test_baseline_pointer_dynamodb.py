@@ -23,7 +23,7 @@ from jstock_advisor.infrastructure.aws import baseline_pointer
 
 _NOW = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
 _REGION = "ap-northeast-1"
-_TABLE_NAME = "jstock-investment_thesis_baseline_pointers"
+_TABLE_NAME = "jstock-investment_thesis_baseline_pointers_v2"
 
 
 @pytest.fixture

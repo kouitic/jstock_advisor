@@ -15,6 +15,7 @@ from decimal import Decimal
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType, ExecutionPlanReason
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 
@@ -49,6 +50,8 @@ def _holding(
     account_type: AccountType,
 ) -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "2914"),
         stock_code="2914",
         stock_name="x",
         shares=shares,

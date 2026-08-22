@@ -35,6 +35,7 @@ from jstock_advisor.domain.entities.enums import (
     TimingAction,
 )
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.signals.profit_taking import ProfitTakingResult, UnrealizedPnl
 from jstock_advisor.interfaces.types import (
     CorporateActionEvent,
@@ -158,6 +159,8 @@ def _providers(
 
 def _holding(stock_code: str) -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name="テスト銘柄",
         shares=100,
@@ -590,6 +593,8 @@ def _holding_with_buy_more(stock_code: str) -> Holding:
     (コードレビュー対応2026-08、指摘1: basis_date=last_purchase_dateの回帰確認用)。
     """
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name="テスト銘柄",
         shares=100,
@@ -657,6 +662,8 @@ def _holding_with_last_sale_date(
     """Profit Protection由来の一部売却後を模擬する保有(last_sale_date設定済み、
     コードレビュー対応2026-08、指摘A-2)。"""
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name="テスト銘柄",
         shares=100,

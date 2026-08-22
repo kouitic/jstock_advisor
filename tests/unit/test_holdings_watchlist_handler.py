@@ -15,6 +15,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
@@ -32,6 +33,8 @@ class _FakeContext:
 
 def _holding(stock_code: str) -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
         shares=100,
@@ -141,7 +144,7 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
     assert {
         "fn": "jstock-advisor-holdings-watchlist",
         "task": "holding",
-        "stock_code": "2914",
+        "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
         "portfolio_total_market_value": None,
         "portfolio_total_acquisition_cost": "200000",
         "execution_mode": "NORMAL",
@@ -150,7 +153,7 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
     assert {
         "fn": "jstock-advisor-holdings-watchlist",
         "task": "holding",
-        "stock_code": "8136",
+        "holding_id": build_holding_id(DEFAULT_OWNER, "8136"),
         "portfolio_total_market_value": None,
         "portfolio_total_acquisition_cost": "200000",
         "execution_mode": "NORMAL",
@@ -162,19 +165,21 @@ def test_task_holding_processes_only_requested_stock(monkeypatch: pytest.MonkeyP
     _patch_common(monkeypatch)
     target = _holding("2914")
 
-    def _get_holding(self: object, stock_code: str) -> Holding | None:
-        return target if stock_code == "2914" else None
+    def _get_holding(self: object, holding_id: str) -> Holding | None:
+        return target if holding_id == build_holding_id(DEFAULT_OWNER, "2914") else None
 
-    monkeypatch.setattr(handler_module.PortfolioService, "get_holding", _get_holding)
+    monkeypatch.setattr(handler_module.HoldingRepository, "get", _get_holding)
     monkeypatch.setattr(
         handler_module, "build_stock_snapshot", lambda *a, **kw: (None, "テストエラー")
     )
 
-    result = handler_module.handler({"task": "holding", "stock_code": "2914"}, _FakeContext())
+    result = handler_module.handler(
+        {"task": "holding", "holding_id": build_holding_id(DEFAULT_OWNER, "2914")}, _FakeContext()
+    )
 
     # データ取得エラー時は評価監査ステータス(要求仕様§12)も併せて返す
     assert result == {
-        "stock_code": "2914",
+        "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
         "recommended": False,
         "notified": False,
         "evaluation_status": "DATA_INSUFFICIENT",
@@ -184,12 +189,14 @@ def test_task_holding_processes_only_requested_stock(monkeypatch: pytest.MonkeyP
 
 def test_task_holding_not_found_reports_found_false(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_common(monkeypatch)
-    monkeypatch.setattr(handler_module.PortfolioService, "get_holding", lambda self, code: None)
+    monkeypatch.setattr(handler_module.HoldingRepository, "get", lambda self, holding_id: None)
 
-    result = handler_module.handler({"task": "holding", "stock_code": "9999"}, _FakeContext())
+    result = handler_module.handler(
+        {"task": "holding", "holding_id": build_holding_id(DEFAULT_OWNER, "9999")}, _FakeContext()
+    )
 
     assert result == {
-        "stock_code": "9999",
+        "holding_id": build_holding_id(DEFAULT_OWNER, "9999"),
         "recommended": False,
         "notified": False,
         "found": False,
@@ -223,7 +230,7 @@ def test_task_holding_hold_category_and_portfolio_concentration_notified(
     """
     _patch_common(monkeypatch)
     target = _holding("2914")
-    monkeypatch.setattr(handler_module.PortfolioService, "get_holding", lambda self, code: target)
+    monkeypatch.setattr(handler_module.HoldingRepository, "get", lambda self, holding_id: target)
     monkeypatch.setattr(
         handler_module,
         "build_stock_snapshot",
@@ -268,7 +275,7 @@ def test_task_holding_hold_category_and_portfolio_concentration_notified(
     result = handler_module.handler(
         {
             "task": "holding",
-            "stock_code": "2914",
+            "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
             # 単一銘柄で全体の取得価格を占めるため取得価格ベースの比率は100%になる
             "portfolio_total_market_value": None,
             "portfolio_total_acquisition_cost": "100000",
@@ -298,7 +305,7 @@ def test_task_holding_validation_mode_does_not_grow_production_audit_log(
     """
     _patch_common(monkeypatch)
     target = _holding("2914")
-    monkeypatch.setattr(handler_module.PortfolioService, "get_holding", lambda self, code: target)
+    monkeypatch.setattr(handler_module.HoldingRepository, "get", lambda self, holding_id: target)
     monkeypatch.setattr(
         handler_module,
         "build_stock_snapshot",
@@ -343,7 +350,7 @@ def test_task_holding_validation_mode_does_not_grow_production_audit_log(
     result = handler_module.handler(
         {
             "task": "holding",
-            "stock_code": "2914",
+            "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
             "portfolio_total_market_value": None,
             "portfolio_total_acquisition_cost": "100000",
             "execution_mode": "VALIDATION",
@@ -897,7 +904,7 @@ def _run_attention_scenario(
     notify_recommendation_with_status()の戻り値になる)。"""
     _patch_common(monkeypatch)
     target = _holding("2914")
-    monkeypatch.setattr(handler_module.PortfolioService, "get_holding", lambda self, code: target)
+    monkeypatch.setattr(handler_module.HoldingRepository, "get", lambda self, holding_id: target)
     monkeypatch.setattr(
         handler_module,
         "build_stock_snapshot",
@@ -942,7 +949,7 @@ def _run_attention_scenario(
     handler_module.handler(
         {
             "task": "holding",
-            "stock_code": "2914",
+            "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
             "portfolio_total_market_value": "100000",
             "portfolio_total_acquisition_cost": "100000",
             # VALIDATION: Recommendation保存を実行しない(実ローカルストアを
@@ -1152,7 +1159,7 @@ def _run_attention_scenario_and_capture_record_result(
     (追加修正3: _finish_batch_item → record_result のIF引数を直接検証)。"""
     _patch_common(monkeypatch)
     target = _holding("2914")
-    monkeypatch.setattr(handler_module.PortfolioService, "get_holding", lambda self, code: target)
+    monkeypatch.setattr(handler_module.HoldingRepository, "get", lambda self, holding_id: target)
     monkeypatch.setattr(
         handler_module,
         "build_stock_snapshot",
@@ -1192,7 +1199,7 @@ def _run_attention_scenario_and_capture_record_result(
     handler_module.handler(
         {
             "task": "holding",
-            "stock_code": "2914",
+            "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
             "portfolio_total_market_value": "100000",
             "portfolio_total_acquisition_cost": "100000",
             "batch_id": "test-batch-if-attention",
@@ -1212,7 +1219,7 @@ def test_record_result_if_c_notification_disabled_attention_data_quality_ok(
         monkeypatch, NotificationEligibility(eligible=True)
     )
 
-    assert captured["attention_detected_stock_code"] == "2914"
+    assert captured["attention_detected_stock_code"] == build_holding_id(DEFAULT_OWNER, "2914")
     assert captured["attention_sent_stock_code"] is None
 
 

@@ -19,6 +19,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
@@ -51,6 +52,8 @@ def _holding(
 ) -> Holding:
     price = Decimal(average_purchase_price)
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
         shares=shares,
@@ -835,7 +838,7 @@ def test_process_single_candidate_shares_one_snapshot_across_buy_sell_profit_tak
 
     monkeypatch.setattr(handler_module.BuySignalService, "analyze", _fake_buy_analyze)
     monkeypatch.setattr(
-        handler_module.PortfolioService, "get_holding", lambda self, code: _holding(code)
+        handler_module.PortfolioService, "get_holding", lambda self, owner, code: _holding(code)
     )
 
     class _NoSignalOutcome:

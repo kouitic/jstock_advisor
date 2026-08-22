@@ -78,6 +78,7 @@ from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
     HoldingDecisionResultRepository,
 )
+from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -879,7 +880,7 @@ def _finish_batch_item(
 
 
 def _process_single_holding(
-    stock_code: str,
+    holding_id: str,
     batch_id: str | None,
     now: dt.datetime,
     providers: ProviderBundle,
@@ -891,16 +892,19 @@ def _process_single_holding(
     portfolio_total_acquisition_cost: Decimal | None,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> dict[str, Any]:
+    """M3(保有銘柄オーナー機能): holding_id(= owner + "#" + stock_code)単位で
+    対象Holdingを特定する。同一stock_codeでも複数ownerが保有する場合、
+    それぞれ独立したworker呼び出しとして処理される。"""
     runtime_config_service = HoldingDecisionRuntimeConfigService(
         cache_ttl_seconds=config.holding_decision.runtime_config_cache_ttl_seconds
     )
-    holding = PortfolioService().get_holding(stock_code)
+    holding = HoldingRepository().get(holding_id)
     if holding is None:
-        logger.warning("dispatched holding not found stock_code=%s", stock_code)
+        logger.warning("dispatched holding not found holding_id=%s", holding_id)
         _finish_batch_item(
-            batch_id, "failed", stock_code, now, notification_service, runtime_config_service
+            batch_id, "failed", holding_id, now, notification_service, runtime_config_service
         )
-        return {"stock_code": stock_code, "recommended": False, "notified": False, "found": False}
+        return {"holding_id": holding_id, "recommended": False, "notified": False, "found": False}
 
     profit_service = ProfitTakingService(
         providers=providers, config=config, execution_context=execution_context
@@ -934,17 +938,17 @@ def _process_single_holding(
             execution_context,
         )
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
-        logger.exception("holding analysis failed unexpectedly stock_code=%s", stock_code)
+        logger.exception("holding analysis failed unexpectedly holding_id=%s", holding_id)
         _finish_batch_item(
-            batch_id, "failed", stock_code, now, notification_service, runtime_config_service
+            batch_id, "failed", holding_id, now, notification_service, runtime_config_service
         )
-        return {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
+        return {"holding_id": holding_id, "recommended": False, "notified": False, "failed": True}
 
     logger.info("holding_evaluation_audit: %s", result.audit)
     _finish_batch_item(
         batch_id,
         result.category,
-        stock_code,
+        holding_id,
         now,
         notification_service,
         runtime_config_service,
@@ -954,7 +958,7 @@ def _process_single_holding(
         attention_sent=result.attention_sent,
     )
     return {
-        "stock_code": stock_code,
+        "holding_id": holding_id,
         "recommended": result.recommended,
         "notified": result.notified,
         "evaluation_status": result.audit.evaluation_status.value,
@@ -1020,9 +1024,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         if execution_context.is_validation:
             logger.info(
                 "VALIDATION MODE task=holding execution_mode=VALIDATION "
-                "validation_run_id=%s stock_code=%s",
+                "validation_run_id=%s holding_id=%s",
                 event.get("batch_id"),
-                event["stock_code"],
+                event["holding_id"],
             )
         portfolio_total_market_value = (
             Decimal(event["portfolio_total_market_value"])
@@ -1035,7 +1039,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             else None
         )
         result = _process_single_holding(
-            event["stock_code"],
+            event["holding_id"],
             event.get("batch_id"),
             now,
             providers,
@@ -1073,8 +1077,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         config=config.notification.trade_cooldown,
         execution_context=execution_context,
     )
-    current_holdings_by_code = {h.stock_code: h for h in holdings}
-    detection_outcome = trade_cooldown_service.detect_and_apply(current_holdings_by_code, now)
+    current_holdings_by_id = {h.holding_id: h for h in holdings}
+    detection_outcome = trade_cooldown_service.detect_and_apply(current_holdings_by_id, now)
     if detection_outcome.confirmed:
         watch_state_service = WatchStateService(
             business_calendar=calendar, execution_context=execution_context
@@ -1113,7 +1117,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             function_name,
             {
                 "task": "holding",
-                "stock_code": holding.stock_code,
+                "holding_id": holding.holding_id,
                 "batch_id": batch_id,
                 "portfolio_total_market_value": (
                     str(portfolio_total_market_value)

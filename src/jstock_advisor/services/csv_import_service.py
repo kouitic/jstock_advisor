@@ -15,11 +15,18 @@ from typing import Literal
 from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.domain.entities.owner import (
+    DEFAULT_OWNER,
+    InvalidOwnerError,
+    build_holding_id,
+    normalize_and_validate_owner,
+)
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.portfolio_service import PortfolioService
 
 REQUIRED_COLUMNS = {"stock_code", "shares", "purchase_price"}
 OPTIONAL_COLUMNS = {
+    "owner",
     "stock_name",
     "purchase_date",
     "account_type",
@@ -81,11 +88,11 @@ class HoldingsCsvImportService:
             if missing:
                 raise ValueError(f"CSVに必須列がありません: {sorted(missing)}")
 
-            seen_rows: set[tuple[str, str, str, str]] = set()
-            overwritten_stock_codes: set[str] = set()
+            seen_rows: set[tuple[str, str, str, str, str]] = set()
+            overwritten_holding_ids: set[str] = set()
             for row_number, row in enumerate(reader, start=2):  # 1行目はヘッダー
                 result = self._process_row(
-                    row_number, row, seen_rows, on_duplicate, overwritten_stock_codes
+                    row_number, row, seen_rows, on_duplicate, overwritten_holding_ids
                 )
                 summary.add(result)
         return summary
@@ -94,10 +101,21 @@ class HoldingsCsvImportService:
         self,
         row_number: int,
         row: dict[str, str | None],
-        seen_rows: set[tuple[str, str, str, str]],
+        seen_rows: set[tuple[str, str, str, str, str]],
         on_duplicate: DuplicatePolicy,
-        overwritten_stock_codes: set[str],
+        overwritten_holding_ids: set[str],
     ) -> CsvImportRowResult:
+        owner_raw = (row.get("owner") or "").strip() or DEFAULT_OWNER
+        try:
+            owner = normalize_and_validate_owner(owner_raw)
+        except InvalidOwnerError:
+            return CsvImportRowResult(
+                row_number=row_number,
+                status=CsvRowStatus.ERROR,
+                stock_code=None,
+                message=f"所有者の指定が不正です: {owner_raw!r}",
+            )
+
         stock_code = ExternalValueParser.stock_code(row.get("stock_code"))
         if stock_code is None:
             raw_stock_code = (row.get("stock_code") or "").strip()
@@ -169,7 +187,7 @@ class HoldingsCsvImportService:
                     message="利確目標率は数値で指定してください",
                 )
 
-        dedup_key = (stock_code, str(purchase_date), str(purchase_price), str(shares))
+        dedup_key = (owner, stock_code, str(purchase_date), str(purchase_price), str(shares))
         if dedup_key in seen_rows:
             messages.append("CSV内に同一内容の行が重複しています")
         seen_rows.add(dedup_key)
@@ -178,19 +196,21 @@ class HoldingsCsvImportService:
         investment_purpose = (row.get("investment_purpose") or "").strip() or None
         memo = (row.get("memo") or "").strip() or None
 
-        existing = self._portfolio.get_holding(stock_code)
+        holding_id = build_holding_id(owner, stock_code)
+        existing = self._portfolio.get_holding(owner, stock_code)
         if (
             existing is not None
             and on_duplicate == "overwrite"
-            and stock_code not in overwritten_stock_codes
+            and holding_id not in overwritten_holding_ids
         ):
-            self._portfolio.delete_holding(stock_code)
-            overwritten_stock_codes.add(stock_code)
+            self._portfolio.delete_holding(owner, stock_code)
+            overwritten_holding_ids.add(holding_id)
             messages.append("既存の保有銘柄を上書きしました")
         elif existing is not None and on_duplicate == "additional_purchase":
             messages.append("既存の保有銘柄への追加購入として登録しました")
 
         self._portfolio.register_purchase(
+            owner=owner,
             stock_code=stock_code,
             stock_name=stock_name,
             shares=shares,

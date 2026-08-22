@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.enums import (
     WatchType,
 )
 from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.line.client import LineClient
 from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
@@ -143,6 +144,8 @@ def test_trade_cooldown_suppression_reason_is_specific(tmp_path: Path) -> None:
     svc, _client = _service(store_dir)
     HoldingsSnapshotRepository(store_dir=store_dir).upsert(
         HoldingsSnapshotEntry(
+            owner=DEFAULT_OWNER,
+            holding_id=build_holding_id(DEFAULT_OWNER, "4631"),
             stock_code="4631",
             shares=100,
             average_purchase_price=Decimal("1000"),

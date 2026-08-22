@@ -32,6 +32,7 @@ from jstock_advisor.domain.entities.holding_decision import (
     RiskDeductionScore,
 )
 from jstock_advisor.domain.entities.notification import NotificationLog
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.signals.holding_decision_score import combine_holding_decision
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
@@ -72,6 +73,8 @@ _PROVIDERS = build_mock_provider_bundle(_NOW)
 
 def _holding(stock_code: str) -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name="x",
         shares=100,
@@ -251,6 +254,8 @@ def test_live_comparison_holding_overrides_used_for_non_holding_stock(store_dir:
     """--purchase-price等で明示指定した場合のみ、非保有銘柄でも旧方式を評価する。"""
     portfolio = PortfolioService(holding_repository=HoldingRepository(store_dir=store_dir))
     override = Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "2914"),
         stock_code="2914",
         stock_name="override",
         shares=200,

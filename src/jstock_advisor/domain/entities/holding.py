@@ -10,9 +10,16 @@ from jstock_advisor.domain.entities.enums import AccountType
 
 
 class PurchaseLot(Entity):
-    """1回の購入取引に対応するロット。同一銘柄を複数回購入した場合に対応する。"""
+    """1回の購入取引に対応するロット。同一銘柄を複数回購入した場合に対応する。
+
+    owner/holding_id(M3、保有銘柄オーナー機能): holding_id = owner + "#" +
+    stock_code(domain/entities/owner.py参照)。同一stock_codeでもownerが
+    異なれば別Holdingのロットとして扱う。
+    """
 
     lot_id: str
+    owner: str
+    holding_id: str
     stock_code: str
     purchase_date: dt.date
     shares: int
@@ -27,8 +34,16 @@ class PurchaseLot(Entity):
 class Holding(Entity):
     """保有銘柄サマリ。average_purchase_price/total_purchase_amount/shares は
     PurchaseLotの集計値のキャッシュであり、ロット追加・編集時にサービス層が再計算する。
+
+    owner/holding_id(M3、保有銘柄オーナー機能): Holdingを一意に識別する単位は
+    stock_codeではなくholding_id(= owner + "#" + stock_code)。同一stock_code
+    でもownerが異なれば別Holdingとして扱う。holding_idは外部から直接受け取らず、
+    常にowner×stock_codeから決定的に導出すること(domain/entities/owner.py
+    build_holding_id()参照)。
     """
 
+    owner: str
+    holding_id: str
     stock_code: str
     stock_name: str
     market_segment: str | None = None

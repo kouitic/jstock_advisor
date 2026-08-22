@@ -10,6 +10,7 @@ import pytest
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.providers.corporate_action.mock_impl import MockCorporateActionProvider
 from jstock_advisor.providers.disclosure.mock_impl import MockDisclosureProvider
 from jstock_advisor.providers.dividend_data.mock_impl import MockDividendDataProvider
@@ -38,6 +39,8 @@ def _providers() -> ProviderBundle:
 
 def _holding() -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "2914"),
         stock_code="2914",
         stock_name="日本たばこ産業",
         shares=100,

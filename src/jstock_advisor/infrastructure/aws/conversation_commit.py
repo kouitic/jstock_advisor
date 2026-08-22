@@ -57,7 +57,7 @@ from jstock_advisor.services.write_plan import (
 
 _TRANSACTIONS_TABLE_FILE = "transactions.json"
 _PURCHASE_LOTS_TABLE_FILE = "purchase_lots.json"
-_HOLDINGS_TABLE_FILE = "holdings.json"
+_HOLDINGS_TABLE_FILE = "holdings_v2.json"  # M3: owner/holding_id対応後のV2テーブル
 _WATCHLIST_TABLE_FILE = "watchlist.json"
 _TRADING_PAUSE_CONFIG_TABLE_FILE = "trading_pause_config.json"
 _TRADING_PAUSE_CONFIG_ID = "trading_pause"

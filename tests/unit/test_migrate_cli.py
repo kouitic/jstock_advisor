@@ -15,9 +15,9 @@ from typer.testing import CliRunner
 
 from jstock_advisor.cli import migrate as cli_module
 from jstock_advisor.domain.entities.enums import AccountType
-from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
 from jstock_advisor.infrastructure.aws import trading_pause_config
 from jstock_advisor.infrastructure.collection_store import build_collection_store
+from jstock_advisor.migrations.legacy_shapes import LegacyHoldingV1, LegacyPurchaseLotV1
 from jstock_advisor.migrations.v2_entities import HoldingV2
 
 _runner = CliRunner()
@@ -25,8 +25,8 @@ _NOW = dt.datetime(2026, 8, 22, 0, 0, tzinfo=dt.UTC)
 
 
 def _seed_holding_and_lot(store_dir: Path) -> None:
-    build_collection_store(PurchaseLot, "purchase_lots.json", "lot_id", store_dir).upsert(
-        PurchaseLot(
+    build_collection_store(LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir).upsert(
+        LegacyPurchaseLotV1(
             lot_id="lot-1",
             stock_code="8306",
             purchase_date=dt.date(2026, 1, 1),
@@ -35,8 +35,8 @@ def _seed_holding_and_lot(store_dir: Path) -> None:
             account_type=AccountType.GENERAL,
         )
     )
-    build_collection_store(Holding, "holdings.json", "stock_code", store_dir).upsert(
-        Holding(
+    build_collection_store(LegacyHoldingV1, "holdings.json", "stock_code", store_dir).upsert(
+        LegacyHoldingV1(
             stock_code="8306",
             stock_name="三菱UFJ",
             shares=100,

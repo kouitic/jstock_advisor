@@ -9,6 +9,7 @@ from pathlib import Path
 import typer
 
 from jstock_advisor.domain.entities.enums import AccountType, SkipReason, TransactionType
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.transaction_csv_import_service import TransactionCsvImportService
@@ -38,6 +39,7 @@ def buy_executed(
     stock_code: str = typer.Argument(..., help="銘柄コード"),
     shares: int = typer.Argument(..., help="約定株数"),
     price: str = typer.Argument(..., help="約定単価(円)"),
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者"),
     recommendation_id: str = typer.Option(None, "--recommendation-id", help="対応する推奨ID"),
     date: str = typer.Option(None, "--date", help="約定日(YYYY-MM-DD、省略時は本日)"),
     account_type: AccountType = typer.Option(None, "--account-type"),
@@ -51,7 +53,7 @@ def buy_executed(
 ) -> None:
     """買付の執行結果を記録する。"""
     if transaction_type is None:
-        existing = PortfolioService().get_holding(stock_code)
+        existing = PortfolioService().get_holding(owner, stock_code)
         transaction_type = TransactionType.ADDITIONAL_BUY if existing else TransactionType.BUY
     elif transaction_type not in (TransactionType.BUY, TransactionType.ADDITIONAL_BUY):
         raise typer.BadParameter("--type はBUYまたはADDITIONAL_BUYを指定してください")
@@ -59,6 +61,7 @@ def buy_executed(
     service = TransactionHistoryService()
     try:
         transaction = service.record_execution(
+            owner=owner,
             stock_code=stock_code,
             transaction_type=transaction_type,
             shares=shares,
@@ -88,6 +91,7 @@ def sell_executed(
     stock_code: str = typer.Argument(..., help="銘柄コード"),
     shares: int = typer.Argument(..., help="約定株数"),
     price: str = typer.Argument(..., help="約定単価(円)"),
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者"),
     recommendation_id: str = typer.Option(None, "--recommendation-id", help="対応する推奨ID"),
     date: str = typer.Option(None, "--date", help="約定日(YYYY-MM-DD、省略時は本日)"),
     account_type: AccountType = typer.Option(None, "--account-type"),
@@ -101,7 +105,7 @@ def sell_executed(
 ) -> None:
     """売却の執行結果を記録する。"""
     if transaction_type is None:
-        existing = PortfolioService().get_holding(stock_code)
+        existing = PortfolioService().get_holding(owner, stock_code)
         if existing is not None and shares >= existing.shares:
             transaction_type = TransactionType.FULL_SELL
         else:
@@ -112,6 +116,7 @@ def sell_executed(
     service = TransactionHistoryService()
     try:
         transaction = service.record_execution(
+            owner=owner,
             stock_code=stock_code,
             transaction_type=transaction_type,
             shares=shares,

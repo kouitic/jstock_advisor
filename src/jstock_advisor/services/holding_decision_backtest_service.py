@@ -42,6 +42,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import JST
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
@@ -228,6 +229,8 @@ def placeholder_holding(stock_code: str, now: dt.datetime) -> Holding:
     ダミー値を渡すと架空の評価結果になる)。
     """
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name=stock_code,
         shares=100,
@@ -248,7 +251,7 @@ def resolve_target_stock_codes(
     if explicit_stock_codes:
         return list(dict.fromkeys(explicit_stock_codes))  # 重複除去・順序維持
     portfolio = portfolio_service or PortfolioService()
-    return [h.stock_code for h in portfolio.list_holdings()]
+    return list(dict.fromkeys(h.stock_code for h in portfolio.list_holdings()))
 
 
 def _data_error_row(stock_code: str, now: dt.datetime, error: str | None) -> BacktestRow:
@@ -305,7 +308,7 @@ def run_live_comparison(
             rows.append(_data_error_row(stock_code, now, error))
             continue
 
-        actual_holding = portfolio.get_holding(stock_code)
+        actual_holding = portfolio.get_holding(DEFAULT_OWNER, stock_code)
         override = (holding_overrides or {}).get(stock_code)
         if override is not None and actual_holding is not None:
             raise ValueError(

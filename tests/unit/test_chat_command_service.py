@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from jstock_advisor.domain.entities.enums import AccountType, TransactionType
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -74,7 +75,7 @@ def test_buy_command_registers_new_purchase(
     assert saved[0].shares == 100
     assert saved[0].execution_price == Decimal("3775")
 
-    holding = portfolio.get_holding("8136")
+    holding = portfolio.get_holding(DEFAULT_OWNER, "8136")
     assert holding is not None
     assert holding.shares == 100
     assert holding.average_purchase_price == Decimal("3775")
@@ -86,6 +87,7 @@ def test_buy_command_detects_additional_purchase(
     transactions: TransactionHistoryService,
 ) -> None:
     portfolio.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="8136",
         stock_name="サンリオ",
         shares=100,
@@ -98,7 +100,7 @@ def test_buy_command_detects_additional_purchase(
     saved = transactions.list_transactions("8136")
     assert saved[0].transaction_type == TransactionType.ADDITIONAL_BUY
 
-    holding = portfolio.get_holding("8136")
+    holding = portfolio.get_holding(DEFAULT_OWNER, "8136")
     assert holding is not None
     assert holding.shares == 150
 
@@ -109,6 +111,7 @@ def test_sell_command_detects_partial_sell(
     transactions: TransactionHistoryService,
 ) -> None:
     portfolio.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="8136",
         stock_name="サンリオ",
         shares=100,
@@ -121,7 +124,7 @@ def test_sell_command_detects_partial_sell(
     saved = transactions.list_transactions("8136")
     assert saved[0].transaction_type == TransactionType.PARTIAL_SELL
 
-    holding = portfolio.get_holding("8136")
+    holding = portfolio.get_holding(DEFAULT_OWNER, "8136")
     assert holding is not None
     assert holding.shares == 70
 
@@ -138,6 +141,7 @@ def test_case_n_sell_command_updates_last_sale_date(
     last_purchase_dateが不変であること(Case O)もあわせて確認する。
     """
     portfolio.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="8136",
         stock_name="サンリオ",
         shares=100,
@@ -145,7 +149,7 @@ def test_case_n_sell_command_updates_last_sale_date(
         purchase_date=dt.date(2026, 1, 1),
         account_type=AccountType.NISA,
     )
-    holding_before = portfolio.get_holding("8136")
+    holding_before = portfolio.get_holding(DEFAULT_OWNER, "8136")
     assert holding_before is not None
     assert holding_before.last_sale_date is None
     assert holding_before.last_purchase_date == dt.date(2026, 1, 1)
@@ -153,7 +157,7 @@ def test_case_n_sell_command_updates_last_sale_date(
     result = service.handle("売却,8136,30,1500", now=_NOW)
     assert result.success is True
 
-    holding_after = portfolio.get_holding("8136")
+    holding_after = portfolio.get_holding(DEFAULT_OWNER, "8136")
     assert holding_after is not None
     assert holding_after.shares == 70
     # _NOW = 2026-07-24 00:00 UTC → JST 09:00、暦日は2026-07-24。
@@ -167,6 +171,7 @@ def test_sell_command_detects_full_sell(
     transactions: TransactionHistoryService,
 ) -> None:
     portfolio.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="8136",
         stock_name="サンリオ",
         shares=100,
@@ -179,7 +184,7 @@ def test_sell_command_detects_full_sell(
     saved = transactions.list_transactions("8136")
     assert saved[0].transaction_type == TransactionType.FULL_SELL
 
-    assert portfolio.get_holding("8136") is None
+    assert portfolio.get_holding(DEFAULT_OWNER, "8136") is None
 
 
 def test_sell_command_rejects_unheld_stock(service: ChatCommandService) -> None:
@@ -194,6 +199,7 @@ def test_sell_command_rejects_oversell(
     transactions: TransactionHistoryService,
 ) -> None:
     portfolio.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="8136",
         stock_name="サンリオ",
         shares=100,
@@ -205,7 +211,7 @@ def test_sell_command_rejects_oversell(
     assert result.success is False
     assert "保有株数" in result.reply_text
     assert transactions.list_transactions("8136") == []
-    holding = portfolio.get_holding("8136")
+    holding = portfolio.get_holding(DEFAULT_OWNER, "8136")
     assert holding is not None
     assert holding.shares == 100
 
@@ -266,7 +272,7 @@ def test_buy_command_uses_jst_calendar_date_across_utc_midnight(
     saved = transactions.list_transactions("8136")
     assert saved[0].execution_date == dt.date(2026, 7, 24)
 
-    holding = portfolio.get_holding("8136")
+    holding = portfolio.get_holding(DEFAULT_OWNER, "8136")
     assert holding is not None
     assert holding.first_purchase_date == dt.date(2026, 7, 24)
 
@@ -277,6 +283,7 @@ def test_sell_command_uses_jst_calendar_date_across_utc_midnight(
     transactions: TransactionHistoryService,
 ) -> None:
     portfolio.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="8136",
         stock_name="サンリオ",
         shares=100,
