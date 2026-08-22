@@ -48,12 +48,15 @@ def _watchlist_item(stock_code: str, stock_name: str | None = None) -> Watchlist
 
 
 def _holding(
-    stock_code: str, shares: int = 100, average_purchase_price: str = "1000"
+    stock_code: str,
+    shares: int = 100,
+    average_purchase_price: str = "1000",
+    owner: str = DEFAULT_OWNER,
 ) -> Holding:
     price = Decimal(average_purchase_price)
     return Holding(
-        owner=DEFAULT_OWNER,
-        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
+        owner=owner,
+        holding_id=build_holding_id(owner, stock_code),
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
         shares=shares,
@@ -838,7 +841,9 @@ def test_process_single_candidate_shares_one_snapshot_across_buy_sell_profit_tak
 
     monkeypatch.setattr(handler_module.BuySignalService, "analyze", _fake_buy_analyze)
     monkeypatch.setattr(
-        handler_module.PortfolioService, "get_holding", lambda self, owner, code: _holding(code)
+        handler_module.PortfolioService,
+        "list_holdings_by_stock",
+        lambda self, code: [_holding(code)],
     )
 
     class _NoSignalOutcome:
@@ -1644,6 +1649,267 @@ def test_build_unified_targets_skips_holdings_when_exceeding_max_sector_entries(
     aborted = [r for r in recorded if r["decision_type"] == "unified_buy_candidate_batch_aborted"]
     assert len(aborted) == 1
     assert aborted[0]["output_values"]["reason"] == "SECTOR_ENTRIES_LIMIT_EXCEEDED"
+
+
+# --- M3.1: buy_candidates_handler.pyの複数owner対応 --------------------------
+
+
+def test_build_unified_targets_aggregates_multiple_owners_of_same_stock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本人#8306 100株@1500・子供#8306 500株@1300が同時に存在しても、8306の
+    targetは1件だけになり、holding_quantity/average_acquisition_priceは
+    owner横断の集約値(単純平均ではなく購入金額合計÷株数合計の加重平均)になる
+    (M3.1、レビュー指摘3)。"""
+    monkeypatch.setattr(handler_module.WatchlistService, "list_items", lambda self: [])
+    holdings = [
+        _holding("8306", shares=100, average_purchase_price="1500", owner=DEFAULT_OWNER),
+        _holding("8306", shares=500, average_purchase_price="1300", owner="子供"),
+    ]
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: holdings)
+
+    targets = handler_module._build_unified_targets(_CONFIG, _NOW)
+
+    assert len(targets) == 1
+    target = targets[0]
+    assert target.stock_code == "8306"
+    assert target.source == CandidateSource.HOLDING
+    assert target.holding_quantity == 600
+    expected_avg = (Decimal("100") * Decimal("1500") + Decimal("500") * Decimal("1300")) / Decimal(
+        "600"
+    )
+    assert target.average_acquisition_price == expected_avg
+
+
+def test_dispatch_mode_holding_count_counts_unique_stock_codes_not_holding_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """holding_count(sector_entries集計のcoverage判定に使われる)は、同一銘柄を
+    複数ownerが保有していても「Holdingレコード件数」ではなく「保有している
+    ユニークstock_code数」として扱う(M3.1、レビュー指摘5)。"""
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(handler_module.WatchlistService, "list_items", lambda self: [])
+    holdings = [
+        _holding("8306", shares=100, owner=DEFAULT_OWNER),
+        _holding("8306", shares=500, owner="子供"),
+    ]
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: holdings)
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "start_batch",
+        lambda batch_id, total, now, holding_count=0: captured.update(
+            total=total, holding_count=holding_count
+        ),
+    )
+    monkeypatch.setattr(handler_module, "dispatch_async", lambda *a, **kw: None)
+
+    result = handler_module.handler({}, _FakeContext())
+
+    assert result == {"dispatched": 1}
+    # Holdingは2件(本人・子供)だが、ユニーク銘柄コードは8306の1件のみ。
+    assert captured["holding_count"] == 1
+
+
+def test_process_single_candidate_sector_entry_uses_aggregated_holding_quantity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """sector_entry(ポートフォリオ集中度算出用)のcurrent_market_valueは、
+    呼び出し元から渡されたholding_quantity(_build_unified_targets()側で既に
+    全owner集約済みの値)にそのまま基づく。単一owner分だけの株数にならないこと
+    を確認する(M3.1、レビュー指摘4)。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "8306",
+        company_quality_score=60.0,
+        recommendation_id="rec-8306",
+        buy_action=BuyAction.BUY,
+        buy_industry_sector=BuyIndustrySector.BANK,
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    monkeypatch.setattr(
+        handler_module.PortfolioService, "list_holdings_by_stock", lambda self, code: []
+    )
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda batch_id, category, sector_entry=None, **kwargs: captured.update(
+            sector_entry=sector_entry
+        ),
+    )
+
+    # holding_quantity=600は本人100株+子供500株の合算(_build_unified_targets()側
+    # で既に集約済みの値としてここへ渡される想定)。
+    handler_module._process_single_candidate(
+        "8306",
+        CandidateSource.HOLDING,
+        600,
+        Decimal("1433.33"),
+        "batch-1",
+        _NOW,
+        object(),
+        _CONFIG,
+        object(),
+        repo,
+        fake_service,
+    )
+
+    decoded = handler_module._decode_sector_entry(captured["sector_entry"])
+    assert decoded is not None
+    _sector, market_value, stock_code = decoded
+    assert stock_code == "8306"
+    assert market_value == recommendation.price_at_recommendation * 600
+
+
+def _conflict_recommendation(
+    stock_code: str, recommendation_type: RecommendationType, owner: str
+) -> Recommendation:
+    return Recommendation(
+        recommendation_id=f"conflict-{owner}",
+        stock_code=stock_code,
+        stock_name=f"銘柄{stock_code}",
+        recommended_at=_NOW,
+        recommendation_type=recommendation_type,
+        price_at_recommendation=Decimal("4200"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+        owner=owner,
+        holding_id=build_holding_id(owner, stock_code),
+    )
+
+
+class _FakeConflictOutcome:
+    def __init__(self, recommendation: Recommendation | None) -> None:
+        self.recommendation = recommendation
+
+
+def _run_addon_conflict_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    sell_recommendation_by_owner: dict[str, Recommendation | None],
+) -> dict[str, object]:
+    """本人#8306・子供#8306の2 Holdingを対象に、SellSignalService.analyzeの
+    結果をowner別に差し替えて_process_single_candidateを実行し、
+    unified_buy_candidate_evaluation監査の最終レコードを返す。"""
+    _patch_snapshot(monkeypatch)
+    holdings = [
+        _holding("8306", shares=100, average_purchase_price="1500", owner=DEFAULT_OWNER),
+        _holding("8306", shares=500, average_purchase_price="1300", owner="子供"),
+    ]
+    monkeypatch.setattr(
+        handler_module.PortfolioService, "list_holdings_by_stock", lambda self, code: holdings
+    )
+    recommendation = _make_recommendation(
+        "8306",
+        company_quality_score=60.0,
+        recommendation_id="rec-8306",
+        buy_action=BuyAction.BUY,
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+
+    def _fake_sell_analyze(self: object, holding: object, now: object, snapshot: object = None):
+        return _FakeConflictOutcome(sell_recommendation_by_owner.get(holding.owner))  # type: ignore[union-attr]
+
+    monkeypatch.setattr(handler_module.SellSignalService, "analyze", _fake_sell_analyze)
+    monkeypatch.setattr(
+        handler_module.ProfitTakingService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: _FakeConflictOutcome(None),
+    )
+
+    audit = _RecordingAuditService()
+    monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: audit)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    handler_module._process_single_candidate(
+        "8306",
+        CandidateSource.HOLDING,
+        600,
+        Decimal("1433.33"),
+        None,
+        _NOW,
+        object(),
+        _CONFIG,
+        object(),
+        repo,
+        fake_service,
+    )
+
+    records = audit.records_by_type("unified_buy_candidate_evaluation")
+    assert len(records) == 1
+    return records[0]
+
+
+def test_addon_conflict_when_default_owner_sells_and_child_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """本人#8306→SELL、子供#8306→HOLD(競合無し)の場合でも、1つでも売却系の
+    競合Recommendationがあれば買い増しは競合ありとして抑止される(M3.1、
+    レビュー指摘6、必須テストD)。"""
+    sell_rec = _conflict_recommendation("8306", RecommendationType.SELL, DEFAULT_OWNER)
+    record = _run_addon_conflict_scenario(
+        monkeypatch, tmp_path, {DEFAULT_OWNER: sell_rec, "子供": None}
+    )
+
+    assert record["output_values"]["conflicting_holding_action"] == RecommendationType.SELL.value
+
+
+def test_addon_conflict_when_non_default_owner_sells_and_default_owner_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """本人#8306→HOLD、子供#8306→SELLの場合、DEFAULT_OWNERではない子供側の
+    SELLも見逃さず買い増しが競合として抑止される(M3.1、レビュー指摘6、
+    必須テストE: DEFAULT_OWNER依存が無いことの確認)。"""
+    sell_rec = _conflict_recommendation("8306", RecommendationType.SELL, "子供")
+    record = _run_addon_conflict_scenario(
+        monkeypatch, tmp_path, {DEFAULT_OWNER: None, "子供": sell_rec}
+    )
+
+    assert record["output_values"]["conflicting_holding_action"] == RecommendationType.SELL.value
+
+
+def test_addon_no_conflict_when_all_owners_hold(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """本人#8306・子供#8306ともHOLD(売却/利確系Recommendationなし)の場合、
+    買い増し競合は発生しない(M3.1、必須テストF)。"""
+    record = _run_addon_conflict_scenario(
+        monkeypatch, tmp_path, {DEFAULT_OWNER: None, "子供": None}
+    )
+
+    assert record["output_values"]["conflicting_holding_action"] is None
+
+
+def test_addon_conflict_picks_strongest_priority_among_multiple_owners(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """本人#8306→PARTIAL_PROFIT_TAKE(一部利確、priority=4)、子供#8306→SELL
+    (priority=4、同tier)のように複数owner・複数種別の競合が同時に出た場合でも、
+    新たな優先順位を新設せず、既存のCross Pipeline Priority優先度表
+    (notification_priority_for_recommendation)に従って選ぶ(M3.1、レビュー
+    指摘6)。ここではCRITICAL_RISK相当のURGENT_REVIEW(priority=6)を混ぜ、
+    それが選ばれることを確認する。"""
+    weak_rec = _conflict_recommendation("8306", RecommendationType.PARTIAL_PROFIT_TAKE, "子供")
+    strong_rec = _conflict_recommendation(
+        "8306", RecommendationType.URGENT_REVIEW, DEFAULT_OWNER
+    )
+    record = _run_addon_conflict_scenario(
+        monkeypatch, tmp_path, {DEFAULT_OWNER: strong_rec, "子供": weak_rec}
+    )
+
+    assert (
+        record["output_values"]["conflicting_holding_action"]
+        == RecommendationType.URGENT_REVIEW.value
+    )
 
 
 # --- 通知検証モード機能(2026-08追加) -------------------------------------

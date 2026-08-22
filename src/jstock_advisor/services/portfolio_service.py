@@ -57,6 +57,12 @@ class PortfolioService:
         holding_id = build_holding_id(normalize_and_validate_owner(owner), stock_code)
         return self._holdings.get(holding_id)
 
+    def list_holdings_by_stock(self, stock_code: str) -> list[Holding]:
+        """owner横断検索用(M3.1: BUY候補側で同一銘柄の全owner Holdingを集約する
+        ため。特定ownerだけを見るget_holding()とは異なり、複数owner分をすべて
+        返す)。"""
+        return self._holdings.list_by_stock(stock_code)
+
     def list_lots(self, owner: str, stock_code: str) -> list[PurchaseLot]:
         holding_id = build_holding_id(normalize_and_validate_owner(owner), stock_code)
         return self._lots.list_by_holding(holding_id)

@@ -82,7 +82,6 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.add_on_risk import evaluate_add_on_eligibility
@@ -108,7 +107,10 @@ from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_funct
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
-from jstock_advisor.services.line_notification_service import LineNotificationService
+from jstock_advisor.services.line_notification_service import (
+    LineNotificationService,
+    notification_priority_for_recommendation,
+)
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
 from jstock_advisor.services.provider_bundle import ProviderBundle
@@ -266,29 +268,35 @@ def _build_unified_targets(
 ) -> list[BuyEvaluationTarget]:
     """気になる銘柄と保有銘柄を銘柄コード単位で統合する(要求仕様§2)。
 
-    事前ガード(要求仕様§8): 保有銘柄数がMAX_SECTOR_ENTRIESを超える場合、
-    sector_entriesの書き込み上限に達する恐れがあるため保有銘柄側は評価対象へ
-    含めない(監査へ記録したうえで、気になる銘柄側の評価は継続する)。
+    事前ガード(要求仕様§8): 保有銘柄(ユニーク銘柄コード数)がMAX_SECTOR_ENTRIES
+    を超える場合、sector_entriesの書き込み上限に達する恐れがあるため保有銘柄側は
+    評価対象へ含めない(監査へ記録したうえで、気になる銘柄側の評価は継続する)。
+
+    M3.1(複数owner対応): 同一stock_codeを複数ownerが保有していても、BUY候補
+    評価はowner別に分割せず銘柄コード単位で1回だけ行う(要求仕様§2)。
+    holding_quantity/average_acquisition_priceは全owner分を集約した値とする
+    (単純なowner間平均ではなく、購入金額合計÷株数合計の加重平均)。
     """
     watchlist_names: dict[str, str | None] = {}
     if config.notification.include_watchlist:
         for item in WatchlistService().list_items():
             watchlist_names[item.stock_code] = item.stock_name
 
-    holdings_by_code: dict[str, Holding] = {}
+    holdings_by_code: dict[str, list[Holding]] = {}
     if config.notification.include_holdings:
         holdings = PortfolioService().list_holdings()
-        if len(holdings) > MAX_SECTOR_ENTRIES:
+        unique_stock_codes = {h.stock_code for h in holdings}
+        if len(unique_stock_codes) > MAX_SECTOR_ENTRIES:
             logger.error(
                 "buy_candidates_handler: holding_count=%d exceeds MAX_SECTOR_ENTRIES=%d; "
                 "skipping holding-side evaluation for this run",
-                len(holdings),
+                len(unique_stock_codes),
                 MAX_SECTOR_ENTRIES,
             )
             AuditService(execution_context=execution_context).record(
                 decision_type="unified_buy_candidate_batch_aborted",
                 stock_code=None,
-                input_values={"holding_count": len(holdings)},
+                input_values={"holding_count": len(unique_stock_codes)},
                 calculation_formulas={},
                 output_values={"reason": "SECTOR_ENTRIES_LIMIT_EXCEEDED"},
                 data_sources=[],
@@ -296,7 +304,8 @@ def _build_unified_targets(
                 timestamp=now,
             )
         else:
-            holdings_by_code = {h.stock_code: h for h in holdings}
+            for holding in holdings:
+                holdings_by_code.setdefault(holding.stock_code, []).append(holding)
 
     codes = sorted(set(watchlist_names) | set(holdings_by_code))
     targets: list[BuyEvaluationTarget] = []
@@ -309,15 +318,24 @@ def _build_unified_targets(
             source = CandidateSource.HOLDING
         else:
             source = CandidateSource.WATCHLIST
-        holding = holdings_by_code.get(code)
-        stock_name = watchlist_names.get(code) or (holding.stock_name if holding else None)
+        holdings_for_code = holdings_by_code.get(code, [])
+        total_shares = sum(h.shares for h in holdings_for_code)
+        total_acquisition_amount = sum(
+            (h.total_purchase_amount for h in holdings_for_code), Decimal("0")
+        )
+        average_acquisition_price = (
+            total_acquisition_amount / total_shares if total_shares > 0 else None
+        )
+        stock_name = watchlist_names.get(code) or (
+            holdings_for_code[0].stock_name if holdings_for_code else None
+        )
         targets.append(
             BuyEvaluationTarget(
                 stock_code=code,
                 stock_name=stock_name,
                 source=source,
-                holding_quantity=holding.shares if holding else None,
-                average_acquisition_price=holding.average_purchase_price if holding else None,
+                holding_quantity=total_shares if holdings_for_code else None,
+                average_acquisition_price=average_acquisition_price,
             )
         )
     return targets
@@ -338,8 +356,16 @@ def _record_evaluation_audit(
     final_buy_action: BuyAction,
     conflicting_holding_action: RecommendationType | None,
     holding_data_inconsistent: bool,
+    holding_owner_count: int | None = None,
+    holding_ids: tuple[str, ...] | None = None,
 ) -> None:
-    """全評価対象銘柄(BUY系以外も含む)について記録する監査(要求仕様§4・§14)。"""
+    """全評価対象銘柄(BUY系以外も含む)について記録する監査(要求仕様§4・§14)。
+
+    M3.1: holding_quantity/average_acquisition_priceは(保有銘柄の場合)常に
+    owner横断の集約値であり、単一ownerの値ではない。holding_owner_count/
+    holding_idsを渡すことで、何名分・どのholding_id分の集約かを監査から
+    追跡できるようにする(owner単位の別Auditは作らない)。
+    """
     audit_service.record(
         decision_type="unified_buy_candidate_evaluation",
         stock_code=stock_code,
@@ -349,6 +375,8 @@ def _record_evaluation_audit(
             "average_acquisition_price": (
                 str(average_acquisition_price) if average_acquisition_price is not None else None
             ),
+            "holding_owner_count": holding_owner_count,
+            "holding_ids": list(holding_ids) if holding_ids is not None else None,
         },
         calculation_formulas={},
         output_values={
@@ -484,6 +512,8 @@ def _process_single_candidate(
             current_market_value: Decimal | None = None
             unrealized_profit_loss: Decimal | None = None
             unrealized_profit_loss_pct: Decimal | None = None
+            holding_owner_count: int | None = None
+            holding_ids: tuple[str, ...] | None = None
 
             if source in (CandidateSource.HOLDING, CandidateSource.BOTH):
                 current_price = recommendation.price_at_recommendation
@@ -491,6 +521,9 @@ def _process_single_candidate(
                 holding_data_inconsistent, holding_is_odd_lot = _holding_data_consistency(
                     holding_quantity, average_acquisition_price, trading_unit
                 )
+                # holding_quantity/average_acquisition_priceは_build_unified_targets()側で
+                # 既に全owner集約済みの値(M3.1)。current_market_valueもowner合算の
+                # 総株数に対して算出されるため、自動的に全owner合算値になる。
                 if holding_quantity is not None and holding_quantity > 0:
                     current_market_value = current_price * holding_quantity
                     if average_acquisition_price is not None and average_acquisition_price > 0:
@@ -500,39 +533,60 @@ def _process_single_candidate(
                             unrealized_profit_loss / total_acquisition * 100
                         )
 
+                # M3.1(複数owner対応): 同一stock_codeを保有する全owner分のHoldingを
+                # 集約して扱う(監査記録用にholding_owner_count/holding_idsも保持する)。
+                holdings_for_stock = PortfolioService().list_holdings_by_stock(stock_code)
+                holding_owner_count = len(holdings_for_stock)
+                holding_ids = tuple(h.holding_id for h in holdings_for_stock)
+
                 # --- 買い増し固有リスク: 売却・利確判定との競合(要求仕様§6)。
                 # base_buy_actionがBUY系、かつ保有データに致命的な不整合が無い
                 # 場合のみ確認する(不整合な保有データでSell/ProfitTakingを
                 # 実行しても無意味なため)。共通購入判断と同一snapshotを渡すことで
-                # 現在値・財務データの矛盾を防ぐ ---
+                # 現在値・財務データの矛盾を防ぐ。
+                #
+                # M3.1(複数owner対応): 全owner分のHoldingを独立にSell/ProfitTaking
+                # 評価する(例: 本人#8306→SELL、子供#8306→HOLD)。1owner分でも
+                # 売却/利確系の競合Recommendationがあれば競合ありとして扱い、
+                # BUY/買い増しを抑止する。複数ownerから異なる種別の競合が同時に
+                # 出た場合は、Cross Pipeline Priorityと同じ優先度表
+                # (notification_priority_for_recommendation、CRITICAL_RISK>
+                # PROMOTED_TO_BUY>SELL/PARTIAL_SELL>BUY>ATTENTION>その他)に従って
+                # 最も強いものをconflicting_holding_actionとして記録する
+                # (新たな優先順位は新設しない) ---
                 if base_buy_action in BUY_FAMILY_ACTIONS and not holding_data_inconsistent:
-                    # M3時点ではowner横断の集約評価は未実装(発見事項として報告済み)。
-                    # 従来どおりDEFAULT_OWNERの保有のみを競合チェック対象とする。
-                    holding = PortfolioService().get_holding(DEFAULT_OWNER, stock_code)
-                    if holding is not None:
-                        sell_service = SellSignalService(
-                            providers=providers,
-                            config=config,
-                            business_calendar=calendar,
-                            execution_context=execution_context,
+                    sell_service = SellSignalService(
+                        providers=providers,
+                        config=config,
+                        business_calendar=calendar,
+                        execution_context=execution_context,
+                    )
+                    profit_service = ProfitTakingService(
+                        providers=providers,
+                        config=config,
+                        business_calendar=calendar,
+                        execution_context=execution_context,
+                    )
+                    best_conflict: Recommendation | None = None
+                    best_conflict_priority = -1
+                    for owner_holding in holdings_for_stock:
+                        sell_outcome = sell_service.analyze(owner_holding, now, snapshot=snapshot)
+                        holding_conflict = sell_outcome.recommendation
+                        if holding_conflict is None:
+                            profit_outcome = profit_service.analyze(
+                                owner_holding, now, snapshot=snapshot
+                            )
+                            holding_conflict = profit_outcome.recommendation
+                        if holding_conflict is None:
+                            continue
+                        candidate_priority = notification_priority_for_recommendation(
+                            holding_conflict
                         )
-                        sell_outcome = sell_service.analyze(holding, now, snapshot=snapshot)
-                        if sell_outcome.recommendation is not None:
-                            conflicting_holding_action = (
-                                sell_outcome.recommendation.recommendation_type
-                            )
-                        if conflicting_holding_action is None:
-                            profit_service = ProfitTakingService(
-                                providers=providers,
-                                config=config,
-                                business_calendar=calendar,
-                                execution_context=execution_context,
-                            )
-                            profit_outcome = profit_service.analyze(holding, now, snapshot=snapshot)
-                            if profit_outcome.recommendation is not None:
-                                conflicting_holding_action = (
-                                    profit_outcome.recommendation.recommendation_type
-                                )
+                        if candidate_priority > best_conflict_priority:
+                            best_conflict_priority = candidate_priority
+                            best_conflict = holding_conflict
+                    if best_conflict is not None:
+                        conflicting_holding_action = best_conflict.recommendation_type
 
                 final_recommendation = recommendation.model_copy(
                     update={
@@ -650,6 +704,8 @@ def _process_single_candidate(
                 final_buy_action=final_recommendation.buy_action or base_buy_action,
                 conflicting_holding_action=conflicting_holding_action,
                 holding_data_inconsistent=holding_data_inconsistent,
+                holding_owner_count=holding_owner_count,
+                holding_ids=holding_ids,
             )
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
         logger.exception("buy candidate analysis failed unexpectedly stock_code=%s", stock_code)

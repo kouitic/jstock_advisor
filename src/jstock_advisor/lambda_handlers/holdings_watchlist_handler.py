@@ -773,8 +773,10 @@ def _count_holding_summary_actions(entries: list[str]) -> dict[HoldingSummaryAct
     再コードレビュー対応(2026-08、追加修正4): 分類ロジックの唯一の正本
     resolve_holding_summary_action()(domain/entities/enums.py)のみを使い、
     detected集計・sent集計の両方でこの関数を共通利用する(分類の二重実装を
-    避ける)。entriesは"{RecommendationType.value}|{stock_code}"形式
-    (progress.detected_categories/notification_categoriesと同じ形式)。
+    避ける)。entriesは"{RecommendationType.value}|{holding_id}"形式
+    (progress.detected_categories/notification_categoriesと同じ形式。
+    M3.1: このハンドラでは"|"より後ろはholding_idであり、件数集計自体は
+    "|"より前(RecommendationType)しか見ないため計算結果に影響しない)。
     """
     counts: dict[HoldingSummaryAction, int] = {action: 0 for action in HoldingSummaryAction}
     for entry in entries:
@@ -788,7 +790,7 @@ def _count_holding_summary_actions(entries: list[str]) -> dict[HoldingSummaryAct
 def _finish_batch_item(
     batch_id: str | None,
     category: str,
-    stock_code: str,
+    holding_id: str,
     now: dt.datetime,
     notification_service: LineNotificationService,
     runtime_config_service: HoldingDecisionRuntimeConfigService,
@@ -807,26 +809,38 @@ def _finish_batch_item(
     使う。recommendation_type(実際にLINE送信された場合のみ呼び出し元が渡す、
     以前からの引数)はsent集計用としてそのまま残し、CloudWatch Logsでの監査・
     Issue #16評価用途にのみ使う(ユーザー向けサマリーには表示しない)。
+
+    M3.1(命名整理): このモジュールでは、record_result()/BatchProgress側の
+    汎用的な"stock_code"引数・フィールド名(buy_candidates_handler.py側では
+    文字どおりstock_code)へ、実際にはholding_id(= owner + "#" + stock_code)を
+    渡している。DynamoDBの文字列セットは同一値の重複を許さないため、holding_id
+    単位で渡すことで同一銘柄を複数ownerが保有していても正しく別件として集計
+    される(機能はM3切替時から変更していない、命名・コメントの整理のみ)。
+    holding_idの文字列自体がowner・stock_codeの両方を含むため、data_insufficient/
+    failedのサマリー表示(下記notify_batch_summary呼び出し)は追加の変更なしで
+    owner・stock_codeの両方を識別できる。
     """
     if batch_id is None:
         return
     needs_code = category in ("data_insufficient", "failed")
     notification_category_entry = (
-        f"{recommendation_type.value}|{stock_code}" if recommendation_type is not None else None
+        f"{recommendation_type.value}|{holding_id}" if recommendation_type is not None else None
     )
     detected_category_entry = (
-        f"{detected_recommendation_type.value}|{stock_code}"
+        f"{detected_recommendation_type.value}|{holding_id}"
         if detected_recommendation_type is not None
         else None
     )
     progress = record_result(
         batch_id,
         category,
-        stock_code=stock_code if needs_code else None,
+        # M3.1: 引数名はstock_codeだが、この保有銘柄パイプラインではholding_idを渡す
+        # (上記docstring参照)。
+        stock_code=holding_id if needs_code else None,
         notification_category_entry=notification_category_entry,
         detected_category_entry=detected_category_entry,
-        attention_detected_stock_code=stock_code if attention_detected else None,
-        attention_sent_stock_code=stock_code if attention_sent else None,
+        attention_detected_stock_code=holding_id if attention_detected else None,
+        attention_sent_stock_code=holding_id if attention_sent else None,
     )
     if progress is None or not progress.is_complete:
         return

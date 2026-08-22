@@ -67,6 +67,11 @@ class HoldingRepository:
     def list_all(self) -> list[Holding]:
         return self._store.list_all()
 
+    def list_by_stock(self, stock_code: str) -> list[Holding]:
+        """owner横断検索用(M3.1: BUY候補側での同一銘柄の全owner Holding集約・
+        売却/利確競合チェック等)。"""
+        return self._store.find(lambda holding: holding.stock_code == stock_code)
+
     def get(self, holding_id: str) -> Holding | None:
         return self._store.get(holding_id)
 

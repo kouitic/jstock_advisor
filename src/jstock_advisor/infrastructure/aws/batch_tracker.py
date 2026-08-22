@@ -88,6 +88,14 @@ class BatchFinalizeStatus(StrEnum):
 
 @dataclass(frozen=True)
 class BatchProgress:
+    """M3.1: 本クラス・record_result()の"stock_code"を含む引数・フィールド名は
+    汎用の識別子として2つのパイプラインで共用されている。buy_candidates_handler.py
+    側は文字どおりstock_codeを渡すが、holdings_watchlist_handler.py側は
+    holding_id(= owner + "#" + stock_code)を渡す(同一銘柄を複数ownerが保有する
+    場合にDynamoDBの文字列セット上で正しく別件として集計するため)。フィールド名
+    自体は変更していない(既存のDynamoDB属性名・呼び出し元との互換性を保つため)。
+    """
+
     total: int
     completed: int
     category_counts: dict[str, int]
@@ -126,7 +134,9 @@ class BatchProgress:
     # "{NotificationCategory.value}|{stock_code}"の形式でDynamoDBの文字列
     # セットへ集約される(Setは重複を許さないため、stock_codeを含めて銘柄
     # ごとに一意にする。ranking_entriesと同じ設計パターン)。finalize側で
-    # "|"より前を取り出しCounterで件数化する。
+    # "|"より前を取り出しCounterで件数化する(件数集計自体は"|"より後ろの値を
+    # 見ないため、M3.1以降holdings_watchlist_handler.py側が"|"より後ろへ
+    # holding_idを渡していても影響しない。クラスdocstring参照)。
     notification_categories: list[str] = field(default_factory=list)
     # 再コードレビュー対応(2026-08、detected/sent一元化、追加修正1): 「有効な
     # アクション検出」件数(DataQuality安全ゲートを通過していればTradeCooldown・
@@ -140,7 +150,8 @@ class BatchProgress:
     # count)をサマリーへ表示するために使う(notification_categoriesは実際に
     # LINE送信された銘柄のみを集約するため、この用途には使えない)。値は
     # stock_codeそのもの(Setの重複排除のみが目的で、他フィールドと異なり
-    # 種別プレフィックスは不要)。
+    # 種別プレフィックスは不要。M3.1: holdings_watchlist_handler.py側は
+    # holding_idを渡す。クラスdocstring参照)。
     attention_detected_stock_codes: list[str] = field(default_factory=list)
     # 再コードレビュー対応(2026-08、追加修正2): ATTENTIONが実際にLINE個別送信
     # できた銘柄一覧(attention_detected_stock_codesとは別に明示保持し、将来別の
@@ -197,12 +208,20 @@ def record_result(
     attention_detected_stock_code: str | None = None,
     attention_sent_stock_code: str | None = None,
 ) -> BatchProgress | None:
-    """1銘柄の処理完了を原子的に記録し、現在の進捗を返す(ローカル環境ではNone)。
+    """1銘柄(または1 holding_id)の処理完了を原子的に記録し、現在の進捗を返す
+    (ローカル環境ではNone)。
+
+    M3.1: stock_code・notification_category_entry等の引数名は汎用の識別子として
+    2つのパイプラインで共用されている。buy_candidates_handler.pyは文字どおり
+    stock_codeを渡すが、holdings_watchlist_handler.pyはholding_id(= owner + "#" +
+    stock_code)を渡す(BatchProgressのクラスdocstring参照)。DynamoDBの文字列
+    セットは値の集合を保持するだけで、どちらの意味かは呼び出し元の責務。
 
     categoryは"sent"/"hold"/"review"/"data_insufficient"/"suppressed"/"failed"/
     "candidate_not_ranked"(domain/entities/evaluation_audit.pyのSUMMARY_CATEGORIES
     と同じ集合)。data_insufficient/failedの場合、stock_codeを渡すとDynamoDBの
-    文字列セットへ原子的に追加し、バッチサマリーで銘柄コードを表示できるようにする。
+    文字列セットへ原子的に追加し、バッチサマリーで対象(stock_codeまたは
+    holding_id)を表示できるようにする。
 
     ranking_entryを渡すと、優先度付け通知(要求仕様2026-07追加)向けに、任意の
     文字列(呼び出し側でスコア等を含めてエンコードする)をDynamoDBの文字列セットへ

@@ -45,6 +45,6 @@ class DailyNotificationPriorityRecord(Entity):
     # 数値が大きいほど優先度が高い(CRITICAL_RISK=6 > PROMOTED_TO_BUY=5 >
     # SELL/PARTIAL_SELL=4 > BUY=3 > ATTENTION=2 > その他=0。NEAR_BUY/
     # WATCH_BEFORE_EARNINGSは独立した階層ではなく「その他=0」に含まれる。
-    # line_notification_service.py _notification_priority()参照)。
+    # line_notification_service.py notification_priority_for_recommendation()参照)。
     priority: int
     category: str
