@@ -22,6 +22,7 @@ from jstock_advisor.domain.entities.enums import (
     RuntimeConfigMode,
 )
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
@@ -107,6 +108,8 @@ def _build_services(store_dir: Path, mode: RuntimeConfigMode):
 
 def _holding(stock_code: str) -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name="x",
         shares=100,

@@ -67,6 +67,7 @@ def _confirm_state() -> ConversationState:
         stock_code=None,
         shares=None,
         price=None,
+        owner=None,
         created_at=_NOW,
         updated_at=_NOW,
         ttl=int(_NOW.timestamp()) + 1200,

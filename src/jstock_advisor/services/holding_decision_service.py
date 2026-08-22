@@ -194,7 +194,7 @@ class HoldingDecisionService:
             )
             return HoldingDecisionEvaluationOutcome(holding.stock_code, None, data_error=error)
 
-        holding_id = holding.stock_code  # 現状stock_codeの1:1エイリアス(3節)
+        holding_id = holding.holding_id  # M3: owner + "#" + stock_code
         industry = classify_industry(snapshot.financial.sector, snapshot.financial.industry)
 
         # --- 企業品質スコア -------------------------------------------------

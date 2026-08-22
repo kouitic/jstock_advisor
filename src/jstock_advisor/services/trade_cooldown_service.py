@@ -131,7 +131,8 @@ class TradeCooldownService:
     def _do_detect_and_apply(
         self, current_holdings: dict[str, Holding], today: dt.date
     ) -> list[TradeEvent]:
-        previous_entries = {e.stock_code: e for e in self._repo.list_all()}
+        """current_holdingsはholding_id(= owner + "#" + stock_code)キー(M3)。"""
+        previous_entries = {e.holding_id: e for e in self._repo.list_all()}
         if not previous_entries:
             # 初回実行(前回スナップショットが皆無): 誤検知防止のためイベント検知
             # 自体をスキップし、現状をベースラインとして書き込むのみに留める。
@@ -146,6 +147,8 @@ class TradeCooldownService:
                 cooldown_until = self._calendar.add_business_days(today, cooldown_days)
             self._repo.upsert(
                 HoldingsSnapshotEntry(
+                    owner=event.owner,
+                    holding_id=event.holding_id,
                     stock_code=event.stock_code,
                     shares=event.shares,
                     average_purchase_price=event.average_purchase_price,
@@ -159,10 +162,12 @@ class TradeCooldownService:
         return events
 
     def _write_baseline(self, current_holdings: dict[str, Holding], today: dt.date) -> None:
-        for stock_code, holding in current_holdings.items():
+        for holding_id, holding in current_holdings.items():
             self._repo.upsert(
                 HoldingsSnapshotEntry(
-                    stock_code=stock_code,
+                    owner=holding.owner,
+                    holding_id=holding_id,
+                    stock_code=holding.stock_code,
                     shares=holding.shares,
                     average_purchase_price=holding.average_purchase_price,
                     recorded_at=today,
@@ -174,10 +179,15 @@ class TradeCooldownService:
         """§6: 通常の売買推奨通知(BUY/買い増し/SELL/一部売却検討/NEAR BUY/
         WATCH_BEFORE_EARNINGS)を抑止すべきか(重大リスクはこのチェックより
         前段で貫通させること。呼び出し元の責務)。
+
+        M3: BUY候補側は特定ownerを知らないため、stock_codeに対して
+        「いずれかのownerにactive cooldownがあるか」というowner横断検索を行う
+        (1人でもクールダウン中ならBUY候補としての通知は抑止する安全側の設計)。
         """
         if not self._config.enabled:
             return False
-        entry = self._repo.get(stock_code)
-        if entry is None or entry.cooldown_until_date is None:
-            return False
-        return today <= entry.cooldown_until_date
+        entries = self._repo.list_by_stock(stock_code)
+        return any(
+            entry.cooldown_until_date is not None and today <= entry.cooldown_until_date
+            for entry in entries
+        )

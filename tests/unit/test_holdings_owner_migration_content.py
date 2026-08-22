@@ -19,7 +19,6 @@ from jstock_advisor.domain.entities.decision_snapshot import (
     DecisionType,
 )
 from jstock_advisor.domain.entities.enums import AccountType, ConfidenceLevel, RecommendationType
-from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
 from jstock_advisor.domain.entities.holding_decision import (
     CompanyQualityScore,
     ComponentCoverage,
@@ -32,7 +31,6 @@ from jstock_advisor.domain.entities.holding_decision import (
     InvestmentThesisScore,
     RiskDeductionScore,
 )
-from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
 from jstock_advisor.domain.entities.notification import NotificationLog
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.transaction import Transaction
@@ -43,6 +41,11 @@ from jstock_advisor.infrastructure.collection_store import (
 )
 from jstock_advisor.migrations.holdings_owner_migration import run_migration
 from jstock_advisor.migrations.holdings_owner_preflight import run_preflight
+from jstock_advisor.migrations.legacy_shapes import (
+    LegacyHoldingsSnapshotEntryV1,
+    LegacyHoldingV1,
+    LegacyPurchaseLotV1,
+)
 from jstock_advisor.migrations.target import MigrationTarget
 from jstock_advisor.migrations.v2_entities import HoldingsSnapshotEntryV2
 
@@ -57,8 +60,8 @@ def _set_pause(store_dir: Path, paused: bool) -> None:
 
 
 def _seed_holding_and_lot(store_dir: Path) -> None:
-    build_collection_store(PurchaseLot, "purchase_lots.json", "lot_id", store_dir).upsert(
-        PurchaseLot(
+    build_collection_store(LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir).upsert(
+        LegacyPurchaseLotV1(
             lot_id="lot-1",
             stock_code=_STOCK,
             purchase_date=dt.date(2026, 1, 1),
@@ -67,8 +70,8 @@ def _seed_holding_and_lot(store_dir: Path) -> None:
             account_type=AccountType.GENERAL,
         )
     )
-    build_collection_store(Holding, "holdings.json", "stock_code", store_dir).upsert(
-        Holding(
+    build_collection_store(LegacyHoldingV1, "holdings.json", "stock_code", store_dir).upsert(
+        LegacyHoldingV1(
             stock_code=_STOCK,
             stock_name="三菱UFJ",
             shares=100,
@@ -230,8 +233,12 @@ def test_holdings_snapshot_migration_writes_v2_with_owner(store_dir: Path) -> No
     _set_pause(store_dir, True)
     _seed_holding_and_lot(store_dir)
     build_collection_store(
-        HoldingsSnapshotEntry, "holdings_snapshots.json", "stock_code", store_dir
-    ).upsert(HoldingsSnapshotEntry(stock_code=_STOCK, shares=100, recorded_at=dt.date(2026, 1, 1)))
+        LegacyHoldingsSnapshotEntryV1, "holdings_snapshots.json", "stock_code", store_dir
+    ).upsert(
+        LegacyHoldingsSnapshotEntryV1(
+            stock_code=_STOCK, shares=100, recorded_at=dt.date(2026, 1, 1)
+        )
+    )
 
     run_migration(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 

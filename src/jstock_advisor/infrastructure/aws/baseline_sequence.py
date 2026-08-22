@@ -23,7 +23,8 @@ from jstock_advisor.infrastructure.collection_store import (
     running_on_lambda,
 )
 
-_TABLE_FILE_NAME = "investment_thesis_baseline_sequences.json"
+_TABLE_FILE_NAME = "investment_thesis_baseline_sequences_v2.json"
+# M3: V2切替。保存形式(トップレベル属性)は変更なし。
 
 
 class _BaselineSequenceCounter(Entity):

@@ -663,11 +663,12 @@ class BuySignalService:
         watch_previous_consecutive_business_days: int | None = None
         watch_end_reason: str | None = None
         evaluation_date = evaluation_date_jst(now)
-        cooldown_entry = self._holdings_snapshot_repo.get(stock_code)
-        in_trade_cooldown = (
-            cooldown_entry is not None
-            and cooldown_entry.cooldown_until_date is not None
-            and evaluation_date <= cooldown_entry.cooldown_until_date
+        # M3: BUY候補側は特定ownerを知らないため、TradeCooldownService.is_in_cooldown()
+        # と同じくstock_codeに対するowner横断検索で判定する(1人でもクールダウン中
+        # ならBUY候補としての通知は抑止する安全側の設計)。
+        in_trade_cooldown = any(
+            entry.cooldown_until_date is not None and evaluation_date <= entry.cooldown_until_date
+            for entry in self._holdings_snapshot_repo.list_by_stock(stock_code)
         )
         if not in_trade_cooldown:
             transition = self._watch_state_service.evaluate_and_update(

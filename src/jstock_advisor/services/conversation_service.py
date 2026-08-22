@@ -31,6 +31,7 @@ from jstock_advisor.domain.entities.enums import (
     ConversationStateName,
     TransactionType,
 )
+from jstock_advisor.domain.entities.owner import InvalidOwnerError, normalize_and_validate_owner
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.aws import conversation_commit, conversation_state_store
 from jstock_advisor.infrastructure.aws.conversation_state_store import ConversationState
@@ -51,9 +52,10 @@ from jstock_advisor.services.watchlist_service import WatchlistService
 # スクリーニング設定へ依存させないための意図的な分離)。
 _STOCK_NAME_NEGATIVE_CACHE_TTL_SECONDS = 60
 
-_BUY_PROMPT = "銘柄コード,株数,単価 の形式で送信してください(例: 8306,100,1500)"
-_SELL_PROMPT = "銘柄コード,株数,単価 の形式で送信してください(例: 8306,100,1500)"
+_BUY_PROMPT = "所有者,銘柄コード,株数,単価 の形式で送信してください(例: 本人,8306,100,1500)"
+_SELL_PROMPT = "所有者,銘柄コード,株数,単価 の形式で送信してください(例: 本人,8306,100,1800)"
 _WATCH_PROMPT = "銘柄コードを送信してください(例: 8306)"
+_INVALID_OWNER = "所有者の指定が不正です"
 _START_PROMPTS: dict[ConversationAction, str] = {
     ConversationAction.BUY: f"購入記録を開始します。\n{_BUY_PROMPT}",
     ConversationAction.SELL: f"売却記録を開始します。\n{_SELL_PROMPT}",
@@ -225,10 +227,15 @@ class ConversationService:
         if self._trading_pause.is_buy_sell_paused():
             return ConversationReply(_TRADING_PAUSED)
         fields = _parse_csv_fields(text)
-        if fields is None or len(fields) != 3:
+        if fields is None or len(fields) != 4:
             return ConversationReply(_START_PROMPTS[action])
 
-        stock_code = ExternalValueParser.stock_code(fields[0])
+        try:
+            owner = normalize_and_validate_owner(fields[0])
+        except InvalidOwnerError:
+            return ConversationReply(_INVALID_OWNER)
+
+        stock_code = ExternalValueParser.stock_code(fields[1])
         if stock_code is None:
             return ConversationReply(_INVALID_STOCK_CODE)
         # 指摘3: 存在しない銘柄コードは確認画面へ進めず、この時点で拒否する。
@@ -236,16 +243,16 @@ class ConversationService:
         # する(一時的なデータ取得失敗を理由に正当な入力をブロックしないため)。
         if self._display_name_resolver.exists(stock_code) is False:
             return _unknown_stock_code_reply(stock_code)
-        shares = ExternalValueParser.integer(fields[1])
+        shares = ExternalValueParser.integer(fields[2])
         if shares is None or shares <= 0:
             return ConversationReply("株数は正の整数で指定してください")
-        price = ExternalValueParser.decimal(fields[2])
+        price = ExternalValueParser.decimal(fields[3])
         if price is None or price <= 0:
             return ConversationReply("単価は正の数値で指定してください")
 
         current_shares: int | None = None
         if action == ConversationAction.SELL:
-            holding = self._portfolio.get_holding(stock_code)
+            holding = self._portfolio.get_holding(owner, stock_code)
             if holding is None:
                 return ConversationReply(f"{stock_code}は保有銘柄として登録されていません")
             if shares > holding.shares:
@@ -253,17 +260,17 @@ class ConversationService:
             current_shares = holding.shares
 
         new_state = conversation_state_store.record_input(
-            user_id, action, stock_code, now, shares=shares, price=price
+            user_id, action, stock_code, now, shares=shares, price=price, owner=owner
         )
         if new_state is None:
             return ConversationReply(_STATE_CHANGED)
         if action == ConversationAction.SELL:
             assert current_shares is not None
             return self._build_sell_confirmation_reply(
-                stock_code, current_shares, shares, price, new_state.operation_id
+                owner, stock_code, current_shares, shares, price, new_state.operation_id
             )
         return self._build_buy_confirmation_reply(
-            stock_code, shares, price, new_state.operation_id
+            owner, stock_code, shares, price, new_state.operation_id
         )
 
     def _handle_watch_input(
@@ -310,6 +317,7 @@ class ConversationService:
 
     def _build_buy_confirmation_reply(
         self,
+        owner: str,
         stock_code: str,
         shares: int,
         price: Decimal,
@@ -319,6 +327,7 @@ class ConversationService:
         amount = shares * price
         text_body = (
             "以下の内容で登録します。よろしければ「登録する」を押してください。\n\n"
+            f"所有者：{owner}\n"
             f"{display_name}({stock_code})\n"
             f"買付: {shares:,}株 @{price:,}円\n"
             f"合計: {amount:,}円"
@@ -327,6 +336,7 @@ class ConversationService:
 
     def _build_sell_confirmation_reply(
         self,
+        owner: str,
         stock_code: str,
         current_shares: int,
         shares: int,
@@ -342,6 +352,7 @@ class ConversationService:
         amount = shares * price
         text_body = (
             "売却内容をご確認ください。\n\n"
+            f"所有者：{owner}\n"
             f"銘柄：{display_name}（{stock_code}）\n"
             f"現在保有：{current_shares:,}株\n"
             f"今回売却：{shares:,}株\n"
@@ -365,12 +376,14 @@ class ConversationService:
         assert state.stock_code is not None
         assert state.shares is not None
         assert state.price is not None
-        holding = self._portfolio.get_holding(state.stock_code)
+        assert state.owner is not None
+        holding = self._portfolio.get_holding(state.owner, state.stock_code)
         transaction_type = (
             TransactionType.ADDITIONAL_BUY if holding is not None else TransactionType.BUY
         )
         execution_date = evaluation_date_jst(now)
         plan = self._portfolio.build_purchase_write_plan(
+            owner=state.owner,
             stock_code=state.stock_code,
             stock_name=None,
             shares=state.shares,
@@ -381,6 +394,7 @@ class ConversationService:
         )
         transaction = self._transactions.build_execution_plan(
             transaction_id=state.operation_id,
+            owner=state.owner,
             stock_code=state.stock_code,
             transaction_type=transaction_type,
             shares=state.shares,
@@ -405,7 +419,8 @@ class ConversationService:
         assert state.stock_code is not None
         assert state.shares is not None
         assert state.price is not None
-        holding = self._portfolio.get_holding(state.stock_code)
+        assert state.owner is not None
+        holding = self._portfolio.get_holding(state.owner, state.stock_code)
         if holding is None:
             return ConversationReply(_WRITE_CONFLICT)
         transaction_type = (
@@ -414,9 +429,12 @@ class ConversationService:
             else TransactionType.PARTIAL_SELL
         )
         execution_date = evaluation_date_jst(now)
-        plan = self._portfolio.build_sale_write_plan(state.stock_code, state.shares, now=now)
+        plan = self._portfolio.build_sale_write_plan(
+            state.owner, state.stock_code, state.shares, now=now
+        )
         transaction = self._transactions.build_execution_plan(
             transaction_id=state.operation_id,
+            owner=state.owner,
             stock_code=state.stock_code,
             transaction_type=transaction_type,
             shares=state.shares,

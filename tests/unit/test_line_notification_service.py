@@ -12,6 +12,7 @@ from jstock_advisor.domain.entities.common import (
     SellPriceLevels,
 )
 from jstock_advisor.domain.entities.daily_notification_priority import (
+    STOCK_SCOPE_SUFFIX,
     build_daily_notification_priority_id,
 )
 from jstock_advisor.domain.entities.enums import (
@@ -33,6 +34,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
 from jstock_advisor.domain.entities.notification import NotificationLog
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
@@ -3950,7 +3952,10 @@ def test_cp_c_record_id_date_matches_business_date_field(service_and_repos) -> N
     stored = service._daily_priority_repo.get(record_id)
     assert stored is not None
     assert stored.business_date == business_date
-    assert record_id == f"{stored.business_date.isoformat()}:{sell_rec.stock_code}"
+    assert (
+        record_id
+        == f"{stored.business_date.isoformat()}:{sell_rec.stock_code}:{STOCK_SCOPE_SUFFIX}"
+    )
 
 
 # ===== TradeCooldown JST暦日境界修正(追加修正1) =====
@@ -3962,6 +3967,8 @@ def _service_with_cooldown_entry(
     store_dir = tmp_path / "local_store"
     HoldingsSnapshotRepository(store_dir=store_dir).upsert(
         HoldingsSnapshotEntry(
+            owner=DEFAULT_OWNER,
+            holding_id=build_holding_id(DEFAULT_OWNER, "4631"),
             stock_code="4631",
             shares=100,
             average_purchase_price=Decimal("1000"),

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from jstock_advisor.domain.entities.enums import AccountType
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
@@ -46,6 +47,8 @@ class _FakeScreeningDataProvider:
 
 def _holding(stock_code: str) -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
         shares=100,

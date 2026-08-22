@@ -10,6 +10,7 @@ import typer
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.corporate_action_service import CorporateActionService
@@ -57,16 +58,18 @@ def list_holdings() -> None:
 
 
 @app.command("show")
-def show_holding(stock_code: str) -> None:
+def show_holding(
+    stock_code: str, owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者")
+) -> None:
     """特定銘柄の保有詳細と購入ロット一覧を表示する。"""
     service = PortfolioService()
-    holding = service.get_holding(stock_code)
+    holding = service.get_holding(owner, stock_code)
     if holding is None:
-        typer.echo(f"銘柄コード{stock_code}は登録されていません。")
+        typer.echo(f"所有者{owner}・銘柄コード{stock_code}は登録されていません。")
         raise typer.Exit(code=1)
     typer.echo(holding.model_dump_json(indent=2))
     typer.echo("--- 購入ロット ---")
-    for lot in service.list_lots(stock_code):
+    for lot in service.list_lots(owner, stock_code):
         typer.echo(
             f"{lot.lot_id}\t{lot.purchase_date}\t{lot.shares}株\t{lot.purchase_price}円\t"
             f"手数料:{lot.fee}円\t口座:{lot.account_type.value}"
@@ -76,6 +79,7 @@ def show_holding(stock_code: str) -> None:
 @app.command("add")
 def add_holding(
     stock_code: str = typer.Argument(..., help="銘柄コード(4桁)"),
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者"),
     shares: int = typer.Option(..., "--shares", "-s", help="購入株数"),
     price: str = typer.Option(..., "--price", "-p", help="購入単価(円)"),
     stock_name: str = typer.Option(None, "--name", "-n", help="銘柄名"),
@@ -92,6 +96,7 @@ def add_holding(
     """保有銘柄を1件登録する(既存銘柄の場合は追加購入ロットとして扱う)。"""
     service = PortfolioService()
     holding = service.register_purchase(
+        owner=owner,
         stock_code=stock_code,
         stock_name=stock_name,
         shares=shares,
@@ -113,6 +118,7 @@ def add_holding(
 @app.command("update-meta")
 def update_holding_meta(
     stock_code: str,
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者"),
     stock_name: str = typer.Option(None, "--name"),
     market_segment: str = typer.Option(None, "--market-segment"),
     industry: str = typer.Option(None, "--industry"),
@@ -147,7 +153,7 @@ def update_holding_meta(
 
     service = PortfolioService()
     try:
-        holding = service.update_holding_meta(stock_code, **fields)
+        holding = service.update_holding_meta(owner, stock_code, **fields)
     except ValueError as e:
         typer.echo(str(e))
         raise typer.Exit(code=1) from e
@@ -157,24 +163,29 @@ def update_holding_meta(
 @app.command("delete")
 def delete_holding(
     stock_code: str,
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者"),
     yes: bool = typer.Option(False, "--yes", "-y", help="確認をスキップする"),
 ) -> None:
     """保有銘柄(全ロット含む)を削除する。"""
     if not yes and not typer.confirm(
-        f"{stock_code}の保有銘柄データを全て削除します。よろしいですか?"
+        f"所有者{owner}・{stock_code}の保有銘柄データを全て削除します。よろしいですか?"
     ):
         raise typer.Abort()
     service = PortfolioService()
-    deleted = service.delete_holding(stock_code)
+    deleted = service.delete_holding(owner, stock_code)
     typer.echo("削除しました。" if deleted else "該当する保有銘柄は見つかりませんでした。")
 
 
 @app.command("delete-lot")
-def delete_lot(stock_code: str, lot_id: str) -> None:
+def delete_lot(
+    stock_code: str,
+    lot_id: str,
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者"),
+) -> None:
     """特定の購入ロットのみを削除し、保有サマリを再計算する。"""
     service = PortfolioService()
     try:
-        holding = service.delete_lot(stock_code, lot_id)
+        holding = service.delete_lot(owner, stock_code, lot_id)
     except ValueError as e:
         typer.echo(str(e))
         raise typer.Exit(code=1) from e
@@ -216,7 +227,7 @@ def recompute_all(
 
     for holding in holdings:
         before_shares, before_price = holding.shares, holding.average_purchase_price
-        updated = service.recompute_holding(holding.stock_code)
+        updated = service.recompute_holding(holding.owner, holding.stock_code)
         audit.record(
             decision_type="holding_split_adjustment",
             stock_code=holding.stock_code,

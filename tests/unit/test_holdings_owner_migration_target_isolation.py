@@ -23,7 +23,6 @@ import pytest
 from moto import mock_aws
 
 from jstock_advisor.domain.entities.enums import AccountType
-from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
 from jstock_advisor.infrastructure.aws import trading_pause_config
 from jstock_advisor.infrastructure.collection_store import (
     build_collection_store,
@@ -31,7 +30,7 @@ from jstock_advisor.infrastructure.collection_store import (
 )
 from jstock_advisor.migrations.holdings_owner_migration import run_migration
 from jstock_advisor.migrations.holdings_owner_preflight import run_preflight
-from jstock_advisor.migrations.legacy_shapes import LegacyPurchaseLotV1
+from jstock_advisor.migrations.legacy_shapes import LegacyHoldingV1, LegacyPurchaseLotV1
 from jstock_advisor.migrations.target import MigrationTarget, target_backend
 from jstock_advisor.migrations.v2_entities import HoldingV2
 
@@ -82,8 +81,8 @@ def aws_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         yield
 
 
-def _holding(stock_code: str, shares: int) -> Holding:
-    return Holding(
+def _holding(stock_code: str, shares: int) -> LegacyHoldingV1:
+    return LegacyHoldingV1(
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
         shares=shares,
@@ -97,8 +96,8 @@ def _holding(stock_code: str, shares: int) -> Holding:
     )
 
 
-def _lot(lot_id: str, stock_code: str, shares: int) -> PurchaseLot:
-    return PurchaseLot(
+def _lot(lot_id: str, stock_code: str, shares: int) -> LegacyPurchaseLotV1:
+    return LegacyPurchaseLotV1(
         lot_id=lot_id,
         stock_code=stock_code,
         purchase_date=dt.date(2026, 1, 1),
@@ -110,10 +109,10 @@ def _lot(lot_id: str, stock_code: str, shares: int) -> PurchaseLot:
 
 def _seed_aws_holding_and_lot(stock_code: str, shares: int, *, paused: bool = True) -> None:
     with target_backend(MigrationTarget.AWS):
-        build_collection_store(Holding, "holdings.json", "stock_code", None).upsert(
+        build_collection_store(LegacyHoldingV1, "holdings.json", "stock_code", None).upsert(
             _holding(stock_code, shares)
         )
-        build_collection_store(PurchaseLot, "purchase_lots.json", "lot_id", None).upsert(
+        build_collection_store(LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", None).upsert(
             _lot("aws-lot-1", stock_code, shares)
         )
         trading_pause_config.init(
@@ -124,10 +123,10 @@ def _seed_aws_holding_and_lot(stock_code: str, shares: int, *, paused: bool = Tr
 def _seed_local_holding_and_lot(
     store_dir: Path, stock_code: str, shares: int, *, paused: bool = True
 ) -> None:
-    build_collection_store(Holding, "holdings.json", "stock_code", store_dir).upsert(
+    build_collection_store(LegacyHoldingV1, "holdings.json", "stock_code", store_dir).upsert(
         _holding(stock_code, shares)
     )
-    build_collection_store(PurchaseLot, "purchase_lots.json", "lot_id", store_dir).upsert(
+    build_collection_store(LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir).upsert(
         _lot("local-lot-1", stock_code, shares)
     )
     trading_pause_config.init(
@@ -141,7 +140,7 @@ def _seed_local_holding_and_lot(
 def _seed_local_orphan_purchase_lot(store_dir: Path, stock_code: str) -> None:
     """対応するHoldingが存在しない孤立したPurchaseLotのみをlocalへ置く
     (holding_purchase_lot_consistencyチェックが失敗する原因になる)。"""
-    build_collection_store(PurchaseLot, "purchase_lots.json", "lot_id", store_dir).upsert(
+    build_collection_store(LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir).upsert(
         _lot("local-orphan-lot", stock_code, 10)
     )
 

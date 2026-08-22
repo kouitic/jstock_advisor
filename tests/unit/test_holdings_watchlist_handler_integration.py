@@ -37,6 +37,7 @@ from jstock_advisor.domain.entities.holding_decision import (
     InvestmentThesisScore,
     RiskDeductionScore,
 )
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.signals.holding_decision_score import combine_holding_decision
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
@@ -89,6 +90,8 @@ class _FakeLineClient:
 
 def _holding(stock_code: str = _STOCK_CODE) -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name="x",
         shares=100,

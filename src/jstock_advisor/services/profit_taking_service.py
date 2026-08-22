@@ -778,6 +778,8 @@ class ProfitTakingService:
 
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
+            owner=holding.owner,
+            holding_id=holding.holding_id,
             stock_code=holding.stock_code,
             stock_name=snapshot.financial.stock_name or holding.stock_name,
             recommended_at=now,

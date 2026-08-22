@@ -13,6 +13,11 @@ import unicodedata
 _HOLDING_ID_DELIMITER = "#"
 _MAX_OWNER_LENGTH = 20
 
+# 既定owner(M2データ移行・CLI/レガシーCSVコマンドの既定値として使用)。
+# owner概念導入前の唯一の利用者を表す固定値であり、Enumではなく通常のowner
+# 文字列の1つ(normalize_and_validate_owner()の検証対象)として扱う。
+DEFAULT_OWNER = "本人"
+
 
 class InvalidOwnerError(ValueError):
     """owner正規化・検証に失敗した(空文字列・最大長超過・禁止文字を含む等)。"""

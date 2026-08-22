@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.services.csv_import_service import CsvRowStatus, HoldingsCsvImportService
 from jstock_advisor.services.portfolio_service import PortfolioService
 
@@ -27,7 +28,7 @@ def test_valid_rows_are_imported(
     assert summary.total_rows == 1
     assert summary.success_count == 1
     assert summary.error_count == 0
-    holding = portfolio_service.get_holding("2914")
+    holding = portfolio_service.get_holding(DEFAULT_OWNER, "2914")
     assert holding is not None
     assert holding.shares == 100
 
@@ -87,7 +88,7 @@ def test_missing_account_type_defaults_to_general_with_warning(
     csv_path = _write_csv(tmp_path, "stock_code,shares,purchase_price\n2914,100,4200\n")
     summary = csv_import_service.import_file(csv_path)
     assert summary.results[0].status == CsvRowStatus.WARNING
-    holding = portfolio_service.get_holding("2914")
+    holding = portfolio_service.get_holding(DEFAULT_OWNER, "2914")
     assert holding is not None
     assert holding.account_type.value == "GENERAL"
 
@@ -98,6 +99,7 @@ def test_existing_holding_additional_purchase_accumulates(
     portfolio_service: PortfolioService,
 ) -> None:
     portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         stock_name="日本たばこ産業",
         shares=100,
@@ -110,7 +112,7 @@ def test_existing_holding_additional_purchase_accumulates(
     )
     summary = csv_import_service.import_file(csv_path, on_duplicate="additional_purchase")
     assert summary.results[0].status == CsvRowStatus.WARNING
-    holding = portfolio_service.get_holding("2914")
+    holding = portfolio_service.get_holding(DEFAULT_OWNER, "2914")
     assert holding is not None
     assert holding.shares == 200
 
@@ -121,6 +123,7 @@ def test_existing_holding_overwrite_replaces_lots(
     portfolio_service: PortfolioService,
 ) -> None:
     portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         stock_name="日本たばこ産業",
         shares=100,
@@ -133,7 +136,7 @@ def test_existing_holding_overwrite_replaces_lots(
     )
     summary = csv_import_service.import_file(csv_path, on_duplicate="overwrite")
     assert summary.results[0].status == CsvRowStatus.WARNING
-    holding = portfolio_service.get_holding("2914")
+    holding = portfolio_service.get_holding(DEFAULT_OWNER, "2914")
     assert holding is not None
     assert holding.shares == 50
     assert holding.average_purchase_price == Decimal("4400")

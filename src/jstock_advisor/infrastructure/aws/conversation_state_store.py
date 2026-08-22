@@ -65,6 +65,9 @@ class ConversationState:
     stock_code: str | None
     shares: int | None
     price: Decimal | None
+    # M3(保有銘柄オーナー機能): BUY/SELLのCSV入力成功後からconfirmまで保持する
+    # owner(中間状態のためOptional)。WATCHでは常にNoneのまま。
+    owner: str | None
     created_at: dt.datetime
     updated_at: dt.datetime
     ttl: int
@@ -87,6 +90,7 @@ def _from_item(item: dict[str, Any]) -> ConversationState:
         stock_code=item.get("stock_code"),
         shares=int(item["shares"]) if item.get("shares") is not None else None,
         price=item.get("price"),
+        owner=item.get("owner"),
         created_at=dt.datetime.fromisoformat(item["created_at"]),
         updated_at=dt.datetime.fromisoformat(item["updated_at"]),
         ttl=int(item["ttl"]),
@@ -132,13 +136,15 @@ def record_input(
     now: dt.datetime,
     shares: int | None = None,
     price: Decimal | None = None,
+    owner: str | None = None,
 ) -> ConversationState | None:
     """INPUT_WAITING→CONFIRM_WAITING。actionが一致し、状態がINPUT_WAITING、
     かつ`ttl > now`の場合のみ成功する(期限切れは物理的に残っていても条件不成立
     として扱う)。成功時は新しいoperation_idを発行する。条件不成立時はNoneを返す。
 
-    shares/priceはWATCH(銘柄コードのみ)ではNoneのまま渡す(該当属性を
-    REMOVEし、以前の対話で残っていた値をクリアする)。
+    shares/price/ownerはWATCH(銘柄コードのみ)ではNoneのまま渡す(該当属性を
+    REMOVEし、以前の対話で残っていた値をクリアする)。ownerはBUY/SELLの
+    CSV入力(所有者,銘柄コード,株数,単価)成功時に正規化済みの値を渡すこと。
     """
     operation_id = str(uuid.uuid4())
     now_iso = now.isoformat()
@@ -173,6 +179,11 @@ def record_input(
         values[":price"] = price
     else:
         remove_clauses.append("#price")
+    if owner is not None:
+        set_clauses.append("#owner = :owner")
+        values[":owner"] = owner
+    else:
+        remove_clauses.append("#owner")
 
     update_expression = "SET " + ", ".join(set_clauses)
     if remove_clauses:
@@ -180,8 +191,8 @@ def record_input(
 
     # DynamoDBはExpressionAttributeNamesに実際の式で参照されていないエントリが
     # 1つでもあるとValidationExceptionを送出するため、この呼び出しで実際に
-    # 使う名前だけに絞る(#shares/#priceはSET/REMOVEいずれかに必ず含まれるが、
-    # #created_atはこの関数では一切参照しないため含めない)。
+    # 使う名前だけに絞る(#shares/#price/#ownerはSET/REMOVEいずれかに必ず
+    # 含まれるが、#created_atはこの関数では一切参照しないため含めない)。
     names = {
         "#action": "action",
         "#state": "state",
@@ -191,6 +202,7 @@ def record_input(
         "#ttl": "ttl",
         "#shares": "shares",
         "#price": "price",
+        "#owner": "owner",
     }
 
     try:
@@ -216,8 +228,8 @@ def retry(
     expected_operation_id: str,
     now: dt.datetime,
 ) -> ConversationState | None:
-    """CONFIRM_WAITING→INPUT_WAITING(入力し直し)。stock_code/shares/priceを
-    クリアし、operation_idを再発行する。operation_id・state・期限のいずれかが
+    """CONFIRM_WAITING→INPUT_WAITING(入力し直し)。stock_code/shares/price/owner
+    をクリアし、operation_idを再発行する。operation_id・state・期限のいずれかが
     一致しない場合は何も変更せずNoneを返す。"""
     new_operation_id = str(uuid.uuid4())
     now_iso = now.isoformat()
@@ -229,7 +241,7 @@ def retry(
             UpdateExpression=(
                 "SET #state = :input_waiting, #operation_id = :new_op, "
                 "#updated_at = :now, #ttl = :ttl "
-                "REMOVE #stock_code, #shares, #price"
+                "REMOVE #stock_code, #shares, #price, #owner"
             ),
             ConditionExpression=(
                 "#action = :expected_action AND #state = :confirm_waiting "
@@ -244,6 +256,7 @@ def retry(
                 "#stock_code": "stock_code",
                 "#shares": "shares",
                 "#price": "price",
+                "#owner": "owner",
             },
             ExpressionAttributeValues={
                 ":expected_action": expected_action.value,

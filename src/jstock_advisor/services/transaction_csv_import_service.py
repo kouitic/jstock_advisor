@@ -13,6 +13,11 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.enums import AccountType, TransactionType
+from jstock_advisor.domain.entities.owner import (
+    DEFAULT_OWNER,
+    InvalidOwnerError,
+    normalize_and_validate_owner,
+)
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 
@@ -71,6 +76,17 @@ class TransactionCsvImportService:
         return summary
 
     def _process_row(self, row_number: int, row: dict[str, str | None]) -> CsvImportRowResult:
+        owner_raw = (row.get("owner") or "").strip() or DEFAULT_OWNER
+        try:
+            owner = normalize_and_validate_owner(owner_raw)
+        except InvalidOwnerError:
+            return CsvImportRowResult(
+                row_number=row_number,
+                status=CsvRowStatus.ERROR,
+                stock_code=None,
+                message=f"所有者の指定が不正です: {owner_raw!r}",
+            )
+
         stock_code = ExternalValueParser.stock_code(row.get("stock_code"))
         if stock_code is None:
             return CsvImportRowResult(
@@ -159,6 +175,7 @@ class TransactionCsvImportService:
 
         try:
             self._service.record_execution(
+                owner=owner,
                 stock_code=stock_code,
                 transaction_type=transaction_type,
                 shares=shares,

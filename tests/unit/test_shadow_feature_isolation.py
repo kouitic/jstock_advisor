@@ -86,6 +86,7 @@ from jstock_advisor.domain.entities.holding_decision import (
     RiskDeductionScore,
 )
 from jstock_advisor.domain.entities.market_environment import MarketEnvironmentResult
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.sector_environment import SectorEnvironmentResult
 from jstock_advisor.domain.entities.timing_score import TimingScoreResult
@@ -152,6 +153,8 @@ def _base_snapshot() -> StockSnapshot:
 
 def _holding() -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, _STOCK_CODE),
         stock_code=_STOCK_CODE,
         stock_name="x",
         shares=100,

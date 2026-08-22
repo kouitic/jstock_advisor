@@ -17,6 +17,7 @@ import io
 from dataclasses import dataclass
 
 from jstock_advisor.domain.entities.enums import AccountType, TransactionType
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.portfolio_service import PortfolioService
@@ -112,7 +113,7 @@ class ChatCommandService:
         if price is None or price <= 0:
             return ChatCommandResult("単価は正の数値で指定してください", False)
 
-        holding = self._portfolio.get_holding(stock_code)
+        holding = self._portfolio.get_holding(DEFAULT_OWNER, stock_code)
         if command == _BUY_COMMAND:
             transaction_type = (
                 TransactionType.ADDITIONAL_BUY if holding is not None else TransactionType.BUY
@@ -133,6 +134,7 @@ class ChatCommandService:
         today_jst = evaluation_date_jst(now)
         try:
             self._transactions.record_execution(
+                owner=DEFAULT_OWNER,
                 stock_code=stock_code,
                 transaction_type=transaction_type,
                 shares=shares,
@@ -145,6 +147,7 @@ class ChatCommandService:
 
         if command == _BUY_COMMAND:
             self._portfolio.register_purchase(
+                owner=DEFAULT_OWNER,
                 stock_code=stock_code,
                 stock_name=None,
                 shares=shares,
@@ -157,7 +160,7 @@ class ChatCommandService:
             # reset用)がexecution_date/today_jstと同じ評価日になるようにする
             # (再コードレビュー対応2026-08、指摘3: 以前はnowが渡されず実際の
             # 処理時刻が使われていた)。
-            self._portfolio.sell_shares(stock_code, shares, now=now)
+            self._portfolio.sell_shares(DEFAULT_OWNER, stock_code, shares, now=now)
 
         return ChatCommandResult(
             f"記録しました: {transaction_type.value} {stock_code} {shares}株 @{price}円", True

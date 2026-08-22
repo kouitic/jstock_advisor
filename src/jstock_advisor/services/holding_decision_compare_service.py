@@ -22,6 +22,7 @@ from pathlib import Path
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import ExecutionPlanReason
 from jstock_advisor.domain.entities.holding_decision import ReasonImpact
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.services.holding_decision_backtest_service import placeholder_holding
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
 from jstock_advisor.services.portfolio_service import PortfolioService
@@ -155,7 +156,7 @@ def run_compare(
             )
             continue
 
-        holding = portfolio.get_holding(stock_code)
+        holding = portfolio.get_holding(DEFAULT_OWNER, stock_code)
         legacy_category: str
         legacy_should_notify: bool | None
         legacy_reason_codes: tuple[str, ...]

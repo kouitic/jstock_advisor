@@ -16,6 +16,7 @@ from jstock_advisor.domain.entities.enums import (
     SkipReason,
     TransactionType,
 )
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
@@ -82,6 +83,7 @@ def service(tmp_path: Path) -> TransactionHistoryService:
 
 def test_record_buy_without_recommendation(service: TransactionHistoryService) -> None:
     tx = service.record_execution(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -98,6 +100,7 @@ def test_record_buy_with_recommendation_computes_price_diff(
     service: TransactionHistoryService,
 ) -> None:
     tx = service.record_execution(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -116,6 +119,7 @@ def test_record_partial_sell_uses_partial_profit_start_price(
     service: TransactionHistoryService,
 ) -> None:
     tx = service.record_execution(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         transaction_type=TransactionType.PARTIAL_SELL,
         shares=50,
@@ -132,6 +136,7 @@ def test_record_full_sell_uses_full_profit_consideration_price(
     service: TransactionHistoryService,
 ) -> None:
     tx = service.record_execution(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         transaction_type=TransactionType.FULL_SELL,
         shares=100,
@@ -149,6 +154,7 @@ def test_record_sell_against_buy_recommendation_has_no_reference_price(
 ) -> None:
     # BUY型の推奨にはsell_pricesが無いため、売却の推奨価格差は算出できない
     tx = service.record_execution(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         transaction_type=TransactionType.PARTIAL_SELL,
         shares=50,
@@ -166,6 +172,7 @@ def test_record_execution_rejects_unknown_recommendation(
 ) -> None:
     with pytest.raises(ValueError, match="見つかりません"):
         service.record_execution(
+            owner=DEFAULT_OWNER,
             stock_code="2914",
             transaction_type=TransactionType.BUY,
             shares=100,
@@ -179,6 +186,7 @@ def test_record_execution_rejects_unknown_recommendation(
 def test_record_execution_rejects_non_positive_shares(service: TransactionHistoryService) -> None:
     with pytest.raises(ValueError):
         service.record_execution(
+            owner=DEFAULT_OWNER,
             stock_code="2914",
             transaction_type=TransactionType.BUY,
             shares=0,
@@ -203,6 +211,7 @@ def test_record_skip_rejects_unknown_recommendation(service: TransactionHistoryS
 
 def test_list_transactions_filters_by_stock(service: TransactionHistoryService) -> None:
     service.record_execution(
+        owner=DEFAULT_OWNER,
         stock_code="2914",
         transaction_type=TransactionType.BUY,
         shares=100,
@@ -211,6 +220,7 @@ def test_list_transactions_filters_by_stock(service: TransactionHistoryService) 
         now=_NOW,
     )
     service.record_execution(
+        owner=DEFAULT_OWNER,
         stock_code="8136",
         transaction_type=TransactionType.BUY,
         shares=100,

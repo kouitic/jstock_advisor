@@ -15,6 +15,7 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType, ExecutionMode, ExecutionPlanReason
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.investment_thesis_baseline_repository import (
     InvestmentThesisBaselineRepository,
@@ -38,6 +39,8 @@ _PROVIDERS = build_mock_provider_bundle(_NOW)
 
 def _holding(stock_code: str = "2914") -> Holding:
     return Holding(
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name="x",
         shares=100,
