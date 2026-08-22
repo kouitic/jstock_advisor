@@ -7,13 +7,33 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from jstock_advisor.domain.entities.enums import AccountType, BaselineOrigin, ExecutionMode
+from jstock_advisor.domain.entities.enums import (
+    AccountType,
+    BaselineOrigin,
+    BaselineStatus,
+    ExecutionMode,
+)
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
-from jstock_advisor.domain.entities.holding_decision import BaselineValueSnapshot
+from jstock_advisor.domain.entities.holding_decision import (
+    BaselineValueSnapshot,
+    CompanyQualityScore,
+    ComponentCoverage,
+    ExecutionPlanReason,
+    HoldingDecisionCategory,
+    HoldingDecisionConfidenceLevel,
+    HoldingDecisionHardGate,
+    HoldingDecisionResult,
+    InvestmentThesis,
+    InvestmentThesisBaseline,
+    InvestmentThesisScore,
+    RiskDeductionScore,
+)
+from jstock_advisor.domain.entities.owner import InvalidOwnerError
 from jstock_advisor.infrastructure.aws import (
     baseline_pointer,
     baseline_sequence,
@@ -77,6 +97,33 @@ def _seed_holding_and_lot(store_dir: Path, stock_code: str = _STOCK, shares: int
             created_at=_NOW,
             updated_at=_NOW,
         )
+    )
+
+
+def _holding_decision_result(
+    holding_decision_result_id: str, holding_id: str
+) -> HoldingDecisionResult:
+    return HoldingDecisionResult(
+        holding_decision_result_id=holding_decision_result_id,
+        holding_id=holding_id,
+        stock_code=_STOCK,
+        evaluated_at=_NOW,
+        company_quality=CompanyQualityScore(score=30.0, coverage_ratio=1.0),
+        investment_thesis=InvestmentThesisScore(score=25.0, coverage_ratio=1.0),
+        risk_deduction=RiskDeductionScore(score=10.0, coverage_ratio=1.0),
+        base_score=45.0,
+        hard_gate=HoldingDecisionHardGate(triggered=False),
+        final_score=45.0,
+        display_value=45,
+        category=HoldingDecisionCategory.SELL_CONSIDERATION,
+        coverage=ComponentCoverage(
+            overall=1.0, company_quality=1.0, investment_thesis=1.0, risk_deduction=1.0
+        ),
+        confidence=HoldingDecisionConfidenceLevel.HIGH,
+        should_notify=True,
+        scoring_model_version=1,
+        runtime_config_version=1,
+        execution_plan_reason=ExecutionPlanReason.NORMAL_ACTIVE,
     )
 
 
@@ -279,3 +326,119 @@ def test_baseline_pointer_migration_then_update_succeeds(
     assert refetched is not None
     assert refetched.pointer_version == 2
     assert refetched.active_baseline_version == 2
+
+
+# --- holding_id "field-only"移行の冪等性・fail-closed(必須2) -----------------
+
+
+def test_migration_aborts_when_holding_id_field_has_mismatched_owner(store_dir: Path) -> None:
+    """HoldingDecisionResult等のholding_idが既に別ownerで移行済みだった場合、
+    誤って上書き/二重prefix化せずfail-closedで中止すること。"""
+    _set_pause(store_dir, True)
+    _seed_holding_and_lot(store_dir)
+    store = build_collection_store(
+        HoldingDecisionResult,
+        "holding_decision_results.json",
+        "holding_decision_result_id",
+        store_dir,
+    )
+    store.upsert(_holding_decision_result("hdr-1", holding_id="子供#8306"))
+
+    with pytest.raises(InvalidOwnerError):
+        run_migration(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
+
+
+def test_migration_retry_after_partial_failure_does_not_double_prefix_holding_id(
+    store_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """holding_decision_results(前半)の移行が成功した直後にinvestment_theses
+    (後半)側で技術的障害が発生してmigrationが中止された場合でも、再実行時に
+    holding_decision_resultsが"本人#本人#8306"のような二重prefixにならず、
+    investment_theses/investment_thesis_baselinesも正しく1回だけ移行される
+    こと(必須テスト: 前半成功→後半で例外→再実行)。"""
+    _set_pause(store_dir, True)
+    _seed_holding_and_lot(store_dir)
+
+    hdr_store = build_collection_store(
+        HoldingDecisionResult,
+        "holding_decision_results.json",
+        "holding_decision_result_id",
+        store_dir,
+    )
+    hdr_store.upsert(_holding_decision_result("hdr-1", holding_id=_STOCK))
+
+    thesis_store = build_collection_store(
+        InvestmentThesis, "investment_theses.json", "investment_thesis_id", store_dir
+    )
+    thesis_store.upsert(
+        InvestmentThesis(
+            investment_thesis_id="thesis-1", holding_id=_STOCK, stock_code=_STOCK, updated_at=_NOW
+        )
+    )
+
+    baseline_store = build_collection_store(
+        InvestmentThesisBaseline, "investment_thesis_baselines.json", "baseline_id", store_dir
+    )
+    baseline_store.upsert(
+        InvestmentThesisBaseline(
+            baseline_id=f"{_STOCK}:v1",
+            holding_id=_STOCK,
+            stock_code=_STOCK,
+            version=1,
+            origin=BaselineOrigin.SYSTEM_INITIALIZED,
+            status=BaselineStatus.APPROVED,
+            created_at=_NOW,
+            baseline_values=BaselineValueSnapshot(total_yield_pct=4.0, equity_ratio_pct=45.0),
+        )
+    )
+
+    original_build_collection_store = build_collection_store
+    call_state = {"raised": False}
+
+    def _flaky_build_collection_store(
+        model_type: Any,
+        file_name: str,
+        id_field: str,
+        store_dir_arg: Path | None = None,
+        ttl_seconds: int | None = None,
+    ) -> Any:
+        if file_name == "investment_theses.json" and not call_state["raised"]:
+            call_state["raised"] = True
+            raise RuntimeError("simulated transient failure while migrating investment_theses")
+        return original_build_collection_store(
+            model_type, file_name, id_field, store_dir_arg, ttl_seconds=ttl_seconds
+        )
+
+    monkeypatch.setattr(
+        "jstock_advisor.migrations.holdings_owner_migration.build_collection_store",
+        _flaky_build_collection_store,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated transient failure"):
+        run_migration(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
+
+    # 前半(holding_decision_results)は既に正しく移行済みであること。
+    migrated_hdr = hdr_store.get("hdr-1")
+    assert migrated_hdr is not None
+    assert migrated_hdr.holding_id == "本人#8306"
+
+    # 後半(investment_theses)はまだ未移行のまま(旧形式)であること。
+    unmigrated_thesis = thesis_store.get("thesis-1")
+    assert unmigrated_thesis is not None
+    assert unmigrated_thesis.holding_id == _STOCK
+
+    monkeypatch.undo()
+
+    result = run_migration(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
+    assert result.preflight.passed is True
+
+    migrated_hdr_again = hdr_store.get("hdr-1")
+    migrated_thesis = thesis_store.get("thesis-1")
+    migrated_baseline = baseline_store.get(f"{_STOCK}:v1")
+    assert migrated_hdr_again is not None
+    assert migrated_thesis is not None
+    assert migrated_baseline is not None
+    # 再実行後、いずれも二重prefixにならず正しく"本人#8306"であること。
+    assert migrated_hdr_again.holding_id == "本人#8306"
+    assert migrated_thesis.holding_id == "本人#8306"
+    assert migrated_baseline.holding_id == "本人#8306"

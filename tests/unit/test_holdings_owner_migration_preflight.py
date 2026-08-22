@@ -230,3 +230,52 @@ def test_preflight_v2_table_check_skipped_for_local_target(store_dir: Path) -> N
     report = run_preflight(MigrationTarget.LOCAL, store_dir)
     check = next(c for c in report.checks if c.name == "v2_tables_exist_with_holding_id_key")
     assert check.passed is True
+
+
+# --- ValidationHoldingsSnapshotの整合性(normal側と独立にチェックする、追加改善)---
+
+
+def test_preflight_detects_active_validation_snapshot_without_holding(store_dir: Path) -> None:
+    validation_store = build_collection_store(
+        HoldingsSnapshotEntry, "validation_holdings_snapshots.json", "stock_code", store_dir
+    )
+    validation_store.upsert(
+        HoldingsSnapshotEntry(
+            stock_code="9999",
+            shares=10,
+            recorded_at=dt.date(2026, 1, 1),
+            active_holding=True,
+        )
+    )
+
+    report = run_preflight(MigrationTarget.LOCAL, store_dir)
+
+    assert report.passed is False
+    check = next(
+        c for c in report.checks if c.name == "validation_holdings_snapshot_consistency"
+    )
+    assert check.passed is False
+    assert check.offending[0]["stock_code"] == "9999"
+
+
+def test_preflight_passes_when_validation_snapshot_matches_holding(store_dir: Path) -> None:
+    _seed_holding(store_dir, stock_code="8306")
+    validation_store = build_collection_store(
+        HoldingsSnapshotEntry, "validation_holdings_snapshots.json", "stock_code", store_dir
+    )
+    validation_store.upsert(
+        HoldingsSnapshotEntry(
+            stock_code="8306",
+            shares=100,
+            recorded_at=dt.date(2026, 1, 1),
+            active_holding=True,
+        )
+    )
+
+    report = run_preflight(MigrationTarget.LOCAL, store_dir)
+
+    check = next(
+        c for c in report.checks if c.name == "validation_holdings_snapshot_consistency"
+    )
+    assert check.passed is True
+    assert report.counts["validation_holdings_snapshots"] == 1

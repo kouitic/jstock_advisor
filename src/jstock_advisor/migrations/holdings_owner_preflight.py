@@ -29,7 +29,7 @@ from jstock_advisor.migrations.legacy_shapes import (
     LegacyHoldingV1,
     LegacyPurchaseLotV1,
 )
-from jstock_advisor.migrations.target import MigrationTarget
+from jstock_advisor.migrations.target import MigrationTarget, target_backend
 
 # RecommendationTypeの発生元による分類(実コード確認済み、v4プラン承認事項)。
 # BUY系(BuySignalService由来、stock-scope): shares_at_recommendationは常にNone。
@@ -248,6 +248,29 @@ def _check_holdings_snapshot_consistency(
     )
 
 
+def _check_validation_holdings_snapshot_consistency(
+    validation_snapshots: list[LegacyHoldingsSnapshotEntryV1], holdings: list[LegacyHoldingV1]
+) -> PreflightCheck:
+    """ValidationHoldingsSnapshotについても、通常のHoldingsSnapshotと同じ
+    active_holding=True整合性検証を独立に行う(normal側のみ検証していた
+    レビュー指摘の是正)。"""
+    holding_stock_codes = {h.stock_code for h in holdings}
+    offending = [
+        {
+            "stock_code": entry.stock_code,
+            "reason": "active_holding=Trueだが対応するHoldingが存在しない(validation側)",
+        }
+        for entry in validation_snapshots
+        if entry.active_holding and entry.stock_code not in holding_stock_codes
+    ]
+    return PreflightCheck(
+        name="validation_holdings_snapshot_consistency",
+        passed=not offending,
+        detail=f"ValidationHoldingsSnapshot×Holdingの整合性: 不整合{len(offending)}件",
+        offending=tuple(offending),
+    )
+
+
 def _check_baseline_reference_integrity(
     sequences: list[Any], pointers: list[Any]
 ) -> PreflightCheck:
@@ -343,60 +366,80 @@ def run_preflight(
     store_dir: Path | None = None,
     accepted_unresolved_notification_ids: frozenset[str] = frozenset(),
 ) -> PreflightReport:
-    """全preflightチェックを実行し、PreflightReportを返す(副作用なし、読み取りのみ)。"""
-    holding_store = build_collection_store(
-        LegacyHoldingV1, "holdings.json", "stock_code", store_dir
-    )
-    lot_store = build_collection_store(
-        LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir
-    )
-    snapshot_store = build_collection_store(
-        LegacyHoldingsSnapshotEntryV1, "holdings_snapshots.json", "stock_code", store_dir
-    )
-    recommendation_store = build_collection_store(
-        Recommendation, "recommendations.json", "recommendation_id", store_dir
-    )
-    notification_store = build_collection_store(
-        NotificationLog, "notification_log.json", "notification_id", store_dir
-    )
-    decision_snapshot_store = build_collection_store(
-        DecisionSnapshot, "decision_snapshots.json", "decision_id", store_dir
-    )
+    """全preflightチェックを実行し、PreflightReportを返す(副作用なし、読み取りのみ)。
 
-    holdings = holding_store.list_all()
-    purchase_lots = lot_store.list_all()
-    snapshots = snapshot_store.list_all()
-    recommendations = recommendation_store.list_all()
-    notification_logs = notification_store.list_all()
-    decision_snapshots = decision_snapshot_store.list_all()
-    sequences = read_all_legacy_sequences(target, store_dir)
-    pointers = read_all_legacy_pointers(target, store_dir)
+    Store生成・読み取りは全て単一のtarget_backend(target)コンテキスト内で
+    行う。build_collection_store()はAWS_LAMBDA_FUNCTION_NAME環境変数の有無
+    だけでlocal/AWSを切り替えるため、コンテキストが途切れると
+    --target awsを指定していても一部の読み取りだけlocal JSONへ
+    フォールバックしうる(local/AWSの混在)。それを避けるため、ここ1箇所で
+    全Store生成を包む。
+    """
+    with target_backend(target):
+        holding_store = build_collection_store(
+            LegacyHoldingV1, "holdings.json", "stock_code", store_dir
+        )
+        lot_store = build_collection_store(
+            LegacyPurchaseLotV1, "purchase_lots.json", "lot_id", store_dir
+        )
+        snapshot_store = build_collection_store(
+            LegacyHoldingsSnapshotEntryV1, "holdings_snapshots.json", "stock_code", store_dir
+        )
+        validation_snapshot_store = build_collection_store(
+            LegacyHoldingsSnapshotEntryV1,
+            "validation_holdings_snapshots.json",
+            "stock_code",
+            store_dir,
+        )
+        recommendation_store = build_collection_store(
+            Recommendation, "recommendations.json", "recommendation_id", store_dir
+        )
+        notification_store = build_collection_store(
+            NotificationLog, "notification_log.json", "notification_id", store_dir
+        )
+        decision_snapshot_store = build_collection_store(
+            DecisionSnapshot, "decision_snapshots.json", "decision_id", store_dir
+        )
 
-    recommendations_by_id = {r.recommendation_id: r for r in recommendations}
+        holdings = holding_store.list_all()
+        purchase_lots = lot_store.list_all()
+        snapshots = snapshot_store.list_all()
+        validation_snapshots = validation_snapshot_store.list_all()
+        recommendations = recommendation_store.list_all()
+        notification_logs = notification_store.list_all()
+        decision_snapshots = decision_snapshot_store.list_all()
+        sequences = read_all_legacy_sequences(target, store_dir)
+        pointers = read_all_legacy_pointers(target, store_dir)
 
-    v2_check, pre_migration_counts = _check_v2_tables_exist_with_holding_id_key(target)
+        recommendations_by_id = {r.recommendation_id: r for r in recommendations}
 
-    checks = (
-        _check_recommendation_scope_consistency(recommendations),
-        _check_notification_log_reference_integrity(
-            notification_logs, recommendations_by_id, accepted_unresolved_notification_ids
-        ),
-        _check_decision_snapshot_reference_integrity(decision_snapshots, recommendations_by_id),
-        _check_holding_purchase_lot_consistency(holdings, purchase_lots),
-        _check_holdings_snapshot_consistency(snapshots, holdings),
-        _check_baseline_reference_integrity(sequences, pointers),
-        v2_check,
-    )
+        v2_check, pre_migration_counts = _check_v2_tables_exist_with_holding_id_key(target)
 
-    counts: dict[str, int] = {
-        "holdings": len(holdings),
-        "purchase_lots": len(purchase_lots),
-        "holdings_snapshots": len(snapshots),
-        "recommendations": len(recommendations),
-        "notification_logs": len(notification_logs),
-        "decision_snapshots": len(decision_snapshots),
-        "baseline_sequences": len(sequences),
-        "baseline_pointers": len(pointers),
-    }
-    counts.update({f"v2_existing:{k}": v for k, v in pre_migration_counts.items()})
+        checks = (
+            _check_recommendation_scope_consistency(recommendations),
+            _check_notification_log_reference_integrity(
+                notification_logs, recommendations_by_id, accepted_unresolved_notification_ids
+            ),
+            _check_decision_snapshot_reference_integrity(
+                decision_snapshots, recommendations_by_id
+            ),
+            _check_holding_purchase_lot_consistency(holdings, purchase_lots),
+            _check_holdings_snapshot_consistency(snapshots, holdings),
+            _check_validation_holdings_snapshot_consistency(validation_snapshots, holdings),
+            _check_baseline_reference_integrity(sequences, pointers),
+            v2_check,
+        )
+
+        counts: dict[str, int] = {
+            "holdings": len(holdings),
+            "purchase_lots": len(purchase_lots),
+            "holdings_snapshots": len(snapshots),
+            "validation_holdings_snapshots": len(validation_snapshots),
+            "recommendations": len(recommendations),
+            "notification_logs": len(notification_logs),
+            "decision_snapshots": len(decision_snapshots),
+            "baseline_sequences": len(sequences),
+            "baseline_pointers": len(pointers),
+        }
+        counts.update({f"v2_existing:{k}": v for k, v in pre_migration_counts.items()})
     return PreflightReport(checks=checks, counts=counts)

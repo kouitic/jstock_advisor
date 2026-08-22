@@ -48,6 +48,7 @@ from jstock_advisor.migrations.conversions import (
     convert_holding,
     convert_holdings_snapshot_entry,
     convert_purchase_lot,
+    migrate_holding_id_field_value,
     recommendation_scope_for_migration,
 )
 from jstock_advisor.migrations.holdings_owner_preflight import PreflightReport, run_preflight
@@ -274,16 +275,22 @@ def _migrate_holding_id_field_only[T: BaseModel](
 ) -> int:
     """holding_id値のみを新形式へ移行する(HoldingDecisionResult/InvestmentThesis/
     InvestmentThesisBaseline共通、いずれも既にholding_id: strフィールドを持つ)。
-    現在holding_idはstock_codeの1:1エイリアスのため、旧holding_id(=stock_code)
-    からowner付き新holding_idを導出する。baseline_id等、他の識別子は一切
-    変更しない(不変スナップショットの識別子を勝手に再採番しない)。"""
+    baseline_id等、他の識別子は一切変更しない(不変スナップショットの識別子を
+    勝手に再採番しない)。
+
+    このファイル自体(PurchaseLotsと同様)は本移行によって"その場"で
+    holding_id値を上書きするため、再実行時には旧形式(stock_codeそのもの)と
+    既に移行済みの新形式(owner付き)が混在しうる。migrate_holding_id_field_value()
+    が両方を区別して冪等に扱う(旧形式→変換、既に正しいowner付き→そのまま、
+    別ownerや多重prefix等の不正形式→fail-closedで例外を送出しmigrationを
+    中止させる)。値が変化しない場合は不要な書き込みも行わない。"""
     store = build_collection_store(model_type, file_name, id_field, store_dir)
     count = 0
     for item in store.list_all():
         old_holding_id = getattr(item, "holding_id")  # noqa: B009
-        new_holding_id = migrated_holding_id_for_stock_code(old_holding_id, owner)
-        updated = item.model_copy(update={"holding_id": new_holding_id})
-        if not dry_run:
+        new_holding_id = migrate_holding_id_field_value(old_holding_id, owner)
+        if new_holding_id != old_holding_id and not dry_run:
+            updated = item.model_copy(update={"holding_id": new_holding_id})
             store.upsert(updated)
         count += 1
     return count
@@ -322,68 +329,78 @@ def run_migration(
 ) -> MigrationResult:
     normalized_owner = normalize_and_validate_owner(owner)
 
-    _ensure_trading_paused(target, store_dir)
+    # preflight/migration本体の開始から終了まで、Storeの生成・読み書きが全て
+    # 同じtarget_backend(target)コンテキスト内で行われるようにする。
+    # build_collection_store()はAWS_LAMBDA_FUNCTION_NAME環境変数の有無だけで
+    # local/AWSを切り替えるため、途中でコンテキストが途切れると
+    # (--target awsを指定していても)一部の読み書きだけlocal JSONへ
+    # フォールバックしてしまう(local/AWSの混在)。これを避けるため、
+    # 個々のヘルパー関数側にtarget切替を持たせず、ここ1箇所で全体を包む。
+    with target_backend(target):
+        _ensure_trading_paused(target, store_dir)
 
-    report = run_preflight(target, store_dir, accepted_unresolved_notification_ids)
-    if not report.passed:
-        raise MigrationAbortedError(
-            "preflightに失敗しているためmigrationを中止しました(fail-closed):\n"
-            + report.render_text()
-        )
+        report = run_preflight(target, store_dir, accepted_unresolved_notification_ids)
+        if not report.passed:
+            raise MigrationAbortedError(
+                "preflightに失敗しているためmigrationを中止しました(fail-closed):\n"
+                + report.render_text()
+            )
 
-    counts_written: dict[str, int] = {
-        "holdings": _migrate_holdings(store_dir, normalized_owner, dry_run),
-        "purchase_lots": _migrate_purchase_lots(target, store_dir, normalized_owner, dry_run),
-        "holdings_snapshots": _migrate_holdings_snapshot(
-            store_dir,
-            normalized_owner,
-            dry_run,
-            "holdings_snapshots.json",
-            "holdings_snapshots_v2.json",
-        ),
-        "validation_holdings_snapshots": _migrate_holdings_snapshot(
-            store_dir,
-            normalized_owner,
-            dry_run,
-            "validation_holdings_snapshots.json",
-            "validation_holdings_snapshots_v2.json",
-        ),
-        "recommendations": _migrate_recommendations(store_dir, normalized_owner, dry_run),
-        "notification_logs": _migrate_notification_logs(
-            store_dir, normalized_owner, dry_run, accepted_unresolved_notification_ids
-        ),
-        "decision_snapshots": _migrate_decision_snapshots(store_dir, normalized_owner, dry_run),
-        "transactions": _migrate_transactions(store_dir, normalized_owner, dry_run),
-        "holding_decision_results": _migrate_holding_id_field_only(
-            HoldingDecisionResult,
-            "holding_decision_results.json",
-            "holding_decision_result_id",
-            store_dir,
-            normalized_owner,
-            dry_run,
-        ),
-        "investment_theses": _migrate_holding_id_field_only(
-            InvestmentThesis,
-            "investment_theses.json",
-            "investment_thesis_id",
-            store_dir,
-            normalized_owner,
-            dry_run,
-        ),
-        "investment_thesis_baselines": _migrate_holding_id_field_only(
-            InvestmentThesisBaseline,
-            "investment_thesis_baselines.json",
-            "baseline_id",
-            store_dir,
-            normalized_owner,
-            dry_run,
-        ),
-        "baseline_sequences": _migrate_baseline_sequences(
-            target, store_dir, normalized_owner, dry_run
-        ),
-        "baseline_pointers": _migrate_baseline_pointers(
-            target, store_dir, normalized_owner, dry_run
-        ),
-    }
+        counts_written: dict[str, int] = {
+            "holdings": _migrate_holdings(store_dir, normalized_owner, dry_run),
+            "purchase_lots": _migrate_purchase_lots(target, store_dir, normalized_owner, dry_run),
+            "holdings_snapshots": _migrate_holdings_snapshot(
+                store_dir,
+                normalized_owner,
+                dry_run,
+                "holdings_snapshots.json",
+                "holdings_snapshots_v2.json",
+            ),
+            "validation_holdings_snapshots": _migrate_holdings_snapshot(
+                store_dir,
+                normalized_owner,
+                dry_run,
+                "validation_holdings_snapshots.json",
+                "validation_holdings_snapshots_v2.json",
+            ),
+            "recommendations": _migrate_recommendations(store_dir, normalized_owner, dry_run),
+            "notification_logs": _migrate_notification_logs(
+                store_dir, normalized_owner, dry_run, accepted_unresolved_notification_ids
+            ),
+            "decision_snapshots": _migrate_decision_snapshots(
+                store_dir, normalized_owner, dry_run
+            ),
+            "transactions": _migrate_transactions(store_dir, normalized_owner, dry_run),
+            "holding_decision_results": _migrate_holding_id_field_only(
+                HoldingDecisionResult,
+                "holding_decision_results.json",
+                "holding_decision_result_id",
+                store_dir,
+                normalized_owner,
+                dry_run,
+            ),
+            "investment_theses": _migrate_holding_id_field_only(
+                InvestmentThesis,
+                "investment_theses.json",
+                "investment_thesis_id",
+                store_dir,
+                normalized_owner,
+                dry_run,
+            ),
+            "investment_thesis_baselines": _migrate_holding_id_field_only(
+                InvestmentThesisBaseline,
+                "investment_thesis_baselines.json",
+                "baseline_id",
+                store_dir,
+                normalized_owner,
+                dry_run,
+            ),
+            "baseline_sequences": _migrate_baseline_sequences(
+                target, store_dir, normalized_owner, dry_run
+            ),
+            "baseline_pointers": _migrate_baseline_pointers(
+                target, store_dir, normalized_owner, dry_run
+            ),
+        }
 
     return MigrationResult(dry_run=dry_run, preflight=report, counts_written=counts_written)

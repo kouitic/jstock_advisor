@@ -1168,4 +1168,16 @@ jstock migrate holdings-owner run --target aws --no-dry-run
 安全側で中止されます(CLIの操作手順だけに頼らない設計です)。
 
 移行は何度実行しても結果が変わらない(重複しない)設計のため、途中で
-失敗した場合は原因を確認のうえ、そのまま再実行して構いません。
+失敗した場合は原因を確認のうえ、そのまま再実行して構いません(再実行時、
+既に正しく移行済みのholding_idを再度書き換えて二重prefix化する、といった
+不整合は発生しません。万一データが破損している場合はfail-closedで移行を
+中止します)。
+
+**`--target aws`指定時は、preflight・run本体の開始から終了まで一貫して
+AWS(DynamoDB)のみを参照し、途中でローカルJSONへフォールバックすることは
+ありません**(逆に`--target local`指定時はAWSへ一切アクセスしません)。
+1回の実行中にlocal/AWSのデータが混在することはない設計です。
+
+HoldingsSnapshot(通常)だけでなくValidationHoldingsSnapshot(検証モード用)
+についても、`active_holding=true`なのに対応するHoldingが存在しないといった
+不整合をpreflightが独立に検知します。

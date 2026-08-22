@@ -9,7 +9,12 @@
 
 from __future__ import annotations
 
-from jstock_advisor.domain.entities.owner import build_holding_id, normalize_and_validate_owner
+from jstock_advisor.domain.entities.owner import (
+    InvalidOwnerError,
+    build_holding_id,
+    normalize_and_validate_owner,
+    split_holding_id,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.migrations.legacy_shapes import (
     LegacyHoldingsSnapshotEntryV1,
@@ -71,4 +76,29 @@ def convert_holdings_snapshot_entry(
     holding_id = build_holding_id(normalized_owner, legacy.stock_code)
     return HoldingsSnapshotEntryV2(
         holding_id=holding_id, owner=normalized_owner, **legacy.model_dump()
+    )
+
+
+def migrate_holding_id_field_value(old_value: str, owner: str = DEFAULT_MIGRATION_OWNER) -> str:
+    """holding_id"field-only"移行(HoldingDecisionResult/InvestmentThesis/
+    InvestmentThesisBaseline共通)を冪等かつfail-closedに行う。
+
+    - 旧形式(区切り文字なし、stock_codeそのもの): 新形式へ変換して返す。
+    - 既に正しいowner付きで移行済み(例: "本人#8306"、期待ownerと一致):
+      そのまま返す(再実行しても値が変わらない=冪等)。
+    - 別ownerで既に移行済み(例: "子供#8306")、または区切り文字が複数含まれる
+      不正な多重prefix(例: "本人#本人#8306"): InvalidOwnerErrorを送出し
+      fail-closedで中止する(誤って別ownerへ書き換えたり、二重prefixの
+      レコードを生成したりしない)。
+    """
+    normalized_owner = normalize_and_validate_owner(owner)
+    parsed = split_holding_id(old_value)
+    if parsed is None:
+        return build_holding_id(normalized_owner, old_value)
+    existing_owner, _stock_code = parsed
+    if existing_owner == normalized_owner:
+        return old_value
+    raise InvalidOwnerError(
+        f"holding_idが既に別ownerで移行済みのため、fail-closedで中止しました: "
+        f"{old_value!r}(期待owner={normalized_owner!r})"
     )
