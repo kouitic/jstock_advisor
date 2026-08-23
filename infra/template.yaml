@@ -206,10 +206,12 @@ Resources:
 
   # 保有銘柄オーナー機能移行(データ移行手順M1、2026-08追加): holding_id
   # (owner×stock_codeの合成キー)をパーティションキーとする新テーブル。
-  # 既存のHoldingsTable(stock_code単一キー)はそのまま残し(削除しない)、
-  # このテーブルはまだどのアプリケーションコードからも参照されない
-  # (M2の移行スクリプトがHoldingsTableから読みこのテーブルへ書き込み、
-  # M3のコード切替でアプリケーションが参照先をこちらへ切り替える)。
+  # 既存のHoldingsTable(stock_code単一キー)はそのまま残し(削除しない)。
+  # M3(アプリケーション本体切替)以降、PortfolioService/HoldingRepositoryは
+  # このテーブルを参照する(旧HoldingsTableはロールバック用に保持されるのみで、
+  # 実行時には参照されない)。参照するFunctionのIAM Policyへこのテーブルの
+  # ARNを追加し忘れるとAccessDeniedExceptionになる(M4本番検証で実際に発生・
+  # 修正した不備。下記の各FunctionのPolicies参照)。
   HoldingsTableV2:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -343,8 +345,9 @@ Resources:
         Enabled: true
 
   # 保有銘柄オーナー機能移行(データ移行手順M1、2026-08追加): holding_id単位の
-  # TradeCooldown/売買イベント検知状態。HoldingsTableV2と同様、まだどの
-  # アプリケーションコードからも参照されない(HoldingsTableV2の注記参照)。
+  # TradeCooldown/売買イベント検知状態。M3以降TradeCooldownService(HoldingsSnapshot
+  # Repository)が参照する。参照するFunctionのIAM Policyへの追加が必要
+  # (HoldingsTableV2の注記参照)。
   HoldingsSnapshotTableV2:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -974,6 +977,14 @@ Resources:
                 - !Sub "${HoldingsSnapshotTable.Arn}/index/*"
                 - !GetAtt ValidationHoldingsSnapshotTable.Arn
                 - !Sub "${ValidationHoldingsSnapshotTable.Arn}/index/*"
+                # M4本番検証で発覚したIAM不備の修正(2026-08): TradeCooldownService.
+                # detect_and_apply()がHoldingsSnapshotRepository経由でV2テーブルを
+                # 参照する(M3切替済み)。旧HoldingsSnapshotTable/ValidationHoldings
+                # SnapshotTable(直上)は削除せずロールバック用に残し、V2を追加する。
+                - !GetAtt HoldingsSnapshotTableV2.Arn
+                - !Sub "${HoldingsSnapshotTableV2.Arn}/index/*"
+                - !GetAtt ValidationHoldingsSnapshotTableV2.Arn
+                - !Sub "${ValidationHoldingsSnapshotTableV2.Arn}/index/*"
                 - !GetAtt TradeDetectionRunLockTable.Arn
                 - !Sub "${TradeDetectionRunLockTable.Arn}/index/*"
                 - !GetAtt DailyNotificationPriorityTable.Arn
@@ -994,6 +1005,12 @@ Resources:
                 - !Sub "${WatchlistTable.Arn}/index/*"
                 - !GetAtt HoldingsTable.Arn
                 - !Sub "${HoldingsTable.Arn}/index/*"
+                # M4本番検証で発覚したIAM不備の修正(2026-08): PortfolioService.
+                # list_holdings()/list_holdings_by_stock()がHoldingRepository経由で
+                # V2テーブルを参照する(M3切替済み)。旧HoldingsTable(直上)は
+                # 削除せずロールバック用に残し、V2を追加する。
+                - !GetAtt HoldingsTableV2.Arn
+                - !Sub "${HoldingsTableV2.Arn}/index/*"
                 - !GetAtt PurchaseLotsTable.Arn
                 - !Sub "${PurchaseLotsTable.Arn}/index/*"
                 - !GetAtt ShareholderBenefitsTable.Arn
@@ -1072,6 +1089,13 @@ Resources:
                 - !Sub "${InvestmentThesisBaselineSequencesTable.Arn}/index/*"
                 - !GetAtt InvestmentThesisBaselinePointersTable.Arn
                 - !Sub "${InvestmentThesisBaselinePointersTable.Arn}/index/*"
+                # M4本番検証で発覚したIAM不備の修正(2026-08): InvestmentThesisService
+                # (baseline_sequence.py/baseline_pointer.py)がM3切替済みのV2テーブルを
+                # 参照する。旧テーブル(直上2件)は削除せずロールバック用に残し、V2を追加する。
+                - !GetAtt InvestmentThesisBaselineSequencesTableV2.Arn
+                - !Sub "${InvestmentThesisBaselineSequencesTableV2.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselinePointersTableV2.Arn
+                - !Sub "${InvestmentThesisBaselinePointersTableV2.Arn}/index/*"
                 - !GetAtt DecisionSnapshotsTable.Arn
                 - !Sub "${DecisionSnapshotsTable.Arn}/index/*"
                 - !GetAtt WatchStateTable.Arn
@@ -1082,6 +1106,13 @@ Resources:
                 - !Sub "${HoldingsSnapshotTable.Arn}/index/*"
                 - !GetAtt ValidationHoldingsSnapshotTable.Arn
                 - !Sub "${ValidationHoldingsSnapshotTable.Arn}/index/*"
+                # M4本番検証で発覚したIAM不備の修正(2026-08): TradeCooldownService
+                # (HoldingsSnapshotRepository)がM3切替済みのV2テーブルを参照する。
+                # 旧テーブル(直上2件)は削除せずロールバック用に残し、V2を追加する。
+                - !GetAtt HoldingsSnapshotTableV2.Arn
+                - !Sub "${HoldingsSnapshotTableV2.Arn}/index/*"
+                - !GetAtt ValidationHoldingsSnapshotTableV2.Arn
+                - !Sub "${ValidationHoldingsSnapshotTableV2.Arn}/index/*"
                 - !GetAtt TradeDetectionRunLockTable.Arn
                 - !Sub "${TradeDetectionRunLockTable.Arn}/index/*"
                 - !GetAtt DailyNotificationPriorityTable.Arn
@@ -1101,6 +1132,12 @@ Resources:
               Resource:
                 - !GetAtt HoldingsTable.Arn
                 - !Sub "${HoldingsTable.Arn}/index/*"
+                # M4本番検証で発覚したIAM不備の修正(2026-08): PortfolioService.
+                # list_holdings()・HoldingRepository.get(holding_id)がM3切替済みの
+                # V2テーブルを参照する。旧HoldingsTable(直上)は削除せずロールバック
+                # 用に残し、V2を追加する。
+                - !GetAtt HoldingsTableV2.Arn
+                - !Sub "${HoldingsTableV2.Arn}/index/*"
                 - !GetAtt PurchaseLotsTable.Arn
                 - !Sub "${PurchaseLotsTable.Arn}/index/*"
                 - !GetAtt WatchlistTable.Arn
@@ -1141,6 +1178,10 @@ Resources:
       Timeout: 180
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
+        # M4本番検証で発覚したIAM不備の修正(2026-08): DisclosureCheckService.
+        # analyze()がPortfolioService.list_holdings()経由でM3切替済みのV2テーブルを
+        # 参照する。旧HoldingsTable(直上)は削除せずロールバック用に残し、V2を追加する。
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingsTableV2 }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
       Events:
@@ -1265,6 +1306,11 @@ Resources:
               Resource:
                 - !GetAtt HoldingsTable.Arn
                 - !Sub "${HoldingsTable.Arn}/index/*"
+                # M4本番検証で発覚したIAM不備の修正(2026-08): WatchlistCandidateCollector
+                # の保有銘柄除外判定(list_all())がM3切替済みのV2テーブルを参照する。
+                # 旧HoldingsTable(直上)は削除せずロールバック用に残し、V2を追加する。
+                - !GetAtt HoldingsTableV2.Arn
+                - !Sub "${HoldingsTableV2.Arn}/index/*"
                 - !GetAtt ShareholderBenefitsTable.Arn
                 - !Sub "${ShareholderBenefitsTable.Arn}/index/*"
                 - !GetAtt CorporateActionRegistryTable.Arn
@@ -1643,6 +1689,12 @@ Resources:
                 - !Sub "${WatchlistTable.Arn}/index/*"
                 - !GetAtt HoldingsTable.Arn
                 - !Sub "${HoldingsTable.Arn}/index/*"
+                # M4本番検証で発覚したIAM不備の修正(2026-08): conversation_service.py
+                # (get_holding)・conversation_commit.py(TransactWriteItems)がM3切替
+                # 済みのV2テーブルを参照する。旧HoldingsTable(直上)は削除せず
+                # ロールバック用に残し、V2を追加する。
+                - !GetAtt HoldingsTableV2.Arn
+                - !Sub "${HoldingsTableV2.Arn}/index/*"
                 - !GetAtt PurchaseLotsTable.Arn
                 - !Sub "${PurchaseLotsTable.Arn}/index/*"
                 - !GetAtt ConversationStatesTable.Arn
