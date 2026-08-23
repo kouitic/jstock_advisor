@@ -1265,7 +1265,18 @@ def evaluate_profit_taking(
             )
         )
 
-    if partial_count >= cbj.min_conditions_for_partial or fv_partial_gate_ok:
+    # コードレビュー対応(2026-08、PARTIAL数量欠落不具合): 以下2経路は
+    # profit_protection strong経路(_extra_action_gates_met/1300行目付近)と
+    # 同様にcondition_inputs.partial_sale_executableをゲートする。保有株数が
+    # 売買単位以下でodd_lot_trading_availableもFalseの場合、これらの経路から
+    # _Level.PARTIALへ到達するとProfitTakingService側でsuggested_sell_shares
+    # を算出できず(trading_unit_feasibility.py参照)、「一部売却」なのに
+    # 売却株数が確定しない通知になってしまうため。ゲートによりPARTIAL候補
+    # 自体を成立させず、WATCH側の独立した到達条件(下記watch_reasons)へ
+    # 自然にフォールバックする。
+    if (
+        partial_count >= cbj.min_conditions_for_partial or fv_partial_gate_ok
+    ) and condition_inputs.partial_sale_executable:
         partial_reasons_with_gate = list(partial_reasons)
         origin = _RawLevelOrigin.OTHER_CONDITIONS
         if fv_partial_gate_ok and bull_excess_pct is not None:
@@ -1278,7 +1289,7 @@ def evaluate_profit_taking(
                 partial_reasons_with_gate.append(gate_reason)
         candidates.append((_Level.PARTIAL, origin, partial_reasons_with_gate))
 
-    if price_level == _Level.PARTIAL:
+    if price_level == _Level.PARTIAL and condition_inputs.partial_sale_executable:
         assert upside_pct is not None
         candidates.append(
             (

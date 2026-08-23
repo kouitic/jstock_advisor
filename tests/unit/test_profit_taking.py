@@ -1,3 +1,4 @@
+import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
@@ -1129,6 +1130,159 @@ def test_medium_confidence_reaches_partial_when_all_gates_met() -> None:
         RecommendationType.PARTIAL_PROFIT_TAKE,
         RecommendationType.FULL_PROFIT_TAKE,
     )
+
+
+# --- partial_sale_executable=Falseのゲート(コードレビュー対応2026-08、
+# PARTIAL数量欠落不具合)。独立条件数経路(1268行目)・価格位置経路(1281行目)の
+# 双方が、profit_protection strong経路と同じくpartial_sale_executable
+# ゲートを課すことを確認する。保有株数が売買単位以下でodd_lot_trading_
+# available=Falseの場合(evaluate_trading_unit_feasibility()参照)に相当する
+# 状況をcondition_inputs.partial_sale_executable=Falseで直接再現する
+# (evaluate_profit_taking()自体は生の株数/売買単位を受け取らず、呼び出し側が
+# 事前計算したpartial_sale_executableのみを入力とするため)。特定銘柄・
+# 特定株数のハードコードは行わない。 ---------------------------------------
+
+
+def test_condition_count_partial_reached_when_partial_sale_executable() -> None:
+    # 独立条件数経路(総合利回り低下+ポートフォリオ集中超過の2条件)のみで
+    # PARTIALへ到達することを確認する(価格系条件は関与させないよう含み益を
+    # 低く抑える)。
+    result = evaluate_profit_taking(
+        current_price=Decimal("1050"),  # 含み益5%、価格系の閾値には届かない
+        average_purchase_price=Decimal("1000"),
+        shares=800,
+        total_purchase_amount=Decimal("800000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=2.0,  # total_yield_caution_pct(2.5)未満
+        forecast_annual_dividend_per_share=Decimal("20"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            portfolio_concentration_over_limit=True,
+            partial_sale_executable=True,
+        ),
+    )
+    assert result.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+
+
+def test_condition_count_partial_blocked_when_partial_sale_not_executable() -> None:
+    # 上と全く同じ条件でも、partial_sale_executable=Falseの場合は
+    # PARTIAL_PROFIT_TAKEを成立させず、WATCHへ自然にフォールバックする
+    # (一部売却が実行不能な保有については、既存のWATCHフォールバック条件
+    # (partial_count>=1)がそのまま働く設計)。
+    result = evaluate_profit_taking(
+        current_price=Decimal("1050"),
+        average_purchase_price=Decimal("1000"),
+        shares=800,
+        total_purchase_amount=Decimal("800000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=2.0,
+        forecast_annual_dividend_per_share=Decimal("20"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            portfolio_concentration_over_limit=True,
+            partial_sale_executable=False,
+        ),
+    )
+    assert result.recommendation_type != RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.recommendation_type == RecommendationType.WATCH
+
+
+def test_price_position_partial_reached_when_partial_sale_executable() -> None:
+    # 価格位置経路(含み益率×上値余地)のみでPARTIALへ到達することを確認する
+    # (独立条件数側の条件は満たさないようにする)。
+    result = evaluate_profit_taking(
+        current_price=Decimal("1220"),  # 含み益22%(partial_gain_pct=20以上、full=25未満)
+        average_purchase_price=Decimal("1000"),
+        shares=800,
+        total_purchase_amount=Decimal("800000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            # bull=1300 -> 上値余地約6.6%(partial_upside_max_pct=15未満)
+            fair_value_range=_fair_value_range(
+                neutral=Decimal("1250"), bull=Decimal("1300"), bear=Decimal("1200"), method_count=3
+            ),
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+            partial_sale_executable=True,
+        ),
+    )
+    assert result.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+
+
+def test_price_position_partial_blocked_when_partial_sale_not_executable() -> None:
+    # 上と全く同じ価格位置条件でも、partial_sale_executable=Falseの場合は
+    # PARTIAL_PROFIT_TAKEを成立させず、WATCHへ自然にフォールバックする
+    # (含み益率がWATCH閾値も上回るため、既存のWATCHフォールバック条件
+    # (unrealized_pnl_pct>=watch_gain_threshold)がそのまま働く設計)。
+    result = evaluate_profit_taking(
+        current_price=Decimal("1220"),
+        average_purchase_price=Decimal("1000"),
+        shares=800,
+        total_purchase_amount=Decimal("800000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=_fair_value_range(
+                neutral=Decimal("1250"), bull=Decimal("1300"), bear=Decimal("1200"), method_count=3
+            ),
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+            partial_sale_executable=False,
+        ),
+    )
+    assert result.recommendation_type != RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.recommendation_type == RecommendationType.WATCH
+
+
+def test_profit_protection_strong_gate_still_enforced_alongside_new_gates() -> None:
+    # 既存のProfit Protection strong経路(1300行目付近)のpartial_sale_executable
+    # ゲートが、今回の2経路への追加ゲートと同じ挙動のまま維持されていることを
+    # 確認する(test_profit_taking_profit_protection.py::
+    # test_strong_signal_requires_partial_sale_executableの回帰確認と重複する
+    # 観点だが、本ファイル内でも一貫性を明示する)。
+    from jstock_advisor.domain.signals.profit_protection import ProfitProtectionMetrics
+
+    pp_metrics = ProfitProtectionMetrics(
+        insufficient_data_reason=None,
+        peak_price_since_entry=Decimal("1500"),
+        peak_date=dt.date(2026, 6, 1),
+        peak_gain_pct=50.0,
+        current_gain_pct=30.0,
+        drawdown_from_peak_pct=20.0,
+        gain_giveback_ratio_pct=40.0,
+        candidate_signal=True,
+        strong_signal=True,
+    )
+    result = evaluate_profit_taking(
+        current_price=Decimal("1300"),
+        average_purchase_price=Decimal("1000"),
+        shares=800,
+        total_purchase_amount=Decimal("800000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            profit_protection=pp_metrics,
+            partial_sale_executable=False,
+        ),
+    )
+    assert result.recommendation_type != RecommendationType.PARTIAL_PROFIT_TAKE
 
 
 # --- 上値余地(ceiling_price/upside_pct)の導入(コードレビュー対応2026-08)の
