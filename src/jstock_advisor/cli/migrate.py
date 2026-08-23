@@ -15,11 +15,20 @@ from jstock_advisor.migrations.holdings_owner_migration import (
     run_migration,
 )
 from jstock_advisor.migrations.holdings_owner_preflight import run_preflight
+from jstock_advisor.migrations.holdings_owner_reclassification import (
+    PlanValidationError,
+    ReclassificationAbortedError,
+    run_reclassification,
+)
 from jstock_advisor.migrations.target import MigrationTarget
 
 app = typer.Typer(help="データ移行コマンド群")
 holdings_owner_app = typer.Typer(help="保有銘柄オーナー機能移行(owner/holding_id対応)")
 app.add_typer(holdings_owner_app, name="holdings-owner")
+owner_reclassification_app = typer.Typer(
+    help="既存保有データのowner実態補正(M4.1、4680分割・9434単価訂正含む)"
+)
+app.add_typer(owner_reclassification_app, name="owner-reclassification")
 
 
 @holdings_owner_app.command("preflight")
@@ -70,6 +79,25 @@ def run(
             accepted_unresolved_notification_ids=accepted,
         )
     except MigrationAbortedError as e:
+        typer.echo(str(e))
+        raise typer.Exit(code=1) from e
+    typer.echo(result.render_text())
+
+
+@owner_reclassification_app.command("run")
+def owner_reclassification_run(
+    target: MigrationTarget = typer.Option(..., "--target", help="local | aws(必須指定)"),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--no-dry-run",
+        help="既定はdry-run(書き込みなし)。実際に書き込むには--no-dry-runを明示指定する。",
+    ),
+) -> None:
+    """M4.1本体(既存保有データのowner実態補正)。実行直前にpause_buy_sell==true
+    であることとholding_id衝突の不在をこのコード自身が確認する(fail-closed)。"""
+    try:
+        result = run_reclassification(target, dry_run=dry_run)
+    except (ReclassificationAbortedError, PlanValidationError) as e:
         typer.echo(str(e))
         raise typer.Exit(code=1) from e
     typer.echo(result.render_text())
