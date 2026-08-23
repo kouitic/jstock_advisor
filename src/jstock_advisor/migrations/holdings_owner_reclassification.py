@@ -19,6 +19,12 @@ Holdingが存在しない)も対象外(owner確定不能のため現状維持、
 分割する特殊ケース。9434(ソフトバンク)はowner変更に加えて取得単価の
 訂正(187円→188円、確定指示)を伴う。
 
+実行前precondition(2026-08-23確定指示、コードレビュー対応): dry-runでの
+人間確認だけに頼らず、build_plan()自身が実行のたびに2269/5401/8566/9434/
+4680の実データ(shares・取得単価・4680のlot構成)をユーザー確定値と照合し、
+一致しない場合はPlanValidationErrorでfail-closedに中止する(下記
+SIMPLE_PRECONDITIONS等参照)。
+
 owner型は引き続きEnum/allow-listではない(domain/entities/owner.py)。
 本モジュール内のマッピング定数(所有者A/所有者B/所有者C)は、通常運用のowner語彙を
 制限するものではなく、今回1回限りの実データ再分類の入力値にすぎない。
@@ -97,6 +103,165 @@ SPLIT_LOT_OWNERS: dict[str, str] = {
 PRICE_CORRECTIONS: dict[str, Decimal] = {
     "e5865e06-c43b-47ae-baa9-fc8a133482aa": Decimal("188"),  # 9434のlot(187→188、確定指示)
 }
+
+# --- 実行前precondition(2026-08-23確定指示、この一回限りの移行専用) ---------
+# これはowner語彙のallow-list化ではない。今回のユーザー確定値そのままの実データ
+# 前提条件を、dry-runでの人間確認だけに頼らずbuild_plan()自身が実行のたびに
+# 検証するための入力値にすぎない(通常運用のvalidationへは一切流用しない)。
+# 対応する旧Holding(owner="本人")が既に存在しない場合(=既に移行済み)は
+# 検証自体を行わない(冪等)。
+
+
+@dataclass(frozen=True)
+class _SimplePrecondition:
+    expected_shares: int
+    expected_average_price: Decimal
+
+
+SIMPLE_PRECONDITIONS: dict[str, _SimplePrecondition] = {
+    "2269": _SimplePrecondition(expected_shares=200, expected_average_price=Decimal("3215")),
+    "5401": _SimplePrecondition(expected_shares=500, expected_average_price=Decimal("587")),
+    "8566": _SimplePrecondition(expected_shares=100, expected_average_price=Decimal("5480")),
+}
+
+# 9434: 価格訂正(187→188)を伴うため、訂正前の値を別途定義する。訂正後
+# (188)の状態で再実行された場合(途中失敗後の再実行)も冪等にPASSさせる。
+NINE_FOUR_THREE_FOUR_STOCK_CODE = "9434"
+NINE_FOUR_THREE_FOUR_LOT_ID = "e5865e06-c43b-47ae-baa9-fc8a133482aa"
+NINE_FOUR_THREE_FOUR_SHARES = 100
+NINE_FOUR_THREE_FOUR_OLD_PRICE = Decimal("187")
+
+# 4680: lot_idだけでなくshares/purchase_price自体も検証する。
+SPLIT_LOT_PRECONDITIONS: dict[str, tuple[int, Decimal]] = {
+    "295d6620-bea5-464b-8f37-e887df26bc3d": (300, Decimal("1193")),
+    "f86f9ed3-3a78-4784-943e-2925d591b4e4": (100, Decimal("1258")),
+}
+SPLIT_OLD_SHARES = 400
+SPLIT_OLD_AVERAGE_PRICE = Decimal("1209.25")
+SPLIT_OLD_TOTAL_AMOUNT = Decimal("483700")
+
+
+def _check_holding_matches(
+    stock_code: str, holding: Holding, expected_shares: int, expected_average_price: Decimal
+) -> None:
+    shares_mismatch = holding.shares != expected_shares
+    price_mismatch = holding.average_purchase_price != expected_average_price
+    if shares_mismatch or price_mismatch:
+        raise PlanValidationError(
+            f"{stock_code}の旧Holdingが確定指示の値(shares={expected_shares}, "
+            f"average_purchase_price={expected_average_price})と一致しません"
+            f"(fail-closed): shares={holding.shares}, "
+            f"average_purchase_price={holding.average_purchase_price}"
+        )
+
+
+def _check_simple_precondition(
+    stock_code: str,
+    holding: Holding,
+    stock_lots: list[PurchaseLot],
+    precondition: _SimplePrecondition,
+) -> None:
+    _check_holding_matches(
+        stock_code, holding, precondition.expected_shares, precondition.expected_average_price
+    )
+    if not stock_lots:
+        raise PlanValidationError(
+            f"{stock_code}に対応するPurchaseLotが1件もありません(fail-closed)。"
+        )
+    total_shares, avg_price, _total, _first, _last = summarize_lots(stock_lots)
+    shares_mismatch = total_shares != precondition.expected_shares
+    avg_mismatch = avg_price != precondition.expected_average_price
+    if shares_mismatch or avg_mismatch:
+        raise PlanValidationError(
+            f"{stock_code}のPurchaseLot再計算値(shares={total_shares}, "
+            f"average={avg_price})が確定指示の値(shares={precondition.expected_shares}, "
+            f"average={precondition.expected_average_price})と一致しません(fail-closed)。"
+        )
+
+
+def _check_9434_precondition(holding: Holding, stock_lots: list[PurchaseLot]) -> None:
+    corrected_price = PRICE_CORRECTIONS[NINE_FOUR_THREE_FOUR_LOT_ID]
+    if holding.shares != NINE_FOUR_THREE_FOUR_SHARES or holding.average_purchase_price not in (
+        NINE_FOUR_THREE_FOUR_OLD_PRICE,
+        corrected_price,
+    ):
+        raise PlanValidationError(
+            f"9434の旧Holdingが確定指示の値(shares={NINE_FOUR_THREE_FOUR_SHARES}, "
+            f"average_purchase_price={NINE_FOUR_THREE_FOUR_OLD_PRICE}(訂正前)または"
+            f"{corrected_price}(訂正後))と一致しません(fail-closed): "
+            f"shares={holding.shares}, average_purchase_price={holding.average_purchase_price}"
+        )
+    if len(stock_lots) != 1 or stock_lots[0].lot_id != NINE_FOUR_THREE_FOUR_LOT_ID:
+        raise PlanValidationError(
+            "9434のPurchaseLot構成が確定指示(lot_id="
+            f"{NINE_FOUR_THREE_FOUR_LOT_ID!r}の1件のみ)と一致しません(fail-closed): "
+            f"実際={[lot.lot_id for lot in stock_lots]}"
+        )
+    lot = stock_lots[0]
+    if lot.shares != NINE_FOUR_THREE_FOUR_SHARES or lot.purchase_price not in (
+        NINE_FOUR_THREE_FOUR_OLD_PRICE,
+        corrected_price,
+    ):
+        raise PlanValidationError(
+            f"9434のlot_id={NINE_FOUR_THREE_FOUR_LOT_ID!r}が確定指示の値"
+            f"(shares={NINE_FOUR_THREE_FOUR_SHARES}, "
+            f"price={NINE_FOUR_THREE_FOUR_OLD_PRICE}(訂正前)または{corrected_price}"
+            f"(訂正後))と一致しません(fail-closed、想定外の価格への上書きを防止するため): "
+            f"shares={lot.shares}, price={lot.purchase_price}"
+        )
+
+
+def _check_4680_precondition(holding: Holding, stock_lots: list[PurchaseLot]) -> None:
+    _check_holding_matches(SPLIT_STOCK_CODE, holding, SPLIT_OLD_SHARES, SPLIT_OLD_AVERAGE_PRICE)
+    if holding.total_purchase_amount != SPLIT_OLD_TOTAL_AMOUNT:
+        raise PlanValidationError(
+            "4680の旧Holding.total_purchase_amountが確定指示の値"
+            f"({SPLIT_OLD_TOTAL_AMOUNT})と一致しません(fail-closed): "
+            f"{holding.total_purchase_amount}"
+        )
+    lots_by_id = {lot.lot_id: lot for lot in stock_lots}
+    if set(lots_by_id) != set(SPLIT_LOT_PRECONDITIONS):
+        raise PlanValidationError(
+            "4680のPurchaseLot構成が確定指示のlot_id集合と一致しません(fail-closed): "
+            f"実際={sorted(lots_by_id)} 期待={sorted(SPLIT_LOT_PRECONDITIONS)}"
+        )
+    for lot_id, (expected_shares, expected_price) in SPLIT_LOT_PRECONDITIONS.items():
+        lot = lots_by_id[lot_id]
+        if lot.shares != expected_shares or lot.purchase_price != expected_price:
+            raise PlanValidationError(
+                f"4680のlot_id={lot_id!r}が確定指示の内容(shares={expected_shares}, "
+                f"price={expected_price})と一致しません(fail-closed): "
+                f"shares={lot.shares}, price={lot.purchase_price}"
+            )
+
+
+def _verify_preconditions(
+    old_holdings: list[Holding], lots_by_stock_code: dict[str, list[PurchaseLot]]
+) -> None:
+    """ユーザー確定済みの実データ(shares/取得単価/lot構成)を、実行のたびに
+    このコード自身が検証する(2026-08-23確定指示、fail-closed)。対応する
+    旧Holding(owner="本人")が既に存在しないstock_codeは、既に移行済みとみなし
+    検証しない(冪等)。
+    """
+    old_holdings_by_stock = {h.stock_code: h for h in old_holdings}
+
+    for stock_code, precondition in SIMPLE_PRECONDITIONS.items():
+        holding = old_holdings_by_stock.get(stock_code)
+        if holding is None:
+            continue
+        _check_simple_precondition(
+            stock_code, holding, lots_by_stock_code.get(stock_code, []), precondition
+        )
+
+    nine_four_three_four = old_holdings_by_stock.get(NINE_FOUR_THREE_FOUR_STOCK_CODE)
+    if nine_four_three_four is not None:
+        _check_9434_precondition(
+            nine_four_three_four, lots_by_stock_code.get(NINE_FOUR_THREE_FOUR_STOCK_CODE, [])
+        )
+
+    split_holding = old_holdings_by_stock.get(SPLIT_STOCK_CODE)
+    if split_holding is not None:
+        _check_4680_precondition(split_holding, lots_by_stock_code.get(SPLIT_STOCK_CODE, []))
 
 
 class ReclassificationAbortedError(Exception):
@@ -218,6 +383,8 @@ def build_plan(holdings: list[Holding], lots: list[PurchaseLot]) -> Reclassifica
     lots_by_stock_code: dict[str, list[PurchaseLot]] = {}
     for lot in lots:
         lots_by_stock_code.setdefault(lot.stock_code, []).append(lot)
+
+    _verify_preconditions(old_holdings, lots_by_stock_code)
 
     targets: list[ReclassificationTarget] = []
     for holding in old_holdings:

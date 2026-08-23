@@ -188,7 +188,7 @@ def _seed_pointer(store_dir: Path, owner: str, stock_code: str, baseline_version
 def _seed_4680_split(store_dir: Path) -> None:
     _seed_lot(store_dir, "295d6620-bea5-464b-8f37-e887df26bc3d", _OLD, "4680", 300, "1193")
     _seed_lot(store_dir, "f86f9ed3-3a78-4784-943e-2925d591b4e4", _OLD, "4680", 100, "1258")
-    _seed_holding(store_dir, _OLD, "4680", 400, "1225.75")  # (300*1193+100*1258)/400
+    _seed_holding(store_dir, _OLD, "4680", 400, "1209.25")  # (300*1193+100*1258)/400
 
 
 def _holding_store(store_dir: Path):
@@ -556,7 +556,7 @@ def test_4680_snapshot_koichi_inherits_cooldown_kazuho_gets_fresh_baseline(
     _set_pause(store_dir, True)
     _seed_4680_split(store_dir)
     cooldown_until = dt.date(2026, 8, 27)
-    _seed_snapshot(store_dir, _OLD, "4680", 400, "1225.75", cooldown_until=cooldown_until)
+    _seed_snapshot(store_dir, _OLD, "4680", 400, "1209.25", cooldown_until=cooldown_until)
 
     run_reclassification(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
@@ -590,3 +590,194 @@ def test_simple_reassignment_snapshot_carries_over_without_spurious_event(
     assert new_snapshot is not None
     assert new_snapshot.shares == 100
     assert _snapshot_store(store_dir).get("本人#8306") is None
+
+
+# --- 実行前precondition(2026-08-23確定指示): 2269/5401/8566/9434/4680 ---------
+
+
+def test_5401_child_owner_reassignment_matches_confirmed_precondition(store_dir: Path) -> None:
+    _set_pause(store_dir, True)
+    _seed_simple(store_dir, "5401", 500, "587")
+
+    run_reclassification(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
+
+    new_holding = _holding_store(store_dir).get("所有者B#5401")
+    assert new_holding is not None
+    assert new_holding.owner == "所有者B"
+    assert new_holding.shares == 500
+    assert new_holding.average_purchase_price == Decimal("587")
+
+
+def test_2269_precondition_fails_on_shares_mismatch(store_dir: Path) -> None:
+    _set_pause(store_dir, True)
+    _seed_simple(store_dir, "2269", 199, "3215")  # 確定指示は200株
+
+    with pytest.raises(PlanValidationError, match="2269"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_2269_precondition_fails_on_price_mismatch(store_dir: Path) -> None:
+    _set_pause(store_dir, True)
+    _seed_simple(store_dir, "2269", 200, "3216")  # 確定指示は@3215
+
+    with pytest.raises(PlanValidationError, match="2269"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_5401_precondition_fails_on_shares_mismatch(store_dir: Path) -> None:
+    _set_pause(store_dir, True)
+    _seed_simple(store_dir, "5401", 501, "587")  # 確定指示は500株
+
+    with pytest.raises(PlanValidationError, match="5401"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_8566_precondition_fails_on_price_mismatch(store_dir: Path) -> None:
+    _set_pause(store_dir, True)
+    _seed_simple(store_dir, "8566", 100, "5481")  # 確定指示は@5480
+
+    with pytest.raises(PlanValidationError, match="8566"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_simple_precondition_fails_on_lot_composition_mismatch(store_dir: Path) -> None:
+    """合計shares/averageは一致していても、複数lotの構成自体がPurchaseLot
+    再計算値と食い違うケースを検知する(1lot構成のはずが2lot合算で偶然
+    合計が一致してしまう場合等、再計算による突合が必須である根拠)。"""
+    _set_pause(store_dir, True)
+    _seed_holding(store_dir, _OLD, "2269", 200, "3215")
+    # 2lotに分割し、合計株数は200のまま平均単価が3215からずれるケース
+    # (100株@3000+100株@3400=640000/200=3200 != 3215)。
+    _seed_lot(store_dir, "lot-2269-a", _OLD, "2269", 100, "3000")
+    _seed_lot(store_dir, "lot-2269-b", _OLD, "2269", 100, "3400")
+
+    with pytest.raises(PlanValidationError, match="2269"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_9434_precondition_passes_when_already_price_corrected(store_dir: Path) -> None:
+    """途中失敗後の再実行で、9434のlotが既に188円へ訂正済みの状態でも
+    冪等にPASSすること。"""
+    _set_pause(store_dir, True)
+    _seed_lot(store_dir, "e5865e06-c43b-47ae-baa9-fc8a133482aa", _OLD, "9434", 100, "188")
+    _seed_holding(store_dir, _OLD, "9434", 100, "188")
+
+    result = run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+    assert "所有者B#9434" in result.processed_new_holding_ids
+
+
+def test_9434_precondition_fails_on_unexpected_price(store_dir: Path) -> None:
+    """187円(訂正前)でも188円(訂正後)でもない想定外の価格(189円)を
+    勝手に188円へ上書きしないこと。"""
+    _set_pause(store_dir, True)
+    _seed_lot(store_dir, "e5865e06-c43b-47ae-baa9-fc8a133482aa", _OLD, "9434", 100, "189")
+    _seed_holding(store_dir, _OLD, "9434", 100, "189")
+
+    with pytest.raises(PlanValidationError, match="9434"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+    # 実際に書き込みは行われていない(fail-closed、書き込み前に中止)。
+    lot = _lot_store(store_dir).get("e5865e06-c43b-47ae-baa9-fc8a133482aa")
+    assert lot is not None
+    assert lot.purchase_price == Decimal("189")
+
+
+def test_9434_precondition_fails_on_shares_mismatch(store_dir: Path) -> None:
+    _set_pause(store_dir, True)
+    _seed_lot(store_dir, "e5865e06-c43b-47ae-baa9-fc8a133482aa", _OLD, "9434", 101, "187")
+    _seed_holding(store_dir, _OLD, "9434", 101, "187")
+
+    with pytest.raises(PlanValidationError, match="9434"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_9434_precondition_fails_on_lot_composition_mismatch(store_dir: Path) -> None:
+    """確定指示のlot_id(e5865e06-...)1件のみのはずが、別lotが混在している
+    場合はfail-closedで中止すること。"""
+    _set_pause(store_dir, True)
+    _seed_lot(store_dir, "e5865e06-c43b-47ae-baa9-fc8a133482aa", _OLD, "9434", 100, "187")
+    _seed_lot(store_dir, "lot-9434-extra", _OLD, "9434", 0, "0")
+    _seed_holding(store_dir, _OLD, "9434", 100, "187")
+
+    with pytest.raises(PlanValidationError, match="9434"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_4680_precondition_fails_when_lot_shares_wrong(store_dir: Path) -> None:
+    """lot_idは正しいがsharesが確定指示と異なる場合、分割を実行しないこと。"""
+    _set_pause(store_dir, True)
+    _seed_lot(store_dir, "295d6620-bea5-464b-8f37-e887df26bc3d", _OLD, "4680", 301, "1193")
+    _seed_lot(store_dir, "f86f9ed3-3a78-4784-943e-2925d591b4e4", _OLD, "4680", 99, "1258")
+    _seed_holding(store_dir, _OLD, "4680", 400, "1209.25")
+
+    with pytest.raises(PlanValidationError, match="4680"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_4680_precondition_fails_when_lot_price_wrong(store_dir: Path) -> None:
+    """lot_id・sharesは正しいがpurchase_priceが確定指示と異なる場合、
+    分割を実行しないこと。"""
+    _set_pause(store_dir, True)
+    _seed_lot(store_dir, "295d6620-bea5-464b-8f37-e887df26bc3d", _OLD, "4680", 300, "1194")
+    _seed_lot(store_dir, "f86f9ed3-3a78-4784-943e-2925d591b4e4", _OLD, "4680", 100, "1258")
+    _seed_holding(store_dir, _OLD, "4680", 400, "1209.25")
+
+    with pytest.raises(PlanValidationError, match="4680"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_4680_precondition_fails_when_old_holding_total_wrong(store_dir: Path) -> None:
+    """average_purchase_priceは確定指示どおり(1209.25)でも、
+    total_purchase_amountだけが確定指示の値(483700)と食い違う場合を
+    独立に検知すること。"""
+    _set_pause(store_dir, True)
+    _seed_lot(store_dir, "295d6620-bea5-464b-8f37-e887df26bc3d", _OLD, "4680", 300, "1193")
+    _seed_lot(store_dir, "f86f9ed3-3a78-4784-943e-2925d591b4e4", _OLD, "4680", 100, "1258")
+    build_collection_store(Holding, "holdings_v2.json", "holding_id", store_dir).upsert(
+        Holding(
+            owner=_OLD,
+            holding_id=build_holding_id(_OLD, "4680"),
+            stock_code="4680",
+            stock_name="銘柄4680",
+            shares=400,
+            average_purchase_price=Decimal("1209.25"),
+            total_purchase_amount=Decimal("999999"),  # 確定指示(483700)と不一致
+            first_purchase_date=dt.date(2026, 1, 1),
+            last_purchase_date=dt.date(2026, 1, 1),
+            account_type=AccountType.GENERAL,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    with pytest.raises(PlanValidationError, match="4680"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_4680_precondition_fails_when_lot_composition_wrong(store_dir: Path) -> None:
+    """確定指示のlot_id集合と異なる(想定外のlot_idが混在する)場合、
+    分割を実行しないこと。"""
+    _set_pause(store_dir, True)
+    _seed_lot(store_dir, "295d6620-bea5-464b-8f37-e887df26bc3d", _OLD, "4680", 300, "1193")
+    _seed_lot(store_dir, "unexpected-lot-id", _OLD, "4680", 100, "1258")
+    _seed_holding(store_dir, _OLD, "4680", 400, "1209.25")
+
+    with pytest.raises(PlanValidationError, match="4680"):
+        run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+
+
+def test_precondition_not_checked_when_already_migrated(store_dir: Path) -> None:
+    """旧Holding(owner=本人)が既に存在しない(=既に移行済み)stock_codeは、
+    preconditionが再検証されず冪等に成功扱いになること。"""
+    _set_pause(store_dir, True)
+    _seed_simple(store_dir, "2269", 200, "3215")
+    run_reclassification(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
+
+    # 移行後、新Holding(所有者B#2269)の株数を(本移行と無関係な事情で)後から
+    # 変更しても、旧本人#2269が存在しない以上preconditionの再検証対象外。
+    new_holding = _holding_store(store_dir).get("所有者B#2269")
+    assert new_holding is not None
+
+    result = run_reclassification(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
+    assert result.processed_new_holding_ids == ()
