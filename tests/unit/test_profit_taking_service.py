@@ -32,6 +32,7 @@ from jstock_advisor.domain.entities.enums import (
     CorporateActionType,
     RecentPeriodsSource,
     RecommendationType,
+    SellIntensity,
     TimingAction,
 )
 from jstock_advisor.domain.entities.holding import Holding
@@ -163,7 +164,11 @@ def _holding(stock_code: str) -> Holding:
         holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
         stock_code=stock_code,
         stock_name="テスト銘柄",
-        shares=100,
+        # 売買単位(既定100株)ちょうどだとPARTIAL成立時にpartial_sale_executable
+        # =Falseとなり不変条件違反でrecommendation=Noneへ落ちてしまうため、
+        # 単位を超える株数にする(コードレビュー対応2026-08、PARTIAL数量欠落
+        # 不具合の再発防止で追加した不変条件のためのfixture調整)。
+        shares=300,
         average_purchase_price=Decimal("4000"),
         total_purchase_amount=Decimal("400000"),
         first_purchase_date=dt.date(2024, 1, 1),
@@ -174,9 +179,18 @@ def _holding(stock_code: str) -> Holding:
     )
 
 
-def _canned_result(recommendation_type: RecommendationType) -> ProfitTakingResult:
+def _canned_result(
+    recommendation_type: RecommendationType,
+    sell_intensity: SellIntensity | None = SellIntensity.STANDARD,
+) -> ProfitTakingResult:
     """evaluate_profit_taking()の結果をモックのファンダメンタルズに依存せず
     固定するためのフェイク結果(REVIEW_AFTER_EARNINGS分岐だけを検証したいため)。
+
+    sell_intensityは既定でSTANDARD(PARTIAL_PROFIT_TAKEが実際に一部売却数量を
+    確定できる、現実的な状態を表す)。sell_intensity自体を検証したいテストは
+    明示的にNone等を渡すこと(コードレビュー対応2026-08: PARTIAL_PROFIT_TAKEなのに
+    sell_intensity=Noneのままだと、ProfitTakingService側の不変条件チェックに
+    より数量なしRecommendationは生成されなくなったため)。
     """
     return ProfitTakingResult(
         recommendation_type=recommendation_type,
@@ -212,7 +226,7 @@ def _canned_result(recommendation_type: RecommendationType) -> ProfitTakingResul
         profit_protection_drawdown_from_peak_pct=None,
         profit_protection_gain_giveback_ratio_pct=None,
         profit_protection_insufficient_reason=None,
-        sell_intensity=None,
+        sell_intensity=sell_intensity,
     )
 
 
@@ -952,3 +966,128 @@ def test_earnings_suppression_clears_sell_intensity(
     assert rec.sell_intensity is None
     assert rec.suggested_sell_shares is None
     assert rec.suggested_sell_ratio is None
+
+
+# --- domain/service間の不変条件(コードレビュー対応2026-08、PARTIAL数量欠落
+# 不具合の再発防止): 「PARTIAL_PROFIT_TAKEがRecommendationとして成立するなら
+# suggested_sell_sharesが必ず存在する」ことをService層自身が最終確認し、
+# 満たさない場合は数量なしRecommendationを生成せずrecommendation=None・
+# data_errorを設定してfail-closedする(1銘柄の異常でLambda全体を落とさない
+# 既存パターン、429行目の snapshot取得失敗時と同じ形)。 -----------------------
+
+
+def test_normal_partial_has_shares_and_ratio(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A. 通常のPARTIAL(株数が売買単位を十分超える保有)では
+    # suggested_sell_shares/suggested_sell_ratioが必ず確定する。
+    canned = _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE)  # sell_intensity=STANDARD既定
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)  # shares=300(単位100超)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    assert outcome.recommendation.recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert outcome.recommendation.suggested_sell_shares is not None
+    assert outcome.recommendation.suggested_sell_shares > 0
+    assert outcome.recommendation.suggested_sell_ratio is not None
+    assert 0 < outcome.recommendation.suggested_sell_ratio < 1
+
+
+def test_partial_blocked_when_shares_at_or_below_trading_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # B. domain層をモックしてPARTIAL成立を強制しても、保有株数が売買単位以下
+    # (partial_sale_executable=False相当)の場合は数量なしRecommendationを
+    # 生成せず、data_errorを設定してfail-closedする。
+    canned = _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE)  # sell_intensity=STANDARD既定
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    holding = _holding("2914").model_copy(update={"shares": 100})  # 売買単位ちょうど
+
+    outcome = service.analyze(holding, _NOW)
+
+    assert outcome.recommendation is None
+    assert outcome.data_error is not None
+    assert "PARTIAL_PROFIT_TAKE" in outcome.data_error
+
+
+def test_partial_blocked_when_sell_intensity_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    # C. 保有株数は十分でも(partial_sale_executable=True相当)、
+    # sell_intensity=Noneのままではやはり数量なしRecommendationを生成しない。
+    canned = _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE, sell_intensity=None)
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)  # shares=300
+
+    assert outcome.recommendation is None
+    assert outcome.data_error is not None
+
+
+def test_partial_blocked_when_compute_suggested_sell_shares_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # D. partial_sale_executable=True・sell_intensityも確定しているにもかかわらず、
+    # compute_suggested_sell_shares()自身がNoneを返す異常ケース(売買単位の
+    # 1〜1.99単位分、例: 150株/単位100株では unit_count=1<2 のため一部売却後に
+    # 最低1単位を残せず算出不能)でも、数量なしRecommendationを生成しない。
+    canned = _canned_result(
+        RecommendationType.PARTIAL_PROFIT_TAKE, sell_intensity=SellIntensity.LIGHT
+    )
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    # 150株: partial_sale_executable=True(150>100)だが
+    # compute_suggested_sell_shares()はunit_count=1<2でNoneを返す。
+    holding = _holding("2914").model_copy(update={"shares": 150})
+
+    outcome = service.analyze(holding, _NOW)
+
+    assert outcome.recommendation is None
+    assert outcome.data_error is not None
+
+
+def test_normal_partial_notification_text_includes_share_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # E. 正常なPARTIALをRecommendation -> adapter -> formatterまで通し、
+    # 通知本文に株数が実際に存在することを確認する。
+    from jstock_advisor.domain.entities.enums import NotificationCategory
+    from jstock_advisor.domain.notification.message_formatter import format_notification_text
+    from jstock_advisor.domain.notification.recommendation_adapter import (
+        build_notification_text_input,
+    )
+
+    canned = _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE)  # sell_intensity=STANDARD既定
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    providers = _providers(None, dt.date(2026, 6, 30))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.recommendation is not None
+    text_input = build_notification_text_input(
+        outcome.recommendation, NotificationCategory.PARTIAL_SELL
+    )
+    assert text_input.suggested_sell_shares is not None
+    text = format_notification_text(text_input)
+    assert "株" in text

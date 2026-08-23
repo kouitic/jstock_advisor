@@ -730,6 +730,31 @@ class ProfitTakingService:
             suppressed_rules=result.mitigating_factors_applied,
         )
 
+        # コードレビュー対応(2026-08、PARTIAL数量欠落不具合の再発防止): domain層
+        # (evaluate_profit_taking())が将来別の経路を追加した場合でも、「PARTIAL_
+        # PROFIT_TAKEとして通知されるのに何株売るべきか確定しない」状態が
+        # Service層より先(通知)へ到達しないことをここで最終確認する
+        # (domain/service間の不変条件、個別経路のゲート漏れに依存しない防御)。
+        # 上のself._audit.record()は既にこの時点のsuggested_sell_shares/ratio等
+        # 診断値を記録済みのため、追加の監査呼び出しは行わない。違反時は
+        # snapshot取得失敗時(429行目)と全く同じ「recommendation=None、data_error
+        # 設定」パターンで1銘柄のみをdata_insufficient相当として扱い、Lambda全体は
+        # 落とさない(formatter側での数量補完・新規例外クラスの追加は行わない)。
+        if effective_recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE and (
+            not trading_unit_feasibility.partial_sale_executable
+            or sell_intensity is None
+            or suggested_sell_shares is None
+            or suggested_sell_shares <= 0
+            or suggested_sell_ratio is None
+            or not (0 < suggested_sell_ratio < 1)
+        ):
+            return ProfitTakingOutcome(
+                holding.stock_code,
+                None,
+                "PARTIAL_PROFIT_TAKEなのに一部売却数量が確定できません"
+                "(domain/service間の不変条件違反、fail-closed)",
+            )
+
         if effective_recommendation_type == RecommendationType.HOLD:
             return ProfitTakingOutcome(holding.stock_code, None, None)
 
