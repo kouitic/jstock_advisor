@@ -70,13 +70,29 @@ class LinePostbackEvent:
     user_id: str
     action: str
     op: str | None
+    # LINE UI第二弾(保有銘柄/ウォッチリスト/対象確認、2026-08)向け。
+    # show_holdings(owner選択後)・show_targets(category選択後)のみ設定される。
+    owner: str | None = None
+    category: str | None = None
 
 
 # LINEボタン起点会話型UI(2026-08)・実装プランv2 4節で確定したpostback data値
-# (リッチメニュー3種+Quick Reply3種)。ここに無い値・パースできないdataは
-# 「想定外のaction値」として無視する(推測で補完しない)。
+# (リッチメニュー3種+Quick Reply3種)。LINE UI第二弾(2026-08)でshow_holdings/
+# show_watchlist/show_targetsを追加(保有銘柄/ウォッチリスト/対象確認、
+# いずれも読み取り専用)。ここに無い値・パースできないdataは「想定外の
+# action値」として無視する(推測で補完しない)。
 _VALID_POSTBACK_ACTIONS = frozenset(
-    {"start_buy", "start_sell", "start_watch", "confirm", "retry", "cancel"}
+    {
+        "start_buy",
+        "start_sell",
+        "start_watch",
+        "confirm",
+        "retry",
+        "cancel",
+        "show_holdings",
+        "show_watchlist",
+        "show_targets",
+    }
 )
 
 
@@ -118,9 +134,18 @@ def parse_postback_events(body: bytes) -> list[LinePostbackEvent]:
             continue
         op_values = parsed.get("op")
         op = op_values[0] if op_values else None
+        owner_values = parsed.get("owner")
+        owner = owner_values[0] if owner_values else None
+        category_values = parsed.get("category")
+        category = category_values[0] if category_values else None
         results.append(
             LinePostbackEvent(
-                reply_token=reply_token, user_id=user_id, action=action_values[0], op=op
+                reply_token=reply_token,
+                user_id=user_id,
+                action=action_values[0],
+                op=op,
+                owner=owner,
+                category=category,
             )
         )
     return results

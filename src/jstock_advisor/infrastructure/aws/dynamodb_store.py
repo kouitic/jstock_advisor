@@ -116,6 +116,28 @@ class DynamoDbCollectionStore[T: BaseModel]:
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
         return [item for item in self.list_all() if predicate(item)]
 
+    def upsert_with_index_attributes(self, item: T, index_attributes: dict[str, str]) -> None:
+        dynamo_item = self._to_item(item)
+        dynamo_item.update(index_attributes)
+        self._table.put_item(Item=dynamo_item)
+
+    def query_by_index(self, index_name: str, key_name: str, key_value: str) -> list[T]:
+        from boto3.dynamodb.conditions import Key
+
+        items: list[T] = []
+        query_kwargs: dict[str, Any] = {
+            "IndexName": index_name,
+            "KeyConditionExpression": Key(key_name).eq(key_value),
+        }
+        while True:
+            response = self._table.query(**query_kwargs)
+            items.extend(self._from_item(raw) for raw in response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query_kwargs["ExclusiveStartKey"] = last_key
+        return items
+
     def insert_if_absent(self, item: T) -> bool:
         """条件付きput_item(attribute_not_exists)で原子的に新規追加のみを許可する。
 

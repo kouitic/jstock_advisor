@@ -72,6 +72,19 @@ class HoldingRepository:
         売却/利確競合チェック等)。"""
         return self._store.find(lambda holding: holding.stock_code == stock_code)
 
+    def list_by_owner(self, owner: str) -> list[Holding]:
+        """LINE UI第二弾「保有銘柄」機能(2026-08)向け。指定ownerの保有銘柄一覧を
+        stock_code昇順で返す。"""
+        items = self._store.find(lambda holding: holding.owner == owner)
+        return sorted(items, key=lambda holding: holding.stock_code)
+
+    def list_distinct_owners(self) -> list[str]:
+        """LINE UI第二弾「保有銘柄」機能(2026-08)向け。現在保有銘柄に登録されて
+        いる所有者一覧を、重複除去のうえ安定順(文字列昇順)で返す。owner名は
+        一切ハードコードせず、既存Holdingから動的に導出する(将来の所有者
+        増減にコード変更なしで追従するため)。"""
+        return sorted({holding.owner for holding in self._store.list_all()})
+
     def get(self, holding_id: str) -> Holding | None:
         return self._store.get(holding_id)
 

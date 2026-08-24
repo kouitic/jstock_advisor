@@ -24,6 +24,7 @@ import datetime as dt
 import io
 from dataclasses import dataclass
 from decimal import Decimal
+from urllib.parse import quote
 
 from jstock_advisor.domain.entities.enums import (
     AccountType,
@@ -37,6 +38,12 @@ from jstock_advisor.infrastructure.aws import conversation_commit, conversation_
 from jstock_advisor.infrastructure.aws.conversation_state_store import ConversationState
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.line.client import QuickReplyButton
+from jstock_advisor.services.buy_candidate_target_view_service import (
+    CATEGORY_DISPLAY_LABELS,
+    BuyCandidateTargetViewService,
+    is_valid_category_label,
+)
+from jstock_advisor.services.holdings_view_service import HoldingsViewService
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.trading_pause_service import TradingPauseService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
@@ -45,6 +52,7 @@ from jstock_advisor.services.watchlist_display_name import (
     build_stock_display_name_resolver,
 )
 from jstock_advisor.services.watchlist_service import WatchlistService
+from jstock_advisor.services.watchlist_view_service import WatchlistViewService
 
 # StockDisplayNameResolver.build_stock_display_name_resolver()向け。
 # watchlist_screening_rules.yamlのjpx_name_negative_cache_ttl_seconds既定値
@@ -79,6 +87,18 @@ _TRADING_PAUSED = (
     "しばらくしてからもう一度お試しください。"
 )
 
+# --- LINE UI第二弾(保有銘柄/ウォッチリスト/対象確認、2026-08、読み取り専用) ---
+_NO_OWNERS_REGISTERED = "保有銘柄が登録されていません。"
+_SELECT_OWNER_PROMPT = "誰の保有銘柄を確認しますか？"
+_NO_HOLDINGS_FOR_OWNER = "該当する保有銘柄がありません。"
+_EMPTY_WATCHLIST = "ウォッチリストは空です。"
+_SELECT_TARGET_CATEGORY_PROMPT = "確認する対象を選択してください。"
+_NO_TARGETS_FOR_CATEGORY = "該当する銘柄がありません。"
+_UNKNOWN_CATEGORY = "認識できないカテゴリーです。メニューからやり直してください。"
+# LINEテキストメッセージの上限(公式5000文字)に対する安全マージン込みの
+# 打ち切り基準。件数ではなく実際の生成文字数を基準にする(v2 5節)。
+_MESSAGE_CHAR_BUDGET = 4500
+
 
 def _unknown_stock_code_reply(stock_code: str) -> ConversationReply:
     return ConversationReply(
@@ -101,6 +121,29 @@ def _confirm_quick_reply(operation_id: str) -> list[QuickReplyButton]:
     ]
 
 
+def _build_list_reply(header: str, lines: list[str], empty_message: str) -> ConversationReply:
+    """一覧表示系(保有銘柄/ウォッチリスト/対象確認)の共通整形。件数ではなく
+    実際の生成文字数(_MESSAGE_CHAR_BUDGET)を基準に打ち切る(v2 5節)。
+    """
+    if not lines:
+        return ConversationReply(empty_message)
+
+    body_lines = [header, ""]
+    total_len = len(header) + 1
+    included = 0
+    for line in lines:
+        candidate_len = total_len + len(line) + 1
+        if candidate_len > _MESSAGE_CHAR_BUDGET:
+            break
+        body_lines.append(line)
+        total_len = candidate_len
+        included += 1
+    if included < len(lines):
+        omitted = len(lines) - included
+        body_lines.append(f"…他{omitted}件(文字数上限のため省略、絞り込んでご確認ください)")
+    return ConversationReply("\n".join(body_lines))
+
+
 def _parse_csv_fields(text: str) -> list[str] | None:
     try:
         rows = list(csv.reader(io.StringIO(text.strip())))
@@ -119,6 +162,9 @@ class ConversationService:
         watchlist_service: WatchlistService | None = None,
         stock_display_name_resolver: StockDisplayNameResolver | None = None,
         trading_pause_service: TradingPauseService | None = None,
+        holdings_view_service: HoldingsViewService | None = None,
+        watchlist_view_service: WatchlistViewService | None = None,
+        target_view_service: BuyCandidateTargetViewService | None = None,
     ) -> None:
         self._portfolio = portfolio_service or PortfolioService()
         self._transactions = transaction_history_service or TransactionHistoryService()
@@ -128,11 +174,29 @@ class ConversationService:
             or build_stock_display_name_resolver(_STOCK_NAME_NEGATIVE_CACHE_TTL_SECONDS)
         )
         self._trading_pause = trading_pause_service or TradingPauseService()
+        # LINE UI第二弾(保有銘柄/ウォッチリスト/対象確認、2026-08、読み取り専用)。
+        # いずれもHolding/Watchlist/BuyCandidateEvaluationRecord等の正データを
+        # 一切書き換えない(19節: 読み取り専用機能としての安全性)。
+        self._holdings_view = holdings_view_service or HoldingsViewService(
+            display_name_resolver=self._display_name_resolver
+        )
+        self._watchlist_view = watchlist_view_service or WatchlistViewService(
+            display_name_resolver=self._display_name_resolver
+        )
+        self._target_view = target_view_service or BuyCandidateTargetViewService(
+            display_name_resolver=self._display_name_resolver
+        )
 
     # --- postback(リッチメニュー起点・Quick Reply起点) ---------------------
 
     def handle_postback(
-        self, user_id: str, action: str, op: str | None, now: dt.datetime
+        self,
+        user_id: str,
+        action: str,
+        op: str | None,
+        now: dt.datetime,
+        owner: str | None = None,
+        category: str | None = None,
     ) -> ConversationReply:
         if action == "start_buy":
             return self._start(user_id, ConversationAction.BUY, now)
@@ -146,7 +210,59 @@ class ConversationService:
             return self._retry(user_id, op, now)
         if action == "cancel":
             return self._cancel(user_id, op, now)
+        if action == "show_holdings":
+            return self._show_holdings(owner)
+        if action == "show_watchlist":
+            return self._show_watchlist()
+        if action == "show_targets":
+            return self._show_targets(category)
         return ConversationReply(_UNKNOWN_POSTBACK)
+
+    # --- 保有銘柄/ウォッチリスト/対象確認(読み取り専用、状態を一切持たない) ---
+
+    def _show_holdings(self, owner: str | None) -> ConversationReply:
+        if owner is not None:
+            lines = self._holdings_view.build_owner_holdings_lines(owner)
+            return _build_list_reply(f"【{owner}の保有銘柄】", lines, _NO_HOLDINGS_FOR_OWNER)
+
+        owners = self._holdings_view.list_owners()
+        if not owners:
+            return ConversationReply(_NO_OWNERS_REGISTERED)
+        quick_reply = [
+            QuickReplyButton(
+                label=name, postback_data=f"action=show_holdings&owner={quote(name)}"
+            )
+            for name in owners
+        ]
+        return ConversationReply(_SELECT_OWNER_PROMPT, quick_reply=quick_reply)
+
+    def _show_watchlist(self) -> ConversationReply:
+        lines = self._watchlist_view.build_lines()
+        if isinstance(lines, str):
+            # GSI反映待ち(直近の分析結果を反映中です...)の安全側メッセージ。
+            return ConversationReply(lines)
+        return _build_list_reply("【ウォッチリスト】", lines, _EMPTY_WATCHLIST)
+
+    def _show_targets(self, category: str | None) -> ConversationReply:
+        if category is not None:
+            if not is_valid_category_label(category):
+                return ConversationReply(_UNKNOWN_CATEGORY)
+            lines = self._target_view.build_lines(category)
+            if isinstance(lines, str):
+                return ConversationReply(lines)
+            header = f"【{category}｜直近分析】"
+            reply = _build_list_reply(header, lines, _NO_TARGETS_FOR_CATEGORY)
+            if lines:
+                return ConversationReply(f"{reply.text}\n{len(lines)}件")
+            return reply
+
+        quick_reply = [
+            QuickReplyButton(
+                label=label, postback_data=f"action=show_targets&category={quote(label)}"
+            )
+            for label in CATEGORY_DISPLAY_LABELS
+        ]
+        return ConversationReply(_SELECT_TARGET_CATEGORY_PROMPT, quick_reply=quick_reply)
 
     def _start(
         self, user_id: str, action: ConversationAction, now: dt.datetime

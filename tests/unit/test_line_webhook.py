@@ -163,7 +163,51 @@ def test_parse_postback_events_returns_empty_for_invalid_json() -> None:
 
 
 def test_parse_postback_events_handles_all_confirmed_actions() -> None:
-    for action in ("start_buy", "start_sell", "start_watch", "confirm", "retry", "cancel"):
+    for action in (
+        "start_buy",
+        "start_sell",
+        "start_watch",
+        "confirm",
+        "retry",
+        "cancel",
+        "show_holdings",
+        "show_watchlist",
+        "show_targets",
+    ):
         events = parse_postback_events(_postback_body(f"action={action}&op=x"))
         assert len(events) == 1
         assert events[0].action == action
+
+
+# --- LINE UI第二弾(保有銘柄/ウォッチリスト/対象確認、2026-08) --------------------
+
+
+def test_parse_postback_events_extracts_owner_for_show_holdings() -> None:
+    events = parse_postback_events(_postback_body("action=show_holdings&owner=%E6%99%83%E4%B8%80"))
+    assert len(events) == 1
+    assert events[0].action == "show_holdings"
+    assert events[0].owner == "所有者A"
+    assert events[0].category is None
+
+
+def test_parse_postback_events_show_holdings_without_owner_is_none() -> None:
+    events = parse_postback_events(_postback_body("action=show_holdings"))
+    assert len(events) == 1
+    assert events[0].owner is None
+
+
+def test_parse_postback_events_extracts_category_for_show_targets() -> None:
+    events = parse_postback_events(
+        _postback_body("action=show_targets&category=%E8%B2%B7%E3%81%84%E9%96%93%E8%BF%91")
+    )
+    assert len(events) == 1
+    assert events[0].action == "show_targets"
+    assert events[0].category == "買い間近"
+    assert events[0].owner is None
+
+
+def test_parse_postback_events_show_watchlist_has_no_owner_or_category() -> None:
+    events = parse_postback_events(_postback_body("action=show_watchlist"))
+    assert len(events) == 1
+    assert events[0].owner is None
+    assert events[0].category is None

@@ -64,6 +64,9 @@ from typing import Any
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.entities.buy_candidate_batch_pointer import (
+    LatestBuyCandidateBatchPointer,
+)
 from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
     BuyCandidateEvaluationRecord,
     build_evaluation_id,
@@ -77,6 +80,7 @@ from jstock_advisor.domain.entities.enums import (
     CandidateSource,
     DecisionType,
     EligibilityBlockCategory,
+    ExecutionMode,
     NotificationContext,
     PortfolioValuationBasis,
     PurchaseCategory,
@@ -104,6 +108,9 @@ from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_rec
 )
 from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
     DecisionSnapshotRepository,
+)
+from jstock_advisor.infrastructure.local_repository.latest_buy_candidate_batch_pointer_repository import (  # noqa: E501
+    LatestBuyCandidateBatchPointerRepository,
 )
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -425,6 +432,7 @@ def _process_single_candidate(
     notification_service: LineNotificationService,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     evaluation_record_repo: BuyCandidateEvaluationRecordRepository | None = None,
+    latest_batch_pointer_repo: LatestBuyCandidateBatchPointerRepository | None = None,
 ) -> dict[str, Any]:
     service = BuySignalService(
         providers=providers,
@@ -749,7 +757,7 @@ def _process_single_candidate(
         result = {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
 
     if batch_id is not None:
-        _save_evaluation_record_safely(
+        evaluation_record_saved = _save_evaluation_record_safely(
             evaluation_record_repo,
             batch_id,
             stock_code,
@@ -772,6 +780,9 @@ def _process_single_candidate(
             validation_recommendation_id=validation_recommendation_id,
             near_buy_ranking_entry=near_buy_ranking_entry,
             watch_end_ranking_entry=watch_end_ranking_entry,
+            evaluation_record_saved_stock_code=(
+                stock_code if evaluation_record_saved else None
+            ),
         )
         if progress is not None and progress.is_complete:
             _finalize_batch(
@@ -783,6 +794,7 @@ def _process_single_candidate(
                 notification_service,
                 execution_context,
                 evaluation_record_repo,
+                latest_batch_pointer_repo,
             )
     return result
 
@@ -798,14 +810,19 @@ def _save_evaluation_record_safely(
     final_buy_action: BuyAction | None,
     raw_buy_action: BuyAction | None,
     recommendation_id: str | None,
-) -> None:
+) -> bool:
     """BuyCandidateEvaluationRecordの構築・保存失敗が既存の判定・通知フローを
     絶対にブロックしないためのラッパー(save_decision_snapshot_safely()と同じ
     設計方針)。将来のLINE詳細理由照会機能に向けた参照用の副次的な記録であり、
     失敗してもWARNINGログのみに留め、呼び出し元へ伝播させない。
+
+    戻り値は保存に成功したかどうか(LINE UI第二弾「対象確認」機能2026-08で
+    追加)。呼び出し元はこの結果をrecord_result()のevaluation_record_saved_
+    stock_code引数へ渡し、latest batch pointerの更新条件(全対象銘柄分の
+    保存成功)の判定に使う。
     """
     if evaluation_record_repo is None:
-        return
+        return False
     try:
         evaluation_record_repo.upsert(
             BuyCandidateEvaluationRecord(
@@ -821,6 +838,7 @@ def _save_evaluation_record_safely(
                 recommendation_id=recommendation_id,
             )
         )
+        return True
     except Exception:  # noqa: BLE001 - 参照用の副次記録の失敗で本処理を止めない
         logger.warning(
             "buy_candidates_handler: failed to save BuyCandidateEvaluationRecord "
@@ -829,6 +847,7 @@ def _save_evaluation_record_safely(
             batch_id,
             exc_info=True,
         )
+        return False
 
 
 def _aggregate_sector_entries(
@@ -1001,6 +1020,7 @@ def _finalize_batch(
     notification_service: LineNotificationService,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     evaluation_record_repo: BuyCandidateEvaluationRecordRepository | None = None,
+    latest_batch_pointer_repo: LatestBuyCandidateBatchPointerRepository | None = None,
 ) -> None:
     """全銘柄の処理完了を検知したワーカーが1回だけ呼ぶ。購入候補ランキング順に
     以下の固定順序でゲートを評価する(breakしない。全件をループし尽くす):
@@ -1481,6 +1501,39 @@ def _finalize_batch(
         notification_result_counts=notification_result_counts,
     )
 
+    # LINE UI第二弾「対象確認」機能(2026-08)向け、latest completed batch
+    # pointerの更新。以下2条件を両方満たす場合のみ更新する:
+    #   1. execution_context.mode == NORMAL(VALIDATION/DRY_RUNでは絶対に
+    #      更新しない。mode自体を直接比較し、is_validation/is_dry_runという
+    #      派生プロパティの意味論に依存しない最も明示的な条件とする)
+    #   2. このbatchの全対象銘柄についてBuyCandidateEvaluationRecordの保存が
+    #      実際に成功している(evaluation_record_saved_stock_codesの件数が
+    #      total と一致。EvaluationRecord保存はbest-effortのため、GSI反映
+    #      遅延とは独立に、保存そのものの欠損を見逃さないための判定)。
+    # 条件を満たさない場合はポインタを更新せず、直前の正常完了batchの値を
+    # 維持する(新しいNotificationLog保存失敗(下記log_failed)によってここまで
+    # 到達していれば、通知系のブックキーピング障害であり分析結果自体は既に
+    # 完成しているため、ポインタ更新には影響させない)。
+    if latest_batch_pointer_repo is not None and execution_context.mode == ExecutionMode.NORMAL:
+        saved_count = len(progress.evaluation_record_saved_stock_codes)
+        if saved_count == progress.total:
+            latest_batch_pointer_repo.update_latest_completed(
+                LatestBuyCandidateBatchPointer(
+                    latest_completed_batch_id=batch_id,
+                    completed_at=now,
+                    total_candidates=progress.total,
+                )
+            )
+        else:
+            logger.error(
+                "buy_candidates_handler: evaluation record save incomplete, "
+                "latest batch pointer NOT updated (前回正常batchのまま維持) "
+                "batch_id=%s saved=%d total=%d",
+                batch_id,
+                saved_count,
+                progress.total,
+            )
+
     if execution_context.is_validation:
         # 通知検証モード機能(2026-08追加): 通知送信が正常終了した後、このバッチで
         # 保存した全Recommendationを検証用テーブルから削除する(使い捨て
@@ -1519,6 +1572,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     providers = build_real_provider_bundle(now, config)
     recommendation_repo = RecommendationRepository.for_execution_context(execution_context)
     evaluation_record_repo = BuyCandidateEvaluationRecordRepository()
+    latest_batch_pointer_repo = LatestBuyCandidateBatchPointerRepository()
     # BUY候補裾野拡大機能(2026-08、§5-1): 子Lambda(task=buy_candidate)は
     # 親Lambdaがdetect_and_apply()の結果をイベントペイロード経由で伝播した
     # trade_detection_confirmedをそのまま使う(親自身は通知を送らないため
@@ -1565,6 +1619,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             notification_service,
             execution_context,
             evaluation_record_repo,
+            latest_batch_pointer_repo,
         )
         logger.info("buy_candidates_handler single candidate done: %s", result)
         return result

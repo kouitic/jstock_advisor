@@ -181,6 +181,84 @@ def test_upsert_with_ttl_seconds_sets_ttl_attribute(
     assert int(raw_item["ttl"]) <= before + 7200 + 30
 
 
+@pytest.fixture
+def store_with_gsi(monkeypatch: pytest.MonkeyPatch):
+    """LINE UI第二弾「対象確認」機能(2026-08)向け、GSI経由のQuery検証用。
+    汎用のcategory属性でGSIを作る(batch_id等、特定機能の属性名にテストを
+    結び付けないため)。"""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name=_REGION)
+        client.create_table(
+            TableName=_TABLE_NAME,
+            KeySchema=[{"AttributeName": "item_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "item_id", "AttributeType": "S"},
+                {"AttributeName": "category", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "category-index",
+                    "KeySchema": [{"AttributeName": "category", "KeyType": "HASH"}],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield DynamoDbCollectionStore(_Item, _TABLE_NAME, "item_id")
+
+
+def test_upsert_with_index_attributes_adds_top_level_attribute(
+    store_with_gsi: DynamoDbCollectionStore[_Item],
+) -> None:
+    store_with_gsi.upsert_with_index_attributes(
+        _Item(item_id="1", name="a", value=1), {"category": "buy_candidate"}
+    )
+    raw_item = store_with_gsi._table.get_item(Key={"item_id": "1"})["Item"]
+    assert raw_item["category"] == "buy_candidate"
+    # dataとしても引き続き正しく読み戻せる(索引属性がモデルの通常シリアライズを
+    # 壊さないこと)。
+    assert store_with_gsi.get("1") == _Item(item_id="1", name="a", value=1)
+
+
+def test_query_by_index_returns_only_matching_items(
+    store_with_gsi: DynamoDbCollectionStore[_Item],
+) -> None:
+    store_with_gsi.upsert_with_index_attributes(
+        _Item(item_id="1", name="a", value=1), {"category": "buy_candidate"}
+    )
+    store_with_gsi.upsert_with_index_attributes(
+        _Item(item_id="2", name="b", value=2), {"category": "buy_candidate"}
+    )
+    store_with_gsi.upsert_with_index_attributes(
+        _Item(item_id="3", name="c", value=3), {"category": "near_buy"}
+    )
+
+    results = store_with_gsi.query_by_index("category-index", "category", "buy_candidate")
+
+    assert {item.item_id for item in results} == {"1", "2"}
+
+
+def test_query_by_index_returns_empty_list_when_no_match(
+    store_with_gsi: DynamoDbCollectionStore[_Item],
+) -> None:
+    store_with_gsi.upsert_with_index_attributes(
+        _Item(item_id="1", name="a", value=1), {"category": "buy_candidate"}
+    )
+    assert store_with_gsi.query_by_index("category-index", "category", "no_such_value") == []
+
+
+def test_upsert_without_index_attributes_is_unaffected(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """既存のupsert()呼び出しは今回の変更で一切挙動が変わらない(索引属性を
+    要求しない通常テーブルでも引き続き使えること)。"""
+    store.upsert(_Item(item_id="1", name="foo", value=10))
+    assert store.get("1") == _Item(item_id="1", name="foo", value=10)
+
+
 def test_get_does_not_use_consistent_read(
     store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -701,8 +701,10 @@ AWSデプロイ後、LINE Webhookを設定していれば、CLIを開かずLINE�
 リッチメニューの作成・画像アップロードは`infra/line_rich_menu/
 register_rich_menu.py`で行う(このスクリプトはLambda/CIからは呼ばれない、
 人間が手元で実行する運用スクリプト)。定義は`infra/line_rich_menu/
-rich_menu.json`にリポジトリ管理されている。画像ファイルはリポジトリに
-含めないため、別途用意すること(2500×843pxの1行3分割を前提とした定義)。
+rich_menu.json`にリポジトリ管理されている。**Phase 2-A(2026-08、6.3節)で
+2500×1686px・上段3分割/下段3分割の2段構成へ更新済み**のため、画像ファイルも
+この構成(上段: 買った/売った/お気に入り登録、下段: 保有銘柄/ウォッチリスト/
+対象確認)に合わせて別途用意すること。
 
 ```bash
 # 1. 環境変数にチャネルアクセストークンを設定する(Secrets Managerの値をコピー)
@@ -718,7 +720,38 @@ python infra/line_rich_menu/register_rich_menu.py --rich-menu-id <richMenuId> --
 ```
 
 デフォルト設定(手順3)は既存のリッチメニュー設定を上書きする可能性があるため、
-必ず手順2の出力を確認してから実行すること。
+必ず手順2の出力を確認してから実行すること。**アプリケーションコード
+(Lambda)のデプロイと、このリッチメニュー登録手順は完全に独立している**。
+コードをデプロイしただけではLINEトーク画面のメニュー表示は変わらず、
+本手順を別途手動で実行して初めて利用者の画面に反映される。
+
+### 6.3 保有銘柄・ウォッチリスト・対象確認(参照専用、Phase 2-A・2026-08追加)
+
+利用者向けの操作方法は機能仕様書10.5節を参照。運用担当者が把握しておくべき
+点は以下のとおり。
+
+- **読み取り専用**: `HoldingsViewService`/`WatchlistViewService`/
+  `BuyCandidateTargetViewService`(いずれも`src/jstock_advisor/services/`
+  配下)は、Holding・PurchaseLot・WatchlistItem・BuyCandidateEvaluationRecord
+  等の正データへの書き込みメソッドを一切持たない設計。
+- **最新完了batchポインタ**: 「対象確認」「ウォッチリスト」の直近購入判定
+  参照は、`BuyCandidateBatchCompletionTable`(単一行)が指す直近の
+  「通常運用(NORMAL)で完了し、かつ全対象銘柄の内部記録(12.14節相当、
+  `BuyCandidateEvaluationRecordsTable`)保存が確認できたbatch」のみを見る。
+  検証モード(VALIDATION/DRY_RUN)実行時や、一部銘柄の内部記録保存に失敗した
+  場合はこのポインタを更新しない(直前の正常完了分がそのまま参照され
+  続ける)。更新されなかった場合は`buy-candidates` LambdaのCloudWatch Logs
+  へERRORログ(`evaluation record save incomplete, latest batch pointer NOT
+  updated`)が出力されるため、これが頻発する場合は`buy_candidate_evaluation_
+  records`テーブルへの書き込み失敗の原因を調査すること。
+- **GSI(`batch_id-index`)反映待ちの表示**: `BuyCandidateEvaluationRecordsTable`
+  のGSIは結果整合性のみのため、直近batch完了直後の数秒間、対象確認・
+  ウォッチリストの参照が「直近の分析結果を反映中です。少し時間をおいて
+  再度お試しください。」と表示することがある(1回の短い自動再試行後も
+  件数が一致しない場合のみ)。異常ではなく、少し待って再操作すれば解消する。
+- **IAM**: `LineWebhookFunction`に`BuyCandidateEvaluationRecordsTable`・
+  `BuyCandidateBatchCompletionTable`への読み取り専用アクセスを追加した
+  (11節のGSI追加時の注意もあわせて参照)。
 
 ---
 
@@ -1078,6 +1111,21 @@ rotation dispatch leaseテーブル追加を機に集約)は既に個別指定�
 changesetの中身を人間が確認していれば防げた種類の問題ではなく、
 IAM側のサイズ上限はCloudFormation実行時まで判明しないため、事前の
 `sam validate`だけでは検知できません)。
+
+**既存テーブルへGSIを追加する場合の注意(2026-08、Phase 2-A・
+`BuyCandidateEvaluationRecordsTable`へ`batch_id-index`追加時に確認)**:
+DynamoDBのGSIはスパースインデックスであり、GSI追加(`UpdateTable`)は既存の
+全アイテムに対して自動バックフィルを行うものの、GSIのキー属性(この例では
+`batch_id`)をそもそも持たないアイテムはGSIに載らない。本システムの
+`DynamoDbCollectionStore`は各アイテムを`{id, "data": JSON文字列}`という
+形式で保存しており、通常の`upsert()`ではGSI用の属性はトップレベルに
+書き込まれない(`upsert_with_index_attributes()`を使うリポジトリのみが
+書き込む)。したがって、**GSI追加前にコード変更(該当リポジトリの
+`upsert_with_index_attributes()`切替)をデプロイしていない場合、GSI追加後も
+既存データはGSIから検索できないまま**になる。コードとインフラ(GSI追加)を
+同一デプロイで反映すれば、デプロイ後に新規書き込まれるデータから正しく
+GSIに載るため、通常はこれで実害はない(過去データをGSI経由で検索する必要が
+無い設計であることを事前に確認すること)。
 
 ## 12. 保有銘柄オーナー機能移行の運用(TradingPauseConfig、2026-08追加)
 

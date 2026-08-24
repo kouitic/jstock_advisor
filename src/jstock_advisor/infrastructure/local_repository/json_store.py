@@ -90,6 +90,14 @@ class JsonCollectionStore[T: BaseModel]:
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
         return [item for item in self._read_all().values() if predicate(item)]
 
+    def upsert_with_index_attributes(self, item: T, index_attributes: dict[str, str]) -> None:
+        """ローカルJSONにGSI概念は無いため、index_attributesを無視して通常のupsertと同一。"""
+        self.upsert(item)
+
+    def query_by_index(self, index_name: str, key_name: str, key_value: str) -> list[T]:
+        """ローカルJSONにGSI概念は無いため、index_nameは無視しfind()相当で絞り込む。"""
+        return self.find(lambda item: str(getattr(item, key_name)) == key_value)
+
     def insert_if_absent(self, item: T) -> bool:
         """既存があれば触らずFalse、無ければ追加してTrue。
 

@@ -698,12 +698,46 @@ Resources:
       AttributeDefinitions:
         - AttributeName: evaluation_id
           AttributeType: S
+        # LINE UI第二弾「対象確認」機能(2026-08)向け。GSI(batch_id-index)の
+        # HASHキー。evaluation_id(batch_id:stock_codeの複合文字列)からは
+        # batch_id単体でのQueryができないため追加した。デプロイ前に書き込まれた
+        # 既存レコードにはbatch_id属性(トップレベル)が無く、DynamoDBのGSIは
+        # スパースインデックスのためそれらはGSIに載らない(実害無し、詳細は
+        # BuyCandidateEvaluationRecordRepository参照)。
+        - AttributeName: batch_id
+          AttributeType: S
       KeySchema:
         - AttributeName: evaluation_id
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: batch_id-index
+          KeySchema:
+            - AttributeName: batch_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
+
+  # LINE UI第二弾「対象確認」機能(2026-08)向け。単一行(pointer_id="default"
+  # 固定)のみを保持する、直近完了BUY候補batchの永続ポインタ。BatchRunsTable
+  # (TTL6時間、買い候補パイプラインではstatus更新自体を行わない)では
+  # 「最新完了batch」を長期に特定できないため新設した。書き込みは
+  # buy_candidates_handler._finalize_batch()からNORMAL運用かつ全対象銘柄分の
+  # BuyCandidateEvaluationRecord保存成功時のみ行う。TTLは持たせない(常に
+  # 上書きのため肥大化しない)。
+  BuyCandidateBatchCompletionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-buy_candidate_batch_completion"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pointer_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pointer_id
+          KeyType: HASH
 
   UserFeedbackTable:
     Type: AWS::DynamoDB::Table
@@ -989,6 +1023,11 @@ Resources:
                 - !Sub "${DecisionSnapshotsTable.Arn}/index/*"
                 - !GetAtt BuyCandidateEvaluationRecordsTable.Arn
                 - !Sub "${BuyCandidateEvaluationRecordsTable.Arn}/index/*"
+                # LINE UI第二弾「対象確認」機能(2026-08)向け。latest completed
+                # batch pointerの書き込み(_finalize_batch()のみ、NORMAL運用かつ
+                # 全対象銘柄分のEvaluationRecord保存成功時)。
+                - !GetAtt BuyCandidateBatchCompletionTable.Arn
+                - !Sub "${BuyCandidateBatchCompletionTable.Arn}/index/*"
                 - !GetAtt WatchStateTable.Arn
                 - !Sub "${WatchStateTable.Arn}/index/*"
                 - !GetAtt ValidationWatchStateTable.Arn
@@ -1723,6 +1762,10 @@ Resources:
         # StockDisplayNameResolverのoverrideソース(手動上書き名称)・JPXソース用
         # (指摘対応、上記CANDIDATE_UNIVERSE_CACHE_BUCKET環境変数とあわせて追加)。
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # LINE UI第二弾(ウォッチリスト/対象確認、2026-08)向け。直近購入判定・
+        # 対象確認一覧の読み取り専用アクセス(いずれも書き込みは行わない)。
+        - DynamoDBReadPolicy: { TableName: !Ref BuyCandidateEvaluationRecordsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref BuyCandidateBatchCompletionTable }
         # 保有銘柄オーナー機能移行: BUY/SELL一時停止フラグ。書き込みはCLI経由の
         # 人間のみ(DynamoDBReadPolicyでは不足。commit_buy/commit_sellの
         # TransactWriteItemsがConditionCheckとして参照するためdynamodb:

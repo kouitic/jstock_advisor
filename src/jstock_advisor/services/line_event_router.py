@@ -44,7 +44,12 @@ class LineEventRouter:
 
     def route_postback(self, event: LinePostbackEvent, now: dt.datetime) -> ConversationReply:
         return self.conversation_service.handle_postback(
-            event.user_id, event.action, event.op, now
+            event.user_id,
+            event.action,
+            event.op,
+            now,
+            owner=event.owner,
+            category=event.category,
         )
 
     def route_text(self, event: LineTextMessageEvent, now: dt.datetime) -> ConversationReply:

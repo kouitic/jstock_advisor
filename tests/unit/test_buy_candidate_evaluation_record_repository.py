@@ -114,6 +114,26 @@ def test_list_by_stock_returns_only_matching_stock_sorted_by_evaluated_at(tmp_pa
     assert [item.batch_id for item in items] == ["batch-1", "batch-2"]
 
 
+def test_list_by_batch_returns_only_matching_batch_sorted_by_stock_code(tmp_path: Path) -> None:
+    """LINE UI第二弾「対象確認」機能(2026-08)向け。batch_id-index(GSI)経由の
+    Query(ローカルJSON実装はquery_by_index()のfind()フォールバック)で、
+    指定batch_idの全レコードのみをstock_code昇順で取得できること。"""
+    repo = BuyCandidateEvaluationRecordRepository(store_dir=tmp_path)
+    repo.upsert(_record(evaluation_id="batch-1:8136", batch_id="batch-1", stock_code="8136"))
+    repo.upsert(_record(evaluation_id="batch-1:2914", batch_id="batch-1", stock_code="2914"))
+    repo.upsert(_record(evaluation_id="batch-2:2914", batch_id="batch-2", stock_code="2914"))
+
+    items = repo.list_by_batch("batch-1")
+
+    assert [item.stock_code for item in items] == ["2914", "8136"]
+
+
+def test_list_by_batch_returns_empty_list_when_no_match(tmp_path: Path) -> None:
+    repo = BuyCandidateEvaluationRecordRepository(store_dir=tmp_path)
+    repo.upsert(_record(evaluation_id="batch-1:2914", batch_id="batch-1"))
+    assert repo.list_by_batch("does-not-exist") == []
+
+
 def test_default_ttl_seconds_is_ninety_days() -> None:
     """既定90日のTTL(DEFAULT_TTL_SECONDS)。BuyCandidateEvaluationRecordRepositoryの
     __init__のデフォルト引数として使われるモジュールレベル定数であり、他の

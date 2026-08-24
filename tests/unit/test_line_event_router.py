@@ -30,12 +30,22 @@ _USER = "U1"
 class _FakeConversationService:
     def __init__(self) -> None:
         self.postback_calls: list[tuple[str, str, str | None]] = []
+        self.postback_calls_with_owner_category: list[
+            tuple[str, str, str | None, str | None, str | None]
+        ] = []
         self.text_calls: list[tuple[str, ConversationState, str]] = []
 
     def handle_postback(
-        self, user_id: str, action: str, op: str | None, now: dt.datetime
+        self,
+        user_id: str,
+        action: str,
+        op: str | None,
+        now: dt.datetime,
+        owner: str | None = None,
+        category: str | None = None,
     ) -> ConversationReply:
         self.postback_calls.append((user_id, action, op))
+        self.postback_calls_with_owner_category.append((user_id, action, op, owner, category))
         return ConversationReply("conversation-postback-reply")
 
     def handle_text_input(
@@ -102,6 +112,24 @@ def test_postback_always_goes_to_conversation_service_regardless_of_state(
     assert reply.text == "conversation-postback-reply"
     assert conversation.postback_calls == [(_USER, "start_buy", None)]
     assert chat_command.handled == []
+
+
+def test_postback_owner_and_category_propagate_to_conversation_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LINE UI第二弾(保有銘柄/対象確認、2026-08)向け、owner/categoryが
+    ConversationService.handle_postback()まで正しく伝播すること。"""
+    _patch_state(monkeypatch, None)
+    router, conversation, _ = _build_router()
+    event = LinePostbackEvent(
+        reply_token="rt", user_id=_USER, action="show_holdings", op=None, owner="所有者A"
+    )
+
+    router.route_postback(event, _NOW)
+
+    assert conversation.postback_calls_with_owner_category == [
+        (_USER, "show_holdings", None, "所有者A", None)
+    ]
 
 
 # --- ② 有効なConversationStateがあれば常にConversationService --------------

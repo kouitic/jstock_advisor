@@ -149,6 +149,52 @@ def test_record_result_accumulates_stock_codes_across_calls(
     assert sorted(progress.data_insufficient_stock_codes) == ["1111", "2222"]
 
 
+def test_record_result_evaluation_record_saved_stock_codes_accumulates_as_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LINE UI第二弾「対象確認」機能(2026-08)向け。EvaluationRecordの保存成功
+    stock_codeは文字列セット(DynamoDB Set)として蓄積され、単純なADDカウンタ
+    ではないことを確認する。"""
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.record_result(
+        "batch-1", "candidate_not_ranked", evaluation_record_saved_stock_code="1111"
+    )
+    progress = batch_tracker.record_result(
+        "batch-1", "candidate_not_ranked", evaluation_record_saved_stock_code="2222"
+    )
+
+    assert progress is not None
+    assert sorted(progress.evaluation_record_saved_stock_codes) == ["1111", "2222"]
+
+
+def test_record_result_evaluation_record_saved_stock_code_duplicate_report_counts_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lambda retry等により同一stock_codeが複数回報告されても、Set上は1件の
+    ままであること(冪等性)を確認する。"""
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.record_result(
+        "batch-1", "candidate_not_ranked", evaluation_record_saved_stock_code="1111"
+    )
+    batch_tracker.record_result(
+        "batch-1", "candidate_not_ranked", evaluation_record_saved_stock_code="1111"
+    )
+    progress = batch_tracker.record_result(
+        "batch-1", "candidate_not_ranked", evaluation_record_saved_stock_code="1111"
+    )
+
+    assert progress is not None
+    assert progress.evaluation_record_saved_stock_codes == ["1111"]
+
+
 def test_record_result_accumulates_ranking_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     """買い候補の優先度付け通知(2026-07仕様追加)向け: ranking_entryを渡した銘柄が
     文字列セットへ原子的に蓄積され、record_resultの戻り値から取得できることを確認する。

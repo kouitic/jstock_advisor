@@ -59,6 +59,29 @@ class CollectionStore[T: BaseModel](Protocol):
         model_dump_json()を返す(実利用はDynamoDB実装のみ)。項目が無ければNone。
         """
         ...
+    def upsert_with_index_attributes(self, item: T, index_attributes: dict[str, str]) -> None:
+        """upsert()に加え、GSI等でのクエリ用にトップレベル属性も書き込む
+        (LINE UI第二弾・対象確認機能2026-08追加)。
+
+        DynamoDB実装のみがindex_attributesを実際にトップレベル属性として
+        書き込む。JSON実装はindex_attributesを無視してupsert(item)と同じ
+        動作(ローカルJSONにはGSIという概念が存在しないため)。batch_id等の
+        特定の属性名をこのProtocol自体に持ち込まない、汎用の拡張ポイントとする。
+        """
+        ...
+
+    def query_by_index(self, index_name: str, key_name: str, key_value: str) -> list[T]:
+        """指定したGSI(index_name)のHASHキー(key_name)がkey_valueに一致する
+        項目をQueryで取得する(LINE UI第二弾・対象確認機能2026-08追加)。
+
+        DynamoDB実装のみが実際にGSIをQueryする(効率的な検索用)。ローカルJSON
+        実装はindex_nameを無視し、find(lambda item: getattr(item, key_name) ==
+        key_value)と同じ全件フィルタ結果を返す(ローカルにGSIという概念が
+        存在しないため)。対象のGSIを持たないテーブルでこのメソッドを呼ぶと
+        DynamoDB実装側で例外になるため、呼び出し側は対応するGSIを持つ
+        リポジトリでのみ使用すること。
+        """
+        ...
 
 
 def running_on_lambda() -> bool:

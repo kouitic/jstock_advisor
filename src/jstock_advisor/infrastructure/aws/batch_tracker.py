@@ -158,6 +158,14 @@ class BatchProgress:
     # WATCH系通知が追加されてもRecommendationType.WATCHの件数からの推測に
     # 依存しない構造にする)。
     attention_sent_stock_codes: list[str] = field(default_factory=list)
+    # LINE UI第二弾「対象確認」機能(2026-08)向け。BuyCandidateEvaluationRecordの
+    # 保存に実際に成功したstock_codeの集合(DynamoDBの文字列セットのため、
+    # 同一stock_codeがLambda retry等により複数回報告されても1件に潰れる=冪等)。
+    # 単純なADDカウンタ(int)ではなく銘柄コード集合にしているのは、「同一
+    # stock_codeの重複報告」と「本当に別の銘柄の保存成功」を区別できるように
+    # するため(カウンタ方式だと重複報告分だけ数字が水増しされ、実際には一部
+    # 銘柄のEvaluationRecordが欠損していても検知できない)。
+    evaluation_record_saved_stock_codes: list[str] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -207,6 +215,7 @@ def record_result(
     detected_category_entry: str | None = None,
     attention_detected_stock_code: str | None = None,
     attention_sent_stock_code: str | None = None,
+    evaluation_record_saved_stock_code: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄(または1 holding_id)の処理完了を原子的に記録し、現在の進捗を返す
     (ローカル環境ではNone)。
@@ -264,6 +273,15 @@ def record_result(
     件数集計(2026-08、追加修正2)向けに、stock_codeをDynamoDBの文字列セットへ
     原子的に追加する。Setの性質上、同一stock_codeを複数回(Lambda retry等で)
     渡しても件数が膨らむことはない。
+
+    evaluation_record_saved_stock_codeを渡すと、LINE UI第二弾「対象確認」
+    機能(2026-08)向けに、BuyCandidateEvaluationRecordの保存に成功した
+    stock_codeをDynamoDBの文字列セットへ原子的に追加する。単純なADDカウンタ
+    ではなく銘柄コード集合のため、Lambda retry等による同一stock_codeの
+    重複報告があってもSet上は1件のまま(冪等)。呼び出し側はfinalize時に
+    `len(progress.evaluation_record_saved_stock_codes) == progress.total`を
+    比較し、全対象銘柄分の保存が実際に成功した場合にのみlatest batch
+    pointerを更新すること(一部保存失敗を見逃さないため)。
     """
     if not running_on_lambda():
         return None
@@ -316,6 +334,10 @@ def record_result(
         names["#attention_sent_codes"] = "attention_sent_stock_codes"
         update_expr += ", #attention_sent_codes :attention_sent_codes"
         values[":attention_sent_codes"] = {attention_sent_stock_code}
+    if evaluation_record_saved_stock_code is not None:
+        names["#evaluation_record_saved_codes"] = "evaluation_record_saved_stock_codes"
+        update_expr += ", #evaluation_record_saved_codes :evaluation_record_saved_codes"
+        values[":evaluation_record_saved_codes"] = {evaluation_record_saved_stock_code}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -341,6 +363,9 @@ def record_result(
         detected_categories=sorted(item.get("detected_categories", set())),
         attention_detected_stock_codes=sorted(item.get("attention_detected_stock_codes", set())),
         attention_sent_stock_codes=sorted(item.get("attention_sent_stock_codes", set())),
+        evaluation_record_saved_stock_codes=sorted(
+            item.get("evaluation_record_saved_stock_codes", set())
+        ),
     )
 
 
