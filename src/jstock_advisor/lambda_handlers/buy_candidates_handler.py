@@ -64,6 +64,10 @@ from typing import Any
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
+    BuyCandidateEvaluationRecord,
+    build_evaluation_id,
+)
 from jstock_advisor.domain.entities.buy_evaluation_target import BuyEvaluationTarget
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
@@ -75,9 +79,11 @@ from jstock_advisor.domain.entities.enums import (
     EligibilityBlockCategory,
     NotificationContext,
     PortfolioValuationBasis,
+    PurchaseCategory,
     RecommendationType,
     WatchTransitionType,
     WatchType,
+    resolve_purchase_category,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
@@ -93,6 +99,9 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     start_batch,
 )
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
+    BuyCandidateEvaluationRecordRepository,
+)
 from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
     DecisionSnapshotRepository,
 )
@@ -415,6 +424,7 @@ def _process_single_candidate(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+    evaluation_record_repo: BuyCandidateEvaluationRecordRepository | None = None,
 ) -> dict[str, Any]:
     service = BuySignalService(
         providers=providers,
@@ -430,6 +440,13 @@ def _process_single_candidate(
     watch_end_ranking_entry: str | None = None
     sector_entry: str | None = None
     validation_recommendation_id: str | None = None
+    # 買い候補サマリー表示改修(2026-08): 将来のLINE詳細理由照会機能に向けて、
+    # try/exceptのどの経路を通っても最終的な購入判定分類・recommendation_idを
+    # 記録できるよう、既定値(処理失敗扱い)をtry開始前に用意しておく。
+    record_purchase_category = PurchaseCategory.FAILED
+    record_final_buy_action: BuyAction | None = None
+    record_raw_buy_action: BuyAction | None = None
+    record_recommendation_id: str | None = None
     try:
         # --- 統合BUY候補パイプライン(2026-07)。購入判定と、保有銘柄の場合の
         # 売却・利確判定(後段)とで同一のスナップショット(現在値・財務データ)を
@@ -462,6 +479,9 @@ def _process_single_candidate(
                 )
             category = "data_insufficient"
             result = {"stock_code": stock_code, "recommended": False, "notified": False}
+            record_purchase_category = PurchaseCategory.DATA_INSUFFICIENT
+            record_final_buy_action = BuyAction.DATA_INSUFFICIENT
+            record_raw_buy_action = BuyAction.DATA_INSUFFICIENT
             _record_evaluation_audit(
                 audit_service,
                 rule_version,
@@ -486,6 +506,9 @@ def _process_single_candidate(
             # 未計算のため報告できない。ポートフォリオ集計の既知の制約)。
             category = "hold"
             result = {"stock_code": stock_code, "recommended": False, "notified": False}
+            record_purchase_category = PurchaseCategory.EXCLUDED
+            record_final_buy_action = BuyAction.EXCLUDED
+            record_raw_buy_action = BuyAction.EXCLUDED
             _record_evaluation_audit(
                 audit_service,
                 rule_version,
@@ -664,21 +687,34 @@ def _process_single_candidate(
             ):
                 watch_end_ranking_entry = final_recommendation.recommendation_id
 
+            record_final_buy_action = final_recommendation.buy_action
+            record_raw_buy_action = base_buy_action
+            record_recommendation_id = final_recommendation.recommendation_id
+
             if final_recommendation.buy_action == BuyAction.MANUAL_REVIEW:
                 category = "review"
+                record_purchase_category = PurchaseCategory.MANUAL_REVIEW
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
             elif outcome.ranking_group == "buy_candidate":
                 # 実際の送信可否判定は行わず、ランキング候補として登録するだけに
                 # 留める(全銘柄処理完了後、購入候補ランキング順に評価・送信する)。
                 category = "candidate_not_ranked"
+                record_purchase_category = PurchaseCategory.BUY_CANDIDATE
                 ranking_entry = _encode_buy_ranking_entry(final_recommendation)
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
             elif outcome.ranking_group == "watch_price":
-                category = "watch_not_ranked"
-                # BUY候補裾野拡大機能(2026-08): NEAR BUY(watch_type=NEAR_BUY)
-                # またはWATCH_BEFORE_EARNINGSのみ、毎営業日通知フローに乗せる
-                # ための専用ランキングエントリを作る(通常のWATCH_FOR_PRICEは
-                # 従来どおり通知対象外のまま)。
+                # 買い候補サマリー表示改修(2026-08): 表示上「買い間近」(NEAR_BUY)と
+                # 「買い待ち」(それ以外のWATCH_FOR_PRICE・WATCH_BEFORE_EARNINGS)を
+                # 分離する。NEAR BUY/WATCH_BEFORE_EARNINGS向けの日次ランキング
+                # エントリ生成ロジック自体は変更しない(既存どおり)。
+                is_near_buy = (
+                    final_recommendation.buy_action == BuyAction.WATCH_FOR_PRICE
+                    and final_recommendation.watch_type is not None
+                )
+                category = "near_buy" if is_near_buy else "watch_wait"
+                record_purchase_category = resolve_purchase_category(
+                    final_recommendation.buy_action, final_recommendation.watch_type
+                ) or PurchaseCategory.WATCH_FOR_PRICE
                 if (
                     final_recommendation.watch_type is not None
                     or final_recommendation.buy_action == BuyAction.WATCH_BEFORE_EARNINGS
@@ -687,6 +723,7 @@ def _process_single_candidate(
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
             else:
                 category = "hold"
+                record_purchase_category = PurchaseCategory.NOT_ATTRACTIVE
                 result = {"stock_code": stock_code, "recommended": True, "notified": False}
 
             _record_evaluation_audit(
@@ -712,6 +749,18 @@ def _process_single_candidate(
         result = {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
 
     if batch_id is not None:
+        _save_evaluation_record_safely(
+            evaluation_record_repo,
+            batch_id,
+            stock_code,
+            now,
+            rule_version,
+            source,
+            record_purchase_category,
+            record_final_buy_action,
+            record_raw_buy_action,
+            record_recommendation_id,
+        )
         needs_code = category in ("data_insufficient", "failed")
         stock_code_for_category = stock_code if needs_code else None
         progress = record_result(
@@ -726,9 +775,60 @@ def _process_single_candidate(
         )
         if progress is not None and progress.is_complete:
             _finalize_batch(
-                progress, config, now, recommendation_repo, notification_service, execution_context
+                progress,
+                batch_id,
+                config,
+                now,
+                recommendation_repo,
+                notification_service,
+                execution_context,
+                evaluation_record_repo,
             )
     return result
+
+
+def _save_evaluation_record_safely(
+    evaluation_record_repo: BuyCandidateEvaluationRecordRepository | None,
+    batch_id: str,
+    stock_code: str,
+    now: dt.datetime,
+    rule_version: str,
+    source: CandidateSource,
+    purchase_category: PurchaseCategory,
+    final_buy_action: BuyAction | None,
+    raw_buy_action: BuyAction | None,
+    recommendation_id: str | None,
+) -> None:
+    """BuyCandidateEvaluationRecordの構築・保存失敗が既存の判定・通知フローを
+    絶対にブロックしないためのラッパー(save_decision_snapshot_safely()と同じ
+    設計方針)。将来のLINE詳細理由照会機能に向けた参照用の副次的な記録であり、
+    失敗してもWARNINGログのみに留め、呼び出し元へ伝播させない。
+    """
+    if evaluation_record_repo is None:
+        return
+    try:
+        evaluation_record_repo.upsert(
+            BuyCandidateEvaluationRecord(
+                evaluation_id=build_evaluation_id(batch_id, stock_code),
+                batch_id=batch_id,
+                stock_code=stock_code,
+                evaluated_at=now,
+                rule_version=rule_version,
+                candidate_source=source,
+                purchase_category=purchase_category,
+                final_buy_action=final_buy_action,
+                raw_buy_action=raw_buy_action,
+                recommendation_id=recommendation_id,
+            )
+        )
+    except Exception:  # noqa: BLE001 - 参照用の副次記録の失敗で本処理を止めない
+        logger.warning(
+            "buy_candidates_handler: failed to save BuyCandidateEvaluationRecord "
+            "stock_code=%s batch_id=%s",
+            stock_code,
+            batch_id,
+            exc_info=True,
+        )
 
 
 def _aggregate_sector_entries(
@@ -840,13 +940,67 @@ def _record_notification_outcome_audit(
     )
 
 
+def _update_evaluation_record_outcome_safely(
+    evaluation_record_repo: BuyCandidateEvaluationRecordRepository | None,
+    batch_id: str,
+    stock_code: str,
+    unified_rank: int | None,
+    notification_rank: int | None,
+    eligible: bool,
+    block_category: str | None,
+    block_reason: str | None,
+    add_on_block_reasons: tuple[str, ...],
+    send_outcome: str | None,
+) -> None:
+    """買い候補ランキングループの各finalize判定結果を、判定時点(worker側)で
+    既に作成済みのBuyCandidateEvaluationRecordへ追記する(save_decision_
+    snapshot_safely()と同じ「失敗しても本処理を止めない」設計方針)。
+    """
+    if evaluation_record_repo is None:
+        return
+    try:
+        evaluation_id = build_evaluation_id(batch_id, stock_code)
+        existing = evaluation_record_repo.get(evaluation_id)
+        if existing is None:
+            logger.warning(
+                "buy_candidates_handler: BuyCandidateEvaluationRecord not found at finalize "
+                "stock_code=%s batch_id=%s",
+                stock_code,
+                batch_id,
+            )
+            return
+        evaluation_record_repo.upsert(
+            existing.model_copy(
+                update={
+                    "unified_rank": unified_rank,
+                    "notification_rank": notification_rank,
+                    "notification_eligible": eligible,
+                    "notification_block_category": block_category,
+                    "notification_block_reason": block_reason,
+                    "add_on_block_reasons": add_on_block_reasons,
+                    "send_outcome": send_outcome,
+                }
+            )
+        )
+    except Exception:  # noqa: BLE001 - 参照用の副次記録の失敗で本処理を止めない
+        logger.warning(
+            "buy_candidates_handler: failed to update BuyCandidateEvaluationRecord "
+            "stock_code=%s batch_id=%s",
+            stock_code,
+            batch_id,
+            exc_info=True,
+        )
+
+
 def _finalize_batch(
     progress: BatchProgress,
+    batch_id: str,
     config: AppConfig,
     now: dt.datetime,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+    evaluation_record_repo: BuyCandidateEvaluationRecordRepository | None = None,
 ) -> None:
     """全銘柄の処理完了を検知したワーカーが1回だけ呼ぶ。購入候補ランキング順に
     以下の固定順序でゲートを評価する(breakしない。全件をループし尽くす):
@@ -869,10 +1023,13 @@ def _finalize_batch(
         progress.sector_entries, progress.holding_count
     )
 
-    quality_blocked_count = 0
+    data_quality_blocked_count = 0
+    trade_cooldown_blocked_count = 0
+    cross_pipeline_blocked_count = 0
     addon_blocked_count = 0
-    suppressed_count = 0
+    resend_suppressed_count = 0
     outside_top5_count = 0
+    record_not_found_count = 0
     eligible_winners: list[tuple[int, Recommendation]] = []
 
     for unified_rank, (_sort_key, stock_code, recommendation_id) in enumerate(buy_entries, start=1):
@@ -884,16 +1041,29 @@ def _finalize_batch(
                 stock_code,
                 recommendation_id,
             )
+            record_not_found_count += 1
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                False, "RECORD_NOT_FOUND", "RECORD_NOT_FOUND", (), None,
+            )
             continue
 
         dq = notification_service.check_data_quality_eligibility(
             recommendation, now, context=NotificationContext.BUY_CANDIDATE_BATCH
         )
         if not dq.eligible:
-            quality_blocked_count += 1
+            data_quality_blocked_count += 1
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 "NOT_REQUIRED", dq, basis, portfolio_total, coverage_ratio,
+            )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                False,
+                dq.block_category.value
+                if dq.block_category
+                else EligibilityBlockCategory.DATA_QUALITY.value,
+                dq.block_reason, (), None,
             )
             continue
 
@@ -903,11 +1073,19 @@ def _finalize_batch(
         # BUY通知が送られてしまう不備のため、あわせて修正する。
         buy_cooldown = notification_service.check_trade_cooldown_eligibility(recommendation, now)
         if not buy_cooldown.eligible:
-            suppressed_count += 1
+            trade_cooldown_blocked_count += 1
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 buy_cooldown.block_reason or "NOT_REQUIRED", buy_cooldown,
                 basis, portfolio_total, coverage_ratio,
+            )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                False,
+                buy_cooldown.block_category.value
+                if buy_cooldown.block_category
+                else EligibilityBlockCategory.TRADE_COOLDOWN.value,
+                buy_cooldown.block_reason, (), None,
             )
             continue
 
@@ -916,11 +1094,19 @@ def _finalize_batch(
             recommendation, now
         )
         if not buy_priority.eligible:
-            suppressed_count += 1
+            cross_pipeline_blocked_count += 1
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 buy_priority.block_reason or "NOT_REQUIRED", buy_priority,
                 basis, portfolio_total, coverage_ratio,
+            )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                False,
+                buy_priority.block_category.value
+                if buy_priority.block_category
+                else EligibilityBlockCategory.LOW_PRIORITY.value,
+                buy_priority.block_reason, (), None,
             )
             continue
 
@@ -988,14 +1174,30 @@ def _finalize_batch(
                     audit_service, rule_version, now, recommendation, unified_rank, None,
                     "NOT_REQUIRED", addon_eligibility, basis, portfolio_total, coverage_ratio,
                 )
+                _update_evaluation_record_outcome_safely(
+                    evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                    False,
+                    addon_eligibility.block_category.value
+                    if addon_eligibility.block_category
+                    else None,
+                    addon_eligibility.block_reason, assessment.reasons, None,
+                )
                 continue
 
         resend = notification_service.check_resend_eligibility(recommendation, now)
         if not resend.eligible:
-            suppressed_count += 1
+            resend_suppressed_count += 1
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 resend.block_reason or "SUPPRESSED", resend, basis, portfolio_total, coverage_ratio,
+            )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                False,
+                resend.block_category.value
+                if resend.block_category
+                else EligibilityBlockCategory.RECENTLY_NOTIFIED.value,
+                resend.block_reason, (), None,
             )
             continue
 
@@ -1011,6 +1213,10 @@ def _finalize_batch(
                 ),
                 basis, portfolio_total, coverage_ratio,
             )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                False, EligibilityBlockCategory.OUTSIDE_TOP_5.value, "OUTSIDE_TOP_5", (), None,
+            )
             continue
 
         eligible_winners.append((unified_rank, recommendation))
@@ -1021,11 +1227,31 @@ def _finalize_batch(
 
     notification_rank = 0
     sent_count = 0
+    send_failed_count = 0
+    # 通知ドライラン機能(2026-08追加): DRY_RUN時は全通知条件・ランキング・
+    # 上限判定を通過していても外部LINE送信のみ行われない(WOULD_SEND_DRY_RUN)。
+    # 「通知済み」にも「送信失敗」にも計上しない、独立したカウンタとする。
+    dry_run_would_send_count = 0
     for unified_rank, rec in eligible_winners:
         outcome = send_result.get(rec.stock_code, "SEND_FAILED")
         # 通知検証モード機能(2026-08追加): SENT_VALIDATIONもLINE送信に成功した
         # 銘柄数として扱う(NotificationLog未保存を理由に0件扱いにしない)。
-        if outcome in ("SENT_AND_RECORDED", "SENT_VALIDATION"):
+        # コードレビュー対応(2026-08、買い候補サマリー表示改修): SENT_LOG_FAILED
+        # はLINE送信自体には成功しているため、表示上・件数上は「通知済み」として
+        # 扱う(「送信失敗」とはしない)。内部のsend_outcomeでのみSENT_LOG_FAILEDを
+        # 区別し、既存どおりLambda例外による運用検知(下記log_failed)は維持する。
+        if outcome == "WOULD_SEND_DRY_RUN":
+            dry_run_would_send_count += 1
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, rec, unified_rank, None,
+                "SENT", NotificationEligibility(eligible=True),
+                basis, portfolio_total, coverage_ratio,
+            )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
+                True, None, None, (), outcome,
+            )
+        elif outcome in ("SENT_AND_RECORDED", "SENT_VALIDATION", "SENT_LOG_FAILED"):
             notification_rank += 1
             sent_count += 1
             _record_notification_outcome_audit(
@@ -1033,11 +1259,20 @@ def _finalize_batch(
                 "SENT", NotificationEligibility(eligible=True),
                 basis, portfolio_total, coverage_ratio,
             )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, notification_rank,
+                True, None, None, (), outcome,
+            )
         else:
+            send_failed_count += 1
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, rec, unified_rank, None,
                 outcome, NotificationEligibility(eligible=False, block_reason=outcome),
                 basis, portfolio_total, coverage_ratio,
+            )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
+                False, None, outcome, (), outcome,
             )
 
     log_failed = [code for code, outcome in send_result.items() if outcome == "SENT_LOG_FAILED"]
@@ -1196,28 +1431,48 @@ def _finalize_batch(
             basis, portfolio_total, coverage_ratio,
         )
 
-    total_buy_candidates = progress.category_counts.get("candidate_not_ranked", 0)
-    evaluated_count = len(buy_entries)
-    adjusted_counts = dict(progress.category_counts)
-    adjusted_counts["sent"] = progress.category_counts.get("sent", 0) + sent_count
-    adjusted_counts["review"] = (
-        progress.category_counts.get("review", 0) + quality_blocked_count + addon_blocked_count
+    # 買い候補サマリー表示改修(2026-08): 「購入判定」(判定状態)と「買い候補の
+    # 通知結果」(通知処理状態)を明確に分離した2種類の内訳を組み立てる。
+    # 「買い候補」総数(candidate_not_ranked)は判定時点の値をそのまま使い、
+    # finalizeで0へ上書きしない(以前はここで購入判定の総数自体が消えていた)。
+    purchase_judgment_counts = {
+        "buy_candidate": progress.category_counts.get("candidate_not_ranked", 0),
+        "near_buy": progress.category_counts.get("near_buy", 0),
+        "watch_wait": progress.category_counts.get("watch_wait", 0),
+        "not_attractive": progress.category_counts.get("hold", 0),
+        "manual_review": progress.category_counts.get("review", 0),
+        "data_insufficient": progress.category_counts.get("data_insufficient", 0),
+        "failed": progress.category_counts.get("failed", 0),
+    }
+    other_suppressed_count = (
+        data_quality_blocked_count + trade_cooldown_blocked_count + cross_pipeline_blocked_count
     )
-    adjusted_counts["suppressed"] = (
-        progress.category_counts.get("suppressed", 0) + suppressed_count + outside_top5_count
-    )
-    adjusted_counts["candidate_not_ranked"] = total_buy_candidates - evaluated_count
+    notification_result_counts = {
+        "sent": sent_count,
+        "notification_limit": outside_top5_count,
+        "resend_suppressed": resend_suppressed_count,
+        "addon_blocked": addon_blocked_count,
+        "other_suppressed": other_suppressed_count,
+        "send_failed": send_failed_count,
+        "other_error": record_not_found_count,
+        # 通知ドライラン機能(2026-08追加): 「通知済み」にも「送信失敗」にも
+        # 計上しない独立区分。SEND/NORMALでは構造的に常に0のまま
+        # (WOULD_SEND_DRY_RUNはnotification_mode=DRY_RUN時にしか発生しない)。
+        "dry_run_would_send": dry_run_would_send_count,
+    }
 
     notification_service.notify_batch_summary(
         _PROCESS_NAME,
         progress.total,
-        adjusted_counts,
+        progress.category_counts,
         now,
         data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
         failed_stock_codes=progress.failed_stock_codes,
         buy_candidates_sent_count=sent_count,
         near_buy_sent_count=near_buy_sent_count,
         send_empty_summary=config.notification.send_empty_summary,
+        purchase_judgment_counts=purchase_judgment_counts,
+        notification_result_counts=notification_result_counts,
     )
 
     if execution_context.is_validation:
@@ -1257,6 +1512,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     calendar = BusinessCalendar.from_config(config.holiday_calendar)
     providers = build_real_provider_bundle(now, config)
     recommendation_repo = RecommendationRepository.for_execution_context(execution_context)
+    evaluation_record_repo = BuyCandidateEvaluationRecordRepository()
     # BUY候補裾野拡大機能(2026-08、§5-1): 子Lambda(task=buy_candidate)は
     # 親Lambdaがdetect_and_apply()の結果をイベントペイロード経由で伝播した
     # trade_detection_confirmedをそのまま使う(親自身は通知を送らないため
@@ -1298,6 +1554,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             recommendation_repo,
             notification_service,
             execution_context,
+            evaluation_record_repo,
         )
         logger.info("buy_candidates_handler single candidate done: %s", result)
         return result

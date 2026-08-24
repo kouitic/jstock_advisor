@@ -114,7 +114,7 @@ def test_near_buy_candidate_is_recorded_as_non_actionable_without_sending(
     )
     fake_service = _FakeNearBuyNotificationService()
 
-    handler_module._finalize_batch(progress, _CONFIG, _NOW, repo, fake_service)
+    handler_module._finalize_batch(progress, "batch-1", _CONFIG, _NOW, repo, fake_service)
 
     assert fake_service.sent == []
     assert fake_service.batch_summary_calls[0]["near_buy_sent_count"] == 1
@@ -167,7 +167,7 @@ def test_near_buy_daily_limit_stops_further_sends(monkeypatch, tmp_path: Path) -
     )
     fake_service = _FakeNearBuyNotificationService()
 
-    handler_module._finalize_batch(progress, limited_config, _NOW, repo, fake_service)
+    handler_module._finalize_batch(progress, "batch-1", limited_config, _NOW, repo, fake_service)
 
     assert fake_service.sent == []
     # distance_pct昇順(近い順)に評価されるため、最も近い2件のみがNON_ACTIONABLE

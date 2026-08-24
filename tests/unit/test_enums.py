@@ -10,11 +10,15 @@ from jstock_advisor.domain.entities.enums import (
     _LEGACY_SELL_RECOMMENDATION_TYPES,
     FULL_SELL_RECOMMENDATION_TYPES,
     BacktestRecommendationSource,
+    BuyAction,
     HoldingSummaryAction,
+    PurchaseCategory,
     RecommendationType,
+    WatchType,
     classify_recommendation_source,
     is_full_sell_like,
     resolve_holding_summary_action,
+    resolve_purchase_category,
 )
 
 
@@ -195,3 +199,62 @@ def test_resolve_holding_summary_action_covers_every_recommendation_type() -> No
     for recommendation_type in RecommendationType:
         result = resolve_holding_summary_action(recommendation_type)
         assert result is None or result in HoldingSummaryAction
+
+
+# ===== 買い候補サマリー表示改修(2026-08): resolve_purchase_category =====
+
+
+@pytest.mark.parametrize(
+    ("buy_action", "watch_type", "expected_category"),
+    [
+        (None, None, None),
+        (None, WatchType.NEAR_BUY, None),
+        (BuyAction.STRONG_BUY, None, PurchaseCategory.BUY_CANDIDATE),
+        (BuyAction.STRONG_BUY, WatchType.NEAR_BUY, PurchaseCategory.BUY_CANDIDATE),
+        (BuyAction.BUY, None, PurchaseCategory.BUY_CANDIDATE),
+        (BuyAction.BUY, WatchType.NEAR_BUY, PurchaseCategory.BUY_CANDIDATE),
+        (BuyAction.SMALL_ENTRY, None, PurchaseCategory.BUY_CANDIDATE),
+        (BuyAction.SMALL_ENTRY, WatchType.NEAR_BUY, PurchaseCategory.BUY_CANDIDATE),
+        (BuyAction.WATCH_FOR_PRICE, None, PurchaseCategory.WATCH_FOR_PRICE),
+        (BuyAction.WATCH_FOR_PRICE, WatchType.NEAR_BUY, PurchaseCategory.NEAR_BUY),
+        (BuyAction.WATCH_BEFORE_EARNINGS, None, PurchaseCategory.WATCH_BEFORE_EARNINGS),
+        (
+            BuyAction.WATCH_BEFORE_EARNINGS,
+            WatchType.NEAR_BUY,
+            PurchaseCategory.WATCH_BEFORE_EARNINGS,
+        ),
+        (BuyAction.MANUAL_REVIEW, None, PurchaseCategory.MANUAL_REVIEW),
+        (BuyAction.MANUAL_REVIEW, WatchType.NEAR_BUY, PurchaseCategory.MANUAL_REVIEW),
+        (BuyAction.NOT_ATTRACTIVE, None, PurchaseCategory.NOT_ATTRACTIVE),
+        (BuyAction.NOT_ATTRACTIVE, WatchType.NEAR_BUY, PurchaseCategory.NOT_ATTRACTIVE),
+        (BuyAction.EXCLUDED, None, PurchaseCategory.EXCLUDED),
+        (BuyAction.EXCLUDED, WatchType.NEAR_BUY, PurchaseCategory.EXCLUDED),
+        (BuyAction.DATA_INSUFFICIENT, None, PurchaseCategory.DATA_INSUFFICIENT),
+        (BuyAction.DATA_INSUFFICIENT, WatchType.NEAR_BUY, PurchaseCategory.DATA_INSUFFICIENT),
+    ],
+)
+def test_resolve_purchase_category_exhaustive_table(
+    buy_action: BuyAction | None,
+    watch_type: WatchType | None,
+    expected_category: PurchaseCategory | None,
+) -> None:
+    """全(BuyAction, WatchType|None)の組み合わせが購入判定7区分(または
+    buy_action未設定時のNone)へ一意に決定されることを固定する(唯一の正本)。
+    watch_type=NEAR_BUYはbuy_action=WATCH_FOR_PRICEの場合のみ意味を持ち、
+    それ以外のbuy_actionでは無視される(watch_typeそのものはWATCH_FOR_PRICE
+    以外には本来設定され得ない付帯属性だが、関数としては無視して安全に動作する
+    ことも合わせて確認する)。"""
+    assert resolve_purchase_category(buy_action, watch_type) == expected_category
+
+
+def test_resolve_purchase_category_covers_every_buy_action_with_and_without_near_buy() -> None:
+    """全BuyActionについて、watch_typeの有無に関わらず例外なく分類できる
+    (PurchaseCategory.FAILEDはresolve_purchase_category()からは決して導出
+    されない設計上の意図も併せて確認する。FAILEDはtry/except全体の失敗時に
+    ハンドラ側が直接設定する既定値である)。"""
+    for buy_action in BuyAction:
+        for watch_type in (None, WatchType.NEAR_BUY):
+            result = resolve_purchase_category(buy_action, watch_type)
+            assert result is not None
+            assert result in PurchaseCategory
+            assert result != PurchaseCategory.FAILED

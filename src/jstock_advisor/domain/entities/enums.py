@@ -42,6 +42,22 @@ class ExecutionMode(StrEnum):
     VALIDATION = "VALIDATION"
 
 
+class NotificationMode(StrEnum):
+    """通知検証モードの送信方式(2026-08追加)。Lambdaイベントのnotification_mode
+    キーで指定する、VALIDATION専用の補助設定。execution_mode=NORMALでは
+    一切使用しない(指定するとresolve_execution_context()がエラーにする)。
+
+    SEND: 既存VALIDATIONと同じ動作。判定・通知文生成後、実際に外部LINE APIへ
+    pushする(LINE画面上での文面確認が目的)。未指定時の既定値でもある。
+    DRY_RUN: 判定・通知対象選定・通知文生成・VALIDATIONバナー付与までは
+    SENDと完全に同じ経路を通すが、外部LINE APIへのpushのみ行わない
+    (owner再分類等、通知文面の確認自体が目的ではない検証作業向け)。
+    """
+
+    SEND = "SEND"
+    DRY_RUN = "DRY_RUN"
+
+
 class RecommendationType(StrEnum):
     """要求仕様26節。買い判定・保有判定・売却判定を一つの列挙で表現する。"""
 
@@ -1030,6 +1046,58 @@ class WatchTransitionType(StrEnum):
     PROMOTED_TO_BUY = "PROMOTED_TO_BUY"
     ENDED = "ENDED"
     NONE = "NONE"
+
+
+class PurchaseCategory(StrEnum):
+    """買い候補分析サマリーの「購入判定」7区分の唯一の判定ソース(2026-08、
+    買い候補サマリー表示改修)。resolve_purchase_category()経由でのみ使う。
+
+    「判定状態」(このenum)と「通知処理状態」(通知済み/通知上限/再通知抑止等)を
+    明確に分離する。保有銘柄であること自体はこの分類に一切影響しない
+    (統合BUY候補パイプラインの既存方針どおり、保有継続という概念を持たない)。
+    """
+
+    BUY_CANDIDATE = "BUY_CANDIDATE"
+    NEAR_BUY = "NEAR_BUY"
+    WATCH_FOR_PRICE = "WATCH_FOR_PRICE"
+    WATCH_BEFORE_EARNINGS = "WATCH_BEFORE_EARNINGS"
+    NOT_ATTRACTIVE = "NOT_ATTRACTIVE"
+    EXCLUDED = "EXCLUDED"
+    MANUAL_REVIEW = "MANUAL_REVIEW"
+    DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
+    FAILED = "FAILED"
+
+
+def resolve_purchase_category(
+    buy_action: BuyAction | None,
+    watch_type: WatchType | None,
+) -> PurchaseCategory | None:
+    """(buy_action, watch_type)から購入判定7区分(表示用にはさらに集約する、
+    line_notification_service.py参照)を一意に決定する唯一の正本。
+
+    data_insufficient/failedはbuy_action自体が存在しない(判定に到達しな
+    かった)経路のため、この関数の対象外(呼び出し側が個別に扱う)。
+    buy_action=Noneの場合はNoneを返す(呼び出し側の責務外の状態)。
+    """
+    if buy_action is None:
+        return None
+    if buy_action in BUY_FAMILY_ACTIONS:
+        return PurchaseCategory.BUY_CANDIDATE
+    if buy_action == BuyAction.WATCH_FOR_PRICE:
+        if watch_type == WatchType.NEAR_BUY:
+            return PurchaseCategory.NEAR_BUY
+        return PurchaseCategory.WATCH_FOR_PRICE
+    if buy_action == BuyAction.WATCH_BEFORE_EARNINGS:
+        return PurchaseCategory.WATCH_BEFORE_EARNINGS
+    if buy_action == BuyAction.MANUAL_REVIEW:
+        return PurchaseCategory.MANUAL_REVIEW
+    if buy_action == BuyAction.NOT_ATTRACTIVE:
+        return PurchaseCategory.NOT_ATTRACTIVE
+    if buy_action == BuyAction.EXCLUDED:
+        return PurchaseCategory.EXCLUDED
+    if buy_action == BuyAction.DATA_INSUFFICIENT:
+        return PurchaseCategory.DATA_INSUFFICIENT
+    return None
 
 
 class NotificationCategory(StrEnum):

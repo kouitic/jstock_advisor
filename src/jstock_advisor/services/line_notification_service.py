@@ -81,8 +81,10 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.audit_service import AuditService
+from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.data_quality_service import DataQualityIssueSeverity, detect_anomalies
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
+from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.watchlist_addition_summary_builder import (
     WatchlistAdditionItemView,
     WatchlistAdditionSummary,
@@ -96,8 +98,14 @@ logger = logging.getLogger(__name__)
 # SENT_VALIDATIONは通知検証モード機能(2026-08追加)専用。VALIDATIONでは
 # NotificationLogを保存しないため、「記録された」ことを含意するSENT_AND_RECORDEDを
 # 返さない(SENT_LOG_FAILEDもVALIDATIONでは構造的に発生しない)。
+# WOULD_SEND_DRY_RUNは通知ドライラン機能(2026-08追加)専用。通知条件・ランキング・
+# 上限判定を全て通過し「本来なら送信されるはずだった」候補について、DRY_RUN指定に
+# より外部LINE送信のみを行わなかったことを表す。SKIPPED(対象外)ではなく、
+# 送信対象ではあったが意図的に外部送信しなかった、という意味を明示するためこの
+# 名称にしている。SENT_AND_RECORDED/SENT_LOG_FAILED(通知済み)にも
+# SEND_FAILED(送信失敗)にも計上しない、独立した状態として扱うこと。
 BuyDigestSendOutcome = Literal[
-    "SENT_AND_RECORDED", "SENT_VALIDATION", "SENT_LOG_FAILED", "SEND_FAILED"
+    "SENT_AND_RECORDED", "SENT_VALIDATION", "WOULD_SEND_DRY_RUN", "SENT_LOG_FAILED", "SEND_FAILED"
 ]
 
 # コードレビュー対応(2026-08、LINE通知/監査分離): 短文通知に対して従来の
@@ -2163,15 +2171,92 @@ class LineNotificationService:
             block_reason=status.value,
         )
 
-    def _push(self, text: str) -> None:
+    def _push(
+        self,
+        text: str,
+        *,
+        notification_type: NotificationType | None = None,
+        stock_code: str | None = None,
+        content_hash: str | None = None,
+        related_recommendation_id: str | None = None,
+        now: dt.datetime | None = None,
+    ) -> None:
         """全てのLINE送信箇所が経由する唯一の送信ヘルパー(通知検証モード機能
         2026-08追加)。VALIDATIONでは本文冒頭に検証banner を付与してから送信する。
         今後通知種別が増えても、push_messageを直接呼ばずこのヘルパーを経由する
         規約さえ守ればbanner表示漏れが構造的に起きない。
+
+        通知ドライラン機能(2026-08追加): execution_context.is_dry_run(VALIDATION
+        かつnotification_mode=DRY_RUN)の場合、banner付与後の最終文面が確定した
+        時点で外部LINE APIへのpush_messageのみを行わない。DRY_RUN判定はこの
+        メソッドへ一元化し、各通知メソッド側(send_recommendation_notification等)
+        へ`if is_dry_run`を複製しない(このメソッドが呼び出し可能な唯一の送信経路
+        であることを規約として維持する限り、判定漏れは構造的に起きない)。
+
+        notification_type/stock_code/content_hash/related_recommendation_id/nowは
+        DRY_RUN時にAudit・CloudWatch Logsへ記録する付随情報として任意受け取りする
+        (省略しても送信抑止そのものは動作するが、記録の詳細度が下がる)。
         """
         if self._execution_context.is_validation:
             text = _VALIDATION_BANNER + text
+        if self._execution_context.is_dry_run:
+            self._record_dry_run_notification(
+                text,
+                notification_type=notification_type,
+                stock_code=stock_code,
+                content_hash=content_hash,
+                related_recommendation_id=related_recommendation_id,
+                now=now,
+            )
+            return
         self._client.push_message(text)
+
+    def _record_dry_run_notification(
+        self,
+        text: str,
+        *,
+        notification_type: NotificationType | None,
+        stock_code: str | None,
+        content_hash: str | None,
+        related_recommendation_id: str | None,
+        now: dt.datetime | None,
+    ) -> None:
+        """DRY_RUNにより外部LINE送信を行わなかった通知の記録(通知ドライラン機能
+        2026-08追加)。実LINE送信を伴わないため通常のNotificationLogには一切
+        保存しない(通常運用の再送判定・通知履歴を汚さないVALIDATIONの既存原則を
+        維持する)。既存のAuditService.record()はis_validation時、本番AuditLog
+        Tableへ保存せずCloudWatch Logsへ出力するのみに既に切り替わる設計
+        (2026-08-11コードレビュー対応)ため、新規テーブルを設けずそのまま再利用する。
+        """
+        timestamp = now or dt.datetime.now(dt.UTC)
+        notification_type_value = notification_type.value if notification_type is not None else None
+        logger.info(
+            "VALIDATION DRY_RUN: external LINE push suppressed stock_code=%s "
+            "notification_type=%s content_hash=%s message_text=%s",
+            stock_code,
+            notification_type_value,
+            content_hash,
+            text,
+        )
+        rule_version = RuleVersionService().get_active_version_or(RULE_VERSION_PLACEHOLDER)
+        self._audit.record(
+            decision_type="notification_dry_run",
+            stock_code=stock_code,
+            input_values={},
+            calculation_formulas={},
+            output_values={
+                "execution_mode": self._execution_context.mode.value,
+                "notification_mode": self._execution_context.notification_mode.value,
+                "notification_type": notification_type_value,
+                "related_recommendation_id": related_recommendation_id,
+                "would_send": True,
+                "content_hash": content_hash,
+                "message_text": text,
+            },
+            data_sources=[],
+            rule_version=rule_version,
+            timestamp=timestamp,
+        )
 
     def send_recommendation_notification(
         self, recommendation: Recommendation, now: dt.datetime
@@ -2186,7 +2271,15 @@ class LineNotificationService:
         message = _render_notification_body(
             recommendation, self._config.notification.fair_value_large_spread_ratio
         )
-        self._push(message)
+        content_hash = _compute_content_hash(recommendation.recommendation_type)
+        self._push(
+            message,
+            notification_type=notification_type,
+            stock_code=recommendation.stock_code,
+            content_hash=content_hash,
+            related_recommendation_id=recommendation.recommendation_id,
+            now=now,
+        )
         self._record_daily_priority(recommendation, now)
         if not self._execution_context.is_validation:
             self._log_repo.save(
@@ -2194,7 +2287,7 @@ class LineNotificationService:
                     notification_id=str(uuid.uuid4()),
                     notification_type=notification_type,
                     stock_code=recommendation.stock_code,
-                    content_hash=_compute_content_hash(recommendation.recommendation_type),
+                    content_hash=content_hash,
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
                 )
@@ -2216,14 +2309,22 @@ class LineNotificationService:
         """
         text_input = build_watch_end_text_input(recommendation)
         message = format_notification_text(text_input)
-        self._push(message)
+        content_hash = _compute_content_hash(recommendation.recommendation_type)
+        self._push(
+            message,
+            notification_type=NotificationType.WATCH_END,
+            stock_code=recommendation.stock_code,
+            content_hash=content_hash,
+            related_recommendation_id=recommendation.recommendation_id,
+            now=now,
+        )
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
                     notification_id=str(uuid.uuid4()),
                     notification_type=NotificationType.WATCH_END,
                     stock_code=recommendation.stock_code,
-                    content_hash=_compute_content_hash(recommendation.recommendation_type),
+                    content_hash=content_hash,
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
                 )
@@ -2249,7 +2350,15 @@ class LineNotificationService:
             )
         text_input = build_attention_text_input(recommendation, attention_origin)
         message = format_notification_text(text_input)
-        self._push(message)
+        content_hash = _compute_attention_event_identity(recommendation)
+        self._push(
+            message,
+            notification_type=NotificationType.PROFIT_PROTECTION_ATTENTION,
+            stock_code=recommendation.stock_code,
+            content_hash=content_hash,
+            related_recommendation_id=recommendation.recommendation_id,
+            now=now,
+        )
         # 再コードレビュー対応(2026-08): send_recommendation_notification()と同様、
         # 実送信後にCross Pipeline Priority用の当日優先度を記録する(以前はこの
         # 呼び出しが無く、ATTENTION送信後もpriority 0のまま扱われ、後発の低優先度
@@ -2262,7 +2371,7 @@ class LineNotificationService:
                     notification_id=str(uuid.uuid4()),
                     notification_type=NotificationType.PROFIT_PROTECTION_ATTENTION,
                     stock_code=recommendation.stock_code,
-                    content_hash=_compute_attention_event_identity(recommendation),
+                    content_hash=content_hash,
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
                 )
@@ -2348,6 +2457,29 @@ class LineNotificationService:
                 self._record_daily_priority(recommendation, now)
 
             for recommendation, _ in chunk:
+                # 通知ドライラン機能(2026-08追加): 外部LINE送信の抑止判定自体は
+                # _push()へ一元化済み(ここでは既に完了している)。ここでの
+                # is_dry_run参照は、銘柄単位の戻り値(results)・監査記録という
+                # 既存の「is_validationで銘柄単位に分岐する」既存パターンを
+                # そのまま踏襲した銘柄単位の記録先選択であり、送信可否の再判定
+                # ではない。
+                if self._execution_context.is_dry_run:
+                    self._record_dry_run_notification(
+                        message,
+                        notification_type=_RECOMMENDATION_TO_NOTIFICATION_TYPE[
+                            recommendation.recommendation_type
+                        ],
+                        stock_code=recommendation.stock_code,
+                        content_hash=_compute_content_hash(recommendation.recommendation_type),
+                        related_recommendation_id=recommendation.recommendation_id,
+                        now=now,
+                    )
+                    # 通知条件は全て通過しており「送信されるはずだった」ことを表す。
+                    # 通知済み(SENT_AND_RECORDED等)にも送信失敗(SEND_FAILED)にも
+                    # 計上しない、独立した状態(要求仕様: DRY_RUN件数は既存の通知
+                    # 済み/送信失敗のいずれにも混ぜない)。
+                    results[recommendation.stock_code] = "WOULD_SEND_DRY_RUN"
+                    continue
                 if self._execution_context.is_validation:
                     # NotificationLogを保存しないため「記録された」ことを含意する
                     # SENT_AND_RECORDEDは返さない(SENT_LOG_FAILEDもこの分岐を
@@ -2495,7 +2627,15 @@ class LineNotificationService:
         text_input = build_notification_text_input(
             recommendation, NotificationCategory.MANUAL_REVIEW
         )
-        self._push(format_notification_text(text_input))
+        content_hash = _compute_content_hash(recommendation.recommendation_type)
+        self._push(
+            format_notification_text(text_input),
+            notification_type=NotificationType.MANUAL_REVIEW_REQUIRED,
+            stock_code=recommendation.stock_code,
+            content_hash=content_hash,
+            related_recommendation_id=recommendation.recommendation_id,
+            now=now,
+        )
 
         if not self._execution_context.is_validation:
             self._log_repo.save(
@@ -2503,7 +2643,7 @@ class LineNotificationService:
                     notification_id=str(uuid.uuid4()),
                     notification_type=NotificationType.MANUAL_REVIEW_REQUIRED,
                     stock_code=recommendation.stock_code,
-                    content_hash=_compute_content_hash(recommendation.recommendation_type),
+                    content_hash=content_hash,
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
                 )
@@ -2523,10 +2663,11 @@ class LineNotificationService:
         """適時開示からリスクキーワードが検出された場合に速報として送信する。
 
         同一開示(published_at+タイトルで識別)は再送しない。この再送抑止は
-        通知検証モード機能(2026-08追加)の対象外(個別銘柄の売買判断通知では
-        なく、適時開示の存在を知らせる事実通知のため)。現時点で本メソッドを
-        呼び出すハンドラ(disclosure_check_handler.py)はexecution_modeを扱わず
-        常にNORMALで動くため、この分岐に到達することはない。
+        通知検証モード機能(2026-08追加、およびそのDRY_RUN拡張)の対象外
+        (個別銘柄の売買判断通知ではなく、適時開示の存在を知らせる事実通知の
+        ため)。現時点で本メソッドを呼び出すハンドラ(disclosure_check_handler.py)
+        はexecution_mode/notification_modeを一切扱わず常にNORMALで動くため、
+        この分岐に到達することはない。
         """
         content_hash = hashlib.sha256(
             f"{stock_code}|{published_at.isoformat()}|{disclosure_title}".encode()
@@ -2626,6 +2767,17 @@ class LineNotificationService:
         # (pseudo_stock_code)・content_hashは引き続きprocess_nameのみで計算し、
         # 既存NotificationLogとの互換性を維持する(表示名だけを分離する)。
         display_title: str | None = None,
+        # 買い候補サマリー表示改修(2026-08): 「購入判定」(判定状態、7区分)と
+        # 「買い候補の通知結果」(通知処理状態、買い候補のみに付随する内訳)を
+        # 分離して表示するための集計値。buy_candidates_handler.py専用
+        # (holdings_watchlist_handler.py・その他呼び出し元は渡さない)。
+        # キーはそれぞれ固定: purchase_judgment_counts=
+        # {buy_candidate, near_buy, watch_wait, not_attractive, manual_review,
+        # data_insufficient, failed}、notification_result_counts=
+        # {sent, notification_limit, resend_suppressed, addon_blocked,
+        # other_suppressed, send_failed, other_error}。
+        purchase_judgment_counts: dict[str, int] | None = None,
+        notification_result_counts: dict[str, int] | None = None,
     ) -> bool:
         """銘柄単位ファンアウト(lambda_handlers/_fanout.py)の全件処理完了後に1回だけ送る、
         全体件数・区分別内訳のサマリー通知(要求仕様§13)。個別のデータ取得エラー・
@@ -2690,7 +2842,9 @@ class LineNotificationService:
             f"{sorted(counts.items())}|near_buy={near_buy_sent_count}|"
             f"partial_sell={partial_sell_detected_count}|full_sell={full_sell_detected_count}|"
             f"sell={sell_detected_count}|critical_risk={critical_risk_detected_count}|"
-            f"attention={attention_detected_count}".encode()
+            f"attention={attention_detected_count}|"
+            f"purchase_judgment={sorted((purchase_judgment_counts or {}).items())}|"
+            f"notification_result={sorted((notification_result_counts or {}).items())}".encode()
         ).hexdigest()[:16]
 
         # コードレビュー対応(2026-08、LINE通知アクション限定化・通知意図3段階化):
@@ -2781,7 +2935,13 @@ class LineNotificationService:
             lines.append("")
             lines.append(f"評価日時：{format_jst(now)}")
             lines.append(_DISCLAIMER)
-            self._push("\n".join(lines))
+            self._push(
+                "\n".join(lines),
+                notification_type=NotificationType.BATCH_SUMMARY,
+                stock_code=pseudo_stock_code,
+                content_hash=content_hash,
+                now=now,
+            )
             if not self._execution_context.is_validation:
                 self._log_repo.save(
                     NotificationLog(
@@ -2795,47 +2955,100 @@ class LineNotificationService:
                 )
             return True
 
-        # 2026-07仕様レビュー対応(§10): 「判定結果」(保有継続/要確認等)と「通知処理の
-        # 結果」(送信した/抑止した等)が同じ並びで表示され意味が伝わりにくいという
-        # 指摘を受け、「処理結果:」見出し+「・」箇条書きへ整理する。集計方法
-        # (category_countsの分類自体)は変更しない。
+        # 買い候補サマリー表示改修(2026-08、要求仕様: 購入判定と通知結果の分離)。
+        # 「購入判定」(判定状態、7区分・優先順位順)と「買い候補の通知結果」
+        # (通知処理状態、買い候補にのみ付随する内訳)を明確に分離する。
+        # 「通知不要（保有継続）」という文言・区分は廃止し、保有銘柄も
+        # ウォッチリスト銘柄と同じ購入判定区分(買い対象外等)へ分類する。
+        pj = purchase_judgment_counts or {}
+        nr = notification_result_counts or {}
+        buy_candidate_n = pj.get("buy_candidate", 0)
+        near_buy_n = pj.get("near_buy", 0)
+        watch_wait_n = pj.get("watch_wait", 0)
+        not_attractive_n = pj.get("not_attractive", 0)
+        manual_review_n = pj.get("manual_review", 0)
+        data_insufficient_n = pj.get("data_insufficient", 0)
+        failed_n = pj.get("failed", 0)
+        purchase_judgment_sum = (
+            buy_candidate_n
+            + near_buy_n
+            + watch_wait_n
+            + not_attractive_n
+            + manual_review_n
+            + data_insufficient_n
+            + failed_n
+        )
+        is_consistent = purchase_judgment_sum == total
+
         lines = [
             f"【{process_name}完了】",
             "",
-            "処理結果:",
-            f"・個別通知送信：{counts['sent']}件",
-            f"・通知不要（保有継続）：{counts['hold']}件",
-            f"・要確認：{counts['review']}件",
-            f"・データ不足：{counts['data_insufficient']}件",
-            f"・再通知抑止：{counts['suppressed']}件",
-            f"・処理失敗：{counts['failed']}件",
+            "購入判定:",
+            f"・買い候補：{buy_candidate_n}件",
+            f"・買い間近：{near_buy_n}件",
+            f"・買い待ち：{watch_wait_n}件",
+            f"・買い対象外：{not_attractive_n}件",
+            f"・要確認：{manual_review_n}件",
+            f"・データ不足：{data_insufficient_n}件",
+            f"・処理失敗：{failed_n}件",
         ]
-        # 買い候補分析(2026-07 BUYパイプライン再設計)専用: 購入候補・価格待ちの
-        # いずれもシグナル自体は成立したが、1回あたりの通知上限により今回は通知を
-        # 見送った件数。他のバッチ(保有銘柄・適時開示等)ではこれらのカテゴリを
-        # 使わない(常に0)ため、0件のときは表示しない。
-        # 「優先順位の高いN件」という表現は使わず、購入候補/価格待ちを明示して区別する。
-        if counts["candidate_not_ranked"] > 0:
-            lines.append(f"・買い候補(通知上限により見送り)：{counts['candidate_not_ranked']}件")
-        if counts["watch_not_ranked"] > 0:
-            lines.append(f"・価格待ち(通知上限により見送り)：{counts['watch_not_ranked']}件")
-        # BUY候補裾野拡大機能(2026-08)。コードレビュー対応(2026-08、LINE通知
-        # アクション限定化): NEAR BUYはもはやLINE送信しない(NON_ACTIONABLE、
-        # Audit記録のみ)ため、finalizeループを通過した候補数=内部監視・昇格
-        # 判定の対象件数であり、実際にLINE送信された件数ではない(表記を明示)。
-        # BUY候補以外のバッチ呼び出しではnear_buy_sent_count=Noneのため表示しない。
-        if near_buy_sent_count is not None:
-            lines.append(f"・NEAR BUY監視(LINE通知なし)：{near_buy_sent_count}件")
+
+        sent_n = nr.get("sent", 0)
+        notification_limit_n = nr.get("notification_limit", 0)
+        resend_suppressed_n = nr.get("resend_suppressed", 0)
+        addon_blocked_n = nr.get("addon_blocked", 0)
+        other_suppressed_n = nr.get("other_suppressed", 0)
+        send_failed_n = nr.get("send_failed", 0)
+        other_error_n = nr.get("other_error", 0)
+        # 通知ドライラン機能(2026-08追加): 「通知済み」にも「送信失敗」にも
+        # 計上しない独立区分。SEND/NORMALでは構造的に常に0のまま。
+        dry_run_would_send_n = nr.get("dry_run_would_send", 0)
+        notification_result_sum = (
+            sent_n
+            + notification_limit_n
+            + resend_suppressed_n
+            + addon_blocked_n
+            + other_suppressed_n
+            + send_failed_n
+            + other_error_n
+            + dry_run_would_send_n
+        )
+        notification_result_consistent = notification_result_sum == buy_candidate_n
+        if buy_candidate_n > 0:
+            lines.append("")
+            lines.append("買い候補の通知結果:")
+            lines.append(f"・通知済み：{sent_n}件")
+            if notification_limit_n > 0:
+                lines.append(f"・通知上限：{notification_limit_n}件")
+            if resend_suppressed_n > 0:
+                lines.append(f"・再通知抑止：{resend_suppressed_n}件")
+            if addon_blocked_n > 0:
+                lines.append(f"・買い増し見送り：{addon_blocked_n}件")
+            if other_suppressed_n > 0:
+                lines.append(f"・その他抑止：{other_suppressed_n}件")
+            if send_failed_n > 0:
+                lines.append(f"・送信失敗：{send_failed_n}件")
+            if dry_run_would_send_n > 0:
+                lines.append(f"・DRY_RUN送信予定：{dry_run_would_send_n}件")
+            if not notification_result_consistent:
+                lines.append(
+                    f"※通知結果内訳合計({notification_result_sum}件)が"
+                    f"買い候補件数と一致していません。"
+                )
+
         lines.append("")
         lines.append(f"対象銘柄：{total}件")
-        if buy_zero and near_buy_zero:
+        # 「該当なし」は購入判定そのものが0件の日のみ表示する(判定は成立したが
+        # 通知結果が0件、というケースを誤って「該当なし」と表示しない。買い候補
+        # 判定が存在する場合は上の「買い候補の通知結果」ブロックが実情を示す)。
+        if buy_candidate_n == 0 and near_buy_n == 0 and watch_wait_n == 0:
             lines.append("")
             lines.append("【今回の購入候補】")
             lines.append("該当なし")
             lines.append("現在価格で安全余裕を満たす銘柄はありませんでした。")
         if not is_consistent:
             lines.append("")
-            lines.append(f"※内訳合計({counts_sum}件)が対象銘柄数と一致していません。")
+            lines.append(f"※内訳合計({purchase_judgment_sum}件)が対象銘柄数と一致していません。")
         if data_insufficient_stock_codes:
             lines.append("")
             lines.append("データ不足：")
@@ -2847,7 +3060,13 @@ class LineNotificationService:
         lines.append("")
         lines.append(f"評価日時：{format_jst(now)}")
         lines.append(_DISCLAIMER)
-        self._push("\n".join(lines))
+        self._push(
+            "\n".join(lines),
+            notification_type=NotificationType.BATCH_SUMMARY,
+            stock_code=pseudo_stock_code,
+            content_hash=content_hash,
+            now=now,
+        )
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
@@ -2879,6 +3098,12 @@ class LineNotificationService:
         screening_policy・追加銘柄コード一覧のみに依存し、表示文言(順位・
         ハイライト等)には依存しない(方針B: 同じバッチ・同じ追加銘柄なら
         表示文言が変わっても同一通知として重複抑止する)。
+
+        通知検証モード機能(2026-08追加、およびそのDRY_RUN拡張)の対象外
+        (functional_spec.md 12.13節、ウォッチリスト自動追加は個別銘柄の売買
+        判断通知ではないため)。呼び出し元(watchlist系ハンドラ)は
+        execution_mode/notification_modeを一切扱わず常にNORMALで動くため、
+        この分岐に到達することはない。
         """
         if not summary.items:
             return False

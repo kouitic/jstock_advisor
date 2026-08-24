@@ -1002,28 +1002,80 @@ def _counts(
     }
 
 
+def _purchase_judgment_counts(
+    buy_candidate=0,
+    near_buy=0,
+    watch_wait=0,
+    not_attractive=0,
+    manual_review=0,
+    data_insufficient=0,
+    failed=0,
+) -> dict[str, int]:
+    return {
+        "buy_candidate": buy_candidate,
+        "near_buy": near_buy,
+        "watch_wait": watch_wait,
+        "not_attractive": not_attractive,
+        "manual_review": manual_review,
+        "data_insufficient": data_insufficient,
+        "failed": failed,
+    }
+
+
+def _notification_result_counts(
+    sent=0,
+    notification_limit=0,
+    resend_suppressed=0,
+    addon_blocked=0,
+    other_suppressed=0,
+    send_failed=0,
+    other_error=0,
+) -> dict[str, int]:
+    return {
+        "sent": sent,
+        "notification_limit": notification_limit,
+        "resend_suppressed": resend_suppressed,
+        "addon_blocked": addon_blocked,
+        "other_suppressed": other_suppressed,
+        "send_failed": send_failed,
+        "other_error": other_error,
+    }
+
+
 def test_notify_batch_summary_sends_counts(service_and_repos) -> None:
+    """買い候補サマリー表示改修(2026-08): 「保有銘柄・ウォッチリスト分析」という
+    process_nameを渡していても、holdings専用の4分類kwargsを渡さない呼び出しは
+    唯一の実呼び出し元であるbuy_candidates_handler.py用の書式(購入判定/買い候補
+    の通知結果)で描画される(is_holdings_call判定はprocess_nameではなくkwargsの
+    有無で行われる)。"""
     service, _repo, client = service_and_repos
 
     sent = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=27,
-        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        category_counts={},
         now=_NOW,
+        purchase_judgment_counts=_purchase_judgment_counts(
+            buy_candidate=6, not_attractive=20, data_insufficient=1
+        ),
+        notification_result_counts=_notification_result_counts(sent=4, resend_suppressed=2),
     )
 
     assert sent is True
     assert len(client.sent) == 1
     message = client.sent[0]
-    assert "処理結果:" in message
+    assert "購入判定:" in message
     assert "対象銘柄：27件" in message
-    assert "・個別通知送信：6件" in message
-    assert "・通知不要（保有継続）：18件" in message
+    assert "・買い候補：6件" in message
+    assert "・買い対象外：20件" in message
     assert "・要確認：0件" in message
     assert "・データ不足：1件" in message
-    assert "・再通知抑止：2件" in message
     assert "・処理失敗：0件" in message
-    assert "内訳合計" not in message  # 6+18+0+1+2+0=27で一致するため不整合の注記は出ない
+    assert "買い候補の通知結果:" in message
+    assert "・通知済み：4件" in message
+    assert "・再通知抑止：2件" in message
+    assert "内訳合計" not in message  # 6+0+0+20+0+1+0=27で一致するため不整合の注記は出ない
+    assert "通知結果内訳合計" not in message  # 4+2=6=buy_candidateで一致する
 
 
 def test_notify_batch_summary_flags_inconsistent_counts(service_and_repos) -> None:
@@ -1032,8 +1084,10 @@ def test_notify_batch_summary_flags_inconsistent_counts(service_and_repos) -> No
     service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=27,
-        category_counts=_counts(sent=6, hold=18),  # 合計24 != 27
+        category_counts={},
         now=_NOW,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=6, not_attractive=18),
+        notification_result_counts=_notification_result_counts(sent=6),  # 合計24 != 27
     )
 
     message = client.sent[0]
@@ -1048,10 +1102,11 @@ def test_notify_batch_summary_lists_data_insufficient_and_failed_stock_codes(
     service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=2,
-        category_counts=_counts(data_insufficient=1, failed=1),
+        category_counts={},
         now=_NOW,
         data_insufficient_stock_codes=["7042"],
         failed_stock_codes=["1234"],
+        purchase_judgment_counts=_purchase_judgment_counts(data_insufficient=1, failed=1),
     )
 
     message = client.sent[0]
@@ -1069,14 +1124,22 @@ def test_notify_batch_summary_suppresses_duplicate_same_day_same_content(
     first = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=27,
-        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        category_counts={},
         now=_NOW,
+        purchase_judgment_counts=_purchase_judgment_counts(
+            buy_candidate=6, not_attractive=20, data_insufficient=1
+        ),
+        notification_result_counts=_notification_result_counts(sent=4, resend_suppressed=2),
     )
     second = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=27,
-        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        category_counts={},
         now=_NOW + dt.timedelta(seconds=15),
+        purchase_judgment_counts=_purchase_judgment_counts(
+            buy_candidate=6, not_attractive=20, data_insufficient=1
+        ),
+        notification_result_counts=_notification_result_counts(sent=4, resend_suppressed=2),
     )
 
     assert first is True
@@ -1091,14 +1154,20 @@ def test_notify_batch_summary_sends_again_when_content_differs(service_and_repos
     first = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=27,
-        category_counts=_counts(sent=6, hold=18, data_insufficient=1, suppressed=2),
+        category_counts={},
         now=_NOW,
+        purchase_judgment_counts=_purchase_judgment_counts(
+            buy_candidate=6, not_attractive=20, data_insufficient=1
+        ),
+        notification_result_counts=_notification_result_counts(sent=4, resend_suppressed=2),
     )
     second = service.notify_batch_summary(
         "保有銘柄・ウォッチリスト分析",
         total=27,
-        category_counts=_counts(sent=9, hold=18),
+        category_counts={},
         now=_NOW + dt.timedelta(hours=1),
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=9, not_attractive=18),
+        notification_result_counts=_notification_result_counts(sent=9),
     )
 
     assert first is True
@@ -1395,21 +1464,29 @@ def test_batch_summary_no_buy_candidates_renders_none_found(service_and_repos) -
 
 
 def test_batch_summary_shows_buy_and_watch_breakdown_separately(service_and_repos) -> None:
+    """買い候補サマリー表示改修(2026-08)により、旧来の「買い候補(通知上限により
+    見送り)」「価格待ち(通知上限により見送り)」という文言・区分は廃止された。
+    購入判定(買い候補の総数)と、その通知結果内訳(通知上限等)は別ブロックへ
+    明確に分離して表示する。"""
     service, _repo, client = service_and_repos
 
     service.notify_batch_summary(
         "買い候補分析",
         total=68,
-        category_counts=_counts(
-            sent=6, hold=40, data_insufficient=5, candidate_not_ranked=17, watch_not_ranked=0
-        ),
+        category_counts={},
         now=_NOW,
         buy_candidates_sent_count=1,
+        purchase_judgment_counts=_purchase_judgment_counts(
+            buy_candidate=18, not_attractive=40, data_insufficient=5, watch_wait=5
+        ),
+        notification_result_counts=_notification_result_counts(sent=1, notification_limit=17),
     )
 
     message = client.sent[0]
-    assert "買い候補(通知上限により見送り)：17件" in message
-    assert "価格待ち(通知上限により見送り)：" not in message  # 0件なので非表示
+    assert "・買い候補：18件" in message
+    assert "・通知上限：17件" in message
+    assert "買い候補(通知上限により見送り)" not in message
+    assert "価格待ち(通知上限により見送り)" not in message
 
 
 def test_batch_summary_never_says_top_priority_n_stocks(service_and_repos) -> None:
@@ -1749,6 +1826,265 @@ def test_notify_batch_summary_default_still_sends_for_non_buy_callers(
 
     assert sent is True
     assert len(client.sent) == 1
+
+
+# --- 買い候補サマリー表示改修(2026-08): 購入判定/通知結果の分離レンダリング ------
+
+
+def test_notify_batch_summary_shows_all_notification_result_categories_when_nonzero(
+    service_and_repos,
+) -> None:
+    """買い候補の通知結果ブロックは、0件でない区分のみ表示する。ここでは6区分
+    (通知済み以外の5区分)すべてを非ゼロにし、全て表示されることを確認する。"""
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=20,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=1,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=19, not_attractive=1),
+        notification_result_counts=_notification_result_counts(
+            sent=1,
+            notification_limit=2,
+            resend_suppressed=3,
+            addon_blocked=4,
+            other_suppressed=5,
+            send_failed=4,
+        ),
+    )
+
+    message = client.sent[0]
+    assert "・通知済み：1件" in message
+    assert "・通知上限：2件" in message
+    assert "・再通知抑止：3件" in message
+    assert "・買い増し見送り：4件" in message
+    assert "・その他抑止：5件" in message
+    assert "・送信失敗：4件" in message
+
+
+def test_notify_batch_summary_hides_zero_notification_result_categories(
+    service_and_repos,
+) -> None:
+    """買い候補の通知結果ブロックでは、0件の区分は表示しない(「通知済み」のみ
+    非ゼロで残り5区分が0件のケース)。"""
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=5,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=5,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=5),
+        notification_result_counts=_notification_result_counts(sent=5),
+    )
+
+    message = client.sent[0]
+    assert "・通知済み：5件" in message
+    assert "・通知上限：" not in message
+    assert "・再通知抑止：" not in message
+    assert "・買い増し見送り：" not in message
+    assert "・その他抑止：" not in message
+    assert "・送信失敗：" not in message
+
+
+def test_notify_batch_summary_omits_notification_result_block_when_no_buy_candidates(
+    service_and_repos,
+) -> None:
+    """買い候補が1件も無い日は、通知結果ブロック自体を表示しない
+    (通知済み0件を毎回表示するとノイズになるため)。"""
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=3,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=0,
+        purchase_judgment_counts=_purchase_judgment_counts(
+            near_buy=1, watch_wait=1, not_attractive=1
+        ),
+    )
+
+    message = client.sent[0]
+    assert "買い候補の通知結果:" not in message
+
+
+def test_notify_batch_summary_no_candidates_block_only_when_all_three_categories_zero(
+    service_and_repos,
+) -> None:
+    """「該当なし」は買い候補・買い間近・買い待ちがすべて0件の日のみ表示する。
+    買い候補が存在するが全件抑止された(通知結果は0件)ケースでは、判定は成立して
+    いるため「該当なし」を出してはならない(以前の不具合の再発防止)。"""
+    service, _repo, client = service_and_repos
+
+    all_zero_message = service.notify_batch_summary(
+        "買い候補分析",
+        total=3,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=0,
+        purchase_judgment_counts=_purchase_judgment_counts(not_attractive=3),
+    )
+    assert all_zero_message is True
+    assert "【今回の購入候補】" in client.sent[0]
+    assert "該当なし" in client.sent[0]
+
+    client.sent.clear()
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=3,
+        category_counts={},
+        now=_NOW + dt.timedelta(hours=1),
+        buy_candidates_sent_count=0,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=3),
+        notification_result_counts=_notification_result_counts(resend_suppressed=3),
+    )
+    assert "【今回の購入候補】" not in client.sent[0]
+    assert "該当なし" not in client.sent[0]
+
+
+def test_notify_batch_summary_never_shows_removed_holding_continuation_wording(
+    service_and_repos,
+) -> None:
+    """廃止済みの「通知不要（保有継続）」という文言は、買い候補分析のサマリーに
+    一切出現しない(保有銘柄もウォッチリスト銘柄と同じ購入判定区分へ統合された)。"""
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=10,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=2,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=2, not_attractive=8),
+        notification_result_counts=_notification_result_counts(sent=2),
+    )
+
+    message = client.sent[0]
+    assert "通知不要（保有継続）" not in message
+
+
+def test_notify_batch_summary_never_shows_old_notification_limit_wording(
+    service_and_repos,
+) -> None:
+    """旧来の通知上限見送り文言(買い候補/価格待ち/NEAR BUY監視、廃止済み)は
+    完全に消えている(リネームではなく削除)。"""
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=10,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=2,
+        purchase_judgment_counts=_purchase_judgment_counts(
+            buy_candidate=3, near_buy=2, not_attractive=5
+        ),
+        notification_result_counts=_notification_result_counts(sent=2, notification_limit=1),
+    )
+
+    message = client.sent[0]
+    assert "買い候補(通知上限により見送り)" not in message
+    assert "価格待ち(通知上限により見送り)" not in message
+    assert "NEAR BUY監視(LINE通知なし)" not in message
+
+
+def test_notify_batch_summary_notification_result_mismatch_warning_shown_only_when_inconsistent(
+    service_and_repos,
+) -> None:
+    """通知結果内訳合計が買い候補件数と一致しない場合のみ警告行を出す。"""
+    service, _repo, client = service_and_repos
+
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=5,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=3,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=5),
+        notification_result_counts=_notification_result_counts(sent=3),  # 3 != 5
+    )
+
+    message = client.sent[0]
+    assert "通知結果内訳合計(3件)が買い候補件数と一致していません" in message
+
+    client.sent.clear()
+    service.notify_batch_summary(
+        "買い候補分析",
+        total=5,
+        category_counts={},
+        now=_NOW + dt.timedelta(hours=1),
+        buy_candidates_sent_count=5,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=5),
+        notification_result_counts=_notification_result_counts(sent=5),  # 一致
+    )
+    assert "通知結果内訳合計" not in client.sent[0]
+
+
+def test_notify_batch_summary_content_hash_changes_with_purchase_judgment_and_notification_result(
+    service_and_repos,
+) -> None:
+    """content_hashはpurchase_judgment_counts/notification_result_countsの差異も
+    反映する(既存のcategory_counts/total/near_buy等が完全に同一でも、この2つの
+    辞書だけが異なれば別内容として扱い、同日dedupで誤って抑止しない)。"""
+    service, _repo, client = service_and_repos
+
+    first = service.notify_batch_summary(
+        "買い候補分析",
+        total=5,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=3,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=5),
+        notification_result_counts=_notification_result_counts(sent=3, resend_suppressed=2),
+    )
+    second = service.notify_batch_summary(
+        "買い候補分析",
+        total=5,
+        category_counts={},
+        now=_NOW + dt.timedelta(seconds=10),
+        buy_candidates_sent_count=3,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=5),
+        # notification_result_countsの内訳だけが異なる(合計は同じ3件)。
+        notification_result_counts=_notification_result_counts(sent=3, addon_blocked=2),
+    )
+
+    assert first is True
+    assert second is True  # content_hashが変わるためdedup抑止されない
+    assert len(client.sent) == 2
+
+
+def test_notify_batch_summary_normal_and_validation_bodies_match_except_title(
+    service_and_repos, validation_service_and_repos
+) -> None:
+    """NORMAL/VALIDATIONで同一件数・同一process_nameを渡した場合、本文は完全に
+    一致し、VALIDATIONでは_push()が本文冒頭に検証banner(🧪検証｜)を付与する
+    だけである(通知検証モード機能の既存の仕組み。買い候補サマリー表示改修で
+    別ロジックを分岐させていないことの回帰確認)。"""
+    from jstock_advisor.services.line_notification_service import _VALIDATION_BANNER
+
+    normal_service, _repo, normal_client = service_and_repos
+    validation_service, _validation_repo, validation_client = validation_service_and_repos
+
+    kwargs = dict(
+        total=10,
+        category_counts={},
+        now=_NOW,
+        buy_candidates_sent_count=3,
+        purchase_judgment_counts=_purchase_judgment_counts(buy_candidate=3, not_attractive=7),
+        notification_result_counts=_notification_result_counts(sent=3),
+    )
+
+    normal_service.notify_batch_summary("買い候補分析", **kwargs)
+    validation_service.notify_batch_summary("買い候補分析", **kwargs)
+
+    normal_body = normal_client.sent[0]
+    validation_body = validation_client.sent[0]
+    assert normal_body.startswith("【買い候補分析完了】")
+    assert validation_body == _VALIDATION_BANNER + normal_body
 
 
 # --- BUYパイプライン第3次修正(2026-07): 採用済み安全余裕理由のみ表示 ------------

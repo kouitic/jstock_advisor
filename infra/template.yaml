@@ -687,6 +687,24 @@ Resources:
         - AttributeName: decision_id
           KeyType: HASH
 
+  # 買い候補サマリー表示改修(2026-08)。将来のLINE詳細理由照会機能に向けた参照用
+  # ストア(BuyCandidateEvaluationRecordRepository参照)。Recommendation/
+  # DecisionSnapshotの代替ではなく、無期限に増加させないため既定90日でTTL削除する。
+  BuyCandidateEvaluationRecordsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-buy_candidate_evaluation_records"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: evaluation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: evaluation_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   UserFeedbackTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -969,6 +987,8 @@ Resources:
                 - !Sub "${BatchRunsTable.Arn}/index/*"
                 - !GetAtt DecisionSnapshotsTable.Arn
                 - !Sub "${DecisionSnapshotsTable.Arn}/index/*"
+                - !GetAtt BuyCandidateEvaluationRecordsTable.Arn
+                - !Sub "${BuyCandidateEvaluationRecordsTable.Arn}/index/*"
                 - !GetAtt WatchStateTable.Arn
                 - !Sub "${WatchStateTable.Arn}/index/*"
                 - !GetAtt ValidationWatchStateTable.Arn

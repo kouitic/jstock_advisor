@@ -57,6 +57,12 @@ _SUMMARY_CATEGORY_CANDIDATE_NOT_RANKED = "candidate_not_ranked"
 # 買い候補分析専用: 価格待ち(WATCH_FOR_PRICE/WATCH_BEFORE_EARNINGS)判定だが、
 # 1回あたりの通知上限により今回は通知を見送った銘柄(BUYパイプライン再設計§17)。
 _SUMMARY_CATEGORY_WATCH_NOT_RANKED = "watch_not_ranked"
+# 買い候補分析専用(購入判定カテゴリ改修2026-08): WATCH_FOR_PRICEのうち
+# watch_type==NEAR_BUY(買い間近)。
+_SUMMARY_CATEGORY_NEAR_BUY = "near_buy"
+# 買い候補分析専用(購入判定カテゴリ改修2026-08): WATCH_FOR_PRICE(非NEAR_BUY)
+# およびWATCH_BEFORE_EARNINGS(買い待ち)。
+_SUMMARY_CATEGORY_WATCH_WAIT = "watch_wait"
 # ウォッチリスト自動追加機能専用: スクリーニング(必須条件+スコア条件)に合格した銘柄。
 _SUMMARY_CATEGORY_PASSED = "passed"
 # ウォッチリスト自動追加機能専用: 必須条件(時価総額・営業CF等)を満たさず不合格。
@@ -73,6 +79,8 @@ SUMMARY_CATEGORIES = (
     _SUMMARY_CATEGORY_FAILED,
     _SUMMARY_CATEGORY_CANDIDATE_NOT_RANKED,
     _SUMMARY_CATEGORY_WATCH_NOT_RANKED,
+    _SUMMARY_CATEGORY_NEAR_BUY,
+    _SUMMARY_CATEGORY_WATCH_WAIT,
     _SUMMARY_CATEGORY_PASSED,
     _SUMMARY_CATEGORY_REQUIRED_CONDITION_FAILED,
     _SUMMARY_CATEGORY_SCORE_FAILED,

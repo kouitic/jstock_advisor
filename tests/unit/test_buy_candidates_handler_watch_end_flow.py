@@ -119,7 +119,7 @@ def test_watch_end_is_recorded_as_non_actionable_without_sending(
         watch_end_ranking_entries=[rec.recommendation_id],
     )
 
-    handler_module._finalize_batch(progress, _CONFIG, _NOW, repo, notification_service)
+    handler_module._finalize_batch(progress, "batch-1", _CONFIG, _NOW, repo, notification_service)
 
     assert client.sent == []
     audit_entries = audit_repo.list_by_stock("9432")
@@ -238,7 +238,7 @@ def test_promoted_to_buy_after_stale_gap_sends_single_notification(
         watch_end_ranking_entries=[],
     )
 
-    handler_module._finalize_batch(progress, _CONFIG, _NOW, repo, notification_service)
+    handler_module._finalize_batch(progress, "batch-1", _CONFIG, _NOW, repo, notification_service)
 
     # BUYランキング経由の購入候補まとめ通知(1通)+バッチ完了サマリー(1通)の
     # 計2通のみが送信される(§8のダイジェスト形式は既存仕様どおり)。
