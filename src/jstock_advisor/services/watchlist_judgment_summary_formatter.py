@@ -165,17 +165,45 @@ def _select_supplementary_concern(
     return None
 
 
+def _resolve_weights(
+    recommendation: Recommendation | None, fallback_weights: ScoreWeights
+) -> ScoreWeights:
+    """判定時点で実際に使われたScoreWeightsを、Recommendation.config_values_used
+    (2026-08-25追加の"scoring_weights"スナップショット、buy_signal_service.py
+    参照)から復元する。過去の判定を、後からconfig変更後の"現在の"weightsで
+    誤って再解釈しないための措置(スコア配点を変更しても、既に確定した過去
+    batchの説明文が変化しないようにする)。
+
+    既知の制約: このスナップショットが無い(本修正より前に作成された)
+    既存のRecommendationについてはやむを得ずfallback_weights(呼び出し側が
+    渡す現在のconfig)を使う。その場合のみ「判定時点のweights」ではなく
+    「表示時点の現在weights」で解釈することになる。
+    """
+    if recommendation is None:
+        return fallback_weights
+    snapshot = recommendation.config_values_used.get("scoring_weights")
+    if not isinstance(snapshot, dict):
+        return fallback_weights
+    try:
+        return ScoreWeights(**snapshot)
+    except Exception:
+        # 過去に永続化された外部データの形式不整合に対する防御的フォール
+        # バックであり、本モジュール自身が生成したデータではない。
+        return fallback_weights
+
+
 def format_watchlist_line(
     display_name: str,
     stock_code: str,
     record: BuyCandidateEvaluationRecord | None,
     recommendation: Recommendation | None,
-    weights: ScoreWeights,
+    fallback_weights: ScoreWeights,
 ) -> str:
     """ウォッチリスト1銘柄1行の表示文字列を組み立てる(表示専用、副作用なし)。
 
     形式: 「社名（銘柄コード）｜区分｜区分理由、補足懸念」。区分理由・補足懸念は
     それぞれ無ければ省略する(説明要素は最大2件、必ず2件表示する必要はない)。
+    補足懸念の算出には、判定時点のScoreWeights(_resolve_weights参照)を使う。
     """
     header = f"{display_name}（{stock_code}）"
     if record is None:
@@ -185,7 +213,9 @@ def format_watchlist_line(
     reason = _category_reason_text(record, recommendation)
     concern = (
         _select_supplementary_concern(
-            recommendation.score_breakdown, weights, recommendation.buy_decision_reasons
+            recommendation.score_breakdown,
+            _resolve_weights(recommendation, fallback_weights),
+            recommendation.buy_decision_reasons,
         )
         if recommendation is not None
         else None

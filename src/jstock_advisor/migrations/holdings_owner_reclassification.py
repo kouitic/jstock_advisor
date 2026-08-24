@@ -15,19 +15,24 @@ InvestmentThesisBaseline。過去のowner帰属を現在の保有者から遡っ
 ことはできないため。また4631のtombstone(active_holding=False、対応する
 Holdingが存在しない)も対象外(owner確定不能のため現状維持、確定指示)。
 
-4680(ラウンドワン)は1 Holding(400株)→2 Holding(所有者A300株+所有者B100株)へ
+4680(ラウンドワン)は1 Holding(400株)→2 Holding(大きい持分側+小さい持分側)へ
 分割する特殊ケース。9434(ソフトバンク)はowner変更に加えて取得単価の
-訂正(187円→188円、確定指示)を伴う。
+訂正(確定指示)を伴う。
 
 実行前precondition(2026-08-23確定指示、コードレビュー対応): dry-runでの
-人間確認だけに頼らず、build_plan()自身が実行のたびに2269/5401/8566/9434/
-4680の実データ(shares・取得単価・4680のlot構成)をユーザー確定値と照合し、
-一致しない場合はPlanValidationErrorでfail-closedに中止する(下記
-SIMPLE_PRECONDITIONS等参照)。
+人間確認だけに頼らず、build_plan()自身が実行のたびに対象銘柄の実データ
+(shares・取得単価・4680のlot構成)をユーザー確定値と照合し、一致しない
+場合はPlanValidationErrorでfail-closedに中止する(下記RealDataInput参照)。
 
 owner型は引き続きEnum/allow-listではない(domain/entities/owner.py)。
-本モジュール内のマッピング定数(所有者A/所有者B/所有者C)は、通常運用のowner語彙を
-制限するものではなく、今回1回限りの実データ再分類の入力値にすぎない。
+
+実在の所有者名・実際の保有数量・取得単価はGit管理対象のソースコードへ
+一切記録しない(2026-08-25コードレビュー対応、CLAUDE.md恒久ルール)。
+これらは今回1回限りの実データ再分類の入力値にすぎず、実行時に
+`RealDataInput`として外部(Git管理対象外のローカルJSONファイル、
+`jstock migrate owner-reclassification run --plan-file`)から読み込む。
+本モジュール自体は所有者名・数値をハードコードせず、どのような
+`RealDataInput`が渡されても同じロジックで動作する汎用的な移行機構である。
 
 冪等性・再実行安全性の設計:
   - build_plan()は毎回、その時点の実データ(Holding.owner=="本人"の
@@ -56,6 +61,7 @@ owner型は引き続きEnum/allow-listではない(domain/entities/owner.py)。
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -85,31 +91,15 @@ _POINTER_FILE = "investment_thesis_baseline_pointers_v2.json"
 
 OLD_OWNER = "本人"
 
-# --- M4.1確定済みマッピング(2026-08-23、ユーザー確定指示) -------------------
-# 通常運用のowner allow-listではない(domain/entities/owner.pyはopenなstrの
-# ままであり、本モジュール以外のコードから一切参照されない)。
-DEFAULT_NEW_OWNER = "所有者A"
-CHILD_OWNER_BY_STOCK_CODE: dict[str, str] = {
-    "2269": "所有者B",
-    "5401": "所有者B",
-    "9434": "所有者B",
-    "8566": "所有者C",
-}
-SPLIT_STOCK_CODE = "4680"
-SPLIT_LOT_OWNERS: dict[str, str] = {
-    "295d6620-bea5-464b-8f37-e887df26bc3d": "所有者A",  # 300株@1193
-    "f86f9ed3-3a78-4784-943e-2925d591b4e4": "所有者B",  # 100株@1258
-}
-PRICE_CORRECTIONS: dict[str, Decimal] = {
-    "e5865e06-c43b-47ae-baa9-fc8a133482aa": Decimal("188"),  # 9434のlot(187→188、確定指示)
-}
 
-# --- 実行前precondition(2026-08-23確定指示、この一回限りの移行専用) ---------
-# これはowner語彙のallow-list化ではない。今回のユーザー確定値そのままの実データ
-# 前提条件を、dry-runでの人間確認だけに頼らずbuild_plan()自身が実行のたびに
-# 検証するための入力値にすぎない(通常運用のvalidationへは一切流用しない)。
-# 対応する旧Holding(owner="本人")が既に存在しない場合(=既に移行済み)は
-# 検証自体を行わない(冪等)。
+# --- 実データ入力(2026-08-25コードレビュー対応: 個人情報除去) ---------------
+# 実在の所有者名・実際の保有数量・取得単価はGit管理対象のソースコードへ
+# 記録しない(CLAUDE.md恒久ルール)。これらは`RealDataInput`として実行時に
+# 外部の(Git管理対象外の)ローカルJSONファイルから読み込む
+# (`jstock migrate owner-reclassification run --plan-file <path>`)。
+# 以前はこれらがモジュール定数としてハードコードされていたが、本モジュール
+# 自体はどのようなRealDataInputが渡されても同じロジックで動作する汎用的な
+# 移行機構であり、特定の所有者名・数値に依存しない。
 
 
 @dataclass(frozen=True)
@@ -118,27 +108,82 @@ class _SimplePrecondition:
     expected_average_price: Decimal
 
 
-SIMPLE_PRECONDITIONS: dict[str, _SimplePrecondition] = {
-    "2269": _SimplePrecondition(expected_shares=200, expected_average_price=Decimal("3215")),
-    "5401": _SimplePrecondition(expected_shares=500, expected_average_price=Decimal("587")),
-    "8566": _SimplePrecondition(expected_shares=100, expected_average_price=Decimal("5480")),
-}
+@dataclass(frozen=True)
+class RealDataInput:
+    """M4.1実行時にのみ渡される実データ(Git管理対象外)。
 
-# 9434: 価格訂正(187→188)を伴うため、訂正前の値を別途定義する。訂正後
-# (188)の状態で再実行された場合(途中失敗後の再実行)も冪等にPASSさせる。
-NINE_FOUR_THREE_FOUR_STOCK_CODE = "9434"
-NINE_FOUR_THREE_FOUR_LOT_ID = "e5865e06-c43b-47ae-baa9-fc8a133482aa"
-NINE_FOUR_THREE_FOUR_SHARES = 100
-NINE_FOUR_THREE_FOUR_OLD_PRICE = Decimal("187")
+    `load_real_data_input()`でローカルJSONファイルから読み込む。フィールドの
+    意味は該当箇所のdocstring/コメント(旧モジュール定数のコメント)を参照。
+    """
 
-# 4680: lot_idだけでなくshares/purchase_price自体も検証する。
-SPLIT_LOT_PRECONDITIONS: dict[str, tuple[int, Decimal]] = {
-    "295d6620-bea5-464b-8f37-e887df26bc3d": (300, Decimal("1193")),
-    "f86f9ed3-3a78-4784-943e-2925d591b4e4": (100, Decimal("1258")),
-}
-SPLIT_OLD_SHARES = 400
-SPLIT_OLD_AVERAGE_PRICE = Decimal("1209.25")
-SPLIT_OLD_TOTAL_AMOUNT = Decimal("483700")
+    default_new_owner: str
+    child_owner_by_stock_code: dict[str, str]
+    split_stock_code: str
+    split_lot_owners: dict[str, str]
+    price_corrections: dict[str, Decimal]
+    simple_preconditions: dict[str, _SimplePrecondition]
+    nine_four_three_four_stock_code: str
+    nine_four_three_four_lot_id: str
+    nine_four_three_four_shares: int
+    nine_four_three_four_old_price: Decimal
+    split_lot_preconditions: dict[str, tuple[int, Decimal]]
+    split_old_shares: int
+    split_old_average_price: Decimal
+    split_old_total_amount: Decimal
+
+
+def load_real_data_input(path: Path) -> RealDataInput:
+    """`--plan-file`で指定されたローカルJSON(Git管理対象外)からRealDataInput
+    を読み込む。想定するJSONスキーマ(値はすべて実データのプレースホルダ、
+    実在の所有者名・金額はこのモジュールにもリポジトリ全体にも記録しない):
+
+    {
+      "default_new_owner": "<owner>",
+      "child_owner_by_stock_code": {"<stock_code>": "<owner>", ...},
+      "split_stock_code": "<stock_code>",
+      "split_lot_owners": {"<lot_id>": "<owner>", ...},
+      "price_corrections": {"<lot_id>": "<corrected_price>", ...},
+      "simple_preconditions": {
+        "<stock_code>": {"expected_shares": <int>, "expected_average_price": "<price>"}, ...
+      },
+      "nine_four_three_four": {
+        "stock_code": "<stock_code>", "lot_id": "<lot_id>",
+        "shares": <int>, "old_price": "<price>"
+      },
+      "split_lot_preconditions": {"<lot_id>": {"shares": <int>, "price": "<price>"}, ...},
+      "split_old": {
+        "shares": <int>, "average_price": "<price>", "total_amount": "<amount>"
+      }
+    }
+    """
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    nine_four_three_four = raw["nine_four_three_four"]
+    split_old = raw["split_old"]
+    return RealDataInput(
+        default_new_owner=raw["default_new_owner"],
+        child_owner_by_stock_code=dict(raw["child_owner_by_stock_code"]),
+        split_stock_code=raw["split_stock_code"],
+        split_lot_owners=dict(raw["split_lot_owners"]),
+        price_corrections={k: Decimal(v) for k, v in raw["price_corrections"].items()},
+        simple_preconditions={
+            k: _SimplePrecondition(
+                expected_shares=int(v["expected_shares"]),
+                expected_average_price=Decimal(v["expected_average_price"]),
+            )
+            for k, v in raw["simple_preconditions"].items()
+        },
+        nine_four_three_four_stock_code=nine_four_three_four["stock_code"],
+        nine_four_three_four_lot_id=nine_four_three_four["lot_id"],
+        nine_four_three_four_shares=int(nine_four_three_four["shares"]),
+        nine_four_three_four_old_price=Decimal(nine_four_three_four["old_price"]),
+        split_lot_preconditions={
+            k: (int(v["shares"]), Decimal(v["price"]))
+            for k, v in raw["split_lot_preconditions"].items()
+        },
+        split_old_shares=int(split_old["shares"]),
+        split_old_average_price=Decimal(split_old["average_price"]),
+        split_old_total_amount=Decimal(split_old["total_amount"]),
+    )
 
 
 def _check_holding_matches(
@@ -179,64 +224,74 @@ def _check_simple_precondition(
         )
 
 
-def _check_9434_precondition(holding: Holding, stock_lots: list[PurchaseLot]) -> None:
-    corrected_price = PRICE_CORRECTIONS[NINE_FOUR_THREE_FOUR_LOT_ID]
-    if holding.shares != NINE_FOUR_THREE_FOUR_SHARES or holding.average_purchase_price not in (
-        NINE_FOUR_THREE_FOUR_OLD_PRICE,
+def _check_9434_precondition(
+    holding: Holding, stock_lots: list[PurchaseLot], real_data: RealDataInput
+) -> None:
+    lot_id = real_data.nine_four_three_four_lot_id
+    shares = real_data.nine_four_three_four_shares
+    old_price = real_data.nine_four_three_four_old_price
+    corrected_price = real_data.price_corrections[lot_id]
+    stock_code = real_data.nine_four_three_four_stock_code
+    if holding.shares != shares or holding.average_purchase_price not in (
+        old_price,
         corrected_price,
     ):
         raise PlanValidationError(
-            f"9434の旧Holdingが確定指示の値(shares={NINE_FOUR_THREE_FOUR_SHARES}, "
-            f"average_purchase_price={NINE_FOUR_THREE_FOUR_OLD_PRICE}(訂正前)または"
+            f"{stock_code}の旧Holdingが確定指示の値(shares={shares}, "
+            f"average_purchase_price={old_price}(訂正前)または"
             f"{corrected_price}(訂正後))と一致しません(fail-closed): "
             f"shares={holding.shares}, average_purchase_price={holding.average_purchase_price}"
         )
-    if len(stock_lots) != 1 or stock_lots[0].lot_id != NINE_FOUR_THREE_FOUR_LOT_ID:
+    if len(stock_lots) != 1 or stock_lots[0].lot_id != lot_id:
         raise PlanValidationError(
-            "9434のPurchaseLot構成が確定指示(lot_id="
-            f"{NINE_FOUR_THREE_FOUR_LOT_ID!r}の1件のみ)と一致しません(fail-closed): "
+            f"{stock_code}のPurchaseLot構成が確定指示(lot_id="
+            f"{lot_id!r}の1件のみ)と一致しません(fail-closed): "
             f"実際={[lot.lot_id for lot in stock_lots]}"
         )
     lot = stock_lots[0]
-    if lot.shares != NINE_FOUR_THREE_FOUR_SHARES or lot.purchase_price not in (
-        NINE_FOUR_THREE_FOUR_OLD_PRICE,
-        corrected_price,
-    ):
+    if lot.shares != shares or lot.purchase_price not in (old_price, corrected_price):
         raise PlanValidationError(
-            f"9434のlot_id={NINE_FOUR_THREE_FOUR_LOT_ID!r}が確定指示の値"
-            f"(shares={NINE_FOUR_THREE_FOUR_SHARES}, "
-            f"price={NINE_FOUR_THREE_FOUR_OLD_PRICE}(訂正前)または{corrected_price}"
+            f"{stock_code}のlot_id={lot_id!r}が確定指示の値"
+            f"(shares={shares}, "
+            f"price={old_price}(訂正前)または{corrected_price}"
             f"(訂正後))と一致しません(fail-closed、想定外の価格への上書きを防止するため): "
             f"shares={lot.shares}, price={lot.purchase_price}"
         )
 
 
-def _check_4680_precondition(holding: Holding, stock_lots: list[PurchaseLot]) -> None:
-    _check_holding_matches(SPLIT_STOCK_CODE, holding, SPLIT_OLD_SHARES, SPLIT_OLD_AVERAGE_PRICE)
-    if holding.total_purchase_amount != SPLIT_OLD_TOTAL_AMOUNT:
+def _check_4680_precondition(
+    holding: Holding, stock_lots: list[PurchaseLot], real_data: RealDataInput
+) -> None:
+    stock_code = real_data.split_stock_code
+    _check_holding_matches(
+        stock_code, holding, real_data.split_old_shares, real_data.split_old_average_price
+    )
+    if holding.total_purchase_amount != real_data.split_old_total_amount:
         raise PlanValidationError(
-            "4680の旧Holding.total_purchase_amountが確定指示の値"
-            f"({SPLIT_OLD_TOTAL_AMOUNT})と一致しません(fail-closed): "
+            f"{stock_code}の旧Holding.total_purchase_amountが確定指示の値"
+            f"({real_data.split_old_total_amount})と一致しません(fail-closed): "
             f"{holding.total_purchase_amount}"
         )
     lots_by_id = {lot.lot_id: lot for lot in stock_lots}
-    if set(lots_by_id) != set(SPLIT_LOT_PRECONDITIONS):
+    if set(lots_by_id) != set(real_data.split_lot_preconditions):
         raise PlanValidationError(
-            "4680のPurchaseLot構成が確定指示のlot_id集合と一致しません(fail-closed): "
-            f"実際={sorted(lots_by_id)} 期待={sorted(SPLIT_LOT_PRECONDITIONS)}"
+            f"{stock_code}のPurchaseLot構成が確定指示のlot_id集合と一致しません(fail-closed): "
+            f"実際={sorted(lots_by_id)} 期待={sorted(real_data.split_lot_preconditions)}"
         )
-    for lot_id, (expected_shares, expected_price) in SPLIT_LOT_PRECONDITIONS.items():
+    for lot_id, (expected_shares, expected_price) in real_data.split_lot_preconditions.items():
         lot = lots_by_id[lot_id]
         if lot.shares != expected_shares or lot.purchase_price != expected_price:
             raise PlanValidationError(
-                f"4680のlot_id={lot_id!r}が確定指示の内容(shares={expected_shares}, "
+                f"{stock_code}のlot_id={lot_id!r}が確定指示の内容(shares={expected_shares}, "
                 f"price={expected_price})と一致しません(fail-closed): "
                 f"shares={lot.shares}, price={lot.purchase_price}"
             )
 
 
 def _verify_preconditions(
-    old_holdings: list[Holding], lots_by_stock_code: dict[str, list[PurchaseLot]]
+    old_holdings: list[Holding],
+    lots_by_stock_code: dict[str, list[PurchaseLot]],
+    real_data: RealDataInput,
 ) -> None:
     """ユーザー確定済みの実データ(shares/取得単価/lot構成)を、実行のたびに
     このコード自身が検証する(2026-08-23確定指示、fail-closed)。対応する
@@ -245,7 +300,7 @@ def _verify_preconditions(
     """
     old_holdings_by_stock = {h.stock_code: h for h in old_holdings}
 
-    for stock_code, precondition in SIMPLE_PRECONDITIONS.items():
+    for stock_code, precondition in real_data.simple_preconditions.items():
         holding = old_holdings_by_stock.get(stock_code)
         if holding is None:
             continue
@@ -253,15 +308,19 @@ def _verify_preconditions(
             stock_code, holding, lots_by_stock_code.get(stock_code, []), precondition
         )
 
-    nine_four_three_four = old_holdings_by_stock.get(NINE_FOUR_THREE_FOUR_STOCK_CODE)
+    nine_four_three_four = old_holdings_by_stock.get(real_data.nine_four_three_four_stock_code)
     if nine_four_three_four is not None:
         _check_9434_precondition(
-            nine_four_three_four, lots_by_stock_code.get(NINE_FOUR_THREE_FOUR_STOCK_CODE, [])
+            nine_four_three_four,
+            lots_by_stock_code.get(real_data.nine_four_three_four_stock_code, []),
+            real_data,
         )
 
-    split_holding = old_holdings_by_stock.get(SPLIT_STOCK_CODE)
+    split_holding = old_holdings_by_stock.get(real_data.split_stock_code)
     if split_holding is not None:
-        _check_4680_precondition(split_holding, lots_by_stock_code.get(SPLIT_STOCK_CODE, []))
+        _check_4680_precondition(
+            split_holding, lots_by_stock_code.get(real_data.split_stock_code, []), real_data
+        )
 
 
 class ReclassificationAbortedError(Exception):
@@ -289,7 +348,7 @@ class ReclassificationTarget:
     is_split: bool
     price_corrected: bool
     # 4680分割時、既存InvestmentThesis/BaselineSequence/BaselinePointerを
-    # 引き継ぐのはどちらか一方のみ(確定指示: 大きい持分側=所有者A)。
+    # 引き継ぐのはどちらか一方のみ(確定指示: 大きい持分側)。
     inherits_thesis_and_baseline: bool
     inherits_snapshot: bool
 
@@ -300,15 +359,15 @@ class ReclassificationPlan:
     old_holding_ids: tuple[str, ...]
 
 
-def _corrected_lot(lot: PurchaseLot) -> PurchaseLot:
-    corrected_price = PRICE_CORRECTIONS.get(lot.lot_id)
+def _corrected_lot(lot: PurchaseLot, real_data: RealDataInput) -> PurchaseLot:
+    corrected_price = real_data.price_corrections.get(lot.lot_id)
     if corrected_price is None:
         return lot
     return lot.model_copy(update={"purchase_price": corrected_price})
 
 
 def _build_simple_target(
-    holding: Holding, stock_lots: list[PurchaseLot], new_owner: str
+    holding: Holding, stock_lots: list[PurchaseLot], new_owner: str, real_data: RealDataInput
 ) -> ReclassificationTarget:
     if not stock_lots:
         raise PlanValidationError(
@@ -324,23 +383,23 @@ def _build_simple_target(
         old_holding_id=holding.holding_id,
         lot_ids=tuple(lot.lot_id for lot in stock_lots),
         is_split=False,
-        price_corrected=any(lot.lot_id in PRICE_CORRECTIONS for lot in stock_lots),
+        price_corrected=any(lot.lot_id in real_data.price_corrections for lot in stock_lots),
         inherits_thesis_and_baseline=True,
         inherits_snapshot=True,
     )
 
 
 def _build_split_targets(
-    holding: Holding, stock_lots: list[PurchaseLot]
+    holding: Holding, stock_lots: list[PurchaseLot], real_data: RealDataInput
 ) -> list[ReclassificationTarget]:
     by_owner: dict[str, list[PurchaseLot]] = {}
     for lot in stock_lots:
-        owner = SPLIT_LOT_OWNERS.get(lot.lot_id)
+        owner = real_data.split_lot_owners.get(lot.lot_id)
         if owner is None:
             raise PlanValidationError(
-                f"4680(分割対象)のlot_id={lot.lot_id!r}がSPLIT_LOT_OWNERSに"
-                "定義されていません(fail-closed)。想定外のlotが増えている"
-                "可能性があるため、マッピングを確認してから再実行してください。"
+                f"{real_data.split_stock_code}(分割対象)のlot_id={lot.lot_id!r}が"
+                "split_lot_ownersに定義されていません(fail-closed)。想定外のlotが"
+                "増えている可能性があるため、マッピングを確認してから再実行してください。"
             )
         by_owner.setdefault(owner, []).append(lot)
 
@@ -361,7 +420,9 @@ def _build_split_targets(
                 old_holding_id=holding.holding_id,
                 lot_ids=tuple(lot.lot_id for lot in owner_lots),
                 is_split=True,
-                price_corrected=any(lot.lot_id in PRICE_CORRECTIONS for lot in owner_lots),
+                price_corrected=any(
+                    lot.lot_id in real_data.price_corrections for lot in owner_lots
+                ),
                 inherits_thesis_and_baseline=(owner == inheriting_owner),
                 inherits_snapshot=(owner == inheriting_owner),
             )
@@ -369,31 +430,35 @@ def _build_split_targets(
     return targets
 
 
-def build_plan(holdings: list[Holding], lots: list[PurchaseLot]) -> ReclassificationPlan:
+def build_plan(
+    holdings: list[Holding], lots: list[PurchaseLot], real_data: RealDataInput
+) -> ReclassificationPlan:
     """その時点の実データからreclassification計画を構築する(副作用なし)。
 
     holding_idはstock_codeではなく実際に存在するHolding.owner=="本人"の
     行から導出する。stock_codeでlotsをグルーピングする(holding_idではなく)
     ことで、途中失敗後の再実行で一部lotのholding_idフィールドが既に新owner
     へ書き換わっていても正しく再グルーピングできる(4680分割の場合、
-    lot単位でSPLIT_LOT_OWNERSにより最終的な帰属先を決定するため、現在の
-    lot.owner値に依存しない)。
+    lot単位でreal_data.split_lot_ownersにより最終的な帰属先を決定するため、
+    現在のlot.owner値に依存しない)。
     """
     old_holdings = [h for h in holdings if h.owner == OLD_OWNER]
     lots_by_stock_code: dict[str, list[PurchaseLot]] = {}
     for lot in lots:
         lots_by_stock_code.setdefault(lot.stock_code, []).append(lot)
 
-    _verify_preconditions(old_holdings, lots_by_stock_code)
+    _verify_preconditions(old_holdings, lots_by_stock_code, real_data)
 
     targets: list[ReclassificationTarget] = []
     for holding in old_holdings:
         stock_lots = lots_by_stock_code.get(holding.stock_code, [])
-        if holding.stock_code == SPLIT_STOCK_CODE:
-            targets.extend(_build_split_targets(holding, stock_lots))
+        if holding.stock_code == real_data.split_stock_code:
+            targets.extend(_build_split_targets(holding, stock_lots, real_data))
         else:
-            new_owner = CHILD_OWNER_BY_STOCK_CODE.get(holding.stock_code, DEFAULT_NEW_OWNER)
-            targets.append(_build_simple_target(holding, stock_lots, new_owner))
+            new_owner = real_data.child_owner_by_stock_code.get(
+                holding.stock_code, real_data.default_new_owner
+            )
+            targets.append(_build_simple_target(holding, stock_lots, new_owner, real_data))
 
     new_ids = [t.new_holding_id for t in targets]
     duplicates = sorted({i for i in new_ids if new_ids.count(i) > 1})
@@ -415,7 +480,7 @@ def build_plan(holdings: list[Holding], lots: list[PurchaseLot]) -> Reclassifica
         existing = existing_by_id.get(t.new_holding_id)
         if existing is None:
             continue
-        target_lots = [_corrected_lot(lots_by_id[lot_id]) for lot_id in t.lot_ids]
+        target_lots = [_corrected_lot(lots_by_id[lot_id], real_data) for lot_id in t.lot_ids]
         total_shares, avg_price, total_amount, _first, _last = summarize_lots(target_lots)
         matches_expected = (
             existing.owner == t.new_owner
@@ -546,10 +611,10 @@ def _new_holding_for_target(
         "updated_at": now,
     }
     if target.is_split and not target.inherits_thesis_and_baseline:
-        # 分割で新設される側(所有者B#4680)は、累積配当・優待受取実績や直近売却日等、
-        # 旧Holding全体(400株)に紐づく履歴的な累積値をそのまま引き継がない
-        # (継承側=所有者Aが旧Holdingの継続とみなされることと対称的な設計。
-        # 完了報告で明示し、実行前にユーザー確認を得ること)。
+        # 分割で新設される側(小さい持分側)は、累積配当・優待受取実績や直近
+        # 売却日等、旧Holding全体(400株)に紐づく履歴的な累積値をそのまま
+        # 引き継がない(継承側=大きい持分側が旧Holdingの継続とみなされる
+        # ことと対称的な設計。完了報告で明示し、実行前にユーザー確認を得ること)。
         update.update(
             {
                 "cumulative_dividend_received": Decimal("0"),
@@ -661,12 +726,15 @@ class ReclassificationResult:
 def run_reclassification(
     target: MigrationTarget,
     dry_run: bool,
+    real_data: RealDataInput,
     store_dir: Path | None = None,
     now: dt.datetime | None = None,
 ) -> ReclassificationResult:
     """M4.1本体。実行直前にpause_buy_sell==trueであることをこのコード自身が
     確認する(fail-closed)。dry_run既定はTrue、書き込みには明示的な
-    dry_run=Falseが必要。
+    dry_run=Falseが必要。real_dataは`load_real_data_input()`でGit管理対象外の
+    ローカルJSONファイルから読み込んだ実データ入力(個人情報除去対応、
+    2026-08-25)。
 
     Store生成・読み書きはすべて単一のtarget_backend(target)コンテキスト内で
     行う(M2と同じ設計、local/AWSの途中混在を防ぐため)。
@@ -691,7 +759,7 @@ def run_reclassification(
         holdings = holding_store.list_all()
         lots = lot_store.list_all()
 
-        plan = build_plan(holdings, lots)
+        plan = build_plan(holdings, lots, real_data)
 
         targets_by_old_id: dict[str, list[ReclassificationTarget]] = {}
         for t in plan.targets:
@@ -724,7 +792,7 @@ def run_reclassification(
                             "(fail-closed、想定外の状態のため中止しました)"
                         )
                     target_lots_raw.append(lot)
-                target_lots = [_corrected_lot(lot) for lot in target_lots_raw]
+                target_lots = [_corrected_lot(lot, real_data) for lot in target_lots_raw]
 
                 new_holding = _new_holding_for_target(old_holding, t, target_lots, now_value)
 

@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 
 from jstock_advisor.migrations.holdings_owner_migration import (
@@ -18,6 +20,7 @@ from jstock_advisor.migrations.holdings_owner_preflight import run_preflight
 from jstock_advisor.migrations.holdings_owner_reclassification import (
     PlanValidationError,
     ReclassificationAbortedError,
+    load_real_data_input,
     run_reclassification,
 )
 from jstock_advisor.migrations.target import MigrationTarget
@@ -87,6 +90,16 @@ def run(
 @owner_reclassification_app.command("run")
 def owner_reclassification_run(
     target: MigrationTarget = typer.Option(..., "--target", help="local | aws(必須指定)"),
+    plan_file: Path = typer.Option(
+        ...,
+        "--plan-file",
+        help=(
+            "実在の所有者名・実際の保有数量/取得単価を含む、Git管理対象外の"
+            "ローカルJSONファイルへのパス(必須指定)。スキーマは"
+            "holdings_owner_reclassification.load_real_data_input()のdocstring参照。"
+            "本ファイルを絶対にGit管理対象へコミットしないこと。"
+        ),
+    ),
     dry_run: bool = typer.Option(
         True,
         "--dry-run/--no-dry-run",
@@ -94,9 +107,12 @@ def owner_reclassification_run(
     ),
 ) -> None:
     """M4.1本体(既存保有データのowner実態補正)。実行直前にpause_buy_sell==true
-    であることとholding_id衝突の不在をこのコード自身が確認する(fail-closed)。"""
+    であることとholding_id衝突の不在をこのコード自身が確認する(fail-closed)。
+    実データ(所有者名等)はGit管理対象へ記録せず、--plan-fileで指定する
+    ローカルファイルからのみ読み込む(2026-08-25コードレビュー対応)。"""
+    real_data = load_real_data_input(plan_file)
     try:
-        result = run_reclassification(target, dry_run=dry_run)
+        result = run_reclassification(target, dry_run=dry_run, real_data=real_data)
     except (ReclassificationAbortedError, PlanValidationError) as e:
         typer.echo(str(e))
         raise typer.Exit(code=1) from e

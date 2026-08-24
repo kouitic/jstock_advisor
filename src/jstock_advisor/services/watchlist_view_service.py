@@ -45,7 +45,7 @@ class WatchlistViewService:
         recommendation_repository: RecommendationRepository | None = None,
         latest_batch_pointer_repository: LatestBuyCandidateBatchPointerRepository | None = None,
         display_name_resolver: StockDisplayNameResolver | None = None,
-        score_weights: ScoreWeights | None = None,
+        fallback_score_weights: ScoreWeights | None = None,
     ) -> None:
         self._watchlist = watchlist_repository or WatchlistRepository()
         self._evaluation_records = (
@@ -56,7 +56,11 @@ class WatchlistViewService:
             latest_batch_pointer_repository or LatestBuyCandidateBatchPointerRepository()
         )
         self._display_name_resolver = display_name_resolver
-        self._score_weights = score_weights or load_config().scoring.weights
+        # judgment時点のScoreWeightsをRecommendation.config_values_usedから
+        # 復元できない場合(スナップショット追加前の既存レコード)のみ使う
+        # フォールバック(2026-08-25コードレビュー対応、
+        # watchlist_judgment_summary_formatter._resolve_weights参照)。
+        self._fallback_score_weights = fallback_score_weights or load_config().scoring.weights
 
     def build_lines(self) -> list[str] | str:
         """戻り値: 表示行のリスト(1銘柄1行)、またはGSI反映待ちを示す単一の
@@ -88,7 +92,11 @@ class WatchlistViewService:
             )
             lines.append(
                 format_watchlist_line(
-                    display_name, item.stock_code, record, recommendation, self._score_weights
+                    display_name,
+                    item.stock_code,
+                    record,
+                    recommendation,
+                    self._fallback_score_weights,
                 )
             )
         return lines

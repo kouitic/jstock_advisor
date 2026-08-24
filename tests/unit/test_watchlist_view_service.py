@@ -109,7 +109,7 @@ def _service(store_dir: Path) -> WatchlistViewService:
             store_dir=store_dir
         ),
         display_name_resolver=None,
-        score_weights=_WEIGHTS,
+        fallback_score_weights=_WEIGHTS,
     )
 
 

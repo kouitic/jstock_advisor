@@ -183,7 +183,9 @@ def test_parse_postback_events_handles_all_confirmed_actions() -> None:
 
 
 def test_parse_postback_events_extracts_owner_for_show_holdings() -> None:
-    events = parse_postback_events(_postback_body("action=show_holdings&owner=%E6%99%83%E4%B8%80"))
+    events = parse_postback_events(
+        _postback_body("action=show_holdings&owner=%E6%89%80%E6%9C%89%E8%80%85A")
+    )
     assert len(events) == 1
     assert events[0].action == "show_holdings"
     assert events[0].owner == "所有者A"

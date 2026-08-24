@@ -835,6 +835,12 @@ class BuySignalService:
             config_values_used={
                 "min_total_yield_pct": self._config.screening.total_yield.min_total_yield_pct,
                 "aggregation_method": self._config.valuation.fair_value_methods.aggregation_method,
+                # score_breakdown算出に実際に使ったScoreWeights(2026-08-25
+                # コードレビュー対応)。過去の判定を後から説明する際、config
+                # 変更後の"現在の"weightsで誤って再解釈しないため、判定時点の
+                # weightsをここに記録する(watchlist_judgment_summary_formatter
+                # 参照)。
+                "scoring_weights": self._config.scoring.weights.model_dump(),
                 "historical_valuation": historical_valuation_config_values(
                     self._config.historical_valuation
                 ),

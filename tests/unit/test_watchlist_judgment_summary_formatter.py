@@ -81,6 +81,7 @@ def _recommendation(
     reasons: tuple[BuyDecisionReason, ...],
     score_breakdown: ScoreBreakdown | None = None,
     recommendation_id: str = "rec-1",
+    config_values_used: dict | None = None,
 ) -> Recommendation:
     return Recommendation(
         recommendation_id=recommendation_id,
@@ -103,6 +104,7 @@ def _recommendation(
         purchase_attractiveness_score=50.0,
         score_breakdown=score_breakdown or _breakdown(),
         buy_decision_reasons=reasons,
+        config_values_used=config_values_used or {},
     )
 
 
@@ -354,3 +356,72 @@ def test_supplementary_concern_no_weak_item_but_score_below_threshold_tied_lists
     )
     line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
     assert "評価内訳では総合利回りの魅力度・配当持続性が相対的に低め" in line
+
+
+# --- 判定時点のScoreWeightsスナップショット(2026-08-25コードレビュー対応) ------
+# config/scoring_weights.yamlを後から変更しても、過去に確定したbatchの説明文は
+# 判定時点のweightsのまま変化しないこと(Recommendation.config_values_used
+# ["scoring_weights"]から復元、buy_signal_service.py参照)を検証する。
+
+
+def test_uses_judgment_time_weights_snapshot_when_present() -> None:
+    """呼び出し側が渡すfallback_weightsと異なるscoring_weightsスナップショットが
+    Recommendationに保存されている場合、判定時点のスナップショット側を使って
+    補足懸念を選ぶこと。"""
+    reasons = (_reason("PRICE_TIER"),)
+    record = _record(PurchaseCategory.BUY_CANDIDATE, BuyAction.BUY)
+    # financial_health=5点。fallback_weights(_WEIGHTS)の配点20なら5/20=0.25で
+    # 弱い項目だが、判定時点のスナップショット(financial_healthの配点を10に
+    # 変更)なら5/10=0.5で弱くない。
+    judgment_time_weights = {
+        "total_yield_attractiveness": 20,
+        "dividend_sustainability": 20,
+        "financial_health": 10,
+        "undervaluation": 20,
+        "shareholder_benefit_value": 10,
+        "earnings_stability": 5,
+        "price_stability": 5,
+    }
+    rec = _recommendation(
+        reasons,
+        score_breakdown=_breakdown(15, 15, 5, 15, 8, 4, 4),
+        config_values_used={"scoring_weights": judgment_time_weights},
+    )
+
+    line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
+
+    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内"
+    assert "財務健全性に懸念" not in line
+
+
+def test_falls_back_to_current_weights_when_snapshot_absent() -> None:
+    """スナップショット追加前の既存Recommendation(config_values_usedに
+    scoring_weightsが無い)では、呼び出し側が渡すfallback_weightsを使う
+    (既存の挙動を維持)。"""
+    reasons = (_reason("PRICE_TIER"),)
+    record = _record(PurchaseCategory.BUY_CANDIDATE, BuyAction.BUY)
+    rec = _recommendation(
+        reasons,
+        score_breakdown=_breakdown(15, 15, 5, 15, 8, 4, 4),
+        config_values_used={},
+    )
+
+    line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
+
+    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内、財務健全性に懸念"
+
+
+def test_falls_back_to_current_weights_when_snapshot_malformed() -> None:
+    """scoring_weightsスナップショットが不正な形式(必須フィールド欠落)の
+    場合も、例外を送出せずfallback_weightsへ安全にフォールバックすること。"""
+    reasons = (_reason("PRICE_TIER"),)
+    record = _record(PurchaseCategory.BUY_CANDIDATE, BuyAction.BUY)
+    rec = _recommendation(
+        reasons,
+        score_breakdown=_breakdown(15, 15, 5, 15, 8, 4, 4),
+        config_values_used={"scoring_weights": {"total_yield_attractiveness": 20}},
+    )
+
+    line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
+
+    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内、財務健全性に懸念"

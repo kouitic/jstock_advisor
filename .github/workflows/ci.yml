@@ -52,6 +52,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # 個人情報(実在人物の氏名・個人メール等)の再混入防止(CLAUDE.md恒久ルール、
+  # 2026-08-25追加)。gitleaksは秘密情報(APIキー等)用のためこの用途では
+  # 検知しない。denylist方式であり全PII検出を保証しない(CLAUDE.md参照)。
+  pii-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/scan_for_pii.py
+
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
