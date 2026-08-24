@@ -82,9 +82,14 @@ def _candidate_tokens(text: str) -> set[str]:
     return tokens
 
 
-def scan(repo_root: Path) -> list[str]:
+def scan(repo_root: Path, known_hashes: frozenset[str] | None = None) -> list[str]:
     """PII混入が検出されたファイルパスの一覧を返す(実際の一致文字列は
-    呼び出し元・ログのいずれにも出力しない)。"""
+    呼び出し元・ログのいずれにも出力しない)。known_hashesを省略した場合は
+    本番denylist(_KNOWN_PII_HASHES)を使う。テストが検出ロジック自体を
+    検証する際、実在人物名を一切使わずに済むよう、別のdenylistを注入
+    できるようにするためのパラメータ(tests/unit/test_scan_for_pii.py参照)。
+    """
+    hashes = known_hashes if known_hashes is not None else _KNOWN_PII_HASHES
     violating_paths: set[str] = set()
     for rel_path in _tracked_files(repo_root):
         path = repo_root / rel_path
@@ -93,7 +98,7 @@ def scan(repo_root: Path) -> list[str]:
         except (UnicodeDecodeError, OSError):
             continue
         for token in _candidate_tokens(text):
-            if _hash(token) in _KNOWN_PII_HASHES:
+            if _hash(token) in hashes:
                 violating_paths.add(rel_path)
                 break
     return sorted(violating_paths)
