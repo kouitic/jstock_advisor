@@ -91,6 +91,15 @@ from jstock_advisor.services.watchlist_addition_summary_builder import (
 )
 
 logger = logging.getLogger(__name__)
+# バグ修正(2026-08、通知ドライラン機能の本番検証で発覚): lambda_handlers配下の
+# 各エントリポイントは自身のloggerへ明示的にsetLevel(INFO)しているが
+# (buy_candidates_handler.py等12ファイル、既存の確立された慣習)、サービス層の
+# 本loggerには同様の設定が無かったため、AWS Lambda環境下ではINFOレベルの
+# logger.info()呼び出し(DRY_RUN時の送信抑止ログ含む)が実際にはCloudWatch Logs
+# へ一切出力されていなかった(WARNING以上のみ出力される既定挙動)。送信抑止の
+# 判定自体(is_dry_run分岐でpush_messageを呼ばない制御フロー)はロギングと無関係
+# に正しく動作していたが、観測できないのは運用上重大な問題のため修正する。
+logger.setLevel(logging.INFO)
 
 # notify_buy_candidates_digest()のチャンク単位送信結果(統合BUY候補パイプライン
 # 2026-07で追加)。外部LINE APIとDynamoDBを1つのトランザクションにはできないため、
