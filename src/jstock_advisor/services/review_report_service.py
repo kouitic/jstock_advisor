@@ -99,6 +99,11 @@ class ReviewReportService:
     def send_report(
         self, horizon_business_days: int | None = None, now: dt.datetime | None = None
     ) -> str:
+        # 通知検証モード機能(2026-08追加、およびそのDRY_RUN拡張)の対象外
+        # (functional_spec.md 12.13節、週次/月次/四半期レビューは個別銘柄の
+        # 売買判断通知ではないため)。本サービスはexecution_context/
+        # notification_modeを一切保持せず、常にLineNotificationService._push()
+        # を経由しない直接push_messageのため、VALIDATION/DRY_RUNから到達しない。
         if self._line_client is None:
             raise ValueError("line_clientが設定されていません")
         text = self.build_report_text(horizon_business_days, now)

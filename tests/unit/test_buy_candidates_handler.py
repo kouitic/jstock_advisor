@@ -1640,6 +1640,10 @@ def test_finalize_batch_purchase_judgment_and_notification_result_worked_example
         "other_suppressed": 0,
         "send_failed": 0,
         "other_error": 0,
+        # 通知ドライラン機能(2026-08追加): notification_mode=DRY_RUN専用の独立区分
+        # (WOULD_SEND_DRY_RUN)。本テストはVALIDATION+DRY_RUNではなく既定の
+        # execution_contextで実行しているため常に0。
+        "dry_run_would_send": 0,
     }
     assert sum(call["notification_result_counts"].values()) == call["purchase_judgment_counts"][
         "buy_candidate"
@@ -1718,6 +1722,7 @@ def test_finalize_batch_notification_result_sum_matches_buy_candidate_count_when
         "other_suppressed": 0,
         "send_failed": 0,
         "other_error": 1,
+        "dry_run_would_send": 0,
     }
     assert sum(call["notification_result_counts"].values()) == call["purchase_judgment_counts"][
         "buy_candidate"

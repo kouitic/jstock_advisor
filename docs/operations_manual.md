@@ -1181,3 +1181,55 @@ AWS(DynamoDB)のみを参照し、途中でローカルJSONへフォールバッ
 HoldingsSnapshot(通常)だけでなくValidationHoldingsSnapshot(検証モード用)
 についても、`active_holding=true`なのに対応するHoldingが存在しないといった
 不整合をpreflightが独立に検知します。
+
+## 13. 通知検証モード(VALIDATION)利用時の注意事項・用途別手順(2026-08追加)
+
+`BuyCandidatesFunction`・`HoldingsWatchlistFunction`をAWSコンソール/CLIから
+`{"execution_mode": "VALIDATION"}`で手動起動する「通知検証モード」
+(機能仕様書12.13節)は、**`notification_mode`を指定しない限り実際にLINEへ
+通知が送信されます**。これは既存仕様どおりの正常動作であり、バグでは
+ありません。
+
+owner再分類・データ移行検証(12節)・保有判断ロジックの整合性確認など、
+**LINE文面の確認自体が目的ではない**検証作業でVALIDATIONを使う場合は、
+実LINE送信を伴わない`notification_mode: "DRY_RUN"`を必ず使ってください
+(2026-08-23、owner再分類検証作業中に意図せずLINE通知が実送信された事例を
+受けて追加)。
+
+### 13.1 LINE文面そのものを確認したい場合(実送信あり)
+
+```json
+{
+  "execution_mode": "VALIDATION",
+  "notification_mode": "SEND"
+}
+```
+
+`notification_mode`を省略した場合も`SEND`と完全に同じ動作です(既存仕様との
+後方互換性のため、`{"execution_mode": "VALIDATION"}`単体の呼び出しは今後も
+挙動が変わりません)。**この形式では実際にLINEへ通知が届きます**(本文冒頭に
+「🧪検証｜」が付きます)。
+
+### 13.2 判定結果・処理の整合性だけを確認したい場合(実送信なし)
+
+```json
+{
+  "execution_mode": "VALIDATION",
+  "notification_mode": "DRY_RUN"
+}
+```
+
+判定・通知対象選定・通知文生成・検証banner付与までは13.1と全く同じ処理を
+行いますが、**外部LINE APIへの送信のみ行いません**。「実際に送るとしたら
+何が送られたか」(最終文面・銘柄コード・判定区分等)はCloudWatch Logsで
+確認できます。今回のM4.2のようなowner再分類・データ整合性・移行検証等、
+LINE文面確認自体が目的ではない作業では、原則こちらを使ってください。
+
+### 13.3 組み合わせの制約
+
+`notification_mode`は`execution_mode: "VALIDATION"`と組み合わせた場合のみ
+有効です。`execution_mode`が`NORMAL`(省略時含む)の状態で`notification_mode`
+を指定すると、黙って無視されたりSENDへフォールバックしたりせず、明確な
+エラーとしてLambda呼び出し自体が失敗します。通常の自動実行(毎日決まった
+時刻)は`notification_mode`を一切指定しないため、この制約による影響は
+ありません。

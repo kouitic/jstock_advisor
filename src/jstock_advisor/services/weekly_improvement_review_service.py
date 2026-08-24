@@ -171,6 +171,11 @@ class WeeklyImprovementReviewService:
                 self._candidates_repo.save(candidate)
                 candidates.append(candidate)
 
+        # 通知検証モード機能(2026-08追加、およびそのDRY_RUN拡張)の対象外
+        # (functional_spec.md 12.13節、週次改善レビューは個別銘柄の売買判断
+        # 通知ではないため)。本サービスはexecution_context/notification_modeを
+        # 一切保持せず、以下のpush_messageはLineNotificationService._push()を
+        # 経由しない直接呼び出しのため、VALIDATION/DRY_RUNから到達しない。
         issue_eligible = [c for c in candidates if self._is_issue_eligible(c)]
         github_statuses: dict[str, int] = {}
         notified_new_issue_count = 0
