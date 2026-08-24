@@ -1538,7 +1538,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         if execution_context.is_validation:
             logger.info(
                 "VALIDATION MODE task=buy_candidate execution_mode=VALIDATION "
+                "notification_mode=%s event_notification_mode=%r is_dry_run=%s "
                 "validation_run_id=%s stock_code=%s",
+                execution_context.notification_mode.value,
+                event.get("notification_mode"),
+                execution_context.is_dry_run,
                 event.get("batch_id"),
                 event["stock_code"],
             )
@@ -1613,7 +1617,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、
         # イベント解析直後ではなくこの時点でVALIDATION開始ログを出す。
         logger.info(
-            "VALIDATION MODE START execution_mode=VALIDATION validation_run_id=%s target_count=%d",
+            "VALIDATION MODE START execution_mode=VALIDATION notification_mode=%s "
+            "validation_run_id=%s target_count=%d",
+            execution_context.notification_mode.value,
             batch_id,
             len(targets),
         )
