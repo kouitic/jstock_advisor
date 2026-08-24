@@ -2180,6 +2180,7 @@ class LineNotificationService:
         content_hash: str | None = None,
         related_recommendation_id: str | None = None,
         now: dt.datetime | None = None,
+        emit_dry_run_record: bool = True,
     ) -> None:
         """全てのLINE送信箇所が経由する唯一の送信ヘルパー(通知検証モード機能
         2026-08追加)。VALIDATIONでは本文冒頭に検証banner を付与してから送信する。
@@ -2196,18 +2197,27 @@ class LineNotificationService:
         notification_type/stock_code/content_hash/related_recommendation_id/nowは
         DRY_RUN時にAudit・CloudWatch Logsへ記録する付随情報として任意受け取りする
         (省略しても送信抑止そのものは動作するが、記録の詳細度が下がる)。
+
+        コードレビュー対応(2026-08、通知ドライラン機能の監査二重記録整理):
+        emit_dry_run_record=Falseの場合、送信抑止の判定・実行はこれまでどおり
+        このメソッドが行うが、DRY_RUN記録(ログ・監査)自体は行わない。
+        notify_buy_candidates_digest()のように、この呼び出し自体が複数銘柄を
+        まとめた1メッセージ(チャンク)を対象とし、かつ呼び出し側が銘柄単位で
+        別途`_record_dry_run_notification()`を呼んで正本の記録を残す場合に、
+        stock_code=None の意味の薄いチャンク単位の重複記録を生成しないために使う。
         """
         if self._execution_context.is_validation:
             text = _VALIDATION_BANNER + text
         if self._execution_context.is_dry_run:
-            self._record_dry_run_notification(
-                text,
-                notification_type=notification_type,
-                stock_code=stock_code,
-                content_hash=content_hash,
-                related_recommendation_id=related_recommendation_id,
-                now=now,
-            )
+            if emit_dry_run_record:
+                self._record_dry_run_notification(
+                    text,
+                    notification_type=notification_type,
+                    stock_code=stock_code,
+                    content_hash=content_hash,
+                    related_recommendation_id=related_recommendation_id,
+                    now=now,
+                )
             return
         self._client.push_message(text)
 
@@ -2441,7 +2451,12 @@ class LineNotificationService:
                 message = "\n\n".join([message, "\n".join(footer)])
 
             try:
-                self._push(message)
+                # コードレビュー対応(2026-08、通知ドライラン機能の監査二重記録整理):
+                # このチャンク単位の呼び出しはstock_code等を渡さないため、
+                # emit_dry_run_record=Falseでチャンク単位の意味の薄い重複記録を
+                # 抑止する。DRY_RUN時の正本記録は、この後の銘柄単位ループが
+                # _record_dry_run_notification()を直接呼んで銘柄ごとに残す。
+                self._push(message, emit_dry_run_record=False)
             except Exception:  # noqa: BLE001 - LINE送信失敗は未送信として扱い処理を継続する
                 logger.exception(
                     "notify_buy_candidates_digest: push_message failed chunk=%d/%d",

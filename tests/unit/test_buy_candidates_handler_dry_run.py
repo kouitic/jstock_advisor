@@ -10,6 +10,13 @@
 `tests/unit/test_buy_candidates_handler.py`の既存フィクスチャと同じパターンを
 踏襲しつつ、同ファイルへの同時編集(買い候補サマリー表示改修のテスト追加)との
 衝突を避けるため独立ファイルとした。
+
+コードレビュー対応(2026-08、コミットc570264への指摘)により以下を追加確認する。
+(1) WOULD_SEND_DRY_RUNの監査記録(unified_buy_candidate_notification_outcome)
+について、notification_eligibility(通知条件を通過したか)はeligible=Trueの
+まま維持しつつ、actual send outcome(実際に外部送信したか)を表す
+notification_statusフィールドへ"SENT"ではなく"WOULD_SEND_DRY_RUN"を記録し、
+「条件は満たしたが実送信はしていない」ことを監査上も区別できることを確認する。
 """
 
 from __future__ import annotations
@@ -74,6 +81,42 @@ class _NoopAuditService:
 
 def _patch_audit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: _NoopAuditService())
+
+
+class _RecordingAuditService:
+    """AuditService.record()の呼び出し内容(decision_type/output_values等)を
+    そのまま記録するフェイク(コードレビュー対応2026-08、監査内容そのものの
+    確認用。_NoopAuditServiceは内容を破棄するため使えない)。
+    """
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+
+    def record(
+        self,
+        decision_type: str,
+        stock_code: str | None = None,
+        input_values: dict[str, object] | None = None,
+        calculation_formulas: dict[str, object] | None = None,
+        output_values: dict[str, object] | None = None,
+        **kwargs: object,
+    ) -> None:
+        self.records.append(
+            {
+                "decision_type": decision_type,
+                "stock_code": stock_code,
+                "output_values": output_values or {},
+            }
+        )
+
+    def records_by_type(self, decision_type: str) -> list[dict[str, object]]:
+        return [r for r in self.records if r["decision_type"] == decision_type]
+
+
+def _patch_recording_audit(monkeypatch: pytest.MonkeyPatch) -> _RecordingAuditService:
+    recorder = _RecordingAuditService()
+    monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: recorder)
+    return recorder
 
 
 def _progress(ranking_entries: list[str], total: int, category_counts: dict[str, int]):
@@ -240,3 +283,39 @@ def test_would_send_dry_run_does_not_raise_log_failed_runtime_error(
 
     # 例外を送出しないことそのものが確認事項。
     handler_module._finalize_batch(progress, "batch-dry-run-3", _CONFIG, _NOW, repo, fake_service)
+
+
+def test_would_send_dry_run_audit_records_would_send_not_sent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """コードレビュー対応(2026-08、コミットc570264への指摘1)。WOULD_SEND_DRY_RUN
+    の監査記録(unified_buy_candidate_notification_outcome)は、通知条件を通過
+    したこと(eligible=True、block_category/block_reasonがNone)は維持しつつ、
+    実際の送信結果(notification_status)へ"SENT"ではなく"WOULD_SEND_DRY_RUN"を
+    記録する。将来のLINEからの理由照会機能で「実送信済み」と誤認されないための
+    区別。
+    """
+    recorder = _patch_recording_audit(monkeypatch)
+    repo = RecommendationRepository(store_dir=tmp_path)
+    rec = _make_recommendation("4001", "rec-dry-audit")
+    repo.save(rec)
+    ranking_entries = [handler_module._encode_buy_ranking_entry(rec)]
+
+    fake_service = _FakeNotificationServiceForDryRun({rec.stock_code: "WOULD_SEND_DRY_RUN"})
+    progress = _progress(ranking_entries, total=1, category_counts={"candidate_not_ranked": 1})
+
+    handler_module._finalize_batch(
+        progress, "batch-dry-run-audit", _CONFIG, _NOW, repo, fake_service
+    )
+
+    outcome_records = recorder.records_by_type("unified_buy_candidate_notification_outcome")
+    assert len(outcome_records) == 1
+    output_values = outcome_records[0]["output_values"]
+    assert output_values["notification_status"] == "WOULD_SEND_DRY_RUN"
+    assert output_values["notification_status"] != "SENT"
+    # eligible=True(通知条件は通過)であることは、block_category/block_reasonが
+    # いずれもNoneであることから確認する(_record_notification_outcome_auditは
+    # NotificationEligibility.eligibleそのものを別フィールドとしては保存しない、
+    # 既存の記録形式)。
+    assert output_values["block_category"] is None
+    assert output_values["block_reason"] is None

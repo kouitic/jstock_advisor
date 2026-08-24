@@ -293,13 +293,48 @@ def test_notify_buy_candidates_digest_dry_run_returns_would_send_and_suppresses_
 
     assert client.sent == []
     assert results == {"1000": "WOULD_SEND_DRY_RUN", "1001": "WOULD_SEND_DRY_RUN"}
-    # 銘柄ごとに個別のDRY_RUN監査記録が残る(通知結果コードだけでなく、内部では
-    # 銘柄単位のcontent_hash/notification_type/related_recommendation_idまで
-    # 保持する)。チャンク単位の_push()呼び出し自体もstock_code=Noneの汎用記録を
-    # 1件残す(chunk全体の最終文面確認用)ため、銘柄単位の記録はその追加分。
+    # コードレビュー対応(2026-08、監査二重記録整理): チャンク単位の_push()呼び出し
+    # (emit_dry_run_record=False)はもはや記録を残さない。銘柄単位の記録のみが
+    # 正本として残り、銘柄数とちょうど一致する(二重計上されない)。
     dry_run_calls = audit_service.dry_run_calls()
+    assert len(dry_run_calls) == len(winners)
     recorded_stock_codes = {c["stock_code"] for c in dry_run_calls}
-    assert {"1000", "1001"} <= recorded_stock_codes
+    assert recorded_stock_codes == {"1000", "1001"}
+    for call in dry_run_calls:
+        assert call["output_values"]["notification_type"] is not None
+        assert call["output_values"]["content_hash"]
+        assert call["output_values"]["related_recommendation_id"] is not None
+        assert call["output_values"]["message_text"]
+        assert call["output_values"]["would_send"] is True
+
+
+def test_notify_buy_candidates_digest_dry_run_multi_chunk_no_double_counting(
+    tmp_path: Path,
+) -> None:
+    """複数チャンクにまたがる大量の候補でも、DRY_RUN監査記録は銘柄数と
+    ちょうど一致する(チャンク単位の重複記録が発生しない)。1銘柄分のブロックは
+    約42文字、チャンク上限は4500文字のため、150件あれば必ず複数チャンクに
+    分割される(107件/チャンク程度)。
+    """
+    ctx = ExecutionContext(
+        mode=ExecutionMode.VALIDATION, notification_mode=NotificationMode.DRY_RUN
+    )
+    service, client, audit_service, _ = _build_service(tmp_path, ctx)
+    winner_count = 150
+    winners = [
+        _make_recommendation(f"rec-{i}", stock_code=f"{2000 + i}") for i in range(winner_count)
+    ]
+
+    results = service.notify_buy_candidates_digest(winners, _NOW)
+
+    assert client.sent == []
+    assert len(results) == winner_count
+    assert all(outcome == "WOULD_SEND_DRY_RUN" for outcome in results.values())
+    dry_run_calls = audit_service.dry_run_calls()
+    assert len(dry_run_calls) == winner_count
+    assert {c["stock_code"] for c in dry_run_calls} == {
+        str(2000 + i) for i in range(winner_count)
+    }
 
 
 def test_notify_buy_candidates_digest_validation_send_unaffected(tmp_path: Path) -> None:

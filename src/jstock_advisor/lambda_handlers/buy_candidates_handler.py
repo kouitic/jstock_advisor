@@ -1242,9 +1242,15 @@ def _finalize_batch(
         # 区別し、既存どおりLambda例外による運用検知(下記log_failed)は維持する。
         if outcome == "WOULD_SEND_DRY_RUN":
             dry_run_would_send_count += 1
+            # コードレビュー対応(2026-08、通知ドライラン機能): 通知条件は通過した
+            # (eligible=True)が実LINE送信はしていないため、notification_status
+            # (実際の送信結果)へ"SENT"を記録しない。「eligible=True・
+            # send_outcome=WOULD_SEND_DRY_RUN」の組み合わせで、「条件は満たしたが
+            # 実送信はしていない」ことを監査上も明確に区別する(将来のLINEからの
+            # 理由照会機能で「送信済み」と誤認されないようにするため)。
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, rec, unified_rank, None,
-                "SENT", NotificationEligibility(eligible=True),
+                outcome, NotificationEligibility(eligible=True),
                 basis, portfolio_total, coverage_ratio,
             )
             _update_evaluation_record_outcome_safely(
