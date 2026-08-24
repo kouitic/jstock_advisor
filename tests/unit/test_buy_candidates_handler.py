@@ -2699,6 +2699,66 @@ def test_dispatch_mode_propagates_validation_execution_mode(
 
     assert result == {"dispatched": 1}
     assert dispatched[0]["execution_mode"] == "VALIDATION"
+    # コードレビュー対応(2026-08、通知ドライラン機能のバグ修正): notification_mode
+    # 未指定時は既定値SENDとして子Lambdaへも明示伝播する(VALIDATION同士なら
+    # resolve_execution_context()はnotification_mode指定を許可するため問題ない)。
+    assert dispatched[0]["notification_mode"] == "SEND"
+
+
+def test_dispatch_mode_propagates_notification_mode_dry_run_to_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """バグ修正の回帰テスト(2026-08): VALIDATION+DRY_RUNで起動した場合、子Lambdaへの
+    dispatchペイロードにnotification_mode=DRY_RUNが伝播されること。この伝播漏れに
+    より、子Lambda側でnotification_modeが既定のSENDへ黙ってフォールバックし、
+    DRY_RUN指定にもかかわらず実LINE送信が抑止されない不具合があった。
+    """
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.WatchlistService,
+        "list_items",
+        lambda self: [_watchlist_item("2914"), _watchlist_item("8136")],
+    )
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: [])
+
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_async",
+        lambda function_name, payload: dispatched.append(payload),
+    )
+
+    handler_module.handler(
+        {"execution_mode": "VALIDATION", "notification_mode": "DRY_RUN"}, _FakeContext()
+    )
+
+    assert len(dispatched) == 2
+    for payload in dispatched:
+        assert payload["execution_mode"] == "VALIDATION"
+        assert payload["notification_mode"] == "DRY_RUN"
+
+
+def test_dispatch_mode_propagates_notification_mode_send_to_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.WatchlistService, "list_items", lambda self: [_watchlist_item("2914")]
+    )
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: [])
+
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_async",
+        lambda function_name, payload: dispatched.append(payload),
+    )
+
+    handler_module.handler(
+        {"execution_mode": "VALIDATION", "notification_mode": "SEND"}, _FakeContext()
+    )
+
+    assert dispatched[0]["notification_mode"] == "SEND"
 
 
 def test_dispatch_mode_unspecified_execution_mode_propagates_normal(
@@ -2720,6 +2780,7 @@ def test_dispatch_mode_unspecified_execution_mode_propagates_normal(
     handler_module.handler({}, _FakeContext())
 
     assert dispatched[0]["execution_mode"] == "NORMAL"
+    assert "notification_mode" not in dispatched[0]
 
 
 def test_handler_invalid_execution_mode_raises_before_any_processing(

@@ -1127,21 +1127,30 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     )
 
     for holding in holdings:
+        child_payload: dict[str, Any] = {
+            "task": "holding",
+            "holding_id": holding.holding_id,
+            "batch_id": batch_id,
+            "portfolio_total_market_value": (
+                str(portfolio_total_market_value)
+                if portfolio_total_market_value is not None
+                else None
+            ),
+            "portfolio_total_acquisition_cost": str(portfolio_total_acquisition_cost),
+            "execution_mode": execution_context.mode.value,
+            "trade_detection_confirmed": detection_outcome.confirmed,
+        }
+        # バグ修正(2026-08、通知ドライラン機能): notification_modeを子Lambdaへ
+        # 伝播し忘れており、VALIDATION+DRY_RUNで起動しても子Lambda側は
+        # notification_mode未指定→既定のSEND扱いとなり、実LINE送信が抑止
+        # されない不備があった。NORMAL実行時はresolve_execution_context()が
+        # execution_mode=NORMAL+notification_mode指定をエラーにするため、
+        # VALIDATION時のみキー自体を追加する(NORMAL実行への影響を避ける)。
+        if execution_context.is_validation:
+            child_payload["notification_mode"] = execution_context.notification_mode.value
         dispatch_async(
             function_name,
-            {
-                "task": "holding",
-                "holding_id": holding.holding_id,
-                "batch_id": batch_id,
-                "portfolio_total_market_value": (
-                    str(portfolio_total_market_value)
-                    if portfolio_total_market_value is not None
-                    else None
-                ),
-                "portfolio_total_acquisition_cost": str(portfolio_total_acquisition_cost),
-                "execution_mode": execution_context.mode.value,
-                "trade_detection_confirmed": detection_outcome.confirmed,
-            },
+            child_payload,
         )
 
     logger.info(

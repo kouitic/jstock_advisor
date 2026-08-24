@@ -1619,23 +1619,29 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         )
 
     for target in targets:
-        dispatch_async(
-            function_name,
-            {
-                "task": "buy_candidate",
-                "stock_code": target.stock_code,
-                "source": target.source.value,
-                "batch_id": batch_id,
-                "holding_quantity": target.holding_quantity,
-                "average_acquisition_price": (
-                    str(target.average_acquisition_price)
-                    if target.average_acquisition_price is not None
-                    else None
-                ),
-                "execution_mode": execution_context.mode.value,
-                "trade_detection_confirmed": detection_outcome.confirmed,
-            },
-        )
+        child_payload: dict[str, Any] = {
+            "task": "buy_candidate",
+            "stock_code": target.stock_code,
+            "source": target.source.value,
+            "batch_id": batch_id,
+            "holding_quantity": target.holding_quantity,
+            "average_acquisition_price": (
+                str(target.average_acquisition_price)
+                if target.average_acquisition_price is not None
+                else None
+            ),
+            "execution_mode": execution_context.mode.value,
+            "trade_detection_confirmed": detection_outcome.confirmed,
+        }
+        # バグ修正(2026-08、通知ドライラン機能): notification_modeを子Lambdaへ
+        # 伝播し忘れており、VALIDATION+DRY_RUNで起動しても子Lambda側は
+        # notification_mode未指定→既定のSEND扱いとなり、実LINE送信が抑止
+        # されない不備があった。NORMAL実行時はresolve_execution_context()が
+        # execution_mode=NORMAL+notification_mode指定をエラーにするため、
+        # VALIDATION時のみキー自体を追加する(NORMAL実行への影響を避ける)。
+        if execution_context.is_validation:
+            child_payload["notification_mode"] = execution_context.notification_mode.value
+        dispatch_async(function_name, child_payload)
 
     logger.info(
         "buy_candidates_handler dispatched: scanned=%d (holdings=%d) batch_id=%s",
