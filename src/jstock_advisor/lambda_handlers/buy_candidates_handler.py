@@ -1228,10 +1228,6 @@ def _finalize_batch(
     notification_rank = 0
     sent_count = 0
     send_failed_count = 0
-    # 通知ドライラン機能(2026-08追加): DRY_RUN時は全通知条件・ランキング・
-    # 上限判定を通過していても外部LINE送信のみ行われない(WOULD_SEND_DRY_RUN)。
-    # 「通知済み」にも「送信失敗」にも計上しない、独立したカウンタとする。
-    dry_run_would_send_count = 0
     for unified_rank, rec in eligible_winners:
         outcome = send_result.get(rec.stock_code, "SEND_FAILED")
         # 通知検証モード機能(2026-08追加): SENT_VALIDATIONもLINE送信に成功した
@@ -1240,18 +1236,7 @@ def _finalize_batch(
         # はLINE送信自体には成功しているため、表示上・件数上は「通知済み」として
         # 扱う(「送信失敗」とはしない)。内部のsend_outcomeでのみSENT_LOG_FAILEDを
         # 区別し、既存どおりLambda例外による運用検知(下記log_failed)は維持する。
-        if outcome == "WOULD_SEND_DRY_RUN":
-            dry_run_would_send_count += 1
-            _record_notification_outcome_audit(
-                audit_service, rule_version, now, rec, unified_rank, None,
-                "SENT", NotificationEligibility(eligible=True),
-                basis, portfolio_total, coverage_ratio,
-            )
-            _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
-                True, None, None, (), outcome,
-            )
-        elif outcome in ("SENT_AND_RECORDED", "SENT_VALIDATION", "SENT_LOG_FAILED"):
+        if outcome in ("SENT_AND_RECORDED", "SENT_VALIDATION", "SENT_LOG_FAILED"):
             notification_rank += 1
             sent_count += 1
             _record_notification_outcome_audit(
@@ -1455,10 +1440,6 @@ def _finalize_batch(
         "other_suppressed": other_suppressed_count,
         "send_failed": send_failed_count,
         "other_error": record_not_found_count,
-        # 通知ドライラン機能(2026-08追加): 「通知済み」にも「送信失敗」にも
-        # 計上しない独立区分。SEND/NORMALでは構造的に常に0のまま
-        # (WOULD_SEND_DRY_RUNはnotification_mode=DRY_RUN時にしか発生しない)。
-        "dry_run_would_send": dry_run_would_send_count,
     }
 
     notification_service.notify_batch_summary(
