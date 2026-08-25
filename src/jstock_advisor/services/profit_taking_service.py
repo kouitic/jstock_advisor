@@ -130,6 +130,10 @@ class ProfitTakingOutcome:
     stock_code: str
     recommendation: Recommendation | None
     data_error: str | None
+    # Phase 2-B「銘柄分析」向け(2026-08): この判定サイクルで実際に書き込んだ
+    # AuditLogEntryのID(judgment audit呼び出しに到達しなかった場合はNone)。
+    # HoldingEvaluationRecord.authoritative_audit_log_idへ橋渡しするための参照。
+    audit_id: str | None = None
 
 
 def _dividend_decrease_explanation(
@@ -619,7 +623,7 @@ class ProfitTakingService:
 
         confidence_result = self._compute_confidence(result, snapshot, now)
 
-        self._audit.record(
+        audit_entry = self._audit.record(
             decision_type="profit_taking",
             stock_code=holding.stock_code,
             input_values={
@@ -756,7 +760,9 @@ class ProfitTakingService:
             )
 
         if effective_recommendation_type == RecommendationType.HOLD:
-            return ProfitTakingOutcome(holding.stock_code, None, None)
+            return ProfitTakingOutcome(
+                holding.stock_code, None, None, audit_id=audit_entry.audit_id
+            )
 
         dividend = snapshot.dividend
         forecast_increase = None
@@ -1052,7 +1058,9 @@ class ProfitTakingService:
                 snapshot.environment, snapshot.market_environment, snapshot.sector_environment
             ),
         )
-        return ProfitTakingOutcome(holding.stock_code, recommendation, None)
+        return ProfitTakingOutcome(
+            holding.stock_code, recommendation, None, audit_id=audit_entry.audit_id
+        )
 
 
 def _is_long_term_benefit_imminent(

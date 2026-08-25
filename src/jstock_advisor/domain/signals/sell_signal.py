@@ -164,6 +164,30 @@ def detect_continuous_decline_period_aware(
     return all(recent[i].value < recent[i - 1].value for i in range(1, len(recent)))
 
 
+def _continuous_decline_evidence(
+    periods: list[FinancialPeriodValue], consecutive_quarters: int
+) -> tuple[str | None, str | None, str | None]:
+    """Phase 2-B「銘柄分析」向け(2026-08、監査証跡拡張): continuous_decline系
+    ルールが実際に比較した直近2期分の実数値を返す(current_value/previous_value/
+    comparison_period)。detect_continuous_decline_period_aware()と全く同じ
+    有効性判定(period_type一致・非累計・件数充足)を満たす場合のみ値を返し、
+    それ以外(判定不能)はすべてNone(判定条件自体は一切変更しない、既存関数の
+    読み取り専用の副読み)。
+    """
+    if consecutive_quarters < 1 or len(periods) < consecutive_quarters + 1:
+        return None, None, None
+    recent = periods[-(consecutive_quarters + 1) :]
+    period_types = {p.period_type for p in recent}
+    if len(period_types) != 1 or any(p.is_cumulative for p in recent):
+        return None, None, None
+    latest, previous = recent[-1], recent[-2]
+    return (
+        str(latest.value),
+        str(previous.value),
+        f"{previous.period_end.isoformat()}〜{latest.period_end.isoformat()}",
+    )
+
+
 @dataclass(frozen=True)
 class SellRuleEvaluation:
     """売却ルール1件の評価結果(要求仕様§3)。
@@ -360,12 +384,21 @@ def _evaluate_cashflow_decline_rule(
                 "継続悪化を判定できない"
             ),
         )
+    # Phase 2-B「銘柄分析」向け(2026-08、監査証跡拡張): declined is not Noneの
+    # 時点で、比較に使った直近2期分の実数値が確定している(判定条件自体は
+    # detect_continuous_decline_period_aware()のまま変更しない)。
+    cf_current_value, cf_previous_value, cf_comparison_period = _continuous_decline_evidence(
+        quarterly_operating_cashflow_periods, consecutive_quarters
+    )
     if not declined:
         return SellRuleEvaluation(
             rule_name="continuous_operating_cashflow_decline",
             status=TriggerStatus.NOT_TRIGGERED,
             evidence_group=EvidenceGroup.CASHFLOW,
             metric_name="operating_cashflow",
+            current_value=cf_current_value,
+            previous_value=cf_previous_value,
+            comparison_period=cf_comparison_period,
             source="yfinance",
             explanation="営業キャッシュフローの継続悪化は検出されなかった",
         )
@@ -377,6 +410,9 @@ def _evaluate_cashflow_decline_rule(
             status=TriggerStatus.NOT_TRIGGERED,
             evidence_group=EvidenceGroup.CASHFLOW,
             metric_name="operating_cashflow",
+            current_value=cf_current_value,
+            previous_value=cf_previous_value,
+            comparison_period=cf_comparison_period,
             source="yfinance",
             explanation="営業CFの悪化は検出されたが、要因分解の結果、運転資本・一過性要因が主因",
         )
@@ -386,6 +422,9 @@ def _evaluate_cashflow_decline_rule(
             status=TriggerStatus.NOT_EVALUATED,
             evidence_group=EvidenceGroup.CASHFLOW,
             metric_name="operating_cashflow",
+            current_value=cf_current_value,
+            previous_value=cf_previous_value,
+            comparison_period=cf_comparison_period,
             source="yfinance",
             explanation=(
                 "営業CFの継続悪化は検出されたが、要因分解データが無く本業要因が主因かどうか"
@@ -398,6 +437,9 @@ def _evaluate_cashflow_decline_rule(
         evidence_group=EvidenceGroup.CASHFLOW,
         severity=severity,
         metric_name="operating_cashflow",
+        current_value=cf_current_value,
+        previous_value=cf_previous_value,
+        comparison_period=cf_comparison_period,
         source="yfinance",
         explanation="営業CFが継続悪化しており、要因分解の結果、本業要因が主因と確認できた",
     )
@@ -477,6 +519,7 @@ def build_sell_rule_inputs_from_data(
         evidence_group=EvidenceGroup.DIVIDEND,
         severity=config.rules["dividend_cut"].severity if dividend_cut_triggered else None,
         metric_name="official_dividend_cut_announced",
+        current_value=str(dividend_cut_triggered),
         source="EDINET/TDnet" if dividend_cut_triggered else "yfinance",
         primary_source_confirmed=dividend_cut_triggered,
         explanation=(
@@ -503,6 +546,11 @@ def build_sell_rule_inputs_from_data(
         severity=config.rules["dividend_omission"].severity if official_omission else None,
         is_immediate_critical=False,
         metric_name="official_dividend_omission_announced",
+        current_value=(
+            "official_confirmed"
+            if official_omission
+            else ("inferred_only" if inferred_omission else "not_detected")
+        ),
         source="EDINET/TDnet" if official_omission else "yfinance",
         primary_source_confirmed=official_omission,
         explanation=(
@@ -520,6 +568,9 @@ def build_sell_rule_inputs_from_data(
     income_declined = detect_continuous_decline_period_aware(
         quarterly_operating_income_periods, income_quarters
     )
+    income_current_value, income_previous_value, income_comparison_period = (
+        _continuous_decline_evidence(quarterly_operating_income_periods, income_quarters)
+    )
     evaluations["continuous_operating_income_decline"] = SellRuleEvaluation(
         rule_name="continuous_operating_income_decline",
         status=(
@@ -533,6 +584,10 @@ def build_sell_rule_inputs_from_data(
             if income_declined
             else None
         ),
+        metric_name="operating_income",
+        current_value=income_current_value,
+        previous_value=income_previous_value,
+        comparison_period=income_comparison_period,
         source="yfinance",
         explanation=(
             "比較対象期間のperiod_typeが揃っていない、または期間データが不足しており、"
@@ -561,6 +616,8 @@ def build_sell_rule_inputs_from_data(
         severity=(
             config.rules["shareholder_benefit_abolished"].severity if benefit_abolished else None
         ),
+        metric_name="is_abolished",
+        current_value=str(benefit_abolished),
         source="manual_registry",
         primary_source_confirmed=True,
         explanation="株主優待の廃止が確認されている"
@@ -578,6 +635,8 @@ def build_sell_rule_inputs_from_data(
             if benefit_downgraded
             else None
         ),
+        metric_name="is_major_downgrade",
+        current_value=str(benefit_downgraded),
         source="manual_registry",
         primary_source_confirmed=True,
         explanation="株主優待の大幅改悪が確認されている"
@@ -597,6 +656,8 @@ def build_sell_rule_inputs_from_data(
             evidence_group=_RULE_EVIDENCE_GROUP[rule_name],
             severity=config.rules[rule_name].severity if triggered else None,
             is_immediate_critical=(rule_name in _IMMEDIATE_CRITICAL_RULES) and material_confirmed,
+            metric_name="disclosure_risk_confirmation_level",
+            current_value=confirmation.value if confirmation is not None else "NONE",
             source="EDINET/TDnet開示",
             primary_source_confirmed=True,
             explanation=(

@@ -25,12 +25,16 @@ HoldingEvaluationRecord)をユーザーへ分かりやすく説明するだけ�
 
 from __future__ import annotations
 
+from typing import Any
+
+from jstock_advisor.domain.entities.audit import AuditLogEntry
 from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
     BuyCandidateEvaluationRecord,
 )
-from jstock_advisor.domain.entities.common import BuyPriceLevels
+from jstock_advisor.domain.entities.common import BuyPriceLevels, ScoreBreakdown
 from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
 )
@@ -51,6 +55,24 @@ from jstock_advisor.services.latest_batch_records_provider import (
 from jstock_advisor.services.watchlist_display_name import StockDisplayNameResolver
 
 _UNRESTORABLE = "現行データでは、判定根拠の詳細を復元できません。"
+
+# domain/signals/buy_signal.py::_SCORE_LABELSと同じ7項目・同じラベル
+# (投資判断モジュールへの依存を避けるため、watchlist_judgment_summary_
+# formatter.pyと同様に値のみ独立して定義する。既存定数の変更に追従する
+# 必要が生じた場合はここも合わせて見直すこと)。
+_SCORE_COMPONENT_LABELS: dict[str, str] = {
+    "total_yield_attractiveness": "総合利回りの魅力度",
+    "dividend_sustainability": "配当持続性",
+    "financial_health": "財務健全性",
+    "undervaluation": "割安度",
+    "shareholder_benefit_value": "株主優待価値",
+    "earnings_stability": "業績安定性",
+    "price_stability": "株価安定性",
+}
+# buy_signal.py::_STRONG_SCORE_RATIO/_WEAK_SCORE_RATIOと同じ値(意図的に同期。
+# 表示層で新しい閾値を作らず、既存の「強い/弱い」判定基準をそのまま流用する)。
+_STRONG_SCORE_RATIO = 0.7
+_WEAK_SCORE_RATIO = 0.3
 
 _BUY_ACTION_LABEL: dict[BuyAction, str] = {
     BuyAction.STRONG_BUY: "積極買い候補",
@@ -97,6 +119,105 @@ def _buy_price_lines(buy_prices: BuyPriceLevels | None) -> list[str]:
         lines.append(f"標準買付：{buy_prices.standard.price}円以下")
     if buy_prices.entry is not None:
         lines.append(f"打診買付：{buy_prices.entry.price}円以下")
+    return lines
+
+
+def _decimal_str_to_display(value: Any, digits: int = 2) -> str | None:
+    """buy_score_input_facts内のstr化されたDecimal値を表示用に整形する
+    (JSON保存のためstr化された値を、そのまま長い桁数で表示しないため)。"""
+    if value is None:
+        return None
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _rank_score_components(
+    score_breakdown: ScoreBreakdown, weights: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """既存の判定結果(score_breakdown、判定時点の実点数)と判定時点weight
+    (config_values_used["scoring_weights"]スナップショット)だけを使い、
+    配点比の高い順/低い順に項目をランキングする(表示専用の集計処理)。
+
+    採否の閾値はdomain/signals/buy_signal.py::score_areas()が既に使っている
+    _STRONG_SCORE_RATIO(0.7)/_WEAK_SCORE_RATIO(0.3)をそのまま流用し、表示層で
+    新しい評価基準・投資判断ルールを新設しない。score_areas()自体は閾値で
+    フィルタするだけで大きい順に並べる機能を持たないため、ここでは実際の
+    配点比でsorted()し、真に上位/下位の項目だけを選ぶ(6節で提案した設計)。
+    """
+    entries: list[tuple[float, float, float, str]] = []
+    for field_name, label in _SCORE_COMPONENT_LABELS.items():
+        max_weight = weights.get(field_name)
+        score = getattr(score_breakdown, field_name, None)
+        if not max_weight or score is None:
+            continue
+        entries.append((score / max_weight, float(score), float(max_weight), label))
+
+    positive_candidates = sorted(
+        (e for e in entries if e[0] >= _STRONG_SCORE_RATIO), key=lambda e: e[0], reverse=True
+    )
+    negative_candidates = sorted(
+        (e for e in entries if e[0] < _WEAK_SCORE_RATIO), key=lambda e: e[0]
+    )
+    positive = [
+        f"{label}（{score:.1f}/{max_weight:.0f}点）"
+        for _ratio, score, max_weight, label in positive_candidates[:3]
+    ]
+    negative = [
+        f"{label}（{score:.1f}/{max_weight:.0f}点）"
+        for _ratio, score, max_weight, label in negative_candidates[:3]
+    ]
+    return positive, negative
+
+
+def _buy_facts_lines(recommendation: Recommendation) -> list[str]:
+    """■ 判断根拠となった事実。判定時点に実際に保存された値のみを表示する
+    (現在値の再取得・現在configの流用は一切行わない)。"""
+    lines = [f"判定時株価：{recommendation.price_at_recommendation}円"]
+    if recommendation.company_quality_score is not None:
+        lines.append(f"企業魅力度スコア：{recommendation.company_quality_score}点")
+    if recommendation.dividend_yield_pct_at_recommendation is not None:
+        lines.append(f"配当利回り：{recommendation.dividend_yield_pct_at_recommendation:.2f}%")
+    if recommendation.shareholder_benefit_yield_pct_at_recommendation is not None:
+        lines.append(
+            f"優待利回り：{recommendation.shareholder_benefit_yield_pct_at_recommendation:.2f}%"
+        )
+    if recommendation.total_yield_pct_at_recommendation is not None:
+        lines.append(f"総合利回り：{recommendation.total_yield_pct_at_recommendation:.2f}%")
+
+    facts = recommendation.buy_score_input_facts or {}
+    per = _decimal_str_to_display(facts.get("current_per"), digits=1)
+    if per is not None:
+        median = _decimal_str_to_display(facts.get("historical_per_median"), digits=1)
+        suffix = f"（自社の過去中央値{median}倍）" if median is not None else ""
+        lines.append(f"PER：{per}倍{suffix}")
+    pbr = _decimal_str_to_display(facts.get("current_pbr"), digits=2)
+    if pbr is not None:
+        median = _decimal_str_to_display(facts.get("historical_pbr_median"), digits=2)
+        suffix = f"（自社の過去中央値{median}倍）" if median is not None else ""
+        lines.append(f"PBR：{pbr}倍{suffix}")
+    return lines
+
+
+def _buy_interpretation_lines(recommendation: Recommendation) -> list[str]:
+    """■ 解釈。PER/PBR単体の絶対値から独自に「割安」等を断定せず、既存の
+    score_breakdown(実際の判定結果)を配点比でランキングして表示する。"""
+    if recommendation.score_breakdown is None:
+        return []
+    weights = (recommendation.config_values_used or {}).get("scoring_weights")
+    if not weights:
+        return []
+    positive, negative = _rank_score_components(recommendation.score_breakdown, weights)
+    lines: list[str] = []
+    if positive:
+        lines.append("主なプラス材料")
+        lines += [f"・{p}" for p in positive]
+    if negative:
+        if lines:
+            lines.append("")
+        lines.append("注意材料")
+        lines += [f"・{n}" for n in negative]
     return lines
 
 
@@ -173,6 +294,79 @@ def _buy_reason_text(
     return None
 
 
+# Legacy SELLの17ルールのうちラベル表示が必要なもの(3節の監査証跡拡張で
+# current_valueを実際に持ちうるルールのみ)。domain/signals/sell_signal.py
+# ::_RULE_LABELSと同じ文字列(意図的に同期。judgment moduleへの依存を避ける
+# ため値のみ独立して持つ、watchlist_judgment_summary_formatter.pyと同じ方針)。
+_SELL_RULE_LABELS: dict[str, str] = {
+    "dividend_cut": "減配(推測)",
+    "dividend_omission": "無配転落(推測)",
+    "continuous_operating_income_decline": "営業利益の継続悪化",
+    "continuous_operating_cashflow_decline": "営業キャッシュフローの継続悪化",
+    "financial_health_severe_deterioration": "財務健全性の重大な悪化(一般事業会社基準)",
+    "balance_sheet_insolvency": "債務超過",
+    "shareholder_benefit_abolished": "株主優待の廃止",
+    "shareholder_benefit_major_downgrade": "株主優待の大幅改悪",
+    "major_scandal": "重大な不祥事",
+    "accounting_problem": "会計問題",
+    "listing_maintenance_risk": "上場維持リスク・継続企業前提の重要事象",
+}
+
+_SELL_FACT_VALUE_TRANSLATIONS: dict[str, str] = {
+    "True": "該当あり",
+    "False": "該当なし",
+    "official_confirmed": "一次情報で確認",
+    "inferred_only": "二次情報のみ(未確認)",
+    "not_detected": "検出なし",
+    "MATERIAL_EVENT_CONFIRMED": "重大事象を確認",
+    "RISK_KEYWORD_DETECTED": "リスクキーワードのみ検出",
+    "NONE": "検出なし",
+}
+
+_CONTINUOUS_DECLINE_RULE_NAMES = frozenset(
+    {"continuous_operating_income_decline", "continuous_operating_cashflow_decline"}
+)
+
+
+def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
+    """Legacy SELLの1ルール分の監査証跡から、実際に値が残っているものだけを
+    事実の1行として組み立てる(内部enum名/真偽値をそのまま出さず自然文へ
+    翻訳する。3節の監査証跡拡張で追加したcurrent_valueが無いルールは
+    Noneを返し、呼び出し側で除外する)。"""
+    current_value = detail.get("current_value")
+    if current_value is None:
+        return None
+    rule_name = str(detail.get("rule_name"))
+    label = _SELL_RULE_LABELS.get(rule_name, rule_name)
+    if rule_name in _CONTINUOUS_DECLINE_RULE_NAMES:
+        previous_value = detail.get("previous_value")
+        period = detail.get("comparison_period")
+        if previous_value is not None:
+            period_note = f"、{period}" if period else ""
+            return f"{label}：前期{previous_value}円→今期{current_value}円{period_note}"
+        return f"{label}：{current_value}円"
+    threshold = detail.get("threshold")
+    if threshold is not None:
+        return f"{label}：{current_value}（基準{threshold}）"
+    return f"{label}：{_SELL_FACT_VALUE_TRANSLATIONS.get(current_value, current_value)}"
+
+
+def _legacy_sell_hold_facts_lines(audit_entry: AuditLogEntry) -> list[str]:
+    """純粋HOLD(Recommendation非生成)時、Legacy SELLの監査ログに残る
+    ルール別実データのうち、実際に値を保持しているものだけを事実として
+    示す(全17ルールの実数値を復元できるわけではないため、値が存在する
+    ものに限定する。データ不足で失われている項目を推測で埋めない)。"""
+    rule_evidence_details = audit_entry.input_values.get("rule_evidence_details")
+    if not rule_evidence_details:
+        return []
+    lines = []
+    for detail in rule_evidence_details:
+        line = _legacy_sell_hold_fact_line(detail)
+        if line is not None:
+            lines.append(line)
+    return lines
+
+
 class StockAnalysisViewService:
     def __init__(
         self,
@@ -180,6 +374,7 @@ class StockAnalysisViewService:
         latest_batch_pointer_repository: LatestBuyCandidateBatchPointerRepository | None = None,
         recommendation_repository: RecommendationRepository | None = None,
         holding_evaluation_record_repository: HoldingEvaluationRecordRepository | None = None,
+        audit_log_repository: AuditLogRepository | None = None,
         display_name_resolver: StockDisplayNameResolver | None = None,
     ) -> None:
         self._evaluation_records = (
@@ -192,6 +387,7 @@ class StockAnalysisViewService:
         self._holding_evaluation_records = (
             holding_evaluation_record_repository or HoldingEvaluationRecordRepository()
         )
+        self._audit_log = audit_log_repository or AuditLogRepository()
         self._display_name_resolver = display_name_resolver
 
     # --- BUY側 -----------------------------------------------------------
@@ -254,9 +450,18 @@ class StockAnalysisViewService:
             ]
             return "\n".join(lines)
 
+        if recommendation is not None:
+            facts_lines = _buy_facts_lines(recommendation)
+            if facts_lines:
+                lines += ["", "■ 判断根拠となった事実", *facts_lines]
+
+            interpretation_lines = _buy_interpretation_lines(recommendation)
+            if interpretation_lines:
+                lines += ["", "■ 解釈", *interpretation_lines]
+
         reason = _buy_reason_text(record, recommendation)
         if reason:
-            lines += ["", "■ 理由", reason]
+            lines += ["", "■ 総合判断", reason]
 
         if recommendation is not None:
             price_lines = _buy_price_lines(recommendation.buy_prices)
@@ -302,7 +507,29 @@ class StockAnalysisViewService:
         )
 
         if recommendation is None:
-            lines += ["", "■ 理由", _UNRESTORABLE]
+            # Phase 2-B追加調査(2026-08)対応: Legacy SELL担当の純粋HOLDのみ、
+            # authoritative_audit_log_id経由でその評価サイクルのAuditLogEntryを
+            # 参照する(HoldingEvaluationRecord自身が持つポインタのため、owner
+            # 取り違えは構造的に発生しない)。ProfitTaking/HoldingDecisionScore
+            # (SHADOW)担当のHOLDはこの経路の対象外(3節はLegacy SELLの証跡拡張
+            # のみが対象、7節ルール#8によりSHADOWは使わない)。
+            facts_lines: list[str] = []
+            if (
+                record.authoritative_engine == "LEGACY_SELL"
+                and record.authoritative_audit_log_id is not None
+            ):
+                audit_entry = self._audit_log.get(record.authoritative_audit_log_id)
+                if audit_entry is not None:
+                    facts_lines = _legacy_sell_hold_facts_lines(audit_entry)
+            if facts_lines:
+                lines += ["", "■ 判断根拠となった事実（投資前提悪化ルールの状況）", *facts_lines]
+                lines += [
+                    "",
+                    "■ 総合判断",
+                    "投資前提の悪化を示すルールには該当しませんでした。",
+                ]
+            else:
+                lines += ["", "■ 理由", _UNRESTORABLE]
             return "\n".join(lines)
 
         lines += ["", "■ 理由"]

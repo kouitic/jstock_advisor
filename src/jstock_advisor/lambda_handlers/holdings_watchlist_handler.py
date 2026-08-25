@@ -474,6 +474,7 @@ def _persist_holding_evaluation_record(
     authoritative_engine: str | None,
     authoritative_outcome_category: str,
     authoritative_recommendation_id: str | None,
+    authoritative_audit_log_id: str | None = None,
     authoritative_notification_sent: bool,
     legacy_sell_ran: bool,
     legacy_sell_recommendation_id: str | None,
@@ -507,6 +508,7 @@ def _persist_holding_evaluation_record(
         authoritative_engine=authoritative_engine,
         authoritative_outcome_category=authoritative_outcome_category,
         authoritative_recommendation_id=authoritative_recommendation_id,
+        authoritative_audit_log_id=authoritative_audit_log_id,
         authoritative_notification_sent=authoritative_notification_sent,
         legacy_sell_ran=legacy_sell_ran,
         legacy_sell_recommendation_id=legacy_sell_recommendation_id,
@@ -774,6 +776,7 @@ def _analyze_one_holding(
             authoritative_engine="LEGACY_SELL",
             authoritative_outcome_category=legacy_result.category,
             authoritative_recommendation_id=legacy_result.recommendation_id,
+            authoritative_audit_log_id=sell_outcome.audit_id,
             authoritative_notification_sent=legacy_result.notified,
             legacy_sell_ran=True,
             legacy_sell_recommendation_id=legacy_result.recommendation_id,
@@ -828,6 +831,7 @@ def _analyze_one_holding(
         result = _HoldingResult(
             recommended=False, notified=False, succeeded=True, category="hold", audit=audit
         )
+        mode_designated_engine = _resolve_mode_designated_engine(mode_plan)
         _persist_holding_evaluation_record(
             holding_evaluation_record_repo,
             holding,
@@ -837,9 +841,14 @@ def _analyze_one_holding(
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
-            authoritative_engine=_resolve_mode_designated_engine(mode_plan),
+            authoritative_engine=mode_designated_engine,
             authoritative_outcome_category=result.category,
             authoritative_recommendation_id=None,
+            authoritative_audit_log_id=(
+                sell_outcome.audit_id
+                if mode_designated_engine == "LEGACY_SELL" and plan.run_legacy_sell_evaluation
+                else None
+            ),
             authoritative_notification_sent=False,
             legacy_sell_ran=plan.run_legacy_sell_evaluation,
             legacy_sell_recommendation_id=None,
@@ -955,6 +964,7 @@ def _analyze_one_holding(
             authoritative_engine="PROFIT_TAKING",
             authoritative_outcome_category=result.category,
             authoritative_recommendation_id=result.recommendation_id,
+            authoritative_audit_log_id=pt_outcome.audit_id,
             authoritative_notification_sent=result.notified,
             legacy_sell_ran=plan.run_legacy_sell_evaluation,
             legacy_sell_recommendation_id=None,
@@ -985,6 +995,7 @@ def _analyze_one_holding(
     result = _HoldingResult(
         recommended=False, notified=False, succeeded=True, category="hold", audit=audit
     )
+    mode_designated_engine = _resolve_mode_designated_engine(mode_plan)
     _persist_holding_evaluation_record(
         holding_evaluation_record_repo,
         holding,
@@ -994,9 +1005,14 @@ def _analyze_one_holding(
         execution_plan_mode=runtime_lookup.config.mode.value,
         execution_plan_reason=plan.execution_reason.value,
         notification_enabled=notification_enabled,
-        authoritative_engine=_resolve_mode_designated_engine(mode_plan),
+        authoritative_engine=mode_designated_engine,
         authoritative_outcome_category=result.category,
         authoritative_recommendation_id=None,
+        authoritative_audit_log_id=(
+            sell_outcome.audit_id
+            if mode_designated_engine == "LEGACY_SELL" and plan.run_legacy_sell_evaluation
+            else None
+        ),
         authoritative_notification_sent=False,
         legacy_sell_ran=plan.run_legacy_sell_evaluation,
         legacy_sell_recommendation_id=None,

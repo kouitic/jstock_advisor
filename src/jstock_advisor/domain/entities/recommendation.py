@@ -64,6 +64,12 @@ class Recommendation(ImmutableSnapshot):
 
     total_score: float | None = None
     score_breakdown: ScoreBreakdown | None = None
+    # Phase 2-B「銘柄分析」向け(2026-08): company_quality_score算出に実際に
+    # 使用した判定時点の入力事実のうち、score_breakdown(算出結果)にも
+    # config_values_used(設定パラメータ)にも残らないもの(PER/PBR実数値、
+    # 自己資本比率、配当性向、割安度6シグナルの真偽値等)を保存する。
+    # 表示専用のスナップショットであり、投資判断ロジックには一切使用しない。
+    buy_score_input_facts: dict[str, Any] | None = None
 
     reasons: list[str] = []
     counter_factors: list[str] = []  # 反対材料

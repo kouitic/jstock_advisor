@@ -17,7 +17,7 @@ from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
     BuyCandidateEvaluationRecord,
 )
 from jstock_advisor.domain.entities.buy_decision import BuyDecisionReason
-from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
+from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale, ScoreBreakdown
 from jstock_advisor.domain.entities.enums import (
     BuyAction,
     CandidateSource,
@@ -30,6 +30,7 @@ from jstock_advisor.domain.entities.holding_evaluation_record import (
     build_holding_evaluation_id,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
 )
@@ -58,6 +59,7 @@ def _service(store_dir: Path) -> StockAnalysisViewService:
         holding_evaluation_record_repository=HoldingEvaluationRecordRepository(
             store_dir=store_dir
         ),
+        audit_log_repository=AuditLogRepository(store_dir=store_dir),
     )
 
 
@@ -150,6 +152,93 @@ def test_buy_price_tier_shows_exact_prices(tmp_path: Path) -> None:
     assert "打診買付：160円以下" in text
 
 
+def test_buy_facts_section_shows_yields_and_per_pbr_from_snapshot(tmp_path: Path) -> None:
+    """追加調査(2026-08)対応: BUYスナップショット拡張後、判断根拠となった事実
+    セクションに企業魅力度スコア・利回り・PER/PBR(自社過去中央値付き)が
+    実際に表示されること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        dividend_yield_pct_at_recommendation=3.2,
+        shareholder_benefit_yield_pct_at_recommendation=1.0,
+        total_yield_pct_at_recommendation=4.2,
+        buy_score_input_facts={
+            "current_per": "9.8",
+            "current_pbr": "0.82",
+            "historical_per_median": "12.3",
+            "historical_pbr_median": "1.05",
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.BUY,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "■ 判断根拠となった事実" in text
+    assert "配当利回り：3.20%" in text
+    assert "優待利回り：1.00%" in text
+    assert "総合利回り：4.20%" in text
+    assert "PER：9.8倍（自社の過去中央値12.3倍）" in text
+    assert "PBR：0.82倍（自社の過去中央値1.05倍）" in text
+
+
+def test_buy_interpretation_ranks_score_components_not_raw_per(tmp_path: Path) -> None:
+    """追加調査(2026-08)対応: 「解釈」はPER単体の絶対値から独自に割安と
+    断定せず、既存score_breakdownを配点比でランキングして表示する。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        score_breakdown=ScoreBreakdown(
+            total_yield_attractiveness=18.0,
+            dividend_sustainability=10.0,
+            financial_health=1.0,
+            undervaluation=16.0,
+            shareholder_benefit_value=8.0,
+            earnings_stability=4.0,
+            price_stability=4.0,
+            total=61.0,
+        ),
+        config_values_used={
+            "scoring_weights": {
+                "total_yield_attractiveness": 20,
+                "dividend_sustainability": 20,
+                "financial_health": 20,
+                "undervaluation": 20,
+                "shareholder_benefit_value": 10,
+                "earnings_stability": 5,
+                "price_stability": 5,
+            }
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.BUY,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "■ 解釈" in text
+    assert "主なプラス材料" in text
+    assert "総合利回りの魅力度（18.0/20点）" in text
+    assert "注意材料" in text
+    assert "財務健全性（1.0/20点）" in text
+    # PER/PBRの実数値から表示層で独自に「割安」と断定していないこと。
+    assert "PERが低い" not in text
+    assert "だから割安" not in text
+
+
 def test_score_below_threshold_shows_exact_numbers_when_snapshot_present(
     tmp_path: Path,
 ) -> None:
@@ -218,7 +307,12 @@ def test_score_below_threshold_falls_back_without_fabricating_numbers(
 
     text = service.build_buy_analysis_text("8306")
 
-    assert "62.77点" not in text
+    # 企業魅力度スコア自体は既存Recommendationに保存済みの事実であり、
+    # 「判断根拠となった事実」セクションに表示してよい(捏造ではない)。
+    assert "企業魅力度スコア：62.77点" in text
+    # 一方、格下げの「解釈・総合判断」側では、判定時点の閾値スナップショットが
+    # 無い場合に実数値の比較(例:「基準（70.0点）」)を捏造してはならない。
+    assert "の基準（" not in text
     assert "スナップショットが無いため" in text
 
 
@@ -396,3 +490,68 @@ def test_no_holding_evaluation_record_reports_not_found(tmp_path: Path) -> None:
     service = _service(tmp_path)
     text = service.build_holding_analysis_text("本人", "9999")
     assert "見つかりませんでした" in text
+
+
+def test_legacy_sell_hold_shows_facts_from_linked_audit_log(tmp_path: Path) -> None:
+    """追加調査(2026-08)対応: authoritative_audit_log_id経由で、Legacy SELLの
+    純粋HOLD時にも監査ログに残る実数値(3節の証跡拡張で追加した項目)を
+    事実として表示できる。owner取り違えは、HoldingEvaluationRecord自身が
+    保持するポインタのため構造的に発生しない。"""
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    audit_entry = AuditLogEntry(
+        audit_id="audit-1",
+        timestamp=_NOW,
+        stock_code="8306",
+        decision_type="sell_signal",
+        input_values={
+            "rule_evidence_details": [
+                {
+                    "rule_name": "financial_health_severe_deterioration",
+                    "status": "NOT_TRIGGERED",
+                    "current_value": "45.0%",
+                    "previous_value": None,
+                    "threshold": "15.0%",
+                    "comparison_period": None,
+                },
+                {
+                    "rule_name": "dividend_cut",
+                    "status": "NOT_TRIGGERED",
+                    "current_value": "False",
+                    "previous_value": None,
+                    "threshold": None,
+                    "comparison_period": None,
+                },
+                {
+                    "rule_name": "unfavorable_dividend_policy_change",
+                    "status": "NOT_EVALUATED",
+                    "current_value": None,
+                    "previous_value": None,
+                    "threshold": None,
+                    "comparison_period": None,
+                },
+            ]
+        },
+        calculation_formulas={},
+        output_values={},
+        data_sources=[],
+        rule_version="v1",
+    )
+    AuditLogRepository(store_dir=tmp_path).save(audit_entry)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id=None,
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="hold",
+        authoritative_audit_log_id="audit-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_holding_analysis_text("本人", "8306")
+
+    assert "保有継続" in text
+    assert "財務健全性の重大な悪化(一般事業会社基準)：45.0%（基準15.0%）" in text
+    assert "減配(推測)：該当なし" in text
+    # NOT_EVALUATED(current_value無し)のルールは表示しない(捏造しない)。
+    assert "配当方針の不利な変更" not in text
+    assert "現行データでは" not in text

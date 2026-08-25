@@ -109,6 +109,10 @@ class SellSignalOutcome:
     # 保有判断スコアのShadow比較用監査情報(実装プラン15節)。旧エンジンが
     # 判定根拠とした個別ルール名(TRIGGERED分)。データ取得失敗時は空。
     triggered_rule_names: tuple[str, ...] = ()
+    # Phase 2-B「銘柄分析」向け(2026-08): この判定サイクルで実際に書き込んだ
+    # AuditLogEntryのID(judgment audit呼び出しに到達しなかった場合はNone)。
+    # HoldingEvaluationRecord.authoritative_audit_log_idへ橋渡しするための参照。
+    audit_id: str | None = None
 
 
 def _evidence_detail_dict(e: SellRuleEvaluation) -> dict[str, object]:
@@ -382,10 +386,20 @@ class SellSignalService:
             result, snapshot, now, counter_factors_evaluated
         )
 
-        self._audit.record(
+        audit_entry = self._audit.record(
             decision_type="sell_signal",
             stock_code=holding.stock_code,
-            input_values=inputs.as_dict(),
+            input_values={
+                **inputs.as_dict(),
+                # Phase 2-B「銘柄分析」向け(2026-08、証跡拡張): 真偽値だけでなく
+                # 各ルールの構造化評価(現行値・閾値・説明文等)を、TRIGGERED/
+                # NOT_TRIGGERED/NOT_EVALUATEDを問わず全17ルール分保存する
+                # (既存のas_dict()は後方互換のため維持)。HOLD時もこの時点で
+                # 記録されるため、以前は失われていた個別ルールの事実が残る。
+                "rule_evidence_details": [
+                    _evidence_detail_dict(e) for e in inputs.evaluations.values()
+                ],
+            },
             calculation_formulas={
                 "judgment": (
                     "即時性criticalが1件以上 -> URGENT_REVIEW; "
@@ -412,7 +426,13 @@ class SellSignalService:
         )
 
         if recommendation_type == RecommendationType.HOLD:
-            return SellSignalOutcome(holding.stock_code, None, None, tuple(result.triggered_rules))
+            return SellSignalOutcome(
+                holding.stock_code,
+                None,
+                None,
+                tuple(result.triggered_rules),
+                audit_id=audit_entry.audit_id,
+            )
 
         evidence_details = result.evidence_details
 
@@ -585,5 +605,9 @@ class SellSignalService:
             ),
         )
         return SellSignalOutcome(
-            holding.stock_code, recommendation, None, tuple(result.triggered_rules)
+            holding.stock_code,
+            recommendation,
+            None,
+            tuple(result.triggered_rules),
+            audit_id=audit_entry.audit_id,
         )

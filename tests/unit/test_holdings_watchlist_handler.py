@@ -219,6 +219,7 @@ class _NoSignalOutcome:
     recommendation = None
     data_error = None
     triggered_rule_names: tuple[str, ...] = ()
+    audit_id: str | None = None
 
 
 def test_task_holding_hold_category_and_portfolio_concentration_notified(
@@ -948,6 +949,7 @@ class _FakeProfitTakingOutcome:
         self.recommendation = recommendation
         self.stock_code = recommendation.stock_code
         self.data_error = None
+        self.audit_id: str | None = None
 
 
 def _run_attention_scenario(

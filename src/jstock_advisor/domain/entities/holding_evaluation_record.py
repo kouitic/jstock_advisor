@@ -49,6 +49,17 @@ class HoldingEvaluationRecord(Entity):
     # summary_category()が返す各種区分)。
     authoritative_outcome_category: str
     authoritative_recommendation_id: str | None = None
+    # Phase 2-B「銘柄分析」向け追加調査(2026-08)対応: 本来の判定担当エンジンが
+    # そのサイクルで実際に書き込んだAuditLogEntryのID。authoritative_engineと
+    # 同じエンジンのものだけを保持する(legacy_sell_audit_id/profit_taking_
+    # audit_idのようなエンジン別フィールドは持たない。理由: 表示側は常に
+    # 「本来の判定担当が何を根拠にしたか」だけを知りたく、どのエンジンかを
+    # 意識させないため。エンジン別の実行有無・紐づくRecommendation IDは既存の
+    # legacy_sell_ran/profit_taking_recommendation_id等が担うため、ここへ
+    # 同じ情報をエンジン別に複製しない)。HOLDING_DECISION_SCORE(SHADOW)が
+    # 担当の場合は、SHADOWデータをauthoritativeな理由として使わない方針
+    # (Phase 2-B文章仕様)のため常にNoneのまま。
+    authoritative_audit_log_id: str | None = None
     # 実際にLINE個別通知が送信されたか(notification_enabledとは独立。kill switch
     # 抑止・DataQualityブロック等で送信されなければFalse)。
     authoritative_notification_sent: bool = False

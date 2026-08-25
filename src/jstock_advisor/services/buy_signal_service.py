@@ -548,6 +548,22 @@ class BuySignalService:
         )
         company_quality_score = score_result.breakdown.total
 
+        # Phase 2-B「銘柄分析」向け(2026-08): compute_score()内部では取得できない
+        # (buy_signal_service.py側でのみ計算される)PER/PBR関連の判定時点入力事実を
+        # score_result.input_facts(compute_score()自身が保持する分)へ合流させる。
+        # 投資判断ロジックには一切使用しない、表示専用の記録。
+        buy_score_input_facts: dict[str, object] = {
+            **score_result.input_facts,
+            "current_per": str(current_per) if current_per is not None else None,
+            "current_pbr": str(current_pbr) if current_pbr is not None else None,
+            "historical_per_median": str(per_median) if per_median is not None else None,
+            "historical_pbr_median": str(pbr_median) if pbr_median is not None else None,
+            "historical_average_dividend_yield_pct": historical_avg_dividend_yield_pct,
+            "drawdown_from_52w_high_pct": drawdown_pct,
+            "recent_price_change_pct": recent_price_change_pct,
+            "score_formulas": dict(score_result.formulas),
+        }
+
         # --- 13. purchase_attractiveness_score算出 ---
         purchase_attractiveness_score = compute_purchase_attractiveness_score(
             current_price=current_price,
@@ -813,6 +829,7 @@ class BuySignalService:
             fair_value_at_recommendation=valuation_anchor,
             total_score=company_quality_score,
             score_breakdown=score_result.breakdown,
+            buy_score_input_facts=buy_score_input_facts,
             reasons=positive_reasons,
             counter_factors=counter_factors,
             key_risks=counter_factors,

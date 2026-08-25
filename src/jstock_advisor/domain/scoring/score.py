@@ -56,6 +56,10 @@ class UndervaluationSignals:
 class ScoreResult:
     breakdown: ScoreBreakdown
     formulas: dict[str, str] = field(default_factory=dict)
+    # Phase 2-B「銘柄分析」向け(2026-08): 判定に実際に使用した入力値のうち、
+    # breakdown(算出結果の点数)には残らないものをそのまま保持する(表示専用、
+    # 判定ロジックからは参照しない)。
+    input_facts: dict[str, object] = field(default_factory=dict)
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -142,9 +146,14 @@ def score_shareholder_benefit_value(
 
 def score_earnings_stability(
     quarterly_operating_incomes: list[Decimal], weight: float
-) -> tuple[float, str]:
+) -> tuple[float, str, float | None]:
+    """3つ目の戻り値は「四半期営業利益が前期比非悪化だった割合」(Phase 2-B
+    「銘柄分析」向け、判定時点の入力事実スナップショット用。判定ロジック自体は
+    従来と同一、戻り値を1つ追加しているだけ)。データ不足でスコア自体が
+    中立評価(0.5)の場合はNone(比率自体を計算していないため)。
+    """
     if len(quarterly_operating_incomes) < 2:
-        return weight * 0.5, "四半期業績データ不足のため中立(0.5)評価"
+        return weight * 0.5, "四半期業績データ不足のため中立(0.5)評価", None
     non_decreasing = sum(
         1
         for i in range(1, len(quarterly_operating_incomes))
@@ -153,16 +162,23 @@ def score_earnings_stability(
     ratio = non_decreasing / (len(quarterly_operating_incomes) - 1)
     score = weight * ratio
     formula = f"四半期営業利益が前期比非悪化だった割合{ratio:.2f} × 配点{weight}点"
-    return score, formula
+    return score, formula, ratio
 
 
-def score_price_stability(price_bars: list[PriceBar], weight: float) -> tuple[float, str]:
+def score_price_stability(
+    price_bars: list[PriceBar], weight: float
+) -> tuple[float, str, float | None]:
+    """3つ目の戻り値は年率換算ボラティリティ(%)(Phase 2-B「銘柄分析」向け、
+    判定時点の入力事実スナップショット用。判定ロジック自体は従来と同一、
+    戻り値を1つ追加しているだけ)。データ不足でスコア自体が中立評価(0.5)の
+    場合はNone(ボラティリティ自体を計算していないため)。
+    """
     if len(price_bars) < 2:
-        return weight * 0.5, "株価履歴不足のため中立(0.5)評価"
+        return weight * 0.5, "株価履歴不足のため中立(0.5)評価", None
     closes = [float(bar.close) for bar in price_bars]
     returns = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes)) if closes[i - 1] > 0]
     if len(returns) < 2:
-        return weight * 0.5, "リターン計算に十分なデータがないため中立(0.5)評価"
+        return weight * 0.5, "リターン計算に十分なデータがないため中立(0.5)評価", None
     daily_vol = statistics.pstdev(returns)
     annualized_vol_pct = daily_vol * math.sqrt(_TRADING_DAYS_PER_YEAR) * 100
     ratio = 1 - _clip(
@@ -177,7 +193,7 @@ def score_price_stability(price_bars: list[PriceBar], weight: float) -> tuple[fl
         f"{_PRICE_STABILITY_LOW_VOL_PCT}%(満点)〜{_PRICE_STABILITY_HIGH_VOL_PCT}%(0点)"
         f"で評価 × 配点{weight}点"
     )
-    return score, formula
+    return score, formula, annualized_vol_pct
 
 
 def compute_score(
@@ -207,11 +223,11 @@ def compute_score(
     benefit_score, benefit_formula = score_shareholder_benefit_value(
         benefit_yield_pct, w.shareholder_benefit_value
     )
-    earnings_score, earnings_formula = score_earnings_stability(
-        quarterly_operating_incomes, w.earnings_stability
+    earnings_score, earnings_formula, operating_income_non_decrease_ratio = (
+        score_earnings_stability(quarterly_operating_incomes, w.earnings_stability)
     )
-    price_stability_score, price_stability_formula = score_price_stability(
-        price_bars, w.price_stability
+    price_stability_score, price_stability_formula, annualized_volatility_pct = (
+        score_price_stability(price_bars, w.price_stability)
     )
 
     total = (
@@ -243,4 +259,20 @@ def compute_score(
         "earnings_stability": earnings_formula,
         "price_stability": price_stability_formula,
     }
-    return ScoreResult(breakdown=breakdown, formulas=formulas)
+    # Phase 2-B「銘柄分析」向け(2026-08): 判定に使用したがbreakdown(点数)には
+    # 残らない入力事実。総合利回り・割安度6シグナルはundervaluation_signals/
+    # buy_signal_service.py側で別途PER/PBR実数値等と合わせて記録するため、
+    # ここではcompute_score()自身が受け取っている入力値のみを対象とする。
+    input_facts: dict[str, object] = {
+        "total_yield_pct": total_yield_pct,
+        "is_progressive_or_doe_policy": dividend.is_progressive_or_doe_policy,
+        "consecutive_dividend_increase_years": dividend.consecutive_dividend_increase_years,
+        "payout_ratio_pct": financial.payout_ratio_pct,
+        "equity_ratio_pct": financial.equity_ratio_pct,
+        "benefit_yield_pct": benefit_yield_pct,
+        "undervaluation_signals": undervaluation_signals.available(),
+        "quarterly_operating_incomes": [str(v) for v in quarterly_operating_incomes],
+        "operating_income_non_decrease_ratio": operating_income_non_decrease_ratio,
+        "annualized_volatility_pct": annualized_volatility_pct,
+    }
+    return ScoreResult(breakdown=breakdown, formulas=formulas, input_facts=input_facts)
