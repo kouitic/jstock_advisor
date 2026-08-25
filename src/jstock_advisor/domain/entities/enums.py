@@ -1451,6 +1451,10 @@ class ConversationAction(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
     WATCH = "WATCH"
+    # 銘柄分析(Phase 2-B、2026-08)。4文字銘柄コード入力→購入/売却・保有
+    # 判定の選択、というINPUT_WAITING単独の対話(CONFIRM_WAITINGへは進まない
+    # 読み取り専用フロー)。
+    ANALYZE = "ANALYZE"
 
 
 class ConversationStateName(StrEnum):

@@ -39,6 +39,12 @@ class BuyCandidateEvaluationRecord(Entity):
     # 判定時点でRecommendationが作成された場合のみ設定(EXCLUDED/
     # DATA_INSUFFICIENTの場合はNoneのまま)。
     recommendation_id: str | None = None
+    # Phase 2-B「銘柄分析」向け(2026-08): screen_investment_universe()が返す
+    # 除外理由(ScreeningOutcome.exclusion_reasons)。purchase_category=EXCLUDEDの
+    # 場合のみ設定する。以前はBuyAnalysisOutcomeに乗ったまま監査ログにしか
+    # 記録されず、銘柄コードから安定して参照できなかった(調査で確認済みの
+    # ギャップ)。
+    exclusion_reasons: tuple[str, ...] | None = None
 
     # --- finalize時(ランキングループ通過対象のみ)に埋まる。判定時点では
     # 全てNoneのまま ---

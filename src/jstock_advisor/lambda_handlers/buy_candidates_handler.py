@@ -374,6 +374,7 @@ def _record_evaluation_audit(
     holding_data_inconsistent: bool,
     holding_owner_count: int | None = None,
     holding_ids: tuple[str, ...] | None = None,
+    exclusion_reasons: list[str] | None = None,
 ) -> None:
     """全評価対象銘柄(BUY系以外も含む)について記録する監査(要求仕様§4・§14)。
 
@@ -393,6 +394,7 @@ def _record_evaluation_audit(
             ),
             "holding_owner_count": holding_owner_count,
             "holding_ids": list(holding_ids) if holding_ids is not None else None,
+            "exclusion_reasons": exclusion_reasons,
         },
         calculation_formulas={},
         output_values={
@@ -455,6 +457,7 @@ def _process_single_candidate(
     record_final_buy_action: BuyAction | None = None
     record_raw_buy_action: BuyAction | None = None
     record_recommendation_id: str | None = None
+    record_exclusion_reasons: list[str] | None = None
     try:
         # --- 統合BUY候補パイプライン(2026-07)。購入判定と、保有銘柄の場合の
         # 売却・利確判定(後段)とで同一のスナップショット(現在値・財務データ)を
@@ -517,6 +520,7 @@ def _process_single_candidate(
             record_purchase_category = PurchaseCategory.EXCLUDED
             record_final_buy_action = BuyAction.EXCLUDED
             record_raw_buy_action = BuyAction.EXCLUDED
+            record_exclusion_reasons = outcome.exclusion_reasons or None
             _record_evaluation_audit(
                 audit_service,
                 rule_version,
@@ -532,6 +536,7 @@ def _process_single_candidate(
                 final_buy_action=BuyAction.EXCLUDED,
                 conflicting_holding_action=None,
                 holding_data_inconsistent=False,
+                exclusion_reasons=record_exclusion_reasons,
             )
         else:
             recommendation = outcome.recommendation
@@ -768,6 +773,7 @@ def _process_single_candidate(
             record_final_buy_action,
             record_raw_buy_action,
             record_recommendation_id,
+            record_exclusion_reasons,
         )
         needs_code = category in ("data_insufficient", "failed")
         stock_code_for_category = stock_code if needs_code else None
@@ -810,6 +816,7 @@ def _save_evaluation_record_safely(
     final_buy_action: BuyAction | None,
     raw_buy_action: BuyAction | None,
     recommendation_id: str | None,
+    exclusion_reasons: list[str] | None = None,
 ) -> bool:
     """BuyCandidateEvaluationRecordの構築・保存失敗が既存の判定・通知フローを
     絶対にブロックしないためのラッパー(save_decision_snapshot_safely()と同じ
@@ -836,6 +843,9 @@ def _save_evaluation_record_safely(
                 final_buy_action=final_buy_action,
                 raw_buy_action=raw_buy_action,
                 recommendation_id=recommendation_id,
+                exclusion_reasons=(
+                    tuple(exclusion_reasons) if exclusion_reasons is not None else None
+                ),
             )
         )
         return True

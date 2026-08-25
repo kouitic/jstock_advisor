@@ -1,4 +1,9 @@
-"""ウォッチリスト一覧表示(LINE UI第二弾、読み取り専用、2026-08)のテスト。"""
+"""ウォッチリスト一覧表示(LINE UI第二弾、読み取り専用、2026-08)のテスト。
+
+ウォッチリスト表示改善(2026-08、Phase 2-B文章仕様最終案): 7区分固定順・
+0件は「対象なし」・区分ラベルは見出しに1回だけ(各行には含めない)・
+複数LINEメッセージ(最大5件、各4500文字)への分割。
+"""
 
 from __future__ import annotations
 
@@ -37,6 +42,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
     WatchlistRepository,
 )
+from jstock_advisor.services.buy_candidate_target_view_service import CATEGORY_DISPLAY_LABELS
 from jstock_advisor.services.latest_batch_records_provider import STILL_PROPAGATING_MESSAGE
 from jstock_advisor.services.watchlist_view_service import WatchlistViewService
 
@@ -113,23 +119,54 @@ def _service(store_dir: Path) -> WatchlistViewService:
     )
 
 
-def test_empty_watchlist_returns_empty_list(tmp_path: Path) -> None:
+def _single_message(service: WatchlistViewService) -> list[str]:
+    """テスト用: 単一メッセージ(通常件数)を前提に最初のメッセージだけ返す。"""
+    groups = service.build_message_groups()
+    assert isinstance(groups, list)
+    assert len(groups) == 1
+    return groups[0]
+
+
+def _lines_for_category(lines: list[str], label: str) -> list[str]:
+    """指定区分見出しの直後から、次の見出し(または末尾)までの行を返す
+    (見出し自身は含まない)。"""
+    header = f"【{label}】"
+    start = lines.index(header) + 1
+    end = len(lines)
+    for i in range(start, len(lines)):
+        if lines[i].startswith("【"):
+            end = i
+            break
+    return lines[start:end]
+
+
+def test_all_seven_category_headers_always_present(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    assert service.build_lines() == []
+    lines = _single_message(service)
+    for label in CATEGORY_DISPLAY_LABELS:
+        assert f"【{label}】" in lines
 
 
-def test_no_completed_batch_shows_no_history_for_all_items(tmp_path: Path) -> None:
+def test_empty_watchlist_shows_no_target_for_every_category(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    lines = _single_message(service)
+    for label in CATEGORY_DISPLAY_LABELS:
+        assert _lines_for_category(lines, label) == ["対象なし"]
+
+
+def test_no_completed_batch_groups_under_data_insufficient(tmp_path: Path) -> None:
     WatchlistRepository(store_dir=tmp_path).upsert(_watchlist_item("9432"))
     service = _service(tmp_path)
 
-    lines = service.build_lines()
+    lines = _single_message(service)
 
-    assert lines == ["銘柄9432（9432）｜判定履歴なし"]
+    assert _lines_for_category(lines, "データ不足") == ["銘柄9432（9432）｜判定履歴なし"]
+    assert _lines_for_category(lines, "買い待ち") == ["対象なし"]
 
 
-def test_item_not_in_latest_batch_shows_no_history(tmp_path: Path) -> None:
+def test_item_not_in_latest_batch_groups_under_data_insufficient(tmp_path: Path) -> None:
     """直近NORMAL完了batchの候補ユニバースに含まれなかった銘柄は
-    「判定履歴なし」(全履歴からの最新判定を遡らない)。"""
+    「データ不足」区分へ分類される(全履歴からの最新判定を遡らない)。"""
     WatchlistRepository(store_dir=tmp_path).upsert(_watchlist_item("9432"))
     eval_repo = BuyCandidateEvaluationRecordRepository(store_dir=tmp_path)
     eval_repo.upsert(_eval_record("batch-old", "9432"))  # 古いbatchにのみ存在
@@ -141,12 +178,14 @@ def test_item_not_in_latest_batch_shows_no_history(tmp_path: Path) -> None:
     )
     service = _service(tmp_path)
 
-    lines = service.build_lines()
+    lines = _single_message(service)
 
-    assert lines == ["銘柄9432（9432）｜判定履歴なし"]
+    assert _lines_for_category(lines, "データ不足") == ["銘柄9432（9432）｜判定履歴なし"]
 
 
-def test_item_in_latest_batch_shows_judgment(tmp_path: Path) -> None:
+def test_item_in_latest_batch_groups_under_its_category_without_per_line_label(
+    tmp_path: Path,
+) -> None:
     WatchlistRepository(store_dir=tmp_path).upsert(_watchlist_item("9432"))
     eval_repo = BuyCandidateEvaluationRecordRepository(store_dir=tmp_path)
     eval_repo.upsert(_eval_record("batch-1", "9432", recommendation_id="rec-9432"))
@@ -159,12 +198,15 @@ def test_item_in_latest_batch_shows_judgment(tmp_path: Path) -> None:
     )
     service = _service(tmp_path)
 
-    lines = service.build_lines()
+    lines = _single_message(service)
 
-    assert lines == ["銘柄9432（9432）｜買い待ち｜現在値が買付価格を上回る"]
+    # 区分ラベル(買い待ち)は見出し側にのみ表示され、銘柄行には含まれない。
+    assert _lines_for_category(lines, "買い待ち") == [
+        "銘柄9432（9432）｜現在値が買付価格を上回る"
+    ]
 
 
-def test_sorted_by_priority_then_stock_code(tmp_path: Path) -> None:
+def test_sorted_by_priority_then_stock_code_within_category(tmp_path: Path) -> None:
     repo = WatchlistRepository(store_dir=tmp_path)
     repo.upsert(_watchlist_item("2222", priority=Priority.LOW))
     repo.upsert(_watchlist_item("1111", priority=Priority.HIGH))
@@ -172,9 +214,10 @@ def test_sorted_by_priority_then_stock_code(tmp_path: Path) -> None:
     repo.upsert(_watchlist_item("4444", priority=Priority.MEDIUM))
     service = _service(tmp_path)
 
-    lines = service.build_lines()
+    lines = _single_message(service)
+    category_lines = _lines_for_category(lines, "データ不足")
 
-    codes_in_order = [line.split("（")[1][:4] for line in lines]
+    codes_in_order = [line.split("（")[1][:4] for line in category_lines]
     assert codes_in_order == ["1111", "3333", "4444", "2222"]
 
 
@@ -191,9 +234,48 @@ def test_still_propagating_returns_message_string(tmp_path: Path) -> None:
     )
     service = _service(tmp_path)
 
-    result = service.build_lines()
+    result = service.build_message_groups()
 
     assert result == STILL_PROPAGATING_MESSAGE
+
+
+def test_overflow_splits_into_multiple_messages_without_dropping_headers(
+    tmp_path: Path,
+) -> None:
+    """1メッセージに収まらない件数の場合、複数メッセージへ分割されるが、
+    どのメッセージ群全体を通じても7区分の見出しは必ず一度は出現する。"""
+    watchlist_repo = WatchlistRepository(store_dir=tmp_path)
+    eval_repo = BuyCandidateEvaluationRecordRepository(store_dir=tmp_path)
+    for i in range(400):
+        stock_code = f"{1000 + i}"
+        watchlist_repo.upsert(_watchlist_item(stock_code))
+        eval_repo.upsert(
+            _eval_record(
+                "batch-1",
+                stock_code,
+                purchase_category=PurchaseCategory.NOT_ATTRACTIVE,
+                final_buy_action=BuyAction.NOT_ATTRACTIVE,
+                recommendation_id=None,
+            )
+        )
+    pointer_repo = LatestBuyCandidateBatchPointerRepository(store_dir=tmp_path)
+    pointer_repo.update_latest_completed(
+        LatestBuyCandidateBatchPointer(
+            latest_completed_batch_id="batch-1", completed_at=_NOW, total_candidates=400
+        )
+    )
+    service = _service(tmp_path)
+
+    groups = service.build_message_groups()
+
+    assert isinstance(groups, list)
+    assert len(groups) > 1
+    assert len(groups) <= 5
+    for group in groups:
+        assert sum(len(line) + 1 for line in group) <= 4500 + 200  # ヘッダー強制追記分の余裕
+    all_lines = [line for group in groups for line in group]
+    for label in CATEGORY_DISPLAY_LABELS:
+        assert f"【{label}】" in all_lines
 
 
 def test_does_not_write_to_watchlist_or_evaluation_records(tmp_path: Path) -> None:

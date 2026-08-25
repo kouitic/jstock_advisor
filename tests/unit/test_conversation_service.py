@@ -61,6 +61,10 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             # 無い場合はrepo.get()がClientErrorとなり安全側の一時停止扱いに
             # フォールバックしてしまうため)。
             ("jstock-trading_pause_config", "config_id"),
+            # 銘柄分析(Phase 2-B、2026-08)向け。
+            ("jstock-buy_candidate_batch_completion", "pointer_id"),
+            ("jstock-buy_candidate_evaluation_records", "evaluation_id"),
+            ("jstock-recommendations", "recommendation_id"),
         ):
             client.create_table(
                 TableName=table_name,
@@ -68,6 +72,26 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                 AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
                 BillingMode="PAY_PER_REQUEST",
             )
+        client.create_table(
+            TableName="jstock-holding_evaluation_records",
+            KeySchema=[{"AttributeName": "holding_evaluation_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "holding_evaluation_id", "AttributeType": "S"},
+                {"AttributeName": "holding_id", "AttributeType": "S"},
+                {"AttributeName": "evaluated_at", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "holding_id-index",
+                    "KeySchema": [
+                        {"AttributeName": "holding_id", "KeyType": "HASH"},
+                        {"AttributeName": "evaluated_at", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
         yield
 
 
@@ -733,3 +757,157 @@ def test_commit_sell_blocked_if_paused_after_conversation_started(
     holding = HoldingRepository().get(_HOLDING_ID)
     assert holding is not None
     assert holding.shares == 100  # 変更されていない
+
+
+# --- 銘柄分析(Phase 2-B、2026-08、読み取り専用) -----------------------------
+
+
+def test_analyze_flow_start_prompts_for_code(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    reply = service.handle_postback(_USER, "start_analyze", None, _NOW)
+    assert "銘柄コード" in reply.text
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    assert state.state == ConversationStateName.INPUT_WAITING
+
+
+def test_analyze_flow_unknown_code_is_rejected_and_state_ends(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    service.handle_postback(_USER, "start_analyze", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, "9999", _NOW)
+
+    assert "見つかりませんでした" in reply.text
+    # 該当データが無くてもstateは終了する(読み取り専用フローは常に1往復で
+    # 終わる、修正9)。
+    assert conversation_state_store.get(_USER, _NOW) is None
+
+
+def test_analyze_flow_invalid_code_keeps_state_for_retry(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    service.handle_postback(_USER, "start_analyze", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, "12", _NOW)
+
+    assert "銘柄コードが不正です" in reply.text
+    # 形式不正の時点ではstateを終了しない(_handle_watch_inputと同じ方針、
+    # ユーザーが再送信できるように)。
+    assert conversation_state_store.get(_USER, _NOW) is not None
+
+
+def test_analyze_flow_single_owner_holding_offers_sell_button_only(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    _seed_holding(shares=100)
+    service.handle_postback(_USER, "start_analyze", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+
+    reply = service.handle_text_input(_USER, state, _STOCK, _NOW)
+
+    assert conversation_state_store.get(_USER, _NOW) is None
+    assert reply.quick_reply is not None
+    labels = [button.label for button in reply.quick_reply]
+    assert labels == ["売却・保有判定を見る"]
+    assert reply.quick_reply[0].postback_data == f"action=show_analysis_sell&code={_STOCK}"
+
+
+def test_analyze_flow_sell_analysis_no_evaluation_record_is_reported_honestly(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """保有銘柄はあるが、まだ一度もholdings_watchlist_handlerの評価を経て
+    いない(HoldingEvaluationRecordが無い)場合、「保有継続」等を捏造せず、
+    データが見つからない旨を正直に伝える。"""
+    _seed_holding(shares=300)
+
+    reply = service.handle_postback(_USER, "show_analysis_sell", None, _NOW, code=_STOCK)
+
+    assert "見つかりませんでした" in reply.text
+
+
+def test_analyze_flow_sell_analysis_pure_hold_shows_unrestorable_reason(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """HoldingEvaluationRecordはあるが、通知権限を持つエンジンがHOLDを返した
+    (Recommendationが作られなかった)場合は「保有継続」+理由復元不可を表示する
+    (E節: SHADOW中のHoldingDecisionResultは初期実装では参照しない)。"""
+    from jstock_advisor.domain.entities.holding_evaluation_record import (
+        HoldingEvaluationRecord,
+        build_holding_evaluation_id,
+    )
+    from jstock_advisor.infrastructure.local_repository.holding_evaluation_record_repository import (  # noqa: E501
+        HoldingEvaluationRecordRepository,
+    )
+
+    _seed_holding(shares=300)
+    HoldingEvaluationRecordRepository().save(
+        HoldingEvaluationRecord(
+            holding_evaluation_id=build_holding_evaluation_id(_HOLDING_ID, _NOW),
+            holding_id=_HOLDING_ID,
+            owner=DEFAULT_OWNER,
+            stock_code=_STOCK,
+            evaluated_at=_NOW,
+            rule_version="v1",
+            authoritative_engine="LEGACY_SELL",
+            authoritative_outcome_category="hold",
+        )
+    )
+
+    reply = service.handle_postback(_USER, "show_analysis_sell", None, _NOW, code=_STOCK)
+
+    assert "【銘柄分析】" in reply.text
+    assert "保有継続" in reply.text
+    assert "現行データでは" in reply.text
+
+
+def test_analyze_flow_sell_analysis_multiple_owners_offers_choice(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    from jstock_advisor.domain.entities.enums import AccountType
+    from jstock_advisor.domain.entities.holding import Holding
+
+    _seed_holding(shares=100)
+    second_owner = "owner-b"
+    HoldingRepository().upsert(
+        Holding(
+            owner=second_owner,
+            holding_id=build_holding_id(second_owner, _STOCK),
+            stock_code=_STOCK,
+            stock_name="x",
+            shares=50,
+            average_purchase_price=Decimal("1000"),
+            total_purchase_amount=Decimal("50000"),
+            first_purchase_date=dt.date(2026, 8, 1),
+            last_purchase_date=dt.date(2026, 8, 1),
+            account_type=AccountType.GENERAL,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    reply = service.handle_postback(_USER, "show_analysis_sell", None, _NOW, code=_STOCK)
+
+    assert reply.quick_reply is not None
+    labels = sorted(button.label for button in reply.quick_reply)
+    assert labels == sorted([DEFAULT_OWNER, second_owner])
+    for button in reply.quick_reply:
+        assert button.postback_data.startswith(f"action=show_analysis_sell&code={_STOCK}&owner=")
+
+    owner_reply = service.handle_postback(
+        _USER, "show_analysis_sell", None, _NOW, code=_STOCK, owner=second_owner
+    )
+    assert second_owner in owner_reply.text
+
+
+def test_analyze_flow_no_data_at_all_is_rejected(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    reply = service.handle_postback(_USER, "show_analysis_buy", None, _NOW, code=None)
+    assert "見つかりませんでした" in reply.text

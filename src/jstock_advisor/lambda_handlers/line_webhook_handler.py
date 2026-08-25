@@ -20,16 +20,27 @@ import logging
 import os
 from typing import Any
 
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import LineClient, build_line_client_from_env
 from jstock_advisor.infrastructure.line.webhook import (
     parse_postback_events,
     parse_text_message_events,
     verify_line_signature,
 )
+from jstock_advisor.services.conversation_service import ConversationReply
 from jstock_advisor.services.line_event_router import build_line_event_router
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _send_reply(line_client: LineClient, reply_token: str, reply: ConversationReply) -> None:
+    """ウォッチリスト表示改善(2026-08)向け: reply.textsが設定されている場合は
+    複数メッセージ返信(LineClient.reply_messages)、それ以外は既存の単一
+    メッセージ返信を使う(後方互換)。"""
+    if reply.texts:
+        line_client.reply_messages(reply_token, reply.texts, reply.quick_reply)
+    else:
+        line_client.reply_message(reply_token, reply.text, reply.quick_reply)
 
 
 def _extract_body_bytes(event: dict[str, Any]) -> bytes:
@@ -71,7 +82,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             ignored += 1
             continue
         reply = router.route_postback(postback_event, now)
-        line_client.reply_message(postback_event.reply_token, reply.text, reply.quick_reply)
+        _send_reply(line_client, postback_event.reply_token, reply)
         handled += 1
 
     for message_event in parse_text_message_events(body_bytes):
@@ -80,7 +91,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             ignored += 1
             continue
         reply = router.route_text(message_event, now)
-        line_client.reply_message(message_event.reply_token, reply.text, reply.quick_reply)
+        _send_reply(line_client, message_event.reply_token, reply)
         handled += 1
 
     logger.info("line_webhook_handler done: handled=%d ignored=%d", handled, ignored)

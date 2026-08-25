@@ -882,6 +882,13 @@ class ProfitTakingService:
                 "fair_value_action_usable": result.fair_value_action_usable,
                 # 利益保全(Profit Protection)判定当時に実際に使用した閾値(§18)。
                 "profit_protection": self._config.profit_taking.profit_protection.model_dump(),
+                # Phase 2-B「銘柄分析」向け(2026-08): PARTIAL_PROFIT_TAKEの
+                # 「目標比率→理論株数→単元株調整→最終株数」フローで使用した
+                # 目標比率テーブルを判定時点の値としてスナップショットする
+                # (どのsell_intensityがどの比率に対応したかは
+                # suggested_sell_ratio/sell_intensityから復元できるが、比率
+                # テーブル自体の判定時点値は従来保存されていなかった)。
+                "partial_sell_ratios": self._config.profit_taking.partial_sell_ratios.model_dump(),
             },
             data_sources=list(snapshot.data_sources),
             next_review_conditions=_build_next_review_conditions(

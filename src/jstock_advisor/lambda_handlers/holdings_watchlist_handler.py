@@ -62,6 +62,10 @@ from jstock_advisor.domain.entities.evaluation_audit import HoldingEvaluationAud
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
+from jstock_advisor.domain.entities.holding_evaluation_record import (
+    HoldingEvaluationRecord,
+    build_holding_evaluation_id,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.exit_price_range import evaluate_exit_price_range
@@ -77,6 +81,9 @@ from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository
 )
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
     HoldingDecisionResultRepository,
+)
+from jstock_advisor.infrastructure.local_repository.holding_evaluation_record_repository import (
+    HoldingEvaluationRecordRepository,
 )
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
@@ -159,6 +166,10 @@ class _HoldingResult:
     # できた場合のみTrue(attention_detectedとは別に明示的に保持し、将来別の
     # WATCH系通知が追加されてもRecommendationType.WATCHからの推測に依存しない)。
     attention_sent: bool = False
+    # Phase 2-B「銘柄分析」向け(2026-08): HoldingEvaluationRecordのauthoritative_
+    # recommendation_idへそのまま渡すための、この結果を生んだRecommendationのID。
+    # 通知の有無に関わらず、Recommendationが作成された場合のみ設定する。
+    recommendation_id: str | None = None
 
 
 _KILL_SWITCH_SUPPRESSED_OUTCOME = NotificationOutcome(
@@ -351,6 +362,7 @@ def _notify_legacy_sell_and_build_result(
         detected_recommendation_type=(
             recommendation.recommendation_type if not outcome.data_quality_blocked else None
         ),
+        recommendation_id=recommendation.recommendation_id,
     )
 
 
@@ -444,8 +456,84 @@ def _notify_holding_decision_and_build_result(
         detected_recommendation_type=(
             recommendation.recommendation_type if not outcome.data_quality_blocked else None
         ),
+        recommendation_id=recommendation.recommendation_id,
     )
     return holding_result, linked_result
+
+
+def _persist_holding_evaluation_record(
+    holding_evaluation_record_repo: HoldingEvaluationRecordRepository,
+    holding: Holding,
+    now: dt.datetime,
+    execution_context: ExecutionContext,
+    rule_version: str,
+    *,
+    execution_plan_mode: str | None,
+    execution_plan_reason: str | None,
+    notification_enabled: bool | None,
+    authoritative_engine: str | None,
+    authoritative_outcome_category: str,
+    authoritative_recommendation_id: str | None,
+    authoritative_notification_sent: bool,
+    legacy_sell_ran: bool,
+    legacy_sell_recommendation_id: str | None,
+    profit_taking_ran: bool,
+    profit_taking_recommendation_id: str | None,
+    holding_decision_ran: bool,
+    holding_decision_result_id: str | None,
+    holding_decision_notified: bool,
+) -> None:
+    """Phase 2-B「銘柄分析」向け(2026-08): 呼び出し側で評価本体の結果を一旦
+    構造化した(このキーワード引数群)うえで、HoldingEvaluationRecordとして
+    1件記録する。_analyze_one_holding()の全ての戻り経路(データ取得失敗・
+    整合性エラー・各エンジンの通知確定・利確判定・純粋なHOLDの全て)から
+    呼ばれ、必ず1件のレコードが残る。VALIDATIONでは既存のRecommendation等と
+    同様、判定履歴を汚さないため保存自体をスキップする。参照用の補助レコード
+    のため、保存に失敗しても既存の通知・戻り値には一切影響させない
+    (save_decision_snapshot_safelyと同じfire-and-forget方針)。
+    """
+    if execution_context.is_validation:
+        return
+    record = HoldingEvaluationRecord(
+        holding_evaluation_id=build_holding_evaluation_id(holding.holding_id, now),
+        holding_id=holding.holding_id,
+        owner=holding.owner,
+        stock_code=holding.stock_code,
+        evaluated_at=now,
+        rule_version=rule_version,
+        execution_plan_mode=execution_plan_mode,
+        execution_plan_reason=execution_plan_reason,
+        notification_enabled=notification_enabled,
+        authoritative_engine=authoritative_engine,
+        authoritative_outcome_category=authoritative_outcome_category,
+        authoritative_recommendation_id=authoritative_recommendation_id,
+        authoritative_notification_sent=authoritative_notification_sent,
+        legacy_sell_ran=legacy_sell_ran,
+        legacy_sell_recommendation_id=legacy_sell_recommendation_id,
+        profit_taking_ran=profit_taking_ran,
+        profit_taking_recommendation_id=profit_taking_recommendation_id,
+        holding_decision_ran=holding_decision_ran,
+        holding_decision_result_id=holding_decision_result_id,
+        holding_decision_notified=holding_decision_notified,
+    )
+    try:
+        holding_evaluation_record_repo.save(record)
+    except Exception:  # noqa: BLE001 - 記録失敗で既存の通知・戻り値に影響させない
+        logger.exception("holding_evaluation_record_save_failed holding_id=%s", holding.holding_id)
+
+
+def _resolve_mode_designated_engine(
+    mode_plan: Any,
+) -> str | None:
+    """kill switchの影響を受けないmode_plan(notification_enabled=True相当)を
+    基準に「本来の判定担当」エンジンを決定する(コードレビュー対応: authoritative_
+    engineはkill switch適用後のplan.allow_*_notificationだけから決定しない)。
+    """
+    if mode_plan.allow_legacy_sell_notification:
+        return "LEGACY_SELL"
+    if mode_plan.allow_holding_decision_notification:
+        return "HOLDING_DECISION_SCORE"
+    return None
 
 
 def _analyze_one_holding(
@@ -458,6 +546,7 @@ def _analyze_one_holding(
     holding_decision_service: HoldingDecisionService,
     runtime_config_service: HoldingDecisionRuntimeConfigService,
     holding_decision_result_repo: HoldingDecisionResultRepository,
+    holding_evaluation_record_repo: HoldingEvaluationRecordRepository,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     rule_version_service: RuleVersionService,
@@ -491,13 +580,35 @@ def _analyze_one_holding(
             confidence=None,
             error_code="DATA_FETCH_FAILED",
         )
-        return _HoldingResult(
+        result = _HoldingResult(
             recommended=False,
             notified=False,
             succeeded=False,
             category="data_insufficient",
             audit=audit,
         )
+        _persist_holding_evaluation_record(
+            holding_evaluation_record_repo,
+            holding,
+            now,
+            execution_context,
+            rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            execution_plan_mode=None,
+            execution_plan_reason=None,
+            notification_enabled=None,
+            authoritative_engine=None,
+            authoritative_outcome_category=result.category,
+            authoritative_recommendation_id=None,
+            authoritative_notification_sent=False,
+            legacy_sell_ran=False,
+            legacy_sell_recommendation_id=None,
+            profit_taking_ran=False,
+            profit_taking_recommendation_id=None,
+            holding_decision_ran=False,
+            holding_decision_result_id=None,
+            holding_decision_notified=False,
+        )
+        return result
 
     # kill switchは緊急停止用途のため、mode等のTTLキャッシュを経由せず毎回
     # 最新値を取得する(実装プラン修正2)。ポートフォリオ集中リスク通知より前に取得し、
@@ -593,13 +704,35 @@ def _analyze_one_holding(
                 error_code="DATA_INTEGRITY_ERROR",
             )
             if legacy_result is None:
-                return _HoldingResult(
+                result = _HoldingResult(
                     recommended=False,
                     notified=False,
                     succeeded=False,
                     category=summary_category(integrity_audit),
                     audit=integrity_audit,
                 )
+                _persist_holding_evaluation_record(
+                    holding_evaluation_record_repo,
+                    holding,
+                    now,
+                    execution_context,
+                    rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+                    execution_plan_mode=runtime_lookup.config.mode.value,
+                    execution_plan_reason=plan.execution_reason.value,
+                    notification_enabled=notification_enabled,
+                    authoritative_engine="HOLDING_DECISION_SCORE",
+                    authoritative_outcome_category=result.category,
+                    authoritative_recommendation_id=None,
+                    authoritative_notification_sent=False,
+                    legacy_sell_ran=plan.run_legacy_sell_evaluation,
+                    legacy_sell_recommendation_id=None,
+                    profit_taking_ran=False,
+                    profit_taking_recommendation_id=None,
+                    holding_decision_ran=True,
+                    holding_decision_result_id=None,
+                    holding_decision_notified=False,
+                )
+                return result
             # 旧エンジンが既にこのサイクルの通知を確定させている場合、新エンジン側の
             # shadow計算失敗によってその成功結果を上書きしない(ログにのみ残す)。
             logger.warning(
@@ -629,8 +762,50 @@ def _analyze_one_holding(
                 holding_decision_result_repo.save(hd_result)
 
     if legacy_result is not None:
+        _persist_holding_evaluation_record(
+            holding_evaluation_record_repo,
+            holding,
+            now,
+            execution_context,
+            rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            execution_plan_mode=runtime_lookup.config.mode.value,
+            execution_plan_reason=plan.execution_reason.value,
+            notification_enabled=notification_enabled,
+            authoritative_engine="LEGACY_SELL",
+            authoritative_outcome_category=legacy_result.category,
+            authoritative_recommendation_id=legacy_result.recommendation_id,
+            authoritative_notification_sent=legacy_result.notified,
+            legacy_sell_ran=True,
+            legacy_sell_recommendation_id=legacy_result.recommendation_id,
+            profit_taking_ran=False,
+            profit_taking_recommendation_id=None,
+            holding_decision_ran=plan.run_holding_decision_evaluation,
+            holding_decision_result_id=None,
+            holding_decision_notified=False,
+        )
         return legacy_result
     if holding_decision_result_notified is not None:
+        _persist_holding_evaluation_record(
+            holding_evaluation_record_repo,
+            holding,
+            now,
+            execution_context,
+            rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            execution_plan_mode=runtime_lookup.config.mode.value,
+            execution_plan_reason=plan.execution_reason.value,
+            notification_enabled=notification_enabled,
+            authoritative_engine="HOLDING_DECISION_SCORE",
+            authoritative_outcome_category=holding_decision_result_notified.category,
+            authoritative_recommendation_id=holding_decision_result_notified.recommendation_id,
+            authoritative_notification_sent=holding_decision_result_notified.notified,
+            legacy_sell_ran=plan.run_legacy_sell_evaluation,
+            legacy_sell_recommendation_id=None,
+            profit_taking_ran=False,
+            profit_taking_recommendation_id=None,
+            holding_decision_ran=True,
+            holding_decision_result_id=hd_result.holding_decision_result_id,
+            holding_decision_notified=True,
+        )
         return holding_decision_result_notified
 
     if not plan.run_profit_taking_when_no_sell_notification:
@@ -650,9 +825,31 @@ def _analyze_one_holding(
             confidence=None,
             error_code=None,
         )
-        return _HoldingResult(
+        result = _HoldingResult(
             recommended=False, notified=False, succeeded=True, category="hold", audit=audit
         )
+        _persist_holding_evaluation_record(
+            holding_evaluation_record_repo,
+            holding,
+            now,
+            execution_context,
+            rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            execution_plan_mode=runtime_lookup.config.mode.value,
+            execution_plan_reason=plan.execution_reason.value,
+            notification_enabled=notification_enabled,
+            authoritative_engine=_resolve_mode_designated_engine(mode_plan),
+            authoritative_outcome_category=result.category,
+            authoritative_recommendation_id=None,
+            authoritative_notification_sent=False,
+            legacy_sell_ran=plan.run_legacy_sell_evaluation,
+            legacy_sell_recommendation_id=None,
+            profit_taking_ran=False,
+            profit_taking_recommendation_id=None,
+            holding_decision_ran=plan.run_holding_decision_evaluation,
+            holding_decision_result_id=None,
+            holding_decision_notified=False,
+        )
+        return result
 
     pt_outcome = profit_service.analyze(holding, now, snapshot=snapshot)
     if pt_outcome.recommendation is not None:
@@ -723,7 +920,7 @@ def _analyze_one_holding(
         # (notification_enabled=Falseは送信のみを止める仕組みであり、判定の
         # 信頼性自体を否定するものではないため)。
         data_quality_ok = not outcome.data_quality_blocked
-        return _HoldingResult(
+        result = _HoldingResult(
             recommended=True,
             notified=outcome.sent,
             succeeded=True,
@@ -744,7 +941,30 @@ def _analyze_one_holding(
             detected_recommendation_type=(
                 pt_outcome.recommendation.recommendation_type if data_quality_ok else None
             ),
+            recommendation_id=pt_outcome.recommendation.recommendation_id,
         )
+        _persist_holding_evaluation_record(
+            holding_evaluation_record_repo,
+            holding,
+            now,
+            execution_context,
+            rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            execution_plan_mode=runtime_lookup.config.mode.value,
+            execution_plan_reason=plan.execution_reason.value,
+            notification_enabled=notification_enabled,
+            authoritative_engine="PROFIT_TAKING",
+            authoritative_outcome_category=result.category,
+            authoritative_recommendation_id=result.recommendation_id,
+            authoritative_notification_sent=result.notified,
+            legacy_sell_ran=plan.run_legacy_sell_evaluation,
+            legacy_sell_recommendation_id=None,
+            profit_taking_ran=True,
+            profit_taking_recommendation_id=result.recommendation_id,
+            holding_decision_ran=plan.run_holding_decision_evaluation,
+            holding_decision_result_id=None,
+            holding_decision_notified=False,
+        )
+        return result
 
     audit = HoldingEvaluationAudit(
         stock_code=holding.stock_code,
@@ -762,9 +982,31 @@ def _analyze_one_holding(
         confidence=None,
         error_code=None,
     )
-    return _HoldingResult(
+    result = _HoldingResult(
         recommended=False, notified=False, succeeded=True, category="hold", audit=audit
     )
+    _persist_holding_evaluation_record(
+        holding_evaluation_record_repo,
+        holding,
+        now,
+        execution_context,
+        rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+        execution_plan_mode=runtime_lookup.config.mode.value,
+        execution_plan_reason=plan.execution_reason.value,
+        notification_enabled=notification_enabled,
+        authoritative_engine=_resolve_mode_designated_engine(mode_plan),
+        authoritative_outcome_category=result.category,
+        authoritative_recommendation_id=None,
+        authoritative_notification_sent=False,
+        legacy_sell_ran=plan.run_legacy_sell_evaluation,
+        legacy_sell_recommendation_id=None,
+        profit_taking_ran=True,
+        profit_taking_recommendation_id=None,
+        holding_decision_ran=plan.run_holding_decision_evaluation,
+        holding_decision_result_id=None,
+        holding_decision_notified=False,
+    )
+    return result
 
 
 def _count_holding_summary_actions(entries: list[str]) -> dict[HoldingSummaryAction, int]:
@@ -933,6 +1175,7 @@ def _process_single_holding(
         execution_context=execution_context,
     )
     holding_decision_result_repo = HoldingDecisionResultRepository()
+    holding_evaluation_record_repo = HoldingEvaluationRecordRepository()
     try:
         result = _analyze_one_holding(
             holding,
@@ -944,6 +1187,7 @@ def _process_single_holding(
             holding_decision_service,
             runtime_config_service,
             holding_decision_result_repo,
+            holding_evaluation_record_repo,
             recommendation_repo,
             notification_service,
             rule_version_service,

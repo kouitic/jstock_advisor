@@ -31,6 +31,9 @@ from jstock_advisor.infrastructure.local_repository.daily_notification_priority_
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
     HoldingDecisionResultRepository,
 )
+from jstock_advisor.infrastructure.local_repository.holding_evaluation_record_repository import (
+    HoldingEvaluationRecordRepository,
+)
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
 )
@@ -80,6 +83,7 @@ def _build_services(store_dir: Path, mode: RuntimeConfigMode):
         _PROVIDERS, _CFG, thesis_service, runtime_config_service, audit_service
     )
     holding_decision_result_repo = HoldingDecisionResultRepository(store_dir)
+    holding_evaluation_record_repo = HoldingEvaluationRecordRepository(store_dir)
     recommendation_repo = RecommendationRepository(store_dir)
     line_client = _FakeLineClient()
     notification_service = LineNotificationService(
@@ -99,6 +103,7 @@ def _build_services(store_dir: Path, mode: RuntimeConfigMode):
         "holding_decision_service": holding_decision_service,
         "runtime_config_service": runtime_config_service,
         "holding_decision_result_repo": holding_decision_result_repo,
+        "holding_evaluation_record_repo": holding_evaluation_record_repo,
         "recommendation_repo": recommendation_repo,
         "notification_service": notification_service,
         "rule_version_service": RuleVersionService(),
@@ -135,6 +140,7 @@ def _run(store_dir: Path, mode: RuntimeConfigMode, stock_code: str = "2914"):
         services["holding_decision_service"],
         services["runtime_config_service"],
         services["holding_decision_result_repo"],
+        services["holding_evaluation_record_repo"],
         services["recommendation_repo"],
         services["notification_service"],
         services["rule_version_service"],
@@ -250,6 +256,7 @@ def test_kill_switch_on_suppresses_legacy_notification(store_dir: Path, monkeypa
         services["holding_decision_service"],
         services["runtime_config_service"],
         services["holding_decision_result_repo"],
+        services["holding_evaluation_record_repo"],
         services["recommendation_repo"],
         services["notification_service"],
         services["rule_version_service"],
@@ -284,6 +291,7 @@ def test_kill_switch_off_allows_legacy_notification(store_dir: Path, monkeypatch
         services["holding_decision_service"],
         services["runtime_config_service"],
         services["holding_decision_result_repo"],
+        services["holding_evaluation_record_repo"],
         services["recommendation_repo"],
         services["notification_service"],
         services["rule_version_service"],

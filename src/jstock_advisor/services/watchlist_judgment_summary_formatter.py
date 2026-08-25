@@ -225,3 +225,39 @@ def format_watchlist_line(
     if not parts:
         return f"{header}｜{label}"
     return f"{header}｜{label}｜{'、'.join(parts)}"
+
+
+def format_watchlist_line_body(
+    display_name: str,
+    stock_code: str,
+    record: BuyCandidateEvaluationRecord | None,
+    recommendation: Recommendation | None,
+    fallback_weights: ScoreWeights,
+) -> str:
+    """ウォッチリスト1銘柄1行の表示文字列を、区分ラベルを含めずに組み立てる
+    (ウォッチリスト表示改善2026-08)。7区分見出し単位でグルーピングし、
+    区分ラベルは見出し側で1回だけ表示する新方式(WatchlistViewService)向け。
+
+    形式: 「社名（銘柄コード）｜区分理由、補足懸念」。区分理由・補足懸念が
+    共に無ければ「｜」以降を省略する(format_watchlist_line()と同じロジックを
+    区分ラベル抜きで再利用する)。
+    """
+    header = f"{display_name}（{stock_code}）"
+    if record is None:
+        return f"{header}｜判定履歴なし"
+
+    reason = _category_reason_text(record, recommendation)
+    concern = (
+        _select_supplementary_concern(
+            recommendation.score_breakdown,
+            _resolve_weights(recommendation, fallback_weights),
+            recommendation.buy_decision_reasons,
+        )
+        if recommendation is not None
+        else None
+    )
+
+    parts = [part for part in (reason, concern) if part]
+    if not parts:
+        return header
+    return f"{header}｜{'、'.join(parts)}"

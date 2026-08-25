@@ -35,11 +35,11 @@ class _FakeHoldingsView:
 
 
 class _FakeWatchlistView:
-    def __init__(self, lines: list[str] | str) -> None:
-        self._lines = lines
+    def __init__(self, message_groups: list[list[str]] | str) -> None:
+        self._message_groups = message_groups
 
-    def build_lines(self) -> list[str] | str:
-        return self._lines
+    def build_message_groups(self) -> list[list[str]] | str:
+        return self._message_groups
 
 
 class _FakeTargetView:
@@ -127,13 +127,26 @@ def test_show_holdings_does_not_write_anything() -> None:
 
 
 def test_show_watchlist_lists_lines() -> None:
-    fake = _FakeWatchlistView(["NTT（9432）｜買い待ち｜現在値が買付価格を上回る"])
+    fake = _FakeWatchlistView([["【買い待ち】", "NTT（9432）｜現在値が買付価格を上回る"]])
     service = _service(watchlist_view=fake)
 
     reply = service.handle_postback(_USER, "show_watchlist", None, _NOW)
 
     assert "【ウォッチリスト】" in reply.text
-    assert "NTT（9432）｜買い待ち｜現在値が買付価格を上回る" in reply.text
+    assert "NTT（9432）｜現在値が買付価格を上回る" in reply.text
+
+
+def test_show_watchlist_multiple_messages_are_all_carried_in_texts() -> None:
+    fake = _FakeWatchlistView([["【買い候補】", "対象なし"], ["【買い対象外】", "対象なし"]])
+    service = _service(watchlist_view=fake)
+
+    reply = service.handle_postback(_USER, "show_watchlist", None, _NOW)
+
+    assert reply.texts is not None
+    assert len(reply.texts) == 2
+    assert "【ウォッチリスト】" in reply.texts[0]
+    assert "【買い候補】" in reply.texts[0]
+    assert "【買い対象外】" in reply.texts[1]
 
 
 def test_show_watchlist_empty() -> None:

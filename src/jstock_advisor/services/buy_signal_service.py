@@ -841,6 +841,13 @@ class BuySignalService:
                 # weightsをここに記録する(watchlist_judgment_summary_formatter
                 # 参照)。
                 "scoring_weights": self._config.scoring.weights.model_dump(),
+                # Phase 2-B「銘柄分析」向け(2026-08): raw_buy_action→buy_actionの
+                # 格下げ(SCORE_BELOW_THRESHOLD)がどの閾値を跨いだかを事後に一意
+                # 特定できるよう、判定時点の4閾値をスナップショットする
+                # (BuyDecisionReason.threshold_valueは常にwatch閾値のみを記録する
+                # 精度限界があるため、company_quality_scoreとこのスナップショットの
+                # 突き合わせで判定する。domain/signals/buy_decision.py参照)。
+                "score_thresholds": self._config.buy_decision.score_thresholds.model_dump(),
                 "historical_valuation": historical_valuation_config_values(
                     self._config.historical_valuation
                 ),

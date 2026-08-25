@@ -74,6 +74,9 @@ class LinePostbackEvent:
     # show_holdings(owner選択後)・show_targets(category選択後)のみ設定される。
     owner: str | None = None
     category: str | None = None
+    # 銘柄分析(Phase 2-B、2026-08)向け。show_analysis_buy/show_analysis_sellの
+    # みで設定される4文字銘柄コード。
+    code: str | None = None
 
 
 # LINEボタン起点会話型UI(2026-08)・実装プランv2 4節で確定したpostback data値
@@ -92,6 +95,9 @@ _VALID_POSTBACK_ACTIONS = frozenset(
         "show_holdings",
         "show_watchlist",
         "show_targets",
+        "start_analyze",
+        "show_analysis_buy",
+        "show_analysis_sell",
     }
 )
 
@@ -138,6 +144,8 @@ def parse_postback_events(body: bytes) -> list[LinePostbackEvent]:
         owner = owner_values[0] if owner_values else None
         category_values = parsed.get("category")
         category = category_values[0] if category_values else None
+        code_values = parsed.get("code")
+        code = code_values[0] if code_values else None
         results.append(
             LinePostbackEvent(
                 reply_token=reply_token,
@@ -146,6 +154,7 @@ def parse_postback_events(body: bytes) -> list[LinePostbackEvent]:
                 op=op,
                 owner=owner,
                 category=category,
+                code=code,
             )
         )
     return results

@@ -50,6 +50,7 @@ class LineEventRouter:
             now,
             owner=event.owner,
             category=event.category,
+            code=event.code,
         )
 
     def route_text(self, event: LineTextMessageEvent, now: dt.datetime) -> ConversationReply:

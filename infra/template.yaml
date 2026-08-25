@@ -720,6 +720,40 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  HoldingEvaluationRecordsTable:
+    # Phase 2-B「銘柄分析」向け(2026-08)。保有銘柄1回の評価ごとに1件、どの
+    # エンジン(Legacy SELL/ProfitTaking/HoldingDecisionScore)が実際の判定担当
+    # だったかを記録する。BuyCandidateEvaluationRecordsTableと対称的な設計。
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-holding_evaluation_records"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: holding_evaluation_id
+          AttributeType: S
+        # GSI(holding_id-index)のHASH/RANGEキー。holding_id(owner#stock_code)
+        # 単体でのQueryができないため追加した(FilterExpressionでのowner絞り込み
+        # は行わない設計、HoldingEvaluationRecordRepository参照)。
+        - AttributeName: holding_id
+          AttributeType: S
+        - AttributeName: evaluated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: holding_evaluation_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: holding_id-index
+          KeySchema:
+            - AttributeName: holding_id
+              KeyType: HASH
+            - AttributeName: evaluated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # LINE UI第二弾「対象確認」機能(2026-08)向け。単一行(pointer_id="default"
   # 固定)のみを保持する、直近完了BUY候補batchの永続ポインタ。BatchRunsTable
   # (TTL6時間、買い候補パイプラインではstatus更新自体を行わない)では
@@ -1178,6 +1212,9 @@ Resources:
                 - !Sub "${DailyNotificationPriorityTable.Arn}/index/*"
                 - !GetAtt ValidationDailyNotificationPriorityTable.Arn
                 - !Sub "${ValidationDailyNotificationPriorityTable.Arn}/index/*"
+                # Phase 2-B「銘柄分析」向け(2026-08)。
+                - !GetAtt HoldingEvaluationRecordsTable.Arn
+                - !Sub "${HoldingEvaluationRecordsTable.Arn}/index/*"
             # --- 保有判断スコア方式(2026-08仕様)の補足: HoldingDecisionRuntimeConfigTable
             # のみ読み取り専用(書き込みはCLI経由の人間のみ、1節)。他は上記CRUDグループへ含む ---
             - Sid: DynamoDbReadOnlyAccess
@@ -1766,6 +1803,9 @@ Resources:
         # 対象確認一覧の読み取り専用アクセス(いずれも書き込みは行わない)。
         - DynamoDBReadPolicy: { TableName: !Ref BuyCandidateEvaluationRecordsTable }
         - DynamoDBReadPolicy: { TableName: !Ref BuyCandidateBatchCompletionTable }
+        # Phase 2-B「銘柄分析」向け(2026-08)。SELL/HOLD側の直近評価参照
+        # (どのエンジンが判定担当だったかの照会)、読み取り専用。
+        - DynamoDBReadPolicy: { TableName: !Ref HoldingEvaluationRecordsTable }
         # 保有銘柄オーナー機能移行: BUY/SELL一時停止フラグ。書き込みはCLI経由の
         # 人間のみ(DynamoDBReadPolicyでは不足。commit_buy/commit_sellの
         # TransactWriteItemsがConditionCheckとして参照するためdynamodb:

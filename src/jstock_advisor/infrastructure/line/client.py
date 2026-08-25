@@ -34,6 +34,19 @@ class LineClient(Protocol):
         self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
     ) -> None: ...
 
+    def reply_messages(
+        self,
+        reply_token: str,
+        texts: list[str],
+        quick_reply: list[QuickReplyButton] | None = None,
+    ) -> None:
+        """複数メッセージでの返信(ウォッチリスト表示改善2026-08、最大5件、
+        LINE Reply APIの上限)。quick_replyは最後のメッセージにのみ付与する
+        (LINEの一般的な慣行に合わせる)。reply_message()は後方互換のため
+        変更しない(既存の単一メッセージ経路はそのまま動作する)。
+        """
+        ...
+
 
 def _build_message(text: str, quick_reply: list[QuickReplyButton] | None) -> dict[str, object]:
     message: dict[str, object] = {"type": "text", "text": text}
@@ -99,6 +112,24 @@ class LiveLineClient:
             {"replyToken": reply_token, "messages": [_build_message(text, quick_reply)]},
         )
 
+    def reply_messages(
+        self,
+        reply_token: str,
+        texts: list[str],
+        quick_reply: list[QuickReplyButton] | None = None,
+    ) -> None:
+        if not texts:
+            return
+        messages = [
+            _build_message(text, quick_reply if i == len(texts) - 1 else None)
+            for i, text in enumerate(texts)
+        ]
+        _post_messages(
+            self._token,
+            self._REPLY_ENDPOINT,
+            {"replyToken": reply_token, "messages": messages},
+        )
+
 
 class ConsoleLineClient:
     """LINE認証情報が無い場合のドライラン実装。標準出力に表示するのみで送信しない。"""
@@ -121,6 +152,23 @@ class ConsoleLineClient:
         if quick_reply:
             print(f"  quick_reply: {[b.label for b in quick_reply]}")
         print("--------------------------------------")
+
+    def reply_messages(
+        self,
+        reply_token: str,
+        texts: list[str],
+        quick_reply: list[QuickReplyButton] | None = None,
+    ) -> None:
+        for i, text in enumerate(texts):
+            self.sent_messages.append(text)
+            print(
+                f"----- [LINE返信(ドライラン・未送信、reply_token={reply_token}、"
+                f"{i + 1}/{len(texts)}通目)] -----"
+            )
+            print(text)
+            if quick_reply and i == len(texts) - 1:
+                print(f"  quick_reply: {[b.label for b in quick_reply]}")
+            print("--------------------------------------")
 
 
 def build_line_client_from_env() -> LineClient:

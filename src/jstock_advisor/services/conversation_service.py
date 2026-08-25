@@ -38,6 +38,7 @@ from jstock_advisor.infrastructure.aws import conversation_commit, conversation_
 from jstock_advisor.infrastructure.aws.conversation_state_store import ConversationState
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.line.client import QuickReplyButton
+from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.services.buy_candidate_target_view_service import (
     CATEGORY_DISPLAY_LABELS,
     BuyCandidateTargetViewService,
@@ -45,6 +46,7 @@ from jstock_advisor.services.buy_candidate_target_view_service import (
 )
 from jstock_advisor.services.holdings_view_service import HoldingsViewService
 from jstock_advisor.services.portfolio_service import PortfolioService
+from jstock_advisor.services.stock_analysis_view_service import StockAnalysisViewService
 from jstock_advisor.services.trading_pause_service import TradingPauseService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 from jstock_advisor.services.watchlist_display_name import (
@@ -63,11 +65,13 @@ _STOCK_NAME_NEGATIVE_CACHE_TTL_SECONDS = 60
 _BUY_PROMPT = "所有者,銘柄コード,株数,単価 の形式で送信してください(例: 本人,8306,100,1500)"
 _SELL_PROMPT = "所有者,銘柄コード,株数,単価 の形式で送信してください(例: 本人,8306,100,1800)"
 _WATCH_PROMPT = "銘柄コードを送信してください(例: 8306)"
+_ANALYZE_PROMPT = "分析したい銘柄コードを送信してください(例: 8306)"
 _INVALID_OWNER = "所有者の指定が不正です"
 _START_PROMPTS: dict[ConversationAction, str] = {
     ConversationAction.BUY: f"購入記録を開始します。\n{_BUY_PROMPT}",
     ConversationAction.SELL: f"売却記録を開始します。\n{_SELL_PROMPT}",
     ConversationAction.WATCH: f"ウォッチリスト登録を開始します。\n{_WATCH_PROMPT}",
+    ConversationAction.ANALYZE: f"銘柄分析を開始します。\n{_ANALYZE_PROMPT}",
 }
 _CONFIRM_WAITING_GUIDANCE = "ボタンから操作してください(登録する/やり直す/キャンセル)"
 _NO_ACTIVE_OPERATION = "有効な操作がありません。メニューからやり直してください。"
@@ -95,6 +99,16 @@ _EMPTY_WATCHLIST = "ウォッチリストは空です。"
 _SELECT_TARGET_CATEGORY_PROMPT = "確認する対象を選択してください。"
 _NO_TARGETS_FOR_CATEGORY = "該当する銘柄がありません。"
 _UNKNOWN_CATEGORY = "認識できないカテゴリーです。メニューからやり直してください。"
+
+# --- 銘柄分析(Phase 2-B、2026-08、読み取り専用) --------------------------
+_NO_ANALYSIS_DATA = (
+    "この銘柄コードは分析対象データに見つかりませんでした。"
+    "保有銘柄・直近のBUY候補いずれにも該当しない可能性があります。"
+)
+_SELECT_ANALYSIS_KIND_PROMPT = "確認したい内容を選択してください。"
+_SELECT_ANALYSIS_OWNER_PROMPT = "誰の保有分について確認しますか？"
+_ANALYSIS_BUY_LABEL = "購入判定を見る"
+_ANALYSIS_SELL_LABEL = "売却・保有判定を見る"
 # LINEテキストメッセージの上限(公式5000文字)に対する安全マージン込みの
 # 打ち切り基準。件数ではなく実際の生成文字数を基準にする(v2 5節)。
 _MESSAGE_CHAR_BUDGET = 4500
@@ -111,6 +125,11 @@ def _unknown_stock_code_reply(stock_code: str) -> ConversationReply:
 class ConversationReply:
     text: str
     quick_reply: list[QuickReplyButton] | None = None
+    # ウォッチリスト表示改善(2026-08)向け: 複数LINEメッセージへ分割して返信
+    # する場合に設定する(最大5件、LineClient.reply_messages参照)。設定時は
+    # 呼び出し側(line_webhook_handler.py)がtextではなくこちらを使う。
+    # textは後方互換・ログ表示用に先頭メッセージを保持する。
+    texts: list[str] | None = None
 
 
 def _confirm_quick_reply(operation_id: str) -> list[QuickReplyButton]:
@@ -165,6 +184,8 @@ class ConversationService:
         holdings_view_service: HoldingsViewService | None = None,
         watchlist_view_service: WatchlistViewService | None = None,
         target_view_service: BuyCandidateTargetViewService | None = None,
+        stock_analysis_view_service: StockAnalysisViewService | None = None,
+        holding_repository: HoldingRepository | None = None,
     ) -> None:
         self._portfolio = portfolio_service or PortfolioService()
         self._transactions = transaction_history_service or TransactionHistoryService()
@@ -186,6 +207,11 @@ class ConversationService:
         self._target_view = target_view_service or BuyCandidateTargetViewService(
             display_name_resolver=self._display_name_resolver
         )
+        # Phase 2-B「銘柄分析」向け(2026-08、読み取り専用)。
+        self._stock_analysis_view = stock_analysis_view_service or StockAnalysisViewService(
+            display_name_resolver=self._display_name_resolver
+        )
+        self._holdings_repo = holding_repository or HoldingRepository()
 
     # --- postback(リッチメニュー起点・Quick Reply起点) ---------------------
 
@@ -197,6 +223,7 @@ class ConversationService:
         now: dt.datetime,
         owner: str | None = None,
         category: str | None = None,
+        code: str | None = None,
     ) -> ConversationReply:
         if action == "start_buy":
             return self._start(user_id, ConversationAction.BUY, now)
@@ -204,6 +231,8 @@ class ConversationService:
             return self._start(user_id, ConversationAction.SELL, now)
         if action == "start_watch":
             return self._start(user_id, ConversationAction.WATCH, now)
+        if action == "start_analyze":
+            return self._start(user_id, ConversationAction.ANALYZE, now)
         if action == "confirm":
             return self._confirm(user_id, op, now)
         if action == "retry":
@@ -216,6 +245,10 @@ class ConversationService:
             return self._show_watchlist()
         if action == "show_targets":
             return self._show_targets(category)
+        if action == "show_analysis_buy":
+            return self._show_analysis_buy(code)
+        if action == "show_analysis_sell":
+            return self._show_analysis_sell(code, owner)
         return ConversationReply(_UNKNOWN_POSTBACK)
 
     # --- 保有銘柄/ウォッチリスト/対象確認(読み取り専用、状態を一切持たない) ---
@@ -237,11 +270,17 @@ class ConversationService:
         return ConversationReply(_SELECT_OWNER_PROMPT, quick_reply=quick_reply)
 
     def _show_watchlist(self) -> ConversationReply:
-        lines = self._watchlist_view.build_lines()
-        if isinstance(lines, str):
+        message_groups = self._watchlist_view.build_message_groups()
+        if isinstance(message_groups, str):
             # GSI反映待ち(直近の分析結果を反映中です...)の安全側メッセージ。
-            return ConversationReply(lines)
-        return _build_list_reply("【ウォッチリスト】", lines, _EMPTY_WATCHLIST)
+            return ConversationReply(message_groups)
+        if not message_groups:
+            return ConversationReply(_EMPTY_WATCHLIST)
+        texts = [
+            "\n".join(["【ウォッチリスト】", *group] if i == 0 else group)
+            for i, group in enumerate(message_groups)
+        ]
+        return ConversationReply(texts[0], texts=texts)
 
     def _show_targets(self, category: str | None) -> ConversationReply:
         if category is not None:
@@ -263,6 +302,47 @@ class ConversationService:
             for label in CATEGORY_DISPLAY_LABELS
         ]
         return ConversationReply(_SELECT_TARGET_CATEGORY_PROMPT, quick_reply=quick_reply)
+
+    # --- 銘柄分析(Phase 2-B、2026-08、読み取り専用) -------------------------
+
+    def _show_analysis_buy(self, stock_code: str | None) -> ConversationReply:
+        if stock_code is None:
+            return ConversationReply(_NO_ANALYSIS_DATA)
+        return ConversationReply(self._stock_analysis_view.build_buy_analysis_text(stock_code))
+
+    def _show_analysis_sell(
+        self, stock_code: str | None, owner: str | None
+    ) -> ConversationReply:
+        if stock_code is None:
+            return ConversationReply(_NO_ANALYSIS_DATA)
+        if owner is not None:
+            return ConversationReply(
+                self._stock_analysis_view.build_holding_analysis_text(owner, stock_code)
+            )
+
+        holdings = self._holdings_repo.list_by_stock(stock_code)
+        if not holdings:
+            return ConversationReply(_NO_ANALYSIS_DATA)
+        if len(holdings) == 1:
+            return ConversationReply(
+                self._stock_analysis_view.build_holding_analysis_text(
+                    holdings[0].owner, stock_code
+                )
+            )
+        # 複数owner保有(修正4): owner名を一切ハードコードせず、既存Holdingから
+        # 動的にQuick Replyを組み立てる(HoldingRepository.list_distinct_owners()
+        # と同じ設計方針)。
+        quick_reply = [
+            QuickReplyButton(
+                label=holding.owner,
+                postback_data=(
+                    f"action=show_analysis_sell&code={quote(stock_code)}"
+                    f"&owner={quote(holding.owner)}"
+                ),
+            )
+            for holding in sorted(holdings, key=lambda h: h.owner)
+        ]
+        return ConversationReply(_SELECT_ANALYSIS_OWNER_PROMPT, quick_reply=quick_reply)
 
     def _start(
         self, user_id: str, action: ConversationAction, now: dt.datetime
@@ -331,6 +411,8 @@ class ConversationService:
             return ConversationReply(_CONFIRM_WAITING_GUIDANCE)
         if state.action == ConversationAction.WATCH:
             return self._handle_watch_input(user_id, state, text, now)
+        if state.action == ConversationAction.ANALYZE:
+            return self._handle_analyze_input(user_id, state, text, now)
         return self._handle_trade_input(user_id, state.action, text, now)
 
     def _handle_trade_input(
@@ -430,6 +512,47 @@ class ConversationService:
         return ConversationReply(
             text_body, quick_reply=_confirm_quick_reply(new_state.operation_id)
         )
+
+    def _handle_analyze_input(
+        self, user_id: str, state: ConversationState, text: str, now: dt.datetime
+    ) -> ConversationReply:
+        """銘柄分析(Phase 2-B、2026-08): 4文字銘柄コード入力→state終了→
+        購入判定/売却・保有判定の選択。読み取り専用のためCONFIRM_WAITINGへは
+        進まず、入力を受け取った時点でConversationStateを終了する
+        (修正9: start_analyze→INPUT_WAITING→4文字コード入力→state終了→選択)。
+        """
+        fields = _parse_csv_fields(text)
+        if fields is None or len(fields) != 1:
+            return ConversationReply(_START_PROMPTS[ConversationAction.ANALYZE])
+        stock_code = ExternalValueParser.stock_code(fields[0])
+        if stock_code is None:
+            return ConversationReply(_INVALID_STOCK_CODE)
+
+        conversation_state_store.discard_input(
+            user_id, ConversationAction.ANALYZE, state.operation_id, now
+        )
+
+        has_buy = self._stock_analysis_view.has_buy_analysis(stock_code)
+        has_sell = bool(self._holdings_repo.list_by_stock(stock_code))
+        if not has_buy and not has_sell:
+            return _unknown_stock_code_reply(stock_code)
+
+        buttons = []
+        if has_buy:
+            buttons.append(
+                QuickReplyButton(
+                    label=_ANALYSIS_BUY_LABEL,
+                    postback_data=f"action=show_analysis_buy&code={quote(stock_code)}",
+                )
+            )
+        if has_sell:
+            buttons.append(
+                QuickReplyButton(
+                    label=_ANALYSIS_SELL_LABEL,
+                    postback_data=f"action=show_analysis_sell&code={quote(stock_code)}",
+                )
+            )
+        return ConversationReply(_SELECT_ANALYSIS_KIND_PROMPT, quick_reply=buttons)
 
     def _build_buy_confirmation_reply(
         self,
