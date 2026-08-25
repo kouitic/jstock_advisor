@@ -43,6 +43,7 @@ class _FakeConversationService:
         now: dt.datetime,
         owner: str | None = None,
         category: str | None = None,
+        code: str | None = None,
     ) -> ConversationReply:
         self.postback_calls.append((user_id, action, op))
         self.postback_calls_with_owner_category.append((user_id, action, op, owner, category))
