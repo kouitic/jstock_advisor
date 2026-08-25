@@ -279,7 +279,22 @@ class StockAnalysisViewService:
             else None
         )
 
-        lines = ["【銘柄分析】", f"{stock_code}（{owner}）", "", "■ 判定"]
+        # 修正(UAT指摘): 括弧内は会社名(BUY側と同じ形式)とし、所有者は別行で
+        # 示す(以前は括弧内が誤って所有者名になっていた)。resolver未接続の
+        # 場合はrecommendation.stock_name、それも無ければ銘柄コードへ
+        # フォールバックする。
+        display_name = (
+            self._display_name_resolver.resolve(stock_code)
+            if self._display_name_resolver is not None
+            else (recommendation.stock_name if recommendation is not None else stock_code)
+        )
+        lines = [
+            "【銘柄分析】",
+            f"{display_name}（{stock_code}）",
+            f"所有者：{owner}",
+            "",
+            "■ 判定",
+        ]
         lines.append(
             _HOLDING_JUDGMENT_LABEL.get(recommendation.recommendation_type, "要確認")
             if recommendation is not None
