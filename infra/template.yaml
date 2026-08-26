@@ -1806,6 +1806,12 @@ Resources:
         # Phase 2-B「銘柄分析」向け(2026-08)。SELL/HOLD側の直近評価参照
         # (どのエンジンが判定担当だったかの照会)、読み取り専用。
         - DynamoDBReadPolicy: { TableName: !Ref HoldingEvaluationRecordsTable }
+        # レビュー対応(2026-08、本番デプロイ後確認で発覚): Legacy SELL担当の
+        # 純粋HOLD銘柄分析(authoritative_audit_log_id経由でAuditLogEntryを直接
+        # 取得する経路)にAuditLogTableへの読み取り権限が付与されておらず、
+        # AccessDeniedExceptionとなっていた不備を修正。読み取り専用(Write権限は
+        # 付与しない)。
+        - DynamoDBReadPolicy: { TableName: !Ref AuditLogTable }
         # 保有銘柄オーナー機能移行: BUY/SELL一時停止フラグ。書き込みはCLI経由の
         # 人間のみ(DynamoDBReadPolicyでは不足。commit_buy/commit_sellの
         # TransactWriteItemsがConditionCheckとして参照するためdynamodb:
