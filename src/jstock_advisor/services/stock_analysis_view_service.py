@@ -133,9 +133,13 @@ def _decimal_str_to_display(value: Any, digits: int = 2) -> str | None:
         return None
 
 
+# ratio, score, max_weight, field_name, label
+_RankedComponent = tuple[float, float, float, str, str]
+
+
 def _rank_score_components(
     score_breakdown: ScoreBreakdown, weights: dict[str, Any]
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[_RankedComponent], list[_RankedComponent]]:
     """既存の判定結果(score_breakdown、判定時点の実点数)と判定時点weight
     (config_values_used["scoring_weights"]スナップショット)だけを使い、
     配点比の高い順/低い順に項目をランキングする(表示専用の集計処理)。
@@ -145,30 +149,103 @@ def _rank_score_components(
     新しい評価基準・投資判断ルールを新設しない。score_areas()自体は閾値で
     フィルタするだけで大きい順に並べる機能を持たないため、ここでは実際の
     配点比でsorted()し、真に上位/下位の項目だけを選ぶ(6節で提案した設計)。
+    field_nameを併せて返し、呼び出し側が項目別の事実文を組み立てられるように
+    する(レビュー対応2026-08、修正条件1)。
     """
-    entries: list[tuple[float, float, float, str]] = []
+    entries: list[_RankedComponent] = []
     for field_name, label in _SCORE_COMPONENT_LABELS.items():
         max_weight = weights.get(field_name)
         score = getattr(score_breakdown, field_name, None)
         if not max_weight or score is None:
             continue
-        entries.append((score / max_weight, float(score), float(max_weight), label))
+        entries.append((score / max_weight, float(score), float(max_weight), field_name, label))
 
     positive_candidates = sorted(
         (e for e in entries if e[0] >= _STRONG_SCORE_RATIO), key=lambda e: e[0], reverse=True
-    )
+    )[:3]
     negative_candidates = sorted(
         (e for e in entries if e[0] < _WEAK_SCORE_RATIO), key=lambda e: e[0]
-    )
-    positive = [
-        f"{label}（{score:.1f}/{max_weight:.0f}点）"
-        for _ratio, score, max_weight, label in positive_candidates[:3]
-    ]
-    negative = [
-        f"{label}（{score:.1f}/{max_weight:.0f}点）"
-        for _ratio, score, max_weight, label in negative_candidates[:3]
-    ]
-    return positive, negative
+    )[:3]
+    return positive_candidates, negative_candidates
+
+
+# undervaluation項目の解釈文組み立てに使う、UndervaluationSignals(compute_score()が
+# 保存するinput_facts["undervaluation_signals"]、6シグナルの真偽値)そのものの
+# 自然文訳。domain/scoring/score.py::UndervaluationSignalsのフィールド名・意味と
+# 完全に対応しており、表示層で新しい割安判定基準を作るものではない(既存シグナルの
+# 言い換えのみ)。
+_UNDERVALUATION_SIGNAL_LABELS: dict[str, str] = {
+    "per_below_median": "PERが自社の過去中央値を下回っている",
+    "pbr_below_median": "PBRが自社の過去中央値を下回っている",
+    "dividend_yield_above_historical_average": "配当利回りが自社の過去平均を上回っている",
+    "drawdown_from_52w_high": "52週高値から一定以上下落している",
+    "below_fair_value": "現在値が算出された適正価格を下回っている",
+    "price_down_despite_stable_earnings": "業績は安定している一方で株価が下落している",
+}
+
+
+def _component_fact_clause(field_name: str, facts: dict[str, Any], is_positive: bool) -> str | None:
+    """該当スコア項目について、判定時点に実際に保存された入力事実
+    (buy_score_input_facts)のみから、その項目のスコアへの寄与を説明する
+    1文(語尾の句点なし)を組み立てる。表示層で新しい投資判断基準・PER/PBRの
+    絶対水準による割安判定を作らない(修正条件1)。参照する事実自体が
+    保存されていない場合はNoneを返し、呼び出し側で該当行を省略する。
+    """
+    if field_name == "total_yield_attractiveness":
+        pct = facts.get("total_yield_pct")
+        if pct is None:
+            return None
+        return f"総合利回り(配当+優待)は{pct:.2f}%です"
+    if field_name == "dividend_sustainability":
+        parts = []
+        if facts.get("is_progressive_or_doe_policy"):
+            parts.append("累進配当/DOE方針を採用")
+        years = facts.get("consecutive_dividend_increase_years")
+        if years:
+            parts.append(f"連続増配{years}年")
+        payout = facts.get("payout_ratio_pct")
+        if payout is not None:
+            parts.append(f"配当性向{payout:.1f}%")
+        if not parts:
+            return None
+        return "、".join(parts)
+    if field_name == "financial_health":
+        equity = facts.get("equity_ratio_pct")
+        if equity is None:
+            return "自己資本比率のデータがありません"
+        return f"自己資本比率は{equity:.1f}%です"
+    if field_name == "undervaluation":
+        signals: dict[str, bool] = facts.get("undervaluation_signals") or {}
+        matched = [
+            label
+            for name, label in _UNDERVALUATION_SIGNAL_LABELS.items()
+            if signals.get(name) is is_positive
+        ]
+        if not matched:
+            return None
+        return "、".join(matched)
+    if field_name == "shareholder_benefit_value":
+        benefit = facts.get("benefit_yield_pct")
+        if not benefit:
+            return "株主優待利回りのデータがないか、優待がありません"
+        return f"株主優待利回りは{benefit:.2f}%です"
+    if field_name == "earnings_stability":
+        ratio = facts.get("operating_income_non_decrease_ratio")
+        if ratio is None:
+            return "四半期業績データが不足しています"
+        return f"四半期営業利益が前期比で悪化しなかった期間の割合は{ratio * 100:.0f}%です"
+    if field_name == "price_stability":
+        vol = facts.get("annualized_volatility_pct")
+        if vol is None:
+            return "株価履歴が不足しています"
+        return f"年率換算ボラティリティは{vol:.1f}%です"
+    return None
+
+
+def _direction_suffix(label: str, is_positive: bool) -> str:
+    if is_positive:
+        return f"、{label}評価のプラス要因となっています。"
+    return f"、{label}評価の注意材料となっています。"
 
 
 def _buy_facts_lines(recommendation: Recommendation) -> list[str]:
@@ -197,27 +274,64 @@ def _buy_facts_lines(recommendation: Recommendation) -> list[str]:
         median = _decimal_str_to_display(facts.get("historical_pbr_median"), digits=2)
         suffix = f"（自社の過去中央値{median}倍）" if median is not None else ""
         lines.append(f"PBR：{pbr}倍{suffix}")
+
+    equity_ratio = facts.get("equity_ratio_pct")
+    if equity_ratio is not None:
+        lines.append(f"自己資本比率：{equity_ratio:.1f}%")
+    payout_ratio = facts.get("payout_ratio_pct")
+    if payout_ratio is not None:
+        lines.append(f"配当性向：{payout_ratio:.1f}%")
+    dividend_years = facts.get("consecutive_dividend_increase_years")
+    if dividend_years:
+        lines.append(f"連続増配年数：{dividend_years}年")
+    if facts.get("is_progressive_or_doe_policy"):
+        lines.append("累進配当/DOE方針：あり")
+    income_ratio = facts.get("operating_income_non_decrease_ratio")
+    if income_ratio is not None:
+        lines.append(f"営業利益が前期比で悪化しなかった割合：{income_ratio * 100:.0f}%")
+    volatility = facts.get("annualized_volatility_pct")
+    if volatility is not None:
+        lines.append(f"年率換算ボラティリティ：{volatility:.1f}%")
     return lines
+
+
+def _interpretation_bullets(
+    entries: list[_RankedComponent], facts: dict[str, Any], is_positive: bool
+) -> list[str]:
+    bullets: list[str] = []
+    for _ratio, score, max_weight, field_name, label in entries:
+        clause = _component_fact_clause(field_name, facts, is_positive)
+        if clause is not None:
+            bullets.append(f"・{clause}{_direction_suffix(label, is_positive)}")
+        bullets.append(f"・{label}は{score:.1f}/{max_weight:.0f}点です。")
+    return bullets
 
 
 def _buy_interpretation_lines(recommendation: Recommendation) -> list[str]:
     """■ 解釈。PER/PBR単体の絶対値から独自に「割安」等を断定せず、既存の
-    score_breakdown(実際の判定結果)を配点比でランキングして表示する。"""
+    score_breakdown(実際の判定結果)を配点比でランキングしたうえで、各項目
+    について保存済みの判定時点事実(buy_score_input_facts)がそのスコアへ
+    どう寄与したかを説明する(レビュー対応2026-08、修正条件1)。事実自体が
+    保存されていない項目は、スコア行のみを示し文章を捏造しない。
+    """
     if recommendation.score_breakdown is None:
         return []
     weights = (recommendation.config_values_used or {}).get("scoring_weights")
     if not weights:
         return []
+    facts = recommendation.buy_score_input_facts or {}
     positive, negative = _rank_score_components(recommendation.score_breakdown, weights)
     lines: list[str] = []
-    if positive:
+    positive_bullets = _interpretation_bullets(positive, facts, True)
+    if positive_bullets:
         lines.append("主なプラス材料")
-        lines += [f"・{p}" for p in positive]
-    if negative:
+        lines += positive_bullets
+    negative_bullets = _interpretation_bullets(negative, facts, False)
+    if negative_bullets:
         if lines:
             lines.append("")
         lines.append("注意材料")
-        lines += [f"・{n}" for n in negative]
+        lines += negative_bullets
     return lines
 
 
@@ -327,6 +441,26 @@ _CONTINUOUS_DECLINE_RULE_NAMES = frozenset(
     {"continuous_operating_income_decline", "continuous_operating_cashflow_decline"}
 )
 
+# レビュー対応(2026-08、修正条件3): AuditLogには全17ルールの証跡を保存する設計は
+# 維持したまま、LINE表示側だけを「ユーザーの判断に有用な事実を優先」する方式へ
+# 変更する(監査証跡の完全性とLINE表示の簡潔性を分離)。以下は単純な真偽値/
+# 検出レベルのみを持つルール(継続悪化2ルール・財務健全性2ルールのような実数値・
+# トレンドを持たない)で、かつ「該当なし」が判定結果として最も多く出現する
+# ルール。これらが軒並み「該当なし」の場合、1行ずつ列挙すると「減配：該当なし」
+# 「優待廃止：該当なし」等が多数並ぶだけになりユーザーにとって有用性が低いため、
+# 1行に集約する。個別ルールが実際に該当あり(=ユーザーが読むべき情報)の場合は、
+# 従来どおり個別行として表示する。
+_FLAT_NEGATIVE_SUMMARY_LABEL: dict[str, str] = {
+    "dividend_cut": "減配",
+    "dividend_omission": "無配転落",
+    "shareholder_benefit_abolished": "株主優待の廃止",
+    "shareholder_benefit_major_downgrade": "株主優待の大幅改悪",
+    "major_scandal": "重大な不祥事",
+    "accounting_problem": "会計問題",
+    "listing_maintenance_risk": "上場維持リスク",
+}
+_FLAT_NEGATIVE_CURRENT_VALUES = frozenset({"False", "not_detected", "NONE"})
+
 
 def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
     """Legacy SELLの1ルール分の監査証跡から、実際に値が残っているものだけを
@@ -355,15 +489,37 @@ def _legacy_sell_hold_facts_lines(audit_entry: AuditLogEntry) -> list[str]:
     """純粋HOLD(Recommendation非生成)時、Legacy SELLの監査ログに残る
     ルール別実データのうち、実際に値を保持しているものだけを事実として
     示す(全17ルールの実数値を復元できるわけではないため、値が存在する
-    ものに限定する。データ不足で失われている項目を推測で埋めない)。"""
+    ものに限定する。データ不足で失われている項目を推測で埋めない)。
+
+    AuditLog自体は全ルールの証跡をそのまま保持する(3節の設計を変更しない)。
+    ここでの集約はLINE表示専用であり、単純な真偽値/検出レベルのみのルール
+    (_FLAT_NEGATIVE_SUMMARY_LABEL)が軒並み「該当なし」の場合は1行に集約し、
+    実数値・トレンドを持つルール、および実際に該当ありのルールは従来どおり
+    個別行のまま表示する(修正条件3)。
+    """
     rule_evidence_details = audit_entry.input_values.get("rule_evidence_details")
     if not rule_evidence_details:
         return []
-    lines = []
+    lines: list[str] = []
+    flat_negative_labels: list[str] = []
     for detail in rule_evidence_details:
+        current_value = detail.get("current_value")
+        if current_value is None:
+            continue
         line = _legacy_sell_hold_fact_line(detail)
-        if line is not None:
-            lines.append(line)
+        if line is None:
+            continue
+        rule_name = str(detail.get("rule_name"))
+        summary_label = _FLAT_NEGATIVE_SUMMARY_LABEL.get(rule_name)
+        if summary_label is not None and str(current_value) in _FLAT_NEGATIVE_CURRENT_VALUES:
+            flat_negative_labels.append(summary_label)
+            continue
+        lines.append(line)
+    if flat_negative_labels:
+        lines.append(
+            "その他の投資前提悪化ルール(" + "・".join(flat_negative_labels) + ")については、"
+            "いずれも該当する事実は確認されませんでした。"
+        )
     return lines
 
 

@@ -189,9 +189,120 @@ def test_buy_facts_section_shows_yields_and_per_pbr_from_snapshot(tmp_path: Path
     assert "PBR：0.82倍（自社の過去中央値1.05倍）" in text
 
 
+def test_buy_facts_section_shows_remaining_score_component_inputs(tmp_path: Path) -> None:
+    """レビュー対応(2026-08、修正条件1): 事実セクションに、割安度・PER/PBR
+    以外のスコア項目(配当持続性・財務健全性・業績安定性・株価安定性)が実際に
+    使用した判定時点入力も表示されること(解釈セクションでの説明の土台となる
+    生の事実)。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_score_input_facts={
+            "equity_ratio_pct": 55.5,
+            "payout_ratio_pct": 25.0,
+            "consecutive_dividend_increase_years": 4,
+            "is_progressive_or_doe_policy": True,
+            "operating_income_non_decrease_ratio": 0.33,
+            "annualized_volatility_pct": 38.5,
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.BUY,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "自己資本比率：55.5%" in text
+    assert "配当性向：25.0%" in text
+    assert "連続増配年数：4年" in text
+    assert "累進配当/DOE方針：あり" in text
+    assert "営業利益が前期比で悪化しなかった割合：33%" in text
+    assert "年率換算ボラティリティ：38.5%" in text
+
+
+def test_buy_interpretation_covers_remaining_score_components(tmp_path: Path) -> None:
+    """レビュー対応(2026-08、修正条件1): 割安度・財務健全性以外の残りの
+    スコア項目(総合利回り・配当持続性・株主優待価値・業績安定性・株価安定性)
+    についても、保存済みの判定時点事実からスコアへの寄与を説明する文章に
+    なっていること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        score_breakdown=ScoreBreakdown(
+            total_yield_attractiveness=18.0,
+            dividend_sustainability=16.0,
+            financial_health=12.0,
+            undervaluation=12.0,
+            shareholder_benefit_value=8.0,
+            earnings_stability=1.0,
+            price_stability=1.0,
+            total=68.0,
+        ),
+        config_values_used={
+            "scoring_weights": {
+                "total_yield_attractiveness": 20,
+                "dividend_sustainability": 20,
+                "financial_health": 20,
+                "undervaluation": 20,
+                "shareholder_benefit_value": 10,
+                "earnings_stability": 5,
+                "price_stability": 5,
+            }
+        },
+        buy_score_input_facts={
+            "total_yield_pct": 5.5,
+            "is_progressive_or_doe_policy": True,
+            "consecutive_dividend_increase_years": 4,
+            "payout_ratio_pct": 25.0,
+            "benefit_yield_pct": 1.8,
+            "operating_income_non_decrease_ratio": 0.33,
+            "annualized_volatility_pct": 38.5,
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.BUY,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert (
+        "総合利回り(配当+優待)は5.50%です、総合利回りの魅力度評価のプラス要因となっています。"
+        in text
+    )
+    assert "総合利回りの魅力度は18.0/20点です。" in text
+    assert (
+        "累進配当/DOE方針を採用、連続増配4年、配当性向25.0%、配当持続性評価の"
+        "プラス要因となっています。" in text
+    )
+    assert "配当持続性は16.0/20点です。" in text
+    assert "株主優待利回りは1.80%です、株主優待価値評価のプラス要因となっています。" in text
+    assert "株主優待価値は8.0/10点です。" in text
+    assert (
+        "四半期営業利益が前期比で悪化しなかった期間の割合は33%です、業績安定性評価の"
+        "注意材料となっています。" in text
+    )
+    assert "業績安定性は1.0/5点です。" in text
+    assert "年率換算ボラティリティは38.5%です、株価安定性評価の注意材料となっています。" in text
+    assert "株価安定性は1.0/5点です。" in text
+
+
 def test_buy_interpretation_ranks_score_components_not_raw_per(tmp_path: Path) -> None:
-    """追加調査(2026-08)対応: 「解釈」はPER単体の絶対値から独自に割安と
-    断定せず、既存score_breakdownを配点比でランキングして表示する。"""
+    """追加調査(2026-08)対応・レビュー対応(2026-08、修正条件1): 「解釈」は
+    PER単体の絶対値から独自に割安と断定せず、既存score_breakdownを配点比で
+    ランキングしたうえで、保存済みのUndervaluationSignals等の判定時点事実が
+    そのスコアへどう寄与したかを自然文で説明する。"""
     _seed_batch(tmp_path, "batch-1", "8306")
     _save_buy_recommendation(
         tmp_path,
@@ -216,6 +327,12 @@ def test_buy_interpretation_ranks_score_components_not_raw_per(tmp_path: Path) -
                 "price_stability": 5,
             }
         },
+        buy_score_input_facts={
+            "undervaluation_signals": {
+                "per_below_median": True,
+                "pbr_below_median": True,
+            },
+        },
     )
     _save_eval_record(
         tmp_path,
@@ -231,9 +348,14 @@ def test_buy_interpretation_ranks_score_components_not_raw_per(tmp_path: Path) -
 
     assert "■ 解釈" in text
     assert "主なプラス材料" in text
-    assert "総合利回りの魅力度（18.0/20点）" in text
+    assert (
+        "PERが自社の過去中央値を下回っている、PBRが自社の過去中央値を下回っている、"
+        "割安度評価のプラス要因となっています。" in text
+    )
+    assert "割安度は16.0/20点です。" in text
     assert "注意材料" in text
-    assert "財務健全性（1.0/20点）" in text
+    assert "自己資本比率のデータがありません、財務健全性評価の注意材料となっています。" in text
+    assert "財務健全性は1.0/20点です。" in text
     # PER/PBRの実数値から表示層で独自に「割安」と断定していないこと。
     assert "PERが低い" not in text
     assert "だから割安" not in text
@@ -493,10 +615,16 @@ def test_no_holding_evaluation_record_reports_not_found(tmp_path: Path) -> None:
 
 
 def test_legacy_sell_hold_shows_facts_from_linked_audit_log(tmp_path: Path) -> None:
-    """追加調査(2026-08)対応: authoritative_audit_log_id経由で、Legacy SELLの
-    純粋HOLD時にも監査ログに残る実数値(3節の証跡拡張で追加した項目)を
-    事実として表示できる。owner取り違えは、HoldingEvaluationRecord自身が
-    保持するポインタのため構造的に発生しない。"""
+    """追加調査(2026-08)対応・レビュー対応(2026-08、修正条件3): authoritative_
+    audit_log_id経由で、Legacy SELLの純粋HOLD時にも監査ログに残る実数値(3節の
+    証跡拡張で追加した項目)を事実として表示できる。owner取り違えは、
+    HoldingEvaluationRecord自身が保持するポインタのため構造的に発生しない。
+
+    単純な真偽値/検出レベルのみのルールが軒並み「該当なし」の場合は、
+    LINE表示では個別に列挙せず1行に集約する(監査ログ自体には全ルードの
+    証跡がそのまま残っていることを別途確認する)。一方、実際に該当ありの
+    ルール(major_scandal)は個別行のまま表示する。
+    """
     from jstock_advisor.domain.entities.audit import AuditLogEntry
 
     audit_entry = AuditLogEntry(
@@ -518,6 +646,22 @@ def test_legacy_sell_hold_shows_facts_from_linked_audit_log(tmp_path: Path) -> N
                     "rule_name": "dividend_cut",
                     "status": "NOT_TRIGGERED",
                     "current_value": "False",
+                    "previous_value": None,
+                    "threshold": None,
+                    "comparison_period": None,
+                },
+                {
+                    "rule_name": "shareholder_benefit_abolished",
+                    "status": "NOT_TRIGGERED",
+                    "current_value": "False",
+                    "previous_value": None,
+                    "threshold": None,
+                    "comparison_period": None,
+                },
+                {
+                    "rule_name": "major_scandal",
+                    "status": "TRIGGERED",
+                    "current_value": "RISK_KEYWORD_DETECTED",
                     "previous_value": None,
                     "threshold": None,
                     "comparison_period": None,
@@ -550,8 +694,16 @@ def test_legacy_sell_hold_shows_facts_from_linked_audit_log(tmp_path: Path) -> N
     text = service.build_holding_analysis_text("本人", "8306")
 
     assert "保有継続" in text
+    # 実数値を持つルールは従来どおり個別表示する。
     assert "財務健全性の重大な悪化(一般事業会社基準)：45.0%（基準15.0%）" in text
-    assert "減配(推測)：該当なし" in text
+    # 実際に該当ありのルールは、単純な真偽値ルールであっても個別表示する。
+    assert "重大な不祥事：リスクキーワードのみ検出" in text
+    # 単純な真偽値ルールが「該当なし」のものは、個別列挙せず1行に集約する。
+    assert "減配(推測)：該当なし" not in text
+    assert "株主優待の廃止：該当なし" not in text
+    assert "その他の投資前提悪化ルール(" in text
+    assert "減配" in text
+    assert "株主優待の廃止" in text
     # NOT_EVALUATED(current_value無し)のルールは表示しない(捏造しない)。
     assert "配当方針の不利な変更" not in text
     assert "現行データでは" not in text

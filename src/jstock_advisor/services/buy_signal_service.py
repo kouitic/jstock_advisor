@@ -554,6 +554,25 @@ class BuySignalService:
         # 投資判断ロジックには一切使用しない、表示専用の記録。
         buy_score_input_facts: dict[str, object] = {
             **score_result.input_facts,
+            # レビュー対応(2026-08): current_per/current_pbr自体は既に保存しているが、
+            # それらの算出根拠(judgment時点のforecast_eps/forecast_bps)自体は
+            # どこにも保存されていなかった。「表示に必要か」ではなく「判定時点の
+            # 計算を事後に監査できるか」を基準に、current_per=current_price/
+            # forecast_eps・current_pbr=current_price/forecast_bpsを後から検証
+            # できるよう、両者の入力(forecast_eps/forecast_bps)を追加保存する
+            # (current_priceはprice_at_recommendationとして既存保存済み)。
+            # なお、UndervaluationSignals算出に使うvaluation_anchorは既存の
+            # fair_value_at_recommendation、current_dividend_yield_pctは既存の
+            # dividend_yield_pct_at_recommendationで既に保存済みのため重複保存
+            # しない。earnings_trend_non_decreasing/severe_earnings_declineは
+            # いずれもquarterly_operating_incomes(既にinput_facts内に保存済み)
+            # のみから再計算可能な純粋関数の出力のため、同じ理由で重複保存しない。
+            "forecast_eps": (
+                str(financial.forecast_eps) if financial.forecast_eps is not None else None
+            ),
+            "forecast_bps": (
+                str(financial.forecast_bps) if financial.forecast_bps is not None else None
+            ),
             "current_per": str(current_per) if current_per is not None else None,
             "current_pbr": str(current_pbr) if current_pbr is not None else None,
             "historical_per_median": str(per_median) if per_median is not None else None,

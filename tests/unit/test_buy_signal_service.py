@@ -500,6 +500,34 @@ def test_only_nihon_shinyaku_is_not_excluded_for_price_reasons(
     assert "EARNINGS_WINDOW" in nihon_shinyaku_reasons
 
 
+def test_buy_score_input_facts_includes_forecast_eps_and_bps_for_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """レビュー対応(2026-08、修正条件2): current_per/current_pbrは判定時点の
+    forecast_eps/forecast_bpsから算出された導出値であり、算出そのものを事後に
+    監査・再現するには元のforecast_eps/forecast_bps自体も判定時点入力として
+    保存されている必要がある。「表示に必要か」ではなく「判定時点の計算を
+    監査可能か」を基準に、buy_score_input_factsへ両者が保存されることを確認
+    する(current_per/current_pbrの値自体もforecast_eps/forecast_bpsと現在値
+    から算出した値と整合すること、すなわちforecast_eps/forecast_bpsが捏造値
+    ではなく実際にcurrent_per/current_pbr算出へ使われた入力そのものであること
+    も合わせて検証する)。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+    assert facts["forecast_eps"] == str(_NIHON_SHINYAKU.forecast_eps)
+    assert facts["forecast_bps"] == str(_NIHON_SHINYAKU.forecast_bps)
+    # current_per = current_price / forecast_eps であることの整合性確認
+    # (forecast_epsが実際にcurrent_per算出へ使われた値と一致することの検証)。
+    expected_current_per = _NIHON_SHINYAKU.current_price / _NIHON_SHINYAKU.forecast_eps
+    assert facts["current_per"] == str(expected_current_per)
+    expected_current_pbr = _NIHON_SHINYAKU.current_price / _NIHON_SHINYAKU.forecast_bps
+    assert facts["current_pbr"] == str(expected_current_pbr)
+
+
 # ===== 再々コードレビュー対応(2026-08、JST暦日境界修正・指摘4):
 # in_trade_cooldown判定(cooldown_until_date比較)とWatchStateService.
 # evaluate_and_update()への「当日」がJST暦日基準になっていることの回帰。
