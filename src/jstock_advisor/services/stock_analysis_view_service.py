@@ -174,13 +174,25 @@ def _rank_score_components(
 # 自然文訳。domain/scoring/score.py::UndervaluationSignalsのフィールド名・意味と
 # 完全に対応しており、表示層で新しい割安判定基準を作るものではない(既存シグナルの
 # 言い換えのみ)。
-_UNDERVALUATION_SIGNAL_LABELS: dict[str, str] = {
+# レビュー対応(2026-08、事実反転バグ修正): True時とFalse時で意味が逆になるため、
+# 同じラベルをis_positiveの真偽で使い回さず、シグナルごとにTrue用/False用の
+# 文言を明示的に分けて持つ(表示専用の修正。UndervaluationSignals自体の算出
+# ロジックは変更しない)。
+_UNDERVALUATION_SIGNAL_LABELS_TRUE: dict[str, str] = {
     "per_below_median": "PERが自社の過去中央値を下回っている",
     "pbr_below_median": "PBRが自社の過去中央値を下回っている",
     "dividend_yield_above_historical_average": "配当利回りが自社の過去平均を上回っている",
     "drawdown_from_52w_high": "52週高値から一定以上下落している",
     "below_fair_value": "現在値が算出された適正価格を下回っている",
     "price_down_despite_stable_earnings": "業績は安定している一方で株価が下落している",
+}
+_UNDERVALUATION_SIGNAL_LABELS_FALSE: dict[str, str] = {
+    "per_below_median": "PERは自社の過去中央値を下回っていない",
+    "pbr_below_median": "PBRは自社の過去中央値を下回っていない",
+    "dividend_yield_above_historical_average": "配当利回りは自社の過去平均を上回っていない",
+    "drawdown_from_52w_high": "52週高値から一定以上の下落には該当していない",
+    "below_fair_value": "現在値は算出された適正価格を下回っていない",
+    "price_down_despite_stable_earnings": "「業績安定下の株価下落」条件には該当していない",
 }
 
 
@@ -216,10 +228,13 @@ def _component_fact_clause(field_name: str, facts: dict[str, Any], is_positive: 
         return f"自己資本比率は{equity:.1f}%です"
     if field_name == "undervaluation":
         signals: dict[str, bool] = facts.get("undervaluation_signals") or {}
+        labels = (
+            _UNDERVALUATION_SIGNAL_LABELS_TRUE
+            if is_positive
+            else _UNDERVALUATION_SIGNAL_LABELS_FALSE
+        )
         matched = [
-            label
-            for name, label in _UNDERVALUATION_SIGNAL_LABELS.items()
-            if signals.get(name) is is_positive
+            label for name, label in labels.items() if signals.get(name) is is_positive
         ]
         if not matched:
             return None

@@ -298,6 +298,136 @@ def test_buy_interpretation_covers_remaining_score_components(tmp_path: Path) ->
     assert "株価安定性は1.0/5点です。" in text
 
 
+def test_undervaluation_fact_clause_true_and_false_wording_for_all_signals() -> None:
+    """レビュー対応(2026-08、事実反転バグ修正): UndervaluationSignalsの6項目
+    すべてについて、True/Falseそれぞれの文言が正しい(反転していない)ことを
+    直接検証する(必須テスト1・2・5)。"""
+    from jstock_advisor.services.stock_analysis_view_service import _component_fact_clause
+
+    expected = {
+        "per_below_median": (
+            "PERが自社の過去中央値を下回っている",
+            "PERは自社の過去中央値を下回っていない",
+        ),
+        "pbr_below_median": (
+            "PBRが自社の過去中央値を下回っている",
+            "PBRは自社の過去中央値を下回っていない",
+        ),
+        "dividend_yield_above_historical_average": (
+            "配当利回りが自社の過去平均を上回っている",
+            "配当利回りは自社の過去平均を上回っていない",
+        ),
+        "drawdown_from_52w_high": (
+            "52週高値から一定以上下落している",
+            "52週高値から一定以上の下落には該当していない",
+        ),
+        "below_fair_value": (
+            "現在値が算出された適正価格を下回っている",
+            "現在値は算出された適正価格を下回っていない",
+        ),
+        "price_down_despite_stable_earnings": (
+            "業績は安定している一方で株価が下落している",
+            "「業績安定下の株価下落」条件には該当していない",
+        ),
+    }
+    for signal_name, (true_wording, false_wording) in expected.items():
+        true_facts = {"undervaluation_signals": {signal_name: True}}
+        false_facts = {"undervaluation_signals": {signal_name: False}}
+
+        # True値はプラス材料側(is_positive=True)でのみ、True用の文言になる。
+        assert _component_fact_clause("undervaluation", true_facts, True) == true_wording
+        # True値は注意材料側(is_positive=False)では抽出対象外(該当なし)。
+        assert _component_fact_clause("undervaluation", true_facts, False) is None
+
+        # False値は注意材料側(is_positive=False)でのみ、False用の文言になる。
+        assert _component_fact_clause("undervaluation", false_facts, False) == false_wording
+        # False値はプラス材料側(is_positive=True)では抽出対象外(該当なし)。
+        assert _component_fact_clause("undervaluation", false_facts, True) is None
+
+
+def test_undervaluation_fact_clause_none_or_unset_generates_no_text() -> None:
+    """必須テスト4: None/未保存のシグナルについては文言を生成しない。"""
+    from jstock_advisor.services.stock_analysis_view_service import _component_fact_clause
+
+    # シグナル自体が保存されていない(キー無し)。
+    assert _component_fact_clause("undervaluation", {}, True) is None
+    assert _component_fact_clause("undervaluation", {}, False) is None
+    # シグナルはあるが値がNone(判定不能で保存対象外だった項目)。
+    facts_with_none = {"undervaluation_signals": {"per_below_median": None}}
+    assert _component_fact_clause("undervaluation", facts_with_none, True) is None
+    assert _component_fact_clause("undervaluation", facts_with_none, False) is None
+
+
+def test_buy_interpretation_undervaluation_negative_uses_false_wording_not_reversed(
+    tmp_path: Path,
+) -> None:
+    """必須テスト2・3: per_below_median=Falseのまま割安度が注意材料(スコア比が
+    低い)側に回った場合、保存済み事実と逆の「下回っている」ではなく、正しく
+    「下回っていない」と表示されること(実際に報告された事実反転バグの回帰
+    テスト)。プラス材料側の他項目(総合利回り)は別途正しく分離されること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        score_breakdown=ScoreBreakdown(
+            total_yield_attractiveness=18.0,
+            dividend_sustainability=10.0,
+            financial_health=10.0,
+            undervaluation=2.0,
+            shareholder_benefit_value=5.0,
+            earnings_stability=2.5,
+            price_stability=2.5,
+            total=50.0,
+        ),
+        config_values_used={
+            "scoring_weights": {
+                "total_yield_attractiveness": 20,
+                "dividend_sustainability": 20,
+                "financial_health": 20,
+                "undervaluation": 20,
+                "shareholder_benefit_value": 10,
+                "earnings_stability": 5,
+                "price_stability": 5,
+            }
+        },
+        buy_score_input_facts={
+            "total_yield_pct": 5.5,
+            "undervaluation_signals": {
+                "per_below_median": False,
+                "pbr_below_median": False,
+            },
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.BUY,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    # 修正後: 保存済みFalse事実どおりの文言。
+    assert (
+        "PERは自社の過去中央値を下回っていない、PBRは自社の過去中央値を下回っていない、"
+        "割安度評価の注意材料となっています。" in text
+    )
+    # バグ再発防止: True用の文言(意味が逆)が注意材料として出てはならない。
+    assert (
+        "PERが自社の過去中央値を下回っている、PBRが自社の過去中央値を下回っている、割安度"
+        not in text
+    )
+    # プラス材料側(総合利回り)は正しく分離されていること。
+    assert "主なプラス材料" in text
+    assert (
+        "総合利回り(配当+優待)は5.50%です、総合利回りの魅力度評価のプラス要因となっています。"
+        in text
+    )
+    assert "注意材料" in text
+
+
 def test_buy_interpretation_ranks_score_components_not_raw_per(tmp_path: Path) -> None:
     """追加調査(2026-08)対応・レビュー対応(2026-08、修正条件1): 「解釈」は
     PER単体の絶対値から独自に割安と断定せず、既存score_breakdownを配点比で
