@@ -802,6 +802,61 @@ def test_no_valuation_anchor_shows_dispersion_reason_from_stored_snapshot(
     assert "判定時点の詳細な理由は保存されていません" not in text
 
 
+def test_no_valuation_anchor_unknown_code_does_not_fall_back_to_valuation_methods(
+    tmp_path: Path,
+) -> None:
+    """コードレビュー対応(2026-08): no_valuation_anchor_reasonスナップショット
+    自体は保存されているが、そのcodeが現在の表示処理にとって未知(将来
+    追加されたblocking reason等を想定)の場合、標準方式のexclusion_reason
+    (別事象)へフォールバックしてはならない。フォールバックしてしまうと、
+    スナップショットが存在するにもかかわらず無関係な理由を原因として
+    表示してしまい、今回修正したindustry誤表示と同型の不具合を再発させる。
+    非断定・fail-safeな表示にとどまり、保存済みexclusion_reasonも保存済み
+    codeそのものも表示しないことを確認する。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="NO_VALUATION_ANCHOR", message="x", actual_value=None, threshold_value=None
+            ),
+        ),
+        valuation_methods=(
+            FairValueMethodResult(
+                method="per",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason="現在値の10%未満のため外れ値として除外",
+            ),
+        ),
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "UNKNOWN_FUTURE_REASON",
+                "actual_value": "1.0",
+                "threshold_value": "2.0",
+            }
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "PER法" not in text
+    assert "現在値の10%未満のため外れ値として除外" not in text
+    assert "UNKNOWN_FUTURE_REASON" not in text
+    assert "判定理由の詳細を現在の表示処理では解釈できません" in text
+    assert "判定時点の詳細な理由は保存されていません" not in text
+
+
 def test_no_valuation_anchor_shows_no_valid_methods_reason_from_stored_snapshot(
     tmp_path: Path,
 ) -> None:

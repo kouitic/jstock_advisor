@@ -509,14 +509,29 @@ def _no_valuation_anchor_detail_text(
 def _no_valuation_anchor_text(recommendation: Recommendation) -> str:
     facts = recommendation.buy_score_input_facts or {}
     reason = facts.get("no_valuation_anchor_reason")
-    if isinstance(reason, dict) and reason.get("code"):
-        detail = _no_valuation_anchor_detail_text(
-            str(reason.get("code")), reason.get("actual_value"), reason.get("threshold_value")
+    if isinstance(reason, dict):
+        # レビュー対応(2026-08、コードレビュー指摘): no_valuation_anchor_reason
+        # スナップショット自体が保存されている場合、原因は既にこのスナップ
+        # ショットへ一元化されている(=判定時点にvaluation_anchorが実際にNone
+        # になった唯一の理由)。codeが現在の表示処理で未知(将来追加された
+        # blocking reason等)であっても、無関係な標準方式のexclusion_reasonへ
+        # フォールバックしてはならない(それは別事象であり、代用すると
+        # industryの理由を誤って原因として表示していた不具合と同型の問題を
+        # 再発させる)。この場合は非断定・fail-safeな表示にとどめ、保存済みの
+        # codeそのものをユーザー向けに出すこともしない。
+        code = reason.get("code")
+        detail = (
+            _no_valuation_anchor_detail_text(
+                str(code), reason.get("actual_value"), reason.get("threshold_value")
+            )
+            if code
+            else None
         )
         if detail is not None:
             return f"{_NO_VALUATION_ANCHOR_LEAD_TEXT}\n{detail}"
+        return f"{_NO_VALUATION_ANCHOR_LEAD_TEXT}判定理由の詳細を現在の表示処理では解釈できません。"
 
-    # 旧データ(no_valuation_anchor_reason未保存、またはcodeが未知)フォールバック:
+    # 旧データ(no_valuation_anchor_reason自体が未保存)専用フォールバック:
     # 標準5方式に保存済みのexclusion_reasonがあればそれのみ表示し、無関係な
     # 理由(industryの恒常的なexclusion_reason等)を代用しない。理由自体が
     # 無い場合は、原因を推測せず非断定表示にとどめる。
