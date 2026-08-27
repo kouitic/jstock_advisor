@@ -4385,3 +4385,81 @@ def test_tc_d_existing_cooldown_business_days_config_is_unchanged() -> None:
     assert _CONFIG.notification.trade_cooldown.partial_trade_business_days >= 1
     assert _CONFIG.notification.trade_cooldown.buy_business_days >= 1
     assert _CONFIG.notification.trade_cooldown.sell_business_days >= 1
+
+
+# --- Issue #23(2026-08-28): UTC/JST境界の回帰テスト -------------------------
+# いずれも「修正前(UTC暦日基準)なら誤り、修正後(JST暦日基準)なら正しい」
+# 業務ケースを固定する。
+
+
+def test_issue23_resend_not_triggered_when_only_utc_date_advanced(
+    service_and_repos,
+) -> None:
+    """resend_after_daysはJST暦日で数える。sent_at=JST 08:50(UTC前日23:50)の
+    ように送信がUTC日付境界の手前にあると、UTC暦日差はJST暦日差より1大きく
+    なる。JST暦日差がresend_after_days未満(n-1日)のうちは、UTC暦日差が
+    ちょうどnに達していても再送してはならない(修正前はUTC差で再送していた)。"""
+    service, repo, client = service_and_repos
+    n = _CONFIG.notification.resend_after_days
+
+    sent_at = dt.datetime(2026, 7, 23, 23, 50, tzinfo=dt.UTC)  # JST 07-24 08:50
+    rec1 = _make_recommendation(
+        recommendation_id="rec-jst-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation(rec1, sent_at) is True
+
+    # JST 09:10(UTC 00:10)なのでUTC暦日はsent_atの翌日。そこから(n-1)日後:
+    # UTC暦日差 = n(修正前は再送条件成立)、JST暦日差 = n-1(未達)。
+    now_not_yet = dt.datetime(2026, 7, 24, 0, 10, tzinfo=dt.UTC) + dt.timedelta(days=n - 1)
+    rec2 = _make_recommendation(
+        recommendation_id="rec-jst-2",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec2)
+    assert service.notify_recommendation(rec2, now_not_yet) is False
+    assert len(client.sent) == 1
+
+    # さらに1日進めるとJST暦日差もnに達し、正しく再送される。
+    now_due = dt.datetime(2026, 7, 24, 0, 10, tzinfo=dt.UTC) + dt.timedelta(days=n)
+    rec3 = _make_recommendation(
+        recommendation_id="rec-jst-3",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec3)
+    assert service.notify_recommendation(rec3, now_due) is True
+    assert len(client.sent) == 2
+
+
+def test_issue23_batch_summary_dedup_stable_across_utc_boundary_same_jst_day(
+    service_and_repos,
+) -> None:
+    """batch summaryのcontent_hashに含める日付はJST暦日。同一JST日・同一内容の
+    2回目呼び出し(JST 08:55 → 09:05、UTC日付だけが跨る)はdedup identityが
+    同一となり重複抑止される(修正前はUTC日付が変わりhash不一致→二重送信)。"""
+    service, _repo, client = service_and_repos
+    kwargs = dict(
+        total=27,
+        category_counts={},
+        purchase_judgment_counts=_purchase_judgment_counts(
+            buy_candidate=6, not_attractive=20, data_insufficient=1
+        ),
+        notification_result_counts=_notification_result_counts(sent=4, resend_suppressed=2),
+    )
+    first = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        now=dt.datetime(2026, 7, 23, 23, 55, tzinfo=dt.UTC),  # JST 07-24 08:55
+        **kwargs,
+    )
+    second = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析",
+        now=dt.datetime(2026, 7, 24, 0, 5, tzinfo=dt.UTC),  # JST 07-24 09:05
+        **kwargs,
+    )
+    assert first is True
+    assert second is False  # 同一JST日・同一内容 -> content_hash一致で抑止
+    assert len(client.sent) == 1

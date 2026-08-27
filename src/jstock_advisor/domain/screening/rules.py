@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from jstock_advisor.config.models import ScreeningRulesConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.interfaces.types import Disclosure, DividendInfo, FinancialSummary
 
 
@@ -160,7 +161,16 @@ def evaluate_screening(
         else:
             warnings.append(message)
 
-    data_age_days = business_calendar.business_days_between(data_fetched_at.date(), now.date())
+    # Issue #23(2026-08-28): JPX BusinessCalendarへ渡すdateは「JPX営業日を表す
+    # JST calendar date」とする(JPXの営業日はJST基準)。data_fetched_at/nowは
+    # UTC instantとして保持し、営業日計算の直前でのみJST暦日へ変換する。
+    # 両端を必ず同一時間概念(JST暦日)へ揃えること — 片端だけJST化すると
+    # 新たな基準混在になる。UTC暦日のままだと、JST 00:00〜08:59の実行で
+    # 実際より新しいデータとして扱われ、本来stale除外すべき古いデータが
+    # 除外を免れる方向へ誤判定する。
+    data_age_days = business_calendar.business_days_between(
+        evaluation_date_jst(data_fetched_at), evaluation_date_jst(now)
+    )
     max_age = config.data_quality.max_data_age_business_days
     if data_age_days > max_age:
         reasons.append(f"データが{data_age_days}営業日前と古く、基準{max_age}営業日を超過")

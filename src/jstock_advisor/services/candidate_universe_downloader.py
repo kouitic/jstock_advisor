@@ -27,6 +27,7 @@ from typing import cast
 
 from pydantic import BaseModel
 
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.collection_store import (
     resolve_candidate_universe_bucket,
     resolve_candidate_universe_local_cache_dir,
@@ -190,7 +191,11 @@ def _validate(
         return f"レスポンスサイズが小さすぎます: {len(data)}バイト(最小{min_bytes}バイト)"
     if source_date is None:
         return "ソース日付を取得できませんでした"
-    if source_date > now.date():
+    # Issue #23(2026-08-28): JPX公表データのsource_dateはJST基準の日付のため、
+    # 未来判定はJST暦日(JST calendar date)で行う。UTC暦日(now.date())だと
+    # JST 00:00〜08:59の実行(手動再実行・リトライ)でUTC上は前日となり、
+    # 正当なJST当日データを「未来日付」として誤って弾く。
+    if source_date > evaluation_date_jst(now):
         return f"ソース日付が未来です: {source_date}"
     low, high = _ROW_COUNT_BOUNDS[source]
     if not (low <= raw_row_count <= high):

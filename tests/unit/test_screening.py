@@ -268,3 +268,43 @@ def test_going_concern_doubt_still_excluded() -> None:
     )
     assert not result.passed
     assert any("継続企業" in r for r in result.exclusion_reasons)
+
+
+def test_issue23_stale_boundary_uses_jst_business_dates() -> None:
+    """Issue #23: データ鮮度のJPX営業日計算は両端ともJST暦日で行う。
+    fetched=2026-07-06(月)、now=2026-07-09T23:30Z(UTC木曜/JST金曜08:30)の場合、
+    JST基準ではmax_data_age_business_days(3)を超過する4営業日となりstale除外
+    される(修正前はUTC暦日で3営業日と数え、除外を免れていた)。"""
+    fetched = dt.datetime(2026, 7, 6, 7, 0, tzinfo=dt.UTC)  # 月曜(UTC=JST同日)
+    now = dt.datetime(2026, 7, 9, 23, 30, tzinfo=dt.UTC)  # UTC木曜 / JST金曜08:30
+    result = evaluate_screening(
+        financial=_healthy_financial(),
+        dividend=_healthy_dividend(),
+        average_trading_value_yen=Decimal("50_000_000"),
+        disclosure_risk_keywords_found=[],
+        data_fetched_at=fetched,
+        now=now,
+        business_calendar=_CALENDAR,
+        config=_CONFIG.screening,
+    )
+    assert not result.passed
+    assert any("営業日" in r for r in result.exclusion_reasons)
+
+
+def test_issue23_stale_boundary_not_excluded_at_exact_max_age_jst() -> None:
+    """Issue #23の対照ケース: JST基準でちょうどmax_data_age_business_days(3)
+    営業日ならstale除外しない(境界の内側)。"""
+    fetched = dt.datetime(2026, 7, 6, 7, 0, tzinfo=dt.UTC)  # 月曜
+    now = dt.datetime(2026, 7, 8, 23, 30, tzinfo=dt.UTC)  # UTC水曜 / JST木曜08:30 -> 3営業日
+    result = evaluate_screening(
+        financial=_healthy_financial(),
+        dividend=_healthy_dividend(),
+        average_trading_value_yen=Decimal("50_000_000"),
+        disclosure_risk_keywords_found=[],
+        data_fetched_at=fetched,
+        now=now,
+        business_calendar=_CALENDAR,
+        config=_CONFIG.screening,
+    )
+    assert result.passed
+

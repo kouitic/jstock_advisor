@@ -113,7 +113,18 @@ class RecommendationEvaluationService:
     def _evaluate_due_horizons(
         self, recommendation: Recommendation, now: dt.datetime, outcome: EvaluationRunOutcome
     ) -> None:
-        today = now.date()
+        # Issue #23(2026-08-28): 「評価を実施してよい日に達したか」の当日判定は
+        # JST暦日(JST calendar date)で行う。UTC暦日(now.date())だとJST 00:00〜
+        # 08:59の実行(reconciler等の再実行)で前日扱いとなり、本来当日実施すべき
+        # 評価が1日遅延する(run_due_calendar_evaluations()側は同一不具合を
+        # docstring明記の上で修正済みで、営業日ベース側だけが未修正だった)。
+        today = evaluation_date_jst(now)
+        # start_date(評価期間の起点)は従来どおりUTC暦日のまま【意図的に変更しない】。
+        # _evaluate_one()のコメントのとおり「営業日評価はUTC暦日、暦日評価はJST
+        # 暦日」という呼び出し側基準が文書化された既存設計であり、ここをJST化
+        # するとhorizon評価日・max_gain/max_drawdown/ベンチマークwindowが変わる
+        # 別仕様変更になるため、Issue #23のスコープ外とする(今回修正するのは
+        # 実施可否判定(today)の基準のみ)。
         start_date = recommendation.recommended_at.date()
         for horizon in self._horizons_for(recommendation.recommendation_type):
             evaluation_date = self._calendar.add_business_days(start_date, horizon)

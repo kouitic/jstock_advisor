@@ -2861,8 +2861,18 @@ class LineNotificationService:
         # アクション種別が異なる日(例: 昨日は一部売却2件、今日は売却2件)を
         # 同一内容として誤ってdedup抑止してしまう恐れがあった。4分類の件数
         # (holdings専用呼び出し以外は常にNone)もハッシュ入力へ含める。
+        # Issue #23(2026-08-28): content_hashへ含める日付はdedup identityの一部で
+        # あり、「同じJST営業日の同じ内容か」を表すJST暦日(JST calendar date)を
+        # 使う。UTC暦日(now.date())だと、JST 08-09時台の二重ディスパッチがUTC
+        # 日付境界を跨いだ場合に同一内容でもhashが変わり重複抑止に失敗する
+        # (下のis_holdings_call分岐は既にJST暦日dedup済みで、本hashだけがUTCの
+        # まま残る修正漏れだった)。
+        # 既知の移行リスク: この変更によりデプロイを跨いだ同一JST日では
+        # 旧コード生成hashと新コード生成hashのdedup identityが一時的に連続しない
+        # (旧hashとの二重比較・migration等の互換ロジックは意図的に追加しない。
+        # 一過性の移行リスクより、恒久的なUTC/JST境界のdedup破綻の修正を優先)。
         content_hash = hashlib.sha256(
-            f"{process_name}|{now.date().isoformat()}|{total}|"
+            f"{process_name}|{evaluation_date_jst(now).isoformat()}|{total}|"
             f"{sorted(counts.items())}|near_buy={near_buy_sent_count}|"
             f"partial_sell={partial_sell_detected_count}|full_sell={full_sell_detected_count}|"
             f"sell={sell_detected_count}|critical_risk={critical_risk_detected_count}|"
@@ -3270,7 +3280,16 @@ class LineNotificationService:
         ):
             return NotificationStatus.SENT
 
-        days_elapsed = (now.date() - latest_log.sent_at.date()).days
+        # Issue #23(2026-08-28): resend_after_daysは「何日待てば再送するか」という
+        # ユーザー体感のJST暦日(JST calendar date)概念のため、経過日数はJST暦日
+        # 同士の差分で数える。UTC暦日(now.date())同士の差分だと、同一JST日内でも
+        # UTC日付境界(JST 09:00)を跨いだだけで1日経過と誤判定し、
+        # resend_after_days未満での過剰再送(またはその逆)が起きる。
+        # sent_at/nowはいずれもUTC instantとして保持し、比較の直前でのみ
+        # JST暦日へ変換する(再送許可条件そのものは変更しない)。
+        days_elapsed = (
+            evaluation_date_jst(now) - evaluation_date_jst(latest_log.sent_at)
+        ).days
         if days_elapsed >= self._config.notification.resend_after_days:
             return NotificationStatus.SENT
 

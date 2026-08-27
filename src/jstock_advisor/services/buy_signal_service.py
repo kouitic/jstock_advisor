@@ -342,8 +342,13 @@ class BuySignalService:
                 ranking_group=None,
             )
 
+        # Issue #23(2026-08-28): JPX BusinessCalendarへ渡すdateは「JPX営業日を
+        # 表すJST calendar date」とする(domain/screening/rules.pyの同一計算と
+        # 同じ理由・同じ基準。両端を必ずJST暦日へ揃える)。この値はPhase 3.5の
+        # 観測snapshot(facts["data_age_business_days"])へもそのまま保存される
+        # (「実際に判定に使用した値を保存する」というPhase 3.5の設計原則どおり)。
         data_age_days = self._calendar.business_days_between(
-            snapshot.data_fetched_at.date(), now.date()
+            evaluation_date_jst(snapshot.data_fetched_at), evaluation_date_jst(now)
         )
         has_stale_data_warning = data_age_days > 1
 

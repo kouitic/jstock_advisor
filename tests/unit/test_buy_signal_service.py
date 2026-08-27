@@ -1017,3 +1017,28 @@ def test_phase35_no_suppression_reason_codes_in_normal_case() -> None:
         "value": False,
         "reason_code": None,
     }
+
+def test_issue23_data_age_business_days_uses_jst_calendar_dates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #23: buy_signal_service側のデータ鮮度計算(data_age_business_days)も
+    JPX営業日計算の両端をJST暦日で行う。fetched=JST月曜23:00(UTC月曜14:00)、
+    now=JST火曜08:30(UTC月曜23:30)ならJST基準で1営業日(修正前はUTC暦日同士で
+    0営業日と数えていた)。Phase 3.5の観測snapshotには判定に実際に使用した値が
+    そのまま保存される。"""
+    import dataclasses
+
+    fetched = dt.datetime(2026, 8, 3, 14, 0, tzinfo=dt.UTC)  # JST 08-03(月)23:00
+    now = dt.datetime(2026, 8, 3, 23, 30, tzinfo=dt.UTC)  # JST 08-04(火)08:30
+    snapshot = _build_snapshot(_TACHI_S)
+    snapshot = dataclasses.replace(snapshot, data_fetched_at=fetched)
+    monkeypatch.setattr(
+        service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None)
+    )
+    service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
+    outcome = service.analyze(_TACHI_S.stock_code, now, RecommendationType.BUY)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+    assert facts["data_age_business_days"] == 1

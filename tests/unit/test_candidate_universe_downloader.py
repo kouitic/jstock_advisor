@@ -300,3 +300,42 @@ def test_promote_overwrites_current_on_repeated_calls(
     result = local_cache_io.read_current("jpx400")
     assert result is not None
     assert result[0] == b"second"
+
+
+def test_issue23_source_date_of_jst_today_is_not_future_when_utc_is_previous_day() -> None:
+    """Issue #23: JPX source_dateの未来判定はJST暦日で行う。JST当日(2026-07-24)の
+    データを、UTCではまだ前日となるJST 08:30に検証しても「未来日付」と
+    誤判定しない(修正前はUTC暦日07-23と比較して弾いていた)。"""
+    reason = _validate(
+        "listed_issues",
+        data=b"x" * 200_000,
+        raw_row_count=3100,
+        invalid_code_count=0,
+        duplicate_count=0,
+        unknown_market_segment_count=0,
+        selected_count=3100,
+        source_date=dt.date(2026, 7, 24),  # JST当日
+        previous_selected_count=None,
+        now=dt.datetime(2026, 7, 23, 23, 30, tzinfo=dt.UTC),  # JST 07-24 08:30
+    )
+    assert reason is None
+
+
+def test_issue23_source_date_of_jst_tomorrow_is_still_rejected_as_future() -> None:
+    """Issue #23の対照ケース: JST基準でも未来(翌日)のsource_dateは引き続き
+    「未来日付」として拒否される。"""
+    reason = _validate(
+        "listed_issues",
+        data=b"x" * 200_000,
+        raw_row_count=3100,
+        invalid_code_count=0,
+        duplicate_count=0,
+        unknown_market_segment_count=0,
+        selected_count=3100,
+        source_date=dt.date(2026, 7, 25),  # JST翌日
+        previous_selected_count=None,
+        now=dt.datetime(2026, 7, 23, 23, 30, tzinfo=dt.UTC),  # JST 07-24 08:30
+    )
+    assert reason is not None
+    assert "未来" in reason
+

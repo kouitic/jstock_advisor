@@ -417,3 +417,53 @@ def test_run_due_calendar_evaluations_evaluation_start_date_is_jst_not_utc(
     # 標準買値(2000円)を下回る安値はUTC暦日07-28のみに存在する。
     # JST起点(07-29)を正しく使っていれば、この日は期間に含まれず到達しない。
     assert result.reached_standard_buy_price is False
+
+
+def test_issue23_due_horizon_evaluated_on_jst_today_even_when_utc_is_previous_day(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """Issue #23: 「評価を実施してよい日に達したか」はJST暦日で判定する。
+    evaluation_date=JST当日・now=JST 08時台(UTCでは前日)のケースで、
+    評価を翌日へ延期しない(修正前はUTC暦日のため全horizonがskipされ
+    evaluatedが空になっていた)。"""
+    now = dt.datetime(2024, 2, 26, 23, 30, tzinfo=dt.UTC)  # JST 02-27(火)08:30
+    service, recommendation_repo, _ = _build_service(tmp_path, config, calendar, now)
+    rec = _make_recommendation()
+    # 月曜01:00Z(JST同日10:00)推奨 -> horizon=1営業日の評価基準日は02-27(火)
+    rec = rec.model_copy(
+        update={"recommended_at": dt.datetime(2024, 2, 26, 1, 0, tzinfo=dt.UTC)}
+    )
+    recommendation_repo.save(rec)
+
+    outcome = service.run_due_evaluations(now)
+
+    assert outcome.evaluated, "JST当日の評価がUTC前日を理由に延期されてはならない"
+    horizon1 = [r for r in outcome.evaluated if r.horizon_business_days == 1]
+    assert len(horizon1) == 1
+    assert horizon1[0].evaluation_date == dt.date(2024, 2, 27)
+
+
+def test_issue23_start_date_basis_remains_utc_calendar_date(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """Issue #23の回帰固定: start_date(評価期間の起点)の算出基準は今回
+    変更していない(recommended_at.date()=UTC暦日のまま)。
+    recommended_at=23:30Z(UTC暦日02-26、JST暦日02-27)の場合、
+    horizon=1営業日の評価基準日はUTC起点の02-27であり、
+    もしstart_dateがJST化されていれば02-28になるはずである。"""
+    now = dt.datetime(2024, 2, 28, 10, 0, tzinfo=dt.UTC)  # JST/UTCとも02-28(水)
+    service, recommendation_repo, _ = _build_service(tmp_path, config, calendar, now)
+    rec = _make_recommendation()
+    rec = rec.model_copy(
+        update={"recommended_at": dt.datetime(2024, 2, 26, 23, 30, tzinfo=dt.UTC)}
+    )
+    recommendation_repo.save(rec)
+
+    outcome = service.run_due_evaluations(now)
+
+    horizon1 = [r for r in outcome.evaluated if r.horizon_business_days == 1]
+    assert len(horizon1) == 1
+    # UTC起点(02-26)+1営業日=02-27。JST起点なら02-28になるため、この固定で
+    # start_date基準が今回変わっていないことを検証する。
+    assert horizon1[0].evaluation_date == dt.date(2024, 2, 27)
+
