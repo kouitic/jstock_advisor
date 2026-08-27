@@ -14,6 +14,16 @@ from jstock_advisor.domain.entities.enums import ConfidenceLevel
 
 _MIN_METHODS_FOR_MEDIUM_OR_HIGH = 2
 
+# NO_VALUATION_ANCHORの直接原因コード(2026-08、ウォッチリスト表示改善で
+# 共通定数化)。ValuationAnchorBlockingReason.codeへ設定する値、および表示層
+# (stock_analysis_view_service.py/watchlist_judgment_summary_formatter.py)が
+# code→文言変換に使う値は、必ずこれらの定数を経由し、文字列リテラルを
+# 複数箇所へ重複定義しないこと。
+CODE_NO_VALID_VALUATION_METHODS = "NO_VALID_VALUATION_METHODS"
+CODE_TOO_FEW_VALUATION_METHODS = "TOO_FEW_VALUATION_METHODS"
+CODE_VALUATION_DISPERSION_TOO_HIGH = "VALUATION_DISPERSION_TOO_HIGH"
+CODE_VALUATION_ANCHOR_CALCULATION_FAILED = "VALUATION_ANCHOR_CALCULATION_FAILED"
+
 
 @dataclass(frozen=True)
 class ValuationAnchorBlockingReason:
@@ -53,7 +63,7 @@ def determine_valuation_confidence(
         return ValuationConfidenceResult(
             ConfidenceLevel.LOW,
             ["有効な適正価格算出手法がありません"],
-            blocking_reason=ValuationAnchorBlockingReason(code="NO_VALID_VALUATION_METHODS"),
+            blocking_reason=ValuationAnchorBlockingReason(code=CODE_NO_VALID_VALUATION_METHODS),
         )
 
     reasons_not_high: list[str] = []
@@ -73,7 +83,7 @@ def determine_valuation_confidence(
             ConfidenceLevel.LOW,
             [*reasons_not_high, "有効な適正価格算出手法が2件未満です"],
             blocking_reason=ValuationAnchorBlockingReason(
-                code="TOO_FEW_VALUATION_METHODS",
+                code=CODE_TOO_FEW_VALUATION_METHODS,
                 actual_value=float(methods_used_count),
                 threshold_value=float(_MIN_METHODS_FOR_MEDIUM_OR_HIGH),
             ),
@@ -87,7 +97,7 @@ def determine_valuation_confidence(
                 "自動購入判定を禁止します",
             ],
             blocking_reason=ValuationAnchorBlockingReason(
-                code="VALUATION_DISPERSION_TOO_HIGH",
+                code=CODE_VALUATION_DISPERSION_TOO_HIGH,
                 actual_value=dispersion_ratio,
                 threshold_value=dispersion_auto_buy_block,
             ),

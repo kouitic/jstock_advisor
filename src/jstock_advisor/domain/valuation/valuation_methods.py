@@ -38,7 +38,10 @@ from jstock_advisor.domain.entities.valuation import (
     ValuationExclusionReason,
 )
 from jstock_advisor.domain.valuation.fair_value_usability import build_fair_value_range
-from jstock_advisor.domain.valuation.valuation_confidence import ValuationAnchorBlockingReason
+from jstock_advisor.domain.valuation.valuation_confidence import (
+    CODE_VALUATION_ANCHOR_CALCULATION_FAILED,
+    ValuationAnchorBlockingReason,
+)
 
 DispersionBand = Literal["LOW", "MEDIUM", "HIGH"]
 
@@ -405,7 +408,7 @@ def compute_valuation_anchor(
         return ValuationAnchorResult(
             anchor=None,
             blocking_reason=ValuationAnchorBlockingReason(
-                code="VALUATION_ANCHOR_CALCULATION_FAILED"
+                code=CODE_VALUATION_ANCHOR_CALCULATION_FAILED
             ),
         )
 

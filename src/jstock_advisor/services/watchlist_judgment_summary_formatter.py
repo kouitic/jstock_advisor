@@ -27,6 +27,12 @@ from jstock_advisor.domain.entities.buy_decision import BuyDecisionReason
 from jstock_advisor.domain.entities.common import ScoreBreakdown
 from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.valuation.valuation_confidence import (
+    CODE_NO_VALID_VALUATION_METHODS,
+    CODE_TOO_FEW_VALUATION_METHODS,
+    CODE_VALUATION_ANCHOR_CALCULATION_FAILED,
+    CODE_VALUATION_DISPERSION_TOO_HIGH,
+)
 
 # 既存buy_signal.py._WEAK_SCORE_RATIOと同じ値。投資判断モジュールへの依存を
 # 避けるため値のみ独立して定義する(既存定数の変更に追従する必要が生じた
@@ -66,7 +72,21 @@ _PRICE_TIER_REASON_TEXT: dict[BuyAction, str] = {
     BuyAction.SMALL_ENTRY: "現在値が打診買付価格以内",
     BuyAction.WATCH_FOR_PRICE: "現在値が買付価格を上回る",
 }
-_NO_VALUATION_ANCHOR_TEXT = "適正価格を算出できず"
+# レビュー対応(2026-08、ウォッチリスト表示改善): NO_VALUATION_ANCHORの直接
+# 原因(判定時点スナップショットbuy_score_input_facts["no_valuation_anchor_
+# reason"]のcode)を、ウォッチリストの1行表示向けに短く変換する。銘柄分析
+# (stock_analysis_view_service.py)ほど詳細(実測値・基準値)は表示せず、
+# ラベルのみとする(詳細は銘柄分析側で確認する役割分担)。codeが未知、また
+# スナップショット自体が無い(旧Recommendation)場合は、いずれも原因を推測
+# せず同一の非断定表示へフォールバックする(valuation_methods等の別の事実
+# へフォールバックしない。stock_analysis_view_service.pyと同じ設計原則)。
+_NO_VALUATION_ANCHOR_REASON_LABELS: dict[str, str] = {
+    CODE_NO_VALID_VALUATION_METHODS: "適正価格を算出できず",
+    CODE_TOO_FEW_VALUATION_METHODS: "適正価格の算出方式が不足",
+    CODE_VALUATION_DISPERSION_TOO_HIGH: "適正価格のばらつき大",
+    CODE_VALUATION_ANCHOR_CALCULATION_FAILED: "購入基準価格を算出できず",
+}
+_NO_VALUATION_ANCHOR_FALLBACK_TEXT = "購入基準価格を決定できず"
 _EARNINGS_WINDOW_TEXT = "次回決算が近いため保留"
 _BUY_PRICE_RELIABILITY_LOW_TEXT = "価格算出の信頼度が低い"
 _VALUATION_DISPERSION_TOO_HIGH_TEXT = "評価手法間のばらつきが大きい"
@@ -111,7 +131,7 @@ def _category_reason_text(
     if last_reason.code == "PRICE_TIER":
         return _PRICE_TIER_REASON_TEXT.get(final_action, "") if final_action else ""
     if last_reason.code == "NO_VALUATION_ANCHOR":
-        return _NO_VALUATION_ANCHOR_TEXT
+        return _no_valuation_anchor_reason_text(recommendation)
     if last_reason.code == "EARNINGS_WINDOW":
         return _EARNINGS_WINDOW_TEXT
     if last_reason.code == "BUY_PRICE_RELIABILITY_LOW":
@@ -119,6 +139,27 @@ def _category_reason_text(
     if last_reason.code == "VALUATION_DISPERSION_TOO_HIGH":
         return _VALUATION_DISPERSION_TOO_HIGH_TEXT
     return ""
+
+
+def _no_valuation_anchor_reason_text(recommendation: Recommendation) -> str:
+    """NO_VALUATION_ANCHORの直接原因を、判定時点スナップショット
+    (buy_score_input_facts["no_valuation_anchor_reason"])から短い1行表現へ
+    変換する(2026-08、ウォッチリスト表示改善)。
+
+    スナップショットが存在しcodeが既知の場合のみ具体的なラベルを返す。
+    スナップショット自体が存在しない(旧Recommendation)場合、および
+    スナップショットは存在するがcodeが未知(将来追加されたcode等)の場合は、
+    いずれも原因を推測せず同一の非断定表示へフォールバックする
+    (stock_analysis_view_service.pyと同じ設計原則。valuation_methods等の
+    別の事実へフォールバックしない)。
+    """
+    facts = recommendation.buy_score_input_facts or {}
+    reason = facts.get("no_valuation_anchor_reason")
+    if isinstance(reason, dict):
+        label = _NO_VALUATION_ANCHOR_REASON_LABELS.get(str(reason.get("code")))
+        if label is not None:
+            return label
+    return _NO_VALUATION_ANCHOR_FALLBACK_TEXT
 
 
 def _select_supplementary_concern(
@@ -201,9 +242,13 @@ def format_watchlist_line(
 ) -> str:
     """ウォッチリスト1銘柄1行の表示文字列を組み立てる(表示専用、副作用なし)。
 
-    形式: 「社名（銘柄コード）｜区分｜区分理由、補足懸念」。区分理由・補足懸念は
+    形式: 「社名（銘柄コード）｜区分｜区分理由｜補足懸念」。区分理由・補足懸念は
     それぞれ無ければ省略する(説明要素は最大2件、必ず2件表示する必要はない)。
-    補足懸念の算出には、判定時点のScoreWeights(_resolve_weights参照)を使う。
+    区分理由(buy_decision_reasons由来)と補足懸念(score_breakdown由来)は
+    互いに独立した別々の判定結果であり因果関係が無いため、「、」ではなく
+    「｜」で区切り、2つの独立した情報であることを明示する(2026-08、
+    ウォッチリスト表示改善)。補足懸念の算出には、判定時点のScoreWeights
+    (_resolve_weights参照)を使う。
     """
     header = f"{display_name}（{stock_code}）"
     if record is None:
@@ -224,7 +269,7 @@ def format_watchlist_line(
     parts = [part for part in (reason, concern) if part]
     if not parts:
         return f"{header}｜{label}"
-    return f"{header}｜{label}｜{'、'.join(parts)}"
+    return f"{header}｜{label}｜{'｜'.join(parts)}"
 
 
 def format_watchlist_line_body(
@@ -238,9 +283,10 @@ def format_watchlist_line_body(
     (ウォッチリスト表示改善2026-08)。7区分見出し単位でグルーピングし、
     区分ラベルは見出し側で1回だけ表示する新方式(WatchlistViewService)向け。
 
-    形式: 「社名（銘柄コード）｜区分理由、補足懸念」。区分理由・補足懸念が
+    形式: 「社名（銘柄コード）｜区分理由｜補足懸念」。区分理由・補足懸念が
     共に無ければ「｜」以降を省略する(format_watchlist_line()と同じロジックを
-    区分ラベル抜きで再利用する)。
+    区分ラベル抜きで再利用する)。区切りを「｜」とする理由は
+    format_watchlist_line()のdocstring参照。
     """
     header = f"{display_name}（{stock_code}）"
     if record is None:
@@ -260,4 +306,4 @@ def format_watchlist_line_body(
     parts = [part for part in (reason, concern) if part]
     if not parts:
         return header
-    return f"{header}｜{'、'.join(parts)}"
+    return f"{header}｜{'｜'.join(parts)}"

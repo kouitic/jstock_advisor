@@ -1,7 +1,7 @@
 {
   "size": { "width": 2500, "height": 1686 },
   "selected": true,
-  "name": "jstock-advisor-main-menu-v2a",
+  "name": "jstock-advisor-main-menu-v2b",
   "chatBarText": "メニュー",
   "areas": [
     {
@@ -17,16 +17,20 @@
       "action": { "type": "postback", "data": "action=start_watch", "displayText": "⭐ お気に入り登録" }
     },
     {
-      "bounds": { "x": 0, "y": 843, "width": 833, "height": 843 },
+      "bounds": { "x": 0, "y": 843, "width": 625, "height": 843 },
       "action": { "type": "postback", "data": "action=show_holdings", "displayText": "📊 保有銘柄" }
     },
     {
-      "bounds": { "x": 833, "y": 843, "width": 834, "height": 843 },
+      "bounds": { "x": 625, "y": 843, "width": 625, "height": 843 },
       "action": { "type": "postback", "data": "action=show_watchlist", "displayText": "👀 ウォッチリスト" }
     },
     {
-      "bounds": { "x": 1667, "y": 843, "width": 833, "height": 843 },
+      "bounds": { "x": 1250, "y": 843, "width": 625, "height": 843 },
       "action": { "type": "postback", "data": "action=show_targets", "displayText": "🎯 対象確認" }
+    },
+    {
+      "bounds": { "x": 1875, "y": 843, "width": 625, "height": 843 },
+      "action": { "type": "postback", "data": "action=start_analyze", "displayText": "🔍 銘柄分析" }
     }
   ]
 }

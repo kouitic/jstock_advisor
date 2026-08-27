@@ -34,6 +34,12 @@ from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
 from jstock_advisor.domain.entities.common import BuyPriceLevels, ScoreBreakdown
 from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.valuation.valuation_confidence import (
+    CODE_NO_VALID_VALUATION_METHODS,
+    CODE_TOO_FEW_VALUATION_METHODS,
+    CODE_VALUATION_ANCHOR_CALCULATION_FAILED,
+    CODE_VALUATION_DISPERSION_TOO_HIGH,
+)
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
@@ -482,16 +488,16 @@ def _no_valuation_anchor_detail_text(
     一切行わない。actual_value/threshold_valueも判定時点に保存された値を
     そのまま表示に使い、現在configを取得し直さない。
     """
-    if code == "NO_VALID_VALUATION_METHODS":
+    if code == CODE_NO_VALID_VALUATION_METHODS:
         return "有効な適正価格の算出方式が一つもありませんでした。"
-    if code == "TOO_FEW_VALUATION_METHODS":
+    if code == CODE_TOO_FEW_VALUATION_METHODS:
         actual = _decimal_str_to_display(actual_value, digits=0) or "不明"
         threshold = _decimal_str_to_display(threshold_value, digits=0) or "不明"
         return (
             f"有効な適正価格の算出方式が{actual}件しかなく"
             f"（{threshold}件必要）、結果を一本化できませんでした。"
         )
-    if code == "VALUATION_DISPERSION_TOO_HIGH":
+    if code == CODE_VALUATION_DISPERSION_TOO_HIGH:
         actual_ratio = _decimal_str_to_display(actual_value, digits=2)
         threshold_ratio = _decimal_str_to_display(threshold_value, digits=2)
         actual_text = f"{actual_ratio}倍" if actual_ratio is not None else "不明"
@@ -501,7 +507,7 @@ def _no_valuation_anchor_detail_text(
             f"判定時点のばらつき：{actual_text}\n"
             f"自動買付を行わない基準：{threshold_text}"
         )
-    if code == "VALUATION_ANCHOR_CALCULATION_FAILED":
+    if code == CODE_VALUATION_ANCHOR_CALCULATION_FAILED:
         return "算出処理で有効な結果を得られませんでした。"
     return None
 

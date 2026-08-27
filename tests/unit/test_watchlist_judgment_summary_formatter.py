@@ -28,6 +28,7 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.services.watchlist_judgment_summary_formatter import (
     category_label,
     format_watchlist_line,
+    format_watchlist_line_body,
 )
 
 _NOW = dt.datetime(2026, 8, 24, 7, 0, tzinfo=dt.UTC)
@@ -82,6 +83,7 @@ def _recommendation(
     score_breakdown: ScoreBreakdown | None = None,
     recommendation_id: str = "rec-1",
     config_values_used: dict | None = None,
+    buy_score_input_facts: dict | None = None,
 ) -> Recommendation:
     return Recommendation(
         recommendation_id=recommendation_id,
@@ -105,6 +107,7 @@ def _recommendation(
         score_breakdown=score_breakdown or _breakdown(),
         buy_decision_reasons=reasons,
         config_values_used=config_values_used or {},
+        buy_score_input_facts=buy_score_input_facts,
     )
 
 
@@ -191,12 +194,137 @@ def test_price_tier_watch_for_price() -> None:
     assert "買い待ち｜現在値が買付価格を上回る" in line
 
 
-def test_no_valuation_anchor() -> None:
+def test_no_valuation_anchor_without_snapshot_shows_non_committal_fallback() -> None:
+    """必須テスト5: no_valuation_anchor_reasonスナップショットが無い(旧
+    Recommendation)場合、原因を推測せず非断定表示にとどめる。"""
     reasons = (_reason("NO_VALUATION_ANCHOR"),)
     record = _record(PurchaseCategory.WATCH_FOR_PRICE, BuyAction.WATCH_FOR_PRICE)
     rec = _recommendation(reasons)
     line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
+    assert "買い待ち｜購入基準価格を決定できず" in line
+
+
+def test_no_valuation_anchor_no_valid_methods() -> None:
+    """必須テスト1: NO_VALID_VALUATION_METHODS。"""
+    reasons = (_reason("NO_VALUATION_ANCHOR"),)
+    record = _record(PurchaseCategory.WATCH_FOR_PRICE, BuyAction.WATCH_FOR_PRICE)
+    rec = _recommendation(
+        reasons,
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "NO_VALID_VALUATION_METHODS",
+                "actual_value": None,
+                "threshold_value": None,
+            }
+        },
+    )
+    line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
     assert "買い待ち｜適正価格を算出できず" in line
+
+
+def test_no_valuation_anchor_too_few_methods() -> None:
+    """必須テスト2: TOO_FEW_VALUATION_METHODS。ウォッチリストではactual_value/
+    threshold_value等の詳細数値は表示しない(短いラベルのみ、銘柄分析側で
+    詳細を確認する役割分担)。"""
+    reasons = (_reason("NO_VALUATION_ANCHOR"),)
+    record = _record(PurchaseCategory.WATCH_FOR_PRICE, BuyAction.WATCH_FOR_PRICE)
+    rec = _recommendation(
+        reasons,
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "TOO_FEW_VALUATION_METHODS",
+                "actual_value": "1.0",
+                "threshold_value": "2.0",
+            }
+        },
+    )
+    line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
+    assert "買い待ち｜適正価格の算出方式が不足" in line
+    assert "1.0" not in line
+    assert "2.0" not in line
+
+
+def test_no_valuation_anchor_dispersion_too_high() -> None:
+    """必須テスト3: VALUATION_DISPERSION_TOO_HIGH。"""
+    reasons = (_reason("NO_VALUATION_ANCHOR"),)
+    record = _record(PurchaseCategory.WATCH_FOR_PRICE, BuyAction.WATCH_FOR_PRICE)
+    rec = _recommendation(
+        reasons,
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "VALUATION_DISPERSION_TOO_HIGH",
+                "actual_value": "14.4",
+                "threshold_value": "2.0",
+            }
+        },
+    )
+    line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
+    assert "買い待ち｜適正価格のばらつき大" in line
+    assert "14.4" not in line
+    assert "2.0" not in line
+
+
+def test_no_valuation_anchor_calculation_failed() -> None:
+    """必須テスト4: VALUATION_ANCHOR_CALCULATION_FAILED。"""
+    reasons = (_reason("NO_VALUATION_ANCHOR"),)
+    record = _record(PurchaseCategory.WATCH_FOR_PRICE, BuyAction.WATCH_FOR_PRICE)
+    rec = _recommendation(
+        reasons,
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "VALUATION_ANCHOR_CALCULATION_FAILED",
+                "actual_value": None,
+                "threshold_value": None,
+            }
+        },
+    )
+    line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
+    assert "買い待ち｜購入基準価格を算出できず" in line
+
+
+def test_no_valuation_anchor_unknown_code_does_not_fall_back_to_valuation_methods() -> None:
+    """必須テスト6: no_valuation_anchor_reasonスナップショットは存在するが
+    codeが未知(将来追加されたcode等)の場合、原因を推測せず非断定表示に
+    とどめる。valuation_methods等の別の事実へフォールバックしないこと、
+    未知code自体をユーザー向け文言へ露出させないことを明示的に検証する。"""
+    reasons = (_reason("NO_VALUATION_ANCHOR"),)
+    record = _record(PurchaseCategory.WATCH_FOR_PRICE, BuyAction.WATCH_FOR_PRICE)
+    rec = _recommendation(
+        reasons,
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "UNKNOWN_FUTURE_REASON",
+                "actual_value": "1.0",
+                "threshold_value": "2.0",
+            }
+        },
+    )
+    line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
+    assert "買い待ち｜購入基準価格を決定できず" in line
+    assert "UNKNOWN_FUTURE_REASON" not in line
+
+
+def test_no_valuation_anchor_with_supplementary_concern_uses_pipe_separator() -> None:
+    """必須テスト7: 区分理由(NO_VALUATION_ANCHOR由来)と補足懸念
+    (score_breakdown由来)は独立した判定結果であり因果関係が無いため、
+    「、」ではなく「｜」で区切ること(本番実データUATで確認したしまむら
+    (8227)相当のケース)。"""
+    reasons = (_reason("NO_VALUATION_ANCHOR"),)
+    record = _record(PurchaseCategory.WATCH_FOR_PRICE, BuyAction.WATCH_FOR_PRICE)
+    rec = _recommendation(
+        reasons,
+        # total_yield_attractiveness = 0/20 = 0.0 のみ弱い項目(0.3未満)。
+        score_breakdown=_breakdown(0, 15, 15, 15, 8, 4, 4),
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "VALUATION_DISPERSION_TOO_HIGH",
+                "actual_value": "14.4",
+                "threshold_value": "2.0",
+            }
+        },
+    )
+    line = format_watchlist_line_body("しまむら", "8227", record, rec, _WEIGHTS)
+    assert line == "しまむら（8227）｜適正価格のばらつき大｜総合利回りの魅力度に懸念"
 
 
 def test_score_below_threshold_final_buy() -> None:
@@ -293,7 +421,7 @@ def test_supplementary_concern_single_weak_item() -> None:
         score_breakdown=_breakdown(15, 15, 5, 15, 8, 4, 4),
     )
     line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
-    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内、財務健全性に懸念"
+    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内｜財務健全性に懸念"
 
 
 def test_supplementary_concern_multiple_weak_items_unique_max() -> None:
@@ -306,7 +434,7 @@ def test_supplementary_concern_multiple_weak_items_unique_max() -> None:
         score_breakdown=_breakdown(19, 2, 10, 15, 1, 0.5, 4),
     )
     line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
-    assert line.endswith("、配当持続性に懸念")
+    assert line.endswith("｜配当持続性に懸念")
 
 
 def test_supplementary_concern_multiple_weak_items_tied_max_lists_all() -> None:
@@ -318,7 +446,7 @@ def test_supplementary_concern_multiple_weak_items_tied_max_lists_all() -> None:
         score_breakdown=_breakdown(15, 0, 0, 15, 8, 4, 4),
     )
     line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
-    assert line.endswith("、配当持続性・財務健全性に懸念")
+    assert line.endswith("｜配当持続性・財務健全性に懸念")
     assert "総合評価に一部懸念あり" not in line
 
 
@@ -337,7 +465,7 @@ def test_supplementary_concern_no_weak_item_but_score_below_threshold_shows_rela
     )
     line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
     assert line == (
-        "NTT（9432）｜買い候補｜現在値が標準買付価格以内、評価内訳では割安度が相対的に低め"
+        "NTT（9432）｜買い候補｜現在値が標準買付価格以内｜評価内訳では割安度が相対的に低め"
     )
     assert "総合評価が基準未満" not in line
     assert "主な弱点" not in line
@@ -408,7 +536,7 @@ def test_falls_back_to_current_weights_when_snapshot_absent() -> None:
 
     line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
 
-    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内、財務健全性に懸念"
+    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内｜財務健全性に懸念"
 
 
 def test_falls_back_to_current_weights_when_snapshot_malformed() -> None:
@@ -424,4 +552,4 @@ def test_falls_back_to_current_weights_when_snapshot_malformed() -> None:
 
     line = format_watchlist_line("NTT", "9432", record, rec, _WEIGHTS)
 
-    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内、財務健全性に懸念"
+    assert line == "NTT（9432）｜買い候補｜現在値が標準買付価格以内｜財務健全性に懸念"
