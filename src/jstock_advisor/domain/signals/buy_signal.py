@@ -33,6 +33,21 @@ _SCORE_LABELS: dict[str, str] = {
 }
 
 
+def undervaluation_signal_threshold_values() -> dict[str, float]:
+    """UndervaluationSignals算出に使うモジュール定数閾値の判定時点スナップショット用
+    (Issue #22 Phase 3.5、2026-08-28)。これらはconfig化されていないため、
+    config_values_usedへ記録しないと判定時点の値を事後に確定できない。
+    判定ロジック自体は一切変更しない(値の公開のみ)。
+    """
+    return {
+        "drawdown_from_high_threshold_pct": _DRAWDOWN_FROM_HIGH_THRESHOLD_PCT,
+        "price_down_despite_stable_earnings_threshold_pct": (
+            _PRICE_DOWN_DESPITE_STABLE_EARNINGS_THRESHOLD_PCT
+        ),
+        "earnings_severe_decline_threshold_pct": _EARNINGS_SEVERE_DECLINE_THRESHOLD_PCT,
+    }
+
+
 def has_severe_earnings_decline(quarterly_operating_incomes: list[Decimal]) -> bool:
     if len(quarterly_operating_incomes) < 2:
         return False

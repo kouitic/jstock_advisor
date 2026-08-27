@@ -158,3 +158,67 @@ def test_old_shape_decision_snapshot_without_entry_exit_price_range_fields_loads
     assert snapshot.environment_coverage is None
     assert snapshot.environment_reason_codes == ()
     assert snapshot.environment_metrics == {}
+
+
+# --- Issue #22 Phase 3.5(2026-08-28): company_quality_score_model_version -----
+# 買い側company_quality_score専用の第4の版概念(DecisionSnapshot.model_version・
+# 各Shadowスコアのmodel_version・保有判断側scoring_model_versionとは別物)。
+# フィールドを持たない既存レコードはdefaultにより"v1"として読む(backfillしない)。
+# buy_score_input_facts_schema_versionキーを持たない既存factsは
+# LEGACY_UNVERSIONEDとして扱う(キー数から世代を推測しない)。
+
+
+def test_old_shape_recommendation_defaults_company_quality_score_model_version(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "local_store"
+    store_dir.mkdir()
+    (store_dir / "recommendations.json").write_text(
+        json.dumps([_OLD_SHAPE_RECOMMENDATION]), encoding="utf-8"
+    )
+
+    repo = RecommendationRepository(store_dir=store_dir)
+    rec = repo.get("old-rec-1")
+
+    assert rec is not None
+    assert rec.company_quality_score_model_version == "v1"
+
+
+def test_old_shape_recommendation_facts_without_schema_version_is_legacy(
+    tmp_path: Path,
+) -> None:
+    """schema versionキーを持たない旧factsはLEGACY_UNVERSIONEDとして扱う
+    (消費側は「キーが無い=当時未実装」と「キーが無い=判定不能」を混同しない)。
+    既存データのbackfillは行わないため、読み込み時にキーが自然に欠けたままで
+    あることを確認する。"""
+    old_with_facts = dict(_OLD_SHAPE_RECOMMENDATION)
+    old_with_facts["recommendation_id"] = "old-rec-legacy-facts"
+    old_with_facts["buy_score_input_facts"] = {"total_yield_pct": 3.0}
+    store_dir = tmp_path / "local_store"
+    store_dir.mkdir()
+    (store_dir / "recommendations.json").write_text(
+        json.dumps([old_with_facts]), encoding="utf-8"
+    )
+
+    repo = RecommendationRepository(store_dir=store_dir)
+    rec = repo.get("old-rec-legacy-facts")
+
+    assert rec is not None
+    assert rec.buy_score_input_facts is not None
+    assert "buy_score_input_facts_schema_version" not in rec.buy_score_input_facts
+
+
+def test_old_shape_decision_snapshot_defaults_company_quality_score_model_version(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "local_store"
+    store_dir.mkdir()
+    (store_dir / "decision_snapshots.json").write_text(
+        json.dumps([_OLD_SHAPE_DECISION_SNAPSHOT]), encoding="utf-8"
+    )
+
+    repo = DecisionSnapshotRepository(store_dir=store_dir)
+    snapshot = repo.get("decision|old-rec-1")
+
+    assert snapshot is not None
+    assert snapshot.company_quality_score_model_version == "v1"

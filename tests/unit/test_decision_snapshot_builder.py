@@ -401,3 +401,16 @@ def test_build_decision_snapshot_reexecution_produces_same_decision_id() -> None
     second = build_decision_snapshot(recommendation, DecisionType.BUY)
 
     assert first.decision_id == second.decision_id == "decision|rec-1"
+
+
+def test_build_decision_snapshot_copies_company_quality_score_model_version() -> None:
+    """Issue #22 Phase 3.5: 買い側品質スコアのモデル版がRecommendationから
+    DecisionSnapshotへコピーされる(model_version=Decision Enhancement Layer
+    全体の版とは別概念。config_values_used経由でscoring_weights等が間接流入
+    しているため、将来のv1/v2混在集計防止にversionを併せて記録する)。"""
+    recommendation = _recommendation()
+    decision = build_decision_snapshot(recommendation, DecisionType.BUY)
+    assert recommendation.company_quality_score_model_version == "v1"
+    assert decision.company_quality_score_model_version == "v1"
+    # Decision Enhancement Layer全体の版(model_version)とは独立に保持される
+    assert decision.model_version != decision.company_quality_score_model_version

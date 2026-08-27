@@ -44,8 +44,13 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.scoring.score import compute_score
+from jstock_advisor.domain.scoring.undervaluation_categories import (
+    UndervaluationCategoryDetail,
+    build_undervaluation_category_details,
+)
 from jstock_advisor.domain.screening.rules import evaluate_screening
 from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
 from jstock_advisor.domain.signals.buy_decision import (
@@ -60,6 +65,7 @@ from jstock_advisor.domain.signals.buy_signal import (
     estimate_historical_average_dividend_yield_pct,
     is_earnings_trend_non_decreasing,
     score_areas,
+    undervaluation_signal_threshold_values,
 )
 from jstock_advisor.domain.signals.earnings_surprise import (
     earnings_surprise_config_values,
@@ -135,6 +141,105 @@ _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
 _STRONG_SCORE_RATIO = 0.7
 _WEAK_SCORE_RATIO = 0.3
+
+# --- Issue #22 Phase 3.5(2026-08-28): 観測用snapshotの正式schema versioning ---
+# buy_score_input_factsのschema versionはこのPhase 3.5から正式に開始する。
+# このキーを持たない既存Recommendation(2026-08-28以前)はLEGACY_UNVERSIONED
+# として扱う(キー数から世代を推測しない。backfillもしない)。optional keyの
+# 追加だけで互換性を壊さない場合は必ずしもversionを上げる必要はない。
+FACTS_SCHEMA_VERSION = "v1"
+
+# 観測用に保存する財務時系列(営業利益・営業CF・EPS)の1系列あたり保存上限
+# (直近N期のみ保存)。providerが将来取得期間を拡大してもRecommendation
+# payloadが無制限に増加しないための上限であり、以下の実際の利用要件から決定:
+# - cf_streak(保有判断側config cf_streak_quartersのfull_at=4)は4期で飽和
+#   → 8期あれば飽和+観測余裕を持って streak を判別できる
+# - eps_stability(holding_decision_ratio_rules.yaml
+#   min_periods_for_stability_score=3)は最低3期
+# - TTM変換(financial_series._TTM_WINDOW=4)は4期。将来providerが四半期粒度を
+#   返せるようになった場合でも8四半期=TTM系列5点分を確保できる
+# - 現行yfinance providerは年次4〜5期しか返さないため、8は現状の実データを
+#   一切切り捨てない
+_FACTS_SERIES_MAX_PERIODS = 8
+
+# 割安シグナルが「評価の結果False/None」ではなく「上位ルール(重大業績悪化)に
+# より抑止された」ことを表すreason_code(観測用。stateには混ぜず、stateは
+# EVALUATED/NOT_EVALUATED/NOT_APPLICABLEの3値に統一する)。
+_REASON_SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE = "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE"
+
+
+def _serialize_period_series(periods: list[FinancialPeriodValue]) -> list[dict[str, object]]:
+    """FinancialPeriodValue系列を観測用snapshotへ直列化する(直近N期のみ)。
+
+    period_typeを必ず併存保存する(ANNUAL_FALLBACK環境では「期」が年を意味し、
+    「4期連続」を四半期と断定できないため。FinancialPeriodValueのdocstring参照)。
+    """
+    ordered = sorted(periods, key=lambda p: p.period_end)[-_FACTS_SERIES_MAX_PERIODS:]
+    return [
+        {
+            "value": str(p.value),
+            "period_end": p.period_end.isoformat(),
+            "period_type": p.period_type.value,
+        }
+        for p in ordered
+    ]
+
+
+def _trailing_positive_streak(periods: list[FinancialPeriodValue]) -> int:
+    """直近から連続で正値が続く期数(company_quality_scoring._trailing_positive_streak
+    と同一ロジック。保有判断側のprivate関数のため、観測用に同じ4行をここへ持つ。
+    判定ロジックには使用しない観測専用)。
+    """
+    ordered = sorted(periods, key=lambda p: p.period_end)
+    streak = 0
+    for period in reversed(ordered):
+        if period.value > 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def _serialize_undervaluation_categories(
+    details: list[UndervaluationCategoryDetail],
+    suppressed_signal_reasons: dict[str, str],
+) -> list[dict[str, object]]:
+    """割安度4カテゴリの判定時点明細を観測用snapshotへ直列化する。
+
+    signal_resultsは{"value": bool|None, "reason_code": str|None}形式とし、
+    「評価不能(value=None)」と「評価したが上位ルールで抑止された
+    (value=False + SUPPRESSED_*)」を区別する(Issue #22 Phase 3.5)。
+    """
+    payload: list[dict[str, object]] = []
+    for detail in details:
+        reason_codes: list[str] = []
+        if detail.signals_available == 0:
+            reason_codes.append("NO_SIGNALS_AVAILABLE")
+        elif detail.signals_available < detail.signals_defined:
+            reason_codes.append("PARTIAL_SIGNAL_COVERAGE")
+        if any(name in suppressed_signal_reasons for name in detail.signal_results):
+            reason_codes.append(_REASON_SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE)
+        signal_results = {
+            name: {
+                "value": value,
+                "reason_code": suppressed_signal_reasons.get(name),
+            }
+            for name, value in detail.signal_results.items()
+        }
+        payload.append(
+            {
+                "category": detail.category,
+                "score": detail.score,
+                "cap": detail.cap,
+                "signals_met": detail.signals_met,
+                "signals_available": detail.signals_available,
+                "signals_defined": detail.signals_defined,
+                "state": detail.state.value,
+                "reason_codes": reason_codes,
+                "signal_results": signal_results,
+            }
+        )
+    return payload
 
 
 @dataclass(frozen=True)
@@ -610,6 +715,37 @@ class BuySignalService:
         )
         company_quality_score = score_result.breakdown.total
 
+        # --- Issue #22 Phase 3.5(2026-08-28): 割安シグナルの抑止注記(観測用) ---
+        # compute_undervaluation_signals()はsevere_earnings_decline時に
+        # drawdown_from_52w_high/below_fair_valueを強制Falseにし、
+        # price_down_despite_stable_earningsをNoneのままにする(buy_signal.py参照)。
+        # 保存されたFalse/Noneだけでは「評価の結果」と「ルールによる抑止」を
+        # 事後に区別できないため、入力が実在した(=抑止が実際に作用した)場合のみ
+        # reason_codeとして記録する(推測ではなく判定時点の事実からの確定)。
+        suppressed_signal_reasons: dict[str, str] = {}
+        if snapshot.severe_earnings_decline:
+            if drawdown_pct is not None:
+                suppressed_signal_reasons["drawdown_from_52w_high"] = (
+                    _REASON_SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE
+                )
+            if valuation_anchor is not None:
+                suppressed_signal_reasons["below_fair_value"] = (
+                    _REASON_SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE
+                )
+            if recent_price_change_pct is not None and earnings_trend_non_decreasing is not None:
+                suppressed_signal_reasons["price_down_despite_stable_earnings"] = (
+                    _REASON_SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE
+                )
+        undervaluation_category_details = build_undervaluation_category_details(
+            undervaluation_signals, self._config.buy_decision.undervaluation_category_caps
+        )
+        cf_periods = snapshot.quarterly_operating_cashflow_periods
+        cf_periods_ordered = sorted(cf_periods, key=lambda p: p.period_end)
+        eps_periods = sorted(
+            (hv for hv in snapshot.historical_valuations if hv.eps is not None),
+            key=lambda hv: hv.date,
+        )[-_FACTS_SERIES_MAX_PERIODS:]
+
         # Phase 2-B「銘柄分析」向け(2026-08): compute_score()内部では取得できない
         # (buy_signal_service.py側でのみ計算される)PER/PBR関連の判定時点入力事実を
         # score_result.input_facts(compute_score()自身が保持する分)へ合流させる。
@@ -679,6 +815,74 @@ class BuySignalService:
             # 基準値ごとスナップショットする(511行付近のコメント参照)。valuation_anchor
             # が算出できた場合はNone。
             "no_valuation_anchor_reason": no_valuation_anchor_reason,
+            # --- Issue #22 Phase 3.5(2026-08-28): 観測用snapshot ---
+            # 以下はすべて将来のスコア責務再設計(C4)のshadow検証用の観測データで
+            # あり、v1の判定ロジック・スコア・BuyActionからは一切参照されない。
+            # このキーが無い既存RecommendationはLEGACY_UNVERSIONEDとして扱う
+            # (モジュール冒頭のFACTS_SCHEMA_VERSIONコメント参照)。
+            "buy_score_input_facts_schema_version": FACTS_SCHEMA_VERSION,
+            # Common Quality候補の本来値(判定時点にsnapshotへ算出済みだが従来
+            # 未保存だったもの。暫定代替ではなく本来値をそのまま保存する)。
+            # net_incomeを併存保存するのは、is_deficitがnet_income=Noneのとき
+            # Falseへ潰れる(黒字と欠測を区別できない)ため。
+            "net_income": (
+                str(financial.net_income) if financial.net_income is not None else None
+            ),
+            "is_deficit": financial.is_deficit,
+            "is_debt_excess": financial.is_debt_excess,
+            "latest_operating_income": (
+                str(financial.operating_income)
+                if financial.operating_income is not None
+                else None
+            ),
+            "latest_operating_cashflow": (
+                str(financial.operating_cashflow)
+                if financial.operating_cashflow is not None
+                else None
+            ),
+            "trailing_eps": (
+                str(financial.trailing_eps) if financial.trailing_eps is not None else None
+            ),
+            # 財務時系列(直近_FACTS_SERIES_MAX_PERIODS期のみ、上限の根拠は
+            # モジュール冒頭コメント参照)。period_type付き構造化系列であり、
+            # 既存キーquarterly_operating_incomes(期ラベル無しの素の値列)は
+            # 互換のため変更せず並置する。
+            "operating_income_periods": _serialize_period_series(
+                snapshot.quarterly_operating_income_periods
+            ),
+            "operating_cashflow_periods": _serialize_period_series(cf_periods),
+            # 営業CF連続黒字期数。ANNUAL_FALLBACK環境では「期」=「年」であり
+            # 四半期ではないため、period_type/recent_periods_sourceを必ず併存
+            # 保存する(「4期連続四半期黒字」と断定させないため)。
+            "operating_cf_positive_streak": {
+                "streak": _trailing_positive_streak(cf_periods),
+                "periods_available": len(cf_periods),
+                "latest_period_type": (
+                    cf_periods_ordered[-1].period_type.value if cf_periods_ordered else None
+                ),
+                "recent_periods_source": financial.recent_periods_source.value,
+            },
+            # EPS系列。歴史的PER/PBR算出用のhistorical_valuationsから抽出した
+            # ものであり「完全なEPS履歴」ではない(PER/PBR算出不能の期はEPS値が
+            # 存在しても系列から落ち得る)。この制約をデータ自体に明示する。
+            "historical_valuation_eps_periods": {
+                "source": "historical_valuations",
+                "coverage_limitation": "VALUATION_DATA_DEPENDENT",
+                "periods": [
+                    {"date": hv.date.isoformat(), "eps": str(hv.eps)} for hv in eps_periods
+                ],
+            },
+            # 割安度4カテゴリの判定時点明細(得点/満点/state/シグナル別値/
+            # 判定可否・抑止理由)。従来はカテゴリ合計値のみ保存されており、
+            # quality/valuation責務分離のshadow検証が保存データだけでは
+            # 不可能だったことへの直接の是正。
+            "undervaluation_categories": _serialize_undervaluation_categories(
+                undervaluation_category_details, suppressed_signal_reasons
+            ),
+            # 7componentの判定時点評価状況(VALID相当=EVALUATED / DATA_MISSING
+            # 相当=NOT_EVALUATED / NOT_APPLICABLE の3値。v1では推測を伴う
+            # NOT_APPLICABLEを生成しない。score.py参照)。
+            "component_states": score_result.component_states,
         }
 
         # --- 13. purchase_attractiveness_score算出 ---
@@ -1015,6 +1219,24 @@ class BuySignalService:
                 "valuation_dispersion_medium_max": (
                     self._config.buy_decision.valuation_dispersion.medium_max
                 ),
+                # Issue #22 Phase 3.5(2026-08-28): 割安度カテゴリ上限点と
+                # UndervaluationSignals算出のモジュール定数閾値の判定時点
+                # スナップショット(buy_score_input_facts.undervaluation_categories
+                # を事後に"現在の"config・定数で誤って再解釈しないため。
+                # score_thresholds等と同じ理由)。
+                "undervaluation_category_caps": {
+                    "valuation_multiple": (
+                        self._config.buy_decision.undervaluation_category_caps.valuation_multiple
+                    ),
+                    "yield": self._config.buy_decision.undervaluation_category_caps.yield_,
+                    "fair_value": (
+                        self._config.buy_decision.undervaluation_category_caps.fair_value
+                    ),
+                    "market_price_action": (
+                        self._config.buy_decision.undervaluation_category_caps.market_price_action
+                    ),
+                },
+                "undervaluation_signal_thresholds": undervaluation_signal_threshold_values(),
             },
             data_sources=list(snapshot.data_sources),
             industry_model_applied=industry_model_applied,

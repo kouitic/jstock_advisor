@@ -209,6 +209,14 @@ class DecisionSnapshot(ImmutableSnapshot):
     # --- 監査・バージョニング(モジュールdocstring参照) ---
     rule_version: str
     model_version: str
+    # Issue #22 Phase 3.5(2026-08-28): 買い側company_quality_scoreのモデル版
+    # (Recommendationからのコピー)。model_version(Decision Enhancement Layer
+    # 全体のスキーマ/方式版)とは別概念。DecisionSnapshot自体は
+    # company_quality_scoreを保持しないが、config_values_used経由で
+    # scoring_weights/score_thresholdsが間接的に流入しているため、将来の
+    # v1/v2混在集計を防げるようversionを併せて記録する。
+    # フィールドを持たない既存レコードはdefaultにより"v1"として読む。
+    company_quality_score_model_version: str = "v1"
     config_values_used: dict[str, Any] = Field(default_factory=dict)
 
     # --- データ出所(Recommendation.data_sourcesのコピー) ---

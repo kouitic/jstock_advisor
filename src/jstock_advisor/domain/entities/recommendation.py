@@ -322,6 +322,19 @@ class Recommendation(ImmutableSnapshot):
     raw_buy_action: BuyAction | None = None
 
     company_quality_score: float | None = None
+    # Issue #22 Phase 3.5(2026-08-28): 買い側company_quality_scoreのモデル版。
+    # 既存の3つのversion概念(DecisionSnapshot.model_version=Decision Enhancement
+    # Layer全体 / 各Shadowスコア個別のmodel_version / 保有判断側
+    # HoldingDecisionResult.scoring_model_version)とは別の、買い側品質スコア
+    # 専用の第4の版概念。本フィールドを持たない既存レコードはdefaultにより
+    # "v1"として読む(backfillしない。判定時点の事実を書き換えない既存方針)。
+    # "v2"の書き込み開始はPhase 4(人間承認後)であり、Phase 3.5では
+    # read/write compatibilityの先行導入のみ行う。
+    # ロールバック互換性の制約: 本フィールドの書き込み開始後は、本フィールドを
+    # 知らないPhase 3.5より前のコード(extra="forbid")では読み込みに失敗する
+    # ため、Phase 3.5より前のコードは安全なrollback先ではない
+    # (docs/functional_spec.md参照)。
+    company_quality_score_model_version: str = "v1"
     purchase_attractiveness_score: float | None = None
 
     # 適正価格の集約値。単一の「最終適正価格」を断定的に扱わず、レンジと

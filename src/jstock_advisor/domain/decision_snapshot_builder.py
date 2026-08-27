@@ -68,6 +68,11 @@ def build_decision_snapshot(
         fair_value_confidence=recommendation.fair_value_overall_confidence,
         rule_version=recommendation.rule_version,
         model_version=DECISION_SNAPSHOT_MODEL_VERSION,
+        # Issue #22 Phase 3.5: 買い側品質スコアのモデル版をコピー(model_version
+        # とは別概念。decision_snapshot.pyのフィールドコメント参照)。
+        company_quality_score_model_version=(
+            recommendation.company_quality_score_model_version
+        ),
         config_values_used=dict(recommendation.config_values_used),
         data_sources=tuple(recommendation.data_sources),
         historical_valuation_score=recommendation.historical_valuation_score,

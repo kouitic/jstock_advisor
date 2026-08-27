@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from jstock_advisor.config.models import ScoringWeightsConfig, UndervaluationCategoryCaps
 from jstock_advisor.domain.entities.common import ScoreBreakdown
+from jstock_advisor.domain.entities.enums import EvidenceCoverageStatus
 from jstock_advisor.domain.scoring.undervaluation_categories import (
     score_undervaluation_categories,
 )
@@ -60,6 +61,19 @@ class ScoreResult:
     # breakdown(算出結果の点数)には残らないものをそのまま保持する(表示専用、
     # 判定ロジックからは参照しない)。
     input_facts: dict[str, object] = field(default_factory=dict)
+    # Issue #22 Phase 3.5(2026-08-28、観測性強化): 7componentそれぞれの
+    # 判定時点の評価状況スナップショット。key=component名、value=
+    # {"state": EvidenceCoverageStatusの値, "reason_codes": [...],
+    #  "excluded_from_denominator": bool}。
+    # 観測専用であり、v1のスコア算出(breakdown/total)へは一切適用しない。
+    # v1は全componentを常に分母へ含めるため excluded_from_denominator は
+    # 常にFalse(v1の実際の挙動をそのまま記録する)。
+    # stateはEVALUATED/NOT_EVALUATEDのみを使う。NOT_APPLICABLEは「判定時点の
+    # 事実だけから明確に評価対象外と断定できる」場合にのみ許され、v1の
+    # スコアリングにはそのような判定基準が存在しないため生成しない
+    # (例: 優待利回りNoneは「優待制度なし」と「レジストリ未登録」を判別
+    # できないため、非断定のNOT_EVALUATEDとする)。
+    component_states: dict[str, object] = field(default_factory=dict)
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -275,4 +289,114 @@ def compute_score(
         "operating_income_non_decrease_ratio": operating_income_non_decrease_ratio,
         "annualized_volatility_pct": annualized_volatility_pct,
     }
-    return ScoreResult(breakdown=breakdown, formulas=formulas, input_facts=input_facts)
+    component_states = _build_component_states(
+        dividend=dividend,
+        financial=financial,
+        undervaluation_signals=undervaluation_signals,
+        benefit_yield_pct=benefit_yield_pct,
+        operating_income_non_decrease_ratio=operating_income_non_decrease_ratio,
+        annualized_volatility_pct=annualized_volatility_pct,
+    )
+    return ScoreResult(
+        breakdown=breakdown,
+        formulas=formulas,
+        input_facts=input_facts,
+        component_states=component_states,
+    )
+
+
+def _component_state_entry(
+    state: EvidenceCoverageStatus, reason_codes: list[str]
+) -> dict[str, object]:
+    # excluded_from_denominatorはv1の実際の挙動の記録(v1は全componentを常に
+    # 分母へ含めるため常にFalse)。将来のv2でN/A項目を分母から除外する設計に
+    # なった場合に意味を持つフィールドを、観測用として先行して持たせている。
+    return {
+        "state": state.value,
+        "reason_codes": reason_codes,
+        "excluded_from_denominator": False,
+    }
+
+
+def _build_component_states(
+    dividend: DividendInfo,
+    financial: FinancialSummary,
+    undervaluation_signals: UndervaluationSignals,
+    benefit_yield_pct: float | None,
+    operating_income_non_decrease_ratio: float | None,
+    annualized_volatility_pct: float | None,
+) -> dict[str, object]:
+    """Issue #22 Phase 3.5: 7componentの判定時点評価状況(観測専用)。
+
+    保存時に意味を推測しない、が大原則(ScoreResult.component_statesの
+    docstring参照)。各stateは「v1がこのcomponentを実データから評価したか
+    (EVALUATED)、データ不足でフォールバック値(0点または中立0.5)を使ったか
+    (NOT_EVALUATED)」という判定時点の事実のみを記録する。
+    """
+    evaluated = EvidenceCoverageStatus.EVALUATED
+    not_evaluated = EvidenceCoverageStatus.NOT_EVALUATED
+
+    # total_yield: compute_total_yield_pct()が上流でNone→0.0へ潰すため、
+    # ここでは常に値が評価される(無配とデータ欠測はこの層では判別不能。
+    # 配当利回り自体の有無はRecommendation.dividend_yield_pct_at_recommendation
+    # で別途観測可能)。
+    total_yield_state = _component_state_entry(evaluated, [])
+
+    # 配当持続性はv1では常に係数式で評価される(欠測要素は加点0として扱われる)
+    # ため state=EVALUATED とし、どの入力が欠測だったかをreason_codesへ残す。
+    # is_progressive_or_doe_policyのFalseは「方針なし」と「データ取得不能」を
+    # この層では判別できないため、断定的なreason_codeは付けない(Issue #30参照)。
+    sustainability_reasons: list[str] = []
+    if financial.payout_ratio_pct is None:
+        sustainability_reasons.append("PAYOUT_RATIO_UNAVAILABLE")
+    if dividend.consecutive_dividend_increase_years is None:
+        sustainability_reasons.append("CONSECUTIVE_DIVIDEND_INCREASE_YEARS_UNAVAILABLE")
+    sustainability_state = _component_state_entry(evaluated, sustainability_reasons)
+
+    if financial.equity_ratio_pct is None:
+        health_state = _component_state_entry(not_evaluated, ["EQUITY_RATIO_UNAVAILABLE"])
+    else:
+        health_state = _component_state_entry(evaluated, [])
+
+    available_signals = undervaluation_signals.available()
+    if not available_signals:
+        undervaluation_state = _component_state_entry(
+            not_evaluated, ["NO_UNDERVALUATION_SIGNALS_AVAILABLE"]
+        )
+    elif len(available_signals) < 6:
+        undervaluation_state = _component_state_entry(evaluated, ["PARTIAL_SIGNAL_COVERAGE"])
+    else:
+        undervaluation_state = _component_state_entry(evaluated, [])
+
+    # 優待利回りNoneは「優待制度が存在しない」と「制度はあるがレジストリ
+    # 未登録」を判定時点のデータから判別できないため、断定的な
+    # NO_BENEFIT_PROGRAM等ではなく非断定のUNAVAILABLEとする(Issue #27参照)。
+    if benefit_yield_pct is None:
+        benefit_state = _component_state_entry(not_evaluated, ["BENEFIT_YIELD_UNAVAILABLE"])
+    else:
+        benefit_state = _component_state_entry(evaluated, [])
+
+    # ratio/volがNone ⟺ v1がデータ不足の中立(0.5)フォールバックを適用した
+    # (score_earnings_stability/score_price_stabilityの戻り値仕様)。
+    if operating_income_non_decrease_ratio is None:
+        earnings_state = _component_state_entry(
+            not_evaluated, ["INSUFFICIENT_QUARTERLY_PERIODS", "NEUTRAL_FALLBACK_APPLIED"]
+        )
+    else:
+        earnings_state = _component_state_entry(evaluated, [])
+    if annualized_volatility_pct is None:
+        price_stability_state = _component_state_entry(
+            not_evaluated, ["INSUFFICIENT_PRICE_HISTORY", "NEUTRAL_FALLBACK_APPLIED"]
+        )
+    else:
+        price_stability_state = _component_state_entry(evaluated, [])
+
+    return {
+        "total_yield_attractiveness": total_yield_state,
+        "dividend_sustainability": sustainability_state,
+        "financial_health": health_state,
+        "undervaluation": undervaluation_state,
+        "shareholder_benefit_value": benefit_state,
+        "earnings_stability": earnings_state,
+        "price_stability": price_stability_state,
+    }

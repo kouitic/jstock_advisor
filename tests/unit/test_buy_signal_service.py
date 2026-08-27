@@ -758,3 +758,214 @@ def test_in_trade_cooldown_still_blocks_watch_state_within_jst_business_date(
     now = dt.datetime(2026, 8, 20, 23, 30, tzinfo=dt.UTC)
     calls = _analyze_with_cooldown_entry(monkeypatch, tmp_path, _TACHI_S, now, dt.date(2026, 8, 21))
     assert calls == []
+
+
+# --- Issue #22 Phase 3.5(2026-08-28): 観測用snapshotの保存 -------------------
+
+
+def test_phase35_observation_snapshot_stored_with_schema_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3.5の観測用snapshotが正式schema version("v1")付きで、判定時点値
+    のまま保存されることを確認する。このキーを持たない既存レコードは
+    LEGACY_UNVERSIONEDとして扱う(キー数から世代を推測しない)。"""
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    assert facts["buy_score_input_facts_schema_version"] == "v1"
+    # Common Quality候補の本来値(fixtureではいずれも未設定=判定時点の事実)
+    assert facts["net_income"] is None
+    assert facts["is_deficit"] is False
+    assert facts["is_debt_excess"] is False
+    assert facts["latest_operating_cashflow"] is None
+    assert facts["trailing_eps"] is None
+    # 時系列(fixtureは空系列。空でもキー自体は必ず保存される)
+    assert facts["operating_income_periods"] == []
+    assert facts["operating_cashflow_periods"] == []
+    assert facts["operating_cf_positive_streak"] == {
+        "streak": 0,
+        "periods_available": 0,
+        "latest_period_type": None,
+        "recent_periods_source": "UNAVAILABLE",
+    }
+    # EPS系列: source/coverage_limitationがデータ自体に明示される
+    eps_payload = facts["historical_valuation_eps_periods"]
+    assert eps_payload["source"] == "historical_valuations"
+    assert eps_payload["coverage_limitation"] == "VALUATION_DATA_DEPENDENT"
+    assert eps_payload["periods"] == []  # fixtureのhistorical_valuationsはeps=None
+    # 割安度4カテゴリ明細と7component状況
+    assert len(facts["undervaluation_categories"]) == 4
+    assert set(facts["component_states"].keys()) == {
+        "total_yield_attractiveness",
+        "dividend_sustainability",
+        "financial_health",
+        "undervaluation",
+        "shareholder_benefit_value",
+        "earnings_stability",
+        "price_stability",
+    }
+    # config_values_used: 割安度カテゴリ上限点とモジュール定数閾値のスナップショット
+    caps_snapshot = rec.config_values_used["undervaluation_category_caps"]
+    assert caps_snapshot == {
+        "valuation_multiple": _CONFIG.buy_decision.undervaluation_category_caps.valuation_multiple,
+        "yield": _CONFIG.buy_decision.undervaluation_category_caps.yield_,
+        "fair_value": _CONFIG.buy_decision.undervaluation_category_caps.fair_value,
+        "market_price_action": (
+            _CONFIG.buy_decision.undervaluation_category_caps.market_price_action
+        ),
+    }
+    thresholds_snapshot = rec.config_values_used["undervaluation_signal_thresholds"]
+    assert thresholds_snapshot["drawdown_from_high_threshold_pct"] == -15.0
+    assert thresholds_snapshot["price_down_despite_stable_earnings_threshold_pct"] == -10.0
+    assert thresholds_snapshot["earnings_severe_decline_threshold_pct"] == -30.0
+
+
+def test_phase35_recommendation_carries_default_score_model_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3.5ではcompany_quality_score_model_versionのread/write互換のみを
+    先行導入し、書き込み値は"v1"のまま("v2"の書き込みはPhase 4以降)。"""
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    assert rec.company_quality_score_model_version == "v1"
+
+
+def test_phase35_period_series_capped_at_max_periods(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """時系列snapshotは直近_FACTS_SERIES_MAX_PERIODS(8)期のみ保存される
+    (providerが取得期間を拡大してもpayloadが無制限に増加しないための上限)。
+    streakとperiod_type/recent_periods_sourceの併存保存も確認する。"""
+    import dataclasses
+
+    from jstock_advisor.domain.entities.enums import PeriodType, RecentPeriodsSource
+    from jstock_advisor.domain.financial_series import FinancialPeriodValue
+
+    cf_periods = [
+        FinancialPeriodValue(
+            value=Decimal("50") if i != 9 else Decimal("-10"),  # 最古期のみ赤字
+            period_end=dt.date(2026 - i, 3, 31),
+            period_type=PeriodType.ANNUAL,
+        )
+        for i in range(10)  # 10期分(上限8を超える)を用意
+    ]
+    snapshot = _build_snapshot(_NIHON_SHINYAKU)
+    snapshot = dataclasses.replace(
+        snapshot,
+        quarterly_operating_cashflow_periods=cf_periods,
+        # FinancialSummaryはPydanticモデル(ImmutableSnapshot)のためmodel_copyを使う
+        financial=snapshot.financial.model_copy(
+            update={"recent_periods_source": RecentPeriodsSource.ANNUAL_FALLBACK}
+        ),
+    )
+    monkeypatch.setattr(
+        service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None)
+    )
+    service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
+    outcome = service.analyze(_NIHON_SHINYAKU.stock_code, _NOW, RecommendationType.BUY)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    series = facts["operating_cashflow_periods"]
+    assert len(series) == 8  # 10期 -> 直近8期のみ
+    assert series[0]["period_end"] == "2019-03-31"  # 最古2期(2017/2018)は切り捨て
+    assert series[-1]["period_end"] == "2026-03-31"
+    assert all(entry["period_type"] == "ANNUAL" for entry in series)
+
+    streak_payload = facts["operating_cf_positive_streak"]
+    # 最古期(2017-03-31)のみ赤字 -> 直近から9期連続黒字(streak自体は全期間で計算)
+    assert streak_payload["streak"] == 9
+    assert streak_payload["periods_available"] == 10
+    assert streak_payload["latest_period_type"] == "ANNUAL"
+    assert streak_payload["recent_periods_source"] == "ANNUAL_FALLBACK"
+
+
+def test_phase35_suppression_is_reason_code_not_state() -> None:
+    """抑止(severe_earnings_decline)はstateではなくreason_codeとして保存される。
+    stateの語彙はEVALUATED/NOT_EVALUATED/NOT_APPLICABLEの3種に統一し、
+    「評価不能(value=None)」と「評価したが上位ルールで抑止(value=False+
+    SUPPRESSED_*)」を明確に区別する。"""
+    from jstock_advisor.domain.scoring.score import UndervaluationSignals
+    from jstock_advisor.domain.scoring.undervaluation_categories import (
+        build_undervaluation_category_details,
+    )
+    from jstock_advisor.services.buy_signal_service import (
+        _serialize_undervaluation_categories,
+    )
+
+    # severe_earnings_decline時のcompute_undervaluation_signals()出力を再現:
+    # below_fair_valueは強制False、price_down_despite_stable_earningsはNone
+    signals = UndervaluationSignals(
+        per_below_median=True,
+        below_fair_value=False,
+        price_down_despite_stable_earnings=None,
+    )
+    details = build_undervaluation_category_details(
+        signals, _CONFIG.buy_decision.undervaluation_category_caps
+    )
+    payload = _serialize_undervaluation_categories(
+        details,
+        suppressed_signal_reasons={
+            "below_fair_value": "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE",
+            "price_down_despite_stable_earnings": "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE",
+        },
+    )
+    by_category = {entry["category"]: entry for entry in payload}
+
+    fair_value = by_category["fair_value"]
+    # 抑止されてもstateはEVALUATED(値Falseとして評価に使われた事実)のまま
+    assert fair_value["state"] == "EVALUATED"
+    assert "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE" in fair_value["reason_codes"]
+    assert fair_value["signal_results"]["below_fair_value"] == {
+        "value": False,
+        "reason_code": "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE",
+    }
+
+    market = by_category["market_price_action"]
+    # price_downはNone(抑止により判定自体が行われなかった)+ 抑止理由
+    assert market["signal_results"]["price_down_despite_stable_earnings"] == {
+        "value": None,
+        "reason_code": "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE",
+    }
+    # drawdownは入力自体が無く判定不能(抑止ではない)-> reason_codeなし
+    assert market["signal_results"]["drawdown_from_52w_high"] == {
+        "value": None,
+        "reason_code": None,
+    }
+
+    # 抑止と無関係なカテゴリにはSUPPRESSEDが付かない
+    vm = by_category["valuation_multiple"]
+    assert vm["state"] == "EVALUATED"
+    assert "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE" not in vm["reason_codes"]
+    # 全カテゴリでstateは3値語彙のみ
+    assert all(
+        entry["state"] in {"EVALUATED", "NOT_EVALUATED", "NOT_APPLICABLE"}
+        for entry in payload
+    )
+
+
+def test_phase35_v1_score_and_actions_unchanged_by_observation_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """観測用フィールドの追加がv1の判定結果へ一切影響しないことの回帰。
+    既存テスト(§21の5銘柄回帰等)が判定結果自体を固定しているため、ここでは
+    「観測フィールドを除いた既存facts/score構造がそのまま維持されている」
+    ことを確認する。"""
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    # 既存キーが従来どおりの形式で残っている(観測キー追加による破壊なし)
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+    assert facts["forecast_eps"] == str(_NIHON_SHINYAKU.forecast_eps)
+    assert isinstance(facts["quarterly_operating_incomes"], list)
+    assert all(isinstance(v, str) for v in facts["quarterly_operating_incomes"])
+    # score_breakdownの7component構造・合計は不変
+    assert rec.score_breakdown is not None
+    assert rec.company_quality_score == rec.score_breakdown.total
