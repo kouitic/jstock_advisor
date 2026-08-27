@@ -487,6 +487,35 @@ class BuySignalService:
         excluded_outlier_count = sum(
             1 for m in valuation_summary.methods_excluded if m.exclusion_detail is not None
         )
+        # レビュー対応(2026-08、commit f546473再レビューで発覚): Recommendation.
+        # valuation_methods(下のtuple(method_results))は、apply_outlier_filters()
+        # 適用「前」のオブジェクトである(build_valuation_summary()内部でmodel_copy()
+        # されたコピーにのみ外れ値フィルタのexclusion_detail/exclusion_reasonが
+        # 設定され、method_results自体は書き換わらない)。そのためVALUATION_
+        # OUTLIER_EXCLUDED concernの表示時にRecommendation.valuation_methodsの
+        # exclusion_reasonを参照すると、外れ値以外の理由(算出不能・業種モデル
+        # 未実装等)を外れ値理由として誤って表示しうる不備があった。実際に外れ値
+        # フィルタで除外された方式・理由(exclusion_detailが設定されている
+        # ものだけ)を判定時点のスナップショットとして別途保存する。
+        valuation_outlier_exclusions: list[dict[str, object]] = [
+            {
+                "method": m.method,
+                "code": m.exclusion_detail.code,
+                "message": m.exclusion_detail.message,
+                "actual_value": (
+                    str(m.exclusion_detail.actual_value)
+                    if m.exclusion_detail.actual_value is not None
+                    else None
+                ),
+                "reference_value": (
+                    str(m.exclusion_detail.reference_value)
+                    if m.exclusion_detail.reference_value is not None
+                    else None
+                ),
+            }
+            for m in valuation_summary.methods_excluded
+            if m.exclusion_detail is not None
+        ]
         reliability_result = determine_buy_price_reliability(
             margin_result=margin_result,
             maximum_entry_margin=self._config.buy_decision.margin_of_safety.maximum_margin.entry,
@@ -607,6 +636,11 @@ class BuySignalService:
             "outlier_filter_blocking_reason": valuation_summary.outlier_filter_blocking_reason,
             "valuation_methods_used_count": valuation_summary.methods_used_count,
             "valuation_excluded_outlier_count": excluded_outlier_count,
+            # レビュー対応(2026-08、commit f546473再レビュー): VALUATION_OUTLIER_
+            # EXCLUDED concernの表示専用。Recommendation.valuation_methodsは
+            # 外れ値フィルタ適用前のオブジェクトのため、実際に外れ値として除外
+            # された方式・理由はここへ別途スナップショットする(上記コメント参照)。
+            "valuation_outlier_exclusions": valuation_outlier_exclusions,
         }
 
         # --- 13. purchase_attractiveness_score算出 ---

@@ -852,13 +852,18 @@ def test_reliability_low_data_quality_earnings_outlier_and_blocking_reason(
         tmp_path,
         business_days_to_earnings=None,
         earnings_date_status=EarningsDateStatus.STALE_PAST_DATE,
+        # レビュー対応(2026-08、commit f546473再レビュー): valuation_methods
+        # (外れ値フィルタ適用「前」のオブジェクト)に、外れ値とは無関係な
+        # 通常のexclusion_reason(算出不能)を持つ方式を混ぜておき、これが
+        # VALUATION_OUTLIER_EXCLUDEDの理由として誤って表示されないことを
+        # あわせて確認する(必須テスト3)。
         valuation_methods=(
             FairValueMethodResult(
-                method="per",
+                method="dcf",
                 fair_value=None,
                 confidence=ConfidenceLevel.LOW,
                 applicable=False,
-                exclusion_reason="現在値の10%未満のため外れ値として除外",
+                exclusion_reason="EPSが負数のため算出不可",
             ),
         ),
         buy_score_input_facts={
@@ -869,6 +874,17 @@ def test_reliability_low_data_quality_earnings_outlier_and_blocking_reason(
                 "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER",
             ],
             "data_age_business_days": 3,
+            # 実際に外れ値フィルタで除外された方式・理由の判定時点スナップ
+            # ショット(dcfの「算出不能」とは別の、per方式の外れ値除外)。
+            "valuation_outlier_exclusions": [
+                {
+                    "method": "per",
+                    "code": "BELOW_CURRENT_PRICE_THRESHOLD",
+                    "message": "現在値の10%未満のため外れ値として除外",
+                    "actual_value": "50",
+                    "reference_value": "500",
+                }
+            ],
         },
     )
     service = _service(tmp_path)
@@ -884,6 +900,11 @@ def test_reliability_low_data_quality_earnings_outlier_and_blocking_reason(
     assert "PER法: 現在値の10%未満のため外れ値として除外" in text
     assert "外れ値除外の結果、比較に使える手法が不足したため除外前の結果へ戻した" in text
 
+    # 必須テスト3: 算出不能(dcf、外れ値とは無関係)がVALUATION_OUTLIER_EXCLUDED
+    # の理由として混在していないこと。
+    assert "EPSが負数のため算出不可" not in text
+    assert "DCF法" not in text
+
     # G: 保存順(concernsリストの並び)のまま表示されること。
     order = [
         text.index("データ品質に懸念がある"),
@@ -892,6 +913,82 @@ def test_reliability_low_data_quality_earnings_outlier_and_blocking_reason(
         text.index("外れ値除外の結果"),
     ]
     assert order == sorted(order)
+
+
+def test_reliability_low_outlier_excluded_shows_only_actually_excluded_methods(
+    tmp_path: Path,
+) -> None:
+    """レビュー対応(2026-08、commit f546473再レビュー、必須テスト2): 実際に
+    外れ値フィルタで除外された方式(valuation_outlier_exclusions)だけを
+    表示し、他の理由(算出不能・業種モデル未実装等でvaluation_methodsに
+    保存されている通常のexclusion_reason)は一切混在させないことを、
+    VALUATION_OUTLIER_EXCLUDED単独のケースで確認する。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        valuation_methods=(
+            FairValueMethodResult(
+                method="historical_range",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason="価格レンジ算出に必要な履歴データが不足",
+            ),
+        ),
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": ["VALUATION_OUTLIER_EXCLUDED"],
+            "valuation_outlier_exclusions": [
+                {
+                    "method": "dcf",
+                    "code": "EXTREME_HIGH_RELATIVE_TO_MEDIAN",
+                    "message": "算出値が他方式の中央値を大きく上回るため外れ値として除外",
+                    "actual_value": "5000",
+                    "reference_value": "1500",
+                }
+            ],
+        },
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "適正価格の算出方式に外れ値が含まれていた" in text
+    assert "DCF法: 算出値が他方式の中央値を大きく上回るため外れ値として除外" in text
+    assert "価格レンジ算出に必要な履歴データが不足" not in text
+    assert "価格レンジ法" not in text
+
+
+def test_reliability_low_outlier_excluded_shows_label_only_for_old_data(
+    tmp_path: Path,
+) -> None:
+    """必須テスト4: VALUATION_OUTLIER_EXCLUDEDが発火しているが、詳細
+    スナップショット(valuation_outlier_exclusions)自体が保存されていない
+    旧データでは、concernラベルのみを表示し、valuation_methodsの通常
+    exclusion_reasonを外れ値理由として流用しないこと。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        valuation_methods=(
+            FairValueMethodResult(
+                method="per",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason="PERが算出できないため除外",
+            ),
+        ),
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": ["VALUATION_OUTLIER_EXCLUDED"],
+            # valuation_outlier_exclusionsキー自体が存在しない(旧データ)。
+        },
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "適正価格の算出方式に外れ値が含まれていた" in text
+    assert "PERが算出できないため除外" not in text
+    assert "PER法" not in text
 
 
 def test_reliability_low_falls_back_when_concerns_not_stored(tmp_path: Path) -> None:

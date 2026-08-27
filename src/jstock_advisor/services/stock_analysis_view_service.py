@@ -574,7 +574,23 @@ def _reliability_concern_line(
         return f"・{label}"
 
     if concern == "VALUATION_OUTLIER_EXCLUDED":
-        reasons = _valuation_method_exclusion_reasons(recommendation)
+        # レビュー対応(2026-08、commit f546473再レビューで発覚): この分岐は
+        # 以前_valuation_method_exclusion_reasons(recommendation)(= Recommendation.
+        # valuation_methodsのexclusion_reason)を使っていたが、valuation_methodsは
+        # 外れ値フィルタ適用「前」のオブジェクトであり、外れ値フィルタが実際に
+        # 設定するexclusion_detail/exclusion_reasonは反映されない(build_
+        # valuation_summary()内部でmodel_copy()された別オブジェクトにのみ設定
+        # される)。そのため算出不能・業種モデル未実装等の無関係な理由を外れ値
+        # 理由として誤表示しうる不具合があった。実際に外れ値フィルタで除外
+        # された方式・理由のみを保存したbuy_score_input_facts
+        # ["valuation_outlier_exclusions"](新規スナップショット)を参照する。
+        exclusions = facts.get("valuation_outlier_exclusions")
+        reasons = [
+            f"{_VALUATION_METHOD_LABELS.get(str(e.get('method')), str(e.get('method')))}: "
+            f"{e.get('message')}"
+            for e in exclusions
+            if isinstance(e, dict) and e.get("method") and e.get("message")
+        ] if isinstance(exclusions, list) else []
         if reasons:
             return f"・{label}（{'／'.join(reasons)}）"
         return f"・{label}"

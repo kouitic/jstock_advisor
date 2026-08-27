@@ -373,6 +373,25 @@ _AICHI_TOKEI = _StockFixture(
     per_median=Decimal("15"),
 )
 
+# レビュー対応(2026-08、commit f546473再レビュー、VALUATION_OUTLIER_EXCLUDED
+# 実データ検証用): target_yield法(配当基準価格=1円÷4.0%=25円)が現在値1000円の
+# 10%(=100円)を大きく下回るよう設計し、apply_outlier_filters()の
+# EXTREME_LOW_RELATIVE_TO_CURRENT_PRICE検知を実際に発火させる。per法・pbr法は
+# いずれも1500円で一致させ、外れ値除外後も_MIN_REMAINING_METHODS_AFTER_FILTER
+# (2件)を満たし、除外結果がそのまま採用されるようにする。
+_OUTLIER_EXCLUSION_STOCK = _StockFixture(
+    stock_code="1111",
+    stock_name="テスト外れ値銘柄",
+    current_price=Decimal("1000"),
+    industry="医薬品",
+    sector="Healthcare",
+    forecast_dividend=Decimal("1"),  # target_yield価格 = 1 / 0.04 = 25円(現在値の2.5%)
+    forecast_eps=Decimal("100"),  # per価格 = 15 * 100 = 1500円
+    per_median=Decimal("15"),
+    forecast_bps=Decimal("500"),  # pbr価格 = 3 * 500 = 1500円
+    pbr_median=Decimal("3"),
+)
+
 
 def _providers() -> ProviderBundle:
     # build_stock_snapshotをmonkeypatchで置き換えるため、providersの中身は
@@ -563,6 +582,39 @@ def test_buy_price_reliability_facts_and_config_snapshot_are_stored(
     assert config_snapshot["valuation_dispersion_medium_max"] == pytest.approx(
         _CONFIG.buy_decision.valuation_dispersion.medium_max
     )
+
+
+def test_valuation_outlier_exclusions_captures_actual_outlier_filtered_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """レビュー対応(2026-08、commit f546473再レビュー、必須テスト1): 実際に
+    BuySignalServiceを通し、外れ値フィルタ(apply_outlier_filters())が1方式
+    (target_yield)を実際に除外するケースで、その方式・除外理由(exclusion_
+    detail相当)がbuy_score_input_facts["valuation_outlier_exclusions"]へ
+    正しく保存されることを確認する。Recommendation.valuation_methods自体は
+    外れ値フィルタ適用前のオブジェクトのため、この方式のexclusion_reasonは
+    Noneのままであること(=valuation_methodsからは復元できないこと)も
+    あわせて確認する。
+    """
+    outcome = _analyze(monkeypatch, _OUTLIER_EXCLUSION_STOCK)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    exclusions = facts["valuation_outlier_exclusions"]
+    assert isinstance(exclusions, list)
+    assert len(exclusions) == 1
+    assert exclusions[0]["method"] == "target_yield"
+    assert "外れ値" in exclusions[0]["message"]
+    assert exclusions[0]["actual_value"] is not None
+    assert exclusions[0]["reference_value"] is not None
+
+    # Recommendation.valuation_methods(外れ値フィルタ適用前)では、この方式の
+    # exclusion_reasonがNoneのままであることを確認する(=このフィールドからは
+    # 外れ値除外の事実を復元できないことの実証)。
+    target_yield_method = next(m for m in rec.valuation_methods if m.method == "target_yield")
+    assert target_yield_method.exclusion_reason is None
 
 
 # ===== 再々コードレビュー対応(2026-08、JST暦日境界修正・指摘4):
