@@ -740,8 +740,233 @@ def test_no_valuation_anchor_falls_back_without_fabricating_when_no_reasons_stor
 
     text = service.build_buy_analysis_text("8306")
 
-    assert "現行データからは区別できません" in text
+    assert "判定時点の詳細な理由は保存されていません" in text
     assert "PER法" not in text
+
+
+def test_no_valuation_anchor_shows_dispersion_reason_from_stored_snapshot(
+    tmp_path: Path,
+) -> None:
+    """必須テスト3: no_valuation_anchor_reasonスナップショット(VALUATION_
+    DISPERSION_TOO_HIGH)が保存されている場合、生成文章はその実測値・基準値を
+    使い、industry等valuation_methods側の無関係なexclusion_reasonを
+    表示しないこと。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="NO_VALUATION_ANCHOR", message="x", actual_value=None, threshold_value=None
+            ),
+        ),
+        valuation_methods=(
+            FairValueMethodResult(
+                method="target_yield",
+                fair_value=Decimal("1000"),
+                confidence=ConfidenceLevel.HIGH,
+                applicable=True,
+            ),
+            FairValueMethodResult(
+                method="industry",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason="SMALL_GROWTH_MODEL_NOT_AVAILABLE",
+            ),
+        ),
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "VALUATION_DISPERSION_TOO_HIGH",
+                "actual_value": "14.4",
+                "threshold_value": "2.0",
+            }
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "算出方式間の結果のばらつきが大きく" in text
+    assert "14.40倍" in text
+    assert "2.00倍超" in text
+    assert "SMALL_GROWTH_MODEL_NOT_AVAILABLE" not in text
+    assert "industry" not in text
+    assert "判定時点の詳細な理由は保存されていません" not in text
+
+
+def test_no_valuation_anchor_shows_no_valid_methods_reason_from_stored_snapshot(
+    tmp_path: Path,
+) -> None:
+    """有効方式0件(NO_VALID_VALUATION_METHODS)のスナップショットが正しく
+    表示されること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="NO_VALUATION_ANCHOR", message="x", actual_value=None, threshold_value=None
+            ),
+        ),
+        valuation_methods=(),
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "NO_VALID_VALUATION_METHODS",
+                "actual_value": None,
+                "threshold_value": None,
+            }
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "有効な適正価格の算出方式が一つもありませんでした" in text
+
+
+def test_no_valuation_anchor_shows_too_few_methods_reason_from_stored_snapshot(
+    tmp_path: Path,
+) -> None:
+    """有効方式1件(TOO_FEW_VALUATION_METHODS)のスナップショットが、実測値
+    (1件)・基準値(2件必要)ごと正しく表示されること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="NO_VALUATION_ANCHOR", message="x", actual_value=None, threshold_value=None
+            ),
+        ),
+        valuation_methods=(),
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "TOO_FEW_VALUATION_METHODS",
+                "actual_value": "1.0",
+                "threshold_value": "2.0",
+            }
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "有効な適正価格の算出方式が1件しかなく" in text
+    assert "2件必要" in text
+
+
+def test_no_valuation_anchor_shows_calculation_failed_reason_from_stored_snapshot(
+    tmp_path: Path,
+) -> None:
+    """理論上のweighted_median失敗経路(VALUATION_ANCHOR_CALCULATION_FAILED)
+    のスナップショットが正しく表示されること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="NO_VALUATION_ANCHOR", message="x", actual_value=None, threshold_value=None
+            ),
+        ),
+        valuation_methods=(),
+        buy_score_input_facts={
+            "no_valuation_anchor_reason": {
+                "code": "VALUATION_ANCHOR_CALCULATION_FAILED",
+                "actual_value": None,
+                "threshold_value": None,
+            }
+        },
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "算出処理で有効な結果を得られませんでした" in text
+
+
+def test_no_valuation_anchor_old_data_excludes_industry_from_fallback(
+    tmp_path: Path,
+) -> None:
+    """必須テスト7・8: no_valuation_anchor_reasonスナップショットが保存されて
+    いない旧データで、標準5方式に除外理由が無くindustryにのみ除外理由がある
+    場合(本番実データUATで確認した8227相当のパターン)、industryの理由を
+    NO_VALUATION_ANCHORの原因として流用せず、非断定表示になること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="NO_VALUATION_ANCHOR", message="x", actual_value=None, threshold_value=None
+            ),
+        ),
+        valuation_methods=(
+            FairValueMethodResult(
+                method="target_yield",
+                fair_value=Decimal("1450"),
+                confidence=ConfidenceLevel.HIGH,
+                applicable=True,
+            ),
+            FairValueMethodResult(
+                method="per",
+                fair_value=Decimal("22835"),
+                confidence=ConfidenceLevel.MEDIUM,
+                applicable=True,
+            ),
+            FairValueMethodResult(
+                method="industry",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason="SMALL_GROWTH_MODEL_NOT_AVAILABLE",
+            ),
+        ),
+        # no_valuation_anchor_reasonキー自体が存在しない(旧データ)。
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "SMALL_GROWTH_MODEL_NOT_AVAILABLE" not in text
+    assert "industry" not in text
+    assert "判定時点の詳細な理由は保存されていません" in text
 
 
 def _save_reliability_low_recommendation(tmp_path: Path, **overrides) -> None:

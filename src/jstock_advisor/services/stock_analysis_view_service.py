@@ -442,30 +442,88 @@ _VALUATION_METHOD_LABELS: dict[str, str] = {
     "dcf": "DCF法",
 }
 
+# レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): Recommendation.
+# valuation_methodsには標準5方式に加えて"industry"(業種別モデル)が含まれるが、
+# industryは専用モデルが未実装のため全銘柄・常にexclusion_reasonを持つ
+# (buy_signal_service.py: industry_model_appliedは常にFalse固定。個別銘柄の
+# 判定結果と無関係な恒常的事実であり、industryの理由だけがNO_VALUATION_ANCHOR
+# の原因であるかのように誤って表示されていた不備の原因)。標準5方式のみを
+# 対象とすることで、この混同を防ぐ。
+_STANDARD_VALUATION_METHODS: frozenset[str] = frozenset(_VALUATION_METHOD_LABELS)
 
-def _valuation_method_exclusion_reasons(recommendation: Recommendation) -> list[str]:
-    """recommendation.valuation_methods(既存フィールド)から、実際に保存済みの
-    除外理由(exclusion_reason)だけを方式名付きで取り出す(表示層で新しい
-    除外理由を推測・算出しない)。NO_VALUATION_ANCHOR・
-    VALUATION_OUTLIER_EXCLUDEDの両方で共用する。"""
+
+def _standard_valuation_method_exclusion_reasons(recommendation: Recommendation) -> list[str]:
+    """recommendation.valuation_methods(既存フィールド)から、標準5方式
+    (target_yield/per/pbr/historical_range/dcf)についてのみ、実際に保存済みの
+    除外理由(exclusion_reason)を方式名付きで取り出す(表示層で新しい除外理由を
+    推測・算出しない)。industryは対象外とする理由は上記コメント参照。
+    NO_VALUATION_ANCHORの旧データ(no_valuation_anchor_reasonスナップショット
+    未保存)フォールバック専用。"""
     return [
-        f"{_VALUATION_METHOD_LABELS.get(m.method, m.method)}: {m.exclusion_reason}"
+        f"{_VALUATION_METHOD_LABELS[m.method]}: {m.exclusion_reason}"
         for m in recommendation.valuation_methods
-        if m.exclusion_reason
+        if m.method in _STANDARD_VALUATION_METHODS and m.exclusion_reason
     ]
 
 
-def _no_valuation_anchor_text(recommendation: Recommendation) -> str:
-    reasons = _valuation_method_exclusion_reasons(recommendation)
-    if not reasons:
+_NO_VALUATION_ANCHOR_LEAD_TEXT = "本銘柄については、購入判断に使う適正価格を決定できませんでした。"
+
+
+def _no_valuation_anchor_detail_text(
+    code: str, actual_value: object, threshold_value: object
+) -> str | None:
+    """buy_score_input_facts["no_valuation_anchor_reason"]["code"]を日本語の
+    説明文へ変換する(2026-08、NO_VALUATION_ANCHOR表示不備の是正)。
+
+    原因の判定(なぜvaluation_anchorを生成できなかったか)はドメイン層
+    (valuation_confidence.py::determine_valuation_confidence() /
+    valuation_methods.py::compute_valuation_anchor())側で完結しており、
+    ここではそのcodeを日本語文言へ変換するだけで、閾値比較等の再判定は
+    一切行わない。actual_value/threshold_valueも判定時点に保存された値を
+    そのまま表示に使い、現在configを取得し直さない。
+    """
+    if code == "NO_VALID_VALUATION_METHODS":
+        return "有効な適正価格の算出方式が一つもありませんでした。"
+    if code == "TOO_FEW_VALUATION_METHODS":
+        actual = _decimal_str_to_display(actual_value, digits=0) or "不明"
+        threshold = _decimal_str_to_display(threshold_value, digits=0) or "不明"
         return (
-            "本銘柄については、適正価格の算出結果を得られませんでした。"
-            "具体的な要因は現行データからは区別できません。"
+            f"有効な適正価格の算出方式が{actual}件しかなく"
+            f"（{threshold}件必要）、結果を一本化できませんでした。"
         )
-    return (
-        "本銘柄については、適正価格の算出結果を得られませんでした。"
-        "各算出方式の結果: " + "／".join(reasons)
-    )
+    if code == "VALUATION_DISPERSION_TOO_HIGH":
+        actual_ratio = _decimal_str_to_display(actual_value, digits=2)
+        threshold_ratio = _decimal_str_to_display(threshold_value, digits=2)
+        actual_text = f"{actual_ratio}倍" if actual_ratio is not None else "不明"
+        threshold_text = f"{threshold_ratio}倍超" if threshold_ratio is not None else "不明"
+        return (
+            "算出方式間の結果のばらつきが大きく、基準価格を一本化できませんでした。\n"
+            f"判定時点のばらつき：{actual_text}\n"
+            f"自動買付を行わない基準：{threshold_text}"
+        )
+    if code == "VALUATION_ANCHOR_CALCULATION_FAILED":
+        return "算出処理で有効な結果を得られませんでした。"
+    return None
+
+
+def _no_valuation_anchor_text(recommendation: Recommendation) -> str:
+    facts = recommendation.buy_score_input_facts or {}
+    reason = facts.get("no_valuation_anchor_reason")
+    if isinstance(reason, dict) and reason.get("code"):
+        detail = _no_valuation_anchor_detail_text(
+            str(reason.get("code")), reason.get("actual_value"), reason.get("threshold_value")
+        )
+        if detail is not None:
+            return f"{_NO_VALUATION_ANCHOR_LEAD_TEXT}\n{detail}"
+
+    # 旧データ(no_valuation_anchor_reason未保存、またはcodeが未知)フォールバック:
+    # 標準5方式に保存済みのexclusion_reasonがあればそれのみ表示し、無関係な
+    # 理由(industryの恒常的なexclusion_reason等)を代用しない。理由自体が
+    # 無い場合は、原因を推測せず非断定表示にとどめる。
+    reasons = _standard_valuation_method_exclusion_reasons(recommendation)
+    if reasons:
+        return f"{_NO_VALUATION_ANCHOR_LEAD_TEXT}各算出方式の結果: " + "／".join(reasons)
+    return f"{_NO_VALUATION_ANCHOR_LEAD_TEXT}判定時点の詳細な理由は保存されていません。"
 
 
 # --- BUY_PRICE_RELIABILITY_LOW具体的理由表示(2026-08、本番実データUAT対応) ---

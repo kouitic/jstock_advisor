@@ -16,9 +16,27 @@ _MIN_METHODS_FOR_MEDIUM_OR_HIGH = 2
 
 
 @dataclass(frozen=True)
+class ValuationAnchorBlockingReason:
+    """valuation_anchor(購入判断基準価格)を生成できなかった直接原因の構造化記録
+    (2026-08、NO_VALUATION_ANCHOR表示不備の是正対応)。
+
+    reasons_not_high(HIGHへ格上げしなかっただけの補助理由。業種別モデル未適用・
+    簡易DCF使用等、ほぼ全銘柄で恒常的に成立しうる)とは異なり、こちらは
+    「なぜvaluation_anchor自体をNoneにしたか」という直接原因のみを表す。
+    表示層(StockAnalysisViewService)が現在configを再取得して原因を再判定
+    しなくて済むよう、判定時点に実際に使用した実測値・基準値をそのまま保持する。
+    """
+
+    code: str
+    actual_value: float | None = None
+    threshold_value: float | None = None
+
+
+@dataclass(frozen=True)
 class ValuationConfidenceResult:
     level: ConfidenceLevel
     reasons_not_high: list[str] = field(default_factory=list)
+    blocking_reason: ValuationAnchorBlockingReason | None = None
 
 
 def determine_valuation_confidence(
@@ -33,7 +51,9 @@ def determine_valuation_confidence(
 ) -> ValuationConfidenceResult:
     if methods_used_count == 0:
         return ValuationConfidenceResult(
-            ConfidenceLevel.LOW, ["有効な適正価格算出手法がありません"]
+            ConfidenceLevel.LOW,
+            ["有効な適正価格算出手法がありません"],
+            blocking_reason=ValuationAnchorBlockingReason(code="NO_VALID_VALUATION_METHODS"),
         )
 
     reasons_not_high: list[str] = []
@@ -52,6 +72,11 @@ def determine_valuation_confidence(
         return ValuationConfidenceResult(
             ConfidenceLevel.LOW,
             [*reasons_not_high, "有効な適正価格算出手法が2件未満です"],
+            blocking_reason=ValuationAnchorBlockingReason(
+                code="TOO_FEW_VALUATION_METHODS",
+                actual_value=float(methods_used_count),
+                threshold_value=float(_MIN_METHODS_FOR_MEDIUM_OR_HIGH),
+            ),
         )
     if dispersion_ratio is not None and dispersion_ratio > dispersion_auto_buy_block:
         return ValuationConfidenceResult(
@@ -61,6 +86,11 @@ def determine_valuation_confidence(
                 f"適正価格手法間のばらつきが{dispersion_auto_buy_block}倍を超えており"
                 "自動購入判定を禁止します",
             ],
+            blocking_reason=ValuationAnchorBlockingReason(
+                code="VALUATION_DISPERSION_TOO_HIGH",
+                actual_value=dispersion_ratio,
+                threshold_value=dispersion_auto_buy_block,
+            ),
         )
 
     if reasons_not_high:

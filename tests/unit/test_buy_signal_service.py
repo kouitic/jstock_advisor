@@ -392,6 +392,27 @@ _OUTLIER_EXCLUSION_STOCK = _StockFixture(
     pbr_median=Decimal("3"),
 )
 
+# レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正、必須テスト1・2):
+# target_yield(1000円)・per(1300円)・pbr(2200円)の3方式がいずれも個別には
+# 有効(outlier filterでも除外されない、いずれの方式も他方式中央値の40%〜250%の
+# 範囲内・現在値の10%以上)だが、方式間の乖離(2200/1000=2.2倍)が
+# dispersion.auto_buy_block(2.00倍)を超えるよう設計し、determine_valuation_
+# confidence()のVALUATION_DISPERSION_TOO_HIGH分岐(valuation_confidence.py)を
+# 実際に発火させる。DCF・価格レンジ法は本フィクスチャ共通の仕様上
+# (operating_cashflow=None・bars=[])常に算出不可のため対象外(3方式のみ)。
+_DISPERSION_STOCK = _StockFixture(
+    stock_code="2222",
+    stock_name="テスト乖離銘柄",
+    current_price=Decimal("1000"),
+    industry="小売業",
+    sector="Retail",
+    forecast_dividend=Decimal("40"),  # target_yield価格 = 40 / 0.04 = 1000円
+    forecast_eps=Decimal("100"),  # per価格 = 13 * 100 = 1300円
+    per_median=Decimal("13"),
+    forecast_bps=Decimal("200"),  # pbr価格 = 11 * 200 = 2200円
+    pbr_median=Decimal("11"),
+)
+
 
 def _providers() -> ProviderBundle:
     # build_stock_snapshotをmonkeypatchで置き換えるため、providersの中身は
@@ -615,6 +636,40 @@ def test_valuation_outlier_exclusions_captures_actual_outlier_filtered_method(
     # 外れ値除外の事実を復元できないことの実証)。
     target_yield_method = next(m for m in rec.valuation_methods if m.method == "target_yield")
     assert target_yield_method.exclusion_reason is None
+
+
+def test_no_valuation_anchor_reason_captures_valuation_dispersion_too_high(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """必須テスト1・2: 実際にBuySignalServiceを通し、標準方式(target_yield/
+    per/pbr)は3件とも個別には有効(outlier filterでも除外されない)だが、
+    方式間の乖離がauto_buy_blockを超えてvaluation_anchorがNoneになる
+    (=BuyDecisionReason.code="NO_VALUATION_ANCHOR"が発火する)ケースで、
+    buy_score_input_facts["no_valuation_anchor_reason"]へ直接原因
+    (VALUATION_DISPERSION_TOO_HIGH)が、判定時点の実測値(dispersion_ratio)・
+    実際に使用した基準値(auto_buy_block)ごと構造化して保存されることを
+    確認する。"""
+    outcome = _analyze(monkeypatch, _DISPERSION_STOCK)
+    rec = outcome.recommendation
+    assert rec is not None
+    assert any(r.code == "NO_VALUATION_ANCHOR" for r in rec.buy_decision_reasons)
+    assert rec.valuation_anchor is None
+
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+    reason = facts["no_valuation_anchor_reason"]
+    assert isinstance(reason, dict)
+    assert reason["code"] == "VALUATION_DISPERSION_TOO_HIGH"
+    assert reason["actual_value"] is not None
+    assert float(reason["actual_value"]) > 2.0
+    assert reason["threshold_value"] == "2.0"
+
+    # 標準3方式はいずれも個別には有効であり(exclusion_reasonが無い)、この
+    # 事実だけからは方式間乖離が原因だったことを復元できない(=表示層が新規
+    # スナップショットを参照する必要があることの実証)。
+    for method_name in ("target_yield", "per", "pbr"):
+        method = next(m for m in rec.valuation_methods if m.method == method_name)
+        assert method.exclusion_reason is None
 
 
 # ===== 再々コードレビュー対応(2026-08、JST暦日境界修正・指摘4):

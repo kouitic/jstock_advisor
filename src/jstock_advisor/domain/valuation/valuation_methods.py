@@ -38,6 +38,7 @@ from jstock_advisor.domain.entities.valuation import (
     ValuationExclusionReason,
 )
 from jstock_advisor.domain.valuation.fair_value_usability import build_fair_value_range
+from jstock_advisor.domain.valuation.valuation_confidence import ValuationAnchorBlockingReason
 
 DispersionBand = Literal["LOW", "MEDIUM", "HIGH"]
 
@@ -357,12 +358,27 @@ def _percentile(values: list[Decimal], pct: float) -> Decimal:
     return ordered[lower_index] + (ordered[upper_index] - ordered[lower_index]) * fraction
 
 
+@dataclass(frozen=True)
+class ValuationAnchorResult:
+    """compute_valuation_anchor()の戻り値(2026-08、NO_VALUATION_ANCHOR表示
+    不備の是正対応)。anchorがNoneの場合、blocking_reasonにこの関数内でしか
+    判定できない直接原因(全採用方式のweightが0以下でweighted_medianが
+    算出できなかった等)を構造化して残す。valuation_confidence==LOWによる
+    打ち切りの理由はdetermine_valuation_confidence()側のValuation
+    ConfidenceResult.blocking_reasonに既に格納されているため、ここでは
+    重複して設定しない(呼び出し側が両者をORで合成する)。
+    """
+
+    anchor: Decimal | None
+    blocking_reason: ValuationAnchorBlockingReason | None = None
+
+
 def compute_valuation_anchor(
     fair_value_range: FairValueRange,
     valuation_confidence: ConfidenceLevel,
     dispersion_band: DispersionBand | None,
     method_weights: dict[str, float] | None = None,
-) -> Decimal | None:
+) -> ValuationAnchorResult:
     """購入判断基準価格(要求仕様11節)。適正価格は「買ってよい上限価格」ではなく
     企業価値の中心値として扱い、実際の買付価格には別途安全余裕率を適用する。
 
@@ -372,11 +388,11 @@ def compute_valuation_anchor(
     - 信頼度LOW: None(自動買付価格を生成しない)
     """
     if valuation_confidence == ConfidenceLevel.LOW:
-        return None
+        return ValuationAnchorResult(anchor=None)
 
     values = [r.fair_value for r in fair_value_range.methods_used if r.fair_value is not None]
     if not values:
-        return None
+        return ValuationAnchorResult(anchor=None)
 
     weights = method_weights or {}
     values_with_weights = [
@@ -386,12 +402,17 @@ def compute_valuation_anchor(
     ]
     weighted_median = _weighted_median(values_with_weights)
     if weighted_median is None:
-        return None
+        return ValuationAnchorResult(
+            anchor=None,
+            blocking_reason=ValuationAnchorBlockingReason(
+                code="VALUATION_ANCHOR_CALCULATION_FAILED"
+            ),
+        )
 
     if dispersion_band == "HIGH":
-        return _percentile(values, 40)
+        return ValuationAnchorResult(anchor=_percentile(values, 40))
     if valuation_confidence == ConfidenceLevel.MEDIUM or dispersion_band == "MEDIUM":
         trimmed_mean = _trimmed_mean(values)
-        return min(weighted_median, trimmed_mean)
+        return ValuationAnchorResult(anchor=min(weighted_median, trimmed_mean))
     # 信頼度HIGHかつばらつき小(またはばらつき不明で信頼度HIGH)
-    return weighted_median
+    return ValuationAnchorResult(anchor=weighted_median)

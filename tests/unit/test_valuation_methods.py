@@ -272,27 +272,48 @@ def test_build_valuation_summary_separates_all_methods_from_decision_range() -> 
 def test_valuation_anchor_none_when_confidence_low() -> None:
     results = [_result("target_yield", "100")]
     summary = build_valuation_summary(results, "median", None, _USABILITY_CONFIG)
-    anchor = compute_valuation_anchor(summary, ConfidenceLevel.LOW, "LOW")
-    assert anchor is None
+    result = compute_valuation_anchor(summary, ConfidenceLevel.LOW, "LOW")
+    assert result.anchor is None
+    # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): confidence==LOWに
+    # よる打ち切りの理由はdetermine_valuation_confidence()側のValuation
+    # ConfidenceResult.blocking_reasonに格納される設計のため、compute_valuation_
+    # anchor()自身のblocking_reasonはここでは設定されない(重複防止)。
+    assert result.blocking_reason is None
 
 
 def test_valuation_anchor_high_confidence_low_dispersion_uses_weighted_median() -> None:
     results = [_result("target_yield", "100"), _result("per", "110"), _result("pbr", "120")]
     summary = build_valuation_summary(results, "median", None, _USABILITY_CONFIG)
-    anchor = compute_valuation_anchor(summary, ConfidenceLevel.HIGH, "LOW")
-    assert anchor == Decimal("110")
+    result = compute_valuation_anchor(summary, ConfidenceLevel.HIGH, "LOW")
+    assert result.anchor == Decimal("110")
 
 
 def test_valuation_anchor_medium_confidence_uses_min_of_weighted_median_and_trimmed_mean() -> None:
     results = [_result("target_yield", "100"), _result("per", "110"), _result("pbr", "150")]
     summary = build_valuation_summary(results, "median", None, _USABILITY_CONFIG)
-    anchor = compute_valuation_anchor(summary, ConfidenceLevel.MEDIUM, "LOW")
+    result = compute_valuation_anchor(summary, ConfidenceLevel.MEDIUM, "LOW")
     weighted_median = Decimal("110")
-    assert anchor <= weighted_median
+    assert result.anchor is not None
+    assert result.anchor <= weighted_median
 
 
 def test_valuation_anchor_high_dispersion_uses_percentile_40() -> None:
     results = [_result("target_yield", "100"), _result("per", "200")]
     summary = build_valuation_summary(results, "median", None, _USABILITY_CONFIG)
-    anchor = compute_valuation_anchor(summary, ConfidenceLevel.MEDIUM, "HIGH")
-    assert Decimal("100") <= anchor <= Decimal("200")
+    result = compute_valuation_anchor(summary, ConfidenceLevel.MEDIUM, "HIGH")
+    assert result.anchor is not None
+    assert Decimal("100") <= result.anchor <= Decimal("200")
+
+
+def test_valuation_anchor_calculation_failed_when_all_weights_non_positive() -> None:
+    """必須テスト6: weighted_medianが算出不能(全採用方式のweightが0以下)な
+    理論上のエッジケース。現行configのmethod_weightsは全方式正の値が設定されて
+    おり実運用では発生しないため、method_weightsを直接0で注入して単体で
+    検証する(BuySignalService経由の結合テストでは到達不能パスのため対象外)。"""
+    results = [_result("target_yield", "100"), _result("per", "110"), _result("pbr", "120")]
+    summary = build_valuation_summary(results, "median", None, _USABILITY_CONFIG)
+    zero_weights = {"target_yield": 0.0, "per": 0.0, "pbr": 0.0}
+    result = compute_valuation_anchor(summary, ConfidenceLevel.HIGH, "LOW", zero_weights)
+    assert result.anchor is None
+    assert result.blocking_reason is not None
+    assert result.blocking_reason.code == "VALUATION_ANCHOR_CALCULATION_FAILED"

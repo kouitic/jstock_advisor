@@ -231,6 +231,14 @@ def test_valuation_confidence_low_when_dispersion_above_2_00() -> None:
         normalized_eps_confidence=None,
     )
     assert result.level == ConfidenceLevel.LOW
+    # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正、必須テスト1・2):
+    # 標準5方式が有効でも方式間乖離がauto_buy_blockを超えた場合、直接原因が
+    # VALUATION_DISPERSION_TOO_HIGHとして、判定時点の実測値dispersion_ratioと
+    # 実際に使用した基準値dispersion_auto_buy_blockごと構造化される。
+    assert result.blocking_reason is not None
+    assert result.blocking_reason.code == "VALUATION_DISPERSION_TOO_HIGH"
+    assert result.blocking_reason.actual_value == 2.5
+    assert result.blocking_reason.threshold_value == 2.00
 
 
 def test_valuation_confidence_low_when_fewer_than_2_methods() -> None:
@@ -244,3 +252,42 @@ def test_valuation_confidence_low_when_fewer_than_2_methods() -> None:
         normalized_eps_confidence=None,
     )
     assert result.level == ConfidenceLevel.LOW
+    # 必須テスト5: 有効方式1件のケースでTOO_FEW_VALUATION_METHODSが構造化される。
+    assert result.blocking_reason is not None
+    assert result.blocking_reason.code == "TOO_FEW_VALUATION_METHODS"
+    assert result.blocking_reason.actual_value == 1.0
+    assert result.blocking_reason.threshold_value == 2.0
+
+
+def test_valuation_confidence_low_when_no_methods_used() -> None:
+    """必須テスト4: 有効方式0件のケースでNO_VALID_VALUATION_METHODSが構造化される。"""
+    result = determine_valuation_confidence(
+        methods_used_count=0,
+        dispersion_ratio=None,
+        dispersion_medium_max=1.60,
+        dispersion_auto_buy_block=2.00,
+        industry_model_applied=True,
+        uses_simplified_dcf=False,
+        normalized_eps_confidence=None,
+    )
+    assert result.level == ConfidenceLevel.LOW
+    assert result.blocking_reason is not None
+    assert result.blocking_reason.code == "NO_VALID_VALUATION_METHODS"
+    assert result.blocking_reason.actual_value is None
+    assert result.blocking_reason.threshold_value is None
+
+
+def test_valuation_confidence_medium_has_no_blocking_reason() -> None:
+    """MEDIUM/HIGHではblocking_reasonが設定されない(anchorが実際に算出される
+    ため、NO_VALUATION_ANCHOR原因のスナップショットは不要)ことを確認する。"""
+    result = determine_valuation_confidence(
+        methods_used_count=3,
+        dispersion_ratio=1.7,
+        dispersion_medium_max=1.60,
+        dispersion_auto_buy_block=2.00,
+        industry_model_applied=True,
+        uses_simplified_dcf=False,
+        normalized_eps_confidence=None,
+    )
+    assert result.level == ConfidenceLevel.MEDIUM
+    assert result.blocking_reason is None

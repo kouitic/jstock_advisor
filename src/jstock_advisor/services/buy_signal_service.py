@@ -405,11 +405,22 @@ class BuySignalService:
         valuation_confidence = valuation_confidence_result.level
 
         # --- 8. valuation_anchor算出 ---
-        valuation_anchor = compute_valuation_anchor(
+        anchor_result = compute_valuation_anchor(
             valuation_summary,
             valuation_confidence,
             dispersion_band,
             self._config.valuation.fair_value_methods.method_weights,
+        )
+        valuation_anchor = anchor_result.anchor
+        # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): valuation_
+        # confidence==LOWによる打ち切り理由はvaluation_confidence_result側に、
+        # confidence自体はLOWでないのにweighted_median算出が失敗した場合の理由は
+        # anchor_result側に格納される(排他的にどちらか一方のみ設定される)。
+        # 表示層(StockAnalysisViewService)がこの原因を再判定しなくて済むよう、
+        # 判定時点にどちらが発火したかをそのままbuy_score_input_factsへ
+        # スナップショットする(下記929行付近参照)。
+        no_valuation_anchor_blocking_reason = (
+            valuation_confidence_result.blocking_reason or anchor_result.blocking_reason
         )
 
         # --- 決算日の妥当性検証(要求仕様12節)。コードレビュー対応により
@@ -516,6 +527,28 @@ class BuySignalService:
             for m in valuation_summary.methods_excluded
             if m.exclusion_detail is not None
         ]
+        # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): valuation_anchor
+        # がNoneの場合(=BuyDecisionReason.code="NO_VALUATION_ANCHOR"が必ず発火する)、
+        # その直接原因(方式間の乖離が大きすぎた/有効な方式が無かった等)を判定時点の
+        # 実測値・基準値ごと構造化してスナップショットする。標準5方式の
+        # exclusion_reasonだけでは説明できない集約段階の失敗(全方式が個別には
+        # 有効なのに乖離が大きすぎてアンカーを一本化できない等)を、表示層が
+        # 現在configを再取得せずに正しく説明できるようにするため。
+        no_valuation_anchor_reason: dict[str, object] | None = None
+        if valuation_anchor is None and no_valuation_anchor_blocking_reason is not None:
+            no_valuation_anchor_reason = {
+                "code": no_valuation_anchor_blocking_reason.code,
+                "actual_value": (
+                    str(no_valuation_anchor_blocking_reason.actual_value)
+                    if no_valuation_anchor_blocking_reason.actual_value is not None
+                    else None
+                ),
+                "threshold_value": (
+                    str(no_valuation_anchor_blocking_reason.threshold_value)
+                    if no_valuation_anchor_blocking_reason.threshold_value is not None
+                    else None
+                ),
+            }
         reliability_result = determine_buy_price_reliability(
             margin_result=margin_result,
             maximum_entry_margin=self._config.buy_decision.margin_of_safety.maximum_margin.entry,
@@ -641,6 +674,11 @@ class BuySignalService:
             # 外れ値フィルタ適用前のオブジェクトのため、実際に外れ値として除外
             # された方式・理由はここへ別途スナップショットする(上記コメント参照)。
             "valuation_outlier_exclusions": valuation_outlier_exclusions,
+            # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): BuyDecisionReason
+            # (code="NO_VALUATION_ANCHOR")が発火した場合の直接原因を判定時点の実測値・
+            # 基準値ごとスナップショットする(511行付近のコメント参照)。valuation_anchor
+            # が算出できた場合はNone。
+            "no_valuation_anchor_reason": no_valuation_anchor_reason,
         }
 
         # --- 13. purchase_attractiveness_score算出 ---
