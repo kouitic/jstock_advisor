@@ -2309,6 +2309,15 @@ class LineNotificationService:
                     content_hash=content_hash,
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
+                    # Issue #33: 送信対象Recommendationのscope(owner/holding_id)を
+                    # そのまま転記する(M3移行backfillと同じ意味論)。holding-scope
+                    # 通知の再送判定はlatest_by_holding_and_type()で過去logを検索
+                    # するため、書き込み側がholding_idを保存しないと過去実績が
+                    # 永久に見つからず、resend_after_days等の既存抑止条件が機能
+                    # しない(read/write非対称)。stock-scope(holding_id=None)は
+                    # Noneのまま転記される。
+                    owner=recommendation.owner,
+                    holding_id=recommendation.holding_id,
                 )
             )
 
@@ -2346,6 +2355,10 @@ class LineNotificationService:
                     content_hash=content_hash,
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
+                    # Issue #33: Recommendationのscopeを転記する
+                    # (send_recommendation_notification()のコメント参照)。
+                    owner=recommendation.owner,
+                    holding_id=recommendation.holding_id,
                 )
             )
 
@@ -2393,6 +2406,13 @@ class LineNotificationService:
                     content_hash=content_hash,
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
+                    # Issue #33: Recommendationのscopeを転記する。ATTENTIONは
+                    # holding-scopeであり、_attention_status_for_send()が
+                    # latest_by_holding_and_type()でevent identityを比較するため、
+                    # holding_id未保存だと同一局面の再送抑止が機能しない
+                    # (send_recommendation_notification()のコメント参照)。
+                    owner=recommendation.owner,
+                    holding_id=recommendation.holding_id,
                 )
             )
 
@@ -2522,6 +2542,11 @@ class LineNotificationService:
                             content_hash=_compute_content_hash(recommendation.recommendation_type),
                             sent_at=now,
                             related_recommendation_id=recommendation.recommendation_id,
+                            # Issue #33: Recommendationのscopeを転記する。BUY候補は
+                            # stock-scope(holding_id=None)のためNoneのまま転記される
+                            # (send_recommendation_notification()のコメント参照)。
+                            owner=recommendation.owner,
+                            holding_id=recommendation.holding_id,
                         )
                     )
                     results[recommendation.stock_code] = "SENT_AND_RECORDED"
@@ -2670,6 +2695,10 @@ class LineNotificationService:
                     content_hash=content_hash,
                     sent_at=now,
                     related_recommendation_id=recommendation.recommendation_id,
+                    # Issue #33: Recommendationのscopeを転記する
+                    # (send_recommendation_notification()のコメント参照)。
+                    owner=recommendation.owner,
+                    holding_id=recommendation.holding_id,
                 )
             )
         return True
@@ -3249,9 +3278,14 @@ class LineNotificationService:
             return NotificationStatus.SENT
 
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
-        latest_log = self._log_repo.latest_by_stock_and_type(
-            recommendation.stock_code, notification_type
-        )
+        # Issue #33: days_elapsed(resend_after_days)の基準となる直近送信実績も、
+        # previous(_previous_recommendation経由)と同じscopeで参照する
+        # (holding-scopeはholding_id単位、stock-scopeはstock_code単位)。以前は
+        # latest_by_stock_and_typeを直接使っており、同一stock_codeを複数ownerが
+        # 保有する場合に別ownerの送信時刻が再送間隔判定へ影響するscope非対称が
+        # あった。再送条件そのもの(resend_after_daysの値・JST暦日計算・価格閾値
+        # 等)は変更しない。
+        latest_log = self._latest_log_for_recommendation_scope(recommendation, notification_type)
         if latest_log is None:
             return NotificationStatus.SENT
         if previous is None:

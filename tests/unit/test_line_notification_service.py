@@ -4463,3 +4463,269 @@ def test_issue23_batch_summary_dedup_stable_across_utc_boundary_same_jst_day(
     assert first is True
     assert second is False  # 同一JST日・同一内容 -> content_hash一致で抑止
     assert len(client.sent) == 1
+
+
+# --- Issue #33(2026-08-28): holding-scope NotificationLogのread/write整合 -----
+# 修正前は保存logにowner/holding_idが転記されず、holding-scope読み取り
+# (latest_by_holding_and_type)が常に0件となり再送抑止が機能しなかった。
+# 以下のテストはowner/holding_idを実際に設定したRecommendationで
+# 「保存→次回判定で発見→既存の再送条件どおり抑止/許可」を固定する。
+# owner値はCLAUDE.mdのPIIルールに従い架空値(owner-a等)を使う。
+
+_I33_T1 = dt.datetime(2026, 7, 24, 3, 0, tzinfo=dt.UTC)  # JST 2026-07-24 12:00
+_I33_T2 = dt.datetime(2026, 7, 26, 3, 0, tzinfo=dt.UTC)  # JST暦日差2日(未到達)
+_I33_T3 = dt.datetime(2026, 7, 29, 3, 0, tzinfo=dt.UTC)  # JST暦日差5日(到達)
+
+
+def _i33_holding_sell_recommendation(
+    *,
+    recommendation_id: str,
+    owner: str,
+    now: dt.datetime,
+    stock_code: str = "2914",
+    limit_price: str | None = None,
+) -> Recommendation:
+    sell_prices = (
+        SellPriceLevels(
+            recommended_limit_price=PriceWithRationale(price=Decimal(limit_price), rationale="x")
+        )
+        if limit_price is not None
+        else SellPriceLevels()
+    )
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        owner=owner,
+        holding_id=build_holding_id(owner, stock_code),
+        stock_code=stock_code,
+        stock_name="日本たばこ産業",
+        recommended_at=now,
+        recommendation_type=RecommendationType.SELL,
+        sell_prices=sell_prices,
+        price_at_recommendation=Decimal("1400"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+    )
+
+
+def test_issue33_notification_log_records_holding_scope(service_and_repos) -> None:
+    """A/B: holding_id付きSELLを送信すると、保存logにowner/holding_idが転記され、
+    latest_by_holding_and_type()で前回実績として取得できる。"""
+    service, repo, client = service_and_repos
+    rec = _i33_holding_sell_recommendation(
+        recommendation_id="i33-a-1", owner="owner-a", now=_I33_T1
+    )
+    repo.save(rec)
+
+    outcome = service.notify_recommendation_with_status(rec, _I33_T1)
+
+    assert outcome.sent is True
+    assert len(client.sent) == 1
+    log = service._log_repo.latest_by_holding_and_type(
+        build_holding_id("owner-a", "2914"), NotificationType.SELL_SIGNAL
+    )
+    assert log is not None
+    assert log.owner == "owner-a"
+    assert log.holding_id == build_holding_id("owner-a", "2914")
+    assert log.related_recommendation_id == "i33-a-1"
+    # stock-scope読み取りからも従来どおり見える(stock_codeは引き続き保存)
+    assert (
+        service._log_repo.latest_by_stock_and_type("2914", NotificationType.SELL_SIGNAL)
+        is not None
+    )
+
+
+def test_issue33_holding_scope_resend_suppressed_within_interval(service_and_repos) -> None:
+    """C/複数ownerケース2: 同一holding・同一typeの再判定はresend_after_days
+    未到達なら抑止される(修正前はholding-scope読み取りが0件で毎回送信されていた)。"""
+    service, repo, client = service_and_repos
+    rec1 = _i33_holding_sell_recommendation(
+        recommendation_id="i33-c-1", owner="owner-a", now=_I33_T1
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation_with_status(rec1, _I33_T1).sent is True
+
+    rec2 = _i33_holding_sell_recommendation(
+        recommendation_id="i33-c-2", owner="owner-a", now=_I33_T2
+    )
+    repo.save(rec2)
+    outcome = service.notify_recommendation_with_status(rec2, _I33_T2)
+
+    assert outcome.sent is False
+    assert outcome.status == NotificationStatus.DUPLICATE_SUPPRESSED
+    assert len(client.sent) == 1
+
+
+def test_issue33_other_owner_same_stock_is_not_suppressed(service_and_repos) -> None:
+    """複数ownerケース1: owner-aの送信実績が、同一stock_code・同一typeを保有する
+    owner-bのresend_after_days判定を抑止しない(business-level固定)。"""
+    service, repo, client = service_and_repos
+    rec_a = _i33_holding_sell_recommendation(
+        recommendation_id="i33-mo-a", owner="owner-a", now=_I33_T1
+    )
+    repo.save(rec_a)
+    assert service.notify_recommendation_with_status(rec_a, _I33_T1).sent is True
+
+    rec_b = _i33_holding_sell_recommendation(
+        recommendation_id="i33-mo-b", owner="owner-b", now=_I33_T2
+    )
+    repo.save(rec_b)
+    outcome = service.notify_recommendation_with_status(rec_b, _I33_T2)
+
+    assert outcome.sent is True
+    assert len(client.sent) == 2
+    log_b = service._log_repo.latest_by_holding_and_type(
+        build_holding_id("owner-b", "2914"), NotificationType.SELL_SIGNAL
+    )
+    assert log_b is not None
+    assert log_b.owner == "owner-b"
+
+
+def test_issue33_holding_scope_resend_allowed_after_interval(service_and_repos) -> None:
+    """D: resend_after_days(JST暦日)到達後は従来仕様どおり再送可能。"""
+    service, repo, client = service_and_repos
+    rec1 = _i33_holding_sell_recommendation(
+        recommendation_id="i33-d-1", owner="owner-a", now=_I33_T1
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation_with_status(rec1, _I33_T1).sent is True
+
+    rec2 = _i33_holding_sell_recommendation(
+        recommendation_id="i33-d-2", owner="owner-a", now=_I33_T3
+    )
+    repo.save(rec2)
+    outcome = service.notify_recommendation_with_status(rec2, _I33_T3)
+
+    assert outcome.sent is True
+    assert len(client.sent) == 2
+
+
+def test_issue33_holding_scope_price_change_resend(service_and_repos) -> None:
+    """E: 価格変化による正当再送は従来仕様どおり許可される(閾値未満は抑止)。
+    holding-scopeのlatest_logが発見されたうえで、既存の価格閾値判定に到達する
+    ことを固定する。"""
+    service, repo, _client = service_and_repos
+    prev = _i33_holding_sell_recommendation(
+        recommendation_id="i33-e-prev", owner="owner-a", now=_I33_T1, limit_price="1000"
+    )
+    repo.save(prev)
+    service._log_repo.save(
+        NotificationLog(
+            notification_id="i33-e-log",
+            notification_type=NotificationType.SELL_SIGNAL,
+            stock_code="2914",
+            content_hash="x",
+            sent_at=_I33_T1,
+            related_recommendation_id="i33-e-prev",
+            owner="owner-a",
+            holding_id=build_holding_id("owner-a", "2914"),
+        )
+    )
+
+    above = _i33_holding_sell_recommendation(
+        recommendation_id="i33-e-above", owner="owner-a", now=_I33_T2, limit_price="1035"
+    )
+    below = _i33_holding_sell_recommendation(
+        recommendation_id="i33-e-below", owner="owner-a", now=_I33_T2, limit_price="1010"
+    )
+
+    assert (
+        service._notification_status_for_send(above, prev, _I33_T2) == NotificationStatus.SENT
+    )
+    assert (
+        service._notification_status_for_send(below, prev, _I33_T2)
+        == NotificationStatus.PRICE_CHANGE_BELOW_THRESHOLD
+    )
+
+
+def test_issue33_attention_same_event_identity_suppressed(service_and_repos) -> None:
+    """F: holding-scope ATTENTIONは同一event identityの2回目が抑止される
+    (修正前はholding-scope読み取りが0件で毎バッチ再送されていた)。"""
+    service, repo, client = service_and_repos
+    holding_id = build_holding_id("owner-a", "8136")
+    rec1 = _make_attention_watch_recommendation(recommendation_id="i33-f-1").model_copy(
+        update={"owner": "owner-a", "holding_id": holding_id}
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation_with_status(rec1, _I33_T1).sent is True
+    log = service._log_repo.latest_by_holding_and_type(
+        holding_id, NotificationType.PROFIT_PROTECTION_ATTENTION
+    )
+    assert log is not None
+    assert log.holding_id == holding_id
+
+    rec2 = _make_attention_watch_recommendation(recommendation_id="i33-f-2").model_copy(
+        update={"owner": "owner-a", "holding_id": holding_id}
+    )
+    repo.save(rec2)
+    outcome = service.notify_recommendation_with_status(rec2, _I33_T2)
+
+    assert outcome.sent is False
+    assert outcome.status == NotificationStatus.DUPLICATE_SUPPRESSED
+    assert len(client.sent) == 1
+
+
+def test_issue33_attention_new_event_identity_sent(service_and_repos) -> None:
+    """G: event identityが変化した場合(高値更新等)は新しい局面として送信される。"""
+    service, repo, client = service_and_repos
+    holding_id = build_holding_id("owner-a", "8136")
+    rec1 = _make_attention_watch_recommendation(recommendation_id="i33-g-1").model_copy(
+        update={"owner": "owner-a", "holding_id": holding_id}
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation_with_status(rec1, _I33_T1).sent is True
+
+    rec2 = _make_attention_watch_recommendation(
+        recommendation_id="i33-g-2", peak_price=Decimal("1600")
+    ).model_copy(update={"owner": "owner-a", "holding_id": holding_id})
+    repo.save(rec2)
+    outcome = service.notify_recommendation_with_status(rec2, _I33_T2)
+
+    assert outcome.sent is True
+    assert len(client.sent) == 2
+
+
+def test_issue33_stock_scope_behavior_unchanged(service_and_repos) -> None:
+    """H/複数ownerケース3: stock-scope(holding_id=None)は従来どおり
+    latest_by_stock_and_typeで判定され、保存logのowner/holding_idはNoneのまま。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="i33-h-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation(rec1, _I33_T1) is True
+    log = service._log_repo.latest_by_stock_and_type("2914", NotificationType.DAILY_BUY_CANDIDATES)
+    assert log is not None
+    assert log.owner is None
+    assert log.holding_id is None
+
+    # 同一価格・同日 → 従来どおり抑止(scope-aware read化による挙動変化なし)
+    rec2 = _make_recommendation(
+        recommendation_id="i33-h-2",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec2)
+    assert service.notify_recommendation(rec2, _I33_T1) is False
+    assert len(client.sent) == 1
+
+
+def test_issue33_digest_log_keeps_stock_scope_none(service_and_repos) -> None:
+    """H補足: BUY digest経路の保存logもowner/holding_id=Noneのまま
+    (BUY候補はstock-scope)。"""
+    service, repo, _client = service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="i33-dg-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+
+    results = service.notify_buy_candidates_digest([rec], _I33_T1)
+
+    assert results == {"2914": "SENT_AND_RECORDED"}
+    log = service._log_repo.latest_by_stock_and_type("2914", NotificationType.DAILY_BUY_CANDIDATES)
+    assert log is not None
+    assert log.owner is None
+    assert log.holding_id is None
