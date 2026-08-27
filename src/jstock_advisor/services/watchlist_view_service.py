@@ -135,11 +135,18 @@ class _MessagePacker:
     ことを許容する。見出し自体は数文字〜十数文字であり、実運用上の
     超過幅は無視できる)。銘柄行は予算内に収まる分だけ表示し、収まらない
     残りは「他N件は🎯対象確認からご確認いただけます」の1行に要約する。
+
+    レビュー対応(2026-08、ウォッチリスト表示改善): 2つ目以降の区分見出しの
+    直前には、区分の境界を視認しやすくするため空行を1行挿入する(_started/
+    add_category()参照)。ただし見出しが新規メッセージへ持ち越される場合
+    (_start_new_message()発火時)は挿入しない(各メッセージの先頭に不要な
+    空行を作らないため)。
     """
 
     def __init__(self) -> None:
         self.messages: list[list[str]] = [[]]
         self._current_len = 0
+        self._started = False
 
     def _fits(self, line: str) -> bool:
         return self._current_len + len(line) + 1 <= MESSAGE_CHAR_BUDGET
@@ -157,15 +164,34 @@ class _MessagePacker:
 
     def add_category(self, label: str, item_lines: list[str]) -> None:
         header = f"【{label}】"
-        if not self._fits(header) and not self._start_new_message():
-            # 上限到達: 見出しは必ず表示するハード要件のため、最後のメッセージへ
-            # 予算超過を許容してでも追記する。銘柄行は一切表示せず案内のみ残す。
-            self._append(header)
-            if item_lines:
-                self._append(f"{len(item_lines)}件は{_OVERFLOW_GUIDANCE}")
-            else:
-                self._append(_NO_TARGET_LINE)
-            return
+        is_first_category = not self._started
+        self._started = True
+
+        # 区切り空行が必要かどうかは、同一メッセージ内で前の区分から続く
+        # 場合のみ。ただし空行自体も1行分の予算を消費するため、
+        # 「空行+見出し」が同一メッセージへ収まるかを併せて判定する
+        # (見出し単体ではぎりぎり収まるが空行を足すと超過する境界ケースで、
+        # 新規メッセージの先頭に空行だけが取り残されることを防ぐ)。
+        needs_separator = not is_first_category and self._current_len > 0
+        separator_cost = 1 if needs_separator else 0  # 空行という1行分(内容は空文字列)
+
+        if self._current_len + separator_cost + len(header) + 1 > MESSAGE_CHAR_BUDGET:
+            if not self._start_new_message():
+                # 上限到達: 見出しは必ず表示するハード要件のため、最後の
+                # メッセージへ予算超過を許容してでも追記する(区切り空行は
+                # 挿入しない、既存の予算超過許容方針のみを踏襲)。銘柄行は
+                # 一切表示せず案内のみ残す。
+                self._append(header)
+                if item_lines:
+                    self._append(f"{len(item_lines)}件は{_OVERFLOW_GUIDANCE}")
+                else:
+                    self._append(_NO_TARGET_LINE)
+                return
+            # 新規メッセージの先頭は見出しから始める(空行を入れない)。
+            needs_separator = False
+        if needs_separator:
+            self._append("")
+
         self._append(header)
 
         if not item_lines:

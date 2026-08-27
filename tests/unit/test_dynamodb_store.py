@@ -7,7 +7,7 @@ import pytest
 from moto import mock_aws
 from pydantic import BaseModel
 
-from jstock_advisor.infrastructure.aws.dynamodb_store import DynamoDbCollectionStore
+from jstock_advisor.infrastructure.aws.dynamodb_store import DynamoDbCollectionStore, to_dynamo_item
 
 _TABLE_NAME = "test-items"
 _REGION = "ap-northeast-1"
@@ -276,3 +276,178 @@ def test_get_does_not_use_consistent_read(
 
     assert len(calls) == 1
     assert "ConsistentRead" not in calls[0]
+
+
+# --- get_many() (対象確認機能2026-08、N+1回避) -----------------------------
+
+
+def test_get_many_returns_empty_dict_for_empty_input(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """必須テスト1: 0件。"""
+    assert store.get_many([]) == {}
+
+
+def test_get_many_single_id_round_trips(store: DynamoDbCollectionStore[_Item]) -> None:
+    """必須テスト2: 1件。"""
+    store.upsert(_Item(item_id="1", name="a", value=1))
+    assert store.get_many(["1"]) == {"1": _Item(item_id="1", name="a", value=1)}
+
+
+def test_get_many_with_exactly_100_ids_uses_single_batch_request(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """必須テスト3: 100件(BatchGetItemの1リクエスト上限ちょうど)は1リクエストで
+    完結すること。"""
+    for i in range(100):
+        store.upsert(_Item(item_id=str(i), name=f"n{i}", value=i))
+    calls: list[dict] = []
+    original = store._resource.batch_get_item
+
+    def _spy(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(store._resource, "batch_get_item", _spy)
+
+    result = store.get_many([str(i) for i in range(100)])
+
+    assert len(calls) == 1
+    assert len(result) == 100
+
+
+def test_get_many_splits_into_multiple_batch_requests_over_100_ids(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """必須テスト4: 101件以上は複数のBatchGetItemリクエストへ分割されること
+    (100件ずつのチャンク、1件ずつのGetItemへはフォールバックしないこと)。"""
+    for i in range(101):
+        store.upsert(_Item(item_id=str(i), name=f"n{i}", value=i))
+    batch_calls: list[dict] = []
+    original_batch = store._resource.batch_get_item
+
+    def _spy_batch(**kwargs):
+        batch_calls.append(kwargs)
+        return original_batch(**kwargs)
+
+    get_item_calls: list[dict] = []
+    original_get_item = store._table.get_item
+
+    def _spy_get_item(**kwargs):
+        get_item_calls.append(kwargs)
+        return original_get_item(**kwargs)
+
+    monkeypatch.setattr(store._resource, "batch_get_item", _spy_batch)
+    monkeypatch.setattr(store._table, "get_item", _spy_get_item)
+
+    result = store.get_many([str(i) for i in range(101)])
+
+    assert len(batch_calls) == 2  # 100件 + 1件の2リクエストへ分割される
+    assert len(result) == 101
+    assert get_item_calls == []  # 1件ずつGetItemする実装へフォールバックしない
+
+
+def test_get_many_omits_missing_ids(store: DynamoDbCollectionStore[_Item]) -> None:
+    """必須テスト5: 一部IDが存在しない場合、存在するIDのみ戻り値に含まれる
+    (Noneでは表現しない、get()と同じ意味)。"""
+    store.upsert(_Item(item_id="1", name="a", value=1))
+    result = store.get_many(["1", "does-not-exist"])
+    assert result == {"1": _Item(item_id="1", name="a", value=1)}
+
+
+def test_get_many_retries_on_unprocessed_keys_and_succeeds(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """必須テスト6: UnprocessedKeysが発生しても、リトライにより最終的に
+    全件取得できること。"""
+    item1 = _Item(item_id="1", name="a", value=1)
+    item2 = _Item(item_id="2", name="b", value=2)
+    raw1 = to_dynamo_item(item1, "item_id")
+    raw2 = to_dynamo_item(item2, "item_id")
+    calls: list[dict] = []
+
+    def _flaky_batch_get_item(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            # 1回目はitem_id=2だけをUnprocessedKeysとして残す。
+            return {
+                "Responses": {_TABLE_NAME: [raw1]},
+                "UnprocessedKeys": {_TABLE_NAME: {"Keys": [{"item_id": "2"}]}},
+            }
+        return {"Responses": {_TABLE_NAME: [raw2]}, "UnprocessedKeys": {}}
+
+    monkeypatch.setattr(store._resource, "batch_get_item", _flaky_batch_get_item)
+    monkeypatch.setattr(
+        "jstock_advisor.infrastructure.aws.dynamodb_store.time.sleep", lambda *_: None
+    )
+
+    result = store.get_many(["1", "2"])
+
+    assert len(calls) == 2
+    assert result == {"1": item1, "2": item2}
+
+
+def test_get_many_raises_when_unprocessed_keys_remain_after_max_retries(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """必須テスト7: UnprocessedKeysが規定回数のリトライ後も残る場合、
+    RuntimeErrorを送出すること(存在しないIDとして静かに省略しない、
+    取得失敗と「存在しない」を混同しない)。"""
+
+    def _always_unprocessed(**kwargs):
+        return {
+            "Responses": {_TABLE_NAME: []},
+            "UnprocessedKeys": {_TABLE_NAME: {"Keys": [{"item_id": "1"}]}},
+        }
+
+    monkeypatch.setattr(store._resource, "batch_get_item", _always_unprocessed)
+    monkeypatch.setattr(
+        "jstock_advisor.infrastructure.aws.dynamodb_store.time.sleep", lambda *_: None
+    )
+
+    with pytest.raises(RuntimeError, match="UnprocessedKeys"):
+        store.get_many(["1"])
+
+
+def test_get_many_deduplicates_repeated_ids(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """必須テスト8: 入力IDに重複があっても1件として扱う(BatchGetItemの
+    重複キーエラーを起こさない、戻り値も1エントリ)。"""
+    store.upsert(_Item(item_id="1", name="a", value=1))
+    calls: list[dict] = []
+    original = store._resource.batch_get_item
+
+    def _spy(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(store._resource, "batch_get_item", _spy)
+
+    result = store.get_many(["1", "1", "1"])
+
+    assert result == {"1": _Item(item_id="1", name="a", value=1)}
+    assert len(calls) == 1
+    assert len(calls[0]["RequestItems"][_TABLE_NAME]["Keys"]) == 1
+
+
+def test_get_many_never_falls_back_to_single_get_item(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """入力件数が多くても1件ずつGetItemする実装へフォールバックしないこと
+    (通常規模での確認、大規模分割時の確認はtest_get_many_splits_into_
+    multiple_batch_requests_over_100_idsで別途行う)。"""
+    store.upsert(_Item(item_id="1", name="a", value=1))
+    store.upsert(_Item(item_id="2", name="b", value=2))
+    calls: list[dict] = []
+    original = store._table.get_item
+
+    def _spy(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(store._table, "get_item", _spy)
+
+    store.get_many(["1", "2"])
+
+    assert calls == []

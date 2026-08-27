@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from jstock_advisor.domain.entities.enums import RecommendationType
@@ -68,6 +69,15 @@ class RecommendationRepository:
 
     def get(self, recommendation_id: str) -> Recommendation | None:
         return self._store.get(recommendation_id)
+
+    def get_many(self, recommendation_ids: Iterable[str]) -> dict[str, Recommendation]:
+        """複数のrecommendation_idを一括取得する(対象確認機能2026-08、N+1回避)。
+
+        戻り値には実際に存在したIDのみを含める(get()と同じ意味)。DynamoDB
+        実装はBatchGetItemで一括取得するため、1件ずつGetItemを呼ぶ実装には
+        ならない(infrastructure/aws/dynamodb_store.py::get_many()参照)。
+        """
+        return self._store.get_many(recommendation_ids)
 
     def save(self, recommendation: Recommendation) -> None:
         if self._store.get(recommendation.recommendation_id) is not None:

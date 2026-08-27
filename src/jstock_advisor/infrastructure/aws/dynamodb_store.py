@@ -14,9 +14,10 @@ id_fieldの値をそのまま使う単純な設計とする(単一ユーザー�
 
 from __future__ import annotations
 
+import random
 import time
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import boto3
 from botocore.exceptions import ClientError
@@ -24,6 +25,19 @@ from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb.service_resource import Table
+
+# BatchGetItemのチャンク・リトライ仕様(対象確認機能2026-08、N+1回避)。
+# batch_tracker.py::_batch_write_with_retry()(BatchWriteItemのUnprocessedItems
+# 再送)と同じ指数バックオフ+ジッターのパラメータをそのまま踏襲する(この
+# リポジトリ内でのバッチ系DynamoDB API呼び出しの再送方針を1本化するため)。
+_BATCH_GET_MAX_KEYS_PER_REQUEST = 100  # BatchGetItemの1リクエストあたりの上限(AWS仕様)
+_BATCH_GET_BASE_DELAY_SECONDS = 0.5
+_BATCH_GET_MAX_DELAY_SECONDS = 5.0
+_BATCH_GET_MAX_RETRIES = 5
+
+
+def _chunked(values: list[str], size: int) -> list[list[str]]:
+    return [values[i : i + size] for i in range(0, len(values), size)]
 
 
 def to_dynamo_item(
@@ -55,8 +69,9 @@ class DynamoDbCollectionStore[T: BaseModel]:
         self._model_type = model_type
         self._id_field = id_field
         self._ttl_seconds = ttl_seconds
-        resource = boto3.resource("dynamodb")
-        self._table: Table = resource.Table(table_name)
+        self._table_name = table_name
+        self._resource = boto3.resource("dynamodb")
+        self._table: Table = self._resource.Table(table_name)
 
     def _to_item(self, model: T) -> dict[str, Any]:
         return to_dynamo_item(model, self._id_field, self._ttl_seconds)
@@ -155,3 +170,50 @@ class DynamoDbCollectionStore[T: BaseModel]:
             if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
                 return False
             raise
+
+    def get_many(self, item_ids: Iterable[str]) -> dict[str, T]:
+        """BatchGetItem(最大100件/リクエスト)で複数IDを一括取得する
+        (対象確認機能2026-08、N+1回避)。1件ずつGetItemを呼ぶ実装へは
+        フォールバックしない。
+
+        戻り値には実際に存在したIDのみを含める(get()と同じ意味、存在しない
+        IDは単に含まれずNoneでも表現しない)。UnprocessedKeysが返った場合は
+        モジュール冒頭の定数(batch_tracker.py::_batch_write_with_retry()と
+        同じ指数バックオフ+ジッター)で再送し、規定回数を超えて残る場合は
+        RuntimeErrorを送出する(取得できなかったことを「存在しない」と
+        混同して静かに省略しない)。
+        """
+        unique_ids = list(dict.fromkeys(item_ids))
+        result: dict[str, T] = {}
+        for chunk in _chunked(unique_ids, _BATCH_GET_MAX_KEYS_PER_REQUEST):
+            pending_keys: list[dict[str, Any]] = [{self._id_field: item_id} for item_id in chunk]
+            attempt = 0
+            while pending_keys:
+                response = cast(
+                    "dict[str, Any]",
+                    self._resource.batch_get_item(
+                        RequestItems={self._table_name: {"Keys": pending_keys}}
+                    ),
+                )
+                responses: dict[str, Any] = response.get("Responses", {})
+                for raw in responses.get(self._table_name, []):
+                    item = self._from_item(raw)
+                    result[str(getattr(item, self._id_field))] = item
+                unprocessed_keys: dict[str, Any] = response.get("UnprocessedKeys", {})
+                pending_keys = unprocessed_keys.get(self._table_name, {}).get("Keys", [])
+                if not pending_keys:
+                    break
+                attempt += 1
+                if attempt > _BATCH_GET_MAX_RETRIES:
+                    raise RuntimeError(
+                        f"BatchGetItem: UnprocessedKeysが{_BATCH_GET_MAX_RETRIES}回の"
+                        f"再送後も残っています table={self._table_name} "
+                        f"remaining={len(pending_keys)}"
+                    )
+                delay = min(
+                    _BATCH_GET_MAX_DELAY_SECONDS,
+                    _BATCH_GET_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+                )
+                delay *= 1 + random.uniform(-0.2, 0.2)
+                time.sleep(max(0.0, delay))
+        return result

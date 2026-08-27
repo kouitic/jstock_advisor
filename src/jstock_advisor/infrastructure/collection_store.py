@@ -83,6 +83,25 @@ class CollectionStore[T: BaseModel](Protocol):
         """
         ...
 
+    def get_many(self, item_ids: Iterable[str]) -> dict[str, T]:
+        """複数IDを一括取得する(対象確認機能2026-08、N+1回避)。
+
+        戻り値は取得できたitem_idのみを含む辞書(get()と同じく、存在しない
+        IDは戻り値に単純に含まれない。Noneで表現しない)。重複したitem_idは
+        1件分として扱う。
+
+        DynamoDB実装はBatchGetItem(最大100件/リクエスト)を使い、1件ずつ
+        GetItemを呼ぶ実装へフォールバックしない。UnprocessedKeysが返った
+        場合は`_batch_write_with_retry()`(batch_tracker.py)と同じ指数
+        バックオフ+ジッターで再送し、規定回数の再送後もUnprocessedKeysが
+        残る場合はRuntimeErrorを送出する(実際に存在しないIDとして静かに
+        省略しない。取得失敗と「存在しない」を混同しないため)。
+
+        ローカルJSON実装は既存の全件読み込みから該当IDだけを取り出す
+        (追加I/Oなし、失敗の概念自体が無い)。
+        """
+        ...
+
 
 def running_on_lambda() -> bool:
     return bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))

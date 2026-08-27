@@ -44,7 +44,12 @@ from jstock_advisor.infrastructure.local_repository.watchlist_repository import 
 )
 from jstock_advisor.services.buy_candidate_target_view_service import CATEGORY_DISPLAY_LABELS
 from jstock_advisor.services.latest_batch_records_provider import STILL_PROPAGATING_MESSAGE
-from jstock_advisor.services.watchlist_view_service import WatchlistViewService
+from jstock_advisor.services.watchlist_view_service import (
+    MESSAGE_CHAR_BUDGET,
+    WatchlistViewService,
+    _MessagePacker,
+    _pack_category_groups,
+)
 
 _NOW = dt.datetime(2026, 8, 24, 7, 0, tzinfo=dt.UTC)
 _WEIGHTS = ScoreWeights(
@@ -129,7 +134,12 @@ def _single_message(service: WatchlistViewService) -> list[str]:
 
 def _lines_for_category(lines: list[str], label: str) -> list[str]:
     """指定区分見出しの直後から、次の見出し(または末尾)までの行を返す
-    (見出し自身は含まない)。"""
+    (見出し自身は含まない)。
+
+    レビュー対応(2026-08、ウォッチリスト表示改善): 次区分見出しの直前に
+    挿入される区切り空行は、区分同士の境界を示すものであり、この区分
+    自体の内容ではないため、末尾に付いていれば取り除いて比較する。
+    """
     header = f"【{label}】"
     start = lines.index(header) + 1
     end = len(lines)
@@ -137,7 +147,10 @@ def _lines_for_category(lines: list[str], label: str) -> list[str]:
         if lines[i].startswith("【"):
             end = i
             break
-    return lines[start:end]
+    category_lines = lines[start:end]
+    if category_lines and category_lines[-1] == "":
+        category_lines = category_lines[:-1]
+    return category_lines
 
 
 def test_all_seven_category_headers_always_present(tmp_path: Path) -> None:
@@ -283,3 +296,102 @@ def test_does_not_write_to_watchlist_or_evaluation_records(tmp_path: Path) -> No
     service = _service(tmp_path)
     assert not hasattr(service, "upsert")
     assert not hasattr(service, "delete")
+
+
+# --- 要件1: 区分見出し切り替わり時の区切り空行(2026-08、ウォッチリスト表示改善) ---
+# _MessagePackerを直接テストする(WatchlistViewService.build_message_groups()
+# 経由の統合テストは上記の既存テスト群で別途カバーされている)。
+
+
+def test_first_category_header_has_no_leading_blank_line() -> None:
+    """必須テスト1: 最初の区分見出し前に空行が入らない。"""
+    packer = _MessagePacker()
+    packer.add_category("買い候補", ["A（1111）"])
+    assert packer.messages[0][0] == "【買い候補】"
+
+
+def test_blank_line_inserted_before_second_category_header() -> None:
+    """必須テスト2: 2区分目以降の見出し前に空行が1行入る。"""
+    packer = _MessagePacker()
+    packer.add_category("買い候補", ["A（1111）"])
+    packer.add_category("買い間近", ["B（2222）"])
+    assert packer.messages[0] == [
+        "【買い候補】",
+        "A（1111）",
+        "",
+        "【買い間近】",
+        "B（2222）",
+    ]
+
+
+def test_no_blank_line_between_items_within_same_category() -> None:
+    """必須テスト3: 同一区分内の銘柄同士には空行が入らない。"""
+    packer = _MessagePacker()
+    packer.add_category("買い候補", ["A（1111）", "B（2222）", "C（3333）"])
+    assert packer.messages[0] == ["【買い候補】", "A（1111）", "B（2222）", "C（3333）"]
+
+
+def test_blank_line_is_exactly_one_between_consecutive_categories() -> None:
+    """必須テスト4: 複数の区分が連続しても空行は常に1行だけ(0件区分を挟んでも
+    同様、必須テスト6も兼ねる)。"""
+    packer = _MessagePacker()
+    packer.add_category("買い候補", ["A（1111）"])
+    packer.add_category("買い間近", [])
+    packer.add_category("買い待ち", ["C（3333）"])
+    assert packer.messages[0] == [
+        "【買い候補】",
+        "A（1111）",
+        "",
+        "【買い間近】",
+        "対象なし",
+        "",
+        "【買い待ち】",
+        "C（3333）",
+    ]
+
+
+def test_no_trailing_blank_line_after_last_category() -> None:
+    """必須テスト5: 最終行の後ろに不要な空行が入らない。"""
+    packer = _MessagePacker()
+    packer.add_category("買い候補", ["A（1111）"])
+    packer.add_category("買い間近", ["B（2222）"])
+    assert packer.messages[0][-1] == "B（2222）"
+
+
+def test_new_message_does_not_start_with_blank_line_when_header_overflows() -> None:
+    """必須テスト7: メッセージ分割が発生する場合、新規メッセージの先頭は
+    見出しから始まり、区切り空行が先頭に来ないこと。
+
+    境界ケース: 「見出し単体ならぎりぎり収まるが、区切り空行を足すと
+    4500文字を超える」状態を意図的に作り、この場合も新規メッセージへ
+    正しく切り替わり(予算超過も空行の取り残しも起きない)ことを確認する。
+    """
+    packer = _MessagePacker()
+    packer.add_category("買い候補", [])
+    header2 = "【買い間近】"
+    # 「区切り空行(1文字扱い)+見出し2+区切り文字」がちょうど1文字だけ
+    # 予算を超えるよう、現在のメッセージ長を調整する(見出し2単体なら
+    # ぎりぎり収まる長さ)。
+    filler_len = MESSAGE_CHAR_BUDGET - packer._current_len - len(header2) - 2
+    packer._append("あ" * filler_len)
+    assert packer._fits(header2)  # 見出し単体ならまだ収まる状態であることの前提確認
+
+    packer.add_category("買い間近", ["B（2222）"])
+
+    assert len(packer.messages) == 2
+    # 前のメッセージの末尾はfillerのままで、空行が取り残されていない。
+    assert packer.messages[0][-1] == "あ" * filler_len
+    # 新規メッセージは見出しから始まり、空行が先頭に来ない。
+    assert packer.messages[1] == ["【買い間近】", "B（2222）"]
+    # 新規メッセージも予算超過していない。
+    assert sum(len(line) + 1 for line in packer.messages[1]) <= MESSAGE_CHAR_BUDGET
+
+
+def test_category_order_preserved_with_blank_line_separators() -> None:
+    """必須テスト8: 空行挿入後も既存の区分順が変わらない。"""
+    grouped: dict[str, list[str]] = {label: [] for label in CATEGORY_DISPLAY_LABELS}
+    messages = _pack_category_groups(grouped)
+    headers_in_order = [
+        line[1:-1] for line in messages[0] if line.startswith("【") and line.endswith("】")
+    ]
+    assert tuple(headers_in_order) == CATEGORY_DISPLAY_LABELS

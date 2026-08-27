@@ -98,6 +98,13 @@ class JsonCollectionStore[T: BaseModel]:
         """ローカルJSONにGSI概念は無いため、index_nameは無視しfind()相当で絞り込む。"""
         return self.find(lambda item: str(getattr(item, key_name)) == key_value)
 
+    def get_many(self, item_ids: Iterable[str]) -> dict[str, T]:
+        """対象確認機能2026-08向け。既存の全件読み込みから該当IDだけを取り出す
+        だけであり、追加I/Oは発生しない(DynamoDB実装のBatchGetItem相当の
+        分割・リトライ・失敗概念はローカル実装には存在しない)。"""
+        items = self._read_all()
+        return {item_id: items[item_id] for item_id in dict.fromkeys(item_ids) if item_id in items}
+
     def insert_if_absent(self, item: T) -> bool:
         """既存があれば触らずFalse、無ければ追加してTrue。
 

@@ -127,3 +127,36 @@ def test_delete_removes_recommendation(tmp_path: Path) -> None:
 def test_delete_returns_false_when_not_found(tmp_path: Path) -> None:
     repo = RecommendationRepository(store_dir=tmp_path)
     assert repo.delete("does-not-exist") is False
+
+
+# --- get_many() (対象確認機能2026-08、N+1回避) -----------------------------
+# DynamoDB実装(BatchGetItemのチャンク・リトライ・fail-safe)のテストは
+# test_dynamodb_store.pyへ集約する。ここではRecommendationRepository経由の
+# 薄いラッパーが、ローカルJSONバックエンドに対して正しく動くことのみ確認する。
+
+
+def test_get_many_returns_empty_dict_for_empty_input(tmp_path: Path) -> None:
+    repo = RecommendationRepository(store_dir=tmp_path)
+    assert repo.get_many([]) == {}
+
+
+def test_get_many_returns_only_existing_recommendations(tmp_path: Path) -> None:
+    repo = RecommendationRepository(store_dir=tmp_path)
+    rec1 = _recommendation(
+        "r1", RecommendationType.BUY, dt.datetime(2026, 8, 1, tzinfo=dt.UTC), "v10"
+    )
+    repo.save(rec1)
+
+    result = repo.get_many(["r1", "does-not-exist"])
+
+    assert result == {"r1": rec1}
+
+
+def test_get_many_deduplicates_repeated_ids(tmp_path: Path) -> None:
+    repo = RecommendationRepository(store_dir=tmp_path)
+    rec1 = _recommendation(
+        "r1", RecommendationType.BUY, dt.datetime(2026, 8, 1, tzinfo=dt.UTC), "v10"
+    )
+    repo.save(rec1)
+
+    assert repo.get_many(["r1", "r1"]) == {"r1": rec1}
