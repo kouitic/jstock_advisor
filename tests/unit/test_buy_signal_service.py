@@ -528,6 +528,43 @@ def test_buy_score_input_facts_includes_forecast_eps_and_bps_for_audit(
     assert facts["current_pbr"] == str(expected_current_pbr)
 
 
+def test_buy_price_reliability_facts_and_config_snapshot_are_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """レビュー対応(2026-08、BUY_PRICE_RELIABILITY_LOW具体的理由表示、必須
+    テストA/B): determine_buy_price_reliability()の判定に実際に使用した
+    入力事実(concerns自体含む)がbuy_score_input_facts、config閾値の判定
+    時点スナップショットがconfig_values_usedへ、それぞれ実際の判定時点値
+    で保存されることを確認する(LOW/OKいずれの判定結果でも、facts自体は
+    常に保存される)。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    # A: buy_score_input_facts(concerns自体と、他のどこにも判定時点値が
+    # 残らない入力事実)。
+    assert isinstance(facts["buy_price_reliability_concerns"], list)
+    assert facts["data_age_business_days"] == 0
+    assert "entry_margin_before_cap" in facts
+    assert "outlier_filter_blocking_reason" in facts
+    assert "valuation_methods_used_count" in facts
+    assert "valuation_excluded_outlier_count" in facts
+
+    # B: config_values_used(determine_buy_price_reliability()が参照する
+    # config由来の値の判定時点スナップショット)。
+    config_snapshot = rec.config_values_used
+    assert config_snapshot is not None
+    assert config_snapshot["maximum_entry_margin"] == pytest.approx(
+        _CONFIG.buy_decision.margin_of_safety.maximum_margin.entry
+    )
+    assert config_snapshot["valuation_dispersion_medium_max"] == pytest.approx(
+        _CONFIG.buy_decision.valuation_dispersion.medium_max
+    )
+
+
 # ===== 再々コードレビュー対応(2026-08、JST暦日境界修正・指摘4):
 # in_trade_cooldown判定(cooldown_until_date比較)とWatchStateService.
 # evaluate_and_update()への「当日」がJST暦日基準になっていることの回帰。

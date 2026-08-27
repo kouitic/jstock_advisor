@@ -22,6 +22,7 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     CandidateSource,
     ConfidenceLevel,
+    EarningsDateStatus,
     PurchaseCategory,
     RecommendationType,
 )
@@ -741,6 +742,226 @@ def test_no_valuation_anchor_falls_back_without_fabricating_when_no_reasons_stor
 
     assert "現行データからは区別できません" in text
     assert "PER法" not in text
+
+
+def _save_reliability_low_recommendation(tmp_path: Path, **overrides) -> None:
+    defaults: dict = dict(
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="BUY_PRICE_RELIABILITY_LOW",
+                message="x",
+                actual_value=None,
+                threshold_value=None,
+            ),
+        ),
+    )
+    defaults.update(overrides)
+    _save_buy_recommendation(tmp_path, **defaults)
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.WATCH_FOR_PRICE,
+        recommendation_id="rec-1",
+    )
+
+
+def test_reliability_low_entry_margin_exceeds_cap_shows_actual_and_cap_values(
+    tmp_path: Path,
+) -> None:
+    """必須テストC: ENTRY_MARGIN_EXCEEDS_CAPについて、保存された判定時点の
+    実数値(entry_margin_before_cap)と判定時点上限(config_values_used
+    ["maximum_entry_margin"])が正しく%表示されること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": ["ENTRY_MARGIN_EXCEEDS_CAP"],
+            "entry_margin_before_cap": "0.42",
+        },
+        config_values_used={"maximum_entry_margin": 0.30},
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "安全余裕率が上限を超過" in text
+    assert "判定時の安全余裕率42.0%" in text
+    assert "上限30.0%" in text
+
+
+def test_reliability_low_high_valuation_dispersion_shows_actual_and_threshold(
+    tmp_path: Path,
+) -> None:
+    """必須テストD: HIGH_VALUATION_DISPERSIONについて、既存フィールド
+    valuation_dispersion_ratioと判定時点threshold(config_values_used
+    ["valuation_dispersion_medium_max"])が正しく表示されること。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        valuation_dispersion_ratio=Decimal("1.75"),
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": ["HIGH_VALUATION_DISPERSION"],
+        },
+        config_values_used={"valuation_dispersion_medium_max": 1.60},
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "適正価格のばらつきが大きい" in text
+    assert "判定時のばらつき1.75倍" in text
+    assert "基準1.60倍以下" in text
+
+
+def test_reliability_low_too_few_valuation_methods_uses_stored_concern_not_rejudged(
+    tmp_path: Path,
+) -> None:
+    """必須テストE: TOO_FEW_VALUATION_METHODSは保存されたconcernを発火根拠
+    とし、表示層では再判定しないこと。件数は判定時と同一条件で保存された
+    valuation_methods_used_countのみを使う(valuation_methodsから独自に
+    数え直さない)。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": ["TOO_FEW_VALUATION_METHODS"],
+            "valuation_methods_used_count": 2,
+        },
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "適正価格の算出に使えた手法が少ない" in text
+    assert "判定時に使用できた手法2件" in text
+    assert "2件以下が対象" in text
+
+
+def test_reliability_low_data_quality_earnings_outlier_and_blocking_reason(
+    tmp_path: Path,
+) -> None:
+    """必須テストF: DATA_QUALITY_WARNING・STALE_EARNINGS_DATE・
+    VALUATION_OUTLIER_EXCLUDED・outlier_filter_blocking_reason(TOO_FEW_
+    METHODS_AFTER_OUTLIER_FILTER)について、それぞれ保存済み事実の範囲で
+    正しく表示されること(このテストは複数concern同時発生時に保存順で
+    全件表示されること(必須テストG)も兼ねる)。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        business_days_to_earnings=None,
+        earnings_date_status=EarningsDateStatus.STALE_PAST_DATE,
+        valuation_methods=(
+            FairValueMethodResult(
+                method="per",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason="現在値の10%未満のため外れ値として除外",
+            ),
+        ),
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": [
+                "DATA_QUALITY_WARNING",
+                "STALE_EARNINGS_DATE",
+                "VALUATION_OUTLIER_EXCLUDED",
+                "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER",
+            ],
+            "data_age_business_days": 3,
+        },
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "データ品質に懸念がある" in text
+    assert "取得データの経過日数3営業日" in text
+    assert "次回決算予定日が未確定" in text
+    assert "次回決算予定日の情報が古い" in text
+    assert "判定時のステータス: STALE_PAST_DATE" in text
+    assert "適正価格の算出方式に外れ値が含まれていた" in text
+    assert "PER法: 現在値の10%未満のため外れ値として除外" in text
+    assert "外れ値除外の結果、比較に使える手法が不足したため除外前の結果へ戻した" in text
+
+    # G: 保存順(concernsリストの並び)のまま表示されること。
+    order = [
+        text.index("データ品質に懸念がある"),
+        text.index("次回決算予定日の情報が古い"),
+        text.index("適正価格の算出方式に外れ値が含まれていた"),
+        text.index("外れ値除外の結果"),
+    ]
+    assert order == sorted(order)
+
+
+def test_reliability_low_falls_back_when_concerns_not_stored(tmp_path: Path) -> None:
+    """必須テストH: buy_price_reliability_concernsが保存されていない
+    (旧レコード)場合は、従来どおり非断定のフォールバック文言のままである
+    こと(concernを推測・再計算して補完しない)。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(tmp_path, buy_score_input_facts={})
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "信頼性低下の具体的な要因は、現行データからは一意に特定できません" in text
+
+
+def test_reliability_low_uses_stored_snapshot_not_current_config(tmp_path: Path) -> None:
+    """必須テストI: 判定時snapshotと(実際に想定される)現在configを意図的に
+    異なる値にし、表示が保存済みsnapshotの値を使うこと(現在configを
+    参照していないこと)を確認する。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": ["ENTRY_MARGIN_EXCEEDS_CAP"],
+            "entry_margin_before_cap": "0.99",
+        },
+        # 現実の設定ファイル(config/buy_decision_rules.yaml)のmaximum_margin.
+        # entry(0.30)とは意図的に異なる値を保存し、この非現実的な値がそのまま
+        # 表示されること(=現在configの0.30が紛れ込んでいないこと)を検証する。
+        config_values_used={"maximum_entry_margin": 0.77},
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "判定時の安全余裕率99.0%" in text
+    assert "上限77.0%" in text
+    assert "30.0%" not in text
+
+
+def test_reliability_low_does_not_reverse_or_invent_concern_from_contradicting_facts(
+    tmp_path: Path,
+) -> None:
+    """必須テストJ: 保存されたconcernと補足事実が意図的に矛盾するテスト
+    データを用意し、「発火したかどうか」はconcernsを正として扱い、表示層が
+    補足事実から独自に発火判定を追加・反転させないことを確認する。ここでは
+    concernsに一切何も含めていないにもかかわらず、HIGH_VALUATION_DISPERSION/
+    TOO_FEW_VALUATION_METHODSが本来発火してもおかしくない値
+    (valuation_dispersion_ratio超過・使用手法1件)を補足事実側に置き、
+    それでも該当行が生成されないことを確認する。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        valuation_dispersion_ratio=Decimal("5.00"),  # 閾値を大きく超える値
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": [],  # 空: 何も発火していない
+            "valuation_methods_used_count": 1,  # 閾値以下だが対応concern無し
+        },
+        config_values_used={"valuation_dispersion_medium_max": 1.60},
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    # concernsが空の場合は「保存されているが空」であり、旧データ(キー自体が
+    # 無い)とは区別しつつ、該当行が1件も無いため非断定フォールバックへ
+    # 倒れることを確認する(該当concern無し=表示すべき具体的要因が無い)。
+    assert "信頼性低下の具体的な要因は、現行データからは一意に特定できません" in text
+    assert "適正価格のばらつきが大きい" not in text
+    assert "適正価格の算出に使えた手法が少ない" not in text
 
 
 def test_excluded_shows_stored_exclusion_reasons(tmp_path: Path) -> None:

@@ -415,11 +415,7 @@ def _buy_reason_text(
             "ため、決算内容確認後まで新規購入を保留しています。"
         )
     if last.code == "BUY_PRICE_RELIABILITY_LOW":
-        return (
-            "自動算出した買付価格の信頼性が低い状態のため、算出した価格をそのまま"
-            "購入判断には使用していません。信頼性低下の具体的な要因は、現行データ"
-            "からは一意に特定できません。"
-        )
+        return _buy_price_reliability_low_text(recommendation)
     if last.code == "VALUATION_DISPERSION_TOO_HIGH":
         return (
             "適正価格の算出手法間でばらつきが大きく（算出方法によって評価額が"
@@ -447,12 +443,20 @@ _VALUATION_METHOD_LABELS: dict[str, str] = {
 }
 
 
-def _no_valuation_anchor_text(recommendation: Recommendation) -> str:
-    reasons = [
+def _valuation_method_exclusion_reasons(recommendation: Recommendation) -> list[str]:
+    """recommendation.valuation_methods(既存フィールド)から、実際に保存済みの
+    除外理由(exclusion_reason)だけを方式名付きで取り出す(表示層で新しい
+    除外理由を推測・算出しない)。NO_VALUATION_ANCHOR・
+    VALUATION_OUTLIER_EXCLUDEDの両方で共用する。"""
+    return [
         f"{_VALUATION_METHOD_LABELS.get(m.method, m.method)}: {m.exclusion_reason}"
         for m in recommendation.valuation_methods
         if m.exclusion_reason
     ]
+
+
+def _no_valuation_anchor_text(recommendation: Recommendation) -> str:
+    reasons = _valuation_method_exclusion_reasons(recommendation)
     if not reasons:
         return (
             "本銘柄については、適正価格の算出結果を得られませんでした。"
@@ -461,6 +465,148 @@ def _no_valuation_anchor_text(recommendation: Recommendation) -> str:
     return (
         "本銘柄については、適正価格の算出結果を得られませんでした。"
         "各算出方式の結果: " + "／".join(reasons)
+    )
+
+
+# --- BUY_PRICE_RELIABILITY_LOW具体的理由表示(2026-08、本番実データUAT対応) ---
+#
+# 設計原則(承認済み調査報告どおり):
+# 1. どのconcernが実際に発火したかは、buy_score_input_facts
+#    ["buy_price_reliability_concerns"](判定時点にdetermine_buy_price_
+#    reliability()が返したconcernsそのもの)を唯一のauthoritativeな根拠とする。
+#    valuation_methods/valuation_dispersion_ratio/earnings_date_status等の
+#    他の保存済み事実は、発火の有無を表示層で再判定するためには使わず、
+#    「なぜそのconcernが発火したかを人間向けに補足説明する」ためだけに使う。
+# 2. 現在のconfig値・現在値は一切参照しない(表示するのは判定時点の
+#    スナップショットのみ)。
+# 3. concernsが保存されていない(=buy_price_reliability_concernsキーが
+#    Noneの)旧レコードでは、従来どおりの非断定フォールバックのままとする。
+# 4. 複数concern該当時は、表示層で並び替え・重要度付けをせず、保存された
+#    順序のまま全件表示する。
+
+# TOO_FEW_VALUATION_METHODSの閾値(2件)はdomain/valuation/buy_price_
+# reliability.py::determine_buy_price_reliability()内のハードコード定数
+# (config化されていない)。表示専用の参考情報としてのみ複製し、判定ロジック
+# には一切使用しない(このファイルの_STRONG_SCORE_RATIO等と同じ、意図的な
+# 同期。値が変わった場合はここも合わせて見直すこと)。
+_TOO_FEW_VALUATION_METHODS_THRESHOLD = 2
+
+_RELIABILITY_CONCERN_LABELS: dict[str, str] = {
+    "ENTRY_MARGIN_EXCEEDS_CAP": "安全余裕率が上限を超過",
+    "HIGH_VALUATION_DISPERSION": "適正価格のばらつきが大きい",
+    "TOO_FEW_VALUATION_METHODS": "適正価格の算出に使えた手法が少ない",
+    "DATA_QUALITY_WARNING": "データ品質に懸念がある",
+    "STALE_EARNINGS_DATE": "次回決算予定日の情報が古い",
+    "VALUATION_OUTLIER_EXCLUDED": "適正価格の算出方式に外れ値が含まれていた",
+    "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER": (
+        "外れ値除外の結果、比較に使える手法が不足したため除外前の結果へ戻した"
+    ),
+}
+
+
+def _reliability_concern_line(
+    concern: str,
+    facts: dict[str, Any],
+    config_snapshot: dict[str, Any],
+    recommendation: Recommendation,
+) -> str:
+    """1件のconcernコードから、判定時点に保存済みの補足事実を添えた説明文を
+    組み立てる。concern自体は既にauthoritativeな発火結果として確定して
+    おり、ここでは「なぜ」を補足するだけで発火有無の判断はしない。補足事実が
+    安全に取得できない場合はconcern名(ラベル)のみを返す(推測しない)。"""
+    label = _RELIABILITY_CONCERN_LABELS.get(concern, concern)
+
+    if concern == "ENTRY_MARGIN_EXCEEDS_CAP":
+        # entry_margin_before_cap/maximum_entry_marginはいずれも0.30=30%形式の
+        # 割合(margin_of_safety.pyのconfig単位)。_decimal_str_to_display()は
+        # PER/PBRのような「倍率」表示専用のため、ここでは使わずそのまま
+        # %表示(×100)に変換する。
+        entry_margin_raw = facts.get("entry_margin_before_cap")
+        cap = config_snapshot.get("maximum_entry_margin")
+        if entry_margin_raw is not None and cap is not None:
+            try:
+                entry_margin_pct = float(entry_margin_raw) * 100
+                cap_pct = float(cap) * 100
+            except (TypeError, ValueError):
+                return f"・{label}"
+            return f"・{label}（判定時の安全余裕率{entry_margin_pct:.1f}%、上限{cap_pct:.1f}%）"
+        return f"・{label}"
+
+    if concern == "HIGH_VALUATION_DISPERSION":
+        ratio = recommendation.valuation_dispersion_ratio
+        threshold = config_snapshot.get("valuation_dispersion_medium_max")
+        if ratio is not None and threshold is not None:
+            try:
+                threshold_value = float(threshold)
+            except (TypeError, ValueError):
+                return f"・{label}"
+            return (
+                f"・{label}（判定時のばらつき{float(ratio):.2f}倍、"
+                f"基準{threshold_value:.2f}倍以下）"
+            )
+        return f"・{label}"
+
+    if concern == "TOO_FEW_VALUATION_METHODS":
+        count = facts.get("valuation_methods_used_count")
+        if isinstance(count, int):
+            return (
+                f"・{label}（判定時に使用できた手法{count}件、"
+                f"{_TOO_FEW_VALUATION_METHODS_THRESHOLD}件以下が対象）"
+            )
+        return f"・{label}"
+
+    if concern == "DATA_QUALITY_WARNING":
+        details = []
+        data_age = facts.get("data_age_business_days")
+        if isinstance(data_age, int):
+            details.append(f"取得データの経過日数{data_age}営業日")
+        business_days = recommendation.business_days_to_earnings
+        if business_days is not None:
+            details.append(f"次回決算まで{business_days}営業日")
+        else:
+            details.append("次回決算予定日が未確定")
+        return f"・{label}（{'、'.join(details)}）"
+
+    if concern == "STALE_EARNINGS_DATE":
+        status = recommendation.earnings_date_status
+        if status is not None:
+            return f"・{label}（判定時のステータス: {status.value}）"
+        return f"・{label}"
+
+    if concern == "VALUATION_OUTLIER_EXCLUDED":
+        reasons = _valuation_method_exclusion_reasons(recommendation)
+        if reasons:
+            return f"・{label}（{'／'.join(reasons)}）"
+        return f"・{label}"
+
+    if concern == "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER":
+        return f"・{label}"
+
+    # 未知のconcernコード(将来追加されうる)は、保存された文字列をそのまま
+    # 表示するだけに留め、意味を推測しない。
+    return f"・{label}"
+
+
+def _buy_price_reliability_low_text(recommendation: Recommendation) -> str:
+    facts = recommendation.buy_score_input_facts or {}
+    concerns = facts.get("buy_price_reliability_concerns")
+    if not isinstance(concerns, list) or not concerns:
+        # concerns自体が保存されていない(旧レコード)場合は、従来どおり
+        # 非断定のフォールバックのままとする(推測・再計算しない)。
+        return (
+            "自動算出した買付価格の信頼性が低い状態のため、算出した価格をそのまま"
+            "購入判断には使用していません。信頼性低下の具体的な要因は、現行データ"
+            "からは一意に特定できません。"
+        )
+    config_snapshot = recommendation.config_values_used or {}
+    lines = [
+        _reliability_concern_line(str(concern), facts, config_snapshot, recommendation)
+        for concern in concerns
+    ]
+    return (
+        "自動算出した買付価格の信頼性が低い状態のため、算出した価格をそのまま"
+        "購入判断には使用していません。判定時点に確認された要因は以下のとおり"
+        "です。\n" + "\n".join(lines)
     )
 
 

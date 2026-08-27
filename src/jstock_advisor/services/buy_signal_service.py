@@ -581,6 +581,32 @@ class BuySignalService:
             "drawdown_from_52w_high_pct": drawdown_pct,
             "recent_price_change_pct": recent_price_change_pct,
             "score_formulas": dict(score_result.formulas),
+            # レビュー対応(2026-08、BUY_PRICE_RELIABILITY_LOW具体的理由表示):
+            # determine_buy_price_reliability()が実際に発火させたconcerns自体は
+            # 従来どこにも保存されておらず、AuditLog(audit_id未捕捉のため事後に
+            # 参照不能)にしか残らなかった。concernsをそのまま判定時点事実として
+            # 保存し、表示層(StockAnalysisViewService)がこれを唯一のauthoritative
+            # な発火結果として扱えるようにする(表示層で発火有無を再判定しない)。
+            # あわせて、determine_buy_price_reliability()の入力のうち他のどこにも
+            # 判定時点値が残らないものも保存する(entry_margin_before_cap・
+            # data_age_business_days・outlier_filter_blocking_reason・
+            # methods_used_count・excluded_outlier_count)。methods_used_count/
+            # excluded_outlier_countは、valuation_methodsから件数を数え直すと
+            # 判定時の集計方法(methods_used/methods_excluded)と完全一致する保証が
+            # ないため、判定に実際に使われた値をそのまま保存する(再集計しない)。
+            # valuation_dispersion_ratio・earnings_date_status・
+            # business_days_to_earningsは既存のRecommendation専用フィールドに
+            # 既に保存済みのため重複保存しない。
+            "buy_price_reliability_concerns": list(reliability_result.concerns),
+            "entry_margin_before_cap": (
+                str(margin_result.entry_margin_before_cap)
+                if margin_result.entry_margin_before_cap is not None
+                else None
+            ),
+            "data_age_business_days": data_age_days,
+            "outlier_filter_blocking_reason": valuation_summary.outlier_filter_blocking_reason,
+            "valuation_methods_used_count": valuation_summary.methods_used_count,
+            "valuation_excluded_outlier_count": excluded_outlier_count,
         }
 
         # --- 13. purchase_attractiveness_score算出 ---
@@ -903,6 +929,19 @@ class BuySignalService:
                 ),
                 "environment": environment_config_values(
                     self._config.market_sector_environment.environment
+                ),
+                # レビュー対応(2026-08、BUY_PRICE_RELIABILITY_LOW具体的理由表示):
+                # determine_buy_price_reliability()が参照するconfig由来の閾値の
+                # 判定時点スナップショット(score_thresholds等と同じ理由: 表示側が
+                # "現在の"configで誤って再解釈しないようにする)。_MIN_CONCERNS_
+                # FOR_LOW(2件、buy_price_reliability.py内のハードコード定数で
+                # config化されていない)以外に、この関数がconfigから受け取る値は
+                # この2つのみ。
+                "maximum_entry_margin": (
+                    self._config.buy_decision.margin_of_safety.maximum_margin.entry
+                ),
+                "valuation_dispersion_medium_max": (
+                    self._config.buy_decision.valuation_dispersion.medium_max
                 ),
             },
             data_sources=list(snapshot.data_sources),
