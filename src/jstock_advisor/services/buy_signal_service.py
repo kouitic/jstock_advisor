@@ -165,6 +165,20 @@ _FACTS_SERIES_MAX_PERIODS = 8
 # 割安シグナルが「評価の結果False/None」ではなく「上位ルール(重大業績悪化)に
 # より抑止された」ことを表すreason_code(観測用。stateには混ぜず、stateは
 # EVALUATED/NOT_EVALUATED/NOT_APPLICABLEの3値に統一する)。
+#
+# 正式な観測仕様として、抑止は以下の2形式を区別する(v1の
+# compute_undervaluation_signals()の実際の挙動と一致させた定義。
+# コードレビューPASS_WITH_CONDITIONS対応、2026-08-28):
+#   形式1: value=False + 本reason_code
+#     入力から本来のbool評価が可能だったが、上位ルールによりFalseへ強制された
+#     (drawdown_from_52w_high / below_fair_value が該当。v1は一度bool値を
+#      算出した後、severe_earnings_decline=TrueならFalseで上書きする)
+#   形式2: value=None + 本reason_code
+#     必要入力自体は揃っていたが、上位ルールによりシグナル評価そのものを
+#     実施しなかった(price_down_despite_stable_earnings が該当。v1は
+#     severe_earnings_decline=Trueの場合、評価式自体へ入らずNoneのままとする)
+# いずれの形式でも、reason_codeが無いvalue=Noneは「必要入力の不足による
+# 判定不能」を意味する(抑止とは区別される)。
 _REASON_SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE = "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE"
 
 
@@ -206,9 +220,12 @@ def _serialize_undervaluation_categories(
 ) -> list[dict[str, object]]:
     """割安度4カテゴリの判定時点明細を観測用snapshotへ直列化する。
 
-    signal_resultsは{"value": bool|None, "reason_code": str|None}形式とし、
-    「評価不能(value=None)」と「評価したが上位ルールで抑止された
-    (value=False + SUPPRESSED_*)」を区別する(Issue #22 Phase 3.5)。
+    signal_resultsは{"value": bool|None, "reason_code": str|None}形式。
+    抑止(SUPPRESSED_*)は「value=Falseへの強制(形式1)」と「評価自体の
+    未実施によるvalue=None(形式2)」の2形式があり、valueだけでは
+    抑止の有無を判別できない。意味定義の詳細は
+    _REASON_SUPPRESSED_BY_SEVERE_EARNINGS_DECLINEのコメント参照
+    (Issue #22 Phase 3.5)。
     """
     payload: list[dict[str, object]] = []
     for detail in details:
@@ -716,12 +733,16 @@ class BuySignalService:
         company_quality_score = score_result.breakdown.total
 
         # --- Issue #22 Phase 3.5(2026-08-28): 割安シグナルの抑止注記(観測用) ---
-        # compute_undervaluation_signals()はsevere_earnings_decline時に
-        # drawdown_from_52w_high/below_fair_valueを強制Falseにし、
-        # price_down_despite_stable_earningsをNoneのままにする(buy_signal.py参照)。
-        # 保存されたFalse/Noneだけでは「評価の結果」と「ルールによる抑止」を
-        # 事後に区別できないため、入力が実在した(=抑止が実際に作用した)場合のみ
-        # reason_codeとして記録する(推測ではなく判定時点の事実からの確定)。
+        # compute_undervaluation_signals()はsevere_earnings_decline時に、
+        # drawdown_from_52w_high/below_fair_valueは「一度bool評価した値を
+        # Falseへ強制」(→観測上は形式1: value=False+SUPPRESSED_*)、
+        # price_down_despite_stable_earningsは「評価式自体へ入らずNoneのまま」
+        # (→観測上は形式2: value=None+SUPPRESSED_*)とする(buy_signal.py参照。
+        # 2形式の正式な意味定義は_REASON_SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE
+        # のコメント参照)。保存されたFalse/Noneだけでは「評価の結果」と
+        # 「ルールによる抑止」を事後に区別できないため、必要入力が実在した
+        # (=抑止が実際に作用した)場合のみreason_codeとして記録する
+        # (推測ではなく判定時点の事実からの確定)。
         suppressed_signal_reasons: dict[str, str] = {}
         if snapshot.severe_earnings_decline:
             if drawdown_pct is not None:

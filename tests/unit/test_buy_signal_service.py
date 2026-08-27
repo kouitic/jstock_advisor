@@ -887,10 +887,20 @@ def test_phase35_period_series_capped_at_max_periods(
 
 
 def test_phase35_suppression_is_reason_code_not_state() -> None:
-    """抑止(severe_earnings_decline)はstateではなくreason_codeとして保存される。
-    stateの語彙はEVALUATED/NOT_EVALUATED/NOT_APPLICABLEの3種に統一し、
-    「評価不能(value=None)」と「評価したが上位ルールで抑止(value=False+
-    SUPPRESSED_*)」を明確に区別する。"""
+    """抑止(severe_earnings_decline)はstateではなくreason_codeとして保存される
+    (stateの語彙はEVALUATED/NOT_EVALUATED/NOT_APPLICABLEの3種に統一)。
+
+    正式な観測仕様として、抑止は以下の2形式を区別する(v1の
+    compute_undervaluation_signals()の実際の挙動と一致した定義。
+    コードレビューPASS_WITH_CONDITIONS対応):
+      形式1: value=False + SUPPRESSED_*
+        入力から本来のbool評価が可能だったが、上位ルールによりFalseへ
+        強制された(drawdown_from_52w_high / below_fair_value)
+      形式2: value=None + SUPPRESSED_*
+        必要入力自体は揃っていたが、上位ルールによりシグナル評価そのものを
+        実施しなかった(price_down_despite_stable_earnings)
+    reason_codeが無いvalue=Noneは「必要入力の不足による判定不能」であり、
+    上記2形式(抑止)とは区別される。"""
     from jstock_advisor.domain.scoring.score import UndervaluationSignals
     from jstock_advisor.domain.scoring.undervaluation_categories import (
         build_undervaluation_category_details,
@@ -900,7 +910,8 @@ def test_phase35_suppression_is_reason_code_not_state() -> None:
     )
 
     # severe_earnings_decline時のcompute_undervaluation_signals()出力を再現:
-    # below_fair_valueは強制False、price_down_despite_stable_earningsはNone
+    # below_fair_valueは一度bool評価された後にFalseへ強制(形式1)、
+    # price_down_despite_stable_earningsは評価式自体へ入らずNoneのまま(形式2)
     signals = UndervaluationSignals(
         per_below_median=True,
         below_fair_value=False,
@@ -919,6 +930,7 @@ def test_phase35_suppression_is_reason_code_not_state() -> None:
     by_category = {entry["category"]: entry for entry in payload}
 
     fair_value = by_category["fair_value"]
+    # 【形式1】value=False + SUPPRESSED_*: bool評価が可能だったがFalseへ強制。
     # 抑止されてもstateはEVALUATED(値Falseとして評価に使われた事実)のまま
     assert fair_value["state"] == "EVALUATED"
     assert "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE" in fair_value["reason_codes"]
@@ -928,12 +940,14 @@ def test_phase35_suppression_is_reason_code_not_state() -> None:
     }
 
     market = by_category["market_price_action"]
-    # price_downはNone(抑止により判定自体が行われなかった)+ 抑止理由
+    # 【形式2】value=None + SUPPRESSED_*: 必要入力は揃っていたが、上位ルール
+    # によりシグナル評価そのものを実施しなかった(Falseへの強制ではない)
     assert market["signal_results"]["price_down_despite_stable_earnings"] == {
         "value": None,
         "reason_code": "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE",
     }
-    # drawdownは入力自体が無く判定不能(抑止ではない)-> reason_codeなし
+    # 【抑止ではないNone】必要入力の不足による判定不能 -> reason_codeなし。
+    # 形式2(value=None+SUPPRESSED_*)とはreason_codeの有無で区別される
     assert market["signal_results"]["drawdown_from_52w_high"] == {
         "value": None,
         "reason_code": None,
@@ -969,3 +983,37 @@ def test_phase35_v1_score_and_actions_unchanged_by_observation_fields(
     # score_breakdownの7component構造・合計は不変
     assert rec.score_breakdown is not None
     assert rec.company_quality_score == rec.score_breakdown.total
+
+
+def test_phase35_no_suppression_reason_codes_in_normal_case() -> None:
+    """severe declineでない通常ケースでは、いかなるsignal_resultsにも
+    SUPPRESSED_*が付かず、reason_codeはすべてNoneのまま(保存内容不変)。
+    value=Noneは「必要入力の不足による判定不能」のみを意味する。"""
+    from jstock_advisor.domain.scoring.score import UndervaluationSignals
+    from jstock_advisor.domain.scoring.undervaluation_categories import (
+        build_undervaluation_category_details,
+    )
+    from jstock_advisor.services.buy_signal_service import (
+        _serialize_undervaluation_categories,
+    )
+
+    signals = UndervaluationSignals(
+        per_below_median=True,
+        below_fair_value=False,  # 通常の評価結果としてのFalse(強制ではない)
+        drawdown_from_52w_high=None,  # 入力不足による判定不能
+    )
+    details = build_undervaluation_category_details(
+        signals, _CONFIG.buy_decision.undervaluation_category_caps
+    )
+    payload = _serialize_undervaluation_categories(details, suppressed_signal_reasons={})
+
+    for entry in payload:
+        assert "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE" not in entry["reason_codes"]
+        for signal in entry["signal_results"].values():
+            assert signal["reason_code"] is None
+    by_category = {entry["category"]: entry for entry in payload}
+    # 通常の評価結果としてのFalseにはreason_codeが付かない(形式1と区別される)
+    assert by_category["fair_value"]["signal_results"]["below_fair_value"] == {
+        "value": False,
+        "reason_code": None,
+    }
