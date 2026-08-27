@@ -30,6 +30,7 @@ from jstock_advisor.domain.entities.holding_evaluation_record import (
     build_holding_evaluation_id,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
@@ -529,6 +530,98 @@ def test_score_below_threshold_shows_exact_numbers_when_snapshot_present(
     assert "大きく" not in text
 
 
+def test_score_below_threshold_watch_for_price_shows_exact_numbers_when_snapshot_present(
+    tmp_path: Path,
+) -> None:
+    """本番実データUAT(2026-08)で発覚した修正条件A: raw_buy_action=
+    WATCH_FOR_PRICE(価格条件は打診買付水準を満たしていたが企業魅力度スコアで
+    さらにNOT_ATTRACTIVEへ格下げされたケース)でも、score_thresholds
+    スナップショットにwatch閾値が実際に保存されていれば、実数値で説明する
+    (以前は_TIER_THRESHOLD_FIELDにWATCH_FOR_PRICEが無く、スナップショットが
+    実在するにもかかわらず「スナップショットが無いため実数値は表示できない」
+    という事実に反する文言が表示されていた)。"""
+    _seed_batch(tmp_path, "batch-1", "6653")
+    _save_buy_recommendation(
+        tmp_path,
+        recommendation_id="rec-6653",
+        stock_code="6653",
+        raw_buy_action=BuyAction.WATCH_FOR_PRICE,
+        buy_action=BuyAction.NOT_ATTRACTIVE,
+        company_quality_score=29.84,
+        config_values_used={
+            "score_thresholds": {
+                "strong_buy": 70.0,
+                "buy": 60.0,
+                "small_entry": 55.0,
+                "watch": 45.0,
+            }
+        },
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="PRICE_TIER", message="x", actual_value=Decimal("2177.0"), threshold_value=None
+            ),
+            BuyDecisionReason(
+                code="SCORE_BELOW_THRESHOLD", message="x", actual_value=29.84, threshold_value=45.0
+            ),
+        ),
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "6653",
+        purchase_category=PurchaseCategory.NOT_ATTRACTIVE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-6653",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("6653")
+
+    assert "29.84点" in text
+    assert "45.0点" in text
+    assert "スナップショットが無いため" not in text
+
+
+def test_score_below_threshold_watch_for_price_falls_back_when_snapshot_missing(
+    tmp_path: Path,
+) -> None:
+    """修正条件B: 同じraw_buy_action=WATCH_FOR_PRICE+SCORE_BELOW_THRESHOLDでも、
+    score_thresholdsスナップショット自体が保存されていない旧データでは、
+    実数値を捏造せず非断定のフォールバック文言のままであること。"""
+    _seed_batch(tmp_path, "batch-1", "6653")
+    _save_buy_recommendation(
+        tmp_path,
+        recommendation_id="rec-6653",
+        stock_code="6653",
+        raw_buy_action=BuyAction.WATCH_FOR_PRICE,
+        buy_action=BuyAction.NOT_ATTRACTIVE,
+        company_quality_score=29.84,
+        config_values_used={},
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="PRICE_TIER", message="x", actual_value=Decimal("2177.0"), threshold_value=None
+            ),
+            BuyDecisionReason(
+                code="SCORE_BELOW_THRESHOLD", message="x", actual_value=29.84, threshold_value=45.0
+            ),
+        ),
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "6653",
+        purchase_category=PurchaseCategory.NOT_ATTRACTIVE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-6653",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("6653")
+
+    assert "スナップショットが無いため" in text
+    assert "45.0点" not in text
+
+
 def test_score_below_threshold_falls_back_without_fabricating_numbers(
     tmp_path: Path,
 ) -> None:
@@ -566,6 +659,88 @@ def test_score_below_threshold_falls_back_without_fabricating_numbers(
     # 無い場合に実数値の比較(例:「基準（70.0点）」)を捏造してはならない。
     assert "の基準（" not in text
     assert "スナップショットが無いため" in text
+
+
+def test_no_valuation_anchor_shows_per_method_exclusion_reasons_when_stored(
+    tmp_path: Path,
+) -> None:
+    """本番実データUAT横断確認(2026-08)で発覚した同種バグ: NO_VALUATION_ANCHOR
+    は、recommendation.valuation_methods(既存フィールド)に各方式の実際の
+    除外理由(exclusion_reason)が保存されているにもかかわらず、一律
+    「具体的な要因は現行データからは区別できません」と表示していた。
+    保存済みの除外理由をそのまま表示するよう修正した(表示層で新しい
+    除外理由を推測・算出しない)。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="NO_VALUATION_ANCHOR", message="x", actual_value=None, threshold_value=None
+            ),
+        ),
+        valuation_methods=(
+            FairValueMethodResult(
+                method="per",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason="現在値の10%未満のため外れ値として除外",
+            ),
+            FairValueMethodResult(
+                method="dcf",
+                fair_value=None,
+                confidence=ConfidenceLevel.LOW,
+                applicable=False,
+                exclusion_reason="単年度キャッシュフローの歪みにより算出不能",
+            ),
+        ),
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "PER法: 現在値の10%未満のため外れ値として除外" in text
+    assert "DCF法: 単年度キャッシュフローの歪みにより算出不能" in text
+    assert "現行データからは区別できません" not in text
+
+
+def test_no_valuation_anchor_falls_back_without_fabricating_when_no_reasons_stored(
+    tmp_path: Path,
+) -> None:
+    """valuation_methodsに除外理由が一件も保存されていない(旧データ等)場合は、
+    従来どおり非断定のフォールバック文言のままであること(捏造しない)。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        buy_decision_reasons=(
+            BuyDecisionReason(
+                code="NO_VALUATION_ANCHOR", message="x", actual_value=None, threshold_value=None
+            ),
+        ),
+        valuation_methods=(),
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.NOT_ATTRACTIVE,
+        recommendation_id="rec-1",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_buy_analysis_text("8306")
+
+    assert "現行データからは区別できません" in text
+    assert "PER法" not in text
 
 
 def test_excluded_shows_stored_exclusion_reasons(tmp_path: Path) -> None:
@@ -824,8 +999,10 @@ def test_legacy_sell_hold_shows_facts_from_linked_audit_log(tmp_path: Path) -> N
     text = service.build_holding_analysis_text("本人", "8306")
 
     assert "保有継続" in text
-    # 実数値を持つルールは従来どおり個別表示する。
-    assert "財務健全性の重大な悪化(一般事業会社基準)：45.0%（基準15.0%）" in text
+    # 実数値を持つルールは従来どおり個別表示するが、レビュー対応(2026-08)で
+    # status(NOT_TRIGGERED)を明示するようになった(explanation無しのため
+    # 現在値・基準値で安全に補足)。
+    assert "財務健全性の重大な悪化(一般事業会社基準)：該当なし（45.0%、基準15.0%）" in text
     # 実際に該当ありのルールは、単純な真偽値ルールであっても個別表示する。
     assert "重大な不祥事：リスクキーワードのみ検出" in text
     # 単純な真偽値ルールが「該当なし」のものは、個別列挙せず1行に集約する。
@@ -836,4 +1013,138 @@ def test_legacy_sell_hold_shows_facts_from_linked_audit_log(tmp_path: Path) -> N
     assert "株主優待の廃止" in text
     # NOT_EVALUATED(current_value無し)のルールは表示しない(捏造しない)。
     assert "配当方針の不利な変更" not in text
+
+
+def test_legacy_sell_hold_quantitative_rules_show_status_and_do_not_reverse(
+    tmp_path: Path,
+) -> None:
+    """本番実データUAT(2026-08)で発覚した修正条件C/D/E: 定量値+閾値形式の
+    ルール(balance_sheet_insolvency等)は、数値だけでなくstatus(該当あり/
+    該当なし)を明示する。explanationが保存されていればそれを優先して使う。
+    同じ表示関数を使う複数ルールで、TRIGGERED/NOT_TRIGGEREDの意味が反転
+    しないことも確認する(balance_sheet_insolvency=NOT_TRIGGERED、
+    financial_health_severe_deterioration=TRIGGEREDという逆方向の2件を
+    同時に検証)。"""
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    audit_entry = AuditLogEntry(
+        audit_id="audit-2",
+        timestamp=_NOW,
+        stock_code="7203",
+        decision_type="sell_signal",
+        input_values={
+            "rule_evidence_details": [
+                {
+                    "rule_name": "balance_sheet_insolvency",
+                    "status": "NOT_TRIGGERED",
+                    "current_value": "36.4%",
+                    "previous_value": None,
+                    "threshold": "0%",
+                    "comparison_period": None,
+                    "explanation": "自己資本比率はマイナスではない(債務超過ではない)",
+                },
+                {
+                    "rule_name": "financial_health_severe_deterioration",
+                    "status": "TRIGGERED",
+                    "current_value": "8.0%",
+                    "previous_value": None,
+                    "threshold": "15.0%",
+                    "comparison_period": None,
+                    "explanation": "自己資本比率が閾値を下回っている",
+                },
+            ]
+        },
+        calculation_formulas={},
+        output_values={},
+        data_sources=[],
+        rule_version="v1",
+    )
+    AuditLogRepository(store_dir=tmp_path).save(audit_entry)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id=None,
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="hold",
+        authoritative_audit_log_id="audit-2",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_holding_analysis_text("本人", "8306")
+
+    # C: NOT_TRIGGERED + explanationあり → 「該当なし」+ explanationがそのまま使われる。
+    assert "債務超過：該当なし（自己資本比率はマイナスではない(債務超過ではない)）" in text
+    # D: TRIGGERED → 「該当あり」が明示される。
+    assert (
+        "財務健全性の重大な悪化(一般事業会社基準)：該当あり（自己資本比率が閾値を下回っている）"
+        in text
+    )
+    # E: 同じ表示関数を使う2ルールで意味が反転していないこと
+    # (該当なし側に「該当あり」、該当あり側に「該当なし」が紛れ込んでいない)。
+    assert "債務超過：該当あり" not in text
+    assert "財務健全性の重大な悪化(一般事業会社基準)：該当なし" not in text
+
+
+def test_legacy_sell_hold_continuous_decline_shows_status_without_reversal(
+    tmp_path: Path,
+) -> None:
+    """継続悪化2ルールの表示関数でも、statusの反転が起きないことを確認する
+    (前期→今期の実数値表示はそのまま維持しつつ、該当あり/なしを付記する)。"""
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    audit_entry = AuditLogEntry(
+        audit_id="audit-3",
+        timestamp=_NOW,
+        stock_code="7203",
+        decision_type="sell_signal",
+        input_values={
+            "rule_evidence_details": [
+                {
+                    "rule_name": "continuous_operating_income_decline",
+                    "status": "NOT_TRIGGERED",
+                    "current_value": "520",
+                    "previous_value": "500",
+                    "threshold": None,
+                    "comparison_period": "直近2四半期",
+                    "explanation": "営業利益の継続悪化は検出されなかった",
+                },
+                {
+                    "rule_name": "continuous_operating_cashflow_decline",
+                    "status": "TRIGGERED",
+                    "current_value": "300",
+                    "previous_value": "500",
+                    "threshold": None,
+                    "comparison_period": "直近2四半期",
+                    "explanation": (
+                        "営業キャッシュフローが継続悪化しており、本業要因が主因と確認できた"
+                    ),
+                },
+            ]
+        },
+        calculation_formulas={},
+        output_values={},
+        data_sources=[],
+        rule_version="v1",
+    )
+    AuditLogRepository(store_dir=tmp_path).save(audit_entry)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id=None,
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="hold",
+        authoritative_audit_log_id="audit-3",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_holding_analysis_text("本人", "8306")
+
+    assert (
+        "営業利益の継続悪化：該当なし（前期500円→今期520円、直近2四半期、"
+        "営業利益の継続悪化は検出されなかった）" in text
+    )
+    assert (
+        "営業キャッシュフローの継続悪化：該当あり（前期500円→今期300円、直近2四半期、"
+        "営業キャッシュフローが継続悪化しており、本業要因が主因と確認できた）" in text
+    )
+    assert "営業利益の継続悪化：該当あり" not in text
+    assert "営業キャッシュフローの継続悪化：該当なし" not in text
     assert "現行データでは" not in text

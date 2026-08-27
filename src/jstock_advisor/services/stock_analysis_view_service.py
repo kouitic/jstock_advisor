@@ -102,10 +102,20 @@ _PURCHASE_CATEGORY_JUDGMENT_LABEL: dict[PurchaseCategory, str] = {
 # company_quality_scoreとscore_thresholdsスナップショットの比較から
 # 一意に特定する(BuyDecisionReason.threshold_valueは常にwatch閾値のみを
 # 記録する精度限界があるため、この比較で補う)。
+# レビュー対応(2026-08、本番実データUATで発覚): domain/signals/buy_decision.py
+# のスコア格下げカスケード(STRONG_BUY→BUY→SMALL_ENTRY→WATCH_FOR_PRICE→
+# NOT_ATTRACTIVE)を確認したところ、raw_action(価格条件のみの仮判定)として
+# 実際に到達しうるのはSTRONG_BUY/BUY/SMALL_ENTRY/WATCH_FOR_PRICEの4種のみ
+# (価格条件自体でNOT_ATTRACTIVEになった銘柄はこのカスケード自体を通らない)。
+# WATCH_FOR_PRICE→"watch"の対応が抜けていたため、score_thresholdsスナップ
+# ショットが実際に保存されているにもかかわらず「スナップショットが無い」と
+# 誤表示する事実矛盾があった。4種全てを網羅したことで、他のBuyActionが
+# raw_actionとして渡ることは無く、同種の抜けは存在しない。
 _TIER_THRESHOLD_FIELD: dict[BuyAction, str] = {
     BuyAction.STRONG_BUY: "strong_buy",
     BuyAction.BUY: "buy",
     BuyAction.SMALL_ENTRY: "small_entry",
+    BuyAction.WATCH_FOR_PRICE: "watch",
 }
 
 
@@ -416,11 +426,42 @@ def _buy_reason_text(
             "大きく異なる状態）、自動判定を見合わせています。"
         )
     if last.code == "NO_VALUATION_ANCHOR":
+        return _no_valuation_anchor_text(recommendation)
+    return None
+
+
+# レビュー対応(2026-08、本番実データUAT横断確認で発覚): recommendation.
+# valuation_methods(各適正価格算出方式の結果、既存フィールド)は、方式ごとに
+# 実際に採用しなかった理由(exclusion_reason、判定エンジン自身が生成した
+# 人が読める文字列)を保持しているにもかかわらず、NO_VALUATION_ANCHORの
+# 表示では一切参照せず「具体的な要因は現行データからは区別できません」と
+# 一律表示していた(score_thresholds同様、実際には保存されているデータを
+# 「無い」と表示する不備)。表示層で新たな除外理由を推測・算出せず、
+# 既存フィールドをそのまま使う。
+_VALUATION_METHOD_LABELS: dict[str, str] = {
+    "target_yield": "配当利回り法",
+    "per": "PER法",
+    "pbr": "PBR法",
+    "historical_range": "価格レンジ法",
+    "dcf": "DCF法",
+}
+
+
+def _no_valuation_anchor_text(recommendation: Recommendation) -> str:
+    reasons = [
+        f"{_VALUATION_METHOD_LABELS.get(m.method, m.method)}: {m.exclusion_reason}"
+        for m in recommendation.valuation_methods
+        if m.exclusion_reason
+    ]
+    if not reasons:
         return (
             "本銘柄については、適正価格の算出結果を得られませんでした。"
             "具体的な要因は現行データからは区別できません。"
         )
-    return None
+    return (
+        "本銘柄については、適正価格の算出結果を得られませんでした。"
+        "各算出方式の結果: " + "／".join(reasons)
+    )
 
 
 # Legacy SELLの17ルールのうちラベル表示が必要なもの(3節の監査証跡拡張で
@@ -456,6 +497,15 @@ _CONTINUOUS_DECLINE_RULE_NAMES = frozenset(
     {"continuous_operating_income_decline", "continuous_operating_cashflow_decline"}
 )
 
+# レビュー対応(2026-08、本番実データUATで発覚): AuditLogEntryのstatus
+# (TriggerStatus.TRIGGERED/NOT_TRIGGERED、文字列で保存)を「該当あり/該当なし」
+# へそのまま翻訳する。表示層で閾値比較の向きを独自に再計算・推測しない
+# (原因側のsell_signal.pyが既に判定済みのstatusをそのまま使うだけ)。
+_STATUS_WORD: dict[str, str] = {
+    "TRIGGERED": "該当あり",
+    "NOT_TRIGGERED": "該当なし",
+}
+
 # レビュー対応(2026-08、修正条件3): AuditLogには全17ルールの証跡を保存する設計は
 # 維持したまま、LINE表示側だけを「ユーザーの判断に有用な事実を優先」する方式へ
 # 変更する(監査証跡の完全性とLINE表示の簡潔性を分離)。以下は単純な真偽値/
@@ -481,22 +531,51 @@ def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
     """Legacy SELLの1ルール分の監査証跡から、実際に値が残っているものだけを
     事実の1行として組み立てる(内部enum名/真偽値をそのまま出さず自然文へ
     翻訳する。3節の監査証跡拡張で追加したcurrent_valueが無いルールは
-    Noneを返し、呼び出し側で除外する)。"""
+    Noneを返し、呼び出し側で除外する)。
+
+    レビュー対応(2026-08、本番実データUATで発覚): 定量値+閾値形式のルール
+    (balance_sheet_insolvency/financial_health_severe_deterioration)は、
+    数値・閾値だけを機械的に並べており、実際にはNOT_TRIGGEREDであっても
+    「債務超過：36.4%」のようにラベルだけを見ると該当しているかのように
+    誤読されうる不備があった。表示層で閾値比較の向きを独自に再計算・推測
+    せず、AuditLogEntryに保存済みのstatus(TRIGGERED/NOT_TRIGGERED)と
+    explanation(判定エンジン自身が生成した説明文)をそのまま使い、
+    「該当あり/該当なし」を明示する。explanationが保存されている場合は
+    それを優先して使い、無い場合のみ現在値・基準値で安全に補足する。
+    継続悪化2ルール(前期→今期の実数値を示す形式)でも同様にstatusを明示する
+    (実数値自体は引き続き表示し、explanationは補足として付記する)。
+    """
     current_value = detail.get("current_value")
     if current_value is None:
         return None
     rule_name = str(detail.get("rule_name"))
     label = _SELL_RULE_LABELS.get(rule_name, rule_name)
+    status_value = detail.get("status")
+    status_word = _STATUS_WORD.get(str(status_value)) if status_value is not None else None
+    explanation = detail.get("explanation") or None
+
     if rule_name in _CONTINUOUS_DECLINE_RULE_NAMES:
         previous_value = detail.get("previous_value")
         period = detail.get("comparison_period")
         if previous_value is not None:
             period_note = f"、{period}" if period else ""
-            return f"{label}：前期{previous_value}円→今期{current_value}円{period_note}"
-        return f"{label}：{current_value}円"
+            trend = f"前期{previous_value}円→今期{current_value}円{period_note}"
+        else:
+            trend = f"{current_value}円"
+        body = f"{trend}、{explanation}" if explanation else trend
+        if status_word is not None:
+            return f"{label}：{status_word}（{body}）"
+        return f"{label}：{body}"
+
     threshold = detail.get("threshold")
     if threshold is not None:
+        if status_word is not None:
+            # explanationが無い場合の括弧多重ネスト("該当なし（36.4%（基準…）」)
+            # を避けるため、status_word有りの場合は「、」区切りの平文にする。
+            body = explanation if explanation else f"{current_value}、基準{threshold}"
+            return f"{label}：{status_word}（{body}）"
         return f"{label}：{current_value}（基準{threshold}）"
+
     return f"{label}：{_SELL_FACT_VALUE_TRANSLATIONS.get(current_value, current_value)}"
 
 
