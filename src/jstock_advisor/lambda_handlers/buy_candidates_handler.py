@@ -1286,6 +1286,10 @@ def _finalize_batch(
     # 上限判定を通過していても外部LINE送信のみ行われない(WOULD_SEND_DRY_RUN)。
     # 「通知済み」にも「送信失敗」にも計上しない、独立したカウンタとする。
     dry_run_would_send_count = 0
+    # Issue #36: claim機構(Issue #17)がチャンクのpushを抑止した銘柄
+    # (CLAIM_SUPPRESSED)。今回の実行は送信していないため「通知済み」に
+    # 計上せず、notification_result_countsの「その他抑止」へ合算する。
+    claim_suppressed_count = 0
     for unified_rank, rec in eligible_winners:
         outcome = send_result.get(rec.stock_code, "SEND_FAILED")
         # 通知検証モード機能(2026-08追加): SENT_VALIDATIONもLINE送信に成功した
@@ -1321,6 +1325,23 @@ def _finalize_batch(
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, notification_rank,
+                True, None, None, (), outcome,
+            )
+        elif outcome == "CLAIM_SUPPRESSED":
+            # Issue #36: claim機構による抑止は通知条件をすべて通過した後
+            # (eligible=True)の送信段階で起きるため、送信失敗(else)へ
+            # 落とさず明示分岐で「その他抑止」へ計上する。「eligible=True・
+            # send_outcome=CLAIM_SUPPRESSED」の組み合わせで「条件は満たしたが
+            # 今回の実行はpushしていない(別実行が送信済み/送信中)」ことを
+            # 監査上も区別する(WOULD_SEND_DRY_RUNと同じ記録パターン)。
+            claim_suppressed_count += 1
+            _record_notification_outcome_audit(
+                audit_service, rule_version, now, rec, unified_rank, None,
+                outcome, NotificationEligibility(eligible=True),
+                basis, portfolio_total, coverage_ratio,
+            )
+            _update_evaluation_record_outcome_safely(
+                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
                 True, None, None, (), outcome,
             )
         else:
@@ -1505,7 +1526,13 @@ def _finalize_batch(
         "failed": progress.category_counts.get("failed", 0),
     }
     other_suppressed_count = (
-        data_quality_blocked_count + trade_cooldown_blocked_count + cross_pipeline_blocked_count
+        data_quality_blocked_count
+        + trade_cooldown_blocked_count
+        + cross_pipeline_blocked_count
+        # Issue #36: claim機構による送信抑止(別実行が送信済み/送信中)。
+        # 再通知ポリシーによる抑止(resend_suppressed)とは限らないため、
+        # 「その他抑止」へ計上する(承認済み設計)。
+        + claim_suppressed_count
     )
     notification_result_counts = {
         "sent": sent_count,

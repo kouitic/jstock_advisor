@@ -1961,6 +1961,56 @@ def test_finalize_batch_send_failed_counts_as_send_failed_and_records_send_outco
     assert record.notification_eligible is False
 
 
+def test_issue36_finalize_batch_claim_suppressed_counts_as_other_suppressed(
+    monkeypatch, tmp_path
+) -> None:
+    """Issue #36: CLAIM_SUPPRESSED(claim機構による抑止=別実行が送信済み/
+    送信中)は「通知済み」(sent)にも「送信失敗」(send_failed)にも計上せず、
+    other_suppressedへ計上する。elseフォールスルーで送信失敗扱いになる
+    回帰を防ぐ明示分岐の固定。RuntimeErrorも送出しない。"""
+    _patch_audit(monkeypatch)
+    repo = RecommendationRepository(store_dir=tmp_path)
+    eval_repo = BuyCandidateEvaluationRecordRepository(store_dir=tmp_path / "eval")
+    batch_id = "batch-claim-suppressed"
+    ranking_entries: list[str] = []
+    _add_ranked_candidate(repo, ranking_entries, "2914", 90.0)
+    _add_ranked_candidate(repo, ranking_entries, "7203", 80.0)
+    _seed_evaluation_record(eval_repo, batch_id, "2914")
+    _seed_evaluation_record(eval_repo, batch_id, "7203")
+
+    config = _config_with_max_notifications(5)
+    progress = _progress(ranking_entries, total=2, category_counts={"candidate_not_ranked": 2})
+    fake_service = _FakeNotificationServiceForRanking(
+        send_result={"2914": "SENT_AND_RECORDED", "7203": "CLAIM_SUPPRESSED"}
+    )
+
+    handler_module._finalize_batch(
+        progress,
+        batch_id,
+        config,
+        _NOW,
+        repo,
+        fake_service,
+        handler_module._DEFAULT_EXECUTION_CONTEXT,
+        eval_repo,
+    )
+
+    call = fake_service.batch_summary_calls[0]
+    assert call["notification_result_counts"]["sent"] == 1  # 今回pushした銘柄のみ
+    assert call["notification_result_counts"]["send_failed"] == 0  # 送信失敗と誤計上しない
+    assert call["notification_result_counts"]["other_suppressed"] == 1
+    assert call["buy_candidates_sent_count"] == 1
+    assert sum(call["notification_result_counts"].values()) == call["purchase_judgment_counts"][
+        "buy_candidate"
+    ]  # 全銘柄がいずれかの区分へ過不足なく計上される
+
+    record = eval_repo.get(build_evaluation_id(batch_id, "7203"))
+    assert record is not None
+    assert record.send_outcome == "CLAIM_SUPPRESSED"
+    assert record.notification_eligible is True  # 通知条件自体は通過している
+    assert record.notification_rank is None  # 今回pushしていないためrankなし
+
+
 @pytest.mark.parametrize("outcome_value", ["SENT_AND_RECORDED", "SENT_VALIDATION"])
 def test_finalize_batch_sent_outcomes_both_count_as_sent_but_remain_distinguishable(
     monkeypatch, tmp_path, outcome_value: str
