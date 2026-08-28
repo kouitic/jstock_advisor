@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from jstock_advisor.config.models import FairValueUsability
 from jstock_advisor.domain.entities.enums import ConfidenceLevel
-from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
+from jstock_advisor.domain.entities.valuation import (
+    FairValueMethodResult,
+    FairValueRange,
+    FairValueUnusableReasonCode,
+)
 from jstock_advisor.domain.valuation.fair_value import aggregate_fair_value
 
 
@@ -33,6 +37,9 @@ def build_fair_value_range(
             methods_excluded=excluded,
             usable_for_trading_judgment=False,
             unusable_reason="有効な適正価格手法が一つもありません",
+            # Issue #21: 使用不可の直接原因を構造化コードでも残す(機械判定用の
+            # 正本。自由文unusable_reasonは判定時点の説明スナップショット)。
+            unusable_reason_code=FairValueUnusableReasonCode.NO_VALID_METHODS,
         )
 
     values = [r.fair_value for r in used if r.fair_value is not None]
@@ -43,18 +50,21 @@ def build_fair_value_range(
 
     usable = True
     unusable_reason = None
+    unusable_reason_code: FairValueUnusableReasonCode | None = None
     if len(used) < usability_config.min_methods_required:
         usable = False
         unusable_reason = (
             f"有効な適正価格手法が{len(used)}件しかなく"
             f"({usability_config.min_methods_required}件必要)、使用できません"
         )
+        unusable_reason_code = FairValueUnusableReasonCode.TOO_FEW_METHODS
     elif bear > 0 and float(bull / bear) >= usability_config.max_method_spread_ratio:
         usable = False
         unusable_reason = (
             f"手法間の乖離が{usability_config.max_method_spread_ratio}倍以上"
             f"({bear}円〜{bull}円)のため、使用できません"
         )
+        unusable_reason_code = FairValueUnusableReasonCode.METHOD_SPREAD_TOO_WIDE
 
     confidences = [r.confidence for r in used]
     if not usable or any(c == ConfidenceLevel.LOW for c in confidences):
@@ -73,4 +83,5 @@ def build_fair_value_range(
         methods_excluded=excluded,
         usable_for_trading_judgment=usable,
         unusable_reason=unusable_reason,
+        unusable_reason_code=unusable_reason_code,
     )

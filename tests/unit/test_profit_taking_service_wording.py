@@ -13,7 +13,11 @@ import pytest
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, ProfitTakingIndustrySector
-from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
+from jstock_advisor.domain.entities.valuation import (
+    FairValueMethodResult,
+    FairValueRange,
+    FairValueUnusableReasonCode,
+)
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
@@ -61,7 +65,9 @@ def _result():
 
 
 def _reasons(
-    industry_sector: ProfitTakingIndustrySector, industry_model_applied: bool
+    industry_sector: ProfitTakingIndustrySector,
+    industry_model_applied: bool,
+    fair_value_unusable_reason_code: FairValueUnusableReasonCode | None = None,
 ) -> list[str]:
     return _build_not_yet_action_reasons(
         result=_result(),
@@ -73,6 +79,7 @@ def _reasons(
         trading_unit_feasibility=_FEASIBLE,
         has_strong_counter_material=False,
         is_uptrend=False,
+        fair_value_unusable_reason_code=fair_value_unusable_reason_code,
     )
 
 
@@ -124,3 +131,64 @@ def test_no_industry_wording_when_model_applied() -> None:
     joined = " ".join(reasons)
     assert "専用評価モデル" not in joined
     assert "汎用モデルによる参考値" not in joined
+
+
+# --- Issue #21(2026-08-28): usable_for_trading_judgment=False時の実遮断理由表示 ---
+# 従来は、実際に価格基準の利確判定を遮断した理由(手法不足/乖離過大)が
+# どこにも表示されず、ほぼ常時発火する業種モデル文言だけが見えていた。
+# 分岐は構造化code(FairValueUnusableReasonCode)で行い、自由文をparseしない。
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (
+            FairValueUnusableReasonCode.NO_VALID_METHODS,
+            "適正価格を算出できる有効な評価手法がないため、価格基準の利確判定に使用していません",
+        ),
+        (
+            FairValueUnusableReasonCode.TOO_FEW_METHODS,
+            "適正価格を算出できる評価手法が不足しているため、価格基準の利確判定に使用していません",
+        ),
+        (
+            FairValueUnusableReasonCode.METHOD_SPREAD_TOO_WIDE,
+            "適正価格の算出手法間の乖離が大きいため、価格基準の利確判定に使用していません",
+        ),
+    ],
+    ids=["no_valid_methods", "too_few_methods", "method_spread_too_wide"],
+)
+def test_issue21_unusable_reason_text_by_code(
+    code: FairValueUnusableReasonCode, expected: str
+) -> None:
+    reasons = _reasons(
+        ProfitTakingIndustrySector.GENERAL,
+        industry_model_applied=False,
+        fair_value_unusable_reason_code=code,
+    )
+    assert expected in reasons
+
+
+def test_issue21_unusable_reason_precedes_generic_industry_wording() -> None:
+    """実遮断理由(乖離過大等)は、一般的な業種モデル文言より先に表示される。
+    既存の業種モデル文言自体は削除されず後続に残る。"""
+    reasons = _reasons(
+        ProfitTakingIndustrySector.GENERAL,
+        industry_model_applied=False,
+        fair_value_unusable_reason_code=FairValueUnusableReasonCode.METHOD_SPREAD_TOO_WIDE,
+    )
+    blocker_index = reasons.index(
+        "適正価格の算出手法間の乖離が大きいため、価格基準の利確判定に使用していません"
+    )
+    industry_index = reasons.index("現在の適正価格は汎用モデルによる参考値です")
+    assert blocker_index < industry_index
+
+
+def test_issue21_no_unusable_wording_when_code_is_none() -> None:
+    """usable=True(code=None)では新文言は一切追加されない(従来表示のまま)。"""
+    reasons = _reasons(
+        ProfitTakingIndustrySector.GENERAL,
+        industry_model_applied=False,
+        fair_value_unusable_reason_code=None,
+    )
+    joined = " ".join(reasons)
+    assert "価格基準の利確判定に使用していません" not in joined

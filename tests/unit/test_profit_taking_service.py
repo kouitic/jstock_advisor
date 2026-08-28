@@ -1091,3 +1091,95 @@ def test_normal_partial_notification_text_includes_share_count(
     assert text_input.suggested_sell_shares is not None
     text = format_notification_text(text_input)
     assert "株" in text
+
+
+# --- Issue #21(2026-08-28): FairValueRange使用可否の判定時点スナップショット ---
+
+
+def _analyze_with_fair_value_usability(
+    monkeypatch: pytest.MonkeyPatch, *, usable: bool
+) -> object:
+    """build_stock_snapshot()の実結果のfair_value_rangeだけを使用可否指定で
+    差し替えてanalyze()し、Recommendationを返すヘルパー(判定種別はcanned WATCHで
+    固定し、fair_value可否の転記だけを決定的に検証する)。"""
+    import jstock_advisor.services.profit_taking_service as service_module
+    from jstock_advisor.domain.entities.enums import ConfidenceLevel
+    from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
+
+    original_build = service_module.build_stock_snapshot
+
+    def _build_with_forced_usability(*args: object, **kwargs: object) -> object:
+        snapshot, error = original_build(*args, **kwargs)
+        if snapshot is None:
+            return snapshot, error
+        if usable:
+            forced = snapshot.fair_value_range.model_copy(
+                update={
+                    "usable_for_trading_judgment": True,
+                    "unusable_reason": None,
+                    "unusable_reason_code": None,
+                }
+            )
+        else:
+            forced = snapshot.fair_value_range.model_copy(
+                update={
+                    "usable_for_trading_judgment": False,
+                    "unusable_reason": (
+                        "手法間の乖離が2.0倍以上(500円〜2000円)のため、使用できません"
+                    ),
+                    "unusable_reason_code": (
+                        FairValueUnusableReasonCode.METHOD_SPREAD_TOO_WIDE
+                    ),
+                    "overall_confidence": ConfidenceLevel.LOW,
+                }
+            )
+        return dataclasses.replace(snapshot, fair_value_range=forced), error
+
+    monkeypatch.setattr(service_module, "build_stock_snapshot", _build_with_forced_usability)
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.WATCH, sell_intensity=None),
+    )
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    outcome = service.analyze(_holding("2914"), _NOW)
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None
+    return outcome.recommendation
+
+
+def test_issue21_recommendation_snapshots_unusable_fair_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """usable=False時、判定時点のusable/code/reasonがRecommendationへそのまま
+    転記され(codeは.value文字列)、実遮断理由がnot_yet_action_reasonsへ表示される。
+    判定結果自体(canned WATCH、ceiling/upside=None)は従来どおり変わらない。"""
+    rec = _analyze_with_fair_value_usability(monkeypatch, usable=False)
+
+    assert rec.fair_value_usable_for_trading_judgment is False
+    assert rec.fair_value_unusable_reason_code == "METHOD_SPREAD_TOO_WIDE"
+    assert rec.fair_value_unusable_reason == (
+        "手法間の乖離が2.0倍以上(500円〜2000円)のため、使用できません"
+    )
+    # 判定ロジック不変(Issue #21は保存・表示専用): 判定種別と価格系はそのまま
+    assert rec.recommendation_type == RecommendationType.WATCH
+    assert rec.profit_taking_ceiling_price is None
+    assert rec.profit_taking_upside_pct is None
+    # B-2: 実際の遮断理由が説明に含まれる
+    assert (
+        "適正価格の算出手法間の乖離が大きいため、価格基準の利確判定に使用していません"
+        in rec.not_yet_action_reasons
+    )
+
+
+def test_issue21_recommendation_snapshots_usable_fair_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """usable=True時はTrue/None/Noneが転記され、新規の遮断理由文言は表示されない。"""
+    rec = _analyze_with_fair_value_usability(monkeypatch, usable=True)
+
+    assert rec.fair_value_usable_for_trading_judgment is True
+    assert rec.fair_value_unusable_reason_code is None
+    assert rec.fair_value_unusable_reason is None
+    assert not any(
+        "価格基準の利確判定に使用していません" in r for r in rec.not_yet_action_reasons
+    )

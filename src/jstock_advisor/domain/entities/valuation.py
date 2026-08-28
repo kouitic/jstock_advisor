@@ -8,9 +8,24 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
+from enum import StrEnum
 
 from jstock_advisor.domain.entities.base import ImmutableSnapshot
 from jstock_advisor.domain.entities.enums import ConfidenceLevel
+
+
+class FairValueUnusableReasonCode(StrEnum):
+    """FairValueRange.usable_for_trading_judgment=Falseの直接原因の構造化コード
+    (Issue #21)。
+
+    build_fair_value_range()の3つの発火条件と1対1対応する。機械判定
+    (表示分岐等)はこのcodeを正本とし、unusable_reason(自由文)は判定時点の
+    監査・説明用スナップショットとして扱う(自由文のparse分岐は禁止)。
+    """
+
+    NO_VALID_METHODS = "NO_VALID_METHODS"
+    TOO_FEW_METHODS = "TOO_FEW_METHODS"
+    METHOD_SPREAD_TOO_WIDE = "METHOD_SPREAD_TOO_WIDE"
 
 
 class ValuationExclusionReason(ImmutableSnapshot):
@@ -59,6 +74,9 @@ class FairValueRange(ImmutableSnapshot):
     methods_excluded: list[FairValueMethodResult]
     usable_for_trading_judgment: bool
     unusable_reason: str | None = None
+    # Issue #21: unusable_reasonの構造化コード(usable=False時のみ非None)。
+    # 既存のusable_for_trading_judgment/unusable_reasonの意味は変更しない。
+    unusable_reason_code: FairValueUnusableReasonCode | None = None
 
     # --- BUYパイプライン再設計(2026-07)で追加。単一の「最終適正価格」ではなく
     # 手法間のバラつきを扱えるようにする(要求仕様9節)。SELL側の
