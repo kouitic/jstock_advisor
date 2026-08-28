@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -90,7 +90,9 @@ class JsonCollectionStore[T: BaseModel]:
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
         return [item for item in self._read_all().values() if predicate(item)]
 
-    def upsert_with_index_attributes(self, item: T, index_attributes: dict[str, str]) -> None:
+    def upsert_with_index_attributes(
+        self, item: T, index_attributes: Mapping[str, str | int]
+    ) -> None:
         """ローカルJSONにGSI概念は無いため、index_attributesを無視して通常のupsertと同一。"""
         self.upsert(item)
 
