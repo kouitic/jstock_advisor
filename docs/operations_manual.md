@@ -1281,3 +1281,46 @@ LINE文面確認自体が目的ではない作業では、原則こちらを使�
 エラーとしてLambda呼び出し自体が失敗します。通常の自動実行(毎日決まった
 時刻)は`notification_mode`を一切指定しないため、この制約による影響は
 ありません。
+
+## 14. Lambda Layer依存パッケージの更新手順(Issue #35、2026-08-28追加)
+
+本番Lambdaの依存Layer(DependenciesLayer)は、再現可能ビルドのため
+lock方式で管理しています(それまでは範囲指定のみだったため、`sam build`の
+実行日時によって推移的依存の解決結果が変わり、Issue #33デプロイ時に無関係な
+`platformdirs 4.11.4→4.11.5`でLayerVersionローテーションが発生しました)。
+
+- `infra/layer/requirements.in`: 人間が編集するdirect依存の正本(範囲指定)
+- `infra/layer/requirements.txt`: **自動生成物(直接編集禁止)**。全依存の
+  完全pin。SAMが実際に使うmanifest
+- `infra/layer/build-requirements.txt`: compileツール(uv)のバージョン固定
+
+再生成の標準コマンド・compile条件(Python 3.12/Linux x86_64)は
+[infra/README.md](../infra/README.md)の「Layer dependency lock」節を参照
+してください。
+
+### 14.1 依存更新の標準フロー
+
+1. **意図的な更新**(範囲変更・パッケージ追加/削除): `requirements.in`を
+   編集 → 標準コマンドで再生成 → `requirements.txt`の差分をレビュー → PR
+2. **定期更新・セキュリティ更新**(範囲内のパッチ取り込み):
+   `requirements.in`は変更せず、標準コマンドへ`--upgrade`(または
+   `--upgrade-package <名前>`)を付けて再生成 → 差分 = 更新一覧としてレビュー → PR
+3. いずれの場合も「次回デプロイでLayerVersionローテーション(Add/Removeペア)が
+   発生する意図的な変更」であることをPR上で明示してください。逆に、依存を
+   変更していないデプロイのChangeSetにDependenciesLayerの差分が現れた場合は
+   想定外なので、原因を確認してから実行してください。
+
+### 14.2 運用上の注意
+
+- CIの`layer-lock-drift`ジョブが「`.in`から再生成した結果と`requirements.txt`の
+  一致」を検証します(`.in`だけ変更して再生成を忘れるとCI FAIL)。
+  `dependency-audit`ジョブは本番Layerに実際に入る`requirements.txt`を
+  pip-audit監査します(脆弱性検出時は14.1の2の手順で更新)
+- lockを更新しない限り、`sam build`は何度・いつ実行しても同一の依存集合を
+  生成します。rollback時は過去コミットをcheckoutして`sam build`すれば当時の
+  Layerが再現されます(PyPI側でyank/削除されていない限り)
+- `tzdata`は`requirements.in`へ明示的に記載しています(pandas等がWindows限定
+  markerで宣言しているため、Linux向け解決では自動には入らない。従来の
+  Windows機ビルドの本番Layerとの同一性維持と、Lambda実行環境でのzoneinfo用
+  IANAタイムゾーンデータ保証のため)。除外する場合は専用Issueで判断して
+  ください

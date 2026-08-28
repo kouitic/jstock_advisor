@@ -25,6 +25,42 @@ aws secretsmanager put-secret-value --secret-id jstock/line-channel-secret --sec
 
 作成したシークレットのARNを控えておく(`aws secretsmanager describe-secret --secret-id jstock/edinet-api-key`等で確認可能)。
 
+## 依存Layerのlock管理(Layer dependency lock、Issue #35)
+
+DependenciesLayerの依存は2ファイル方式で管理する(再現可能ビルドのため。
+範囲指定のみだったころは、`sam build`実行日時によって推移的依存の解決結果が
+変わり、無関係なデプロイでLayerVersionローテーションが発生していた)。
+
+| ファイル | 役割 |
+|---|---|
+| `layer/requirements.in` | **人間が編集する**direct依存の正本(範囲指定) |
+| `layer/requirements.txt` | **自動生成物**。全direct/推移的依存の完全pin。SAM PythonPipBuilderが実際にインストールするmanifest |
+| `layer/build-requirements.txt` | compileに使うuvのバージョン固定(ローカル・CIで共通) |
+
+**`layer/requirements.txt`を直接編集しないこと。**依存を変更する場合は必ず
+`layer/requirements.in`を編集し、以下の標準コマンドで再生成する。
+
+```bash
+pip install -r infra/layer/build-requirements.txt
+```
+
+```bash
+python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements.txt --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --no-annotate --custom-compile-command "python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements.txt --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --no-annotate"
+```
+
+- 標準compile条件はPython 3.12・Lambda実行環境(Linux/x86_64)。リポジトリルートから
+  実行すること(生成ヘッダを全環境で一致させるため、コマンドは上記をそのまま使う)
+- uvは既存の`requirements.txt`にあるpinを範囲内で優先するため、`.in`を変更していない
+  再実行では勝手に最新版へ上がらない。**意図的に依存を更新する場合のみ**
+  `--upgrade`(全体)または`--upgrade-package <名前>`(個別)を付けて再生成し、
+  差分をレビュー可能なcommit/PRとして提出する
+- CIの`layer-lock-drift`ジョブが「`.in`から再生成した結果と`requirements.txt`の
+  一致」を検証する(再生成忘れはCI FAIL)。`dependency-audit`ジョブは
+  `requirements.txt`をpip-audit監査する
+- rollback時は過去コミットをcheckoutして`sam build`すれば、pin済み集合により
+  当時と同一のLayerが再現される(PyPI上でyank/削除されていない限り)
+- 運用フロー全体は`docs/operations_manual.md`14節を参照
+
 ## ビルド・デプロイ
 
 ```bash
