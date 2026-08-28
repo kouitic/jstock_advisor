@@ -99,8 +99,10 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     MAX_SECTOR_ENTRIES,
     MAX_SECTOR_ENTRY_BYTES,
     BatchProgress,
+    mark_completion_finalize_completed,
     record_result,
     start_batch,
+    try_acquire_completion_finalize,
 )
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
@@ -794,17 +796,32 @@ def _process_single_candidate(
             ),
         )
         if progress is not None and progress.is_complete:
-            _finalize_batch(
-                progress,
-                batch_id,
-                config,
-                now,
-                recommendation_repo,
-                notification_service,
-                execution_context,
-                evaluation_record_repo,
-                latest_batch_pointer_repo,
-            )
+            # Issue #31: completedカウンタは非冪等なADDのため、処理済み銘柄の
+            # Lambda非同期retryでis_completeが再成立しうる。_finalize_batch
+            # (ランキング・digest/summary送信・監査記録等)の実行権を原子的に
+            # 取得し、取得できた1実行だけが実行する。正常終了時のみcompleted
+            # 記録し、例外時は記録しない(stale化後に後続トリガーがtakeover
+            # して再実行できる)。
+            finalize_token = try_acquire_completion_finalize(batch_id, now)
+            if finalize_token is None:
+                logger.info(
+                    "buy candidates finalize skipped (already acquired or completed) "
+                    "batch_id=%s",
+                    batch_id,
+                )
+            else:
+                _finalize_batch(
+                    progress,
+                    batch_id,
+                    config,
+                    now,
+                    recommendation_repo,
+                    notification_service,
+                    execution_context,
+                    evaluation_record_repo,
+                    latest_batch_pointer_repo,
+                )
+                mark_completion_finalize_completed(batch_id, finalize_token, now)
     return result
 
 

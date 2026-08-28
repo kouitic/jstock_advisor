@@ -1375,3 +1375,73 @@ def test_finish_batch_item_sends_single_summary_for_multiple_owners_of_same_stoc
     # バッチ完了時に1回だけ。
     assert len(summary_calls) == 1
     assert summary_calls[0]["partial_sell_detected_count"] == 2
+
+
+# --- Issue #31: holdings側summary finalize-onceゲート --------------------------
+
+
+def _issue31_completed_progress() -> object:
+    from jstock_advisor.infrastructure.aws.batch_tracker import BatchProgress
+
+    return BatchProgress(
+        total=1,
+        completed=2,  # 処理済みholding_idのretryでcompleted>totalとなった状態を再現
+        category_counts={"sent": 1},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=1,
+    )
+
+
+class _Issue31FakeNotificationService:
+    def __init__(self) -> None:
+        self.summary_calls: list[str] = []
+
+    def notify_batch_summary(self, process_name, *args, **kwargs) -> bool:
+        self.summary_calls.append(process_name)
+        return True
+
+
+class _Issue31FakeRuntimeConfig:
+    def get_notification_enabled(self) -> bool:
+        return True
+
+
+def test_issue31_holdings_summary_runs_once_under_duplicate_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """J/L: 複数のworkerトリガーがis_complete==Trueを観測しても、
+    try_acquire_completion_finalizeに成功した1実行だけがsummaryフローへ進み、
+    正常終了後にmark_completion_finalize_completedが自分のtokenで1回だけ
+    呼ばれる(Issue #31)。"""
+    monkeypatch.setattr(
+        handler_module, "record_result", lambda *a, **kw: _issue31_completed_progress()
+    )
+    acquire_results = iter(["issue31-token", None])
+    monkeypatch.setattr(
+        handler_module,
+        "try_acquire_completion_finalize",
+        lambda batch_id, now: next(acquire_results),
+    )
+    marks: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "mark_completion_finalize_completed",
+        lambda batch_id, token, now: marks.append((batch_id, token)) or True,
+    )
+    service = _Issue31FakeNotificationService()
+
+    for _ in range(2):  # retryによるis_complete再成立(二重トリガー)を再現
+        handler_module._finish_batch_item(
+            "batch-1",
+            "sent",
+            "owner-a#2914",
+            _NOW,
+            service,  # type: ignore[arg-type]
+            _Issue31FakeRuntimeConfig(),  # type: ignore[arg-type]
+        )
+
+    assert len(service.summary_calls) == 1  # summaryフローは1回だけ
+    assert marks == [("batch-1", "issue31-token")]
