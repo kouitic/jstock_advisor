@@ -1410,3 +1410,33 @@ parse不能なitemが1件でも検出された場合、スクリプトはexit 1�
 
 「1つ前のmain SHAへ戻せば完全rollback」ではない点に注意してください
 (特にPhase C以降のTTL削除分)。
+
+## 16. BUY calibration用datasetのexport(Issue #28 Phase B、2026-08-28追加)
+
+買い候補判定の較正(calibration)分析に使う正規化datasetを、既存の保存データ
+(Recommendation・EvaluationResult・DecisionSnapshot、いずれも読み取りのみ)
+から生成するCLIです。**判定・閾値・スコアには一切影響しません**(dataset生成・
+exportのみ。統計分析・成功率評価・閾値提案はPhase C以降で別途扱います)。
+日次バッチ・Lambdaへは組み込まず、人間のオンデマンド実行専用です。
+
+```bash
+# canonical export(JSONL。1行目がmetadata、以降が1 Recommendation×1 horizonの行)
+jstock calibration export-dataset --output dataset.jsonl
+
+# 閲覧用CSV(dataset.csv.meta.jsonというmetadataファイルも同時に生成される)
+jstock calibration export-dataset --output dataset.csv --format csv
+
+# sample定義を非重複window方式にし、選択行のみ・horizon未到来行を除いてexport
+jstock calibration export-dataset --output dataset.jsonl \
+  --sample-definition non-overlapping-window --selected-only --no-include-pending
+```
+
+- **return_basis=PRICE_ONLY**: リターンは株価のみ(配当・株主優待・手数料・
+  税金を含まない)。metadataに常に明記されます
+- benchmark: EvaluationResult保存済みの`benchmark_symbol`(TOPIX)を事実として
+  出力し、実際のinstrument(現行コードではTOPIX連動ETF 1306.T)は
+  「export時点の現在コードによる解釈」としてmetadata側にのみ記録します
+- 行のraw粒度は「1 Recommendation × 1 horizon」で、重複Recommendationは
+  dedupしません(sample定義は行を削除せずsample_selected等の列で注釈)
+- horizon未到来はNOT_YET_EVALUABLE、到来済みで評価が無い行は
+  EVALUATION_MISSINGとして残ります(黙って行を落としません)
