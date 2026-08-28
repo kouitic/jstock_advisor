@@ -173,7 +173,7 @@ class _FakeNotificationServiceForDryRun:
         return NotificationEligibility(eligible=True)
 
     def notify_buy_candidates_digest(
-        self, winners: list[Recommendation], now: dt.datetime
+        self, winners: list[Recommendation], now: dt.datetime, *, batch_id: str | None = None
     ) -> dict[str, str]:
         self.digest_calls.append(list(winners))
         return {r.stock_code: self._send_result.get(r.stock_code, "SEND_FAILED") for r in winners}

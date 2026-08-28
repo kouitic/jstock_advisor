@@ -2578,11 +2578,17 @@ class LineNotificationService:
             )
 
     def notify_buy_candidates_digest(
-        self, winners: list[Recommendation], now: dt.datetime
+        self, winners: list[Recommendation], now: dt.datetime, *, batch_id: str
     ) -> dict[str, BuyDigestSendOutcome]:
         """購入候補(BUY_FAMILY_ACTIONS)の上位銘柄を1通(長すぎる場合のみ複数通)に
         まとめて送信する(BUYパイプライン第2次修正2026-07で追加。要求仕様17節・18節。
         統合BUY候補パイプライン2026-07でチャンク単位の3状態管理に変更)。
+
+        batch_id(Issue #17)はこのdigest送信判断を生んだBUY候補バッチのID。
+        dispatcherが1回のバッチ起動につき1度だけ生成し、各ワーカーの非同期
+        呼び出しevent・batch trackerを経由して伝搬されるため、同一バッチの
+        retry・二重finalizeを跨いで不変であり、別のバッチ起動(=別の送信判断)
+        では必ず異なる。claim identityの安定した送信判断IDとして使う。
 
         1銘柄1通ずつ`send_recommendation_notification`を呼ぶ旧方式を廃止し、
         優先順位順に並んだ購入候補だけをまとめて1回のバッチで送信する。
@@ -2643,18 +2649,21 @@ class LineNotificationService:
             # Issue #17: チャンク単位claim + 銘柄単位repair seed(承認済み設計)。
             # 外部副作用の単位(LINE push 1回=1チャンク)とclaimを一致させ、
             # NotificationLogの銘柄単位意味論はmembers(seed)が維持する。
-            # identityはJST暦日(#23)+チャンク位置+チャンクの銘柄構成(順序含む)
-            # から構築する。個別通知と異なりprev(直近logのid)は【意図的に含めない】:
-            # チャンク内の一部銘柄だけNotificationLog保存が失敗した場合、retryが
-            # 同一winnersで再実行されるとprevが変化しidentityが不安定になり、
-            # 「retryではチャンクを再送せず欠落logだけrepairする」という要件が
-            # 成立しなくなるため。既知の保証限界: (1)同一JST日に同一銘柄構成の
-            # チャンクを正当に再送するケース(全構成銘柄が同日中に価格閾値以上
-            # 変動し、かつ同日中に再実行された場合)はclaimに抑止される(翌JST日に
-            # 自然回復する安全側の縮退)。(2)部分log保存失敗後にパイプライン全体が
-            # retryされ、eligibilityによりチャンク構成が変わった場合の再送可能性は
-            # 現行と同等のまま(claimで悪化はしない)。複数チャンクはチャンクごとに
-            # 独立したclaimとなる。
+            # identityは安定した送信判断ID(batch_id)+チャンク位置+チャンクの
+            # 銘柄構成(順序含む)から構築する。
+            # ・prev(直近logのid)を含めない理由: チャンク内の一部銘柄だけ
+            #   NotificationLog保存が失敗した場合、retryでprevが変化しidentityが
+            #   不安定になり、「retryではチャンクを再送せず欠落logだけrepairする」
+            #   という要件が成立しなくなるため(NotificationLog保存成否によって
+            #   identityが変化してはならない)。
+            # ・JST暦日を含めない理由: 同一バッチのretryがJST日付境界を跨いでも
+            #   identityが不必要に変化しないようにするため(batch_idが送信判断を
+            #   一意化するので日付は不要)。
+            # ・batch_idを含める理由: 同一バッチのretry・二重finalizeでは不変で
+            #   claimが衝突し(push 1回に収束)、同一JST日でも別バッチによる正当な
+            #   後続送信判断(既存check_resend_eligibilityがSENDを許可した場合)は
+            #   新identityとなり、claim層が既存の再送ポリシーを変更しない。
+            # 複数チャンクはチャンクごとに独立したclaimとなる。
             acquisition = _ClaimAcquisition(decision="disabled")
             chunk_members: dict[str, NotificationClaimMember] = {}
             if self._claims_enabled():
@@ -2668,7 +2677,7 @@ class LineNotificationService:
                     chunk_members[rec.stock_code] = rec_member
                 chunk_stocks = ",".join(rec.stock_code for rec, _ in chunk)
                 identity = (
-                    f"v1|buy_digest|{evaluation_date_jst(now).isoformat()}|"
+                    f"v1|buy_digest|batch={batch_id}|"
                     f"chunk={index}/{total_chunks}|stocks={chunk_stocks}"
                 )
                 acquisition = self._acquire_send_claim(

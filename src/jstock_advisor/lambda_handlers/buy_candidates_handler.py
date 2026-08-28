@@ -1255,7 +1255,11 @@ def _finalize_batch(
         eligible_winners.append((unified_rank, recommendation))
 
     send_result = notification_service.notify_buy_candidates_digest(
-        [rec for _, rec in eligible_winners], now
+        [rec for _, rec in eligible_winners],
+        now,
+        # Issue #17: claim identityの安定した送信判断ID。同一バッチのretry・
+        # 二重finalizeでは不変、別バッチ起動では必ず異なる。
+        batch_id=batch_id,
     )
 
     notification_rank = 0

@@ -424,7 +424,7 @@ class _FakeNotificationServiceForRanking:
         self.digest_calls.append([recommendation])
 
     def notify_buy_candidates_digest(
-        self, winners: list[Recommendation], now: dt.datetime
+        self, winners: list[Recommendation], now: dt.datetime, *, batch_id: str | None = None
     ) -> dict[str, str]:
         self.digest_calls.append(list(winners))
         if self._send_result is not None:

@@ -1662,7 +1662,7 @@ def test_notify_buy_candidates_digest_sends_one_message_for_multiple_winners(
         ),
     ]
 
-    results = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     assert results == {"4516": "SENT_AND_RECORDED", "1111": "SENT_AND_RECORDED"}
     assert len(client.sent) == 1
@@ -1703,7 +1703,7 @@ def test_notify_buy_candidates_digest_block_omits_long_form_detail(
         }
     )
 
-    service.notify_buy_candidates_digest([winner], _NOW)
+    service.notify_buy_candidates_digest([winner], _NOW, batch_id="batch-test")
 
     message = client.sent[0]
     assert "種別" not in message
@@ -1731,7 +1731,7 @@ def test_notify_buy_candidates_digest_records_notification_log_per_stock(
     )
     winners = [_make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)]
 
-    service.notify_buy_candidates_digest(winners, _NOW)
+    service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     from jstock_advisor.domain.entities.enums import NotificationType
 
@@ -1745,7 +1745,7 @@ def test_notify_buy_candidates_digest_records_notification_log_per_stock(
 def test_notify_buy_candidates_digest_no_winners_sends_nothing(service_and_repos) -> None:
     service, _repo, client = service_and_repos
 
-    results = service.notify_buy_candidates_digest([], _NOW)
+    results = service.notify_buy_candidates_digest([], _NOW, batch_id="batch-test")
 
     assert results == {}
     assert client.sent == []
@@ -1765,7 +1765,7 @@ def test_notify_buy_candidates_digest_line_send_failure_marks_send_failed(
 
     monkeypatch.setattr(client, "push_message", _raise)
 
-    results = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     assert results == {"4516": "SEND_FAILED"}
 
@@ -1784,7 +1784,7 @@ def test_notify_buy_candidates_digest_log_save_failure_marks_sent_log_failed(
 
     monkeypatch.setattr(service._log_repo, "save", _raise)
 
-    results = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     assert results == {"4516": "SENT_LOG_FAILED"}
     assert len(client.sent) == 1  # LINEへは実際に送信されている
@@ -2748,7 +2748,7 @@ def test_validation_mode_buy_candidates_digest_returns_sent_validation(
     service, _repo, client = validation_service_and_repos
     winners = [_make_buy_pipeline_recommendation(buy_action=BuyAction.STRONG_BUY)]
 
-    results = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     assert results == {"4516": "SENT_VALIDATION"}
     assert len(client.sent) == 1
@@ -2769,7 +2769,7 @@ def test_validation_mode_buy_candidates_digest_never_marks_sent_log_failed(
 
     monkeypatch.setattr(service._log_repo, "save", _raise)
 
-    results = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     assert results == {"4516": "SENT_VALIDATION"}
 
@@ -4739,7 +4739,7 @@ def test_issue33_digest_log_keeps_stock_scope_none(service_and_repos) -> None:
     )
     repo.save(rec)
 
-    results = service.notify_buy_candidates_digest([rec], _I33_T1)
+    results = service.notify_buy_candidates_digest([rec], _I33_T1, batch_id="batch-test")
 
     assert results == {"2914": "SENT_AND_RECORDED"}
     log = service._log_repo.latest_by_stock_and_type("2914", NotificationType.DAILY_BUY_CANDIDATES)
@@ -5141,18 +5141,18 @@ def test_issue17_digest_double_finalize_pushes_once(service_and_repos) -> None:
     repo.save(rec)
     original_save = service._log_repo.save
     service._log_repo.save = _raise_log_save
-    first = service.notify_buy_candidates_digest([rec], _I17_T1)
+    first = service.notify_buy_candidates_digest([rec], _I17_T1, batch_id="batch-test")
     assert first == {"2914": "SENT_LOG_FAILED"}
     assert len(client.sent) == 1
     service._log_repo.save = original_save
 
-    second = service.notify_buy_candidates_digest([rec], _I17_T1B)
+    second = service.notify_buy_candidates_digest([rec], _I17_T1B, batch_id="batch-test")
     assert second == {"2914": "SENT_AND_RECORDED"}
     assert len(client.sent) == 1  # 再pushなし
     assert len(service._log_repo.list_all()) == 1  # repairで1件だけ保存
 
     # D: SENT claim + 全log存在 → 完全no-op(push・log追加とも無し)
-    third = service.notify_buy_candidates_digest([rec], _I17_T1B)
+    third = service.notify_buy_candidates_digest([rec], _I17_T1B, batch_id="batch-test")
     assert third == {"2914": "SENT_AND_RECORDED"}
     assert len(client.sent) == 1
     assert len(service._log_repo.list_all()) == 1
@@ -5183,12 +5183,12 @@ def test_issue17_digest_partial_log_failure_repairs_only_missing(service_and_rep
         original_save(log)
 
     service._log_repo.save = _save_fail_for_b
-    first = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1)
+    first = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1, batch_id="batch-test")
     assert first == {"2914": "SENT_AND_RECORDED", "7203": "SENT_LOG_FAILED"}
     assert len(client.sent) == 1
     service._log_repo.save = original_save
 
-    second = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1B)
+    second = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1B, batch_id="batch-test")
     assert second == {"2914": "SENT_AND_RECORDED", "7203": "SENT_AND_RECORDED"}
     assert len(client.sent) == 1  # チャンク再pushなし
     logs = service._log_repo.list_all()
@@ -5218,11 +5218,11 @@ def test_issue17_digest_multi_chunk_resends_only_unsent_chunk(
 
     flaky = _FlakyLineClient(fail_on_calls={2})  # 1回目のchunk2 pushだけ失敗
     service._client = flaky
-    first = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1)
+    first = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1, batch_id="batch-test")
     assert first == {"2914": "SENT_AND_RECORDED", "7203": "SEND_FAILED"}
     assert len(flaky.sent) == 1  # chunk1のみ送信済み
 
-    second = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1B)
+    second = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1B, batch_id="batch-test")
     assert second == {"2914": "SENT_AND_RECORDED", "7203": "SENT_AND_RECORDED"}
     assert len(flaky.sent) == 2  # chunk1は再送されず、chunk2のみ送信
     assert sum("2914" in message for message in flaky.sent) == 1
@@ -5312,3 +5312,101 @@ def test_issue17_claim_backend_error_propagates_without_push(tmp_path: Path) -> 
     with pytest.raises(RuntimeError, match="claim backend unavailable"):
         service.send_recommendation_notification(rec, _I17_T1)
     assert client.sent == []
+
+
+# --- Issue #17 再レビュー対応(2026-08-28): digest claim identityのbatch_id化 ---
+# identityへNotificationLog保存成否で変化する値(prev)を使わず、かつJST日付+
+# 銘柄構成だけで別バッチの正当な後続送信まで同一視しない、安定した送信判断ID
+# (batch_id)を採用したことを固定する。
+
+_I17_JSTB1 = dt.datetime(2026, 7, 24, 14, 55, tzinfo=dt.UTC)  # JST 07-24 23:55
+_I17_JSTB2 = dt.datetime(2026, 7, 24, 15, 5, tzinfo=dt.UTC)  # JST 07-25 00:05
+
+
+def test_issue17_digest_new_batch_same_day_same_stocks_is_sent(service_and_repos) -> None:
+    """ケースC: 同一JST日・同一銘柄構成でも【別batch_id】(=別の送信判断。
+    既存check_resend_eligibilityがSENDを許可した後にのみdigestへ到達する前提)は
+    新claimとなりLINE送信される。240aade(JST日付+銘柄構成identity)では
+    同一identityとして抑止されていた挙動の修正を固定する。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="i17-c2-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    first = service.notify_buy_candidates_digest([rec1], _I17_T1, batch_id="batch-1")
+    assert first == {"2914": "SENT_AND_RECORDED"}
+    assert len(client.sent) == 1
+
+    # 別バッチによる同日の正当な後続送信判断(価格変動等でeligibilityが許可した
+    # 前提。digest自体は再送判定を行わない=呼び出し側保証の既存規約どおり)
+    rec2 = _make_recommendation(
+        recommendation_id="i17-c2-2",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3500",
+    )
+    repo.save(rec2)
+    second = service.notify_buy_candidates_digest([rec2], _I17_T1B, batch_id="batch-2")
+
+    assert second == {"2914": "SENT_AND_RECORDED"}
+    assert len(client.sent) == 2  # claimが正当な別判断を抑止しない
+    assert len(service._claim_repo.list_all()) == 2
+
+
+def test_issue17_digest_read_based_dedup_still_gates_before_claim(service_and_repos) -> None:
+    """ケースD: 別batch_idでも既存のread-based再送判定がSENDを許可しない場合は、
+    claim取得より前(check_resend_eligibility)で抑止される。claim層は再送可否を
+    決めていない(digestへ到達しないためclaimは増えない)。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="i17-d2-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    assert service.notify_buy_candidates_digest([rec1], _I17_T1, batch_id="batch-1") == {
+        "2914": "SENT_AND_RECORDED"
+    }
+    assert len(service._claim_repo.list_all()) == 1
+
+    # 別バッチの再評価(同一価格): 既存判定が再送を許可しない
+    rec2 = _make_recommendation(
+        recommendation_id="i17-d2-2",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec2)
+    eligibility = service.check_resend_eligibility(rec2, _I17_T1B)
+
+    assert eligibility.eligible is False  # read-based判定による抑止(claim無関係)
+    assert len(service._claim_repo.list_all()) == 1  # claimは増えていない
+    assert len(client.sent) == 1
+
+
+def test_issue17_digest_same_batch_retry_stable_across_jst_boundary(
+    service_and_repos,
+) -> None:
+    """ケースE: 同一batch_idのretryがJST日付境界を跨いでも、identityは日付を
+    含まないため不必要に変化せず、チャンクは再pushされずrepairだけが行われる。"""
+    service, repo, client = service_and_repos
+    assert evaluation_date_jst(_I17_JSTB1) != evaluation_date_jst(_I17_JSTB2)
+    rec = _make_recommendation(
+        recommendation_id="i17-e2-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+    original_save = service._log_repo.save
+    service._log_repo.save = _raise_log_save
+    first = service.notify_buy_candidates_digest([rec], _I17_JSTB1, batch_id="batch-jst")
+    assert first == {"2914": "SENT_LOG_FAILED"}
+    assert len(client.sent) == 1
+    service._log_repo.save = original_save
+
+    # JST日付が変わった後のretry(同一batch_id)
+    second = service.notify_buy_candidates_digest([rec], _I17_JSTB2, batch_id="batch-jst")
+
+    assert second == {"2914": "SENT_AND_RECORDED"}
+    assert len(client.sent) == 1  # 再pushなし(identityにJST日付を含まない)
+    assert len(service._log_repo.list_all()) == 1  # repairのみ

@@ -289,7 +289,7 @@ def test_notify_buy_candidates_digest_dry_run_returns_would_send_and_suppresses_
         _make_recommendation("rec-b", stock_code="1001"),
     ]
 
-    results = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     assert client.sent == []
     assert results == {"1000": "WOULD_SEND_DRY_RUN", "1001": "WOULD_SEND_DRY_RUN"}
@@ -325,7 +325,7 @@ def test_notify_buy_candidates_digest_dry_run_multi_chunk_no_double_counting(
         _make_recommendation(f"rec-{i}", stock_code=f"{2000 + i}") for i in range(winner_count)
     ]
 
-    results = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     assert client.sent == []
     assert len(results) == winner_count
@@ -345,7 +345,7 @@ def test_notify_buy_candidates_digest_validation_send_unaffected(tmp_path: Path)
     service, client, audit_service, _ = _build_service(tmp_path, ctx)
     winners = [_make_recommendation("rec-a")]
 
-    results = service.notify_buy_candidates_digest(winners, _NOW)
+    results = service.notify_buy_candidates_digest(winners, _NOW, batch_id="batch-test")
 
     assert len(client.sent) == 1
     assert client.sent[0].startswith("🧪検証｜")

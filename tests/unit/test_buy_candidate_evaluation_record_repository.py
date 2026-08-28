@@ -282,7 +282,7 @@ class _FakeNotificationService:
 
         return NotificationEligibility(eligible=True)
 
-    def notify_buy_candidates_digest(self, winners, now):
+    def notify_buy_candidates_digest(self, winners, now, *, batch_id=None):
         return {r.stock_code: "SENT_AND_RECORDED" for r in winners}
 
     def notify_batch_summary(self, *args: object, **kwargs: object) -> bool:

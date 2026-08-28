@@ -40,7 +40,9 @@ class _NoopAuditService:
 
 
 class _FakeNotificationService:
-    def notify_buy_candidates_digest(self, winners: list[object], now: object) -> dict[str, str]:
+    def notify_buy_candidates_digest(
+        self, winners: list[object], now: object, *, batch_id: object = None
+    ) -> dict[str, str]:
         return {}
 
     def notify_batch_summary(self, *args: object, **kwargs: object) -> bool:

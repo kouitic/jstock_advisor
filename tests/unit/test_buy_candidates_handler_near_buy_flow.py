@@ -77,7 +77,7 @@ class _FakeNearBuyNotificationService:
     def send_recommendation_notification(self, recommendation, now) -> None:
         self.sent.append(recommendation)
 
-    def notify_buy_candidates_digest(self, winners, now):
+    def notify_buy_candidates_digest(self, winners, now, *, batch_id=None):
         return {}
 
     def notify_batch_summary(self, process_name, total, category_counts, now, **kwargs):
