@@ -510,3 +510,45 @@ def test_repositories_receive_no_writes_and_sources_unchanged() -> None:
 def test_naive_now_is_rejected() -> None:
     with pytest.raises(ValueError):
         _builder([], [], []).build(dt.datetime(2026, 8, 28, 7, 0))  # tzなしは拒否
+
+
+# --- Phase C1: ACTION_CHANGE selector -----------------------------------------
+
+
+def test_action_change_selector_marks_transitions_without_deleting_rows() -> None:
+    base_at = dt.datetime(2026, 7, 30, 1, 0, tzinfo=dt.UTC)
+    recs = [
+        _recommendation("rec-1", recommended_at=base_at, buy_action=BuyAction.WATCH_FOR_PRICE),
+        _recommendation(
+            "rec-2",
+            recommended_at=base_at + dt.timedelta(days=1),
+            buy_action=BuyAction.WATCH_FOR_PRICE,
+        ),
+        _recommendation(
+            "rec-3",
+            recommended_at=base_at + dt.timedelta(days=2),
+            buy_action=BuyAction.SMALL_ENTRY,
+        ),
+    ]
+    dataset = _builder(recs, [], []).build(
+        _NOW, sample_definition=SampleDefinition.ACTION_CHANGE
+    )
+    r1 = _rows_for(dataset, "rec-1", HorizonUnit.BUSINESS_DAYS, 5)[0]
+    r2 = _rows_for(dataset, "rec-2", HorizonUnit.BUSINESS_DAYS, 5)[0]
+    r3 = _rows_for(dataset, "rec-3", HorizonUnit.BUSINESS_DAYS, 5)[0]
+    assert r1.sample_selected is True
+    assert r1.selection_reason == SelectionReason.FIRST_OBSERVED
+    assert r2.sample_selected is False
+    assert r2.selection_reason == SelectionReason.NO_ACTION_CHANGE
+    assert r2.sample_group_id == r1.sample_group_id
+    assert r3.sample_selected is True
+    assert r3.selection_reason == SelectionReason.ACTION_CHANGED
+    # 行は削除されない(canonical raw datasetの粒度は不変)
+    assert len(dataset.rows) == 3 * (len(_BUSINESS_HORIZONS) + 1)
+    # metadataへselectorパラメータを記録
+    assert dataset.metadata["sample_selector_parameters"] == {"comparison_field": "buy_action"}
+
+
+def test_non_action_change_definitions_have_empty_selector_parameters() -> None:
+    dataset = _builder([_recommendation()], [], []).build(_NOW)
+    assert dataset.metadata["sample_selector_parameters"] == {}
