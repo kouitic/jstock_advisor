@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import random
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import boto3
@@ -131,7 +131,9 @@ class DynamoDbCollectionStore[T: BaseModel]:
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
         return [item for item in self.list_all() if predicate(item)]
 
-    def upsert_with_index_attributes(self, item: T, index_attributes: dict[str, str]) -> None:
+    def upsert_with_index_attributes(
+        self, item: T, index_attributes: Mapping[str, str | int]
+    ) -> None:
         dynamo_item = self._to_item(item)
         dynamo_item.update(index_attributes)
         self._table.put_item(Item=dynamo_item)
