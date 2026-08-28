@@ -2,7 +2,10 @@ from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import ConfidenceLevel
-from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from jstock_advisor.domain.entities.valuation import (
+    FairValueMethodResult,
+    FairValueUnusableReasonCode,
+)
 from jstock_advisor.domain.valuation.fair_value import compute_dcf_price
 from jstock_advisor.domain.valuation.fair_value_usability import build_fair_value_range
 
@@ -73,6 +76,9 @@ def test_fair_value_range_usable_with_close_methods() -> None:
     assert range_.usable_for_trading_judgment is True
     assert range_.bear == Decimal("1000")
     assert range_.bull == Decimal("1100")
+    # Issue #21: usable=True時はcode/reasonともNoneを保証する
+    assert range_.unusable_reason is None
+    assert range_.unusable_reason_code is None
 
 
 def test_fair_value_range_unusable_when_methods_diverge_too_much() -> None:
@@ -88,6 +94,8 @@ def test_fair_value_range_unusable_when_methods_diverge_too_much() -> None:
     )
     assert range_.usable_for_trading_judgment is False
     assert range_.unusable_reason is not None
+    # Issue #21: 乖離過大は構造化codeでも区別できる
+    assert range_.unusable_reason_code is FairValueUnusableReasonCode.METHOD_SPREAD_TOO_WIDE
     assert range_.overall_confidence == ConfidenceLevel.LOW
 
 
@@ -100,6 +108,9 @@ def test_fair_value_range_unusable_when_too_few_methods() -> None:
         _CONFIG.fair_value_usability,
     )
     assert range_.usable_for_trading_judgment is False
+    # Issue #21: 手法不足は構造化codeでも区別できる
+    assert range_.unusable_reason_code is FairValueUnusableReasonCode.TOO_FEW_METHODS
+    assert range_.unusable_reason is not None
 
 
 def test_fair_value_range_no_usable_methods() -> None:
@@ -112,6 +123,9 @@ def test_fair_value_range_no_usable_methods() -> None:
     )
     assert range_.bear is None
     assert range_.usable_for_trading_judgment is False
+    # Issue #21: 有効手法0件は構造化codeでも区別できる
+    assert range_.unusable_reason_code is FairValueUnusableReasonCode.NO_VALID_METHODS
+    assert range_.unusable_reason is not None
 
 
 def test_fair_value_range_low_confidence_method_caps_overall_confidence() -> None:

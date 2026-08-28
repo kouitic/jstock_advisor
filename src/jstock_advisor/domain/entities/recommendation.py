@@ -223,6 +223,17 @@ class Recommendation(ImmutableSnapshot):
     fair_value_methods: list[dict[str, Any]] = []  # method/fair_value/confidence/exclusion_reason
     fair_value_spread_ratio: float | None = None
 
+    # --- Issue #21(2026-08-28)で追加: 判定時点のFairValueRange使用可否の
+    # スナップショット。値(bear/bull等)は保存されるのに「売買判定に使えたか」と
+    # その直接原因が保存されず、後から現在configなしで理由を復元できなかった
+    # 不備の修正。codeはFairValueUnusableReasonCode.value(機械判定用の正本)、
+    # reasonは生成時点の自由文(監査・説明用。parseして分岐してはならない)。
+    # 3つともusable=True時はcode/reason=None。Noneは「保存なし(改修前の記録)」
+    # も意味するため、旧レコードについて現在configで理由を再構築しないこと。
+    fair_value_usable_for_trading_judgment: bool | None = None
+    fair_value_unusable_reason_code: str | None = None
+    fair_value_unusable_reason: str | None = None
+
     # --- 増配実績と増配予想の分離(2026-07仕様レビュー対応) ---
     consecutive_actual_dividend_increase_years: int | None = None
     forecast_dividend_increase: bool | None = None
