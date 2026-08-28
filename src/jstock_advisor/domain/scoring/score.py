@@ -279,7 +279,20 @@ def compute_score(
     # ここではcompute_score()自身が受け取っている入力値のみを対象とする。
     input_facts: dict[str, object] = {
         "total_yield_pct": total_yield_pct,
+        # Issue #30 Phase 1: 3状態(True/False/None=UNKNOWN)をそのまま記録し、
+        # あわせて監査用のstatus/type/source/checked_atをスナップショットする
+        # (evidence_text全文はレジストリ側が正本のためコピーしない)。
         "is_progressive_or_doe_policy": dividend.is_progressive_or_doe_policy,
+        "shareholder_return_policy_status": (
+            "UNKNOWN" if dividend.is_progressive_or_doe_policy is None else "CONFIRMED"
+        ),
+        "shareholder_return_policy_type": dividend.shareholder_return_policy_type,
+        "shareholder_return_policy_source": dividend.shareholder_return_policy_source_reference,
+        "shareholder_return_policy_checked_at": (
+            dividend.shareholder_return_policy_checked_at.isoformat()
+            if dividend.shareholder_return_policy_checked_at is not None
+            else None
+        ),
         "consecutive_dividend_increase_years": dividend.consecutive_dividend_increase_years,
         "payout_ratio_pct": financial.payout_ratio_pct,
         "equity_ratio_pct": financial.equity_ratio_pct,
@@ -344,9 +357,17 @@ def _build_component_states(
 
     # 配当持続性はv1では常に係数式で評価される(欠測要素は加点0として扱われる)
     # ため state=EVALUATED とし、どの入力が欠測だったかをreason_codesへ残す。
-    # is_progressive_or_doe_policyのFalseは「方針なし」と「データ取得不能」を
-    # この層では判別できないため、断定的なreason_codeは付けない(Issue #30参照)。
+    # Issue #30 Phase 1: is_progressive_or_doe_policyは3状態化済み。方針factorだけが
+    # UNKNOWN/NONE確認済みでも、連続増配・配当性向のfactorは評価可能なため
+    # component全体はEVALUATEDのまま、subfactor理由としてreason_codesへ記録する
+    # (POLICY_STATUS_UNKNOWN=レジストリ未登録・取得不能 /
+    #  POLICY_NONE_CONFIRMED=人間確認済みで方針なし。いずれもscoreは方針分0点で、
+    #  UNKNOWNへの中立加点・再正規化は行わない)。
     sustainability_reasons: list[str] = []
+    if dividend.is_progressive_or_doe_policy is None:
+        sustainability_reasons.append("POLICY_STATUS_UNKNOWN")
+    elif dividend.is_progressive_or_doe_policy is False:
+        sustainability_reasons.append("POLICY_NONE_CONFIRMED")
     if financial.payout_ratio_pct is None:
         sustainability_reasons.append("PAYOUT_RATIO_UNAVAILABLE")
     if dividend.consecutive_dividend_increase_years is None:

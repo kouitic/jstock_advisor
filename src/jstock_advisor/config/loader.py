@@ -42,6 +42,7 @@ from jstock_advisor.config.models import (
     ScoringWeightsConfig,
     ScreeningRulesConfig,
     SellRulesConfig,
+    ShareholderReturnPoliciesConfig,
     StockClassificationRulesConfig,
     TimingScoreRulesConfig,
     ValuationRulesConfig,
@@ -171,6 +172,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     market_sector_environment = MarketSectorEnvironmentRulesConfig.model_validate(
         _load_yaml(directory / "market_sector_environment_rules.yaml")
     )
+    shareholder_return_policies = ShareholderReturnPoliciesConfig.model_validate(
+        _load_yaml(directory / "shareholder_return_policies.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -204,4 +208,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         earnings_trend=earnings_trend,
         entry_exit_price=entry_exit_price,
         market_sector_environment=market_sector_environment,
+        shareholder_return_policies=shareholder_return_policies,
     )

@@ -226,7 +226,11 @@ class YFinanceDividendDataProvider:
             # 使うこと(要求仕様§11・§12: yfinance単独の推測を「公式発表」扱いしない)。
             is_dividend_cut_announced=is_dividend_cut_announced,
             is_dividend_omission_announced=is_dividend_omission_announced,
-            is_progressive_or_doe_policy=False,  # yfinanceからは判定不可(既知の限界)
+            # Issue #30 Phase 1: yfinanceからは方針の有無を判定不可(恒久的な限界)のため
+            # UNKNOWN(None)とする。以前はFalse固定で「方針なし」と「取得不能」が
+            # 区別できなかった。正式なTrue/Falseは手動レジストリ由来の
+            # policy_enrichment_implのみが設定する。
+            is_progressive_or_doe_policy=None,
             dividend_policy_note=None,
             dividend_record_dates=[],  # yfinanceは権利確定日を取得不可
             consecutive_dividend_increase_years=consecutive_increase_years,

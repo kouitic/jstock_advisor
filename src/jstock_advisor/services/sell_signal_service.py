@@ -192,8 +192,12 @@ def _evaluate_counter_factors(
         factors.append("自社株買いの実施が確認されている")
 
     # 配当方針維持
+    # Issue #30 Phase 1: is_progressive_or_doe_policyの3状態化(bool | None)に伴う
+    # 型整合のため `is True` を明示する。SELL側の評価coverage semanticsは不変
+    # (旧実装はFalse(当時は「方針なし」と「取得不能」の混在)を「評価できず」
+    # 扱いにしており、None(UNKNOWN)も同じ結果になる。挙動完全保存)。
     evaluated["dividend_policy_maintained"] = dividend.has_dividend_floor_policy is not None or (
-        dividend.is_progressive_or_doe_policy
+        dividend.is_progressive_or_doe_policy is True
     )
     if dividend.is_progressive_or_doe_policy or dividend.has_dividend_floor_policy:
         factors.append("累進的配当方針・配当下限方針が維持されている")
