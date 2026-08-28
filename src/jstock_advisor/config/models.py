@@ -7,12 +7,16 @@ Pythonのデフォルトとしては持たせず、YAMLの値のみを正とす�
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from jstock_advisor.domain.entities.enums import FinancialIndustryCategory
+from jstock_advisor.domain.entities.enums import (
+    FinancialIndustryCategory,
+    ShareholderReturnPolicyType,
+)
 
 
 class StrictModel(BaseModel):
@@ -2757,6 +2761,54 @@ class MarketSectorEnvironmentRulesConfig(StrictModel):
     environment: EnvironmentCompositeConfig
 
 
+# --- shareholder_return_policies.yaml(Issue #30 Phase 1) --------------------
+
+
+class ShareholderReturnPolicyEntry(StrictModel):
+    """株主還元方針レジストリの1銘柄分。
+
+    Trueの正式認定(累進配当/DOE)は、会社の一次情報を人間が確認して
+    このレジストリへ登録した場合のみ。過去実績(減配なし・連続増配等)・
+    キーワードヒット・LLM出力から推測して登録してはならない。
+    policy_type=NONEは「確認したが方針なし」であり、単に見つからなかった
+    ことを理由に登録してはならない(未確認はレジストリ非掲載=UNKNOWNで表す)。
+    確認実施者はGit履歴(commit author)で追跡する(CLAUDE.mdのPIIルールにより
+    実在人物名をこのファイルへ記録しない)。
+    """
+
+    stock_code: str = Field(pattern=r"^[0-9][0-9A-Z]{3}$")
+    policy_type: ShareholderReturnPolicyType
+    status: Literal["CONFIRMED"]
+    source_type: Literal["COMPANY_IR", "EDINET_ANNUAL_REPORT", "TDNET_DISCLOSURE", "OTHER"]
+    # 一次情報への参照(IRページURL・EDINET docID等)。監査の起点となるため必須
+    source_reference: str = Field(min_length=1)
+    source_date: _dt.date
+    # 根拠文の引用(全文はRecommendationへはコピーせず、正本はこのレジストリのみが持つ)
+    evidence_text: str = Field(min_length=1)
+    checked_at: _dt.date
+
+
+class ShareholderReturnPoliciesConfig(StrictModel):
+    version: int
+    policies: list[ShareholderReturnPolicyEntry]
+
+    @model_validator(mode="after")
+    def _validate_unique_stock_codes(self) -> ShareholderReturnPoliciesConfig:
+        """1 stock_code = 1有効レコード。過去の方針変更履歴はGit履歴で追跡する。"""
+        seen: set[str] = set()
+        for entry in self.policies:
+            if entry.stock_code in seen:
+                raise ValueError(f"stock_codeが重複しています: {entry.stock_code}")
+            seen.add(entry.stock_code)
+        return self
+
+    def entry_for(self, stock_code: str) -> ShareholderReturnPolicyEntry | None:
+        for entry in self.policies:
+            if entry.stock_code == stock_code:
+                return entry
+        return None
+
+
 class AppConfig(StrictModel):
     screening: ScreeningRulesConfig
     valuation: ValuationRulesConfig
@@ -2799,3 +2851,5 @@ class AppConfig(StrictModel):
     # --- 判定精度向上機能Phase D: Market/Sector Environment Shadow
     # (2026-08)で追加 ---
     market_sector_environment: MarketSectorEnvironmentRulesConfig
+    # --- 株主還元方針レジストリ(Issue #30 Phase 1、2026-08)で追加 ---
+    shareholder_return_policies: ShareholderReturnPoliciesConfig

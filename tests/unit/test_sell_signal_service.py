@@ -43,3 +43,67 @@ def test_sell_signal_service_does_not_reference_earnings_release_gating() -> Non
     assert "resolve_earnings_decision_relevance" not in source
     assert "EarningsReleaseConfirmationState" not in source
     assert "EarningsDecisionRelevance" not in source
+
+
+# --- Issue #30 Phase 1: is_progressive_or_doe_policyの3状態化(bool | None) ---
+# SELL側の反対材料評価(_evaluate_counter_factors)の既存互換semanticsを固定する:
+# True=従来どおり、False=従来どおり、None=従来の「取得不能時False」と同一結果。
+# 評価coverage(dividend_policy_maintained)もFalse/Noneで「評価できず」のまま
+# (案b: is not None は不採用。coverage semanticsは変更しない)。
+
+
+def _counter_factor_snapshot(policy: bool | None):
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from jstock_advisor.domain.entities.common import DataSourceReference
+    from jstock_advisor.interfaces.types import DividendInfo
+
+    now = dt.datetime(2026, 8, 28, tzinfo=dt.UTC)
+    dividend = DividendInfo(
+        stock_code="9433",
+        fiscal_year="2026",
+        is_progressive_or_doe_policy=policy,
+        consecutive_dividend_increase_years=None,
+        source=DataSourceReference(provider="test", fetched_at=now),
+    )
+    return SimpleNamespace(
+        quarterly_operating_income_periods=[
+            SimpleNamespace(value=Decimal("100")),
+            SimpleNamespace(value=Decimal("90")),
+        ],
+        disclosures=[],
+        dividend=dividend,
+        financial=SimpleNamespace(
+            sector="Technology", industry="Consumer Electronics", equity_ratio_pct=50.0
+        ),
+        cashflow_decomposition=None,
+        momentum=SimpleNamespace(ma20=None),
+    )
+
+
+def test_counter_factor_policy_true_behaves_as_before() -> None:
+    factors, _ = sell_signal_service_module._evaluate_counter_factors(  # noqa: SLF001
+        _counter_factor_snapshot(True), triggered_count=2
+    )
+    assert "累進的配当方針・配当下限方針が維持されている" in factors
+
+
+def test_counter_factor_policy_false_behaves_as_before() -> None:
+    factors, evaluated = sell_signal_service_module._evaluate_counter_factors(  # noqa: SLF001
+        _counter_factor_snapshot(False), triggered_count=2
+    )
+    assert "累進的配当方針・配当下限方針が維持されている" not in factors
+    assert evaluated is False  # 方針False+下限方針不明は従来どおり「評価できず」
+
+
+def test_counter_factor_policy_none_identical_to_false() -> None:
+    """None(UNKNOWN)はFalseと完全に同一の結果(SELL側判定を一切変えない)。"""
+    false_result = sell_signal_service_module._evaluate_counter_factors(  # noqa: SLF001
+        _counter_factor_snapshot(False), triggered_count=2
+    )
+    none_result = sell_signal_service_module._evaluate_counter_factors(  # noqa: SLF001
+        _counter_factor_snapshot(None), triggered_count=2
+    )
+    assert none_result == false_result
+    assert "累進的配当方針・配当下限方針が維持されている" not in none_result[0]

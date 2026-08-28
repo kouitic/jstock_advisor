@@ -1541,3 +1541,49 @@ def test_fundamental_critical_risk_exempt_from_all_softening() -> None:
     assert result.timing_action == TimingAction.WAIT_UPTREND_CONTINUES
     assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
     assert result.mitigating_factors_applied
+
+
+# --- Issue #30 Phase 1: is_progressive_or_doe_policyの3状態化(bool | None) ---
+# SELL/利確側semantics: None(未確認/UNKNOWN)は緩和要因に該当しない
+# (=False扱い。判定を弱めない)。判定条件・weight自体は不変。
+
+
+def _evaluate_with_policy(policy: bool | None):
+    return evaluate_profit_taking(
+        current_price=Decimal("1220"),  # +22% -> raw WATCH
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(is_progressive_or_doe_policy=policy),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=_degenerate_fair_value_range(Decimal("1400"))
+        ),
+    )
+
+
+def test_policy_true_applies_mitigation_as_before() -> None:
+    result = _evaluate_with_policy(True)
+    assert any("累進配当またはDOE方針" in factor for factor in result.mitigating_factors_applied)
+
+
+def test_policy_false_applies_no_mitigation() -> None:
+    result = _evaluate_with_policy(False)
+    assert not any(
+        "累進配当またはDOE方針" in factor for factor in result.mitigating_factors_applied
+    )
+
+
+def test_policy_none_behaves_exactly_like_false() -> None:
+    """None(UNKNOWN)はFalseと同一結果(緩和なし・判定を弱めない)。"""
+    false_result = _evaluate_with_policy(False)
+    none_result = _evaluate_with_policy(None)
+    assert not any(
+        "累進配当またはDOE方針" in factor for factor in none_result.mitigating_factors_applied
+    )
+    assert none_result.recommendation_type == false_result.recommendation_type
+    assert none_result.mitigating_factors_applied == false_result.mitigating_factors_applied

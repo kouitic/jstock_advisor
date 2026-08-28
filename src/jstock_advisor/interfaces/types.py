@@ -22,6 +22,7 @@ from jstock_advisor.domain.entities.enums import (
     DividendValidationStatus,
     RecentPeriodsSource,
     RecordDateUnknownReason,
+    ShareholderReturnPolicyType,
     ValuationBasis,
 )
 from jstock_advisor.domain.jst import require_timezone_aware
@@ -226,7 +227,13 @@ class DividendInfo(ImmutableSnapshot):
     previous_fiscal_year_dividend_per_share: Decimal | None = None
     is_dividend_cut_announced: bool = False
     is_dividend_omission_announced: bool = False
-    is_progressive_or_doe_policy: bool = False
+    # Issue #30 Phase 1: 3状態化。True=累進配当/DOE方針を人間が一次情報で確認済み、
+    # False=確認済みだが対象方針なし、None=UNKNOWN(未確認・データソースから取得不能)。
+    # Trueの正本はconfig/shareholder_return_policies.yaml(手動レジストリ)のみ。
+    # 過去実績(減配なし・連続増配等)からの推測でTrueにしてはならない。
+    # SELL/利確側の緩和要因判定ではNoneはFalseと同じ「緩和なし」として扱う
+    # (判定を弱めない。MitigatingFactorInputsのdocstring参照)。
+    is_progressive_or_doe_policy: bool | None = None
     dividend_policy_note: str | None = None
     dividend_record_dates: list[dt.date] = []
     consecutive_dividend_increase_years: int | None = None
@@ -265,6 +272,16 @@ class DividendInfo(ImmutableSnapshot):
     # --- 無配転落のofficial/inferred分離(2026-07仕様レビュー対応) ---
     official_dividend_omission_announced: bool = False
     inferred_dividend_omission: bool = False
+
+    # --- 株主還元方針レジストリ由来の監査用スナップショット(Issue #30 Phase 1) ---
+    # policy_enrichment_implがレジストリ登録済み銘柄にのみ付与する。未登録
+    # (UNKNOWN)ではすべてNoneのまま。evidence_text全文はここへコピーしない
+    # (正本はconfig/shareholder_return_policies.yaml。ここは監査に必要な
+    # 短い識別情報のみ)。
+    shareholder_return_policy_type: ShareholderReturnPolicyType | None = None
+    shareholder_return_policy_source_type: str | None = None
+    shareholder_return_policy_source_reference: str | None = None
+    shareholder_return_policy_checked_at: dt.date | None = None
 
     # --- 配当データクロスバリデーション根本修正(2026-08)で追加 ---
     # yfinance(暦年集計)とEDINET(決算期単位)で比較対象期間がそもそもズレていた

@@ -105,7 +105,10 @@ class EdinetDividendDataProvider:
             previous_fiscal_year_dividend_per_share=previous,
             is_dividend_cut_announced=False,
             is_dividend_omission_announced=False,
-            is_progressive_or_doe_policy=False,
+            # Issue #30 Phase 1: 経営指標等の推移表からは方針の有無を判定できないため
+            # UNKNOWN(None)とする(以前はFalse固定=未実装)。正式なTrue/Falseは
+            # 手動レジストリ由来のpolicy_enrichment_implのみが設定する。
+            is_progressive_or_doe_policy=None,
             dividend_policy_note=None,
             dividend_record_dates=[],  # EDINETのこの表からは権利確定日を取得できない
             consecutive_dividend_increase_years=consecutive_increase_years,
