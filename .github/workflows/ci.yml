@@ -73,3 +73,25 @@ jobs:
           python-version: "3.12"
       - run: pip install pip-audit
       - run: pip-audit -r requirements-lock.txt
+      # Issue #35: 本番Lambda Layerへ実際に入る依存(infra/layer/requirements.txt、
+      # 全推移的依存を完全pinした生成物)も監査対象にする。
+      - run: pip-audit -r infra/layer/requirements.txt
+
+  # Issue #35: Lambda Layer依存lockのdrift検知。infra/layer/requirements.in(人間が
+  # 編集するdirect依存の正本)から標準compileコマンドで再生成した結果が、Git管理
+  # されているinfra/layer/requirements.txt(SAM PythonPipBuilderが実際に使う完全pin
+  # 生成物)と一致しない場合はFAILさせる(.inだけ変更して再生成を忘れた状態をmainへ
+  # 入れないため)。uvバージョン・compile条件はinfra/layer/build-requirements.txtと
+  # このコマンド(infra/README.md「Layer dependency lock」に記載の標準コマンド)で
+  # ローカルと完全に揃えること。uvは既存出力のpinを範囲内で優先するため、PyPIに
+  # 新しいバージョンが出てもこのジョブが勝手に失敗することはない。
+  layer-lock-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r infra/layer/build-requirements.txt
+      - run: python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements.txt --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --no-annotate --custom-compile-command "python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements.txt --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --no-annotate"
+      - run: git diff --exit-code -- infra/layer/requirements.txt

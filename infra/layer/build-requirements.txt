@@ -1,0 +1,7 @@
+# Pinned toolchain for compiling infra/layer/requirements.in into
+# infra/layer/requirements.txt (Issue #35). Local developers and CI MUST use
+# this same uv version so the compile output is byte-identical everywhere:
+#   pip install -r infra/layer/build-requirements.txt
+# See infra/README.md "Layer dependency lock" for the standard compile command.
+# Kept ASCII-only intentionally (same reason as requirements.in).
+uv==0.12.7

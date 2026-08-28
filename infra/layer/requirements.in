@@ -1,0 +1,48 @@
+# Lambda Layer direct dependency list (HUMAN-EDITED SOURCE, Issue #35).
+#
+# This file is the single human-edited source of the DependenciesLayer
+# dependencies. The sibling requirements.txt is GENERATED from this file
+# (fully pinned, including all transitive dependencies) and is what SAM's
+# PythonPipBuilder actually installs. Do NOT edit requirements.txt directly;
+# edit this file and regenerate with the standard compile command
+# (see infra/README.md "Layer dependency lock").
+#
+# boto3/botocore ship with the Lambda managed runtime, so they are excluded
+# here (reduces package size, per AWS's recommended practice).
+# typer/python-dotenv are CLI-only dependencies not referenced from
+# lambda_handlers/services/domain, so they are excluded here too.
+#
+# Operational hardening item 8: version ranges are capped to the verified range
+# (matches pyproject.toml's ranges; keep both files in sync, since the compiled
+# requirements.txt is what actually determines what ships in the deployed
+# Lambda artifact).
+#
+# Kept ASCII-only intentionally: some pip build steps (SAM CLI's
+# PythonPipBuilder on Windows, requirements-file parsers used by CI tooling)
+# default to a non-UTF-8 codec and fail on non-ASCII bytes in this file.
+pydantic>=2.13,<3.0
+pyyaml>=6.0,<7.0
+python-dateutil>=2.9,<3.0
+jpholiday>=1.0,<2.0
+# yfinance is an unofficial library and the most prone to breaking changes,
+# so its range is kept the narrowest.
+yfinance>=1.5.2,<1.6.0
+# Full-scale candidate universe support (2026-08): used to parse the JPX
+# listed-issues file (.xls). Also added to pyproject.toml's realdata extra
+# with the same version (this file and pyproject.toml are managed
+# independently; the compiled requirements.txt is what actually determines
+# the deployed Lambda dependencies, so adding it to only one of the two would
+# silently drop it in production).
+xlrd>=2.0,<3.0
+# Weekly improvement review revamp (2026-08): GitHub App JWT auth for the
+# GitHub Issue integration (infrastructure/github/client.py, used by
+# WeeklyReviewFunction only). The [crypto] extra pulls in the cryptography
+# package needed for RS256 signing (not otherwise present in this layer).
+PyJWT[crypto]>=2.10,<3.0
+# Explicit for two reasons (Issue #35): (1) pandas/pydantic declare tzdata
+# only under sys_platform == "win32" markers, so the pre-lock production
+# layers (built by pip on a Windows host) always contained it, and the
+# initial lock must match that verified set exactly; (2) it guarantees the
+# IANA timezone database for zoneinfo on the Lambda runtime regardless of
+# what the OS image ships. Do not remove without a dedicated issue.
+tzdata>=2026.3,<2027.0
