@@ -1440,6 +1440,34 @@ jstock calibration export-dataset --output dataset.jsonl \
   dedupしません(sample定義は行を削除せずsample_selected等の列で注釈)
 - horizon未到来はNOT_YET_EVALUABLE、到来済みで評価が無い行は
   EVALUATION_MISSINGとして残ります(黙って行を落としません)
+
+### 16.1 記述統計レポート(Phase C1、2026-08-28追加)
+
+exportしたdatasetから記述統計のanalysis artifact(JSONL)を生成できます。
+これも読み取り専用で、判定・閾値・スコアには一切影響しません。
+良いBUYの定義・優劣判定・閾値提案は含みません(将来のPhase C3で別途扱う)。
+
+```bash
+# sample定義は3種類: raw / non-overlapping-window / action-change
+jstock calibration export-dataset --output dataset.jsonl --sample-definition non-overlapping-window
+jstock calibration analyze --input dataset.jsonl --output report.jsonl
+```
+
+- **RAW datasetの注意**: 同一銘柄の日次Recommendation重複により行は独立標本では
+  ありません(SAMPLE_DEPENDENCY_WARNING)。記述統計・カバレッジ・到達率の
+  観察には使えますが、RAW行を独立と仮定した信頼区間・有意差・優劣判定には
+  使わないでください(analyzeもRAWにはWilson区間・bootstrapを付けません)
+- non-overlapping-window等も「独立性の保証」ではなく「同一銘柄内の重複window
+  によるpseudo-replicationの軽減」です(市場共通要因・セクター相関・
+  銘柄内の非重複window間依存は残ります)
+- 全horizonを独立表示します(60営業日は将来のprimary候補としてmetadataに
+  記載されるのみ。短期・中期・長期を1つの成功率へ混ぜません)
+- 小標本セルは数値を隠さずSMALL_SAMPLE_WARNINGを付与します(閾値は
+  分析パラメータとしてartifactのmetadataに記録)
+- benchmark将来リターンによるregime別集計はex-post層別です(LOOK-AHEAD。
+  予測特徴として使わないでください)
+- リターンはPRICE_ONLY(配当・優待・税・手数料を含まない)のままです
+
 ## 17. valuation集約仮説のshadow分析export(Issue #20 Phase C、2026-08-28追加)
 
 適正価格(Fair Value)の集約・grouping仮説を、保存済みRecommendationの

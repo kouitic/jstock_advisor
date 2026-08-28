@@ -69,12 +69,23 @@ class RowStatus(StrEnum):
 class SampleDefinition(StrEnum):
     RAW = "RAW"
     NON_OVERLAPPING_WINDOW = "NON_OVERLAPPING_WINDOW"
+    # Phase C1で追加: buy_action(既定)が直前のRecommendationから変化した
+    # 「判定変化イベント」のみを選択するannotation selector。行は削除しない。
+    ACTION_CHANGE = "ACTION_CHANGE"
 
 
 class SelectionReason(StrEnum):
     RAW = "RAW"
     FIRST_IN_WINDOW = "FIRST_IN_WINDOW"
     OVERLAPS_PRIOR_WINDOW = "OVERLAPS_PRIOR_WINDOW"
+    # ACTION_CHANGE selector用(Phase C1)
+    FIRST_OBSERVED = "FIRST_OBSERVED"
+    ACTION_CHANGED = "ACTION_CHANGED"
+    NO_ACTION_CHANGE = "NO_ACTION_CHANGE"
+
+
+# ACTION_CHANGE selectorの既定比較フィールド(metadataへ記録する)
+ACTION_CHANGE_COMPARISON_FIELD = "buy_action"
 
 
 # orphan EvaluationResult(親Recommendation欠損)のIDをdiagnosticsへ残す上限。
@@ -440,11 +451,16 @@ class CalibrationDatasetBuilder:
         # rowではなくmetadataにのみ「現在コードの解釈」として記録する。
         from jstock_advisor.providers.market_data.yfinance_impl import _BENCHMARK_TICKERS
 
+        selector_parameters: dict[str, Any] = {}
+        if sample_definition == SampleDefinition.ACTION_CHANGE:
+            selector_parameters["comparison_field"] = ACTION_CHANGE_COMPARISON_FIELD
+
         return {
             "record_type": "metadata",
             "calibration_dataset_schema_version": CALIBRATION_DATASET_SCHEMA_VERSION,
             "as_of": now.astimezone(dt.UTC).isoformat(),
             "sample_definition": sample_definition.value,
+            "sample_selector_parameters": selector_parameters,
             "row_count": row_count,
             "return_basis": "PRICE_ONLY",
             "return_basis_note": (
@@ -486,7 +502,57 @@ def _apply_sample_definition(
     if sample_definition == SampleDefinition.NON_OVERLAPPING_WINDOW:
         _apply_non_overlapping_window(rows)
         return
+    if sample_definition == SampleDefinition.ACTION_CHANGE:
+        _apply_action_change(rows)
+        return
     raise ValueError(f"unknown sample definition: {sample_definition}")
+
+
+def _apply_action_change(rows: list[CalibrationRow]) -> None:
+    """銘柄×horizon単位で、buy_actionが直前のRecommendationから変化した行のみを
+    sample_selected=trueにする(判定変化イベント単位のsample定義。Phase C1)。
+
+    行は削除しない。銘柄の最初のRecommendationはFIRST_OBSERVEDとして選択する。
+    比較フィールドはACTION_CHANGE_COMPARISON_FIELD(buy_action)固定で、
+    exportメタデータへ記録される(canonical raw datasetの行構造は不変)。
+    """
+    groups: dict[tuple[str, HorizonUnit, int], list[CalibrationRow]] = {}
+    for row in rows:
+        groups.setdefault((row.stock_code, row.horizon_unit, row.horizon_value), []).append(row)
+
+    for group_rows in groups.values():
+        group_rows.sort(
+            key=lambda r: (
+                r.recommendation_date_jst.isoformat(),
+                r.recommended_at.astimezone(dt.UTC).isoformat(),
+                r.recommendation_id,
+            )
+        )
+        previous_action: str | None = None
+        first = True
+        current_group_id = ""
+        for row in group_rows:
+            row.sample_definition = SampleDefinition.ACTION_CHANGE
+            if first:
+                row.sample_selected = True
+                row.selection_reason = SelectionReason.FIRST_OBSERVED
+                current_group_id = (
+                    f"{row.stock_code}|{row.horizon_unit.value}|{row.horizon_value}"
+                    f"|{row.recommendation_date_jst.isoformat()}"
+                )
+                first = False
+            elif row.buy_action != previous_action:
+                row.sample_selected = True
+                row.selection_reason = SelectionReason.ACTION_CHANGED
+                current_group_id = (
+                    f"{row.stock_code}|{row.horizon_unit.value}|{row.horizon_value}"
+                    f"|{row.recommendation_date_jst.isoformat()}"
+                )
+            else:
+                row.sample_selected = False
+                row.selection_reason = SelectionReason.NO_ACTION_CHANGE
+            row.sample_group_id = current_group_id
+            previous_action = row.buy_action
 
 
 def _apply_non_overlapping_window(rows: list[CalibrationRow]) -> None:
