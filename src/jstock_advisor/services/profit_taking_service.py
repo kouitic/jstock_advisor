@@ -994,6 +994,9 @@ class ProfitTakingService:
                 else None
             ),
             fair_value_unusable_reason=fv_range.unusable_reason,
+            # Issue #20 Phase B2-A: 判定入力financial dataのprovenance
+            # (snapshot構築時点の事実の転記のみ。観測専用・判定不変)。
+            financial_input_provenance=snapshot.financial_input_provenance,
             consecutive_actual_dividend_increase_years=(
                 dividend.consecutive_dividend_increase_years
             ),

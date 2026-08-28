@@ -247,3 +247,24 @@ def test_old_shape_recommendation_without_fair_value_usability_fields_loads(
     assert rec.fair_value_usable_for_trading_judgment is None
     assert rec.fair_value_unusable_reason_code is None
     assert rec.fair_value_unusable_reason is None
+
+
+# --- Issue #20 Phase B2-A(2026-08-28): financial_input_provenance ------------
+# fp1導入前の旧レコードはNone=NOT_CAPTUREDとして読む(現在値からのbackfill・
+# 推測は行わない)。
+
+
+def test_old_shape_recommendation_without_financial_input_provenance_loads(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "local_store"
+    store_dir.mkdir()
+    (store_dir / "recommendations.json").write_text(
+        json.dumps([_OLD_SHAPE_RECOMMENDATION]), encoding="utf-8"
+    )
+
+    repo = RecommendationRepository(store_dir=store_dir)
+    rec = repo.get("old-rec-1")
+
+    assert rec is not None
+    assert rec.financial_input_provenance is None  # NOT_CAPTURED

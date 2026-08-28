@@ -1306,6 +1306,9 @@ class BuySignalService:
             normalized_eps=eps_result.normalized_eps,
             eps_normalization_method=eps_result.method,
             valuation_methods=tuple(method_results),
+            # Issue #20 Phase B2-A: 判定入力financial dataのprovenance
+            # (snapshot構築時点の事実の転記のみ。観測専用・判定不変)。
+            financial_input_provenance=snapshot.financial_input_provenance,
             buy_decision_reasons=tuple(buy_decision_reasons),
             dividend_record_date_recurring_label=resolve_dividend_record_date_recurring_label(
                 dividend, financial.fiscal_year_end_month
