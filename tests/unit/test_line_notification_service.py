@@ -63,6 +63,7 @@ from jstock_advisor.services import line_notification_service as line_notificati
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
+    NotificationDeliveryResult,
     compute_watchlist_addition_content_hash,
     render_notification_preview,
     render_watchlist_addition_message,
@@ -5147,13 +5148,15 @@ def test_issue17_digest_double_finalize_pushes_once(service_and_repos) -> None:
     service._log_repo.save = original_save
 
     second = service.notify_buy_candidates_digest([rec], _I17_T1B, batch_id="batch-test")
-    assert second == {"2914": "SENT_AND_RECORDED"}
+    # Issue #36: claim抑止(repair)チャンクは、今回の実行がpushしていないため
+    # SENT_AND_RECORDEDではなくCLAIM_SUPPRESSEDを返す(repair挙動自体は不変)。
+    assert second == {"2914": "CLAIM_SUPPRESSED"}
     assert len(client.sent) == 1  # 再pushなし
     assert len(service._log_repo.list_all()) == 1  # repairで1件だけ保存
 
     # D: SENT claim + 全log存在 → 完全no-op(push・log追加とも無し)
     third = service.notify_buy_candidates_digest([rec], _I17_T1B, batch_id="batch-test")
-    assert third == {"2914": "SENT_AND_RECORDED"}
+    assert third == {"2914": "CLAIM_SUPPRESSED"}
     assert len(client.sent) == 1
     assert len(service._log_repo.list_all()) == 1
 
@@ -5189,7 +5192,9 @@ def test_issue17_digest_partial_log_failure_repairs_only_missing(service_and_rep
     service._log_repo.save = original_save
 
     second = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1B, batch_id="batch-test")
-    assert second == {"2914": "SENT_AND_RECORDED", "7203": "SENT_AND_RECORDED"}
+    # Issue #36: retry側はチャンクごとpushしていないため両銘柄ともCLAIM_SUPPRESSED
+    # (欠落logのrepairは従来どおり行われる)。
+    assert second == {"2914": "CLAIM_SUPPRESSED", "7203": "CLAIM_SUPPRESSED"}
     assert len(client.sent) == 1  # チャンク再pushなし
     logs = service._log_repo.list_all()
     assert len(logs) == 2  # Aは1件のまま(重複なし)、Bはrepairで補完
@@ -5223,7 +5228,9 @@ def test_issue17_digest_multi_chunk_resends_only_unsent_chunk(
     assert len(flaky.sent) == 1  # chunk1のみ送信済み
 
     second = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1B, batch_id="batch-test")
-    assert second == {"2914": "SENT_AND_RECORDED", "7203": "SENT_AND_RECORDED"}
+    # Issue #36: 送信済みchunk1(2914)はclaim抑止=CLAIM_SUPPRESSED、今回実際に
+    # pushしたchunk2(7203)のみSENT_AND_RECORDED。
+    assert second == {"2914": "CLAIM_SUPPRESSED", "7203": "SENT_AND_RECORDED"}
     assert len(flaky.sent) == 2  # chunk1は再送されず、chunk2のみ送信
     assert sum("2914" in message for message in flaky.sent) == 1
     assert sum("7203" in message for message in flaky.sent) == 1
@@ -5407,6 +5414,273 @@ def test_issue17_digest_same_batch_retry_stable_across_jst_boundary(
     # JST日付が変わった後のretry(同一batch_id)
     second = service.notify_buy_candidates_digest([rec], _I17_JSTB2, batch_id="batch-jst")
 
-    assert second == {"2914": "SENT_AND_RECORDED"}
+    # Issue #36: retry側はpushしていないためCLAIM_SUPPRESSED(repair挙動は不変)。
+    assert second == {"2914": "CLAIM_SUPPRESSED"}
     assert len(client.sent) == 1  # 再pushなし(identityにJST日付を含まない)
     assert len(service._log_repo.list_all()) == 1  # repairのみ
+
+
+# --- Issue #36(2026-08-28): claim抑止結果の呼び出し側への透過 -----------------
+# claim機構(Issue #17)がpushを抑止したケースを、send系メソッドの戻り値
+# (NotificationDeliveryResult)とnotify_recommendation_with_statusの
+# sent=False/DUPLICATE_SUPPRESSEDへ正しく写すことを固定する。
+# 「送信件数=今回の実行が実際にLINEへpushした件数」というA基準の定義を検証する。
+# claim層の判定・遷移自体(identity・CAS・takeover・repair・TTL等)は
+# Issue #17のまま不変(上のissue17テスト群が回帰を固定する)。
+
+
+def test_issue36_normal_push_returns_pushed_and_sent_true(service_and_repos) -> None:
+    """ケース1: 通常push成功はPUSHEDを返し、with_statusは従来どおり
+    sent=True/SENT。"""
+    service, repo, client = service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="i36-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+
+    outcome = service.notify_recommendation_with_status(rec, _I17_T1)
+
+    assert outcome.sent is True
+    assert outcome.status == NotificationStatus.SENT
+    assert len(client.sent) == 1
+
+
+def test_issue36_send_methods_return_pushed_on_actual_push(service_and_repos) -> None:
+    """send系メソッドの戻り値None→NotificationDeliveryResult化の基本形:
+    実pushしたらPUSHED。"""
+    service, repo, client = service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="i36-2",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+    result = service.send_recommendation_notification(rec, _I17_T1)
+    assert result is NotificationDeliveryResult.PUSHED
+
+    attention = _make_attention_watch_recommendation(recommendation_id="i36-2b")
+    repo.save(attention)
+    attention_result = service.send_attention_notification(attention, _I17_T1)
+    assert attention_result is NotificationDeliveryResult.PUSHED
+    assert len(client.sent) == 2
+
+
+def test_issue36_read_based_dedup_unchanged(service_and_repos) -> None:
+    """ケース2: read-based dedup(同一価格・同日)は従来どおりclaimより前で
+    抑止される(sent=False)。claim層は関与しない(claimは増えない)。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="i36-3a",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation_with_status(rec1, _I17_T1).sent is True
+    assert len(service._claim_repo.list_all()) == 1
+
+    rec2 = _make_recommendation(
+        recommendation_id="i36-3b",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec2)
+    outcome = service.notify_recommendation_with_status(rec2, _I17_T1B)
+
+    assert outcome.sent is False
+    assert len(client.sent) == 1
+    assert len(service._claim_repo.list_all()) == 1  # claim層は関与していない
+
+
+def test_issue36_fresh_claim_conflict_maps_to_suppressed_in_flight(service_and_repos) -> None:
+    """ケース3: fresh CLAIMED競合(他実行が送信中)はSUPPRESSED_IN_FLIGHTを返し、
+    with_statusはsent=False/DUPLICATE_SUPPRESSED(以前はsent=True/SENTへ楽観計上
+    されていた不備の修正)。LINE pushなし・claim不変。"""
+    service, repo, client = service_and_repos
+    identity = _individual_identity(NotificationType.DAILY_BUY_CANDIDATES, "2914", _I17_T1)
+    other = NotificationClaim(
+        claim_id=compute_claim_id(identity),
+        identity=identity,
+        claim_token="other-execution-token",
+        status=NotificationClaimStatus.CLAIMED,
+        claimed_at=_I17_T1 - dt.timedelta(seconds=60),
+        sent_at=None,
+        evaluated_at=_I17_T1 - dt.timedelta(seconds=60),
+        notification_type=NotificationType.DAILY_BUY_CANDIDATES,
+        scope="2914",
+        members=[],
+    )
+    assert service._claim_repo.try_claim(other) is True
+    rec = _make_recommendation(
+        recommendation_id="i36-4",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+
+    result = service.send_recommendation_notification(rec, _I17_T1)
+    assert result is NotificationDeliveryResult.SUPPRESSED_IN_FLIGHT
+
+    outcome = service.notify_recommendation_with_status(rec, _I17_T1)
+    assert outcome.sent is False
+    assert outcome.status == NotificationStatus.DUPLICATE_SUPPRESSED
+    assert client.sent == []
+    claims = service._claim_repo.list_all()
+    assert len(claims) == 1
+    assert claims[0].claim_token == "other-execution-token"  # claim不変(#17維持)
+
+
+def test_issue36_sent_claim_repair_maps_to_suppressed_already_sent(service_and_repos) -> None:
+    """ケース4: SENT claim検出はSUPPRESSED_ALREADY_SENTを返し、欠落logの
+    repairは従来どおり行う(LINE再pushなし)。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="i36-5a",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    original_save = service._log_repo.save
+    service._log_repo.save = _raise_log_save
+    with pytest.raises(RuntimeError, match="log save failed"):
+        service.send_recommendation_notification(rec1, _I17_T1)
+    assert len(client.sent) == 1
+    service._log_repo.save = original_save
+
+    rec2 = _make_recommendation(
+        recommendation_id="i36-5b",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec2)
+    result = service.send_recommendation_notification(rec2, _I17_T1B)
+
+    assert result is NotificationDeliveryResult.SUPPRESSED_ALREADY_SENT
+    assert len(client.sent) == 1  # 再pushなし
+    assert len(service._log_repo.list_all()) == 1  # repairで1件だけ保存
+
+
+def test_issue36_with_status_maps_repair_to_duplicate_suppressed(service_and_repos) -> None:
+    """ケース4補足: 他実行がpush済み(SENT claim)だがlog・優先度記録が残る前に
+    crashした稀な窓では、read判定・CrossPipelinePriorityともSENDを許可して
+    claim層まで到達する。この場合もwith_statusはsent=False/DUPLICATE_SUPPRESSED
+    を返す(holdings側sent系集計が増えない。以前はsent=True/SENTへ楽観計上)。
+
+    (同一実行内で優先度記録まで完了している通常のretryは、claimより前の
+    DUPLICATE_STOCK_NOTIFICATIONで抑止される既存経路のまま=従来どおり
+    sent=False。ここではその手前の記録が無い並行crash窓を直接モデル化する。)"""
+    service, repo, client = service_and_repos
+    identity = _individual_identity(NotificationType.DAILY_BUY_CANDIDATES, "2914", _I17_T1)
+    other_sent = NotificationClaim(
+        claim_id=compute_claim_id(identity),
+        identity=identity,
+        claim_token="other-execution-token",
+        status=NotificationClaimStatus.SENT,
+        claimed_at=_I17_T1 - dt.timedelta(seconds=60),
+        sent_at=_I17_T1 - dt.timedelta(seconds=30),
+        evaluated_at=_I17_T1 - dt.timedelta(seconds=60),
+        notification_type=NotificationType.DAILY_BUY_CANDIDATES,
+        scope="2914",
+        members=[],  # 他実行のseed詳細はこのテストの対象外(repair no-op)
+    )
+    assert service._claim_repo.try_claim(other_sent) is True
+    rec = _make_recommendation(
+        recommendation_id="i36-6",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+
+    outcome = service.notify_recommendation_with_status(rec, _I17_T1)
+
+    assert outcome.sent is False
+    assert outcome.status == NotificationStatus.DUPLICATE_SUPPRESSED
+    assert client.sent == []  # 今回の実行はpushしていない
+
+
+def test_issue36_attention_repair_returns_suppressed_already_sent(service_and_repos) -> None:
+    """ATTENTION経路も同じ規約: SENT claim検出はSUPPRESSED_ALREADY_SENT
+    (repair済み・再pushなし)。"""
+    service, repo, client = service_and_repos
+    holding_id = build_holding_id("owner-a", "8136")
+    rec1 = _make_attention_watch_recommendation(recommendation_id="i36-7a").model_copy(
+        update={"owner": "owner-a", "holding_id": holding_id}
+    )
+    repo.save(rec1)
+    original_save = service._log_repo.save
+    service._log_repo.save = _raise_log_save
+    with pytest.raises(RuntimeError, match="log save failed"):
+        service.send_attention_notification(rec1, _I17_T1)
+    assert len(client.sent) == 1
+    service._log_repo.save = original_save
+
+    rec2 = _make_attention_watch_recommendation(recommendation_id="i36-7b").model_copy(
+        update={"owner": "owner-a", "holding_id": holding_id}
+    )
+    repo.save(rec2)
+    result = service.send_attention_notification(rec2, _I17_T1B)
+
+    assert result is NotificationDeliveryResult.SUPPRESSED_ALREADY_SENT
+    assert len(client.sent) == 1
+
+
+def test_issue36_push_exception_semantics_unchanged(service_and_repos) -> None:
+    """ケース5: push例外は従来どおり伝播し、補償deleteでretryが再送できる
+    (#17のBケースと同一。Issue #36は例外経路を変更せず、retry成功時は
+    PUSHEDが返る)。"""
+    service, repo, _client = service_and_repos
+    flaky = _FlakyLineClient(fail_on_calls={1})
+    service._client = flaky
+    rec = _make_recommendation(
+        recommendation_id="i36-8",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+    with pytest.raises(RuntimeError, match="push failed"):
+        service.send_recommendation_notification(rec, _I17_T1)
+    assert service._claim_repo.list_all() == []
+
+    result = service.send_recommendation_notification(rec, _I17_T1B)  # retry
+    assert result is NotificationDeliveryResult.PUSHED
+    assert len(flaky.sent) == 1
+
+
+def test_issue36_validation_and_dry_run_return_pushed(
+    validation_service_and_repos, tmp_path: Path
+) -> None:
+    """ケース6/7: VALIDATION(実push)・DRY_RUN(外部送信なし)はclaim無効の
+    従来経路のままPUSHEDを返す(claim抑止扱いにしない。sent=True等の既存
+    semanticsを変更しない)。"""
+    service, repo, client = validation_service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="i36-9",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+    result = service.send_recommendation_notification(rec, _I17_T1)
+    assert result is NotificationDeliveryResult.PUSHED
+    assert len(client.sent) == 1
+    assert service._claim_repo.list_all() == []
+
+    store_dir = tmp_path / "dry_run_store"
+    dry_run_claims = NotificationClaimRepository(store_dir=store_dir)
+    dry_service = LineNotificationService(
+        line_client=_FakeLineClient(),
+        notification_log_repository=NotificationLogRepository(store_dir=store_dir),
+        recommendation_repository=RecommendationRepository(store_dir=store_dir),
+        config=_CONFIG,
+        execution_context=ExecutionContext(
+            mode=ExecutionMode.VALIDATION, notification_mode=NotificationMode.DRY_RUN
+        ),
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
+        notification_claim_repository=dry_run_claims,
+    )
+    dry_result = dry_service.send_recommendation_notification(rec, _I17_T1)
+    assert dry_result is NotificationDeliveryResult.PUSHED
+    assert dry_run_claims.list_all() == []

@@ -17,6 +17,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
+from enum import StrEnum
 from typing import Literal
 
 from jstock_advisor.config.models import AppConfig
@@ -122,8 +123,21 @@ logger.setLevel(logging.INFO)
 # 送信対象ではあったが意図的に外部送信しなかった、という意味を明示するためこの
 # 名称にしている。SENT_AND_RECORDED/SENT_LOG_FAILED(通知済み)にも
 # SEND_FAILED(送信失敗)にも計上しない、独立した状態として扱うこと。
+# CLAIM_SUPPRESSED(Issue #36)は、claim機構(Issue #17)が「同一の送信決定は
+# 他実行が送信済み(repair済み)またはpush実行中」と判定し、この実行では
+# LINE pushを行わなかったチャンクの銘柄を表す。通知自体は論理的には届いている
+# (別実行が送信した/している)が、「今回の実行が実際にpushした件数」には
+# 含めない。通知済み(SENT_AND_RECORDED等)にも送信失敗(SEND_FAILED)にも
+# 計上しない独立した状態として扱うこと(呼び出し側はother_suppressedへ計上する。
+# 以前はSENT_AND_RECORDEDとして楽観計上しており、サマリーの「通知済み」件数が
+# 実際のpush件数より過大になる表示不備があった)。
 BuyDigestSendOutcome = Literal[
-    "SENT_AND_RECORDED", "SENT_VALIDATION", "WOULD_SEND_DRY_RUN", "SENT_LOG_FAILED", "SEND_FAILED"
+    "SENT_AND_RECORDED",
+    "SENT_VALIDATION",
+    "WOULD_SEND_DRY_RUN",
+    "SENT_LOG_FAILED",
+    "SEND_FAILED",
+    "CLAIM_SUPPRESSED",
 ]
 
 # コードレビュー対応(2026-08、LINE通知/監査分離): 短文通知に対して従来の
@@ -198,6 +212,38 @@ class _ClaimAcquisition:
     @property
     def should_push(self) -> bool:
         return self.decision in ("push", "disabled")
+
+
+class NotificationDeliveryResult(StrEnum):
+    """個別通知send系メソッドの配送結果(Issue #36)。
+
+    claim機構(Issue #17)導入により「pushせずに正常終了する経路」が生まれたが、
+    send系メソッドが戻り値を持たなかったため、呼び出し側(notify_recommendation_
+    with_status)がclaim抑止を検知できず、常にsent=True/SENTを返してサマリー・
+    監査の送信件数が過大計上される表示不備があった。この結果値で「今回の実行が
+    実際にLINEへpushしたか」を呼び出し側へ透過させる。claimの判定・遷移自体には
+    一切関与しない(claim層の意味論はIssue #17のまま不変)。
+
+    PUSHED: 今回の実行がLINEへpushした(claim無効時の従来送信を含む)。
+    SUPPRESSED_ALREADY_SENT: 同一identityが既にSENT済みで、欠落NotificationLogの
+        repairのみ行った(pushなし)。
+    SUPPRESSED_IN_FLIGHT: 他実行がfresh CLAIMEDで処理中等のため今回はpushしない。
+
+    表示・集計上は両SUPPRESSED_*を同一(sent=False/DUPLICATE_SUPPRESSED)として
+    扱ってよいが、「repairした」/「他実行が処理中だった」という意味の区別を
+    コード・ログ上で失わないため、値としては分離したままにする。
+    """
+
+    PUSHED = "PUSHED"
+    SUPPRESSED_ALREADY_SENT = "SUPPRESSED_ALREADY_SENT"
+    SUPPRESSED_IN_FLIGHT = "SUPPRESSED_IN_FLIGHT"
+
+
+def _suppressed_delivery_result(acquisition: _ClaimAcquisition) -> NotificationDeliveryResult:
+    """push抑止(should_push=False)となった_ClaimAcquisitionを配送結果へ写す。"""
+    if acquisition.decision == "repaired":
+        return NotificationDeliveryResult.SUPPRESSED_ALREADY_SENT
+    return NotificationDeliveryResult.SUPPRESSED_IN_FLIGHT
 
 
 def resolve_notification_category(recommendation: Recommendation) -> NotificationCategory:
@@ -1874,9 +1920,23 @@ class LineNotificationService:
         if outcome.status != NotificationStatus.SENT or outcome.data_quality_blocked:
             return outcome
         if outcome.notification_intent is NotificationIntent.ATTENTION:
-            self.send_attention_notification(recommendation, now)
+            delivery = self.send_attention_notification(recommendation, now)
         else:
-            self.send_recommendation_notification(recommendation, now)
+            delivery = self.send_recommendation_notification(recommendation, now)
+        # Issue #36: claim機構(Issue #17)がpushを抑止した場合(同一identityが
+        # SENT済み/他実行がfresh CLAIMEDで処理中)、今回の実行は送信していない
+        # ためsent=Trueを返さない。statusは既存のDUPLICATE_SUPPRESSEDを再利用
+        # する(read-based dedupと同じ「重複のため送らなかった」区分。claim由来
+        # か否かの区別は、send側のINFOログとNotificationDeliveryResultで追跡
+        # できるため、ユーザー向けNotificationStatusは細分化しない)。これに
+        # より呼び出し側(holdings_watchlist_handler等)のsent集計・監査の
+        # summary_category(再通知抑止)が自動的に正確になる。
+        if delivery is not NotificationDeliveryResult.PUSHED:
+            return NotificationOutcome(
+                status=NotificationStatus.DUPLICATE_SUPPRESSED,
+                sent=False,
+                notification_intent=outcome.notification_intent,
+            )
         return NotificationOutcome(
             status=NotificationStatus.SENT,
             sent=True,
@@ -2330,12 +2390,15 @@ class LineNotificationService:
 
     def send_recommendation_notification(
         self, recommendation: Recommendation, now: dt.datetime
-    ) -> None:
+    ) -> NotificationDeliveryResult:
         """recommendationの通知メッセージを条件判定なしで送信する。
 
         呼び出し前にevaluate_notification_statusでstatus==SENTかつ
         data_quality_blocked=Falseであることを確認していること
         (このメソッド自体は再通知抑止・データ品質チェックを一切行わない)。
+
+        戻り値(Issue #36)は今回の実行が実際にLINEへpushしたかを表す
+        (claim抑止時はSUPPRESSED_*を返す。push失敗時は従来どおり例外を伝播する)。
         """
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         message = _render_notification_body(
@@ -2371,7 +2434,7 @@ class LineNotificationService:
                 acquisition.decision,
                 recommendation.stock_code,
             )
-            return
+            return _suppressed_delivery_result(acquisition)
         try:
             self._push(
                 message,
@@ -2411,8 +2474,11 @@ class LineNotificationService:
                     holding_id=recommendation.holding_id,
                 )
             )
+        return NotificationDeliveryResult.PUSHED
 
-    def send_watch_end_notification(self, recommendation: Recommendation, now: dt.datetime) -> None:
+    def send_watch_end_notification(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationDeliveryResult:
         """NEAR BUY監視の終了通知を送信する(コードレビュー対応2026-08、§3)。
 
         `recommendation`はその日の通常評価で生成されたRecommendation
@@ -2425,6 +2491,9 @@ class LineNotificationService:
         通常のrecommendation_type別本文とは別の専用テキスト
         (`build_watch_end_text_input()`)を使うため、
         `send_recommendation_notification()`とは独立したメソッドとする。
+
+        戻り値(Issue #36)は今回の実行が実際にLINEへpushしたかを表す
+        (send_recommendation_notification()と同じ規約)。
         """
         text_input = build_watch_end_text_input(recommendation)
         message = format_notification_text(text_input)
@@ -2456,7 +2525,7 @@ class LineNotificationService:
                 acquisition.decision,
                 recommendation.stock_code,
             )
-            return
+            return _suppressed_delivery_result(acquisition)
         try:
             self._push(
                 message,
@@ -2485,8 +2554,11 @@ class LineNotificationService:
                     holding_id=recommendation.holding_id,
                 )
             )
+        return NotificationDeliveryResult.PUSHED
 
-    def send_attention_notification(self, recommendation: Recommendation, now: dt.datetime) -> None:
+    def send_attention_notification(
+        self, recommendation: Recommendation, now: dt.datetime
+    ) -> NotificationDeliveryResult:
         """Profit Protection ATTENTION通知(2026-08、通知意図3段階化)を送信する。
 
         呼び出し前提: evaluate_notification_statusでnotification_intent==ATTENTION
@@ -2497,6 +2569,9 @@ class LineNotificationService:
         (build_attention_text_input()がcategory=WATCHのNotificationTextInputを
         生成し、format_notification_text()がPARTIAL_SELL以外では売却数量
         セグメントを構造上生成しないため)。
+
+        戻り値(Issue #36)は今回の実行が実際にLINEへpushしたかを表す
+        (send_recommendation_notification()と同じ規約)。
         """
         attention_origin = resolve_attention_origin_for_recommendation(recommendation)
         if attention_origin is None:
@@ -2536,7 +2611,7 @@ class LineNotificationService:
                 acquisition.decision,
                 recommendation.stock_code,
             )
-            return
+            return _suppressed_delivery_result(acquisition)
         try:
             self._push(
                 message,
@@ -2576,6 +2651,7 @@ class LineNotificationService:
                     holding_id=recommendation.holding_id,
                 )
             )
+        return NotificationDeliveryResult.PUSHED
 
     def notify_buy_candidates_digest(
         self, winners: list[Recommendation], now: dt.datetime, *, batch_id: str
@@ -2605,6 +2681,9 @@ class LineNotificationService:
         "SENT_LOG_FAILED"とする(二重送信を避けるため、このバッチ内では
         再送しない)。呼び出し側はSENT_LOG_FAILEDが1件でもあればLambda呼び出しを
         失敗させ、CloudWatch Logsで運用検知できるようにすること。
+        claim機構がチャンクのpushを抑止した場合(同一送信決定を別実行が送信済み/
+        送信中)は"CLAIM_SUPPRESSED"を返す(Issue #36)。呼び出し側は通知済みにも
+        送信失敗にも計上せず、独立した抑止区分として扱うこと。
         """
         if not winners:
             return {}
@@ -2691,10 +2770,10 @@ class LineNotificationService:
             if acquisition.decision in ("repaired", "suppressed"):
                 # 同一の送信決定は他実行が送信済み(repaired: NotificationLogも
                 # repair済み)またはpush実行中(suppressed)。チャンクは再送しない。
-                # resultsは既存のBuyDigestSendOutcome集合を維持するため
-                # SENT_AND_RECORDEDとして計上する(suppressedは送信中の他実行が
-                # 完了する前提の楽観的な計上。稀な競合時のサマリー表示件数のみに
-                # 影響し、判定・再送制御・NotificationLogには影響しない)。
+                # Issue #36: 以前はSENT_AND_RECORDEDとして楽観計上していたが、
+                # 今回の実行はpushしていないため「通知済み」件数に含めない。
+                # 専用のCLAIM_SUPPRESSEDを返し、呼び出し側が「その他抑止」へ
+                # 計上する(判定・再送制御・NotificationLogには影響しない)。
                 logger.info(
                     "notify_buy_candidates_digest: chunk %d/%d suppressed by claim (%s)",
                     index,
@@ -2702,7 +2781,7 @@ class LineNotificationService:
                     acquisition.decision,
                 )
                 for rec, _ in chunk:
-                    results[rec.stock_code] = "SENT_AND_RECORDED"
+                    results[rec.stock_code] = "CLAIM_SUPPRESSED"
                 continue
 
             try:
