@@ -12,6 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from jstock_advisor.domain.entities.enums import FinancialIndustryCategory
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -46,7 +48,13 @@ class CorporateEventsScreening(StrictModel):
 
 class IndustrySpecificRules(StrictModel):
     financial_sector_action: str
-    target_industry_classification: list[str]
+    # Issue #29(2026-08-28): 旧形式はTSE33業種の日本語ラベル(例: "銀行業")の
+    # リストだったが、判定対象のindustry値はyfinance由来の英語GICS値
+    # (例: "Banks - Diversified")のため一度も一致せず、金融業除外が機能して
+    # いなかった。classify_industry()(domain/classification/financial_industry.py)
+    # の金融細分類enum値で指定する形式へ変更。不正な値はconfigロード時に
+    # pydanticのenum検証でfail-fastする。
+    target_industry_classification: list[FinancialIndustryCategory]
 
 
 class DataQualityRules(StrictModel):

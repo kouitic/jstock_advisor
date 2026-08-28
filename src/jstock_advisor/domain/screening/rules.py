@@ -12,6 +12,8 @@ from decimal import Decimal
 
 from jstock_advisor.config.models import ScreeningRulesConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.classification.financial_industry import classify_industry
+from jstock_advisor.domain.entities.enums import IndustryClassification
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.interfaces.types import Disclosure, DividendInfo, FinancialSummary
 
@@ -145,10 +147,22 @@ def evaluate_screening(
                 f"平均売買代金{average_trading_value_yen:,.0f}円が基準{min_value:,}円未満"
             )
 
+    # Issue #29(2026-08-28): 以前はconfigの日本語TSE33ラベルとyfinance由来の
+    # 英語industry値を直接比較しており一度も一致しなかった(金融業除外が機能して
+    # いなかった)。保有判断スコア・SELL側と同じ既存分類器classify_industry()を
+    # 唯一の判定ソースとして使う。UNKNOWN(sector欠損・未知値)は金融業と推測して
+    # 除外しない(通過)。
     industry_rules = config.industry_specific_rules
-    if financial.industry in industry_rules.target_industry_classification:
+    industry_result = classify_industry(financial.sector, financial.industry)
+    if (
+        industry_result.classification == IndustryClassification.FINANCIAL
+        and industry_result.financial_category in industry_rules.target_industry_classification
+    ):
         action = industry_rules.financial_sector_action
-        message = f"業種({financial.industry})は個別評価ルール未実装のため対象外"
+        message = (
+            f"金融業({industry_result.financial_category}: {financial.industry})は"
+            "個別評価ルール未実装のため対象外"
+        )
         if action == "exclude_with_warning":
             reasons.append(message)
         elif action != "custom_rules":
