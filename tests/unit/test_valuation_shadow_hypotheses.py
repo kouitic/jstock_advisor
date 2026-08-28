@@ -58,6 +58,25 @@ def test_exploratory_hypothesis_carries_derivation_note() -> None:
         assert h.derivation_note
 
 
+def test_c1c_is_canonicalized_into_h_d_per_pbr_pair() -> None:
+    """設計候補C1c({per,pbr}|{target_yield}|{dcf}|{historical_range})は
+    H_D_PER_PBR_PAIRと概念的に同一のため、vh1では別仮説として二重登録せず
+    H_Dへcanonicalizeする(aliasで機械可読に記録)。"""
+    c1c_conceptual_definition = {
+        frozenset({"per", "pbr"}),
+        frozenset({"target_yield"}),
+        frozenset({"dcf"}),
+        frozenset({"historical_range"}),
+    }
+    h_d = next(h for h in ALL_HYPOTHESES if h.hypothesis_id == "H_D_PER_PBR_PAIR")
+    assert h_d.clusters is not None
+    assert set(h_d.clusters) == c1c_conceptual_definition
+    assert "C1c" in h_d.aliases
+    # 同一分割を持つ仮説が重複登録されていないこと
+    partitions = [set(h.clusters) for h in ALL_HYPOTHESES if h.clusters is not None]
+    assert len(partitions) == len({frozenset(p) for p in partitions})
+
+
 def test_clusters_are_valid_partitions_of_standard_methods() -> None:
     for h in ALL_HYPOTHESES:
         if h.clusters is None:

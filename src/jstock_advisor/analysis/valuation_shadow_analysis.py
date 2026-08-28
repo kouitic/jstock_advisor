@@ -53,6 +53,10 @@ from jstock_advisor.domain.valuation.valuation_taxonomy import (
 
 VALUATION_SHADOW_EXPORT_SCHEMA_VERSION = "vs1"
 
+# H_A再構成self-checkの許容誤差(vs1では厳密一致=0。判定時点の保存値からの
+# 再構成であり丸めの帳尻合わせを許さない。現在config等から取得しない)。
+RECONSTRUCTION_TOLERANCE = Decimal("0")
+
 
 class ReconstructionStatus(StrEnum):
     """H_A×BUY_DECISIONでのsaved anchor再構成self-checkの結果。"""
@@ -121,16 +125,21 @@ def _reconstruction(
             continue
         delta = abs(candidate - saved_anchor)
         deltas.append(delta)
-        if delta == 0:
-            return status, candidate, "0"
+        if delta <= RECONSTRUCTION_TOLERANCE:
+            # delta=0のスケール表現("0.000"等)は情報を持たないため"0"へ正規化
+            return status, candidate, "0" if delta == 0 else str(delta)
     if not deltas:
         return ReconstructionStatus.RECONSTRUCTION_MISMATCH, None, None
     return ReconstructionStatus.RECONSTRUCTION_MISMATCH, None, str(min(deltas))
 
 
 def _unavailable_row(
-    recommendation: Recommendation, observation: ValuationSpreadObservation
+    recommendation: Recommendation,
+    observation: ValuationSpreadObservation,
+    hypothesis: ValuationHypothesis,
 ) -> dict[str, object]:
+    """canonical grain(1 Rec×1 context×1 仮説)をUNAVAILABLEでも維持する。
+    仮説計算値(population/anchors等)は計算不能としてNone(推測計算はしない)。"""
     return {
         "recommendation_id": recommendation.recommendation_id,
         "stock_code": recommendation.stock_code,
@@ -139,8 +148,12 @@ def _unavailable_row(
         "context": observation.context.value,
         "observation_status": observation.status.value,
         "unavailable_reason": observation.unavailable_reason,
-        "hypothesis_id": None,
-        "hypothesis_origin": None,
+        "hypothesis_id": hypothesis.hypothesis_id,
+        "hypothesis_origin": hypothesis.origin.value,
+        "population": None,
+        "population_count": None,
+        "population_spread_ratio": None,
+        "anchors": None,
     }
 
 
@@ -262,7 +275,12 @@ def build_shadow_rows(recommendation: Recommendation) -> list[dict[str, object]]
     rows: list[dict[str, object]] = []
     for observation in derive_spread_observations(recommendation):
         if observation.status is ObservationStatus.OBSERVATION_UNAVAILABLE:
-            rows.append(_unavailable_row(recommendation, observation))
+            # canonical grain統一: UNAVAILABLEでも全仮説分の行を生成する
+            # (仮説別denominator・unavailable率を後段で計算可能にする)。
+            rows.extend(
+                _unavailable_row(recommendation, observation, hypothesis)
+                for hypothesis in ALL_HYPOTHESES
+            )
             continue
         for hypothesis in ALL_HYPOTHESES:
             values_by_method = dict(observation.values)
@@ -291,9 +309,15 @@ def build_shadow_rows(recommendation: Recommendation) -> list[dict[str, object]]
 
 @dataclass(frozen=True)
 class ShadowExportResult:
+    """row_countはraw shadow行数(1 Rec×1 context×1 仮説、metadata行を除く)。
+    unavailable_shadow_row_countは仮説展開後のUNAVAILABLE行数、
+    unavailable_context_countは観測不能だった(Recommendation, context)組数
+    (=展開前の件数)。両者を混同しないこと。"""
+
     row_count: int
     recommendation_count: int
-    unavailable_row_count: int
+    unavailable_shadow_row_count: int
+    unavailable_context_count: int
     reconstruction_mismatch_count: int
 
 
@@ -316,6 +340,7 @@ def build_metadata(
                     else [sorted(cluster) for cluster in h.clusters]
                 ),
                 "derivation_note": h.derivation_note,
+                "aliases": list(h.aliases),
             }
             for h in ALL_HYPOTHESES
         ],
@@ -359,11 +384,14 @@ def write_shadow_export(
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
-    unavailable = sum(
-        1
+    unavailable_rows = [
+        row
         for row in rows
         if row["observation_status"] == ObservationStatus.OBSERVATION_UNAVAILABLE.value
-    )
+    ]
+    unavailable_contexts = {
+        (row["recommendation_id"], row["context"]) for row in unavailable_rows
+    }
     mismatch = sum(
         1
         for row in rows
@@ -374,7 +402,8 @@ def write_shadow_export(
     return ShadowExportResult(
         row_count=len(rows),
         recommendation_count=len(ordered),
-        unavailable_row_count=unavailable,
+        unavailable_shadow_row_count=len(unavailable_rows),
+        unavailable_context_count=len(unavailable_contexts),
         reconstruction_mismatch_count=mismatch,
     )
 
@@ -402,6 +431,12 @@ def _write_summary(rows: list[dict[str, object]], summary_path: Path) -> None:
         for row in rows
         if row.get("reconstruction_status") == ReconstructionStatus.RECONSTRUCTION_MISMATCH.value
     }
+    # 単位の定義(§件数semantics):
+    # - raw shadow row = 1 Recommendation×1 context×1 仮説(UNAVAILABLE含む)
+    # - sample_count = そのcontext×仮説のAVAILABLE行数(mismatch除外後)
+    # - unavailable_row_count = そのcontext×仮説のUNAVAILABLE行数
+    # - _UNAVAILABLE_CONTEXTS_ = 観測不能な(Recommendation, context)組数
+    #   (仮説展開前の件数。shadow行数と混同しない)
     groups: dict[tuple[str, str], list[dict[str, object]]] = {}
     for row in rows:
         if row.get("hypothesis_id") is None:
@@ -416,6 +451,7 @@ def _write_summary(rows: list[dict[str, object]], summary_path: Path) -> None:
                 "context",
                 "hypothesis_id",
                 "sample_count",
+                "unavailable_row_count",
                 "reconstruction_excluded_count",
                 "anchor_delta_pct_representative_p25",
                 "anchor_delta_pct_representative_p50",
@@ -427,21 +463,33 @@ def _write_summary(rows: list[dict[str, object]], summary_path: Path) -> None:
                 "excluded_method_row_count",
             ]
         )
-        total_unavailable = sum(
-            1
+        unavailable_all = [
+            row
             for row in rows
             if row["observation_status"] == ObservationStatus.OBSERVATION_UNAVAILABLE.value
+        ]
+        unavailable_contexts = {
+            (row["recommendation_id"], row["context"]) for row in unavailable_all
+        }
+        writer.writerow(
+            ["_ALL_", "_UNAVAILABLE_SHADOW_ROWS_", "", len(unavailable_all)] + [""] * 9
         )
         writer.writerow(
-            ["_ALL_", "_UNAVAILABLE_ROWS_", total_unavailable] + [""] * 9
+            ["_ALL_", "_UNAVAILABLE_CONTEXTS_", "", len(unavailable_contexts)] + [""] * 9
         )
         for (context, hypothesis_id), group in sorted(groups.items()):
-            eligible = [
+            available = [
                 row
                 for row in group
+                if row["observation_status"] != ObservationStatus.OBSERVATION_UNAVAILABLE.value
+            ]
+            unavailable_count = len(group) - len(available)
+            eligible = [
+                row
+                for row in available
                 if (row["recommendation_id"], row["context"]) not in mismatch_keys
             ]
-            excluded_count = len(group) - len(eligible)
+            excluded_count = len(available) - len(eligible)
             deltas = [
                 d[REPRESENTATIVE_ANCHOR_FORMULA]
                 for row in eligible
@@ -460,6 +508,7 @@ def _write_summary(rows: list[dict[str, object]], summary_path: Path) -> None:
                     context,
                     hypothesis_id,
                     len(eligible),
+                    unavailable_count,
                     excluded_count,
                     d25,
                     d50,
