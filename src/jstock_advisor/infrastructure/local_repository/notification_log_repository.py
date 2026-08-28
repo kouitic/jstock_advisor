@@ -18,6 +18,11 @@ class NotificationLogRepository:
     def list_all(self) -> list[NotificationLog]:
         return self._store.list_all()
 
+    def get(self, notification_id: str) -> NotificationLog | None:
+        """notification_id単キーでの取得(Issue #17: claim repairが「対応する
+        NotificationLogが既に保存済みか」を確認するために使う)。"""
+        return self._store.get(notification_id)
+
     def list_by_stock_and_type(
         self, stock_code: str, notification_type: NotificationType
     ) -> list[NotificationLog]:

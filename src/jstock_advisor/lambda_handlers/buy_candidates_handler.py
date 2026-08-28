@@ -112,6 +112,9 @@ from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository
 from jstock_advisor.infrastructure.local_repository.latest_buy_candidate_batch_pointer_repository import (  # noqa: E501
     LatestBuyCandidateBatchPointerRepository,
 )
+from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
+    NotificationClaimRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -1591,6 +1594,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     notification_service = LineNotificationService(
         line_client=build_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
+        # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
+        # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
+        notification_claim_repository=NotificationClaimRepository(),
         recommendation_repository=recommendation_repo,
         config=config,
         execution_context=execution_context,

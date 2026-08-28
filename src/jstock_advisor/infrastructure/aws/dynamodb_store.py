@@ -171,6 +171,43 @@ class DynamoDbCollectionStore[T: BaseModel]:
                 return False
             raise
 
+    def replace_if_raw_matches(self, item_id: str, expected_raw_data: str, item: T) -> bool:
+        """`data`生JSONがexpected_raw_dataと完全一致する場合のみ原子的に置換する
+        (CAS。Issue #17。watchlist_rotation_state.py等の#data = :expected_data
+        楽観ロックパターンの汎用化)。条件不成立(値の不一致・項目の不存在)は
+        ConditionalCheckFailedExceptionを捕捉しFalseを返す。それ以外の
+        ClientError(スロットリング等の基盤エラー)はそのまま送出する。"""
+        del item_id  # PKはitem側のid_field値から導出される(引数はProtocol整合用)
+        try:
+            self._table.put_item(
+                Item=self._to_item(item),
+                ConditionExpression="#data = :expected_data",
+                ExpressionAttributeNames={"#data": "data"},
+                ExpressionAttributeValues={":expected_data": expected_raw_data},
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
+
+    def delete_if_raw_matches(self, item_id: str, expected_raw_data: str) -> bool:
+        """`data`生JSONがexpected_raw_dataと完全一致する場合のみ原子的に削除する
+        (条件付き削除。Issue #17)。条件不成立はFalse、その他のClientErrorは
+        そのまま送出する(replace_if_raw_matches()と同じ規約)。"""
+        try:
+            self._table.delete_item(
+                Key={self._id_field: item_id},
+                ConditionExpression="#data = :expected_data",
+                ExpressionAttributeNames={"#data": "data"},
+                ExpressionAttributeValues={":expected_data": expected_raw_data},
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
+
     def get_many(self, item_ids: Iterable[str]) -> dict[str, T]:
         """BatchGetItem(最大100件/リクエスト)で複数IDを一括取得する
         (対象確認機能2026-08、N+1回避)。1件ずつGetItemを呼ぶ実装へは

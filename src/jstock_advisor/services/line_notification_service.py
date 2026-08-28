@@ -51,6 +51,12 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
+from jstock_advisor.domain.entities.notification_claim import (
+    NotificationClaim,
+    NotificationClaimMember,
+    NotificationClaimStatus,
+    compute_claim_id,
+)
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst, format_jst
@@ -73,6 +79,9 @@ from jstock_advisor.infrastructure.local_repository.daily_notification_priority_
 )
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
+)
+from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
+    NotificationClaimRepository,
 )
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -155,6 +164,40 @@ _RECOMMENDATION_TO_NOTIFICATION_TYPE: dict[RecommendationType, NotificationType]
 }
 
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
+
+# --- LINE通知dedupの原子化(Issue #17) --------------------------------------
+# stale claim判定の閾値(秒)。CLAIMEDのままこの時間を超えたclaimは、取得した
+# 実行がpush前にcrash/timeoutしたとみなし、後続の同一identity実行がtakeover
+# して送信する(通知欠落よりも稀な二重通知を安全側とする承認済み方針)。
+# 値の根拠: claim機構を利用する全Lambda(infra/template.yaml)の設定Timeoutの
+# 最大値は buy-candidates / holdings-watchlist の900秒。実行中のLambdaが
+# 生存しているのにstale扱いしないよう、900秒+安全余裕300秒=1200秒とする。
+# TTL(30日、notification_claim_repository.py)はcleanup専用であり、この判定
+# には絶対に使わない(DynamoDB TTL削除は最大48時間程度遅延しうるため)。
+_CLAIM_STALE_AFTER_SECONDS = 1200
+
+
+@dataclass(frozen=True)
+class _ClaimAcquisition:
+    """claim取得試行の結果(Issue #17)。
+
+    decision:
+      "push"      : 送信権を取得した(claim/rawを保持。push成功後にSENT化、
+                    push失敗時に補償deleteへ使う)
+      "repaired"  : 同一identityが既にSENT済み。欠落していたNotificationLogの
+                    repairのみ行った(LINE pushはしない)
+      "suppressed": 他実行が処理中(fresh CLAIMED)等。LINE pushはしない
+      "disabled"  : claim機構が無効(リポジトリ未注入、またはVALIDATION/
+                    DRY_RUN)。従来どおり送信する(claim読み書きは一切ない)
+    """
+
+    decision: Literal["push", "repaired", "suppressed", "disabled"]
+    claim: NotificationClaim | None = None
+    raw: str | None = None
+
+    @property
+    def should_push(self) -> bool:
+        return self.decision in ("push", "disabled")
 
 
 def resolve_notification_category(recommendation: Recommendation) -> NotificationCategory:
@@ -1777,6 +1820,12 @@ class LineNotificationService:
         holdings_snapshot_repository: HoldingsSnapshotRepository | None = None,
         trade_detection_confirmed: bool = True,
         daily_notification_priority_repository: DailyNotificationPriorityRepository | None = None,
+        # LINE通知dedupの原子化(Issue #17)。Noneの場合claim機構は無効となり
+        # 従来のread-before-write dedupのみで動作する(後方互換)。本番の
+        # Lambdaハンドラ・CLIエントリポイントは必ずNotificationClaimRepository()
+        # を注入すること(注入漏れは並行実行時の二重送信防止が効かないことを
+        # 意味する)。テストはstore_dirを分離したインスタンスを注入する。
+        notification_claim_repository: NotificationClaimRepository | None = None,
     ) -> None:
         self._client = line_client
         self._log_repo = notification_log_repository
@@ -1803,6 +1852,8 @@ class LineNotificationService:
             daily_notification_priority_repository
             or DailyNotificationPriorityRepository.for_execution_context(execution_context)
         )
+        # --- LINE通知dedupの原子化(Issue #17) ---
+        self._claim_repo = notification_claim_repository
 
     def notify_recommendation(self, recommendation: Recommendation, now: dt.datetime) -> bool:
         """再通知条件を満たす場合のみLINEへ送信する。送信した場合Trueを返す。
@@ -2291,19 +2342,59 @@ class LineNotificationService:
             recommendation, self._config.notification.fair_value_large_spread_ratio
         )
         content_hash = _compute_content_hash(recommendation.recommendation_type)
-        self._push(
-            message,
-            notification_type=notification_type,
-            stock_code=recommendation.stock_code,
-            content_hash=content_hash,
-            related_recommendation_id=recommendation.recommendation_id,
-            now=now,
-        )
+        # Issue #17: 呼び出し前提(evaluate_notification_statusでSEND許可済み)の
+        # 送信決定を原子的に一意化する。identityは既存判定が確定した入力のみ:
+        # 通知種別・scope(#33のholding-scope基準と同一)・JST暦日(#23)・判定が
+        # 読んだ直近logのnotification_id(prev)。価格等はidentityへ含めない
+        # (正当な再送はprevまたはJST暦日の変化として現れるため、claim層が
+        # 再送判定を代行することはない)。
+        member = self._member_for_recommendation(recommendation, notification_type, content_hash)
+        scope = recommendation.holding_id or recommendation.stock_code
+        acquisition = _ClaimAcquisition(decision="disabled")
+        if self._claims_enabled():
+            identity = (
+                f"v1|individual|{notification_type.value}|{scope}|"
+                f"{evaluation_date_jst(now).isoformat()}|"
+                f"prev={self._prev_log_id_for_scope(recommendation, notification_type)}"
+            )
+            acquisition = self._acquire_send_claim(
+                identity=identity,
+                notification_type=notification_type,
+                scope=scope,
+                members=[member],
+                claimed_at=now,
+                evaluated_at=now,
+            )
+        if not acquisition.should_push:
+            logger.info(
+                "send_recommendation_notification suppressed by claim (%s) stock_code=%s",
+                acquisition.decision,
+                recommendation.stock_code,
+            )
+            return
+        try:
+            self._push(
+                message,
+                notification_type=notification_type,
+                stock_code=recommendation.stock_code,
+                content_hash=content_hash,
+                related_recommendation_id=recommendation.recommendation_id,
+                now=now,
+            )
+        except Exception:
+            # Issue #17: push失敗はclaimを補償deleteし、従来どおり例外を伝播する
+            # (Lambda retryが同一identityを再claimして再送できる)。
+            self._release_claim_after_push_failure(acquisition)
+            raise
+        self._mark_claim_sent(acquisition, now)
         self._record_daily_priority(recommendation, now)
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
-                    notification_id=str(uuid.uuid4()),
+                    # Issue #17: notification_idはclaim取得時に確定したseedの値を
+                    # 使う(この保存が失敗してもretryのrepairが同一レコードを
+                    # 保存するため、送信履歴の永久欠落と二重logの両方を防ぐ)。
+                    notification_id=member.notification_id,
                     notification_type=notification_type,
                     stock_code=recommendation.stock_code,
                     content_hash=content_hash,
@@ -2338,18 +2429,51 @@ class LineNotificationService:
         text_input = build_watch_end_text_input(recommendation)
         message = format_notification_text(text_input)
         content_hash = _compute_content_hash(recommendation.recommendation_type)
-        self._push(
-            message,
-            notification_type=NotificationType.WATCH_END,
-            stock_code=recommendation.stock_code,
-            content_hash=content_hash,
-            related_recommendation_id=recommendation.recommendation_id,
-            now=now,
+        # Issue #17: 個別通知と同じclaim方式(send_recommendation_notification()の
+        # コメント参照)。
+        member = self._member_for_recommendation(
+            recommendation, NotificationType.WATCH_END, content_hash
         )
+        scope = recommendation.holding_id or recommendation.stock_code
+        acquisition = _ClaimAcquisition(decision="disabled")
+        if self._claims_enabled():
+            identity = (
+                f"v1|individual|{NotificationType.WATCH_END.value}|{scope}|"
+                f"{evaluation_date_jst(now).isoformat()}|"
+                f"prev={self._prev_log_id_for_scope(recommendation, NotificationType.WATCH_END)}"
+            )
+            acquisition = self._acquire_send_claim(
+                identity=identity,
+                notification_type=NotificationType.WATCH_END,
+                scope=scope,
+                members=[member],
+                claimed_at=now,
+                evaluated_at=now,
+            )
+        if not acquisition.should_push:
+            logger.info(
+                "send_watch_end_notification suppressed by claim (%s) stock_code=%s",
+                acquisition.decision,
+                recommendation.stock_code,
+            )
+            return
+        try:
+            self._push(
+                message,
+                notification_type=NotificationType.WATCH_END,
+                stock_code=recommendation.stock_code,
+                content_hash=content_hash,
+                related_recommendation_id=recommendation.recommendation_id,
+                now=now,
+            )
+        except Exception:
+            self._release_claim_after_push_failure(acquisition)
+            raise
+        self._mark_claim_sent(acquisition, now)
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
-                    notification_id=str(uuid.uuid4()),
+                    notification_id=member.notification_id,
                     notification_type=NotificationType.WATCH_END,
                     stock_code=recommendation.stock_code,
                     content_hash=content_hash,
@@ -2383,14 +2507,49 @@ class LineNotificationService:
         text_input = build_attention_text_input(recommendation, attention_origin)
         message = format_notification_text(text_input)
         content_hash = _compute_attention_event_identity(recommendation)
-        self._push(
-            message,
-            notification_type=NotificationType.PROFIT_PROTECTION_ATTENTION,
-            stock_code=recommendation.stock_code,
-            content_hash=content_hash,
-            related_recommendation_id=recommendation.recommendation_id,
-            now=now,
+        # Issue #17: ATTENTIONのclaim identityは既存dedupと同じevent identity
+        # (basis_date|peak_date|peak_price)+prev(直近ATTENTION logのid)。日付は
+        # 含めない(同一局面は日数経過で再送しないという既存意味論のまま)。
+        # prevを含めるのは、局面がX→Y→Xと再来した場合に既存read判定が送信を
+        # 許可する(latestはY)のをclaimが妨げないようにするため。
+        member = self._member_for_recommendation(
+            recommendation, NotificationType.PROFIT_PROTECTION_ATTENTION, content_hash
         )
+        scope = recommendation.holding_id or recommendation.stock_code
+        acquisition = _ClaimAcquisition(decision="disabled")
+        if self._claims_enabled():
+            prev_log_id = self._prev_log_id_for_scope(
+                recommendation, NotificationType.PROFIT_PROTECTION_ATTENTION
+            )
+            identity = f"v1|attention|{scope}|{content_hash}|prev={prev_log_id}"
+            acquisition = self._acquire_send_claim(
+                identity=identity,
+                notification_type=NotificationType.PROFIT_PROTECTION_ATTENTION,
+                scope=scope,
+                members=[member],
+                claimed_at=now,
+                evaluated_at=now,
+            )
+        if not acquisition.should_push:
+            logger.info(
+                "send_attention_notification suppressed by claim (%s) stock_code=%s",
+                acquisition.decision,
+                recommendation.stock_code,
+            )
+            return
+        try:
+            self._push(
+                message,
+                notification_type=NotificationType.PROFIT_PROTECTION_ATTENTION,
+                stock_code=recommendation.stock_code,
+                content_hash=content_hash,
+                related_recommendation_id=recommendation.recommendation_id,
+                now=now,
+            )
+        except Exception:
+            self._release_claim_after_push_failure(acquisition)
+            raise
+        self._mark_claim_sent(acquisition, now)
         # 再コードレビュー対応(2026-08): send_recommendation_notification()と同様、
         # 実送信後にCross Pipeline Priority用の当日優先度を記録する(以前はこの
         # 呼び出しが無く、ATTENTION送信後もpriority 0のまま扱われ、後発の低優先度
@@ -2400,7 +2559,9 @@ class LineNotificationService:
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
-                    notification_id=str(uuid.uuid4()),
+                    # Issue #17: claim seedのnotification_idを使う(repairとの冪等性。
+                    # send_recommendation_notification()のコメント参照)。
+                    notification_id=member.notification_id,
                     notification_type=NotificationType.PROFIT_PROTECTION_ATTENTION,
                     stock_code=recommendation.stock_code,
                     content_hash=content_hash,
@@ -2479,6 +2640,62 @@ class LineNotificationService:
             if index == total_chunks:
                 message = "\n\n".join([message, "\n".join(footer)])
 
+            # Issue #17: チャンク単位claim + 銘柄単位repair seed(承認済み設計)。
+            # 外部副作用の単位(LINE push 1回=1チャンク)とclaimを一致させ、
+            # NotificationLogの銘柄単位意味論はmembers(seed)が維持する。
+            # identityはJST暦日(#23)+チャンク位置+チャンクの銘柄構成(順序含む)
+            # から構築する。個別通知と異なりprev(直近logのid)は【意図的に含めない】:
+            # チャンク内の一部銘柄だけNotificationLog保存が失敗した場合、retryが
+            # 同一winnersで再実行されるとprevが変化しidentityが不安定になり、
+            # 「retryではチャンクを再送せず欠落logだけrepairする」という要件が
+            # 成立しなくなるため。既知の保証限界: (1)同一JST日に同一銘柄構成の
+            # チャンクを正当に再送するケース(全構成銘柄が同日中に価格閾値以上
+            # 変動し、かつ同日中に再実行された場合)はclaimに抑止される(翌JST日に
+            # 自然回復する安全側の縮退)。(2)部分log保存失敗後にパイプライン全体が
+            # retryされ、eligibilityによりチャンク構成が変わった場合の再送可能性は
+            # 現行と同等のまま(claimで悪化はしない)。複数チャンクはチャンクごとに
+            # 独立したclaimとなる。
+            acquisition = _ClaimAcquisition(decision="disabled")
+            chunk_members: dict[str, NotificationClaimMember] = {}
+            if self._claims_enabled():
+                members: list[NotificationClaimMember] = []
+                for rec, _ in chunk:
+                    rec_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[rec.recommendation_type]
+                    rec_member = self._member_for_recommendation(
+                        rec, rec_type, _compute_content_hash(rec.recommendation_type)
+                    )
+                    members.append(rec_member)
+                    chunk_members[rec.stock_code] = rec_member
+                chunk_stocks = ",".join(rec.stock_code for rec, _ in chunk)
+                identity = (
+                    f"v1|buy_digest|{evaluation_date_jst(now).isoformat()}|"
+                    f"chunk={index}/{total_chunks}|stocks={chunk_stocks}"
+                )
+                acquisition = self._acquire_send_claim(
+                    identity=identity,
+                    notification_type=NotificationType.DAILY_BUY_CANDIDATES,
+                    scope=f"__buy_digest__:{index}/{total_chunks}",
+                    members=members,
+                    claimed_at=now,
+                    evaluated_at=now,
+                )
+            if acquisition.decision in ("repaired", "suppressed"):
+                # 同一の送信決定は他実行が送信済み(repaired: NotificationLogも
+                # repair済み)またはpush実行中(suppressed)。チャンクは再送しない。
+                # resultsは既存のBuyDigestSendOutcome集合を維持するため
+                # SENT_AND_RECORDEDとして計上する(suppressedは送信中の他実行が
+                # 完了する前提の楽観的な計上。稀な競合時のサマリー表示件数のみに
+                # 影響し、判定・再送制御・NotificationLogには影響しない)。
+                logger.info(
+                    "notify_buy_candidates_digest: chunk %d/%d suppressed by claim (%s)",
+                    index,
+                    total_chunks,
+                    acquisition.decision,
+                )
+                for rec, _ in chunk:
+                    results[rec.stock_code] = "SENT_AND_RECORDED"
+                continue
+
             try:
                 # コードレビュー対応(2026-08、通知ドライラン機能の監査二重記録整理):
                 # このチャンク単位の呼び出しはstock_code等を渡さないため、
@@ -2487,6 +2704,9 @@ class LineNotificationService:
                 # _record_dry_run_notification()を直接呼んで銘柄ごとに残す。
                 self._push(message, emit_dry_run_record=False)
             except Exception:  # noqa: BLE001 - LINE送信失敗は未送信として扱い処理を継続する
+                # Issue #17: claimを補償deleteしてから従来どおりSEND_FAILED扱い
+                # とする(Lambda retryが同一identityを再claimして再送できる)。
+                self._release_claim_after_push_failure(acquisition)
                 logger.exception(
                     "notify_buy_candidates_digest: push_message failed chunk=%d/%d",
                     index,
@@ -2496,6 +2716,7 @@ class LineNotificationService:
                     for rec, _ in remaining_chunk:
                         results[rec.stock_code] = "SEND_FAILED"
                 break
+            self._mark_claim_sent(acquisition, now)
 
             for recommendation, _ in chunk:
                 self._record_daily_priority(recommendation, now)
@@ -2533,10 +2754,18 @@ class LineNotificationService:
                 notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[
                     recommendation.recommendation_type
                 ]
+                # Issue #17: notification_idはclaim seedの値を使う(claim無効時のみ
+                # 新規uuid4)。log保存が一部失敗しても、retryのrepairがseedから
+                # 同一レコードを保存するため欠落logだけが補完される。
+                chunk_member = chunk_members.get(recommendation.stock_code)
                 try:
                     self._log_repo.save(
                         NotificationLog(
-                            notification_id=str(uuid.uuid4()),
+                            notification_id=(
+                                chunk_member.notification_id
+                                if chunk_member is not None
+                                else str(uuid.uuid4())
+                            ),
                             notification_type=notification_type,
                             stock_code=recommendation.stock_code,
                             content_hash=_compute_content_hash(recommendation.recommendation_type),
@@ -2742,12 +2971,43 @@ class LineNotificationService:
         lines.append("対応内容: 開示内容を確認し、投資前提に影響がないか確認してください。")
         lines.append(f"開示日時: {format_jst(published_at)}")
         lines.append(_DISCLAIMER)
-        self._push("\n".join(lines))
+        # Issue #17: claim identityは既存dedupと同じ「同一開示」のcontent_hash
+        # (stock_code|published_at|title)+prev。
+        member = NotificationClaimMember(
+            notification_id=str(uuid.uuid4()),
+            notification_type=NotificationType.IMPORTANT_DISCLOSURE,
+            stock_code=stock_code,
+            content_hash=content_hash,
+        )
+        acquisition = _ClaimAcquisition(decision="disabled")
+        if self._claims_enabled():
+            prev_log_id = latest.notification_id if latest is not None else "NONE"
+            acquisition = self._acquire_send_claim(
+                identity=f"v1|disclosure|{stock_code}|{content_hash}|prev={prev_log_id}",
+                notification_type=NotificationType.IMPORTANT_DISCLOSURE,
+                scope=stock_code,
+                members=[member],
+                claimed_at=now,
+                evaluated_at=now,
+            )
+        if not acquisition.should_push:
+            logger.info(
+                "disclosure_risk suppressed by claim (%s) stock_code=%s",
+                acquisition.decision,
+                stock_code,
+            )
+            return False
+        try:
+            self._push("\n".join(lines))
+        except Exception:
+            self._release_claim_after_push_failure(acquisition)
+            raise
+        self._mark_claim_sent(acquisition, now)
 
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
-                    notification_id=str(uuid.uuid4()),
+                    notification_id=member.notification_id,
                     notification_type=NotificationType.IMPORTANT_DISCLOSURE,
                     stock_code=stock_code,
                     content_hash=content_hash,
@@ -2927,10 +3187,15 @@ class LineNotificationService:
         # 通知検証モード機能(2026-08追加): このdedupは_notification_status_for_send
         # とは別に自前で持つ同日・同内容抑止のため、VALIDATIONでは別途バイパスする
         # (再送防止によって通知が抑止されないという要求を満たすため)。
+        # Issue #17: prev_log_idはclaim identityの`prev`要素(read判定が参照した
+        # 直近サマリーlogのid)。VALIDATIONではclaim機構自体が無効のため未使用。
+        prev_log_id = "NONE"
         if not self._execution_context.is_validation:
             latest = self._log_repo.latest_by_stock_and_type(
                 pseudo_stock_code, NotificationType.BATCH_SUMMARY
             )
+            if latest is not None:
+                prev_log_id = latest.notification_id
             if is_holdings_call:
                 # 保有株チェック完了サマリー(2026-08、通知意図3段階化)は「1営業日
                 # 1回」をJST暦日基準で保証する(UTC日付でdedupすると23:00 UTC=
@@ -2998,25 +3263,18 @@ class LineNotificationService:
             lines.append("")
             lines.append(f"評価日時：{format_jst(now)}")
             lines.append(_DISCLAIMER)
-            self._push(
-                "\n".join(lines),
-                notification_type=NotificationType.BATCH_SUMMARY,
-                stock_code=pseudo_stock_code,
+            # Issue #17: 保有株サマリーのclaim identityは既存dedupと同じ
+            # 「同一JST暦日1回」(#23で確定したJST calendar date)+prev。
+            return self._deliver_batch_summary(
+                message="\n".join(lines),
+                pseudo_stock_code=pseudo_stock_code,
                 content_hash=content_hash,
+                identity=(
+                    f"v1|batch_summary|{pseudo_stock_code}|"
+                    f"{evaluation_date_jst(now).isoformat()}|prev={prev_log_id}"
+                ),
                 now=now,
             )
-            if not self._execution_context.is_validation:
-                self._log_repo.save(
-                    NotificationLog(
-                        notification_id=str(uuid.uuid4()),
-                        notification_type=NotificationType.BATCH_SUMMARY,
-                        stock_code=pseudo_stock_code,
-                        content_hash=content_hash,
-                        sent_at=now,
-                        related_recommendation_id=None,
-                    )
-                )
-            return True
 
         # 買い候補サマリー表示改修(2026-08、要求仕様: 購入判定と通知結果の分離)。
         # 「購入判定」(判定状態、7区分・優先順位順)と「買い候補の通知結果」
@@ -3123,17 +3381,72 @@ class LineNotificationService:
         lines.append("")
         lines.append(f"評価日時：{format_jst(now)}")
         lines.append(_DISCLAIMER)
-        self._push(
-            "\n".join(lines),
+        # Issue #17: 既定書式(買い候補等)のclaim identityは既存dedupと同じ
+        # content_hash(#23によりJST暦日を内包)+prev。
+        return self._deliver_batch_summary(
+            message="\n".join(lines),
+            pseudo_stock_code=pseudo_stock_code,
+            content_hash=content_hash,
+            identity=(
+                f"v1|batch_summary|{pseudo_stock_code}|{content_hash}|prev={prev_log_id}"
+            ),
+            now=now,
+        )
+
+    def _deliver_batch_summary(
+        self,
+        *,
+        message: str,
+        pseudo_stock_code: str,
+        content_hash: str,
+        identity: str,
+        now: dt.datetime,
+    ) -> bool:
+        """バッチサマリーの送信+NotificationLog保存をclaimゲート付きで行う
+        (Issue #17。notify_batch_summary()の2書式共通の送信終端)。
+
+        claimに抑止された場合(同一送信決定を他実行が送信済み/送信中)はFalseを
+        返す(既存のdedup抑止時と同じ「送信しなかった」意味)。
+        """
+        member = NotificationClaimMember(
+            notification_id=str(uuid.uuid4()),
             notification_type=NotificationType.BATCH_SUMMARY,
             stock_code=pseudo_stock_code,
             content_hash=content_hash,
-            now=now,
         )
+        acquisition = _ClaimAcquisition(decision="disabled")
+        if self._claims_enabled():
+            acquisition = self._acquire_send_claim(
+                identity=identity,
+                notification_type=NotificationType.BATCH_SUMMARY,
+                scope=pseudo_stock_code,
+                members=[member],
+                claimed_at=now,
+                evaluated_at=now,
+            )
+        if not acquisition.should_push:
+            logger.info(
+                "batch_summary suppressed by claim (%s) pseudo_stock_code=%s",
+                acquisition.decision,
+                pseudo_stock_code,
+            )
+            return False
+        try:
+            self._push(
+                message,
+                notification_type=NotificationType.BATCH_SUMMARY,
+                stock_code=pseudo_stock_code,
+                content_hash=content_hash,
+                now=now,
+            )
+        except Exception:
+            self._release_claim_after_push_failure(acquisition)
+            raise
+        self._mark_claim_sent(acquisition, now)
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
-                    notification_id=str(uuid.uuid4()),
+                    notification_id=member.notification_id,
                     notification_type=NotificationType.BATCH_SUMMARY,
                     stock_code=pseudo_stock_code,
                     content_hash=content_hash,
@@ -3182,11 +3495,43 @@ class LineNotificationService:
             return False
 
         message = render_watchlist_addition_message(summary)
-        self._push(message)
+        # Issue #17: claim identityは既存dedupと同じcontent_hash(batch_id・評価
+        # 基準日・policy・追加銘柄一覧から成る再試行安定なhash)+prev。
+        # このメソッドはnow引数を持たないため、stale判定用のclaimed_atのみ
+        # 現在時刻を使う(evaluated_at=summary.evaluated_atは保存されるlogの
+        # sent_atと同一の既存意味論を維持する)。
+        member = NotificationClaimMember(
+            notification_id=str(uuid.uuid4()),
+            notification_type=NotificationType.WATCHLIST_AUTO_ADDITION,
+            stock_code=pseudo_stock_code,
+            content_hash=content_hash,
+        )
+        acquisition = _ClaimAcquisition(decision="disabled")
+        if self._claims_enabled():
+            prev_log_id = latest.notification_id if latest is not None else "NONE"
+            acquisition = self._acquire_send_claim(
+                identity=f"v1|watchlist_addition|{content_hash}|prev={prev_log_id}",
+                notification_type=NotificationType.WATCHLIST_AUTO_ADDITION,
+                scope=pseudo_stock_code,
+                members=[member],
+                claimed_at=dt.datetime.now(dt.UTC),
+                evaluated_at=summary.evaluated_at,
+            )
+        if not acquisition.should_push:
+            logger.info(
+                "watchlist_auto_addition suppressed by claim (%s)", acquisition.decision
+            )
+            return False
+        try:
+            self._push(message)
+        except Exception:
+            self._release_claim_after_push_failure(acquisition)
+            raise
+        self._mark_claim_sent(acquisition, dt.datetime.now(dt.UTC))
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
-                    notification_id=str(uuid.uuid4()),
+                    notification_id=member.notification_id,
                     notification_type=NotificationType.WATCHLIST_AUTO_ADDITION,
                     stock_code=pseudo_stock_code,
                     content_hash=content_hash,
@@ -3209,6 +3554,202 @@ class LineNotificationService:
                 recommendation.holding_id, notification_type
             )
         return self._log_repo.latest_by_stock_and_type(recommendation.stock_code, notification_type)
+
+    # --- LINE通知dedupの原子化(Issue #17) ----------------------------------
+    # claim層は独自の再送判定を一切行わない。各send系メソッドが「既存の
+    # read-based dedup判定がSENDを許可した後」に、その送信決定を一意化する
+    # identity(既存判定が確定した入力のみから構築)でclaimを取得し、取得できた
+    # 1実行だけがLINE pushを行う。VALIDATION/DRY_RUNではclaim機構を完全に
+    # 使用しない(read/write/takeover/SENT化/repairのいずれもなし)。
+
+    def _claims_enabled(self) -> bool:
+        return self._claim_repo is not None and not self._execution_context.is_validation
+
+    def _member_for_recommendation(
+        self,
+        recommendation: Recommendation,
+        notification_type: NotificationType,
+        content_hash: str,
+    ) -> NotificationClaimMember:
+        """Recommendation由来の通知のrepair seed。owner/holding_id(Issue #33の
+        scope転記)を必ず含め、repair経由でもholding-scope semanticsを維持する。"""
+        return NotificationClaimMember(
+            notification_id=str(uuid.uuid4()),
+            notification_type=notification_type,
+            stock_code=recommendation.stock_code,
+            content_hash=content_hash,
+            related_recommendation_id=recommendation.recommendation_id,
+            owner=recommendation.owner,
+            holding_id=recommendation.holding_id,
+        )
+
+    def _prev_log_id_for_scope(
+        self, recommendation: Recommendation, notification_type: NotificationType
+    ) -> str:
+        """claim identityの`prev`要素: 既存read判定が参照する「直近送信実績」の
+        notification_id(無ければ"NONE")。#33でscope-aware化された読み取りを
+        そのまま使う(claim層で独自のscope解決を再実装しない)。"""
+        latest = self._latest_log_for_recommendation_scope(recommendation, notification_type)
+        return latest.notification_id if latest is not None else "NONE"
+
+    def _acquire_send_claim(
+        self,
+        *,
+        identity: str,
+        notification_type: NotificationType,
+        scope: str,
+        members: list[NotificationClaimMember],
+        claimed_at: dt.datetime,
+        evaluated_at: dt.datetime,
+    ) -> _ClaimAcquisition:
+        """送信決定identityに対するclaimを原子的に取得する。
+
+        戻り値のdecisionに従い、呼び出し側は"push"/"disabled"のときだけ
+        LINE pushを行うこと。claim基盤の予期しないエラー
+        (ConditionalCheckFailed以外のDynamoDBエラー等)は捕捉せずそのまま
+        送出する(dedup保証なしの送信経路を作らない。Lambda retryで回復する)。
+        """
+        if not self._claims_enabled():
+            return _ClaimAcquisition(decision="disabled")
+        assert self._claim_repo is not None
+        claim = NotificationClaim(
+            claim_id=compute_claim_id(identity),
+            identity=identity,
+            claim_token=str(uuid.uuid4()),
+            status=NotificationClaimStatus.CLAIMED,
+            claimed_at=claimed_at,
+            sent_at=None,
+            evaluated_at=evaluated_at,
+            notification_type=notification_type,
+            scope=scope,
+            members=members,
+        )
+        if self._claim_repo.try_claim(claim):
+            return _ClaimAcquisition(decision="push", claim=claim, raw=claim.model_dump_json())
+
+        raw = self._claim_repo.get_raw(claim.claim_id)
+        if raw is None:
+            # 直前に補償delete等で消えた稀な競合。1回だけ取り直しを試み、
+            # それでも取れなければ他実行に委ねる(次回同一identity実行で回復)。
+            if self._claim_repo.try_claim(claim):
+                return _ClaimAcquisition(decision="push", claim=claim, raw=claim.model_dump_json())
+            return _ClaimAcquisition(decision="suppressed")
+
+        existing = NotificationClaim.model_validate_json(raw)
+        if existing.status is NotificationClaimStatus.SENT:
+            # 同一の送信決定は既にpush済み。LINEは再送せず、欠落している
+            # NotificationLogだけをrepairする(push成功→log保存失敗→retryで
+            # 送信履歴が永久欠落しないようにする)。
+            self._repair_member_logs(existing)
+            return _ClaimAcquisition(decision="repaired")
+
+        elapsed_seconds = (claimed_at - existing.claimed_at).total_seconds()
+        if elapsed_seconds < _CLAIM_STALE_AFTER_SECONDS:
+            logger.info(
+                "notification claim suppressed (in-flight elsewhere) claim_id=%s "
+                "elapsed=%.0fs identity=%s",
+                existing.claim_id,
+                elapsed_seconds,
+                identity,
+            )
+            return _ClaimAcquisition(decision="suppressed")
+
+        # stale takeover: 取得実行がpush前にcrash/timeoutしたとみなし、raw JSON
+        # 一致のCASで所有権を引き継ぐ(claim_token更新により旧実行はSENT化も
+        # deleteもできなくなる)。membersは今回実行のseedへ差し替える(identity
+        # 一致=同一の送信決定であり、pushするのも今回実行の本文のため)。
+        # ttl(cleanup用)はCAS書き込み時に自動更新される。
+        takeover = existing.model_copy(
+            update={
+                "claim_token": str(uuid.uuid4()),
+                "claimed_at": claimed_at,
+                "evaluated_at": evaluated_at,
+                "members": members,
+            }
+        )
+        if self._claim_repo.replace_if_raw_matches(claim.claim_id, raw, takeover):
+            logger.warning(
+                "notification claim stale takeover claim_id=%s stale_elapsed=%.0fs identity=%s",
+                claim.claim_id,
+                elapsed_seconds,
+                identity,
+            )
+            return _ClaimAcquisition(
+                decision="push", claim=takeover, raw=takeover.model_dump_json()
+            )
+        return _ClaimAcquisition(decision="suppressed")
+
+    def _mark_claim_sent(self, acquisition: _ClaimAcquisition, sent_at: dt.datetime) -> None:
+        """push成功後にclaimをSENTへ遷移させる(raw JSON一致のCAS)。
+
+        CAS失敗(=stale takeoverにより所有権を失っていた)の場合、claimの正本は
+        takeover側にあるため何もしない(警告ログのみ。ここで例外にすると
+        push成功済みの正常経路を失敗させてしまう)。
+        """
+        if acquisition.claim is None or acquisition.raw is None:
+            return
+        assert self._claim_repo is not None
+        sent = acquisition.claim.model_copy(
+            update={"status": NotificationClaimStatus.SENT, "sent_at": sent_at}
+        )
+        if not self._claim_repo.replace_if_raw_matches(sent.claim_id, acquisition.raw, sent):
+            logger.warning(
+                "notification claim SENT CAS failed (ownership lost to takeover) claim_id=%s",
+                sent.claim_id,
+            )
+
+    def _release_claim_after_push_failure(self, acquisition: _ClaimAcquisition) -> None:
+        """push失敗時の補償delete(raw JSON一致の条件付き削除)。
+
+        deleteに成功すればclaimはabsentへ戻り、Lambda retryが同一identityを
+        再claimして再送できる(通知欠落を避けるため即retry可能な設計を優先)。
+        delete自体が失敗した場合(所有権喪失・基盤エラー)はstale takeover経路が
+        回復手段となるため、ここでは例外を握りつぶし元のpush例外を優先する。
+        既知の保証限界: LINE側では受理済みなのにclient側timeout等で例外に
+        なった場合、delete→retryで二重送信されうる(exactly-onceではない)。
+        """
+        if acquisition.claim is None or acquisition.raw is None:
+            return
+        assert self._claim_repo is not None
+        try:
+            self._claim_repo.delete_if_raw_matches(acquisition.claim.claim_id, acquisition.raw)
+        except Exception:  # noqa: BLE001 - 元のpush例外を失わせない(補償はbest-effort)
+            logger.exception(
+                "notification claim compensating delete failed claim_id=%s",
+                acquisition.claim.claim_id,
+            )
+
+    def _repair_member_logs(self, claim: NotificationClaim) -> None:
+        """SENT済みclaimのrepair seedから、欠落しているNotificationLogだけを
+        保存する(LINE pushは行わない)。
+
+        notification_idはclaim取得時に確定済みのため、元実行の通常保存と
+        このrepairは同一レコードを書く(両方実行されてもupsertで冪等)。
+        sent_atにはclaim.evaluated_at(元実行のnow)を使い、元実行が保存する
+        はずだったlogと同一内容にする。owner/holding_id(Issue #33)もseedから
+        そのまま復元する。
+        """
+        for member in claim.members:
+            if self._log_repo.get(member.notification_id) is not None:
+                continue
+            self._log_repo.save(
+                NotificationLog(
+                    notification_id=member.notification_id,
+                    notification_type=member.notification_type,
+                    stock_code=member.stock_code,
+                    content_hash=member.content_hash,
+                    sent_at=claim.evaluated_at,
+                    related_recommendation_id=member.related_recommendation_id,
+                    owner=member.owner,
+                    holding_id=member.holding_id,
+                )
+            )
+            logger.warning(
+                "notification claim repair: missing NotificationLog restored "
+                "notification_id=%s claim_id=%s",
+                member.notification_id,
+                claim.claim_id,
+            )
 
     def _previous_recommendation(
         self, recommendation: Recommendation, notification_type: NotificationType

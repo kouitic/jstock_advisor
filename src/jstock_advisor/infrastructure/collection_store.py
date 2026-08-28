@@ -83,6 +83,28 @@ class CollectionStore[T: BaseModel](Protocol):
         """
         ...
 
+    def replace_if_raw_matches(self, item_id: str, expected_raw_data: str, item: T) -> bool:
+        """保存中の`data`生JSONがexpected_raw_dataと完全一致する場合のみitemで
+        置き換えてTrue、一致しない・項目が無い場合は何もせずFalse(CAS。
+        LINE通知dedup原子化 Issue #17で追加)。
+
+        DynamoDB実装はConditionExpression「#data = :expected_data」の条件付き
+        put_itemで原子的に行う(watchlist_rotation_state.py等で実績のある
+        楽観ロックパターンの汎用化)。expected_raw_dataにはget_raw_data()で
+        取得した値をそのまま渡すこと(get()したモデルのmodel_dump_json()し直しは
+        バイト単位一致が保証されないため使わない)。ローカルJSON実装は
+        単一プロセス前提のread-compare-write(insert_if_absent()と同じ前提)。
+        """
+        ...
+
+    def delete_if_raw_matches(self, item_id: str, expected_raw_data: str) -> bool:
+        """保存中の`data`生JSONがexpected_raw_dataと完全一致する場合のみ削除して
+        True、一致しない・項目が無い場合は何もせずFalse(条件付き削除。
+        LINE通知dedup原子化 Issue #17で追加。claim所有者だけがpush失敗時の
+        補償deleteを行えるようにするために使う)。
+        """
+        ...
+
     def get_many(self, item_ids: Iterable[str]) -> dict[str, T]:
         """複数IDを一括取得する(対象確認機能2026-08、N+1回避)。
 

@@ -16,6 +16,9 @@ from jstock_advisor.infrastructure.line.client import LineClient, build_line_cli
 from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
     DecisionSnapshotRepository,
 )
+from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
+    NotificationClaimRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -65,6 +68,9 @@ def _build_notification_service(
     return LineNotificationService(
         line_client=line_client,
         notification_log_repository=NotificationLogRepository(),
+        # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
+        # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
+        notification_claim_repository=NotificationClaimRepository(),
         recommendation_repository=recommendation_repo,
         config=config,
     )

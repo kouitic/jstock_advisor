@@ -118,3 +118,26 @@ class JsonCollectionStore[T: BaseModel]:
         items[item_id] = item
         self._write_all(items)
         return True
+
+    def replace_if_raw_matches(self, item_id: str, expected_raw_data: str, item: T) -> bool:
+        """現在値のmodel_dump_json()がexpected_raw_dataと一致する場合のみ置換
+        (CAS。Issue #17)。単一プロセス前提のread-compare-write
+        (insert_if_absent()と同じ前提)。"""
+        items = self._read_all()
+        current = items.get(item_id)
+        if current is None or current.model_dump_json() != expected_raw_data:
+            return False
+        items[item_id] = item
+        self._write_all(items)
+        return True
+
+    def delete_if_raw_matches(self, item_id: str, expected_raw_data: str) -> bool:
+        """現在値のmodel_dump_json()がexpected_raw_dataと一致する場合のみ削除
+        (条件付き削除。Issue #17)。単一プロセス前提のread-compare-write。"""
+        items = self._read_all()
+        current = items.get(item_id)
+        if current is None or current.model_dump_json() != expected_raw_data:
+            return False
+        del items[item_id]
+        self._write_all(items)
+        return True

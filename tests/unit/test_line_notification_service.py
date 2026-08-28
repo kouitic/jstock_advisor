@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.enums import (
     ExecutionMode,
     NotificationCategory,
     NotificationIntent,
+    NotificationMode,
     NotificationStatus,
     NotificationType,
     RecommendationType,
@@ -34,6 +35,11 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
 from jstock_advisor.domain.entities.notification import NotificationLog
+from jstock_advisor.domain.entities.notification_claim import (
+    NotificationClaim,
+    NotificationClaimStatus,
+    compute_claim_id,
+)
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
@@ -43,6 +49,9 @@ from jstock_advisor.infrastructure.local_repository.daily_notification_priority_
 )
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
+)
+from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
+    NotificationClaimRepository,
 )
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -176,6 +185,10 @@ def service_and_repos(
         daily_notification_priority_repository=DailyNotificationPriorityRepository(
             store_dir=store_dir
         ),
+        # LINE通知dedupの原子化(Issue #17): 本番構成と同じくclaim機構を有効化した
+        # 状態で既存テストを全て通す(claimが既存のdedup/再送挙動を変えないことの
+        # 回帰確認を兼ねる)。
+        notification_claim_repository=NotificationClaimRepository(store_dir=store_dir),
     )
     return service, recommendation_repo, client
 
@@ -200,6 +213,10 @@ def validation_service_and_repos(
         daily_notification_priority_repository=DailyNotificationPriorityRepository(
             store_dir=store_dir
         ),
+        # Issue #17: VALIDATIONではclaim機構が完全に不使用であることを固定する
+        # ため、リポジトリ自体は注入する(read/writeが発生しないことをテストで
+        # 確認する)。
+        notification_claim_repository=NotificationClaimRepository(store_dir=store_dir),
     )
     return service, recommendation_repo, client
 
@@ -4729,3 +4746,569 @@ def test_issue33_digest_log_keeps_stock_scope_none(service_and_repos) -> None:
     assert log is not None
     assert log.owner is None
     assert log.holding_id is None
+
+
+# --- Issue #17(2026-08-28): LINE通知dedupの原子化(claim機構) -----------------
+# claim層は既存のread-based再送判定がSENDを許可した後の「送信決定」を一意化する
+# だけであり、再送条件そのものは変更しない。以下のテストは並行競合・部分障害・
+# takeover・repair・モード分離の境界を固定する。
+
+_I17_T1 = dt.datetime(2026, 7, 24, 3, 0, tzinfo=dt.UTC)  # JST 2026-07-24 12:00
+_I17_T1B = dt.datetime(2026, 7, 24, 3, 10, tzinfo=dt.UTC)  # 同JST日+10分
+_I17_D6 = dt.datetime(2026, 7, 30, 3, 0, tzinfo=dt.UTC)  # JST暦日差6日(resend到達)
+
+
+def _raise_log_save(_log) -> None:
+    raise RuntimeError("log save failed (simulated)")
+
+
+class _FlakyLineClient(_FakeLineClient):
+    """指定回数目のpush_messageだけ例外にするクライアント(push失敗系テスト用)。"""
+
+    def __init__(self, fail_on_calls: set[int]) -> None:
+        super().__init__()
+        self._calls = 0
+        self._fail_on_calls = fail_on_calls
+
+    def push_message(self, text: str) -> None:
+        self._calls += 1
+        if self._calls in self._fail_on_calls:
+            raise RuntimeError("push failed (simulated)")
+        super().push_message(text)
+
+
+def _individual_identity(
+    notification_type: NotificationType, scope: str, now: dt.datetime, prev: str = "NONE"
+) -> str:
+    return (
+        f"v1|individual|{notification_type.value}|{scope}|"
+        f"{evaluation_date_jst(now).isoformat()}|prev={prev}"
+    )
+
+
+def test_issue17_same_identity_second_execution_repairs_log_without_push(
+    service_and_repos,
+) -> None:
+    """A/C: push成功→NotificationLog保存失敗(例外伝播)後のretry相当の実行は、
+    SENT claimによりLINEを再送せず、欠落logだけをrepairする。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="i17-ac-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    original_save = service._log_repo.save
+    service._log_repo.save = _raise_log_save
+    with pytest.raises(RuntimeError, match="log save failed"):
+        service.send_recommendation_notification(rec1, _I17_T1)
+    assert len(client.sent) == 1  # pushは成功済み
+    claims = service._claim_repo.list_all()
+    assert len(claims) == 1
+    assert claims[0].status == NotificationClaimStatus.SENT
+    seed_id = claims[0].members[0].notification_id
+    service._log_repo.save = original_save
+
+    # retry相当: 同一入力の再評価(logが無いためprev=NONE→同一identity)
+    rec2 = _make_recommendation(
+        recommendation_id="i17-ac-2",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec2)
+    service.send_recommendation_notification(rec2, _I17_T1B)
+
+    assert len(client.sent) == 1  # LINE再送なし
+    log = service._log_repo.get(seed_id)
+    assert log is not None  # 欠落logがseedからrepairされた
+    assert log.related_recommendation_id == "i17-ac-1"  # 元実行の内容と同一
+    assert log.sent_at == _I17_T1  # 元実行のnow(claim.evaluated_at)
+    assert len(service._log_repo.list_all()) == 1
+
+
+def test_issue17_push_failure_deletes_claim_and_allows_retry(service_and_repos) -> None:
+    """B: push例外→claimをCAS delete→retryが再claimして送信できる(永久送信不能に
+    ならない)。"""
+    service, repo, _client = service_and_repos
+    flaky = _FlakyLineClient(fail_on_calls={1})
+    service._client = flaky
+    rec1 = _make_recommendation(
+        recommendation_id="i17-b-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    with pytest.raises(RuntimeError, match="push failed"):
+        service.send_recommendation_notification(rec1, _I17_T1)
+    assert flaky.sent == []
+    assert service._claim_repo.list_all() == []  # 補償deleteでabsentへ戻る
+
+    service.send_recommendation_notification(rec1, _I17_T1B)  # retry
+    assert len(flaky.sent) == 1
+    claims = service._claim_repo.list_all()
+    assert len(claims) == 1
+    assert claims[0].status == NotificationClaimStatus.SENT
+
+
+def test_issue17_fresh_claimed_is_suppressed(service_and_repos) -> None:
+    """E: fresh CLAIMED(他実行が送信中)はpushしない。claimも変更しない。"""
+    service, repo, client = service_and_repos
+    identity = _individual_identity(NotificationType.DAILY_BUY_CANDIDATES, "2914", _I17_T1)
+    other = NotificationClaim(
+        claim_id=compute_claim_id(identity),
+        identity=identity,
+        claim_token="other-execution-token",
+        status=NotificationClaimStatus.CLAIMED,
+        claimed_at=_I17_T1 - dt.timedelta(seconds=60),
+        sent_at=None,
+        evaluated_at=_I17_T1 - dt.timedelta(seconds=60),
+        notification_type=NotificationType.DAILY_BUY_CANDIDATES,
+        scope="2914",
+        members=[],
+    )
+    assert service._claim_repo.try_claim(other) is True
+    rec = _make_recommendation(
+        recommendation_id="i17-e-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+
+    service.send_recommendation_notification(rec, _I17_T1)
+
+    assert client.sent == []
+    claims = service._claim_repo.list_all()
+    assert len(claims) == 1
+    assert claims[0].claim_token == "other-execution-token"
+    assert claims[0].status == NotificationClaimStatus.CLAIMED
+
+
+def test_issue17_stale_claimed_is_taken_over_and_sent(service_and_repos) -> None:
+    """F: stale CLAIMED(claimed_atが閾値1200秒超過)はtakeoverして送信する。
+    claim_token・claimed_atが更新されSENTへ遷移する。"""
+    service, repo, client = service_and_repos
+    identity = _individual_identity(NotificationType.DAILY_BUY_CANDIDATES, "2914", _I17_T1)
+    stale = NotificationClaim(
+        claim_id=compute_claim_id(identity),
+        identity=identity,
+        claim_token="stale-old-token",
+        status=NotificationClaimStatus.CLAIMED,
+        claimed_at=_I17_T1 - dt.timedelta(seconds=1300),
+        sent_at=None,
+        evaluated_at=_I17_T1 - dt.timedelta(seconds=1300),
+        notification_type=NotificationType.DAILY_BUY_CANDIDATES,
+        scope="2914",
+        members=[],
+    )
+    assert service._claim_repo.try_claim(stale) is True
+    rec = _make_recommendation(
+        recommendation_id="i17-f-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+
+    service.send_recommendation_notification(rec, _I17_T1)
+
+    assert len(client.sent) == 1
+    claims = service._claim_repo.list_all()
+    assert len(claims) == 1
+    assert claims[0].status == NotificationClaimStatus.SENT
+    assert claims[0].claim_token != "stale-old-token"
+    assert claims[0].claimed_at == _I17_T1
+
+
+def test_issue17_old_owner_cannot_update_after_takeover(tmp_path: Path) -> None:
+    """G: takeover後、旧ownerの取得時rawを条件とするSENT化CAS・delete CASは
+    いずれも失敗する(raw JSON一致条件にclaim_tokenが含まれるため)。"""
+    claim_repo = NotificationClaimRepository(store_dir=tmp_path / "local_store")
+    identity = "v1|individual|TEST|0000|2026-07-24|prev=NONE"
+    c1 = NotificationClaim(
+        claim_id=compute_claim_id(identity),
+        identity=identity,
+        claim_token="t1",
+        status=NotificationClaimStatus.CLAIMED,
+        claimed_at=_I17_T1,
+        sent_at=None,
+        evaluated_at=_I17_T1,
+        notification_type=NotificationType.DAILY_BUY_CANDIDATES,
+        scope="0000",
+        members=[],
+    )
+    assert claim_repo.try_claim(c1) is True
+    raw1 = claim_repo.get_raw(c1.claim_id)
+    assert raw1 is not None
+
+    takeover = c1.model_copy(
+        update={"claim_token": "t2", "claimed_at": _I17_T1 + dt.timedelta(seconds=1300)}
+    )
+    assert claim_repo.replace_if_raw_matches(c1.claim_id, raw1, takeover) is True
+
+    old_owner_sent = c1.model_copy(
+        update={"status": NotificationClaimStatus.SENT, "sent_at": _I17_T1}
+    )
+    assert claim_repo.replace_if_raw_matches(c1.claim_id, raw1, old_owner_sent) is False
+    assert claim_repo.delete_if_raw_matches(c1.claim_id, raw1) is False
+    remaining = claim_repo.list_all()
+    assert len(remaining) == 1
+    assert remaining[0].claim_token == "t2"
+
+
+def test_issue17_resend_after_days_creates_new_claim(service_and_repos) -> None:
+    """H: resend_after_days経過後の正当再送は、prev(直前logのid)とJST暦日が
+    変わるため新claimとなり、claimに妨げられない。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="i17-h-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation(rec1, _I17_T1) is True
+
+    rec2 = _make_recommendation(
+        recommendation_id="i17-h-2",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec2)
+    assert service.notify_recommendation(rec2, _I17_D6) is True
+
+    assert len(client.sent) == 2
+    assert len(service._claim_repo.list_all()) == 2
+
+
+def test_issue17_price_change_resend_not_blocked_by_claim(service_and_repos) -> None:
+    """I: resend_after_days未到達でも価格変化閾値以上なら正当再送となる既存条件が
+    claimに妨げられない(prev=直前logのidが変わるため新claimになる)。
+    ※同一JST日内の再送は既存のCrossPipelinePriority(同一銘柄・同日)が
+    claimとは無関係に抑止するため、翌JST日(暦日差1日<resend_after_days=5)で
+    価格変化による再送資格だけが成立するケースを固定する。"""
+    service, repo, client = service_and_repos
+    rec1 = _make_recommendation(
+        recommendation_id="i17-i-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec1)
+    assert service.notify_recommendation(rec1, _I17_T1) is True
+
+    next_day = _I17_T1 + dt.timedelta(days=1)
+    rec2 = _make_recommendation(
+        recommendation_id="i17-i-2",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3500",  # 約4.2%変化(閾値3.0%以上)
+    )
+    repo.save(rec2)
+    assert service.notify_recommendation(rec2, next_day) is True
+
+    assert len(client.sent) == 2
+    assert len(service._claim_repo.list_all()) == 2
+
+    # 対照: 価格変化が閾値未満なら従来どおり再送されない(claimではなく
+    # 既存のread-based判定による抑止であることの確認)
+    rec3 = _make_recommendation(
+        recommendation_id="i17-i-3",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3500",
+    )
+    repo.save(rec3)
+    assert service.notify_recommendation(rec3, next_day + dt.timedelta(days=1)) is False
+    assert len(client.sent) == 2
+
+
+def test_issue17_validation_and_dry_run_never_touch_claims(
+    validation_service_and_repos, tmp_path: Path
+) -> None:
+    """J: VALIDATION/DRY_RUNはclaimのread/write/takeover/SENT化/repairを一切
+    行わない(本番dedup stateへ影響しない)。"""
+    service, repo, client = validation_service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="i17-j-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+    assert service.notify_recommendation(rec, _I17_T1) is True
+    assert len(client.sent) == 1
+    assert service._claim_repo.list_all() == []
+
+    # DRY_RUN(VALIDATION + notification_mode=DRY_RUN)
+    store_dir = tmp_path / "dry_run_store"
+    dry_run_claims = NotificationClaimRepository(store_dir=store_dir)
+    dry_service = LineNotificationService(
+        line_client=_FakeLineClient(),
+        notification_log_repository=NotificationLogRepository(store_dir=store_dir),
+        recommendation_repository=RecommendationRepository(store_dir=store_dir),
+        config=_CONFIG,
+        execution_context=ExecutionContext(
+            mode=ExecutionMode.VALIDATION, notification_mode=NotificationMode.DRY_RUN
+        ),
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
+        notification_claim_repository=dry_run_claims,
+    )
+    dry_service.send_recommendation_notification(rec, _I17_T1)
+    assert dry_run_claims.list_all() == []
+
+
+def test_issue17_batch_summary_claim_stable_across_utc_boundary(service_and_repos) -> None:
+    """K: #23で確定したJST暦日基準がclaim identityにも適用される。同一JST日の
+    UTC境界(JST 08:5x→09:0x)を跨ぐ再実行は、log保存が失敗していても(read側
+    dedupが働かない状態でも)claimが同一identityとなり再pushしない。"""
+    service, _repo, client = service_and_repos
+    first_now = dt.datetime(2026, 7, 23, 23, 55, tzinfo=dt.UTC)  # JST 07-24 08:55
+    second_now = dt.datetime(2026, 7, 24, 0, 5, tzinfo=dt.UTC)  # JST 07-24 09:05
+    kwargs = dict(
+        total=10,
+        category_counts={},
+        partial_sell_detected_count=1,
+        full_sell_detected_count=0,
+        sell_detected_count=0,
+        critical_risk_detected_count=0,
+        attention_detected_count=2,
+    )
+    original_save = service._log_repo.save
+    service._log_repo.save = _raise_log_save
+    with pytest.raises(RuntimeError, match="log save failed"):
+        service.notify_batch_summary("保有銘柄・ウォッチリスト分析", now=first_now, **kwargs)
+    assert len(client.sent) == 1
+    service._log_repo.save = original_save
+
+    sent = service.notify_batch_summary(
+        "保有銘柄・ウォッチリスト分析", now=second_now, **kwargs
+    )
+
+    assert sent is False  # claimにより抑止(同一JST暦日=同一identity)
+    assert len(client.sent) == 1
+    # 欠落していたサマリーlogはrepairされている
+    logs = service._log_repo.list_all()
+    assert len(logs) == 1
+    assert logs[0].notification_type == NotificationType.BATCH_SUMMARY
+
+
+def test_issue17_attention_claim_same_phase_suppressed_new_phase_sent(
+    service_and_repos,
+) -> None:
+    """L: ATTENTIONはevent identityベースのclaimで同一局面の再pushを抑止し、
+    新しい局面(peak更新等)は新identityとして送信される。"""
+    service, repo, client = service_and_repos
+    holding_id = build_holding_id("owner-a", "8136")
+    rec1 = _make_attention_watch_recommendation(recommendation_id="i17-l-1").model_copy(
+        update={"owner": "owner-a", "holding_id": holding_id}
+    )
+    repo.save(rec1)
+    original_save = service._log_repo.save
+    service._log_repo.save = _raise_log_save
+    with pytest.raises(RuntimeError, match="log save failed"):
+        service.send_attention_notification(rec1, _I17_T1)
+    assert len(client.sent) == 1
+    service._log_repo.save = original_save
+
+    rec2 = _make_attention_watch_recommendation(recommendation_id="i17-l-2").model_copy(
+        update={"owner": "owner-a", "holding_id": holding_id}
+    )
+    repo.save(rec2)
+    service.send_attention_notification(rec2, _I17_T1B)
+    assert len(client.sent) == 1  # 同一局面: claimで抑止+logはrepair済み
+    repaired = service._log_repo.latest_by_holding_and_type(
+        holding_id, NotificationType.PROFIT_PROTECTION_ATTENTION
+    )
+    assert repaired is not None
+    assert repaired.owner == "owner-a"  # P: repairがIssue #33のscopeを維持する
+    assert repaired.holding_id == holding_id
+
+    rec3 = _make_attention_watch_recommendation(
+        recommendation_id="i17-l-3", peak_price=Decimal("1700")
+    ).model_copy(update={"owner": "owner-a", "holding_id": holding_id})
+    repo.save(rec3)
+    service.send_attention_notification(rec3, _I17_T1B)
+    assert len(client.sent) == 2  # 新局面は新identityで送信
+
+
+def test_issue17_digest_double_finalize_pushes_once(service_and_repos) -> None:
+    """M/D: 二重finalize相当(同一winnersでのdigest再実行)はchunk claimにより
+    push 1回に収束し、2回目はNotificationLog repairのみ行う(全log存在なら
+    完全no-op)。"""
+    service, repo, client = service_and_repos
+    rec = _make_recommendation(
+        recommendation_id="i17-m-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+    original_save = service._log_repo.save
+    service._log_repo.save = _raise_log_save
+    first = service.notify_buy_candidates_digest([rec], _I17_T1)
+    assert first == {"2914": "SENT_LOG_FAILED"}
+    assert len(client.sent) == 1
+    service._log_repo.save = original_save
+
+    second = service.notify_buy_candidates_digest([rec], _I17_T1B)
+    assert second == {"2914": "SENT_AND_RECORDED"}
+    assert len(client.sent) == 1  # 再pushなし
+    assert len(service._log_repo.list_all()) == 1  # repairで1件だけ保存
+
+    # D: SENT claim + 全log存在 → 完全no-op(push・log追加とも無し)
+    third = service.notify_buy_candidates_digest([rec], _I17_T1B)
+    assert third == {"2914": "SENT_AND_RECORDED"}
+    assert len(client.sent) == 1
+    assert len(service._log_repo.list_all()) == 1
+
+
+def test_issue17_digest_partial_log_failure_repairs_only_missing(service_and_repos) -> None:
+    """N: チャンク内の一部銘柄だけlog保存が失敗した場合、同一winnersのretryは
+    チャンクを再pushせず、欠落した銘柄のlogだけをrepairする。"""
+    service, repo, client = service_and_repos
+    rec_a = _make_recommendation(
+        recommendation_id="i17-n-a",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    rec_b = _make_recommendation(
+        recommendation_id="i17-n-b",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    ).model_copy(update={"stock_code": "7203"})
+    repo.save(rec_a)
+    repo.save(rec_b)
+
+    original_save = service._log_repo.save
+
+    def _save_fail_for_b(log) -> None:
+        if log.stock_code == "7203":
+            raise RuntimeError("log save failed (simulated)")
+        original_save(log)
+
+    service._log_repo.save = _save_fail_for_b
+    first = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1)
+    assert first == {"2914": "SENT_AND_RECORDED", "7203": "SENT_LOG_FAILED"}
+    assert len(client.sent) == 1
+    service._log_repo.save = original_save
+
+    second = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1B)
+    assert second == {"2914": "SENT_AND_RECORDED", "7203": "SENT_AND_RECORDED"}
+    assert len(client.sent) == 1  # チャンク再pushなし
+    logs = service._log_repo.list_all()
+    assert len(logs) == 2  # Aは1件のまま(重複なし)、Bはrepairで補完
+    assert {log.stock_code for log in logs} == {"2914", "7203"}
+
+
+def test_issue17_digest_multi_chunk_resends_only_unsent_chunk(
+    service_and_repos, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O: 複数チャンクの途中でpushが失敗した場合、retryは送信済みチャンクを
+    再送せず(claim SENT)、未送信チャンクのみ送信する。"""
+    service, repo, _client = service_and_repos
+    monkeypatch.setattr(line_notification_service_module, "_BUY_DIGEST_MAX_CHARS", 10)
+    rec_a = _make_recommendation(
+        recommendation_id="i17-o-a",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    rec_b = _make_recommendation(
+        recommendation_id="i17-o-b",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    ).model_copy(update={"stock_code": "7203"})
+    repo.save(rec_a)
+    repo.save(rec_b)
+
+    flaky = _FlakyLineClient(fail_on_calls={2})  # 1回目のchunk2 pushだけ失敗
+    service._client = flaky
+    first = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1)
+    assert first == {"2914": "SENT_AND_RECORDED", "7203": "SEND_FAILED"}
+    assert len(flaky.sent) == 1  # chunk1のみ送信済み
+
+    second = service.notify_buy_candidates_digest([rec_a, rec_b], _I17_T1B)
+    assert second == {"2914": "SENT_AND_RECORDED", "7203": "SENT_AND_RECORDED"}
+    assert len(flaky.sent) == 2  # chunk1は再送されず、chunk2のみ送信
+    assert sum("2914" in message for message in flaky.sent) == 1
+    assert sum("7203" in message for message in flaky.sent) == 1
+
+
+def test_issue17_holding_scope_repair_preserves_issue33_semantics(service_and_repos) -> None:
+    """P/Q: holding-scope SELLのrepairがowner/holding_idを維持し(#33)、repair後の
+    logで既存の再送抑止が機能する。別ownerの同一stock_codeとは干渉しない。"""
+    service, repo, client = service_and_repos
+    rec1 = _i33_holding_sell_recommendation(
+        recommendation_id="i17-p-1", owner="owner-a", now=_I17_T1
+    )
+    repo.save(rec1)
+    original_save = service._log_repo.save
+    service._log_repo.save = _raise_log_save
+    with pytest.raises(RuntimeError, match="log save failed"):
+        service.send_recommendation_notification(rec1, _I17_T1)
+    assert len(client.sent) == 1
+    service._log_repo.save = original_save
+
+    # retry相当 → repairのみ(再pushなし)
+    rec2 = _i33_holding_sell_recommendation(
+        recommendation_id="i17-p-2", owner="owner-a", now=_I17_T1B
+    )
+    repo.save(rec2)
+    service.send_recommendation_notification(rec2, _I17_T1B)
+    assert len(client.sent) == 1
+    repaired = service._log_repo.latest_by_holding_and_type(
+        build_holding_id("owner-a", "2914"), NotificationType.SELL_SIGNAL
+    )
+    assert repaired is not None
+    assert repaired.owner == "owner-a"
+    assert repaired.holding_id == build_holding_id("owner-a", "2914")
+
+    # repair後のlogで#33の再送抑止が機能する(翌日・未到達)
+    rec3 = _i33_holding_sell_recommendation(
+        recommendation_id="i17-p-3",
+        owner="owner-a",
+        now=_I17_T1 + dt.timedelta(days=1),
+    )
+    repo.save(rec3)
+    outcome = service.notify_recommendation_with_status(rec3, _I17_T1 + dt.timedelta(days=1))
+    assert outcome.sent is False
+
+    # Q: 別owner(owner-b)はclaim/dedupとも干渉しない
+    rec_b = _i33_holding_sell_recommendation(
+        recommendation_id="i17-q-1", owner="owner-b", now=_I17_T1B
+    )
+    repo.save(rec_b)
+    assert service.notify_recommendation_with_status(rec_b, _I17_T1B).sent is True
+    assert len(client.sent) == 2
+
+
+def test_issue17_claim_backend_error_propagates_without_push(tmp_path: Path) -> None:
+    """S: claim基盤の予期しないエラー(条件不成立以外)は例外として伝播し、
+    dedup保証なしの送信は行わない(Lambda retryで回復する一時障害として扱う)。"""
+
+    class _ExplodingClaimRepository(NotificationClaimRepository):
+        def __init__(self) -> None:  # storeを初期化しない(全操作が例外)
+            pass
+
+        def try_claim(self, claim) -> bool:
+            raise RuntimeError("claim backend unavailable (simulated)")
+
+    store_dir = tmp_path / "local_store"
+    client = _FakeLineClient()
+    repo = RecommendationRepository(store_dir=store_dir)
+    service = LineNotificationService(
+        line_client=client,
+        notification_log_repository=NotificationLogRepository(store_dir=store_dir),
+        recommendation_repository=repo,
+        config=_CONFIG,
+        holdings_snapshot_repository=HoldingsSnapshotRepository(store_dir=store_dir),
+        daily_notification_priority_repository=DailyNotificationPriorityRepository(
+            store_dir=store_dir
+        ),
+        notification_claim_repository=_ExplodingClaimRepository(),
+    )
+    rec = _make_recommendation(
+        recommendation_id="i17-s-1",
+        recommendation_type=RecommendationType.BUY,
+        standard_price="3359",
+    )
+    repo.save(rec)
+
+    with pytest.raises(RuntimeError, match="claim backend unavailable"):
+        service.send_recommendation_notification(rec, _I17_T1)
+    assert client.sent == []

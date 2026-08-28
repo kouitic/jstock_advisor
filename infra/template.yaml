@@ -596,6 +596,25 @@ Resources:
         - AttributeName: notification_id
           KeyType: HASH
 
+  # --- LINE通知dedupの原子化(Issue #17): 送信決定claimテーブル ---------------
+  # claim_id = identity文字列のSHA-256(64桁hex)。TTL(ttl属性、30日)はcleanup
+  # 専用であり、送信可否・stale判定には使わない(stale判定はアプリ側の
+  # claimed_at比較のみ。DynamoDB TTL削除は最大48時間程度遅延しうるため)。
+  NotificationClaimsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-notification_claims"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: claim_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: claim_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   EvaluationResultsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -1047,6 +1066,8 @@ Resources:
                 - !Sub "${ValidationRecommendationsTable.Arn}/index/*"
                 - !GetAtt NotificationLogTable.Arn
                 - !Sub "${NotificationLogTable.Arn}/index/*"
+                # LINE通知dedupの原子化(Issue #17): 送信決定claim
+                - !GetAtt NotificationClaimsTable.Arn
                 - !GetAtt EdinetFilingCacheTable.Arn
                 - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
                 - !GetAtt EdinetDisclosureCacheTable.Arn
@@ -1166,6 +1187,8 @@ Resources:
                 - !Sub "${RecommendationsTable.Arn}/index/*"
                 - !GetAtt NotificationLogTable.Arn
                 - !Sub "${NotificationLogTable.Arn}/index/*"
+                # LINE通知dedupの原子化(Issue #17): 送信決定claim
+                - !GetAtt NotificationClaimsTable.Arn
                 - !GetAtt EdinetFilingCacheTable.Arn
                 - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
                 - !GetAtt EdinetDisclosureCacheTable.Arn
@@ -1279,6 +1302,8 @@ Resources:
         # 参照する。旧HoldingsTable(直上)は削除せずロールバック用に残し、V2を追加する。
         - DynamoDBReadPolicy: { TableName: !Ref HoldingsTableV2 }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        # LINE通知dedupの原子化(Issue #17): 送信決定claim
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationClaimsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
       Events:
         Morning:
@@ -1377,6 +1402,8 @@ Resources:
                 - !Sub "${WatchlistTable.Arn}/index/*"
                 - !GetAtt NotificationLogTable.Arn
                 - !Sub "${NotificationLogTable.Arn}/index/*"
+                # LINE通知dedupの原子化(Issue #17): 送信決定claim
+                - !GetAtt NotificationClaimsTable.Arn
                 - !GetAtt EdinetFilingCacheTable.Arn
                 - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
                 - !GetAtt EdinetDisclosureCacheTable.Arn
@@ -1488,6 +1515,8 @@ Resources:
                 - !Sub "${WatchlistTable.Arn}/index/*"
                 - !GetAtt NotificationLogTable.Arn
                 - !Sub "${NotificationLogTable.Arn}/index/*"
+                # LINE通知dedupの原子化(Issue #17): 送信決定claim
+                - !GetAtt NotificationClaimsTable.Arn
                 - !GetAtt EdinetFilingCacheTable.Arn
                 - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
                 - !GetAtt EdinetDisclosureCacheTable.Arn
@@ -1549,6 +1578,8 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref WatchlistCandidateProgressTable }
         - DynamoDBCrudPolicy: { TableName: !Ref WatchlistTable }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationLogTable }
+        # LINE通知dedupの原子化(Issue #17): 送信決定claim
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationClaimsTable }
         - DynamoDBReadPolicy: { TableName: !Ref HoldingsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetFilingCacheTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EdinetDisclosureCacheTable }
@@ -1612,6 +1643,8 @@ Resources:
                 - !Sub "${WatchlistTable.Arn}/index/*"
                 - !GetAtt NotificationLogTable.Arn
                 - !Sub "${NotificationLogTable.Arn}/index/*"
+                # LINE通知dedupの原子化(Issue #17): 送信決定claim
+                - !GetAtt NotificationClaimsTable.Arn
                 - !GetAtt EdinetFilingCacheTable.Arn
                 - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
                 - !GetAtt EdinetDisclosureCacheTable.Arn
