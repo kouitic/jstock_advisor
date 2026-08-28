@@ -13,8 +13,9 @@ build_execution_plan/build_add_item_plan)を使い、実際の書き込みは
 conversation_commit.commit_*()の単一TransactWriteItems呼び出しに集約する
 (要求仕様: 明示的な確認前に一切の永続化を行わない、実装プランv2 1節)。
 
-既存のCSVテキストコマンド(ChatCommandService)とは完全に独立した経路であり、
-挙動を変更しない(LineEventRouterが状態の有無で振り分ける。実装プランv2 5節)。
+textイベントはLineEventRouterが状態の有無で振り分ける(実装プランv2 5節。
+かつて併存したlegacy CSVテキストコマンド経路(ChatCommandService)は
+Issue #24で廃止済みで、本経路がLINEからの唯一の登録経路)。
 """
 
 from __future__ import annotations
@@ -487,12 +488,11 @@ class ConversationService:
             # コードレビュー2026-08-17 指摘1: build_add_item_plan()は既存項目の
             # reason/priority等をデフォルト値で再構築するため、確認画面へ進めて
             # しまうと既存設定を失う。確認前にここで終了し、既存WatchlistItemは
-            # 一切変更しない(Legacy CSV側のadd_item()の上書き挙動自体は変更しない)。
+            # 一切変更しない。
             # 再レビュー指摘: ここで返信するだけではINPUT_WAITINGのConversationState
-            # が残ったままになり、次の通常テキスト(Legacy CSVコマンド等)が誤って
-            # WATCH入力として処理されてしまう。安全な条件付きDeleteで対話自体を
-            # 終了させる(無条件Deleteはせず、action/state/operation_id/ttlが
-            # 一致する場合のみ)。
+            # が残ったままになり、次の通常テキストが誤ってWATCH入力として処理されて
+            # しまう。安全な条件付きDeleteで対話自体を終了させる(無条件Deleteは
+            # せず、action/state/operation_id/ttlが一致する場合のみ)。
             conversation_state_store.discard_input(
                 user_id, ConversationAction.WATCH, state.operation_id, now
             )

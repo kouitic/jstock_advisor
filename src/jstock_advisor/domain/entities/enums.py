@@ -1443,9 +1443,9 @@ class FinancialPolicyOverride(StrEnum):
 class ConversationAction(StrEnum):
     """LINEリッチメニュー/postbackから開始する対話の種別。
 
-    ChatCommandServiceのCSVコマンド語(買付/売却/ウォッチ)とは独立した
-    英語enumとして定義する(postback data値`action=start_buy`等・
-    DynamoDB ConversationStatesテーブルの`action`属性値として使う)。
+    postback data値`action=start_buy`等・DynamoDB ConversationStatesテーブルの
+    `action`属性値として使う英語enum(かつて併存したlegacy CSVコマンド語
+    「買付/売却/ウォッチ」の経路はIssue #24で廃止済み)。
     """
 
     BUY = "BUY"

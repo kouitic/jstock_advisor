@@ -1,7 +1,7 @@
 """LINE Webhookハンドラ(API Gateway経由)。
 
-リッチメニュー/Quick Reply起点のボタン操作(会話型UI)と、既存のCSVテキスト
-コマンドの両方を受け付ける。処理の流れ:
+リッチメニュー/Quick Reply起点のボタン操作(会話型UI)を受け付ける
+(legacy CSVテキストコマンド経路はIssue #24で廃止済み)。処理の流れ:
 1. 署名検証(X-Line-Signatureヘッダー、LINE_CHANNEL_SECRET環境変数)。
    検証に失敗した場合は403を返し一切処理しない。
 2. 送信者認可(LINE_USER_ID環境変数と一致するuserIdのみ処理する。
