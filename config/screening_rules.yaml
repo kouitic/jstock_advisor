@@ -49,11 +49,18 @@ industry_specific_rules:
   # MVPでは個別評価ルール未実装。フラグを立てて除外+警告するに留める。
   # 将来: financial_sector_action を "custom_rules" に変更し、業種別ルールを追加する。
   financial_sector_action: "exclude_with_warning"
+  # Issue #29(2026-08-28): 旧形式はTSE33業種の日本語ラベルだったが、判定対象の
+  # industry値はyfinance由来の英語GICS値(例: "Banks - Diversified")のため
+  # 一度も一致せず、金融業除外が機能していなかった。既存の金融業分類器
+  # (classify_industry、保有判断スコア・SELL側と同じ判定ソース)の
+  # 金融細分類(FinancialIndustryCategory)の値で指定する形式へ変更。
+  # OTHER_FINANCIAL(リース・ノンバンク・Credit Services等)は既定では除外しない
+  # (高配当投資対象として評価可能な銘柄を含むため。除外したい場合はこの
+  # リストへ "OTHER_FINANCIAL" を追記するだけでよい)。
   target_industry_classification:
-    - "銀行業"
-    - "証券、商品先物取引業"
-    - "保険業"
-    - "その他金融業"
+    - "BANKING"
+    - "SECURITIES"
+    - "INSURANCE"
 
 data_quality:
   # 判定に使用するデータがこの営業日数より古い場合は「データ鮮度エラー」として推奨を出さない

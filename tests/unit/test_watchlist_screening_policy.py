@@ -558,3 +558,55 @@ def test_r_downstream_buy_screening_hard_exclusion_unaffected() -> None:
     )
     assert result.passed is True
     assert result.exclusion_reasons == []
+
+
+# --- Issue #29: 金融業hard exclusion(classify_industryベース) ----------------
+# BUY一次スクリーニング(test_screening.py)と同じ除外方針であることを
+# watchlist経路でも固定する(片経路だけ直すと、通常screeningでは除外されるが
+# watchlist自動追加では流入する不整合が残るため)。
+
+
+def test_financial_bank_hard_excluded_like_8306() -> None:
+    result = _MS_POLICY.evaluate(
+        _good_input(sector="Financial Services", industry="Banks - Diversified"),
+        _CONFIG,
+    )
+    assert result.passed is False
+    assert HardExclusionCode.UNSUPPORTED_INDUSTRY in result.hard_exclusion_codes
+    assert any("BANKING" in reason for reason in result.hard_exclusion_reasons)
+
+
+def test_financial_securities_hard_excluded_like_8604() -> None:
+    result = _MS_POLICY.evaluate(
+        _good_input(sector="Financial Services", industry="Capital Markets"),
+        _CONFIG,
+    )
+    assert result.passed is False
+    assert HardExclusionCode.UNSUPPORTED_INDUSTRY in result.hard_exclusion_codes
+
+
+def test_financial_insurance_hard_excluded_like_8766() -> None:
+    result = _MS_POLICY.evaluate(
+        _good_input(sector="Financial Services", industry="Insurance - Property & Casualty"),
+        _CONFIG,
+    )
+    assert result.passed is False
+    assert HardExclusionCode.UNSUPPORTED_INDUSTRY in result.hard_exclusion_codes
+
+
+def test_other_financial_lease_not_hard_excluded_by_default() -> None:
+    """OTHER_FINANCIAL(リース・Credit Services等)は既定ではhard exclusionしない。"""
+    result = _MS_POLICY.evaluate(
+        _good_input(sector="Financial Services", industry="Credit Services"),
+        _CONFIG,
+    )
+    assert HardExclusionCode.UNSUPPORTED_INDUSTRY not in result.hard_exclusion_codes
+
+
+def test_unknown_sector_not_hard_excluded() -> None:
+    """UNKNOWN(sector欠損)を金融業と推測してhard exclusionしない。"""
+    result = _MS_POLICY.evaluate(
+        _good_input(sector=None, industry="銀行業"),
+        _CONFIG,
+    )
+    assert HardExclusionCode.UNSUPPORTED_INDUSTRY not in result.hard_exclusion_codes
