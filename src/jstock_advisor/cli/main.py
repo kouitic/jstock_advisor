@@ -24,6 +24,7 @@ from jstock_advisor.cli import (
     shareholder_benefit,
     trading_pause,
     transactions,
+    valuation_shadow,
     watchlist,
     watchlist_screening,
 )
@@ -48,6 +49,7 @@ app.add_typer(shareholder_benefit.app, name="shareholder-benefit")
 app.add_typer(watchlist_screening.app, name="watchlist-screening")
 app.add_typer(candidate_universe.app, name="candidate-universe")
 app.add_typer(calibration.app, name="calibration")
+app.add_typer(valuation_shadow.app, name="valuation-shadow")
 app.add_typer(holding_decision.app, name="holding-decision")
 app.add_typer(trading_pause.app, name="trading-pause")
 app.add_typer(migrate.app, name="migrate")

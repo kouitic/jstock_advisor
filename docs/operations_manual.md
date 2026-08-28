@@ -1440,3 +1440,36 @@ jstock calibration export-dataset --output dataset.jsonl \
   dedupしません(sample定義は行を削除せずsample_selected等の列で注釈)
 - horizon未到来はNOT_YET_EVALUABLE、到来済みで評価が無い行は
   EVALUATION_MISSINGとして残ります(黙って行を落としません)
+## 17. valuation集約仮説のshadow分析export(Issue #20 Phase C、2026-08-28追加)
+
+適正価格(Fair Value)の集約・grouping仮説を、保存済みRecommendationの
+判定時点値だけを入力にoffline/shadowで並行計算し、raw shadow observation
+(canonical JSONL)と記述統計summary(CSV)としてexportするCLIです。
+**判定・閾値・適正価格・買付/利確価格・usability・通知には一切影響しません**
+(観測・比較のみ。最良仮説の決定・ランキング・閾値提案は出力しません。
+将来リターンとの結合分析は16節のcalibration datasetとrecommendation_idで
+joinして別途行います)。日次バッチ・Lambdaへは組み込まず、人間のオンデマンド
+実行専用です。
+
+```bash
+# canonical export(JSONL。1行目がmetadata、以降が
+# 1 Recommendation×1 context(BUY_RAW/BUY_DECISION/SELL_RAW)×1 仮説の行)
+jstock valuation-shadow export --output shadow.jsonl
+
+# 記述統計summary(CSV)も同時に出力
+jstock valuation-shadow export --output shadow.jsonl --summary shadow_summary.csv
+```
+
+- 復元不能・保存値と照合できない記録はOBSERVATION_UNAVAILABLEとして行ごと
+  残します(黙って落としません)。現在の設定・現在の株価による再計算はしません
+- H_A(現行方式)×BUY_DECISIONでは保存済みvaluation_anchorの再構成self-checkを
+  行い、どの現行式とも一致しない記録はRECONSTRUCTION_MISMATCHとして可視化し、
+  summaryのanchor差分統計から除外します
+- 探索由来の仮説(実測相関から導出)はhypothesis_origin=
+  EXPLORATORY_DATA_DERIVEDとして事前定義仮説と区別されます(性能比較時は
+  探索に使ったsampleとvalidation sampleを分離すること)
+- SELLのusability閾値(乖離2.0倍・最少2手法)は判定記録に保存されていない
+  ため、shadow計算parameterとしてmetadataに明記されます(#21で保存済みの
+  使用可否・理由コードがhistorical factです)
+- shadow価格(shadow_entry_price等)は仮説anchor×判定時点の保存済み
+  安全余裕率による参考値であり、約定・到達の判定には使いません
