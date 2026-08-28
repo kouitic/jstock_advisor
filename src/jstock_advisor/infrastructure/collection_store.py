@@ -11,7 +11,7 @@ Lambda環境(AWS_LAMBDA_FUNCTION_NAME環境変数が設定されている)では
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -59,7 +59,9 @@ class CollectionStore[T: BaseModel](Protocol):
         model_dump_json()を返す(実利用はDynamoDB実装のみ)。項目が無ければNone。
         """
         ...
-    def upsert_with_index_attributes(self, item: T, index_attributes: dict[str, str]) -> None:
+    def upsert_with_index_attributes(
+        self, item: T, index_attributes: Mapping[str, str | int]
+    ) -> None:
         """upsert()に加え、GSI等でのクエリ用にトップレベル属性も書き込む
         (LINE UI第二弾・対象確認機能2026-08追加)。
 
@@ -67,6 +69,8 @@ class CollectionStore[T: BaseModel](Protocol):
         書き込む。JSON実装はindex_attributesを無視してupsert(item)と同じ
         動作(ローカルJSONにはGSIという概念が存在しないため)。batch_id等の
         特定の属性名をこのProtocol自体に持ち込まない、汎用の拡張ポイントとする。
+        値はstr(GSIキー等)に加えint(DynamoDB Native TTLのepoch秒等)を許容する
+        (Issue #32でTTL属性nl_expires_atに使用)。
         """
         ...
 

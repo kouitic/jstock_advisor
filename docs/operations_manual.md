@@ -1324,3 +1324,89 @@ lock方式で管理しています(それまでは範囲指定のみだったた
   Windows機ビルドの本番Layerとの同一性維持と、Lambda実行環境でのzoneinfo用
   IANAタイムゾーンデータ保証のため)。除外する場合は専用Issueで判断して
   ください
+
+## 15. NotificationLogのGSI/TTL移行(Issue #32、2026-08-28追加)
+
+NotificationLogテーブル(`jstock-notification_log`)の再送判定・dedup読み取りは
+従来「全件Scan+Pythonフィルタ」であり、通知履歴の増加に伴い読み取りコストが
+単調増加する構造でした。Issue #32で、主要オンライン読み取り(銘柄scope/
+保有scopeの最新1件取得)をGSI Queryへ移行し、保持期間(TTL)を導入します。
+
+- 保持期間: **730日**(再送判定期間・評価ホライズン最大250営業日・
+  backtest/replay・監査参照をすべて包含)。TTLはcleanup専用であり、業務ロジックは
+  削除時刻に依存しません(TTL失効後の残留は再送抑止が効き続ける安全側)
+- **PROFIT_PROTECTION_ATTENTION(利益保全注意)のみTTL対象外**(同一局面の
+  再送抑止が局面変化まで無期限に必要なため。件数は極小)。将来このtypeの件数が
+  増大した場合は別Issueで再評価する
+- 追加されるDynamoDBトップレベル属性(既存の`data` JSON本体は一切不変):
+  `nl_stock_type_key` / `nl_holding_type_key` / `nl_sent_sort`(時刻+
+  notification_idによる完全順序ソートキー)/ `nl_expires_at`(TTL、epoch秒)
+
+### 15.1 段階リリース手順(各deploy・backfillは個別に人間承認が必要)
+
+| Phase | 内容 | 単位 |
+|---|---|---|
+| A | save時のindex/TTL属性dual-write(読み取りは従来Scanのまま) | PR 32-A → main merge → deploy |
+| backfill | 既存itemへの属性付与(下記15.2) | 人間が手元で実行 |
+| B | GSI-1(`nl_stock_type_key-index`)追加 | PR 32-B → main merge → deploy |
+| C | GSI-2(`nl_holding_type_key-index`)追加 + TTL有効化 | PR 32-C → main merge → deploy |
+| 検証 | 移行完了acceptance(15.3) | `--verify`(read-only) |
+| D | 読み取りのGSI Query切替 | PR 32-D → main merge → deploy |
+
+CloudFormationは1回のupdateで1つのGSIしか作成できないためB/Cを分割しています。
+TTL有効化は「一度削除されたitemはtemplateをrevertしても復元できない」不可逆な
+データライフサイクル変更のため、GSI移行が進んだPhase Cで有効化します。
+各deployは`sam deploy --no-execute-changeset`でChangeSetのReplacement列が
+すべてFalseであることを確認してから実行してください(11節と同じ運用)。
+
+### 15.2 backfill手順(Phase Aデプロイ後・Phase D前に必須)
+
+`scripts/backfill_notification_log_index_attributes.py`を使います。既定は
+dry-run(書き込みなし)。キー生成は通常save経路と同じ関数を共有しており、
+backfillと通常writeでロジックが乖離しません。冪等のため何度でも再実行できます。
+
+```bash
+# 1. dry-run(対象件数・更新予定属性の集計を表示するだけ)
+python scripts/backfill_notification_log_index_attributes.py --table jstock-notification_log
+
+# 2. 本実行(誤爆防止のため--confirm-tableでテーブル名の再入力が必要)
+python scripts/backfill_notification_log_index_attributes.py --table jstock-notification_log --execute --confirm-table jstock-notification_log
+
+# 3. 検証(read-only)
+python scripts/backfill_notification_log_index_attributes.py --table jstock-notification_log --verify
+```
+
+parse不能なitemが1件でも検出された場合、スクリプトはexit 1となり
+「migration完了」とは見なせません。該当itemを個別に確認・解消してから
+再実行してください。
+
+### 15.3 移行完了acceptance criteria(Phase D deploy前の必須ゲート)
+
+`--verify`(read-only)が以下すべてを満たしPASSすること:
+
+1. 属性coverage 100%(全itemが期待どおりのindex属性を保持。ATTENTIONは
+   `nl_expires_at`を持たないことも検査)
+2. parse不能item 0件
+3. GSI作成済みの場合: 全distinct scope keyについて「GSI Query(降順Limit=1)の
+   latest == Scan由来のlatest」が完全一致(**この一致確認が不十分なまま
+   Phase Dへ進むと、GSIから見えないlegacy itemにより previous=None →
+   誤再送、という最重要回帰が起きます**)
+
+`--verify`はphase-awareであり、GSIが未作成の段階では等価性検査をskipと表示
+します(その段階ではfailureではありません)。ただしPhase D前は必ずGSI作成後の
+`--verify`で3.を含む全項目のPASSを確認してください。
+
+### 15.4 rollback方針(phase別)
+
+- **Phase A**: コードrevert+再deployで戻せる。書き込み済みのindex/TTL属性は
+  残存するが、Scan読み取りは`data` JSONのみを参照するため無害
+- **Phase B**: template revert(GSI-1削除)で戻せる。ベーステーブルのデータは
+  不変
+- **Phase C**: GSI-2削除・TTL無効化はtemplate revertで可能。**ただしTTLに
+  よって既に削除されたitemは自動復元できない**(730日より古いitemのみが対象の
+  ため、通常の再送判定には影響しないが、この不可逆性を理解したうえで
+  有効化すること)
+- **Phase D**: コードrevert+再deployでScan読み取りへ戻せる(データ非依存)
+
+「1つ前のmain SHAへ戻せば完全rollback」ではない点に注意してください
+(特にPhase C以降のTTL削除分)。
