@@ -361,3 +361,20 @@ def test_raw_and_normalized_values_differ_without_double_adjustment(
     assert actual.raw_dividend_per_share == Decimal("50")  # 分割調整前の生値(25+25)
     assert actual.normalized_dividend_per_share == Decimal("10")  # 分割後基準(50/5)
     assert actual.normalization_basis_date is not None
+
+
+def test_policy_flag_is_unknown_not_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #30 Phase 1: yfinanceは方針の有無を判定不可のためNone(UNKNOWN)を返す。
+    以前のFalse固定(「方針なし」と区別不能)へ退行しないことを固定する。"""
+    import jstock_advisor.providers.dividend_data.yfinance_impl as module
+
+    monkeypatch.setattr(module.yf, "Ticker", _FakeTicker)
+    provider = YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
+
+    info = provider.get_dividend_info("7203")
+
+    assert info is not None
+    assert info.is_progressive_or_doe_policy is None
+    assert info.shareholder_return_policy_type is None

@@ -122,7 +122,10 @@ class MitigatingFactorInputs:
 
     fair_value_rising_with_earnings_growth: bool = False
     continuous_dividend_increase_years: int = 0
-    is_progressive_or_doe_policy: bool = False
+    # Issue #30 Phase 1: DividendInfoの3状態化(bool | None)に伴う型整合のための
+    # 最小限のinterface適応。None(未確認/UNKNOWN)はdocstringの原則どおり
+    # False扱い(緩和要因に該当しない=判定を弱めない)。判定条件自体は不変。
+    is_progressive_or_doe_policy: bool | None = False
     long_term_holding_benefit_imminent: bool = False
     few_reinvestment_alternatives: bool = False
     is_nisa_account: bool = False

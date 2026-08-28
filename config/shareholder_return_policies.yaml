@@ -1,0 +1,34 @@
+# 株主還元方針(累進配当/DOE)の手動レジストリ(Issue #30 Phase 1)
+#
+# このファイルが「累進配当/DOE方針あり」の正式認定の唯一の正本です。
+# 買い候補スコアの配当持続性(方針分 0.4 x 20点 = 8点)は、ここに
+# CONFIRMEDで登録された銘柄にのみ加点されます。
+#
+# 登録ルール(必読):
+# - 会社の一次情報(IR資料・有価証券報告書・適時開示)を人間が確認した
+#   場合のみ登録する。過去の配当実績(減配なし・連続増配等)・キーワード
+#   ヒット・LLM出力からの推測登録は禁止。
+# - policy_type: PROGRESSIVE(累進配当) / DOE / BOTH / NONE。
+#   NONEは「一次情報を確認したが、いずれの方針も明示されていない」場合のみ。
+#   単にIR資料が見つからなかった銘柄はNONE登録せず、未掲載のまま
+#   (未掲載 = UNKNOWN として扱われ、加点も減点もされない)。
+# - 1銘柄1レコード。方針変更時は上書きし、履歴はGit履歴で追跡する。
+# - 確認実施者の氏名は書かない(CLAUDE.mdのPIIルール。Git commit authorで追跡)。
+# - source_reference: 一次情報への参照(IRページURL・EDINET docID等)。
+# - evidence_text: 根拠文の引用(短くてよい。正本はこのファイルのみが持つ)。
+#
+# 登録例(コメント。実登録時はpoliciesの下へ同じ形式で追加):
+#   - stock_code: "9999"
+#     policy_type: "PROGRESSIVE"
+#     status: "CONFIRMED"
+#     source_type: "COMPANY_IR"
+#     source_reference: "https://example.com/ir/policy"
+#     source_date: 2026-05-01
+#     evidence_text: "累進配当を基本方針とし、減配せず配当維持または増配を継続する"
+#     checked_at: 2026-08-28
+#
+# どの銘柄を登録するかは別途データ整備工程で決定する(コード実装と同時の
+# 大量登録は行わない)。
+
+version: 1
+policies: []

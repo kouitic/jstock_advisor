@@ -90,3 +90,41 @@ def test_missing_latest_annual_period_end_returns_empty_list() -> None:
         {"当期": Decimal("37")}, None
     )
     assert actuals == []
+
+
+def test_policy_flag_is_unknown_not_false(monkeypatch) -> None:
+    """Issue #30 Phase 1: EDINET(経営指標等の推移表)は方針の有無を判定できないため
+    None(UNKNOWN)を返す。以前のFalse固定(未実装)へ退行しないことを固定する。"""
+    import jstock_advisor.providers.dividend_data.edinet_impl as module
+    from jstock_advisor.infrastructure.edinet.csv_parser import EdinetCsvRow
+
+    class _FakeClient:
+        is_configured = True
+
+        def download_document_zip(self, doc_id: str) -> bytes:
+            return b"zip"
+
+    class _FakeFiling:
+        latest_annual_doc_id = "D0001"
+        latest_annual_period_end = "2026-03-31"
+
+    row = EdinetCsvRow(
+        element_id="jpcrp_cor:DividendPaidPerShareSummaryOfBusinessResults",
+        item_name="1株当たり配当額",
+        context_id="CurrentYearDuration",
+        relative_period="当期",
+        consolidated_or_individual="連結",
+        period_or_instant="期間",
+        unit_id="JPY",
+        unit_label="円",
+        value="37",
+    )
+    monkeypatch.setattr(module, "find_latest_filings", lambda *a, **k: _FakeFiling())
+    monkeypatch.setattr(module, "extract_main_document_rows", lambda z: [row])
+
+    provider = EdinetDividendDataProvider(client=_FakeClient(), now=_NOW)  # type: ignore[arg-type]
+    info = provider.get_dividend_info("7203")
+
+    assert info is not None
+    assert info.is_progressive_or_doe_policy is None
+    assert info.shareholder_return_policy_type is None

@@ -39,6 +39,9 @@ from jstock_advisor.providers.dividend_data.cross_validating_impl import (
 )
 from jstock_advisor.providers.dividend_data.edinet_impl import EdinetDividendDataProvider
 from jstock_advisor.providers.dividend_data.mock_impl import MockDividendDataProvider
+from jstock_advisor.providers.dividend_data.policy_enrichment_impl import (
+    ShareholderReturnPolicyEnrichingDividendDataProvider,
+)
 from jstock_advisor.providers.dividend_data.yfinance_impl import YFinanceDividendDataProvider
 from jstock_advisor.providers.financial_data.mock_impl import MockFinancialDataProvider
 from jstock_advisor.providers.financial_data.yfinance_impl import YFinanceFinancialDataProvider
@@ -76,16 +79,21 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
         manual_provider=LocalRegistryCorporateActionProvider(),
     )
     corporate_action_service = CorporateActionService(corporate_action, now=now)
-    dividend_data = CrossValidatingDividendDataProvider(
-        primary=YFinanceDividendDataProvider(
-            now=now, corporate_action_service=corporate_action_service
+    # Issue #30 Phase 1: 外部データ取得(yfinance+EDINET)の後段で、手動レジストリの
+    # 株主還元方針(累進配当/DOE)をenrichする(責務分離。レジストリが正本)。
+    dividend_data = ShareholderReturnPolicyEnrichingDividendDataProvider(
+        inner=CrossValidatingDividendDataProvider(
+            primary=YFinanceDividendDataProvider(
+                now=now, corporate_action_service=corporate_action_service
+            ),
+            secondary=EdinetDividendDataProvider(
+                client=edinet_client, cache_repository=edinet_filing_cache, now=now
+            ),
+            corporate_action_service=corporate_action_service,
+            config=config.data_validation,
+            now=now,
         ),
-        secondary=EdinetDividendDataProvider(
-            client=edinet_client, cache_repository=edinet_filing_cache, now=now
-        ),
-        corporate_action_service=corporate_action_service,
-        config=config.data_validation,
-        now=now,
+        policies=config.shareholder_return_policies,
     )
     return ProviderBundle(
         market_data=YFinanceMarketDataProvider(now=now),

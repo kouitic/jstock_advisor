@@ -1467,3 +1467,19 @@ class ConversationStateName(StrEnum):
 
     INPUT_WAITING = "INPUT_WAITING"
     CONFIRM_WAITING = "CONFIRM_WAITING"
+
+
+class ShareholderReturnPolicyType(StrEnum):
+    """株主還元方針の種別(Issue #30 Phase 1)。
+
+    会社が一次情報(IR資料・有価証券報告書等)で明示した資本政策・株主還元方針を
+    人間が確認して登録した結果を表す。過去の配当実績(減配なし・連続増配等)から
+    推測して設定してはならない(正本はconfig/shareholder_return_policies.yaml)。
+    NONEは「確認したが累進配当/DOEいずれの方針も明示されていない」ことを表す
+    (「未確認」はレジストリに銘柄が存在しないことで表現し、この列挙型には含めない)。
+    """
+
+    PROGRESSIVE = "PROGRESSIVE"
+    DOE = "DOE"
+    BOTH = "BOTH"
+    NONE = "NONE"
