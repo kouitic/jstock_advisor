@@ -1,12 +1,14 @@
-"""LineEventRouterの判定ルールのテスト(LINEボタン起点会話型UI・実装プランv2 5節)。
+"""LineEventRouterの判定ルールのテスト(LINEボタン起点会話型UI・実装プランv2 5節、
+Issue #24でlegacy CSVコマンド経路を廃止)。
 
 優先順位: ①postbackは常にConversationService、②有効なConversationStateが
-あればテキスト形式に関わらずConversationService、③状態が無く既存のLegacy
-CSVフルコマンドのみChatCommandService、④それ以外はヘルプ。
+あればテキスト形式に関わらずConversationService、③それ以外(状態無しのtext
+全般。旧Legacy CSVフルコマンドを含む)はヘルプ(永続化なし)。
 
 ConversationServiceが実際に何を書き込むかはtest_conversation_service.py・
-test_conversation_commit.pyで検証済みのため、ここでは「どちらのサービスに
-振り分けられるか」の判定ロジックのみをフェイクで検証する。
+test_conversation_commit.pyで検証済みのため、ここでは「どのサービスに
+振り分けられるか(または振り分けられないか)」の判定ロジックのみを
+フェイクで検証する。
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from jstock_advisor.domain.entities.enums import ConversationAction, Conversatio
 from jstock_advisor.infrastructure.aws.conversation_state_store import ConversationState
 from jstock_advisor.infrastructure.line.webhook import LinePostbackEvent, LineTextMessageEvent
 from jstock_advisor.services import line_event_router
-from jstock_advisor.services.chat_command_service import ChatCommandResult
 from jstock_advisor.services.conversation_service import ConversationReply
 from jstock_advisor.services.line_event_router import LineEventRouter
 
@@ -56,19 +57,6 @@ class _FakeConversationService:
         return ConversationReply("conversation-text-reply")
 
 
-class _FakeChatCommandService:
-    def __init__(self, is_legacy: bool) -> None:
-        self._is_legacy = is_legacy
-        self.handled: list[str] = []
-
-    def is_legacy_command(self, text: str) -> bool:
-        return self._is_legacy
-
-    def handle(self, text: str, now: dt.datetime | None = None) -> ChatCommandResult:
-        self.handled.append(text)
-        return ChatCommandResult(f"chat-reply:{text}", True)
-
-
 def _confirm_state() -> ConversationState:
     return ConversationState(
         user_id=_USER,
@@ -89,13 +77,10 @@ def _patch_state(monkeypatch: pytest.MonkeyPatch, state: ConversationState | Non
     monkeypatch.setattr(line_event_router.conversation_state_store, "get", lambda *a, **kw: state)
 
 
-def _build_router(
-    is_legacy: bool = False,
-) -> tuple[LineEventRouter, _FakeConversationService, _FakeChatCommandService]:
+def _build_router() -> tuple[LineEventRouter, _FakeConversationService]:
     conversation = _FakeConversationService()
-    chat_command = _FakeChatCommandService(is_legacy=is_legacy)
-    router = LineEventRouter(conversation_service=conversation, chat_command_service=chat_command)  # type: ignore[arg-type]
-    return router, conversation, chat_command
+    router = LineEventRouter(conversation_service=conversation)  # type: ignore[arg-type]
+    return router, conversation
 
 
 # --- ① postbackは常にConversationService ------------------------------------
@@ -105,14 +90,13 @@ def test_postback_always_goes_to_conversation_service_regardless_of_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_state(monkeypatch, None)
-    router, conversation, chat_command = _build_router()
+    router, conversation = _build_router()
     event = LinePostbackEvent(reply_token="rt", user_id=_USER, action="start_buy", op=None)
 
     reply = router.route_postback(event, _NOW)
 
     assert reply.text == "conversation-postback-reply"
     assert conversation.postback_calls == [(_USER, "start_buy", None)]
-    assert chat_command.handled == []
 
 
 def test_postback_owner_and_category_propagate_to_conversation_service(
@@ -121,7 +105,7 @@ def test_postback_owner_and_category_propagate_to_conversation_service(
     """LINE UI第二弾(保有銘柄/対象確認、2026-08)向け、owner/categoryが
     ConversationService.handle_postback()まで正しく伝播すること。"""
     _patch_state(monkeypatch, None)
-    router, conversation, _ = _build_router()
+    router, conversation = _build_router()
     event = LinePostbackEvent(
         reply_token="rt", user_id=_USER, action="show_holdings", op=None, owner="所有者A"
     )
@@ -139,18 +123,17 @@ def test_postback_owner_and_category_propagate_to_conversation_service(
 def test_text_during_input_waiting_goes_to_conversation_service_even_if_csv_shaped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """BUY_INPUT_WAITING中の"8306,100,2500"はCSV形式に見えるが、
-    ChatCommandServiceは一切呼ばれないこと(実装プランv2の指摘4の核心)。"""
+    """BUY_INPUT_WAITING中の"8306,100,2500"はCSV形式に見えるが、常に現在の
+    入力待ち状態の期待フォーマットとして解釈されること(実装プランv2の指摘4)。"""
     state = _confirm_state()
     _patch_state(monkeypatch, state)
-    router, conversation, chat_command = _build_router(is_legacy=False)
+    router, conversation = _build_router()
     event = LineTextMessageEvent(reply_token="rt", user_id=_USER, text="8306,100,2500")
 
     reply = router.route_text(event, _NOW)
 
     assert reply.text == "conversation-text-reply"
     assert conversation.text_calls == [(_USER, state, "8306,100,2500")]
-    assert chat_command.handled == []
 
 
 def test_text_during_confirm_waiting_with_unrelated_text_goes_to_conversation_service(
@@ -158,50 +141,89 @@ def test_text_during_confirm_waiting_with_unrelated_text_goes_to_conversation_se
 ) -> None:
     state = _confirm_state()
     _patch_state(monkeypatch, state)
-    router, conversation, chat_command = _build_router()
+    router, conversation = _build_router()
     event = LineTextMessageEvent(reply_token="rt", user_id=_USER, text="関係ないテキスト")
 
     router.route_text(event, _NOW)
 
     assert conversation.text_calls == [(_USER, state, "関係ないテキスト")]
-    assert chat_command.handled == []
 
 
-# --- ③ 状態が無く、既存のLegacy CSVフルコマンドのみChatCommandService -------
+# --- ③ 状態無しのtextはすべてヘルプ(Issue #24: legacy CSVコマンド経路廃止) --
 
 
-def test_text_without_state_and_legacy_command_goes_to_chat_command_service(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 旧Legacy CSVフルコマンド(廃止済み。ヘルプのみ返し、一切永続化しない)
+        "買付,7203,100,2000",
+        "売却,7203,100,2000",
+        "ウォッチ,7203",
+        # 断片的なCSV・通常の未認識テキスト
+        "8306,100,2500",
+        "こんにちは",
+    ],
+)
+def test_text_without_state_goes_to_help_and_never_reaches_any_service(
+    monkeypatch: pytest.MonkeyPatch, text: str
 ) -> None:
+    """状態無しのtextは(旧Legacy CSVコマンドを含め)ConversationServiceへも
+    どこへも到達せず、固定ヘルプのみ返すこと。永続化ゼロはフェイクが一切
+    呼ばれないことで保証される(実書き込みの回帰はテスト末尾の
+    test_legacy_csv_text_without_state_causes_zero_persistenceで検証)。"""
     _patch_state(monkeypatch, None)
-    router, conversation, chat_command = _build_router(is_legacy=True)
-    event = LineTextMessageEvent(reply_token="rt", user_id=_USER, text="買付,8306,100,2500")
-
-    reply = router.route_text(event, _NOW)
-
-    assert reply.text == "chat-reply:買付,8306,100,2500"
-    assert chat_command.handled == ["買付,8306,100,2500"]
-    assert conversation.text_calls == []
-
-
-# --- ④ 状態無し・非Legacy CSV → ヘルプ(両サービスとも呼ばれない) -----------
-
-
-def test_text_without_state_and_fragment_goes_to_help(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_state(monkeypatch, None)
-    router, conversation, chat_command = _build_router(is_legacy=False)
-    event = LineTextMessageEvent(reply_token="rt", user_id=_USER, text="8306,100,2500")
+    router, conversation = _build_router()
+    event = LineTextMessageEvent(reply_token="rt", user_id=_USER, text=text)
 
     reply = router.route_text(event, _NOW)
 
     assert "コマンドが認識できませんでした" in reply.text
     assert conversation.text_calls == []
-    assert chat_command.handled == []
+    assert conversation.postback_calls == []
+
+
+def test_help_text_does_not_advertise_removed_legacy_csv_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ヘルプ文言が廃止済みのCSV書式(買付,/売却,/ウォッチ,)を案内しないこと。"""
+    _patch_state(monkeypatch, None)
+    router, _ = _build_router()
+    event = LineTextMessageEvent(reply_token="rt", user_id=_USER, text="help")
+
+    reply = router.route_text(event, _NOW)
+
+    assert "買付," not in reply.text
+    assert "売却," not in reply.text
+    assert "ウォッチ," not in reply.text
+    assert "メニュー" in reply.text
+
+
+def test_legacy_csv_text_without_state_causes_zero_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #24の新仕様の核心回帰: 実ConversationServiceを組み込んだrouterへ
+    旧Legacy CSVコマンドを送っても、リポジトリ層への書き込みが一切発生しない
+    こと(routerがヘルプを返すだけでどのサービスにも到達しないため、
+    conversation_state_store.get以外のインフラ呼び出しはゼロ)。"""
+    _patch_state(monkeypatch, None)
+    router = line_event_router.build_line_event_router()
+
+    calls: list[str] = []
+    for name in ("start_or_replace", "record_input", "retry", "cancel", "discard_input"):
+        monkeypatch.setattr(
+            line_event_router.conversation_state_store,
+            name,
+            lambda *a, _n=name, **kw: calls.append(_n),
+        )
+
+    for text in ("買付,7203,100,2000", "売却,7203,100,2000", "ウォッチ,7203"):
+        event = LineTextMessageEvent(reply_token="rt", user_id=_USER, text=text)
+        reply = router.route_text(event, _NOW)
+        assert "コマンドが認識できませんでした" in reply.text
+
+    assert calls == []
 
 
 def test_build_line_event_router_constructs_real_dependencies() -> None:
     router = line_event_router.build_line_event_router()
     assert router.conversation_service is not None
-    assert router.chat_command_service is not None
