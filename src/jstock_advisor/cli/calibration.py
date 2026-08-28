@@ -27,6 +27,7 @@ _FORMATS = ("jsonl", "csv")
 _SAMPLE_DEFINITIONS = {
     "raw": SampleDefinition.RAW,
     "non-overlapping-window": SampleDefinition.NON_OVERLAPPING_WINDOW,
+    "action-change": SampleDefinition.ACTION_CHANGE,
 }
 
 
@@ -39,7 +40,7 @@ def export_dataset(
     sample_definition: str = typer.Option(
         "raw",
         "--sample-definition",
-        help="raw(全Recommendation×horizon)またはnon-overlapping-window",
+        help="raw(全Recommendation×horizon)/ non-overlapping-window / action-change",
     ),
     selected_only: bool = typer.Option(
         False, "--selected-only", help="sample_selected=trueの行のみexportする"
@@ -83,3 +84,37 @@ def export_dataset(
     )
     for path in written:
         typer.echo(f"  -> {path}")
+
+
+@app.command("analyze")
+def analyze_dataset(
+    input_path: Path = typer.Option(..., "--input", help="export-datasetが生成したJSONL"),
+    output: Path = typer.Option(..., "--output", help="analysis artifact(JSONL)の出力先"),
+    bootstrap_iterations: int = typer.Option(500, "--bootstrap-iterations"),
+    bootstrap_seed: int = typer.Option(42, "--bootstrap-seed"),
+    small_sample_rows: int = typer.Option(30, "--small-sample-rows"),
+    small_sample_stocks: int = typer.Option(10, "--small-sample-stocks"),
+) -> None:
+    """Phase C1: 記述統計のanalysis artifactを生成する(判定・閾値・scoreは
+    一切変更しない。good BUY composite・優劣判定・threshold提案は行わない)。"""
+    from jstock_advisor.services.calibration_analysis_service import (
+        AnalysisParameters,
+        analyze,
+        parse_dataset_jsonl,
+        to_artifact_jsonl,
+    )
+
+    dataset = parse_dataset_jsonl(input_path.read_text(encoding="utf-8"))
+    params = AnalysisParameters(
+        small_sample_warning_rows=small_sample_rows,
+        small_sample_warning_distinct_stocks=small_sample_stocks,
+        bootstrap_iterations=bootstrap_iterations,
+        bootstrap_seed=bootstrap_seed,
+    )
+    records = analyze(dataset, params)
+    output.write_text(to_artifact_jsonl(records), encoding="utf-8", newline="\n")
+    typer.echo(
+        f"analyze完了: cells={records[0]['cell_count']} "
+        f"sample_definition={records[0]['source_dataset']['sample_definition']}"
+    )
+    typer.echo(f"  -> {output}")
