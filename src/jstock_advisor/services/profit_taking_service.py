@@ -37,6 +37,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
 from jstock_advisor.domain.financial_decomposition import (
     has_guidance_revision_disclosure,
     is_fundamentally_driven,
@@ -200,6 +201,22 @@ _INDUSTRY_SECTOR_LABELS: dict[ProfitTakingIndustrySector, str] = {
 }
 
 
+# Issue #21: usable_for_trading_judgment=False時に「なぜ価格基準の利確判定を
+# 使用できなかったか」を利用者向けに説明する文言。分岐は必ず構造化code
+# (FairValueUnusableReasonCode)で行い、自由文unusable_reasonをparseしない。
+_FAIR_VALUE_UNUSABLE_REASON_TEXTS: dict[FairValueUnusableReasonCode, str] = {
+    FairValueUnusableReasonCode.NO_VALID_METHODS: (
+        "適正価格を算出できる有効な評価手法がないため、価格基準の利確判定に使用していません"
+    ),
+    FairValueUnusableReasonCode.TOO_FEW_METHODS: (
+        "適正価格を算出できる評価手法が不足しているため、価格基準の利確判定に使用していません"
+    ),
+    FairValueUnusableReasonCode.METHOD_SPREAD_TOO_WIDE: (
+        "適正価格の算出手法間の乖離が大きいため、価格基準の利確判定に使用していません"
+    ),
+}
+
+
 def _build_not_yet_action_reasons(
     result: ProfitTakingResult,
     config: AppConfig,
@@ -210,16 +227,25 @@ def _build_not_yet_action_reasons(
     trading_unit_feasibility: TradingUnitFeasibility,
     has_strong_counter_material: bool,
     is_uptrend: bool,
+    fair_value_unusable_reason_code: FairValueUnusableReasonCode | None,
 ) -> list[str]:
     """「直ちに利確しない理由」を、最終判定の種類からではなく実際に評価した
     数値条件から構築する(要求仕様§2)。MUFGのように含み益率が閾値以上でも
     最終判定がWATCHになりうる(業種別モデル未対応等が理由の)ケースで、
     誤って「含み益率が閾値未満」と表示しないようにする。
+
+    Issue #21: fair_value_unusable_reason_code(usable_for_trading_judgment=
+    Falseのときのみ非None)がある場合、実際に価格基準の利確判定を遮断した
+    理由を、業種モデル等の一般的な説明より先に表示する(従来は遮断要因が
+    どこにも表示されず、ほぼ常時発火する業種モデル文言だけが見えていた)。
+    既存の他の理由は従来どおり残す。
     """
     t = config.profit_taking.thresholds
     reasons: list[str] = []
     if result.pnl.unrealized_pnl_pct < t.unrealized_gain_partial_pct:
         reasons.append(f"含み益率は一部利確基準({t.unrealized_gain_partial_pct:.0f}%)未満")
+    if fair_value_unusable_reason_code is not None:
+        reasons.append(_FAIR_VALUE_UNUSABLE_REASON_TEXTS[fair_value_unusable_reason_code])
     if fair_value_overall_confidence == ConfidenceLevel.MEDIUM:
         reasons.append("適正価格モデルの信頼度がMEDIUM")
     if not industry_model_applied:
@@ -911,6 +937,7 @@ class ProfitTakingService:
                 has_strong_counter_material,
                 snapshot.momentum.trend_classification
                 in (TrendClassification.UPTREND, TrendClassification.STRONG_UPTREND),
+                fv_range.unusable_reason_code,
             ),
             current_price_vs_neutral_fair_value_pct=(
                 result.current_price_vs_neutral_fair_value_pct
@@ -957,6 +984,16 @@ class ProfitTakingService:
                 for m in (fv_range.methods_used + fv_range.methods_excluded)
             ],
             fair_value_spread_ratio=spread_ratio,
+            # Issue #21: 判定時点のFairValueRange使用可否スナップショット。
+            # codeはenumの.value(文字列)で保存する(sell_intensity・
+            # fair_value_methods内confidence等と同じ既存規約)。
+            fair_value_usable_for_trading_judgment=fv_range.usable_for_trading_judgment,
+            fair_value_unusable_reason_code=(
+                fv_range.unusable_reason_code.value
+                if fv_range.unusable_reason_code is not None
+                else None
+            ),
+            fair_value_unusable_reason=fv_range.unusable_reason,
             consecutive_actual_dividend_increase_years=(
                 dividend.consecutive_dividend_increase_years
             ),

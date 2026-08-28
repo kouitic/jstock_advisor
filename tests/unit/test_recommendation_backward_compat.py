@@ -222,3 +222,28 @@ def test_old_shape_decision_snapshot_defaults_company_quality_score_model_versio
 
     assert snapshot is not None
     assert snapshot.company_quality_score_model_version == "v1"
+
+
+# --- Issue #21(2026-08-28): fair_value使用可否スナップショット3フィールド -----
+# fair_value_usable_for_trading_judgment / fair_value_unusable_reason_code /
+# fair_value_unusable_reason を持たない既存レコードはNoneとして読む。
+# Noneは「保存なし(改修前の記録)」を意味し、現在configで理由を再構築しない
+# (backfillも行わない)。
+
+
+def test_old_shape_recommendation_without_fair_value_usability_fields_loads(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "local_store"
+    store_dir.mkdir()
+    (store_dir / "recommendations.json").write_text(
+        json.dumps([_OLD_SHAPE_RECOMMENDATION]), encoding="utf-8"
+    )
+
+    repo = RecommendationRepository(store_dir=store_dir)
+    rec = repo.get("old-rec-1")
+
+    assert rec is not None
+    assert rec.fair_value_usable_for_trading_judgment is None
+    assert rec.fair_value_unusable_reason_code is None
+    assert rec.fair_value_unusable_reason is None
