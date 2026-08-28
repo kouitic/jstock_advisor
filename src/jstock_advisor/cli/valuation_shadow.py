@@ -42,7 +42,8 @@ def export(
     typer.echo(
         f"export完了: recommendations={result.recommendation_count} "
         f"rows={result.row_count} "
-        f"unavailable_rows={result.unavailable_row_count} "
+        f"unavailable_shadow_rows={result.unavailable_shadow_row_count} "
+        f"unavailable_contexts={result.unavailable_context_count} "
         f"reconstruction_mismatch={result.reconstruction_mismatch_count}"
     )
     typer.echo(f"  -> {output}")

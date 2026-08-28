@@ -45,13 +45,17 @@ class HypothesisOrigin(StrEnum):
 class ValuationHypothesis:
     """1つのgrouping仮説。clusters=Noneは「各方式を独立票として扱う」
     (現行方式の母集団解釈)。clustersは標準5方式の分割で、群内はmedianへ
-    縮約したうえで群を1票として集約する。"""
+    縮約したうえで群を1票として集約する。
+
+    aliases: 設計文書上の別名(概念的に同一の仮説を二重登録しないための
+    canonicalize記録。同一計算を別idで重複させない)。"""
 
     hypothesis_id: str
     origin: HypothesisOrigin
     clusters: tuple[frozenset[str], ...] | None
     description: str
     derivation_note: str | None = None
+    aliases: tuple[str, ...] = ()
 
 
 PREDEFINED_HYPOTHESES: tuple[ValuationHypothesis, ...] = (
@@ -90,7 +94,12 @@ PREDEFINED_HYPOTHESES: tuple[ValuationHypothesis, ...] = (
             frozenset({"dcf"}),
             frozenset({"historical_range"}),
         ),
-        description="PER/PBRのみ1証拠群として扱い他は独立票のまま",
+        description=(
+            "PER/PBRのみ1証拠群として扱い他は独立票のまま"
+            "(設計候補C1c(4群分割)と概念的に同一のため、vh1では本仮説へ"
+            "canonicalizeし二重登録しない)"
+        ),
+        aliases=("C1c", "PER_PBR_GROUPING"),
     ),
 )
 

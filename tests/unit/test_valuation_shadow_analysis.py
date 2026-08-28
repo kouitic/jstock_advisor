@@ -260,13 +260,51 @@ def test_sell_saved_usable_none_means_flip_not_comparable() -> None:
 # --- UNAVAILABLE伝播 ------------------------------------------------------
 
 
-def test_unavailable_contexts_are_exported_not_dropped() -> None:
+def test_unavailable_contexts_expand_to_all_hypotheses() -> None:
+    """canonical grain(1 Rec×1 context×1 仮説)はUNAVAILABLEでも維持され、
+    3context×全仮説数の行が生成される(仮説別denominatorを後段で計算可能)。"""
+    from jstock_advisor.analysis.valuation_shadow_hypotheses import ALL_HYPOTHESES
+
     rows = build_shadow_rows(_make_recommendation())
-    assert len(rows) == 3  # 3context×1行(仮説展開しない)
+    assert len(rows) == 3 * len(ALL_HYPOTHESES)
+    hypothesis_ids = {h.hypothesis_id for h in ALL_HYPOTHESES}
+    for context in ("BUY_RAW", "BUY_DECISION", "SELL_RAW"):
+        context_rows = [r for r in rows if r["context"] == context]
+        assert {r["hypothesis_id"] for r in context_rows} == hypothesis_ids
     for row in rows:
         assert row["observation_status"] == "OBSERVATION_UNAVAILABLE"
-        assert row["hypothesis_id"] is None
+        assert row["hypothesis_id"] is not None
+        assert row["hypothesis_origin"] in ("PREDEFINED", "EXPLORATORY_DATA_DERIVED")
         assert row["unavailable_reason"]
+        # 仮説計算値は推測せずNone(shadow値・価格・bear/bullを生成しない)
+        assert row["population"] is None
+        assert row["anchors"] is None
+        assert "shadow_prices" not in row
+        assert "shadow_bear" not in row
+
+
+def test_available_zero_method_population_is_valid_with_empty_values() -> None:
+    """AVAILABLE+有効方式0件(NO_VALID_METHODS相当)は正当な状態であり、
+    母集団空・anchors全Noneの行として出力される(UNAVAILABLEと混同しない)。"""
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.WATCH,
+        fair_value_methods=[
+            {"method": "per", "fair_value": None, "confidence": "LOW"},
+            {"method": "pbr", "fair_value": None, "confidence": "LOW"},
+        ],
+        fair_value_bear=None,
+        fair_value_bull=None,
+        fair_value_usable_for_trading_judgment=False,
+        fair_value_unusable_reason_code="NO_VALID_METHODS",
+    )
+    row = _rows_by(build_shadow_rows(rec), "SELL_RAW", "H_A_INDEPENDENT_METHODS")
+    assert row["observation_status"] == "AVAILABLE"
+    assert row["population"] == []
+    assert row["population_count"] == 0
+    anchors = row["anchors"]
+    assert isinstance(anchors, dict)
+    assert all(v is None for v in anchors.values())
+    assert row["shadow_usable_for_trading_judgment"] is False
 
 
 # --- export ---------------------------------------------------------------
@@ -296,8 +334,14 @@ def test_export_is_deterministic_and_carries_versions(tmp_path: Path) -> None:
         and h["origin"] == "EXPLORATORY_DATA_DERIVED"
         for h in metadata["hypotheses"]
     )
-    # BUY fixtureのSELL_RAW(1行)+snapshotなしrecの3context(3行)= 4行
-    assert result_a.unavailable_row_count == 4
+    assert any(
+        h["hypothesis_id"] == "H_D_PER_PBR_PAIR" and "C1c" in h["aliases"]
+        for h in metadata["hypotheses"]
+    )
+    # UNAVAILABLE contexts = BUY fixtureのSELL_RAW(1)+snapshotなしrecの3context = 4組。
+    # shadow行はcanonical grain統一により4組×全仮説数へ展開される
+    assert result_a.unavailable_context_count == 4
+    assert result_a.unavailable_shadow_row_count == 4 * len(metadata["hypotheses"])
 
 
 def test_summary_excludes_reconstruction_mismatch_from_delta_stats(tmp_path: Path) -> None:
@@ -313,13 +357,19 @@ def test_summary_excludes_reconstruction_mismatch_from_delta_stats(tmp_path: Pat
     text = summary.read_text(encoding="utf-8")
     lines = [line for line in text.splitlines() if line]
     header = lines[0].split(",")
-    assert "sample_count" in header and "reconstruction_excluded_count" in header
+    assert header[2] == "sample_count"
+    assert header[3] == "unavailable_row_count"
+    assert header[4] == "reconstruction_excluded_count"
+    # 件数semantics: shadow行数と(Recommendation, context)組数を分離して出力
+    assert any(line.startswith("_ALL_,_UNAVAILABLE_SHADOW_ROWS_") for line in lines)
+    assert any(line.startswith("_ALL_,_UNAVAILABLE_CONTEXTS_") for line in lines)
     decision_h_a = next(
         line for line in lines if line.startswith("BUY_DECISION,H_A_INDEPENDENT_METHODS")
     )
     cols = decision_h_a.split(",")
     assert cols[2] == "1"  # mismatchレコードはsampleから除外
-    assert cols[3] == "1"  # 除外件数として可視化
+    assert cols[3] == "0"  # BUY_DECISIONにUNAVAILABLE行なし
+    assert cols[4] == "1"  # 除外件数として可視化
     # 自動結論(ランキング・優劣・閾値提案)を出力しない
     for forbidden in ("best", "rank", "GOOD", "FAIL", "threshold"):
         assert forbidden not in text
