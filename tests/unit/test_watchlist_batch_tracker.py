@@ -1039,3 +1039,138 @@ def test_set_watchlist_batch_total_records_triggered_by_batch_id(dynamo) -> None
     assert item is not None
     assert item["triggered_by_batch_id"] == "batch-1"
     assert item["trigger_type"] == "POST_NEW_CANDIDATE_SCREENING"
+
+
+# --- Issue #31: holdings/buy完了処理(finalize)の排他制御 -----------------------
+# completion_finalize_token/started_at/completed_atによるacquire/complete/
+# stale takeoverのDynamoDB意味論をmotoで検証する。running_on_lambda()ガードを
+# 通すため各テストでAWS_LAMBDA_FUNCTION_NAMEを設定する。
+
+_I31_NOW = dt.datetime(2026, 8, 28, 23, 0, tzinfo=dt.UTC)
+
+
+def _i31_put_batch(batch_id: str = "cb-1", total: int = 3, completed: int = 3) -> None:
+    boto3.resource("dynamodb", region_name=_REGION).Table(_BATCH_TABLE).put_item(
+        Item={"batch_id": batch_id, "total": total, "completed": completed}
+    )
+
+
+def _i31_get_batch(batch_id: str = "cb-1") -> dict:
+    return (
+        boto3.resource("dynamodb", region_name=_REGION)
+        .Table(_BATCH_TABLE)
+        .get_item(Key={"batch_id": batch_id})["Item"]
+    )
+
+
+def test_issue31_acquire_first_true_then_false(dynamo, monkeypatch) -> None:
+    """A/B/D: 初回acquireはtokenを返し、直後(stale閾値未満)の2回目はNone。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i31_put_batch()
+
+    token = batch_tracker.try_acquire_completion_finalize("cb-1", _I31_NOW)
+    assert token is not None
+
+    again = batch_tracker.try_acquire_completion_finalize(
+        "cb-1", _I31_NOW + dt.timedelta(seconds=600)
+    )
+    assert again is None
+    item = _i31_get_batch()
+    assert item["completion_finalize_token"] == token  # 所有権は初回のまま
+
+
+def test_issue31_acquire_rejected_when_batch_incomplete(dynamo, monkeypatch) -> None:
+    """C: completed < totalの間はfinalize lockを取得できない。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i31_put_batch(total=3, completed=2)
+
+    assert batch_tracker.try_acquire_completion_finalize("cb-1", _I31_NOW) is None
+
+
+def test_issue31_stale_takeover_updates_token(dynamo, monkeypatch) -> None:
+    """E: started_atが1200秒以上古くcompleted_at未記録なら、takeoverが成功し
+    token・started_atが新ownerの値へ更新される。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i31_put_batch()
+    old_token = batch_tracker.try_acquire_completion_finalize("cb-1", _I31_NOW)
+    assert old_token is not None
+
+    later = _I31_NOW + dt.timedelta(seconds=1300)
+    new_token = batch_tracker.try_acquire_completion_finalize("cb-1", later)
+
+    assert new_token is not None
+    assert new_token != old_token
+    item = _i31_get_batch()
+    assert item["completion_finalize_token"] == new_token
+    assert item["completion_finalize_started_at"] == later.isoformat()
+
+
+def test_issue31_old_owner_cannot_complete_after_takeover(dynamo, monkeypatch) -> None:
+    """F/G: takeover後、旧owner tokenによるcompleted記録は必ず失敗し、
+    新owner tokenのみ記録できる。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i31_put_batch()
+    old_token = batch_tracker.try_acquire_completion_finalize("cb-1", _I31_NOW)
+    later = _I31_NOW + dt.timedelta(seconds=1300)
+    new_token = batch_tracker.try_acquire_completion_finalize("cb-1", later)
+    assert old_token is not None and new_token is not None
+
+    assert (
+        batch_tracker.mark_completion_finalize_completed("cb-1", old_token, later)
+        is False
+    )
+    item = _i31_get_batch()
+    assert "completion_finalize_completed_at" not in item
+
+    assert (
+        batch_tracker.mark_completion_finalize_completed("cb-1", new_token, later)
+        is True
+    )
+    item = _i31_get_batch()
+    assert item["completion_finalize_completed_at"] == later.isoformat()
+
+
+def test_issue31_completed_batch_never_reacquired(dynamo, monkeypatch) -> None:
+    """H/I(Acceptance Criteria): completed_at記録後は、直後でも1200秒以上・
+    数時間経過後でも、どれだけ遅いretryでも再acquireできない
+    (TTLでbatch item自体が削除されるまでfinalize済み状態を維持)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i31_put_batch()
+    token = batch_tracker.try_acquire_completion_finalize("cb-1", _I31_NOW)
+    assert token is not None
+    assert batch_tracker.mark_completion_finalize_completed("cb-1", token, _I31_NOW) is True
+
+    for delay_seconds in (1, 1300, 2 * 60 * 60, 5 * 60 * 60):
+        assert (
+            batch_tracker.try_acquire_completion_finalize(
+                "cb-1", _I31_NOW + dt.timedelta(seconds=delay_seconds)
+            )
+            is None
+        ), f"delay={delay_seconds}s で再acquireできてはならない"
+
+
+def test_issue31_complete_is_recorded_only_once(dynamo, monkeypatch) -> None:
+    """completed_atは1回だけ記録される(同一tokenでの二重記録もFalse)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i31_put_batch()
+    token = batch_tracker.try_acquire_completion_finalize("cb-1", _I31_NOW)
+    assert token is not None
+    assert batch_tracker.mark_completion_finalize_completed("cb-1", token, _I31_NOW) is True
+    assert (
+        batch_tracker.mark_completion_finalize_completed(
+            "cb-1", token, _I31_NOW + dt.timedelta(seconds=1)
+        )
+        is False
+    )
+
+
+def test_issue31_local_environment_always_acquires(monkeypatch) -> None:
+    """ローカル(非Lambda)は常に取得成功(単一プロセスのため排他不要。
+    DynamoDBへはアクセスしない)。"""
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    token = batch_tracker.try_acquire_completion_finalize("cb-local", _I31_NOW)
+    assert token is not None
+    assert (
+        batch_tracker.mark_completion_finalize_completed("cb-local", token, _I31_NOW)
+        is True
+    )

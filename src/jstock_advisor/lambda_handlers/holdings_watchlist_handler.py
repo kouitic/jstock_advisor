@@ -74,7 +74,12 @@ from jstock_advisor.domain.signals.holding_decision_execution_plan import (
     resolve_financial_deferred_policy,
 )
 from jstock_advisor.domain.signals.portfolio_concentration import evaluate_portfolio_concentration
-from jstock_advisor.infrastructure.aws.batch_tracker import record_result, start_batch
+from jstock_advisor.infrastructure.aws.batch_tracker import (
+    mark_completion_finalize_completed,
+    record_result,
+    start_batch,
+    try_acquire_completion_finalize,
+)
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
     DecisionSnapshotRepository,
@@ -1111,6 +1116,18 @@ def _finish_batch_item(
             batch_id,
         )
         return
+    # Issue #31: completedカウンタは非冪等なADDのため、処理済みholding_idの
+    # Lambda非同期retryでis_completeが再成立しうる。summary送信フローの実行権を
+    # 原子的に取得し、取得できた1実行だけが以降を実行する(kill switch判定は
+    # 副作用が無いためゲートの前に置き、抑止中はacquire自体を行わない=
+    # 解除後の後続トリガーで従来どおり送信可能という既存意味論を維持)。
+    finalize_token = try_acquire_completion_finalize(batch_id, now)
+    if finalize_token is None:
+        logger.info(
+            "batch summary finalize skipped (already acquired or completed) batch_id=%s",
+            batch_id,
+        )
+        return
     detected_counts = _count_holding_summary_actions(progress.detected_categories)
     sent_counts = _count_holding_summary_actions(progress.notification_categories)
     attention_detected_n = len(progress.attention_detected_stock_codes)
@@ -1152,6 +1169,10 @@ def _finish_batch_item(
         attention_detected_count=attention_detected_n,
         display_title="保有株チェック",
     )
+    # Issue #31: 完了処理の正常終了を記録する。これ以降、同一batch_idの
+    # acquireは(経過時間に関わらず)永久に失敗する。summary送信が例外の場合は
+    # ここへ到達せず、stale化(1200秒)後に後続トリガーがtakeoverして再実行できる。
+    mark_completion_finalize_completed(batch_id, finalize_token, now)
 
 
 def _process_single_holding(

@@ -14,6 +14,7 @@ import datetime as dt
 import logging
 import random
 import time
+import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -367,6 +368,131 @@ def record_result(
             item.get("evaluation_record_saved_stock_codes", set())
         ),
     )
+
+
+# --- holdings/buyバッチの完了処理(finalize)排他制御(Issue #31) ---------------
+# record_result()のcompletedカウンタは非冪等なADDであり、処理済み銘柄の
+# Lambda非同期retryでcompletedがtotalを超えた後もis_complete(completed>=total)が
+# 再成立し、完了トリガー処理(holdings: summary送信、buy: _finalize_batch)が
+# 二重実行されうる。以下の2関数は「completed>=totalとなった後のfinalize実行権」を
+# 原子的に制御する(completedカウンタ自体の冪等化は行わない)。
+# watchlistパイプラインのtry_acquire_finalize()/status state machineとは意図的に
+# 統合しない(Reconcilerがstatus値でスキャン・分岐しており、holdings/buyの
+# バッチ項目はstatus=RUNNINGのままstarted_at/dispatch_completed属性を持たない
+# ことで無害にスキップされている既存前提を壊さないため)。専用の
+# completion_finalize_*属性のみを追加する。
+#
+# 状態モデル(Issue #31承認済み設計):
+#   A. started/completedとも無し            → 初回acquire可
+#   B. startedあり・completedなし・1200秒未満 → acquire不可(他実行が処理中)
+#   C. startedあり・completedなし・1200秒以上 → stale takeover可(token更新)
+#   D. completedあり                        → 永久にacquire不可(finalize済み。
+#      TTL(6時間)でbatch item自体が削除されるまで維持)
+#
+# 保証水準(exactly-onceではない):
+#   ・通常のretry/並行実行: effectively once(条件付きUpdateで実行権は正確に1つ)
+#   ・owner crash(acquire後・finalize完了前): stale takeoverによるat-least-once回復
+#   ・finalize本体成功後・completed記録前のcrash: takeoverによるfinalize再実行の
+#     可能性が残る(狭い窓)。再実行時の副作用はIssue #17のNotificationClaim・
+#     決定的キーのupsert等により安全側に抑えられる(分散トランザクションは
+#     作らない方針)。
+
+# stale takeover閾値(秒)。根拠: 本ゲートを利用するLambda(buy-candidates/
+# holdings-watchlist)の設定Timeout最大値900秒+安全余裕300秒(Issue #17の
+# _CLAIM_STALE_AFTER_SECONDSと同一の考え方)。
+_COMPLETION_FINALIZE_STALE_AFTER_SECONDS = 1200
+
+
+def try_acquire_completion_finalize(batch_id: str, now: dt.datetime) -> str | None:
+    """holdings/buyバッチの完了処理(summary送信/_finalize_batch)の実行権を
+    原子的に取得する(Issue #31)。
+
+    is_complete(completed>=total)を観測した呼び出し側が、完了処理の実行前に
+    必ず呼ぶこと。取得に成功した場合は所有権token(uuid4)を返し、呼び出し側は
+    完了処理の正常終了後にmark_completion_finalize_completed(batch_id, token)を
+    呼ぶ。取得できない場合(他実行が取得済み/finalize完了済み/completed<total)は
+    Noneを返し、呼び出し側は完了処理を実行してはならない。
+
+    条件(単一のConditionExpressionで原子的に判定):
+      completion_finalize_completed_at が存在しない(完了済みなら永久に不可)
+      AND completed >= total(バッチ未完了のままlockだけ取得することは不可)
+      AND (completion_finalize_started_at が存在しない(初回)
+           OR started_atがstale閾値(1200秒)より古い(crashからのtakeover))
+    takeover時はtoken・started_atが自分の値へ更新されるため、旧ownerは
+    mark_completion_finalize_completed()のtoken条件で必ず失敗する。
+
+    ローカル(非Lambda)環境では常に取得成功として新規tokenを返す
+    (単一プロセスのため排他不要。try_acquire_finalize()と同じ慣習)。
+    """
+    token = str(uuid.uuid4())
+    if not running_on_lambda():
+        return token
+    stale_before = (
+        now - dt.timedelta(seconds=_COMPLETION_FINALIZE_STALE_AFTER_SECONDS)
+    ).isoformat()
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET completion_finalize_token = :token, "
+                "completion_finalize_started_at = :now"
+            ),
+            ConditionExpression=(
+                "attribute_not_exists(completion_finalize_completed_at)"
+                " AND completed >= #total"
+                " AND (attribute_not_exists(completion_finalize_started_at)"
+                " OR completion_finalize_started_at < :stale_before)"
+            ),
+            ExpressionAttributeNames={"#total": "total"},
+            ExpressionAttributeValues={
+                ":token": token,
+                ":now": now.isoformat(),
+                ":stale_before": stale_before,
+            },
+        )
+        return token
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
+            return None
+        raise
+
+
+def mark_completion_finalize_completed(batch_id: str, token: str, now: dt.datetime) -> bool:
+    """完了処理の正常終了を記録する(Issue #31)。
+
+    try_acquire_completion_finalize()が返したtokenの所有者だけが記録できる
+    (takeoverでtokenが更新された後の旧ownerは条件不成立でFalse)。記録後は
+    同一batch_idのacquireが(経過時間に関わらず)永久に失敗するようになる。
+    完了処理が例外で失敗した場合は呼ばないこと(started_atがstale化した時点で
+    後続のトリガーがtakeoverし再実行できる)。
+
+    条件不成立(所有権喪失・既に記録済み)はFalseを返す。それ以外の
+    ClientError(スロットリング等)はそのまま送出する(呼び出し側のLambda retry
+    で回復する。この場合completed_at未記録のままstale化し、takeover側の
+    finalize再実行があり得る=モジュール冒頭の保証水準に記載の狭い窓)。
+    """
+    if not running_on_lambda():
+        return True
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression="SET completion_finalize_completed_at = :now",
+            ConditionExpression=(
+                "completion_finalize_token = :token"
+                " AND attribute_not_exists(completion_finalize_completed_at)"
+            ),
+            ExpressionAttributeValues={":now": now.isoformat(), ":token": token},
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
+            logger.warning(
+                "mark_completion_finalize_completed: condition failed "
+                "(ownership lost or already completed) batch_id=%s",
+                batch_id,
+            )
+            return False
+        raise
 
 
 def try_acquire_finalize(batch_id: str) -> bool:

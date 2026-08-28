@@ -3103,3 +3103,122 @@ def test_process_single_candidate_normal_mode_still_grows_audit_log(
     )
 
     assert len(audit_repo.list_all()) == 1
+
+
+# --- Issue #31: buy側finalize-onceゲート -------------------------------------
+
+
+def _issue31_completed_progress() -> object:
+    return handler_module.BatchProgress(
+        total=1,
+        completed=2,  # 処理済み銘柄のretryでcompleted>totalとなった状態を再現
+        category_counts={},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+        validation_recommendation_ids=[],
+    )
+
+
+def _issue31_run_candidate(monkeypatch, tmp_path) -> tuple[list, list]:
+    """is_complete==Trueを2回観測するシナリオを実行し、
+    (_finalize_batch呼び出し回数リスト, mark呼び出しリスト)を返す。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1",
+        buy_action=BuyAction.NOT_ATTRACTIVE,
+    )
+    outcome = _outcome(recommendation, ranking_group="excluded")
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
+    )
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda *a, **kw: _issue31_completed_progress(),
+    )
+    finalize_calls: list[int] = []
+    monkeypatch.setattr(
+        handler_module, "_finalize_batch", lambda *a, **kw: finalize_calls.append(1)
+    )
+    acquire_results = iter(["issue31-token", None])
+    monkeypatch.setattr(
+        handler_module,
+        "try_acquire_completion_finalize",
+        lambda batch_id, now: next(acquire_results),
+    )
+    marks: list[tuple[str, str]] = []
+
+    def _fake_mark(batch_id, token, now):
+        marks.append((batch_id, token))
+        return True
+
+    monkeypatch.setattr(handler_module, "mark_completion_finalize_completed", _fake_mark)
+
+    for _ in range(2):  # 二重トリガー(retryによるis_complete再成立)を再現
+        handler_module._process_single_candidate(
+            "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(),
+            _CONFIG, object(), repo, fake_service,
+        )
+    return finalize_calls, marks
+
+
+def test_issue31_buy_finalize_runs_once_under_duplicate_trigger(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """K/L: is_completeを複数回観測しても、acquire成功側だけが_finalize_batchへ
+    進み、正常終了後にmark_completion_finalize_completedが自分のtokenで
+    1回だけ呼ばれる。"""
+    finalize_calls, marks = _issue31_run_candidate(monkeypatch, tmp_path)
+    assert finalize_calls == [1]
+    assert marks == [("batch-1", "issue31-token")]
+
+
+def test_issue31_buy_finalize_exception_does_not_mark_completed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """M: _finalize_batchが例外の場合、completed_atは記録されない
+    (stale化後のtakeoverで再実行可能な状態を保つ)。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1",
+        buy_action=BuyAction.NOT_ATTRACTIVE,
+    )
+    outcome = _outcome(recommendation, ranking_group="excluded")
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
+    )
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+    monkeypatch.setattr(
+        handler_module, "record_result", lambda *a, **kw: _issue31_completed_progress()
+    )
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("finalize failed (simulated)")
+
+    monkeypatch.setattr(handler_module, "_finalize_batch", _boom)
+    monkeypatch.setattr(
+        handler_module,
+        "try_acquire_completion_finalize",
+        lambda batch_id, now: "issue31-token",
+    )
+    marks: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "mark_completion_finalize_completed",
+        lambda batch_id, token, now: marks.append((batch_id, token)) or True,
+    )
+
+    with pytest.raises(RuntimeError, match="finalize failed"):
+        handler_module._process_single_candidate(
+            "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(),
+            _CONFIG, object(), repo, fake_service,
+        )
+    assert marks == []
