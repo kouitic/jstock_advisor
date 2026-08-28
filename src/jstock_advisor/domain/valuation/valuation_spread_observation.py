@@ -76,6 +76,13 @@ class ValuationSpreadObservation:
     methods_count: int = 0
     excluded: tuple[ExcludedMethodObservation, ...] = ()
     unavailable_reason: str | None = None
+    # Issue #20 Phase C: このcontextの母集団((method, 値)のmethod名昇順tuple)。
+    # 端点だけでなく仮説別の集約(shadow分析)が全値集合を必要とするため公開する
+    # (導出元・意味論は従来と同一)。AVAILABLE時に復元された母集団であり、
+    # 有効方式0件(NO_VALID_METHODS相当)の場合は空tupleが正当な状態。
+    # OBSERVATION_UNAVAILABLE時も空tuple(「0件」と「観測不能」の区別は
+    # statusが担う。このフィールドだけで両者を判別しないこと)。
+    values: tuple[tuple[str, Decimal], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,7 @@ def _available(
         spread_ratio=endpoints.spread_ratio,
         methods_count=len(endpoints.values),
         excluded=excluded,
+        values=endpoints.values,
     )
 
 
