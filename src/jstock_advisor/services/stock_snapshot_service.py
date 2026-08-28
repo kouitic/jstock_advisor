@@ -31,6 +31,11 @@ from jstock_advisor.domain.entities.enums import (
     ValuationBasis,
 )
 from jstock_advisor.domain.entities.environment import EnvironmentResult
+from jstock_advisor.domain.entities.financial_input_provenance import (
+    FinancialInputProvenance,
+    FinancialValueProvenance,
+    FinancialValueSourceType,
+)
 from jstock_advisor.domain.entities.historical_valuation import HistoricalValuationResult
 from jstock_advisor.domain.entities.market_environment import MarketEnvironmentResult
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
@@ -171,6 +176,73 @@ class StockSnapshot:
     market_environment: MarketEnvironmentResult
     sector_environment: SectorEnvironmentResult
     environment: EnvironmentResult
+    # --- Issue #20 Phase B2-A(2026-08追加) ---
+    # 判定入力financial dataのprovenance(期間・provider・観測時点・値種別)。
+    # build_stock_snapshot()がsnapshot構築時点の事実からのみ組み立てる
+    # (新たなprovider呼び出し・推測なし)。判定ロジックからは一切参照されない
+    # 観測専用フィールドで、BUY/SELL両パイプラインがRecommendationへ転記する。
+    # テスト等で手動構築されたsnapshotではNone(NOT_CAPTURED相当)になりうる。
+    financial_input_provenance: FinancialInputProvenance | None = None
+
+
+def build_financial_input_provenance(
+    financial: FinancialSummary, dividend: DividendInfo
+) -> FinancialInputProvenance:
+    """snapshot構築時点の事実のみからprovenanceを組み立てる(Issue #20 B2-A)。
+
+    新たなprovider呼び出し・推測・現在値からの補完は行わない。想定内の入力
+    欠損(providerが値を提供しなかった)はavailable=False(NOT_AVAILABLE)と
+    して正常に表現し、想定外のprogramming errorは握り潰さない(包括的
+    try/exceptを置かない)。
+
+    - latest_quarter_endはrecent_quarters中の最大期末日の生値。未来日ガード等の
+      判定はearnings_window側(resolve_latest_financial_period_end)の既存責務の
+      ままで、ここで再判定・推測しない。
+    - 予想EPS/予想配当は、providerが予想の出所(会社予想か推定か)を明示しない
+      ためPROVIDER_FORECAST_UNSPECIFIED(根拠なくCOMPANY_FORECASTとしない)。
+    - 予想BPSは、pipelineが予想として扱う一方で実態はprovider提供のtrailing
+      bookValueである可能性が実装コメント上既知であり、provider仕様として
+      種別を保証できないためUNKNOWN(実績とも予想とも断定しない)。
+    """
+    quarter_ends = [q.quarter_end for q in financial.recent_quarters]
+    financial_provider = financial.source.provider
+    financial_observed_at = financial.source.fetched_at
+
+    def _financial_forecast(value: object) -> FinancialValueProvenance:
+        return FinancialValueProvenance(
+            source_type=FinancialValueSourceType.PROVIDER_FORECAST_UNSPECIFIED,
+            provider=financial_provider,
+            observed_at=financial_observed_at,
+            available=value is not None,
+        )
+
+    return FinancialInputProvenance(
+        fiscal_period_end=financial.fiscal_period_end,
+        fiscal_year_end_month=financial.fiscal_year_end_month,
+        latest_quarter_end=max(quarter_ends) if quarter_ends else None,
+        recent_periods_source=financial.recent_periods_source,
+        financial_provider=financial_provider,
+        financial_observed_at=financial_observed_at,
+        forecast_eps_source=_financial_forecast(financial.forecast_eps),
+        forecast_bps_source=FinancialValueProvenance(
+            source_type=FinancialValueSourceType.UNKNOWN,
+            provider=financial_provider,
+            observed_at=financial_observed_at,
+            available=financial.forecast_bps is not None,
+        ),
+        forecast_dividend_source=FinancialValueProvenance(
+            source_type=FinancialValueSourceType.PROVIDER_FORECAST_UNSPECIFIED,
+            provider=dividend.source.provider,
+            observed_at=dividend.source.fetched_at,
+            available=dividend.forecast_annual_dividend_per_share is not None,
+        ),
+        actual_dividend_source=FinancialValueProvenance(
+            source_type=FinancialValueSourceType.ACTUAL,
+            provider=dividend.source.provider,
+            observed_at=dividend.source.fetched_at,
+            available=dividend.actual_annual_dividend_per_share is not None,
+        ),
+    )
 
 
 def build_stock_snapshot(
@@ -543,6 +615,8 @@ def build_stock_snapshot(
         market_environment, sector_environment, now, config.market_sector_environment.environment
     )
 
+    financial_input_provenance = build_financial_input_provenance(financial, dividend)
+
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
@@ -584,5 +658,6 @@ def build_stock_snapshot(
         market_environment=market_environment,
         sector_environment=sector_environment,
         environment=environment,
+        financial_input_provenance=financial_input_provenance,
     )
     return snapshot, None

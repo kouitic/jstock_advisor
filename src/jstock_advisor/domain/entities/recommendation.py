@@ -37,6 +37,7 @@ from jstock_advisor.domain.entities.enums import (
     StockType,
     WatchType,
 )
+from jstock_advisor.domain.entities.financial_input_provenance import FinancialInputProvenance
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 
 
@@ -233,6 +234,14 @@ class Recommendation(ImmutableSnapshot):
     fair_value_usable_for_trading_judgment: bool | None = None
     fair_value_unusable_reason_code: str | None = None
     fair_value_unusable_reason: str | None = None
+
+    # --- Issue #20 Phase B2-A(2026-08-28)で追加: 判定入力financial dataの
+    # provenance(期間・provider・観測時点・値種別)のdecision-time snapshot。
+    # 保証対象はpipelineが実際に使用したStockSnapshot上の情報のみ。
+    # None=NOT_CAPTURED(fp1導入前の旧レコード、またはprovenance未構築の
+    # 手動snapshot経由)。現在値からのbackfill・推測は禁止
+    # (financial_input_provenance.pyのモジュールdocstring参照)。
+    financial_input_provenance: FinancialInputProvenance | None = None
 
     # --- 増配実績と増配予想の分離(2026-07仕様レビュー対応) ---
     consecutive_actual_dividend_increase_years: int | None = None
