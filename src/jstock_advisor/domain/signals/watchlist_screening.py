@@ -26,7 +26,8 @@ from jstock_advisor.config.models import (
     ShareholderBenefitScoringConfig,
     WatchlistScreeningRulesConfig,
 )
-from jstock_advisor.domain.entities.enums import StockType
+from jstock_advisor.domain.classification.financial_industry import classify_industry
+from jstock_advisor.domain.entities.enums import IndustryClassification, StockType
 from jstock_advisor.services.screening_data_provider import WatchlistScreeningInput
 
 
@@ -484,15 +485,23 @@ def _evaluate_hard_exclusions(
                 )
             )
 
+    # Issue #29(2026-08-28): BUY一次スクリーニング(domain/screening/rules.py)と
+    # 同じバグ(日本語TSE33ラベルと英語GICS industry値の比較不一致で金融業除外が
+    # 機能していなかった)がこちらにもあったため、同一の分類器classify_industry()へ
+    # 両経路同時に切り替える(片方だけ直すと、通常screeningでは除外されるが
+    # watchlist自動追加では流入する不整合が残るため)。UNKNOWNは除外しない。
     industry_rules = screening_rules.industry_specific_rules
+    industry_result = classify_industry(input.sector, input.industry)
     if (
-        input.industry in industry_rules.target_industry_classification
+        industry_result.classification == IndustryClassification.FINANCIAL
+        and industry_result.financial_category in industry_rules.target_industry_classification
         and industry_rules.financial_sector_action == "exclude_with_warning"
     ):
         findings.append(
             HardExclusionFinding(
                 HardExclusionCode.UNSUPPORTED_INDUSTRY,
-                f"業種({input.industry})は個別評価ルール未実装のため対象外",
+                f"金融業({industry_result.financial_category}: {input.industry})は"
+                "個別評価ルール未実装のため対象外",
             )
         )
 

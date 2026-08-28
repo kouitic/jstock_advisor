@@ -1,9 +1,14 @@
 import datetime as dt
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.config.models import IndustrySpecificRules
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import FinancialIndustryCategory
 from jstock_advisor.domain.screening.rules import (
     detect_disclosure_risk_keywords,
     evaluate_screening,
@@ -133,19 +138,121 @@ def test_low_liquidity_excluded() -> None:
     assert any("平均売買代金" in r for r in result.exclusion_reasons)
 
 
-def test_financial_sector_excluded_with_warning_config() -> None:
-    result = evaluate_screening(
-        financial=_healthy_financial(industry="銀行業", equity_ratio_pct=6.0),
+# --- Issue #29: 金融業除外(classify_industryベース) --------------------------
+# 以前はconfigの日本語TSE33ラベルとyfinance英語industry値を直接比較しており
+# 一度も一致しなかった(除外が機能していなかった)。実在銘柄の実測値
+# (8306/8604/8766相当)を固定fixtureとして再現する。
+
+
+def _evaluate_industry(
+    sector: str | None,
+    industry: str | None,
+    config: object = None,
+):
+    return evaluate_screening(
+        financial=_healthy_financial(sector=sector, industry=industry),
         dividend=_healthy_dividend(),
         average_trading_value_yen=Decimal("50_000_000"),
         disclosure_risk_keywords_found=[],
         data_fetched_at=_NOW,
         now=_NOW,
         business_calendar=_CALENDAR,
-        config=_CONFIG.screening,
+        config=config or _CONFIG.screening,
     )
+
+
+def _screening_config_with_industries(
+    categories: list[FinancialIndustryCategory],
+    financial_sector_action: str = "exclude_with_warning",
+):
+    rules = _CONFIG.screening.industry_specific_rules.model_copy(
+        update={
+            "target_industry_classification": categories,
+            "financial_sector_action": financial_sector_action,
+        }
+    )
+    return _CONFIG.screening.model_copy(update={"industry_specific_rules": rules})
+
+
+def test_bank_excluded_like_8306() -> None:
+    result = _evaluate_industry("Financial Services", "Banks - Diversified")
     assert not result.passed
-    assert any("銀行業" in r for r in result.exclusion_reasons)
+    assert any("BANKING" in r for r in result.exclusion_reasons)
+
+
+def test_securities_excluded_like_8604() -> None:
+    result = _evaluate_industry("Financial Services", "Capital Markets")
+    assert not result.passed
+    assert any("SECURITIES" in r for r in result.exclusion_reasons)
+
+
+def test_insurance_excluded_like_8766() -> None:
+    result = _evaluate_industry("Financial Services", "Insurance - Property & Casualty")
+    assert not result.passed
+    assert any("INSURANCE" in r for r in result.exclusion_reasons)
+
+
+def test_other_financial_lease_passes_by_default() -> None:
+    """OTHER_FINANCIAL(リース・Credit Services等)は既定では除外しない。"""
+    result = _evaluate_industry("Financial Services", "Credit Services")
+    assert result.passed
+    assert result.exclusion_reasons == []
+
+
+def test_other_financial_excluded_when_added_to_config() -> None:
+    config = _screening_config_with_industries(
+        [
+            FinancialIndustryCategory.BANKING,
+            FinancialIndustryCategory.SECURITIES,
+            FinancialIndustryCategory.INSURANCE,
+            FinancialIndustryCategory.OTHER_FINANCIAL,
+        ]
+    )
+    result = _evaluate_industry("Financial Services", "Credit Services", config=config)
+    assert not result.passed
+    assert any("OTHER_FINANCIAL" in r for r in result.exclusion_reasons)
+
+
+def test_japanese_financial_input_excluded() -> None:
+    """日本語入力はclassify_industryの既存仕様どおり判定される(将来データソース対応)。"""
+    result = _evaluate_industry("金融", "銀行業")
+    assert not result.passed
+    assert any("BANKING" in r for r in result.exclusion_reasons)
+
+
+def test_japanese_industry_without_sector_is_unknown_and_passes() -> None:
+    """sector欠損はclassify_industryの既存仕様どおりUNKNOWN。金融業と推測して除外しない。"""
+    result = _evaluate_industry(None, "銀行業")
+    assert result.passed
+
+
+def test_general_corporate_sector_passes() -> None:
+    result = _evaluate_industry("Technology", "Consumer Electronics")
+    assert result.passed
+
+
+def test_unknown_sector_passes_without_crash() -> None:
+    for sector, industry in ((None, None), ("", ""), ("Unknown Sector X", "Something")):
+        result = _evaluate_industry(sector, industry)
+        assert result.passed
+
+
+def test_financial_sector_action_non_exclude_value_warns_only() -> None:
+    config = _screening_config_with_industries(
+        [FinancialIndustryCategory.BANKING], financial_sector_action="warn"
+    )
+    result = _evaluate_industry("Financial Services", "Banks - Diversified", config=config)
+    assert result.passed
+    assert any("BANKING" in w for w in result.warnings)
+
+
+def test_invalid_target_industry_classification_fails_fast() -> None:
+    """不正なsubcategory名はconfigロード時にpydanticのenum検証でfail-fastする。"""
+    with pytest.raises(ValidationError):
+        IndustrySpecificRules(
+            financial_sector_action="exclude_with_warning",
+            target_industry_classification=["BANKING", "TSE_BANKS"],  # type: ignore[list-item]
+        )
 
 
 def test_stale_data_excluded() -> None:
