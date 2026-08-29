@@ -156,6 +156,13 @@ _SECRET = "SUPERSECRET123"
         f"crumb={_SECRET}",
         f"access_token={_SECRET}",
         f"api_key: {_SECRET}",
+        # 引用符付きの値(regexが値の先頭quoteで取りこぼさないこと)
+        f'token="{_SECRET}"',
+        f"token='{_SECRET}'",
+        f'api_key="{_SECRET}"',
+        f'Authorization: "{_SECRET}"',
+        f'Authorization: Bearer "{_SECRET}"',
+        f"cookie='{_SECRET}'",
     ],
 )
 def test_secret_is_redacted_everywhere(
@@ -183,6 +190,27 @@ def test_secret_is_redacted_everywhere(
     # 元例外は原因として保持する(ログへは自動出力しない)
     assert err.__cause__ is original
     assert _SECRET in str(original)
+
+
+def test_quoted_value_with_spaces_is_fully_redacted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """引用符内に空白があっても値全体を伏せる(閉じ引用符までを1つの値とみなす)。"""
+    secret_with_spaces = "SUPER SECRET 123"
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ProviderDataError) as excinfo:
+        raise_provider_data_error(
+            RuntimeError(f'token="{secret_with_spaces}"'),
+            provider_name="yfinance",
+            operation="info",
+        )
+
+    err = excinfo.value
+    assert secret_with_spaces not in err.error_summary
+    assert secret_with_spaces not in str(err)
+    for record in caplog.records:
+        assert secret_with_spaces not in record.getMessage()
+    assert err.error_summary == f"token={REDACTED}"
 
 
 def test_sanitize_keeps_non_secret_context() -> None:

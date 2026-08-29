@@ -46,17 +46,22 @@ _CREDENTIAL_KEYS = (
     "secret",
 )
 
-# `key=value` / `key: value`(URLクエリ・ヘッダ断片の両方)。値は空白・`&`・引用符・
-# セミコロンまでを1つの値とみなす。
+# `key=value` / `key: value`(URLクエリ・ヘッダ断片の両方)。
+# 値は次の3形式を受ける(引用符付きの値を取りこぼさないため):
+#   "quoted value" / 'quoted value' … 閉じ引用符までを値とみなす(値中の空白も含む)
+#   bare value                       … 空白・`&`・`;`・`,`・引用符の手前までを値とみなす
 _CREDENTIAL_KEY_ALTERNATION = "|".join(re.escape(key) for key in _CREDENTIAL_KEYS)
+_QUOTED_OR_BARE_VALUE = r"\"[^\"]*\"|'[^']*'|[^\s&;,'\"]+"
 _KEY_VALUE_PATTERN = re.compile(
-    r"(?i)\b(" + _CREDENTIAL_KEY_ALTERNATION + r")(\s*[=:]\s*)([^\s&;,'\"]+)"
+    r"(?i)\b(" + _CREDENTIAL_KEY_ALTERNATION + r")(\s*[=:]\s*)(" + _QUOTED_OR_BARE_VALUE + r")"
 )
 
 # `Authorization: Bearer <value>` / `Basic <value>` のスキーム付き形式。
 # 上の_KEY_VALUE_PATTERNは "authorization: Bearer" までしか伏せないため、
-# スキームの後続値も個別に伏せる。
-_AUTH_SCHEME_PATTERN = re.compile(r"(?i)\b(Bearer|Basic)(\s+)([^\s&;,'\"]+)")
+# スキームの後続値も個別に伏せる(引用符付きにも対応する)。
+_AUTH_SCHEME_PATTERN = re.compile(
+    r"(?i)\b(Bearer|Basic)(\s+)(" + _QUOTED_OR_BARE_VALUE + r")"
+)
 
 
 def sanitize_error_summary(message: str) -> str:
