@@ -146,6 +146,7 @@ from jstock_advisor.services.watch_state_service import (
     WatchStateService,
 )
 from jstock_advisor.services.watchlist_service import WatchlistService
+from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_retry
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -467,7 +468,19 @@ def _process_single_candidate(
         # --- 統合BUY候補パイプライン(2026-07)。購入判定と、保有銘柄の場合の
         # 売却・利確判定(後段)とで同一のスナップショット(現在値・財務データ)を
         # 使うことで、同一銘柄について矛盾した判定が同時に成立しないようにする ---
-        snapshot, snapshot_error = build_stock_snapshot(providers, stock_code, now, config)
+        # Issue #59 Phase B1: providerが取得失敗を欠測へ潰さず例外を送出するように
+        # なったため、一過性障害(429等)がretryされないまま即FAILEDにならないよう、
+        # watchlist経路と同じ再試行ヘルパーで包む。再試行しても回復しない場合のみ
+        # 例外が伝播し、この関数末尾のexceptでPurchaseCategory.FAILEDとして記録される
+        # (「取得に失敗した」と「データが本当に不足していた(DATA_INSUFFICIENT)」を
+        # 混同しないための分離)。
+        retry_result = call_with_rate_limit_retry(
+            lambda: build_stock_snapshot(providers, stock_code, now, config)
+        )
+        if retry_result.error is not None:
+            raise retry_result.error
+        assert retry_result.value is not None
+        snapshot, snapshot_error = retry_result.value
         outcome = service.analyze(stock_code, now, snapshot=snapshot)
         if outcome.data_error:
             # --- BUYパイプライン第3次修正(2026-07)。個別のデータ取得エラーは

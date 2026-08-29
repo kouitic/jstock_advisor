@@ -372,7 +372,9 @@ class CashflowDecomposition(ImmutableSnapshot):
     """
 
     stock_code: str
-    period_end: dt.date
+    # Issue #59 E-2: 会計期末を取得できない場合はNone。取得日・現在日付での代用は
+    # 禁止する(代用するとデータ鮮度の検査が意味を失う)。
+    period_end: dt.date | None = None
     pretax_income: Decimal | None = None
     depreciation_amortization: Decimal | None = None
     receivables_change: Decimal | None = None

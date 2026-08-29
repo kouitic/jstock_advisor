@@ -128,6 +128,7 @@ from jstock_advisor.services.shareholder_benefit_registry_service import check_r
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
 from jstock_advisor.services.watch_state_service import WatchStateService
+from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_retry
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -569,7 +570,17 @@ def _analyze_one_holding(
     sell_signal/profit_takingは同一銘柄のデータを必要とするため、
     stock_snapshotを一度だけ取得して両方に渡す(実データ取得の重複を避ける)。
     """
-    snapshot, error = build_stock_snapshot(providers, holding.stock_code, now, config)
+    # Issue #59 Phase B1: BUY経路と同じ理由で再試行ヘルパーで包む。再試行しても
+    # 回復しない場合のみ例外が伝播し、呼び出し元の銘柄単位exceptで
+    # EvaluationStatus.ANALYSIS_FAILEDとして記録される(取得失敗と
+    # DATA_INSUFFICIENTを混同しない)。
+    retry_result = call_with_rate_limit_retry(
+        lambda: build_stock_snapshot(providers, holding.stock_code, now, config)
+    )
+    if retry_result.error is not None:
+        raise retry_result.error
+    assert retry_result.value is not None
+    snapshot, error = retry_result.value
     if snapshot is None:
         notification_service.notify_data_error(
             holding.stock_code, error or "データ取得エラー", now, stock_name=holding.stock_name

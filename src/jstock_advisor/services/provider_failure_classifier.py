@@ -12,6 +12,8 @@ cookie関連例外を広く「データ提供元障害の疑い」として検�
 
 from __future__ import annotations
 
+from jstock_advisor.interfaces.provider_errors import ProviderDataError
+
 _HTTP_STATUS_FAILURE_CODES = frozenset({403, 429, 500, 502, 503, 504})
 
 # 例外メッセージに含まれていれば障害の疑いとみなすパターン(小文字比較)。
@@ -50,6 +52,12 @@ def classify_provider_failure(exc: Exception) -> bool:
     あるかどうかを判定する。True=障害の疑い、False=それ以外(通常の例外として
     呼び出し側の既存処理に委ねる)。
     """
+    # Issue #59 Phase B1: provider境界で既に分類済みの例外は、その結果をそのまま使う
+    # (分類ロジックを二重実装しない)。ラップにより元例外の型名・response・
+    # メッセージが失われても、retryabilityの判定が壊れないようにするための短絡。
+    if isinstance(exc, ProviderDataError):
+        return exc.retryable
+
     status_code = getattr(getattr(exc, "response", None), "status_code", None)
     if status_code is not None and status_code in _HTTP_STATUS_FAILURE_CODES:
         return True
