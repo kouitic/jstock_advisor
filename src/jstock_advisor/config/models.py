@@ -179,6 +179,43 @@ class MitigatingFactors(StrictModel):
     few_reinvestment_alternatives: MitigatingFactor
     nisa_long_term_benefit: MitigatingFactor
 
+    # Issue #55 Phase B-2(F-G2 / N6・N11)。`MitigatingFactor` は6要因で共有される
+    # ため、パラメータ2種(min_consecutive_years / within_business_days)は
+    # Optional として定義せざるを得ない。しかしそれを使う要因が `enabled: true` の
+    # ときは**必須**であり、未設定は設定ミスである。
+    #
+    # 従来は YAML から該当行を1行消すと、警告もログも無く当該緩和要因だけが
+    # 黙って無効化されていた(`min_years > 0` / `within_days is None` の
+    # ガードで False へ落ちるため)。設定値の欠落を「無効化の意思表示」と
+    # 解釈せず、起動時に fail-fast させる。
+    #
+    # 値 0 も不正とする: `profit_taking.py` の連続増配要因は成立時に
+    # 「実績で{n}年連続増配している」という文言を生成するため、0 では
+    # 事実に反する文言になる(`min_years > 0` ガードが load-bearing な理由)。
+    @model_validator(mode="after")
+    def _validate_required_parameters(self) -> MitigatingFactors:
+        required_parameters = (
+            ("continuous_dividend_increase", "min_consecutive_years"),
+            ("long_term_holding_benefit_imminent", "within_business_days"),
+        )
+        for factor_name, parameter_name in required_parameters:
+            factor: MitigatingFactor = getattr(self, factor_name)
+            if not factor.enabled:
+                continue
+            value = getattr(factor, parameter_name)
+            if value is None:
+                raise ValueError(
+                    f"profit_taking.mitigating_factors.{factor_name}.{parameter_name} は "
+                    f"enabled: true のとき必須です(未設定だと当該緩和要因が"
+                    f"黙って無効化されます)。値を設定するか enabled: false にしてください。"
+                )
+            if value <= 0:
+                raise ValueError(
+                    f"profit_taking.mitigating_factors.{factor_name}.{parameter_name} は "
+                    f"1以上である必要があります(指定値: {value})。"
+                )
+        return self
+
 
 class EventProximityNotice(StrictModel):
     dividend_record_date_within_business_days: int

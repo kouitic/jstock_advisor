@@ -1433,9 +1433,19 @@ def _format_watch_profit_taking_message(
     lines.append(f"{shares}株／平均取得{_yen(avg)}")
     lines.append(f"現在値{_yen(price)}")
     if shares is not None and avg is not None:
-        gain = (price - avg) * shares
-        gain_pct = float(price / avg - 1) * 100 if avg > 0 else 0.0
-        lines.append(f"含み益{_yen(gain)}({gain_pct:+.1f}%)")
+        # Issue #55 Phase B-2(N7 / F-G4): 平均取得単価が0以下はデータ品質異常であり、
+        # 正当な業務状態ではない。従来は騰落率を 0.0% と断定し、さらに
+        # gain = (price - avg) * shares が時価総額そのものになるため、
+        # 金額側も虚偽の断定になっていた。金額・率とも出さず「算出不可」とする。
+        # 「不明」ではなく「算出不可」とするのは、値が存在しないのではなく
+        # **不正**であるため(profit_protection.py の語彙に合わせる)。
+        # 行ごと消さないのは、異常の可視化がデータ是正の起点になるため。
+        if avg > 0:
+            gain = (price - avg) * shares
+            gain_pct = float(price / avg - 1) * 100
+            lines.append(f"含み益{_yen(gain)}({gain_pct:+.1f}%)")
+        else:
+            lines.append("含み益：算出不可(平均取得単価が不正です)")
     lines.append("")
     is_earnings_pending = (
         recommendation.recommendation_type == RecommendationType.WATCH_BEFORE_EARNINGS
@@ -1770,10 +1780,35 @@ def _format_holding_decision_message(recommendation: Recommendation) -> str:
     label = _recommendation_type_label(recommendation.recommendation_type)
     cfg = recommendation.config_values_used
 
+    # Issue #55 Phase B-2(N8 / F-G5): キー欠落を 0 で代用しない。
+    # `config_values_used` は dict[str, Any] の自由形式で extra="forbid" の検証が
+    # 及ばないため、キーが増減しても読み込みは常に成功してしまう
+    # (#63 の bad-record isolation では救えない領域)。
+    # `+0点` は「妥当な水準」と正反対に誤読されるため、値を捏造せず「不明」とする。
+    # fail-fast は採らない(通知が届かないこと自体が障害であるため)。
+    missing_score_keys = [
+        key
+        for key in ("final_score", "company_quality_score", "investment_thesis_score",
+                    "risk_deduction_score")
+        if key not in cfg
+    ]
+    if missing_score_keys:
+        logger.warning(
+            "holding decision notification: config_values_used にスコアキーが"
+            " 欠落しています stock_code=%s missing=%s",
+            recommendation.stock_code,
+            ",".join(missing_score_keys),
+        )
+
+    final_score = cfg.get("final_score")
+    final_score_text = (
+        f"{round(final_score):+d}点" if isinstance(final_score, int | float) else "不明"
+    )
+
     lines = [
         f"【{label}】{recommendation.stock_code} {recommendation.stock_name}",
         "",
-        f"保有判断スコア：{round(cfg.get('final_score', 0.0)):+d}点",
+        f"保有判断スコア：{final_score_text}",
         f"判定：{label}",
         "",
         "保有状況：",
@@ -1790,9 +1825,14 @@ def _format_holding_decision_message(recommendation: Recommendation) -> str:
     ):
         avg = recommendation.average_purchase_price_at_recommendation
         shares = recommendation.shares_at_recommendation
-        pnl = (recommendation.price_at_recommendation - avg) * shares
-        pnl_pct = float((recommendation.price_at_recommendation / avg - 1) * 100) if avg else 0.0
-        lines.append(f"含み損益：{pnl:+,.0f}円（{pnl_pct:+.1f}%）")
+        # Issue #55 Phase B-2(N7 / F-G4): 上の_format_watch_profit_taking_message()と
+        # 同じ理由で、平均取得単価が0以下のときは金額・率とも断定しない。
+        if avg > 0:
+            pnl = (recommendation.price_at_recommendation - avg) * shares
+            pnl_pct = float((recommendation.price_at_recommendation / avg - 1) * 100)
+            lines.append(f"含み損益：{pnl:+,.0f}円（{pnl_pct:+.1f}%）")
+        else:
+            lines.append("含み損益：算出不可(平均取得単価が不正です)")
 
     lines.append("")
     if recommendation.reasons:
@@ -1805,9 +1845,18 @@ def _format_holding_decision_message(recommendation: Recommendation) -> str:
         lines.append("")
 
     lines.append("スコア内訳：")
-    lines.append(f"・企業品質：{round(cfg.get('company_quality_score', 0.0))}／50")
-    lines.append(f"・投資ストーリー維持：{round(cfg.get('investment_thesis_score', 0.0))}／50")
-    lines.append(f"・リスク控除：{round(cfg.get('risk_deduction_score', 0.0))}／100")
+    # Issue #55 Phase B-2(N8 / F-G5): キーがある項目だけを出す
+    # (stock_analysis_view_service.py の確立された前例に合わせる)。
+    # とくに risk_deduction_score の欠落を `0／100` と表示すると
+    # 「リスク控除ゼロ＝リスクなし」と読め、最も危険な誤読になる。
+    for key, caption, denominator in (
+        ("company_quality_score", "企業品質", 50),
+        ("investment_thesis_score", "投資ストーリー維持", 50),
+        ("risk_deduction_score", "リスク控除", 100),
+    ):
+        value = cfg.get(key)
+        if isinstance(value, int | float):
+            lines.append(f"・{caption}：{round(value)}／{denominator}")
     if cfg.get("hard_gate_adjustment_applied"):
         base_score = cfg.get("base_score", 0.0)
         lines.append(
