@@ -74,7 +74,11 @@ from jstock_advisor.domain.notification.recommendation_adapter import (
     build_notification_text_input,
     build_watch_end_text_input,
 )
-from jstock_advisor.infrastructure.line.client import LineClient
+from jstock_advisor.infrastructure.line.client import (
+    LINE_MAX_TEXT_CHARS,
+    LineClient,
+    LineMessageLimitError,
+)
 from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
     DailyNotificationPriorityRepository,
 )
@@ -413,10 +417,25 @@ def notification_priority_for_recommendation(recommendation: Recommendation) -> 
     return _NOTIFICATION_PRIORITY.get(category, 0)
 
 
+# --- 通知本文の文字数予算(Issue #50) ---------------------------------------
+# NOTIFICATION_TEXT_CHAR_BUDGET は「アプリケーション側の安全予算」であり、
+# infrastructure/line/client.py の LINE_MAX_TEXT_CHARS(=5000、protocol上の
+# hard limit)とは別概念である。両者を同一定数へ統合してはならない。
+#
+# 余白500文字の内訳(この余白があるからformatterは自分の予算だけを見ればよい):
+#   - _VALIDATION_BANNER の4文字(len()基準。絵文字は1コードポイント)。
+#     _push() が本文組み立て後に前置するため、formatterからは見えない
+#     (VALIDATION実行時のみ加算される)。
+#   - _DISCLAIMER 約24文字。
+#   - 省略告知行(「ほかN件…」)約35文字。
+#   - LINE側の文字数カウントとPythonのlen()の差異(サロゲートペア等)。
+#   - 将来の微小な文言追加。
+NOTIFICATION_TEXT_CHAR_BUDGET = 4500
+
 # 購入候補まとめ通知(notify_buy_candidates_digest)を分割する目安の文字数
 # (LINEのメッセージ長上限に対して余裕を持たせた値。BUYパイプライン第2次修正
-# 2026-07で追加。要求仕様17節)。
-_BUY_DIGEST_MAX_CHARS = 4500
+# 2026-07で追加。要求仕様17節)。Issue #50で共通予算へ統合した。
+_BUY_DIGEST_MAX_CHARS = NOTIFICATION_TEXT_CHAR_BUDGET
 
 # バッチサマリーの内訳区分(要求仕様§13)。domain/entities/evaluation_audit.pyの
 # SUMMARY_CATEGORIESと同じキー集合を使う。
@@ -426,10 +445,76 @@ _BATCH_SUMMARY_CATEGORIES = SUMMARY_CATEGORIES
 _WATCHLIST_ADDITION_DETAIL_LIMIT = 10
 
 # ウォッチリスト追加通知本文の文字数予算(LINE通知品質改善2026-08、修正⑩)。
-# LINEメッセージ本文の実測上限(5000文字程度)に対する安全マージン。
 # render_watchlist_addition_message()は、末尾の「ほかN銘柄」・評価日時等を
 # 含めた最終本文がこの予算に収まることを保証する(先読み方式)。
-_LINE_ADDITION_MESSAGE_CHAR_BUDGET = 4500
+# Issue #50で共通予算へ統合した(値は変更していない)。
+_LINE_ADDITION_MESSAGE_CHAR_BUDGET = NOTIFICATION_TEXT_CHAR_BUDGET
+
+
+def _render_batch_summary_code_section(
+    label: str, codes: list[str], shown: int, *, omitted_note: str
+) -> list[str]:
+    """バッチサマリーの銘柄コード一覧1区分を描画する(Issue #50)。
+
+    表示件数を`shown`件に制限し、残りは件数のみを「ほかN件」として残す。
+    件数を落とすと「何件失敗したのか」という最重要情報が消えるため、
+    省略時も必ず総数が復元できる形にする。
+    """
+    if not codes:
+        return []
+    section = ["", label]
+    section.extend(f"・{code}" for code in codes[:shown])
+    omitted = len(codes) - min(shown, len(codes))
+    if omitted > 0:
+        section.append(f"・ほか{omitted}件({omitted_note})")
+    return section
+
+
+def _assemble_batch_summary_message(
+    *,
+    header_lines: list[str],
+    footer_lines: list[str],
+    code_groups: list[tuple[str, list[str]]],
+    budget: int,
+    omitted_note: str = "全件はCloudWatch Logsを参照",
+) -> str | None:
+    """ヘッダ・フッタを保持したまま、予算内に収まる最大の表示件数を先読みで決める。
+
+    render_watchlist_addition_message()と同じ方式で、「省略行とフッタを含む
+    完成形」を毎回組み立てて判定する。途中経過に対して判定してから末尾へ
+    追記する方式だと、追記分だけ予算を超過する(off-by-one)ためである。
+
+    表示件数は全区分で共通の`shown`とし、区分間で公平に配分する。
+    ヘッダ・フッタだけで予算を超える場合はNoneを返し、呼び出し側が
+    最小形へフォールバックする。
+    """
+
+    def assemble(shown: int) -> str:
+        body = list(header_lines)
+        for label, codes in code_groups:
+            body.extend(
+                _render_batch_summary_code_section(
+                    label, codes, shown, omitted_note=omitted_note
+                )
+            )
+        return "\n".join(body + footer_lines)
+
+    if len(assemble(0)) > budget:
+        return None
+
+    max_codes = max((len(codes) for _, codes in code_groups), default=0)
+    if max_codes == 0 or len(assemble(max_codes)) <= budget:
+        return assemble(max_codes)
+
+    # assemble()の長さはshownに対し単調増加するため二分探索できる。
+    low, high = 0, max_codes  # low は必ず収まる、high は必ず超える
+    while high - low > 1:
+        mid = (low + high) // 2
+        if len(assemble(mid)) <= budget:
+            low = mid
+        else:
+            high = mid
+    return assemble(low)
 
 
 def _yen(value: Decimal | int | float | str | None) -> str:
@@ -2325,9 +2410,33 @@ class LineNotificationService:
         まとめた1メッセージ(チャンク)を対象とし、かつ呼び出し側が銘柄単位で
         別途`_record_dry_run_notification()`を呼んで正本の記録を残す場合に、
         stock_code=None の意味の薄いチャンク単位の重複記録を生成しないために使う。
+
+        Issue #50(送信境界の上限保証): VALIDATION bannerを付与した「最終本文」が
+        protocol hard limit(LINE_MAX_TEXT_CHARS)を超えていないことをここで検証する。
+        バナーは本文組み立て後に前置されるため、最終長を見られるのはこの層だけである。
+
+        超過時は本文を自動truncateせず、logger.errorを出したうえで例外を送出する。
+        ここでの黙った切り詰めはformatter層の不具合(=上限内へ要約する責務の失敗)を
+        隠してしまい、どの情報が失われたか誰にも分からなくなるため行わない。
+        formatter層が責務を果たしていれば、この検証は発火しない。
         """
         if self._execution_context.is_validation:
             text = _VALIDATION_BANNER + text
+        if len(text) > LINE_MAX_TEXT_CHARS:
+            logger.error(
+                "LINE通知本文が上限を超えました(送信中止): length=%d limit=%d "
+                "notification_type=%s stock_code=%s validation=%s",
+                len(text),
+                LINE_MAX_TEXT_CHARS,
+                notification_type.value if notification_type is not None else None,
+                stock_code,
+                self._execution_context.is_validation,
+            )
+            raise LineMessageLimitError(
+                "LINE通知本文が上限を超えています(formatter側で要約されていません): "
+                f"{len(text)}文字 > {LINE_MAX_TEXT_CHARS}文字"
+                f"(notification_type={notification_type.value if notification_type else None})"
+            )
         if self._execution_context.is_dry_run:
             if emit_dry_run_record:
                 self._record_dry_run_notification(
@@ -2699,12 +2808,25 @@ class LineNotificationService:
         ]
 
         pairs = list(zip(winners, blocks, strict=True))
+        # Issue #50: header(「【本日の購入候補】(i/N)」)とfooterは、従来
+        # チャンク境界を決めた「後で」連結していたため予算に算入されておらず、
+        # 実効上限が予算を超えていた(off-by-one)。ここで両方を先に差し引き、
+        # 完成形が予算内に収まることを保証する。
+        # headerは最終的なチャンク数が確定する前に必要なので、最悪ケース
+        # (全銘柄が別チャンクになった場合の桁数)で見積もる。
+        header_reserve = len(f"【本日の購入候補】({len(pairs)}/{len(pairs)})") + 2
+        footer_reserve = len("\n".join(footer)) + 2
+        chunk_budget = _BUY_DIGEST_MAX_CHARS - header_reserve - footer_reserve
+        # 1銘柄すら入らない極端な予算にはしない(最低1ブロックは必ず入れる。
+        # 下のループは current_chunk が空なら無条件に追加するため成立する)。
+        chunk_budget = max(chunk_budget, 1)
+
         chunks: list[list[tuple[Recommendation, str]]] = []
         current_chunk: list[tuple[Recommendation, str]] = []
         current_len = 0
         for pair in pairs:
             block_len = len(pair[1]) + 2  # 区切りの空行分
-            if current_chunk and current_len + block_len > _BUY_DIGEST_MAX_CHARS:
+            if current_chunk and current_len + block_len > chunk_budget:
                 chunks.append(current_chunk)
                 current_chunk = []
                 current_len = 0
@@ -3458,21 +3580,55 @@ class LineNotificationService:
         if not is_consistent:
             lines.append("")
             lines.append(f"※内訳合計({purchase_judgment_sum}件)が対象銘柄数と一致していません。")
-        if data_insufficient_stock_codes:
-            lines.append("")
-            lines.append("データ不足：")
-            lines.extend(f"・{code}" for code in data_insufficient_stock_codes)
-        if failed_stock_codes:
-            lines.append("")
-            lines.append("処理失敗：")
-            lines.extend(f"・{code}" for code in failed_stock_codes)
-        lines.append("")
-        lines.append(f"評価日時：{format_jst(now)}")
-        lines.append(_DISCLAIMER)
+
+        # Issue #50: 銘柄コード一覧は件数に上限が無く、provider全体障害等で
+        # 数百件に達すると本文がLINEの上限を超えて通知そのものが失われる
+        # (最も通知が必要な日に届かなくなる)。ここでは末尾を単純に切るのではなく、
+        # render_watchlist_addition_message()と同じ先読み方式で
+        # 「入るだけ表示し、残りは『ほかN件』として件数を保持する」。
+        # ヘッダ(購入判定7区分・通知結果・対象銘柄数・整合性注記)と
+        # フッタ(評価日時・免責)は必須部分として常に保持する。
+        header_lines = list(lines)
+        footer_lines = ["", f"評価日時：{format_jst(now)}", _DISCLAIMER]
+        code_groups: list[tuple[str, list[str]]] = [
+            ("データ不足：", list(data_insufficient_stock_codes or [])),
+            ("処理失敗：", list(failed_stock_codes or [])),
+        ]
+        message = _assemble_batch_summary_message(
+            header_lines=header_lines,
+            footer_lines=footer_lines,
+            code_groups=code_groups,
+            budget=NOTIFICATION_TEXT_CHAR_BUDGET,
+        )
+        if message is None:
+            # ヘッダ・フッタだけで予算を超える異常系。件数サマリーと評価日時は
+            # 必ず残す最小形へ切り替える(黙って失うより、必ず届く形を優先する)。
+            logger.error(
+                "batch summary本文が予算を超えたため最小形へ切り替えました: "
+                "process=%s total=%d data_insufficient=%d failed=%d budget=%d",
+                process_name,
+                total,
+                len(code_groups[0][1]),
+                len(code_groups[1][1]),
+                NOTIFICATION_TEXT_CHAR_BUDGET,
+            )
+            message = "\n".join(
+                [
+                    f"【{process_name}完了】",
+                    f"対象銘柄：{total}件",
+                    f"買い候補{buy_candidate_n}件／買い間近{near_buy_n}件／"
+                    f"買い待ち{watch_wait_n}件／買い対象外{not_attractive_n}件／"
+                    f"要確認{manual_review_n}件／データ不足{data_insufficient_n}件／"
+                    f"処理失敗{failed_n}件",
+                    "※本文が文字数上限を超えたため要約形式で送信しました。",
+                    f"評価日時：{format_jst(now)}",
+                    _DISCLAIMER,
+                ]
+            )
         # Issue #17: 既定書式(買い候補等)のclaim identityは既存dedupと同じ
         # content_hash(#23によりJST暦日を内包)+prev。
         return self._deliver_batch_summary(
-            message="\n".join(lines),
+            message=message,
             pseudo_stock_code=pseudo_stock_code,
             content_hash=content_hash,
             identity=(

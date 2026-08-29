@@ -8,6 +8,7 @@ performance_metrics_service/rule_proposal_serviceの結果をテキストレポ�
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 from jstock_advisor.domain.entities.enums import ApprovalStatus
 from jstock_advisor.domain.jst import to_jst
@@ -19,7 +20,14 @@ from jstock_advisor.services.performance_metrics_service import (
 )
 from jstock_advisor.services.rule_proposal_service import RuleProposalService
 
+logger = logging.getLogger(__name__)
+
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
+
+# Issue #50: 本文の文字数予算(LINEのhard limit 5000に対する安全余白)。
+# 本サービスはLineNotificationService._push()を経由せず直接push_messageする
+# 例外経路のため、要約の責務はこのサービス自身が負う。
+REPORT_TEXT_CHAR_BUDGET = 4500
 
 
 def _format_bucket_line(bucket: MetricsBucket) -> str:
@@ -80,21 +88,50 @@ class ReviewReportService:
         actionable = [
             p for p in proposals if p.status in (ApprovalStatus.DRAFT, ApprovalStatus.PROPOSED)
         ]
-        if actionable:
-            lines.append("")
-            lines.append("【改善提案(要確認)】")
-            for proposal in actionable:
-                status_label = (
-                    "承認待ち" if proposal.status == ApprovalStatus.PROPOSED else "未申請"
-                )
-                lines.append(
-                    f"  [{status_label}] {proposal.target}: "
-                    f"{proposal.current_value} → {proposal.proposed_value}({proposal.reason})"
-                )
+        footer_lines = ["", _DISCLAIMER]
 
-        lines.append("")
-        lines.append(_DISCLAIMER)
-        return "\n".join(lines)
+        # Issue #50: 改善提案は件数に上限が無く、蓄積すると本文がLINEの上限を
+        # 超えてレポート全体が送信できなくなる。末尾を単純に切るのではなく、
+        # 「入るだけ表示し、残りは『ほかN件』として件数を保持する」先読み方式で
+        # 収める(完成形を毎回組み立てて判定するため、省略行の後付けによる
+        # 予算超過が起きない)。
+        def assemble(shown: int) -> str:
+            body = list(lines)
+            if actionable:
+                body.append("")
+                body.append("【改善提案(要確認)】")
+                for proposal in actionable[:shown]:
+                    status_label = (
+                        "承認待ち" if proposal.status == ApprovalStatus.PROPOSED else "未申請"
+                    )
+                    body.append(
+                        f"  [{status_label}] {proposal.target}: "
+                        f"{proposal.current_value} → {proposal.proposed_value}"
+                        f"({proposal.reason})"
+                    )
+                omitted = len(actionable) - min(shown, len(actionable))
+                if omitted > 0:
+                    body.append(f"  ほか{omitted}件(全件は`jstock review proposals`で確認)")
+            return "\n".join(body + footer_lines)
+
+        if not actionable or len(assemble(len(actionable))) <= REPORT_TEXT_CHAR_BUDGET:
+            return assemble(len(actionable))
+
+        low, high = 0, len(actionable)  # low は収まる、high は超える
+        while high - low > 1:
+            mid = (low + high) // 2
+            if len(assemble(mid)) <= REPORT_TEXT_CHAR_BUDGET:
+                low = mid
+            else:
+                high = mid
+        text = assemble(low)
+        logger.warning(
+            "振り返りレポートの改善提案を省略しました: total=%d shown=%d budget=%d",
+            len(actionable),
+            low,
+            REPORT_TEXT_CHAR_BUDGET,
+        )
+        return text
 
     def send_report(
         self, horizon_business_days: int | None = None, now: dt.datetime | None = None
