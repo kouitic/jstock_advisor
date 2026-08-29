@@ -176,6 +176,12 @@ class WeeklyImprovementReviewService:
         # 通知ではないため)。本サービスはexecution_context/notification_modeを
         # 一切保持せず、以下のpush_messageはLineNotificationService._push()を
         # 経由しない直接呼び出しのため、VALIDATION/DRY_RUNから到達しない。
+        #
+        # Issue #50(LINE文字数上限)についても、_push()を経由しない
+        # 「文書化された例外経路」として扱う。以下の3種の通知本文はいずれも
+        # 固定長テンプレート(_format_*_notification、概ね200文字程度)であり、
+        # 件数に比例して伸びる要素を持たないため、要約処理を持たない。
+        # 上限違反の検出自体はLineClient側(protocol validation)が担保する。
         issue_eligible = [c for c in candidates if self._is_issue_eligible(c)]
         github_statuses: dict[str, int] = {}
         notified_new_issue_count = 0
