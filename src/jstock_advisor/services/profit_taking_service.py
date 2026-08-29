@@ -470,8 +470,12 @@ class ProfitTakingService:
                 if len(snapshot.quarterly_operating_incomes) >= 2
                 else False
             ),
+            # Issue #55 Phase B-2(N5): `or 0` で不明(None)を0年へ潰さない。
+            # 潰すと監査ログ(input_values.consecutive_dividend_increase_years)上で
+            # 「0年であることが確定」と「取得できていない」が区別できなくなる。
+            # 判定への影響はない(いずれも緩和要因に該当しない)。
             continuous_dividend_increase_years=(
-                snapshot.dividend.consecutive_dividend_increase_years or 0
+                snapshot.dividend.consecutive_dividend_increase_years
             ),
             is_progressive_or_doe_policy=snapshot.dividend.is_progressive_or_doe_policy,
             long_term_holding_benefit_imminent=_is_long_term_benefit_imminent(
@@ -506,10 +510,23 @@ class ProfitTakingService:
             snapshot.financial.sector, snapshot.financial.industry
         ).classification
 
+        # Issue #55 Phase B-2(N6): 連続増配年数のしきい値をここへハードコード
+        # (`>= 2`)せず、config を唯一のtruth sourceにする
+        # (同じ「何年で連続増配とみなすか」を2箇所で二重管理しない)。
+        # enabled: true のとき1以上であることは起動時検証が保証する。
+        # 年数不明(None)は該当させない(従来 `or 0` と判定結果は同じ)。
+        min_increase_years = (
+            self._config.profit_taking.mitigating_factors.continuous_dividend_increase.min_consecutive_years
+        )
+        consecutive_years = snapshot.dividend.consecutive_dividend_increase_years
         has_strong_counter_material = (
             snapshot.dividend.dividend_comparison_outcome
             == DividendComparisonOutcome.DIVIDEND_INCREASE
-            or (snapshot.dividend.consecutive_dividend_increase_years or 0) >= 2
+            or (
+                min_increase_years is not None
+                and consecutive_years is not None
+                and consecutive_years >= min_increase_years
+            )
         )
 
         profit_protection_metrics = self._compute_profit_protection_metrics(holding, snapshot, now)
@@ -1124,6 +1141,18 @@ def _is_long_term_benefit_imminent(
 
     mitigating = config.profit_taking.mitigating_factors.long_term_holding_benefit_imminent
     within_days = mitigating.within_business_days
+    # Issue #55 Phase B-2(N11)。`within_business_days` が None になり得るのは
+    # 「enabled: false(この要因を使わない)」の場合だけである。
+    # enabled: true で未設定のまま起動することは、config の起動時検証
+    # (MitigatingFactors)が禁じる。したがってここでの None は
+    # 「データ不足」でも「未評価」でもなく、**設定上この要因を使わない**の意であり、
+    # 該当なし(False)を返すのが正しい。
+    # 従来はこの区別が明記されておらず、enabled: true のまま設定行が消えても
+    # 無言で False へ落ちていた(その沈黙は起動時検証で塞いだ)。
+    #
+    # なお `enabled` はここでは見ない。この関数が返すのは「条件達成が近いか」という
+    # 事実であり、「緩和要因として適用するか」は profit_taking.py:469 が
+    # `enabled` と併せて判断する責務のため(両者を混ぜない)。
     if within_days is None:
         return False
 
