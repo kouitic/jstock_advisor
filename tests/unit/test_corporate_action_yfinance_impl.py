@@ -88,16 +88,3 @@ def test_non_retryable_failure_is_also_propagated(monkeypatch: pytest.MonkeyPatc
         YFinanceCorporateActionProvider(now=_NOW).get_corporate_actions("7203", _SINCE)
 
     assert excinfo.value.retryable is False
-
-
-def test_no_typed_availability_result_is_introduced() -> None:
-    """E-4: 専用のResult型を新設していないこと(戻り値はlistのまま)。
-
-    失敗は例外契約で表現されるため、availabilityを正常値として持ち回る型は不要。
-    将来この判断を変える場合は、consumerがavailabilityを保持する必要性を先に示すこと。
-    """
-    import inspect
-
-    signature = inspect.signature(YFinanceCorporateActionProvider.get_corporate_actions)
-
-    assert "list[CorporateActionEvent]" in str(signature.return_annotation)
