@@ -517,6 +517,17 @@ def _assemble_batch_summary_message(
     return assemble(low)
 
 
+def _total_yield_line(total_yield_pct: float | None) -> str:
+    """総合利回り表示行(Issue #55 Phase B-1)。
+
+    Noneは「判定時点で総合利回りを確定できなかった」を意味し、確定0%とは異なる。
+    値を捏造せず「不明」と明示する。
+    """
+    if total_yield_pct is None:
+        return "総合利回り: 不明(配当または優待の情報が取得できませんでした)"
+    return f"総合利回り: {total_yield_pct:.2f}%"
+
+
 def _yen(value: Decimal | int | float | str | None) -> str:
     """金額を円単位の整数・カンマ区切りで表示する(要求仕様レビュー対応: 小数点以下は表示しない)。
 
@@ -1150,8 +1161,10 @@ def _format_buy_candidate_message(recommendation: Recommendation) -> str:
         lines.append(f"企業魅力度: {recommendation.company_quality_score:.1f}点")
     if recommendation.purchase_attractiveness_score is not None:
         lines.append(f"購入魅力度: {recommendation.purchase_attractiveness_score:.1f}点")
-    if recommendation.total_yield_pct_at_recommendation is not None:
-        lines.append(f"総合利回り: {recommendation.total_yield_pct_at_recommendation:.2f}%")
+    # Issue #55 Phase B-1: 総合利回りが確定できなかった場合(配当データ取得不能・
+    # 優待の評価額不明)は「0.00%」と断定せず「不明」と表示する。行ごと省略すると
+    # 書式差なのか判定不能なのかを読み手が区別できないため、行は残す。
+    lines.append(_total_yield_line(recommendation.total_yield_pct_at_recommendation))
     if recommendation.next_earnings_date:
         lines.append(f"次回決算予定日: {recommendation.next_earnings_date}")
     lines.append(f"適正価格信頼度: {recommendation.confidence.value}")
@@ -1196,8 +1209,10 @@ def _format_watch_for_price_message(recommendation: Recommendation) -> str:
         lines.append(f"打診買い価格まで: 約{abs(pct):.1f}%の下落が必要")
     if recommendation.company_quality_score is not None:
         lines.append(f"企業魅力度: {recommendation.company_quality_score:.1f}点")
-    if recommendation.total_yield_pct_at_recommendation is not None:
-        lines.append(f"総合利回り: {recommendation.total_yield_pct_at_recommendation:.2f}%")
+    # Issue #55 Phase B-1: 総合利回りが確定できなかった場合(配当データ取得不能・
+    # 優待の評価額不明)は「0.00%」と断定せず「不明」と表示する。行ごと省略すると
+    # 書式差なのか判定不能なのかを読み手が区別できないため、行は残す。
+    lines.append(_total_yield_line(recommendation.total_yield_pct_at_recommendation))
     if recommendation.reasons:
         lines.append("企業評価: " + " / ".join(recommendation.reasons))
     if action == BuyAction.WATCH_BEFORE_EARNINGS:

@@ -79,7 +79,7 @@ from jstock_advisor.domain.valuation.fair_value import (
 )
 from jstock_advisor.domain.valuation.fair_value_usability import build_fair_value_range
 from jstock_advisor.domain.valuation.yield_calc import (
-    compute_annual_benefit_value,
+    compute_annual_benefit_valuation,
     compute_benefit_yield_pct,
     compute_dividend_yield_pct,
     compute_total_yield_pct,
@@ -121,7 +121,10 @@ class StockSnapshot:
     dividend_yield_pct: float | None
     benefit_yield_pct: float | None
     annual_benefit_value: Decimal | None
-    total_yield_pct: float
+    # Issue #55 Phase B-1: Noneは「判定時点で総合利回りを確定できなかった」を表す
+    # (配当データが取得できない、または優待の評価額が不明)。0.0(=確定0%)と
+    # 混同してはならない。判定側はNOT_EVALUATEDとして扱い、coverageを下げる。
+    total_yield_pct: float | None
     fair_value: Decimal | None
     fair_value_methods_used_count: int
     data_sources: list[DataSourceReference]
@@ -335,12 +338,18 @@ def build_stock_snapshot(
     dividend_yield_pct = compute_dividend_yield_pct(
         dividend.forecast_annual_dividend_per_share, current_price
     )
-    annual_benefit_value = compute_annual_benefit_value(benefit, coefficients)
+    # Issue #55 Phase B-1: 優待は「制度なし(寄与0で確定)」「評価可能」「評価不能(unknown)」
+    # の3状態を区別する。従来は評価不能も年間評価額0円として扱われ、
+    # 総合利回りが「0%と確定」してしまっていた。
+    benefit_valuation = compute_annual_benefit_valuation(benefit, coefficients)
+    annual_benefit_value = benefit_valuation.annual_value
     min_shares_required = benefit.min_shares_required if benefit is not None else 100
     benefit_yield_pct = compute_benefit_yield_pct(
         annual_benefit_value, min_shares_required, current_price
     )
-    total_yield_pct = compute_total_yield_pct(dividend_yield_pct, benefit_yield_pct)
+    total_yield_pct = compute_total_yield_pct(
+        dividend_yield_pct, benefit_yield_pct, benefit_state=benefit_valuation.state
+    )
 
     target_price = compute_target_yield_price(
         dividend.forecast_annual_dividend_per_share,

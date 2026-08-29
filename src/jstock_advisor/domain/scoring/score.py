@@ -349,10 +349,14 @@ def _build_component_states(
     evaluated = EvidenceCoverageStatus.EVALUATED
     not_evaluated = EvidenceCoverageStatus.NOT_EVALUATED
 
-    # total_yield: compute_total_yield_pct()が上流でNone→0.0へ潰すため、
-    # ここでは常に値が評価される(無配とデータ欠測はこの層では判別不能。
-    # 配当利回り自体の有無はRecommendation.dividend_yield_pct_at_recommendation
-    # で別途観測可能)。
+    # total_yield: Issue #55 Phase B-1でcompute_total_yield_pct()はNoneを返すように
+    # なったが、買い側のスコア意味論は変更していない(#55のスコープ外)。
+    # buy_signal_serviceが呼び出し側で「不明→0.0」へ明示的に落としているため、
+    # この層には常に値が届き、無配とデータ欠測はここでは判別できない
+    # (配当利回り自体の有無はRecommendation.dividend_yield_pct_at_recommendationで
+    # 別途観測可能)。保有判断側は同じ欠測をNOT_EVALUATEDとして扱いcoverageを下げる。
+    # 買い側もそれに揃える場合、ScoreBreakdown.total_yield_attractivenessが
+    # 非Optionalかつ永続化されるためスキーマ変更を伴う(Issue #63と順序依存)。
     total_yield_state = _component_state_entry(evaluated, [])
 
     # 配当持続性はv1では常に係数式で評価される(欠測要素は加点0として扱われる)

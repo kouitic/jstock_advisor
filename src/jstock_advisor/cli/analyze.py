@@ -320,9 +320,15 @@ def _print_buy_recommendation(r: Recommendation) -> None:
         buy_action_label(r.buy_action) if r.buy_action is not None else r.recommendation_type.value
     )
     typer.echo(f"[{label}] {r.stock_code} {r.stock_name}")
+    # Issue #55 Phase B-1: 総合利回りは判定時点で確定できないことがある(None)。
+    # 0.00%と断定せず「不明」と表示する(:.2fへNoneを渡すとTypeErrorになる)。
+    total_yield_text = (
+        f"{r.total_yield_pct_at_recommendation:.2f}%"
+        if r.total_yield_pct_at_recommendation is not None
+        else "不明"
+    )
     typer.echo(
-        f"  現在株価: {r.price_at_recommendation}円 / "
-        f"総合利回り: {r.total_yield_pct_at_recommendation:.2f}%"
+        f"  現在株価: {r.price_at_recommendation}円 / 総合利回り: {total_yield_text}"
     )
     if r.buy_prices and r.buy_prices.entry and r.buy_prices.standard and r.buy_prices.strong:
         typer.echo(
