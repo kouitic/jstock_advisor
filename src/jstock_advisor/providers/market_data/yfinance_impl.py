@@ -14,6 +14,7 @@ import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot
+from jstock_advisor.providers._failure import raise_provider_data_error
 
 _PROVIDER_NAME = "yfinance"
 _TICKER_SUFFIX = ".T"
@@ -59,10 +60,16 @@ class YFinanceMarketDataProvider:
                 interval="1d",
                 auto_adjust=False,
             )
-        except Exception:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
-            return None
+        except Exception as exc:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
+            # Issue #59 Phase B2: 取得失敗を「データ無し(None)」へ潰さない。
+            # 潰すと再試行・障害率の安全弁が発火せず、一過性障害が
+            # 「そのとき株価が取得できなかった銘柄」として恒久的に記録される。
+            raise_provider_data_error(
+                exc, provider_name=_PROVIDER_NAME, operation="history"
+            )
 
         if df is None or df.empty:
+            # 応答は成立したが対象期間にバーが無い(SUCCESS + empty)。
             return None
 
         bars: list[PriceBar] = []

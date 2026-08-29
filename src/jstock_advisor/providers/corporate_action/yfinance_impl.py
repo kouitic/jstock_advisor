@@ -10,6 +10,7 @@ import yfinance as yf
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import CorporateActionType
 from jstock_advisor.interfaces.types import CorporateActionEvent
+from jstock_advisor.providers._failure import raise_provider_data_error
 
 _PROVIDER_NAME = "yfinance"
 _TICKER_SUFFIX = ".T"
@@ -23,10 +24,15 @@ class YFinanceCorporateActionProvider:
         try:
             ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
             splits = ticker.splits
-        except Exception:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
-            return []
+        except Exception as exc:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
+            # Issue #59 Phase B2 / E-4: 取得失敗を空リストへ潰さない。潰すと
+            # 「コーポレートアクションなし」と「確認できなかった」が同値になり、
+            # 配当のクロスバリデーション補正が無言でスキップされる。
+            # 失敗は例外契約で表現できるため、専用のResult型は導入しない。
+            raise_provider_data_error(exc, provider_name=_PROVIDER_NAME, operation="splits")
 
         if splits is None or splits.empty:
+            # 応答は成立したがイベントが無い(SUCCESS + no event)。
             return []
 
         source = DataSourceReference(provider=_PROVIDER_NAME, fetched_at=self._now)

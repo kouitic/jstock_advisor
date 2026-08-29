@@ -30,6 +30,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.dividend_cut_analysis import classify_dividend_change
 from jstock_advisor.interfaces.types import AnnualDividendActual, DividendInfo
+from jstock_advisor.providers._failure import raise_provider_data_error
 from jstock_advisor.services.corporate_action_service import CorporateActionService
 
 _PROVIDER_NAME = "yfinance"
@@ -112,16 +113,20 @@ class YFinanceDividendDataProvider:
         ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
         try:
             info: dict[str, Any] = ticker.info or {}
-        except Exception:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
-            info = {}
+        except Exception as exc:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
+            # Issue #59 Phase B2: 取得失敗を欠測(None)や配当0へ潰さない。
+            # 「配当0(真のzero)」「配当情報なし(unknown)」「取得失敗」の
+            # 3状態を混同しない(#55のsemanticsを壊さない)。
+            raise_provider_data_error(exc, provider_name=_PROVIDER_NAME, operation="info")
 
         if not info or info.get("regularMarketPrice") is None:
+            # 応答は成立したが対象銘柄のデータが無い(SUCCESS + missing)。
             return None
 
         try:
             dividends = ticker.dividends
-        except Exception:  # noqa: BLE001
-            dividends = None
+        except Exception as exc:  # noqa: BLE001
+            raise_provider_data_error(exc, provider_name=_PROVIDER_NAME, operation="dividends")
 
         calendar_year_fallback_used = fiscal_year_end_month is None
         effective_fiscal_year_end_month = fiscal_year_end_month or 12
