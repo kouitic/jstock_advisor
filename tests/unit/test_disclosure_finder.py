@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import io
 import zipfile
 from pathlib import Path
@@ -20,6 +21,11 @@ from jstock_advisor.infrastructure.edinet.disclosure_finder import (
     EdinetDisclosureCacheRepository,
     _extract_reason_summary,
     find_extraordinary_reports,
+)
+from jstock_advisor.infrastructure.edinet.document_finder import find_latest_filings
+from jstock_advisor.infrastructure.edinet.document_list_cache import (
+    EdinetDailyDocumentListCacheRepository,
+    EdinetDocumentSource,
 )
 from jstock_advisor.infrastructure.edinet.types import (
     EdinetDocumentEntry,
@@ -83,16 +89,22 @@ class FakeDocumentSource:
         zips_by_doc_id: dict[str, bytes | None] | None = None,
         failed_dates: set[dt.date] | None = None,
         configured: bool = True,
+        refresh_window_days: int = 7,
     ) -> None:
         self._documents_by_date = documents_by_date or {}
         self._zips_by_doc_id = zips_by_doc_id or {}
         self._failed_dates = failed_dates or set()
         self._configured = configured
+        self._refresh_window_days = refresh_window_days
         self.scanned_dates: list[dt.date] = []
 
     @property
     def is_configured(self) -> bool:
         return self._configured
+
+    @property
+    def refresh_window_days(self) -> int:
+        return self._refresh_window_days
 
     def list_documents(self, scan_date: dt.date, now: dt.datetime) -> EdinetListResult:
         del now
@@ -137,7 +149,6 @@ def _find(
     repo: EdinetDisclosureCacheRepository,
     now: dt.datetime,
     initial_lookback_days: int = 10,
-    refresh_window_days: int = 7,
 ):
     return find_extraordinary_reports(
         source,  # type: ignore[arg-type]
@@ -145,7 +156,6 @@ def _find(
         _STOCK_CODE,
         now,
         initial_lookback_days=initial_lookback_days,
-        refresh_window_days=refresh_window_days,
     )
 
 
@@ -312,8 +322,8 @@ def test_refresh_window_rescans_recent_days_only(tmp_path: Path) -> None:
 
     _find(FakeDocumentSource(), repo, now, initial_lookback_days=30)
 
-    rescan = FakeDocumentSource()
-    _find(rescan, repo, now, initial_lookback_days=30, refresh_window_days=7)
+    rescan = FakeDocumentSource(refresh_window_days=7)
+    _find(rescan, repo, now, initial_lookback_days=30)
 
     assert min(rescan.scanned_dates) == dt.date(2026, 8, 24)  # today - 7暦日
     assert max(rescan.scanned_dates) == dt.date(2026, 8, 31)
@@ -396,3 +406,113 @@ def test_missing_summary_after_successful_download_does_not_block_advance(
     assert cache is not None
     assert cache.records == []
     assert cache.newest_scanned_date == "2026-08-31"
+
+
+# --- refresh windowの正本がEdinetDocumentSourceであること -------------------
+# finder(走査開始日)とdaily cache(freshness判定)が別々の窓を持つと、
+# 「finderは再走査するのにcacheは窓外として古い成功結果を永久にfresh扱いする」
+# という破綻が起きる。既定値7日では表面化しないため、非既定値で固定する。
+
+
+class _CountingClient:
+    """EdinetDocumentSourceへ渡す実クライアント相当のフェイク。"""
+
+    is_configured = True
+
+    def __init__(self) -> None:
+        self.list_calls: list[dt.date] = []
+
+    def list_documents(self, date: dt.date) -> EdinetListResult:
+        self.list_calls.append(date)
+        return EdinetListResult(EdinetFetchStatus.SUCCESS_EMPTY, [])
+
+    def download_document_zip(self, doc_id: str) -> EdinetDownloadResult:
+        return EdinetDownloadResult(
+            EdinetFetchStatus.FETCH_FAILED, None, EdinetFailureReason.DOWNLOAD_ERROR
+        )
+
+
+def _real_source(
+    tmp_path: Path, client: _CountingClient, refresh_window_days: int
+) -> EdinetDocumentSource:
+    return EdinetDocumentSource(
+        client=client,  # type: ignore[arg-type]
+        repository=EdinetDailyDocumentListCacheRepository(store_dir=tmp_path),
+        refresh_window_days=refresh_window_days,
+    )
+
+
+def test_finder_uses_source_refresh_window_for_non_default_14_days(tmp_path: Path) -> None:
+    """window=14では、14日前のdaily cacheがrefresh TTL超過なら再取得される。"""
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    cache_dir = tmp_path / "daily"
+    cache_dir.mkdir()
+    target = dt.date(2026, 8, 17)  # 2026-08-31 の14日前(月曜)
+    now = dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC)  # 2026-08-31 10:00 JST
+
+    seed_client = _CountingClient()
+    seed_source = EdinetDocumentSource(
+        client=seed_client,  # type: ignore[arg-type]
+        repository=EdinetDailyDocumentListCacheRepository(store_dir=cache_dir),
+        refresh_window_days=14,
+    )
+    # refresh TTL(30分)を大きく超える過去に取得済みのdaily cacheを作る
+    seed_source.list_documents(target, now - dt.timedelta(hours=6))
+    assert seed_client.list_calls == [target]
+
+    client = _CountingClient()
+    source = EdinetDocumentSource(
+        client=client,  # type: ignore[arg-type]
+        repository=EdinetDailyDocumentListCacheRepository(store_dir=cache_dir),
+        refresh_window_days=14,
+    )
+    find_extraordinary_reports(source, repo, _STOCK_CODE, now, initial_lookback_days=30)
+
+    # finderが14日前を走査対象に含め、cache側もTTL超過として実際に再取得する
+    assert target in client.list_calls
+
+
+def test_source_window_7_treats_eight_days_ago_as_settled(tmp_path: Path) -> None:
+    """window=7では8日前は窓外。finderは走査せず、cacheも確定扱いで再取得しない。"""
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    cache_dir = tmp_path / "daily"
+    cache_dir.mkdir()
+    eight_days_ago = dt.date(2026, 8, 24) - dt.timedelta(days=1)  # 2026-08-23(日)
+    settled_weekday = dt.date(2026, 8, 21)  # 8日以上前の平日
+    now = dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC)
+
+    seed_client = _CountingClient()
+    seed_source = EdinetDocumentSource(
+        client=seed_client,  # type: ignore[arg-type]
+        repository=EdinetDailyDocumentListCacheRepository(store_dir=cache_dir),
+        refresh_window_days=7,
+    )
+    seed_source.list_documents(settled_weekday, now - dt.timedelta(days=3))
+
+    client = _CountingClient()
+    source = EdinetDocumentSource(
+        client=client,  # type: ignore[arg-type]
+        repository=EdinetDailyDocumentListCacheRepository(store_dir=cache_dir),
+        refresh_window_days=7,
+    )
+    # 既存cacheを作り、以後は窓内のみ再走査される状態にする
+    seeded = find_extraordinary_reports(source, repo, _STOCK_CODE, now, initial_lookback_days=30)
+    assert seeded is not None
+
+    rescan_client = _CountingClient()
+    rescan_source = EdinetDocumentSource(
+        client=rescan_client,  # type: ignore[arg-type]
+        repository=EdinetDailyDocumentListCacheRepository(store_dir=cache_dir),
+        refresh_window_days=7,
+    )
+    find_extraordinary_reports(rescan_source, repo, _STOCK_CODE, now, initial_lookback_days=30)
+
+    assert settled_weekday not in rescan_client.list_calls
+    assert eight_days_ago not in rescan_client.list_calls
+    assert all(d >= dt.date(2026, 8, 24) for d in rescan_client.list_calls)
+
+
+def test_finders_do_not_expose_independent_refresh_window_parameter() -> None:
+    """finder側に独立したwindow設定を残さない(正本はEdinetDocumentSourceのみ)。"""
+    assert "refresh_window_days" not in inspect.signature(find_extraordinary_reports).parameters
+    assert "refresh_window_days" not in inspect.signature(find_latest_filings).parameters

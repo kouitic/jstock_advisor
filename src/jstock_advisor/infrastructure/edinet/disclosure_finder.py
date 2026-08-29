@@ -19,7 +19,6 @@ from jstock_advisor.infrastructure.collection_store import CollectionStore, buil
 from jstock_advisor.infrastructure.edinet.csv_parser import extract_main_document_rows
 from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
 from jstock_advisor.infrastructure.edinet.scan_window import (
-    DEFAULT_REFRESH_WINDOW_DAYS,
     advance_newest_scanned,
     business_days_between,
     compute_scan_start,
@@ -94,7 +93,6 @@ def find_extraordinary_reports(
     stock_code: str,
     now: dt.datetime,
     initial_lookback_days: int = _DEFAULT_INITIAL_LOOKBACK_DAYS,
-    refresh_window_days: int = DEFAULT_REFRESH_WINDOW_DAYS,
 ) -> EdinetDisclosureCache | None:
     """対象銘柄の臨時報告書・訂正臨時報告書をキャッシュ込みで検索する。
 
@@ -105,7 +103,7 @@ def find_extraordinary_reports(
         使っていたため、JST 00:00〜08:59に起動する朝バッチでは常に前日扱いとなり、
         `newest_scanned >= today`が成立してEDINETを一度も呼ばずにキャッシュを
         返していた(domain/jst.pyの「now.date()を直接呼ばない」規約違反)。
-      - 直近(当日+refresh_window_days暦日)は毎回再走査する。日付単位の
+      - 直近(当日+source.refresh_window_days暦日)は毎回再走査する。日付単位の
         `newest_scanned_date`だけでは「その日の何時時点まで見たか」を表現できず、
         10:00の走査で当日を走査済みと記録すると、同じ日の引け後(15:00-17:00)に
         提出された臨時報告書を永久に取得できなかったため。doc_idで重複排除して
@@ -128,8 +126,10 @@ def find_extraordinary_reports(
     previous_newest = (
         dt.date.fromisoformat(cache.newest_scanned_date) if cache is not None else None
     )
+    # refresh windowの正本はEdinetDocumentSource(日付単位キャッシュのfreshness判定と
+    # 必ず同じ窓を使う。ここで独自の窓を持つと両者が食い違う)。
     scan_start = compute_scan_start(
-        today, previous_newest, initial_lookback_days, refresh_window_days
+        today, previous_newest, initial_lookback_days, source.refresh_window_days
     )
     oldest_scanned = cache.oldest_scanned_date if cache is not None else scan_start.isoformat()
 

@@ -29,15 +29,21 @@ class FakeDocumentSource:
         documents_by_date: dict[dt.date, list[EdinetDocumentEntry]] | None = None,
         failed_dates: set[dt.date] | None = None,
         configured: bool = True,
+        refresh_window_days: int = 7,
     ) -> None:
         self._documents_by_date = documents_by_date or {}
         self._failed_dates = failed_dates or set()
         self._configured = configured
+        self._refresh_window_days = refresh_window_days
         self.scanned_dates: list[dt.date] = []
 
     @property
     def is_configured(self) -> bool:
         return self._configured
+
+    @property
+    def refresh_window_days(self) -> int:
+        return self._refresh_window_days
 
     def list_documents(self, scan_date: dt.date, now: dt.datetime) -> EdinetListResult:
         del now
@@ -78,7 +84,6 @@ def _find(
     repo: EdinetFilingCacheRepository,
     now: dt.datetime,
     initial_lookback_days: int = 10,
-    refresh_window_days: int = 7,
 ):
     return find_latest_filings(
         source,  # type: ignore[arg-type]
@@ -86,7 +91,6 @@ def _find(
         _STOCK_CODE,
         now,
         initial_lookback_days=initial_lookback_days,
-        refresh_window_days=refresh_window_days,
     )
 
 

@@ -17,7 +17,6 @@ from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
 from jstock_advisor.infrastructure.edinet.scan_window import (
-    DEFAULT_REFRESH_WINDOW_DAYS,
     advance_newest_scanned,
     business_days_between,
     compute_scan_start,
@@ -66,7 +65,6 @@ def find_latest_filings(
     stock_code: str,
     now: dt.datetime,
     initial_lookback_days: int = _DEFAULT_INITIAL_LOOKBACK_DAYS,
-    refresh_window_days: int = DEFAULT_REFRESH_WINDOW_DAYS,
 ) -> EdinetFilingCache | None:
     """対象銘柄の直近の有価証券報告書・半期報告書docIDをキャッシュ込みで取得する。
 
@@ -75,7 +73,7 @@ def find_latest_filings(
     Issue #53 Phase B1で、disclosure_finderと同じ規約へ揃えた(詳細は
     disclosure_finder.find_extraordinary_reports のdocstring参照)。
       - 走査対象日をJST暦日で決める(UTC暦日だと朝バッチが常に前日扱いになる)
-      - 当日+refresh_window_days暦日は毎回再走査する
+      - 当日+source.refresh_window_days暦日は毎回再走査する
       - 取得に失敗した日を走査済みとしない(連続成功範囲までしか前進させない)
       - 書類一覧の取得は日付単位キャッシュ(EdinetDocumentSource)経由で行い、
         銘柄ごとに同じ日付のdocuments.jsonを取得しない
@@ -96,8 +94,9 @@ def find_latest_filings(
     previous_newest = (
         dt.date.fromisoformat(cache.newest_scanned_date) if cache is not None else None
     )
+    # refresh windowの正本はEdinetDocumentSource(disclosure_finderと同じ理由)。
     scan_start = compute_scan_start(
-        today, previous_newest, initial_lookback_days, refresh_window_days
+        today, previous_newest, initial_lookback_days, source.refresh_window_days
     )
     oldest_scanned = cache.oldest_scanned_date if cache is not None else scan_start.isoformat()
 

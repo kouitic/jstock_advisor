@@ -128,6 +128,17 @@ class EdinetDocumentSource:
     def is_configured(self) -> bool:
         return self._client.is_configured
 
+    @property
+    def refresh_window_days(self) -> int:
+        """refresh windowの正本。
+
+        finderの走査開始日(compute_scan_start)と、日付単位キャッシュのfreshness判定は
+        必ず同じ窓を使わなければならない。両者が食い違うと「finderは再走査するが、
+        キャッシュ側は窓外として古い成功結果を永久にfresh扱いする」という破綻が起きる。
+        そのためfinder側に独立した窓の設定は持たせず、この値を唯一の設定元とする。
+        """
+        return self._refresh_window_days
+
     def download_document_zip(self, doc_id: str) -> EdinetDownloadResult:
         """書類ZIPは書類単位(日付単位ではない)のためキャッシュせず素通しする。"""
         return self._client.download_document_zip(doc_id)

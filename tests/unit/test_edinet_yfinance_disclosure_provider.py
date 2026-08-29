@@ -25,6 +25,7 @@ _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 
 class _NotConfiguredSource:
     is_configured = False
+    refresh_window_days = 7
 
     def list_documents(self, scan_date: dt.date, now: dt.datetime) -> EdinetListResult:
         return EdinetListResult(
@@ -67,6 +68,7 @@ def test_get_disclosures_filters_by_since_date(tmp_path: Path) -> None:
 
     class _ConfiguredNoOpSource:
         is_configured = True
+        refresh_window_days = 7
 
         def list_documents(self, scan_date: dt.date, now: dt.datetime) -> EdinetListResult:
             return EdinetListResult(EdinetFetchStatus.SUCCESS_EMPTY, [])
