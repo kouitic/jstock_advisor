@@ -123,15 +123,16 @@ def test_unavailable_reason_values_contain_no_secrets() -> None:
 
 
 def test_watchlist_unavailable_marks_disclosure_as_missing_required_field() -> None:
-    """UNAVAILABLEは必須項目欠損として扱い、既存のDATA_INSUFFICIENT経路に乗せる。
+    """provider contract: UNAVAILABLEはmissing_required_fieldsへ載り、型付きでも伝わる。
 
-    `missing_required_fields` が空でないと
-    `HighDividendFinancialHealthPolicy` が `ExclusionReason.DATA_INSUFFICIENT` を
-    返す(domain/signals/watchlist_screening.py)。新しい除外理由は増やさない。
+    Issue #81。このテストは**provider側の契約のみ**を対象とする。
+    「実際に除外されるか」という挙動はservice層の責務であり、
+    tests/unit/test_watchlist_disclosure_availability_gate.py で
+    実際にServiceを実行して検証する(定数値のassertだけでは、保護が完全に
+    壊れていても失敗しないため。実際に#53 Phase B2ではそれが起きていた)。
     """
     from jstock_advisor.domain.signals.watchlist_screening import ExclusionReason
 
-    # 実データ組み立ては重いため、経路の契約(定数名と既存enumの存在)を固定する
     assert DISCLOSURE_AVAILABILITY_FIELD_NAME == "disclosure_availability"
     assert ExclusionReason.DATA_INSUFFICIENT.value == "DATA_INSUFFICIENT"
 
