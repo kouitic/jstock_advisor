@@ -1445,3 +1445,70 @@ def test_issue31_holdings_summary_runs_once_under_duplicate_trigger(
 
     assert len(service.summary_calls) == 1  # summaryフローは1回だけ
     assert marks == [("batch-1", "issue31-token")]
+
+
+# --- Issue #75 Phase B1(2026-08-30): 利確判定不能の holdings pipeline への接続 ---
+#
+# recommendation=None でも、「判定できたうえで利確シグナルなし」と
+# 「入力が不正で判定そのものが成立しなかった」は別状態である。
+# 以前は data_error を参照しておらず、両者とも COMPLETED / NO_SIGNAL / "hold" として
+# 記録されていたため、運用者が沈黙抑止に気付けなかった。
+
+
+class _InvalidCostOutcome:
+    """ProfitTakingService が取得原価不正を検出したときの outcome。"""
+
+    recommendation = None
+    data_error = (
+        "平均取得単価が不正なため利確判定は不能"
+        "(平均取得単価・総取得金額は正である必要があります: average_purchase_price=0)"
+    )
+    triggered_rule_names: tuple[str, ...] = ()
+    audit_id: str | None = None
+
+
+def _run_holding_task_with_profit_taking_outcome(
+    monkeypatch: pytest.MonkeyPatch, outcome: object
+) -> dict[str, object]:
+    _patch_common(monkeypatch)
+    target = _holding("2914")
+    monkeypatch.setattr(handler_module.HoldingRepository, "get", lambda self, holding_id: target)
+    monkeypatch.setattr(
+        handler_module,
+        "build_stock_snapshot",
+        lambda *a, **kw: (_FakeSnapshot(current_price=Decimal("1200")), None),
+    )
+    monkeypatch.setattr(
+        handler_module.SellSignalService, "analyze", lambda self, *a, **kw: _NoSignalOutcome()
+    )
+    monkeypatch.setattr(
+        handler_module.ProfitTakingService, "analyze", lambda self, *a, **kw: outcome
+    )
+    return handler_module.handler(
+        {
+            "task": "holding",
+            "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
+            "portfolio_total_market_value": None,
+            "portfolio_total_acquisition_cost": None,
+        },
+        _FakeContext(),
+    )
+
+
+def test_profit_taking_input_invalid_is_recorded_as_data_insufficient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T8: 判定不能が EvaluationStatus.DATA_INSUFFICIENT へ到達する。"""
+    result = _run_holding_task_with_profit_taking_outcome(monkeypatch, _InvalidCostOutcome())
+
+    assert result["evaluation_status"] == "DATA_INSUFFICIENT"
+
+
+def test_profit_taking_no_signal_remains_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T10: 正常な「利確シグナルなし」は従来どおり COMPLETED のまま(回帰)。
+
+    T8 と対にすることで、両者が pipeline 上で区別されることを示す。
+    """
+    result = _run_holding_task_with_profit_taking_outcome(monkeypatch, _NoSignalOutcome())
+
+    assert result["evaluation_status"] == "COMPLETED"
