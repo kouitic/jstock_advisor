@@ -42,7 +42,7 @@ import typing
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -58,6 +58,7 @@ from jstock_advisor.interfaces.provider_errors import (
     ProviderDataError,
     ProviderFailureCategory,
 )
+from jstock_advisor.lambda_handlers import watchlist_worker_handler as worker_module
 from jstock_advisor.services import buy_signal_service as buy_signal_service_module
 from jstock_advisor.services.buy_signal_service import BuySignalService
 from jstock_advisor.services.screening_data_provider import (
@@ -296,18 +297,27 @@ def _p5_arrange(case: SemanticCase) -> _StubScreeningDataProvider:
 
 
 def _p5_act(provider: _StubScreeningDataProvider, monkeypatch: pytest.MonkeyPatch) -> str:
-    """worker が evaluation_result を決める分岐(実コード)をそのまま通す。"""
-    screening_data = provider.get_screening_input("9999", _WATCHLIST_NOW)
-    if screening_data.status != ScreeningDataStatus.OK or screening_data.input is None:
-        return (
-            "DATA_ERROR"
-            if screening_data.status == ScreeningDataStatus.DATA_ERROR
-            else "NOT_FOUND"
-        )
-    service = WatchlistScreeningService(load_config())
-    result = service.evaluate("9999", "テスト株式会社", screening_data.input, _WATCHLIST_NOW)
-    _category, evaluation_result = categorize_exclusion_reasons(result.exclusion_reasons)
-    return evaluation_result
+    """production の `_evaluate_candidate()` を**そのまま**呼ぶ。
+
+    差し替えるのは **producer 境界(provider の生成)だけ**で、
+    `ScreeningDataStatus` → `evaluation_result` の変換は
+    production の worker 実装が行う。テスト側でこの分岐を再実装すると、
+    worker で `DATA_ERROR → PASSED` へ退行しても本テストが green のままになる。
+    """
+    monkeypatch.setattr(
+        worker_module, "build_screening_data_provider", lambda *a, **kw: provider
+    )
+    # 監査記録は本契約の対象外(外部依存を増やさないため無効化する)
+    monkeypatch.setattr(worker_module, "record_candidate_audit", lambda *a, **kw: None)
+
+    outcome = worker_module._evaluate_candidate(
+        stock_code="9999",
+        batch_id="batch-safety-contract",
+        now=_WATCHLIST_NOW,
+        providers=cast(Any, object()),
+        config=load_config(),
+    )
+    return outcome.evaluation_result
 
 
 P5_PROVIDER_FAILURE = SafetyContractCase(
@@ -458,15 +468,24 @@ def _declared_screening_policies() -> tuple[str, ...]:
     return typing.get_args(annotation)
 
 
-def test_all_declared_policies_are_covered_by_a_safety_contract() -> None:
-    """宣言済みの全 screening policy が safety contract で検証されている。
+def test_every_declared_policy_suppresses_auto_add_when_disclosure_unavailable() -> None:
+    """**宣言済みの全 screening policy** で、開示情報を取得できなかったときに
+    auto-add が抑止されることを確認する。
 
-    Issue #81 は「保護が本番 policy へ接続されていなかった」欠陥だった。
-    新しい policy を追加して本テストを更新しないと**必ず失敗する**ようにし、
-    未接続を構造的に検出する。
+    Issue #81 は「保護が**本番で使われている policy へ接続されていなかった**」
+    欠陥だった。個別テストは active policy 1つしか見ておらず、
+    policy を差し替えた瞬間に保護が失われる構造を検出できなかった。
 
-    なお本テストは private 実装を検証するものではなく、
-    **policy 集合と contract 集合の同期**を確認するためのものである。
+    本テストが保証するのは **policy 集合の網羅**であって、
+    registry(`REQUIRED_SAFETY_CONTRACTS`)との対応ではない。
+    新しい policy を追加した場合、その policy でも安全gateが効いていなければ
+    **本テストを更新しなくても失敗する**(= 実装側の未接続を検出する)。
+
+    policy 名の列挙元は `config/models.py` の
+    `WatchlistScreeningRulesConfig.screening_policy: Literal[...]` である。
+    これは config schema 上の正本であり、private な `_build_policy()` には
+    依存しない。ここで列挙を使うのは private 実装の検証のためではなく、
+    **「宣言された policy をひとつも取りこぼさない」ことを担保するため**である。
     """
     declared = set(_declared_screening_policies())
 
