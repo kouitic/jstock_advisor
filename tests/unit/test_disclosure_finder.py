@@ -144,12 +144,13 @@ def _entry(
     )
 
 
-def _find(
+def _scan(
     source: FakeDocumentSource,
     repo: EdinetDisclosureCacheRepository,
     now: dt.datetime,
     initial_lookback_days: int = 10,
 ):
+    """走査結果(cache + この実行で最後まで取得できたか)をそのまま返す。"""
     return find_extraordinary_reports(
         source,  # type: ignore[arg-type]
         repo,
@@ -157,6 +158,16 @@ def _find(
         now,
         initial_lookback_days=initial_lookback_days,
     )
+
+
+def _find(
+    source: FakeDocumentSource,
+    repo: EdinetDisclosureCacheRepository,
+    now: dt.datetime,
+    initial_lookback_days: int = 10,
+):
+    """cacheのみを取り出す(走査完了フラグを見ない既存テスト向け)。"""
+    return _scan(source, repo, now, initial_lookback_days=initial_lookback_days).cache
 
 
 # --- 提出理由の抽出(既存の回帰) ------------------------------------------
@@ -516,3 +527,68 @@ def test_finders_do_not_expose_independent_refresh_window_parameter() -> None:
     """finder側に独立したwindow設定を残さない(正本はEdinetDocumentSourceのみ)。"""
     assert "refresh_window_days" not in inspect.signature(find_extraordinary_reports).parameters
     assert "refresh_window_days" not in inspect.signature(find_latest_filings).parameters
+
+
+# --- Issue #53 Phase B2: 走査完了フラグ(provider境界でavailabilityへ変換される) ---
+
+
+def test_scan_result_is_complete_when_all_dates_succeed(tmp_path: Path) -> None:
+    scan = _scan(
+        FakeDocumentSource(),
+        EdinetDisclosureCacheRepository(store_dir=tmp_path),
+        dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC),
+    )
+
+    assert scan.complete is True
+    assert scan.failure_reason is None
+    assert scan.cache is not None
+
+
+def test_scan_result_is_incomplete_when_not_configured(tmp_path: Path) -> None:
+    scan = _scan(
+        FakeDocumentSource(configured=False),
+        EdinetDisclosureCacheRepository(store_dir=tmp_path),
+        dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC),
+    )
+
+    assert scan.complete is False
+    assert scan.failure_reason is EdinetFailureReason.NOT_CONFIGURED
+    assert scan.cache is None
+
+
+def test_scan_result_is_incomplete_when_any_date_fails(tmp_path: Path) -> None:
+    """1日でも取得に失敗したら、cacheが残っていてもcomplete=False。
+
+    「過去に取得済みの記録があるから開示なし」と言えないことを表す
+    (provider境界でUNAVAILABLEへ変換される)。
+    """
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    seeded = _scan(FakeDocumentSource(), repo, dt.datetime(2026, 8, 25, 1, 0, tzinfo=dt.UTC))
+    assert seeded.complete is True
+
+    scan = _scan(
+        FakeDocumentSource(failed_dates={dt.date(2026, 8, 27)}),
+        repo,
+        dt.datetime(2026, 8, 28, 1, 0, tzinfo=dt.UTC),
+    )
+
+    assert scan.complete is False
+    assert scan.failure_reason is EdinetFailureReason.HTTP_ERROR
+    assert scan.cache is not None  # 過去分のcacheは残るが「今回確認できた」ではない
+
+
+def test_scan_result_is_incomplete_when_zip_download_fails(tmp_path: Path) -> None:
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    _scan(FakeDocumentSource(), repo, dt.datetime(2026, 8, 25, 1, 0, tzinfo=dt.UTC))
+
+    scan = _scan(
+        FakeDocumentSource(
+            {dt.date(2026, 8, 26): [_entry("DOC1", submit_date_time="2026-08-26 12:00")]},
+            {"DOC1": None},
+        ),
+        repo,
+        dt.datetime(2026, 8, 27, 1, 0, tzinfo=dt.UTC),
+    )
+
+    assert scan.complete is False
+    assert scan.failure_reason is EdinetFailureReason.DOWNLOAD_ERROR

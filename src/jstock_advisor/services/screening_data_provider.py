@@ -31,6 +31,7 @@ from jstock_advisor.domain.classification.stock_type import classify_stock_type
 from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.domain.entities.common import BenefitUtilityCoefficients, DataSourceReference
 from jstock_advisor.domain.financial_series import to_seasonally_adjusted_series
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.screening.rules import detect_disclosure_risk_keywords
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.valuation.yield_calc import (
@@ -38,6 +39,7 @@ from jstock_advisor.domain.valuation.yield_calc import (
     compute_benefit_yield_pct,
     compute_dividend_yield_pct,
 )
+from jstock_advisor.interfaces.disclosure import DisclosureAvailability
 from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, ShareholderBenefit
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
@@ -96,6 +98,13 @@ class WatchlistScreeningInput:
     severe_earnings_decline: bool
 
 
+# Issue #53 Phase B2: 開示情報を調査できなかった場合に必須項目欠損として扱う名前。
+# 既存のmissing_required_fields → ExclusionReason.DATA_INSUFFICIENT 経路を再利用し、
+# 新しい除外理由を増やさない(「開示リスク検出」とは別物として扱うため、
+# DISCLOSURE_RISKには決して倒さない)。
+DISCLOSURE_AVAILABILITY_FIELD_NAME = "disclosure_availability"
+
+
 class ScreeningDataStatus(StrEnum):
     OK = "OK"
     NOT_FOUND = "NOT_FOUND"
@@ -134,6 +143,7 @@ def _build_screening_input(
     avg_trading_value: Decimal | None,
     disclosure_risk_keywords_found: list[str],
     severe_earnings_decline: bool,
+    disclosure_available: bool,
 ) -> WatchlistScreeningInput:
     """`StockSnapshotScreeningDataProvider`/`LightweightScreeningDataProvider`が
     共通で使う、WatchlistScreeningInput組み立てロジック本体(ロジックの二重実装を
@@ -156,6 +166,10 @@ def _build_screening_input(
         for name in REQUIRED_FIELD_NAMES
         if getattr(financial, name, None) is None
     ]
+    if not disclosure_available:
+        # 開示情報を調査できていない = 重大リスク開示の有無が不明。評価不能
+        # (DATA_INSUFFICIENT)として扱い、候補へ通さない(Issue #53 Phase B2)。
+        missing_required.append(DISCLOSURE_AVAILABILITY_FIELD_NAME)
 
     consecutive_increase_years = dividend.consecutive_dividend_increase_years
     scoring_values = {
@@ -228,6 +242,9 @@ def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
         avg_trading_value=snapshot.avg_trading_value,
         disclosure_risk_keywords_found=snapshot.disclosure_risk_keywords_found,
         severe_earnings_decline=snapshot.severe_earnings_decline,
+        disclosure_available=(
+            snapshot.disclosure_availability is DisclosureAvailability.AVAILABLE
+        ),
     )
 
 
@@ -356,9 +373,10 @@ class LightweightScreeningDataProvider:
         benefit = self._providers.shareholder_benefit.get_shareholder_benefit(stock_code)
         current_price = snap.close_price
         avg_trading_value = self._providers.market_data.get_average_trading_value(stock_code, 20)
-        disclosures = self._providers.disclosure.get_disclosures(
-            stock_code, now.date() - dt.timedelta(days=30)
+        disclosure_result = self._providers.disclosure.get_disclosures(
+            stock_code, evaluation_date_jst(now) - dt.timedelta(days=30)
         )
+        disclosures = disclosure_result.disclosures
 
         coefficients = BenefitUtilityCoefficients(
             **self._config.scoring.shareholder_benefit_value.utility_coefficients_default.model_dump()
@@ -416,6 +434,7 @@ class LightweightScreeningDataProvider:
             avg_trading_value=avg_trading_value,
             disclosure_risk_keywords_found=keywords_found,
             severe_earnings_decline=severe_earnings_decline,
+            disclosure_available=disclosure_result.is_available,
         )
         return input_dto, None
 

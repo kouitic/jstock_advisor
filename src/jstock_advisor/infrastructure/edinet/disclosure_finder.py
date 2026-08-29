@@ -10,6 +10,7 @@ document_finder.py(有価証券報告書・半期報告書向け)とは異なり
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -23,6 +24,7 @@ from jstock_advisor.infrastructure.edinet.scan_window import (
     business_days_between,
     compute_scan_start,
 )
+from jstock_advisor.infrastructure.edinet.types import EdinetFailureReason
 
 _EXTRAORDINARY_REPORT_DOC_TYPE_CODES = {"180", "190"}  # 臨時報告書・訂正臨時報告書
 _DEFAULT_INITIAL_LOOKBACK_DAYS = 60
@@ -60,6 +62,21 @@ class EdinetDisclosureCacheRepository:
         self._store.upsert(cache)
 
 
+@dataclass(frozen=True)
+class ExtraordinaryReportScanResult:
+    """走査結果(Issue #53 Phase B2)。
+
+    `complete`は「この実行で対象範囲を最後まで取得できたか」を表す。Falseの場合、
+    cacheに過去の走査結果が残っていても**今回は開示状況を確認できていない**ため、
+    呼び出し側は「開示なし」として扱ってはならない(provider境界で
+    DisclosureQueryResult.UNAVAILABLEへ変換する)。
+    """
+
+    cache: EdinetDisclosureCache | None
+    complete: bool
+    failure_reason: EdinetFailureReason | None = None
+
+
 def _sec_code5(stock_code: str) -> str:
     """4桁の証券コードをEDINETのsecCode(5桁、末尾チェックデジット0)に変換する。"""
     return f"{stock_code}0"
@@ -93,10 +110,13 @@ def find_extraordinary_reports(
     stock_code: str,
     now: dt.datetime,
     initial_lookback_days: int = _DEFAULT_INITIAL_LOOKBACK_DAYS,
-) -> EdinetDisclosureCache | None:
+) -> ExtraordinaryReportScanResult:
     """対象銘柄の臨時報告書・訂正臨時報告書をキャッシュ込みで検索する。
 
-    EDINETが設定されていない(APIキー未設定)場合はNoneを返す。
+    戻り値は走査結果(cache + この実行で最後まで取得できたか)。EDINETが設定されて
+    いない(APIキー未設定)場合や、走査範囲に取得失敗が1日でもあった場合は
+    complete=Falseとなり、呼び出し側は「開示なし」と解釈してはならない
+    (Issue #53 Phase B2)。
 
     Issue #53 Phase B1で以下を修正した。
       - 走査対象日をJST暦日(evaluation_date_jst)で決める。now.date()(UTC暦日)を
@@ -114,7 +134,7 @@ def find_extraordinary_reports(
         その日を未完了として扱う。
     """
     if not source.is_configured:
-        return None
+        return ExtraordinaryReportScanResult(None, False, EdinetFailureReason.NOT_CONFIGURED)
 
     sec_code = _sec_code5(stock_code)
     today = evaluation_date_jst(now)
@@ -135,9 +155,12 @@ def find_extraordinary_reports(
 
     last_complete: dt.date | None = None
     gap_found = False
+    first_failure_reason: EdinetFailureReason | None = None
     for scan_date in business_days_between(scan_start, today):
         result = source.list_documents(scan_date, now)
         date_complete = result.succeeded
+        if not result.succeeded and first_failure_reason is None:
+            first_failure_reason = result.failure_reason or EdinetFailureReason.OTHER
         for entry in result.entries:
             if entry.sec_code != sec_code:
                 continue
@@ -151,6 +174,10 @@ def find_extraordinary_reports(
                 # ZIP取得失敗はこの日の走査が未完了であることを意味する
                 # (この書類を取り込めていないため、走査済みにしてはならない)。
                 date_complete = False
+                if first_failure_reason is None:
+                    first_failure_reason = (
+                        download.failure_reason or EdinetFailureReason.DOWNLOAD_ERROR
+                    )
                 continue
             summary = _extract_reason_summary(download.payload)
             if summary is None:
@@ -177,11 +204,12 @@ def find_extraordinary_reports(
         elif not gap_found:
             last_complete = scan_date
 
+    complete = first_failure_reason is None
     newest_scanned = advance_newest_scanned(previous_newest, last_complete)
     if newest_scanned is None:
         # 初回走査で1日も完了しなかった場合。走査済みの記録を作らない
         # (作ると、その範囲が二度と走査されないcache poisoningになる)。
-        return None
+        return ExtraordinaryReportScanResult(None, complete, first_failure_reason)
 
     updated_cache = EdinetDisclosureCache(
         stock_code=stock_code,
@@ -191,4 +219,4 @@ def find_extraordinary_reports(
         updated_at=now,
     )
     cache_repo.save(updated_cache)
-    return updated_cache
+    return ExtraordinaryReportScanResult(updated_cache, complete, first_failure_reason)

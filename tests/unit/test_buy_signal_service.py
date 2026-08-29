@@ -54,7 +54,16 @@ from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.sector_environment import SectorEnvironmentResult
 from jstock_advisor.domain.entities.timing_score import TimingScoreResult
 from jstock_advisor.domain.entities.valuation import FairValueRange
-from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, HistoricalValuation
+from jstock_advisor.interfaces.disclosure import (
+    DisclosureAvailability,
+    DisclosureUnavailableReason,
+)
+from jstock_advisor.interfaces.types import (
+    Disclosure,
+    DividendInfo,
+    FinancialSummary,
+    HistoricalValuation,
+)
 from jstock_advisor.services import buy_signal_service as service_module
 from jstock_advisor.services.buy_signal_service import BuySignalService
 from jstock_advisor.services.provider_bundle import ProviderBundle
@@ -230,7 +239,13 @@ class _StockFixture:
     next_earnings_date: dt.date | None = None
 
 
-def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
+def _build_snapshot(
+    fx: _StockFixture,
+    disclosure_availability: DisclosureAvailability = DisclosureAvailability.AVAILABLE,
+    disclosure_unavailable_reason: DisclosureUnavailableReason | None = None,
+    disclosures: list[Disclosure] | None = None,
+    disclosure_risk_keywords_found: list[str] | None = None,
+) -> StockSnapshot:
     financial = _financial(
         stock_code=fx.stock_code,
         industry=fx.industry,
@@ -268,7 +283,9 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         bars=[],
         historical_valuations=_historical_per_only(fx.per_median, fx.pbr_median),
         avg_trading_value=Decimal("100000000"),
-        disclosures=[],
+        disclosures=disclosures or [],
+        disclosure_availability=disclosure_availability,
+        disclosure_unavailable_reason=disclosure_unavailable_reason,
         next_earnings_date=resolved_next_earnings_date,
         earnings_date_status=earnings_date_status,
         earnings_date_raw=earnings_date_raw,
@@ -291,7 +308,7 @@ def _build_snapshot(fx: _StockFixture) -> StockSnapshot:
         quarterly_operating_income_periods=[],
         quarterly_operating_cashflow_periods=[],
         severe_earnings_decline=False,
-        disclosure_risk_keywords_found=[],
+        disclosure_risk_keywords_found=disclosure_risk_keywords_found or [],
         material_event_keywords_found=[],
         cashflow_decomposition=None,
         stock_type_classification=_stock_type(fx.stock_code, fx.stock_types),
@@ -1042,3 +1059,92 @@ def test_issue23_data_age_business_days_uses_jst_calendar_dates(
     facts = rec.buy_score_input_facts
     assert facts is not None
     assert facts["data_age_business_days"] == 1
+
+
+# --- Issue #53 Phase B2: 開示情報の取得可否によるBUY判定ポリシー ---------------
+# 「開示リスクを検出した」と「開示情報を調査できなかった」を混同しないこと。
+
+
+def _analyze_with_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+    fx: _StockFixture,
+    availability: DisclosureAvailability,
+    unavailable_reason: DisclosureUnavailableReason | None = None,
+    disclosure_risk_keywords_found: list[str] | None = None,
+) -> service_module.BuyAnalysisOutcome:
+    snapshot = _build_snapshot(
+        fx,
+        disclosure_availability=availability,
+        disclosure_unavailable_reason=unavailable_reason,
+        disclosure_risk_keywords_found=disclosure_risk_keywords_found,
+    )
+    monkeypatch.setattr(
+        service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None)
+    )
+    service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
+    return service.analyze(fx.stock_code, _NOW, RecommendationType.BUY)
+
+
+def test_buy_available_empty_disclosure_is_not_excluded_for_disclosure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AVAILABLE + 開示0件は「開示リスクなし」。開示を理由に除外されない。"""
+    outcome = _analyze_with_disclosure(
+        monkeypatch, _NIHON_SHINYAKU, DisclosureAvailability.AVAILABLE
+    )
+
+    assert outcome.buy_action is not BuyAction.DATA_INSUFFICIENT
+    assert not any("開示" in reason for reason in outcome.exclusion_reasons)
+
+
+def test_buy_available_risky_disclosure_is_excluded_as_disclosure_risk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AVAILABLE + リスクキーワード検出は従来どおり開示リスクで除外される。"""
+    outcome = _analyze_with_disclosure(
+        monkeypatch,
+        _NIHON_SHINYAKU,
+        DisclosureAvailability.AVAILABLE,
+        disclosure_risk_keywords_found=["上場廃止"],
+    )
+
+    assert outcome.buy_action == BuyAction.EXCLUDED
+    assert any("リスクキーワード" in reason for reason in outcome.exclusion_reasons)
+    # 「調査できなかった」ではなく「検出した」ため、評価不能にはしない
+    assert outcome.buy_action is not BuyAction.DATA_INSUFFICIENT
+
+
+def test_buy_unavailable_disclosure_is_data_insufficient_not_disclosure_risk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNAVAILABLEは評価不能(DATA_INSUFFICIENT)。開示リスク検出とは別物。"""
+    outcome = _analyze_with_disclosure(
+        monkeypatch,
+        _NIHON_SHINYAKU,
+        DisclosureAvailability.UNAVAILABLE,
+        unavailable_reason=DisclosureUnavailableReason.TEMPORARY_FAILURE,
+    )
+
+    assert outcome.buy_action == BuyAction.DATA_INSUFFICIENT
+    assert outcome.buy_action not in BUY_FAMILY_ACTIONS
+    assert outcome.recommendation is None
+    assert outcome.ranking_group is None
+    # 「リスクキーワードを検出した」という表現にはならない
+    assert not any("リスクキーワード" in reason for reason in outcome.exclusion_reasons)
+    assert outcome.data_error is not None
+    assert "取得できなかった" in outcome.data_error
+
+
+def test_buy_unavailable_disclosure_does_not_pass_as_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNAVAILABLEを「問題開示なし」として通過させない。"""
+    outcome = _analyze_with_disclosure(
+        monkeypatch,
+        _NIHON_SHINYAKU,
+        DisclosureAvailability.UNAVAILABLE,
+        unavailable_reason=DisclosureUnavailableReason.NOT_CONFIGURED,
+    )
+
+    assert outcome.buy_action not in BUY_FAMILY_ACTIONS
+    assert outcome.recommendation is None

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -129,6 +130,7 @@ from jstock_advisor.domain.valuation.valuation_methods import (
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
 )
+from jstock_advisor.interfaces.disclosure import DisclosureAvailability
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
@@ -259,6 +261,8 @@ def _serialize_undervaluation_categories(
     return payload
 
 
+logger = logging.getLogger(__name__)
+
 @dataclass(frozen=True)
 class BuyAnalysisOutcome:
     stock_code: str
@@ -338,6 +342,44 @@ class BuySignalService:
                 False,
                 [],
                 error,
+                buy_action=BuyAction.DATA_INSUFFICIENT,
+                ranking_group=None,
+            )
+
+        # Issue #53 Phase B2: 開示情報を調査できなかった場合は、リスク開示の有無を
+        # 判断できない。「開示リスクを検出した(DISCLOSURE_RISK)」でも「問題なし」でも
+        # なく、評価不能(DATA_INSUFFICIENT)として扱い新規買い候補から外す
+        # (「不祥事を発見した」と「開示情報を調査できなかった」を混同しない)。
+        if snapshot.disclosure_availability is DisclosureAvailability.UNAVAILABLE:
+            reason = (
+                "開示情報を取得できなかったため評価できません"
+                f"(理由区分: {snapshot.disclosure_unavailable_reason})"
+            )
+            logger.warning(
+                "buy_signal disclosure unavailable stock_code=%s reason=%s",
+                stock_code,
+                snapshot.disclosure_unavailable_reason,
+            )
+            self._audit.record(
+                decision_type="buy_signal",
+                stock_code=stock_code,
+                input_values={},
+                calculation_formulas={},
+                output_values={
+                    "data_error": reason,
+                    "disclosure_availability": snapshot.disclosure_availability.value,
+                    "final_buy_action": BuyAction.DATA_INSUFFICIENT.value,
+                },
+                data_sources=list(snapshot.data_sources),
+                rule_version=self._active_rule_version(),
+                timestamp=now,
+            )
+            return BuyAnalysisOutcome(
+                stock_code,
+                None,
+                False,
+                [],
+                reason,
                 buy_action=BuyAction.DATA_INSUFFICIENT,
                 ranking_group=None,
             )
