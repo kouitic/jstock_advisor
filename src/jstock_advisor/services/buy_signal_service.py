@@ -31,6 +31,11 @@ from jstock_advisor.domain.classification.buy_industry import (
     buy_industry_model_missing_reason,
     classify_buy_industry_sector,
 )
+from jstock_advisor.domain.classification.canonical_industry import classify_canonical_industry
+from jstock_advisor.domain.classification.financial_industry import classify_industry
+from jstock_advisor.domain.classification.profit_taking_industry import (
+    classify_profit_taking_industry_sector,
+)
 from jstock_advisor.domain.entities.buy_decision import BuyDecisionReason
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
@@ -132,6 +137,10 @@ from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository
 )
 from jstock_advisor.interfaces.disclosure import DisclosureAvailability
 from jstock_advisor.services.audit_service import AuditService
+from jstock_advisor.services.jpx_industry_source import (
+    JpxIndustrySource,
+    get_default_jpx_industry_source,
+)
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
@@ -287,6 +296,7 @@ class BuySignalService:
         execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
         watch_state_service: WatchStateService | None = None,
         holdings_snapshot_repository: HoldingsSnapshotRepository | None = None,
+        jpx_industry_source: JpxIndustrySource | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
@@ -301,6 +311,85 @@ class BuySignalService:
             holdings_snapshot_repository
             or HoldingsSnapshotRepository.for_execution_context(execution_context)
         )
+        # --- Issue #54 Phase B-1(2026-08-29): 業種分類canonical観測用 ---
+        # 観測専用。解決できなくても判定は従来どおり継続する。
+        self._jpx_industry_source = jpx_industry_source or get_default_jpx_industry_source()
+
+    def _observe_canonical_industry(
+        self,
+        stock_code: str,
+        snapshot: StockSnapshot,
+        buy_industry_sector: BuyIndustrySector,
+        is_growth_stock: bool,
+    ) -> dict[str, object]:
+        """業種分類のcanonical観測(Issue #54 Phase B-1、**判定へは一切影響しない**)。
+
+        同一銘柄に対して、canonical(JPX 33業種)と既存4分類器が実際に何を返したかを
+        並べて記録する。目的は次の2点をProductionデータで確認することであり、
+        ここで分類を是正することではない。
+
+          1. JPXでcanonical業種を解決できる銘柄の割合(BUY経路はJPX universeを
+             通らないため、キャッシュ経由で引けるかどうかが未知)
+          2. 既存分類器どうしの不一致・死んだ判定(CYCLICAL/DEFENSIVE)の実際の発生率
+
+        観測の失敗は判定を止めない(引き当てできなければ、その理由を
+        `jpx_lookup_status` として記録したうえで従来どおり評価を続ける)。
+        """
+        # 引き当て失敗(SOURCE_UNAVAILABLE)でも例外にせず観測値として記録し、
+        # BUY評価は従来どおり継続する(B-1はshadow observationのため)。
+        lookup = self._jpx_industry_source.lookup(stock_code)
+        jpx_entry = lookup.entry
+        canonical = classify_canonical_industry(
+            industry_33_code=jpx_entry.industry_33_code if jpx_entry else None,
+            industry_33_name=jpx_entry.industry_33_name if jpx_entry else None,
+            market_segment=jpx_entry.market_segment if jpx_entry else None,
+            jpx_lookup_status=lookup.status,
+            fallback_sector=snapshot.financial.sector,
+            fallback_industry=snapshot.financial.industry,
+        )
+        financial_result = classify_industry(
+            snapshot.financial.sector, snapshot.financial.industry
+        )
+        return {
+            "canonical_industry_33_code": canonical.industry_33_code,
+            "canonical_industry_33_name": canonical.industry_33_name,
+            "canonical_security_type": canonical.security_type.value,
+            "canonical_source": canonical.source.value,
+            # 「一覧に無い(NOT_FOUND)」と「一覧を読めない(SOURCE_UNAVAILABLE)」を
+            # 区別する。canonical_sourceだけでは両者が同じ値へ潰れるため、
+            # **JPX解決率の算出にはこちらを使う**(Phase B-2の判断材料)。
+            "jpx_lookup_status": canonical.jpx_lookup_status.value,
+            "provider_sector": canonical.fallback_sector,
+            "provider_industry": canonical.fallback_industry,
+            # 既存分類器が同一入力に対して実際に返した値(是正はしない)。
+            "financial_industry_classification": financial_result.classification.value,
+            "financial_industry_category": (
+                financial_result.financial_category.value
+                if financial_result.financial_category is not None
+                else None
+            ),
+            "buy_industry_sector": buy_industry_sector.value,
+            # 利確側の分類器は保有経路の責務だが、同じsector/industryからの純粋関数
+            # であるため、ここで同一入力に対する結果を並べて不一致率を観測できる
+            # (保有経路のコードは変更しない)。
+            "profit_taking_industry_sector": classify_profit_taking_industry_sector(
+                snapshot.financial.industry,
+                snapshot.financial.sector,
+                is_growth_stock,
+            ).value,
+            # CYCLICAL/DEFENSIVEは現状ほぼ付与されない(日本語キーワードを英語GICSへ
+            # 部分一致させているため)。実際の発生率を観測する。
+            "stock_type_cyclical_or_defensive": [
+                stock_type.value
+                for stock_type in snapshot.stock_type_classification.types
+                if stock_type in (StockType.CYCLICAL, StockType.DEFENSIVE)
+            ],
+            # providerが生成したsecurity_type / market_segment。yfinance実装は
+            # market_segment=None・security_type既定値"STOCK"を返すため、REIT除外が
+            # 到達不能である現状をProductionデータで裏づけるために記録する。
+            "provider_security_type": snapshot.financial.security_type,
+            "provider_market_segment": snapshot.financial.market_segment,
+        }
 
     def _active_rule_version(self) -> str:
         return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
@@ -958,6 +1047,15 @@ class BuySignalService:
             # 相当=NOT_EVALUATED / NOT_APPLICABLE の3値。v1では推測を伴う
             # NOT_APPLICABLEを生成しない。score.py参照)。
             "component_states": score_result.component_states,
+            # --- Issue #54 Phase B-1(2026-08-29): 業種分類のcanonical観測 ---
+            # JPX 33業種(canonical)と、既存4分類器が同一銘柄に対して実際に
+            # 出した分類を判定時点の事実として並べて記録する。**判定・スコア・
+            # BuyActionからは一切参照されない観測専用**であり、死んでいる判定
+            # (CYCLICAL/DEFENSIVE・REIT除外)の復活はPhase B-2で、この観測結果を
+            # 確認したうえで実施する(適正価格と対象母集団が変わるため)。
+            "canonical_industry_observation": self._observe_canonical_industry(
+                stock_code, snapshot, buy_industry_sector, is_growth_stock
+            ),
         }
 
         # --- 13. purchase_attractiveness_score算出 ---
