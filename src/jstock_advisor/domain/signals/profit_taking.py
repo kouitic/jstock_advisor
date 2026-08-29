@@ -121,7 +121,12 @@ class MitigatingFactorInputs:
     """各緩和要因の該当有無。判定不能・未評価の場合はFalse扱いとする(判定を弱めない)。"""
 
     fair_value_rising_with_earnings_growth: bool = False
-    continuous_dividend_increase_years: int = 0
+    # Issue #55 Phase B-2(N5)。`None` は「連続増配年数が不明(取得できていない)」、
+    # `0` は「0年であることが確定している」を意味する。従来は供給側が `or 0` で
+    # 両者を同一化しており、監査ログから事後に区別できなかった。
+    # 判定上の扱いはdocstringの原則どおり不明はFalse相当(緩和要因に該当しない
+    # =判定を弱めない)で、**従来の挙動と同じ**。区別するのは記録の粒度のみ。
+    continuous_dividend_increase_years: int | None = None
     # Issue #30 Phase 1: DividendInfoの3状態化(bool | None)に伴う型整合のための
     # 最小限のinterface適応。None(未確認/UNKNOWN)はdocstringの原則どおり
     # False扱い(緩和要因に該当しない=判定を弱めない)。判定条件自体は不変。
@@ -439,8 +444,19 @@ def _apply_mitigating_factors(
         applied.append("現在の利益水準を考慮すると、適正価格を一定程度支えている可能性があります")
 
     cdi = config.continuous_dividend_increase
-    min_years = cdi.min_consecutive_years or 0
-    if cdi.enabled and inputs.continuous_dividend_increase_years >= min_years and min_years > 0:
+    # Issue #55 Phase B-2(N6)。`min_consecutive_years` は enabled: true のとき
+    # 1以上であることをconfigの起動時検証(MitigatingFactors)が保証する。
+    # ここでは None を「無効化」へ黙って読み替えず、enabled と分けて扱う。
+    # Issue #55 Phase B-2(N5)。年数不明(None)は緩和要因に該当させない
+    # (従来 `or 0` で0年へ潰していたときと判定結果は同じ)。
+    min_years = cdi.min_consecutive_years
+    actual_years = inputs.continuous_dividend_increase_years
+    if (
+        cdi.enabled
+        and min_years is not None
+        and actual_years is not None
+        and actual_years >= min_years
+    ):
         total_downgrade += cdi.downgrade_levels
         # 「連続増配」は実績確定年数のみを指す(予想は含まない、要求仕様レビュー対応)。
         applied.append(f"実績で{inputs.continuous_dividend_increase_years}年連続増配している")
