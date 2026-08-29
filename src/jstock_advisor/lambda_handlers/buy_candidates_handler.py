@@ -58,12 +58,15 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.classification.buy_industry import classify_buy_industry_sector
 from jstock_advisor.domain.entities.buy_candidate_batch_pointer import (
     LatestBuyCandidateBatchPointer,
 )
@@ -85,6 +88,7 @@ from jstock_advisor.domain.entities.enums import (
     PortfolioValuationBasis,
     PurchaseCategory,
     RecommendationType,
+    StockType,
     WatchTransitionType,
     WatchType,
     resolve_purchase_category,
@@ -139,7 +143,7 @@ from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
-from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
 from jstock_advisor.services.watch_state_service import (
     WATCH_END_NOTIFIABLE_REASONS,
@@ -244,24 +248,161 @@ def _decode_near_buy_ranking_entry(entry: str) -> tuple[tuple[float, ...], str, 
     return sort_key, stock_code, recommendation_id
 
 
-def _encode_sector_entry(sector: BuyIndustrySector, market_value: Decimal, stock_code: str) -> str:
-    return _SECTOR_ENTRY_DELIMITER.join([sector.value, str(market_value), stock_code])
+class SectorClassificationAvailability(StrEnum):
+    """portfolio exposure factにおける業種分類の可用性(Issue #82)。
+
+    **時価の可用性とは独立の軸**である。時価が判明していれば銘柄集中度は
+    算出できるため、業種が不明であることを理由に銘柄集中度まで無効化しない。
+    """
+
+    KNOWN = "KNOWN"
+    UNKNOWN = "UNKNOWN"
 
 
-def _decode_sector_entry(entry: str) -> tuple[BuyIndustrySector, Decimal, str] | None:
-    """不正なエントリはNoneを返す(呼び出し側でログ・無視すること)。"""
+@dataclass(frozen=True)
+class PortfolioExposureFact:
+    """1保有銘柄のポートフォリオ露出(Issue #82)。
+
+    **screening eligibility とは無関係**である。screeningで除外された銘柄でも、
+    実際に保有している以上、ポートフォリオ時価の分母から消してはならない
+    (「買い候補として不適」は「保有していない」を意味しない)。
+
+    したがって本factは screening_outcome / BuyAction / BuyAnalysisOutcome の
+    いずれにも依存せず、snapshot取得直後に生成される。
+    """
+
+    stock_code: str
+    current_market_value: Decimal
+    sector: BuyIndustrySector
+    sector_availability: SectorClassificationAvailability
+
+    @property
+    def sector_is_known(self) -> bool:
+        return self.sector_availability is SectorClassificationAvailability.KNOWN
+
+
+def _encode_portfolio_exposure_fact(fact: PortfolioExposureFact) -> str:
+    """DynamoDB String Setへ格納する文字列へ変換する(Issue #82)。
+
+    **形式(v2、4フィールド)**: `{sector}|{market_value}|{stock_code}|{availability}`
+
+    旧形式(v1、3フィールド)からの拡張であり、**旧デコーダはv2を読めない**
+    (`len(parts) != 3` でNoneを返す)。これは意図的な設計である。
+    デプロイ跨ぎで新workerと旧finalizeが混在した場合、旧finalizeはv2エントリを
+    無視するため coverage 不足 → `UNAVAILABLE` → **現行と同じfail-close**へ退避する。
+    v1へUNKNOWNを詰めて3フィールドのまま送ると、旧finalizeがそれを通常の
+    業種バケットとして集計し、**業種不明でも業種集中度を算出してしまう**
+    (新契約のfail-closeが効かない)。安全側に倒れる方を選ぶ。
+
+    逆方向(旧workerのv1エントリ → 新finalize)は
+    `_decode_portfolio_exposure_fact` が受理する。
+    """
+    return _SECTOR_ENTRY_DELIMITER.join(
+        [
+            fact.sector.value,
+            str(fact.current_market_value),
+            fact.stock_code,
+            fact.sector_availability.value,
+        ]
+    )
+
+
+def _decode_portfolio_exposure_fact(entry: str) -> PortfolioExposureFact | None:
+    """v1(3フィールド)/ v2(4フィールド)の双方を受理する(Issue #82)。
+
+    不正なエントリはNoneを返す(呼び出し側でログ・無視すること)。
+
+    v1は業種可用性フィールドを持たないため、業種値そのものから復元する
+    (`UNKNOWN` → 不明、それ以外 → 既知)。v1は「screening通過銘柄のみが報告」
+    という前提で書かれているが、値の解釈としてはこの復元で過不足がない。
+    """
     parts = entry.split(_SECTOR_ENTRY_DELIMITER)
-    if len(parts) != 3:
+    if len(parts) == 3:
+        sector_raw, value_raw, stock_code = parts
+        availability_raw = None
+    elif len(parts) == 4:
+        sector_raw, value_raw, stock_code, availability_raw = parts
+    else:
         return None
-    sector_raw, value_raw, stock_code = parts
     if not _STOCK_CODE_PATTERN.match(stock_code):
         return None
     try:
         sector = BuyIndustrySector(sector_raw)
         market_value = Decimal(value_raw)
+        availability = (
+            SectorClassificationAvailability(availability_raw)
+            if availability_raw is not None
+            else (
+                SectorClassificationAvailability.UNKNOWN
+                if sector is BuyIndustrySector.UNKNOWN
+                else SectorClassificationAvailability.KNOWN
+            )
+        )
     except (ValueError, ArithmeticError):
         return None
-    return sector, market_value, stock_code
+    # 値の内部整合: UNKNOWN業種をKNOWNと主張するエントリは受理しない
+    # (業種不明のまま業種集中度へ算入されるのを防ぐ)。
+    if sector is BuyIndustrySector.UNKNOWN:
+        availability = SectorClassificationAvailability.UNKNOWN
+    return PortfolioExposureFact(
+        stock_code=stock_code,
+        current_market_value=market_value,
+        sector=sector,
+        sector_availability=availability,
+    )
+
+
+def _build_portfolio_exposure_fact(
+    *,
+    stock_code: str,
+    source: CandidateSource,
+    holding_quantity: int | None,
+    snapshot: StockSnapshot,
+) -> PortfolioExposureFact | None:
+    """保有銘柄のportfolio exposure factを生成する(Issue #82)。
+
+    **screeningの結果を一切参照しない。** 引数に screening_outcome / BuyAction /
+    BuyAnalysisOutcome を取らないことで、「特定のscreening経路を通過した場合だけ
+    exposureが生成される」という責務結合を構造的に排除する。将来
+    screening/analysis側に新しいearly-returnが追加されても、本関数の呼び出しは
+    その手前にあるためexposure報告は消えない。
+
+    Noneを返すのは「そもそもポートフォリオ露出が無い/測れない」場合だけ:
+
+    - 保有銘柄ではない(watchlist専用)
+    - 保有株数が不明・0以下(時価を算出できない。**0円補完はしない**)
+    - 現在値が0以下(同上)
+
+    業種が判定できない場合もfactは生成する(`sector_availability=UNKNOWN`)。
+    時価が判明していれば銘柄集中度は算出できるため、業種不明を理由に
+    ポートフォリオ分母から銘柄を消してはならない。
+    """
+    if source not in (CandidateSource.HOLDING, CandidateSource.BOTH):
+        return None
+    if holding_quantity is None or holding_quantity <= 0:
+        return None
+    current_price = snapshot.current_price
+    if current_price <= 0:
+        return None
+
+    # 既存分類器をそのまま使う(Issue #54のcanonical taxonomyは先取りしない)。
+    # holding_quantity/current_priceは_build_unified_targets側で全owner集約済み
+    # (M3.1)。owner scopeの意味論(#64)は変更しない。
+    is_growth_stock = StockType.GROWTH in snapshot.stock_type_classification.types
+    sector = classify_buy_industry_sector(
+        snapshot.financial.industry, snapshot.financial.sector, is_growth_stock
+    )
+    availability = (
+        SectorClassificationAvailability.UNKNOWN
+        if sector is BuyIndustrySector.UNKNOWN
+        else SectorClassificationAvailability.KNOWN
+    )
+    return PortfolioExposureFact(
+        stock_code=stock_code,
+        current_market_value=current_price * holding_quantity,
+        sector=sector,
+        sector_availability=availability,
+    )
 
 
 def _holding_data_consistency(
@@ -481,6 +622,40 @@ def _process_single_candidate(
             raise retry_result.error
         assert retry_result.value is not None
         snapshot, snapshot_error = retry_result.value
+
+        # --- Issue #82(2026-08-30): portfolio exposure factの生成 ---
+        # **screening / BUY analysisより前に、それらの結果へ依存せず生成する。**
+        # 以前は「screening通過 → recommendation生成 → その分岐でのみ報告」という
+        # 責務結合があり、保有銘柄が1件でもscreening除外されると
+        # ポートフォリオ時価の分母が欠け、全HOLDING/BOTH候補の集中度判定が
+        # CONCENTRATION_RELIABILITY_INSUFFICIENTで停止していた
+        # (#29により金融株を1銘柄でも保有していると恒久化する)。
+        # ここで生成することで、以降にearly-returnが何本増えても報告は消えない。
+        # snapshotがNone(現在値そのものを取得できなかった)場合はfactを作らない。
+        # ポートフォリオ総額が不完全となり、銘柄集中度・業種集中度とも
+        # fail-closeする(**0円で補完しない**)。
+        exposure_fact = (
+            _build_portfolio_exposure_fact(
+                stock_code=stock_code,
+                source=source,
+                holding_quantity=holding_quantity,
+                snapshot=snapshot,
+            )
+            if snapshot is not None
+            else None
+        )
+        if exposure_fact is not None:
+            candidate_entry = _encode_portfolio_exposure_fact(exposure_fact)
+            if len(candidate_entry.encode("utf-8")) <= MAX_SECTOR_ENTRY_BYTES:
+                sector_entry = candidate_entry
+            else:
+                logger.error(
+                    "buy_candidates_handler: portfolio exposure entry exceeds "
+                    "MAX_SECTOR_ENTRY_BYTES=%d stock_code=%s",
+                    MAX_SECTOR_ENTRY_BYTES,
+                    stock_code,
+                )
+
         outcome = service.analyze(stock_code, now, snapshot=snapshot)
         if outcome.data_error:
             # --- BUYパイプライン第3次修正(2026-07)。個別のデータ取得エラーは
@@ -530,9 +705,9 @@ def _process_single_candidate(
         elif outcome.buy_action == BuyAction.EXCLUDED or outcome.recommendation is None:
             # 投資対象スクリーニングで除外(第1段階)。screening_passed=Falseの場合、
             # recommendationは常にNoneとなる想定(buy_signal_service.py参照)。
-            # スナップショット自体は取得済みのため、保有銘柄の場合は時価総額のみ
-            # sector_entriesへ報告できる(業種分類はスクリーニング除外時点では
-            # 未計算のため報告できない。ポートフォリオ集計の既知の制約)。
+            # Issue #82: 除外されても保有していることに変わりはないため、
+            # portfolio exposure factはこの分岐に入る前に既に生成・報告済みである
+            # (screening eligibility ≠ portfolio exposure membership)。
             category = "hold"
             result = {"stock_code": stock_code, "recommended": False, "notified": False}
             record_purchase_category = PurchaseCategory.EXCLUDED
@@ -655,24 +830,9 @@ def _process_single_candidate(
                     }
                 )
 
-                # 業種集中度用のsector_entry報告(全保有銘柄が対象。BUY_FAMILY以外も
-                # 含む。既知の制約: buy_industry_sectorはスクリーニング通過後にしか
-                # 計算されないため、この分岐に到達した=screening_passed=True の
-                # 保有銘柄のみが対象になる)。
-                buy_industry_sector = recommendation.buy_industry_sector
-                if current_market_value is not None and buy_industry_sector is not None:
-                    candidate_entry = _encode_sector_entry(
-                        buy_industry_sector, current_market_value, stock_code
-                    )
-                    if len(candidate_entry.encode("utf-8")) <= MAX_SECTOR_ENTRY_BYTES:
-                        sector_entry = candidate_entry
-                    else:
-                        logger.error(
-                            "buy_candidates_handler: sector_entry exceeds "
-                            "MAX_SECTOR_ENTRY_BYTES=%d stock_code=%s",
-                            MAX_SECTOR_ENTRY_BYTES,
-                            stock_code,
-                        )
+                # Issue #82: portfolio exposure factの報告はここでは行わない。
+                # screening/analysisの結果に依存しないよう、snapshot取得直後へ
+                # 移動済み(この分岐に到達しない銘柄も分母へ算入するため)。
             else:
                 final_recommendation = recommendation.model_copy(
                     update={
@@ -893,67 +1053,153 @@ def _save_evaluation_record_safely(
         return False
 
 
-def _aggregate_sector_entries(
-    sector_entries: list[str], holding_count: int
-) -> tuple[dict[BuyIndustrySector, Decimal], Decimal | None, PortfolioValuationBasis, float]:
-    """sector_entriesを銘柄コード単位で集計し、業種別・全体の時価総額を導出する
-    (要求仕様§5後半・§7・§8)。
+@dataclass(frozen=True)
+class PortfolioExposureAggregate:
+    """全保有銘柄のportfolio exposureを集計した結果(Issue #82)。
+
+    **時価の可用性と業種の可用性を独立した2軸として保持する。**
+    以前は単一の `PortfolioValuationBasis` に両者が畳み込まれており、
+    業種が1件不明なだけで銘柄集中度まで評価不能になっていた。
+
+    - `basis` / `portfolio_total`: 銘柄集中度の分母。**全保有銘柄の時価**が
+      揃った場合のみ `MARKET_VALUE`。1件でも欠落・競合すれば `UNAVAILABLE`
+      (価格欠損時のfail-closeは従来どおり維持する。0円補完はしない)
+    - `sector_totals` / `sector_exposure_complete`: 業種集中度の入力。
+      **業種不明の銘柄が1件でもあれば `sector_exposure_complete=False`** とし、
+      業種集中度のみDATA_INSUFFICIENT扱いとする(銘柄集中度は巻き添えにしない)
+    - `coverage_ratio`: **observability / audit / completeness把握専用**。
+      authorizationには一切使用しない(部分カバレッジによるfail-open禁止)
+    """
+
+    sector_totals: dict[BuyIndustrySector, Decimal]
+    portfolio_total: Decimal | None
+    basis: PortfolioValuationBasis
+    sector_exposure_complete: bool
+    coverage_ratio: float
+    # 銘柄コード → 集計に採用したfact。候補自身がどの業種バケットに属するかを
+    # ここから引く(screening由来のRecommendation.buy_industry_sectorに依存しない)。
+    facts_by_stock: dict[str, PortfolioExposureFact]
+
+    def sector_total_for(self, stock_code: str) -> Decimal | None:
+        """銘柄の業種集中度に使う業種別時価を返す。判定できない場合はNone。
+
+        Noneは「業種集中度を評価できない」を意味し、**0円ではない**
+        (0を返すと「業種内の時価が0」という誤った事実になる)。
+        """
+        if not self.sector_exposure_complete:
+            return None
+        fact = self.facts_by_stock.get(stock_code)
+        if fact is None or not fact.sector_is_known:
+            return None
+        return self.sector_totals.get(fact.sector)
+
+
+def _unavailable_exposure(coverage_ratio: float) -> PortfolioExposureAggregate:
+    """時価が揃っていない場合の集計結果(stock/sectorとも fail-close)。"""
+    return PortfolioExposureAggregate(
+        sector_totals={},
+        portfolio_total=None,
+        basis=PortfolioValuationBasis.UNAVAILABLE,
+        sector_exposure_complete=False,
+        coverage_ratio=coverage_ratio,
+        facts_by_stock={},
+    )
+
+
+def _aggregate_portfolio_exposure(
+    exposure_entries: list[str], holding_count: int
+) -> PortfolioExposureAggregate:
+    """portfolio exposure factを銘柄コード単位で集計する(要求仕様§5後半・§7・§8)。
+
+    Issue #82 で `_aggregate_sector_entries` から改称・拡張した。報告元が
+    「screeningを通過した銘柄」から「保有している全銘柄」へ変わったため、
+    名前も screening 由来の語彙(sector entry)を残さない。
+    DynamoDB属性名 `sector_entries` は既存schema互換のため変更しない。
 
     保有銘柄全員分のエントリが揃い、かつ内容競合(同一銘柄で異なる値)が無い
-    場合のみPortfolioValuationBasis.MARKET_VALUEとする。1件でも欠落・競合が
-    あればUNAVAILABLEとし、時価ベースの比率を信頼できないものとして扱う
+    場合のみ `PortfolioValuationBasis.MARKET_VALUE` とする。1件でも欠落・競合が
+    あれば `UNAVAILABLE` とし、時価ベースの比率を信頼できないものとして扱う
     (時価と取得金額を混在させない)。DynamoDB String Setは順序保証が無いため、
     「最後に見つかった値を採用」はしない。
+
+    **業種不明(`sector_availability=UNKNOWN`)は欠落ではない。** 時価は判明して
+    いるためポートフォリオ分母へ算入し、`sector_exposure_complete=False` として
+    業種集中度側だけを不成立にする。
     """
     if holding_count == 0:
-        return {}, None, PortfolioValuationBasis.UNAVAILABLE, 0.0
+        return _unavailable_exposure(0.0)
 
-    if len(sector_entries) > MAX_SECTOR_ENTRIES:
+    if len(exposure_entries) > MAX_SECTOR_ENTRIES:
         logger.error(
-            "buy_candidates_handler: sector_entries count=%d exceeds MAX_SECTOR_ENTRIES=%d",
-            len(sector_entries),
+            "buy_candidates_handler: exposure entry count=%d exceeds MAX_SECTOR_ENTRIES=%d",
+            len(exposure_entries),
             MAX_SECTOR_ENTRIES,
         )
-        return {}, None, PortfolioValuationBasis.UNAVAILABLE, 0.0
+        return _unavailable_exposure(0.0)
 
-    by_stock: dict[str, tuple[BuyIndustrySector, Decimal]] = {}
+    by_stock: dict[str, PortfolioExposureFact] = {}
     conflicting_codes: set[str] = set()
-    for raw_entry in sector_entries:
-        parsed = _decode_sector_entry(raw_entry)
-        if parsed is None:
-            logger.warning("buy_candidates_handler: invalid sector_entry=%r ignored", raw_entry)
+    for raw_entry in exposure_entries:
+        fact = _decode_portfolio_exposure_fact(raw_entry)
+        if fact is None:
+            logger.warning(
+                "buy_candidates_handler: invalid portfolio exposure entry=%r ignored", raw_entry
+            )
             continue
-        sector, market_value, stock_code = parsed
-        existing = by_stock.get(stock_code)
-        if existing is not None and existing != (sector, market_value):
-            conflicting_codes.add(stock_code)
+        existing = by_stock.get(fact.stock_code)
+        if existing is not None and existing != fact:
+            conflicting_codes.add(fact.stock_code)
             continue
-        by_stock[stock_code] = (sector, market_value)
+        by_stock[fact.stock_code] = fact
 
     coverage_ratio = len(by_stock) / holding_count if holding_count > 0 else 0.0
 
     if conflicting_codes:
         logger.error(
-            "buy_candidates_handler: conflicting sector_entry values for stock_codes=%s",
+            "buy_candidates_handler: conflicting portfolio exposure values for stock_codes=%s",
             sorted(conflicting_codes),
         )
-        return {}, None, PortfolioValuationBasis.UNAVAILABLE, coverage_ratio
+        return _unavailable_exposure(coverage_ratio)
 
     if len(by_stock) < holding_count:
+        # 価格・株数を取得できなかった保有銘柄が残っている状態。ポートフォリオ
+        # 総額そのものが不完全なため、銘柄集中度・業種集中度ともfail-closeする
+        # (0円補完はしない)。Issue #82 以降、screening除外は欠落の原因ではない。
         logger.warning(
-            "buy_candidates_handler: sector_entries coverage incomplete (%d/%d holdings)",
+            "buy_candidates_handler: portfolio exposure coverage incomplete (%d/%d holdings)",
             len(by_stock),
             holding_count,
         )
-        return {}, None, PortfolioValuationBasis.UNAVAILABLE, coverage_ratio
+        return _unavailable_exposure(coverage_ratio)
 
     sector_totals: dict[BuyIndustrySector, Decimal] = {}
     portfolio_total = Decimal("0")
-    for sector, market_value in by_stock.values():
-        sector_totals[sector] = sector_totals.get(sector, Decimal("0")) + market_value
-        portfolio_total += market_value
+    sector_exposure_complete = True
+    for fact in by_stock.values():
+        portfolio_total += fact.current_market_value
+        if fact.sector_is_known:
+            sector_totals[fact.sector] = (
+                sector_totals.get(fact.sector, Decimal("0")) + fact.current_market_value
+            )
+        else:
+            # 業種不明の銘柄を「その他セクター」として集計へ含めない。含めると
+            # 実際には別業種かもしれない時価を1つのバケットへ混ぜることになる。
+            sector_exposure_complete = False
 
-    return sector_totals, portfolio_total, PortfolioValuationBasis.MARKET_VALUE, coverage_ratio
+    if not sector_exposure_complete:
+        logger.warning(
+            "buy_candidates_handler: sector exposure incomplete "
+            "(unknown industry present); sector concentration is DATA_INSUFFICIENT"
+        )
+
+    return PortfolioExposureAggregate(
+        sector_totals=sector_totals,
+        portfolio_total=portfolio_total,
+        basis=PortfolioValuationBasis.MARKET_VALUE,
+        sector_exposure_complete=sector_exposure_complete,
+        coverage_ratio=coverage_ratio,
+        facts_by_stock=by_stock,
+    )
 
 
 def _record_notification_outcome_audit(
@@ -1082,9 +1328,14 @@ def _finalize_batch(
     # 降順ソート。同点時は銘柄コード昇順で決定性を確保する(要求仕様15節)。
     buy_entries.sort(key=lambda item: (tuple(-v for v in item[0]), item[1]))
 
-    sector_totals, portfolio_total, basis, coverage_ratio = _aggregate_sector_entries(
+    # progress.sector_entriesはDynamoDB属性名(既存schema互換のため改称しない)だが、
+    # 中身はIssue #82以降 screening結果に依存しないportfolio exposure factである。
+    exposure = _aggregate_portfolio_exposure(
         progress.sector_entries, progress.holding_count
     )
+    portfolio_total = exposure.portfolio_total
+    basis = exposure.basis
+    coverage_ratio = exposure.coverage_ratio
 
     data_quality_blocked_count = 0
     trade_cooldown_blocked_count = 0
@@ -1174,11 +1425,13 @@ def _finalize_batch(
             continue
 
         if recommendation.candidate_source in (CandidateSource.HOLDING, CandidateSource.BOTH):
-            sector_total = (
-                sector_totals.get(recommendation.buy_industry_sector, Decimal("0"))
-                if recommendation.buy_industry_sector is not None
-                else Decimal("0")
-            )
+            # Issue #82: 業種集中度を判定できない場合はNoneを渡し、
+            # add_on_risk側で業種ゲートのみDATA_INSUFFICIENTとする。
+            # 以前はDecimal("0")を埋めていたため、「業種不明」が
+            # 「業種内の時価0円」と同義になっていた(0円補完の禁止)。
+            # 業種はexposure fact側から引く(screening結果に由来する
+            # Recommendation.buy_industry_sectorへ依存させない)。
+            sector_total = exposure.sector_total_for(recommendation.stock_code)
             trading_unit = config.profit_taking.trading_unit.default_trading_unit
             holding_data_inconsistent, holding_is_odd_lot = _holding_data_consistency(
                 recommendation.holding_quantity,

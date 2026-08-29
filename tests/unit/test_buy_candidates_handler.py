@@ -1,5 +1,6 @@
 import datetime as dt
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,7 @@ from jstock_advisor.domain.entities.notification_eligibility import Notification
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.signals.add_on_risk import evaluate_add_on_eligibility
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
@@ -95,10 +97,33 @@ class _FakeTradeCooldownService:
         return TradeDetectionOutcome(confirmed=True, events=[])
 
 
+_FAKE_SNAPSHOT_PRICE = Decimal("1000")
+
+
+def _fake_snapshot(
+    *,
+    current_price: str = str(_FAKE_SNAPSHOT_PRICE),
+    industry: str | None = "Auto Parts",
+    sector: str | None = "Consumer Cyclical",
+) -> SimpleNamespace:
+    """portfolio exposure fact生成に必要な最小限のsnapshotダブル(Issue #82)。
+
+    exposure factはscreening/analysisより前に生成されるため、これらの属性は
+    どの判定結果を模したテストでも必要になる。
+    """
+    return SimpleNamespace(
+        current_price=Decimal(current_price),
+        financial=SimpleNamespace(industry=industry, sector=sector),
+        stock_type_classification=SimpleNamespace(types=[]),
+    )
+
+
 def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(handler_module, "build_real_provider_bundle", lambda now, config: object())
     monkeypatch.setattr(handler_module, "build_line_client_from_env", lambda: object())
-    monkeypatch.setattr(handler_module, "build_stock_snapshot", lambda *a, **kw: (object(), None))
+    monkeypatch.setattr(
+        handler_module, "build_stock_snapshot", lambda *a, **kw: (_fake_snapshot(), None)
+    )
     monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: _NoopAuditService())
     monkeypatch.setattr(handler_module, "TradeCooldownService", _FakeTradeCooldownService)
     monkeypatch.setattr(
@@ -144,7 +169,9 @@ class _RecordingAuditService:
 
 
 def _patch_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(handler_module, "build_stock_snapshot", lambda *a, **kw: (object(), None))
+    monkeypatch.setattr(
+        handler_module, "build_stock_snapshot", lambda *a, **kw: (_fake_snapshot(), None)
+    )
 
 
 def _patch_audit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1124,7 +1151,7 @@ def test_process_single_candidate_shares_one_snapshot_across_buy_sell_profit_tak
     _patch_audit(monkeypatch)
 
     snapshot_calls: list[object] = []
-    sentinel_snapshot = object()
+    sentinel_snapshot = _fake_snapshot()
 
     def _fake_build_stock_snapshot(*_a: object, **_kw: object) -> tuple[object, None]:
         snapshot_calls.append(sentinel_snapshot)
@@ -1702,8 +1729,13 @@ def test_finalize_batch_notification_result_sum_matches_buy_candidate_count_when
         total=3,
         category_counts={"candidate_not_ranked": 3},
         sector_entries=[
-            handler_module._encode_sector_entry(
-                BuyIndustrySector.AUTOMOTIVE_PARTS, Decimal("100000"), "9302"
+            handler_module._encode_portfolio_exposure_fact(
+                handler_module.PortfolioExposureFact(
+                    stock_code="9302",
+                    current_market_value=Decimal("100000"),
+                    sector=BuyIndustrySector.AUTOMOTIVE_PARTS,
+                    sector_availability=handler_module.SectorClassificationAvailability.KNOWN,
+                )
             ),
         ],
         holding_count=1,
@@ -1770,8 +1802,13 @@ def test_finalize_batch_addon_downgrade_to_manual_review_does_not_change_purchas
         total=1,
         category_counts={"candidate_not_ranked": 1},
         sector_entries=[
-            handler_module._encode_sector_entry(
-                BuyIndustrySector.AUTOMOTIVE_PARTS, Decimal("100000"), "7239"
+            handler_module._encode_portfolio_exposure_fact(
+                handler_module.PortfolioExposureFact(
+                    stock_code="7239",
+                    current_market_value=Decimal("100000"),
+                    sector=BuyIndustrySector.AUTOMOTIVE_PARTS,
+                    sector_availability=handler_module.SectorClassificationAvailability.KNOWN,
+                )
             ),
         ],
         holding_count=1,
@@ -2077,8 +2114,13 @@ def test_finalize_batch_blocks_holding_with_conflicting_sell_signal(monkeypatch,
         total=1,
         category_counts={"candidate_not_ranked": 1},
         sector_entries=[
-            handler_module._encode_sector_entry(
-                BuyIndustrySector.AUTOMOTIVE_PARTS, Decimal("100000"), "7239"
+            handler_module._encode_portfolio_exposure_fact(
+                handler_module.PortfolioExposureFact(
+                    stock_code="7239",
+                    current_market_value=Decimal("100000"),
+                    sector=BuyIndustrySector.AUTOMOTIVE_PARTS,
+                    sector_availability=handler_module.SectorClassificationAvailability.KNOWN,
+                )
             )
         ],
         holding_count=1,
@@ -2124,11 +2166,21 @@ def test_finalize_batch_allows_holding_with_no_conflict_and_reliable_portfolio_d
         total=1,
         category_counts={"candidate_not_ranked": 1},
         sector_entries=[
-            handler_module._encode_sector_entry(
-                BuyIndustrySector.AUTOMOTIVE_PARTS, Decimal("100000"), "7239"
+            handler_module._encode_portfolio_exposure_fact(
+                handler_module.PortfolioExposureFact(
+                    stock_code="7239",
+                    current_market_value=Decimal("100000"),
+                    sector=BuyIndustrySector.AUTOMOTIVE_PARTS,
+                    sector_availability=handler_module.SectorClassificationAvailability.KNOWN,
+                )
             ),
-            handler_module._encode_sector_entry(
-                BuyIndustrySector.BANK, Decimal("2500000"), "8001"
+            handler_module._encode_portfolio_exposure_fact(
+                handler_module.PortfolioExposureFact(
+                    stock_code="8001",
+                    current_market_value=Decimal("2500000"),
+                    sector=BuyIndustrySector.BANK,
+                    sector_availability=handler_module.SectorClassificationAvailability.KNOWN,
+                )
             ),
         ],
         holding_count=2,
@@ -2174,8 +2226,13 @@ def test_finalize_batch_blocks_holding_when_portfolio_data_unreliable(
         total=1,
         category_counts={"candidate_not_ranked": 1},
         sector_entries=[
-            handler_module._encode_sector_entry(
-                BuyIndustrySector.AUTOMOTIVE_PARTS, Decimal("100000"), "7239"
+            handler_module._encode_portfolio_exposure_fact(
+                handler_module.PortfolioExposureFact(
+                    stock_code="7239",
+                    current_market_value=Decimal("100000"),
+                    sector=BuyIndustrySector.AUTOMOTIVE_PARTS,
+                    sector_availability=handler_module.SectorClassificationAvailability.KNOWN,
+                )
             )
         ],
         holding_count=2,
@@ -2245,11 +2302,21 @@ def test_finalize_batch_does_not_favor_holdings_in_ranking_order(monkeypatch, tm
         total=3,
         category_counts={"candidate_not_ranked": 3},
         sector_entries=[
-            handler_module._encode_sector_entry(
-                BuyIndustrySector.AUTOMOTIVE_PARTS, Decimal("50000"), "9002"
+            handler_module._encode_portfolio_exposure_fact(
+                handler_module.PortfolioExposureFact(
+                    stock_code="9002",
+                    current_market_value=Decimal("50000"),
+                    sector=BuyIndustrySector.AUTOMOTIVE_PARTS,
+                    sector_availability=handler_module.SectorClassificationAvailability.KNOWN,
+                )
             ),
-            handler_module._encode_sector_entry(
-                BuyIndustrySector.BANK, Decimal("2500000"), "8001"
+            handler_module._encode_portfolio_exposure_fact(
+                handler_module.PortfolioExposureFact(
+                    stock_code="8001",
+                    current_market_value=Decimal("2500000"),
+                    sector=BuyIndustrySector.BANK,
+                    sector_availability=handler_module.SectorClassificationAvailability.KNOWN,
+                )
             ),
         ],
         holding_count=2,
@@ -2266,29 +2333,111 @@ def test_finalize_batch_does_not_favor_holdings_in_ranking_order(monkeypatch, tm
 # (統合BUY候補パイプライン2026-07 §4・§5) ---
 
 
-def test_encode_decode_sector_entry_round_trip() -> None:
-    entry = handler_module._encode_sector_entry(
-        BuyIndustrySector.BANK, Decimal("123456"), "7203"
+def _exposure(
+    stock_code: str,
+    sector: BuyIndustrySector,
+    market_value: str,
+    *,
+    known: bool = True,
+) -> handler_module.PortfolioExposureFact:
+    return handler_module.PortfolioExposureFact(
+        stock_code=stock_code,
+        current_market_value=Decimal(market_value),
+        sector=sector,
+        sector_availability=(
+            handler_module.SectorClassificationAvailability.KNOWN
+            if known
+            else handler_module.SectorClassificationAvailability.UNKNOWN
+        ),
     )
-    decoded = handler_module._decode_sector_entry(entry)
 
-    assert decoded == (BuyIndustrySector.BANK, Decimal("123456"), "7203")
+
+def _encode(
+    stock_code: str,
+    sector: BuyIndustrySector,
+    market_value: str,
+    *,
+    known: bool = True,
+) -> str:
+    return handler_module._encode_portfolio_exposure_fact(
+        _exposure(stock_code, sector, market_value, known=known)
+    )
+
+
+def _encode_v1(sector: BuyIndustrySector, market_value: str, stock_code: str) -> str:
+    """Issue #82 以前の3フィールド形式(旧workerが書き込む形式)。"""
+    return "|".join([sector.value, market_value, stock_code])
+
+
+def test_encode_decode_portfolio_exposure_fact_round_trip() -> None:
+    fact = _exposure("7203", BuyIndustrySector.BANK, "123456")
+
+    entry = handler_module._encode_portfolio_exposure_fact(fact)
+
+    assert entry == "BANK|123456|7203|KNOWN"
+    assert handler_module._decode_portfolio_exposure_fact(entry) == fact
+
+
+def test_encode_decode_round_trip_preserves_unknown_sector_availability() -> None:
+    fact = _exposure("7203", BuyIndustrySector.UNKNOWN, "123456", known=False)
+
+    decoded = handler_module._decode_portfolio_exposure_fact(
+        handler_module._encode_portfolio_exposure_fact(fact)
+    )
+
+    assert decoded == fact
+    assert decoded is not None
+    assert decoded.sector_is_known is False
+
+
+def test_decode_accepts_legacy_v1_entry_from_older_worker() -> None:
+    """Issue #82: 旧worker(3フィールド)のエントリを新finalizeが読めること。
+
+    デプロイ跨ぎで旧workerと新workerが混在しても、旧形式のエントリを
+    落とさない(落とすとcoverage不足で不必要にfail-closeする)。
+    """
+    decoded = handler_module._decode_portfolio_exposure_fact(
+        _encode_v1(BuyIndustrySector.BANK, "123456", "7203")
+    )
+
+    assert decoded == _exposure("7203", BuyIndustrySector.BANK, "123456")
+
+
+def test_decode_legacy_v1_unknown_sector_is_treated_as_unavailable() -> None:
+    """旧形式は可用性フィールドを持たないため、業種値そのものから復元する。"""
+    decoded = handler_module._decode_portfolio_exposure_fact(
+        _encode_v1(BuyIndustrySector.UNKNOWN, "123456", "7203")
+    )
+
+    assert decoded is not None
+    assert decoded.sector_is_known is False
+
+
+def test_decode_rejects_inconsistent_known_claim_for_unknown_sector() -> None:
+    """業種UNKNOWNをKNOWNと主張するエントリを受理しない(業種集中度への誤算入防止)。"""
+    decoded = handler_module._decode_portfolio_exposure_fact("UNKNOWN|123456|7203|KNOWN")
+
+    assert decoded is not None
+    assert decoded.sector_is_known is False
 
 
 @pytest.mark.parametrize(
     "invalid_entry",
     [
         "BANK|123456",  # 要素数不足
-        "BANK|123456|7203|extra",  # 要素数過多
-        "NOT_A_SECTOR|123456|7203",  # 不正な業種
-        "BANK|not_a_number|7203",  # Decimalとしてパース不可
-        "BANK|123456|watch-high",  # 銘柄コードが数字パターンでない
-        "BANK|123456|123",  # 銘柄コードが3桁(4〜5桁のパターンに不一致)
+        "BANK|123456|7203|KNOWN|extra",  # 要素数過多
+        "NOT_A_SECTOR|123456|7203|KNOWN",  # 不正な業種
+        "BANK|not_a_number|7203|KNOWN",  # Decimalとしてパース不可
+        "BANK|123456|watch-high|KNOWN",  # 銘柄コードが数字パターンでない
+        "BANK|123456|123|KNOWN",  # 銘柄コードが3桁(4〜5桁のパターンに不一致)
+        "BANK|123456|7203|NOT_AN_AVAILABILITY",  # 不正な可用性
         "",
     ],
 )
-def test_decode_sector_entry_returns_none_for_invalid_entries(invalid_entry: str) -> None:
-    assert handler_module._decode_sector_entry(invalid_entry) is None
+def test_decode_portfolio_exposure_fact_returns_none_for_invalid_entries(
+    invalid_entry: str,
+) -> None:
+    assert handler_module._decode_portfolio_exposure_fact(invalid_entry) is None
 
 
 @pytest.mark.parametrize(
@@ -2317,117 +2466,163 @@ def test_holding_data_consistency(
     assert result == expected
 
 
-def test_aggregate_sector_entries_full_coverage_yields_market_value_basis() -> None:
+def test_aggregate_portfolio_exposure_full_coverage_yields_market_value_basis() -> None:
     entries = [
-        handler_module._encode_sector_entry(BuyIndustrySector.BANK, Decimal("100000"), "7203"),
-        handler_module._encode_sector_entry(
-            BuyIndustrySector.AUTOMOTIVE_PARTS, Decimal("200000"), "9001"
-        ),
+        _encode("7203", BuyIndustrySector.BANK, "100000"),
+        _encode("9001", BuyIndustrySector.AUTOMOTIVE_PARTS, "200000"),
     ]
 
-    totals, portfolio_total, basis, coverage = handler_module._aggregate_sector_entries(
-        entries, holding_count=2
-    )
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=2)
 
-    assert basis == PortfolioValuationBasis.MARKET_VALUE
-    assert portfolio_total == Decimal("300000")
-    assert totals == {
+    assert exposure.basis == PortfolioValuationBasis.MARKET_VALUE
+    assert exposure.portfolio_total == Decimal("300000")
+    assert exposure.sector_totals == {
         BuyIndustrySector.BANK: Decimal("100000"),
         BuyIndustrySector.AUTOMOTIVE_PARTS: Decimal("200000"),
     }
-    assert coverage == 1.0
+    assert exposure.sector_exposure_complete is True
+    assert exposure.coverage_ratio == 1.0
 
 
-def test_aggregate_sector_entries_incomplete_coverage_is_unavailable() -> None:
+def test_aggregate_portfolio_exposure_price_missing_fails_close_for_both_gates() -> None:
+    """時価を報告できない保有銘柄が残る場合はfail-close(0円補完しない)。
+
+    Issue #82 以降、screening除外は欠落の原因ではない(除外銘柄も報告する)。
+    ここで欠落するのは現在値・株数そのものを取得できなかった銘柄である。
+    """
+    entries = [_encode("7203", BuyIndustrySector.BANK, "100000")]
+
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=2)
+
+    assert exposure.basis == PortfolioValuationBasis.UNAVAILABLE
+    assert exposure.portfolio_total is None
+    assert exposure.sector_totals == {}
+    assert exposure.sector_exposure_complete is False
+    assert exposure.coverage_ratio == 0.5
+
+
+def test_aggregate_portfolio_exposure_includes_screening_excluded_holding() -> None:
+    """Issue #82: 保有3銘柄のうち1銘柄がscreening除外でも分母へ3銘柄すべて含める。
+
+    除外銘柄もexposureを報告するため coverage が満たされ、集中度判定が成立する
+    (以前は除外1件で `UNAVAILABLE` となり全HOLDING/BOTH候補が停止していた)。
+    """
     entries = [
-        handler_module._encode_sector_entry(BuyIndustrySector.BANK, Decimal("100000"), "7203"),
+        _encode("7203", BuyIndustrySector.AUTOMOTIVE_PARTS, "100000"),
+        _encode("9001", BuyIndustrySector.GENERAL, "200000"),
+        # screeningで除外された金融株(#29により毎日除外される)
+        _encode("8306", BuyIndustrySector.BANK, "300000"),
     ]
 
-    totals, portfolio_total, basis, coverage = handler_module._aggregate_sector_entries(
-        entries, holding_count=2
-    )
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=3)
 
-    assert basis == PortfolioValuationBasis.UNAVAILABLE
-    assert portfolio_total is None
-    assert totals == {}
-    assert coverage == 0.5
+    assert exposure.basis == PortfolioValuationBasis.MARKET_VALUE
+    assert exposure.portfolio_total == Decimal("600000")
+    assert exposure.sector_totals[BuyIndustrySector.BANK] == Decimal("300000")
+    assert exposure.sector_exposure_complete is True
 
 
-def test_aggregate_sector_entries_conflicting_duplicate_is_unavailable() -> None:
+def test_aggregate_portfolio_exposure_unknown_sector_keeps_total_but_marks_sector_incomplete(
+) -> None:
+    """Issue #82: 業種不明は欠落ではない。分母には算入し、業種側だけ不成立とする。"""
+    entries = [
+        _encode("7203", BuyIndustrySector.BANK, "100000"),
+        _encode("9001", BuyIndustrySector.UNKNOWN, "200000", known=False),
+    ]
+
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=2)
+
+    assert exposure.basis == PortfolioValuationBasis.MARKET_VALUE
+    assert exposure.portfolio_total == Decimal("300000")
+    assert exposure.coverage_ratio == 1.0
+    # 業種集中度のみDATA_INSUFFICIENT。
+    assert exposure.sector_exposure_complete is False
+    # 業種不明を「その他セクター」として集計へ含めない。
+    assert BuyIndustrySector.UNKNOWN not in exposure.sector_totals
+    assert exposure.sector_totals == {BuyIndustrySector.BANK: Decimal("100000")}
+
+
+def test_aggregate_portfolio_exposure_accepts_mixed_legacy_and_new_entries() -> None:
+    """デプロイ跨ぎ: 旧worker(v1)と新worker(v2)のエントリが混在しても集計できる。"""
+    entries = [
+        _encode_v1(BuyIndustrySector.BANK, "100000", "7203"),
+        _encode("9001", BuyIndustrySector.GENERAL, "200000"),
+    ]
+
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=2)
+
+    assert exposure.basis == PortfolioValuationBasis.MARKET_VALUE
+    assert exposure.portfolio_total == Decimal("300000")
+    assert exposure.sector_exposure_complete is True
+
+
+def test_aggregate_portfolio_exposure_conflicting_duplicate_is_unavailable() -> None:
     """同一銘柄で異なる値の複数エントリが存在する場合、信頼性不足として扱う
     (例: 価格再取得やリトライによる不一致)。"""
     entries = [
-        handler_module._encode_sector_entry(BuyIndustrySector.BANK, Decimal("100000"), "7203"),
-        handler_module._encode_sector_entry(BuyIndustrySector.BANK, Decimal("999999"), "7203"),
+        _encode("7203", BuyIndustrySector.BANK, "100000"),
+        _encode("7203", BuyIndustrySector.BANK, "999999"),
     ]
 
-    totals, portfolio_total, basis, coverage = handler_module._aggregate_sector_entries(
-        entries, holding_count=1
-    )
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=1)
 
-    assert basis == PortfolioValuationBasis.UNAVAILABLE
-    assert portfolio_total is None
-    assert totals == {}
+    assert exposure.basis == PortfolioValuationBasis.UNAVAILABLE
+    assert exposure.portfolio_total is None
+    assert exposure.sector_totals == {}
+    assert exposure.sector_exposure_complete is False
 
 
-def test_aggregate_sector_entries_identical_duplicate_is_not_double_counted() -> None:
+def test_aggregate_portfolio_exposure_identical_duplicate_is_not_double_counted() -> None:
     """DynamoDB String Setは完全一致文字列の重複を保持しないが、呼び出し側の
     集計ロジック自体も同一銘柄・同一値の重複入力を二重加算しないことを確認する。
     """
-    entry = handler_module._encode_sector_entry(BuyIndustrySector.BANK, Decimal("100000"), "7203")
+    entry = _encode("7203", BuyIndustrySector.BANK, "100000")
 
-    totals, portfolio_total, basis, _coverage = handler_module._aggregate_sector_entries(
-        [entry, entry], holding_count=1
-    )
+    exposure = handler_module._aggregate_portfolio_exposure([entry, entry], holding_count=1)
 
-    assert basis == PortfolioValuationBasis.MARKET_VALUE
-    assert portfolio_total == Decimal("100000")
-    assert totals == {BuyIndustrySector.BANK: Decimal("100000")}
+    assert exposure.basis == PortfolioValuationBasis.MARKET_VALUE
+    assert exposure.portfolio_total == Decimal("100000")
+    assert exposure.sector_totals == {BuyIndustrySector.BANK: Decimal("100000")}
 
 
-def test_aggregate_sector_entries_ignores_invalid_entries_without_crashing() -> None:
+def test_aggregate_portfolio_exposure_ignores_invalid_entries_without_crashing() -> None:
     entries = [
-        handler_module._encode_sector_entry(BuyIndustrySector.BANK, Decimal("100000"), "7203"),
-        "garbage|not|valid|entry",
+        _encode("7203", BuyIndustrySector.BANK, "100000"),
+        "garbage|not|valid|entry|at|all",
     ]
 
-    totals, portfolio_total, basis, coverage = handler_module._aggregate_sector_entries(
-        entries, holding_count=1
-    )
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=1)
 
     # 不正エントリは無視され、有効な1銘柄分だけで完全カバレッジとして扱われる
-    assert basis == PortfolioValuationBasis.MARKET_VALUE
-    assert portfolio_total == Decimal("100000")
-    assert coverage == 1.0
-    assert totals == {BuyIndustrySector.BANK: Decimal("100000")}
+    assert exposure.basis == PortfolioValuationBasis.MARKET_VALUE
+    assert exposure.portfolio_total == Decimal("100000")
+    assert exposure.coverage_ratio == 1.0
+    assert exposure.sector_totals == {BuyIndustrySector.BANK: Decimal("100000")}
 
 
-def test_aggregate_sector_entries_zero_holding_count_is_unavailable_without_crashing() -> None:
-    totals, portfolio_total, basis, coverage = handler_module._aggregate_sector_entries(
-        [], holding_count=0
-    )
+def test_aggregate_portfolio_exposure_zero_holding_count_is_unavailable_without_crashing() -> None:
+    exposure = handler_module._aggregate_portfolio_exposure([], holding_count=0)
 
-    assert basis == PortfolioValuationBasis.UNAVAILABLE
-    assert portfolio_total is None
-    assert totals == {}
-    assert coverage == 0.0
+    assert exposure.basis == PortfolioValuationBasis.UNAVAILABLE
+    assert exposure.portfolio_total is None
+    assert exposure.sector_totals == {}
+    assert exposure.sector_exposure_complete is False
+    assert exposure.coverage_ratio == 0.0
 
 
-def test_aggregate_sector_entries_exceeding_max_is_unavailable_without_crashing() -> None:
+def test_aggregate_portfolio_exposure_exceeding_max_is_unavailable_without_crashing() -> None:
     entries = [
-        handler_module._encode_sector_entry(
-            BuyIndustrySector.BANK, Decimal("1000"), f"{9000 + i}"
-        )
+        _encode(f"{9000 + i}", BuyIndustrySector.BANK, "1000")
         for i in range(handler_module.MAX_SECTOR_ENTRIES + 1)
     ]
 
-    totals, portfolio_total, basis, _coverage = handler_module._aggregate_sector_entries(
+    exposure = handler_module._aggregate_portfolio_exposure(
         entries, holding_count=len(entries)
     )
 
-    assert basis == PortfolioValuationBasis.UNAVAILABLE
-    assert portfolio_total is None
-    assert totals == {}
+    assert exposure.basis == PortfolioValuationBasis.UNAVAILABLE
+    assert exposure.portfolio_total is None
+    assert exposure.sector_totals == {}
 
 
 def test_build_unified_targets_skips_holdings_when_exceeding_max_sector_entries(
@@ -2575,11 +2770,12 @@ def test_process_single_candidate_sector_entry_uses_aggregated_holding_quantity(
         fake_service,
     )
 
-    decoded = handler_module._decode_sector_entry(captured["sector_entry"])
+    decoded = handler_module._decode_portfolio_exposure_fact(captured["sector_entry"])
     assert decoded is not None
-    _sector, market_value, stock_code = decoded
-    assert stock_code == "8306"
-    assert market_value == recommendation.price_at_recommendation * 600
+    assert decoded.stock_code == "8306"
+    # Issue #82: 時価はsnapshotのcurrent_price(=price_at_recommendationと同一値)
+    # と集約済みholding_quantityから算出される。
+    assert decoded.current_market_value == _FAKE_SNAPSHOT_PRICE * 600
 
 
 def _conflict_recommendation(
@@ -3272,3 +3468,434 @@ def test_issue31_buy_finalize_exception_does_not_mark_completed(
             _CONFIG, object(), repo, fake_service,
         )
     assert marks == []
+
+
+# --- Issue #82(2026-08-30): portfolio exposure は screening eligibility と独立 -----
+#
+# 「特定のscreening経路を通過した場合だけexposureが生成される」という責務結合が
+# root causeであったため、**どのscreening結果でも同じexposureが生成される**ことを
+# 固定する。これが崩れると、保有銘柄が1件でも除外された日に全HOLDING/BOTH候補の
+# 集中度判定が停止する(#29有効時は金融株保有で恒久化する)。
+
+
+def _capture_exposure_entry(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module,
+        "record_result",
+        lambda batch_id, category, sector_entry=None, **kwargs: captured.update(
+            sector_entry=sector_entry
+        ),
+    )
+    return captured
+
+
+def _outcome_excluded(stock_code: str):
+    from jstock_advisor.services.buy_signal_service import BuyAnalysisOutcome
+
+    return BuyAnalysisOutcome(
+        stock_code=stock_code,
+        recommendation=None,
+        screening_passed=False,
+        exclusion_reasons=["金融業は個別評価ルール未実装のため対象外"],
+        data_error=None,
+        buy_action=BuyAction.EXCLUDED,
+        ranking_group="excluded",
+    )
+
+
+def _outcome_data_insufficient(stock_code: str):
+    from jstock_advisor.services.buy_signal_service import BuyAnalysisOutcome
+
+    return BuyAnalysisOutcome(
+        stock_code=stock_code,
+        recommendation=None,
+        screening_passed=True,
+        exclusion_reasons=[],
+        data_error="財務データを取得できませんでした",
+        buy_action=BuyAction.DATA_INSUFFICIENT,
+        ranking_group=None,
+    )
+
+
+@pytest.mark.parametrize("screening_result", ["PASSED", "EXCLUDED", "DATA_INSUFFICIENT"])
+def test_exposure_fact_is_identical_regardless_of_screening_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, screening_result: str
+) -> None:
+    """同じsnapshot + 同じ保有情報なら、screening結果によらず同じexposure factになる。
+
+    Issue #82 の核心。exposure factの生成はscreening_outcome / BuyAction /
+    BuyAnalysisOutcome のいずれにも依存しない。
+    """
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.PortfolioService, "list_holdings_by_stock", lambda self, code: []
+    )
+
+    if screening_result == "PASSED":
+        recommendation = _make_recommendation(
+            "8306",
+            company_quality_score=60.0,
+            recommendation_id="rec-8306",
+            buy_action=BuyAction.BUY,
+            buy_industry_sector=BuyIndustrySector.BANK,
+        )
+        outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    elif screening_result == "EXCLUDED":
+        outcome = _outcome_excluded("8306")
+    else:
+        outcome = _outcome_data_insufficient("8306")
+
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    captured = _capture_exposure_entry(monkeypatch)
+
+    handler_module._process_single_candidate(
+        "8306",
+        CandidateSource.HOLDING,
+        600,
+        Decimal("1433.33"),
+        "batch-1",
+        _NOW,
+        object(),
+        _CONFIG,
+        object(),
+        RecommendationRepository(store_dir=tmp_path),
+        _FakeNotificationServiceForRanking(),
+    )
+
+    decoded = handler_module._decode_portfolio_exposure_fact(captured["sector_entry"])
+    assert decoded is not None, f"{screening_result}でexposure factが報告されていない"
+    assert decoded.stock_code == "8306"
+    assert decoded.current_market_value == _FAKE_SNAPSHOT_PRICE * 600
+
+
+def test_exposure_fact_not_reported_for_watchlist_only_candidate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """保有していない銘柄はportfolio exposureを持たない(分母へ入れない)。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _outcome_excluded("2914")
+    )
+    captured = _capture_exposure_entry(monkeypatch)
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(), _CONFIG,
+        object(), RecommendationRepository(store_dir=tmp_path),
+        _FakeNotificationServiceForRanking(),
+    )
+
+    assert captured.get("sector_entry") is None
+
+
+def test_exposure_fact_not_reported_when_holding_quantity_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """株数が不明なら時価を出せないため報告しない(**0円補完はしない**)。
+
+    結果としてcoverage不足となり、銘柄集中度・業種集中度ともfail-closeする。
+    """
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _outcome_excluded("8306")
+    )
+    captured = _capture_exposure_entry(monkeypatch)
+
+    handler_module._process_single_candidate(
+        "8306", CandidateSource.HOLDING, None, None, "batch-1", _NOW, object(), _CONFIG,
+        object(), RecommendationRepository(store_dir=tmp_path),
+        _FakeNotificationServiceForRanking(),
+    )
+
+    assert captured.get("sector_entry") is None
+
+
+def test_exposure_fact_marks_unknown_sector_when_industry_unresolvable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """業種を解決できなくてもfactは作る(時価は分母へ算入する)。"""
+    _patch_audit(monkeypatch)
+    monkeypatch.setattr(
+        handler_module,
+        "build_stock_snapshot",
+        lambda *a, **kw: (_fake_snapshot(industry=None, sector=None), None),
+    )
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _outcome_excluded("8306")
+    )
+    captured = _capture_exposure_entry(monkeypatch)
+
+    handler_module._process_single_candidate(
+        "8306", CandidateSource.HOLDING, 100, Decimal("900"), "batch-1", _NOW, object(), _CONFIG,
+        object(), RecommendationRepository(store_dir=tmp_path),
+        _FakeNotificationServiceForRanking(),
+    )
+
+    decoded = handler_module._decode_portfolio_exposure_fact(captured["sector_entry"])
+    assert decoded is not None
+    assert decoded.sector_is_known is False
+    assert decoded.current_market_value == _FAKE_SNAPSHOT_PRICE * 100
+
+
+def test_exposure_fact_survives_exception_in_analysis_and_reaches_aggregation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """producer→aggregator契約が**例外経路でも**維持されることを固定する。
+
+    snapshot取得成功 → exposure fact生成 → analyze()例外 → handler終了
+    → aggregate実行 → **そのfactが集計へ実際に使われる**、までを1本で確認する。
+
+    「factが生成された」だけでは不十分で、例外を出した銘柄の時価が
+    ポートフォリオ分母へ入らなければ coverage 不足となり、結局その日の
+    HOLDING/BOTH候補が全滅する(#82のroot causeと同じ結果になる)。
+    """
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+
+    def _boom(self, *a: object, **kw: object) -> object:
+        raise RuntimeError("unexpected analysis failure")
+
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", _boom)
+    captured = _capture_exposure_entry(monkeypatch)
+
+    # --- producer側: analyze()が例外を投げてもhandlerは完走する ---
+    handler_module._process_single_candidate(
+        "8306", CandidateSource.HOLDING, 600, Decimal("1433.33"), "batch-1", _NOW, object(),
+        _CONFIG, object(), RecommendationRepository(store_dir=tmp_path),
+        _FakeNotificationServiceForRanking(),
+    )
+
+    reported_entry = captured["sector_entry"]
+    assert isinstance(reported_entry, str)
+
+    # --- aggregator側: 報告されたentryが実際に集計へ使われる ---
+    # 例外を出した8306と、正常に評価された7239の2銘柄を保有している状況。
+    # 7239は8306とは別業種にしておく(業種集中度の上限に触れさせないため。
+    # ここで確認したいのは「判定が成立するか」であり、上限超過の有無ではない)。
+    exposure = handler_module._aggregate_portfolio_exposure(
+        [reported_entry, _encode("7239", BuyIndustrySector.GENERAL, "100000")],
+        holding_count=2,
+    )
+
+    expected_8306_value = _FAKE_SNAPSHOT_PRICE * 600
+    # 例外銘柄の時価が分母へ算入され、coverageが満たされている。
+    assert exposure.coverage_ratio == 1.0
+    assert exposure.basis == PortfolioValuationBasis.MARKET_VALUE
+    assert exposure.portfolio_total == expected_8306_value + Decimal("100000")
+    assert exposure.facts_by_stock["8306"].current_market_value == expected_8306_value
+
+    # --- consumer側: 無関係な候補(7239)の集中度判定が成立する ---
+    assessment, eligibility = evaluate_add_on_eligibility(
+        current_market_value=Decimal("100000"),
+        # 1単元あたりの買い増し額を小さくし、集中度上限に触れない条件にする
+        # (ここで確認したいのは「判定が成立するか」であり、上限超過の有無ではない)。
+        current_price=Decimal("100"),
+        trading_unit=100,
+        portfolio_total_market_value=exposure.portfolio_total,
+        sector_total_market_value=exposure.sector_total_for("7239"),
+        portfolio_valuation_basis=exposure.basis,
+        conflicting_holding_action=None,
+        holding_data_inconsistent=False,
+        holding_is_odd_lot=False,
+        config=_CONFIG.add_on,
+    )
+
+    # reliability不足でまとめてブロックされるのではなく、両ゲートが実際に評価される。
+    assert assessment.portfolio_data_reliable is True
+    assert assessment.sector_exposure_available is True
+    assert assessment.current_position_ratio is not None
+    assert assessment.current_sector_ratio is not None
+    assert eligibility.eligible is True
+
+
+@pytest.mark.parametrize(
+    ("reported", "holding_count", "expected_coverage"),
+    [
+        (4, 5, 0.8),  # 高いcoverage(80%)でも許可の根拠にしない
+        (1, 5, 0.2),  # 低いcoverageでも扱いは同じ(fail-close)
+    ],
+)
+def test_partial_coverage_never_authorizes_add_on(
+    reported: int, holding_count: int, expected_coverage: float
+) -> None:
+    """coverage_ratioは判定条件にならない(部分カバレッジでfail-openしない)。
+
+    「80%取れたから残り20%を無視して買い増し許可」を禁止する契約を、
+    **振る舞い**で固定する(実装内の変数名・ログ文言には依存しない)。
+
+    coverageの値がいくつであっても、報告が揃っていなければ
+    銘柄集中度・業種集中度ともfail-closeする。
+    """
+    entries = [_encode(f"{9000 + i}", BuyIndustrySector.BANK, "100000") for i in range(reported)]
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=holding_count)
+
+    # coverageは観測値としては算出される(observability / audit用途)。
+    assert exposure.coverage_ratio == expected_coverage
+    # しかし判定の前提は成立しない。
+    assert exposure.basis == PortfolioValuationBasis.UNAVAILABLE
+    assert exposure.portfolio_total is None
+    assert exposure.sector_exposure_complete is False
+
+    assessment, eligibility = evaluate_add_on_eligibility(
+        current_market_value=Decimal("100000"),
+        current_price=Decimal("1000"),
+        trading_unit=100,
+        portfolio_total_market_value=exposure.portfolio_total,
+        sector_total_market_value=exposure.sector_total_for("9000"),
+        portfolio_valuation_basis=exposure.basis,
+        conflicting_holding_action=None,
+        holding_data_inconsistent=False,
+        holding_is_odd_lot=False,
+        config=_CONFIG.add_on,
+    )
+
+    # stock gate / sector gate ともfail-close。比率も算出されない。
+    assert assessment.portfolio_data_reliable is False
+    assert assessment.sector_exposure_available is False
+    assert assessment.current_position_ratio is None
+    assert assessment.current_sector_ratio is None
+    assert eligibility.eligible is False
+    assert eligibility.block_category == EligibilityBlockCategory.PORTFOLIO_DATA_RELIABILITY
+
+
+def test_add_on_decision_is_identical_for_different_coverage_ratios() -> None:
+    """coverage_ratioの値そのものが判定を変えないことを直接固定する。
+
+    coverage 0.8 と 0.2 で集計結果・ゲート判定がまったく同じになることを示し、
+    「coverageが高いほど緩む」という実装が入り込む余地を塞ぐ。
+    """
+
+    def _decide(reported: int) -> tuple[object, object, object]:
+        entries = [
+            _encode(f"{9000 + i}", BuyIndustrySector.BANK, "100000") for i in range(reported)
+        ]
+        exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=5)
+        _assessment, eligibility = evaluate_add_on_eligibility(
+            current_market_value=Decimal("100000"),
+            current_price=Decimal("1000"),
+            trading_unit=100,
+            portfolio_total_market_value=exposure.portfolio_total,
+            sector_total_market_value=exposure.sector_total_for("9000"),
+            portfolio_valuation_basis=exposure.basis,
+            conflicting_holding_action=None,
+            holding_data_inconsistent=False,
+            holding_is_odd_lot=False,
+            config=_CONFIG.add_on,
+        )
+        return exposure.basis, eligibility.eligible, eligibility.block_reason
+
+    high_coverage = _decide(4)
+    low_coverage = _decide(1)
+
+    assert high_coverage == low_coverage
+
+
+def test_exposure_entry_stays_within_max_entry_bytes() -> None:
+    """v2形式でも1エントリのバイト上限を超えない(既存上限の回帰)。"""
+    entry = _encode("99999", BuyIndustrySector.GENERAL_MANUFACTURING, "999999999999")
+
+    assert len(entry.encode("utf-8")) <= handler_module.MAX_SECTOR_ENTRY_BYTES
+
+
+def test_finalize_batch_does_not_block_all_holdings_when_financial_stock_is_screened_out(
+    monkeypatch, tmp_path
+) -> None:
+    """Issue #82: 金融株を保有していても無関係な買い増し候補が全滅しない。
+
+    #29 により金融株は毎日screening除外されるが、除外銘柄もexposureを報告する
+    ため coverage が満たされ、集中度判定が成立する。以前はこの状況で
+    `CONCENTRATION_RELIABILITY_INSUFFICIENT` により全HOLDING/BOTH候補が
+    恒久的にブロックされていた。
+    """
+    audit = _RecordingAuditService()
+    monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: audit)
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    # 買い増し候補(金融株とは無関係な銘柄)
+    _add_ranked_candidate(
+        repo,
+        ranking_entries,
+        "7239",
+        90.0,
+        candidate_source=CandidateSource.HOLDING,
+        current_market_value="100000",
+        holding_quantity=100,
+        average_acquisition_price="900",
+    )
+
+    config = _config_with_max_notifications(5)
+    progress = _progress(
+        ranking_entries,
+        total=1,
+        category_counts={"candidate_not_ranked": 1},
+        sector_entries=[
+            _encode("7239", BuyIndustrySector.AUTOMOTIVE_PARTS, "100000"),
+            # #29 でscreening除外される金融株。除外されても保有しているため報告される。
+            _encode("8306", BuyIndustrySector.BANK, "2500000"),
+        ],
+        holding_count=2,
+    )
+    fake_service = _FakeNotificationServiceForRanking()
+
+    handler_module._finalize_batch(progress, "batch-1", config, _NOW, repo, fake_service)
+
+    digested_codes = [r.stock_code for r in fake_service.digest_calls[0]]
+    assert digested_codes == ["7239"]
+    output_values = audit.records_by_type("unified_buy_candidate_notification_outcome")[0][
+        "output_values"
+    ]
+    assert output_values["notification_status"] == "SENT"
+    # 金融株の時価も分母へ含まれている(2,600,000)。
+    assert output_values["portfolio_total_market_value"] == "2600000"
+    assert output_values["portfolio_valuation_basis"] == PortfolioValuationBasis.MARKET_VALUE.value
+
+
+def test_finalize_batch_unknown_sector_holding_blocks_only_sector_gate(
+    monkeypatch, tmp_path
+) -> None:
+    """Issue #82: 業種不明の保有銘柄があっても分母は成立し、業種ゲートのみ不成立。
+
+    銘柄集中度は評価されるため、理由コードで業種データ不足だと識別できる。
+    """
+    audit = _RecordingAuditService()
+    monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: audit)
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries: list[str] = []
+    _add_ranked_candidate(
+        repo,
+        ranking_entries,
+        "7239",
+        90.0,
+        candidate_source=CandidateSource.HOLDING,
+        current_market_value="100000",
+        holding_quantity=100,
+        average_acquisition_price="900",
+    )
+
+    config = _config_with_max_notifications(5)
+    progress = _progress(
+        ranking_entries,
+        total=1,
+        category_counts={"candidate_not_ranked": 1},
+        sector_entries=[
+            _encode("7239", BuyIndustrySector.AUTOMOTIVE_PARTS, "100000"),
+            _encode("9999", BuyIndustrySector.UNKNOWN, "2500000", known=False),
+        ],
+        holding_count=2,
+    )
+    fake_service = _FakeNotificationServiceForRanking()
+
+    handler_module._finalize_batch(progress, "batch-1", config, _NOW, repo, fake_service)
+
+    assert [r.stock_code for r in fake_service.digest_calls[0]] == []
+    output_values = audit.records_by_type("unified_buy_candidate_notification_outcome")[0][
+        "output_values"
+    ]
+    # ポートフォリオ総額そのものは成立している(業種不明でも分母へ算入)。
+    assert output_values["portfolio_valuation_basis"] == PortfolioValuationBasis.MARKET_VALUE.value
+    assert output_values["portfolio_total_market_value"] == "2600000"
+    # ブロック理由は業種データ不足であり、時価の信頼性不足とは区別できる。
+    assert output_values["block_reason"] == "SECTOR_EXPOSURE_DATA_INSUFFICIENT"
