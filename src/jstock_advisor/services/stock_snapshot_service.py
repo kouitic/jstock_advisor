@@ -84,6 +84,10 @@ from jstock_advisor.domain.valuation.yield_calc import (
     compute_dividend_yield_pct,
     compute_total_yield_pct,
 )
+from jstock_advisor.interfaces.disclosure import (
+    DisclosureAvailability,
+    DisclosureUnavailableReason,
+)
 from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
     Disclosure,
@@ -107,6 +111,11 @@ class StockSnapshot:
     historical_valuations: list[HistoricalValuation]
     avg_trading_value: Decimal | None
     disclosures: list[Disclosure]
+    # Issue #53 Phase B2: 開示情報を「調査できたか」。UNAVAILABLEの場合、
+    # disclosures/disclosure_risk_keywords_foundが空であることは「開示リスクなし」を
+    # 意味しない(調査自体ができていない)。消費者はこのフラグを必ず確認すること。
+    disclosure_availability: DisclosureAvailability
+    disclosure_unavailable_reason: DisclosureUnavailableReason | None
     # next_earnings_dateは検証済みの値(過去日・取得不能時はNone)。生値は
     # earnings_date_rawで別途保持する(コードレビュー対応: 明治HD事例、
     # データ提供元の更新遅延により過去日がそのまま返ってくることがあるため、
@@ -306,9 +315,10 @@ def build_stock_snapshot(
         stock_code, config.valuation.per_method.lookback_years_primary
     )
     avg_trading_value = providers.market_data.get_average_trading_value(stock_code, 20)
-    disclosures = providers.disclosure.get_disclosures(
-        stock_code, now.date() - dt.timedelta(days=30)
+    disclosure_result = providers.disclosure.get_disclosures(
+        stock_code, evaluation_date - dt.timedelta(days=30)
     )
+    disclosures = disclosure_result.disclosures
     # 決算日の妥当性検証(コードレビュー対応: 明治HD事例)。データ提供元(yfinance等)の
     # 更新遅延により、評価日より過去の日付が「次回決算予定日」として返ってくることが
     # ある。過去日をそのまま次回決算日として使わず、検証済みの値のみをnext_earnings_date
@@ -636,6 +646,8 @@ def build_stock_snapshot(
         historical_valuations=historical_valuations,
         avg_trading_value=avg_trading_value,
         disclosures=disclosures,
+        disclosure_availability=disclosure_result.availability,
+        disclosure_unavailable_reason=disclosure_result.unavailable_reason,
         next_earnings_date=next_earnings_date,
         earnings_date_status=earnings_date_status,
         earnings_date_raw=earnings_date_raw,

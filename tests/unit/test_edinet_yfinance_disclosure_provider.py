@@ -15,6 +15,10 @@ from jstock_advisor.infrastructure.edinet.types import (
     EdinetFetchStatus,
     EdinetListResult,
 )
+from jstock_advisor.interfaces.disclosure import (
+    DisclosureAvailability,
+    DisclosureUnavailableReason,
+)
 from jstock_advisor.providers.disclosure.edinet_yfinance_impl import (
     EdinetYfinanceDisclosureProvider,
 )
@@ -38,13 +42,20 @@ class _NotConfiguredSource:
         )
 
 
-def test_get_disclosures_returns_empty_when_edinet_not_configured(tmp_path: Path) -> None:
+def test_get_disclosures_is_unavailable_when_edinet_not_configured(tmp_path: Path) -> None:
+    """APIキー未設定は「開示0件」ではなく取得不能(Issue #53 Phase B2)。"""
     provider = EdinetYfinanceDisclosureProvider(
         document_source=_NotConfiguredSource(),  # type: ignore[arg-type]
         cache_repository=EdinetDisclosureCacheRepository(store_dir=tmp_path),
         now=_NOW,
     )
-    assert provider.get_disclosures(_STOCK_CODE, dt.date(2026, 6, 1)) == []
+
+    result = provider.get_disclosures(_STOCK_CODE, dt.date(2026, 6, 1))
+
+    assert result.availability is DisclosureAvailability.UNAVAILABLE
+    assert result.unavailable_reason is DisclosureUnavailableReason.NOT_CONFIGURED
+    assert result.disclosures == []
+    assert result.is_available is False
 
 
 def test_get_disclosures_filters_by_since_date(tmp_path: Path) -> None:
@@ -83,7 +94,10 @@ def test_get_disclosures_filters_by_since_date(tmp_path: Path) -> None:
         cache_repository=repo,
         now=_NOW,
     )
-    disclosures = provider.get_disclosures(_STOCK_CODE, dt.date(2026, 6, 1))
+    result = provider.get_disclosures(_STOCK_CODE, dt.date(2026, 6, 1))
+
+    assert result.availability is DisclosureAvailability.AVAILABLE
+    disclosures = result.disclosures
     assert len(disclosures) == 1
     assert disclosures[0].summary == "新しい開示"
     assert disclosures[0].stock_code == _STOCK_CODE

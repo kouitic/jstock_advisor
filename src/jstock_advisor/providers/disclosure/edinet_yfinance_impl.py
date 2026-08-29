@@ -26,9 +26,25 @@ from jstock_advisor.infrastructure.edinet.disclosure_finder import (
     find_extraordinary_reports,
 )
 from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
+from jstock_advisor.infrastructure.edinet.types import EdinetFailureReason
+from jstock_advisor.interfaces.disclosure import (
+    DisclosureQueryResult,
+    DisclosureUnavailableReason,
+)
 from jstock_advisor.interfaces.types import Disclosure
 
 _EDINET_PROVIDER_NAME = "edinet"
+
+# infrastructure層のEDINET固有失敗種別を、domain契約の3値へ正規化する対応表
+# (Issue #53 Phase B2: EdinetFailureReasonをdomainへ漏らさないための境界変換)。
+_UNAVAILABLE_REASON_BY_FAILURE: dict[EdinetFailureReason, DisclosureUnavailableReason] = {
+    EdinetFailureReason.NOT_CONFIGURED: DisclosureUnavailableReason.NOT_CONFIGURED,
+    EdinetFailureReason.TIMEOUT: DisclosureUnavailableReason.TEMPORARY_FAILURE,
+    EdinetFailureReason.HTTP_ERROR: DisclosureUnavailableReason.TEMPORARY_FAILURE,
+    EdinetFailureReason.DOWNLOAD_ERROR: DisclosureUnavailableReason.TEMPORARY_FAILURE,
+    EdinetFailureReason.PARSE_ERROR: DisclosureUnavailableReason.OTHER,
+    EdinetFailureReason.OTHER: DisclosureUnavailableReason.OTHER,
+}
 
 
 class EdinetYfinanceDisclosureProvider:
@@ -42,29 +58,40 @@ class EdinetYfinanceDisclosureProvider:
         self._cache_repo = cache_repository or EdinetDisclosureCacheRepository()
         self._now = now or dt.datetime.now(dt.UTC)
 
-    def get_disclosures(self, stock_code: str, since: dt.date) -> list[Disclosure]:
-        cache = find_extraordinary_reports(self._source, self._cache_repo, stock_code, self._now)
-        if cache is None:
-            return []
+    def get_disclosures(self, stock_code: str, since: dt.date) -> DisclosureQueryResult:
+        scan = find_extraordinary_reports(self._source, self._cache_repo, stock_code, self._now)
+        if not scan.complete or scan.cache is None:
+            # 今回の実行で対象範囲を最後まで取得できていない。過去の走査結果が
+            # cacheに残っていても「開示なし」とは言えないため、取得不能として返す
+            # (Issue #53 Phase B2)。
+            reason = _UNAVAILABLE_REASON_BY_FAILURE.get(
+                scan.failure_reason or EdinetFailureReason.OTHER,
+                DisclosureUnavailableReason.OTHER,
+            )
+            return DisclosureQueryResult.unavailable(reason)
         source = DataSourceReference(
             provider=_EDINET_PROVIDER_NAME,
             fetched_at=self._now,
             source_type=SourceType.TDNET_EDINET,
             primary_source_flag=True,
         )
-        return [
-            Disclosure(
-                stock_code=stock_code,
-                published_at=dt.datetime.combine(record.submit_date, dt.time.min, tzinfo=dt.UTC),
-                title="臨時報告書",
-                category="臨時報告書",
-                summary=record.summary,
-                url=None,
-                source=source,
-            )
-            for record in cache.records
-            if record.submit_date >= since
-        ]
+        return DisclosureQueryResult.available(
+            [
+                Disclosure(
+                    stock_code=stock_code,
+                    published_at=dt.datetime.combine(
+                        record.submit_date, dt.time.min, tzinfo=dt.UTC
+                    ),
+                    title="臨時報告書",
+                    category="臨時報告書",
+                    summary=record.summary,
+                    url=None,
+                    source=source,
+                )
+                for record in scan.cache.records
+                if record.submit_date >= since
+            ]
+        )
 
     def get_next_earnings_date(self, stock_code: str) -> dt.date | None:
         try:

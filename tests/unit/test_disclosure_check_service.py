@@ -1,4 +1,5 @@
 import datetime as dt
+import logging
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,6 +13,10 @@ from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
 )
+from jstock_advisor.interfaces.disclosure import (
+    DisclosureQueryResult,
+    DisclosureUnavailableReason,
+)
 from jstock_advisor.interfaces.types import Disclosure
 from jstock_advisor.services.disclosure_check_service import DisclosureCheckService
 from jstock_advisor.services.portfolio_service import PortfolioService
@@ -22,15 +27,26 @@ _SOURCE = DataSourceReference(provider="test", fetched_at=_NOW)
 
 
 class _FakeDisclosureProvider:
-    def __init__(self, disclosures_by_stock: dict[str, list[Disclosure]]) -> None:
+    def __init__(
+        self,
+        disclosures_by_stock: dict[str, list[Disclosure]],
+        unavailable: bool = False,
+    ) -> None:
         self._disclosures_by_stock = disclosures_by_stock
+        self._unavailable = unavailable
 
-    def get_disclosures(self, stock_code: str, since: dt.date) -> list[Disclosure]:
-        return [
-            d
-            for d in self._disclosures_by_stock.get(stock_code, [])
-            if d.published_at.date() >= since
-        ]
+    def get_disclosures(self, stock_code: str, since: dt.date) -> DisclosureQueryResult:
+        if self._unavailable:
+            return DisclosureQueryResult.unavailable(
+                DisclosureUnavailableReason.TEMPORARY_FAILURE
+            )
+        return DisclosureQueryResult.available(
+            [
+                d
+                for d in self._disclosures_by_stock.get(stock_code, [])
+                if d.published_at.date() >= since
+            ]
+        )
 
     def get_next_earnings_date(self, stock_code: str) -> dt.date | None:
         return None
@@ -113,3 +129,50 @@ def test_check_holdings_returns_empty_when_no_holdings(tmp_path: Path) -> None:
         disclosure_provider=provider, config=_CONFIG, portfolio_service=empty_portfolio
     )
     assert service.check_holdings(_NOW) == []
+
+
+# --- Issue #53 Phase B2: 取得不能時はwarning/auditのみ(リスク通知にしない) ---
+
+
+def test_check_holdings_unavailable_produces_no_risk_alert(
+    portfolio_service: PortfolioService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """EDINET取得不能を「リスク開示あり」と同等に扱わない。
+
+    取得不能をアラート化するとEDINET障害がそのままLINEのリスク通知になるため、
+    アラートは0件とし、運用者が障害を認識できるようWARNINGログのみ残す。
+    """
+    provider = _FakeDisclosureProvider(
+        {"2914": [_disclosure("2914", "臨時報告書", "特別調査委員会の設置について")]},
+        unavailable=True,
+    )
+    service = DisclosureCheckService(
+        disclosure_provider=provider, config=_CONFIG, portfolio_service=portfolio_service
+    )
+
+    with caplog.at_level(logging.WARNING):
+        alerts = service.check_holdings(_NOW)
+
+    assert alerts == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("disclosure_check unavailable" in r.getMessage() for r in warnings)
+    assert any("2914" in r.getMessage() for r in warnings)
+
+
+def test_check_holdings_unavailable_warning_contains_no_secret(
+    portfolio_service: PortfolioService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """警告ログに認証情報等の秘密情報を出さない。"""
+    provider = _FakeDisclosureProvider({}, unavailable=True)
+    service = DisclosureCheckService(
+        disclosure_provider=provider, config=_CONFIG, portfolio_service=portfolio_service
+    )
+
+    with caplog.at_level(logging.WARNING):
+        service.check_holdings(_NOW)
+
+    for record in caplog.records:
+        message = record.getMessage().lower()
+        assert "api_key" not in message
+        assert "subscription-key" not in message
+        assert "secret" not in message

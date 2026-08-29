@@ -514,6 +514,11 @@ class ProfitTakingService:
 
         profit_protection_metrics = self._compute_profit_protection_metrics(holding, snapshot, now)
 
+        # Issue #53 Phase B2: accounting_or_scandal_or_delisting_riskはここで一切
+        # 設定せず、既定のFalseのままとする(開示情報を取得できなかったことを
+        # 売却リスクへ変換しない。EDINET障害を売却理由にしてはならない)。
+        # guidance_revision_disclosedも、取得不能時はsnapshot.disclosuresが空となり
+        # False = 「修正開示を検出していない」となる(リスク側へ倒れない)。
         condition_inputs = ProfitTakingConditionInputs(
             stock_types=snapshot.stock_type_classification.types,
             fair_value_range=snapshot.fair_value_range,
