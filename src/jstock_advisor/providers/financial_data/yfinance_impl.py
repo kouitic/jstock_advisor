@@ -36,6 +36,7 @@ from jstock_advisor.interfaces.types import (
     HistoricalValuation,
     QuarterlyFinancials,
 )
+from jstock_advisor.providers._failure import raise_provider_data_error
 
 _CORPORATE_SUFFIX_PATTERN = re.compile(r"株式会社")
 
@@ -124,10 +125,12 @@ class YFinanceFinancialDataProvider:
         ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
         try:
             info: dict[str, Any] = ticker.info or {}
-        except Exception:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
-            info = {}
+        except Exception as exc:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
+            # Issue #59: 取得失敗を欠測(None)へ潰さない。分類・ログのうえ伝播する。
+            raise_provider_data_error(exc, provider_name=_PROVIDER_NAME, operation="info")
 
         if not info or info.get("regularMarketPrice") is None:
+            # 応答自体は成立したが対象銘柄のデータが無い(SUCCESS + missing)。
             return None
 
         equity_ratio_pct = self._compute_equity_ratio_pct(ticker)
@@ -210,9 +213,10 @@ class YFinanceFinancialDataProvider:
     def _latest_value(self, ticker: yf.Ticker, attr: str, row_name: str) -> Decimal | None:
         try:
             df = getattr(ticker, attr)
-        except Exception:  # noqa: BLE001
-            return None
+        except Exception as exc:  # noqa: BLE001
+            raise_provider_data_error(exc, provider_name=_PROVIDER_NAME, operation=attr)
         if df is None or df.empty or row_name not in df.index:
+            # 応答は成立したが当該行が無い(SUCCESS + missing)。
             return None
         for value in df.loc[row_name]:
             decimal_value = _to_decimal(value)
@@ -232,8 +236,10 @@ class YFinanceFinancialDataProvider:
         """
         try:
             df = ticker.income_stmt
-        except Exception:  # noqa: BLE001
-            return None
+        except Exception as exc:  # noqa: BLE001
+            raise_provider_data_error(
+                exc, provider_name=_PROVIDER_NAME, operation="income_stmt"
+            )
         if df is None or df.empty or len(df.columns) == 0:
             return None
         try:
@@ -269,9 +275,10 @@ class YFinanceFinancialDataProvider:
         try:
             income_df = ticker.quarterly_income_stmt
             cf_df = ticker.quarterly_cashflow
-        except Exception:  # noqa: BLE001
-            income_df = None
-            cf_df = None
+        except Exception as exc:  # noqa: BLE001
+            raise_provider_data_error(
+                exc, provider_name=_PROVIDER_NAME, operation="quarterly_income_stmt"
+            )
 
         has_quarterly = (
             income_df is not None and not income_df.empty and "Operating Income" in income_df.index
@@ -282,9 +289,10 @@ class YFinanceFinancialDataProvider:
             try:
                 income_df = ticker.income_stmt
                 cf_df = ticker.cashflow
-            except Exception:  # noqa: BLE001
-                income_df = None
-                cf_df = None
+            except Exception as exc:  # noqa: BLE001
+                raise_provider_data_error(
+                    exc, provider_name=_PROVIDER_NAME, operation="income_stmt"
+                )
 
         if income_df is None or income_df.empty or "Operating Income" not in income_df.index:
             return _RecentPeriodsResult(periods=[], source=RecentPeriodsSource.UNAVAILABLE)
@@ -343,8 +351,10 @@ class YFinanceFinancialDataProvider:
         try:
             income_df = ticker.income_stmt
             balance_df = ticker.balance_sheet
-        except Exception:  # noqa: BLE001
-            return []
+        except Exception as exc:  # noqa: BLE001
+            raise_provider_data_error(
+                exc, provider_name=_PROVIDER_NAME, operation="income_stmt/balance_sheet"
+            )
 
         if income_df is None or income_df.empty:
             return []
@@ -359,14 +369,14 @@ class YFinanceFinancialDataProvider:
         try:
             info = ticker.info or {}
             shares_outstanding = _to_decimal(info.get("sharesOutstanding"))
-        except Exception:  # noqa: BLE001
-            shares_outstanding = None
+        except Exception as exc:  # noqa: BLE001
+            raise_provider_data_error(exc, provider_name=_PROVIDER_NAME, operation="info")
 
         start = self._now.date() - dt.timedelta(days=365 * years + 30)
         try:
             price_history = ticker.history(start=start, end=self._now.date(), interval="1d")
-        except Exception:  # noqa: BLE001
-            price_history = None
+        except Exception as exc:  # noqa: BLE001
+            raise_provider_data_error(exc, provider_name=_PROVIDER_NAME, operation="history")
 
         source = self._source()
         results: list[HistoricalValuation] = []
@@ -462,15 +472,15 @@ class YFinanceFinancialDataProvider:
         if pretax_income is None:
             return None
 
-        period_end = self._now.date()
-        try:
-            income_df = ticker.income_stmt
-            if income_df is not None and not income_df.empty:
-                latest_column = sorted(income_df.columns)[-1]
-                if hasattr(latest_column, "date"):
-                    period_end = latest_column.date()
-        except Exception:  # noqa: BLE001
-            pass
+        # Issue #59 E-2: 会計期末を取得できない場合に取得日(self._now)で代用しない。
+        # 代用すると「データ鮮度が常に最新」に見え、鮮度検査が意味を失う
+        # (同種のバグを_latest_annual_period_endで一度修正した経緯がある)。
+        period_end: dt.date | None = None
+        income_df = ticker.income_stmt
+        if income_df is not None and not income_df.empty:
+            latest_column = sorted(income_df.columns)[-1]
+            if hasattr(latest_column, "date"):
+                period_end = latest_column.date()
 
         return CashflowDecomposition(
             stock_code=stock_code,
@@ -510,9 +520,12 @@ class YFinanceFinancialDataProvider:
         ticker = yf.Ticker(f"{stock_code}{_TICKER_SUFFIX}")
         try:
             df = ticker.get_earnings_history()
-        except Exception:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
-            return []
+        except Exception as exc:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
+            raise_provider_data_error(
+                exc, provider_name=_PROVIDER_NAME, operation="get_earnings_history"
+            )
         if df is None or df.empty:
+            # 応答は成立したが履歴が無い(SUCCESS + empty)。
             return []
 
         source = self._source()

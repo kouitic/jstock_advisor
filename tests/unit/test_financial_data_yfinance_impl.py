@@ -398,13 +398,14 @@ def test_get_earnings_surprise_history_returns_empty_when_dataframe_empty(
     assert provider.get_earnings_surprise_history("0000") == []
 
 
-def test_get_earnings_surprise_history_returns_empty_on_exception(
+def test_get_earnings_surprise_history_raises_on_exception(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """get_earnings_history()は非公式ライブラリの内部実装に依存するため、
-    例外発生時は空リストへフォールバックする(既存Provider実装の広い例外捕捉
-    パターンを踏襲)。"""
+    """Issue #59 Phase B1: 取得失敗を空リスト(欠測)へ潰さず、ProviderDataErrorとして
+    伝播する。従来は例外時に[]を返しており、「取得できて0件」と区別できなかった
+    (再試行・障害率の安全弁も例外を観測できなかった)。"""
     import jstock_advisor.providers.financial_data.yfinance_impl as module
+    from jstock_advisor.interfaces.provider_errors import ProviderDataError
 
     class _RaisingTicker:
         def get_earnings_history(self) -> pd.DataFrame:
@@ -415,4 +416,8 @@ def test_get_earnings_surprise_history_returns_empty_on_exception(
         now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
     )
 
-    assert provider.get_earnings_surprise_history("7203") == []
+    with pytest.raises(ProviderDataError) as excinfo:
+        provider.get_earnings_surprise_history("7203")
+
+    assert excinfo.value.operation == "get_earnings_history"
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
