@@ -765,7 +765,14 @@ class BuySignalService:
             severe_earnings_decline=snapshot.severe_earnings_decline,
         )
         score_result = compute_score(
-            total_yield_pct=snapshot.total_yield_pct,
+            # Issue #55 Phase B-1: 買い側のスコア意味論は変更しない(本Issueのスコープ外)。
+            # snapshot.total_yield_pctがOptionalになったため、買い側では従来どおり
+            # 「不明は0%として採点する」挙動を呼び出し側で明示的に維持する
+            # (domain/scoring/score.pyのtotal_yield component_state=EVALUATEDの前提)。
+            # この非対称の理由と、変更する場合の影響はscore.pyのコメントを参照。
+            total_yield_pct=(
+                snapshot.total_yield_pct if snapshot.total_yield_pct is not None else 0.0
+            ),
             dividend=snapshot.dividend,
             financial=financial,
             undervaluation_signals=undervaluation_signals,

@@ -343,7 +343,15 @@ def _check_yield_sufficient_full_take_on_yield_alone(
     if r.recommendation_type != RecommendationType.FULL_PROFIT_TAKE:
         return None
     yield_pct = r.total_yield_pct_at_recommendation
-    if yield_pct is None or yield_pct < min_yield_pct:
+    if yield_pct is None:
+        # Issue #55 Phase B-1: 判定時点で総合利回りを確定できなかった(unknown)。
+        # 「基準以上だったのに利回り低下だけを根拠にした」かどうかを検証できないため、
+        # 違反なしではなく「検証不能」として何も主張しない。
+        # 下の「基準未満」は事実として確認できたケースであり、同一視しない。
+        return None
+    if yield_pct < min_yield_pct:
+        # 総合利回りが最低基準未満であることが確認できている。
+        # 利回り低下を根拠にすることは妥当であり、違反ではない。
         return None
     yield_reasons = [reason for reason in r.reasons if "利回り" in reason]
     if yield_reasons and len(yield_reasons) == len(r.reasons):
