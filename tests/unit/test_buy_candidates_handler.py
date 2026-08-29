@@ -29,6 +29,7 @@ from jstock_advisor.domain.entities.notification_eligibility import Notification
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.signals.add_on_risk import evaluate_add_on_eligibility
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
@@ -3639,14 +3640,17 @@ def test_exposure_fact_marks_unknown_sector_when_industry_unresolvable(
     assert decoded.current_market_value == _FAKE_SNAPSHOT_PRICE * 100
 
 
-def test_exposure_fact_survives_exception_in_analysis(
+def test_exposure_fact_survives_exception_in_analysis_and_reaches_aggregation(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """snapshot取得後にanalysis側で例外が出ても、exposure factは失われない。
+    """producer→aggregator契約が**例外経路でも**維持されることを固定する。
 
-    exposure factの生成はanalysisより前に完了しているため、以降で何が起きても
-    報告済みの値は消えない(ここが崩れると、想定外例外1件で
-    ポートフォリオ分母が欠けて全候補が停止する)。
+    snapshot取得成功 → exposure fact生成 → analyze()例外 → handler終了
+    → aggregate実行 → **そのfactが集計へ実際に使われる**、までを1本で確認する。
+
+    「factが生成された」だけでは不十分で、例外を出した銘柄の時価が
+    ポートフォリオ分母へ入らなければ coverage 不足となり、結局その日の
+    HOLDING/BOTH候補が全滅する(#82のroot causeと同じ結果になる)。
     """
     _patch_snapshot(monkeypatch)
     _patch_audit(monkeypatch)
@@ -3657,36 +3661,136 @@ def test_exposure_fact_survives_exception_in_analysis(
     monkeypatch.setattr(handler_module.BuySignalService, "analyze", _boom)
     captured = _capture_exposure_entry(monkeypatch)
 
+    # --- producer側: analyze()が例外を投げてもhandlerは完走する ---
     handler_module._process_single_candidate(
         "8306", CandidateSource.HOLDING, 600, Decimal("1433.33"), "batch-1", _NOW, object(),
         _CONFIG, object(), RecommendationRepository(store_dir=tmp_path),
         _FakeNotificationServiceForRanking(),
     )
 
-    decoded = handler_module._decode_portfolio_exposure_fact(captured["sector_entry"])
-    assert decoded is not None
-    assert decoded.current_market_value == _FAKE_SNAPSHOT_PRICE * 600
+    reported_entry = captured["sector_entry"]
+    assert isinstance(reported_entry, str)
+
+    # --- aggregator側: 報告されたentryが実際に集計へ使われる ---
+    # 例外を出した8306と、正常に評価された7239の2銘柄を保有している状況。
+    # 7239は8306とは別業種にしておく(業種集中度の上限に触れさせないため。
+    # ここで確認したいのは「判定が成立するか」であり、上限超過の有無ではない)。
+    exposure = handler_module._aggregate_portfolio_exposure(
+        [reported_entry, _encode("7239", BuyIndustrySector.GENERAL, "100000")],
+        holding_count=2,
+    )
+
+    expected_8306_value = _FAKE_SNAPSHOT_PRICE * 600
+    # 例外銘柄の時価が分母へ算入され、coverageが満たされている。
+    assert exposure.coverage_ratio == 1.0
+    assert exposure.basis == PortfolioValuationBasis.MARKET_VALUE
+    assert exposure.portfolio_total == expected_8306_value + Decimal("100000")
+    assert exposure.facts_by_stock["8306"].current_market_value == expected_8306_value
+
+    # --- consumer側: 無関係な候補(7239)の集中度判定が成立する ---
+    assessment, eligibility = evaluate_add_on_eligibility(
+        current_market_value=Decimal("100000"),
+        # 1単元あたりの買い増し額を小さくし、集中度上限に触れない条件にする
+        # (ここで確認したいのは「判定が成立するか」であり、上限超過の有無ではない)。
+        current_price=Decimal("100"),
+        trading_unit=100,
+        portfolio_total_market_value=exposure.portfolio_total,
+        sector_total_market_value=exposure.sector_total_for("7239"),
+        portfolio_valuation_basis=exposure.basis,
+        conflicting_holding_action=None,
+        holding_data_inconsistent=False,
+        holding_is_odd_lot=False,
+        config=_CONFIG.add_on,
+    )
+
+    # reliability不足でまとめてブロックされるのではなく、両ゲートが実際に評価される。
+    assert assessment.portfolio_data_reliable is True
+    assert assessment.sector_exposure_available is True
+    assert assessment.current_position_ratio is not None
+    assert assessment.current_sector_ratio is not None
+    assert eligibility.eligible is True
 
 
-def test_coverage_ratio_is_never_used_to_authorize_add_on() -> None:
-    """coverage_ratioはobservability専用。部分カバレッジでfail-openしない。
+@pytest.mark.parametrize(
+    ("reported", "holding_count", "expected_coverage"),
+    [
+        (4, 5, 0.8),  # 高いcoverage(80%)でも許可の根拠にしない
+        (1, 5, 0.2),  # 低いcoverageでも扱いは同じ(fail-close)
+    ],
+)
+def test_partial_coverage_never_authorizes_add_on(
+    reported: int, holding_count: int, expected_coverage: float
+) -> None:
+    """coverage_ratioは判定条件にならない(部分カバレッジでfail-openしない)。
 
-    「80%取れたから残り20%を無視して買い増し許可」を禁止する契約の回帰テスト。
+    「80%取れたから残り20%を無視して買い増し許可」を禁止する契約を、
+    **振る舞い**で固定する(実装内の変数名・ログ文言には依存しない)。
+
+    coverageの値がいくつであっても、報告が揃っていなければ
+    銘柄集中度・業種集中度ともfail-closeする。
     """
-    import inspect
+    entries = [_encode(f"{9000 + i}", BuyIndustrySector.BANK, "100000") for i in range(reported)]
+    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=holding_count)
 
-    from jstock_advisor.domain.signals import add_on_risk
-
-    # 判定モジュールがcoverageを一切参照しない。
-    assert "coverage" not in inspect.getsource(add_on_risk)
-
-    # 集計側でも、coverageが高いだけでは MARKET_VALUE にならない。
-    entries = [_encode(f"{9000 + i}", BuyIndustrySector.BANK, "100000") for i in range(4)]
-    exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=5)
-
-    assert exposure.coverage_ratio == 0.8
+    # coverageは観測値としては算出される(observability / audit用途)。
+    assert exposure.coverage_ratio == expected_coverage
+    # しかし判定の前提は成立しない。
     assert exposure.basis == PortfolioValuationBasis.UNAVAILABLE
     assert exposure.portfolio_total is None
+    assert exposure.sector_exposure_complete is False
+
+    assessment, eligibility = evaluate_add_on_eligibility(
+        current_market_value=Decimal("100000"),
+        current_price=Decimal("1000"),
+        trading_unit=100,
+        portfolio_total_market_value=exposure.portfolio_total,
+        sector_total_market_value=exposure.sector_total_for("9000"),
+        portfolio_valuation_basis=exposure.basis,
+        conflicting_holding_action=None,
+        holding_data_inconsistent=False,
+        holding_is_odd_lot=False,
+        config=_CONFIG.add_on,
+    )
+
+    # stock gate / sector gate ともfail-close。比率も算出されない。
+    assert assessment.portfolio_data_reliable is False
+    assert assessment.sector_exposure_available is False
+    assert assessment.current_position_ratio is None
+    assert assessment.current_sector_ratio is None
+    assert eligibility.eligible is False
+    assert eligibility.block_category == EligibilityBlockCategory.PORTFOLIO_DATA_RELIABILITY
+
+
+def test_add_on_decision_is_identical_for_different_coverage_ratios() -> None:
+    """coverage_ratioの値そのものが判定を変えないことを直接固定する。
+
+    coverage 0.8 と 0.2 で集計結果・ゲート判定がまったく同じになることを示し、
+    「coverageが高いほど緩む」という実装が入り込む余地を塞ぐ。
+    """
+
+    def _decide(reported: int) -> tuple[object, object, object]:
+        entries = [
+            _encode(f"{9000 + i}", BuyIndustrySector.BANK, "100000") for i in range(reported)
+        ]
+        exposure = handler_module._aggregate_portfolio_exposure(entries, holding_count=5)
+        _assessment, eligibility = evaluate_add_on_eligibility(
+            current_market_value=Decimal("100000"),
+            current_price=Decimal("1000"),
+            trading_unit=100,
+            portfolio_total_market_value=exposure.portfolio_total,
+            sector_total_market_value=exposure.sector_total_for("9000"),
+            portfolio_valuation_basis=exposure.basis,
+            conflicting_holding_action=None,
+            holding_data_inconsistent=False,
+            holding_is_odd_lot=False,
+            config=_CONFIG.add_on,
+        )
+        return exposure.basis, eligibility.eligible, eligibility.block_reason
+
+    high_coverage = _decide(4)
+    low_coverage = _decide(1)
+
+    assert high_coverage == low_coverage
 
 
 def test_exposure_entry_stays_within_max_entry_bytes() -> None:
