@@ -33,14 +33,17 @@ from jstock_advisor.domain.entities.entry_price_range import EntryPriceRangeResu
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
     BuyAction,
+    BuyIndustrySector,
     ConfidenceLevel,
     EarningsDateStatus,
     EarningsSurpriseEvaluationState,
     EarningsTrendEvaluationState,
     EnvironmentEvaluationState,
     HistoricalValuationEvaluationState,
+    IndustryClassification,
     MarketEnvironmentEvaluationState,
     PriceRangeEvaluationState,
+    ProfitTakingIndustrySector,
     RecommendationType,
     SectorEnvironmentEvaluationState,
     StockType,
@@ -66,6 +69,10 @@ from jstock_advisor.interfaces.types import (
 )
 from jstock_advisor.services import buy_signal_service as service_module
 from jstock_advisor.services.buy_signal_service import BuySignalService
+from jstock_advisor.services.jpx_industry_source import (
+    JpxIndustryEntry,
+    JpxIndustrySource,
+)
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot
 
@@ -1148,3 +1155,211 @@ def test_buy_unavailable_disclosure_does_not_pass_as_clean(
 
     assert outcome.buy_action not in BUY_FAMILY_ACTIONS
     assert outcome.recommendation is None
+
+
+# --- Issue #54 Phase B-1(2026-08-29): 業種分類canonical観測(shadow) -----------
+#
+# 本節のテストが固定する最重要契約は「**観測はBUY判定を一切変えない**」ことである。
+# CYCLICAL/DEFENSIVEやREIT除外といった死んだ判定の復活は Phase B-2 の範囲であり、
+# B-1では観測のみを行う(適正価格と対象母集団が変わるため、観測結果を確認せずに
+# 復活させない)。
+
+
+def _jpx_source(entries: dict[str, JpxIndustryEntry]) -> JpxIndustrySource:
+    """指定エントリだけを解決するJpxIndustrySource(キャッシュ読み取りを行わない)。"""
+    source = JpxIndustrySource()
+    source._map = entries  # noqa: SLF001 - テスト用に読み込み済み状態を直接構成する
+    return source
+
+
+def _analyze_with_jpx(
+    monkeypatch: pytest.MonkeyPatch,
+    fx: _StockFixture,
+    jpx_industry_source: JpxIndustrySource | None,
+) -> service_module.BuyAnalysisOutcome:
+    snapshot = _build_snapshot(fx)
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
+    service = BuySignalService(
+        providers=_providers(),
+        config=_CONFIG,
+        business_calendar=_CALENDAR,
+        jpx_industry_source=jpx_industry_source,
+    )
+    return service.analyze(fx.stock_code, _NOW, RecommendationType.BUY)
+
+
+_JPX_ENTRY = JpxIndustryEntry(
+    industry_33_code="3050",
+    industry_33_name="医薬品",
+    market_segment="プライム（内国株式）",
+)
+
+
+def test_canonical_industry_observation_records_jpx_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JPXで解決できた場合、33業種コードと証券種別が観測として保存される。"""
+    outcome = _analyze_with_jpx(
+        monkeypatch,
+        _NIHON_SHINYAKU,
+        _jpx_source({_NIHON_SHINYAKU.stock_code: _JPX_ENTRY}),
+    )
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    observation = facts["canonical_industry_observation"]
+    assert observation["canonical_industry_33_code"] == "3050"
+    assert observation["canonical_industry_33_name"] == "医薬品"
+    assert observation["canonical_security_type"] == "COMMON_STOCK"
+    assert observation["canonical_source"] == "JPX_TSE33"
+
+
+def test_canonical_industry_observation_records_unresolved_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JPXで解決できない銘柄はUNKNOWNのまま記録し、provider値で埋めない。
+
+    Phase B-2の判断材料は「JPX解決率」であるため、解決できなかったことを
+    yfinanceの値で塗りつぶしてはならない。
+    """
+    outcome = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    observation = facts["canonical_industry_observation"]
+    assert observation["canonical_industry_33_code"] is None
+    assert observation["canonical_security_type"] == "UNKNOWN"
+    assert observation["canonical_source"] == "YFINANCE_FALLBACK"
+    # 観測のために見た値はそのまま残す(canonicalへは昇格させない)。
+    assert observation["provider_sector"] == _NIHON_SHINYAKU.sector
+    assert observation["provider_industry"] == _NIHON_SHINYAKU.industry
+
+
+def test_canonical_industry_observation_records_existing_classifier_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既存4分類器が同一入力に対して実際に返した値を、是正せず並記する。
+
+    yfinanceは市場区分を提供せず(`market_segment=None`)、`security_type`も
+    既定値"STOCK"のままであるため、REIT除外が到達不能である現状もここに記録される。
+    """
+    outcome = _analyze_with_jpx(
+        monkeypatch,
+        _NIHON_SHINYAKU,
+        _jpx_source({_NIHON_SHINYAKU.stock_code: _JPX_ENTRY}),
+    )
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    observation = facts["canonical_industry_observation"]
+    assert observation["financial_industry_classification"] in {
+        classification.value for classification in IndustryClassification
+    }
+    assert observation["buy_industry_sector"] in {sector.value for sector in BuyIndustrySector}
+    assert observation["profit_taking_industry_sector"] in {
+        sector.value for sector in ProfitTakingIndustrySector
+    }
+    assert observation["stock_type_cyclical_or_defensive"] == []
+    assert observation["provider_security_type"] == "STOCK"
+    assert observation["provider_market_segment"] is None
+
+
+def test_canonical_industry_observation_does_not_change_buy_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**shadow性の証明**: JPXで解決できてもできなくても判定結果が変わらない。
+
+    B-1で判定が動いてしまうと、Phase B-2で「観測結果を見てから復活させる」という
+    段階分けが成立しない。
+    """
+    resolved = _analyze_with_jpx(
+        monkeypatch,
+        _NIHON_SHINYAKU,
+        _jpx_source({_NIHON_SHINYAKU.stock_code: _JPX_ENTRY}),
+    )
+    unresolved = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+
+    assert resolved.buy_action == unresolved.buy_action
+    assert resolved.ranking_group == unresolved.ranking_group
+    assert resolved.exclusion_reasons == unresolved.exclusion_reasons
+    assert resolved.recommendation is not None
+    assert unresolved.recommendation is not None
+    assert resolved.recommendation.total_score == unresolved.recommendation.total_score
+    assert (
+        resolved.recommendation.fair_value_at_recommendation
+        == unresolved.recommendation.fair_value_at_recommendation
+    )
+    assert resolved.recommendation.buy_prices == unresolved.recommendation.buy_prices
+    assert resolved.recommendation.score_breakdown == unresolved.recommendation.score_breakdown
+    assert resolved.recommendation.reasons == unresolved.recommendation.reasons
+
+
+def test_reit_security_type_does_not_change_buy_decision_in_phase_b1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REITと観測されてもB-1では除外しない(除外の復活はPhase B-2)。"""
+    reit_entry = JpxIndustryEntry(
+        industry_33_code="8050",
+        industry_33_name="不動産業",
+        market_segment="REIT・ベンチャーファンド・カントリーファンド・インフラファンド",
+    )
+    reit = _analyze_with_jpx(
+        monkeypatch, _NIHON_SHINYAKU, _jpx_source({_NIHON_SHINYAKU.stock_code: reit_entry})
+    )
+    baseline = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+
+    assert reit.recommendation is not None
+    observation = reit.recommendation.buy_score_input_facts["canonical_industry_observation"]
+    assert observation["canonical_security_type"] == "REIT"
+    # 観測はREITだが、判定は従来どおり。
+    assert reit.buy_action == baseline.buy_action
+    assert reit.exclusion_reasons == baseline.exclusion_reasons
+
+
+def test_jpx_source_failure_does_not_break_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JPXキャッシュを読めなくてもBUY評価は従来どおり完了する。
+
+    観測のためにBUYパイプラインを止めてはならない。
+    """
+    class _FailingSource(JpxIndustrySource):
+        def get(self, stock_code: str) -> JpxIndustryEntry | None:
+            return None
+
+    failing = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _FailingSource())
+    baseline = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+
+    assert failing.buy_action == baseline.buy_action
+    assert failing.recommendation is not None
+    observation = failing.recommendation.buy_score_input_facts["canonical_industry_observation"]
+    assert observation["canonical_source"] == "YFINANCE_FALLBACK"
+
+
+def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """観測キーの追加はoptional key追加であり、既存レコードとの互換性を壊さない。
+
+    `buy_score_input_facts` は判定に使わない観測用snapshotであり、消費者
+    (calibration dataset等)は必要なキーを個別に取り出す。したがって
+    schema versionの引き上げもbackfillも不要である
+    (`FACTS_SCHEMA_VERSION` の方針コメント参照)。この判断をテストで固定する。
+    """
+    outcome = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    assert facts["buy_score_input_facts_schema_version"] == "v1"
+    # 観測キーを取り除いた状態(=既存レコード)でも、他のキーは何も変わらない。
+    legacy_view = {k: v for k, v in facts.items() if k != "canonical_industry_observation"}
+    assert "canonical_industry_observation" not in legacy_view
+    assert legacy_view["buy_score_input_facts_schema_version"] == "v1"
