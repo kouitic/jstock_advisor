@@ -4,6 +4,15 @@
   必ず [docs/functional_spec.md](docs/functional_spec.md)(非技術者向けの機能仕様書)を
   合わせて更新し、末尾の変更履歴に日付と概要を追記すること。
 
+- **GitHub Issueを作成・調査・更新・closeする場合は、
+  [docs/issue_label_policy.md](docs/issue_label_policy.md) を必ず読み、
+  そのルールに従うこと。** labelはIssue Type / Priority / Severity /
+  Release Blockerの4軸を独立して判定し、相互に自動推論しない。
+  Issue本文・最新コメント・labelsが矛盾する場合は、勝手に推測して実装を進めず、
+  どれが最新の確定判断かを確認すること。
+  (同文書はAI非依存のリポジトリ運用ポリシーであり、本ファイルはその入口に過ぎない。
+  ルールを変更する場合は同文書を更新する。)
+
 - **実在人物の個人情報をGit管理対象へ含めない。** 氏名・家族名・個人メール
   アドレス・住所・電話番号等を、ソースコード、テストデータ、fixture、コメント、
   ドキュメント、サンプル、コミットメッセージへ記録してはならない。所有者等を
