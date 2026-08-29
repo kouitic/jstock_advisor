@@ -21,11 +21,11 @@ import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import SourceType
-from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.disclosure_finder import (
     EdinetDisclosureCacheRepository,
     find_extraordinary_reports,
 )
+from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
 from jstock_advisor.interfaces.types import Disclosure
 
 _EDINET_PROVIDER_NAME = "edinet"
@@ -34,16 +34,16 @@ _EDINET_PROVIDER_NAME = "edinet"
 class EdinetYfinanceDisclosureProvider:
     def __init__(
         self,
-        client: EdinetClient | None = None,
+        document_source: EdinetDocumentSource | None = None,
         cache_repository: EdinetDisclosureCacheRepository | None = None,
         now: dt.datetime | None = None,
     ) -> None:
-        self._client = client or EdinetClient()
+        self._source = document_source or EdinetDocumentSource()
         self._cache_repo = cache_repository or EdinetDisclosureCacheRepository()
         self._now = now or dt.datetime.now(dt.UTC)
 
     def get_disclosures(self, stock_code: str, since: dt.date) -> list[Disclosure]:
-        cache = find_extraordinary_reports(self._client, self._cache_repo, stock_code, self._now)
+        cache = find_extraordinary_reports(self._source, self._cache_repo, stock_code, self._now)
         if cache is None:
             return []
         source = DataSourceReference(

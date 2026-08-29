@@ -9,6 +9,12 @@ from jstock_advisor.infrastructure.edinet.disclosure_finder import (
     EdinetDisclosureCacheRepository,
     EdinetDisclosureRecord,
 )
+from jstock_advisor.infrastructure.edinet.types import (
+    EdinetDownloadResult,
+    EdinetFailureReason,
+    EdinetFetchStatus,
+    EdinetListResult,
+)
 from jstock_advisor.providers.disclosure.edinet_yfinance_impl import (
     EdinetYfinanceDisclosureProvider,
 )
@@ -17,19 +23,23 @@ _STOCK_CODE = "2914"
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 
 
-class _NotConfiguredClient:
+class _NotConfiguredSource:
     is_configured = False
 
-    def list_documents(self, date: dt.date) -> list[dict[str, object]]:
-        return []
+    def list_documents(self, scan_date: dt.date, now: dt.datetime) -> EdinetListResult:
+        return EdinetListResult(
+            EdinetFetchStatus.FETCH_FAILED, [], EdinetFailureReason.NOT_CONFIGURED
+        )
 
-    def download_document_zip(self, doc_id: str) -> bytes | None:
-        return None
+    def download_document_zip(self, doc_id: str) -> EdinetDownloadResult:
+        return EdinetDownloadResult(
+            EdinetFetchStatus.FETCH_FAILED, None, EdinetFailureReason.NOT_CONFIGURED
+        )
 
 
 def test_get_disclosures_returns_empty_when_edinet_not_configured(tmp_path: Path) -> None:
     provider = EdinetYfinanceDisclosureProvider(
-        client=_NotConfiguredClient(),  # type: ignore[arg-type]
+        document_source=_NotConfiguredSource(),  # type: ignore[arg-type]
         cache_repository=EdinetDisclosureCacheRepository(store_dir=tmp_path),
         now=_NOW,
     )
@@ -55,17 +65,19 @@ def test_get_disclosures_filters_by_since_date(tmp_path: Path) -> None:
         )
     )
 
-    class _ConfiguredNoOpClient:
+    class _ConfiguredNoOpSource:
         is_configured = True
 
-        def list_documents(self, date: dt.date) -> list[dict[str, object]]:
-            return []
+        def list_documents(self, scan_date: dt.date, now: dt.datetime) -> EdinetListResult:
+            return EdinetListResult(EdinetFetchStatus.SUCCESS_EMPTY, [])
 
-        def download_document_zip(self, doc_id: str) -> bytes | None:
-            return None
+        def download_document_zip(self, doc_id: str) -> EdinetDownloadResult:
+            return EdinetDownloadResult(
+                EdinetFetchStatus.FETCH_FAILED, None, EdinetFailureReason.DOWNLOAD_ERROR
+            )
 
     provider = EdinetYfinanceDisclosureProvider(
-        client=_ConfiguredNoOpClient(),  # type: ignore[arg-type]
+        document_source=_ConfiguredNoOpSource(),  # type: ignore[arg-type]
         cache_repository=repo,
         now=_NOW,
     )

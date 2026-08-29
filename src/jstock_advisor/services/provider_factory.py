@@ -18,9 +18,9 @@ import datetime as dt
 from pathlib import Path
 
 from jstock_advisor.config.models import AppConfig
-from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.disclosure_finder import EdinetDisclosureCacheRepository
 from jstock_advisor.infrastructure.edinet.document_finder import EdinetFilingCacheRepository
+from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
 from jstock_advisor.interfaces.candidate_universe import CandidateUniverseProvider
 from jstock_advisor.providers.candidate_universe.csv_impl import CsvCandidateUniverseProvider
 from jstock_advisor.providers.candidate_universe.jpx_impl import JpxCandidateUniverseProvider
@@ -71,7 +71,10 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
 
     株主優待はユーザーの手動/CSV登録データ(local_registry_impl)を使う。
     """
-    edinet_client = EdinetClient()
+    # Issue #53 Phase B1: EDINET書類一覧(日付単位API)の取得は1インスタンスへ集約し、
+    # disclosure/financial/dividendの3経路でプロセス内メモ(L1)と日付単位の
+    # 共有キャッシュ(L2)を共有する。銘柄ごとに同じdocuments.jsonを取得しない。
+    edinet_document_source = EdinetDocumentSource()
     edinet_filing_cache = EdinetFilingCacheRepository()
 
     corporate_action = MergedCorporateActionProvider(
@@ -87,7 +90,9 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
                 now=now, corporate_action_service=corporate_action_service
             ),
             secondary=EdinetDividendDataProvider(
-                client=edinet_client, cache_repository=edinet_filing_cache, now=now
+                document_source=edinet_document_source,
+                cache_repository=edinet_filing_cache,
+                now=now,
             ),
             corporate_action_service=corporate_action_service,
             config=config.data_validation,
@@ -98,12 +103,16 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
     return ProviderBundle(
         market_data=YFinanceMarketDataProvider(now=now),
         financial_data=YFinanceFinancialDataProvider(
-            now=now, edinet_client=edinet_client, edinet_cache_repository=edinet_filing_cache
+            now=now,
+            edinet_document_source=edinet_document_source,
+            edinet_cache_repository=edinet_filing_cache,
         ),
         dividend_data=dividend_data,
         shareholder_benefit=LocalRegistryShareholderBenefitProvider(),
         disclosure=EdinetYfinanceDisclosureProvider(
-            client=EdinetClient(), cache_repository=EdinetDisclosureCacheRepository(), now=now
+            document_source=edinet_document_source,
+            cache_repository=EdinetDisclosureCacheRepository(),
+            now=now,
         ),
         corporate_action=corporate_action,
     )

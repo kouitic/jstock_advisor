@@ -1,12 +1,32 @@
+"""臨時報告書のfinder(Issue #53 Phase B1で走査日・失敗扱いを修正)。
+
+重点:
+  - 走査対象日がJST暦日で決まること(JST 00:00〜08:59でも当日を走査する)
+  - refresh window内(当日+直前7暦日)を毎回再走査すること
+  - 取得に失敗した日を走査済みとしないこと(連続成功範囲までしか前進しない)
+  - 書類ZIPの取得失敗もその日を未完了として扱うこと
+"""
+
+from __future__ import annotations
+
 import datetime as dt
 import io
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from jstock_advisor.infrastructure.edinet.disclosure_finder import (
     EdinetDisclosureCacheRepository,
     _extract_reason_summary,
     find_extraordinary_reports,
+)
+from jstock_advisor.infrastructure.edinet.types import (
+    EdinetDocumentEntry,
+    EdinetDownloadResult,
+    EdinetFailureReason,
+    EdinetFetchStatus,
+    EdinetListResult,
 )
 
 _STOCK_CODE = "2914"
@@ -50,35 +70,86 @@ _REASON_ROWS = [
 ]
 
 
-class FakeEdinetClient:
+class FakeDocumentSource:
+    """EdinetDocumentSource相当のフェイク。
+
+    finderの責務(どの日を走査し、どこまでを走査済みとするか)のみを検証するため、
+    日付単位キャッシュ自体は持たない(そちらはtest_edinet_document_list_cache.py)。
+    """
+
     def __init__(
         self,
-        documents_by_date: dict[dt.date, list[dict[str, object]]],
-        zips_by_doc_id: dict[str, bytes | None],
+        documents_by_date: dict[dt.date, list[EdinetDocumentEntry]] | None = None,
+        zips_by_doc_id: dict[str, bytes | None] | None = None,
+        failed_dates: set[dt.date] | None = None,
         configured: bool = True,
     ) -> None:
-        self._documents_by_date = documents_by_date
-        self._zips_by_doc_id = zips_by_doc_id
+        self._documents_by_date = documents_by_date or {}
+        self._zips_by_doc_id = zips_by_doc_id or {}
+        self._failed_dates = failed_dates or set()
         self._configured = configured
+        self.scanned_dates: list[dt.date] = []
 
     @property
     def is_configured(self) -> bool:
         return self._configured
 
-    def list_documents(self, date: dt.date) -> list[dict[str, object]]:
-        return self._documents_by_date.get(date, [])
+    def list_documents(self, scan_date: dt.date, now: dt.datetime) -> EdinetListResult:
+        del now
+        self.scanned_dates.append(scan_date)
+        if scan_date in self._failed_dates:
+            return EdinetListResult(
+                EdinetFetchStatus.FETCH_FAILED, [], EdinetFailureReason.HTTP_ERROR
+            )
+        entries = self._documents_by_date.get(scan_date, [])
+        status = (
+            EdinetFetchStatus.SUCCESS_WITH_DOCUMENTS
+            if entries
+            else EdinetFetchStatus.SUCCESS_EMPTY
+        )
+        return EdinetListResult(status, list(entries))
 
-    def download_document_zip(self, doc_id: str) -> bytes | None:
-        return self._zips_by_doc_id.get(doc_id)
+    def download_document_zip(self, doc_id: str) -> EdinetDownloadResult:
+        payload = self._zips_by_doc_id.get(doc_id)
+        if payload is None:
+            return EdinetDownloadResult(
+                EdinetFetchStatus.FETCH_FAILED, None, EdinetFailureReason.DOWNLOAD_ERROR
+            )
+        return EdinetDownloadResult(EdinetFetchStatus.SUCCESS_WITH_DOCUMENTS, payload)
 
 
-def _doc_entry(doc_id: str, sec_code: str = _SEC_CODE, doc_type: str = "180") -> dict[str, object]:
-    return {
-        "docID": doc_id,
-        "secCode": sec_code,
-        "docTypeCode": doc_type,
-        "submitDateTime": "2026-07-17 11:10",
-    }
+def _entry(
+    doc_id: str,
+    sec_code: str = _SEC_CODE,
+    doc_type: str = "180",
+    submit_date_time: str = "2026-07-17 11:10",
+) -> EdinetDocumentEntry:
+    return EdinetDocumentEntry(
+        sec_code=sec_code,
+        doc_id=doc_id,
+        doc_type_code=doc_type,
+        submit_date_time=submit_date_time,
+    )
+
+
+def _find(
+    source: FakeDocumentSource,
+    repo: EdinetDisclosureCacheRepository,
+    now: dt.datetime,
+    initial_lookback_days: int = 10,
+    refresh_window_days: int = 7,
+):
+    return find_extraordinary_reports(
+        source,  # type: ignore[arg-type]
+        repo,
+        _STOCK_CODE,
+        now,
+        initial_lookback_days=initial_lookback_days,
+        refresh_window_days=refresh_window_days,
+    )
+
+
+# --- 提出理由の抽出(既存の回帰) ------------------------------------------
 
 
 def test_extract_reason_summary_excludes_cover_page_and_joins_blocks() -> None:
@@ -98,108 +169,230 @@ def test_extract_reason_summary_returns_none_when_no_text_blocks() -> None:
     assert _extract_reason_summary(_csv_zip(rows)) is None
 
 
+# --- 基本動作(既存の回帰) --------------------------------------------------
+
+
 def test_not_configured_returns_none(tmp_path: Path) -> None:
-    client = FakeEdinetClient({}, {}, configured=False)
     repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
-    result = find_extraordinary_reports(
-        client, repo, _STOCK_CODE, dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
-    )
-    assert result is None
+    source = FakeDocumentSource(configured=False)
+
+    assert _find(source, repo, dt.datetime(2026, 7, 24, tzinfo=dt.UTC)) is None
 
 
 def test_finds_matching_extraordinary_report(tmp_path: Path) -> None:
     now = dt.datetime(2026, 7, 20, tzinfo=dt.UTC)
-    doc_date = dt.date(2026, 7, 17)
-    client = FakeEdinetClient(
-        {doc_date: [_doc_entry("DOC1")]},
-        {"DOC1": _csv_zip(_REASON_ROWS)},
+    source = FakeDocumentSource(
+        {dt.date(2026, 7, 17): [_entry("DOC1")]}, {"DOC1": _csv_zip(_REASON_ROWS)}
     )
-    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    cache = _find(source, EdinetDisclosureCacheRepository(store_dir=tmp_path), now)
 
-    cache = find_extraordinary_reports(client, repo, _STOCK_CODE, now, initial_lookback_days=10)
     assert cache is not None
-    assert len(cache.records) == 1
-    assert cache.records[0].doc_id == "DOC1"
+    assert [r.doc_id for r in cache.records] == ["DOC1"]
     assert "代表取締役の異動について決議しました。" in cache.records[0].summary
 
 
 def test_ignores_non_matching_sec_code(tmp_path: Path) -> None:
     now = dt.datetime(2026, 7, 20, tzinfo=dt.UTC)
-    doc_date = dt.date(2026, 7, 17)
-    client = FakeEdinetClient(
-        {doc_date: [_doc_entry("DOC1", sec_code="99990")]},
+    source = FakeDocumentSource(
+        {dt.date(2026, 7, 17): [_entry("DOC1", sec_code="99990")]},
         {"DOC1": _csv_zip(_REASON_ROWS)},
     )
-    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    cache = _find(source, EdinetDisclosureCacheRepository(store_dir=tmp_path), now)
 
-    cache = find_extraordinary_reports(client, repo, _STOCK_CODE, now, initial_lookback_days=10)
     assert cache is not None
     assert cache.records == []
 
 
 def test_ignores_non_extraordinary_doc_type(tmp_path: Path) -> None:
     now = dt.datetime(2026, 7, 20, tzinfo=dt.UTC)
-    doc_date = dt.date(2026, 7, 17)
-    client = FakeEdinetClient(
-        {doc_date: [_doc_entry("DOC1", doc_type="120")]},
+    source = FakeDocumentSource(
+        {dt.date(2026, 7, 17): [_entry("DOC1", doc_type="120")]},
         {"DOC1": _csv_zip(_REASON_ROWS)},
     )
-    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    cache = _find(source, EdinetDisclosureCacheRepository(store_dir=tmp_path), now)
 
-    cache = find_extraordinary_reports(client, repo, _STOCK_CODE, now, initial_lookback_days=10)
     assert cache is not None
     assert cache.records == []
 
 
-def test_skips_document_when_download_fails(tmp_path: Path) -> None:
-    now = dt.datetime(2026, 7, 20, tzinfo=dt.UTC)
-    doc_date = dt.date(2026, 7, 17)
-    client = FakeEdinetClient({doc_date: [_doc_entry("DOC1")]}, {"DOC1": None})
-    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
-
-    cache = find_extraordinary_reports(client, repo, _STOCK_CODE, now, initial_lookback_days=10)
-    assert cache is not None
-    assert cache.records == []
-
-
-def test_incremental_scan_only_covers_new_dates_and_appends(tmp_path: Path) -> None:
-    day1 = dt.date(2026, 7, 17)
-    day2 = dt.date(2026, 7, 21)
-    client = FakeEdinetClient(
-        {day1: [_doc_entry("DOC1")], day2: [_doc_entry("DOC2")]},
+def test_incremental_scan_appends_new_documents(tmp_path: Path) -> None:
+    source = FakeDocumentSource(
+        {dt.date(2026, 7, 17): [_entry("DOC1")], dt.date(2026, 7, 21): [_entry("DOC2")]},
         {"DOC1": _csv_zip(_REASON_ROWS), "DOC2": _csv_zip(_REASON_ROWS)},
     )
     repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
 
-    first_now = dt.datetime(2026, 7, 18, tzinfo=dt.UTC)
-    first_cache = find_extraordinary_reports(
-        client, repo, _STOCK_CODE, first_now, initial_lookback_days=5
-    )
-    assert first_cache is not None
-    assert {r.doc_id for r in first_cache.records} == {"DOC1"}
+    first = _find(source, repo, dt.datetime(2026, 7, 18, tzinfo=dt.UTC), initial_lookback_days=5)
+    assert first is not None
+    assert {r.doc_id for r in first.records} == {"DOC1"}
 
-    second_now = dt.datetime(2026, 7, 22, tzinfo=dt.UTC)
-    second_cache = find_extraordinary_reports(
-        client, repo, _STOCK_CODE, second_now, initial_lookback_days=5
-    )
-    assert second_cache is not None
-    assert {r.doc_id for r in second_cache.records} == {"DOC1", "DOC2"}
+    second = _find(source, repo, dt.datetime(2026, 7, 22, tzinfo=dt.UTC), initial_lookback_days=5)
+    assert second is not None
+    assert {r.doc_id for r in second.records} == {"DOC1", "DOC2"}
 
 
-def test_second_call_same_day_returns_cached_without_rescanning(tmp_path: Path) -> None:
-    now = dt.datetime(2026, 7, 20, tzinfo=dt.UTC)
-    doc_date = dt.date(2026, 7, 17)
-    call_count = {"n": 0}
+# --- JST/UTC境界(#53の核心。現行テストの盲点だった) ------------------------
 
-    class CountingClient(FakeEdinetClient):
-        def list_documents(self, date: dt.date) -> list[dict[str, object]]:
-            call_count["n"] += 1
-            return super().list_documents(date)
 
-    client = CountingClient({doc_date: [_doc_entry("DOC1")]}, {"DOC1": _csv_zip(_REASON_ROWS)})
+@pytest.mark.parametrize(
+    ("now", "expected_today_jst"),
+    [
+        # JST 00:00 = 前日15:00Z
+        (dt.datetime(2026, 8, 30, 15, 0, tzinfo=dt.UTC), dt.date(2026, 8, 31)),
+        # JST 07:59 = 前日22:59Z
+        (dt.datetime(2026, 8, 30, 22, 59, tzinfo=dt.UTC), dt.date(2026, 8, 31)),
+        # JST 08:00(朝の判定バッチ)= 前日23:00Z
+        (dt.datetime(2026, 8, 30, 23, 0, tzinfo=dt.UTC), dt.date(2026, 8, 31)),
+        # JST 08:59 = 前日23:59Z
+        (dt.datetime(2026, 8, 30, 23, 59, tzinfo=dt.UTC), dt.date(2026, 8, 31)),
+        # JST 09:00 = 00:00Z(UTC暦日と一致する唯一の瞬間)
+        (dt.datetime(2026, 8, 31, 0, 0, tzinfo=dt.UTC), dt.date(2026, 8, 31)),
+        # JST 10:00 / 12:30 / 15:30
+        (dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC), dt.date(2026, 8, 31)),
+        (dt.datetime(2026, 8, 31, 3, 30, tzinfo=dt.UTC), dt.date(2026, 8, 31)),
+        (dt.datetime(2026, 8, 31, 6, 30, tzinfo=dt.UTC), dt.date(2026, 8, 31)),
+    ],
+)
+def test_scan_range_ends_at_jst_today_for_all_batch_times(
+    tmp_path: Path, now: dt.datetime, expected_today_jst: dt.date
+) -> None:
+    source = FakeDocumentSource()
+    _find(source, EdinetDisclosureCacheRepository(store_dir=tmp_path), now)
+
+    assert source.scanned_dates
+    assert max(source.scanned_dates) == expected_today_jst
+
+
+def test_morning_batch_scans_even_when_cache_covers_utc_today(tmp_path: Path) -> None:
+    """Issue #53の最小再現。
+
+    cache.newest_scanned_date="2026-08-31"、now=2026-08-31T23:00Z(= 09-01 08:00 JST)。
+    修正前は today=now.date()=2026-08-31 となり `newest_scanned >= today` が成立して
+    EDINETの呼び出し回数が0だった。
+    """
     repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    seed_source = FakeDocumentSource()
+    seeded = _find(seed_source, repo, dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC))
+    assert seeded is not None
+    assert seeded.newest_scanned_date == "2026-08-31"
 
-    find_extraordinary_reports(client, repo, _STOCK_CODE, now, initial_lookback_days=10)
-    calls_after_first = call_count["n"]
-    find_extraordinary_reports(client, repo, _STOCK_CODE, now, initial_lookback_days=10)
-    assert call_count["n"] == calls_after_first
+    morning_source = FakeDocumentSource()
+    cache = _find(morning_source, repo, dt.datetime(2026, 8, 31, 23, 0, tzinfo=dt.UTC))
+
+    assert morning_source.scanned_dates, "朝バッチが一度もEDINETを走査していない"
+    assert dt.date(2026, 9, 1) in morning_source.scanned_dates
+    assert cache is not None
+    assert cache.newest_scanned_date == "2026-09-01"
+
+
+def test_same_day_rerun_rescans_today_and_picks_up_late_filing(tmp_path: Path) -> None:
+    """10:00の走査後に当日提出された書類を15:30の実行で検出できること。"""
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    today = dt.date(2026, 8, 31)
+
+    morning = FakeDocumentSource()
+    first = _find(morning, repo, dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC))  # 10:00 JST
+    assert first is not None
+    assert first.records == []
+
+    afternoon = FakeDocumentSource(
+        {today: [_entry("LATE1", submit_date_time="2026-08-31 15:10")]},
+        {"LATE1": _csv_zip(_REASON_ROWS)},
+    )
+    second = _find(afternoon, repo, dt.datetime(2026, 8, 31, 6, 30, tzinfo=dt.UTC))  # 15:30 JST
+
+    assert today in afternoon.scanned_dates
+    assert second is not None
+    assert [r.doc_id for r in second.records] == ["LATE1"]
+
+
+def test_refresh_window_rescans_recent_days_only(tmp_path: Path) -> None:
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    now = dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC)  # 2026-08-31 10:00 JST
+
+    _find(FakeDocumentSource(), repo, now, initial_lookback_days=30)
+
+    rescan = FakeDocumentSource()
+    _find(rescan, repo, now, initial_lookback_days=30, refresh_window_days=7)
+
+    assert min(rescan.scanned_dates) == dt.date(2026, 8, 24)  # today - 7暦日
+    assert max(rescan.scanned_dates) == dt.date(2026, 8, 31)
+    # 窓より前の日付は再走査しない
+    assert all(d >= dt.date(2026, 8, 24) for d in rescan.scanned_dates)
+
+
+# --- 失敗時にcacheを前進させない(cache poisoning防止) ---------------------
+
+
+def test_failed_fetch_does_not_advance_newest_scanned(tmp_path: Path) -> None:
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    seeded = _find(
+        FakeDocumentSource(), repo, dt.datetime(2026, 8, 25, 1, 0, tzinfo=dt.UTC)
+    )
+    assert seeded is not None
+    assert seeded.newest_scanned_date == "2026-08-25"
+
+    failing = FakeDocumentSource(failed_dates={dt.date(2026, 8, d) for d in range(18, 32)})
+    cache = _find(failing, repo, dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC))
+
+    assert cache is not None
+    assert cache.newest_scanned_date == "2026-08-25", "取得失敗日を走査済みにしてはならない"
+
+
+def test_partial_failure_advances_only_up_to_last_consecutive_success(tmp_path: Path) -> None:
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    seeded = _find(FakeDocumentSource(), repo, dt.datetime(2026, 8, 25, 1, 0, tzinfo=dt.UTC))
+    assert seeded is not None
+
+    # 08-26(水)は成功、08-27(木)で失敗、08-28(金)は成功
+    failing = FakeDocumentSource(failed_dates={dt.date(2026, 8, 27)})
+    cache = _find(failing, repo, dt.datetime(2026, 8, 28, 1, 0, tzinfo=dt.UTC))
+
+    assert cache is not None
+    assert cache.newest_scanned_date == "2026-08-26"
+
+
+def test_zip_download_failure_marks_date_incomplete(tmp_path: Path) -> None:
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    seeded = _find(FakeDocumentSource(), repo, dt.datetime(2026, 8, 25, 1, 0, tzinfo=dt.UTC))
+    assert seeded is not None
+
+    source = FakeDocumentSource(
+        {dt.date(2026, 8, 26): [_entry("DOC1", submit_date_time="2026-08-26 12:00")]},
+        {"DOC1": None},  # ZIP取得失敗
+    )
+    cache = _find(source, repo, dt.datetime(2026, 8, 27, 1, 0, tzinfo=dt.UTC))
+
+    assert cache is not None
+    assert cache.records == []
+    assert cache.newest_scanned_date == "2026-08-25", "ZIP取得失敗日を走査済みにしてはならない"
+
+
+def test_no_cache_is_written_when_first_scan_completely_fails(tmp_path: Path) -> None:
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    now = dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC)
+    failing = FakeDocumentSource(
+        failed_dates={dt.date(2026, 8, d) for d in range(20, 32)}
+    )
+
+    cache = _find(failing, repo, now, initial_lookback_days=10)
+
+    assert cache is None
+    assert repo.get(_STOCK_CODE) is None, "走査できていない範囲を走査済みとして保存しない"
+
+
+def test_missing_summary_after_successful_download_does_not_block_advance(
+    tmp_path: Path,
+) -> None:
+    """ダウンロードは成功したがテキストブロックが無い場合は未完了扱いにしない。"""
+    repo = EdinetDisclosureCacheRepository(store_dir=tmp_path)
+    source = FakeDocumentSource(
+        {dt.date(2026, 8, 28): [_entry("DOC1", submit_date_time="2026-08-28 12:00")]},
+        {"DOC1": _csv_zip([("jpdei_cor:SecurityCodeDEI", "証券コード、DEI", "29140")])},
+    )
+
+    cache = _find(source, repo, dt.datetime(2026, 8, 31, 1, 0, tzinfo=dt.UTC))
+
+    assert cache is not None
+    assert cache.records == []
+    assert cache.newest_scanned_date == "2026-08-31"

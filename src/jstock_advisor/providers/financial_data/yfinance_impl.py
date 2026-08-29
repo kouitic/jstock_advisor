@@ -21,11 +21,11 @@ import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import RecentPeriodsSource, ValuationBasis
-from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.document_finder import (
     EdinetFilingCacheRepository,
     find_latest_filings,
 )
+from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
 from jstock_advisor.infrastructure.local_repository.stock_name_override_repository import (
     StockNameOverrideRepository,
 )
@@ -88,12 +88,12 @@ class YFinanceFinancialDataProvider:
     def __init__(
         self,
         now: dt.datetime | None = None,
-        edinet_client: EdinetClient | None = None,
+        edinet_document_source: EdinetDocumentSource | None = None,
         edinet_cache_repository: EdinetFilingCacheRepository | None = None,
         stock_name_override_repository: StockNameOverrideRepository | None = None,
     ) -> None:
         self._now = now or dt.datetime.now(dt.UTC)
-        self._edinet_client = edinet_client
+        self._edinet_source = edinet_document_source
         self._edinet_cache_repo = edinet_cache_repository
         # 銘柄名の手動オーバーライド(2026-07 BUYパイプライン第2次修正・要求仕様19節)。
         # EDINET filerNameが取得できない、または表記の見直しが必要な銘柄のみ、
@@ -109,12 +109,12 @@ class YFinanceFinancialDataProvider:
         override = self._stock_name_override_repo.get(stock_code)
         if override is not None:
             return override
-        if self._edinet_client is None or self._edinet_cache_repo is None:
+        if self._edinet_source is None or self._edinet_cache_repo is None:
             return None
-        if not self._edinet_client.is_configured:
+        if not self._edinet_source.is_configured:
             return None
         filing = find_latest_filings(
-            self._edinet_client, self._edinet_cache_repo, stock_code, self._now
+            self._edinet_source, self._edinet_cache_repo, stock_code, self._now
         )
         if filing is None or filing.filer_name is None:
             return None
