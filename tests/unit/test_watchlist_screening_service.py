@@ -19,12 +19,14 @@ _CONFIG = load_config()
 _NOW = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
 
 
-def _fake_input() -> SimpleNamespace:
+def _fake_input(*, disclosure_available: bool = True) -> SimpleNamespace:
     return SimpleNamespace(
         missing_required_fields=[],
         missing_scoring_fields=[],
         dividend_yield_pct=4.2,
         equity_ratio_pct=55.0,
+        # Issue #81: critical data availability gateが参照する。
+        disclosure_available=disclosure_available,
     )
 
 

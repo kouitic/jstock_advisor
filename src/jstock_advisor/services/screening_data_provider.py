@@ -96,12 +96,29 @@ class WatchlistScreeningInput:
     avg_trading_value: Decimal | None
     disclosure_risk_keywords_found: list[str]
     severe_earnings_decline: bool
+    # --- Issue #81。開示情報を調査できたか否かを、文字列リスト
+    # (missing_required_fields)への混入とは別に型付きで保持する。
+    # WatchlistScreeningServiceのcritical data availability gateが参照する唯一の
+    # truth sourceであり、"disclosure_availability" in missing_required_fields
+    # という文字列照合には依存しない。既定値は与えない(=全構築箇所へ明示を強制し、
+    # 渡し忘れが安全側ではなくmypyエラーとして表面化するようにする)。
+    # disclosure_risk_keywords_foundとは別物である点に注意:
+    # こちらは「調べられたか」、あちらは「調べた結果リスクがあったか」。
+    disclosure_available: bool
 
 
 # Issue #53 Phase B2: 開示情報を調査できなかった場合に必須項目欠損として扱う名前。
-# 既存のmissing_required_fields → ExclusionReason.DATA_INSUFFICIENT 経路を再利用し、
-# 新しい除外理由を増やさない(「開示リスク検出」とは別物として扱うため、
-# DISCLOSURE_RISKには決して倒さない)。
+# 新しい除外理由は増やさず ExclusionReason.DATA_INSUFFICIENT を使う(「開示リスク検出」
+# とは別物として扱うため、DISCLOSURE_RISKには決して倒さない)。
+#
+# Issue #81: この文字列をmissing_required_fieldsへ載せること自体は
+# 監査・表示のために維持するが、**除外判定の根拠にはしない**。
+# 判定はWatchlistScreeningServiceのcritical data availability gateが
+# 型付きのWatchlistScreeningInput.disclosure_availableを見て行う。
+# 当初は「missing_required_fieldsが非空ならDATA_INSUFFICIENT」という既存経路の
+# 再利用を意図していたが、その経路はHighDividendFinancialHealthPolicyにしか存在せず、
+# 本番のmulti_style_monitoring Policyには無かったため保護が効いていなかった
+# (multi_styleはoperating_cashflow等の欠損を加点対象外とするだけで除外しない設計)。
 DISCLOSURE_AVAILABILITY_FIELD_NAME = "disclosure_availability"
 
 
@@ -225,6 +242,7 @@ def _build_screening_input(
         avg_trading_value=avg_trading_value,
         disclosure_risk_keywords_found=disclosure_risk_keywords_found,
         severe_earnings_decline=severe_earnings_decline,
+        disclosure_available=disclosure_available,
     )
 
 

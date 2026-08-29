@@ -67,6 +67,7 @@ def _good_input(**overrides: object) -> WatchlistScreeningInput:
         avg_trading_value=Decimal("100000000"),
         disclosure_risk_keywords_found=[],
         severe_earnings_decline=False,
+        disclosure_available=True,
     )
     return replace(defaults, **overrides)  # type: ignore[arg-type]
 
