@@ -2,6 +2,10 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.enums import DividendPeriodEndBasis
+from jstock_advisor.infrastructure.edinet.types import (
+    EdinetDownloadResult,
+    EdinetFetchStatus,
+)
 from jstock_advisor.providers.dividend_data.edinet_impl import EdinetDividendDataProvider
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
@@ -101,8 +105,8 @@ def test_policy_flag_is_unknown_not_false(monkeypatch) -> None:
     class _FakeClient:
         is_configured = True
 
-        def download_document_zip(self, doc_id: str) -> bytes:
-            return b"zip"
+        def download_document_zip(self, doc_id: str) -> EdinetDownloadResult:
+            return EdinetDownloadResult(EdinetFetchStatus.SUCCESS_WITH_DOCUMENTS, b"zip")
 
     class _FakeFiling:
         latest_annual_doc_id = "D0001"
@@ -122,7 +126,9 @@ def test_policy_flag_is_unknown_not_false(monkeypatch) -> None:
     monkeypatch.setattr(module, "find_latest_filings", lambda *a, **k: _FakeFiling())
     monkeypatch.setattr(module, "extract_main_document_rows", lambda z: [row])
 
-    provider = EdinetDividendDataProvider(client=_FakeClient(), now=_NOW)  # type: ignore[arg-type]
+    provider = EdinetDividendDataProvider(  # type: ignore[arg-type]
+        document_source=_FakeClient(), now=_NOW
+    )
     info = provider.get_dividend_info("7203")
 
     assert info is not None

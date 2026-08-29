@@ -13,8 +13,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
-from jstock_advisor.infrastructure.edinet.client import EdinetClient
+from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
+from jstock_advisor.infrastructure.edinet.scan_window import (
+    advance_newest_scanned,
+    business_days_between,
+    compute_scan_start,
+)
 
 _ANNUAL_DOC_TYPE_CODES = {"120", "130"}  # 有価証券報告書・訂正有価証券報告書
 _SEMIANNUAL_DOC_TYPE_CODES = {"160", "170"}  # 半期報告書・訂正半期報告書
@@ -53,18 +59,8 @@ def _sec_code5(stock_code: str) -> str:
     return f"{stock_code}0"
 
 
-def _business_days_between(start: dt.date, end: dt.date) -> list[dt.date]:
-    days: list[dt.date] = []
-    current = start
-    while current <= end:
-        if current.weekday() < 5:
-            days.append(current)
-        current += dt.timedelta(days=1)
-    return days
-
-
 def find_latest_filings(
-    client: EdinetClient,
+    source: EdinetDocumentSource,
     cache_repo: EdinetFilingCacheRepository,
     stock_code: str,
     now: dt.datetime,
@@ -73,12 +69,20 @@ def find_latest_filings(
     """対象銘柄の直近の有価証券報告書・半期報告書docIDをキャッシュ込みで取得する。
 
     EDINETが設定されていない(APIキー未設定)場合はNoneを返す。
+
+    Issue #53 Phase B1で、disclosure_finderと同じ規約へ揃えた(詳細は
+    disclosure_finder.find_extraordinary_reports のdocstring参照)。
+      - 走査対象日をJST暦日で決める(UTC暦日だと朝バッチが常に前日扱いになる)
+      - 当日+source.refresh_window_days暦日は毎回再走査する
+      - 取得に失敗した日を走査済みとしない(連続成功範囲までしか前進させない)
+      - 書類一覧の取得は日付単位キャッシュ(EdinetDocumentSource)経由で行い、
+        銘柄ごとに同じ日付のdocuments.jsonを取得しない
     """
-    if not client.is_configured:
+    if not source.is_configured:
         return None
 
     sec_code = _sec_code5(stock_code)
-    today = now.date()
+    today = evaluation_date_jst(now)
     cache = cache_repo.get(stock_code)
 
     filer_name = cache.filer_name if cache else None
@@ -87,38 +91,46 @@ def find_latest_filings(
     semiannual_doc_id = cache.latest_semiannual_doc_id if cache else None
     semiannual_period_end = cache.latest_semiannual_period_end if cache else None
 
-    if cache is None:
-        scan_dates = _business_days_between(today - dt.timedelta(days=initial_lookback_days), today)
-        oldest_scanned = (today - dt.timedelta(days=initial_lookback_days)).isoformat()
-    else:
-        newest_scanned = dt.date.fromisoformat(cache.newest_scanned_date)
-        if newest_scanned >= today:
-            return cache
-        scan_dates = _business_days_between(newest_scanned + dt.timedelta(days=1), today)
-        oldest_scanned = cache.oldest_scanned_date
+    previous_newest = (
+        dt.date.fromisoformat(cache.newest_scanned_date) if cache is not None else None
+    )
+    # refresh windowの正本はEdinetDocumentSource(disclosure_finderと同じ理由)。
+    scan_start = compute_scan_start(
+        today, previous_newest, initial_lookback_days, source.refresh_window_days
+    )
+    oldest_scanned = cache.oldest_scanned_date if cache is not None else scan_start.isoformat()
 
-    for scan_date in scan_dates:
-        for entry in client.list_documents(scan_date):
-            if entry.get("secCode") != sec_code:
+    last_complete: dt.date | None = None
+    gap_found = False
+    for scan_date in business_days_between(scan_start, today):
+        result = source.list_documents(scan_date, now)
+        for entry in result.entries:
+            if entry.sec_code != sec_code:
                 continue
-            if filer_name is None:
-                candidate_name = entry.get("filerName")
-                if isinstance(candidate_name, str) and candidate_name:
-                    filer_name = candidate_name
+            if filer_name is None and entry.filer_name:
+                filer_name = entry.filer_name
 
-            doc_type = entry.get("docTypeCode")
-            period_end = entry.get("periodEnd")
-            doc_id = entry.get("docID")
-            if not isinstance(period_end, str) or not isinstance(doc_id, str):
+            if entry.period_end is None:
                 continue
-            if doc_type in _ANNUAL_DOC_TYPE_CODES and (
-                annual_period_end is None or period_end > annual_period_end
+            if entry.doc_type_code in _ANNUAL_DOC_TYPE_CODES and (
+                annual_period_end is None or entry.period_end > annual_period_end
             ):
-                annual_doc_id, annual_period_end = doc_id, period_end
-            elif doc_type in _SEMIANNUAL_DOC_TYPE_CODES and (
-                semiannual_period_end is None or period_end > semiannual_period_end
+                annual_doc_id, annual_period_end = entry.doc_id, entry.period_end
+            elif entry.doc_type_code in _SEMIANNUAL_DOC_TYPE_CODES and (
+                semiannual_period_end is None or entry.period_end > semiannual_period_end
             ):
-                semiannual_doc_id, semiannual_period_end = doc_id, period_end
+                semiannual_doc_id, semiannual_period_end = entry.doc_id, entry.period_end
+
+        if not result.succeeded:
+            gap_found = True
+        elif not gap_found:
+            last_complete = scan_date
+
+    newest_scanned = advance_newest_scanned(previous_newest, last_complete)
+    if newest_scanned is None:
+        # 初回走査で1日も完了しなかった場合は走査済みの記録を作らない
+        # (作ると、その範囲が二度と走査されないcache poisoningになる)。
+        return None
 
     updated_cache = EdinetFilingCache(
         stock_code=stock_code,
@@ -128,7 +140,7 @@ def find_latest_filings(
         latest_semiannual_doc_id=semiannual_doc_id,
         latest_semiannual_period_end=semiannual_period_end,
         oldest_scanned_date=oldest_scanned,
-        newest_scanned_date=today.isoformat(),
+        newest_scanned_date=newest_scanned.isoformat(),
         updated_at=now,
     )
     cache_repo.save(updated_cache)

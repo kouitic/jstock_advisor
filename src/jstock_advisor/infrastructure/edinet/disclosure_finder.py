@@ -14,9 +14,15 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
-from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.csv_parser import extract_main_document_rows
+from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
+from jstock_advisor.infrastructure.edinet.scan_window import (
+    advance_newest_scanned,
+    business_days_between,
+    compute_scan_start,
+)
 
 _EXTRAORDINARY_REPORT_DOC_TYPE_CODES = {"180", "190"}  # 臨時報告書・訂正臨時報告書
 _DEFAULT_INITIAL_LOOKBACK_DAYS = 60
@@ -59,16 +65,6 @@ def _sec_code5(stock_code: str) -> str:
     return f"{stock_code}0"
 
 
-def _business_days_between(start: dt.date, end: dt.date) -> list[dt.date]:
-    days: list[dt.date] = []
-    current = start
-    while current <= end:
-        if current.weekday() < 5:
-            days.append(current)
-        current += dt.timedelta(days=1)
-    return days
-
-
 def _extract_reason_summary(zip_bytes: bytes) -> str | None:
     """本文CSVから、提出理由・報告内容のテキストブロックを結合して返す。
 
@@ -92,7 +88,7 @@ def _extract_reason_summary(zip_bytes: bytes) -> str | None:
 
 
 def find_extraordinary_reports(
-    client: EdinetClient,
+    source: EdinetDocumentSource,
     cache_repo: EdinetDisclosureCacheRepository,
     stock_code: str,
     now: dt.datetime,
@@ -101,62 +97,97 @@ def find_extraordinary_reports(
     """対象銘柄の臨時報告書・訂正臨時報告書をキャッシュ込みで検索する。
 
     EDINETが設定されていない(APIキー未設定)場合はNoneを返す。
+
+    Issue #53 Phase B1で以下を修正した。
+      - 走査対象日をJST暦日(evaluation_date_jst)で決める。now.date()(UTC暦日)を
+        使っていたため、JST 00:00〜08:59に起動する朝バッチでは常に前日扱いとなり、
+        `newest_scanned >= today`が成立してEDINETを一度も呼ばずにキャッシュを
+        返していた(domain/jst.pyの「now.date()を直接呼ばない」規約違反)。
+      - 直近(当日+source.refresh_window_days暦日)は毎回再走査する。日付単位の
+        `newest_scanned_date`だけでは「その日の何時時点まで見たか」を表現できず、
+        10:00の走査で当日を走査済みと記録すると、同じ日の引け後(15:00-17:00)に
+        提出された臨時報告書を永久に取得できなかったため。doc_idで重複排除して
+        いるので再走査は冪等。
+      - 取得に失敗した日を走査済みとしない。連続して成功した範囲の末尾までしか
+        `newest_scanned_date`を前進させない(失敗日を走査済みにすると、その営業日は
+        二度と走査されずリスク開示を恒久的に見落とす)。書類ZIPの取得失敗も
+        その日を未完了として扱う。
     """
-    if not client.is_configured:
+    if not source.is_configured:
         return None
 
     sec_code = _sec_code5(stock_code)
-    today = now.date()
+    today = evaluation_date_jst(now)
     cache = cache_repo.get(stock_code)
 
     records = list(cache.records) if cache else []
     known_doc_ids = {r.doc_id for r in records}
 
-    if cache is None:
-        scan_dates = _business_days_between(today - dt.timedelta(days=initial_lookback_days), today)
-        oldest_scanned = (today - dt.timedelta(days=initial_lookback_days)).isoformat()
-    else:
-        newest_scanned = dt.date.fromisoformat(cache.newest_scanned_date)
-        if newest_scanned >= today:
-            return cache
-        scan_dates = _business_days_between(newest_scanned + dt.timedelta(days=1), today)
-        oldest_scanned = cache.oldest_scanned_date
+    previous_newest = (
+        dt.date.fromisoformat(cache.newest_scanned_date) if cache is not None else None
+    )
+    # refresh windowの正本はEdinetDocumentSource(日付単位キャッシュのfreshness判定と
+    # 必ず同じ窓を使う。ここで独自の窓を持つと両者が食い違う)。
+    scan_start = compute_scan_start(
+        today, previous_newest, initial_lookback_days, source.refresh_window_days
+    )
+    oldest_scanned = cache.oldest_scanned_date if cache is not None else scan_start.isoformat()
 
-    for scan_date in scan_dates:
-        for entry in client.list_documents(scan_date):
-            if entry.get("secCode") != sec_code:
+    last_complete: dt.date | None = None
+    gap_found = False
+    for scan_date in business_days_between(scan_start, today):
+        result = source.list_documents(scan_date, now)
+        date_complete = result.succeeded
+        for entry in result.entries:
+            if entry.sec_code != sec_code:
                 continue
-            if entry.get("docTypeCode") not in _EXTRAORDINARY_REPORT_DOC_TYPE_CODES:
+            if entry.doc_type_code not in _EXTRAORDINARY_REPORT_DOC_TYPE_CODES:
                 continue
-            doc_id = entry.get("docID")
-            submit_datetime = entry.get("submitDateTime")
-            if not isinstance(doc_id, str) or doc_id in known_doc_ids:
-                continue
-            if not isinstance(submit_datetime, str):
+            if entry.doc_id in known_doc_ids or entry.submit_date_time is None:
                 continue
 
-            zip_bytes = client.download_document_zip(doc_id)
-            if zip_bytes is None:
+            download = source.download_document_zip(entry.doc_id)
+            if not download.succeeded or download.payload is None:
+                # ZIP取得失敗はこの日の走査が未完了であることを意味する
+                # (この書類を取り込めていないため、走査済みにしてはならない)。
+                date_complete = False
                 continue
-            summary = _extract_reason_summary(zip_bytes)
+            summary = _extract_reason_summary(download.payload)
             if summary is None:
+                # 取得は成功しており、抽出対象のテキストブロックが無かっただけ。
+                # 再走査しても結果は変わらないため未完了とはしない。
                 continue
 
             try:
-                submit_date = dt.datetime.strptime(submit_datetime, "%Y-%m-%d %H:%M").date()
+                submit_date = dt.datetime.strptime(
+                    entry.submit_date_time, "%Y-%m-%d %H:%M"
+                ).date()
             except ValueError:
                 continue
 
             records.append(
-                EdinetDisclosureRecord(doc_id=doc_id, submit_date=submit_date, summary=summary)
+                EdinetDisclosureRecord(
+                    doc_id=entry.doc_id, submit_date=submit_date, summary=summary
+                )
             )
-            known_doc_ids.add(doc_id)
+            known_doc_ids.add(entry.doc_id)
+
+        if not date_complete:
+            gap_found = True
+        elif not gap_found:
+            last_complete = scan_date
+
+    newest_scanned = advance_newest_scanned(previous_newest, last_complete)
+    if newest_scanned is None:
+        # 初回走査で1日も完了しなかった場合。走査済みの記録を作らない
+        # (作ると、その範囲が二度と走査されないcache poisoningになる)。
+        return None
 
     updated_cache = EdinetDisclosureCache(
         stock_code=stock_code,
         records=records,
         oldest_scanned_date=oldest_scanned,
-        newest_scanned_date=today.isoformat(),
+        newest_scanned_date=newest_scanned.isoformat(),
         updated_at=now,
     )
     cache_repo.save(updated_cache)
