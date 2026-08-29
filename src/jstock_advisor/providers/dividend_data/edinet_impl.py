@@ -25,12 +25,12 @@ from jstock_advisor.domain.entities.enums import (
     RecordDateUnknownReason,
     SourceType,
 )
-from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.csv_parser import EdinetCsvRow, extract_main_document_rows
 from jstock_advisor.infrastructure.edinet.document_finder import (
     EdinetFilingCacheRepository,
     find_latest_filings,
 )
+from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocumentSource
 from jstock_advisor.interfaces.types import AnnualDividendActual, DividendInfo
 
 _PROVIDER_NAME = "edinet"
@@ -51,11 +51,11 @@ def _shift_years(value: dt.date, years: int) -> dt.date:
 class EdinetDividendDataProvider:
     def __init__(
         self,
-        client: EdinetClient | None = None,
+        document_source: EdinetDocumentSource | None = None,
         cache_repository: EdinetFilingCacheRepository | None = None,
         now: dt.datetime | None = None,
     ) -> None:
-        self._client = client or EdinetClient()
+        self._source_client = document_source or EdinetDocumentSource()
         self._cache_repo = cache_repository or EdinetFilingCacheRepository()
         self._now = now or dt.datetime.now(dt.UTC)
 
@@ -71,18 +71,18 @@ class EdinetDividendDataProvider:
         self, stock_code: str, fiscal_year_end_month: int | None = None
     ) -> DividendInfo | None:
         del fiscal_year_end_month  # EDINETは当期のperiod_endを書類一覧APIから直接取得するため未使用
-        if not self._client.is_configured:
+        if not self._source_client.is_configured:
             return None
 
-        filing = find_latest_filings(self._client, self._cache_repo, stock_code, self._now)
+        filing = find_latest_filings(self._source_client, self._cache_repo, stock_code, self._now)
         if filing is None or filing.latest_annual_doc_id is None:
             return None
 
-        zip_bytes = self._client.download_document_zip(filing.latest_annual_doc_id)
-        if zip_bytes is None:
+        download = self._source_client.download_document_zip(filing.latest_annual_doc_id)
+        if not download.succeeded or download.payload is None:
             return None
 
-        rows = extract_main_document_rows(zip_bytes)
+        rows = extract_main_document_rows(download.payload)
         if rows is None:
             return None
 

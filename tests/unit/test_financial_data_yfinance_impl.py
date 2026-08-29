@@ -30,7 +30,7 @@ def test_strip_corporate_suffix(raw: str, expected: str) -> None:
     assert _strip_corporate_suffix(raw) == expected
 
 
-class _NotConfiguredClient:
+class _NotConfiguredDocumentSource:
     is_configured = False
 
     def list_documents(self, date: dt.date) -> list[dict[str, object]]:
@@ -40,7 +40,7 @@ class _NotConfiguredClient:
         return None
 
 
-def test_resolve_japanese_stock_name_returns_none_without_edinet_client(
+def test_resolve_japanese_stock_name_returns_none_without_edinet_document_source(
     tmp_path: Path,
 ) -> None:
     provider = YFinanceFinancialDataProvider(
@@ -55,7 +55,7 @@ def test_resolve_japanese_stock_name_returns_none_when_edinet_not_configured(
 ) -> None:
     provider = YFinanceFinancialDataProvider(
         now=_NOW,
-        edinet_client=_NotConfiguredClient(),  # type: ignore[arg-type]
+        edinet_document_source=_NotConfiguredDocumentSource(),  # type: ignore[arg-type]
         edinet_cache_repository=EdinetFilingCacheRepository(store_dir=tmp_path),
         stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path),
     )
@@ -71,7 +71,7 @@ def test_resolve_japanese_stock_name_prefers_manual_override_over_edinet(
     override_repo.save("4246", "ダイキョーニシカワ")
     provider = YFinanceFinancialDataProvider(
         now=_NOW,
-        edinet_client=_NotConfiguredClient(),  # type: ignore[arg-type]
+        edinet_document_source=_NotConfiguredDocumentSource(),  # type: ignore[arg-type]
         edinet_cache_repository=EdinetFilingCacheRepository(store_dir=tmp_path),
         stock_name_override_repository=override_repo,
     )
