@@ -8,6 +8,9 @@
 - ポートフォリオ集中度計算に使うデータそのものの信頼性
   (全保有銘柄の時価が判明している場合のみ計算する。一部でも欠落・矛盾が
   あれば「比率が計算できない」ため、上限超過とは別カテゴリで通知を禁止する)
+  Issue #82: **時価の可用性と業種の可用性を独立した2軸として扱う。**
+  時価が揃っていれば銘柄集中度は評価し、業種が不明な場合は
+  業種集中度だけをDATA_INSUFFICIENT(fail-close)とする。
 - 銘柄集中度・業種集中度(買い増し後の構成比。最低売買単位1単元を仮定)
 
 判定は優先順位付きの単一パスで行い、最初に該当したブロック理由だけを返す
@@ -29,6 +32,11 @@ from jstock_advisor.domain.entities.notification_eligibility import Notification
 
 PROJECTION_BASIS_MINIMUM_TRADING_UNIT = "MINIMUM_TRADING_UNIT_AT_CURRENT_PRICE"
 
+# ブロック理由コード。EligibilityBlockCategoryは永続化される列挙のため追加せず、
+# 同一カテゴリ内でreason文字列により2つの不成立要因を区別する(Issue #82)。
+BLOCK_REASON_PORTFOLIO_VALUATION_INSUFFICIENT = "CONCENTRATION_RELIABILITY_INSUFFICIENT"
+BLOCK_REASON_SECTOR_EXPOSURE_INSUFFICIENT = "SECTOR_EXPOSURE_DATA_INSUFFICIENT"
+
 
 @dataclass(frozen=True)
 class AddOnRiskAssessment:
@@ -42,7 +50,11 @@ class AddOnRiskAssessment:
     projected_sector_ratio: Decimal | None
     position_limit_exceeded: bool
     sector_limit_exceeded: bool
+    # Issue #82: 時価の可用性(銘柄集中度の前提)。
     portfolio_data_reliable: bool
+    # Issue #82: 業種の可用性(業種集中度の前提)。時価が揃っていても、
+    # 業種不明の保有銘柄が1件でもあればFalseになる。
+    sector_exposure_available: bool
     reasons: tuple[str, ...]
 
 
@@ -75,12 +87,15 @@ def evaluate_add_on_eligibility(
     """
     projected_add_on_amount = current_price * trading_unit
 
+    # Issue #82: 以前は単一boolに時価と業種の可用性を畳み込んでいたため、
+    # 業種が1件不明なだけで銘柄集中度まで評価不能になっていた。2軸へ分離する。
     portfolio_data_reliable = (
         portfolio_valuation_basis == PortfolioValuationBasis.MARKET_VALUE
         and portfolio_total_market_value is not None
         and portfolio_total_market_value > 0
-        and sector_total_market_value is not None
     )
+    # 業種集中度は時価の分母にも依存するため、時価が不明なら業種側も成立しない。
+    sector_exposure_available = portfolio_data_reliable and sector_total_market_value is not None
 
     current_position_ratio: Decimal | None = None
     projected_position_ratio: Decimal | None = None
@@ -91,20 +106,23 @@ def evaluate_add_on_eligibility(
 
     if portfolio_data_reliable:
         assert portfolio_total_market_value is not None
-        assert sector_total_market_value is not None
         current_position_ratio = _safe_ratio(current_market_value, portfolio_total_market_value)
         projected_position_ratio = _safe_ratio(
             current_market_value + projected_add_on_amount,
             portfolio_total_market_value + projected_add_on_amount,
         )
+        position_limit_exceeded = (
+            projected_position_ratio is not None
+            and projected_position_ratio > Decimal(str(config.block_add_on_single_stock_ratio))
+        )
+
+    if sector_exposure_available:
+        assert portfolio_total_market_value is not None
+        assert sector_total_market_value is not None
         current_sector_ratio = _safe_ratio(sector_total_market_value, portfolio_total_market_value)
         projected_sector_ratio = _safe_ratio(
             sector_total_market_value + projected_add_on_amount,
             portfolio_total_market_value + projected_add_on_amount,
-        )
-        position_limit_exceeded = (
-            projected_position_ratio is not None
-            and projected_position_ratio > Decimal(str(config.block_add_on_single_stock_ratio))
         )
         sector_limit_exceeded = (
             projected_sector_ratio is not None
@@ -119,7 +137,9 @@ def evaluate_add_on_eligibility(
     if holding_is_odd_lot:
         reasons.append("ODD_LOT_HOLDING")
     if not portfolio_data_reliable:
-        reasons.append("CONCENTRATION_RELIABILITY_INSUFFICIENT")
+        reasons.append(BLOCK_REASON_PORTFOLIO_VALUATION_INSUFFICIENT)
+    elif not sector_exposure_available:
+        reasons.append(BLOCK_REASON_SECTOR_EXPOSURE_INSUFFICIENT)
     if position_limit_exceeded:
         reasons.append("POSITION_LIMIT_EXCEEDED")
     if sector_limit_exceeded:
@@ -137,6 +157,7 @@ def evaluate_add_on_eligibility(
         position_limit_exceeded=position_limit_exceeded,
         sector_limit_exceeded=sector_limit_exceeded,
         portfolio_data_reliable=portfolio_data_reliable,
+        sector_exposure_available=sector_exposure_available,
         reasons=tuple(reasons),
     )
 
@@ -144,8 +165,10 @@ def evaluate_add_on_eligibility(
         return assessment, NotificationEligibility(eligible=True)
 
     # 優先順位: 売却競合 → 保有データ整合性(単元未満株を含む) →
-    # ポートフォリオデータ信頼性 → 銘柄集中 → 業種集中。最初に該当した
-    # 1件だけを理由として返す。
+    # ポートフォリオ時価の信頼性 → 銘柄集中 → 業種データ可用性 → 業種集中。
+    # 最初に該当した1件だけを理由として返す。
+    # Issue #82: 業種データ可用性は銘柄集中の**後**に置く。時価が揃っていれば
+    # 銘柄集中度は評価できるため、業種不明で銘柄集中の判定まで失わせない。
     #
     # 【保有判断スコア方式移行に伴う既知の未対応事項】conflicting_holding_actionは
     # buy_candidates_handler.pyがSellSignalService(旧エンジン)を直接呼んで
@@ -178,13 +201,23 @@ def evaluate_add_on_eligibility(
         return assessment, NotificationEligibility(
             eligible=False,
             block_category=EligibilityBlockCategory.PORTFOLIO_DATA_RELIABILITY,
-            block_reason="CONCENTRATION_RELIABILITY_INSUFFICIENT",
+            block_reason=BLOCK_REASON_PORTFOLIO_VALUATION_INSUFFICIENT,
         )
     if position_limit_exceeded:
         return assessment, NotificationEligibility(
             eligible=False,
             block_category=EligibilityBlockCategory.POSITION_CONCENTRATION,
             block_reason="POSITION_LIMIT_EXCEEDED",
+        )
+    # Issue #82: 銘柄集中度を通過してから業種側の可用性を見る。時価が揃っている
+    # 以上、銘柄集中度は既に評価済みであり、ここでブロックされるのは
+    # 「業種集中度を判定できない」ことだけが理由である(業種不明の保有銘柄が
+    # 1件でもある場合。**推測で業種を埋めたり0扱いにしたりしない**)。
+    if not sector_exposure_available:
+        return assessment, NotificationEligibility(
+            eligible=False,
+            block_category=EligibilityBlockCategory.PORTFOLIO_DATA_RELIABILITY,
+            block_reason=BLOCK_REASON_SECTOR_EXPOSURE_INSUFFICIENT,
         )
     if sector_limit_exceeded:
         return assessment, NotificationEligibility(

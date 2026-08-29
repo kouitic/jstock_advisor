@@ -8,6 +8,8 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.signals.add_on_risk import (
+    BLOCK_REASON_PORTFOLIO_VALUATION_INSUFFICIENT,
+    BLOCK_REASON_SECTOR_EXPOSURE_INSUFFICIENT,
     PROJECTION_BASIS_MINIMUM_TRADING_UNIT,
     AddOnRiskAssessment,
     evaluate_add_on_eligibility,
@@ -150,11 +152,78 @@ def test_missing_portfolio_total_market_value_blocks_as_reliability() -> None:
     assert eligibility.block_category == EligibilityBlockCategory.PORTFOLIO_DATA_RELIABILITY
 
 
-def test_missing_sector_total_market_value_blocks_as_reliability() -> None:
-    _, eligibility = _call(sector_total_market_value=None)
+def test_missing_sector_total_blocks_only_sector_gate_and_keeps_stock_gate(
+) -> None:
+    """Issue #82: 業種が不明でも**銘柄集中度は評価する**。
 
+    旧契約: sector不明 → stockもsectorもまとめてreliability block。
+    新契約: sector不明 → **stock gateは評価**、sector gateのみfail-close。
+
+    時価が揃っていれば銘柄集中度は算出できるため、業種の欠如を理由に
+    銘柄集中度まで無効化しない(業種を推測で埋めることもしない)。
+    """
+    assessment, eligibility = _call(sector_total_market_value=None)
+
+    # 銘柄集中度は算出されている(=巻き添えになっていない)。
+    assert assessment.portfolio_data_reliable is True
+    assert assessment.current_position_ratio == Decimal("100000") / Decimal("1000000")
+    assert assessment.projected_position_ratio is not None
+    # 業種集中度のみ不成立。推測値も0埋めもしない。
+    assert assessment.sector_exposure_available is False
+    assert assessment.current_sector_ratio is None
+    assert assessment.projected_sector_ratio is None
+    assert assessment.sector_limit_exceeded is False
+    # 通知は安全側でブロックされるが、理由は業種データ不足であると識別できる。
     assert eligibility.eligible is False
     assert eligibility.block_category == EligibilityBlockCategory.PORTFOLIO_DATA_RELIABILITY
+    assert eligibility.block_reason == BLOCK_REASON_SECTOR_EXPOSURE_INSUFFICIENT
+    assert BLOCK_REASON_SECTOR_EXPOSURE_INSUFFICIENT in assessment.reasons
+
+
+def test_stock_concentration_still_blocks_when_sector_is_unknown() -> None:
+    """業種不明でも、銘柄集中度の上限超過はきちんと検出される。
+
+    「sector不明なら常にsectorデータ不足でブロック」ではなく、優先順位どおり
+    **銘柄集中度の超過が先に**理由として返ることを固定する。
+    """
+    _, eligibility = _call(
+        current_market_value=Decimal("500000"), sector_total_market_value=None
+    )
+
+    assert eligibility.eligible is False
+    assert eligibility.block_category == EligibilityBlockCategory.POSITION_CONCENTRATION
+    assert eligibility.block_reason == "POSITION_LIMIT_EXCEEDED"
+
+
+def test_price_missing_fails_close_for_both_stock_and_sector_gates() -> None:
+    """Issue #82: 価格欠損はポートフォリオ総額自体が不完全なため両ゲートfail-close。
+
+    業種側だけを通す、0円で補完する、といった緩和は行わない。
+    """
+    assessment, eligibility = _call(
+        portfolio_valuation_basis=PortfolioValuationBasis.UNAVAILABLE,
+        portfolio_total_market_value=None,
+        sector_total_market_value=Decimal("200000"),
+    )
+
+    assert assessment.portfolio_data_reliable is False
+    assert assessment.sector_exposure_available is False
+    assert assessment.current_position_ratio is None
+    assert assessment.current_sector_ratio is None
+    assert eligibility.eligible is False
+    assert eligibility.block_category == EligibilityBlockCategory.PORTFOLIO_DATA_RELIABILITY
+    assert eligibility.block_reason == BLOCK_REASON_PORTFOLIO_VALUATION_INSUFFICIENT
+
+
+def test_portfolio_valuation_insufficient_takes_precedence_over_sector_insufficient() -> None:
+    """時価も業種も無い場合、理由は時価不足(より根本的な方)になる。"""
+    _, eligibility = _call(
+        portfolio_valuation_basis=PortfolioValuationBasis.UNAVAILABLE,
+        portfolio_total_market_value=None,
+        sector_total_market_value=None,
+    )
+
+    assert eligibility.block_reason == BLOCK_REASON_PORTFOLIO_VALUATION_INSUFFICIENT
 
 
 def test_zero_portfolio_total_market_value_blocks_as_reliability_not_division_error() -> None:
