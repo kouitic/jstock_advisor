@@ -4,6 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from jstock_advisor.interfaces.disclosure import (
+    DisclosureAvailability,
+    DisclosureUnavailableReason,
+)
 from jstock_advisor.services import screening_data_provider as sdp_module
 from jstock_advisor.services.screening_data_provider import (
     ScreeningDataStatus,
@@ -47,6 +51,10 @@ def _fake_snapshot(**overrides: object) -> SimpleNamespace:
         "avg_trading_value": Decimal("100000000"),
         "disclosure_risk_keywords_found": [],
         "severe_earnings_decline": False,
+        # Issue #53 Phase B2: 既定は「開示情報を調査できた」。UNAVAILABLEの
+        # 挙動は下部の専用テストで検証する。
+        "disclosure_availability": DisclosureAvailability.AVAILABLE,
+        "disclosure_unavailable_reason": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -197,3 +205,57 @@ def test_shareholder_benefit_exists_flag_reflects_benefit_presence(
 
     assert result.input is not None
     assert result.input.shareholder_benefit_exists is True
+
+
+# --- Issue #53 Phase B2: 開示情報を調査できなかった場合の watchlist policy -----
+
+
+def test_disclosure_unavailable_is_reported_as_missing_required_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNAVAILABLEは必須項目欠損として扱い、既存のDATA_INSUFFICIENT経路へ乗せる。
+
+    `missing_required_fields`が空でない入力はwatchlistのscreening policyが
+    `ExclusionReason.DATA_INSUFFICIENT`で除外する(新しい除外理由は増やさない)。
+    「開示リスクを検出した(DISCLOSURE_RISK)」とは別物として扱う。
+    """
+    monkeypatch.setattr(
+        sdp_module,
+        "build_stock_snapshot",
+        lambda *a, **kw: (
+            _fake_snapshot(
+                disclosure_availability=DisclosureAvailability.UNAVAILABLE,
+                disclosure_unavailable_reason=DisclosureUnavailableReason.TEMPORARY_FAILURE,
+            ),
+            None,
+        ),
+    )
+
+    result = _make_provider().get_screening_input("2914", _NOW)
+
+    assert result.input is not None
+    assert sdp_module.DISCLOSURE_AVAILABILITY_FIELD_NAME in result.input.missing_required_fields
+    # 開示リスク検出(キーワード)ではないことを併せて固定する
+    assert result.input.disclosure_risk_keywords_found == []
+
+
+def test_disclosure_available_does_not_add_missing_required_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AVAILABLE(開示0件を含む)は必須項目欠損にしない。"""
+    monkeypatch.setattr(
+        sdp_module,
+        "build_stock_snapshot",
+        lambda *a, **kw: (
+            _fake_snapshot(disclosure_availability=DisclosureAvailability.AVAILABLE),
+            None,
+        ),
+    )
+
+    result = _make_provider().get_screening_input("2914", _NOW)
+
+    assert result.input is not None
+    assert (
+        sdp_module.DISCLOSURE_AVAILABILITY_FIELD_NAME
+        not in result.input.missing_required_fields
+    )
