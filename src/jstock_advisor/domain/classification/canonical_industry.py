@@ -47,6 +47,32 @@ class CanonicalIndustrySource(StrEnum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
+class JpxLookupStatus(StrEnum):
+    """canonicalの権威(JPX上場銘柄一覧)を**引けたかどうか**の状態(Issue #54 Phase B-1)。
+
+    `CanonicalIndustrySource` とは独立した軸である。source は「canonical値が
+    どの由来で決まったか」を表し、本enumは「権威に問い合わせられたか」を表す。
+
+    #59 の provider failure contract(**FAILURE ≠ SUCCESS + missing**)と同じ区別を、
+    観測データに対して適用する。
+
+    - `RESOLVED`: 一覧を読めて、当該銘柄の行があった
+    - `NOT_FOUND`: **一覧は読めた**が、当該銘柄の行が無かった(SUCCESS + missing)
+    - `SOURCE_UNAVAILABLE`: **そもそも一覧を読めなかった**(FAILURE)
+
+    両者を潰すと「JPXで解決できる銘柄の割合」を測れなくなる(解決率の低さが
+    銘柄側の事情なのかキャッシュ障害なのか区別できない)。Phase B-2 の実施可否は
+    この解決率で判断するため、観測データの信頼性として区別が必要である。
+
+    **B-1ではいずれの状態でもBUY判定を変えない**(SOURCE_UNAVAILABLEでも
+    従来どおり評価を継続する。観測のために判定を止めない)。
+    """
+
+    RESOLVED = "RESOLVED"
+    NOT_FOUND = "NOT_FOUND"
+    SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
+
+
 class CanonicalSecurityType(StrEnum):
     """証券種別(軸(d))。業種(軸(a))とは独立に決まる。
 
@@ -87,6 +113,10 @@ class CanonicalIndustryClassification:
     industry_33_name: str | None
     security_type: CanonicalSecurityType
     source: CanonicalIndustrySource
+    # 権威へ問い合わせられたか。`source` では NOT_FOUND と SOURCE_UNAVAILABLE が
+    # 同じ値(YFINANCE_FALLBACK / UNAVAILABLE)へ潰れるため、独立した軸で保持する。
+    # **JPX解決率の算出にはこちらを使う**(`source` 単独では算出できない)。
+    jpx_lookup_status: JpxLookupStatus = JpxLookupStatus.SOURCE_UNAVAILABLE
     # JPXで解決できなかった場合に、観測用として何を見たかを残す(判定には使わない)。
     fallback_sector: str | None = None
     fallback_industry: str | None = None
@@ -115,6 +145,7 @@ def classify_canonical_industry(
     industry_33_code: str | None,
     industry_33_name: str | None,
     market_segment: str | None,
+    jpx_lookup_status: JpxLookupStatus,
     fallback_sector: str | None = None,
     fallback_industry: str | None = None,
 ) -> CanonicalIndustryClassification:
@@ -125,6 +156,10 @@ def classify_canonical_industry(
     yfinanceの `sector`/`industry` を業種コードへ変換して埋めることはしない
     (第三者APIの開いた語彙を canonical へ昇格させない)。観測のために
     参照した値だけを `fallback_*` へ残す。
+
+    `jpx_lookup_status` は呼び出し側(JPXソース)が観測した引き当て結果をそのまま
+    受け取る。「一覧に無かった」と「一覧を読めなかった」を潰さないための軸であり、
+    canonical値の決定そのものには使わない。
     """
     security_type = classify_security_type(market_segment)
     code = (industry_33_code or "").strip() or None
@@ -136,6 +171,7 @@ def classify_canonical_industry(
             industry_33_name=name,
             security_type=security_type,
             source=CanonicalIndustrySource.JPX_TSE33,
+            jpx_lookup_status=jpx_lookup_status,
         )
 
     has_fallback_input = bool((fallback_sector or "").strip() or (fallback_industry or "").strip())
@@ -150,4 +186,5 @@ def classify_canonical_industry(
         ),
         fallback_sector=(fallback_sector or "").strip() or None,
         fallback_industry=(fallback_industry or "").strip() or None,
+        jpx_lookup_status=jpx_lookup_status,
     )

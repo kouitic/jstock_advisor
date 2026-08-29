@@ -16,6 +16,7 @@ from __future__ import annotations
 from jstock_advisor.domain.classification.canonical_industry import (
     CanonicalIndustrySource,
     CanonicalSecurityType,
+    JpxLookupStatus,
     classify_canonical_industry,
     classify_security_type,
 )
@@ -30,6 +31,7 @@ def test_jpx_33_code_becomes_canonical_and_source_is_jpx() -> None:
         industry_33_code="3050",
         industry_33_name="医薬品",
         market_segment=_PRIME,
+        jpx_lookup_status=JpxLookupStatus.RESOLVED,
     )
 
     assert result.industry_33_code == "3050"
@@ -48,6 +50,7 @@ def test_display_name_alone_does_not_resolve_canonical_industry() -> None:
         industry_33_code=None,
         industry_33_name="医薬品",
         market_segment=_PRIME,
+        jpx_lookup_status=JpxLookupStatus.NOT_FOUND,
     )
 
     assert result.industry_33_code is None
@@ -95,6 +98,7 @@ def test_real_estate_industry_is_not_inferred_as_reit() -> None:
         industry_33_code="8050",
         industry_33_name="不動産業",
         market_segment=_PRIME,
+        jpx_lookup_status=JpxLookupStatus.RESOLVED,
     )
 
     assert result.security_type is CanonicalSecurityType.COMMON_STOCK
@@ -106,6 +110,7 @@ def test_reit_security_type_does_not_fill_industry_code() -> None:
         industry_33_code=None,
         industry_33_name=None,
         market_segment=_REIT_SEGMENT,
+        jpx_lookup_status=JpxLookupStatus.RESOLVED,
     )
 
     assert result.security_type is CanonicalSecurityType.REIT
@@ -123,6 +128,7 @@ def test_provider_vocabulary_is_not_promoted_to_canonical() -> None:
         industry_33_code=None,
         industry_33_name=None,
         market_segment=None,
+        jpx_lookup_status=JpxLookupStatus.NOT_FOUND,
         fallback_sector="Healthcare",
         fallback_industry="Drug Manufacturers - Specialty & Generic",
     )
@@ -145,6 +151,7 @@ def test_no_input_at_all_is_unavailable_not_fallback() -> None:
         industry_33_code=None,
         industry_33_name=None,
         market_segment=None,
+        jpx_lookup_status=JpxLookupStatus.NOT_FOUND,
     )
 
     assert result.source is CanonicalIndustrySource.UNAVAILABLE
@@ -157,6 +164,7 @@ def test_whitespace_only_values_are_treated_as_missing() -> None:
         industry_33_code="  ",
         industry_33_name="  ",
         market_segment="  ",
+        jpx_lookup_status=JpxLookupStatus.NOT_FOUND,
         fallback_sector="  ",
         fallback_industry="  ",
     )
@@ -172,8 +180,50 @@ def test_security_type_is_resolved_independently_of_industry_resolution() -> Non
         industry_33_code=None,
         industry_33_name=None,
         market_segment="ETF・ETN",
+        jpx_lookup_status=JpxLookupStatus.RESOLVED,
         fallback_sector="Financial Services",
     )
 
     assert result.is_resolved is False
     assert result.security_type is CanonicalSecurityType.ETF_ETN
+
+
+def test_lookup_status_distinguishes_not_found_from_source_unavailable() -> None:
+    """**NOT_FOUND と SOURCE_UNAVAILABLE が同じ観測値へ潰れないこと**。
+
+    `source` だけでは両者とも `YFINANCE_FALLBACK`(provider値がある場合)または
+    `UNAVAILABLE`(何も無い場合)になり区別できない。JPX解決率の算出には
+    `jpx_lookup_status` を使う。#59 の FAILURE ≠ SUCCESS + missing と同じ区別。
+    """
+    common = {
+        "industry_33_code": None,
+        "industry_33_name": None,
+        "market_segment": None,
+        "fallback_sector": "Healthcare",
+    }
+    not_found = classify_canonical_industry(
+        **common, jpx_lookup_status=JpxLookupStatus.NOT_FOUND
+    )
+    unavailable = classify_canonical_industry(
+        **common, jpx_lookup_status=JpxLookupStatus.SOURCE_UNAVAILABLE
+    )
+
+    # sourceは同値(=これだけでは区別できないことの明示)。
+    assert not_found.source is unavailable.source is CanonicalIndustrySource.YFINANCE_FALLBACK
+    # lookup statusで区別できる。
+    assert not_found.jpx_lookup_status is JpxLookupStatus.NOT_FOUND
+    assert unavailable.jpx_lookup_status is JpxLookupStatus.SOURCE_UNAVAILABLE
+    assert not_found.jpx_lookup_status != unavailable.jpx_lookup_status
+
+
+def test_lookup_status_is_orthogonal_to_resolution() -> None:
+    """解決できた場合は RESOLVED を保持する(軸が独立していることの確認)。"""
+    result = classify_canonical_industry(
+        industry_33_code="3050",
+        industry_33_name="医薬品",
+        market_segment=_PRIME,
+        jpx_lookup_status=JpxLookupStatus.RESOLVED,
+    )
+
+    assert result.jpx_lookup_status is JpxLookupStatus.RESOLVED
+    assert result.source is CanonicalIndustrySource.JPX_TSE33

@@ -25,6 +25,7 @@ import pytest
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.classification.canonical_industry import JpxLookupStatus
 from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.earnings_surprise import EarningsSurpriseResult
@@ -71,6 +72,7 @@ from jstock_advisor.services import buy_signal_service as service_module
 from jstock_advisor.services.buy_signal_service import BuySignalService
 from jstock_advisor.services.jpx_industry_source import (
     JpxIndustryEntry,
+    JpxIndustryLookup,
     JpxIndustrySource,
 )
 from jstock_advisor.services.provider_bundle import ProviderBundle
@@ -1166,10 +1168,21 @@ def test_buy_unavailable_disclosure_does_not_pass_as_clean(
 
 
 def _jpx_source(entries: dict[str, JpxIndustryEntry]) -> JpxIndustrySource:
-    """指定エントリだけを解決するJpxIndustrySource(キャッシュ読み取りを行わない)。"""
+    """一覧を読み込み済みのJpxIndustrySource(キャッシュ読み取りを行わない)。
+
+    空dictを渡した場合は「一覧は読めたが当該銘柄が無い」= `NOT_FOUND` になる。
+    「一覧そのものを読めない」= `SOURCE_UNAVAILABLE` は `_UnavailableJpxSource` を使う。
+    """
     source = JpxIndustrySource()
     source._map = entries  # noqa: SLF001 - テスト用に読み込み済み状態を直接構成する
     return source
+
+
+class _UnavailableJpxSource(JpxIndustrySource):
+    """JPXキャッシュを読めない状態のソース(例外は送出しない)。"""
+
+    def lookup(self, stock_code: str) -> JpxIndustryLookup:
+        return JpxIndustryLookup(status=JpxLookupStatus.SOURCE_UNAVAILABLE)
 
 
 def _analyze_with_jpx(
@@ -1214,6 +1227,7 @@ def test_canonical_industry_observation_records_jpx_resolution(
     assert observation["canonical_industry_33_name"] == "医薬品"
     assert observation["canonical_security_type"] == "COMMON_STOCK"
     assert observation["canonical_source"] == "JPX_TSE33"
+    assert observation["jpx_lookup_status"] == "RESOLVED"
 
 
 def test_canonical_industry_observation_records_unresolved_state(
@@ -1234,6 +1248,8 @@ def test_canonical_industry_observation_records_unresolved_state(
     assert observation["canonical_industry_33_code"] is None
     assert observation["canonical_security_type"] == "UNKNOWN"
     assert observation["canonical_source"] == "YFINANCE_FALLBACK"
+    # 「一覧は読めたが当該銘柄が無い」ことを、読めなかった場合と区別して記録する。
+    assert observation["jpx_lookup_status"] == "NOT_FOUND"
     # 観測のために見た値はそのまま残す(canonicalへは昇格させない)。
     assert observation["provider_sector"] == _NIHON_SHINYAKU.sector
     assert observation["provider_industry"] == _NIHON_SHINYAKU.industry
@@ -1325,21 +1341,53 @@ def test_reit_security_type_does_not_change_buy_decision_in_phase_b1(
 def test_jpx_source_failure_does_not_break_analysis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """JPXキャッシュを読めなくてもBUY評価は従来どおり完了する。
+    """**JPXキャッシュを読めなくてもBUY判定は一切変わらない**。
 
-    観測のためにBUYパイプラインを止めてはならない。
+    B-1はshadow observationであり、観測のためにBUYパイプラインを止めてはならない
+    (#59 の provider failure contract は外部provider取得に対する契約であり、
+    ローカルcacheを読む観測専用sourceの失敗をBUY失敗へ昇格させる必要はない)。
     """
-    class _FailingSource(JpxIndustrySource):
-        def get(self, stock_code: str) -> JpxIndustryEntry | None:
-            return None
-
-    failing = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _FailingSource())
+    failing = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _UnavailableJpxSource())
     baseline = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
 
     assert failing.buy_action == baseline.buy_action
+    assert failing.ranking_group == baseline.ranking_group
+    assert failing.exclusion_reasons == baseline.exclusion_reasons
+    assert failing.data_error == baseline.data_error
     assert failing.recommendation is not None
-    observation = failing.recommendation.buy_score_input_facts["canonical_industry_observation"]
-    assert observation["canonical_source"] == "YFINANCE_FALLBACK"
+    assert baseline.recommendation is not None
+    assert failing.recommendation.total_score == baseline.recommendation.total_score
+    assert (
+        failing.recommendation.fair_value_at_recommendation
+        == baseline.recommendation.fair_value_at_recommendation
+    )
+    assert failing.recommendation.buy_prices == baseline.recommendation.buy_prices
+
+
+def test_source_unavailable_is_recorded_distinctly_from_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**観測データ上で「一覧に無い」と「一覧を読めない」が別値になること**。
+
+    ここが潰れると、JPX解決率の低さが銘柄側の事情なのかキャッシュ障害なのかを
+    区別できず、Phase B-2 の実施可否を判断できない。
+    """
+    unavailable = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _UnavailableJpxSource())
+    not_found = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+
+    assert unavailable.recommendation is not None
+    assert not_found.recommendation is not None
+    unavailable_obs = unavailable.recommendation.buy_score_input_facts[
+        "canonical_industry_observation"
+    ]
+    not_found_obs = not_found.recommendation.buy_score_input_facts[
+        "canonical_industry_observation"
+    ]
+
+    assert unavailable_obs["jpx_lookup_status"] == "SOURCE_UNAVAILABLE"
+    assert not_found_obs["jpx_lookup_status"] == "NOT_FOUND"
+    # canonical_sourceは同値であり、これだけでは区別できない。
+    assert unavailable_obs["canonical_source"] == not_found_obs["canonical_source"]
 
 
 def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(

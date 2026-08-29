@@ -332,13 +332,18 @@ class BuySignalService:
              通らないため、キャッシュ経由で引けるかどうかが未知)
           2. 既存分類器どうしの不一致・死んだ判定(CYCLICAL/DEFENSIVE)の実際の発生率
 
-        観測の失敗は判定を止めない(取得できなければUNAVAILABLEとして記録する)。
+        観測の失敗は判定を止めない(引き当てできなければ、その理由を
+        `jpx_lookup_status` として記録したうえで従来どおり評価を続ける)。
         """
-        jpx_entry = self._jpx_industry_source.get(stock_code)
+        # 引き当て失敗(SOURCE_UNAVAILABLE)でも例外にせず観測値として記録し、
+        # BUY評価は従来どおり継続する(B-1はshadow observationのため)。
+        lookup = self._jpx_industry_source.lookup(stock_code)
+        jpx_entry = lookup.entry
         canonical = classify_canonical_industry(
             industry_33_code=jpx_entry.industry_33_code if jpx_entry else None,
             industry_33_name=jpx_entry.industry_33_name if jpx_entry else None,
             market_segment=jpx_entry.market_segment if jpx_entry else None,
+            jpx_lookup_status=lookup.status,
             fallback_sector=snapshot.financial.sector,
             fallback_industry=snapshot.financial.industry,
         )
@@ -350,6 +355,10 @@ class BuySignalService:
             "canonical_industry_33_name": canonical.industry_33_name,
             "canonical_security_type": canonical.security_type.value,
             "canonical_source": canonical.source.value,
+            # 「一覧に無い(NOT_FOUND)」と「一覧を読めない(SOURCE_UNAVAILABLE)」を
+            # 区別する。canonical_sourceだけでは両者が同じ値へ潰れるため、
+            # **JPX解決率の算出にはこちらを使う**(Phase B-2の判断材料)。
+            "jpx_lookup_status": canonical.jpx_lookup_status.value,
             "provider_sector": canonical.fallback_sector,
             "provider_industry": canonical.fallback_industry,
             # 既存分類器が同一入力に対して実際に返した値(是正はしない)。

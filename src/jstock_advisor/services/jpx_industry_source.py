@@ -21,6 +21,7 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 
+from jstock_advisor.domain.classification.canonical_industry import JpxLookupStatus
 from jstock_advisor.providers.candidate_universe.jpx_impl import parse_listed_issues_xls
 from jstock_advisor.services.candidate_universe_downloader import CandidateUniverseCacheIO
 
@@ -40,6 +41,18 @@ class JpxIndustryEntry:
     industry_33_code: str | None
     industry_33_name: str | None
     market_segment: str | None
+
+
+@dataclass(frozen=True)
+class JpxIndustryLookup:
+    """1銘柄の引き当て結果。
+
+    **`None` 1つで「一覧に無い」と「一覧を読めない」を潰さない**(#59 の
+    FAILURE ≠ SUCCESS + missing と同じ区別)。`entry` は `RESOLVED` のときのみ非None。
+    """
+
+    status: JpxLookupStatus
+    entry: JpxIndustryEntry | None = None
 
 
 def _default_clock() -> dt.datetime:
@@ -117,12 +130,22 @@ class JpxIndustrySource:
         self._last_failed_at = None
         return self._map
 
-    def get(self, stock_code: str) -> JpxIndustryEntry | None:
-        """銘柄のJPXメタデータを返す。解決できない場合はNone(推測しない)。"""
+    def lookup(self, stock_code: str) -> JpxIndustryLookup:
+        """銘柄のJPXメタデータを引く。値の推測は行わない。
+
+        - 一覧を読めて行がある → `RESOLVED`(entry付き)
+        - **一覧は読めたが行が無い** → `NOT_FOUND`
+        - **一覧そのものを読めない** → `SOURCE_UNAVAILABLE`
+
+        いずれの場合も例外は送出しない(観測のためにBUY判定を止めない)。
+        """
         entries = self._ensure_loaded()
         if entries is None:
-            return None
-        return entries.get(stock_code)
+            return JpxIndustryLookup(status=JpxLookupStatus.SOURCE_UNAVAILABLE)
+        entry = entries.get(stock_code)
+        if entry is None:
+            return JpxIndustryLookup(status=JpxLookupStatus.NOT_FOUND)
+        return JpxIndustryLookup(status=JpxLookupStatus.RESOLVED, entry=entry)
 
 
 # プロセス内共有インスタンス。BUYはfan-out(Lambda 1実行 = 1銘柄)であり、
