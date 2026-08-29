@@ -378,3 +378,105 @@ def test_policy_flag_is_unknown_not_false(monkeypatch: pytest.MonkeyPatch) -> No
     assert info is not None
     assert info.is_progressive_or_doe_policy is None
     assert info.shareholder_return_policy_type is None
+
+
+# --- Issue #59 Phase B2: 取得失敗 / 真の0 / 不明 の3状態を混同しない ------------
+
+
+class _RaisingInfoTicker:
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+
+    @property
+    def info(self) -> dict[str, object]:
+        raise RuntimeError("429 Too Many Requests")
+
+
+class _RaisingDividendsTicker:
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+        self.info = {"regularMarketPrice": 1000, "dividendRate": 50}
+
+    @property
+    def dividends(self) -> dict[object, float]:
+        raise TimeoutError("read timed out")
+
+
+class _ZeroDividendTicker:
+    """配当を明示的に0で返すfake(真のzero。無配企業)。"""
+
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+        self.info = {"regularMarketPrice": 1000, "dividendRate": 0}
+        self.dividends: dict[object, float] = {}
+
+
+class _NoPriceTicker:
+    """応答は成立するが対象銘柄のデータが無いfake(SUCCESS + missing)。"""
+
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+        self.info: dict[str, object] = {}
+        self.dividends: dict[object, float] = {}
+
+
+def _provider_for(
+    monkeypatch: pytest.MonkeyPatch, ticker_cls: type
+) -> YFinanceDividendDataProvider:
+    import jstock_advisor.providers.dividend_data.yfinance_impl as module
+
+    monkeypatch.setattr(module.yf, "Ticker", ticker_cls)
+    return YFinanceDividendDataProvider(
+        now=_NOW, corporate_action_service=_no_op_corporate_action_service()
+    )
+
+
+def test_dividend_info_failure_raises_provider_data_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """取得失敗を配当0や欠測へ潰さない。"""
+    from jstock_advisor.interfaces.provider_errors import ProviderDataError
+
+    provider = _provider_for(monkeypatch, _RaisingInfoTicker)
+
+    with pytest.raises(ProviderDataError) as excinfo:
+        provider.get_dividend_info("7203")
+
+    assert excinfo.value.operation == "info"
+    assert excinfo.value.retryable is True
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def test_dividends_series_failure_raises_provider_data_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jstock_advisor.interfaces.provider_errors import ProviderDataError
+
+    provider = _provider_for(monkeypatch, _RaisingDividendsTicker)
+
+    with pytest.raises(ProviderDataError) as excinfo:
+        provider.get_dividend_info("7203")
+
+    assert excinfo.value.operation == "dividends"
+    assert excinfo.value.retryable is True
+
+
+def test_explicit_zero_dividend_is_kept_as_true_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """明示的な配当0(無配)は真のzeroとして保持する(#55 semanticsの回帰)。"""
+    provider = _provider_for(monkeypatch, _ZeroDividendTicker)
+
+    info = provider.get_dividend_info("7203")
+
+    assert info is not None
+    assert info.forecast_annual_dividend_per_share == Decimal("0")
+
+
+def test_missing_market_data_is_still_unknown_not_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """応答は成立したがデータが無い場合は従来どおりNone(unknown)。"""
+    provider = _provider_for(monkeypatch, _NoPriceTicker)
+
+    assert provider.get_dividend_info("7203") is None

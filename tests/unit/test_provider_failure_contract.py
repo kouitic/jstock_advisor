@@ -25,7 +25,11 @@ from jstock_advisor.interfaces.provider_errors import (
     ProviderDataError,
     ProviderFailureCategory,
 )
-from jstock_advisor.providers._failure import raise_provider_data_error
+from jstock_advisor.providers._failure import (
+    REDACTED,
+    raise_provider_data_error,
+    sanitize_error_summary,
+)
 from jstock_advisor.providers.financial_data.yfinance_impl import YFinanceFinancialDataProvider
 from jstock_advisor.services.provider_failure_classifier import classify_provider_failure
 
@@ -137,20 +141,104 @@ def test_raise_provider_data_error_marks_non_retryable() -> None:
     )
 
 
-def test_failure_log_contains_no_secrets(caplog: pytest.LogCaptureFixture) -> None:
-    """ログに認証情報・URLクエリ等を出さない(安全要約のみ)。"""
-    secret = "Subscription-Key=SUPERSECRET123"
-    with caplog.at_level(logging.WARNING), pytest.raises(ProviderDataError):
+_SECRET = "SUPERSECRET123"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        f"Subscription-Key={_SECRET}",
+        f"https://x.test/path?token={_SECRET}",
+        f"https://x.test/path?date=2026-08-29&apikey={_SECRET}",
+        f"Authorization: Bearer {_SECRET}",
+        f"Authorization: Basic {_SECRET}",
+        f"cookie={_SECRET}",
+        f"crumb={_SECRET}",
+        f"access_token={_SECRET}",
+        f"api_key: {_SECRET}",
+        # 引用符付きの値(regexが値の先頭quoteで取りこぼさないこと)
+        f'token="{_SECRET}"',
+        f"token='{_SECRET}'",
+        f'api_key="{_SECRET}"',
+        f'Authorization: "{_SECRET}"',
+        f'Authorization: Bearer "{_SECRET}"',
+        f"cookie='{_SECRET}'",
+    ],
+)
+def test_secret_is_redacted_everywhere(
+    caplog: pytest.LogCaptureFixture, message: str
+) -> None:
+    """既知のcredential patternはログ・属性・例外メッセージの3箇所すべてで伏せる。
+
+    従来のテストはsecretを例外メッセージへ実際に含めていなかったため、
+    redactionを一切検証できていなかった(Issue #59 の safe logging contract 未達)。
+    """
+    original = RuntimeError(message)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ProviderDataError) as excinfo:
+        raise_provider_data_error(original, provider_name="yfinance", operation="info")
+
+    err = excinfo.value
+    # 1) ログ
+    for record in caplog.records:
+        assert _SECRET not in record.getMessage()
+    # 2) ProviderDataError.error_summary 属性
+    assert _SECRET not in err.error_summary
+    # 3) 例外メッセージ(str)
+    assert _SECRET not in str(err)
+    assert REDACTED in err.error_summary
+    # 元例外は原因として保持する(ログへは自動出力しない)
+    assert err.__cause__ is original
+    assert _SECRET in str(original)
+
+
+def test_quoted_value_with_spaces_is_fully_redacted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """引用符内に空白があっても値全体を伏せる(閉じ引用符までを1つの値とみなす)。"""
+    secret_with_spaces = "SUPER SECRET 123"
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ProviderDataError) as excinfo:
         raise_provider_data_error(
-            RuntimeError("boom"), provider_name="yfinance", operation="info"
+            RuntimeError(f'token="{secret_with_spaces}"'),
+            provider_name="yfinance",
+            operation="info",
         )
 
+    err = excinfo.value
+    assert secret_with_spaces not in err.error_summary
+    assert secret_with_spaces not in str(err)
     for record in caplog.records:
-        message = record.getMessage()
-        assert secret not in message
-        assert "api_key" not in message.lower()
-        assert "subscription-key" not in message.lower()
-        assert "token" not in message.lower()
+        assert secret_with_spaces not in record.getMessage()
+    assert err.error_summary == f"token={REDACTED}"
+
+
+def test_sanitize_keeps_non_secret_context() -> None:
+    """安全な情報まで過剰に消さない(障害切り分けを妨げない)。"""
+    summary = sanitize_error_summary(
+        "HTTPError: 429 Too Many Requests for url https://x.test/v8/finance/chart/7203.T"
+    )
+
+    assert "429" in summary
+    assert "Too Many Requests" in summary
+    assert "7203.T" in summary
+    assert REDACTED not in summary
+
+
+def test_error_summary_is_sanitized_before_truncation() -> None:
+    """sanitize → truncate の順序(逆だと壊れた断片が伏せられずに残る)。"""
+    padding = "x" * 400
+    with pytest.raises(ProviderDataError) as excinfo:
+        raise_provider_data_error(
+            RuntimeError(f"token={_SECRET} {padding}"),
+            provider_name="yfinance",
+            operation="info",
+        )
+
+    summary = excinfo.value.error_summary
+    assert _SECRET not in summary
+    assert REDACTED in summary
+    assert len(summary) == 200
 
 
 def test_error_summary_is_truncated() -> None:
