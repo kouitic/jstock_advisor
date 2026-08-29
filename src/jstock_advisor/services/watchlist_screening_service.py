@@ -102,6 +102,46 @@ def _shrink_ranking_entry_if_needed(entry: RankingEntry) -> RankingEntry | None:
     return None
 
 
+def _critical_data_unavailable(input: WatchlistScreeningInput) -> bool:
+    """安全性contract上、取得できていなければ評価そのものを成立させない項目の判定。
+
+    Issue #81。投資スタイルの好み(高配当か成長かなど)を表すPolicyとは無関係に、
+    「そもそも判断材料を確認できたか」を全Policy共通の前段で判定する。
+    ここをPolicy内へ置くと、Policyを差し替えた瞬間に安全性contractが失われる
+    (実際に#53 Phase B2の開示情報保護は、旧Policyにしか無い経路へ接続されていた
+    ため本番のmulti_style_monitoringでは効いていなかった)。
+
+    現時点の対象は開示情報の取得可否のみ。**missing_required_fields全体を
+    対象にはしない**: shares_outstanding/operating_cashflowの欠損は
+    multi_style_monitoringでは従来どおり除外理由にならず(加点対象外になるだけ)、
+    ここで一括ハード除外すると#53と無関係なPolicy変更になってしまう。
+    対象を増やす場合は、その項目が「スタイルの好み」ではなく
+    「安全性contract」であることを個別に判断すること。
+    """
+    return not input.disclosure_available
+
+
+def _data_insufficient_result(
+    policy_name: str, input: WatchlistScreeningInput
+) -> ScreeningPolicyResult:
+    """critical data availability gateに該当した場合の「評価不能」結果(Issue #81)。
+
+    新しいExclusionReasonは増やさず、既存のDATA_INSUFFICIENTを使う。
+    DISCLOSURE_RISKへは決して倒さない(「危険な開示があった」のではなく
+    「開示を確認できなかった」ため)。
+    """
+    return ScreeningPolicyResult(
+        policy_name=policy_name,
+        passed=False,
+        score=0.0,
+        matched_criteria=[],
+        exclusion_reasons=[ExclusionReason.DATA_INSUFFICIENT],
+        missing_required_fields=input.missing_required_fields,
+        missing_scoring_fields=input.missing_scoring_fields,
+        score_breakdown={},
+    )
+
+
 class WatchlistScreeningService:
     def __init__(self, config: AppConfig, policies: list[ScreeningPolicy] | None = None) -> None:
         self._config: WatchlistScreeningRulesConfig = config.watchlist_screening
@@ -114,7 +154,17 @@ class WatchlistScreeningService:
         input: WatchlistScreeningInput,
         now: dt.datetime,
     ) -> WatchlistScreeningResult:
-        policy_results = [policy.evaluate(input, self._config) for policy in self._policies]
+        if _critical_data_unavailable(input):
+            # Issue #81: style policyを実行せず、DATA_INSUFFICIENTとして確定させる。
+            # policy_resultsは空にしない(空にすると_aggregate_total_score()が
+            # IndexError、all([])がTrueになるため)。Policy1件につき1件の
+            # 「評価不能」結果を作り、以降の集約ロジックを通常経路と共有する。
+            policy_results = [
+                _data_insufficient_result(policy.policy_name, input)
+                for policy in self._policies
+            ]
+        else:
+            policy_results = [policy.evaluate(input, self._config) for policy in self._policies]
         total_score = _aggregate_total_score(policy_results)
 
         matched_criteria: list[MatchedCriterion] = []
