@@ -57,6 +57,20 @@ def _parse_positive_decimal(value: str, field_name: str) -> Decimal:
     return parsed
 
 
+def _parse_positive_int(value: int, field_name: str) -> int:
+    """正の整数のみを受け付ける(Issue #93 Phase B1)。
+
+    購入株数専用の入口チェックであり、**権威はPortfolioService側の検証**である
+    (CLIを経由しない登録経路や将来のcallerも同じ契約で守られる)。ここでは
+    永続層へ到達する前に原因の分かるメッセージで拒否することを目的とする。
+
+    他の整数引数へ無条件の正値制約を加えないよう、専用のhelperとして分けている。
+    """
+    if value <= 0:
+        raise typer.BadParameter(f"{field_name}は0より大きい値を指定してください")
+    return value
+
+
 @app.command("list")
 def list_holdings() -> None:
     """保有銘柄一覧を表示する。"""
@@ -114,7 +128,7 @@ def add_holding(
         owner=owner,
         stock_code=stock_code,
         stock_name=stock_name,
-        shares=shares,
+        shares=_parse_positive_int(shares, "購入株数"),
         purchase_price=_parse_positive_decimal(price, "購入単価"),
         purchase_date=_parse_date(purchase_date),
         account_type=account_type,

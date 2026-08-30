@@ -716,3 +716,215 @@ def test_cli_fee_parser_still_accepts_zero() -> None:
     """T10補足: 既存の `_parse_decimal` へ無条件の正値制約を加えていない。"""
     assert holdings_cli._parse_decimal("0", "手数料") == Decimal("0")
     assert holdings_cli._parse_decimal("-100", "手数料") == Decimal("-100")
+
+
+# --- Issue #93 Phase B1(2026-08-30): 不正な購入株数を新規に永続化させない -------
+#
+# `summarize_lots()` は **合計株数** のみを検証するため、既に保有がある銘柄へ
+# 0以下の株数で追加購入すると合計が正のまま通過していた。とくに負値は「購入」で
+# ありながら実質的に売却として作用し、**売却記録を伴わずに保有株数と平均取得単価を
+# 改変**していた(新規保有時のみ `total_shares must be positive` で偶発的に停止)。
+#
+# #75(取得単価)とは別フィールドの検証であり、責務を混ぜない。
+# entity validator は置かない(#63 の historical compatibility へ干渉するため)。
+
+
+@pytest.mark.parametrize("invalid_shares", [0, -1, -50])
+def test_build_purchase_write_plan_rejects_non_positive_shares(
+    portfolio_service: PortfolioService, invalid_shares: int
+) -> None:
+    """T1/T2: 共通の購入書き込み境界で0以下の株数を拒否する。"""
+    with pytest.raises(ValueError, match="購入株数は0より大きい値"):
+        portfolio_service.build_purchase_write_plan(
+            DEFAULT_OWNER,
+            "8136",
+            "サンリオ",
+            invalid_shares,
+            Decimal("3775"),
+            dt.date(2025, 4, 1),
+            AccountType.NISA,
+        )
+
+
+def test_invalid_shares_fails_fast_before_repository_read(store_dir: Path) -> None:
+    """T3: 不正な株数では lot repository の読み取りにも到達しない。
+
+    `PurchaseLot` 生成・repository read・Holding 再計算・永続化のいずれよりも前で
+    打ち切ることを、repository の呼び出し有無で直接確認する。
+    """
+    reads: list[str] = []
+
+    class _RecordingLotRepository(PurchaseLotRepository):
+        def list_by_holding(self, holding_id: str):  # type: ignore[no-untyped-def]
+            reads.append(holding_id)
+            return super().list_by_holding(holding_id)
+
+    service = PortfolioService(
+        holding_repository=HoldingRepository(store_dir=store_dir),
+        lot_repository=_RecordingLotRepository(store_dir=store_dir),
+    )
+
+    with pytest.raises(ValueError, match="購入株数は0より大きい値"):
+        service.build_purchase_write_plan(
+            DEFAULT_OWNER,
+            "8136",
+            "サンリオ",
+            0,
+            Decimal("3775"),
+            dt.date(2025, 4, 1),
+            AccountType.NISA,
+        )
+
+    assert reads == []
+
+
+@pytest.mark.parametrize("invalid_shares", [0, -50])
+def test_register_purchase_rejects_non_positive_shares_without_persisting(
+    portfolio_service: PortfolioService, store_dir: Path, invalid_shares: int
+) -> None:
+    """T4/T5: 拒否時にlot・holdingがいずれも書き込まれない。"""
+    lot_repo = PurchaseLotRepository(store_dir=store_dir)
+    holding_repo = HoldingRepository(store_dir=store_dir)
+    holding_id = build_holding_id(DEFAULT_OWNER, "8136")
+
+    with pytest.raises(ValueError, match="購入株数は0より大きい値"):
+        portfolio_service.register_purchase(
+            owner=DEFAULT_OWNER,
+            stock_code="8136",
+            stock_name="サンリオ",
+            shares=invalid_shares,
+            purchase_price=Decimal("3775"),
+            purchase_date=dt.date(2025, 4, 1),
+            account_type=AccountType.NISA,
+        )
+
+    assert lot_repo.list_by_holding(holding_id) == []
+    assert holding_repo.get(holding_id) is None
+    assert holding_repo.list_all() == []
+
+
+@pytest.mark.parametrize("invalid_shares", [-50, 0])
+def test_existing_holding_is_unchanged_by_invalid_shares_purchase(
+    portfolio_service: PortfolioService, store_dir: Path, invalid_shares: int
+) -> None:
+    """T6/T7: 既存保有への不正株数の追加購入で state が一切変わらない。
+
+    負値は以前 shares 100→50 / avg 3,000→2,000 と改変していた(#93 の root cause)。
+    0株はゼロ株ロットを永続化していた。いずれも発生しないことを固定する。
+    """
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    holding_id = build_holding_id(DEFAULT_OWNER, "8136")
+    lot_repo = PurchaseLotRepository(store_dir=store_dir)
+    holding_repo = HoldingRepository(store_dir=store_dir)
+    lots_before = lot_repo.list_by_holding(holding_id)
+    holding_before = holding_repo.get(holding_id)
+    assert holding_before is not None
+
+    with pytest.raises(ValueError, match="購入株数は0より大きい値"):
+        portfolio_service.register_purchase(
+            owner=DEFAULT_OWNER,
+            stock_code="8136",
+            stock_name="サンリオ",
+            shares=invalid_shares,
+            purchase_price=Decimal("4000"),
+            purchase_date=dt.date(2025, 6, 1),
+            account_type=AccountType.NISA,
+        )
+
+    lots_after = lot_repo.list_by_holding(holding_id)
+    holding_after = holding_repo.get(holding_id)
+    assert holding_after is not None
+    assert len(lots_after) == len(lots_before) == 1
+    assert holding_after.shares == holding_before.shares == 100
+    assert holding_after.average_purchase_price == holding_before.average_purchase_price
+    assert holding_after.total_purchase_amount == holding_before.total_purchase_amount
+
+
+def test_positive_shares_additional_purchase_is_unchanged(
+    portfolio_service: PortfolioService,
+) -> None:
+    """T8: 正の株数の既存挙動は変わらない(回帰)。"""
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    holding = portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("4000"),
+        purchase_date=dt.date(2025, 6, 1),
+        account_type=AccountType.NISA,
+    )
+
+    assert holding.shares == 200
+    assert holding.average_purchase_price == Decimal("3500")
+
+
+def test_purchase_price_error_takes_precedence_over_shares_error(
+    portfolio_service: PortfolioService,
+) -> None:
+    """T14: 取得単価・株数がともに不正なら **取得単価のエラーが先に返る**。
+
+    #75 Phase B2 で確立した error precedence を本Issueで変更しない。
+    """
+    with pytest.raises(ValueError, match="購入単価は0より大きい値"):
+        portfolio_service.build_purchase_write_plan(
+            DEFAULT_OWNER,
+            "8136",
+            "サンリオ",
+            -50,
+            Decimal("0"),
+            dt.date(2025, 4, 1),
+            AccountType.NISA,
+        )
+
+
+def test_historical_lot_with_invalid_shares_is_still_constructible() -> None:
+    """T12: entity validator を追加していないため、既存の不正レコードは読める。
+
+    write は塞ぐが read 互換は壊さない(#63 の historical compatibility を維持)。
+    """
+    for invalid_shares in (0, -50):
+        lot = PurchaseLot(
+            lot_id=f"lot-legacy-{invalid_shares}",
+            owner=DEFAULT_OWNER,
+            holding_id=build_holding_id(DEFAULT_OWNER, "8136"),
+            stock_code="8136",
+            purchase_date=dt.date(2020, 1, 1),
+            shares=invalid_shares,
+            purchase_price=Decimal("3000"),
+            account_type=AccountType.SPECIFIC,
+        )
+
+        assert lot.shares == invalid_shares
+        assert lot.amount() == Decimal("3000") * invalid_shares
+
+
+# --- CLI 側の二重防御 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("invalid_shares", [0, -1, -100])
+def test_cli_add_rejects_non_positive_shares(invalid_shares: int) -> None:
+    """T9/T10: CLIは永続層へ到達する前に BadParameter で拒否する。"""
+    with pytest.raises(typer.BadParameter, match="0より大きい値"):
+        holdings_cli._parse_positive_int(invalid_shares, "購入株数")
+
+
+def test_cli_add_accepts_positive_shares() -> None:
+    """T11: 正の株数は従来どおりそのままserviceへ渡る。"""
+    assert holdings_cli._parse_positive_int(100, "購入株数") == 100
