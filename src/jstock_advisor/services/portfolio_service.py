@@ -47,6 +47,23 @@ def _validate_purchase_price(purchase_price: Decimal) -> None:
         raise ValueError(PURCHASE_PRICE_MUST_BE_POSITIVE)
 
 
+PURCHASE_SHARES_MUST_BE_POSITIVE = "購入株数は0より大きい値を指定してください"
+
+
+def _validate_purchase_shares(shares: int) -> None:
+    """新規購入ロットの株数が正であることを保証する(Issue #93 Phase B1)。
+
+    `summarize_lots()` は **合計株数** のみを検証するため、既に保有がある銘柄へ
+    0以下の株数で追加購入すると、合計が正のまま通過してしまう。とくに負値は
+    「購入」でありながら実質的に売却として作用し、**売却記録を伴わずに保有株数と
+    平均取得単価を改変する**(Issue #93 で実測)。
+
+    取得単価(#75)とは別のフィールドの検証であり、責務を混ぜない。
+    """
+    if shares <= 0:
+        raise ValueError(PURCHASE_SHARES_MUST_BE_POSITIVE)
+
+
 class PortfolioService:
     def __init__(
         self,
@@ -145,11 +162,17 @@ class PortfolioService:
         # Holding再計算・永続化のいずれよりも前でfail-fastする
         # (repository stateを一切変化させない)。
         #
-        # PurchaseLot entityへvalidatorを置く方式は採らない。読み込み時にも
-        # 検証が走り、取得単価が不正な既存レコードを読めなくしてしまうため
-        # (#63のhistorical compatibilityへ干渉する)。既にそうなっている
-        # 保有銘柄の判定側の安全弁はPhase B1(利確判定のfail-close)が担う。
+        # PurchaseLot entityへvalidatorを置く方式は採らない(取得単価・株数とも)。
+        # 読み込み時にも検証が走り、値が不正な既存レコードを読めなくしてしまうため
+        # (#63のhistorical compatibilityへ干渉する)。取得単価については、既に
+        # そうなっている保有銘柄の判定側の安全弁を #75 Phase B1(利確判定の
+        # fail-close)が担う。
         _validate_purchase_price(purchase_price)
+        # --- Issue #93 Phase B1(2026-08-30): 購入株数の正値contract ---
+        # 検証順序は purchase_price → shares の順を維持する。#75 Phase B2 で
+        # 確立した「両方不正なら purchase_price のエラーが先に返る」という
+        # error precedence を、本Issueを理由に変更しない。
+        _validate_purchase_shares(shares)
 
         now = now or dt.datetime.now(dt.UTC)
         normalized_owner = normalize_and_validate_owner(owner)
