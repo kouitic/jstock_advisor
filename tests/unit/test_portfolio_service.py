@@ -928,3 +928,237 @@ def test_cli_add_rejects_non_positive_shares(invalid_shares: int) -> None:
 def test_cli_add_accepts_positive_shares() -> None:
     """T11: 正の株数は従来どおりそのままserviceへ渡る。"""
     assert holdings_cli._parse_positive_int(100, "購入株数") == 100
+
+
+# --- Issue #96 Phase B1(2026-08-30): 不正な売却株数を拒否する ------------------
+#
+# 以前は shares<=0 でも例外にならず、FIFO消費ループが `remaining <= 0` を先に判定して
+# どのロットも消費しないまま**成功として終了**していた。しかし純粋なno-opではなく、
+# 残ロットからHoldingを再計算する経路(is_sale=True)へ到達するため、
+# **売却していないのに last_sale_date が当日へ更新**されていた。
+#
+# last_sale_date は利益保全判定の基準日(basis_date)として使われるため、
+# これが不当に進むと過去の高値形成が評価対象から外れ、利益保全シグナルが抑止されうる。
+
+
+@pytest.mark.parametrize("invalid_shares", [0, -1, -50])
+def test_build_sale_write_plan_rejects_non_positive_shares(
+    portfolio_service: PortfolioService, invalid_shares: int
+) -> None:
+    """T1/T2: 売却書き込みの共通境界で0以下の株数を拒否する。"""
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+
+    with pytest.raises(ValueError, match="売却株数は0より大きい値"):
+        portfolio_service.build_sale_write_plan(DEFAULT_OWNER, "8136", invalid_shares)
+
+
+def test_invalid_sale_shares_fails_fast_before_repository_read(store_dir: Path) -> None:
+    """T3: 不正な売却株数では lot repository の読み取りにも到達しない。"""
+    reads: list[str] = []
+
+    class _RecordingLotRepository(PurchaseLotRepository):
+        def list_by_holding(self, holding_id: str):  # type: ignore[no-untyped-def]
+            reads.append(holding_id)
+            return super().list_by_holding(holding_id)
+
+    service = PortfolioService(
+        holding_repository=HoldingRepository(store_dir=store_dir),
+        lot_repository=_RecordingLotRepository(store_dir=store_dir),
+    )
+    service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    reads.clear()
+
+    with pytest.raises(ValueError, match="売却株数は0より大きい値"):
+        service.build_sale_write_plan(DEFAULT_OWNER, "8136", 0)
+
+    assert reads == []
+
+
+@pytest.mark.parametrize("invalid_shares", [0, -50])
+def test_sell_shares_with_invalid_quantity_does_not_mutate_state(
+    portfolio_service: PortfolioService, store_dir: Path, invalid_shares: int
+) -> None:
+    """T4〜T8: 不正な売却で lot / holding とも書き込まれず、state が完全に不変。
+
+    とくに **last_sale_date と updated_at が変化しない**ことが本Issueの核心。
+    以前は「売却していないのに last_sale_date が当日へ更新」されていた。
+    """
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    holding_id = build_holding_id(DEFAULT_OWNER, "8136")
+    lot_repo = PurchaseLotRepository(store_dir=store_dir)
+    holding_repo = HoldingRepository(store_dir=store_dir)
+    lots_before = lot_repo.list_by_holding(holding_id)
+    before = holding_repo.get(holding_id)
+    raw_before = holding_repo.get_raw_data(holding_id)
+    assert before is not None
+    assert before.last_sale_date is None
+
+    with pytest.raises(ValueError, match="売却株数は0より大きい値"):
+        portfolio_service.sell_shares(
+            owner=DEFAULT_OWNER, stock_code="8136", shares=invalid_shares
+        )
+
+    after = holding_repo.get(holding_id)
+    assert after is not None
+    # T4/T5: lot write 0件 / holding write 0件(raw が完全一致)
+    assert lot_repo.list_by_holding(holding_id) == lots_before
+    assert holding_repo.get_raw_data(holding_id) == raw_before
+    # T6: 保有内容が不変
+    assert after.shares == before.shares == 100
+    assert after.average_purchase_price == before.average_purchase_price
+    assert after.total_purchase_amount == before.total_purchase_amount
+    # T7: last_sale_date 不変(**本Issueの核心**)
+    assert after.last_sale_date is None
+    # T8: updated_at 不変
+    assert after.updated_at == before.updated_at
+
+
+def test_invalid_sale_shares_does_not_advance_profit_protection_basis_date(
+    portfolio_service: PortfolioService, store_dir: Path
+) -> None:
+    """T15: 不正な売却で利益保全の基準日が進まない。
+
+    `last_sale_date` は `profit_taking_service` が basis_date として採用する
+    (`last_sale_date > basis_date` なら basis_date を上書き)。ここが不当に進むと
+    それ以前の高値形成が評価対象から外れ、利益保全シグナルが抑止されうる。
+    profit protection の production code は変更せず、入力側で防ぐ。
+    """
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    holding_repo = HoldingRepository(store_dir=store_dir)
+    holding_id = build_holding_id(DEFAULT_OWNER, "8136")
+
+    for invalid_shares in (0, -50):
+        with pytest.raises(ValueError, match="売却株数は0より大きい値"):
+            portfolio_service.sell_shares(
+                owner=DEFAULT_OWNER, stock_code="8136", shares=invalid_shares
+            )
+
+    holding = holding_repo.get(holding_id)
+    assert holding is not None
+    # basis_date の候補は last_purchase_date のまま。売却日で上書きされない。
+    assert holding.last_sale_date is None
+    assert holding.last_purchase_date == dt.date(2025, 4, 1)
+
+
+def test_partial_sale_still_updates_last_sale_date(
+    portfolio_service: PortfolioService, store_dir: Path
+) -> None:
+    """T9: 一部売却は従来どおり成功し、last_sale_date が更新される(回帰)。"""
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+
+    holding = portfolio_service.sell_shares(owner=DEFAULT_OWNER, stock_code="8136", shares=50)
+
+    assert holding is not None
+    assert holding.shares == 50
+    assert holding.average_purchase_price == Decimal("3000")
+    assert holding.last_sale_date is not None
+
+
+def test_exact_all_shares_sale_deletes_holding(
+    portfolio_service: PortfolioService, store_dir: Path
+) -> None:
+    """T10: 全部売却は従来どおり Holding を削除し None を返す(回帰)。"""
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+
+    result = portfolio_service.sell_shares(owner=DEFAULT_OWNER, stock_code="8136", shares=100)
+
+    assert result is None
+    holding_id = build_holding_id(DEFAULT_OWNER, "8136")
+    assert HoldingRepository(store_dir=store_dir).get(holding_id) is None
+    assert PurchaseLotRepository(store_dir=store_dir).list_by_holding(holding_id) == []
+
+
+def test_over_sell_is_still_rejected(portfolio_service: PortfolioService) -> None:
+    """T11: 保有超過の売却は従来どおり拒否される(回帰)。"""
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+
+    with pytest.raises(ValueError, match="保有株数"):
+        portfolio_service.sell_shares(owner=DEFAULT_OWNER, stock_code="8136", shares=200)
+
+
+def test_invalid_owner_error_takes_precedence_over_invalid_sale_shares(
+    portfolio_service: PortfolioService,
+) -> None:
+    """T12: owner と株数がともに不正なら **owner のエラーが先**。
+
+    owner は holding_id 導出の前提であり、既存順序を壊さない。
+    """
+    with pytest.raises(ValueError) as excinfo:
+        portfolio_service.build_sale_write_plan("", "8136", 0)
+
+    assert "売却株数" not in str(excinfo.value)
+
+
+def test_invalid_sale_shares_takes_precedence_over_missing_holding(
+    portfolio_service: PortfolioService,
+) -> None:
+    """T13: 保有していない銘柄でも、株数が不正なら **株数のエラーが先**。
+
+    入力自体が不正なので、保有の有無を調べる(repository read)前に弾く。
+    """
+    with pytest.raises(ValueError, match="売却株数は0より大きい値"):
+        portfolio_service.build_sale_write_plan(DEFAULT_OWNER, "9999", 0)
+
+
+def test_missing_holding_error_is_unchanged_for_valid_shares(
+    portfolio_service: PortfolioService,
+) -> None:
+    """T13補足: 株数が正なら従来どおり「購入ロットがありません」(回帰)。"""
+    with pytest.raises(ValueError, match="購入ロットがありません"):
+        portfolio_service.build_sale_write_plan(DEFAULT_OWNER, "9999", 100)
