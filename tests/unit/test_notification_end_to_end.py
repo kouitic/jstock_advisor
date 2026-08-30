@@ -19,6 +19,10 @@ from jstock_advisor.domain.entities.common import (
     PriceWithRationale,
     SellPriceLevels,
 )
+from jstock_advisor.domain.entities.daily_notification_priority import (
+    DailyNotificationPriorityRecord,
+    build_daily_notification_priority_id,
+)
 from jstock_advisor.domain.entities.enums import (
     BuyAction,
     ConfidenceLevel,
@@ -31,6 +35,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
@@ -185,6 +190,38 @@ def _partial_sell_recommendation(
         reasons=["含み益が閾値を超過"],
         confidence=ConfidenceLevel.MEDIUM,
         rule_version="v1-mvp",
+    )
+
+
+def _daily_priority_record(svc: LineNotificationService, recommendation: Recommendation):
+    """当該Recommendationのscopeに対応する当日の優先度記録を返す。"""
+    record_id = build_daily_notification_priority_id(
+        recommendation.stock_code,
+        evaluation_date_jst(_NOW),
+        holding_id=recommendation.holding_id,
+    )
+    return svc._daily_priority_repo.get(record_id)
+
+
+def _put_daily_priority_record(
+    svc: LineNotificationService, stock_code: str, holding_id: str | None, category: str
+) -> None:
+    """既送信状態を直接作る(通知経路を通さずに読み取り側の分岐だけを検証するため)。
+
+    `category` には未知の文字列も渡せる(fail-close の検証に使う)。
+    """
+    business_date = evaluation_date_jst(_NOW)
+    svc._daily_priority_repo.upsert(
+        DailyNotificationPriorityRecord(
+            record_id=build_daily_notification_priority_id(
+                stock_code, business_date, holding_id=holding_id
+            ),
+            stock_code=stock_code,
+            holding_id=holding_id,
+            business_date=business_date,
+            priority=4,
+            category=category,
+        )
     )
 
 
@@ -390,10 +427,17 @@ def test_partial_sell_and_sell_are_same_tier_second_one_suppressed(service) -> N
     assert eligibility.block_category.value == "DUPLICATE_STOCK_NOTIFICATION"
 
 
-def test_sell_after_partial_sell_same_tier_also_suppressed(service) -> None:
-    """G2: G1の対称ケース。同日PARTIAL_SELL通知済み → 同一銘柄の通常SELLも
-    同tierのため抑止される(sell-side通知は方向を問わず1日1回で十分という
-    業務判断)。"""
+def test_sell_after_partial_sell_same_day_is_allowed_as_escalation(service) -> None:
+    """G2(Issue #60 A1で方針転換): 同日PARTIAL_SELL通知済み → 同一銘柄のSELLは
+    **エスカレーションとして送信される**。
+
+    旧契約は「sell-side通知は方向を問わず1日1回で十分」という業務判断で、
+    同tier(priority 4)のため抑止していた。しかし一部売却と全部売却は利用者へ
+    求める行動が異なり、強まった側が届かないのは投資判断に直結するため、
+    この組み合わせだけを例外として通す(F-M5)。
+
+    G1(`SELL → PARTIAL_SELL`、逆方向)は従来どおり抑止する。
+    """
     svc, client = service
     stock_code = "4631"
     partial = _partial_sell_recommendation(
@@ -404,6 +448,157 @@ def test_sell_after_partial_sell_same_tier_also_suppressed(service) -> None:
     svc.send_recommendation_notification(partial, _NOW)
     assert len(client.sent) == 1
 
+    eligibility = svc.check_cross_pipeline_priority_eligibility(sell, _NOW)
+    assert eligibility.eligible is True
+    assert eligibility.block_category is None
+
+
+def test_partial_sell_after_partial_sell_same_day_is_suppressed(service) -> None:
+    """G2-a: 同一アクションの再通知は従来どおり抑止する(エスカレーションではない)。"""
+    svc, client = service
+    stock_code = "4631"
+    first = _partial_sell_recommendation(
+        stock_code=stock_code, recommendation_id="rec-partial-g2a-1"
+    )
+    second = _partial_sell_recommendation(
+        stock_code=stock_code, recommendation_id="rec-partial-g2a-2"
+    )
+
+    svc.send_recommendation_notification(first, _NOW)
+    assert len(client.sent) == 1
+
+    eligibility = svc.check_cross_pipeline_priority_eligibility(second, _NOW)
+    assert eligibility.eligible is False
+    assert eligibility.block_category is not None
+    assert eligibility.block_category.value == "DUPLICATE_STOCK_NOTIFICATION"
+
+
+def test_sell_after_sell_same_day_is_suppressed(service) -> None:
+    """G2-b: SELLの再通知も従来どおり抑止する。"""
+    svc, client = service
+    stock_code = "4631"
+    first = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2b-1")
+    second = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2b-2")
+
+    svc.send_recommendation_notification(first, _NOW)
+    assert len(client.sent) == 1
+
+    eligibility = svc.check_cross_pipeline_priority_eligibility(second, _NOW)
+    assert eligibility.eligible is False
+    assert eligibility.block_category is not None
+    assert eligibility.block_category.value == "DUPLICATE_STOCK_NOTIFICATION"
+
+
+def test_escalation_advances_recorded_category_to_sell(service) -> None:
+    """G2-c(Issue #60 A1): エスカレーションで実際にSELLを送ったら、当日の記録の
+    categoryをSELLへ前進させる。priorityは4のまま変えない。
+
+    これが無いと記録はPARTIAL_SELLのまま残り、同日2通目以降のSELLも
+    「PARTIAL_SELLからのエスカレーション」と誤判定されて送信され続ける。
+    """
+    svc, client = service
+    stock_code = "4631"
+    partial = _partial_sell_recommendation(
+        stock_code=stock_code, recommendation_id="rec-partial-g2c"
+    )
+    sell = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2c")
+
+    svc.send_recommendation_notification(partial, _NOW)
+    record = _daily_priority_record(svc, partial)
+    assert record is not None
+    assert (record.priority, record.category) == (4, "PARTIAL_SELL")
+
+    svc.send_recommendation_notification(sell, _NOW)
+    assert len(client.sent) == 2
+
+    record = _daily_priority_record(svc, sell)
+    assert record is not None
+    assert record.category == "SELL"
+    assert record.priority == 4, "priority階層は変更しない"
+
+
+def test_second_sell_after_escalation_same_day_is_suppressed(service) -> None:
+    """G2-d(Issue #60 A1): エスカレーションを許すのは1回だけ。
+
+    PARTIAL_SELL → SELL を通した後、同日さらにSELLが発生しても抑止する
+    (エスカレーションの連鎖でSELLが何通も届くことを防ぐ)。
+    """
+    svc, client = service
+    stock_code = "4631"
+    svc.send_recommendation_notification(
+        _partial_sell_recommendation(stock_code=stock_code, recommendation_id="rec-partial-g2d"),
+        _NOW,
+    )
+    svc.send_recommendation_notification(
+        _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2d-1"), _NOW
+    )
+    assert len(client.sent) == 2
+
+    third = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2d-2")
+    eligibility = svc.check_cross_pipeline_priority_eligibility(third, _NOW)
+    assert eligibility.eligible is False
+    assert eligibility.block_category is not None
+    assert eligibility.block_category.value == "DUPLICATE_STOCK_NOTIFICATION"
+
+
+def test_escalation_on_next_jst_day_is_a_normal_send(service) -> None:
+    """G2-e: 別JST日のPARTIAL_SELL → SELLは、エスカレーション判定を経ずに
+    通常送信される(記録は日付を含むキーで分離されている)。"""
+    svc, client = service
+    stock_code = "4631"
+    svc.send_recommendation_notification(
+        _partial_sell_recommendation(stock_code=stock_code, recommendation_id="rec-partial-g2e"),
+        _NOW,
+    )
+
+    next_day = _NOW + dt.timedelta(days=1)
+    sell = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2e")
+    assert svc.check_cross_pipeline_priority_eligibility(sell, next_day).eligible is True
+
+
+def test_escalation_does_not_leak_to_other_stock(service) -> None:
+    """G2-f: 別銘柄のPARTIAL_SELL記録はエスカレーション判定に干渉しない。"""
+    svc, client = service
+    svc.send_recommendation_notification(
+        _partial_sell_recommendation(stock_code="4631", recommendation_id="rec-partial-g2f"), _NOW
+    )
+
+    other_sell = _sell_recommendation(stock_code="9999", recommendation_id="rec-sell-g2f")
+    assert svc.check_cross_pipeline_priority_eligibility(other_sell, _NOW).eligible is True
+
+
+def test_escalation_blocked_when_any_same_priority_record_is_not_escalation(service) -> None:
+    """G2-g: stock-scopeとholding-scopeの両方が同priorityで存在する場合、
+    **1件でもエスカレーションに該当しなければ抑止**する(安全側)。
+
+    holding側がPARTIAL_SELLでも、stock側が既にSELLならSELLを通さない。
+    """
+    svc, _ = service
+    stock_code = "4631"
+    holding_id = "owner-a#4631"
+
+    # stock-scope: SELL(エスカレーション元にならない)
+    _put_daily_priority_record(svc, stock_code, None, "SELL")
+    # holding-scope: PARTIAL_SELL(単独ならエスカレーション元になる)
+    _put_daily_priority_record(svc, stock_code, holding_id, "PARTIAL_SELL")
+
+    sell = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2g")
+    sell = sell.model_copy(update={"holding_id": holding_id})
+
+    eligibility = svc.check_cross_pipeline_priority_eligibility(sell, _NOW)
+    assert eligibility.eligible is False
+    assert eligibility.block_category is not None
+    assert eligibility.block_category.value == "DUPLICATE_STOCK_NOTIFICATION"
+
+
+def test_unknown_recorded_category_does_not_allow_escalation(service) -> None:
+    """G2-h: 記録のcategoryを解釈できない場合はエスカレーションを許可しない
+    (fail-close。判断できないときに通知を増やす方向へ倒さない)。"""
+    svc, _ = service
+    stock_code = "4631"
+    _put_daily_priority_record(svc, stock_code, None, "SOME_UNKNOWN_CATEGORY")
+
+    sell = _sell_recommendation(stock_code=stock_code, recommendation_id="rec-sell-g2h")
     eligibility = svc.check_cross_pipeline_priority_eligibility(sell, _NOW)
     assert eligibility.eligible is False
     assert eligibility.block_category is not None

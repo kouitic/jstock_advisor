@@ -375,6 +375,50 @@ _NOTIFICATION_PRIORITY: dict[NotificationCategory, int] = {
     NotificationCategory.BUY: 3,
 }
 _PROMOTED_TO_BUY_PRIORITY = 5
+
+# Issue #60 A1(F-M5): 同一tier(同一priority)であっても、**業務上のエスカレーション**
+# にあたる組み合わせだけは重複扱いにせず通知する。
+#
+# 従来は「sell-side通知は方向を問わず1日1回で十分」という業務判断で、同日に
+# PARTIAL_SELL(一部売却検討)を送った銘柄がSELL(全部売却検討)へ強まっても
+# DUPLICATE_STOCK_NOTIFICATIONとして抑止していた。しかし一部売却と全部売却は
+# 利用者に求める行動が異なり、強まった側が届かないのは投資判断に直結するため、
+# この1組だけを例外とする(#60 Phase A1で方針転換)。
+#
+# **priority値そのものは変更しない。** SELL/PARTIAL_SELLの値を変えると
+# `notification_priority_for_recommendation()`を再利用している
+# `buy_candidates_handler.py`の「複数ownerの競合Recommendationから最も強いものを
+# 選ぶ」判定まで変わってしまい、F-M5の外側へ波及するためである。
+#
+# ここへ組を足すことは「同priorityでも通す通知が増える」ことを意味する。
+# 「同tierだから全部通す」へ広げてはならない。
+_NOTIFICATION_ESCALATIONS: frozenset[tuple[NotificationCategory, NotificationCategory]] = (
+    frozenset({(NotificationCategory.PARTIAL_SELL, NotificationCategory.SELL)})
+)
+
+
+def _is_notification_escalation(
+    existing_category: NotificationCategory | None,
+    incoming_category: NotificationCategory,
+) -> bool:
+    """既送信の通知から今回の通知への遷移が、業務上のエスカレーションかを返す。
+
+    Trueになるのは `PARTIAL_SELL → SELL` のみ。逆方向(`SELL → PARTIAL_SELL`)・
+    同一カテゴリの再通知・その他のカテゴリはすべてFalseとする。
+    `existing_category` がNone(記録のcategoryを解釈できない)場合もFalse
+    (fail-close。判断できないときに通知を増やす方向へ倒さない)。
+    """
+    if existing_category is None:
+        return False
+    return (existing_category, incoming_category) in _NOTIFICATION_ESCALATIONS
+
+
+def _parse_notification_category(raw: str) -> NotificationCategory | None:
+    """永続化されたcategory文字列をenumへ戻す。解釈できなければNone(fail-close)。"""
+    try:
+        return NotificationCategory(raw)
+    except ValueError:
+        return None
 # 再コードレビュー対応(2026-08、通知意図3段階化): ATTENTION(Profit Protection
 # candidate/strong起因のWATCH)をCross Pipeline Priorityへ参加させる。
 # CRITICAL_RISK(6) > PROMOTED_TO_BUY(5) > SELL/PARTIAL_SELL(4) > BUY(3) >
@@ -2367,23 +2411,36 @@ class LineNotificationService:
             if recommendation.holding_id is not None
             else None
         )
-        existing_priority = max(
-            (r.priority for r in (stock_record, holding_record) if r is not None), default=None
-        )
-        if existing_priority is None:
+        existing_records = [r for r in (stock_record, holding_record) if r is not None]
+        if not existing_records:
             return NotificationEligibility(eligible=True)
-        if existing_priority > this_priority:
+        if any(r.priority > this_priority for r in existing_records):
             return NotificationEligibility(
                 eligible=False,
                 block_category=EligibilityBlockCategory.LOW_PRIORITY,
                 block_reason="LOW_PRIORITY",
             )
-        if existing_priority == this_priority:
-            return NotificationEligibility(
-                eligible=False,
-                block_category=EligibilityBlockCategory.DUPLICATE_STOCK_NOTIFICATION,
-                block_reason="DUPLICATE_STOCK_NOTIFICATION",
-            )
+        # Issue #60 A1(F-M5): 同priorityの既存記録をrecord単位で見る。
+        # 従来はmax(priority)へ畳み込んでいたため「どちらのcategoryが最大だったか」
+        # を失い、PARTIAL_SELL済みの銘柄がSELLへ強まっても区別できなかった。
+        #
+        # **同priorityの既存記録が1件でもエスカレーションに該当しなければ抑止する**
+        # (安全側)。stock-scopeとholding-scopeの両方が同priorityで存在し、
+        # 片方が既にSELLなら、もう片方がPARTIAL_SELLでも通さない。
+        same_priority = [r for r in existing_records if r.priority == this_priority]
+        if same_priority:
+            incoming_category = resolve_notification_category(recommendation)
+            if not all(
+                _is_notification_escalation(
+                    _parse_notification_category(r.category), incoming_category
+                )
+                for r in same_priority
+            ):
+                return NotificationEligibility(
+                    eligible=False,
+                    block_category=EligibilityBlockCategory.DUPLICATE_STOCK_NOTIFICATION,
+                    block_reason="DUPLICATE_STOCK_NOTIFICATION",
+                )
         return NotificationEligibility(eligible=True)
 
     def _record_daily_priority(self, recommendation: Recommendation, now: dt.datetime) -> None:
@@ -2407,10 +2464,26 @@ class LineNotificationService:
         record_id = build_daily_notification_priority_id(
             recommendation.stock_code, business_date, holding_id=recommendation.holding_id
         )
-        existing = self._daily_priority_repo.get(record_id)
-        if existing is not None and existing.priority >= priority:
-            return
         category = resolve_notification_category(recommendation)
+        existing = self._daily_priority_repo.get(record_id)
+        if existing is not None:
+            if existing.priority > priority:
+                return
+            # Issue #60 A1(F-M5): 同priorityでも、エスカレーション
+            # (PARTIAL_SELL → SELL)で実際に送信したときだけcategoryを前進させる。
+            #
+            # 従来は`existing.priority >= priority`で一律returnしていたため、
+            # PARTIAL_SELL記録後にSELLを送ってもcategoryがPARTIAL_SELLのまま残った。
+            # read側だけを直すと、同日2通目以降のSELLも「PARTIAL_SELLからの
+            # エスカレーション」と誤判定されて送信され続けてしまう。
+            #
+            # 逆方向(SELL → PARTIAL_SELL)・同一category・その他の同priorityは
+            # 更新しない(fail-close)。categoryはSELL系において
+            # PARTIAL_SELL → SELL の一方向にのみ前進し、後退しない。
+            if existing.priority == priority and not _is_notification_escalation(
+                _parse_notification_category(existing.category), category
+            ):
+                return
         self._daily_priority_repo.upsert(
             DailyNotificationPriorityRecord(
                 record_id=record_id,
