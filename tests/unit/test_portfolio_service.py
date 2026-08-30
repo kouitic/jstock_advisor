@@ -3,10 +3,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import typer
 
+from jstock_advisor.cli import holdings as holdings_cli
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import AccountType, CorporateActionType
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
+from jstock_advisor.domain.entities.holding import PurchaseLot
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
@@ -516,3 +519,200 @@ def test_register_purchase_and_sell_shares_behavior_unchanged_via_plan_refactor(
     assert result is None
     assert portfolio_service.get_holding(DEFAULT_OWNER, "8136") is None
     assert portfolio_service.list_lots(DEFAULT_OWNER, "8136") == []
+
+
+# --- Issue #75 Phase B2(2026-08-30): 不正な取得単価を新規に永続化させない -------
+#
+# Phase B1 は「既に不正なデータ」に対する利確判定の fail-close だった。
+# B2 は「新しい不正データを作らせない」write prevention を扱う。
+# 権威は PortfolioService の購入書き込み境界であり、CLI 側は二重防御。
+#
+# entity validator は置かない(#63 の historical compatibility へ干渉するため)。
+# したがって read 互換は壊さず、write だけを塞ぐ。
+
+
+@pytest.mark.parametrize("invalid_price", [Decimal("0"), Decimal("-1"), Decimal("-3775")])
+def test_build_purchase_write_plan_rejects_non_positive_price(
+    portfolio_service: PortfolioService, invalid_price: Decimal
+) -> None:
+    """T1/T2: 共通の購入書き込み境界で0以下の取得単価を拒否する。"""
+    with pytest.raises(ValueError, match="購入単価は0より大きい値"):
+        portfolio_service.build_purchase_write_plan(
+            DEFAULT_OWNER,
+            "8136",
+            "サンリオ",
+            100,
+            invalid_price,
+            dt.date(2025, 4, 1),
+            AccountType.NISA,
+        )
+
+
+@pytest.mark.parametrize("invalid_price", [Decimal("0"), Decimal("-1")])
+def test_register_purchase_rejects_non_positive_price_without_persisting(
+    portfolio_service: PortfolioService, store_dir: Path, invalid_price: Decimal
+) -> None:
+    """T3/T4/T12: 拒否時にlot・holdingがいずれも書き込まれない(fail-fast)。
+
+    build_purchase_write_plan の冒頭で検証するため、repository の状態は
+    まったく変化しない。
+    """
+    lot_repo = PurchaseLotRepository(store_dir=store_dir)
+    holding_repo = HoldingRepository(store_dir=store_dir)
+    holding_id = build_holding_id(DEFAULT_OWNER, "8136")
+
+    with pytest.raises(ValueError, match="購入単価は0より大きい値"):
+        portfolio_service.register_purchase(
+            owner=DEFAULT_OWNER,
+            stock_code="8136",
+            stock_name="サンリオ",
+            shares=100,
+            purchase_price=invalid_price,
+            purchase_date=dt.date(2025, 4, 1),
+            account_type=AccountType.NISA,
+        )
+
+    assert lot_repo.list_by_holding(holding_id) == []
+    assert holding_repo.get(holding_id) is None
+    assert holding_repo.list_all() == []
+
+
+def test_register_purchase_with_positive_price_is_unchanged(
+    portfolio_service: PortfolioService,
+) -> None:
+    """T5: 正の取得単価は従来どおり登録される(回帰)。"""
+    holding = portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+
+    assert holding.average_purchase_price == Decimal("3775")
+    assert holding.shares == 100
+
+
+def test_additional_purchase_with_positive_price_is_unchanged(
+    portfolio_service: PortfolioService,
+) -> None:
+    """T6: 既存保有への追加購入も正の価格なら従来どおり(回帰)。"""
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    holding = portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("4000"),
+        purchase_date=dt.date(2025, 6, 1),
+        account_type=AccountType.NISA,
+    )
+
+    assert holding.shares == 200
+    assert holding.average_purchase_price == Decimal("3500")
+
+
+def test_additional_purchase_with_invalid_price_does_not_corrupt_existing_holding(
+    portfolio_service: PortfolioService, store_dir: Path
+) -> None:
+    """T12補足: 既存保有がある状態でも、不正価格の追加購入は状態を変えない。"""
+    portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3000"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+    )
+    holding_id = build_holding_id(DEFAULT_OWNER, "8136")
+    lot_repo = PurchaseLotRepository(store_dir=store_dir)
+    holding_repo = HoldingRepository(store_dir=store_dir)
+    lots_before = len(lot_repo.list_by_holding(holding_id))
+    holding_before = holding_repo.get(holding_id)
+    assert holding_before is not None
+
+    with pytest.raises(ValueError, match="購入単価は0より大きい値"):
+        portfolio_service.register_purchase(
+            owner=DEFAULT_OWNER,
+            stock_code="8136",
+            stock_name="サンリオ",
+            shares=100,
+            purchase_price=Decimal("0"),
+            purchase_date=dt.date(2025, 6, 1),
+            account_type=AccountType.NISA,
+        )
+
+    assert len(lot_repo.list_by_holding(holding_id)) == lots_before
+    holding_after = holding_repo.get(holding_id)
+    assert holding_after is not None
+    assert holding_after.shares == holding_before.shares
+    assert holding_after.average_purchase_price == holding_before.average_purchase_price
+
+
+def test_zero_fee_remains_valid(portfolio_service: PortfolioService) -> None:
+    """T10: 手数料0は従来どおり合法(取得単価だけを正値必須にした)。"""
+    holding = portfolio_service.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code="8136",
+        stock_name="サンリオ",
+        shares=100,
+        purchase_price=Decimal("3775"),
+        purchase_date=dt.date(2025, 4, 1),
+        account_type=AccountType.NISA,
+        fee=Decimal("0"),
+    )
+
+    assert holding.shares == 100
+
+
+def test_historical_lot_with_invalid_price_is_still_constructible() -> None:
+    """T11: entity validator を追加していないため、既存の不正レコードは読める。
+
+    write は塞ぐが read 互換は壊さない(#63 の historical compatibility を維持)。
+    既にそうなっている保有銘柄の安全弁は Phase B1(利確判定の fail-close)が担う。
+    """
+    lot = PurchaseLot(
+        lot_id="lot-legacy",
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "8136"),
+        stock_code="8136",
+        purchase_date=dt.date(2020, 1, 1),
+        shares=100,
+        purchase_price=Decimal("0"),
+        account_type=AccountType.SPECIFIC,
+    )
+
+    assert lot.purchase_price == Decimal("0")
+    assert lot.amount() == Decimal("0")
+
+
+# --- CLI 側の二重防御 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("invalid_price", ["0", "-1", "-3775"])
+def test_cli_add_rejects_non_positive_price(invalid_price: str) -> None:
+    """T7/T8: CLIは永続層へ到達する前に BadParameter で拒否する。"""
+    with pytest.raises(typer.BadParameter, match="0より大きい値"):
+        holdings_cli._parse_positive_decimal(invalid_price, "購入単価")
+
+
+def test_cli_add_accepts_positive_price() -> None:
+    """T9: 正の価格は従来どおりそのままserviceへ渡る。"""
+    assert holdings_cli._parse_positive_decimal("3775", "購入単価") == Decimal("3775")
+
+
+def test_cli_fee_parser_still_accepts_zero() -> None:
+    """T10補足: 既存の `_parse_decimal` へ無条件の正値制約を加えていない。"""
+    assert holdings_cli._parse_decimal("0", "手数料") == Decimal("0")
+    assert holdings_cli._parse_decimal("-100", "手数料") == Decimal("-100")
