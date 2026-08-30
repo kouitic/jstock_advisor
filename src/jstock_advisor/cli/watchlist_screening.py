@@ -129,6 +129,10 @@ def run(
     # とrecord_repository_result_audit(dry-runでは呼ばない)の両方へ同じ値を渡すことで、
     # 後からbatch_id経由で評価結果とRepository結果を突き合わせられるようにする。
     batch_id = f"watchlist-screening-cli-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    # Issue #58 F-O6: batch_idは追加した銘柄の`registration_batch_id`として
+    # 保存される。障害時に「どの実行が何を追加したか」を運用者が追跡できるよう、
+    # 実行の最初に必ず表示する(実行ごとに新しい値であり、再実行では変わる)。
+    typer.echo(f"batch_id: {batch_id}")
     config = load_config()
     wc = config.watchlist_screening
 
@@ -249,6 +253,12 @@ def run(
             reason=describe_matched_criteria(entry.matched_criteria),
             registration_source=WatchlistRegistrationSource.AUTO_SCREENING,
             registration_policy=wc.screening_policy,
+            # Issue #58 F-O6: どの実行がこの銘柄を追加したか(provenance)を残す。
+            # Lambda側(watchlist_batch_finalizer.py:518)は設定しているが、CLIは
+            # 設定していなかったため、CLI追加分は「誰が追加したか」を後から辿れず、
+            # finalizerの復旧分岐(同 :550-554)の判定材料にもならなかった。
+            # 手動登録(MANUAL)へは設定しない(AUTO_SCREENING追加時のみ)。
+            registration_batch_id=batch_id,
             created_at=now,
             updated_at=now,
         )

@@ -8,6 +8,10 @@ from typer.testing import CliRunner
 from jstock_advisor.cli import watchlist_screening as cli_module
 from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.domain.entities.enums import ConfidenceLevel
+from jstock_advisor.domain.entities.watchlist import (
+    WatchlistItem,
+    WatchlistRegistrationSource,
+)
 from jstock_advisor.interfaces.candidate_universe import (
     CandidateUniverseError,
 )
@@ -391,3 +395,174 @@ def test_real_run_reports_candidate_universe_error(monkeypatch: pytest.MonkeyPat
 
     assert result.exit_code == 1
     assert "見つかりません" in result.output
+
+
+# ============================================================================
+# Issue #58 Phase B3 (F-O6): CLI screening の provenance
+#
+# `registration_batch_id` は「どの実行がこの銘柄を追加したか」の記録である。
+# Lambda側(watchlist_batch_finalizer.py:518)は設定していたが、CLIは設定して
+# いなかったため、CLI追加分は provenance を辿れず、finalizer の復旧分岐
+# (同 :550-554)の判定材料にもならなかった。
+#
+# **resume(途中結果の復旧)は本Phaseでは実装していない。**
+# CLI の batch_id は実行ごとに新規発行される実行インスタンスIDであり、
+# 再実行では必ず別値になる。そのため provenance を保存しただけでは
+# 復旧分岐は成立しない(詳細は Issue #58 の Phase A コメント)。
+# ここで固定するのは provenance の記録と、それが誤って復旧の根拠に
+# 使われない(別batch・MANUAL・未設定を own-added とみなさない)ことである。
+# ============================================================================
+
+
+class _ExistingAwareWatchlistRepository:
+    """既存項目を持つ WatchlistRepository の fake。
+
+    `add_if_new` は「既存があれば触らず False」という本物の契約
+    (`local_repository/watchlist_repository.py:29-35`)を再現する。
+    """
+
+    def __init__(self, preexisting: dict[str, Any] | None = None) -> None:
+        self.items: dict[str, Any] = dict(preexisting or {})
+        self.added: list[Any] = []
+        self.write_attempts: list[str] = []
+
+    def add_if_new(self, item: Any) -> bool:
+        self.write_attempts.append(item.stock_code)
+        if item.stock_code in self.items:
+            return False
+        self.items[item.stock_code] = item
+        self.added.append(item)
+        return True
+
+    def get(self, stock_code: str) -> Any:
+        return self.items.get(stock_code)
+
+
+def _run_cli_with_repo(
+    monkeypatch: pytest.MonkeyPatch, repo: _ExistingAwareWatchlistRepository
+) -> tuple[Any, list[tuple], list[Any]]:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(cli_module, "WatchlistRepository", lambda: repo)
+
+    notify_calls: list[Any] = []
+
+    class _FakeNotificationService:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def notify_watchlist_additions(self, summary, content_hash):  # noqa: ANN001, ANN201
+            notify_calls.append((list(summary.items), content_hash))
+            return True
+
+    monkeypatch.setattr(cli_module, "LineNotificationService", _FakeNotificationService)
+    monkeypatch.setattr(cli_module, "record_candidate_audit", lambda *a, **kw: None)
+    monkeypatch.setattr(cli_module, "record_batch_audit", lambda **kw: None)
+    repo_result_calls: list[tuple] = []
+    monkeypatch.setattr(
+        cli_module,
+        "record_repository_result_audit",
+        lambda *a, **kw: repo_result_calls.append(a),
+    )
+
+    result = _runner.invoke(cli_module.app, ["run"])
+    assert result.exit_code == 0, result.output
+    return result, repo_result_calls, notify_calls
+
+
+def test_cli_add_records_registration_batch_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T1: 通常の CLI 追加で `registration_batch_id` が保存される。
+
+    値はその実行の batch_id と一致し、CLI が発行した形式であること。
+    """
+    repo = _ExistingAwareWatchlistRepository()
+    result, repo_result_calls, _ = _run_cli_with_repo(monkeypatch, repo)
+
+    assert len(repo.added) == 1
+    added = repo.added[0]
+    assert added.registration_batch_id is not None
+    # record_repository_result_audit の第1引数が当該実行の batch_id
+    assert added.registration_batch_id == repo_result_calls[0][0]
+    assert added.registration_batch_id.startswith("watchlist-screening-cli-")
+    # provenance は AUTO_SCREENING 追加にのみ付く
+    assert added.registration_source is WatchlistRegistrationSource.AUTO_SCREENING
+
+
+def test_cli_prints_batch_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T2: batch_id が CLI 出力に現れる(障害時に運用者が控えられる)。"""
+    repo = _ExistingAwareWatchlistRepository()
+    result, _, _ = _run_cli_with_repo(monkeypatch, repo)
+
+    assert "batch_id: " in result.output
+    assert repo.added[0].registration_batch_id in result.output
+
+
+def test_cli_batch_id_differs_between_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """batch_id は実行インスタンスIDであり、再実行では必ず別値になる。
+
+    これが「provenance を保存しただけでは resume 復旧が成立しない」根拠であり、
+    resume を別途設計する必要がある理由(Issue #58 Phase A)。
+    """
+    first, _, _ = _run_cli_with_repo(monkeypatch, _ExistingAwareWatchlistRepository())
+    second, _, _ = _run_cli_with_repo(monkeypatch, _ExistingAwareWatchlistRepository())
+
+    def _batch_id(output: str) -> str:
+        line = next(ln for ln in output.splitlines() if ln.startswith("batch_id: "))
+        return line.removeprefix("batch_id: ").strip()
+
+    assert _batch_id(first.output) != _batch_id(second.output)
+
+
+@pytest.mark.parametrize(
+    ("case", "preexisting_kwargs"),
+    [
+        # T4: 別 batch の AUTO_SCREENING 既存項目
+        ("different_batch", {
+            "registration_source": WatchlistRegistrationSource.AUTO_SCREENING,
+            "registration_batch_id": "watchlist-screening-cli-20260101T000000-deadbeef",
+        }),
+        # T5: 手動登録の既存項目
+        ("manual", {"registration_source": WatchlistRegistrationSource.MANUAL}),
+        # T6: registration_batch_id 未設定の旧レコード
+        ("legacy_without_batch_id", {
+            "registration_source": WatchlistRegistrationSource.AUTO_SCREENING,
+            "registration_batch_id": None,
+        }),
+    ],
+)
+def test_cli_existing_item_is_skipped_and_preserved(
+    monkeypatch: pytest.MonkeyPatch, case: str, preexisting_kwargs: dict[str, Any]
+) -> None:
+    """T4 / T5 / T6: 既存項目は上書きせず `skipped_existing` とする。
+
+    CLI は provenance を**書く**だけで、それを根拠に既存項目を own-added として
+    復元する分岐を持たない。別batch・MANUAL・未設定のいずれも、
+    誤って「自分が追加した」とみなされないことを固定する。
+    """
+    preexisting = WatchlistItem(
+        stock_code="1234",
+        stock_name="既存の銘柄",
+        memo="利用者が書いたメモ",
+        reason="既存の理由",
+        registration_policy="preexisting_policy",
+        created_at=_NOW - dt.timedelta(days=30),
+        updated_at=_NOW - dt.timedelta(days=30),
+        **preexisting_kwargs,
+    )
+    repo = _ExistingAwareWatchlistRepository({"1234": preexisting})
+
+    _, repo_result_calls, notify_calls = _run_cli_with_repo(monkeypatch, repo)
+
+    # 追加は発生しない
+    assert repo.added == []
+    assert repo.write_attempts == ["1234"], "add_if_new は1回だけ試行される"
+    # skipped_existing として監査される(added にはならない)
+    results = [c[5] for c in repo_result_calls]
+    assert results == ["skipped_existing"], f"{case}: {results}"
+    # 既存項目の内容は一切変わらない
+    survivor = repo.get("1234")
+    assert survivor is preexisting
+    assert survivor.memo == "利用者が書いたメモ"
+    assert survivor.registration_source is preexisting.registration_source
+    assert survivor.registration_batch_id == preexisting.registration_batch_id
+    # 追加0件のため追加通知も送らない
+    assert notify_calls == []
