@@ -20,7 +20,12 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
-from jstock_advisor.infrastructure.aws.batch_tracker import record_terminal_failure
+from jstock_advisor.infrastructure.aws.batch_tracker import (
+    UnknownWatchlistJobTypeError,
+    WatchlistJobType,
+    record_terminal_failure,
+    resolve_watchlist_job_type,
+)
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
@@ -33,7 +38,10 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
-from jstock_advisor.services.watchlist_batch_finalizer import maybe_finalize
+from jstock_advisor.services.watchlist_batch_finalizer import (
+    maybe_finalize,
+    maybe_finalize_maintenance,
+)
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
 
 logger = logging.getLogger(__name__)
@@ -65,7 +73,35 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         stock_code = body["stock_code"]
 
         if record_terminal_failure(batch_id, stock_code, now):
-            maybe_finalize(batch_id, now, providers, config, notification_service)
+            # Issue #56: この銘柄が最後の未処理分だった場合、ここがfinalizeの
+            # 起点になる。job_typeを見ずに常にADD用finalizerを呼ぶと、
+            # WATCHLIST_MAINTENANCEバッチがメンテナンス業務(自動削除・
+            # 連続非該当カウント更新・監視スコア更新)を一切実行しないまま
+            # COMPLETED(終端)になり、二度と実行されない。
+            # job_typeはSQSメッセージ本文に含まれている
+            # (watchlist_dispatcher_handler.py)。
+            try:
+                job_type = resolve_watchlist_job_type(
+                    body.get("job_type"),
+                    default=WatchlistJobType.NEW_CANDIDATE_SCREENING,
+                )
+            except UnknownWatchlistJobTypeError:
+                # 未知値は暗黙にどちらかへ倒さずfail-closeする。
+                # finalizeしないだけでterminal failure自体は記録済みであり、
+                # Reconcilerのtimeout経路が後続を担う。
+                logger.error(
+                    "watchlist terminal failure handler: unknown job_type=%r "
+                    "batch_id=%s stock_code=%s (finalize skipped)",
+                    body.get("job_type"),
+                    batch_id,
+                    stock_code,
+                )
+                processed.append({"batch_id": batch_id, "stock_code": stock_code})
+                continue
+            if job_type is WatchlistJobType.WATCHLIST_MAINTENANCE:
+                maybe_finalize_maintenance(batch_id, now, config)
+            else:
+                maybe_finalize(batch_id, now, providers, config, notification_service)
         else:
             # 既に他の主体(Worker/Reconciler)が終端状態へ確定済み(冪等スキップ)。
             logger.info(

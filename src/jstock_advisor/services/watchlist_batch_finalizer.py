@@ -95,7 +95,9 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     NOTIFICATION_OUTCOME_SENT,
     NOTIFICATION_OUTCOME_SKIPPED,
     CandidateProgressRecord,
+    UnknownWatchlistJobTypeError,
     WatchlistBatchStatus,
+    WatchlistJobType,
     WatchlistProgressStatus,
     get_watchlist_batch,
     mark_batch_audit_recorded,
@@ -110,6 +112,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     record_notification_resolved,
     record_repository_result_item,
     resolve_watchlist_batch_completion_status,
+    resolve_watchlist_job_type,
     try_acquire_maintenance_trigger,
     try_finalize_if_ready,
     try_retry_finalize,
@@ -169,6 +172,11 @@ from jstock_advisor.services.watchlist_screening_service import WatchlistScreeni
 _ranking_entry_list_adapter: TypeAdapter[list[RankingEntry]] = TypeAdapter(list[RankingEntry])
 
 logger = logging.getLogger(__name__)
+
+# Issue #56: maintenance batchの監査記録で使うuniverse_provider。
+# ADD用のcandidate_universe.providerと取り違えると、メンテナンス実行が
+# 「新規追加バッチ」として監査に残り意味が食い違うため、正本をここに置く。
+MAINTENANCE_UNIVERSE_PROVIDER = "watchlist_maintenance"
 
 # 4節で1銘柄あたり8〜15件のHTTP通信が発生すると確認した範囲の中央値概算(15節)。
 _ESTIMATED_YAHOO_FINANCE_REQUESTS_PER_STOCK = 11
@@ -1133,6 +1141,48 @@ def _finalize_completed(
     )
 
 
+def _job_type_matches(batch_id: str, expected: str) -> bool:
+    """Issue #56: このfinalizerが担当すべきjob_typeのバッチかを確認する。
+
+    **状態遷移(`try_finalize_if_ready`)より前に呼ぶこと。** finalizer本体
+    (`_finalize_completed`等)の冒頭でreturnする方式は採れない。その時点では
+    既にFINALIZE_PREPARINGへ遷移済みであり、単純returnするとバッチを中間状態へ
+    取り残すためである。
+
+    dispatcher/workerに加えてterminal-failure handler・reconcilerからも
+    finalizerが呼ばれるが、共有primitiveの`try_finalize_if_ready`は
+    job_typeを条件に持たない。呼び出し側の分岐だけを唯一の防御にすると、
+    復旧経路が増えるたびに同じ取り違えが再発する(実際に本Issueで発生した)。
+    そのためpublic boundaryでもfail-closeする多層防御とする。
+
+    未知のjob_typeは「担当しない」として扱う(暗黙のfallbackを作らない)。
+    既存レコード互換のため、キー自体が無い場合のみNEW_CANDIDATE_SCREENINGを既定とする。
+    """
+    batch_item = get_watchlist_batch(batch_id) or {}
+    try:
+        job_type = resolve_watchlist_job_type(
+            batch_item.get("job_type"),
+            default=WatchlistJobType.NEW_CANDIDATE_SCREENING,
+        )
+    except UnknownWatchlistJobTypeError:
+        logger.error(
+            "watchlist finalize refused: unknown job_type batch_id=%s raw=%r expected=%s",
+            batch_id,
+            batch_item.get("job_type"),
+            expected,
+        )
+        return False
+    if job_type.value != expected:
+        logger.error(
+            "watchlist finalize refused: job_type mismatch batch_id=%s actual=%s expected=%s",
+            batch_id,
+            job_type.value,
+            expected,
+        )
+        return False
+    return True
+
+
 def maybe_finalize(
     batch_id: str,
     now: dt.datetime,
@@ -1144,6 +1194,8 @@ def maybe_finalize(
     した場合のみfinalize処理を実行してTrueを返す。条件不成立(まだ完了していない、
     または他の実行に競り負けた)の場合はFalseを返す(エラーではない)。
     """
+    if not _job_type_matches(batch_id, JOB_TYPE_NEW_CANDIDATE_SCREENING):
+        return False
     if not try_finalize_if_ready(batch_id, now):
         return False
 
@@ -1174,6 +1226,8 @@ def retry_finalize(
     再実行できる。呼び出し元(Reconciler/CLI)はそれぞれの方針で再試行回数を
     制御すること(本関数自体は無制限に呼び出し可能)。
     """
+    if not _job_type_matches(batch_id, JOB_TYPE_NEW_CANDIDATE_SCREENING):
+        return False
     if not try_retry_finalize(batch_id):
         return False
 
@@ -1206,6 +1260,8 @@ def retry_notification(
     FINALIZE_FAILEDへ落とす。呼び出し元(Reconciler/CLI)はそれぞれの方針で
     再試行回数を制御すること(本関数自体は無制限に呼び出し可能)。
     """
+    if not _job_type_matches(batch_id, JOB_TYPE_NEW_CANDIDATE_SCREENING):
+        return False
     if not try_retry_notification(batch_id, now):
         return False
 
@@ -1306,7 +1362,7 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
 
     record_batch_audit(
         execution_mode="scheduled",
-        universe_provider="watchlist_maintenance",
+        universe_provider=MAINTENANCE_UNIVERSE_PROVIDER,
         screening_policies=[config.watchlist_screening.screening_policy],
         output_values={
             "execution_result": EXECUTION_RESULT_NORMAL,
@@ -1331,6 +1387,8 @@ def maybe_finalize_maintenance(batch_id: str, now: dt.datetime, config: AppConfi
     した場合のみメンテナンスfinalizeを実行する。`maybe_finalize`(ADD用)と
     同じ排他制御・再開耐性を持つが、ランキング・通知フェーズは持たない。
     """
+    if not _job_type_matches(batch_id, JOB_TYPE_WATCHLIST_MAINTENANCE):
+        return False
     if not try_finalize_if_ready(batch_id, now):
         return False
 
