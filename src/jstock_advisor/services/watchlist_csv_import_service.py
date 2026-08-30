@@ -115,17 +115,31 @@ class WatchlistCsvImportService:
         benefit_interest_raw = (row.get("benefit_interest") or "").strip().lower()
         notify_raw = (row.get("notify_enabled") or "").strip().lower()
 
-        self._watchlist.add_item(
-            stock_code=stock_code,
-            stock_name=(row.get("stock_name") or "").strip() or None,
-            reason=(row.get("reason") or "").strip() or None,
-            desired_total_yield_pct=desired_yield,
-            desired_buy_price=desired_price,
-            benefit_interest=benefit_interest_raw in ("true", "1", "yes"),
-            priority=priority,
-            notify_enabled=notify_raw not in ("false", "0", "no"),
-            memo=(row.get("memo") or "").strip() or None,
-        )
+        # Issue #58: 列の欠落・空セル・空白のみは「未指定」として既存値を保持し、
+        # **非空の明示値だけ**をpatchへ積む。CSVから値をクリアする機能は提供しない
+        # (従来はdefaultへ変換してからadd_item()へ渡していたため、列が無いだけで
+        #  priorityがMEDIUM・notify_enabledがTrueへ戻り、既存の登録内容を破壊していた)。
+        patch: dict[str, object] = {}
+        for column, field in (
+            ("stock_name", "stock_name"),
+            ("reason", "reason"),
+            ("memo", "memo"),
+        ):
+            value = (row.get(column) or "").strip()
+            if value:
+                patch[field] = value
+        if desired_yield is not None:
+            patch["desired_total_yield_pct"] = desired_yield
+        if desired_price is not None:
+            patch["desired_buy_price"] = desired_price
+        if priority_raw:
+            patch["priority"] = priority
+        if benefit_interest_raw:
+            patch["benefit_interest"] = benefit_interest_raw in ("true", "1", "yes")
+        if notify_raw:
+            patch["notify_enabled"] = notify_raw not in ("false", "0", "no")
+
+        self._watchlist.add_item(stock_code=stock_code, patch=patch)
 
         return CsvImportRowResult(
             row_number=row_number,
