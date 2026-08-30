@@ -64,6 +64,29 @@ def _validate_purchase_shares(shares: int) -> None:
         raise ValueError(PURCHASE_SHARES_MUST_BE_POSITIVE)
 
 
+SALE_SHARES_MUST_BE_POSITIVE = "売却株数は0より大きい値を指定してください"
+
+
+def _validate_sale_shares(shares: int) -> None:
+    """売却株数が正であることを保証する(Issue #96 Phase B1)。
+
+    以前は0以下でも例外にならず、FIFO消費ループが `remaining <= 0` を先に判定して
+    どのロットも消費しないまま**成功として終了**していた。純粋なno-opではなく、
+    残ロットから Holding を再計算する経路(`is_sale=True`)へ到達するため、
+    **売却していないのに `last_sale_date` が当日へ更新される**。
+
+    `last_sale_date` は利益保全判定の基準日(`basis_date`)として使われるため
+    (`profit_taking_service.py` / `domain/signals/profit_protection.py`)、
+    これが不当に進むと**それ以前の高値形成が評価対象から外れ、利益保全シグナルが
+    抑止されうる**。判定入力データの破壊にあたるため、書き込み前に打ち切る。
+
+    購入株数(#93 `_validate_purchase_shares`)とは文言・意味が異なるため
+    helperを共有しない(購入/売却を1つのabstractionへ無理に統合しない)。
+    """
+    if shares <= 0:
+        raise ValueError(SALE_SHARES_MUST_BE_POSITIVE)
+
+
 class PortfolioService:
     def __init__(
         self,
@@ -417,6 +440,13 @@ class PortfolioService:
         """
         now = now or dt.datetime.now(dt.UTC)
         normalized_owner = normalize_and_validate_owner(owner)
+        # --- Issue #96 Phase B1(2026-08-30): 売却株数の正値contract ---
+        # **repository読み取りより前**に打ち切る。0以下の売却は以前
+        # 「どのロットも消費しないまま成功」として終わり、しかもHolding再計算経路へ
+        # 到達して last_sale_date / updated_at を書き換えていた。
+        # owner検証は holding_id 導出の前提のため先のまま維持する
+        # (不正ownerは従来どおり先に拒否される)。
+        _validate_sale_shares(shares)
         holding_id = build_holding_id(normalized_owner, stock_code)
         lots = sorted(self._lots.list_by_holding(holding_id), key=lambda lot: lot.purchase_date)
         if not lots:
