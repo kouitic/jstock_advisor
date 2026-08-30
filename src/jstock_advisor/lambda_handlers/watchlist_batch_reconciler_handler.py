@@ -27,12 +27,15 @@ from typing import Any
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    UnknownWatchlistJobTypeError,
     WatchlistBatchStatus,
+    WatchlistJobType,
     get_watchlist_batch,
     list_stale_maintenance_triggers,
     list_watchlist_batches_by_status,
     mark_dispatch_failed,
     mark_finalizing_stuck_as_failed,
+    resolve_watchlist_job_type,
     run_timeout_finalization_pass,
     set_timeout_finalize_completed_count,
     transition_timeout_finalizing_to_failed,
@@ -57,9 +60,11 @@ from jstock_advisor.services.line_notification_service import LineNotificationSe
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.watchlist_batch_finalizer import (
+    MAINTENANCE_UNIVERSE_PROVIDER,
     MaintenanceTriggerOutcome,
     compute_batch_metrics,
     maybe_finalize,
+    maybe_finalize_maintenance,
     maybe_trigger_maintenance,
     retry_finalize,
     retry_notification,
@@ -172,9 +177,20 @@ def _process_timeout_finalizing(
     metrics = compute_batch_metrics(result.all_records)
     completion_rate = (metrics["processed_count"] / result.total) if result.total else 0.0
 
+    # Issue #56: maintenance batchもRUNNING救済に失敗すればここへ到達する。
+    # ADD用のcandidate_universe.providerで記録すると、メンテナンス実行が
+    # 「新規追加バッチのタイムアウト」として監査に残り意味が食い違う。
+    # (TIMED_OUTは14節どおり部分結果の登録・通知を行わないため誤りは監査の
+    #  意味論に限られるが、job_typeに追随させる。)
+    universe_provider = (
+        MAINTENANCE_UNIVERSE_PROVIDER
+        if batch_item.get("job_type") == WatchlistJobType.WATCHLIST_MAINTENANCE.value
+        else config.watchlist_screening.candidate_universe.provider
+    )
+
     record_batch_audit(
         execution_mode="scheduled",
-        universe_provider=config.watchlist_screening.candidate_universe.provider,
+        universe_provider=universe_provider,
         screening_policies=[config.watchlist_screening.screening_policy],
         output_values={
             "execution_result": "TIMED_OUT",
@@ -239,7 +255,31 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             continue
 
         if status == WatchlistBatchStatus.RUNNING.value:
-            if maybe_finalize(batch_id, now, providers, config, notification_service):
+            # Issue #56: 全件完了しているのにfinalize呼び出し自体が失敗した
+            # ケースの救済。job_typeを見ずに常にADD用finalizerを呼ぶと、
+            # WATCHLIST_MAINTENANCEバッチがメンテナンス業務(自動削除・
+            # 連続非該当カウント更新・監視スコア更新)を一切実行しないまま
+            # COMPLETED(終端)になり、二度と実行されない。
+            try:
+                job_type = resolve_watchlist_job_type(
+                    batch_item.get("job_type"),
+                    default=WatchlistJobType.NEW_CANDIDATE_SCREENING,
+                )
+            except UnknownWatchlistJobTypeError:
+                # 未知値は暗黙にどちらかへ倒さずfail-closeする(救済しない)。
+                # タイムアウト経路は後続のReconciler実行が引き続き担う。
+                logger.error(
+                    "watchlist reconciler: unknown job_type=%r batch_id=%s (rescue skipped)",
+                    batch_item.get("job_type"),
+                    batch_id,
+                )
+                continue
+            rescued_now = (
+                maybe_finalize_maintenance(batch_id, now, config)
+                if job_type is WatchlistJobType.WATCHLIST_MAINTENANCE
+                else maybe_finalize(batch_id, now, providers, config, notification_service)
+            )
+            if rescued_now:
                 rescued += 1
                 continue
             if not _is_timed_out(batch_item, wc.batch_processing_timeout_hours, now):
