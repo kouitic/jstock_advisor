@@ -80,5 +80,17 @@ class DisclosureProvider(Protocol):
         ...
 
     def get_next_earnings_date(self, stock_code: str) -> dt.date | None:
-        """次回決算発表予定日を取得する。不明であればNone。"""
+        """次回決算発表予定日を取得する(Issue #59 Phase B4で契約を明確化)。
+
+        Returns:
+            取得できた次回決算発表予定日。**providerへのアクセスは成功したが
+            決算予定日が未公表・欠測**の場合は `None`(正常な欠測)。
+
+        Raises:
+            ProviderDataError: **外部アクセスに失敗した場合**、または
+                **応答の構造が想定外でパースできない場合**。いずれも
+                「決算予定なし」へ読み替えない(取得失敗を欠測へロンダリングしない)。
+                再試行の要否は `retryable` 属性が持ち、consumer境界の
+                `call_with_rate_limit_retry()` が判断する。
+        """
         ...

@@ -24,6 +24,10 @@ from jstock_advisor.domain.entities.enums import (
     HistoricalValuationEvaluationState,
     ValuationBasis,
 )
+from jstock_advisor.interfaces.provider_errors import (
+    ProviderDataError,
+    ProviderFailureCategory,
+)
 from jstock_advisor.interfaces.types import Disclosure
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
@@ -355,3 +359,49 @@ def test_normal_case_still_fetches_earnings_surprise_history() -> None:
     assert error is None
     assert snapshot is not None
     assert spy_financial.earnings_surprise_history_call_count == 1
+
+
+# --- Issue #59 Phase B4(2026-08-30): provider障害を欠測へロンダリングしない ------
+
+
+class _FailingEarningsDateDisclosureProvider:
+    """次回決算日の取得だけが provider 障害で失敗する disclosure provider。"""
+
+    def __init__(self, delegate: object) -> None:
+        self._delegate = delegate
+
+    def get_disclosures(self, stock_code: str, since: dt.date) -> object:
+        return self._delegate.get_disclosures(stock_code, since)  # type: ignore[attr-defined]
+
+    def get_next_earnings_date(self, stock_code: str) -> dt.date | None:
+        raise ProviderDataError(
+            provider_name="yfinance",
+            operation="get_next_earnings_date",
+            retryable=True,
+            failure_category=ProviderFailureCategory.RETRYABLE_PROVIDER_FAILURE,
+            error_type="RuntimeError",
+            error_summary="429 Too Many Requests",
+        )
+
+
+def test_provider_failure_is_not_converted_to_unavailable_status() -> None:
+    """T10: provider障害を EarningsDateStatus.UNAVAILABLE へ縮退させない。
+
+    以前は provider 例外が provider 内で None へ潰され、consumer 側で
+    「決算予定なし(UNAVAILABLE)」と同義になり、決算直前のBUY抑制ゲートが
+    無音ですり抜けていた(business_days_to_earnings=None のため条件不成立)。
+
+    Phase B4 以降は ProviderDataError がそのまま伝播し、呼び出し元の既存
+    retry 境界(call_with_rate_limit_retry)が観測する。snapshot 側で
+    UNAVAILABLE へ変換しない。
+    """
+    base = build_mock_provider_bundle(_NOW)
+    providers = dataclasses.replace(
+        base, disclosure=_FailingEarningsDateDisclosureProvider(base.disclosure)
+    )
+
+    with pytest.raises(ProviderDataError) as excinfo:
+        build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert excinfo.value.operation == "get_next_earnings_date"
+    assert excinfo.value.retryable is True
