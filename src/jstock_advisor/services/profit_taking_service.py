@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import calendar
 import datetime as dt
+import logging
 import uuid
 from dataclasses import dataclass
 
@@ -87,6 +88,7 @@ from jstock_advisor.domain.signals.profit_protection import (
     compute_profit_protection_metrics,
 )
 from jstock_advisor.domain.signals.profit_taking import (
+    InvalidProfitTakingInputError,
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
     ProfitTakingResult,
@@ -118,6 +120,8 @@ from jstock_advisor.services.corporate_action_service import CorporateActionServ
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+
+logger = logging.getLogger(__name__)
 
 # 決算直前は原則として通常のPARTIAL/FULL_PROFIT_TAKE提案を保留する(要求仕様§4)。
 _EARNINGS_SUPPRESSIBLE_TO_REVIEW = (
@@ -311,6 +315,56 @@ class ProfitTakingService:
 
     def _active_rule_version(self) -> str:
         return self._rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER)
+
+    def _profit_taking_input_invalid_outcome(
+        self,
+        holding: Holding,
+        exc: InvalidProfitTakingInputError,
+        now: dt.datetime,
+    ) -> ProfitTakingOutcome:
+        """取得原価が不正で利確判定が成立しない場合の処理(Issue #75)。
+
+        「判定できたうえでHOLD」と区別できる形で終える。具体的には
+        **Recommendationを生成せず**、`ProfitTakingOutcome.data_error` へ理由を載せる
+        (取得失敗時と同じ経路であり、holdings pipeline側が
+        `EvaluationStatus.DATA_INSUFFICIENT` / `NotificationStatus.DATA_INSUFFICIENT`
+        として記録する)。
+
+        監査は `data_error` のみを記録する。正常に評価を終えた銘柄と同じ
+        `input_values` / `output_values` を書くと、判定できなかった事実が
+        記録上で見分けられなくなるため。
+
+        個別のLINE通知は新設しない(同一の不正データが毎日通知されるのを避ける)。
+        """
+        message = (
+            f"{exc.reason}(平均取得単価・総取得金額は正である必要があります: "
+            f"{exc.field}={exc.value})"
+        )
+        logger.warning(
+            "profit_taking_input_invalid stock_code=%s field=%s value=%s reason=%s",
+            holding.stock_code,
+            exc.field,
+            exc.value,
+            exc.reason,
+        )
+        self._audit.record(
+            decision_type="profit_taking",
+            stock_code=holding.stock_code,
+            input_values={
+                "average_purchase_price": str(holding.average_purchase_price),
+                "total_purchase_amount": str(holding.total_purchase_amount),
+            },
+            calculation_formulas={},
+            output_values={
+                "data_error": message,
+                "invalid_input_field": exc.field,
+                "profit_taking_status": "NOT_EVALUATED",
+            },
+            data_sources=[],
+            rule_version=self._active_rule_version(),
+            timestamp=now,
+        )
+        return ProfitTakingOutcome(holding.stock_code, None, message)
 
     def _fair_value_reflects_latest_earnings(self, snapshot: StockSnapshot) -> bool | None:
         """適正価格算出の入力が最新決算を反映しているかの簡易判定(要求仕様レビュー対応)。
@@ -558,24 +612,36 @@ class ProfitTakingService:
         )
 
         is_benefit_eligible = snapshot.benefit is not None
-        result = evaluate_profit_taking(
-            current_price=snapshot.current_price,
-            average_purchase_price=holding.average_purchase_price,
-            shares=holding.shares,
-            total_purchase_amount=holding.total_purchase_amount,
-            cumulative_dividend_received=holding.cumulative_dividend_received,
-            cumulative_benefit_value_received=holding.cumulative_benefit_value_received,
-            current_total_yield_pct=snapshot.total_yield_pct,
-            forecast_annual_dividend_per_share=snapshot.dividend.forecast_annual_dividend_per_share,
-            mitigating_inputs=mitigating_inputs,
-            config=self._config.profit_taking,
-            condition_inputs=condition_inputs,
-            annual_benefit_value_at_min_lot=snapshot.annual_benefit_value,
-            benefit_min_shares_required=(
-                snapshot.benefit.min_shares_required if snapshot.benefit is not None else None
-            ),
-            is_benefit_eligible=is_benefit_eligible,
-        )
+        try:
+            result = evaluate_profit_taking(
+                current_price=snapshot.current_price,
+                average_purchase_price=holding.average_purchase_price,
+                shares=holding.shares,
+                total_purchase_amount=holding.total_purchase_amount,
+                cumulative_dividend_received=holding.cumulative_dividend_received,
+                cumulative_benefit_value_received=holding.cumulative_benefit_value_received,
+                current_total_yield_pct=snapshot.total_yield_pct,
+                forecast_annual_dividend_per_share=(
+                    snapshot.dividend.forecast_annual_dividend_per_share
+                ),
+                mitigating_inputs=mitigating_inputs,
+                config=self._config.profit_taking,
+                condition_inputs=condition_inputs,
+                annual_benefit_value_at_min_lot=snapshot.annual_benefit_value,
+                benefit_min_shares_required=(
+                    snapshot.benefit.min_shares_required if snapshot.benefit is not None else None
+                ),
+                is_benefit_eligible=is_benefit_eligible,
+            )
+        except InvalidProfitTakingInputError as exc:
+            # --- Issue #75(2026-08-30): 取得原価が不正な保有の fail-close ---
+            # 以前はdomain側が不正入力を含み損益率0.0%へ潰していたため、
+            # 適正価格を大きく超過していても「利確条件に該当しなかった」として
+            # 沈黙で抑止され、運用者がHOLDと区別できなかった。
+            # ここでは判定不能をそのまま保ち、**Recommendationを生成しない**。
+            # 通常の利確判定を終えた銘柄として監査へ記録することもしない
+            # (正常評価と混同させない。既存のdata_error経路と同じ扱いにする)。
+            return self._profit_taking_input_invalid_outcome(holding, exc, now)
 
         # 決算直前の判定抑制(要求仕様§4)。上場廃止決定・債務超過公式確認等の
         # 一次情報確認済みの即時criticalが検出されている場合は抑制しない。

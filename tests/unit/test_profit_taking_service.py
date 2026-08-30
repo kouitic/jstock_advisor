@@ -1183,3 +1183,146 @@ def test_issue21_recommendation_snapshots_usable_fair_value(
     assert not any(
         "価格基準の利確判定に使用していません" in r for r in rec.not_yet_action_reasons
     )
+
+
+# --- Issue #75 Phase B1(2026-08-30): 取得原価が不正な保有の service 境界の扱い ---
+#
+# domain が送出する InvalidProfitTakingInputError を service が受け、
+# **Recommendation を生成せず** data_error として「判定できなかった」ことを
+# 保ったまま上位へ返すことを固定する。
+# 正常評価と同じ形の監査を書かないことも併せて確認する
+# (書いてしまうと、判定不能が記録上で正常HOLDと見分けられなくなる)。
+
+
+def _invalid_cost_holding(
+    stock_code: str,
+    *,
+    average_purchase_price: Decimal,
+    total_purchase_amount: Decimal,
+) -> Holding:
+    return _holding(stock_code).model_copy(
+        update={
+            "average_purchase_price": average_purchase_price,
+            "total_purchase_amount": total_purchase_amount,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "avg", "total_cost", "expected_field"),
+    [
+        ("avg=0", Decimal("0"), Decimal("0"), "average_purchase_price"),
+        ("avg<0", Decimal("-100"), Decimal("-30000"), "average_purchase_price"),
+        ("total_cost=0", Decimal("4000"), Decimal("0"), "total_purchase_amount"),
+    ],
+)
+def test_invalid_cost_suppresses_recommendation_and_reports_data_error(
+    label: str, avg: Decimal, total_cost: Decimal, expected_field: str
+) -> None:
+    """T7: 判定不能時は Recommendation を生成せず、data_error で理由を返す。"""
+    providers = _providers(_STALE_EARNINGS_DATE, dt.date(2026, 3, 31))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(
+        _invalid_cost_holding("2914", average_purchase_price=avg, total_purchase_amount=total_cost),
+        _NOW,
+    )
+
+    assert outcome.recommendation is None, label
+    assert outcome.data_error is not None, label
+    assert "利確判定は不能" in outcome.data_error
+    assert expected_field in outcome.data_error
+
+
+def test_invalid_cost_is_distinguishable_from_normal_hold() -> None:
+    """T7補足: 正常なHOLD(recommendation=None, data_error=None)と区別できる。
+
+    以前は avg<=0 でも「利確条件に該当しなかった」として同じ形で終わっており、
+    呼び出し側から沈黙抑止を検知できなかった。
+    """
+    providers = _providers(_STALE_EARNINGS_DATE, dt.date(2026, 3, 31))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    invalid = service.analyze(
+        _invalid_cost_holding(
+            "2914", average_purchase_price=Decimal("0"), total_purchase_amount=Decimal("0")
+        ),
+        _NOW,
+    )
+    normal = service.analyze(_holding("2914"), _NOW)
+
+    # どちらも recommendation は None になり得るが、data_error の有無で区別できる。
+    assert invalid.recommendation is None
+    assert invalid.data_error is not None
+    assert normal.data_error is None
+
+
+def test_invalid_cost_records_observable_audit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T9: 判定不能が監査へ observable な形で記録される。
+
+    正常評価と同じ output_values を書かず、data_error / invalid_input_field /
+    profit_taking_status=NOT_EVALUATED を残すことを固定する。
+    """
+    recorded: list[dict[str, object]] = []
+
+    class _RecordingAudit:
+        def record(self, **kwargs: object) -> object:
+            recorded.append(kwargs)
+            return None
+
+    providers = _providers(_STALE_EARNINGS_DATE, dt.date(2026, 3, 31))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    monkeypatch.setattr(service, "_audit", _RecordingAudit())
+
+    outcome = service.analyze(
+        _invalid_cost_holding(
+            "2914", average_purchase_price=Decimal("0"), total_purchase_amount=Decimal("0")
+        ),
+        _NOW,
+    )
+
+    assert outcome.recommendation is None
+    profit_records = [r for r in recorded if r.get("decision_type") == "profit_taking"]
+    assert len(profit_records) == 1
+    output_values = profit_records[0]["output_values"]
+    assert output_values["invalid_input_field"] == "average_purchase_price"
+    assert output_values["profit_taking_status"] == "NOT_EVALUATED"
+    assert "利確判定は不能" in str(output_values["data_error"])
+    # 正常評価の監査フィールド(判定結果)は書かれていない。
+    assert "final_action" not in output_values
+    assert "recommendation_type" not in output_values
+
+
+def test_invalid_cost_logs_warning_without_personal_data(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T9補足: warning ログに銘柄コード・不正フィールド・値・理由が出る。"""
+    providers = _providers(_STALE_EARNINGS_DATE, dt.date(2026, 3, 31))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    with caplog.at_level("WARNING"):
+        service.analyze(
+            _invalid_cost_holding(
+                "2914", average_purchase_price=Decimal("0"), total_purchase_amount=Decimal("0")
+            ),
+            _NOW,
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("profit_taking_input_invalid" in m for m in messages)
+    assert any("2914" in m and "average_purchase_price" in m for m in messages)
+
+
+def test_valid_cost_holding_behaviour_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T10: 正常な取得原価の保有は従来どおり評価・通知経路へ進む(回帰)。"""
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE),
+    )
+    providers = _providers(_STALE_EARNINGS_DATE, dt.date(2026, 3, 31))
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error is None
+    assert outcome.recommendation is not None

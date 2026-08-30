@@ -1,8 +1,12 @@
 import datetime as dt
 from decimal import Decimal
 
+import pytest
+
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import (
+    AccountType,
     ConfidenceLevel,
     IndustryClassification,
     ProfitTakingIndustrySector,
@@ -11,14 +15,19 @@ from jstock_advisor.domain.entities.enums import (
     TimingAction,
     TrendClassification,
 )
+from jstock_advisor.domain.entities.holding import PurchaseLot
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult, FairValueRange
+from jstock_advisor.domain.signals.profit_protection import compute_profit_protection_metrics
 from jstock_advisor.domain.signals.profit_taking import (
+    InvalidProfitTakingInputError,
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
     compute_unrealized_pnl,
     evaluate_profit_taking,
 )
+from jstock_advisor.interfaces.types import PriceBar
 
 _CONFIG = load_config()
 
@@ -1587,3 +1596,191 @@ def test_policy_none_behaves_exactly_like_false() -> None:
     )
     assert none_result.recommendation_type == false_result.recommendation_type
     assert none_result.mitigating_factors_applied == false_result.mitigating_factors_applied
+
+
+# --- Issue #75 Phase B1(2026-08-30): 取得原価が不正な保有の fail-close ----------
+#
+# 以前は average_purchase_price <= 0 のとき含み損益率だけを 0.0 へ潰していたため、
+# has_unrealized_gain が False となり、適正価格を大きく超過していても
+# 「利確シグナルに該当する条件がない(HOLD)」として**沈黙で抑止**されていた。
+# エラー・警告・判定不能の記録が一切残らず、運用者は正常なHOLDと区別できなかった。
+#
+# 本節は「判定できたうえでのHOLD」と「判定そのものが成立しない」が
+# 型・制御フローで別物であることを固定する。
+
+
+def _invalid_input_fair_value() -> FairValueRange:
+    """現在値が中立適正価格を大幅超過する状況(本来なら利確候補が立つ)。"""
+    return _fair_value_range(
+        neutral=Decimal("1000"), bull=Decimal("1200"), bear=Decimal("900"), method_count=3
+    )
+
+
+def _evaluate_with_cost(avg: Decimal, total_cost: Decimal):
+    return evaluate_profit_taking(
+        current_price=Decimal("3000"),
+        average_purchase_price=avg,
+        shares=100,
+        total_purchase_amount=total_cost,
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=1.0,
+        forecast_annual_dividend_per_share=Decimal("10"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(fair_value_range=_invalid_input_fair_value()),
+    )
+
+
+def test_zero_average_purchase_price_is_unavailable_not_hold() -> None:
+    """T1: avg=0 かつ適正価格大幅超過 → HOLDではなく明示的な判定不能。"""
+    with pytest.raises(InvalidProfitTakingInputError) as excinfo:
+        _evaluate_with_cost(Decimal("0"), Decimal("0"))
+
+    assert excinfo.value.field == "average_purchase_price"
+    assert excinfo.value.value == Decimal("0")
+    assert "判定は不能" in excinfo.value.reason
+
+
+def test_negative_average_purchase_price_is_unavailable() -> None:
+    """T2: avg<0 → 判定不能。"""
+    with pytest.raises(InvalidProfitTakingInputError) as excinfo:
+        _evaluate_with_cost(Decimal("-500"), Decimal("-50000"))
+
+    assert excinfo.value.field == "average_purchase_price"
+
+
+def test_zero_total_purchase_amount_is_unavailable_even_when_avg_is_positive() -> None:
+    """T3: avg>0 だが total_purchase_amount=0 → 判定不能。
+
+    正常なロット集計では両者は連動するため、この状態はHoldingが持つ
+    集計キャッシュ同士の内部不整合であり、正常な業務状態ではない。
+    「total_return_pctだけ不明として利確判定を続ける」はしない。
+    """
+    with pytest.raises(InvalidProfitTakingInputError) as excinfo:
+        _evaluate_with_cost(Decimal("1000"), Decimal("0"))
+
+    assert excinfo.value.field == "total_purchase_amount"
+
+
+def test_valid_cost_inputs_are_evaluated_normally() -> None:
+    """T4: avg>0 かつ total_purchase_amount>0 → 従来どおり評価される(回帰)。"""
+    result = _evaluate_with_cost(Decimal("1000"), Decimal("100000"))
+
+    assert result.pnl.unrealized_pnl_pct == 200.0
+    assert result.pnl.total_return_pct == 200.0
+    # 判定が実際に成立している(HOLDに固定されていない)。
+    assert result.recommendation_type in {
+        RecommendationType.HOLD,
+        RecommendationType.WATCH,
+        RecommendationType.PARTIAL_PROFIT_TAKE,
+        RecommendationType.FULL_PROFIT_TAKE,
+    }
+
+
+def test_contradictory_unrealized_pnl_is_never_constructed() -> None:
+    """T5: avg<=0 のとき「金額は含み益・率は0.0%」という矛盾DTOを生成しない。
+
+    以前は unrealized_pnl=+300,000円 / unrealized_pnl_pct=0.0 という自己矛盾した
+    UnrealizedPnl が下流(判定ゲート・監査・通知文言)へ流れていた。
+    compute_unrealized_pnl を直接呼ぶ経路でも生成されないことを固定する。
+    """
+    for avg, cost in ((Decimal("0"), Decimal("0")), (Decimal("-500"), Decimal("-50000"))):
+        with pytest.raises(InvalidProfitTakingInputError):
+            compute_unrealized_pnl(
+                current_price=Decimal("3000"),
+                average_purchase_price=avg,
+                shares=100,
+                total_purchase_amount=cost,
+                cumulative_dividend_received=Decimal("0"),
+                cumulative_benefit_value_received=Decimal("0"),
+            )
+
+
+def test_profit_taking_and_profit_protection_agree_on_invalid_cost() -> None:
+    """T6: 同じ avg<=0 について両エンジンが「判定不能」で一致する。
+
+    DTOの型までは統一しない(profit_protectionはmetrics + reason、
+    profit_takingは例外)。揃えるのは business contract である。
+    """
+    calendar = BusinessCalendar.from_config(_CONFIG.holiday_calendar)
+    bars = [
+        PriceBar(
+            date=dt.date(2026, 8, 20) + dt.timedelta(days=i),
+            open=Decimal("2900"),
+            high=Decimal("3200"),
+            low=Decimal("2800"),
+            close=Decimal("3000"),
+            volume=1000,
+        )
+        for i in range(5)
+    ]
+    for avg in (Decimal("0"), Decimal("-500")):
+        metrics = compute_profit_protection_metrics(
+            bars=bars,
+            current_price=Decimal("3000"),
+            average_purchase_price=avg,
+            basis_date=dt.date(2026, 8, 19),
+            as_of_date=dt.date(2026, 8, 24),
+            business_calendar=calendar,
+            config=_CONFIG.profit_taking.profit_protection,
+            ratio_adjustment_event_since_basis=False,
+        )
+        # profit_protection: 判定不能
+        assert metrics.signal_label == "DATA_INSUFFICIENT"
+        assert metrics.insufficient_data_reason is not None
+        # profit_taking: 判定不能(例外)。0%として評価を続行しない。
+        with pytest.raises(InvalidProfitTakingInputError):
+            _evaluate_with_cost(avg, Decimal("100000") if avg > 0 else Decimal("-1"))
+
+
+def test_current_price_zero_behaviour_is_unchanged_by_this_issue() -> None:
+    """T11: current_price<=0 の扱いを本Issueで変更していない(#52 scope)。
+
+    avg/total costが正であれば、現在値が0でも従来どおり評価が続行される
+    (含み損として扱われる)。ここを判定不能へ変えることは #52 の責務。
+    """
+    result = evaluate_profit_taking(
+        current_price=Decimal("0"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(fair_value_range=_invalid_input_fair_value()),
+    )
+
+    assert result.pnl.unrealized_pnl_pct == -100.0
+    assert result.recommendation_type == RecommendationType.HOLD
+
+
+def test_historical_holding_with_invalid_cost_is_still_readable() -> None:
+    """T12: 取得原価が不正な既存レコードでも entity の読み込みは壊れない。
+
+    Issue #75 の fail-close は**判定側**で行い、`PurchaseLot` / `Holding` へ
+    正値 validator を置かない。entity 側に置くと既存の歴史レコードを読む時点で
+    検証が走り、bad-record isolation / historical compatibility(#63 F-F10)を
+    悪化させるため。ここでは「entity は読める」「判定は止まる」の両立を固定する。
+    """
+    lot = PurchaseLot(
+        lot_id="lot-1",
+        owner=DEFAULT_OWNER,
+        holding_id=build_holding_id(DEFAULT_OWNER, "9999"),
+        stock_code="9999",
+        purchase_date=dt.date(2024, 1, 1),
+        shares=100,
+        purchase_price=Decimal("0"),
+        account_type=AccountType.SPECIFIC,
+    )
+
+    # entity 生成そのものは成功する(読み込み経路を壊さない)。
+    assert lot.purchase_price == Decimal("0")
+    assert lot.amount() == Decimal("0")
+
+    # 判定側が fail-close する。
+    with pytest.raises(InvalidProfitTakingInputError):
+        _evaluate_with_cost(Decimal("0"), Decimal("0"))

@@ -6,6 +6,12 @@
 
 価格フィールドは最終判定(final_action)に基づいて再構成する。格下げされた判定に
 格下げ前の強い価格提案(即時執行価格・指値候補)が残らないようにする。
+
+**入力不正時の契約(Issue #75)**: 平均取得単価・総取得金額が0以下の保有について、
+本モジュールは判定を行わず `InvalidProfitTakingInputError` を送出する。不正入力を
+含み損益率0.0%へ読み替えて「利確条件に該当しなかった」として黙って通すことは、
+投資判断そのものを沈黙で抑止するため禁止する(`profit_protection` が同じ入力に対して
+既に「判定不能」を返しているのと同じ business contract へ揃える)。
 """
 
 from __future__ import annotations
@@ -246,6 +252,63 @@ class ProfitTakingResult:
     sell_intensity: SellIntensity | None
 
 
+class InvalidProfitTakingInputError(ValueError):
+    """利確判定の入力が不正で、判定そのものが成立しない(Issue #75)。
+
+    「利確条件に該当しなかった(HOLD)」とは**別の状態**である。HOLDは判定できた
+    うえでの結論だが、本例外は判定に必要な前提が壊れていることを表す。
+
+    本例外を捕捉して `ProfitTakingResult` をダミー値(final_action=HOLD、
+    pnl=0、sell_prices=empty 等)で組み立ててはならない。それでは
+    Issue #75 の root cause(不正入力が正常な判定結果と区別できなくなる)を
+    別の形で再導入することになる。捕捉は service 境界で行い、
+    `ProfitTakingOutcome(recommendation=None, data_error=...)` として
+    「判定できなかった」ことを保ったまま上位へ伝える。
+
+    `field` / `value` は運用者が原因の保有銘柄を特定するための最小情報であり、
+    個人情報は含めない。
+    """
+
+    def __init__(self, field: str, value: Decimal, reason: str) -> None:
+        super().__init__(reason)
+        self.field = field
+        self.value = value
+        self.reason = reason
+
+
+def validate_profit_taking_inputs(
+    average_purchase_price: Decimal, total_purchase_amount: Decimal
+) -> None:
+    """利確判定の前提となる取得原価の妥当性を検証する(Issue #75)。
+
+    正常なロット集計では `average_purchase_price = total_purchase_amount / total_shares`
+    かつ `total_shares > 0`(`entities/holding.py:summarize_lots`)であるため、
+    両者は必ず連動する。したがって次の2つはいずれも入力不正である。
+
+    - `average_purchase_price <= 0`: 取得単価として意味を持たない。正規入力経路の
+      うちCSV取込・LINE会話型登録は明示的に0以下を拒否しており、リポジトリの意図は
+      「取得単価は正」である(贈与・スピンオフ等を0円取得として表す仕様は無い)
+    - `total_purchase_amount <= 0`: 単価が正なのに総取得金額が0以下という状態は、
+      Holdingが保持する集計キャッシュ同士の内部不整合であり、正常な業務状態ではない
+
+    **現在値(current_price)は検証しない。** provider境界での価格検証は Issue #52 の
+    責務であり、本Issueでは扱わない(`profit_protection` との非対称が残ることは
+    認識のうえ、境界を越えない)。
+    """
+    if average_purchase_price <= 0:
+        raise InvalidProfitTakingInputError(
+            field="average_purchase_price",
+            value=average_purchase_price,
+            reason="平均取得単価が不正なため利確判定は不能",
+        )
+    if total_purchase_amount <= 0:
+        raise InvalidProfitTakingInputError(
+            field="total_purchase_amount",
+            value=total_purchase_amount,
+            reason="総取得金額が不正なため利確判定は不能",
+        )
+
+
 def compute_unrealized_pnl(
     current_price: Decimal,
     average_purchase_price: Decimal,
@@ -254,16 +317,17 @@ def compute_unrealized_pnl(
     cumulative_dividend_received: Decimal,
     cumulative_benefit_value_received: Decimal,
 ) -> UnrealizedPnl:
+    # Issue #75: 不正入力から UnrealizedPnl を生成しない。以前は
+    # average_purchase_price <= 0 のとき率だけを 0.0 へ潰していたため、
+    # 「金額は +300,000円(含み益あり)なのに率は 0.0%(増減なし)」という
+    # 自己矛盾したDTOが下流(判定ゲート・監査・通知文言)へ流れていた。
+    # ここで送出することで、compute_unrealized_pnl を直接呼ぶ経路も防御される。
+    validate_profit_taking_inputs(average_purchase_price, total_purchase_amount)
+
     unrealized_pnl = (current_price - average_purchase_price) * shares
-    unrealized_pnl_pct = (
-        float(current_price / average_purchase_price - 1) * 100
-        if average_purchase_price > 0
-        else 0.0
-    )
+    unrealized_pnl_pct = float(current_price / average_purchase_price - 1) * 100
     total_return = unrealized_pnl + cumulative_dividend_received + cumulative_benefit_value_received
-    total_return_pct = (
-        float(total_return / total_purchase_amount * 100) if total_purchase_amount > 0 else 0.0
-    )
+    total_return_pct = float(total_return / total_purchase_amount * 100)
     return UnrealizedPnl(
         unrealized_pnl=unrealized_pnl,
         unrealized_pnl_pct=unrealized_pnl_pct,
@@ -1166,7 +1230,18 @@ def evaluate_profit_taking(
     到達する)。ファンダメンタル評価(fundamental_action)とタイミング評価
     (timing_action)を分離し、上昇トレンドはfundamental_actionを最大1段階
     までしか緩和できない(final_action)。
+
+    Raises:
+        InvalidProfitTakingInputError: 平均取得単価・総取得金額が0以下の場合
+            (Issue #75)。**HOLDを返さない。** 「判定できたうえでHOLD」と
+            「判定そのものが成立しない」を呼び出し側が区別できるようにするため、
+            戻り値ではなく例外で表す。
     """
+    # Issue #75: 判定の前提が壊れている場合はここで打ち切る。呼び出し側が
+    # compute_unrealized_pnl を経由せず本関数だけを使う場合にも同じ契約が働くよう、
+    # domain boundary で明示的に検証する(service層のガードだけに依存しない)。
+    validate_profit_taking_inputs(average_purchase_price, total_purchase_amount)
+
     condition_inputs = condition_inputs or ProfitTakingConditionInputs()
     pnl = compute_unrealized_pnl(
         current_price,
