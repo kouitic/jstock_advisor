@@ -143,7 +143,12 @@ def evaluate_maintenance_decision(
     `removal_candidate_since`は変更せず、`last_screened_at`のみ更新する。
     """
     if screening_summary is None:
-        updated = item.model_copy(update={"last_screened_at": now})
+        # Issue #58 Phase B2(F-O5): system-owned stateを変更して永続化する経路では
+        # `updated_at`も進める。`updated_at`は「そのレコードが最後に実質的に
+        # 更新された時刻」であり、利用者の最終編集日時ではない。
+        # DATA_UNAVAILABLEでも「確認を試みた事実」を`last_screened_at`へ記録する
+        # 実質的な更新であるため、ここも対象に含む。
+        updated = item.model_copy(update={"last_screened_at": now, "updated_at": now})
         reference_time = item.last_qualified_at or item.created_at
         stale = (now - reference_time).days > config.maximum_unconfirmed_days
         return MaintenanceDecision(
@@ -161,6 +166,8 @@ def evaluate_maintenance_decision(
                 "last_matched_target_types": screening_summary.matched_target_types,
                 "last_screening_result": "PASSED",
                 "last_screening_policy": screening_summary.policy_name,
+                # Issue #58 Phase B2(F-O5)
+                "updated_at": now,
             }
         )
         return MaintenanceDecision(MaintenanceOutcome.KEEP, updated)
@@ -182,6 +189,10 @@ def evaluate_maintenance_decision(
             "last_matched_target_types": screening_summary.matched_target_types,
             "last_screening_result": "FAILED",
             "last_screening_policy": screening_summary.policy_name,
+            # Issue #58 Phase B2(F-O5)。削除系outcomeでは`updated_item`が
+            # 永続化されない(finalizerがdelete分岐へ入る)ため、この値は
+            # 監査記録の参照にのみ使われる。KEEP(非該当1回目等)では永続化される。
+            "updated_at": now,
         }
     )
 
