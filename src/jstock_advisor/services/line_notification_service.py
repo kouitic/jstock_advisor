@@ -359,8 +359,7 @@ def resolve_attention_origin_for_recommendation(recommendation: Recommendation) 
 # 発生しても優先度比較されず常に貫通する(これは許容通り)」という非対称な
 # 抜け穴があった。SELLと同じpriority(4)を与え、同一tierとして扱う:
 # 一部売却/売却いずれも「本日この銘柄について売却方向の通知は済んでいる」
-# という点で意味的に同格であり、後着の同tier通知はDUPLICATE_STOCK_
-# NOTIFICATIONとして抑止する一方、BUY(3)には優先し、CRITICAL_RISK(6)/
+# という点で意味的に同格であり、BUY(3)には優先し、CRITICAL_RISK(6)/
 # BUY到達(5)には劣後する。既存優先度レコード(DailyNotificationPriority
 # Record.priority)との後方互換: 本変更は既存メンバー(CRITICAL_RISK=6/
 # PROMOTED_TO_BUY=5/SELL=4/BUY=3)の数値を一切変更せず新規メンバーを追加
@@ -368,6 +367,22 @@ def resolve_attention_origin_for_recommendation(recommendation: Recommendation) 
 # priority_id)で当日限りしか生存せず、ローリングデプロイ中に旧コードが
 # 書いたSELL=4のレコードを新コードがPARTIAL_SELL=4と比較しても、意図通り
 # 同tierとして正しく機能する(数値の意味が変わっていないため)。
+#
+# Issue #60 A1(F-M5、2026-08-30 現在のcontract): 上記の「後着の同tier通知は
+# 一律DUPLICATE_STOCK_NOTIFICATIONとして抑止する」という扱いを**1方向だけ
+# 例外化した**。現在の契約は次のとおり:
+#   - SELL / PARTIAL_SELL のpriority値はいずれも4(同一tier)
+#   - 同priorityの後着通知は**原則として重複抑止**する
+#   - ただし `PARTIAL_SELL → SELL` の1方向のみ、business escalation として
+#     通知を許可する(一部売却と全部売却は利用者へ求める行動が異なり、
+#     強まった側が届かないのは投資判断に直結するため)
+#   - `SELL → PARTIAL_SELL`(逆方向)・同一category・その他の同priorityは
+#     **従来どおり抑止**する
+# 許可する組は `_NOTIFICATION_ESCALATIONS` に明示する(下記)。
+# **priority値そのものは変更していない。** 値を変えると
+# `notification_priority_for_recommendation()` を再利用している
+# `buy_candidates_handler.py`(複数ownerの競合Recommendationから最も強いものを
+# 選ぶ判定)まで挙動が変わり、F-M5の外側へ波及するためである。
 _NOTIFICATION_PRIORITY: dict[NotificationCategory, int] = {
     NotificationCategory.CRITICAL_RISK: 6,
     NotificationCategory.SELL: 4,
@@ -2372,12 +2387,25 @@ class LineNotificationService:
         """§5: cross-pipeline重複抑止(コードレビュー対応2026-08、best-effort)。
 
         BUY候補Lambda・保有銘柄Lambdaは別Lambdaのため共有の排他制御を持たない。
-        当日・同一銘柄について、既に送信済みの通知の優先度(notification_priority_for_recommendation)
-        と比較し、既送優先度 >= 今回優先度なら抑止する(既送と同優先度なら
-        DUPLICATE_STOCK_NOTIFICATION、既送より低優先度ならLOW_PRIORITY)。
-        既送より高優先度(例: NEAR BUY送信済みの銘柄に重大リスク/SELLが発生)は
-        必ず貫通させる。重大リスクはこのチェック自体をスキップし常に貫通する
-        (§6のクールダウンと同じ方針)。
+        当日・同一銘柄について、既に送信済みの通知の優先度
+        (notification_priority_for_recommendation)と比較して抑止可否を決める。
+
+        判定(Issue #60 A1で同priorityの扱いのみ更新):
+
+        - **既送priority > 今回priority** → 抑止(LOW_PRIORITY)
+        - **既送priority == 今回priority** → **原則**抑止
+          (DUPLICATE_STOCK_NOTIFICATION)。ただし明示された
+          business escalation(`_NOTIFICATION_ESCALATIONS`、現在は
+          `PARTIAL_SELL → SELL` の1方向のみ)に該当する場合は許可する。
+          同priorityの既存記録が複数ある場合(stock-scope / holding-scope)は
+          **1件でもescalationに該当しなければ抑止**する(安全側)
+        - **既送priority < 今回priority**(例: NEAR BUY送信済みの銘柄に
+          重大リスク/SELLが発生)→ 必ず貫通させる
+        - **重大リスク**はこのチェック自体をスキップし常に貫通する
+          (§6のクールダウンと同じ方針)
+
+        「同priorityだから一律通す」ではない。許可する組み合わせは
+        `_NOTIFICATION_ESCALATIONS` に明示されたものだけである。
 
         読み取り専用(他のcheck_*_eligibilityと同じ規約)。実際に送信した後の
         記録は`_record_daily_priority()`が担う。
