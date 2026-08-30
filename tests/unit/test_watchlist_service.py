@@ -7,7 +7,9 @@ from jstock_advisor.services.watchlist_service import WatchlistService
 
 
 def test_add_and_list_item(watchlist_service: WatchlistService) -> None:
-    watchlist_service.add_item(stock_code="7203", stock_name="トヨタ自動車", priority=Priority.HIGH)
+    watchlist_service.add_item(
+        stock_code="7203", patch={"stock_name": "トヨタ自動車", "priority": Priority.HIGH}
+    )
     items = watchlist_service.list_items()
     assert len(items) == 1
     assert items[0].stock_code == "7203"
@@ -15,7 +17,7 @@ def test_add_and_list_item(watchlist_service: WatchlistService) -> None:
 
 
 def test_update_item_merges_fields(watchlist_service: WatchlistService) -> None:
-    watchlist_service.add_item(stock_code="7203", stock_name="トヨタ自動車")
+    watchlist_service.add_item(stock_code="7203", patch={"stock_name": "トヨタ自動車"})
     updated = watchlist_service.update_item(
         "7203", desired_buy_price=Decimal("2500"), memo="決算後に再検討"
     )

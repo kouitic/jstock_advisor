@@ -39,6 +39,7 @@ def list_items() -> None:
 
 @app.command("add")
 def add_item(
+    ctx: typer.Context,
     stock_code: str = typer.Argument(..., help="銘柄コード"),
     stock_name: str = typer.Option(None, "--name", "-n"),
     reason: str = typer.Option(None, "--reason", help="登録理由"),
@@ -49,21 +50,42 @@ def add_item(
     notify: bool = typer.Option(True, "--notify/--no-notify"),
     memo: str = typer.Option(None, "--memo"),
 ) -> None:
-    """ウォッチリストに銘柄を登録する。"""
+    """ウォッチリストに銘柄を登録する(既存銘柄の場合は指定した項目だけ更新する)。
+
+    Issue #58: **オプションのdefault値を「利用者がその値を明示した」とみなさない。**
+    `--notify` / `--priority` / `--benefit-interest` はdefaultと同じ値を明示指定
+    できるため、値だけでは区別がつかない。Clickのparameter sourceを見て、
+    コマンドラインで実際に指定されたものだけをpatchへ積む。
+    これを怠ると、既存銘柄を `jstock watchlist add 9999` と再登録しただけで
+    priority等が既定値へ戻る。
+    """
+
+    def _specified(name: str) -> bool:
+        source = ctx.get_parameter_source(name)
+        return source is not None and source.name == "COMMANDLINE"
+
+    patch: dict[str, object] = {}
+    # 既定値がNoneのオプションは、値の有無だけで指定を判別できる
+    if stock_name is not None:
+        patch["stock_name"] = stock_name
+    if reason is not None:
+        patch["reason"] = reason
+    if desired_total_yield is not None:
+        patch["desired_total_yield_pct"] = desired_total_yield
+    if desired_buy_price is not None:
+        patch["desired_buy_price"] = _parse_decimal(desired_buy_price, "希望買値")
+    if memo is not None:
+        patch["memo"] = memo
+    # 既定値が非Noneのオプションは、明示指定されたときだけ反映する
+    if _specified("benefit_interest"):
+        patch["benefit_interest"] = benefit_interest
+    if _specified("priority"):
+        patch["priority"] = priority
+    if _specified("notify"):
+        patch["notify_enabled"] = notify
+
     service = WatchlistService()
-    item = service.add_item(
-        stock_code=stock_code,
-        stock_name=stock_name,
-        reason=reason,
-        desired_total_yield_pct=desired_total_yield,
-        desired_buy_price=_parse_decimal(desired_buy_price, "希望買値")
-        if desired_buy_price
-        else None,
-        benefit_interest=benefit_interest,
-        priority=priority,
-        notify_enabled=notify,
-        memo=memo,
-    )
+    item = service.add_item(stock_code=stock_code, patch=patch)
     typer.echo(f"登録しました: {item.stock_code} {item.stock_name or ''}")
 
 
@@ -106,6 +128,7 @@ def update_item(
     try:
         item = service.update_item(stock_code, **fields)
     except ValueError as e:
+        # WatchlistFieldOwnershipError(ValueError派生)と未登録エラーの両方を含む
         typer.echo(str(e))
         raise typer.Exit(code=1) from e
     typer.echo(f"更新しました: {item.stock_code}")
