@@ -32,6 +32,7 @@ from jstock_advisor.interfaces.disclosure import (
     DisclosureUnavailableReason,
 )
 from jstock_advisor.interfaces.types import Disclosure
+from jstock_advisor.providers._failure import raise_provider_data_error
 
 _EDINET_PROVIDER_NAME = "edinet"
 
@@ -94,16 +95,74 @@ class EdinetYfinanceDisclosureProvider:
         )
 
     def get_next_earnings_date(self, stock_code: str) -> dt.date | None:
+        """次回決算発表予定日を取得する(Issue #59 Phase B4)。
+
+        契約: **SUCCESS + date / SUCCESS + missing / FAILURE を混同しない。**
+
+        - 取得できた → `date`
+        - **取得自体は成功したが決算予定日が未公表・欠測** → `None`
+          (`calendar` が `None` / 空 dict / "Earnings Date" キー無し / 値が空)
+        - **外部アクセス失敗・応答の構造が想定外** → `ProviderDataError` を送出
+
+        以前は上記3種をすべて `None` へ潰していたため、provider障害が
+        「決算予定なし」と同義になり、再試行も走らないまま
+        `EarningsDateStatus.UNAVAILABLE` へロンダリングされていた
+        (決算直前のBUY抑制ゲートが無音ですり抜ける経路)。
+
+        パース失敗を `None` + 警告ログに留めると「parse failure = missing」の
+        混同が残るため、**failureとして送出**する。新しい例外階層は作らず、
+        非再試行の内部例外を `raise_provider_data_error()` へ渡して
+        `ProviderDataError` へ統一する(retryable は分類器が1回だけ決める)。
+        """
         try:
             ticker = yf.Ticker(f"{stock_code}.T")
             calendar = ticker.calendar
-        except Exception:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
+        except Exception as exc:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
+            # 外部アクセス中の例外。429・timeout等はretryableとして分類され、
+            # 呼び出し元の既存retry境界(call_with_rate_limit_retry)が再試行する。
+            raise_provider_data_error(
+                exc, provider_name="yfinance", operation="get_next_earnings_date"
+            )
+
+        # --- ここから先はアクセス成功。missing と parse failure を分ける ---
+        if calendar is None:
+            return None
+        if not isinstance(calendar, dict):
+            # 想定外の応答構造。「決算予定なし」と解釈してはならない。
+            raise_provider_data_error(
+                TypeError(f"unexpected calendar type: {type(calendar).__name__}"),
+                provider_name="yfinance",
+                operation="get_next_earnings_date",
+            )
+
+        if "Earnings Date" not in calendar:
+            return None
+        earnings_dates = calendar["Earnings Date"]
+        if earnings_dates is None:
+            return None
+        if not isinstance(earnings_dates, list | tuple):
+            raise_provider_data_error(
+                TypeError(
+                    f"unexpected Earnings Date type: {type(earnings_dates).__name__}"
+                ),
+                provider_name="yfinance",
+                operation="get_next_earnings_date",
+            )
+        if not earnings_dates:
+            # 空リスト = 予定日が未公表(正常な欠測)。
             return None
 
-        if not isinstance(calendar, dict):
-            return None
-        earnings_dates = calendar.get("Earnings Date")
-        if not earnings_dates:
-            return None
         first = earnings_dates[0]
-        return first if isinstance(first, dt.date) else None
+        if isinstance(first, dt.datetime):
+            # dt.datetimeはdt.dateのサブクラスであり、素通しすると時刻付きの値が
+            # 「次回決算日」として流れる。既存consumerは日付比較
+            # (`earnings_date_raw < evaluation_date`)と営業日数算出のみを行うため、
+            # 日付へ明示的に正規化する(仕様変更ではなく、既存の日付比較契約の明確化)。
+            return first.date()
+        if isinstance(first, dt.date):
+            return first
+        raise_provider_data_error(
+            TypeError(f"unexpected Earnings Date element type: {type(first).__name__}"),
+            provider_name="yfinance",
+            operation="get_next_earnings_date",
+        )
