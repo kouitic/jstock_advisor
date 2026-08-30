@@ -1,6 +1,8 @@
 import datetime as dt
 from decimal import Decimal
 
+import pytest
+
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import (
@@ -11,6 +13,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.interfaces.types import AnnualDividendActual, CorporateActionEvent, DividendInfo
 from jstock_advisor.providers.dividend_data.cross_validating_impl import (
     CrossValidatingDividendDataProvider,
+    _representative_value,
 )
 from jstock_advisor.services.corporate_action_service import CorporateActionService
 
@@ -531,3 +534,79 @@ def test_8136_pattern_split_within_period_is_not_yet_validatable() -> None:
 
     assert result is not None
     assert result.validation_status == DividendValidationStatus.NOT_YET_VALIDATABLE
+
+
+# --- Issue #59 Phase B3(2026-08-30): 0 と None の混同(N10)の是正 --------------
+#
+# 以前は `_representative_value()` が `actual or forecast` としていたため、
+# **`Decimal("0")`(無配という確定した実値)が falsy 扱いされ forecast へ
+# フォールバック**していた。その結果、
+#   - 無配企業で予想配当も無い場合は「代表値なし」として早期returnし、
+#     クロスバリデーション自体が実施されない
+#   - 無配企業に予想配当がある場合は予想値が代表値になる
+# という「0(確定)と None(不明)の混同」が起きていた。
+#
+# provider failure semantics(#59 の FAILURE != SUCCESS + missing/empty/zero)と
+# 同じ root concept であり、B3 の対象とする。
+
+
+def _info_with_actual_and_forecast(
+    actual: Decimal | None, forecast: Decimal | None
+) -> DividendInfo:
+    return DividendInfo(
+        stock_code="8136",
+        fiscal_year="2026",
+        actual_annual_dividend_per_share=actual,
+        forecast_annual_dividend_per_share=forecast,
+        source=_SOURCE_A,
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "actual", "forecast", "expected"),
+    [
+        # T1: 無配確定 + 予想なし → 0 を返す(以前は None になり検証がスキップされた)
+        ("actual=0/forecast=None", Decimal("0"), None, Decimal("0")),
+        # T2: 無配確定 + 予想あり → **forecast へフォールバックしない**
+        ("actual=0/forecast=50", Decimal("0"), Decimal("50"), Decimal("0")),
+        # T3: 実績不明 + 予想あり → forecast を採用(actual is None のときだけ)
+        ("actual=None/forecast=50", None, Decimal("50"), Decimal("50")),
+        # T4: 通常ケース → actual を採用
+        ("actual=40/forecast=50", Decimal("40"), Decimal("50"), Decimal("40")),
+    ],
+)
+def test_representative_value_distinguishes_zero_from_none(
+    label: str, actual: Decimal | None, forecast: Decimal | None, expected: Decimal
+) -> None:
+    """0(無配確定)と None(不明)を混同しない。"""
+    info = _info_with_actual_and_forecast(actual, forecast)
+
+    assert _representative_value(info) == expected, label
+
+
+def test_zero_actual_dividend_does_not_skip_cross_validation() -> None:
+    """actual=0 / forecast=None でも「代表値なし」として早期returnしない。
+
+    以前は `_representative_value()` が None を返し、
+    `get_dividend_info()` が primary をそのまま返して
+    **クロスバリデーションが一切実施されない**状態だった。
+    現在は検証フローへ進み、副データ源の状況に応じた
+    validation_status が設定される。
+    """
+    primary = DividendInfo(
+        stock_code="8136",
+        fiscal_year="2026",
+        actual_annual_dividend_per_share=Decimal("0"),
+        forecast_annual_dividend_per_share=None,
+        source=_SOURCE_A,
+        annual_dividend_actuals=[],
+    )
+    provider = _provider(primary, None)
+
+    result = provider.get_dividend_info("8136")
+
+    assert result is not None
+    # 早期returnではなく検証フローへ進み、副データ源が使えないことが記録される。
+    assert result.validation_status == DividendValidationStatus.SECONDARY_UNAVAILABLE
+    # 無配(0)という実値は保持される。
+    assert result.actual_annual_dividend_per_share == Decimal("0")

@@ -37,7 +37,26 @@ logger = logging.getLogger(__name__)
 
 
 def _representative_value(info: DividendInfo) -> Decimal | None:
-    return info.actual_annual_dividend_per_share or info.forecast_annual_dividend_per_share
+    """クロスバリデーションを実施できるかの判定に使う代表値(Issue #59 Phase B3)。
+
+    契約:
+
+    - `actual_annual_dividend_per_share` が **None でなければ actual を採用**する
+    - **`Decimal("0")` は「無配」という正当な実値**であり、欠測ではない
+    - `forecast_annual_dividend_per_share` へフォールバックするのは
+      **actual が None(=不明)の場合だけ**
+
+    以前は `actual or forecast` としていたため、`Decimal("0")` が falsy 扱いされ
+    forecast へフォールバックしていた。その結果、無配企業について
+    「配当実績0円(確定)」と「配当実績が不明」が同じ扱いになり、
+    予想配当が無い銘柄ではクロスバリデーション自体が
+    「代表値なし」として早期returnで実施されなくなっていた
+    (#59 の provider failure semantics と同じ「0とNoneの混同」)。
+    """
+    actual = info.actual_annual_dividend_per_share
+    if actual is not None:
+        return actual
+    return info.forecast_annual_dividend_per_share
 
 
 def _within_threshold(a: Decimal, b: Decimal, threshold_pct: float) -> bool:
