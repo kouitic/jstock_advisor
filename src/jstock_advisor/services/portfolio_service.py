@@ -33,6 +33,19 @@ from jstock_advisor.services.write_plan import (
     SaleWritePlan,
 )
 
+PURCHASE_PRICE_MUST_BE_POSITIVE = "購入単価は0より大きい値を指定してください"
+
+
+def _validate_purchase_price(purchase_price: Decimal) -> None:
+    """新規購入ロットの取得単価が正であることを保証する(Issue #75 Phase B2)。
+
+    0以下の取得単価は正当な業務状態ではない(贈与・スピンオフ等を0円取得として
+    表す仕様は存在しない)。CSV取込・LINE会話型登録は以前から0以下を拒否しており、
+    本検証はその契約を購入書き込みの共通境界へ引き上げるものである。
+    """
+    if purchase_price <= 0:
+        raise ValueError(PURCHASE_PRICE_MUST_BE_POSITIVE)
+
 
 class PortfolioService:
     def __init__(
@@ -125,6 +138,19 @@ class PortfolioService:
         計画構築時点で読み取った既存Holdingの生data文字列(新規追加なら
         None)をexpected_dataへ含める。
         """
+        # --- Issue #75 Phase B2(2026-08-30): 取得単価の正値contract ---
+        # 購入書き込みの共通境界で検証する。register_purchase()側だけに置くと、
+        # 本メソッドを直接呼ぶ経路(conversation_service.py等)や将来のcallerが
+        # 素通りしてしまうため。lot repositoryの読み取り・PurchaseLot生成・
+        # Holding再計算・永続化のいずれよりも前でfail-fastする
+        # (repository stateを一切変化させない)。
+        #
+        # PurchaseLot entityへvalidatorを置く方式は採らない。読み込み時にも
+        # 検証が走り、取得単価が不正な既存レコードを読めなくしてしまうため
+        # (#63のhistorical compatibilityへ干渉する)。既にそうなっている
+        # 保有銘柄の判定側の安全弁はPhase B1(利確判定のfail-close)が担う。
+        _validate_purchase_price(purchase_price)
+
         now = now or dt.datetime.now(dt.UTC)
         normalized_owner = normalize_and_validate_owner(owner)
         holding_id = build_holding_id(normalized_owner, stock_code)
