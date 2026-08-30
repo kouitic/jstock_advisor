@@ -995,24 +995,42 @@ def _analyze_one_holding(
         )
         return result
 
+    # --- Issue #75(2026-08-30): 利確判定が成立しなかった場合の区別 ---
+    # recommendationがNoneでも、「判定できたうえで利確シグナルなし(NO_SIGNAL)」と
+    # 「入力が不正で判定そのものが成立しなかった(NOT_EVALUATED)」は別の状態である。
+    # 以前はdata_errorを参照しておらず、両者ともCOMPLETED / NO_SIGNAL / holdとして
+    # 記録されていたため、運用者が沈黙抑止に気付けなかった。
+    profit_taking_unavailable = pt_outcome.data_error is not None
     audit = HoldingEvaluationAudit(
         stock_code=holding.stock_code,
         evaluated_at=now,
-        evaluation_status=EvaluationStatus.COMPLETED,
+        evaluation_status=(
+            EvaluationStatus.DATA_INSUFFICIENT
+            if profit_taking_unavailable
+            else EvaluationStatus.COMPLETED
+        ),
         raw_sell_recommendation_type=None,
         raw_profit_recommendation_type=None,
         final_recommendation_type=None,
-        notification_status=NotificationStatus.NOT_REQUIRED,
-        notification_suppression_reason=None,
+        notification_status=(
+            NotificationStatus.DATA_INSUFFICIENT
+            if profit_taking_unavailable
+            else NotificationStatus.NOT_REQUIRED
+        ),
+        notification_suppression_reason=pt_outcome.data_error,
         sell_signal_status="NO_SIGNAL",
-        profit_taking_status="NO_SIGNAL",
+        profit_taking_status="NOT_EVALUATED" if profit_taking_unavailable else "NO_SIGNAL",
         fair_value_status="NOT_AVAILABLE",
-        data_quality_status="OK",
+        data_quality_status="NOT_EVALUATED" if profit_taking_unavailable else "OK",
         confidence=None,
         error_code=None,
     )
     result = _HoldingResult(
-        recommended=False, notified=False, succeeded=True, category="hold", audit=audit
+        recommended=False,
+        notified=False,
+        succeeded=True,
+        category="data_insufficient" if profit_taking_unavailable else "hold",
+        audit=audit,
     )
     mode_designated_engine = _resolve_mode_designated_engine(mode_plan)
     _persist_holding_evaluation_record(
