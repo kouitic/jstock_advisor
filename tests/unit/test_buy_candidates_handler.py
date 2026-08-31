@@ -18,6 +18,7 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     EligibilityBlockCategory,
     ExecutionMode,
+    NotificationMode,
     PortfolioValuationBasis,
     PurchaseCategory,
     RecommendationType,
@@ -3899,3 +3900,220 @@ def test_finalize_batch_unknown_sector_holding_blocks_only_sector_gate(
     assert output_values["portfolio_total_market_value"] == "2600000"
     # ブロック理由は業種データ不足であり、時価の信頼性不足とは区別できる。
     assert output_values["block_reason"] == "SECTOR_EXPOSURE_DATA_INSUFFICIENT"
+
+
+# ============================================================================
+# Issue #105: VALIDATION は BuyCandidateEvaluationRecord を本番テーブルへ書かない
+#
+# `BuyCandidateEvaluationRecord` は本番テーブル専用(検証用テーブルを持たない)。
+# 対称的な `HoldingEvaluationRecord` と同じく、VALIDATION では **保存自体を
+# スキップ** することで「VALIDATION は通常運用の永続履歴を汚さない」契約を守る。
+#
+# save 側だけを抑止して finalize の update 側を残すと、対象銘柄数ぶんの
+# "BuyCandidateEvaluationRecord not found" warning が出続け、read 自体も
+# 本番テーブルへ発生する。**save と update は対称に抑止する。**
+# ============================================================================
+
+
+class _SpyEvaluationRecordRepository:
+    """本番 evaluation record repository への到達を検出する spy。
+
+    `upsert` / `get` のいずれかが呼ばれたら記録する(呼ばれないことの assert 用)。
+    """
+
+    def __init__(self, seed: dict | None = None) -> None:
+        self.items: dict = dict(seed or {})
+        self.upsert_calls: list[str] = []
+        self.get_calls: list[str] = []
+
+    def upsert(self, record) -> None:  # noqa: ANN001
+        self.upsert_calls.append(record.evaluation_id)
+        self.items[record.evaluation_id] = record
+
+    def get(self, evaluation_id: str):  # noqa: ANN201
+        self.get_calls.append(evaluation_id)
+        return self.items.get(evaluation_id)
+
+    def list_by_batch(self, batch_id: str) -> list:
+        return [r for r in self.items.values() if getattr(r, "batch_id", None) == batch_id]
+
+
+def _run_single_candidate_with_spy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, execution_context: ExecutionContext
+) -> _SpyEvaluationRecordRepository:
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    monkeypatch.setattr(handler_module, "record_result", lambda *a, **kw: None)
+    spy = _SpyEvaluationRecordRepository()
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, "batch-105", _NOW, object(), _CONFIG,
+        object(), RecommendationRepository(store_dir=tmp_path),
+        _FakeNotificationServiceForRanking(), execution_context, spy,
+    )
+    return spy
+
+
+def test_t1_normal_saves_evaluation_record_to_production_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T1: NORMAL では従来どおり本番 repository へ upsert される(既存挙動の回帰)。"""
+    spy = _run_single_candidate_with_spy(monkeypatch, tmp_path, ExecutionContext.normal())
+
+    assert spy.upsert_calls == ["batch-105:2914"]
+
+
+def test_t2_validation_does_not_write_evaluation_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T2(#105 本体): VALIDATION では本番 repository へ一切 write しない。"""
+    spy = _run_single_candidate_with_spy(
+        monkeypatch, tmp_path, ExecutionContext(mode=ExecutionMode.VALIDATION)
+    )
+
+    assert spy.upsert_calls == [], "VALIDATION で本番 evaluation record へ書き込んでいる"
+    assert spy.get_calls == []
+
+
+def test_t2b_validation_dry_run_does_not_write_evaluation_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T2 の DRY_RUN 版。notification_mode によらず抑止されること。"""
+    ctx = ExecutionContext(
+        mode=ExecutionMode.VALIDATION, notification_mode=NotificationMode.DRY_RUN
+    )
+    spy = _run_single_candidate_with_spy(monkeypatch, tmp_path, ctx)
+
+    assert spy.upsert_calls == []
+    assert spy.get_calls == []
+
+
+def _run_finalize_with_spy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, execution_context: ExecutionContext
+):
+    _patch_audit(monkeypatch)
+    repo = RecommendationRepository(store_dir=tmp_path)
+    ranking_entries = []
+    for code in ("1111", "2222"):
+        rec = _make_recommendation(
+            code, company_quality_score=60.0, recommendation_id=f"rec-{code}",
+            buy_action=BuyAction.BUY,
+        )
+        repo.save(rec)
+        ranking_entries.append(handler_module._encode_buy_ranking_entry(rec))
+    progress = _progress(ranking_entries, total=2, category_counts={"buy_candidate": 2})
+    # finalize 側が「判定時点で作成済み」と想定するレコードを事前投入する。
+    # VALIDATION では read すら発生しないことを確認するため、seed は両モード共通。
+    seed = {}
+    for code in ("1111", "2222"):
+        record = BuyCandidateEvaluationRecord(
+            evaluation_id=build_evaluation_id("batch-105", code),
+            batch_id="batch-105", stock_code=code, evaluated_at=_NOW,
+            rule_version="v1-mvp", candidate_source=CandidateSource.WATCHLIST,
+            purchase_category=PurchaseCategory.BUY_CANDIDATE,
+            final_buy_action=BuyAction.BUY, raw_buy_action=BuyAction.BUY,
+            recommendation_id=f"rec-{code}",
+        )
+        seed[record.evaluation_id] = record
+    spy = _SpyEvaluationRecordRepository(seed)
+    fake_service = _FakeNotificationServiceForRanking()
+    handler_module._finalize_batch(
+        progress, "batch-105", _CONFIG, _NOW, repo, fake_service, execution_context, spy,
+    )
+    return spy, fake_service
+
+
+def test_t5_validation_finalize_does_not_read_or_update_evaluation_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T5: VALIDATION の finalize では repository の get / upsert を一切呼ばない。
+
+    save 側だけ抑止して update 側を残すと "not found" warning が大量に出るため、
+    **両方が対称に抑止されている**ことをここで固定する。
+    """
+    spy, _ = _run_finalize_with_spy(
+        monkeypatch, tmp_path, ExecutionContext(mode=ExecutionMode.VALIDATION)
+    )
+
+    assert spy.get_calls == [], "VALIDATION finalize が本番 evaluation record を read している"
+    assert spy.upsert_calls == []
+
+
+def test_t5b_normal_finalize_still_updates_evaluation_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T5 の NORMAL 回帰: finalize の outcome 追記は従来どおり行われる。"""
+    spy, _ = _run_finalize_with_spy(monkeypatch, tmp_path, ExecutionContext.normal())
+
+    assert spy.get_calls, "NORMAL で finalize の read が消えている"
+    assert spy.upsert_calls, "NORMAL で finalize の outcome 追記が消えている"
+
+
+def test_t6_validation_finalize_completes_without_evaluation_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T6: evaluation record を保存しない VALIDATION でも finalize が完走する。
+
+    ranking(digest 送信)と batch summary の生成がどちらも行われること。
+    """
+    _, fake_service = _run_finalize_with_spy(
+        monkeypatch, tmp_path, ExecutionContext(mode=ExecutionMode.VALIDATION)
+    )
+
+    assert len(fake_service.digest_calls) == 1
+    assert [r.stock_code for r in fake_service.digest_calls[0]] == ["1111", "2222"]
+    assert fake_service.batch_summary_calls, "batch summary が生成されていない"
+
+
+class _SpyPointerRepository:
+    def __init__(self) -> None:
+        self.updates: list = []
+
+    def get(self):  # noqa: ANN201
+        return None
+
+    def update_latest_completed(self, pointer) -> None:  # noqa: ANN001
+        self.updates.append(pointer)
+
+
+@pytest.mark.parametrize(
+    ("ctx", "expect_updated"),
+    [
+        (ExecutionContext.normal(), True),
+        (ExecutionContext(mode=ExecutionMode.VALIDATION), False),
+    ],
+    ids=["normal", "validation"],
+)
+def test_t7_latest_batch_pointer_contract_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, ctx: ExecutionContext, expect_updated: bool
+) -> None:
+    """T7: latest batch pointer の更新契約(NORMAL のみ)が #105 修正後も不変。
+
+    NORMAL では全銘柄分の evaluation record 保存成功が条件のため更新され、
+    VALIDATION では保存しない = 条件を満たさないうえ mode ゲートでも弾かれる。
+    """
+    _patch_audit(monkeypatch)
+    repo = RecommendationRepository(store_dir=tmp_path)
+    rec = _make_recommendation(
+        "1111", company_quality_score=60.0, recommendation_id="rec-1111",
+        buy_action=BuyAction.BUY,
+    )
+    repo.save(rec)
+    progress = _progress(
+        [handler_module._encode_buy_ranking_entry(rec)],
+        total=1, category_counts={"buy_candidate": 1},
+    )
+    progress.evaluation_record_saved_stock_codes.append("1111")
+    spy = _SpyEvaluationRecordRepository()
+    pointer = _SpyPointerRepository()
+
+    handler_module._finalize_batch(
+        progress, "batch-105", _CONFIG, _NOW, repo,
+        _FakeNotificationServiceForRanking(), ctx, spy, pointer,
+    )
+
+    assert bool(pointer.updates) is expect_updated

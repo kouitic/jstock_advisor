@@ -951,6 +951,7 @@ def _process_single_candidate(
             record_final_buy_action,
             record_raw_buy_action,
             record_recommendation_id,
+            execution_context,
             record_exclusion_reasons,
         )
         needs_code = category in ("data_insufficient", "failed")
@@ -1009,6 +1010,7 @@ def _save_evaluation_record_safely(
     final_buy_action: BuyAction | None,
     raw_buy_action: BuyAction | None,
     recommendation_id: str | None,
+    execution_context: ExecutionContext,
     exclusion_reasons: list[str] | None = None,
 ) -> bool:
     """BuyCandidateEvaluationRecordの構築・保存失敗が既存の判定・通知フローを
@@ -1020,7 +1022,20 @@ def _save_evaluation_record_safely(
     追加)。呼び出し元はこの結果をrecord_result()のevaluation_record_saved_
     stock_code引数へ渡し、latest batch pointerの更新条件(全対象銘柄分の
     保存成功)の判定に使う。
+
+    Issue #105: VALIDATIONでは保存自体をスキップする。BuyCandidateEvaluationRecordは
+    本番テーブル専用(検証用テーブルを持たない)ため、ここでスキップしないと
+    「VALIDATIONは通常運用の永続履歴を汚さない」という既存契約に反する。
+    対称的な`HoldingEvaluationRecord`(holdings_watchlist_handler.py)も同じく
+    分離ではなくスキップ方式であり、それに揃える。
+
+    スキップの意思表示は`execution_context`で行い、`evaluation_record_repo=None`
+    (=未注入)へ流用しない。戻り値Falseは「保存していない」という事実どおりの値で、
+    唯一の消費先であるlatest batch pointerの更新条件はNORMAL限定
+    (`_finalize_batch`参照)のため、VALIDATIONでの挙動に影響しない。
     """
+    if execution_context.is_validation:
+        return False
     if evaluation_record_repo is None:
         return False
     try:
@@ -1259,11 +1274,19 @@ def _update_evaluation_record_outcome_safely(
     block_reason: str | None,
     add_on_block_reasons: tuple[str, ...],
     send_outcome: str | None,
+    execution_context: ExecutionContext,
 ) -> None:
     """買い候補ランキングループの各finalize判定結果を、判定時点(worker側)で
     既に作成済みのBuyCandidateEvaluationRecordへ追記する(save_decision_
     snapshot_safely()と同じ「失敗しても本処理を止めない」設計方針)。
+
+    Issue #105: VALIDATIONでは`_save_evaluation_record_safely()`が保存自体を
+    スキップするため、ここも**対称にスキップする**。片側だけ抑止すると、
+    finalizeで対象銘柄数ぶんの"BuyCandidateEvaluationRecord not found"
+    warningが出続けるうえ、read自体は本番テーブルへ発生してしまう。
     """
+    if execution_context.is_validation:
+        return
     if evaluation_record_repo is None:
         return
     try:
@@ -1359,6 +1382,7 @@ def _finalize_batch(
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, stock_code, unified_rank, None,
                 False, "RECORD_NOT_FOUND", "RECORD_NOT_FOUND", (), None,
+                execution_context,
             )
             continue
 
@@ -1378,6 +1402,7 @@ def _finalize_batch(
                 if dq.block_category
                 else EligibilityBlockCategory.DATA_QUALITY.value,
                 dq.block_reason, (), None,
+                execution_context,
             )
             continue
 
@@ -1400,6 +1425,7 @@ def _finalize_batch(
                 if buy_cooldown.block_category
                 else EligibilityBlockCategory.TRADE_COOLDOWN.value,
                 buy_cooldown.block_reason, (), None,
+                execution_context,
             )
             continue
 
@@ -1421,6 +1447,7 @@ def _finalize_batch(
                 if buy_priority.block_category
                 else EligibilityBlockCategory.LOW_PRIORITY.value,
                 buy_priority.block_reason, (), None,
+                execution_context,
             )
             continue
 
@@ -1497,6 +1524,7 @@ def _finalize_batch(
                     if addon_eligibility.block_category
                     else None,
                     addon_eligibility.block_reason, assessment.reasons, None,
+                    execution_context,
                 )
                 continue
 
@@ -1514,6 +1542,7 @@ def _finalize_batch(
                 if resend.block_category
                 else EligibilityBlockCategory.RECENTLY_NOTIFIED.value,
                 resend.block_reason, (), None,
+                execution_context,
             )
             continue
 
@@ -1532,6 +1561,7 @@ def _finalize_batch(
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, stock_code, unified_rank, None,
                 False, EligibilityBlockCategory.OUTSIDE_TOP_5.value, "OUTSIDE_TOP_5", (), None,
+                execution_context,
             )
             continue
 
@@ -1580,6 +1610,7 @@ def _finalize_batch(
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
                 True, None, None, (), outcome,
+                execution_context,
             )
         elif outcome in ("SENT_AND_RECORDED", "SENT_VALIDATION", "SENT_LOG_FAILED"):
             notification_rank += 1
@@ -1592,6 +1623,7 @@ def _finalize_batch(
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, notification_rank,
                 True, None, None, (), outcome,
+                execution_context,
             )
         elif outcome == "CLAIM_SUPPRESSED":
             # Issue #36: claim機構による抑止は通知条件をすべて通過した後
@@ -1609,6 +1641,7 @@ def _finalize_batch(
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
                 True, None, None, (), outcome,
+                execution_context,
             )
         else:
             send_failed_count += 1
@@ -1620,6 +1653,7 @@ def _finalize_batch(
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
                 False, None, outcome, (), outcome,
+                execution_context,
             )
 
     log_failed = [code for code, outcome in send_result.items() if outcome == "SENT_LOG_FAILED"]
