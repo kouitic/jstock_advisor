@@ -1641,6 +1641,11 @@ Resources:
           # maybe_trigger_maintenance()がWatchlistDispatcherFunctionを
           # 非同期invokeする。
           WATCHLIST_DISPATCHER_FUNCTION_NAME: !Sub "${AWS::StackName}-watchlist-dispatcher"
+          # Issue #57 Phase B2: finalizeが未完了のbuy/holdingsバッチを検出した際、
+          # 当該Lambdaへ「締めくくり処理のみ」の非同期invokeを発行する
+          # (recovery_action=FINALIZE_ONLY)。銘柄評価等のworker処理は再実行しない。
+          BUY_CANDIDATES_FUNCTION_NAME: !Sub "${AWS::StackName}-buy-candidates"
+          HOLDINGS_WATCHLIST_FUNCTION_NAME: !Sub "${AWS::StackName}-holdings-watchlist"
       Policies:
         # 本番検証(2026-08)で発覚: retry_finalize()経由でDispatcher/Worker
         # と同じ_finalize_completed()/_maybe_commit_rotation()を呼ぶため、
@@ -1718,6 +1723,16 @@ Resources:
               Action: lambda:InvokeFunction
               Resource:
                 - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-dispatcher"
+        # Issue #57 Phase B2: buy/holdingsのfinalize recovery。締めくくり処理のみを
+        # 再実行させるため当該Lambdaを非同期invokeする(recovery_action=FINALIZE_ONLY)。
+        # ワイルドカードは使わず、対象2関数のARNだけを列挙する。
+        - Statement:
+            - Sid: InvokeForCompletionFinalizeRecovery
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-buy-candidates"
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-holdings-watchlist"
       Events:
         Hourly:
           Type: ScheduleV2
