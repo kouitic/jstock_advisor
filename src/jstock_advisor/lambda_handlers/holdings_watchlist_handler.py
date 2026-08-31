@@ -76,6 +76,7 @@ from jstock_advisor.domain.signals.holding_decision_execution_plan import (
 from jstock_advisor.domain.signals.portfolio_concentration import evaluate_portfolio_concentration
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     mark_completion_finalize_completed,
+    mark_completion_finalize_failed,
     record_result,
     start_batch,
     try_acquire_completion_finalize,
@@ -1136,6 +1137,11 @@ def _finish_batch_item(
         detected_category_entry=detected_category_entry,
         attention_detected_stock_code=holding_id if attention_detected else None,
         attention_sent_stock_code=holding_id if attention_sent else None,
+        # Issue #57 B1: finalize eligibilityの正本となる完了識別子。同一銘柄を
+        # 複数ownerが保有する場合に別件として数える必要があるためholding_idを渡す
+        # (M3.1の既存方針と同じ)。stock_code引数はcategory依存でしか渡されない
+        # ため流用できず、専用引数として常に渡す。
+        completion_id=holding_id,
     )
     if progress is None or not progress.is_complete:
         return
@@ -1184,24 +1190,49 @@ def _finish_batch_item(
         attention_detected_n,
         attention_sent_n,
     )
-    notification_service.notify_batch_summary(
-        _PROCESS_NAME,
-        progress.total,
-        progress.category_counts,
-        now,
-        data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
-        failed_stock_codes=progress.failed_stock_codes,
-        partial_sell_detected_count=detected_counts[HoldingSummaryAction.PARTIAL],
-        full_sell_detected_count=detected_counts[HoldingSummaryAction.FULL],
-        sell_detected_count=detected_counts[HoldingSummaryAction.SELL],
-        critical_risk_detected_count=detected_counts[HoldingSummaryAction.CRITICAL],
-        attention_detected_count=attention_detected_n,
-        display_title="保有株チェック",
-    )
+    try:
+        notification_service.notify_batch_summary(
+            _PROCESS_NAME,
+            progress.total,
+            progress.category_counts,
+            now,
+            data_insufficient_stock_codes=progress.data_insufficient_stock_codes,
+            failed_stock_codes=progress.failed_stock_codes,
+            partial_sell_detected_count=detected_counts[HoldingSummaryAction.PARTIAL],
+            full_sell_detected_count=detected_counts[HoldingSummaryAction.FULL],
+            sell_detected_count=detected_counts[HoldingSummaryAction.SELL],
+            critical_risk_detected_count=detected_counts[HoldingSummaryAction.CRITICAL],
+            attention_detected_count=attention_detected_n,
+            display_title="保有株チェック",
+        )
+    except BaseException as exc:
+        # Issue #57 B1: 捕捉可能な失敗を永続化する(観測のみ。completed_atは
+        # 書かないためgateの意味論は不変で、再駆動もまだ行わない=Phase B2)。
+        # 記録の失敗で元の例外を握りつぶさない。
+        _mark_finalize_failure_safely(batch_id, finalize_token, now, exc)
+        raise
     # Issue #31: 完了処理の正常終了を記録する。これ以降、同一batch_idの
     # acquireは(経過時間に関わらず)永久に失敗する。summary送信が例外の場合は
     # ここへ到達せず、stale化(1200秒)後に後続トリガーがtakeoverして再実行できる。
     mark_completion_finalize_completed(batch_id, finalize_token, now)
+
+
+def _mark_finalize_failure_safely(
+    batch_id: str, finalize_token: str, now: dt.datetime, exc: BaseException
+) -> None:
+    """finalize失敗の記録を試みる(Issue #57 B1)。
+
+    記録は観測目的のbest-effortであり、**元の例外の伝播を妨げてはならない**。
+    記録自体が失敗した場合は警告を残すだけで飲み込む。
+    """
+    try:
+        mark_completion_finalize_failed(batch_id, finalize_token, now, exc)
+    except Exception:  # noqa: BLE001 - 記録失敗で元の例外を隠さない
+        logger.warning(
+            "holdings batch summary: failed to persist finalize failure batch_id=%s",
+            batch_id,
+            exc_info=True,
+        )
 
 
 def _process_single_holding(

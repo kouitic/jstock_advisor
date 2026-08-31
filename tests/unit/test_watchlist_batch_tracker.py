@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import boto3
 import pytest
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
@@ -1174,3 +1176,294 @@ def test_issue31_local_environment_always_acquires(monkeypatch) -> None:
         batch_tracker.mark_completion_finalize_completed("cb-local", token, _I31_NOW)
         is True
     )
+
+
+# --- Issue #57 Phase B1: completion idempotency / early finalize prevention ----
+# `completed`カウンタは条件なしADDのため、同一銘柄のLambda非同期retryで二重
+# 加算され、未処理銘柄を残したまま`completed >= total`が成立しうる(早期
+# finalize)。B1ではDynamoDBの文字列セット`completed_codes`の要素数を
+# eligibilityの正本にする。DynamoDBのsize()/Set意味論に依存するためmotoで検証する。
+
+_I57_NOW = dt.datetime(2026, 8, 31, 23, 0, tzinfo=dt.UTC)
+
+
+def _i57_start(batch_id: str = "b57", total: int = 2) -> None:
+    """新形式(B1)のバッチをstart_batch経由で作成する。"""
+    batch_tracker.start_batch(batch_id, total, _I57_NOW)
+
+
+def _i57_item(batch_id: str = "b57") -> dict:
+    return (
+        boto3.resource("dynamodb", region_name=_REGION)
+        .Table(_BATCH_TABLE)
+        .get_item(Key={"batch_id": batch_id})["Item"]
+    )
+
+
+def test_i57_duplicate_completion_id_is_idempotent(dynamo, monkeypatch) -> None:
+    """T1: 同一識別子を2回report → completed_codesは1件のまま(completedは2)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start(total=2)
+
+    batch_tracker.record_result("b57", "hold", completion_id="7203")
+    progress = batch_tracker.record_result("b57", "hold", completion_id="7203")
+
+    assert progress is not None
+    assert progress.completed_codes == ["7203"]
+    assert progress.unique_completed == 1
+    # legacyカウンタは維持する(削除しない。既存monitoring/log互換のため)
+    assert progress.completed == 2
+
+
+def test_i57_duplicate_plus_pending_is_not_complete(dynamo, monkeypatch) -> None:
+    """T2: A×2 + B未処理 → completed(2) >= total(2) でもeligibilityはFalse。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start(total=2)
+
+    batch_tracker.record_result("b57", "hold", completion_id="7203")
+    progress = batch_tracker.record_result("b57", "hold", completion_id="7203")
+
+    assert progress is not None
+    assert progress.completed >= progress.total, "旧判定なら完了扱いになる前提条件"
+    assert progress.is_complete is False, "早期finalizeを防げていない"
+    # DynamoDB側のConditionExpressionも同じ意味論であること
+    assert batch_tracker.try_acquire_completion_finalize("b57", _I57_NOW) is None
+
+
+def test_i57_duplicate_plus_pending_completes_after_last_stock(dynamo, monkeypatch) -> None:
+    """T3: A×2 + Bが完了 → eligibilityはTrue(正常完了を妨げない)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start(total=2)
+
+    batch_tracker.record_result("b57", "hold", completion_id="7203")
+    batch_tracker.record_result("b57", "hold", completion_id="7203")
+    progress = batch_tracker.record_result("b57", "hold", completion_id="8306")
+
+    assert progress is not None
+    assert progress.unique_completed == 2
+    assert progress.is_complete is True
+    assert batch_tracker.try_acquire_completion_finalize("b57", _I57_NOW) is not None
+
+
+def test_i57_holdings_same_stock_different_owner_counts_separately(
+    dynamo, monkeypatch
+) -> None:
+    """T4: holdingsはholding_id(owner#stock_code)を渡すため、同一銘柄でも
+    owner違いは別の完了として数える(M3.1の既存方針と整合)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start(total=2)
+
+    batch_tracker.record_result("b57", "hold", completion_id="owner-a#8306")
+    progress = batch_tracker.record_result("b57", "hold", completion_id="owner-b#8306")
+
+    assert progress is not None
+    assert progress.unique_completed == 2
+    assert progress.is_complete is True
+
+
+def test_i57_legacy_item_without_completed_codes_still_finalizes(
+    dynamo, monkeypatch
+) -> None:
+    """T5(deploy境界): 旧コードが作成した項目にはcompleted_codesが無い。
+    属性の不在を「完了0件」と扱うと永久にfinalize不能になるため、legacy
+    カウンタへフォールバックする。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    boto3.resource("dynamodb", region_name=_REGION).Table(_BATCH_TABLE).put_item(
+        Item={"batch_id": "legacy", "total": 3, "completed": 3}
+    )
+
+    progress = batch_tracker.BatchProgress(
+        total=3,
+        completed=3,
+        category_counts={},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+    )
+    assert progress.has_completion_ids is False
+    assert progress.unique_completed == 3
+    assert progress.is_complete is True
+    assert batch_tracker.try_acquire_completion_finalize("legacy", _I57_NOW) is not None
+
+
+def test_i57_new_format_item_uses_set_cardinality(dynamo, monkeypatch) -> None:
+    """T6: 新形式項目はcompleted_codesの要素数で判定する
+    (legacyカウンタが水増しされていても引きずられない)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    boto3.resource("dynamodb", region_name=_REGION).Table(_BATCH_TABLE).put_item(
+        Item={"batch_id": "mixed", "total": 3, "completed": 99, "completed_codes": {"a", "b"}}
+    )
+    assert batch_tracker.try_acquire_completion_finalize("mixed", _I57_NOW) is None
+
+    batch_tracker.record_result("mixed", "hold", completion_id="c")
+    assert batch_tracker.try_acquire_completion_finalize("mixed", _I57_NOW) is not None
+
+
+def test_i57_large_batch_item_size_is_within_dynamodb_limit(dynamo, monkeypatch) -> None:
+    """T7: 621銘柄規模で、他の大きな属性と併存しても400KB上限に余裕があること
+    を実測する(概算ではなくserialized sizeを測る)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    total = 621
+    _i57_start("big", total=total)
+    for i in range(total):
+        code = f"{1000 + i}"
+        batch_tracker.record_result(
+            "big",
+            "hold",
+            completion_id=code,
+            # 同時に育つ既存の大きな属性も併せて再現する
+            ranking_entry=f"12.3456789|{code}|{'r' * 36}",
+            sector_entry=f"BANKING|1234567890.12|{code}",
+        )
+
+    item = _i57_item("big")
+    assert len(item["completed_codes"]) == total
+
+    serializer = TypeSerializer()
+    serialized = {k: serializer.serialize(v) for k, v in item.items()}
+    size_bytes = len(json.dumps(serialized, default=str).encode("utf-8"))
+    # DynamoDB項目上限は400KB。余裕があること(半分未満)を固定する。
+    assert size_bytes < 200_000, f"item size too large: {size_bytes} bytes"
+
+
+def test_i57_concurrent_duplicate_completions_do_not_inflate_unique_count(
+    dynamo, monkeypatch
+) -> None:
+    """T8: 同一識別子が並行に複数回reportされても、unique完了数はずれない
+    (#71のfanout重複が未修正でも#57側で安全であることを固定する)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start("conc", total=3)
+
+    for _ in range(5):
+        batch_tracker.record_result("conc", "hold", completion_id="7203")
+        batch_tracker.record_result("conc", "hold", completion_id="8306")
+    progress = batch_tracker.record_result("conc", "hold", completion_id="9432")
+
+    assert progress is not None
+    assert progress.unique_completed == 3
+    assert progress.completed == 11
+    assert progress.is_complete is True
+
+
+# --- Issue #31 regression(B1で壊れていないこと) -------------------------------
+
+
+def test_i57_regression_parallel_acquire_yields_exactly_one_token(
+    dynamo, monkeypatch
+) -> None:
+    """T9(#31回帰): 新形式項目でも、同時acquireで実行権を得るのは1つだけ。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start("par", total=1)
+    batch_tracker.record_result("par", "hold", completion_id="7203")
+
+    tokens = [
+        batch_tracker.try_acquire_completion_finalize("par", _I57_NOW) for _ in range(5)
+    ]
+    assert sum(1 for t in tokens if t is not None) == 1
+
+
+def test_i57_regression_completed_marker_blocks_forever(dynamo, monkeypatch) -> None:
+    """T10(#31回帰): 正常finalize後はstale閾値を超えても永久にacquire不可。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start("once", total=1)
+    batch_tracker.record_result("once", "hold", completion_id="7203")
+
+    token = batch_tracker.try_acquire_completion_finalize("once", _I57_NOW)
+    assert token is not None
+    assert batch_tracker.mark_completion_finalize_completed("once", token, _I57_NOW) is True
+
+    much_later = _I57_NOW + dt.timedelta(seconds=100_000)
+    assert batch_tracker.try_acquire_completion_finalize("once", much_later) is None
+
+
+# --- Issue #57 B1 Track 2前半: finalize failure persistence --------------------
+
+
+def test_i57_catchable_failure_is_persisted(dynamo, monkeypatch) -> None:
+    """T11: 捕捉可能な例外はfailed_at/failure_reasonとして永続化される。
+    completed_atは書かないため、gateの意味論は変わらない。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start("fail", total=1)
+    batch_tracker.record_result("fail", "hold", completion_id="7203")
+    token = batch_tracker.try_acquire_completion_finalize("fail", _I57_NOW)
+    assert token is not None
+
+    assert (
+        batch_tracker.mark_completion_finalize_failed(
+            "fail", token, _I57_NOW, RuntimeError("provider secret=abc123 leaked")
+        )
+        is True
+    )
+
+    item = _i57_item("fail")
+    assert item["completion_finalize_failed_at"] == _I57_NOW.isoformat()
+    # 例外クラス名のみ。メッセージ本文(秘密情報を含みうる)は保存しない。
+    assert item["completion_finalize_failure_reason"] == "RuntimeError"
+    assert "secret" not in item["completion_finalize_failure_reason"]
+    assert "completion_finalize_completed_at" not in item
+
+
+def test_i57_normal_finalize_leaves_no_failure_marker(dynamo, monkeypatch) -> None:
+    """T12: 正常finalizeではfailed_at/failure_reasonが付かない。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start("ok", total=1)
+    batch_tracker.record_result("ok", "hold", completion_id="7203")
+    token = batch_tracker.try_acquire_completion_finalize("ok", _I57_NOW)
+    assert token is not None
+    assert batch_tracker.mark_completion_finalize_completed("ok", token, _I57_NOW) is True
+
+    item = _i57_item("ok")
+    assert item["completion_finalize_completed_at"] == _I57_NOW.isoformat()
+    assert "completion_finalize_failed_at" not in item
+    assert "completion_finalize_failure_reason" not in item
+
+
+def test_i57_timeout_like_state_has_no_failed_at_but_is_stale_detectable(
+    dynamo, monkeypatch
+) -> None:
+    """T13(§9の契約): Lambda timeout/強制終了は捕捉できないため
+    failed_atは付かない。started_atあり かつ completed_atなし がstale候補の
+    第一条件であり、failed_atの不在を「失敗していない」と解釈してはならない。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start("to", total=1)
+    batch_tracker.record_result("to", "hold", completion_id="7203")
+    token = batch_tracker.try_acquire_completion_finalize("to", _I57_NOW)
+    assert token is not None
+    # ここでプロセスが強制終了した想定(mark_*を一切呼ばない)
+
+    item = _i57_item("to")
+    assert "completion_finalize_started_at" in item
+    assert "completion_finalize_completed_at" not in item
+    assert "completion_finalize_failed_at" not in item, (
+        "timeoutでfailed_atが付くと主張してはならない"
+    )
+
+    # stale閾値経過後はtakeover可能(=stale候補として識別できる)。
+    stale_later = _I57_NOW + dt.timedelta(
+        seconds=batch_tracker._COMPLETION_FINALIZE_STALE_AFTER_SECONDS + 1
+    )
+    assert batch_tracker.try_acquire_completion_finalize("to", stale_later) is not None
+
+
+def test_i57_failure_marker_requires_token_ownership(dynamo, monkeypatch) -> None:
+    """所有権を失った旧ownerはfailure markerを書けない(takeover側を上書きしない)。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
+    _i57_start("own", total=1)
+    batch_tracker.record_result("own", "hold", completion_id="7203")
+    old_token = batch_tracker.try_acquire_completion_finalize("own", _I57_NOW)
+    assert old_token is not None
+    later = _I57_NOW + dt.timedelta(
+        seconds=batch_tracker._COMPLETION_FINALIZE_STALE_AFTER_SECONDS + 1
+    )
+    new_token = batch_tracker.try_acquire_completion_finalize("own", later)
+    assert new_token is not None and new_token != old_token
+
+    assert (
+        batch_tracker.mark_completion_finalize_failed(
+            "own", old_token, later, RuntimeError("stale owner")
+        )
+        is False
+    )
+    assert "completion_finalize_failed_at" not in _i57_item("own")

@@ -4117,3 +4117,107 @@ def test_t7_latest_batch_pointer_contract_unchanged(
     )
 
     assert bool(pointer.updates) is expect_updated
+
+
+# --- Issue #57 Phase B1: completion_id 伝播 / finalize failure persistence ------
+
+
+def test_i57_buy_passes_completion_id_to_record_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """B1: buyは常にcompletion_id=stock_codeを渡す。既存のstock_code引数は
+    categoryが data_insufficient/failed のときしか渡らないため流用できない
+    (=完了識別子が欠けると早期finalize防止が効かない)。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1",
+        buy_action=BuyAction.NOT_ATTRACTIVE,
+    )
+    outcome = _outcome(recommendation, ranking_group="excluded")
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_record_result(batch_id, category, **kwargs):
+        captured.update(kwargs)
+        captured["category"] = category
+        return None
+
+    monkeypatch.setattr(handler_module, "record_result", _fake_record_result)
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(),
+        _CONFIG, object(), RecommendationRepository(store_dir=tmp_path),
+        _FakeNotificationServiceForRanking(),
+    )
+
+    assert captured["completion_id"] == "2914"
+    # このcategoryではstock_codeは渡らない = 流用できないことの固定
+    assert captured["category"] not in ("data_insufficient", "failed")
+    assert captured["stock_code"] is None
+
+
+def _i57_run_buy_finalize_failure(monkeypatch, tmp_path, mark_failed):
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1",
+        buy_action=BuyAction.NOT_ATTRACTIVE,
+    )
+    outcome = _outcome(recommendation, ranking_group="excluded")
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome
+    )
+    monkeypatch.setattr(
+        handler_module, "record_result", lambda *a, **kw: _issue31_completed_progress()
+    )
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("finalize failed (simulated)")
+
+    monkeypatch.setattr(handler_module, "_finalize_batch", _boom)
+    monkeypatch.setattr(
+        handler_module, "try_acquire_completion_finalize",
+        lambda batch_id, now: "i57-token",
+    )
+    monkeypatch.setattr(
+        handler_module, "mark_completion_finalize_completed",
+        lambda *a, **kw: pytest.fail("completed marker must not be written on failure"),
+    )
+    monkeypatch.setattr(handler_module, "mark_completion_finalize_failed", mark_failed)
+
+    with pytest.raises(RuntimeError, match="finalize failed"):
+        handler_module._process_single_candidate(
+            "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(),
+            _CONFIG, object(), RecommendationRepository(store_dir=tmp_path),
+            _FakeNotificationServiceForRanking(),
+        )
+
+
+def test_i57_buy_catchable_finalize_failure_is_persisted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """B1 Track2: 捕捉可能なfinalize例外はfailure markerとして永続化され、
+    元の例外はそのまま伝播する(Lambdaのretry/可視化を変えない)。"""
+    calls: list[tuple[str, str, str]] = []
+
+    def _mark_failed(batch_id, token, now, exc):
+        calls.append((batch_id, token, type(exc).__name__))
+        return True
+
+    _i57_run_buy_finalize_failure(monkeypatch, tmp_path, _mark_failed)
+    assert calls == [("batch-1", "i57-token", "RuntimeError")]
+
+
+def test_i57_buy_failure_persistence_error_does_not_mask_original(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """failure markerの書き込み自体が失敗しても、元の例外を握りつぶさない。"""
+
+    def _mark_failed(batch_id, token, now, exc):
+        raise RuntimeError("dynamodb throttled (simulated)")
+
+    # pytest.raises(match="finalize failed") が成立する = 元の例外が伝播している
+    _i57_run_buy_finalize_failure(monkeypatch, tmp_path, _mark_failed)

@@ -1512,3 +1512,32 @@ def test_profit_taking_no_signal_remains_completed(monkeypatch: pytest.MonkeyPat
     result = _run_holding_task_with_profit_taking_outcome(monkeypatch, _NoSignalOutcome())
 
     assert result["evaluation_status"] == "COMPLETED"
+
+
+# --- Issue #57 Phase B1: completion_id 伝播 / finalize failure persistence ------
+
+
+def test_i57_holdings_passes_holding_id_as_completion_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1: holdingsはholding_id(owner#stock_code)をcompletion_idとして渡す。
+    同一銘柄を複数ownerが保有しても別件として数えるため(M3.1の既存方針)。"""
+    captured: dict[str, object] = {}
+
+    def _fake_record_result(batch_id, category, stock_code=None, **kwargs):
+        captured.update(kwargs)
+        captured["stock_code"] = stock_code
+        return None
+
+    monkeypatch.setattr(handler_module, "record_result", _fake_record_result)
+
+    handler_module._finish_batch_item(
+        batch_id="batch-1",
+        category="hold",
+        holding_id="owner-a#8306",
+        now=_NOW,
+        notification_service=object(),
+        runtime_config_service=object(),
+    )
+
+    assert captured["completion_id"] == "owner-a#8306"
