@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import pandas as pd
@@ -21,10 +24,18 @@ import pytest
 from jstock_advisor.infrastructure.local_repository.stock_name_override_repository import (
     StockNameOverrideRepository,
 )
+from jstock_advisor.interfaces.candidate_universe import CandidateUniverseProvider
+from jstock_advisor.interfaces.corporate_action import CorporateActionProvider
+from jstock_advisor.interfaces.disclosure import DisclosureProvider
+from jstock_advisor.interfaces.dividend_data import DividendDataProvider
+from jstock_advisor.interfaces.financial_data import FinancialDataProvider
+from jstock_advisor.interfaces.market_data import MarketDataProvider
+from jstock_advisor.interfaces.news import NewsProvider
 from jstock_advisor.interfaces.provider_errors import (
     ProviderDataError,
     ProviderFailureCategory,
 )
+from jstock_advisor.interfaces.shareholder_benefit import ShareholderBenefitProvider
 from jstock_advisor.providers._failure import (
     REDACTED,
     raise_provider_data_error,
@@ -482,3 +493,264 @@ def test_batch_handlers_wrap_snapshot_build_with_retry(module_name: str) -> None
 
     assert "call_with_rate_limit_retry" in source
     assert "build_stock_snapshot(" in source
+
+
+# =============================================================================
+# Issue #85 Phase B2 / Group 2: provider failure-vs-empty **completeness**
+#
+# 既存テストは provider method を**手書きで列挙**していたため、
+# 「新しい provider method が追加され、取得失敗時に None / [] / 0 へ縮退しても、
+#  手書き一覧に入らないので見逃す」という穴があった。
+#
+# ここでは provider Protocol から method を**機械的に列挙**し、
+# すべての method が下記のいずれかへ明示的に分類されていることを強制する。
+# 分類漏れ(= Protocol へ method を足しただけ)はテスト失敗になる。
+#
+#   ENFORCED       : network 由来の取得失敗を ProviderDataError へ変換する
+#                    (実際に失敗を注入して振る舞いを検証する)
+#   DOMAIN_ERROR   : provider 固有の型付きエラーを送出する契約
+#                    (ProviderDataError ではないが、欠測へは縮退しない)
+#   NO_REMOTE_FETCH: ローカル登録簿・固定スタブ等で取得失敗が発生しない
+#   KNOWN_GAP      : 契約違反が残っている。**必ず related_issue を伴う**
+#
+# KNOWN_GAP は「見えなくする」ための仕組みではない。#85 では production code を
+# 修正しない代わりに、違反を Issue 付きで台帳へ残して追跡可能にする。
+# =============================================================================
+
+
+class _ContractKind(StrEnum):
+    ENFORCED = "ENFORCED"
+    DOMAIN_ERROR = "DOMAIN_ERROR"
+    NO_REMOTE_FETCH = "NO_REMOTE_FETCH"
+    KNOWN_GAP = "KNOWN_GAP"
+
+
+@dataclass(frozen=True)
+class _ProviderContract:
+    kind: _ContractKind
+    reason: str
+    #: KNOWN_GAP のときは必須(追跡可能性の担保)。
+    related_issue: str | None = None
+
+
+_PROVIDER_PROTOCOLS: tuple[type, ...] = (
+    CandidateUniverseProvider,
+    CorporateActionProvider,
+    DisclosureProvider,
+    DividendDataProvider,
+    FinancialDataProvider,
+    MarketDataProvider,
+    NewsProvider,
+    ShareholderBenefitProvider,
+)
+
+#: provider Protocol の全 method に対する契約台帳。
+#: **Protocol へ method を追加したらここへも登録しないとテストが落ちる。**
+_PROVIDER_FAILURE_CONTRACT: dict[str, _ProviderContract] = {
+    "MarketDataProvider.get_latest_price": _ProviderContract(
+        _ContractKind.ENFORCED, "yfinance history 失敗を ProviderDataError へ変換"
+    ),
+    "MarketDataProvider.get_average_trading_value": _ProviderContract(
+        _ContractKind.ENFORCED, "同上(出来高代金)"
+    ),
+    "MarketDataProvider.get_price_history": _ProviderContract(
+        _ContractKind.ENFORCED, "同上(株価ヒストリー)"
+    ),
+    "MarketDataProvider.get_benchmark_price_history": _ProviderContract(
+        _ContractKind.ENFORCED, "同上(ベンチマーク)"
+    ),
+    "FinancialDataProvider.get_financial_summary": _ProviderContract(
+        _ContractKind.ENFORCED, "Issue #59 B1 で ProviderDataError 化"
+    ),
+    "FinancialDataProvider.get_cashflow_decomposition": _ProviderContract(
+        _ContractKind.ENFORCED, "同上"
+    ),
+    "FinancialDataProvider.get_earnings_surprise_history": _ProviderContract(
+        _ContractKind.ENFORCED, "同上"
+    ),
+    "FinancialDataProvider.get_historical_valuation": _ProviderContract(
+        _ContractKind.ENFORCED, "同上(空listへ縮退しない)"
+    ),
+    "DividendDataProvider.get_dividend_info": _ProviderContract(
+        _ContractKind.ENFORCED, "yfinance 失敗を ProviderDataError へ変換"
+    ),
+    "CorporateActionProvider.get_corporate_actions": _ProviderContract(
+        _ContractKind.ENFORCED, "yfinance splits 失敗を ProviderDataError へ変換"
+    ),
+    "DisclosureProvider.get_disclosures": _ProviderContract(
+        _ContractKind.DOMAIN_ERROR,
+        "Issue #53: EdinetFetchStatus.FETCH_FAILED を DisclosureQueryResult へ載せて返す"
+        "(SUCCESS_EMPTY と別状態として保持されるため欠測へ縮退しない)",
+    ),
+    "DisclosureProvider.get_next_earnings_date": _ProviderContract(
+        _ContractKind.DOMAIN_ERROR,
+        "EarningsDateStatus(CONFIRMED/STALE_PAST_DATE/UNAVAILABLE)で取得不能を表現する",
+    ),
+    "CandidateUniverseProvider.get_candidate_universe": _ProviderContract(
+        _ContractKind.DOMAIN_ERROR,
+        "CandidateUniverseError を送出する(空ユニバースへ縮退しない)",
+    ),
+    "ShareholderBenefitProvider.get_shareholder_benefit": _ProviderContract(
+        _ContractKind.NO_REMOTE_FETCH,
+        "ローカル優待レジストリ / unavailable スタブのみ。remote fetch を持たない",
+    ),
+    "NewsProvider.get_news": _ProviderContract(
+        _ContractKind.NO_REMOTE_FETCH,
+        "現行実装は remote fetch を持たない(将来 remote 化する場合は ENFORCED へ移すこと)",
+    ),
+}
+
+
+def _protocol_method_keys() -> list[str]:
+    """provider Protocol 群から method を機械的に列挙する。"""
+    keys: list[str] = []
+    for proto in _PROVIDER_PROTOCOLS:
+        for name in dir(proto):
+            if name.startswith("_"):
+                continue
+            if not callable(getattr(proto, name, None)):
+                continue
+            keys.append(f"{proto.__name__}.{name}")
+    return sorted(keys)
+
+
+def test_every_provider_protocol_method_has_a_declared_failure_contract() -> None:
+    """**inventory の完全性**: Protocol の全 method が契約台帳に登録されていること。
+
+    新しい provider method を追加したのに登録を忘れると、ここで落ちる
+    (= 手書き列挙の見逃しを構造的に防ぐ)。
+    """
+    discovered = set(_protocol_method_keys())
+    registered = set(_PROVIDER_FAILURE_CONTRACT)
+
+    unregistered = sorted(discovered - registered)
+    assert not unregistered, (
+        "provider Protocol へ method が追加されたが失敗時契約が宣言されていない: "
+        f"{unregistered}。_PROVIDER_FAILURE_CONTRACT へ ENFORCED / DOMAIN_ERROR / "
+        "NO_REMOTE_FETCH / KNOWN_GAP のいずれかで登録すること"
+    )
+    stale = sorted(registered - discovered)
+    assert not stale, f"Protocol から消えた method が台帳に残っている: {stale}"
+
+
+def test_known_gaps_are_always_tracked_by_an_issue() -> None:
+    """KNOWN_GAP は必ず Issue 番号を伴うこと(黙って除外しないための歯止め)。"""
+    untracked = sorted(
+        key
+        for key, contract in _PROVIDER_FAILURE_CONTRACT.items()
+        if contract.kind is _ContractKind.KNOWN_GAP
+        and not (contract.related_issue or "").startswith("#")
+    )
+    assert not untracked, (
+        f"KNOWN_GAP に related_issue(#NN)が無い: {untracked}。"
+        "契約違反を追跡不能な形で除外してはならない"
+    )
+
+
+class _RaisingTickerAll:
+    """どの属性アクセス・メソッド呼び出しでも provider 障害を送出する fake。"""
+
+    def __getattr__(self, name: str) -> object:
+        raise _HttpError(429)
+
+    def history(self, *args: object, **kwargs: object) -> object:
+        raise _HttpError(429)
+
+    def get_earnings_history(self) -> object:
+        raise _HttpError(429)
+
+
+def _enforced_invocations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Callable[[], object]]:
+    """ENFORCED な method を実際に呼び出すための invocation を組み立てる。
+
+    provider ごとに underlying client の差し込み方が異なるため、
+    Protocol の signature から自動生成せず明示的に構築する
+    (自動生成は引数の意味を取り違えたときに誤検知を生むため)。
+    """
+    import jstock_advisor.providers.corporate_action.yfinance_impl as ca_module
+    import jstock_advisor.providers.dividend_data.yfinance_impl as dv_module
+    import jstock_advisor.providers.financial_data.yfinance_impl as fd_module
+    import jstock_advisor.providers.market_data.yfinance_impl as md_module
+    from jstock_advisor.services.corporate_action_service import CorporateActionService
+
+    for module in (md_module, fd_module, dv_module, ca_module):
+        monkeypatch.setattr(module.yf, "Ticker", lambda _symbol: _RaisingTickerAll())
+
+    market = md_module.YFinanceMarketDataProvider(now=_NOW)
+    financial = fd_module.YFinanceFinancialDataProvider(
+        now=_NOW, stock_name_override_repository=StockNameOverrideRepository(store_dir=tmp_path)
+    )
+    corporate = ca_module.YFinanceCorporateActionProvider(now=_NOW)
+    dividend = dv_module.YFinanceDividendDataProvider(
+        CorporateActionService(corporate, _NOW), now=_NOW
+    )
+    start, end = _NOW.date() - dt.timedelta(days=30), _NOW.date()
+    return {
+        "MarketDataProvider.get_latest_price": lambda: market.get_latest_price("7203"),
+        "MarketDataProvider.get_average_trading_value": (
+            lambda: market.get_average_trading_value("7203", 20)
+        ),
+        "MarketDataProvider.get_price_history": (
+            lambda: market.get_price_history("7203", start, end)
+        ),
+        "MarketDataProvider.get_benchmark_price_history": (
+            lambda: market.get_benchmark_price_history("^N225", start, end)
+        ),
+        "FinancialDataProvider.get_financial_summary": (
+            lambda: financial.get_financial_summary("7203")
+        ),
+        "FinancialDataProvider.get_cashflow_decomposition": (
+            lambda: financial.get_cashflow_decomposition("7203")
+        ),
+        "FinancialDataProvider.get_earnings_surprise_history": (
+            lambda: financial.get_earnings_surprise_history("7203")
+        ),
+        "FinancialDataProvider.get_historical_valuation": (
+            lambda: financial.get_historical_valuation("7203", 5)
+        ),
+        "DividendDataProvider.get_dividend_info": lambda: dividend.get_dividend_info("7203"),
+        "CorporateActionProvider.get_corporate_actions": (
+            lambda: corporate.get_corporate_actions("7203", start)
+        ),
+    }
+
+
+def test_every_enforced_method_has_an_executable_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ENFORCED と宣言した method には必ず実行可能な検証が存在すること。
+
+    宣言だけして検証していない(= 実質 KNOWN_GAP を ENFORCED と偽る)ことを防ぐ。
+    """
+    enforced = {
+        key
+        for key, contract in _PROVIDER_FAILURE_CONTRACT.items()
+        if contract.kind is _ContractKind.ENFORCED
+    }
+    invocations = set(_enforced_invocations(tmp_path, monkeypatch))
+
+    assert enforced == invocations, (
+        "ENFORCED 宣言と実行可能な検証が一致しない: "
+        f"検証欠落={sorted(enforced - invocations)} / 宣言欠落={sorted(invocations - enforced)}"
+    )
+
+
+@pytest.mark.parametrize("method_key", sorted(_PROVIDER_FAILURE_CONTRACT))
+def test_enforced_provider_method_raises_instead_of_degrading_to_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method_key: str
+) -> None:
+    """ENFORCED な全 method が、取得失敗を None / [] / 0 へ縮退させないこと。
+
+    ENFORCED 以外(DOMAIN_ERROR / NO_REMOTE_FETCH / KNOWN_GAP)は
+    ここでは検証せず skip する。KNOWN_GAP は
+    `test_known_gaps_are_always_tracked_by_an_issue` で追跡性のみ担保する。
+    """
+    contract = _PROVIDER_FAILURE_CONTRACT[method_key]
+    if contract.kind is not _ContractKind.ENFORCED:
+        pytest.skip(f"{contract.kind.value}: {contract.reason}")
+
+    invoke = _enforced_invocations(tmp_path, monkeypatch)[method_key]
+    with pytest.raises(ProviderDataError):
+        invoke()
