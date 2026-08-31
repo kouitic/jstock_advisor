@@ -176,6 +176,30 @@ class _PendingWork:
     business_horizons: tuple[tuple[int, dt.date], ...]
     calendar_horizon: tuple[int, dt.date] | None
 
+    @property
+    def oldest_pending_evaluation_date(self) -> dt.date:
+        """このRecommendationが持つ**未評価**horizonの中で最も古い評価基準日。
+
+        backlogの消化順に使う。`recommended_at`(推奨日)で並べると
+        「古い推奨から」にはなるが「**最も古い未処理horizonから**」にはならない。
+        両者は backlog recovery 中に食い違う:
+
+          推奨A: 推奨日は古いが 1/5/20日horizonは評価済みで、
+                 未評価は60日horizonのみ(その評価基準日は最近)
+          推奨B: 推奨日は新しいが 1日horizonが未評価
+                 (その評価基準日はAの60日horizonより古い)
+
+        この場合に先に処理すべきはBである。営業日軸と暦日軸の**両方**を
+        対象に最小値を取る(暦日horizonだけが未評価というケースがあるため)。
+
+        `_PendingWork`は「dueかつ未評価のhorizonが1つ以上ある」場合にのみ
+        生成されるため、候補は必ず1つ以上ある。
+        """
+        dates = [evaluation_date for _, evaluation_date in self.business_horizons]
+        if self.calendar_horizon is not None:
+            dates.append(self.calendar_horizon[1])
+        return min(dates)
+
 
 def _latest_bar_on_or_before(bars: list[PriceBar], target: dt.date) -> PriceBar | None:
     candidates = [b for b in bars if b.date <= target]
@@ -299,8 +323,18 @@ class RecommendationEvaluationService:
             include_business=include_business,
             calendar_horizon_days=calendar_horizon_days,
         )
-        # backlogはdueが古いものから消化する(古い評価をskipしない)。
-        pending.sort(key=lambda work: (work.recommended_at, work.recommendation_id))
+        # backlogは「最も古い未処理horizonを持つRecommendation」から消化する
+        # (古い評価をskipしない)。**推奨日順ではない**——推奨日が古くても
+        # 未評価horizonの評価基準日が新しいことがあり、両者は
+        # backlog recovery中に食い違う(_PendingWork.oldest_pending_evaluation_date参照)。
+        # 同着は recommended_at → recommendation_id で決定的に解決する。
+        pending.sort(
+            key=lambda work: (
+                work.oldest_pending_evaluation_date,
+                work.recommended_at,
+                work.recommendation_id,
+            )
+        )
 
         logger.info(
             "evaluation scan done: scanned=%d due_horizons=%d already_evaluated=%d "

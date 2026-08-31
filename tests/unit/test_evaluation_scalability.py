@@ -29,7 +29,11 @@ from jstock_advisor.domain.entities.common import (
     DataSourceReference,
     PriceWithRationale,
 )
-from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
+from jstock_advisor.domain.entities.enums import (
+    ConfidenceLevel,
+    EvaluationLabel,
+    RecommendationType,
+)
 from jstock_advisor.domain.entities.evaluation import EvaluationResult
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
@@ -103,6 +107,48 @@ def _clone_many(
         template.model_copy(update={"recommendation_id": f"{prefix}-{i:05d}"})
         for i in range(count)
     ]
+
+
+def _seed_evaluated(
+    evaluation_repo: _CountingEvaluationRepository,
+    recommendation_id: str,
+    *,
+    business: tuple[int, ...] = (),
+    calendar_days: int | None = None,
+) -> None:
+    """指定の(recommendation, horizon)を「評価済み」として事前投入する。
+
+    `label_evidence="seed"` で印を付け、run中に新規保存された分と区別できるようにする。
+    """
+    for horizon in business:
+        evaluation_repo.saved.append(
+            _seed_result(recommendation_id, business_days=horizon)
+        )
+    if calendar_days is not None:
+        evaluation_repo.saved.append(
+            _seed_result(recommendation_id, calendar_days=calendar_days)
+        )
+
+
+def _seed_result(
+    recommendation_id: str,
+    *,
+    business_days: int | None = None,
+    calendar_days: int | None = None,
+) -> EvaluationResult:
+    suffix = f"bd{business_days}" if business_days is not None else f"cd{calendar_days}"
+    return EvaluationResult(
+        evaluation_id=f"seed-{recommendation_id}-{suffix}",
+        recommendation_id=recommendation_id,
+        horizon_business_days=business_days,
+        horizon_calendar_days=calendar_days,
+        evaluated_at=_NOW - dt.timedelta(days=1),
+        evaluation_date=dt.date(2026, 8, 1),
+        price_at_evaluation=Decimal("2200"),
+        price_return_pct=0.0,
+        evaluation_label=EvaluationLabel.ACCEPTABLE,
+        label_evidence="seed",
+    )
 
 
 # --- テストダブル -------------------------------------------------------------
@@ -611,7 +657,7 @@ def test_no_budget_source_means_unlimited(config: AppConfig, calendar: BusinessC
 def test_backlog_is_processed_oldest_due_first(
     config: AppConfig, calendar: BusinessCalendar
 ) -> None:
-    """古い推奨から順に消化すること(古い評価をskipしない)。"""
+    """未評価horizonが同条件なら、古い推奨から順に消化すること。"""
     recommendations = [
         _make_recommendation("rec-new", recommended_at=dt.datetime(2026, 8, 10, tzinfo=dt.UTC)),
         _make_recommendation("rec-old", recommended_at=dt.datetime(2026, 7, 1, tzinfo=dt.UTC)),
@@ -625,6 +671,99 @@ def test_backlog_is_processed_oldest_due_first(
     )
 
     assert {e.recommendation_id for e in evaluation_repo.saved} == {"rec-old"}
+
+
+def test_order_uses_oldest_pending_horizon_not_oldest_recommendation(
+    config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """**推奨日順ではなく、最も古い未処理horizonを持つ推奨から**処理すること。
+
+    backlog recoveryでは両者が食い違う。
+
+      A: 推奨日はBより古いが、1/5/20日horizonは評価済みで
+         未評価は60日horizonのみ(その評価基準日は最近)
+      B: 推奨日はAより新しいが、1日horizonが未評価
+         (その評価基準日はAの60日horizonより古い)
+
+    先に処理すべきはB。推奨日で並べるとAが先になってしまう。
+    """
+    a_at = dt.datetime(2026, 6, 1, tzinfo=dt.UTC)
+    b_at = dt.datetime(2026, 8, 1, tzinfo=dt.UTC)
+    rec_a = _make_recommendation("rec-a", recommended_at=a_at)
+    rec_b = _make_recommendation("rec-b", recommended_at=b_at)
+
+    a_pending_date = calendar.add_business_days(a_at.date(), 60)
+    b_pending_date = calendar.add_business_days(b_at.date(), 1)
+    # 前提: 推奨日は A < B、未処理horizonの評価基準日は B < A(交差している)
+    assert a_at < b_at
+    assert b_pending_date < a_pending_date
+
+    service, _, evaluation_repo, _ = _build_service(config, calendar, [rec_a, rec_b])
+    # Aは60日horizonだけを未評価として残す(暦日7日も評価済みにしておく)
+    _seed_evaluated(evaluation_repo, "rec-a", business=(1, 5, 20), calendar_days=7)
+    context = _FakeLambdaContext([900_000, 900_000, 1_000])
+
+    service.run_due_evaluations_single_pass(
+        _NOW, budget=TimeBudget(source=context, reserve_ms=60_000)
+    )
+
+    processed = {e.recommendation_id for e in evaluation_repo.saved if e.label_evidence != "seed"}
+    assert processed == {"rec-b"}
+
+
+def test_order_considers_calendar_horizon_as_oldest_pending(
+    config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """最古の未処理horizonが**暦日軸**の場合も、それが順序に反映されること。
+
+      E: 推奨日は新しいが、未評価は暦日7日horizonのみ(基準日は古い)
+      F: 推奨日は古いが、未評価は60日営業日horizonのみ(基準日は新しい)
+
+    先に処理すべきはE。営業日軸だけを見ているとFが先になってしまう。
+    """
+    e_at = dt.datetime(2026, 8, 5, tzinfo=dt.UTC)
+    f_at = dt.datetime(2026, 6, 1, tzinfo=dt.UTC)
+    rec_e = _make_recommendation("rec-e", recommended_at=e_at)
+    rec_f = _make_recommendation("rec-f", recommended_at=f_at)
+
+    e_pending_date = e_at.date() + dt.timedelta(days=7)  # 暦日horizon
+    f_pending_date = calendar.add_business_days(f_at.date(), 60)
+    assert f_at < e_at
+    assert e_pending_date < f_pending_date
+
+    service, _, evaluation_repo, _ = _build_service(config, calendar, [rec_e, rec_f])
+    _seed_evaluated(evaluation_repo, "rec-e", business=(1, 5))  # 20日はまだ未到来
+    _seed_evaluated(evaluation_repo, "rec-f", business=(1, 5, 20), calendar_days=7)
+    context = _FakeLambdaContext([900_000, 900_000, 1_000])
+
+    service.run_due_evaluations_single_pass(
+        _NOW, budget=TimeBudget(source=context, reserve_ms=60_000)
+    )
+
+    processed = [e for e in evaluation_repo.saved if e.label_evidence != "seed"]
+    assert {e.recommendation_id for e in processed} == {"rec-e"}
+    assert [e.horizon_calendar_days for e in processed] == [7]
+
+
+def test_recommendation_is_completed_atomically_within_budget(
+    config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """順序変更後も「着手した1件はdueな全horizonを完了する」契約が維持されること。"""
+    rec = _make_recommendation("rec-old", recommended_at=dt.datetime(2026, 7, 1, tzinfo=dt.UTC))
+    other = _make_recommendation("rec-new", recommended_at=dt.datetime(2026, 8, 20, tzinfo=dt.UTC))
+    service, _, evaluation_repo, _ = _build_service(config, calendar, [rec, other])
+    context = _FakeLambdaContext([900_000, 900_000, 1_000])
+
+    outcome = service.run_due_evaluations_single_pass(
+        _NOW, budget=TimeBudget(source=context, reserve_ms=60_000)
+    )
+
+    assert outcome.summary.budget_exhausted is True
+    saved = [e for e in evaluation_repo.saved if e.recommendation_id == "rec-old"]
+    # 着手した rec-old は営業日1/5/20 と暦日7 をすべて評価し終えている
+    assert sorted(e.horizon_business_days for e in saved if e.horizon_business_days) == [1, 5, 20]
+    assert [e.horizon_calendar_days for e in saved if e.horizon_calendar_days] == [7]
+    assert all(e.recommendation_id == "rec-old" for e in evaluation_repo.saved)
 
 
 def test_old_due_horizons_are_not_skipped(config: AppConfig, calendar: BusinessCalendar) -> None:
