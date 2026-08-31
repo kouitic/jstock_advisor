@@ -16,6 +16,7 @@ from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.infrastructure.aws import batch_tracker
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     WatchlistBatchStatus,
@@ -1187,9 +1188,20 @@ def test_issue31_local_environment_always_acquires(monkeypatch) -> None:
 _I57_NOW = dt.datetime(2026, 8, 31, 23, 0, tzinfo=dt.UTC)
 
 
-def _i57_start(batch_id: str = "b57", total: int = 2) -> None:
-    """新形式(B1)のバッチをstart_batch経由で作成する。"""
-    batch_tracker.start_batch(batch_id, total, _I57_NOW)
+def _i57_start(
+    batch_id: str = "b57",
+    total: int = 2,
+    family: batch_tracker.BatchFamily = batch_tracker.BatchFamily.BUY_CANDIDATES,
+    execution_context: ExecutionContext | None = None,
+) -> None:
+    """新形式(B1/B2)のバッチをstart_batch経由で作成する。"""
+    batch_tracker.start_batch(
+        batch_id,
+        total,
+        _I57_NOW,
+        family,
+        execution_context or ExecutionContext.normal(),
+    )
 
 
 def _i57_item(batch_id: str = "b57") -> dict:

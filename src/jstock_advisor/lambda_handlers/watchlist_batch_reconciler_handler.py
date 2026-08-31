@@ -22,14 +22,18 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.entities.enums import ExecutionMode
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    BatchFamily,
     UnknownWatchlistJobTypeError,
     WatchlistBatchStatus,
     WatchlistJobType,
+    get_completion_batch,
     get_watchlist_batch,
     list_stale_maintenance_triggers,
     list_watchlist_batches_by_status,
@@ -56,6 +60,8 @@ from jstock_advisor.infrastructure.local_repository.notification_log_repository 
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from jstock_advisor.lambda_handlers._fanout import dispatch_async
+from jstock_advisor.lambda_handlers._finalize_recovery import build_finalize_only_payload
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
@@ -218,6 +224,100 @@ def _process_timeout_finalizing(
     )
 
 
+_COMPLETION_RECOVERY_FUNCTION_ENV = {
+    BatchFamily.BUY_CANDIDATES: "BUY_CANDIDATES_FUNCTION_NAME",
+    BatchFamily.HOLDINGS_WATCHLIST: "HOLDINGS_WATCHLIST_FUNCTION_NAME",
+}
+
+
+def _handle_completion_recovery_candidate(
+    batch_item: dict[str, Any], now: dt.datetime
+) -> bool | None:
+    """buy/holdingsのfinalize recovery候補を処理する(Issue #57 Phase B2)。
+
+    戻り値:
+      None  … このバッチはbuy/holdings familyではない(=呼び出し側は
+              既存のwatchlist経路をそのまま続行する)
+      True  … finalize-only invokeを発行した
+      False … buy/holdings familyだが今回は何もしなかった
+
+    **marker不在は None を返す。** 既存のwatchlist batchには`batch_family`が
+    無いため、marker不在を一律skipするとwatchlist recoveryを壊す。
+    一方、**未知のfamily値はfail-close**(False)とし、既存経路へは流さない。
+
+    reconcilerは**gateを取得しない**。`try_acquire_completion_finalize()`は
+    invoke先のhandlerだけが実行する(invokeに失敗したときにgateを占有して
+    しまわないため。取得回数も消費しない)。
+    """
+    raw_family = batch_item.get("batch_family")
+    if raw_family is None:
+        return None
+    batch_id = batch_item["batch_id"]
+    try:
+        family = BatchFamily(raw_family)
+    except ValueError:
+        logger.error(
+            "watchlist reconciler: unknown batch_family=%r batch_id=%s "
+            "(fail-close: neither completion recovery nor watchlist path)",
+            raw_family,
+            batch_id,
+        )
+        return False
+
+    record = get_completion_batch(batch_id)
+    if record is None:
+        logger.warning(
+            "watchlist reconciler: completion batch record unavailable batch_id=%s", batch_id
+        )
+        return False
+    if record.is_finalized:
+        return False
+    if not record.progress.is_complete:
+        # 全銘柄の処理が終わっていない=通常進行中。recoveryの対象ではない。
+        return False
+    if record.execution_context is None or record.execution_context.mode != ExecutionMode.NORMAL:
+        # VALIDATIONおよびcontext不明はfail-close(自動re-driveしない)。
+        return False
+    if record.attempts_exhausted:
+        logger.error(
+            "watchlist reconciler: finalize recovery exhausted batch_id=%s "
+            "batch_family=%s attempt_count=%d reason=FINALIZE_RETRY_EXHAUSTED",
+            batch_id,
+            family.value,
+            record.attempt_count,
+        )
+        return False
+
+    function_name = os.environ.get(_COMPLETION_RECOVERY_FUNCTION_ENV[family], "")
+    if not function_name:
+        logger.error(
+            "watchlist reconciler: completion recovery target function not configured "
+            "batch_id=%s batch_family=%s",
+            batch_id,
+            family.value,
+        )
+        return False
+    try:
+        dispatch_async(function_name, build_finalize_only_payload(record))
+    except Exception:  # noqa: BLE001 - 1バッチのinvoke失敗で他バッチの処理を止めない
+        # invoke自体の失敗ではgateを取得していないため、attempt_countも増えない。
+        # 次回の毎時実行で再試行できる(invoke試行回数とgate取得回数は別物)。
+        logger.exception(
+            "watchlist reconciler: finalize recovery invoke failed batch_id=%s batch_family=%s",
+            batch_id,
+            family.value,
+        )
+        return False
+    logger.info(
+        "watchlist reconciler: finalize recovery invoked batch_id=%s batch_family=%s "
+        "attempt_count=%d",
+        batch_id,
+        family.value,
+        record.attempt_count,
+    )
+    return True
+
+
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     now = dt.datetime.now(dt.UTC)
     config = load_config()
@@ -236,11 +336,28 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     finalize_retry_exhausted = 0
     notification_retried = 0
     notification_retry_exhausted = 0
+    completion_recovery_invoked = 0
+    completion_recovery_skipped = 0
     to_process_timeout: list[str] = []
 
     for batch_item in candidates:
         batch_id = batch_item["batch_id"]
         status = batch_item["status"]
+
+        # Issue #57 Phase B2: buy/holdingsのfinalize recovery。
+        # `list_watchlist_batches_by_status()`はstatusだけで絞るfull scanのため、
+        # buy/holdingsの項目(status=RUNNING固定)もここへ届く。従来はstarted_at
+        # 不在によりタイムアウト判定が成立せず無害にskipされていたが、B2からは
+        # **family markerで積極識別して専用分岐へ隔離**する。
+        # **watchlistの既存status分岐へ流してはならない**(#56と同型の
+        # 「種別を確認せず既定経路へ流す」誤終端を再生産しないため)。
+        family_outcome = _handle_completion_recovery_candidate(batch_item, now)
+        if family_outcome is not None:
+            if family_outcome:
+                completion_recovery_invoked += 1
+            else:
+                completion_recovery_skipped += 1
+            continue
 
         if status == WatchlistBatchStatus.DISPATCHING.value:
             timed_out = _is_timed_out(batch_item, wc.batch_processing_timeout_hours, now)
@@ -418,7 +535,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "finalizing_marked_stuck=%d finalize_retried=%d finalize_retry_exhausted=%d "
         "notification_retried=%d notification_retry_exhausted=%d timeout_processed=%d "
         "maintenance_trigger_retried=%d maintenance_trigger_retry_failed=%d "
-        "maintenance_trigger_retry_skipped=%d maintenance_trigger_retry_configuration_error=%d",
+        "maintenance_trigger_retry_skipped=%d maintenance_trigger_retry_configuration_error=%d "
+        "completion_recovery_invoked=%d completion_recovery_skipped=%d",
         len(candidates),
         dispatch_failed,
         rescued,
@@ -432,6 +550,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         maintenance_trigger_retry_failed,
         maintenance_trigger_retry_skipped,
         maintenance_trigger_retry_configuration_error,
+        completion_recovery_invoked,
+        completion_recovery_skipped,
     )
     return {
         "candidates": len(candidates),
@@ -444,6 +564,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "notification_retry_exhausted": notification_retry_exhausted,
         "timeout_processed": timeout_processed,
         "maintenance_trigger_retried": maintenance_trigger_retried,
+        "completion_recovery_invoked": completion_recovery_invoked,
+        "completion_recovery_skipped": completion_recovery_skipped,
         "maintenance_trigger_retry_failed": maintenance_trigger_retry_failed,
         "maintenance_trigger_retry_skipped": maintenance_trigger_retry_skipped,
         "maintenance_trigger_retry_configuration_error": (

@@ -2709,8 +2709,11 @@ def test_dispatch_mode_holding_count_counts_unique_stock_codes_not_holding_recor
     monkeypatch.setattr(
         handler_module,
         "start_batch",
-        lambda batch_id, total, now, holding_count=0: captured.update(
-            total=total, holding_count=holding_count
+        lambda batch_id, total, now, family, execution_context, holding_count=0: captured.update(
+            total=total,
+            holding_count=holding_count,
+            family=family,
+            execution_context=execution_context,
         ),
     )
     monkeypatch.setattr(handler_module, "dispatch_async", lambda *a, **kw: None)
@@ -4221,3 +4224,149 @@ def test_i57_buy_failure_persistence_error_does_not_mask_original(
 
     # pytest.raises(match="finalize failed") が成立する = 元の例外が伝播している
     _i57_run_buy_finalize_failure(monkeypatch, tmp_path, _mark_failed)
+
+
+# --- Issue #57 Phase B2: FINALIZE_ONLY は worker 処理を再実行しない ---------------
+
+
+def _b2_buy_record(batch_id: str = "buy-1"):
+    from jstock_advisor.domain.entities.execution_context import ExecutionContext
+    from jstock_advisor.infrastructure.aws.batch_tracker import (
+        BatchFamily,
+        CompletionBatchRecord,
+    )
+
+    return CompletionBatchRecord(
+        batch_id=batch_id,
+        family=BatchFamily.BUY_CANDIDATES,
+        execution_context=ExecutionContext.normal(),
+        progress=_issue31_completed_progress(),
+        attempt_count=1,
+        finalize_started_at=None,
+        finalize_completed_at=None,
+        finalize_failed_at=None,
+    )
+
+
+def test_b2_finalize_only_does_not_reexecute_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T13/T30: FINALIZE_ONLY では銘柄評価・record_result・fanout を一切行わない。
+
+    #71(fanout の重複起動)が未修正でも、この経路が worker 処理を再実行しない
+    ことで判定履歴の複製を持ち込まない。
+    """
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+
+    def _must_not_run(*_a, **_kw):
+        pytest.fail("worker path must not be re-executed by FINALIZE_ONLY")
+
+    monkeypatch.setattr(handler_module, "_process_single_candidate", _must_not_run)
+    monkeypatch.setattr(handler_module, "record_result", _must_not_run)
+    monkeypatch.setattr(handler_module, "dispatch_async", _must_not_run)
+    monkeypatch.setattr(handler_module, "start_batch", _must_not_run)
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", _must_not_run)
+
+    monkeypatch.setattr(
+        handler_module, "resolve_finalize_only_request", lambda *a, **kw: _b2_buy_record()
+    )
+    monkeypatch.setattr(
+        handler_module, "try_acquire_completion_finalize", lambda batch_id, now: "tok"
+    )
+    finalize_calls: list[str] = []
+    monkeypatch.setattr(
+        handler_module, "_finalize_batch", lambda *a, **kw: finalize_calls.append("x")
+    )
+    marks: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "mark_completion_finalize_completed",
+        lambda batch_id, token, now: marks.append((batch_id, token)) or True,
+    )
+
+    result = handler_module.handler(
+        {
+            "recovery_action": "FINALIZE_ONLY",
+            "batch_id": "buy-1",
+            "batch_family": "BUY_CANDIDATES",
+            "execution_mode": "NORMAL",
+        },
+        _FakeContext(),
+    )
+
+    assert result == {"finalize_recovery": "COMPLETED"}
+    assert finalize_calls == ["x"]
+    assert marks == [("buy-1", "tok")]
+
+
+def test_b2_rejected_recovery_payload_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T15/T16: 拒否された recovery payload では finalize も worker も走らない。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+
+    def _must_not_run(*_a, **_kw):
+        pytest.fail("nothing must run for a rejected recovery payload")
+
+    monkeypatch.setattr(handler_module, "_process_single_candidate", _must_not_run)
+    monkeypatch.setattr(handler_module, "_finalize_batch", _must_not_run)
+    monkeypatch.setattr(handler_module, "start_batch", _must_not_run)
+    monkeypatch.setattr(handler_module, "try_acquire_completion_finalize", _must_not_run)
+    monkeypatch.setattr(
+        handler_module, "resolve_finalize_only_request", lambda *a, **kw: None
+    )
+
+    result = handler_module.handler(
+        {"recovery_action": "SOMETHING_UNKNOWN", "batch_id": "buy-1"}, _FakeContext()
+    )
+
+    assert result == {"finalize_recovery": "REJECTED"}
+
+
+def test_b2_exhausted_recovery_does_not_acquire_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T5/T21: 取得回数上限に達していれば gate を取りに行かず EXHAUSTED を返す。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    monkeypatch.setattr(handler_module, "_finalize_batch", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        handler_module, "resolve_finalize_only_request", lambda *a, **kw: _b2_buy_record()
+    )
+    monkeypatch.setattr(
+        handler_module, "try_acquire_completion_finalize", lambda batch_id, now: None
+    )
+
+    from jstock_advisor.domain.entities.execution_context import ExecutionContext
+    from jstock_advisor.infrastructure.aws.batch_tracker import (
+        BatchFamily,
+        CompletionBatchRecord,
+    )
+
+    exhausted = CompletionBatchRecord(
+        batch_id="buy-1",
+        family=BatchFamily.BUY_CANDIDATES,
+        execution_context=ExecutionContext.normal(),
+        progress=_issue31_completed_progress(),
+        attempt_count=3,
+        finalize_started_at=None,
+        finalize_completed_at=None,
+        finalize_failed_at=None,
+    )
+    monkeypatch.setattr(
+        handler_module, "resolve_finalize_only_request", lambda *a, **kw: exhausted
+    )
+
+    result = handler_module.handler(
+        {
+            "recovery_action": "FINALIZE_ONLY",
+            "batch_id": "buy-1",
+            "batch_family": "BUY_CANDIDATES",
+            "execution_mode": "NORMAL",
+        },
+        _FakeContext(),
+    )
+
+    assert result == {"finalize_recovery": "EXHAUSTED"}

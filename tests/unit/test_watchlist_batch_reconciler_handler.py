@@ -17,8 +17,21 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from jstock_advisor.domain.entities.enums import ExecutionMode as _B2ExecutionMode
+from jstock_advisor.domain.entities.execution_context import (
+    ExecutionContext as _B2ExecutionContext,
+)
 from jstock_advisor.domain.signals.watchlist_screening import RankingEntry
 from jstock_advisor.infrastructure.aws import batch_tracker
+from jstock_advisor.infrastructure.aws.batch_tracker import (
+    BatchFamily as _B2BatchFamily,
+)
+from jstock_advisor.infrastructure.aws.batch_tracker import (
+    BatchProgress as _B2BatchProgress,
+)
+from jstock_advisor.infrastructure.aws.batch_tracker import (
+    CompletionBatchRecord as _B2Record,
+)
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     WatchlistBatchStatus,
     WatchlistProgressStatus,
@@ -604,3 +617,240 @@ def test_reconciler_does_not_retry_maintenance_trigger_within_lease(
 
     assert retried == []
     assert result["maintenance_trigger_retried"] == 0
+
+
+# --- Issue #57 Phase B2: buy/holdings finalize recovery の分岐隔離 ---------------
+# reconcilerは`status`だけで全項目をscanするため、buy/holdingsの項目もここへ届く。
+# family markerで積極識別し、**watchlistの既存status分岐へ流さない**ことを固定する。
+
+
+_B2_NOW = dt.datetime(2026, 8, 31, 23, 0, tzinfo=dt.UTC)
+
+
+def _b2_progress(total: int = 1, completed_codes: list[str] | None = None) -> _B2BatchProgress:
+    codes = completed_codes if completed_codes is not None else ["7203"]
+    return _B2BatchProgress(
+        total=total,
+        completed=len(codes),
+        category_counts={},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+        completed_codes=codes,
+    )
+
+
+def _b2_record(
+    batch_id: str = "buy-1",
+    family: _B2BatchFamily | None = _B2BatchFamily.BUY_CANDIDATES,
+    context: _B2ExecutionContext | None = None,
+    attempt_count: int = 0,
+    completed_at: str | None = None,
+    progress: _B2BatchProgress | None = None,
+) -> _B2Record:
+    return _B2Record(
+        batch_id=batch_id,
+        family=family,
+        execution_context=(
+            context if context is not None else _B2ExecutionContext.normal()
+        ),
+        progress=progress if progress is not None else _b2_progress(),
+        attempt_count=attempt_count,
+        finalize_started_at=None,
+        finalize_completed_at=completed_at,
+        finalize_failed_at=None,
+    )
+
+
+def _b2_patch(monkeypatch, record, invoked: list[tuple[str, dict]]):
+    monkeypatch.setenv("BUY_CANDIDATES_FUNCTION_NAME", "fn-buy")
+    monkeypatch.setenv("HOLDINGS_WATCHLIST_FUNCTION_NAME", "fn-holdings")
+    monkeypatch.setattr(handler_module, "get_completion_batch", lambda batch_id: record)
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_async",
+        lambda name, payload: invoked.append((name, payload)),
+    )
+
+
+def test_b2_buy_batch_is_routed_to_finalize_recovery(monkeypatch) -> None:
+    """T6: buyのバッチはwatchlist finalizerへ流れず、finalize-only invokeになる。"""
+    invoked: list[tuple[str, dict]] = []
+    _b2_patch(monkeypatch, _b2_record(), invoked)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
+    )
+
+    assert outcome is True
+    assert invoked == [
+        (
+            "fn-buy",
+            {
+                "recovery_action": "FINALIZE_ONLY",
+                "batch_id": "buy-1",
+                "batch_family": "BUY_CANDIDATES",
+                "execution_mode": "NORMAL",
+            },
+        )
+    ]
+
+
+def test_b2_holdings_batch_is_routed_to_finalize_recovery(monkeypatch) -> None:
+    """T7: holdingsのバッチも同様に隔離された経路へ入る。"""
+    invoked: list[tuple[str, dict]] = []
+    record = _b2_record(batch_id="hold-1", family=_B2BatchFamily.HOLDINGS_WATCHLIST)
+    _b2_patch(monkeypatch, record, invoked)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "hold-1", "status": "RUNNING", "batch_family": "HOLDINGS_WATCHLIST"},
+        _B2_NOW,
+    )
+
+    assert outcome is True
+    assert invoked[0][0] == "fn-holdings"
+    assert invoked[0][1]["batch_family"] == "HOLDINGS_WATCHLIST"
+
+
+def test_b2_marker_absent_falls_through_to_watchlist_path(monkeypatch) -> None:
+    """T5/T27: 既存watchlist batchにはmarkerが無い。**Noneを返して既存経路を継続**する
+    (marker不在を一律skipするとwatchlist recoveryを壊すため)。"""
+    invoked: list[tuple[str, dict]] = []
+    _b2_patch(monkeypatch, _b2_record(), invoked)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "watchlist-1", "status": "RUNNING"}, _B2_NOW
+    )
+
+    assert outcome is None, "marker不在は既存watchlist経路へ継続しなければならない"
+    assert invoked == []
+
+
+def test_b2_unknown_family_is_fail_closed(monkeypatch) -> None:
+    """T12: 未知のfamily値はfail-close。既存watchlist経路へも流さない。"""
+    invoked: list[tuple[str, dict]] = []
+    _b2_patch(monkeypatch, _b2_record(), invoked)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "x-1", "status": "RUNNING", "batch_family": "SOMETHING_ELSE"}, _B2_NOW
+    )
+
+    assert outcome is False, "未知familyを既存経路へ流してはならない"
+    assert invoked == []
+
+
+def test_b2_validation_batch_is_not_invoked(monkeypatch) -> None:
+    """T17: VALIDATIONバッチは自動re-driveしない。"""
+    invoked: list[tuple[str, dict]] = []
+    record = _b2_record(
+        context=_B2ExecutionContext(mode=_B2ExecutionMode.VALIDATION)
+    )
+    _b2_patch(monkeypatch, record, invoked)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+    )
+
+    assert outcome is False
+    assert invoked == []
+
+
+def test_b2_unknown_context_is_not_invoked(monkeypatch) -> None:
+    """実行文脈を復元できない項目はfail-close(NORMALと仮定しない)。"""
+    invoked: list[tuple[str, dict]] = []
+    _b2_patch(monkeypatch, _b2_record(context=None), invoked)
+    # context=None を明示的に作る
+    record = _b2_record()
+    record = _B2Record(
+        batch_id=record.batch_id,
+        family=record.family,
+        execution_context=None,
+        progress=record.progress,
+        attempt_count=0,
+        finalize_started_at=None,
+        finalize_completed_at=None,
+        finalize_failed_at=None,
+    )
+    monkeypatch.setattr(handler_module, "get_completion_batch", lambda batch_id: record)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+    )
+
+    assert outcome is False
+    assert invoked == []
+
+
+def test_b2_already_finalized_batch_is_not_invoked(monkeypatch) -> None:
+    """T24: 既にfinalize済みならinvokeしない。"""
+    invoked: list[tuple[str, dict]] = []
+    _b2_patch(monkeypatch, _b2_record(completed_at="2026-08-31T23:00:00+00:00"), invoked)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+    )
+
+    assert outcome is False
+    assert invoked == []
+
+
+def test_b2_incomplete_batch_is_not_invoked(monkeypatch) -> None:
+    """全銘柄の処理が終わっていないバッチは通常進行中でありrecovery対象外。"""
+    invoked: list[tuple[str, dict]] = []
+    record = _b2_record(progress=_b2_progress(total=3, completed_codes=["7203"]))
+    _b2_patch(monkeypatch, record, invoked)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+    )
+
+    assert outcome is False
+    assert invoked == []
+
+
+def test_b2_exhausted_batch_is_not_invoked(monkeypatch) -> None:
+    """T5/T21: 取得回数上限に達したバッチは毎時invokeし続けない。"""
+    invoked: list[tuple[str, dict]] = []
+    _b2_patch(monkeypatch, _b2_record(attempt_count=3), invoked)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+    )
+
+    assert outcome is False
+    assert invoked == []
+
+
+def test_b2_invoke_failure_is_contained(monkeypatch) -> None:
+    """T23: invoke自体が失敗しても他バッチの処理を止めず、gateも消費しない
+    (attempt_countはgate取得時にしか増えないため、invoke失敗では増えない)。"""
+    monkeypatch.setenv("BUY_CANDIDATES_FUNCTION_NAME", "fn-buy")
+    monkeypatch.setattr(handler_module, "get_completion_batch", lambda batch_id: _b2_record())
+
+    def _boom(name, payload):
+        raise RuntimeError("invoke failed (simulated)")
+
+    monkeypatch.setattr(handler_module, "dispatch_async", _boom)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+    )
+
+    assert outcome is False
+
+
+def test_b2_missing_function_name_is_fail_closed(monkeypatch) -> None:
+    """invoke先が未設定ならinvokeせずERRORを残す(環境設定漏れの検出)。"""
+    invoked: list[tuple[str, dict]] = []
+    _b2_patch(monkeypatch, _b2_record(), invoked)
+    monkeypatch.delenv("BUY_CANDIDATES_FUNCTION_NAME", raising=False)
+
+    outcome = handler_module._handle_completion_recovery_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+    )
+
+    assert outcome is False
+    assert invoked == []

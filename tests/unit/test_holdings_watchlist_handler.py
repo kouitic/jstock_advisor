@@ -1541,3 +1541,103 @@ def test_i57_holdings_passes_holding_id_as_completion_id(
     )
 
     assert captured["completion_id"] == "owner-a#8306"
+
+
+# --- Issue #57 Phase B2: FINALIZE_ONLY は worker 処理を再実行しない ---------------
+
+
+def test_b2_holdings_finalize_only_does_not_reexecute_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T14/T30: holdings の FINALIZE_ONLY でも worker 処理は走らない。
+    サマリー送信は通常経路と同一の `_send_batch_summary()` を通る。"""
+    from jstock_advisor.domain.entities.execution_context import ExecutionContext
+    from jstock_advisor.infrastructure.aws.batch_tracker import (
+        BatchFamily,
+        BatchProgress,
+        CompletionBatchRecord,
+    )
+
+    def _must_not_run(*_a, **_kw):
+        pytest.fail("worker path must not be re-executed by FINALIZE_ONLY")
+
+    monkeypatch.setattr(handler_module, "_process_single_holding", _must_not_run)
+    monkeypatch.setattr(handler_module, "record_result", _must_not_run)
+    monkeypatch.setattr(handler_module, "dispatch_async", _must_not_run)
+    monkeypatch.setattr(handler_module, "start_batch", _must_not_run)
+
+    progress = BatchProgress(
+        total=1,
+        completed=1,
+        category_counts={},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+        completed_codes=["owner-a#8306"],
+    )
+    record = CompletionBatchRecord(
+        batch_id="hold-1",
+        family=BatchFamily.HOLDINGS_WATCHLIST,
+        execution_context=ExecutionContext.normal(),
+        progress=progress,
+        attempt_count=1,
+        finalize_started_at=None,
+        finalize_completed_at=None,
+        finalize_failed_at=None,
+    )
+    monkeypatch.setattr(
+        handler_module, "resolve_finalize_only_request", lambda *a, **kw: record
+    )
+    summary_calls: list[str] = []
+    monkeypatch.setattr(
+        handler_module,
+        "_send_batch_summary",
+        lambda batch_id, *a, **kw: summary_calls.append(batch_id),
+    )
+
+    result = handler_module.handler(
+        {
+            "recovery_action": "FINALIZE_ONLY",
+            "batch_id": "hold-1",
+            "batch_family": "HOLDINGS_WATCHLIST",
+            "execution_mode": "NORMAL",
+        },
+        _FakeContext(),
+    )
+
+    assert result == {"finalize_recovery": "ATTEMPTED"}
+    assert summary_calls == ["hold-1"]
+
+
+def test_b2_holdings_kill_switch_blocks_recovery_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T11/T12: kill switch ON 中は recovery でも gate を取らずサマリーも送らない
+    (recovery 専用経路で kill switch を迂回しない)。解除後は次回 recovery で回復する。"""
+    from jstock_advisor.infrastructure.aws.batch_tracker import BatchProgress
+
+    progress = BatchProgress(
+        total=1,
+        completed=1,
+        category_counts={},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+        completed_codes=["owner-a#8306"],
+    )
+    monkeypatch.setattr(
+        handler_module, "try_acquire_completion_finalize",
+        lambda *a, **kw: pytest.fail("kill switch ON must not acquire the gate"),
+    )
+
+    class _KillSwitchOff:
+        def get_notification_enabled(self) -> bool:
+            return False
+
+    handler_module._send_batch_summary(
+        "hold-1", progress, _NOW, object(), _KillSwitchOff()
+    )

@@ -75,6 +75,9 @@ from jstock_advisor.domain.signals.holding_decision_execution_plan import (
 )
 from jstock_advisor.domain.signals.portfolio_concentration import evaluate_portfolio_concentration
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    BatchFamily,
+    BatchProgress,
+    CompletionBatchRecord,
     mark_completion_finalize_completed,
     mark_completion_finalize_failed,
     record_result,
@@ -103,6 +106,10 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers._execution_mode import resolve_execution_context
 from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
+from jstock_advisor.lambda_handlers._finalize_recovery import (
+    is_recovery_event,
+    resolve_finalize_only_request,
+)
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
 from jstock_advisor.services.holding_decision_notification_builder import (
@@ -1145,6 +1152,25 @@ def _finish_batch_item(
     )
     if progress is None or not progress.is_complete:
         return
+    _send_batch_summary(
+        batch_id, progress, now, notification_service, runtime_config_service
+    )
+
+
+def _send_batch_summary(
+    batch_id: str,
+    progress: BatchProgress,
+    now: dt.datetime,
+    notification_service: LineNotificationService,
+    runtime_config_service: HoldingDecisionRuntimeConfigService,
+) -> None:
+    """バッチ完了時のサマリー送信フロー(Issue #57 B2で関数として切り出し)。
+
+    通常の最終worker(`_finish_batch_item`)と、finalize-only recovery
+    (`_run_finalize_only_recovery`)の**両方がこの同一経路を通る**。
+    recovery専用の別経路を作らないことで、kill switch判定・gate取得・
+    失敗記録の意味論が1箇所に保たれる。
+    """
     if not runtime_config_service.get_notification_enabled():
         logger.info(
             "kill_switch_suppressed: batch_summary batch_id=%s notification_enabled=False",
@@ -1215,6 +1241,41 @@ def _finish_batch_item(
     # acquireは(経過時間に関わらず)永久に失敗する。summary送信が例外の場合は
     # ここへ到達せず、stale化(1200秒)後に後続トリガーがtakeoverして再実行できる。
     mark_completion_finalize_completed(batch_id, finalize_token, now)
+
+
+def _run_finalize_only_recovery(
+    record: CompletionBatchRecord,
+    now: dt.datetime,
+    notification_service: LineNotificationService,
+    runtime_config_service: HoldingDecisionRuntimeConfigService,
+) -> dict[str, Any]:
+    """サマリー送信だけを再実行する(Issue #57 Phase B2)。
+
+    **通常workerの処理は行わない。** 通常の最終workerとまったく同じ
+    `_send_batch_summary()`を呼ぶため、**kill switch判定・gate取得・失敗記録の
+    意味論はすべて既存経路と同一**である(kill switch ON中はacquireせず
+    サマリーも送らない=解除後の次回recoveryで回復する、という契約を維持)。
+
+    実行権は既存の`try_acquire_completion_finalize()`が`_send_batch_summary()`
+    の内部で取得する(recovery専用のgateを作らない=Issue #31を迂回しない)。
+    """
+    if record.attempts_exhausted:
+        logger.error(
+            "finalize recovery exhausted batch_id=%s batch_family=%s "
+            "attempt_count=%d reason=FINALIZE_RETRY_EXHAUSTED",
+            record.batch_id,
+            BatchFamily.HOLDINGS_WATCHLIST.value,
+            record.attempt_count,
+        )
+        return {"finalize_recovery": "EXHAUSTED"}
+    _send_batch_summary(
+        record.batch_id,
+        record.progress,
+        now,
+        notification_service,
+        runtime_config_service,
+    )
+    return {"finalize_recovery": "ATTEMPTED"}
 
 
 def _mark_finalize_failure_safely(
@@ -1379,6 +1440,25 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     )
     rule_version_service = RuleVersionService()
 
+    if is_recovery_event(event):
+        # Issue #57 B2: finalize-only recovery。**通常workerの処理は一切行わない**
+        # (銘柄評価・Recommendation/DecisionSnapshot再生成・record_result・
+        # fanoutのいずれも実行しない)。task分岐より前に置き、未知の
+        # recovery_actionが通常worker経路へ落ちないようにする。
+        record = resolve_finalize_only_request(
+            event, BatchFamily.HOLDINGS_WATCHLIST, execution_context
+        )
+        if record is None:
+            return {"finalize_recovery": "REJECTED"}
+        return _run_finalize_only_recovery(
+            record,
+            now,
+            notification_service,
+            HoldingDecisionRuntimeConfigService(
+                cache_ttl_seconds=config.holding_decision.runtime_config_cache_ttl_seconds
+            ),
+        )
+
     task = event.get("task")
     if task == "holding":
         # 子Lambda: batch_idはevent由来なのでこの時点で既に確定している。
@@ -1463,7 +1543,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
     total = len(holdings)
     batch_id = f"holdings-watchlist-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    start_batch(batch_id, total, now)
+    # Issue #57 B2: reconcilerがstatusではなくfamily markerで積極識別するため、
+    # 種別と実行文脈をここで必ず永続化する。
+    start_batch(batch_id, total, now, BatchFamily.HOLDINGS_WATCHLIST, execution_context)
     if execution_context.is_validation:
         # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、
         # イベント解析直後ではなくこの時点でVALIDATION開始ログを出す。

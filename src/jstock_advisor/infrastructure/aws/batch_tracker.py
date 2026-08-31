@@ -25,7 +25,9 @@ from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
+from jstock_advisor.domain.entities.enums import ExecutionMode, NotificationMode
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.signals.watchlist_screening import WatchlistScoreDetail
 from jstock_advisor.infrastructure.collection_store import resolve_table_name, running_on_lambda
 
@@ -85,6 +87,36 @@ class BatchFinalizeStatus(StrEnum):
     FINALIZING = "FINALIZING"
     COMPLETED = "COMPLETED"
     FINALIZE_FAILED = "FINALIZE_FAILED"
+
+
+class BatchFamily(StrEnum):
+    """completion finalize gateを使うバッチの種別(Issue #57 Phase B2)。
+
+    `jstock-batch_runs`は3系統のバッチが同居する単一テーブルであり、毎時の
+    watchlist reconcilerは`status`だけで全項目をscanする。buy/holdingsの項目は
+    `status=RUNNING`のままで`started_at`を持たないため無害にskipされてきたが、
+    B2でreconcilerがbuy/holdingsのfinalize recoveryを担うにあたり、
+    **statusではなく明示的なfamily markerで積極識別する**(#56と同型の
+    「種別を確認せず既定経路へ流す」欠陥を再生産しないため)。
+
+    識別はpositive matchingのみ。**未知の値はfail-close**(何もしない)。
+    **属性そのものが無い項目はlegacy watchlist**として従来の経路をそのまま通す
+    (marker不在を一律skipするとwatchlist recoveryを壊すため)。
+    """
+
+    BUY_CANDIDATES = "BUY_CANDIDATES"
+    HOLDINGS_WATCHLIST = "HOLDINGS_WATCHLIST"
+
+
+# completion finalize gateの取得回数上限(Issue #57 Phase B2)。
+#
+# **これは「retry回数」ではなく「gate取得回数」である。**
+#   1回目 = 通常workerによる初回finalize
+#   2回目 = 1回目のrecovery(reconciler経由)
+#   3回目 = 2回目のrecovery
+# したがって自動recoveryは実質最大2回。ログ・docstring・docsで
+# 「retry count」と表記しないこと。
+MAX_COMPLETION_FINALIZE_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -219,12 +251,30 @@ def _table() -> Any:
     return boto3.resource("dynamodb").Table(resolve_table_name(_TABLE_FILE_NAME))
 
 
-def start_batch(batch_id: str, total: int, now: dt.datetime, holding_count: int = 0) -> None:
+def start_batch(
+    batch_id: str,
+    total: int,
+    now: dt.datetime,
+    family: BatchFamily,
+    execution_context: ExecutionContext,
+    holding_count: int = 0,
+) -> None:
     """ファンアウト開始時に呼ぶ。ローカル環境・対象0件の場合は何もしない。
 
     holding_count(統合BUY候補パイプライン2026-07で追加)は、このバッチで
     dispatchされた保有銘柄(HOLDING/BOTH)の総数。finalize側がsector_entriesの
     集計件数と比較し、ポートフォリオ集中度計算の信頼性を判定するために使う。
+
+    family / execution_context(Issue #57 Phase B2): finalize recoveryのために
+    永続化する。**本関数の呼び出し元はbuy/holdingsの2箇所だけ**であり
+    (watchlistは set_watchlist_batch_total() を使う)、ここで必ず記録することで
+    reconcilerが種別と実行文脈を推測せずに判定できる。
+
+    execution_contextを保存する理由: recoveryが**元のバッチと同じfinalize
+    semantics**を復元できなければならないため。とくにVALIDATIONバッチを
+    NORMALとして再実行してはならない(Issue #105で永続化契約を是正した直後の
+    ため、ここで取り違えると同じ問題を再導入する)。値が無い/未知の項目は
+    recovery側でfail-closeする。
     """
     if total <= 0 or not running_on_lambda():
         return
@@ -239,6 +289,10 @@ def start_batch(batch_id: str, total: int, now: dt.datetime, holding_count: int 
         # 既存のBUY/holdingsハンドラはこの属性を一切参照しないため、追加しても
         # 既存動作に影響しない。
         "status": BatchFinalizeStatus.RUNNING.value,
+        # Issue #57 B2: reconcilerによる積極識別と実行文脈の復元。
+        "batch_family": family.value,
+        "execution_mode": execution_context.mode.value,
+        "notification_mode": execution_context.notification_mode.value,
     }
     for category in SUMMARY_CATEGORIES:
         item[category] = 0
@@ -530,10 +584,20 @@ def try_acquire_completion_finalize(batch_id: str, now: dt.datetime) -> str | No
             Key={"batch_id": batch_id},
             UpdateExpression=(
                 "SET completion_finalize_token = :token, "
-                "completion_finalize_started_at = :now"
+                "completion_finalize_started_at = :now "
+                # Issue #57 B2: gate取得回数を**同一UpdateItemで**加算する。
+                # 別writeへ分けると、取得したのに加算されない/加算されたのに
+                # 取得できていない中間状態が生まれ、予算管理が破綻する
+                # (#65 F-E10のrecord_notification_failed無条件ADDと同型の欠陥を
+                # 再生産しないため)。
+                "ADD completion_finalize_attempt_count :one"
             ),
             ConditionExpression=(
                 "attribute_not_exists(completion_finalize_completed_at)"
+                # Issue #57 B2: 取得回数上限。属性が無い項目は0相当として扱う。
+                # **retry回数ではなくgate取得回数**(初回finalizeで1になる)。
+                " AND (attribute_not_exists(completion_finalize_attempt_count)"
+                " OR completion_finalize_attempt_count < :max_attempts)"
                 # Issue #57 B1: 完了判定の正本をcompleted_codesの要素数にする。
                 # size()はDynamoDB側で評価されるため、アプリがSetを
                 # read→len→writeする非原子的な実装にはならない。
@@ -554,6 +618,8 @@ def try_acquire_completion_finalize(batch_id: str, now: dt.datetime) -> str | No
                 ":token": token,
                 ":now": now.isoformat(),
                 ":stale_before": stale_before,
+                ":one": 1,
+                ":max_attempts": MAX_COMPLETION_FINALIZE_ATTEMPTS,
             },
         )
         return token
@@ -668,6 +734,119 @@ def mark_completion_finalize_failed(
         # 失敗の記録に失敗しても、元の例外を握りつぶしてはならない。呼び出し側は
         # 本関数の例外を伝播させず、必ず元の例外を再送出すること。
         raise
+
+
+@dataclass(frozen=True)
+class CompletionBatchRecord:
+    """finalize recoveryのためにbatch項目から復元した読み取りモデル(Issue #57 B2)。
+
+    **不明・不整合はここでNoneへ落とし、呼び出し側をfail-closeさせる。**
+    推測でNORMALへ寄せない(VALIDATIONバッチをNORMALとして再実行しないため)。
+    """
+
+    batch_id: str
+    family: BatchFamily | None
+    execution_context: ExecutionContext | None
+    progress: BatchProgress
+    attempt_count: int
+    finalize_started_at: str | None
+    finalize_completed_at: str | None
+    finalize_failed_at: str | None
+
+    @property
+    def is_finalized(self) -> bool:
+        return self.finalize_completed_at is not None
+
+    @property
+    def attempts_exhausted(self) -> bool:
+        return self.attempt_count >= MAX_COMPLETION_FINALIZE_ATTEMPTS
+
+
+def _build_batch_progress(item: dict[str, Any]) -> BatchProgress:
+    """batch項目からBatchProgressを復元する(Issue #57 B2)。
+
+    従来BatchProgressはrecord_result()の戻り値としてしか得られなかったため、
+    finalize-only recoveryのために読み取り専用の復元経路を追加する。
+    属性名・型はrecord_result()の組み立てと必ず一致させること。
+    """
+    return BatchProgress(
+        total=int(item["total"]),
+        completed=int(item.get("completed", 0)),
+        category_counts={category: int(item.get(category, 0)) for category in SUMMARY_CATEGORIES},
+        data_insufficient_stock_codes=sorted(item.get("data_insufficient_codes", set())),
+        failed_stock_codes=sorted(item.get("failed_codes", set())),
+        ranking_entries=sorted(item.get("ranking_entries", set())),
+        sector_entries=sorted(item.get("sector_entries", set())),
+        holding_count=int(item.get("holding_count", 0)),
+        validation_recommendation_ids=sorted(item.get("validation_recommendation_ids", set())),
+        near_buy_ranking_entries=sorted(item.get("near_buy_ranking_entries", set())),
+        watch_end_ranking_entries=sorted(item.get("watch_end_ranking_entries", set())),
+        notification_categories=sorted(item.get("notification_categories", set())),
+        detected_categories=sorted(item.get("detected_categories", set())),
+        attention_detected_stock_codes=sorted(item.get("attention_detected_stock_codes", set())),
+        attention_sent_stock_codes=sorted(item.get("attention_sent_stock_codes", set())),
+        evaluation_record_saved_stock_codes=sorted(
+            item.get("evaluation_record_saved_stock_codes", set())
+        ),
+        completed_codes=sorted(item.get("completed_codes", set())),
+    )
+
+
+def _resolve_persisted_execution_context(item: dict[str, Any]) -> ExecutionContext | None:
+    """永続化した実行文脈を復元する(Issue #57 B2)。復元できなければNone。
+
+    `resolve_execution_context()`と同じ組み合わせ規則(NORMALにnotification_mode
+    指定は不可)を適用する。規則を満たさない記録は**不整合として拒否**し、
+    NORMAL+SENDへ寄せない。
+    """
+    raw_mode = item.get("execution_mode")
+    if raw_mode is None:
+        return None
+    try:
+        mode = ExecutionMode(raw_mode)
+    except ValueError:
+        return None
+    raw_notification_mode = item.get("notification_mode")
+    if raw_notification_mode is None:
+        return ExecutionContext(mode=mode)
+    try:
+        notification_mode = NotificationMode(raw_notification_mode)
+    except ValueError:
+        return None
+    if mode != ExecutionMode.VALIDATION and notification_mode != NotificationMode.SEND:
+        # NORMAL + DRY_RUN等は resolve_execution_context() が禁止している組み合わせ。
+        # 記録が壊れているとみなし、推測で補正しない。
+        return None
+    return ExecutionContext(mode=mode, notification_mode=notification_mode)
+
+
+def get_completion_batch(batch_id: str) -> CompletionBatchRecord | None:
+    """finalize recovery用にbatch項目を読み取る(Issue #57 B2、read-only)。
+
+    項目が存在しない(TTL経過等)場合はNone。familyやexecution_contextが
+    復元できない場合はNoneのまま返し、呼び出し側でfail-closeさせる。
+    """
+    if not running_on_lambda():
+        return None
+    item = _table().get_item(Key={"batch_id": batch_id}).get("Item")
+    if item is None:
+        return None
+    raw_family = item.get("batch_family")
+    family: BatchFamily | None
+    try:
+        family = BatchFamily(raw_family) if raw_family is not None else None
+    except ValueError:
+        family = None
+    return CompletionBatchRecord(
+        batch_id=batch_id,
+        family=family,
+        execution_context=_resolve_persisted_execution_context(item),
+        progress=_build_batch_progress(item),
+        attempt_count=int(item.get("completion_finalize_attempt_count", 0)),
+        finalize_started_at=item.get("completion_finalize_started_at"),
+        finalize_completed_at=item.get("completion_finalize_completed_at"),
+        finalize_failed_at=item.get("completion_finalize_failed_at"),
+    )
 
 
 def try_acquire_finalize(batch_id: str) -> bool:

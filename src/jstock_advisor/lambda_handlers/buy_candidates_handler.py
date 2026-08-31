@@ -102,7 +102,9 @@ from jstock_advisor.domain.signals.add_on_risk import evaluate_add_on_eligibilit
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     MAX_SECTOR_ENTRIES,
     MAX_SECTOR_ENTRY_BYTES,
+    BatchFamily,
     BatchProgress,
+    CompletionBatchRecord,
     mark_completion_finalize_completed,
     mark_completion_finalize_failed,
     record_result,
@@ -130,6 +132,10 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers._execution_mode import resolve_execution_context
 from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
+from jstock_advisor.lambda_handlers._finalize_recovery import (
+    is_recovery_event,
+    resolve_finalize_only_request,
+)
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
@@ -1010,6 +1016,66 @@ def _process_single_candidate(
                     raise
                 mark_completion_finalize_completed(batch_id, finalize_token, now)
     return result
+
+
+def _run_finalize_only_recovery(
+    record: CompletionBatchRecord,
+    config: AppConfig,
+    now: dt.datetime,
+    recommendation_repo: RecommendationRepository,
+    notification_service: LineNotificationService,
+    execution_context: ExecutionContext,
+    evaluation_record_repo: BuyCandidateEvaluationRecordRepository,
+    latest_batch_pointer_repo: LatestBuyCandidateBatchPointerRepository,
+) -> dict[str, Any]:
+    """締めくくり処理だけを再実行する(Issue #57 Phase B2)。
+
+    **通常workerの処理は行わない。** `_finalize_batch()`のみを、通常経路と
+    まったく同じ依存(repository / notification service / ExecutionContext)で
+    呼び出す。
+
+    実行権は**既存の`try_acquire_completion_finalize()`**で取得する
+    (recovery専用のgateは作らない=Issue #31のat-most-onceを迂回しない)。
+    取得回数上限もこのgateのConditionExpressionが正本であり、上限到達時は
+    Noneが返るため無限invokeにならない。
+    """
+    batch_id = record.batch_id
+    finalize_token = try_acquire_completion_finalize(batch_id, now)
+    if finalize_token is None:
+        # 他実行が取得済み / 既にfinalize済み / 取得回数上限のいずれか。
+        # 上限到達は運用者向けに明示する(B2では新しい通知は追加しない)。
+        if record.attempts_exhausted:
+            logger.error(
+                "finalize recovery exhausted batch_id=%s batch_family=%s "
+                "attempt_count=%d reason=FINALIZE_RETRY_EXHAUSTED",
+                batch_id,
+                BatchFamily.BUY_CANDIDATES.value,
+                record.attempt_count,
+            )
+            return {"finalize_recovery": "EXHAUSTED"}
+        logger.info(
+            "finalize recovery skipped (already acquired or completed) batch_id=%s",
+            batch_id,
+        )
+        return {"finalize_recovery": "SKIPPED"}
+    try:
+        _finalize_batch(
+            record.progress,
+            batch_id,
+            config,
+            now,
+            recommendation_repo,
+            notification_service,
+            execution_context,
+            evaluation_record_repo,
+            latest_batch_pointer_repo,
+        )
+    except BaseException as exc:
+        _mark_finalize_failure_safely(batch_id, finalize_token, now, exc)
+        raise
+    mark_completion_finalize_completed(batch_id, finalize_token, now)
+    logger.info("finalize recovery completed batch_id=%s", batch_id)
+    return {"finalize_recovery": "COMPLETED"}
 
 
 def _mark_finalize_failure_safely(
@@ -1983,6 +2049,27 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         trade_detection_confirmed=trade_detection_confirmed,
     )
 
+    if is_recovery_event(event):
+        # Issue #57 B2: finalize-only recovery。**通常workerの処理は一切行わない**
+        # (銘柄評価・Recommendation/DecisionSnapshot/EvaluationRecord再生成・
+        # Audit再登録・record_result・fanoutのいずれも実行しない)。task分岐より
+        # 前に置き、未知のrecovery_actionが通常worker経路へ落ちないようにする。
+        record = resolve_finalize_only_request(
+            event, BatchFamily.BUY_CANDIDATES, execution_context
+        )
+        if record is None:
+            return {"finalize_recovery": "REJECTED"}
+        return _run_finalize_only_recovery(
+            record,
+            config,
+            now,
+            recommendation_repo,
+            notification_service,
+            execution_context,
+            evaluation_record_repo,
+            latest_batch_pointer_repo,
+        )
+
     if event.get("task") == "buy_candidate":
         # 子Lambda: batch_idはevent由来なのでこの時点で既に確定している。
         if execution_context.is_validation:
@@ -2063,7 +2150,16 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         1 for t in targets if t.source in (CandidateSource.HOLDING, CandidateSource.BOTH)
     )
     batch_id = f"buy-candidates-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    start_batch(batch_id, len(targets), now, holding_count=holding_count)
+    start_batch(
+        batch_id,
+        len(targets),
+        now,
+        # Issue #57 B2: reconcilerがstatusではなくfamily markerで積極識別するため、
+        # 種別と実行文脈をここで必ず永続化する。
+        BatchFamily.BUY_CANDIDATES,
+        execution_context,
+        holding_count=holding_count,
+    )
     if execution_context.is_validation:
         # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、
         # イベント解析直後ではなくこの時点でVALIDATION開始ログを出す。
