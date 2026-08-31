@@ -6,9 +6,16 @@ import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.infrastructure.aws import batch_tracker
 
 _NOW = dt.datetime(2026, 7, 28, 7, 0, tzinfo=dt.UTC)
+# Issue #57 B2: start_batch()はfamily/execution_contextを必須引数として受け取る
+# (reconcilerがstatusではなくfamily markerで積極識別し、recoveryが元の実行文脈を
+#  復元できるようにするため)。既存テストの意味論は変えないため、buy family +
+#  NORMALを既定として渡す。
+_FAMILY = batch_tracker.BatchFamily.BUY_CANDIDATES
+_CONTEXT = ExecutionContext.normal()
 _REGION = "ap-northeast-1"
 
 
@@ -53,7 +60,7 @@ def test_start_batch_and_record_result_no_op_when_not_on_lambda(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: False)
-    batch_tracker.start_batch("batch-1", 3, _NOW)  # 例外を出さずに何もしない
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)  # 例外を出さずに何もしない
     assert batch_tracker.record_result("batch-1", "sent") is None
 
 
@@ -63,7 +70,7 @@ def test_start_batch_with_zero_total_is_noop_even_on_lambda(
     monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
     calls = []
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: calls.append(1))
-    batch_tracker.start_batch("batch-1", 0, _NOW)
+    batch_tracker.start_batch("batch-1", 0, _NOW, _FAMILY, _CONTEXT)
     assert calls == []
 
 
@@ -80,7 +87,7 @@ def test_record_result_tracks_category_breakdown_and_detects_completion(
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
 
     p1 = batch_tracker.record_result("batch-1", "sent")
     assert p1 is not None
@@ -122,7 +129,7 @@ def test_record_result_never_uses_raw_category_name_in_update_expression(
 
     from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 
-    batch_tracker.start_batch("batch-1", len(SUMMARY_CATEGORIES), _NOW)
+    batch_tracker.start_batch("batch-1", len(SUMMARY_CATEGORIES), _NOW, _FAMILY, _CONTEXT)
     for category in SUMMARY_CATEGORIES:
         batch_tracker.record_result("batch-1", category, stock_code="1234")
 
@@ -140,7 +147,7 @@ def test_record_result_accumulates_stock_codes_across_calls(
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 2, _NOW)
+    batch_tracker.start_batch("batch-1", 2, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.record_result("batch-1", "data_insufficient", stock_code="1111")
     progress = batch_tracker.record_result("batch-1", "data_insufficient", stock_code="2222")
 
@@ -159,7 +166,7 @@ def test_record_result_evaluation_record_saved_stock_codes_accumulates_as_set(
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.record_result(
         "batch-1", "candidate_not_ranked", evaluation_record_saved_stock_code="1111"
     )
@@ -180,7 +187,7 @@ def test_record_result_evaluation_record_saved_stock_code_duplicate_report_count
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.record_result(
         "batch-1", "candidate_not_ranked", evaluation_record_saved_stock_code="1111"
     )
@@ -203,7 +210,7 @@ def test_record_result_accumulates_ranking_entries(monkeypatch: pytest.MonkeyPat
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.record_result(
         "batch-1", "candidate_not_ranked", ranking_entry="72.5|1234|rec-a"
     )
@@ -224,7 +231,7 @@ def test_record_result_without_ranking_entry_leaves_ranking_entries_empty(
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 1, _NOW)
+    batch_tracker.start_batch("batch-1", 1, _NOW, _FAMILY, _CONTEXT)
     progress = batch_tracker.record_result("batch-1", "hold")
 
     assert progress is not None
@@ -244,7 +251,7 @@ def test_record_result_accumulates_detected_categories_independently_of_notifica
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 2, _NOW)
+    batch_tracker.start_batch("batch-1", 2, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.record_result(
         "batch-1", "sent", detected_category_entry="PARTIAL_PROFIT_TAKE|1234"
     )
@@ -269,7 +276,7 @@ def test_record_result_attention_sent_is_independent_of_attention_detected(
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 2, _NOW)
+    batch_tracker.start_batch("batch-1", 2, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.record_result(
         "batch-1", "sent", attention_detected_stock_code="1234", attention_sent_stock_code="1234"
     )
@@ -293,7 +300,7 @@ def test_record_result_retry_of_same_stock_code_does_not_inflate_counts(
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.record_result(
         "batch-1",
         "sent",
@@ -328,7 +335,7 @@ def test_record_result_counts_two_owners_of_same_stock_as_separate_entries(
     table = _FakeTable()
     monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
 
-    batch_tracker.start_batch("batch-1", 2, _NOW)
+    batch_tracker.start_batch("batch-1", 2, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.record_result(
         "batch-1",
         "sent",
@@ -381,7 +388,7 @@ def moto_dynamodb(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_try_acquire_finalize_succeeds_after_start_batch(moto_dynamodb: None) -> None:
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     assert batch_tracker.try_acquire_finalize("batch-1") is True
 
 
@@ -391,7 +398,7 @@ def test_try_acquire_finalize_only_succeeds_once_for_concurrent_workers(
     """複数ワーカーが同時にis_complete==Trueを観測しても、1ワーカーだけが
     finalize権限を取得できることを検証する(実装プラン§7)。
     """
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
 
     first = batch_tracker.try_acquire_finalize("batch-1")
     second = batch_tracker.try_acquire_finalize("batch-1")
@@ -401,7 +408,7 @@ def test_try_acquire_finalize_only_succeeds_once_for_concurrent_workers(
 
 
 def test_mark_finalize_complete_transitions_to_completed(moto_dynamodb: None) -> None:
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.try_acquire_finalize("batch-1")
 
     batch_tracker.mark_finalize_complete("batch-1")
@@ -427,7 +434,7 @@ def test_mark_finalize_complete_is_noop_locally(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_mark_finalize_failed_transitions_to_finalize_failed(moto_dynamodb: None) -> None:
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.try_acquire_finalize("batch-1")
 
     batch_tracker.mark_finalize_failed("batch-1", "boom")
@@ -441,7 +448,7 @@ def test_mark_finalize_failed_transitions_to_finalize_failed(moto_dynamodb: None
 
 
 def test_mark_finalize_failed_truncates_long_error_message(moto_dynamodb: None) -> None:
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.try_acquire_finalize("batch-1")
     long_message = "x" * 10_000
 
@@ -461,7 +468,7 @@ def test_try_acquire_finalize_does_not_allow_retry_after_finalize_failed(
     moto_dynamodb: None,
 ) -> None:
     """通常の重複ワーカーはFINALIZE_FAILEDから再取得できない(終端状態として扱う)。"""
-    batch_tracker.start_batch("batch-1", 3, _NOW)
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
     batch_tracker.try_acquire_finalize("batch-1")
     batch_tracker.mark_finalize_failed("batch-1", "boom")
 
