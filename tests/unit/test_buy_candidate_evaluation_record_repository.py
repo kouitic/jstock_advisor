@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
     build_evaluation_id,
 )
 from jstock_advisor.domain.entities.enums import BuyAction, CandidateSource, PurchaseCategory
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.infrastructure.local_repository import (
     buy_candidate_evaluation_record_repository as repo_module,
 )
@@ -377,6 +378,7 @@ def test_update_evaluation_record_outcome_safely_swallows_exception(tmp_path: Pa
         "OUTSIDE_TOP_5",
         (),
         None,
+        ExecutionContext.normal(),
     )
 
 
@@ -388,7 +390,8 @@ def test_update_evaluation_record_outcome_safely_warns_when_record_not_found(
     eval_repo = BuyCandidateEvaluationRecordRepository(store_dir=tmp_path)
     with caplog.at_level("WARNING"):
         handler_module._update_evaluation_record_outcome_safely(
-            eval_repo, "batch-1", "9999", 1, None, False, "OUTSIDE_TOP_5", "OUTSIDE_TOP_5", (), None
+            eval_repo, "batch-1", "9999", 1, None, False, "OUTSIDE_TOP_5", "OUTSIDE_TOP_5", (),
+            None, ExecutionContext.normal(),
         )
     assert "not found at finalize" in caplog.text
 
@@ -413,6 +416,7 @@ def test_update_evaluation_record_outcome_safely_updates_same_row_created_at_jud
         None,
         (),
         "SENT_AND_RECORDED",
+        ExecutionContext.normal(),
     )
 
     items = eval_repo.list_by_stock("2914")
