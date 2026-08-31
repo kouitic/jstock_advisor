@@ -22,7 +22,9 @@ B) WatchlistJobType → resolve_watchlist_job_type() → Dispatcher/Worker/
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from decimal import Decimal
+from enum import StrEnum
 
 import pytest
 
@@ -31,9 +33,13 @@ from jstock_advisor.domain.entities.enums import (
     FULL_SELL_RECOMMENDATION_TYPES,
     SELL_LIKE_RECOMMENDATION_TYPES,
     ConfidenceLevel,
+    DividendValidationStatus,
+    EarningsDateStatus,
+    EvidenceCoverageStatus,
     NotificationCategory,
     NotificationIntent,
     RecommendationType,
+    RecordDateUnknownReason,
     is_critical_risk,
     is_full_sell_like,
 )
@@ -45,12 +51,14 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     WatchlistJobType,
     resolve_watchlist_job_type,
 )
+from jstock_advisor.infrastructure.edinet.types import EdinetFailureReason, EdinetFetchStatus
 from jstock_advisor.services import watchlist_batch_finalizer
 from jstock_advisor.services.line_notification_service import (
     notification_priority_for_recommendation,
     resolve_notification_category,
     resolve_notification_intent_for_recommendation,
 )
+from jstock_advisor.services.screening_data_provider import ScreeningDataStatus
 
 _NOW = dt.datetime(2026, 8, 16, 8, 0, tzinfo=dt.UTC)
 
@@ -225,3 +233,185 @@ def test_b6_rotation_commit_gate_only_admits_new_candidate_screening() -> None:
             "batch-invariant-test", {"job_type": job_type.value}, None, _NOW
         )
         assert result is None
+
+
+# =============================================================================
+# C) Issue #85 Phase B2 / Group 1: semantic status family inventory
+#
+# 過去バグ(BP-01 Missing value semantics)の共通根は
+# 「**取得できなかった**」と「**調べた結果、値が無かった**」を同じ表現へ潰すこと。
+# 本コードベースはこれを domain ごとに **別々の enum** で表現している
+# (#55 利回り / #59 provider例外 / #53 EDINET / #75 平均取得単価)。
+#
+# ここでは個々の domain 単体テストを複製せず、
+# **「この enum family 全体が semantic role を持ち続けること」** を横断で固定する。
+#
+# 重要: すべての enum が同じメンバー名を持つべき、という一般化はしない。
+# 名称は domain ごとに違ってよい。見るのは **role が別メンバーとして残っているか**。
+# =============================================================================
+
+
+class _SemanticRole(StrEnum):
+    """欠測 semantics の役割。domain 間で名称は違っても役割は共通。"""
+
+    #: 値が取得でき、判定に使える。
+    PRESENT = "PRESENT"
+    #: 調べた結果、値が無い/該当しない。**判定として妥当な欠測**。
+    ABSENT_KNOWN = "ABSENT_KNOWN"
+    #: そもそも調べられなかった / 判定できない。**欠測へ潰してはいけない**。
+    UNDETERMINED = "UNDETERMINED"
+
+
+@dataclass(frozen=True)
+class _SemanticFamily:
+    """semantic role → その domain での enum メンバー名。"""
+
+    enum_type: type[StrEnum]
+    roles: dict[_SemanticRole, tuple[str, ...]]
+    origin_issue: str
+
+
+#: 「値あり / 値が無い / 判定できない」を表現する enum の台帳。
+#: **新しい semantic status enum を追加したらここへも登録すること。**
+_SEMANTIC_FAMILIES: tuple[_SemanticFamily, ...] = (
+    _SemanticFamily(
+        EdinetFetchStatus,
+        {
+            _SemanticRole.PRESENT: ("SUCCESS_WITH_DOCUMENTS",),
+            _SemanticRole.ABSENT_KNOWN: ("SUCCESS_EMPTY",),
+            _SemanticRole.UNDETERMINED: ("FETCH_FAILED",),
+        },
+        "#53",
+    ),
+    _SemanticFamily(
+        ScreeningDataStatus,
+        {
+            _SemanticRole.PRESENT: ("OK",),
+            _SemanticRole.ABSENT_KNOWN: ("NOT_FOUND",),
+            _SemanticRole.UNDETERMINED: ("DATA_ERROR",),
+        },
+        "#59",
+    ),
+    _SemanticFamily(
+        EvidenceCoverageStatus,
+        {
+            _SemanticRole.PRESENT: ("EVALUATED",),
+            _SemanticRole.ABSENT_KNOWN: ("NOT_APPLICABLE",),
+            _SemanticRole.UNDETERMINED: ("NOT_EVALUATED",),
+        },
+        "#55",
+    ),
+    _SemanticFamily(
+        EarningsDateStatus,
+        {
+            _SemanticRole.PRESENT: ("CONFIRMED",),
+            _SemanticRole.ABSENT_KNOWN: ("STALE_PAST_DATE",),
+            _SemanticRole.UNDETERMINED: ("UNAVAILABLE",),
+        },
+        "#53",
+    ),
+    _SemanticFamily(
+        DividendValidationStatus,
+        {
+            _SemanticRole.PRESENT: ("VALIDATED",),
+            _SemanticRole.ABSENT_KNOWN: ("NOT_YET_VALIDATABLE",),
+            _SemanticRole.UNDETERMINED: ("SECONDARY_UNAVAILABLE",),
+        },
+        "#59",
+    ),
+    _SemanticFamily(
+        RecordDateUnknownReason,
+        {
+            _SemanticRole.ABSENT_KNOWN: ("NOT_APPLICABLE",),
+            _SemanticRole.UNDETERMINED: (
+                "SOURCE_NOT_FOUND",
+                "PARSE_ERROR",
+                "CORPORATE_ACTION_UNRESOLVED",
+                "DATA_PROVIDER_MISSING",
+            ),
+        },
+        "#59",
+    ),
+)
+
+
+def _family_ids() -> list[str]:
+    return [family.enum_type.__name__ for family in _SEMANTIC_FAMILIES]
+
+
+@pytest.mark.parametrize("family", _SEMANTIC_FAMILIES, ids=_family_ids())
+def test_c1_declared_members_exist_in_the_enum(family: _SemanticFamily) -> None:
+    """台帳に書いたメンバーが実際に enum へ存在すること(メンバー削除・改名の検知)。"""
+    actual = {member.name for member in family.enum_type}
+    declared = {name for names in family.roles.values() for name in names}
+
+    missing = sorted(declared - actual)
+    assert not missing, (
+        f"{family.enum_type.__name__}({family.origin_issue})から semantic メンバーが"
+        f"消えている: {missing}。欠測 semantics の区別が失われていないか確認すること"
+    )
+
+
+@pytest.mark.parametrize("family", _SEMANTIC_FAMILIES, ids=_family_ids())
+def test_c2_absent_and_undetermined_are_distinct_members(family: _SemanticFamily) -> None:
+    """**「値が無い」と「判定できない」が別メンバーであること**(BP-01 の中核)。
+
+    片方を他方へ統合すると、取得失敗が欠測として扱われる過去バグが再発する。
+    """
+    absent = set(family.roles.get(_SemanticRole.ABSENT_KNOWN, ()))
+    undetermined = set(family.roles.get(_SemanticRole.UNDETERMINED, ()))
+
+    assert absent, f"{family.enum_type.__name__}: ABSENT_KNOWN 役が未宣言"
+    assert undetermined, f"{family.enum_type.__name__}: UNDETERMINED 役が未宣言"
+    overlap = sorted(absent & undetermined)
+    assert not overlap, (
+        f"{family.enum_type.__name__}({family.origin_issue}): "
+        f"「値が無い」と「判定できない」が同一メンバーへ統合されている: {overlap}"
+    )
+
+
+@pytest.mark.parametrize("family", _SEMANTIC_FAMILIES, ids=_family_ids())
+def test_c3_every_enum_member_is_classified(family: _SemanticFamily) -> None:
+    """enum へメンバーを追加したら台帳へも分類すること(inventory の完全性)。
+
+    未分類のまま増えると、その値がどの semantic role なのか不明のまま
+    consumer 側で暗黙に「欠測」へ寄せられる余地が生まれる。
+    """
+    actual = {member.name for member in family.enum_type}
+    declared = {name for names in family.roles.values() for name in names}
+
+    unclassified = sorted(actual - declared)
+    assert not unclassified, (
+        f"{family.enum_type.__name__} へ追加されたメンバーが semantic role へ"
+        f"分類されていない: {unclassified}"
+    )
+
+
+def test_c4_no_single_member_covers_both_success_and_failure() -> None:
+    """PRESENT と UNDETERMINED が同一メンバーで表現されていないこと(全 family)。"""
+    collisions: list[str] = []
+    for family in _SEMANTIC_FAMILIES:
+        present = set(family.roles.get(_SemanticRole.PRESENT, ()))
+        undetermined = set(family.roles.get(_SemanticRole.UNDETERMINED, ()))
+        if present & undetermined:
+            collisions.append(f"{family.enum_type.__name__}: {sorted(present & undetermined)}")
+    assert not collisions, f"成功と判定不能が同一メンバーで表現されている: {collisions}"
+
+
+def test_c5_edinet_success_empty_is_not_a_failure_reason() -> None:
+    """#53 の中核契約: SUCCESS_EMPTY(0件)は FETCH_FAILED と別状態であること。
+
+    `EdinetFailureReason` は FETCH_FAILED の内訳であり、
+    SUCCESS_EMPTY の理由コードが混入していないことを確認する。
+    """
+    failure_reasons = {member.name for member in EdinetFailureReason}
+
+    assert "SUCCESS_EMPTY" not in failure_reasons
+    assert EdinetFetchStatus.SUCCESS_EMPTY is not EdinetFetchStatus.FETCH_FAILED
+    assert EdinetFetchStatus.SUCCESS_EMPTY.value != EdinetFetchStatus.FETCH_FAILED.value
+
+
+def test_c6_semantic_family_inventory_is_not_empty() -> None:
+    """台帳自体が空になっていないこと(テストの空回りを防ぐ)。"""
+    assert len(_SEMANTIC_FAMILIES) >= 6
+    assert len(set(_family_ids())) == len(_SEMANTIC_FAMILIES), "同じ enum が重複登録されている"
