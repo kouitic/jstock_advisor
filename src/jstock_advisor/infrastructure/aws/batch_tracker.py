@@ -167,9 +167,51 @@ class BatchProgress:
     # するため(カウンタ方式だと重複報告分だけ数字が水増しされ、実際には一部
     # 銘柄のEvaluationRecordが欠損していても検知できない)。
     evaluation_record_saved_stock_codes: list[str] = field(default_factory=list)
+    # Issue #57 Phase B1: 完了報告された識別子(buy=stock_code /
+    # holdings=holding_id)の集合。`completed`カウンタが非冪等なADDであるのに対し、
+    # こちらはDynamoDBの文字列セットのため同一識別子を何度報告しても1件のまま
+    # (冪等)。**finalize eligibilityの正本はこの集合の要素数**であり、
+    # `completed`は既存monitoring/log互換のためのlegacyカウンタとして維持する。
+    completed_codes: list[str] = field(default_factory=list)
+
+    @property
+    def has_completion_ids(self) -> bool:
+        """新形式(Issue #57 B1)の完了識別子が記録されているか。
+
+        DynamoDBは空の文字列セットを保持できない(要素が0になると属性ごと消える)
+        ため、「属性が存在する」ことと「要素が1件以上ある」ことは同値である。
+        したがって要素数0は「まだ1件も完了報告がない」か「旧形式の項目」の
+        いずれかであり、どちらの場合も後方互換のためlegacyカウンタで判定する。
+        """
+        return len(self.completed_codes) > 0
+
+    @property
+    def unique_completed(self) -> int:
+        """重複報告を除いた完了件数。旧形式項目ではlegacyカウンタを返す。"""
+        if self.has_completion_ids:
+            return len(self.completed_codes)
+        return self.completed
 
     @property
     def is_complete(self) -> bool:
+        """finalize eligibility(Issue #57 B1で重複報告に対して冪等化)。
+
+        **deploy境界の後方互換ポリシー**(migration/backfillを行わないため必須):
+
+        - `completed_codes`が**存在する**(=新形式のworkerが1件以上報告済み)
+          → **要素数**で判定する。同一識別子の重複報告でカウントが増えないため、
+            未処理銘柄を残したままの早期finalizeを防ぐ
+        - `completed_codes`が**存在しない**(=旧コードが作成・処理した項目)
+          → 従来どおり`completed`カウンタで判定する。
+            **「属性が無い=完了0件」とは扱わない。**そう扱うと、deploy時点で
+            進行中だった旧形式バッチが永久にfinalize不能になるため
+
+        `try_acquire_completion_finalize()`のConditionExpressionも同じ二分岐を
+        DynamoDB側で評価する(アプリ側でread→len→writeする非原子的な実装は
+        しない)。両者は同じ意味論であることをテストで固定している。
+        """
+        if self.has_completion_ids:
+            return len(self.completed_codes) >= self.total
         return self.completed >= self.total
 
 
@@ -217,6 +259,7 @@ def record_result(
     attention_detected_stock_code: str | None = None,
     attention_sent_stock_code: str | None = None,
     evaluation_record_saved_stock_code: str | None = None,
+    completion_id: str | None = None,
 ) -> BatchProgress | None:
     """1銘柄(または1 holding_id)の処理完了を原子的に記録し、現在の進捗を返す
     (ローカル環境ではNone)。
@@ -283,6 +326,19 @@ def record_result(
     `len(progress.evaluation_record_saved_stock_codes) == progress.total`を
     比較し、全対象銘柄分の保存が実際に成功した場合にのみlatest batch
     pointerを更新すること(一部保存失敗を見逃さないため)。
+
+    completion_id(Issue #57 Phase B1)は、この完了報告の一意な識別子
+    (buy=stock_code / holdings=holding_id)。DynamoDBの文字列セット
+    `completed_codes`へ原子的に追加され、**finalize eligibilityの正本**になる。
+    `completed`カウンタは条件なしADDのため、同一銘柄のLambda非同期retryで
+    二重加算され、未処理銘柄を残したまま`completed >= total`が成立しうる
+    (=早期finalize)。Setは重複を許さないため、この経路を塞ぐ。
+
+    **buy/holdingsの両パイプラインは必ずcompletion_idを渡すこと。**渡さない
+    場合、そのバッチは`completed_codes`が育たず、後方互換ポリシーにより
+    legacyカウンタ判定へフォールバックする(=早期finalize防止が効かない)。
+    既存のstock_code引数はcategoryが"data_insufficient"/"failed"のときだけ
+    渡される仕様のため、完了識別子としては流用できない(別引数にしている理由)。
     """
     if not running_on_lambda():
         return None
@@ -339,6 +395,13 @@ def record_result(
         names["#evaluation_record_saved_codes"] = "evaluation_record_saved_stock_codes"
         update_expr += ", #evaluation_record_saved_codes :evaluation_record_saved_codes"
         values[":evaluation_record_saved_codes"] = {evaluation_record_saved_stock_code}
+    if completion_id is not None:
+        # Issue #57 B1: finalize eligibilityの正本。categoryやstock_codeの有無に
+        # 関わらず、完了報告のたびに必ず同一のADDへ相乗りさせる(別のupdate_itemへ
+        # 分けると、片方だけ成功した中間状態が生まれるため)。
+        names["#completed_codes"] = "completed_codes"
+        update_expr += ", #completed_codes :completion_id"
+        values[":completion_id"] = {completion_id}
 
     response = _table().update_item(
         Key={"batch_id": batch_id},
@@ -367,15 +430,30 @@ def record_result(
         evaluation_record_saved_stock_codes=sorted(
             item.get("evaluation_record_saved_stock_codes", set())
         ),
+        completed_codes=sorted(item.get("completed_codes", set())),
     )
 
 
-# --- holdings/buyバッチの完了処理(finalize)排他制御(Issue #31) ---------------
+# --- holdings/buyバッチの完了処理(finalize)排他制御(Issue #31 / #57) ---------
 # record_result()のcompletedカウンタは非冪等なADDであり、処理済み銘柄の
 # Lambda非同期retryでcompletedがtotalを超えた後もis_complete(completed>=total)が
 # 再成立し、完了トリガー処理(holdings: summary送信、buy: _finalize_batch)が
-# 二重実行されうる。以下の2関数は「completed>=totalとなった後のfinalize実行権」を
-# 原子的に制御する(completedカウンタ自体の冪等化は行わない)。
+# 二重実行されうる。以下の関数群は「バッチ完了後のfinalize実行権」を原子的に
+# 制御する。
+#
+# Issue #57 Phase B1: 上記の「completedカウンタ自体の冪等化は行わない」方針を
+# 改めた。at-most-once(実行権が1つだけ)を維持していても、**カウンタの水増しに
+# よって未処理銘柄を残したままバッチ完了と判定される**(早期finalize)経路が
+# 残っていたためである。完了判定の正本を文字列セットcompleted_codesの要素数へ
+# 移し、`completed`はlegacy/observabilityカウンタとして維持する。
+# **fencing契約(token・started_at/completed_at・stale閾値1200秒)は不変。**
+#
+# Issue #57 Phase B1(Track 2前半): 捕捉可能なfinalize失敗を
+# completion_finalize_failed_at / _failure_reason として永続化する
+# (mark_completion_finalize_failed)。**再駆動は行わない**(Phase B2で既存の
+# watchlist-batch-reconcilerへ接続する)。timeout等の捕捉不能な終了では
+# failed_atは付かないため、staleの第一条件は従来どおり
+# 「started_atあり かつ completed_atなし」である。
 # watchlistパイプラインのtry_acquire_finalize()/status state machineとは意図的に
 # 統合しない(Reconcilerがstatus値でスキャン・分岐しており、holdings/buyの
 # バッチ項目はstatus=RUNNINGのままstarted_at/dispatch_completed属性を持たない
@@ -415,9 +493,26 @@ def try_acquire_completion_finalize(batch_id: str, now: dt.datetime) -> str | No
 
     条件(単一のConditionExpressionで原子的に判定):
       completion_finalize_completed_at が存在しない(完了済みなら永久に不可)
-      AND completed >= total(バッチ未完了のままlockだけ取得することは不可)
+      AND バッチ完了(Issue #57 B1で正本を変更。下記)
       AND (completion_finalize_started_at が存在しない(初回)
            OR started_atがstale閾値(1200秒)より古い(crashからのtakeover))
+
+    Issue #57 Phase B1: 「バッチ完了」の判定を`completed >= total`から
+    **`size(completed_codes) >= total`**へ変更した。`completed`は条件なしADDで
+    非冪等なため、同一銘柄のLambda非同期retryで二重加算され、未処理銘柄を
+    残したまま条件が成立しうる(早期finalize)。文字列セットの要素数なら
+    重複報告で増えない。size()はDynamoDB側で評価されるため、アプリ側の
+    read→len→writeにはならない。
+
+    **後方互換(migration/backfillなし)**: `completed_codes`属性が存在しない
+    項目(旧コードが作成・処理したバッチ)は従来どおり`completed >= total`で
+    判定する。属性の不在を「完了0件」と扱うと、deploy時点で進行中だった
+    バッチが永久にfinalize不能になるため。BatchProgress.is_completeも同じ
+    二分岐であり、両者の一致をテストで固定している。
+
+    **at-most-onceのfencing契約(Issue #31、Production verified)は不変**:
+    token方式・completion_finalize_started_at/completed_at・stale閾値1200秒は
+    いずれも変更していない。B1が変えたのはeligibilityの算出元だけである。
     takeover時はtoken・started_atが自分の値へ更新されるため、旧ownerは
     mark_completion_finalize_completed()のtoken条件で必ず失敗する。
 
@@ -439,11 +534,22 @@ def try_acquire_completion_finalize(batch_id: str, now: dt.datetime) -> str | No
             ),
             ConditionExpression=(
                 "attribute_not_exists(completion_finalize_completed_at)"
-                " AND completed >= #total"
+                # Issue #57 B1: 完了判定の正本をcompleted_codesの要素数にする。
+                # size()はDynamoDB側で評価されるため、アプリがSetを
+                # read→len→writeする非原子的な実装にはならない。
+                # 属性が存在しない旧形式項目は従来どおりlegacyカウンタで判定する
+                # (「属性が無い=完了0件」と扱うと、deploy時点で進行中だった
+                # 旧形式バッチが永久にfinalize不能になるため)。
+                " AND ((attribute_exists(#completed_codes)"
+                " AND size(#completed_codes) >= #total)"
+                " OR (attribute_not_exists(#completed_codes) AND completed >= #total))"
                 " AND (attribute_not_exists(completion_finalize_started_at)"
                 " OR completion_finalize_started_at < :stale_before)"
             ),
-            ExpressionAttributeNames={"#total": "total"},
+            ExpressionAttributeNames={
+                "#total": "total",
+                "#completed_codes": "completed_codes",
+            },
             ExpressionAttributeValues={
                 ":token": token,
                 ":now": now.isoformat(),
@@ -492,6 +598,75 @@ def mark_completion_finalize_completed(batch_id: str, token: str, now: dt.dateti
                 batch_id,
             )
             return False
+        raise
+
+
+# finalize失敗理由に載せてよい情報の上限(Issue #57 B1)。例外メッセージ本文・
+# provider応答・payloadは載せない(秘密情報の混入を構造的に防ぐため、例外クラス名
+# だけを記録する)。クラス名は開発者が定義した識別子であり利用者データを含まない。
+_MAX_FINALIZE_FAILURE_REASON_LEN = 120
+
+
+def mark_completion_finalize_failed(
+    batch_id: str, token: str, now: dt.datetime, exc: BaseException
+) -> bool:
+    """完了処理が**捕捉可能な例外**で失敗したことを記録する(Issue #57 Phase B1)。
+
+    `completion_finalize_completed_at`は**書かない**。したがって本関数を呼んでも
+    gateは開いたまま(staleになれば後続がtakeover可能)であり、Issue #31の
+    at-most-once契約は変わらない。記録するのは観測用の事実のみである。
+
+    **本関数はfinalizeを再駆動しない。**再駆動はPhase B2で既存の
+    watchlist-batch-reconcilerへ接続する。B1では「失敗したという事実が
+    TTL(6時間)まで残り、後続フェーズが検出できる」状態を作るだけである。
+
+    **重要な契約(Issue #57 B1、§9)**:
+
+    - **捕捉可能な例外** → `completion_finalize_failed_at`が付く
+    - **Lambdaのtimeout・強制終了** → プロセスごと消えるため**本関数は呼ばれない**。
+      `completion_finalize_started_at`だけが残り、stale検出の候補になる
+
+    つまり **「すべての失敗がfailed_atに記録される」わけではない。**
+    failed_atの不在は「失敗していない」を意味しないため、後続フェーズは
+    `started_atあり かつ completed_atなし`をstale候補の第一条件とし、
+    failed_atは補助的な分類情報として扱うこと。
+
+    所有権(token)が失われている場合はFalseを返し、何も記録しない
+    (takeoverした側の実行を上書きしないため)。
+    """
+    if not running_on_lambda():
+        return True
+    # 例外クラス名のみを記録する。str(exc)はprovider応答・URL・資格情報等を
+    # 含みうるため使わない(Issue #59で確立したsafe logging方針と同じ)。
+    reason = type(exc).__name__[:_MAX_FINALIZE_FAILURE_REASON_LEN]
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET completion_finalize_failed_at = :now,"
+                " completion_finalize_failure_reason = :reason"
+            ),
+            ConditionExpression=(
+                "completion_finalize_token = :token"
+                " AND attribute_not_exists(completion_finalize_completed_at)"
+            ),
+            ExpressionAttributeValues={
+                ":now": now.isoformat(),
+                ":reason": reason,
+                ":token": token,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
+            logger.warning(
+                "mark_completion_finalize_failed: condition failed "
+                "(ownership lost or already completed) batch_id=%s",
+                batch_id,
+            )
+            return False
+        # 失敗の記録に失敗しても、元の例外を握りつぶしてはならない。呼び出し側は
+        # 本関数の例外を伝播させず、必ず元の例外を再送出すること。
         raise
 
 

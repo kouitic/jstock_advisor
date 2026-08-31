@@ -104,6 +104,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     MAX_SECTOR_ENTRY_BYTES,
     BatchProgress,
     mark_completion_finalize_completed,
+    mark_completion_finalize_failed,
     record_result,
     start_batch,
     try_acquire_completion_finalize,
@@ -968,14 +969,19 @@ def _process_single_candidate(
             evaluation_record_saved_stock_code=(
                 stock_code if evaluation_record_saved else None
             ),
+            # Issue #57 B1: finalize eligibilityの正本となる完了識別子。
+            # stock_code引数はcategoryが"data_insufficient"/"failed"のときしか
+            # 渡されないため流用できず、専用引数として常に渡す。
+            completion_id=stock_code,
         )
         if progress is not None and progress.is_complete:
-            # Issue #31: completedカウンタは非冪等なADDのため、処理済み銘柄の
-            # Lambda非同期retryでis_completeが再成立しうる。_finalize_batch
-            # (ランキング・digest/summary送信・監査記録等)の実行権を原子的に
-            # 取得し、取得できた1実行だけが実行する。正常終了時のみcompleted
-            # 記録し、例外時は記録しない(stale化後に後続トリガーがtakeover
-            # して再実行できる)。
+            # Issue #31: 完了トリガーの実行権を原子的に取得し、取得できた1実行
+            # だけが_finalize_batch(ランキング・digest/summary送信・監査記録等)を
+            # 実行する。正常終了時のみcompleted記録し、例外時は記録しない
+            # (stale化後に後続トリガーがtakeoverして再実行できる)。
+            # Issue #57 B1: is_complete/gateの正本はcompleted_codesの要素数へ
+            # 変更済み。同一銘柄のLambda非同期retryでcompletedカウンタが二重
+            # 加算されても、未処理銘柄を残したままここへ到達しない。
             finalize_token = try_acquire_completion_finalize(batch_id, now)
             if finalize_token is None:
                 logger.info(
@@ -984,19 +990,45 @@ def _process_single_candidate(
                     batch_id,
                 )
             else:
-                _finalize_batch(
-                    progress,
-                    batch_id,
-                    config,
-                    now,
-                    recommendation_repo,
-                    notification_service,
-                    execution_context,
-                    evaluation_record_repo,
-                    latest_batch_pointer_repo,
-                )
+                try:
+                    _finalize_batch(
+                        progress,
+                        batch_id,
+                        config,
+                        now,
+                        recommendation_repo,
+                        notification_service,
+                        execution_context,
+                        evaluation_record_repo,
+                        latest_batch_pointer_repo,
+                    )
+                except BaseException as exc:
+                    # Issue #57 B1: 捕捉可能な失敗を永続化する(観測のみ。
+                    # completed_atは書かないためgateの意味論は不変で、再駆動も
+                    # まだ行わない=Phase B2)。記録の失敗で元の例外を握りつぶさない。
+                    _mark_finalize_failure_safely(batch_id, finalize_token, now, exc)
+                    raise
                 mark_completion_finalize_completed(batch_id, finalize_token, now)
     return result
+
+
+def _mark_finalize_failure_safely(
+    batch_id: str, finalize_token: str, now: dt.datetime, exc: BaseException
+) -> None:
+    """finalize失敗の記録を試みる(Issue #57 B1)。
+
+    記録は観測目的のbest-effortであり、**元の例外の伝播を妨げてはならない**。
+    記録自体が失敗した場合は警告を残すだけで飲み込む(呼び出し側が元の例外を
+    再送出することで、Lambdaのretry/可視化は従来どおり働く)。
+    """
+    try:
+        mark_completion_finalize_failed(batch_id, finalize_token, now, exc)
+    except Exception:  # noqa: BLE001 - 記録失敗で元の例外を隠さない
+        logger.warning(
+            "buy candidates: failed to persist finalize failure batch_id=%s",
+            batch_id,
+            exc_info=True,
+        )
 
 
 def _save_evaluation_record_safely(
