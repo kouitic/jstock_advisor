@@ -22,12 +22,15 @@ B) WatchlistJobType → resolve_watchlist_job_type() → Dispatcher/Worker/
 from __future__ import annotations
 
 import datetime as dt
+import importlib
+import pkgutil
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 
 import pytest
 
+from jstock_advisor import lambda_handlers
 from jstock_advisor.domain.entities.enums import (
     CRITICAL_RISK_RECOMMENDATION_TYPES,
     FULL_SELL_RECOMMENDATION_TYPES,
@@ -415,3 +418,411 @@ def test_c6_semantic_family_inventory_is_not_empty() -> None:
     """台帳自体が空になっていないこと(テストの空回りを防ぐ)。"""
     assert len(_SEMANTIC_FAMILIES) >= 6
     assert len(set(_family_ids())) == len(_SEMANTIC_FAMILIES), "同じ enum が重複登録されている"
+
+
+# =============================================================================
+# D) Issue #85 Phase B3: execution context propagation inventory(BP-02)
+#
+# 過去バグ(#56 job_type 伝播漏れ / #105 VALIDATION 永続化漏れ)の共通根は
+# 「**呼び出し側が context を渡し忘れても、既定値のまま黙って本番動作へ倒れる**」こと。
+#
+# 本 Group が固定するのは **inventory / completeness 層のみ** である。
+# 「全 handler が execution_mode を解決すること」という behavioral invariant は
+# **#70(F-B3 / F-B4)が未修正のため今 main で FAIL する**ので追加しない。
+# ここでは代わりに、
+#
+#   - Lambda handler を **機械的に列挙**し、
+#   - 各 handler × contract dimension を**必ず分類**させ、
+#   - 分類漏れ(= handler 追加時の見逃し)を CI FAIL にし、
+#   - 既知の契約違反を **KNOWN_GAP + related_issue + finding_id** で追跡可能に残す
+#
+# ことで、#70 が解消されるまでの間も欠陥が**見えなくならない**ようにする。
+#
+# 1 handler = 1 status へ粗く潰さず、**dimension ごとに**分類する
+# (例: buy は execution_mode を伝播するが trade_detection_confirmed は fail-open)。
+# =============================================================================
+
+
+class _Dimension(StrEnum):
+    """context contract の観点。handler ごとに独立して評価する。"""
+
+    EXECUTION_MODE = "execution_mode"
+    NOTIFICATION_MODE = "notification_mode"
+    TRADE_DETECTION_CONFIRMED = "trade_detection_confirmed"
+    JOB_TYPE = "job_type"
+
+
+class _ContractStatus(StrEnum):
+    #: context を解決し、必要な子処理へ同じ意味を伝播する。
+    PROPAGATES = "PROPAGATES"
+    #: その dimension をサポートしないが、渡されたら黙殺せず明示的に fail-close する。
+    REJECTS_EXPLICITLY = "REJECTS_EXPLICITLY"
+    #: そもそもこの dimension の契約対象外(理由必須)。
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    #: 既知の契約違反。related_issue と finding_id が必須。
+    KNOWN_GAP = "KNOWN_GAP"
+
+
+@dataclass(frozen=True)
+class _ContractCell:
+    status: _ContractStatus
+    reason: str
+    related_issue: str | None = None
+    finding_id: str | None = None
+
+
+def _cell(
+    status: _ContractStatus,
+    reason: str,
+    *,
+    related_issue: str | None = None,
+    finding_id: str | None = None,
+) -> _ContractCell:
+    return _ContractCell(status, reason, related_issue, finding_id)
+
+
+_NA_NO_CONTEXT = "この handler は execution context を受け取る設計ではない(スケジュール起動専用)"
+_NA_NOT_DISPATCHER = "子 Lambda を dispatch しないため伝播対象が無い"
+_NA_NO_TRADE_DETECTION = "売買イベント検知を行わない"
+_NA_NO_JOB_TYPE = "watchlist job_type を扱わない"
+
+#: handler × dimension の契約台帳。
+#: **lambda_handlers へ handler module を追加したらここへも登録しないと CI が落ちる。**
+_CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
+    "buy_candidates_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.PROPAGATES,
+            "resolve_execution_context() で解決し、子 payload へ execution_mode を渡す",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.PROPAGATES, "VALIDATION 時のみ子 payload へ notification_mode を渡す"
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "子側の既定値が True(fail-open)。payload 欠落時に通知抑止が効かない",
+            related_issue="#70",
+            finding_id="F-B3",
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    "holdings_watchlist_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.PROPAGATES, "buy と同じく解決し子 payload へ渡す"
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.PROPAGATES, "VALIDATION 時のみ子 payload へ notification_mode を渡す"
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "子側の既定値が True(fail-open)",
+            related_issue="#70",
+            finding_id="F-B3",
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    "watchlist_dispatcher_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "execution_mode を黙って無視し、VALIDATION 指定でも完全な本番実行になる",
+            related_issue="#70",
+            finding_id="F-B4",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "execution_mode を解決しないため notification_mode も伝播しない",
+            related_issue="#70",
+            finding_id="F-B4",
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #56: SQS body へ job_type を載せ、未知値は fail-close する",
+        ),
+    },
+    "watchlist_worker_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "execution_mode を解決しない",
+            related_issue="#70",
+            finding_id="F-B4",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "同上",
+            related_issue="#70",
+            finding_id="F-B4",
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(
+            _ContractStatus.PROPAGATES, "Issue #56: job_type で finalizer を分岐する"
+        ),
+    },
+    "watchlist_terminal_failure_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "execution_mode を解決しない",
+            related_issue="#70",
+            finding_id="F-B4",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP, "同上", related_issue="#70", finding_id="F-B4"
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #56: SQS body の job_type で finalizer を分岐し、未知値は fail-close",
+        ),
+    },
+    "watchlist_batch_reconciler_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "execution_mode を解決しない",
+            related_issue="#70",
+            finding_id="F-B4",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP, "同上", related_issue="#70", finding_id="F-B4"
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #56: RUNNING 救済で batch record の job_type により分岐する",
+        ),
+    },
+    "disclosure_check_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "LINE 送信を行うが execution_mode を解決せず、VALIDATION 指定でも実送信になる",
+            related_issue="#109",
+            finding_id="F-D1",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.KNOWN_GAP,
+            "LineNotificationService へ execution_context を渡さないため DRY_RUN が効かない",
+            related_issue="#109",
+            finding_id="F-D1",
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    "evaluation_handler": {
+        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_CONTEXT),
+        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    "line_webhook_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.NOT_APPLICABLE,
+            "API Gateway 経由のユーザー操作入口であり、スケジュール実行の mode 概念を持たない",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    "weekly_review_handler": {
+        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_CONTEXT),
+        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    "monthly_review_handler": {
+        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_CONTEXT),
+        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    "quarterly_review_handler": {
+        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_CONTEXT),
+        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+}
+
+
+def _discover_handler_modules() -> list[str]:
+    """`lambda_handlers` package から Lambda entry point を機械的に列挙する。
+
+    `_` 始まりの内部モジュール(`_fanout` / `_execution_mode` 等)は entry point では
+    ないため除外し、`handler(event, context)` を公開しているものだけを対象にする。
+    """
+    discovered: list[str] = []
+    for module_info in pkgutil.iter_modules(lambda_handlers.__path__):
+        name = module_info.name
+        if name.startswith("_"):
+            continue
+        module = importlib.import_module(f"{lambda_handlers.__name__}.{name}")
+        if callable(getattr(module, "handler", None)):
+            discovered.append(name)
+    return sorted(discovered)
+
+
+def test_d1_handler_discovery_is_not_empty() -> None:
+    """discovery 自体が空回りしていないこと(台帳が常に空で通るのを防ぐ)。"""
+    discovered = _discover_handler_modules()
+
+    assert len(discovered) >= 10, f"Lambda handler の機械列挙に失敗している: {discovered}"
+    assert "buy_candidates_handler" in discovered
+    assert "watchlist_dispatcher_handler" in discovered
+
+
+def test_d2_every_discovered_handler_is_registered() -> None:
+    """**新しい Lambda handler を足したら台帳へも登録すること**(見逃し防止)。"""
+    discovered = set(_discover_handler_modules())
+    registered = set(_CONTEXT_CONTRACT_MATRIX)
+
+    unregistered = sorted(discovered - registered)
+    assert not unregistered, (
+        f"Lambda handler が追加されたが context contract が分類されていない: {unregistered}。"
+        "_CONTEXT_CONTRACT_MATRIX へ PROPAGATES / REJECTS_EXPLICITLY / "
+        "NOT_APPLICABLE / KNOWN_GAP のいずれかで登録すること"
+    )
+
+
+def test_d3_no_ghost_handler_in_inventory() -> None:
+    """存在しない handler が台帳へ残っていないこと(削除・改名の検知)。"""
+    discovered = set(_discover_handler_modules())
+    registered = set(_CONTEXT_CONTRACT_MATRIX)
+
+    ghosts = sorted(registered - discovered)
+    assert not ghosts, f"lambda_handlers に存在しない handler が台帳に残っている: {ghosts}"
+
+
+@pytest.mark.parametrize("handler_name", sorted(_CONTEXT_CONTRACT_MATRIX))
+def test_d4_every_dimension_is_classified(handler_name: str) -> None:
+    """handler ごとに **全 dimension** が分類されていること。
+
+    1 handler = 1 status へ粗く潰さず、観点ごとに評価させる。
+    """
+    cells = _CONTEXT_CONTRACT_MATRIX[handler_name]
+
+    missing = sorted(d.value for d in _Dimension if d not in cells)
+    assert not missing, f"{handler_name}: 未分類の contract dimension: {missing}"
+
+
+@pytest.mark.parametrize("handler_name", sorted(_CONTEXT_CONTRACT_MATRIX))
+def test_d5_known_gaps_carry_issue_and_finding(handler_name: str) -> None:
+    """KNOWN_GAP は **related_issue と finding_id を必ず持つ**こと。
+
+    理由なし除外・"legacy" だけの除外を構造的に禁止する。
+    """
+    untracked: list[str] = []
+    for dimension, cell in _CONTEXT_CONTRACT_MATRIX[handler_name].items():
+        if cell.status is not _ContractStatus.KNOWN_GAP:
+            continue
+        if not (cell.related_issue or "").startswith("#") or not cell.finding_id:
+            untracked.append(dimension.value)
+    assert not untracked, (
+        f"{handler_name}: KNOWN_GAP に related_issue(#NN)/ finding_id が無い: {untracked}"
+    )
+
+
+@pytest.mark.parametrize("handler_name", sorted(_CONTEXT_CONTRACT_MATRIX))
+def test_d6_every_cell_has_a_reason(handler_name: str) -> None:
+    """全 cell が理由を持つこと(特に NOT_APPLICABLE は理由必須)。"""
+    empty = sorted(
+        dimension.value
+        for dimension, cell in _CONTEXT_CONTRACT_MATRIX[handler_name].items()
+        if not cell.reason.strip()
+    )
+    assert not empty, f"{handler_name}: 分類理由が空: {empty}"
+
+
+def test_d7_issue_70_findings_are_tracked_in_the_inventory() -> None:
+    """#70 の F-B3 / F-B4 が台帳から消えていないこと。
+
+    #70 が修正されたら、該当 cell を PROPAGATES / REJECTS_EXPLICITLY へ
+    **更新しない限りこのテストが落ちる**(gap の放置と修正の取りこぼしを両方検知する)。
+    """
+    tracked: dict[str, list[str]] = {}
+    for handler_name, cells in _CONTEXT_CONTRACT_MATRIX.items():
+        for dimension, cell in cells.items():
+            if cell.status is _ContractStatus.KNOWN_GAP and cell.related_issue == "#70":
+                tracked.setdefault(cell.finding_id or "", []).append(
+                    f"{handler_name}.{dimension.value}"
+                )
+
+    assert "F-B3" in tracked, "#70 F-B3(trade_detection_confirmed の fail-open)が台帳に無い"
+    assert "F-B4" in tracked, "#70 F-B4(watchlist系の execution_mode 黙殺)が台帳に無い"
+    assert sorted(tracked["F-B3"]) == [
+        "buy_candidates_handler.trade_detection_confirmed",
+        "holdings_watchlist_handler.trade_detection_confirmed",
+    ]
+    assert {entry.split(".")[0] for entry in tracked["F-B4"]} == {
+        "watchlist_dispatcher_handler",
+        "watchlist_worker_handler",
+        "watchlist_terminal_failure_handler",
+        "watchlist_batch_reconciler_handler",
+    }
+
+
+def test_d8_issue_56_job_type_contract_is_recorded_as_green() -> None:
+    """#56(job_type routing)は修正済みなので PROPAGATES として台帳に載ること。
+
+    個別の回帰は `test_watchlist_job_type_routing.py` が担当するため
+    ここでは**分類のみ**を確認し、behavioral な重複追加はしない。
+    """
+    watchlist_handlers = [
+        name for name in _CONTEXT_CONTRACT_MATRIX if name.startswith("watchlist_")
+    ]
+    assert len(watchlist_handlers) == 4
+
+    for name in watchlist_handlers:
+        cell = _CONTEXT_CONTRACT_MATRIX[name][_Dimension.JOB_TYPE]
+        assert cell.status is _ContractStatus.PROPAGATES, f"{name}: job_type が PROPAGATES でない"
+
+
+def test_d9_status_and_tracking_fields_are_consistent() -> None:
+    """KNOWN_GAP 以外が related_issue / finding_id を持たないこと。
+
+    「PROPAGATES なのに Issue 参照が残っている」ような、
+    修正後の更新漏れを示す矛盾状態を検知する。
+    """
+    inconsistent: list[str] = []
+    for handler_name, cells in _CONTEXT_CONTRACT_MATRIX.items():
+        for dimension, cell in cells.items():
+            if cell.status is _ContractStatus.KNOWN_GAP:
+                continue
+            if cell.related_issue or cell.finding_id:
+                inconsistent.append(f"{handler_name}.{dimension.value}({cell.status.value})")
+    assert not inconsistent, (
+        f"KNOWN_GAP 以外に related_issue / finding_id が残っている: {inconsistent}。"
+        "修正後に status だけ更新して追跡情報を消し忘れていないか確認すること"
+    )
+
+
+def test_d10_inventory_covers_every_dimension_at_least_once() -> None:
+    """全 dimension が少なくとも1 handler で実質的に評価されていること。
+
+    dimension を足したのに全 handler で NOT_APPLICABLE、という空振りを防ぐ。
+    """
+    meaningful = {
+        dimension
+        for cells in _CONTEXT_CONTRACT_MATRIX.values()
+        for dimension, cell in cells.items()
+        if cell.status is not _ContractStatus.NOT_APPLICABLE
+    }
+
+    missing = sorted(d.value for d in _Dimension if d not in meaningful)
+    assert not missing, f"どの handler でも実質評価されていない dimension: {missing}"
