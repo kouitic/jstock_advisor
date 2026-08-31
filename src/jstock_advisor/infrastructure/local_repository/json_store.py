@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -53,6 +53,16 @@ class JsonCollectionStore[T: BaseModel]:
 
     def list_all(self) -> list[T]:
         return list(self._read_all().values())
+
+    def iter_all(self) -> Iterator[T]:
+        """`list_all()`のストリーミング版(Issue #113、CollectionStore Protocol)。
+
+        ローカルJSONは元々ファイル全体を一度に読むため、DynamoDB実装のような
+        ピークメモリ削減効果は無い(ローカルCLI専用であり本番Lambdaの
+        メモリ制約の対象ではない)。呼び出し側から見た列挙順・件数・内容が
+        `list_all()`と一致することだけを保証する。
+        """
+        return iter(self._read_all().values())
 
     def get(self, item_id: str) -> T | None:
         return self._read_all().get(item_id)
