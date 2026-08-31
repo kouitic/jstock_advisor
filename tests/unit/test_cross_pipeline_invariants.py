@@ -599,16 +599,14 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
     },
     "disclosure_check_handler": {
         _Dimension.EXECUTION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "LINE 送信を行うが execution_mode を解決せず、VALIDATION 指定でも実送信になる",
-            related_issue="#109",
-            finding_id="F-D1",
+            _ContractStatus.PROPAGATES,
+            "Issue #109: handler 冒頭で resolve_execution_context(event) を解決する"
+            "(未知・不正な mode は黙殺せず例外)",
         ),
         _Dimension.NOTIFICATION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "LineNotificationService へ execution_context を渡さないため DRY_RUN が効かない",
-            related_issue="#109",
-            finding_id="F-D1",
+            _ContractStatus.PROPAGATES,
+            "Issue #109: LineNotificationService へ execution_context を注入し、"
+            "DRY_RUN の外部 push 抑止・NotificationLog / Claim 抑止を効かせる",
         ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
