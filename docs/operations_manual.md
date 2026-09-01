@@ -147,7 +147,7 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 | 08:00 | `daily_buy_candidates_analysis` | `jstock analyze buy-candidates <銘柄コード...> --source real --notify` | `BuyCandidatesFunction` | ウォッチリスト+保有銘柄を統合して買い判定(新規購入・買い増し)を行う(2026-07-31改訂)。全上場銘柄の自動スクリーニングではない |
 | 08:00 | `daily_holdings_watchlist_analysis` | `jstock analyze holdings --source real --notify` | `HoldingsWatchlistFunction` | 保有銘柄の利確・売却判定、ポートフォリオ集中チェック(2026-07-31改訂: 16:30から08:00へ変更。買い候補分析と処理条件・通知タイミングを揃えるため)。保有銘柄は全件自動対象 |
 | 10:00/12:30/15:30 | `disclosure_check` | `jstock analyze disclosure-check --source real --notify` | `DisclosureCheckFunction` | 保有銘柄の新規開示にリスクキーワードが検出された場合のみ速報通知する |
-| 18:00 | `point_in_time_evaluation` | `jstock evaluation run --source real` | `EvaluationFunction` | 評価期限(営業日数)を迎えた推奨のみ処理。通知機能は無く、結果はコンソール/CloudWatch Logs表示のみ |
+| 18:00 | `point_in_time_evaluation` | `jstock evaluation run --source real` | `EvaluationFunction` | 評価期限(営業日数)を迎えた推奨のみ処理。通知機能は無く、結果はコンソール/CloudWatch Logs表示のみ。Timeout 900秒(Issue #113。残時間に余裕を残して自主的に切り上げる) |
 
 ### 実行結果の確認ポイント
 
@@ -487,6 +487,55 @@ Provider(`LightweightScreeningDataProvider`)も実装済みだが、
 (リスク影響・過学習リスク評価等の自由記述を要する)を自動生成しない
 (要求仕様45節の人間承認必須の原則のため)。実際の`rules backtest`/
 `rules propose`は利用者が手動で実行すること(第7節参照)。
+
+### 5.0 定点評価の監視とbacklog回復(Issue #113、2026-08-31追加)
+
+#### run summaryの読み方
+
+`EvaluationFunction`は実行のたびにCloudWatch Logsへ次の1行を出力する
+(**予算切れで途中終了した場合も必ず出力される**)。
+
+```
+evaluation_handler done: evaluated=N (business=N calendar=N) skipped=N
+  due_horizons=N already_evaluated=N pending_horizons=N pending_recommendations=N
+  backlog_remaining=N budget_exhausted=<bool> recommendations_scanned=N
+  missing=N provider_calls=N duration_ms=N
+```
+
+| 項目 | 意味 |
+|---|---|
+| `due_horizons` | 評価日が到来している(recommendation, horizon)の組の総数 |
+| `already_evaluated` | そのうち既に評価済みの数 |
+| `pending_horizons` | 未処理の数(= `due_horizons - already_evaluated`) |
+| `backlog_remaining` | **この実行の後に残った未処理数**。0でなければ回復途中 |
+| `budget_exhausted` | 残時間が尽きて自主的に切り上げたか |
+| `provider_calls` | 外部株価APIへ実際に到達した回数(runスコープのキャッシュ後) |
+
+**監視の要点**: `backlog_remaining`が**実行を重ねても減らない/増える**場合は、
+1回あたりの処理能力が新規流入(推奨の増加ペース)を下回っている。
+この場合はTimeout・providerレイテンシ・pending件数を確認すること。
+
+途中経過は `evaluation scan done:` と `evaluation progress:`(500件ごと)で
+追跡できる。以前は`START`〜`REPORT`の間にアプリケーションログが1行も出ず、
+どこまで進んだか追跡できなかった。
+
+#### CloudWatch Alarm
+
+| Alarm | 条件 |
+|---|---|
+| `<stack>-evaluation-errors` | `Errors >= 1`(**Lambdaのタイムアウトもここに計上される**) |
+| `<stack>-evaluation-duration` | `Duration >= 720,000ms`(Timeout 900秒の80%) |
+
+**通知先(SNS/LINE/GitHub)は設定していない**ため、`AlarmActions`は空である。
+現時点ではCloudWatchコンソールでAlarm stateを確認する運用とする。
+
+#### backlog回復期間中の注意
+
+未処理分は**古い推奨から順に消化される**。評価値は基準日の株価から計算されるため
+遅れて処理しても結果は変わらないが、**週次改善レビュー(5.1節)は
+「前週に結果が確定した分」を集計する**ため、回復期間中はその週の集計件数が
+一時的に大きく膨らむ。**回復期間中の週次レビュー結果を、通常の週と同じ意味で
+比較しないこと**(`docs/functional_spec.md` 12.4節参照)。
 
 ### 5.1 GitHub Issue自動起票の設定(振り返り機能改修、2026-08追加)
 

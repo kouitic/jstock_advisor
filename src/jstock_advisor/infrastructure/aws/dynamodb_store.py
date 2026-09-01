@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import random
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import boto3
@@ -80,16 +80,28 @@ class DynamoDbCollectionStore[T: BaseModel]:
         return self._model_type.model_validate_json(item["data"])
 
     def list_all(self) -> list[T]:
-        items: list[T] = []
+        return list(self.iter_all())
+
+    def iter_all(self) -> Iterator[T]:
+        """Scanのページを1つずつ処理し、1件ずつyieldする(Issue #113)。
+
+        `list_all()`と異なり全ページを`list`へ保持しないため、ピークメモリは
+        「1ページ分(最大1MBの生データ + そのdeserialize結果)」に有界となる。
+        呼び出し側がページ間で参照を保持しなければ、直前のページは次ページの
+        取得前に解放される。
+
+        `list_all()`はこのメソッドの`list()`化として実装しており、
+        列挙順・件数・内容が両者で一致することが構造的に保証される。
+        """
         scan_kwargs: dict[str, Any] = {}
         while True:
             response = self._table.scan(**scan_kwargs)
-            items.extend(self._from_item(raw) for raw in response.get("Items", []))
+            for raw in response.get("Items", []):
+                yield self._from_item(raw)
             last_key = response.get("LastEvaluatedKey")
             if not last_key:
                 break
             scan_kwargs["ExclusiveStartKey"] = last_key
-        return items
 
     def get(self, item_id: str) -> T | None:
         response = self._table.get_item(Key={self._id_field: item_id})

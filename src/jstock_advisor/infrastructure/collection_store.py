@@ -11,7 +11,7 @@ Lambda環境(AWS_LAMBDA_FUNCTION_NAME環境変数が設定されている)では
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -25,6 +25,25 @@ _DEFAULT_TABLE_PREFIX = "jstock"
 
 class CollectionStore[T: BaseModel](Protocol):
     def list_all(self) -> list[T]: ...
+    def iter_all(self) -> Iterator[T]:
+        """全項目を1件ずつ遅延生成する(Issue #113。`list_all()`のストリーミング版)。
+
+        DynamoDB実装はScanのページを1つずつ取得し、そのページ分だけをdeserialize
+        してyieldしたあと解放する(全ページを`list`へ保持しない)。件数に比例して
+        メモリを消費する`list_all()`と異なり、ピークメモリが1ページ分に有界となる。
+        Recommendationのように1件約20KB・数千件規模へ育つコレクションを
+        Lambda(512MB)で走査するために必要(Issue #113で`list_all()`が
+        約527MBを保持し実行ごとにメモリ上限へ到達していた)。
+
+        JSON実装は元々ファイル全体を読むためピークメモリは削減されない
+        (ローカルCLI専用であり本番の制約対象ではない)。呼び出し側から見た
+        列挙順・件数・内容は`list_all()`と一致させること。
+
+        走査中の書き込みは前提としない(DynamoDBのScanは結果整合性であり、
+        走査途中の更新が反映されるかは保証されない)。
+        """
+        ...
+
     def get(self, item_id: str) -> T | None: ...
     def upsert(self, item: T) -> None: ...
     def upsert_many(self, new_items: Iterable[T]) -> None: ...

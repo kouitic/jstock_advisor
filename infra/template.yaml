@@ -1361,6 +1361,13 @@ Resources:
       FunctionName: !Sub "${AWS::StackName}-evaluation"
       CodeUri: ../src/
       Handler: jstock_advisor.lambda_handlers.evaluation_handler.handler
+      # Issue #113: Globals既定の300秒では、蓄積したbacklogをtime budget内で
+      # 安全に消化しきれない。「処理が遅いので力技で延ばす」ためではなく、
+      # N+1 Scan除去・streaming・run scope cacheを行った上で、
+      # get_remaining_time_in_millis()による予算管理のもとで
+      # backlogを消化するための実行枠として900秒を割り当てる
+      # (MemorySizeはstreaming化により512MBのまま据え置く)。
+      Timeout: 900
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EvaluationResultsTable }
@@ -1372,6 +1379,52 @@ Resources:
             ScheduleExpressionTimezone: Asia/Tokyo
             FlexibleTimeWindow:
               Mode: "OFF"
+
+  # Issue #113: 定点評価Lambdaが11日以上「一度も成功していない」ことに
+  # 気づけなかったため、最低限の検知を追加する。本スタックにはこれ以前
+  # CloudWatch AlarmもSNS Topicも1つも存在しなかった。
+  # 通知配信基盤(SNS/LINE/GitHub)の新設は本Issueのscope外とし、
+  # ここではAlarm stateの可視化までを担保する(AlarmActionsは意図的に付けない)。
+  # なお**Lambdaのタイムアウトはerrorsメトリクスに計上される**ため、
+  # このErrors Alarmが1本あれば今回の37回の失敗はすべて検知できていた。
+  EvaluationFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-evaluation-errors"
+      AlarmDescription: >-
+        定点評価Lambdaが失敗した(タイムアウトを含む)。Issue #113参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EvaluationFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # 実行されない時間帯(平日18:00のみ稼働)をALARMにしないため。
+      TreatMissingData: notBreaching
+
+  # Timeout(900秒)の80%=720秒に達したら、まだ失敗していなくても
+  # 予算超過が近いことを検知する(backlogの発散を早期に捉えるため)。
+  EvaluationFunctionDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-evaluation-duration"
+      AlarmDescription: >-
+        定点評価Lambdaの実行時間がTimeoutの80%(720秒)に達した。Issue #113参照。
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EvaluationFunction
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 720000 # ミリ秒。EvaluationFunctionのTimeout 900秒 × 0.8
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
 
   # --- ウォッチリスト自動追加(候補ユニバース本格対応・2026-08) ---------------
   # 旧WatchlistAutoAdditionFunction(単一Lambdaの自己再帰fan-out)を、
