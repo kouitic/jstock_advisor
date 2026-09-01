@@ -451,3 +451,80 @@ def test_get_many_never_falls_back_to_single_get_item(
     store.get_many(["1", "2"])
 
     assert calls == []
+
+
+# --- Issue #113: Scanのストリーミング(iter_all) -----------------------------
+
+
+class _FakePagedTable:
+    """LastEvaluatedKeyで複数ページを返すtableダブル(Scan呼び出し回数を数える)。"""
+
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self._pages = pages
+        self.scan_calls = 0
+
+    def scan(self, **kwargs):
+        self.scan_calls += 1
+        index = kwargs.get("ExclusiveStartKey", {}).get("page", 0)
+        response: dict = {"Items": self._pages[index]}
+        if index + 1 < len(self._pages):
+            response["LastEvaluatedKey"] = {"page": index + 1}
+        return response
+
+
+def _fake_pages(store: DynamoDbCollectionStore[_Item], page_sizes: list[int]) -> _FakePagedTable:
+    pages: list[list[dict]] = []
+    counter = 0
+    for size in page_sizes:
+        page = []
+        for _ in range(size):
+            counter += 1
+            item = _Item(item_id=str(counter), name="x", value=counter)
+            page.append(to_dynamo_item(item, "item_id"))
+        pages.append(page)
+    return _FakePagedTable(pages)
+
+
+def test_iter_all_returns_same_items_as_list_all(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    store.upsert(_Item(item_id="1", name="a", value=1))
+    store.upsert(_Item(item_id="2", name="b", value=2))
+
+    assert list(store.iter_all()) == store.list_all()
+
+
+def test_iter_all_fetches_pages_lazily(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #113: 全ページを先読みせず、消費した分だけScanすること。
+
+    `list_all()`が全ページを一度にlistへ保持していたため、本番の
+    RecommendationsTable(約118MB)でLambdaのメモリ上限を超えていた。
+    """
+    fake = _fake_pages(store, [3, 3, 3])
+    monkeypatch.setattr(store, "_table", fake)
+
+    iterator = store.iter_all()
+    first = next(iterator)
+
+    assert first.item_id == "1"
+    assert fake.scan_calls == 1  # 1ページ目しか取得していない
+
+    rest = list(iterator)
+
+    assert fake.scan_calls == 3
+    assert [item.item_id for item in rest] == ["2", "3", "4", "5", "6", "7", "8", "9"]
+
+
+def test_list_all_still_returns_every_page(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`list_all()`はiter_all()のlist()化であり、ページング結果が変わらないこと。"""
+    fake = _fake_pages(store, [2, 2, 1])
+    monkeypatch.setattr(store, "_table", fake)
+
+    items = store.list_all()
+
+    assert [item.item_id for item in items] == ["1", "2", "3", "4", "5"]
+    assert fake.scan_calls == 3
