@@ -405,15 +405,27 @@ class PortfolioService:
         再計算する(企業行動調整サービスを注入している場合は分割調整も適用)。"""
         return self._recompute_holding(owner, stock_code)
 
-    def repair_holding_projection(self, owner: str, stock_code: str) -> bool:
+    def repair_holding_projection(
+        self, owner: str, stock_code: str, *, stock_name: str | None = None
+    ) -> bool:
         """Holdingの集計値がロット集合とずれていれば再計算して直す(Issue #61 Phase B1)。
 
         直した場合はTrue、既に整合していれば**何も書き込まず**False。
 
         PurchaseLotとHoldingは別々の永続書き込みであり(ロット→Holdingの順)、
-        ロット保存後・Holding保存前に失敗すると「ロットはあるがHoldingが古い」
-        部分状態が残る。CSV取込は「その行のロットが存在するか」で適用済みを
-        判定するため、この修復が無いとHoldingが古いまま永久に残る。
+        ロット保存後・Holding保存前に失敗すると部分状態が残る。CSV取込は
+        「その行のロットが存在するか」で適用済みを判定するため、この修復が
+        無いとその状態が永久に残る。部分状態は2種類ある。
+
+        - 既存保有への追加購入 … Holdingが古い集計値のまま残る
+        - **新規保有** … Holdingがそもそも存在しない(`existing is None`)
+
+        後者も修復対象に含める。ここで`existing is None`を理由に何もしないと、
+        ロットだけが存在して保有が作られない状態が永久に残る。
+
+        ロットが1件も無い場合は何もしない(空のロット集合から0株のHoldingを
+        新規作成してしまわないため。売却によりロットが尽きた保有の扱いは
+        本メソッドの責務ではない)。
 
         整合している場合に書き込まないのは、`updated_at`を不必要に進めないため
         (取込のやり直しは正常な操作であり、何も変わらないのに更新日時だけが
@@ -421,10 +433,10 @@ class PortfolioService:
         """
         normalized_owner = normalize_and_validate_owner(owner)
         holding_id = build_holding_id(normalized_owner, stock_code)
-        existing = self._holdings.get(holding_id)
-        if existing is None:
-            return False
         lots = self._lots.list_by_holding(holding_id)
+        if not lots:
+            return False
+        existing = self._holdings.get(holding_id)
         expected = self._compute_holding(
             normalized_owner,
             holding_id,
@@ -432,7 +444,11 @@ class PortfolioService:
             lots,
             existing,
             dt.datetime.now(dt.UTC),
+            stock_name=stock_name,
         )
+        if existing is None:
+            self._holdings.upsert(expected)
+            return True
         # ロットから導出される項目だけを比較する(メタ情報は再計算対象外)。
         derived = (
             "shares",

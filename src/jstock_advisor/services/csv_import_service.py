@@ -145,7 +145,7 @@ class HoldingsCsvImportService:
         return summary
 
     def _skip_applied_row(
-        self, row_number: int, owner: str, stock_code: str
+        self, row_number: int, owner: str, stock_code: str, stock_name: str | None
     ) -> CsvImportRowResult:
         """既に適用済みの行をskipする。
 
@@ -156,9 +156,15 @@ class HoldingsCsvImportService:
         以後は「ロットがあるからskip」と判断され続け、Holdingが古いまま
         永久に残ってしまう。
 
+        新規保有の行(Holdingがまだ存在しない)でも同じ部分状態が起きるため、
+        その場合はHoldingを作り直す。`stock_name`はPurchaseLotが保持していない
+        ため、CSVの行から渡す(渡さないと銘柄名が銘柄コードで埋められてしまう)。
+
         整合していれば何も書き込まない(`updated_at`を不必要に進めない)。
         """
-        repaired = self._portfolio.repair_holding_projection(owner, stock_code)
+        repaired = self._portfolio.repair_holding_projection(
+            owner, stock_code, stock_name=stock_name
+        )
         message = "このCSVの同じ行は取り込み済みのため、登録せずにスキップしました"
         if repaired:
             message += "(保有株数がロットと合っていなかったため再計算しました)"
@@ -299,7 +305,7 @@ class HoldingsCsvImportService:
         # 二重計上が起きる(レビュー指摘R1)。
         lot_id = build_row_lot_id(import_id, row_number)
         if self._portfolio.lot_exists(lot_id):
-            return self._skip_applied_row(row_number, owner, stock_code)
+            return self._skip_applied_row(row_number, owner, stock_code, stock_name)
 
         # 行コミットを原子的にclaimする。データ適用より**先**に行うことで、
         # 台帳の書き込み自体が失敗した場合に「適用済みなのに台帳が無い」状態を
@@ -315,7 +321,7 @@ class HoldingsCsvImportService:
         )
         if not claimed and self._portfolio.lot_exists(lot_id):
             # 他がclaimし、実際に適用も完了している。
-            return self._skip_applied_row(row_number, owner, stock_code)
+            return self._skip_applied_row(row_number, owner, stock_code, stock_name)
         # claimが獲得できず、かつ実データが未適用の場合は**取り残されたclaim**である
         # (適用に失敗したあとの解放にも失敗した等)。claimの有無ではなく実データを
         # 正としてそのまま適用する。同じ決定的lot_idで登録し、Holdingはロット集合

@@ -275,6 +275,47 @@ def test_retry_repairs_holding_when_lot_persisted_but_holding_write_failed(
     assert summary.results[0].status == CsvRowStatus.SKIPPED_DUPLICATE
 
 
+def test_retry_repairs_holding_for_a_brand_new_holding(
+    tmp_path: Path,
+    portfolio_service: PortfolioService,
+    csv_import_ledger: CsvImportLedger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**保有がまだ存在しない**銘柄でも、同じ部分状態から回復できること。
+
+    既存保有への追加購入と違い、Holdingがそもそも存在しない状態で
+    ロットだけが保存される。修復が「既存Holdingがある場合」に限定されていると、
+    保有が作られないまま永久に残る。
+    """
+    service = HoldingsCsvImportService(
+        portfolio_service=portfolio_service, ledger=csv_import_ledger
+    )
+    path = _write(tmp_path)  # 100株の新規取込
+
+    monkeypatch.setattr(
+        portfolio_service._holdings,  # noqa: SLF001
+        "upsert",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("holding write failure")),
+    )
+    with pytest.raises(RuntimeError):
+        service.import_file(path)
+    monkeypatch.undo()
+
+    # 部分状態: ロットだけ保存され、Holdingは存在しない。
+    assert len(portfolio_service.list_lots(_OWNER, "2914")) == 1
+    assert _lot_total(portfolio_service) == 100
+    assert portfolio_service.get_holding(_OWNER, "2914") is None
+
+    summary = service.import_file(path)
+
+    assert len(portfolio_service.list_lots(_OWNER, "2914")) == 1, "ロットが二重に作られた"
+    assert _lot_total(portfolio_service) == 100
+    holding = portfolio_service.get_holding(_OWNER, "2914")
+    assert holding is not None, "保有が作られないまま残っている"
+    assert holding.shares == 100
+    assert summary.results[0].status == CsvRowStatus.SKIPPED_DUPLICATE
+
+
 def test_applied_lot_with_missing_ledger_repairs_projection(
     tmp_path: Path,
     portfolio_service: PortfolioService,
