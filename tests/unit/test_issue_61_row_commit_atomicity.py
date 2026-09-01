@@ -199,6 +199,212 @@ def test_release_failure_still_retries_without_double_count(
     assert _state(portfolio_service) == (100, 1)
 
 
+# --- Holding projection の整合(レビュー指摘R2) -------------------------------
+#
+# PurchaseLotとHoldingは別々の永続writeであり(lot → holdingの順)、
+# ロット保存成功・Holding保存失敗という部分状態が成立しうる。この状態で
+# 「lotがあるからskip」とだけ判断すると、Holdingが古いまま永久に残る。
+#
+# B1の外部契約は「rowのbusiness effectが1回だけ存在する」ことに加えて
+# 「HoldingがそのロットNの集合と一致している」ことまでを含む。
+
+
+def _existing_holding(portfolio: PortfolioService, shares: int = 100) -> None:
+    portfolio.register_purchase(
+        owner=_OWNER,
+        stock_code="2914",
+        stock_name="日本たばこ産業",
+        shares=shares,
+        purchase_price=Decimal("4000"),
+        purchase_date=dt.date(2025, 1, 1),
+        account_type=AccountType.NISA,
+    )
+
+
+_ADDITIONAL_CSV = (
+    "owner,stock_code,shares,purchase_price,purchase_date,account_type\n"
+    f"{_OWNER},2914,50,4400,2025-06-01,NISA\n"
+)
+
+
+def _lot_total(portfolio: PortfolioService) -> int:
+    return sum(lot.shares for lot in portfolio.list_lots(_OWNER, "2914"))
+
+
+def test_retry_repairs_holding_when_lot_persisted_but_holding_write_failed(
+    tmp_path: Path,
+    portfolio_service: PortfolioService,
+    csv_import_ledger: CsvImportLedger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ロット保存成功・Holding保存失敗のあと、再実行でHoldingが修復されること。
+
+    ロットは既に永続化されているため二重に作ってはならず、かつHoldingは
+    ロット集合と一致する値まで回復しなければならない。
+    """
+    _existing_holding(portfolio_service)
+    service = HoldingsCsvImportService(
+        portfolio_service=portfolio_service, ledger=csv_import_ledger
+    )
+    path = _write(tmp_path, _ADDITIONAL_CSV)
+
+    original_upsert = portfolio_service._holdings.upsert  # noqa: SLF001
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated holding write failure")
+
+    monkeypatch.setattr(portfolio_service._holdings, "upsert", _boom)  # noqa: SLF001
+    with pytest.raises(RuntimeError):
+        service.import_file(path, on_duplicate="additional_purchase")
+    monkeypatch.setattr(portfolio_service._holdings, "upsert", original_upsert)  # noqa: SLF001
+
+    # 部分状態: ロットは保存済み・Holdingは古い。
+    assert len(portfolio_service.list_lots(_OWNER, "2914")) == 2
+    assert _lot_total(portfolio_service) == 150
+    holding = portfolio_service.get_holding(_OWNER, "2914")
+    assert holding is not None
+    assert holding.shares == 100, "前提が崩れている(Holdingが更新されている)"
+
+    summary = service.import_file(path, on_duplicate="additional_purchase")
+
+    assert len(portfolio_service.list_lots(_OWNER, "2914")) == 2, "ロットが二重に作られた"
+    assert _lot_total(portfolio_service) == 150
+    repaired = portfolio_service.get_holding(_OWNER, "2914")
+    assert repaired is not None
+    assert repaired.shares == 150, "Holdingが古いまま残っている"
+    assert summary.results[0].status == CsvRowStatus.SKIPPED_DUPLICATE
+
+
+def test_applied_lot_with_missing_ledger_repairs_projection(
+    tmp_path: Path,
+    portfolio_service: PortfolioService,
+    csv_import_ledger: CsvImportLedger,
+    store_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """台帳が失われ、かつHoldingが古い状態でも、再実行で修復される。"""
+    _existing_holding(portfolio_service)
+    service = HoldingsCsvImportService(
+        portfolio_service=portfolio_service, ledger=csv_import_ledger
+    )
+    path = _write(tmp_path, _ADDITIONAL_CSV)
+
+    monkeypatch.setattr(
+        portfolio_service._holdings,  # noqa: SLF001
+        "upsert",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("holding write failure")),
+    )
+    with pytest.raises(RuntimeError):
+        service.import_file(path)
+    monkeypatch.undo()
+
+    # 台帳も失われた状態にする。
+    import_id = compute_import_id(path.read_bytes())
+    AuditLogRepository(store_dir=store_dir).delete(build_row_audit_id(import_id, 2))
+    assert _ledger_entries(store_dir) == []
+
+    summary = service.import_file(path)
+
+    assert _lot_total(portfolio_service) == 150
+    assert len(portfolio_service.list_lots(_OWNER, "2914")) == 2
+    holding = portfolio_service.get_holding(_OWNER, "2914")
+    assert holding is not None
+    assert holding.shares == 150
+    assert summary.results[0].status == CsvRowStatus.SKIPPED_DUPLICATE
+
+
+def test_stale_claim_with_applied_lot_repairs_projection(
+    tmp_path: Path,
+    portfolio_service: PortfolioService,
+    csv_import_ledger: CsvImportLedger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claimが残り、ロットも保存済みで、Holdingだけ古い状態でも修復される。"""
+    _existing_holding(portfolio_service)
+    service = HoldingsCsvImportService(
+        portfolio_service=portfolio_service, ledger=csv_import_ledger
+    )
+    path = _write(tmp_path, _ADDITIONAL_CSV)
+
+    monkeypatch.setattr(
+        portfolio_service._holdings,  # noqa: SLF001
+        "upsert",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("holding write failure")),
+    )
+    monkeypatch.setattr(
+        csv_import_ledger,
+        "release",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("release failure")),
+    )
+    with pytest.raises(RuntimeError):
+        service.import_file(path)
+    monkeypatch.undo()
+
+    summary = service.import_file(path)
+
+    assert _lot_total(portfolio_service) == 150
+    assert len(portfolio_service.list_lots(_OWNER, "2914")) == 2
+    holding = portfolio_service.get_holding(_OWNER, "2914")
+    assert holding is not None
+    assert holding.shares == 150
+    assert summary.results[0].status == CsvRowStatus.SKIPPED_DUPLICATE
+
+
+def test_skip_does_not_touch_holding_when_projection_is_consistent(
+    tmp_path: Path,
+    portfolio_service: PortfolioService,
+    csv_import_ledger: CsvImportLedger,
+) -> None:
+    """整合している場合はHoldingを書き換えない(updated_atを不必要に進めない)。"""
+    service = HoldingsCsvImportService(
+        portfolio_service=portfolio_service, ledger=csv_import_ledger
+    )
+    path = _write(tmp_path)
+    service.import_file(path)
+    before = portfolio_service.get_holding(_OWNER, "2914")
+    assert before is not None
+
+    service.import_file(path)
+
+    after = portfolio_service.get_holding(_OWNER, "2914")
+    assert after is not None
+    assert after.updated_at == before.updated_at
+    assert after.shares == before.shares
+
+
+# --- 別rowの正当な購入への副作用がないこと -------------------------------------
+
+
+def test_dedupe_does_not_drop_other_lots(
+    tmp_path: Path,
+    portfolio_service: PortfolioService,
+    csv_import_ledger: CsvImportLedger,
+) -> None:
+    """同lot_idの除外が、別lot_idの正当な購入を消さないこと。
+
+    row A(+50) と row B(+30) を別々のCSVで取り込み、
+    どちらも失われないことを確認する。
+    """
+    _existing_holding(portfolio_service)
+    service = HoldingsCsvImportService(
+        portfolio_service=portfolio_service, ledger=csv_import_ledger
+    )
+    service.import_file(_write(tmp_path, _ADDITIONAL_CSV))
+    service.import_file(
+        _write(
+            tmp_path,
+            "owner,stock_code,shares,purchase_price,purchase_date,account_type\n"
+            f"{_OWNER},2914,30,4600,2025-07-01,NISA\n",
+        )
+    )
+
+    assert len(portfolio_service.list_lots(_OWNER, "2914")) == 3
+    assert _lot_total(portfolio_service) == 180
+    holding = portfolio_service.get_holding(_OWNER, "2914")
+    assert holding is not None
+    assert holding.shares == 180
+
+
 # --- 同時実行 -----------------------------------------------------------------
 
 

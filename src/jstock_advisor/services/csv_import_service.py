@@ -144,6 +144,31 @@ class HoldingsCsvImportService:
             summary.add(result)
         return summary
 
+    def _skip_applied_row(
+        self, row_number: int, owner: str, stock_code: str
+    ) -> CsvImportRowResult:
+        """既に適用済みの行をskipする。
+
+        skipする前に**Holdingがロット集合と一致していることを保証する**
+        (Issue #61 Phase B1 レビュー指摘R2)。PurchaseLotとHoldingは別々の
+        永続書き込みであり、ロット保存後・Holding保存前に失敗すると
+        「ロットはあるがHoldingが古い」部分状態が残る。ここで直さないと、
+        以後は「ロットがあるからskip」と判断され続け、Holdingが古いまま
+        永久に残ってしまう。
+
+        整合していれば何も書き込まない(`updated_at`を不必要に進めない)。
+        """
+        repaired = self._portfolio.repair_holding_projection(owner, stock_code)
+        message = "このCSVの同じ行は取り込み済みのため、登録せずにスキップしました"
+        if repaired:
+            message += "(保有株数がロットと合っていなかったため再計算しました)"
+        return CsvImportRowResult(
+            row_number=row_number,
+            status=CsvRowStatus.SKIPPED_DUPLICATE,
+            stock_code=stock_code,
+            message=message,
+        )
+
     def _process_row(
         self,
         row_number: int,
@@ -274,12 +299,7 @@ class HoldingsCsvImportService:
         # 二重計上が起きる(レビュー指摘R1)。
         lot_id = build_row_lot_id(import_id, row_number)
         if self._portfolio.lot_exists(lot_id):
-            return CsvImportRowResult(
-                row_number=row_number,
-                status=CsvRowStatus.SKIPPED_DUPLICATE,
-                stock_code=stock_code,
-                message="このCSVの同じ行は取り込み済みのため、登録せずにスキップしました",
-            )
+            return self._skip_applied_row(row_number, owner, stock_code)
 
         # 行コミットを原子的にclaimする。データ適用より**先**に行うことで、
         # 台帳の書き込み自体が失敗した場合に「適用済みなのに台帳が無い」状態を
@@ -295,12 +315,7 @@ class HoldingsCsvImportService:
         )
         if not claimed and self._portfolio.lot_exists(lot_id):
             # 他がclaimし、実際に適用も完了している。
-            return CsvImportRowResult(
-                row_number=row_number,
-                status=CsvRowStatus.SKIPPED_DUPLICATE,
-                stock_code=stock_code,
-                message="このCSVの同じ行は取り込み済みのため、登録せずにスキップしました",
-            )
+            return self._skip_applied_row(row_number, owner, stock_code)
         # claimが獲得できず、かつ実データが未適用の場合は**取り残されたclaim**である
         # (適用に失敗したあとの解放にも失敗した等)。claimの有無ではなく実データを
         # 正としてそのまま適用する。同じ決定的lot_idで登録し、Holdingはロット集合
