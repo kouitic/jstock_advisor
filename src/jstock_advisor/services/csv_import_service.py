@@ -2,12 +2,29 @@
 
 MVPではローカルCLIからの取り込みを実装する(S3経由の取り込みは後続フェーズで追加)。
 全件成功/全件失敗ではなく、行単位で結果を返す。
+
+Issue #61 Phase B1(2026-09-02)で次の3点を変更した。
+
+1. **ownerを必須列にした。** 従来は`owner`列の欠落・空欄を無警告で
+   `DEFAULT_OWNER`へ補完していたが、実際に別所有者の保有が1件へ誤って
+   統合される事故が起きたため(functional_spec 変更履歴 2026-08-23)、
+   CSV取込では暗黙の補完を廃止しERRORとする。
+   **CLI等、CSV以外の経路の既定owner仕様は変更していない。**
+2. **CSV内の重複行を登録しない。** 従来は警告を積むだけで登録は実行していた。
+3. **同一CSVの再取込・途中失敗後の再実行を冪等にした。**
+   行単位の適用済み台帳(`csv_import_ledger`)を参照し、適用済みの行はskipする。
+
+`on_duplicate="additional_purchase"`(既定)の意味論は変更していない。
+**別のCSVによる同一銘柄への追加購入は引き続き正当な操作**であり、
+「保有が既に存在すること」を重複取込として扱わない。
+重複とみなすのは**同一内容のCSVの同一行**だけである。
 """
 
 from __future__ import annotations
 
 import csv
 import datetime as dt
+import io
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -16,17 +33,19 @@ from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.enums import AccountType
 from jstock_advisor.domain.entities.owner import (
-    DEFAULT_OWNER,
     InvalidOwnerError,
     build_holding_id,
     normalize_and_validate_owner,
 )
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
+from jstock_advisor.services.csv_import_ledger import CsvImportLedger, compute_import_id
 from jstock_advisor.services.portfolio_service import PortfolioService
 
-REQUIRED_COLUMNS = {"stock_code", "shares", "purchase_price"}
+# Issue #61 Phase B1: ownerを必須列へ移した(暗黙のDEFAULT_OWNER補完を廃止)。
+# 列自体が無いCSVは、行ごとに同じERRORを大量生成せず、既存のヘッダー検証
+# (ValueError)で「必須列がありません」として1回だけ返す。
+REQUIRED_COLUMNS = {"stock_code", "shares", "purchase_price", "owner"}
 OPTIONAL_COLUMNS = {
-    "owner",
     "stock_name",
     "purchase_date",
     "account_type",
@@ -42,6 +61,10 @@ DuplicatePolicy = Literal["additional_purchase", "overwrite"]
 class CsvRowStatus(StrEnum):
     SUCCESS = "SUCCESS"
     WARNING = "WARNING"
+    # Issue #61 Phase B1: 既に取り込み済みの行を「登録せずにskipした」ことを
+    # 利用者へ明示する(無音のskipにしない)。取込のやり直しは正常な操作であり
+    # ERRORではないため、専用のstatusを設ける。
+    SKIPPED_DUPLICATE = "SKIPPED_DUPLICATE"
     ERROR = "ERROR"
 
 
@@ -56,6 +79,7 @@ class CsvImportSummary(BaseModel):
     total_rows: int = 0
     success_count: int = 0
     warning_count: int = 0
+    skipped_count: int = 0
     error_count: int = 0
     results: list[CsvImportRowResult] = []
 
@@ -66,13 +90,20 @@ class CsvImportSummary(BaseModel):
             self.success_count += 1
         elif result.status == CsvRowStatus.WARNING:
             self.warning_count += 1
+        elif result.status == CsvRowStatus.SKIPPED_DUPLICATE:
+            self.skipped_count += 1
         else:
             self.error_count += 1
 
 
 class HoldingsCsvImportService:
-    def __init__(self, portfolio_service: PortfolioService | None = None) -> None:
+    def __init__(
+        self,
+        portfolio_service: PortfolioService | None = None,
+        ledger: CsvImportLedger | None = None,
+    ) -> None:
         self._portfolio = portfolio_service or PortfolioService()
+        self._ledger = ledger or CsvImportLedger()
 
     def import_file(
         self,
@@ -80,21 +111,33 @@ class HoldingsCsvImportService:
         on_duplicate: DuplicatePolicy = "additional_purchase",
     ) -> CsvImportSummary:
         summary = CsvImportSummary()
-        with path.open(encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None:
-                raise ValueError("CSVにヘッダー行がありません")
-            missing = REQUIRED_COLUMNS - set(reader.fieldnames)
-            if missing:
-                raise ValueError(f"CSVに必須列がありません: {sorted(missing)}")
+        # Issue #61 Phase B1: **実際に読み込んだバイト列**からimport idを算出する
+        # (ファイル名は使わない。別名でも内容が同一なら同一importとして扱う)。
+        # 同じバイト列をそのままデコードして解析し、hash対象と解析対象を一致させる。
+        content = path.read_bytes()
+        import_id = compute_import_id(content)
+        text = content.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text, newline=""))
+        if reader.fieldnames is None:
+            raise ValueError("CSVにヘッダー行がありません")
+        missing = REQUIRED_COLUMNS - set(reader.fieldnames)
+        if missing:
+            raise ValueError(f"CSVに必須列がありません: {sorted(missing)}")
 
-            seen_rows: set[tuple[str, str, str, str, str]] = set()
-            overwritten_holding_ids: set[str] = set()
-            for row_number, row in enumerate(reader, start=2):  # 1行目はヘッダー
-                result = self._process_row(
-                    row_number, row, seen_rows, on_duplicate, overwritten_holding_ids
-                )
-                summary.add(result)
+        now = dt.datetime.now(dt.UTC)
+        seen_rows: set[tuple[str, str, str, str, str]] = set()
+        overwritten_holding_ids: set[str] = set()
+        for row_number, row in enumerate(reader, start=2):  # 1行目はヘッダー
+            result = self._process_row(
+                row_number,
+                row,
+                seen_rows,
+                on_duplicate,
+                overwritten_holding_ids,
+                import_id=import_id,
+                now=now,
+            )
+            summary.add(result)
         return summary
 
     def _process_row(
@@ -104,8 +147,20 @@ class HoldingsCsvImportService:
         seen_rows: set[tuple[str, str, str, str, str]],
         on_duplicate: DuplicatePolicy,
         overwritten_holding_ids: set[str],
+        *,
+        import_id: str,
+        now: dt.datetime,
     ) -> CsvImportRowResult:
-        owner_raw = (row.get("owner") or "").strip() or DEFAULT_OWNER
+        # Issue #61 Phase B1: ownerを暗黙にDEFAULT_OWNERへ補完しない。
+        # 空欄は「未指定」であって「既定の所有者」ではないため、登録せずERRORにする。
+        owner_raw = (row.get("owner") or "").strip()
+        if not owner_raw:
+            return CsvImportRowResult(
+                row_number=row_number,
+                status=CsvRowStatus.ERROR,
+                stock_code=ExternalValueParser.stock_code(row.get("stock_code")),
+                message="所有者(owner)が未指定です。所有者を明示してください",
+            )
         try:
             owner = normalize_and_validate_owner(owner_raw)
         except InvalidOwnerError:
@@ -187,14 +242,35 @@ class HoldingsCsvImportService:
                     message="利確目標率は数値で指定してください",
                 )
 
+        # Issue #61 Phase B1: CSV内の完全重複行は**登録しない**。
+        # 従来は警告を積むだけで登録は実行しており、CSVの作成ミスがそのまま
+        # 保有株数の二重計上になっていた。CSVを直すべき入力の誤りなのでERRORとする
+        # (取込のやり直しによるskip=SKIPPED_DUPLICATEとは区別する)。
         dedup_key = (owner, stock_code, str(purchase_date), str(purchase_price), str(shares))
         if dedup_key in seen_rows:
-            messages.append("CSV内に同一内容の行が重複しています")
+            return CsvImportRowResult(
+                row_number=row_number,
+                status=CsvRowStatus.ERROR,
+                stock_code=stock_code,
+                message="CSV内に同一内容の行が重複しています。2件目以降は登録していません",
+            )
         seen_rows.add(dedup_key)
 
         stock_name = (row.get("stock_name") or "").strip() or None
         investment_purpose = (row.get("investment_purpose") or "").strip() or None
         memo = (row.get("memo") or "").strip() or None
+
+        # Issue #61 Phase B1: 同一CSVの再取込・途中失敗後の再実行を冪等にする。
+        # **保有が既に存在すること**を重複取込とみなしてはならない(別CSVによる
+        # 同一銘柄への追加購入は正当な操作)。重複とみなすのは
+        # 「同一内容のCSVの同一行」= import_id × row_number だけである。
+        if self._ledger.is_applied(import_id, row_number):
+            return CsvImportRowResult(
+                row_number=row_number,
+                status=CsvRowStatus.SKIPPED_DUPLICATE,
+                stock_code=stock_code,
+                message="このCSVの同じ行は取り込み済みのため、登録せずにスキップしました",
+            )
 
         holding_id = build_holding_id(owner, stock_code)
         existing = self._portfolio.get_holding(owner, stock_code)
@@ -220,6 +296,18 @@ class HoldingsCsvImportService:
             investment_purpose=investment_purpose,
             profit_target_rate=profit_target_rate,
             memo=memo,
+        )
+        # **適用が成功した後に**台帳へ記録する。適用前に記録すると、適用が例外で
+        # 失敗した行が「適用済み」として永久にskipされ、再実行しても登録されない
+        # (データ欠落)。この順序により、途中失敗しても成功済みの行だけがskipされ、
+        # 失敗した行は再実行で1回だけ適用される。
+        self._ledger.mark_applied(
+            import_id,
+            row_number,
+            owner=owner,
+            stock_code=stock_code,
+            shares=shares,
+            now=now,
         )
 
         status = CsvRowStatus.WARNING if messages else CsvRowStatus.SUCCESS
