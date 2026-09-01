@@ -222,6 +222,37 @@ def test_audit_failure_does_not_propagate(caplog: pytest.LogCaptureFixture) -> N
     assert "budget_exhausted=True" in message
 
 
+def test_audit_service_construction_failure_does_not_propagate(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**AuditServiceの生成が失敗しても伝播させない**(PR #119 レビュー指摘R1)。
+
+    boto3クライアントの初期化や設定解決はコンストラクタ側で失敗しうる。
+    生成をfailure boundaryの外へ置くと、その経路だけ契約が破れて
+    Lambdaがasync retryされてしまう。
+    """
+
+    def _exploding_init(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("audit service init failed")
+
+    monkeypatch.setattr(module, "AuditService", _exploding_init)
+
+    with caplog.at_level(logging.ERROR, logger=module.__name__):
+        persisted = record_run_summary(
+            _summary(),
+            run_started_at=_STARTED,
+            run_completed_at=_COMPLETED,
+            # audit_service を渡さず、モジュール側の生成経路を通す。
+        )
+
+    assert persisted is False
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert PERSIST_FAILED_EVENT in message
+    assert "error_type=RuntimeError" in message
+    assert "audit service init failed" in message
+
+
 def test_audit_failure_does_not_write_partial_record(tmp_path: Path) -> None:
     """失敗時に中途半端な監査レコードを残さない。"""
     service = AuditService(repository=AuditLogRepository(store_dir=tmp_path))

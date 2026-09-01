@@ -144,3 +144,34 @@ def test_handler_runs_evaluation_exactly_once_on_audit_failure(
 
     assert len(stubbed_handler) == 1
     assert stubbed_handler[0].saved_calls == 1
+
+
+def test_handler_survives_audit_service_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_handler: list[_StubService],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """**AuditServiceの生成失敗でもhandlerをFAILさせない**(PR #119 レビュー指摘R1)。
+
+    `record_if_absent()`の失敗だけでなく、AuditServiceのコンストラクタが
+    失敗する経路でも同じ契約(例外を出さない/audit_persisted=false/ERRORログ/
+    評価処理は1回だけ)が成立することを固定する。
+    """
+
+    def _exploding_init(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("audit service init failed")
+
+    monkeypatch.setattr(evaluation_run_audit, "AuditService", _exploding_init)
+
+    with caplog.at_level(logging.ERROR, logger=evaluation_run_audit.__name__):
+        result = evaluation_handler.handler({}, None)  # 例外が出ないこと自体が契約
+
+    assert result["audit_persisted"] is False
+    # 評価本体の結果は影響を受けない。
+    assert result["backlog_remaining"] == 10
+    assert result["evaluated"] == _SUMMARY.business_evaluated_count
+    # 無音にしない。
+    assert any(PERSIST_FAILED_EVENT in r.getMessage() for r in caplog.records)
+    # async retry を誘発しない = 評価処理は1回だけ。
+    assert len(stubbed_handler) == 1
+    assert stubbed_handler[0].saved_calls == 1

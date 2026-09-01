@@ -77,10 +77,17 @@ def record_run_summary(
     不要に再実行される。そのためここで捕捉し、**ERRORログとFalseで表現する**
     (無音のfail-softにはしない。呼び出し側は戻り値を`audit_persisted`として返す)。
 
+    **`AuditService`の生成もこのtryの内側に置く。** boto3クライアントの初期化や
+    設定解決はコンストラクタ側で失敗しうるため、生成をtryの外に出すと
+    「監査書き込みに起因する例外は伝播させない」という上記の契約が
+    その経路だけ破れてしまう(PR #119 レビュー指摘R1)。
+    捕捉するのは**評価本体の完了後に行う監査永続化処理に起因する例外だけ**であり、
+    `EvaluationRunSummary`の生成など評価本体側の例外はここへ到達しない。
+
     既に同じaudit_idの記録が存在する場合もTrueを返す(冪等な成功)。
     """
-    service = audit_service or AuditService()
     try:
+        service = audit_service or AuditService()
         service.record_if_absent(
             audit_id=build_audit_id(run_started_at),
             decision_type=DECISION_TYPE_EVALUATION_RUN_SUMMARY,
