@@ -31,6 +31,16 @@ class AuditLogRepository:
     def save(self, entry: AuditLogEntry) -> None:
         self._store.upsert(entry)
 
+    def delete(self, audit_id: str) -> bool:
+        """指定audit_idの記録を削除する(Issue #61 Phase B1)。
+
+        **監査記録一般の削除手段として使わないこと。** 用途は
+        `csv_import_ledger`が行コミットのclaimを獲得したあと、データ適用に
+        失敗した場合の補償(claimの解放)に限定する。解放しないと、実データが
+        未適用のまま「claim済み」が残り再実行しても適用されなくなるため。
+        """
+        return self._store.delete(audit_id)
+
     def save_if_absent(self, entry: AuditLogEntry) -> bool:
         """運用ハードニング第3弾3節: 既にaudit_idが存在すればFalse(何もしない)、
         無ければ保存してTrue(冪等な新規記録専用)。決定的なaudit_idと組み合わせて

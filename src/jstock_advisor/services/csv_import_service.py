@@ -38,7 +38,11 @@ from jstock_advisor.domain.entities.owner import (
     normalize_and_validate_owner,
 )
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
-from jstock_advisor.services.csv_import_ledger import CsvImportLedger, compute_import_id
+from jstock_advisor.services.csv_import_ledger import (
+    CsvImportLedger,
+    build_row_lot_id,
+    compute_import_id,
+)
 from jstock_advisor.services.portfolio_service import PortfolioService
 
 # Issue #61 Phase B1: ownerを必須列へ移した(暗黙のDEFAULT_OWNER補完を廃止)。
@@ -264,7 +268,12 @@ class HoldingsCsvImportService:
         # **保有が既に存在すること**を重複取込とみなしてはならない(別CSVによる
         # 同一銘柄への追加購入は正当な操作)。重複とみなすのは
         # 「同一内容のCSVの同一行」= import_id × row_number だけである。
-        if self._ledger.is_applied(import_id, row_number):
+        #
+        # 適用済みの判定は**永続データそのもの**(決定的lot_idのロットの存在)で行う。
+        # 別置きの台帳で判定すると「適用済みだが台帳が無い」状態で再適用され、
+        # 二重計上が起きる(レビュー指摘R1)。
+        lot_id = build_row_lot_id(import_id, row_number)
+        if self._portfolio.lot_exists(lot_id):
             return CsvImportRowResult(
                 row_number=row_number,
                 status=CsvRowStatus.SKIPPED_DUPLICATE,
@@ -272,36 +281,11 @@ class HoldingsCsvImportService:
                 message="このCSVの同じ行は取り込み済みのため、登録せずにスキップしました",
             )
 
-        holding_id = build_holding_id(owner, stock_code)
-        existing = self._portfolio.get_holding(owner, stock_code)
-        if (
-            existing is not None
-            and on_duplicate == "overwrite"
-            and holding_id not in overwritten_holding_ids
-        ):
-            self._portfolio.delete_holding(owner, stock_code)
-            overwritten_holding_ids.add(holding_id)
-            messages.append("既存の保有銘柄を上書きしました")
-        elif existing is not None and on_duplicate == "additional_purchase":
-            messages.append("既存の保有銘柄への追加購入として登録しました")
-
-        self._portfolio.register_purchase(
-            owner=owner,
-            stock_code=stock_code,
-            stock_name=stock_name,
-            shares=shares,
-            purchase_price=purchase_price,
-            purchase_date=purchase_date,
-            account_type=account_type,
-            investment_purpose=investment_purpose,
-            profit_target_rate=profit_target_rate,
-            memo=memo,
-        )
-        # **適用が成功した後に**台帳へ記録する。適用前に記録すると、適用が例外で
-        # 失敗した行が「適用済み」として永久にskipされ、再実行しても登録されない
-        # (データ欠落)。この順序により、途中失敗しても成功済みの行だけがskipされ、
-        # 失敗した行は再実行で1回だけ適用される。
-        self._ledger.mark_applied(
+        # 行コミットを原子的にclaimする。データ適用より**先**に行うことで、
+        # 台帳の書き込み自体が失敗した場合に「適用済みなのに台帳が無い」状態を
+        # 作らない。同時実行で他プロセスが先に獲得していればFalseが返る
+        # (単なる事前存在チェックでは塞げないTOCTOU raceをここで塞ぐ)。
+        claimed = self._ledger.claim(
             import_id,
             row_number,
             owner=owner,
@@ -309,6 +293,54 @@ class HoldingsCsvImportService:
             shares=shares,
             now=now,
         )
+        if not claimed and self._portfolio.lot_exists(lot_id):
+            # 他がclaimし、実際に適用も完了している。
+            return CsvImportRowResult(
+                row_number=row_number,
+                status=CsvRowStatus.SKIPPED_DUPLICATE,
+                stock_code=stock_code,
+                message="このCSVの同じ行は取り込み済みのため、登録せずにスキップしました",
+            )
+        # claimが獲得できず、かつ実データが未適用の場合は**取り残されたclaim**である
+        # (適用に失敗したあとの解放にも失敗した等)。claimの有無ではなく実データを
+        # 正としてそのまま適用する。同じ決定的lot_idで登録し、Holdingはロット集合
+        # からの再計算になるため、仮に他プロセスと同時に適用しても最終状態は
+        # 変わらない(build_purchase_write_plan()がlot_idで重複排除する)。
+
+        holding_id = build_holding_id(owner, stock_code)
+        existing = self._portfolio.get_holding(owner, stock_code)
+        try:
+            if (
+                existing is not None
+                and on_duplicate == "overwrite"
+                and holding_id not in overwritten_holding_ids
+            ):
+                self._portfolio.delete_holding(owner, stock_code)
+                overwritten_holding_ids.add(holding_id)
+                messages.append("既存の保有銘柄を上書きしました")
+            elif existing is not None and on_duplicate == "additional_purchase":
+                messages.append("既存の保有銘柄への追加購入として登録しました")
+
+            # 決定的lot_idで登録する。Holdingはロット集合からの再計算であるため、
+            # 同じlot_idを再適用しても最終状態は変わらない(収束する)。
+            self._portfolio.register_purchase(
+                owner=owner,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                shares=shares,
+                purchase_price=purchase_price,
+                purchase_date=purchase_date,
+                account_type=account_type,
+                investment_purpose=investment_purpose,
+                profit_target_rate=profit_target_rate,
+                memo=memo,
+                lot_id=lot_id,
+            )
+        except Exception:
+            # 適用に失敗したclaimを解放する。解放しないと実データが未適用のまま
+            # 「claim済み」が残り、再実行しても適用されない(データ欠落)。
+            self._ledger.release(import_id, row_number)
+            raise
 
         status = CsvRowStatus.WARNING if messages else CsvRowStatus.SUCCESS
         return CsvImportRowResult(
