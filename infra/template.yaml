@@ -1175,36 +1175,23 @@ Resources:
               Action: lambda:InvokeFunction
               Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-buy-candidates"
         # Issue #116: Issue #54 Phase B-1のshadow observation専用の読み取り権限。
-        # SAMのS3ReadPolicyは使わない(GetObjectAcl/GetLifecycleConfiguration/
-        # GetObjectVersion等、本経路が使わないActionまで付与されるため)。
+        # SAMのS3ReadPolicyは使わない(GetObjectAcl/GetLifecycleConfiguration等、
+        # 本経路が使わないActionまで付与されるため)。
         #
-        # 付与Actionはコードから確認した必要最小限:
-        #   - s3:GetObject
-        #       CandidateUniverseCacheIO.read_current()が
-        #       current/<source>/data と current/<source>/metadata.json の
-        #       2キーに対してのみget_object()を呼ぶ(services/
-        #       candidate_universe_downloader.py)。list_objects_v2/head_objectは
-        #       呼ばないため、それらに対応するActionは付与しない。
-        #   - s3:ListBucket
-        #       read_current()は「キャッシュ未生成」を
-        #       `except self._s3.exceptions.NoSuchKey: return None` で表現する。
-        #       S3はs3:ListBucketが無い主体に対し、存在しないキーへのGetObjectを
-        #       404 NoSuchKeyではなく403 AccessDeniedで返す仕様のため、
-        #       ListBucketが無いとこの分岐へ到達できない(fail-soft自体は
-        #       上位のtry/exceptで維持されるが、原因がAccessDeniedとして
-        #       誤って記録され観測精度が落ちる)。オブジェクト読み取りは
-        #       下記Resourceのとおりcurrent/配下に限定される。
+        # CandidateUniverseCacheIO.read_current()はcurrent/<source>/data と
+        # current/<source>/metadata.json の2キーへget_object()するだけであり、
+        # list_objects_v2/head_objectは呼ばない。書き込み(promote())は
+        # WatchlistDispatcherFunction側の責務。
         #
-        # 本Functionは書き込みを行わない(promote()はWatchlistDispatcherFunction側)。
+        # #116の契約では「キャッシュ未生成」も「S3読み取り不能」もいずれも
+        # SOURCE_UNAVAILABLEとしてfail-softするため、両者を区別しない。
+        # よってNoSuchKey(404)を得る目的だけのs3:ListBucketは付与しない
+        # (最小権限を優先する)。
         - Statement:
             - Sid: CandidateUniverseCacheReadForJpxShadow
               Effect: Allow
               Action: s3:GetObject
               Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
-            - Sid: CandidateUniverseCacheListForNoSuchKeySemantics
-              Effect: Allow
-              Action: s3:ListBucket
-              Resource: !GetAtt CandidateUniverseCacheBucket.Arn
       Events:
         DailyMorning:
           Type: ScheduleV2

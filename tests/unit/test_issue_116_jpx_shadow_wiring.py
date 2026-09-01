@@ -14,10 +14,11 @@ Phase B-1 の主目的である「BUY経路でJPX canonical業種を解決でき
 
 本モジュールが固定する契約:
 
-1. **配線(infra)**: `BuyCandidatesFunction` に環境変数とバケット読み取り権限が
-   存在し、Resource がワイルドカードでないこと(Test F)
-2. **fail-soft**: 環境変数が無い / S3読み取りが失敗する場合でも、例外を送出せず
-   `SOURCE_UNAVAILABLE` として観測し、BUY判定を止めないこと(Test C / D)
+1. **配線(infra)**: `BuyCandidatesFunction` に環境変数と `s3:GetObject`(`current/*` 限定)
+   **のみ**が付与され、list/write 権限もワイルドカードも持たないこと(Test F)
+2. **fail-soft**: 環境変数が無い / S3読み取りが失敗する(403 AccessDenied を含む)/
+   キャッシュ未生成のいずれでも、例外を送出せず `SOURCE_UNAVAILABLE` として観測し、
+   BUY判定を止めないこと(Test C / D)
 3. **shadow-only**: shadow の解決状態(`RESOLVED` / `NOT_FOUND` /
    `SOURCE_UNAVAILABLE`)が変わっても、同一の snapshot 入力に対する
    BUY判定結果が一切変わらないこと(Test E)
@@ -35,6 +36,7 @@ from typing import Any
 
 import pytest
 import yaml
+from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.classification.canonical_industry import JpxLookupStatus
 from jstock_advisor.services import candidate_universe_downloader as downloader_module
@@ -89,10 +91,44 @@ def test_s3_read_failure_is_source_unavailable_without_raising(
             pass
 
         def read_current(self, source: str) -> object:
-            raise RuntimeError("AccessDenied")
+            raise RuntimeError("s3 unavailable")
 
     monkeypatch.setattr(downloader_module, "CandidateUniverseCacheIO", _FailingCacheIO)
     monkeypatch.setattr(module, "CandidateUniverseCacheIO", _FailingCacheIO)
+
+    result = JpxIndustrySource().lookup("1234")
+
+    assert result.status is JpxLookupStatus.SOURCE_UNAVAILABLE
+    assert result.entry is None
+
+
+def test_s3_access_denied_is_source_unavailable_without_raising(
+    real_loader: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**403 AccessDenied も `SOURCE_UNAVAILABLE` へ吸収する**(Issue #116)。
+
+    本Functionには `s3:ListBucket` を付与しないため、`current/...` のキーが
+    まだ生成されていない場合、S3は 404 `NoSuchKey` ではなく 403 `AccessDenied` を返す
+    (ListBucket を持たない主体に対してキー存在を秘匿するS3の仕様)。
+
+    `read_current()` が捕捉するのは `NoSuchKey` だけなので `ClientError` は外へ抜けるが、
+    `_load_jpx_industry_map()` の `except Exception` が受け止めて `None` を返すため、
+    **観測は `SOURCE_UNAVAILABLE`、BUY判定は継続**となる。
+    #116 は「キャッシュ未生成」と「S3読み取り不能」を別の `jpx_lookup_status` へ
+    分類する仕様ではないため、404 を得るためだけに ListBucket を付与しない。
+    """
+
+    class _AccessDeniedCacheIO:
+        def __init__(self) -> None:
+            pass
+
+        def read_current(self, source: str) -> object:
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+                "GetObject",
+            )
+
+    monkeypatch.setattr(module, "CandidateUniverseCacheIO", _AccessDeniedCacheIO)
 
     result = JpxIndustrySource().lookup("1234")
 
@@ -105,9 +141,10 @@ def test_missing_cache_object_is_source_unavailable_without_raising(
 ) -> None:
     """キャッシュ未生成(read_currentがNone)でも例外にしない。
 
-    `read_current()` はキー不在を `NoSuchKey` で捕捉して `None` を返す契約であり、
-    この分岐が成立するには `s3:ListBucket` が必要(S3は ListBucket を持たない主体へ
-    404 ではなく 403 を返すため)。infra 側の権限付与理由は template.yaml のコメント参照。
+    `s3:ListBucket` を持つ主体であれば S3 は 404 `NoSuchKey` を返し、
+    `read_current()` がそれを捕捉して `None` を返す経路。本Functionは
+    ListBucket を持たないため実運用では上の 403 経路になるが、
+    **どちらも `SOURCE_UNAVAILABLE` へ収束する**ことを両方で固定する。
     """
 
     class _EmptyCacheIO:
@@ -210,7 +247,7 @@ def test_buy_candidates_function_has_candidate_universe_cache_bucket_env() -> No
 
 
 def test_buy_candidates_function_can_read_candidate_universe_cache() -> None:
-    """JPXキャッシュの読み取りに必要な最小Actionが付与されている。"""
+    """JPXキャッシュの読み取りに必要な Action が `s3:GetObject` **のみ**である。"""
     policies = _function_properties(_FUNCTION_LOGICAL_ID)["Policies"]
     statements = [s for s in _iter_statements(policies) if _references_bucket(s.get("Resource"))]
 
@@ -222,13 +259,32 @@ def test_buy_candidates_function_can_read_candidate_universe_cache() -> None:
         action for statement in statements for action in _as_list(statement.get("Action", []))
     }
     # read_current() が実際に呼ぶのは get_object のみ。
-    assert "s3:GetObject" in granted
-    # キー不在を NoSuchKey(404)として観測するために必要。
-    assert "s3:ListBucket" in granted
+    assert granted == {"s3:GetObject"}, (
+        f"{_BUCKET_LOGICAL_ID} への付与は s3:GetObject のみとする(Issue #116)。実際: {granted}"
+    )
+
+
+def test_buy_candidates_function_getobject_is_scoped_to_current_prefix() -> None:
+    """`s3:GetObject` の Resource が `current/` 配下に限定されている。"""
+    policies = _function_properties(_FUNCTION_LOGICAL_ID)["Policies"]
+    statements = [s for s in _iter_statements(policies) if _references_bucket(s.get("Resource"))]
+
+    resources = [r for s in statements for r in _as_list(s.get("Resource"))]
+    assert resources, "Resource が空"
+    for resource in resources:
+        assert resource == {"Sub": f"${{{_BUCKET_LOGICAL_ID}.Arn}}/current/*"}, (
+            f"GetObject は current/* に限定する(Issue #116)。実際: {resource}"
+        )
 
 
 def test_buy_candidates_function_bucket_access_is_read_only_and_not_wildcard() -> None:
-    """付与するのは読み取りのみで、Resource にワイルドカードを使わない。"""
+    """読み取り専用・非ワイルドカードで、list/write 権限を持たない。
+
+    `s3:ListBucket` は**付与しない**(Issue #116)。#116 の契約では
+    「キャッシュ未生成」も「S3読み取り不能」もいずれも `SOURCE_UNAVAILABLE` として
+    fail-soft するため、`NoSuchKey`(404)を得る目的だけの list 権限は不要であり、
+    最小権限を優先する。
+    """
     policies = _function_properties(_FUNCTION_LOGICAL_ID)["Policies"]
     statements = [s for s in _iter_statements(policies) if _references_bucket(s.get("Resource"))]
 
@@ -239,6 +295,10 @@ def test_buy_candidates_function_bucket_access_is_read_only_and_not_wildcard() -
         for action in _as_list(statement.get("Action", [])):
             assert isinstance(action, str)
             assert action != "s3:*", "s3:* は禁止(読み取り専用にする)"
+            # 404 NoSuchKey を得る目的だけの list 権限は付与しない(Issue #116)。
+            assert not action.startswith("s3:List"), (
+                "s3:List* は付与しない(Issue #116: 404/403 の区別を必要としない契約)"
+            )
             # promote() は WatchlistDispatcherFunction 側の責務であり、
             # BuyCandidatesFunction は書き込み・削除を行わない。
             assert not action.startswith("s3:Put")
