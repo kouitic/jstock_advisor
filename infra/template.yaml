@@ -1060,6 +1060,16 @@ Resources:
       # 24節仕様の再設計(モメンタム・複数手法適正価格・分割調整等)で銘柄あたりの
       # 実データ取得件数が増えたため、既定の300秒では銘柄数によってはタイムアウトしうる
       Timeout: 900
+      Environment:
+        Variables:
+          # Issue #116: Issue #54 Phase B-1のshadow observation
+          # (services/jpx_industry_source.py::JpxIndustrySource)が
+          # CandidateUniverseCacheIO経由でJPX上場銘柄一覧キャッシュを読むために必要。
+          # 本変数が無いとresolve_candidate_universe_bucket()がRuntimeErrorとなり、
+          # jpx_lookup_statusが常にSOURCE_UNAVAILABLE(canonical解決率0%)になる。
+          # **観測専用**であり、BUY判定・screening・portfolio exposureは
+          # classify_industry(provider由来のsector/industry)を使うため影響を受けない。
+          CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
       Policies:
         # コードレビュー対応(2026-08): テーブル数の増加に伴うIAMロールのインライン
         # ポリシー合計サイズ上限(10240バイト)超過を避けるため、HoldingsWatchlistFunction
@@ -1164,6 +1174,24 @@ Resources:
             - Effect: Allow
               Action: lambda:InvokeFunction
               Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-buy-candidates"
+        # Issue #116: Issue #54 Phase B-1のshadow observation専用の読み取り権限。
+        # SAMのS3ReadPolicyは使わない(GetObjectAcl/GetLifecycleConfiguration等、
+        # 本経路が使わないActionまで付与されるため)。
+        #
+        # CandidateUniverseCacheIO.read_current()はcurrent/<source>/data と
+        # current/<source>/metadata.json の2キーへget_object()するだけであり、
+        # list_objects_v2/head_objectは呼ばない。書き込み(promote())は
+        # WatchlistDispatcherFunction側の責務。
+        #
+        # #116の契約では「キャッシュ未生成」も「S3読み取り不能」もいずれも
+        # SOURCE_UNAVAILABLEとしてfail-softするため、両者を区別しない。
+        # よってNoSuchKey(404)を得る目的だけのs3:ListBucketは付与しない
+        # (最小権限を優先する)。
+        - Statement:
+            - Sid: CandidateUniverseCacheReadForJpxShadow
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
       Events:
         DailyMorning:
           Type: ScheduleV2

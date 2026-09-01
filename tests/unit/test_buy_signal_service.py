@@ -1390,6 +1390,64 @@ def test_source_unavailable_is_recorded_distinctly_from_not_found(
     assert unavailable_obs["canonical_source"] == not_found_obs["canonical_source"]
 
 
+def test_all_jpx_lookup_states_yield_identical_buy_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #116: 3つのshadow状態すべてでBUY判定が完全に一致することを固定する。
+
+    #116 は infra 配線を直して `jpx_lookup_status` を
+    `SOURCE_UNAVAILABLE` 一色から実際の分布へ変える修正であり、
+    **観測精度だけを変え、判定は変えない**。本テストはその不変条件を
+    `RESOLVED` / `NOT_FOUND` / `SOURCE_UNAVAILABLE` の3値で同時に固定する
+    (既存テストは2値ずつの比較であり、3値同時かつ `screening_passed` を含む
+    形では固定されていなかった)。
+    """
+    outcomes = {
+        "RESOLVED": _analyze_with_jpx(
+            monkeypatch,
+            _NIHON_SHINYAKU,
+            _jpx_source({_NIHON_SHINYAKU.stock_code: _JPX_ENTRY}),
+        ),
+        "NOT_FOUND": _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({})),
+        "SOURCE_UNAVAILABLE": _analyze_with_jpx(
+            monkeypatch, _NIHON_SHINYAKU, _UnavailableJpxSource()
+        ),
+    }
+
+    # 観測値としては3状態が区別されている(潰れていない)ことを先に確認する。
+    statuses = {
+        name: outcome.recommendation.buy_score_input_facts["canonical_industry_observation"][
+            "jpx_lookup_status"
+        ]
+        for name, outcome in outcomes.items()
+        if outcome.recommendation is not None
+    }
+    assert statuses == {
+        "RESOLVED": "RESOLVED",
+        "NOT_FOUND": "NOT_FOUND",
+        "SOURCE_UNAVAILABLE": "SOURCE_UNAVAILABLE",
+    }
+
+    baseline = outcomes["RESOLVED"]
+    assert baseline.recommendation is not None
+    for name, outcome in outcomes.items():
+        assert outcome.recommendation is not None, name
+        assert outcome.screening_passed == baseline.screening_passed, name
+        assert outcome.buy_action == baseline.buy_action, name
+        assert outcome.ranking_group == baseline.ranking_group, name
+        assert outcome.exclusion_reasons == baseline.exclusion_reasons, name
+        assert outcome.data_error == baseline.data_error, name
+        assert outcome.recommendation.total_score == baseline.recommendation.total_score, name
+        assert outcome.recommendation.buy_prices == baseline.recommendation.buy_prices, name
+        assert (
+            outcome.recommendation.fair_value_at_recommendation
+            == baseline.recommendation.fair_value_at_recommendation
+        ), name
+        assert (
+            outcome.recommendation.score_breakdown == baseline.recommendation.score_breakdown
+        ), name
+
+
 def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
