@@ -407,12 +407,16 @@ def test_t7c_session_close_boundary_is_evaluated_in_jst() -> None:
 # --- Phase B1 の scope 境界: 業務判定へ接続していないこと ----------------------
 
 
-def test_price_freshness_is_not_wired_into_business_decisions_yet() -> None:
-    """Phase B1 では価格 freshness を業務判定へ接続していないことを固定する。
+def test_price_freshness_is_wired_only_through_the_policy_layer() -> None:
+    """価格 freshness の観測が policy 層を通してのみ判定へ接続されていること。
 
-    Phase B2 で閾値(BUY: missed>=2 で HARD_STOP、HOLDINGS: missed>=1 で
-    DATA_INSUFFICIENT)を確定してから接続する。B1 の段階で誤って接続されると、
-    閾値が未確定のまま Production の判定が変わってしまう。
+    Phase B1 では業務判定へ未接続であることを固定していた。Phase B2 で
+    人間が閾値を確定し接続したため、契約を「未接続」から
+    **「接続先を policy 層に限定する」**へ更新する。
+
+    `missed_trading_sessions` を各判定モジュールから直接呼ぶと、閾値が
+    判定ごとに散らばり、BUY と holdings の非対称性を型・テストで守れなくなる
+    (Issue #52 が是正しようとしている構造そのもの)。
     """
     src_root = Path(__file__).resolve().parents[2] / "src"
     referencing = sorted(
@@ -421,14 +425,13 @@ def test_price_freshness_is_not_wired_into_business_decisions_yet() -> None:
         if "missed_trading_sessions" in path.read_text(encoding="utf-8")
     )
 
-    assert referencing == ["jstock_advisor/domain/market_session.py"], (
-        "価格 freshness が定義元以外から参照されている。"
-        f"Phase B1 では業務判定へ接続しない: {referencing}"
+    assert referencing == [
+        "jstock_advisor/domain/market_session.py",  # 定義元(観測)
+        "jstock_advisor/domain/price_freshness.py",  # policy 層(閾値の唯一の所在)
+    ], (
+        "missed_trading_sessions が policy 層以外から参照されている。"
+        f"閾値は domain/price_freshness.py へ集約すること: {referencing}"
     )
-
-
-# --- T8 / T9: naive datetime を暗黙処理しない ---------------------------------
-
 
 def test_t8_expected_session_rejects_naive_datetime() -> None:
     """naive な `now` は ValueError(暗黙にUTC扱いしない)。

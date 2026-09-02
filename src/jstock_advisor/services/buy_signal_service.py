@@ -493,6 +493,9 @@ class BuySignalService:
             now=now,
             business_calendar=self._calendar,
             config=self._config.screening,
+            # Issue #52 Phase B2: 株価の基準日による鮮度判定を有効にする。
+            # data_fetched_at(取得時刻)とは別軸で評価する。
+            price_as_of_date=snapshot.price_as_of_date,
         )
         screening_outcome = screen_investment_universe(
             screening_result, snapshot.severe_earnings_decline, snapshot.benefit

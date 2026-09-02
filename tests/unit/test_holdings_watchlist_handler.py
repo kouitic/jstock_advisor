@@ -4,6 +4,8 @@ from decimal import Decimal
 
 import pytest
 
+from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
 from jstock_advisor.domain.entities.enums import (
     AccountType,
@@ -18,6 +20,9 @@ from jstock_advisor.domain.entities.notification_eligibility import Notification
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.market_session import (
+    expected_latest_completed_trading_session,
+)
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.lambda_handlers import holdings_watchlist_handler as handler_module
 from jstock_advisor.services import holding_decision_service as holding_decision_service_module
@@ -208,11 +213,41 @@ class _FakeFinancial:
     sector: str | None = None
     industry: str | None = None
 
+def _fresh_price_as_of_date(now: dt.datetime | None = None) -> dt.date:
+    """`now` 時点で期待される直近の完了済みセッション。鮮度が正常な状態を表す。
+
+    Issue #52 Phase B2 review: 以前は「未来日ならmissed=0になる」性質を利用して
+    JST暦日の当日を既定にしていたが、**未来日は正常な値ではない**
+    (policy層でtimestamp異常として弾かれるようになった)。
+    異常値を使って正常系fixtureを作らない。
+
+    本モジュールには `_NOW` を使うテストと実時刻を使うテストが混在するため、
+    既定では実時刻から導出する。`_NOW` を使うテストは明示的に渡すこと。
+    """
+    return expected_latest_completed_trading_session(
+        now or dt.datetime.now(dt.UTC),
+        BusinessCalendar.from_config(load_config().holiday_calendar),
+    )
+
+
 
 @dataclass(frozen=True)
 class _FakeSnapshot:
     current_price: Decimal
     financial: _FakeFinancial = field(default_factory=_FakeFinancial)
+    # Issue #52 Phase B2: 価格の基準日。
+    #
+    # 本モジュールの既存テストは価格鮮度**以外**の挙動(attention検出・集中リスク通知・
+    # 利確判定等)を対象としているため、既定では鮮度が正常な状態を表す。
+    #
+    # 実時刻から期待セッションを導出する(未来日は使わない)。
+    # `_NOW` を使うテストでは `_NOW` 時点の期待セッションより過去になるが、
+    # `_NOW`(2026-07-29)より後の日付は `_NOW` 基準では未来日になってしまうため、
+    # `_NOW` を使う経路は価格鮮度gateを通らないもの(handler を直接呼ばない
+    # 単体テスト)に限られることを前提とする。
+    #
+    # 鮮度そのものを検証するテストは price_as_of_date を明示的に古くすること。
+    price_as_of_date: dt.date = field(default_factory=_fresh_price_as_of_date)
 
 
 class _NoSignalOutcome:

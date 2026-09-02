@@ -104,6 +104,11 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 class StockSnapshot:
     stock_code: str
     current_price: Decimal
+    # Issue #52 Phase B2: current_priceが「いつの取引による終値か」。
+    # fetched_at(APIを叩いた時刻)とは別概念であり、鮮度判定にはこちらを使う。
+    # StockSnapshotは判定処理の中間生成物であり永続化されないため、
+    # このフィールド追加による保存schemaへの影響は無い。
+    price_as_of_date: dt.date
     financial: FinancialSummary
     dividend: DividendInfo
     benefit: ShareholderBenefit | None
@@ -292,6 +297,7 @@ def build_stock_snapshot(
 
     benefit = providers.shareholder_benefit.get_shareholder_benefit(stock_code)
     current_price = snap.close_price
+    price_as_of_date = snap.as_of_date
 
     history_start = now.date() - dt.timedelta(
         days=365 * config.valuation.historical_range_method.lookback_years
@@ -655,6 +661,7 @@ def build_stock_snapshot(
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
+        price_as_of_date=price_as_of_date,
         financial=financial,
         dividend=dividend,
         benefit=benefit,

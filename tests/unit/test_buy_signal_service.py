@@ -58,6 +58,9 @@ from jstock_advisor.domain.entities.momentum import MomentumSnapshot
 from jstock_advisor.domain.entities.sector_environment import SectorEnvironmentResult
 from jstock_advisor.domain.entities.timing_score import TimingScoreResult
 from jstock_advisor.domain.entities.valuation import FairValueRange
+from jstock_advisor.domain.market_session import (
+    expected_latest_completed_trading_session,
+)
 from jstock_advisor.interfaces.disclosure import (
     DisclosureAvailability,
     DisclosureUnavailableReason,
@@ -254,6 +257,7 @@ def _build_snapshot(
     disclosure_unavailable_reason: DisclosureUnavailableReason | None = None,
     disclosures: list[Disclosure] | None = None,
     disclosure_risk_keywords_found: list[str] | None = None,
+    price_as_of_date: dt.date | None = None,
 ) -> StockSnapshot:
     financial = _financial(
         stock_code=fx.stock_code,
@@ -286,6 +290,21 @@ def _build_snapshot(
     return StockSnapshot(
         stock_code=fx.stock_code,
         current_price=fx.current_price,
+        # Issue #52 Phase B2: 価格の基準日。既定では鮮度が正常な状態を表す。
+        #
+        # 本モジュールのテストは価格鮮度**以外**の判定(BUYスコア・screening・
+        # cooldown・shadow observation 等)を対象としており、`now` は
+        # テストごとに異なる(_NOW 以外に 2026-08-20 23:30 UTC 等を使う)。
+        #
+        # review 対応: 以前は「未来日ならmissed=0になる」性質を利用していたが、
+        # **未来日は正常な値ではない**(policy層でtimestamp異常として弾かれる)。
+        # 異常値を使って正常系fixtureを作らない。
+        # `now` ごとの期待セッションを導出して渡す。
+        #
+        # 鮮度そのものを検証するテストは
+        # tests/unit/test_issue_52_phase_b2_price_freshness_gate.py にある。
+        price_as_of_date=price_as_of_date
+        or expected_latest_completed_trading_session(_NOW, _CALENDAR),
         financial=financial,
         dividend=dividend,
         benefit=None,
@@ -725,7 +744,14 @@ def _analyze_with_cooldown_entry(
 
     # data_fetched_atをnowに揃える(このテストの関心事(cooldown判定のJST基準日)とは
     # 無関係なデータ鮮度ゲートが、_NOWから離れたnowにより誤って発火しないようにする)。
-    snapshot = dataclasses.replace(_build_snapshot(fx), data_fetched_at=now)
+    # Issue #52 Phase B2: price_as_of_date も now に揃える。
+    # 本テストの関心事はcooldown判定のJST基準日であり、価格鮮度ではない。
+    # 未来日を使って回避しない(未来日はtimestamp異常として弾かれる)。
+    snapshot = dataclasses.replace(
+        _build_snapshot(fx),
+        data_fetched_at=now,
+        price_as_of_date=expected_latest_completed_trading_session(now, _CALENDAR),
+    )
     monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
 
     calls: list[dt.date] = []
@@ -1057,7 +1083,14 @@ def test_issue23_data_age_business_days_uses_jst_calendar_dates(
     fetched = dt.datetime(2026, 8, 3, 14, 0, tzinfo=dt.UTC)  # JST 08-03(月)23:00
     now = dt.datetime(2026, 8, 3, 23, 30, tzinfo=dt.UTC)  # JST 08-04(火)08:30
     snapshot = _build_snapshot(_TACHI_S)
-    snapshot = dataclasses.replace(snapshot, data_fetched_at=fetched)
+    # Issue #52 Phase B2: 本テストの関心事は data_age のJST暦日計算であり、
+    # 価格鮮度ではない。now(JST 08-04 08:30 = 寄付前)時点の期待セッションへ揃える
+    # (既定は _NOW = 08-04 大引け後 基準のため、この now では未来日になる)。
+    snapshot = dataclasses.replace(
+        snapshot,
+        data_fetched_at=fetched,
+        price_as_of_date=expected_latest_completed_trading_session(now, _CALENDAR),
+    )
     monkeypatch.setattr(
         service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None)
     )
