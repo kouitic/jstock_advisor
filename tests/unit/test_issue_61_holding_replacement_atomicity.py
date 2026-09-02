@@ -672,3 +672,150 @@ def test_reusing_an_existing_lot_id_does_not_delete_and_put_the_same_lot(
     assert plan.lot_put.expected_data is not None, "既存ロットの置換は楽観ロック付きPut"
     keys = _transact_keys(holding_replacement_commit.build_transact_items(plan))
     assert len(keys) == len(set(keys))
+
+
+# --- T26〜T29 ローカル rollback の完全性 ---------------------------------------
+#
+# ロールバックの対象は「削除するロット」だけではない。**Putによって上書きされる
+# 既存ロットも対象**である。新しいロットIDが既存ロットのIDと同一の場合、
+# そのIDは(同一アイテムへのDelete+Putを避けるため)lot_deletes から除外され
+# lot_put だけになる。削除対象のスナップショットしか保持していないと、
+# 上書きされた旧ロットが復元されず消失する。
+
+
+def _snapshot(portfolio: PortfolioService) -> tuple[dict[str, Any], Any]:
+    """ロット全件と保有を model_dump で比較可能な形にする(IDだけでなく内容も見る)。"""
+    lots = {lot.lot_id: lot.model_dump() for lot in portfolio.list_lots(_OWNER, _CODE)}
+    holding = portfolio.get_holding(_OWNER, _CODE)
+    return lots, (holding.model_dump() if holding is not None else None)
+
+
+def _break_holdings_apply_batch(portfolio: PortfolioService) -> None:
+    def _fail(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("holdingsの書き込みに失敗しました")
+
+    portfolio._holdings.apply_batch = _fail  # type: ignore[method-assign]
+
+
+def _overwrite_with_lot_id(portfolio: PortfolioService, lot_id: str) -> Any:
+    purchase = portfolio.build_purchase_write_plan(
+        _OWNER,
+        _CODE,
+        "J社",
+        10,
+        Decimal("5000"),
+        dt.date(2026, 3, 1),
+        AccountType.SPECIFIC,
+        lot_id=lot_id,
+    )
+    return portfolio.build_holding_replacement_plan(_OWNER, _CODE, purchase=purchase)
+
+
+def test_rollback_removes_the_new_lot_and_restores_the_old_state(
+    portfolio: PortfolioService,
+) -> None:
+    """T26: 新規lot_id + 保有書き込み失敗 → 新ロット消去・旧ロット完全復元。"""
+    _seed_two_lots(portfolio)
+    before = _snapshot(portfolio)
+
+    plan = _overwrite_with_lot_id(portfolio, "csv:new-import:1")
+    _break_holdings_apply_batch(portfolio)
+    with pytest.raises(OSError):
+        portfolio.apply_holding_replacement_plan(plan)
+
+    after = _snapshot(portfolio)
+    assert "csv:new-import:1" not in after[0], "新規ロットが残っている"
+    assert after == before, "旧stateが完全に復元されていない"
+
+
+def test_rollback_restores_the_old_content_of_a_reused_lot_id(
+    portfolio: PortfolioService,
+) -> None:
+    """T27: 既存lot_idの再利用 + 保有書き込み失敗 → 同一IDのロットが旧内容へ復元。
+
+    修正前は、再利用されたIDが lot_deletes から除外される一方で
+    ロールバック用スナップショットにも含まれず、上書きされた旧ロットが消失した。
+    """
+    _seed_two_lots(portfolio)
+    before = _snapshot(portfolio)
+    reused_lot_id = next(iter(before[0]))
+    assert before[0][reused_lot_id]["shares"] == 100
+
+    plan = _overwrite_with_lot_id(portfolio, reused_lot_id)
+    assert all(d.id_value != reused_lot_id for d in plan.lot_deletes), (
+        "再利用IDは削除対象から外れている前提"
+    )
+    _break_holdings_apply_batch(portfolio)
+    with pytest.raises(OSError):
+        portfolio.apply_holding_replacement_plan(plan)
+
+    after = _snapshot(portfolio)
+    assert reused_lot_id in after[0], "再利用された既存ロットが消失した"
+    assert after[0][reused_lot_id]["shares"] == 100, "旧内容へ戻っていない"
+    assert after == before, "旧stateが完全に復元されていない"
+
+
+def test_reused_lot_id_overwrite_succeeds_with_the_new_content(
+    tmp_path: Path, portfolio: PortfolioService
+) -> None:
+    """T28: 既存lot_idの再利用が正常に成功した場合は新内容になる。"""
+    _seed_two_lots(portfolio)
+    reused_lot_id = portfolio.list_lots(_OWNER, _CODE)[0].lot_id
+
+    plan = _overwrite_with_lot_id(portfolio, reused_lot_id)
+    portfolio.apply_holding_replacement_plan(plan)
+
+    lots = portfolio.list_lots(_OWNER, _CODE)
+    assert len(lots) == 1, "置換後は新ロット1件だけになること"
+    assert lots[0].lot_id == reused_lot_id
+    assert lots[0].shares == 10, "新内容になっていない"
+    assert _state(portfolio) == (10, 1, 10)
+
+
+def test_rollback_with_reused_id_among_many_lots_restores_every_lot(
+    portfolio: PortfolioService,
+) -> None:
+    """T29: 複数ロットのうち1件のIDを再利用 + 保有書き込み失敗 →
+    全ロット集合・全内容がミューテーション前と完全一致する。
+    """
+    _seed(
+        portfolio,
+        [
+            (10, "100", "2026-01-01"),
+            (20, "200", "2026-01-02"),
+            (30, "300", "2026-01-03"),
+            (40, "400", "2026-01-04"),
+        ],
+    )
+    before = _snapshot(portfolio)
+    assert len(before[0]) == 4
+    reused_lot_id = sorted(before[0])[2]
+
+    plan = _overwrite_with_lot_id(portfolio, reused_lot_id)
+    _break_holdings_apply_batch(portfolio)
+    with pytest.raises(OSError):
+        portfolio.apply_holding_replacement_plan(plan)
+
+    after = _snapshot(portfolio)
+    assert set(after[0]) == set(before[0]), "ロット集合が変化した"
+    assert after == before, "ロットの内容または保有が旧stateと一致しない"
+
+
+def test_rollback_snapshot_covers_delete_set_union_put_target(
+    portfolio: PortfolioService,
+) -> None:
+    """ロールバックの対象が「削除対象 ∪ Put対象」であることを直接確認する。
+
+    再利用IDは lot_deletes に含まれないため、削除対象だけを見ていると
+    スナップショットから漏れる。
+    """
+    _seed_two_lots(portfolio)
+    reused_lot_id = portfolio.list_lots(_OWNER, _CODE)[0].lot_id
+    plan = _overwrite_with_lot_id(portfolio, reused_lot_id)
+
+    delete_ids = {d.id_value for d in plan.lot_deletes}
+    assert plan.lot_put is not None
+    put_id = str(getattr(plan.lot_put.model, plan.lot_put.id_field))
+    assert put_id == reused_lot_id
+    assert put_id not in delete_ids, "同一アイテムへのDelete+Putになっている"
+    assert len(delete_ids | {put_id}) == 2, "ロールバック対象は削除対象 ∪ Put対象の2件"

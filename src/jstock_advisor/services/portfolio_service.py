@@ -800,34 +800,59 @@ class PortfolioService:
 
         ## 保証する範囲(AWS実装との差)
 
-        DynamoDB実装はTransactWriteItemsにより、プロセスの強制終了を含む
-        いかなる失敗に対しても「全部成功 or 全部不成功」が保証される。
-        ローカルJSON実装はロットと保有が**別ファイル**であり、同じ保証は与えられない。
-        本実装が保証するのは次のとおりである。
+        DynamoDB実装はTransactWriteItemsにより、プロセスの強制終了を含むいかなる
+        失敗に対しても「全部成功 or 全部不成功」が保証される。ローカルJSON実装は
+        ロットと保有が**別ファイル**であり、同じ保証は与えられない。本実装が
+        保証するのは次のとおりである。
 
             LOCAL_NORMAL_EXCEPTION_ROLLBACK        = YES
-              書き込み中に例外が送出された場合、旧stateへ戻す
+              書き込み中に例外が送出された場合、旧stateへ完全に戻す
             LOCAL_CRASH_SAFE_CROSS_FILE_ATOMICITY  = NO
               2つのファイル書き込みの間でプロセスが強制終了した場合は保証しない
 
         ## 実装
 
         1. **各ファイルへの書き込みを1回にまとめる**(`apply_batch`)。
-           一時ファイルへ書いてから`os.replace()`で差し替えるため、
-           同一ファイル内では部分適用が起こらない。「ロットを1件ずつ削除して
-           途中で失敗する」という状態は構造的に発生しない。
+           一時ファイルへ書いてから`os.replace()`で差し替えるため、同一ファイル内
+           では部分適用が起こらない。「ロットを1件ずつ削除して途中で失敗する」
+           という状態は構造的に発生しない。
         2. **ロット→保有の順に書く。** ロットの書き込みで失敗した場合は
            どちらのファイルも変更されておらず、旧stateが完全に維持される。
-        3. 保有の書き込みで例外が出た場合は、保持しておいた旧ロット・旧保有で
-           書き戻す。
+        3. 保有の書き込みで例外が出た場合は、保持しておいた旧stateへ戻す。
 
-        3のロールバック自体も失敗する状況(プロセス強制終了等)で残りうるのは
-        「新しいロット + 古い保有」である。これは**再取込で必ず新stateへ収束する**
-        (Phase B1の決定的lot_idと`repair_holding_projection`)。overwriteが意図する
-        最終状態と一致するため、利用者が指定していない状態が残ることはない。
+        ## ロールバック対象の範囲(重要)
+
+        ロールバックの対象は「削除するロット」だけではない。**Putによって上書き
+        される既存ロットも対象**である。新しいロットIDが既存ロットのIDと同一の
+        場合(同一アイテムへのDelete+Putを避けるため、そのIDは`lot_deletes`から
+        除外され`lot_put`だけになる)、削除対象のスナップショットだけを保持して
+        いると、**上書きされた旧ロットが復元されず消失する**。
+
+        そのため、今回のミューテーションで変更されうる全ロットID
+        (削除対象 ∪ Put対象)の旧stateを開始前にスナップショットする。
+        ロールバックでは、変更した全IDを一旦取り除いたうえで、開始前に存在して
+        いたロットだけを書き戻す。これにより次をすべて満たす。
+
+          - 元々存在しなかった新規ロットは、ロールバック後も存在しない
+          - 元々存在した同一IDのロットは、旧内容へ完全に戻る
+          - 削除対象だったロットも、旧内容へ完全に戻る
         """
         delete_lot_ids = [d.id_value for d in plan.lot_deletes]
-        saved_lots = [lot for lot in (self._lots.get(i) for i in delete_lot_ids) if lot is not None]
+
+        new_lot: PurchaseLot | None = None
+        if plan.lot_put is not None:
+            lot_model = plan.lot_put.model
+            if not isinstance(lot_model, PurchaseLot):
+                raise TypeError("lot_put.modelはPurchaseLotである必要があります")
+            new_lot = lot_model
+
+        # 今回変更されうる全ロットID(削除対象 ∪ Put対象)の旧stateを保持する。
+        affected_lot_ids = list(delete_lot_ids)
+        if new_lot is not None and new_lot.lot_id not in affected_lot_ids:
+            affected_lot_ids.append(new_lot.lot_id)
+        saved_lots = [
+            lot for lot in (self._lots.get(i) for i in affected_lot_ids) if lot is not None
+        ]
 
         # 置換(holding_put)と削除(holding_delete)は排他。どちらの場合も
         # 対象のholding_idを特定し、ロールバック用に旧Holdingを保持する。
@@ -838,13 +863,7 @@ class PortfolioService:
             holding_id = str(getattr(plan.holding_put.model, plan.holding_put.id_field))
         saved_holding = self._holdings.get(holding_id) if holding_id is not None else None
 
-        new_lots: list[PurchaseLot] = []
-        if plan.lot_put is not None:
-            lot_model = plan.lot_put.model
-            if not isinstance(lot_model, PurchaseLot):
-                raise TypeError("lot_put.modelはPurchaseLotである必要があります")
-            new_lots.append(lot_model)
-
+        new_lots = [new_lot] if new_lot is not None else []
         delete_holding_ids = (
             [plan.holding_delete.id_value] if plan.holding_delete is not None else []
         )
@@ -857,12 +876,12 @@ class PortfolioService:
 
         # 1. ロット(ここで失敗すれば何も変わっていない)
         self._lots.apply_batch(delete_lot_ids, new_lots)
-        # 2. 保有(ここで失敗したらロットと保有を書き戻す)
+        # 2. 保有(ここで失敗したらロットと保有を旧stateへ戻す)
         try:
             self._holdings.apply_batch(delete_holding_ids, new_holdings)
         except Exception:
-            restore_ids = [lot.lot_id for lot in new_lots]
-            self._lots.apply_batch(restore_ids, saved_lots)
+            # 変更しうる全IDを一旦取り除き、開始前に存在していたロットだけを戻す。
+            self._lots.apply_batch(affected_lot_ids, saved_lots)
             if saved_holding is not None:
                 self._holdings.apply_batch([], [saved_holding])
             elif holding_id is not None:

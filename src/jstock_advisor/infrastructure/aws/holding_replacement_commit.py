@@ -11,11 +11,27 @@ overwrite取込(`--on-duplicate overwrite`)と保有削除(CLI)は、いずれ�
 DynamoDBが「全部成功 or 全部不成功」を保証する。
 
 ```
-既存ロットのDelete × N   (楽観ロック: #data = :expected_data)
-既存HoldingのDelete × 1  (同上。Holdingが存在する場合のみ)
-新ロットのPut × 1        (attribute_not_exists(PK)。置換の場合のみ)
-新HoldingのPut × 1       (同上)
+overwrite(置換):
+  既存ロットのDelete × N   (楽観ロック: #data = :expected_data)
+                           ただし新ロットと同じIDのものは除外する
+  新ロットのPut     × 1   (既存なら #data 条件、新規なら attribute_not_exists)
+  HoldingのPut      × 1   (既存なら #data 条件、新規なら attribute_not_exists)
+  = N + 2 項目
+
+delete(削除のみ):
+  既存ロットのDelete × N   (楽観ロック: #data = :expected_data)
+  HoldingのDelete   × 1   (同上)
+  = N + 1 項目
 ```
+
+**同一アイテムに対して複数のアクションを入れない。** DynamoDBのTransactWriteItems
+は1トランザクション内で同一アイテムを対象とする複数アクションを許可しない
+(ValidationException)。そのため置換ではHoldingを「Delete → Put」にせず、
+既存の生JSONを`expected_data`とする**1回のConditionalPut**で置き換える
+(楽観ロックは維持される)。ロットについても、新しいロットIDが既存ロットに
+含まれる場合は削除対象から除外し、Putだけを行う。
+
+この不変条件は`HoldingReplacementPlan.__post_init__`が計画の構築時点で強制する。
 
 TransactWriteItemsの構築・条件式・リトライ方針は
 `dynamodb_transaction.py`(会話型UIの確定操作と共有するプリミティブ)に従う。
