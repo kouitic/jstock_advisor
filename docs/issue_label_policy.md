@@ -185,6 +185,45 @@ NEXT_PRODUCTION_RELEASE_BLOCKER
 `release-blocker` が付いていても「すべての Production release を止める」とは
 限らない。**release 判断時は label の有無だけでなく、必ず block 条件を確認する。**
 
+### Production-target defect の release-blocker lifecycle
+
+現行 Production に実害が出ている欠陥(Production-target defect)については、
+`release-blocker` を次の lifecycle で扱う。
+
+```
+blocker 付与
+  → 修正の merge
+  → Production deploy
+  → Immediate Verification
+  → mandatory verification(Issue が定義したもの)
+  → ChatGPT review
+  → human approval
+  → blocker 解除
+```
+
+重要な点は次のとおり。
+
+- **deploy しただけでは解除しない。merge しただけでも解除しない。**
+  Issue が `MANDATORY_FOR_RELEASE_BLOCKER_REMOVAL` と定義した verification が
+  完了して初めて解除の判断ができる。
+- **`Issue close` と `release-blocker 解除` は別判断である。**
+  verification 完了前に Issue を close しない一方、blocker を解除しても
+  後続 Phase が残るなら Issue は OPEN のままでよい。逆に、Issue を close しても
+  blocker が別条件で残ることもありうる。
+- 未完了の verification が
+  **`OPTIONAL_POST_RELEASE_OBSERVATION` だけになった場合は、解除しうる。**
+  この場合、自然な障害発生を待つことを必須とせず、事前に定義した代替証拠
+  (unit / contract tests、CI、Immediate Verification、正常系 natural evidence)
+  と ChatGPT review PASS、人間判断をもって解除可否を決める。
+  分類の定義と代替証拠の要件は
+  [docs/development_workflow.md](development_workflow.md) 7節が正本。
+- **Issue 自身が自然な negative-path observation を Acceptance Criteria として
+  明示している場合、これを勝手に `OPTIONAL` へ格下げしない。**
+
+この lifecycle は、§6 冒頭の「`release-blocker` は Production release を
+**実際に止める** Issue にだけ設定する」という意味を変更するものではない。
+解除の手順を明確にするものである。
+
 ---
 
 ## 7. 推測して埋めない
