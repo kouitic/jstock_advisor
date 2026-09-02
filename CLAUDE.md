@@ -4,6 +4,13 @@
   必ず [docs/functional_spec.md](docs/functional_spec.md)(非技術者向けの機能仕様書)を
   合わせて更新し、末尾の変更履歴に日付と概要を追記すること。
 
+- **開発の進め方・レビュー・release governanceは
+  [docs/development_workflow.md](docs/development_workflow.md) に従うこと。**
+  lane / WIP制限 / 実装パイプライン / ローカルテスト方針 / GitHubへの永続化 /
+  現況判断 / negative-path検証 / AWS pagination / grouped release /
+  人間承認の境界は同文書が正本である。
+  (詳細を本ファイルへ複製しない。ルールを変更する場合は同文書を更新する。)
+
 - **GitHub Issueを作成・調査・更新・closeする場合は、
   [docs/issue_label_policy.md](docs/issue_label_policy.md) を必ず読み、
   そのルールに従うこと。** labelはIssue Type / Priority / Severity /
