@@ -13,6 +13,19 @@
   (同文書はAI非依存のリポジトリ運用ポリシーであり、本ファイルはその入口に過ぎない。
   ルールを変更する場合は同文書を更新する。)
 
+- **メソッド名だけを根拠にread-onlyと判断してはならない。**
+  `get` / `list` / `find` / `read` / `check` / `health` 等の名称は副作用の有無を
+  保証しない。Productionのread-only観測・health check・validation・verification・
+  IAM least-privilege設計を行う場合は、**呼び出し先を含むcall graphを確認**し、
+  repositoryのsave/update/delete、DynamoDB/S3 write、queue publish、Lambda invoke、
+  LINE送信等の外部状態変更が無いことを確かめること。read-onlyと定義した処理に
+  hidden writeを持たせない。writeを伴う場合は、API契約・名称・IAM・テストから
+  その事実が判別できなければならない。
+  (背景と具体的な確認手順は
+  [docs/operations_manual.md](docs/operations_manual.md) 18節。
+  2026-09-02に、read名のAPIが内部で書き込みを行い、読み取り専用IAMのLambdaで
+  AccessDeniedとなって日次バッチ全体が停止するProduction障害が発生している。)
+
 - **実在人物の個人情報をGit管理対象へ含めない。** 氏名・家族名・個人メール
   アドレス・住所・電話番号等を、ソースコード、テストデータ、fixture、コメント、
   ドキュメント、サンプル、コミットメッセージへ記録してはならない。所有者等を
