@@ -331,20 +331,27 @@ class HoldingsCsvImportService:
         holding_id = build_holding_id(owner, stock_code)
         existing = self._portfolio.get_holding(owner, stock_code)
         try:
-            if (
+            is_overwrite = (
                 existing is not None
                 and on_duplicate == "overwrite"
                 and holding_id not in overwritten_holding_ids
-            ):
-                self._portfolio.delete_holding(owner, stock_code)
-                overwritten_holding_ids.add(holding_id)
-                messages.append("既存の保有銘柄を上書きしました")
-            elif existing is not None and on_duplicate == "additional_purchase":
+            )
+            if existing is not None and on_duplicate == "additional_purchase":
                 messages.append("既存の保有銘柄への追加購入として登録しました")
 
             # 決定的lot_idで登録する。Holdingはロット集合からの再計算であるため、
             # 同じlot_idを再適用しても最終状態は変わらない(収束する)。
-            self._portfolio.register_purchase(
+            #
+            # overwriteは「既存の全ロット+Holdingの削除」と「新しいロット+Holdingの
+            # 作成」を**単一トランザクション**で行う(Issue #61 Phase B2)。
+            # 以前は delete_holding() の直後に register_purchase() を呼んでおり、
+            # その間で失敗すると既存の保有が削除されたまま復元されなかった。
+            register = (
+                self._portfolio.replace_holding_with_purchase
+                if is_overwrite
+                else self._portfolio.register_purchase
+            )
+            register(
                 owner=owner,
                 stock_code=stock_code,
                 stock_name=stock_name,
@@ -357,6 +364,9 @@ class HoldingsCsvImportService:
                 memo=memo,
                 lot_id=lot_id,
             )
+            if is_overwrite:
+                overwritten_holding_ids.add(holding_id)
+                messages.append("既存の保有銘柄を上書きしました")
         except Exception:
             # 適用に失敗したclaimを解放する。解放しないと実データが未適用のまま
             # 「claim済み」が残り、再実行しても適用されない(データ欠落)。

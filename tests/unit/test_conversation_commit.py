@@ -24,7 +24,11 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
-from jstock_advisor.infrastructure.aws import conversation_commit, conversation_state_store
+from jstock_advisor.infrastructure.aws import (
+    conversation_commit,
+    conversation_state_store,
+    dynamodb_transaction,
+)
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -613,7 +617,7 @@ def _patch_flaky_transact_client(
 ) -> _FlakyTransactClient:
     real_client = boto3.client("dynamodb", region_name=_REGION)
     flaky = _FlakyTransactClient(real_client, fail_times=fail_times, error_code=error_code)
-    monkeypatch.setattr(conversation_commit.boto3, "client", lambda *a, **kw: flaky)
+    monkeypatch.setattr(dynamodb_transaction.boto3, "client", lambda *a, **kw: flaky)
     return flaky
 
 
@@ -685,17 +689,17 @@ def _canceled_error(reason_codes: list[str]) -> ClientError:
 
 def test_is_safe_business_conflict_true_for_conditional_check_failed_reasons() -> None:
     error = _canceled_error(["None", "ConditionalCheckFailed", "None"])
-    assert conversation_commit._is_safe_business_conflict(error) is True
+    assert dynamodb_transaction.is_safe_business_conflict(error) is True
 
 
 def test_is_safe_business_conflict_false_for_validation_error_reason() -> None:
     error = _canceled_error(["None", "ValidationError", "None"])
-    assert conversation_commit._is_safe_business_conflict(error) is False
+    assert dynamodb_transaction.is_safe_business_conflict(error) is False
 
 
 def test_is_safe_business_conflict_false_for_throttling_reason() -> None:
     error = _canceled_error(["ThrottlingError", "ConditionalCheckFailed"])
-    assert conversation_commit._is_safe_business_conflict(error) is False
+    assert dynamodb_transaction.is_safe_business_conflict(error) is False
 
 
 def test_is_safe_business_conflict_true_for_top_level_conditional_check_failed() -> None:
@@ -703,7 +707,7 @@ def test_is_safe_business_conflict_true_for_top_level_conditional_check_failed()
         {"Error": {"Code": "ConditionalCheckFailedException", "Message": "x"}},
         "TransactWriteItems",
     )
-    assert conversation_commit._is_safe_business_conflict(error) is True
+    assert dynamodb_transaction.is_safe_business_conflict(error) is True
 
 
 def test_is_safe_business_conflict_false_for_unrelated_error_code() -> None:
@@ -711,7 +715,7 @@ def test_is_safe_business_conflict_false_for_unrelated_error_code() -> None:
         {"Error": {"Code": "AccessDeniedException", "Message": "x"}},
         "TransactWriteItems",
     )
-    assert conversation_commit._is_safe_business_conflict(error) is False
+    assert dynamodb_transaction.is_safe_business_conflict(error) is False
 
 
 def test_commit_watch_propagates_non_business_transaction_canceled_exception(
@@ -728,7 +732,7 @@ def test_commit_watch_propagates_non_business_transaction_canceled_exception(
             raise _canceled_error(["None", "ValidationException"])
 
     monkeypatch.setattr(
-        conversation_commit.boto3, "client", lambda *a, **kw: _AlwaysNonBusinessCanceledClient()
+        dynamodb_transaction.boto3, "client", lambda *a, **kw: _AlwaysNonBusinessCanceledClient()
     )
 
     with pytest.raises(ClientError):

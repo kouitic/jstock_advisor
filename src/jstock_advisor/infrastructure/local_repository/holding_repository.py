@@ -51,6 +51,14 @@ class PurchaseLotRepository:
     def delete(self, lot_id: str) -> bool:
         return self._store.delete(lot_id)
 
+    def apply_batch(self, delete_lot_ids: list[str], puts: list[PurchaseLot]) -> None:
+        """ロットの削除と追加/更新を1回の書き込みで適用する(Issue #61 Phase B2)。
+
+        保有の原子的な置換・削除で使う。1件ずつ削除して途中で失敗する状態を
+        構造的に無くすため、delete_by_holding()のループではなくこちらを使うこと。
+        """
+        self._store.apply_batch(delete_lot_ids, puts)
+
     def delete_by_holding(self, holding_id: str) -> int:
         lots = self.list_by_holding(holding_id)
         for lot in lots:
@@ -93,6 +101,10 @@ class HoldingRepository:
 
     def upsert(self, holding: Holding) -> None:
         self._store.upsert(holding)
+
+    def apply_batch(self, delete_holding_ids: list[str], puts: list[Holding]) -> None:
+        """保有の削除と追加/更新を1回の書き込みで適用する(Issue #61 Phase B2)。"""
+        self._store.apply_batch(delete_holding_ids, puts)
 
     def delete(self, holding_id: str) -> bool:
         return self._store.delete(holding_id)

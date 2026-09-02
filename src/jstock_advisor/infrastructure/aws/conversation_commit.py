@@ -34,22 +34,17 @@ v2の設計判断)。
 from __future__ import annotations
 
 import datetime as dt
-import random
-import time
 from typing import Any
 
-import boto3
 from boto3.dynamodb.types import TypeSerializer
-from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.enums import ConversationAction
 from jstock_advisor.domain.entities.transaction import Transaction
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
-from jstock_advisor.infrastructure.aws import conversation_state_store
+from jstock_advisor.infrastructure.aws import conversation_state_store, dynamodb_transaction
 from jstock_advisor.infrastructure.aws.dynamodb_store import to_dynamo_item
 from jstock_advisor.infrastructure.collection_store import resolve_table_name
 from jstock_advisor.services.write_plan import (
-    ConditionalDelete,
     ConditionalPut,
     PurchaseWritePlan,
     SaleWritePlan,
@@ -75,60 +70,8 @@ _TRANSACTION_CONFLICT_RETRY_BASE_DELAY_SECONDS = 0.05
 _serializer = TypeSerializer()
 
 
-def _ser(value: Any) -> Any:
-    return _serializer.serialize(value)
 
 
-def _is_retryable_transaction_conflict(error: ClientError) -> bool:
-    """batch_tracker.py の同名関数と同じ判定ロジック(3節docstring参照)。"""
-    code = error.response["Error"]["Code"]
-    if code in _RETRYABLE_TRANSACTION_CONFLICT_CODES:
-        return True
-    if code != "TransactionCanceledException":
-        return False
-    reasons = error.response.get("CancellationReasons") or []
-    reason_codes = {reason.get("Code") for reason in reasons}
-    if "ConditionalCheckFailed" in reason_codes:
-        return False
-    return "TransactionConflict" in reason_codes
-
-
-def _transact_write_items_with_conflict_retry(
-    client: Any, transact_items: list[dict[str, Any]]
-) -> None:
-    delay = _TRANSACTION_CONFLICT_RETRY_BASE_DELAY_SECONDS
-    for attempt in range(1, _MAX_TRANSACTION_CONFLICT_RETRY_ATTEMPTS + 1):
-        try:
-            client.transact_write_items(TransactItems=transact_items)
-            return
-        except ClientError as e:
-            is_last_attempt = attempt >= _MAX_TRANSACTION_CONFLICT_RETRY_ATTEMPTS
-            if is_last_attempt or not _is_retryable_transaction_conflict(e):
-                raise
-            time.sleep(delay + random.uniform(0, delay))
-            delay *= 2
-
-
-def _conditional_put_transact_item(table_name: str, put: ConditionalPut) -> dict[str, Any]:
-    item = to_dynamo_item(put.model, put.id_field)
-    if put.expected_data is None:
-        return {
-            "Put": {
-                "TableName": table_name,
-                "Item": {k: _ser(v) for k, v in item.items()},
-                "ConditionExpression": "attribute_not_exists(#pk)",
-                "ExpressionAttributeNames": {"#pk": put.id_field},
-            }
-        }
-    return {
-        "Put": {
-            "TableName": table_name,
-            "Item": {k: _ser(v) for k, v in item.items()},
-            "ConditionExpression": "#data = :expected_data",
-            "ExpressionAttributeNames": {"#data": "data"},
-            "ExpressionAttributeValues": {":expected_data": _ser(put.expected_data)},
-        }
-    }
 
 
 def _trading_pause_condition_check_item() -> dict[str, Any]:
@@ -145,72 +88,17 @@ def _trading_pause_condition_check_item() -> dict[str, Any]:
     return {
         "ConditionCheck": {
             "TableName": resolve_table_name(_TRADING_PAUSE_CONFIG_TABLE_FILE),
-            "Key": {"config_id": _ser(_TRADING_PAUSE_CONFIG_ID)},
+            "Key": {"config_id": dynamodb_transaction.serialize(_TRADING_PAUSE_CONFIG_ID)},
             "ConditionExpression": (
                 "attribute_not_exists(config_id) OR pause_buy_sell = :not_paused"
             ),
-            "ExpressionAttributeValues": {":not_paused": _ser(False)},
+            "ExpressionAttributeValues": {":not_paused": dynamodb_transaction.serialize(False)},
         }
     }
 
 
-def _unconditional_put_transact_item(table_name: str, item: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "Put": {
-            "TableName": table_name,
-            "Item": {k: _ser(v) for k, v in item.items()},
-        }
-    }
 
 
-def _conditional_delete_transact_item(table_name: str, delete: ConditionalDelete) -> dict[str, Any]:
-    return {
-        "Delete": {
-            "TableName": table_name,
-            "Key": {delete.id_field: _ser(delete.id_value)},
-            "ConditionExpression": "#data = :expected_data",
-            "ExpressionAttributeNames": {"#data": "data"},
-            "ExpressionAttributeValues": {":expected_data": _ser(delete.expected_data)},
-        }
-    }
-
-
-def _is_safe_business_conflict(error: ClientError) -> bool:
-    """安全に「もう一度操作してください」へ変換してよい業務競合か判定する
-    (コードレビュー2026-08-17 指摘3)。
-
-    ConditionalCheckFailedException/TransactionConflictException(トップ
-    レベルのエラーコード)はそのままTrue。TransactionCanceledExceptionは
-    CancellationReasonsの中身を見て、すべての理由が"None"(そのアイテム自体
-    は失敗要因ではない)または"ConditionalCheckFailed"(楽観ロック競合・
-    ConversationState条件不成立)である場合のみTrueとする。スロットリング・
-    内部障害・権限不足・ValidationError等、それ以外の理由が1つでも含まれる
-    場合は業務競合として握りつぶさず、呼び出し元へ例外を伝播させる。
-    """
-    code = error.response["Error"]["Code"]
-    if code in _CONDITION_FAILURE_TOP_LEVEL_CODES:
-        return True
-    if code != "TransactionCanceledException":
-        return False
-    reasons = error.response.get("CancellationReasons") or []
-    reason_codes = {reason.get("Code") for reason in reasons}
-    return bool(reason_codes) and reason_codes <= _SAFE_CANCELLATION_REASON_CODES
-
-
-def _commit(transact_items: list[dict[str, Any]]) -> bool:
-    """成功時True。安全な業務競合(operation_id/state/期限不一致・楽観ロック
-    競合・二重押下)時はFalseを返す(呼び出し側が「もう一度操作してください」
-    等の安全側の案内を返す)。スロットリング・内部障害・権限不足等の非業務
-    エラーはFalseへ変換せず、そのまま例外を伝播する(指摘3)。
-    """
-    client = boto3.client("dynamodb")
-    try:
-        _transact_write_items_with_conflict_retry(client, transact_items)
-        return True
-    except ClientError as e:
-        if _is_safe_business_conflict(e):
-            return False
-        raise
 
 
 def commit_buy(
@@ -225,14 +113,18 @@ def commit_buy(
         conversation_state_store.build_confirm_delete_transact_item(
             user_id, ConversationAction.BUY, expected_operation_id, now
         ),
-        _conditional_put_transact_item(
+        dynamodb_transaction.conditional_put_transact_item(
             resolve_table_name(_TRANSACTIONS_TABLE_FILE),
             ConditionalPut(model=transaction, id_field="transaction_id", expected_data=None),
         ),
-        _conditional_put_transact_item(resolve_table_name(_PURCHASE_LOTS_TABLE_FILE), plan.lot_put),
-        _conditional_put_transact_item(resolve_table_name(_HOLDINGS_TABLE_FILE), plan.holding_put),
+        dynamodb_transaction.conditional_put_transact_item(
+            resolve_table_name(_PURCHASE_LOTS_TABLE_FILE), plan.lot_put
+        ),
+        dynamodb_transaction.conditional_put_transact_item(
+            resolve_table_name(_HOLDINGS_TABLE_FILE), plan.holding_put
+        ),
     ]
-    return _commit(items)
+    return dynamodb_transaction.commit(items)
 
 
 def commit_sell(
@@ -247,24 +139,32 @@ def commit_sell(
         conversation_state_store.build_confirm_delete_transact_item(
             user_id, ConversationAction.SELL, expected_operation_id, now
         ),
-        _conditional_put_transact_item(
+        dynamodb_transaction.conditional_put_transact_item(
             resolve_table_name(_TRANSACTIONS_TABLE_FILE),
             ConditionalPut(model=transaction, id_field="transaction_id", expected_data=None),
         ),
     ]
     lots_table = resolve_table_name(_PURCHASE_LOTS_TABLE_FILE)
     for lot_delete in plan.lot_deletes:
-        items.append(_conditional_delete_transact_item(lots_table, lot_delete))
+        items.append(
+            dynamodb_transaction.conditional_delete_transact_item(lots_table, lot_delete)
+        )
     for lot_put in plan.lot_puts:
-        items.append(_conditional_put_transact_item(lots_table, lot_put))
+        items.append(dynamodb_transaction.conditional_put_transact_item(lots_table, lot_put))
 
     holdings_table = resolve_table_name(_HOLDINGS_TABLE_FILE)
     if plan.holding_put is not None:
-        items.append(_conditional_put_transact_item(holdings_table, plan.holding_put))
+        items.append(
+            dynamodb_transaction.conditional_put_transact_item(holdings_table, plan.holding_put)
+        )
     if plan.holding_delete is not None:
-        items.append(_conditional_delete_transact_item(holdings_table, plan.holding_delete))
+        items.append(
+            dynamodb_transaction.conditional_delete_transact_item(
+                holdings_table, plan.holding_delete
+            )
+        )
 
-    return _commit(items)
+    return dynamodb_transaction.commit(items)
 
 
 def commit_watch(
@@ -282,9 +182,9 @@ def commit_watch(
         conversation_state_store.build_confirm_delete_transact_item(
             user_id, ConversationAction.WATCH, expected_operation_id, now
         ),
-        _unconditional_put_transact_item(
+        dynamodb_transaction.unconditional_put_transact_item(
             resolve_table_name(_WATCHLIST_TABLE_FILE),
             to_dynamo_item(watchlist_item, "stock_code"),
         ),
     ]
-    return _commit(items)
+    return dynamodb_transaction.commit(items)

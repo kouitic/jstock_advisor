@@ -63,3 +63,36 @@ class SaleWritePlan:
     holding_put: ConditionalPut | None
     holding_delete: ConditionalDelete | None
     resulting_holding: Holding | None
+
+
+@dataclass(frozen=True)
+class HoldingReplacementPlan:
+    """保有(Holding)とその全ロット(PurchaseLot)を**原子的に置き換える/削除する**
+    計画(Issue #61 Phase B2)。
+
+    overwrite取込と保有削除の双方で使う。
+      overwrite : lot_deletes=既存全ロット / holding_delete=既存Holding /
+                  lot_put=新ロット / holding_put=新Holding
+      削除のみ  : lot_deletes=既存全ロット / holding_delete=既存Holding /
+                  lot_put=None / holding_put=None
+
+    `SaleWritePlan`と異なり、**部分的な残存ロットを持たない**(全削除→全置換)。
+    途中状態(Holdingだけ旧値・ロット一部欠落・Holding無し/ロット有り・
+    Holding有り/ロット無し)をコミット後に残さないことが本計画の契約である。
+    """
+
+    lot_deletes: list[ConditionalDelete]
+    holding_delete: ConditionalDelete | None
+    lot_put: ConditionalPut | None
+    holding_put: ConditionalPut | None
+    resulting_holding: Holding | None
+
+    @property
+    def write_item_count(self) -> int:
+        """この計画が必要とする書き込み項目数(DynamoDB TransactWriteItems換算)。"""
+        return (
+            len(self.lot_deletes)
+            + (1 if self.holding_delete is not None else 0)
+            + (1 if self.lot_put is not None else 0)
+            + (1 if self.holding_put is not None else 0)
+        )

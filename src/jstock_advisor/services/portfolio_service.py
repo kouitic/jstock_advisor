@@ -21,6 +21,7 @@ from jstock_advisor.domain.entities.enums import AccountType
 from jstock_advisor.domain.entities.holding import Holding, PurchaseLot, summarize_lots
 from jstock_advisor.domain.entities.owner import build_holding_id, normalize_and_validate_owner
 from jstock_advisor.domain.jst import evaluation_date_jst
+from jstock_advisor.infrastructure.collection_store import running_on_lambda
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -29,11 +30,42 @@ from jstock_advisor.services.corporate_action_service import CorporateActionServ
 from jstock_advisor.services.write_plan import (
     ConditionalDelete,
     ConditionalPut,
+    HoldingReplacementPlan,
     PurchaseWritePlan,
     SaleWritePlan,
 )
 
 PURCHASE_PRICE_MUST_BE_POSITIVE = "購入単価は0より大きい値を指定してください"
+
+MAX_LOTS_PER_HOLDING = 90
+"""1保有あたりのロット数の**業務上の上限**(supported domain、Issue #61 Phase B2)。
+
+保有の原子的な置換・削除は、既存ロットの削除・Holdingの削除・新ロットのPut・
+新HoldingのPutを**単一のDynamoDB TransactWriteItemsへ入れる**ことで実現する。
+1リクエストあたりの書き込み項目数は次のとおり。
+
+    既存ロット削除 N + Holding削除 1 + 新ロットPut 1 + 新HoldingPut 1 = N + 3
+
+DynamoDBの物理上限は100項目(`dynamodb_transaction.MAX_TRANSACT_ITEMS`)であり
+理論上は N<=97 まで可能だが、条件式の追加・将来の項目追加に対する余裕を残すため、
+**業務上の上限は90**とする。物理上限と業務上限は意図的に別の定数である
+(物理上限が変わっても業務契約は変わらない)。
+
+上限を超える保有は、**変更を一切行う前に**`HoldingLotLimitExceededError`で
+拒否する。部分適用・非トランザクション経路へのフォールバック・
+先頭90件だけの削除・無音の切り詰めはいずれも行わない。リトライしても解消しない
+性質のため、非リトライ対象として扱う。
+"""
+
+
+class HoldingLotLimitExceededError(ValueError):
+    """1保有のロット数が`MAX_LOTS_PER_HOLDING`を超えており、原子的な置換・削除を
+    実行できない(Issue #61 Phase B2)。
+
+    **この例外が送出された時点で、HoldingもPurchaseLotも一切変更されていない**
+    (mutation開始前の事前検証で送出する)。リトライでは解消しないため、
+    呼び出し側は再試行せず運用者へ提示すること。
+    """
 
 
 def _validate_purchase_price(purchase_price: Decimal) -> None:
@@ -611,7 +643,210 @@ class PortfolioService:
             return None
         return self._recompute_holding(owner, stock_code)
 
+    # --- 保有の原子的な置換・削除(Issue #61 Phase B2) ---------------------
+    #
+    # overwrite取込と保有削除は、いずれも「既存の全ロット + Holding を消して、
+    # (置換の場合は)新しいロット + Holding を作る」という同一の操作である。
+    # これを個別のwriteへ分解すると、途中で失敗したときに
+    #   - Holdingだけ旧値でロットが一部欠落
+    #   - Holdingが消えてロットだけ残る / その逆
+    # といった部分状態が残り、**再実行しても元の保有は復元されない**
+    # (削除は既に確定しているため)。Phase B1の冪等化は「新規適用を何度行っても
+    # 同じ最終状態へ収束する」ことは保証するが、「削除された既存データを復元する」
+    # ことは対象外である。
+    #
+    # そのため本Phaseでは計画(HoldingReplacementPlan)と適用を分離し、適用を
+    # **単一トランザクション**で行う。外から見える結果は
+    #   成功 -> 新state(または完全削除)
+    #   失敗 -> 旧stateが完全に維持される
+    # のどちらか一方だけになる。
+
+    def build_holding_replacement_plan(
+        self,
+        owner: str,
+        stock_code: str,
+        *,
+        purchase: PurchaseWritePlan | None,
+    ) -> HoldingReplacementPlan:
+        """既存の全ロットとHoldingを消し、purchaseがあればそれを新stateとする計画。
+
+        purchase=Noneは保有の完全削除(CLIの保有削除)。purchaseを渡すと
+        overwrite(置換)になる。
+
+        **一切の永続化を行わない。** 既存アイテムの削除には、読み取った生JSONを
+        expected_dataとする楽観ロック条件を必ず付与する(計画構築から適用までの
+        間に別経路で変更されていれば、適用時にトランザクション全体が失敗する)。
+
+        ロット数がMAX_LOTS_PER_HOLDINGを超える場合はHoldingLotLimitExceededErrorを
+        送出する。**計画構築の時点で送出するため、呼び出し側が適用へ進むことはなく、
+        HoldingもPurchaseLotも変更されない。**
+        """
+        normalized_owner = normalize_and_validate_owner(owner)
+        holding_id = build_holding_id(normalized_owner, stock_code)
+        existing_lots = self._lots.list_by_holding(holding_id)
+
+        if len(existing_lots) > MAX_LOTS_PER_HOLDING:
+            raise HoldingLotLimitExceededError(
+                f"保有({stock_code})の購入ロットが{len(existing_lots)}件あり、"
+                f"原子的に置き換えられる上限({MAX_LOTS_PER_HOLDING}件)を超えています。"
+                "データを変更せず中止しました。"
+            )
+
+        lot_deletes: list[ConditionalDelete] = []
+        for lot in existing_lots:
+            raw = self._lots.get_raw_data(lot.lot_id)
+            if raw is None:
+                raise ValueError(f"ロットID{lot.lot_id}のデータ取得に失敗しました")
+            lot_deletes.append(
+                ConditionalDelete(id_value=lot.lot_id, id_field="lot_id", expected_data=raw)
+            )
+
+        holding_delete: ConditionalDelete | None = None
+        if self._holdings.get(holding_id) is not None:
+            raw_holding = self._holdings.get_raw_data(holding_id)
+            if raw_holding is None:
+                raise ValueError(f"保有ID{holding_id}のデータ取得に失敗しました")
+            holding_delete = ConditionalDelete(
+                id_value=holding_id, id_field="holding_id", expected_data=raw_holding
+            )
+
+        if purchase is None:
+            return HoldingReplacementPlan(
+                lot_deletes=lot_deletes,
+                holding_delete=holding_delete,
+                lot_put=None,
+                holding_put=None,
+                resulting_holding=None,
+            )
+
+        # 置換後のHoldingは「新しいロット1件だけ」から再計算した値でなければならない。
+        # build_purchase_write_plan()は既存ロットへの追加として集計するため、
+        # ここで新ロット単独の集計へ組み替える。
+        new_lot = purchase.lot_put.model
+        if not isinstance(new_lot, PurchaseLot):
+            raise TypeError("purchase.lot_put.modelはPurchaseLotである必要があります")
+        replaced_holding = self._compute_holding(
+            normalized_owner,
+            holding_id,
+            stock_code,
+            [new_lot],
+            None,
+            dt.datetime.now(dt.UTC),
+            stock_name=getattr(purchase.holding_put.model, "stock_name", None),
+        )
+        return HoldingReplacementPlan(
+            lot_deletes=lot_deletes,
+            holding_delete=holding_delete,
+            lot_put=ConditionalPut(model=new_lot, id_field="lot_id", expected_data=None),
+            holding_put=ConditionalPut(
+                model=replaced_holding, id_field="holding_id", expected_data=None
+            ),
+            resulting_holding=replaced_holding,
+        )
+
+    def apply_holding_replacement_plan(self, plan: HoldingReplacementPlan) -> None:
+        """計画を**全部成功か全部不成功か**のどちらかで適用する。
+
+        Lambda環境(DynamoDB)ではTransactWriteItemsで原子的に適用する。
+        ローカルJSON実装にはトランザクション機構が無いため、適用前の状態を保持し、
+        途中で失敗した場合は保持した状態へ戻したうえで例外を再送出する。
+        **呼び出し側から観測できる結果は両実装で同じ**(成功=全置換/全削除、
+        失敗=旧stateの完全維持)。
+        """
+        if plan.write_item_count == 0:
+            return
+        if running_on_lambda():
+            from jstock_advisor.infrastructure.aws.holding_replacement_commit import (
+                commit_holding_replacement,
+            )
+
+            commit_holding_replacement(plan)
+            return
+        self._apply_holding_replacement_locally(plan)
+
+    def _apply_holding_replacement_locally(self, plan: HoldingReplacementPlan) -> None:
+        """ローカルJSON実装向けの適用。
+
+        JSONストアはロットと保有で別ファイルであり、DynamoDBのような
+        単一トランザクションにはできない。そこで次の2点で契約を揃える。
+
+        1. **各ファイルへの書き込みを1回にまとめる**(`apply_batch`)。
+           一時ファイルへ書いてから`os.replace()`で差し替えるため、
+           同一ファイル内では部分適用が起こらない。「ロットを1件ずつ削除して
+           途中で失敗する」という状態は構造的に発生しなくなる。
+        2. **ロット→保有の順に書く。** ロットの書き込みで失敗した場合は
+           どちらのファイルも変更されておらず、旧stateが完全に維持される。
+
+        保有の書き込みで失敗した場合はロットだけが新しくなるため、保持しておいた
+        旧ロットで書き戻す補償を行う。補償自体も失敗した場合(プロセス強制終了等)
+        に残るのは「新しいロット + 古い保有」であり、これは
+        **再取込で必ず新stateへ収束する**(Phase B1の決定的lot_idと
+        `repair_holding_projection`)。overwriteが意図する最終状態と一致するため、
+        利用者が指定していない状態が残ることはない。
+        """
+        delete_lot_ids = [d.id_value for d in plan.lot_deletes]
+        saved_lots = [lot for lot in (self._lots.get(i) for i in delete_lot_ids) if lot is not None]
+        saved_holding = (
+            self._holdings.get(plan.holding_delete.id_value)
+            if plan.holding_delete is not None
+            else None
+        )
+
+        new_lots: list[PurchaseLot] = []
+        if plan.lot_put is not None:
+            lot_model = plan.lot_put.model
+            if not isinstance(lot_model, PurchaseLot):
+                raise TypeError("lot_put.modelはPurchaseLotである必要があります")
+            new_lots.append(lot_model)
+
+        delete_holding_ids = (
+            [plan.holding_delete.id_value] if plan.holding_delete is not None else []
+        )
+        new_holdings: list[Holding] = []
+        if plan.holding_put is not None:
+            holding_model = plan.holding_put.model
+            if not isinstance(holding_model, Holding):
+                raise TypeError("holding_put.modelはHoldingである必要があります")
+            new_holdings.append(holding_model)
+
+        # 1. ロット(ここで失敗すれば何も変わっていない)
+        self._lots.apply_batch(delete_lot_ids, new_lots)
+        # 2. 保有(ここで失敗したらロットを書き戻す)
+        try:
+            self._holdings.apply_batch(delete_holding_ids, new_holdings)
+        except Exception:
+            restore_ids = [lot.lot_id for lot in new_lots]
+            self._lots.apply_batch(restore_ids, saved_lots)
+            if saved_holding is not None:
+                self._holdings.apply_batch([], [saved_holding])
+            raise
+
+
+    def replace_holding_with_purchase(self, **purchase_kwargs: Any) -> Holding:
+        """既存の保有を破棄し、指定した購入1件だけの状態へ**原子的に**置き換える。
+
+        保有CSVの --on-duplicate overwrite から使う。引数は
+        build_purchase_write_plan() と同じ。
+        """
+        purchase = self.build_purchase_write_plan(**purchase_kwargs)
+        plan = self.build_holding_replacement_plan(
+            purchase_kwargs["owner"], purchase_kwargs["stock_code"], purchase=purchase
+        )
+        self.apply_holding_replacement_plan(plan)
+        if plan.resulting_holding is None:
+            raise RuntimeError("置換計画にHoldingが含まれていません")
+        return plan.resulting_holding
+
     def delete_holding(self, owner: str, stock_code: str) -> bool:
-        holding_id = build_holding_id(normalize_and_validate_owner(owner), stock_code)
-        self._lots.delete_by_holding(holding_id)
-        return self._holdings.delete(holding_id)
+        """保有とその全ロットを**原子的に**削除する(Issue #61 Phase B2)。
+
+        戻り値の意味は従来と同じ(削除対象のHoldingが存在したかどうか)。
+        以前はロットを1件ずつ削除してからHoldingを削除していたため、途中で失敗
+        すると部分削除が残った。現在は失敗時に旧stateが完全に維持される。
+
+        ロット数がMAX_LOTS_PER_HOLDINGを超える場合は、**何も削除せずに**
+        HoldingLotLimitExceededErrorを送出する。
+        """
+        plan = self.build_holding_replacement_plan(owner, stock_code, purchase=None)
+        self.apply_holding_replacement_plan(plan)
+        return plan.holding_delete is not None

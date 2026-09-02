@@ -83,6 +83,20 @@ class JsonCollectionStore[T: BaseModel]:
         items[item_id] = item
         self._write_all(items)
 
+    def apply_batch(self, delete_ids: Iterable[str], puts: Iterable[T]) -> None:
+        """削除と追加/更新を1回の書き込みで適用する(Issue #61 Phase B2)。
+
+        _write_all()は一時ファイルへ書いてからos.replace()で差し替えるため、
+        このファイルについては部分適用が発生しない(全部反映されるか、
+        元のファイルがそのまま残るかのどちらか)。
+        """
+        items = self._read_all()
+        for item_id in delete_ids:
+            items.pop(str(item_id), None)
+        for item in puts:
+            items[str(getattr(item, self._id_field))] = item
+        self._write_all(items)
+
     def upsert_many(self, new_items: Iterable[T]) -> None:
         items = self._read_all()
         for item in new_items:
