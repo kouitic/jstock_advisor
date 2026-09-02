@@ -425,3 +425,44 @@ def test_price_freshness_is_not_wired_into_business_decisions_yet() -> None:
         "価格 freshness が定義元以外から参照されている。"
         f"Phase B1 では業務判定へ接続しない: {referencing}"
     )
+
+
+# --- T8 / T9: naive datetime を暗黙処理しない ---------------------------------
+
+
+def test_t8_expected_session_rejects_naive_datetime() -> None:
+    """naive な `now` は ValueError(暗黙にUTC扱いしない)。
+
+    naive を暗黙にUTC扱いすると、JST 00:00〜08:59 に相当する時刻で
+    1営業日ずれたセッションを返す。本Issueが是正しようとしている
+    「基準がずれたまま鮮度を判定する」問題を別の形で再導入することになるため、
+    入口で拒否する(`domain/jst.py` の規約に従う)。
+    """
+    naive = dt.datetime(2026, 9, 2, 8, 0)  # noqa: DTZ001 - naive であること自体が検証対象
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        expected_latest_completed_trading_session(naive, _CALENDAR)
+
+
+def test_t9_missed_sessions_rejects_naive_datetime() -> None:
+    """`missed_trading_sessions` も naive な `now` を受け付けない。
+
+    検証は `expected_latest_completed_trading_session()` の入口1箇所で行い、
+    ここでは重複チェックを置かない。呼び出し経路として拒否されることを固定する。
+    """
+    naive = dt.datetime(2026, 9, 2, 8, 0)  # noqa: DTZ001 - naive であること自体が検証対象
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        missed_trading_sessions(dt.date(2026, 8, 31), naive, _CALENDAR)
+
+
+def test_t9b_unknown_as_of_returns_before_timezone_validation() -> None:
+    """`as_of_date` が None の経路では `now` を検証しない(仕様の明示)。
+
+    評価に使わない `now` の形式で例外にする必要はないため、
+    UNKNOWN を返す経路は naive でも通す。この非対称は意図的であり、
+    docstring と本テストで契約として固定する。
+    """
+    naive = dt.datetime(2026, 9, 2, 8, 0)  # noqa: DTZ001 - naive であること自体が検証対象
+
+    assert missed_trading_sessions(None, naive, _CALENDAR) is MISSED_SESSIONS_UNKNOWN

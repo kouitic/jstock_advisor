@@ -44,7 +44,7 @@ import datetime as dt
 from typing import Final
 
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.jst import to_jst
+from jstock_advisor.domain.jst import require_timezone_aware, to_jst
 
 # JPXの通常立会の大引け(2024-11-05以降)。JST。
 # 現物の日足barはこの時刻以降に確定するため、これより前は当日のbarを期待しない。
@@ -72,7 +72,16 @@ def expected_latest_completed_trading_session(
         平日 18:00 JST  -> 当日
         土曜 12:00 JST  -> 直前の金曜
         月曜が祝日で火曜 08:00 JST -> 前週金曜
+
+    `now` はtimezone-aware必須。naiveなdatetimeを暗黙にUTC扱いすると、
+    JST 00:00〜08:59に相当する時刻で1日ずれた営業日を返し、
+    本Issueが是正しようとしている「基準がずれたまま鮮度を判定する」問題を
+    別の形で再導入することになる(`domain/jst.py` の規約に従う)。
+
+    Raises:
+        ValueError: `now` がtimezone-naiveな場合。
     """
+    require_timezone_aware(now)
     jst_now = to_jst(now)
     candidate = jst_now.date()
 
@@ -103,6 +112,13 @@ def missed_trading_sessions(
     `filter_future_bars`(domain/signals)の責務である。
 
     `fetched_at` へのfallbackは行わない(モジュールdocstring参照)。
+
+    `now` のtimezone-aware検証は`expected_latest_completed_trading_session()`が
+    行う。`as_of_date`がNoneの場合は同関数を呼ばずに返すため、その経路では
+    `now`を検証しない(検証すべき用途が無いため。重複チェックは置かない)。
+
+    Raises:
+        ValueError: `as_of_date` が指定されており、かつ `now` がtimezone-naiveな場合。
     """
     if as_of_date is None:
         return MISSED_SESSIONS_UNKNOWN
