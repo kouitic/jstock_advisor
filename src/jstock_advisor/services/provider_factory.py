@@ -108,7 +108,7 @@ def build_real_provider_bundle(now: dt.datetime, config: AppConfig) -> ProviderB
             edinet_cache_repository=edinet_filing_cache,
         ),
         dividend_data=dividend_data,
-        shareholder_benefit=LocalRegistryShareholderBenefitProvider(),
+        shareholder_benefit=LocalRegistryShareholderBenefitProvider(now=now),
         disclosure=EdinetYfinanceDisclosureProvider(
             document_source=edinet_document_source,
             cache_repository=EdinetDisclosureCacheRepository(),

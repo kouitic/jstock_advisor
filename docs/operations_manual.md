@@ -1544,3 +1544,64 @@ jstock valuation-shadow export --output shadow.jsonl --summary shadow_summary.cs
   使用可否・理由コードがhistorical factです)
 - shadow価格(shadow_entry_price等)は仮説anchor×判定時点の保存済み
   安全余裕率による参考値であり、約定・到達の判定には使いません
+
+---
+
+## 18. read-only観測・health checkにおける副作用確認(Issue #120、2026-09-02追加)
+
+### 18.1 なぜ必要か
+
+2026-09-02 08:00 JSTに、買い候補判定・保有銘柄判定の日次バッチが**両方とも
+1銘柄も処理せずに停止**する障害が発生した。当日の判定・LINE通知はいずれも
+0件だった(データ破壊・誤判定は無し。「何も出さなかった」障害)。
+
+原因は、バッチ開始時に呼ぶ株主優待レジストリの健全性チェックが、
+名前上は読み取りAPIである `list_all()` を呼び、その内部で権利確定日の
+再計算結果を `repository.save()`(DynamoDB PutItem)へ書き戻していたこと。
+両Lambdaは当該テーブルへ**読み取り専用IAM**しか持たないため
+`AccessDeniedException` となり、dispatch前にバッチ全体が落ちた。
+
+書き戻しは「再計算値が保存値と異なるとき」だけ発生するため、権利確定日が
+繰り上がる日付境界を越えた日に初めて顕在化した。**同じコード・同じIAMのまま、
+日付だけで発火する**タイプの障害である。
+
+### 18.2 恒久ルール
+
+**実行するコマンドやメソッドの名称がread系だからという理由で、
+安全(read-only)と判断してはならない。**
+
+Production read-only verification、health check、validation、
+IAM least-privilege設計を行う際は、**呼び出し先まで含めて**次の副作用が
+無いことを確認する。
+
+| 確認対象 | 具体例 |
+|---|---|
+| repository層の状態変更 | `save` / `upsert` / `update` / `delete` |
+| DynamoDB | `PutItem` / `UpdateItem` / `DeleteItem` / `BatchWriteItem` / `TransactWriteItems` |
+| S3 | `PutObject` / `DeleteObject` |
+| キュー・非同期 | SQS `SendMessage` / SNS `Publish` / Lambda `Invoke` |
+| 外部送信 | LINE Messaging APIへの送信 |
+
+確認は名前の1段スキャンでは不十分である。**Issue #120の実バグは、
+read-like名の関数から1段だけ辿っても検出できなかった**
+(`list_all()` → `_refresh_and_persist()` → `save()` と、write動詞を持たない
+privateヘルパを1段挟んでいたため)。推移的に辿ること。
+
+### 18.3 設計時の要求
+
+- read-onlyと定義した処理にhidden writeを持たせない。
+- 書き込みを伴う場合は、**API契約・名称・IAM・テスト**からその事実が
+  判別できるようにする(例: `get_or_create_*` のように名称へ表す)。
+- 観測・健全性チェックの類は、失敗しても本体処理を止めない(fail-soft)。
+  ただし**沈黙させない**。件数等が取得できなかった事実を構造化ログへ残す。
+- fail-softの対象は観測処理自身の失敗に限る。**判定に必要なデータの取得失敗まで
+  握り潰さない**(business dataの取得失敗は従来どおり銘柄単位で失敗として扱う)。
+
+### 18.4 IAM設計との関係
+
+新しいテーブルへの権限を設計する際は、11節(テーブル追加時の注意)に加えて、
+そのLambdaが到達しうる**すべてのコードパス**の副作用を確認したうえで
+最小権限を決める。read-onlyで足りるはずの経路にwriteが混ざっている場合、
+権限を足すのではなく**その経路のwriteを外せないか**を先に検討する
+(Issue #120では、書き戻していた値が純粋な派生値であり永続化する価値が
+無かったため、IAMを広げずに読み取り側の書き込みを除去した)。
