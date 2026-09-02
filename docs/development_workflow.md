@@ -278,7 +278,7 @@ Production で `AccessDenied` / provider failure / Lambda failure 等を
 複数 Issue をまとめて release する場合、次を**すべて**満たすこと。
 
 ```
-OPEN な release-blocker = 0
+release scope 外に OPEN な release-blocker が無い
 included Issues がすべて merge 済み
 各 Issue の Production Verification Plan が既知
 先行する mandatory verification に未完了が無い
@@ -288,14 +288,58 @@ release inventory を再構築済み(baseline → target の全 commit を列挙
 人間が exact release candidate(SHA)を承認
 ```
 
+### release scope 内の blocker remediation は release へ含められる
+
+第1条件は「**release scope 外**に OPEN な release-blocker が無いこと」である。
+`OPEN な release-blocker = 0` ではない。
+
+`release-blocker` の lifecycle は
+[docs/issue_label_policy.md](issue_label_policy.md) §6 のとおり
+
+```
+blocker 付与 → 修正の merge → Production deploy → Immediate Verification
+  → mandatory verification → ChatGPT review → human approval → blocker 解除
+```
+
+であり、**Production deploy が blocker 解除の前提**である。したがって
+「OPEN blocker が 1 件でもあれば deploy できない」と適用すると循環し、
+Production-target defect を恒久的に remediate できなくなる。
+
+release scope 内の `release-blocker` については、次を**すべて**満たす場合に
+release へ含めてよい。
+
+```
+今回の release がその blocker の remediation を含む
+その修正が merge 済み
+その Issue の Production Verification Plan が定義済み
+deploy 後も blocker を維持する(deploy では解除しない)
+mandatory verification + ChatGPT review + human approval まで解除しない
+```
+
+これは「OPEN blocker を無視してよい」という緩和ではない。
+**解除条件は一切緩めない。** deploy はあくまで verification の前提であり、
+deploy 自体が blocker を解除する根拠にはならない。
+
+release scope 外に OPEN な `release-blocker` がある場合は、その blocker の
+block 条件(条件付き release-blocker の扱いは
+[docs/issue_label_policy.md](issue_label_policy.md) §6)を確認し、
+今回の release を止めるものかどうかを判断する。止めるものであれば
+grouped release へ進まない。
+
 ### blocker remediation release への piggyback は禁止
 
-Production が障害状態にあり、それを解消するための release
+Production が**障害状態**にあり、それを解消するための release
 (`BLOCKER_REMEDIATION_RELEASE`)には、**無関係な変更を相乗りさせない**。
 
 この場合の release scope は「その障害の修正のみ」であることを、
 baseline → target の commit 列挙で確認する。
 `単に main が最新だから OK` としない。
+
+`BLOCKER_REMEDIATION_RELEASE`(Production 障害の解消専用)と、
+複数の Production-target blocker をまとめて解消する通常の grouped release は
+別物である。前者は scope を障害修正のみに限定する。後者は上記の条件を
+満たす限り複数 Issue を含めてよいが、**いずれの場合も
+release scope 外の変更を便乗させない**点は共通である。
 
 ---
 
@@ -361,3 +405,4 @@ Production failure injection 禁止
 | 日付 | 変更概要 |
 |---|---|
 | 2026-09-02 | 新規作成(Issue #122)。Stabilization Sprint の lane / WIP 制限 / 実装パイプライン / ローカルテスト方針 / GitHub 永続化 / status freshness / negative-path 分類 / AWS pagination / grouped release / 人間承認の境界を正本化した。既存の Human merge approval・Human Production approval・exact ChangeSet approval・release-blocker lifecycle・one Issue / one implementation owner・hidden-write 確認・Production failure injection 禁止・duplicate Issue 確認はいずれも緩和していない |
+| 2026-09-03 | §9 の grouped release 第1条件を「OPEN な release-blocker = 0」から「release scope 外に OPEN な release-blocker が無い」へ修正(Issue #122)。release-blocker lifecycle(docs/issue_label_policy.md §6)では Production deploy が blocker 解除の前提であるため、旧記述では Production-target defect の remediation release が循環して実施不能になる不整合があった。あわせて release scope 内 blocker を release へ含めるための条件(remediation を含む / merge 済み / Verification Plan 定義済み / deploy 後も blocker 維持 / mandatory verification + ChatGPT review + human approval まで解除しない)を明文化し、`BLOCKER_REMEDIATION_RELEASE` と通常の grouped release の区別を補足した。**解除条件は一切緩和していない** |
