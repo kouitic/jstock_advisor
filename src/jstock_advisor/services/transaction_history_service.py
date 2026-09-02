@@ -141,13 +141,19 @@ class TransactionHistoryService:
         「同一バイト列のCSVの再取込は正常なno-opである」という契約に違反する。
         取込済みかどうかの判定を、**現在の可変状態へ依存させない**。
 
-        この事前readは**あくまで最適化(fast-path)**であり、一意性の権威では
-        ない。事前readと書き込みの間に他プロセスが同じidを保存する余地は残るが、
-        最終的な書き込みは`save_if_absent`(DynamoDB実装では条件付き書き込み)で
-        あるため、その競合は書き込み側で必ず検出されFalseになる。
+        この事前readには`get_consistent()`(DynamoDB実装ではConsistentRead=True)を
+        使う。通常の`get()`は結果整合性読み取りであり、保存済みのTransactionが
+        一時的に見えないことがある。その場合に`build_execution_plan()`へ進むと、
+        取込後に削除された推奨を参照する再取込がProductionでだけERRORになり、
+        上記の契約を満たせない。
+
+        ただし事前readは強い整合性で読んでも**あくまで最適化(fast-path)**であり、
+        一意性の権威ではない。事前readと書き込みの間に他プロセスが同じidを保存する
+        余地は残るが、最終的な書き込みは`save_if_absent`(DynamoDB実装では条件付き
+        書き込み)であるため、その競合は書き込み側で必ず検出されFalseになる。
         **事前readで分岐して無条件saveを行うcheck-then-actにはしない。**
         """
-        existing = self._transactions.get(transaction_id)
+        existing = self._transactions.get_consistent(transaction_id)
         if existing is not None:
             return False
 

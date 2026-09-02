@@ -619,9 +619,9 @@ def test_pre_read_fast_path_does_not_weaken_the_conditional_write(
         "execution_price": Decimal("4200"),
         "execution_date": dt.date(2026, 3, 1),
     }
-    assert repository.get(transaction_id) is None
+    assert repository.get_consistent(transaction_id) is None
 
-    original_get = repository.get
+    original_get = repository.get_consistent
     calls: list[str] = []
 
     def _stale_get(item_id: str) -> Any:
@@ -631,12 +631,12 @@ def test_pre_read_fast_path_does_not_weaken_the_conditional_write(
             return None
         return original_get(item_id)
 
-    repository.get = _stale_get  # type: ignore[method-assign]
+    repository.get_consistent = _stale_get  # type: ignore[method-assign]
     try:
         first = history.record_execution_if_absent(transaction_id=transaction_id, **kwargs)
         second = history.record_execution_if_absent(transaction_id=transaction_id, **kwargs)
     finally:
-        repository.get = original_get  # type: ignore[method-assign]
+        repository.get_consistent = original_get  # type: ignore[method-assign]
 
     assert (first, second) == (True, False), (
         "事前readが両方とも不存在を返しても、書き込みは1件だけ成立すること"
@@ -666,3 +666,152 @@ def test_final_write_is_insert_if_absent_not_unconditional_save(
 
     assert history.record_execution_if_absent(transaction_id=transaction_id, **kwargs) is True
     assert _count(history) == 1
+
+
+# --- T18 / T19 duplicate fast-pathの読み取り整合性 -----------------------------
+#
+# Productionでは `TransactionRepository.get()` は
+# `DynamoDbCollectionStore.get()`(ConsistentReadなし = 結果整合性読み取り)へ
+# 到達するため、直前に保存したTransactionが一時的に見えないことがある。
+# その状態で `build_execution_plan()` へ進むと、取込後に削除された推奨を参照する
+# 再取込がProductionでだけERRORになり、「保存済みの行の再取込は正常なno-op」
+# という契約を満たせない。取込済み判定だけを strongly consistent read で行う。
+
+
+def test_duplicate_fast_path_uses_consistent_read_not_eventually_consistent_get(
+    tmp_path: Path, repository: TransactionRepository
+) -> None:
+    """T18: 通常getがstaleでNoneを返しても、取込済み判定は既存Transactionを見つける。
+
+    `build_execution_plan()` を呼ばずに SKIPPED_DUPLICATE になること
+    (可変状態であるRecommendationの検証より前に、重複であることが確定する)。
+    """
+    from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
+        RecommendationRepository,
+    )
+
+    recommendations = RecommendationRepository(store_dir=tmp_path)
+    recommendations.save(_recommendation("R1"))
+    history = TransactionHistoryService(
+        transaction_repository=repository, recommendation_repository=recommendations
+    )
+    importer = TransactionCsvImportService(transaction_history_service=history)
+    header = (
+        "owner,stock_code,transaction_type,execution_date,shares,execution_price,"
+        "recommendation_id\n"
+    )
+    path = tmp_path / "with_rec.csv"
+    path.write_text(header + f"{_OWNER},{_CODE},BUY,2026-03-01,100,4200,R1\n", encoding="utf-8")
+    importer.import_file(path)
+    assert _count(history) == 1
+
+    # 結果整合性読み取りが古いスナップショットを返す状況を模す。
+    def _stale_get(_transaction_id: str) -> Any:
+        return None
+
+    repository.get = _stale_get  # type: ignore[method-assign]
+
+    # 可変状態(Recommendation)は取込済み判定より後でなければ参照されない。
+    def _forbidden(_recommendation_id: str) -> Any:
+        raise AssertionError(
+            "取込済み判定より前にRecommendationRepositoryを参照している"
+            "(build_execution_planへ進んでしまっている)"
+        )
+
+    recommendations.get = _forbidden  # type: ignore[method-assign]
+
+    summary = importer.import_file(path)
+
+    assert summary.results[0].status is CsvRowStatus.SKIPPED_DUPLICATE
+    assert summary.error_count == 0, "staleな結果整合性読み取りで再取込がERRORになった"
+    assert summary.skipped_count == 1
+    assert _count(history) == 1
+
+
+def test_duplicate_fast_path_reads_through_get_consistent(
+    history: TransactionHistoryService, repository: TransactionRepository
+) -> None:
+    """T18補: 取込済み判定が `get_consistent()` を経由していること。
+
+    ローカルJSON実装では get() と get_consistent() の結果が同じであるため、
+    「どちらを呼んだか」を直接固定しないとProductionでの整合性差が回帰しうる。
+    """
+    calls: list[str] = []
+    original_get_consistent = repository.get_consistent
+
+    def _spy(transaction_id: str) -> Any:
+        calls.append(transaction_id)
+        return original_get_consistent(transaction_id)
+
+    repository.get_consistent = _spy  # type: ignore[method-assign]
+
+    transaction_id = build_row_transaction_id("e" * 64, 2)
+    assert (
+        history.record_execution_if_absent(
+            transaction_id=transaction_id,
+            owner=_OWNER,
+            stock_code=_CODE,
+            transaction_type=TransactionType.BUY,
+            shares=100,
+            execution_price=Decimal("4200"),
+            execution_date=dt.date(2026, 3, 1),
+        )
+        is True
+    )
+
+    assert calls == [transaction_id], "取込済み判定がget_consistent()を経由していない"
+
+
+def test_conditional_write_still_protects_race_after_consistent_lookup(
+    tmp_path: Path, repository: TransactionRepository
+) -> None:
+    """T19: consistent lookup時点では不存在でも、競合相手のinsert後は書き込みが負ける。
+
+    strong readを足しても「read → 無条件save」にはしない。一意性の権威は
+    引き続き `save_if_absent`(DynamoDB実装では条件付き書き込み)側にある。
+    """
+    from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
+        RecommendationRepository,
+    )
+
+    recommendations = RecommendationRepository(store_dir=tmp_path)
+    history = TransactionHistoryService(
+        transaction_repository=repository, recommendation_repository=recommendations
+    )
+    transaction_id = build_row_transaction_id("f" * 64, 2)
+    kwargs: dict[str, Any] = {
+        "owner": _OWNER,
+        "stock_code": _CODE,
+        "transaction_type": TransactionType.BUY,
+        "shares": 100,
+        "execution_price": Decimal("4200"),
+        "execution_date": dt.date(2026, 3, 1),
+    }
+
+    original_get_consistent = repository.get_consistent
+    lookups: list[str] = []
+
+    def _lookup_then_competitor_inserts(item_id: str) -> Any:
+        """取込済み判定は「不存在」を返すが、その直後に競合相手が同じidを保存する。"""
+        lookups.append(item_id)
+        result = original_get_consistent(item_id)
+        if len(lookups) == 1:
+            assert result is None
+            competitor = TransactionHistoryService(
+                transaction_repository=TransactionRepository(store_dir=tmp_path),
+                recommendation_repository=recommendations,
+            )
+            assert (
+                competitor.record_execution_if_absent(transaction_id=transaction_id, **kwargs)
+                is True
+            )
+        return result
+
+    repository.get_consistent = _lookup_then_competitor_inserts  # type: ignore[method-assign]
+
+    saved = history.record_execution_if_absent(transaction_id=transaction_id, **kwargs)
+
+    repository.get_consistent = original_get_consistent  # type: ignore[method-assign]
+
+    assert saved is False, "consistent lookupが不存在でも、条件付き書き込みで競合を検出すること"
+    assert _count(history) == 1, "競合により同一transaction_idが二重登録された"
