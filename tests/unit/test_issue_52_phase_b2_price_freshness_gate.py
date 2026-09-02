@@ -399,3 +399,166 @@ def test_t16_t17_regression_modules_exist() -> None:
         "test_issue_120_registry_read_purity.py",
     ):
         assert (tests_dir / name).exists(), f"{name} が存在しない"
+
+
+# --- T18-T22: 未来日の as_of_date(review finding F1) --------------------------
+#
+# `missed_trading_sessions()` は未来日に対して 0 を返す(取りこぼしは負にならない、
+# という観測としては正しい contract)。Phase B1 ではこの primitive を業務判定へ
+# 接続していなかったため許容できたが、B2 で接続したことにより
+# **未来日の株価が NORMAL として売買判定に使われる**状態になっていた。
+#
+# 未来日は「新鮮」ではなく timestamp / data integrity の異常である。
+# 観測の contract は壊さず、policy 層(`_is_future_as_of`)で分離する。
+
+
+def _future_session(days: int) -> dt.date:
+    """期待される直近完了セッションより `days` 日ぶん未来の日付。"""
+    return expected_latest_completed_trading_session(_NOW, _CALENDAR) + dt.timedelta(
+        days=days
+    )
+
+
+@pytest.mark.parametrize("days", [1, 3, 30])
+def test_t18_buy_future_as_of_is_hard_stop(days: int) -> None:
+    """T18: BUY は未来日の基準日を HARD_STOP とする。"""
+    verdict, reason = evaluate_buy_price_freshness(
+        _future_session(days), _NOW, _CALENDAR
+    )
+
+    assert verdict is PriceFreshnessVerdict.HARD_STOP
+    assert verdict is not PriceFreshnessVerdict.NORMAL
+    assert reason is not None
+    assert "未来" in reason
+
+
+@pytest.mark.parametrize("days", [1, 3, 30])
+def test_t19_holdings_future_as_of_is_data_insufficient(days: int) -> None:
+    """T19: holdings/SELL は未来日の基準日を DATA_INSUFFICIENT とする。"""
+    verdict, reason = evaluate_holdings_price_freshness(
+        _future_session(days), _NOW, _CALENDAR
+    )
+
+    assert verdict is PriceFreshnessVerdict.DATA_INSUFFICIENT
+    assert verdict is not PriceFreshnessVerdict.NORMAL
+    assert reason is not None
+    assert "未来" in reason
+
+
+def test_t20_future_date_does_not_pass_business_gate_as_normal() -> None:
+    """T20: 未来日が missed=0 経由で NORMAL として gate を通らないこと。
+
+    observation(`missed_trading_sessions`)が 0 を返すこと自体は仕様どおりだが、
+    その 0 が judgement へそのまま流れないことを固定する。
+    観測と policy のどちらを直しても片方だけでは満たせない契約である。
+    """
+    from jstock_advisor.domain.market_session import missed_trading_sessions
+
+    future = _future_session(1)
+
+    # 観測は 0 のまま(contract を壊していない)
+    assert missed_trading_sessions(future, _NOW, _CALENDAR) == 0
+
+    # しかし judgement は NORMAL にならない
+    buy_verdict, _ = evaluate_buy_price_freshness(future, _NOW, _CALENDAR)
+    holdings_verdict, _ = evaluate_holdings_price_freshness(future, _NOW, _CALENDAR)
+
+    assert buy_verdict is not PriceFreshnessVerdict.NORMAL
+    assert holdings_verdict is not PriceFreshnessVerdict.NORMAL
+
+
+def test_t21_expected_session_date_is_normal() -> None:
+    """T21: 期待セッションちょうど(未来ではない)は NORMAL のまま。
+
+    未来日の拒否が1日ぶん厳しくなって正常系を巻き込んでいないことの確認。
+    """
+    expected = expected_latest_completed_trading_session(_NOW, _CALENDAR)
+
+    buy_verdict, buy_reason = evaluate_buy_price_freshness(expected, _NOW, _CALENDAR)
+    holdings_verdict, holdings_reason = evaluate_holdings_price_freshness(
+        expected, _NOW, _CALENDAR
+    )
+
+    assert buy_verdict is PriceFreshnessVerdict.NORMAL
+    assert buy_reason is None
+    assert holdings_verdict is PriceFreshnessVerdict.NORMAL
+    assert holdings_reason is None
+
+
+def test_t22_shared_fixtures_do_not_depend_on_future_dates() -> None:
+    """T22: 価格鮮度と無関係なテストの fixture が未来日に依存していないこと。
+
+    「未来日なら missed=0 になる」性質を使って正常系 fixture を作ると、
+    異常値許容がテスト上で固定されてしまう(F1 の再発)。
+    """
+    tests_dir = Path(__file__).resolve().parent
+    forbidden = "dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date()"
+
+    for name in (
+        "test_buy_signal_service.py",
+        "test_holdings_watchlist_handler.py",
+    ):
+        source = (tests_dir / name).read_text(encoding="utf-8")
+        assert forbidden not in source, (
+            f"{name} が『未来日で missed=0 になる』性質へ依存している。"
+            "expected_latest_completed_trading_session から導出すること"
+        )
+
+
+# --- T23: UNKNOWN の business path 到達性 --------------------------------------
+
+
+def test_t23_as_of_date_is_required_by_current_typed_contract() -> None:
+    """T23: 現行の型契約では as_of_date は必須であり、UNKNOWN は到達しない。
+
+    `PriceSnapshot.as_of_date` / `StockSnapshot.price_as_of_date` はいずれも
+    `dt.date`(optional でない)であるため、Production の通常経路で
+    `None` が渡ることはない。UNKNOWN policy は**将来 optional 化された場合の
+    安全弁**として定義してあり、現時点では到達不能である。
+
+    ```
+    UNKNOWN_POLICY_DEFINED                    = YES
+    UNKNOWN_BUSINESS_PATH_CURRENTLY_REACHABLE = NO
+    ```
+
+    型を optional 化する変更が入った際に、この assert が落ちることで
+    「安全弁が実際に必要になった」ことに気づけるようにする。
+    """
+    import typing
+
+    from jstock_advisor.interfaces.types import PriceSnapshot
+    from jstock_advisor.services.stock_snapshot_service import StockSnapshot
+
+    price_hint = typing.get_type_hints(PriceSnapshot)["as_of_date"]
+    snapshot_hint = typing.get_type_hints(StockSnapshot)["price_as_of_date"]
+
+    assert price_hint is dt.date, (
+        "PriceSnapshot.as_of_date が optional 化された。"
+        "evaluate_screening の price_as_of_date=None による skip が"
+        "安全弁を無効化しないか確認すること"
+    )
+    assert snapshot_hint is dt.date, (
+        "StockSnapshot.price_as_of_date が optional 化された。同上"
+    )
+
+
+def test_t23b_screening_skips_only_when_price_date_is_not_supplied() -> None:
+    """T23b: evaluate_screening の optional 引数が安全弁を消さないこと。
+
+    `price_as_of_date=None` は「呼び出し側が価格を渡していない」を意味し、
+    「基準日が不明」ではない。前者では鮮度判定を行わず、後者(将来 optional 化
+    された場合)は `evaluate_buy_price_freshness(None, ...)` が HARD_STOP を返す。
+
+    この2つを混同すると、型が optional 化されたときに
+    **未指定として素通りする**経路ができる。
+    """
+    # 「基準日が不明」は HARD_STOP(skip ではない)
+    verdict, reason = evaluate_buy_price_freshness(None, _NOW, _CALENDAR)
+    assert verdict is PriceFreshnessVerdict.HARD_STOP
+    assert reason is not None
+
+    holdings_verdict, holdings_reason = evaluate_holdings_price_freshness(
+        None, _NOW, _CALENDAR
+    )
+    assert holdings_verdict is PriceFreshnessVerdict.DATA_INSUFFICIENT
+    assert holdings_reason is not None

@@ -22,10 +22,17 @@ holdings/SELL  売る/売らないの誤りは実損に直結する
 ```
 BUY            missed=0 -> NORMAL / missed=1 -> WARNING / missed>=2 -> HARD_STOP
                as_of UNKNOWN -> HARD_STOP
+               as_of が未来日 -> HARD_STOP
 
 holdings/SELL  missed=0 -> NORMAL / missed>=1 -> DATA_INSUFFICIENT
                as_of UNKNOWN -> DATA_INSUFFICIENT
+               as_of が未来日 -> DATA_INSUFFICIENT
 ```
+
+未来日は「取りこぼし0(=新鮮)」ではなく **timestamp / data integrity の異常**として
+扱う。`missed_trading_sessions()` は未来日に対して 0 を返すが(観測としては正しい)、
+その 0 をそのまま judgement へ通すと未来日の価格が NORMAL になってしまう。
+観測の contract は壊さず、policy層で分離する(`_is_future_as_of`)。
 
 休場日・土日・祝日・寄付前・大引け前後は**個別の閾値を持たない**。
 `expected_latest_completed_trading_session()` の定義により missed=0 へ畳み込まれる
@@ -45,6 +52,7 @@ from typing import Final
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.market_session import (
     JPX_REGULAR_SESSION_CLOSE_JST,
+    expected_latest_completed_trading_session,
     missed_trading_sessions,
 )
 
@@ -71,6 +79,10 @@ class PriceFreshnessVerdict(StrEnum):
 
 # 判定理由の文言はここへ集約する。各所へハードコードして分散させない。
 _REASON_UNKNOWN_BUY: Final = "株価の基準日を確認できないため買い判定を実施しない"
+_REASON_FUTURE_BUY: Final = (
+    "株価の基準日が未来日({as_of})のため買い判定を実施しない"
+)
+_REASON_FUTURE_HOLDINGS: Final = "株価の基準日が未来日({as_of})のため判定できません"
 _REASON_UNKNOWN_HOLDINGS: Final = "株価の基準日を確認できないため判定できません"
 _REASON_WARNING_BUY: Final = "株価が{missed}取引セッション前のものです"
 _REASON_HARD_STOP_BUY: Final = (
@@ -79,6 +91,33 @@ _REASON_HARD_STOP_BUY: Final = (
 _REASON_INSUFFICIENT_HOLDINGS: Final = (
     "最新の株価を確認できない(株価が{missed}取引セッション前)ため判定できません"
 )
+
+
+def _is_future_as_of(
+    as_of_date: dt.date,
+    now: dt.datetime,
+    calendar: BusinessCalendar,
+    session_close_jst: dt.time,
+) -> bool:
+    """価格の基準日が、期待される直近完了セッションより**未来**か。
+
+    未来日の市場価格は「新鮮」ではなく **timestamp / data integrity の異常**である。
+    まだ発生していない取引の終値が存在するはずがないため、provider側の時刻ずれ、
+    タイムゾーン取り違え、あるいはデータ破損を示す。
+
+    `missed_trading_sessions()` は未来日に対して 0 を返す(取りこぼしは負にならない、
+    という観測としては正しい contract)。しかしその 0 を鮮度judgementへそのまま
+    通すと **未来日の価格が NORMAL として売買判定に使われる**。
+    観測の contract は壊さず、policy層でこの異常を明示的に検査して分離する。
+
+    なお `filter_future_bars`(domain/signals)は **`as_of_date` を基準として
+    未来の PriceBar を除外する**ものであり、`as_of_date` 自身の妥当性は検査しない。
+    さらに市場・セクター環境スコアの経路でのみ呼ばれ、`get_latest_price` →
+    `StockSnapshot.price_as_of_date` → BUY/holdings 判定の経路には適用されない。
+    したがって未来 as_of の検査はここで行う必要がある。
+    """
+    expected = expected_latest_completed_trading_session(now, calendar, session_close_jst)
+    return as_of_date > expected
 
 
 def evaluate_buy_price_freshness(
@@ -94,8 +133,16 @@ def evaluate_buy_price_freshness(
     `HARD_STOP` の理由は呼び出し側で `exclusion_reasons` へ、
     `WARNING` の理由は `warnings` へ入れることを想定する。
     """
+    if as_of_date is None:
+        return PriceFreshnessVerdict.HARD_STOP, _REASON_UNKNOWN_BUY
+    if _is_future_as_of(as_of_date, now, calendar, session_close_jst):
+        return (
+            PriceFreshnessVerdict.HARD_STOP,
+            _REASON_FUTURE_BUY.format(as_of=as_of_date.isoformat()),
+        )
+
     missed = missed_trading_sessions(as_of_date, now, calendar, session_close_jst)
-    if missed is None:
+    if missed is None:  # pragma: no cover - as_of_date is not None のため到達しない
         return PriceFreshnessVerdict.HARD_STOP, _REASON_UNKNOWN_BUY
     if missed >= BUY_HARD_STOP_MISSED_SESSIONS:
         return (
@@ -121,8 +168,16 @@ def evaluate_holdings_price_freshness(
     **当該銘柄を判定不能とするだけ**であり、バッチ全体を止める意図はない
     (呼び出し側は既存の銘柄単位ハンドリングへ委ねる)。
     """
+    if as_of_date is None:
+        return PriceFreshnessVerdict.DATA_INSUFFICIENT, _REASON_UNKNOWN_HOLDINGS
+    if _is_future_as_of(as_of_date, now, calendar, session_close_jst):
+        return (
+            PriceFreshnessVerdict.DATA_INSUFFICIENT,
+            _REASON_FUTURE_HOLDINGS.format(as_of=as_of_date.isoformat()),
+        )
+
     missed = missed_trading_sessions(as_of_date, now, calendar, session_close_jst)
-    if missed is None:
+    if missed is None:  # pragma: no cover - as_of_date is not None のため到達しない
         return PriceFreshnessVerdict.DATA_INSUFFICIENT, _REASON_UNKNOWN_HOLDINGS
     if missed >= HOLDINGS_DATA_INSUFFICIENT_MISSED_SESSIONS:
         return (
