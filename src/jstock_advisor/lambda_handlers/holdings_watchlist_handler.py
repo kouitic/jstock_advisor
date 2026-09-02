@@ -68,6 +68,10 @@ from jstock_advisor.domain.entities.holding_evaluation_record import (
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
+from jstock_advisor.domain.price_freshness import (
+    PriceFreshnessVerdict,
+    evaluate_holdings_price_freshness,
+)
 from jstock_advisor.domain.signals.exit_price_range import evaluate_exit_price_range
 from jstock_advisor.domain.signals.holding_decision_execution_plan import (
     resolve_execution_plan,
@@ -608,6 +612,72 @@ def _analyze_one_holding(
             data_quality_status="NOT_EVALUATED",
             confidence=None,
             error_code="DATA_FETCH_FAILED",
+        )
+        result = _HoldingResult(
+            recommended=False,
+            notified=False,
+            succeeded=False,
+            category="data_insufficient",
+            audit=audit,
+        )
+        _persist_holding_evaluation_record(
+            holding_evaluation_record_repo,
+            holding,
+            now,
+            execution_context,
+            rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            execution_plan_mode=None,
+            execution_plan_reason=None,
+            notification_enabled=None,
+            authoritative_engine=None,
+            authoritative_outcome_category=result.category,
+            authoritative_recommendation_id=None,
+            authoritative_notification_sent=False,
+            legacy_sell_ran=False,
+            legacy_sell_recommendation_id=None,
+            profit_taking_ran=False,
+            profit_taking_recommendation_id=None,
+            holding_decision_ran=False,
+            holding_decision_result_id=None,
+            holding_decision_notified=False,
+        )
+        return result
+
+    # Issue #52 Phase B2: 価格の基準日が古い場合、保有銘柄の判定を確定させない。
+    #
+    # BUYは「買わない」で済むが、保有側の誤りは実損に直結する
+    # (古い価格で損切りが発火する / 既に暴落しているのに売らない)。
+    # そのため1取引セッションでも取りこぼしていればDATA_INSUFFICIENTとする
+    # (閾値はdomain/price_freshness.pyへ集約。人間確定値)。
+    #
+    # **当該銘柄を判定不能とするだけであり、バッチ全体は止めない。**
+    # 上のsnapshot取得失敗時と同じ_HoldingResult経路へ合流させ、
+    # 呼び出し元の銘柄単位ループがそのまま次の銘柄へ進む。
+    price_freshness, price_freshness_reason = evaluate_holdings_price_freshness(
+        snapshot.price_as_of_date,
+        now,
+        BusinessCalendar.from_config(config.holiday_calendar),
+    )
+    if price_freshness is PriceFreshnessVerdict.DATA_INSUFFICIENT:
+        reason = price_freshness_reason or "最新の株価を確認できないため判定できません"
+        notification_service.notify_data_error(
+            holding.stock_code, reason, now, stock_name=holding.stock_name
+        )
+        audit = HoldingEvaluationAudit(
+            stock_code=holding.stock_code,
+            evaluated_at=now,
+            evaluation_status=EvaluationStatus.DATA_INSUFFICIENT,
+            raw_sell_recommendation_type=None,
+            raw_profit_recommendation_type=None,
+            final_recommendation_type=None,
+            notification_status=NotificationStatus.DATA_INSUFFICIENT,
+            notification_suppression_reason=reason,
+            sell_signal_status="NOT_EVALUATED",
+            profit_taking_status="NOT_EVALUATED",
+            fair_value_status="NOT_AVAILABLE",
+            data_quality_status="NOT_EVALUATED",
+            confidence=None,
+            error_code="PRICE_STALE",
         )
         result = _HoldingResult(
             recommended=False,
