@@ -102,6 +102,79 @@ class TransactionHistoryService:
         self._transactions.save(transaction)
         return transaction
 
+    def record_execution_if_absent(
+        self,
+        transaction_id: str,
+        owner: str,
+        stock_code: str,
+        transaction_type: TransactionType,
+        shares: int,
+        execution_price: Decimal,
+        execution_date: dt.date,
+        recommendation_id: str | None = None,
+        fee: Decimal = Decimal("0"),
+        tax: Decimal = Decimal("0"),
+        account_type: AccountType | None = None,
+        reason: str | None = None,
+        memo: str | None = None,
+        now: dt.datetime | None = None,
+    ) -> bool:
+        """指定したtransaction_idが未登録のときだけ保存する(Issue #61 Phase B3)。
+
+        保存できたらTrue、既に同じtransaction_idが存在すればFalse(何も書かない)。
+        CSV取込が「同じ行を何度取り込んでも1回だけ登録される」ことを、
+        **永続データそのもの**で保証するために使う。
+
+        `record_execution()`と違い`transaction_id`を呼び出し側が決める。
+        書き込みは`save_if_absent`(DynamoDB実装では条件付き書き込み)で原子的に
+        行うため、呼び出し側でexists()→save()というcheck-then-actを書かないこと。
+
+        **既存Transactionの内容は上書きしない。** 同じidが既にある場合は
+        「取込済み」とみなす。
+
+        ## duplicate fast-path と race safety の分担
+
+        既に同じtransaction_idが保存済みの場合、**計画の構築より前に**Falseを返す。
+        `build_execution_plan()`は`recommendation_id`の実在をRecommendation
+        リポジトリへ問い合わせるため、これを先に通すと「取込時点では存在したが
+        その後に削除された推奨」を参照する再取込がエラーになり、
+        「同一バイト列のCSVの再取込は正常なno-opである」という契約に違反する。
+        取込済みかどうかの判定を、**現在の可変状態へ依存させない**。
+
+        この事前readには`get_consistent()`(DynamoDB実装ではConsistentRead=True)を
+        使う。通常の`get()`は結果整合性読み取りであり、保存済みのTransactionが
+        一時的に見えないことがある。その場合に`build_execution_plan()`へ進むと、
+        取込後に削除された推奨を参照する再取込がProductionでだけERRORになり、
+        上記の契約を満たせない。
+
+        ただし事前readは強い整合性で読んでも**あくまで最適化(fast-path)**であり、
+        一意性の権威ではない。事前readと書き込みの間に他プロセスが同じidを保存する
+        余地は残るが、最終的な書き込みは`save_if_absent`(DynamoDB実装では条件付き
+        書き込み)であるため、その競合は書き込み側で必ず検出されFalseになる。
+        **事前readで分岐して無条件saveを行うcheck-then-actにはしない。**
+        """
+        existing = self._transactions.get_consistent(transaction_id)
+        if existing is not None:
+            return False
+
+        transaction = self.build_execution_plan(
+            transaction_id=transaction_id,
+            owner=owner,
+            stock_code=stock_code,
+            transaction_type=transaction_type,
+            shares=shares,
+            execution_price=execution_price,
+            execution_date=execution_date,
+            recommendation_id=recommendation_id,
+            fee=fee,
+            tax=tax,
+            account_type=account_type,
+            reason=reason,
+            memo=memo,
+            now=now,
+        )
+        return self._transactions.save_if_absent(transaction)
+
     def build_execution_plan(
         self,
         transaction_id: str,

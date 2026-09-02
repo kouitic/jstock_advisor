@@ -27,8 +27,35 @@ class TransactionRepository:
     def get(self, transaction_id: str) -> Transaction | None:
         return self._store.get(transaction_id)
 
+    def get_consistent(self, transaction_id: str) -> Transaction | None:
+        """get()のstrongly consistent read版(Issue #61 Phase B3)。
+
+        CSV取込の「この行は取込済みか」を判定する用途専用。DynamoDB実装の
+        通常のget()は結果整合性読み取りであり、直前に保存したTransactionが
+        一時的に見えないことがある。そこで取込済み判定だけをConsistentRead=Trueで
+        読み、「保存済みの行の再取込は現在の可変状態に依存しない正常なno-op」という
+        契約をProductionでも満たす。
+
+        通常のget()を一律これへ置き換えない(DynamoDBの読み取りコスト増加・
+        既存経路の挙動変更を避けるため)。
+        """
+        return self._store.get_consistent(transaction_id)
+
     def save(self, transaction: Transaction) -> None:
         self._store.upsert(transaction)
+
+    def save_if_absent(self, transaction: Transaction) -> bool:
+        """transaction_idが未登録なら保存してTrue、既に存在すればFalse(Issue #61 Phase B3)。
+
+        CSV取込の冪等性を**永続データそのもの**で保証するために使う。
+        DynamoDB実装は`attribute_not_exists(transaction_id)`の条件付き書き込みで
+        原子的にこれを保証するため、呼び出し側でexists()→save()という
+        check-then-actを書いてはならない(TOCTOU raceが残るため)。
+
+        既存Transactionの内容は**上書きしない**。同じtransaction_idが既にある
+        場合は「取込済み」とみなし、何も書かずにFalseを返す。
+        """
+        return self._store.insert_if_absent(transaction)
 
 
 class SkippedRecommendationRepository:
