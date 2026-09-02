@@ -116,6 +116,14 @@ class PortfolioService:
         返す)。"""
         return self._holdings.list_by_stock(stock_code)
 
+    def lot_exists(self, lot_id: str) -> bool:
+        """指定lot_idのロットが既に存在するか(Issue #61 Phase B1)。
+
+        CSV取込が「この行は適用済みか」を**永続データそのもの**で判定するために使う
+        (別に置いた台帳と実データがずれる状態を作らないため)。
+        """
+        return self._lots.get(lot_id) is not None
+
     def list_lots(self, owner: str, stock_code: str) -> list[PurchaseLot]:
         holding_id = build_holding_id(normalize_and_validate_owner(owner), stock_code)
         return self._lots.list_by_holding(holding_id)
@@ -134,10 +142,17 @@ class PortfolioService:
         sell_policy: str | None = None,
         profit_target_rate: float | None = None,
         memo: str | None = None,
+        lot_id: str | None = None,
     ) -> Holding:
         """build_purchase_write_plan()を呼び出した直後にその場で適用する薄い
         ラッパー(LINEボタン起点会話型UI・実装プランv2 3節。挙動・戻り値は
-        従来と完全に同じ)。"""
+        従来と完全に同じ)。
+
+        `lot_id`(Issue #61 Phase B1)を渡すと、そのlot_idでロットを作る。
+        **省略時は従来どおりuuid4を採番する**(既存の呼び出し元の挙動は不変)。
+        CSV取込は「同じCSVの同じ行」から決定的なlot_idを作ることで、
+        同じ行を再適用しても新しいロットが増えないようにする。
+        """
         plan = self.build_purchase_write_plan(
             owner,
             stock_code,
@@ -151,6 +166,7 @@ class PortfolioService:
             sell_policy=sell_policy,
             profit_target_rate=profit_target_rate,
             memo=memo,
+            lot_id=lot_id,
         )
         self._lots.upsert(plan.lot_put.model)  # type: ignore[arg-type]
         self._holdings.upsert(plan.holding_put.model)  # type: ignore[arg-type]
@@ -171,6 +187,7 @@ class PortfolioService:
         profit_target_rate: float | None = None,
         memo: str | None = None,
         now: dt.datetime | None = None,
+        lot_id: str | None = None,
     ) -> PurchaseWritePlan:
         """register_purchase()と同じ計算を行うが、一切の永続化を行わず
         「計画」のみを返す(LINEボタン起点会話型UI・実装プランv2 3節・
@@ -201,7 +218,9 @@ class PortfolioService:
         normalized_owner = normalize_and_validate_owner(owner)
         holding_id = build_holding_id(normalized_owner, stock_code)
         lot = PurchaseLot(
-            lot_id=str(uuid.uuid4()),
+            # Issue #61 Phase B1: 呼び出し元が決定的なlot_idを指定できる。
+            # 省略時は従来どおりuuid4(既存の呼び出し元の挙動は不変)。
+            lot_id=lot_id or str(uuid.uuid4()),
             owner=normalized_owner,
             holding_id=holding_id,
             stock_code=stock_code,
@@ -214,11 +233,16 @@ class PortfolioService:
         existing_lots = self._lots.list_by_holding(holding_id)
         existing_holding = self._holdings.get(holding_id)
         existing_holding_raw = self._holdings.get_raw_data(holding_id)
+        # Issue #61 Phase B1: 同一lot_idを二重に数えない。決定的lot_idを渡す
+        # 呼び出し元(CSV取込)が同じ行を再適用しても、Holdingはロット集合からの
+        # 再計算であるため**最終状態が変わらない**(収束する)ことを保証する。
+        # uuid4を採番する既存の呼び出し元にとっては何も変わらない(衝突しないため)。
+        lots_for_holding = [existing for existing in existing_lots if existing.lot_id != lot.lot_id]
         holding = self._compute_holding(
             normalized_owner,
             holding_id,
             stock_code,
-            [*existing_lots, lot],
+            [*lots_for_holding, lot],
             existing_holding,
             now,
             stock_name=stock_name,
@@ -380,6 +404,63 @@ class PortfolioService:
         """既存メタ情報を保持したまま、ロットからshares/average_purchase_priceを
         再計算する(企業行動調整サービスを注入している場合は分割調整も適用)。"""
         return self._recompute_holding(owner, stock_code)
+
+    def repair_holding_projection(
+        self, owner: str, stock_code: str, *, stock_name: str | None = None
+    ) -> bool:
+        """Holdingの集計値がロット集合とずれていれば再計算して直す(Issue #61 Phase B1)。
+
+        直した場合はTrue、既に整合していれば**何も書き込まず**False。
+
+        PurchaseLotとHoldingは別々の永続書き込みであり(ロット→Holdingの順)、
+        ロット保存後・Holding保存前に失敗すると部分状態が残る。CSV取込は
+        「その行のロットが存在するか」で適用済みを判定するため、この修復が
+        無いとその状態が永久に残る。部分状態は2種類ある。
+
+        - 既存保有への追加購入 … Holdingが古い集計値のまま残る
+        - **新規保有** … Holdingがそもそも存在しない(`existing is None`)
+
+        後者も修復対象に含める。ここで`existing is None`を理由に何もしないと、
+        ロットだけが存在して保有が作られない状態が永久に残る。
+
+        ロットが1件も無い場合は何もしない(空のロット集合から0株のHoldingを
+        新規作成してしまわないため。売却によりロットが尽きた保有の扱いは
+        本メソッドの責務ではない)。
+
+        整合している場合に書き込まないのは、`updated_at`を不必要に進めないため
+        (取込のやり直しは正常な操作であり、何も変わらないのに更新日時だけが
+        動くと、更新日時を手掛かりにした確認ができなくなる)。
+        """
+        normalized_owner = normalize_and_validate_owner(owner)
+        holding_id = build_holding_id(normalized_owner, stock_code)
+        lots = self._lots.list_by_holding(holding_id)
+        if not lots:
+            return False
+        existing = self._holdings.get(holding_id)
+        expected = self._compute_holding(
+            normalized_owner,
+            holding_id,
+            stock_code,
+            lots,
+            existing,
+            dt.datetime.now(dt.UTC),
+            stock_name=stock_name,
+        )
+        if existing is None:
+            self._holdings.upsert(expected)
+            return True
+        # ロットから導出される項目だけを比較する(メタ情報は再計算対象外)。
+        derived = (
+            "shares",
+            "average_purchase_price",
+            "total_purchase_amount",
+            "first_purchase_date",
+            "last_purchase_date",
+        )
+        if all(getattr(existing, field) == getattr(expected, field) for field in derived):
+            return False
+        self._holdings.upsert(expected)
+        return True
 
     def update_holding_meta(self, owner: str, stock_code: str, **fields: Any) -> Holding:
         """stock_name/market_segment/industry/investment_purpose/sell_policy/
