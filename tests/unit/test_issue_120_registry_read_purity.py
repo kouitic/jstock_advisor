@@ -32,13 +32,18 @@ Issue #120のスコープ外(別Issue)であり、ここでUTC基準の挙動を
 from __future__ import annotations
 
 import datetime as dt
+import json
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import yaml
 from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.enums import BenefitUtilityCategory
+from jstock_advisor.domain.valuation.shareholder_benefit_matching import (
+    compute_next_record_date,
+)
 from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
     ShareholderBenefitRegistryRepository,
 )
@@ -447,4 +452,181 @@ def test_provider_returns_none_for_unregistered_stock(
 ) -> None:
     provider = LocalRegistryShareholderBenefitProvider(repository=repository, now=_ON_ROLLOVER)
     assert provider.get_shareholder_benefit("9999") is None
+    assert repository.save_attempts == 0
+
+
+# --- E. 採用設計の固定(Issue #120 duplicate reconciliation で移植) -----------
+#
+# 以下2契約は、独立実装 4b99269 で固定されていたがcanonical側に無かったため移植した。
+# production codeは変更していない(canonical実装のまま)。
+
+
+class _BusinessDataUnavailableRepository(ShareholderBenefitRegistryRepository):
+    """判定に必要な優待データの取得自体が失敗するリポジトリ。"""
+
+    def list_all(self) -> list:  # type: ignore[override]
+        raise RuntimeError("registry backend is unavailable")
+
+    def get(self, stock_code: str) -> object | None:  # type: ignore[override]
+        raise RuntimeError("registry backend is unavailable")
+
+
+def test_fail_soft_is_scoped_to_the_health_check_only(tmp_path: Path) -> None:
+    """fail-softは健全性チェック自身の失敗に限る(Contract B)。
+
+    `check_registry_health`は失敗を握り潰してよいが、**判定に使う取得経路まで
+    握り潰してはならない**。握り潰すと、優待データが取れていないのに
+    「優待なし」として判定が進み、誤った投資判断につながる。
+
+    canonical実装のdocstringはこの限定を明記しているが、テストで固定されて
+    いなかったため追加する(実装は変更していない)。
+    """
+    repository = _BusinessDataUnavailableRepository(store_dir=tmp_path)
+    service = ShareholderBenefitRegistryService(repository=repository)
+    provider = LocalRegistryShareholderBenefitProvider(
+        repository=repository, now=_ON_ROLLOVER
+    )
+
+    # 健全性チェックは止まらない(fail-soft)
+    check_registry_health(min_expected_entries=1, service=service)
+
+    # 判定側の取得経路は従来どおり失敗として終端する(fail-close)
+    with pytest.raises(RuntimeError):
+        service.list_all(now=_ON_ROLLOVER)
+    with pytest.raises(RuntimeError):
+        service.get(_STOCK, now=_ON_ROLLOVER)
+    with pytest.raises(RuntimeError):
+        provider.get_shareholder_benefit(_STOCK)
+
+
+class _CfnLoader(yaml.SafeLoader):
+    """CloudFormationの短縮形組み込み関数を素朴なdictへ変換する構文解析専用Loader
+    (tests/unit/test_issue_116_jpx_shadow_wiring.py と同一手法)。
+    """
+
+
+def _cfn_multi_constructor(loader: yaml.SafeLoader, tag_suffix: str, node: yaml.Node) -> object:
+    if isinstance(node, yaml.ScalarNode):
+        return {tag_suffix: loader.construct_scalar(node)}
+    if isinstance(node, yaml.SequenceNode):
+        return {tag_suffix: loader.construct_sequence(node)}
+    assert isinstance(node, yaml.MappingNode)  # noqa: S101 - CFNタグはこの3種のみ
+    return {tag_suffix: loader.construct_mapping(node)}
+
+
+_CfnLoader.add_multi_constructor("!", _cfn_multi_constructor)  # type: ignore[no-untyped-call]
+
+_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "infra" / "template.yaml"
+_TABLE_LOGICAL_ID = "ShareholderBenefitsTable"
+_WRITE_ACTIONS = frozenset(
+    {
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:BatchWriteItem",
+    }
+)
+# Issue #120 の hidden-write audit で、ShareholderBenefitsTable を読み取り専用で
+# 参照していることを確認した全Function。
+_READ_ONLY_CONSUMERS = (
+    "BuyCandidatesFunction",
+    "HoldingsWatchlistFunction",
+    "WatchlistDispatcherFunction",
+    "WatchlistWorkerFunction",
+    "WatchlistBatchReconcilerFunction",
+)
+
+
+def _granted_actions_for_table(logical_id: str, table_logical_id: str) -> set[str]:
+    resources = yaml.load(_TEMPLATE_PATH.read_text(encoding="utf-8"), Loader=_CfnLoader)[
+        "Resources"
+    ]
+    assert logical_id in resources, f"{logical_id} が template.yaml に存在しない"
+    granted: set[str] = set()
+    for policy in resources[logical_id]["Properties"].get("Policies", []):
+        if not (isinstance(policy, dict) and "Statement" in policy):
+            continue
+        for statement in policy["Statement"]:
+            actions = statement.get("Action")
+            actions = actions if isinstance(actions, list) else [actions]
+            resource = statement.get("Resource")
+            resource = resource if isinstance(resource, list) else [resource]
+            if table_logical_id not in json.dumps(resource, ensure_ascii=False):
+                continue
+            granted.update(str(a) for a in actions)
+    return granted
+
+
+@pytest.mark.parametrize("function_logical_id", _READ_ONLY_CONSUMERS)
+def test_shareholder_benefits_table_stays_read_only(function_logical_id: str) -> None:
+    """優待テーブルへ書き込み権限を足して解決しないこと(Contract A)。
+
+    Issue #120 では案A(`dynamodb:PutItem` を付与する)を**採用しなかった**
+    (`IAM_PUTITEM_ADDITION=NO`)。read APIの裏でwriteする設計を追認してしまい、
+    同じ欠陥が別の場所で再発するためである。是正すべきは権限側ではなく責務側。
+
+    将来「AccessDeniedが出たから権限を足す」という安易な修正へ戻ることを防ぐ。
+    """
+    granted = _granted_actions_for_table(function_logical_id, _TABLE_LOGICAL_ID)
+
+    assert granted, f"{function_logical_id} が {_TABLE_LOGICAL_ID} を参照していない"
+    assert not (granted & _WRITE_ACTIONS), (
+        f"{function_logical_id} に {_TABLE_LOGICAL_ID} への書き込み権限が付与されている: "
+        f"{sorted(granted & _WRITE_ACTIONS)}。"
+        "Issue #120 は権限追加ではなく読み取りの純化で解決する方針である。"
+    )
+
+
+def _tz_neutral_now(reference_date: dt.date) -> dt.datetime:
+    """指定した暦日を、UTC暦日とJST暦日が一致する時刻として返す(Contract C)。
+
+    本ファイル上部の`_BEFORE_ROLLOVER`等はUTC暦日とJST暦日が食い違う時刻
+    (23:00Z = 翌日08:00 JST)であり、incidentの実行時刻を忠実に再現する一方、
+    **繰り上がりの境界がどちら側に来るかが実装の採る暦に依存する**。
+    そのためIssue #66でJST暦日基準へ是正すると、それらのfixtureは境界を
+    跨がなくなる。
+
+    ここでは 00:00 UTC(= 09:00 JST)を用いることで、どちらの暦を採っても
+    同じ暦日となる時刻を作り、**暦の選択から独立に read purity を保証する**。
+    """
+    now = dt.datetime.combine(reference_date, dt.time(0, 0), tzinfo=dt.UTC)
+    jst_date = now.astimezone(dt.timezone(dt.timedelta(hours=9))).date()
+    # 中立性を維持するためのガード。15:00Z以降の時刻へ書き換えるとここで落ちる。
+    assert now.date() == jst_date == reference_date, (  # noqa: S101
+        "テスト時刻がUTC暦日とJST暦日で食い違っている。"
+        "Issue #66 の論点を固定しないよう、暦日が一致する時刻を使うこと。"
+    )
+    return now
+
+
+@pytest.mark.parametrize(
+    "reference_date",
+    [
+        dt.date(2026, 8, 31),  # 権利確定日当日(「以降」に含まれるため繰り上がらない)
+        dt.date(2026, 9, 1),  # 翌日(繰り上がる = 保存値と乖離しはじめる)
+        dt.date(2027, 1, 15),  # 十分に後
+    ],
+)
+def test_read_purity_at_boundary_is_independent_of_calendar_choice(
+    service: ShareholderBenefitRegistryService,
+    repository: _WriteDeniedRepository,
+    reference_date: dt.date,
+) -> None:
+    """境界の両側で読み取りが書き込まないことを、暦の選択から独立に固定する。
+
+    **固定するのは「書き込みが発生しないこと」であって、どの暦日で繰り上がるかではない。**
+    期待値は`compute_next_record_date()`から導出し、切り替わり日をテスト側へ
+    ハードコードしない。基準日をUTC暦日/JST暦日のどちらで決めるかはIssue #66の
+    対象であり、本Issueでは変更しない(`_tz_neutral_now()`のdocstring参照)。
+    """
+    _register(service, _tz_neutral_now(dt.date(2026, 1, 15)))
+    _arm(repository)
+
+    now = _tz_neutral_now(reference_date)
+    expected = compute_next_record_date(_RECURRENCE, reference_date)
+
+    returned = service.get(_STOCK, now=now)
+
+    assert returned is not None
+    assert returned.next_benefit_record_date == expected
     assert repository.save_attempts == 0
