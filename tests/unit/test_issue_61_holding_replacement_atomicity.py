@@ -285,7 +285,7 @@ def test_max_lots_boundary_is_allowed(portfolio: PortfolioService) -> None:
     plan = portfolio.build_holding_replacement_plan(_OWNER, _CODE, purchase=None)
 
     assert len(plan.lot_deletes) == MAX_LOTS_PER_HOLDING
-    assert plan.write_item_count == MAX_LOTS_PER_HOLDING + 1
+    assert plan.write_item_count == MAX_LOTS_PER_HOLDING + 1, "削除は N + 1"
     assert portfolio.delete_holding(_OWNER, _CODE) is True
     assert _state(portfolio) == (None, 0, 0)
 
@@ -332,9 +332,8 @@ def test_business_limit_is_independent_of_the_dynamodb_physical_limit() -> None:
     assert MAX_LOTS_PER_HOLDING == 90
     assert dynamodb_transaction.MAX_TRANSACT_ITEMS == 100
     assert MAX_LOTS_PER_HOLDING < dynamodb_transaction.MAX_TRANSACT_ITEMS
-    assert MAX_LOTS_PER_HOLDING + 3 <= dynamodb_transaction.MAX_TRANSACT_ITEMS, (
-        "置換1回分(ロット削除N + Holding削除1 + 新ロットPut1 + 新HoldingPut1)が"
-        "物理上限へ収まること"
+    assert MAX_LOTS_PER_HOLDING + 2 <= dynamodb_transaction.MAX_TRANSACT_ITEMS, (
+        "置換1回分(ロット削除N + 新ロットPut1 + HoldingPut1 = N + 2)が物理上限へ収まること"
     )
 
 
@@ -376,11 +375,12 @@ def test_overwrite_plan_contains_deletes_and_puts_in_one_transaction(
     plan = portfolio.build_holding_replacement_plan(_OWNER, _CODE, purchase=purchase)
     items = holding_replacement_commit.build_transact_items(plan)
 
-    assert len(items) == plan.write_item_count == 5, (
-        "ロット削除2 + Holding削除1 + 新ロットPut1 + 新HoldingPut1"
+    assert len(items) == plan.write_item_count == 4, (
+        "ロット削除2 + 新ロットPut1 + HoldingのConditionalPut1 = N + 2"
     )
-    assert sum(1 for i in items if "Delete" in i) == 3
+    assert sum(1 for i in items if "Delete" in i) == 2, "削除はロットのみ"
     assert sum(1 for i in items if "Put" in i) == 2
+    assert plan.holding_delete is None, "置換ではHoldingをDeleteしない"
     assert plan.resulting_holding is not None
     assert plan.resulting_holding.shares == 10, "置換後は新ロットだけから再計算されること"
 
@@ -487,3 +487,188 @@ def test_holding_model_type_is_validated(portfolio: PortfolioService) -> None:
     plan = portfolio.build_holding_replacement_plan(_OWNER, _CODE, purchase=None)
     assert plan.lot_put is None and plan.holding_put is None
     assert isinstance(portfolio.get_holding(_OWNER, _CODE), Holding)
+
+
+# --- T19〜T25 DynamoDB transaction の構造(同一アイテムへの複数アクション禁止) ---
+#
+# DynamoDBのTransactWriteItemsは、1トランザクション内で同一アイテムを対象とする
+# 複数のアクションを許可しない(ValidationException)。overwriteでHoldingを
+# 「Delete → Put」にしていると、ローカルJSONのテストが通っていてもProductionの
+# DynamoDB経路では必ず失敗する。ここではその構造をテストで固定する。
+
+
+def _transact_keys(items: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """(TableName, primary key value) の一覧を返す。"""
+    keys: list[tuple[str, str]] = []
+    for item in items:
+        if "Delete" in item:
+            body = item["Delete"]
+            key_value = next(iter(body["Key"].values()))
+        else:
+            body = item["Put"]
+            pk_field = body.get("Key")
+            if pk_field is not None:
+                key_value = next(iter(pk_field.values()))
+            else:
+                # Putはitem側にPKを持つ。dataではない属性がPK。
+                non_data = {k: v for k, v in body["Item"].items() if k != "data"}
+                key_value = next(iter(non_data.values()))
+        keys.append((body["TableName"], next(iter(key_value.values()))))
+    return keys
+
+
+def _overwrite_plan(portfolio: PortfolioService, lot_id: str = "csv:test:2") -> Any:
+    purchase = portfolio.build_purchase_write_plan(
+        _OWNER,
+        _CODE,
+        "J社",
+        10,
+        Decimal("5000"),
+        dt.date(2026, 3, 1),
+        AccountType.SPECIFIC,
+        lot_id=lot_id,
+    )
+    return portfolio.build_holding_replacement_plan(_OWNER, _CODE, purchase=purchase)
+
+
+def test_overwrite_plan_has_exactly_one_action_for_the_holding(
+    portfolio: PortfolioService,
+) -> None:
+    """T19: overwriteの計画でHoldingへのアクションが1個だけであること。"""
+    _seed_two_lots(portfolio)
+    plan = _overwrite_plan(portfolio)
+
+    holding_actions = [a for a in (plan.holding_delete, plan.holding_put) if a is not None]
+    assert len(holding_actions) == 1
+
+
+def test_overwrite_existing_holding_uses_conditional_put_with_expected_data(
+    portfolio: PortfolioService,
+) -> None:
+    """T20: 既存Holdingがある置換は、既存の生JSONを条件とするPut 1件で行う。"""
+    _seed_two_lots(portfolio)
+    existing_raw = portfolio._holdings.get_raw_data(
+        f"{_OWNER}#{_CODE}"
+    ) or portfolio._holdings.get_raw_data(_CODE)
+
+    plan = _overwrite_plan(portfolio)
+
+    assert plan.holding_delete is None
+    assert plan.holding_put is not None
+    assert plan.holding_put.expected_data is not None, "楽観ロック条件が付いていない"
+    assert plan.holding_put.expected_data == existing_raw
+
+
+def test_overwrite_new_holding_uses_attribute_not_exists(portfolio: PortfolioService) -> None:
+    """T21: 既存Holdingが無い場合はexpected_data=None(attribute_not_exists)。"""
+    plan = _overwrite_plan(portfolio)
+
+    assert plan.holding_delete is None
+    assert plan.holding_put is not None
+    assert plan.holding_put.expected_data is None
+
+    from jstock_advisor.infrastructure.aws import holding_replacement_commit
+
+    items = holding_replacement_commit.build_transact_items(plan)
+    holding_items = [i for i in items if "Put" in i and "holdings" in i["Put"]["TableName"]]
+    assert len(holding_items) == 1
+    assert holding_items[0]["Put"]["ConditionExpression"] == "attribute_not_exists(#pk)"
+
+
+def test_delete_plan_uses_conditional_delete_only(portfolio: PortfolioService) -> None:
+    """T22: 削除の計画はHoldingへのDeleteのみを持つ。"""
+    _seed_two_lots(portfolio)
+
+    plan = portfolio.build_holding_replacement_plan(_OWNER, _CODE, purchase=None)
+
+    assert plan.holding_put is None
+    assert plan.holding_delete is not None
+    assert plan.lot_put is None
+
+
+@pytest.mark.parametrize("with_purchase", [True, False])
+def test_transact_items_never_target_the_same_item_twice(
+    portfolio: PortfolioService, with_purchase: bool
+) -> None:
+    """T23: 同一table×同一primary keyを対象とするアクションが重複しない。
+
+    DynamoDBのTransactWriteItemsが拒否する形になっていないことを、
+    実際に構築される項目列から直接確認する。
+    """
+    from jstock_advisor.infrastructure.aws import holding_replacement_commit
+
+    _seed(
+        portfolio,
+        [(10, "100", "2026-01-01"), (20, "200", "2026-01-02"), (30, "300", "2026-01-03")],
+    )
+    plan = (
+        _overwrite_plan(portfolio)
+        if with_purchase
+        else portfolio.build_holding_replacement_plan(_OWNER, _CODE, purchase=None)
+    )
+    items = holding_replacement_commit.build_transact_items(plan)
+
+    keys = _transact_keys(items)
+    assert len(keys) == len(set(keys)), f"同一アイテムへの複数アクションがある: {keys}"
+
+
+def test_plan_rejects_holding_delete_and_put_together(portfolio: PortfolioService) -> None:
+    """T23補: 不変条件がデータ構造の側で強制されていること。"""
+    from jstock_advisor.services.write_plan import (
+        ConditionalDelete,
+        ConditionalPut,
+        HoldingReplacementPlan,
+    )
+
+    _seed_two_lots(portfolio)
+    holding = portfolio.get_holding(_OWNER, _CODE)
+    assert holding is not None
+    with pytest.raises(ValueError, match="DeleteとPut"):
+        HoldingReplacementPlan(
+            lot_deletes=[],
+            holding_delete=ConditionalDelete(
+                id_value=holding.holding_id, id_field="holding_id", expected_data="{}"
+            ),
+            lot_put=None,
+            holding_put=ConditionalPut(
+                model=holding, id_field="holding_id", expected_data=None
+            ),
+            resulting_holding=holding,
+        )
+
+
+def test_overwrite_write_count_is_n_plus_2_at_the_limit(portfolio: PortfolioService) -> None:
+    """T24: 90ロットのoverwriteは N + 2 項目。"""
+    _seed_n_lots(portfolio, MAX_LOTS_PER_HOLDING)
+
+    plan = _overwrite_plan(portfolio)
+
+    assert plan.write_item_count == MAX_LOTS_PER_HOLDING + 2
+    assert plan.write_item_count <= 100, "DynamoDBの物理上限へ収まること"
+
+
+def test_delete_write_count_is_n_plus_1_at_the_limit(portfolio: PortfolioService) -> None:
+    """T25: 90ロットの削除は N + 1 項目。"""
+    _seed_n_lots(portfolio, MAX_LOTS_PER_HOLDING)
+
+    plan = portfolio.build_holding_replacement_plan(_OWNER, _CODE, purchase=None)
+
+    assert plan.write_item_count == MAX_LOTS_PER_HOLDING + 1
+
+
+def test_reusing_an_existing_lot_id_does_not_delete_and_put_the_same_lot(
+    portfolio: PortfolioService,
+) -> None:
+    """新ロットIDが既存ロットと同一の場合も、同一アイテムへの二重アクションにしない。"""
+    from jstock_advisor.infrastructure.aws import holding_replacement_commit
+
+    _seed_two_lots(portfolio)
+    existing_lot_id = portfolio.list_lots(_OWNER, _CODE)[0].lot_id
+
+    plan = _overwrite_plan(portfolio, lot_id=existing_lot_id)
+
+    assert all(d.id_value != existing_lot_id for d in plan.lot_deletes)
+    assert plan.lot_put is not None
+    assert plan.lot_put.expected_data is not None, "既存ロットの置換は楽観ロック付きPut"
+    keys = _transact_keys(holding_replacement_commit.build_transact_items(plan))
+    assert len(keys) == len(set(keys))
