@@ -8,6 +8,7 @@
   [docs/development_workflow.md](docs/development_workflow.md) に従うこと。**
   lane / WIP制限 / 実装パイプライン / ローカルテスト方針 / GitHubへの永続化 /
   現況判断 / negative-path検証 / AWS pagination / grouped release /
+  **Issue起点の原則(挙動・構成・運用・契約へ影響する変更はIssue必須)** /
   人間承認の境界は同文書が正本である。
   (詳細を本ファイルへ複製しない。ルールを変更する場合は同文書を更新する。)
 

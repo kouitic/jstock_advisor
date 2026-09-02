@@ -278,7 +278,8 @@ Production で `AccessDenied` / provider failure / Lambda failure 等を
 複数 Issue をまとめて release する場合、次を**すべて**満たすこと。
 
 ```
-release scope 外に OPEN な release-blocker が無い
+SCOPE_EXTERNAL_OPEN_RELEASE_BLOCKERS = 0
+  (release scope 外に OPEN な release-blocker が無い)
 included Issues がすべて merge 済み
 各 Issue の Production Verification Plan が既知
 先行する mandatory verification に未完了が無い
@@ -321,10 +322,31 @@ mandatory verification + ChatGPT review + human approval まで解除しない
 deploy 自体が blocker を解除する根拠にはならない。
 
 release scope 外に OPEN な `release-blocker` がある場合は、その blocker の
-block 条件(条件付き release-blocker の扱いは
-[docs/issue_label_policy.md](issue_label_policy.md) §6)を確認し、
-今回の release を止めるものかどうかを判断する。止めるものであれば
-grouped release へ進まない。
+block 条件を確認し、今回の release を止めるものかどうかを判断する。
+止めるものであれば grouped release へ進まない。
+
+**`release-blocker` label の有無だけで release 可否を判断しない。**
+各 blocker の `BLOCKER_MODE` / `BLOCKING_TARGET` / `BLOCKER_SCOPE` を確認する。
+これらの記録形式と `DEFECT_BLOCK` / `VERIFICATION_HOLD` の定義、および
+`BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER` は
+[docs/issue_label_policy.md](issue_label_policy.md) §6 が正本である。
+
+### release inventory の追跡要件
+
+Production release 監査では、baseline → target の**全 commit** について
+次を追跡できること。
+
+```
+ISSUE
+PR
+COMMIT
+BLOCKER_MODE
+BLOCKING_TARGET
+VERIFICATION_STATUS
+```
+
+Issue へ辿れない commit が baseline → target に含まれる場合は、
+その commit の由来を確定させるまで release へ進まない。
 
 ### blocker remediation release への piggyback は禁止
 
@@ -340,6 +362,98 @@ baseline → target の commit 列挙で確認する。
 別物である。前者は scope を障害修正のみに限定する。後者は上記の条件を
 満たす限り複数 Issue を含めてよいが、**いずれの場合も
 release scope 外の変更を便乗させない**点は共通である。
+
+---
+
+## 9.5 すべての変更を Issue 起点とする
+
+```
+NO_BEHAVIOR_OR_OPERATIONAL_CHANGE_WITHOUT_ISSUE
+```
+
+理由を問わず、**挙動・構成・運用・契約へ影響する変更は必ず GitHub Issue を
+起点とする。**
+
+対象:
+
+```
+application code
+infrastructure
+IAM
+config / threshold
+schema
+CI/CD
+operational behavior
+Production-affecting docs
+governance rules
+```
+
+変更理由が次のいずれであっても Issue は必須である。
+
+```
+bug fix / design correction / requirement addition / requirement change
+refactor / security improvement / operations improvement
+```
+
+**「小さい変更だから」「ついでだから」を Issue 省略の理由にしない。**
+
+### Issue 省略を許す唯一の例外
+
+純粋な doc-only であり、次の**両方**を満たすものだけ Issue なしを許容してよい。
+
+```
+NO_BEHAVIOR_CHANGE    = YES
+NO_OPERATIONAL_CHANGE = YES
+```
+
+例: typo 修正 / 表現だけの修正 / 壊れたリンク修正 / Markdown formatting。
+
+この場合も PR 本文へ次を記録する。
+
+```
+ISSUE_EXCEPTION       = DOC_ONLY_NON_BEHAVIORAL
+NO_BEHAVIOR_CHANGE    = YES
+NO_OPERATIONAL_CHANGE = YES
+```
+
+**判断が曖昧なら Issue を作る側へ倒す。**
+**governance rule の変更はこの例外に含まれない。** 本文書のような workflow 変更は
+Issue 必須である。
+
+### Issue Type は既存体系を維持する
+
+新しい Type label を不用意に追加しない。
+[docs/issue_label_policy.md](issue_label_policy.md) §3 の
+
+```
+bug / design-defect / enhancement / investigation
+calibration / tracking / not-a-bug / accepted-risk
+```
+
+を維持する。`requirement-change` / `refactor` / `security` / `operations` /
+`governance` 等は、現時点では**新しい Type 軸を作らず**、
+既存 Type + Issue 本文の Reason / Scope で表現する。
+
+```
+新要件            -> enhancement
+セキュリティ改善   -> bug / design-defect / enhancement を実態で判定
+governance 変更   -> enhancement / tracking 等を実態で判定
+```
+
+4軸モデル(Issue Type / Priority / Severity / Release Blocker)を崩さない。
+
+### commit / PR と Issue の追跡
+
+Issue 必須の変更では、**PR が必ず Issue を参照する。**
+
+```
+Refs #xx    基本。Production Verification pending の Issue では
+            merge 時点で自動 close させないため必ずこちらを使う
+Fixes #xx   Issue 全体をその PR で完了させる場合のみ
+```
+
+commit 単位でも、どの Issue 由来かを release inventory から追跡可能にする。
+**main への直接 push は禁止**(既存方針を維持)。
 
 ---
 
@@ -398,6 +512,11 @@ Production failure injection 禁止
 
 報告では `DOC_ONLY_CHANGE=YES` を明示する。
 
+本節は doc-only 変更の**検証手順**を定めるものであり、**Issue の要否とは別**である。
+Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEHAVIORAL`
+(`NO_BEHAVIOR_CHANGE` かつ `NO_OPERATIONAL_CHANGE`)を満たす場合に限る。
+**governance rule の変更は doc-only であっても Issue 必須**である。
+
 ---
 
 ## 変更履歴
@@ -406,3 +525,4 @@ Production failure injection 禁止
 |---|---|
 | 2026-09-02 | 新規作成(Issue #122)。Stabilization Sprint の lane / WIP 制限 / 実装パイプライン / ローカルテスト方針 / GitHub 永続化 / status freshness / negative-path 分類 / AWS pagination / grouped release / 人間承認の境界を正本化した。既存の Human merge approval・Human Production approval・exact ChangeSet approval・release-blocker lifecycle・one Issue / one implementation owner・hidden-write 確認・Production failure injection 禁止・duplicate Issue 確認はいずれも緩和していない |
 | 2026-09-03 | §9 の grouped release 第1条件を「OPEN な release-blocker = 0」から「release scope 外に OPEN な release-blocker が無い」へ修正(Issue #122)。release-blocker lifecycle(docs/issue_label_policy.md §6)では Production deploy が blocker 解除の前提であるため、旧記述では Production-target defect の remediation release が循環して実施不能になる不整合があった。あわせて release scope 内 blocker を release へ含めるための条件(remediation を含む / merge 済み / Verification Plan 定義済み / deploy 後も blocker 維持 / mandatory verification + ChatGPT review + human approval まで解除しない)を明文化し、`BLOCKER_REMEDIATION_RELEASE` と通常の grouped release の区別を補足した。**解除条件は一切緩和していない** |
+| 2026-09-03 | release-blocker の blocking target semantics を導入(Issue #122)。`BLOCKER_MODE`(`DEFECT_BLOCK` / `VERIFICATION_HOLD`)・`BLOCKING_TARGET` 等の必須記録と `BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER` は docs/issue_label_policy.md §6 を正本とし、本文書 §9 はそれを参照する。§9 の第1条件を `SCOPE_EXTERNAL_OPEN_RELEASE_BLOCKERS = 0` として明示し、release inventory の追跡要件(ISSUE / PR / COMMIT / BLOCKER_MODE / BLOCKING_TARGET / VERIFICATION_STATUS)を追加した。あわせて §9.5 `NO_BEHAVIOR_OR_OPERATIONAL_CHANGE_WITHOUT_ISSUE`(挙動・構成・運用・契約へ影響する変更は Issue 必須。例外は `NO_BEHAVIOR_CHANGE` かつ `NO_OPERATIONAL_CHANGE` の doc-only のみで、governance 変更は例外に含まない)・既存 Issue Type 体系の維持・Refs/Fixes の使い分け・main 直接 push 禁止の再確認を追加した。**既存の解除条件・piggyback 禁止・人間承認境界・4軸独立性はいずれも緩和していない** |
