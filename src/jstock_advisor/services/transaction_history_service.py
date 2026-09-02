@@ -102,6 +102,54 @@ class TransactionHistoryService:
         self._transactions.save(transaction)
         return transaction
 
+    def record_execution_if_absent(
+        self,
+        transaction_id: str,
+        owner: str,
+        stock_code: str,
+        transaction_type: TransactionType,
+        shares: int,
+        execution_price: Decimal,
+        execution_date: dt.date,
+        recommendation_id: str | None = None,
+        fee: Decimal = Decimal("0"),
+        tax: Decimal = Decimal("0"),
+        account_type: AccountType | None = None,
+        reason: str | None = None,
+        memo: str | None = None,
+        now: dt.datetime | None = None,
+    ) -> bool:
+        """指定したtransaction_idが未登録のときだけ保存する(Issue #61 Phase B3)。
+
+        保存できたらTrue、既に同じtransaction_idが存在すればFalse(何も書かない)。
+        CSV取込が「同じ行を何度取り込んでも1回だけ登録される」ことを、
+        **永続データそのもの**で保証するために使う。
+
+        `record_execution()`と違い`transaction_id`を呼び出し側が決める。
+        書き込みは`save_if_absent`(DynamoDB実装では条件付き書き込み)で原子的に
+        行うため、呼び出し側でexists()→save()というcheck-then-actを書かないこと。
+
+        **既存Transactionの内容は上書きしない。** 同じidが既にある場合は
+        「取込済み」とみなす。
+        """
+        transaction = self.build_execution_plan(
+            transaction_id=transaction_id,
+            owner=owner,
+            stock_code=stock_code,
+            transaction_type=transaction_type,
+            shares=shares,
+            execution_price=execution_price,
+            execution_date=execution_date,
+            recommendation_id=recommendation_id,
+            fee=fee,
+            tax=tax,
+            account_type=account_type,
+            reason=reason,
+            memo=memo,
+            now=now,
+        )
+        return self._transactions.save_if_absent(transaction)
+
     def build_execution_plan(
         self,
         transaction_id: str,
