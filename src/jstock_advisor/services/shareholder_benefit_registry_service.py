@@ -18,7 +18,9 @@ from jstock_advisor.domain.entities.enums import (
     RecordDateUnknownReason,
     SourceType,
 )
-from jstock_advisor.domain.valuation.shareholder_benefit_matching import compute_next_record_date
+from jstock_advisor.domain.valuation.shareholder_benefit_matching import (
+    with_refreshed_next_record_date,
+)
 from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry_repository import (
     ShareholderBenefitRegistryRepository,
 )
@@ -43,20 +45,6 @@ def _record_date_unknown_reason(
     record_dates: list[dt.date],
 ) -> RecordDateUnknownReason | None:
     return None if record_dates else RecordDateUnknownReason.SOURCE_NOT_FOUND
-
-
-def _with_refreshed_next_record_date(
-    benefit: ShareholderBenefit, now: dt.datetime
-) -> ShareholderBenefit:
-    """benefit_record_date_recurrence_monthsから次回権利確定日を再計算する。
-
-    「毎年3月末」のような周期は日付を固定で持たせると時間の経過で陳腐化するため、
-    保存・取得のたびにnowを基準に再計算し、変化があれば保存し直す(要求仕様16節拡張)。
-    """
-    next_date = compute_next_record_date(benefit.benefit_record_date_recurrence_months, now.date())
-    if next_date == benefit.next_benefit_record_date:
-        return benefit
-    return benefit.model_copy(update={"next_benefit_record_date": next_date})
 
 
 class ShareholderBenefitRegistryService:
@@ -111,7 +99,7 @@ class ShareholderBenefitRegistryService:
             benefit_record_date_unknown_reason=_record_date_unknown_reason(record_dates),
             benefit_record_date_recurrence_months=recurrence_months,
         )
-        benefit = _with_refreshed_next_record_date(benefit, resolved_now)
+        benefit = with_refreshed_next_record_date(benefit, resolved_now.date())
         self._repo.save(benefit)
         return benefit
 
@@ -193,32 +181,36 @@ class ShareholderBenefitRegistryService:
                 "source": _source(resolved_now),
             }
         )
-        updated = _with_refreshed_next_record_date(updated, resolved_now)
+        updated = with_refreshed_next_record_date(updated, resolved_now.date())
         self._repo.save(updated)
         return updated
 
     def list_all(self, now: dt.datetime | None = None) -> list[ShareholderBenefit]:
+        """全件を返す。**読み取り専用**(永続化を一切伴わない、Issue #61 → #120)。
+
+        next_benefit_record_dateは保存済みの値をそのまま返さず、現行の計算契約に
+        従って再導出した値を返す(`with_refreshed_next_record_date`)。
+        再導出結果の書き戻しは行わない。
+        """
         resolved_now = now or dt.datetime.now(dt.UTC)
         return [
-            self._refresh_and_persist(benefit, resolved_now) for benefit in self._repo.list_all()
+            with_refreshed_next_record_date(benefit, resolved_now.date())
+            for benefit in self._repo.list_all()
         ]
 
     def get(self, stock_code: str, now: dt.datetime | None = None) -> ShareholderBenefit | None:
+        """1件を返す。**読み取り専用**(永続化を一切伴わない、Issue #120)。
+
+        next_benefit_record_dateの扱いは`list_all`と同じ。
+        """
         benefit = self._repo.get(stock_code)
         if benefit is None:
             return None
-        return self._refresh_and_persist(benefit, now or dt.datetime.now(dt.UTC))
+        resolved_now = now or dt.datetime.now(dt.UTC)
+        return with_refreshed_next_record_date(benefit, resolved_now.date())
 
     def delete(self, stock_code: str) -> bool:
         return self._repo.delete(stock_code)
-
-    def _refresh_and_persist(
-        self, benefit: ShareholderBenefit, now: dt.datetime
-    ) -> ShareholderBenefit:
-        refreshed = _with_refreshed_next_record_date(benefit, now)
-        if refreshed is not benefit:
-            self._repo.save(refreshed)
-        return refreshed
 
 
 def check_registry_health(
@@ -236,8 +228,39 @@ def check_registry_health(
     serviceは主にテスト用(任意のリポジトリを注入できるようにするため)。
     未指定時は既定のリポジトリ(Lambda環境ではDynamoDB、それ以外はローカル
     JSON)を使う。
+
+    **fail-soft契約(Issue #120)**: 件数取得自体が失敗しても例外を外へ出さない。
+    本関数は「登録件数をログへ残す」だけの観測処理であり、判定・通知に必要な
+    データを供給していない。したがってその失敗は判定結果に影響せず、
+    BUY/保有バッチ全体を停止させてはならない。
+
+    2026-09-02のProduction incidentでは、当時のlist_all()が読み取り経路で
+    `repository.save()`(DynamoDB PutItem)へ到達し、読み取り専用IAMの
+    BUY/保有Lambdaで`AccessDeniedException`となり、この健全性チェックが
+    **dispatch前にバッチ全体を停止**させた(当日の判定・通知が全件未実行)。
+    読み取り経路の書き込みは同Issueで除去したが、`list_all()`はDynamoDB Scan
+    であり、スロットリング等の一過性エラーでも同じ停止が起こりうるため、
+    fail-softは書き込み除去とは独立に必要である。
+
+    **沈黙fail-softは禁止**。失敗時は件数不明であることを観測できるよう
+    `event=shareholder_benefit_registry_health_check_failed`のERRORを必ず残す。
+
+    なお本契約は健全性チェック自身の失敗に限る。**判定に必要な優待データの
+    取得失敗まで握り潰すものではない**(business dataの取得は
+    shareholder_benefit provider経由で行われ、失敗時は従来どおり銘柄単位で
+    失敗として終端する)。
     """
-    count = len((service or ShareholderBenefitRegistryService()).list_all())
+    try:
+        count = len((service or ShareholderBenefitRegistryService()).list_all())
+    except Exception:
+        logger.exception(
+            "event=shareholder_benefit_registry_health_check_failed "
+            "min_expected_entries=%d "
+            "株主優待レジストリの件数取得に失敗しました。健全性チェックのみを"
+            "スキップし、判定・通知処理は継続します(登録件数は不明)。",
+            min_expected_entries,
+        )
+        return
     logger.info("ShareholderBenefitRegistry loaded %d entries.", count)
     if min_expected_entries > 0 and count < min_expected_entries:
         logger.warning(
