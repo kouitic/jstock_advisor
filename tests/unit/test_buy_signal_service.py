@@ -286,6 +286,21 @@ def _build_snapshot(
     return StockSnapshot(
         stock_code=fx.stock_code,
         current_price=fx.current_price,
+        # Issue #52 Phase B2: 価格の基準日。既定では鮮度が正常な状態を表す。
+        #
+        # 本モジュールのテストは価格鮮度**以外**の判定(BUYスコア・screening・
+        # cooldown・shadow observation 等)を対象としており、`now` は
+        # テストごとに異なる(_NOW 以外に 2026-08-20 23:30 UTC 等を使う)。
+        # `_build_snapshot()` は `now` を受け取らないため、固定日付にすると
+        # 一部のテストだけ鮮度切れになる。
+        #
+        # `missed_trading_sessions` は期待セッションより**未来**の as_of に対して
+        # 0 を返す(取りこぼしは負にならない)ため、JST暦日の当日を既定にすれば
+        # どの `now` でも missed=0 = NORMAL になる。
+        #
+        # 鮮度そのものを検証するテストは
+        # tests/unit/test_issue_52_phase_b2_price_freshness_gate.py にある。
+        price_as_of_date=dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date(),
         financial=financial,
         dividend=dividend,
         benefit=None,

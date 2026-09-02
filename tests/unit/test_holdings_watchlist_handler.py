@@ -208,11 +208,29 @@ class _FakeFinancial:
     sector: str | None = None
     industry: str | None = None
 
+def _jst_today() -> dt.date:
+    """JST暦日の当日。価格鮮度が正常であることを表すテスト既定値に使う。"""
+    return dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date()
+
+
 
 @dataclass(frozen=True)
 class _FakeSnapshot:
     current_price: Decimal
     financial: _FakeFinancial = field(default_factory=_FakeFinancial)
+    # Issue #52 Phase B2: 価格の基準日。
+    #
+    # 本モジュールの既存テストは価格鮮度**以外**の挙動(attention検出・集中リスク通知・
+    # 利確判定等)を対象としているため、既定では鮮度が正常な状態を表す。
+    #
+    # 固定日付にしないのは、本モジュールに `_NOW` を使うテストと実時刻を使うテストが
+    # 混在しているため。JST暦日の当日は、どちらの場合も
+    # expected_latest_completed_trading_session 以降になる
+    # (missed_trading_sessions は未来日に対して 0 を返す)ので、
+    # いずれの now でも missed=0 = NORMAL になる。
+    #
+    # 鮮度そのものを検証するテストは price_as_of_date を明示的に古くすること。
+    price_as_of_date: dt.date = field(default_factory=lambda: _jst_today())
 
 
 class _NoSignalOutcome:
