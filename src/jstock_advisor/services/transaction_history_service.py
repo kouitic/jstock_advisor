@@ -131,7 +131,26 @@ class TransactionHistoryService:
 
         **既存Transactionの内容は上書きしない。** 同じidが既にある場合は
         「取込済み」とみなす。
+
+        ## duplicate fast-path と race safety の分担
+
+        既に同じtransaction_idが保存済みの場合、**計画の構築より前に**Falseを返す。
+        `build_execution_plan()`は`recommendation_id`の実在をRecommendation
+        リポジトリへ問い合わせるため、これを先に通すと「取込時点では存在したが
+        その後に削除された推奨」を参照する再取込がエラーになり、
+        「同一バイト列のCSVの再取込は正常なno-opである」という契約に違反する。
+        取込済みかどうかの判定を、**現在の可変状態へ依存させない**。
+
+        この事前readは**あくまで最適化(fast-path)**であり、一意性の権威では
+        ない。事前readと書き込みの間に他プロセスが同じidを保存する余地は残るが、
+        最終的な書き込みは`save_if_absent`(DynamoDB実装では条件付き書き込み)で
+        あるため、その競合は書き込み側で必ず検出されFalseになる。
+        **事前readで分岐して無条件saveを行うcheck-then-actにはしない。**
         """
+        existing = self._transactions.get(transaction_id)
+        if existing is not None:
+            return False
+
         transaction = self.build_execution_plan(
             transaction_id=transaction_id,
             owner=owner,

@@ -82,9 +82,15 @@ def build_row_transaction_id(import_id: str, row_number: int) -> str:
     永続データ自身が識別子を持つことで、「取込済みだが記録が無い」というずれが
     構造的に発生しない。
 
-    `row_number`はCSVの物理行番号(ヘッダーを1行目とする2始まり)であり、
-    **同一バイト列に対して必ず同じ値になる**。無効行を除外した連番や成功行だけの
-    連番にはしない(前方に無効行があっても後続行のIDが変わらないようにするため)。
+    `row_number`は**ヘッダー後のCSVレコード順に対応する安定した行ordinal**
+    (ヘッダーを1として2始まり)であり、**同一バイト列に対して必ず同じ値になる**。
+    無効行を除外した連番や成功行だけの連番にはしない(前方に無効行があっても
+    後続行のIDが変わらないようにするため)。
+
+    引用符で囲まれた複数行フィールドがある場合、この値はファイル上の物理行番号とは
+    一致しない(`csv.DictReader`が返すレコードの通し番号である)。冪等性に必要なのは
+    「同じバイト列 → 同じordinal」であり物理行番号そのものではないため、
+    この差は識別子の安定性に影響しない。
     """
     return f"{_TRANSACTION_ID_PREFIX}:{import_id}:{row_number}"
 
@@ -152,7 +158,8 @@ class TransactionCsvImportService:
         if missing:
             raise ValueError(f"CSVに必須列がありません: {sorted(missing)}")
 
-        # 物理行番号(ヘッダーが1行目)。無効行があっても後続行の番号は変わらない。
+        # ヘッダー後のレコード順に対応する安定した行ordinal(ヘッダーを1として2始まり)。
+        # 無効行があっても後続行の番号は変わらない。
         for row_number, row in enumerate(reader, start=2):
             summary.add(self._process_row(row_number, row, import_id=import_id))
         return summary

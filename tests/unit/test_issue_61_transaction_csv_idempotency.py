@@ -505,3 +505,164 @@ def test_record_execution_still_generates_a_unique_id(
 
     assert first.transaction_id != second.transaction_id
     assert _count(history) == 2
+
+
+# --- T16 / T17 duplicate 判定を可変状態へ依存させない --------------------------
+#
+# `build_execution_plan()` は recommendation_id の実在を Recommendation
+# リポジトリへ問い合わせる。取込済みかどうかの判定をその後ろに置くと、
+# 「取込時点では存在したがその後に削除された推奨」を参照する再取込がエラーになり、
+# 「同一バイト列のCSVの再取込は正常な no-op」という契約に違反する。
+
+_HEADER_WITH_REC = (
+    "owner,stock_code,transaction_type,execution_date,shares,execution_price,"
+    "recommendation_id\n"
+)
+_ROW_WITH_REC = f"{_OWNER},{_CODE},BUY,2026-03-01,100,4200,R1\n"
+
+
+def _recommendation(recommendation_id: str) -> Any:
+    from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
+    from jstock_advisor.domain.entities.recommendation import Recommendation
+
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code=_CODE,
+        stock_name="J社",
+        recommended_at=dt.datetime(2026, 3, 1, tzinfo=dt.UTC),
+        recommendation_type=RecommendationType.BUY,
+        price_at_recommendation=Decimal("4200"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1",
+    )
+
+
+def _with_recommendation(
+    tmp_path: Path, repository: TransactionRepository
+) -> tuple[Any, TransactionHistoryService, TransactionCsvImportService, Path]:
+    from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
+        RecommendationRepository,
+    )
+
+    recommendations = RecommendationRepository(store_dir=tmp_path)
+    recommendations.save(_recommendation("R1"))
+    history = TransactionHistoryService(
+        transaction_repository=repository, recommendation_repository=recommendations
+    )
+    importer = TransactionCsvImportService(transaction_history_service=history)
+    path = tmp_path / "with_rec.csv"
+    path.write_text(_HEADER_WITH_REC + _ROW_WITH_REC, encoding="utf-8")
+    return recommendations, history, importer, path
+
+
+def test_reimport_is_idempotent_even_after_the_recommendation_is_removed(
+    tmp_path: Path, repository: TransactionRepository
+) -> None:
+    """T16: 取込後に recommendation が取得不能になっても、再取込は正常なno-op。
+
+    duplicate 判定が RecommendationRepository の現在の状態へ依存していないことを
+    固定する。
+    """
+    recommendations, history, importer, path = _with_recommendation(tmp_path, repository)
+
+    first = importer.import_file(path)
+    assert first.results[0].status is CsvRowStatus.SUCCESS
+    assert _count(history) == 1
+    before = _ids(history)
+
+    # 取込後に推奨が取得不能になる
+    recommendations.delete("R1")
+    assert recommendations.get("R1") is None
+
+    second = importer.import_file(path)
+
+    assert second.results[0].status is CsvRowStatus.SKIPPED_DUPLICATE
+    assert second.error_count == 0, "取込済み行の再取込がエラーになった"
+    assert second.skipped_count == 1
+    assert _count(history) == 1
+    assert _ids(history) == before
+
+
+def test_duplicate_detection_does_not_read_the_recommendation_repository(
+    tmp_path: Path, repository: TransactionRepository
+) -> None:
+    """T16補: 取込済み行の再取込で RecommendationRepository を参照しないこと。"""
+    recommendations, _history, importer, path = _with_recommendation(tmp_path, repository)
+    importer.import_file(path)
+
+    def _forbidden(_recommendation_id: str) -> Any:
+        raise AssertionError("取込済み判定でRecommendationRepositoryを参照している")
+
+    recommendations.get = _forbidden  # type: ignore[method-assign]
+
+    summary = importer.import_file(path)
+
+    assert summary.results[0].status is CsvRowStatus.SKIPPED_DUPLICATE
+    assert summary.error_count == 0
+
+
+def test_pre_read_fast_path_does_not_weaken_the_conditional_write(
+    history: TransactionHistoryService, repository: TransactionRepository
+) -> None:
+    """T17: 事前readが双方とも不存在を返しても、insertは1件だけ成功する。
+
+    事前readはあくまで最適化(fast-path)であり、一意性の権威は
+    `save_if_absent`(DynamoDB実装では条件付き書き込み)側にある。
+    事前readと書き込みの間に他プロセスが保存しても、書き込み側で検出される。
+    """
+    transaction_id = build_row_transaction_id("c" * 64, 2)
+    kwargs: dict[str, Any] = {
+        "owner": _OWNER,
+        "stock_code": _CODE,
+        "transaction_type": TransactionType.BUY,
+        "shares": 100,
+        "execution_price": Decimal("4200"),
+        "execution_date": dt.date(2026, 3, 1),
+    }
+    assert repository.get(transaction_id) is None
+
+    original_get = repository.get
+    calls: list[str] = []
+
+    def _stale_get(item_id: str) -> Any:
+        """最初の2回は「不存在」を返す(古いスナップショットを読んだ状況を模す)。"""
+        calls.append(item_id)
+        if len(calls) <= 2:
+            return None
+        return original_get(item_id)
+
+    repository.get = _stale_get  # type: ignore[method-assign]
+    try:
+        first = history.record_execution_if_absent(transaction_id=transaction_id, **kwargs)
+        second = history.record_execution_if_absent(transaction_id=transaction_id, **kwargs)
+    finally:
+        repository.get = original_get  # type: ignore[method-assign]
+
+    assert (first, second) == (True, False), (
+        "事前readが両方とも不存在を返しても、書き込みは1件だけ成立すること"
+    )
+    assert _count(history) == 1
+    assert len(calls) >= 2, "事前readのfast-pathが呼ばれている"
+
+
+def test_final_write_is_insert_if_absent_not_unconditional_save(
+    history: TransactionHistoryService, repository: TransactionRepository
+) -> None:
+    """最終的な書き込みが save_if_absent であり、無条件 save ではないこと。"""
+    transaction_id = build_row_transaction_id("d" * 64, 2)
+    kwargs: dict[str, Any] = {
+        "owner": _OWNER,
+        "stock_code": _CODE,
+        "transaction_type": TransactionType.BUY,
+        "shares": 100,
+        "execution_price": Decimal("4200"),
+        "execution_date": dt.date(2026, 3, 1),
+    }
+
+    def _forbidden(_transaction: Any) -> None:
+        raise AssertionError("無条件のsave()が使われている(条件付き書き込みでない)")
+
+    repository.save = _forbidden  # type: ignore[method-assign]
+
+    assert history.record_execution_if_absent(transaction_id=transaction_id, **kwargs) is True
+    assert _count(history) == 1
