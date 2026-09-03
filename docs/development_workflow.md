@@ -227,6 +227,38 @@ registry に定義されている。
 Issue #143 は単独実行と全件 CI では確認したが、**部分集合の組み合わせ実行を
 確認しなかった**ため Issue #148 を露出させた。
 
+**順序依存 cohort** — cohort のメンバを揃えるだけでは不十分な場合がある。
+共有 module-global state による汚染には**方向**があるためである。
+
+```
+実測(Issue #148)
+  integration -> handler   handler 側 11 件が失敗する
+  handler -> integration   失敗しない
+```
+
+pytest の収集順(アルファベット)は `handler -> integration` であり、
+**full CI ではこの汚染方向を通らない**。したがって順序依存が既知、または
+合理的に疑われる cohort では `DECLARED_ORDER_CASES` を宣言し、その順序で実行する。
+
+```
+全順列は要求しない(cohort が 5 件なら 120 通りとなり組合せ爆発する)。
+宣言された「既知・高リスクな汚染方向」のみを対象とする。
+```
+
+宣言した順序で既知の失敗が出る場合は `KNOWN_FAILURE_ISSUE` に owner Issue を
+記載する。ただし **「red だが既知」で済ませない。**
+
+```
+期待する失敗集合 と 実際の失敗集合 を比較し、一致することを確認する。
+新規の失敗が 1 件でもあれば、それは当該変更の regression として扱う。
+```
+
+order case は `tests/unit/test_time_semantics_guard.py` に宣言し、
+同ファイルが metadata の健全性(登録済みモジュールのみ / cohort 外を参照しない /
+重複が無い / 順序依存と宣言した cohort が order case を持つ)を検証する。
+**実行そのものは自動化しない**(1 回あたり数分を要するため、CI を重くしない)。
+
+
 **`C-EL`(T2)** — 「このコードがそう書いてあるから、実装者はそう理解している
 はず」は**根拠にしない**。official docs / installed source / upstream source /
 read-only experiment のいずれかで確認し、**version とともに記録する**。

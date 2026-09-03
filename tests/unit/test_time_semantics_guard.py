@@ -219,6 +219,133 @@ def _cohort_members(cohort: str) -> tuple[_Entry, ...]:
 _IDS = [e.module.rsplit("/", 1)[-1] for e in _REGISTRY]
 
 
+# --- order-sensitive cohort ------------------------------------------------------
+#
+# cohort のメンバを揃えるだけでは、共有 module-global state による汚染を
+# 検出できない場合がある。汚染には**方向**があるためである。
+#
+# 実測(Issue #148):
+#   integration -> handler   handler 側 11 件が失敗する
+#   handler -> integration   失敗しない
+#
+# pytest の収集順(アルファベット)は handler -> integration であり、
+# full CI ではこの汚染方向を通らない。したがって「cohort を同一プロセスで
+# 実行する」だけでは不十分で、**既知・高リスクな順序を明示的に宣言**する必要がある。
+#
+# 全順列(cohort が 5 件なら 120 通り)は要求しない。組合せ爆発になるうえ、
+# 大半は検証価値が無い。宣言された順序のみを対象とする。
+
+
+@dataclass(frozen=True)
+class _OrderCase:
+    """cohort 内で明示的に検証する実行順序。
+
+    name                 識別子
+    cohort               所属 cohort(cohort 外のモジュールは参照できない)
+    modules              実行順。registry 登録済みのモジュールのみ
+    known_failure_issue  この順序で既知の失敗が出る場合、その owner Issue。
+                         「red だが既知」で済ませず、失敗集合の一致を確認するための印。
+    """
+
+    name: str
+    cohort: str
+    modules: tuple[str, ...]
+    known_failure_issue: str = ""
+
+
+# 順序依存が既知、または合理的に疑われる cohort。
+# ここに挙げた cohort は ORDER_CASES を最低 1 件持たなければならない(O6)。
+_ORDER_SENSITIVE_COHORTS = frozenset({"holding_decision_runtime_config"})
+
+_ORDER_CASES: tuple[_OrderCase, ...] = (
+    _OrderCase(
+        name="ORDER_CASE_CANONICAL",
+        cohort="holding_decision_runtime_config",
+        modules=(
+            "tests/unit/test_holdings_watchlist_handler.py",
+            "tests/unit/test_holdings_watchlist_handler_integration.py",
+        ),
+    ),
+    _OrderCase(
+        name="ORDER_CASE_148_CONTAMINATION",
+        cohort="holding_decision_runtime_config",
+        modules=(
+            "tests/unit/test_holdings_watchlist_handler_integration.py",
+            "tests/unit/test_holdings_watchlist_handler.py",
+        ),
+        known_failure_issue="#148",
+    ),
+)
+
+_ORDER_IDS = [c.name for c in _ORDER_CASES]
+
+
+# --- O1-O6: order metadata の自己検証 --------------------------------------------
+
+
+@pytest.mark.parametrize("case", _ORDER_CASES, ids=_ORDER_IDS)
+def test_o1_order_case_is_not_empty(case: _OrderCase) -> None:
+    assert case.modules, f"{case.name} の modules が空です。"
+
+
+@pytest.mark.parametrize("case", _ORDER_CASES, ids=_ORDER_IDS)
+def test_o2_order_case_modules_are_registered(case: _OrderCase) -> None:
+    """順序に現れるモジュールは registry に登録済みであること。"""
+    registered = {e.module for e in _REGISTRY}
+    unknown = sorted(set(case.modules) - registered)
+    assert unknown == [], (
+        f"{case.name} が registry 未登録のモジュールを参照しています: {unknown}。"
+        "先に registry へ登録してください。"
+    )
+
+
+@pytest.mark.parametrize("case", _ORDER_CASES, ids=_ORDER_IDS)
+def test_o3_order_case_has_no_duplicate_module(case: _OrderCase) -> None:
+    duplicates = sorted({m for m in case.modules if case.modules.count(m) > 1})
+    assert duplicates == [], f"{case.name} に重複モジュールがあります: {duplicates}"
+
+
+@pytest.mark.parametrize("case", _ORDER_CASES, ids=_ORDER_IDS)
+def test_o4_order_case_stays_within_its_cohort(case: _OrderCase) -> None:
+    """cohort 外のモジュールを混ぜないこと(cohort の定義が曖昧になるため)。"""
+    members = {e.module for e in _cohort_members(case.cohort)}
+    outside = sorted(set(case.modules) - members)
+    assert outside == [], (
+        f"{case.name} が cohort '{case.cohort}' の外のモジュールを参照しています: {outside}"
+    )
+
+
+@pytest.mark.parametrize("case", _ORDER_CASES, ids=_ORDER_IDS)
+def test_o5_known_failure_issue_is_not_blank_when_present(case: _OrderCase) -> None:
+    """既知失敗を宣言する場合、owner Issue を空にしない。"""
+    if not case.known_failure_issue:
+        pytest.skip("known_failure_issue を持たない order case は対象外")
+    assert case.known_failure_issue.strip().startswith("#"), (
+        f"{case.name} の known_failure_issue は '#<番号>' 形式で記載してください: "
+        f"{case.known_failure_issue!r}"
+    )
+
+
+def test_o6_order_sensitive_cohorts_declare_order_cases() -> None:
+    """順序依存と宣言した cohort が ORDER_CASES を持たないことを許さない。
+
+    宣言だけして順序を書かない(= 検証されない)状態を防ぐ。
+    """
+    covered = {c.cohort for c in _ORDER_CASES}
+    missing = sorted(_ORDER_SENSITIVE_COHORTS - covered)
+    assert missing == [], (
+        f"順序依存と宣言された cohort に ORDER_CASES がありません: {missing}。"
+        "検証すべき実行順序を宣言してください(Issue #145)。"
+    )
+
+
+def test_o6_order_sensitive_cohorts_exist_in_registry() -> None:
+    """順序依存 cohort 名が registry の cohort と対応していること。"""
+    cohorts = {e.cohort for e in _REGISTRY}
+    unknown = sorted(_ORDER_SENSITIVE_COHORTS - cohorts)
+    assert unknown == [], f"registry に存在しない cohort が順序依存と宣言されています: {unknown}"
+
+
 # --- V1: registry 非空 -----------------------------------------------------------
 
 
