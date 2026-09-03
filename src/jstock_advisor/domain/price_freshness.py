@@ -22,19 +22,42 @@ holdings/SELL  売る/売らないの誤りは実損に直結する
 ```
 BUY            missed=0 -> NORMAL / missed=1 -> WARNING / missed>=2 -> HARD_STOP
                as_of UNKNOWN -> HARD_STOP
-               as_of が未来日 -> HARD_STOP
+               as_of が TRUE_FUTURE / NON_TRADING_DAY -> HARD_STOP
 
 holdings/SELL  missed=0 -> NORMAL / missed>=1 -> DATA_INSUFFICIENT
                as_of UNKNOWN -> DATA_INSUFFICIENT
-               as_of が未来日 -> DATA_INSUFFICIENT
+               as_of が TRUE_FUTURE / NON_TRADING_DAY -> DATA_INSUFFICIENT
+
+両経路共通  as_of が CURRENT_SESSION_PROVISIONAL -> NORMAL
 ```
 
-未来日は「取りこぼし0(=新鮮)」ではなく **timestamp / data integrity の異常**として
-扱う。`missed_trading_sessions()` は未来日に対して 0 を返すが(観測としては正しい)、
-その 0 をそのまま judgement へ通すと未来日の価格が NORMAL になってしまう。
-観測の contract は壊さず、policy層で分離する(`_is_future_as_of`)。
+## as_of の状態分類(Issue #52 回帰修正、2026-09-03)
 
-休場日・土日・祝日・寄付前・大引け前後は**個別の閾値を持たない**。
+当初の実装は「`expected_latest_completed_trading_session()` より後 = 未来日」と
+していた。しかし provider は**立会中に当日の未確定barを返す**(実 provider を
+read-only 実測して確認済み)一方、同関数は 15:30 JST までは前営業日を返す。
+このため **毎営業日 09:00-15:30 の実行が必ず異常判定になる**回帰が生じた
+(Issue #143 で CI が実行時刻により結果を変えた原因でもある)。
+
+    「完了した最新セッション」  !=  「正当に観測されうる最大日付」
+
+両者を分離し、`as_of` は `classify_as_of_date()` で状態へ写像する。
+
+```
+TRUE_FUTURE                  JST暦日の当日を超える。存在しえない -> fail-close
+NON_TRADING_DAY              当日が非営業日なのに当日付 -> fail-close
+CURRENT_SESSION_PROVISIONAL  進行中セッションの未確定bar -> 正常(取りこぼし0)
+COMPLETED_SESSION            既存の missed ラダーで評価
+```
+
+`TRUE_FUTURE` の fail-close は**弱めない**。判定基準を「期待セッション」から
+「JST暦日の当日」へ移しただけであり、真の未来日は従来どおり全経路で停止する。
+
+`missed_trading_sessions()` は未来日に対して 0 を返すが(観測としては正しい)、
+その 0 をそのまま judgement へ通すと未来日の価格が NORMAL になってしまう。
+観測の contract は壊さず、policy層で分離する(`classify_as_of_date()`)。
+
+休場日・土日・祝日・大引け後は**個別の閾値を持たない**。
 `expected_latest_completed_trading_session()` の定義により missed=0 へ畳み込まれる
 (Phase B1 の境界テストで固定済み)。ここで暦の再実装をしない
 (Issue #66 と同じUTC/JST分散を再発させないため)。
@@ -50,9 +73,12 @@ from enum import StrEnum
 from typing import Final
 
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.jst import to_jst
 from jstock_advisor.domain.market_session import (
     JPX_REGULAR_SESSION_CLOSE_JST,
-    expected_latest_completed_trading_session,
+    JPX_REGULAR_SESSION_OPEN_JST,
+    MarketSessionState,
+    classify_market_session,
     missed_trading_sessions,
 )
 
@@ -83,6 +109,12 @@ _REASON_FUTURE_BUY: Final = (
     "株価の基準日が未来日({as_of})のため買い判定を実施しない"
 )
 _REASON_FUTURE_HOLDINGS: Final = "株価の基準日が未来日({as_of})のため判定できません"
+_REASON_NON_TRADING_BUY: Final = (
+    "株価の基準日({as_of})が非営業日のため買い判定を実施しない"
+)
+_REASON_NON_TRADING_HOLDINGS: Final = (
+    "株価の基準日({as_of})が非営業日のため判定できません"
+)
 _REASON_UNKNOWN_HOLDINGS: Final = "株価の基準日を確認できないため判定できません"
 _REASON_WARNING_BUY: Final = "株価が{missed}取引セッション前のものです"
 _REASON_HARD_STOP_BUY: Final = (
@@ -93,37 +125,79 @@ _REASON_INSUFFICIENT_HOLDINGS: Final = (
 )
 
 
-def _is_future_as_of(
+class AsOfDateState(StrEnum):
+    """価格の基準日(`as_of_date`)が `now` に対してどの状態にあるか。
+
+    Issue #52 の回帰の根本原因は、`expected_latest_completed_trading_session()`
+    (= **鮮度の基準点**)を、そのまま **妥当性の上限** として使ったことである。
+    両者は別概念であり、立会中は後者が当日を含む。
+
+        「完了した最新セッション」  !=  「正当に観測されうる最大日付」
+
+    本Enumはその区別を型として固定する。
+
+    COMPLETED_SESSION            完了済みセッションのbar。既存の missed ラダーで評価する
+    CURRENT_SESSION_PROVISIONAL  進行中セッションの**未確定**bar。異常ではない
+    TRUE_FUTURE                  実在しえない未来日。timestamp / data integrity の異常
+    NON_TRADING_DAY              非営業日付のbar。同じく integrity の異常
+    """
+
+    COMPLETED_SESSION = "COMPLETED_SESSION"
+    CURRENT_SESSION_PROVISIONAL = "CURRENT_SESSION_PROVISIONAL"
+    TRUE_FUTURE = "TRUE_FUTURE"
+    NON_TRADING_DAY = "NON_TRADING_DAY"
+
+
+def classify_as_of_date(
     as_of_date: dt.date,
     now: dt.datetime,
     calendar: BusinessCalendar,
-    session_close_jst: dt.time,
-) -> bool:
-    """価格の基準日が、期待される直近完了セッションより**未来**か。
+    session_open_jst: dt.time = JPX_REGULAR_SESSION_OPEN_JST,
+    session_close_jst: dt.time = JPX_REGULAR_SESSION_CLOSE_JST,
+) -> AsOfDateState:
+    """価格の基準日を `now` との関係で分類する。
 
-    未来日の市場価格は「新鮮」ではなく **timestamp / data integrity の異常**である。
-    まだ発生していない取引の終値が存在するはずがないため、provider側の時刻ずれ、
-    タイムゾーン取り違え、あるいはデータ破損を示す。
+    ## なぜ「期待される直近完了セッションより後 = 未来」ではないのか
 
-    `missed_trading_sessions()` は未来日に対して 0 を返す(取りこぼしは負にならない、
-    という観測としては正しい contract)。しかしその 0 を鮮度judgementへそのまま
-    通すと **未来日の価格が NORMAL として売買判定に使われる**。
-    観測の contract は壊さず、policy層でこの異常を明示的に検査して分離する。
+    provider(yfinance系および mock)は、立会中に**当日の未確定bar**を返す。
+    これは provider の異常ではなく正常な振る舞いである(Issue #52 で
+    実 provider を read-only 実測して確認済み)。一方
+    `expected_latest_completed_trading_session()` は 15:30 JST までは前営業日を返す。
 
-    なお `filter_future_bars`(domain/signals)は **`as_of_date` を基準として
-    未来の PriceBar を除外する**ものであり、`as_of_date` 自身の妥当性は検査しない。
-    さらに市場・セクター環境スコアの経路でのみ呼ばれ、`get_latest_price` →
-    `StockSnapshot.price_as_of_date` → BUY/holdings 判定の経路には適用されない。
-    したがって未来 as_of の検査はここで行う必要がある。
+    したがって「期待セッションより後」を未来判定にすると、
+    **毎営業日 09:00-15:30 の実行が必ず異常判定になる**。これが Issue #52 の回帰であり、
+    Issue #143 で CI が実行時刻により結果を変えた原因でもある。
+
+    `TRUE_FUTURE` は **JST暦日の当日を超えているか**で判定する。
+    まだ到来していない暦日のbarは存在しえないため、これは時刻ずれ・タイムゾーン
+    取り違え・データ破損を示す真の異常であり、**fail-close を弱めない**。
+
+    ## 非営業日付
+
+    `as_of_date` が**当日**であって当日が非営業日の場合、その日付のbarは存在しえない
+    ため `NON_TRADING_DAY` とする。過去日付については本関数は営業日検査を行わない
+    (欠損・売買停止の表現として過去の非営業日付が来ることはなく、また
+    既存の missed ラダーが遅れとして正しく評価するため)。
     """
-    expected = expected_latest_completed_trading_session(now, calendar, session_close_jst)
-    return as_of_date > expected
+    jst_today = to_jst(now).date()
+    if as_of_date > jst_today:
+        return AsOfDateState.TRUE_FUTURE
+    if as_of_date < jst_today:
+        return AsOfDateState.COMPLETED_SESSION
+
+    session = classify_market_session(now, calendar, session_open_jst, session_close_jst)
+    if session is MarketSessionState.NON_BUSINESS_DAY:
+        return AsOfDateState.NON_TRADING_DAY
+    if session is MarketSessionState.POST_CLOSE:
+        return AsOfDateState.COMPLETED_SESSION
+    return AsOfDateState.CURRENT_SESSION_PROVISIONAL
 
 
 def evaluate_buy_price_freshness(
     as_of_date: dt.date | None,
     now: dt.datetime,
     calendar: BusinessCalendar,
+    session_open_jst: dt.time = JPX_REGULAR_SESSION_OPEN_JST,
     session_close_jst: dt.time = JPX_REGULAR_SESSION_CLOSE_JST,
 ) -> tuple[PriceFreshnessVerdict, str | None]:
     """BUY経路の価格鮮度を判定する。
@@ -135,11 +209,21 @@ def evaluate_buy_price_freshness(
     """
     if as_of_date is None:
         return PriceFreshnessVerdict.HARD_STOP, _REASON_UNKNOWN_BUY
-    if _is_future_as_of(as_of_date, now, calendar, session_close_jst):
+    state = classify_as_of_date(as_of_date, now, calendar, session_open_jst, session_close_jst)
+    if state is AsOfDateState.TRUE_FUTURE:
         return (
             PriceFreshnessVerdict.HARD_STOP,
             _REASON_FUTURE_BUY.format(as_of=as_of_date.isoformat()),
         )
+    if state is AsOfDateState.NON_TRADING_DAY:
+        return (
+            PriceFreshnessVerdict.HARD_STOP,
+            _REASON_NON_TRADING_BUY.format(as_of=as_of_date.isoformat()),
+        )
+    if state is AsOfDateState.CURRENT_SESSION_PROVISIONAL:
+        # 進行中セッションの未確定bar。取りこぼしは無く、取得可能な中で最も新しい。
+        # 鮮度ゲートは「古さ」を検出するためのものであり、ここで止めない(Issue #52)。
+        return PriceFreshnessVerdict.NORMAL, None
 
     missed = missed_trading_sessions(as_of_date, now, calendar, session_close_jst)
     if missed is None:  # pragma: no cover - as_of_date is not None のため到達しない
@@ -158,6 +242,7 @@ def evaluate_holdings_price_freshness(
     as_of_date: dt.date | None,
     now: dt.datetime,
     calendar: BusinessCalendar,
+    session_open_jst: dt.time = JPX_REGULAR_SESSION_OPEN_JST,
     session_close_jst: dt.time = JPX_REGULAR_SESSION_CLOSE_JST,
 ) -> tuple[PriceFreshnessVerdict, str | None]:
     """保有銘柄(売却判定・利確判定を含む)の価格鮮度を判定する。
@@ -170,11 +255,21 @@ def evaluate_holdings_price_freshness(
     """
     if as_of_date is None:
         return PriceFreshnessVerdict.DATA_INSUFFICIENT, _REASON_UNKNOWN_HOLDINGS
-    if _is_future_as_of(as_of_date, now, calendar, session_close_jst):
+    state = classify_as_of_date(as_of_date, now, calendar, session_open_jst, session_close_jst)
+    if state is AsOfDateState.TRUE_FUTURE:
         return (
             PriceFreshnessVerdict.DATA_INSUFFICIENT,
             _REASON_FUTURE_HOLDINGS.format(as_of=as_of_date.isoformat()),
         )
+    if state is AsOfDateState.NON_TRADING_DAY:
+        return (
+            PriceFreshnessVerdict.DATA_INSUFFICIENT,
+            _REASON_NON_TRADING_HOLDINGS.format(as_of=as_of_date.isoformat()),
+        )
+    if state is AsOfDateState.CURRENT_SESSION_PROVISIONAL:
+        # 進行中セッションの未確定bar。損切り・利確はむしろ最新値で判定すべきであり、
+        # ここで DATA_INSUFFICIENT にすると立会中は保有判定が全て不能になる(Issue #52)。
+        return PriceFreshnessVerdict.NORMAL, None
 
     missed = missed_trading_sessions(as_of_date, now, calendar, session_close_jst)
     if missed is None:  # pragma: no cover - as_of_date is not None のため到達しない

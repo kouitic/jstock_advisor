@@ -41,6 +41,7 @@ DATA_INSUFFICIENT)は判定policy側の関心事であり、データ自身の�
 from __future__ import annotations
 
 import datetime as dt
+from enum import StrEnum
 from typing import Final
 
 from jstock_advisor.domain.business_calendar import BusinessCalendar
@@ -49,6 +50,61 @@ from jstock_advisor.domain.jst import require_timezone_aware, to_jst
 # JPXの通常立会の大引け(2024-11-05以降)。JST。
 # 現物の日足barはこの時刻以降に確定するため、これより前は当日のbarを期待しない。
 JPX_REGULAR_SESSION_CLOSE_JST: Final = dt.time(15, 30)
+
+# JPXの通常立会の寄付(前場開始)。JST。
+# `now` がこれより前であれば、当日はまだ1本も約定していない。
+JPX_REGULAR_SESSION_OPEN_JST: Final = dt.time(9, 0)
+
+
+class MarketSessionState(StrEnum):
+    """`now` 時点のJPX通常立会の状態(**`now` の状態であり、データの状態ではない**)。
+
+    Issue #52 の回帰は「最新の完了セッション」と「正当に観測されうる最大日付」を
+    同一の関数で表現したことに起因する。両者を分けるには、まず `now` が
+    立会のどこに位置するかを明示的な状態として持つ必要がある。
+
+    PRE_OPEN          営業日・寄付前。当日のbarはまだ存在しない
+    IN_SESSION        営業日・立会中。当日のbarは存在するが**未確定**
+    POST_CLOSE        営業日・大引け後。当日のbarが確定している
+    NON_BUSINESS_DAY  非営業日(土日・祝日・臨時休場)。当日のbarは存在しえない
+    """
+
+    PRE_OPEN = "PRE_OPEN"
+    IN_SESSION = "IN_SESSION"
+    POST_CLOSE = "POST_CLOSE"
+    NON_BUSINESS_DAY = "NON_BUSINESS_DAY"
+
+
+def classify_market_session(
+    now: dt.datetime,
+    calendar: BusinessCalendar,
+    session_open_jst: dt.time = JPX_REGULAR_SESSION_OPEN_JST,
+    session_close_jst: dt.time = JPX_REGULAR_SESSION_CLOSE_JST,
+) -> MarketSessionState:
+    """`now` がJPX通常立会のどの状態にあるかを返す。
+
+    暦日・時刻はすべてJST基準で判定する(`domain/jst.py` の規約に従う)。
+    本関数は**観測**であり、いかなる閾値も持たない。
+
+    境界の扱い(Issue #52 で固定):
+
+        寄付ちょうど(09:00)   IN_SESSION   立会は開始している
+        大引けちょうど(15:30) POST_CLOSE   barは確定している
+
+    Raises:
+        ValueError: `now` がtimezone-naiveな場合。
+    """
+    require_timezone_aware(now)
+    jst_now = to_jst(now)
+    if not calendar.is_business_day(jst_now.date()):
+        return MarketSessionState.NON_BUSINESS_DAY
+    current = jst_now.time()
+    if current < session_open_jst:
+        return MarketSessionState.PRE_OPEN
+    if current < session_close_jst:
+        return MarketSessionState.IN_SESSION
+    return MarketSessionState.POST_CLOSE
+
 
 # as_of が不明で鮮度を評価できないことを表す。0(=新鮮)と混同しないための番兵。
 MISSED_SESSIONS_UNKNOWN: Final = None

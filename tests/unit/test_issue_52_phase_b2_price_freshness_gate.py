@@ -409,14 +409,22 @@ def test_t16_t17_regression_modules_exist() -> None:
 # **未来日の株価が NORMAL として売買判定に使われる**状態になっていた。
 #
 # 未来日は「新鮮」ではなく timestamp / data integrity の異常である。
-# 観測の contract は壊さず、policy 層(`_is_future_as_of`)で分離する。
+# 観測の contract は壊さず、policy 層(`classify_as_of_date`)で分離する。
+#
+# **未来日の基準は「JST暦日の当日」である**(Issue #52 回帰修正、2026-09-03)。
+# 当初はここを「期待される直近完了セッション」としていたが、それは
+# **鮮度の基準点**であって**妥当性の上限**ではない。provider は立会中に
+# 当日の未確定barを返すため、その基準では立会中の実行が必ず異常判定になった。
+# 下のヘルパは真の未来日(= 当日を超える日付)のみを生成する。
 
 
 def _future_session(days: int) -> dt.date:
-    """期待される直近完了セッションより `days` 日ぶん未来の日付。"""
-    return expected_latest_completed_trading_session(_NOW, _CALENDAR) + dt.timedelta(
-        days=days
-    )
+    """JST暦日の当日より `days` 日ぶん未来の日付(= 真の未来日)。
+
+    `days >= 1` は常に「まだ到来していない暦日」であり、その日のbarは
+    存在しえない。立会の進行状況に関係なく異常である。
+    """
+    return _NOW.astimezone(_JST).date() + dt.timedelta(days=days)
 
 
 @pytest.mark.parametrize("days", [1, 3, 30])
