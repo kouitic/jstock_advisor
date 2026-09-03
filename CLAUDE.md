@@ -6,11 +6,19 @@
 
 - **開発の進め方・レビュー・release governanceは
   [docs/development_workflow.md](docs/development_workflow.md) に従うこと。**
-  lane / WIP制限 / 実装パイプライン / ローカルテスト方針 / GitHubへの永続化 /
-  現況判断 / negative-path検証 / AWS pagination / grouped release /
+  lane / WIP制限 / **指示プロトコル(INSTRUCTION_ID)** / 実装パイプライン /
+  ローカルテスト方針 / GitHubへの永続化 / 現況判断 / negative-path検証 /
+  AWS pagination / grouped release /
   **Issue起点の原則(挙動・構成・運用・契約へ影響する変更はIssue必須)** /
   人間承認の境界は同文書が正本である。
   (詳細を本ファイルへ複製しない。ルールを変更する場合は同文書を更新する。)
+
+- **作業指示に `INSTRUCTION_ID` が付いている場合、回答の冒頭に同じIDを必ず記載すること。**
+  IDが無い回答・別IDの回答・撤回済みIDへの回答は、次工程の根拠として扱われない。
+  指示キューは作業者ごとに独立しており(`PER_WORKER_SERIALIZATION=YES` /
+  `GLOBAL_SERIALIZATION=NO`)、他の作業者が作業中であることは
+  自分への指示を妨げない。詳細は
+  [docs/development_workflow.md](docs/development_workflow.md) 2.5節が正本。
 
 - **GitHub Issueを作成・調査・更新・closeする場合は、
   [docs/issue_label_policy.md](docs/issue_label_policy.md) を必ず読み、

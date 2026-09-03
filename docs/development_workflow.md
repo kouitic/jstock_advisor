@@ -90,6 +90,124 @@ INVESTIGATION_WIP  <= 2
 
 ---
 
+## 2.5 指示プロトコル(B')
+
+複数の AI エージェントへ並行して作業を依頼する際、**どの指示に対する回答か**が
+曖昧になると、古い指示への回答を次工程の根拠にしてしまう事故が起きる。
+本節はその防止のための統制である。
+
+### 2.5.1 INSTRUCTION_ID
+
+指示側から各エージェントへ出す**すべての作業指示に一意な ID を付与する**。
+
+```
+形式   <ASSIGNEE>-<YYYYMMDD>-<連番>
+例     TARO-20260904-001
+       JIRO-20260904-001
+```
+
+作業者は**回答時に、対応した INSTRUCTION_ID を必ず明記する**。
+
+回答が次のいずれかに該当する場合、その回答を**自動的には次工程の根拠にしない**。
+まず指示と回答の対応関係を確認する。
+
+```
+INSTRUCTION_ID が無い
+別の ID が付いている
+WITHDRAWN 済みの ID への回答である
+```
+
+### 2.5.2 指示の状態
+
+各 INSTRUCTION_ID を最低限次の 3 状態で管理する。
+
+```
+PENDING     指示済み、回答未受領
+ANSWERED    回答を受領した
+WITHDRAWN   撤回済み(緊急差し替え等)。以後この ID への回答は無効
+```
+
+### 2.5.3 直列化は「作業者ごと」— 全体を止めない
+
+```
+PER_WORKER_SERIALIZATION = YES
+GLOBAL_SERIALIZATION     = NO
+```
+
+**同一作業者**について、直前の通常指示が `PENDING` の間は次の通常指示を追加しない。
+新しい通常指示を出す前に、その作業者の直前指示が `ANSWERED` または `WITHDRAWN`
+であることを確認する。
+
+**他の作業者の `PENDING` は、新規指示の発行を妨げない。** キューは作業者ごとに独立である。
+
+```
+誤り   「太郎が作業中なら次郎にも指示できない」
+正しい 「太郎が PENDING なら太郎への次の通常指示を出さない。次郎へは出してよい」
+```
+
+#### 例 A — 別 worker への並行指示は可
+
+```
+太郎   TARO-20260904-001 = PENDING
+次郎   JIRO-20260904-001 = ANSWERED
+
+-> JIRO-20260904-002 を次郎へ発行してよい
+-> TARO-20260904-002 を太郎へ発行してはいけない
+   (太郎の 001 が ANSWERED / WITHDRAWN になるまで待つ)
+```
+
+### 2.5.4 緊急差し替え(EMERGENCY SUPERSEDE)
+
+緊急時に限り、同一作業者の `PENDING` 指示が存在していても新指示へ差し替えてよい。
+その場合、新指示に次を**必ず明記する**。
+
+```
+EMERGENCY                   = YES
+SUPERSEDES                  = <旧 INSTRUCTION_ID>
+PREVIOUS_INSTRUCTION_STATUS = WITHDRAWN
+```
+
+旧指示はその時点で無効になる。**その後に旧指示への遅延回答が届いても、
+有効な完了報告として扱わない。**
+
+#### 例 B — 緊急差し替え
+
+```
+太郎   TARO-20260904-003 = PENDING(Production 自然検証の待機中)
+
+Production で新たな障害を検知したため差し替える:
+
+INSTRUCTION_ID              = TARO-20260904-004
+EMERGENCY                   = YES
+SUPERSEDES                  = TARO-20260904-003
+PREVIOUS_INSTRUCTION_STATUS = WITHDRAWN
+
+-> 以後 TARO-20260904-003 への回答が届いても完了報告として扱わない
+-> 太郎は TARO-20260904-004 に対してのみ回答する
+```
+
+### 2.5.5 回答フォーマット
+
+作業報告の**冒頭**に最低限次を記載する。
+
+```
+INSTRUCTION_ID     = <対応した ID>
+ASSIGNEE           = <TARO | JIRO>
+INSTRUCTION_STATUS = ANSWERED
+```
+
+**複数の古い指示の結果を 1 つの回答へ混在させない。**
+1 指示 1 回答を原則とし、対応関係を一意に保つ。
+
+### 2.5.6 適用範囲
+
+本節は **AI エージェントへの作業指示の統制**であり、Production release 手順そのもの
+ではない。9 節(grouped release)・10 節(人間承認の境界)の要求を緩和しない。
+とくに merge / Production deploy / ChangeSet / manual invoke 等の人間承認は、
+INSTRUCTION_ID の有無にかかわらず従来どおり必要である。
+
+---
+
 ## 3. 実装パイプライン(C)
 
 標準の流れ:
@@ -751,3 +869,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-03 | §9 の grouped release 第1条件を「OPEN な release-blocker = 0」から「release scope 外に OPEN な release-blocker が無い」へ修正(Issue #122)。release-blocker lifecycle(docs/issue_label_policy.md §6)では Production deploy が blocker 解除の前提であるため、旧記述では Production-target defect の remediation release が循環して実施不能になる不整合があった。あわせて release scope 内 blocker を release へ含めるための条件(remediation を含む / merge 済み / Verification Plan 定義済み / deploy 後も blocker 維持 / mandatory verification + ChatGPT review + human approval まで解除しない)を明文化し、`BLOCKER_REMEDIATION_RELEASE` と通常の grouped release の区別を補足した。**解除条件は一切緩和していない** |
 | 2026-09-03 | release-blocker の blocking target semantics を導入(Issue #122)。`BLOCKER_MODE`(`DEFECT_BLOCK` / `VERIFICATION_HOLD`)・`BLOCKING_TARGET` 等の必須記録と `BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER` は docs/issue_label_policy.md §6 を正本とし、本文書 §9 はそれを参照する。§9 の第1条件を `SCOPE_EXTERNAL_OPEN_RELEASE_BLOCKERS = 0` として明示し、release inventory の追跡要件(ISSUE / PR / COMMIT / BLOCKER_MODE / BLOCKING_TARGET / VERIFICATION_STATUS)を追加した。あわせて §9.5 `NO_BEHAVIOR_OR_OPERATIONAL_CHANGE_WITHOUT_ISSUE`(挙動・構成・運用・契約へ影響する変更は Issue 必須。例外は `NO_BEHAVIOR_CHANGE` かつ `NO_OPERATIONAL_CHANGE` の doc-only のみで、governance 変更は例外に含まない)・既存 Issue Type 体系の維持・Refs/Fixes の使い分け・main 直接 push 禁止の再確認を追加した。**既存の解除条件・piggyback 禁止・人間承認境界・4軸独立性はいずれも緩和していない** |
 | 2026-09-03 | §3.5「時間意味論変更ゲート」を新設(Issue #145)。Issue #52 / #143 / #148 の再発を上流で止めるため、時刻・営業日・市場セッション・timezone・外部ライブラリの日付境界に触れる変更へのみ適用するゲートを定めた。トリガ T1-T4 をファイルパスと diff の有無で客観判定し、control(C-BM / C-BS / C-MG / C-CO / C-CS / C-PC / C-EL / C-TZ / C-MD)を決定表で対応づける。**T1-T4 は階層ではなく独立した control 集合**であり、複数該当時は union を要求する(「より強いトリガを1つ選ぶ」方式は control が欠落するため採らない)。最も件数の多い consumer 変更(T3)には分岐する状態のみを課し、全境界マトリクスは共有ヘルパ変更(T1)に限定する。トリガ非該当の PR には追加負担を課さない。外部ライブラリの境界仕様はコードからの推測を根拠とせず version つきの独立根拠を要求し、mock の期待値を判定側 helper から自己参照的に導出した assertion は provider contract の証拠と認めない。CI の実行時刻は補助証拠に留め、**CI の複数時刻実行・時刻別 matrix job・sleep/wait・現在時刻依存テストは導入しない**(検出確率を上げるだけで非決定性が残るため)。full pytest のローカル必須化も行わない(§4 の方針は不変)。あわせて .github/PULL_REQUEST_TEMPLATE.md と tests/unit/test_time_semantics_guard.py(registry と registry 自身の健全性検証)を追加した。**判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない**(開発運用ゲートの追加のみ) |
+| 2026-09-04 | §2.5「指示プロトコル(B')」を新設(Issue #122)。複数の AI エージェントへ並行して作業を依頼する際、どの指示に対する回答かが曖昧になり、古い指示への回答を次工程の根拠にしてしまう事故を防ぐための統制。(1)指示側は全作業指示へ一意な `INSTRUCTION_ID`(`<ASSIGNEE>-<YYYYMMDD>-<連番>`)を付与し、作業者は回答冒頭へ同一 ID・ASSIGNEE・INSTRUCTION_STATUS を記載する。ID が無い回答・別 ID の回答・撤回済み ID への回答は自動的には次工程の根拠にせず、まず対応関係を確認する。(2)指示状態を `PENDING` / `ANSWERED` / `WITHDRAWN` で管理する。(3)**直列化は作業者ごと**とする(`PER_WORKER_SERIALIZATION=YES` / `GLOBAL_SERIALIZATION=NO`)。同一作業者の直前の通常指示が PENDING の間は次の通常指示を追加しないが、**他の作業者の PENDING は新規指示の発行を妨げない**。「一方が作業中なら他方にも指示できない」という誤読を避けるため、別 worker への並行指示可の例を明記した。(4)緊急時のみ `EMERGENCY=YES` / `SUPERSEDES` / `PREVIOUS_INSTRUCTION_STATUS=WITHDRAWN` を明記して差し替えてよく、撤回済み指示への遅延回答は有効な完了報告として扱わない。差し替えの例も明記した。(5)複数の古い指示の結果を 1 つの回答へ混在させない。あわせて CLAUDE.md へ入口となる記載を追加した。**本節は AI への作業指示の統制であり、9節(grouped release)・10節(人間承認の境界)の要求はいずれも緩和していない**(merge / Production deploy / ChangeSet / manual invoke 等の人間承認は INSTRUCTION_ID の有無にかかわらず従来どおり必要)。コード・Production 挙動の変更なし |
