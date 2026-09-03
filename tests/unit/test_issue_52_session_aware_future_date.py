@@ -52,6 +52,7 @@ from jstock_advisor.domain.price_freshness import (
     evaluate_holdings_price_freshness,
 )
 from jstock_advisor.providers.market_data.mock_impl import MockMarketDataProvider
+from jstock_advisor.providers.market_data.yfinance_impl import YFinanceMarketDataProvider
 from jstock_advisor.providers.mock_fixtures import business_calendar
 
 _JST = dt.timezone(dt.timedelta(hours=9))
@@ -518,3 +519,107 @@ def test_non_business_day_same_day_bar_is_fail_closed(calendar) -> None:
     assert evaluate_holdings_price_freshness(_SATURDAY, now, calendar)[0] is (
         PriceFreshnessVerdict.DATA_INSUFFICIENT
     )
+
+
+# --- 実 provider の query window 契約(C1-A。ネットワークを使わない) ----------------
+#
+# 実 provider(yfinance)は `get_latest_price()` で
+#   start = self._now.date() - 14日
+#   end   = self._now.date() + 1日   (yfinance の end は排他)
+# という window を組み立てる。`self._now` は UTC aware であり `.date()` は **UTC 暦日**。
+#
+# UTC 00:00 == JST 09:00 == JPX 寄付 であるため、UTC 暦日の切り替わりが寄付の瞬間と
+# 一致する。結果として **寄付前は window が当日を含まない**。
+# この構造的性質を、ネットワークを使わずに固定 now で検証する。
+
+
+def _captured_query_window(now: dt.datetime) -> tuple[dt.date, dt.date]:
+    """`get_latest_price()` が組み立てる (start, last_included) を通信せずに捕捉する。
+
+    `_fetch_history()` の `end` 引数は「含めたい最終日」であり、yfinance へは
+    その内部で +1日(排他)して渡される。ここでは `_fetch_history` を差し替えて
+    捕捉するため、返る `end` は **含めたい最終日(inclusive)** である。
+
+    `now` は **UTC aware** で渡すこと。本番の全 entry point
+    (Lambda handler / CLI)が `dt.datetime.now(dt.UTC)` を生成しており、
+    `self._now.date()` は UTC 暦日になるためである。
+    """
+    provider = YFinanceMarketDataProvider(now=now)
+    captured: dict[str, dt.date] = {}
+
+    def _fake_fetch(ticker_symbol: str, start: dt.date, end: dt.date):
+        captured["start"] = start
+        captured["end"] = end
+        return None
+
+    provider._fetch_history = _fake_fetch  # type: ignore[method-assign]
+    assert provider.get_latest_price("7203") is None
+    return captured["start"], captured["end"]
+
+
+@pytest.mark.parametrize(
+    ("label", "day", "hour", "minute"),
+    [
+        ("PRE_OPEN_0800", _BUSINESS_DAY, 8, 0),
+        ("PRE_OPEN_0859", _BUSINESS_DAY, 8, 59),
+        ("IN_SESSION_0924", _BUSINESS_DAY, 9, 24),
+        ("BEFORE_CLOSE_1529", _BUSINESS_DAY, 15, 29),
+        ("POST_CLOSE_1600", _BUSINESS_DAY, 16, 0),
+        ("MONDAY_PRE_OPEN", dt.date(2026, 9, 7), 8, 0),
+        ("LONG_WEEKEND_PRE_OPEN", _LONG_WEEKEND_REOPEN, 8, 0),
+        ("WEEKEND", _SATURDAY, 12, 0),
+    ],
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_real_provider_query_window_cannot_reach_future_bars(
+    calendar, label, day, hour, minute
+) -> None:
+    """実 provider の query window が `latest_plausible_bar_date` を超えないこと。
+
+    window が当日を含まなければ、provider 側が当日 bar を保持していても
+    **返しようがない**。寄付前に当日 bar が判定へ流入する経路が構造的に無いことを固定する。
+    """
+    now_jst = _jst(day, hour, minute)
+    now = now_jst.astimezone(dt.UTC)  # 本番と同じ UTC aware
+    start, last_included = _captured_query_window(now)
+    assert start < last_included
+
+    newest_in_window = last_included
+    while not calendar.is_business_day(newest_in_window):
+        newest_in_window -= dt.timedelta(days=1)
+
+    assert newest_in_window <= latest_plausible_bar_date(now_jst, calendar)
+
+
+def test_real_provider_query_window_excludes_today_before_open() -> None:
+    """寄付前の window は当日を含まない(当日 bar を要求しない)。
+
+    JST 08:00 は UTC では前日 23:00 であり、`self._now.date()`(UTC 暦日)は
+    前日になる。したがって当日 bar は window の外側になる。
+    """
+    now = _jst(_BUSINESS_DAY, 8).astimezone(dt.UTC)
+    _start, last_included = _captured_query_window(now)
+    assert last_included < _BUSINESS_DAY
+    assert last_included == _PREV_BUSINESS_DAY
+
+
+def test_real_provider_query_window_includes_today_after_open() -> None:
+    """寄付後の window は当日を含む(未確定 bar を取得しうる)。"""
+    now = _jst(_BUSINESS_DAY, 9, 24).astimezone(dt.UTC)
+    _start, last_included = _captured_query_window(now)
+    assert last_included == _BUSINESS_DAY
+
+
+def test_query_window_boundary_coincides_with_market_open() -> None:
+    """UTC 暦日の切り替わり(= JST 09:00)が寄付と一致することを固定する。
+
+    本番は `now` を UTC aware で生成するため `self._now.date()` は UTC 暦日になり、
+    その切り替わりが JST 09:00(JPX 寄付)と一致する。これが「寄付前は当日 bar を
+    取りに行かない」という安全性の根拠である。**この一致は UTC+9 という
+    オフセットに依存している**ため、前提が変わればこの保護は失われる。
+    """
+    just_before_open = _jst(_BUSINESS_DAY, 8, 59).astimezone(dt.UTC)
+    just_after_open = _jst(_BUSINESS_DAY, 9, 0).astimezone(dt.UTC)
+
+    assert _captured_query_window(just_before_open)[1] == _PREV_BUSINESS_DAY
+    assert _captured_query_window(just_after_open)[1] == _BUSINESS_DAY
