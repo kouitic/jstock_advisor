@@ -20,6 +20,13 @@
   自分への指示を妨げない。詳細は
   [docs/development_workflow.md](docs/development_workflow.md) 2.5節が正本。
 
+- **ユーザーとChatGPTの間の協働ルール(役割分担・Human Gate・レビュー判定・
+  指示の対応付け・セッション開始時のbootstrap)は
+  [docs/chatgpt_collaboration_protocol.md](docs/chatgpt_collaboration_protocol.md)
+  が正本である。** 特に「ChatGPTが推奨すること」と「ユーザーが承認したこと」は
+  別であり、`PASS_WITH_CONDITIONS`はHuman Gate通過を意味しない。
+  `INSUFFICIENT_EVIDENCE`は不合格ではなく証拠不足であり、推測でPASSにしない。
+
 - **GitHub Issueを作成・調査・更新・closeする場合は、
   [docs/issue_label_policy.md](docs/issue_label_policy.md) を必ず読み、
   そのルールに従うこと。** labelはIssue Type / Priority / Severity /
