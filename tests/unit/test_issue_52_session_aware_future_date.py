@@ -417,3 +417,104 @@ def test_session_constants_match_jpx_regular_session() -> None:
     """寄付・大引けの定数を固定する(市場営業時間の仕様変更は本Issueの範囲外)。"""
     assert dt.time(9, 0) == JPX_REGULAR_SESSION_OPEN_JST
     assert dt.time(15, 30) == JPX_REGULAR_SESSION_CLOSE_JST
+
+
+# --- mock as_of の完全マトリクス(局面ごとの期待日を明示的に固定) -----------------
+
+
+@pytest.mark.parametrize(
+    ("label", "day", "hour", "minute", "expected_as_of"),
+    [
+        ("PRE_OPEN_0800", _BUSINESS_DAY, 8, 0, _PREV_BUSINESS_DAY),
+        ("PRE_OPEN_0859", _BUSINESS_DAY, 8, 59, _PREV_BUSINESS_DAY),
+        ("OPEN_0900", _BUSINESS_DAY, 9, 0, _BUSINESS_DAY),
+        ("IN_SESSION_0924", _BUSINESS_DAY, 9, 24, _BUSINESS_DAY),
+        ("BEFORE_CLOSE_1529", _BUSINESS_DAY, 15, 29, _BUSINESS_DAY),
+        ("CLOSE_1530", _BUSINESS_DAY, 15, 30, _BUSINESS_DAY),
+        ("POST_CLOSE_1600", _BUSINESS_DAY, 16, 0, _BUSINESS_DAY),
+        ("WEEKEND", _SATURDAY, 12, 0, _NEXT_BUSINESS_DAY),
+        ("LONG_WEEKEND_PRE_OPEN", _LONG_WEEKEND_REOPEN, 8, 0, _LONG_WEEKEND_LAST_BUSINESS_DAY),
+    ],
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_mock_as_of_matrix(label, day, hour, minute, expected_as_of) -> None:
+    """mock provider が各局面で返す `as_of_date` を1件ずつ固定する。
+
+    `latest_plausible_bar_date` を超えないことだけでなく、
+    **どの日付を返すか**まで明示する(局面ごとの期待を曖昧にしない)。
+    """
+    now = _jst(day, hour, minute)
+    snapshot = MockMarketDataProvider(now=now).get_latest_price(_MOCK_STOCK)
+    assert snapshot is not None
+    assert snapshot.as_of_date == expected_as_of
+
+
+# --- mutation guard: 3方向すべてを非空振りで固定 ---------------------------------
+#
+# これらは「壊し方」を直接表現したテストである。実装を各方向へ戻したときに
+# 必ず失敗することを保証し、guard が空振りしないようにする。
+
+
+def test_mutation_guard_pre_open_must_not_accept_same_day_bar(calendar) -> None:
+    """PRE_OPEN の当日barを NORMAL へ戻す mutation を検出する。
+
+    mock を「常に当日」へ戻す(= 旧 UTC 暦日相当)と、寄付前に当日barが返り
+    判定が fail-close する。両側から固定しておく。
+    """
+    now = _jst(_BUSINESS_DAY, 8)
+
+    # 判定側: 寄付前の当日barは必ず fail-close
+    assert evaluate_buy_price_freshness(_BUSINESS_DAY, now, calendar)[0] is (
+        PriceFreshnessVerdict.HARD_STOP
+    )
+    assert evaluate_holdings_price_freshness(_BUSINESS_DAY, now, calendar)[0] is (
+        PriceFreshnessVerdict.DATA_INSUFFICIENT
+    )
+
+    # provider側: 寄付前は当日barを返さない
+    snapshot = MockMarketDataProvider(now=now).get_latest_price(_MOCK_STOCK)
+    assert snapshot is not None
+    assert snapshot.as_of_date != _BUSINESS_DAY
+    assert snapshot.as_of_date == _PREV_BUSINESS_DAY
+
+
+def test_mutation_guard_in_session_must_accept_same_day_bar(calendar) -> None:
+    """IN_SESSION の当日barを未来扱いへ戻す mutation を検出する。"""
+    now = _jst(_BUSINESS_DAY, 9, 24)
+    assert latest_plausible_bar_date(now, calendar) == _BUSINESS_DAY
+    assert evaluate_buy_price_freshness(_BUSINESS_DAY, now, calendar)[0] is (
+        PriceFreshnessVerdict.NORMAL
+    )
+    assert evaluate_holdings_price_freshness(_BUSINESS_DAY, now, calendar)[0] is (
+        PriceFreshnessVerdict.NORMAL
+    )
+    snapshot = MockMarketDataProvider(now=now).get_latest_price(_MOCK_STOCK)
+    assert snapshot is not None
+    assert snapshot.as_of_date == _BUSINESS_DAY
+
+
+@pytest.mark.parametrize(("hour", "minute"), [(8, 0), (9, 24), (15, 30), (16, 0)])
+def test_mutation_guard_true_future_must_stay_fail_closed(calendar, hour, minute) -> None:
+    """真の未来を NORMAL へ緩める mutation を検出する。
+
+    どの局面でも、翌営業日以降のbarは fail-close を維持する。
+    """
+    now = _jst(_BUSINESS_DAY, hour, minute)
+    for future_date in (_NEXT_BUSINESS_DAY, dt.date(2026, 10, 1), dt.date(2027, 1, 4)):
+        assert evaluate_buy_price_freshness(future_date, now, calendar)[0] is (
+            PriceFreshnessVerdict.HARD_STOP
+        )
+        assert evaluate_holdings_price_freshness(future_date, now, calendar)[0] is (
+            PriceFreshnessVerdict.DATA_INSUFFICIENT
+        )
+
+
+def test_non_business_day_same_day_bar_is_fail_closed(calendar) -> None:
+    """非営業日の当日barは存在し得ない。fail-close を維持する。"""
+    now = _jst(_SATURDAY, 12)
+    assert evaluate_buy_price_freshness(_SATURDAY, now, calendar)[0] is (
+        PriceFreshnessVerdict.HARD_STOP
+    )
+    assert evaluate_holdings_price_freshness(_SATURDAY, now, calendar)[0] is (
+        PriceFreshnessVerdict.DATA_INSUFFICIENT
+    )
