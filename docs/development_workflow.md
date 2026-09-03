@@ -210,7 +210,7 @@ REQUIRED_CONTROLS = 該当する全トリガの control の union
 **`C-BM`(T1 のみ)** — 次の境界を固定 clock で網羅する。
 
 ```
-寄付直前 / 寄付ちょうど / 立会中 / 大引け1分前 / 大引けちょうど /
+寄り付き直前 / 寄り付きちょうど / 立会中 / 大引け1分前 / 大引けちょうど /
 大引け後 / 非営業日 / 連休明け / UTC-JST 日跨ぎ / 真の未来日
 ```
 
@@ -318,7 +318,7 @@ wall clock の使用は正当であり、リスクベースの登録制とする
 本節が Production の挙動を定めるものではない。
 
 ```
-寄付前              当日付の bar は存在し得ない        -> fail-close
+寄り付き前          当日付の bar は存在し得ない        -> fail-close
 立会中(未確定)     当日付の bar は存在しうる          -> 正常
 大引け後(確定)     当日付の bar は存在する            -> 正常
 非営業日            当日付の bar は存在し得ない        -> fail-close
@@ -333,6 +333,35 @@ wall clock の使用は正当であり、リスクベースの登録制とする
 
 `NO` の宣言は免罪符ではない。変更内容と矛盾する場合、レビュワーはこれを FAIL とする。
 PR 本文を CI で自動解析する仕組みは導入しない。
+
+#### order-sensitive cohort に該当する場合
+
+order case の実行は**自動化しない**(CI を重くしないため)。手動実行である以上、
+実行が忘れられると metadata だけが残り、ゲートが実質的に働かなくなる。
+したがって **実行証拠を PR review の必須項目とする**。
+
+`EVIDENCE` へ最低限:
+
+```
+ORDER_CASES_EXECUTED = <実行した order case 名>
+ORDER_CASE_RESULTS   = <各 case の結果>
+```
+
+該当する order case が `KNOWN_FAILURE_ISSUE` を持つ場合はさらに:
+
+```
+EXPECTED_FAILURE_SET = <期待する失敗集合の根拠>
+ACTUAL_FAILURE_SET   = <実際の失敗集合の根拠>
+FAILURE_SET_MATCH    = YES | NO
+```
+
+`FAILURE_SET_MATCH = NO`(= 既知失敗と一致しない)場合、差分は当該変更の
+regression として扱う。**「red だが既知」で済ませない。**
+
+期待する失敗集合のテスト名一覧を registry へハードコードすることは要求しない
+(owner Issue の解消により変動するため)。実行時の出力を根拠として示せばよい。
+
+**order-sensitive でない cohort には、この追加記録を求めない。**
 
 ---
 

@@ -31,6 +31,23 @@ REQUIRED_CONTROLS =
 EVIDENCE          =
 
 N/A とする control がある場合は理由を併記する。無言の省略は不可。
+
+order-sensitive cohort(3.5.6 の registry で ORDER_CASES を持つ cohort)に
+該当する場合は、EVIDENCE へ実行証拠を必ず記録する。order case の実行は
+自動化していないため、記録が無いと実質的に検証されない。
+
+ORDER_CASES_EXECUTED =
+ORDER_CASE_RESULTS   =
+
+その order case が KNOWN_FAILURE_ISSUE を持つ場合はさらに:
+
+EXPECTED_FAILURE_SET =
+ACTUAL_FAILURE_SET   =
+FAILURE_SET_MATCH    = YES | NO
+
+FAILURE_SET_MATCH = NO の場合、差分は当該変更の regression として扱う
+(「red だが既知」で済ませない)。
+order-sensitive でない cohort には、この追加記録を求めない。
 -->
 
 > **`TIME_SEMANTICS_IMPACT = NO` は免罪符ではない。**
