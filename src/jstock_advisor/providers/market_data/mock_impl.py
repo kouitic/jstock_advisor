@@ -6,8 +6,13 @@ import datetime as dt
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.market_session import latest_plausible_bar_date
 from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot
-from jstock_advisor.providers.mock_fixtures import get_benchmark_series, get_price_volume_series
+from jstock_advisor.providers.mock_fixtures import (
+    business_calendar,
+    get_benchmark_series,
+    get_price_volume_series,
+)
 
 _PROVIDER_NAME = "mock_market_data"
 
@@ -19,11 +24,28 @@ class MockMarketDataProvider:
     def _source(self) -> DataSourceReference:
         return DataSourceReference(provider=_PROVIDER_NAME, fetched_at=self._now)
 
+    def _latest_available_bar_date(self) -> dt.date:
+        """`now` 時点で市場上存在しうる最も新しい営業日(JST暦日)。
+
+        Issue #52 Phase B2 regression 是正: 以前は `self._now.date()`(**UTC暦日**)で
+        打ち切っていたため、UTC 00:00〜JST大引けの時間帯に「まだ寄り付いていない
+        当日のbar」を返し、`price_freshness` の未来判定と衝突して CI が実行時刻に
+        よって green / red に変わっていた。
+
+        判定側(`domain/price_freshness.py`)と**同一の helper** を使い、
+        provider が返す `as_of_date` を市場セッションの契約へ揃える。
+        """
+        return latest_plausible_bar_date(self._now, business_calendar())
+
     def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
         series = get_price_volume_series(stock_code)
         if not series:
             return None
-        latest_date = max(d for d in series if d <= self._now.date())
+        cutoff = self._latest_available_bar_date()
+        candidates = [d for d in series if d <= cutoff]
+        if not candidates:
+            return None
+        latest_date = max(candidates)
         close, volume = series[latest_date]
         return PriceSnapshot(
             stock_code=stock_code,
@@ -59,7 +81,8 @@ class MockMarketDataProvider:
         series = get_price_volume_series(stock_code)
         if not series:
             return None
-        recent = sorted((d for d in series if d <= self._now.date()), reverse=True)[:business_days]
+        cutoff = self._latest_available_bar_date()
+        recent = sorted((d for d in series if d <= cutoff), reverse=True)[:business_days]
         if not recent:
             return None
         values = [Decimal(str(series[d][0])) * series[d][1] for d in recent]

@@ -41,6 +41,7 @@ DATA_INSUFFICIENT)は判定policy側の関心事であり、データ自身の�
 from __future__ import annotations
 
 import datetime as dt
+from enum import StrEnum
 from typing import Final
 
 from jstock_advisor.domain.business_calendar import BusinessCalendar
@@ -49,6 +50,12 @@ from jstock_advisor.domain.jst import require_timezone_aware, to_jst
 # JPXの通常立会の大引け(2024-11-05以降)。JST。
 # 現物の日足barはこの時刻以降に確定するため、これより前は当日のbarを期待しない。
 JPX_REGULAR_SESSION_CLOSE_JST: Final = dt.time(15, 30)
+
+# JPXの通常立会の寄付。JST。
+# **この時刻以降は当日の日足barが「未確定だが存在しうる」状態になる**
+# (Issue #52 Phase B2 regression 是正)。大引け前でも当日barは実在するため、
+# 当日barを「未来のbar」と判定してはならない。
+JPX_REGULAR_SESSION_OPEN_JST: Final = dt.time(9, 0)
 
 # as_of が不明で鮮度を評価できないことを表す。0(=新鮮)と混同しないための番兵。
 MISSED_SESSIONS_UNKNOWN: Final = None
@@ -127,3 +134,75 @@ def missed_trading_sessions(
     if as_of_date >= expected:
         return 0
     return calendar.business_days_between(as_of_date, expected)
+
+
+class MarketSessionPhase(StrEnum):
+    """`now` 時点の取引セッションの局面(Issue #52 Phase B2 regression 是正)。
+
+    PRE_OPEN          営業日だが寄付前。当日barはまだ存在しない
+    IN_SESSION        営業日の寄付〜大引け前。当日barは**未確定だが存在する**
+    POST_CLOSE        営業日の大引け後。当日barは確定している
+    NON_BUSINESS_DAY  土日・祝日・臨時休場。当日barは存在しない
+    """
+
+    PRE_OPEN = "PRE_OPEN"
+    IN_SESSION = "IN_SESSION"
+    POST_CLOSE = "POST_CLOSE"
+    NON_BUSINESS_DAY = "NON_BUSINESS_DAY"
+
+
+def current_market_session_phase(
+    now: dt.datetime,
+    calendar: BusinessCalendar,
+    session_open_jst: dt.time = JPX_REGULAR_SESSION_OPEN_JST,
+    session_close_jst: dt.time = JPX_REGULAR_SESSION_CLOSE_JST,
+) -> MarketSessionPhase:
+    """`now`(JST換算)が取引セッションのどの局面かを返す。
+
+    暦日・時刻はすべてJST基準で判定する(`domain/jst.py` の規約)。
+
+    Raises:
+        ValueError: `now` がtimezone-naiveな場合。
+    """
+    require_timezone_aware(now)
+    jst_now = to_jst(now)
+    if not calendar.is_business_day(jst_now.date()):
+        return MarketSessionPhase.NON_BUSINESS_DAY
+    if jst_now.time() < session_open_jst:
+        return MarketSessionPhase.PRE_OPEN
+    if jst_now.time() < session_close_jst:
+        return MarketSessionPhase.IN_SESSION
+    return MarketSessionPhase.POST_CLOSE
+
+
+def latest_plausible_bar_date(
+    now: dt.datetime,
+    calendar: BusinessCalendar,
+    session_open_jst: dt.time = JPX_REGULAR_SESSION_OPEN_JST,
+    session_close_jst: dt.time = JPX_REGULAR_SESSION_CLOSE_JST,
+) -> dt.date:
+    """`now` 時点で日足barが**存在しうる**最も新しいJPX営業日(JST暦日)を返す。
+
+    `expected_latest_completed_trading_session()` との違い:
+
+    ```
+    expected_latest_completed_trading_session  既に大引けを迎えた直近営業日
+                                              (= 鮮度の基準。当日は大引け後のみ)
+    latest_plausible_bar_date                 barが存在しうる最も新しい営業日
+                                              (= 未来判定の基準。寄付後は当日も含む)
+    ```
+
+    寄付後・大引け前の当日barは**未確定(provisional)だが実在する**。
+    これを「未来のbar」として扱うと、市場時間中の判定が全銘柄で不能になる
+    (Issue #52 Phase B2 の regression。2026-09-03 に本番providerで再現)。
+
+    「未確定」と「未来」は別概念である。翌営業日以降のような
+    **その時点で市場上存在し得ないbar** のみを未来として扱う。
+
+    Raises:
+        ValueError: `now` がtimezone-naiveな場合。
+    """
+    phase = current_market_session_phase(now, calendar, session_open_jst, session_close_jst)
+    if phase in (MarketSessionPhase.IN_SESSION, MarketSessionPhase.POST_CLOSE):
+        return to_jst(now).date()
+    return expected_latest_completed_trading_session(now, calendar, session_close_jst)

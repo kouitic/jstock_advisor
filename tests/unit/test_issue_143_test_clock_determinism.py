@@ -75,22 +75,36 @@ def _at(date: dt.date, hour: int, minute: int) -> dt.datetime:
     return dt.datetime.combine(date, dt.time(hour, minute), tzinfo=_JST)
 
 
+_TUE = dt.date(2026, 9, 1)  # 火曜(_WED の直前営業日)
 _WED = dt.date(2026, 9, 2)  # 水曜(営業日)
+_FRI = dt.date(2026, 9, 4)  # 金曜(_MON の直前営業日)
 _SAT = dt.date(2026, 9, 5)  # 土曜
 _MON = dt.date(2026, 9, 7)  # 翌週月曜
 
 # (ラベル, 固定now, 期待する最新完了セッション, 期待する mock as_of_date)
+#
+# Issue #52 で市場セッション semantics が確定したため、寄付前の期待 as_of を
+# 「当日」から「直前完了営業日」へ同期した(本ファイル作成時点では #52 未確定で
+# あり、docstring のとおり業務上の可否を #52 へ委ねていた)。
+#
+#   PRE_OPEN    当日barはまだ約定が無く存在し得ない -> 直前完了営業日
+#   IN_SESSION  当日barは未確定だが存在し得る       -> 当日
+#   POST_CLOSE  当日barは確定                      -> 当日
+#   非営業日     当日barは存在し得ない               -> 直前完了営業日
+#
+# 本ファイルの責務(wall clock 非依存 / 同一 injected clock なら同一結果)は
+# 変えていない。固定 clock で全セッション局面を再現する点も維持する。
 _SESSION_BOUNDARY_MATRIX = [
-    ("PRE_OPEN", _at(_WED, 8, 0), dt.date(2026, 9, 1), _WED),
-    ("MARKET_OPEN_JUST_BEFORE", _at(_WED, 8, 59), dt.date(2026, 9, 1), _WED),
-    ("MARKET_OPEN_JUST_AFTER", _at(_WED, 9, 0), dt.date(2026, 9, 1), _WED),
-    ("IN_SESSION", _at(_WED, 9, 24), dt.date(2026, 9, 1), _WED),
-    ("SESSION_CLOSE_MINUS_1MIN", _at(_WED, 15, 29), dt.date(2026, 9, 1), _WED),
+    ("PRE_OPEN", _at(_WED, 8, 0), _TUE, _TUE),
+    ("MARKET_OPEN_JUST_BEFORE", _at(_WED, 8, 59), _TUE, _TUE),
+    ("MARKET_OPEN_JUST_AFTER", _at(_WED, 9, 0), _TUE, _WED),
+    ("IN_SESSION", _at(_WED, 9, 24), _TUE, _WED),
+    ("SESSION_CLOSE_MINUS_1MIN", _at(_WED, 15, 29), _TUE, _WED),
     ("SESSION_CLOSE", _at(_WED, 15, 30), _WED, _WED),
     ("POST_CLOSE", _at(_WED, 16, 0), _WED, _WED),
     ("POST_CLOSE_LATE", _at(_WED, 23, 0), _WED, _WED),
-    ("WEEKEND", _at(_SAT, 12, 0), dt.date(2026, 9, 4), dt.date(2026, 9, 4)),
-    ("MONDAY_PRE_OPEN", _at(_MON, 8, 0), dt.date(2026, 9, 4), _MON),
+    ("WEEKEND", _at(_SAT, 12, 0), _FRI, _FRI),
+    ("MONDAY_PRE_OPEN", _at(_MON, 8, 0), _FRI, _FRI),
 ]
 
 
@@ -159,12 +173,16 @@ def test_result_depends_only_on_injected_clock_not_on_wall_clock() -> None:
 
 
 def test_different_injected_clocks_yield_different_but_deterministic_dates() -> None:
-    """異なる注入 clock は異なる、しかし決定的な日付を返す。"""
+    """異なる注入 clock は異なる、しかし決定的な日付を返す。
+
+    月曜の寄付前は当日barがまだ存在し得ないため、直前完了営業日(金曜)を返す
+    (Issue #52 で確定した市場セッション semantics)。
+    """
     pre_open = MockMarketDataProvider(_at(_MON, 8, 0)).get_latest_price(_MOCK_STOCK_CODE)
     post_close = MockMarketDataProvider(_at(_WED, 16, 0)).get_latest_price(_MOCK_STOCK_CODE)
     assert pre_open is not None
     assert post_close is not None
-    assert pre_open.as_of_date == _MON
+    assert pre_open.as_of_date == _FRI
     assert post_close.as_of_date == _WED
 
 
