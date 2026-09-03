@@ -141,6 +141,169 @@ PR 本文では、Issue に後続 Phase が残る場合や Production 自然検�
 
 ---
 
+## 3.5 時間意味論変更ゲート(C')
+
+Issue #52 / #143 / #148 は、いずれも「時刻・営業日・市場セッションの扱い」に
+起因した。本節はその再発を上流で止めるためのゲートである(Issue #145)。
+
+**大多数の PR には何も課さない。** トリガに該当する変更にのみ適用する。
+
+### 3.5.1 トリガ判定
+
+次の diff があるときだけ `TIME_SEMANTICS_IMPACT = YES` となる。
+判定はファイルパスと diff の有無で決まり、著者・レビュワーの主観に依存しない。
+
+```
+T1  domain/market_session.py / business_calendar.py / jst.py / price_freshness.py
+T2  provider が返す日付・時刻の決定ロジック
+    (as_of_date / fetched_at / bar date / 取得窓の start・end / timezone 変換 /
+     外部ライブラリの日付境界の使い方)
+T3  時刻由来値を受け取って業務分岐する consumer
+T4  test / mock / fixture の clock または期待日
+```
+
+T4 を含めるのは、**Issue #143 が「テスト期待値の変更」として現れた**ためである。
+
+### 3.5.2 control identifiers
+
+```
+C-BM  固定 clock の境界マトリクス(全境界)
+C-BS  分岐する状態のみの固定 clock テスト
+C-MG  mutation guard(緩める方向の変更で必ず落ちること)
+C-CO  affected cohort の組み合わせ実行(同一プロセス)
+C-CS  clock 固定化の影響範囲分析(どの cohort に属するかの特定と記録)
+C-PC  provider contract テスト
+C-EL  外部ライブラリの境界仕様の独立根拠(version を必ず記録)
+C-TZ  timezone / 取得窓の証拠
+C-MD  mock 期待値が provider contract 由来であること(リテラルの期待日で固定)
+```
+
+### 3.5.3 決定表
+
+| TRIGGER | REQUIRED_CONTROLS |
+|---|---|
+| **T1** | `C-BM` `C-MG` `C-CO` |
+| **T2** | `C-PC` `C-EL` `C-TZ` `C-MD` |
+| **T3** | `C-BS` |
+| **T4** | `C-CS` `C-CO` + 変更対象が属する層(T1/T2/T3)の control |
+
+**T1-T4 は階層ではない。** 番号の大小に上下関係はなく、それぞれが独立した
+control の集合である。T1 は T2 を包含しない(共有ヘルパを変えても provider
+契約の証拠は得られない)。
+
+複数トリガに該当する場合:
+
+```
+REQUIRED_CONTROLS = 該当する全トリガの control の union
+```
+
+「より強いトリガを1つ選ぶ」方式は採らない。control が欠落するためである。
+
+```
+例  T1 + T2  ->  C-BM C-MG C-CO C-PC C-EL C-TZ C-MD
+    T2 + T4  ->  C-PC C-EL C-TZ C-MD C-CS C-CO
+    T3 のみ  ->  C-BS
+```
+
+### 3.5.4 control の内容
+
+**`C-BM`(T1 のみ)** — 次の境界を固定 clock で網羅する。
+
+```
+寄付直前 / 寄付ちょうど / 立会中 / 大引け1分前 / 大引けちょうど /
+大引け後 / 非営業日 / 連休明け / UTC-JST 日跨ぎ / 真の未来日
+```
+
+業務上存在しない境界は N/A としてよいが、**理由を明記する**。無言の省略は不可。
+
+**`C-BS`(T3)** — 実際に分岐する状態のみでよい。**無関係な全境界は不要。**
+最も件数が多いのは T3 であり、ここへ全境界を課さないことが本ゲートを軽く保つ要点である。
+
+**`C-CO` / `C-CS`(T4)** — 1 ファイルだけ clock を固定して他モジュールとの整合を
+壊さないこと。固定化後、単独実行だけでなく **cohort の組み合わせ実行**で回帰が
+無いことを確認する。cohort は `tests/unit/test_time_semantics_guard.py` の
+registry に定義されている。
+
+Issue #143 は単独実行と全件 CI では確認したが、**部分集合の組み合わせ実行を
+確認しなかった**ため Issue #148 を露出させた。
+
+**`C-EL`(T2)** — 「このコードがそう書いてあるから、実装者はそう理解している
+はず」は**根拠にしない**。official docs / installed source / upstream source /
+read-only experiment のいずれかで確認し、**version とともに記録する**。
+
+**`C-MD`(T2)** — mock の期待値を判定側 helper から自己参照的に導出した
+assertion は、恒真になりうるため provider contract の証拠と認めない。
+
+```
+不可  assert snapshot.as_of_date <= latest_plausible_bar_date(now, calendar)
+      (mock が helper ちょうどで打ち切る実装なら失敗しえない)
+
+可    局面ごとにリテラルの期待日を固定する
+      ("PRE_OPEN_0800", _BUSINESS_DAY, 8, 0, _PREV_BUSINESS_DAY)
+```
+
+### 3.5.5 証拠の扱い
+
+```
+主証拠  固定 clock の境界マトリクス / mutation guard /
+        provider の取得窓分析 / 外部ライブラリ境界の独立根拠
+補助    CI がどの時刻(局面)で回ったか
+```
+
+**CI が「今の時刻で」green であることを correctness の主証拠にしない。**
+Issue #143 では、大引け後に回った CI の green が false green であった。
+
+導入しないもの:
+
+```
+CI の複数時刻実行 / 時刻別 matrix job / sleep・wait / 現在時刻依存テスト
+```
+
+検出確率を上げるだけで非決定性そのものは残るため、対策として誤りである。
+正しい対策はテストを時刻非依存にすることに帰着する。
+
+`full pytest` のローカル必須化も行わない(4節の方針を変えない)。
+
+### 3.5.6 registry
+
+時刻に敏感なテストモジュールは
+`tests/unit/test_time_semantics_guard.py` の registry に登録する。
+registry 自身の健全性(登録漏れ・削除・化石化した例外)も同ファイルで検証される。
+
+```
+FORBIDDEN         wall clock 呼び出しがあれば FAIL
+ALLOWED_EXISTING  既存の残存リスク。rationale と owner Issue が必須。
+                  負債が解消され呼び出しが 0 件になったら FAIL し、
+                  FORBIDDEN への更新を促す
+```
+
+**全テストファイルを走査する方式は採らない。** 市場セッションに接触しない
+wall clock の使用は正当であり、リスクベースの登録制とする。
+
+### 3.5.7 参照 contract(Issue #52)
+
+日足 bar の妥当性について確定した契約。ドキュメント上の参照であり、
+本節が Production の挙動を定めるものではない。
+
+```
+寄付前              当日付の bar は存在し得ない        -> fail-close
+立会中(未確定)     当日付の bar は存在しうる          -> 正常
+大引け後(確定)     当日付の bar は存在する            -> 正常
+非営業日            当日付の bar は存在し得ない        -> fail-close
+翌日以降の日付      その時点で存在し得ない            -> fail-close
+```
+
+### 3.5.8 PR での宣言
+
+`.github/PULL_REQUEST_TEMPLATE.md` に従い、非該当なら
+`TIME_SEMANTICS_IMPACT = NO` の1行のみでよい。該当する場合は
+`TRIGGERS` / `REQUIRED_CONTROLS` / `EVIDENCE` を記録する。
+
+`NO` の宣言は免罪符ではない。変更内容と矛盾する場合、レビュワーはこれを FAIL とする。
+PR 本文を CI で自動解析する仕組みは導入しない。
+
+---
+
 ## 4. ローカルテスト方針(D)
 
 原則、ローカルでは次のみを実行する。
@@ -526,3 +689,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-02 | 新規作成(Issue #122)。Stabilization Sprint の lane / WIP 制限 / 実装パイプライン / ローカルテスト方針 / GitHub 永続化 / status freshness / negative-path 分類 / AWS pagination / grouped release / 人間承認の境界を正本化した。既存の Human merge approval・Human Production approval・exact ChangeSet approval・release-blocker lifecycle・one Issue / one implementation owner・hidden-write 確認・Production failure injection 禁止・duplicate Issue 確認はいずれも緩和していない |
 | 2026-09-03 | §9 の grouped release 第1条件を「OPEN な release-blocker = 0」から「release scope 外に OPEN な release-blocker が無い」へ修正(Issue #122)。release-blocker lifecycle(docs/issue_label_policy.md §6)では Production deploy が blocker 解除の前提であるため、旧記述では Production-target defect の remediation release が循環して実施不能になる不整合があった。あわせて release scope 内 blocker を release へ含めるための条件(remediation を含む / merge 済み / Verification Plan 定義済み / deploy 後も blocker 維持 / mandatory verification + ChatGPT review + human approval まで解除しない)を明文化し、`BLOCKER_REMEDIATION_RELEASE` と通常の grouped release の区別を補足した。**解除条件は一切緩和していない** |
 | 2026-09-03 | release-blocker の blocking target semantics を導入(Issue #122)。`BLOCKER_MODE`(`DEFECT_BLOCK` / `VERIFICATION_HOLD`)・`BLOCKING_TARGET` 等の必須記録と `BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER` は docs/issue_label_policy.md §6 を正本とし、本文書 §9 はそれを参照する。§9 の第1条件を `SCOPE_EXTERNAL_OPEN_RELEASE_BLOCKERS = 0` として明示し、release inventory の追跡要件(ISSUE / PR / COMMIT / BLOCKER_MODE / BLOCKING_TARGET / VERIFICATION_STATUS)を追加した。あわせて §9.5 `NO_BEHAVIOR_OR_OPERATIONAL_CHANGE_WITHOUT_ISSUE`(挙動・構成・運用・契約へ影響する変更は Issue 必須。例外は `NO_BEHAVIOR_CHANGE` かつ `NO_OPERATIONAL_CHANGE` の doc-only のみで、governance 変更は例外に含まない)・既存 Issue Type 体系の維持・Refs/Fixes の使い分け・main 直接 push 禁止の再確認を追加した。**既存の解除条件・piggyback 禁止・人間承認境界・4軸独立性はいずれも緩和していない** |
+| 2026-09-03 | §3.5「時間意味論変更ゲート」を新設(Issue #145)。Issue #52 / #143 / #148 の再発を上流で止めるため、時刻・営業日・市場セッション・timezone・外部ライブラリの日付境界に触れる変更へのみ適用するゲートを定めた。トリガ T1-T4 をファイルパスと diff の有無で客観判定し、control(C-BM / C-BS / C-MG / C-CO / C-CS / C-PC / C-EL / C-TZ / C-MD)を決定表で対応づける。**T1-T4 は階層ではなく独立した control 集合**であり、複数該当時は union を要求する(「より強いトリガを1つ選ぶ」方式は control が欠落するため採らない)。最も件数の多い consumer 変更(T3)には分岐する状態のみを課し、全境界マトリクスは共有ヘルパ変更(T1)に限定する。トリガ非該当の PR には追加負担を課さない。外部ライブラリの境界仕様はコードからの推測を根拠とせず version つきの独立根拠を要求し、mock の期待値を判定側 helper から自己参照的に導出した assertion は provider contract の証拠と認めない。CI の実行時刻は補助証拠に留め、**CI の複数時刻実行・時刻別 matrix job・sleep/wait・現在時刻依存テストは導入しない**(検出確率を上げるだけで非決定性が残るため)。full pytest のローカル必須化も行わない(§4 の方針は不変)。あわせて .github/PULL_REQUEST_TEMPLATE.md と tests/unit/test_time_semantics_guard.py(registry と registry 自身の健全性検証)を追加した。**判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない**(開発運用ゲートの追加のみ) |
