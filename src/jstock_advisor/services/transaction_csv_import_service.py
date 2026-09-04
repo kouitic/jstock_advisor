@@ -51,14 +51,23 @@ from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.enums import AccountType, TransactionType
 from jstock_advisor.domain.entities.owner import (
-    DEFAULT_OWNER,
     InvalidOwnerError,
     normalize_and_validate_owner,
 )
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 
-REQUIRED_COLUMNS = {"stock_code", "transaction_type", "execution_date", "shares", "execution_price"}
+# Issue #61 F-A4: ownerを必須列にした(暗黙のDEFAULT_OWNER補完を廃止)。
+# 保有銘柄CSV(csv_import_service.py)と同じ規則へ揃える。同じ「所有者」という
+# 概念でCSVごとに規則が違うと、利用者が取り違えて別人の記録として登録されうる。
+REQUIRED_COLUMNS = {
+    "stock_code",
+    "transaction_type",
+    "execution_date",
+    "shares",
+    "execution_price",
+    "owner",
+}
 
 # 決定的transaction_idの接頭辞。uuid4由来の既存transaction_idと見分けがつくようにする
 # (過去データはuuid4のまま共存する。書き換えない)。
@@ -167,7 +176,19 @@ class TransactionCsvImportService:
     def _process_row(
         self, row_number: int, row: dict[str, str | None], *, import_id: str
     ) -> CsvImportRowResult:
-        owner_raw = (row.get("owner") or "").strip() or DEFAULT_OWNER
+        # Issue #61 F-A4: ownerを暗黙にDEFAULT_OWNERへ補完しない。
+        # 空欄は「未指定」であって「既定の所有者」ではないため、登録せずERRORにする。
+        # 検査位置は従来のowner検査と同じ(行の先頭)であり、既存のエラー優先順位を変えない。
+        owner_raw = (row.get("owner") or "").strip()
+        if not owner_raw:
+            return CsvImportRowResult(
+                row_number=row_number,
+                status=CsvRowStatus.ERROR,
+                # どの行かを利用者が特定できるようにstock_codeは可能な範囲で返す
+                # (保有銘柄CSVと同じ扱い)。
+                stock_code=ExternalValueParser.stock_code(row.get("stock_code")),
+                message="所有者(owner)が未指定です。所有者を明示してください",
+            )
         try:
             owner = normalize_and_validate_owner(owner_raw)
         except InvalidOwnerError:
