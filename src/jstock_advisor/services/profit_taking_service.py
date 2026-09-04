@@ -117,6 +117,11 @@ from jstock_advisor.interfaces.types import DividendInfo, ShareholderBenefit
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.corporate_action_service import CorporateActionService
+from jstock_advisor.services.financial_freshness_integration import (
+    FINANCIAL_STALE_USER_WARNING,
+    FinancialFreshnessAssessment,
+    assess_financial_freshness,
+)
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
@@ -455,7 +460,11 @@ class ProfitTakingService:
         )
 
     def _compute_confidence(
-        self, result: ProfitTakingResult, snapshot: StockSnapshot, now: dt.datetime
+        self,
+        result: ProfitTakingResult,
+        snapshot: StockSnapshot,
+        now: dt.datetime,
+        financial_freshness: FinancialFreshnessAssessment,
     ) -> ConfidenceScoreResult:
         fv_range = snapshot.fair_value_range
         spread_ratio = (
@@ -482,6 +491,10 @@ class ProfitTakingService:
             counter_factors_evaluated=True,
             benefit_eligible_but_value_unavailable=benefit_value_missing,
             fair_value_is_sole_strong_basis=result.fair_value_used_as_sole_strong_basis,
+            # Issue #52 Phase B3-B2: 財務期間の鮮度。上のdata_freshness_days
+            # (取得時刻)とは別fieldであり、同じ事実を2箇所へ書かない。
+            # UNKNOWNは「古いと確認できていない」ためFalseとする。
+            financial_data_freshness_stale=financial_freshness.is_stale,
         )
         return compute_confidence(factors, self._config.confidence)
 
@@ -735,7 +748,16 @@ class ProfitTakingService:
         else:
             sell_intensity = None
 
-        confidence_result = self._compute_confidence(result, snapshot, now)
+        # Issue #52 Phase B3-B2: 既に解決済みの期間末・評価日をそのまま渡し、
+        # 同じ値を二度計算しない(判定に使う値を1つに保つ)。
+        financial_freshness = assess_financial_freshness(
+            snapshot.financial,
+            now,
+            self._config,
+            latest_financial_period_end=resolved_period.period_end,
+            evaluation_date=evaluation_date,
+        )
+        confidence_result = self._compute_confidence(result, snapshot, now, financial_freshness)
 
         audit_entry = self._audit.record(
             decision_type="profit_taking",
@@ -788,6 +810,8 @@ class ProfitTakingService:
                 "confidence": confidence_result.level.value,
                 "confidence_score": confidence_result.score,
                 "confidence_reasons": confidence_result.reasons_not_high,
+                # --- Issue #52 Phase B3-B2: 財務データの期間鮮度 ---
+                **financial_freshness.audit_values(self._config),
                 # --- デプロイ前対応: 決算反映確認の由来を監査可能にする ---
                 "resolved_financial_period_end": (
                     resolved_period.period_end.isoformat()
@@ -943,6 +967,10 @@ class ProfitTakingService:
             key_risks=[
                 f"含み損益率{result.pnl.unrealized_pnl_pct:.1f}%",
                 f"配当・優待込み累計利益率{result.pnl.total_return_pct:.1f}%",
+                # Issue #52 Phase B3-B2: 判定に使った財務データが報告サイクル上の
+                # 最新でない場合の留意事項。利確を促す判定理由ではないため
+                # reasons ではなく key_risks(留意事項)へ入れる。
+                *([FINANCIAL_STALE_USER_WARNING] if financial_freshness.is_stale else []),
             ],
             confidence=confidence_result.level,
             next_earnings_date=snapshot.next_earnings_date,

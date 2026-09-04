@@ -1335,6 +1335,9 @@ class ConfidenceScoringWeights(StrictModel):
     penalty_missing_data: float
     penalty_untraced_one_time_factors: float
     penalty_cross_rule_disagreement: float
+    # Issue #52 Phase B3-B2: 財務データが報告サイクル上の最新でない場合の減点。
+    # penalty_stale_data(取得時刻ベース)とは別concept のため専用設定とする。
+    penalty_financial_data_stale: float = Field(ge=0)
     high_threshold: float
     medium_threshold: float
 
