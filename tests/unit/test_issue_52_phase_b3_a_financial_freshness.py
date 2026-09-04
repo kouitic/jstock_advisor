@@ -601,12 +601,15 @@ def test_production_call_sites_are_limited_to_the_current_phase() -> None:
     """接続先を Phase 単位で固定する。
 
     B3-A の時点では call site 0 だった(pure domain contract のみ)。
-    B3-B1 で **BUY のみ** へ接続した。SELL / 利確への接続は B3-B2 であり、
-    そこには既存の共通 confidence score(`compute_confidence`)が実在するため、
-    BUY とは接続のしかたが異なる。混ぜて実装しないよう、ここで境界を固定する。
+    B3-B1 で BUY へ、B3-B2 で SELL / 利確へ接続した。**接続のしかたは経路ごとに
+    異なる**(BUY は共通 confidence score を持たないため警告のみ、SELL / 利確は
+    既存の `compute_confidence` へ減点を接続する)ため、どこへ繋がっているかを
+    ここで一元的に固定し、次の Phase で無自覚に広がらないようにする。
 
-    接続のしかたそのもの(警告のみ・減点なし)は
-    `tests/unit/test_issue_52_phase_b3_b1_buy_financial_freshness.py` が固定する。
+    接続のしかたそのものは各 Phase のテストが固定する。
+    B3-B1(BUY)  tests/unit/test_issue_52_phase_b3_b1_buy_financial_freshness.py
+    B3-B2(SELL / 利確)
+                 tests/unit/test_issue_52_phase_b3_b2_sell_profit_financial_freshness.py
     """
     src_root = Path(__file__).resolve().parents[2] / "src" / "jstock_advisor"
     importers = sorted(
@@ -615,4 +618,11 @@ def test_production_call_sites_are_limited_to_the_current_phase() -> None:
         if path.name != "financial_freshness.py"
         and "financial_freshness" in path.read_text(encoding="utf-8")
     )
-    assert importers == ["services/buy_signal_service.py"], f"unexpected call sites: {importers}"
+    assert importers == [
+        # BUY(B3-B1): 警告のみ。共通 confidence score を持たない
+        "services/buy_signal_service.py",
+        # SELL / 利確(B3-B2)が共有する接続部分
+        "services/financial_freshness_integration.py",
+        "services/profit_taking_service.py",
+        "services/sell_signal_service.py",
+    ], f"unexpected call sites: {importers}"
