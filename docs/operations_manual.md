@@ -529,6 +529,52 @@ evaluation_handler done: evaluated=N (business=N calendar=N) skipped=N
 **通知先(SNS/LINE/GitHub)は設定していない**ため、`AlarmActions`は空である。
 現時点ではCloudWatchコンソールでAlarm stateを確認する運用とする。
 
+#### run summaryの監査ログへの記録(Issue #114 Phase B1、2026-09-02追加)
+
+上記のrun summaryは、CloudWatch Logsに加えて**監査ログへも保存される**。
+
+```
+保存先        jstock-audit_log
+decision_type evaluation_run_summary
+audit_id      evaluation_run_summary:<run開始時刻のISO8601>
+```
+
+CloudWatch Logsは検索が手間で保持期間の制約もあるため、
+「いつの実行で、backlogがどこまで減ったか」を後から永続データとして
+追跡できるようにしたもの。記録内容は上表のrun summary全項目に加え、
+`run_started_at` / `run_completed_at` / `run_status`
+(`COMPLETED` または `BUDGET_EXHAUSTED`)。
+
+**保証範囲(重要)**
+
+| 実行の終わり方 | 監査ログへの記録 |
+|---|---|
+| 正常完了 | される |
+| 時間予算による自主終了 | される(`run_status=BUDGET_EXHAUSTED`) |
+| **メモリ不足(OOM)・タイムアウト** | **されない場合がある** |
+
+OOM・タイムアウトではLambdaのプロセスが強制終了され、記録処理まで到達できない。
+**この検知は上記のCloudWatch Alarm(`<stack>-evaluation-errors`)の役割**である
+(OOMもタイムアウトも`Errors`に計上される)。したがって
+「監査ログに記録が無い」ことをもって「backlogが無い」と解釈してはならない。
+
+**監査ログへの保存に失敗した場合**
+
+評価そのもの(EvaluationResultの保存)は既に成功しているため、
+**保存失敗でLambdaを失敗させない**(失敗させると自動リトライで
+評価処理全体が不要に再実行されるため)。失敗時は次のように表れる。
+
+```
+ERRORログ         event=evaluation_run_summary_persist_failed ...
+Lambdaの戻り値    "audit_persisted": false
+```
+
+`audit_persisted` が `false` の実行は、評価結果自体は正常だが
+監査記録だけが欠けている状態である。
+
+Lambdaが自動リトライした場合、各リトライは`run_started_at`が異なるため
+**それぞれ別の実行として記録される**(最後の試行の状態を見ること)。
+
 #### backlog回復期間中の注意
 
 未処理分は**古い推奨から順に消化される**。評価値は基準日の株価から計算されるため

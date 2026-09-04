@@ -30,6 +30,7 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.services.evaluation_run_audit import record_run_summary
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
@@ -100,6 +101,17 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             summary.budget_exhausted,
         )
 
+    # Issue #114 Phase B1: run summaryをAuditLogへ永続化し、将来の週次改善レビューが
+    # catch-up中かどうかを参照できるようにする。**失敗しても例外を伝播させない**
+    # (評価本体は既に成功しており、ここでLambdaをFAILさせるとasync retryで
+    # 評価処理全体が不要に再実行されるため)。失敗はrecord_run_summary()内の
+    # ERRORログとこのフラグで表現する(無音のfail-softにはしない)。
+    audit_persisted = record_run_summary(
+        summary,
+        run_started_at=now,
+        run_completed_at=dt.datetime.now(dt.UTC),
+    )
+
     return {
         # 既存の戻り値キーは維持する(呼び出し側・ログ解析の互換性のため)。
         "evaluated": summary.business_evaluated_count,
@@ -117,4 +129,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "missing_recommendation_count": summary.missing_recommendation_count,
         "provider_call_count": summary.provider_call_count,
         "duration_ms": summary.duration_ms,
+        # Issue #114 Phase B1: run summaryをAuditLogへ永続化できたか。
+        # falseでも評価本体は成功している(監査記録だけが欠けている)。
+        "audit_persisted": audit_persisted,
     }

@@ -1399,6 +1399,19 @@ Resources:
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EvaluationResultsTable }
+        # Issue #114 Phase B1: run summaryをAuditLogへ記録する。
+        # 書き込みはAuditLogRepository.save_if_absent()の条件付きPutItemのみで、
+        # 読み取り・削除・Scan/Queryは行わない。DynamoDBCrudPolicyでは
+        # GetItem/Scan/Query/DeleteItem等まで付いてしまうため、
+        # **実際に使うPutItemだけ**を明示する(最小権限)。
+        # なお週次改善レビュー側の読み取り権限は#114 Phase B3で追加する
+        # (B1では読まないため、ここでは付与しない)。
+        - Statement:
+            - Sid: PutEvaluationRunSummaryAudit
+              Effect: Allow
+              Action: dynamodb:PutItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
       Events:
         DailyEvening:
           Type: ScheduleV2
