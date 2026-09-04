@@ -20,6 +20,28 @@
   自分への指示を妨げない。詳細は
   [docs/development_workflow.md](docs/development_workflow.md) 2.5節が正本。
 
+- **Issueの現況は、作業の前に読み直し、作業で変えたら書き戻すこと。**
+  詳細ルールの正本は
+  [docs/development_workflow.md](docs/development_workflow.md) 6.5節。
+
+  着手前: Issueのcurrent state / labels / 最新の`ISSUE_STATE_SNAPSHOT` /
+  その後のコメント / 関連PR / **関連remote branchとmainへの取り込み**を確認する。
+  記憶・会話要約・古いIssue本文だけを根拠に実装を始めない。stale・矛盾・
+  snapshot不在のいずれかなら、実装せずまずread-onlyのstatus reconciliationを行う
+  (`ISSUE_STATE_FRESHNESS_GATE=FAIL`)。
+
+  完了時: stateを変えた場合、または既存記載がstaleと判明した場合は、
+  `ISSUE_STATE_SNAPSHOT`をIssueへ書き戻してから完了とする
+  (`WORK_COMPLETE = TECHNICAL_WORK_COMPLETE AND REQUIRED_SSOT_WRITEBACK_COMPLETE`)。
+  **実装・テスト・push・報告だけでは完了ではない。** read-onlyでstateが変わらず
+  既存記載もstaleでなければsnapshotは不要。
+
+  **handoffはstate writebackの代わりにならない**
+  (`HANDOFF_IS_NOT_A_SUBSTITUTE_FOR_STATE_WRITEBACK=YES`)。
+  snapshotがcurrent stateの主要記録であり、handoffは次担当への補足情報
+  (理由・推奨する次の行動・注意点)である。current state全体をhandoffへ
+  再コピーしない。旧snapshotは監査履歴として削除・改変しない(append-only)。
+
 - **ユーザーとChatGPTの間の協働ルール(役割分担・Human Gate・レビュー判定・
   指示の対応付け・セッション開始時のbootstrap)は
   [docs/chatgpt_collaboration_protocol.md](docs/chatgpt_collaboration_protocol.md)

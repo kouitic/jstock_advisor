@@ -556,6 +556,8 @@ docs のみの変更では pytest / mypy / ruff を機械的に回す必要は�
 
 永続化先は原則として対象 Issue のコメント。運用ルール自体の変更は本文書へ。
 
+**いつ・誰が・どの形式で current state を書き戻すかは 6.5節が正本である。**
+
 ---
 
 ## 6. 現況判断と status freshness(F)
@@ -587,6 +589,490 @@ close する前に、**現況と矛盾する次の箇所のみ**を同期する�
 
 **Problem / Evidence / Root cause / 旧判断・旧 AC の取り下げ記録 /
 accepted residual risk 等の歴史的記録を無闇に削除しない。**
+
+本節は現況の**判断**を定める。書き戻しの発火条件・snapshot の形式・
+新規割当前の read barrier は **6.5節**が正本である。
+
+---
+
+## 6.5 Issue state の同期(F')
+
+6節は「現況をどう**判断**するか」を定める。本節は「現況をどう**書き戻し**、
+新しい作業を割り当てる前にどう**読み直す**か」を定める。
+
+```
+ISSUE_STATE_SSOT = GITHUB_ISSUE
+
+STATE_TRANSITION_WRITEBACK_REQUIRED             = YES
+HANDOFF_IS_NOT_A_SUBSTITUTE_FOR_STATE_WRITEBACK = YES
+WORK_COMPLETE_REQUIRES_SSOT_WRITEBACK           = YES
+ASSIGNMENT_READ_BARRIER_REQUIRED                = YES
+LATEST_VERIFIABLE_GITHUB_STATE_WINS             = YES
+
+WORKER_STATE_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE
+CHATGPT_STATE_READ_OWNER = CHATGPT
+```
+
+state を変えた者が書き、次の割当を出す者が読む。**どちらか一方だけでは成立しない。**
+
+### 6.5.1 なぜ handoff だけでは足りないか
+
+handoff は「別の Issue / 別の担当へ移る時」にしか発火しない。しかし state は
+その途中でも変わる。branch を push した、PR を作った、merge された、main CI が
+落ちた、deploy した——これらは handoff を伴わずに起きる。
+
+```
+Issue 本文・snapshot   実装未着手
+remote branch          実装済み commit が push 済み
+  -> 「新規実装」として指示すると二重実装になる
+```
+
+したがって writeback の trigger は handoff ではなく **state transition** とする。
+
+---
+
+### 6.5.2 State transition writeback(WRITE 側)
+
+次を writeback の trigger とする。
+
+```
+PHASE_START                     PHASE_COMPLETE
+IMPLEMENTATION_START            IMPLEMENTATION_COMPLETE
+BRANCH_PUSHED
+PR_CREATED                      PR_REVIEW_PASS            PR_MERGED
+MAIN_CI_PASS                    MAIN_CI_FAIL
+PRODUCTION_DEPLOYED             PRODUCTION_VERIFIED       PRODUCTION_VERIFICATION_FAILED
+BLOCKED                         UNBLOCKED
+HUMAN_DECISION_REQUIRED         HUMAN_DECISION_RESOLVED
+OWNER_CHANGE                    HANDOFF
+```
+
+`HANDOFF` は trigger の 1 つにすぎない。**handoff が無くても state が変われば
+writeback が必要である。**
+
+#### comment を増やしすぎないための batching
+
+全 trigger で無条件にコメントすると Issue がノイズ化し、かえって最新 snapshot を
+見失う。trigger を 2 種へ分ける。
+
+```
+ASSIGNMENT_VISIBLE    他の worker が現況を誤判断しうる transition
+                      IMPLEMENTATION_START / BRANCH_PUSHED / PR_CREATED / PR_MERGED /
+                      MAIN_CI_FAIL / PRODUCTION_DEPLOYED / PRODUCTION_VERIFIED /
+                      PRODUCTION_VERIFICATION_FAILED / BLOCKED / UNBLOCKED /
+                      HUMAN_DECISION_REQUIRED / HUMAN_DECISION_RESOLVED /
+                      OWNER_CHANGE / HANDOFF
+
+BATCHABLE             同一作業単位の内部的な進行
+                      PHASE_START / PHASE_COMPLETE / IMPLEMENTATION_COMPLETE /
+                      PR_REVIEW_PASS / MAIN_CI_PASS
+```
+
+```
+BATCHABLE          作業完了時の 1 snapshot へ集約してよい
+ASSIGNMENT_VISIBLE 次の作業割当より前に必ず durable 化する
+```
+
+原則として **1 作業単位(1 INSTRUCTION_ID)につき snapshot は 1 件**とし、
+その中で複数 transition をまとめて記録する。ただし作業が長く、途中で
+`ASSIGNMENT_VISIBLE` な transition が発生し、それが次の割当より前に見えない
+状態になる場合は、その時点で追加の snapshot を出す。
+
+```
+COMMENT_SPAM_MINIMIZED      = YES   1 作業単位 1 snapshot を原則とする
+STALE_STATE_WINDOW_BOUNDED  = YES   未書き戻しの ASSIGNMENT_VISIBLE transition が
+                                    ある間は次の割当を出さない
+```
+
+---
+
+### 6.5.3 ISSUE_STATE_SNAPSHOT contract
+
+current state の記録は自由文だけにせず、機械的に読める固定キーを含める。
+
+```
+ISSUE_STATE_SNAPSHOT
+
+DISCLOSURE          = PUBLIC_SANITIZED
+
+STATE_ID            = <YYYYMMDDTHHMMSSffffffZ>-<ACTOR>-<INSTRUCTION_ID|MANUAL>-<NONCE>
+SUPERSEDES_STATE_ID = <previous STATE_ID|NONE>
+STATUS_AS_OF        = <ISO-8601>
+ISSUE               = #<number>
+
+CLASSIFICATION      = <issue type>
+PRIORITY            = <P0|P1|P2|P3>
+SEVERITY            = <SEV-1|SEV-2|SEV-3|SEV-4|N/A>
+RELEASE_BLOCKER     = <YES|NO>
+
+PHASE               = <current phase>
+IMPLEMENTATION      = <state>
+OWNER               = <TARO|JIRO|USER|NONE>
+
+BRANCH              = <name|NONE>
+BRANCH_HEAD         = <sha|NONE>
+PR                  = <number|NONE>
+PR_STATE            = <state|NONE>
+MERGED_TO_MAIN      = <YES|NO>
+
+MAIN_SHA            = <sha|N/A>
+MAIN_CI             = <state|N/A>
+PRODUCTION_DEPLOYED = <YES|NO|PARTIAL|UNKNOWN|N/A>
+PRODUCTION_VERIFIED = <YES|NO|PARTIAL|UNKNOWN|N/A>
+
+CURRENT_BLOCKER     = <value|NONE>
+NEXT_ACTION         = <value|NONE>
+NEXT_ACTION_ALLOWED = <YES|NO>
+```
+
+`N/A` を許容する。Production へ到達していない Issue へ Production 行を
+`UNKNOWN` として並べると、確認していないのか該当しないのかが区別できない。
+
+snapshot は **current labels を記録するもの**であり、label の分類基準ではない。
+Type / Priority / Severity / Release Blocker の 4軸モデルの正本は
+[issue_label_policy.md](issue_label_policy.md) であり、本節はそれを変更しない。
+
+#### STATE_ID の方式
+
+単調増加の手動整数は、**TARO と JIRO が並行して snapshot を出した場合に
+同じ番号を取り合って壊れる**。番号の採番自体に排他が要るため採用しない。
+
+```
+STATE_ID = <YYYYMMDDTHHMMSSffffffZ>-<ACTOR>-<INSTRUCTION_ID|MANUAL>-<NONCE>
+
+例  20260904T081341882304Z-JIRO-JIRO-20260904-020-a1b2c3d4
+    20260904T081341882304Z-CHATGPT-MANUAL-9f72c1ab
+    20260904T081342001234Z-USER-MANUAL-4d8e01f7
+```
+
+各成分の責務を分ける。**一意性を担うのは NONCE だけである。**
+
+```
+timestamp        人間が概ね時系列を読むための監査補助 / correlation 補助
+                 collision resistance の根拠にはしない
+ACTOR            発行主体の識別
+                 TARO / JIRO / CHATGPT / USER
+                 既存運用と整合する actor を追加してよいが、
+                 無制限の自由文字列にはしない
+INSTRUCTION_ID   作業の correlation
+  | MANUAL       指示 ID を持たない操作は MANUAL とする
+                 collision resistance の根拠にはしない
+NONCE            STATE_ID の collision resistance を担保する識別成分
+```
+
+##### collision resistance は NONCE が担う
+
+```
+STATE_ID の collision resistance は独立生成の NONCE によって担保し、
+timestamp / ACTOR / INSTRUCTION_ID 単独の一意性には依存しない。
+```
+
+依存させてはならない理由は 2 つある。
+
+```
+INSTRUCTION_ID   「必ず一意である」は運用規律にすぎない。
+                 本プロジェクトでは既に instruction ID の collision が発生している。
+                 規律は破られうるものであり、破られた時に状態追跡まで
+                 壊れる設計にしない。
+
+timestamp+ACTOR  衝突確率を下げるだけで一意性を保証しない。
+                 同一 ACTOR が同一 microsecond 内に 2 つの snapshot を生成すれば
+                 両者は同一になる。
+```
+
+本節が目的とするのは「通常は衝突しない」ことではなく、**運用規律が破られても
+state tracking が壊れないこと**である。したがって一意性の担保は、既存要素から
+独立した NONCE へ寄せる。
+
+###### NONCE の生成
+
+```
+用いてよい   UUID4(フル)
+             UUID4 由来の短縮表現(8 桁以上の hex 等)
+             十分に長い random hex token
+
+禁止         timestamp 派生
+             INSTRUCTION_ID 派生
+             ACTOR 派生
+```
+
+既存要素から決定論的に導出した値は、その要素が衝突した時に同時に衝突するため、
+collision 耐性が増えない。**独立に生成すること。**
+
+短縮表現は数学的な絶対一意を保証するものではない。本 contract が要求するのは
+`collision-resistant unique identifier` であり、絶対一意の証明ではない。
+
+timestamp を microseconds まで固定桁で保持するのは、監査時に時系列を読みやすく
+するためであり、一意性のためではない。
+
+##### 順序と「最新」の判定
+
+```
+timestamp prefix  人間が概ね時系列を読むための補助
+                  識別 / correlation / 監査補助に使う
+```
+
+**STATE_ID の辞書順を「最新 snapshot」判定の唯一の truth source にしない。**
+
+```
+LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER
+```
+
+「最新 snapshot」は Issue のコメント列で最後に現れる `ISSUE_STATE_SNAPSHOT`
+とする。actor のクロックずれや後から追記された snapshot があっても、
+GitHub のコメント順が正本である。
+
+##### SUPERSEDES_STATE_ID
+
+直前の snapshot の `STATE_ID` を設定する。一致しない場合は
+`STATE_DRIFT_DETECTED = YES` として扱う。
+
+```
+不一致 = 必ず不正、ではない
+         parallel write / race / stale read の検出シグナルとして扱う
+         reconciliation で current state を再構成する
+```
+
+#### append-only
+
+```
+古い snapshot を削除・改変しない
+訂正は新しい snapshot の追加で行う
+```
+
+これは 6節「旧記載そのものを削除しない」と同じ原則である。監査履歴を残す。
+
+#### 証拠の採用順序
+
+snapshot も絶対視しない。**証拠の採用順序の正本は
+[chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 3.6節**であり、
+ChatGPT に限らず全 actor へ適用する。序列を本節へ複製しない
+(複製すると正本の改訂時に本節が stale になり、本節が防ごうとしている事故を
+本節自身が起こす)。
+
+```
+snapshot          IMPLEMENTATION = NOT_STARTED
+remote branch     より新しい実装 commit が存在する
+  -> CURRENT_VERIFIABLE_STATE が優先
+  -> STATE_DRIFT_DETECTED = YES / STATUS_RECONCILIATION_REQUIRED = YES
+```
+
+---
+
+### 6.5.4 Assignment Read Barrier(READ 側)
+
+新しい Issue または別 Phase へ作業者を割り当てる**前**に実行する。
+実行主体は ChatGPT(`CHATGPT_STATE_READ_OWNER = CHATGPT`)。
+
+```
+1   Issue current state / labels
+2   最新の ISSUE_STATE_SNAPSHOT
+3   その snapshot より後の Issue comments
+4   関連する open / closed / merged PR
+5   関連する remote branch
+6   current main SHA
+7   branch / PR commit が main に含まれるか
+8   main CI
+9   Production release state          (関連する場合)
+10  Production verification state     (関連する場合)
+```
+
+**記憶・会話要約・古い Issue 記述だけを根拠に新規実装を指示しない。**
+
+#### applicability(不要な確認を強制しない)
+
+全 Issue で AWS / Production を確認させると、到達しない Issue にまでコストが出る。
+
+```
+Production 未到達の Issue          9 / 10 は N/A
+branch が存在しないと確認済み       5 / 7 は N/A(存在しないことの確認自体は実施する)
+PR が存在しないと確認済み           4 は N/A(同上)
+docs のみの Issue                  8 / 9 / 10 は N/A
+```
+
+ただし **implementation state を判断する Issue では 1〜5 を原則必須**とする。
+「branch は無いだろう」という推測で 5 を省略しない。ここを省略したことが
+本節を設けた直接の原因である。
+
+---
+
+### 6.5.5 ASSIGNMENT_BASELINE
+
+新しい指示には、read barrier で確認した baseline を持たせる。
+
+```
+ASSIGNMENT_BASELINE
+
+ISSUE_STATE_AS_OF     = <time>
+CURRENT_MAIN_SHA      = <sha>
+LATEST_STATE_SNAPSHOT = <url|NONE>
+RELATED_BRANCHES      = <list|NONE>
+RELATED_PRS           = <list|NONE>
+IMPLEMENTATION_STATE  = <state>
+```
+
+指示文を肥大化させない。branch / PR / Production が明らかに該当しない単純な
+Issue では `N/A` / `NONE` を許容する。**baseline を書かないことは許容しない**
+(確認したうえで該当なし、と、確認していない、は別である)。
+
+---
+
+### 6.5.6 State Freshness Gate
+
+次のいずれかに該当する場合、新規 implementation を開始してはならない。
+
+```
+最新 snapshot が存在しない
+snapshot が current GitHub evidence より古い
+snapshot と branch / PR / main が矛盾する
+Phase 状態が複数 source で矛盾する
+owner が不明である
+```
+
+```
+ISSUE_STATE_FRESHNESS_GATE             = FAIL
+STATUS_RECONCILIATION_REQUIRED         = YES
+NEW_IMPLEMENTATION_INSTRUCTION_ALLOWED = NO
+```
+
+まず **read-only の reconciliation** を行い、snapshot を現況へ同期する。
+完了後に implementation gate を再評価する。
+
+#### P0 例外(適用範囲は最小)
+
+```
+条件   P0 の Production incident で、即時の被害抑止が必要な場合に限る
+緩和   read barrier を最小確認(Issue state / labels / 最新 snapshot /
+       current main SHA)へ縮小し、freshness gate FAIL でも
+       被害抑止のための指示を出してよい
+記録   P0_BARRIER_REDUCED = YES と理由を残す
+復旧   被害抑止の完了後、通常作業を再開する前に full reconciliation を行う
+```
+
+```
+緩和しないもの
+  Human Gate / merge 承認 / Production approval / exact ChangeSet approval
+  PRODUCTION_DEPLOYMENT_EXECUTOR / DEPLOY_OPERATION_DELEGATION_TO_JIRO
+  Production failure injection 禁止
+  release-blocker lifecycle
+```
+
+**P0 例外は「読む手間を減らす」ものであり、「承認を飛ばす」ものではない。**
+
+---
+
+### 6.5.7 Work Complete Gate
+
+作業の完了条件を変更する。実装・テスト・push・報告だけでは完了としない。
+
+```
+WORK_COMPLETE = TECHNICAL_WORK_COMPLETE
+                AND REQUIRED_SSOT_WRITEBACK_COMPLETE
+```
+
+例えば branch push まで行った作業は、`IMPLEMENTATION` / `BRANCH` /
+`BRANCH_HEAD` / `NEXT_ACTION` を snapshot へ同期してから `ANSWERED` とする。
+
+不要な snapshot は強制しない。
+
+```
+SSOT_WRITEBACK_REQUIRED =
+    state が変化した
+    OR
+    既存の state 記載が stale だと判明した
+```
+
+```
+read-only の調査で state が変化せず、既存記載も stale でなかった
+  -> snapshot 不要(報告のみでよい)
+read-only の調査だが、既存記載が stale だと判明した
+  -> 訂正の snapshot が必要
+```
+
+---
+
+### 6.5.8 handoff の責務(再定義)
+
+```
+ISSUE_STATE_SNAPSHOT   current state の主要記録
+HANDOFF                次担当への補足情報
+```
+
+handoff へ current state 全体を再コピーしない。二重管理になり、両者が食い違う。
+
+```
+HANDOFF minimum
+
+LATEST_STATE_SNAPSHOT   = <url>
+WHY_HANDOFF             = <reason>
+NEXT_RECOMMENDED_ACTION = <action>
+SPECIAL_CAUTION         = <notes|NONE>
+```
+
+handoff を残す既存の運用は維持する。そのうえで
+`HANDOFF_IS_NOT_A_SUBSTITUTE_FOR_STATE_WRITEBACK = YES` を明記する。
+
+---
+
+### 6.5.9 人間が state を変えた後の責務
+
+merge は `MERGE_EXECUTOR = USER` であり(10節)、作業 AI だけでは全 transition を
+書き戻せない。
+
+```
+worker が PR 作成 -> USER が GitHub 上で merge
+  -> PR_MERGED / MAIN_CI_PASS を worker は書き戻せない
+```
+
+```
+NEXT_CHATGPT_GATE_OWNS_RECONCILIATION = YES
+```
+
+ChatGPT は post-merge の gate で次を確認する。
+
+```
+merge commit / current main SHA / main CI / Issue state の writeback
+```
+
+snapshot が無ければ、ChatGPT 自身が記録するか、worker へ reconciliation を
+指示して同期させてから次工程へ進む。ChatGPT が直接 Issue を書き換える運用を
+必須にはしない。**要点は「誰かがやるだろう」を禁止し、next gate owner を
+明示することである。**
+
+---
+
+### 6.5.10 State drift audit
+
+queue reorder は原則 1 日 1 回(0節)。これに合わせて軽量な drift audit を行う。
+
+```
+P0 / P1 の open Issue      必須
+P2 / P3                    全件走査しない。次のいずれかに該当するものだけ
+                             queue 候補として着手を検討している
+                             remote branch または open PR が存在する
+                             直近で human decision を待っている
+```
+
+**Stabilization Sprint の速度を落とさないため、P2 / P3 の全件重走査は行わない。**
+
+検出対象の例:
+
+```
+Issue は NOT_STARTED だが branch が存在する
+Issue は PR 未 merge だが PR が merged
+Issue は Production 未 deploy だが deploy 済みの evidence がある
+Issue は verification pending だが PASS evidence がある
+labels が最新の triage と不一致
+同一 finding の owner が複数 Issue に存在する
+```
+
+検出時:
+
+```
+STATE_DRIFT_DETECTED           = YES
+IMPLEMENTATION_START           = BLOCKED
+STATUS_RECONCILIATION_REQUIRED = YES
+```
 
 ---
 
@@ -910,3 +1396,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-03 | §3.5「時間意味論変更ゲート」を新設(Issue #145)。Issue #52 / #143 / #148 の再発を上流で止めるため、時刻・営業日・市場セッション・timezone・外部ライブラリの日付境界に触れる変更へのみ適用するゲートを定めた。トリガ T1-T4 をファイルパスと diff の有無で客観判定し、control(C-BM / C-BS / C-MG / C-CO / C-CS / C-PC / C-EL / C-TZ / C-MD)を決定表で対応づける。**T1-T4 は階層ではなく独立した control 集合**であり、複数該当時は union を要求する(「より強いトリガを1つ選ぶ」方式は control が欠落するため採らない)。最も件数の多い consumer 変更(T3)には分岐する状態のみを課し、全境界マトリクスは共有ヘルパ変更(T1)に限定する。トリガ非該当の PR には追加負担を課さない。外部ライブラリの境界仕様はコードからの推測を根拠とせず version つきの独立根拠を要求し、mock の期待値を判定側 helper から自己参照的に導出した assertion は provider contract の証拠と認めない。CI の実行時刻は補助証拠に留め、**CI の複数時刻実行・時刻別 matrix job・sleep/wait・現在時刻依存テストは導入しない**(検出確率を上げるだけで非決定性が残るため)。full pytest のローカル必須化も行わない(§4 の方針は不変)。あわせて .github/PULL_REQUEST_TEMPLATE.md と tests/unit/test_time_semantics_guard.py(registry と registry 自身の健全性検証)を追加した。**判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない**(開発運用ゲートの追加のみ) |
 | 2026-09-04 | §2.5「指示プロトコル(B')」を新設(Issue #122)。複数の AI エージェントへ並行して作業を依頼する際、どの指示に対する回答かが曖昧になり、古い指示への回答を次工程の根拠にしてしまう事故を防ぐための統制。(1)指示側は全作業指示へ一意な `INSTRUCTION_ID`(`<ASSIGNEE>-<YYYYMMDD>-<連番>`)を付与し、作業者は回答冒頭へ同一 ID・ASSIGNEE・INSTRUCTION_STATUS を記載する。ID が無い回答・別 ID の回答・撤回済み ID への回答は自動的には次工程の根拠にせず、まず対応関係を確認する。(2)指示状態を `PENDING` / `ANSWERED` / `WITHDRAWN` で管理する。(3)**直列化は作業者ごと**とする(`PER_WORKER_SERIALIZATION=YES` / `GLOBAL_SERIALIZATION=NO`)。同一作業者の直前の通常指示が PENDING の間は次の通常指示を追加しないが、**他の作業者の PENDING は新規指示の発行を妨げない**。「一方が作業中なら他方にも指示できない」という誤読を避けるため、別 worker への並行指示可の例を明記した。(4)緊急時のみ `EMERGENCY=YES` / `SUPERSEDES` / `PREVIOUS_INSTRUCTION_STATUS=WITHDRAWN` を明記して差し替えてよく、撤回済み指示への遅延回答は有効な完了報告として扱わない。差し替えの例も明記した。(5)複数の古い指示の結果を 1 つの回答へ混在させない。あわせて CLAUDE.md へ入口となる記載を追加した。**本節は AI への作業指示の統制であり、9節(grouped release)・10節(人間承認の境界)の要求はいずれも緩和していない**(merge / Production deploy / ChangeSet / manual invoke 等の人間承認は INSTRUCTION_ID の有無にかかわらず従来どおり必要)。コード・Production 挙動の変更なし |
 | 2026-09-04 | §4「ローカルテスト方針」を明確化(Issue #122)。`LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN` / `FULL_SUITE_AUTHORITY = PR_CI` を明示した。従来も「理由なく local full suite を毎回実行しない」としていたが、既定の可否が曖昧で、各 worker が同じ 20 分規模の全体テストを繰り返す運用が残っていた。**全体回帰の正本は PR CI** とし、ローカルでは targeted tests / related regression / ruff / mypy に絞る。**品質基準を下げるルールではなく、ローカルは狭く速く・CI は広く、という分担である。**そのうえで full suite の local 実行を完全禁止にはせず、test order dependency / global state pollution / fixture lifecycle / import-time side effect / collection の問題 / CI の full-suite failure 再現 / 共通 test infrastructure の変更 / suite-wide interaction の確認が主目的、といった **suite 全体でしか観測できない具体的理由**がある場合の例外とし、`LOCAL_FULL_PYTEST_EXCEPTION = YES` と `REASON` の明示を求める。「念のため」「安全のため」「一応」は何を確認したいのかを述べていないため理由として認めない。10節(人間承認の境界)・11節(DOC_ONLY_CHANGE)は変更していない。コード・Production 挙動の変更なし |
+| 2026-09-04 | §6.5「Issue state の同期(F')」を新設(Issue #157)。GitHub を SSoT としながら、変化する current state を**いつ・誰が・どの形式で書き戻すか**が未定義であったため、古い Issue 記述から実装状態を誤認したまま次の作業指示が出る事故が繰り返し発生していた。実際に、Issue 側は実装未着手を示す一方で remote branch には実装済み commit が push されており、新規実装として指示が出かけた事例がある。**「handoff コメントを丁寧に書く」だけでは解消しない**ため、WRITE 側と READ 側の双方を統制する。(1)writeback の trigger を handoff ではなく **state transition** とし、`PHASE_*` / `IMPLEMENTATION_*` / `BRANCH_PUSHED` / `PR_*` / `MAIN_CI_*` / `PRODUCTION_*` / `BLOCKED` / `HUMAN_DECISION_*` / `OWNER_CHANGE` / `HANDOFF` を列挙した(`HANDOFF` は trigger の1つにすぎない)。(2)Issue のノイズ化を避けるため trigger を `ASSIGNMENT_VISIBLE` と `BATCHABLE` へ二分し、原則 **1 作業単位 1 snapshot**へ集約する一方、他 worker が現況を誤判断しうる transition は次の作業割当より前に必ず durable 化する(`COMMENT_SPAM_MINIMIZED` と `STALE_STATE_WINDOW_BOUNDED` の両立)。(3)機械可読な `ISSUE_STATE_SNAPSHOT` contract を定義した。**手動連番の `STATE_VERSION` は TARO / JIRO の並行 write で番号を取り合うため採用せず**、`STATE_ID = <YYYYMMDDTHHMMSSffffffZ>-<ACTOR>-<INSTRUCTION_ID|MANUAL>-<NONCE>` とした。**collision resistance は独立生成の NONCE が担い、timestamp / ACTOR / INSTRUCTION_ID 単独の一意性へは依存させない。** INSTRUCTION_ID の「必ず一意」は運用規律にすぎず(本プロジェクトでは既に instruction ID collision が発生している)、timestamp + ACTOR も同一 ACTOR が同一 microsecond 内に 2 つの snapshot を生成すれば衝突するため、いずれも一意性の根拠にしない。NONCE は UUID4 由来等の独立生成値とし、**timestamp / INSTRUCTION_ID / ACTOR からの決定論的導出は禁止**する(元の要素が衝突した時に同時に衝突し、耐性が増えないため)。要求するのは `collision-resistant unique identifier` であり絶対一意の数学的保証ではない。timestamp を microseconds まで固定桁で保持するのは監査時の可読性のためであり一意性のためではなく、INSTRUCTION_ID は correlation 情報として保持する。timestamp prefix は識別・correlation・監査補助に用い、**STATE_ID の辞書順を「最新 snapshot」判定の唯一の truth source にしない**(`LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER`)。`SUPERSEDES_STATE_ID` の不一致は並行 write の検出シグナルとして扱い、**不一致 = 必ず不正とはしない**(reconciliation で current state を再構成する)。旧 snapshot は append-only で保持する。Production 未到達 Issue のために `N/A` を許容し、未確認と該当なしを区別する。(4)割当前の **Assignment Read Barrier**(10項目)を定義し、applicability により Production / branch / PR が該当しない Issue へ無駄な確認を強制しない。ただし implementation state を判断する Issue では Issue / labels / snapshot / 後続コメント / PR / **remote branch** の確認を原則必須とした。(5)`ASSIGNMENT_BASELINE` を指示へ持たせる(該当なしは `N/A` 可、ただし**未記載は不可**)。(6)`ISSUE_STATE_FRESHNESS_GATE = FAIL` の間は新規 implementation 指示を禁止し、先に read-only reconciliation を行う。P0 Production incident に限り read barrier を最小確認へ縮小する例外を設けたが、**Human Gate / merge 承認 / Production approval / exact ChangeSet approval / deploy 実行者 / failure injection 禁止 / release-blocker lifecycle はいずれも緩和しない**(読む手間を減らす例外であり承認を飛ばす例外ではない)。(7)`WORK_COMPLETE = TECHNICAL_WORK_COMPLETE AND REQUIRED_SSOT_WRITEBACK_COMPLETE` とし、state が変化した場合または既存記載が stale と判明した場合にのみ writeback を要求する(read-only 調査へ不要な snapshot を強制しない)。(8)handoff を「次担当への補足情報」へ再定義し、current state の主要記録は snapshot とした。(9)USER による merge 等の後は `NEXT_CHATGPT_GATE_OWNS_RECONCILIATION = YES` とし、「誰かがやるだろう」を禁止した。(10)drift audit を定義し、P0/P1 open Issue を必須、P2/P3 は queue 候補・branch/PR 保有・human decision 待ちのみとして**全件重走査を行わない**(Stabilization Sprint の速度を落とさない)。証拠の採用順序は chatgpt_collaboration_protocol.md 3.6節を正本として参照し複製していない。あわせて §5 / §6 へ正本の所在を1行ずつ追加した。**docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない** |

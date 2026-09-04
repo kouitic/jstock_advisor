@@ -785,6 +785,99 @@ global state pollution 等)を調べることが目的の場合のみ例外と�
 
 ---
 
+## 5.5 Assignment Read Barrier(state を読み直す責務)
+
+### 目的
+
+5節は「作業者が空いているか」を確認する。本節は「**Issue の現況が本当に
+その状態か**」を確認する。両者は別である。作業者が空いていても、Issue の
+現況が古ければ誤った指示になる。
+
+```
+CHATGPT_ASSIGNMENT_READ_BARRIER_OWNER = YES
+```
+
+### ルール
+
+新しい Issue または別 Phase へ作業 AI を割り当てる前に、
+[development_workflow.md](development_workflow.md) 6.5節の
+**Assignment Read Barrier** を実行する。
+
+```
+ChatGPT は、記憶・会話要約・古い Issue 記述だけを根拠に
+新規 implementation を指示してはならない。
+```
+
+確認項目・applicability(N/A 条件)・`ASSIGNMENT_BASELINE` の形式・
+`ISSUE_STATE_SNAPSHOT` の contract・freshness gate・P0 例外はいずれも
+**development_workflow.md 6.5節が正本**である。本文書へ複製しない。
+
+本文書が定めるのは、**それを誰が実行するか**だけである。
+
+```
+read barrier の実行            ChatGPT
+state の書き戻し               state を変えた actor(作業 AI / ChatGPT / ユーザー)
+```
+
+### drift を検出した場合
+
+```
+ISSUE_STATE_FRESHNESS_GATE = FAIL
+  -> 新規 implementation 指示を出さない
+  -> 先に read-only の status reconciliation を指示する
+  -> 同期後に implementation gate を再評価する
+```
+
+`STATE_DRIFT_DETECTED` は不合格判定ではない。3節の `INSUFFICIENT_EVIDENCE` と
+同じく「まだ判断材料が揃っていない」状態であり、**推測で埋めて先へ進めない。**
+
+### ユーザーが state を変えた後(merge 等)
+
+merge は 2.6節のとおり `MERGE_EXECUTOR = USER` であり、作業 AI は
+`PR_MERGED` / `MAIN_CI_PASS` を自ら書き戻せない。
+
+```
+NEXT_CHATGPT_GATE_OWNS_RECONCILIATION = YES
+```
+
+ユーザーによる merge・label 変更・Issue 操作の後、**次の ChatGPT gate が
+reconciliation の確認責任を持つ。** ChatGPT 自身が durable comment を残しても、
+作業 AI へ reconciliation を指示してもよい。**「いずれ誰かが同期するだろう」
+として次工程へ進めない。**
+
+### 例
+
+```
+BAD
+  会話要約に「#N は未実装」とあった
+  -> そのまま「Phase B を実装してください」と指示
+  -> 実際には remote branch へ実装済み commit が push されていた
+  -> 二重実装になりかけた
+
+GOOD
+  割当前に Issue / labels / 最新 snapshot / 後続コメント / PR /
+  remote branch / main 包含を確認
+  -> branch 上に未 merge の実装を検出
+  -> STATE_DRIFT_DETECTED=YES として実装指示を出さず、
+     先に status reconciliation を指示
+```
+
+この失敗は「handoff コメントが雑だったから」ではなく、
+**割当前に現況を読み直す手順が無かったから**起きる。
+丁寧な handoff では代替できない。
+
+### 例外
+
+`development_workflow.md` 6.5節の **P0 例外**のみ。
+P0 の Production incident で即時の被害抑止が必要な場合に限り
+read barrier を最小確認へ縮小してよい。
+
+**ただし Human Gate(2節)・merge 承認(2.6節)・Production approval・
+exact ChangeSet approval はいずれも緩和しない。**
+読む手間を減らす例外であり、承認を飛ばす例外ではない。
+
+---
+
 ## 6. 回答の対応付け(correlation)
 
 ### 目的
@@ -1011,6 +1104,7 @@ DISCLOSURE = PUBLIC_SANITIZED
 実装の進め方 / lane / WIP 制限                        -> development_workflow.md
 ローカルテスト方針 / local full pytest の可否と例外    -> development_workflow.md 4節
 指示プロトコルの仕様                                   -> development_workflow.md 2.5節
+Issue state 同期の仕様(writeback / snapshot / gate)  -> development_workflow.md 6.5節
 Issue の分類と label                                   -> issue_label_policy.md
 Production の具体的な運用手順                          -> operations_manual.md
 利用者から見た機能仕様                                 -> functional_spec.md
@@ -1029,3 +1123,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-04 | 新規作成(Issue #122)。ユーザー ↔ ChatGPT 間の協働ルールを、チャット履歴・AI の記憶に依存させず GitHub 上の SSoT として管理するための文書。役割分担(承認はユーザー / 推奨は ChatGPT)、Human Gate の一覧と「承認はその操作・その対象に限る」原則、レビュー判定4種と `INSUFFICIENT_EVIDENCE ≠ REJECT` / `PASS_WITH_CONDITIONS ≠ Human Gate 通過` の区別、指示プロトコル(`INSTRUCTION_ID` / 作業者ごとの直列化 / 緊急差し替え)を指示側から見た運用として整理、4.5節「ChatGPT から作業 AI への指示文の出力形式」(指示はユーザーが手作業で転送するため、内容が正しくても届いた時点で壊れるという失敗が起きる。これを出力形式の側で防ぐ。**作業 AI への指示は単一の外側コードブロックへ収める** / **内部は plain text とする** / **nested code fence は禁止** / **一括コピー可能性を確保する**。指示の一部を外側ブロックの前後へ分散させず、例示は字下げや区切り線で表現し、見出し・表・引用に依存しなくても意味が成立する指示文にする。GOOD / BAD-1(分散)/ BAD-2(フェンスのネスト)の例を記載。対象は ChatGPT から TARO / JIRO への作業指示のみで、ユーザーへの通常回答や作業 AI からの報告形式は対象外)、新規指示前の確認手順、回答の correlation と例外的な `MANUAL_CORRELATION`、1指示1回答、ルール変更時の `LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY` と同期義務(優先を認めるのはユーザーが明示的に確定した判断に限り、ChatGPT や作業 AI が独自にルールを追加・変更する根拠にはしない)、セッション開始時の明示的 bootstrap(自動読み込みを前提にしない)、恒久ルールと dynamic state の分離、公開リポジトリでの取り扱いを記載した。**既存 governance の要求はいずれも緩和していない**(merge / Production 操作 / release-blocker 解除の人間承認、`PER_WORKER_SERIALIZATION=YES` / `GLOBAL_SERIALIZATION=NO` の区別を含む)。コード・Production 挙動の変更なし |
 | 2026-09-04 | 協働ルールを追加(Issue #122)。**2.5節「提案・承認・実行・検証を混同しない」** — `PROPOSED` / `APPROVED` / `EXECUTED` / `VERIFIED` を別状態として扱う(`STATE_SEPARATION=YES`)。`MERGE_READY=YES` は提案であって承認でも実行でもなく、実行しただけでは検証済みでもない。release-blocker についても「解除できると判断」「解除を承認」「label を削除」「削除後の state を確認」を別状態とする。2節の Human Gate は緩和しない。**2.6節「merge の実行者」** — `MERGE_EXECUTOR = USER`。通常は作業 AI へ merge を指示せず、ChatGPT の `MERGE_READY` 提示後にユーザー自身が GitHub 上で merge する(`USER_MERGE_ACTION = HUMAN_APPROVAL + EXECUTION`)。事前の承認宣言は必須にしない。ChatGPT が `MERGE_READY` を出していない PR をユーザーが merge した場合も、人間による実行であるため勝手に revert しない。**PR merge を Production の承認として扱わない。** **3.5節「判断は証拠を先に置く」** — `EVIDENCE_FIRST=YES`。重要 Gate では作業 AI の自己申告だけで事実認定せず、GitHub / CI / Production の実体と突合する。矛盾時は差異を明示し実体を優先し、確定できなければ `INSUFFICIENT_EVIDENCE` とする。軽微な報告を毎回過剰検証するルールではない。**3.6節「証拠の鮮度と検証可能性」** — `FRESHER_VERIFIABLE_EVIDENCE_WINS=YES`。現在の検証可能な実体 > 検証済みの最新 durable comment > 過去の durable comment > 古い記述、の順で採用する。ただし単純なタイムスタンプ順ではなく、freshness と verifiability の両方で判断する。未検証の推測は最新であっても優先しない。古い記述が stale でも履歴として削除・改ざんしない。**3.7節「merge 判断を支援する提示形式」** — PR 番号を必ず明示し、`REVIEW_VERDICT` / `MERGE_READY` / `REMAINING_ISSUES_OR_CONCERNS` / `MERGE_BLOCKING_CONCERN` / `OTHER_ISSUE_IMPACT` / `PRODUCTION_IMPACT` / `RECOMMENDED_ACTION` をセットで示す。**残課題があることと、それが merge を止めるべきかは別**であることを `MERGE_BLOCKING_CONCERN` で明示する。形式は Markdown の表へ固定しない。あわせて5節へ、指示に検証を含める際は targeted tests を基本とし local full pytest を原則指示しない旨を記載した(詳細と例外条件の正本は development_workflow.md 4節。本文書へ複製しない)。既存ルール(指示プロトコル / 直列化 / 1指示1回答 / 出力形式 / レビュー判定4種 / Human Gate / dynamic state 分離 / PUBLIC_SANITIZED)はいずれも変更していない。コード・Production 挙動の変更なし |
 | 2026-09-04 | 1.5節「Production deploy 関連作業の担当」を新設(Issue #122)。deploy 工程は途中で担当が入れ替わると、承認対象の exact SHA・exact ChangeSet・build 済み artifact の同一性といった前提が引き継がれない。そこで実作業の担当を1体へ集約し `PRODUCTION_DEPLOYMENT_EXECUTOR = TARO` とした。対象は release 対象 SHA の最終確認 / main CI / release-blocker inventory / clean worktree・unpushed / sam build / ChangeSet CREATE / ChangeSet の read-only 確認 / 承認後の EXECUTE / CloudFormation terminal state / immediate Production verification / deploy artifact の同一性確認 / stack event 確認。次郎は調査・設計・実装・PR 作成・release readiness 調査・Verification Plan 設計・Production evidence の read-only 分析まで担当できるが、deploy 実作業は既定で行わない(`DEPLOY_OPERATION_DELEGATION_TO_JIRO = FORBIDDEN_BY_DEFAULT`)。**担当の集約は承認の省略を意味しない。** ChangeSet CREATE と EXECUTE は別 Human Gate、PR merge の承認は Production の承認ではない、main advance で exact SHA 承認は失効、ChangeSet 再作成で exact ChangeSet 承認は失効、という既存の区別をいずれも維持する。また immediate verification は太郎の担当とする一方、自然実行後の業務的な evidence 分析は内容に応じて割り当ててよく、`PRODUCTION_DEPLOYMENT_EXECUTOR = TARO` は `ALL_PRODUCTION_ANALYSIS_ASSIGNEE = TARO` を意味しないことを明記した。ユーザーが別担当を明示指定した場合は 8節の `LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY` に従う。あわせて development_workflow.md 10節へ、deploy 実作業の担当の正本が本節であることの参照を1行追加した(詳細は複製していない)。既存ルール(`MERGE_EXECUTOR=USER` / 状態分離 / EVIDENCE FIRST / 証拠の鮮度 / ローカルテスト方針 / 指示プロトコル / 出力形式 / Human Gate / PUBLIC_SANITIZED)は変更していない。コード・Production 挙動の変更なし |
+| 2026-09-04 | 5.5節「Assignment Read Barrier(state を読み直す責務)」を新設(Issue #157)。5節は「作業者が空いているか」を確認するが、**Issue の現況が本当にその状態か**は確認していなかった。会話要約や古い Issue 本文だけを根拠に「未実装」と判断し、remote branch 上の実装済み commit を見落として二重実装になりかけた事例が発生している。そこで `CHATGPT_ASSIGNMENT_READ_BARRIER_OWNER = YES` とし、新しい Issue / 別 Phase へ作業 AI を割り当てる前に development_workflow.md 6.5節の Assignment Read Barrier を ChatGPT が実行することを定めた。**確認項目・applicability・`ASSIGNMENT_BASELINE`・`ISSUE_STATE_SNAPSHOT` contract・freshness gate・P0 例外の正本は development_workflow.md 6.5節であり、本文書へ複製していない。** 本節が定めるのは実行主体(read barrier = ChatGPT / state の書き戻し = state を変えた actor)だけである。あわせて、`STATE_DRIFT_DETECTED` は不合格判定ではなく 3節の `INSUFFICIENT_EVIDENCE` と同じく判断材料の不足であり推測で埋めないこと、`ISSUE_STATE_FRESHNESS_GATE = FAIL` では実装指示を出さず先に read-only reconciliation を指示すること、ユーザーによる merge・label 変更・Issue 操作の後は `NEXT_CHATGPT_GATE_OWNS_RECONCILIATION = YES` として次の ChatGPT gate が同期確認の責任を持つこと(「いずれ誰かが同期するだろう」で次工程へ進まない)を記載した。12節へ Issue state 同期の正本の所在を1行追加した。例外は 6.5節の P0 例外のみで、**Human Gate(2節)・merge 承認(2.6節)・Production approval・exact ChangeSet approval はいずれも緩和していない。** 既存ルール(役割分担 / 指示プロトコル / 直列化 / 1指示1回答 / 出力形式 / レビュー判定4種 / EVIDENCE FIRST / 証拠の鮮度 / dynamic state 分離 / PUBLIC_SANITIZED)は変更していない。コード・Production 挙動の変更なし |
