@@ -19,6 +19,15 @@ from jstock_advisor.interfaces.provider_errors import (
 )
 from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot
 from jstock_advisor.providers._failure import raise_provider_data_error
+from jstock_advisor.providers.market_data._yfinance_log_filter import (
+    install_yfinance_expected_missing_log_filter,
+    yfinance_fetch_context,
+)
+
+# yfinanceは既定で例外を隠し、恒久missing銘柄でもライブラリ自身のloggerへERRORを
+# 出力して空データを返す(Issue #125)。モジュール初期化時に一度だけフィルタを登録し、
+# 期待される恒久missingのみWARNINGへ降格する。真の障害はERRORのまま素通しする。
+install_yfinance_expected_missing_log_filter()
 
 _PROVIDER_NAME = "yfinance"
 _TICKER_SUFFIX = ".T"
@@ -89,13 +98,16 @@ class YFinanceMarketDataProvider:
         self, ticker_symbol: str, start: dt.date, end: dt.date
     ) -> PriceHistory | None:
         try:
-            ticker = yf.Ticker(ticker_symbol)
-            df = ticker.history(
-                start=start,
-                end=end + dt.timedelta(days=1),
-                interval="1d",
-                auto_adjust=False,
-            )
+            # Issue #125: 1回の取得を明示的な境界で囲み、この範囲でのみ
+            # 「確定した404」と、そこから派生する曖昧なログの相関を許す。
+            with yfinance_fetch_context():
+                ticker = yf.Ticker(ticker_symbol)
+                df = ticker.history(
+                    start=start,
+                    end=end + dt.timedelta(days=1),
+                    interval="1d",
+                    auto_adjust=False,
+                )
         except Exception as exc:  # noqa: BLE001 - 非公式ライブラリのため例外種別を限定できない
             # Issue #59 Phase B2: 取得失敗を「データ無し(None)」へ潰さない。
             # 潰すと再試行・障害率の安全弁が発火せず、一過性障害が
