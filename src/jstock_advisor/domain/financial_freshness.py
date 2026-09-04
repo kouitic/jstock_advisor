@@ -217,7 +217,8 @@ def resolve_expected_next_period_end(
     解決順序(Issue #52 Phase B3 design closure で確定):
 
     ```
-    1  実績が四半期由来で、期末が2点以上あり、周期が整合している
+    1  実績が四半期由来で、期末が2点以上あり、周期が整合しており、
+       かつ**履歴の末尾が latest_financial_period_end と一致している**
          -> 直近の期末に1四半期を加える
     2  1が成立せず、決算期末月があり、直近期末の月と一致している
          -> 直近の期末に1年を加える
@@ -228,6 +229,19 @@ def resolve_expected_next_period_end(
     `recent_periods_source` を見るのは、`quarter_ends` に値があっても
     それが年次フォールバック由来のことがあるため。年次の期末を四半期として
     扱うと、実在しない期末日を作って STALE を誤検出する。
+
+    1 の末尾一致が必要な理由(review 指摘)。四半期履歴が
+    `latest_financial_period_end` より古いことがある。その場合に履歴の末尾から
+    1四半期を進めると、**既に持っている期を「次に来るはず」として扱ってしまう**。
+
+    ```
+    latest = 2024-09-30 / 履歴 = (2024-03-31, 2024-06-30)
+      履歴だけ見ると周期は整合している
+      末尾 2024-06-30 + 1四半期 = 2024-09-30 = latest と同一
+      -> 期限を過ぎると「2024-09-30 へまだ更新されていない」と判定してしまう
+    ```
+
+    次の期末は必ず**現在の最新期末**から進める。古い履歴の末尾から進めない。
 
     Args:
         latest_financial_period_end: 解決済みの直近期末日。評価日以前であること。
@@ -248,6 +262,17 @@ def resolve_expected_next_period_end(
             usable
             and all(_is_month_end(q) for q in usable)
             and _has_verified_quarterly_cycle(usable)
+            # 四半期履歴が「現在の最新期末」まで到達していることを必須とする。
+            #
+            # これが無いと、履歴が最新期末より古い場合に
+            # 「履歴の末尾 + 1四半期」を次の期末としてしまう。その値が
+            # 既に持っている latest_financial_period_end と一致すると、
+            # **既に取得済みの期を「まだ更新されていない」と判定する**
+            # 論理矛盾が起きる(期限を過ぎれば STALE になる)。
+            #
+            # 比較対象は sanitize 後の末尾であり、引数の生の最後の要素ではない
+            # (順不同・重複・未来日を含みうるため)。
+            and usable[-1] == latest_financial_period_end
         ):
             return ExpectedNextPeriod(
                 period_end=_add_months(usable[-1], _QUARTER_CYCLE_MONTHS),

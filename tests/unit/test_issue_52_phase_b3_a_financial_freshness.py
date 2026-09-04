@@ -238,6 +238,81 @@ def test_missing_period_end_is_unknown() -> None:
     assert result.verdict is FinancialFreshnessVerdict.UNKNOWN
 
 
+# --- 四半期履歴が最新期末まで到達していること(review 指摘の回帰) ---------------
+
+
+def test_quarter_history_older_than_latest_period_is_unknown() -> None:
+    """履歴が最新期末より古いとき、履歴の末尾から次期を推定しない。
+
+    履歴 (2024-03-31, 2024-06-30) はそれ自体では四半期周期として整合する。
+    しかし最新期末は既に 2024-09-30 であり、履歴の末尾 + 1四半期は
+    2024-09-30 = 最新期末と同一になる。
+
+    これを許すと **既に取得済みの期を「まだ更新されていない」と判定する**
+    という論理矛盾が起き、期限を過ぎた時点で STALE になってしまう。
+    """
+    result = _evaluate(
+        latest=dt.date(2024, 9, 30),
+        quarter_ends=(dt.date(2024, 3, 31), dt.date(2024, 6, 30)),
+        source=RecentPeriodsSource.QUARTERLY,
+        fy_end_month=None,
+        evaluation_date=dt.date(2025, 1, 1),
+    )
+    assert result.verdict is FinancialFreshnessVerdict.UNKNOWN
+    assert result.expected_next_period_end is None
+    assert result.basis is ExpectedPeriodBasis.UNRESOLVED
+
+
+def test_quarter_history_terminating_at_latest_period_resolves() -> None:
+    """履歴の末尾が最新期末と一致していれば従来どおり解決する(positive control)。"""
+    result = _evaluate(
+        latest=dt.date(2024, 6, 30),
+        quarter_ends=(dt.date(2024, 3, 31), dt.date(2024, 6, 30)),
+        source=RecentPeriodsSource.QUARTERLY,
+        evaluation_date=dt.date(2024, 7, 1),
+    )
+    assert result.expected_next_period_end == dt.date(2024, 9, 30)
+    assert result.basis is ExpectedPeriodBasis.QUARTERLY_HISTORY
+
+
+def test_history_alignment_is_checked_after_sanitization() -> None:
+    """順不同・重複・未来日を含む入力でも、整形後の末尾と最新期末を比較する。
+
+    生の入力の最後の要素と比較すると、並び順や未来日の混入で判定が変わる。
+    """
+    result = _evaluate(
+        latest=dt.date(2024, 6, 30),
+        quarter_ends=(
+            dt.date(2024, 6, 30),
+            dt.date(2024, 3, 31),
+            dt.date(2024, 3, 31),  # 重複
+            dt.date(2025, 3, 31),  # 未来日(評価日より後)
+        ),
+        source=RecentPeriodsSource.QUARTERLY,
+        evaluation_date=dt.date(2024, 7, 1),
+    )
+    assert result.expected_next_period_end == dt.date(2024, 9, 30)
+    assert result.basis is ExpectedPeriodBasis.QUARTERLY_HISTORY
+
+
+def test_history_mismatch_still_allows_independent_annual_inference() -> None:
+    """四半期推定が成立しなくても、年次推定が独立に成立するなら使う。
+
+    履歴が古くて四半期推定は使えないが、決算期末月と最新期末の月が一致して
+    いるため年次サイクルとしては解決できる。ここで一律 UNKNOWN にすると
+    使える根拠を捨てることになる。
+    """
+    result = _evaluate(
+        latest=dt.date(2024, 3, 31),
+        quarter_ends=(dt.date(2023, 6, 30), dt.date(2023, 9, 30)),
+        source=RecentPeriodsSource.QUARTERLY,
+        fy_end_month=_FY_END_MONTH_MARCH,
+        evaluation_date=dt.date(2024, 4, 1),
+    )
+    assert result.expected_next_period_end == dt.date(2025, 3, 31)
+    assert result.basis is ExpectedPeriodBasis.ANNUAL_CYCLE
+
+
 # --- 12-14. 暦計算の境界 ------------------------------------------------------
 
 
