@@ -359,16 +359,25 @@ LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY
 ### 例
 
 ```
-会話で新しい判定語を導入した
-  -> その場では適用してよい
-  -> 恒久ルールなら Issue を立てて本文書へ同期する
+ユーザーが明示的に、新しい判定語を導入すると決定した
+  -> 最新の明示的な Human decision として、その場では適用する
+  -> 恒久ルールなら Issue を起点に本文書または該当 SSoT へ同期する
   -> 一時的な運用なら文書化しない
 ```
+
+この節が優先を認めるのは、**ユーザーが明示的に確定した判断**に限る。
+`ChatGPT が独自の判断でルールを追加・変更してよい`という意味ではない。
+判定語について言えば、3節の4判定は恒久ルールであり、
+**ChatGPT が独自に判定語を増やすことは本節の対象外である**(3節の例外なしを維持)。
 
 ### 例外
 
 一時的・その作業限りの取り決めは文書化しない。
 恒久ルールと一時的判断を区別することがこの節の要点である。
+
+作業 AI(太郎 / 次郎)についても同様であり、本節は
+「ユーザーの明示判断が文書より新しい場合の優先順位」を定めるものであって、
+作業 AI が独自にルールを変える根拠にはならない。
 
 ---
 
@@ -502,4 +511,4 @@ Production の具体的な運用手順                 -> operations_manual.md
 
 | 日付 | 変更内容 |
 |---|---|
-| 2026-09-04 | 新規作成(Issue #122)。ユーザー ↔ ChatGPT 間の協働ルールを、チャット履歴・AI の記憶に依存させず GitHub 上の SSoT として管理するための文書。役割分担(承認はユーザー / 推奨は ChatGPT)、Human Gate の一覧と「承認はその操作・その対象に限る」原則、レビュー判定4種と `INSUFFICIENT_EVIDENCE ≠ REJECT` / `PASS_WITH_CONDITIONS ≠ Human Gate 通過` の区別、指示プロトコル(`INSTRUCTION_ID` / 作業者ごとの直列化 / 緊急差し替え)を指示側から見た運用として整理、新規指示前の確認手順、回答の correlation と例外的な `MANUAL_CORRELATION`、1指示1回答、ルール変更時の `LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY` と同期義務、セッション開始時の明示的 bootstrap(自動読み込みを前提にしない)、恒久ルールと dynamic state の分離、公開リポジトリでの取り扱いを記載した。**既存 governance の要求はいずれも緩和していない**(merge / Production 操作 / release-blocker 解除の人間承認、`PER_WORKER_SERIALIZATION=YES` / `GLOBAL_SERIALIZATION=NO` の区別を含む)。コード・Production 挙動の変更なし |
+| 2026-09-04 | 新規作成(Issue #122)。ユーザー ↔ ChatGPT 間の協働ルールを、チャット履歴・AI の記憶に依存させず GitHub 上の SSoT として管理するための文書。役割分担(承認はユーザー / 推奨は ChatGPT)、Human Gate の一覧と「承認はその操作・その対象に限る」原則、レビュー判定4種と `INSUFFICIENT_EVIDENCE ≠ REJECT` / `PASS_WITH_CONDITIONS ≠ Human Gate 通過` の区別、指示プロトコル(`INSTRUCTION_ID` / 作業者ごとの直列化 / 緊急差し替え)を指示側から見た運用として整理、新規指示前の確認手順、回答の correlation と例外的な `MANUAL_CORRELATION`、1指示1回答、ルール変更時の `LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY` と同期義務(優先を認めるのはユーザーが明示的に確定した判断に限り、ChatGPT や作業 AI が独自にルールを追加・変更する根拠にはしない)、セッション開始時の明示的 bootstrap(自動読み込みを前提にしない)、恒久ルールと dynamic state の分離、公開リポジトリでの取り扱いを記載した。**既存 governance の要求はいずれも緩和していない**(merge / Production 操作 / release-blocker 解除の人間承認、`PER_WORKER_SERIALIZATION=YES` / `GLOBAL_SERIALIZATION=NO` の区別を含む)。コード・Production 挙動の変更なし |
