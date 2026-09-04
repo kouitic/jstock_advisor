@@ -50,6 +50,10 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from jstock_advisor.domain.financial_freshness import (
+    FinancialFreshnessVerdict,
+    evaluate_financial_freshness,
+)
 from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.scoring.score import compute_score
@@ -80,6 +84,9 @@ from jstock_advisor.domain.signals.earnings_surprise import (
 from jstock_advisor.domain.signals.earnings_trend import (
     earnings_trend_config_values,
     earnings_trend_result_to_metrics,
+)
+from jstock_advisor.domain.signals.earnings_window import (
+    resolve_latest_financial_period_end,
 )
 from jstock_advisor.domain.signals.entry_price_range import (
     entry_price_range_config_values,
@@ -149,6 +156,11 @@ from jstock_advisor.services.watch_state_service import WatchStateService
 # アクティブなRuleVersionが未登録の場合(初期運用時)のフォールバック値
 RULE_VERSION_PLACEHOLDER = "v1-mvp"
 _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
+
+# Issue #52 Phase B3-B1: 財務データが報告サイクル上の最新でないときの反対材料。
+# 「取得が古い」ではなく「発表されているはずの期の数字が入っていない」ことを
+# 示す文言にする(利用者が2つの鮮度を混同しないようにするため)。
+_FINANCIAL_STALE_COUNTER_FACTOR = "最新の決算が財務データへ反映されていない可能性がある"
 
 _STRONG_SCORE_RATIO = 0.7
 _WEAK_SCORE_RATIO = 0.3
@@ -272,6 +284,7 @@ def _serialize_undervaluation_categories(
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class BuyAnalysisOutcome:
     stock_code: str
@@ -347,9 +360,7 @@ class BuySignalService:
             fallback_sector=snapshot.financial.sector,
             fallback_industry=snapshot.financial.industry,
         )
-        financial_result = classify_industry(
-            snapshot.financial.sector, snapshot.financial.industry
-        )
+        financial_result = classify_industry(snapshot.financial.sector, snapshot.financial.industry)
         return {
             "canonical_industry_33_code": canonical.industry_33_code,
             "canonical_industry_33_name": canonical.industry_33_name,
@@ -486,6 +497,33 @@ class BuySignalService:
             evaluation_date_jst(snapshot.data_fetched_at), evaluation_date_jst(now)
         )
         has_stale_data_warning = data_age_days > 1
+
+        # Issue #52 Phase B3-B1: 上のdata_age_daysとは別concept の鮮度を判定する。
+        #
+        # data_age_daysは「snapshotをいつ取得したか」であり、無料providerは取得の
+        # 都度いまの時刻を入れるため、決算発表後も旧期のままの財務データを取得した
+        # 場合でも「新しい」と見えてしまう(これがIssue #52の根本原因)。ここでは
+        # 取得時刻を一切使わず、財務データの対象期間末と報告サイクルだけを見て
+        # 「発表されているはずなのに旧期のままか」を判定する。
+        #
+        # 猶予日数は暦日。営業日へ読み替えない(domain側の契約)。
+        financial_period_end_result = resolve_latest_financial_period_end(
+            snapshot.financial, evaluation_date_jst(now)
+        )
+        financial_freshness = evaluate_financial_freshness(
+            latest_financial_period_end=financial_period_end_result.period_end,
+            quarter_ends=tuple(q.quarter_end for q in snapshot.financial.recent_quarters),
+            recent_periods_source=snapshot.financial.recent_periods_source,
+            fiscal_year_end_month=snapshot.financial.fiscal_year_end_month,
+            evaluation_date=evaluation_date_jst(now),
+            reporting_lag_days=(
+                self._config.screening.data_quality.financial_reporting_lag_calendar_days
+            ),
+        )
+        # STALEのみ利用者へ知らせる。UNKNOWNは「判定できなかった」であって
+        # 「古い」ではないため、警告を出さず監査項目としてのみ残す
+        # (FINANCIAL_UNKNOWN_POLICY = NO_WARNING_NO_PENALTY_OBSERVABILITY_ONLY)。
+        financial_freshness_warning = financial_freshness.verdict is FinancialFreshnessVerdict.STALE
 
         # --- 2. 投資対象スクリーニング(第1段階) ---
         screening_result = evaluate_screening(
@@ -973,6 +1011,34 @@ class BuySignalService:
                 else None
             ),
             "data_age_business_days": data_age_days,
+            # --- Issue #52 Phase B3-B1: 財務データの期間鮮度(取得時刻とは別) ---
+            # 判定時点の入力・出力の両方を保存し、事後に再検証できるようにする。
+            # BUYにはpenaltyを適用する共通confidence scoreが存在しないため、
+            # 減点の有無はboolean falseではなく「経路が無い」ことを明示する
+            # 文字列で残す(将来falseを「減点しなかった」と誤読させない)。
+            "financial_freshness_verdict": financial_freshness.verdict.value,
+            "financial_freshness_basis": financial_freshness.basis.value,
+            "financial_freshness_reason": financial_freshness.reason,
+            "latest_financial_period_end": (
+                financial_period_end_result.period_end.isoformat()
+                if financial_period_end_result.period_end is not None
+                else None
+            ),
+            "expected_next_financial_period_end": (
+                financial_freshness.expected_next_period_end.isoformat()
+                if financial_freshness.expected_next_period_end is not None
+                else None
+            ),
+            "expected_financial_report_deadline": (
+                financial_freshness.expected_report_deadline.isoformat()
+                if financial_freshness.expected_report_deadline is not None
+                else None
+            ),
+            "financial_reporting_lag_calendar_days": (
+                self._config.screening.data_quality.financial_reporting_lag_calendar_days
+            ),
+            "financial_freshness_warning": financial_freshness_warning,
+            "financial_stale_confidence_penalty_applied": "N/A_NO_BUY_CONFIDENCE_SCORE",
             "outlier_filter_blocking_reason": valuation_summary.outlier_filter_blocking_reason,
             "valuation_methods_used_count": valuation_summary.methods_used_count,
             "valuation_excluded_outlier_count": excluded_outlier_count,
@@ -996,15 +1062,11 @@ class BuySignalService:
             # 未保存だったもの。暫定代替ではなく本来値をそのまま保存する)。
             # net_incomeを併存保存するのは、is_deficitがnet_income=Noneのとき
             # Falseへ潰れる(黒字と欠測を区別できない)ため。
-            "net_income": (
-                str(financial.net_income) if financial.net_income is not None else None
-            ),
+            "net_income": (str(financial.net_income) if financial.net_income is not None else None),
             "is_deficit": financial.is_deficit,
             "is_debt_excess": financial.is_debt_excess,
             "latest_operating_income": (
-                str(financial.operating_income)
-                if financial.operating_income is not None
-                else None
+                str(financial.operating_income) if financial.operating_income is not None else None
             ),
             "latest_operating_cashflow": (
                 str(financial.operating_cashflow)
@@ -1135,6 +1197,17 @@ class BuySignalService:
             )
         ]
         counter_factors = list(screening_result.warnings)
+        # Issue #52 Phase B3-B1: 財務鮮度はcounter_factors(反対材料)としてのみ
+        # 提示する。data_quality_warning/adjustment_codesへは合流させない。
+        # あちらはmargin_of_safety・買付価格信頼性・データ品質スコアの3経路へ
+        # 波及するため、合流させると「警告のみ」ではなく実質的な減点になる。
+        # BUY経路に共通confidence scoreは存在せず、適正価格の信頼度
+        # (determine_valuation_confidence)は算出手法の信頼性という別concept の
+        # ため、そこへ財務鮮度を混ぜることもしない(混ぜれば本Issueの根本原因を
+        # 別の形で作り直すことになる)。SELL/利確側のconfidence penaltyは
+        # B3-B2で既存のcompute_confidence経路へ接続する。
+        if financial_freshness_warning:
+            counter_factors.append(_FINANCIAL_STALE_COUNTER_FACTOR)
         if snapshot.benefit is not None and snapshot.benefit.is_major_downgrade:
             counter_factors.append("株主優待の内容が改悪された可能性がある")
         counter_factors.extend(
