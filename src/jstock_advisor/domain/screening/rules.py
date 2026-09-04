@@ -15,6 +15,10 @@ from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.enums import IndustryClassification
 from jstock_advisor.domain.jst import evaluation_date_jst
+from jstock_advisor.domain.price_freshness import (
+    PriceFreshnessVerdict,
+    evaluate_buy_price_freshness,
+)
 from jstock_advisor.interfaces.types import Disclosure, DividendInfo, FinancialSummary
 
 
@@ -74,6 +78,7 @@ def evaluate_screening(
     now: dt.datetime,
     business_calendar: BusinessCalendar,
     config: ScreeningRulesConfig,
+    price_as_of_date: dt.date | None = None,
 ) -> ScreeningResult:
     """一次スクリーニング(BUY候補裾野拡大機能2026-08で再整理)。
 
@@ -188,5 +193,28 @@ def evaluate_screening(
     max_age = config.data_quality.max_data_age_business_days
     if data_age_days > max_age:
         reasons.append(f"データが{data_age_days}営業日前と古く、基準{max_age}営業日を超過")
+
+    # Issue #52 Phase B2: 株価の基準日(as_of_date)による鮮度判定。
+    #
+    # 上のdata_age判定は「いつ取得したか」(fetched_at)を見ているのに対し、
+    # こちらは「その株価がいつの取引によるものか」を見る。yfinance系providerは
+    # 常にfetched_at=nowを返すため、上の判定は10営業日前の終値でも発火しない。
+    #
+    # 判定はmax_data_age_business_daysを**流用しない**。取得鮮度と価格基準日の
+    # 鮮度は別概念であり、再び混ぜるとIssue #52の根本原因へ戻る。
+    # 閾値は domain/price_freshness.py へ集約する(人間確定値)。
+    #
+    # price_as_of_dateがNone(未指定)の場合は判定しない。呼び出し側が
+    # 価格を持たない文脈(既存テスト等)で挙動を変えないため。
+    # **株価の基準日が不明**であること自体を表現したい場合は、
+    # 呼び出し側でevaluate_buy_price_freshness()を直接使うこと。
+    if price_as_of_date is not None:
+        verdict, reason = evaluate_buy_price_freshness(
+            price_as_of_date, now, business_calendar
+        )
+        if verdict is PriceFreshnessVerdict.HARD_STOP and reason is not None:
+            reasons.append(reason)
+        elif verdict is PriceFreshnessVerdict.WARNING and reason is not None:
+            warnings.append(reason)
 
     return ScreeningResult(passed=not reasons, exclusion_reasons=reasons, warnings=warnings)

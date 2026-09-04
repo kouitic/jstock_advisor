@@ -13,6 +13,10 @@ from decimal import Decimal, InvalidOperation
 import yfinance as yf
 
 from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.interfaces.provider_errors import (
+    ProviderDataError,
+    ProviderFailureCategory,
+)
 from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot
 from jstock_advisor.providers._failure import raise_provider_data_error
 
@@ -40,6 +44,38 @@ def _to_decimal(value: float) -> Decimal | None:
         return Decimal(str(round(f, 2)))
     except InvalidOperation:
         return None
+
+
+def _reject_non_positive_close(stock_code: str, close: Decimal, *, operation: str) -> None:
+    """終値が0以下ならProviderDataError(retryable=False)を送出する(Issue #52 Phase B2)。
+
+    ゼロ/負値の株価は現実の市場価格として成立しない。これを正常なPriceSnapshotとして
+    domainへ流入させると、適正価格比較・含み損益・損切り・利確の全経路が
+    無意味な値で動く(F-J13。`data_quality_service`の`price > 0`ガードは
+    ゼロ価格で**検査自体をskipする**ため、下流では検知できない)。
+
+    `None`へ変換しない。`None`は「取得できたがデータが無い(genuine missing)」を
+    意味するのに対し、ゼロ/負値は「取得できたがデータが壊れている」であり別物である。
+    両者を混同すると、欠測として静かに素通りする経路が再びできる。
+
+    再試行しても壊れた値は変わらないため`retryable=False`。
+
+    値そのものは例外へ載せない(`ProviderDataError`の既存契約に従い、
+    メッセージには当方が構築した安全要約のみを載せる)。
+    """
+    if close > 0:
+        return
+    raise ProviderDataError(
+        provider_name=_PROVIDER_NAME,
+        operation=operation,
+        retryable=False,
+        failure_category=ProviderFailureCategory.NON_RETRYABLE_PROVIDER_FAILURE,
+        error_type="NonPositiveClosePrice",
+        error_summary=(
+            f"close price must be positive (stock_code={stock_code}, sign="
+            f"{'zero' if close == 0 else 'negative'})"
+        ),
+    )
 
 
 class YFinanceMarketDataProvider:
@@ -99,6 +135,10 @@ class YFinanceMarketDataProvider:
         if history is None or not history.bars:
             return None
         latest = history.bars[-1]
+        # Issue #52 Phase B2: ゼロ/負値の終値をdomainへ流入させない。
+        # 「データが無い」(None)ではなく「データはあるが壊れている」ため、
+        # missingではなくfailureとして扱う(Issue #59 の failure/missing 分離契約)。
+        _reject_non_positive_close(stock_code, latest.close, operation="get_latest_price")
         return PriceSnapshot(
             stock_code=stock_code,
             as_of_date=latest.date,

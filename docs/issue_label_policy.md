@@ -185,6 +185,152 @@ NEXT_PRODUCTION_RELEASE_BLOCKER
 `release-blocker` が付いていても「すべての Production release を止める」とは
 限らない。**release 判断時は label の有無だけでなく、必ず block 条件を確認する。**
 
+### blocking target の必須記録
+
+`release-blocker` を付与する場合、**Issue 本文または最新の durable status comment
+へ次の構造化情報を必ず記録する。** label だけでは block 対象を表現できないためである。
+
+```
+BLOCKER_MODE              = DEFECT_BLOCK | VERIFICATION_HOLD
+BLOCKING_TARGET_TYPE      = ISSUE | COMMIT | RELEASE_CANDIDATE | PRODUCTION_NEXT
+BLOCKING_TARGET           = 具体的対象
+BLOCK_REASON              = 理由
+BLOCKER_SCOPE             = 何を含む release を止めるのか
+BLOCKER_REMOVAL_CONDITION = 解除条件
+BLOCKER_ADDED_AT          = 付与日
+```
+
+必要に応じて次も記録する。
+
+```
+REMEDIATION_COMMIT           = sha | PENDING
+PRODUCTION_VERIFICATION_PLAN = Issue の該当 section / comment への参照
+```
+
+**GitHub label 自体に値を持たせようとしない。** label は `release-blocker` の
+存在だけを示し、詳細な target は Issue の durable record で管理する。
+4軸モデル(§1)は変更しない。
+
+#### 必須記録が不足している場合は fail-closed とする
+
+`release-blocker` が付いているにもかかわらず、上記の必須記録のいずれかが
+不足している場合は次のように扱う。
+
+```
+BLOCKER_METADATA_COMPLETE = NO
+RELEASE_DECISION          = INSUFFICIENT_EVIDENCE
+```
+
+**必須記録が不足している `release-blocker` を、blocker が無いものとして
+扱ってはならない。** release 可否を `INSUFFICIENT_EVIDENCE` とし、
+blocking target / scope を確定するまで Production release へ進んではならない。
+
+記録が無いことは「その blocker が release を止めない」ことの根拠にならない。
+**label を無視して release することは禁止**である。
+不足を解消する方法は、当該 Issue へ必須記録を追加して blocking target と
+scope を確定させることであって、blocker を無視することではない。
+
+### BLOCKER_MODE の定義
+
+**`DEFECT_BLOCK`**
+
+修正がまだ release artifact へ入っていないため、欠陥を未修正のまま Production へ
+出すことを禁止する状態。
+
+```
+BLOCKER_MODE         = DEFECT_BLOCK
+BLOCKING_TARGET_TYPE = PRODUCTION_NEXT
+意味                  = remediation commit を含まない release は禁止
+```
+
+remediation commit が merge され、**その修正を Production へ入れる release 自身**を
+この blocker で禁止してはならない。
+
+**`VERIFICATION_HOLD`**
+
+remediation commit は main / release candidate へ入っているが、
+Production Verification が未完了の状態。
+
+```
+意味 = remediation release そのものの deploy は許容する
+      deploy 後、Issue 定義の mandatory verification + ChatGPT PASS +
+      human approval まで blocker を維持する
+      この期間は、当該 verification を未完了のまま
+      さらに次の通常 Production release へ進むことを禁止する
+```
+
+### remediation release の自己 block 禁止
+
+```
+BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER
+```
+
+`release-blocker` は「**問題を未解消のまま通過する release**」を止めるための
+ものであり、「**その blocker 自身を解消するための remediation release**」を
+永遠に禁止するものではない。
+
+remediation release を許可する条件は次のとおりで、**すべて**満たすこと。
+
+```
+remediation fix が merge 済み
+release scope に当該 fix が含まれる
+Production Verification Plan が定義済み
+blocker は deploy だけでは解除しない
+unrelated piggyback 禁止ルールを満たす
+exact release candidate SHA について人間承認
+ChangeSet CREATE / EXECUTE は別途人間承認
+```
+
+これは「OPEN blocker があっても無視してよい」というルールでは**ない**。
+release 可否は、各 blocker の `BLOCKING_TARGET` / `BLOCKER_SCOPE` を確認して
+判定する。grouped release 側の条件は
+[docs/development_workflow.md](development_workflow.md) §9 が正本。
+
+### 既存 blocker の移行
+
+本節の導入だけを理由に、既存 Issue の blocker metadata を一括書き換えしない。
+現在 OPEN の `release-blocker` は、**次回の status update 時に新フォーマットへ
+同期する**方針とする。既存の履歴を破壊しない。
+
+### Production-target defect の release-blocker lifecycle
+
+現行 Production に実害が出ている欠陥(Production-target defect)については、
+`release-blocker` を次の lifecycle で扱う。
+
+```
+blocker 付与
+  → 修正の merge
+  → Production deploy
+  → Immediate Verification
+  → mandatory verification(Issue が定義したもの)
+  → ChatGPT review
+  → human approval
+  → blocker 解除
+```
+
+重要な点は次のとおり。
+
+- **deploy しただけでは解除しない。merge しただけでも解除しない。**
+  Issue が `MANDATORY_FOR_RELEASE_BLOCKER_REMOVAL` と定義した verification が
+  完了して初めて解除の判断ができる。
+- **`Issue close` と `release-blocker 解除` は別判断である。**
+  verification 完了前に Issue を close しない一方、blocker を解除しても
+  後続 Phase が残るなら Issue は OPEN のままでよい。逆に、Issue を close しても
+  blocker が別条件で残ることもありうる。
+- 未完了の verification が
+  **`OPTIONAL_POST_RELEASE_OBSERVATION` だけになった場合は、解除しうる。**
+  この場合、自然な障害発生を待つことを必須とせず、事前に定義した代替証拠
+  (unit / contract tests、CI、Immediate Verification、正常系 natural evidence)
+  と ChatGPT review PASS、人間判断をもって解除可否を決める。
+  分類の定義と代替証拠の要件は
+  [docs/development_workflow.md](development_workflow.md) 7節が正本。
+- **Issue 自身が自然な negative-path observation を Acceptance Criteria として
+  明示している場合、これを勝手に `OPTIONAL` へ格下げしない。**
+
+この lifecycle は、§6 冒頭の「`release-blocker` は Production release を
+**実際に止める** Issue にだけ設定する」という意味を変更するものではない。
+解除の手順を明確にするものである。
+
 ---
 
 ## 7. 推測して埋めない
@@ -424,3 +570,4 @@ Release Blocker 軸と混同されるため不可)。
 | 日付 | 変更概要 |
 |---|---|
 | 2026-08-30 | 初版作成(#87)。4軸モデル、Type 8種と排他関係、Priority / Severity の定義、条件付き release-blocker、推測禁止と報告用語、Severity の「N/A」と「TRIAGE_REQUIRED」の区別、Phase / status を label 化しない方針、tracking への非伝播、運用フロー、実例を規定。 |
+| 2026-09-03 | §6 へ blocking target semantics を追加(#122)。`release-blocker` 付与時の必須記録(`BLOCKER_MODE` / `BLOCKING_TARGET_TYPE` / `BLOCKING_TARGET` / `BLOCK_REASON` / `BLOCKER_SCOPE` / `BLOCKER_REMOVAL_CONDITION` / `BLOCKER_ADDED_AT`)を定め、必須記録が不足する場合は fail-closed(`BLOCKER_METADATA_COMPLETE=NO` / `RELEASE_DECISION=INSUFFICIENT_EVIDENCE`)として blocker を無視した release を禁止した。`BLOCKER_MODE` の `DEFECT_BLOCK` / `VERIFICATION_HOLD` を定義し、`BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER`(remediation release を自身の blocker で禁止しない)と、その許可条件7点を明文化した。既存 blocker の metadata は一括書き換えせず次回 status update 時に同期する。**既存の4軸独立性・条件付き blocker・Production-target defect の lifecycle・Issue close と blocker 解除の分離はいずれも変更していない** |

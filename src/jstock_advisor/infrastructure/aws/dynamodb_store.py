@@ -131,6 +131,18 @@ class DynamoDbCollectionStore[T: BaseModel]:
     def upsert(self, item: T) -> None:
         self._table.put_item(Item=self._to_item(item))
 
+    def apply_batch(self, delete_ids: Iterable[str], puts: Iterable[T]) -> None:
+        """削除と追加/更新を順に適用する(Issue #61 Phase B2)。
+
+        **本実装は原子的ではない。** DynamoDBで原子性が必要な経路は
+        TransactWriteItems(holding_replacement_commit.py)を使うこと。
+        本メソッドはローカルJSON実装とのインターフェース互換のために存在する。
+        """
+        for item_id in delete_ids:
+            self.delete(str(item_id))
+        for item in puts:
+            self.upsert(item)
+
     def upsert_many(self, new_items: Iterable[T]) -> None:
         with self._table.batch_writer() as batch:
             for item in new_items:

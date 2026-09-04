@@ -138,3 +138,30 @@ def compute_next_record_date(
                 candidates.append(candidate)
                 break
     return min(candidates) if candidates else None
+
+
+def with_refreshed_next_record_date(
+    benefit: ShareholderBenefit, reference_date: dt.date
+) -> ShareholderBenefit:
+    """next_benefit_record_dateをreference_date基準で再導出したコピーを返す(純関数)。
+
+    「毎年3月末」のような周期は日付を固定で持たせると時間の経過で陳腐化するため、
+    **保存済みの派生値をそのまま使わず、現行の計算契約
+    (`compute_next_record_date`)に従って読み取りのたびに再導出する**
+    (要求仕様16節拡張、Issue #120)。
+
+    Issue #120以前はサービス層が再導出結果を`repository.save()`で書き戻していたが、
+    この項目は`(benefit_record_date_recurrence_months, reference_date)`の純粋な
+    派生値であり、判定ロジックはいずれも生の周期情報から評価時に導出している。
+    永続化して得られる価値が無い一方、読み取りAPIが書き込み権限を要求する原因に
+    なっていたため、**書き戻しは行わない**。
+
+    `reference_date`は呼び出し側が決める。どの暦(UTC暦日/JST暦日)を基準とするかは
+    本関数の責務ではない(この選択自体の是正はIssue #120のスコープ外)。
+    """
+    next_date = compute_next_record_date(
+        benefit.benefit_record_date_recurrence_months, reference_date
+    )
+    if next_date == benefit.next_benefit_record_date:
+        return benefit
+    return benefit.model_copy(update={"next_benefit_record_date": next_date})

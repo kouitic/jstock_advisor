@@ -359,6 +359,10 @@ class BuySignalService:
             # 区別する。canonical_sourceだけでは両者が同じ値へ潰れるため、
             # **JPX解決率の算出にはこちらを使う**(Phase B-2の判断材料)。
             "jpx_lookup_status": canonical.jpx_lookup_status.value,
+            # providerが返した生の業種情報。**canonical値ではない**。
+            # Issue #54 Phase B-2-0(2026-09-04): 以前はJPX解決時に保持されず、
+            # 解決率100%のProductionでは常にnullになっていた。canonical(JPX)と
+            # 既存分類器の入力を同一observationから突き合わせられるようにする。
             "provider_sector": canonical.fallback_sector,
             "provider_industry": canonical.fallback_industry,
             # 既存分類器が同一入力に対して実際に返した値(是正はしない)。
@@ -493,6 +497,9 @@ class BuySignalService:
             now=now,
             business_calendar=self._calendar,
             config=self._config.screening,
+            # Issue #52 Phase B2: 株価の基準日による鮮度判定を有効にする。
+            # data_fetched_at(取得時刻)とは別軸で評価する。
+            price_as_of_date=snapshot.price_as_of_date,
         )
         screening_outcome = screen_investment_universe(
             screening_result, snapshot.severe_earnings_decline, snapshot.benefit

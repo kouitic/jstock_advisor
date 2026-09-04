@@ -104,6 +104,11 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 class StockSnapshot:
     stock_code: str
     current_price: Decimal
+    # Issue #52 Phase B2: current_priceが「いつの取引による終値か」。
+    # fetched_at(APIを叩いた時刻)とは別概念であり、鮮度判定にはこちらを使う。
+    # StockSnapshotは判定処理の中間生成物であり永続化されないため、
+    # このフィールド追加による保存schemaへの影響は無い。
+    price_as_of_date: dt.date
     financial: FinancialSummary
     dividend: DividendInfo
     benefit: ShareholderBenefit | None
@@ -292,6 +297,7 @@ def build_stock_snapshot(
 
     benefit = providers.shareholder_benefit.get_shareholder_benefit(stock_code)
     current_price = snap.close_price
+    price_as_of_date = snap.as_of_date
 
     history_start = now.date() - dt.timedelta(
         days=365 * config.valuation.historical_range_method.lookback_years
@@ -428,10 +434,26 @@ def build_stock_snapshot(
         config.valuation.fair_value_usability,
     )
 
+    # 出所(provenance)は登録型データを含めて記録する。監査・説明可能性のため。
     data_sources = [snap.source, financial.source, dividend.source]
     if benefit is not None:
         data_sources.append(benefit.source)
-    data_fetched_at = min(s.fetched_at for s in data_sources)
+
+    # Issue #52 Phase B1: generic freshness(=「取得してきたデータがどれだけ古いか」)の
+    # 分母には**登録型データを入れない**。
+    #
+    # 株主優待はユーザーが手動/CSVで登録するデータであり、その`fetched_at`は
+    # 「登録操作を行った時刻」であってデータが真である時点ではない。これを
+    # min()へ混ぜると、優待を登録した銘柄は登録から数営業日後に
+    # 「データが古い」でBUYからハード除外されていた(F-J1)。
+    # 登録内容が古くなったかどうかは、市場・財務データの取得鮮度とは別の問題である。
+    #
+    # 除外はsource_typeではなく**構築時に分離する**ことで担保する
+    # (source_typeの設定漏れで防御が破れないようにするため)。
+    # 将来ここへsourceを追加する場合、それが「取得してきたデータ」なのか
+    # 「登録されたデータ」なのかを必ず判断すること。
+    freshness_sources = [snap.source, financial.source, dividend.source]
+    data_fetched_at = min(s.fetched_at for s in freshness_sources)
 
     keywords_found = detect_disclosure_risk_keywords(
         disclosures, config.sell.disclosure_risk_keywords
@@ -639,6 +661,7 @@ def build_stock_snapshot(
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
+        price_as_of_date=price_as_of_date,
         financial=financial,
         dividend=dividend,
         benefit=benefit,

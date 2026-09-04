@@ -57,7 +57,15 @@ from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalOutcome, SellSignalService
 
 _CFG = load_config()
-_NOW = dt.datetime.now(dt.UTC)
+# Issue #143: 実 wall clock を参照すると、同一 commit でも実行時刻により
+# 結果が変わる(市場時間中は mock provider が当日の未確定 bar を as_of_date
+# として返し、価格鮮度ゲートの判定が変化するため)。
+# テストの now は **固定**する。ここでは営業日の大引け後(POST_CLOSE)を選び、
+# 「最新の完了セッション = 当日」が成立する状態を明示的に作る。
+# 境界時刻ごとの semantics は tests/unit/test_issue_143_test_clock_determinism.py
+# が表として固定している。
+_JST = dt.timezone(dt.timedelta(hours=9))
+_NOW = dt.datetime(2026, 9, 2, 16, 0, tzinfo=_JST)  # 水曜 16:00 JST = 大引け後
 _PROVIDERS = build_mock_provider_bundle(_NOW)
 
 

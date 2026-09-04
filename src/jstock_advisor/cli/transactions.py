@@ -193,12 +193,18 @@ def import_csv(
         raise typer.Exit(code=1) from e
 
     for result in summary.results:
-        marker = {"SUCCESS": "OK", "WARNING": "WARN", "ERROR": "NG"}[result.status.value]
+        marker = {
+            "SUCCESS": "OK",
+            "WARNING": "WARN",
+            "ERROR": "NG",
+            "SKIPPED_DUPLICATE": "SKIP",
+        }[result.status.value]
         typer.echo(f"[{marker}] 行{result.row_number} {result.stock_code or '-'}: {result.message}")
 
     typer.echo(
         f"--- 合計{summary.total_rows}行 (成功:{summary.success_count} "
-        f"警告:{summary.warning_count} エラー:{summary.error_count}) ---"
+        f"警告:{summary.warning_count} スキップ:{summary.skipped_count} "
+        f"エラー:{summary.error_count}) ---"
     )
     if summary.error_count > 0:
         raise typer.Exit(code=1)

@@ -298,7 +298,19 @@ def import_csv(
         help="既存銘柄と重複する場合の扱い: additional_purchase(追加購入) または overwrite(上書き)",
     ),
 ) -> None:
-    """保有銘柄CSVを一括登録する(行単位で結果を返す)。"""
+    """保有銘柄CSVを一括登録する(行単位で結果を返す)。
+
+    必須列: stock_code, shares, purchase_price, **owner**
+    任意列: stock_name, purchase_date, account_type, investment_purpose,
+            profit_target_rate, memo
+
+    Issue #61: ownerは必須です(列が無い、または空欄の行はエラーになります)。
+    以前は未指定時に自動で既定の所有者へ割り当てていましたが、別の所有者の保有が
+    誤って1件へ統合される事故が起きたため廃止しました。
+
+    同じ内容のCSVを再度取り込んだ場合、取り込み済みの行は登録せずスキップします
+    (SKIP)。CSV内に同一内容の行が複数あるときは、2件目以降を登録しません(NG)。
+    """
     if on_duplicate not in ("additional_purchase", "overwrite"):
         raise typer.BadParameter(
             "--on-duplicate は additional_purchase または overwrite を指定してください"
@@ -312,12 +324,19 @@ def import_csv(
         raise typer.Exit(code=1) from e
 
     for result in summary.results:
-        marker = {"SUCCESS": "OK", "WARNING": "WARN", "ERROR": "NG"}[result.status.value]
+        # Issue #61 Phase B1: 取り込み済みでskipした行(SKIPPED_DUPLICATE)を追加。
+        marker = {
+            "SUCCESS": "OK",
+            "WARNING": "WARN",
+            "SKIPPED_DUPLICATE": "SKIP",
+            "ERROR": "NG",
+        }[result.status.value]
         typer.echo(f"[{marker}] 行{result.row_number} {result.stock_code or '-'}: {result.message}")
 
     typer.echo(
         f"--- 合計{summary.total_rows}行 (成功:{summary.success_count} "
-        f"警告:{summary.warning_count} エラー:{summary.error_count}) ---"
+        f"警告:{summary.warning_count} スキップ:{summary.skipped_count} "
+        f"エラー:{summary.error_count}) ---"
     )
     if summary.error_count > 0:
         raise typer.Exit(code=1)

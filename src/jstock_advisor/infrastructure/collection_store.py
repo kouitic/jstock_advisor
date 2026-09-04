@@ -47,6 +47,19 @@ class CollectionStore[T: BaseModel](Protocol):
     def get(self, item_id: str) -> T | None: ...
     def upsert(self, item: T) -> None: ...
     def upsert_many(self, new_items: Iterable[T]) -> None: ...
+    def apply_batch(self, delete_ids: Iterable[str], puts: Iterable[T]) -> None:
+        """削除と追加/更新を**このコレクションについては1回の書き込みで**適用する
+        (Issue #61 Phase B2)。
+
+        ローカルJSON実装は全件を読み込んで変更し、一時ファイルへ書いてから
+        os.replace()で差し替えるため、**同一ファイル内では部分適用が起こらない**
+        (ロットを1件ずつ削除して途中で失敗する、という状態を構造的に無くす)。
+
+        DynamoDB実装は個別の書き込みを順に行う。DynamoDBで原子性が必要な経路は
+        本メソッドではなくTransactWriteItems(holding_replacement_commit.py)を
+        使うこと。
+        """
+        ...
     def delete(self, item_id: str) -> bool: ...
     def find(self, predicate: Callable[[T], bool]) -> list[T]: ...
     def insert_if_absent(self, item: T) -> bool:
