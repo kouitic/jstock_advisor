@@ -594,21 +594,25 @@ def test_verdict_has_exactly_fresh_stale_unknown() -> None:
     assert {v.value for v in FinancialFreshnessVerdict} == {"FRESH", "STALE", "UNKNOWN"}
 
 
-# --- 20. Phase B3-A は挙動を変えない ------------------------------------------
+# --- 20. 接続先は Phase ごとに限定する ----------------------------------------
 
 
-def test_no_production_call_site() -> None:
-    """判定経路から呼ばれていないことを固定する。
+def test_production_call_sites_are_limited_to_the_current_phase() -> None:
+    """接続先を Phase 単位で固定する。
 
-    B3-A は pure domain contract のみで、merge しても Production の挙動は
-    変わらない。接続は Phase B3-B で行う。ここが破れたら、それは
-    B3-A の範囲を超えた変更である。
+    B3-A の時点では call site 0 だった(pure domain contract のみ)。
+    B3-B1 で **BUY のみ** へ接続した。SELL / 利確への接続は B3-B2 であり、
+    そこには既存の共通 confidence score(`compute_confidence`)が実在するため、
+    BUY とは接続のしかたが異なる。混ぜて実装しないよう、ここで境界を固定する。
+
+    接続のしかたそのもの(警告のみ・減点なし)は
+    `tests/unit/test_issue_52_phase_b3_b1_buy_financial_freshness.py` が固定する。
     """
     src_root = Path(__file__).resolve().parents[2] / "src" / "jstock_advisor"
-    importers = [
+    importers = sorted(
         path.relative_to(src_root).as_posix()
         for path in src_root.rglob("*.py")
         if path.name != "financial_freshness.py"
         and "financial_freshness" in path.read_text(encoding="utf-8")
-    ]
-    assert importers == [], f"unexpected call sites: {importers}"
+    )
+    assert importers == ["services/buy_signal_service.py"], f"unexpected call sites: {importers}"

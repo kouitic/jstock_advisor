@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -45,6 +46,7 @@ from jstock_advisor.domain.entities.enums import (
     MarketEnvironmentEvaluationState,
     PriceRangeEvaluationState,
     ProfitTakingIndustrySector,
+    RecentPeriodsSource,
     RecommendationType,
     SectorEnvironmentEvaluationState,
     StockType,
@@ -70,6 +72,7 @@ from jstock_advisor.interfaces.types import (
     DividendInfo,
     FinancialSummary,
     HistoricalValuation,
+    QuarterlyFinancials,
 )
 from jstock_advisor.services import buy_signal_service as service_module
 from jstock_advisor.services.buy_signal_service import BuySignalService
@@ -469,9 +472,7 @@ def _analyze(
     monkeypatch: pytest.MonkeyPatch, fx: _StockFixture
 ) -> service_module.BuyAnalysisOutcome:
     snapshot = _build_snapshot(fx)
-    monkeypatch.setattr(
-        service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None)
-    )
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
     service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
     return service.analyze(fx.stock_code, _NOW, RecommendationType.BUY)
 
@@ -914,9 +915,7 @@ def test_phase35_period_series_capped_at_max_periods(
             update={"recent_periods_source": RecentPeriodsSource.ANNUAL_FALLBACK}
         ),
     )
-    monkeypatch.setattr(
-        service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None)
-    )
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
     service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
     outcome = service.analyze(_NIHON_SHINYAKU.stock_code, _NOW, RecommendationType.BUY)
     rec = outcome.recommendation
@@ -1011,8 +1010,7 @@ def test_phase35_suppression_is_reason_code_not_state() -> None:
     assert "SUPPRESSED_BY_SEVERE_EARNINGS_DECLINE" not in vm["reason_codes"]
     # 全カテゴリでstateは3値語彙のみ
     assert all(
-        entry["state"] in {"EVALUATED", "NOT_EVALUATED", "NOT_APPLICABLE"}
-        for entry in payload
+        entry["state"] in {"EVALUATED", "NOT_EVALUATED", "NOT_APPLICABLE"} for entry in payload
     )
 
 
@@ -1070,6 +1068,7 @@ def test_phase35_no_suppression_reason_codes_in_normal_case() -> None:
         "reason_code": None,
     }
 
+
 def test_issue23_data_age_business_days_uses_jst_calendar_dates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1091,9 +1090,7 @@ def test_issue23_data_age_business_days_uses_jst_calendar_dates(
         data_fetched_at=fetched,
         price_as_of_date=expected_latest_completed_trading_session(now, _CALENDAR),
     )
-    monkeypatch.setattr(
-        service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None)
-    )
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
     service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
     outcome = service.analyze(_TACHI_S.stock_code, now, RecommendationType.BUY)
     rec = outcome.recommendation
@@ -1120,9 +1117,7 @@ def _analyze_with_disclosure(
         disclosure_unavailable_reason=unavailable_reason,
         disclosure_risk_keywords_found=disclosure_risk_keywords_found,
     )
-    monkeypatch.setattr(
-        service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None)
-    )
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
     service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
     return service.analyze(fx.stock_code, _NOW, RecommendationType.BUY)
 
@@ -1413,9 +1408,7 @@ def test_source_unavailable_is_recorded_distinctly_from_not_found(
     unavailable_obs = unavailable.recommendation.buy_score_input_facts[
         "canonical_industry_observation"
     ]
-    not_found_obs = not_found.recommendation.buy_score_input_facts[
-        "canonical_industry_observation"
-    ]
+    not_found_obs = not_found.recommendation.buy_score_input_facts["canonical_industry_observation"]
 
     assert unavailable_obs["jpx_lookup_status"] == "SOURCE_UNAVAILABLE"
     assert not_found_obs["jpx_lookup_status"] == "NOT_FOUND"
@@ -1476,9 +1469,9 @@ def test_all_jpx_lookup_states_yield_identical_buy_decision(
             outcome.recommendation.fair_value_at_recommendation
             == baseline.recommendation.fair_value_at_recommendation
         ), name
-        assert (
-            outcome.recommendation.score_breakdown == baseline.recommendation.score_breakdown
-        ), name
+        assert outcome.recommendation.score_breakdown == baseline.recommendation.score_breakdown, (
+            name
+        )
 
 
 def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
@@ -1502,3 +1495,195 @@ def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
     legacy_view = {k: v for k, v in facts.items() if k != "canonical_industry_observation"}
     assert "canonical_industry_observation" not in legacy_view
     assert legacy_view["buy_score_input_facts_schema_version"] == "v1"
+
+
+# ---------------------------------------------------------------------------
+# Issue #52 Phase B3-B1: 財務データの「報告サイクル上の鮮度」をBUYへ接続する
+#
+# data_age_business_days(いつ取得したか)とは別concept である。無料providerは
+# 取得の都度いまの時刻を入れるため、取得時刻をいくら見ても「決算発表後なのに
+# 旧期のままである」ことは検知できない。ここでは取得時刻を新しいままにした上で
+# 財務期間だけを古くし、判定が実際に変わることを固定する。
+#
+# 確定仕様(人間確定。ここで再判断しない)
+#   猶予          50暦日(config: data_quality.financial_reporting_lag_calendar_days)
+#   STALE         警告のみ。hard exclusionしない。confidence減点もしない
+#                 (BUY経路に共通confidence scoreが存在しないため)
+#   UNKNOWN       警告なし・減点なし。監査項目としてのみ残す
+# ---------------------------------------------------------------------------
+
+# 期末2026-03-31 -> 期待される次の期末2026-06-30 -> 報告期限 2026-06-30+50日
+# = 2026-08-19。期限当日はSTALE側に含める(domain契約)。
+_B3_DEADLINE = dt.date(2026, 8, 19)
+_B3_FRESH_NOW = dt.datetime(2026, 8, 18, 7, 0, tzinfo=dt.UTC)
+_B3_STALE_NOW = dt.datetime(2026, 8, 19, 7, 0, tzinfo=dt.UTC)
+_B3_STALE_COUNTER_FACTOR = "最新の決算が財務データへ反映されていない可能性がある"
+
+
+def _b3_quarterly_financial(base: FinancialSummary) -> FinancialSummary:
+    """四半期実績の履歴を持つ財務データ(期末は2026-03-31)。"""
+    return base.model_copy(
+        update={
+            "fiscal_period_end": dt.date(2026, 3, 31),
+            "fiscal_year_end_month": 3,
+            "recent_quarters": [
+                QuarterlyFinancials(stock_code=base.stock_code, quarter_end=q, source=_SOURCE)
+                for q in (dt.date(2025, 12, 31), dt.date(2026, 3, 31))
+            ],
+            "recent_periods_source": RecentPeriodsSource.QUARTERLY,
+        }
+    )
+
+
+def _b3_unresolvable_financial(base: FinancialSummary) -> FinancialSummary:
+    """決算サイクルを確認できない財務データ(UNKNOWNへ倒れる)。"""
+    return base.model_copy(
+        update={
+            "fiscal_period_end": dt.date(2026, 3, 31),
+            "fiscal_year_end_month": None,
+            "recent_quarters": [],
+            "recent_periods_source": RecentPeriodsSource.UNAVAILABLE,
+        }
+    )
+
+
+def _b3_analyze(
+    monkeypatch: pytest.MonkeyPatch,
+    now: dt.datetime,
+    financial_builder: Callable[[FinancialSummary], FinancialSummary],
+) -> service_module.BuyAnalysisOutcome:
+    """財務期間だけを差し替え、取得時刻・価格鮮度は常に正常なまま評価する。"""
+    import dataclasses
+
+    fx = dataclasses.replace(_TACHI_S, next_earnings_date=dt.date(2026, 11, 13))
+    base = _build_snapshot(fx)
+    snapshot = dataclasses.replace(
+        base,
+        financial=financial_builder(base.financial),
+        # 「取得は当日。しかし財務データの対象期間が古い」状況を作るため、
+        # 取得時刻と価格基準日は常に鮮度が正常な値へ揃える。
+        data_fetched_at=now,
+        price_as_of_date=expected_latest_completed_trading_session(now, _CALENDAR),
+    )
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
+    service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
+    return service.analyze(fx.stock_code, now, RecommendationType.BUY)
+
+
+def test_b3_b1_financial_stale_adds_counter_factor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """報告期限を過ぎても旧期のままなら、反対材料として利用者へ提示する。"""
+    rec = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_quarterly_financial).recommendation
+    assert rec is not None
+    assert _B3_STALE_COUNTER_FACTOR in rec.counter_factors
+    facts = rec.buy_score_input_facts or {}
+    assert facts["financial_freshness_verdict"] == "STALE"
+    assert facts["financial_freshness_warning"] is True
+    assert facts["expected_financial_report_deadline"] == _B3_DEADLINE.isoformat()
+
+
+def test_b3_b1_financial_fresh_does_not_add_counter_factor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """期限前は「まだ発表前なので旧期が正常」であり、警告しない。"""
+    rec = _b3_analyze(monkeypatch, _B3_FRESH_NOW, _b3_quarterly_financial).recommendation
+    assert rec is not None
+    assert _B3_STALE_COUNTER_FACTOR not in rec.counter_factors
+    facts = rec.buy_score_input_facts or {}
+    assert facts["financial_freshness_verdict"] == "FRESH"
+    assert facts["financial_freshness_warning"] is False
+
+
+def test_b3_b1_deadline_day_itself_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """50暦日の境界。期限前日はFRESH、期限当日はSTALE(境界は1つに固定する)。"""
+    fresh = _b3_analyze(monkeypatch, _B3_FRESH_NOW, _b3_quarterly_financial).recommendation
+    stale = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_quarterly_financial).recommendation
+    assert fresh is not None
+    assert stale is not None
+    assert (fresh.buy_score_input_facts or {})["financial_freshness_verdict"] == "FRESH"
+    assert (stale.buy_score_input_facts or {})["financial_freshness_verdict"] == "STALE"
+
+
+def test_b3_b1_unknown_is_observability_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """判定根拠が無い場合は「古い」ではないため、警告を出さず監査項目のみ残す。"""
+    rec = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_unresolvable_financial).recommendation
+    assert rec is not None
+    assert _B3_STALE_COUNTER_FACTOR not in rec.counter_factors
+    facts = rec.buy_score_input_facts or {}
+    assert facts["financial_freshness_verdict"] == "UNKNOWN"
+    assert facts["financial_freshness_warning"] is False
+    assert facts["financial_freshness_basis"] == "UNRESOLVED"
+    # 根拠が無いことは reason として残す(空文字で潰さない)。
+    assert facts["financial_freshness_reason"]
+
+
+def test_b3_b1_fetched_today_but_financial_period_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #52の中核: 取得は当日でも、財務期間が古ければSTALEとして検知する。
+
+    取得時刻ベースの鮮度(data_age_business_days)は0のままである。ここが0のまま
+    STALEを検知できることが、2つの鮮度が別concept であることの証明になる。
+    """
+    rec = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_quarterly_financial).recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts or {}
+    assert facts["data_age_business_days"] == 0
+    assert facts["financial_freshness_verdict"] == "STALE"
+    assert _B3_STALE_COUNTER_FACTOR in rec.counter_factors
+
+
+def test_b3_b1_stale_does_not_change_valuation_confidence_or_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """警告のみである(hard exclusionも減点もしない)ことを判定結果で固定する。
+
+    財務鮮度をdata_quality_warning/adjustment_codesへ合流させると、
+    margin_of_safety・買付価格信頼性・データ品質スコアの3経路へ波及して
+    実質的な減点になる。適正価格の信頼度(determine_valuation_confidence)は
+    算出手法の信頼性という別concept であり、そこへも混ぜない。
+    """
+    results = {
+        verdict: _b3_analyze(monkeypatch, now, builder)
+        for verdict, now, builder in (
+            ("FRESH", _B3_FRESH_NOW, _b3_quarterly_financial),
+            ("STALE", _B3_STALE_NOW, _b3_quarterly_financial),
+            ("UNKNOWN", _B3_STALE_NOW, _b3_unresolvable_financial),
+        )
+    }
+    fresh = results["FRESH"].recommendation
+    assert fresh is not None
+    for verdict, outcome in results.items():
+        rec = outcome.recommendation
+        assert rec is not None, verdict
+        assert rec.confidence == fresh.confidence, verdict
+        assert rec.buy_price_reliability == fresh.buy_price_reliability, verdict
+        assert rec.required_margin_of_safety_entry == fresh.required_margin_of_safety_entry, verdict
+        assert outcome.buy_action == results["FRESH"].buy_action, verdict
+        assert outcome.screening_passed is True, verdict
+
+
+def test_b3_b1_penalty_is_recorded_as_not_applicable_not_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUYには減点を適用する共通confidence scoreが存在しないことを監査へ明示する。
+
+    boolean falseで残すと、将来「減点しなかった(=経路はある)」と誤読されうる。
+    """
+    rec = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_quarterly_financial).recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts or {}
+    assert facts["financial_stale_confidence_penalty_applied"] == "N/A_NO_BUY_CONFIDENCE_SCORE"
+
+
+def test_b3_b1_audit_records_the_lag_actually_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """判定に実際に使った猶予日数・期間末をそのまま保存する(事後に再検証できる)。"""
+    rec = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_quarterly_financial).recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts or {}
+    assert (
+        facts["financial_reporting_lag_calendar_days"]
+        == _CONFIG.screening.data_quality.financial_reporting_lag_calendar_days
+    )
+    assert facts["latest_financial_period_end"] == "2026-03-31"
+    assert facts["expected_next_financial_period_end"] == "2026-06-30"
+    assert facts["financial_freshness_basis"] == "QUARTERLY_HISTORY"

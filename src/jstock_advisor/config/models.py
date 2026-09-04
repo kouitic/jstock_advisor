@@ -63,6 +63,11 @@ class IndustrySpecificRules(StrictModel):
 
 class DataQualityRules(StrictModel):
     max_data_age_business_days: int
+    # Issue #52 Phase B3: 決算期末から報告期限までの猶予「暦日」数。
+    # max_data_age_business_daysが「いつ取得したか」の鮮度であるのに対し、
+    # こちらは「財務データの対象期間が報告サイクル上最新か」を判定する。
+    # 負値は意味を持たないため設定段階で弾く(判定時のUNKNOWNへ流さない)。
+    financial_reporting_lag_calendar_days: int = Field(ge=0)
 
 
 class ScreeningRulesConfig(StrictModel):
