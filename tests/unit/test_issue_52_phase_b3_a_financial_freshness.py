@@ -53,10 +53,12 @@ _QUARTERLY_HISTORY = (_Q_2023_09, _Q_2023_12, _Q_2024_03)
 _EXPECTED_NEXT_QUARTER = _Q_2024_06
 _QUARTER_DEADLINE = dt.date(2024, 8, 29)
 
-# 年次サイクル。2024-03-31 の次は 2025-03-31、期限は +60日 = 2025-05-30。
-_ANNUAL_PERIOD_END = _Q_2024_03
-_EXPECTED_NEXT_ANNUAL = dt.date(2025, 3, 31)
-_ANNUAL_DEADLINE = dt.date(2025, 5, 30)
+# 決算期末月 anchor による四半期解決。実績履歴が無くても
+# 3月決算なら 2024-03-31 の次は **2024-06-30**(1年後ではない)。
+# 期限は +60日 = 2024-08-29。
+_ANCHOR_PERIOD_END = _Q_2024_03
+_EXPECTED_NEXT_ANCHORED = _Q_2024_06
+_ANCHOR_DEADLINE = dt.date(2024, 8, 29)
 
 
 def _evaluate(
@@ -110,26 +112,131 @@ def test_quarterly_cycle_after_deadline_is_stale() -> None:
 # --- 3-4. 年次サイクル --------------------------------------------------------
 
 
-def test_annual_cycle_before_deadline_is_fresh() -> None:
+def test_fiscal_year_anchored_expects_next_quarter_not_next_year() -> None:
+    """annual fallback でも次の期末は**3か月後**であること。
+
+    以前は +12か月(ANNUAL_CYCLE)としていた。しかし ANNUAL_FALLBACK は
+    「その会社が年次でしか開示しない」ではなく「provider が四半期を取れない」
+    という取得上の制約にすぎない。上場会社には四半期更新を期待する。
+
+    +12か月のままだと、四半期ごとに更新されるはずのデータが1年近く古くても
+    FRESH と判定されてしまう。
+    """
     result = _evaluate(
-        latest=_ANNUAL_PERIOD_END,
+        latest=_ANCHOR_PERIOD_END,
         source=RecentPeriodsSource.ANNUAL_FALLBACK,
         fy_end_month=_FY_END_MONTH_MARCH,
-        evaluation_date=_ANNUAL_DEADLINE - dt.timedelta(days=1),
+        evaluation_date=_ANCHOR_DEADLINE - dt.timedelta(days=1),
     )
     assert result.verdict is FinancialFreshnessVerdict.FRESH
-    assert result.expected_next_period_end == _EXPECTED_NEXT_ANNUAL
-    assert result.basis is ExpectedPeriodBasis.ANNUAL_CYCLE
+    assert result.expected_next_period_end == _EXPECTED_NEXT_ANCHORED
+    assert result.expected_next_period_end != dt.date(2025, 3, 31)  # 旧契約の値
+    assert result.basis is ExpectedPeriodBasis.FISCAL_YEAR_ANCHORED_QUARTERLY
 
 
-def test_annual_cycle_after_deadline_is_stale() -> None:
+def test_fiscal_year_anchored_after_deadline_is_stale() -> None:
     result = _evaluate(
-        latest=_ANNUAL_PERIOD_END,
+        latest=_ANCHOR_PERIOD_END,
         source=RecentPeriodsSource.ANNUAL_FALLBACK,
         fy_end_month=_FY_END_MONTH_MARCH,
-        evaluation_date=_ANNUAL_DEADLINE + dt.timedelta(days=1),
+        evaluation_date=_ANCHOR_DEADLINE + dt.timedelta(days=1),
     )
     assert result.verdict is FinancialFreshnessVerdict.STALE
+
+
+@pytest.mark.parametrize(
+    ("latest", "fy_end_month", "expected_next"),
+    [
+        # 3月決算。期末は 3 / 6 / 9 / 12 月末
+        (dt.date(2026, 3, 31), 3, dt.date(2026, 6, 30)),
+        (dt.date(2026, 6, 30), 3, dt.date(2026, 9, 30)),
+        (dt.date(2026, 9, 30), 3, dt.date(2026, 12, 31)),
+        (dt.date(2026, 12, 31), 3, dt.date(2027, 3, 31)),
+        # 12月決算。期末は 12 / 3 / 6 / 9 月末
+        (dt.date(2025, 12, 31), 12, dt.date(2026, 3, 31)),
+        (dt.date(2026, 3, 31), 12, dt.date(2026, 6, 30)),
+    ],
+)
+def test_fiscal_year_anchor_resolves_quarter_calendar(
+    latest: dt.date, fy_end_month: int, expected_next: dt.date
+) -> None:
+    """決算期末月は四半期の暦を揃える anchor であり、周期そのものではない。"""
+    resolved = resolve_expected_next_period_end(
+        latest_financial_period_end=latest,
+        quarter_ends=(),
+        recent_periods_source=RecentPeriodsSource.ANNUAL_FALLBACK,
+        fiscal_year_end_month=fy_end_month,
+        evaluation_date=dt.date(2027, 12, 31),
+    )
+    assert resolved.period_end == expected_next
+    assert resolved.basis is ExpectedPeriodBasis.FISCAL_YEAR_ANCHORED_QUARTERLY
+
+
+def test_annual_fallback_alone_does_not_force_unknown() -> None:
+    """ANNUAL_FALLBACK であること自体を理由に推定を諦めない。"""
+    resolved = resolve_expected_next_period_end(
+        latest_financial_period_end=_ANCHOR_PERIOD_END,
+        quarter_ends=(),
+        recent_periods_source=RecentPeriodsSource.ANNUAL_FALLBACK,
+        fiscal_year_end_month=_FY_END_MONTH_MARCH,
+        evaluation_date=dt.date(2024, 4, 1),
+    )
+    assert resolved.period_end is not None
+
+
+def test_period_month_not_on_quarter_calendar_is_unknown() -> None:
+    """決算期末月から3の倍数だけ離れていない期末は暦に乗っていない。
+
+    変則決算・決算期変更・provider 異常のいずれかであり、推定の根拠にしない。
+    """
+    result = _evaluate(
+        latest=dt.date(2026, 5, 31),  # 3月決算の暦(3/6/9/12)に乗らない
+        source=RecentPeriodsSource.ANNUAL_FALLBACK,
+        fy_end_month=_FY_END_MONTH_MARCH,
+        evaluation_date=dt.date(2027, 12, 31),
+    )
+    assert result.verdict is FinancialFreshnessVerdict.UNKNOWN
+    assert result.basis is ExpectedPeriodBasis.UNRESOLVED
+
+
+def test_human_decided_fifty_day_lag_boundary() -> None:
+    """猶予50日の境界。期限当日は STALE、前日は FRESH。
+
+    50 は人間が確定した値だが、domain へは埋め込まず引数で受け取る。
+    期待値は実装の計算とは独立に、リテラルで固定する。
+    """
+    # latest 2026-03-31 -> expected 2026-06-30 -> deadline 2026-06-30 + 50日
+    deadline = dt.date(2026, 8, 19)
+    fresh = _evaluate(
+        latest=dt.date(2026, 3, 31),
+        source=RecentPeriodsSource.ANNUAL_FALLBACK,
+        fy_end_month=_FY_END_MONTH_MARCH,
+        evaluation_date=dt.date(2026, 8, 18),
+        lag_days=50,
+    )
+    stale = _evaluate(
+        latest=dt.date(2026, 3, 31),
+        source=RecentPeriodsSource.ANNUAL_FALLBACK,
+        fy_end_month=_FY_END_MONTH_MARCH,
+        evaluation_date=deadline,
+        lag_days=50,
+    )
+    assert fresh.verdict is FinancialFreshnessVerdict.FRESH
+    assert fresh.expected_report_deadline == deadline
+    assert stale.verdict is FinancialFreshnessVerdict.STALE
+
+
+def test_reporting_lag_is_not_hardcoded_in_domain() -> None:
+    """確定値 50 を domain へ埋め込んでいないこと(供給は B3-B1 の責務)。"""
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "jstock_advisor"
+        / "domain"
+        / "financial_freshness.py"
+    ).read_text(encoding="utf-8")
+    assert "= 50" not in source
+    assert "reporting_lag_days: int = " not in source
 
 
 # --- 5-11. UNKNOWN へ倒すべき条件 ---------------------------------------------
@@ -161,10 +268,12 @@ def test_inconsistent_quarter_interval_is_unknown() -> None:
 
 
 def test_annual_fallback_is_not_treated_as_quarterly() -> None:
-    """年次フォールバック由来の期末を四半期として扱わない。
+    """年次フォールバック由来の期末を「四半期の実績履歴」として扱わない。
 
-    扱ってしまうと実在しない期末日を作り、STALE を誤検出する。
-    決算期末月も無いためここでは推定できず UNKNOWN になる。
+    履歴として使うと周期検証が成立してしまい、実在しない期末日を作る。
+    このケースは決算期末月も無いため anchor でも解決できず UNKNOWN になる
+    (ANNUAL_FALLBACK だから UNKNOWN なのではない点は
+    test_annual_fallback_alone_does_not_force_unknown で固定している)。
     """
     result = _evaluate(
         latest=_Q_2024_03,
@@ -178,7 +287,7 @@ def test_annual_fallback_is_not_treated_as_quarterly() -> None:
 def test_missing_fiscal_year_end_month_is_unknown() -> None:
     """年次推定が必要な場面で決算期末月が無ければ推定しない。"""
     result = _evaluate(
-        latest=_ANNUAL_PERIOD_END,
+        latest=_ANCHOR_PERIOD_END,
         source=RecentPeriodsSource.ANNUAL_FALLBACK,
         fy_end_month=None,
         evaluation_date=dt.date(2025, 12, 31),
@@ -187,11 +296,16 @@ def test_missing_fiscal_year_end_month_is_unknown() -> None:
 
 
 def test_fiscal_year_end_month_contradiction_is_unknown() -> None:
-    """決算期末月と直近期末の月が矛盾する(決算期変更の可能性)。"""
+    """決算期末月の暦に直近期末が乗らない(決算期変更の可能性)。
+
+    3月期末は 12月決算の暦(12/3/6/9)に乗るため、この組み合わせでは
+    anchor で解決できてしまう。ここでは暦に乗らない月を使って
+    矛盾を表現する。
+    """
     result = _evaluate(
-        latest=_ANNUAL_PERIOD_END,  # 3月期末
+        latest=dt.date(2024, 4, 30),  # 4月期末
         source=RecentPeriodsSource.ANNUAL_FALLBACK,
-        fy_end_month=12,  # 12月決算だと主張している
+        fy_end_month=12,  # 12月決算の暦(12/3/6/9)に 4月は乗らない
         evaluation_date=dt.date(2025, 12, 31),
     )
     assert result.verdict is FinancialFreshnessVerdict.UNKNOWN
@@ -225,7 +339,7 @@ def test_irregular_fiscal_year_is_unknown() -> None:
     期末月が決算期末月と一致しないため、矛盾として UNKNOWN になる。
     """
     result = _evaluate(
-        latest=dt.date(2024, 9, 30),  # 12月決算の会社が9月末で区切った移行期
+        latest=dt.date(2024, 10, 31),  # 12月決算の暦(12/3/6/9)に 10月は乗らない
         source=RecentPeriodsSource.ANNUAL_FALLBACK,
         fy_end_month=12,
         evaluation_date=dt.date(2025, 12, 31),
@@ -295,12 +409,12 @@ def test_history_alignment_is_checked_after_sanitization() -> None:
     assert result.basis is ExpectedPeriodBasis.QUARTERLY_HISTORY
 
 
-def test_history_mismatch_still_allows_independent_annual_inference() -> None:
-    """四半期推定が成立しなくても、年次推定が独立に成立するなら使う。
+def test_history_mismatch_still_allows_fiscal_year_anchored_inference() -> None:
+    """履歴で解決できなくても、決算期末月の暦で解決できるなら使う。
 
-    履歴が古くて四半期推定は使えないが、決算期末月と最新期末の月が一致して
-    いるため年次サイクルとしては解決できる。ここで一律 UNKNOWN にすると
-    使える根拠を捨てることになる。
+    履歴が古くて周期検証は使えないが、決算期末月を anchor にすれば
+    暦は決まる。ここで一律 UNKNOWN にすると使える根拠を捨てることになる。
+    次の期末は**3か月後**であり1年後ではない。
     """
     result = _evaluate(
         latest=dt.date(2024, 3, 31),
@@ -309,8 +423,8 @@ def test_history_mismatch_still_allows_independent_annual_inference() -> None:
         fy_end_month=_FY_END_MONTH_MARCH,
         evaluation_date=dt.date(2024, 4, 1),
     )
-    assert result.expected_next_period_end == dt.date(2025, 3, 31)
-    assert result.basis is ExpectedPeriodBasis.ANNUAL_CYCLE
+    assert result.expected_next_period_end == dt.date(2024, 6, 30)
+    assert result.basis is ExpectedPeriodBasis.FISCAL_YEAR_ANCHORED_QUARTERLY
 
 
 # --- 12-14. 暦計算の境界 ------------------------------------------------------
@@ -360,8 +474,11 @@ def test_month_end_arithmetic_across_boundaries(
     assert resolved.basis is ExpectedPeriodBasis.QUARTERLY_HISTORY
 
 
-def test_leap_day_annual_cycle() -> None:
-    """2月決算のうるう年。2024-02-29 の1年後は 2025-02-28(月末を維持)。"""
+def test_leap_day_month_end_preserved_in_anchored_fallback() -> None:
+    """うるう年2月末を anchor 経路でも月末のまま3か月進める。
+
+    2024-02-29 -> 2024-05-31。日数加算だと 5/29 になり月末が崩れる。
+    """
     resolved = resolve_expected_next_period_end(
         latest_financial_period_end=dt.date(2024, 2, 29),
         quarter_ends=(),
@@ -369,7 +486,8 @@ def test_leap_day_annual_cycle() -> None:
         fiscal_year_end_month=2,
         evaluation_date=dt.date(2024, 12, 31),
     )
-    assert resolved.period_end == dt.date(2025, 2, 28)
+    assert resolved.period_end == dt.date(2024, 5, 31)
+    assert resolved.basis is ExpectedPeriodBasis.FISCAL_YEAR_ANCHORED_QUARTERLY
 
 
 # --- 15. 期限当日の境界 -------------------------------------------------------

@@ -28,14 +28,37 @@
 したがって**公開時刻の存在を前提にしない**。代わりに、既に取得できている
 期末日と決算期末月から報告サイクルを推定する。
 
-## 推定できないときは UNKNOWN にする
+## 上場会社に期待する更新周期は四半期である
+
+```
+EXPECTED_FINANCIAL_UPDATE_CYCLE = QUARTERLY
+```
+
+日本の上場会社は四半期ごとに財務を開示する。したがって
+**次に来るはずの期末は原則3か月後**である。
 
 provider の実態として、四半期データは超大型株を除きほとんど取得できず、
-年次フォールバックになる銘柄が多数を占める。**UNKNOWN が多く出ること自体は
-正常であり、失敗ではない。** coverage を増やすために推定を緩めない。
+`RecentPeriodsSource.ANNUAL_FALLBACK` になる銘柄が多数を占める。しかしこれは
+
+```
+ANNUAL_FALLBACK_SEMANTICS = PROVIDER_DATA_LIMITATION_ONLY
+```
+
+であり、**その会社が年次でしか開示しないという意味ではない**。
+年次フォールバックを理由に「次の期末は12か月後」としてはならない。
+そうすると、四半期ごとに更新されるはずのデータが1年近く古いまま
+FRESH と判定されてしまう。
+
+`fiscal_year_end_month` は**年次周期を意味しない**。四半期の暦をどこに
+揃えるかを決める **anchor** として使う。
+
+## 推定できないときは UNKNOWN にする
 
 推定の根拠が足りないまま STALE へ倒すと、正常な銘柄へ警告と減点が付く。
 架空の期末日を作ることは禁止する。
+
+ただし **`ANNUAL_FALLBACK` であること自体を理由に UNKNOWN へ落とさない。**
+決算期末月から四半期の暦を安全に解決できるなら、3か月後を使う。
 
 ## 責務の境界(Issue #59 と重複実装しない)
 
@@ -79,8 +102,6 @@ from jstock_advisor.domain.entities.enums import RecentPeriodsSource
 
 # 四半期サイクルの月数。四半期の期末は3か月ごとに来るという前提の唯一の置き場所。
 _QUARTER_CYCLE_MONTHS: Final = 3
-# 年次サイクルの月数。
-_ANNUAL_CYCLE_MONTHS: Final = 12
 # 四半期周期を「確認できた」とみなすために必要な実績期末の最小件数。
 # 1点では間隔を検証できず、機械的な3か月加算になってしまうため2点を要求する。
 _MIN_QUARTER_ENDS_FOR_CYCLE: Final = 2
@@ -107,10 +128,18 @@ class ExpectedPeriodBasis(StrEnum):
     監査で「なぜその判定になったか」を追えるようにするために持つ。
     UNKNOWN の理由が「四半期履歴が足りない」のか「決算期末月が無い」のかを
     区別できないと、provider 側の改善余地を見誤る。
+
+    QUARTERLY_HISTORY               実績の期末が四半期周期として整合していた
+    FISCAL_YEAR_ANCHORED_QUARTERLY  実績履歴では解決できず、決算期末月を
+                                    anchor として四半期の暦を解決した
+    UNRESOLVED                      根拠が足りず解決しなかった
+
+    **どちらの解決経路でも、次の期末は3か月後である。**
+    決算期末月を使うのは暦を揃えるためであって、年次周期を意味しない。
     """
 
     QUARTERLY_HISTORY = "QUARTERLY_HISTORY"
-    ANNUAL_CYCLE = "ANNUAL_CYCLE"
+    FISCAL_YEAR_ANCHORED_QUARTERLY = "FISCAL_YEAR_ANCHORED_QUARTERLY"
     UNRESOLVED = "UNRESOLVED"
 
 
@@ -214,21 +243,28 @@ def resolve_expected_next_period_end(
 ) -> ExpectedNextPeriod:
     """次に来るはずの期末日を求める。根拠が足りなければ解決しない。
 
-    解決順序(Issue #52 Phase B3 design closure で確定):
+    解決順序:
 
     ```
     1  実績が四半期由来で、期末が2点以上あり、周期が整合しており、
        かつ**履歴の末尾が latest_financial_period_end と一致している**
-         -> 直近の期末に1四半期を加える
-    2  1が成立せず、決算期末月があり、直近期末の月と一致している
-         -> 直近の期末に1年を加える
+         -> 直近の期末に1四半期を加える(basis = QUARTERLY_HISTORY)
+    2  1が成立せず、決算期末月を anchor として直近期末が四半期の暦に乗る
+         -> 直近の期末に**1四半期**を加える
+            (basis = FISCAL_YEAR_ANCHORED_QUARTERLY)
     3  いずれも成立しない
          -> UNRESOLVED(推定しない)
     ```
 
+    **2 でも加えるのは3か月である。1年ではない。**
+    決算期末月は暦を揃える anchor であり、更新周期そのものではない。
+
     `recent_periods_source` を見るのは、`quarter_ends` に値があっても
-    それが年次フォールバック由来のことがあるため。年次の期末を四半期として
-    扱うと、実在しない期末日を作って STALE を誤検出する。
+    それが年次フォールバック由来のことがあるため。年次の期末を「四半期の実績
+    履歴」として周期検証に使うと、実在しない期末日を作って STALE を誤検出する。
+
+    ただし **`ANNUAL_FALLBACK` であることを理由に推定を諦めない。** 履歴による
+    周期検証ができないだけで、決算期末月から暦を解決できるなら 2 を使う。
 
     1 の末尾一致が必要な理由(review 指摘)。四半期履歴が
     `latest_financial_period_end` より古いことがある。その場合に履歴の末尾から
@@ -279,14 +315,22 @@ def resolve_expected_next_period_end(
                 basis=ExpectedPeriodBasis.QUARTERLY_HISTORY,
             )
 
+    # 実績履歴では解決できない場合でも、決算期末月を anchor にすれば
+    # 四半期の暦を決められる。3月決算なら 3 / 6 / 9 / 12 月末が期末になる。
+    #
+    # 直近期末の月が anchor から3の倍数だけ離れていれば、その暦に乗っている。
+    # 乗っていない場合は変則決算・決算期変更・provider 異常の可能性があり、
+    # 推定の根拠にしない。
     if (
         fiscal_year_end_month is not None
         and 1 <= fiscal_year_end_month <= 12
-        and latest_financial_period_end.month == fiscal_year_end_month
+        and (latest_financial_period_end.month - fiscal_year_end_month)
+        % _QUARTER_CYCLE_MONTHS
+        == 0
     ):
         return ExpectedNextPeriod(
-            period_end=_add_months(latest_financial_period_end, _ANNUAL_CYCLE_MONTHS),
-            basis=ExpectedPeriodBasis.ANNUAL_CYCLE,
+            period_end=_add_months(latest_financial_period_end, _QUARTER_CYCLE_MONTHS),
+            basis=ExpectedPeriodBasis.FISCAL_YEAR_ANCHORED_QUARTERLY,
         )
 
     return ExpectedNextPeriod(period_end=None, basis=ExpectedPeriodBasis.UNRESOLVED)
