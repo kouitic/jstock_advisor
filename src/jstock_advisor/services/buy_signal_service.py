@@ -359,6 +359,10 @@ class BuySignalService:
             # 区別する。canonical_sourceだけでは両者が同じ値へ潰れるため、
             # **JPX解決率の算出にはこちらを使う**(Phase B-2の判断材料)。
             "jpx_lookup_status": canonical.jpx_lookup_status.value,
+            # providerが返した生の業種情報。**canonical値ではない**。
+            # Issue #54 Phase B-2-0(2026-09-04): 以前はJPX解決時に保持されず、
+            # 解決率100%のProductionでは常にnullになっていた。canonical(JPX)と
+            # 既存分類器の入力を同一observationから突き合わせられるようにする。
             "provider_sector": canonical.fallback_sector,
             "provider_industry": canonical.fallback_industry,
             # 既存分類器が同一入力に対して実際に返した値(是正はしない)。
