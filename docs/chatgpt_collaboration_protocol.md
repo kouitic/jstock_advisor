@@ -151,6 +151,117 @@ Issue close と release-blocker 解除は別判断      片方の承認は他方
 
 ---
 
+## 2.5 提案・承認・実行・検証を混同しない
+
+### 目的
+
+この4つは日常会話ではひとまとめに「終わった」と表現されがちだが、
+**取り違えると、承認されていない操作を実行済みとみなす**という
+最も危険な誤りにつながる。
+
+```
+STATE_SEPARATION                             = YES
+PROPOSED_APPROVED_EXECUTED_VERIFIED_DISTINCT = YES
+```
+
+### ルール
+
+```
+PROPOSED   ChatGPT または作業 AI が提案・推奨しただけ
+           人間の承認ではない
+
+APPROVED   ユーザーが対象と操作を明示的に承認した状態
+           まだ実行済みとは限らない
+
+EXECUTED   承認された操作が実際に実行された状態
+           成功が確認済みとは限らない
+
+VERIFIED   実行結果を read-only の evidence 等で確認し、
+           期待した状態になったことを検証した状態
+```
+
+前の状態が成立していても、次の状態を自動的には満たさない。
+
+### 例
+
+```
+MERGE_READY = YES
+  -> PROPOSED。merge を実行してよいという意味ではない
+
+ユーザーが GitHub 上で merge した
+  -> APPROVED + EXECUTED
+     main CI を確認する前なので VERIFIED ではない
+
+merge commit / origin/main / main CI SUCCESS を確認した
+  -> VERIFIED
+```
+
+release-blocker についても同じ4段である。
+
+```
+release-blocker を解除できる状態だと判断した   PROPOSED
+ユーザーが解除を承認した                       APPROVED
+label を実際に削除した                         EXECUTED
+削除後の GitHub state を確認した               VERIFIED
+```
+
+### 例外
+
+なし。本節は 2節の Human Gate を弱めない。
+`PROPOSED` がどれだけ強い推奨であっても `APPROVED` の代わりにはならない。
+
+---
+
+## 2.6 merge の実行者
+
+### 目的
+
+merge は Human Gate であり、実行主体を曖昧にしない。
+
+```
+MERGE_EXECUTOR = USER
+```
+
+### ルール
+
+通常フローは次のとおり。
+
+```
+1  作業 AI が PR を作成する
+2  ChatGPT が PR をレビューする
+3  ChatGPT が MERGE_READY 判定を提示する
+4  ユーザーが GitHub 上で直接 merge する
+5  ChatGPT が必要に応じて read-only の post-merge 確認を行う
+6  main CI を確認する
+7  Production は別の Human Gate
+```
+
+通常は作業 AI へ「merge してください」という作業指示を出さない。
+
+ユーザーが ChatGPT へ事前に「merge を承認します」と宣言することは
+**必須ではない**。ChatGPT が `MERGE_READY` を提示したうえで
+ユーザー自身が GitHub で merge を実行した場合、
+
+```
+USER_MERGE_ACTION = HUMAN_APPROVAL + EXECUTION
+```
+
+として扱ってよい。承認と実行が同一の操作で成立している。
+
+### 例外
+
+ユーザーが明示的に「今回は作業 AI に merge させる」と決めた場合は、
+8節の `LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY` に従う。
+
+ChatGPT が `MERGE_READY` を出していない PR をユーザーが merge した場合でも、
+それは人間による実行であるから、**勝手に revert / rollback しない**。
+必要なら post-merge review で状態と影響を確認する。
+
+**PR を merge したことを Production の承認として扱ってはならない。**
+Production deploy は本節とは別の Human Gate である(2節)。
+
+---
+
 ## 3. ChatGPT のレビュー判定
 
 ### 目的
@@ -193,6 +304,191 @@ PASS_WITH_CONDITIONS   ≠  Human Gate 通過
 ### 例外
 
 なし。判定語を独自に増やさない。
+
+---
+
+## 3.5 判断は証拠を先に置く(EVIDENCE FIRST)
+
+### 目的
+
+作業 AI の報告は**事実の主張であって事実そのものではない**。
+重要な判断を自己申告だけで確定させると、報告と実体がずれたときに
+誰も気づかないまま次工程へ進む。
+
+```
+EVIDENCE_FIRST = YES
+```
+
+### ルール
+
+重要 Gate では、ChatGPT が read-only で確認できる情報を、
+可能な範囲で GitHub / CI / Production の実体と突合する。
+
+```
+突合の対象例
+  PR HEAD / PR の merge state / main SHA / CI 結果
+  Issue state / label / release-blocker
+  Production artifact / Production stack state / Production verification
+```
+
+報告と実体が矛盾した場合の手順。
+
+```
+1  差異を明示する
+2  実体を優先して再確認する
+3  根拠なく AI の報告を正しいものとして扱わない
+4  それでも確定できなければ INSUFFICIENT_EVIDENCE とする
+```
+
+### 適用範囲
+
+```
+主対象   Human Gate / merge readiness / release readiness /
+         Production verification / release-blocker removal /
+         Issue close eligibility
+
+対象外   軽微な作業報告を毎回過剰に検証すること
+```
+
+すべての報告を毎回検証し直すルールではない。
+**誤ると取り返しがつかない判断**に絞って適用する。
+
+### 例外
+
+なし。ただし上記の適用範囲を超えて検証コストを広げない。
+
+---
+
+## 3.6 証拠の鮮度と検証可能性
+
+### 目的
+
+Issue 本文・過去のコメント・最新のコメント・現在の実体が食い違うとき、
+どれを採用するかを決めておく。
+
+```
+FRESHER_VERIFIABLE_EVIDENCE_WINS = YES
+```
+
+### ルール
+
+原則として次の順で採用する。
+
+```
+1  CURRENT_VERIFIABLE_STATE        現在の GitHub state / label / PR / code / CI
+2  LATEST_DURABLE_VERIFIED_EVIDENCE 検証済みの最新 durable comment
+3  OLDER_DURABLE_EVIDENCE           過去の durable comment
+4  STALE_DESCRIPTIVE_TEXT           古い記述(Issue 本文の状況説明など)
+```
+
+**単純に「タイムスタンプが新しいものが常に勝つ」ではない。**
+`freshness` と `verifiability` の**両方**で判断する。
+
+次の場合、最新であっても無条件には優先しない。
+
+```
+単なる推測である
+verification されていない自己申告である
+現在の実体と矛盾している
+```
+
+### 例
+
+```
+古い Issue 本文が「Production は未対応」と書いていて、
+現在の stack / artifact が対応済みであることを確認できる
+  -> 現在の実体を採用する
+
+最新の durable comment が過去の Issue 本文を訂正している
+  -> 訂正後を採用する
+
+最新コメントが「たぶん直っているはず」と書いている
+  -> 検証されていないため採用しない。実体を確認するか
+     INSUFFICIENT_EVIDENCE とする
+```
+
+### 例外
+
+古い記述が stale であっても、**履歴として削除・改ざんしない**。
+現在状態を明確にしたい場合は、最新の durable comment を追加するか、
+本文を現在状態へ同期する。過去の記録を消して辻褄を合わせない。
+
+---
+
+## 3.7 merge 判断を支援する提示形式
+
+### 目的
+
+merge を実行するのはユーザーである(2.6節)。
+したがって PR レビュー結果は、**ユーザーが GitHub 上で
+merge するかどうかをその場で判断できる**形で提示する必要がある。
+
+特に重要なのは、**残課題があること**と
+**その残課題が今回の merge を止めるべきか**は別だという点である。
+これが区別されていないと、止める必要のない PR が滞留する。
+
+### ルール
+
+ChatGPT が PR レビュー結果を提示する場合、
+**PR 番号を必ず明示したうえで**、最低限次をセットで示す。
+
+```
+PR_NUMBER                    どの PR の話かを必ず明示する
+
+REVIEW_VERDICT               PASS / PASS_WITH_CONDITIONS /
+                             REJECT / INSUFFICIENT_EVIDENCE(3節)
+
+MERGE_READY                  YES / NO
+
+REMAINING_ISSUES_OR_CONCERNS NONE または具体的内容
+
+MERGE_BLOCKING_CONCERN       YES / NO
+                             残課題が今回の merge を止めるかどうか
+
+OTHER_ISSUE_IMPACT           NONE または Issue 番号と影響
+
+PRODUCTION_IMPACT            NONE / NOT_DEPLOYED / HAS_IMPACT 等
+
+RECOMMENDED_ACTION           MERGE / FIX_BEFORE_MERGE / HOLD /
+                             MERGE_AND_TRACK_SEPARATELY 等
+```
+
+```
+残課題があっても今回の merge を妨げない   -> MERGE_BLOCKING_CONCERN = NO
+merge 前に修正が必要                      -> MERGE_BLOCKING_CONCERN = YES
+```
+
+### 例
+
+```
+PR #<番号>
+
+  REVIEW_VERDICT = PASS
+  MERGE_READY    = YES
+
+  REMAINING_ISSUES_OR_CONCERNS =
+    命名と意味に若干のズレがある
+
+  MERGE_BLOCKING_CONCERN = NO
+
+  OTHER_ISSUE_IMPACT =
+    NONE。関連 Issue の後続 Phase は未着手のまま
+
+  PRODUCTION_IMPACT = NOT_DEPLOYED
+
+  RECOMMENDED_ACTION = MERGE
+```
+
+ユーザーはこれを見て GitHub 上で merge を判断できる。
+
+### 例外
+
+**この形式を Markdown の表へ固定しない。**
+ChatGPT の通常の回答として読みやすく提示できればよく、
+項目が揃っていることが要件である。
+
+なお、この提示自体は `PROPOSED` にとどまる(2.5節)。
+`MERGE_READY = YES` は承認でも実行でもない。
 
 ---
 
@@ -381,6 +677,24 @@ python / text 等のコードブロックを開いてしまう
 
 同一 worker の直前指示が `PENDING` なら、通常の次指示を発行しない。
 **別 worker の `PENDING` は妨げにならない。**
+
+### 検証手順を指示するとき
+
+指示に検証を含める場合、ローカル検証は狭く速く保つ。
+
+```
+targeted tests / related regression / ruff / mypy   を基本とする
+local full pytest は原則として指示しない
+全体回帰の正本は PR CI とする
+```
+
+`suite 全体でしか観測できない事象`(test order dependency /
+global state pollution 等)を調べることが目的の場合のみ例外とし、
+その理由を明示させる。
+
+**詳細と例外条件の正本は
+[development_workflow.md](development_workflow.md) 4節である。**
+本文書へ手順を複製しない。
 
 ### 例外
 
@@ -611,10 +925,12 @@ DISCLOSURE = PUBLIC_SANITIZED
 ## 12. この文書が扱わないこと
 
 ```
-実装の進め方 / lane / WIP 制限 / テスト方針  -> development_workflow.md
-Issue の分類と label                          -> issue_label_policy.md
-Production の具体的な運用手順                 -> operations_manual.md
-利用者から見た機能仕様                        -> functional_spec.md
+実装の進め方 / lane / WIP 制限                        -> development_workflow.md
+ローカルテスト方針 / local full pytest の可否と例外    -> development_workflow.md 4節
+指示プロトコルの仕様                                   -> development_workflow.md 2.5節
+Issue の分類と label                                   -> issue_label_policy.md
+Production の具体的な運用手順                          -> operations_manual.md
+利用者から見た機能仕様                                 -> functional_spec.md
 ```
 
 本文書を厚くしすぎない。
@@ -628,3 +944,4 @@ Production の具体的な運用手順                 -> operations_manual.md
 | 日付 | 変更内容 |
 |---|---|
 | 2026-09-04 | 新規作成(Issue #122)。ユーザー ↔ ChatGPT 間の協働ルールを、チャット履歴・AI の記憶に依存させず GitHub 上の SSoT として管理するための文書。役割分担(承認はユーザー / 推奨は ChatGPT)、Human Gate の一覧と「承認はその操作・その対象に限る」原則、レビュー判定4種と `INSUFFICIENT_EVIDENCE ≠ REJECT` / `PASS_WITH_CONDITIONS ≠ Human Gate 通過` の区別、指示プロトコル(`INSTRUCTION_ID` / 作業者ごとの直列化 / 緊急差し替え)を指示側から見た運用として整理、4.5節「ChatGPT から作業 AI への指示文の出力形式」(指示はユーザーが手作業で転送するため、内容が正しくても届いた時点で壊れるという失敗が起きる。これを出力形式の側で防ぐ。**作業 AI への指示は単一の外側コードブロックへ収める** / **内部は plain text とする** / **nested code fence は禁止** / **一括コピー可能性を確保する**。指示の一部を外側ブロックの前後へ分散させず、例示は字下げや区切り線で表現し、見出し・表・引用に依存しなくても意味が成立する指示文にする。GOOD / BAD-1(分散)/ BAD-2(フェンスのネスト)の例を記載。対象は ChatGPT から TARO / JIRO への作業指示のみで、ユーザーへの通常回答や作業 AI からの報告形式は対象外)、新規指示前の確認手順、回答の correlation と例外的な `MANUAL_CORRELATION`、1指示1回答、ルール変更時の `LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY` と同期義務(優先を認めるのはユーザーが明示的に確定した判断に限り、ChatGPT や作業 AI が独自にルールを追加・変更する根拠にはしない)、セッション開始時の明示的 bootstrap(自動読み込みを前提にしない)、恒久ルールと dynamic state の分離、公開リポジトリでの取り扱いを記載した。**既存 governance の要求はいずれも緩和していない**(merge / Production 操作 / release-blocker 解除の人間承認、`PER_WORKER_SERIALIZATION=YES` / `GLOBAL_SERIALIZATION=NO` の区別を含む)。コード・Production 挙動の変更なし |
+| 2026-09-04 | 協働ルールを追加(Issue #122)。**2.5節「提案・承認・実行・検証を混同しない」** — `PROPOSED` / `APPROVED` / `EXECUTED` / `VERIFIED` を別状態として扱う(`STATE_SEPARATION=YES`)。`MERGE_READY=YES` は提案であって承認でも実行でもなく、実行しただけでは検証済みでもない。release-blocker についても「解除できると判断」「解除を承認」「label を削除」「削除後の state を確認」を別状態とする。2節の Human Gate は緩和しない。**2.6節「merge の実行者」** — `MERGE_EXECUTOR = USER`。通常は作業 AI へ merge を指示せず、ChatGPT の `MERGE_READY` 提示後にユーザー自身が GitHub 上で merge する(`USER_MERGE_ACTION = HUMAN_APPROVAL + EXECUTION`)。事前の承認宣言は必須にしない。ChatGPT が `MERGE_READY` を出していない PR をユーザーが merge した場合も、人間による実行であるため勝手に revert しない。**PR merge を Production の承認として扱わない。** **3.5節「判断は証拠を先に置く」** — `EVIDENCE_FIRST=YES`。重要 Gate では作業 AI の自己申告だけで事実認定せず、GitHub / CI / Production の実体と突合する。矛盾時は差異を明示し実体を優先し、確定できなければ `INSUFFICIENT_EVIDENCE` とする。軽微な報告を毎回過剰検証するルールではない。**3.6節「証拠の鮮度と検証可能性」** — `FRESHER_VERIFIABLE_EVIDENCE_WINS=YES`。現在の検証可能な実体 > 検証済みの最新 durable comment > 過去の durable comment > 古い記述、の順で採用する。ただし単純なタイムスタンプ順ではなく、freshness と verifiability の両方で判断する。未検証の推測は最新であっても優先しない。古い記述が stale でも履歴として削除・改ざんしない。**3.7節「merge 判断を支援する提示形式」** — PR 番号を必ず明示し、`REVIEW_VERDICT` / `MERGE_READY` / `REMAINING_ISSUES_OR_CONCERNS` / `MERGE_BLOCKING_CONCERN` / `OTHER_ISSUE_IMPACT` / `PRODUCTION_IMPACT` / `RECOMMENDED_ACTION` をセットで示す。**残課題があることと、それが merge を止めるべきかは別**であることを `MERGE_BLOCKING_CONCERN` で明示する。形式は Markdown の表へ固定しない。あわせて5節へ、指示に検証を含める際は targeted tests を基本とし local full pytest を原則指示しない旨を記載した(詳細と例外条件の正本は development_workflow.md 4節。本文書へ複製しない)。既存ルール(指示プロトコル / 直列化 / 1指示1回答 / 出力形式 / レビュー判定4種 / Human Gate / dynamic state 分離 / PUBLIC_SANITIZED)はいずれも変更していない。コード・Production 挙動の変更なし |
