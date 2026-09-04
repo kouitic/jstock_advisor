@@ -861,6 +861,10 @@ failure injection
 - 承認は**その操作・その対象に限る**。ある文脈での承認を別の文脈へ拡張しない。
 - 作業指示の**宛先が異なる**場合(他エージェント宛の承認)、その承認をもって
   操作しない。宛先を確認する。
+- **deploy 実作業を誰が行うか**は
+  [chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 1.5節が正本
+  (`PRODUCTION_DEPLOYMENT_EXECUTOR`)。**担当の集約は承認の省略を意味しない。**
+  本節の人間承認は担当者が誰であっても従来どおり必要である。
 
 ### 併せて緩和しないもの
 
