@@ -52,11 +52,38 @@
 - **GitHub Issueを作成・調査・更新・closeする場合は、
   [docs/issue_label_policy.md](docs/issue_label_policy.md) を必ず読み、
   そのルールに従うこと。** labelはIssue Type / Priority / Severity /
-  Release Blockerの4軸を独立して判定し、相互に自動推論しない。
+  Release Blocker / Progress Statusの5軸を独立して判定し、相互に自動推論しない
+  (`waiting:`は判定軸ではない補助metadata)。
   Issue本文・最新コメント・labelsが矛盾する場合は、勝手に推測して実装を進めず、
   どれが最新の確定判断かを確認すること。
   (同文書はAI非依存のリポジトリ運用ポリシーであり、本ファイルはその入口に過ぎない。
   ルールを変更する場合は同文書を更新する。)
+
+- **Priorityは「ユーザーの投資運用に対して、そのIssueをどの順番で直すべきか」で決める。**
+  subsystem名(notification / watchlist / test 等)だけで決めてはならない。
+  root causeからProduction reachability・downstream effect・
+  ユーザーの投資判断への影響までを追ってから判定すること。
+
+  ```
+  P0  動かない・データが壊れる
+  P1  動くが投資判断が狂う
+  P2  投資判断は概ね正しいが補助機能が狂う
+  P3  投資機能は正しく、開発・運用を改善する
+  ```
+
+  **ただし投資影響だけで決めない。** Security / Privacy / Compliance /
+  Data Protection / Cost / Reliability / Capacity 等の非機能影響も独立に評価し、
+  **高い方をIssueのPriorityとする**(`MAX(functional, non-functional)`)。
+  重大なsecurity・privacy事故や、放置すると増え続けるcost runawayはP0になり得る。
+  一方、security issueだから自動P0・cost issueだから自動P0とはしない。
+  到達性(reachability)・影響範囲(blast radius)・切迫度(immediacy)を確認すること。
+
+  判定基準の詳細(各段の判定質問・代表例・`PRODUCTION_REACHABILITY`の分類・
+  複数findingを持つIssueの扱い・再評価トリガー)の正本は
+  [docs/issue_label_policy.md](docs/issue_label_policy.md) 4節であり、
+  **本ファイルへ複製しない**。新しい証拠(Action delta / notification delta /
+  reachability の変化等)が判明したらPriorityを再評価し、変更した場合は
+  根拠をGitHubへ書き戻すこと。
 
 - **メソッド名だけを根拠にread-onlyと判断してはならない。**
   `get` / `list` / `find` / `read` / `check` / `health` 等の名称は副作用の有無を
