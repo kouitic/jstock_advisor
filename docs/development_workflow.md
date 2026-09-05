@@ -1103,6 +1103,11 @@ MAIN_CI             = <state|N/A>
 PRODUCTION_DEPLOYED = <YES|NO|PARTIAL|UNKNOWN|N/A>
 PRODUCTION_VERIFIED = <YES|NO|PARTIAL|UNKNOWN|N/A>
 
+RESIDUAL_WORK_UNITS          = <残作業単位の列挙|NONE>
+UNIQUE_PROGRESS_STATUS_COUNT = <n>
+ISSUE_SPLIT_REQUIRED         = <YES|NO>
+SPLIT_TARGET_ISSUES          = <#nnn, #nnn|NONE>
+
 CURRENT_BLOCKER     = <value|NONE>
 NEXT_ACTION         = <value|NONE>
 NEXT_ACTION_ALLOWED = <YES|NO>
@@ -1110,6 +1115,16 @@ NEXT_ACTION_ALLOWED = <YES|NO>
 
 `N/A` を許容する。Production へ到達していない Issue へ Production 行を
 `UNKNOWN` として並べると、確認していないのか該当しないのかが区別できない。
+
+`RESIDUAL_WORK_UNITS` 以下の 4 行は
+[issue_label_policy.md](issue_label_policy.md) §7.3 の
+`ONE_ISSUE_ONE_PROGRESS_LIFECYCLE` を検証した結果を残すためのものである。
+残作業単位を列挙し、それぞれに相当する Progress Status を割り当て、
+種類数が 2 以上なら `ISSUE_SPLIT_REQUIRED = YES` とする。
+**判定基準は「独立しているか」ではなく status divergence であり**、
+判定ルールそのものの正本は issue_label_policy.md §7.3 で、本節へ複製しない。
+`UNIQUE_PROGRESS_STATUS_COUNT = 1` / `ISSUE_SPLIT_REQUIRED = NO` も明示的に書く
+(確認したうえで不要と判断した記録になる)。
 
 snapshot は **current labels を記録するもの**であり、label の分類基準ではない。
 Type / Priority / Release Blocker / Progress Status の 4軸モデルの正本は
@@ -1327,9 +1342,27 @@ remote branch     より新しい実装 commit が存在する
 8   main CI
 9   Production release state          (関連する場合)
 10  Production verification state     (関連する場合)
+11  残作業単位と Progress Status の整合
 ```
 
 **記憶・会話要約・古い Issue 記述だけを根拠に新規実装を指示しない。**
+
+#### 11 の確認内容(G1: lifecycle 分岐の検出)
+
+1〜10 で集めた事実をもとに、その Issue に残っている作業単位を列挙し、
+それぞれへ現在相当する Progress Status を割り当てる
+(判定ルールの正本は [issue_label_policy.md](issue_label_policy.md) §7.3)。
+
+```
+UNIQUE_PROGRESS_STATUS_COUNT > 1
+  -> STATUS_RECONCILIATION_REQUIRED
+  -> ISSUE_STATE_FRESHNESS_GATE = FAIL と同じ扱いとし、
+     implementation assignment を出さない
+  -> 先に split の要否を判断し、必要なら分割してから status を確定する
+```
+
+current status label と残 scope が矛盾する場合(例: `status:マージ済` だが
+未実装の作業単位が残る)も同様に扱う。**勝手に label を変えない。**
 
 #### applicability(不要な確認を強制しない)
 
@@ -1484,12 +1517,29 @@ ChatGPT は post-merge の gate で次を確認する。
 
 ```
 merge commit / current main SHA / main CI / Issue state の writeback
+残作業単位と Progress Status の整合
 ```
 
 snapshot が無ければ、ChatGPT 自身が記録するか、worker へ reconciliation を
 指示して同期させてから次工程へ進む。ChatGPT が直接 Issue を書き換える運用を
 必須にはしない。**要点は「誰かがやるだろう」を禁止し、next gate owner を
 明示することである。**
+
+#### G3: final status transition より前に split を判断する
+
+merge 後は「その Issue の残作業が何か」が最も明確になる時点である。ここで
+`RESIDUAL_WORK_UNITS` と `UNIQUE_PROGRESS_STATUS_COUNT` を確認する
+(判定ルールの正本は [issue_label_policy.md](issue_label_policy.md) §7.3)。
+
+```
+UNIQUE_PROGRESS_STATUS_COUNT > 1
+  -> final status transition より先に split する
+  -> 分割してから status を確定する
+```
+
+merge した成果物だけを見て `status:マージ済` へ進め、未実装の作業単位を
+不可視にしない。これを見落とすと、その Issue は「実装は終わっている」と
+読める label のまま残り、release 判定を誤らせる。
 
 ---
 
@@ -1912,3 +1962,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-05 | 9.5節の Priority 再評価トリガーへ非機能側の 7 項目(security exposure / privacy exposure / data recoverability / cost anomaly / capacity exhaustion / compliance requirement / compensating control の変化)を追加した(#122)。**判定基準そのものは issue_label_policy.md §4.13〜§4.21 が正本であり本文書へ複製していない。** 既存の再評価時点・`WORKER_PRIORITY_LABEL_WRITE_OWNER`・`PRIORITY_RECONCILIATION_REQUIRED` は変更していない。コード・Production 挙動の変更なし |
 | 2026-09-05 | Severity 軸の廃止(#122)に伴い、label モデルの表記を 4軸(Issue Type / Priority / Release Blocker / Progress Status)へ同期し、6.5.3 の ISSUE_STATE_SNAPSHOT contract の必須項目から `SEVERITY` を削除して `STATUS` を加えた。**過去の snapshot は一切編集しておらず、そこに残る `SEVERITY = ...` は履歴として有効である。** 互換用の `SEVERITY = RETIRED` 等も新規必須にはしない。**Severity 廃止の理由・retired label の扱い・再導入条件の正本は issue_label_policy.md §5 であり本文書へ複製していない。** 既存の lane / WIP / 指示プロトコル / テスト方針 / state 同期 / Priority 再評価 / 人間承認の境界は変更していない。コード・Production 挙動の変更なし |
 | 2026-09-06 | §2.6「機能領域ベースの WIP モデル(DOMAIN_WIP_RULE_V1)」を新設(Issue #177)。§2 の担当者単位 WIP は「同時に壊れる範囲の最小化」には有効だが、互いに無関係な機能領域まで直列化する一方、**Git では検出できない衝突(同じ判定契約・永続契約を別ファイルから同時に変える / 共通 module 経由で他領域が壊れる)を防げていなかった**。実際に Issue #140 は 1 ファイルのみの変更でありながら、その module の呼び出し元は買い判定と保有判断の 2 領域にまたがっており、ファイル重複だけを見る判定では並行可能と誤認する。そこで並行可否を**ファイルの重複ではなく機能領域の重複**で判定する。(1)R1〜R6 を定め、領域ごとに code WIP = 1、異なる領域は並行可、複数領域を触る Issue は必要な領域を同時取得、SHARED は LOCK_LEVEL に従う、`MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1` は維持(並行度は作業者を増やして得るものであり 1 人の掛け持ちでは得ない)、read-only 作業は code WIP を消費しない、とした。(2)着手可否を `DOMAIN_WIP_AVAILABLE` / `FILE_OVERLAP_ACCEPTABLE` / `SHARED_CONTRACT_OVERLAP_ACCEPTABLE` / `DEPENDENCY_ORDER_CLEAR` / `BASE_MAIN_COMPATIBLE` の 5 条件で判定し、1 つでも判定できなければ着手不可とした(「不明」は「可」ではない)。(3)`DOMAIN_WIP_DECLARATION` の書式を定めた。(4)SHARED の `LOCK_LEVEL` を 3 段階とし、**LEVEL_1 を `ADDITIVE_ONLY` ではなく `ADDITIVE_AND_BACKWARD_COMPATIBLE`** と定義した。追加 diff であることは semantic compatibility を保証せず、とくに enum 値の追加は網羅的な分岐・対応表・入力バリデーション・直列化・永続データの読み手・外部の利用者を壊し得るためである。LEVEL_1 の主張には consumer behavior / serialization / validation / persisted read / exhaustive consumer impact の 5 つの実測証拠を要求し、1 つでも UNKNOWN なら LEVEL_1 を禁止する。enum 値追加の既定は LEVEL_2、optional な永続 field 追加も LEVEL_2 として調査を開始し reader/serialization 互換を実測できた場合のみ LEVEL_1 とする。分類不能は LEVEL_3 の fail-closed。**「diff が追加だけだから LEVEL_1」という判定を明示的に禁止した。**(5)解放条件を `PR_MERGED AND MAIN_CI_PASS AND MAIN_HEAD_EXACT AND NO_CORRECTIVE_CODE_WIP_REQUIRED` とし、PR 作成時・review PASS 時には解放しないこと、解放は Production 反映・Production 検証・Issue close のいずれも意味しないことを明記した。(6)scope 拡大時の停止義務、(7)P0 割り込み手順(掲示なしの割り込みは認めない。P1 以下は既存 WIP を強制中断しない)、(8)main 追随と re-review 必須条件、(9)現在の WIP 保持状況の SSoT を**各 Issue の DOMAIN_WIP_DECLARATION + 最新 ISSUE_STATE_SNAPSHOT** とし専用管理 Issue も docs 管理も作らないこと(人間承認 H4)、(10)発効の境界と周知項目を定めた。**本節は設計として確定しているが発効していない**(`DOMAIN_WIP_MODEL_ACTIVE = NO` / `CURRENT_WIP_RULE = ISSUE_122`)。docs が main に入っただけでは有効にならず、周知と人間による明示的な発効宣言を要する。発効後も進行中の作業へ遡及適用しない。領域・機能・共通部品の一覧は docs/functional_domains.md が正本であり本文書へ複製していない。既存の §2 / §2.5 / §3〜§11、人間承認の境界、grouped release、release-blocker lifecycle はいずれも変更・緩和していない。**docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない** |
+| 2026-09-06 | 6.5.3節の ISSUE_STATE_SNAPSHOT contract へ `RESIDUAL_WORK_UNITS` / `UNIQUE_PROGRESS_STATUS_COUNT` / `ISSUE_SPLIT_REQUIRED` / `SPLIT_TARGET_ISSUES` の 4 項目を追加し、6.5.4節の Assignment Read Barrier へ確認項目 11「残作業単位と Progress Status の整合」(G1)を、6.5.9節の post-merge reconciliation へ G3「final status transition より前に split を判断する」を追加した(Issue #181)。Progress Status は Issue 全体を表す単一 label であるため、1 つの Issue の中で独立した作業単位が異なるライフサイクル位置を持つと、どの label を付けても実態と食い違う(Issue #20 で実際に発生)。label は単一値しか持てず「分割が必要な状態を検出したのか、検出したうえで不要と判断したのか」を区別できないため、判定結果を snapshot 側へ残す。read barrier で `UNIQUE_PROGRESS_STATUS_COUNT > 1` を検出した場合は `STATUS_RECONCILIATION_REQUIRED` とし、`ISSUE_STATE_FRESHNESS_GATE = FAIL` と同じ扱いで implementation assignment を出さず、先に split の要否を判断する(勝手に label を変えない)。post-merge は残作業が最も明確になる時点であるため、merge した成果物だけを見て `status:マージ済` へ進めて未実装の作業単位を不可視にしないことを明記した。**判定ルールそのもの(`ONE_ISSUE_ONE_PROGRESS_LIFECYCLE`、`UNIQUE_PROGRESS_STATUS_COUNT > 1` による split 判定、依存関係が判定を上書きしないこと、分割手続き、既存 Issue への lazy 適用)の正本は issue_label_policy.md §7.3 であり、本文書へ複製していない。** 既存の STATE_ID 方式・append-only 原則・証拠の採用順序・applicability・ASSIGNMENT_BASELINE・State Freshness Gate・P0 例外・Work Complete Gate・handoff の責務・drift audit・lane / WIP 制限・指示プロトコル・テスト方針・人間承認の境界はいずれも変更していない。docs のみの変更であり、コード・Production 挙動の変更なし |

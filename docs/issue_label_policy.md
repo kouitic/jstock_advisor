@@ -955,15 +955,188 @@ status を遷移させるときは、**旧 status label を remove して新 sta
 status:設計済  --(implementation start)-->  status:開発中
 ```
 
-### 7.3 進捗の測り方(複数 Phase を持つ Issue)
+### 7.3 1 Issue = 1 progress lifecycle
 
-1つの修正対象を段階的に進める Issue(Phase A / B-1 / B-2 / …)では、
-**到達した最も進んだ工程**を status とする。後続 Phase が残っていることは、
-Issue が OPEN であること自体と Issue State Snapshot が表す。
+```
+ONE_ISSUE_ONE_PROGRESS_LIFECYCLE = YES
+```
 
-umbrella / tracking Issue のように「完了」が単一の工程で定義できない Issue では、
-到達点ではなく **その Issue の現在の活動段階**を status とする(活動中の tracking Issue は
-`status:調査・設計中`)。
+**Progress Status は、その Issue 全体を正確に表現しなければならない。**
+`status:マージ済` が付いた Issue を見た者は「この Issue の実装は main へ入り終えて
+おり、残るのは Production 反映である」と読んでよい。この保証を label に持たせる。
+
+したがって、1 つの Issue の中で複数の作業単位が**異なる Progress Status を同時に
+要求する**状態を許容しない。該当する場合は Issue を分割する。
+
+#### 7.3.1 判定基準(唯一の規範的ルール)
+
+```
+1  Issue に残っている作業単位を列挙する
+2  各作業単位へ、現在相当する Progress Status を 1 つ割り当てる
+3  UNIQUE_PROGRESS_STATUS_COUNT を数える
+
+UNIQUE_PROGRESS_STATUS_COUNT > 1  ->  ISSUE_SPLIT_REQUIRED = YES
+UNIQUE_PROGRESS_STATUS_COUNT = 1  ->  split は必須ではない
+```
+
+**判定はこれだけである。** 判定条件を増やさないこと自体がこのルールの要件であり、
+「独立性が高いか」「承認単位が同じか」「WIP がどこにあるか」といった補助条件を
+規範的な判定へ持ち込まない(条件が増えるほど優先順位の解釈余地が生まれ、
+原則と矛盾する例外が入り込む)。
+
+#### 7.3.2 依存関係は判定を上書きしない
+
+```
+DEPENDENCY_DOES_NOT_OVERRIDE_SPLIT = YES
+```
+
+依存関係の強さと Progress Status の一意性は別問題である。順序制約が不可分でも、
+片方だけが merge された時点で単一 label では表現できない。
+
+```
+reader を先に出し、writer を後から出す 2 段リリース
+
+  reader merge 済み  ->  status:マージ済 相当
+  writer 未実装      ->  status:未着手 / status:設計済 相当
+  UNIQUE_PROGRESS_STATUS_COUNT = 2  ->  ISSUE_SPLIT_REQUIRED = YES
+```
+
+**「不可分な migration sequence だから 1 つの Issue に残す」という例外は無い。**
+依存関係は Issue を統合することではなく、関係の記述で表現する。
+
+```
+BLOCKED_BY / DEPENDS_ON / Related / 必要なら tracking Issue
+```
+
+順序制約は失われない。むしろ分割したほうが「reader は deploy 済み /
+writer は未着手」という実態を label で表現できる。
+
+#### 7.3.3 複数 PR の扱い
+
+```
+PR_SPLIT_SIGNAL   = CANDIDATE(機械的な split 条件にしない)
+STATUS_DIVERGENCE = DECISIVE(判定するのはこちら)
+```
+
+「PR が複数になるから必ず split」とはしない。連続する複数の PR を間を空けずに
+出し切るなら、その間の status は `status:開発中` のままで分かれない。
+
+判定の引き金は PR を分けたことではなく、**merge の非同時性が実際に生じたこと**
+である。1 本目が merge され、後続が未 merge / 未実装のまま残った時点で
+status が分かれるため `ISSUE_SPLIT_REQUIRED = YES` となる。
+
+#### 7.3.4 同一 Issue のままでよいもの
+
+```
+Phase A 内の調査 sub-step
+同一 branch 内の implementation step
+複数 commit
+1 本の PR へまとめる内部 step
+```
+
+いずれも「全作業単位が同じ Progress Status にある」ために分割不要なのであって、
+「内部 step だから」ではない。最終的な判断は常に
+`UNIQUE_PROGRESS_STATUS_COUNT` で行う。
+
+#### 7.3.5 tracking / umbrella Issue
+
+```
+TRACKING_ISSUE_STATUS_IS_NOT_A_DELIVERABLE_STATUS = YES
+```
+
+tracking / umbrella Issue のように「完了」が単一の工程で定義できない Issue では、
+到達点ではなく **その Issue の現在の活動段階**を status とする(活動中の tracking
+Issue は `status:調査・設計中`)。child の成果物の到達点を tracking Issue の status
+として代表させない。child はそれぞれ自分の Progress Status を持ち、
+tracking Issue の close は全 child の close 後とする。
+
+parent(tracking) Issue を作るかどうかを、**child の個数で決めない。**
+
+```
+TRACKING_PARENT_REQUIRED = NO_BY_COUNT_ALONE
+```
+
+必要性で判断する。
+
+```
+複数 child に共通の Goal を追跡する必要がある
+dependency chain 全体の完了条件を 1 箇所で定義したい
+release / verification を全体として俯瞰する必要がある
+```
+
+child が 2 つでも必要なら作ってよく、4 つでも Related の相互参照で足りるなら
+作らなくてよい。
+
+#### 7.3.6 分割の手続き
+
+```
+移管元へ記録   source Issue へ append-only で「何を、どの Issue へ移したか」を残す
+移管先へ記録   target Issue の本文と最初の snapshot へ ORIGIN_ISSUE と SPLIT_REASON
+acceptance     同じ受入条件を両方へ残さない。移管した条件は source から外す
+WIP ownership  移管後は target が code WIP を持つ。source は持たない
+Production     deploy / verification は Issue ごとに独立して判定する
+history        旧 snapshot は historical record として保持し、編集・削除しない
+               (最新 snapshot で supersede する)
+child Priority source からの機械的な継承にせず再判定する
+source 側      残 scope に基づき Type / Priority / status を再評価する
+```
+
+worked example は Issue #20 -> #179 / #180 の分割である。
+
+#### 7.3.7 既存 OPEN Issue への適用
+
+```
+BULK_REWRITE_FORBIDDEN = YES
+LAZY_ON_TOUCH          = YES
+```
+
+既存の OPEN Issue を一括で棚卸し・書き換えることはしない。実態を伴わない label
+変更を大量に生むためである。次の時点で検出する。
+
+```
+Assignment Read Barrier / state transition / PR review / post-merge reconciliation
+```
+
+`UNIQUE_PROGRESS_STATUS_COUNT > 1` を検出したら、勝手に label を変えず
+`STATUS_RECONCILIATION_REQUIRED` として報告し、新しい implementation 指示や
+state transition より前に split の要否を判断する。
+
+```
+EFFECTIVE_FROM    = 本節の改訂が main へ merge された時点以降
+RETROACTIVE_AUDIT = NO(過去の CLOSED Issue へ遡及適用しない)
+```
+
+#### 7.3.8 Issue 分割は並行実装の許可ではない
+
+```
+ISSUE_SPLIT_DOES_NOT_GRANT_PARALLEL_WIP = YES
+```
+
+Issue を分割しても、それだけで並行して実装してよいことにはならない。
+WIP の単位は Issue ではない。`DOMAIN_WIP_MODEL_ACTIVE = YES` の期間は、
+同一 functional domain 内の code WIP は domain lock により直列化される
+([docs/functional_domains.md](functional_domains.md))。
+
+```
+例: #179 と #180 は別 Issue だが、いずれも valuation 領域に属するため
+    同時には実装できない
+```
+
+#### 7.3.9 CI で機械判定できる範囲
+
+```
+CI_ENFORCEABLE = PARTIAL
+```
+
+```
+CI で判定できる   status label が 0 個 / 2 個以上、語彙に無い値、静的な label 制約
+CI で判定できない 残作業単位の列挙、各作業単位の Progress Status、split 要否
+```
+
+split の要否は semantic な判断であり機械判定できない。
+**`CI green` を「split 不要」の根拠にしない。** 実効性は §7.3.7 の 4 つの検出時点
+(Assignment Read Barrier / state transition / PR review / post-merge
+reconciliation)が担う。
 
 ### 7.4 Production 変更を伴わない Issue
 
@@ -1103,6 +1276,31 @@ GitHub comments / PR / merge / deploy evidence から reconcile し、
 
 判定に足る証拠が得られない場合は、推測で label を付けず
 `STATUS_RECONCILIATION_REQUIRED` として Issue 番号と不足証拠を報告する。
+
+### 9.3 lifecycle 分岐を snapshot で表す
+
+§7.3 の判定結果は snapshot にも残す。label は単一値しか持てないため、
+「分割が必要な状態を検出したのか、検出したうえで不要と判断したのか」を
+label だけからは区別できないためである。
+
+```
+RESIDUAL_WORK_UNITS              = <残っている作業単位の列挙 | NONE>
+UNIQUE_PROGRESS_STATUS_COUNT     = <n>
+ISSUE_SPLIT_REQUIRED             = YES | NO
+SPLIT_TARGET_ISSUES              = #nnn, #nnn | NONE
+ONE_ISSUE_ONE_PROGRESS_LIFECYCLE = YES
+```
+
+`RESIDUAL_WORK_UNITS` は「独立した scope が残っているか」ではなく
+**残作業単位そのものの列挙**である。判定基準は独立性ではなく status divergence
+(§7.3.1)であり、field 名もそれに合わせる。
+
+`UNIQUE_PROGRESS_STATUS_COUNT = 1` かつ `ISSUE_SPLIT_REQUIRED = NO` を明示的に
+書くことに意味がある(確認したうえで不要と判断した記録になる)。
+
+field の正式な contract は
+[docs/development_workflow.md](development_workflow.md) 6.5.3節が正本であり、
+本節へ複製しない。
 
 ---
 
@@ -1378,3 +1576,4 @@ Release Blocker 軸と混同されるため不可)。
 | 2026-09-05 | Priority へ**非機能リスク**を正式に含めた(#122、`PRIORITY_POLICY_V2_NFR`)。`ISSUE_PRIORITY = MAX(FUNCTIONAL_PRIORITY, NON_FUNCTIONAL_PRIORITY)` を規定し、SECURITY / PRIVACY / COMPLIANCE / DATA_PROTECTION / COST / RELIABILITY / CAPACITY / PERFORMANCE を評価軸として追加した。P0 の定義を「事業継続を脅かす」へ拡張し、active な credential compromise・認証なしで攻撃可能な公開露出・現在進行の PUBLIC な個人情報漏洩・重大な compliance 違反・`UNCONTROLLED_COST_RUNAWAY` を P0 条件として明文化した。**security / cost であることだけを理由に自動 P0 にはせず**、ATTACK_REACHABILITY / EXPLOITABILITY / CURRENT_EXPOSURE / COMPENSATING_CONTROLS、および cost では CURRENT_COST_RATE / MULTIPLIER / GROWTH_RATE / SELF_TERMINATING 等の評価を要求する(金額閾値は固定せず、必要なら HUMAN_DECISION_REQUIRED)。P1 へ「広範権限の長期 credential」「protection boundary が成立していない privacy」「authoritative data が復元不能」「継続的で有意な不要 cost」等を、P2 へ「exploitability の低い hardening」「audit trail / retention 不足」等を追加した。非機能 Issue には NON_FUNCTIONAL_DIMENSION / REACHABILITY / BLAST_RADIUS / IMMEDIACY / COMPENSATING_CONTROLS の記録を求め、MAX 規則の適用例 5 件を示した。再評価トリガーへ security / privacy / recoverability / cost / capacity / compliance / compensating control の 7 項目を追加した。public な GitHub へ security の根拠を書く際に攻撃手順・identifier・secret 実値を追加公開しない方針を明記した。**Severity policy は変更しておらず、security / privacy / cost を表現できない `SEVERITY_POLICY_GAP` は既知として記録するに留めた。** Type / Severity / Release Blocker / Progress Status の定義と 5軸の独立性は変更していない |
 | 2026-09-05 | §4.22「Priority を meta-priority として使わない」を追加した(#122)。`PRIORITY_LABEL_NOT_USED_AS_META_PRIORITY = YES` とし、sprint の順序・freeze 状態・governance 上の重要度を符号化するためだけに Priority label を使わないこと、sprint / freeze / stabilization の状態はそれを定める Issue と policy が独立に保持することを明文化した。governance Issue を「今スプリントで最優先だから」という理由だけで P0 にしない。**判定基準そのもの(§4.1〜§4.21)は変更していない** |
 | 2026-09-05 | **Severity 軸を廃止**し、5軸モデルを 4軸モデル(Issue Type / Priority / Release Blocker / Progress Status)へ変更した(#122)。`SEVERITY_AXIS_RETIRED = YES` / `SEVERITY_CLASSIFICATION_REQUIRED = NO` / `SEVERITY_LABEL_WRITEBACK_REQUIRED = NO` / `SEVERITY_REEVALUATION_REQUIRED = NO` / `SEVERITY_NOT_USED_FOR_ASSIGNMENT = YES` / `SEVERITY_NOT_USED_FOR_RELEASE_GATE = YES`。旧 Severity(SEV-1 重大 / SEV-2 高 / SEV-3 中 / SEV-4 低)が担っていた影響度評価は Priority Policy V2 NFR(§4)へ統合済みであり、独立軸として重複分類しない。§5 を Retired section へ置換し、§2 から Severity 由来の独立性記述(SEV-1 ≠ P0 等)を削除、§10 の `SEVERITY_TRIAGE_REQUIRED` / `PRIORITY_SEVERITY_TRIAGE_REQUIRED` と「Severity の N/A と未確定の区別」を `PRIORITY_RECONCILIATION_REQUIRED` へ統合した。**label 定義は削除・改名しない**(CLOSED Issue / merged PR の履歴参照のため)。OPEN Issue / OPEN PR からのみ severity label を外し、Issue 本文・コメント・過去 snapshot の Severity 記載は append-only の監査証跡として書き換えない。将来 incident SLA / paging / MTTR KPI 等の独立用途が生じた場合のみ別目的で再導入を検討でき、Priority の代用品としては復活させない。`src/` `config/` の application-domain severity は無関係であり対象外。**Priority Policy V2 NFR・Type・Release Blocker・Progress Status・waiting の定義は変更していない** |
+| 2026-09-06 | §7.3 を「進捗の測り方(複数 Phase を持つ Issue)」から「1 Issue = 1 progress lifecycle」へ全面改訂した(Issue #181)。**旧規則「複数 Phase を持つ Issue では到達した最も進んだ工程を status とする」を廃止する。** Progress Status は Issue 全体を表す単一 label(§7.2)であるため、旧規則では独立した作業単位が異なるライフサイクル位置を同時に持つ Issue を正しく表現できなかった。Issue #20 で実際に、O-C(観測性向上)が main へ merge 済みである一方 H-5(hard cutoff の解消)と H-6(閾値の config 化)が未着手という状態が生じ、`status:マージ済` を付けると未着手 Phase が不可視になり、`status:設計済` を付けると稼働中の実装が未実装に見え、`status:開発中` を付けると merge 済みの成果物が消える、というどれを選んでも実態と食い違う状態になった(release 判定・Assignment Read Barrier・進捗集計のいずれもが誤る)。新しい正本は `ONE_ISSUE_ONE_PROGRESS_LIFECYCLE = YES` とし、**唯一の規範的判定基準を「残作業単位へそれぞれ Progress Status を割り当て、`UNIQUE_PROGRESS_STATUS_COUNT > 1` なら `ISSUE_SPLIT_REQUIRED = YES`」だけとした**(§7.3.1)。判定条件を増やさないこと自体を要件とし、独立性・承認単位・WIP の所在といった補助条件を規範ルールへ持ち込まない。**依存関係は判定を上書きしない**(`DEPENDENCY_DOES_NOT_OVERRIDE_SPLIT = YES`、§7.3.2)。reader を先に出し writer を後から出す 2 段リリースのような不可分な順序制約であっても、reader が merge 済みで writer が未実装なら status は 2 種類に分かれるため分割必須であり、**「不可分な migration sequence だから 1 Issue に残す」という例外は設けない**。依存関係は Issue の統合ではなく `BLOCKED_BY` / `DEPENDS_ON` / `Related` / tracking Issue で表現する。複数 PR は `PR_SPLIT_SIGNAL = CANDIDATE` に留め、判定の引き金は PR を分けたことではなく **merge の非同時性が実際に生じたこと**とした(§7.3.3)。同一 Issue に残してよいのは全作業単位が同じ Progress Status にある場合のみで、「内部 step だから」を理由にしない(§7.3.4)。tracking / umbrella Issue の既存規定(自身の活動段階を status とする)は維持したうえで `TRACKING_ISSUE_STATUS_IS_NOT_A_DELIVERABLE_STATUS = YES` を明示し、parent を作るかどうかを **child の個数で決めない**(`TRACKING_PARENT_REQUIRED = NO_BY_COUNT_ALONE`)ことにした(§7.3.5)。分割手続き(移管元/移管先への記録・acceptance criteria の二重所有禁止・WIP ownership の移管・Production lifecycle の個別化・historical snapshot の保持・child Priority の再判定・source 側 4軸の再評価)を §7.3.6 に定めた。既存 OPEN Issue は `BULK_REWRITE_FORBIDDEN = YES` / `LAZY_ON_TOUCH = YES` とし、Assignment Read Barrier / state transition / PR review / post-merge reconciliation の 4 時点で検出したら勝手に label を変えず `STATUS_RECONCILIATION_REQUIRED` として報告し、split 判断を先に行う(§7.3.7、過去の CLOSED Issue へは遡及適用しない)。**Issue を分割しても並行実装が許可されるわけではない**ことを `ISSUE_SPLIT_DOES_NOT_GRANT_PARALLEL_WIP = YES` として明記した(§7.3.8。WIP の単位は Issue ではなく機能領域であり、`DOMAIN_WIP_MODEL_ACTIVE = YES` の期間は同一領域内の code WIP は domain lock で直列化される)。CI については `CI_ENFORCEABLE = PARTIAL` とし、機械判定できるのは status label 数・語彙・静的制約のみで、残作業単位の列挙と split 要否は semantic 判断であるため **`CI green` を split 不要の根拠にしない**ことを明記した(§7.3.9)。あわせて §9.3 を新設し、判定結果を snapshot へ残すための項目(`RESIDUAL_WORK_UNITS` / `UNIQUE_PROGRESS_STATUS_COUNT` / `ISSUE_SPLIT_REQUIRED` / `SPLIT_TARGET_ISSUES` / `ONE_ISSUE_ONE_PROGRESS_LIFECYCLE`)を示した(field contract の正本は development_workflow.md 6.5.3節であり複製していない)。**Progress Status の 8 段階の名称・意味(§7.1)、`STATUS_LABEL_COUNT_PER_OPEN_ISSUE = 1`(§7.2)、Production を伴わない Issue の扱い(§7.4)、CLOSED 時の label 保持(§7.5)、waiting label(§8)、Type / Priority / Release Blocker の判定基準はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
