@@ -40,10 +40,44 @@ Production の運用手順                    -> operations_manual.md
 NEW_CONTRACT_ACTIVE = NO
 ```
 
-**本文書が main に入っただけでは発効しない。** 発効までは、報告形式は
-[development_workflow.md](development_workflow.md) 2.5.5、Human Gate の提示は
-[chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 3.7 の
-現行運用が有効である。発効の手順と境界は 8節に定める。
+**本文書が main に入っただけでは発効しない。** 発効の手順と境界は 10節に定める。
+
+```
+MERGE_IS_NOT_ACTIVATION = YES
+```
+
+```
+★ Issue #177 の DOMAIN_WIP_RULE_V1 は別物であり、既に発効している。
+  本節の NEW_CONTRACT_ACTIVE = NO は、本文書(メッセージ形式の契約)だけを指す。
+  2 つを混同しない。
+```
+
+### 発効前後でどちらが正本か
+
+merge から発効までの間、本文書は main に存在するが**規範ではない**。
+
+```
+BEFORE_ISSUE_184_ACTIVATION
+
+  作業報告の形式        development_workflow.md 2.5.5 の冒頭 3 行のみが必須。
+                        それ以外は従来どおりで、本文書の 2〜4節を強制しない
+  Human Gate の提示形式  chatgpt_collaboration_protocol.md 3.7 が正本
+  Instruction の許可範囲  AUTHORIZED_PHASES を必須にしない(5.5 を適用しない)
+
+AFTER_ISSUE_184_ACTIVATION
+
+  作業報告の形式        本文書 2〜4節が正本
+  Human Gate の提示形式  本文書 8節が正本
+                        (chatgpt_collaboration_protocol.md 3.7 の提示項目は
+                         本文書 8節へ吸収され、並列の規範として残らない)
+  Instruction の許可範囲  本文書 5節が正本
+```
+
+```
+発効前に本文書の形式へ従うことは禁止しない。従わないことを違反ともしない。
+発効前は「推奨」であり、発効後は「規範」である。
+DUPLICATE_SSOT を避けるため、発効後は旧記述を並列の規範として扱わない。
+```
 
 ---
 
@@ -499,22 +533,74 @@ AUDIT_INFO
 
 ### 8.2 適用する gate 種別
 
-| GATE_TYPE | 4 節を適用 | exact identifier の置き場所 |
+| GATE_TYPE | 「承認対象」節へ必ず書く識別子 | AUDIT_INFO へ分離してよいもの |
 |---|---|---|
-| `DESIGN_GATE` | 可 | 不要 |
-| `MERGE_GATE` | 可 | AUDIT_INFO でよい |
-| `PRODUCTION_CHANGESET_CREATE_GATE` | 可 | **承認対象の本文へ残す** |
-| `PRODUCTION_CHANGESET_EXECUTE_GATE` | 可 | **承認対象の本文へ残す** |
-| `ROLLBACK_GATE` | 可 | **承認対象の本文へ残す** |
-| `RELEASE_BLOCKER_REMOVAL_GATE` | 可 | AUDIT_INFO でよい(検証証拠は本文) |
-| `ACTIVATION_GATE` | 可 | AUDIT_INFO でよい |
+| `DESIGN_GATE` | 対象 Issue と Phase | 参照 URL |
+| `MERGE_GATE` | **PR 番号 + exact PR head SHA** | base SHA / CI run / review URL |
+| `PRODUCTION_CHANGESET_CREATE_GATE` | **対象 stack + release 対象の exact SHA + CREATE する scope** | build 情報 / 参照 URL |
+| `PRODUCTION_CHANGESET_EXECUTE_GATE` | **exact ChangeSet ARN** | stack event / diff の参照 URL |
+| `ROLLBACK_GATE` | **巻き戻し対象と、戻し先の exact 識別子** | 経緯 / 参照 URL |
+| `RELEASE_BLOCKER_REMOVAL_GATE` | 対象 Issue と label | 検証証拠の参照 URL |
+| `ACTIVATION_GATE` | 発効する contract と対象 Issue | merge SHA / main CI run |
 
 ```
 exact 承認では識別子が承認対象そのものである。
+これを AUDIT_INFO へ追いやると「何を承認したか」が本文から消える。
+承認の有効範囲の正本は chatgpt_collaboration_protocol.md 2節であり、
+本節はその提示のしかたを定める。
+```
 
-  ChangeSet の CREATE / EXECUTE と rollback では、承認は exact ARN /
-  exact 対象に対してのみ有効である(chatgpt_collaboration_protocol.md 2節)。
-  これを AUDIT_INFO へ追いやると「何を承認したか」が本文から消える。
+#### MERGE_GATE は review した exact head に紐づく
+
+```
+承認対象
+  PR #<番号> / head <exact SHA> を main へ merge すること
+```
+
+merge の承認がレビューした exact head に紐づき、head が変われば失効すること
+そのものは [chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md)
+3.7節(および 2節の「承認はその操作・その対象に限る」)が正本である。本節は
+**それを提示へ反映するために head SHA を承認対象へ書く**ことだけを定める。
+
+PR 番号だけの承認は、レビューしていない内容を含みうるため提示として成立しない。
+
+#### CREATE と EXECUTE では識別子が異なる
+
+```
+CREATE_APPROVAL != EXECUTE_APPROVAL
+```
+
+**CREATE の前に ChangeSet ARN は存在しない。** したがって CREATE Gate で
+exact ARN を要求することはできない。CREATE 時点で一意に定まるもので承認対象を
+特定する。
+
+```
+PRODUCTION_CHANGESET_CREATE_GATE の承認対象
+
+  対象 stack
+  release 対象の exact SHA(build 済み artifact の由来)
+  CREATE する scope(どの変更を含めるか)
+  その他、CREATE の内容を一意にする既知の識別子
+```
+
+```
+CREATE 承認 -> ChangeSet を作成 -> ARN を取得
+            -> read-only で内容を確認
+            -> PRODUCTION_CHANGESET_EXECUTE_GATE(別の承認)
+```
+
+```
+PRODUCTION_CHANGESET_EXECUTE_GATE の承認対象
+
+  EXACT_CHANGESET_ARN(必須)
+```
+
+```
+ChangeSet を作り直すと ARN が変わる。
+その時点で以前の EXECUTE 承認は失効する。
+これは chatgpt_collaboration_protocol.md 2節
+「ChangeSet の execute 承認は exact ARN のみ有効。再作成した時点で失効する」
+と同じ意味であり、本節はその提示のしかたを定めるだけである。
 ```
 
 ### 8.3 承認単位を統合しない

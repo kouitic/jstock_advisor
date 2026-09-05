@@ -19,8 +19,9 @@
   場合は同文書の共通部品一覧を更新すること。領域の追加・分割・統合は
   人間承認が必要である。同文書を用いた領域ベースのWIP運用ルール
   (`DOMAIN_WIP_RULE_V1`)は development_workflow.md 2.6節が正本であり、
-  **本ファイル作成時点では発効していない**(`DOMAIN_WIP_MODEL_ACTIVE = NO`。
-  有効なWIPルールは同文書2節)。
+  **既に発効している**(`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1`)。
+  発効状態は変わりうるため、確認が必要な場合はIssue #177の最新のdurableな
+  activation記録をfreshに読むこと(静的な文書を唯一の根拠にしない)。
 
 - **作業報告・Human Gate提示・Instructionの許可範囲(`AUTHORIZED_PHASES`)・
   確認質問といった「メッセージの形式」は

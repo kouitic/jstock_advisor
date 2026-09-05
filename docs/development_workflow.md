@@ -99,9 +99,9 @@ INVESTIGATION_WIP  <= 2
   新しく着手した作業より優先して対応する。
 
 
-**機能領域ベースの WIP モデル(`DOMAIN_WIP_RULE_V1`)を 2.6 節に定めているが、
-本書の現時点では発効していない**(`DOMAIN_WIP_MODEL_ACTIVE = NO`)。
-有効な WIP ルールは本節である。
+**機能領域ベースの WIP モデル(`DOMAIN_WIP_RULE_V1`)は 2.6 節が正本であり、
+既に発効している。** 本節の `MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1` は
+2.6 節の R5 として維持されるが、着手可否の判定は 2.6 節による。
 
 ---
 
@@ -274,12 +274,22 @@ INSTRUCTION_ID の有無にかかわらず従来どおり必要である。
 ## 2.6 機能領域ベースの WIP モデル(DOMAIN_WIP_RULE_V1)
 
 ```
-DOMAIN_WIP_MODEL_ACTIVE = NO
-CURRENT_WIP_RULE        = ISSUE_122(2節。担当者単位 code WIP = 1)
+CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1
+EFFECTIVE_FROM   = 2026-09-06 02:27 JST(2026-09-05T17:27:01Z)
 ```
 
-**本節は設計として確定しているが、まだ発効していない。**
-発効までは 2 節が有効な WIP ルールである。発効の条件は 2.6.10 に定める。
+**本節は既に発効している。** 発効の手順と、発効時点で進行中だった作業の
+扱いは 2.6.10 に定める。
+
+```
+ACTIVATION_STATE_SSOT = Issue #177 の最新の durable な activation 記録
+```
+
+発効状態は運用の中で変わりうる(試行の結果、人間の判断で 2 節へ戻すことも
+ありうる。2.6.10)。**本書のような静的な文書を、変わりうる状態の唯一の
+根拠にしない。** 現在の発効状態を確認する必要がある場合は、Issue #177 の
+最新の durable な activation 記録を fresh に読む(6.5.4 の read barrier と
+同じ原則)。上記の値は本節を改訂した時点のものである。
 
 領域・機能・共通部品の一覧は
 [docs/functional_domains.md](functional_domains.md) が正本であり、
@@ -653,11 +663,13 @@ memory・会話要約・古い Issue 本文だけで判断しない(6.5.4 と同
 ### 2.6.10 発効の境界
 
 ```
-DOMAIN_WIP_MODEL_ACTIVE = NO
+ACTIVATION_STATE   = 発効済み(2026-09-06 02:27 JST)
+ACTIVATION_STATE_SSOT = Issue #177 の最新の durable な activation 記録
 ```
 
-**docs が main に入っただけでは本節は有効にならない。** 発効は次をすべて
-終えた後、人間による明示的な発効宣言をもって行う。
+**docs が main に入っただけでは本節は有効にならなかった。** 発効は次をすべて
+終えたのち、人間による明示的な発効宣言をもって行われた。同じ手順は、将来
+本節を改訂して再発効する場合にも適用する。
 
 ```
 docs review -> PR -> CI -> 人間の merge 承認 -> merge -> main CI
@@ -680,7 +692,9 @@ RETROACTIVE_APPLICATION = NO
 ```
 
 試行期間として、発効から 2 週間はゲート判定で迷った事例を Issue #177 へ
-記録し、試行後に領域一覧と LOCK_LEVEL の見直しを 1 度行う。
+記録し、試行後に領域一覧と LOCK_LEVEL の見直しを 1 度行う。試行の終了は
+期間の経過だけでは成立せず、人間とレビューによる continue / amend / rollback の
+判断をもって確定する。
 
 ### 2.6.11 発効時の周知(COMMUNICATION)
 
@@ -2160,3 +2174,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-06 | §2.6「機能領域ベースの WIP モデル(DOMAIN_WIP_RULE_V1)」を新設(Issue #177)。§2 の担当者単位 WIP は「同時に壊れる範囲の最小化」には有効だが、互いに無関係な機能領域まで直列化する一方、**Git では検出できない衝突(同じ判定契約・永続契約を別ファイルから同時に変える / 共通 module 経由で他領域が壊れる)を防げていなかった**。実際に Issue #140 は 1 ファイルのみの変更でありながら、その module の呼び出し元は買い判定と保有判断の 2 領域にまたがっており、ファイル重複だけを見る判定では並行可能と誤認する。そこで並行可否を**ファイルの重複ではなく機能領域の重複**で判定する。(1)R1〜R6 を定め、領域ごとに code WIP = 1、異なる領域は並行可、複数領域を触る Issue は必要な領域を同時取得、SHARED は LOCK_LEVEL に従う、`MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1` は維持(並行度は作業者を増やして得るものであり 1 人の掛け持ちでは得ない)、read-only 作業は code WIP を消費しない、とした。(2)着手可否を `DOMAIN_WIP_AVAILABLE` / `FILE_OVERLAP_ACCEPTABLE` / `SHARED_CONTRACT_OVERLAP_ACCEPTABLE` / `DEPENDENCY_ORDER_CLEAR` / `BASE_MAIN_COMPATIBLE` の 5 条件で判定し、1 つでも判定できなければ着手不可とした(「不明」は「可」ではない)。(3)`DOMAIN_WIP_DECLARATION` の書式を定めた。(4)SHARED の `LOCK_LEVEL` を 3 段階とし、**LEVEL_1 を `ADDITIVE_ONLY` ではなく `ADDITIVE_AND_BACKWARD_COMPATIBLE`** と定義した。追加 diff であることは semantic compatibility を保証せず、とくに enum 値の追加は網羅的な分岐・対応表・入力バリデーション・直列化・永続データの読み手・外部の利用者を壊し得るためである。LEVEL_1 の主張には consumer behavior / serialization / validation / persisted read / exhaustive consumer impact の 5 つの実測証拠を要求し、1 つでも UNKNOWN なら LEVEL_1 を禁止する。enum 値追加の既定は LEVEL_2、optional な永続 field 追加も LEVEL_2 として調査を開始し reader/serialization 互換を実測できた場合のみ LEVEL_1 とする。分類不能は LEVEL_3 の fail-closed。**「diff が追加だけだから LEVEL_1」という判定を明示的に禁止した。**(5)解放条件を `PR_MERGED AND MAIN_CI_PASS AND MAIN_HEAD_EXACT AND NO_CORRECTIVE_CODE_WIP_REQUIRED` とし、PR 作成時・review PASS 時には解放しないこと、解放は Production 反映・Production 検証・Issue close のいずれも意味しないことを明記した。(6)scope 拡大時の停止義務、(7)P0 割り込み手順(掲示なしの割り込みは認めない。P1 以下は既存 WIP を強制中断しない)、(8)main 追随と re-review 必須条件、(9)現在の WIP 保持状況の SSoT を**各 Issue の DOMAIN_WIP_DECLARATION + 最新 ISSUE_STATE_SNAPSHOT** とし専用管理 Issue も docs 管理も作らないこと(人間承認 H4)、(10)発効の境界と周知項目を定めた。**本節は設計として確定しているが発効していない**(`DOMAIN_WIP_MODEL_ACTIVE = NO` / `CURRENT_WIP_RULE = ISSUE_122`)。docs が main に入っただけでは有効にならず、周知と人間による明示的な発効宣言を要する。発効後も進行中の作業へ遡及適用しない。領域・機能・共通部品の一覧は docs/functional_domains.md が正本であり本文書へ複製していない。既存の §2 / §2.5 / §3〜§11、人間承認の境界、grouped release、release-blocker lifecycle はいずれも変更・緩和していない。**docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない** |
 | 2026-09-06 | 6.5.3節の ISSUE_STATE_SNAPSHOT contract へ `RESIDUAL_WORK_UNITS` / `UNIQUE_PROGRESS_STATUS_COUNT` / `ISSUE_SPLIT_REQUIRED` / `SPLIT_TARGET_ISSUES` の 4 項目を追加し、6.5.4節の Assignment Read Barrier へ確認項目 11「残作業単位と Progress Status の整合」(G1)を、6.5.9節の post-merge reconciliation へ G3「final status transition より前に split を判断する」を追加した(Issue #181)。Progress Status は Issue 全体を表す単一 label であるため、1 つの Issue の中で独立した作業単位が異なるライフサイクル位置を持つと、どの label を付けても実態と食い違う(Issue #20 で実際に発生)。label は単一値しか持てず「分割が必要な状態を検出したのか、検出したうえで不要と判断したのか」を区別できないため、判定結果を snapshot 側へ残す。read barrier で `UNIQUE_PROGRESS_STATUS_COUNT > 1` を検出した場合は `STATUS_RECONCILIATION_REQUIRED` とし、`ISSUE_STATE_FRESHNESS_GATE = FAIL` と同じ扱いで implementation assignment を出さず、先に split の要否を判断する(勝手に label を変えない)。post-merge は残作業が最も明確になる時点であるため、merge した成果物だけを見て `status:マージ済` へ進めて未実装の作業単位を不可視にしないことを明記した。**判定ルールそのもの(`ONE_ISSUE_ONE_PROGRESS_LIFECYCLE`、`UNIQUE_PROGRESS_STATUS_COUNT > 1` による split 判定、依存関係が判定を上書きしないこと、分割手続き、既存 Issue への lazy 適用)の正本は issue_label_policy.md §7.3 であり、本文書へ複製していない。** 既存の STATE_ID 方式・append-only 原則・証拠の採用順序・applicability・ASSIGNMENT_BASELINE・State Freshness Gate・P0 例外・Work Complete Gate・handoff の責務・drift audit・lane / WIP 制限・指示プロトコル・テスト方針・人間承認の境界はいずれも変更していない。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-06 | 運用ルールの欠落を補い、集約 read model の例外を追加した(Issue #184)。(1)§2.5.3 へ「指示の直列化」と §2.6 の code WIP モデルが**直交する**ことを明記した(`PER_WORKER_INSTRUCTION_SERIALIZATION != PER_WORKER_CODE_WIP_MODEL`)。#177 の発効により「WIP」という語が 2 つの意味を持つようになり、「領域が空いているから次の指示を出してよい」「1 人 1 code WIP だから指示も 1 本のはず」という双方向の誤読が起こりうるため。片方が空いてももう片方の制約は解除されない。(2)§2.5.5 の報告フォーマットについて、冒頭 3 行のみを本文書に残し、報告の構造(NORMAL / FORENSIC / `BASELINE_INVARIANTS` / 一括コピー可能性 / `AUTHORIZED_PHASES`)の正本を新設した docs/ai_operation_message_contract.md への参照に置き換えた(本文を複製していない)。(3)§6.5.4 へ **fresh-read の対象**を明記した(`FRESH_READ_SOURCE = CURRENT_REMOTE_SSOT` / `LOCAL_WORKTREE_IS_NOT_SSOT` / `STALE_FEATURE_BRANCH_IS_NOT_FRESH_READ`)。既存の規則は記憶・会話要約・古い Issue 記述を禁じていたが、**手元の作業 branch の docs を現行ルールとして読むこと**を禁じていなかった。実際に #177 の作業 branch 上で #181 改訂前の issue_label_policy §7.3 を参照した事例が発生している。(4)同じく §6.5.4 へ **取得が途中で打ち切られた場合**の規則を追加した(`RETRIEVAL_TRUNCATED -> FRESH_READ_COMPLETE = NO`)。コメント一覧や snapshot の取得は件数が増えると打ち切られることがあり、途中までしか読んでいない状態を「読み終えた」と扱うと #157 が解決した stale state 事故と同型の見落としが起きる。latest state を再構成するまで assignment 判断を行わない。(5)§9.5 へ `OPPORTUNISTIC_FIX_FORBIDDEN` / `FIX_FIRST_ISSUE_LATER = FORBIDDEN` を追加した。scope 外の不具合はその場で直さず、duplicate check -> Issue 化 -> lifecycle とする。**P0 であっても「先に直して Issue は後」は認めない**(P0 は Issue を省略してよいという意味ではなく、Issue を作ったうえで §2.6.8 の割り込み手順で最優先に着手してよいという意味である)。Production の緊急停止操作は運用操作であり本節の対象ではない。(6)§2.6.9 に **人間の承認による限定的な policy 変更**を反映した。従来の「専用の WIP 管理 Issue を作らない」を、`CACHE_ONLY` / `READ_MODEL_IS_SSOT = NO` / `INDEX_ONLY` の集約 read model に限って認める形へ改めた。**`WIP_STATE_SSOT`(各 Issue の宣言 + 最新 snapshot)と「docs 側に現況表を置かない」は変更していない。** read model は SSoT の複製ではなく索引であり、不一致時は Issue snapshot が勝ち(`READ_MODEL_MISMATCH -> ISSUE_SNAPSHOTS_WIN -> REBUILD_REQUIRED`)、stale なら索引としても使わず全走査へフォールバックする。`DOMAIN_WIP_READ_MODEL != ASSIGNMENT_READ_BARRIER_BYPASS` を明記し、lock 取得の確定は必ず名指しされた Issue の宣言と snapshot を fresh に読んで行う。この例外は Issue #184 の発効をもって有効になり、それまでは tracking Issue を作成しない。**既存の Human Gate / merge 承認 / Production approval / exact ChangeSet approval / grouped release / release-blocker lifecycle / label 4 軸 / §2.6 の取得ゲートと解放条件はいずれも変更・緩和していない。** docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
+| 2026-09-06 | §2 / §2.6 / §2.6.10 の発効状態を現況へ同期した(Issue #184)。2.6節は 2026-09-06 02:27 JST に人間の承認により発効しているが、本文には `DOMAIN_WIP_MODEL_ACTIVE = NO` /「まだ発効していない」という**発効前の記述が残っており、現況と矛盾していた**。`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` と `EFFECTIVE_FROM` へ更新し、§2 の案内も「2.6節が正本であり既に発効している」へ改めた(§2 の `MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1` は 2.6 の R5 として維持される)。あわせて `ACTIVATION_STATE_SSOT = Issue #177 の最新の durable な activation 記録` を定め、**静的な文書を、変わりうる発効状態の唯一の根拠にしない**ことを明記した(試行の結果として人間の判断で §2 のルールへ戻ることもありうるため。2.6.10 の巻き戻し規定)。試行期間の終了は期間の経過だけでは成立せず、continue / amend / rollback の判断をもって確定することも明記した。**R1〜R6・取得ゲート・掲示書式・LOCK_LEVEL・解放条件・scope 拡大・P0 割り込み・main 追随・WIP の SSoT・周知項目はいずれも変更していない。** 変更履歴に残る発効前の記述は当時の記録であり、書き換えていない。コード・Production 挙動の変更なし |
