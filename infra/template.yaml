@@ -25,6 +25,26 @@ Parameters:
   LineChannelSecretSecretArn:
     Type: String
     Description: LINE_CHANNEL_SECRETを保持するSecrets ManagerシークレットのARN(Webhook署名検証用)
+  LineCredentialRotationVersion:
+    Type: String
+    Default: "0"
+    Description: >
+      Issue #117 Phase R1。LINE認証情報のローテーション時に**明示的に値を変える**ための
+      非秘密マーカー。Secrets Managerの値だけを更新してもdynamic referenceは再解決
+      されず(リソースに実変更が無いとCloudFormationがNO_CHANGESとするため)、Lambdaは
+      旧credentialのまま動き続ける。この値を変更するとGlobalsのEnvironmentが変わり、
+      全Lambda関数がModify対象になるため再解決が確実に起きる。
+      **秘密値・トークン・キーを入れないこと**(この値は環境変数として平文で残る)。
+      通常のデプロイでは既定値のまま変更しない(変更しなければ再解決を意図しない)。
+  EdinetCredentialRotationVersion:
+    Type: String
+    Default: "0"
+    Description: >
+      Issue #117 Phase R1。EDINET認証情報のローテーション用の非秘密マーカー。
+      役割はLineCredentialRotationVersionと同じで、**LINEとEDINETを同一波で
+      ローテーションしない**運用方針に合わせて独立したパラメータとする
+      (ChangeSet上で「どちらのローテーションを意図した変更か」を識別可能にする)。
+      **秘密値・キーを入れないこと。**
   WatchlistReservedConcurrentExecutions:
     Type: Number
     Default: 4
@@ -84,6 +104,12 @@ Globals:
         EDINET_API_KEY: !Sub "{{resolve:secretsmanager:${EdinetApiKeySecretArn}:SecretString}}"
         LINE_CHANNEL_ACCESS_TOKEN: !Sub "{{resolve:secretsmanager:${LineChannelAccessTokenSecretArn}:SecretString}}"
         LINE_USER_ID: !Sub "{{resolve:secretsmanager:${LineUserIdSecretArn}:SecretString}}"
+        # Issue #117 Phase R1: ローテーション時の強制再解決マーカー(非秘密)。
+        # 上の3つのdynamic referenceと**同じEnvironmentブロック**に置くことが要件で、
+        # この値が変わればブロック全体が変更されて再解決が起きる。
+        # 値は運用者が明示的に渡す非秘密の版数であり、秘密を入れてはならない。
+        LINE_CREDENTIAL_ROTATION_VERSION: !Ref LineCredentialRotationVersion
+        EDINET_CREDENTIAL_ROTATION_VERSION: !Ref EdinetCredentialRotationVersion
 
 Resources:
   # --- 候補ユニバース本格対応(2026-08): S3キャッシュバケット ------------------
