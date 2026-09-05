@@ -8,9 +8,10 @@
 AI 非依存のリポジトリ運用ポリシーであり、特定の AI エージェントやセッションに
 依存しない。[CLAUDE.md](../CLAUDE.md) は本文書への入口にすぎない。
 
-label の 4 軸モデル(Issue Type / Priority / Severity / Release Blocker)そのものは
-[docs/issue_label_policy.md](issue_label_policy.md) が正本である。本文書は label の
-意味を定義せず、**release-blocker の lifecycle**についてのみ同文書と接続する。
+label の 4 軸モデル(Issue Type / Priority / Release Blocker /
+Progress Status)そのものは [docs/issue_label_policy.md](issue_label_policy.md) が
+正本である。本文書は label の意味を定義せず、**release-blocker の lifecycle** と
+**Priority を再評価すべき時点**についてのみ同文書と接続する。
 
 Production の具体的な運用手順(deploy 手順・テーブル追加時の注意・
 read-only 観測での副作用確認等)は [docs/operations_manual.md](operations_manual.md)
@@ -105,6 +106,11 @@ INVESTIGATION_WIP  <= 2
 例     TARO-20260904-001
        JIRO-20260904-001
 ```
+
+連番の採番規則(日本時間基準・作業者ごと・日付が変わったら 001 へリセット・
+同一日での再利用禁止)の正本は
+[chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 4.1節。
+採番するのは指示側であるため、本文書へは複製しない。
 
 作業者は**回答時に、対応した INSTRUCTION_ID を必ず明記する**。
 
@@ -703,8 +709,8 @@ ISSUE               = #<number>
 
 CLASSIFICATION      = <issue type>
 PRIORITY            = <P0|P1|P2|P3>
-SEVERITY            = <SEV-1|SEV-2|SEV-3|SEV-4|N/A>
 RELEASE_BLOCKER     = <YES|NO>
+STATUS              = <status: label>
 
 PHASE               = <current phase>
 IMPLEMENTATION      = <state>
@@ -730,7 +736,7 @@ NEXT_ACTION_ALLOWED = <YES|NO>
 `UNKNOWN` として並べると、確認していないのか該当しないのかが区別できない。
 
 snapshot は **current labels を記録するもの**であり、label の分類基準ではない。
-Type / Priority / Severity / Release Blocker の 4軸モデルの正本は
+Type / Priority / Release Blocker / Progress Status の 4軸モデルの正本は
 [issue_label_policy.md](issue_label_policy.md) であり、本節はそれを変更しない。
 
 #### STATE_ID の方式
@@ -1373,7 +1379,65 @@ calibration / tracking / not-a-bug / accepted-risk
 governance 変更   -> enhancement / tracking 等を実態で判定
 ```
 
-4軸モデル(Issue Type / Priority / Severity / Release Blocker)を崩さない。
+4軸モデル(Issue Type / Priority / Release Blocker / Progress Status)を崩さない。
+Severity は 2026-09-05 に廃止済みで、新規付与・再評価・writeback は行わない
+([issue_label_policy.md](issue_label_policy.md) §5)。
+
+### Priority を読み直す時点(いつ再評価するか)
+
+Priority の**判定基準**は [docs/issue_label_policy.md](issue_label_policy.md) §4 が
+正本である。本節は**いつ読み直し、いつ再評価するか**だけを定める。
+
+Priority は起票時から永久固定ではない。次の時点で fresh に読み直す。
+
+```
+Issue 起票時 / duplicate check 後
+Phase A 完了時
+Production evidence を取得した時
+Action delta が判明した時
+notification delta が判明した時
+Production reachability が判明した時
+remediation で主要 impact が消えた時
+worker assignment queue を決める時
+```
+
+次のいずれかが判明した場合は再評価を必須とする。
+
+```
+PRIORITY_REEVALUATION_REQUIRED = YES
+
+1. Production reachability が変わった
+2. Action delta が判明した
+3. notification delta が判明した
+4. batch-wide failure が実到達と判明した
+5. latent -> normal recurring と判明した
+6. normal recurring -> not reachable と判明した
+7. high-impact finding が resolved / moved / out-of-scope になった
+8. security exposure が判明した
+9. privacy exposure が判明した
+10. data recoverability の状況が判明した
+11. AWS / resource の cost anomaly が判明した
+12. capacity / resource exhaustion が判明した
+13. compliance requirement が判明した
+14. compensating control が追加・除去された
+```
+
+Priority は投資機能への影響だけでなく非機能リスクも含めて評価する
+(`MAX(FUNCTIONAL_PRIORITY, NON_FUNCTIONAL_PRIORITY)`)。判定基準は
+[issue_label_policy.md](issue_label_policy.md) §4.13〜§4.21 が正本である。
+
+Priority を変更した場合は、その作業の中で GitHub label を更新し、根拠を
+durable comment として書き戻す(記載項目は issue_label_policy.md §4.11)。
+
+```
+WORKER_PRIORITY_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_PRIORITY
+```
+
+Priority の変更を理由に Progress Status(§6.5 の state / `status:` label)を
+巻き戻さない。両者は独立している。
+
+判定できない場合は推測で埋めず、`PRIORITY_RECONCILIATION_REQUIRED` として
+不足している証拠を報告する。
 
 ### commit / PR と Issue の追跡
 
@@ -1468,3 +1532,6 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-04 | §4「ローカルテスト方針」を明確化(Issue #122)。`LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN` / `FULL_SUITE_AUTHORITY = PR_CI` を明示した。従来も「理由なく local full suite を毎回実行しない」としていたが、既定の可否が曖昧で、各 worker が同じ 20 分規模の全体テストを繰り返す運用が残っていた。**全体回帰の正本は PR CI** とし、ローカルでは targeted tests / related regression / ruff / mypy に絞る。**品質基準を下げるルールではなく、ローカルは狭く速く・CI は広く、という分担である。**そのうえで full suite の local 実行を完全禁止にはせず、test order dependency / global state pollution / fixture lifecycle / import-time side effect / collection の問題 / CI の full-suite failure 再現 / 共通 test infrastructure の変更 / suite-wide interaction の確認が主目的、といった **suite 全体でしか観測できない具体的理由**がある場合の例外とし、`LOCAL_FULL_PYTEST_EXCEPTION = YES` と `REASON` の明示を求める。「念のため」「安全のため」「一応」は何を確認したいのかを述べていないため理由として認めない。10節(人間承認の境界)・11節(DOC_ONLY_CHANGE)は変更していない。コード・Production 挙動の変更なし |
 | 2026-09-04 | §6.5「Issue state の同期(F')」を新設(Issue #157)。GitHub を SSoT としながら、変化する current state を**いつ・誰が・どの形式で書き戻すか**が未定義であったため、古い Issue 記述から実装状態を誤認したまま次の作業指示が出る事故が繰り返し発生していた。実際に、Issue 側は実装未着手を示す一方で remote branch には実装済み commit が push されており、新規実装として指示が出かけた事例がある。**「handoff コメントを丁寧に書く」だけでは解消しない**ため、WRITE 側と READ 側の双方を統制する。(1)writeback の trigger を handoff ではなく **state transition** とし、`PHASE_*` / `IMPLEMENTATION_*` / `BRANCH_PUSHED` / `PR_*` / `MAIN_CI_*` / `PRODUCTION_*` / `BLOCKED` / `HUMAN_DECISION_*` / `OWNER_CHANGE` / `HANDOFF` を列挙した(`HANDOFF` は trigger の1つにすぎない)。(2)Issue のノイズ化を避けるため trigger を `ASSIGNMENT_VISIBLE` と `BATCHABLE` へ二分し、原則 **1 作業単位 1 snapshot**へ集約する一方、他 worker が現況を誤判断しうる transition は次の作業割当より前に必ず durable 化する(`COMMENT_SPAM_MINIMIZED` と `STALE_STATE_WINDOW_BOUNDED` の両立)。(3)機械可読な `ISSUE_STATE_SNAPSHOT` contract を定義した。**手動連番の `STATE_VERSION` は TARO / JIRO の並行 write で番号を取り合うため採用せず**、`STATE_ID = <YYYYMMDDTHHMMSSffffffZ>-<ACTOR>-<INSTRUCTION_ID|MANUAL>-<NONCE>` とした。**collision resistance は独立生成の NONCE が担い、timestamp / ACTOR / INSTRUCTION_ID 単独の一意性へは依存させない。** INSTRUCTION_ID の「必ず一意」は運用規律にすぎず(本プロジェクトでは既に instruction ID collision が発生している)、timestamp + ACTOR も同一 ACTOR が同一 microsecond 内に 2 つの snapshot を生成すれば衝突するため、いずれも一意性の根拠にしない。NONCE は UUID4 由来等の独立生成値とし、**timestamp / INSTRUCTION_ID / ACTOR からの決定論的導出は禁止**する(元の要素が衝突した時に同時に衝突し、耐性が増えないため)。要求するのは `collision-resistant unique identifier` であり絶対一意の数学的保証ではない。timestamp を microseconds まで固定桁で保持するのは監査時の可読性のためであり一意性のためではなく、INSTRUCTION_ID は correlation 情報として保持する。timestamp prefix は識別・correlation・監査補助に用い、**STATE_ID の辞書順を「最新 snapshot」判定の唯一の truth source にしない**(`LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER`)。`SUPERSEDES_STATE_ID` の不一致は並行 write の検出シグナルとして扱い、**不一致 = 必ず不正とはしない**(reconciliation で current state を再構成する)。旧 snapshot は append-only で保持する。Production 未到達 Issue のために `N/A` を許容し、未確認と該当なしを区別する。(4)割当前の **Assignment Read Barrier**(10項目)を定義し、applicability により Production / branch / PR が該当しない Issue へ無駄な確認を強制しない。ただし implementation state を判断する Issue では Issue / labels / snapshot / 後続コメント / PR / **remote branch** の確認を原則必須とした。(5)`ASSIGNMENT_BASELINE` を指示へ持たせる(該当なしは `N/A` 可、ただし**未記載は不可**)。(6)`ISSUE_STATE_FRESHNESS_GATE = FAIL` の間は新規 implementation 指示を禁止し、先に read-only reconciliation を行う。P0 Production incident に限り read barrier を最小確認へ縮小する例外を設けたが、**Human Gate / merge 承認 / Production approval / exact ChangeSet approval / deploy 実行者 / failure injection 禁止 / release-blocker lifecycle はいずれも緩和しない**(読む手間を減らす例外であり承認を飛ばす例外ではない)。(7)`WORK_COMPLETE = TECHNICAL_WORK_COMPLETE AND REQUIRED_SSOT_WRITEBACK_COMPLETE` とし、state が変化した場合または既存記載が stale と判明した場合にのみ writeback を要求する(read-only 調査へ不要な snapshot を強制しない)。(8)handoff を「次担当への補足情報」へ再定義し、current state の主要記録は snapshot とした。(9)USER による merge 等の後は `NEXT_CHATGPT_GATE_OWNS_RECONCILIATION = YES` とし、「誰かがやるだろう」を禁止した。(10)drift audit を定義し、P0/P1 open Issue を必須、P2/P3 は queue 候補・branch/PR 保有・human decision 待ちのみとして**全件重走査を行わない**(Stabilization Sprint の速度を落とさない)。証拠の採用順序は chatgpt_collaboration_protocol.md 3.6節を正本として参照し複製していない。あわせて §5 / §6 へ正本の所在を1行ずつ追加した。**docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない** |
 | 2026-09-04 | §6.5.3 の `SUPERSEDES_STATE_ID` へ legacy predecessor の migration 規則を追加(Issue #157 follow-up)。STATE_ID contract の運用開始前に書かれた status comment には `STATE_ID` が無く、そこから最初の新形式 snapshot へ移る際に `SUPERSEDES_STATE_ID = NONE` とするしかなかった。しかし `NONE` では**先行 snapshot が存在しないのか、存在するが legacy 形式なのかを区別できず**、移行直後の 1 件だけ `SUPERSEDES_STATE_ID` による parallel write / race / stale read の検出が成立しない欠落があった(Issue #52 の実運用で判明)。そこで 3 つの場合を分け、先行なし = `NONE`、先行あり & STATE_ID あり = 実際の predecessor STATE_ID、**先行あり & STATE_ID なし = `LEGACY_NO_STATE_ID` とし、この場合のみ `SUPERSEDES_SNAPSHOT_URL`(predecessor の実際のコメント URL)を必須**とした。STATE_ID で辿れない 1 点をコメント URL で監査可能にするためであり、`LEGACY_NO_STATE_ID` は「ID が分からない」ではなく「predecessor は存在し、STATE_ID contract より前のものである」という明確な semantics を持つ。あわせて migration の禁止事項(legacy snapshot の書き換え / STATE_ID の後付け / 推測による fake・inferred STATE_ID の生成 / predecessor URL の捏造 / predecessor が STATE_ID を持つのに LEGACY_NO_STATE_ID を使う / predecessor が無いのに LEGACY_NO_STATE_ID を使う)を明文化し、`LEGACY_NO_STATE_ID` は**初回移行の 1 件にのみ使用可能**で以後は通常の supersession へ戻ることを定めた。`LEGACY_MIGRATION_RULE_EFFECTIVE_FROM` を本規則の追加以降とし、**過去へ遡及適用しない**(本規則より前に `NONE` で記録された移行時 snapshot は当時の contract に従った historical evidence としてそのまま保持し、辻褄合わせのために書き換えない)。`LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` と append-only 原則は不変。canonical rule は本節にのみ置き、CLAUDE.md / chatgpt_collaboration_protocol.md へ複製していない。Human Gate / merge 承認 / Production approval / deploy 実行者 / release-blocker lifecycle はいずれも変更していない。**docs のみの変更であり、コード・Production 挙動の変更なし** |
+| 2026-09-05 | label の 4軸表記を 5軸(Issue Type / Priority / Severity / Release Blocker / Progress Status)へ同期し、9.5節へ「Priority を読み直す時点」を新設した(#122)。Priority は起票時から永久固定ではなく、Issue 起票時 / duplicate check 後 / Phase A 完了時 / Production evidence 取得時 / Action delta 判明時 / notification delta 判明時 / Production reachability 判明時 / remediation で主要 impact が消えた時 / worker assignment queue 決定時に fresh に読み直す。再評価必須の 7 トリガーと `WORKER_PRIORITY_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_PRIORITY`、判定不能時の `PRIORITY_RECONCILIATION_REQUIRED` を定めた。**Priority の判定基準そのものは issue_label_policy.md §4 が正本であり本文書へ複製していない。** Priority 変更を理由に Progress Status を巻き戻さない。既存の lane / WIP / 指示プロトコル / テスト方針 / state 同期 / 人間承認の境界は変更していない。コード・Production 挙動の変更なし |
+| 2026-09-05 | 9.5節の Priority 再評価トリガーへ非機能側の 7 項目(security exposure / privacy exposure / data recoverability / cost anomaly / capacity exhaustion / compliance requirement / compensating control の変化)を追加した(#122)。**判定基準そのものは issue_label_policy.md §4.13〜§4.21 が正本であり本文書へ複製していない。** 既存の再評価時点・`WORKER_PRIORITY_LABEL_WRITE_OWNER`・`PRIORITY_RECONCILIATION_REQUIRED` は変更していない。コード・Production 挙動の変更なし |
+| 2026-09-05 | Severity 軸の廃止(#122)に伴い、label モデルの表記を 4軸(Issue Type / Priority / Release Blocker / Progress Status)へ同期し、6.5.3 の ISSUE_STATE_SNAPSHOT contract の必須項目から `SEVERITY` を削除して `STATUS` を加えた。**過去の snapshot は一切編集しておらず、そこに残る `SEVERITY = ...` は履歴として有効である。** 互換用の `SEVERITY = RETIRED` 等も新規必須にはしない。**Severity 廃止の理由・retired label の扱い・再導入条件の正本は issue_label_policy.md §5 であり本文書へ複製していない。** 既存の lane / WIP / 指示プロトコル / テスト方針 / state 同期 / Priority 再評価 / 人間承認の境界は変更していない。コード・Production 挙動の変更なし |
