@@ -78,6 +78,12 @@
   **Severity軸は2026-09-05に廃止した。** 新規付与・再評価・writebackを行わない
   (既存labelはCLOSED Issue / merged PRの履歴として残す)。影響度の評価は
   Priorityへ統合済み。詳細は同文書§5。
+  **Progress Statusは1 Issue = 1 lifecycleである**
+  (`ONE_ISSUE_ONE_PROGRESS_LIFECYCLE`)。Issueに残る作業単位へそれぞれ
+  Progress Statusを割り当て、種類が2つ以上になるならIssueを分割する。
+  依存関係が強いこと(reader先行/writer後追い等)はこの判定を上書きしない。
+  判定基準・分割手続き・既存Issueへの適用は同文書§7.3が正本であり、
+  **本ファイルへ複製しない**。
   Issue本文・最新コメント・labelsが矛盾する場合は、勝手に推測して実装を進めず、
   どれが最新の確定判断かを確認すること。
   (同文書はAI非依存のリポジトリ運用ポリシーであり、本ファイルはその入口に過ぎない。
