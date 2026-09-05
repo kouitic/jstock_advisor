@@ -831,6 +831,32 @@ ISSUE_STATE_FRESHNESS_GATE = FAIL
 `STATE_DRIFT_DETECTED` は不合格判定ではない。3節の `INSUFFICIENT_EVIDENCE` と
 同じく「まだ判断材料が揃っていない」状態であり、**推測で埋めて先へ進めない。**
 
+### Priority の鮮度確認
+
+read barrier では state だけでなく **Priority の鮮度**も確認する。
+
+```
+CHATGPT_PRIORITY_READ_OWNER            = CHATGPT
+ASSIGNMENT_PRIORITY_FRESHNESS_REQUIRED = YES
+```
+
+worker assignment を出す前に、**latest priority label** と
+**latest Issue evidence**(最新コメント / snapshot / PR / Production evidence)の
+整合を確認する。判定基準そのものは
+[docs/issue_label_policy.md](issue_label_policy.md) §4 が正本、
+再評価すべき時点は [development_workflow.md](development_workflow.md) 9.5節が
+正本であり、本文書へ複製しない。本文書が定めるのは**誰が確認するか**だけである。
+
+矛盾していた場合。
+
+```
+PRIORITY_RECONCILIATION_REQUIRED
+  -> 原則、新しい通常 implementation assignment を出す前に reconcile する
+```
+
+例外は Production の P0 incident に対する**必要最小限の containment** のみで、
+その場合も事後に reconcile する。
+
 ### ユーザーが state を変えた後(merge 等)
 
 merge は 2.6節のとおり `MERGE_EXECUTOR = USER` であり、作業 AI は
@@ -1124,3 +1150,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-04 | 協働ルールを追加(Issue #122)。**2.5節「提案・承認・実行・検証を混同しない」** — `PROPOSED` / `APPROVED` / `EXECUTED` / `VERIFIED` を別状態として扱う(`STATE_SEPARATION=YES`)。`MERGE_READY=YES` は提案であって承認でも実行でもなく、実行しただけでは検証済みでもない。release-blocker についても「解除できると判断」「解除を承認」「label を削除」「削除後の state を確認」を別状態とする。2節の Human Gate は緩和しない。**2.6節「merge の実行者」** — `MERGE_EXECUTOR = USER`。通常は作業 AI へ merge を指示せず、ChatGPT の `MERGE_READY` 提示後にユーザー自身が GitHub 上で merge する(`USER_MERGE_ACTION = HUMAN_APPROVAL + EXECUTION`)。事前の承認宣言は必須にしない。ChatGPT が `MERGE_READY` を出していない PR をユーザーが merge した場合も、人間による実行であるため勝手に revert しない。**PR merge を Production の承認として扱わない。** **3.5節「判断は証拠を先に置く」** — `EVIDENCE_FIRST=YES`。重要 Gate では作業 AI の自己申告だけで事実認定せず、GitHub / CI / Production の実体と突合する。矛盾時は差異を明示し実体を優先し、確定できなければ `INSUFFICIENT_EVIDENCE` とする。軽微な報告を毎回過剰検証するルールではない。**3.6節「証拠の鮮度と検証可能性」** — `FRESHER_VERIFIABLE_EVIDENCE_WINS=YES`。現在の検証可能な実体 > 検証済みの最新 durable comment > 過去の durable comment > 古い記述、の順で採用する。ただし単純なタイムスタンプ順ではなく、freshness と verifiability の両方で判断する。未検証の推測は最新であっても優先しない。古い記述が stale でも履歴として削除・改ざんしない。**3.7節「merge 判断を支援する提示形式」** — PR 番号を必ず明示し、`REVIEW_VERDICT` / `MERGE_READY` / `REMAINING_ISSUES_OR_CONCERNS` / `MERGE_BLOCKING_CONCERN` / `OTHER_ISSUE_IMPACT` / `PRODUCTION_IMPACT` / `RECOMMENDED_ACTION` をセットで示す。**残課題があることと、それが merge を止めるべきかは別**であることを `MERGE_BLOCKING_CONCERN` で明示する。形式は Markdown の表へ固定しない。あわせて5節へ、指示に検証を含める際は targeted tests を基本とし local full pytest を原則指示しない旨を記載した(詳細と例外条件の正本は development_workflow.md 4節。本文書へ複製しない)。既存ルール(指示プロトコル / 直列化 / 1指示1回答 / 出力形式 / レビュー判定4種 / Human Gate / dynamic state 分離 / PUBLIC_SANITIZED)はいずれも変更していない。コード・Production 挙動の変更なし |
 | 2026-09-04 | 1.5節「Production deploy 関連作業の担当」を新設(Issue #122)。deploy 工程は途中で担当が入れ替わると、承認対象の exact SHA・exact ChangeSet・build 済み artifact の同一性といった前提が引き継がれない。そこで実作業の担当を1体へ集約し `PRODUCTION_DEPLOYMENT_EXECUTOR = TARO` とした。対象は release 対象 SHA の最終確認 / main CI / release-blocker inventory / clean worktree・unpushed / sam build / ChangeSet CREATE / ChangeSet の read-only 確認 / 承認後の EXECUTE / CloudFormation terminal state / immediate Production verification / deploy artifact の同一性確認 / stack event 確認。次郎は調査・設計・実装・PR 作成・release readiness 調査・Verification Plan 設計・Production evidence の read-only 分析まで担当できるが、deploy 実作業は既定で行わない(`DEPLOY_OPERATION_DELEGATION_TO_JIRO = FORBIDDEN_BY_DEFAULT`)。**担当の集約は承認の省略を意味しない。** ChangeSet CREATE と EXECUTE は別 Human Gate、PR merge の承認は Production の承認ではない、main advance で exact SHA 承認は失効、ChangeSet 再作成で exact ChangeSet 承認は失効、という既存の区別をいずれも維持する。また immediate verification は太郎の担当とする一方、自然実行後の業務的な evidence 分析は内容に応じて割り当ててよく、`PRODUCTION_DEPLOYMENT_EXECUTOR = TARO` は `ALL_PRODUCTION_ANALYSIS_ASSIGNEE = TARO` を意味しないことを明記した。ユーザーが別担当を明示指定した場合は 8節の `LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY` に従う。あわせて development_workflow.md 10節へ、deploy 実作業の担当の正本が本節であることの参照を1行追加した(詳細は複製していない)。既存ルール(`MERGE_EXECUTOR=USER` / 状態分離 / EVIDENCE FIRST / 証拠の鮮度 / ローカルテスト方針 / 指示プロトコル / 出力形式 / Human Gate / PUBLIC_SANITIZED)は変更していない。コード・Production 挙動の変更なし |
 | 2026-09-04 | 5.5節「Assignment Read Barrier(state を読み直す責務)」を新設(Issue #157)。5節は「作業者が空いているか」を確認するが、**Issue の現況が本当にその状態か**は確認していなかった。会話要約や古い Issue 本文だけを根拠に「未実装」と判断し、remote branch 上の実装済み commit を見落として二重実装になりかけた事例が発生している。そこで `CHATGPT_ASSIGNMENT_READ_BARRIER_OWNER = YES` とし、新しい Issue / 別 Phase へ作業 AI を割り当てる前に development_workflow.md 6.5節の Assignment Read Barrier を ChatGPT が実行することを定めた。**確認項目・applicability・`ASSIGNMENT_BASELINE`・`ISSUE_STATE_SNAPSHOT` contract・freshness gate・P0 例外の正本は development_workflow.md 6.5節であり、本文書へ複製していない。** 本節が定めるのは実行主体(read barrier = ChatGPT / state の書き戻し = state を変えた actor)だけである。あわせて、`STATE_DRIFT_DETECTED` は不合格判定ではなく 3節の `INSUFFICIENT_EVIDENCE` と同じく判断材料の不足であり推測で埋めないこと、`ISSUE_STATE_FRESHNESS_GATE = FAIL` では実装指示を出さず先に read-only reconciliation を指示すること、ユーザーによる merge・label 変更・Issue 操作の後は `NEXT_CHATGPT_GATE_OWNS_RECONCILIATION = YES` として次の ChatGPT gate が同期確認の責任を持つこと(「いずれ誰かが同期するだろう」で次工程へ進まない)を記載した。12節へ Issue state 同期の正本の所在を1行追加した。例外は 6.5節の P0 例外のみで、**Human Gate(2節)・merge 承認(2.6節)・Production approval・exact ChangeSet approval はいずれも緩和していない。** 既存ルール(役割分担 / 指示プロトコル / 直列化 / 1指示1回答 / 出力形式 / レビュー判定4種 / EVIDENCE FIRST / 証拠の鮮度 / dynamic state 分離 / PUBLIC_SANITIZED)は変更していない。コード・Production 挙動の変更なし |
+| 2026-09-05 | Assignment Read Barrier へ「Priority の鮮度確認」を追加(#122)。`CHATGPT_PRIORITY_READ_OWNER = CHATGPT` / `ASSIGNMENT_PRIORITY_FRESHNESS_REQUIRED = YES` とし、worker assignment を出す前に latest priority label と latest Issue evidence の整合を確認することを定めた。矛盾時は `PRIORITY_RECONCILIATION_REQUIRED` として、原則あたらしい通常 implementation assignment より先に reconcile する(例外は Production P0 incident の必要最小限 containment のみで、その場合も事後に reconcile する)。**Priority の判定基準は issue_label_policy.md §4、再評価時点は development_workflow.md 9.5節が正本であり本文書へ複製していない。** 本節が定めるのは確認の実行主体だけである。既存の役割分担 / Human Gate / レビュー判定 / read barrier の所有者・例外は変更していない |

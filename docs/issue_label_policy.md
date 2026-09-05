@@ -27,7 +27,7 @@ Issue には次の5つの軸がある。
 | 軸 | 問い | ラベル |
 |---|---|---|
 | **Issue Type** | 何の Issue か | `bug` / `design-defect` / `enhancement` / `investigation` / `calibration` / `tracking` / `not-a-bug` / `accepted-risk` |
-| **Priority** | いつ対応するか(対応順序) | `priority:P0` / `priority:P1` / `priority:P2` / `priority:P3` |
+| **Priority** | いつ対応するか(投資運用への影響による対応順序) | `priority:P0` / `priority:P1` / `priority:P2` / `priority:P3` |
 | **Severity** | 問題が発生した場合の影響度 | `severity:SEV-1` / `severity:SEV-2` / `severity:SEV-3` / `severity:SEV-4` |
 | **Release Blocker** | Production release を止めるか | `release-blocker` |
 | **Progress Status** | 開発ライフサイクル上どこまで進んだか | `status:未着手` / `status:調査・設計中` / `status:設計済` / `status:開発中` / `status:開発済` / `status:マージ済` / `status:デプロイ済` / `status:本番検証済` |
@@ -135,21 +135,269 @@ Issue には原則として Type を **1つだけ**設定する。
 
 ## 4. Priority
 
-| ラベル | 意味 |
-|---|---|
-| `priority:P0` | 最優先で対応する |
-| `priority:P1` | 高 |
-| `priority:P2` | 中 |
-| `priority:P3` | 低 |
+Priority は **対応順序・優先順位**を表す。何を根拠に順序を決めるかは
+「**ユーザーの投資運用に対して、その Issue をどの順番で直すべきか**」である。
 
-Priority は **対応順序・優先順位**を表す。
+| ラベル | 一行定義 | 判定軸 |
+|---|---|---|
+| `priority:P0` | 動かない・データが壊れる | System continuity / Data integrity |
+| `priority:P1` | 動くが投資判断が狂う | Direct investment return impact |
+| `priority:P2` | 投資判断は概ね正しいが補助機能が狂う | Supporting investment function quality |
+| `priority:P3` | 投資機能は正しく、開発・運用を改善する | Development / Operations |
+
+```
+PRIORITY_POLICY_VERSION = PRIORITY_POLICY_V2
+```
+
+既存の独立性は維持する。
 
 - **P0 だからといって次回 Production release を必ず止めるわけではない。**
   release 可否は `release-blocker` で別途判断する。
 - **Severity が高い = Priority が高い、とは限らない。**
+- **Progress Status(§7)は進捗であり、Priority ではない。**
 
 通常の実装 Issue では **Priority を設定することを基本とする**
 (設定しない場合の扱いは §10 を参照)。
+
+### 4.1 `priority:P0` — System continuity / Data integrity
+
+正常な投資判断処理そのものを実行・継続できなくする、または Production の
+永続データを破損・消失させる問題。
+
+```
+判定質問
+  この Issue を放置すると、Jstock Adviser が正常に投資判断処理を継続できないか、
+  または Production データが壊れるか？
+```
+
+代表例。
+
+```
+EventBridge 等から主要処理が起動しない
+BUY / holdings 等の主要バッチが広範囲に完走不能
+通常入力で主要 Lambda が恒常的に異常終了
+Production データの破損・消失 / Production state の不可逆な不正更新
+破損データにより次回以降も処理不能
+必須認証・権限等により主要機能が利用不能
+1 件の通常データで主要 collection 全体が読めなくなる等、
+  normal Production 経路で広範囲停止する
+```
+
+**潜在的な型上の可能性だけで P0 にしない。** `PRODUCTION_REACHABILITY`(§4.6)を
+必ず確認する。例えば「戻り型は `None` を許すが、current implementation では
+`None` を返す経路が存在しない」なら、それだけでは P0 にしない。
+
+### 4.2 `priority:P1` — Direct investment return impact
+
+システム自体は正常終了するが、ユーザーが受け取る投資判断・価格・重要通知を
+誤らせ、投資リターンを低下させ得る問題。
+
+```
+判定質問
+  処理は正常終了するが、この Issue のためにユーザーが違う売買行動を
+  取る可能性があるか？
+```
+
+代表例。
+
+```
+本来 BUY すべき銘柄を候補から落とす / BUY すべきでない銘柄を BUY とする
+SELL / PARTIAL / FULL / HOLD / WATCH 等を誤判定
+買値・売値・利確価格等を誤る
+本来届くべき重要な売買通知が届かない
+本来発生すべきでない売買通知が発生する
+通知本文の Action / 価格 / 投資判断材料が誤る
+stale / incorrect data を normal Production 経路で使い投資判断を変え得る
+score defect により、ユーザーが参照する Action / category を有意に変える
+投資スタイルを構造的に過小評価し、BUY 機会損失を継続的に起こし得る
+```
+
+```
+ACTUAL_FINANCIAL_LOSS_REQUIRED_FOR_P1 = NO
+```
+
+実損を Production で観測する必要はない。code flow / Production read-only evidence /
+historical comparison / shadow calculation / Action delta / notification delta の
+いずれかで合理的に確認できればよい。
+
+**誤投資判断を Production で意図的に発生させる failure injection は禁止。**
+
+### 4.3 `priority:P2` — Supporting investment function quality
+
+直接の BUY / SELL 判断・重要通知には原則影響しないが、投資支援の補助機能・
+分析・監視・説明・振り返り等を低下させる問題。
+
+```
+判定質問
+  これを直さなくても通常の BUY / SELL 判断は基本的に変わらないが、
+  分析・監視・振り返り・説明等の品質が低下するか？
+```
+
+代表例。
+
+```
+定点評価の集計不具合 / weekly improvement review の不具合
+calibration / backtest / retrospective metrics の品質低下
+watchlist 追加・削除・cooldown 等の不整合
+監査情報・説明情報の欠落
+同じ正しい通知の単純な重複 / 表示件数と実送信件数の乖離
+Action・価格は正しいが理由説明だけ不正確
+VALIDATION / manual-only path の不具合
+通常 scheduler では到達しない運用上の問題
+```
+
+**subsystem 名だけで P2 にしない。** 例えば watchlist の bug でも、
+「有望銘柄が監視対象にならない → BUY 通知が継続的に届かない」まで因果が
+確認できるなら P1 である。
+
+### 4.4 `priority:P3` — Development / Operations
+
+現在の Production 投資判断には実質的影響がなく、主に開発・テスト・保守・
+運用効率・将来リスクを改善するもの。
+
+```
+判定質問
+  現在の Production 投資機能は正しく、主に作る側・運用する側を改善する問題か？
+```
+
+代表例。
+
+```
+test-only flaky / test determinism / CI 改善 / テストコード品質
+refactoring / docs 改善 / 開発ガバナンス / 開発者向け可観測性
+現在未使用経路の latent defect / 将来仕様変更時のみ顕在化するもの
+運用手順改善 / コード可読性・保守性
+```
+
+### 4.5 subsystem-based priority の禁止
+
+```
+SUBSYSTEM_BASED_PRIORITY_FORBIDDEN = YES
+```
+
+次のような決め方をしてはならない。
+
+```
+notification だから P1
+watchlist だから P2
+test だから P3
+```
+
+必ず次の順で因果を追う。
+
+```
+ROOT_CAUSE
+  -> PRODUCTION_REACHABILITY
+  -> DOWNSTREAM_EFFECT
+  -> USER_INVESTMENT_EFFECT
+```
+
+### 4.6 Production reachability
+
+```
+PRODUCTION_REACHABILITY_REQUIRED = YES
+```
+
+Priority 判定時に、最低でも次のいずれかへ分類する。
+
+| 値 | 意味 |
+|---|---|
+| `NORMAL_RECURRING` | 通常の定期実行経路で繰り返し到達する |
+| `MANUAL_ONLY` | 手動起動・VALIDATION 等でのみ到達する |
+| `CONDITIONAL` | 特定条件が揃ったときのみ到達する |
+| `LATENT` | 現 implementation では到達経路が存在しない |
+| `NOT_REACHABLE` | 構造上到達しない |
+
+normal recurring へ到達しない問題は通常 Priority が低くなるが、
+**「機械的に必ず1段下げる」ルールにはしない。** 到達したときの影響と合わせて判断する。
+
+### 4.7 通知の扱い
+
+```
+重要通知の欠落                    -> P1 候補
+誤 Action / 誤価格 / 誤売買内容    -> P1 候補
+誤った売買通知の発生               -> P1 候補
+同じ正しい通知の単純重複           -> P2 候補
+```
+
+ただし大量重複によって重要通知が実質的に埋没するなら P1 として再評価する。
+
+### 4.8 score / category の扱い
+
+内部 score の delta だけでは P1 にしない。次のいずれかが有意に変わるなら P1 候補。
+
+```
+final Action / ユーザー表示 category / 売買強度 / 推奨価格 / 重要通知内容
+```
+
+Production 実データまたは shadow で Action / category delta が確認された場合、
+**「LINE 通知件数は同じ」だけを理由に P2 へ下げない。**
+
+### 4.9 複数 finding を持つ Issue
+
+```
+Issue Priority = 最も高い Priority となる ACTIVE finding
+```
+
+次の finding は含めない。
+
+```
+RESOLVED / MOVED_TO_OTHER_ISSUE / OUT_OF_SCOPE / NO_LONGER_REPRODUCIBLE
+```
+
+過去に P1 相当の finding が存在していても、それが解消済みなら
+**残っている active finding だけで再評価する。**
+
+### 4.10 同一 Priority 内の順序
+
+同じ Priority の中での実装順序は、次の観点で比較する。
+
+```
+1. Production reachability
+2. 発生頻度
+3. 影響銘柄 / 処理件数
+4. 投資 Action への距離
+5. 通知欠落 / 誤通知
+6. workaround の有無
+7. 修正の独立性・安全性
+```
+
+`priority:P1.1` のような細分 label は作らない。順序は queue / comment で管理する。
+
+### 4.11 Priority は起票時から固定ではない
+
+```
+PRIORITY_REEVALUATION_ON_NEW_EVIDENCE = REQUIRED
+```
+
+次のいずれかが判明したら `PRIORITY_REEVALUATION_REQUIRED = YES` として再評価する。
+
+```
+1. Production reachability が変わった
+2. Action delta が判明した
+3. notification delta が判明した
+4. batch-wide failure が実到達と判明した
+5. latent -> normal recurring と判明した
+6. normal recurring -> not reachable と判明した
+7. high-impact finding が resolved / moved / out-of-scope になった
+```
+
+Priority を変更したら、GitHub へ根拠を durable comment として書き戻す。
+
+```
+PRIORITY_REEVALUATED       = YES
+POLICY_VERSION             = PRIORITY_POLICY_V2
+OLD_PRIORITY / NEW_PRIORITY
+PRODUCTION_REACHABILITY
+DIRECT_INVESTMENT_IMPACT
+RATIONALE
+```
+
+### 4.12 判定できない場合
+
+証拠を複数方向から確認しても Priority を確定できない場合は、推測で埋めず
+`PRIORITY_RECONCILIATION_REQUIRED` として不足している証拠を明記する。
+定量調査が必要なら `PHASE_A_PRIORITY_EVIDENCE_REQUIRED` として次タスク候補にする。
 
 ---
 
@@ -795,3 +1043,4 @@ Release Blocker 軸と混同されるため不可)。
 | 2026-08-30 | 初版作成(#87)。4軸モデル、Type 8種と排他関係、Priority / Severity の定義、条件付き release-blocker、推測禁止と報告用語、Severity の「N/A」と「TRIAGE_REQUIRED」の区別、Phase / status を label 化しない方針、tracking への非伝播、運用フロー、実例を規定。 |
 | 2026-09-03 | §6 へ blocking target semantics を追加(#122)。`release-blocker` 付与時の必須記録(`BLOCKER_MODE` / `BLOCKING_TARGET_TYPE` / `BLOCKING_TARGET` / `BLOCK_REASON` / `BLOCKER_SCOPE` / `BLOCKER_REMOVAL_CONDITION` / `BLOCKER_ADDED_AT`)を定め、必須記録が不足する場合は fail-closed(`BLOCKER_METADATA_COMPLETE=NO` / `RELEASE_DECISION=INSUFFICIENT_EVIDENCE`)として blocker を無視した release を禁止した。`BLOCKER_MODE` の `DEFECT_BLOCK` / `VERIFICATION_HOLD` を定義し、`BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER`(remediation release を自身の blocker で禁止しない)と、その許可条件7点を明文化した。既存 blocker の metadata は一括書き換えせず次回 status update 時に同期する。**既存の4軸独立性・条件付き blocker・Production-target defect の lifecycle・Issue close と blocker 解除の分離はいずれも変更していない** |
 | 2026-09-05 | 第5軸 **Progress Status** を追加(#122)。`status:` 8種(未着手 / 調査・設計中 / 設計済 / 開発中 / 開発済 / マージ済 / デプロイ済 / 本番検証済)を定義し、OPEN Issue には常に1つだけ付与する排他制約(`STATUS_LABEL_COUNT_PER_OPEN_ISSUE = 1`)を規定した。判定軸ではない補助 metadata として `waiting:` 3種(本番検証 / 人間判断 / 外部条件)を追加し、「status = どこまで完了したか」「waiting = なぜ今進んでいないか」の区別を明文化した。Progress Status は derived metadata であり Issue State Snapshot の代替ではないこと(SSoT 優先順位は snapshot / GitHub factual state が上位)、`STATUS_LABEL_WRITEBACK_REQUIRED = YES` と `WORKER_STATUS_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE`、state transition と status の mapping、不整合時の `STATUS_RECONCILIATION_REQUIRED` を規定した。close 時は最終 status を残す(`CLOSED_ISSUE_STATUS_LABEL_POLICY = KEEP_FINAL_STATUS`)。Production 変更を伴わない Issue(test-only / docs-only / governance / investigation / tracking 等)はマージ済・デプロイ済を経由せず、Issue 固有の最終 verification 完了をもって本番検証済としてよい。**既存の Type / Priority / Severity / Release Blocker の定義と独立性は変更していない** |
+| 2026-09-05 | **Priority Policy V2** を正本化(#122)。Priority の判定根拠を「ユーザーの投資運用に対して、その Issue をどの順番で直すべきか」と定義し、一行定義(P0 動かない・データが壊れる / P1 動くが投資判断が狂う / P2 投資判断は概ね正しいが補助機能が狂う / P3 投資機能は正しく開発・運用を改善する)と各段の判定質問・代表例を規定した。`SUBSYSTEM_BASED_PRIORITY_FORBIDDEN = YES`(subsystem 名だけで Priority を決めず ROOT_CAUSE -> PRODUCTION_REACHABILITY -> DOWNSTREAM_EFFECT -> USER_INVESTMENT_EFFECT まで追う)、`PRODUCTION_REACHABILITY_REQUIRED = YES`(NORMAL_RECURRING / MANUAL_ONLY / CONDITIONAL / LATENT / NOT_REACHABLE。到達しないものを機械的に1段下げる規則にはしない)、`ACTUAL_FINANCIAL_LOSS_REQUIRED_FOR_P1 = NO`(実損の Production 観測は不要。failure injection は引き続き禁止)を追加した。通知の欠落・誤 Action は P1 候補、正しい通知の単純重複は P2 候補(埋没するなら P1 再評価)。内部 score delta だけでは P1 にせず、final Action / 表示 category / 売買強度 / 推奨価格 / 重要通知内容が有意に変わる場合を P1 候補とする。複数 finding を持つ Issue は ACTIVE finding のみで最も高い Priority を採用し、resolved / moved / out-of-scope は含めない。同一 Priority 内の順序は 7 観点で比較し、細分 label は作らない。`PRIORITY_REEVALUATION_ON_NEW_EVIDENCE = REQUIRED` と再評価トリガー 7 種、判定不能時の `PRIORITY_RECONCILIATION_REQUIRED` / `PHASE_A_PRIORITY_EVIDENCE_REQUIRED` を規定した。**Type / Severity / Release Blocker / Progress Status の定義と 5軸の独立性は変更していない** |
