@@ -649,6 +649,31 @@ Priority の根拠は「広範な credential」「account-wide の blast radius�
 
 ---
 
+### 4.22 Priority を meta-priority として使わない
+
+```
+PRIORITY_LABEL_NOT_USED_AS_META_PRIORITY = YES
+```
+
+Priority は **その Issue 自身の影響と、修理の緊急度**を表す metadata である。
+sprint の順序・freeze 状態・governance 上の重要度を符号化するためだけに使わない。
+
+```
+BAD   governance Issue を「今スプリントで最優先だから」という理由だけで
+      priority:P0 にする
+GOOD  その Issue 自身の影響（continuity / data / investment / 非機能）で
+      Priority を決め、sprint の順序は別の仕組みで表す
+```
+
+sprint / freeze / stabilization の状態は、**それを定める Issue と policy が
+独立に保持する**。Priority label へ代替させると
+「Priority = 投資運用と事業継続への影響」という定義が曖昧になり、
+queue 決定と判定の一貫性が失われる。
+
+同様に、Progress Status(§7)や waiting(§8)も Priority の代わりに使わない。
+
+---
+
 ## 5. Severity
 
 | ラベル | 意味 |
@@ -1293,3 +1318,4 @@ Release Blocker 軸と混同されるため不可)。
 | 2026-09-05 | 第5軸 **Progress Status** を追加(#122)。`status:` 8種(未着手 / 調査・設計中 / 設計済 / 開発中 / 開発済 / マージ済 / デプロイ済 / 本番検証済)を定義し、OPEN Issue には常に1つだけ付与する排他制約(`STATUS_LABEL_COUNT_PER_OPEN_ISSUE = 1`)を規定した。判定軸ではない補助 metadata として `waiting:` 3種(本番検証 / 人間判断 / 外部条件)を追加し、「status = どこまで完了したか」「waiting = なぜ今進んでいないか」の区別を明文化した。Progress Status は derived metadata であり Issue State Snapshot の代替ではないこと(SSoT 優先順位は snapshot / GitHub factual state が上位)、`STATUS_LABEL_WRITEBACK_REQUIRED = YES` と `WORKER_STATUS_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE`、state transition と status の mapping、不整合時の `STATUS_RECONCILIATION_REQUIRED` を規定した。close 時は最終 status を残す(`CLOSED_ISSUE_STATUS_LABEL_POLICY = KEEP_FINAL_STATUS`)。Production 変更を伴わない Issue(test-only / docs-only / governance / investigation / tracking 等)はマージ済・デプロイ済を経由せず、Issue 固有の最終 verification 完了をもって本番検証済としてよい。**既存の Type / Priority / Severity / Release Blocker の定義と独立性は変更していない** |
 | 2026-09-05 | **Priority Policy V2** を正本化(#122)。Priority の判定根拠を「ユーザーの投資運用に対して、その Issue をどの順番で直すべきか」と定義し、一行定義(P0 動かない・データが壊れる / P1 動くが投資判断が狂う / P2 投資判断は概ね正しいが補助機能が狂う / P3 投資機能は正しく開発・運用を改善する)と各段の判定質問・代表例を規定した。`SUBSYSTEM_BASED_PRIORITY_FORBIDDEN = YES`(subsystem 名だけで Priority を決めず ROOT_CAUSE -> PRODUCTION_REACHABILITY -> DOWNSTREAM_EFFECT -> USER_INVESTMENT_EFFECT まで追う)、`PRODUCTION_REACHABILITY_REQUIRED = YES`(NORMAL_RECURRING / MANUAL_ONLY / CONDITIONAL / LATENT / NOT_REACHABLE。到達しないものを機械的に1段下げる規則にはしない)、`ACTUAL_FINANCIAL_LOSS_REQUIRED_FOR_P1 = NO`(実損の Production 観測は不要。failure injection は引き続き禁止)を追加した。通知の欠落・誤 Action は P1 候補、正しい通知の単純重複は P2 候補(埋没するなら P1 再評価)。内部 score delta だけでは P1 にせず、final Action / 表示 category / 売買強度 / 推奨価格 / 重要通知内容が有意に変わる場合を P1 候補とする。複数 finding を持つ Issue は ACTIVE finding のみで最も高い Priority を採用し、resolved / moved / out-of-scope は含めない。同一 Priority 内の順序は 7 観点で比較し、細分 label は作らない。`PRIORITY_REEVALUATION_ON_NEW_EVIDENCE = REQUIRED` と再評価トリガー 7 種、判定不能時の `PRIORITY_RECONCILIATION_REQUIRED` / `PHASE_A_PRIORITY_EVIDENCE_REQUIRED` を規定した。**Type / Severity / Release Blocker / Progress Status の定義と 5軸の独立性は変更していない** |
 | 2026-09-05 | Priority へ**非機能リスク**を正式に含めた(#122、`PRIORITY_POLICY_V2_NFR`)。`ISSUE_PRIORITY = MAX(FUNCTIONAL_PRIORITY, NON_FUNCTIONAL_PRIORITY)` を規定し、SECURITY / PRIVACY / COMPLIANCE / DATA_PROTECTION / COST / RELIABILITY / CAPACITY / PERFORMANCE を評価軸として追加した。P0 の定義を「事業継続を脅かす」へ拡張し、active な credential compromise・認証なしで攻撃可能な公開露出・現在進行の PUBLIC な個人情報漏洩・重大な compliance 違反・`UNCONTROLLED_COST_RUNAWAY` を P0 条件として明文化した。**security / cost であることだけを理由に自動 P0 にはせず**、ATTACK_REACHABILITY / EXPLOITABILITY / CURRENT_EXPOSURE / COMPENSATING_CONTROLS、および cost では CURRENT_COST_RATE / MULTIPLIER / GROWTH_RATE / SELF_TERMINATING 等の評価を要求する(金額閾値は固定せず、必要なら HUMAN_DECISION_REQUIRED)。P1 へ「広範権限の長期 credential」「protection boundary が成立していない privacy」「authoritative data が復元不能」「継続的で有意な不要 cost」等を、P2 へ「exploitability の低い hardening」「audit trail / retention 不足」等を追加した。非機能 Issue には NON_FUNCTIONAL_DIMENSION / REACHABILITY / BLAST_RADIUS / IMMEDIACY / COMPENSATING_CONTROLS の記録を求め、MAX 規則の適用例 5 件を示した。再評価トリガーへ security / privacy / recoverability / cost / capacity / compliance / compensating control の 7 項目を追加した。public な GitHub へ security の根拠を書く際に攻撃手順・identifier・secret 実値を追加公開しない方針を明記した。**Severity policy は変更しておらず、security / privacy / cost を表現できない `SEVERITY_POLICY_GAP` は既知として記録するに留めた。** Type / Severity / Release Blocker / Progress Status の定義と 5軸の独立性は変更していない |
+| 2026-09-05 | §4.22「Priority を meta-priority として使わない」を追加した(#122)。`PRIORITY_LABEL_NOT_USED_AS_META_PRIORITY = YES` とし、sprint の順序・freeze 状態・governance 上の重要度を符号化するためだけに Priority label を使わないこと、sprint / freeze / stabilization の状態はそれを定める Issue と policy が独立に保持することを明文化した。governance Issue を「今スプリントで最優先だから」という理由だけで P0 にしない。**判定基準そのもの(§4.1〜§4.21)は変更していない** |
