@@ -138,15 +138,35 @@ Issue には原則として Type を **1つだけ**設定する。
 Priority は **対応順序・優先順位**を表す。何を根拠に順序を決めるかは
 「**ユーザーの投資運用に対して、その Issue をどの順番で直すべきか**」である。
 
-| ラベル | 一行定義 | 判定軸 |
-|---|---|---|
-| `priority:P0` | 動かない・データが壊れる | System continuity / Data integrity |
-| `priority:P1` | 動くが投資判断が狂う | Direct investment return impact |
-| `priority:P2` | 投資判断は概ね正しいが補助機能が狂う | Supporting investment function quality |
-| `priority:P3` | 投資機能は正しく、開発・運用を改善する | Development / Operations |
+判定は **投資機能への影響(functional)** と **非機能リスク(non-functional)** を
+独立に評価し、高い方を採用する。
 
 ```
-PRIORITY_POLICY_VERSION = PRIORITY_POLICY_V2
+ISSUE_PRIORITY = MAX(FUNCTIONAL_PRIORITY, NON_FUNCTIONAL_PRIORITY)
+                 （P0 > P1 > P2 > P3）
+```
+
+| ラベル | 定義 |
+|---|---|
+| `priority:P0` | 事業継続を脅かす(動かない・データが壊れる・重大な security / privacy 事故・急激な cost runaway 等) |
+| `priority:P1` | 投資成果または重要な非機能品質を直接損なう |
+| `priority:P2` | 直接的な投資成果・事業継続には影響しないが、補助機能または非機能品質が低下する |
+| `priority:P3` | 現在の Production 品質に実害がなく、主に開発・運用・将来改善 |
+
+投資機能だけに着目した短縮表現(入口用)。
+
+```
+P0  動かない・データが壊れる
+P1  動くが投資判断が狂う
+P2  投資判断は概ね正しいが補助機能が狂う
+P3  投資機能は正しく、開発・運用を改善する
+```
+
+短縮表現は理解の入口であり、**非機能リスクを落とさないこと**。
+非機能の判定基準は §4.13〜§4.21 が正本である。
+
+```
+PRIORITY_POLICY_VERSION = PRIORITY_POLICY_V2_NFR
 ```
 
 既存の独立性は維持する。
@@ -159,7 +179,7 @@ PRIORITY_POLICY_VERSION = PRIORITY_POLICY_V2
 通常の実装 Issue では **Priority を設定することを基本とする**
 (設定しない場合の扱いは §10 を参照)。
 
-### 4.1 `priority:P0` — System continuity / Data integrity
+### 4.1 `priority:P0`(functional) — System continuity / Data integrity
 
 正常な投資判断処理そのものを実行・継続できなくする、または Production の
 永続データを破損・消失させる問題。
@@ -187,7 +207,7 @@ Production データの破損・消失 / Production state の不可逆な不正�
 必ず確認する。例えば「戻り型は `None` を許すが、current implementation では
 `None` を返す経路が存在しない」なら、それだけでは P0 にしない。
 
-### 4.2 `priority:P1` — Direct investment return impact
+### 4.2 `priority:P1`(functional) — Direct investment return impact
 
 システム自体は正常終了するが、ユーザーが受け取る投資判断・価格・重要通知を
 誤らせ、投資リターンを低下させ得る問題。
@@ -222,7 +242,7 @@ historical comparison / shadow calculation / Action delta / notification delta �
 
 **誤投資判断を Production で意図的に発生させる failure injection は禁止。**
 
-### 4.3 `priority:P2` — Supporting investment function quality
+### 4.3 `priority:P2`(functional) — Supporting investment function quality
 
 直接の BUY / SELL 判断・重要通知には原則影響しないが、投資支援の補助機能・
 分析・監視・説明・振り返り等を低下させる問題。
@@ -250,7 +270,7 @@ VALIDATION / manual-only path の不具合
 「有望銘柄が監視対象にならない → BUY 通知が継続的に届かない」まで因果が
 確認できるなら P1 である。
 
-### 4.4 `priority:P3` — Development / Operations
+### 4.4 `priority:P3`(functional) — Development / Operations
 
 現在の Production 投資判断には実質的影響がなく、主に開発・テスト・保守・
 運用効率・将来リスクを改善するもの。
@@ -380,6 +400,13 @@ PRIORITY_REEVALUATION_ON_NEW_EVIDENCE = REQUIRED
 5. latent -> normal recurring と判明した
 6. normal recurring -> not reachable と判明した
 7. high-impact finding が resolved / moved / out-of-scope になった
+8. security exposure が判明した
+9. privacy exposure が判明した
+10. data recoverability の状況が判明した
+11. AWS / resource の cost anomaly が判明した
+12. capacity / resource exhaustion が判明した
+13. compliance requirement が判明した
+14. compensating control が追加・除去された
 ```
 
 Priority を変更したら、GitHub へ根拠を durable comment として書き戻す。
@@ -398,6 +425,227 @@ RATIONALE
 証拠を複数方向から確認しても Priority を確定できない場合は、推測で埋めず
 `PRIORITY_RECONCILIATION_REQUIRED` として不足している証拠を明記する。
 定量調査が必要なら `PHASE_A_PRIORITY_EVIDENCE_REQUIRED` として次タスク候補にする。
+
+---
+
+### 4.13 非機能リスクの評価軸
+
+`PRIORITY_POLICY_V2` は投資機能への影響を中心に定義していたため、
+security / privacy / compliance / data protection / cost / reliability 等の
+非機能リスクを Priority へ反映できない gap があった。本節以降がその是正である。
+
+```
+PRIORITY_POLICY_VERSION = PRIORITY_POLICY_V2_NFR
+```
+
+最低限、次を正式な評価軸として扱う。
+
+| dimension | 対象 |
+|---|---|
+| `SECURITY` | credential / 権限 / 認証 / 攻撃面 |
+| `PRIVACY` | 個人情報・投資情報・秘密情報の露出 |
+| `COMPLIANCE` | 法令・契約・利用規約 |
+| `DATA_PROTECTION` | 復元可能性・backup・deletion protection |
+| `COST` | AWS running cost・課金の増加 |
+| `RELIABILITY` | 可用性・失敗率 |
+| `CAPACITY` | resource 枯渇・上限到達 |
+| `PERFORMANCE` | 遅延・処理時間 |
+
+`PERFORMANCE` は独立軸として扱ってよいが、遅延が通知遅延や投資機会損失へ
+直接届く場合は **FUNCTIONAL_IMPACT 側の P1** としても評価できる。
+
+### 4.14 functional / non-functional の MAX 規則
+
+```
+ISSUE_PRIORITY = MAX(FUNCTIONAL_PRIORITY, NON_FUNCTIONAL_PRIORITY)
+                 （P0 > P1 > P2 > P3）
+```
+
+両者を**独立に**評価し、高い方を採用する。
+
+**security issue だから自動的に P0、cost issue だから自動的に P0 とはしない。**
+必ず reachability / blast radius / immediacy を評価する(§4.18)。
+
+### 4.15 `priority:P0` の非機能条件
+
+§4.1(system continuity / data integrity)に加え、次のいずれかに該当し、かつ
+**CURRENT / IMMINENT / NORMAL_REACHABLE** であるものを P0 とする。
+
+#### security
+
+```
+active credential compromise
+active unauthorized access
+internet から重大資産へ認証なし・実質無防備で到達でき、現在攻撃可能
+AWS account / Production data / secrets 全体へ高確率・低障壁で到達できる重大 exposure
+即時 containment が合理的に必要
+```
+
+**「blast radius が大きい」だけで自動 P0 にしない。**
+`ATTACK_REACHABILITY` / `EXPLOITABILITY` / `CURRENT_EXPOSURE` /
+`COMPENSATING_CONTROLS` を確認する。
+
+#### privacy
+
+```
+個人情報・投資情報・秘密情報が現在 PUBLIC に露出している
+継続的に漏洩している
+即時の封じ込めが必要
+```
+
+#### compliance
+
+```
+法令・契約・利用規約への重大違反が現在発生しており、
+システム停止・利用停止・重大是正を直ちに要する
+```
+
+推測で法的結論を出さない。明確な contract / regulation の evidence がある場合のみ。
+
+#### cost runaway
+
+```
+UNCONTROLLED_COST_RUNAWAY
+  AWS cost が異常な速度で増加している
+  runaway loop / recursive invoke / 無制御な resource 生成等により、
+    放置時間に比例して損失が急増する
+  日単位・時間単位で無視できない追加 cost が発生している
+  budget を短期間で大幅に超過する合理的見込みがある
+  停止しない限り増加し続ける
+```
+
+**「少し高い」「最適化の余地がある」「不要 resource が月数百円」は P0 にしない。**
+
+cost の P0 判定では、可能な範囲で次を評価する。
+
+```
+CURRENT_COST_RATE / BASELINE_COST_RATE / MULTIPLIER / ABSOLUTE_COST /
+GROWTH_RATE / EXPECTED_24H_COST / EXPECTED_30D_COST /
+SELF_TERMINATING / HUMAN_ACTION_REQUIRED_TO_STOP
+```
+
+金額の閾値は現時点で固定しない。予算感・運用規模の判断が必要な場合は
+`HUMAN_DECISION_REQUIRED` として報告する。
+
+### 4.16 `priority:P1` の非機能条件
+
+§4.2(direct investment return impact)は維持したうえで、次を追加する。
+
+```
+security      現在の悪用証拠は無いが、normal operating state で credential compromise /
+              unauthorized access / major blast radius へ直接到達できる
+              例) 広範権限の長期 credential の恒久利用
+
+privacy       PUBLIC 露出は現在確認されていないが、通常運用で重大な PII leakage が
+              合理的に起こり得る。protection boundary が実質成立していない
+
+data
+protection    authoritative data を失った場合に復元不能。
+              current data は正常だが、通常の運用ミス等から irreversible loss へ
+              直接到達する
+
+cost          継続的で有意な不要 cost。P0 ほど急激ではないが、放置期間に応じて
+              明確な経済損失になる。monthly running cost へ大きな割合で影響する
+
+reliability   major functionality が高頻度または通常経路で失敗し得るが、
+              現時点で全面停止ではない
+```
+
+考え方は「**今すぐ incident containment が要るほどではないが、放置すると
+ユーザーの投資成果・資産・秘密・費用・継続運用へ直接重大な損失を与え得る**」。
+
+### 4.17 `priority:P2` / `priority:P3` の非機能条件
+
+P2(§4.3 に加えて)。
+
+```
+security hardening だが current exploitability が低い
+audit trail 不足 / retention 設計不足
+minor privacy exposure risk
+recovery 改善だが authoritative data への direct loss path が遠い
+中程度・緩慢な cost inefficiency
+observability 不足 / operational reliability 改善
+```
+
+例: CloudWatch Logs の retention 未設定で cost が緩やかに増える場合は原則 P2。
+ただし**実測で cost が急騰しているなら P0 / P1 へ**。
+
+P3(§4.4 に加えて)。
+
+```
+current Production exposure なし / latent hardening
+cost 最適化の効果がごく小さい
+future architecture improvement / minor operational convenience
+```
+
+### 4.18 非機能 Issue の評価記録
+
+該当する項目について、最低限次を記録する。
+
+```
+NON_FUNCTIONAL_DIMENSION = SECURITY | PRIVACY | COMPLIANCE | DATA_PROTECTION |
+                           COST | RELIABILITY | CAPACITY | PERFORMANCE | NONE
+
+REACHABILITY = NORMAL_RECURRING | PUBLICLY_REACHABLE | INTERNAL_REACHABLE |
+               MANUAL_ONLY | CONDITIONAL | LATENT | NOT_REACHABLE
+
+BLAST_RADIUS = SINGLE_RECORD | SINGLE_FUNCTION | SINGLE_WORKFLOW |
+               APPLICATION_WIDE | AWS_ACCOUNT_WIDE | PUBLIC_DATA_EXPOSURE | OTHER
+
+IMMEDIACY = ACTIVE | IMMINENT | ONGOING | POTENTIAL | LATENT
+
+COMPENSATING_CONTROLS = <summary>
+```
+
+§4.6 の `PRODUCTION_REACHABILITY` は機能面の到達性、本節の `REACHABILITY` は
+非機能面の到達性を表す。両方に該当する Issue では両方を記録してよい。
+
+### 4.19 MAX 規則の適用例
+
+```
+A  BUY 判定への影響なし + AWS account-wide の credential exposure = P1
+   -> Issue = P1
+
+B  投資機能への影響なし + 無制御な recursive Lambda で cost が急騰中 = P0
+   -> Issue = P0
+
+C  投資機能への影響なし + CloudWatch Logs の retention 未設定、
+   cost 増加は緩慢 = P2
+   -> Issue = P2
+
+D  test flaky のみ = P3
+   -> Issue = P3
+
+E  BUY 通知の欠落 = P1 + 非機能影響 = P3
+   -> Issue = P1
+```
+
+### 4.20 Severity とは引き続き独立
+
+Priority が非機能を含むようになっても、Severity・release-blocker・
+Progress Status との独立性(§2)は変わらない。
+
+```
+security / privacy / cost の Issue でも Priority は P0 / P1 になり得る
+Severity は「問題が発生した場合の影響度」であり Priority とは別に判定する
+```
+
+なお現在の Severity ladder(§5)は機能欠陥を前提とした表現であり、
+security / privacy / cost のカテゴリを直接表現できない。
+
+```
+SEVERITY_POLICY_GAP = 既知（本節では Priority 側のみ是正し、Severity policy は変更しない）
+```
+
+### 4.21 公開時の開示
+
+非機能 Issue、特に security の Priority 根拠を public な GitHub へ書く際は、
+攻撃手順・credential identifier・secret の実値・過度に具体的な resource identifier・
+非公開のアーキテクチャ詳細を**追加公開しない**。
+
+各 Issue の `PUBLIC_MINIMAL` / `PUBLIC_SANITIZED` 方針を維持する。
+Priority の根拠は「広範な credential」「account-wide の blast radius」
+「現時点では conditional」程度の抽象度で足りる。
 
 ---
 
@@ -1044,3 +1292,4 @@ Release Blocker 軸と混同されるため不可)。
 | 2026-09-03 | §6 へ blocking target semantics を追加(#122)。`release-blocker` 付与時の必須記録(`BLOCKER_MODE` / `BLOCKING_TARGET_TYPE` / `BLOCKING_TARGET` / `BLOCK_REASON` / `BLOCKER_SCOPE` / `BLOCKER_REMOVAL_CONDITION` / `BLOCKER_ADDED_AT`)を定め、必須記録が不足する場合は fail-closed(`BLOCKER_METADATA_COMPLETE=NO` / `RELEASE_DECISION=INSUFFICIENT_EVIDENCE`)として blocker を無視した release を禁止した。`BLOCKER_MODE` の `DEFECT_BLOCK` / `VERIFICATION_HOLD` を定義し、`BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER`(remediation release を自身の blocker で禁止しない)と、その許可条件7点を明文化した。既存 blocker の metadata は一括書き換えせず次回 status update 時に同期する。**既存の4軸独立性・条件付き blocker・Production-target defect の lifecycle・Issue close と blocker 解除の分離はいずれも変更していない** |
 | 2026-09-05 | 第5軸 **Progress Status** を追加(#122)。`status:` 8種(未着手 / 調査・設計中 / 設計済 / 開発中 / 開発済 / マージ済 / デプロイ済 / 本番検証済)を定義し、OPEN Issue には常に1つだけ付与する排他制約(`STATUS_LABEL_COUNT_PER_OPEN_ISSUE = 1`)を規定した。判定軸ではない補助 metadata として `waiting:` 3種(本番検証 / 人間判断 / 外部条件)を追加し、「status = どこまで完了したか」「waiting = なぜ今進んでいないか」の区別を明文化した。Progress Status は derived metadata であり Issue State Snapshot の代替ではないこと(SSoT 優先順位は snapshot / GitHub factual state が上位)、`STATUS_LABEL_WRITEBACK_REQUIRED = YES` と `WORKER_STATUS_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE`、state transition と status の mapping、不整合時の `STATUS_RECONCILIATION_REQUIRED` を規定した。close 時は最終 status を残す(`CLOSED_ISSUE_STATUS_LABEL_POLICY = KEEP_FINAL_STATUS`)。Production 変更を伴わない Issue(test-only / docs-only / governance / investigation / tracking 等)はマージ済・デプロイ済を経由せず、Issue 固有の最終 verification 完了をもって本番検証済としてよい。**既存の Type / Priority / Severity / Release Blocker の定義と独立性は変更していない** |
 | 2026-09-05 | **Priority Policy V2** を正本化(#122)。Priority の判定根拠を「ユーザーの投資運用に対して、その Issue をどの順番で直すべきか」と定義し、一行定義(P0 動かない・データが壊れる / P1 動くが投資判断が狂う / P2 投資判断は概ね正しいが補助機能が狂う / P3 投資機能は正しく開発・運用を改善する)と各段の判定質問・代表例を規定した。`SUBSYSTEM_BASED_PRIORITY_FORBIDDEN = YES`(subsystem 名だけで Priority を決めず ROOT_CAUSE -> PRODUCTION_REACHABILITY -> DOWNSTREAM_EFFECT -> USER_INVESTMENT_EFFECT まで追う)、`PRODUCTION_REACHABILITY_REQUIRED = YES`(NORMAL_RECURRING / MANUAL_ONLY / CONDITIONAL / LATENT / NOT_REACHABLE。到達しないものを機械的に1段下げる規則にはしない)、`ACTUAL_FINANCIAL_LOSS_REQUIRED_FOR_P1 = NO`(実損の Production 観測は不要。failure injection は引き続き禁止)を追加した。通知の欠落・誤 Action は P1 候補、正しい通知の単純重複は P2 候補(埋没するなら P1 再評価)。内部 score delta だけでは P1 にせず、final Action / 表示 category / 売買強度 / 推奨価格 / 重要通知内容が有意に変わる場合を P1 候補とする。複数 finding を持つ Issue は ACTIVE finding のみで最も高い Priority を採用し、resolved / moved / out-of-scope は含めない。同一 Priority 内の順序は 7 観点で比較し、細分 label は作らない。`PRIORITY_REEVALUATION_ON_NEW_EVIDENCE = REQUIRED` と再評価トリガー 7 種、判定不能時の `PRIORITY_RECONCILIATION_REQUIRED` / `PHASE_A_PRIORITY_EVIDENCE_REQUIRED` を規定した。**Type / Severity / Release Blocker / Progress Status の定義と 5軸の独立性は変更していない** |
+| 2026-09-05 | Priority へ**非機能リスク**を正式に含めた(#122、`PRIORITY_POLICY_V2_NFR`)。`ISSUE_PRIORITY = MAX(FUNCTIONAL_PRIORITY, NON_FUNCTIONAL_PRIORITY)` を規定し、SECURITY / PRIVACY / COMPLIANCE / DATA_PROTECTION / COST / RELIABILITY / CAPACITY / PERFORMANCE を評価軸として追加した。P0 の定義を「事業継続を脅かす」へ拡張し、active な credential compromise・認証なしで攻撃可能な公開露出・現在進行の PUBLIC な個人情報漏洩・重大な compliance 違反・`UNCONTROLLED_COST_RUNAWAY` を P0 条件として明文化した。**security / cost であることだけを理由に自動 P0 にはせず**、ATTACK_REACHABILITY / EXPLOITABILITY / CURRENT_EXPOSURE / COMPENSATING_CONTROLS、および cost では CURRENT_COST_RATE / MULTIPLIER / GROWTH_RATE / SELF_TERMINATING 等の評価を要求する(金額閾値は固定せず、必要なら HUMAN_DECISION_REQUIRED)。P1 へ「広範権限の長期 credential」「protection boundary が成立していない privacy」「authoritative data が復元不能」「継続的で有意な不要 cost」等を、P2 へ「exploitability の低い hardening」「audit trail / retention 不足」等を追加した。非機能 Issue には NON_FUNCTIONAL_DIMENSION / REACHABILITY / BLAST_RADIUS / IMMEDIACY / COMPENSATING_CONTROLS の記録を求め、MAX 規則の適用例 5 件を示した。再評価トリガーへ security / privacy / recoverability / cost / capacity / compliance / compensating control の 7 項目を追加した。public な GitHub へ security の根拠を書く際に攻撃手順・identifier・secret 実値を追加公開しない方針を明記した。**Severity policy は変更しておらず、security / privacy / cost を表現できない `SEVERITY_POLICY_GAP` は既知として記録するに留めた。** Type / Severity / Release Blocker / Progress Status の定義と 5軸の独立性は変更していない |

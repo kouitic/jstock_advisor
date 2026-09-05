@@ -71,6 +71,13 @@
   P3  投資機能は正しく、開発・運用を改善する
   ```
 
+  **ただし投資影響だけで決めない。** Security / Privacy / Compliance /
+  Data Protection / Cost / Reliability / Capacity 等の非機能影響も独立に評価し、
+  **高い方をIssueのPriorityとする**(`MAX(functional, non-functional)`)。
+  重大なsecurity・privacy事故や、放置すると増え続けるcost runawayはP0になり得る。
+  一方、security issueだから自動P0・cost issueだから自動P0とはしない。
+  到達性(reachability)・影響範囲(blast radius)・切迫度(immediacy)を確認すること。
+
   判定基準の詳細(各段の判定質問・代表例・`PRODUCTION_REACHABILITY`の分類・
   複数findingを持つIssueの扱い・再評価トリガー)の正本は
   [docs/issue_label_policy.md](docs/issue_label_policy.md) 4節であり、
