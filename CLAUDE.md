@@ -22,6 +22,16 @@
   **本ファイル作成時点では発効していない**(`DOMAIN_WIP_MODEL_ACTIVE = NO`。
   有効なWIPルールは同文書2節)。
 
+- **作業報告・Human Gate提示・Instructionの許可範囲(`AUTHORIZED_PHASES`)・
+  確認質問といった「メッセージの形式」は
+  [docs/ai_operation_message_contract.md](docs/ai_operation_message_contract.md)
+  が正本である。** 同文書は形式のみを定め、承認の要否・作業の可否・WIP・labelの
+  規則はいずれも他文書が正本である(本ファイルへも同文書へも複製しない)。
+  **同文書は作成時点で発効していない**(`NEW_CONTRACT_ACTIVE = NO`)。
+  発効までは報告形式は development_workflow.md 2.5.5、Human Gateの提示は
+  chatgpt_collaboration_protocol.md 3.7 の現行運用が有効である。
+  merge しただけでは発効せず、周知と人間の明示的な承認を要する。
+
 - **作業指示に `INSTRUCTION_ID` が付いている場合、回答の冒頭に同じIDを必ず記載すること。**
   IDが無い回答・別IDの回答・撤回済みIDへの回答は、次工程の根拠として扱われない。
   指示キューは作業者ごとに独立しており(`PER_WORKER_SERIALIZATION=YES` /

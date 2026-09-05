@@ -402,6 +402,20 @@ Issue close と release-blocker 解除は別判断      片方の承認は他方
   -> release-blocker 解除の条件を満たしたわけではない
 ```
 
+### 提示のフォーマット
+
+承認を求める際の**提示形式**(固定 4 節 + `AUDIT_INFO` の分離、gate 種別ごとの
+exact identifier の扱い)は
+[docs/ai_operation_message_contract.md](ai_operation_message_contract.md) 8節が
+正本である。本文書は**どの操作に承認が要るか**を定め、形式を複製しない。
+
+```
+APPROVAL_UNIT_CONSOLIDATION = NO
+```
+
+同文書は提示形式を定めるだけであり、本節の承認単位を 1 つも統合・緩和しない。
+同文書は作成時点で発効していない(`NEW_CONTRACT_ACTIVE = NO`)。
+
 ### 例外
 
 なし。緊急時であっても Human Gate は省略しない。
@@ -1006,8 +1020,17 @@ JIRO-20260906-001      どちらも有効
 次はいずれも「使用済み」として扱う。
 
 ```
-実行完了 / CANCELLED / SUPERSEDED / 途中停止 / 作業開始後の取消
+実行完了 / ANSWERED / FAILED / BLOCKED /
+CANCELLED / SUPERSEDED / 途中停止 / 作業開始後の取消
 ```
+
+```
+ONE_ID_ONE_RELAY_EVENT = YES
+```
+
+**作業者へ relay した時点で、その ID はその 1 回の relay に紐づく。**
+以後は結果がどうであれ再利用しない。失敗した指示・作業者が BLOCKED を返した
+指示の ID を再利用すると、どちらへの回答かを判別できなくなる。
 
 ### 作業 AI へ渡す前の下書き
 
@@ -1540,6 +1563,8 @@ DISCLOSURE = PUBLIC_SANITIZED
 ローカルテスト方針 / local full pytest の可否と例外    -> development_workflow.md 4節
 指示プロトコルの仕様                                   -> development_workflow.md 2.5節
 Issue state 同期の仕様(writeback / snapshot / gate)  -> development_workflow.md 6.5節
+作業報告 / Human Gate 提示 / AUTHORIZED_PHASES / 確認質問の形式
+                                                       -> ai_operation_message_contract.md
 機能領域ベースの WIP 運用ルール                         -> development_workflow.md 2.6節
 機能領域・機能・共通部品の一覧                         -> functional_domains.md
 Issue の分類と label                                   -> issue_label_policy.md
@@ -1567,3 +1592,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-05 | ユーザーの明示承認により2つの恒久ルールを追加(Issue #122)。**1.6節「ユーザーへの説明の水準」** — `USER_EXPLANATION_LEVEL = IT_FOUNDATION_AWS_LITERATE`。Human Gate は「人間が理解したうえで決める」ことが前提であり、理解できない説明に対する承認は Human Gate として成立しない。前提とする知識水準は **IT 基礎知識(応用情報技術者試験相当)+ AWS 主要マネージドサービスの名称・概要の理解**であり、一方で **本プロジェクトの実装・運用の詳細は自明として扱わない**。目的は噛み砕くこと自体ではなく `USER_CAN_MAKE_AN_INFORMED_DECISION` を満たすこと。Lambda / DynamoDB / CloudFormation / S3 / Secrets Manager / EventBridge / IAM / CI / PR / merge / main / Production / PITR / RPO / RTO 等の一般的な IT・AWS 用語はそのまま使ってよく、毎回初歩から言い換えない(サービス名を一般語へ置き換えるのは禁止)。代わりに **本プロジェクト固有の運用概念**(BLOCKED_BY_RELEASE_SCOPE / waiting:本番検証 / grouped release / code WIP / Assignment Read Barrier / Issue State Snapshot 等)、**AWS でも取り違えやすい挙動**(ChangeSet の CREATE と EXECUTE の違い / Dynamic Reference の再解決条件 / Deletion Protection・DeletionPolicy・UpdateReplacePolicy の違い / PITR restore が新しいテーブルになること / merge 済みだが Production 未反映という状態)、**Human Gate の範囲**には背景・因果関係・影響を添える。機械可読の状態値の併記は禁止しないが、それだけをユーザー向け説明としない(`INTERNAL_STATUS_ONLY_RESPONSE = FORBIDDEN`)。最低限「今どうなっているか / なぜ / 進めると何が危険か / 次に何をするか / 今ユーザーがすること / 次に判断が要るのはいつか」を含め、ユーザーの操作が不要なら「今あなたがすることはありません」と明示する。Human Gate の依頼では「承認すると何が起きるか」と**「この承認ではまだ何が起きないか」**を必ず対で示し、`ChangeSet 作成 != Production 反映` / `merge != Production 承認` を説明の側でも崩さない。技術情報を削りすぎて因果関係が見えなくなる説明は禁止し、`IT_FOUNDATION_AWS_LITERATE != TECHNICAL_DETAIL_FORBIDDEN`(Issue/PR/SHA/CI run 等は監査証跡として残す)ことを明記。**対象は ChatGPT からユーザーへの回答のみ**で、作業 AI の完了報告は従来どおり機械可読形式でよい(4.5節・7節の contract は不変)。**4.1節「Instruction ID の採番」** — `INSTRUCTION_ID_DATE_TIMEZONE = Asia/Tokyo` / `SERIAL_SCOPE = PER_ASSIGNEE_PER_JST_DATE` / `SERIAL_RESET_ON_DATE_CHANGE = 001`。日本時間で日付が変わったら連番を 001 へ戻し、前日の連番を翌日へ引き継がない。作業者ごとに独立(同日でも TARO / JIRO の 001 は衝突ではない)。同一作業者・同一日付では使用済み番号を再利用しない(完了 / CANCELLED / SUPERSEDED / 途中停止 / 取消をいずれも使用済みとする)。作業 AI へ未提示の下書きは同じ ID のまま修正してよいが、`RELAYED_TO_ASSIGNEE = YES` の後は同じ ID で内容を差し替えない。development_workflow.md 2.5.1節へは cross-reference のみを置き、採番規則の全文は複製していない。**既存 governance はいずれも緩和していない**(Human Gate / `CREATE != EXECUTE` / `merge != Production 承認` / `PER_WORKER_SERIALIZATION` / 緊急差し替えの条件を含む)。Severity 軸は復活させていない。コード・Production 挙動の変更なし |
 | 2026-09-06 | 3.8節「機能領域 WIP のレビュー観点」を新設(Issue #177)。development_workflow.md 2.6節の領域ベース WIP モデルでは、作業者が自分で触る領域と `LOCK_LEVEL` を判定するが、**その判定の誤りは CI では検出できない**。「本来は買い判定の領域も lock すべきだったのに保有判断の領域だけで進めた」という誤りはレビューでしか気づけないため、`CHATGPT_LOCK_REVIEW_OWNER = CHATGPT` として、実装レビューの観点へ `PRIMARY_DOMAIN` / `LOCKED_DOMAINS` / `SHARED_TOUCHED` の網羅性 / `LOCK_LEVEL` の妥当性 / LEVEL_1 の compatibility evidence / scope 拡大の有無を追加した(人間承認 H5)。判定できない場合は 3節の `INSUFFICIENT_EVIDENCE` とし、「追加だけの diff に見えるから LEVEL_1 でよい」と推測で通さない。**確認された lock omission は合格にしない**(`LOCK_OMISSION_REVIEW_PASS_ALLOWED = NO`)。lock の漏れは他の作業者が「その領域は空いている」と誤判断して並行着手できてしまうため、領域ベース WIP の安全性そのものを破る。material な omission が確認できた場合は `REJECT`、判断する証拠が足りない場合と宣言の説明が不足している場合は `INSUFFICIENT_EVIDENCE` とし、**確認された omission を `PASS_WITH_CONDITIONS` で通すことを禁止する**(条件付き合格は方針が妥当な場合の判定であり、lock 漏れは方針ではなく安全性の欠落である)。判定語は 3節の 4 種から選び独自に増やさない。`REJECT` とする場合も、漏れている領域 / その根拠となる参照元 / 関係する共通部品と consumer / 必要な追加 lock を具体的に示し、作業者は STOP -> 宣言の再評価 -> 必要 lock の取得 -> scope 再宣言 -> 必要なら main 取り込み -> re-review の順で対応する。**「具体的に理由を示す」ことは「REJECT しない」ことではない。** **領域・機能・共通部品の一覧は functional_domains.md、WIP ルール本文は development_workflow.md 2.6節が正本であり本文書へ複製していない。** 本節は 2.6節の発効(`DOMAIN_WIP_MODEL_ACTIVE = YES`)をもって適用を開始し、それまでは確認義務を課さない。あわせて 12節へ正本の所在を 2 行追加した。**2節の Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet approval はいずれも変更していない。** コード・Production 挙動の変更なし |
 | 2026-09-06 | 2.6節へ「MERGE_READY 判定に含める確認(G2)」を追加した(Issue #181)。PR レビューでは diff の妥当性に加え、**その PR が merge された後にその Issue へ別の Progress Status 相当の残作業が残るか**を確認し、残る場合は原則として merge より前に Issue を分割する。Progress Status は Issue 全体を表す単一 label であるため、未実装の作業単位を抱えたまま `status:マージ済` へ進むと「実装は終わっている」と読める label のまま release 判定を誤らせる(Issue #20 で実際に発生し、post-merge の reconciliation で分割した)。**これは既存の review gate へ確認項目を 1 つ加えるものであり、新しい Human Gate を増やすものではない。** `MERGE_EXECUTOR = USER`・`USER_MERGE_ACTION = HUMAN_APPROVAL + EXECUTION`・merge を Production 承認として扱わない原則・2節の Production Human Gate はいずれも変更していない。判定ルールの正本は issue_label_policy.md §7.3、snapshot の記録項目は development_workflow.md 6.5.3節であり、本文書へ複製していない。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-06 | Instruction ID の使用済み判定を補完し、Human Gate の提示形式の正本を参照へ移した(Issue #184)。(1)4.1節の「使用済み」の列挙へ `ANSWERED` / `FAILED` / `BLOCKED` を追加し、`ONE_ID_ONE_RELAY_EVENT = YES` を明記した。従来の列挙(実行完了 / CANCELLED / SUPERSEDED / 途中停止 / 作業開始後の取消)には、**指示が失敗した場合と作業者が BLOCKED を返した場合**が含まれておらず、その ID を再利用すると回答の対応付けが壊れる余地が残っていた。採番規則そのもの(Asia/Tokyo の日付 / 作業者別の日次連番 / 日付変更で 001 へリセット)は変更していない。(2)2節へ「提示のフォーマット」を追加し、承認を求める際の形式(固定 4 節 + AUDIT_INFO の分離、gate 種別ごとの exact identifier の扱い)の正本が新設した docs/ai_operation_message_contract.md 8節であることを参照で示した。**本文書は「どの操作に承認が要るか」を定め、形式を複製しない。** 同文書は提示形式のみを定めるものであり `APPROVAL_UNIT_CONSOLIDATION = NO`、本節の承認単位を 1 つも統合・緩和していない。(3)12節へ正本の所在を 1 行追加した。既存の Human Gate 一覧 / `MERGE_EXECUTOR = USER` / exact ChangeSet approval / レビュー判定 4 種 / 指示プロトコル / 3.8節の lock omission 判定はいずれも変更していない。コード・Production 挙動の変更なし |
