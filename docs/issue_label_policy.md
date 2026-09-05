@@ -20,9 +20,9 @@
 
 ---
 
-## 1. 4軸モデル
+## 1. 5軸モデル
 
-Issue には次の4つの軸がある。
+Issue には次の5つの軸がある。
 
 | 軸 | 問い | ラベル |
 |---|---|---|
@@ -30,12 +30,16 @@ Issue には次の4つの軸がある。
 | **Priority** | いつ対応するか(対応順序) | `priority:P0` / `priority:P1` / `priority:P2` / `priority:P3` |
 | **Severity** | 問題が発生した場合の影響度 | `severity:SEV-1` / `severity:SEV-2` / `severity:SEV-3` / `severity:SEV-4` |
 | **Release Blocker** | Production release を止めるか | `release-blocker` |
+| **Progress Status** | 開発ライフサイクル上どこまで進んだか | `status:未着手` / `status:調査・設計中` / `status:設計済` / `status:開発中` / `status:開発済` / `status:マージ済` / `status:デプロイ済` / `status:本番検証済` |
+
+この5軸とは別に、**判定軸ではない補助 metadata** として waiting label がある
+(`waiting:本番検証` / `waiting:人間判断` / `waiting:外部条件`、§8)。
 
 ---
 
-## 2. 4軸は独立して判定する
+## 2. 5軸は独立して判定する
 
-**この4軸を相互に自動推論してはならない。** それぞれ独立した根拠で判断する。
+**この5軸を相互に自動推論してはならない。** それぞれ独立した根拠で判断する。
 
 ```
 P0              ≠  release-blocker
@@ -50,6 +54,8 @@ bug             ≠  必ず release-blocker
 - 「SEV-1 だから P0」— 影響度が大きくても、対応順序が最優先とは限らない。
 - 「release-blocker だから Severity を引き上げる」— block 条件と影響度は別物。
 - 「bug だから release-blocker」— 多くの bug は release を止めない。
+- 「P0 だから status:開発中」— Priority は対応順序であり、進捗ではない。
+- 「status:デプロイ済 だから release-blocker を解除してよい」— 進捗と block 条件は別物。
 
 ---
 
@@ -143,7 +149,7 @@ Priority は **対応順序・優先順位**を表す。
 - **Severity が高い = Priority が高い、とは限らない。**
 
 通常の実装 Issue では **Priority を設定することを基本とする**
-(設定しない場合の扱いは §7 を参照)。
+(設定しない場合の扱いは §10 を参照)。
 
 ---
 
@@ -209,7 +215,7 @@ PRODUCTION_VERIFICATION_PLAN = Issue の該当 section / comment への参照
 
 **GitHub label 自体に値を持たせようとしない。** label は `release-blocker` の
 存在だけを示し、詳細な target は Issue の durable record で管理する。
-4軸モデル(§1)は変更しない。
+5軸モデル(§1)は変更しない。
 
 #### 必須記録が不足している場合は fail-closed とする
 
@@ -333,7 +339,196 @@ blocker 付与
 
 ---
 
-## 7. 推測して埋めない
+## 7. Progress Status
+
+Progress Status は「**この Issue が開発ライフサイクル上どこまで進んだか**」だけを
+表す軸である。Type / Priority / Severity / Release Blocker から自動推論しない。
+
+### 7.1 8つの状態
+
+| label | 意味 |
+|---|---|
+| `status:未着手` | Issue は登録済みだが、Phase A の調査・設計にまだ着手していない |
+| `status:調査・設計中` | Phase A / investigation / design を実施中。設計は未確定 |
+| `status:設計済` | Phase A 完了。実装方針が確定している。コード実装は未開始 |
+| `status:開発中` | branch 上でコード・設定・docs 等の実装を開始しており、implementation complete に未到達 |
+| `status:開発済` | implementation complete。必要な branch test / PR / CI まで到達しているが main へ未 merge(原則 OPEN PR + implementation complete + CI green) |
+| `status:マージ済` | main へ merge 済み。Production へ反映すべき変更があるが、まだ deploy されていない |
+| `status:デプロイ済` | Production 反映済み。ただし Issue が要求する必須 Production verification が未完了 |
+| `status:本番検証済` | Issue 固有の必須 verification が完了し、技術的には close 可能な状態 |
+
+`status:設計済` は Human decision 待ちでも成立する。設計が完了しているなら status は
+`設計済` のままとし、待ち理由は §8 の waiting label で補助表現する。
+
+### 7.2 排他制約
+
+```
+STATUS_LABEL_COUNT_PER_OPEN_ISSUE = 1（0 個禁止 / 2 個以上禁止）
+```
+
+status を遷移させるときは、**旧 status label を remove して新 status label を add** する
+(置換)。履歴目的で複数の status を残さない。履歴は Issue State Snapshot が保持する。
+
+```
+status:設計済  --(implementation start)-->  status:開発中
+```
+
+### 7.3 進捗の測り方(複数 Phase を持つ Issue)
+
+1つの修正対象を段階的に進める Issue(Phase A / B-1 / B-2 / …)では、
+**到達した最も進んだ工程**を status とする。後続 Phase が残っていることは、
+Issue が OPEN であること自体と Issue State Snapshot が表す。
+
+umbrella / tracking Issue のように「完了」が単一の工程で定義できない Issue では、
+到達点ではなく **その Issue の現在の活動段階**を status とする(活動中の tracking Issue は
+`status:調査・設計中`)。
+
+### 7.4 Production 変更を伴わない Issue
+
+すべての Issue が Production lifecycle を通るわけではない。
+
+```
+test-only / docs-only / governance / investigation / tracking /
+accepted-risk / not-a-bug
+```
+
+これらでは、不要な `status:マージ済` / `status:デプロイ済` を経由する必要はない。
+その Issue 固有の完了条件(main CI green、deterministic verification、
+documentation verification 等)を満たした時点で `status:本番検証済` へ進めてよい。
+
+```
+status:本番検証済 = 「Issue 固有の最終 verification 完了」を含む広義の final verified state
+```
+
+名称に「本番」が含まれるが、**Production 変更が存在しない Issue にも適用される**。
+これは承認済みの 8 段階名称を維持したうえでの定義であり、名称の読み替えではなく
+定義の明文化である。
+
+### 7.5 GitHub state との関係
+
+GitHub の `state=CLOSED` が Issue 完了そのものを表すため、`status:完了` という label は
+新設しない。
+
+```
+CLOSED_ISSUE_STATUS_LABEL_POLICY = KEEP_FINAL_STATUS
+```
+
+close 時は最後の status label をそのまま残す。過去 Issue の一覧でも
+「どこまで実証されて close されたか」が判別できるためである。
+既存の CLOSED Issue への一括 backfill は必須としない。
+
+---
+
+## 8. waiting metadata(補助状態)
+
+waiting label は Progress Status とは独立した補助軸であり、**判定軸ではない**。
+
+| label | 意味 |
+|---|---|
+| `waiting:本番検証` | 実装 / merge / deploy 等は進んでいるが、自然実行・所定時刻・Production 観測等を待っている |
+| `waiting:人間判断` | 技術調査・設計等は完了しているが、Human decision / approval がないと次工程へ進めない |
+| `waiting:外部条件` | 外部サービスの事象、データ蓄積、自然障害の発生、外部情報の到着等を待っている |
+
+```
+WAITING_LABEL_COUNT_PER_ISSUE = 0 個以上（複数併用可。ただし必要最低限）
+```
+
+### 8.1 status と waiting の違い
+
+```
+status  = どこまで完了したか
+waiting = なぜ今進んでいないか
+```
+
+両者は併用する。
+
+```
+status:デプロイ済 + waiting:本番検証
+status:設計済     + waiting:人間判断
+status:デプロイ済 + waiting:外部条件
+```
+
+### 8.2 waiting:人間判断 を付けない場合
+
+merge 承認・Production ChangeSet EXECUTE 承認のように、**全 Issue 共通の短時間 gate**
+ごとに機械的に付け外ししない。Issue が実質的に Human decision blocked になっている
+場合にのみ使う。
+
+### 8.3 重複を避ける
+
+主因が明確なら 1 つに絞る。例えば「自然な障害事象の発生待ち」が主因の Issue では
+`waiting:外部条件` を優先し、`waiting:本番検証` を重ねない。
+
+---
+
+## 9. Issue State Snapshot との関係
+
+Progress Status label は **derived metadata** であり、Issue State Snapshot の代替ではない。
+
+| | 役割 |
+|---|---|
+| GitHub label | 人間が Issue 一覧で現在地を把握するための粗い状態 |
+| Issue State Snapshot | AI / review / gate 判断に使う詳細な SSoT |
+
+```
+SSoT 優先順位
+  Issue State Snapshot / GitHub factual state（PR / merge / deploy evidence）
+    ↓
+  status label
+```
+
+### 9.1 label 同期の運用契約
+
+```
+STATE_TRANSITION_WRITEBACK_REQUIRED = YES（既存）
+STATUS_LABEL_WRITEBACK_REQUIRED     = YES（新規）
+
+WORKER_STATE_WRITE_OWNER        = ACTOR_WHO_CHANGED_STATE（既存）
+WORKER_STATUS_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE（新規）
+CHATGPT_STATE_READ_OWNER        = CHATGPT（既存・変更なし）
+```
+
+state を変更した当人が、同じ作業の中で status label も同期する。
+同期対象となる state transition は次のとおり。
+
+| transition | status |
+|---|---|
+| Issue created | `status:未着手` |
+| PHASE_START | `status:調査・設計中` |
+| PHASE_COMPLETE | `status:設計済` |
+| IMPLEMENTATION_START | `status:開発中` |
+| IMPLEMENTATION_COMPLETE(未 merge) | `status:開発済` |
+| PR_MERGED(Production deploy が必要) | `status:マージ済` |
+| PRODUCTION_DEPLOYED(verification 未了) | `status:デプロイ済` |
+| PRODUCTION_VERIFIED | `status:本番検証済` |
+| ISSUE_CLOSED | 最終 status を維持(`KEEP_FINAL_STATUS`) |
+
+`OWNER_CHANGE` は status の変更理由にならない。
+
+### 9.2 stale / 不整合 label の扱い
+
+Assignment read barrier では、latest Issue State Snapshot と current status label の
+整合を確認する。食い違う場合は次のように扱う。
+
+```
+例: snapshot は IMPLEMENTATION_START、label は status:未着手
+  -> STATUS_RECONCILIATION_REQUIRED
+```
+
+このとき、**stale または missing な label だけを理由に既存の事実を捨てない。**
+GitHub comments / PR / merge / deploy evidence から reconcile し、
+事実に合わせて label を直す。逆はしない。
+
+判定に足る証拠が得られない場合は、推測で label を付けず
+`STATUS_RECONCILIATION_REQUIRED` として Issue 番号と不足証拠を報告する。
+
+---
+
+## 10. 推測して埋めない
+
+Progress Status も推測で埋めない。証拠が得られない場合は
+`status:未着手` を便宜的に付けず、`STATUS_RECONCILIATION_REQUIRED` として
+Issue 番号と不足証拠を報告する(判定手順は §9.2)。
 
 **最重要原則: label を「埋めること」を目的にしない。**
 
@@ -374,7 +569,7 @@ Priority についても同じ区別を維持する
 
 ---
 
-## 8. label 化しないもの
+## 11. label 化しないもの
 
 ### Phase を label 化しない
 
@@ -382,9 +577,10 @@ Priority についても同じ区別を維持する
 進行する場合でも、**Phase ごとの label を追加しない。**
 Phase は Issue comment で管理する。
 
-### 一時的 status を label 化しない
+### 細粒度の一時的 status を label 化しない
 
-次のような一時的状態は原則として label 化しない。
+§7 の Progress Status(8段階)と §8 の waiting metadata は label 化する。
+それより細かい次のような一時的状態は、引き続き label 化しない。
 
 ```
 IMPLEMENTATION_REVIEW_REQUIRED   PR_CREATED      PR_CI_GREEN
@@ -393,7 +589,7 @@ HANDOFF                          PAUSED          WAITING_REVIEW
 ```
 
 これらは **Issue comment / PR state / GitHub Actions / Git branch** を
-truth source とする。labels は比較的安定した分類情報に限定する。
+truth source とする。labels は Progress Status の粒度までに留める。
 
 ### Issue label を PR へコピーしない
 
@@ -403,7 +599,7 @@ PR label が必要な場合は、PR 独自の目的に応じて別途判断す�
 
 ---
 
-## 9. tracking Issue の扱い
+## 12. tracking Issue の扱い
 
 tracking Issue では、**子 Issue の Priority / Severity を親へ機械的に伝播しない。**
 
@@ -414,9 +610,9 @@ tracking Issue 自身に `priority:P0` / `severity:SEV-2` を付けない。
 
 ---
 
-## 10. 運用フロー
+## 13. 運用フロー
 
-### 10.1 新規 Issue 作成時
+### 13.1 新規 Issue 作成時
 
 Issue 登録は「本文を書く → labels を設定する」までを**1つの作業**とする。
 Issue だけ登録して labels を後回しにしない。
@@ -426,7 +622,7 @@ duplicate 検索
   ↓
 Issue 作成
   ↓
-4軸判定(Type / Priority / Severity / release-blocker 要否)
+5軸判定(Type / Priority / Severity / release-blocker 要否 / Progress Status)
   ↓
 labels 設定
   ↓
@@ -441,26 +637,38 @@ Classification: BUG
 Priority:       P1
 Severity:       SEV-2
 Release blocker: NO
+Progress status: 未着手
 ```
 
-### 10.2 Issue 着手時
+新規 Issue の Progress Status は `status:未着手` から始める。
+
+### 13.2 Issue 着手時
 
 実装開始前に必ず **Issue 本文 / 最新コメント / labels** を確認する。
+このとき latest Issue State Snapshot と current status label の整合も確認する
+(§9.2)。
 
 矛盾がある場合、**そのまま実装を開始しない。**
 明らかな label 同期漏れなら修正する。判断が必要なら
 `LABEL_CONSISTENCY_DECISION_REQUIRED` として報告する。
+status label と snapshot が食い違う場合は
+`STATUS_RECONCILIATION_REQUIRED` として扱い、事実に合わせて label を直す。
 
 着手報告には次を含める。
 
 ```
 Labels: ...
 Label consistency: PASS / FAIL
+Status label: <現在の status:>
 ```
 
 FAIL なら実装開始前に解消する。
 
-### 10.3 investigation 完了時
+着手して Phase A を開始したら、その作業の中で status label を
+`status:未着手` から `status:調査・設計中` へ置換する
+(`STATUS_LABEL_WRITEBACK_REQUIRED = YES`、§9.1)。
+
+### 13.3 investigation 完了時
 
 調査後は結論に合わせて labels を再評価する。
 
@@ -473,9 +681,9 @@ FAIL なら実装開始前に解消する。
 
 分類が変わった場合、**Issue 本文の過去の判断を削除しない。**
 取り消し線などで「当初そう判断したが、調査によって撤回した」という
-**監査証跡を残す**(実例は §11 の #79)。
+**監査証跡を残す**(実例は §14 の #79)。
 
-### 10.4 Issue close 前
+### 13.4 Issue close 前
 
 close する前に最終 Label consistency check を行う。
 
@@ -486,15 +694,19 @@ close する前に最終 Label consistency check を行う。
 - `bug` + `not-a-bug` になっていないか
 - `investigation` のまま結論済みになっていないか
 - `accepted-risk` の根拠が記録されているか
+- status label が到達した最終工程を表しているか(通常は `status:本番検証済`)
 
-矛盾を解消してから close する。完了報告には次を含める。
+矛盾を解消してから close する。close 時に status label は削除せず、
+最終 status をそのまま残す(`KEEP_FINAL_STATUS`、§7.5)。
+完了報告には次を含める。
 
 ```
 Final labels: ...
 Label consistency: PASS
+Final status: <status:...>
 ```
 
-### 10.5 Production release 前
+### 13.5 Production release 前
 
 OPEN な `release-blocker` を検索する。
 
@@ -502,7 +714,7 @@ OPEN な `release-blocker` を検索する。
 各 Issue の本文 / 最新コメントの block 条件を確認し、
 今回の release 対象 commit に block 対象機能が含まれるかを判定する(§6)。
 
-### 10.6 別 bug を発見した場合
+### 13.6 別 bug を発見した場合
 
 作業中の Issue とは別の bug / design-defect を発見した場合:
 
@@ -517,7 +729,7 @@ OPEN な `release-blocker` を検索する。
 
 ---
 
-## 11. 実例
+## 14. 実例
 
 以下は本ポリシーの適用例である。
 **Issue 番号はあくまで「例」であり、ポリシーの定義そのものを
@@ -525,7 +737,7 @@ OPEN な `release-blocker` を検索する。
 
 | Issue | labels | ポイント |
 |---|---|---|
-| #81 | `bug` `priority:P0` `severity:SEV-2` `release-blocker` | 4軸がすべて立つ例 |
+| #81 | `bug` `priority:P0` `severity:SEV-2` `release-blocker` | 判定軸がすべて立つ例 |
 | #82 | `design-defect` `priority:P1` `severity:SEV-3` `release-blocker` | 安全性 bug ではないが、特定機能を含む release を止める**条件付き blocker** |
 | #85 | `enhancement` `priority:P0` | P0 でも `release-blocker` を付けない例。Severity は N/A |
 | #49 | `tracking` | 子 Issue に P0 / SEV-2 があっても親へ伝播しない |
@@ -535,7 +747,7 @@ OPEN な `release-blocker` を検索する。
 
 ---
 
-## 12. 現行 label 一覧
+## 15. 現行 label 一覧
 
 | label | description |
 |---|---|
@@ -556,6 +768,17 @@ OPEN な `release-blocker` を検索する。
 | `severity:SEV-3` | 中(機能低下・可観測性の欠如) |
 | `severity:SEV-4` | 低(軽微・表示のみ) |
 | `release-blocker` | 次回Production releaseの前に解消が必要 |
+| `status:未着手` | Progress Status: 登録済みだがPhase A調査・設計に未着手 |
+| `status:調査・設計中` | Progress Status: Phase A / 調査・設計を実施中(設計確定前) |
+| `status:設計済` | Progress Status: Phase A完了。実装方針が確定、コード実装は未開始 |
+| `status:開発中` | Progress Status: branch上で実装中(implementation complete未到達) |
+| `status:開発済` | Progress Status: implementation complete。PR/CIまで到達、main未merge |
+| `status:マージ済` | Progress Status: mainへmerge済み。Production反映が必要だが未deploy |
+| `status:デプロイ済` | Progress Status: Production反映済み。必須verificationが未完了 |
+| `status:本番検証済` | Progress Status: Issue固有の最終verification完了。技術的にclose可能 |
+| `waiting:本番検証` | 補助metadata: 自然実行・所定時刻・Production観測を待っている |
+| `waiting:人間判断` | 補助metadata: Human decision / approvalがないと次工程へ進めない |
+| `waiting:外部条件` | 補助metadata: 外部事象・データ蓄積・外部情報の到着を待っている |
 
 `release-blocker` の実際の適用範囲は、Issue 本文の block 条件も確認すること(§6)。
 
@@ -565,9 +788,10 @@ Release Blocker 軸と混同されるため不可)。
 
 ---
 
-## 13. 変更履歴
+## 16. 変更履歴
 
 | 日付 | 変更概要 |
 |---|---|
 | 2026-08-30 | 初版作成(#87)。4軸モデル、Type 8種と排他関係、Priority / Severity の定義、条件付き release-blocker、推測禁止と報告用語、Severity の「N/A」と「TRIAGE_REQUIRED」の区別、Phase / status を label 化しない方針、tracking への非伝播、運用フロー、実例を規定。 |
 | 2026-09-03 | §6 へ blocking target semantics を追加(#122)。`release-blocker` 付与時の必須記録(`BLOCKER_MODE` / `BLOCKING_TARGET_TYPE` / `BLOCKING_TARGET` / `BLOCK_REASON` / `BLOCKER_SCOPE` / `BLOCKER_REMOVAL_CONDITION` / `BLOCKER_ADDED_AT`)を定め、必須記録が不足する場合は fail-closed(`BLOCKER_METADATA_COMPLETE=NO` / `RELEASE_DECISION=INSUFFICIENT_EVIDENCE`)として blocker を無視した release を禁止した。`BLOCKER_MODE` の `DEFECT_BLOCK` / `VERIFICATION_HOLD` を定義し、`BLOCKER_REMEDIATION_RELEASE_IS_NOT_BLOCKED_BY_ITS_OWN_BLOCKER`(remediation release を自身の blocker で禁止しない)と、その許可条件7点を明文化した。既存 blocker の metadata は一括書き換えせず次回 status update 時に同期する。**既存の4軸独立性・条件付き blocker・Production-target defect の lifecycle・Issue close と blocker 解除の分離はいずれも変更していない** |
+| 2026-09-05 | 第5軸 **Progress Status** を追加(#122)。`status:` 8種(未着手 / 調査・設計中 / 設計済 / 開発中 / 開発済 / マージ済 / デプロイ済 / 本番検証済)を定義し、OPEN Issue には常に1つだけ付与する排他制約(`STATUS_LABEL_COUNT_PER_OPEN_ISSUE = 1`)を規定した。判定軸ではない補助 metadata として `waiting:` 3種(本番検証 / 人間判断 / 外部条件)を追加し、「status = どこまで完了したか」「waiting = なぜ今進んでいないか」の区別を明文化した。Progress Status は derived metadata であり Issue State Snapshot の代替ではないこと(SSoT 優先順位は snapshot / GitHub factual state が上位)、`STATUS_LABEL_WRITEBACK_REQUIRED = YES` と `WORKER_STATUS_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE`、state transition と status の mapping、不整合時の `STATUS_RECONCILIATION_REQUIRED` を規定した。close 時は最終 status を残す(`CLOSED_ISSUE_STATUS_LABEL_POLICY = KEEP_FINAL_STATUS`)。Production 変更を伴わない Issue(test-only / docs-only / governance / investigation / tracking 等)はマージ済・デプロイ済を経由せず、Issue 固有の最終 verification 完了をもって本番検証済としてよい。**既存の Type / Priority / Severity / Release Blocker の定義と独立性は変更していない** |
