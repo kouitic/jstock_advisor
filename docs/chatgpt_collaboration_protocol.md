@@ -784,9 +784,70 @@ SCOPE_EXPANSION        宣言時の PLANNED_FILES から実際の変更が広が
 入力バリデーション・直列化・永続データの読み手を壊し得る。
 ```
 
-`LOCKED_DOMAINS` に漏れがあった場合は `REJECT` ではなく、まず
-**何が漏れているか(どの参照元がどの領域に属するか)を具体的に示す。**
-作業者が実測をやり直せる形で返す。
+#### lock の漏れが確認された場合
+
+```
+LOCK_OMISSION_REVIEW_PASS_ALLOWED = NO
+```
+
+`LOCKED_DOMAINS` の漏れ、`SHARED_TOUCHED` の漏れ、`LOCK_LEVEL` の過小判定が
+**実体との突合で確認された**場合、そのレビューは合格にしない。lock の漏れは
+領域ベース WIP の安全性そのものを破る。他の作業者が「その領域は空いている」と
+判断して並行着手できてしまうためである。
+
+判定は既存の4種(3節)から選ぶ。**判定語を独自に増やさない。**
+
+```
+material な lock omission が確認できた
+    -> REJECT
+       修正が必要な状態であり、条件付きで前進してよい状態ではない
+
+漏れているかどうかを判断する証拠が足りない
+    -> INSUFFICIENT_EVIDENCE
+       不合格ではない。参照元の実測を要求する
+
+lock 自体は妥当だが、宣言の説明が不足している
+    -> INSUFFICIENT_EVIDENCE
+       証拠(実測した参照元と件数)の追加を要求する
+```
+
+```
+禁止  確認された lock omission を PASS_WITH_CONDITIONS で通すこと。
+      PASS_WITH_CONDITIONS は方針が妥当な場合の判定であり、
+      lock 漏れは方針ではなく安全性の欠落である。
+```
+
+`REJECT` とする場合も、作業者が実測をやり直せるよう次を具体的に示す。
+
+```
+1  漏れている領域(D<n>)
+2  その根拠となる参照元(どの path が、どの機能を経由して、どの領域に属するか)
+3  関係する共通部品(S-<nn>)と、その consumer
+4  必要な追加 lock(LOCKED_DOMAINS へ加えるべき領域と LOCK_LEVEL)
+```
+
+```
+「具体的に理由を示す」ことは「REJECT しない」ことではない。
+理由の提示は判定を弱める根拠にならない。
+```
+
+指摘を受けた作業者は次の順で対応する。
+
+```
+STOP(実装を止める)
+-> DOMAIN_WIP_DECLARATION を再評価する
+-> 必要な領域の code WIP を取得する(取得できなければ着手しない)
+-> scope を再宣言する
+-> 必要なら最新 main を取り込む
+-> re-review を受ける
+```
+
+```
+取得すべき領域の code WIP を他者が保持していた場合、
+その実装は「直すべき指摘があるまま進める」のではなく、
+development_workflow.md 2.6.7 に従って設計変更・待機・Issue 分割の
+いずれかを選ぶ。
+```
 
 ### 適用範囲
 
@@ -1483,4 +1544,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-05 | Priority の鮮度確認について、functional evidence と non-functional evidence(security / privacy / data protection / cost / reliability 等)の双方を確認することを最小追記した(#122)。Priority は両者の高い方で決まるため、片方だけを見て「変化なし」と判断しない。**判定基準は issue_label_policy.md §4.13〜§4.21 が正本であり本文書へ複製していない。** 実行主体(`CHATGPT_PRIORITY_READ_OWNER`)と例外は変更していない |
 | 2026-09-05 | Severity 軸の廃止(#122)に伴い、責務表の記載を Issue 分類 / Priority / release-blocker / Progress Status へ同期した。worker instruction・レビュー・assignment read barrier のいずれでも Severity の判定・writeback・鮮度確認を要求しない。**過去の instruction 例やコメントに残る Severity 記載は履歴として保持する。** Priority の鮮度確認(functional / non-functional 双方)と実行主体、Human Gate・レビュー判定・役割分担は変更していない |
 | 2026-09-05 | ユーザーの明示承認により2つの恒久ルールを追加(Issue #122)。**1.6節「ユーザーへの説明の水準」** — `USER_EXPLANATION_LEVEL = IT_FOUNDATION_AWS_LITERATE`。Human Gate は「人間が理解したうえで決める」ことが前提であり、理解できない説明に対する承認は Human Gate として成立しない。前提とする知識水準は **IT 基礎知識(応用情報技術者試験相当)+ AWS 主要マネージドサービスの名称・概要の理解**であり、一方で **本プロジェクトの実装・運用の詳細は自明として扱わない**。目的は噛み砕くこと自体ではなく `USER_CAN_MAKE_AN_INFORMED_DECISION` を満たすこと。Lambda / DynamoDB / CloudFormation / S3 / Secrets Manager / EventBridge / IAM / CI / PR / merge / main / Production / PITR / RPO / RTO 等の一般的な IT・AWS 用語はそのまま使ってよく、毎回初歩から言い換えない(サービス名を一般語へ置き換えるのは禁止)。代わりに **本プロジェクト固有の運用概念**(BLOCKED_BY_RELEASE_SCOPE / waiting:本番検証 / grouped release / code WIP / Assignment Read Barrier / Issue State Snapshot 等)、**AWS でも取り違えやすい挙動**(ChangeSet の CREATE と EXECUTE の違い / Dynamic Reference の再解決条件 / Deletion Protection・DeletionPolicy・UpdateReplacePolicy の違い / PITR restore が新しいテーブルになること / merge 済みだが Production 未反映という状態)、**Human Gate の範囲**には背景・因果関係・影響を添える。機械可読の状態値の併記は禁止しないが、それだけをユーザー向け説明としない(`INTERNAL_STATUS_ONLY_RESPONSE = FORBIDDEN`)。最低限「今どうなっているか / なぜ / 進めると何が危険か / 次に何をするか / 今ユーザーがすること / 次に判断が要るのはいつか」を含め、ユーザーの操作が不要なら「今あなたがすることはありません」と明示する。Human Gate の依頼では「承認すると何が起きるか」と**「この承認ではまだ何が起きないか」**を必ず対で示し、`ChangeSet 作成 != Production 反映` / `merge != Production 承認` を説明の側でも崩さない。技術情報を削りすぎて因果関係が見えなくなる説明は禁止し、`IT_FOUNDATION_AWS_LITERATE != TECHNICAL_DETAIL_FORBIDDEN`(Issue/PR/SHA/CI run 等は監査証跡として残す)ことを明記。**対象は ChatGPT からユーザーへの回答のみ**で、作業 AI の完了報告は従来どおり機械可読形式でよい(4.5節・7節の contract は不変)。**4.1節「Instruction ID の採番」** — `INSTRUCTION_ID_DATE_TIMEZONE = Asia/Tokyo` / `SERIAL_SCOPE = PER_ASSIGNEE_PER_JST_DATE` / `SERIAL_RESET_ON_DATE_CHANGE = 001`。日本時間で日付が変わったら連番を 001 へ戻し、前日の連番を翌日へ引き継がない。作業者ごとに独立(同日でも TARO / JIRO の 001 は衝突ではない)。同一作業者・同一日付では使用済み番号を再利用しない(完了 / CANCELLED / SUPERSEDED / 途中停止 / 取消をいずれも使用済みとする)。作業 AI へ未提示の下書きは同じ ID のまま修正してよいが、`RELAYED_TO_ASSIGNEE = YES` の後は同じ ID で内容を差し替えない。development_workflow.md 2.5.1節へは cross-reference のみを置き、採番規則の全文は複製していない。**既存 governance はいずれも緩和していない**(Human Gate / `CREATE != EXECUTE` / `merge != Production 承認` / `PER_WORKER_SERIALIZATION` / 緊急差し替えの条件を含む)。Severity 軸は復活させていない。コード・Production 挙動の変更なし |
-| 2026-09-06 | 3.8節「機能領域 WIP のレビュー観点」を新設(Issue #177)。development_workflow.md 2.6節の領域ベース WIP モデルでは、作業者が自分で触る領域と `LOCK_LEVEL` を判定するが、**その判定の誤りは CI では検出できない**。「本来は買い判定の領域も lock すべきだったのに保有判断の領域だけで進めた」という誤りはレビューでしか気づけないため、`CHATGPT_LOCK_REVIEW_OWNER = CHATGPT` として、実装レビューの観点へ `PRIMARY_DOMAIN` / `LOCKED_DOMAINS` / `SHARED_TOUCHED` の網羅性 / `LOCK_LEVEL` の妥当性 / LEVEL_1 の compatibility evidence / scope 拡大の有無を追加した(人間承認 H5)。判定できない場合は 3節の `INSUFFICIENT_EVIDENCE` とし、「追加だけの diff に見えるから LEVEL_1 でよい」と推測で通さない。`LOCKED_DOMAINS` の漏れは `REJECT` ではなく、どの参照元がどの領域に属するかを具体的に示して作業者が実測をやり直せる形で返す。**領域・機能・共通部品の一覧は functional_domains.md、WIP ルール本文は development_workflow.md 2.6節が正本であり本文書へ複製していない。** 本節は 2.6節の発効(`DOMAIN_WIP_MODEL_ACTIVE = YES`)をもって適用を開始し、それまでは確認義務を課さない。あわせて 12節へ正本の所在を 2 行追加した。**2節の Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet approval はいずれも変更していない。** コード・Production 挙動の変更なし |
+| 2026-09-06 | 3.8節「機能領域 WIP のレビュー観点」を新設(Issue #177)。development_workflow.md 2.6節の領域ベース WIP モデルでは、作業者が自分で触る領域と `LOCK_LEVEL` を判定するが、**その判定の誤りは CI では検出できない**。「本来は買い判定の領域も lock すべきだったのに保有判断の領域だけで進めた」という誤りはレビューでしか気づけないため、`CHATGPT_LOCK_REVIEW_OWNER = CHATGPT` として、実装レビューの観点へ `PRIMARY_DOMAIN` / `LOCKED_DOMAINS` / `SHARED_TOUCHED` の網羅性 / `LOCK_LEVEL` の妥当性 / LEVEL_1 の compatibility evidence / scope 拡大の有無を追加した(人間承認 H5)。判定できない場合は 3節の `INSUFFICIENT_EVIDENCE` とし、「追加だけの diff に見えるから LEVEL_1 でよい」と推測で通さない。**確認された lock omission は合格にしない**(`LOCK_OMISSION_REVIEW_PASS_ALLOWED = NO`)。lock の漏れは他の作業者が「その領域は空いている」と誤判断して並行着手できてしまうため、領域ベース WIP の安全性そのものを破る。material な omission が確認できた場合は `REJECT`、判断する証拠が足りない場合と宣言の説明が不足している場合は `INSUFFICIENT_EVIDENCE` とし、**確認された omission を `PASS_WITH_CONDITIONS` で通すことを禁止する**(条件付き合格は方針が妥当な場合の判定であり、lock 漏れは方針ではなく安全性の欠落である)。判定語は 3節の 4 種から選び独自に増やさない。`REJECT` とする場合も、漏れている領域 / その根拠となる参照元 / 関係する共通部品と consumer / 必要な追加 lock を具体的に示し、作業者は STOP -> 宣言の再評価 -> 必要 lock の取得 -> scope 再宣言 -> 必要なら main 取り込み -> re-review の順で対応する。**「具体的に理由を示す」ことは「REJECT しない」ことではない。** **領域・機能・共通部品の一覧は functional_domains.md、WIP ルール本文は development_workflow.md 2.6節が正本であり本文書へ複製していない。** 本節は 2.6節の発効(`DOMAIN_WIP_MODEL_ACTIVE = YES`)をもって適用を開始し、それまでは確認義務を課さない。あわせて 12節へ正本の所在を 2 行追加した。**2節の Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet approval はいずれも変更していない。** コード・Production 挙動の変更なし |
