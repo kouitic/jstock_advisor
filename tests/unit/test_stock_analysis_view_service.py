@@ -1341,6 +1341,199 @@ def test_reliability_low_does_not_reverse_or_invent_concern_from_contradicting_f
     assert "適正価格の算出に使えた手法が少ない" not in text
 
 
+# --- Issue #20 O-C: 適正価格の集計から除外された低い評価の参考表示 ---------
+
+
+_DOWNSIDE_HEADING = "参考：適正価格の集計から除外された低い評価"
+
+
+def _save_downside_recommendation(tmp_path: Path, **overrides) -> None:
+    """買付価格信頼性がLOWでない(通常の)BUY推奨を保存する。
+
+    _save_reliability_low_recommendation と違い BUY_PRICE_RELIABILITY_LOW を
+    立てないため、reliability=OK でも参考表示が出ることを確認できる。
+    """
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(tmp_path, **overrides)
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.WATCH_FOR_PRICE,
+        recommendation_id="rec-1",
+    )
+
+
+def test_downside_section_shown_even_when_reliability_is_ok(tmp_path: Path) -> None:
+    """T9: buy_price_reliabilityがLOWでなくても、下方除外があれば表示すること。
+
+    既存の唯一の表示経路は「買付価格の信頼性が低い」ブロックの内側にあり、
+    reliability=OKの推奨では除外の事実が一切表示されなかった。
+    """
+    _save_downside_recommendation(
+        tmp_path,
+        valuation_anchor=Decimal("1480"),
+        buy_score_input_facts={
+            "valuation_outlier_exclusions": [
+                {
+                    "method": "dcf",
+                    "code": "EXTREME_LOW_RELATIVE_TO_MEDIAN",
+                    "message": "算出値(620円)が他方式の中央値(1652円)の40%未満であり…",
+                    "actual_value": "620",
+                    "reference_value": "660.6078256323011480182117464",
+                }
+            ]
+        },
+    )
+
+    text = _service(tmp_path).build_buy_analysis_text("8306")
+
+    assert _DOWNSIDE_HEADING in text
+    assert "DCF法：620円（他の評価方式と比べて大きく低い評価）" in text
+    assert "購入判断に使った適正価格：1,480円" in text
+    # 信頼性LOWのブロック自体は出ていない(=LOWブロックへの依存が無い)。
+    assert "自動算出した買付価格の信頼性が低い状態のため" not in text
+
+
+def test_downside_section_wording_does_not_present_it_as_anchor_or_forecast(
+    tmp_path: Path,
+) -> None:
+    """T12: 除外値を適正価格や下落予想として誤認させないこと。"""
+    _save_downside_recommendation(
+        tmp_path,
+        valuation_anchor=Decimal("1480"),
+        buy_score_input_facts={
+            "valuation_outlier_exclusions": [
+                {
+                    "method": "dcf",
+                    "code": "BELOW_52_WEEK_LOW",
+                    "message": "算出値(620円)が直近52週安値(1714.0円)の50%未満であり…",
+                    "actual_value": "620",
+                    "reference_value": "857.000",
+                }
+            ]
+        },
+    )
+
+    text = _service(tmp_path).build_buy_analysis_text("8306")
+
+    assert "算出はされたものの、外れ値として通常の適正価格計算から除外した評価です。" in text
+    assert "これらの金額は購入判断には使っていません。" in text
+    assert "この価格まで下がるという予測でもありません。" in text
+    for forbidden in ("最悪価格", "必ずここまで下がる", "真の適正価格", "下落予想価格"):
+        assert forbidden not in text
+    # 内部コード名をそのままユーザーへ出さない。
+    assert "BELOW_52_WEEK_LOW" not in text
+    # 52週安値そのもの(857 / 0.50 = 1714)を逆算して表示しない。
+    assert "1714" not in text
+    assert "1,714" not in text
+
+
+def test_downside_section_omitted_for_legacy_record_without_snapshot(tmp_path: Path) -> None:
+    """T10: 除外スナップショットが無い旧レコードではセクションを出さないこと。
+
+    「悲観シナリオなし」とも書かない(観測できないことと0件は別)。
+    """
+    _save_downside_recommendation(tmp_path, buy_score_input_facts={})
+
+    text = _service(tmp_path).build_buy_analysis_text("8306")
+
+    assert _DOWNSIDE_HEADING not in text
+    assert "悲観" not in text
+
+
+def test_downside_section_omitted_when_only_upward_exclusions(tmp_path: Path) -> None:
+    """上方除外しか無い場合はセクションを出さないこと。"""
+    _save_downside_recommendation(
+        tmp_path,
+        buy_score_input_facts={
+            "valuation_outlier_exclusions": [
+                {
+                    "method": "dcf",
+                    "code": "DCF_UPWARD_DIVERGENCE",
+                    "message": "簡易DCFが他方式の中央値を30%超上回っており…",
+                    "actual_value": "5000",
+                    "reference_value": "1500",
+                }
+            ]
+        },
+    )
+
+    text = _service(tmp_path).build_buy_analysis_text("8306")
+
+    assert _DOWNSIDE_HEADING not in text
+
+
+def test_downside_section_lists_all_scenarios_in_persisted_order(tmp_path: Path) -> None:
+    """複数件を全件・保存順で表示し、最も低い1件へ畳み込まないこと。
+
+    併せて、保存値がDecimalの指数表記(8.0E+2)でもそのまま表示しないことを固定する。
+    """
+    _save_downside_recommendation(
+        tmp_path,
+        buy_score_input_facts={
+            "valuation_outlier_exclusions": [
+                {
+                    "method": "target_yield",
+                    "code": "EXTREME_LOW_RELATIVE_TO_MEDIAN",
+                    "message": "x",
+                    "actual_value": "8.0E+2",
+                    "reference_value": "1294.708091883049584760226238",
+                },
+                {
+                    "method": "per",
+                    "code": "EXTREME_LOW_RELATIVE_TO_CURRENT_PRICE",
+                    "message": "x",
+                    "actual_value": "123.6044770391832137969440814",
+                    "reference_value": "140.800",
+                },
+            ]
+        },
+    )
+
+    text = _service(tmp_path).build_buy_analysis_text("8306")
+
+    assert "8.0E+2" not in text
+    assert "配当利回り法：800円（他の評価方式と比べて大きく低い評価）" in text
+    assert "PER法：124円（現在株価に対して極端に低い評価）" in text
+    assert text.index("配当利回り法：800円") < text.index("PER法：124円")
+
+
+def test_downside_section_keeps_existing_outlier_concern_line(tmp_path: Path) -> None:
+    """T11: 既存のVALUATION_OUTLIER_EXCLUDED concern行を置き換えないこと。"""
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_reliability_low_recommendation(
+        tmp_path,
+        valuation_anchor=Decimal("1480"),
+        buy_score_input_facts={
+            "buy_price_reliability_concerns": [
+                "VALUATION_OUTLIER_EXCLUDED",
+                "TOO_FEW_VALUATION_METHODS",
+            ],
+            "valuation_methods_used_count": 2,
+            "valuation_outlier_exclusions": [
+                {
+                    "method": "dcf",
+                    "code": "BELOW_52_WEEK_LOW",
+                    "message": "現在値の基準を下回るため外れ値として除外",
+                    "actual_value": "620",
+                    "reference_value": "857.000",
+                }
+            ],
+        },
+    )
+
+    text = _service(tmp_path).build_buy_analysis_text("8306")
+
+    # 既存 concern 行(信頼性が低い理由としての説明)は残っている。
+    assert "適正価格の算出方式に外れ値が含まれていた" in text
+    assert "DCF法: 現在値の基準を下回るため外れ値として除外" in text
+    # 新しい参考セクションも独立して出る。
+    assert _DOWNSIDE_HEADING in text
+    assert "DCF法：620円（過去1年の値動きに対して低い評価）" in text
+
+
 def test_excluded_shows_stored_exclusion_reasons(tmp_path: Path) -> None:
     _seed_batch(tmp_path, "batch-1", "9999")
     _save_eval_record(
