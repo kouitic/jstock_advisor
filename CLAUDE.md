@@ -51,9 +51,12 @@
 
 - **GitHub Issueを作成・調査・更新・closeする場合は、
   [docs/issue_label_policy.md](docs/issue_label_policy.md) を必ず読み、
-  そのルールに従うこと。** labelはIssue Type / Priority / Severity /
-  Release Blocker / Progress Statusの5軸を独立して判定し、相互に自動推論しない
+  そのルールに従うこと。** labelはIssue Type / Priority /
+  Release Blocker / Progress Statusの4軸を独立して判定し、相互に自動推論しない
   (`waiting:`は判定軸ではない補助metadata)。
+  **Severity軸は2026-09-05に廃止した。** 新規付与・再評価・writebackを行わない
+  (既存labelはCLOSED Issue / merged PRの履歴として残す)。影響度の評価は
+  Priorityへ統合済み。詳細は同文書§5。
   Issue本文・最新コメント・labelsが矛盾する場合は、勝手に推測して実装を進めず、
   どれが最新の確定判断かを確認すること。
   (同文書はAI非依存のリポジトリ運用ポリシーであり、本ファイルはその入口に過ぎない。

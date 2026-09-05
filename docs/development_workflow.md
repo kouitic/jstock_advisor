@@ -8,7 +8,7 @@
 AI 非依存のリポジトリ運用ポリシーであり、特定の AI エージェントやセッションに
 依存しない。[CLAUDE.md](../CLAUDE.md) は本文書への入口にすぎない。
 
-label の 5 軸モデル(Issue Type / Priority / Severity / Release Blocker /
+label の 4 軸モデル(Issue Type / Priority / Release Blocker /
 Progress Status)そのものは [docs/issue_label_policy.md](issue_label_policy.md) が
 正本である。本文書は label の意味を定義せず、**release-blocker の lifecycle** と
 **Priority を再評価すべき時点**についてのみ同文書と接続する。
@@ -704,8 +704,8 @@ ISSUE               = #<number>
 
 CLASSIFICATION      = <issue type>
 PRIORITY            = <P0|P1|P2|P3>
-SEVERITY            = <SEV-1|SEV-2|SEV-3|SEV-4|N/A>
 RELEASE_BLOCKER     = <YES|NO>
+STATUS              = <status: label>
 
 PHASE               = <current phase>
 IMPLEMENTATION      = <state>
@@ -731,7 +731,7 @@ NEXT_ACTION_ALLOWED = <YES|NO>
 `UNKNOWN` として並べると、確認していないのか該当しないのかが区別できない。
 
 snapshot は **current labels を記録するもの**であり、label の分類基準ではない。
-Type / Priority / Severity / Release Blocker / Progress Status の 5軸モデルの正本は
+Type / Priority / Release Blocker / Progress Status の 4軸モデルの正本は
 [issue_label_policy.md](issue_label_policy.md) であり、本節はそれを変更しない。
 
 #### STATE_ID の方式
@@ -1374,7 +1374,9 @@ calibration / tracking / not-a-bug / accepted-risk
 governance 変更   -> enhancement / tracking 等を実態で判定
 ```
 
-5軸モデル(Issue Type / Priority / Severity / Release Blocker / Progress Status)を崩さない。
+4軸モデル(Issue Type / Priority / Release Blocker / Progress Status)を崩さない。
+Severity は 2026-09-05 に廃止済みで、新規付与・再評価・writeback は行わない
+([issue_label_policy.md](issue_label_policy.md) §5)。
 
 ### Priority を読み直す時点(いつ再評価するか)
 
@@ -1527,3 +1529,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-04 | §6.5.3 の `SUPERSEDES_STATE_ID` へ legacy predecessor の migration 規則を追加(Issue #157 follow-up)。STATE_ID contract の運用開始前に書かれた status comment には `STATE_ID` が無く、そこから最初の新形式 snapshot へ移る際に `SUPERSEDES_STATE_ID = NONE` とするしかなかった。しかし `NONE` では**先行 snapshot が存在しないのか、存在するが legacy 形式なのかを区別できず**、移行直後の 1 件だけ `SUPERSEDES_STATE_ID` による parallel write / race / stale read の検出が成立しない欠落があった(Issue #52 の実運用で判明)。そこで 3 つの場合を分け、先行なし = `NONE`、先行あり & STATE_ID あり = 実際の predecessor STATE_ID、**先行あり & STATE_ID なし = `LEGACY_NO_STATE_ID` とし、この場合のみ `SUPERSEDES_SNAPSHOT_URL`(predecessor の実際のコメント URL)を必須**とした。STATE_ID で辿れない 1 点をコメント URL で監査可能にするためであり、`LEGACY_NO_STATE_ID` は「ID が分からない」ではなく「predecessor は存在し、STATE_ID contract より前のものである」という明確な semantics を持つ。あわせて migration の禁止事項(legacy snapshot の書き換え / STATE_ID の後付け / 推測による fake・inferred STATE_ID の生成 / predecessor URL の捏造 / predecessor が STATE_ID を持つのに LEGACY_NO_STATE_ID を使う / predecessor が無いのに LEGACY_NO_STATE_ID を使う)を明文化し、`LEGACY_NO_STATE_ID` は**初回移行の 1 件にのみ使用可能**で以後は通常の supersession へ戻ることを定めた。`LEGACY_MIGRATION_RULE_EFFECTIVE_FROM` を本規則の追加以降とし、**過去へ遡及適用しない**(本規則より前に `NONE` で記録された移行時 snapshot は当時の contract に従った historical evidence としてそのまま保持し、辻褄合わせのために書き換えない)。`LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` と append-only 原則は不変。canonical rule は本節にのみ置き、CLAUDE.md / chatgpt_collaboration_protocol.md へ複製していない。Human Gate / merge 承認 / Production approval / deploy 実行者 / release-blocker lifecycle はいずれも変更していない。**docs のみの変更であり、コード・Production 挙動の変更なし** |
 | 2026-09-05 | label の 4軸表記を 5軸(Issue Type / Priority / Severity / Release Blocker / Progress Status)へ同期し、9.5節へ「Priority を読み直す時点」を新設した(#122)。Priority は起票時から永久固定ではなく、Issue 起票時 / duplicate check 後 / Phase A 完了時 / Production evidence 取得時 / Action delta 判明時 / notification delta 判明時 / Production reachability 判明時 / remediation で主要 impact が消えた時 / worker assignment queue 決定時に fresh に読み直す。再評価必須の 7 トリガーと `WORKER_PRIORITY_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_PRIORITY`、判定不能時の `PRIORITY_RECONCILIATION_REQUIRED` を定めた。**Priority の判定基準そのものは issue_label_policy.md §4 が正本であり本文書へ複製していない。** Priority 変更を理由に Progress Status を巻き戻さない。既存の lane / WIP / 指示プロトコル / テスト方針 / state 同期 / 人間承認の境界は変更していない。コード・Production 挙動の変更なし |
 | 2026-09-05 | 9.5節の Priority 再評価トリガーへ非機能側の 7 項目(security exposure / privacy exposure / data recoverability / cost anomaly / capacity exhaustion / compliance requirement / compensating control の変化)を追加した(#122)。**判定基準そのものは issue_label_policy.md §4.13〜§4.21 が正本であり本文書へ複製していない。** 既存の再評価時点・`WORKER_PRIORITY_LABEL_WRITE_OWNER`・`PRIORITY_RECONCILIATION_REQUIRED` は変更していない。コード・Production 挙動の変更なし |
+| 2026-09-05 | Severity 軸の廃止(#122)に伴い、label モデルの表記を 4軸(Issue Type / Priority / Release Blocker / Progress Status)へ同期し、6.5.3 の ISSUE_STATE_SNAPSHOT contract の必須項目から `SEVERITY` を削除して `STATUS` を加えた。**過去の snapshot は一切編集しておらず、そこに残る `SEVERITY = ...` は履歴として有効である。** 互換用の `SEVERITY = RETIRED` 等も新規必須にはしない。**Severity 廃止の理由・retired label の扱い・再導入条件の正本は issue_label_policy.md §5 であり本文書へ複製していない。** 既存の lane / WIP / 指示プロトコル / テスト方針 / state 同期 / Priority 再評価 / 人間承認の境界は変更していない。コード・Production 挙動の変更なし |
