@@ -42,6 +42,18 @@
   (理由・推奨する次の行動・注意点)である。current state全体をhandoffへ
   再コピーしない。旧snapshotは監査履歴として削除・改変しない(append-only)。
 
+- **`INSTRUCTION_ID` の連番は、作業者ごと・日本時間の日付ごとに採番する。**
+  日付が変わったら `001` へリセットし、前日の連番を翌日へ引き継がない
+  (`TARO-20260905-072` の翌日は `TARO-20260906-001`)。同一日で使用済みの番号は
+  再利用しない。採番するのは指示側であり、正本は
+  [docs/chatgpt_collaboration_protocol.md](docs/chatgpt_collaboration_protocol.md)
+  4.1節。
+  なお**ユーザー向けの説明は、IT基礎知識とAWS主要マネージドサービスの概要理解を
+  前提としてよい**(同文書1.6節)。一般的なIT・AWS用語は毎回言い換えず、
+  **本プロジェクト固有の運用概念・取り違えやすいAWS挙動・Human Gateの範囲**に
+  背景と因果関係を添える。内部の状態値だけを並べた回答をユーザー向け説明としない。
+  **作業AIからの完了報告は従来どおり機械可読形式でよい**(別contract)。
+
 - **ユーザーとChatGPTの間の協働ルール(役割分担・Human Gate・レビュー判定・
   指示の対応付け・セッション開始時のbootstrap)は
   [docs/chatgpt_collaboration_protocol.md](docs/chatgpt_collaboration_protocol.md)
