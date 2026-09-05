@@ -107,6 +107,11 @@ INVESTIGATION_WIP  <= 2
        JIRO-20260904-001
 ```
 
+連番の採番規則(日本時間基準・作業者ごと・日付が変わったら 001 へリセット・
+同一日での再利用禁止)の正本は
+[chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 4.1節。
+採番するのは指示側であるため、本文書へは複製しない。
+
 作業者は**回答時に、対応した INSTRUCTION_ID を必ず明記する**。
 
 回答が次のいずれかに該当する場合、その回答を**自動的には次工程の根拠にしない**。
