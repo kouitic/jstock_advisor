@@ -7,34 +7,31 @@ yfinanceは既定で例外を隠す設定(`hide_exceptions`)のため、銘柄�
 `ProviderDataError = 0` でありながら毎営業日固定件数の`ERROR`だけが残り、
 真の障害(権限エラー等)がそのノイズに埋もれる。
 
+## 認識する2つの確定signature
+
+Production実測(Phase A2 / forensic)により、恒久missingの404は次の形で出力される。
+
+    HTTP Error <status>: <reason句><応答body>
+
+これは `str(例外) + 応答body` の**単純連結**であり、ticker はbody内の
+`description` にしか現れない。reason句はHTTP/2では空になり得るため、
+**reason句の内容に依存してはならない**。bodyを意味的に解釈して判定する。
+
+もう一方の形式は別のexcept節(TickerBase側のcatch-all)から出る。
+
+    Failed to get ticker '<ticker>' reason: <例外>
+
+こちらは例外種別を問わない共通経路のため、接頭辞だけでは降格根拠にならない。
+理由側に404と「見つからない」旨のmarkerが揃うことを追加条件として要求する。
+
 ## ★ `possibly delisted` を単独で降格してはならない理由
 
-installed版の実装を確認した結果、`$<ticker>: possibly delisted; <理由>` は
-**恒久上場廃止の確定を意味しない**ことが分かった。当該文言は次の経路で出力される。
+`$<ticker>: possibly delisted; <理由>` は**恒久上場廃止の確定を意味しない**。
+timezone取得や価格取得のHTTP要求がtimeout・接続断・HTTP 5xxで終わった場合にも
+例外が握り潰されて同じ文言になる。無条件に降格すると真の障害を隠す。
 
-    銘柄のtimezone取得が失敗する
-      -> tz = None
-      -> 履歴取得側で「有効な銘柄にtimezoneが無いのはおかしい」と判断され
-         `possibly delisted; no timezone found` が出力される
-
-    価格取得のHTTP要求が例外で終わる(例外は握り潰される)
-      -> 応答が None のまま
-      -> `possibly delisted; no price data found ...` が出力される
-
-いずれも**timeout・接続断・HTTP 5xxでも同じ文言になる**。すなわち
-`possibly delisted` は「理由が判然としないときに付く推測のprefix」であり、
-これを無条件に降格すると真の障害を隠す(TRUE_ERROR_VISIBILITYの毀損)。
-
-## 採用した方式
-
-    UNAMBIGUOUS       Yahoo側が404 Not Foundを返した事実は、銘柄が存在しない
-                      ことの十分に明確な根拠であるため、単独で降格する。
-
-    SECONDARY         同一の取得コンテキスト内で同一tickerについて
-                      confirmed 404 を観測した**後続**の `possibly delisted` は、
-                      その404から派生した二次ノイズとみなして降格する。
-
-    それ以外           `possibly delisted` は `ERROR` のまま残す。
+そこで、同一の取得コンテキスト内で同一tickerについて確定404を観測した
+**後続**のものだけを、その404から派生した二次ノイズとして降格する。
 
 相関のスコープは `yfinance_fetch_context()` で明示的に囲まれた範囲に限定する。
 状態は`ContextVar`が保持するため、warm再利用・並行実行・別tickerの混入・
@@ -42,16 +39,19 @@ installed版の実装を確認した結果、`$<ticker>: possibly delisted; <理
 
 本モジュールはログのseverityのみを扱い、例外経路・retry・失敗率集計には
 一切触れない(Issue #59のprovider failure semanticsは不変)。
+依存ライブラリへのmonkey patchも行わない。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Final
+from dataclasses import dataclass, field
+from typing import Any, Final
 
 YFINANCE_LOGGER_NAME: Final = "yfinance"
 
@@ -61,52 +61,74 @@ _TICKER_SUFFIX: Final = ".T"
 SIGNATURE_QUOTE_NOT_FOUND: Final = "QUOTE_NOT_FOUND_404"
 SIGNATURE_SECONDARY_MISSING: Final = "PERMANENT_MISSING_SECONDARY"
 
+#: Production実形式。`str(例外) + 応答body` の連結であり、reason句の有無は問わない。
+#: status は本文から取り出して404のみを対象とする(他のstatusへは広げない)。
+_SIG_HTTP_ERROR: Final = re.compile(
+    r"^HTTP Error (?P<status>\d{3}):(?P<rest>.*)$", re.DOTALL
+)
+
 #: 曖昧なsignature。**単独では降格根拠にならない。**
 #: 恒久missingでも一時障害でも同じ文言になるため、同一コンテキスト内の
-#: confirmed 404 と相関が取れた場合に限り二次ノイズとして降格する。
+#: 確定404と相関が取れた場合に限り二次ノイズとして降格する。
 _SIG_POSSIBLY_DELISTED: Final = re.compile(
     r"^\$(?P<ticker>[^:\s]+): possibly delisted;\s*(?P<reason>.*)$"
 )
 
-#: 確定的なsignatureの候補。ただしこの接頭辞は
-#: **例外種別を問わない共通のcatch-all経路**から出力されるため、
-#: 接頭辞だけで降格してはならない(timeout・接続断も同じ形になる)。
+#: 旧経路(TickerBase側のcatch-all)。**例外種別を問わない**ため接頭辞だけでは
+#: 降格してはならない(timeout・接続断も同じ形になる)。
 _SIG_FAILED_TO_GET_TICKER: Final = re.compile(
     r"^Failed to get ticker '(?P<ticker>[^']+)' reason:\s*(?P<reason>.*)$"
 )
 
-#: signature を「銘柄が存在しない」と確定させるために理由側へ要求するmarker。
+#: 旧経路を「銘柄が存在しない」と確定させるために理由側へ要求するmarker。
 #: **すべて**満たす場合のみ降格する(ANDであってORではない)。
-#: 実際の理由文言は `404 Client Error: Not Found for url: ...` の形を取る。
-#: 一方 timeout は `Read timed out`、HTTP 5xx は `500 Server Error`、
+#: timeout は `Read timed out`、HTTP 5xx は `500 Server Error`、
 #: 接続断は `Failed to establish a new connection`、レート制限は `429` となり、
 #: いずれも404を含まないため降格対象にならない。
-#: 404単独ではなく「見つからない」旨も併せて要求することで、
-#: 404を含むだけの別種メッセージを巻き込まない最小安全条件とする。
-_CONFIRMED_MISSING_REASON_MARKERS: Final = ("404", "not found")
+_LEGACY_MISSING_REASON_MARKERS: Final = ("404", "not found")
 
-#: 現在の取得コンテキスト内でconfirmed 404を観測したtickerの集合。
-#: コンテキスト外(``None``)では相関を行わない = `possibly delisted` は
-#: `ERROR` のまま残る(fail-safe側へ倒す)。
-_confirmed_missing_tickers: ContextVar[set[str] | None] = ContextVar(
-    "jstock_yfinance_confirmed_missing_tickers", default=None
+_NOT_FOUND_STATUS: Final = "404"
+_NOT_FOUND_CODE: Final = "not found"
+_QUOTE_NOT_FOUND_DESCRIPTION_PREFIX: Final = "quote not found for symbol:"
+
+#: 解析を試みるbodyの上限。想定外に巨大な応答をログ処理内で解析しない
+#: (超過時は解析せず`ERROR`のまま素通しする = fail-safe)。
+_MAX_PARSED_BODY_CHARS: Final = 65_536
+
+
+@dataclass
+class _FetchContext:
+    """1回のデータ取得の境界。取得中のtickerと、その中で確定したmissingを保持する。"""
+
+    ticker: str
+    confirmed_missing: set[str] = field(default_factory=set)
+
+
+#: 現在の取得コンテキスト。コンテキスト外(``None``)では相関を行わず、
+#: Production実形式の降格も成立させない(fail-safe側へ倒す)。
+_fetch_context: ContextVar[_FetchContext | None] = ContextVar(
+    "jstock_yfinance_fetch_context", default=None
 )
 
 
 @contextmanager
-def yfinance_fetch_context() -> Iterator[None]:
-    """1回のデータ取得の境界を明示し、その範囲でのみログ相関を有効にする。
+def yfinance_fetch_context(ticker: str) -> Iterator[None]:
+    """1回のデータ取得の境界を明示し、その範囲でのみログの再分類・相関を有効にする。
 
     `ContextVar` を使うためスレッド・非同期タスクごとに独立し、
     ``finally`` で必ずresetするため、warm再利用や後続invocationへ状態が
     持ち越されることはない(例外で抜けた場合も同様)。入れ子にした場合は
-    内側が独立した集合を持つため、外側の観測結果が混入しない。
+    内側が独立した状態を持つため、外側の観測結果が混入しない。
+
+    Args:
+        ticker: この取得で問い合わせている提供元側のティッカーシンボル。
+            ログから抽出したtickerがこれと一致することを降格の条件にする。
     """
-    token = _confirmed_missing_tickers.set(set())
+    token = _fetch_context.set(_FetchContext(ticker=ticker))
     try:
         yield
     finally:
-        _confirmed_missing_tickers.reset(token)
+        _fetch_context.reset(token)
 
 
 class YfinanceExpectedMissingLogFilter(logging.Filter):
@@ -116,6 +138,8 @@ class YfinanceExpectedMissingLogFilter(logging.Filter):
       「ERRORではないと分かる形で残す」ことが目的。
     - 対象は``ERROR``**ちょうど**。``CRITICAL``は決して降格しない。
     - 一致しないレコードは属性を一切変更しない。
+    - 解析処理自体が例外を出した場合もレコードをそのまま通す
+      (ログ出力経路を壊さない)。
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -124,48 +148,113 @@ class YfinanceExpectedMissingLogFilter(logging.Filter):
             return True
 
         try:
-            message = record.getMessage()
-        except Exception:  # noqa: BLE001 - ログ整形の失敗で本処理を壊さない
+            classified = _classify(record.getMessage())
+        except Exception:  # noqa: BLE001 - 解析の失敗でログ出力経路を壊さない
             return True
 
-        confirmed = _SIG_FAILED_TO_GET_TICKER.match(message)
-        if confirmed is not None:
-            reason = confirmed.group("reason").strip()
-            lowered = reason.lower()
-            if all(marker in lowered for marker in _CONFIRMED_MISSING_REASON_MARKERS):
-                ticker = confirmed.group("ticker")
-                _remember_confirmed_missing(ticker)
-                _downgrade(
-                    record,
-                    signature=SIGNATURE_QUOTE_NOT_FOUND,
-                    ticker=ticker,
-                    reason=reason,
-                )
+        if classified is None:
             return True
 
-        ambiguous = _SIG_POSSIBLY_DELISTED.match(message)
-        if ambiguous is not None:
-            ticker = ambiguous.group("ticker")
-            if _is_confirmed_missing(ticker):
-                _downgrade(
-                    record,
-                    signature=SIGNATURE_SECONDARY_MISSING,
-                    ticker=ticker,
-                    reason=ambiguous.group("reason").strip(),
-                )
-            # 相関が取れない場合は ERROR のまま残す(降格しない)。
+        signature, ticker, reason = classified
+        if signature == SIGNATURE_QUOTE_NOT_FOUND:
+            _remember_confirmed_missing(ticker)
+        _downgrade(record, signature=signature, ticker=ticker, reason=reason)
         return True
 
 
+def _classify(message: str) -> tuple[str, str, str] | None:
+    """降格対象なら ``(signature, ticker, reason)`` を返す。該当しなければ ``None``。"""
+    http_error = _SIG_HTTP_ERROR.match(message)
+    if http_error is not None:
+        return _classify_http_error(http_error)
+
+    legacy = _SIG_FAILED_TO_GET_TICKER.match(message)
+    if legacy is not None:
+        reason = legacy.group("reason").strip()
+        lowered = reason.lower()
+        if all(marker in lowered for marker in _LEGACY_MISSING_REASON_MARKERS):
+            return SIGNATURE_QUOTE_NOT_FOUND, legacy.group("ticker"), reason
+        return None
+
+    ambiguous = _SIG_POSSIBLY_DELISTED.match(message)
+    if ambiguous is not None:
+        ticker = ambiguous.group("ticker")
+        if _is_confirmed_missing(ticker):
+            return SIGNATURE_SECONDARY_MISSING, ticker, ambiguous.group("reason").strip()
+        # 相関が取れない場合は ERROR のまま残す(降格しない)。
+
+    return None
+
+
+def _classify_http_error(matched: re.Match[str]) -> tuple[str, str, str] | None:
+    """Production実形式の404を意味的に検証する。1つでも欠ければ ``None``。"""
+    if matched.group("status") != _NOT_FOUND_STATUS:
+        return None
+
+    rest = matched.group("rest")
+    if len(rest) > _MAX_PARSED_BODY_CHARS:
+        return None
+
+    body_start = rest.find("{")
+    if body_start < 0:
+        return None
+
+    try:
+        body = json.loads(rest[body_start:])
+    except (ValueError, RecursionError):
+        return None
+
+    extracted = _extract_quote_not_found(body)
+    if extracted is None:
+        return None
+
+    ticker, description = extracted
+    context = _fetch_context.get()
+    if context is None or context.ticker != ticker:
+        # 取得中の銘柄と一致しないものは降格しない(取り違えを構造的に防ぐ)。
+        return None
+
+    return SIGNATURE_QUOTE_NOT_FOUND, ticker, description
+
+
+def _extract_quote_not_found(body: Any) -> tuple[str, str] | None:
+    """応答bodyが「指定銘柄が見つからない」を表す場合のみ ``(ticker, 説明)`` を返す。"""
+    if not isinstance(body, dict):
+        return None
+    quote_summary = body.get("quoteSummary")
+    if not isinstance(quote_summary, dict):
+        return None
+    error = quote_summary.get("error")
+    if not isinstance(error, dict):
+        return None
+
+    code = error.get("code")
+    if not isinstance(code, str) or code.strip().casefold() != _NOT_FOUND_CODE:
+        return None
+
+    description = error.get("description")
+    if not isinstance(description, str):
+        return None
+    stripped = description.strip()
+    if not stripped.casefold().startswith(_QUOTE_NOT_FOUND_DESCRIPTION_PREFIX):
+        return None
+
+    ticker = stripped[len(_QUOTE_NOT_FOUND_DESCRIPTION_PREFIX) :].strip()
+    if not ticker or any(char.isspace() for char in ticker):
+        return None
+
+    return ticker, stripped
+
+
 def _remember_confirmed_missing(ticker: str) -> None:
-    confirmed = _confirmed_missing_tickers.get()
-    if confirmed is not None:
-        confirmed.add(ticker)
+    context = _fetch_context.get()
+    if context is not None:
+        context.confirmed_missing.add(ticker)
 
 
 def _is_confirmed_missing(ticker: str) -> bool:
-    confirmed = _confirmed_missing_tickers.get()
-    return confirmed is not None and ticker in confirmed
+    context = _fetch_context.get()
+    return context is not None and ticker in context.confirmed_missing
 
 
 def _to_stock_code(ticker: str) -> str:
