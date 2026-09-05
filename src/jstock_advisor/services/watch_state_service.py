@@ -175,13 +175,25 @@ class WatchStateService:
 
             assert required_decline_to_entry_pct is not None  # noqa: S101 - continue条件で保証済み
             gap = self._calendar.business_days_between(existing.last_matched_at, today)
-            is_resumed = gap >= 2
-            consecutive = compute_consecutive_business_days(
-                gap, existing.consecutive_business_days
+            # Issue #166: 非営業日(週末・平日に当たる祝日)の評価では、営業日ベースの
+            # stateを一切進めない。last_matched_atは「連続営業日数へ寄与した最後の
+            # 一致営業日」であり、非営業日で上書きすると営業日計算の起点そのものが
+            # 非営業日になってしまう(エンティティ側の定義とも矛盾する)。
+            # gapが2以上でも同様で、非営業日にリセットを確定させず次の営業日へ委ねる
+            # (次の営業日でもgapは2以上のままなので、そこで正しくリセットされる)。
+            # last_evaluated_atは「最後に評価処理を行った日」なので常に更新する。
+            today_is_business_day = self._calendar.is_business_day(today)
+            is_resumed = today_is_business_day and gap >= 2
+            consecutive = (
+                compute_consecutive_business_days(gap, existing.consecutive_business_days)
+                if today_is_business_day
+                else existing.consecutive_business_days
             )
+            # 同一営業日の再評価(gap == 0)でも起点は動かさない(二重更新しない)。
+            advances_anchor = today_is_business_day and gap >= 1
             updated = existing.model_copy(
                 update={
-                    "last_matched_at": today,
+                    "last_matched_at": today if advances_anchor else existing.last_matched_at,
                     "last_evaluated_at": today,
                     "consecutive_business_days": consecutive,
                     "last_current_price": current_price,
@@ -206,6 +218,17 @@ class WatchStateService:
         if meets_near_buy_start_conditions(
             buy_action, company_quality_score, required_decline_to_entry_pct, config
         ):
+            # Issue #166: 非営業日には監視を開始しない。
+            # consecutive_business_days=1は「1営業日連続で条件を満たした」ことを
+            # 意味し、last_matched_atは「連続営業日数へ寄与した一致営業日」である。
+            # 非営業日に開始すると、まだ1営業日も成立していないのにcounter=1となり、
+            # 営業日計算の起点も非営業日になってしまう(継続側の契約と矛盾する)。
+            # counterを0で作る・過去の営業日を起点として詐称する、といった回避は
+            # いずれも採らず、**永続stateを作らずに次の営業日へ委ねる**。
+            # 次の営業日に改めて評価し、その日に開始条件を満たしていれば
+            # その営業日を起点として通常どおり開始する。
+            if not self._calendar.is_business_day(today):
+                return _NO_TRANSITION
             assert required_decline_to_entry_pct is not None  # noqa: S101 - 開始条件で保証済み
             new_state = WatchState(
                 watch_id=build_watch_id(stock_code, WatchType.NEAR_BUY),
