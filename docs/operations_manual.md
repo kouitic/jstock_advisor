@@ -1880,3 +1880,250 @@ E  疎通確認に失敗した
 マーカーの値には秘密を入れない。
 マーカーは平文で残ることを前提とした非秘密の版数である。
 ```
+
+---
+
+## 20. DynamoDBの復旧手順(Issue #137、2026-09-05追加)
+
+### 20.1 何が設定されているか
+
+Phase Aのデータ分類にもとづき、**失うと再生成できないデータを持つ37テーブル**へ
+次の4つを`infra/template.yaml`で設定している(手動設定は行わない)。
+
+```
+PointInTimeRecoverySpecification   直近35日への時点復元
+DeletionProtectionEnabled          DeleteTable自体の禁止
+DeletionPolicy: Retain             stack削除・template除去で実体を残す
+UpdateReplacePolicy: Retain        置換時に古い実体を残す
+```
+
+cache(外部から再取得可能)と一時状態(ロック・claim・進捗・VALIDATION専用)の
+17テーブルには**意図的に付けていない**。
+
+```
+★ 一時状態は「復元してはいけない対象」である。
+  ロック・claimを過去時点へ戻すと、取得済みロックの復活や
+  送信済み通知の再送といった二次障害を起こす。
+```
+
+分類はテストで固定している(`tests/unit/test_infra_issue_137_dynamodb_data_protection.py`)。
+新しいテーブルを追加すると、保護を付けるか対象外リストへ入れるまでテストが落ちる。
+
+### 20.2 4つの機能の違い(混同しない)
+
+| 機能 | 効く契機 | 守る対象 |
+|---|---|---|
+| PITR | 復元操作 | 直近35日の**内容** |
+| DeletionProtectionEnabled | DeleteTable | **テーブル自体** |
+| `DeletionPolicy: Retain` | stack削除 / templateから定義を外す | 実体を残す |
+| `UpdateReplacePolicy: Retain` | 置換が発生したとき | **古い方**を残す |
+
+互いの代替にはならない。
+
+### 20.3 復旧目標
+
+```
+RPO_TARGET                  約5分
+RESTORE_POINT_GRANULARITY   1秒
+RTO_TARGET                  3時間以内
+BUSINESS_TARGET             可能なら次の08:00 JSTの営業バッチまでに復旧する
+```
+
+RPOが「秒単位」ではなく約5分なのは、PITRの**最新復元可能時刻が現在時刻より
+数分前**になるためである。復元時刻は1秒刻みで選べるが、直前数分ぶんは戻らない。
+
+```
+3時間はJstock側の運用目標であり、AWSが保証する値ではない。
+```
+
+### 20.4 復元の前提(必ず読む)
+
+```
+RESTORE_MODE = NEW_TABLE_ONLY
+```
+
+PITRの復元は**常に新しいテーブルを作る**。既存テーブルへのin-placeロールバックは
+できない。したがって「PITRをONにすればワンクリックで戻せる」は誤りであり、
+復元後のcutoverまでが手順である。
+
+復元先テーブルへ**引き継がれない**もの。
+
+```
+PITR設定 / DeletionProtectionEnabled / TTL / タグ / stream /
+auto scaling / resource policy / CloudWatchアラーム
+既存ARNを参照するIAM・アプリ設定も自動追従しない
+```
+
+本システムはテーブル名を`<接頭辞>-<論理名>`として単一の環境変数から解決している。
+接頭辞は54テーブル共通のため、**接頭辞の切替による復旧は使えない**
+(1テーブルだけ戻したい場合でも全テーブルが切り替わる)。
+
+### 20.5 テーブル横断の整合性
+
+```
+SHARED_RESTORE_POINT_REQUIRED = YES
+```
+
+購入・売却の確定処理は、取引・購入ロット・保有の**3テーブルを1回の
+TransactWriteItemsで同時に書いている**。したがって関連テーブルを別々の復元時刻へ
+戻すと、書き込み時には存在し得なかった不整合が生まれる。
+
+```
+関連テーブルを別々のrestore timestampへ戻すことは標準手順として禁止する。
+```
+
+復元後は最低限、次をread-onlyで検証する。
+
+```
+取引の累積と購入ロットの整合
+購入ロットと保有の整合(数量・金額の不変条件)
+orphanレコードの有無(片側にしか存在しない関連)
+3テーブルが同一の復元時刻であること
+```
+
+### 20.6 復元drillの手順(実施は別Human Gate)
+
+Production を直接巻き戻さない。隔離したテーブルへ復元して検証する。
+
+```
+PRECONDITION
+  対象テーブルでPITRが有効
+  Human の drill 承認を取得済み
+  Production の変更が無い時間帯であること
+
+RESTORE_TIMESTAMP
+  latest restorable time を確認し、その値以前の時刻を選ぶ
+  障害復旧の場合は「事象発生の直前」を選ぶ
+
+RESTORE_TARGETS
+  トランザクション整合グループ(取引・購入ロット・保有)は必ずまとめて扱う
+
+SHARED_RESTORE_POINT
+  対象テーブルすべてへ同一の復元時刻を指定する
+
+RESTORE_DESTINATION
+  本番と衝突しない名前の新規テーブルへ復元する
+  例: <接頭辞>-restoredrill-<論理名>-<日時>
+
+NETWORK/ACCESS_ISOLATION
+  復元先はアプリから参照しない。CLIのread-only検証のみ
+  Lambda の環境変数・接頭辞は変更しない
+
+NO_PRODUCTION_TRAFFIC
+  本番テーブルへは一切書き込まない
+
+SCHEMA_VALIDATION      キー構成・GSI・属性の型
+ITEM_COUNT_VALIDATION  件数が復元時刻の期待と矛盾しないこと
+BUSINESS_KEY_VALIDATION 主キーの重複・欠落・必須項目の欠落
+CROSS_TABLE_CONSISTENCY 20.5の検証を実施する
+
+TTL_RECONFIGURATION                復元先はTTLが無効。必要なら設定し直す
+TAG_RECONFIGURATION                タグは引き継がれない
+STREAM_RECONFIGURATION             streamは引き継がれない
+PITR_RECONFIGURATION               復元先のPITRは無効
+DELETION_PROTECTION_RECONFIGURATION 復元先の削除保護は無効
+
+CUTOVER_OPTIONS                    20.7を参照
+ROLLBACK
+  本番へ書き戻す場合は、実施直前に現状のon-demand backupを取得してから始める
+CLEANUP
+  drill用テーブルを削除する(保管コストを残さない)
+EVIDENCE
+  実施日時・復元時刻・検証結果・所要時間をIssueへ記録する
+```
+
+```
+drillで確認したいのは「復元できること」ではなく、
+「復元してから通常運用へ戻すまでの手順が実際に成立すること」である。
+```
+
+### 20.7 実際の復旧時のcutover方針
+
+```
+第一候補  復元専用テーブルへ復元 → 検証 → 必要なレコードだけ本番へ書き戻す
+```
+
+利用者所有データは規模が小さいため、この方式が現実的である。CloudFormationの
+管理下から外れるテーブルが生じない点でも安全である。
+
+```
+本番テーブルへの書き戻しは PRODUCTION_DATA_MUTATION であり、別のHuman Gateが要る。
+runbookに書いてあることは実行してよいことを意味しない。
+```
+
+「本番テーブルを丸ごと復元テーブルへ切り替える」方式は標準にしない
+(接頭辞が全テーブル共通であり、CloudFormationの管理とも整合しないため)。
+
+### 20.8 直前数分ぶんの取りこぼし
+
+```
+RECENT_WRITE_RECONCILIATION_REQUIRED = YES
+```
+
+PITRの最新復元可能時刻には遅れがあるため、障害直前の数分間の更新は復元されない
+可能性がある。復旧時は次を確認する。
+
+```
+1  事象の開始時刻を特定する
+2  latest restorable time を確認する
+3  その差分(gap window)を明示する
+4  gap window中に利用者操作があったかを確認する
+   LINEの操作履歴・CloudWatch Logs・取引履歴などから追跡できる範囲で確認する
+5  復元されなかった操作があれば、利用者へ再登録を依頼する
+6  再登録の内容と実施をIssueへ記録する
+```
+
+実データ(銘柄・数量・単価・氏名)は記録・引用しない。
+
+### 20.9 テーブル置換が必要な変更を行うとき
+
+```
+「とりあえずDeletion Protectionを無効化する」を標準手順にしてはならない。
+保護を自動で外す運用にすると、保護が実質的に無効になる。
+```
+
+置換が必要かどうかは、変更するpropertyがreplacementを要求するかで決まる。
+すべての更新が置換になるわけではない。次の順で確認する。
+
+```
+1  その変更に本当にreplacementが必要か(別の手段で目的を達成できないか)
+2  対象がauthoritative dataか(失うと再生成できないか)
+3  PITR・backupの状態を確認する
+4  依存するconsumer(Lambda・IAM・CLI)を洗い出す
+5  TableNameを明示指定していることによる制約を確認する
+   同名テーブルを同時に存在させられないため、置換の可否に影響する
+6  ChangeSetを作成し、実際にreplacementが起きるかを確認する
+7  Human Gate(ここまでは調査。ここから先は承認が要る)
+8  replacementが避けられない場合のみ、そのケース固有の移行手順を設計する
+9  移行後の検証(20.5と同じ整合性チェック)
+10 古い実体のcleanupは別のHuman Gate(Retainにより自動削除されない)
+```
+
+```
+TEMPORARY_DISABLE_REQUIRED = CASE_SPECIFIC
+```
+
+Deletion Protectionの一時解除が必要なケースが**実在すると確認できた場合にのみ**、
+そのケース限定の手順として設計する。一般則にはしない。
+
+### 20.10 今回入れていないもの
+
+```
+SCHEDULED_ON_DEMAND_BACKUP = NO
+AWS_BACKUP_PLAN            = NO
+CROSS_ACCOUNT_COPY         = NO
+CROSS_REGION_COPY          = NO
+```
+
+PITRの35日で開始し、必要性は実績で判断する。35日を超える保管や、
+AWSアカウント侵害への耐性(別アカウントへの退避)が必要になった場合の拡張点として
+記録しておく。
+
+```
+★ 現在の保護は「誤操作・不具合」には有効だが、
+  「credential侵害」には十分でない。
+  同一アカウント内の強い権限を持つprincipalは、primaryもbackupも消せる。
+  この点は Issue #133 / #164 の解消と合わせて評価する。
+```
+
+PITRの課金は保存量に比例するため、保持期間の設計(Issue #138)と足並みを揃える。
