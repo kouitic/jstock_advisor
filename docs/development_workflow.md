@@ -17,6 +17,10 @@ Production の具体的な運用手順(deploy 手順・テーブル追加時の�
 read-only 観測での副作用確認等)は [docs/operations_manual.md](operations_manual.md)
 が正本である。本文書はそれらの手順を複製しない。
 
+機能領域・機能・共通部品の一覧は
+[docs/functional_domains.md](functional_domains.md) が正本である。本文書は
+2.6 節でその一覧を用いた WIP 運用**ルール**を定め、一覧そのものを複製しない。
+
 **ルールを変更する場合は本文書を更新する。**
 
 ---
@@ -88,6 +92,11 @@ INVESTIGATION_WIP  <= 2
 - **ただし同一 Issue へ修正が必要になった場合は、最優先で戻る。**
   review 指摘・CI 失敗・verification 失敗が発生したら、
   新しく着手した作業より優先して対応する。
+
+
+**機能領域ベースの WIP モデル(`DOMAIN_WIP_RULE_V1`)を 2.6 節に定めているが、
+本書の現時点では発効していない**(`DOMAIN_WIP_MODEL_ACTIVE = NO`)。
+有効な WIP ルールは本節である。
 
 ---
 
@@ -211,6 +220,373 @@ INSTRUCTION_STATUS = ANSWERED
 ではない。9 節(grouped release)・10 節(人間承認の境界)の要求を緩和しない。
 とくに merge / Production deploy / ChangeSet / manual invoke 等の人間承認は、
 INSTRUCTION_ID の有無にかかわらず従来どおり必要である。
+
+---
+
+## 2.6 機能領域ベースの WIP モデル(DOMAIN_WIP_RULE_V1)
+
+```
+DOMAIN_WIP_MODEL_ACTIVE = NO
+CURRENT_WIP_RULE        = ISSUE_122(2節。担当者単位 code WIP = 1)
+```
+
+**本節は設計として確定しているが、まだ発効していない。**
+発効までは 2 節が有効な WIP ルールである。発効の条件は 2.6.10 に定める。
+
+領域・機能・共通部品の一覧は
+[docs/functional_domains.md](functional_domains.md) が正本であり、
+本節へ複製しない。本節は**ルール**を、同文書は**判定材料**を持つ。
+
+### 2.6.1 目的
+
+2 節の担当者単位 WIP は「同時に壊れる範囲の最小化」には有効だが、
+互いに無関係な機能領域まで直列化する。一方、単純に並行数を増やすと
+Git では検出できない衝突が起きる。
+
+```
+衝突の型 1  同じファイルを同時に編集する         -> Git が検出できる
+衝突の型 2  同じ判定契約・永続契約を同時に変える   -> Git は検出できない
+衝突の型 3  共通 module 経由で他領域が壊れる      -> PR 単体では見落とす
+```
+
+本節は型 2・型 3 を防ぐため、並行可否を**ファイルの重複ではなく
+機能領域の重複**で判定する。
+
+### 2.6.2 基本規則
+
+```
+R1  ONE_ACTIVE_CODE_WIP_PER_FUNCTIONAL_DOMAIN
+    1 つの機能領域で同時に進行できる code WIP は 1 件
+
+R2  異なる領域であれば、異なる作業者が並行して code WIP を持てる
+
+R3  1 つの Issue が複数領域を触る場合、触るすべての領域の code WIP を
+    同時に取得する。どれか 1 つでも取れなければ着手しない
+
+R4  SHARED を触る場合は LOCK_LEVEL(2.6.5)に従って関係領域を取得する
+
+R5  MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1
+    領域が空いていても、1 人が同時に 2 件の実装を持つことは許さない
+
+R6  read-only の調査・設計・レビュー・state 同期は code WIP を消費しない
+```
+
+R5 は 2 節の意図(同時に壊れる範囲の最小化)を維持するためである。
+並行度は**作業者を増やすこと**で得るものであり、1 人の掛け持ちでは得ない。
+
+### 2.6.3 着手可否の最終ゲート
+
+```
+CODE_WIP_ACQUIRE_ALLOWED =
+      DOMAIN_WIP_AVAILABLE
+  AND FILE_OVERLAP_ACCEPTABLE
+  AND SHARED_CONTRACT_OVERLAP_ACCEPTABLE
+  AND DEPENDENCY_ORDER_CLEAR
+  AND BASE_MAIN_COMPATIBLE
+```
+
+```
+DOMAIN_WIP_AVAILABLE
+  触るすべての領域について、他の作業者が code WIP を保持していないこと。
+  保持状況は 2.6.9 の SSoT を fresh に読んで確認する(記憶で判断しない)
+
+FILE_OVERLAP_ACCEPTABLE
+  進行中の他 WIP の変更予定ファイルと重ならないこと。
+  1 つでも重なる見込みがあれば OVERLAP_DETECTED = YES として着手しない。
+  「たぶん大丈夫」で進めない
+
+SHARED_CONTRACT_OVERLAP_ACCEPTABLE
+  進行中の他 WIP が LOCK_LEVEL_2 以上で触っている SHARED を、
+  自分も読む・書く場合は着手しない。
+  読むだけでも、相手が意味を変えている最中なら不可
+
+DEPENDENCY_ORDER_CLEAR
+  先に main へ入るべき上流 Issue が未 merge のまま下流を実装しない
+
+BASE_MAIN_COMPATIBLE
+  自分の base が現在の origin/main と互換であること
+```
+
+```
+5 条件のうち 1 つでも判定できない場合は CODE_WIP_ACQUIRE_ALLOWED = NO。
+「不明」は「可」ではない。
+```
+
+### 2.6.4 掲示(DOMAIN_WIP_DECLARATION)
+
+code WIP を取得する作業者は、実装を始める前に Issue へ次を掲示する。
+
+```
+DOMAIN_WIP_DECLARATION
+
+ISSUE                  #<番号>
+ASSIGNEE               <作業者>
+INSTRUCTION_ID         <取得根拠となった指示 ID>
+ACQUIRED_AT            <UTC タイムスタンプ>
+
+PRIMARY_DOMAIN         D<n>
+LOCKED_DOMAINS         D<n> [, D<m> ...]   R3 / R4 で取得したすべて
+SHARED_TOUCHED         S-<nn> [, ...] | NONE
+LOCK_LEVEL             1 | 2 | 3 | N/A
+COMPATIBILITY_EVIDENCE LOCK_LEVEL = 1 のとき必須(2.6.5)
+PLANNED_FILES          <変更予定の主要 path>
+PLANNED_CONTRACTS      <触る永続契約> | NONE
+BASE_MAIN_SHA          <SHA>
+```
+
+`SHARED` を `PRIMARY_DOMAIN` として宣言することはできない。SHARED は領域では
+なく層であり、影響する領域を `LOCKED_DOMAINS` へ展開する。
+
+`PLANNED_FILES` は着手時点の見込みでよい。見込みが外れること自体は違反では
+なく、**増えたときに黙って続けること**が違反である(2.6.7)。
+
+### 2.6.5 SHARED の LOCK_LEVEL
+
+```
+LOCK_LEVEL_1  ADDITIVE_AND_BACKWARD_COMPATIBLE
+              追加であり、かつ後方互換であることを実測できた場合のみ
+              -> 参照領域の code WIP を奪わない(掲示は必須)
+
+LOCK_LEVEL_2  BEHAVIOR_CHANGE
+              既存の入出力・判定結果が変わりうる
+              -> functional_domains.md K節の「lock する領域」をすべて取得
+
+LOCK_LEVEL_3  CONTRACT_BREAKING
+              永続表現・provider 契約の破壊的変更
+              -> K節の領域に加えて全領域を lock。さらに人間承認が必須
+```
+
+`LOCK_LEVEL_1` を主張するには、次の 5 つを**すべて実測**して
+`COMPATIBILITY_EVIDENCE` へ記載する。
+
+```
+EXISTING_CONSUMER_BEHAVIOR_UNCHANGED = YES
+    既存の呼び出し元の挙動が変わらない
+
+EXISTING_SERIALIZATION_COMPATIBLE = YES
+    新要素を含まないデータが従来どおり読み書きできる
+
+EXISTING_VALIDATION_COMPATIBLE = YES
+    従来通っていた入力が通り、従来弾いていた入力が弾かれる
+
+EXISTING_PERSISTED_READ_COMPATIBLE = YES
+    保存済みデータの読み手が壊れない。
+    新旧の Lambda が同時に動く期間(デプロイ途中・段階リリース)を含めて評価する
+
+EXHAUSTIVE_CONSUMER_IMPACT = NONE
+    網羅的な分岐・対応表・許可リストのいずれにも影響がない。
+    参照元を全件列挙したうえで確認する
+```
+
+```
+1 つでも NO または UNKNOWN なら LOCK_LEVEL_1 を主張してはならない。
+UNKNOWN_COMPATIBILITY_FAILS_CLOSED = YES
+```
+
+種類ごとの既定。
+
+```
+enum 値の追加
+    DEFAULT = LOCK_LEVEL_2
+    consumer を全件実測し、既存 consumer が未知の値を安全に扱うことを
+    証明できた場合に限り LOCK_LEVEL_1 へ下げてよい
+
+optional な永続 field の追加
+    LOCK_LEVEL_2 として調査を開始し、reader compatibility と
+    serialization compatibility を実測できた場合に LOCK_LEVEL_1
+
+新しい関数・モジュールの追加
+    既存の呼び出し元をひとつも変更しない場合に限り LOCK_LEVEL_1。
+    既存関数から新関数を呼ぶよう書き換えた時点で LOCK_LEVEL_2 以上
+
+分類できない場合
+    LOCK_LEVEL_3(fail-closed)
+```
+
+```
+禁止  「diff が追加だけだから LOCK_LEVEL_1」という判定。
+      LOCK_LEVEL は diff の形ではなく、
+      既存の利用者から見た振る舞いが変わらないことで決める。
+
+      enum 値の追加は追加しかしていなくても、網羅的な分岐 / 対応表 /
+      入力バリデーション / 直列化 / 永続データの読み手 / 外部の利用者を
+      壊し得る。「追加だから安全」は成り立たない。
+```
+
+### 2.6.6 code WIP の解放
+
+```
+CODE_WIP_RELEASED = PR_MERGED
+                AND MAIN_CI_PASS
+                AND MAIN_HEAD_EXACT
+                AND NO_CORRECTIVE_CODE_WIP_REQUIRED
+```
+
+```
+解放しない時点   PR を作成した時点
+                 ChatGPT review が PASS した時点
+                 CI が PASS した時点(main CI と main HEAD の一致まで見る)
+
+解放が意味しないこと
+                 Production へ反映済みである
+                 Production で検証済みである
+                 Issue が CLOSED である
+```
+
+解放が意味するのは「その領域で次の実装を開始できる」ことだけである。
+Issue の OPEN / CLOSED、Production の状態とは分離して扱う。
+
+途中で放棄する場合は `CODE_WIP_ABANDONED` として、残置物(branch 名 /
+stash の有無 / 未 merge の変更)を明記する。**勝手に branch を消さない・
+stash を drop しない。**
+
+### 2.6.7 実装中の scope 拡大(SCOPE_EXPANSION_RULE)
+
+実装中に、宣言していない領域・SHARED を触る必要が生じた場合。
+
+```
+E1  その場で実装を止める
+E2  追加で必要な領域の WIP が空いているかを fresh に確認する
+E3  空いていれば LOCKED_DOMAINS を追記して掲示し直し、続行する
+E4  空いていなければ続行しない。次のいずれかを選び、理由とともに報告する
+      (a) 追加領域を触らない実装へ設計を変える
+      (b) 追加領域の WIP が空くまで待つ
+      (c) Issue を分割する
+```
+
+```
+禁止  宣言外の領域を黙って触る。
+      「もう半分書いたから」は続行の理由にならない。
+```
+
+### 2.6.8 P0 割り込みと main 追随
+
+```
+P0_INTERRUPT_RULE
+
+P0(動かない・データ破壊)の Issue は、対象領域の code WIP が他者に
+保持されていても着手できる。ただし次の手順を守る。
+
+I1  割り込む側が P0_INTERRUPT_DECLARATION を掲示する
+      対象領域 / 割り込む理由 / 影響する進行中 WIP / 想定所要
+I2  進行中の WIP 保持者は作業を停止し、変更を commit または stash して
+      作業中である旨と残置物を掲示する(破棄しない)
+I3  P0 の PR が main へ merge され main CI が PASS する
+I4  停止していた側が最新 main を取り込み直して再開する
+I5  再開時は必要な re-review を行う
+```
+
+```
+掲示なしの割り込みは認めない。停止側が気づかず衝突する原因になる。
+P1 以下は既存 WIP を強制的に中断しない。順番を待つか、別領域の Issue を
+先に進める。優先度の入れ替えが必要な場合は人間の判断を仰ぐ。
+```
+
+```
+MAIN_SYNC_RULE
+
+自分の base より後に main が進んだ場合、進んだ内容が次のいずれかと
+重なるなら main を取り込み直す。
+
+  自分の LOCKED_DOMAINS
+  自分の SHARED_TOUCHED
+  自分の PLANNED_FILES
+
+いずれとも重ならない場合の取り込みは任意。
+force push が必要になる方法を安易に選ばない。main の取り込みは merge を
+既定とし、rebase はレビュー済みの履歴を書き換えない場合に限る。
+```
+
+```
+RE_REVIEW_REQUIRED
+
+取り込み直した結果、次のいずれかならレビューをやり直す。
+
+  SHARED の LOCK_LEVEL_2 以上の変更が入った
+  自分が読む永続契約の形が変わった
+  自分の変更ファイルに conflict が発生した
+  取り込み後にテスト結果が変わった
+
+「CI が通ったから同じ」とはみなさない。conflict 解消時の判断は
+人間・レビュアが見ていない変更である。
+```
+
+### 2.6.9 現在の WIP 保持状況の SSoT
+
+```
+WIP_STATE_SSOT = 各 Issue の DOMAIN_WIP_DECLARATION
+                 + 最新の ISSUE_STATE_SNAPSHOT(6.5.3)
+```
+
+```
+作らない  専用の WIP 管理 Issue
+置かない  docs 側での「現在どの領域が埋まっているか」の管理
+```
+
+現況は頻繁に変わるため、PR 経由で更新する docs には置かない。また管理表を
+別に作ると Issue と二重更新になり、片方だけ更新される事故が起きる。
+
+```
+着手前の確認手順
+
+1  OPEN な Issue のうち status:開発中 のものを fresh に列挙する
+2  それぞれの DOMAIN_WIP_DECLARATION を読む
+3  自分が触る領域と重ならないことを確認する
+
+memory・会話要約・古い Issue 本文だけで判断しない(6.5.4 と同じ原則)。
+```
+
+### 2.6.10 発効の境界
+
+```
+DOMAIN_WIP_MODEL_ACTIVE = NO
+```
+
+**docs が main に入っただけでは本節は有効にならない。** 発効は次をすべて
+終えた後、人間による明示的な発効宣言をもって行う。
+
+```
+docs review -> PR -> CI -> 人間の merge 承認 -> merge -> main CI
+-> 周知(2.6.11) -> 人間による明示的な発効宣言
+```
+
+```
+RETROACTIVE_APPLICATION = NO
+
+発効時点で進行中の code WIP は、完了まで 2 節の担当者単位ルールで扱う。
+発効後に新しく取得する WIP から本節を適用する。
+```
+
+```
+巻き戻し
+
+発効後に「lock の粒度が粗すぎて動けない」「逆に衝突が増えた」等が
+観測された場合、人間の判断で 2 節のルールへ戻せる。
+戻す場合も宣言を要し、黙って併用しない。
+```
+
+試行期間として、発効から 2 週間はゲート判定で迷った事例を Issue #177 へ
+記録し、試行後に領域一覧と LOCK_LEVEL の見直しを 1 度行う。
+
+### 2.6.11 発効時の周知(COMMUNICATION)
+
+発効宣言の前に、次を TARO / JIRO / ChatGPT / 人間の全員へ周知する。
+
+```
+1  領域カタログの所在(docs/functional_domains.md)
+2  着手可否の最終ゲート(2.6.3)
+3  DOMAIN_WIP_DECLARATION の書式(2.6.4)
+4  SHARED の LOCK_LEVEL と LEVEL_1 の証拠要件(2.6.5)
+5  code WIP の解放条件(2.6.6)
+6  scope 拡大時の停止義務(2.6.7)
+7  P0 割り込みの手順(2.6.8)
+8  新機能・新領域・廃止時のカタログ維持義務(functional_domains.md M節)
+9  現在の WIP 保持状況の SSoT と着手前の確認手順(2.6.9)
+10 発効日時(EFFECTIVE_FROM)
+11 遡及適用しないこと(RETROACTIVE_APPLICATION = NO)
+```
+
+周知は発効の前提であり、周知を省いて発効しない。
 
 ---
 
@@ -1535,3 +1911,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-05 | label の 4軸表記を 5軸(Issue Type / Priority / Severity / Release Blocker / Progress Status)へ同期し、9.5節へ「Priority を読み直す時点」を新設した(#122)。Priority は起票時から永久固定ではなく、Issue 起票時 / duplicate check 後 / Phase A 完了時 / Production evidence 取得時 / Action delta 判明時 / notification delta 判明時 / Production reachability 判明時 / remediation で主要 impact が消えた時 / worker assignment queue 決定時に fresh に読み直す。再評価必須の 7 トリガーと `WORKER_PRIORITY_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_PRIORITY`、判定不能時の `PRIORITY_RECONCILIATION_REQUIRED` を定めた。**Priority の判定基準そのものは issue_label_policy.md §4 が正本であり本文書へ複製していない。** Priority 変更を理由に Progress Status を巻き戻さない。既存の lane / WIP / 指示プロトコル / テスト方針 / state 同期 / 人間承認の境界は変更していない。コード・Production 挙動の変更なし |
 | 2026-09-05 | 9.5節の Priority 再評価トリガーへ非機能側の 7 項目(security exposure / privacy exposure / data recoverability / cost anomaly / capacity exhaustion / compliance requirement / compensating control の変化)を追加した(#122)。**判定基準そのものは issue_label_policy.md §4.13〜§4.21 が正本であり本文書へ複製していない。** 既存の再評価時点・`WORKER_PRIORITY_LABEL_WRITE_OWNER`・`PRIORITY_RECONCILIATION_REQUIRED` は変更していない。コード・Production 挙動の変更なし |
 | 2026-09-05 | Severity 軸の廃止(#122)に伴い、label モデルの表記を 4軸(Issue Type / Priority / Release Blocker / Progress Status)へ同期し、6.5.3 の ISSUE_STATE_SNAPSHOT contract の必須項目から `SEVERITY` を削除して `STATUS` を加えた。**過去の snapshot は一切編集しておらず、そこに残る `SEVERITY = ...` は履歴として有効である。** 互換用の `SEVERITY = RETIRED` 等も新規必須にはしない。**Severity 廃止の理由・retired label の扱い・再導入条件の正本は issue_label_policy.md §5 であり本文書へ複製していない。** 既存の lane / WIP / 指示プロトコル / テスト方針 / state 同期 / Priority 再評価 / 人間承認の境界は変更していない。コード・Production 挙動の変更なし |
+| 2026-09-06 | §2.6「機能領域ベースの WIP モデル(DOMAIN_WIP_RULE_V1)」を新設(Issue #177)。§2 の担当者単位 WIP は「同時に壊れる範囲の最小化」には有効だが、互いに無関係な機能領域まで直列化する一方、**Git では検出できない衝突(同じ判定契約・永続契約を別ファイルから同時に変える / 共通 module 経由で他領域が壊れる)を防げていなかった**。実際に Issue #140 は 1 ファイルのみの変更でありながら、その module の呼び出し元は買い判定と保有判断の 2 領域にまたがっており、ファイル重複だけを見る判定では並行可能と誤認する。そこで並行可否を**ファイルの重複ではなく機能領域の重複**で判定する。(1)R1〜R6 を定め、領域ごとに code WIP = 1、異なる領域は並行可、複数領域を触る Issue は必要な領域を同時取得、SHARED は LOCK_LEVEL に従う、`MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1` は維持(並行度は作業者を増やして得るものであり 1 人の掛け持ちでは得ない)、read-only 作業は code WIP を消費しない、とした。(2)着手可否を `DOMAIN_WIP_AVAILABLE` / `FILE_OVERLAP_ACCEPTABLE` / `SHARED_CONTRACT_OVERLAP_ACCEPTABLE` / `DEPENDENCY_ORDER_CLEAR` / `BASE_MAIN_COMPATIBLE` の 5 条件で判定し、1 つでも判定できなければ着手不可とした(「不明」は「可」ではない)。(3)`DOMAIN_WIP_DECLARATION` の書式を定めた。(4)SHARED の `LOCK_LEVEL` を 3 段階とし、**LEVEL_1 を `ADDITIVE_ONLY` ではなく `ADDITIVE_AND_BACKWARD_COMPATIBLE`** と定義した。追加 diff であることは semantic compatibility を保証せず、とくに enum 値の追加は網羅的な分岐・対応表・入力バリデーション・直列化・永続データの読み手・外部の利用者を壊し得るためである。LEVEL_1 の主張には consumer behavior / serialization / validation / persisted read / exhaustive consumer impact の 5 つの実測証拠を要求し、1 つでも UNKNOWN なら LEVEL_1 を禁止する。enum 値追加の既定は LEVEL_2、optional な永続 field 追加も LEVEL_2 として調査を開始し reader/serialization 互換を実測できた場合のみ LEVEL_1 とする。分類不能は LEVEL_3 の fail-closed。**「diff が追加だけだから LEVEL_1」という判定を明示的に禁止した。**(5)解放条件を `PR_MERGED AND MAIN_CI_PASS AND MAIN_HEAD_EXACT AND NO_CORRECTIVE_CODE_WIP_REQUIRED` とし、PR 作成時・review PASS 時には解放しないこと、解放は Production 反映・Production 検証・Issue close のいずれも意味しないことを明記した。(6)scope 拡大時の停止義務、(7)P0 割り込み手順(掲示なしの割り込みは認めない。P1 以下は既存 WIP を強制中断しない)、(8)main 追随と re-review 必須条件、(9)現在の WIP 保持状況の SSoT を**各 Issue の DOMAIN_WIP_DECLARATION + 最新 ISSUE_STATE_SNAPSHOT** とし専用管理 Issue も docs 管理も作らないこと(人間承認 H4)、(10)発効の境界と周知項目を定めた。**本節は設計として確定しているが発効していない**(`DOMAIN_WIP_MODEL_ACTIVE = NO` / `CURRENT_WIP_RULE = ISSUE_122`)。docs が main に入っただけでは有効にならず、周知と人間による明示的な発効宣言を要する。発効後も進行中の作業へ遡及適用しない。領域・機能・共通部品の一覧は docs/functional_domains.md が正本であり本文書へ複製していない。既存の §2 / §2.5 / §3〜§11、人間承認の境界、grouped release、release-blocker lifecycle はいずれも変更・緩和していない。**docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない** |
