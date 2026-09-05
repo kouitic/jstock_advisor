@@ -25,6 +25,7 @@ HoldingEvaluationRecord)をユーザーへ分かりやすく説明するだけ�
 
 from __future__ import annotations
 
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from jstock_advisor.domain.entities.audit import AuditLogEntry
@@ -34,6 +35,10 @@ from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
 from jstock_advisor.domain.entities.common import BuyPriceLevels, ScoreBreakdown
 from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.valuation.downside_valuation_scenario import (
+    DownsideScenarioKind,
+    derive_downside_valuation_observation,
+)
 from jstock_advisor.domain.valuation.valuation_confidence import (
     CODE_NO_VALID_VALUATION_METHODS,
     CODE_TOO_FEW_VALUATION_METHODS,
@@ -456,6 +461,62 @@ _VALUATION_METHOD_LABELS: dict[str, str] = {
 # の原因であるかのように誤って表示されていた不備の原因)。標準5方式のみを
 # 対象とすることで、この混同を防ぐ。
 _STANDARD_VALUATION_METHODS: frozenset[str] = frozenset(_VALUATION_METHOD_LABELS)
+
+
+# --- Issue #20 O-C(2026-09-06): 適正価格の集計から下方外れ値として除外された
+# 評価の参考表示 ---
+# 判定時点に保存済みのbuy_score_input_facts["valuation_outlier_exclusions"]を
+# domain層(downside_valuation_scenario.py)でruntime導出したものを表示するだけで
+# あり、新しい価格の算出・永続化・判定への反映は一切行わない。
+# 買付価格信頼性(buy_price_reliability=LOW)のブロックとは独立したセクションと
+# する。信頼性がOKでも下方除外は発生しうるため、LOWブロックの内側に置くと
+# 実際に除外が起きた推奨の一部でしか表示されない。
+_DOWNSIDE_SECTION_HEADING = "■ 参考：適正価格の集計から除外された低い評価"
+_DOWNSIDE_SECTION_LEAD = "算出はされたものの、外れ値として通常の適正価格計算から除外した評価です。"
+_DOWNSIDE_SECTION_CAUTION = (
+    "これらの金額は購入判断には使っていません。この価格まで下がるという予測でもありません。"
+)
+# scenario_kindごとの自然文。内部コード名(BELOW_52_WEEK_LOW等)はそのまま
+# ユーザーへ出さない。また判定時点のmessageもここでは使わない(messageは
+# 「算出値(8.0E+2円)が…」のようにDecimalの指数表記をそのまま含むため、
+# 一般ユーザー向けの表示には適さない。監査用途の値としてdomain層に保持する)。
+_DOWNSIDE_KIND_TEXT: dict[DownsideScenarioKind, str] = {
+    DownsideScenarioKind.EXTREME_RELATIVE_TO_CURRENT_PRICE: "現在株価に対して極端に低い評価",
+    DownsideScenarioKind.METHOD_DIVERGENT_DOWNSIDE: "他の評価方式と比べて大きく低い評価",
+    DownsideScenarioKind.HISTORICAL_PRICE_RELATIVE_DOWNSIDE: "過去1年の値動きに対して低い評価",
+}
+
+
+def _yen(value: Decimal) -> str:
+    """円建て金額の表示整形(line_notification_service.pyと同じ丸め方針)。
+
+    保存済みDecimalは`8.0E+2`や28桁の値を取りうるため、そのまま文字列化しない。
+    表示のための整形であり、保存値・判定値は一切変更しない。
+    """
+    return f"{int(value.to_integral_value(rounding=ROUND_HALF_UP)):,}円"
+
+
+def _downside_scenario_lines(recommendation: Recommendation) -> list[str]:
+    """下方外れ値として除外された評価の参考表示行を組み立てる。
+
+    - 判定時点スナップショットが無い旧レコードでは、セクション自体を出さない
+      (「悲観シナリオなし」とは表示しない。観測できないことと0件は別)。
+    - 下方除外が0件の場合も、追加情報として出すものが無いため行を返さない。
+    """
+    observation = derive_downside_valuation_observation(recommendation)
+    if not observation.scenarios:
+        return []
+
+    lines = [_DOWNSIDE_SECTION_LEAD]
+    for scenario in observation.scenarios:
+        label = _VALUATION_METHOD_LABELS.get(scenario.method, scenario.method)
+        kind_text = _DOWNSIDE_KIND_TEXT.get(scenario.scenario_kind)
+        detail = f"（{kind_text}）" if kind_text else ""
+        lines.append(f"・{label}：{_yen(scenario.fair_value)}{detail}")
+    lines.append(_DOWNSIDE_SECTION_CAUTION)
+    if recommendation.valuation_anchor is not None:
+        lines.append(f"購入判断に使った適正価格：{_yen(recommendation.valuation_anchor)}")
+    return lines
 
 
 def _standard_valuation_method_exclusion_reasons(recommendation: Recommendation) -> list[str]:
@@ -958,6 +1019,12 @@ class StockAnalysisViewService:
             price_lines = _buy_price_lines(recommendation.buy_prices)
             if price_lines:
                 lines += ["", "■ 価格目安（判定時点）", *price_lines]
+
+            # Issue #20 O-C: 判定に使わなかった低い評価の参考表示。
+            # 価格目安の後に置き、判定に使う価格と混ざらないようにする。
+            downside_lines = _downside_scenario_lines(recommendation)
+            if downside_lines:
+                lines += ["", _DOWNSIDE_SECTION_HEADING, *downside_lines]
 
         return "\n".join(lines)
 
