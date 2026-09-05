@@ -100,7 +100,9 @@ class YFinanceMarketDataProvider:
         try:
             # Issue #125: 1回の取得を明示的な境界で囲み、この範囲でのみ
             # 「確定した404」と、そこから派生する曖昧なログの相関を許す。
-            with yfinance_fetch_context():
+            # tickerを渡すのは、ログから抽出した銘柄が「いま取得中の銘柄」と
+            # 一致することを降格の条件にするため(取り違えの構造的な防止)。
+            with yfinance_fetch_context(ticker_symbol):
                 ticker = yf.Ticker(ticker_symbol)
                 df = ticker.history(
                     start=start,
