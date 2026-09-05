@@ -185,37 +185,75 @@ PRODUCTION_DEPLOYMENT_EXECUTOR = TARO
 
 ### 目的
 
-ユーザーはシステム開発の経験者ではない。内部コードや短縮表記だけを並べた回答は、
-**受け取った側が意味を判断できないため、承認・却下の材料にならない**。
-Human Gate は「人間が理解したうえで決める」ことが前提であり、
-理解できない説明に対する承認は Human Gate として成立しない。
+Human Gate は「人間が理解したうえで決める」ことが前提である。
+**理解できない説明に対する承認は Human Gate として成立しない。**
+内部コードや短縮表記だけを並べた回答は、受け取った側が意味を判断できないため、
+承認・却下の材料にならない。
 
-### ルール
-
-```
-USER_EXPLANATION_LEVEL                = NON_DEVELOPER_FRIENDLY
-SYSTEM_DEVELOPMENT_EXPERIENCE_REQUIRED = NO
-```
-
-ChatGPT からユーザーへ伝える次のものは、開発経験を前提にしない。
+### 前提とする知識水準
 
 ```
-開発状況 / レビュー結果 / Human Gate / Production Gate /
-問題報告 / 次の作業 / 承認依頼
+USER_EXPLANATION_LEVEL = IT_FOUNDATION_AWS_LITERATE
 ```
 
-#### 内部コードだけで回答しない
+ユーザーは **IT の基礎知識(応用情報技術者試験相当)を持ち、AWS の主要な
+マネージドサービスの名称と概要を理解している**。
+一方で **本プロジェクトの実装・運用の詳細は自明として扱わない**。
+
+```
+USER_CAN_MAKE_AN_INFORMED_DECISION = REQUIRED
+```
+
+説明の目的は「噛み砕くこと」自体ではなく、**ユーザーが根拠を持って
+判断できる状態にすること**である。過剰な言い換えはむしろ因果関係を見えなくする。
+
+### そのまま使ってよいもの
+
+一般的な IT / AWS の用語は、毎回初歩から言い換えない。
+
+```
+Lambda / DynamoDB / CloudFormation / S3 / Secrets Manager / EventBridge / IAM
+CI / PR / merge / main / Production / PITR / RPO / RTO
+```
+
+```
+不要   「Lambda = サーバーを管理せずコードを実行するサービス」を毎回添える
+禁止   AWS のサービス名まで一般語へ置き換える
+```
+
+### 説明が必要なもの
+
+判断に効くのは用語の辞書的意味ではなく、**背景・因果関係・影響**である。
+次は説明を添える。
+
+```
+A  本プロジェクト固有の運用概念
+   BLOCKED_BY_RELEASE_SCOPE / waiting:本番検証 / grouped release /
+   code WIP / Assignment Read Barrier / Issue State Snapshot 等
+
+B  AWS でも挙動を取り違えやすい概念
+   ChangeSet の CREATE と EXECUTE の違い
+   CloudFormation の Dynamic Reference が再解決される条件
+   Deletion Protection / DeletionPolicy / UpdateReplacePolicy の違い
+   PITR の restore が新しいテーブルとして作られること
+   merge 済みだが Production 未反映という状態
+
+C  Human Gate の範囲
+   今回何を承認するのか / 承認すると何が起きるか /
+   この承認ではまだ何が起きないか / 次にどの承認が必要か
+```
+
+### 内部コードだけで回答しない
 
 `ISSUE_166_PRODUCTION_GATE = BLOCKED_BY_RELEASE_SCOPE` のような
 機械可読の状態値を**併記すること自体は禁止しない**(監査証跡として有用)。
 ただし **それだけをユーザー向けの説明として提示してはならない**。
-必ず通常の日本語で意味を説明する。
 
 ```
 INTERNAL_STATUS_ONLY_RESPONSE = FORBIDDEN
 ```
 
-#### 最低限説明する内容
+### 最低限説明する内容
 
 状況に応じて、次を含める。
 
@@ -232,9 +270,9 @@ INTERNAL_STATUS_ONLY_RESPONSE = FORBIDDEN
 **「今あなたがすることはありません」と明示する**。
 書かないと「何か待たれているのでは」と誤解させる。
 
-#### Human Gate の依頼
+### Human Gate の依頼
 
-承認を依頼するときは、自然な日本語で最低これを説明する。
+承認を依頼するときは最低これを説明する。
 
 ```
 A  今回何を決めてもらいたいか
@@ -249,24 +287,12 @@ C を落とすと、ユーザーは「承認＝本番反映」と受け取る。
 2.5節の `PROPOSED / APPROVED / EXECUTED / VERIFIED` の区別が
 説明の側で崩れないようにするための必須項目である。
 
-#### 専門用語
-
-専門用語の使用は禁止しない。必要なら**判断に足りる短い意味**を添える。
-
-```
-ChangeSet   本番へ反映すると何が変わるかを、実行前に AWS が一覧化したもの
-CI          自動テスト
-main        レビュー済みの変更をまとめる基準ブランチ
-Production  実際に日々利用している本番環境
-rollback    問題が起きた場合に変更前へ戻すこと
-```
-
-#### 回答の順序
+### 回答の順序
 
 ```
 1  結論
 2  今どうなっているか
-3  理由
+3  理由・影響
 4  これからの順番
 5  今ユーザーがすること
 6  必要なら技術的な証拠
@@ -274,13 +300,9 @@ rollback    問題が起きた場合に変更前へ戻すこと
 
 機械可読の状態値や SHA を回答の冒頭へ大量に並べることを標準としない。
 
-### 分かりやすさのために意味を変えない
+### 技術的な正確さを落とさない
 
-```
-NON_DEVELOPER_FRIENDLY != 技術的に不正確でよい
-```
-
-特に次を混同させない。
+分かりやすさのために技術的な意味を変えない。特に次を混同させない。
 
 ```
 ChangeSet の作成  !=  Production への反映
@@ -291,15 +313,25 @@ merge            !=  Production 承認
 悪い例  「本番反映の準備が終わったので承認をお願いします」
         -> 何が起きるのか、まだ何が起きないのかが分からない
 
-良い例  「本番へ反映した場合に何が変わるかの一覧を、AWS に作らせてよいか
-         という承認です。この段階では本番のシステム自体は変更されません。
-         一覧を確認したあと、実際に反映してよいかは改めて確認します」
+良い例  「PR #172 は main へ merge 済みで CI も通っていますが、
+         Production の baseline から main までを deploy すると、
+         #166 だけでなく未承認の #117 の CloudFormation 変更も含まれます。
+         #117 では Lambda の Environment 更新により Secrets Manager の
+         Dynamic Reference が再解決されるため、#166 単独のつもりで
+         release することはできません。」
+```
+
+後者が想定する粒度である。用語を平易にするのではなく、
+**因果関係と判断ポイントを平易に示す**。
+
+```
+禁止   技術情報を削りすぎて因果関係が見えなくなる説明
 ```
 
 ### 技術的な情報は残す
 
 ```
-NON_DEVELOPER_FRIENDLY != TECHNICAL_DETAIL_FORBIDDEN
+IT_FOUNDATION_AWS_LITERATE != TECHNICAL_DETAIL_FORBIDDEN
 ```
 
 Issue 番号 / PR 番号 / SHA / CI run / ChangeSet の識別子 / 内部状態値は、
@@ -317,8 +349,8 @@ Issue 番号 / PR 番号 / SHA / CI run / ChangeSet の識別子 / 内部状態�
 
 ### 例外
 
-ユーザーが明示的に「技術者向けで」「内部状態だけ」「表だけ」等の形式を
-求めた場合は、その形式を優先してよい。
+ユーザーが明示的に「内部状態だけ」「表だけ」等の形式を求めた場合は、
+その形式を優先してよい。
 ただしその場合も、Human Gate の意味(何が起きて何が起きないか)を
 誤解させてはならない。
 
@@ -1387,4 +1419,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-05 | Assignment Read Barrier へ「Priority の鮮度確認」を追加(#122)。`CHATGPT_PRIORITY_READ_OWNER = CHATGPT` / `ASSIGNMENT_PRIORITY_FRESHNESS_REQUIRED = YES` とし、worker assignment を出す前に latest priority label と latest Issue evidence の整合を確認することを定めた。矛盾時は `PRIORITY_RECONCILIATION_REQUIRED` として、原則あたらしい通常 implementation assignment より先に reconcile する(例外は Production P0 incident の必要最小限 containment のみで、その場合も事後に reconcile する)。**Priority の判定基準は issue_label_policy.md §4、再評価時点は development_workflow.md 9.5節が正本であり本文書へ複製していない。** 本節が定めるのは確認の実行主体だけである。既存の役割分担 / Human Gate / レビュー判定 / read barrier の所有者・例外は変更していない |
 | 2026-09-05 | Priority の鮮度確認について、functional evidence と non-functional evidence(security / privacy / data protection / cost / reliability 等)の双方を確認することを最小追記した(#122)。Priority は両者の高い方で決まるため、片方だけを見て「変化なし」と判断しない。**判定基準は issue_label_policy.md §4.13〜§4.21 が正本であり本文書へ複製していない。** 実行主体(`CHATGPT_PRIORITY_READ_OWNER`)と例外は変更していない |
 | 2026-09-05 | Severity 軸の廃止(#122)に伴い、責務表の記載を Issue 分類 / Priority / release-blocker / Progress Status へ同期した。worker instruction・レビュー・assignment read barrier のいずれでも Severity の判定・writeback・鮮度確認を要求しない。**過去の instruction 例やコメントに残る Severity 記載は履歴として保持する。** Priority の鮮度確認(functional / non-functional 双方)と実行主体、Human Gate・レビュー判定・役割分担は変更していない |
-| 2026-09-05 | ユーザーの明示承認により2つの恒久ルールを追加(Issue #122)。**1.6節「ユーザーへの説明の水準」** — `USER_EXPLANATION_LEVEL = NON_DEVELOPER_FRIENDLY`。ユーザーはシステム開発の経験者ではないため、内部の状態値だけを並べた回答は承認・却下の材料にならず、理解できない説明に対する承認は Human Gate として成立しない。機械可読の状態値の併記は禁止しないが、それだけをユーザー向け説明としない(`INTERNAL_STATUS_ONLY_RESPONSE = FORBIDDEN`)。最低限「今どうなっているか / なぜ / 進めると何が危険か / 次に何をするか / 今ユーザーがすること / 次に判断が要るのはいつか」を含め、ユーザーの操作が不要なら「今あなたがすることはありません」と明示する。Human Gate の依頼では「承認すると何が起きるか」と**「この承認ではまだ何が起きないか」**を必ず対で示し、`ChangeSet 作成 != Production 反映` / `merge != Production 承認` を説明の側でも崩さない。専門用語は禁止せず短い意味を添える。分かりやすさのために技術的意味を変えないこと、`NON_DEVELOPER_FRIENDLY != TECHNICAL_DETAIL_FORBIDDEN`(Issue/PR/SHA/CI run 等は監査証跡として残す)ことを明記。**対象は ChatGPT からユーザーへの回答のみ**で、作業 AI の完了報告は従来どおり機械可読形式でよい(4.5節・7節の contract は不変)。**4.1節「Instruction ID の採番」** — `INSTRUCTION_ID_DATE_TIMEZONE = Asia/Tokyo` / `SERIAL_SCOPE = PER_ASSIGNEE_PER_JST_DATE` / `SERIAL_RESET_ON_DATE_CHANGE = 001`。日本時間で日付が変わったら連番を 001 へ戻し、前日の連番を翌日へ引き継がない。作業者ごとに独立(同日でも TARO / JIRO の 001 は衝突ではない)。同一作業者・同一日付では使用済み番号を再利用しない(完了 / CANCELLED / SUPERSEDED / 途中停止 / 取消をいずれも使用済みとする)。作業 AI へ未提示の下書きは同じ ID のまま修正してよいが、`RELAYED_TO_ASSIGNEE = YES` の後は同じ ID で内容を差し替えない。development_workflow.md 2.5.1節へは cross-reference のみを置き、採番規則の全文は複製していない。**既存 governance はいずれも緩和していない**(Human Gate / `CREATE != EXECUTE` / `merge != Production 承認` / `PER_WORKER_SERIALIZATION` / 緊急差し替えの条件を含む)。Severity 軸は復活させていない。コード・Production 挙動の変更なし |
+| 2026-09-05 | ユーザーの明示承認により2つの恒久ルールを追加(Issue #122)。**1.6節「ユーザーへの説明の水準」** — `USER_EXPLANATION_LEVEL = IT_FOUNDATION_AWS_LITERATE`。Human Gate は「人間が理解したうえで決める」ことが前提であり、理解できない説明に対する承認は Human Gate として成立しない。前提とする知識水準は **IT 基礎知識(応用情報技術者試験相当)+ AWS 主要マネージドサービスの名称・概要の理解**であり、一方で **本プロジェクトの実装・運用の詳細は自明として扱わない**。目的は噛み砕くこと自体ではなく `USER_CAN_MAKE_AN_INFORMED_DECISION` を満たすこと。Lambda / DynamoDB / CloudFormation / S3 / Secrets Manager / EventBridge / IAM / CI / PR / merge / main / Production / PITR / RPO / RTO 等の一般的な IT・AWS 用語はそのまま使ってよく、毎回初歩から言い換えない(サービス名を一般語へ置き換えるのは禁止)。代わりに **本プロジェクト固有の運用概念**(BLOCKED_BY_RELEASE_SCOPE / waiting:本番検証 / grouped release / code WIP / Assignment Read Barrier / Issue State Snapshot 等)、**AWS でも取り違えやすい挙動**(ChangeSet の CREATE と EXECUTE の違い / Dynamic Reference の再解決条件 / Deletion Protection・DeletionPolicy・UpdateReplacePolicy の違い / PITR restore が新しいテーブルになること / merge 済みだが Production 未反映という状態)、**Human Gate の範囲**には背景・因果関係・影響を添える。機械可読の状態値の併記は禁止しないが、それだけをユーザー向け説明としない(`INTERNAL_STATUS_ONLY_RESPONSE = FORBIDDEN`)。最低限「今どうなっているか / なぜ / 進めると何が危険か / 次に何をするか / 今ユーザーがすること / 次に判断が要るのはいつか」を含め、ユーザーの操作が不要なら「今あなたがすることはありません」と明示する。Human Gate の依頼では「承認すると何が起きるか」と**「この承認ではまだ何が起きないか」**を必ず対で示し、`ChangeSet 作成 != Production 反映` / `merge != Production 承認` を説明の側でも崩さない。技術情報を削りすぎて因果関係が見えなくなる説明は禁止し、`IT_FOUNDATION_AWS_LITERATE != TECHNICAL_DETAIL_FORBIDDEN`(Issue/PR/SHA/CI run 等は監査証跡として残す)ことを明記。**対象は ChatGPT からユーザーへの回答のみ**で、作業 AI の完了報告は従来どおり機械可読形式でよい(4.5節・7節の contract は不変)。**4.1節「Instruction ID の採番」** — `INSTRUCTION_ID_DATE_TIMEZONE = Asia/Tokyo` / `SERIAL_SCOPE = PER_ASSIGNEE_PER_JST_DATE` / `SERIAL_RESET_ON_DATE_CHANGE = 001`。日本時間で日付が変わったら連番を 001 へ戻し、前日の連番を翌日へ引き継がない。作業者ごとに独立(同日でも TARO / JIRO の 001 は衝突ではない)。同一作業者・同一日付では使用済み番号を再利用しない(完了 / CANCELLED / SUPERSEDED / 途中停止 / 取消をいずれも使用済みとする)。作業 AI へ未提示の下書きは同じ ID のまま修正してよいが、`RELAYED_TO_ASSIGNEE = YES` の後は同じ ID で内容を差し替えない。development_workflow.md 2.5.1節へは cross-reference のみを置き、採番規則の全文は複製していない。**既存 governance はいずれも緩和していない**(Human Gate / `CREATE != EXECUTE` / `merge != Production 承認` / `PER_WORKER_SERIALIZATION` / 緊急差し替えの条件を含む)。Severity 軸は復活させていない。コード・Production 挙動の変更なし |
