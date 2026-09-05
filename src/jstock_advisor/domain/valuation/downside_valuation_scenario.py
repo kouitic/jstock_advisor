@@ -80,6 +80,10 @@ UNAVAILABLE_ACTUAL_VALUE_MISSING = (
     "下方除外の元値がスナップショットに保存されておらず、"
     "除外された評価額を推測なしで復元できません"
 )
+UNAVAILABLE_METHOD_MISSING = (
+    "下方除外の対象方式がスナップショットに保存されておらず、"
+    "どの算出方式が除外されたのかを推測なしで復元できません"
+)
 
 
 @dataclass(frozen=True)
@@ -119,15 +123,21 @@ class DownsideValuationObservation:
     unavailable_reason: str | None = None
 
 
-def _to_decimal(value: object) -> Decimal | None:
+def _to_finite_decimal(value: object) -> Decimal | None:
+    """保存値をDecimalへ復元する。復元できない値・非有限値はNoneを返す。
+
+    `Decimal("NaN")` / `Decimal("Infinity")` はDecimalとしては構築できてしまうため、
+    金額として扱う前に有限であることを要求する(非有限値を表示層へ渡さない)。
+    """
     if value is None:
         return None
     if isinstance(value, Decimal):
-        return value
+        return value if value.is_finite() else None
     try:
-        return Decimal(str(value))
+        restored = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+    return restored if restored.is_finite() else None
 
 
 def _unavailable(reason: str) -> DownsideValuationObservation:
@@ -152,25 +162,36 @@ def derive_downside_valuation_observation(
         # 「下方除外は無かった」と読み替えず、観測不能として区別する。
         return _unavailable(UNAVAILABLE_NO_EXCLUSION_SNAPSHOT)
 
+    # 判定は必ず「まずcodeを見て下方かどうかを決め、下方と分かった後に
+    # scenarioとして成立するかを検証する」順序で行う。
+    # 下方と断定できないentryを落とすこと(skip)と、下方と分かったentryが
+    # 復元できないこと(観測全体をUNAVAILABLE)は別の意味を持つため、
+    # 両者を同じ扱いにしない。
     scenarios: list[DownsideValuationScenario] = []
     for entry in entries:
+        # A: entry自体が構造化されていない。下方かどうか判定できないためskip。
         if not isinstance(entry, dict):
             continue
+        # B: codeが無い/不正。同じく下方かどうか判定できないためskip。
         code = entry.get("code")
-        method = entry.get("method")
-        if not isinstance(code, str) or not isinstance(method, str):
+        if not isinstance(code, str) or not code:
             continue
+        # C: 上方除外、および将来追加され得る未知コード。下方と断定できない
+        # ものをdownside scenarioとして提示しない(fail-closed)。
         kind = _DOWNWARD_EXCLUSION_KINDS.get(code)
         if kind is None:
-            # 上方除外、および将来追加され得る未知コード。下方と断定できない
-            # ものをdownside scenarioとして提示しない(fail-closed)。
             continue
-        fair_value = _to_decimal(entry.get("actual_value"))
+
+        # D: 下方除外だと認識できた。ここから先の欠損は「無かったこと」に
+        # できない。1件でも復元できなければ、一部だけを提示して件数・水準を
+        # 過小に見せるより、観測全体を不能として扱う(値を捏造しない)。
+        method = entry.get("method")
+        if not isinstance(method, str) or not method.strip():
+            return _unavailable(UNAVAILABLE_METHOD_MISSING)
+        fair_value = _to_finite_decimal(entry.get("actual_value"))
         if fair_value is None:
-            # 下方除外として認識できたが、除外された金額そのものが復元できない。
-            # 一部だけを提示すると件数・水準を過小に見せるため、観測全体を
-            # 不能として扱う(値を捏造しない)。
             return _unavailable(UNAVAILABLE_ACTUAL_VALUE_MISSING)
+
         message = entry.get("message")
         scenarios.append(
             DownsideValuationScenario(
@@ -178,7 +199,10 @@ def derive_downside_valuation_observation(
                 code=code,
                 message=message if isinstance(message, str) else None,
                 fair_value=fair_value,
-                reference_value=_to_decimal(entry.get("reference_value")),
+                # reference_valueは補助情報であり、欠損・不正・非有限でも
+                # scenarioは成立する。ただし非有限値を表示層へ渡さないため
+                # Noneへ落とす(閾値額を推測で補完しない)。
+                reference_value=_to_finite_decimal(entry.get("reference_value")),
                 scenario_kind=kind,
             )
         )

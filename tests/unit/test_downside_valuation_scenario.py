@@ -15,6 +15,7 @@ from jstock_advisor.domain.entities.enums import ConfidenceLevel, Recommendation
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.valuation.downside_valuation_scenario import (
     UNAVAILABLE_ACTUAL_VALUE_MISSING,
+    UNAVAILABLE_METHOD_MISSING,
     UNAVAILABLE_NO_EXCLUSION_SNAPSHOT,
     DownsideScenarioKind,
     derive_downside_valuation_observation,
@@ -246,14 +247,20 @@ def test_missing_reference_value_is_allowed() -> None:
 
 
 def test_malformed_entries_are_skipped_without_raising() -> None:
-    """壊れたentryで例外を投げず、下方と断定できないものは取り込まないこと。"""
+    """下方かどうかを判定できないentryは、例外を投げずにskipすること。
+
+    entry自体がdictでない場合とcodeが無い/不正な場合は、そもそも下方除外だと
+    認識できないためskipでよい(下方と分かったうえでの欠損とは別扱い。
+    後続のテスト参照)。
+    """
     observation = derive_downside_valuation_observation(
         _recommendation(
             {
                 "valuation_outlier_exclusions": [
                     "not-a-dict",
                     {"method": "dcf"},
-                    {"code": "BELOW_52_WEEK_LOW"},
+                    {"method": "dcf", "code": ""},
+                    {"method": "dcf", "code": 123},
                     _entry("per", "BELOW_52_WEEK_LOW"),
                 ]
             }
@@ -262,6 +269,96 @@ def test_malformed_entries_are_skipped_without_raising() -> None:
 
     assert observation.status is ObservationStatus.AVAILABLE
     assert [s.method for s in observation.scenarios] == ["per"]
+
+
+def test_known_downward_entry_without_method_is_unavailable() -> None:
+    """T19: 下方除外と分かったentryのmethodが欠けていたら観測不能とすること。
+
+    actual_value欠損と同じ意味論にそろえる。下方除外の存在を認識できた以上、
+    そのentryだけを黙って落として件数を過小に見せてはならない。
+    """
+    observation = derive_downside_valuation_observation(
+        _recommendation({"valuation_outlier_exclusions": [{"code": "BELOW_52_WEEK_LOW"}]})
+    )
+
+    assert observation.status is ObservationStatus.OBSERVATION_UNAVAILABLE
+    assert observation.unavailable_reason == UNAVAILABLE_METHOD_MISSING
+    assert observation.scenarios == ()
+
+
+def test_valid_scenario_plus_method_missing_returns_no_partial_result() -> None:
+    """T20: 復元できた分だけを返さないこと(件数の過小表示を防ぐ)。"""
+    observation = derive_downside_valuation_observation(
+        _recommendation(
+            {
+                "valuation_outlier_exclusions": [
+                    _entry("dcf", "BELOW_52_WEEK_LOW"),
+                    {"code": "EXTREME_LOW_RELATIVE_TO_MEDIAN", "actual_value": "300"},
+                ]
+            }
+        )
+    )
+
+    assert observation.status is ObservationStatus.OBSERVATION_UNAVAILABLE
+    assert observation.unavailable_reason == UNAVAILABLE_METHOD_MISSING
+    assert observation.scenarios == ()
+
+
+def test_known_downward_entry_with_blank_method_is_unavailable() -> None:
+    """T21: methodが空文字・空白のみでも観測不能とすること。"""
+    for blank in ("", "   ", None, 123):
+        observation = derive_downside_valuation_observation(
+            _recommendation(
+                {
+                    "valuation_outlier_exclusions": [
+                        _entry("dcf", "BELOW_52_WEEK_LOW") | {"method": blank}
+                    ]
+                }
+            )
+        )
+        assert observation.status is ObservationStatus.OBSERVATION_UNAVAILABLE
+        assert observation.unavailable_reason == UNAVAILABLE_METHOD_MISSING
+
+
+def test_non_finite_actual_value_is_rejected() -> None:
+    """T22/T23: NaN・Infinityを有効な金額として通さないこと。
+
+    DecimalとしてはNaN/Infinityも構築できてしまうため、欠損と同じ扱いにする。
+    """
+    for bad in ("NaN", "nan", "Infinity", "-Infinity", "inf", Decimal("NaN")):
+        observation = derive_downside_valuation_observation(
+            _recommendation(
+                {
+                    "valuation_outlier_exclusions": [
+                        _entry("dcf", "BELOW_52_WEEK_LOW", actual_value=bad)  # type: ignore[arg-type]
+                    ]
+                }
+            )
+        )
+        assert observation.status is ObservationStatus.OBSERVATION_UNAVAILABLE, bad
+        assert observation.unavailable_reason == UNAVAILABLE_ACTUAL_VALUE_MISSING
+
+
+def test_non_finite_reference_value_is_dropped_but_scenario_survives() -> None:
+    """T24: reference_valueが不正・非有限でもscenarioは成立し、Noneへ落とすこと。
+
+    reference_valueは補助情報のため観測全体を落とさないが、非有限値を
+    表示層へは渡さない。
+    """
+    for bad in ("NaN", "Infinity", "-Infinity", "not-a-number", Decimal("Infinity")):
+        observation = derive_downside_valuation_observation(
+            _recommendation(
+                {
+                    "valuation_outlier_exclusions": [
+                        _entry("dcf", "BELOW_52_WEEK_LOW", reference_value=bad)  # type: ignore[arg-type]
+                    ]
+                }
+            )
+        )
+        assert observation.status is ObservationStatus.AVAILABLE, bad
+        assert len(observation.scenarios) == 1
+        assert observation.scenarios[0].reference_value is None
+        assert observation.scenarios[0].fair_value == Decimal("620")
 
 
 def test_derivation_is_deterministic_and_does_not_mutate_the_recommendation() -> None:
