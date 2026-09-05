@@ -179,9 +179,15 @@ class WatchStateService:
             consecutive = compute_consecutive_business_days(
                 gap, existing.consecutive_business_days
             )
+            # Issue #166: 営業日が1日も経過していない場合(gap == 0。同一営業日の
+            # 再評価・週末・平日に当たる祝日)はlast_matched_atを据え置く。
+            # last_matched_atは「連続営業日数へ寄与した最後の一致営業日」であり、
+            # 非営業日で上書きすると営業日計算の起点が非営業日になってしまう
+            # (エンティティ側の定義も「営業日」としている)。
+            # last_evaluated_atは「最後に評価処理を行った日」なので更新する。
             updated = existing.model_copy(
                 update={
-                    "last_matched_at": today,
+                    "last_matched_at": today if gap >= 1 else existing.last_matched_at,
                     "last_evaluated_at": today,
                     "consecutive_business_days": consecutive,
                     "last_current_price": current_price,
