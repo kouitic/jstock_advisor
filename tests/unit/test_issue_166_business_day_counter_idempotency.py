@@ -320,3 +320,148 @@ def test_repeated_non_business_day_runs_do_not_accumulate_via_service() -> None:
     assert repo.saved.consecutive_business_days == 2
     assert repo.saved.last_matched_at == _FRI
     assert repo.saved.last_evaluated_at == _SAT
+
+
+# --- 新規開始経路: 非営業日には監視を開始しない（レビュー指摘 NF-1） -----------
+
+
+def _start_conditions_config():
+    """開始条件を満たしやすい設定（required_decline 3% が start 閾値を下回る）。"""
+    from jstock_advisor.config.models import NearBuyConfig
+
+    return NearBuyConfig(
+        start_required_decline_pct=5.0,
+        continue_required_decline_pct=10.0,
+        min_company_quality_score=50.0,
+        daily_max_notifications=5,
+        max_stale_business_days=5,
+    )
+
+
+def _evaluate_without_existing_state(today: dt.date):
+    """既存 state が無い状態で評価する（新規開始経路を通す）。"""
+    from jstock_advisor.domain.entities.enums import BuyAction
+    from jstock_advisor.services.watch_state_service import WatchStateService
+
+    repo = _InMemoryWatchStateRepository(None)
+    service = WatchStateService(business_calendar=_CALENDAR, repository=repo)
+    result = service.evaluate_and_update(
+        stock_code="9999",
+        buy_action=BuyAction.WATCH_FOR_PRICE,
+        company_quality_score=80.0,
+        required_decline_to_entry_pct=Decimal("3"),
+        current_price=Decimal("1000"),
+        entry_price=Decimal("970"),
+        today=today,
+        config=_start_conditions_config(),
+    )
+    return repo, result
+
+
+def _assert_not_started(repo, result) -> None:
+    from jstock_advisor.domain.entities.enums import WatchTransitionType
+
+    assert repo.saved is None, "非営業日には永続 state を作らない"
+    assert result.transition_type == WatchTransitionType.NONE
+    assert result.watch_type is None
+
+
+# A: 週末の新規開始
+@pytest.mark.parametrize("today", [_SAT, _SUN])
+def test_initial_start_is_blocked_on_weekend(today: dt.date) -> None:
+    repo, result = _evaluate_without_existing_state(today)
+
+    _assert_not_started(repo, result)
+
+
+# B: 平日に当たる祝日の新規開始
+def test_initial_start_is_blocked_on_weekday_holiday() -> None:
+    repo, result = _evaluate_without_existing_state(_HOLIDAY_MON)
+
+    _assert_not_started(repo, result)
+
+
+# C: 3 連続の平日祝日 → 連休明けの営業日で初めて開始する
+def test_initial_start_is_blocked_across_consecutive_holidays_then_starts() -> None:
+    from jstock_advisor.domain.entities.enums import WatchTransitionType
+
+    for today in (_HOLIDAY_MON, _HOLIDAY_TUE, _HOLIDAY_WED):
+        repo, result = _evaluate_without_existing_state(today)
+        _assert_not_started(repo, result)
+
+    repo, result = _evaluate_without_existing_state(_HOLIDAY_NEXT_BUSINESS)
+
+    assert result.transition_type == WatchTransitionType.STARTED
+    assert repo.saved is not None
+    assert repo.saved.consecutive_business_days == 1
+    assert repo.saved.started_at == _HOLIDAY_NEXT_BUSINESS
+    assert repo.saved.last_matched_at == _HOLIDAY_NEXT_BUSINESS
+    assert repo.saved.last_evaluated_at == _HOLIDAY_NEXT_BUSINESS
+
+
+# D: 営業日の新規開始は従来どおり
+def test_initial_start_on_business_day_is_unchanged() -> None:
+    from jstock_advisor.domain.entities.enums import WatchTransitionType
+
+    repo, result = _evaluate_without_existing_state(_MON)
+
+    assert result.transition_type == WatchTransitionType.STARTED
+    assert result.consecutive_business_days == 1
+    assert repo.saved.consecutive_business_days == 1
+    assert repo.saved.started_at == _MON
+    assert repo.saved.last_matched_at == _MON
+    assert repo.saved.last_evaluated_at == _MON
+
+
+def test_last_matched_at_is_always_a_business_day_after_initial_start() -> None:
+    """開始・継続のどちらの経路でも、営業日計算の起点が非営業日にならない。"""
+    repo, _ = _evaluate_without_existing_state(_MON)
+    assert _CALENDAR.is_business_day(repo.saved.last_matched_at)
+
+    # 続けて非営業日に評価しても起点は営業日のまま。
+    _evaluate(repo, dt.date(2026, 9, 11))  # 金曜（営業日）
+    _evaluate(repo, dt.date(2026, 9, 13))  # 日曜（非営業日）
+
+    assert _CALENDAR.is_business_day(repo.saved.last_matched_at)
+    assert repo.saved.last_matched_at == dt.date(2026, 9, 11)
+    assert repo.saved.last_evaluated_at == dt.date(2026, 9, 13)
+
+
+def test_non_business_day_does_not_reset_anchor_even_after_a_long_gap() -> None:
+    """営業日が2日以上空いていても、非営業日にリセットを確定させない。
+
+    非営業日に起点を動かすと、そこが営業日計算の基準になってしまう。
+    リセット自体は次の営業日で正しく行われる(gapは2以上のまま残るため)。
+    """
+    repo = _InMemoryWatchStateRepository(
+        _build_state(last_matched=_MON, last_evaluated=_MON, counter=4)
+    )
+    long_gap_saturday = dt.date(2026, 9, 12)
+
+    assert _gap(_MON, long_gap_saturday) >= 2
+    _evaluate(repo, long_gap_saturday)
+
+    assert repo.saved.consecutive_business_days == 4, "非営業日で確定させない"
+    assert repo.saved.last_matched_at == _MON, "起点を非営業日へ動かさない"
+    assert repo.saved.last_evaluated_at == long_gap_saturday
+
+    # 次の営業日で、期待どおり 1 へリセットされる。
+    next_business_day = dt.date(2026, 9, 14)
+    assert _CALENDAR.is_business_day(next_business_day)
+    _evaluate(repo, next_business_day)
+
+    assert repo.saved.consecutive_business_days == 1
+    assert repo.saved.last_matched_at == next_business_day
+
+
+# E: 非営業日に新規開始しないため、開始由来の遷移も発生しない
+@pytest.mark.parametrize("today", [_SAT, _SUN, _HOLIDAY_MON, _HOLIDAY_TUE, _HOLIDAY_WED])
+def test_no_started_transition_is_emitted_on_non_business_days(today: dt.date) -> None:
+    """遷移が発生しないため、開始起因の通知経路自体が動かない。"""
+    from jstock_advisor.domain.entities.enums import WatchTransitionType
+
+    _, result = _evaluate_without_existing_state(today)
+
+    assert result.transition_type == WatchTransitionType.NONE
+    assert result.consecutive_business_days is None
+    assert result.previous_consecutive_business_days is None
