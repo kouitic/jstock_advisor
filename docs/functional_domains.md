@@ -172,7 +172,7 @@ SHARED は置き場所ではなく**性質**である。`domain/` 配下にあ�
 機能の粒度は**「利用者から見て意味のある能力、または運用上独立して
 差し替えられる単位」**とする。`1 関数 = 1 機能`にはしない。
 
-全 45 機能。各表の列は次を表す。
+全 47 機能。各表の列は次を表す。
 
 ```
 ID                FUNCTION_ID。再利用しない(I節)
@@ -222,6 +222,32 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | F-12 | 保有判断の実行時設定 | `services/holding_decision_runtime_config_service.py` | — | `HoldingDecisionRuntimeConfigTable` | D3 / D9 |
 | F-13 | 取引停止・クールダウン | `services/trading_pause_service.py` `services/trade_cooldown_service.py` `infrastructure/aws/trading_pause_config.py` | — | `TradingPauseConfigTable` | D3 / D1 / D2 |
 | F-14 | 保有スナップショット | `services/holdings_view_service.py` `domain/entities/holdings_snapshot.py` | — | `HoldingsSnapshotTable` | D3 / D6 |
+| F-46 | 保有監視日次バッチ | `lambda_handlers/holdings_watchlist_handler.py` `lambda_handlers/_fanout.py` | `schedule.yaml` | `RecommendationsTable` `DecisionSnapshotsTable` `HoldingDecisionResultsTable` `HoldingEvaluationRecordsTable` `NotificationLogTable` | D3 / D1 / D2 / D4 / D5 / D9 / S |
+
+```
+★ F-46 は B節「実行単位(Lambda)を領域の境界にしない」の実例そのものである。
+
+  B節は本 handler を「買い・売り・利確・保有判断・監視状態・通知の 6 領域の
+  サービスを呼んでいる」実例として挙げているが、機能一覧に行が無いため
+  L節の手順(参照元を本書の表で引く)が成立しなかった(Issue #209)。
+
+  影響領域は呼び出し先の実測による。
+    buy_signal_service                       -> D1
+    sell_signal_service / profit_taking_service -> D2
+    holding_decision_service                 -> D3(PRIMARY)
+    watch_state_service                      -> D4
+    LineNotificationService                  -> D5
+    batch tracker / audit                    -> D9
+    decision_snapshot_service / stock_snapshot_service /
+    shareholder_benefit_registry_service     -> S(S-02 / S-05 / S-15)
+
+  B節の「6 領域」はサービスの数え方であり、売りと利確がともに D2 のため
+  領域としては D1〜D5 の 5 つになる。本行はそれに D9 と S を加えた実測値である。
+
+  保有台帳(D6)は **読み取りのみで書き込まない**ため影響領域に含めない
+  (F-10 保有継続判断が holdings を読みながら D3 / S に留めているのと同じ扱い)。
+  株主優待も判定利用側であり D6 ではなく S-15 として数える(B節)。
+```
 
 ### D4 WATCHLIST
 
@@ -285,6 +311,21 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | F-43 | 監査ログ・実行追跡 | `src/jstock_advisor/services/audit_service.py` `src/jstock_advisor/services/evaluation_run_audit.py` `src/jstock_advisor/infrastructure/aws/batch_tracker.py` | — | `AuditLogTable` `BatchRunsTable` | D9 |
 | F-44 | CLI 運用コマンド | `src/jstock_advisor/cli/` | — | なし | D9 / 全領域 |
 | F-45 | CI・品質ゲート | `.github/workflows/ci.yml` `.github/workflows/pii-metadata-audit.yml` `scripts/` | — | なし | D9 |
+| F-47 | batch finalize recovery | `lambda_handlers/_finalize_recovery.py` | — | `BuyCandidateBatchCompletionTable`(読み取り) | D9 / D4 / D1 / D3 |
+
+```
+★ F-47 の影響領域は「生産側」と「消費側」の両方から成る。
+
+  生産側  watchlist_batch_reconciler_handler(F-16 / D4)が
+          build_finalize_only_payload() で recovery の payload を組み立てる
+  消費側  buy_candidates_handler(F-01 / D1)と
+          holdings_watchlist_handler(F-46 / D3 ほか)が受け取って finalize する
+
+  したがって本部品を変更すると、停滞 batch の復旧経路を通じて
+  D1 と D3 の判定結果まで届く。D9 を PRIMARY としたのは、
+  `_execution_mode.py` / `_scheduling.py`(F-42)と同じく
+  **実行基盤側の共通部品**であるためである。
+```
 
 ---
 
@@ -514,3 +555,4 @@ CI ジョブの追加は Production の判定へ影響しないが、必須ジ�
 | 2026-09-06 | F-45(CI・品質ゲート)の主要 source へ `.github/workflows/pii-metadata-audit.yml` を追加(Issue #131)。公開される GitHub metadata(Issue / PR の本文・タイトル、コメント、label、branch 名)の PII 監査を、既存の required job へ GitHub API 依存を持ち込まないため `ci.yml` とは別 workflow として追加したことによる。M.1(新規機能の追加時に主要 source を更新する維持契約)に基づく更新であり、**領域カタログ・機能一覧・共通部品一覧・維持契約の内容は変更していない**(新機能ではなく既存 F-45 の source 追加であるため F 番号は増やしていない)。commit message 走査(`scripts/scan_commit_messages_pii.py`)と `ci.yml` の `pii-scan-commit-messages` job は既存の主要 source(`scripts/` と `ci.yml`)に含まれるため行の更新を要しない。判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
 | 2026-09-06 | 永続化ストア層を SHARED 部品 S-17 として追加(Issue #201)。`collection_store.py` / `json_store.py` / `dynamodb_store.py` は全 9 領域の repository が経由するにもかかわらず、本書に 1 度も現れていなかった(実測 0 件)。`domain/entities/base.py` は S-16 に登録されているのに、その 1 段下で実際に読み書きを担う層がカタログに無い状態であり、**L 節の手順(参照元を本書の表で引く)が成立しなかった**。判定できない場合は fail-closed で `LOCK_LEVEL_3` となるため、この層を変更する Issue #63(永続データの耐障害性 / P1)が lock 対象をカタログから導出できずにいた。呼び出し元を実測(`build_collection_store()` 78 箇所 / 39 module / 28 collection)し、lock する領域を全領域と定めたうえで、S-16(何を検証するか)と S-17(いつ・どの単位で検証するか)の境界、および docs 変更は D9 に閉じることを明記した。M.1(共通部品を追加・変更した場合はカタログを更新する維持契約)に基づく追記である。**領域一覧・機能一覧・既存の S-01〜S-16 の行・維持契約の内容は変更していない。** lock ルール本文は development_workflow.md 2.6節が正本であり本書へ複製していない。判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
 | 2026-09-06 | S-17(永続化ストア層)の主要 source へ `infrastructure/record_failure_policy.py` を追加(Issue #63 / A-U1a)。per-record のデコード失敗をコレクション単位のポリシー(STRICT 既定 / LENIENT / FAIL_SAFE_SUPPRESS)で扱う機構を新規 module として追加したことによる。M.1(共通部品を追加・変更した場合はカタログを更新する維持契約)に基づく更新である。**本 module は追加のみであり、既存の呼び出し元を 1 つも変更していない**(`src/` 内で本 module を import する module は実測 0 件)ため `LOCK_LEVEL_1`(ADDITIVE_AND_BACKWARD_COMPATIBLE)として領域 WIP を取得せずに実施した(2.6.5「新しい関数・モジュールの追加 — 既存の呼び出し元をひとつも変更しない場合に限り LOCK_LEVEL_1」)。`json_store.py` / `dynamodb_store.py` / `collection_store.py` を本機構へ差し替えるのは PR-2(A-U1b)であり、その時点で `LOCK_LEVEL_2` として全領域を取得する。**領域一覧・機能一覧・既存の S-01〜S-16 の行・S-17 の lock する領域(全領域)・維持契約の内容は変更していない。** 判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
+| 2026-09-06 | 機能一覧へ F-46(保有監視日次バッチ)と F-47(batch finalize recovery)を追加(Issue #209)。`lambda_handlers` 配下 16 ファイルを全件走査したところ、`holdings_watchlist_handler.py` と `_finalize_recovery.py` の 2 件が F 行に無く、**L 節の手順(参照元がどの機能に属するかを本書の表で引く)が成立しない**状態だった。前者は B 節が「1 つの handler が 6 領域のサービスを呼ぶ」実例として名指ししているファイルでありながら行が無く、後者は本書に 1 度も現れていなかった。判定できない場合は fail-closed で `LOCK_LEVEL_3` となるため、この 2 ファイルを変更する Issue #70(execution context の伝播と fail-close 統一)が影響領域をカタログから導出できずにいた。呼び出し先を実測し、F-46 は `D3 / D1 / D2 / D4 / D5 / D9 / S`(保有台帳 D6 は**読み取りのみで書き込まないため含めない**。F-10 が holdings を読みながら D3 / S に留めているのと同じ扱い。株主優待は判定利用側のため S-15 として数える)、F-47 は `D9 / D4 / D1 / D3`(生産側 = reconciler / 消費側 = buy・holdings の両 handler)とした。F-47 の PRIMARY を D9 としたのは `_execution_mode.py` / `_scheduling.py`(F-42)と同じ実行基盤側の共通部品であるためである。あわせて E-L 節の「全 45 機能」を「全 47 機能」へ更新した(行追加により本文と表が食い違うため)。M.1(新しい機能を追加したときのカタログ維持契約)に基づく追記であり、**領域一覧・既存の F-01〜F-45 の行・K 節の共通部品一覧・維持契約の内容は変更していない。** lock ルール本文は development_workflow.md 2.6節が正本であり本書へ複製していない。判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
