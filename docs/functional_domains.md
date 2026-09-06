@@ -311,8 +311,58 @@ code WIP を取得すべき領域である(L節)。呼び出し元の実測に�
 | S-14 | provider 契約 | `interfaces/` | D1 / D2 / D3 / D4 / D8 | provider 実装と全利用側 |
 | S-15 | 優待の判定利用 | `domain/valuation/shareholder_benefit_matching.py` `domain/signals/record_date_resolution.py` | D1 / D2 / D3 / D4 | 買い / 売り / 保有 / 監視 / スコア / 投資仮説 |
 | S-16 | 共通 enum・基底 | `domain/entities/enums.py` `domain/entities/common.py` `domain/entities/base.py` | 全領域 | 全域 |
+| S-17 | 永続化ストア層 | `infrastructure/collection_store.py` `infrastructure/local_repository/json_store.py` `infrastructure/aws/dynamodb_store.py` `infrastructure/record_failure_policy.py` | 全領域 | 全 repository(通知 / 推奨 / 保有 / 監視 / 評価 / 監査)+ migrations + EDINET cache |
 
 `SHARED_ID` は再利用しない。
+
+### S-17 の実測(2026-09-06 / main = 6ae201bc)
+
+```
+build_collection_store() の呼び出し   78 箇所
+呼び出す module                        39 個
+扱う collection(literal な file_name)  28 種
+```
+
+呼び出し元の領域は D1〜D9 のすべてに及ぶ。
+
+```
+D1  buy_candidate_evaluation_record / latest_buy_candidate_batch_pointer
+D2  recommendation(売却・利確も同一 collection)
+D3  holding_decision_result / holding_decision_runtime_config /
+    holding_evaluation_record / investment_thesis / baseline_pointer /
+    baseline_sequence / trading_pause_config
+D4  watchlist / watch_state / watchlist_removal_history /
+    watchlist_rotation_state / watchlist_data_cache
+D5  notification_log / notification_claim / daily_notification_priority
+D6  holding / holdings_snapshot / transaction / corporate_action_registry /
+    shareholder_benefit_registry / holdings_owner 系 migrations
+D7  evaluation / weekly_review_metrics / improvement_candidate / feedback /
+    rule_version
+D8  disclosure_finder / document_finder / document_list_cache /
+    stock_name_override
+D9  audit_log
+```
+
+```
+★ 「lock する領域 = 全領域」は、この層の**実装を変更する場合**の既定である
+  (K節冒頭のとおり LOCK_LEVEL_2 以上が対象)。
+  本カタログの行そのものを直す等の docs 変更は D9 に閉じる。
+
+  なお LOCK_LEVEL_1(ADDITIVE_AND_BACKWARD_COMPATIBLE)に該当することを
+  5 つの compatibility evidence で示せる変更は、その限りではない
+  (判定表は development_workflow.md 2.6.5 が正本)。
+  既定 STRICT のまま失敗ポリシー機構を追加する等がこれにあたりうる(Issue #63)。
+```
+
+```
+S-16 と S-17 の境界
+
+  S-16  何を検証するか(entity の型・enum・extra="forbid" 等の基底設定)
+  S-17  いつ・どの単位で検証するか(全件読み込み / per-record / 失敗時の扱い)
+
+  両者は隣接するが別部品である。S-16 を変えると全 entity の契約が変わり、
+  S-17 を変えると全 collection の読み書き経路が変わる。
+```
 
 ---
 
@@ -462,3 +512,5 @@ CI ジョブの追加は Production の判定へ影響しないが、必須ジ�
 | 2026-09-06 | §0 を現在の発効状態へ同期した(Issue #184)。本書は作成時点で `DOMAIN_WIP_MODEL_ACTIVE = NO` と記していたが、2026-09-06 02:27 JST に人間の承認により領域ベース WIP が発効しており、記述が現況と矛盾していた。`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` / `EFFECTIVE_FROM` へ更新し、あわせて**静的な文書を変わりうる状態の唯一の根拠にしない**ことを明記した(発効状態は試行の結果として人間の判断で戻ることもありうるため、確認が必要な場合の参照先は development_workflow.md 2.6.10 の `ACTIVATION_STATE_SSOT` に従う)。**領域カタログ・機能一覧・共通部品一覧・維持契約の内容は変更していない。** コード・Production 挙動の変更なし |
 | 2026-09-06 | 役割名の製品非依存化に伴う参照の更新(Issue #190)。本文中の "ChatGPT" 1 か所を「管理者」へ改めた。**領域カタログ・機能一覧・共通部品一覧・維持契約の内容は変更していない。** governance docs の改称は catalog の主要 path 欄に現れないため、F-45 を含む行の更新も不要である(D9 の主要 source は `.github/workflows/ci.yml` と `scripts/`)。変更履歴の過去エントリも書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-06 | F-45(CI・品質ゲート)の主要 source へ `.github/workflows/pii-metadata-audit.yml` を追加(Issue #131)。公開される GitHub metadata(Issue / PR の本文・タイトル、コメント、label、branch 名)の PII 監査を、既存の required job へ GitHub API 依存を持ち込まないため `ci.yml` とは別 workflow として追加したことによる。M.1(新規機能の追加時に主要 source を更新する維持契約)に基づく更新であり、**領域カタログ・機能一覧・共通部品一覧・維持契約の内容は変更していない**(新機能ではなく既存 F-45 の source 追加であるため F 番号は増やしていない)。commit message 走査(`scripts/scan_commit_messages_pii.py`)と `ci.yml` の `pii-scan-commit-messages` job は既存の主要 source(`scripts/` と `ci.yml`)に含まれるため行の更新を要しない。判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
+| 2026-09-06 | 永続化ストア層を SHARED 部品 S-17 として追加(Issue #201)。`collection_store.py` / `json_store.py` / `dynamodb_store.py` は全 9 領域の repository が経由するにもかかわらず、本書に 1 度も現れていなかった(実測 0 件)。`domain/entities/base.py` は S-16 に登録されているのに、その 1 段下で実際に読み書きを担う層がカタログに無い状態であり、**L 節の手順(参照元を本書の表で引く)が成立しなかった**。判定できない場合は fail-closed で `LOCK_LEVEL_3` となるため、この層を変更する Issue #63(永続データの耐障害性 / P1)が lock 対象をカタログから導出できずにいた。呼び出し元を実測(`build_collection_store()` 78 箇所 / 39 module / 28 collection)し、lock する領域を全領域と定めたうえで、S-16(何を検証するか)と S-17(いつ・どの単位で検証するか)の境界、および docs 変更は D9 に閉じることを明記した。M.1(共通部品を追加・変更した場合はカタログを更新する維持契約)に基づく追記である。**領域一覧・機能一覧・既存の S-01〜S-16 の行・維持契約の内容は変更していない。** lock ルール本文は development_workflow.md 2.6節が正本であり本書へ複製していない。判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
+| 2026-09-06 | S-17(永続化ストア層)の主要 source へ `infrastructure/record_failure_policy.py` を追加(Issue #63 / A-U1a)。per-record のデコード失敗をコレクション単位のポリシー(STRICT 既定 / LENIENT / FAIL_SAFE_SUPPRESS)で扱う機構を新規 module として追加したことによる。M.1(共通部品を追加・変更した場合はカタログを更新する維持契約)に基づく更新である。**本 module は追加のみであり、既存の呼び出し元を 1 つも変更していない**(`src/` 内で本 module を import する module は実測 0 件)ため `LOCK_LEVEL_1`(ADDITIVE_AND_BACKWARD_COMPATIBLE)として領域 WIP を取得せずに実施した(2.6.5「新しい関数・モジュールの追加 — 既存の呼び出し元をひとつも変更しない場合に限り LOCK_LEVEL_1」)。`json_store.py` / `dynamodb_store.py` / `collection_store.py` を本機構へ差し替えるのは PR-2(A-U1b)であり、その時点で `LOCK_LEVEL_2` として全領域を取得する。**領域一覧・機能一覧・既存の S-01〜S-16 の行・S-17 の lock する領域(全領域)・維持契約の内容は変更していない。** 判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
