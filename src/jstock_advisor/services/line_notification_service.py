@@ -3276,25 +3276,109 @@ class LineNotificationService:
         「売買判断を保留」のみ短文で伝える(既存の短文エンジンを再利用)。
         alertオブジェクト自体は呼び出し元で監査ログへ既に記録済みであり、
         判断根拠はそちらから追跡できる。
+
+        Issue #34: 以前は送信前にNotificationLogを読まず(「書くが読まない」構造)、
+        claimも取得していなかったため、(1)条件が続く限り毎バッチ再送され、
+        (2)Lambda retryで即座に二重送信されていた。本メソッドは他の通知種別と
+        同じ2段構えの抑止を行う。
+
+            U2(read-based) 直近の送信実績からresend_after_days以内なら送らない
+            U1(claim)      送信決定identityのclaimを取得できた実行だけが送る
+
+        **初回は必ず送る**という安全弁の性質は変えていない(送信実績が無ければ
+        U2は素通りし、claimも新規取得できる)。通知内容・判定ロジック・
+        再送間隔の値(既存のresend_after_days)はいずれも変更していない。
         """
         text_input = build_notification_text_input(
             recommendation, NotificationCategory.MANUAL_REVIEW
         )
         content_hash = _compute_content_hash(recommendation.recommendation_type)
-        self._push(
-            format_notification_text(text_input),
-            notification_type=NotificationType.MANUAL_REVIEW_REQUIRED,
-            stock_code=recommendation.stock_code,
-            content_hash=content_hash,
-            related_recommendation_id=recommendation.recommendation_id,
-            now=now,
-        )
+        notification_type = NotificationType.MANUAL_REVIEW_REQUIRED
+
+        # Issue #34 U2: 他の通知種別と同じread-based再送抑止。
+        # VALIDATIONでは_notification_status_for_send()と同様に再送防止のみを
+        # 無効化する(検証実行がNORMALの送信実績で抑止されないようにするため)。
+        # 読み取りは#33のscope-aware版を使い、holding-scopeは別ownerの送信実績に
+        # 影響されない。
+        latest_log: NotificationLog | None = None
+        if not self._execution_context.is_validation:
+            latest_log = self._latest_log_for_recommendation_scope(
+                recommendation, notification_type
+            )
+            if latest_log is not None:
+                # Issue #23と同じくJST暦日同士の差分で数える(UTC暦日だと
+                # JST 09:00の境界を跨いだだけで1日経過と誤判定する)。
+                days_elapsed = (
+                    evaluation_date_jst(now) - evaluation_date_jst(latest_log.sent_at)
+                ).days
+                if days_elapsed < self._config.notification.resend_after_days:
+                    logger.info(
+                        "manual_review_required suppressed by resend interval "
+                        "stock_code=%s days_elapsed=%d resend_after_days=%d",
+                        recommendation.stock_code,
+                        days_elapsed,
+                        self._config.notification.resend_after_days,
+                    )
+                    return False
+
+        # Issue #34 U1: claim(Issue #17)を取得してから送る。
+        # identityは既存read判定が確定した入力のみから構築する
+        # (send_recommendation_notification()と同じ構成: 種別|scope|JST暦日|prev)。
+        # recommendation_idはuuid4で評価のたびに変わるためidentityへ含めない
+        # (含めるとretryごとに別identityとなりdedupが成立しない)。
+        # content_hashもrecommendation_typeのみのハッシュで常に同値のため
+        # 識別には使えない(条件変化での再送は#60のidentity設計に委ねる)。
+        # prevは上で読んだlatest_logを再利用する(_prev_log_id_for_scope()を
+        # 呼ぶと同じ全件Scanをもう一度行うことになるため。#32)。
+        member = self._member_for_recommendation(recommendation, notification_type, content_hash)
+        scope = recommendation.holding_id or recommendation.stock_code
+        acquisition = _ClaimAcquisition(decision="disabled")
+        if self._claims_enabled():
+            prev_log_id = latest_log.notification_id if latest_log is not None else "NONE"
+            identity = (
+                f"v1|manual_review|{scope}|"
+                f"{evaluation_date_jst(now).isoformat()}|"
+                f"prev={prev_log_id}"
+            )
+            acquisition = self._acquire_send_claim(
+                identity=identity,
+                notification_type=notification_type,
+                scope=scope,
+                members=[member],
+                claimed_at=now,
+                evaluated_at=now,
+            )
+        if not acquisition.should_push:
+            logger.info(
+                "manual_review_required suppressed by claim (%s) stock_code=%s",
+                acquisition.decision,
+                recommendation.stock_code,
+            )
+            return False
+
+        try:
+            self._push(
+                format_notification_text(text_input),
+                notification_type=notification_type,
+                stock_code=recommendation.stock_code,
+                content_hash=content_hash,
+                related_recommendation_id=recommendation.recommendation_id,
+                now=now,
+            )
+        except Exception:
+            # Issue #17: push失敗はclaimを補償deleteし、従来どおり例外を伝播する
+            # (Lambda retryが同一identityを再claimして再送できる)。
+            self._release_claim_after_push_failure(acquisition)
+            raise
+        self._mark_claim_sent(acquisition, now)
 
         if not self._execution_context.is_validation:
             self._log_repo.save(
                 NotificationLog(
-                    notification_id=str(uuid.uuid4()),
-                    notification_type=NotificationType.MANUAL_REVIEW_REQUIRED,
+                    # Issue #34: claim member と同じidを使う(repair経由で保存された
+                    # 場合と二重にならないようにする)。
+                    notification_id=member.notification_id,
+                    notification_type=notification_type,
                     stock_code=recommendation.stock_code,
                     content_hash=content_hash,
                     sent_at=now,
