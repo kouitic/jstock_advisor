@@ -645,6 +645,8 @@ _RELIABILITY_CONCERN_LABELS: dict[str, str] = {
     "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER": (
         "外れ値除外の結果、比較に使える手法が不足したため除外前の結果へ戻した"
     ),
+    # Issue #179: 除外基準のすぐ下(境界帯)だったため、捨てずに他方式へ寄せて使った。
+    "BORDERLINE_OUTLIER_INTERPOLATION": "適正価格の算出方式に除外基準すれすれの値が含まれていた",
 }
 
 
@@ -735,6 +737,27 @@ def _reliability_concern_line(
             for e in exclusions
             if isinstance(e, dict) and e.get("method") and e.get("message")
         ] if isinstance(exclusions, list) else []
+        if reasons:
+            return f"・{label}（{'／'.join(reasons)}）"
+        return f"・{label}"
+
+    if concern == "BORDERLINE_OUTLIER_INTERPOLATION":
+        # Issue #179: 境界帯として補間採用した方式。判定時点に保存済みの
+        # buy_score_input_facts["valuation_outlier_transitions"]のみを参照する
+        # (除外ではないためvaluation_outlier_exclusionsには入らない)。
+        # 補間前のraw値も併せて示し、#20 O-Cの下方シナリオ観測と同じ粒度で
+        # 元の算出値が引き続き見えるようにする。
+        transitions = facts.get("valuation_outlier_transitions")
+        reasons = (
+            [
+                f"{_VALUATION_METHOD_LABELS.get(str(e.get('method')), str(e.get('method')))}: "
+                f"{e.get('message')}"
+                for e in transitions
+                if isinstance(e, dict) and e.get("method") and e.get("message")
+            ]
+            if isinstance(transitions, list)
+            else []
+        )
         if reasons:
             return f"・{label}（{'／'.join(reasons)}）"
         return f"・{label}"

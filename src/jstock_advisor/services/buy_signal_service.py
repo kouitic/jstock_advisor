@@ -687,6 +687,9 @@ class BuySignalService:
             self._config.valuation.fair_value_usability,
             current_price=current_price,
             low_52_week=low_52_week,
+            transition_min_ratio=(
+                self._config.valuation.outlier_transition.below_52_week_low_min_ratio
+            ),
         )
 
         # --- 7. 適正価格のばらつき判定 ---
@@ -803,6 +806,13 @@ class BuySignalService:
         excluded_outlier_count = sum(
             1 for m in valuation_summary.methods_excluded if m.exclusion_detail is not None
         )
+        # --- Issue #179(2026-09): 52週安値フィルタの境界帯として、除外せず
+        # 他方式中央値へ寄せて採用した方式。除外ではないためmethods_excludedには
+        # 現れず、methods_used側にtransition_detailを持つ ---
+        borderline_interpolated = [
+            m for m in valuation_summary.methods_used if m.transition_detail is not None
+        ]
+        borderline_interpolated_count = len(borderline_interpolated)
         # レビュー対応(2026-08、commit f546473再レビューで発覚): Recommendation.
         # valuation_methods(下のtuple(method_results))は、apply_outlier_filters()
         # 適用「前」のオブジェクトである(build_valuation_summary()内部でmodel_copy()
@@ -831,6 +841,31 @@ class BuySignalService:
             }
             for m in valuation_summary.methods_excluded
             if m.exclusion_detail is not None
+        ]
+        # --- Issue #179(2026-09): 境界帯として補間採用した方式の判定時点スナップ
+        # ショット。除外ではないためvaluation_outlier_exclusionsには入れない
+        # (#20 O-Cの下方シナリオ観測が除外理由コードを前提としているため、
+        # そちらの意味を変えないようキーを分ける)。
+        # actual_valueは補間前のraw値、interpolated_valueが実際に採用した値 ---
+        valuation_outlier_transitions: list[dict[str, object]] = [
+            {
+                "method": m.method,
+                "code": m.transition_detail.code,
+                "message": m.transition_detail.message,
+                "actual_value": (
+                    str(m.transition_detail.actual_value)
+                    if m.transition_detail.actual_value is not None
+                    else None
+                ),
+                "reference_value": (
+                    str(m.transition_detail.reference_value)
+                    if m.transition_detail.reference_value is not None
+                    else None
+                ),
+                "interpolated_value": (str(m.fair_value) if m.fair_value is not None else None),
+            }
+            for m in borderline_interpolated
+            if m.transition_detail is not None
         ]
         # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): valuation_anchor
         # がNoneの場合(=BuyDecisionReason.code="NO_VALUATION_ANCHOR"が必ず発火する)、
@@ -864,6 +899,7 @@ class BuySignalService:
             earnings_date_status=earnings_date_status,
             excluded_outlier_count=excluded_outlier_count,
             outlier_filter_blocking_reason=valuation_summary.outlier_filter_blocking_reason,
+            borderline_interpolated_count=borderline_interpolated_count,
         )
         buy_price_reliability = reliability_result.reliability
 
@@ -1049,6 +1085,13 @@ class BuySignalService:
             # 外れ値フィルタ適用前のオブジェクトのため、実際に外れ値として除外
             # された方式・理由はここへ別途スナップショットする(上記コメント参照)。
             "valuation_outlier_exclusions": valuation_outlier_exclusions,
+            # Issue #179: 境界帯として補間採用した方式(上記コメント参照)。
+            # 該当が無ければ空リスト。
+            "valuation_outlier_transitions": valuation_outlier_transitions,
+            # Issue #179: 52週安値フィルタの基準となった判定時点の直近52週安値。
+            # 監査用であり判定には使わない。backfillしない(このキーが無い既存
+            # レコードは「当時は保存していなかった」を意味し、値の逆算もしない)。
+            "low_52_week": (str(low_52_week) if low_52_week is not None else None),
             # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): BuyDecisionReason
             # (code="NO_VALUATION_ANCHOR")が発火した場合の直接原因を判定時点の実測値・
             # 基準値ごとスナップショットする(511行付近のコメント参照)。valuation_anchor
@@ -1448,6 +1491,11 @@ class BuySignalService:
                 # low_max/auto_buy_blockの未記録は別Issue(#189)。
                 "valuation_dispersion_anchor_block": (
                     self._config.buy_decision.valuation_dispersion.anchor_block
+                ),
+                # Issue #179: 52週安値フィルタの境界帯の下限。除外閾値そのもの
+                # (0.50)はコード定数のままであり記録対象外(#180のscope)。
+                "outlier_transition_below_52_week_low_min_ratio": (
+                    self._config.valuation.outlier_transition.below_52_week_low_min_ratio
                 ),
                 "historical_valuation": historical_valuation_config_values(
                     self._config.historical_valuation

@@ -17,6 +17,13 @@ from jstock_advisor.domain.valuation.margin_of_safety import MarginOfSafetyResul
 # 業種別モデル未適用(常にTrue)を除く5項目のうち、この件数以上該当したらLOWとする。
 _MIN_CONCERNS_FOR_LOW = 2
 
+# --- Issue #179(2026-09) ---
+# 外れ値まわりの懸念。concernsとしては別々に見せる(どちらが起きたか分かるように)が、
+# LOW判定の件数としては1つに束ねる(下記_OUTLIER_SIGNALの説明を参照)。
+_CONCERN_OUTLIER_EXCLUDED = "VALUATION_OUTLIER_EXCLUDED"
+_CONCERN_BORDERLINE_INTERPOLATION = "BORDERLINE_OUTLIER_INTERPOLATION"
+_OUTLIER_CONCERN_FAMILY = frozenset({_CONCERN_OUTLIER_EXCLUDED, _CONCERN_BORDERLINE_INTERPOLATION})
+
 
 @dataclass(frozen=True)
 class BuyPriceReliabilityResult:
@@ -35,6 +42,7 @@ def determine_buy_price_reliability(
     earnings_date_status: EarningsDateStatus | None,
     excluded_outlier_count: int,
     outlier_filter_blocking_reason: str | None = None,
+    borderline_interpolated_count: int = 0,
 ) -> BuyPriceReliabilityResult:
     """要求仕様6節の判定基準。
 
@@ -54,6 +62,20 @@ def determine_buy_price_reliability(
     見えなくなる(例: 3方式が互いを外れ値とみなし合い全滅した場合、
     フォールバック後のmethods_used_countは3のままでTOO_FEW_VALUATION_METHODS
     が発火しない)ため、この明示的なシグナルで確実にLOWへ倒す。
+
+    --- Issue #179(2026-09)で追加 ---
+    borderline_interpolated_countは、52週安値フィルタの境界帯として除外せず
+    他方式中央値へ寄せて採用した方式の件数である(valuation_methods.py
+    ::_interpolate_borderline())。本Issueの修正により、従来は除外されて
+    excluded_outlier_countへ計上されていた方式が「採用」側へ移るため、
+    何もしないとVALUATION_OUTLIER_EXCLUDEDが消えて信頼性が実質的に緩む。
+
+    そこで境界帯の採用も懸念として残す。ただし**LOW判定の件数としては
+    VALUATION_OUTLIER_EXCLUDEDと1つに束ねる**。両者は「外れ値まわりで
+    何かあった」という同一の関心事であり、別々に数えると
+    「除外1件 + 境界帯1件」で懸念が2件になり、修正前は1件だったものが
+    LOWへ落ちてしまう。束ねることで、本Issueがreliability経由でBUY判定を
+    変えないことを保証する(dispersion経由の変化は別軸であり残る)。
     """
     concerns: list[str] = []
 
@@ -76,15 +98,21 @@ def determine_buy_price_reliability(
     if earnings_date_status == EarningsDateStatus.STALE_PAST_DATE:
         concerns.append("STALE_EARNINGS_DATE")
     if excluded_outlier_count >= 1:
-        concerns.append("VALUATION_OUTLIER_EXCLUDED")
+        concerns.append(_CONCERN_OUTLIER_EXCLUDED)
+    if borderline_interpolated_count >= 1:
+        concerns.append(_CONCERN_BORDERLINE_INTERPOLATION)
     if outlier_filter_blocking_reason is not None:
         concerns.append(outlier_filter_blocking_reason)
 
     secondary_concerns = [c for c in concerns if c != "ENTRY_MARGIN_EXCEEDS_CAP"]
+    # 外れ値まわりの2つは同一の関心事として1件に束ねる(docstring参照)。
+    effective_concern_count = len(
+        [c for c in secondary_concerns if c not in _OUTLIER_CONCERN_FAMILY]
+    ) + (1 if any(c in _OUTLIER_CONCERN_FAMILY for c in secondary_concerns) else 0)
     is_low = (
         exceeds_entry_cap
         or outlier_filter_blocking_reason is not None
-        or len(secondary_concerns) >= _MIN_CONCERNS_FOR_LOW
+        or effective_concern_count >= _MIN_CONCERNS_FOR_LOW
     )
 
     return BuyPriceReliabilityResult(
