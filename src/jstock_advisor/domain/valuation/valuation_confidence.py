@@ -54,11 +54,27 @@ def determine_valuation_confidence(
     methods_used_count: int,
     dispersion_ratio: float | None,
     dispersion_medium_max: float,
-    dispersion_auto_buy_block: float,
+    dispersion_anchor_block: float,
     industry_model_applied: bool,
     uses_simplified_dcf: bool,
     normalized_eps_confidence: ConfidenceLevel | None,
 ) -> ValuationConfidenceResult:
+    """--- Issue #186(2026-09-06): dispersionによるLOW判定の閾値を分離した ---
+
+    従来はdispersion > auto_buy_block(2.00)でLOWへ倒し、その結果
+    compute_valuation_anchor()がNoneを返して買付価格が一切生成されなかった。
+    しかし「ばらつきが大きいので自動で買わない」という安全機能は
+    decide_buy_action()とvalidate_buy_recommendation()が同じ2.00で既に持っており、
+    ここでLOWへ倒すのは同じ判断の重複だった。重複の副作用として、方式値を
+    上げるとanchorが 有 -> 無 -> 有 と非単調に反転する挙動が生じていた
+    (保存済み判定記録の実測で、BUY判定の26.1%がanchorを持たず、その98.0%が
+    この分岐に由来していた)。
+
+    そこで本関数のLOW判定はanchor_block(既定50.0)へ移し、
+    「比較対象として成立していない極端な入力を保護する」用途に限定する。
+    auto_buy_block(2.00)は変更していない。自動購入の禁止は引き続き
+    decide_buy_action()/validate_buy_recommendation()が担う。
+    """
     if methods_used_count == 0:
         return ValuationConfidenceResult(
             ConfidenceLevel.LOW,
@@ -88,18 +104,18 @@ def determine_valuation_confidence(
                 threshold_value=float(_MIN_METHODS_FOR_MEDIUM_OR_HIGH),
             ),
         )
-    if dispersion_ratio is not None and dispersion_ratio > dispersion_auto_buy_block:
+    if dispersion_ratio is not None and dispersion_ratio > dispersion_anchor_block:
         return ValuationConfidenceResult(
             ConfidenceLevel.LOW,
             [
                 *reasons_not_high,
-                f"適正価格手法間のばらつきが{dispersion_auto_buy_block}倍を超えており"
-                "自動購入判定を禁止します",
+                f"適正価格手法間のばらつきが{dispersion_anchor_block}倍を超えており"
+                "比較対象として成立していないため基準価格を算出しません",
             ],
             blocking_reason=ValuationAnchorBlockingReason(
                 code=CODE_VALUATION_DISPERSION_TOO_HIGH,
                 actual_value=dispersion_ratio,
-                threshold_value=dispersion_auto_buy_block,
+                threshold_value=dispersion_anchor_block,
             ),
         )
 
