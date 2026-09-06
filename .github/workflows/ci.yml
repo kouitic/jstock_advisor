@@ -64,6 +64,24 @@ jobs:
           python-version: "3.12"
       - run: python scripts/scan_for_pii.py
 
+  # commit messageのPII検査(Issue #131)。pii-scanはworking treeのファイル内容
+  # しか読まないためcommit messageが隙間になっていた。GitHub APIを使わないので
+  # API障害でPRが止まる経路を作らない。既存のpii-scanジョブは変更していない。
+  pii-scan-commit-messages:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scan commit messages introduced by this PR
+        run: >-
+          python scripts/scan_commit_messages_pii.py
+          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
