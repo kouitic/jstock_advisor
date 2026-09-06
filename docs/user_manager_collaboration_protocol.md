@@ -1,11 +1,11 @@
-# ユーザー ↔ ChatGPT 協働プロトコル
+# 利用者 ↔ 管理者 協働プロトコル
 
-この文書は、**リポジトリの所有者(以下ユーザー)と ChatGPT** が、
-複数の作業 AI(太郎 / 次郎)を使って開発を進めるときの
+この文書は、**リポジトリの所有者(以下 利用者)と管理者** が、
+複数の開発者(作業 AI)を使って開発を進めるときの
 **会話・意思決定・レビュー・作業指示・承認の進め方**を定める。
 
 ```
-USER_CHATGPT_COLLABORATION_SSoT
+USER_MANAGER_COLLABORATION_SSOT
 ```
 
 ## 0. この文書の位置づけ
@@ -31,7 +31,7 @@ USER_CHATGPT_COLLABORATION_SSoT
 | [docs/development_workflow.md](development_workflow.md) | 開発・レビュー・release・作業 AI 共通の開発プロセス |
 | [docs/issue_label_policy.md](issue_label_policy.md) | Issue 分類 / Priority / release-blocker / Progress Status |
 | [docs/operations_manual.md](operations_manual.md) | Production 運用手順 |
-| **本文書** | **ユーザー ↔ ChatGPT 間の会話・意思決定・レビュー・作業指示・Human Gate の運用** |
+| **本文書** | **利用者 ↔ 管理者 間の会話・意思決定・レビュー・作業指示・Human Gate の運用** |
 
 同じルールが複数箇所にあると必ず片方が古くなる。
 本文書は「誰が何を決めるか」「どう指示し、どう受け取るか」に限定する。
@@ -43,49 +43,101 @@ USER_CHATGPT_COLLABORATION_SSoT
 ### 目的
 
 「推奨」と「決定」を取り違えないため。
-ChatGPT がどれだけ確信を持って推奨しても、それは承認ではない。
+管理者がどれだけ確信を持って推奨しても、それは承認ではない。
+
+### 役割は権限と責務で定義する
+
+```
+PRODUCT_AGNOSTIC_ROLE_NAMING = YES
+```
+
+役割は**生成 AI 製品名でも個人名でも定義しない**。担当は変わりうるためである。
+本文書は役割だけを定義し、**現在の担当は別に記録する**(10節)。
+
+```
+ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録
+```
+
+```
+役割                       識別子
+利用者・承認者             USER
+管理者                     MANAGER
+開発者(デプロイ権限あり)   DEVELOPER_WITH_DEPLOY
+開発者(デプロイ権限なし)   DEVELOPER
+```
+
+本文書および関連文書で「作業 AI」と書かれている箇所は、
+`DEVELOPER_WITH_DEPLOY` と `DEVELOPER` の総称である。
+
+```
+歴史的名称
+
+  2026-09-06 まで管理者は ChatGPT 上の AI が担っていた。
+  過去の Issue コメント・snapshot に残る "ChatGPT" / `ACTOR = CHATGPT` は
+  当時の管理者を指す。append-only の記録であり書き換えない。
+```
 
 ### ルール
 
-**USER(ユーザー)**
+**USER(利用者)**
 
 ```
 要件・目的の決定
 優先順位の最終判断
 Human Gate の承認
 Production 変更の承認
-merge の承認
+merge の承認と実行(MERGE_EXECUTOR = USER)
 release-blocker 解除の承認
 業務仕様上の最終意思決定
 ```
 
-**ChatGPT**
+**MANAGER(管理者)**
 
 ```
 作業計画の作成
 優先順位の整理
 調査・設計・実装結果のレビュー
-作業 AI(太郎 / 次郎)への作業指示
-instruction queue の管理
+開発者への作業指示と instruction queue の管理
 Human Gate へ到達したかどうかの判定
 release / verification の判定
 Issue / PR / Production evidence の整合確認
+Assignment Read Barrier の実行(5.5節)
+LOCKED_DOMAINS / LOCK_LEVEL / compatibility evidence の検証(3.8節)
 ```
 
-**TARO / JIRO(作業 AI)**
+```
+禁止  承認すること(推奨するだけ。承認は USER)
+      merge の実行 / Production 操作 / AWS 操作
+      判定語を独自に増やすこと(3節の4種から選ぶ)
+```
+
+**DEVELOPER_WITH_DEPLOY(開発者・デプロイ権限あり)**
 
 ```
-ChatGPT の指示に基づく具体作業
+管理者の指示に基づく具体作業
 調査 / 設計 / 実装 / テスト
 GitHub 操作
-承認済み範囲の Production 作業
 evidence の収集
+承認済み範囲の Production 作業(1.5節の PRODUCTION_DEPLOYMENT_EXECUTOR)
+```
+
+**DEVELOPER(開発者・デプロイ権限なし)**
+
+```
+DEVELOPER_WITH_DEPLOY と同じ。ただし deploy 実作業を行わない
+(1.5節の DEPLOY_OPERATION_DELEGATION = FORBIDDEN_BY_DEFAULT)
+Production の read-only 観測と evidence の分析は行う
+```
+
+```
+2 つの開発者役割の差は「deploy 実作業を行うか」の 1 点だけである。
+調査・設計・実装・報告・state 書き戻しの規則はすべて共通である。
 ```
 
 ### 例
 
 ```
-ChatGPT   「MERGE_READY=YES。人間承認へ進んでよい」
+MANAGER   「MERGE_READY=YES。人間承認へ進んでよい」
           -> これは推奨であって承認ではない。merge してはいけない
 
 USER      「PR #146 の SHA 9f4dac0e を merge してよい」
@@ -94,7 +146,7 @@ USER      「PR #146 の SHA 9f4dac0e を merge してよい」
 
 ### 例外
 
-なし。ChatGPT がユーザーの承認を代行することはない。
+なし。管理者が利用者の承認を代行することはない。
 
 ---
 
@@ -109,12 +161,15 @@ build 済み artifact の同一性といった前提は、一連の作業とし�
 そこで実作業の担当を1体へ集約する。
 
 ```
-PRODUCTION_DEPLOYMENT_EXECUTOR = TARO
+PRODUCTION_DEPLOYMENT_EXECUTOR = DEVELOPER_WITH_DEPLOY
 ```
+
+現在この役割を担う個体は ROLE_ASSIGNMENT_SSOT(1節)を参照する。
+**本文書へ担当者名を焼き込まない。**
 
 ### ルール
 
-太郎が担当する範囲は最低限次を含む。
+`DEVELOPER_WITH_DEPLOY` が担当する範囲は最低限次を含む。
 
 ```
 release 対象 SHA の最終確認
@@ -131,12 +186,13 @@ deploy artifact の同一性確認
 stack event の確認
 ```
 
-次郎は調査・設計・実装・targeted test・PR 作成・release readiness 調査・
+`DEVELOPER` は調査・設計・実装・targeted test・PR 作成・release readiness 調査・
 Production Verification Plan の設計・Production evidence の read-only 分析まで
 担当できるが、**deploy の実作業は既定で行わない**。
 
 ```
-DEPLOY_OPERATION_DELEGATION_TO_JIRO = FORBIDDEN_BY_DEFAULT
+DEPLOY_OPERATION_DELEGATION = FORBIDDEN_BY_DEFAULT
+対象役割 DEVELOPER
 
 対象   sam deploy / ChangeSet CREATE / ChangeSet EXECUTE /
        Production config mutation / manual Production invoke /
@@ -154,24 +210,26 @@ main が進めば exact SHA の承認は失効する
 ChangeSet を再作成すれば exact ChangeSet の承認は失効する
 ```
 
-太郎が deploy 担当であることは、
+deploy 担当が 1 つの役割へ集約されていることは、
 **人間承認なしに実行してよいという意味には一切ならない**(2節)。
 
 ### verification の担当は内容で分ける
 
-deploy 直後の immediate verification は太郎が担当する。
+deploy 直後の immediate verification は `DEVELOPER_WITH_DEPLOY` が担当する。
 
 一方、自然実行後の**業務的な** Production evidence 分析は、
-内容に応じて ChatGPT が割り当ててよい。
+内容に応じて 管理者 が割り当ててよい。
 
 ```
-運用寄り(stack / Lambda / IAM / scheduler / logs)   -> 太郎を優先
-業務ロジック寄り(分類比較 / スコア分布 / 業務判断)   -> 次郎へ read-only 分析を割当可
+運用寄り(stack / Lambda / IAM / scheduler / logs)
+  -> DEVELOPER_WITH_DEPLOY を優先
+業務ロジック寄り(分類比較 / スコア分布 / 業務判断)
+  -> DEVELOPER へ read-only 分析を割当可
 ```
 
 ```
-PRODUCTION_DEPLOYMENT_EXECUTOR = TARO
-  ≠ ALL_PRODUCTION_ANALYSIS_ASSIGNEE = TARO
+PRODUCTION_DEPLOYMENT_EXECUTOR = DEVELOPER_WITH_DEPLOY
+  ≠ ALL_PRODUCTION_ANALYSIS_ASSIGNEE = DEVELOPER_WITH_DEPLOY
 ```
 
 ### 例外
@@ -279,7 +337,7 @@ A  今回何を決めてもらいたいか
 B  承認すると何が起きるか
 C  この承認ではまだ何が起きないか
 D  承認せず待つ場合どうなるか
-E  ChatGPT の推奨
+E  管理者の推奨
 F  その理由
 ```
 
@@ -339,11 +397,11 @@ Issue 番号 / PR 番号 / SHA / CI run / ChangeSet の識別子 / 内部状態�
 
 ### 適用範囲
 
-本節が対象とするのは **ChatGPT からユーザーへの回答**である。
+本節が対象とするのは **管理者から利用者への回答**である。
 
 ```
-対象      ChatGPT -> ユーザー
-対象外    作業 AI -> ChatGPT / ユーザーへの完了報告
+対象      管理者 -> 利用者
+対象外    開発者 -> 管理者 / ユーザーへの完了報告
           (機械可読形式を引き続き使用してよい。4.5節・7節の contract は不変)
 ```
 
@@ -414,7 +472,8 @@ APPROVAL_UNIT_CONSOLIDATION = NO
 ```
 
 同文書は提示形式を定めるだけであり、本節の承認単位を 1 つも統合・緩和しない。
-同文書は作成時点で発効していない(`NEW_CONTRACT_ACTIVE = NO`)。
+同文書は既に発効している(発効状態の正本は同文書 0節の
+`ACTIVATION_STATE_SSOT`)。
 
 ### 例外
 
@@ -439,7 +498,7 @@ PROPOSED_APPROVED_EXECUTED_VERIFIED_DISTINCT = YES
 ### ルール
 
 ```
-PROPOSED   ChatGPT または作業 AI が提案・推奨しただけ
+PROPOSED   管理者 または作業 AI が提案・推奨しただけ
            人間の承認ではない
 
 APPROVED   ユーザーが対象と操作を明示的に承認した状態
@@ -500,18 +559,18 @@ MERGE_EXECUTOR = USER
 
 ```
 1  作業 AI が PR を作成する
-2  ChatGPT が PR をレビューする
-3  ChatGPT が MERGE_READY 判定を提示する
+2  管理者 が PR をレビューする
+3  管理者 が MERGE_READY 判定を提示する
 4  ユーザーが GitHub 上で直接 merge する
-5  ChatGPT が必要に応じて read-only の post-merge 確認を行う
+5  管理者 が必要に応じて read-only の post-merge 確認を行う
 6  main CI を確認する
 7  Production は別の Human Gate
 ```
 
 通常は作業 AI へ「merge してください」という作業指示を出さない。
 
-ユーザーが ChatGPT へ事前に「merge を承認します」と宣言することは
-**必須ではない**。ChatGPT が `MERGE_READY` を提示したうえで
+ユーザーが 管理者 へ事前に「merge を承認します」と宣言することは
+**必須ではない**。管理者 が `MERGE_READY` を提示したうえで
 ユーザー自身が GitHub で merge を実行した場合、
 
 ```
@@ -546,7 +605,7 @@ snapshot の記録項目は
 ユーザーが明示的に「今回は作業 AI に merge させる」と決めた場合は、
 8節の `LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY` に従う。
 
-ChatGPT が `MERGE_READY` を出していない PR をユーザーが merge した場合でも、
+管理者 が `MERGE_READY` を出していない PR をユーザーが merge した場合でも、
 それは人間による実行であるから、**勝手に revert / rollback しない**。
 必要なら post-merge review で状態と影響を確認する。
 
@@ -555,7 +614,7 @@ Production deploy は本節とは別の Human Gate である(2節)。
 
 ---
 
-## 3. ChatGPT のレビュー判定
+## 3. 管理者のレビュー判定
 
 ### 目的
 
@@ -614,7 +673,7 @@ EVIDENCE_FIRST = YES
 
 ### ルール
 
-重要 Gate では、ChatGPT が read-only で確認できる情報を、
+重要 Gate では、管理者 が read-only で確認できる情報を、
 可能な範囲で GitHub / CI / Production の実体と突合する。
 
 ```
@@ -722,7 +781,7 @@ merge するかどうかをその場で判断できる**形で提示する必要
 
 ### ルール
 
-ChatGPT が PR レビュー結果を提示する場合、
+管理者 が PR レビュー結果を提示する場合、
 **PR 番号を必ず明示したうえで**、最低限次をセットで示す。
 
 ```
@@ -777,7 +836,7 @@ PR #<番号>
 ### 例外
 
 **この形式を Markdown の表へ固定しない。**
-ChatGPT の通常の回答として読みやすく提示できればよく、
+管理者の通常の回答として読みやすく提示できればよく、
 項目が揃っていることが要件である。
 
 なお、この提示自体は `PROPOSED` にとどまる(2.5節)。
@@ -815,7 +874,7 @@ merge の承認は、レビューした exact PR head SHA に紐づく。head �
 
 ### ルール
 
-`CHATGPT_LOCK_REVIEW_OWNER = CHATGPT`
+`LOCK_REVIEW_OWNER = MANAGER`
 
 作業 AI の実装レビュー(PR review / Phase 完了レビュー)では、既存の観点に
 加えて次を確認する。
@@ -914,7 +973,9 @@ development_workflow.md 2.6.7 に従って設計変更・待機・Issue 分割�
 ```
 
 ```
-本節は development_workflow.md 2.6節の発効(DOMAIN_WIP_MODEL_ACTIVE = YES)を
+本節は development_workflow.md 2.6節が発効している期間
+(`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1`)に適用する。発効状態の正本は
+同 2.6.10 の `ACTIVATION_STATE_SSOT` に従う。同節の発効を
 もって適用を開始する。それまでは確認義務を課さない。
 ```
 
@@ -933,7 +994,7 @@ approval はいずれも変更しない。**
 複数の AI が並行作業するとき、どの指示に対する回答なのかが曖昧だと、
 **古い指示への回答を根拠に次工程へ進んでしまう**。
 
-### ルール(ユーザー ↔ ChatGPT から見た運用)
+### ルール(ユーザー ↔ 管理者 から見た運用)
 
 仕様の正本は [development_workflow.md](development_workflow.md) 2.5節。
 ここでは指示する側の運用として要点だけ示す。
@@ -979,7 +1040,7 @@ EMERGENCY SUPERSEDE       緊急時のみ PENDING を差し替える
 
 `<ASSIGNEE>-<YYYYMMDD>-<連番>` の連番をいつリセットするかが曖昧だと、
 **日付が変わっても連番が伸び続け、ID から「その日の何件目か」が読めなくなる**。
-採番は ChatGPT が行うため、その規則をここに置く。
+採番は 管理者 が行うため、その規則をここに置く。
 
 ### ルール
 
@@ -1053,7 +1114,7 @@ ONE_ID_ONE_RELAY_EVENT = YES
 
 ### 作業 AI へ渡す前の下書き
 
-ChatGPT の内部で作成しただけで、まだ作業 AI へ提示していない下書きは、
+管理者の内部で作成しただけで、まだ作業 AI へ提示していない下書きは、
 ユーザーの求めに応じて**同じ ID のまま内容を修正してよい**。
 
 ```
@@ -1070,12 +1131,12 @@ RELAYED_TO_ASSIGNEE = YES になった後は、
 
 ---
 
-## 4.5 ChatGPT から作業 AI への指示文の出力形式
+## 4.5 管理者から開発者への指示文の出力形式
 
 ### 目的
 
-ChatGPT が作成した作業指示は、**ユーザーが手作業でコピーして
-太郎 / 次郎へ転送する**。つまり指示文はそのまま転送される前提の成果物である。
+管理者 が作成した作業指示は、**ユーザーが手作業でコピーして
+開発者へ転送する**。つまり指示文はそのまま転送される前提の成果物である。
 
 この経路で次のコミュニケーションロスが起きる。
 
@@ -1092,7 +1153,7 @@ Markdown のコードフェンスが入れ子になり形式が崩れる
 ### ルール
 
 ```
-A  ChatGPT -> TARO / JIRO の作業指示は、ユーザーが一括コピーして
+A  管理者 -> TARO / JIRO の作業指示は、ユーザーが一括コピーして
    そのまま転送できる形式で出力する
 
 B  指示全文は原則として「1つの外側コードブロック」の中へすべて収める
@@ -1128,7 +1189,7 @@ G  目的は次の3点である
 **GOOD**
 
 ```
-ChatGPT の回答
+管理者の回答
 
   ユーザー向けの説明文(コードブロックの外。転送対象ではない)
 
@@ -1168,25 +1229,25 @@ python / text 等のコードブロックを開いてしまう
 ### 適用範囲
 
 ```
-対象      ChatGPT -> TARO の作業指示
-          ChatGPT -> JIRO の作業指示
+対象      管理者 -> TARO の作業指示
+          管理者 -> JIRO の作業指示
 
 対象外    ユーザーへの通常の説明・レビュー結果・相談
           (すべての回答をコードブロック化するルールではない)
 
-対象外    TARO / JIRO -> ChatGPT の作業報告
+対象外    TARO / JIRO -> 管理者 の作業報告
           回答側の形式は development_workflow.md 2.5節等の既存ルールを維持する
 ```
 
 ### 例外
 
 本節が定めるのは**指示内容そのもの**ではなく、
-**ChatGPT が指示をどの形式でユーザーへ提示するか**である。
+**管理者 が指示をどの形式でユーザーへ提示するか**である。
 指示の中身に関する既存ルール(4節・5節・7節)はいずれも変更しない。
 
 ---
 
-## 5. ChatGPT が新しい指示を出す前の確認
+## 5. 管理者 が新しい指示を出す前の確認
 
 ### 目的
 
@@ -1242,7 +1303,7 @@ global state pollution 等)を調べることが目的の場合のみ例外と�
 現況が古ければ誤った指示になる。
 
 ```
-CHATGPT_ASSIGNMENT_READ_BARRIER_OWNER = YES
+ASSIGNMENT_READ_BARRIER_OWNER = YES
 ```
 
 ### ルール
@@ -1252,7 +1313,7 @@ CHATGPT_ASSIGNMENT_READ_BARRIER_OWNER = YES
 **Assignment Read Barrier** を実行する。
 
 ```
-ChatGPT は、記憶・会話要約・古い Issue 記述だけを根拠に
+管理者 は、記憶・会話要約・古い Issue 記述だけを根拠に
 新規 implementation を指示してはならない。
 ```
 
@@ -1263,8 +1324,8 @@ ChatGPT は、記憶・会話要約・古い Issue 記述だけを根拠に
 本文書が定めるのは、**それを誰が実行するか**だけである。
 
 ```
-read barrier の実行            ChatGPT
-state の書き戻し               state を変えた actor(作業 AI / ChatGPT / ユーザー)
+read barrier の実行            管理者
+state の書き戻し               state を変えた actor(開発者 / 管理者 / 利用者)
 ```
 
 ### drift を検出した場合
@@ -1284,7 +1345,7 @@ ISSUE_STATE_FRESHNESS_GATE = FAIL
 read barrier では state だけでなく **Priority の鮮度**も確認する。
 
 ```
-CHATGPT_PRIORITY_READ_OWNER            = CHATGPT
+PRIORITY_READ_OWNER            = MANAGER
 ASSIGNMENT_PRIORITY_FRESHNESS_REQUIRED = YES
 ```
 
@@ -1314,11 +1375,11 @@ merge は 2.6節のとおり `MERGE_EXECUTOR = USER` であり、作業 AI は
 `PR_MERGED` / `MAIN_CI_PASS` を自ら書き戻せない。
 
 ```
-NEXT_CHATGPT_GATE_OWNS_RECONCILIATION = YES
+NEXT_MANAGER_GATE_OWNS_RECONCILIATION = YES
 ```
 
-ユーザーによる merge・label 変更・Issue 操作の後、**次の ChatGPT gate が
-reconciliation の確認責任を持つ。** ChatGPT 自身が durable comment を残しても、
+ユーザーによる merge・label 変更・Issue 操作の後、**次の 管理者 gate が
+reconciliation の確認責任を持つ。** 管理者 自身が durable comment を残しても、
 作業 AI へ reconciliation を指示してもよい。**「いずれ誰かが同期するだろう」
 として次工程へ進めない。**
 
@@ -1377,7 +1438,7 @@ ID が欠落している
 **MANUAL_CORRELATION**
 
 ユーザーが明示的に「これは太郎の `TARO-xxx` への回答である」と対応付け、
-ChatGPT が内容の一致を確認できた場合に限り、
+管理者 が内容の一致を確認できた場合に限り、
 `MANUAL_CORRELATION` として扱ってよい。
 
 ```
@@ -1406,7 +1467,7 @@ CORRELATED_BY      = USER
 作業 AI  1つの回答には1つの INSTRUCTION_ID の結果だけを書く
          別指示の残作業・別 Issue の追加調査を混ぜない
 
-ChatGPT  「前回答へのレビュー」と「別 worker への新規指示」を
+管理者  「前回答へのレビュー」と「別 worker への新規指示」を
          不用意に混在させない
          必要な場合は対象 worker と INSTRUCTION_ID を明示して分ける
 ```
@@ -1449,16 +1510,16 @@ LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY
 ```
 
 この節が優先を認めるのは、**ユーザーが明示的に確定した判断**に限る。
-`ChatGPT が独自の判断でルールを追加・変更してよい`という意味ではない。
+`管理者 が独自の判断でルールを追加・変更してよい`という意味ではない。
 判定語について言えば、3節の4判定は恒久ルールであり、
-**ChatGPT が独自に判定語を増やすことは本節の対象外である**(3節の例外なしを維持)。
+**管理者 が独自に判定語を増やすことは本節の対象外である**(3節の例外なしを維持)。
 
 ### 例外
 
 一時的・その作業限りの取り決めは文書化しない。
 恒久ルールと一時的判断を区別することがこの節の要点である。
 
-作業 AI(太郎 / 次郎)についても同様であり、本節は
+開発者についても同様であり、本節は
 「ユーザーの明示判断が文書より新しい場合の優先順位」を定めるものであって、
 作業 AI が独自にルールを変える根拠にはならない。
 
@@ -1468,8 +1529,8 @@ LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY
 
 ### 目的
 
-**「GitHub に置けば ChatGPT が自動的に常時読み込む」という前提は成り立たない。**
-ChatGPT はリポジトリを勝手に読まない。明示的に読ませる必要がある。
+**「GitHub に置けば 管理者 が自動的に常時読み込む」という前提は成り立たない。**
+管理者 はリポジトリを勝手に読まない。明示的に読ませる必要がある。
 
 ### ルール
 
@@ -1477,7 +1538,7 @@ ChatGPT はリポジトリを勝手に読まない。明示的に読ませる必
 または大きな開発作業を始めるときは、可能な限り最初に次を確認する。
 
 ```
-1  docs/chatgpt_collaboration_protocol.md   (本文書)
+1  docs/user_manager_collaboration_protocol.md   (本文書)
 2  CLAUDE.md
 3  作業に必要な development / release の SSoT
      docs/development_workflow.md
@@ -1613,3 +1674,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-06 | 2.6節へ「MERGE_READY 判定に含める確認(G2)」を追加した(Issue #181)。PR レビューでは diff の妥当性に加え、**その PR が merge された後にその Issue へ別の Progress Status 相当の残作業が残るか**を確認し、残る場合は原則として merge より前に Issue を分割する。Progress Status は Issue 全体を表す単一 label であるため、未実装の作業単位を抱えたまま `status:マージ済` へ進むと「実装は終わっている」と読める label のまま release 判定を誤らせる(Issue #20 で実際に発生し、post-merge の reconciliation で分割した)。**これは既存の review gate へ確認項目を 1 つ加えるものであり、新しい Human Gate を増やすものではない。** `MERGE_EXECUTOR = USER`・`USER_MERGE_ACTION = HUMAN_APPROVAL + EXECUTION`・merge を Production 承認として扱わない原則・2節の Production Human Gate はいずれも変更していない。判定ルールの正本は issue_label_policy.md §7.3、snapshot の記録項目は development_workflow.md 6.5.3節であり、本文書へ複製していない。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-06 | 3.7節へ発効後の正本の所在と `MERGE_APPROVAL_IS_BOUND_TO_EXACT_REVIEWED_HEAD = YES` を追記した(Issue #184)。docs/ai_operation_message_contract.md の merge から発効までの間、提示形式の正本が本節と同文書のどちらかが曖昧になりうるため、`BEFORE_ISSUE_184_ACTIVATION` は本節、`AFTER_ISSUE_184_ACTIVATION` は同文書 8節と明示し、発効後に本節を並列の規範として扱わないことにした(`DUPLICATE_SSOT` の回避)。**本節が定める `REVIEW_VERDICT` / `MERGE_BLOCKING_CONCERN` 等の判断の中身は発効後も本節が正本であり、変わるのは提示のしかただけである。** あわせて merge 承認がレビューした exact PR head SHA に紐づき、head が変われば失効することを明記した(2節の「承認はその操作・その対象に限る」と同じ原則であり、新設の緩和ではない)。コード・Production 挙動の変更なし |
 | 2026-09-06 | Instruction ID の使用済み判定を補完し、Human Gate の提示形式の正本を参照へ移した(Issue #184)。(1)4.1節の「使用済み」の列挙へ `ANSWERED` / `FAILED` / `BLOCKED` を追加し、`ONE_ID_ONE_RELAY_EVENT = YES` を明記した。従来の列挙(実行完了 / CANCELLED / SUPERSEDED / 途中停止 / 作業開始後の取消)には、**指示が失敗した場合と作業者が BLOCKED を返した場合**が含まれておらず、その ID を再利用すると回答の対応付けが壊れる余地が残っていた。採番規則そのもの(Asia/Tokyo の日付 / 作業者別の日次連番 / 日付変更で 001 へリセット)は変更していない。(2)2節へ「提示のフォーマット」を追加し、承認を求める際の形式(固定 4 節 + AUDIT_INFO の分離、gate 種別ごとの exact identifier の扱い)の正本が新設した docs/ai_operation_message_contract.md 8節であることを参照で示した。**本文書は「どの操作に承認が要るか」を定め、形式を複製しない。** 同文書は提示形式のみを定めるものであり `APPROVAL_UNIT_CONSOLIDATION = NO`、本節の承認単位を 1 つも統合・緩和していない。(3)12節へ正本の所在を 1 行追加した。既存の Human Gate 一覧 / `MERGE_EXECUTOR = USER` / exact ChangeSet approval / レビュー判定 4 種 / 指示プロトコル / 3.8節の lock omission 判定はいずれも変更していない。コード・Production 挙動の変更なし |
+| 2026-09-06 | 役割を製品非依存にし、ファイル名を chatgpt_collaboration_protocol.md から改称した(Issue #190)。管理・レビュー役が 2026-09-06 に ChatGPT 上の AI から交代したことで、**役割が特定の生成AI製品名で書かれていると、担当が変わるたびに正本を書き換えることになる**という構造的な問題が表面化した。そこで `PRODUCT_AGNOSTIC_ROLE_NAMING = YES` とし、役割を権限と責務で定義する。(1)1節を 4 役割(`USER` / `MANAGER` / `DEVELOPER_WITH_DEPLOY` / `DEVELOPER`)で書き直し、各役割の権限・責務・禁止事項を明記した。開発者 2 役割の差は「deploy 実作業を行うか」の 1 点だけであり、調査・設計・実装・報告・state 書き戻しの規則はすべて共通である。(2)**現在の担当は本文書へ焼き込まない**(`ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録`)。恒久文書と現在状態を分ける 10節の原則に従う。(3)1.5節の `PRODUCTION_DEPLOYMENT_EXECUTOR` と `DEPLOY_OPERATION_DELEGATION` を役割ベースへ改めた(担当者名を書かない)。(4)識別子を `<対象>_OWNER = <役割>` 形式へ統一した(`LOCK_REVIEW_OWNER` / `ASSIGNMENT_READ_BARRIER_OWNER` / `PRIORITY_READ_OWNER` / `STATE_READ_OWNER` = `MANAGER`、`NEXT_MANAGER_GATE_OWNS_RECONCILIATION`、`USER_MANAGER_COLLABORATION_SSOT`)。接頭辞へ役割名を埋め込まないため、次に体制が変わっても識別子名が変わらない。(5)本文中の "ChatGPT" 47 か所を役割名へ置換し、歴史的名称として 1 節で 1 か所だけ定義した(過去の記録が誰を指すか分かるようにするため)。(6)ファイル名を製品非依存へ改称した。**転送用スタブは残さない。** 過去の GitHub metadata からの参照 61 件を実測したところ**すべて平文で markdown link は 0 件**であり、改称で壊れるリンクが存在しないためである。**過去の Issue コメント・snapshot に残る "ChatGPT" / `ACTOR = CHATGPT` は append-only の記録であり書き換えていない。** 本文書の変更履歴の過去エントリも編集していない。承認単位・Human Gate・レビュー判定 4 種・指示プロトコル・merge 実行者はいずれも変更していない。コード・Production 挙動の変更なし |
