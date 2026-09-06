@@ -65,6 +65,11 @@ _MIN_METHODS_FOR_OUTLIER_DETECTION = 3
 _MIN_REMAINING_METHODS_AFTER_FILTER = 2
 _TOO_FEW_METHODS_AFTER_OUTLIER_FILTER = "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER"
 
+# --- Issue #179(2026-09): 52週安値フィルタの境界帯 ---
+# 対象は BELOW_52_WEEK_LOW のみ。他の3フィルタとDCF上方乖離フィルタは変更しない。
+CODE_BELOW_52_WEEK_LOW = "BELOW_52_WEEK_LOW"
+CODE_BORDERLINE_INTERPOLATED_TO_MEDIAN = "BORDERLINE_INTERPOLATED_TO_MEDIAN"
+
 
 def _detect_outlier(
     value: Decimal,
@@ -118,7 +123,7 @@ def _detect_outlier(
         threshold = low_52_week * _BELOW_52_WEEK_LOW_RATIO
         if value < threshold:
             return ValuationExclusionReason(
-                code="BELOW_52_WEEK_LOW",
+                code=CODE_BELOW_52_WEEK_LOW,
                 message=(
                     f"算出値({value}円)が直近52週安値({low_52_week}円)の"
                     f"{float(_BELOW_52_WEEK_LOW_RATIO) * 100:.0f}%未満であり、"
@@ -128,6 +133,76 @@ def _detect_outlier(
                 reference_value=threshold,
             )
     return None
+
+
+def _interpolate_borderline(
+    value: Decimal,
+    exclusion: ValuationExclusionReason,
+    other_values: list[Decimal],
+    transition_min_ratio: float,
+) -> tuple[Decimal, ValuationExclusionReason] | None:
+    """境界帯(TRANSITION)の算出値を他方式の中央値へ線形補間する(Issue #179)。
+
+    従来のBELOW_52_WEEK_LOWは、除外閾値(直近52週安値x0.50)をわずかに下回った
+    だけの値も、桁違いに低い値と同じように完全に切り捨てていた。閾値の直前と
+    直後で採否が反転するため、算出値をわずかに動かすだけでvaluation_anchorが
+    跳ぶ(第1成分 = OUTLIER_MEMBERSHIP_DISCONTINUITY)。
+
+    そこで u = 算出値 ÷ 除外閾値 を定義し、3領域へ分ける。
+
+        u >= 1.0                          そもそも除外されない(本関数へ来ない)
+        transition_min_ratio <= u < 1.0   TRANSITION  他方式中央値へ線形補間
+        u <  transition_min_ratio         HARD_REJECT 完全除外(従来どおり)
+
+    補間は s = (u - T) / (1 - T) を採用比率とし、
+
+        補間値 = 他方式中央値 + (算出値 - 他方式中央値) x s
+
+    とする。u -> 1.0 で s -> 1 となり補間値が算出値そのものに一致するため、
+    **除外閾値(B = 0.50)の境界で値が跳ばない**。不連続は s = 0 となる
+    u = transition_min_ratio の 1 点へ移り、そこでの段差は帯を狭くするほど
+    小さくなる(消えはしない。順位ベースの集約器では要素の増減で統計量が動く)。
+
+    `reference_value ÷ 0.50` から52週安値を逆算することはしない
+    (LOW_52_WEEK_REVERSE_CALCULATION = NO)。判定に使うのはuだけであり、
+    除外閾値が将来変わっても過去記録の意味が壊れないようにするためである。
+
+    戻り値は (補間値, 構造化記録) 。境界帯の外、または補間に必要な他方式が
+    無い場合はNoneを返し、呼び出し側は従来どおり除外する。
+    """
+    actual = exclusion.actual_value
+    reference = exclusion.reference_value
+    if not isinstance(actual, Decimal) or not isinstance(reference, Decimal):
+        return None
+    if reference <= 0:
+        return None
+    ratio = actual / reference
+    if not (Decimal(str(transition_min_ratio)) <= ratio < Decimal("1")):
+        return None
+    if not other_values:
+        return None
+
+    median_others = statistics.median(other_values)
+    share = (ratio - Decimal(str(transition_min_ratio))) / (
+        Decimal("1") - Decimal(str(transition_min_ratio))
+    )
+    interpolated = median_others + (value - median_others) * share
+    if interpolated <= 0:
+        return None
+
+    detail = ValuationExclusionReason(
+        code=CODE_BORDERLINE_INTERPOLATED_TO_MEDIAN,
+        message=(
+            f"算出値({value}円)が除外基準({reference}円)の"
+            f"{float(ratio) * 100:.1f}%であり、境界帯"
+            f"({float(transition_min_ratio) * 100:.0f}%以上100%未満)に入るため、"
+            f"完全に除外せず他方式の中央値({round(median_others, 0)}円)へ寄せて"
+            f"{round(interpolated, 0)}円として採用"
+        ),
+        actual_value=value,
+        reference_value=reference,
+    )
+    return interpolated, detail
 
 
 @dataclass(frozen=True)
@@ -145,12 +220,15 @@ class OutlierFilterResult:
     remaining_count: int = 0
     reliability: BuyPriceReliability = BuyPriceReliability.OK
     blocking_reason: str | None = None
+    # Issue #179: 境界帯として補間採用した方式の件数。
+    transition_count: int = 0
 
 
 def apply_outlier_filters(
     method_results: list[FairValueMethodResult],
     current_price: Decimal | None = None,
     low_52_week: Decimal | None = None,
+    transition_min_ratio: float | None = None,
 ) -> OutlierFilterResult:
     """下方(および保険的に上方)の外れ値を集計から除外する(要求仕様10節)。
 
@@ -167,6 +245,13 @@ def apply_outlier_filters(
     また、3件以上で外れ値検知を行った結果、残る方式が1件以下になった場合
     (例: 3方式が互いを外れ値とみなし合い全滅する)、その除外結果は採用せず
     除外前の結果へフォールバックし、明示的な低信頼シグナルを返す。
+
+    --- Issue #179(2026-09)で追加 ---
+    transition_min_ratioを渡すと、BELOW_52_WEEK_LOWに限り「除外閾値のすぐ下」を
+    境界帯として扱い、完全に除外せず他方式の中央値へ線形補間して採用する
+    (_interpolate_borderline()参照)。Noneのときは従来どおり全件除外であり、
+    既存の呼び出し側の挙動を変えない。他の3フィルタとDCF上方乖離フィルタは
+    対象外である。
     """
     applicable = [r for r in method_results if r.applicable and r.fair_value is not None]
     if len(applicable) < _MIN_METHODS_FOR_OUTLIER_DETECTION:
@@ -176,6 +261,7 @@ def apply_outlier_filters(
 
     filtered: list[FairValueMethodResult] = []
     excluded_count = 0
+    transition_count = 0
     for r in method_results:
         if not r.applicable or r.fair_value is None:
             filtered.append(r)
@@ -185,6 +271,17 @@ def apply_outlier_filters(
         if exclusion is None:
             filtered.append(r)
             continue
+        if exclusion.code == CODE_BELOW_52_WEEK_LOW and transition_min_ratio is not None:
+            interpolation = _interpolate_borderline(
+                r.fair_value, exclusion, other_values, transition_min_ratio
+            )
+            if interpolation is not None:
+                interpolated, detail = interpolation
+                transition_count += 1
+                filtered.append(
+                    r.model_copy(update={"fair_value": interpolated, "transition_detail": detail})
+                )
+                continue
         excluded_count += 1
         filtered.append(
             r.model_copy(
@@ -208,7 +305,10 @@ def apply_outlier_filters(
         )
 
     return OutlierFilterResult(
-        results=filtered, excluded_count=excluded_count, remaining_count=remaining_count
+        results=filtered,
+        excluded_count=excluded_count,
+        remaining_count=remaining_count,
+        transition_count=transition_count,
     )
 
 
@@ -219,6 +319,7 @@ def build_valuation_summary(
     usability_config: FairValueUsability,
     current_price: Decimal | None = None,
     low_52_week: Decimal | None = None,
+    transition_min_ratio: float | None = None,
 ) -> FairValueRange:
     """既存のbuild_fair_value_range()を呼び、統計値(min/max/median/mean/
     dispersion_ratio/methods_used_count)を追加する。applicable=Falseの方式は
@@ -234,7 +335,9 @@ def build_valuation_summary(
     ]
     all_values = [r.fair_value for r in normalized_results if r.fair_value is not None]
 
-    outlier_filter_result = apply_outlier_filters(normalized_results, current_price, low_52_week)
+    outlier_filter_result = apply_outlier_filters(
+        normalized_results, current_price, low_52_week, transition_min_ratio
+    )
     base_range = build_fair_value_range(
         outlier_filter_result.results, aggregation_method, method_weights, usability_config
     )

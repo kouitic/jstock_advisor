@@ -123,6 +123,29 @@ class FairValueUsability(StrictModel):
     min_methods_required: int  # 有効な手法数がこれ未満なら使用不可
 
 
+class OutlierTransition(StrictModel):
+    """外れ値除外の境界帯(Issue #179)。
+
+    除外閾値そのもの(52週安値x0.50等)はvaluation_methods.pyのコード定数のままで
+    あり、configへの移行はIssue #180のscopeである。ここでは#179が新設した
+    「境界帯の下限」だけを持つ。
+    """
+
+    # u = 算出値 ÷ 除外閾値。この値以上1.0未満ならTRANSITION、未満ならHARD_REJECT。
+    below_52_week_low_min_ratio: float
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> OutlierTransition:
+        # 1.0以上にすると境界帯が空になり本Issueの修正が無効化される。
+        # 0以下にすると「閾値の何倍か」という定義が成立しない。
+        if not 0.0 < self.below_52_week_low_min_ratio < 1.0:
+            raise ValueError(
+                "below_52_week_low_min_ratio must satisfy "
+                f"0 < ratio < 1.0 (got {self.below_52_week_low_min_ratio})"
+            )
+        return self
+
+
 class ValuationRulesConfig(StrictModel):
     version: int
     fair_value_methods: FairValueMethods
@@ -132,6 +155,7 @@ class ValuationRulesConfig(StrictModel):
     historical_range_method: HistoricalRangeMethod
     dcf_method: DcfMethod
     fair_value_usability: FairValueUsability
+    outlier_transition: OutlierTransition
 
 
 # --- profit_taking_rules.yaml ----------------------------------------------
