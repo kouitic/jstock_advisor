@@ -1418,12 +1418,20 @@ class ValuationDispersionThresholds(StrictModel):
     low_max: float
     medium_max: float
     auto_buy_block: float
+    # Issue #186: 適正価格そのものを算出しない上限。auto_buy_block(自動購入の禁止)
+    # とは目的が異なるため別キーとする。auto_buy_blockはdecide_buy_action /
+    # buy_consistencyのMANUAL_REVIEW判定でも使われており、値を動かすとそちらの
+    # 安全機能まで一緒に動いてしまうため、共用しない。
+    anchor_block: float
 
     @model_validator(mode="after")
     def _check_order(self) -> ValuationDispersionThresholds:
-        if not (0 < self.low_max < self.medium_max < self.auto_buy_block):
+        if not (
+            0 < self.low_max < self.medium_max < self.auto_buy_block < self.anchor_block
+        ):
             raise ValueError(
-                "valuation_dispersionはlow_max < medium_max < auto_buy_blockの順序が必要です"
+                "valuation_dispersionはlow_max < medium_max < auto_buy_block < "
+                "anchor_blockの順序が必要です"
             )
         return self
 

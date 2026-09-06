@@ -563,10 +563,14 @@ def _no_valuation_anchor_detail_text(
         threshold_ratio = _decimal_str_to_display(threshold_value, digits=2)
         actual_text = f"{actual_ratio}倍" if actual_ratio is not None else "不明"
         threshold_text = f"{threshold_ratio}倍超" if threshold_ratio is not None else "不明"
+        # Issue #186: 閾値の意味がauto_buy_block(自動買付の禁止)から
+        # anchor_block(基準価格を算出しない上限)へ変わったため、文言を合わせる。
+        # 旧レコードもthreshold_valueを保存値から表示するため、当時の基準が
+        # そのまま出る(現在configで再解釈しない既存方針は変更していない)。
         return (
             "算出方式間の結果のばらつきが大きく、基準価格を一本化できませんでした。\n"
             f"判定時点のばらつき：{actual_text}\n"
-            f"自動買付を行わない基準：{threshold_text}"
+            f"基準価格を算出しない基準：{threshold_text}"
         )
     if code == CODE_VALUATION_ANCHOR_CALCULATION_FAILED:
         return "算出処理で有効な結果を得られませんでした。"

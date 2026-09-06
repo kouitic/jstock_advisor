@@ -700,7 +700,9 @@ class BuySignalService:
             methods_used_count=valuation_summary.methods_used_count or 0,
             dispersion_ratio=valuation_summary.valuation_dispersion_ratio,
             dispersion_medium_max=self._config.buy_decision.valuation_dispersion.medium_max,
-            dispersion_auto_buy_block=self._config.buy_decision.valuation_dispersion.auto_buy_block,
+            # Issue #186: 適正価格を算出しない上限はanchor_block(既定50.0)。
+            # auto_buy_block(2.00)は自動購入の禁止用でdecide_buy_action()側が使う。
+            dispersion_anchor_block=self._config.buy_decision.valuation_dispersion.anchor_block,
             industry_model_applied=industry_model_applied,
             uses_simplified_dcf=filtered_dcf.applicable,
             normalized_eps_confidence=eps_result.confidence if is_cyclical_industry else None,
@@ -1439,6 +1441,14 @@ class BuySignalService:
                 # 精度限界があるため、company_quality_scoreとこのスナップショットの
                 # 突き合わせで判定する。domain/signals/buy_decision.py参照)。
                 "score_thresholds": self._config.buy_decision.score_thresholds.model_dump(),
+                # Issue #186: 適正価格を算出しない上限(anchor_block)は判定結果を
+                # 左右するため、判定時点の値をスナップショットする。後からconfigを
+                # 変更しても、過去の判定を"現在の"閾値で誤って再解釈しないため
+                # (score_thresholds/scoring_weightsと同じ理由)。
+                # low_max/auto_buy_blockの未記録は別Issue(#189)。
+                "valuation_dispersion_anchor_block": (
+                    self._config.buy_decision.valuation_dispersion.anchor_block
+                ),
                 "historical_valuation": historical_valuation_config_values(
                     self._config.historical_valuation
                 ),

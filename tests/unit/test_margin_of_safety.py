@@ -184,7 +184,7 @@ def test_valuation_confidence_high_when_no_negative_factors() -> None:
         methods_used_count=3,
         dispersion_ratio=1.1,
         dispersion_medium_max=1.60,
-        dispersion_auto_buy_block=2.00,
+        dispersion_anchor_block=50.00,
         industry_model_applied=True,
         uses_simplified_dcf=False,
         normalized_eps_confidence=None,
@@ -198,7 +198,7 @@ def test_valuation_confidence_medium_when_industry_model_not_applied() -> None:
         methods_used_count=3,
         dispersion_ratio=1.1,
         dispersion_medium_max=1.60,
-        dispersion_auto_buy_block=2.00,
+        dispersion_anchor_block=50.00,
         industry_model_applied=False,
         uses_simplified_dcf=False,
         normalized_eps_confidence=None,
@@ -212,7 +212,7 @@ def test_valuation_confidence_medium_when_dispersion_above_1_60() -> None:
         methods_used_count=3,
         dispersion_ratio=1.7,
         dispersion_medium_max=1.60,
-        dispersion_auto_buy_block=2.00,
+        dispersion_anchor_block=50.00,
         industry_model_applied=True,
         uses_simplified_dcf=False,
         normalized_eps_confidence=None,
@@ -220,25 +220,34 @@ def test_valuation_confidence_medium_when_dispersion_above_1_60() -> None:
     assert result.level == ConfidenceLevel.MEDIUM
 
 
-def test_valuation_confidence_low_when_dispersion_above_2_00() -> None:
+def test_valuation_confidence_low_when_dispersion_above_anchor_block() -> None:
+    """Issue #186: LOWへ倒す閾値はauto_buy_block(2.00)ではなくanchor_block(50.00)。
+
+    2.00超〜50.00以下は「自動購入はしないが基準価格は出す」帯であり、
+    LOWにしない(decide_buy_action/validate_buy_recommendationが2.00で
+    MANUAL_REVIEWへ倒す。同じ判断をここで重複させない)。
+    """
     result = determine_valuation_confidence(
         methods_used_count=3,
-        dispersion_ratio=2.5,
+        dispersion_ratio=60.0,
         dispersion_medium_max=1.60,
-        dispersion_auto_buy_block=2.00,
+        dispersion_anchor_block=50.00,
         industry_model_applied=True,
         uses_simplified_dcf=False,
         normalized_eps_confidence=None,
     )
     assert result.level == ConfidenceLevel.LOW
     # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正、必須テスト1・2):
-    # 標準5方式が有効でも方式間乖離がauto_buy_blockを超えた場合、直接原因が
+    # 標準5方式が有効でも方式間乖離が基準を超えた場合、直接原因が
     # VALUATION_DISPERSION_TOO_HIGHとして、判定時点の実測値dispersion_ratioと
-    # 実際に使用した基準値dispersion_auto_buy_blockごと構造化される。
+    # 実際に使用した基準値ごと構造化される。
+    # Issue #186: 基準値はanchor_blockになった(reason codeは再利用する。
+    # threshold_valueが判定時点の基準を保持するため、旧レコードと新レコードは
+    # 保存値だけで区別できる)。
     assert result.blocking_reason is not None
     assert result.blocking_reason.code == "VALUATION_DISPERSION_TOO_HIGH"
-    assert result.blocking_reason.actual_value == 2.5
-    assert result.blocking_reason.threshold_value == 2.00
+    assert result.blocking_reason.actual_value == 60.0
+    assert result.blocking_reason.threshold_value == 50.00
 
 
 def test_valuation_confidence_low_when_fewer_than_2_methods() -> None:
@@ -246,7 +255,7 @@ def test_valuation_confidence_low_when_fewer_than_2_methods() -> None:
         methods_used_count=1,
         dispersion_ratio=None,
         dispersion_medium_max=1.60,
-        dispersion_auto_buy_block=2.00,
+        dispersion_anchor_block=50.00,
         industry_model_applied=True,
         uses_simplified_dcf=False,
         normalized_eps_confidence=None,
@@ -265,7 +274,7 @@ def test_valuation_confidence_low_when_no_methods_used() -> None:
         methods_used_count=0,
         dispersion_ratio=None,
         dispersion_medium_max=1.60,
-        dispersion_auto_buy_block=2.00,
+        dispersion_anchor_block=50.00,
         industry_model_applied=True,
         uses_simplified_dcf=False,
         normalized_eps_confidence=None,
@@ -284,7 +293,7 @@ def test_valuation_confidence_medium_has_no_blocking_reason() -> None:
         methods_used_count=3,
         dispersion_ratio=1.7,
         dispersion_medium_max=1.60,
-        dispersion_auto_buy_block=2.00,
+        dispersion_anchor_block=50.00,
         industry_model_applied=True,
         uses_simplified_dcf=False,
         normalized_eps_confidence=None,

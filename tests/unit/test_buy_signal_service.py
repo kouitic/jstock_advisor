@@ -461,6 +461,24 @@ _DISPERSION_STOCK = _StockFixture(
     pbr_median=Decimal("11"),
 )
 
+# Issue #186: dispersionがanchor_block(50.00倍)を超え、valuation_anchor自体を
+# 算出しないケース。有効方式が3件未満だと外れ値検知が走らない(=互いを外れ値と
+# みなし合って全滅しない)ことを利用し、target_yield(1000円)とper(60000円)の
+# 2方式だけを有効にして60倍の乖離を作る。forecast_bpsをNoneにしてpbrを算出不可に
+# している(DCF・価格レンジ法は本フィクスチャ共通の仕様上もともと算出不可)。
+_EXTREME_DISPERSION_STOCK = _StockFixture(
+    stock_code="3333",
+    stock_name="テスト極端乖離銘柄",
+    current_price=Decimal("1000"),
+    industry="小売業",
+    sector="Retail",
+    forecast_dividend=Decimal("40"),  # target_yield価格 = 40 / 0.04 = 1000円
+    forecast_eps=Decimal("100"),  # per価格 = 600 * 100 = 60000円
+    per_median=Decimal("600"),
+    forecast_bps=None,
+    pbr_median=None,
+)
+
 
 def _providers() -> ProviderBundle:
     # build_stock_snapshotをmonkeypatchで置き換えるため、providersの中身は
@@ -684,18 +702,67 @@ def test_valuation_outlier_exclusions_captures_actual_outlier_filtered_method(
     assert target_yield_method.exclusion_reason is None
 
 
+def test_dispersion_above_auto_buy_block_still_produces_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #186: 方式間の乖離がauto_buy_block(2.00)を超えても、
+    valuation_anchorと買付価格は生成される。
+
+    従来はここでvaluation_confidenceをLOWにしてanchorをNoneにしていたが、
+    「ばらつきが大きいので自動で買わない」判断はdecide_buy_action()が同じ2.00で
+    既に持っており重複していた。重複の副作用として、方式値を上げるとanchorが
+    有 -> 無 -> 有 と非単調に反転していた(#186)。
+
+    安全機能(自動購入の禁止)は落ちていないことを、BuyActionと
+    VALUATION_DISPERSION_TOO_HIGHのBuyDecisionReasonで確認する。
+    """
+    outcome = _analyze(monkeypatch, _DISPERSION_STOCK)
+    rec = outcome.recommendation
+    assert rec is not None
+
+    # anchorと3価格が生成される(従来はいずれもNoneだった)。
+    assert rec.valuation_anchor is not None
+    assert rec.buy_prices is not None
+    assert rec.buy_prices.entry is not None
+    assert not any(r.code == "NO_VALUATION_ANCHOR" for r in rec.buy_decision_reasons)
+
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+    assert facts["no_valuation_anchor_reason"] is None
+
+    # dispersionはauto_buy_blockを超えている(前提の確認)。
+    assert rec.valuation_dispersion_ratio is not None
+    assert rec.valuation_dispersion_ratio > 2.0
+
+    # 安全側: 価格が出てもBUY系にはならない。
+    # 本フィクスチャでは現在値(1000円)が打診買い価格を上回るため
+    # 価格条件の時点でWATCH_FOR_PRICEとなり、L4のMANUAL_REVIEW格下げには
+    # 到達しない(L4はBUY系に対してのみ作用する降格ゲートであるため)。
+    # L4そのものの回帰は
+    # tests/unit/test_valuation_dispersion_anchor_availability.py の
+    # test_l4_still_forces_manual_review_above_auto_buy_block で固定している。
+    assert rec.buy_action not in BUY_FAMILY_ACTIONS
+    assert rec.buy_action == BuyAction.WATCH_FOR_PRICE
+
+    # Issue #186: 判定時点のanchor_blockがconfig_values_usedへ残る。
+    assert rec.config_values_used["valuation_dispersion_anchor_block"] == 50.0
+
+
 def test_no_valuation_anchor_reason_captures_valuation_dispersion_too_high(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """必須テスト1・2: 実際にBuySignalServiceを通し、標準方式(target_yield/
-    per/pbr)は3件とも個別には有効(outlier filterでも除外されない)だが、
-    方式間の乖離がauto_buy_blockを超えてvaluation_anchorがNoneになる
-    (=BuyDecisionReason.code="NO_VALUATION_ANCHOR"が発火する)ケースで、
-    buy_score_input_facts["no_valuation_anchor_reason"]へ直接原因
-    (VALUATION_DISPERSION_TOO_HIGH)が、判定時点の実測値(dispersion_ratio)・
-    実際に使用した基準値(auto_buy_block)ごと構造化して保存されることを
-    確認する。"""
-    outcome = _analyze(monkeypatch, _DISPERSION_STOCK)
+    """必須テスト1・2(Issue #186で基準値をanchor_blockへ変更): 実際に
+    BuySignalServiceを通し、方式間の乖離がanchor_blockを超えて
+    valuation_anchorがNoneになる(=BuyDecisionReason.code="NO_VALUATION_ANCHOR"が
+    発火する)ケースで、buy_score_input_facts["no_valuation_anchor_reason"]へ
+    直接原因(VALUATION_DISPERSION_TOO_HIGH)が、判定時点の実測値
+    (dispersion_ratio)・実際に使用した基準値(anchor_block)ごと構造化して
+    保存されることを確認する。
+
+    reason codeは従来と同じものを再利用する。threshold_valueが判定時点の基準を
+    保持するため、旧レコード(2.0)と新レコード(50.0)は保存値だけで区別できる。
+    """
+    outcome = _analyze(monkeypatch, _EXTREME_DISPERSION_STOCK)
     rec = outcome.recommendation
     assert rec is not None
     assert any(r.code == "NO_VALUATION_ANCHOR" for r in rec.buy_decision_reasons)
@@ -707,15 +774,8 @@ def test_no_valuation_anchor_reason_captures_valuation_dispersion_too_high(
     assert isinstance(reason, dict)
     assert reason["code"] == "VALUATION_DISPERSION_TOO_HIGH"
     assert reason["actual_value"] is not None
-    assert float(reason["actual_value"]) > 2.0
-    assert reason["threshold_value"] == "2.0"
-
-    # 標準3方式はいずれも個別には有効であり(exclusion_reasonが無い)、この
-    # 事実だけからは方式間乖離が原因だったことを復元できない(=表示層が新規
-    # スナップショットを参照する必要があることの実証)。
-    for method_name in ("target_yield", "per", "pbr"):
-        method = next(m for m in rec.valuation_methods if m.method == method_name)
-        assert method.exclusion_reason is None
+    assert float(reason["actual_value"]) > 50.0
+    assert reason["threshold_value"] == "50.0"
 
 
 # ===== 再々コードレビュー対応(2026-08、JST暦日境界修正・指摘4):
