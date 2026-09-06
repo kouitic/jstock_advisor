@@ -653,11 +653,21 @@ ai_operation_message_contract.md 10節)。
 ```
 着手前の確認手順
 
-1  OPEN な Issue のうち status:開発中 のものを fresh に列挙する
+1  OPEN な Issue のうち **status:開発中 または status:開発済** のものを
+   fresh に列挙する
 2  それぞれの DOMAIN_WIP_DECLARATION を読む
 3  自分が触る領域と重ならないことを確認する
 
 memory・会話要約・古い Issue 本文だけで判断しない(6.5.4 と同じ原則)。
+```
+
+```
+★ status:開発済 を含める理由
+
+  2.6.6 の解放条件は PR_MERGED AND MAIN_CI_PASS AND MAIN_HEAD_EXACT AND ... である。
+  status:開発済(implementation complete / OPEN PR + CI green / main へ未 merge)は
+  PR_MERGED を満たしておらず、**lock を保持したままである**。
+  status:開発中 だけを列挙すると、この状態を取りこぼす。
 ```
 
 ### 2.6.10 発効の境界
@@ -2181,3 +2191,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-06 | 運用ルールの欠落を補い、集約 read model の例外を追加した(Issue #184)。(1)§2.5.3 へ「指示の直列化」と §2.6 の code WIP モデルが**直交する**ことを明記した(`PER_WORKER_INSTRUCTION_SERIALIZATION != PER_WORKER_CODE_WIP_MODEL`)。#177 の発効により「WIP」という語が 2 つの意味を持つようになり、「領域が空いているから次の指示を出してよい」「1 人 1 code WIP だから指示も 1 本のはず」という双方向の誤読が起こりうるため。片方が空いてももう片方の制約は解除されない。(2)§2.5.5 の報告フォーマットについて、冒頭 3 行のみを本文書に残し、報告の構造(NORMAL / FORENSIC / `BASELINE_INVARIANTS` / 一括コピー可能性 / `AUTHORIZED_PHASES`)の正本を新設した docs/ai_operation_message_contract.md への参照に置き換えた(本文を複製していない)。(3)§6.5.4 へ **fresh-read の対象**を明記した(`FRESH_READ_SOURCE = CURRENT_REMOTE_SSOT` / `LOCAL_WORKTREE_IS_NOT_SSOT` / `STALE_FEATURE_BRANCH_IS_NOT_FRESH_READ`)。既存の規則は記憶・会話要約・古い Issue 記述を禁じていたが、**手元の作業 branch の docs を現行ルールとして読むこと**を禁じていなかった。実際に #177 の作業 branch 上で #181 改訂前の issue_label_policy §7.3 を参照した事例が発生している。(4)同じく §6.5.4 へ **取得が途中で打ち切られた場合**の規則を追加した(`RETRIEVAL_TRUNCATED -> FRESH_READ_COMPLETE = NO`)。コメント一覧や snapshot の取得は件数が増えると打ち切られることがあり、途中までしか読んでいない状態を「読み終えた」と扱うと #157 が解決した stale state 事故と同型の見落としが起きる。latest state を再構成するまで assignment 判断を行わない。(5)§9.5 へ `OPPORTUNISTIC_FIX_FORBIDDEN` / `FIX_FIRST_ISSUE_LATER = FORBIDDEN` を追加した。scope 外の不具合はその場で直さず、duplicate check -> Issue 化 -> lifecycle とする。**P0 であっても「先に直して Issue は後」は認めない**(P0 は Issue を省略してよいという意味ではなく、Issue を作ったうえで §2.6.8 の割り込み手順で最優先に着手してよいという意味である)。Production の緊急停止操作は運用操作であり本節の対象ではない。(6)§2.6.9 に **人間の承認による限定的な policy 変更**を反映した。従来の「専用の WIP 管理 Issue を作らない」を、`CACHE_ONLY` / `READ_MODEL_IS_SSOT = NO` / `INDEX_ONLY` の集約 read model に限って認める形へ改めた。**`WIP_STATE_SSOT`(各 Issue の宣言 + 最新 snapshot)と「docs 側に現況表を置かない」は変更していない。** read model は SSoT の複製ではなく索引であり、不一致時は Issue snapshot が勝ち(`READ_MODEL_MISMATCH -> ISSUE_SNAPSHOTS_WIN -> REBUILD_REQUIRED`)、stale なら索引としても使わず全走査へフォールバックする。`DOMAIN_WIP_READ_MODEL != ASSIGNMENT_READ_BARRIER_BYPASS` を明記し、lock 取得の確定は必ず名指しされた Issue の宣言と snapshot を fresh に読んで行う。この例外は Issue #184 の発効をもって有効になり、それまでは tracking Issue を作成しない。**既存の Human Gate / merge 承認 / Production approval / exact ChangeSet approval / grouped release / release-blocker lifecycle / label 4 軸 / §2.6 の取得ゲートと解放条件はいずれも変更・緩和していない。** docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
 | 2026-09-06 | §2 / §2.6 / §2.6.10 の発効状態を現況へ同期した(Issue #184)。2.6節は 2026-09-06 02:27 JST に人間の承認により発効しているが、本文には `DOMAIN_WIP_MODEL_ACTIVE = NO` /「まだ発効していない」という**発効前の記述が残っており、現況と矛盾していた**。`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` と `EFFECTIVE_FROM` へ更新し、§2 の案内も「2.6節が正本であり既に発効している」へ改めた(§2 の `MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1` は 2.6 の R5 として維持される)。あわせて `ACTIVATION_STATE_SSOT = Issue #177 の最新の durable な activation 記録` を定め、**静的な文書を、変わりうる発効状態の唯一の根拠にしない**ことを明記した(試行の結果として人間の判断で §2 のルールへ戻ることもありうるため。2.6.10 の巻き戻し規定)。試行期間の終了は期間の経過だけでは成立せず、continue / amend / rollback の判断をもって確定することも明記した。**R1〜R6・取得ゲート・掲示書式・LOCK_LEVEL・解放条件・scope 拡大・P0 割り込み・main 追随・WIP の SSoT・周知項目はいずれも変更していない。** 変更履歴に残る発効前の記述は当時の記録であり、書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-06 | 役割名の製品非依存化に伴う参照の更新と、発効状態の同期(Issue #190)。(1)`STATE_READ_OWNER = MANAGER` 等、役割ベースの識別子へ揃えた。参照先ファイル名の変更(chatgpt_collaboration_protocol.md -> user_manager_collaboration_protocol.md)を反映した。(2)6.5.3 の `ACTOR` を **役割ではなく個体を指す**と明記し、列挙を TARO / JIRO / HANAKO / USER とした。**役割名(MANAGER 等)を ACTOR にしない。** 同一役割の担当が複数になったとき個体を識別できなくなり、STATE_ID の correlation と監査の手掛かりが失われるためである。生成AI製品名も ACTOR にしない。過去の snapshot に残る `CHATGPT` は履歴として有効であり書き換えていない。(3)2.6.9 の `ACTIVATION_BOUNDARY` の順序表現を ai_operation_message_contract.md 10節と一致させた。両者は「**人間の activation 承認より前には tracking Issue を作らない**」という同じ意図でありながら、字義上は片方が「発効後にしか作れない」と読めていた(実際の運用は承認 -> 作成 -> 発効宣言)。(4)冒頭と 2.5.5 の `NEW_CONTRACT_ACTIVE = NO` を発効済みへ同期し、発効状態の正本を同文書 0節の `ACTIVATION_STATE_SSOT` への参照へ置き換えた(静的な文書を、変わりうる状態の唯一の根拠にしない)。**変更履歴の過去エントリは書き換えていない。** R1〜R6 / 取得ゲート / 解放条件 / P0 割り込み / main 追随 / 人間承認の境界はいずれも変更していない。コード・Production 挙動の変更なし |
+| 2026-09-06 | 2.6.9 の着手前確認の列挙対象へ `status:開発済` を加えた(Issue #193)。2.6.6 の解放条件は `PR_MERGED AND MAIN_CI_PASS AND MAIN_HEAD_EXACT AND NO_CORRECTIVE_CODE_WIP_REQUIRED` であり、`status:開発済`(implementation complete / OPEN PR + CI green / main へ未 merge)は PR_MERGED を満たさず **lock を保持したままである**。しかし 2.6.9 は `status:開発中` だけを列挙しており、**lock を保持しうる状態を 1 つ取りこぼしていた**。解放される条件と、保持者を探す条件が一致していなかったことが原因である。2026-09-06 に実際に取りこぼしが発生している(#186 が status:開発済 で D1 / D2 / D4 と S-05 を保持している間、手順どおり status:開発中 だけを列挙すると D1 が空いて見えた。領域が重ならず実害は出なかったが、同じ領域なら二重取得していた)。**2.6.6 の解放条件そのものは変更していない。** 6.5.4 の Assignment Read Barrier は割当対象 Issue の state を確認する手順であり、lock 保持者の列挙とは目的が異なるため変更していない。R1〜R6 / 取得ゲート / LOCK_LEVEL / P0 割り込み / main 追随 / 人間承認の境界はいずれも変更していない。docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
