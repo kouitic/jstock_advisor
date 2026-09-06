@@ -439,7 +439,7 @@ AUTHORIZED_PHASES_MISSING
 PRE_ACTIVATION_RELAYED_INSTRUCTION -> GRANDFATHERED
 ```
 
-本文書の発効(8節)時点で既に作業者へ渡っている Instruction は、発行時点の
+本文書の発効(10節)時点で既に作業者へ渡っている Instruction は、発行時点の
 契約のまま完了してよい。新しい契約を既存 Instruction へ遡及適用しない。
 
 ---
@@ -625,7 +625,7 @@ APPROVAL_UNIT_CONSOLIDATION = NO
 Human Gate — MERGE_GATE / PR #183
 
 承認対象
-  PR #183 を main へ merge すること
+  PR #183 / head 4f9c1a2... を main へ merge すること
 
 承認すると起きること
   - main への merge
@@ -646,9 +646,9 @@ Human Gate — MERGE_GATE / PR #183
 
 ---
 AUDIT_INFO
-  PR head  4f9c1a2...
   PR base  9bbc2ac...
   CI run   33979357372(event=pull_request / head 一致)
+  review   <レビュー結果の URL>
 ```
 
 ---
