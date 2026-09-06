@@ -158,19 +158,36 @@ ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録
   reachability の変化等)が判明したらPriorityを再評価し、変更した場合は
   根拠をGitHubへ書き戻すこと。
 
-- **実在人物の個人情報をGit管理対象へ含めない。** 氏名・家族名・個人メール
-  アドレス・住所・電話番号等を、ソースコード、テストデータ、fixture、コメント、
-  ドキュメント、サンプル、コミットメッセージへ記録してはならない。所有者等を
+- **実在人物の個人情報を、Git管理対象にも公開面にも含めない。** 氏名・家族名・
+  個人メールアドレス・住所・電話番号等を、ソースコード、テストデータ、fixture、
+  コメント、ドキュメント、サンプルへ記録してはならない。所有者等を
   例示する場合は「所有者A」「owner-a」等の架空値を使用する。本番データの値
   (実在の氏名、実際の保有数量・取得単価等)をテスト・ドキュメントへ転記しない。
   一回限りの移行スクリプト等が実データを必要とする場合は、実データをGit管理
   対象外のローカルファイル(`.gitignore`で除外)から実行時に読み込む設計とし、
-  ソースコードには実データを埋め込まないこと。CIのPIIスキャン
-  (`scripts/scan_for_pii.py`、`.github/workflows/ci.yml`の`pii-scan`ジョブ)が
-  既知の実在人物名を検知した場合はビルドを失敗させる(denylist方式であり、
+  ソースコードには実データを埋め込まないこと。
+
+  **本リポジトリはPUBLICであり、禁止範囲はGit管理ファイルに限らない。**
+  commit message、Issue / PR の本文とタイトル、コメント、label、branch名も
+  そのまま公開される。**公開面へ書く前の遵守事項は
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  11節が正本であり、本ファイルへ複製しない。**
+
+  検出は3経路。いずれも同じdenylistを共有し、一致した文字列自体は出力しない
+  (面 / 所在 / 検出理由 / ハッシュ接頭辞のみ)。
+
+  ```
+  pii-scan                  Git管理ファイルの内容          PRを止める
+  pii-scan-commit-messages  そのPRが持ち込むcommit message  PRを止める
+  pii-metadata-audit        Issue / PR / comment /
+                            label / branch名(日次)         通知のみ
+  ```
+
+  **検出は事後の網であって事前防止の代わりにはならない**(denylist方式であり、
   全てのPIIを検出できる保証はない。上記ルールの遵守が前提)。
-  公開する記録(Issue / PR / comment)への記載禁止は
-  user_manager_collaboration_protocol.md 11節が正本である。
+  **公開面はいったん露出すると、本文を直しても編集履歴・通知メール・外部cacheが
+  残る。** 検出時の是正手順・Human escalationの境界・GitHub Supportへの削除依頼の
+  要否は [docs/operations_manual.md](docs/operations_manual.md) 21節。
 
 ---
 

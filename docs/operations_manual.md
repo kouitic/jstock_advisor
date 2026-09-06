@@ -2127,3 +2127,137 @@ AWSアカウント侵害への耐性(別アカウントへの退避)が必要に
 ```
 
 PITRの課金は保存量に比例するため、保持期間の設計(Issue #138)と足並みを揃える。
+
+---
+
+## 21. 公開面へ個人情報が混入した場合の是正手順(Issue #131、2026-09-06追加)
+
+本リポジトリはPUBLICである。**Git管理ファイルだけでなく、commit message、
+Issue / PR の本文とタイトル、コメント、label、branch名も、そのまま
+インターネットへ公開される。**
+
+公開面へ書く前の遵守事項は
+[user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md)
+11節が正本である。本節はそこを通り抜けて**露出してしまった後**の手順を扱う。
+
+### 21.1 検出経路
+
+| 経路 | 対象 | 実行契機 | 失敗したとき |
+| --- | --- | --- | --- |
+| `pii-scan` ジョブ | Git管理ファイルの内容 | 全push / PR | PRが止まる |
+| `pii-scan-commit-messages` ジョブ | そのPRが持ち込むcommit message | PR | PRが止まる |
+| `pii-metadata-audit` workflow | Issue / PR の本文・タイトル、コメント、label、branch名 | 日次(06:10 JST)+ 手動 | 通知のみ。PRは止まらない |
+
+手動実行は Actions タブの `PII metadata audit` から `Run workflow`
+(`workflow_dispatch`)。ローカルからは以下(read-onlyであり書き込みは行わない)。
+
+```bash
+python scripts/audit_public_metadata_pii.py kouitic/jstock_advisor
+python scripts/scan_commit_messages_pii.py "<base>..<head>"
+```
+
+いずれも `scripts/scan_for_pii.py` の denylist を共有し、**一致した文字列は
+出力しない**(面 / 所在 / 検出理由 / ハッシュ接頭辞のみ)。是正の際もこの
+表現のまま扱い、値そのものを報告・Issueコメント・chatへ再掲しないこと。
+
+```
+★ denylist方式であり、全てのPIIを検出できる保証はない。
+  検出は事後の網であって、事前防止の代わりにはならない。
+  日次監査は「露出から検知まで最大で24時間かかる」ことを意味する。
+```
+
+commit trailer の `noreply@anthropic.com` とGitHubの `*.noreply.github.com` は
+特定個人へ到達しない機械アドレスであり、メール様式の検出から除外している
+(付与が義務づけられており、検出しても是正できないため)。除外はこの2系統に
+限定してあり、ドメイン全体は除外していない。
+
+### 21.2 検出したらまず行うこと
+
+1. **影響範囲を確定する。** どの面 / どの所在(Issue番号・comment id・
+   commit SHA・branch名) / いつ公開されたか。
+2. **露出時間を見積もる。** 投稿時刻から現在まで。日次監査での検出なら
+   最大で1日ぶん遡る。
+3. **21.3 の是正と 21.4 の不可逆性を「両方」評価する。**
+   本文を直しただけでは終わらない。
+
+### 21.3 面ごとの是正手順
+
+| 面 | 手順 | 残るもの |
+| --- | --- | --- |
+| Issue / PR の本文・コメント | 該当箇所を架空値(「所有者A」等)へ編集 | **編集履歴** |
+| Issue / PR のタイトル | 同上 | **編集履歴** |
+| label | rename ではなく削除して作り直す(renameは名前の履歴を残す) | 付与されていたIssueのタイムライン |
+| branch名 | 新しい名前でbranchを作成してpushし、旧branchを削除 | PRのタイムラインに旧head branch名、dangling commit |
+| commit message | history rewrite が必要。**mainに対しては原則行わない** | rewrite前のcommitがforkやcloneに残る |
+
+commit message の是正は force push を伴い、他の作業者の作業branchを壊す。
+**作業AIは単独で実行しない**(21.5)。未mergeかつ自分だけが使っているbranchで
+あっても、実行前に人間の判断を得ること。
+
+### 21.4 不可逆性(必ず理解しておくこと)
+
+「編集すれば消える」は**誤り**である。編集後も次が残る。
+
+- **編集履歴。** Issue / PR / コメントの edit history は、書き込み権限の無い
+  閲覧者にも表示される。編集前の本文がそこに残る。
+- **通知メール。** 投稿時点で watcher へ配信済みであり、取り消せない。
+- **外部の複製。** 検索エンジンのcache、GHArchive等の公開アーカイブ、
+  各種ミラー・スクレイパ。GitHubの管轄外であり、GitHub側を消しても消えない。
+- **fork / clone。** commit は他者の手元に残る。
+
+したがって是正の目的は「無かったことにする」ではなく、
+**追加の露出を止め、残存経路を人間が把握したうえで判断できる状態にする**
+ことである。
+
+### 21.5 Human escalation の境界
+
+作業AIが単独で行ってよいこと。
+
+- 検出の報告(面 / 所在 / 検出理由 / ハッシュ接頭辞のみ)
+- **自分が**作成した未mergeのPR本文・**自分の**コメントの編集
+- **自分が**作成し、まだ他者が使っていないbranchの作り直し
+
+必ず人間の判断を仰ぎ、AIが単独で実行しないこと。
+
+- 他者が作成したIssue / PR / コメントの編集・削除
+- Issue / PR そのものの削除
+- history rewrite(force push)、mainへの介入
+- GitHub Support への削除依頼(21.6)
+- リポジトリのPRIVATE化
+- 露出の事実をどこまで公表するかの判断
+
+判断を仰ぐ際も、値そのものを書かない。所在とハッシュ接頭辞で示す。
+
+### 21.6 GitHub Support への削除依頼の要否
+
+依頼が要るのは「**GitHub側にしか残っておらず、こちらの操作では消せない複製**」
+を消す場合である。
+
+依頼で消せる可能性があるもの。
+
+- 編集履歴(edit history)
+- 削除済みbranch / fork に残る dangling commit
+  (SHAを直接指定するURLで到達できる)
+
+依頼でも消せないもの。
+
+- 検索エンジンのcache、GHArchive等の外部アーカイブ、他者のclone
+
+```
+依頼する    実在人物の氏名・個人メールアドレス・住所・電話番号など、
+            本人へ到達しうる情報が公開面へ出た場合(人間が実施する)
+依頼しない  架空値・銘柄コード・ハッシュ接頭辞・内部の状態値のみの場合
+```
+
+依頼文へ露出した値そのものを書かない。**URLと所在で示す**
+(依頼文自体がGitHubのサポート系統へ残るため)。
+
+### 21.7 事後
+
+- 再発防止をIssueとして起票する。3つの検出経路(21.1)のどれが漏らしたか、
+  事前防止(11節)のどこを通り抜けたかを記録する。
+- denylistへ追加する場合は `scripts/scan_for_pii.py` の `_KNOWN_PII_HASHES` へ
+  **SHA-256ハッシュのみ**を追加する。平文をリポジトリへ書かない
+  (ハッシュ値の計算はGit管理外のローカルで行う)。denylistは
+  `pii-scan` / `pii-scan-commit-messages` / `pii-metadata-audit` の
+  3経路が共有するため、追加は1箇所で足りる。
