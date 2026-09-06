@@ -15,17 +15,21 @@ SHARED_COMPONENT_CATALOG  複数領域が共有する部品と、変更時に lo
 
 ---
 
-## 0. 現在の発効状態
+## 0. 発効状態
 
 ```
-DOMAIN_WIP_MODEL_ACTIVE = NO
-CURRENT_WIP_RULE        = ISSUE_122(担当者単位 code WIP = 1)
+CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1
+EFFECTIVE_FROM   = 2026-09-06 02:27 JST(2026-09-05T17:27:01Z)
 ```
 
-**本書が main に入っただけでは領域ベース WIP は有効にならない。**
-発効は docs review -> PR -> CI -> 人間の merge 承認 -> merge -> main CI ->
-周知 -> **人間による明示的な発効宣言**をすべて終えた後である
-(development_workflow.md 2.6.10)。発効後も遡及適用しない。
+領域ベース WIP は既に発効している。発効の手順と、発効時点で進行中だった
+作業の扱いは [development_workflow.md](development_workflow.md) 2.6.10 が正本である。
+
+発効状態は運用の中で変わりうる(試行の結果、人間の判断で従来ルールへ戻すことも
+ありうる)。**本書のような静的な文書を、変わりうる状態の唯一の根拠にしない。**
+現在の発効状態を確認する必要がある場合の参照先は
+[development_workflow.md](development_workflow.md) 2.6.10 の
+`ACTIVATION_STATE_SSOT` に従う。上記の値は本節を改訂した時点のものである。
 
 ---
 
@@ -455,3 +459,4 @@ CI ジョブの追加は Production の判定へ影響しないが、必須ジ�
 | 日付 | 変更概要 |
 |---|---|
 | 2026-09-06 | 新規作成(Issue #177)。担当者単位の code WIP 制限が、互いに無関係な機能領域まで直列化する一方で、共通 module 経由の semantic conflict(衝突の型 2・型 3)を防げていなかったため、並行して安全な範囲を判定するための材料を正本化した。領域 D1〜D9 と SHARED 層、機能 F-01〜F-45、共通部品 S-01〜S-16 を、呼び出し元の実測に基づいて定義している。**実行単位(Lambda)・ディレクトリを領域の境界にしない**(1 つの handler が 6 領域のサービスを呼ぶ実測があるため)。株主優待は「登録・取り込み側(D6)」と「判定利用側(S-15)」で性質が割れるため独立領域にしない。D2 SELL と D3 HOLDING は config・永続契約が分かれているため分離する(Human 承認 H1)。あわせて新規機能・新規領域・廃止時のカタログ維持契約と、陳腐化防止の 3 段ゲートを定めた。**運用ルール本文は development_workflow.md 2.6節が正本であり本書へ複製していない。** 本書の作成時点で `DOMAIN_WIP_MODEL_ACTIVE = NO` であり、有効な WIP ルールは #122(担当者単位 code WIP = 1)のままである。判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
+| 2026-09-06 | §0 を現在の発効状態へ同期した(Issue #184)。本書は作成時点で `DOMAIN_WIP_MODEL_ACTIVE = NO` と記していたが、2026-09-06 02:27 JST に人間の承認により領域ベース WIP が発効しており、記述が現況と矛盾していた。`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` / `EFFECTIVE_FROM` へ更新し、あわせて**静的な文書を変わりうる状態の唯一の根拠にしない**ことを明記した(発効状態は試行の結果として人間の判断で戻ることもありうるため、確認が必要な場合の参照先は development_workflow.md 2.6.10 の `ACTIVATION_STATE_SSOT` に従う)。**領域カタログ・機能一覧・共通部品一覧・維持契約の内容は変更していない。** コード・Production 挙動の変更なし |

@@ -19,8 +19,19 @@
   場合は同文書の共通部品一覧を更新すること。領域の追加・分割・統合は
   人間承認が必要である。同文書を用いた領域ベースのWIP運用ルール
   (`DOMAIN_WIP_RULE_V1`)は development_workflow.md 2.6節が正本であり、
-  **本ファイル作成時点では発効していない**(`DOMAIN_WIP_MODEL_ACTIVE = NO`。
-  有効なWIPルールは同文書2節)。
+  **既に発効している**(`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1`)。
+  発効状態は変わりうるため、確認が必要な場合はIssue #177の最新のdurableな
+  activation記録をfreshに読むこと(静的な文書を唯一の根拠にしない)。
+
+- **作業報告・Human Gate提示・Instructionの許可範囲(`AUTHORIZED_PHASES`)・
+  確認質問といった「メッセージの形式」は
+  [docs/ai_operation_message_contract.md](docs/ai_operation_message_contract.md)
+  が正本である。** 同文書は形式のみを定め、承認の要否・作業の可否・WIP・labelの
+  規則はいずれも他文書が正本である(本ファイルへも同文書へも複製しない)。
+  **同文書は作成時点で発効していない**(`NEW_CONTRACT_ACTIVE = NO`)。
+  発効までは報告形式は development_workflow.md 2.5.5、Human Gateの提示は
+  chatgpt_collaboration_protocol.md 3.7 の現行運用が有効である。
+  merge しただけでは発効せず、周知と人間の明示的な承認を要する。
 
 - **作業指示に `INSTRUCTION_ID` が付いている場合、回答の冒頭に同じIDを必ず記載すること。**
   IDが無い回答・別IDの回答・撤回済みIDへの回答は、次工程の根拠として扱われない。
