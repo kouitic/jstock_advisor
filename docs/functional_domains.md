@@ -389,7 +389,7 @@ N4  新しい永続契約(table / field)を伴う場合、それを K節へ載�
                        (実測した path と参照関係)
 3  migration impact    既存のどの機能が移るか
 4  WIP lock impact     移動によって既存の LOCKED_DOMAINS 判定がどう変わるか
-5  ChatGPT review
+5  管理者レビュー
 6  人間承認
 7  docs 更新 PR
 8  merge / main CI
@@ -460,3 +460,4 @@ CI ジョブの追加は Production の判定へ影響しないが、必須ジ�
 |---|---|
 | 2026-09-06 | 新規作成(Issue #177)。担当者単位の code WIP 制限が、互いに無関係な機能領域まで直列化する一方で、共通 module 経由の semantic conflict(衝突の型 2・型 3)を防げていなかったため、並行して安全な範囲を判定するための材料を正本化した。領域 D1〜D9 と SHARED 層、機能 F-01〜F-45、共通部品 S-01〜S-16 を、呼び出し元の実測に基づいて定義している。**実行単位(Lambda)・ディレクトリを領域の境界にしない**(1 つの handler が 6 領域のサービスを呼ぶ実測があるため)。株主優待は「登録・取り込み側(D6)」と「判定利用側(S-15)」で性質が割れるため独立領域にしない。D2 SELL と D3 HOLDING は config・永続契約が分かれているため分離する(Human 承認 H1)。あわせて新規機能・新規領域・廃止時のカタログ維持契約と、陳腐化防止の 3 段ゲートを定めた。**運用ルール本文は development_workflow.md 2.6節が正本であり本書へ複製していない。** 本書の作成時点で `DOMAIN_WIP_MODEL_ACTIVE = NO` であり、有効な WIP ルールは #122(担当者単位 code WIP = 1)のままである。判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
 | 2026-09-06 | §0 を現在の発効状態へ同期した(Issue #184)。本書は作成時点で `DOMAIN_WIP_MODEL_ACTIVE = NO` と記していたが、2026-09-06 02:27 JST に人間の承認により領域ベース WIP が発効しており、記述が現況と矛盾していた。`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` / `EFFECTIVE_FROM` へ更新し、あわせて**静的な文書を変わりうる状態の唯一の根拠にしない**ことを明記した(発効状態は試行の結果として人間の判断で戻ることもありうるため、確認が必要な場合の参照先は development_workflow.md 2.6.10 の `ACTIVATION_STATE_SSOT` に従う)。**領域カタログ・機能一覧・共通部品一覧・維持契約の内容は変更していない。** コード・Production 挙動の変更なし |
+| 2026-09-06 | 役割名の製品非依存化に伴う参照の更新(Issue #190)。本文中の "ChatGPT" 1 か所を「管理者」へ改めた。**領域カタログ・機能一覧・共通部品一覧・維持契約の内容は変更していない。** governance docs の改称は catalog の主要 path 欄に現れないため、F-45 を含む行の更新も不要である(D9 の主要 source は `.github/workflows/ci.yml` と `scripts/`)。変更履歴の過去エントリも書き換えていない。コード・Production 挙動の変更なし |

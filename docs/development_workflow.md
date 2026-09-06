@@ -23,8 +23,8 @@ read-only 観測での副作用確認等)は [docs/operations_manual.md](operati
 
 作業報告・Human Gate 提示・Instruction の許可範囲といった**メッセージの形式**は
 [docs/ai_operation_message_contract.md](ai_operation_message_contract.md) が
-正本である(作成時点で `NEW_CONTRACT_ACTIVE = NO`)。本文書は作業の可否と
-state の扱いを定め、形式を複製しない。
+正本である(発効済み。発効状態の正本は同文書 0節の `ACTIVATION_STATE_SSOT`)。
+本文書は作業の可否と state の扱いを定め、形式を複製しない。
 
 **ルールを変更する場合は本文書を更新する。**
 
@@ -123,7 +123,7 @@ INVESTIGATION_WIP  <= 2
 
 連番の採番規則(日本時間基準・作業者ごと・日付が変わったら 001 へリセット・
 同一日での再利用禁止)の正本は
-[chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 4.1節。
+[user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md) 4.1節。
 採番するのは指示側であるため、本文書へは複製しない。
 
 作業者は**回答時に、対応した INSTRUCTION_ID を必ず明記する**。
@@ -255,12 +255,9 @@ INSTRUCTION_STATUS = ANSWERED
 [docs/ai_operation_message_contract.md](ai_operation_message_contract.md) が
 正本である。本節はその冒頭 3 行のみを定め、詳細を複製しない。
 
-```
-NEW_CONTRACT_ACTIVE = NO
-```
-
-同文書は作成時点で発効していない。発効までは本節の 3 行のみが必須であり、
-それ以外の報告構造は現行運用のままとする。
+同文書は既に発効している。本節が定めるのは冒頭 3 行だけであり、
+それ以外の報告構造は同文書に従う。発効状態の正本は同文書 0節の
+`ACTIVATION_STATE_SSOT` である。
 
 ### 2.5.6 適用範囲
 
@@ -482,7 +479,7 @@ CODE_WIP_RELEASED = PR_MERGED
 
 ```
 解放しない時点   PR を作成した時点
-                 ChatGPT review が PASS した時点
+                 管理者レビュー が PASS した時点
                  CI が PASS した時点(main CI と main HEAD の一致まで見る)
 
 解放が意味しないこと
@@ -646,8 +643,11 @@ fresh に読んで行う(6.5.4 の read barrier を省略できるようには�
 ```
 ACTIVATION_BOUNDARY
 
-本節の例外は Issue #184 の発効をもって有効になる。
-それまでは read model の tracking Issue を作成しない。
+本節の例外は Issue #184 の発効をもって有効になった。
+read model の tracking Issue は、**人間の activation 承認の後、
+発効の宣言より前に**作成する(手順は
+ai_operation_message_contract.md 10節)。
+**activation 承認より前には作成しない。**
 ```
 
 ```
@@ -698,7 +698,7 @@ RETROACTIVE_APPLICATION = NO
 
 ### 2.6.11 発効時の周知(COMMUNICATION)
 
-発効宣言の前に、次を TARO / JIRO / ChatGPT / 人間の全員へ周知する。
+発効宣言の前に、次を 開発者・管理者・利用者の全員へ周知する。
 
 ```
 1  領域カタログの所在(docs/functional_domains.md)
@@ -730,7 +730,7 @@ implementation
   → mypy
   → local commit
   → remote branch push
-  → ChatGPT remote diff review
+  → 管理者の remote diff review
   → PASS
   → PR
   → required CI
@@ -740,7 +740,7 @@ implementation
   → main CI
 ```
 
-- **push 前の ChatGPT review は不要。**
+- **push 前の 管理者レビュー は不要。**
   push は **review checkpoint** として扱い、レビュワーが GitHub 上の確定 diff を
   直接参照できるようにする。
 - push は通常 push とし、**force push を使わない**
@@ -1120,7 +1120,7 @@ ASSIGNMENT_READ_BARRIER_REQUIRED                = YES
 LATEST_VERIFIABLE_GITHUB_STATE_WINS             = YES
 
 WORKER_STATE_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE
-CHATGPT_STATE_READ_OWNER = CHATGPT
+STATE_READ_OWNER = MANAGER
 ```
 
 state を変えた者が書き、次の割当を出す者が読む。**どちらか一方だけでは成立しない。**
@@ -1267,7 +1267,7 @@ Type / Priority / Release Blocker / Progress Status の 4軸モデルの正本�
 STATE_ID = <YYYYMMDDTHHMMSSffffffZ>-<ACTOR>-<INSTRUCTION_ID|MANUAL>-<NONCE>
 
 例  20260904T081341882304Z-JIRO-JIRO-20260904-020-a1b2c3d4
-    20260904T081341882304Z-CHATGPT-MANUAL-9f72c1ab
+    20260904T081341882304Z-HANAKO-MANUAL-9f72c1ab
     20260904T081342001234Z-USER-MANUAL-4d8e01f7
 ```
 
@@ -1276,10 +1276,15 @@ STATE_ID = <YYYYMMDDTHHMMSSffffffZ>-<ACTOR>-<INSTRUCTION_ID|MANUAL>-<NONCE>
 ```
 timestamp        人間が概ね時系列を読むための監査補助 / correlation 補助
                  collision resistance の根拠にはしない
-ACTOR            発行主体の識別
-                 TARO / JIRO / CHATGPT / USER
+ACTOR            発行主体の識別。**役割ではなく個体**を指す
+                 TARO / JIRO / HANAKO / USER
+                 **生成 AI 製品名を ACTOR にしない**
+                 役割名(MANAGER 等)も使わない。同一役割の担当が
+                 複数になったとき個体を識別できなくなるためである
                  既存運用と整合する actor を追加してよいが、
                  無制限の自由文字列にはしない
+                 現在の担当は ROLE_ASSIGNMENT_SSOT を参照する
+                 (過去の snapshot に残る CHATGPT は履歴として有効)
 INSTRUCTION_ID   作業の correlation
   | MANUAL       指示 ID を持たない操作は MANUAL とする
                  collision resistance の根拠にはしない
@@ -1440,8 +1445,8 @@ LEGACY_MIGRATION_RULE_EFFECTIVE_FROM = 本規則の追加以降
 #### 証拠の採用順序
 
 snapshot も絶対視しない。**証拠の採用順序の正本は
-[chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 3.6節**であり、
-ChatGPT に限らず全 actor へ適用する。序列を本節へ複製しない
+[user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md) 3.6節**であり、
+管理者 に限らず全 actor へ適用する。序列を本節へ複製しない
 (複製すると正本の改訂時に本節が stale になり、本節が防ごうとしている事故を
 本節自身が起こす)。
 
@@ -1457,7 +1462,7 @@ remote branch     より新しい実装 commit が存在する
 ### 6.5.4 Assignment Read Barrier(READ 側)
 
 新しい Issue または別 Phase へ作業者を割り当てる**前**に実行する。
-実行主体は ChatGPT(`CHATGPT_STATE_READ_OWNER = CHATGPT`)。
+実行主体は 管理者(`STATE_READ_OWNER = MANAGER`)。
 
 ```
 1   Issue current state / labels
@@ -1610,7 +1615,7 @@ NEW_IMPLEMENTATION_INSTRUCTION_ALLOWED = NO
 ```
 緩和しないもの
   Human Gate / merge 承認 / Production approval / exact ChangeSet approval
-  PRODUCTION_DEPLOYMENT_EXECUTOR / DEPLOY_OPERATION_DELEGATION_TO_JIRO
+  PRODUCTION_DEPLOYMENT_EXECUTOR / DEPLOY_OPERATION_DELEGATION
   Production failure injection 禁止
   release-blocker lifecycle
 ```
@@ -1683,18 +1688,18 @@ worker が PR 作成 -> USER が GitHub 上で merge
 ```
 
 ```
-NEXT_CHATGPT_GATE_OWNS_RECONCILIATION = YES
+NEXT_MANAGER_GATE_OWNS_RECONCILIATION = YES
 ```
 
-ChatGPT は post-merge の gate で次を確認する。
+管理者 は post-merge の gate で次を確認する。
 
 ```
 merge commit / current main SHA / main CI / Issue state の writeback
 残作業単位と Progress Status の整合
 ```
 
-snapshot が無ければ、ChatGPT 自身が記録するか、worker へ reconciliation を
-指示して同期させてから次工程へ進む。ChatGPT が直接 Issue を書き換える運用を
+snapshot が無ければ、管理者 自身が記録するか、worker へ reconciliation を
+指示して同期させてから次工程へ進む。管理者 が直接 Issue を書き換える運用を
 必須にはしない。**要点は「誰かがやるだろう」を禁止し、next gate owner を
 明示することである。**
 
@@ -1770,7 +1775,7 @@ Issue 本文の Production Verification Plan に明示する。
 - Immediate Verification(deploy 直後の read-only 確認)
 - 正常系の natural evidence(自然実行が正常終端していること)
 
-そのうえで **ChatGPT review PASS + 人間判断**により解除可否を決める。
+そのうえで **管理者レビュー PASS + 人間判断**により解除可否を決める。
 
 ### 分類を勝手に変えない
 
@@ -1837,7 +1842,7 @@ release inventory を再構築済み(baseline → target の全 commit を列挙
 
 ```
 blocker 付与 → 修正の merge → Production deploy → Immediate Verification
-  → mandatory verification → ChatGPT review → human approval → blocker 解除
+  → mandatory verification → 管理者レビュー → human approval → blocker 解除
 ```
 
 であり、**Production deploy が blocker 解除の前提**である。したがって
@@ -1852,7 +1857,7 @@ release へ含めてよい。
 その修正が merge 済み
 その Issue の Production Verification Plan が定義済み
 deploy 後も blocker を維持する(deploy では解除しない)
-mandatory verification + ChatGPT review + human approval まで解除しない
+mandatory verification + 管理者レビュー + human approval まで解除しない
 ```
 
 これは「OPEN blocker を無視してよい」という緩和ではない。
@@ -2118,7 +2123,7 @@ failure injection
 - 作業指示の**宛先が異なる**場合(他エージェント宛の承認)、その承認をもって
   操作しない。宛先を確認する。
 - **deploy 実作業を誰が行うか**は
-  [chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 1.5節が正本
+  [user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md) 1.5節が正本
   (`PRODUCTION_DEPLOYMENT_EXECUTOR`)。**担当の集約は承認の省略を意味しない。**
   本節の人間承認は担当者が誰であっても従来どおり必要である。
 
@@ -2175,3 +2180,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-06 | 6.5.3節の ISSUE_STATE_SNAPSHOT contract へ `RESIDUAL_WORK_UNITS` / `UNIQUE_PROGRESS_STATUS_COUNT` / `ISSUE_SPLIT_REQUIRED` / `SPLIT_TARGET_ISSUES` の 4 項目を追加し、6.5.4節の Assignment Read Barrier へ確認項目 11「残作業単位と Progress Status の整合」(G1)を、6.5.9節の post-merge reconciliation へ G3「final status transition より前に split を判断する」を追加した(Issue #181)。Progress Status は Issue 全体を表す単一 label であるため、1 つの Issue の中で独立した作業単位が異なるライフサイクル位置を持つと、どの label を付けても実態と食い違う(Issue #20 で実際に発生)。label は単一値しか持てず「分割が必要な状態を検出したのか、検出したうえで不要と判断したのか」を区別できないため、判定結果を snapshot 側へ残す。read barrier で `UNIQUE_PROGRESS_STATUS_COUNT > 1` を検出した場合は `STATUS_RECONCILIATION_REQUIRED` とし、`ISSUE_STATE_FRESHNESS_GATE = FAIL` と同じ扱いで implementation assignment を出さず、先に split の要否を判断する(勝手に label を変えない)。post-merge は残作業が最も明確になる時点であるため、merge した成果物だけを見て `status:マージ済` へ進めて未実装の作業単位を不可視にしないことを明記した。**判定ルールそのもの(`ONE_ISSUE_ONE_PROGRESS_LIFECYCLE`、`UNIQUE_PROGRESS_STATUS_COUNT > 1` による split 判定、依存関係が判定を上書きしないこと、分割手続き、既存 Issue への lazy 適用)の正本は issue_label_policy.md §7.3 であり、本文書へ複製していない。** 既存の STATE_ID 方式・append-only 原則・証拠の採用順序・applicability・ASSIGNMENT_BASELINE・State Freshness Gate・P0 例外・Work Complete Gate・handoff の責務・drift audit・lane / WIP 制限・指示プロトコル・テスト方針・人間承認の境界はいずれも変更していない。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-06 | 運用ルールの欠落を補い、集約 read model の例外を追加した(Issue #184)。(1)§2.5.3 へ「指示の直列化」と §2.6 の code WIP モデルが**直交する**ことを明記した(`PER_WORKER_INSTRUCTION_SERIALIZATION != PER_WORKER_CODE_WIP_MODEL`)。#177 の発効により「WIP」という語が 2 つの意味を持つようになり、「領域が空いているから次の指示を出してよい」「1 人 1 code WIP だから指示も 1 本のはず」という双方向の誤読が起こりうるため。片方が空いてももう片方の制約は解除されない。(2)§2.5.5 の報告フォーマットについて、冒頭 3 行のみを本文書に残し、報告の構造(NORMAL / FORENSIC / `BASELINE_INVARIANTS` / 一括コピー可能性 / `AUTHORIZED_PHASES`)の正本を新設した docs/ai_operation_message_contract.md への参照に置き換えた(本文を複製していない)。(3)§6.5.4 へ **fresh-read の対象**を明記した(`FRESH_READ_SOURCE = CURRENT_REMOTE_SSOT` / `LOCAL_WORKTREE_IS_NOT_SSOT` / `STALE_FEATURE_BRANCH_IS_NOT_FRESH_READ`)。既存の規則は記憶・会話要約・古い Issue 記述を禁じていたが、**手元の作業 branch の docs を現行ルールとして読むこと**を禁じていなかった。実際に #177 の作業 branch 上で #181 改訂前の issue_label_policy §7.3 を参照した事例が発生している。(4)同じく §6.5.4 へ **取得が途中で打ち切られた場合**の規則を追加した(`RETRIEVAL_TRUNCATED -> FRESH_READ_COMPLETE = NO`)。コメント一覧や snapshot の取得は件数が増えると打ち切られることがあり、途中までしか読んでいない状態を「読み終えた」と扱うと #157 が解決した stale state 事故と同型の見落としが起きる。latest state を再構成するまで assignment 判断を行わない。(5)§9.5 へ `OPPORTUNISTIC_FIX_FORBIDDEN` / `FIX_FIRST_ISSUE_LATER = FORBIDDEN` を追加した。scope 外の不具合はその場で直さず、duplicate check -> Issue 化 -> lifecycle とする。**P0 であっても「先に直して Issue は後」は認めない**(P0 は Issue を省略してよいという意味ではなく、Issue を作ったうえで §2.6.8 の割り込み手順で最優先に着手してよいという意味である)。Production の緊急停止操作は運用操作であり本節の対象ではない。(6)§2.6.9 に **人間の承認による限定的な policy 変更**を反映した。従来の「専用の WIP 管理 Issue を作らない」を、`CACHE_ONLY` / `READ_MODEL_IS_SSOT = NO` / `INDEX_ONLY` の集約 read model に限って認める形へ改めた。**`WIP_STATE_SSOT`(各 Issue の宣言 + 最新 snapshot)と「docs 側に現況表を置かない」は変更していない。** read model は SSoT の複製ではなく索引であり、不一致時は Issue snapshot が勝ち(`READ_MODEL_MISMATCH -> ISSUE_SNAPSHOTS_WIN -> REBUILD_REQUIRED`)、stale なら索引としても使わず全走査へフォールバックする。`DOMAIN_WIP_READ_MODEL != ASSIGNMENT_READ_BARRIER_BYPASS` を明記し、lock 取得の確定は必ず名指しされた Issue の宣言と snapshot を fresh に読んで行う。この例外は Issue #184 の発効をもって有効になり、それまでは tracking Issue を作成しない。**既存の Human Gate / merge 承認 / Production approval / exact ChangeSet approval / grouped release / release-blocker lifecycle / label 4 軸 / §2.6 の取得ゲートと解放条件はいずれも変更・緩和していない。** docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
 | 2026-09-06 | §2 / §2.6 / §2.6.10 の発効状態を現況へ同期した(Issue #184)。2.6節は 2026-09-06 02:27 JST に人間の承認により発効しているが、本文には `DOMAIN_WIP_MODEL_ACTIVE = NO` /「まだ発効していない」という**発効前の記述が残っており、現況と矛盾していた**。`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` と `EFFECTIVE_FROM` へ更新し、§2 の案内も「2.6節が正本であり既に発効している」へ改めた(§2 の `MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1` は 2.6 の R5 として維持される)。あわせて `ACTIVATION_STATE_SSOT = Issue #177 の最新の durable な activation 記録` を定め、**静的な文書を、変わりうる発効状態の唯一の根拠にしない**ことを明記した(試行の結果として人間の判断で §2 のルールへ戻ることもありうるため。2.6.10 の巻き戻し規定)。試行期間の終了は期間の経過だけでは成立せず、continue / amend / rollback の判断をもって確定することも明記した。**R1〜R6・取得ゲート・掲示書式・LOCK_LEVEL・解放条件・scope 拡大・P0 割り込み・main 追随・WIP の SSoT・周知項目はいずれも変更していない。** 変更履歴に残る発効前の記述は当時の記録であり、書き換えていない。コード・Production 挙動の変更なし |
+| 2026-09-06 | 役割名の製品非依存化に伴う参照の更新と、発効状態の同期(Issue #190)。(1)`STATE_READ_OWNER = MANAGER` 等、役割ベースの識別子へ揃えた。参照先ファイル名の変更(chatgpt_collaboration_protocol.md -> user_manager_collaboration_protocol.md)を反映した。(2)6.5.3 の `ACTOR` を **役割ではなく個体を指す**と明記し、列挙を TARO / JIRO / HANAKO / USER とした。**役割名(MANAGER 等)を ACTOR にしない。** 同一役割の担当が複数になったとき個体を識別できなくなり、STATE_ID の correlation と監査の手掛かりが失われるためである。生成AI製品名も ACTOR にしない。過去の snapshot に残る `CHATGPT` は履歴として有効であり書き換えていない。(3)2.6.9 の `ACTIVATION_BOUNDARY` の順序表現を ai_operation_message_contract.md 10節と一致させた。両者は「**人間の activation 承認より前には tracking Issue を作らない**」という同じ意図でありながら、字義上は片方が「発効後にしか作れない」と読めていた(実際の運用は承認 -> 作成 -> 発効宣言)。(4)冒頭と 2.5.5 の `NEW_CONTRACT_ACTIVE = NO` を発効済みへ同期し、発効状態の正本を同文書 0節の `ACTIVATION_STATE_SSOT` への参照へ置き換えた(静的な文書を、変わりうる状態の唯一の根拠にしない)。**変更履歴の過去エントリは書き換えていない。** R1〜R6 / 取得ゲート / 解放条件 / P0 割り込み / main 追随 / 人間承認の境界はいずれも変更していない。コード・Production 挙動の変更なし |

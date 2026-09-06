@@ -2,7 +2,7 @@
 
 **この文書の位置づけ**
 
-作業 AI・ChatGPT・人間の間で交換されるメッセージの**形式**の正本(SSoT)である。
+開発者・管理者・利用者の間で交換されるメッセージの**形式**の正本(SSoT)である。
 
 ```
 Worker の完了報告(NORMAL / FORENSIC)
@@ -23,8 +23,8 @@ AI 非依存のリポジトリ運用ポリシーであり、特定の AI エー�
 ```
 開発 lifecycle / SSoT 書き戻し / Assignment Read Barrier /
 WIP 運用 / state reconciliation        -> development_workflow.md
-ChatGPT の責務 / Human とのやり取りの境界 /
-レビュー判定 / Instruction ID の採番     -> chatgpt_collaboration_protocol.md
+管理者の責務 / Human とのやり取りの境界 /
+レビュー判定 / Instruction ID の採番     -> user_manager_collaboration_protocol.md
 Issue の 4 軸 label                     -> issue_label_policy.md
 機能領域 / 共通部品                      -> functional_domains.md
 Production の運用手順                    -> operations_manual.md
@@ -37,19 +37,28 @@ Production の運用手順                    -> operations_manual.md
 ## 0. 現在の発効状態
 
 ```
-NEW_CONTRACT_ACTIVE = NO
+NEW_CONTRACT_ACTIVE = YES
+EFFECTIVE_FROM      = 2026-09-06 13:57 JST(2026-09-06T04:57:48Z)
 ```
 
-**本文書が main に入っただけでは発効しない。** 発効の手順と境界は 10節に定める。
+```
+ACTIVATION_STATE_SSOT = Issue #184 の最新の durable な activation 記録
+```
+
+発効状態は運用の中で変わりうる。**本文書のような静的な文書を、
+変わりうる状態の唯一の根拠にしない。** 現在の発効状態を確認する必要がある場合は
+上記を fresh に読む。上記の値は本節を改訂した時点のものである。
 
 ```
 MERGE_IS_NOT_ACTIVATION = YES
 ```
 
+main に入っただけでは発効しなかった。発効の手順と境界は 10節に定める。
+
 ```
-★ Issue #177 の DOMAIN_WIP_RULE_V1 は別物であり、既に発効している。
-  本節の NEW_CONTRACT_ACTIVE = NO は、本文書(メッセージ形式の契約)だけを指す。
-  2 つを混同しない。
+★ Issue #177 の DOMAIN_WIP_RULE_V1 は別の契約である。
+  こちらの発効状態は development_workflow.md 2.6.10 の
+  ACTIVATION_STATE_SSOT を参照する。2 つを混同しない。
 ```
 
 ### 発効前後でどちらが正本か
@@ -61,14 +70,14 @@ BEFORE_ISSUE_184_ACTIVATION
 
   作業報告の形式        development_workflow.md 2.5.5 の冒頭 3 行のみが必須。
                         それ以外は従来どおりで、本文書の 2〜4節を強制しない
-  Human Gate の提示形式  chatgpt_collaboration_protocol.md 3.7 が正本
+  Human Gate の提示形式  user_manager_collaboration_protocol.md 3.7 が正本
   Instruction の許可範囲  AUTHORIZED_PHASES を必須にしない(5.5 を適用しない)
 
 AFTER_ISSUE_184_ACTIVATION
 
   作業報告の形式        本文書 2〜4節が正本
   Human Gate の提示形式  本文書 8節が正本
-                        (chatgpt_collaboration_protocol.md 3.7 の提示項目は
+                        (user_manager_collaboration_protocol.md 3.7 の提示項目は
                          本文書 8節へ吸収され、並列の規範として残らない)
   Instruction の許可範囲  本文書 5節が正本
 ```
@@ -116,9 +125,9 @@ OTHER_ISSUES_MODIFIED = NO     x7    NEW_ISSUES_CREATED = 0        x7
 
 | channel | 目的 | 圧縮 |
 |---|---|---|
-| C-1 Worker -> ChatGPT のチャット報告 | 次工程の判断材料 | **してよい** |
+| C-1 開発者 -> 管理者 のチャット報告 | 次工程の判断材料 | **してよい** |
 | C-2 Issue コメント / ISSUE_STATE_SNAPSHOT | durable な監査記録・SSoT | **必須項目を削らない** |
-| C-3 ChatGPT -> Human の提示 | 人間の意思決定 | **してよい**(監査情報は分離) |
+| C-3 管理者 -> 利用者 の提示 | 人間の意思決定 | **してよい**(監査情報は分離) |
 
 ```
 COMPACT_REPORT != SSOT_WRITEBACK_OMISSION
@@ -198,7 +207,7 @@ VALIDATION          = ruff PASS / mypy PASS / targeted 15 passed
 BASELINE_INVARIANTS = PR_ONLY_BASELINE:UNCHANGED
 
 DURABLE   = https://github.com/<owner>/<repo>/issues/181#issuecomment-...
-READY_FOR = CHATGPT_PR_REVIEW
+READY_FOR = MANAGER_PR_REVIEW
 ```
 
 ---
@@ -390,7 +399,7 @@ DOCS_SCOPE          = <許可する docs path のリスト>
 ```
 補助 permission は Human Gate を override しない。
 MERGE_ALLOWED = YES であっても、merge には
-chatgpt_collaboration_protocol.md 2節・2.6節の人間承認が別途必要である。
+user_manager_collaboration_protocol.md 2節・2.6節の人間承認が別途必要である。
 ```
 
 ### 5.4 Human Gate との関係
@@ -446,7 +455,7 @@ PRE_ACTIVATION_RELAYED_INSTRUCTION -> GRANDFATHERED
 
 ## 6. 報告の転送契約
 
-作業 AI の報告は、**人間が手作業で ChatGPT へ転送する**ことを前提とする。内容が
+作業 AI の報告は、**人間が手作業で 管理者 へ転送する**ことを前提とする。内容が
 正しくても、届いた時点で欠落すれば次工程の根拠にならない。
 
 ```
@@ -465,9 +474,9 @@ REPORT_IS_HUMAN_RELAYED = YES
 ```
 
 ```
-この契約は ChatGPT -> 作業 AI の指示文の出力形式
-(chatgpt_collaboration_protocol.md 4.5)と対になるものであり、
-同節が明示的に対象外としていた「作業 AI -> ChatGPT の報告」側を定める。
+この契約は 管理者 -> 開発者 の指示文の出力形式
+(user_manager_collaboration_protocol.md 4.5)と対になるものであり、
+同節が明示的に対象外としていた「開発者 -> 管理者 の報告」側を定める。
 ```
 
 ---
@@ -482,7 +491,7 @@ REPORT_IS_HUMAN_RELAYED = YES
 
 ```
 報告の冒頭 3 行(INSTRUCTION_ID / ASSIGNEE / INSTRUCTION_STATUS)は、
-ChatGPT が PENDING を解消して次の Instruction を発行できるようにするための
+管理者 が PENDING を解消して次の Instruction を発行できるようにするための
 対応付け情報である。省略・改変しない。
 
 1 指示 1 回答を守る。複数の指示の結果を 1 つの回答へ混在させない。
@@ -546,7 +555,7 @@ AUDIT_INFO
 ```
 exact 承認では識別子が承認対象そのものである。
 これを AUDIT_INFO へ追いやると「何を承認したか」が本文から消える。
-承認の有効範囲の正本は chatgpt_collaboration_protocol.md 2節であり、
+承認の有効範囲の正本は user_manager_collaboration_protocol.md 2節であり、
 本節はその提示のしかたを定める。
 ```
 
@@ -558,7 +567,7 @@ exact 承認では識別子が承認対象そのものである。
 ```
 
 merge の承認がレビューした exact head に紐づき、head が変われば失効すること
-そのものは [chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md)
+そのものは [user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md)
 3.7節(および 2節の「承認はその操作・その対象に限る」)が正本である。本節は
 **それを提示へ反映するために head SHA を承認対象へ書く**ことだけを定める。
 
@@ -598,7 +607,7 @@ PRODUCTION_CHANGESET_EXECUTE_GATE の承認対象
 ```
 ChangeSet を作り直すと ARN が変わる。
 その時点で以前の EXECUTE 承認は失効する。
-これは chatgpt_collaboration_protocol.md 2節
+これは user_manager_collaboration_protocol.md 2節
 「ChangeSet の execute 承認は exact ARN のみ有効。再作成した時点で失効する」
 と同じ意味であり、本節はその提示のしかたを定めるだけである。
 ```
@@ -612,7 +621,7 @@ APPROVAL_UNIT_CONSOLIDATION = NO
 利用者向けの概念分類(Design 系 / Merge 系 / Production 系)と、実際の承認単位は
 別物として扱う。**本文書は提示の形式を定めるだけであり、承認単位を 1 つも
 統合・緩和しない。** 承認単位の正本は
-[chatgpt_collaboration_protocol.md](chatgpt_collaboration_protocol.md) 2節である。
+[user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md) 2節である。
 
 ```
 例  ChangeSet の CREATE と EXECUTE を「Production Gate 1 回」にまとめない。
@@ -726,10 +735,12 @@ B案   <内容> / 影響
 ## 10. 発効の境界(本文書に固有)
 
 ```
-NEW_CONTRACT_ACTIVE = NO
+ACTIVATION_STATE      = 発効済み(2026-09-06 13:57 JST)
+ACTIVATION_STATE_SSOT = Issue #184 の最新の durable な activation 記録
 ```
 
-本文書の発効は、次をすべて終えたのち**人間の明示的な承認**をもって行う。
+本文書の発効は、次をすべて終えたのち**人間の明示的な承認**をもって行われた。
+同じ手順は、将来本文書を改訂して再発効する場合にも適用する。
 
 ```
 docs review -> PR -> CI -> 人間の merge 承認 -> merge -> main CI
@@ -773,3 +784,4 @@ RETROACTIVE_APPLICATION = NO
 | 日付 | 変更概要 |
 |---|---|
 | 2026-09-06 | 新規作成(Issue #184)。作業 AI・ChatGPT・人間の間のメッセージ形式に正本が無く、Instruction ごとに報告項目が定義されていたため、「Instruction 側が毎回フィールドを書き下ろす」「Worker 側が ISSUE_STATE_SNAPSHOT をチャット報告へ再掲する」という二重化が構造的に発生していた(Issue #177 の 7 コメント 141,409 文字のうち、機械可読キー 659 出現中 146 出現が毎回同一値)。(1)圧縮してよい範囲を channel で分け、durable な snapshot の必須項目は削らないことを明記した(`COMPACT_REPORT != SSOT_WRITEBACK_OMISSION`)。(2)Worker の完了報告を `FIXED_SCHEMA_NOT_FIXED_LENGTH` として 11 の論理フィールドで固定し、Production 関連 Instruction のみ `PRODUCTION_CHANGED` を追加必須とした。`CHANGED_STATE = NONE` は有効な報告だが、state を変えたのに `DURABLE = NONE` は契約違反とした。(3)`BASELINE_INVARIANTS` を導入し、8 つの baseline を定義した。baseline 名の省略と、逸脱があるのに `UNCHANGED` と書くことを禁止した。phase enum とは `MANY_TO_ONE` とし、無理に 1 対 1 へ揃えない。(4)FORENSIC 昇格条件を 16 定め、`REPORT_MODE_OWNER = WORKER`(Instruction は NORMAL を強制できない)、迷ったら FORENSIC(FAIL_VERBOSE)とした。**短くするために証拠を捨てる設計を禁止**している。(5)`AUTHORIZED_PHASES`(11 phase + 補助 permission)を定め、`UNLISTED_PHASE = NOT_AUTHORIZED` / 未記載は `INSTRUCTION_INVALID` として STOP することとした。暗黙の既定を置くと記載漏れが既成事実になるためである。`AUTHORIZED_PHASES != HUMAN_GATE_APPROVAL` および `!= STATE_WRITE_PERMISSION_AUTOMATIC_GRANT` を明記した。(6)報告が人間により手作業で転送される前提を正本化し、一括コピー可能性を要求した(chatgpt_collaboration_protocol.md 4.5 が明示的に対象外としていた側)。(7)Human Gate の提示を固定 4 節 + AUDIT_INFO 分離とし、exact 承認では識別子を承認対象の本文へ残すこととした。**`APPROVAL_UNIT_CONSOLIDATION = NO` であり承認単位は 1 つも統合・緩和していない。** (8)確認質問の要否(Q-1〜Q-12)と UNKNOWN の扱い(調査 -> SSoT -> 質問 -> 明示保留)を定め、`GUESS = FORBIDDEN` とした。**本文書は形式の正本であり、承認の要否・作業の可否・WIP・label の規則はいずれも他文書が正本で、複製していない。** 作成時点で `NEW_CONTRACT_ACTIVE = NO` であり、merge だけでは発効しない。判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
+| 2026-09-06 | 発効状態を現況へ同期し、役割名を製品非依存へ改めた(Issue #190)。0節と 10節の `NEW_CONTRACT_ACTIVE = NO` を発効済み(2026-09-06 13:57 JST)へ更新し、`ACTIVATION_STATE_SSOT = Issue #184 の最新の durable な activation 記録` を明記した。**静的な文書を、変わりうる発効状態の唯一の根拠にしない**方式(#185 が development_workflow.md 2.6 節へ適用したもの)を踏襲している。あわせて channel 名を役割ベースへ改め(`C-1 開発者 -> 管理者` / `C-3 管理者 -> 利用者`)、`READY_FOR` の例を `MANAGER_PR_REVIEW` へ、参照先ファイル名を user_manager_collaboration_protocol.md へ更新した。**報告 schema・FORENSIC 16 条件・BASELINE_INVARIANTS・AUTHORIZED_PHASES・Human Gate の提示形式・確認質問ポリシーはいずれも変更していない。** 変更履歴の過去エントリも書き換えていない。コード・Production 挙動の変更なし |

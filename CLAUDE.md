@@ -1,8 +1,64 @@
 # CLAUDE.md
 
-- 判定ロジック・通知内容・データ管理機能など、システムの仕様に変わる変更を行った場合は、
-  必ず [docs/functional_spec.md](docs/functional_spec.md)(非技術者向けの機能仕様書)を
-  合わせて更新し、末尾の変更履歴に日付と概要を追記すること。
+## 0. この文書の読み方
+
+本ファイルは、このリポジトリで作業するすべての AI が読み込む。
+
+```
+ファイル名はツール側の自動読込規約であり、改称の対象ではない。
+本ファイルの**内容**は特定の生成AI製品に依存しない。
+役割は権限と責務で定義し、製品名・個人名では定義しない。
+```
+
+節ごとに読み手を示す。自分の役割の節と §2 を読むこと。
+
+```
+§2  すべての役割に適用される
+§3  開発者に適用される
+§4  デプロイ権限を持つ開発者のみに適用される
+§5  管理者に適用される
+```
+
+**規則の本文は本ファイルへ複製しない。** 各正本への入口だけを置く。
+ルールを変更する場合は正本の文書を更新する。
+
+---
+
+## 1. 役割
+
+```
+役割                       識別子
+利用者・承認者             USER
+管理者                     MANAGER
+開発者(デプロイ権限あり)   DEVELOPER_WITH_DEPLOY
+開発者(デプロイ権限なし)   DEVELOPER
+```
+
+各役割の権限・責務・禁止事項は
+[docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+1節が正本である。
+
+```
+ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録
+```
+
+**担当は変わりうるため、恒久文書へ焼き込まない。**
+現在の担当を確認する必要がある場合は上記を fresh に読むこと。
+
+```
+本ファイル改訂時点(2026-09-06)の担当
+
+  USER                   利用者
+  MANAGER                HANAKO
+  DEVELOPER_WITH_DEPLOY  TARO
+  DEVELOPER              JIRO
+
+上記は改訂時点の値である。正本は ROLE_ASSIGNMENT_SSOT。
+```
+
+---
+
+## 2. すべての役割に適用される規則
 
 - **開発の進め方・レビュー・release governanceは
   [docs/development_workflow.md](docs/development_workflow.md) に従うこと。**
@@ -11,15 +67,12 @@
   AWS pagination / grouped release /
   **Issue起点の原則(挙動・構成・運用・契約へ影響する変更はIssue必須)** /
   人間承認の境界は同文書が正本である。
-  (詳細を本ファイルへ複製しない。ルールを変更する場合は同文書を更新する。)
 
   **機能領域・機能・共通部品の一覧は
   [docs/functional_domains.md](docs/functional_domains.md) が正本である。**
-  新しい機能を追加する場合は同文書へ行を追加し、共通部品を追加・変更した
-  場合は同文書の共通部品一覧を更新すること。領域の追加・分割・統合は
-  人間承認が必要である。同文書を用いた領域ベースのWIP運用ルール
-  (`DOMAIN_WIP_RULE_V1`)は development_workflow.md 2.6節が正本であり、
-  **既に発効している**(`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1`)。
+  同文書を用いた領域ベースのWIP運用ルール(`DOMAIN_WIP_RULE_V1`)は
+  development_workflow.md 2.6節が正本であり、**既に発効している**
+  (`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1`)。
   発効状態は変わりうるため、確認が必要な場合はIssue #177の最新のdurableな
   activation記録をfreshに読むこと(静的な文書を唯一の根拠にしない)。
 
@@ -28,17 +81,9 @@
   [docs/ai_operation_message_contract.md](docs/ai_operation_message_contract.md)
   が正本である。** 同文書は形式のみを定め、承認の要否・作業の可否・WIP・labelの
   規則はいずれも他文書が正本である(本ファイルへも同文書へも複製しない)。
-  **同文書は作成時点で発効していない**(`NEW_CONTRACT_ACTIVE = NO`)。
-  発効までは報告形式は development_workflow.md 2.5.5、Human Gateの提示は
-  chatgpt_collaboration_protocol.md 3.7 の現行運用が有効である。
-  merge しただけでは発効せず、周知と人間の明示的な承認を要する。
-
-- **作業指示に `INSTRUCTION_ID` が付いている場合、回答の冒頭に同じIDを必ず記載すること。**
-  IDが無い回答・別IDの回答・撤回済みIDへの回答は、次工程の根拠として扱われない。
-  指示キューは作業者ごとに独立しており(`PER_WORKER_SERIALIZATION=YES` /
-  `GLOBAL_SERIALIZATION=NO`)、他の作業者が作業中であることは
-  自分への指示を妨げない。詳細は
-  [docs/development_workflow.md](docs/development_workflow.md) 2.5節が正本。
+  **同文書は既に発効している**(`NEW_CONTRACT_ACTIVE = YES`)。
+  発効状態は変わりうるため、確認が必要な場合はIssue #184の最新のdurableな
+  activation記録をfreshに読むこと。
 
 - **Issueの現況は、作業の前に読み直し、作業で変えたら書き戻すこと。**
   詳細ルールの正本は
@@ -48,7 +93,8 @@
   その後のコメント / 関連PR / **関連remote branchとmainへの取り込み**を確認する。
   記憶・会話要約・古いIssue本文だけを根拠に実装を始めない。stale・矛盾・
   snapshot不在のいずれかなら、実装せずまずread-onlyのstatus reconciliationを行う
-  (`ISSUE_STATE_FRESHNESS_GATE=FAIL`)。
+  (`ISSUE_STATE_FRESHNESS_GATE=FAIL`)。**現在有効な規則を読むときは
+  origin/main を明示 ref で読む**(手元の作業branchを正本にしない)。
 
   完了時: stateを変えた場合、または既存記載がstaleと判明した場合は、
   `ISSUE_STATE_SNAPSHOT`をIssueへ書き戻してから完了とする
@@ -62,22 +108,10 @@
   (理由・推奨する次の行動・注意点)である。current state全体をhandoffへ
   再コピーしない。旧snapshotは監査履歴として削除・改変しない(append-only)。
 
-- **`INSTRUCTION_ID` の連番は、作業者ごと・日本時間の日付ごとに採番する。**
-  日付が変わったら `001` へリセットし、前日の連番を翌日へ引き継がない
-  (`TARO-20260905-072` の翌日は `TARO-20260906-001`)。同一日で使用済みの番号は
-  再利用しない。採番するのは指示側であり、正本は
-  [docs/chatgpt_collaboration_protocol.md](docs/chatgpt_collaboration_protocol.md)
-  4.1節。
-  なお**ユーザー向けの説明は、IT基礎知識とAWS主要マネージドサービスの概要理解を
-  前提としてよい**(同文書1.6節)。一般的なIT・AWS用語は毎回言い換えず、
-  **本プロジェクト固有の運用概念・取り違えやすいAWS挙動・Human Gateの範囲**に
-  背景と因果関係を添える。内部の状態値だけを並べた回答をユーザー向け説明としない。
-  **作業AIからの完了報告は従来どおり機械可読形式でよい**(別contract)。
-
-- **ユーザーとChatGPTの間の協働ルール(役割分担・Human Gate・レビュー判定・
+- **利用者と管理者の間の協働ルール(役割分担・Human Gate・レビュー判定・
   指示の対応付け・セッション開始時のbootstrap)は
-  [docs/chatgpt_collaboration_protocol.md](docs/chatgpt_collaboration_protocol.md)
-  が正本である。** 特に「ChatGPTが推奨すること」と「ユーザーが承認したこと」は
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  が正本である。** 特に「管理者が推奨すること」と「利用者が承認したこと」は
   別であり、`PASS_WITH_CONDITIONS`はHuman Gate通過を意味しない。
   `INSUFFICIENT_EVIDENCE`は不合格ではなく証拠不足であり、推測でPASSにしない。
 
@@ -97,13 +131,11 @@
   **本ファイルへ複製しない**。
   Issue本文・最新コメント・labelsが矛盾する場合は、勝手に推測して実装を進めず、
   どれが最新の確定判断かを確認すること。
-  (同文書はAI非依存のリポジトリ運用ポリシーであり、本ファイルはその入口に過ぎない。
-  ルールを変更する場合は同文書を更新する。)
 
-- **Priorityは「ユーザーの投資運用に対して、そのIssueをどの順番で直すべきか」で決める。**
+- **Priorityは「利用者の投資運用に対して、そのIssueをどの順番で直すべきか」で決める。**
   subsystem名(notification / watchlist / test 等)だけで決めてはならない。
   root causeからProduction reachability・downstream effect・
-  ユーザーの投資判断への影響までを追ってから判定すること。
+  利用者の投資判断への影響までを追ってから判定すること。
 
   ```
   P0  動かない・データが壊れる
@@ -126,6 +158,42 @@
   reachability の変化等)が判明したらPriorityを再評価し、変更した場合は
   根拠をGitHubへ書き戻すこと。
 
+- **実在人物の個人情報をGit管理対象へ含めない。** 氏名・家族名・個人メール
+  アドレス・住所・電話番号等を、ソースコード、テストデータ、fixture、コメント、
+  ドキュメント、サンプル、コミットメッセージへ記録してはならない。所有者等を
+  例示する場合は「所有者A」「owner-a」等の架空値を使用する。本番データの値
+  (実在の氏名、実際の保有数量・取得単価等)をテスト・ドキュメントへ転記しない。
+  一回限りの移行スクリプト等が実データを必要とする場合は、実データをGit管理
+  対象外のローカルファイル(`.gitignore`で除外)から実行時に読み込む設計とし、
+  ソースコードには実データを埋め込まないこと。CIのPIIスキャン
+  (`scripts/scan_for_pii.py`、`.github/workflows/ci.yml`の`pii-scan`ジョブ)が
+  既知の実在人物名を検知した場合はビルドを失敗させる(denylist方式であり、
+  全てのPIIを検出できる保証はない。上記ルールの遵守が前提)。
+  公開する記録(Issue / PR / comment)への記載禁止は
+  user_manager_collaboration_protocol.md 11節が正本である。
+
+---
+
+## 3. 開発者に適用される規則
+
+対象: `DEVELOPER_WITH_DEPLOY` / `DEVELOPER`
+
+- 判定ロジック・通知内容・データ管理機能など、システムの仕様に変わる変更を行った場合は、
+  必ず [docs/functional_spec.md](docs/functional_spec.md)(非技術者向けの機能仕様書)を
+  合わせて更新し、末尾の変更履歴に日付と概要を追記すること。
+
+- **新しい機能を追加する場合は
+  [docs/functional_domains.md](docs/functional_domains.md) へ行を追加し、
+  共通部品を追加・変更した場合は同文書の共通部品一覧を更新すること。**
+  領域の追加・分割・統合は人間承認が必要である。
+
+- **作業指示に `INSTRUCTION_ID` が付いている場合、回答の冒頭に同じIDを必ず記載すること。**
+  IDが無い回答・別IDの回答・撤回済みIDへの回答は、次工程の根拠として扱われない。
+  指示キューは作業者ごとに独立しており(`PER_WORKER_SERIALIZATION=YES` /
+  `GLOBAL_SERIALIZATION=NO`)、他の作業者が作業中であることは
+  自分への指示を妨げない。詳細は
+  [docs/development_workflow.md](docs/development_workflow.md) 2.5節が正本。
+
 - **メソッド名だけを根拠にread-onlyと判断してはならない。**
   `get` / `list` / `find` / `read` / `check` / `health` 等の名称は副作用の有無を
   保証しない。Productionのread-only観測・health check・validation・verification・
@@ -139,14 +207,48 @@
   2026-09-02に、read名のAPIが内部で書き込みを行い、読み取り専用IAMのLambdaで
   AccessDeniedとなって日次バッチ全体が停止するProduction障害が発生している。)
 
-- **実在人物の個人情報をGit管理対象へ含めない。** 氏名・家族名・個人メール
-  アドレス・住所・電話番号等を、ソースコード、テストデータ、fixture、コメント、
-  ドキュメント、サンプル、コミットメッセージへ記録してはならない。所有者等を
-  例示する場合は「所有者A」「owner-a」等の架空値を使用する。本番データの値
-  (実在の氏名、実際の保有数量・取得単価等)をテスト・ドキュメントへ転記しない。
-  一回限りの移行スクリプト等が実データを必要とする場合は、実データをGit管理
-  対象外のローカルファイル(`.gitignore`で除外)から実行時に読み込む設計とし、
-  ソースコードには実データを埋め込まないこと。CIのPIIスキャン
-  (`scripts/scan_for_pii.py`、`.github/workflows/ci.yml`の`pii-scan`ジョブ)が
-  既知の実在人物名を検知した場合はビルドを失敗させる(denylist方式であり、
-  全てのPIIを検出できる保証はない。上記ルールの遵守が前提)。
+---
+
+## 4. デプロイ権限を持つ開発者のみに適用される規則
+
+対象: `DEVELOPER_WITH_DEPLOY`
+
+- **Production deploy 実作業の担当と範囲は
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  1.5節が正本である**(`PRODUCTION_DEPLOYMENT_EXECUTOR = DEVELOPER_WITH_DEPLOY`)。
+  具体的な手順は [docs/operations_manual.md](docs/operations_manual.md) が正本。
+
+  ```
+  DEPLOY_OPERATION_DELEGATION = FORBIDDEN_BY_DEFAULT
+  対象役割 DEVELOPER
+  ```
+
+  **担当が1体へ集約されていることは、人間承認なしに実行してよいという意味ではない。**
+  ChangeSet の CREATE と EXECUTE は別のHuman Gateであり、承認は exact ARN に対して
+  のみ有効である。
+
+---
+
+## 5. 管理者に適用される規則
+
+対象: `MANAGER`
+
+- **`INSTRUCTION_ID` の連番は、作業者ごと・日本時間の日付ごとに採番する。**
+  日付が変わったら `001` へリセットし、前日の連番を翌日へ引き継がない
+  (`TARO-20260905-072` の翌日は `TARO-20260906-001`)。同一日で使用済みの番号は
+  再利用しない。採番するのは指示側であり、正本は
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  4.1節。
+
+- **利用者向けの説明は、IT基礎知識とAWS主要マネージドサービスの概要理解を
+  前提としてよい**(同文書1.6節)。一般的なIT・AWS用語は毎回言い換えず、
+  **本プロジェクト固有の運用概念・取り違えやすいAWS挙動・Human Gateの範囲**に
+  背景と因果関係を添える。内部の状態値だけを並べた回答を利用者向け説明としない。
+  **開発者からの完了報告は機械可読形式でよい**(別contract)。
+
+- **開発者の実装レビューでは、宣言された領域と lock の妥当性を確認する。**
+  `PRIMARY_DOMAIN` / `LOCKED_DOMAINS` / `SHARED_TOUCHED` の網羅性 /
+  `LOCK_LEVEL` の妥当性 / LEVEL_1 の compatibility evidence / scope 拡大の有無。
+  正本は
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  3.8節。**確認された lock omission は合格にしない。**
