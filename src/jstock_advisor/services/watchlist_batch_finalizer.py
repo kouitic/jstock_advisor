@@ -1304,10 +1304,15 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
 
     outcome_counts: dict[str, int] = {}
     stale_unconfirmed_count = 0
-    # Issue #62 Phase B(U3): 中断した削除の検出・補完の件数。
+    # Issue #62 Phase B(U3): 中断した削除の補完の観測。
     # 新規のmetric基盤は作らず、既存のbatch auditとログへ載せる。
-    interrupted_removal_detected_count = 0
-    interrupted_removal_audit_completed_count = 0
+    #
+    # attempted = 「削除履歴はあるがWatchlistItemが無い」を検出し補完を試みた件数
+    # written   = そのうち**実際に新しい監査記録を書いた**件数
+    # 2つを分けるのは、同じbatchのfinalizeが再実行されると attempted は増えるが
+    # written は増えないため(レビュー対応 F-A)。平常時に0であるべきは written。
+    removal_audit_completion_attempted_count = 0
+    removal_audit_completion_written_count = 0
 
     for record in records:
         item = watchlist_repo.get(record.stock_code)
@@ -1326,18 +1331,11 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             history = removal_history_repo.get(record.stock_code)
             if history is None:
                 continue
-            interrupted_removal_detected_count += 1
-            logger.warning(
-                "watchlist maintenance: removal history without watchlist item, "
-                "completing audit stock_code=%s batch_id=%s removed_at=%s",
-                record.stock_code,
-                batch_id,
-                history.removed_at.isoformat(),
-            )
+            removal_audit_completion_attempted_count += 1
             # 復元できない項目はキーワード引数で明示する(位置引数の取り違えで
             # 誤った値を監査へ書かないため)。何が復元できなかったかは
             # `record_removal_audit()`が`unavailable_fields`として記録する。
-            record_removal_audit(
+            written = record_removal_audit(
                 stock_code=history.stock_code,
                 stock_name=None,
                 registered_at=None,
@@ -1353,7 +1351,27 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
                 batch_id=batch_id,
                 reconstructed_from_history=True,
             )
-            interrupted_removal_audit_completed_count += 1
+            if written:
+                removal_audit_completion_written_count += 1
+                # 実際に監査が欠けていた = 前回のfinalizeが delete と監査の間で
+                # 中断した痕跡。異常事象として WARNING で残す。
+                logger.warning(
+                    "watchlist maintenance: removal audit was missing and has been "
+                    "completed from removal history stock_code=%s batch_id=%s removed_at=%s",
+                    record.stock_code,
+                    batch_id,
+                    history.removed_at.isoformat(),
+                )
+            else:
+                # 既に記録済み。同じbatchのfinalize再実行や、削除が正常完了した
+                # 後の再試行で通る正常な経路であり、異常ではない。
+                logger.info(
+                    "watchlist maintenance: removal audit already recorded, "
+                    "no completion needed stock_code=%s batch_id=%s removed_at=%s",
+                    record.stock_code,
+                    batch_id,
+                    history.removed_at.isoformat(),
+                )
             continue
 
         summary = _parse_maintenance_screening_summary(record.screening_summary_json)
@@ -1441,12 +1459,15 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             "execution_result": EXECUTION_RESULT_NORMAL,
             "outcome_counts": outcome_counts,
             "stale_unconfirmed_count": stale_unconfirmed_count,
-            # Issue #62 Phase B(U3): 中断した削除の検出・補完の観測。
-            # 平常時は 0 であることが期待値であり、0 以外が続く場合は
-            # finalize が繰り返し中断していることを示す。
-            "interrupted_removal_detected_count": interrupted_removal_detected_count,
-            "interrupted_removal_audit_completed_count": (
-                interrupted_removal_audit_completed_count
+            # Issue #62 Phase B(U3): 中断した削除の補完の観測。
+            # attempted は finalize の再実行でも増えるため、平常時に 0 で
+            # あるべきなのは written のほう。written が 0 以外なら、
+            # 前回の finalize が delete と監査の間で中断していたことを示す。
+            "removal_audit_completion_attempted_count": (
+                removal_audit_completion_attempted_count
+            ),
+            "removal_audit_completion_written_count": (
+                removal_audit_completion_written_count
             ),
         },
         now=now,
@@ -1456,12 +1477,12 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
     mark_watchlist_batch_completed(batch_id, EXECUTION_RESULT_NORMAL, now)
     logger.info(
         "watchlist_maintenance finalized batch_id=%s outcome_counts=%s stale_unconfirmed=%d "
-        "interrupted_removal_detected=%d interrupted_removal_audit_completed=%d",
+        "removal_audit_completion_attempted=%d removal_audit_completion_written=%d",
         batch_id,
         outcome_counts,
         stale_unconfirmed_count,
-        interrupted_removal_detected_count,
-        interrupted_removal_audit_completed_count,
+        removal_audit_completion_attempted_count,
+        removal_audit_completion_written_count,
     )
 
 

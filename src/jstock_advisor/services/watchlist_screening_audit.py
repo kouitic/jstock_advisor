@@ -197,7 +197,7 @@ def record_removal_audit(
     now: dt.datetime,
     batch_id: str | None,
     reconstructed_from_history: bool = False,
-) -> None:
+) -> bool:
     """AUTO_SCREENING銘柄の自動削除を記録する(計画Part C-6)。
 
     「なぜ自動で削除されたか」を後からこの記録だけで再現できることを最低限の
@@ -216,6 +216,12 @@ def record_removal_audit(
     **Noneや空リストを「値が無かった」ように見せず**、
     `audit_completion`で「履歴から補完した部分記録である」ことを明示する
     (欠測と復元不能を取り違えさせない)。
+
+    戻り値は**実際に新しい監査記録を書いたか**である(レビュー対応 F-A)。
+    既に同じ`audit_id`の記録があればFalseを返す。呼び出し側が
+    「補完を試みた件数」と「実際に補完した件数」を区別できるようにするため、
+    `record_if_absent()`の戻り値を捨てない。捨てると、同じバッチのfinalizeを
+    再実行しただけでも補完件数が増え、「平常時は0件」という観測の意味が壊れる。
     """
     output_values: dict[str, Any] = {
         "stock_name": stock_name,
@@ -239,7 +245,7 @@ def record_removal_audit(
         # 「削除済みで取得できなかった」のかを、記録だけで区別できるようにする。
         output_values["unavailable_fields"] = _REMOVAL_AUDIT_UNAVAILABLE_FIELDS
 
-    AuditService().record_if_absent(
+    entry = AuditService().record_if_absent(
         audit_id=build_removal_audit_id(stock_code, removed_at),
         decision_type=DECISION_TYPE_REMOVAL,
         stock_code=stock_code,
@@ -250,6 +256,7 @@ def record_removal_audit(
         rule_version=RULE_VERSION_PLACEHOLDER,
         timestamp=now,
     )
+    return entry is not None
 
 
 def record_rotation_commit_audit(

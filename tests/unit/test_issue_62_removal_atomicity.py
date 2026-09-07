@@ -482,8 +482,54 @@ def test_interrupted_removal_counts_are_recorded_in_batch_audit(
     ]
     assert len(batch_audits) == 1
     out = batch_audits[0].output_values
-    assert out["interrupted_removal_detected_count"] == 1
-    assert out["interrupted_removal_audit_completed_count"] == 1
+    assert out["removal_audit_completion_attempted_count"] == 1
+    assert out["removal_audit_completion_written_count"] == 1
+
+
+def test_already_recorded_audit_does_not_count_as_completion(
+    dynamo, audit_dir: Path, history_repo: WatchlistRemovalHistoryRepository,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ レビュー対応 F-A: 監査が既にある状態で finalize を再実行しても
+    「実際に補完した件数」は増えず、WARNING も出さないこと。
+
+    `record_if_absent()` の戻り値を捨てていると、同じ batch の finalize を
+    やり直しただけで補完件数が増え、仕様の「平常時は0件」が壊れる。
+    """
+    removed_at = _NOW - dt.timedelta(days=1)
+    _preexisting_removal(history_repo, removed_at)
+    repo = _RecordingWatchlistRepository([])
+    monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: repo)
+
+    # 1 回目: 監査が欠けているので補完される。
+    _drive_maintenance_batch("maint-fa-1", _NOW)
+    assert maybe_finalize_maintenance("maint-fa-1", _NOW, _fake_config()) is True
+    assert len(_removal_audits(audit_dir)) == 1
+
+    # 2 回目: 既に記録済み。試行はするが書き込みは起きない。
+    caplog.clear()
+    with caplog.at_level("INFO", logger=finalizer_module.logger.name):
+        _drive_maintenance_batch("maint-fa-2", _NOW)
+        assert maybe_finalize_maintenance("maint-fa-2", _NOW, _fake_config()) is True
+
+    assert len(_removal_audits(audit_dir)) == 1  # 監査は 1 件のまま
+
+    out = next(
+        e.output_values
+        for e in AuditLogRepository(store_dir=audit_dir).list_all()
+        if e.audit_id == "watchlist_maintenance_batch_audit:maint-fa-2"
+    )
+    assert out["removal_audit_completion_attempted_count"] == 1
+    assert out["removal_audit_completion_written_count"] == 0
+
+    completion_logs = [
+        r for r in caplog.records if "removal audit" in r.getMessage()
+    ]
+    assert completion_logs, "補完経路のログが出ていない"
+    assert all(r.levelname == "INFO" for r in completion_logs), (
+        "既に記録済みの場合は WARNING を出さない"
+    )
+    assert any("already recorded" in r.getMessage() for r in completion_logs)
 
 
 def test_normal_run_reports_zero_interrupted_counts(
@@ -504,5 +550,5 @@ def test_normal_run_reports_zero_interrupted_counts(
         if e.audit_id == "watchlist_maintenance_batch_audit:maint-zero"
     ]
     assert len(batch_audits) == 1
-    assert batch_audits[0].output_values["interrupted_removal_detected_count"] == 0
-    assert batch_audits[0].output_values["interrupted_removal_audit_completed_count"] == 0
+    assert batch_audits[0].output_values["removal_audit_completion_attempted_count"] == 0
+    assert batch_audits[0].output_values["removal_audit_completion_written_count"] == 0
