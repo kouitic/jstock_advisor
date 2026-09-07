@@ -37,7 +37,10 @@ from jstock_advisor.domain.entities.enums import (
     TrendClassification,
 )
 from jstock_advisor.domain.entities.momentum import MomentumSnapshot
-from jstock_advisor.domain.entities.valuation import FairValueRange
+from jstock_advisor.domain.entities.valuation import (
+    FairValueRange,
+    ProfitTakingFairValueBlockReasonCode,
+)
 from jstock_advisor.domain.signals.profit_protection import ProfitProtectionMetrics
 from jstock_advisor.domain.valuation.fair_value import (
     compute_target_total_yield_price,
@@ -225,6 +228,15 @@ class ProfitTakingResult:
     fair_value_action_usable: bool
     ceiling_price: Decimal | None
     upside_pct: float | None
+    # --- Issue #221 Phase 1(U2): 「直ちに利確しない理由」を実際の遮断要因から
+    # 組み立てるための構造化情報。表示層はこれらを見て文言を決め、
+    # reasons文字列のparse分岐は行わない。
+    # レンジ自体は使えるが利確判定側の手法間スプレッド基準で弾かれた場合のcode
+    # (それ以外はNone。Issue #21のunusable_reason_codeと重複させない)。
+    fair_value_action_block_reason_code: str | None
+    # 緩和要因・上昇トレンドが実際に判定を1段以上弱めたか(該当の有無ではなく降格の有無)。
+    mitigating_downgrade_applied: bool
+    timing_downgrade_applied: bool
     # 再コードレビュー対応(2026-08、指摘1): raw_levelを実際に押し上げた根拠の
     # 種別(_RawLevelOrigin.name)。呼び出し元(Recommendation)へ構造化フィールドと
     # して伝播し、通知直前の整合性検証(recommendation_consistency_validator.py)が
@@ -451,6 +463,38 @@ def _fair_value_action_usable(
             >= cbj.min_business_days_to_earnings_for_fair_value_action
         )
     )
+
+
+def _fair_value_action_block_reason(
+    fv_range: FairValueRange | None,
+    config: ProfitTakingRulesConfig,
+) -> ProfitTakingFairValueBlockReasonCode | None:
+    """_fair_value_action_usable()がFalseを返した直接原因のうち、
+    既存の説明経路では利用者へ伝わらないものを構造化して返す(Issue #221 Phase 1)。
+
+    現時点で返すのは「レンジ自体は売買判断に使える(usable_for_trading_judgment
+    =True)が、利確判定側のより厳しい手法間スプレッド基準
+    (condition_based_judgment.max_fair_value_spread_ratio_for_partial)を
+    超えている」場合のみである。
+
+    レンジ自体が使えない場合(usable_for_trading_judgment=False)は
+    FairValueRange.unusable_reason_code(Issue #21)が既に理由を持っているため、
+    ここでは重ねてNoneを返す(同じ事実を2系統で表示しない)。
+
+    ★ _fair_value_action_usable()の他の不成立条件(手法数・最新決算の反映・
+      次回決算までの営業日数・業種)については、本関数はNoneを返す。
+      それらにも既存の説明経路では埋まらない帯が存在するが、Issue #221
+      Phase 1のscope外であり、推測で文言を足さずGitHub Issueへ報告する
+      (development_workflow.md §9.5 OPPORTUNISTIC_FIX_FORBIDDEN)。
+    """
+    if fv_range is None or not fv_range.usable_for_trading_judgment or fv_range.bull is None:
+        return None
+    if fv_range.bear is None or fv_range.bear <= 0:
+        return None
+    spread_ratio = float(fv_range.bull / fv_range.bear)
+    if spread_ratio > config.condition_based_judgment.max_fair_value_spread_ratio_for_partial:
+        return ProfitTakingFairValueBlockReasonCode.METHOD_SPREAD_TOO_WIDE_FOR_ACTION
+    return None
 
 
 def _level_from_price_position(
@@ -1278,6 +1322,13 @@ def evaluate_profit_taking(
         if has_unrealized_gain
         else False
     )
+    # Issue #221 Phase 1(U2): 使えなかった場合の直接原因を構造化して残す。
+    # 含み損の場合は「利確」自体が成立せず遮断要因の話にならないためNoneとする。
+    fair_value_action_block_reason = (
+        _fair_value_action_block_reason(fv_range, config)
+        if has_unrealized_gain and not fair_value_action_usable
+        else None
+    )
     ceiling_price = (
         fv_range.bull if fair_value_action_usable and fv_range is not None else None
     )
@@ -1464,6 +1515,7 @@ def evaluate_profit_taking(
         origin = _RawLevelOrigin.NONE
         triggered_reasons = []
 
+    mitigating_downgrade_applied = False
     if raw_level == _Level.HOLD:
         fundamental_level = _Level.HOLD
         applied_factors: list[str] = []
@@ -1494,6 +1546,14 @@ def evaluate_profit_taking(
             _RawLevelOrigin.PROFIT_PROTECTION_STRONG,
         ) and (raw_level >= _Level.PARTIAL):
             fundamental_level = _Level(max(int(fundamental_level), int(_Level.PARTIAL)))
+        # Issue #221 Phase 1(U2): 緩和要因が判定を弱めた結果が **すべての床を
+        # 通したあとも残っているか** を記録する。「緩和要因が該当した」ことと
+        # 「判定が実際に弱まった」ことは別であり、さらに床が降格を吸収した場合は
+        # 最終的に何も弱まっていない。利用者へ「1段階弱めました」と伝えてよいのは
+        # 最後のケースを除いた場合だけである。
+        # ★ 算出は必ずWATCH床とPARTIAL床の両方を適用した後で行う(床より前で
+        #   算出すると、床が吸収した降格まで「弱めた」と報告してしまう)。
+        mitigating_downgrade_applied = fundamental_level < raw_level
         hold_reasons = list(applied_factors)
 
     # タイミング層(要求仕様9節・10節): ファンダメンタル評価とは独立した軸として算出する。
@@ -1527,6 +1587,26 @@ def evaluate_profit_taking(
         else:
             timing_action = TimingAction.PROCEED_NO_TIMING_SIGNAL
 
+    # Issue #221 Phase 1(U1): 何らかの利確シグナルが実際に発生していた場合
+    # (raw_level > HOLD)、timing層を通したあとでもHOLD(=通知なし)までは落とさない。
+    #
+    # mitigating層には呼び出し側に既に同じ意味の床がある(上記「最低でもWATCH
+    # (監視継続)として可視化する」)。しかしtiming層の降格にはその床が無く、
+    # mitigating層がWATCHへ戻した判定を1段落としてHOLDへ戻していた。
+    # ProfitTakingServiceはHOLDでRecommendationを生成しないため、
+    # 判定記録も通知も残らず、利用者は判定が行われたことすら分からない状態になる。
+    # functional_spec 6.2の表は、含み益率20%以上かつ想定上限価格を判定に使えない
+    # セルを「保有継続(監視)」と定めており、「通知なし」は含み益率20%未満の
+    # セルにのみ割り当てられている。本floorはその表へ実装を合わせるものである。
+    #
+    # 識別条件をraw_level > HOLDとしているのは、mitigating層の既存floorと
+    # 同じ意味をそのまま2層目へ適用するためである(含み益率や上値余地の条件を
+    # ここで再掲すると、同じ判定を2か所で維持することになり食い違いうる)。
+    # 下のPARTIAL floorはこれより強い床であり、max同士で衝突しない。
+    if raw_level > _Level.HOLD:
+        final_level = _Level(max(int(final_level), int(_Level.WATCH)))
+
+
     # コードレビュー対応(2026-08): origin=PRICE_POSITION/FAIR_VALUE_STRONGでraw_levelが
     # PARTIAL以上の場合、mitigating+timing両層を通した合計softeningでもPARTIAL未満へは
     # 落とさない(最終floor)。FUNDAMENTAL_CRITICAL_RISKは上記の両層で降格自体を無効化
@@ -1537,6 +1617,11 @@ def evaluate_profit_taking(
         _RawLevelOrigin.PROFIT_PROTECTION_STRONG,
     ) and (raw_level >= _Level.PARTIAL):
         final_level = _Level(max(int(final_level), int(_Level.PARTIAL)))
+
+    # Issue #221 Phase 1(U2): タイミング層の降格が、**すべての床を通したあとも**
+    # 残っているかを記録する(mitigating側と同じ考え方)。WATCH床・PARTIAL床の
+    # 両方を適用した後で算出する。
+    timing_downgrade_applied = final_level < fundamental_level
 
     fundamental_action = _LEVEL_TO_RECOMMENDATION[fundamental_level]
     final_action = _LEVEL_TO_RECOMMENDATION[final_level]
@@ -1590,6 +1675,13 @@ def evaluate_profit_taking(
         fair_value_action_usable=fair_value_action_usable,
         ceiling_price=ceiling_price,
         upside_pct=upside_pct,
+        fair_value_action_block_reason_code=(
+            fair_value_action_block_reason.value
+            if fair_value_action_block_reason is not None
+            else None
+        ),
+        mitigating_downgrade_applied=mitigating_downgrade_applied,
+        timing_downgrade_applied=timing_downgrade_applied,
         origin=origin.name,
         profit_protection_signal=(
             profit_protection.signal_label if profit_protection is not None else "NONE"
