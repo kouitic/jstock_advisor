@@ -98,13 +98,38 @@ def _resolve_jpx400_weight_column(fieldnames: list[str]) -> str | None:
     return None
 
 
-def _extract_excel_date(value: object, datemode: int) -> dt.date | None:
+def _extract_excel_date(value: object, datemode: int | None = None) -> dt.date | None:
+    """「日付」列のセル値を日付へ変換する。
+
+    Issue #223(PR-2): .xlsxをopenpyxlで読む経路が加わったため、datemodeを
+    Optionalにした。datemodeは**.xls固有の概念**(1900年系/1904年系のシリアル値
+    の基準日)であり、openpyxlは日付セルをdatetimeとして返すためこの概念を持た
+    ない。datemodeがNoneのときはxlrdを一切呼ばない。
+
+    セルの型は読み出し実装で異なる。
+      xlrd     数値セルは常にfloat(例: 20260630.0)
+      openpyxl 整数セルはint、日付書式のセルはdatetime
+    どちらでも同じdt.dateになるよう、int/float/datetime/strをすべて受ける。
+    """
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        # openpyxl経路。data_j.xlsxの「日付」列はYYYYMMDD形式の整数。
+        return _parse_date_string(str(value)) if 19000101 <= value <= 99991231 else None
     if isinstance(value, float):
         # data_j.xlsの「日付」列はExcelのシリアル値ではなく、YYYYMMDD形式の数値が
         # 数値セルとして格納されている(例: 20260630.0)。シリアル値として解釈すると
         # 桁数が大きすぎてOverflowErrorになるため、YYYYMMDD形式を先に判定する。
         if value.is_integer() and 19000101 <= value <= 99991231:
             return _parse_date_string(str(int(value)))
+        if datemode is None:
+            # openpyxl経路でシリアル値が来ることは想定していない
+            # (日付書式ならdatetimeで返るため)。xlrdへは委ねない。
+            return None
         try:
             excel_date: dt.date = xlrd.xldate.xldate_as_datetime(value, datemode).date()
         except (xlrd.xldate.XLDateError, ValueError, OverflowError):
@@ -119,6 +144,58 @@ def _extract_excel_date(value: object, datemode: int) -> dt.date | None:
 def _parse_date_string(value: str) -> dt.date | None:
     """ExternalValueParser.date()へ委譲する(書式優先順位は従来と同一)。"""
     return ExternalValueParser.date(value)
+
+
+# Issue #223(PR-2): 上場銘柄一覧の容れ物の判別。JPXは2026-09-03に
+# data_j.xls(.xls)からdata_j.xlsx(.xlsx)へ差し替えたが、**URLのトークンも
+# ファイル名の幹も変えなかった**ため、拡張子だけでは取り違えうる。
+# 中身の先頭バイト(マジックナンバー)で判別する。
+# H-6(管理者判断): xlrdを残して両対応にする。旧形式へ戻っても動くこと。
+# 非ASCIIのエスケープをソースへ直接書かず、16進表記から組み立てる。
+_XLS_MAGIC = bytes.fromhex("d0cf11e0")  # OLE2複合ドキュメント(.xls)
+_XLSX_MAGIC = bytes.fromhex("504b0304")  # ZIP(.xlsx)
+
+
+def _read_listed_issues_rows(data: bytes) -> tuple[list[list[object]], int | None]:
+    """上場銘柄一覧の全セルを行のリストとして読み出す。
+
+    戻り値は(rows, datemode)。rows[0]がヘッダ行。datemodeは.xls経路でのみ
+    意味を持ち、.xlsx経路ではNoneを返す(_extract_excel_dateがこれで分岐する)。
+
+    **判定・正規化・集計はこの関数の外に1本だけ置く**。容れ物が2種類に
+    なっても、パース後のロジックは1実装のまま保つための分離である。
+    """
+    if data.startswith(_XLSX_MAGIC):
+        return _read_rows_openpyxl(data), None
+    if data.startswith(_XLS_MAGIC):
+        return _read_rows_xlrd(data)
+    raise CandidateUniverseError(
+        "東証上場銘柄一覧の形式を判別できません"
+        "(.xls/.xlsxのいずれのマジックナンバーとも一致しません)"
+    )
+
+
+def _read_rows_xlrd(data: bytes) -> tuple[list[list[object]], int]:
+    book = xlrd.open_workbook(file_contents=data)
+    sheet = book.sheet_by_index(0)
+    rows = [
+        [sheet.cell_value(row, col) for col in range(sheet.ncols)] for row in range(sheet.nrows)
+    ]
+    return rows, book.datemode
+
+
+def _read_rows_openpyxl(data: bytes) -> list[list[object]]:
+    # read_only: 3,000行超を一度にメモリへ載せない(Lambdaのメモリ制約)。
+    # data_only: 数式ではなく計算済みの値を読む。
+    import openpyxl
+
+    workbook = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        sheet = workbook.worksheets[0]
+        return [list(row) for row in sheet.iter_rows(values_only=True)]
+    finally:
+        # read_onlyで開いた場合、明示的に閉じないとファイルハンドルが残る。
+        workbook.close()
 
 
 @dataclass(frozen=True)
@@ -143,12 +220,13 @@ def parse_listed_issues_xls(
     target_market_segmentsによる絞り込みより前の全行を対象に集計する(運用
     ハードニング7節: 対象外市場区分による正常な除外と、列ずれ等の異常を区別する)。
     """
-    book = xlrd.open_workbook(file_contents=data)
-    sheet = book.sheet_by_index(0)
-    header = [str(sheet.cell_value(0, col)).strip() for col in range(sheet.ncols)]
+    rows, datemode = _read_listed_issues_rows(data)
+    if not rows:
+        raise CandidateUniverseError("東証上場銘柄一覧が空です")
+    header = ["" if cell is None else str(cell).strip() for cell in rows[0]]
     missing = _REQUIRED_LISTED_ISSUES_COLUMNS - set(header)
     if missing:
-        raise CandidateUniverseError(f"data_j.xlsに必須列がありません: {sorted(missing)}")
+        raise CandidateUniverseError(f"東証上場銘柄一覧に必須列がありません: {sorted(missing)}")
     col_index = {name: idx for idx, name in enumerate(header)}
 
     items: list[CandidateUniverseItem] = []
@@ -159,12 +237,14 @@ def parse_listed_issues_xls(
     source_date: dt.date | None = None
     seen: set[str] = set()
 
-    for row in range(1, sheet.nrows):
-        code_cell = sheet.cell_value(row, col_index[_COL_CODE])
+    for row_cells in rows[1:]:
+        if len(row_cells) <= max(col_index.values()):
+            continue  # 列数が足りない行(末尾の空行等)
+        code_cell = row_cells[col_index[_COL_CODE]]
         if code_cell in ("", None):
             continue  # 空行
 
-        market_segment = str(sheet.cell_value(row, col_index[_COL_MARKET_SEGMENT])).strip()
+        market_segment = str(row_cells[col_index[_COL_MARKET_SEGMENT]]).strip()
         if market_segment not in _KNOWN_MARKET_SEGMENTS:
             unknown_market_segment_count += 1
         if target_market_segments is not None and market_segment not in target_market_segments:
@@ -174,7 +254,7 @@ def parse_listed_issues_xls(
 
         if source_date is None:
             source_date = _extract_excel_date(
-                sheet.cell_value(row, col_index[_COL_DATE]), book.datemode
+                row_cells[col_index[_COL_DATE]], datemode
             )
 
         stock_code = _normalize_stock_code(code_cell)
@@ -189,26 +269,26 @@ def parse_listed_issues_xls(
         items.append(
             CandidateUniverseItem(
                 stock_code=stock_code,
-                stock_name=str(sheet.cell_value(row, col_index[_COL_NAME])).strip() or None,
+                stock_name=str(row_cells[col_index[_COL_NAME]]).strip() or None,
                 market_segment=market_segment or None,
                 industry_33_code=str(
-                    sheet.cell_value(row, col_index[_COL_INDUSTRY_33_CODE])
+                    row_cells[col_index[_COL_INDUSTRY_33_CODE]]
                 ).strip()
                 or None,
                 industry_33_name=str(
-                    sheet.cell_value(row, col_index[_COL_INDUSTRY_33_NAME])
+                    row_cells[col_index[_COL_INDUSTRY_33_NAME]]
                 ).strip()
                 or None,
                 industry_17_code=str(
-                    sheet.cell_value(row, col_index[_COL_INDUSTRY_17_CODE])
+                    row_cells[col_index[_COL_INDUSTRY_17_CODE]]
                 ).strip()
                 or None,
                 industry_17_name=str(
-                    sheet.cell_value(row, col_index[_COL_INDUSTRY_17_NAME])
+                    row_cells[col_index[_COL_INDUSTRY_17_NAME]]
                 ).strip()
                 or None,
-                size_code=str(sheet.cell_value(row, col_index[_COL_SIZE_CODE])).strip() or None,
-                size_name=str(sheet.cell_value(row, col_index[_COL_SIZE_NAME])).strip() or None,
+                size_code=str(row_cells[col_index[_COL_SIZE_CODE]]).strip() or None,
+                size_name=str(row_cells[col_index[_COL_SIZE_NAME]]).strip() or None,
             )
         )
 

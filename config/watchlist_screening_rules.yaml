@@ -25,9 +25,12 @@ candidate_universe:
   # "jpx": 東証プライム+スタンダード全銘柄を自動取得(候補ユニバース本格対応・2026-08)。
   provider: "jpx"
   csv_path: "data/universe/candidate_universe.csv"
-  # JPX上場銘柄一覧(.xls、無料・月次更新)とJPX400構成銘柄CSV(Nikkei、無料・年1回+随時)。
+  # JPX上場銘柄一覧(無料・月次更新)とJPX400構成銘柄CSV(Nikkei、無料・年1回+随時)。
   # provider="jpx"の場合のみ使用する。
-  jpx_listed_issues_url: "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+  # Issue #223 PR-2(2026-09-07): JPXが2026-09-03に .xls -> .xlsx へ差し替えた
+  # (URLのトークンもファイル名の幹も不変)。旧URLは404になる。パーサは中身の
+  # 先頭バイトで .xls / .xlsx を判別するため、将来旧形式へ戻っても動く。
+  jpx_listed_issues_url: "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
   jpx_400_weight_url: "https://indexes.nikkei.co.jp/nkave/archives/file/jpx_nikkei_index_400_weight_jp.csv"
   # 東証上場銘柄一覧の「市場・商品区分」列でこの値に一致する行のみ候補とする(プライム+スタンダード)。
   target_market_segments:
