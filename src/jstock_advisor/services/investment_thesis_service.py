@@ -26,6 +26,7 @@ from jstock_advisor.domain.entities.holding_decision import (
     InvestmentThesisBaseline,
     ThesisConditionAttestation,
 )
+from jstock_advisor.domain.entities.owner import log_ref
 from jstock_advisor.infrastructure.aws.baseline_pointer import (
     BaselinePointerConflictError,
     create_pointer,
@@ -171,7 +172,7 @@ class InvestmentThesisService:
                 continue
 
         raise BaselineActivationExhaustedError(
-            f"holding_id={holding_id}: baseline活性化が{retries}回失敗しました"
+            f"holding_ref={log_ref(holding_id)}: baseline活性化が{retries}回失敗しました"
             f"(最終エラー: {last_error})。最新状態を確認し、改めて実行してください。"
         ) from last_error
 
@@ -210,9 +211,9 @@ class InvestmentThesisService:
             baseline_values=baseline_values,
         )
         logger.info(
-            "VALIDATION MODE baseline activation transient (not persisted) holding_id=%s "
+            "VALIDATION MODE baseline activation transient (not persisted) holding_ref=%s "
             "baseline_id=%s",
-            holding_id,
+            log_ref(holding_id),
             baseline_id,
         )
         return baseline
@@ -237,8 +238,8 @@ class InvestmentThesisService:
         )
         if self._execution_context.is_validation:
             logger.info(
-                "VALIDATION MODE investment thesis transient (not persisted) holding_id=%s",
-                holding_id,
+                "VALIDATION MODE investment thesis transient (not persisted) holding_ref=%s",
+                log_ref(holding_id),
             )
             return thesis
         self._thesis_repo.save(thesis)
@@ -278,7 +279,9 @@ class InvestmentThesisService:
         current_time = now or dt.datetime.now(dt.UTC)
         thesis = self._thesis_repo.get_by_holding(holding_id)
         if thesis is None:
-            raise ValueError(f"holding_id={holding_id}のInvestmentThesisが見つかりません")
+            raise ValueError(
+                f"holding_ref={log_ref(holding_id)}のInvestmentThesisが見つかりません"
+            )
 
         new_conditions: list[CustomThesisCondition] = []
         found = False

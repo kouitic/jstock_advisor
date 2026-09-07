@@ -66,6 +66,7 @@ from jstock_advisor.domain.entities.holding_evaluation_record import (
     HoldingEvaluationRecord,
     build_holding_evaluation_id,
 )
+from jstock_advisor.domain.entities.owner import log_ref
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.price_freshness import (
@@ -542,7 +543,9 @@ def _persist_holding_evaluation_record(
     try:
         holding_evaluation_record_repo.save(record)
     except Exception:  # noqa: BLE001 - 記録失敗で既存の通知・戻り値に影響させない
-        logger.exception("holding_evaluation_record_save_failed holding_id=%s", holding.holding_id)
+        logger.exception(
+            "holding_evaluation_record_save_failed holding_ref=%s", log_ref(holding.holding_id)
+        )
 
 
 def _resolve_mode_designated_engine(
@@ -1387,7 +1390,7 @@ def _process_single_holding(
     )
     holding = HoldingRepository().get(holding_id)
     if holding is None:
-        logger.warning("dispatched holding not found holding_id=%s", holding_id)
+        logger.warning("dispatched holding not found holding_ref=%s", log_ref(holding_id))
         _finish_batch_item(
             batch_id, "failed", holding_id, now, notification_service, runtime_config_service
         )
@@ -1427,7 +1430,7 @@ def _process_single_holding(
             execution_context,
         )
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
-        logger.exception("holding analysis failed unexpectedly holding_id=%s", holding_id)
+        logger.exception("holding analysis failed unexpectedly holding_ref=%s", log_ref(holding_id))
         _finish_batch_item(
             batch_id, "failed", holding_id, now, notification_service, runtime_config_service
         )
@@ -1536,12 +1539,12 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             logger.info(
                 "VALIDATION MODE task=holding execution_mode=VALIDATION "
                 "notification_mode=%s event_notification_mode=%r is_dry_run=%s "
-                "validation_run_id=%s holding_id=%s",
+                "validation_run_id=%s holding_ref=%s",
                 execution_context.notification_mode.value,
                 event.get("notification_mode"),
                 execution_context.is_dry_run,
                 event.get("batch_id"),
-                event["holding_id"],
+                log_ref(event["holding_id"]),
             )
         portfolio_total_market_value = (
             Decimal(event["portfolio_total_market_value"])
