@@ -407,3 +407,82 @@ def test_block_reason_is_none_for_unrealized_loss() -> None:
 
     assert result.fair_value_action_block_reason_code is None
     assert result.final_action == RecommendationType.HOLD
+
+
+def _partial_reachable_range() -> FairValueRange:
+    """価格系(PRICE_POSITION)で PARTIAL へ到達する適正価格レンジ。
+
+    上値余地が partial_upside_max_pct 未満・full_upside_max_pct 以上に入るよう
+    bull を置く(含み益率 20% 以上 25% 未満と組み合わせて PARTIAL になる)。
+    """
+    return _range(
+        bear=Decimal("1200"), neutral=Decimal("1280"), bull=Decimal("1330"), method_count=3
+    )
+
+
+def test_partial_floor_absorbing_mitigating_downgrade_is_not_reported() -> None:
+    """F-1 の回帰: PARTIAL 床が緩和要因の降格を吸収した場合は「弱めた」と報告しない。
+
+    origin=PRICE_POSITION / raw_level=PARTIAL / 緩和要因 1 件のとき、
+    緩和層はいったん WATCH へ落とすが origin 別 PARTIAL 床が PARTIAL へ戻す。
+    最終判定は raw_level と同じ PARTIAL であり、実際には何も弱まっていない。
+    """
+    result = _evaluate(
+        current_price=Decimal("1220"),
+        average_purchase_price=Decimal("1000"),  # +22%(partial_gain_pct 以上)
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=_partial_reachable_range(),
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+        ),
+        mitigating_inputs=MitigatingFactorInputs(continuous_dividend_increase_years=5),
+    )
+
+    assert result.origin == "PRICE_POSITION"
+    assert result.fundamental_action == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.mitigating_downgrade_applied is False
+
+
+def test_partial_floor_absorbing_timing_downgrade_is_not_reported() -> None:
+    """F-1 の回帰(タイミング層側): 最終 PARTIAL 床が降格を吸収した場合も同様。"""
+    result = _evaluate(
+        current_price=Decimal("1220"),
+        average_purchase_price=Decimal("1000"),
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=_partial_reachable_range(),
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+            momentum=_uptrend(),
+        ),
+        mitigating_inputs=MitigatingFactorInputs(continuous_dividend_increase_years=5),
+    )
+
+    assert result.origin == "PRICE_POSITION"
+    assert result.final_action == RecommendationType.PARTIAL_PROFIT_TAKE
+    assert result.mitigating_downgrade_applied is False
+    assert result.timing_downgrade_applied is False
+
+
+def test_downgrade_from_full_to_partial_is_reported() -> None:
+    """床に吸収されず実際に 1 段下がった場合は報告する(FULL -> PARTIAL)。"""
+    result = _evaluate(
+        current_price=Decimal("1600"),
+        average_purchase_price=Decimal("1000"),  # +60%
+        condition_inputs=ProfitTakingConditionInputs(
+            # 上値余地が FULL 上限未満。価格系で FULL へ到達する。
+            fair_value_range=_range(
+                bear=Decimal("1500"),
+                neutral=Decimal("1560"),
+                bull=Decimal("1620"),
+                method_count=3,
+            ),
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+        ),
+        mitigating_inputs=MitigatingFactorInputs(continuous_dividend_increase_years=5),
+    )
+
+    assert result.origin == "PRICE_POSITION"
+    assert result.fundamental_action == RecommendationType.PARTIAL_PROFIT_TAKE
+    # FULL -> PARTIAL の降格は PARTIAL 床に吸収されず残る。
+    assert result.mitigating_downgrade_applied is True

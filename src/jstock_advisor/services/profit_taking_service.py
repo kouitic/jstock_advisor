@@ -242,7 +242,7 @@ def _profit_taking_fair_value_block_reason_text(
         cbj = config.profit_taking.condition_based_judgment
         threshold = cbj.max_fair_value_spread_ratio_for_partial
         return (
-            f"適正価格の手法間の広がりが利確判定の基準({threshold}倍)を超えているため、"
+            f"適正価格の手法間の広がりが利確判定の基準({threshold:.2f}倍)を超えているため、"
             "価格基準の利確判定に使用していません"
         )
     raise ValueError(f"未対応の利確判定側ブロック理由コードです: {code}")

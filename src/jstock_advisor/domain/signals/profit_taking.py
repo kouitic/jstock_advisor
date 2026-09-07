@@ -1533,12 +1533,6 @@ def evaluate_profit_taking(
         # 完全に打ち消すのではなく、最低でもWATCH(監視継続)として可視化する。
         if fundamental_level == _Level.HOLD:
             fundamental_level = _Level.WATCH
-        # Issue #221 Phase 1(U2): 緩和要因が判定を弱めた結果が **床を通したあとも
-        # 残っているか** を記録する。「緩和要因が該当した」ことと「判定が実際に
-        # 弱まった」ことは別であり、さらに床が降格を吸収した場合は最終的に
-        # 何も弱まっていない。利用者へ「1段階弱めました」と伝えてよいのは
-        # 最後のケースを除いた場合だけである。
-        mitigating_downgrade_applied = fundamental_level < raw_level
         # 再コードレビュー対応(2026-08、指摘6): 最終floor(下記)をfinal_levelにのみ
         # 適用すると、fundamental_action(mitigating適用後)がタイミング層による降格の
         # 影響を受けずfinal_actionより弱く見える(fundamental_action=WATCH・
@@ -1552,6 +1546,14 @@ def evaluate_profit_taking(
             _RawLevelOrigin.PROFIT_PROTECTION_STRONG,
         ) and (raw_level >= _Level.PARTIAL):
             fundamental_level = _Level(max(int(fundamental_level), int(_Level.PARTIAL)))
+        # Issue #221 Phase 1(U2): 緩和要因が判定を弱めた結果が **すべての床を
+        # 通したあとも残っているか** を記録する。「緩和要因が該当した」ことと
+        # 「判定が実際に弱まった」ことは別であり、さらに床が降格を吸収した場合は
+        # 最終的に何も弱まっていない。利用者へ「1段階弱めました」と伝えてよいのは
+        # 最後のケースを除いた場合だけである。
+        # ★ 算出は必ずWATCH床とPARTIAL床の両方を適用した後で行う(床より前で
+        #   算出すると、床が吸収した降格まで「弱めた」と報告してしまう)。
+        mitigating_downgrade_applied = fundamental_level < raw_level
         hold_reasons = list(applied_factors)
 
     # タイミング層(要求仕様9節・10節): ファンダメンタル評価とは独立した軸として算出する。
@@ -1604,9 +1606,6 @@ def evaluate_profit_taking(
     if raw_level > _Level.HOLD:
         final_level = _Level(max(int(final_level), int(_Level.WATCH)))
 
-    # Issue #221 Phase 1(U2): タイミング層の降格が、上記の床を通したあとも
-    # 残っているかを記録する(mitigating側と同じ考え方)。
-    timing_downgrade_applied = final_level < fundamental_level
 
     # コードレビュー対応(2026-08): origin=PRICE_POSITION/FAIR_VALUE_STRONGでraw_levelが
     # PARTIAL以上の場合、mitigating+timing両層を通した合計softeningでもPARTIAL未満へは
@@ -1618,6 +1617,11 @@ def evaluate_profit_taking(
         _RawLevelOrigin.PROFIT_PROTECTION_STRONG,
     ) and (raw_level >= _Level.PARTIAL):
         final_level = _Level(max(int(final_level), int(_Level.PARTIAL)))
+
+    # Issue #221 Phase 1(U2): タイミング層の降格が、**すべての床を通したあとも**
+    # 残っているかを記録する(mitigating側と同じ考え方)。WATCH床・PARTIAL床の
+    # 両方を適用した後で算出する。
+    timing_downgrade_applied = final_level < fundamental_level
 
     fundamental_action = _LEVEL_TO_RECOMMENDATION[fundamental_level]
     final_action = _LEVEL_TO_RECOMMENDATION[final_level]
