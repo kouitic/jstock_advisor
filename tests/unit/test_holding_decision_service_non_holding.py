@@ -68,7 +68,19 @@ def _holding(
 def test_holding_decision_service_ignores_holding_specific_fields() -> None:
     """shares/取得単価/取得日/口座種別を極端に変えても、スコア関連フィールドは
     完全に一致する(HoldingDecisionService.evaluate()がholding.stock_codeのみを
-    読むことの直接的な回帰確認)。"""
+    読むことの直接的な回帰確認)。
+
+    本テストはこれまで共有storeの状態に依存しており、Issue #229のstore隔離
+    (tests/conftest.py)で露出した。空のstoreから始めると、同一holding_idでも
+    **1回目の評価だけ**investment_thesisが低く出る(profit_cf_premise/
+    financial_premiseがNOT_EVALUATED)ため、1回目と2回目を比較する形では
+    保有固有情報とは無関係に不一致になる。
+
+    そのため比較の前に1回評価してbaselineを作り、**2つの比較が同じbaseline状態を
+    見る**ようにする(2回目以降は安定することを実測済み)。初回/2回目の非対称
+    そのものはIssue #249で追う。本テストの関心は「保有固有情報を無視すること」で
+    あり、期待値(全フィールド完全一致)は緩めていない。
+    """
     service = HoldingDecisionService(_PROVIDERS, _CFG)
 
     holding_a = _holding(
@@ -87,6 +99,9 @@ def test_holding_decision_service_ignores_holding_specific_fields() -> None:
         last_purchase_date=dt.date(2026, 8, 5),
         account_type=AccountType.GENERAL,
     )
+
+    # Issue #229/#249: 比較の前にbaselineを作る(初回評価の非対称を比較へ持ち込まない)。
+    service.evaluate(holding_a, _NOW, ExecutionPlanReason.NORMAL_SHADOW)
 
     outcome_a = service.evaluate(holding_a, _NOW, ExecutionPlanReason.NORMAL_SHADOW)
     outcome_b = service.evaluate(holding_b, _NOW, ExecutionPlanReason.NORMAL_SHADOW)
