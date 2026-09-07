@@ -69,6 +69,7 @@ from jstock_advisor.domain.signals.sector_environment import evaluate_sector_env
 from jstock_advisor.domain.signals.timing_score import evaluate_timing_score
 from jstock_advisor.domain.valuation.fair_value import (
     aggregate_fair_value,
+    compute_52_week_low,
     compute_dcf_price,
     compute_historical_range_price,
     compute_pbr_price,
@@ -77,7 +78,7 @@ from jstock_advisor.domain.valuation.fair_value import (
     median_historical_pbr,
     median_historical_per,
 )
-from jstock_advisor.domain.valuation.fair_value_usability import build_fair_value_range
+from jstock_advisor.domain.valuation.valuation_methods import build_valuation_summary
 from jstock_advisor.domain.valuation.yield_calc import (
     compute_annual_benefit_valuation,
     compute_benefit_yield_pct,
@@ -427,11 +428,33 @@ def build_stock_snapshot(
         )
         for name, value in fair_value_candidates.items()
     ]
-    fair_value_range = build_fair_value_range(
+    # Issue #208 O-E: 保有/SELL 側の適正価格集約にも、BUY 側と同じ下方外れ値
+    # フィルタを適用する。
+    #
+    # これまで保有側は build_fair_value_range() を直接呼んでおり、
+    # apply_outlier_filters() を通していなかった。そのため bull = max(生の算出値) /
+    # bear = min(生の算出値) となり、1 手法が極端な値を出しただけで手法間の
+    # 広がり(spread)が大きくなっていた。BUY 側(buy_signal_service)は
+    # build_valuation_summary() 経由でフィルタを通しており、同じ銘柄・同じ日でも
+    # 保有側だけ spread が構造的に大きいという非対称が生じていた。
+    #
+    # spread は利確判定の ceiling 利用可否(_fair_value_action_usable)と
+    # usable_for_trading_judgment の双方が見る値であり、この非対称が
+    # 「含み益が大きいのに価格系の利確判定へ到達できない」原因になっていた。
+    #
+    # 共通部品(S-05 domain/valuation/)は変更していない。既に BUY 側が使っている
+    # build_valuation_summary() を保有側からも呼ぶだけである。閾値
+    # (max_method_spread_ratio / max_fair_value_spread_ratio_for_partial 等)も
+    # 変更していない。
+    low_52_week = compute_52_week_low(bars, now.date())
+    fair_value_range = build_valuation_summary(
         fair_value_method_results,
         config.valuation.fair_value_methods.aggregation_method,
         config.valuation.fair_value_methods.method_weights,
         config.valuation.fair_value_usability,
+        current_price=current_price,
+        low_52_week=low_52_week,
+        transition_min_ratio=config.valuation.outlier_transition.below_52_week_low_min_ratio,
     )
 
     # 出所(provenance)は登録型データを含めて記録する。監査・説明可能性のため。

@@ -363,11 +363,22 @@ def test_old_records_without_transition_detail_are_readable() -> None:
     assert restored.fair_value == Decimal("1234")
 
 
-def test_sell_side_does_not_use_the_outlier_filter_path() -> None:
-    """SELL・保有判断は build_fair_value_range を直接呼び本経路を通らない。
+def test_outlier_filter_path_importers_are_fixed() -> None:
+    """外れ値フィルタ経路を使う module を固定する。
 
     apply_outlier_filters / build_valuation_summary を import しているモジュールを
     AST で実測して固定する(docstring 内の言及は対象にしない)。
+
+    Issue #179 の時点では BUY 側(buy_signal_service)だけが本経路を通り、
+    「SELL・保有判断は build_fair_value_range を直接呼び本経路を通らない」ことを
+    不変条件として固定していた。Issue #208 の O-E でその判断は意図的に反転し、
+    保有/SELL 側(stock_snapshot_service)も本経路を通るようになった
+    (保有側だけ外れ値が除外されず、手法間の広がりが構造的に大きくなっていたため)。
+
+    したがって本テストの役割は「保有側が通らないことの固定」ではなく、
+    **どの module が本経路を使うかを明示的に固定すること**である。
+    ここに挙げていない module が増えた場合は、その変更が意図的かどうかを
+    必ず確認する(集約経路の非対称は #208 のように後から気付きにくい)。
     """
     import ast
     import pathlib
@@ -385,4 +396,7 @@ def test_sell_side_does_not_use_the_outlier_filter_path() -> None:
             ):
                 importers.append(path.as_posix())
                 break
-    assert sorted(importers) == ["src/jstock_advisor/services/buy_signal_service.py"]
+    assert sorted(importers) == [
+        "src/jstock_advisor/services/buy_signal_service.py",
+        "src/jstock_advisor/services/stock_snapshot_service.py",
+    ]
