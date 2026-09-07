@@ -22,7 +22,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 from pydantic import BaseModel
@@ -39,6 +39,12 @@ from jstock_advisor.providers.candidate_universe.jpx_impl import (
 )
 
 logger = logging.getLogger(__name__)
+# Issue #223(O-0): lambda_handlers配下は各handlerがsetLevel(logging.INFO)して
+# いるが、本moduleは設定しておらず、AWS Lambdaの既定レベル(WARNING)のままだった。
+# そのため「candidate universe promoted」(取得成功とsource_date)がCloudWatchへ
+# 一度も出ておらず、**成功しているのか失敗しているのかをログから区別できない**
+# 状態だった(失敗側はlogger.exception/errorのため出ていた)。
+logger.setLevel(logging.INFO)
 
 _CURRENT_PREFIX = "current"
 _ARCHIVE_PREFIX = "archive"
@@ -80,6 +86,13 @@ class DownloadOutcome:
     promoted: bool
     reason: str | None  # promoted=Falseの場合の失敗理由
     metadata: CacheMetadata | None
+    # Issue #223(O-A): この実行の**後に**Providerが実際に読むことになる
+    # キャッシュのsource_date。promoted=Trueならいま昇格した値、Falseなら
+    # 既存キャッシュの値(取得に失敗してもcacheで継続するため)。
+    # キャッシュ自体が無い場合、またはsource_dateを持たない場合はNone。
+    # metadata.source_dateと違い「失敗した回でも、いま何日前のデータで
+    # 動いているか」を呼び出し側が観測できる。
+    effective_source_date: dt.date | None = None
 
 
 class CandidateUniverseCacheIO:
@@ -348,7 +361,31 @@ def refresh_candidate_universe_cache(
     """
     cache_io = CandidateUniverseCacheIO()
     segments = set(target_market_segments) if target_market_segments is not None else None
-    return [
+    outcomes = [
         _download_listed_issues(cache_io, jpx_listed_issues_url, segments, now),
         _download_jpx400(cache_io, jpx_400_weight_url, now),
     ]
+    return [_with_effective_source_date(cache_io, outcome) for outcome in outcomes]
+
+
+def _with_effective_source_date(
+    cache_io: CandidateUniverseCacheIO, outcome: DownloadOutcome
+) -> DownloadOutcome:
+    """Issue #223(O-A): この実行後にProviderが読むキャッシュのsource_dateを
+    埋める。昇格していればいま書いた値がそれであり、追加のキャッシュ読み取りは
+    不要(失敗した回だけ1回読む)。読み取り自体が失敗しても観測のための情報で
+    あり本処理を止めないため、Noneへフォールバックする。
+    """
+    if outcome.metadata is not None:
+        return replace(outcome, effective_source_date=outcome.metadata.source_date)
+    try:
+        current = cache_io.read_current(outcome.source)
+    except Exception:  # noqa: BLE001 - 観測用のため失敗しても処理を止めない
+        logger.warning(
+            "candidate universe cache metadata read failed source=%s (観測値のみ欠落)",
+            outcome.source,
+        )
+        return outcome
+    if current is None:
+        return outcome
+    return replace(outcome, effective_source_date=current[1].source_date)

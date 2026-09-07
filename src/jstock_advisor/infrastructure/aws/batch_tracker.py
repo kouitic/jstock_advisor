@@ -1430,6 +1430,10 @@ def set_watchlist_batch_total(
     universe_signature: str | None = None,
     triggered_by_batch_id: str | None = None,
     trigger_type: str | None = None,
+    universe_source: str | None = None,
+    promoted: bool | None = None,
+    source_date: str | None = None,
+    cache_age_days: int | None = None,
 ) -> None:
     """1節ステップ2: 候補リスト確定後にtotalを設定し、dispatch_completedを
     falseで初期化する(この時点ではまだSQS送信を開始していないため)。
@@ -1455,6 +1459,16 @@ def set_watchlist_batch_total(
     場合の親batch_id・起動種別("POST_NEW_CANDIDATE_SCREENING")を記録する
     (parent-child関係の監査用)。EventBridge Scheduleからの直接起動(現状は
     NEW_CANDIDATE_SCREENINGのみ)ではいずれもNoneのまま。
+
+    Issue #223(O-A、2026-09-07): `universe_source`("DOWNLOADED"/"CACHE")・
+    `promoted`・`source_date`・`cache_age_days`は、この回の候補ユニバースを
+    今回取得したデータで回したのか既存キャッシュで回したのかと、その元データの
+    公開日・経過日数である。取得失敗はDispatcher側で握りつぶしてキャッシュ継続
+    するためLambda Errorsにも現れず、外形的に知る手段が無かった。
+    `staged_rollout_*`と同じく、ここへ記録した値をfinalize時点の監査ログ
+    (watchlist_batch_finalizer._finalize_completed)が読み出す。
+    WATCHLIST_MAINTENANCEおよびcandidate_universe.provider!="jpx"では
+    Downloaderを実行しないためいずれもNoneのまま。
     """
     ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
     _table().update_item(
@@ -1474,7 +1488,11 @@ def set_watchlist_batch_total(
             "rotation_wrapped = :rotation_wrapped, "
             "universe_signature = :universe_signature, "
             "triggered_by_batch_id = :triggered_by_batch_id, "
-            "trigger_type = :trigger_type"
+            "trigger_type = :trigger_type, "
+            "universe_source = :universe_source, "
+            "promoted = :promoted, "
+            "source_date = :source_date, "
+            "cache_age_days = :cache_age_days"
         ),
         ExpressionAttributeNames={"#total": "total", "#ttl": "ttl"},
         ExpressionAttributeValues={
@@ -1495,6 +1513,10 @@ def set_watchlist_batch_total(
             ":universe_signature": universe_signature,
             ":triggered_by_batch_id": triggered_by_batch_id,
             ":trigger_type": trigger_type,
+            ":universe_source": universe_source,
+            ":promoted": promoted,
+            ":source_date": source_date,
+            ":cache_age_days": cache_age_days,
         },
     )
 
