@@ -94,6 +94,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     NOTIFICATION_OUTCOME_NOT_REQUIRED,
     NOTIFICATION_OUTCOME_SENT,
     NOTIFICATION_OUTCOME_SKIPPED,
+    UNIVERSE_SOURCE_CACHE,
     CandidateProgressRecord,
     UnknownWatchlistJobTypeError,
     WatchlistBatchStatus,
@@ -1045,6 +1046,18 @@ def _finalize_completed(
         code for code, result in repository_results.items() if result == REPOSITORY_RESULT_ADDED
     ]
 
+    # Issue #234(U4): この回の候補一覧の取得に失敗しキャッシュで継続したか。
+    # Issue #223 PR-1aでDispatcherがdispatch時点で測りBatchRunsTableへ記録した
+    # 値を読むだけで、**新しい保存項目は作らない**。
+    # universe_source == "CACHE" かつ universe_promoted が偽の場合のみ真とする
+    # (どちらか一方だけでは、Downloaderを走らせていない回= いずれもNone と
+    #  区別できないため)。
+    universe_fetch_failed = (
+        batch_item.get("universe_source") == UNIVERSE_SOURCE_CACHE
+        and batch_item.get("universe_promoted") is False
+    )
+    universe_source_date = batch_item.get("universe_source_date")
+
     # --- Phase 3: NOTIFICATION_PENDING -> NOTIFICATION_SENT/NOTIFICATION_FAILED ---
     # 運用ハードニング第3弾1節: このフェーズは自己完結的に例外を処理する。
     # notify_watchlist_additions()が例外を送出しても、この関数自体は正常return
@@ -1053,7 +1066,11 @@ def _finalize_completed(
     # (ウォッチリスト追加結果はPhase2で既に確定・保持済みのため失われない)。
     if "finalize_notification_outcome" not in batch_item:
         pending_notification_codes = list(added_stock_codes)
-        if not pending_notification_codes:
+        # Issue #234(U4): 取得に失敗した日は、追加0件でも通知経路へ進む。
+        # 「0件なら送らない」の判定はここ(finalizer)と
+        # notify_watchlist_additions()の2か所にあり、**両方**を変えないと
+        # ここで止まって通知に到達しない。
+        if not pending_notification_codes and not universe_fetch_failed:
             record_notification_resolved(batch_id, now, [], NOTIFICATION_OUTCOME_NOT_REQUIRED)
             notification_outcome = NOTIFICATION_OUTCOME_NOT_REQUIRED
         elif not wc.notification_enabled:
@@ -1091,6 +1108,8 @@ def _finalize_completed(
                 scoring_config=wc.scoring,
                 thresholds_config=wc.thresholds,
                 evaluated_at=started_at,
+                universe_fetch_failed=universe_fetch_failed,
+                universe_source_date=universe_source_date,
             )
             try:
                 notification_service.notify_watchlist_additions(summary, content_hash)

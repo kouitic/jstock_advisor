@@ -858,8 +858,28 @@ def compute_watchlist_addition_content_hash(
     ).hexdigest()[:16]
 
 
+_UNIVERSE_SOURCE_DATE_UNKNOWN = "不明"
+
+
+def _render_universe_fetch_failure_lines(summary: WatchlistAdditionSummary) -> list[str]:
+    """Issue #234(U4): 候補一覧の取得に失敗した日だけ、本文の先頭へ1行入れる。
+
+    残り日数・URL・銘柄は出さない(Issue #223の管理者判断H-1)。残り日数は
+    鮮度上限の設定値に依存するため、上限を変えるたびに文言の意味が変わって
+    しまう。取得成功日は空リストを返し、本文は従来と1文字も変わらない。
+    """
+    if not summary.universe_fetch_failed:
+        return []
+    source_date = summary.universe_source_date or _UNIVERSE_SOURCE_DATE_UNKNOWN
+    return [
+        f"候補一覧の取得に失敗しました。前回取得({source_date}時点)の内容で継続しています。",
+        "",
+    ]
+
+
 def _render_watchlist_addition_header(summary: WatchlistAdditionSummary) -> list[str]:
     return [
+        *_render_universe_fetch_failure_lines(summary),
         "【ウォッチリスト追加】",
         "",
         "自動スクリーニングにより",
@@ -3960,6 +3980,12 @@ class LineNotificationService:
         渡すこと。表示対象はWatchlistRepository.add_if_new()が実際にTrueを
         返した銘柄のみ。追加が1件も無い場合は送信しない。
 
+        Issue #234(U4): 例外が1つある。`summary.universe_fetch_failed`が真
+        (= その回の候補一覧の取得に失敗しキャッシュで継続した)の場合は、
+        追加0件でも送信し、本文の先頭にその事実を1行入れる。取得に失敗した
+        日は候補が凍結して追加0件になりやすいため、従来の条件のままでは
+        **知らせたい日ほど届かない**ことになる。
+
         運用ハードニング第3弾4節: content_hashは呼び出し元が
         compute_watchlist_addition_content_hash()で算出した固定値を渡すこと
         (この関数自体はhashを再計算しない。再試行のたびに同じ値が渡されることで
@@ -3974,7 +4000,11 @@ class LineNotificationService:
         execution_mode/notification_modeを一切扱わず常にNORMALで動くため、
         この分岐に到達することはない。
         """
-        if not summary.items:
+        # Issue #234(U4): 追加0件でも、候補一覧の取得に失敗した日は送る。
+        # 取得に失敗した日は候補が凍結して追加0件になりやすく、
+        # 「追加が無いから送らない」ままでは**知らせたい日ほど届かない**。
+        # 取得に成功した日の「0件なら送らない」は従来どおり維持する。
+        if not summary.items and not summary.universe_fetch_failed:
             return False
 
         pseudo_stock_code = "__batch__:watchlist_auto_addition"
