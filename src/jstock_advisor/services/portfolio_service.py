@@ -19,7 +19,11 @@ from typing import Any
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import AccountType
 from jstock_advisor.domain.entities.holding import Holding, PurchaseLot, summarize_lots
-from jstock_advisor.domain.entities.owner import build_holding_id, normalize_and_validate_owner
+from jstock_advisor.domain.entities.owner import (
+    build_holding_id,
+    log_ref,
+    normalize_and_validate_owner,
+)
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.collection_store import running_on_lambda
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
@@ -325,7 +329,7 @@ class PortfolioService:
         購入・メタ情報更新では更新しない(既存値を保持する)。
         """
         if not lots:
-            raise ValueError(f"holding_id{holding_id}の購入ロットがありません")
+            raise ValueError(f"holding_ref={log_ref(holding_id)}の購入ロットがありません")
 
         _, _, total_amount, first_date, last_date = summarize_lots(lots)
 
@@ -508,7 +512,7 @@ class PortfolioService:
         holding_id = build_holding_id(normalize_and_validate_owner(owner), stock_code)
         existing = self._holdings.get(holding_id)
         if existing is None:
-            raise ValueError(f"holding_id{holding_id}の保有銘柄が見つかりません")
+            raise ValueError(f"holding_ref={log_ref(holding_id)}の保有銘柄が見つかりません")
         merged = {
             **existing.model_dump(mode="python"),
             **fields,
@@ -569,7 +573,7 @@ class PortfolioService:
         holding_id = build_holding_id(normalized_owner, stock_code)
         lots = sorted(self._lots.list_by_holding(holding_id), key=lambda lot: lot.purchase_date)
         if not lots:
-            raise ValueError(f"holding_id{holding_id}の購入ロットがありません")
+            raise ValueError(f"holding_ref={log_ref(holding_id)}の購入ロットがありません")
 
         total_held = sum(lot.shares for lot in lots)
         if shares > total_held:
@@ -711,7 +715,9 @@ class PortfolioService:
         if self._holdings.get(holding_id) is not None:
             existing_holding_raw = self._holdings.get_raw_data(holding_id)
             if existing_holding_raw is None:
-                raise ValueError(f"保有ID{holding_id}のデータ取得に失敗しました")
+                raise ValueError(
+                    f"保有ID holding_ref={log_ref(holding_id)}のデータ取得に失敗しました"
+                )
 
         if purchase is None:
             holding_delete = (
