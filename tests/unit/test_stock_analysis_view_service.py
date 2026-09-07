@@ -1811,7 +1811,13 @@ def test_legacy_sell_hold_quantitative_rules_show_status_and_do_not_reverse(
 ) -> None:
     """本番実データUAT(2026-08)で発覚した修正条件C/D/E: 定量値+閾値形式の
     ルール(balance_sheet_insolvency等)は、数値だけでなくstatus(該当あり/
-    該当なし)を明示する。explanationが保存されていればそれを優先して使う。
+    該当なし)を明示する。
+
+    Issue #222(N-3 / N-4)で期待値を更新した。「explanationがあれば
+    それを優先する」という当初の扱いは、誤読(数値だけを見て該当していると
+    読む)は防げたが、**判断材料である実値と基準を捨てていた**。
+    status_wordと実値・基準は両立できるため、実値と基準は常に出し、
+    explanationはTRIGGEREDのときだけ補足として付ける。
     同じ表示関数を使う複数ルールで、TRIGGERED/NOT_TRIGGEREDの意味が反転
     しないことも確認する(balance_sheet_insolvency=NOT_TRIGGERED、
     financial_health_severe_deterioration=TRIGGEREDという逆方向の2件を
@@ -1862,12 +1868,20 @@ def test_legacy_sell_hold_quantitative_rules_show_status_and_do_not_reverse(
 
     text = service.build_holding_analysis_text("本人", "8306")
 
-    # C: NOT_TRIGGERED + explanationあり → 「該当なし」+ explanationがそのまま使われる。
-    assert "債務超過：該当なし（自己資本比率はマイナスではない(債務超過ではない)）" in text
-    # D: TRIGGERED → 「該当あり」が明示される。
+    # C: NOT_TRIGGERED → 「該当なし」+ **実値と基準**。
+    # Issue #222(N-3 / N-4)で期待値を更新した。従来はexplanationを優先して
+    # 実値と基準を捨てており、「債務超過：該当なし（自己資本比率はマイナス
+    # ではない(債務超過ではない)）」のようにlabel + status_word + explanationが
+    # 同じことを3回述べる一方、判断材料(36.4%という実値と0%という基準)が
+    # 失われていた。status_wordと実値・基準は両立できる。
+    assert "債務超過：該当なし（36.4%、基準0%）" in text
+    # N-3: NOT_TRIGGEREDのexplanationは結論の言い換えのため出さない。
+    assert "自己資本比率はマイナスではない" not in text
+    # D: TRIGGERED → 「該当あり」+ 実値と基準 + explanation。
+    # TRIGGEREDのexplanationは言い換えではない情報を持つため残す。
     assert (
-        "財務健全性の重大な悪化(一般事業会社基準)：該当あり（自己資本比率が閾値を下回っている）"
-        in text
+        "財務健全性の重大な悪化(一般事業会社基準)："
+        "該当あり（8.0%、基準15.0%、自己資本比率が閾値を下回っている）" in text
     )
     # E: 同じ表示関数を使う2ルールで意味が反転していないこと
     # (該当なし側に「該当あり」、該当あり側に「該当なし」が紛れ込んでいない)。
@@ -1939,3 +1953,216 @@ def test_legacy_sell_hold_continuous_decline_shows_status_without_reversal(
     assert "営業利益の継続悪化：該当あり" not in text
     assert "営業キャッシュフローの継続悪化：該当なし" not in text
     assert "現行データでは" not in text
+
+
+# --- Issue #222: 【銘柄分析】通知の文面品質 -----------------------------------
+
+
+def _audit_with_continuous_decline(store_dir: Path, **detail) -> None:
+    """継続悪化ルール1件だけを持つ監査証跡を保存する(Issue #222 N-1)。"""
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    base: dict = dict(
+        rule_name="continuous_operating_income_decline",
+        status="NOT_TRIGGERED",
+        current_value="98000000000.0",
+        previous_value="102855000000.0",
+        comparison_period="2025-03-31〜2026-03-31",
+        explanation="営業利益の継続悪化は検出されなかった(必要は2年連続の悪化。実際は1年連続)",
+    )
+    base.update(detail)
+    AuditLogRepository(store_dir=store_dir).save(
+        AuditLogEntry(
+            audit_id="audit-222",
+            timestamp=_NOW,
+            decision_type="sell_signal",
+            stock_code="8306",
+            input_values={"rule_evidence_details": [base]},
+            calculation_formulas={},
+            output_values={},
+            data_sources=[],
+            rule_version="v1",
+        )
+    )
+    _save_holding_eval_record(
+        store_dir,
+        authoritative_recommendation_id=None,
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="hold",
+        authoritative_audit_log_id="audit-222",
+    )
+
+
+def test_n1_large_amounts_are_shown_in_oku_yen_not_raw_float(tmp_path: Path) -> None:
+    """N-1: 監査証跡の生の値をそのまま埋め込まず、億円へ換算して表示する。
+
+    従来は「前期102855000000.0円→今期98000000000.0円」と出ており、桁を数えないと
+    読めなかった。BUY側の表示は既に_yen()を通しており、SELL/HOLD側の事実行だけが
+    通っていなかった(BUY側との不整合)。
+    """
+    _audit_with_continuous_decline(tmp_path)
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "前期1,028.6億円→今期980.0億円" in text
+    # 生の値がそのまま残っていないこと。
+    assert "102855000000" not in text
+    assert "98000000000" not in text
+
+
+def test_n1_amounts_under_one_oku_use_the_existing_yen_formatting(tmp_path: Path) -> None:
+    """N-1: 1億円未満は既存の_yen()と同じ桁区切りの円表記にする。
+
+    小さい金額まで億円へ丸めると、丸めで情報が落ちるだけで読みやすくならない。
+    """
+    _audit_with_continuous_decline(
+        tmp_path, current_value="8000000.0", previous_value="12345678.0"
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "前期12,345,678円→今期8,000,000円" in text
+    assert "億円" not in text
+
+
+def test_n1_unparsable_amounts_are_left_as_they_are(tmp_path: Path) -> None:
+    """N-1: 数値として解釈できない値は握り潰さず、元の文字列のまま出す。
+
+    保存値を推測で補正しない(表示のための整形であり、判定には一切使わない)。
+    """
+    _audit_with_continuous_decline(tmp_path, current_value="不明", previous_value="N/A")
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "前期N/A→今期不明" in text
+
+
+def test_n4_threshold_rules_show_status_with_actual_value_and_threshold(
+    tmp_path: Path,
+) -> None:
+    """N-4: status_wordと実値・基準を両立させる。
+
+    従来はexplanationがあると実値と閾値が捨てられ、status_wordは必ず付くため
+    実質「explanationがあれば数値は出ない」動作だった。誤読は防げたが
+    判断材料が失われていた。
+    """
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    AuditLogRepository(store_dir=tmp_path).save(
+        AuditLogEntry(
+            audit_id="audit-222b",
+            timestamp=_NOW,
+            decision_type="sell_signal",
+            stock_code="8306",
+            input_values={
+                "rule_evidence_details": [
+                    {
+                        "rule_name": "balance_sheet_insolvency",
+                        "status": "NOT_TRIGGERED",
+                        "current_value": "36.4%",
+                        "threshold": "0%",
+                        "explanation": "自己資本比率はマイナスではない(債務超過ではない)",
+                    }
+                ]
+            },
+            calculation_formulas={},
+            output_values={},
+            data_sources=[],
+            rule_version="v1",
+        )
+    )
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id=None,
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="hold",
+        authoritative_audit_log_id="audit-222b",
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "債務超過：該当なし（36.4%、基準0%）" in text
+    # N-3: label + status_wordの言い換えであるexplanationは出さない。
+    assert "自己資本比率はマイナスではない" not in text
+
+
+def test_n5_profit_taking_status_is_shown_for_a_watch_recommendation(
+    tmp_path: Path,
+) -> None:
+    """N-5: 含み益率・上値余地・まだ利確しない理由を本文へ出す。
+
+    従来は含み益率が監視水準を超える保有でも、通知本文にこれらが一切出ず、
+    「なぜまだ利確しないのか」を利用者が読み取れなかった。
+    """
+    rec = Recommendation(
+        recommendation_id="rec-222-watch",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+        reasons=["含み益率が監視の基準に達しました"],
+        unrealized_profit_loss_pct=Decimal("32.5"),
+        profit_taking_upside_pct=8.4,
+        not_yet_action_reasons=[
+            "決算発表が近いため、価格基準の利確判定を保留しています",
+        ],
+    )
+    RecommendationRepository(store_dir=tmp_path).save(rec)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id="rec-222-watch",
+        authoritative_engine="PROFIT_TAKING",
+        authoritative_outcome_category="watch",
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "■ 利確判定の状況" in text
+    assert "含み益率：32.5%" in text
+    assert "想定上限価格までの上値余地：8.4%" in text
+    assert "まだ利確しない理由：" in text
+    assert "・決算発表が近いため、価格基準の利確判定を保留しています" in text
+
+
+def test_n5_upside_line_is_omitted_when_the_ceiling_price_is_unusable(
+    tmp_path: Path,
+) -> None:
+    """N-5: 上値余地が無いときは行そのものを出さない。
+
+    profit_taking_upside_pctは想定上限価格が使える場合にだけ設定される。
+    値が無いのに「上値余地なし」と書くと「余地が0」と誤読されるため、
+    理由の側(not_yet_action_reasons)へ委ねる。
+    """
+    rec = Recommendation(
+        recommendation_id="rec-222-nofv",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+        reasons=["含み益率が監視の基準に達しました"],
+        unrealized_profit_loss_pct=Decimal("41.0"),
+        profit_taking_upside_pct=None,
+        not_yet_action_reasons=[
+            "適正価格の手法間の広がりが利確判定の基準(1.30倍)を超えているため、"
+            "価格基準の利確判定に使用していません",
+        ],
+    )
+    RecommendationRepository(store_dir=tmp_path).save(rec)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id="rec-222-nofv",
+        authoritative_engine="PROFIT_TAKING",
+        authoritative_outcome_category="watch",
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：41.0%" in text
+    assert "上値余地" not in text
+    assert "価格基準の利確判定に使用していません" in text

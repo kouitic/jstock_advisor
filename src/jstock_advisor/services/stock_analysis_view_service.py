@@ -25,7 +25,7 @@ HoldingEvaluationRecord)をユーザーへ分かりやすく説明するだけ�
 
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from jstock_advisor.domain.entities.audit import AuditLogEntry
@@ -856,6 +856,33 @@ _FLAT_NEGATIVE_SUMMARY_LABEL: dict[str, str] = {
 _FLAT_NEGATIVE_CURRENT_VALUES = frozenset({"False", "not_detected", "NONE"})
 
 
+# Issue #222(N-1): 監査証跡の金額は文字列で保存されており、そのまま埋め込むと
+# 「前期102855000000.0円」のように読めない。1億円以上は「億円」へ換算し、
+# それ未満は既存の_yen()(桁区切り・ROUND_HALF_UP)へ通す。
+_OKU = Decimal(10) ** 8
+
+
+def _audit_amount_display(raw: object) -> str:
+    """監査証跡に文字列で保存された金額を、読める形へ整形する(Issue #222 N-1)。
+
+    数値として解釈できない値は**握り潰さず、元の文字列のまま**返す
+    (保存値を推測で補正しない。表示のための整形であり判定には一切使わない)。
+
+    1億円以上は小数第1位までの「億円」表記にする。丸めにより下位の桁は
+    落ちるが、営業利益のような大きい金額では桁区切りだけの表示より
+    誤読が少ない。1億円未満は_yen()と同じ桁区切りの円表記にする。
+    """
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return str(raw)
+    if value.is_nan() or value.is_infinite():
+        return str(raw)
+    if abs(value) >= _OKU:
+        return f"{value / _OKU:,.1f}億円"
+    return _yen(value)
+
+
 def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
     """Legacy SELLの1ルール分の監査証跡から、実際に値が残っているものだけを
     事実の1行として組み立てる(内部enum名/真偽値をそのまま出さず自然文へ
@@ -888,9 +915,12 @@ def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
         period = detail.get("comparison_period")
         if previous_value is not None:
             period_note = f"、{period}" if period else ""
-            trend = f"前期{previous_value}円→今期{current_value}円{period_note}"
+            trend = (
+                f"前期{_audit_amount_display(previous_value)}"
+                f"→今期{_audit_amount_display(current_value)}{period_note}"
+            )
         else:
-            trend = f"{current_value}円"
+            trend = _audit_amount_display(current_value)
         body = f"{trend}、{explanation}" if explanation else trend
         if status_word is not None:
             return f"{label}：{status_word}（{body}）"
@@ -899,9 +929,18 @@ def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
     threshold = detail.get("threshold")
     if threshold is not None:
         if status_word is not None:
-            # explanationが無い場合の括弧多重ネスト("該当なし（36.4%（基準…）」)
-            # を避けるため、status_word有りの場合は「、」区切りの平文にする。
-            body = explanation if explanation else f"{current_value}、基準{threshold}"
+            # Issue #222(N-3 / N-4): 従来はexplanationがあると実値と閾値を捨てて
+            # いた。status_wordは必ず付くため、実質「explanationがあれば数値は
+            # 出ない」動作であり、誤読は防げても判断材料が失われていた。
+            #
+            # 「該当なし」と実値・基準は両立できるため、**常に実値と基準を出す**。
+            # explanationはNOT_TRIGGEREDのときlabel + status_wordの言い換えに
+            # なる(「債務超過：該当なし（自己資本比率はマイナスではない
+            # (債務超過ではない)）」)ため付けない。TRIGGEREDのexplanationは
+            # 一次情報の有無など言い換えでない情報を持つため残す。
+            body = f"{current_value}、基準{threshold}"
+            if explanation and str(status_value) == "TRIGGERED":
+                body = f"{body}、{explanation}"
             return f"{label}：{status_word}（{body}）"
         return f"{label}：{current_value}（基準{threshold}）"
 
@@ -1123,6 +1162,10 @@ class StockAnalysisViewService:
         else:
             lines.append(_UNRESTORABLE)
 
+        profit_taking_lines = _profit_taking_status_lines(recommendation)
+        if profit_taking_lines:
+            lines += ["", "■ 利確判定の状況", *profit_taking_lines]
+
         quantity_lines = _sell_quantity_lines(recommendation)
         if quantity_lines:
             lines += ["", "■ 売却目安の根拠", *quantity_lines]
@@ -1145,6 +1188,32 @@ _HOLDING_JUDGMENT_LABEL: dict[RecommendationType, str] = {
     RecommendationType.STRONG_SELL_CONSIDERATION: "売却を強く検討",
     RecommendationType.URGENT_HOLDING_REVIEW: "緊急確認を推奨",
 }
+
+
+def _profit_taking_status_lines(recommendation: Recommendation) -> list[str]:
+    """利確判定の状況(含み益率・上値余地・まだ利確しない理由)を組み立てる
+    (Issue #222 N-5)。
+
+    含み益率が監視水準を超えていても、通知本文には含み益率・上値余地・保留理由の
+    いずれも出ていなかった。判定そのものは行わず、Recommendationに既に載っている
+    値を表示するだけである(**判定ロジックには一切触れない**)。
+
+    上値余地(profit_taking_upside_pct)は`_fair_value_action_usable`が真のときだけ
+    設定される。値が無い場合に「上値余地なし」と書くと「余地が0」と誤読されるため、
+    Issue #221で追加されたnot_yet_action_reasons(適正価格を使えない理由を含む)へ
+    委ねて、上値余地の行そのものを出さない。
+    """
+    lines: list[str] = []
+    gain_pct = recommendation.unrealized_profit_loss_pct
+    if gain_pct is not None:
+        lines.append(f"含み益率：{gain_pct:.1f}%")
+    upside_pct = recommendation.profit_taking_upside_pct
+    if upside_pct is not None:
+        lines.append(f"想定上限価格までの上値余地：{upside_pct:.1f}%")
+    if recommendation.not_yet_action_reasons:
+        lines.append("まだ利確しない理由：")
+        lines += [f"・{reason}" for reason in recommendation.not_yet_action_reasons]
+    return lines
 
 
 def _sell_quantity_lines(recommendation: Recommendation) -> list[str]:
