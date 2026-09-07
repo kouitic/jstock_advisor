@@ -95,7 +95,18 @@ class JsonCollectionStore[T: BaseModel]:
 
         Issue #63 PR-2(A-U2)。デコードできなかったレコードを書き込みのたびに
         取りこぼさないため、呼び出し側は `_load()` が返した quarantined を渡す。
-        明示的な `delete(id)` だけがそれを消せる。
+
+        quarantined が消えるのは、**その id を名指しした操作**を行った場合だけである。
+
+            delete(id)                       消える(自己修復の経路)
+            upsert / upsert_many /
+            apply_batch の puts・delete_ids  同じ id を書けば置換・削除される
+            insert_if_absent                 既存とみなして拒否する(上書きしない)
+            それ以外の書き込み               触れない(raw のまま残る)
+
+        つまり「他の id への書き込みに巻き込まれて消える」ことが無い、という保証で
+        あって、「delete でしか消えない」という意味ではない。同じ id への upsert は
+        壊れたレコードを正しい値で置き換える正当な復旧手段である。
         """
         payload: list[dict[str, Any]] = [
             json.loads(item.model_dump_json()) for item in items.values()
