@@ -34,6 +34,13 @@ yfinance>=1.5.2,<1.6.0
 # the deployed Lambda dependencies, so adding it to only one of the two would
 # silently drop it in production).
 xlrd>=2.0,<3.0
+# Issue #223 PR-2 (2026-09): JPX switched the listed-issues file from .xls to
+# .xlsx on 2026-09-03 without changing the URL token or the file-name stem.
+# xlrd 2.x cannot read .xlsx, so openpyxl is required. xlrd is kept so that the
+# parser stays able to read both formats (the container is chosen by the
+# leading magic bytes, not by the extension). Also added to pyproject.toml's
+# realdata extra with the same range (the two files are managed independently).
+openpyxl>=3.1,<4.0
 # Weekly improvement review revamp (2026-08): GitHub App JWT auth for the
 # GitHub Issue integration (infrastructure/github/client.py, used by
 # WeeklyReviewFunction only). The [crypto] extra pulls in the cryptography
