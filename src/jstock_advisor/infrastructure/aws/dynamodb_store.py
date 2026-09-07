@@ -109,9 +109,9 @@ class DynamoDbCollectionStore[T: BaseModel]:
         `STRICT` では最初の失敗で元の例外がそのまま送出されるため、
         **呼び出し側から見た挙動は現行と同じ**(打ち切り位置も変わらない)。
 
-        `get()` / `get_consistent()` は要求した 1 件しか検証しないため
-        本経路を通さない(1 件の不正が他の id の取得を妨げないという既存の
-        性質を変えない)。
+        `get()` / `get_consistent()` は要求した 1 件しか検証しないため、
+        本経路ではなく `_decode_one()` を通す(1 件の不正が他の id の取得を
+        妨げないという既存の性質を変えない)。
         """
         for raw in raw_items:
             item_id = str(raw.get(self._id_field, ""))
@@ -119,6 +119,39 @@ class DynamoDbCollectionStore[T: BaseModel]:
                 yield self._from_item(raw)
             except Exception as error:  # noqa: BLE001 - ポリシーに委ねるため広く捕捉する
                 collector.handle(item_id, error)
+
+    def _decode_one(self, item_id: str, raw: dict[str, Any]) -> T | None:
+        """主キー指定で取得した 1 件をデコードする(Issue #63 PR-3a)。
+
+        `get()` / `get_consistent()` 用。全件経路(`_decode_page()`)と違い、
+        検証するのは要求された 1 件だけであり、他の id の取得には影響しない。
+
+            STRICT(既定)  元の例外をそのまま送出する。**現行と同一の挙動**
+            LENIENT       失敗を記録して `None` を返す。呼び出し側から見ると
+                          「その id が無い」= cache miss と同じであり、
+                          provider から取り直して上書きすれば自然に解消する
+
+        **なぜ主キー経路にも接続が要るか。** cache の Production 読み取りは
+        5 経路とも主キー指定の `get()` である(`watchlist_data_cache` の
+        `get_or_fetch`、EDINET の 3 repository)。PR-2 では `_decode_page()` を
+        全件経路(Scan / Query / BatchGetItem)にしか入れていないため、
+        `LENIENT` を宣言しても Lambda では効かず、壊れた 1 件が従来どおり
+        例外を送出していた(ローカル JSON 実装は `_read_all()` を経由するため
+        効いており、backend によって挙動が食い違っていた)。
+        """
+        collector = self._collector()
+        try:
+            return self._from_item(raw)
+        except Exception as error:  # noqa: BLE001 - ポリシーに委ねるため広く捕捉する
+            if self._failure_policy is RecordFailurePolicy.FAIL_SAFE_SUPPRESS:
+                # 「判定不能」を伝える戻り値がこの signature には無い。
+                # `None` を返すと呼び出し側は「レコードが無い」と読み、
+                # FAIL_SAFE_SUPPRESS が防ごうとしている**誤った判断**
+                # (notification_log なら重複送信)をそのまま起こす。
+                # 伝えられない以上は fail-closed とし、元の例外を送出する。
+                raise
+            collector.handle(item_id, error)
+            return None
 
     def list_all(self) -> list[T]:
         return list(self.iter_all())
@@ -147,13 +180,16 @@ class DynamoDbCollectionStore[T: BaseModel]:
     def get(self, item_id: str) -> T | None:
         response = self._table.get_item(Key={self._id_field: item_id})
         item = response.get("Item")
-        return self._from_item(item) if item is not None else None
+        return self._decode_one(item_id, item) if item is not None else None
 
     def get_raw_data(self, item_id: str) -> str | None:
         """`data`属性の生JSON文字列をそのまま返す(モデルを経由した再シリアライズを
         行わない)。楽観ロックのConditionExpression(#data = :expected_data)に
         使う値は、実際にDynamoDBへ保存されているバイト列と完全一致している
-        必要があるため、_from_item()を経由しない。"""
+        必要があるため、_from_item()を経由しない。
+
+        モデル検証を通らないため、`failure_policy`の対象外である
+        (Issue #63 PR-3a。検証しない経路に「検証失敗の扱い」は存在しない)。"""
         response = self._table.get_item(Key={self._id_field: item_id})
         item = response.get("Item")
         return str(item["data"]) if item is not None else None
@@ -167,7 +203,7 @@ class DynamoDbCollectionStore[T: BaseModel]:
         """
         response = self._table.get_item(Key={self._id_field: item_id}, ConsistentRead=True)
         item = response.get("Item")
-        return self._from_item(item) if item is not None else None
+        return self._decode_one(item_id, item) if item is not None else None
 
     def upsert(self, item: T) -> None:
         self._table.put_item(Item=self._to_item(item))

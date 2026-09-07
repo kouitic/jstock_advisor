@@ -135,10 +135,15 @@ def test_writing_keeps_the_broken_record_as_raw(tmp_path: Path) -> None:
 
 
 def test_delete_removes_the_broken_record(tmp_path: Path) -> None:
-    """★ 明示的な delete(id) だけが不正レコードを消せる（自己修復）。
+    """★ delete(id) で不正レコードを消せる（自己修復）。
 
     従来は 16 メソッドすべてが全件検証を経由するため delete すら通らず、
     壊れたレコードを消して復旧する手段が無かった。
+
+    Issue #63 のレビュー所見 F-3 で docstring を是正した。**「delete だけが
+    消せる」ではない。** 同じ id への upsert / upsert_many / apply_batch でも
+    置換される(insert_if_absent のみ拒否する)。A-U2 が保証しているのは
+    「他の id への書き込みに巻き込まれて消えない」ことである。
     """
     path = _seed_one_broken(tmp_path)
     store = _store(tmp_path, policy=RecordFailurePolicy.LENIENT)
