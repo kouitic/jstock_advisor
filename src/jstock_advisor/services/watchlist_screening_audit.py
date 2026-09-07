@@ -31,6 +31,23 @@ REPOSITORY_RESULT_FAILED = "repository_failed"
 # 追加をスキップした場合。
 REPOSITORY_RESULT_SKIPPED_COOLDOWN = "skipped_cooldown"
 
+# --- Issue #62 Phase B(2026-09): 自動削除の非原子性の解消 ---
+# 自動削除の監査記録が「削除時にその場で書かれた完全な記録」なのか、
+# 「中断した実行を次回のfinalizeが削除履歴から補完した部分記録」なのかを
+# 記録自体から区別できるようにする。
+REMOVAL_AUDIT_COMPLETION_COMPLETE = "COMPLETE"
+REMOVAL_AUDIT_COMPLETION_RECONSTRUCTED = "RECONSTRUCTED_FROM_REMOVAL_HISTORY"
+# 補完経路では WatchlistItem が既に削除済みのため復元できない項目。
+_REMOVAL_AUDIT_UNAVAILABLE_FIELDS = [
+    "stock_name",
+    "registered_at",
+    "registration_policy",
+    "last_monitoring_score",
+    "last_matched_target_types",
+    "consecutive_not_qualified_count",
+    "hard_exclusion_reasons",
+]
+
 _MAX_ERROR_SUMMARY_LENGTH = 300
 
 
@@ -151,44 +168,84 @@ def record_repository_result_audit(
     )
 
 
+def build_removal_audit_id(stock_code: str, removed_at: dt.datetime) -> str:
+    """自動削除の監査記録に使う決定的なaudit_id(Issue #62 Phase B)。
+
+    削除履歴(`WatchlistRemovalHistory`)は`stock_code`と`removed_at`を保持する
+    ため、**通常経路でも補完経路でも同じ値を再現できる**。これにより
+    `record_if_absent()`が「同じ削除に対する監査記録は高々1件」を保証する。
+
+    `removed_at`を含める理由: 同一銘柄が削除→クールダウン終了→再追加→再削除と
+    複数回削除されうるため、`stock_code`だけでは2回目以降の削除の監査記録が
+    「既に存在する」と誤判定されて失われる。
+    """
+    return f"{DECISION_TYPE_REMOVAL}:{stock_code}:{removed_at.isoformat()}"
+
+
 def record_removal_audit(
     stock_code: str,
     stock_name: str | None,
-    registered_at: dt.datetime,
+    registered_at: dt.datetime | None,
     registration_policy: str | None,
     removed_at: dt.datetime,
     removal_reason: str,
     removal_category: str,
     last_monitoring_score: float | None,
     last_matched_target_types: list[str],
-    consecutive_not_qualified_count: int,
+    consecutive_not_qualified_count: int | None,
     hard_exclusion_reasons: list[str],
     now: dt.datetime,
     batch_id: str | None,
+    reconstructed_from_history: bool = False,
 ) -> None:
     """AUTO_SCREENING銘柄の自動削除を記録する(計画Part C-6)。
 
     「なぜ自動で削除されたか」を後からこの記録だけで再現できることを最低限の
     要件とする。LINE通知は行わない(即時の売買アクションを求めるものではない
     ため、計画Part C全体の方針)。
+
+    Issue #62 Phase B: `build_removal_audit_id()`の決定的audit_idと
+    `record_if_absent()`を使う。削除後・監査記録前に中断した実行を次回の
+    finalizeが補完する際(`reconstructed_from_history=True`)、既に記録済みなら
+    何もしないため、補完は**何度走らせても監査記録が重複しない**。
+
+    `reconstructed_from_history=True`の場合、削除済みのWatchlistItemから
+    しか取れない項目(`stock_name` / `registered_at` /
+    `last_monitoring_score` / `last_matched_target_types` /
+    `consecutive_not_qualified_count` / `hard_exclusion_reasons`)は復元できない。
+    **Noneや空リストを「値が無かった」ように見せず**、
+    `audit_completion`で「履歴から補完した部分記録である」ことを明示する
+    (欠測と復元不能を取り違えさせない)。
     """
-    AuditService().record(
+    output_values: dict[str, Any] = {
+        "stock_name": stock_name,
+        "registered_at": registered_at.isoformat() if registered_at is not None else None,
+        "registration_policy": registration_policy,
+        "removed_at": removed_at.isoformat(),
+        "removal_reason": removal_reason,
+        "removal_category": removal_category,
+        "last_monitoring_score": last_monitoring_score,
+        "last_matched_target_types": last_matched_target_types,
+        "consecutive_not_qualified_count": consecutive_not_qualified_count,
+        "hard_exclusion_reasons": hard_exclusion_reasons,
+        "audit_completion": (
+            REMOVAL_AUDIT_COMPLETION_RECONSTRUCTED
+            if reconstructed_from_history
+            else REMOVAL_AUDIT_COMPLETION_COMPLETE
+        ),
+    }
+    if reconstructed_from_history:
+        # 復元できなかった項目を明示する。null が「そもそも値が無かった」のか
+        # 「削除済みで取得できなかった」のかを、記録だけで区別できるようにする。
+        output_values["unavailable_fields"] = _REMOVAL_AUDIT_UNAVAILABLE_FIELDS
+
+    AuditService().record_if_absent(
+        audit_id=build_removal_audit_id(stock_code, removed_at),
         decision_type=DECISION_TYPE_REMOVAL,
         stock_code=stock_code,
         input_values={"batch_id": batch_id, "stock_code": stock_code},
         calculation_formulas={},
-        output_values={
-            "stock_name": stock_name,
-            "registered_at": registered_at.isoformat(),
-            "registration_policy": registration_policy,
-            "removed_at": removed_at.isoformat(),
-            "removal_reason": removal_reason,
-            "removal_category": removal_category,
-            "last_monitoring_score": last_monitoring_score,
-            "last_matched_target_types": last_matched_target_types,
-            "consecutive_not_qualified_count": consecutive_not_qualified_count,
-            "hard_exclusion_reasons": hard_exclusion_reasons,
-        },
+        output_values=output_values,
         data_sources=[],
         rule_version=RULE_VERSION_PLACEHOLDER,
         timestamp=now,
