@@ -19,9 +19,13 @@ on:
 # pushとpull_requestでgroupが異なる点に注意(head_refはpull_requestでのみ設定され、
 # pushではrefが"refs/heads/<branch>"になる)。これは意図的であり、branchへのpushが
 # 同じbranchのPR実行(required checksの出所)をキャンセルしない状態を保つ。
+#
+# mainへのpushは対象外(連続mergeで先行runを落とさない)。mainのCI runは
+# development_workflow.md 2.6.6のlock解放条件(MAIN_CI_PASS / MAIN_HEAD_EXACT)の
+# 根拠であり、キャンセルされるとその merge commit に対する PASS の証拠が残らない。
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   lint:

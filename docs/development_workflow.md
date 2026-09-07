@@ -1099,6 +1099,10 @@ CI が push で走るようになったのは「全体回帰を早く見られ�
 ```
 同一 branch へ続けて push した場合、古い実行は自動でキャンセルされる。
 最後の push の結果だけを見ればよい。
+
+main への push は自動キャンセルの対象外である(連続 merge のとき、先に merge した
+commit の main CI run を後続の merge が落とさないため。2.6.6 の MAIN_CI_PASS /
+MAIN_HEAD_EXACT はその run を根拠にする)。
 ```
 
 ---
