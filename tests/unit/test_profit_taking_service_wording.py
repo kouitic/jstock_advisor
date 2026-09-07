@@ -7,6 +7,7 @@
 確認する。
 """
 
+import dataclasses
 from decimal import Decimal
 
 import pytest
@@ -17,10 +18,12 @@ from jstock_advisor.domain.entities.valuation import (
     FairValueMethodResult,
     FairValueRange,
     FairValueUnusableReasonCode,
+    ProfitTakingFairValueBlockReasonCode,
 )
 from jstock_advisor.domain.signals.profit_taking import (
     MitigatingFactorInputs,
     ProfitTakingConditionInputs,
+    ProfitTakingResult,
     evaluate_profit_taking,
 )
 from jstock_advisor.domain.signals.trading_unit_feasibility import TradingUnitFeasibility
@@ -192,3 +195,66 @@ def test_issue21_no_unusable_wording_when_code_is_none() -> None:
     )
     joined = " ".join(reasons)
     assert "価格基準の利確判定に使用していません" not in joined
+
+
+# --- Issue #221 Phase 1(U2): 遮断要因と降格の事実を理由へ出す ---------------
+
+
+def _reasons_for(result: ProfitTakingResult, *, is_uptrend: bool = False) -> list[str]:
+    return _build_not_yet_action_reasons(
+        result=result,
+        config=_CONFIG,
+        fair_value_overall_confidence=ConfidenceLevel.HIGH,
+        industry_sector=ProfitTakingIndustrySector.GENERAL,
+        industry_model_applied=True,
+        days_to_next_earnings_business_days=None,
+        trading_unit_feasibility=_FEASIBLE,
+        has_strong_counter_material=False,
+        is_uptrend=is_uptrend,
+        fair_value_unusable_reason_code=None,
+    )
+
+
+def test_profit_taking_spread_block_reason_is_shown_with_config_threshold() -> None:
+    """1.30 帯の遮断理由が表示され、閾値は config の実値が埋め込まれる。"""
+    base = _result()
+    result = dataclasses.replace(
+        base,
+        fair_value_action_block_reason_code=(
+            ProfitTakingFairValueBlockReasonCode.METHOD_SPREAD_TOO_WIDE_FOR_ACTION.value
+        ),
+    )
+    reasons = _reasons_for(result)
+
+    cbj = _CONFIG.profit_taking.condition_based_judgment
+    threshold = cbj.max_fair_value_spread_ratio_for_partial
+    matched = [r for r in reasons if "手法間の広がり" in r]
+    assert matched, reasons
+    # config の実値をそのまま使い、書式のみ指定する(値はハードコードしない)。
+    assert f"{threshold:.2f}倍" in matched[0]
+
+
+def test_no_spread_block_reason_when_code_is_absent() -> None:
+    reasons = _reasons_for(_result())
+    assert not [r for r in reasons if "手法間の広がり" in r]
+
+
+def test_downgrade_facts_are_shown_in_reasons() -> None:
+    """緩和要因・上昇トレンドが実際に判定を下げた事実が理由に出る。"""
+    result = dataclasses.replace(
+        _result(), mitigating_downgrade_applied=True, timing_downgrade_applied=True
+    )
+    reasons = _reasons_for(result, is_uptrend=True)
+
+    assert any("反対材料により、利確の判定を1段階弱めています" in r for r in reasons), reasons
+    assert any(
+        "上昇トレンドの継続により、利確の判定を1段階弱めています" in r for r in reasons
+    ), reasons
+
+
+def test_downgrade_facts_absent_when_not_applied() -> None:
+    """材料が該当していても、実際に降格していなければ書かない。"""
+    reasons = _reasons_for(_result(), is_uptrend=True)
+
+    assert any("強い上昇トレンドが継続" in r for r in reasons), reasons
+    assert not [r for r in reasons if "1段階弱めています" in r]
