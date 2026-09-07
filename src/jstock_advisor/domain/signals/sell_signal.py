@@ -21,6 +21,7 @@ from jstock_advisor.domain.entities.enums import (
     DisclosureRiskConfirmationLevel,
     EvidenceGroup,
     IndustryClassification,
+    PeriodType,
     PriceFieldBasis,
     RecommendationType,
     TriggerStatus,
@@ -185,6 +186,79 @@ def _continuous_decline_evidence(
         str(latest.value),
         str(previous.value),
         f"{previous.period_end.isoformat()}〜{latest.period_end.isoformat()}",
+    )
+
+
+# Issue #222(N-2b): config・引数の名称は`consecutive_quarters`だが、実際に比較する
+# のはbuild_financial_period_series()がperiod_typeを付けた系列であり、年次頻度の
+# データなら「N年連続」を要求する。名称の改称は互換のため別PR(旧キー読み込み+警告)
+# とし、本PRでは**表示される説明文で単位を明示する**。判定条件は変更しない。
+_PERIOD_TYPE_UNIT_LABEL: dict[PeriodType, str] = {
+    PeriodType.ANNUAL: "年",
+    PeriodType.QUARTER: "四半期",
+    PeriodType.TTM: "期(直近12か月移動合計)",
+    PeriodType.YTD: "期(累計)",
+}
+
+
+def _continuous_decline_unit_label(periods: list[FinancialPeriodValue]) -> str:
+    """比較に使う窓のperiod_typeから、説明文で使う単位語を返す。
+
+    Issue #222(N-2b)。判定には一切使わない表示専用の読み取りである。
+    period_typeが揃っていない・空の場合は、単位を断定せず中立の「期」を返す
+    (誤った単位を提示するくらいなら曖昧なままにする)。
+    """
+    period_types = {p.period_type for p in periods}
+    if len(period_types) != 1:
+        return "期"
+    return _PERIOD_TYPE_UNIT_LABEL.get(next(iter(period_types)), "期")
+
+
+def _actual_decline_streak(periods: list[FinancialPeriodValue]) -> int | None:
+    """直近から遡って何期連続で前期比悪化しているかを数える。
+
+    Issue #222(N-2a)。「必要はN期連続だが実際はM期だった」を説明文へ入れるための
+    読み取り専用の副読みであり、**判定条件(detect_continuous_decline_period_aware)
+    は一切変更しない**。比較の可否の判定基準も同関数と揃える(period_type一致・
+    非累計)。数えられない場合はNoneを返し、呼び出し側は期数に言及しない。
+    """
+    if len(periods) < 2:
+        return None
+    streak = 0
+    for i in range(len(periods) - 1, 0, -1):
+        latest, previous = periods[i], periods[i - 1]
+        if latest.period_type is not previous.period_type:
+            break
+        if latest.is_cumulative or previous.is_cumulative:
+            break
+        if latest.value >= previous.value:
+            break
+        streak += 1
+    return streak
+
+
+def _continuous_decline_not_triggered_explanation(
+    metric_label: str, periods: list[FinancialPeriodValue], consecutive_quarters: int
+) -> str:
+    """継続悪化ルールがNOT_TRIGGEREDのときの説明文(Issue #222 N-2a / N-2b)。
+
+    従来は「継続悪化は検出されなかった」という結論の言い換えのみで、
+    「何期連続の悪化が必要で、実際は何期だったか」が分からなかった。
+    利用者から見ると「減っているのに、なぜ該当しないのか」が読み取れない。
+    """
+    unit = _continuous_decline_unit_label(periods[-(consecutive_quarters + 1) :])
+    required = f"{consecutive_quarters}{unit}連続"
+    streak = _actual_decline_streak(periods)
+    if streak is None:
+        return f"{metric_label}の継続悪化は検出されなかった(必要は{required}の悪化)"
+    if streak == 0:
+        return (
+            f"{metric_label}の継続悪化は検出されなかった"
+            f"(必要は{required}の悪化。直近は前期比で悪化していない)"
+        )
+    return (
+        f"{metric_label}の継続悪化は検出されなかった"
+        f"(必要は{required}の悪化。実際は{streak}{unit}連続)"
     )
 
 
@@ -400,7 +474,11 @@ def _evaluate_cashflow_decline_rule(
             previous_value=cf_previous_value,
             comparison_period=cf_comparison_period,
             source="yfinance",
-            explanation="営業キャッシュフローの継続悪化は検出されなかった",
+            explanation=_continuous_decline_not_triggered_explanation(
+                "営業キャッシュフロー",
+                quarterly_operating_cashflow_periods,
+                consecutive_quarters,
+            ),
         )
 
     fundamentally_driven = is_fundamentally_driven(cashflow_decomposition)
@@ -594,9 +672,16 @@ def build_sell_rule_inputs_from_data(
             "継続悪化を判定できない"
             if income_declined is None
             else (
-                f"営業利益が{income_quarters}期連続で悪化している"
+                # Issue #222(N-2b): TRIGGERED側も評価単位を明示する
+                # (「2四半期連続 = 約半年」と読むと必要な悪化の長さを誤る)。
+                f"営業利益が{income_quarters}"
+                f"{_continuous_decline_unit_label(
+                    quarterly_operating_income_periods[-(income_quarters + 1) :]
+                )}連続で悪化している"
                 if income_declined
-                else "営業利益の継続悪化は検出されなかった"
+                else _continuous_decline_not_triggered_explanation(
+                    "営業利益", quarterly_operating_income_periods, income_quarters
+                )
             )
         ),
     )
