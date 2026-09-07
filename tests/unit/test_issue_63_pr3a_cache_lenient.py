@@ -10,18 +10,30 @@ audit_log(やり直しの経路が無い)は PR-3b で別に扱う。
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 from pathlib import Path
 
+import boto3
 import pytest
-from pydantic import BaseModel
+from moto import mock_aws
+from pydantic import BaseModel, TypeAdapter
 
+from jstock_advisor.infrastructure.aws.dynamodb_store import DynamoDbCollectionStore
 from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
 from jstock_advisor.infrastructure.record_failure_policy import (
     ItemIdDisclosure,
     RecordFailurePolicy,
 )
+from jstock_advisor.services.watchlist_data_cache import (
+    CacheEntry,
+    CacheQualityStatus,
+    get_or_fetch,
+)
+
+_REGION = "ap-northeast-1"
+_DYNAMO_TABLE = "test-watchlist-price-cache"
 
 # cache の主キーの形（架空値）。銘柄コードは実在しない "0000" を使う。
 _BROKEN_KEY = "latest_price:0000:2026-09-07"
@@ -131,3 +143,79 @@ def test_undeclared_collection_keeps_strict_and_hash(
         default_store.list_all()
 
     assert _BROKEN_KEY not in caplog.text, "既定では平文の主キーを出さない"
+# --- Production 経路（DynamoDB + get_or_fetch）------------------------------
+#
+# ★ 上のテストは JsonCollectionStore（ローカル CLI）である。JSON 実装の get() は
+#   _read_all() を経由するため LENIENT が効くが、Lambda が使う DynamoDB 実装の
+#   get() は PR-2 では policy へ接続されていなかった。cache の読み取りは 5 経路
+#   とも主キー指定の get() であるため、**Production では LENIENT が効いていな
+#   かった**（管理者の exact diff review R-1）。以下はその経路を実際に通す。
+
+
+def _dynamo_cache_store(table_name: str) -> DynamoDbCollectionStore[CacheEntry]:
+    """`build_cached_provider_bundle()` が cache 5 件へ渡すのと同じ組み合わせ。"""
+    return DynamoDbCollectionStore(
+        CacheEntry,
+        table_name,
+        "cache_key",
+        failure_policy=RecordFailurePolicy.LENIENT,
+        item_id_disclosure=ItemIdDisclosure.PLAIN,
+    )
+
+
+@pytest.fixture
+def dynamo_table(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    with mock_aws():
+        boto3.client("dynamodb", region_name=_REGION).create_table(
+            TableName=_DYNAMO_TABLE,
+            KeySchema=[{"AttributeName": "cache_key", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "cache_key", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield _DYNAMO_TABLE
+
+
+def _put_broken_cache_entry(table_name: str, cache_key: str) -> None:
+    """`data` がモデルとして不正な cache entry を直接書き込む（fixture 専用）。"""
+    boto3.resource("dynamodb", region_name=_REGION).Table(table_name).put_item(
+        Item={"cache_key": cache_key, "data": '{"cache_key": "x", "cached_at": "not-a-datetime"}'}
+    )
+
+
+def test_broken_entry_is_refetched_through_get_or_fetch_on_dynamodb(
+    dynamo_table: str,
+) -> None:
+    """★ Production の経路で、壊れた entry が miss になり取り直しで置き換わる。
+
+    ここが PR-3a の目的そのものである。是正前はこの test が
+    ValidationError で落ちた（get() が policy へ接続されていなかったため）。
+    """
+    store = _dynamo_cache_store(dynamo_table)
+    _put_broken_cache_entry(dynamo_table, _BROKEN_KEY)
+    calls: list[int] = []
+
+    def fetch_fn() -> int:
+        calls.append(1)
+        return 7
+
+    value = get_or_fetch(
+        store,
+        _BROKEN_KEY,
+        ttl_hours=24,
+        negative_ttl_minutes=60,
+        now=dt.datetime(2026, 9, 7, 12, 0, tzinfo=dt.UTC),
+        fetch_fn=fetch_fn,
+        type_adapter=TypeAdapter(int),
+        classify_quality=lambda _: CacheQualityStatus.VALID,
+        log_label="test",
+    )
+
+    assert value == 7, "provider から取り直した値が返ること"
+    assert calls == [1], "壊れた entry は miss として扱われ fetch_fn が呼ばれること"
+
+    stored = store.get(_BROKEN_KEY)
+    assert stored is not None, "取り直した値で置き換わり、次回は読めること"
+    assert stored.payload_json == "7"

@@ -571,9 +571,11 @@ def test_iter_all_skips_under_lenient(store: DynamoDbCollectionStore[_Item]) -> 
 
 
 def test_get_is_unaffected_by_a_broken_record(store: DynamoDbCollectionStore[_Item]) -> None:
-    """★ get() は要求した 1 件しか検証しない（本 PR で変更していない）。
+    """★ get() は要求した 1 件しか検証しない。
 
     1 件の不正が他の id の取得を妨げない、という既存の性質を固定する。
+    PR-3a で get() をポリシーへ接続した後もこの性質は変わらない
+    （接続したのは「要求した id 自身が壊れていた場合」の扱いだけである）。
     """
     store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
     _put_broken(_TABLE_NAME, "owner-a#0000")
@@ -607,3 +609,139 @@ def test_broken_item_id_is_hashed_in_logs(
 
     assert "owner-a#0000" not in caplog.text
     assert "sha256:" in caplog.text
+# --- Issue #63 PR-3a: 主キー指定の get() / get_consistent() を接続する ---------
+#
+# cache の Production 読み取りは 5 経路とも主キー指定の get() である。
+# PR-2 の _decode_page() は全件経路にしか入っていないため、LENIENT を宣言しても
+# Lambda では効かず、壊れた 1 件が従来どおり例外を送出していた。
+# ローカル JSON 実装は _read_all() を経由するため効いており、backend によって
+# 挙動が食い違っていた。この差を塞ぐ。
+
+
+def test_get_returns_none_under_lenient_when_the_requested_record_is_broken(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """★ LENIENT では、要求した id 自身が壊れていても None を返す（= miss）。
+
+    これが無いと `get_or_fetch()` は例外で止まり、取り直しに進めない。
+    """
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    assert _lenient_store().get("owner-a#0000") is None
+
+
+def test_get_consistent_returns_none_under_lenient_when_broken(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """get_consistent() も同じ扱いにする（読み方の違いだけで分岐させない）。"""
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    assert _lenient_store().get_consistent("owner-a#0000") is None
+
+
+def test_get_is_strict_by_default_when_the_requested_record_is_broken(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """★ 既定（STRICT）では元の例外をそのまま送出する。**現行の挙動と同じ。**
+
+    宣言していない collection の挙動を変えていないことを固定する。
+    """
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with pytest.raises(Exception):  # noqa: B017 - pydantic の ValidationError をそのまま通す
+        store.get("owner-a#0000")
+
+
+def test_get_consistent_is_strict_by_default_when_broken(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    with pytest.raises(Exception):  # noqa: B017 - pydantic の ValidationError をそのまま通す
+        _put_broken(_TABLE_NAME, "owner-a#0000")
+        store.get_consistent("owner-a#0000")
+
+
+def test_get_raises_under_fail_safe_suppress(store: DynamoDbCollectionStore[_Item]) -> None:
+    """★ FAIL_SAFE_SUPPRESS では fail-closed とし、元の例外を送出する。
+
+    このポリシーは「判定不能」を呼び出し側へ伝えて**送信を見送らせる**もので
+    あるが、`get()` の戻り値 `T | None` にはそれを伝える表現が無い。None を
+    返すと呼び出し側は「レコードが無い」と読み、`notification_log` なら
+    重複送信という、まさにこのポリシーが防ごうとしている誤りを起こす。
+    伝えられない以上は黙って進めない。
+
+    現時点でこのポリシーを宣言している collection は無い（PR-4 で
+    notification_log へ入れる予定であり、その再送判定は find() /
+    query_by_index() の全件経路を使う）。
+    """
+    from jstock_advisor.infrastructure.record_failure_policy import RecordFailurePolicy
+
+    suppress_store: DynamoDbCollectionStore[_Item] = DynamoDbCollectionStore(
+        _Item, _TABLE_NAME, "item_id", failure_policy=RecordFailurePolicy.FAIL_SAFE_SUPPRESS
+    )
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with pytest.raises(Exception):  # noqa: B017 - pydantic の ValidationError をそのまま通す
+        suppress_store.get("owner-a#0000")
+
+
+def test_get_hashes_the_item_id_in_logs_by_default(
+    store: DynamoDbCollectionStore[_Item], caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ 既定では主キーの平文をログへ出さない（Issue #135 E-4 を開かない）。"""
+    import logging
+
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with caplog.at_level(logging.WARNING):
+        _lenient_store().get("owner-a#0000")
+
+    assert "owner-a#0000" not in caplog.text
+    assert "sha256:" in caplog.text
+
+
+def test_get_shows_the_item_id_when_plain_is_declared(
+    store: DynamoDbCollectionStore[_Item], caplog: pytest.LogCaptureFixture
+) -> None:
+    """PLAIN を宣言した collection（cache 5 件）では平文で出る。
+
+    主キーが銘柄コード・日付・用途名で構成されることを確認したうえで宣言する
+    ものであり、ここでは cache と同じ形の架空値を使う。
+    """
+    import logging
+
+    from jstock_advisor.infrastructure.record_failure_policy import (
+        ItemIdDisclosure,
+        RecordFailurePolicy,
+    )
+
+    cache_key = "latest_price:0000:2026-09-07"
+    plain_store: DynamoDbCollectionStore[_Item] = DynamoDbCollectionStore(
+        _Item,
+        _TABLE_NAME,
+        "item_id",
+        failure_policy=RecordFailurePolicy.LENIENT,
+        item_id_disclosure=ItemIdDisclosure.PLAIN,
+    )
+    _put_broken(_TABLE_NAME, cache_key)
+
+    with caplog.at_level(logging.WARNING):
+        plain_store.get(cache_key)
+
+    assert cache_key in caplog.text
+
+
+def test_get_raw_data_is_unaffected_by_the_policy(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """★ get_raw_data() は接続対象外（CAS 用の生 JSON）。
+
+    モデル検証を通らないため「検証失敗の扱い」が存在しない。壊れたレコードで
+    あっても保存されているバイト列をそのまま返す（楽観ロックの
+    ConditionExpression が成立しなくなるのを避けるため）。
+    """
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    raw = _lenient_store().get_raw_data("owner-a#0000")
+
+    assert raw is not None
+    assert "not-int" in raw
