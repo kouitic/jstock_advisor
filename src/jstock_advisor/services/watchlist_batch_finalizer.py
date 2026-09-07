@@ -903,6 +903,15 @@ def _finish_batch(
                 ),
                 "universe_count": batch_item.get("universe_count"),
                 "staged_rollout_excluded_count": batch_item.get("staged_rollout_excluded_count"),
+                # Issue #223(O-A): この回の候補ユニバースを今回取得したデータで
+                # 回したのか既存キャッシュで回したのか、およびその元データの
+                # 公開日・経過日数(いずれもdispatch時点でDispatcherが測った値)。
+                # 取得失敗はDispatcher側でキャッシュ継続として握りつぶされ、
+                # Lambda Errorsにも現れないため、成功した回も含めてここへ残す。
+                "universe_source": batch_item.get("universe_source"),
+                "universe_promoted": batch_item.get("universe_promoted"),
+                "universe_source_date": batch_item.get("universe_source_date"),
+                "universe_cache_age_days": batch_item.get("universe_cache_age_days"),
                 **metrics,
             },
             now=now,
