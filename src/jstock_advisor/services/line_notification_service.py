@@ -2654,13 +2654,19 @@ class LineNotificationService:
         """
         timestamp = now or dt.datetime.now(dt.UTC)
         notification_type_value = notification_type.value if notification_type is not None else None
+        # Issue #135: 通知本文をログへ出さない。LINEの本文には所有者名を表示する
+        # (通知の宛先はご本人であり、複数の所有者を扱ううえで識別にも必要なため
+        # 実名は残す = O-D)。本文をそのままログへ複製すると、その実名が
+        # CloudWatch Logsを読めるprincipalへも露出する。
+        # 監査記録側(output_values.message_text)には本文が残るため、
+        # DRY_RUN検証の確認手段は失われない。content_hashで同一性も追える。
         logger.info(
             "VALIDATION DRY_RUN: external LINE push suppressed stock_code=%s "
-            "notification_type=%s content_hash=%s message_text=%s",
+            "notification_type=%s content_hash=%s message_length=%d",
             stock_code,
             notification_type_value,
             content_hash,
-            text,
+            len(text),
         )
         rule_version = RuleVersionService().get_active_version_or(RULE_VERSION_PLACEHOLDER)
         self._audit.record(
