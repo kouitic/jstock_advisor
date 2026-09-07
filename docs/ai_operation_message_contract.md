@@ -176,6 +176,13 @@ Production 関連以外では PRODUCTION_CHANGED を書かない(baseline に含
 Production 関連では baseline に頼らず毎回明示する。取り違えの代償が大きい。
 ```
 
+post-merge / post-deploy の状態遷移を含む Instruction への報告では、
+さらに次を必須とする(11節)。
+
+```
+VERIFICATION_REQUIRED   Instruction の指定を転記する。NONE の場合も書く
+```
+
 ### 2.3 省略と違反の区別
 
 ```
@@ -777,11 +784,60 @@ RETROACTIVE_APPLICATION = NO
 9  発効日時と、遡及適用しないこと
 ```
 
----
+## 11. post-merge / post-deploy の VERIFICATION_REQUIRED
 
+```
+VERIFICATION_REQUIRED_ON_POST_MERGE  = YES
+VERIFICATION_REQUIRED_ON_POST_DEPLOY = YES
+```
+
+merge 後・deploy 後の状態遷移を含む Instruction には、次を**必須**とする。
+
+```
+VERIFICATION_REQUIRED = <観測すべき事象 | NONE>
+```
+
+書式は 1 行または箇条書き。**空欄は許さない。**
+
+```
+例  VERIFICATION_REQUIRED = 翌営業日 08:00 の判定記録で、
+                            レンジが売買判断に使える銘柄の比率が改善していること
+例  VERIFICATION_REQUIRED = NONE(.github と docs のみ。Production へ反映されない)
+```
+
+`NONE` と書けるのは、待つべき事象が**無いことを確認した**ときだけである。
+分からない場合は名指しできるまで調べる。
+
+```
+★ この項目は Progress Status の判定に直結する。
+
+  NONE なら issue_label_policy.md 7.4節により status:デプロイ済 を経由しない。
+  指示側がこの 1 行を書く時点で「待ち先が無い」ことに気付ける
+  (Issue #36 は待ち先の無い status:デプロイ済 のまま 4 日間見落とされ、
+   Issue #209 は指示文が誤って status:マージ済 を指定していた)。
+```
+
+報告側は、指示の指定を**転記する**(`NONE` の場合も書く)。2節の
+`NORMAL_REPORT` 必須フィールドに加えて必須とする。指示側が名指しした観測対象と、
+報告側が到達した status を突き合わせられるようにするためである。
+
+```
+Instruction に VERIFICATION_REQUIRED が無い場合は、その旨を報告して確認する。
+欠落は 2.3節の「違反」であり「省略」ではない。
+```
+
+```
+★ 本節が定めるのは形式だけである。
+
+  何を verification とするかの内容の正本は issue_label_policy.md 7.4節と
+  各 Issue の Acceptance criteria であり、本文書へ複製しない。
+```
+
+---
 ## 変更履歴
 
 | 日付 | 変更概要 |
 |---|---|
 | 2026-09-06 | 新規作成(Issue #184)。作業 AI・ChatGPT・人間の間のメッセージ形式に正本が無く、Instruction ごとに報告項目が定義されていたため、「Instruction 側が毎回フィールドを書き下ろす」「Worker 側が ISSUE_STATE_SNAPSHOT をチャット報告へ再掲する」という二重化が構造的に発生していた(Issue #177 の 7 コメント 141,409 文字のうち、機械可読キー 659 出現中 146 出現が毎回同一値)。(1)圧縮してよい範囲を channel で分け、durable な snapshot の必須項目は削らないことを明記した(`COMPACT_REPORT != SSOT_WRITEBACK_OMISSION`)。(2)Worker の完了報告を `FIXED_SCHEMA_NOT_FIXED_LENGTH` として 11 の論理フィールドで固定し、Production 関連 Instruction のみ `PRODUCTION_CHANGED` を追加必須とした。`CHANGED_STATE = NONE` は有効な報告だが、state を変えたのに `DURABLE = NONE` は契約違反とした。(3)`BASELINE_INVARIANTS` を導入し、8 つの baseline を定義した。baseline 名の省略と、逸脱があるのに `UNCHANGED` と書くことを禁止した。phase enum とは `MANY_TO_ONE` とし、無理に 1 対 1 へ揃えない。(4)FORENSIC 昇格条件を 16 定め、`REPORT_MODE_OWNER = WORKER`(Instruction は NORMAL を強制できない)、迷ったら FORENSIC(FAIL_VERBOSE)とした。**短くするために証拠を捨てる設計を禁止**している。(5)`AUTHORIZED_PHASES`(11 phase + 補助 permission)を定め、`UNLISTED_PHASE = NOT_AUTHORIZED` / 未記載は `INSTRUCTION_INVALID` として STOP することとした。暗黙の既定を置くと記載漏れが既成事実になるためである。`AUTHORIZED_PHASES != HUMAN_GATE_APPROVAL` および `!= STATE_WRITE_PERMISSION_AUTOMATIC_GRANT` を明記した。(6)報告が人間により手作業で転送される前提を正本化し、一括コピー可能性を要求した(chatgpt_collaboration_protocol.md 4.5 が明示的に対象外としていた側)。(7)Human Gate の提示を固定 4 節 + AUDIT_INFO 分離とし、exact 承認では識別子を承認対象の本文へ残すこととした。**`APPROVAL_UNIT_CONSOLIDATION = NO` であり承認単位は 1 つも統合・緩和していない。** (8)確認質問の要否(Q-1〜Q-12)と UNKNOWN の扱い(調査 -> SSoT -> 質問 -> 明示保留)を定め、`GUESS = FORBIDDEN` とした。**本文書は形式の正本であり、承認の要否・作業の可否・WIP・label の規則はいずれも他文書が正本で、複製していない。** 作成時点で `NEW_CONTRACT_ACTIVE = NO` であり、merge だけでは発効しない。判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
 | 2026-09-06 | 発効状態を現況へ同期し、役割名を製品非依存へ改めた(Issue #190)。0節と 10節の `NEW_CONTRACT_ACTIVE = NO` を発効済み(2026-09-06 13:57 JST)へ更新し、`ACTIVATION_STATE_SSOT = Issue #184 の最新の durable な activation 記録` を明記した。**静的な文書を、変わりうる発効状態の唯一の根拠にしない**方式(#185 が development_workflow.md 2.6 節へ適用したもの)を踏襲している。あわせて channel 名を役割ベースへ改め(`C-1 開発者 -> 管理者` / `C-3 管理者 -> 利用者`)、`READY_FOR` の例を `MANAGER_PR_REVIEW` へ、参照先ファイル名を user_manager_collaboration_protocol.md へ更新した。**報告 schema・FORENSIC 16 条件・BASELINE_INVARIANTS・AUTHORIZED_PHASES・Human Gate の提示形式・確認質問ポリシーはいずれも変更していない。** 変更履歴の過去エントリも書き換えていない。コード・Production 挙動の変更なし |
+| 2026-09-07 | post-merge / post-deploy の Instruction と報告へ `VERIFICATION_REQUIRED = <項目 | NONE>` を必須項目として追加した(11節を新設 / 2.2節へ条件付き必須を追記。Issue #220)。指示側がこの 1 行を書く時点で「待つべき事象が無い」ことに気付けるようにするためであり、#36(待ち先の無い status:デプロイ済 が 4 日滞留)と #209(指示文が誤って status:マージ済 を指定していた)の両方に効く。**Instruction 側の必須項目を定める文書は本書である**(development_workflow.md 2.5節は回答の冒頭 3 行のみを定め、Instruction の必須項目を列挙していない。user_manager_collaboration_protocol.md 4.5節は出力形式の規定である)ため本書へ置き、他文書へは複製しない。★ **新設は 11節とし、既存の節番号を繰り下げていない**。他文書から本書の 4節 / 8節 / 10節への参照が実在するため(development_workflow.md と user_manager_collaboration_protocol.md の計 4 箇所)、途中への挿入はそれらの参照を無効にする。何を verification とするかの内容の正本は issue_label_policy.md 7.4節と各 Issue の Acceptance criteria である。**既存の NORMAL_REPORT 必須フィールド・BASELINE_INVARIANTS・FORENSIC の昇格条件・AUTHORIZED_PHASES・報告の転送契約・Human Gate の提示フォーマット・確認質問の要否・発効の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
