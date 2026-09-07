@@ -1022,6 +1022,7 @@ mypy src
 ```
 LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN
 FULL_SUITE_AUTHORITY      = PR_CI
+TEST_STORE_ISOLATION      = FORCED(テストは実ストア data/local_store へ書かない。tests/conftest.py のfixtureが保存先を一時ディレクトリへ差し替える)
 ```
 
 **全体回帰の正本は PR CI(required checks)である。**
