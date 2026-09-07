@@ -26,6 +26,7 @@ from jstock_advisor.providers.candidate_universe.jpx_impl import (
     _XLS_MAGIC,
     _XLSX_MAGIC,
     _extract_excel_date,
+    _normalize_code_cell,
     _read_listed_issues_rows,
     parse_listed_issues_xls,
 )
@@ -215,3 +216,67 @@ def test_realistic_row_volume_stays_within_the_validator_bounds() -> None:
     assert 2500 <= result.raw_row_count <= 4000  # _ROW_COUNT_BOUNDS["listed_issues"]
     assert len(result.items) == 3111
     assert result.unknown_market_segment_count == 0
+
+
+# --- 読み手の違いを吸収していること（exact diff review F-2 / F-3） -------------------
+
+
+def test_empty_cells_become_none_not_the_string_none() -> None:
+    """★ F-2: openpyxl は空セルを None、xlrd は "" で返す。
+
+    読み出し層で吸収しないと、後段の `str(value).strip()` が文字列 "None" を
+    作り、銘柄名・業種コード・規模区分へ "None" が入る。市場・商品区分では
+    未知区分として数えられてしまう。
+    """
+    data = _xlsx([[20260831, 9001, None, _PRIME, None, None, None, None, None, None]])
+    result = parse_listed_issues_xls(data, _TARGET)
+    item = result.items[0]
+
+    assert item.stock_name is None
+    assert item.industry_33_code is None
+    assert item.industry_33_name is None
+    assert item.industry_17_code is None
+    assert item.size_code is None
+    assert item.size_name is None
+    assert result.unknown_market_segment_count == 0  # 区分は埋まっているので未知ではない
+
+
+def test_empty_market_segment_is_counted_as_unknown_not_as_the_string_none() -> None:
+    data = _xlsx([[20260831, 9001, "架空銘柄", None, None, None, None, None, None, None]])
+    result = parse_listed_issues_xls(data, target_market_segments=None)
+    assert result.items[0].market_segment is None
+    assert result.unknown_market_segment_count == 1
+
+
+def test_numeric_code_columns_do_not_depend_on_the_reader() -> None:
+    """★ F-3: 業種コード・規模コードは JPX のファイル上で **数値**として
+    格納されており、同じ値でも読み手で型が違う。
+
+        .xls  / xlrd     float 50.0
+        .xlsx / openpyxl int   50
+
+    素朴な str() のままだと "50.0" と "50" に分かれ、**容れ物が変わっただけで
+    同じ銘柄の業種コードが変わる**。`industry_33_code` は canonical の
+    「安定キー」と定められた値であり、揺れてはならない。
+    """
+    assert _normalize_code_cell(50.0) == "50"  # xlrd が返す形
+    assert _normalize_code_cell(50) == "50"  # openpyxl が返す形
+    assert _normalize_code_cell(1050.0) == _normalize_code_cell(1050) == "1050"
+    # 数値でない値（ETF/REIT 行の "-" 等）はそのまま
+    assert _normalize_code_cell("-") == "-"
+    assert _normalize_code_cell(" 0050 ") == "0050"
+    # 空・非数値
+    assert _normalize_code_cell(None) is None
+    assert _normalize_code_cell("") is None
+    assert _normalize_code_cell(True) is None
+    # 整数でない float は落とさない（情報を失わない）
+    assert _normalize_code_cell(50.5) == "50.5"
+
+
+def test_xlsx_industry_codes_have_no_float_artifact() -> None:
+    """通しで見ても ".0" が付かないこと。"""
+    data = _xlsx([[20260831, 9001, "架空銘柄", _PRIME, 50, "架空業種", 1, "架空17", 6, "架空規模"]])
+    item = parse_listed_issues_xls(data, _TARGET).items[0]
+    assert item.industry_33_code == "50"
+    assert item.industry_17_code == "1"
+    assert item.size_code == "6"

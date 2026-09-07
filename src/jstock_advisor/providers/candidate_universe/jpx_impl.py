@@ -192,10 +192,62 @@ def _read_rows_openpyxl(data: bytes) -> list[list[object]]:
     workbook = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     try:
         sheet = workbook.worksheets[0]
-        return [list(row) for row in sheet.iter_rows(values_only=True)]
+        return [
+            [_normalize_openpyxl_cell(cell) for cell in row]
+            for row in sheet.iter_rows(values_only=True)
+        ]
     finally:
         # read_onlyで開いた場合、明示的に閉じないとファイルハンドルが残る。
         workbook.close()
+
+
+def _normalize_code_cell(value: object) -> str | None:
+    """業種コード・規模コードのセルを、**読み手に依存しない**文字列にする。
+
+    Issue #223 PR-2 の実測(2026-09-07): これらの列はJPXのファイル上で
+    **数値として**格納されている。同じ値でも読み手で型が違う。
+
+        .xls  / xlrd     float  50.0  -> 素朴なstr()は "50.0"
+        .xlsx / openpyxl int    50    -> 素朴なstr()は "50"
+
+    素朴な`str()`のままだと、**JPXが配る容れ物が変わっただけで同じ銘柄の
+    業種コードが変わってしまう**。`industry_33_code`は
+    canonical_industry.pyが「canonicalの安定キー」と定めている値であり、
+    容れ物に依存して揺れてはならない。整数値の小数表記(.0)を落として
+    両者をそろえる。
+
+    ★ ゼロ埋め等の桁合わせは**行わない**。どちらのファイルにもその形の値は
+      無く、この実装で新しい表記を発明すべきではないため
+      (銘柄コードの4桁ゼロ埋めは_normalize_stock_codeが別途担っている)。
+
+    数値でない値(ETF/REIT行の "-" 等)はそのまま文字列として扱う。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    return str(value).strip() or None
+
+
+def _normalize_openpyxl_cell(value: object) -> object:
+    """openpyxlのセル値を、xlrdが返す表現へ合わせる。
+
+    **空セルの表現が両者で違う**。xlrdは空文字列""を返すが、openpyxlはNoneを
+    返す。この差を吸収しないと、後段の`str(value).strip()`が文字列"None"を
+    作ってしまい、銘柄名・業種コード・規模区分へ"None"が入る
+    (市場・商品区分では未知区分として数えられる)。**空セルの契約を1つに
+    そろえる**のが読み出し層の責務であり、判定側では吸収しない。
+
+    数値セルの型もxlrdはfloat、openpyxlはintで異なるが、こちらは
+    ExternalValueParser/_normalize_stock_code/_extract_excel_dateが
+    どちらも受けるため、ここでは変換しない
+    (勝手にstrへ寄せるとゼロ埋めの情報が失われるため)。
+    """
+    return "" if value is None else value
 
 
 @dataclass(frozen=True)
@@ -271,23 +323,21 @@ def parse_listed_issues_xls(
                 stock_code=stock_code,
                 stock_name=str(row_cells[col_index[_COL_NAME]]).strip() or None,
                 market_segment=market_segment or None,
-                industry_33_code=str(
+                industry_33_code=_normalize_code_cell(
                     row_cells[col_index[_COL_INDUSTRY_33_CODE]]
-                ).strip()
-                or None,
+                ),
                 industry_33_name=str(
                     row_cells[col_index[_COL_INDUSTRY_33_NAME]]
                 ).strip()
                 or None,
-                industry_17_code=str(
+                industry_17_code=_normalize_code_cell(
                     row_cells[col_index[_COL_INDUSTRY_17_CODE]]
-                ).strip()
-                or None,
+                ),
                 industry_17_name=str(
                     row_cells[col_index[_COL_INDUSTRY_17_NAME]]
                 ).strip()
                 or None,
-                size_code=str(row_cells[col_index[_COL_SIZE_CODE]]).strip() or None,
+                size_code=_normalize_code_cell(row_cells[col_index[_COL_SIZE_CODE]]),
                 size_name=str(row_cells[col_index[_COL_SIZE_NAME]]).strip() or None,
             )
         )
