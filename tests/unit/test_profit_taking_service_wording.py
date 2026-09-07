@@ -230,9 +230,8 @@ def test_profit_taking_spread_block_reason_is_shown_with_config_threshold() -> N
     threshold = cbj.max_fair_value_spread_ratio_for_partial
     matched = [r for r in reasons if "手法間の広がり" in r]
     assert matched, reasons
-    assert f"{threshold}倍" in matched[0]
-    # 文言に閾値をハードコードしていないこと(config の実値が出ている)。
-    assert str(threshold) in matched[0]
+    # config の実値をそのまま使い、書式のみ指定する(値はハードコードしない)。
+    assert f"{threshold:.2f}倍" in matched[0]
 
 
 def test_no_spread_block_reason_when_code_is_absent() -> None:
