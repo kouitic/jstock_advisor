@@ -23,6 +23,12 @@ import boto3
 from botocore.exceptions import ClientError
 from pydantic import BaseModel
 
+from jstock_advisor.infrastructure.record_failure_policy import (
+    ItemIdDisclosure,
+    RecordFailureCollector,
+    RecordFailurePolicy,
+)
+
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb.service_resource import Table
 
@@ -59,7 +65,13 @@ def to_dynamo_item(
 
 class DynamoDbCollectionStore[T: BaseModel]:
     def __init__(
-        self, model_type: type[T], table_name: str, id_field: str, ttl_seconds: int | None = None
+        self,
+        model_type: type[T],
+        table_name: str,
+        id_field: str,
+        ttl_seconds: int | None = None,
+        failure_policy: RecordFailurePolicy = RecordFailurePolicy.STRICT,
+        item_id_disclosure: ItemIdDisclosure = ItemIdDisclosure.HASH,
     ) -> None:
         """ttl_secondsを指定すると、保存する各アイテムへDynamoDB Native TTL用の
         ttl属性(現在時刻+ttl_seconds、UNIX秒)を付与する(通知検証モード機能
@@ -72,12 +84,41 @@ class DynamoDbCollectionStore[T: BaseModel]:
         self._table_name = table_name
         self._resource = boto3.resource("dynamodb")
         self._table: Table = self._resource.Table(table_name)
+        self._failure_policy = failure_policy
+        self._item_id_disclosure = item_id_disclosure
 
     def _to_item(self, model: T) -> dict[str, Any]:
         return to_dynamo_item(model, self._id_field, self._ttl_seconds)
 
     def _from_item(self, item: dict[str, Any]) -> T:
         return self._model_type.model_validate_json(item["data"])
+
+    def _collector(self) -> RecordFailureCollector:
+        return RecordFailureCollector(
+            collection=self._table_name,
+            policy=self._failure_policy,
+            item_id_disclosure=self._item_id_disclosure,
+        )
+
+    def _decode_page(
+        self, raw_items: Iterable[dict[str, Any]], collector: RecordFailureCollector
+    ) -> Iterator[T]:
+        """全件経路(Scan / Query / BatchGetItem)の 1 ページ分をデコードする。
+
+        Issue #63 PR-2(A-U1b)。失敗の扱いを collector のポリシーへ委ねる。
+        `STRICT` では最初の失敗で元の例外がそのまま送出されるため、
+        **呼び出し側から見た挙動は現行と同じ**(打ち切り位置も変わらない)。
+
+        `get()` / `get_consistent()` は要求した 1 件しか検証しないため
+        本経路を通さない(1 件の不正が他の id の取得を妨げないという既存の
+        性質を変えない)。
+        """
+        for raw in raw_items:
+            item_id = str(raw.get(self._id_field, ""))
+            try:
+                yield self._from_item(raw)
+            except Exception as error:  # noqa: BLE001 - ポリシーに委ねるため広く捕捉する
+                collector.handle(item_id, error)
 
     def list_all(self) -> list[T]:
         return list(self.iter_all())
@@ -93,11 +134,11 @@ class DynamoDbCollectionStore[T: BaseModel]:
         `list_all()`はこのメソッドの`list()`化として実装しており、
         列挙順・件数・内容が両者で一致することが構造的に保証される。
         """
+        collector = self._collector()
         scan_kwargs: dict[str, Any] = {}
         while True:
             response = self._table.scan(**scan_kwargs)
-            for raw in response.get("Items", []):
-                yield self._from_item(raw)
+            yield from self._decode_page(response.get("Items", []), collector)
             last_key = response.get("LastEvaluatedKey")
             if not last_key:
                 break
@@ -165,6 +206,7 @@ class DynamoDbCollectionStore[T: BaseModel]:
     def query_by_index(self, index_name: str, key_name: str, key_value: str) -> list[T]:
         from boto3.dynamodb.conditions import Key
 
+        collector = self._collector()
         items: list[T] = []
         query_kwargs: dict[str, Any] = {
             "IndexName": index_name,
@@ -172,7 +214,7 @@ class DynamoDbCollectionStore[T: BaseModel]:
         }
         while True:
             response = self._table.query(**query_kwargs)
-            items.extend(self._from_item(raw) for raw in response.get("Items", []))
+            items.extend(self._decode_page(response.get("Items", []), collector))
             last_key = response.get("LastEvaluatedKey")
             if not last_key:
                 break
@@ -246,6 +288,7 @@ class DynamoDbCollectionStore[T: BaseModel]:
         RuntimeErrorを送出する(取得できなかったことを「存在しない」と
         混同して静かに省略しない)。
         """
+        collector = self._collector()
         unique_ids = list(dict.fromkeys(item_ids))
         result: dict[str, T] = {}
         for chunk in _chunked(unique_ids, _BATCH_GET_MAX_KEYS_PER_REQUEST):
@@ -259,8 +302,7 @@ class DynamoDbCollectionStore[T: BaseModel]:
                     ),
                 )
                 responses: dict[str, Any] = response.get("Responses", {})
-                for raw in responses.get(self._table_name, []):
-                    item = self._from_item(raw)
+                for item in self._decode_page(responses.get(self._table_name, []), collector):
                     result[str(getattr(item, self._id_field))] = item
                 unprocessed_keys: dict[str, Any] = response.get("UnprocessedKeys", {})
                 pending_keys = unprocessed_keys.get(self._table_name, {}).get("Keys", [])

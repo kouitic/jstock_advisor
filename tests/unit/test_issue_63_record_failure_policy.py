@@ -40,6 +40,18 @@ class _FixtureDecodeError(ValueError):
 _FIXTURE_FIELD_VALUE = "owner a quantity value"
 
 
+def _hashed(item_id: str) -> str:
+    """既定(HASH)の開示レベルで item_id がどう出るか。
+
+    Issue #63 PR-2 で既定が HASH になった。主キーは個人識別情報を含みうるため
+    fail-closed とする(Issue #135)。所在は失われず、運用者は候補キーを
+    ローカルでハッシュして突き合わせられる。
+    """
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:8]
+
+
 def _decode(raw: str) -> str:
     """"bad" で始まる raw を失敗させる単純な decoder。"""
     if raw.startswith("bad"):
@@ -112,8 +124,13 @@ def test_lenient_records_where_the_failure_was() -> None:
         _items("bad1"), _decode, collection="audit_log", policy=RecordFailurePolicy.LENIENT
     )
 
+    # Issue #63 PR-2: item_id は既定(HASH)で開示される。
     assert outcome.failures == (
-        RecordFailure(collection="audit_log", item_id="id1", error_type="_FixtureDecodeError"),
+        RecordFailure(
+            collection="audit_log",
+            item_id=_hashed("id1"),
+            error_type="_FixtureDecodeError",
+        ),
     )
 
 
@@ -126,7 +143,7 @@ def test_lenient_accumulates_every_failure() -> None:
     )
 
     assert outcome.records == ["A", "B"]
-    assert [f.item_id for f in outcome.failures] == ["id1", "id3"]
+    assert [f.item_id for f in outcome.failures] == [_hashed("id1"), _hashed("id3")]
 
 
 # --- FAIL_SAFE_SUPPRESS ------------------------------------------------------
@@ -179,7 +196,10 @@ def test_failure_does_not_carry_record_content() -> None:
     rendered = repr(outcome.failures)
     assert _FIXTURE_FIELD_VALUE not in rendered
     assert "decode failed" not in rendered, "例外 message を持たない（値を含みうるため）"
-    assert "id1" in rendered, "所在は残す（是正できるようにするため）"
+    # Issue #63 PR-2: 所在は残すが、既定では **平文ではなくハッシュ**で残す。
+    # 主キーは個人識別情報を含みうるため(Issue #135 の実測で 6 collection)。
+    assert _hashed("id1") in rendered, "所在は残す（是正できるようにするため）"
+    assert "item_id='id1'" not in rendered, "平文の主キーは出さない"
 
 
 def test_emitted_log_does_not_contain_record_content(
@@ -193,7 +213,9 @@ def test_emitted_log_does_not_contain_record_content(
     text = caplog.text
     assert _FIXTURE_FIELD_VALUE not in text
     assert "collection=c" in text
-    assert "item_id=id1" in text
+    # Issue #63 PR-2: 既定は HASH。平文の主キーはログへ出さない。
+    assert f"item_id={_hashed('id1')}" in text
+    assert "item_id=id1 " not in text
     assert "error=_FixtureDecodeError" in text
 
 
@@ -288,7 +310,7 @@ def test_iter_decoded_records_skips_under_lenient() -> None:
     result = list(iter_decoded_records(_items("a", "bad1", "b"), _decode, collector))
 
     assert result == ["A", "B"]
-    assert [f.item_id for f in collector.failures] == ["id2"]
+    assert [f.item_id for f in collector.failures] == [_hashed("id2")]
 
 
 def test_iter_decoded_records_raises_under_strict() -> None:

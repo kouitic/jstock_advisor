@@ -214,9 +214,12 @@ def test_lot_deletion_is_not_applied_one_by_one(portfolio: PortfolioService) -> 
     calls: list[int] = []
     original = portfolio._lots._store._write_all
 
-    def _counting(items: dict[str, PurchaseLot]) -> None:
+    # Issue #63 PR-2 で `_write_all()` へ quarantined 引数が増えたため、
+    # スタブ側も **kwargs を受ける形へ更新した(削除が 1 回の書き込みで
+    # 適用されることを数える、という本テストの検証意図は変えていない)。
+    def _counting(items: dict[str, PurchaseLot], *args: Any, **kwargs: Any) -> None:
         calls.append(len(items))
-        original(items)
+        original(items, *args, **kwargs)
 
     portfolio._lots._store._write_all = _counting  # type: ignore[method-assign]
 
