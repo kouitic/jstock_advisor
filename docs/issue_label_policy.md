@@ -1094,7 +1094,37 @@ LAZY_ON_TOUCH          = YES
 変更を大量に生むためである。次の時点で検出する。
 
 ```
-Assignment Read Barrier / state transition / PR review / post-merge reconciliation
+1  Assignment Read Barrier
+2  state transition
+3  PR review
+4  post-merge reconciliation
+5  週次 read-only 棚卸(WEEKLY_INVENTORY)
+```
+
+1〜4 は「誰かがその Issue に用があったとき」に働く。**用が無くなった Issue を
+拾う網が無い**ため、5 を置く(Issue #220)。
+
+```
+WEEKLY_INVENTORY
+
+実施者  DEVELOPER
+頻度    週次(月曜)
+種別    read-only。label / state / 本文のいずれも変更しない
+対象    OPEN Issue 全件
+          4 軸(Issue Type / Priority / Release Blocker / Progress Status)の欠落
+          最新 ISSUE_STATE_SNAPSHOT の日付
+          status:デプロイ済 / status:マージ済 の滞留日数
+          waiting: label の孤立(待ち先が既に解消しているもの)
+成果物  tracking Issue 1 件。検出内容は**提案**として列挙する
+初回    Issue #213(OPEN Issue 棚卸 2026-09-07)
+```
+
+```
+★ 棚卸は検出だけを行う。
+
+  label の適用は別 Instruction、close と Priority 変更は USER の gate であり、
+  本項はその境界を変えない。上の BULK_REWRITE_FORBIDDEN も維持する
+  (5 は「一括書き換え」ではなく「read-only の検出」であり、両者は両立する)。
 ```
 
 `UNIQUE_PROGRESS_STATUS_COUNT > 1` を検出したら、勝手に label を変えず
@@ -1134,11 +1164,27 @@ CI で判定できない 残作業単位の列挙、各作業単位の Progress 
 ```
 
 split の要否は semantic な判断であり機械判定できない。
-**`CI green` を「split 不要」の根拠にしない。** 実効性は §7.3.7 の 4 つの検出時点
+**`CI green` を「split 不要」の根拠にしない。** 実効性は §7.3.7 の 5 つの検出時点
 (Assignment Read Barrier / state transition / PR review / post-merge
-reconciliation)が担う。
+reconciliation / 週次 read-only 棚卸)が担う。
 
-### 7.4 Production 変更を伴わない Issue
+機械と人の分担は次のとおりである。
+
+```
+CI(必須 job)   status label が 0 個 / 2 個以上、語彙に無い値、静的な label 制約
+日次 workflow  4 軸の欠落、status:デプロイ済 / status:マージ済 の滞留日数、
+               waiting: の孤立(Issue #220 の P-2。required check ではない)
+週次棚卸(人)   残作業単位の列挙、split 要否、label と実体のずれ
+```
+
+```
+★ 機械側は「数える」までであり、「正しいか」は判断しない。
+
+  「Priority label が無い」「デプロイ済 が 7 日続いている」を数えることはできるが、
+  その Priority が妥当か、その滞留が問題かは semantic な判断である。
+```
+
+### 7.4 status:デプロイ済 を経由しない Issue
 
 すべての Issue が Production lifecycle を通るわけではない。
 
@@ -1158,6 +1204,47 @@ status:本番検証済 = 「Issue 固有の最終 verification 完了」を含�
 名称に「本番」が含まれるが、**Production 変更が存在しない Issue にも適用される**。
 これは承認済みの 8 段階名称を維持したうえでの定義であり、名称の読み替えではなく
 定義の明文化である。
+
+#### 必須 verification を名指しできない code 変更
+
+Production 変更を伴う場合でも、その Issue が**必須 Production verification を
+名指しできない**なら `status:デプロイ済` を付けない。
+
+```
+VERIFICATION_NAMEABLE = NO
+  -> status:デプロイ済 を経由せず status:本番検証済 + CLOSE_READY へ進める
+```
+
+`status:デプロイ済` は §7.1 のとおり「必須 Production verification が**未完了**」を
+意味する。待つべき事象が存在しない Issue にこの label を付けると、
+**待ち先の無い「待ち」**になり、以後だれも触らないまま滞留する
+(Issue #36 は 4 日間これで見落とされた)。
+
+```
+★ 「名指しできない」と「不要だと判断した」は区別する。
+
+  名指しできない  何を待てば完了なのかが決められない状態。
+                  この場合は調べる。**分からないまま デプロイ済 を付けない**
+  不要            待つべき事象が無いことを確認できた状態。
+                  この場合は デプロイ済 を経由しない
+```
+
+判定は Issue 単位であり、変更の種類(code / docs)では決まらない。
+code 変更であっても、Production の観測で確かめるべき事象が無いなら本項の対象である。
+
+```
+★ これは §7.1 の定義の変更ではない。
+
+  「必須 verification が存在しない」なら「未完了」ではありえないため、
+  そもそも status:デプロイ済 の定義に当てはまらない。当てはまらない場合の
+  明文化であり、8 段階の名称・定義はいずれも変更していない。
+```
+
+post-merge / post-deploy の Instruction と報告では
+`VERIFICATION_REQUIRED = <項目 | NONE>` を必須とする。指示側がこの 1 行を書く時点で
+「待ち先が無い」ことに気付ける。書式と適用範囲の正本は
+[docs/ai_operation_message_contract.md](ai_operation_message_contract.md) であり、
+本文書へ複製しない。
 
 ### 7.5 GitHub state との関係
 
@@ -1578,3 +1665,4 @@ Release Blocker 軸と混同されるため不可)。
 | 2026-09-05 | **Severity 軸を廃止**し、5軸モデルを 4軸モデル(Issue Type / Priority / Release Blocker / Progress Status)へ変更した(#122)。`SEVERITY_AXIS_RETIRED = YES` / `SEVERITY_CLASSIFICATION_REQUIRED = NO` / `SEVERITY_LABEL_WRITEBACK_REQUIRED = NO` / `SEVERITY_REEVALUATION_REQUIRED = NO` / `SEVERITY_NOT_USED_FOR_ASSIGNMENT = YES` / `SEVERITY_NOT_USED_FOR_RELEASE_GATE = YES`。旧 Severity(SEV-1 重大 / SEV-2 高 / SEV-3 中 / SEV-4 低)が担っていた影響度評価は Priority Policy V2 NFR(§4)へ統合済みであり、独立軸として重複分類しない。§5 を Retired section へ置換し、§2 から Severity 由来の独立性記述(SEV-1 ≠ P0 等)を削除、§10 の `SEVERITY_TRIAGE_REQUIRED` / `PRIORITY_SEVERITY_TRIAGE_REQUIRED` と「Severity の N/A と未確定の区別」を `PRIORITY_RECONCILIATION_REQUIRED` へ統合した。**label 定義は削除・改名しない**(CLOSED Issue / merged PR の履歴参照のため)。OPEN Issue / OPEN PR からのみ severity label を外し、Issue 本文・コメント・過去 snapshot の Severity 記載は append-only の監査証跡として書き換えない。将来 incident SLA / paging / MTTR KPI 等の独立用途が生じた場合のみ別目的で再導入を検討でき、Priority の代用品としては復活させない。`src/` `config/` の application-domain severity は無関係であり対象外。**Priority Policy V2 NFR・Type・Release Blocker・Progress Status・waiting の定義は変更していない** |
 | 2026-09-06 | §7.3 を「進捗の測り方(複数 Phase を持つ Issue)」から「1 Issue = 1 progress lifecycle」へ全面改訂した(Issue #181)。**旧規則「複数 Phase を持つ Issue では到達した最も進んだ工程を status とする」を廃止する。** Progress Status は Issue 全体を表す単一 label(§7.2)であるため、旧規則では独立した作業単位が異なるライフサイクル位置を同時に持つ Issue を正しく表現できなかった。Issue #20 で実際に、O-C(観測性向上)が main へ merge 済みである一方 H-5(hard cutoff の解消)と H-6(閾値の config 化)が未着手という状態が生じ、`status:マージ済` を付けると未着手 Phase が不可視になり、`status:設計済` を付けると稼働中の実装が未実装に見え、`status:開発中` を付けると merge 済みの成果物が消える、というどれを選んでも実態と食い違う状態になった(release 判定・Assignment Read Barrier・進捗集計のいずれもが誤る)。新しい正本は `ONE_ISSUE_ONE_PROGRESS_LIFECYCLE = YES` とし、**唯一の規範的判定基準を「残作業単位へそれぞれ Progress Status を割り当て、`UNIQUE_PROGRESS_STATUS_COUNT > 1` なら `ISSUE_SPLIT_REQUIRED = YES`」だけとした**(§7.3.1)。判定条件を増やさないこと自体を要件とし、独立性・承認単位・WIP の所在といった補助条件を規範ルールへ持ち込まない。**依存関係は判定を上書きしない**(`DEPENDENCY_DOES_NOT_OVERRIDE_SPLIT = YES`、§7.3.2)。reader を先に出し writer を後から出す 2 段リリースのような不可分な順序制約であっても、reader が merge 済みで writer が未実装なら status は 2 種類に分かれるため分割必須であり、**「不可分な migration sequence だから 1 Issue に残す」という例外は設けない**。依存関係は Issue の統合ではなく `BLOCKED_BY` / `DEPENDS_ON` / `Related` / tracking Issue で表現する。複数 PR は `PR_SPLIT_SIGNAL = CANDIDATE` に留め、判定の引き金は PR を分けたことではなく **merge の非同時性が実際に生じたこと**とした(§7.3.3)。同一 Issue に残してよいのは全作業単位が同じ Progress Status にある場合のみで、「内部 step だから」を理由にしない(§7.3.4)。tracking / umbrella Issue の既存規定(自身の活動段階を status とする)は維持したうえで `TRACKING_ISSUE_STATUS_IS_NOT_A_DELIVERABLE_STATUS = YES` を明示し、parent を作るかどうかを **child の個数で決めない**(`TRACKING_PARENT_REQUIRED = NO_BY_COUNT_ALONE`)ことにした(§7.3.5)。分割手続き(移管元/移管先への記録・acceptance criteria の二重所有禁止・WIP ownership の移管・Production lifecycle の個別化・historical snapshot の保持・child Priority の再判定・source 側 4軸の再評価)を §7.3.6 に定めた。既存 OPEN Issue は `BULK_REWRITE_FORBIDDEN = YES` / `LAZY_ON_TOUCH = YES` とし、Assignment Read Barrier / state transition / PR review / post-merge reconciliation の 4 時点で検出したら勝手に label を変えず `STATUS_RECONCILIATION_REQUIRED` として報告し、split 判断を先に行う(§7.3.7、過去の CLOSED Issue へは遡及適用しない)。**Issue を分割しても並行実装が許可されるわけではない**ことを `ISSUE_SPLIT_DOES_NOT_GRANT_PARALLEL_WIP = YES` として明記した(§7.3.8。WIP の単位は Issue ではなく機能領域であり、`DOMAIN_WIP_MODEL_ACTIVE = YES` の期間は同一領域内の code WIP は domain lock で直列化される)。CI については `CI_ENFORCEABLE = PARTIAL` とし、機械判定できるのは status label 数・語彙・静的制約のみで、残作業単位の列挙と split 要否は semantic 判断であるため **`CI green` を split 不要の根拠にしない**ことを明記した(§7.3.9)。あわせて §9.3 を新設し、判定結果を snapshot へ残すための項目(`RESIDUAL_WORK_UNITS` / `UNIQUE_PROGRESS_STATUS_COUNT` / `ISSUE_SPLIT_REQUIRED` / `SPLIT_TARGET_ISSUES` / `ONE_ISSUE_ONE_PROGRESS_LIFECYCLE`)を示した(field contract の正本は development_workflow.md 6.5.3節であり複製していない)。**Progress Status の 8 段階の名称・意味(§7.1)、`STATUS_LABEL_COUNT_PER_OPEN_ISSUE = 1`(§7.2)、Production を伴わない Issue の扱い(§7.4)、CLOSED 時の label 保持(§7.5)、waiting label(§8)、Type / Priority / Release Blocker の判定基準はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-06 | 役割名の製品非依存化に伴う参照の更新(Issue #190)。`CHATGPT_STATE_READ_OWNER = CHATGPT` を `STATE_READ_OWNER = MANAGER` へ改め、7.3.8 の `DOMAIN_WIP_MODEL_ACTIVE = YES` を `CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` へ置き換えた。後者は #185 で development_workflow.md / functional_domains.md から同識別子が除かれ、本文書だけが定義を失った識別子に条件づけられたまま残っていたためである。本文中の "ChatGPT" 3 か所を役割名へ改めた。**4軸モデル・Type / Priority / Release Blocker / Progress Status の判定基準・§7.3 の分割規則はいずれも変更していない。** 変更履歴の過去エントリも書き換えていない。コード・Production 挙動の変更なし |
+| 2026-09-07 | §7.3.7 の検出時点へ 5 つ目「週次 read-only 棚卸(WEEKLY_INVENTORY / DEVELOPER / 月曜)」を追加し、§7.3.9 の「4 つの検出時点」を 5 つへ同期した(Issue #220)。既存の 1〜4 はいずれも「誰かがその Issue に用があったとき」に働くため、**用が無くなった Issue を拾う網が無かった**。実際に #36 は「待ち先の無い status:デプロイ済」が付いたまま 4 日間だれにも見られず、#128 / #132 の Priority 欠落は「再開判断」という発生しなかった trigger を待っていた。棚卸は read-only であり、対象は OPEN Issue 全件の 4 軸の欠落・最新 snapshot の日付・status:デプロイ済 / マージ済 の滞留日数・waiting: の孤立、成果物は tracking Issue 1 件、初回は #213 とする。**`BULK_REWRITE_FORBIDDEN` と `LAZY_ON_TOUCH` は維持する**(5 は一括書き換えではなく read-only の検出であり両立する)。label の適用は別 Instruction、close と Priority 変更は USER の gate という現行の境界も変えない。あわせて §7.3.9 へ CI(必須 job) / 日次 workflow / 週次棚卸(人)の分担を明記し、**機械側は「数える」までで「正しいか」は判断しない**ことを述べた。さらに §7.4 を「必須 verification を名指しできない code 変更」まで拡張し、見出しを「Production 変更を伴わない Issue」から「status:デプロイ済 を経由しない Issue」へ改めた(拡張後の対象は Production 変更の有無では決まらないため)。`VERIFICATION_NAMEABLE = NO` なら status:デプロイ済 を経由せず status:本番検証済 + CLOSE_READY へ進める。**これは §7.1 の定義の変更ではない**(「必須 verification が存在しない」なら「未完了」ではありえず、そもそも定義に当てはまらない。当てはまらない場合の明文化である)。「名指しできない」と「不要だと判断した」を区別し、**分からないまま デプロイ済 を付けない**ことも明記した。post-merge / post-deploy の Instruction と報告へ `VERIFICATION_REQUIRED = <項目 | NONE>` を必須とするが、その書式と適用範囲の正本は ai_operation_message_contract.md 11節であり本文書へ複製していない。**Progress Status の 8 段階の名称・意味(§7.1)・排他制約(§7.2)・§7.3 の分割判定基準・Type / Priority / Release Blocker の判定基準・waiting label・Human Gate の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
