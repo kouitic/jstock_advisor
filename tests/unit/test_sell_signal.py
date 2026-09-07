@@ -442,3 +442,123 @@ def test_review_and_sell_do_not_set_immediate_execution_price() -> None:
     assert result.recommendation_type == RecommendationType.SELL
     assert result.immediate_execution_price is None
     assert result.stop_review_price is None
+
+
+# --- Issue #222(N-2a / N-2b): 「該当なし」の理由と評価単位 ---------------------
+
+
+def _annual(values: list[str]) -> list[FinancialPeriodValue]:
+    """年次(ANNUAL)の系列を作る。値は架空値。"""
+    return [
+        FinancialPeriodValue(
+            value=Decimal(v),
+            period_end=dt.date(2023 + i, 3, 31),
+            period_type=PeriodType.ANNUAL,
+        )
+        for i, v in enumerate(values)
+    ]
+
+
+def test_n2_not_triggered_explanation_states_required_and_actual_periods() -> None:
+    """N-2a: 「該当なし」の理由に、必要期数と実際の期数を含める。
+
+    従来は「営業利益の継続悪化は検出されなかった」という結論の言い換えのみで、
+    利用者から見て「減っているのに、なぜ該当しないのか」が分からなかった。
+    """
+    from jstock_advisor.domain.signals.sell_signal import (
+        _continuous_decline_not_triggered_explanation,
+    )
+
+    # 3期: 100 -> 90(悪化) -> 95(改善)。直近は悪化していない。
+    periods = _annual(["100", "90", "95"])
+
+    text = _continuous_decline_not_triggered_explanation("営業利益", periods, 2)
+
+    assert "必要は2年連続の悪化" in text
+    assert "直近は前期比で悪化していない" in text
+
+
+def test_n2_not_triggered_explanation_reports_a_shorter_streak() -> None:
+    """N-2a: 必要期数に届かなかった場合、実際に何期連続だったかを出す。"""
+    from jstock_advisor.domain.signals.sell_signal import (
+        _continuous_decline_not_triggered_explanation,
+    )
+
+    # 3期: 100 -> 110(改善) -> 105(悪化)。実際は1期連続。
+    periods = _annual(["100", "110", "105"])
+
+    text = _continuous_decline_not_triggered_explanation("営業利益", periods, 2)
+
+    assert "必要は2年連続の悪化" in text
+    assert "実際は1年連続" in text
+
+
+def test_n2b_unit_label_follows_the_actual_period_type() -> None:
+    """N-2b: 表示する評価単位は、config のキー名ではなく実データの period_type に従う。
+
+    config のキー名も引数名も consecutive_quarters(四半期)だが、実際に比較されるのは
+    period_type を付けた系列であり、年次データなら「2年連続」を要求する。
+    「2四半期連続 = 約半年」と読むと必要な悪化の長さを4分の1に見誤る。
+    """
+    from jstock_advisor.domain.signals.sell_signal import _continuous_decline_unit_label
+
+    assert _continuous_decline_unit_label(_annual(["100", "90", "80"])) == "年"
+
+    quarters = [
+        FinancialPeriodValue(
+            value=Decimal("100"),
+            period_end=dt.date(2026, 3, 31),
+            period_type=PeriodType.QUARTER,
+        )
+    ]
+    assert _continuous_decline_unit_label(quarters) == "四半期"
+
+
+def test_n2b_unit_label_is_neutral_when_period_types_are_mixed() -> None:
+    """N-2b: period_type が揃っていない場合は単位を断定せず中立の「期」を返す。
+
+    誤った単位を提示するくらいなら曖昧なままにする(判定側は period_type が
+    揃わない窓を NOT_EVALUATED としており、表示だけが断定してはいけない)。
+    """
+    from jstock_advisor.domain.signals.sell_signal import _continuous_decline_unit_label
+
+    mixed = [
+        FinancialPeriodValue(
+            value=Decimal("100"),
+            period_end=dt.date(2026, 3, 31),
+            period_type=PeriodType.ANNUAL,
+        ),
+        FinancialPeriodValue(
+            value=Decimal("90"),
+            period_end=dt.date(2026, 6, 30),
+            period_type=PeriodType.QUARTER,
+        ),
+    ]
+    assert _continuous_decline_unit_label(mixed) == "期"
+
+
+def test_n2_streak_does_not_change_the_judgment() -> None:
+    """N-2a の副読みが、既存の判定関数と同じ有効性判定に従うことを固定する。
+
+    _actual_decline_streak は説明文のためだけの読み取りであり、
+    detect_continuous_decline_period_aware の判定条件を一切変更しない。
+    """
+    from jstock_advisor.domain.signals.sell_signal import (
+        _actual_decline_streak,
+        detect_continuous_decline_period_aware,
+    )
+
+    declining = _annual(["100", "90", "80"])
+    assert detect_continuous_decline_period_aware(declining, 2) is True
+    assert _actual_decline_streak(declining) == 2
+
+    # period_type が混在する窓は判定不能。streak も途中で打ち切る。
+    mixed = declining[:2] + [
+        FinancialPeriodValue(
+            value=Decimal("70"),
+            period_end=dt.date(2026, 6, 30),
+            period_type=PeriodType.QUARTER,
+        )
+    ]
+    assert detect_continuous_decline_period_aware(mixed, 2) is None
+    assert _actual_decline_streak(mixed) == 0
