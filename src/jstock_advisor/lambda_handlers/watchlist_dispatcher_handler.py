@@ -51,6 +51,8 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
+    UNIVERSE_SOURCE_CACHE,
+    UNIVERSE_SOURCE_DOWNLOADED,
     CandidateProgressRecord,
     UnknownWatchlistJobTypeError,
     WatchlistJobType,
@@ -174,8 +176,6 @@ def _compute_universe_signature(eligible_universe_count: int, selected_codes: li
 
 
 _LISTED_ISSUES_SOURCE = "listed_issues"
-UNIVERSE_SOURCE_DOWNLOADED = "DOWNLOADED"
-UNIVERSE_SOURCE_CACHE = "CACHE"
 
 
 def _universe_observation(

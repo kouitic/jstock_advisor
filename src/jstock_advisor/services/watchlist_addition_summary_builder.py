@@ -65,6 +65,14 @@ class WatchlistAdditionSummary:
     addition_rate_pct: float
     evaluated_at: dt.datetime
     items: list[WatchlistAdditionItemView]
+    # Issue #234(U4): この回の候補一覧(東証上場銘柄一覧)の取得に失敗し、
+    # 前回取得のキャッシュで処理を継続したかどうか。Dispatcherがdispatch時点で
+    # 測ってBatchRunsTableへ記録した値(Issue #223 PR-1a)をfinalizeが読んで渡す。
+    # **事実だけを持ち、文言は持たない**(表示はnotification service側の責務)。
+    universe_fetch_failed: bool = False
+    # 継続に使ったキャッシュの元データの公開日(ISO文字列)。取得できていない
+    # 場合はNone(文言側で「不明」と表示する)。
+    universe_source_date: str | None = None
 
 
 def _policy_label(policy_name: str) -> str:
@@ -132,10 +140,17 @@ def build_watchlist_addition_summary(
     scoring_config: WatchlistScreeningScoringConfig,
     thresholds_config: WatchlistScreeningThresholds,
     evaluated_at: dt.datetime,
+    universe_fetch_failed: bool = False,
+    universe_source_date: str | None = None,
 ) -> WatchlistAdditionSummary:
     """`added_items`(WatchlistRepository.add_if_new()が実際にTrueを返した銘柄、
     stock_nameは呼び出し側で既にStockDisplayNameResolver.resolve()済みである
     こと)からPresentation DTOを組み立てる。
+
+    Issue #234(U4): `universe_fetch_failed`/`universe_source_date`は、この回の
+    候補一覧の取得に失敗しキャッシュで継続したという**事実**を通知層へ運ぶ。
+    既定値のままなら従来と同じDTOになるため、既存の呼び出し元は変更不要。
+    文言はここでは組み立てない(通知チャネル非依存を保つため)。
     """
     ordered_items = sorted(
         added_items,
@@ -168,4 +183,6 @@ def build_watchlist_addition_summary(
         addition_rate_pct=addition_rate_pct,
         evaluated_at=evaluated_at,
         items=items,
+        universe_fetch_failed=universe_fetch_failed,
+        universe_source_date=universe_source_date,
     )

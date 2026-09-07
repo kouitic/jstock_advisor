@@ -1411,6 +1411,14 @@ def try_acquire_dispatch_lease(
         raise
 
 
+# Issue #223(O-A) / #234(U4): BatchRunsTableのuniverse_sourceが取りうる値。
+# Dispatcherが書き、watchlist_batch_finalizerが読むため、**永続値の語彙**として
+# 書き手側(lambda_handlers)ではなく永続化層のここを正本とする
+# (services -> lambda_handlers の逆向き依存を作らないため)。
+UNIVERSE_SOURCE_DOWNLOADED = "DOWNLOADED"
+UNIVERSE_SOURCE_CACHE = "CACHE"
+
+
 def set_watchlist_batch_total(
     batch_id: str,
     total: int,
