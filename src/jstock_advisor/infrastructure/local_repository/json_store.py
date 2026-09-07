@@ -13,8 +13,15 @@ import os
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
+
+from jstock_advisor.infrastructure.record_failure_policy import (
+    ItemIdDisclosure,
+    RecordFailureCollector,
+    RecordFailurePolicy,
+)
 
 DEFAULT_STORE_DIR = Path(__file__).resolve().parents[4] / "data" / "local_store"
 
@@ -26,21 +33,86 @@ class JsonCollectionStore[T: BaseModel]:
         file_name: str,
         id_field: str,
         store_dir: Path | None = None,
+        failure_policy: RecordFailurePolicy = RecordFailurePolicy.STRICT,
+        item_id_disclosure: ItemIdDisclosure = ItemIdDisclosure.HASH,
     ) -> None:
         self._model_type = model_type
         self._id_field = id_field
         self._path = (store_dir or DEFAULT_STORE_DIR) / file_name
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._failure_policy = failure_policy
+        self._item_id_disclosure = item_id_disclosure
+        self._collection = file_name
 
-    def _read_all(self) -> dict[str, T]:
+    def _collector(self) -> RecordFailureCollector:
+        return RecordFailureCollector(
+            collection=self._collection,
+            policy=self._failure_policy,
+            item_id_disclosure=self._item_id_disclosure,
+        )
+
+    def _decode(
+        self, raw_items: list[dict[str, Any]]
+    ) -> tuple[dict[str, T], dict[str, dict[str, Any]]]:
+        """生の要素列を「デコードできたモデル」と「できなかった raw」へ分ける。
+
+        Issue #63 PR-2(A-U2)。**デコードできなかった要素は raw のまま保持する。**
+        `_write_all()` はこれを元の JSON のまま書き戻す。
+
+        こうしないと、skip した不正レコードが次の書き込みで**黙って消える**。
+        `_write_all()` は検証済みモデルから再直列化するため、skip された要素は
+        書き戻し対象から外れてしまうためである。A-U2 の目的は「壊れたレコードを
+        消せるようにする(自己修復)」であって「意図せず消える」ことではない。
+
+        `STRICT` では最初の失敗で元の例外がそのまま送出される(現行と同じ)。
+        """
+        decoded: dict[str, T] = {}
+        quarantined: dict[str, dict[str, Any]] = {}
+        collector = self._collector()
+        for item in raw_items:
+            item_id = str(item[self._id_field])
+            try:
+                decoded[item_id] = self._model_type.model_validate(item)
+            except Exception as error:  # noqa: BLE001 - ポリシーに委ねるため広く捕捉する
+                collector.handle(item_id, error)
+                quarantined[item_id] = item
+        return decoded, quarantined
+
+    def _load(self) -> tuple[dict[str, T], dict[str, dict[str, Any]]]:
         if not self._path.exists():
-            return {}
+            return {}, {}
         with self._path.open(encoding="utf-8") as f:
             raw = json.load(f)
-        return {str(item[self._id_field]): self._model_type.model_validate(item) for item in raw}
+        return self._decode(raw)
 
-    def _write_all(self, items: dict[str, T]) -> None:
-        payload = [json.loads(item.model_dump_json()) for item in items.values()]
+    def _read_all(self) -> dict[str, T]:
+        return self._load()[0]
+
+    def _write_all(
+        self, items: dict[str, T], quarantined: dict[str, dict[str, Any]] | None = None
+    ) -> None:
+        """検証済みモデルを書き戻す。`quarantined` は**元の JSON のまま**残す。
+
+        Issue #63 PR-2(A-U2)。デコードできなかったレコードを書き込みのたびに
+        取りこぼさないため、呼び出し側は `_load()` が返した quarantined を渡す。
+
+        quarantined が消えるのは、**その id を名指しした操作**を行った場合だけである。
+
+            delete(id)                       消える(自己修復の経路)
+            upsert / upsert_many /
+            apply_batch の puts・delete_ids  同じ id を書けば置換・削除される
+            insert_if_absent                 既存とみなして拒否する(上書きしない)
+            それ以外の書き込み               触れない(raw のまま残る)
+
+        つまり「他の id への書き込みに巻き込まれて消える」ことが無い、という保証で
+        あって、「delete でしか消えない」という意味ではない。同じ id への upsert は
+        壊れたレコードを正しい値で置き換える正当な復旧手段である。
+        """
+        payload: list[dict[str, Any]] = [
+            json.loads(item.model_dump_json()) for item in items.values()
+        ]
+        if quarantined:
+            payload.extend(quarantined.values())
         fd, tmp_path = tempfile.mkstemp(dir=self._path.parent, prefix=".tmp_", suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -78,10 +150,11 @@ class JsonCollectionStore[T: BaseModel]:
         return item.model_dump_json() if item is not None else None
 
     def upsert(self, item: T) -> None:
-        items = self._read_all()
+        items, quarantined = self._load()
         item_id = str(getattr(item, self._id_field))
         items[item_id] = item
-        self._write_all(items)
+        quarantined.pop(item_id, None)
+        self._write_all(items, quarantined)
 
     def apply_batch(self, delete_ids: Iterable[str], puts: Iterable[T]) -> None:
         """削除と追加/更新を1回の書き込みで適用する(Issue #61 Phase B2)。
@@ -90,25 +163,40 @@ class JsonCollectionStore[T: BaseModel]:
         このファイルについては部分適用が発生しない(全部反映されるか、
         元のファイルがそのまま残るかのどちらか)。
         """
-        items = self._read_all()
+        items, quarantined = self._load()
         for item_id in delete_ids:
             items.pop(str(item_id), None)
+            quarantined.pop(str(item_id), None)
         for item in puts:
-            items[str(getattr(item, self._id_field))] = item
-        self._write_all(items)
+            key = str(getattr(item, self._id_field))
+            items[key] = item
+            quarantined.pop(key, None)
+        self._write_all(items, quarantined)
 
     def upsert_many(self, new_items: Iterable[T]) -> None:
-        items = self._read_all()
+        items, quarantined = self._load()
         for item in new_items:
-            items[str(getattr(item, self._id_field))] = item
-        self._write_all(items)
+            key = str(getattr(item, self._id_field))
+            items[key] = item
+            quarantined.pop(key, None)
+        self._write_all(items, quarantined)
 
     def delete(self, item_id: str) -> bool:
-        items = self._read_all()
+        """id を指定した削除。**デコードできなかったレコードも消せる。**
+
+        Issue #63 PR-2(A-U2)。壊れたレコードを消して復旧する経路であり、
+        ここが通らないと自己修復ができない(従来は全件検証を経由するため
+        delete すら通らなかった)。
+        """
+        items, quarantined = self._load()
+        if item_id in quarantined:
+            del quarantined[item_id]
+            self._write_all(items, quarantined)
+            return True
         if item_id not in items:
             return False
         del items[item_id]
-        self._write_all(items)
+        self._write_all(items, quarantined)
         return True
 
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
@@ -137,33 +225,33 @@ class JsonCollectionStore[T: BaseModel]:
         単一プロセスでのCLI利用を前提とし(モジュール冒頭のdocstring参照)、
         read→writeの間の排他制御は行わない(check-then-act)。
         """
-        items = self._read_all()
+        items, quarantined = self._load()
         item_id = str(getattr(item, self._id_field))
-        if item_id in items:
+        if item_id in items or item_id in quarantined:
             return False
         items[item_id] = item
-        self._write_all(items)
+        self._write_all(items, quarantined)
         return True
 
     def replace_if_raw_matches(self, item_id: str, expected_raw_data: str, item: T) -> bool:
         """現在値のmodel_dump_json()がexpected_raw_dataと一致する場合のみ置換
         (CAS。Issue #17)。単一プロセス前提のread-compare-write
         (insert_if_absent()と同じ前提)。"""
-        items = self._read_all()
+        items, quarantined = self._load()
         current = items.get(item_id)
         if current is None or current.model_dump_json() != expected_raw_data:
             return False
         items[item_id] = item
-        self._write_all(items)
+        self._write_all(items, quarantined)
         return True
 
     def delete_if_raw_matches(self, item_id: str, expected_raw_data: str) -> bool:
         """現在値のmodel_dump_json()がexpected_raw_dataと一致する場合のみ削除
         (条件付き削除。Issue #17)。単一プロセス前提のread-compare-write。"""
-        items = self._read_all()
+        items, quarantined = self._load()
         current = items.get(item_id)
         if current is None or current.model_dump_json() != expected_raw_data:
             return False
         del items[item_id]
-        self._write_all(items)
+        self._write_all(items, quarantined)
         return True

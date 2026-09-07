@@ -528,3 +528,82 @@ def test_list_all_still_returns_every_page(
 
     assert [item.item_id for item in items] == ["1", "2", "3", "4", "5"]
     assert fake.scan_calls == 3
+
+
+# --- Issue #63 PR-2(A-U1b): 全件経路を失敗ポリシー機構へ接続する ---------------
+#
+# 不正レコードは fixture としてのみ作る。Production への注入は行わない。
+# 主キーは所有者を含みうる形（架空値）を再現する。
+
+
+def _put_broken(table_name: str, item_id: str) -> None:
+    """`data` がモデルとして不正な項目を直接書き込む（fixture 専用）。"""
+    boto3.resource("dynamodb", region_name=_REGION).Table(table_name).put_item(
+        Item={"item_id": item_id, "data": '{"item_id": "x", "name": "n", "value": "not-int"}'}
+    )
+
+
+def _lenient_store() -> DynamoDbCollectionStore[_Item]:
+    from jstock_advisor.infrastructure.record_failure_policy import RecordFailurePolicy
+
+    return DynamoDbCollectionStore(
+        _Item, _TABLE_NAME, "item_id", failure_policy=RecordFailurePolicy.LENIENT
+    )
+
+
+def test_iter_all_is_strict_by_default(store: DynamoDbCollectionStore[_Item]) -> None:
+    """既定(STRICT)では 1 件の不正で例外。**現行の挙動と同じ。**"""
+    store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with pytest.raises(Exception):  # noqa: B017 - pydantic の ValidationError をそのまま通す
+        store.list_all()
+
+
+def test_iter_all_skips_under_lenient(store: DynamoDbCollectionStore[_Item]) -> None:
+    """LENIENT なら Scan 経路で 1 件の不正を skip して残りを返す。"""
+    store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    items = _lenient_store().list_all()
+
+    assert [i.item_id for i in items] == ["owner-a#0001"]
+
+
+def test_get_is_unaffected_by_a_broken_record(store: DynamoDbCollectionStore[_Item]) -> None:
+    """★ get() は要求した 1 件しか検証しない（本 PR で変更していない）。
+
+    1 件の不正が他の id の取得を妨げない、という既存の性質を固定する。
+    """
+    store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    got = store.get("owner-a#0001")
+
+    assert got is not None
+    assert got.item_id == "owner-a#0001"
+
+
+def test_get_many_skips_under_lenient(store: DynamoDbCollectionStore[_Item]) -> None:
+    """BatchGetItem 経路でも、同じ束に不正が混じって全滅しない。"""
+    store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    result = _lenient_store().get_many(["owner-a#0000", "owner-a#0001"])
+
+    assert list(result) == ["owner-a#0001"]
+
+
+def test_broken_item_id_is_hashed_in_logs(
+    store: DynamoDbCollectionStore[_Item], caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ 既定では主キーの平文をログへ出さない（Issue #135 E-4 を開かない）。"""
+    import logging
+
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with caplog.at_level(logging.WARNING):
+        _lenient_store().list_all()
+
+    assert "owner-a#0000" not in caplog.text
+    assert "sha256:" in caplog.text

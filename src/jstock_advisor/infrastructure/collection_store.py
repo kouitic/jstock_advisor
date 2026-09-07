@@ -18,6 +18,10 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.record_failure_policy import (
+    ItemIdDisclosure,
+    RecordFailurePolicy,
+)
 
 _TABLE_PREFIX_ENV = "DYNAMODB_TABLE_PREFIX"
 _DEFAULT_TABLE_PREFIX = "jstock"
@@ -204,14 +208,41 @@ def build_collection_store[T: BaseModel](
     id_field: str,
     store_dir: Path | None = None,
     ttl_seconds: int | None = None,
+    failure_policy: RecordFailurePolicy = RecordFailurePolicy.STRICT,
+    item_id_disclosure: ItemIdDisclosure = ItemIdDisclosure.HASH,
 ) -> CollectionStore[T]:
     """ttl_secondsはDynamoDBバックエンド向けの任意引数(通知検証モード機能2026-08追加、
     ValidationRecommendationsTable等の使い捨てテーブル専用)。ローカルJSON実装には
-    TTL概念が無いため無視される。"""
+    TTL概念が無いため無視される。
+
+    failure_policyとitem_id_disclosureはIssue #63 PR-2で追加した。**ポリシーは
+    ストア層の内部ではなく呼び出し側(repository)が宣言する。** 表をストア内部に
+    持つと、コレクションを1つLENIENTにするたびにS-17の変更=全領域lockが必要に
+    なるためである。
+
+    既定はSTRICT(現行と同一の挙動。最初の失敗で元の例外をそのまま送出)であり、
+    **宣言しなければ挙動は変わらない。** 個々のコレクションのLENIENT化は
+    Issue #63 PR-3(A-U3)で行う。
+
+    item_id_disclosureの既定はHASH。主キーは個人識別情報を含みうるため
+    fail-closedとする(Issue #135)。
+    """
     if running_on_lambda():
         from jstock_advisor.infrastructure.aws.dynamodb_store import DynamoDbCollectionStore
 
         return DynamoDbCollectionStore(
-            model_type, resolve_table_name(file_name), id_field, ttl_seconds=ttl_seconds
+            model_type,
+            resolve_table_name(file_name),
+            id_field,
+            ttl_seconds=ttl_seconds,
+            failure_policy=failure_policy,
+            item_id_disclosure=item_id_disclosure,
         )
-    return JsonCollectionStore(model_type, file_name, id_field, store_dir)
+    return JsonCollectionStore(
+        model_type,
+        file_name,
+        id_field,
+        store_dir,
+        failure_policy=failure_policy,
+        item_id_disclosure=item_id_disclosure,
+    )

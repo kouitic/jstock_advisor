@@ -48,6 +48,7 @@ PR-2(A-U1b)であり、その時点で `LOCK_LEVEL_2` / 全領域 lock を取得
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -84,12 +85,56 @@ class RecordFailurePolicy(StrEnum):
     """
 
 
+class ItemIdDisclosure(StrEnum):
+    """失敗記録の `item_id` をどこまで出すか(Issue #63 PR-2 / Issue #135)。"""
+
+    HASH = "HASH"
+    """SHA-256 の先頭 8 文字だけを出す。**既定。**
+
+    主キーは個人識別情報を含みうる。実測(Issue #135 Phase A)では
+    `holdings_v2` / `holding_evaluation_records` / `investment_thesis_baselines` /
+    baseline pointer / baseline sequence / holdings snapshot の 6 collection で
+    `item_id` が `<所有者>#<銘柄コード>` 形式を含む。
+
+    平文を出すと、本 module の接続が **そのまま Production ログへの
+    個人識別情報の出力経路になる**(Issue #135 が塞ごうとしている経路)。
+    fail-closed とし、宣言し忘れた collection が実名を出す状態を作らない。
+
+    是正可能性は失われない。運用者は候補キーをローカルでハッシュして
+    突き合わせられる(対象 collection の件数は小さい)。
+    """
+
+    PLAIN = "PLAIN"
+    """そのまま出す。**個人識別情報を含まないと実測できた collection のみ**。
+
+    `audit_log`(audit_id) / `recommendations`(recommendation_id) /
+    `watchlist`(stock_code) / cache 系(cache_key)のように、主キーが
+    生成 ID・銘柄コード・日付で構成されることを確認したうえで宣言する。
+    """
+
+
+_HASH_PREFIX_LEN = 8
+
+
+def _disclose_item_id(item_id: str, disclosure: ItemIdDisclosure) -> str:
+    """開示レベルに従って `item_id` を表示形へ変換する。
+
+    Issue #131 が公開面の PII 検出で採った形(一致した文字列そのものは出さず、
+    ハッシュ接頭辞と所在だけを出す)と同じ仕組みに揃える。二重の方針を作らない。
+    """
+    if disclosure is ItemIdDisclosure.PLAIN:
+        return item_id
+    digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()
+    return f"sha256:{digest[:_HASH_PREFIX_LEN]}"
+
+
 @dataclass(frozen=True)
 class RecordFailure:
     """デコードに失敗した 1 件。**レコードの中身は保持しない。**
 
     collection  コレクション名(テーブル名 / ファイル名)
-    item_id     所在。是正できるように所在だけは残す
+    item_id     所在。**開示レベルを適用した後の文字列**を保持する
+                (既定は SHA-256 の先頭 8 文字。ItemIdDisclosure 参照)
     error_type  例外クラス名。message は含めない(値を含みうるため)
     """
 
@@ -155,6 +200,7 @@ class RecordFailureCollector:
     collection: str
     policy: RecordFailurePolicy = RecordFailurePolicy.STRICT
     emit: Callable[[RecordFailure, RecordFailurePolicy], None] | None = emit_record_failure
+    item_id_disclosure: ItemIdDisclosure = ItemIdDisclosure.HASH
     _failures: list[RecordFailure] = field(default_factory=list, init=False)
 
     @property
@@ -175,7 +221,7 @@ class RecordFailureCollector:
         """
         failure = RecordFailure(
             collection=self.collection,
-            item_id=item_id,
+            item_id=_disclose_item_id(item_id, self.item_id_disclosure),
             error_type=type(error).__name__,
         )
         if self.emit is not None:
@@ -212,6 +258,7 @@ def decode_records[RawT, RecordT](
     collection: str,
     policy: RecordFailurePolicy = RecordFailurePolicy.STRICT,
     emit: Callable[[RecordFailure, RecordFailurePolicy], None] | None = emit_record_failure,
+    item_id_disclosure: ItemIdDisclosure = ItemIdDisclosure.HASH,
 ) -> DecodeOutcome[RecordT]:
     """`(item_id, raw)` の並びを全件デコードして結果をまとめる。
 
@@ -220,7 +267,12 @@ def decode_records[RawT, RecordT](
 
     `policy` を省略すると `STRICT` であり、**現行と同一の挙動**になる。
     """
-    collector = RecordFailureCollector(collection=collection, policy=policy, emit=emit)
+    collector = RecordFailureCollector(
+        collection=collection,
+        policy=policy,
+        emit=emit,
+        item_id_disclosure=item_id_disclosure,
+    )
     scanned = 0
     records: list[RecordT] = []
     for item_id, raw in raw_items:
