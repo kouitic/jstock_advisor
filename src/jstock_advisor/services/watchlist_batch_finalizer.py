@@ -909,9 +909,9 @@ def _finish_batch(
                 # 取得失敗はDispatcher側でキャッシュ継続として握りつぶされ、
                 # Lambda Errorsにも現れないため、成功した回も含めてここへ残す。
                 "universe_source": batch_item.get("universe_source"),
-                "promoted": batch_item.get("promoted"),
-                "source_date": batch_item.get("source_date"),
-                "cache_age_days": batch_item.get("cache_age_days"),
+                "universe_promoted": batch_item.get("universe_promoted"),
+                "universe_source_date": batch_item.get("universe_source_date"),
+                "universe_cache_age_days": batch_item.get("universe_cache_age_days"),
                 **metrics,
             },
             now=now,

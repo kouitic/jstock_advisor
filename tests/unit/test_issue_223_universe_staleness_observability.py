@@ -248,9 +248,9 @@ def test_observation_reports_cache_when_download_failed() -> None:
     ]
     observed = _universe_observation(outcomes, now)
     assert observed["universe_source"] == UNIVERSE_SOURCE_CACHE
-    assert observed["promoted"] is False
-    assert observed["source_date"] == "2026-07-31"
-    assert observed["cache_age_days"] == 37
+    assert observed["universe_promoted"] is False
+    assert observed["universe_source_date"] == "2026-07-31"
+    assert observed["universe_cache_age_days"] == 37
 
 
 def test_observation_reports_downloaded_on_success() -> None:
@@ -266,9 +266,9 @@ def test_observation_reports_downloaded_on_success() -> None:
     ]
     observed = _universe_observation(outcomes, now)
     assert observed["universe_source"] == UNIVERSE_SOURCE_DOWNLOADED
-    assert observed["promoted"] is True
-    assert observed["source_date"] == "2026-09-06"
-    assert observed["cache_age_days"] == 0
+    assert observed["universe_promoted"] is True
+    assert observed["universe_source_date"] == "2026-09-06"
+    assert observed["universe_cache_age_days"] == 0
 
 
 def test_observation_cache_age_days_uses_the_same_basis_as_the_staleness_gate() -> None:
@@ -290,7 +290,7 @@ def test_observation_cache_age_days_uses_the_same_basis_as_the_staleness_gate() 
     age_hours = (
         now - dt.datetime.combine(_PRODUCTION_SOURCE_DATE, dt.time(), tzinfo=dt.UTC)
     ).total_seconds() / 3600
-    assert _universe_observation(outcomes, now)["cache_age_days"] == int(age_hours // 24)
+    assert _universe_observation(outcomes, now)["universe_cache_age_days"] == int(age_hours // 24)
 
 
 def test_observation_tolerates_missing_source_date() -> None:
@@ -299,8 +299,8 @@ def test_observation_tolerates_missing_source_date() -> None:
         DownloadOutcome(source="listed_issues", promoted=False, reason="boom", metadata=None)
     ]
     observed = _universe_observation(outcomes, now)
-    assert observed["source_date"] is None
-    assert observed["cache_age_days"] is None
+    assert observed["universe_source_date"] is None
+    assert observed["universe_cache_age_days"] is None
     assert observed["universe_source"] == UNIVERSE_SOURCE_CACHE
 
 
@@ -361,9 +361,9 @@ def test_observation_is_persisted_to_the_batch_row(dynamo) -> None:
     item = batch_tracker.get_watchlist_batch("batch-223")
     assert item is not None
     assert item["universe_source"] == UNIVERSE_SOURCE_CACHE
-    assert item["promoted"] is False
-    assert item["source_date"] == "2026-07-31"
-    assert int(item["cache_age_days"]) == 37
+    assert item["universe_promoted"] is False
+    assert item["universe_source_date"] == "2026-07-31"
+    assert int(item["universe_cache_age_days"]) == 37
 
 
 def test_batch_row_keeps_the_keys_absent_when_the_downloader_did_not_run(dynamo) -> None:
@@ -377,9 +377,9 @@ def test_batch_row_keeps_the_keys_absent_when_the_downloader_did_not_run(dynamo)
     item = batch_tracker.get_watchlist_batch("batch-maint")
     assert item is not None
     assert item["universe_source"] is None
-    assert item["promoted"] is None
-    assert item["source_date"] is None
-    assert item["cache_age_days"] is None
+    assert item["universe_promoted"] is None
+    assert item["universe_source_date"] is None
+    assert item["universe_cache_age_days"] is None
 
 
 def test_finalize_batch_audit_carries_the_four_keys() -> None:
@@ -395,5 +395,10 @@ def test_finalize_batch_audit_carries_the_four_keys() -> None:
     ).read_text(encoding="utf-8")
     block = source.split("if not batch_item.get(\"finalize_batch_audit_recorded\"):", 1)[1]
     block = block.split("mark_batch_audit_recorded", 1)[0]
-    for key in ("universe_source", "promoted", "source_date", "cache_age_days"):
+    for key in (
+        "universe_source",
+        "universe_promoted",
+        "universe_source_date",
+        "universe_cache_age_days",
+    ):
         assert f'"{key}": batch_item.get("{key}")' in block, key

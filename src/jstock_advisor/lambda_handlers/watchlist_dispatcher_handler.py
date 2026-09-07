@@ -205,9 +205,11 @@ def _universe_observation(
         "universe_source": (
             UNIVERSE_SOURCE_DOWNLOADED if listed.promoted else UNIVERSE_SOURCE_CACHE
         ),
-        "promoted": listed.promoted,
-        "source_date": source_date.isoformat() if source_date is not None else None,
-        "cache_age_days": cache_age_days,
+        "universe_promoted": listed.promoted,
+        "universe_source_date": (
+            source_date.isoformat() if source_date is not None else None
+        ),
+        "universe_cache_age_days": cache_age_days,
     }
 
 
