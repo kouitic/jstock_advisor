@@ -21,6 +21,10 @@ from jstock_advisor.infrastructure.edinet.scan_window import (
     business_days_between,
     compute_scan_start,
 )
+from jstock_advisor.infrastructure.record_failure_policy import (
+    ItemIdDisclosure,
+    RecordFailurePolicy,
+)
 
 _ANNUAL_DOC_TYPE_CODES = {"120", "130"}  # 有価証券報告書・訂正有価証券報告書
 _SEMIANNUAL_DOC_TYPE_CODES = {"160", "170"}  # 半期報告書・訂正半期報告書
@@ -43,8 +47,17 @@ class EdinetFilingCache(BaseModel):
 
 class EdinetFilingCacheRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
+        # Issue #63 PR-3a: cacheのdecode失敗は1件skipしても次回取得で置き換わる
+        # ため、collection全体を止める理由がない(LENIENT)。
+        # item_idはPLAIN。主キーは銘柄コードのみで所有者名を含まない
+        # (#135 Phase Aが実測した6 collectionと重ならない)。
         self._store: CollectionStore[EdinetFilingCache] = build_collection_store(
-            EdinetFilingCache, "edinet_filing_cache.json", "stock_code", store_dir
+            EdinetFilingCache,
+            "edinet_filing_cache.json",
+            "stock_code",
+            store_dir,
+            failure_policy=RecordFailurePolicy.LENIENT,
+            item_id_disclosure=ItemIdDisclosure.PLAIN,
         )
 
     def get(self, stock_code: str) -> EdinetFilingCache | None:

@@ -46,6 +46,10 @@ from jstock_advisor.infrastructure.edinet.types import (
     EdinetFetchStatus,
     EdinetListResult,
 )
+from jstock_advisor.infrastructure.record_failure_policy import (
+    ItemIdDisclosure,
+    RecordFailurePolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +84,18 @@ class EdinetDailyDocumentListCache(BaseModel):
 
 class EdinetDailyDocumentListCacheRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
+        # Issue #63 PR-3a: cacheのdecode失敗は1件skipしても次回取得で置き換わる
+        # ため、collection全体を止める理由がない(LENIENT)。
+        # item_idはPLAIN。主キーはJST暦日のみで銘柄コードも所有者名も含まない
+        # (本moduleのdocstring参照。#135 Phase Aの6 collectionと重ならない)。
         self._store: CollectionStore[EdinetDailyDocumentListCache] = build_collection_store(
             EdinetDailyDocumentListCache,
             _CACHE_FILE_NAME,
             "scan_date",
             store_dir,
             ttl_seconds=_RETENTION_SECONDS,
+            failure_policy=RecordFailurePolicy.LENIENT,
+            item_id_disclosure=ItemIdDisclosure.PLAIN,
         )
 
     def get(self, scan_date: dt.date) -> EdinetDailyDocumentListCache | None:

@@ -56,6 +56,10 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from jstock_advisor.config.models import AppConfig, WatchlistDataCacheConfig
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
+from jstock_advisor.infrastructure.record_failure_policy import (
+    ItemIdDisclosure,
+    RecordFailurePolicy,
+)
 from jstock_advisor.interfaces.dividend_data import DividendDataProvider
 from jstock_advisor.interfaces.financial_data import FinancialDataProvider
 from jstock_advisor.interfaces.market_data import MarketDataProvider
@@ -433,11 +437,25 @@ def build_cached_provider_bundle(
     (既存呼び出し元の挙動は変えない)。
     """
     cache_config = _cache_config(config)
+    # Issue #63 PR-3a: cacheのdecode失敗は1件skipしても次回取得で置き換わるため、
+    # collection全体を止める理由がない(LENIENT)。skipはcache missとして
+    # CacheStatsに計上されるため、件数は既存の手段で数えられる。
+    # item_idはPLAIN。主キーは"<用途>:<銘柄コード>"または
+    # "<用途>:<銘柄コード>:<JST日付>"であり所有者名を含まない
+    # (#135 Phase Aが実測した6 collectionと重ならない)。
     price_repo: CollectionStore[CacheEntry] = build_collection_store(
-        CacheEntry, _PRICE_CACHE_FILE, "cache_key"
+        CacheEntry,
+        _PRICE_CACHE_FILE,
+        "cache_key",
+        failure_policy=RecordFailurePolicy.LENIENT,
+        item_id_disclosure=ItemIdDisclosure.PLAIN,
     )
     financial_repo: CollectionStore[CacheEntry] = build_collection_store(
-        CacheEntry, _FINANCIAL_CACHE_FILE, "cache_key"
+        CacheEntry,
+        _FINANCIAL_CACHE_FILE,
+        "cache_key",
+        failure_policy=RecordFailurePolicy.LENIENT,
+        item_id_disclosure=ItemIdDisclosure.PLAIN,
     )
     return ProviderBundle(
         market_data=_CachingMarketDataProvider(
