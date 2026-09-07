@@ -5,11 +5,23 @@ name: CI
 # requirements-lock.txt(運用ハードニング8節)からインストールし、
 # pyproject.tomlの範囲指定ではなく検証済みの固定バージョン集合で実行する。
 
+# Issue #230: feature branch(issue-**)へのpushでもCIを起動する。§4は全体回帰の
+# 正本をCIと定めており(LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN)、一方で運用は
+# 「push -> exact diff review -> PR」の順であるため、PRを作るまでレビュー担当も
+# 作業者も全体回帰の結果を見られなかった。job定義・required check名は変更しない。
 on:
   push:
-    branches: [main]
+    branches: [main, "issue-**"]
   pull_request:
   workflow_dispatch:
+
+# Issue #230: 同一branchへ続けてpushしたとき、古い実行を自動でキャンセルする。
+# pushとpull_requestでgroupが異なる点に注意(head_refはpull_requestでのみ設定され、
+# pushではrefが"refs/heads/<branch>"になる)。これは意図的であり、branchへのpushが
+# 同じbranchのPR実行(required checksの出所)をキャンセルしない状態を保つ。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:

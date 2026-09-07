@@ -1059,6 +1059,48 @@ REASON                      = <具体的理由>
 
 docs のみの変更では pytest / mypy / ruff を機械的に回す必要はない(11 節)。
 
+### feature branch への push でも CI が走る(Issue #230)
+
+```
+CI_ON_FEATURE_BRANCH_PUSH = YES
+対象 branch                 issue-**
+起動する job                7(pii-scan-commit-messages を除く)
+```
+
+feature branch(`issue-**`)へ push すると CI が自動で起動する。
+**PR 前レビューの時点で全体回帰の結果を見られる。**
+
+```
+実装 -> push -> CI(7 job) -> exact diff review -> PR -> CI(8 job) -> merge
+```
+
+以前は `push` が `main` に限定されており、PR を作るまで CI が一度も走らなかった。
+local full suite は禁止されているため、レビュー担当も作業者も
+「全体が通るか」を知らないまま差分の是非を判断していたことになる。
+
+```
+pii-scan-commit-messages は push では skip される。
+同 job は「その PR が持ち込む commit message」(base..head)を走査するため、
+push イベントでは比較すべき base が定まらない。commit message の走査は
+PR の CI が担当する(main への push でも従来から skipped である)。
+```
+
+**このルールはローカルの方針を変えない。**
+
+```
+LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN   ← 変更なし
+FULL_SUITE_AUTHORITY      = PR_CI       ← 変更なし
+```
+
+ローカルでは引き続き targeted / related regression / ruff / mypy のみを実行する。
+CI が push で走るようになったのは「全体回帰を早く見られるようにする」ためであり、
+ローカルで全体を回してよいという意味ではない。
+
+```
+同一 branch へ続けて push した場合、古い実行は自動でキャンセルされる。
+最後の push の結果だけを見ればよい。
+```
+
 ---
 
 ## 5. GitHub への永続化(E)
@@ -2192,3 +2234,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-06 | §2 / §2.6 / §2.6.10 の発効状態を現況へ同期した(Issue #184)。2.6節は 2026-09-06 02:27 JST に人間の承認により発効しているが、本文には `DOMAIN_WIP_MODEL_ACTIVE = NO` /「まだ発効していない」という**発効前の記述が残っており、現況と矛盾していた**。`CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` と `EFFECTIVE_FROM` へ更新し、§2 の案内も「2.6節が正本であり既に発効している」へ改めた(§2 の `MAX_CONCURRENT_CODE_WIP_PER_WORKER = 1` は 2.6 の R5 として維持される)。あわせて `ACTIVATION_STATE_SSOT = Issue #177 の最新の durable な activation 記録` を定め、**静的な文書を、変わりうる発効状態の唯一の根拠にしない**ことを明記した(試行の結果として人間の判断で §2 のルールへ戻ることもありうるため。2.6.10 の巻き戻し規定)。試行期間の終了は期間の経過だけでは成立せず、continue / amend / rollback の判断をもって確定することも明記した。**R1〜R6・取得ゲート・掲示書式・LOCK_LEVEL・解放条件・scope 拡大・P0 割り込み・main 追随・WIP の SSoT・周知項目はいずれも変更していない。** 変更履歴に残る発効前の記述は当時の記録であり、書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-06 | 役割名の製品非依存化に伴う参照の更新と、発効状態の同期(Issue #190)。(1)`STATE_READ_OWNER = MANAGER` 等、役割ベースの識別子へ揃えた。参照先ファイル名の変更(chatgpt_collaboration_protocol.md -> user_manager_collaboration_protocol.md)を反映した。(2)6.5.3 の `ACTOR` を **役割ではなく個体を指す**と明記し、列挙を TARO / JIRO / HANAKO / USER とした。**役割名(MANAGER 等)を ACTOR にしない。** 同一役割の担当が複数になったとき個体を識別できなくなり、STATE_ID の correlation と監査の手掛かりが失われるためである。生成AI製品名も ACTOR にしない。過去の snapshot に残る `CHATGPT` は履歴として有効であり書き換えていない。(3)2.6.9 の `ACTIVATION_BOUNDARY` の順序表現を ai_operation_message_contract.md 10節と一致させた。両者は「**人間の activation 承認より前には tracking Issue を作らない**」という同じ意図でありながら、字義上は片方が「発効後にしか作れない」と読めていた(実際の運用は承認 -> 作成 -> 発効宣言)。(4)冒頭と 2.5.5 の `NEW_CONTRACT_ACTIVE = NO` を発効済みへ同期し、発効状態の正本を同文書 0節の `ACTIVATION_STATE_SSOT` への参照へ置き換えた(静的な文書を、変わりうる状態の唯一の根拠にしない)。**変更履歴の過去エントリは書き換えていない。** R1〜R6 / 取得ゲート / 解放条件 / P0 割り込み / main 追随 / 人間承認の境界はいずれも変更していない。コード・Production 挙動の変更なし |
 | 2026-09-06 | 2.6.9 の着手前確認の列挙対象へ `status:開発済` を加えた(Issue #193)。2.6.6 の解放条件は `PR_MERGED AND MAIN_CI_PASS AND MAIN_HEAD_EXACT AND NO_CORRECTIVE_CODE_WIP_REQUIRED` であり、`status:開発済`(implementation complete / OPEN PR + CI green / main へ未 merge)は PR_MERGED を満たさず **lock を保持したままである**。しかし 2.6.9 は `status:開発中` だけを列挙しており、**lock を保持しうる状態を 1 つ取りこぼしていた**。解放される条件と、保持者を探す条件が一致していなかったことが原因である。2026-09-06 に実際に取りこぼしが発生している(#186 が status:開発済 で D1 / D2 / D4 と S-05 を保持している間、手順どおり status:開発中 だけを列挙すると D1 が空いて見えた。領域が重ならず実害は出なかったが、同じ領域なら二重取得していた)。**2.6.6 の解放条件そのものは変更していない。** 6.5.4 の Assignment Read Barrier は割当対象 Issue の state を確認する手順であり、lock 保持者の列挙とは目的が異なるため変更していない。R1〜R6 / 取得ゲート / LOCK_LEVEL / P0 割り込み / main 追随 / 人間承認の境界はいずれも変更していない。docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
+| 2026-09-07 | §4 へ「feature branch への push でも CI が走る」を追記した(Issue #230)。§4 は全体回帰の正本を PR CI と定める(`LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN` / `FULL_SUITE_AUTHORITY = PR_CI`)一方、#122 の運用は「実装 -> push -> exact diff review -> PR」の順であり、`.github/workflows/ci.yml` の `push.branches` が `main` に限定されていたため、**PR を作るまで CI が一度も走らなかった**。local full suite は禁止されているため、レビュー担当も作業者も「全体が通るか」を知らないまま差分の是非を判断していたことになる(#221 Phase 1 では push -> review -> 修正 push -> 再 review の 2 往復のあいだ CI が走らず、PR 作成時に初めて 8 job が走った)。`push.branches` へ `issue-**` を追加し、同一 branch の古い実行を自動でキャンセルする `concurrency` を追加した。`pii-scan-commit-messages` は「その PR が持ち込む commit message」(base..head)を走査するため push では比較すべき base が定まらず、従来どおり `pull_request` に限定して skip させる(main への push でも従来から skipped である)。したがって push で走るのは 7 job である。**job の定義と required check の名前は 1 つも変更していない**(ruleset 20046617 が要求する 8 job の名称は不変)。**ローカルの方針は変更していない**。`LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN` / `FULL_SUITE_AUTHORITY = PR_CI` はいずれも維持であり、CI が早く走るようになったことは ローカルで全体を回してよいという意味ではない。§4 の例外規定(`LOCAL_FULL_PYTEST_EXCEPTION`)も変更していない。src / config / job 定義 / ruleset はいずれも変更しておらず、判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
