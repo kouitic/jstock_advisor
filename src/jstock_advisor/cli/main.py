@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from jstock_advisor.cli import (
     analyze,
     audit,
+    baseline_repair,
     calibration,
     candidate_universe,
     decision_performance,
@@ -51,6 +52,7 @@ app.add_typer(candidate_universe.app, name="candidate-universe")
 app.add_typer(calibration.app, name="calibration")
 app.add_typer(valuation_shadow.app, name="valuation-shadow")
 app.add_typer(holding_decision.app, name="holding-decision")
+app.add_typer(baseline_repair.app, name="baseline-repair")
 app.add_typer(trading_pause.app, name="trading-pause")
 app.add_typer(migrate.app, name="migrate")
 
