@@ -56,11 +56,16 @@ class _FakeContext:
 
 
 def _alert() -> DisclosureRiskAlert:
+    """架空値のみで構成する(実在しない銘柄コード "0000" と架空の銘柄名)。
+
+    本 test の関心は execution context の伝播であり、銘柄の実在は不要である。
+    他の test(Issue #63 / #211)と同じく実在しないコードを使う。
+    """
     return DisclosureRiskAlert(
-        stock_code="7203",
-        stock_name="テスト自動車",
+        stock_code="0000",
+        stock_name="銘柄 X",
         disclosure=Disclosure(
-            stock_code="7203",
+            stock_code="0000",
             title="特別損失の計上に関するお知らせ",
             summary="特別損失を計上します。",
             published_at=_NOW - dt.timedelta(hours=1),
