@@ -2157,6 +2157,41 @@ commit 単位でも、どの Issue 由来かを release inventory から追跡�
 
 ---
 
+## 9.6 governance / docs 改善は週次でまとめる
+
+```
+GOVERNANCE_CHANGE_BATCHING = WEEKLY
+```
+
+P1 以外の governance / 開発運用 docs の改善は、その都度 PR を出さず
+**Issue #213(棚卸)または #220 へ集約し、週 1 回 1 PR で反映する**。
+
+```
+対象  issue_label_policy.md / development_workflow.md /
+      ai_operation_message_contract.md /
+      user_manager_collaboration_protocol.md 等の運用ルール文書
+
+P1(運用が止まる・誤判定を生む・公開面へ影響する)は **即時**に扱う。
+```
+
+```
+★ なぜまとめるか
+
+  運用ルールの改善は 1 件ずつが小さく、その都度 Issue と PR を作ると
+  **改善そのものが Issue 数を押し上げる**(2026-09-05〜07 の 3 日で 17 件)。
+  週 1 回にまとめれば、Issue は週 1 件・PR は週 1 本で済む。
+
+★ 9.5 節の Issue 起点の原則は変えない。
+
+  集約先の #213 / #220 が Issue であり、そこへ提案を積む。
+  「Issue なしで直してよい」という意味ではない。
+
+★ 緊急性の判定は Priority で行う。
+  P1 以上を即時とするのは、待たせると運用判断を誤らせるためである。
+```
+
+---
+
 ## 10. 人間承認の境界(J)
 
 次の操作には**人間の明示承認が必要**である。Sprint による高速化でこれらを
@@ -2247,3 +2282,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-07 | §4 へ「feature branch への push でも CI が走る」を追記した(Issue #230)。§4 は全体回帰の正本を PR CI と定める(`LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN` / `FULL_SUITE_AUTHORITY = PR_CI`)一方、#122 の運用は「実装 -> push -> exact diff review -> PR」の順であり、`.github/workflows/ci.yml` の `push.branches` が `main` に限定されていたため、**PR を作るまで CI が一度も走らなかった**。local full suite は禁止されているため、レビュー担当も作業者も「全体が通るか」を知らないまま差分の是非を判断していたことになる(#221 Phase 1 では push -> review -> 修正 push -> 再 review の 2 往復のあいだ CI が走らず、PR 作成時に初めて 8 job が走った)。`push.branches` へ `issue-**` を追加し、同一 branch の古い実行を自動でキャンセルする `concurrency` を追加した。`pii-scan-commit-messages` は「その PR が持ち込む commit message」(base..head)を走査するため push では比較すべき base が定まらず、従来どおり `pull_request` に限定して skip させる(main への push でも従来から skipped である)。したがって push で走るのは 7 job である。**job の定義と required check の名前は 1 つも変更していない**(ruleset 20046617 が要求する 8 job の名称は不変)。**ローカルの方針は変更していない**。`LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN` / `FULL_SUITE_AUTHORITY = PR_CI` はいずれも維持であり、CI が早く走るようになったことは ローカルで全体を回してよいという意味ではない。§4 の例外規定(`LOCAL_FULL_PYTEST_EXCEPTION`)も変更していない。src / config / job 定義 / ruleset はいずれも変更しておらず、判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
 | 2026-09-07 | 2.5.5節へ `VERIFICATION_REQUIRED` の参照を 1 行追加した(Issue #220)。post-merge / post-deploy の Instruction と、その報告に同項目を必須とする。書式と適用範囲の正本は ai_operation_message_contract.md 11節であり、**本文書へ複製していない**(本節が定めるのは回答の冒頭 3 行だけ、という既存の分担を変えない)。**§4 のローカルテスト方針・§2.5 の指示の直列化・§2.6 の WIP モデルと取得ゲート・解放条件・§6.5 の state writeback・人間承認の境界はいずれも変更していない。** docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
 | 2026-09-07 | §4 へ `TEST_STORE_ISOLATION = FORCED` を 1 行追加した(Issue #229)。`json_store.DEFAULT_STORE_DIR` は `data/local_store` をハードコードしており差し替え口が無いため、`store_dir` を明示しないテストは**利用者の実データストアへ直接書き込んでいた**。その結果 `audit_log.json` は実測で 91.8MB / 29,579件まで育ち、1件のupsertに約5.5秒(全読み→パース→全再直列化→全書き出し)を要するようになり、`test_watchlist_finalize_integration.py` が「hangする」と見えていた(実際はデッドロックではなく極端な低速化。空の一時ディレクトリでのA/Bでは20 testsが24.47秒で完走した)。**OS依存でも順序依存でもなく、長く使っている作業コピーであれば同じことが起きる**(CIで再現しないのは `data/local_store/*.json` が `.gitignore` 対象で毎回まっさらな作業ディレクトリから始まるため)。`tests/conftest.py` へ autouse・function scope の fixture を1つ置き、`DEFAULT_STORE_DIR` を各テストの `tmp_path` 配下へ差し替える。**src は1行も変更していない**(`json_store.py` は S-17 永続化ストア層であり、変更すると lock 対象が全領域へ広がるため)。session scope にしないのは、1実行で1ストアを共有すると同じ蓄積問題を小規模に再現するためである。`tests/unit/` ではなく `tests/` 直下へ置き、`tests/integration/` へ将来テストが増えたときの再発を防ぐ。既存の個別回避策(`_NoopAuditService` / `_FakeTradeCooldownService` / `csv_import_ledger`)は**削除していない**(監査を書かないことでテストの関心を絞るという別の役割を持ち、同時に消すと効果と副作用を切り分けられなくなるため)。本変更により、共有storeの状態に依存していた `test_holding_decision_service_ignores_holding_specific_fields` が露出して失敗したため、比較の前に1回評価してbaselineを作る形へ修正した(期待値は緩めていない)。**初回評価と2回目以降で investment_thesis / final_score が 18.75 点ずれるという非対称そのものは Issue #249 で追う**。`LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN` / `FULL_SUITE_AUTHORITY = PR_CI` / §4 の例外規定・§2.5 の指示の直列化・§2.6 の WIP モデルと取得ゲート・解放条件・§6.5 の state writeback・人間承認の境界はいずれも変更していない。tests と docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
+| 2026-09-08 | P1 以外の governance / 開発運用 docs の改善を**週次 1 PR へまとめる**9.6節を新設した(Issue #251、GOVERNANCE_CHANGE_BATCHING = WEEKLY)。運用ルールの改善は 1 件ずつが小さく、その都度 Issue と PR を作ると**改善そのものが Issue 数を押し上げる**(2026-09-05〜07 の新規 48 件のうち 17 件が運用ルール整備だった)。集約先は Issue #213(棚卸)または #220 とし、週 1 回 1 PR で反映する。P1(運用が止まる・誤判定を生む・公開面へ影響する)は従来どおり即時に扱う。★ **9.5節の Issue 起点の原則は変えていない**(集約先が Issue であり、「Issue なしで直してよい」という意味ではない)。**3節の実装パイプライン・3.5節の時間意味論変更ゲート・4節のローカルテスト方針(LOCAL_FULL_PYTEST_DEFAULT / FULL_SUITE_AUTHORITY)・2.5節の指示プロトコル・2.6節の WIP と domain lock・10節の人間承認の境界・OPPORTUNISTIC_FIX_FORBIDDEN はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |

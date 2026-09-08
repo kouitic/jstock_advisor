@@ -971,18 +971,91 @@ ONE_ISSUE_ONE_PROGRESS_LIFECYCLE = YES
 #### 7.3.1 判定基準(唯一の規範的ルール)
 
 ```
-1  Issue に残っている作業単位を列挙する
-2  各作業単位へ、現在相当する Progress Status を 1 つ割り当てる
+1  Issue に残っている**実装単位**を列挙する
+2  各実装単位へ、現在相当する Progress Status を 1 つ割り当てる
 3  UNIQUE_PROGRESS_STATUS_COUNT を数える
 
 UNIQUE_PROGRESS_STATUS_COUNT > 1  ->  ISSUE_SPLIT_REQUIRED = YES
 UNIQUE_PROGRESS_STATUS_COUNT = 1  ->  split は必須ではない
 ```
 
+```
+実装単位 = **別の PR になる code / docs の変更**(Issue #251)
+
+  同じ PR で出し切るものは 1 つの実装単位である。
+  **確認観点(受入条件)は実装単位ではない。**
+```
+
+```
+★ これは判定条件の**追加ではなく、名詞の定義**である。
+
+  本節は「判定条件を増やさないこと自体がこのルールの要件」と定めている。
+  条件を増やすと優先順位の解釈余地が生まれるためである。
+  本定義は条件を 1 つも増やさず、**数える対象を明確にするだけ**であり、
+  判定式(> 1 なら分割)は変えていない。
+```
+
 **判定はこれだけである。** 判定条件を増やさないこと自体がこのルールの要件であり、
 「独立性が高いか」「承認単位が同じか」「WIP がどこにあるか」といった補助条件を
 規範的な判定へ持ち込まない(条件が増えるほど優先順位の解釈余地が生まれ、
 原則と矛盾する例外が入り込む)。
+
+#### 7.3.1a 確認観点の残りでは分割しない
+
+```
+VERIFICATION_SCOPE_IS_NOT_A_SPLIT_TRIGGER = YES
+```
+
+実装が 1 つで、残っているのが**確認観点だけ**なら分割しない。
+
+```
+自然実行待ち      次の営業日・次のバッチを待つ
+外部条件待ち      データ蓄積・外部サービスの事象を待つ
+利用者操作待ち    利用者の操作で初めて通る経路を待つ
+
+-> 元の Issue を **status:デプロイ済 + waiting:** のまま保持し、
+   受入条件を 1 つずつ「確認済み / 未確認」で示す。
+   **全観点を確認してから close する。**
+```
+
+```
+★ なぜ分割しないか
+
+  確認観点が 3 つ残っていても、実装は 1 つであり main の状態も 1 つである。
+  分割すると、同じ実装を指す Issue が複数でき、
+  どれが「その変更の Issue」なのかが読み手に分からなくなる。
+  進捗は label ではなく**受入条件のチェック**で表せる。
+```
+
+待ちの理由は §8 の waiting label で表す(判定軸ではない補助 metadata)。
+status は「どこまで完了したか」、waiting は「なぜ今進んでいないか」であり、
+この分担(§8.1)は変えない。
+
+#### 7.3.1b 起票時に実装単位で分ける
+
+```
+ONE_ISSUE_ONE_IMPLEMENTATION_UNIT_AT_CREATION = YES
+```
+
+```
+1 Issue = 1 実装単位 = 1 PR で起票する。
+
+  複数の PR に分かれることが起票時点で分かっているなら、
+  **最初から別の Issue として登録する**(途中で分割しない)。
+  確認観点は Issue を分ける理由にならず、**受入条件として列挙する**。
+```
+
+```
+★ 途中分割は、それ自体が Issue を増やす。
+
+  分割の手続き(§7.3.6)は移管記録・受入条件の移動・WIP の付け替えを伴い、
+  source と target の両方に snapshot が残る。
+  起票時に分けておけば、この作業は**発生しない**。
+
+★ ただし、起票時に見通せなかった実装単位が後から分かれることはある。
+  その場合は従来どおり §7.3.1 で判定し、§7.3.6 の手続きで分割する。
+  本項は「途中分割の禁止」ではなく、**起票時の既定**である。
+```
 
 #### 7.3.2 依存関係は判定を上書きしない
 
@@ -1083,6 +1156,13 @@ source 側      残 scope に基づき Type / Priority / status を再評価す�
 
 worked example は Issue #20 -> #179 / #180 の分割である。
 
+```
+★ 本改訂(Issue #251)より前に分割済みの Issue(#199 / #227、#137 / #226 等)は
+  **履歴としてそのまま残す**。遡って統合しない。
+  分割の記録(ORIGIN_ISSUE / SPLIT_REASON)は監査履歴であり、
+  当時の判断は当時の規則に照らして正しい。
+```
+
 #### 7.3.7 既存 OPEN Issue への適用
 
 ```
@@ -1115,8 +1195,75 @@ WEEKLY_INVENTORY
           最新 ISSUE_STATE_SNAPSHOT の日付
           status:デプロイ済 / status:マージ済 の滞留日数
           waiting: label の孤立(待ち先が既に解消しているもの)
+          **直近 1 週間の decode 失敗 WARNING(collection 別の件数)**
+指標    **実体の欠陥**の週次 起票数 / close 数 / OPEN 残(下記)
 成果物  tracking Issue 1 件。検出内容は**提案**として列挙する
 初回    Issue #213(OPEN Issue 棚卸 2026-09-07)
+```
+
+```
+CONVERGENCE_METRIC(Issue #251)
+
+実体の欠陥 = Issue Type が **bug** または **design-defect**
+
+除外
+  label に tracking を持つ Issue
+  分割で生まれた Issue(本文または最初の snapshot に
+  **ORIGIN_ISSUE / SPLIT_REASON** を持つもの)
+  Release tracking Issue
+
+記録する値  週次の 起票数 / close 数 / OPEN 残(3 つとも)
+```
+
+```
+★ OPEN 総数では収束を判定しない。
+
+  分割と tracking が数を押し上げるため、製品が良くなっても総数が減らない
+  ことがある。実際、2026-09-05〜07 の新規 48 件のうち製品の欠陥は 14 件で、
+  残る 34 件は運用ルール整備と Phase 分割・tracking だった。
+  **総数を見ていると「悪化している」と読み違える。**
+
+★ 起票数だけでも判定しない。
+
+  検出活動を増やせば起票数は増える。増えること自体は悪くない
+  (見つかっていなかっただけである)。close 数と OPEN 残を併記して、
+  **見つける速さと直す速さのどちらが不足しているか**が分かるようにする。
+
+★ 除外条件を label だけに頼らないのは、分割 Issue に tracking label が
+  付くとは限らないためである。§7.3.6 が ORIGIN_ISSUE / SPLIT_REASON の
+  記録を義務づけているので、そちらを併用する。
+```
+
+```
+分担  定義 = Issue #251 / 毎週の集計と記録 = **Issue #220 Phase C**
+```
+
+```
+DECODE_FAILURE_OBSERVATION(Issue #245)
+
+観測元  CLI 実行時に端末へ出る WARNING を**実行者が記録する**
+          "persistence record decode failed collection=... item_id=... error=... policy=..."
+          "persistence decode summary collection=... scanned=... failed=..."
+記録    collection 別の件数。**0 件でも「0 件」と記録する**
+```
+
+```
+★ なぜ CloudWatch ではなく「実行者の記録」なのか(Issue #245 の実測)
+
+  **Lambda から audit_log を読む経路は 0 件**であり、Production では
+  decode 失敗が発生しない。decode が起きるのは CLI の 2 経路だけである
+  (`cli/audit.py` / `cli/review.py` 経由)。
+  したがって CloudWatch Logs を見ても件数は常に 0 になる。
+
+  失敗はその場で実行者の端末に出る。**観測すべき場所はそこである。**
+
+★ 0 件でも記録するのは、「実行していない」と「実行して 0 件だった」を
+  後から区別するためである。
+
+★ この扱いは **Issue #114 Phase B3 で変わる**。
+  B3 で WeeklyReviewFunction へ audit_log の reader が入ると、
+  Lambda 側で decode 失敗が起こりうるようになり、観測元が CloudWatch へ移る。
+  そのとき Issue #245 を再評価する。
 ```
 
 ```
@@ -1666,3 +1813,4 @@ Release Blocker 軸と混同されるため不可)。
 | 2026-09-06 | §7.3 を「進捗の測り方(複数 Phase を持つ Issue)」から「1 Issue = 1 progress lifecycle」へ全面改訂した(Issue #181)。**旧規則「複数 Phase を持つ Issue では到達した最も進んだ工程を status とする」を廃止する。** Progress Status は Issue 全体を表す単一 label(§7.2)であるため、旧規則では独立した作業単位が異なるライフサイクル位置を同時に持つ Issue を正しく表現できなかった。Issue #20 で実際に、O-C(観測性向上)が main へ merge 済みである一方 H-5(hard cutoff の解消)と H-6(閾値の config 化)が未着手という状態が生じ、`status:マージ済` を付けると未着手 Phase が不可視になり、`status:設計済` を付けると稼働中の実装が未実装に見え、`status:開発中` を付けると merge 済みの成果物が消える、というどれを選んでも実態と食い違う状態になった(release 判定・Assignment Read Barrier・進捗集計のいずれもが誤る)。新しい正本は `ONE_ISSUE_ONE_PROGRESS_LIFECYCLE = YES` とし、**唯一の規範的判定基準を「残作業単位へそれぞれ Progress Status を割り当て、`UNIQUE_PROGRESS_STATUS_COUNT > 1` なら `ISSUE_SPLIT_REQUIRED = YES`」だけとした**(§7.3.1)。判定条件を増やさないこと自体を要件とし、独立性・承認単位・WIP の所在といった補助条件を規範ルールへ持ち込まない。**依存関係は判定を上書きしない**(`DEPENDENCY_DOES_NOT_OVERRIDE_SPLIT = YES`、§7.3.2)。reader を先に出し writer を後から出す 2 段リリースのような不可分な順序制約であっても、reader が merge 済みで writer が未実装なら status は 2 種類に分かれるため分割必須であり、**「不可分な migration sequence だから 1 Issue に残す」という例外は設けない**。依存関係は Issue の統合ではなく `BLOCKED_BY` / `DEPENDS_ON` / `Related` / tracking Issue で表現する。複数 PR は `PR_SPLIT_SIGNAL = CANDIDATE` に留め、判定の引き金は PR を分けたことではなく **merge の非同時性が実際に生じたこと**とした(§7.3.3)。同一 Issue に残してよいのは全作業単位が同じ Progress Status にある場合のみで、「内部 step だから」を理由にしない(§7.3.4)。tracking / umbrella Issue の既存規定(自身の活動段階を status とする)は維持したうえで `TRACKING_ISSUE_STATUS_IS_NOT_A_DELIVERABLE_STATUS = YES` を明示し、parent を作るかどうかを **child の個数で決めない**(`TRACKING_PARENT_REQUIRED = NO_BY_COUNT_ALONE`)ことにした(§7.3.5)。分割手続き(移管元/移管先への記録・acceptance criteria の二重所有禁止・WIP ownership の移管・Production lifecycle の個別化・historical snapshot の保持・child Priority の再判定・source 側 4軸の再評価)を §7.3.6 に定めた。既存 OPEN Issue は `BULK_REWRITE_FORBIDDEN = YES` / `LAZY_ON_TOUCH = YES` とし、Assignment Read Barrier / state transition / PR review / post-merge reconciliation の 4 時点で検出したら勝手に label を変えず `STATUS_RECONCILIATION_REQUIRED` として報告し、split 判断を先に行う(§7.3.7、過去の CLOSED Issue へは遡及適用しない)。**Issue を分割しても並行実装が許可されるわけではない**ことを `ISSUE_SPLIT_DOES_NOT_GRANT_PARALLEL_WIP = YES` として明記した(§7.3.8。WIP の単位は Issue ではなく機能領域であり、`DOMAIN_WIP_MODEL_ACTIVE = YES` の期間は同一領域内の code WIP は domain lock で直列化される)。CI については `CI_ENFORCEABLE = PARTIAL` とし、機械判定できるのは status label 数・語彙・静的制約のみで、残作業単位の列挙と split 要否は semantic 判断であるため **`CI green` を split 不要の根拠にしない**ことを明記した(§7.3.9)。あわせて §9.3 を新設し、判定結果を snapshot へ残すための項目(`RESIDUAL_WORK_UNITS` / `UNIQUE_PROGRESS_STATUS_COUNT` / `ISSUE_SPLIT_REQUIRED` / `SPLIT_TARGET_ISSUES` / `ONE_ISSUE_ONE_PROGRESS_LIFECYCLE`)を示した(field contract の正本は development_workflow.md 6.5.3節であり複製していない)。**Progress Status の 8 段階の名称・意味(§7.1)、`STATUS_LABEL_COUNT_PER_OPEN_ISSUE = 1`(§7.2)、Production を伴わない Issue の扱い(§7.4)、CLOSED 時の label 保持(§7.5)、waiting label(§8)、Type / Priority / Release Blocker の判定基準はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-06 | 役割名の製品非依存化に伴う参照の更新(Issue #190)。`CHATGPT_STATE_READ_OWNER = CHATGPT` を `STATE_READ_OWNER = MANAGER` へ改め、7.3.8 の `DOMAIN_WIP_MODEL_ACTIVE = YES` を `CURRENT_WIP_RULE = DOMAIN_WIP_RULE_V1` へ置き換えた。後者は #185 で development_workflow.md / functional_domains.md から同識別子が除かれ、本文書だけが定義を失った識別子に条件づけられたまま残っていたためである。本文中の "ChatGPT" 3 か所を役割名へ改めた。**4軸モデル・Type / Priority / Release Blocker / Progress Status の判定基準・§7.3 の分割規則はいずれも変更していない。** 変更履歴の過去エントリも書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-07 | §7.3.7 の検出時点へ 5 つ目「週次 read-only 棚卸(WEEKLY_INVENTORY / DEVELOPER / 月曜)」を追加し、§7.3.9 の「4 つの検出時点」を 5 つへ同期した(Issue #220)。既存の 1〜4 はいずれも「誰かがその Issue に用があったとき」に働くため、**用が無くなった Issue を拾う網が無かった**。実際に #36 は「待ち先の無い status:デプロイ済」が付いたまま 4 日間だれにも見られず、#128 / #132 の Priority 欠落は「再開判断」という発生しなかった trigger を待っていた。棚卸は read-only であり、対象は OPEN Issue 全件の 4 軸の欠落・最新 snapshot の日付・status:デプロイ済 / マージ済 の滞留日数・waiting: の孤立、成果物は tracking Issue 1 件、初回は #213 とする。**`BULK_REWRITE_FORBIDDEN` と `LAZY_ON_TOUCH` は維持する**(5 は一括書き換えではなく read-only の検出であり両立する)。label の適用は別 Instruction、close と Priority 変更は USER の gate という現行の境界も変えない。あわせて §7.3.9 へ CI(必須 job) / 日次 workflow / 週次棚卸(人)の分担を明記し、**機械側は「数える」までで「正しいか」は判断しない**ことを述べた。さらに §7.4 を「必須 verification を名指しできない code 変更」まで拡張し、見出しを「Production 変更を伴わない Issue」から「status:デプロイ済 を経由しない Issue」へ改めた(拡張後の対象は Production 変更の有無では決まらないため)。`VERIFICATION_NAMEABLE = NO` なら status:デプロイ済 を経由せず status:本番検証済 + CLOSE_READY へ進める。**これは §7.1 の定義の変更ではない**(「必須 verification が存在しない」なら「未完了」ではありえず、そもそも定義に当てはまらない。当てはまらない場合の明文化である)。「名指しできない」と「不要だと判断した」を区別し、**分からないまま デプロイ済 を付けない**ことも明記した。post-merge / post-deploy の Instruction と報告へ `VERIFICATION_REQUIRED = <項目 | NONE>` を必須とするが、その書式と適用範囲の正本は ai_operation_message_contract.md 11節であり本文書へ複製していない。**Progress Status の 8 段階の名称・意味(§7.1)・排他制約(§7.2)・§7.3 の分割判定基準・Type / Priority / Release Blocker の判定基準・waiting label・Human Gate の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-08 | Issue 分割の判定を**実装単位**で行うよう §7.3 を改訂し、週次棚卸へ収束指標と decode 失敗の観測項目を追加した(Issue #251 / #245)。§7.3.1 は「残る作業単位の Progress Status が 2 種類以上なら分割」と定めていたが、**「作業単位」が定義されていなかった**ため、実務では「確認観点の残り」(自然実行待ち・外部条件待ち・利用者操作待ち)も 1 単位として数えられ、実装としては 1 つの Issue が分割されていた(#199 -> #227、#137 -> #226。いずれも同日中に役目を終え tracking の管理コストだけが残った)。**実装単位 = 別の PR になる code / docs の変更**と定義し、確認観点は含めないことを明記した。★ **これは判定条件の追加ではなく名詞の定義であり、判定式(> 1 なら分割)は変えていない**(同節が「判定条件を増やさないこと自体がこのルールの要件」と定めているため)。あわせて §7.3.1a(確認観点の残りでは分割せず、元 Issue を デプロイ済 + waiting のまま保持し受入条件を 1 つずつ確認して close する)と §7.3.1b(起票時に実装単位で分ける。ただし途中分割の禁止ではなく起票時の既定)を新設し、§7.3.6 へ**本改訂より前の分割は履歴としてそのまま残す**(遡って統合しない)ことを追記した。§7.3.7 の WEEKLY_INVENTORY には CONVERGENCE_METRIC(実体の欠陥 = bug / design-defect。tracking と ORIGIN_ISSUE / SPLIT_REASON を持つ分割 Issue を除外し、週次の 起票数 / close 数 / OPEN 残 を記録する)と、DECODE_FAILURE_OBSERVATION(Issue #245。Lambda から audit_log を読む経路は 0 件でProduction では decode 失敗が発生しないため、観測元は CLI 実行時の端末とし、0 件でも記録する。#114 Phase B3 で observer が入れば CloudWatch へ移る)を追加した。**Progress Status の 8 段階の名称・意味(§7.1)・排他制約(§7.2)・§7.3.1 の判定式・Type / Priority / Release Blocker の判定基準・waiting label(§8)・Human Gate の境界・BULK_REWRITE_FORBIDDEN / LAZY_ON_TOUCH・WEEKLY_INVENTORY が read-only であることはいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
