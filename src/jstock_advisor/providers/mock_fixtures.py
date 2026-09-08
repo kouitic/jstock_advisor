@@ -19,6 +19,17 @@ from jstock_advisor.domain.business_calendar import BusinessCalendar
 
 _calendar = BusinessCalendar.from_config(load_config().holiday_calendar)
 
+
+def business_calendar() -> BusinessCalendar:
+    """モック実装が共有する営業日カレンダー(価格系列の生成に使ったものと同一)。
+
+    Issue #52 Phase B2 regression 是正で、mock provider が返す `as_of_date` を
+    市場セッションの契約へ揃えるために公開した。系列生成と打ち切り判定で
+    別々のカレンダーを使うと、生成された営業日が「存在しない日」と扱われうる。
+    """
+    return _calendar
+
+
 _PRICE_SERIES_START = dt.date(2021, 1, 4)
 _PRICE_SERIES_END = dt.date(2026, 12, 30)
 

@@ -94,6 +94,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     NOTIFICATION_OUTCOME_NOT_REQUIRED,
     NOTIFICATION_OUTCOME_SENT,
     NOTIFICATION_OUTCOME_SKIPPED,
+    UNIVERSE_SOURCE_CACHE,
     CandidateProgressRecord,
     UnknownWatchlistJobTypeError,
     WatchlistBatchStatus,
@@ -903,6 +904,15 @@ def _finish_batch(
                 ),
                 "universe_count": batch_item.get("universe_count"),
                 "staged_rollout_excluded_count": batch_item.get("staged_rollout_excluded_count"),
+                # Issue #223(O-A): この回の候補ユニバースを今回取得したデータで
+                # 回したのか既存キャッシュで回したのか、およびその元データの
+                # 公開日・経過日数(いずれもdispatch時点でDispatcherが測った値)。
+                # 取得失敗はDispatcher側でキャッシュ継続として握りつぶされ、
+                # Lambda Errorsにも現れないため、成功した回も含めてここへ残す。
+                "universe_source": batch_item.get("universe_source"),
+                "universe_promoted": batch_item.get("universe_promoted"),
+                "universe_source_date": batch_item.get("universe_source_date"),
+                "universe_cache_age_days": batch_item.get("universe_cache_age_days"),
                 **metrics,
             },
             now=now,
@@ -1036,6 +1046,18 @@ def _finalize_completed(
         code for code, result in repository_results.items() if result == REPOSITORY_RESULT_ADDED
     ]
 
+    # Issue #234(U4): この回の候補一覧の取得に失敗しキャッシュで継続したか。
+    # Issue #223 PR-1aでDispatcherがdispatch時点で測りBatchRunsTableへ記録した
+    # 値を読むだけで、**新しい保存項目は作らない**。
+    # universe_source == "CACHE" かつ universe_promoted が偽の場合のみ真とする
+    # (どちらか一方だけでは、Downloaderを走らせていない回= いずれもNone と
+    #  区別できないため)。
+    universe_fetch_failed = (
+        batch_item.get("universe_source") == UNIVERSE_SOURCE_CACHE
+        and batch_item.get("universe_promoted") is False
+    )
+    universe_source_date = batch_item.get("universe_source_date")
+
     # --- Phase 3: NOTIFICATION_PENDING -> NOTIFICATION_SENT/NOTIFICATION_FAILED ---
     # 運用ハードニング第3弾1節: このフェーズは自己完結的に例外を処理する。
     # notify_watchlist_additions()が例外を送出しても、この関数自体は正常return
@@ -1044,7 +1066,11 @@ def _finalize_completed(
     # (ウォッチリスト追加結果はPhase2で既に確定・保持済みのため失われない)。
     if "finalize_notification_outcome" not in batch_item:
         pending_notification_codes = list(added_stock_codes)
-        if not pending_notification_codes:
+        # Issue #234(U4): 取得に失敗した日は、追加0件でも通知経路へ進む。
+        # 「0件なら送らない」の判定はここ(finalizer)と
+        # notify_watchlist_additions()の2か所にあり、**両方**を変えないと
+        # ここで止まって通知に到達しない。
+        if not pending_notification_codes and not universe_fetch_failed:
             record_notification_resolved(batch_id, now, [], NOTIFICATION_OUTCOME_NOT_REQUIRED)
             notification_outcome = NOTIFICATION_OUTCOME_NOT_REQUIRED
         elif not wc.notification_enabled:
@@ -1082,6 +1108,8 @@ def _finalize_completed(
                 scoring_config=wc.scoring,
                 thresholds_config=wc.thresholds,
                 evaluated_at=started_at,
+                universe_fetch_failed=universe_fetch_failed,
+                universe_source_date=universe_source_date,
             )
             try:
                 notification_service.notify_watchlist_additions(summary, content_hash)
@@ -1304,11 +1332,74 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
 
     outcome_counts: dict[str, int] = {}
     stale_unconfirmed_count = 0
+    # Issue #62 Phase B(U3): 中断した削除の補完の観測。
+    # 新規のmetric基盤は作らず、既存のbatch auditとログへ載せる。
+    #
+    # attempted = 「削除履歴はあるがWatchlistItemが無い」を検出し補完を試みた件数
+    # written   = そのうち**実際に新しい監査記録を書いた**件数
+    # 2つを分けるのは、同じbatchのfinalizeが再実行されると attempted は増えるが
+    # written は増えないため(レビュー対応 F-A)。平常時に0であるべきは written。
+    removal_audit_completion_attempted_count = 0
+    removal_audit_completion_written_count = 0
 
     for record in records:
         item = watchlist_repo.get(record.stock_code)
         if item is None:
-            # 手動削除等で既に存在しない。スキップ(このバッチのfinalize対象外)。
+            # Issue #62 Phase B(U2 / O-C): ここには2種類の銘柄が来る。
+            #
+            #   (a) 手動削除等で既に存在しない  -> 削除履歴が無い。従来どおりskip
+            #   (b) 前回のfinalizeが「履歴 -> 削除」まで進んだ直後に中断した
+            #       -> 削除履歴が残っている。監査記録が欠落している可能性がある
+            #
+            # (b)を素通りさせると監査証跡が恒久的に欠落する(Phase Aの実測では
+            # 本番の削除経路が未実行のため実害はまだ出ていないが、
+            # 一度欠落すると後から復元する手段が無い)。
+            # `record_removal_audit()`は決定的audit_idの`record_if_absent()`を
+            # 使うため、この補完は**何度走らせても重複しない**。
+            history = removal_history_repo.get(record.stock_code)
+            if history is None:
+                continue
+            removal_audit_completion_attempted_count += 1
+            # 復元できない項目はキーワード引数で明示する(位置引数の取り違えで
+            # 誤った値を監査へ書かないため)。何が復元できなかったかは
+            # `record_removal_audit()`が`unavailable_fields`として記録する。
+            written = record_removal_audit(
+                stock_code=history.stock_code,
+                stock_name=None,
+                registered_at=None,
+                registration_policy=None,
+                removed_at=history.removed_at,
+                removal_reason=history.removal_reason,
+                removal_category=history.removal_category,
+                last_monitoring_score=None,
+                last_matched_target_types=[],
+                consecutive_not_qualified_count=None,
+                hard_exclusion_reasons=[],
+                now=now,
+                batch_id=batch_id,
+                reconstructed_from_history=True,
+            )
+            if written:
+                removal_audit_completion_written_count += 1
+                # 実際に監査が欠けていた = 前回のfinalizeが delete と監査の間で
+                # 中断した痕跡。異常事象として WARNING で残す。
+                logger.warning(
+                    "watchlist maintenance: removal audit was missing and has been "
+                    "completed from removal history stock_code=%s batch_id=%s removed_at=%s",
+                    record.stock_code,
+                    batch_id,
+                    history.removed_at.isoformat(),
+                )
+            else:
+                # 既に記録済み。同じbatchのfinalize再実行や、削除が正常完了した
+                # 後の再試行で通る正常な経路であり、異常ではない。
+                logger.info(
+                    "watchlist maintenance: removal audit already recorded, "
+                    "no completion needed stock_code=%s batch_id=%s removed_at=%s",
+                    record.stock_code,
+                    batch_id,
+                    history.removed_at.isoformat(),
+                )
             continue
 
         summary = _parse_maintenance_screening_summary(record.screening_summary_json)
@@ -1331,7 +1422,34 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
                 if decision.outcome == MaintenanceOutcome.IMMEDIATE_REMOVAL
                 else "CONSECUTIVE_NOT_QUALIFIED"
             )
-            watchlist_repo.delete(item.stock_code)
+            # --- Issue #62 Phase B(U1 / O-B): 書き込み順序の反転 ---
+            #
+            # 旧: delete -> 履歴 -> 監査
+            #   deleteの直後に中断すると「ウォッチリストから消えたが履歴が無い」
+            #   状態になる。is_in_cooldown()は履歴が無ければFalseを返すため、
+            #   翌営業日の自動追加でクールダウンを素通りして即時再追加されうる
+            #   (readd_cooldown_days=30 に対し最短1営業日で破られる)。
+            #
+            # 新: 履歴 -> delete -> 監査
+            #   中断しうる箇所は2つで、いずれも安全側に倒れる。
+            #     履歴の直後に中断  -> まだ削除されていない。履歴だけが残る。
+            #                        クールダウンが先に効くだけで、実害は
+            #                        「まだウォッチリストにある銘柄が
+            #                        再追加対象から外れる」ことに限られる。
+            #                        次回のfinalizeで同じ判定に至れば
+            #                        upsertし直されて削除まで進む(冪等)。
+            #                        判定が覆って削除されなくなった場合、
+            #                        履歴を能動的に消す処理は設けていない。
+            #                        `readd_cooldown_days`相当のTTLで自然に
+            #                        消えるまでの間、その銘柄が自動追加の
+            #                        対象から外れるだけであるため(安全側)。
+            #     deleteの直後に中断 -> 履歴があるため次回のfinalizeが
+            #                        監査を補完する(上のU2)。
+            #
+            # ★ 完全な原子性(O-A / TransactWriteItems)は本Issueの scope 外
+            #   (監査ログが別の保存基盤であり、1トランザクションに含められない)。
+            #   ここで保証するのは「どの時点で落ちても、次回のfinalizeが
+            #   冪等に整合状態へ収束する」ことである。
             removal_history_repo.upsert(
                 WatchlistRemovalHistory(
                     stock_code=item.stock_code,
@@ -1342,6 +1460,7 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
                     + dt.timedelta(days=auto_removal_config.readd_cooldown_days),
                 )
             )
+            watchlist_repo.delete(item.stock_code)
             record_removal_audit(
                 item.stock_code,
                 item.stock_name,
@@ -1368,6 +1487,16 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             "execution_result": EXECUTION_RESULT_NORMAL,
             "outcome_counts": outcome_counts,
             "stale_unconfirmed_count": stale_unconfirmed_count,
+            # Issue #62 Phase B(U3): 中断した削除の補完の観測。
+            # attempted は finalize の再実行でも増えるため、平常時に 0 で
+            # あるべきなのは written のほう。written が 0 以外なら、
+            # 前回の finalize が delete と監査の間で中断していたことを示す。
+            "removal_audit_completion_attempted_count": (
+                removal_audit_completion_attempted_count
+            ),
+            "removal_audit_completion_written_count": (
+                removal_audit_completion_written_count
+            ),
         },
         now=now,
         batch_id=batch_id,
@@ -1375,10 +1504,13 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
     )
     mark_watchlist_batch_completed(batch_id, EXECUTION_RESULT_NORMAL, now)
     logger.info(
-        "watchlist_maintenance finalized batch_id=%s outcome_counts=%s stale_unconfirmed=%d",
+        "watchlist_maintenance finalized batch_id=%s outcome_counts=%s stale_unconfirmed=%d "
+        "removal_audit_completion_attempted=%d removal_audit_completion_written=%d",
         batch_id,
         outcome_counts,
         stale_unconfirmed_count,
+        removal_audit_completion_attempted_count,
+        removal_audit_completion_written_count,
     )
 
 

@@ -25,16 +25,28 @@ candidate_universe:
   # "jpx": 東証プライム+スタンダード全銘柄を自動取得(候補ユニバース本格対応・2026-08)。
   provider: "jpx"
   csv_path: "data/universe/candidate_universe.csv"
-  # JPX上場銘柄一覧(.xls、無料・月次更新)とJPX400構成銘柄CSV(Nikkei、無料・年1回+随時)。
+  # JPX上場銘柄一覧(無料・月次更新)とJPX400構成銘柄CSV(Nikkei、無料・年1回+随時)。
   # provider="jpx"の場合のみ使用する。
-  jpx_listed_issues_url: "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+  # Issue #223 PR-2(2026-09-07): JPXが2026-09-03に .xls -> .xlsx へ差し替えた
+  # (URLのトークンもファイル名の幹も不変)。旧URLは404になる。パーサは中身の
+  # 先頭バイトで .xls / .xlsx を判別するため、将来旧形式へ戻っても動く。
+  jpx_listed_issues_url: "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
   jpx_400_weight_url: "https://indexes.nikkei.co.jp/nkave/archives/file/jpx_nikkei_index_400_weight_jp.csv"
   # 東証上場銘柄一覧の「市場・商品区分」列でこの値に一致する行のみ候補とする(プライム+スタンダード)。
   target_market_segments:
     - "プライム（内国株式）"
     - "スタンダード（内国株式）"
   # キャッシュの最大許容経過時間(8節)。source_date基準。超過すると処理中断。
-  listed_issues_max_stale_hours: 1080  # 45日
+  # Issue #223(PR-1a、2026-09-07): listed_issuesを1080(45日)から2160(90日)へ
+  # **暫定的に**延長した。JPXが2026-09-03にdata_j.xls→data_j.xlsxへ差し替えた
+  # ため上記jpx_listed_issues_urlが404となり、2026-09-03公開分を最後に
+  # キャッシュが更新されていない。1080hのままだと2026-09-15の実行で
+  # staleness判定を超え、自動追加自体が停止する。
+  # ★ 戻し条件: PR-2(.xlsx対応)がProduction反映され、listed_issuesの
+  #   取得成功(promoted=true)が実際に観測できた時点で1080へ戻す。
+  #   延長したまま放置すると「最大90日間、上場廃止銘柄が候補に残り続ける」
+  #   状態を許すことになるため、恒久的な値ではない。
+  listed_issues_max_stale_hours: 2160  # 90日(暫定。Issue #223 PR-2反映後に1080へ戻す)
   jpx400_max_stale_hours: 2160  # 90日
 
 # 2026-08-16: lightweight本番切替後、本番300銘柄実測でdata_fetch p50が

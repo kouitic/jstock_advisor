@@ -63,3 +63,67 @@ class SaleWritePlan:
     holding_put: ConditionalPut | None
     holding_delete: ConditionalDelete | None
     resulting_holding: Holding | None
+
+
+@dataclass(frozen=True)
+class HoldingReplacementPlan:
+    """保有(Holding)とその全ロット(PurchaseLot)を**原子的に置き換える/削除する**
+    計画(Issue #61 Phase B2)。
+
+    overwrite取込と保有削除の双方で使う。
+
+      overwrite : lot_deletes=既存ロット / lot_put=新ロット /
+                  holding_put=新Holding(既存があれば楽観ロック付き置換)
+                  **holding_delete は None**
+      削除のみ  : lot_deletes=既存全ロット / holding_delete=既存Holding /
+                  lot_put=None / holding_put=None
+
+    **同一アイテムに対して複数のアクションを持ってはならない。**
+    DynamoDBのTransactWriteItemsは、1トランザクション内で同一アイテムを対象と
+    する複数アクションを許可しない(ValidationException)。そのためoverwriteでは
+    Holdingを「Delete → Put」にせず、既存の生JSONを`expected_data`とする
+    **1回のConditionalPutで置換**する(楽観ロックは維持される)。
+    ロットについても、新しいロットIDが既存ロットに含まれる場合は削除対象から
+    除外し、Putだけを行う。
+
+    `SaleWritePlan`と異なり、部分的な残存ロットを持たない(全削除→全置換)。
+    途中状態(Holdingだけ旧値・ロット一部欠落・Holding無し/ロット有り・
+    Holding有り/ロット無し)をコミット後に残さないことが本計画の契約である。
+    """
+
+    lot_deletes: list[ConditionalDelete]
+    holding_delete: ConditionalDelete | None
+    lot_put: ConditionalPut | None
+    holding_put: ConditionalPut | None
+    resulting_holding: Holding | None
+
+    def __post_init__(self) -> None:
+        if self.holding_delete is not None and self.holding_put is not None:
+            raise ValueError(
+                "HoldingへのDeleteとPutを同時に持つ計画は作れません"
+                "(DynamoDBは同一アイテムへの複数アクションを許可しません)。"
+                "置換はexpected_data付きのConditionalPut 1件で表現してください。"
+            )
+        delete_lot_ids = {d.id_value for d in self.lot_deletes}
+        if len(delete_lot_ids) != len(self.lot_deletes):
+            raise ValueError("同一ロットに対する削除が重複しています")
+        if self.lot_put is not None:
+            put_lot_id = str(getattr(self.lot_put.model, self.lot_put.id_field))
+            if put_lot_id in delete_lot_ids:
+                raise ValueError(
+                    f"ロット{put_lot_id}に対するDeleteとPutを同時に持つ計画は作れません"
+                )
+
+    @property
+    def write_item_count(self) -> int:
+        """この計画が必要とする書き込み項目数(DynamoDB TransactWriteItems換算)。
+
+        overwrite(既存あり) : ロット削除N + 新ロットPut1 + HoldingPut1 = N + 2
+        削除のみ            : ロット削除N + Holding削除1               = N + 1
+        """
+        return (
+            len(self.lot_deletes)
+            + (1 if self.holding_delete is not None else 0)
+            + (1 if self.lot_put is not None else 0)
+            + (1 if self.holding_put is not None else 0)
+        )

@@ -11,13 +11,17 @@ Lambda環境(AWS_LAMBDA_FUNCTION_NAME環境変数が設定されている)では
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel
 
 from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
+from jstock_advisor.infrastructure.record_failure_policy import (
+    ItemIdDisclosure,
+    RecordFailurePolicy,
+)
 
 _TABLE_PREFIX_ENV = "DYNAMODB_TABLE_PREFIX"
 _DEFAULT_TABLE_PREFIX = "jstock"
@@ -25,9 +29,41 @@ _DEFAULT_TABLE_PREFIX = "jstock"
 
 class CollectionStore[T: BaseModel](Protocol):
     def list_all(self) -> list[T]: ...
+    def iter_all(self) -> Iterator[T]:
+        """全項目を1件ずつ遅延生成する(Issue #113。`list_all()`のストリーミング版)。
+
+        DynamoDB実装はScanのページを1つずつ取得し、そのページ分だけをdeserialize
+        してyieldしたあと解放する(全ページを`list`へ保持しない)。件数に比例して
+        メモリを消費する`list_all()`と異なり、ピークメモリが1ページ分に有界となる。
+        Recommendationのように1件約20KB・数千件規模へ育つコレクションを
+        Lambda(512MB)で走査するために必要(Issue #113で`list_all()`が
+        約527MBを保持し実行ごとにメモリ上限へ到達していた)。
+
+        JSON実装は元々ファイル全体を読むためピークメモリは削減されない
+        (ローカルCLI専用であり本番の制約対象ではない)。呼び出し側から見た
+        列挙順・件数・内容は`list_all()`と一致させること。
+
+        走査中の書き込みは前提としない(DynamoDBのScanは結果整合性であり、
+        走査途中の更新が反映されるかは保証されない)。
+        """
+        ...
+
     def get(self, item_id: str) -> T | None: ...
     def upsert(self, item: T) -> None: ...
     def upsert_many(self, new_items: Iterable[T]) -> None: ...
+    def apply_batch(self, delete_ids: Iterable[str], puts: Iterable[T]) -> None:
+        """削除と追加/更新を**このコレクションについては1回の書き込みで**適用する
+        (Issue #61 Phase B2)。
+
+        ローカルJSON実装は全件を読み込んで変更し、一時ファイルへ書いてから
+        os.replace()で差し替えるため、**同一ファイル内では部分適用が起こらない**
+        (ロットを1件ずつ削除して途中で失敗する、という状態を構造的に無くす)。
+
+        DynamoDB実装は個別の書き込みを順に行う。DynamoDBで原子性が必要な経路は
+        本メソッドではなくTransactWriteItems(holding_replacement_commit.py)を
+        使うこと。
+        """
+        ...
     def delete(self, item_id: str) -> bool: ...
     def find(self, predicate: Callable[[T], bool]) -> list[T]: ...
     def insert_if_absent(self, item: T) -> bool:
@@ -172,14 +208,41 @@ def build_collection_store[T: BaseModel](
     id_field: str,
     store_dir: Path | None = None,
     ttl_seconds: int | None = None,
+    failure_policy: RecordFailurePolicy = RecordFailurePolicy.STRICT,
+    item_id_disclosure: ItemIdDisclosure = ItemIdDisclosure.HASH,
 ) -> CollectionStore[T]:
     """ttl_secondsはDynamoDBバックエンド向けの任意引数(通知検証モード機能2026-08追加、
     ValidationRecommendationsTable等の使い捨てテーブル専用)。ローカルJSON実装には
-    TTL概念が無いため無視される。"""
+    TTL概念が無いため無視される。
+
+    failure_policyとitem_id_disclosureはIssue #63 PR-2で追加した。**ポリシーは
+    ストア層の内部ではなく呼び出し側(repository)が宣言する。** 表をストア内部に
+    持つと、コレクションを1つLENIENTにするたびにS-17の変更=全領域lockが必要に
+    なるためである。
+
+    既定はSTRICT(現行と同一の挙動。最初の失敗で元の例外をそのまま送出)であり、
+    **宣言しなければ挙動は変わらない。** 個々のコレクションのLENIENT化は
+    Issue #63 PR-3(A-U3)で行う。
+
+    item_id_disclosureの既定はHASH。主キーは個人識別情報を含みうるため
+    fail-closedとする(Issue #135)。
+    """
     if running_on_lambda():
         from jstock_advisor.infrastructure.aws.dynamodb_store import DynamoDbCollectionStore
 
         return DynamoDbCollectionStore(
-            model_type, resolve_table_name(file_name), id_field, ttl_seconds=ttl_seconds
+            model_type,
+            resolve_table_name(file_name),
+            id_field,
+            ttl_seconds=ttl_seconds,
+            failure_policy=failure_policy,
+            item_id_disclosure=item_id_disclosure,
         )
-    return JsonCollectionStore(model_type, file_name, id_field, store_dir)
+    return JsonCollectionStore(
+        model_type,
+        file_name,
+        id_field,
+        store_dir,
+        failure_policy=failure_policy,
+        item_id_disclosure=item_id_disclosure,
+    )

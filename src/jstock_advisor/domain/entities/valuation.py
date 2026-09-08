@@ -28,6 +28,26 @@ class FairValueUnusableReasonCode(StrEnum):
     METHOD_SPREAD_TOO_WIDE = "METHOD_SPREAD_TOO_WIDE"
 
 
+class ProfitTakingFairValueBlockReasonCode(StrEnum):
+    """利確判定が想定上限価格(ceiling)を使えなかった直接原因の構造化コード
+    (Issue #221 Phase 1)。
+
+    FairValueUnusableReasonCode(Issue #21)とは別の軸である。あちらは
+    build_fair_value_range()が「レンジそのものを売買判断に使えない」と
+    決めた場合(usable_for_trading_judgment=False)の理由であり、その3値は
+    同関数の3つの発火条件と1対1で対応する。本enumはレンジ自体は使える
+    (usable_for_trading_judgment=True)にもかかわらず、利確判定側の
+    追加ゲート(_fair_value_action_usable())がより厳しい基準で弾いた場合を
+    表す。両者は閾値が異なるため、片方だけが成立する帯が存在する。
+
+    FairValueUnusableReasonCodeへ値を足さないのは、あちらのdocstringが
+    宣言している「build_fair_value_range()の3つの発火条件と1対1対応する」
+    という不変条件を壊さないためである。
+    """
+
+    METHOD_SPREAD_TOO_WIDE_FOR_ACTION = "METHOD_SPREAD_TOO_WIDE_FOR_ACTION"
+
+
 class ValuationExclusionReason(ImmutableSnapshot):
     """適正価格の算出方式が集計から除外された理由の構造化記録
     (BUYパイプライン第2次修正(2026-07)で追加。要求仕様10節)。
@@ -63,6 +83,15 @@ class FairValueMethodResult(ImmutableSnapshot):
     # キャッシュフロー歪み等により、上方乖離フィルタでは検出できない異常に
     # 低い算出値を検出する ---
     exclusion_detail: ValuationExclusionReason | None = None
+
+    # --- Issue #179(2026-09)で追加。除外閾値のすぐ下(境界帯)にあったため
+    # 完全に除外せず、他方式の中央値へ寄せて採用した場合の構造化記録。
+    # exclusion_detailが「集計から外した理由」であるのに対し、こちらは
+    # 「外さずに値を寄せた事実」であり、applicableはTrueのまま、fair_valueは
+    # 補間後の値になる。actual_valueへは補間前のraw値を残すため、
+    # #20 O-Cの下方シナリオ観測と同じ粒度で元の算出値を追跡できる。
+    # このフィールドを持たない既存レコードはNoneとして読める(後方互換)。
+    transition_detail: ValuationExclusionReason | None = None
 
 
 class FairValueRange(ImmutableSnapshot):

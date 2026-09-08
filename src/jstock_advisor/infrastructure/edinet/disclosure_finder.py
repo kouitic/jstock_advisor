@@ -25,6 +25,10 @@ from jstock_advisor.infrastructure.edinet.scan_window import (
     compute_scan_start,
 )
 from jstock_advisor.infrastructure.edinet.types import EdinetFailureReason
+from jstock_advisor.infrastructure.record_failure_policy import (
+    ItemIdDisclosure,
+    RecordFailurePolicy,
+)
 
 _EXTRAORDINARY_REPORT_DOC_TYPE_CODES = {"180", "190"}  # 臨時報告書・訂正臨時報告書
 _DEFAULT_INITIAL_LOOKBACK_DAYS = 60
@@ -51,8 +55,17 @@ class EdinetDisclosureCache(BaseModel):
 
 class EdinetDisclosureCacheRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
+        # Issue #63 PR-3a: cacheのdecode失敗は1件skipしても次回取得で置き換わる
+        # ため、collection全体を止める理由がない(LENIENT)。
+        # item_idはPLAIN。主キーは銘柄コードのみで所有者名を含まない
+        # (#135 Phase Aが実測した6 collectionと重ならない)。
         self._store: CollectionStore[EdinetDisclosureCache] = build_collection_store(
-            EdinetDisclosureCache, "edinet_disclosure_cache.json", "stock_code", store_dir
+            EdinetDisclosureCache,
+            "edinet_disclosure_cache.json",
+            "stock_code",
+            store_dir,
+            failure_policy=RecordFailurePolicy.LENIENT,
+            item_id_disclosure=ItemIdDisclosure.PLAIN,
         )
 
     def get(self, stock_code: str) -> EdinetDisclosureCache | None:

@@ -63,6 +63,11 @@ class IndustrySpecificRules(StrictModel):
 
 class DataQualityRules(StrictModel):
     max_data_age_business_days: int
+    # Issue #52 Phase B3: 決算期末から報告期限までの猶予「暦日」数。
+    # max_data_age_business_daysが「いつ取得したか」の鮮度であるのに対し、
+    # こちらは「財務データの対象期間が報告サイクル上最新か」を判定する。
+    # 負値は意味を持たないため設定段階で弾く(判定時のUNKNOWNへ流さない)。
+    financial_reporting_lag_calendar_days: int = Field(ge=0)
 
 
 class ScreeningRulesConfig(StrictModel):
@@ -118,6 +123,29 @@ class FairValueUsability(StrictModel):
     min_methods_required: int  # 有効な手法数がこれ未満なら使用不可
 
 
+class OutlierTransition(StrictModel):
+    """外れ値除外の境界帯(Issue #179)。
+
+    除外閾値そのもの(52週安値x0.50等)はvaluation_methods.pyのコード定数のままで
+    あり、configへの移行はIssue #180のscopeである。ここでは#179が新設した
+    「境界帯の下限」だけを持つ。
+    """
+
+    # u = 算出値 ÷ 除外閾値。この値以上1.0未満ならTRANSITION、未満ならHARD_REJECT。
+    below_52_week_low_min_ratio: float
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> OutlierTransition:
+        # 1.0以上にすると境界帯が空になり本Issueの修正が無効化される。
+        # 0以下にすると「閾値の何倍か」という定義が成立しない。
+        if not 0.0 < self.below_52_week_low_min_ratio < 1.0:
+            raise ValueError(
+                "below_52_week_low_min_ratio must satisfy "
+                f"0 < ratio < 1.0 (got {self.below_52_week_low_min_ratio})"
+            )
+        return self
+
+
 class ValuationRulesConfig(StrictModel):
     version: int
     fair_value_methods: FairValueMethods
@@ -127,6 +155,7 @@ class ValuationRulesConfig(StrictModel):
     historical_range_method: HistoricalRangeMethod
     dcf_method: DcfMethod
     fair_value_usability: FairValueUsability
+    outlier_transition: OutlierTransition
 
 
 # --- profit_taking_rules.yaml ----------------------------------------------
@@ -1330,6 +1359,9 @@ class ConfidenceScoringWeights(StrictModel):
     penalty_missing_data: float
     penalty_untraced_one_time_factors: float
     penalty_cross_rule_disagreement: float
+    # Issue #52 Phase B3-B2: 財務データが報告サイクル上の最新でない場合の減点。
+    # penalty_stale_data(取得時刻ベース)とは別concept のため専用設定とする。
+    penalty_financial_data_stale: float = Field(ge=0)
     high_threshold: float
     medium_threshold: float
 
@@ -1410,12 +1442,20 @@ class ValuationDispersionThresholds(StrictModel):
     low_max: float
     medium_max: float
     auto_buy_block: float
+    # Issue #186: 適正価格そのものを算出しない上限。auto_buy_block(自動購入の禁止)
+    # とは目的が異なるため別キーとする。auto_buy_blockはdecide_buy_action /
+    # buy_consistencyのMANUAL_REVIEW判定でも使われており、値を動かすとそちらの
+    # 安全機能まで一緒に動いてしまうため、共用しない。
+    anchor_block: float
 
     @model_validator(mode="after")
     def _check_order(self) -> ValuationDispersionThresholds:
-        if not (0 < self.low_max < self.medium_max < self.auto_buy_block):
+        if not (
+            0 < self.low_max < self.medium_max < self.auto_buy_block < self.anchor_block
+        ):
             raise ValueError(
-                "valuation_dispersionはlow_max < medium_max < auto_buy_blockの順序が必要です"
+                "valuation_dispersionはlow_max < medium_max < auto_buy_block < "
+                "anchor_blockの順序が必要です"
             )
         return self
 

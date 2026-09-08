@@ -78,8 +78,21 @@ def _score_stability(
     cv_threshold: LinearScoreThreshold,
     profit_ratio_threshold: LinearScoreThreshold,
     ratio_rules: HoldingDecisionRatioRulesConfig,
+    *,
+    min_mean_for_cv: float | None,
 ) -> _StabilityResult:
-    """変動係数(または赤字・符号反転時は黒字期数割合)による安定性採点(2節)。"""
+    """変動係数(または赤字・符号反転時は黒字期数割合)による安定性採点(2節)。
+
+    `min_mean_for_cv` は「比率にするには系列の絶対規模が小さすぎる」ことを表す
+    下限であり、**系列の単位に依存する**。したがって呼び出し側が系列の単位に
+    合わせて渡す。円建ての金額系列(営業利益)には
+    `ratio_rules.min_mean_for_cv_yen`(単位: 円)を渡し、単位の異なる系列には
+    `None` を渡してこのガードを適用しない(Issue #140)。
+
+    `None` を渡してもゼロ除算・変動係数の発散は起きない。下記の `has_negative`
+    が `v <= 0` を除外するため、この分岐へ到達する時点で全値が正であり
+    `mean > 0` が保証されるためである。
+    """
     ordered = sorted(periods, key=lambda p: p.period_end)
     values = [float(p.value) for p in ordered]
     if len(values) < ratio_rules.min_periods_for_stability_score:
@@ -87,7 +100,8 @@ def _score_stability(
 
     mean = statistics.fmean(values)
     has_negative = any(v <= 0 for v in values)
-    if abs(mean) <= ratio_rules.min_mean_for_cv_yen or has_negative:
+    below_min_mean = min_mean_for_cv is not None and abs(mean) <= min_mean_for_cv
+    if below_min_mean or has_negative:
         positive_ratio = sum(1 for v in values if v > 0) / len(values)
         return _StabilityResult(
             EvidenceCoverageStatus.EVALUATED,
@@ -322,12 +336,17 @@ def score_company_quality(
         )
 
     # --- 収益力: EPS自社履歴の安定性 ---
+    # EPSは1株当たりの金額であり、円建て絶対額のガード(min_mean_for_cv_yen、
+    # 営業利益向けに設計された1千万円)を適用すると常に条件を満たしてしまい、
+    # 設計上の本命である変動係数へ一度も到達しない(Issue #140)。
+    # 単位が異なるため、このガードは適用しない。
     eps_stability = _score_stability(
         inputs.eps_period_values,
         weights.profitability_eps_stability,
         thresholds.cv_based_stability,
         thresholds.profit_quarter_ratio,
         ratio_rules,
+        min_mean_for_cv=None,
     )
     items.append(
         ScoreItemDetail(
@@ -341,12 +360,15 @@ def score_company_quality(
     )
 
     # --- 業績安定性: 営業利益の安定性 ---
+    # 営業利益は円建ての絶対額であり、min_mean_for_cv_yen(単位: 円)は
+    # 本系列のために設計された値である。従来どおり適用する。
     income_stability = _score_stability(
         inputs.quarterly_operating_income_periods,
         weights.stability_operating_income,
         thresholds.cv_based_stability,
         thresholds.profit_quarter_ratio,
         ratio_rules,
+        min_mean_for_cv=ratio_rules.min_mean_for_cv_yen,
     )
     items.append(
         ScoreItemDetail(

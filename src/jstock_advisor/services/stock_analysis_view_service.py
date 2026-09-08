@@ -25,6 +25,7 @@ HoldingEvaluationRecord)をユーザーへ分かりやすく説明するだけ�
 
 from __future__ import annotations
 
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from jstock_advisor.domain.entities.audit import AuditLogEntry
@@ -34,6 +35,10 @@ from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
 from jstock_advisor.domain.entities.common import BuyPriceLevels, ScoreBreakdown
 from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.valuation.downside_valuation_scenario import (
+    DownsideScenarioKind,
+    derive_downside_valuation_observation,
+)
 from jstock_advisor.domain.valuation.valuation_confidence import (
     CODE_NO_VALID_VALUATION_METHODS,
     CODE_TOO_FEW_VALUATION_METHODS,
@@ -458,6 +463,62 @@ _VALUATION_METHOD_LABELS: dict[str, str] = {
 _STANDARD_VALUATION_METHODS: frozenset[str] = frozenset(_VALUATION_METHOD_LABELS)
 
 
+# --- Issue #20 O-C(2026-09-06): 適正価格の集計から下方外れ値として除外された
+# 評価の参考表示 ---
+# 判定時点に保存済みのbuy_score_input_facts["valuation_outlier_exclusions"]を
+# domain層(downside_valuation_scenario.py)でruntime導出したものを表示するだけで
+# あり、新しい価格の算出・永続化・判定への反映は一切行わない。
+# 買付価格信頼性(buy_price_reliability=LOW)のブロックとは独立したセクションと
+# する。信頼性がOKでも下方除外は発生しうるため、LOWブロックの内側に置くと
+# 実際に除外が起きた推奨の一部でしか表示されない。
+_DOWNSIDE_SECTION_HEADING = "■ 参考：適正価格の集計から除外された低い評価"
+_DOWNSIDE_SECTION_LEAD = "算出はされたものの、外れ値として通常の適正価格計算から除外した評価です。"
+_DOWNSIDE_SECTION_CAUTION = (
+    "これらの金額は購入判断には使っていません。この価格まで下がるという予測でもありません。"
+)
+# scenario_kindごとの自然文。内部コード名(BELOW_52_WEEK_LOW等)はそのまま
+# ユーザーへ出さない。また判定時点のmessageもここでは使わない(messageは
+# 「算出値(8.0E+2円)が…」のようにDecimalの指数表記をそのまま含むため、
+# 一般ユーザー向けの表示には適さない。監査用途の値としてdomain層に保持する)。
+_DOWNSIDE_KIND_TEXT: dict[DownsideScenarioKind, str] = {
+    DownsideScenarioKind.EXTREME_RELATIVE_TO_CURRENT_PRICE: "現在株価に対して極端に低い評価",
+    DownsideScenarioKind.METHOD_DIVERGENT_DOWNSIDE: "他の評価方式と比べて大きく低い評価",
+    DownsideScenarioKind.HISTORICAL_PRICE_RELATIVE_DOWNSIDE: "過去1年の値動きに対して低い評価",
+}
+
+
+def _yen(value: Decimal) -> str:
+    """円建て金額の表示整形(line_notification_service.pyと同じ丸め方針)。
+
+    保存済みDecimalは`8.0E+2`や28桁の値を取りうるため、そのまま文字列化しない。
+    表示のための整形であり、保存値・判定値は一切変更しない。
+    """
+    return f"{int(value.to_integral_value(rounding=ROUND_HALF_UP)):,}円"
+
+
+def _downside_scenario_lines(recommendation: Recommendation) -> list[str]:
+    """下方外れ値として除外された評価の参考表示行を組み立てる。
+
+    - 判定時点スナップショットが無い旧レコードでは、セクション自体を出さない
+      (「悲観シナリオなし」とは表示しない。観測できないことと0件は別)。
+    - 下方除外が0件の場合も、追加情報として出すものが無いため行を返さない。
+    """
+    observation = derive_downside_valuation_observation(recommendation)
+    if not observation.scenarios:
+        return []
+
+    lines = [_DOWNSIDE_SECTION_LEAD]
+    for scenario in observation.scenarios:
+        label = _VALUATION_METHOD_LABELS.get(scenario.method, scenario.method)
+        kind_text = _DOWNSIDE_KIND_TEXT.get(scenario.scenario_kind)
+        detail = f"（{kind_text}）" if kind_text else ""
+        lines.append(f"・{label}：{_yen(scenario.fair_value)}{detail}")
+    lines.append(_DOWNSIDE_SECTION_CAUTION)
+    if recommendation.valuation_anchor is not None:
+        lines.append(f"購入判断に使った適正価格：{_yen(recommendation.valuation_anchor)}")
+    return lines
+
+
 def _standard_valuation_method_exclusion_reasons(recommendation: Recommendation) -> list[str]:
     """recommendation.valuation_methods(既存フィールド)から、標準5方式
     (target_yield/per/pbr/historical_range/dcf)についてのみ、実際に保存済みの
@@ -502,10 +563,14 @@ def _no_valuation_anchor_detail_text(
         threshold_ratio = _decimal_str_to_display(threshold_value, digits=2)
         actual_text = f"{actual_ratio}倍" if actual_ratio is not None else "不明"
         threshold_text = f"{threshold_ratio}倍超" if threshold_ratio is not None else "不明"
+        # Issue #186: 閾値の意味がauto_buy_block(自動買付の禁止)から
+        # anchor_block(基準価格を算出しない上限)へ変わったため、文言を合わせる。
+        # 旧レコードもthreshold_valueを保存値から表示するため、当時の基準が
+        # そのまま出る(現在configで再解釈しない既存方針は変更していない)。
         return (
             "算出方式間の結果のばらつきが大きく、基準価格を一本化できませんでした。\n"
             f"判定時点のばらつき：{actual_text}\n"
-            f"自動買付を行わない基準：{threshold_text}"
+            f"基準価格を算出しない基準：{threshold_text}"
         )
     if code == CODE_VALUATION_ANCHOR_CALCULATION_FAILED:
         return "算出処理で有効な結果を得られませんでした。"
@@ -580,6 +645,8 @@ _RELIABILITY_CONCERN_LABELS: dict[str, str] = {
     "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER": (
         "外れ値除外の結果、比較に使える手法が不足したため除外前の結果へ戻した"
     ),
+    # Issue #179: 除外基準のすぐ下(境界帯)だったため、捨てずに他方式へ寄せて使った。
+    "BORDERLINE_OUTLIER_INTERPOLATION": "適正価格の算出方式に除外基準すれすれの値が含まれていた",
 }
 
 
@@ -670,6 +737,27 @@ def _reliability_concern_line(
             for e in exclusions
             if isinstance(e, dict) and e.get("method") and e.get("message")
         ] if isinstance(exclusions, list) else []
+        if reasons:
+            return f"・{label}（{'／'.join(reasons)}）"
+        return f"・{label}"
+
+    if concern == "BORDERLINE_OUTLIER_INTERPOLATION":
+        # Issue #179: 境界帯として補間採用した方式。判定時点に保存済みの
+        # buy_score_input_facts["valuation_outlier_transitions"]のみを参照する
+        # (除外ではないためvaluation_outlier_exclusionsには入らない)。
+        # 補間前のraw値も併せて示し、#20 O-Cの下方シナリオ観測と同じ粒度で
+        # 元の算出値が引き続き見えるようにする。
+        transitions = facts.get("valuation_outlier_transitions")
+        reasons = (
+            [
+                f"{_VALUATION_METHOD_LABELS.get(str(e.get('method')), str(e.get('method')))}: "
+                f"{e.get('message')}"
+                for e in transitions
+                if isinstance(e, dict) and e.get("method") and e.get("message")
+            ]
+            if isinstance(transitions, list)
+            else []
+        )
         if reasons:
             return f"・{label}（{'／'.join(reasons)}）"
         return f"・{label}"
@@ -768,6 +856,33 @@ _FLAT_NEGATIVE_SUMMARY_LABEL: dict[str, str] = {
 _FLAT_NEGATIVE_CURRENT_VALUES = frozenset({"False", "not_detected", "NONE"})
 
 
+# Issue #222(N-1): 監査証跡の金額は文字列で保存されており、そのまま埋め込むと
+# 「前期102855000000.0円」のように読めない。1億円以上は「億円」へ換算し、
+# それ未満は既存の_yen()(桁区切り・ROUND_HALF_UP)へ通す。
+_OKU = Decimal(10) ** 8
+
+
+def _audit_amount_display(raw: object) -> str:
+    """監査証跡に文字列で保存された金額を、読める形へ整形する(Issue #222 N-1)。
+
+    数値として解釈できない値は**握り潰さず、元の文字列のまま**返す
+    (保存値を推測で補正しない。表示のための整形であり判定には一切使わない)。
+
+    1億円以上は小数第1位までの「億円」表記にする。丸めにより下位の桁は
+    落ちるが、営業利益のような大きい金額では桁区切りだけの表示より
+    誤読が少ない。1億円未満は_yen()と同じ桁区切りの円表記にする。
+    """
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return str(raw)
+    if value.is_nan() or value.is_infinite():
+        return str(raw)
+    if abs(value) >= _OKU:
+        return f"{value / _OKU:,.1f}億円"
+    return _yen(value)
+
+
 def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
     """Legacy SELLの1ルール分の監査証跡から、実際に値が残っているものだけを
     事実の1行として組み立てる(内部enum名/真偽値をそのまま出さず自然文へ
@@ -800,9 +915,12 @@ def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
         period = detail.get("comparison_period")
         if previous_value is not None:
             period_note = f"、{period}" if period else ""
-            trend = f"前期{previous_value}円→今期{current_value}円{period_note}"
+            trend = (
+                f"前期{_audit_amount_display(previous_value)}"
+                f"→今期{_audit_amount_display(current_value)}{period_note}"
+            )
         else:
-            trend = f"{current_value}円"
+            trend = _audit_amount_display(current_value)
         body = f"{trend}、{explanation}" if explanation else trend
         if status_word is not None:
             return f"{label}：{status_word}（{body}）"
@@ -811,9 +929,18 @@ def _legacy_sell_hold_fact_line(detail: dict[str, Any]) -> str | None:
     threshold = detail.get("threshold")
     if threshold is not None:
         if status_word is not None:
-            # explanationが無い場合の括弧多重ネスト("該当なし（36.4%（基準…）」)
-            # を避けるため、status_word有りの場合は「、」区切りの平文にする。
-            body = explanation if explanation else f"{current_value}、基準{threshold}"
+            # Issue #222(N-3 / N-4): 従来はexplanationがあると実値と閾値を捨てて
+            # いた。status_wordは必ず付くため、実質「explanationがあれば数値は
+            # 出ない」動作であり、誤読は防げても判断材料が失われていた。
+            #
+            # 「該当なし」と実値・基準は両立できるため、**常に実値と基準を出す**。
+            # explanationはNOT_TRIGGEREDのときlabel + status_wordの言い換えに
+            # なる(「債務超過：該当なし（自己資本比率はマイナスではない
+            # (債務超過ではない)）」)ため付けない。TRIGGEREDのexplanationは
+            # 一次情報の有無など言い換えでない情報を持つため残す。
+            body = f"{current_value}、基準{threshold}"
+            if explanation and str(status_value) == "TRIGGERED":
+                body = f"{body}、{explanation}"
             return f"{label}：{status_word}（{body}）"
         return f"{label}：{current_value}（基準{threshold}）"
 
@@ -959,6 +1086,12 @@ class StockAnalysisViewService:
             if price_lines:
                 lines += ["", "■ 価格目安（判定時点）", *price_lines]
 
+            # Issue #20 O-C: 判定に使わなかった低い評価の参考表示。
+            # 価格目安の後に置き、判定に使う価格と混ざらないようにする。
+            downside_lines = _downside_scenario_lines(recommendation)
+            if downside_lines:
+                lines += ["", _DOWNSIDE_SECTION_HEADING, *downside_lines]
+
         return "\n".join(lines)
 
     # --- SELL/HOLD側 -------------------------------------------------------
@@ -1029,6 +1162,10 @@ class StockAnalysisViewService:
         else:
             lines.append(_UNRESTORABLE)
 
+        profit_taking_lines = _profit_taking_status_lines(recommendation)
+        if profit_taking_lines:
+            lines += ["", "■ 利確判定の状況", *profit_taking_lines]
+
         quantity_lines = _sell_quantity_lines(recommendation)
         if quantity_lines:
             lines += ["", "■ 売却目安の根拠", *quantity_lines]
@@ -1051,6 +1188,32 @@ _HOLDING_JUDGMENT_LABEL: dict[RecommendationType, str] = {
     RecommendationType.STRONG_SELL_CONSIDERATION: "売却を強く検討",
     RecommendationType.URGENT_HOLDING_REVIEW: "緊急確認を推奨",
 }
+
+
+def _profit_taking_status_lines(recommendation: Recommendation) -> list[str]:
+    """利確判定の状況(含み益率・上値余地・まだ利確しない理由)を組み立てる
+    (Issue #222 N-5)。
+
+    含み益率が監視水準を超えていても、通知本文には含み益率・上値余地・保留理由の
+    いずれも出ていなかった。判定そのものは行わず、Recommendationに既に載っている
+    値を表示するだけである(**判定ロジックには一切触れない**)。
+
+    上値余地(profit_taking_upside_pct)は`_fair_value_action_usable`が真のときだけ
+    設定される。値が無い場合に「上値余地なし」と書くと「余地が0」と誤読されるため、
+    Issue #221で追加されたnot_yet_action_reasons(適正価格を使えない理由を含む)へ
+    委ねて、上値余地の行そのものを出さない。
+    """
+    lines: list[str] = []
+    gain_pct = recommendation.unrealized_profit_loss_pct
+    if gain_pct is not None:
+        lines.append(f"含み益率：{gain_pct:.1f}%")
+    upside_pct = recommendation.profit_taking_upside_pct
+    if upside_pct is not None:
+        lines.append(f"想定上限価格までの上値余地：{upside_pct:.1f}%")
+    if recommendation.not_yet_action_reasons:
+        lines.append("まだ利確しない理由：")
+        lines += [f"・{reason}" for reason in recommendation.not_yet_action_reasons]
+    return lines
 
 
 def _sell_quantity_lines(recommendation: Recommendation) -> list[str]:

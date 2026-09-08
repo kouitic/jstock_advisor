@@ -27,13 +27,16 @@ class WatchState(Entity):
     # 初回開始日。評価不能(DATA_INSUFFICIENT)で連続日数がリセットされても
     # 不変(WatchState全体としては継続しているとみなすため)。
     started_at: dt.date
-    # 直近で条件(NEAR BUY開始/継続条件)を実際に確認できた営業日。
+    # 連続営業日数へ寄与した、直近の一致営業日(Issue #166で定義を明確化)。
+    # 非営業日(週末・平日に当たる祝日)や同一営業日の再評価では更新しない。
+    # 営業日計算の起点となるため、ここが非営業日になってはならない。
     last_matched_at: dt.date
-    # 直近で評価を試みた営業日(評価不能だった日も含む。ended_atの
-    # max_stale_business_days判定に使う)。
+    # 直近で評価処理を行った日(Issue #166で定義を明確化)。評価不能だった日も、
+    # 非営業日に実行した日も含む。判定には使わず、実行事実の記録として持つ。
     last_evaluated_at: dt.date
     # 表示用の連続営業日数。評価不能を挟んだ場合は1へリセットする
-    # (near_buy.pyのgapロジック参照)。
+    # (near_buy.pyのgapロジック参照)。営業日が1日も経過していない評価では
+    # 加算しない(Issue #166)。
     consecutive_business_days: int
 
     last_current_price: Decimal | None = None

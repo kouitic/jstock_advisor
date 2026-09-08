@@ -38,7 +38,10 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
-from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
+from jstock_advisor.domain.entities.valuation import (
+    FairValueUnusableReasonCode,
+    ProfitTakingFairValueBlockReasonCode,
+)
 from jstock_advisor.domain.financial_decomposition import (
     has_guidance_revision_disclosure,
     is_fundamentally_driven,
@@ -117,6 +120,11 @@ from jstock_advisor.interfaces.types import DividendInfo, ShareholderBenefit
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.corporate_action_service import CorporateActionService
+from jstock_advisor.services.financial_freshness_integration import (
+    FINANCIAL_STALE_USER_WARNING,
+    FinancialFreshnessAssessment,
+    assess_financial_freshness,
+)
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
@@ -221,6 +229,25 @@ _FAIR_VALUE_UNUSABLE_REASON_TEXTS: dict[FairValueUnusableReasonCode, str] = {
 }
 
 
+def _profit_taking_fair_value_block_reason_text(
+    code: ProfitTakingFairValueBlockReasonCode, config: AppConfig
+) -> str:
+    """利確判定側の追加ゲートが想定上限価格を弾いた理由の利用者向け文言
+    (Issue #221 Phase 1)。
+
+    閾値は文言へハードコードせず、必ずconfigの実値を埋め込む
+    (configを変えたときに説明文だけが古い値のまま残らないようにする)。
+    """
+    if code is ProfitTakingFairValueBlockReasonCode.METHOD_SPREAD_TOO_WIDE_FOR_ACTION:
+        cbj = config.profit_taking.condition_based_judgment
+        threshold = cbj.max_fair_value_spread_ratio_for_partial
+        return (
+            f"適正価格の手法間の広がりが利確判定の基準({threshold:.2f}倍)を超えているため、"
+            "価格基準の利確判定に使用していません"
+        )
+    raise ValueError(f"未対応の利確判定側ブロック理由コードです: {code}")
+
+
 def _build_not_yet_action_reasons(
     result: ProfitTakingResult,
     config: AppConfig,
@@ -250,6 +277,18 @@ def _build_not_yet_action_reasons(
         reasons.append(f"含み益率は一部利確基準({t.unrealized_gain_partial_pct:.0f}%)未満")
     if fair_value_unusable_reason_code is not None:
         reasons.append(_FAIR_VALUE_UNUSABLE_REASON_TEXTS[fair_value_unusable_reason_code])
+    # Issue #221 Phase 1(U2-a): レンジ自体は使えるが、利確判定側のより厳しい
+    # 基準で弾かれた場合。Issue #21のcodeとは排他であり(domain側でNoneを返す)、
+    # 同じ事実が2行になることはない。
+    if result.fair_value_action_block_reason_code is not None:
+        reasons.append(
+            _profit_taking_fair_value_block_reason_text(
+                ProfitTakingFairValueBlockReasonCode(
+                    result.fair_value_action_block_reason_code
+                ),
+                config,
+            )
+        )
     if fair_value_overall_confidence == ConfidenceLevel.MEDIUM:
         reasons.append("適正価格モデルの信頼度がMEDIUM")
     if not industry_model_applied:
@@ -285,6 +324,13 @@ def _build_not_yet_action_reasons(
         reasons.append("増益・増配などの反対材料がある")
     if is_uptrend:
         reasons.append("強い上昇トレンドが継続")
+    # Issue #221 Phase 1(U2-b): 「該当した」ことではなく「実際に判定を1段下げた」
+    # ことを書く。上の2行は材料の有無を述べるだけで、それが判定を弱めたかどうかは
+    # 伝わらない(降格が無効化される経路もある)。
+    if result.mitigating_downgrade_applied:
+        reasons.append("上記の反対材料により、利確の判定を1段階弱めています")
+    if result.timing_downgrade_applied:
+        reasons.append("上昇トレンドの継続により、利確の判定を1段階弱めています")
     if result.fair_value_used_as_sole_strong_basis:
         reasons.append(
             "適正価格モデルの手法間一致度・強気適正価格との関係が強い確信の水準に達していない"
@@ -455,7 +501,11 @@ class ProfitTakingService:
         )
 
     def _compute_confidence(
-        self, result: ProfitTakingResult, snapshot: StockSnapshot, now: dt.datetime
+        self,
+        result: ProfitTakingResult,
+        snapshot: StockSnapshot,
+        now: dt.datetime,
+        financial_freshness: FinancialFreshnessAssessment,
     ) -> ConfidenceScoreResult:
         fv_range = snapshot.fair_value_range
         spread_ratio = (
@@ -482,6 +532,10 @@ class ProfitTakingService:
             counter_factors_evaluated=True,
             benefit_eligible_but_value_unavailable=benefit_value_missing,
             fair_value_is_sole_strong_basis=result.fair_value_used_as_sole_strong_basis,
+            # Issue #52 Phase B3-B2: 財務期間の鮮度。上のdata_freshness_days
+            # (取得時刻)とは別fieldであり、同じ事実を2箇所へ書かない。
+            # UNKNOWNは「古いと確認できていない」ためFalseとする。
+            financial_data_freshness_stale=financial_freshness.is_stale,
         )
         return compute_confidence(factors, self._config.confidence)
 
@@ -735,7 +789,16 @@ class ProfitTakingService:
         else:
             sell_intensity = None
 
-        confidence_result = self._compute_confidence(result, snapshot, now)
+        # Issue #52 Phase B3-B2: 既に解決済みの期間末・評価日をそのまま渡し、
+        # 同じ値を二度計算しない(判定に使う値を1つに保つ)。
+        financial_freshness = assess_financial_freshness(
+            snapshot.financial,
+            now,
+            self._config,
+            latest_financial_period_end=resolved_period.period_end,
+            evaluation_date=evaluation_date,
+        )
+        confidence_result = self._compute_confidence(result, snapshot, now, financial_freshness)
 
         audit_entry = self._audit.record(
             decision_type="profit_taking",
@@ -788,6 +851,8 @@ class ProfitTakingService:
                 "confidence": confidence_result.level.value,
                 "confidence_score": confidence_result.score,
                 "confidence_reasons": confidence_result.reasons_not_high,
+                # --- Issue #52 Phase B3-B2: 財務データの期間鮮度 ---
+                **financial_freshness.audit_values(self._config),
                 # --- デプロイ前対応: 決算反映確認の由来を監査可能にする ---
                 "resolved_financial_period_end": (
                     resolved_period.period_end.isoformat()
@@ -943,6 +1008,10 @@ class ProfitTakingService:
             key_risks=[
                 f"含み損益率{result.pnl.unrealized_pnl_pct:.1f}%",
                 f"配当・優待込み累計利益率{result.pnl.total_return_pct:.1f}%",
+                # Issue #52 Phase B3-B2: 判定に使った財務データが報告サイクル上の
+                # 最新でない場合の留意事項。利確を促す判定理由ではないため
+                # reasons ではなく key_risks(留意事項)へ入れる。
+                *([FINANCIAL_STALE_USER_WARNING] if financial_freshness.is_stale else []),
             ],
             confidence=confidence_result.level,
             next_earnings_date=snapshot.next_earnings_date,

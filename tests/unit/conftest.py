@@ -3,12 +3,14 @@ from pathlib import Path
 
 import pytest
 
+from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
 )
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import WatchlistRepository
 from jstock_advisor.services import jpx_industry_source as jpx_industry_source_module
+from jstock_advisor.services.csv_import_ledger import CsvImportLedger
 from jstock_advisor.services.csv_import_service import HoldingsCsvImportService
 from jstock_advisor.services.jpx_industry_source import (
     JpxIndustryEntry,
@@ -37,8 +39,19 @@ def watchlist_service(store_dir: Path) -> WatchlistService:
 
 
 @pytest.fixture
-def csv_import_service(portfolio_service: PortfolioService) -> HoldingsCsvImportService:
-    return HoldingsCsvImportService(portfolio_service=portfolio_service)
+def csv_import_ledger(store_dir: Path) -> CsvImportLedger:
+    """Issue #61 Phase B1: 取込済み台帳もtmp_pathへ隔離する
+    (既定のAuditLogRepositoryを使うとテストが実データ領域へ書き込むため)。"""
+    return CsvImportLedger(repository=AuditLogRepository(store_dir=store_dir))
+
+
+@pytest.fixture
+def csv_import_service(
+    portfolio_service: PortfolioService, csv_import_ledger: CsvImportLedger
+) -> HoldingsCsvImportService:
+    return HoldingsCsvImportService(
+        portfolio_service=portfolio_service, ledger=csv_import_ledger
+    )
 
 
 @pytest.fixture(autouse=True)

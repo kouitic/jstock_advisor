@@ -69,6 +69,7 @@ from jstock_advisor.domain.signals.sector_environment import evaluate_sector_env
 from jstock_advisor.domain.signals.timing_score import evaluate_timing_score
 from jstock_advisor.domain.valuation.fair_value import (
     aggregate_fair_value,
+    compute_52_week_low,
     compute_dcf_price,
     compute_historical_range_price,
     compute_pbr_price,
@@ -77,7 +78,7 @@ from jstock_advisor.domain.valuation.fair_value import (
     median_historical_pbr,
     median_historical_per,
 )
-from jstock_advisor.domain.valuation.fair_value_usability import build_fair_value_range
+from jstock_advisor.domain.valuation.valuation_methods import build_valuation_summary
 from jstock_advisor.domain.valuation.yield_calc import (
     compute_annual_benefit_valuation,
     compute_benefit_yield_pct,
@@ -104,6 +105,11 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 class StockSnapshot:
     stock_code: str
     current_price: Decimal
+    # Issue #52 Phase B2: current_priceが「いつの取引による終値か」。
+    # fetched_at(APIを叩いた時刻)とは別概念であり、鮮度判定にはこちらを使う。
+    # StockSnapshotは判定処理の中間生成物であり永続化されないため、
+    # このフィールド追加による保存schemaへの影響は無い。
+    price_as_of_date: dt.date
     financial: FinancialSummary
     dividend: DividendInfo
     benefit: ShareholderBenefit | None
@@ -292,6 +298,7 @@ def build_stock_snapshot(
 
     benefit = providers.shareholder_benefit.get_shareholder_benefit(stock_code)
     current_price = snap.close_price
+    price_as_of_date = snap.as_of_date
 
     history_start = now.date() - dt.timedelta(
         days=365 * config.valuation.historical_range_method.lookback_years
@@ -421,17 +428,55 @@ def build_stock_snapshot(
         )
         for name, value in fair_value_candidates.items()
     ]
-    fair_value_range = build_fair_value_range(
+    # Issue #208 O-E: 保有/SELL 側の適正価格集約にも、BUY 側と同じ下方外れ値
+    # フィルタを適用する。
+    #
+    # これまで保有側は build_fair_value_range() を直接呼んでおり、
+    # apply_outlier_filters() を通していなかった。そのため bull = max(生の算出値) /
+    # bear = min(生の算出値) となり、1 手法が極端な値を出しただけで手法間の
+    # 広がり(spread)が大きくなっていた。BUY 側(buy_signal_service)は
+    # build_valuation_summary() 経由でフィルタを通しており、同じ銘柄・同じ日でも
+    # 保有側だけ spread が構造的に大きいという非対称が生じていた。
+    #
+    # spread は利確判定の ceiling 利用可否(_fair_value_action_usable)と
+    # usable_for_trading_judgment の双方が見る値であり、この非対称が
+    # 「含み益が大きいのに価格系の利確判定へ到達できない」原因になっていた。
+    #
+    # 共通部品(S-05 domain/valuation/)は変更していない。既に BUY 側が使っている
+    # build_valuation_summary() を保有側からも呼ぶだけである。閾値
+    # (max_method_spread_ratio / max_fair_value_spread_ratio_for_partial 等)も
+    # 変更していない。
+    low_52_week = compute_52_week_low(bars, now.date())
+    fair_value_range = build_valuation_summary(
         fair_value_method_results,
         config.valuation.fair_value_methods.aggregation_method,
         config.valuation.fair_value_methods.method_weights,
         config.valuation.fair_value_usability,
+        current_price=current_price,
+        low_52_week=low_52_week,
+        transition_min_ratio=config.valuation.outlier_transition.below_52_week_low_min_ratio,
     )
 
+    # 出所(provenance)は登録型データを含めて記録する。監査・説明可能性のため。
     data_sources = [snap.source, financial.source, dividend.source]
     if benefit is not None:
         data_sources.append(benefit.source)
-    data_fetched_at = min(s.fetched_at for s in data_sources)
+
+    # Issue #52 Phase B1: generic freshness(=「取得してきたデータがどれだけ古いか」)の
+    # 分母には**登録型データを入れない**。
+    #
+    # 株主優待はユーザーが手動/CSVで登録するデータであり、その`fetched_at`は
+    # 「登録操作を行った時刻」であってデータが真である時点ではない。これを
+    # min()へ混ぜると、優待を登録した銘柄は登録から数営業日後に
+    # 「データが古い」でBUYからハード除外されていた(F-J1)。
+    # 登録内容が古くなったかどうかは、市場・財務データの取得鮮度とは別の問題である。
+    #
+    # 除外はsource_typeではなく**構築時に分離する**ことで担保する
+    # (source_typeの設定漏れで防御が破れないようにするため)。
+    # 将来ここへsourceを追加する場合、それが「取得してきたデータ」なのか
+    # 「登録されたデータ」なのかを必ず判断すること。
+    freshness_sources = [snap.source, financial.source, dividend.source]
+    data_fetched_at = min(s.fetched_at for s in freshness_sources)
 
     keywords_found = detect_disclosure_risk_keywords(
         disclosures, config.sell.disclosure_risk_keywords
@@ -639,6 +684,7 @@ def build_stock_snapshot(
     snapshot = StockSnapshot(
         stock_code=stock_code,
         current_price=current_price,
+        price_as_of_date=price_as_of_date,
         financial=financial,
         dividend=dividend,
         benefit=benefit,

@@ -467,3 +467,71 @@ def test_issue23_start_date_basis_remains_utc_calendar_date(
     # start_date基準が今回変わっていないことを検証する。
     assert horizon1[0].evaluation_date == dt.date(2024, 2, 27)
 
+
+
+# --- Issue #113: 評価済み索引 / streaming の実リポジトリ検証 --------------------
+
+
+def test_completed_horizon_index_matches_exists_for_horizon(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """索引一括読み込みが、従来のexists_for_*と完全に同じ判定を返すこと。
+
+    Issue #113でループ内のフルScanを索引参照へ置き換えたため、両者の同値性を固定する。
+    """
+    now = dt.datetime(2024, 6, 3, tzinfo=dt.UTC)
+    service, recommendation_repo, evaluation_repo = _build_service(tmp_path, config, calendar, now)
+    recommendation_repo.save(_make_recommendation("rec-1"))
+    recommendation_repo.save(_make_recommendation("rec-2"))
+    service.run_due_evaluations(now)
+    service.run_due_calendar_evaluations(now)
+
+    index = evaluation_repo.load_completed_horizon_index()
+
+    saved = evaluation_repo.list_all()
+    assert saved  # 評価が実際に保存されている前提のテスト
+    for evaluation in saved:
+        if evaluation.horizon_business_days is not None:
+            assert index.has_business_horizon(
+                evaluation.recommendation_id, evaluation.horizon_business_days
+            ) is evaluation_repo.exists_for_horizon(
+                evaluation.recommendation_id, evaluation.horizon_business_days
+            )
+        if evaluation.horizon_calendar_days is not None:
+            assert index.has_calendar_horizon(
+                evaluation.recommendation_id, evaluation.horizon_calendar_days
+            ) is evaluation_repo.exists_for_calendar_horizon(
+                evaluation.recommendation_id, evaluation.horizon_calendar_days
+            )
+    # 未評価の組はどちらもFalse
+    assert index.has_business_horizon("rec-1", 999) is False
+    assert evaluation_repo.exists_for_horizon("rec-1", 999) is False
+    assert index.has_calendar_horizon("missing-rec", 7) is False
+
+
+def test_recommendation_repository_iter_all_matches_list_all(tmp_path: Path) -> None:
+    """Issue #113: streaming APIが列挙順・件数・内容でlist_all()と一致すること。"""
+    repo = RecommendationRepository(store_dir=tmp_path)
+    repo.save(_make_recommendation("rec-1"))
+    repo.save(_make_recommendation("rec-2"))
+    repo.save(_make_recommendation("rec-3"))
+
+    assert list(repo.iter_all()) == repo.list_all()
+
+
+def test_run_summary_reports_backlog_for_partial_progress(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """Issue #113: 部分実行でもrun summaryでbacklogが観測できること。"""
+    now = dt.datetime(2024, 6, 3, tzinfo=dt.UTC)
+    service, recommendation_repo, _ = _build_service(tmp_path, config, calendar, now)
+    recommendation_repo.save(_make_recommendation("rec-1"))
+
+    outcome = service.run_due_evaluations_single_pass(now)
+
+    assert outcome.summary.recommendations_scanned == 1
+    assert outcome.summary.due_count > 0
+    assert outcome.summary.backlog_remaining == (
+        outcome.summary.pending_count - outcome.summary.evaluated_count
+    )
+    assert outcome.summary.budget_exhausted is False

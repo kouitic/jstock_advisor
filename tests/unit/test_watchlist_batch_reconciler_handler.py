@@ -694,6 +694,7 @@ def test_b2_buy_batch_is_routed_to_finalize_recovery(monkeypatch) -> None:
                 "batch_id": "buy-1",
                 "batch_family": "BUY_CANDIDATES",
                 "execution_mode": "NORMAL",
+                "trade_detection_confirmed": False,
             },
         )
     ]

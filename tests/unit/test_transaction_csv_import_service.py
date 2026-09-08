@@ -22,7 +22,8 @@ from jstock_advisor.services.transaction_history_service import TransactionHisto
 
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
 
-_HEADER = "stock_code,transaction_type,execution_date,shares,execution_price"
+# Issue #61 F-A4: 取引履歴CSVでも owner を必須列にしたため、全ケースで owner を書く。
+_HEADER = "owner,stock_code,transaction_type,execution_date,shares,execution_price"
 
 
 @pytest.fixture
@@ -66,7 +67,7 @@ def _write_csv(tmp_path: Path, content: str) -> Path:
 def test_import_valid_row(import_service: TransactionCsvImportService, tmp_path: Path) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER}\n2914,BUY,2026-07-20,100,3400\n",
+        f"{_HEADER}\n本人,2914,BUY,2026-07-20,100,3400\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.total_rows == 1
@@ -81,7 +82,7 @@ def test_import_row_with_recommendation_computes_price_diff(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER},recommendation_id\n2914,BUY,2026-07-20,100,3400,rec-buy\n",
+        f"{_HEADER},recommendation_id\n本人,2914,BUY,2026-07-20,100,3400,rec-buy\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.success_count == 1
@@ -102,7 +103,7 @@ def test_import_invalid_transaction_type_is_row_error(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER}\n2914,INVALID,2026-07-20,100,3400\n",
+        f"{_HEADER}\n本人,2914,INVALID,2026-07-20,100,3400\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.error_count == 1
@@ -114,7 +115,7 @@ def test_import_invalid_date_is_row_error(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER}\n2914,BUY,2026-13-40,100,3400\n",
+        f"{_HEADER}\n本人,2914,BUY,2026-13-40,100,3400\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.error_count == 1
@@ -127,7 +128,7 @@ def test_import_slash_style_date_is_accepted(
     (実装プラン外部データ正規化レイヤー・修正1)。"""
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER}\n2914,BUY,2026/07/20,100,3400\n",
+        f"{_HEADER}\n本人,2914,BUY,2026/07/20,100,3400\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.error_count == 0
@@ -139,7 +140,7 @@ def test_import_non_positive_shares_is_row_error(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER}\n2914,BUY,2026-07-20,0,3400\n",
+        f"{_HEADER}\n本人,2914,BUY,2026-07-20,0,3400\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.error_count == 1
@@ -150,7 +151,7 @@ def test_import_non_positive_price_is_row_error(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER}\n2914,BUY,2026-07-20,100,-3400\n",
+        f"{_HEADER}\n本人,2914,BUY,2026-07-20,100,-3400\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.error_count == 1
@@ -161,7 +162,7 @@ def test_import_invalid_account_type_is_row_error(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER},account_type\n2914,BUY,2026-07-20,100,3400,INVALID\n",
+        f"{_HEADER},account_type\n本人,2914,BUY,2026-07-20,100,3400,INVALID\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.error_count == 1
@@ -172,7 +173,7 @@ def test_import_unknown_recommendation_id_is_row_error(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER},recommendation_id\n2914,BUY,2026-07-20,100,3400,does-not-exist\n",
+        f"{_HEADER},recommendation_id\n本人,2914,BUY,2026-07-20,100,3400,does-not-exist\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.error_count == 1
@@ -184,7 +185,7 @@ def test_import_row_level_error_isolation(
 ) -> None:
     csv_path = _write_csv(
         tmp_path,
-        f"{_HEADER}\n2914,BUY,2026-07-20,100,3400\n8136,INVALID,2026-07-20,100,3000\n",
+        f"{_HEADER}\n本人,2914,BUY,2026-07-20,100,3400\n本人,8136,INVALID,2026-07-20,100,3000\n",
     )
     summary = import_service.import_file(csv_path)
     assert summary.total_rows == 2

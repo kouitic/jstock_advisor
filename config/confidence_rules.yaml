@@ -15,6 +15,14 @@ scoring:
   penalty_missing_data: 15.0
   penalty_untraced_one_time_factors: 10.0
   penalty_cross_rule_disagreement: 10.0
+  # 財務データが報告サイクル上の最新でない場合の減点(Issue #52 Phase B3-B2)。
+  # 上のpenalty_stale_dataが「いつ取得したか」の鮮度であるのに対し、こちらは
+  # 「財務データの対象期間が最新か」を見る別concept である。
+  # stale_data / financial_period_incomparable / missing_data と同程度の
+  # 信頼性低下として15点とする(人間確定)。
+  # なお15点だけではbase100 - 15 = 85でHIGH閾値に達したままのため、
+  # 財務STALEはHIGH禁止条件にも含める(confidence_scoring.py)。
+  penalty_financial_data_stale: 15.0
   high_threshold: 85.0
   medium_threshold: 60.0
 

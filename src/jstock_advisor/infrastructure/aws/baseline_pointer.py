@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from jstock_advisor.domain.entities.holding_decision import InvestmentThesisBaselinePointer
+from jstock_advisor.domain.entities.owner import log_ref
 from jstock_advisor.infrastructure.collection_store import (
     CollectionStore,
     build_collection_store,
@@ -124,7 +125,7 @@ def _update_pointer_local(
     current = store.get(holding_id)
     if current is None or current.pointer_version != expected_pointer_version:
         raise BaselinePointerConflictError(
-            f"holding_id={holding_id}: ポインタが期待したバージョン"
+            f"holding_ref={log_ref(holding_id)}: ポインタが期待したバージョン"
             f"(expected={expected_pointer_version})と一致しません"
             f"(現在={current.pointer_version if current else None})"
         )
@@ -168,14 +169,14 @@ def _update_pointer_dynamodb(
     item = response.get("Item")
     if item is None:
         raise BaselinePointerConflictError(
-            f"holding_id={holding_id}: ポインタが期待したバージョン"
+            f"holding_ref={log_ref(holding_id)}: ポインタが期待したバージョン"
             f"(expected={expected_pointer_version})と一致しません(現在=None、未作成)"
         )
     current_data = item["data"]
     current = InvestmentThesisBaselinePointer.model_validate_json(current_data)
     if current.pointer_version != expected_pointer_version:
         raise BaselinePointerConflictError(
-            f"holding_id={holding_id}: ポインタが期待したバージョン"
+            f"holding_ref={log_ref(holding_id)}: ポインタが期待したバージョン"
             f"(expected={expected_pointer_version})と一致しません"
             f"(現在={current.pointer_version})"
         )
@@ -204,7 +205,7 @@ def _update_pointer_dynamodb(
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
             raise BaselinePointerConflictError(
-                f"holding_id={holding_id}: ポインタが期待したバージョン"
+                f"holding_ref={log_ref(holding_id)}: ポインタが期待したバージョン"
                 f"(expected={expected_pointer_version})と一致しません(競合)"
             ) from e
         raise

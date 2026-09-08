@@ -18,6 +18,13 @@ market_environment.py・sector_environment.py・environment.py参照)を実装
 済み。いずれもShadow計測専用であり、BUY候補判定・保有判断スコア・旧売却
 判定・ProfitTaking判定・LINE通知など既存の判定ロジックには一切影響しない。
 
+Issue #22 C4 V2 Shadow(B1、2026-09-05): 企業品質/投資スタイル魅力度/価格の
+責務を分離したV2 shadowモデルの記録先フィールドを追加した。**B1は読み取り
+互換性のみ**を確立するフェーズであり、算出も書き込みも行わない(既存レコード・
+新規レコードともに全てデフォルト値のまま)。書き込みはB3/B4で、Production判定
+への接続はさらに後段の人間判断による。V2のバージョンはフィールド名ではなく
+company_quality_score_model_versionで表す。
+
 重要な設計原則(コードレビュー対応): DecisionSnapshotはRecommendationを唯一の
 正本とする。StockSnapshot(判定処理の中間生成物)を直接参照しない。BUYパイプライン
 等ではStockSnapshot取得後に補正・ゲート適用を行いfinal Recommendationを作るため、
@@ -205,6 +212,41 @@ class DecisionSnapshot(ImmutableSnapshot):
     environment_coverage: float | None = None
     environment_reason_codes: tuple[str, ...] = ()
     environment_metrics: dict[str, Any] = Field(default_factory=dict)
+
+    # --- Issue #22 C4 V2 Shadow(責務分離モデル)-------------------------------
+    # 企業品質(Layer 1) / 投資スタイル魅力度(Layer 2) / Valuation・Price
+    # (Layer 3)を分離したV2 shadowモデルの記録先。**本フェーズ(B1)は読み取り
+    # 互換性のみ**を確立するものであり、書き込み経路は接続していない(全件が
+    # デフォルトのまま)。算出と保存はB3(Common Quality)・B4(Style
+    # Attractiveness)で行う。
+    #
+    # バージョンはフィールド名へ埋め込まず、既存の
+    # company_quality_score_model_version(上記)で表す。名前へ"_v2"を付けると
+    # 次版で"_v3"フィールドが必要になり、同じ意味の列が増え続けるため。
+    #
+    # Layer 1: 共有Common Quality(0-50点。保有判断と同一モデルを共有する)。
+    # coverageは評価できた配点の割合。stateはPASS/FAIL/DATA_MISSING/
+    # NOT_APPLICABLEを表し、**DATA_MISSINGをFAIL(品質不足)と混同させない**
+    # ために score とは別に持つ(Issue #22要件6)。
+    common_quality_score: float | None = None
+    common_quality_state: str | None = None
+    common_quality_coverage: float | None = None
+    common_quality_reason_codes: tuple[str, ...] = ()
+    common_quality_metrics: dict[str, Any] = Field(default_factory=dict)
+    # Layer 2: Style Attractiveness。該当StockTypeごとに独立して評価するため、
+    # style別のscore/stateはstyle_attractiveness_metricsへ格納する(styleごとに
+    # 列を作らない)。matched_styles/qualified_stylesは集合として保持し、
+    # primary_type相当の代表値は作らない(Issue #22要件7)。
+    style_attractiveness_state: str | None = None
+    style_attractiveness_reason_codes: tuple[str, ...] = ()
+    style_attractiveness_metrics: dict[str, Any] = Field(default_factory=dict)
+    matched_styles: tuple[str, ...] = ()
+    qualified_styles: tuple[str, ...] = ()
+    # V2ゲートを適用した場合の仮定結果と、Layer別の判定理由。**現行のBUY判定
+    # (existing_action等)は上書きしない。** 初期shadowではStyleを非ブロッキング
+    # とするため、この値はCommon Qualityと価格条件のみから導かれる。
+    hypothetical_buy_action: str | None = None
+    hypothetical_layer_reasons: dict[str, Any] = Field(default_factory=dict)
 
     # --- 監査・バージョニング(モジュールdocstring参照) ---
     rule_version: str

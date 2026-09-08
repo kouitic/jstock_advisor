@@ -8,6 +8,7 @@ owner型はEnumではなく開放的なstr型とする(本人/子供に限らず
 
 from __future__ import annotations
 
+import hashlib
 import unicodedata
 
 _HOLDING_ID_DELIMITER = "#"
@@ -17,6 +18,48 @@ _MAX_OWNER_LENGTH = 20
 # owner概念導入前の唯一の利用者を表す固定値であり、Enumではなく通常のowner
 # 文字列の1つ(normalize_and_validate_owner()の検証対象)として扱う。
 DEFAULT_OWNER = "本人"
+
+
+_LOG_REF_PREFIX = "sha256:"
+_LOG_REF_HASH_LEN = 8
+
+
+def log_ref(value: str) -> str:
+    """ログ・例外messageへ出すための短い符号を返す(Issue #135)。
+
+    `sha256:` + SHA-256の先頭8文字。**元の値は出さない。**
+
+    ## なぜ要るか
+
+    `holding_id`は`<所有者>#<銘柄コード>`であり、ownerは実在人物を指す。
+    これをloggerの書式引数や例外messageへ渡すと、その値はCloudWatch Logsを
+    読めるprincipalへ露出する。実行時に書き出す先も「記録」であり、
+    CLAUDE.mdの個人情報の範囲に含まれる。
+
+    ## なぜ所在が失われないか
+
+    運用者は候補の`holding_id`を手元で同じ形にハッシュして突き合わせられる
+    (対象の保有件数は小さい)。「どの保有か」は符号で追える。
+
+    ## 形式をIssue #63・#131と揃える理由
+
+    #63 PR-2の`ItemIdDisclosure.HASH`、#131の公開面PII検出の
+    ハッシュ接頭辞と**同一の形**である。本プロジェクトのハッシュ表記を
+    1つに保ち、読む側が2つの規則を覚えずに済むようにする。
+
+    ★ ただし**関数は共有しない**。#63側の実装は
+    `infrastructure/record_failure_policy.py`(共通部品S-17 = 永続化ストア層)に
+    あり、そこへ依存を作ると以後この用途の都合でS-17を触る動機が生まれる
+    (S-17の変更はlock対象が全領域になる)。形式が同一であることは双方の
+    テストで固定する。
+
+    空文字列はハッシュせずそのまま返す(値が無いことを符号化しても
+    情報が増えず、`sha256:e3b0c442`という定数がログに並ぶだけのため)。
+    """
+    if not value:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"{_LOG_REF_PREFIX}{digest[:_LOG_REF_HASH_LEN]}"
 
 
 class InvalidOwnerError(ValueError):
@@ -41,14 +84,22 @@ def validate_owner(owner: str) -> None:
     - 最大長(20文字)を超える値は拒否する
     - holding_idの区切り文字("#")を含む値は拒否する(holding_idの分解が
       一意にできなくなるため)
+
+    例外messageにはowner自体を含めず`log_ref()`の符号を出す(Issue #135)。
+    例外は捕捉されずtracebackごとログへ出うるため、messageも露出面である。
+    **例外の型は変えない**(捕捉している呼び出し元の挙動を変えないため)。
     """
     if not owner:
         raise InvalidOwnerError("ownerは空文字列にできません")
     if len(owner) > _MAX_OWNER_LENGTH:
-        raise InvalidOwnerError(f"ownerは{_MAX_OWNER_LENGTH}文字以内で指定してください: {owner!r}")
+        raise InvalidOwnerError(
+            f"ownerは{_MAX_OWNER_LENGTH}文字以内で指定してください: "
+            f"owner_ref={log_ref(owner)} length={len(owner)}"
+        )
     if _HOLDING_ID_DELIMITER in owner:
         raise InvalidOwnerError(
-            f"ownerに区切り文字'{_HOLDING_ID_DELIMITER}'を含めることはできません: {owner!r}"
+            f"ownerに区切り文字'{_HOLDING_ID_DELIMITER}'を含めることはできません: "
+            f"owner_ref={log_ref(owner)}"
         )
 
 
@@ -84,7 +135,7 @@ def split_holding_id(holding_id: str) -> tuple[str, str] | None:
     if count > 1:
         raise InvalidOwnerError(
             f"holding_idの形式が不正です(区切り文字'{_HOLDING_ID_DELIMITER}'が"
-            f"複数含まれています): {holding_id!r}"
+            f"複数含まれています): holding_ref={log_ref(holding_id)}"
         )
     owner_part, stock_code = holding_id.split(_HOLDING_ID_DELIMITER, 1)
     return owner_part, stock_code

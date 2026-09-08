@@ -78,6 +78,11 @@ from jstock_advisor.domain.signals.timing_score import (
 )
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
+from jstock_advisor.services.financial_freshness_integration import (
+    FINANCIAL_STALE_USER_WARNING,
+    FinancialFreshnessAssessment,
+    assess_financial_freshness,
+)
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
@@ -284,6 +289,7 @@ class SellSignalService:
         snapshot: StockSnapshot,
         now: dt.datetime,
         counter_factors_evaluated: bool,
+        financial_freshness: FinancialFreshnessAssessment,
     ) -> ConfidenceScoreResult:
         industry_unevaluated = any(
             e.rule_name in ("financial_health_severe_deterioration", "regulatory_capital_breach")
@@ -314,6 +320,10 @@ class SellSignalService:
             evidence_sourced_from_yfinance_only=result.all_evidence_yfinance_only,
             dividend_breakdown_confirmed=snapshot.dividend.dividend_breakdown_confirmed,
             counter_factors_evaluated=counter_factors_evaluated,
+            # Issue #52 Phase B3-B2: 財務期間の鮮度。data_freshness_days
+            # (取得時刻)とは別fieldであり、同じ事実を2箇所へ書かない。
+            # UNKNOWNは「古いと確認できていない」ためFalseとする。
+            financial_data_freshness_stale=financial_freshness.is_stale,
         )
         return compute_confidence(factors, self._config.confidence)
 
@@ -386,8 +396,10 @@ class SellSignalService:
         counter_factors, counter_factors_evaluated = _evaluate_counter_factors(
             snapshot, triggered_count
         )
+        financial_freshness = assess_financial_freshness(snapshot.financial, now, self._config)
+        financial_stale = financial_freshness.is_stale
         confidence_result = self._compute_confidence_level(
-            result, snapshot, now, counter_factors_evaluated
+            result, snapshot, now, counter_factors_evaluated, financial_freshness
         )
 
         audit_entry = self._audit.record(
@@ -423,6 +435,8 @@ class SellSignalService:
                 "confidence": confidence_result.level.value,
                 "confidence_score": confidence_result.score,
                 "confidence_reasons": confidence_result.reasons_not_high,
+                # --- Issue #52 Phase B3-B2: 財務データの期間鮮度 ---
+                **financial_freshness.audit_values(self._config),
             },
             data_sources=list(snapshot.data_sources),
             rule_version=self._active_rule_version(),
@@ -475,7 +489,13 @@ class SellSignalService:
             fair_value_at_recommendation=snapshot.fair_value,
             reasons=result.reasons,
             counter_factors=counter_factors,
-            key_risks=[f"該当ルール: {', '.join(result.triggered_rules)}"],
+            key_risks=[
+                f"該当ルール: {', '.join(result.triggered_rules)}",
+                # Issue #52 Phase B3-B2: 判定に使った財務データが報告サイクル上の
+                # 最新でない場合の留意事項。売却を促す判定理由ではないため
+                # reasons ではなく key_risks(留意事項)へ入れる。
+                *([FINANCIAL_STALE_USER_WARNING] if financial_stale else []),
+            ],
             confidence=confidence_result.level,
             next_earnings_date=snapshot.next_earnings_date,
             dividend_record_date=snapshot.dividend.dividend_record_dates[0]

@@ -50,6 +50,10 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from jstock_advisor.domain.financial_freshness import (
+    FinancialFreshnessVerdict,
+    evaluate_financial_freshness,
+)
 from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.scoring.score import compute_score
@@ -80,6 +84,9 @@ from jstock_advisor.domain.signals.earnings_surprise import (
 from jstock_advisor.domain.signals.earnings_trend import (
     earnings_trend_config_values,
     earnings_trend_result_to_metrics,
+)
+from jstock_advisor.domain.signals.earnings_window import (
+    resolve_latest_financial_period_end,
 )
 from jstock_advisor.domain.signals.entry_price_range import (
     entry_price_range_config_values,
@@ -149,6 +156,11 @@ from jstock_advisor.services.watch_state_service import WatchStateService
 # アクティブなRuleVersionが未登録の場合(初期運用時)のフォールバック値
 RULE_VERSION_PLACEHOLDER = "v1-mvp"
 _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
+
+# Issue #52 Phase B3-B1: 財務データが報告サイクル上の最新でないときの反対材料。
+# 「取得が古い」ではなく「発表されているはずの期の数字が入っていない」ことを
+# 示す文言にする(利用者が2つの鮮度を混同しないようにするため)。
+_FINANCIAL_STALE_COUNTER_FACTOR = "最新の決算が財務データへ反映されていない可能性がある"
 
 _STRONG_SCORE_RATIO = 0.7
 _WEAK_SCORE_RATIO = 0.3
@@ -272,6 +284,7 @@ def _serialize_undervaluation_categories(
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class BuyAnalysisOutcome:
     stock_code: str
@@ -347,9 +360,7 @@ class BuySignalService:
             fallback_sector=snapshot.financial.sector,
             fallback_industry=snapshot.financial.industry,
         )
-        financial_result = classify_industry(
-            snapshot.financial.sector, snapshot.financial.industry
-        )
+        financial_result = classify_industry(snapshot.financial.sector, snapshot.financial.industry)
         return {
             "canonical_industry_33_code": canonical.industry_33_code,
             "canonical_industry_33_name": canonical.industry_33_name,
@@ -359,6 +370,10 @@ class BuySignalService:
             # 区別する。canonical_sourceだけでは両者が同じ値へ潰れるため、
             # **JPX解決率の算出にはこちらを使う**(Phase B-2の判断材料)。
             "jpx_lookup_status": canonical.jpx_lookup_status.value,
+            # providerが返した生の業種情報。**canonical値ではない**。
+            # Issue #54 Phase B-2-0(2026-09-04): 以前はJPX解決時に保持されず、
+            # 解決率100%のProductionでは常にnullになっていた。canonical(JPX)と
+            # 既存分類器の入力を同一observationから突き合わせられるようにする。
             "provider_sector": canonical.fallback_sector,
             "provider_industry": canonical.fallback_industry,
             # 既存分類器が同一入力に対して実際に返した値(是正はしない)。
@@ -483,6 +498,33 @@ class BuySignalService:
         )
         has_stale_data_warning = data_age_days > 1
 
+        # Issue #52 Phase B3-B1: 上のdata_age_daysとは別concept の鮮度を判定する。
+        #
+        # data_age_daysは「snapshotをいつ取得したか」であり、無料providerは取得の
+        # 都度いまの時刻を入れるため、決算発表後も旧期のままの財務データを取得した
+        # 場合でも「新しい」と見えてしまう(これがIssue #52の根本原因)。ここでは
+        # 取得時刻を一切使わず、財務データの対象期間末と報告サイクルだけを見て
+        # 「発表されているはずなのに旧期のままか」を判定する。
+        #
+        # 猶予日数は暦日。営業日へ読み替えない(domain側の契約)。
+        financial_period_end_result = resolve_latest_financial_period_end(
+            snapshot.financial, evaluation_date_jst(now)
+        )
+        financial_freshness = evaluate_financial_freshness(
+            latest_financial_period_end=financial_period_end_result.period_end,
+            quarter_ends=tuple(q.quarter_end for q in snapshot.financial.recent_quarters),
+            recent_periods_source=snapshot.financial.recent_periods_source,
+            fiscal_year_end_month=snapshot.financial.fiscal_year_end_month,
+            evaluation_date=evaluation_date_jst(now),
+            reporting_lag_days=(
+                self._config.screening.data_quality.financial_reporting_lag_calendar_days
+            ),
+        )
+        # STALEのみ利用者へ知らせる。UNKNOWNは「判定できなかった」であって
+        # 「古い」ではないため、警告を出さず監査項目としてのみ残す
+        # (FINANCIAL_UNKNOWN_POLICY = NO_WARNING_NO_PENALTY_OBSERVABILITY_ONLY)。
+        financial_freshness_warning = financial_freshness.verdict is FinancialFreshnessVerdict.STALE
+
         # --- 2. 投資対象スクリーニング(第1段階) ---
         screening_result = evaluate_screening(
             financial=snapshot.financial,
@@ -493,6 +535,9 @@ class BuySignalService:
             now=now,
             business_calendar=self._calendar,
             config=self._config.screening,
+            # Issue #52 Phase B2: 株価の基準日による鮮度判定を有効にする。
+            # data_fetched_at(取得時刻)とは別軸で評価する。
+            price_as_of_date=snapshot.price_as_of_date,
         )
         screening_outcome = screen_investment_universe(
             screening_result, snapshot.severe_earnings_decline, snapshot.benefit
@@ -642,6 +687,9 @@ class BuySignalService:
             self._config.valuation.fair_value_usability,
             current_price=current_price,
             low_52_week=low_52_week,
+            transition_min_ratio=(
+                self._config.valuation.outlier_transition.below_52_week_low_min_ratio
+            ),
         )
 
         # --- 7. 適正価格のばらつき判定 ---
@@ -655,7 +703,9 @@ class BuySignalService:
             methods_used_count=valuation_summary.methods_used_count or 0,
             dispersion_ratio=valuation_summary.valuation_dispersion_ratio,
             dispersion_medium_max=self._config.buy_decision.valuation_dispersion.medium_max,
-            dispersion_auto_buy_block=self._config.buy_decision.valuation_dispersion.auto_buy_block,
+            # Issue #186: 適正価格を算出しない上限はanchor_block(既定50.0)。
+            # auto_buy_block(2.00)は自動購入の禁止用でdecide_buy_action()側が使う。
+            dispersion_anchor_block=self._config.buy_decision.valuation_dispersion.anchor_block,
             industry_model_applied=industry_model_applied,
             uses_simplified_dcf=filtered_dcf.applicable,
             normalized_eps_confidence=eps_result.confidence if is_cyclical_industry else None,
@@ -756,6 +806,13 @@ class BuySignalService:
         excluded_outlier_count = sum(
             1 for m in valuation_summary.methods_excluded if m.exclusion_detail is not None
         )
+        # --- Issue #179(2026-09): 52週安値フィルタの境界帯として、除外せず
+        # 他方式中央値へ寄せて採用した方式。除外ではないためmethods_excludedには
+        # 現れず、methods_used側にtransition_detailを持つ ---
+        borderline_interpolated = [
+            m for m in valuation_summary.methods_used if m.transition_detail is not None
+        ]
+        borderline_interpolated_count = len(borderline_interpolated)
         # レビュー対応(2026-08、commit f546473再レビューで発覚): Recommendation.
         # valuation_methods(下のtuple(method_results))は、apply_outlier_filters()
         # 適用「前」のオブジェクトである(build_valuation_summary()内部でmodel_copy()
@@ -784,6 +841,31 @@ class BuySignalService:
             }
             for m in valuation_summary.methods_excluded
             if m.exclusion_detail is not None
+        ]
+        # --- Issue #179(2026-09): 境界帯として補間採用した方式の判定時点スナップ
+        # ショット。除外ではないためvaluation_outlier_exclusionsには入れない
+        # (#20 O-Cの下方シナリオ観測が除外理由コードを前提としているため、
+        # そちらの意味を変えないようキーを分ける)。
+        # actual_valueは補間前のraw値、interpolated_valueが実際に採用した値 ---
+        valuation_outlier_transitions: list[dict[str, object]] = [
+            {
+                "method": m.method,
+                "code": m.transition_detail.code,
+                "message": m.transition_detail.message,
+                "actual_value": (
+                    str(m.transition_detail.actual_value)
+                    if m.transition_detail.actual_value is not None
+                    else None
+                ),
+                "reference_value": (
+                    str(m.transition_detail.reference_value)
+                    if m.transition_detail.reference_value is not None
+                    else None
+                ),
+                "interpolated_value": (str(m.fair_value) if m.fair_value is not None else None),
+            }
+            for m in borderline_interpolated
+            if m.transition_detail is not None
         ]
         # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): valuation_anchor
         # がNoneの場合(=BuyDecisionReason.code="NO_VALUATION_ANCHOR"が必ず発火する)、
@@ -817,6 +899,7 @@ class BuySignalService:
             earnings_date_status=earnings_date_status,
             excluded_outlier_count=excluded_outlier_count,
             outlier_filter_blocking_reason=valuation_summary.outlier_filter_blocking_reason,
+            borderline_interpolated_count=borderline_interpolated_count,
         )
         buy_price_reliability = reliability_result.reliability
 
@@ -966,6 +1049,34 @@ class BuySignalService:
                 else None
             ),
             "data_age_business_days": data_age_days,
+            # --- Issue #52 Phase B3-B1: 財務データの期間鮮度(取得時刻とは別) ---
+            # 判定時点の入力・出力の両方を保存し、事後に再検証できるようにする。
+            # BUYにはpenaltyを適用する共通confidence scoreが存在しないため、
+            # 減点の有無はboolean falseではなく「経路が無い」ことを明示する
+            # 文字列で残す(将来falseを「減点しなかった」と誤読させない)。
+            "financial_freshness_verdict": financial_freshness.verdict.value,
+            "financial_freshness_basis": financial_freshness.basis.value,
+            "financial_freshness_reason": financial_freshness.reason,
+            "latest_financial_period_end": (
+                financial_period_end_result.period_end.isoformat()
+                if financial_period_end_result.period_end is not None
+                else None
+            ),
+            "expected_next_financial_period_end": (
+                financial_freshness.expected_next_period_end.isoformat()
+                if financial_freshness.expected_next_period_end is not None
+                else None
+            ),
+            "expected_financial_report_deadline": (
+                financial_freshness.expected_report_deadline.isoformat()
+                if financial_freshness.expected_report_deadline is not None
+                else None
+            ),
+            "financial_reporting_lag_calendar_days": (
+                self._config.screening.data_quality.financial_reporting_lag_calendar_days
+            ),
+            "financial_freshness_warning": financial_freshness_warning,
+            "financial_stale_confidence_penalty_applied": "N/A_NO_BUY_CONFIDENCE_SCORE",
             "outlier_filter_blocking_reason": valuation_summary.outlier_filter_blocking_reason,
             "valuation_methods_used_count": valuation_summary.methods_used_count,
             "valuation_excluded_outlier_count": excluded_outlier_count,
@@ -974,6 +1085,13 @@ class BuySignalService:
             # 外れ値フィルタ適用前のオブジェクトのため、実際に外れ値として除外
             # された方式・理由はここへ別途スナップショットする(上記コメント参照)。
             "valuation_outlier_exclusions": valuation_outlier_exclusions,
+            # Issue #179: 境界帯として補間採用した方式(上記コメント参照)。
+            # 該当が無ければ空リスト。
+            "valuation_outlier_transitions": valuation_outlier_transitions,
+            # Issue #179: 52週安値フィルタの基準となった判定時点の直近52週安値。
+            # 監査用であり判定には使わない。backfillしない(このキーが無い既存
+            # レコードは「当時は保存していなかった」を意味し、値の逆算もしない)。
+            "low_52_week": (str(low_52_week) if low_52_week is not None else None),
             # レビュー対応(2026-08、NO_VALUATION_ANCHOR表示不備の是正): BuyDecisionReason
             # (code="NO_VALUATION_ANCHOR")が発火した場合の直接原因を判定時点の実測値・
             # 基準値ごとスナップショットする(511行付近のコメント参照)。valuation_anchor
@@ -989,15 +1107,11 @@ class BuySignalService:
             # 未保存だったもの。暫定代替ではなく本来値をそのまま保存する)。
             # net_incomeを併存保存するのは、is_deficitがnet_income=Noneのとき
             # Falseへ潰れる(黒字と欠測を区別できない)ため。
-            "net_income": (
-                str(financial.net_income) if financial.net_income is not None else None
-            ),
+            "net_income": (str(financial.net_income) if financial.net_income is not None else None),
             "is_deficit": financial.is_deficit,
             "is_debt_excess": financial.is_debt_excess,
             "latest_operating_income": (
-                str(financial.operating_income)
-                if financial.operating_income is not None
-                else None
+                str(financial.operating_income) if financial.operating_income is not None else None
             ),
             "latest_operating_cashflow": (
                 str(financial.operating_cashflow)
@@ -1128,6 +1242,17 @@ class BuySignalService:
             )
         ]
         counter_factors = list(screening_result.warnings)
+        # Issue #52 Phase B3-B1: 財務鮮度はcounter_factors(反対材料)としてのみ
+        # 提示する。data_quality_warning/adjustment_codesへは合流させない。
+        # あちらはmargin_of_safety・買付価格信頼性・データ品質スコアの3経路へ
+        # 波及するため、合流させると「警告のみ」ではなく実質的な減点になる。
+        # BUY経路に共通confidence scoreは存在せず、適正価格の信頼度
+        # (determine_valuation_confidence)は算出手法の信頼性という別concept の
+        # ため、そこへ財務鮮度を混ぜることもしない(混ぜれば本Issueの根本原因を
+        # 別の形で作り直すことになる)。SELL/利確側のconfidence penaltyは
+        # B3-B2で既存のcompute_confidence経路へ接続する。
+        if financial_freshness_warning:
+            counter_factors.append(_FINANCIAL_STALE_COUNTER_FACTOR)
         if snapshot.benefit is not None and snapshot.benefit.is_major_downgrade:
             counter_factors.append("株主優待の内容が改悪された可能性がある")
         counter_factors.extend(
@@ -1359,6 +1484,19 @@ class BuySignalService:
                 # 精度限界があるため、company_quality_scoreとこのスナップショットの
                 # 突き合わせで判定する。domain/signals/buy_decision.py参照)。
                 "score_thresholds": self._config.buy_decision.score_thresholds.model_dump(),
+                # Issue #186: 適正価格を算出しない上限(anchor_block)は判定結果を
+                # 左右するため、判定時点の値をスナップショットする。後からconfigを
+                # 変更しても、過去の判定を"現在の"閾値で誤って再解釈しないため
+                # (score_thresholds/scoring_weightsと同じ理由)。
+                # low_max/auto_buy_blockの未記録は別Issue(#189)。
+                "valuation_dispersion_anchor_block": (
+                    self._config.buy_decision.valuation_dispersion.anchor_block
+                ),
+                # Issue #179: 52週安値フィルタの境界帯の下限。除外閾値そのもの
+                # (0.50)はコード定数のままであり記録対象外(#180のscope)。
+                "outlier_transition_below_52_week_low_min_ratio": (
+                    self._config.valuation.outlier_transition.below_52_week_low_min_ratio
+                ),
                 "historical_valuation": historical_valuation_config_values(
                     self._config.historical_valuation
                 ),

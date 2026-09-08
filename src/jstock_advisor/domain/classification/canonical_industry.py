@@ -117,7 +117,16 @@ class CanonicalIndustryClassification:
     # 同じ値(YFINANCE_FALLBACK / UNAVAILABLE)へ潰れるため、独立した軸で保持する。
     # **JPX解決率の算出にはこちらを使う**(`source` 単独では算出できない)。
     jpx_lookup_status: JpxLookupStatus = JpxLookupStatus.SOURCE_UNAVAILABLE
-    # JPXで解決できなかった場合に、観測用として何を見たかを残す(判定には使わない)。
+    # provider(yfinance)が返した生の業種情報。**判定には使わない観測専用**。
+    #
+    # Issue #54 Phase B-2-0(2026-09-04): 以前はJPXで解決できなかった場合にのみ
+    # 保持していたため、JPX解決率が100%のProductionでは常にnullとなり、
+    # **canonical(JPX)と既存分類器の入力を同一observationから比較できなかった**。
+    # canonicalの採否を実測で判断するには、解決できた場合も生値が要る。
+    #
+    # canonical値(`industry_33_code` / `industry_33_name` / `security_type`)とは
+    # 意味が異なる。provider値をcanonicalとして扱わないこと。
+    # `source` はここでは決めない(下の生成関数を参照)。
     fallback_sector: str | None = None
     fallback_industry: str | None = None
 
@@ -165,6 +174,9 @@ def classify_canonical_industry(
     code = (industry_33_code or "").strip() or None
     name = (industry_33_name or "").strip() or None
 
+    normalized_fallback_sector = (fallback_sector or "").strip() or None
+    normalized_fallback_industry = (fallback_industry or "").strip() or None
+
     if code is not None:
         return CanonicalIndustryClassification(
             industry_33_code=code,
@@ -172,9 +184,14 @@ def classify_canonical_industry(
             security_type=security_type,
             source=CanonicalIndustrySource.JPX_TSE33,
             jpx_lookup_status=jpx_lookup_status,
+            # Issue #54 Phase B-2-0: JPXで解決できた場合も provider の生値を残す。
+            # **`source` は JPX_TSE33 のまま**であり、canonical の決定には一切
+            # 影響しない(下の `has_fallback_input` はこの分岐へ到達しない)。
+            fallback_sector=normalized_fallback_sector,
+            fallback_industry=normalized_fallback_industry,
         )
 
-    has_fallback_input = bool((fallback_sector or "").strip() or (fallback_industry or "").strip())
+    has_fallback_input = bool(normalized_fallback_sector or normalized_fallback_industry)
     return CanonicalIndustryClassification(
         industry_33_code=None,
         industry_33_name=None,
@@ -184,7 +201,7 @@ def classify_canonical_industry(
             if has_fallback_input
             else CanonicalIndustrySource.UNAVAILABLE
         ),
-        fallback_sector=(fallback_sector or "").strip() or None,
-        fallback_industry=(fallback_industry or "").strip() or None,
+        fallback_sector=normalized_fallback_sector,
+        fallback_industry=normalized_fallback_industry,
         jpx_lookup_status=jpx_lookup_status,
     )

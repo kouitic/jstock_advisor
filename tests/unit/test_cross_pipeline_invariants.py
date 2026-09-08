@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib
+import inspect
 import pkgutil
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
+from pathlib import Path
 
 import pytest
 
@@ -55,6 +57,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     resolve_watchlist_job_type,
 )
 from jstock_advisor.infrastructure.edinet.types import EdinetFailureReason, EdinetFetchStatus
+from jstock_advisor.lambda_handlers import _finalize_recovery
 from jstock_advisor.services import watchlist_batch_finalizer
 from jstock_advisor.services.line_notification_service import (
     notification_priority_for_recommendation,
@@ -428,7 +431,9 @@ def test_c6_semantic_family_inventory_is_not_empty() -> None:
 #
 # 本 Group が固定するのは **inventory / completeness 層のみ** である。
 # 「全 handler が execution_mode を解決すること」という behavioral invariant は
-# **#70(F-B3 / F-B4)が未修正のため今 main で FAIL する**ので追加しない。
+# **#70(F-B4)が未修正のため今 main で FAIL する**ので追加しない。
+# (F-B3 = trade_detection_confirmed の fail-open は Issue #211 で解消済み。
+#  解消後の契約は test_d7_trade_detection_confirmed_is_fail_closed が固定する。)
 # ここでは代わりに、
 #
 #   - Lambda handler を **機械的に列挙**し、
@@ -498,10 +503,8 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
             _ContractStatus.PROPAGATES, "VALIDATION 時のみ子 payload へ notification_mode を渡す"
         ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "子側の既定値が True(fail-open)。payload 欠落時に通知抑止が効かない",
-            related_issue="#70",
-            finding_id="F-B3",
+            _ContractStatus.PROPAGATES,
+            "親が実値を渡し、子は欠落時 False(fail-close)で受ける(Issue #211 で解消)",
         ),
         _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
     },
@@ -513,10 +516,8 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
             _ContractStatus.PROPAGATES, "VALIDATION 時のみ子 payload へ notification_mode を渡す"
         ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "子側の既定値が True(fail-open)",
-            related_issue="#70",
-            finding_id="F-B3",
+            _ContractStatus.PROPAGATES,
+            "親が実値を渡し、子は欠落時 False(fail-close)で受ける(Issue #211 で解消)",
         ),
         _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
     },
@@ -748,10 +749,17 @@ def test_d6_every_cell_has_a_reason(handler_name: str) -> None:
 
 
 def test_d7_issue_70_findings_are_tracked_in_the_inventory() -> None:
-    """#70 の F-B3 / F-B4 が台帳から消えていないこと。
+    """#70 の F-B4 が台帳から消えていないこと。
 
     #70 が修正されたら、該当 cell を PROPAGATES / REJECTS_EXPLICITLY へ
     **更新しない限りこのテストが落ちる**(gap の放置と修正の取りこぼしを両方検知する)。
+
+    ★ F-B3(trade_detection_confirmed の fail-open)は **Issue #211 で解消済み**
+      であり、この設計どおり本テストが落ちたため期待値を更新した。
+      buy / holdings の 2 cell は KNOWN_GAP -> PROPAGATES へ反転し、
+      台帳に残る #70 の finding は F-B4 だけになった。
+      解消後の契約そのものは test_d7_trade_detection_confirmed_is_fail_closed が
+      別途固定する(台帳から消えても契約は失われない)。
     """
     tracked: dict[str, list[str]] = {}
     for handler_name, cells in _CONTEXT_CONTRACT_MATRIX.items():
@@ -761,12 +769,10 @@ def test_d7_issue_70_findings_are_tracked_in_the_inventory() -> None:
                     f"{handler_name}.{dimension.value}"
                 )
 
-    assert "F-B3" in tracked, "#70 F-B3(trade_detection_confirmed の fail-open)が台帳に無い"
+    assert "F-B3" not in tracked, (
+        "F-B3 は Issue #211 で解消済み。KNOWN_GAP として台帳へ戻さないこと"
+    )
     assert "F-B4" in tracked, "#70 F-B4(watchlist系の execution_mode 黙殺)が台帳に無い"
-    assert sorted(tracked["F-B3"]) == [
-        "buy_candidates_handler.trade_detection_confirmed",
-        "holdings_watchlist_handler.trade_detection_confirmed",
-    ]
     assert {entry.split(".")[0] for entry in tracked["F-B4"]} == {
         "watchlist_dispatcher_handler",
         "watchlist_worker_handler",
@@ -824,3 +830,36 @@ def test_d10_inventory_covers_every_dimension_at_least_once() -> None:
 
     missing = sorted(d.value for d in _Dimension if d not in meaningful)
     assert not missing, f"どの handler でも実質評価されていない dimension: {missing}"
+
+
+def test_d7_trade_detection_confirmed_is_fail_closed() -> None:
+    """★ 台帳が PROPAGATES と主張する内容を、実際のソースで裏づける(Issue #211)。
+
+    台帳の cell を書き換えるだけでは「直したことにする」ことができてしまう。
+    そこで、解消の根拠となる 2 つの事実をソースから機械的に確かめる。
+
+      1  子 handler の既定値が fail-close(False)であること
+      2  生産側(finalize-only recovery の payload)がキーを必ず載せること
+
+    どちらかが戻れば、台帳の PROPAGATES は嘘になるためここで落ちる。
+    """
+    for module in ("buy_candidates_handler", "holdings_watchlist_handler"):
+        source = (
+            Path(inspect.getfile(importlib.import_module(f"jstock_advisor.lambda_handlers.{module}")))
+            .read_text(encoding="utf-8")
+        )
+        assert 'event.get("trade_detection_confirmed", False)' in source, (
+            f"{module}: 既定値が fail-close(False)でない。"
+            "既定 True へ戻すと payload 欠落時に通知抑止が効かなくなる(#70 F-B3)"
+        )
+        assert 'event.get("trade_detection_confirmed", True)' not in source, (
+            f"{module}: 既定 True の読み取りが残っている"
+        )
+
+    recovery_source = (
+        Path(inspect.getfile(_finalize_recovery)).read_text(encoding="utf-8")
+    )
+    assert '"trade_detection_confirmed": False' in recovery_source, (
+        "finalize-only payload が trade_detection_confirmed を載せていない。"
+        "省略して呼び出し先の既定に委ねると、既定が変わったとき意味が黙って反転する"
+    )

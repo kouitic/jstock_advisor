@@ -451,3 +451,297 @@ def test_get_many_never_falls_back_to_single_get_item(
     store.get_many(["1", "2"])
 
     assert calls == []
+
+
+# --- Issue #113: Scanのストリーミング(iter_all) -----------------------------
+
+
+class _FakePagedTable:
+    """LastEvaluatedKeyで複数ページを返すtableダブル(Scan呼び出し回数を数える)。"""
+
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self._pages = pages
+        self.scan_calls = 0
+
+    def scan(self, **kwargs):
+        self.scan_calls += 1
+        index = kwargs.get("ExclusiveStartKey", {}).get("page", 0)
+        response: dict = {"Items": self._pages[index]}
+        if index + 1 < len(self._pages):
+            response["LastEvaluatedKey"] = {"page": index + 1}
+        return response
+
+
+def _fake_pages(store: DynamoDbCollectionStore[_Item], page_sizes: list[int]) -> _FakePagedTable:
+    pages: list[list[dict]] = []
+    counter = 0
+    for size in page_sizes:
+        page = []
+        for _ in range(size):
+            counter += 1
+            item = _Item(item_id=str(counter), name="x", value=counter)
+            page.append(to_dynamo_item(item, "item_id"))
+        pages.append(page)
+    return _FakePagedTable(pages)
+
+
+def test_iter_all_returns_same_items_as_list_all(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    store.upsert(_Item(item_id="1", name="a", value=1))
+    store.upsert(_Item(item_id="2", name="b", value=2))
+
+    assert list(store.iter_all()) == store.list_all()
+
+
+def test_iter_all_fetches_pages_lazily(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #113: 全ページを先読みせず、消費した分だけScanすること。
+
+    `list_all()`が全ページを一度にlistへ保持していたため、本番の
+    RecommendationsTable(約118MB)でLambdaのメモリ上限を超えていた。
+    """
+    fake = _fake_pages(store, [3, 3, 3])
+    monkeypatch.setattr(store, "_table", fake)
+
+    iterator = store.iter_all()
+    first = next(iterator)
+
+    assert first.item_id == "1"
+    assert fake.scan_calls == 1  # 1ページ目しか取得していない
+
+    rest = list(iterator)
+
+    assert fake.scan_calls == 3
+    assert [item.item_id for item in rest] == ["2", "3", "4", "5", "6", "7", "8", "9"]
+
+
+def test_list_all_still_returns_every_page(
+    store: DynamoDbCollectionStore[_Item], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`list_all()`はiter_all()のlist()化であり、ページング結果が変わらないこと。"""
+    fake = _fake_pages(store, [2, 2, 1])
+    monkeypatch.setattr(store, "_table", fake)
+
+    items = store.list_all()
+
+    assert [item.item_id for item in items] == ["1", "2", "3", "4", "5"]
+    assert fake.scan_calls == 3
+
+
+# --- Issue #63 PR-2(A-U1b): 全件経路を失敗ポリシー機構へ接続する ---------------
+#
+# 不正レコードは fixture としてのみ作る。Production への注入は行わない。
+# 主キーは所有者を含みうる形（架空値）を再現する。
+
+
+def _put_broken(table_name: str, item_id: str) -> None:
+    """`data` がモデルとして不正な項目を直接書き込む（fixture 専用）。"""
+    boto3.resource("dynamodb", region_name=_REGION).Table(table_name).put_item(
+        Item={"item_id": item_id, "data": '{"item_id": "x", "name": "n", "value": "not-int"}'}
+    )
+
+
+def _lenient_store() -> DynamoDbCollectionStore[_Item]:
+    from jstock_advisor.infrastructure.record_failure_policy import RecordFailurePolicy
+
+    return DynamoDbCollectionStore(
+        _Item, _TABLE_NAME, "item_id", failure_policy=RecordFailurePolicy.LENIENT
+    )
+
+
+def test_iter_all_is_strict_by_default(store: DynamoDbCollectionStore[_Item]) -> None:
+    """既定(STRICT)では 1 件の不正で例外。**現行の挙動と同じ。**"""
+    store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with pytest.raises(Exception):  # noqa: B017 - pydantic の ValidationError をそのまま通す
+        store.list_all()
+
+
+def test_iter_all_skips_under_lenient(store: DynamoDbCollectionStore[_Item]) -> None:
+    """LENIENT なら Scan 経路で 1 件の不正を skip して残りを返す。"""
+    store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    items = _lenient_store().list_all()
+
+    assert [i.item_id for i in items] == ["owner-a#0001"]
+
+
+def test_get_is_unaffected_by_a_broken_record(store: DynamoDbCollectionStore[_Item]) -> None:
+    """★ get() は要求した 1 件しか検証しない。
+
+    1 件の不正が他の id の取得を妨げない、という既存の性質を固定する。
+    PR-3a で get() をポリシーへ接続した後もこの性質は変わらない
+    （接続したのは「要求した id 自身が壊れていた場合」の扱いだけである）。
+    """
+    store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    got = store.get("owner-a#0001")
+
+    assert got is not None
+    assert got.item_id == "owner-a#0001"
+
+
+def test_get_many_skips_under_lenient(store: DynamoDbCollectionStore[_Item]) -> None:
+    """BatchGetItem 経路でも、同じ束に不正が混じって全滅しない。"""
+    store.upsert(_Item(item_id="owner-a#0001", name="a", value=1))
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    result = _lenient_store().get_many(["owner-a#0000", "owner-a#0001"])
+
+    assert list(result) == ["owner-a#0001"]
+
+
+def test_broken_item_id_is_hashed_in_logs(
+    store: DynamoDbCollectionStore[_Item], caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ 既定では主キーの平文をログへ出さない（Issue #135 E-4 を開かない）。"""
+    import logging
+
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with caplog.at_level(logging.WARNING):
+        _lenient_store().list_all()
+
+    assert "owner-a#0000" not in caplog.text
+    assert "sha256:" in caplog.text
+# --- Issue #63 PR-3a: 主キー指定の get() / get_consistent() を接続する ---------
+#
+# cache の Production 読み取りは 5 経路とも主キー指定の get() である。
+# PR-2 の _decode_page() は全件経路にしか入っていないため、LENIENT を宣言しても
+# Lambda では効かず、壊れた 1 件が従来どおり例外を送出していた。
+# ローカル JSON 実装は _read_all() を経由するため効いており、backend によって
+# 挙動が食い違っていた。この差を塞ぐ。
+
+
+def test_get_returns_none_under_lenient_when_the_requested_record_is_broken(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """★ LENIENT では、要求した id 自身が壊れていても None を返す（= miss）。
+
+    これが無いと `get_or_fetch()` は例外で止まり、取り直しに進めない。
+    """
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    assert _lenient_store().get("owner-a#0000") is None
+
+
+def test_get_consistent_returns_none_under_lenient_when_broken(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """get_consistent() も同じ扱いにする（読み方の違いだけで分岐させない）。"""
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    assert _lenient_store().get_consistent("owner-a#0000") is None
+
+
+def test_get_is_strict_by_default_when_the_requested_record_is_broken(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """★ 既定（STRICT）では元の例外をそのまま送出する。**現行の挙動と同じ。**
+
+    宣言していない collection の挙動を変えていないことを固定する。
+    """
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with pytest.raises(Exception):  # noqa: B017 - pydantic の ValidationError をそのまま通す
+        store.get("owner-a#0000")
+
+
+def test_get_consistent_is_strict_by_default_when_broken(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    with pytest.raises(Exception):  # noqa: B017 - pydantic の ValidationError をそのまま通す
+        _put_broken(_TABLE_NAME, "owner-a#0000")
+        store.get_consistent("owner-a#0000")
+
+
+def test_get_raises_under_fail_safe_suppress(store: DynamoDbCollectionStore[_Item]) -> None:
+    """★ FAIL_SAFE_SUPPRESS では fail-closed とし、元の例外を送出する。
+
+    このポリシーは「判定不能」を呼び出し側へ伝えて**送信を見送らせる**もので
+    あるが、`get()` の戻り値 `T | None` にはそれを伝える表現が無い。None を
+    返すと呼び出し側は「レコードが無い」と読み、`notification_log` なら
+    重複送信という、まさにこのポリシーが防ごうとしている誤りを起こす。
+    伝えられない以上は黙って進めない。
+
+    現時点でこのポリシーを宣言している collection は無い（PR-4 で
+    notification_log へ入れる予定であり、その再送判定は find() /
+    query_by_index() の全件経路を使う）。
+    """
+    from jstock_advisor.infrastructure.record_failure_policy import RecordFailurePolicy
+
+    suppress_store: DynamoDbCollectionStore[_Item] = DynamoDbCollectionStore(
+        _Item, _TABLE_NAME, "item_id", failure_policy=RecordFailurePolicy.FAIL_SAFE_SUPPRESS
+    )
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with pytest.raises(Exception):  # noqa: B017 - pydantic の ValidationError をそのまま通す
+        suppress_store.get("owner-a#0000")
+
+
+def test_get_hashes_the_item_id_in_logs_by_default(
+    store: DynamoDbCollectionStore[_Item], caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ 既定では主キーの平文をログへ出さない（Issue #135 E-4 を開かない）。"""
+    import logging
+
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    with caplog.at_level(logging.WARNING):
+        _lenient_store().get("owner-a#0000")
+
+    assert "owner-a#0000" not in caplog.text
+    assert "sha256:" in caplog.text
+
+
+def test_get_shows_the_item_id_when_plain_is_declared(
+    store: DynamoDbCollectionStore[_Item], caplog: pytest.LogCaptureFixture
+) -> None:
+    """PLAIN を宣言した collection（cache 5 件）では平文で出る。
+
+    主キーが銘柄コード・日付・用途名で構成されることを確認したうえで宣言する
+    ものであり、ここでは cache と同じ形の架空値を使う。
+    """
+    import logging
+
+    from jstock_advisor.infrastructure.record_failure_policy import (
+        ItemIdDisclosure,
+        RecordFailurePolicy,
+    )
+
+    cache_key = "latest_price:0000:2026-09-07"
+    plain_store: DynamoDbCollectionStore[_Item] = DynamoDbCollectionStore(
+        _Item,
+        _TABLE_NAME,
+        "item_id",
+        failure_policy=RecordFailurePolicy.LENIENT,
+        item_id_disclosure=ItemIdDisclosure.PLAIN,
+    )
+    _put_broken(_TABLE_NAME, cache_key)
+
+    with caplog.at_level(logging.WARNING):
+        plain_store.get(cache_key)
+
+    assert cache_key in caplog.text
+
+
+def test_get_raw_data_is_unaffected_by_the_policy(
+    store: DynamoDbCollectionStore[_Item],
+) -> None:
+    """★ get_raw_data() は接続対象外（CAS 用の生 JSON）。
+
+    モデル検証を通らないため「検証失敗の扱い」が存在しない。壊れたレコードで
+    あっても保存されているバイト列をそのまま返す（楽観ロックの
+    ConditionExpression が成立しなくなるのを避けるため）。
+    """
+    _put_broken(_TABLE_NAME, "owner-a#0000")
+
+    raw = _lenient_store().get_raw_data("owner-a#0000")
+
+    assert raw is not None
+    assert "not-int" in raw

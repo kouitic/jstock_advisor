@@ -25,6 +25,26 @@ Parameters:
   LineChannelSecretSecretArn:
     Type: String
     Description: LINE_CHANNEL_SECRETを保持するSecrets ManagerシークレットのARN(Webhook署名検証用)
+  LineCredentialRotationVersion:
+    Type: String
+    Default: "0"
+    Description: >
+      Issue #117 Phase R1。LINE認証情報のローテーション時に**明示的に値を変える**ための
+      非秘密マーカー。Secrets Managerの値だけを更新してもdynamic referenceは再解決
+      されず(リソースに実変更が無いとCloudFormationがNO_CHANGESとするため)、Lambdaは
+      旧credentialのまま動き続ける。この値を変更するとGlobalsのEnvironmentが変わり、
+      全Lambda関数がModify対象になるため再解決が確実に起きる。
+      **秘密値・トークン・キーを入れないこと**(この値は環境変数として平文で残る)。
+      通常のデプロイでは既定値のまま変更しない(変更しなければ再解決を意図しない)。
+  EdinetCredentialRotationVersion:
+    Type: String
+    Default: "0"
+    Description: >
+      Issue #117 Phase R1。EDINET認証情報のローテーション用の非秘密マーカー。
+      役割はLineCredentialRotationVersionと同じで、**LINEとEDINETを同一波で
+      ローテーションしない**運用方針に合わせて独立したパラメータとする
+      (ChangeSet上で「どちらのローテーションを意図した変更か」を識別可能にする)。
+      **秘密値・キーを入れないこと。**
   WatchlistReservedConcurrentExecutions:
     Type: Number
     Default: 4
@@ -84,6 +104,12 @@ Globals:
         EDINET_API_KEY: !Sub "{{resolve:secretsmanager:${EdinetApiKeySecretArn}:SecretString}}"
         LINE_CHANNEL_ACCESS_TOKEN: !Sub "{{resolve:secretsmanager:${LineChannelAccessTokenSecretArn}:SecretString}}"
         LINE_USER_ID: !Sub "{{resolve:secretsmanager:${LineUserIdSecretArn}:SecretString}}"
+        # Issue #117 Phase R1: ローテーション時の強制再解決マーカー(非秘密)。
+        # 上の3つのdynamic referenceと**同じEnvironmentブロック**に置くことが要件で、
+        # この値が変わればブロック全体が変更されて再解決が起きる。
+        # 値は運用者が明示的に渡す非秘密の版数であり、秘密を入れてはならない。
+        LINE_CREDENTIAL_ROTATION_VERSION: !Ref LineCredentialRotationVersion
+        EDINET_CREDENTIAL_ROTATION_VERSION: !Ref EdinetCredentialRotationVersion
 
 Resources:
   # --- 候補ユニバース本格対応(2026-08): S3キャッシュバケット ------------------
@@ -194,7 +220,15 @@ Resources:
 
   HoldingsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-holdings"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -214,7 +248,15 @@ Resources:
   # 修正した不備。下記の各FunctionのPolicies参照)。
   HoldingsTableV2:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-holdings_v2"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -226,7 +268,15 @@ Resources:
 
   PurchaseLotsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-purchase_lots"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -238,7 +288,15 @@ Resources:
 
   WatchlistTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-watchlist"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -250,7 +308,15 @@ Resources:
 
   RecommendationsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-recommendations"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -287,7 +353,15 @@ Resources:
   # NEAR BUYの継続監視状態(watch_state_service.py参照)。
   WatchStateTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-watch_states"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -319,7 +393,15 @@ Resources:
   # 期限を保持する(trade_cooldown_service.py参照)。
   HoldingsSnapshotTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-holdings_snapshots"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -350,7 +432,15 @@ Resources:
   # (HoldingsTableV2の注記参照)。
   HoldingsSnapshotTableV2:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-holdings_snapshots_v2"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -434,7 +524,15 @@ Resources:
 
   HoldingDecisionResultsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-holding_decision_results"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -446,7 +544,15 @@ Resources:
 
   InvestmentThesesTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-investment_theses"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -458,7 +564,15 @@ Resources:
 
   InvestmentThesisBaselinesTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-investment_thesis_baselines"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -470,7 +584,15 @@ Resources:
 
   InvestmentThesisBaselineSequencesTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-investment_thesis_baseline_sequences"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -491,7 +613,15 @@ Resources:
   # テーブルはそのまま残す。
   InvestmentThesisBaselineSequencesTableV2:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-investment_thesis_baseline_sequences_v2"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -503,7 +633,15 @@ Resources:
 
   InvestmentThesisBaselinePointersTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-investment_thesis_baseline_pointers"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -520,7 +658,15 @@ Resources:
   # の実装)をそのまま踏襲する(新テーブル固有の追加対応は不要)。
   InvestmentThesisBaselinePointersTableV2:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-investment_thesis_baseline_pointers_v2"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -534,7 +680,15 @@ Resources:
   # CLI経由の人間のみに限定する(HoldingsWatchlistFunction等へはReadPolicyのみ付与)。
   HoldingDecisionRuntimeConfigTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-holding_decision_runtime_config"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -550,7 +704,15 @@ Resources:
   # 参照する)。WATCHはHoldings/PurchaseLotsを一切更新しないため対象外。
   TradingPauseConfigTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-trading_pause_config"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -562,7 +724,15 @@ Resources:
 
   TransactionsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-transactions"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -574,7 +744,15 @@ Resources:
 
   SkippedRecommendationsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-skipped_recommendations"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -586,7 +764,15 @@ Resources:
 
   NotificationLogTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-notification_log"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -617,7 +803,15 @@ Resources:
 
   EvaluationResultsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-evaluation_results"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -629,7 +823,15 @@ Resources:
 
   RuleVersionsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-rule_versions"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -641,7 +843,15 @@ Resources:
 
   RuleProposalsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-rule_proposals"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -655,7 +865,15 @@ Resources:
 
   WeeklyReviewMetricsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-weekly_review_metrics"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -667,7 +885,15 @@ Resources:
 
   ImprovementCandidatesTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-improvement_candidates"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -682,7 +908,15 @@ Resources:
     # (ISSUE_CREATING等)を原子的に更新し続ける(infrastructure.aws.
     # improvement_task_tracker.py参照)。
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-improvement_tasks"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -696,7 +930,15 @@ Resources:
 
   DecisionSnapshotsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-decision_snapshots"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -711,7 +953,15 @@ Resources:
   # DecisionSnapshotの代替ではなく、無期限に増加させないため既定90日でTTL削除する。
   BuyCandidateEvaluationRecordsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-buy_candidate_evaluation_records"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -744,7 +994,15 @@ Resources:
     # エンジン(Legacy SELL/ProfitTaking/HoldingDecisionScore)が実際の判定担当
     # だったかを記録する。BuyCandidateEvaluationRecordsTableと対称的な設計。
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-holding_evaluation_records"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -794,7 +1052,15 @@ Resources:
 
   UserFeedbackTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-user_feedback"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -806,7 +1072,15 @@ Resources:
 
   AuditLogTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-audit_log"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -818,7 +1092,15 @@ Resources:
 
   ShareholderBenefitsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-shareholder_benefits"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -830,7 +1112,15 @@ Resources:
 
   CorporateActionRegistryTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-corporate_action_registry"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -843,7 +1133,15 @@ Resources:
   # 銘柄名の手動オーバーライド(2026-07 BUYパイプライン第2次修正・要求仕様19節)。
   StockNameOverridesTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-stock_name_overrides"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -907,7 +1205,15 @@ Resources:
   # 通常運用の投資判断履歴(Recommendation/DecisionSnapshot等)とは性質が異なる。
   BatchRunsTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-batch_runs"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -979,7 +1285,15 @@ Resources:
   # 設定しない(恒久的な状態のため)。
   WatchlistScreeningRotationStateTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-watchlist_screening_rotation_state"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -996,7 +1310,15 @@ Resources:
   # (クールダウン終了と同時に行が自動的に消える)。
   WatchlistRemovalHistoryTable:
     Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
+    # 実体を消さない。保護対象の判定は Phase A のデータ分類に従う。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Issue #137: 誤削除の防止と、直近 35 日への時点復元。
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TableName: !Sub "${TablePrefix}-watchlist_removal_history"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -1060,6 +1382,16 @@ Resources:
       # 24節仕様の再設計(モメンタム・複数手法適正価格・分割調整等)で銘柄あたりの
       # 実データ取得件数が増えたため、既定の300秒では銘柄数によってはタイムアウトしうる
       Timeout: 900
+      Environment:
+        Variables:
+          # Issue #116: Issue #54 Phase B-1のshadow observation
+          # (services/jpx_industry_source.py::JpxIndustrySource)が
+          # CandidateUniverseCacheIO経由でJPX上場銘柄一覧キャッシュを読むために必要。
+          # 本変数が無いとresolve_candidate_universe_bucket()がRuntimeErrorとなり、
+          # jpx_lookup_statusが常にSOURCE_UNAVAILABLE(canonical解決率0%)になる。
+          # **観測専用**であり、BUY判定・screening・portfolio exposureは
+          # classify_industry(provider由来のsector/industry)を使うため影響を受けない。
+          CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
       Policies:
         # コードレビュー対応(2026-08): テーブル数の増加に伴うIAMロールのインライン
         # ポリシー合計サイズ上限(10240バイト)超過を避けるため、HoldingsWatchlistFunction
@@ -1164,6 +1496,24 @@ Resources:
             - Effect: Allow
               Action: lambda:InvokeFunction
               Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-buy-candidates"
+        # Issue #116: Issue #54 Phase B-1のshadow observation専用の読み取り権限。
+        # SAMのS3ReadPolicyは使わない(GetObjectAcl/GetLifecycleConfiguration等、
+        # 本経路が使わないActionまで付与されるため)。
+        #
+        # CandidateUniverseCacheIO.read_current()はcurrent/<source>/data と
+        # current/<source>/metadata.json の2キーへget_object()するだけであり、
+        # list_objects_v2/head_objectは呼ばない。書き込み(promote())は
+        # WatchlistDispatcherFunction側の責務。
+        #
+        # #116の契約では「キャッシュ未生成」も「S3読み取り不能」もいずれも
+        # SOURCE_UNAVAILABLEとしてfail-softするため、両者を区別しない。
+        # よってNoSuchKey(404)を得る目的だけのs3:ListBucketは付与しない
+        # (最小権限を優先する)。
+        - Statement:
+            - Sid: CandidateUniverseCacheReadForJpxShadow
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
       Events:
         DailyMorning:
           Type: ScheduleV2
@@ -1361,9 +1711,29 @@ Resources:
       FunctionName: !Sub "${AWS::StackName}-evaluation"
       CodeUri: ../src/
       Handler: jstock_advisor.lambda_handlers.evaluation_handler.handler
+      # Issue #113: Globals既定の300秒では、蓄積したbacklogをtime budget内で
+      # 安全に消化しきれない。「処理が遅いので力技で延ばす」ためではなく、
+      # N+1 Scan除去・streaming・run scope cacheを行った上で、
+      # get_remaining_time_in_millis()による予算管理のもとで
+      # backlogを消化するための実行枠として900秒を割り当てる
+      # (MemorySizeはstreaming化により512MBのまま据え置く)。
+      Timeout: 900
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EvaluationResultsTable }
+        # Issue #114 Phase B1: run summaryをAuditLogへ記録する。
+        # 書き込みはAuditLogRepository.save_if_absent()の条件付きPutItemのみで、
+        # 読み取り・削除・Scan/Queryは行わない。DynamoDBCrudPolicyでは
+        # GetItem/Scan/Query/DeleteItem等まで付いてしまうため、
+        # **実際に使うPutItemだけ**を明示する(最小権限)。
+        # なお週次改善レビュー側の読み取り権限は#114 Phase B3で追加する
+        # (B1では読まないため、ここでは付与しない)。
+        - Statement:
+            - Sid: PutEvaluationRunSummaryAudit
+              Effect: Allow
+              Action: dynamodb:PutItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
       Events:
         DailyEvening:
           Type: ScheduleV2
@@ -1372,6 +1742,52 @@ Resources:
             ScheduleExpressionTimezone: Asia/Tokyo
             FlexibleTimeWindow:
               Mode: "OFF"
+
+  # Issue #113: 定点評価Lambdaが11日以上「一度も成功していない」ことに
+  # 気づけなかったため、最低限の検知を追加する。本スタックにはこれ以前
+  # CloudWatch AlarmもSNS Topicも1つも存在しなかった。
+  # 通知配信基盤(SNS/LINE/GitHub)の新設は本Issueのscope外とし、
+  # ここではAlarm stateの可視化までを担保する(AlarmActionsは意図的に付けない)。
+  # なお**Lambdaのタイムアウトはerrorsメトリクスに計上される**ため、
+  # このErrors Alarmが1本あれば今回の37回の失敗はすべて検知できていた。
+  EvaluationFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-evaluation-errors"
+      AlarmDescription: >-
+        定点評価Lambdaが失敗した(タイムアウトを含む)。Issue #113参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EvaluationFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # 実行されない時間帯(平日18:00のみ稼働)をALARMにしないため。
+      TreatMissingData: notBreaching
+
+  # Timeout(900秒)の80%=720秒に達したら、まだ失敗していなくても
+  # 予算超過が近いことを検知する(backlogの発散を早期に捉えるため)。
+  EvaluationFunctionDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-evaluation-duration"
+      AlarmDescription: >-
+        定点評価Lambdaの実行時間がTimeoutの80%(720秒)に達した。Issue #113参照。
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EvaluationFunction
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 720000 # ミリ秒。EvaluationFunctionのTimeout 900秒 × 0.8
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
 
   # --- ウォッチリスト自動追加(候補ユニバース本格対応・2026-08) ---------------
   # 旧WatchlistAutoAdditionFunction(単一Lambdaの自己再帰fan-out)を、

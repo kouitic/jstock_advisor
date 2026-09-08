@@ -37,6 +37,7 @@ coverage==7.15.2
 cryptography==50.0.0
 curl_cffi==0.15.0
 docker==7.2.0
+et_xmlfile==2.0.0
 freezegun==1.5.5
 idna==3.18
 iniconfig==2.3.0
@@ -52,6 +53,7 @@ mypy==2.3.0
 mypy-boto3-dynamodb==1.43.0
 mypy_extensions==1.1.0
 numpy==2.5.1
+openpyxl==3.1.5
 packaging==26.2
 pandas==3.0.5
 pathspec==1.1.1

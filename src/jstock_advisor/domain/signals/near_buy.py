@@ -50,13 +50,27 @@ def compute_consecutive_business_days(
     business_days_since_last_matched: int,
     previous_consecutive_business_days: int,
 ) -> int:
-    """business_days_since_last_matched(前回last_matched_atからtodayまでの
-    営業日数。BusinessCalendar.business_days_betweenの戻り値をそのまま渡す)が
-    1(真に連続する営業日)ならインクリメント、2以上(評価不能日を挟んだ)なら
-    1へリセットする(指摘8のA案: WatchState自体は維持するが表示上の連続日数は
-    リセットする)。
+    """連続営業日数を更新する(Issue #166)。
+
+    business_days_since_last_matched は前回last_matched_atからtodayまでの営業日数
+    (BusinessCalendar.business_days_betweenの戻り値をそのまま渡す)。同関数は
+    「起点の翌日からtodayまで」を数えるため、値の意味は次のとおり。
+
+    - 0 … 前回一致日から営業日が1日も経過していない。同一営業日の再評価、
+          週末、平日に当たる祝日(schedulerはMON-FRIで発火するが東証は休場)が
+          すべてここへ入る。**営業日は進んでいないため据え置く。**
+    - 1 … 真に連続する営業日。インクリメントする。
+    - 2以上 … 評価不能日を挟んだ。1へリセットする(WatchState自体は維持するが
+          表示上の連続日数はリセットする)。
+
+    Issue #166 以前は 0 と 1 をまとめて「<= 1」でインクリメントしていたため、
+    営業日が1日も経過していないのに加算されていた(非営業日の実行・同一日の
+    複数回実行のいずれでも発生し、Productionで実測された)。この関数は連続
+    「評価回数」ではなく連続「営業日数」を表すため、0での加算は契約違反である。
     """
-    if business_days_since_last_matched <= 1:
+    if business_days_since_last_matched <= 0:
+        return previous_consecutive_business_days
+    if business_days_since_last_matched == 1:
         return previous_consecutive_business_days + 1
     return 1
 

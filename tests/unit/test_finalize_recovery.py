@@ -255,7 +255,15 @@ def test_b2_valid_request_is_accepted(dynamo) -> None:
 
 
 def test_b2_payload_builder_matches_persisted_record(dynamo) -> None:
-    """reconcilerが送るpayloadは、永続化された値からのみ構築される。"""
+    """reconcilerが送るpayloadは、永続化された値からのみ構築される。
+
+    ★ 例外は`trade_detection_confirmed`である(Issue #211)。これは永続化値では
+      なく**recoveryという経路の事実としての固定False**である。recoveryは停滞
+      batchをfinalizeするだけでdetect_and_apply()を走らせないため、「この実行では
+      検知完了を確認していない」が常に正しい。検知結果をCompletionBatchRecordへ
+      永続化する案(案2)は、recoveryが0件/30日である現状に見合わないとして
+      却下済みである(#200のschema互換の適用対象になるため)。
+    """
     _start("b-pl", family=BatchFamily.HOLDINGS_WATCHLIST)
     _complete_all("b-pl", ["owner-a#8306"])
     record = batch_tracker.get_completion_batch("b-pl")
@@ -265,6 +273,7 @@ def test_b2_payload_builder_matches_persisted_record(dynamo) -> None:
         "batch_id": "b-pl",
         "batch_family": "HOLDINGS_WATCHLIST",
         "execution_mode": "NORMAL",
+        "trade_detection_confirmed": False,
     }
 
 

@@ -65,6 +65,11 @@ _MIN_METHODS_FOR_OUTLIER_DETECTION = 3
 _MIN_REMAINING_METHODS_AFTER_FILTER = 2
 _TOO_FEW_METHODS_AFTER_OUTLIER_FILTER = "TOO_FEW_METHODS_AFTER_OUTLIER_FILTER"
 
+# --- Issue #179(2026-09): 52週安値フィルタの境界帯 ---
+# 対象は BELOW_52_WEEK_LOW のみ。他の3フィルタとDCF上方乖離フィルタは変更しない。
+CODE_BELOW_52_WEEK_LOW = "BELOW_52_WEEK_LOW"
+CODE_BORDERLINE_INTERPOLATED_TO_MEDIAN = "BORDERLINE_INTERPOLATED_TO_MEDIAN"
+
 
 def _detect_outlier(
     value: Decimal,
@@ -118,7 +123,7 @@ def _detect_outlier(
         threshold = low_52_week * _BELOW_52_WEEK_LOW_RATIO
         if value < threshold:
             return ValuationExclusionReason(
-                code="BELOW_52_WEEK_LOW",
+                code=CODE_BELOW_52_WEEK_LOW,
                 message=(
                     f"算出値({value}円)が直近52週安値({low_52_week}円)の"
                     f"{float(_BELOW_52_WEEK_LOW_RATIO) * 100:.0f}%未満であり、"
@@ -128,6 +133,76 @@ def _detect_outlier(
                 reference_value=threshold,
             )
     return None
+
+
+def _interpolate_borderline(
+    value: Decimal,
+    exclusion: ValuationExclusionReason,
+    other_values: list[Decimal],
+    transition_min_ratio: float,
+) -> tuple[Decimal, ValuationExclusionReason] | None:
+    """境界帯(TRANSITION)の算出値を他方式の中央値へ線形補間する(Issue #179)。
+
+    従来のBELOW_52_WEEK_LOWは、除外閾値(直近52週安値x0.50)をわずかに下回った
+    だけの値も、桁違いに低い値と同じように完全に切り捨てていた。閾値の直前と
+    直後で採否が反転するため、算出値をわずかに動かすだけでvaluation_anchorが
+    跳ぶ(第1成分 = OUTLIER_MEMBERSHIP_DISCONTINUITY)。
+
+    そこで u = 算出値 ÷ 除外閾値 を定義し、3領域へ分ける。
+
+        u >= 1.0                          そもそも除外されない(本関数へ来ない)
+        transition_min_ratio <= u < 1.0   TRANSITION  他方式中央値へ線形補間
+        u <  transition_min_ratio         HARD_REJECT 完全除外(従来どおり)
+
+    補間は s = (u - T) / (1 - T) を採用比率とし、
+
+        補間値 = 他方式中央値 + (算出値 - 他方式中央値) x s
+
+    とする。u -> 1.0 で s -> 1 となり補間値が算出値そのものに一致するため、
+    **除外閾値(B = 0.50)の境界で値が跳ばない**。不連続は s = 0 となる
+    u = transition_min_ratio の 1 点へ移り、そこでの段差は帯を狭くするほど
+    小さくなる(消えはしない。順位ベースの集約器では要素の増減で統計量が動く)。
+
+    `reference_value ÷ 0.50` から52週安値を逆算することはしない
+    (LOW_52_WEEK_REVERSE_CALCULATION = NO)。判定に使うのはuだけであり、
+    除外閾値が将来変わっても過去記録の意味が壊れないようにするためである。
+
+    戻り値は (補間値, 構造化記録) 。境界帯の外、または補間に必要な他方式が
+    無い場合はNoneを返し、呼び出し側は従来どおり除外する。
+    """
+    actual = exclusion.actual_value
+    reference = exclusion.reference_value
+    if not isinstance(actual, Decimal) or not isinstance(reference, Decimal):
+        return None
+    if reference <= 0:
+        return None
+    ratio = actual / reference
+    if not (Decimal(str(transition_min_ratio)) <= ratio < Decimal("1")):
+        return None
+    if not other_values:
+        return None
+
+    median_others = statistics.median(other_values)
+    share = (ratio - Decimal(str(transition_min_ratio))) / (
+        Decimal("1") - Decimal(str(transition_min_ratio))
+    )
+    interpolated = median_others + (value - median_others) * share
+    if interpolated <= 0:
+        return None
+
+    detail = ValuationExclusionReason(
+        code=CODE_BORDERLINE_INTERPOLATED_TO_MEDIAN,
+        message=(
+            f"算出値({value}円)が除外基準({reference}円)の"
+            f"{float(ratio) * 100:.1f}%であり、境界帯"
+            f"({float(transition_min_ratio) * 100:.0f}%以上100%未満)に入るため、"
+            f"完全に除外せず他方式の中央値({round(median_others, 0)}円)へ寄せて"
+            f"{round(interpolated, 0)}円として採用"
+        ),
+        actual_value=value,
+        reference_value=reference,
+    )
+    return interpolated, detail
 
 
 @dataclass(frozen=True)
@@ -145,12 +220,15 @@ class OutlierFilterResult:
     remaining_count: int = 0
     reliability: BuyPriceReliability = BuyPriceReliability.OK
     blocking_reason: str | None = None
+    # Issue #179: 境界帯として補間採用した方式の件数。
+    transition_count: int = 0
 
 
 def apply_outlier_filters(
     method_results: list[FairValueMethodResult],
     current_price: Decimal | None = None,
     low_52_week: Decimal | None = None,
+    transition_min_ratio: float | None = None,
 ) -> OutlierFilterResult:
     """下方(および保険的に上方)の外れ値を集計から除外する(要求仕様10節)。
 
@@ -167,6 +245,13 @@ def apply_outlier_filters(
     また、3件以上で外れ値検知を行った結果、残る方式が1件以下になった場合
     (例: 3方式が互いを外れ値とみなし合い全滅する)、その除外結果は採用せず
     除外前の結果へフォールバックし、明示的な低信頼シグナルを返す。
+
+    --- Issue #179(2026-09)で追加 ---
+    transition_min_ratioを渡すと、BELOW_52_WEEK_LOWに限り「除外閾値のすぐ下」を
+    境界帯として扱い、完全に除外せず他方式の中央値へ線形補間して採用する
+    (_interpolate_borderline()参照)。Noneのときは従来どおり全件除外であり、
+    既存の呼び出し側の挙動を変えない。他の3フィルタとDCF上方乖離フィルタは
+    対象外である。
     """
     applicable = [r for r in method_results if r.applicable and r.fair_value is not None]
     if len(applicable) < _MIN_METHODS_FOR_OUTLIER_DETECTION:
@@ -176,6 +261,7 @@ def apply_outlier_filters(
 
     filtered: list[FairValueMethodResult] = []
     excluded_count = 0
+    transition_count = 0
     for r in method_results:
         if not r.applicable or r.fair_value is None:
             filtered.append(r)
@@ -185,6 +271,17 @@ def apply_outlier_filters(
         if exclusion is None:
             filtered.append(r)
             continue
+        if exclusion.code == CODE_BELOW_52_WEEK_LOW and transition_min_ratio is not None:
+            interpolation = _interpolate_borderline(
+                r.fair_value, exclusion, other_values, transition_min_ratio
+            )
+            if interpolation is not None:
+                interpolated, detail = interpolation
+                transition_count += 1
+                filtered.append(
+                    r.model_copy(update={"fair_value": interpolated, "transition_detail": detail})
+                )
+                continue
         excluded_count += 1
         filtered.append(
             r.model_copy(
@@ -208,7 +305,10 @@ def apply_outlier_filters(
         )
 
     return OutlierFilterResult(
-        results=filtered, excluded_count=excluded_count, remaining_count=remaining_count
+        results=filtered,
+        excluded_count=excluded_count,
+        remaining_count=remaining_count,
+        transition_count=transition_count,
     )
 
 
@@ -219,6 +319,7 @@ def build_valuation_summary(
     usability_config: FairValueUsability,
     current_price: Decimal | None = None,
     low_52_week: Decimal | None = None,
+    transition_min_ratio: float | None = None,
 ) -> FairValueRange:
     """既存のbuild_fair_value_range()を呼び、統計値(min/max/median/mean/
     dispersion_ratio/methods_used_count)を追加する。applicable=Falseの方式は
@@ -234,7 +335,9 @@ def build_valuation_summary(
     ]
     all_values = [r.fair_value for r in normalized_results if r.fair_value is not None]
 
-    outlier_filter_result = apply_outlier_filters(normalized_results, current_price, low_52_week)
+    outlier_filter_result = apply_outlier_filters(
+        normalized_results, current_price, low_52_week, transition_min_ratio
+    )
     base_range = build_fair_value_range(
         outlier_filter_result.results, aggregation_method, method_weights, usability_config
     )
@@ -387,8 +490,37 @@ def compute_valuation_anchor(
 
     - 信頼度HIGHかつばらつき小: weighted_median
     - 信頼度MEDIUMまたはばらつき中: min(weighted_median, trimmed_mean)
-    - ばらつき大: percentile_40
+    - ばらつき大: min(weighted_median, trimmed_mean, percentile_40)
     - 信頼度LOW: None(自動買付価格を生成しない)
+
+    ばらつきが悪化するほどanchorが単調に下がる(= より保守的になる)ことを、
+    band間で前段の値とのminを取ることで式の上で保証する(Issue #260)。
+
+    Issue #260の是正前は、ばらつき大のときpercentile_40を**単独で**採っていた。
+    percentile_40は中央値より下であり「中央値と比べれば保守的」ではあるが、
+    ばらつき中が採るmin(weighted_median, trimmed_mean)は中央値よりさらに
+    下がり得るため、percentile_40がそれを下回る保証が無かった。実際、方式値が
+    左に裾を引く分布(安い方式値が1つ突出して低い)では平均が下へ引かれ、
+    mean < percentile_40 <= weighted_median となる。このときばらつきが
+    **悪化した**ほうが高いanchor(= 高い買付価格)になっていた。
+    Production実測では、ばらつき大かつ再構成を検証できた765件のうち437件
+    (57.1%)がこの状態で、買付価格は中央値で+2.82%高く出ていた。
+
+    2026-07-31の設計文書(before_after_report_2026-07-31_buy_pipeline_redesign.md)
+    は「バラつき率と信頼度に応じて**保守的に**決定する」と定めており、本是正は
+    その意図の**変更ではなく復元**である。各集約器を中央値とだけ比べ、
+    前段のbandの集約器と比べていなかったことが欠陥の正体だった。
+
+    関連Issue:
+      #187 band境界(1.30 / 1.60)でanchorが不連続に跳ぶ挙動。本是正では
+           不連続は残る(跳ぶ向きが下方向のみに限定される)。別PRで扱う。
+      #263 _trimmed_mean()はtrim_count = int(n * 0.1)のため本番の方式数
+           (3〜5)では一度もtrimせず単純平均と同一。挙動は本Issueで変えない。
+           上記のminは項が増えるだけなので、この性質があってもanchorは
+           現行以下にしかならない。
+      #189 判定時点スナップショットに集約規則のバージョンが記録されないため、
+           保存済みRecommendationを後から再計算して検証する際に、
+           是正前後のどちらの規則で判定されたかを区別できない。
     """
     if valuation_confidence == ConfidenceLevel.LOW:
         return ValuationAnchorResult(anchor=None)
@@ -413,7 +545,12 @@ def compute_valuation_anchor(
         )
 
     if dispersion_band == "HIGH":
-        return ValuationAnchorResult(anchor=_percentile(values, 40))
+        # Issue #260: 前段(ばらつき中)の値とのminを取り、band悪化でanchorが
+        # 上がらないことを式で保証する。percentile_40単独では保証されない。
+        trimmed_mean = _trimmed_mean(values)
+        return ValuationAnchorResult(
+            anchor=min(weighted_median, trimmed_mean, _percentile(values, 40))
+        )
     if valuation_confidence == ConfidenceLevel.MEDIUM or dispersion_band == "MEDIUM":
         trimmed_mean = _trimmed_mean(values)
         return ValuationAnchorResult(anchor=min(weighted_median, trimmed_mean))

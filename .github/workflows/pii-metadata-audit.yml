@@ -1,0 +1,40 @@
+name: PII metadata audit
+
+# 公開されるGitHub metadata(Issue / PR の本文・コメント・タイトル、label、
+# branch名)を日次で走査する(Issue #131)。CIの`pii-scan`ジョブはGit管理
+# ファイルだけを対象としており、PUBLICリポジトリで同じく公開される
+# Issue / PR のテキストは対象外だった。
+#
+# 既存のrequired jobへGitHub API依存を持ち込まないため、ci.ymlとは別の
+# workflowとして分離している。ここが失敗してもPRはブロックされない。
+#
+# 事前防止の代わりにはならない。日次実行のため、露出から検知までに最大で
+# 24時間かかる。投稿前の手続き
+# (docs/user_manager_collaboration_protocol.md 11節)が第一の防壁である。
+
+on:
+  schedule:
+    # 毎日 21:10 UTC(= 翌 06:10 JST)。日次バッチと時間帯が重ならないようにする。
+    - cron: "10 21 * * *"
+  workflow_dispatch:
+
+# read-onlyに固定する。secretは新設しない(public repoの読み取りは
+# 既定のGITHUB_TOKENで足りる)。
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # 検出時は一致した文字列を出さず、面 / 所在 / 検出理由 / ハッシュ接頭辞
+      # だけを出力する。取得した本文はartifactへ保存しない。
+      - run: python scripts/audit_public_metadata_pii.py "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ github.token }}

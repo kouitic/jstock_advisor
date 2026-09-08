@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from jstock_advisor.domain.entities.enums import RecommendationType
@@ -62,6 +62,16 @@ class RecommendationRepository:
 
     def list_all(self) -> list[Recommendation]:
         return self._store.list_all()
+
+    def iter_all(self) -> Iterator[Recommendation]:
+        """全Recommendationを1件ずつ遅延生成する(Issue #113)。
+
+        1件あたり約20KBあり本番で6,000件規模へ育っているため、`list_all()`で
+        全件materializeするとLambda(512MB)のメモリ上限を超える
+        (実測: 118MB の生JSON → pydantic 保持で約527MB)。定点評価のように
+        全件を1回走査するだけの用途では必ずこちらを使うこと。
+        """
+        return self._store.iter_all()
 
     def list_by_stock(self, stock_code: str) -> list[Recommendation]:
         items = self._store.find(lambda r: r.stock_code == stock_code)

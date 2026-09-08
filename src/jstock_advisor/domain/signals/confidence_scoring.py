@@ -19,6 +19,11 @@ from dataclasses import dataclass
 from jstock_advisor.config.models import ConfidenceRulesConfig
 from jstock_advisor.domain.entities.enums import ConfidenceLevel
 
+# Issue #52 Phase B3-B2: 減点理由とHIGH禁止理由で同一の文言を使う。
+# compute_confidence() 末尾の既存 dedup contract により、reasons_not_high へは
+# 1回しか現れない(利用者に同じ事実を2回見せない)。
+_FINANCIAL_STALE_REASON = "最新の決算が財務データへ反映されていない可能性がある"
+
 
 @dataclass(frozen=True)
 class ConfidenceFactors:
@@ -51,6 +56,14 @@ class ConfidenceFactors:
     benefit_eligible_but_value_unavailable: bool = False
     # 強い判定(FULL相当)の根拠が適正価格のみ(他の独立根拠が無い)場合True。
     fair_value_is_sole_strong_basis: bool = False
+
+    # --- Issue #52 Phase B3-B2: 財務データの報告サイクル鮮度 ---
+    # 期末から所定の猶予日数を過ぎても次の期の数字が入っていない場合True。
+    # data_freshness_days(いつ取得したか)とは**別concept**であり、専用fieldと
+    # する。無料providerは取得の都度いまの時刻を入れるため、取得時刻を見ても
+    # 「発表後なのに旧期のまま」は検知できない(Issue #52の根本原因)。
+    # 判定できなかった場合(UNKNOWN)はFalse(「古い」ことを確認できていない)。
+    financial_data_freshness_stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,6 +143,12 @@ def _high_confidence_disallow_reasons(
     if factors.fair_value_is_sole_strong_basis:
         reasons.append("強い判定の根拠が適正価格のみ")
 
+    # Issue #52 Phase B3-B2(人間確定): 減点15点だけでは base 100 - 15 = 85 となり
+    # HIGH閾値(85)に達したままになる。「最新の決算が未反映である可能性が確認
+    # された状態」を最上位の信頼度として扱わないため、HIGH禁止条件にも加える。
+    if factors.financial_data_freshness_stale:
+        reasons.append(_FINANCIAL_STALE_REASON)
+
     return reasons
 
 
@@ -181,6 +200,14 @@ def compute_confidence(
     if factors.cross_rule_agreement is False:
         score -= w.penalty_cross_rule_disagreement
         reasons.append("判定ルール間の一致度が低い")
+
+    # Issue #52 Phase B3-B2: 財務期間の鮮度。上のdata_freshness_days(取得時刻)
+    # とは別事象のため、両方が成立すればそれぞれ1回ずつ減点する。ただし
+    # 「財務データが古い」という1つの事実は、この1箇所でしか減点しない
+    # (他のfactorへ同じ事実を書かない。AT_MOST_ONCE)。
+    if factors.financial_data_freshness_stale:
+        score -= w.penalty_financial_data_stale
+        reasons.append(_FINANCIAL_STALE_REASON)
 
     score = max(0.0, score)
     disallow_reasons = _high_confidence_disallow_reasons(factors, config)

@@ -51,6 +51,8 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
+    UNIVERSE_SOURCE_CACHE,
+    UNIVERSE_SOURCE_DOWNLOADED,
     CandidateProgressRecord,
     UnknownWatchlistJobTypeError,
     WatchlistJobType,
@@ -88,6 +90,7 @@ from jstock_advisor.infrastructure.local_repository.watchlist_repository import 
 )
 from jstock_advisor.interfaces.candidate_universe import CandidateUniverseError
 from jstock_advisor.services.candidate_universe_downloader import (
+    DownloadOutcome,
     refresh_candidate_universe_cache,
 )
 from jstock_advisor.services.line_notification_service import LineNotificationService
@@ -172,6 +175,44 @@ def _compute_universe_signature(eligible_universe_count: int, selected_codes: li
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
+_LISTED_ISSUES_SOURCE = "listed_issues"
+
+
+def _universe_observation(
+    outcomes: list[DownloadOutcome], now: dt.datetime
+) -> dict[str, Any]:
+    """Issue #223(O-A): 候補ユニバースを「今回取得したもの」で回したのか
+    「前回までのキャッシュ」で回したのかを、成功した回も含めて監査に残す。
+
+    従来は取得失敗がlogger.warningにしか出ず、Lambda Errorsも増えないため、
+    キャッシュで走り続けている状態を外形的に知る手段が無かった(本Issueの
+    Problem)。source_dateとその経過日数を併記することで、staleness上限
+    (listed_issues_max_stale_hours)まであとどれだけかを後から確認できる。
+
+    cache_age_daysはJpxCandidateUniverseProvider._check_staleness()と同じ
+    基準(source_dateの00:00 UTCからの経過)で数え、切り捨てた日数を入れる
+    (BatchRunsTableはDynamoDBのため小数を入れられない)。
+    """
+    listed = next((o for o in outcomes if o.source == _LISTED_ISSUES_SOURCE), None)
+    if listed is None:
+        return {}
+    source_date = listed.effective_source_date
+    cache_age_days: int | None = None
+    if source_date is not None:
+        elapsed = now - dt.datetime.combine(source_date, dt.time(), tzinfo=dt.UTC)
+        cache_age_days = int(elapsed.total_seconds() // 86400)
+    return {
+        "universe_source": (
+            UNIVERSE_SOURCE_DOWNLOADED if listed.promoted else UNIVERSE_SOURCE_CACHE
+        ),
+        "universe_promoted": listed.promoted,
+        "universe_source_date": (
+            source_date.isoformat() if source_date is not None else None
+        ),
+        "universe_cache_age_days": cache_age_days,
+    }
+
+
 def _collect_new_candidate_targets(
     config: Any, now: dt.datetime
 ) -> tuple[list[str], dict[str, Any]]:
@@ -182,6 +223,7 @@ def _collect_new_candidate_targets(
     wc = config.watchlist_screening
     cu = wc.candidate_universe
 
+    universe_observation: dict[str, Any] = {}
     if cu.provider == "jpx":
         # 6節: Dispatcherの通常起動時にDownloaderも実行する(初回キャッシュ
         # 作成フローの統一)。取得・検証に失敗しても既存キャッシュで処理継続する。
@@ -198,6 +240,7 @@ def _collect_new_candidate_targets(
                     outcome.source,
                     outcome.reason,
                 )
+        universe_observation = _universe_observation(outcomes, now)
 
     providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
     universe_provider = build_candidate_universe_provider(config, now)
@@ -242,6 +285,9 @@ def _collect_new_candidate_targets(
         "universe_signature": _compute_universe_signature(
             collector_result.eligible_universe_count, collector_result.stock_codes
         ),
+        # Issue #223(O-A): provider!="jpx"ではDownloaderを走らせないため空dictで、
+        # set_watchlist_batch_total側の既定値(None)がそのまま残る。
+        **universe_observation,
     }
     logger.info(
         "watchlist dispatcher: staged_rollout applied candidate_limit=%s "

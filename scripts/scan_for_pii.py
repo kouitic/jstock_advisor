@@ -10,6 +10,12 @@ denylistは平文ではなくSHA-256ハッシュで保持する。このスク�
 文字列」に限定したdenylist方式であり、これを通過したからといって他の個人情報が
 一切存在しないことを保証するものではない。CLAUDE.mdの開発ルール
 (実在人物の氏名・個人メール等をそもそも記録しない)と併用すること。
+
+Git管理ファイル以外の公開面(Issue / PR の本文・コメント・タイトル、
+commit message等)を走査するための関数もここへ置く(Issue #131)。
+denylistを二重管理しないため、走査対象が違っても同じ_KNOWN_PII_HASHESと
+_candidate_tokens()を使う。ネットワークアクセスはこのモジュールでは行わない
+(取得は呼び出し側の責務。単体テストをfixtureだけで完結させるため)。
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ import hashlib
 import re
 import subprocess
 import sys
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 # 実際に本リポジトリへ混入したことが判明している既知の文字列のSHA-256
@@ -102,6 +110,115 @@ def scan(repo_root: Path, known_hashes: frozenset[str] | None = None) -> list[st
                 violating_paths.add(rel_path)
                 break
     return sorted(violating_paths)
+
+
+# 公開面の走査で使う検出理由。
+REASON_DENYLIST = "DENYLIST"
+REASON_EMAIL_PATTERN = "EMAIL_PATTERN"
+
+# 特定個人へ到達しない機械アドレス。メール様式の検出から除外する。
+#
+# `noreply@anthropic.com` はcommitのCo-Authored-By trailerとして**付与を
+# 義務づけている**値であり(CLAUDE.md / 開発ルール)、全commit messageに必ず
+# 現れる。除外しないとPRのcommit message走査が常に失敗し、警告が意味を
+# 失う(かつtrailerを消す是正は規約違反になるため直しようがない)。
+# GitHubのnoreplyドメインは、GitHub自身が個人メールを隠すために発行する
+# アドレスであり、露出させたくない実アドレスの反対物である。
+#
+# 除外は**この2系統に限定する**。個人が使う可能性のあるドメイン全体
+# (例: anthropic.com 全体)を除外すると、実アドレスの見逃し口になる。
+_NON_PERSONAL_EMAILS: frozenset[str] = frozenset({"noreply@anthropic.com"})
+_NON_PERSONAL_EMAIL_DOMAINS: frozenset[str] = frozenset(
+    {"users.noreply.github.com", "noreply.github.com"}
+)
+
+
+def _is_non_personal_email(address: str) -> bool:
+    normalized = address.strip().lower()
+    if normalized in _NON_PERSONAL_EMAILS:
+        return True
+    _, _, domain = normalized.rpartition("@")
+    return domain in _NON_PERSONAL_EMAIL_DOMAINS
+
+# ハッシュ接頭辞の長さ。所在の突き合わせに足りる範囲だけを出す。
+_HASH_PREFIX_LEN = 8
+
+
+@dataclass(frozen=True)
+class MetadataFinding:
+    """公開面で検出した1件。**一致した文字列そのものは保持しない。**
+
+    surface  走査した面(ISSUE_BODY / COMMIT_MESSAGE 等)
+    location 所在(Issue / PR 番号、comment id、commit の短縮SHA 等)
+    reason   REASON_DENYLIST / REASON_EMAIL_PATTERN
+    token_hash_prefix  一致トークンのSHA-256の先頭。突き合わせ用
+    """
+
+    surface: str
+    location: str
+    reason: str
+    token_hash_prefix: str
+
+
+def scan_texts(
+    items: Iterable[tuple[str, str, str]],
+    known_hashes: frozenset[str] | None = None,
+    *,
+    detect_email_pattern: bool = True,
+    apply_email_allowlist: bool = True,
+) -> list[MetadataFinding]:
+    """(surface, location, text)の並びを走査し、検出結果を返す。
+
+    denylist一致に加えて、メールアドレス様式を検出する(denylistに無い未知の
+    個人メールも公開面では拾えるようにするため)。電話番号・郵便番号・口座様式は
+    本リポジトリの自然文に4桁の銘柄コードや件数が多く現れfalse positiveが高いため
+    対象にしない(Issue #131 Phase A)。
+
+    メール様式のうち機械アドレス(_NON_PERSONAL_EMAILS /
+    _NON_PERSONAL_EMAIL_DOMAINS)は既定で除外する。`apply_email_allowlist=False`
+    で除外を切れる(除外そのものを検証するテスト用)。
+
+    戻り値は一致文字列を含まない。ログ・job summary・artifactのいずれへも
+    平文を出さない設計を、呼び出し側に依存せずここで保証する。
+    """
+    hashes = known_hashes if known_hashes is not None else _KNOWN_PII_HASHES
+    findings: list[MetadataFinding] = []
+    for surface, location, text in items:
+        if not text:
+            continue
+        seen: set[tuple[str, str]] = set()
+        for token in _candidate_tokens(text):
+            digest = _hash(token)
+            if digest in hashes:
+                key = (REASON_DENYLIST, digest[:_HASH_PREFIX_LEN])
+                if key not in seen:
+                    seen.add(key)
+                    findings.append(
+                        MetadataFinding(surface, location, REASON_DENYLIST, key[1])
+                    )
+        if detect_email_pattern:
+            for match in _EMAIL.finditer(text):
+                address = match.group(0)
+                if apply_email_allowlist and _is_non_personal_email(address):
+                    continue
+                digest = _hash(address)
+                key = (REASON_EMAIL_PATTERN, digest[:_HASH_PREFIX_LEN])
+                if key not in seen:
+                    seen.add(key)
+                    findings.append(
+                        MetadataFinding(surface, location, REASON_EMAIL_PATTERN, key[1])
+                    )
+    return findings
+
+
+def format_findings(findings: Iterable[MetadataFinding]) -> list[str]:
+    """報告用の行を組み立てる。**一致文字列を含めない。**"""
+    return [
+        f"  {f.surface} {f.location} reason={f.reason} hash_prefix={f.token_hash_prefix}"
+        for f in sorted(
+            findings, key=lambda f: (f.surface, f.location, f.reason, f.token_hash_prefix)
+        )
+    ]
 
 
 def main() -> int:

@@ -276,9 +276,15 @@ def test_set_record_date_recurrence_updates_existing_registration(
     assert updated.next_benefit_record_date == dt.date(2027, 3, 31)
 
 
-def test_get_refreshes_stale_next_record_date(
+def test_get_rederives_stale_next_record_date_without_persisting(
     service: ShareholderBenefitRegistryService,
+    repository: ShareholderBenefitRegistryRepository,
 ) -> None:
+    """読み取りは保存済みの派生値をそのまま返さず再導出するが、書き戻しはしない。
+
+    Issue #120以前は再導出結果を`repository.save()`していたため、読み取り専用IAMの
+    Lambdaで`AccessDeniedException`となりバッチ全体が停止した。
+    """
     service.register(
         stock_code="2914",
         min_shares_required=100,
@@ -294,14 +300,20 @@ def test_get_refreshes_stale_next_record_date(
     assert stored is not None
     assert stored.next_benefit_record_date == dt.date(2026, 3, 31)
 
-    # 2026-03-31を過ぎた後にgetすると、次回日付が2027-03-31へ更新されて保存される
+    # 2026-03-31を過ぎた後にgetすると、返却値は2027-03-31へ再導出される
     refreshed = service.get("2914", now=dt.datetime(2026, 4, 1, tzinfo=dt.UTC))
     assert refreshed is not None
     assert refreshed.next_benefit_record_date == dt.date(2027, 3, 31)
 
-    persisted = service.get("2914", now=dt.datetime(2026, 4, 1, tzinfo=dt.UTC))
-    assert persisted is not None
-    assert persisted.next_benefit_record_date == dt.date(2027, 3, 31)
+    # 何度読んでも同じ値が返る(再導出は決定的)
+    again = service.get("2914", now=dt.datetime(2026, 4, 1, tzinfo=dt.UTC))
+    assert again is not None
+    assert again.next_benefit_record_date == dt.date(2027, 3, 31)
+
+    # ただし保存値は書き換えない(読み取りは永続化を伴わない)
+    stored = repository.get("2914")
+    assert stored is not None
+    assert stored.next_benefit_record_date == dt.date(2026, 3, 31)
 
 
 def test_check_registry_health_always_logs_count_info(

@@ -55,12 +55,13 @@ def run_due_evaluations(
         market_data_provider=providers.market_data, config=config, business_calendar=calendar
     )
 
-    outcome = service.run_due_evaluations(now)
-    calendar_outcome = service.run_due_calendar_evaluations(
-        now, horizon_days=config.review_improvement.evaluation_horizon_days
+    # Issue #113: 営業日ホライズンと暦日ホライズンを1回の走査でまとめて処理する
+    # (以前は推奨コレクションを2回走査していた)。
+    outcome = service.run_due_evaluations_single_pass(
+        now, calendar_horizon_days=config.review_improvement.evaluation_horizon_days
     )
-    all_evaluated = outcome.evaluated + calendar_outcome.evaluated
-    all_skipped = outcome.skipped_due_to_data_error + calendar_outcome.skipped_due_to_data_error
+    all_evaluated = outcome.evaluated
+    all_skipped = outcome.skipped_due_to_data_error
     if not all_evaluated and not all_skipped:
         typer.echo("評価期限を迎えた推奨はありませんでした。")
         return

@@ -147,7 +147,7 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 | 08:00 | `daily_buy_candidates_analysis` | `jstock analyze buy-candidates <銘柄コード...> --source real --notify` | `BuyCandidatesFunction` | ウォッチリスト+保有銘柄を統合して買い判定(新規購入・買い増し)を行う(2026-07-31改訂)。全上場銘柄の自動スクリーニングではない |
 | 08:00 | `daily_holdings_watchlist_analysis` | `jstock analyze holdings --source real --notify` | `HoldingsWatchlistFunction` | 保有銘柄の利確・売却判定、ポートフォリオ集中チェック(2026-07-31改訂: 16:30から08:00へ変更。買い候補分析と処理条件・通知タイミングを揃えるため)。保有銘柄は全件自動対象 |
 | 10:00/12:30/15:30 | `disclosure_check` | `jstock analyze disclosure-check --source real --notify` | `DisclosureCheckFunction` | 保有銘柄の新規開示にリスクキーワードが検出された場合のみ速報通知する |
-| 18:00 | `point_in_time_evaluation` | `jstock evaluation run --source real` | `EvaluationFunction` | 評価期限(営業日数)を迎えた推奨のみ処理。通知機能は無く、結果はコンソール/CloudWatch Logs表示のみ |
+| 18:00 | `point_in_time_evaluation` | `jstock evaluation run --source real` | `EvaluationFunction` | 評価期限(営業日数)を迎えた推奨のみ処理。通知機能は無く、結果はコンソール/CloudWatch Logs表示のみ。Timeout 900秒(Issue #113。残時間に余裕を残して自主的に切り上げる) |
 
 ### 実行結果の確認ポイント
 
@@ -230,6 +230,41 @@ RUNNING → TIMEOUT_FINALIZING → TIMED_OUT
   失敗した一時的な状態。`WatchlistBatchReconcilerFunction`が次回(1時間後)の
   実行で自動的に再試行するため、通常は運用者の対応は不要です。長時間
   (数時間以上)この状態のままの場合はCloudWatch Logsのエラー内容を確認してください。
+
+**finalize-only recovery で通常通知が抑止されることについて(Issue #211、2026-09-08追加)**:
+`WatchlistBatchReconcilerFunction`は、全銘柄の評価が終わっているのに集計処理
+(finalize)まで進んでいない停滞バッチを検知すると、子Lambdaへ
+`recovery_action=FINALIZE_ONLY`のペイロードを送って集計だけをやり直させます
+(銘柄評価・Recommendation再生成・fanout等は行いません)。
+
+```
+★ この経路では、重大リスク以外の通常のLINE通知は **送られません**。
+  ブロック理由は `TRADE_DETECTION_IN_PROGRESS` として記録されます。
+```
+
+理由は、recoveryが**売買検知(`TradeCooldownService.detect_and_apply()`)を
+この実行では走らせていない**ためです。売買を検知した銘柄には通常通知の
+クールダウンが適用されますが、検知を走らせていない実行ではそのクールダウンが
+未適用のままになります。この状態で通常通知を送ると、**本来は抑止されるべき
+銘柄へ通知が出る**可能性があります。「検知完了を確認できていないなら送らない」
+(fail-close)が本システムの方針です。
+
+したがって運用上は次のように扱ってください。
+
+- recovery が走った日は、その batch 由来の通常通知が出ないことは **正常**です。
+  通知が来ないことを障害として扱わないでください。
+- 集計・監査記録(AuditLog / DecisionSnapshot 等)は通常どおり残ります。
+  判定結果を確認したい場合は `jstock audit show <銘柄コード>` を使ってください。
+- 通知が必要な場合は、次回のスケジュール起動(新しい`batch_id`で最初から)を
+  待ってください。recovery を再実行しても通知は出ません。
+- 重大リスク(`is_critical_risk`)の通知はこのゲートを貫通するため、
+  recovery 経路でも送られます。
+
+```
+★ 2026-09-08 より前は、この経路でも通常通知が送られていました
+  (ペイロードに検知状態が載っておらず、受け取り側が既定値 True =
+   「検知済み」として扱っていたため)。Issue #211 で fail-close へ是正しています。
+```
 
 **候補銘柄数の上限について**: 旧仕様にあった評価対象件数の上限(300件)は、
 候補ユニバース本格対応でSQSベースの銘柄単位処理へ全面的に作り直したことに伴い
@@ -487,6 +522,101 @@ Provider(`LightweightScreeningDataProvider`)も実装済みだが、
 (リスク影響・過学習リスク評価等の自由記述を要する)を自動生成しない
 (要求仕様45節の人間承認必須の原則のため)。実際の`rules backtest`/
 `rules propose`は利用者が手動で実行すること(第7節参照)。
+
+### 5.0 定点評価の監視とbacklog回復(Issue #113、2026-08-31追加)
+
+#### run summaryの読み方
+
+`EvaluationFunction`は実行のたびにCloudWatch Logsへ次の1行を出力する
+(**予算切れで途中終了した場合も必ず出力される**)。
+
+```
+evaluation_handler done: evaluated=N (business=N calendar=N) skipped=N
+  due_horizons=N already_evaluated=N pending_horizons=N pending_recommendations=N
+  backlog_remaining=N budget_exhausted=<bool> recommendations_scanned=N
+  missing=N provider_calls=N duration_ms=N
+```
+
+| 項目 | 意味 |
+|---|---|
+| `due_horizons` | 評価日が到来している(recommendation, horizon)の組の総数 |
+| `already_evaluated` | そのうち既に評価済みの数 |
+| `pending_horizons` | 未処理の数(= `due_horizons - already_evaluated`) |
+| `backlog_remaining` | **この実行の後に残った未処理数**。0でなければ回復途中 |
+| `budget_exhausted` | 残時間が尽きて自主的に切り上げたか |
+| `provider_calls` | 外部株価APIへ実際に到達した回数(runスコープのキャッシュ後) |
+
+**監視の要点**: `backlog_remaining`が**実行を重ねても減らない/増える**場合は、
+1回あたりの処理能力が新規流入(推奨の増加ペース)を下回っている。
+この場合はTimeout・providerレイテンシ・pending件数を確認すること。
+
+途中経過は `evaluation scan done:` と `evaluation progress:`(500件ごと)で
+追跡できる。以前は`START`〜`REPORT`の間にアプリケーションログが1行も出ず、
+どこまで進んだか追跡できなかった。
+
+#### CloudWatch Alarm
+
+| Alarm | 条件 |
+|---|---|
+| `<stack>-evaluation-errors` | `Errors >= 1`(**Lambdaのタイムアウトもここに計上される**) |
+| `<stack>-evaluation-duration` | `Duration >= 720,000ms`(Timeout 900秒の80%) |
+
+**通知先(SNS/LINE/GitHub)は設定していない**ため、`AlarmActions`は空である。
+現時点ではCloudWatchコンソールでAlarm stateを確認する運用とする。
+
+#### run summaryの監査ログへの記録(Issue #114 Phase B1、2026-09-02追加)
+
+上記のrun summaryは、CloudWatch Logsに加えて**監査ログへも保存される**。
+
+```
+保存先        jstock-audit_log
+decision_type evaluation_run_summary
+audit_id      evaluation_run_summary:<run開始時刻のISO8601>
+```
+
+CloudWatch Logsは検索が手間で保持期間の制約もあるため、
+「いつの実行で、backlogがどこまで減ったか」を後から永続データとして
+追跡できるようにしたもの。記録内容は上表のrun summary全項目に加え、
+`run_started_at` / `run_completed_at` / `run_status`
+(`COMPLETED` または `BUDGET_EXHAUSTED`)。
+
+**保証範囲(重要)**
+
+| 実行の終わり方 | 監査ログへの記録 |
+|---|---|
+| 正常完了 | される |
+| 時間予算による自主終了 | される(`run_status=BUDGET_EXHAUSTED`) |
+| **メモリ不足(OOM)・タイムアウト** | **されない場合がある** |
+
+OOM・タイムアウトではLambdaのプロセスが強制終了され、記録処理まで到達できない。
+**この検知は上記のCloudWatch Alarm(`<stack>-evaluation-errors`)の役割**である
+(OOMもタイムアウトも`Errors`に計上される)。したがって
+「監査ログに記録が無い」ことをもって「backlogが無い」と解釈してはならない。
+
+**監査ログへの保存に失敗した場合**
+
+評価そのもの(EvaluationResultの保存)は既に成功しているため、
+**保存失敗でLambdaを失敗させない**(失敗させると自動リトライで
+評価処理全体が不要に再実行されるため)。失敗時は次のように表れる。
+
+```
+ERRORログ         event=evaluation_run_summary_persist_failed ...
+Lambdaの戻り値    "audit_persisted": false
+```
+
+`audit_persisted` が `false` の実行は、評価結果自体は正常だが
+監査記録だけが欠けている状態である。
+
+Lambdaが自動リトライした場合、各リトライは`run_started_at`が異なるため
+**それぞれ別の実行として記録される**(最後の試行の状態を見ること)。
+
+#### backlog回復期間中の注意
+
+未処理分は**古い推奨から順に消化される**。評価値は基準日の株価から計算されるため
+遅れて処理しても結果は変わらないが、**週次改善レビュー(5.1節)は
+「前週に結果が確定した分」を集計する**ため、回復期間中はその週の集計件数が
+一時的に大きく膨らむ。**回復期間中の週次レビュー結果を、通常の週と同じ意味で
+比較しないこと**(`docs/functional_spec.md` 12.4節参照)。
 
 ### 5.1 GitHub Issue自動起票の設定(振り返り機能改修、2026-08追加)
 
@@ -1495,3 +1625,674 @@ jstock valuation-shadow export --output shadow.jsonl --summary shadow_summary.cs
   使用可否・理由コードがhistorical factです)
 - shadow価格(shadow_entry_price等)は仮説anchor×判定時点の保存済み
   安全余裕率による参考値であり、約定・到達の判定には使いません
+
+---
+
+## 18. read-only観測・health checkにおける副作用確認(Issue #120、2026-09-02追加)
+
+### 18.1 なぜ必要か
+
+2026-09-02 08:00 JSTに、買い候補判定・保有銘柄判定の日次バッチが**両方とも
+1銘柄も処理せずに停止**する障害が発生した。当日の判定・LINE通知はいずれも
+0件だった(データ破壊・誤判定は無し。「何も出さなかった」障害)。
+
+原因は、バッチ開始時に呼ぶ株主優待レジストリの健全性チェックが、
+名前上は読み取りAPIである `list_all()` を呼び、その内部で権利確定日の
+再計算結果を `repository.save()`(DynamoDB PutItem)へ書き戻していたこと。
+両Lambdaは当該テーブルへ**読み取り専用IAM**しか持たないため
+`AccessDeniedException` となり、dispatch前にバッチ全体が落ちた。
+
+書き戻しは「再計算値が保存値と異なるとき」だけ発生するため、権利確定日が
+繰り上がる日付境界を越えた日に初めて顕在化した。**同じコード・同じIAMのまま、
+日付だけで発火する**タイプの障害である。
+
+### 18.2 恒久ルール
+
+**実行するコマンドやメソッドの名称がread系だからという理由で、
+安全(read-only)と判断してはならない。**
+
+Production read-only verification、health check、validation、
+IAM least-privilege設計を行う際は、**呼び出し先まで含めて**次の副作用が
+無いことを確認する。
+
+| 確認対象 | 具体例 |
+|---|---|
+| repository層の状態変更 | `save` / `upsert` / `update` / `delete` |
+| DynamoDB | `PutItem` / `UpdateItem` / `DeleteItem` / `BatchWriteItem` / `TransactWriteItems` |
+| S3 | `PutObject` / `DeleteObject` |
+| キュー・非同期 | SQS `SendMessage` / SNS `Publish` / Lambda `Invoke` |
+| 外部送信 | LINE Messaging APIへの送信 |
+
+確認は名前の1段スキャンでは不十分である。**Issue #120の実バグは、
+read-like名の関数から1段だけ辿っても検出できなかった**
+(`list_all()` → `_refresh_and_persist()` → `save()` と、write動詞を持たない
+privateヘルパを1段挟んでいたため)。推移的に辿ること。
+
+### 18.3 設計時の要求
+
+- read-onlyと定義した処理にhidden writeを持たせない。
+- 書き込みを伴う場合は、**API契約・名称・IAM・テスト**からその事実が
+  判別できるようにする(例: `get_or_create_*` のように名称へ表す)。
+- 観測・健全性チェックの類は、失敗しても本体処理を止めない(fail-soft)。
+  ただし**沈黙させない**。件数等が取得できなかった事実を構造化ログへ残す。
+- fail-softの対象は観測処理自身の失敗に限る。**判定に必要なデータの取得失敗まで
+  握り潰さない**(business dataの取得失敗は従来どおり銘柄単位で失敗として扱う)。
+
+### 18.4 IAM設計との関係
+
+新しいテーブルへの権限を設計する際は、11節(テーブル追加時の注意)に加えて、
+そのLambdaが到達しうる**すべてのコードパス**の副作用を確認したうえで
+最小権限を決める。read-onlyで足りるはずの経路にwriteが混ざっている場合、
+権限を足すのではなく**その経路のwriteを外せないか**を先に検討する
+(Issue #120では、書き戻していた値が純粋な派生値であり永続化する価値が
+無かったため、IAMを広げずに読み取り側の書き込みを除去した)。
+
+## 19. 本番シークレットのローテーション手順(Issue #117 Phase R1、2026-09-05追加)
+
+### 19.0 なぜ手順が必要か(この節の前提)
+
+Secrets Managerの値を更新しただけでは、**Lambdaは新しい値を使わない。**
+
+```
+credential再発行
+  -> Secrets Managerを更新
+  -> コード無変更でデプロイ
+  -> CloudFormationが「変更なし」と判定
+  -> dynamic referenceが再解決されず、Lambdaは旧credentialのまま
+```
+
+CloudFormationのdynamic referenceは、**それを含むリソースが更新されるときにしか
+再解決されない**ためである。表面上はデプロイが成功するため、この状態は
+気づかれないまま継続しうる。
+
+Phase R1では、秘密と同じEnvironmentブロックへ**非秘密のマーカー**を置き、
+ローテーション時に運用者が明示的にその値を変えることでリソース更新を強制する。
+
+```
+LineCredentialRotationVersion     -> LINE_CREDENTIAL_ROTATION_VERSION
+EdinetCredentialRotationVersion   -> EDINET_CREDENTIAL_ROTATION_VERSION
+```
+
+```
+通常のデプロイ      マーカーを変えない -> 再解決を意図しない
+ローテーション時    マーカーを明示的に変える -> 再解決を強制する
+```
+
+マーカーは非秘密である。**秘密値・トークン・キーを絶対に入れない**
+(この値は環境変数として平文で残り、`describe-stacks`等からも見える)。
+
+### 19.1 この仕組みの既知の性質(手順の前に必ず理解すること)
+
+#### 全Lambda関数が更新対象になる
+
+LINE・EDINETの秘密は`Globals`のEnvironmentに置かれているため、
+**どちらのマーカーを変えても全Lambda関数が更新対象になる。**
+これは現アーキテクチャ上の制約であり、恒久対策(実行時取得方式)で解消する。
+マーカーの目的は更新対象を絞ることではなく、**再解決が確実に起きること**と
+**着地を非秘密の値で確認できること**である。
+
+#### 他の秘密も同時に再解決される
+
+全関数が更新されるため、Webhook署名検証用の秘密(ローテーション対象外)も
+同時に再解決される。値を変更していなければ結果は同じ値であり実害は無いが、
+**Secrets Manager側に意図しない未反映の変更が残っていると、それも一緒に
+本番へ入る。** ローテーション前に、対象外の秘密について未反映の変更が無いことを
+確認する。
+
+#### R1自体のデプロイでも一度再解決が起きる
+
+マーカー環境変数の追加はEnvironmentの変更であるため、**R1を本番へ入れる
+デプロイ自体が一度の再解決を伴う。** これは仕組みが動くことの証明にもなるが、
+「Secrets Managerの現在値が本番へ入る」ことを意味する。R1のデプロイ前に、
+各シークレットの現在値が意図した稼働中の値であることを確認する。
+
+### 19.2 共通のHuman Gate(R2で必須)
+
+以下は**それぞれ別の承認**として扱う。まとめて1回の承認にしない。
+
+```
+1  credential再発行の承認        ★ 巻き戻せない操作の直前に必ず置く
+2  Secrets Manager更新の承認
+3  ChangeSet CREATEの承認
+4  そのexact ChangeSetのEXECUTE承認   CREATE != EXECUTE
+```
+
+```
+LINEとEDINETを同一波でローテーションしない。
+失敗時にどちらが原因か切り分けられなくなるため。
+```
+
+### 19.3 LINEチャネルアクセストークンのローテーション
+
+本システムのトークンは**長期チャネルアクセストークン(long-lived)**である
+(2026-09-04に確認)。公式仕様上の性質は次のとおり。
+
+```
+同時に有効なトークンは1つだけ
+再発行すると現行トークンは無効化される
+ただし再発行時に、現行トークンの有効期間を**最大24時間延長**できる
+```
+
+```
+★ 延長を選ばずに再発行すると、新しい値が本番へ着地するまでLINE通知が
+  全面停止する。延長の選択は独立したチェック項目として扱う。
+```
+
+手順。
+
+```
+1   Human Gate: 再発行の承認を得る
+2   コンソールで再発行する。このとき **現行トークンの有効期間を延長する**
+    (延長を選んだことを、次へ進む前に確認する)
+3   Human Gate: Secrets Manager更新の承認を得る
+4   Secrets Managerの該当シークレットを新しい値へ更新する
+    -> 入力方法は19.6を必ず参照(コマンド引数へ値を書かない)
+5   LineCredentialRotationVersionを**明示的に別の値へ変更**する
+    (例: 単調増加する整数。日付や連番でよい。秘密は入れない)
+6   Human Gate: ChangeSet CREATEの承認を得る
+7   ChangeSetをCREATEし、差分を確認する
+    -> Lambda関数がModifyになっていること(NO_CHANGESなら19.5-Cへ)
+    -> Replacementが発生していないこと
+    -> 意図しないリソースが含まれていないこと
+8   Human Gate: **そのexact ChangeSet**のEXECUTE承認を得る
+9   EXECUTEする
+10  着地確認: LINE_CREDENTIAL_ROTATION_VERSIONが新しい値になっていること
+    -> 確認方法は19.6(環境変数を全件出力しない)
+11  疎通確認: LINE通知が実際に送れること
+    -> 延長した24時間が切れる前に完了させる
+```
+
+### 19.4 EDINET APIキーのローテーション
+
+公式仕様(EDINET API仕様書 Version 2)上の性質。
+
+```
+再発行すると再発行前のAPIキーは無効化される
+新旧の併存はできない
+旧キーへ戻す手段が無い(復旧は前進のみ)
+```
+
+```
+★ LINEと違い、有効期間の延長に相当する猶予が無い。
+  再発行した瞬間から、新しい値が着地するまでEDINET取得は失敗する。
+  したがって「戻せる状態を先に作ってから再発行する」順序にする。
+```
+
+手順。
+
+```
+1   ローテーション時間帯を決める(日次バッチと重ならない時間にする)
+2   Secrets Manager更新とマーカー変更以外の準備を先に済ませる
+3   Human Gate: 再発行の承認を得る ★ここから先は巻き戻せない
+4   コンソールで再発行する(確認ダイアログでOKを押した時点で旧キーは無効)
+5   Human Gate: Secrets Manager更新の承認を得る
+6   Secrets Managerの該当シークレットを新しい値へ更新する(19.6参照)
+7   EdinetCredentialRotationVersionを明示的に別の値へ変更する
+8   Human Gate: ChangeSet CREATEの承認を得る
+9   ChangeSetをCREATEし、19.3-7と同じ観点で差分を確認する
+10  Human Gate: そのexact ChangeSetのEXECUTE承認を得る
+11  EXECUTEする
+12  着地確認: EDINET_CREDENTIAL_ROTATION_VERSIONが新しい値になっていること
+13  疎通確認: EDINETからの取得が成功すること
+```
+
+### 19.5 失敗パターンと復旧
+
+```
+ROLLBACK = FORWARD_FIX を基本とする。
+```
+
+credentialは「元に戻す」ことができない場合がある(EDINETは常に不可、LINEは
+延長期間を過ぎると不可)。**CloudFormationのアーティファクトのロールバックと、
+credentialのロールバックを混同しない。** スタックを前のバージョンへ戻しても、
+無効化された旧credentialは復活しない。
+
+```
+A  再発行は成功したが、Secrets Managerの更新に失敗した
+   -> 新しい値は手元にある。更新をやり直す。
+      再発行はやり直さない(やり直すと今の値も無効になる)
+
+B  Secrets Manager更新は成功したが、ChangeSet CREATEに失敗した
+   -> 前進して再試行する。Secrets Managerを元に戻さない
+      (旧credentialは既に無効であり、戻しても復旧しない)
+
+C  ChangeSetがNO_CHANGESになった
+   -> ★ R1の設計上これは異常。マーカーの変更が効いていない可能性がある。
+      次を確認する。
+        マーカーの値を実際に前回と違う値にしたか
+        マーカーを渡すパラメータ名が正しいか
+        既定値のまま何も渡していないのではないか
+      EXECUTEへ進まない。原因を特定するまで停止する
+
+D  デプロイに失敗した
+   -> スタックの状態を確認し、前進して修正する。
+      credentialは既に切り替わっているため、アーティファクトだけを
+      戻しても復旧しない点に注意する
+
+E  疎通確認に失敗した
+   -> まず着地確認(マーカーの値)を見る。
+      マーカーが新しい値なら再解決は起きている
+        -> Secrets Managerへ入れた値そのものを疑う
+      マーカーが古い値のままなら再解決が起きていない
+        -> Cと同じ調査へ進む
+      LINEの場合、延長した24時間が残っているうちに切り分ける
+```
+
+### 19.6 セキュリティのガードレール
+
+現アーキテクチャでは秘密がLambdaの環境変数へ平文で入る。したがって
+**確認作業そのものが漏洩経路になりうる。**
+
+```
+禁止  Lambdaの構成を全件出力すること
+      (環境変数がそのまま出力され、秘密が端末・履歴・ログへ残る)
+必須  必要なフィールドだけを --query 等で絞って取得する
+      着地確認で必要なのはマーカーの値だけであり、他の環境変数は不要
+```
+
+```
+禁止  通常の確認作業でSecrets Managerの値そのものを取得すること
+      (SecretString / SecretBinary を読み出さない)
+      値が正しいかは「疎通するか」で確認する
+```
+
+```
+禁止  秘密値をコマンドの引数に書くこと(シェル履歴へ残る)
+推奨  次のいずれか
+        コンソールのSecrets Manager画面で値を入力する(履歴が残らない)
+        やむを得ずCLIを使う場合は、権限を絞った一時ファイルから読み込み、
+        作業後にそのファイルを確実に削除する
+      いずれの場合も、値を画面へ表示させない
+```
+
+```
+禁止  秘密値を次へ書くこと
+        Issue / PR / コミットメッセージ / CIログ / スクリーンショット
+        設定ファイル / テストのfixture / この手順書
+```
+
+```
+マーカーの値には秘密を入れない。
+マーカーは平文で残ることを前提とした非秘密の版数である。
+```
+
+---
+
+## 20. DynamoDBの復旧手順(Issue #137、2026-09-05追加)
+
+### 20.1 何が設定されているか
+
+Phase Aのデータ分類にもとづき、**失うと再生成できないデータを持つ37テーブル**へ
+次の4つを`infra/template.yaml`で設定している(手動設定は行わない)。
+
+```
+PointInTimeRecoverySpecification   直近35日への時点復元
+DeletionProtectionEnabled          DeleteTable自体の禁止
+DeletionPolicy: Retain             stack削除・template除去で実体を残す
+UpdateReplacePolicy: Retain        置換時に古い実体を残す
+```
+
+cache(外部から再取得可能)と一時状態(ロック・claim・進捗・VALIDATION専用)の
+17テーブルには**意図的に付けていない**。
+
+```
+★ 一時状態は「復元してはいけない対象」である。
+  ロック・claimを過去時点へ戻すと、取得済みロックの復活や
+  送信済み通知の再送といった二次障害を起こす。
+```
+
+分類はテストで固定している(`tests/unit/test_infra_issue_137_dynamodb_data_protection.py`)。
+新しいテーブルを追加すると、保護を付けるか対象外リストへ入れるまでテストが落ちる。
+
+### 20.2 4つの機能の違い(混同しない)
+
+| 機能 | 効く契機 | 守る対象 |
+|---|---|---|
+| PITR | 復元操作 | 直近35日の**内容** |
+| DeletionProtectionEnabled | DeleteTable | **テーブル自体** |
+| `DeletionPolicy: Retain` | stack削除 / templateから定義を外す | 実体を残す |
+| `UpdateReplacePolicy: Retain` | 置換が発生したとき | **古い方**を残す |
+
+互いの代替にはならない。
+
+### 20.3 復旧目標
+
+```
+RPO_TARGET                  約5分
+RESTORE_POINT_GRANULARITY   1秒
+RTO_TARGET                  3時間以内
+BUSINESS_TARGET             可能なら次の08:00 JSTの営業バッチまでに復旧する
+```
+
+RPOが「秒単位」ではなく約5分なのは、PITRの**最新復元可能時刻が現在時刻より
+数分前**になるためである。復元時刻は1秒刻みで選べるが、直前数分ぶんは戻らない。
+
+```
+3時間はJstock側の運用目標であり、AWSが保証する値ではない。
+```
+
+### 20.4 復元の前提(必ず読む)
+
+```
+RESTORE_MODE = NEW_TABLE_ONLY
+```
+
+PITRの復元は**常に新しいテーブルを作る**。既存テーブルへのin-placeロールバックは
+できない。したがって「PITRをONにすればワンクリックで戻せる」は誤りであり、
+復元後のcutoverまでが手順である。
+
+復元先テーブルへ**引き継がれない**もの。
+
+```
+PITR設定 / DeletionProtectionEnabled / TTL / タグ / stream /
+auto scaling / resource policy / CloudWatchアラーム
+既存ARNを参照するIAM・アプリ設定も自動追従しない
+```
+
+本システムはテーブル名を`<接頭辞>-<論理名>`として単一の環境変数から解決している。
+接頭辞は54テーブル共通のため、**接頭辞の切替による復旧は使えない**
+(1テーブルだけ戻したい場合でも全テーブルが切り替わる)。
+
+### 20.5 テーブル横断の整合性
+
+```
+SHARED_RESTORE_POINT_REQUIRED = YES
+```
+
+購入・売却の確定処理は、取引・購入ロット・保有の**3テーブルを1回の
+TransactWriteItemsで同時に書いている**。したがって関連テーブルを別々の復元時刻へ
+戻すと、書き込み時には存在し得なかった不整合が生まれる。
+
+```
+関連テーブルを別々のrestore timestampへ戻すことは標準手順として禁止する。
+```
+
+復元後は最低限、次をread-onlyで検証する。
+
+```
+取引の累積と購入ロットの整合
+購入ロットと保有の整合(数量・金額の不変条件)
+orphanレコードの有無(片側にしか存在しない関連)
+3テーブルが同一の復元時刻であること
+```
+
+### 20.6 復元drillの手順(実施は別Human Gate)
+
+Production を直接巻き戻さない。隔離したテーブルへ復元して検証する。
+
+```
+PRECONDITION
+  対象テーブルでPITRが有効
+  Human の drill 承認を取得済み
+  Production の変更が無い時間帯であること
+
+RESTORE_TIMESTAMP
+  latest restorable time を確認し、その値以前の時刻を選ぶ
+  障害復旧の場合は「事象発生の直前」を選ぶ
+
+RESTORE_TARGETS
+  トランザクション整合グループ(取引・購入ロット・保有)は必ずまとめて扱う
+
+SHARED_RESTORE_POINT
+  対象テーブルすべてへ同一の復元時刻を指定する
+
+RESTORE_DESTINATION
+  本番と衝突しない名前の新規テーブルへ復元する
+  例: <接頭辞>-restoredrill-<論理名>-<日時>
+
+NETWORK/ACCESS_ISOLATION
+  復元先はアプリから参照しない。CLIのread-only検証のみ
+  Lambda の環境変数・接頭辞は変更しない
+
+NO_PRODUCTION_TRAFFIC
+  本番テーブルへは一切書き込まない
+
+SCHEMA_VALIDATION      キー構成・GSI・属性の型
+ITEM_COUNT_VALIDATION  件数が復元時刻の期待と矛盾しないこと
+BUSINESS_KEY_VALIDATION 主キーの重複・欠落・必須項目の欠落
+CROSS_TABLE_CONSISTENCY 20.5の検証を実施する
+
+TTL_RECONFIGURATION                復元先はTTLが無効。必要なら設定し直す
+TAG_RECONFIGURATION                タグは引き継がれない
+STREAM_RECONFIGURATION             streamは引き継がれない
+PITR_RECONFIGURATION               復元先のPITRは無効
+DELETION_PROTECTION_RECONFIGURATION 復元先の削除保護は無効
+
+CUTOVER_OPTIONS                    20.7を参照
+ROLLBACK
+  本番へ書き戻す場合は、実施直前に現状のon-demand backupを取得してから始める
+CLEANUP
+  drill用テーブルを削除する(保管コストを残さない)
+EVIDENCE
+  実施日時・復元時刻・検証結果・所要時間をIssueへ記録する
+```
+
+```
+drillで確認したいのは「復元できること」ではなく、
+「復元してから通常運用へ戻すまでの手順が実際に成立すること」である。
+```
+
+### 20.7 実際の復旧時のcutover方針
+
+```
+第一候補  復元専用テーブルへ復元 → 検証 → 必要なレコードだけ本番へ書き戻す
+```
+
+利用者所有データは規模が小さいため、この方式が現実的である。CloudFormationの
+管理下から外れるテーブルが生じない点でも安全である。
+
+```
+本番テーブルへの書き戻しは PRODUCTION_DATA_MUTATION であり、別のHuman Gateが要る。
+runbookに書いてあることは実行してよいことを意味しない。
+```
+
+「本番テーブルを丸ごと復元テーブルへ切り替える」方式は標準にしない
+(接頭辞が全テーブル共通であり、CloudFormationの管理とも整合しないため)。
+
+### 20.8 直前数分ぶんの取りこぼし
+
+```
+RECENT_WRITE_RECONCILIATION_REQUIRED = YES
+```
+
+PITRの最新復元可能時刻には遅れがあるため、障害直前の数分間の更新は復元されない
+可能性がある。復旧時は次を確認する。
+
+```
+1  事象の開始時刻を特定する
+2  latest restorable time を確認する
+3  その差分(gap window)を明示する
+4  gap window中に利用者操作があったかを確認する
+   LINEの操作履歴・CloudWatch Logs・取引履歴などから追跡できる範囲で確認する
+5  復元されなかった操作があれば、利用者へ再登録を依頼する
+6  再登録の内容と実施をIssueへ記録する
+```
+
+実データ(銘柄・数量・単価・氏名)は記録・引用しない。
+
+### 20.9 テーブル置換が必要な変更を行うとき
+
+```
+「とりあえずDeletion Protectionを無効化する」を標準手順にしてはならない。
+保護を自動で外す運用にすると、保護が実質的に無効になる。
+```
+
+置換が必要かどうかは、変更するpropertyがreplacementを要求するかで決まる。
+すべての更新が置換になるわけではない。次の順で確認する。
+
+```
+1  その変更に本当にreplacementが必要か(別の手段で目的を達成できないか)
+2  対象がauthoritative dataか(失うと再生成できないか)
+3  PITR・backupの状態を確認する
+4  依存するconsumer(Lambda・IAM・CLI)を洗い出す
+5  TableNameを明示指定していることによる制約を確認する
+   同名テーブルを同時に存在させられないため、置換の可否に影響する
+6  ChangeSetを作成し、実際にreplacementが起きるかを確認する
+7  Human Gate(ここまでは調査。ここから先は承認が要る)
+8  replacementが避けられない場合のみ、そのケース固有の移行手順を設計する
+9  移行後の検証(20.5と同じ整合性チェック)
+10 古い実体のcleanupは別のHuman Gate(Retainにより自動削除されない)
+```
+
+```
+TEMPORARY_DISABLE_REQUIRED = CASE_SPECIFIC
+```
+
+Deletion Protectionの一時解除が必要なケースが**実在すると確認できた場合にのみ**、
+そのケース限定の手順として設計する。一般則にはしない。
+
+### 20.10 今回入れていないもの
+
+```
+SCHEDULED_ON_DEMAND_BACKUP = NO
+AWS_BACKUP_PLAN            = NO
+CROSS_ACCOUNT_COPY         = NO
+CROSS_REGION_COPY          = NO
+```
+
+PITRの35日で開始し、必要性は実績で判断する。35日を超える保管や、
+AWSアカウント侵害への耐性(別アカウントへの退避)が必要になった場合の拡張点として
+記録しておく。
+
+```
+★ 現在の保護は「誤操作・不具合」には有効だが、
+  「credential侵害」には十分でない。
+  同一アカウント内の強い権限を持つprincipalは、primaryもbackupも消せる。
+  この点は Issue #133 / #164 の解消と合わせて評価する。
+```
+
+PITRの課金は保存量に比例するため、保持期間の設計(Issue #138)と足並みを揃える。
+
+---
+
+## 21. 公開面へ個人情報が混入した場合の是正手順(Issue #131、2026-09-06追加)
+
+本リポジトリはPUBLICである。**Git管理ファイルだけでなく、commit message、
+Issue / PR の本文とタイトル、コメント、label、branch名も、そのまま
+インターネットへ公開される。**
+
+公開面へ書く前の遵守事項は
+[user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md)
+11節が正本である。本節はそこを通り抜けて**露出してしまった後**の手順を扱う。
+
+### 21.1 検出経路
+
+| 経路 | 対象 | 実行契機 | 失敗したとき |
+| --- | --- | --- | --- |
+| `pii-scan` ジョブ | Git管理ファイルの内容 | 全push / PR | PRが止まる |
+| `pii-scan-commit-messages` ジョブ | そのPRが持ち込むcommit message | PR | PRが止まる |
+| `pii-metadata-audit` workflow | Issue / PR の本文・タイトル、コメント、label、branch名 | 日次(06:10 JST)+ 手動 | 通知のみ。PRは止まらない |
+
+手動実行は Actions タブの `PII metadata audit` から `Run workflow`
+(`workflow_dispatch`)。ローカルからは以下(read-onlyであり書き込みは行わない)。
+
+```bash
+python scripts/audit_public_metadata_pii.py kouitic/jstock_advisor
+python scripts/scan_commit_messages_pii.py "<base>..<head>"
+```
+
+いずれも `scripts/scan_for_pii.py` の denylist を共有し、**一致した文字列は
+出力しない**(面 / 所在 / 検出理由 / ハッシュ接頭辞のみ)。是正の際もこの
+表現のまま扱い、値そのものを報告・Issueコメント・chatへ再掲しないこと。
+
+```
+★ denylist方式であり、全てのPIIを検出できる保証はない。
+  検出は事後の網であって、事前防止の代わりにはならない。
+  日次監査は「露出から検知まで最大で24時間かかる」ことを意味する。
+```
+
+commit trailer の `noreply@anthropic.com` とGitHubの `*.noreply.github.com` は
+特定個人へ到達しない機械アドレスであり、メール様式の検出から除外している
+(付与が義務づけられており、検出しても是正できないため)。除外はこの2系統に
+限定してあり、ドメイン全体は除外していない。
+
+### 21.2 検出したらまず行うこと
+
+1. **影響範囲を確定する。** どの面 / どの所在(Issue番号・comment id・
+   commit SHA・branch名) / いつ公開されたか。
+2. **露出時間を見積もる。** 投稿時刻から現在まで。日次監査での検出なら
+   最大で1日ぶん遡る。
+3. **21.3 の是正と 21.4 の不可逆性を「両方」評価する。**
+   本文を直しただけでは終わらない。
+
+### 21.3 面ごとの是正手順
+
+| 面 | 手順 | 残るもの |
+| --- | --- | --- |
+| Issue / PR の本文・コメント | 該当箇所を架空値(「所有者A」等)へ編集 | **編集履歴** |
+| Issue / PR のタイトル | 同上 | **編集履歴** |
+| label | rename ではなく削除して作り直す(renameは名前の履歴を残す) | 付与されていたIssueのタイムライン |
+| branch名 | 新しい名前でbranchを作成してpushし、旧branchを削除 | PRのタイムラインに旧head branch名、dangling commit |
+| commit message | history rewrite が必要。**mainに対しては原則行わない** | rewrite前のcommitがforkやcloneに残る |
+
+commit message の是正は force push を伴い、他の作業者の作業branchを壊す。
+**作業AIは単独で実行しない**(21.5)。未mergeかつ自分だけが使っているbranchで
+あっても、実行前に人間の判断を得ること。
+
+### 21.4 不可逆性(必ず理解しておくこと)
+
+「編集すれば消える」は**誤り**である。編集後も次が残る。
+
+- **編集履歴。** Issue / PR / コメントの edit history は、書き込み権限の無い
+  閲覧者にも表示される。編集前の本文がそこに残る。
+- **通知メール。** 投稿時点で watcher へ配信済みであり、取り消せない。
+- **外部の複製。** 検索エンジンのcache、GHArchive等の公開アーカイブ、
+  各種ミラー・スクレイパ。GitHubの管轄外であり、GitHub側を消しても消えない。
+- **fork / clone。** commit は他者の手元に残る。
+
+したがって是正の目的は「無かったことにする」ではなく、
+**追加の露出を止め、残存経路を人間が把握したうえで判断できる状態にする**
+ことである。
+
+### 21.5 Human escalation の境界
+
+作業AIが単独で行ってよいこと。
+
+- 検出の報告(面 / 所在 / 検出理由 / ハッシュ接頭辞のみ)
+- **自分が**作成した未mergeのPR本文・**自分の**コメントの編集
+- **自分が**作成し、まだ他者が使っていないbranchの作り直し
+
+必ず人間の判断を仰ぎ、AIが単独で実行しないこと。
+
+- 他者が作成したIssue / PR / コメントの編集・削除
+- Issue / PR そのものの削除
+- history rewrite(force push)、mainへの介入
+- GitHub Support への削除依頼(21.6)
+- リポジトリのPRIVATE化
+- 露出の事実をどこまで公表するかの判断
+
+判断を仰ぐ際も、値そのものを書かない。所在とハッシュ接頭辞で示す。
+
+### 21.6 GitHub Support への削除依頼の要否
+
+依頼が要るのは「**GitHub側にしか残っておらず、こちらの操作では消せない複製**」
+を消す場合である。
+
+依頼で消せる可能性があるもの。
+
+- 編集履歴(edit history)
+- 削除済みbranch / fork に残る dangling commit
+  (SHAを直接指定するURLで到達できる)
+
+依頼でも消せないもの。
+
+- 検索エンジンのcache、GHArchive等の外部アーカイブ、他者のclone
+
+```
+依頼する    実在人物の氏名・個人メールアドレス・住所・電話番号など、
+            本人へ到達しうる情報が公開面へ出た場合(人間が実施する)
+依頼しない  架空値・銘柄コード・ハッシュ接頭辞・内部の状態値のみの場合
+```
+
+依頼文へ露出した値そのものを書かない。**URLと所在で示す**
+(依頼文自体がGitHubのサポート系統へ残るため)。
+
+### 21.7 事後
+
+- 再発防止をIssueとして起票する。3つの検出経路(21.1)のどれが漏らしたか、
+  事前防止(11節)のどこを通り抜けたかを記録する。
+- denylistへ追加する場合は `scripts/scan_for_pii.py` の `_KNOWN_PII_HASHES` へ
+  **SHA-256ハッシュのみ**を追加する。平文をリポジトリへ書かない
+  (ハッシュ値の計算はGit管理外のローカルで行う)。denylistは
+  `pii-scan` / `pii-scan-commit-messages` / `pii-metadata-audit` の
+  3経路が共有するため、追加は1箇所で足りる。
