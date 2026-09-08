@@ -2376,3 +2376,67 @@ commit message の是正は force push を伴い、他の作業者の作業branc
   (ハッシュ値の計算はGit管理外のローカルで行う)。denylistは
   `pii-scan` / `pii-scan-commit-messages` / `pii-metadata-audit` の
   3経路が共有するため、追加は1箇所で足りる。
+## 22. 投資仮説 baseline の pointer 不整合の復旧(Issue #272、2026-09-09追加)
+
+保有判断が「その保有だけ永久に止まる」状態になる原因の 1 つが、
+投資仮説 baseline の **pointer 不整合**である。
+
+```
+(A) pointer が無く、baseline の履歴だけがある
+(B) pointer はあるが、指す baseline が見つからない / version が食い違う
+```
+
+いずれも `get_active_baseline()` が integrity_error を返し、保有判断はその時点で
+打ち切られる。**通常経路では復旧しない**(pointer を作る `activate_baseline()` は
+integrity_error の early return より後にあるため、何度実行しても到達しない)。
+
+### 22.1 どう気づくか
+
+**新しい alert は無い。既に見えている。**
+該当保有は毎日の BATCH_SUMMARY 通知に **failed として対象つきで**現れる
+(`evaluation_status = ANALYSIS_FAILED` / `error_code = DATA_INTEGRITY_ERROR`)。
+監査ログ(`audit_log`)と保有評価レコードにも記録される。
+
+つまり **利用者は気づいているが直せない**、という状態だった。本節の CLI がその手段である。
+
+### 22.2 手順
+
+```
+1  dry-run で対象を確認する(★ 読み取りのみ。書き込みは行わない)
+     jstock baseline-repair scan
+
+   出力は holding_ref(sha256 の先頭 8 文字)・理由区分・baseline 履歴の一覧。
+   ★ 所有者名・銘柄コードは出力しない(Issue #135)。
+
+2  ★ 対象が 0 件なら、そこで終わる。
+   ★ 0 件は「壊れている」ではなく「対象なし」を意味する。
+
+3  対象があれば、採用する baseline を**人が決める**。
+   (A) は履歴の最新 version が既定候補として表示される。
+   ★ (B) は候補を自動で選ばない。--baseline-id の明示指定が必須である。
+
+4  ★ Production に対する修復の実行は **利用者の承認**を得てから行う。
+     jstock baseline-repair apply --holding-ref <ref> [--baseline-id <id>]
+
+5  次の 08:00 の自然実行で、その保有の判定が再開することを確認する
+   (BATCH_SUMMARY の failed が減る)。
+```
+
+### 22.3 なぜ自動で直さないのか
+
+pointer は **意図的に古い baseline を指している場合がある**
+(baseline は `supersedes_baseline_id` で連鎖し、active は必ずしも最新ではない)。
+baseline は保有判断スコアの比較基準であり、**active が変われば score が変わる**。
+
+自動修復を入れると「気づかないうちに判定基準が入れ替わる」ことになり、
+「毎日 failed が通知され続ける」よりも危険である。したがって
+**バッチ内での自己修復は実装しない**。人が確認して実行する。
+
+### 22.4 やってはいけないこと
+
+```
+★ 動作確認のために pointer を意図的に壊さない(証拠を人工的に作らない)。
+★ apply を承認なしに Production へ実行しない。
+★ scan の出力を、holding_ref 以外の形(所有者名・銘柄コード)で記録・共有しない。
+```
+
