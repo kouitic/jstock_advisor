@@ -675,6 +675,22 @@ memory・会話要約・古い Issue 本文だけで判断しない(6.5.4 と同
   status:開発中 だけを列挙すると、この状態を取りこぼす。
 ```
 
+
+```
+READ_MODEL_IDENTITY = GENERATED_AT
+
+read model の各更新は **GENERATED_AT(UTC の実測値)** で識別する。
+`UPDATE_LATEST_<n>` のような **連番を識別子にしない**。
+
+★ 理由(2026-09-09 の実例)  複数の作業者が並行して read model を更新するため、
+  それぞれが「直前の最大値 + 1」を付けると **同じ番号が別の更新へ割り当てられる**。
+  番号が重複すると、後から「どの更新がどの lock 変更か」を辿れなくなる。
+  GENERATED_AT は実測時刻であり、並行更新でも衝突しない。
+
+★ 連番は **人が読むための見出し**として残してよいが、
+  参照するときは GENERATED_AT を使う。番号だけで指さないこと。
+★ GENERATED_AT は `date -u` の実測値を書く(未来時刻・概算を書かない)。
+```
 ### 2.6.10 発効の境界
 
 ```
@@ -2346,6 +2362,39 @@ release-blocker lifecycle(issue_label_policy §6)
 Production failure injection 禁止
 ```
 
+
+### 10.1 検証目的の Production 手動起動(VERIFICATION_MANUAL_INVOCATION)
+
+`manual Production Lambda invocation` は上記のとおり人間承認が必要である。
+**検証を目的とする場合も例外ではない。** 本項はその手順を定める。
+
+```
+VERIFICATION_MANUAL_INVOCATION
+
+条件(★ すべて満たすこと)
+  1  ★ 自然実行では確認できないことが示されている
+  2  ★ **VALIDATION mode を優先**する。NORMAL は最後の手段
+  3  ★ **副作用を列挙してから**承認を求める
+       通知の有無 / 書き込み先 / 外部 API の呼び出し / queue への投入
+  4  ★ **1 回の承認で 1 回の起動**(まとめて承認しない)
+  5  ★ 実行時刻は 08:00 / 18:00 / 毎時 :25〜:35 を避ける
+  6  ★ 承認は **利用者**。管理者・開発者の判断だけでは行わない
+```
+
+```
+★ 変えないもの
+
+  ★ **Production failure injection の禁止は変えない。**
+    本項が許すのは「正常な起動を検証のために行う」ことだけである。
+    条件を人工的に作る・壊れた状態を作ることは引き続き禁止する。
+  ★ 「人工的な Production 実行は禁止」という原則も変えない。
+    本項は**例外の手続き**を定めるものであり、原則を緩めるものではない。
+```
+
+```
+本項の承認  利用者判断(2026-09-08。Issue #213 issuecomment-5584115344)
+適用の先例  #109 / #70 / #286 の VALIDATION 起動(Release W4。Issue #290 の C 節)
+```
 ---
 
 ## 11. docs のみの変更(DOC_ONLY_CHANGE)
@@ -2396,3 +2445,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-07 | §4 へ `TEST_STORE_ISOLATION = FORCED` を 1 行追加した(Issue #229)。`json_store.DEFAULT_STORE_DIR` は `data/local_store` をハードコードしており差し替え口が無いため、`store_dir` を明示しないテストは**利用者の実データストアへ直接書き込んでいた**。その結果 `audit_log.json` は実測で 91.8MB / 29,579件まで育ち、1件のupsertに約5.5秒(全読み→パース→全再直列化→全書き出し)を要するようになり、`test_watchlist_finalize_integration.py` が「hangする」と見えていた(実際はデッドロックではなく極端な低速化。空の一時ディレクトリでのA/Bでは20 testsが24.47秒で完走した)。**OS依存でも順序依存でもなく、長く使っている作業コピーであれば同じことが起きる**(CIで再現しないのは `data/local_store/*.json` が `.gitignore` 対象で毎回まっさらな作業ディレクトリから始まるため)。`tests/conftest.py` へ autouse・function scope の fixture を1つ置き、`DEFAULT_STORE_DIR` を各テストの `tmp_path` 配下へ差し替える。**src は1行も変更していない**(`json_store.py` は S-17 永続化ストア層であり、変更すると lock 対象が全領域へ広がるため)。session scope にしないのは、1実行で1ストアを共有すると同じ蓄積問題を小規模に再現するためである。`tests/unit/` ではなく `tests/` 直下へ置き、`tests/integration/` へ将来テストが増えたときの再発を防ぐ。既存の個別回避策(`_NoopAuditService` / `_FakeTradeCooldownService` / `csv_import_ledger`)は**削除していない**(監査を書かないことでテストの関心を絞るという別の役割を持ち、同時に消すと効果と副作用を切り分けられなくなるため)。本変更により、共有storeの状態に依存していた `test_holding_decision_service_ignores_holding_specific_fields` が露出して失敗したため、比較の前に1回評価してbaselineを作る形へ修正した(期待値は緩めていない)。**初回評価と2回目以降で investment_thesis / final_score が 18.75 点ずれるという非対称そのものは Issue #249 で追う**。`LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN` / `FULL_SUITE_AUTHORITY = PR_CI` / §4 の例外規定・§2.5 の指示の直列化・§2.6 の WIP モデルと取得ゲート・解放条件・§6.5 の state writeback・人間承認の境界はいずれも変更していない。tests と docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
 | 2026-09-08 | P1 以外の governance / 開発運用 docs の改善を**週次 1 PR へまとめる**9.6節を新設した(Issue #251、GOVERNANCE_CHANGE_BATCHING = WEEKLY)。運用ルールの改善は 1 件ずつが小さく、その都度 Issue と PR を作ると**改善そのものが Issue 数を押し上げる**(2026-09-05〜07 の新規 48 件のうち 17 件が運用ルール整備だった)。集約先は Issue #213(棚卸)または #220 とし、週 1 回 1 PR で反映する。P1(運用が止まる・誤判定を生む・公開面へ影響する)は従来どおり即時に扱う。★ **9.5節の Issue 起点の原則は変えていない**(集約先が Issue であり、「Issue なしで直してよい」という意味ではない)。**3節の実装パイプライン・3.5節の時間意味論変更ゲート・4節のローカルテスト方針(LOCAL_FULL_PYTEST_DEFAULT / FULL_SUITE_AUTHORITY)・2.5節の指示プロトコル・2.6節の WIP と domain lock・10節の人間承認の境界・OPPORTUNISTIC_FIX_FORBIDDEN はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-08 | §3 へ `DOD_DECLARATION_REQUIRED = YES`(DoD 5 項目の申告)と `SAME_TYPE_SWEEP_REQUIRED = YES`(根本原因が確定した Issue の close 前に同型を 1 回掃く)の 2 節を新設した(Issue #252、打ち手 D-1 / D-4)。直近の欠陥を根本原因で束ねると**境界の連続性 / 単調性 / 定常でない 1 回目 / 単位・スケール / 失敗の可視性**の 5 型に収まり、いずれも実装した本人が PR の時点で確認できたものだった。レビューで毎回指摘するのではなく**実装者に申告させる**形に変える(レビュワーが気づけるかどうかに依存させないため)。**「該当なし」も 1 行で申告し空欄を許さない**(確認したうえで該当しないのか、確認していないのかを読み手が区別できないため)。**満たしていない項目は「該当あり・未解消」とし、理由と引き継ぎ先の Issue を1 行で書く**(未解消のまま追跡が切れるのを防ぐため)。申告は自己申告であり正しさの保証ではなく、レビュワーは申告と diff の矛盾を見る(3.5節の TIME_SEMANTICS_IMPACT と同じ扱い)。同型 sweep は**値ではなく形で探し、0 件でも記録する**(「調べていない」と「調べて無かった」を区別するため)。見つかった同型は 1 件の Issue へ束ね、3〜5 件に分裂させない。**sweep は「見つけたら全部直す」ではなく**、同じ PR で直すのは同じファイル・同じ lock の範囲内に限る(9.5節の scope と食い違わせないため)。あわせて .github/PULL_REQUEST_TEMPLATE.md へ `## DoD` と `## 同型 sweep` の 2 節を `## 確認` の前へ挿入した(**既存の 概要 / TIME_SEMANTICS_IMPACT / 確認 の 3 節は byte 単位で不変**。Issue #145 のゲートをそのまま残す)。**DoD と同型 sweep は CI で強制しない**(未記入でも CI を落とさない。人が読む欄として運用し、強制の要否は効果と副作用を見てから別途判断する。いきなり強制すると通すためだけの記入が増えて申告の意味が失われる)。**§3.5 時間意味論変更ゲート / §4 ローカルテスト方針(LOCAL_FULL_PYTEST_DEFAULT・FULL_SUITE_AUTHORITY を含む) / §2.5 指示プロトコル / §2.6 WIP・domain lock / §9.5 Issue 起点の原則(OPPORTUNISTIC_FIX_FORBIDDEN を含む) / §10 人間承認の境界 / CI の必須 job 構成はいずれも変更していない。** 既存節の削除・書き換えは行っていない(純粋な追加)。コード・Production 挙動の変更なし |
+| 2026-09-09 | 10 節へ **10.1 検証目的の Production 手動起動**を新設し、2.6.9 へ **read model の識別子**の規則を追記した(Issue #213 / #188)。10.1: `manual Production Lambda invocation` は検証目的でも人間承認を要する例外であることを明示し、手順を定めた(自然実行で確認できないことを示す / ★ VALIDATION mode を優先し NORMAL は最後の手段 / ★ 副作用を列挙してから承認を求める / ★ 1 回の承認で 1 回の起動 / 08:00・18:00・毎時 :25〜:35 を避ける / 承認は利用者)。★ **Production failure injection の禁止と「人工的な Production 実行は禁止」という原則は変えていない**(本項は例外の手続きを定めるものであり、原則を緩めない)。利用者判断(2026-09-08 / #213 issuecomment-5584115344)による明文化である。2.6.9: read model の各更新は **GENERATED_AT(UTC の実測値)** で識別し、`UPDATE_LATEST_<n>` のような連番を識別子にしない(★ 並行更新で同じ番号が別の更新へ割り当てられ、後から辿れなくなる実例が 2026-09-09 に発生した)。**3 節の実装パイプライン・4 節のローカルテスト方針・2.5 節の指示プロトコル・2.6 節の WIP と domain lock の判定・10 節のその他の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
