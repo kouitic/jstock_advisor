@@ -52,6 +52,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.notification import NotificationLog
+from jstock_advisor.domain.entities.owner import log_ref
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.line.client import LineClient
 from jstock_advisor.infrastructure.local_repository.daily_notification_priority_repository import (
@@ -135,8 +136,17 @@ def _sell_recommendation(
     )
 
 
-def _seed_log(store_dir: Path, sent_at: dt.datetime, related_recommendation_id: str | None) -> None:
-    """過去に 1 回送信した実績を置く。"""
+def _seed_log(
+    store_dir: Path,
+    sent_at: dt.datetime,
+    related_recommendation_id: str | None,
+    holding_id: str | None = None,
+) -> None:
+    """過去に 1 回送信した実績を置く。
+
+    ★ `holding_id` を渡すと holding-scope の実績になる。再送判定の scope は
+      recommendation 側の holding_id の有無で決まるため、両者を揃える必要がある。
+    """
     NotificationLogRepository(store_dir=store_dir).save(
         NotificationLog(
             notification_id=_LOG_ID,
@@ -145,6 +155,7 @@ def _seed_log(store_dir: Path, sent_at: dt.datetime, related_recommendation_id: 
             content_hash="hash-0001",
             sent_at=sent_at,
             related_recommendation_id=related_recommendation_id,
+            holding_id=holding_id,
         )
     )
 
@@ -420,6 +431,153 @@ def test_t8b_end_to_end_sends_when_the_interval_has_passed(tmp_path: Path) -> No
     recommendation = _sell_recommendation("44444444-4444-4444-8444-444444444444")
 
     assert service.check_resend_eligibility(recommendation, _NOW).eligible is True
+
+
+# =============================================================================
+# G) 失敗の可視性（DoD 項目 5） — 比較できなかった事実がログに残ること
+# =============================================================================
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_t10_warning_is_emitted_when_previous_cannot_be_compared(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ DoD 項目 5: 「比較できないまま日数だけで判断した」事実がログに残ること。
+
+    この事実は**これ以外のどこにも現れない**（戻り値は通常の抑止と同じで、
+    通知本文にも出ない）。放置すると参照先の消失が増えても気づけない。
+    """
+    _seed_log(tmp_path, _days_ago(1), _MISSING_REC_ID)
+    service = _service(tmp_path)
+    recommendation = _sell_recommendation("44444444-4444-4444-8444-444444444444")
+
+    with caplog.at_level("WARNING"):
+        status = service._notification_status_for_send(recommendation, None, _NOW)
+
+    assert status is NotificationStatus.RESEND_INTERVAL_NOT_REACHED  # 戻り値は不変
+    messages = _warnings(caplog)
+    assert len(messages) == 1
+    message = messages[0]
+    assert "previous recommendation unavailable" in message
+    assert f"type={NotificationType.SELL_SIGNAL.value}" in message
+    assert "cause=RECOMMENDATION_NOT_FOUND" in message  # 参照先が消えている側
+    assert f"days_elapsed=1 resend_after_days={_RESEND_AFTER_DAYS}" in message
+
+
+def test_t10b_warning_distinguishes_the_missing_related_id_cause(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ 2 つの原因を**区別して**記録すること。
+
+    「参照 ID を持たない古いログ」と「参照先が消えている」は、運用上の意味が違う
+    （前者は移行の残骸、後者はデータの消失）。同じ文言にすると調査で分けられない。
+    """
+    _seed_log(tmp_path, _days_ago(1), None)
+    service = _service(tmp_path)
+    recommendation = _sell_recommendation("44444444-4444-4444-8444-444444444444")
+
+    with caplog.at_level("WARNING"):
+        service._notification_status_for_send(recommendation, None, _NOW)
+
+    assert "cause=NO_RELATED_RECOMMENDATION_ID" in _warnings(caplog)[0]
+
+
+def test_t10c_warning_is_emitted_even_when_it_ends_up_sending(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ 送信側へ倒れても出すこと。
+
+    観測したいのは**消失そのもの**であり、そのとき送ったか抑止したかではない。
+    抑止時だけ出すと、日数が経っている間の消失が丸ごと見えなくなる。
+    """
+    _seed_log(tmp_path, _days_ago(_RESEND_AFTER_DAYS), _MISSING_REC_ID)
+    service = _service(tmp_path)
+    recommendation = _sell_recommendation("44444444-4444-4444-8444-444444444444")
+
+    with caplog.at_level("WARNING"):
+        status = service._notification_status_for_send(recommendation, None, _NOW)
+
+    assert status is NotificationStatus.SENT  # 戻り値は不変
+    assert len(_warnings(caplog)) == 1
+
+
+def test_t10d_no_warning_when_previous_is_available(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """previous がある平常時は**1 件も出ない**こと（ログを汚さない）。"""
+    _seed_log(tmp_path, _days_ago(1), _PRESENT_REC_ID)
+    service = _service(tmp_path)
+    previous = _sell_recommendation(_PRESENT_REC_ID, price=Decimal("1000"))
+    recommendation = _sell_recommendation(
+        "44444444-4444-4444-8444-444444444444", price=Decimal("1001")
+    )
+
+    with caplog.at_level("WARNING"):
+        service._notification_status_for_send(recommendation, previous, _NOW)
+
+    assert _warnings(caplog) == []
+
+
+def test_t10e_no_warning_when_there_is_no_log_at_all(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ 真の未送信（ログが無い）でも出さないこと。
+
+    ここで出すと、初回通知のたびに WARNING が並び、**本物の消失が埋もれる**。
+    """
+    service = _service(tmp_path)
+    recommendation = _sell_recommendation("44444444-4444-4444-8444-444444444444")
+
+    with caplog.at_level("WARNING"):
+        service._notification_status_for_send(recommendation, None, _NOW)
+
+    assert _warnings(caplog) == []
+
+
+def test_t10f_warning_does_not_contain_plaintext_stock_code_or_owner(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ Issue #135: 銘柄・所有者を**平文で出さない**こと。
+
+    ログは CloudWatch Logs を読める principal へ露出する「記録」である。
+    holding_id は `<所有者>#<銘柄コード>` であり、そのまま出すと所有者が露出する。
+    """
+    holding_id = f"所有者A#{_STOCK}"
+    _seed_log(tmp_path, _days_ago(1), _MISSING_REC_ID, holding_id=holding_id)
+    service = _service(tmp_path)
+    recommendation = _sell_recommendation(
+        "44444444-4444-4444-8444-444444444444"
+    ).model_copy(update={"holding_id": holding_id, "owner": "所有者A"})
+
+    with caplog.at_level("WARNING"):
+        service._notification_status_for_send(recommendation, None, _NOW)
+
+    message = _warnings(caplog)[0]
+    assert holding_id not in message
+    assert "所有者A" not in message
+    assert _STOCK not in message
+    # 代わりに符号が出ており、運用者が手元で突き合わせられること
+    assert f"scope_ref={log_ref(holding_id)}" in message
+    assert "scope=holding" in message
+
+
+def test_t10g_stock_scope_reference_is_also_encoded(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """stock-scope（holding_id なし）でも符号化して出すこと。"""
+    _seed_log(tmp_path, _days_ago(1), _MISSING_REC_ID)
+    service = _service(tmp_path)
+    recommendation = _sell_recommendation("44444444-4444-4444-8444-444444444444")
+
+    with caplog.at_level("WARNING"):
+        service._notification_status_for_send(recommendation, None, _NOW)
+
+    message = _warnings(caplog)[0]
+    assert "scope=stock" in message
+    assert f"scope_ref={log_ref(_STOCK)}" in message
 
 
 # =============================================================================

@@ -59,6 +59,7 @@ from jstock_advisor.domain.entities.notification_claim import (
     compute_claim_id,
 )
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
+from jstock_advisor.domain.entities.owner import log_ref
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst, format_jst
 from jstock_advisor.domain.notification.message_formatter import format_notification_text
@@ -4524,6 +4525,39 @@ class LineNotificationService:
         days_elapsed = (
             evaluation_date_jst(now) - evaluation_date_jst(latest_log.sent_at)
         ).days
+        if previous is None:
+            # Issue #271: 前回の内容と**比較できないまま日数だけで判断した**ことを残す。
+            # この事実はこれ以外のどこにも現れない(戻り値は通常の抑止/送信と同じで、
+            # 通知本文にも出ない)。放置すると参照先の消失が増えても気づけないため、
+            # 判定の前に1件ずつ記録する。
+            #
+            # ★ 送信/抑止の**どちらへ倒れても**出す。消失そのものが観測対象であり、
+            #   結果はdays_elapsedとresend_after_daysの対比から読める。
+            # ★ 戻り値・判定順は1つも変えていない(記録のみ)。
+            # ★ 銘柄・所有者は**平文で出さない**(Issue #135)。scope_refはholding-scopeなら
+            #   holding_id、stock-scopeならstock_codeをlog_ref()で符号化したものである。
+            # ★ scope の判定は logger 呼び出しの**外**で行う。#135 の AST guard は
+            #   「holding_id / owner を logger の書式引数へ渡していないか」を
+            #   **渡し方の形**で見るため、値が出ない三項演算子であっても
+            #   引数の中に holding_id が現れる時点で検出される(正しい厳しさである)。
+            scope = "holding" if recommendation.holding_id is not None else "stock"
+            scope_ref_source = recommendation.holding_id or recommendation.stock_code
+            cause = (
+                "NO_RELATED_RECOMMENDATION_ID"
+                if latest_log.related_recommendation_id is None
+                else "RECOMMENDATION_NOT_FOUND"
+            )
+            logger.warning(
+                "resend judged by elapsed days only: previous recommendation unavailable "
+                "type=%s scope=%s scope_ref=%s cause=%s "
+                "days_elapsed=%d resend_after_days=%d",
+                notification_type.value,
+                scope,
+                log_ref(scope_ref_source),
+                cause,
+                days_elapsed,
+                self._config.notification.resend_after_days,
+            )
         if days_elapsed >= self._config.notification.resend_after_days:
             return NotificationStatus.SENT
 
