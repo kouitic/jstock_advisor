@@ -153,8 +153,24 @@ class NotificationLookup:
 
     @classmethod
     def from_outcome(cls, outcome: DecodeOutcome[NotificationLog]) -> NotificationLookup:
+        """読み取り結果を `sent_at` 昇順へ揃える(Issue #280 / #63 A-U5)。
+
+        ★ 並べ替えキーは **必ず `_sent_at_as_utc()` を通す**。
+          `sent_at` に timezone を持つ値(aware)と持たない値(naive)が混ざると、
+          Python は両者を比較できず `TypeError` を送出し、**通知履歴の読み取りが
+          止まる**(再送判定ができなくなる)。
+
+        ★ 正規化規則をここで新しく作らない。保存側のソートキー生成
+          (`build_sent_sort_value` / `build_expires_at_epoch`)が既に同じ関数を
+          使っており、**読み取り側だけが通っていなかった**のが本 Issue である。
+          naive を UTC とみなす既定もその関数のままで、ここでは変えない。
+
+        ★ **保存値は書き換えない。** 正規化するのは比較キーだけであり、
+          `records` の各 `NotificationLog.sent_at` は読み込んだ値のままである
+          (移行・backfill を伴わない)。
+        """
         return cls(
-            records=sorted(outcome.records, key=lambda n: n.sent_at),
+            records=sorted(outcome.records, key=lambda n: _sent_at_as_utc(n.sent_at)),
             undecidable=outcome.undecidable,
             skipped=outcome.failure_count,
         )
