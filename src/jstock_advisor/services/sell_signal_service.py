@@ -487,6 +487,22 @@ class SellSignalService:
             shareholder_benefit_yield_pct_at_recommendation=snapshot.benefit_yield_pct,
             total_yield_pct_at_recommendation=snapshot.total_yield_pct,
             fair_value_at_recommendation=snapshot.fair_value,
+            # Issue #21: 判定時点のFairValueRange使用可否スナップショット。
+            # SELL側はusable_for_trading_judgmentを判定に使う一方で、その可否と
+            # 直接原因を保存していなかったため、後から「なぜ上限価格を使えなかったか」
+            # を現在configなしで復元できなかった。利確側(profit_taking_service)と
+            # 同じ3フィールドを同じ規約で転記する(codeはenumの.value、reasonは
+            # 生成時点の自由文。usable=True時はcode/reasonともNone)。
+            # ★転記のみであり、判定ロジック・閾値・通知文面は変更しない。
+            fair_value_usable_for_trading_judgment=(
+                snapshot.fair_value_range.usable_for_trading_judgment
+            ),
+            fair_value_unusable_reason_code=(
+                snapshot.fair_value_range.unusable_reason_code.value
+                if snapshot.fair_value_range.unusable_reason_code is not None
+                else None
+            ),
+            fair_value_unusable_reason=snapshot.fair_value_range.unusable_reason,
             reasons=result.reasons,
             counter_factors=counter_factors,
             key_risks=[
