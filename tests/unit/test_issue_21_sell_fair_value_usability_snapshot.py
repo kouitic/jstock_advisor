@@ -10,7 +10,8 @@
 そのため各テストは「保存されたこと」に加えて **判定が変わっていないこと** も
 併せて確認する(#254 の観点: 否定形の assert だけで完結させない)。
 
-fixture は架空値のみ。実在の銘柄コード・所有者名・保有数量は使用しない。
+fixture は架空値のみ。銘柄コードは ★ 割り当てが存在しない "0000" を使い、
+実在の上場コード・所有者名・保有数量は使用しない。
 """
 
 from __future__ import annotations
@@ -38,8 +39,9 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
-# 架空の銘柄コード(実在コードと衝突しない 9 始まりの 4 桁を使う)。
-_STOCK_CODE = "9991"
+# 架空の銘柄コード。★ "0000" は JPX の証券コードとして**割り当てが存在しない**値であり、
+# 実在の上場銘柄と衝突しない(#63 / #109 / #211 / #70 のテストと同じ慣行)。
+_STOCK_CODE = "0000"
 _NOW = dt.datetime(2026, 6, 30, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=9)))
 _CONFIG = load_config()
 
