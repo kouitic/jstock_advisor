@@ -4475,13 +4475,23 @@ class LineNotificationService:
         latest_log = lookup.latest
         if latest_log is None:
             return NotificationStatus.SENT
-        if previous is None:
+        # Issue #271(N-03): previousが無くても**日数判定は通す**。
+        #
+        # ここへ到達した時点でlatest_logは必ず存在する(直前の行で処理済み)
+        # = **過去に送信済み**である。したがってprevious is Noneが意味しうるのは
+        #     (1) latest_log.related_recommendation_idがNone(参照IDを持たない古いログ)
+        #     (2) 参照先のRecommendationが**消えている**(purge/#63の隔離等)
+        # のどちらかであり、いずれも「未送信」ではなく「**比較できない**」である。
+        #
+        # 修正前はここで`return SENT`しており、resend_after_daysを待たずに
+        # 再送していた(=**重複送信**)。日数判定はlatest_log.sent_atだけで計算でき
+        # previousを1つも参照しないため、比較できない項目だけをskipすればよい。
+        if previous is not None and (
+            previous.recommendation_type != recommendation.recommendation_type
+        ):
             return NotificationStatus.SENT
 
-        if previous.recommendation_type != recommendation.recommendation_type:
-            return NotificationStatus.SENT
-
-        prev_price = _representative_price(previous)
+        prev_price = _representative_price(previous) if previous is not None else None
         new_price = _representative_price(recommendation)
         price_comparable = prev_price is not None and new_price is not None and prev_price > 0
         if price_comparable:
@@ -4495,8 +4505,11 @@ class LineNotificationService:
         # 同一recommendation_type内の状態変化を価格変化だけでは検知できない。
         # 構造化フィールド(_earnings_waiting_state_key)が変化していれば、
         # 再送資格ありとみなす(自由文の比較は文言変更に対して脆いため使わない)。
+        # Issue #271: previousが無い場合は比較対象が無いためskipする
+        # (「変化していない」ではなく「**確かめられない**」。日数判定へ委ねる)。
         if (
-            recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
+            previous is not None
+            and recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
             and _earnings_waiting_state_key(previous) != _earnings_waiting_state_key(recommendation)
         ):
             return NotificationStatus.SENT
@@ -4518,6 +4531,12 @@ class LineNotificationService:
         # 場合はDUPLICATE_SUPPRESSED、価格を比較できたが閾値未満だった場合は
         # PRICE_CHANGE_BELOW_THRESHOLD、価格を比較できず日数のみで判断した場合は
         # RESEND_INTERVAL_NOT_REACHEDとする。
+        if previous is None:
+            # Issue #271: 前回の内容と比較していない。DUPLICATE_SUPPRESSED
+            # (=まったく同一内容の再送)へ落とすと、**比較していないのに
+            # 「同一内容だった」と記録する**ことになり事実に反する。
+            # 実際に行ったのは日数だけの判断であるため、その値をそのまま返す。
+            return NotificationStatus.RESEND_INTERVAL_NOT_REACHED
         if price_comparable:
             return NotificationStatus.PRICE_CHANGE_BELOW_THRESHOLD
         if prev_price is None and new_price is None:
