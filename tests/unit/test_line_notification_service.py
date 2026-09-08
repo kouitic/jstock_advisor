@@ -1738,7 +1738,7 @@ def test_notify_buy_candidates_digest_records_notification_log_per_stock(
 
     latest = notification_log_repo.latest_by_stock_and_type(
         "4516", NotificationType.DAILY_BUY_CANDIDATES
-    )
+    ).latest
     assert latest is not None
     assert latest.related_recommendation_id == "rec-buy-1"
 
@@ -3530,7 +3530,7 @@ def test_notify_batch_summary_suppression_does_not_write_notification_log(
     )
     first_log = service._log_repo.latest_by_stock_and_type(
         "__batch__:保有銘柄・ウォッチリスト分析", NotificationType.BATCH_SUMMARY
-    )
+    ).latest
     assert first_log is not None
 
     service.notify_batch_summary(
@@ -3545,7 +3545,7 @@ def test_notify_batch_summary_suppression_does_not_write_notification_log(
     )
     second_log = service._log_repo.latest_by_stock_and_type(
         "__batch__:保有銘柄・ウォッチリスト分析", NotificationType.BATCH_SUMMARY
-    )
+    ).latest
     assert second_log is not None
     assert second_log.notification_id == first_log.notification_id
 
@@ -3847,7 +3847,7 @@ def test_attention_notification_first_send_via_with_status(service_and_repos) ->
     assert len(client.sent) == 1
     log = service._log_repo.latest_by_stock_and_type(
         rec.stock_code, NotificationType.PROFIT_PROTECTION_ATTENTION
-    )
+    ).latest
     assert log is not None
     assert log.related_recommendation_id == rec.recommendation_id
 
@@ -4067,10 +4067,10 @@ def test_partial_profit_take_is_actionable_not_attention(service_and_repos) -> N
     assert outcome.notification_intent is NotificationIntent.ACTIONABLE
     assert service._log_repo.latest_by_stock_and_type(
         rec.stock_code, NotificationType.PROFIT_PROTECTION_ATTENTION
-    ) is None
+    ).latest is None
     log = service._log_repo.latest_by_stock_and_type(
         rec.stock_code, NotificationType.PROFIT_TAKING_SIGNAL
-    )
+    ).latest
     assert log is not None
 
 
@@ -4540,14 +4540,14 @@ def test_issue33_notification_log_records_holding_scope(service_and_repos) -> No
     assert len(client.sent) == 1
     log = service._log_repo.latest_by_holding_and_type(
         build_holding_id("owner-a", "2914"), NotificationType.SELL_SIGNAL
-    )
+    ).latest
     assert log is not None
     assert log.owner == "owner-a"
     assert log.holding_id == build_holding_id("owner-a", "2914")
     assert log.related_recommendation_id == "i33-a-1"
     # stock-scope読み取りからも従来どおり見える(stock_codeは引き続き保存)
     assert (
-        service._log_repo.latest_by_stock_and_type("2914", NotificationType.SELL_SIGNAL)
+        service._log_repo.latest_by_stock_and_type("2914", NotificationType.SELL_SIGNAL).latest
         is not None
     )
 
@@ -4593,7 +4593,7 @@ def test_issue33_other_owner_same_stock_is_not_suppressed(service_and_repos) -> 
     assert len(client.sent) == 2
     log_b = service._log_repo.latest_by_holding_and_type(
         build_holding_id("owner-b", "2914"), NotificationType.SELL_SIGNAL
-    )
+    ).latest
     assert log_b is not None
     assert log_b.owner == "owner-b"
 
@@ -4667,7 +4667,7 @@ def test_issue33_attention_same_event_identity_suppressed(service_and_repos) -> 
     assert service.notify_recommendation_with_status(rec1, _I33_T1).sent is True
     log = service._log_repo.latest_by_holding_and_type(
         holding_id, NotificationType.PROFIT_PROTECTION_ATTENTION
-    )
+    ).latest
     assert log is not None
     assert log.holding_id == holding_id
 
@@ -4713,7 +4713,9 @@ def test_issue33_stock_scope_behavior_unchanged(service_and_repos) -> None:
     )
     repo.save(rec1)
     assert service.notify_recommendation(rec1, _I33_T1) is True
-    log = service._log_repo.latest_by_stock_and_type("2914", NotificationType.DAILY_BUY_CANDIDATES)
+    log = service._log_repo.latest_by_stock_and_type(
+        "2914", NotificationType.DAILY_BUY_CANDIDATES
+    ).latest
     assert log is not None
     assert log.owner is None
     assert log.holding_id is None
@@ -4743,7 +4745,9 @@ def test_issue33_digest_log_keeps_stock_scope_none(service_and_repos) -> None:
     results = service.notify_buy_candidates_digest([rec], _I33_T1, batch_id="batch-test")
 
     assert results == {"2914": "SENT_AND_RECORDED"}
-    log = service._log_repo.latest_by_stock_and_type("2914", NotificationType.DAILY_BUY_CANDIDATES)
+    log = service._log_repo.latest_by_stock_and_type(
+        "2914", NotificationType.DAILY_BUY_CANDIDATES
+    ).latest
     assert log is not None
     assert log.owner is None
     assert log.holding_id is None
@@ -5116,7 +5120,7 @@ def test_issue17_attention_claim_same_phase_suppressed_new_phase_sent(
     assert len(client.sent) == 1  # 同一局面: claimで抑止+logはrepair済み
     repaired = service._log_repo.latest_by_holding_and_type(
         holding_id, NotificationType.PROFIT_PROTECTION_ATTENTION
-    )
+    ).latest
     assert repaired is not None
     assert repaired.owner == "owner-a"  # P: repairがIssue #33のscopeを維持する
     assert repaired.holding_id == holding_id
@@ -5260,7 +5264,7 @@ def test_issue17_holding_scope_repair_preserves_issue33_semantics(service_and_re
     assert len(client.sent) == 1
     repaired = service._log_repo.latest_by_holding_and_type(
         build_holding_id("owner-a", "2914"), NotificationType.SELL_SIGNAL
-    )
+    ).latest
     assert repaired is not None
     assert repaired.owner == "owner-a"
     assert repaired.holding_id == build_holding_id("owner-a", "2914")

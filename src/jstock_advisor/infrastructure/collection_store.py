@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
 from jstock_advisor.infrastructure.record_failure_policy import (
+    DecodeOutcome,
     ItemIdDisclosure,
     RecordFailurePolicy,
 )
@@ -66,6 +67,32 @@ class CollectionStore[T: BaseModel](Protocol):
         ...
     def delete(self, item_id: str) -> bool: ...
     def find(self, predicate: Callable[[T], bool]) -> list[T]: ...
+    def find_with_outcome(self, predicate: Callable[[T], bool]) -> DecodeOutcome[T]:
+        """`find()` と同じ絞り込みに、**decodeの成否**を添えて返す(Issue #279)。
+
+        既存の読み取りAPI(`list_all` / `get` / `find` / `query_by_index` /
+        `get_many` / `iter_all`)はいずれも `list[T]` や `T | None` を返すため、
+        **失敗の事実を呼び出し側へ渡せない**。`RecordFailurePolicy` は
+        collection単位で宣言できるようになったが(Issue #63 PR-2)、
+        `FAIL_SAFE_SUPPRESS` の核心である「判定不能」を受け取る口が
+        どの読み取りメソッドにも無かった。
+
+            STRICT             最初の失敗で元の例外をそのまま送出する(現行と同一)
+            LENIENT            失敗を記録してskipし、`failures` に件数が残る
+            FAIL_SAFE_SUPPRESS skipしたうえで `undecidable` が True になる
+                               -> 呼び出し側は「読めなかったので判断できない」と
+                                  分かり、送信を見送る等の安全側の選択ができる
+
+        **本メソッドは追加であり、既存メソッドの signature も挙動も変えていない。**
+        宣言していない collection は既定の `STRICT` のままであり、
+        本メソッドを呼ばない限り何も変わらない。
+
+        用途の例(Issue #279)
+          notification_log の再送判定。skipすると過去の送信実績を見落として
+          **重複送信**になり、例外にすると**通知が出せなくなる**。
+          どちらも困るため「判定不能なら送らない」を選べる必要がある。
+        """
+        ...
     def insert_if_absent(self, item: T) -> bool:
         """既存の項目がなければ追加してTrue、既に存在すればFalse(冪等な新規追加専用)。
 

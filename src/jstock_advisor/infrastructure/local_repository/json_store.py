@@ -18,9 +18,11 @@ from typing import Any
 from pydantic import BaseModel
 
 from jstock_advisor.infrastructure.record_failure_policy import (
+    DecodeOutcome,
     ItemIdDisclosure,
     RecordFailureCollector,
     RecordFailurePolicy,
+    decode_records,
 )
 
 DEFAULT_STORE_DIR = Path(__file__).resolve().parents[4] / "data" / "local_store"
@@ -201,6 +203,48 @@ class JsonCollectionStore[T: BaseModel]:
 
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
         return [item for item in self._read_all().values() if predicate(item)]
+
+    def _read_raw(self) -> list[dict[str, Any]]:
+        """ファイルの生の要素列を返す(decodeしない)。
+
+        `find_with_outcome()` が decode の成否を数えるために使う。
+        `_load()` は decode 済みの結果しか返さないため、生の列が要る。
+        """
+        if not self._path.exists():
+            return []
+        with self._path.open(encoding="utf-8") as f:
+            raw: list[dict[str, Any]] = json.load(f)
+        return raw
+
+    def find_with_outcome(self, predicate: Callable[[T], bool]) -> DecodeOutcome[T]:
+        """`find()` と同じ絞り込みに、decodeの成否を添えて返す(Issue #279)。
+
+        `find()` は `list[T]` しか返せないため、**FAIL_SAFE_SUPPRESSで
+        skipした事実が呼び出し側へ届かない**。再送判定のように
+        「読めなかったなら送らない」を選びたい経路では、
+        skipされた件数と「判定不能」を知る必要がある。
+
+        既存の `decode_records()` を経由するため、失敗の記録・開示レベルの
+        適用・走査単位の集計ログはすべて既存の機構と同一である。
+
+        ★ `find()` と同じく全件を材料化する(`iter_all()`のピークメモリ有界性
+          (Issue #113)は本メソッドの対象外。`find()`も同様に全件を持つ)。
+        ★ `predicate` はdecodeできたレコードにのみ適用する。
+          decodeできなかったレコードは絞り込みの対象にできないため、
+          `failures` として別に数える(黙って0件へ寄せない)。
+        """
+        outcome = decode_records(
+            ((str(raw.get(self._id_field, "")), raw) for raw in self._read_raw()),
+            self._model_type.model_validate,
+            collection=self._collection,
+            policy=self._failure_policy,
+            item_id_disclosure=self._item_id_disclosure,
+        )
+        return DecodeOutcome(
+            records=[item for item in outcome.records if predicate(item)],
+            failures=outcome.failures,
+            undecidable=outcome.undecidable,
+        )
 
     def upsert_with_index_attributes(
         self, item: T, index_attributes: Mapping[str, str | int]

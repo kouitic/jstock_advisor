@@ -246,10 +246,12 @@ def test_save_and_read_back_via_existing_scan_path(dynamo_lambda_env) -> None:
     repo = NotificationLogRepository()
     repo.save(_make_log(notification_id="n-1", sent_at=_NOW))
     repo.save(_make_log(notification_id="n-2", sent_at=_NOW + dt.timedelta(minutes=1)))
-    latest = repo.latest_by_stock_and_type("8306", NotificationType.SELL_SIGNAL)
-    assert latest is not None and latest.notification_id == "n-2"
-    latest_h = repo.latest_by_holding_and_type("owner-a#8306", NotificationType.SELL_SIGNAL)
-    assert latest_h is not None and latest_h.notification_id == "n-2"
+    lookup = repo.latest_by_stock_and_type("8306", NotificationType.SELL_SIGNAL)
+    assert lookup.undecidable is False and lookup.skipped == 0
+    assert lookup.latest is not None and lookup.latest.notification_id == "n-2"
+    lookup_h = repo.latest_by_holding_and_type("owner-a#8306", NotificationType.SELL_SIGNAL)
+    assert lookup_h.undecidable is False and lookup_h.skipped == 0
+    assert lookup_h.latest is not None and lookup_h.latest.notification_id == "n-2"
 
 
 def test_legacy_item_without_index_attributes_still_readable(dynamo_lambda_env) -> None:
@@ -258,17 +260,18 @@ def test_legacy_item_without_index_attributes_still_readable(dynamo_lambda_env) 
     dynamo_lambda_env.Table(_TABLE_NAME).put_item(
         Item={"notification_id": "legacy-1", "data": legacy.model_dump_json()}
     )
-    latest = NotificationLogRepository().latest_by_stock_and_type(
+    lookup = NotificationLogRepository().latest_by_stock_and_type(
         "8306", NotificationType.SELL_SIGNAL
     )
-    assert latest is not None and latest.notification_id == "legacy-1"
+    assert lookup.undecidable is False and lookup.skipped == 0
+    assert lookup.latest is not None and lookup.latest.notification_id == "legacy-1"
 
 
 def test_local_json_store_save_ignores_index_attributes(tmp_path: Path) -> None:
     repo = NotificationLogRepository(store_dir=tmp_path)
     log = _make_log()
     repo.save(log)
-    assert repo.latest_by_stock_and_type("8306", NotificationType.SELL_SIGNAL) == log
+    assert repo.latest_by_stock_and_type("8306", NotificationType.SELL_SIGNAL).latest == log
 
 
 # --- backfillスクリプト -------------------------------------------------------

@@ -20,6 +20,9 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     UNIVERSE_SOURCE_CACHE,
     UNIVERSE_SOURCE_DOWNLOADED,
 )
+from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
+    NotificationLookup,
+)
 from jstock_advisor.services import watchlist_batch_finalizer
 from jstock_advisor.services.line_notification_service import (
     compute_watchlist_addition_content_hash,
@@ -123,8 +126,17 @@ class _FakeLog:
         self.saved: list[object] = []
         self.latest: object | None = None
 
-    def latest_by_stock_and_type(self, stock_code: str, notification_type: object) -> object | None:
-        return self.latest
+    def latest_by_stock_and_type(self, stock_code: str, notification_type: object) -> object:
+        """Issue #279: 戻り値は NotificationLookup になった。
+
+        この fake は「壊れたレコードは無い」正常系を模すため、
+        undecidable = False / skipped = 0 を返す。
+        """
+        return NotificationLookup(
+            records=[self.latest] if self.latest is not None else [],  # type: ignore[list-item]
+            undecidable=False,
+            skipped=0,
+        )
 
     def save(self, entry: object) -> None:
         self.saved.append(entry)
