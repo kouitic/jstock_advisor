@@ -431,9 +431,13 @@ def test_c6_semantic_family_inventory_is_not_empty() -> None:
 #
 # 本 Group が固定するのは **inventory / completeness 層のみ** である。
 # 「全 handler が execution_mode を解決すること」という behavioral invariant は
-# **#70(F-B4)が未修正のため今 main で FAIL する**ので追加しない。
+# **今も main で FAIL する**ので追加しない(評価・レビュー系 4 handler が
+# 依然として黙殺しており、Issue #287 で扱う)。
 # (F-B3 = trade_detection_confirmed の fail-open は Issue #211 で解消済み。
-#  解消後の契約は test_d7_trade_detection_confirmed_is_fail_closed が固定する。)
+#  解消後の契約は test_d7_trade_detection_confirmed_is_fail_closed が固定する。
+#  F-B4 = watchlist 系 4 handler の黙殺は Issue #286 で解消済み。**対応**ではなく
+#  **明示的な拒否**(REJECTS_EXPLICITLY)を選んだ。解消後の契約は
+#  test_d7_watchlist_handlers_reject_execution_mode が固定する。)
 # ここでは代わりに、
 #
 #   - Lambda handler を **機械的に列挙**し、
@@ -490,6 +494,14 @@ _NA_NO_CONTEXT = "この handler は execution context を受け取る設計で�
 _NA_NOT_DISPATCHER = "子 Lambda を dispatch しないため伝播対象が無い"
 _NA_NO_TRADE_DETECTION = "売買イベント検知を行わない"
 _NA_NO_JOB_TYPE = "watchlist job_type を扱わない"
+#: Issue #286: watchlist 系 4 handler は execution_mode / notification_mode を
+#: **対応せず、渡されたら例外で止める**(黙殺しない)。VALIDATION の隔離が
+#: 存在しない(検証用の watchlist テーブルも rotation cursor の抑止も無い)ため、
+#: 受け付けると「検証のつもりで本番の状態を変える」ことになるからである。
+_WATCHLIST_REJECTS_MODE = (
+    "Issue #286: VALIDATION の隔離が存在しないため対応せず、"
+    "reject_execution_mode() が指定を検出して例外で止める"
+)
 
 #: handler × dimension の契約台帳。
 #: **lambda_handlers へ handler module を追加したらここへも登録しないと CI が落ちる。**
@@ -523,16 +535,12 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
     },
     "watchlist_dispatcher_handler": {
         _Dimension.EXECUTION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "execution_mode を黙って無視し、VALIDATION 指定でも完全な本番実行になる",
-            related_issue="#70",
-            finding_id="F-B4",
+            _ContractStatus.REJECTS_EXPLICITLY,
+            _WATCHLIST_REJECTS_MODE,
         ),
         _Dimension.NOTIFICATION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "execution_mode を解決しないため notification_mode も伝播しない",
-            related_issue="#70",
-            finding_id="F-B4",
+            _ContractStatus.REJECTS_EXPLICITLY,
+            _WATCHLIST_REJECTS_MODE,
         ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
@@ -544,16 +552,12 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
     },
     "watchlist_worker_handler": {
         _Dimension.EXECUTION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "execution_mode を解決しない",
-            related_issue="#70",
-            finding_id="F-B4",
+            _ContractStatus.REJECTS_EXPLICITLY,
+            _WATCHLIST_REJECTS_MODE,
         ),
         _Dimension.NOTIFICATION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "同上",
-            related_issue="#70",
-            finding_id="F-B4",
+            _ContractStatus.REJECTS_EXPLICITLY,
+            _WATCHLIST_REJECTS_MODE,
         ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
@@ -564,13 +568,12 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
     },
     "watchlist_terminal_failure_handler": {
         _Dimension.EXECUTION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "execution_mode を解決しない",
-            related_issue="#70",
-            finding_id="F-B4",
+            _ContractStatus.REJECTS_EXPLICITLY,
+            _WATCHLIST_REJECTS_MODE,
         ),
         _Dimension.NOTIFICATION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP, "同上", related_issue="#70", finding_id="F-B4"
+            _ContractStatus.REJECTS_EXPLICITLY,
+            _WATCHLIST_REJECTS_MODE,
         ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
@@ -582,13 +585,12 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
     },
     "watchlist_batch_reconciler_handler": {
         _Dimension.EXECUTION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP,
-            "execution_mode を解決しない",
-            related_issue="#70",
-            finding_id="F-B4",
+            _ContractStatus.REJECTS_EXPLICITLY,
+            _WATCHLIST_REJECTS_MODE,
         ),
         _Dimension.NOTIFICATION_MODE: _cell(
-            _ContractStatus.KNOWN_GAP, "同上", related_issue="#70", finding_id="F-B4"
+            _ContractStatus.REJECTS_EXPLICITLY,
+            _WATCHLIST_REJECTS_MODE,
         ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
@@ -749,17 +751,22 @@ def test_d6_every_cell_has_a_reason(handler_name: str) -> None:
 
 
 def test_d7_issue_70_findings_are_tracked_in_the_inventory() -> None:
-    """#70 の F-B4 が台帳から消えていないこと。
+    """#70 由来の KNOWN_GAP が台帳へ**戻っていない**こと。
 
-    #70 が修正されたら、該当 cell を PROPAGATES / REJECTS_EXPLICITLY へ
-    **更新しない限りこのテストが落ちる**(gap の放置と修正の取りこぼしを両方検知する)。
+    設計意図は「gap の放置」と「修正の取りこぼし」を両方検知することである。
+    #70 の finding は 2026-09-08 時点でいずれも解消済みのため、判定は
+    「まだ残っているか」から「戻っていないか」へ反転している。
 
-    ★ F-B3(trade_detection_confirmed の fail-open)は **Issue #211 で解消済み**
-      であり、この設計どおり本テストが落ちたため期待値を更新した。
-      buy / holdings の 2 cell は KNOWN_GAP -> PROPAGATES へ反転し、
-      台帳に残る #70 の finding は F-B4 だけになった。
-      解消後の契約そのものは test_d7_trade_detection_confirmed_is_fail_closed が
-      別途固定する(台帳から消えても契約は失われない)。
+    ★ F-B3(trade_detection_confirmed の fail-open)= **Issue #211 で解消**。
+      buy / holdings の 2 cell は KNOWN_GAP -> PROPAGATES。
+    ★ F-B4(watchlist 系 4 handler の execution_mode 黙殺)= **Issue #286 で解消**。
+      8 cell(4 handler × execution_mode / notification_mode)は
+      KNOWN_GAP -> **REJECTS_EXPLICITLY**。対応ではなく明示的な拒否を選んだ
+      (watchlist には VALIDATION の隔離が無く、受け付けると検証のつもりで
+      本番の watchlist と rotation cursor を変えてしまうため)。
+
+    どちらも解消後の契約そのものは別のテストが固定するため、台帳の cell を
+    書き換えるだけで「直したことにする」ことはできない。
     """
     tracked: dict[str, list[str]] = {}
     for handler_name, cells in _CONTEXT_CONTRACT_MATRIX.items():
@@ -772,13 +779,37 @@ def test_d7_issue_70_findings_are_tracked_in_the_inventory() -> None:
     assert "F-B3" not in tracked, (
         "F-B3 は Issue #211 で解消済み。KNOWN_GAP として台帳へ戻さないこと"
     )
-    assert "F-B4" in tracked, "#70 F-B4(watchlist系の execution_mode 黙殺)が台帳に無い"
-    assert {entry.split(".")[0] for entry in tracked["F-B4"]} == {
+    assert "F-B4" not in tracked, (
+        "F-B4 は Issue #286 で解消済み(REJECTS_EXPLICITLY)。"
+        "KNOWN_GAP として台帳へ戻さないこと"
+    )
+    assert not tracked, f"#70 由来の KNOWN_GAP が残っている: {sorted(tracked)}"
+
+
+def test_d7_watchlist_handlers_reject_execution_mode() -> None:
+    """★ 台帳が REJECTS_EXPLICITLY と主張する内容を、実際のソースで裏づける(#286)。
+
+    台帳の cell を書き換えるだけでは「直したことにする」ことができてしまう。
+    そこで 4 handler が実際に拒否関数を呼んでいることをソースから確かめる。
+
+    ★ ここで見るのは**台帳と実装の対応づけ**だけである。例外の型・対象キー・
+      空 event が素通りすることは test_issue_286_watchlist_execution_mode.py が
+      振る舞いとして固定する。
+    """
+    for module_name in (
         "watchlist_dispatcher_handler",
         "watchlist_worker_handler",
         "watchlist_terminal_failure_handler",
         "watchlist_batch_reconciler_handler",
-    }
+    ):
+        module = importlib.import_module(f"jstock_advisor.lambda_handlers.{module_name}")
+        source = Path(inspect.getfile(module)).read_text(encoding="utf-8")
+        assert "reject_execution_mode(event" in source, (
+            f"{module_name}: reject_execution_mode() を呼んでいない。"
+            "台帳の REJECTS_EXPLICITLY が実装と食い違っている(#286)"
+        )
+        cell = _CONTEXT_CONTRACT_MATRIX[module_name][_Dimension.EXECUTION_MODE]
+        assert cell.status is _ContractStatus.REJECTS_EXPLICITLY
 
 
 def test_d8_issue_56_job_type_contract_is_recorded_as_green() -> None:

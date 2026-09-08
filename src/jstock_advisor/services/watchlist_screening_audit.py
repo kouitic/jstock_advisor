@@ -13,6 +13,56 @@ from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningResult
 
+# --- Issue #286 (#70 F-B8): batch auditの`execution_mode`の語彙 ---
+# 修正前は呼び出し元がすべて "scheduled" をハードコードしており、手動起動も
+# 連鎖起動も同じ値で記録されていた(監査から起動経路を区別できなかった)。
+# 値はAuditLogへそのまま入る**説明用の文字列**であり、これを読んで分岐する
+# コードはsrc内に存在しない(実測)。ExecutionMode enumとは無関係である
+# (あちらはNORMAL/VALIDATIONという検証モードの軸で、こちらは起動経路の軸)。
+EXECUTION_MODE_SCHEDULED = "scheduled"
+EXECUTION_MODE_MANUAL = "manual"
+EXECUTION_MODE_TRIGGERED = "triggered"
+
+# 連鎖起動(finalizeがmaintenanceをinvokeする経路)だけが必ず持つキー。
+_TRIGGERED_KEYS = ("trigger_type", "triggered_by_batch_id")
+# EventBridge Scheduler(ScheduleV2)はどのScheduleもInputを持たないため、
+# 自動実行のeventにはこれらのキーが**現れない**(infra/template.yamlを全走査)。
+# したがってこれらがあるのは人がpayloadを与えて起動した場合に限られる。
+_MANUAL_DISPATCH_KEYS = ("job_type", "batch_id")
+
+
+def resolve_dispatch_execution_mode(event: dict[str, Any]) -> str:
+    """dispatcherのeventから起動経路を決める(Issue #286 F-B8)。
+
+    判定の根拠はeventのキーの**有無**だけであり、値は見ない
+    (未知のjob_typeはhandler側が別途fail-closedで止めるため、ここで
+    重ねて解釈しない)。
+    """
+    if any(event.get(key) is not None for key in _TRIGGERED_KEYS):
+        return EXECUTION_MODE_TRIGGERED
+    if any(event.get(key) is not None for key in _MANUAL_DISPATCH_KEYS):
+        return EXECUTION_MODE_MANUAL
+    return EXECUTION_MODE_SCHEDULED
+
+
+def resolve_batch_execution_mode(batch_item: dict[str, Any]) -> str:
+    """BatchRunsTableの行から、そのbatchのdispatch時の経路を復元する。
+
+    finalize / reconcileはdispatchのeventを持たないため、dispatch時に
+    行へ書かれた`trigger_type`/`triggered_by_batch_id`から復元する。
+
+    ★ **既知の限界(Issue #286で解消しない)**
+      `resolve_dispatch_execution_mode()`が返した値そのものは行へ
+      永続化していない(BatchRunsTableへ列を足す変更になるため)。
+      よって**手動でdispatchしたbatch**のfinalize / reconcile監査は
+      ここで "scheduled" と記録される。dispatcher自身の監査5か所は
+      正しく "manual" になるため、経路の判別は少なくとも1か所で残る。
+    """
+    if any(batch_item.get(key) is not None for key in _TRIGGERED_KEYS):
+        return EXECUTION_MODE_TRIGGERED
+    return EXECUTION_MODE_SCHEDULED
+
+
 DECISION_TYPE_BATCH = "watchlist_auto_addition_batch"
 DECISION_TYPE_CANDIDATE = "watchlist_auto_addition_candidate_evaluation"
 # finalize後の銘柄単位Repository書き込み結果専用のdecision_type(レビュー対応)。

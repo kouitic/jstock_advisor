@@ -167,6 +167,7 @@ from jstock_advisor.services.watchlist_screening_audit import (
     record_removal_audit,
     record_repository_result_audit,
     record_rotation_commit_audit,
+    resolve_batch_execution_mode,
 )
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningService
 
@@ -881,7 +882,9 @@ def _finish_batch(
     """
     if not batch_item.get("finalize_batch_audit_recorded"):
         record_batch_audit(
-            execution_mode="scheduled",
+            # Issue #286 (#70 F-B8): dispatch時にbatch行へ書かれた起動経路から
+            # 復元する(以前は "scheduled" のハードコードだった)。
+            execution_mode=resolve_batch_execution_mode(batch_item),
             universe_provider=config.watchlist_screening.candidate_universe.provider,
             screening_policies=[config.watchlist_screening.screening_policy],
             output_values={
@@ -1324,6 +1327,13 @@ def _parse_maintenance_screening_summary(raw: str | None) -> MaintenanceScreenin
 def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: AppConfig) -> None:
     """計画Part C-3の3段階判定を全銘柄へ適用し、削除・監査記録を行う。"""
     records = query_all_candidate_progress(batch_id, consistent_read=True)
+    # Issue #286 (#70 F-B8): 監査へ載せる起動経路をbatch行から復元する。
+    # WATCHLIST_MAINTENANCEは独立したScheduleを持たない(2026-08に廃止)ため、
+    # 実際の経路は「NEW_CANDIDATE_SCREENING完了後の連鎖起動」か「手動起動」に
+    # 限られる。ただしdispatch時の経路そのものは行へ永続化していないため、
+    # 手動dispatchの場合ここは "scheduled" になる(既知の限界。resolve_batch_
+    # execution_modeのdocstring参照)。
+    maintenance_batch_item = get_watchlist_batch(batch_id) or {}
     watchlist_repo = WatchlistRepository()
     auto_removal_config = config.watchlist_screening.auto_removal
     removal_history_repo = WatchlistRemovalHistoryRepository(
@@ -1480,7 +1490,7 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             watchlist_repo.upsert(decision.updated_item)
 
     record_batch_audit(
-        execution_mode="scheduled",
+        execution_mode=resolve_batch_execution_mode(maintenance_batch_item),
         universe_provider=MAINTENANCE_UNIVERSE_PROVIDER,
         screening_policies=[config.watchlist_screening.screening_policy],
         output_values={

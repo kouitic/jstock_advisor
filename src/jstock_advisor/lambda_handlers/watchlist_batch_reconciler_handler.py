@@ -62,6 +62,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers._fanout import dispatch_async
 from jstock_advisor.lambda_handlers._finalize_recovery import build_finalize_only_payload
+from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_execution_mode
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
@@ -76,7 +77,10 @@ from jstock_advisor.services.watchlist_batch_finalizer import (
     retry_notification,
 )
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
-from jstock_advisor.services.watchlist_screening_audit import record_batch_audit
+from jstock_advisor.services.watchlist_screening_audit import (
+    record_batch_audit,
+    resolve_batch_execution_mode,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -195,7 +199,9 @@ def _process_timeout_finalizing(
     )
 
     record_batch_audit(
-        execution_mode="scheduled",
+        # Issue #286 (#70 F-B8): reconciler自身はScheduleで動くが、監査が
+        # 表すのは**そのbatchの起動経路**であるためbatch行から復元する。
+        execution_mode=resolve_batch_execution_mode(batch_item),
         universe_provider=universe_provider,
         screening_policies=[config.watchlist_screening.screening_policy],
         output_values={
@@ -319,6 +325,8 @@ def _handle_completion_recovery_candidate(
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    # Issue #286 (#70 F-B4): watchlist系は execution_mode を**受け付けない**。
+    reject_execution_mode(event, handler_name="watchlist batch reconciler")
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     wc = config.watchlist_screening

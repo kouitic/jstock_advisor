@@ -1406,6 +1406,86 @@ LINE文面確認自体が目的ではない作業では、原則こちらを使�
 時刻)は`notification_mode`を一切指定しないため、この制約による影響は
 ありません。
 
+### 13.4 各Lambdaの`execution_mode`対応可否(Issue #286、2026-09-08追加)
+
+**どのLambdaが検証モードを受け付けるのかは、Lambdaごとに異なります。**
+受け付けないLambdaへ指定した場合の挙動も、以前は一様ではありませんでした
+(黙って通常運用として実行されるものがありました)。実測した現況を以下に
+まとめます。
+
+| Lambda(handler module) | `execution_mode`指定時 | 備考 |
+|---|---|---|
+| `buy_candidates_handler` | **対応**(VALIDATION/NORMAL) | 13.1〜13.3の手順が使える。検証用テーブルへ隔離される |
+| `holdings_watchlist_handler` | **対応**(VALIDATION/NORMAL) | 同上 |
+| `disclosure_check_handler` | **対応**(VALIDATION/NORMAL) | Issue #109で対応済み |
+| `watchlist_dispatcher_handler` | ★ **拒否**(Lambda呼び出しが失敗する) | Issue #286。理由は下記 |
+| `watchlist_worker_handler` | ★ **拒否**(同上) | 同上 |
+| `watchlist_batch_reconciler_handler` | ★ **拒否**(同上) | 同上 |
+| `watchlist_terminal_failure_handler` | ★ **拒否**(同上) | 同上 |
+| `evaluation_handler` | ⚠ **黙殺**(通常運用として実行される) | **Issue #287で未解消**。指定しないこと |
+| `weekly_review_handler` | ⚠ **黙殺**(同上) | 同上 |
+| `monthly_review_handler` | ⚠ **黙殺**(同上) | 同上 |
+| `quarterly_review_handler` | ⚠ **黙殺**(同上) | 同上 |
+| `line_webhook_handler` | 対象外 | LINEからのwebhook受信であり、バッチ起動の概念を持たない |
+
+```
+★ watchlist系4本を「対応」ではなく「拒否」にした理由
+
+  検証モードが成立するには、書き込み先を検証用へ隔離できる必要がある。
+  watchlistにはその隔離が存在しない(実測)。
+
+    for_execution_context()を持つrepository  Recommendation / WatchState /
+                                             HoldingsSnapshot /
+                                             DailyNotificationPriority
+    WatchlistRepository と rotation state   **持たない**
+    infra/template.yamlのValidation*テーブル **watchlist / rotationは無い**
+
+  したがって受け付けると、LINE送信は止められても
+  **実際のwatchlistが書き換わり、巡回カーソルが前進する**。
+  「検証のつもりで本番の状態を変えた」という最悪の結果になるため、
+  対応せず**明示的に失敗させる**方針とした(機能仕様書12.13節の
+  「ウォッチリスト自動追加の通知は対象外」という仕様は変えていない)。
+
+★ 拒否されたときの見え方
+  Lambda呼び出しが`WatchlistExecutionModeNotSupportedError`で失敗し、
+  CloudWatch Logsへ「どのhandlerがどのキーを拒否したか」がERRORで残る。
+  黙って握りつぶすことはない。
+
+★ **自動実行(EventBridge Scheduler)は影響を受けない。**
+  どのScheduleもInputを持たず、`execution_mode`を渡さないためである。
+```
+
+```
+★ ⚠ の4本(evaluation / weekly / monthly / quarterly review)について
+
+  **指定しても黙って通常運用として実行されます。** Issue #287で是正予定。
+  それまでの間、これら4本へ`execution_mode`を渡した「検証実行」は
+  **行わないでください**(通常運用の実行になります)。
+  weekly_reviewはLINE送信とGitHub Issue起票を伴います。
+```
+
+### 13.5 監査記録の`execution_mode`(起動経路)の読み方(Issue #286、2026-09-08追加)
+
+ウォッチリストのバッチ監査記録(`watchlist_auto_addition_batch`)に入る
+`execution_mode`は、13.1〜13.4の**検証モードとは別の軸**です。
+「どの経路で起動されたか」を表します。
+
+```
+scheduled  EventBridge Schedulerからの自動実行(eventにキーが無い)
+manual     人がpayloadを与えて手動起動した(job_type / batch_idを指定)
+triggered  当日の新規候補スクリーニングの完了後に、後続のメンテナンスが
+           自動で連鎖起動した(trigger_type = POST_NEW_CANDIDATE_SCREENING)
+```
+
+```
+★ 既知の限界(Issue #286では解消していない)
+
+  dispatcherが判定した経路そのものはBatchRunsTableへ保存していないため、
+  **手動でdispatchしたバッチの「集計時」の監査記録は`scheduled`になります**。
+  経路を正しく見分けられるのは、dispatcher自身が書く監査記録
+  (中止・skip時)だけです。同一batch_idの記録を突き合わせて読んでください。
+```
+
 ## 14. Lambda Layer依存パッケージの更新手順(Issue #35、2026-08-28追加)
 
 本番Lambdaの依存Layer(DependenciesLayer)は、再現可能ビルドのため
