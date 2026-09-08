@@ -1499,7 +1499,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # BUY候補裾野拡大機能(2026-08、§5-1): 子Lambda(task=holding)は親Lambdaが
     # detect_and_apply()の結果をイベントペイロード経由で伝播した
     # trade_detection_confirmedをそのまま使う。
-    trade_detection_confirmed = event.get("trade_detection_confirmed", True)
+    # ★ 既定は**False(fail-close)**である(Issue #211 / #70 F-B3)。
+    #   理由と影響範囲はbuy_candidates_handlerの同じ箇所と同一。
+    #   通常のscheduled経路では親が必ず実値を渡すため挙動は変わらない。
+    trade_detection_confirmed = event.get("trade_detection_confirmed", False)
     notification_service = LineNotificationService(
         line_client=build_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),

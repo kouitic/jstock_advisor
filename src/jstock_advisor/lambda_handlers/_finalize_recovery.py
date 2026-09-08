@@ -41,6 +41,17 @@ def build_finalize_only_payload(record: CompletionBatchRecord) -> dict[str, Any]
     ExecutionContext を組み立てられるようにする(recovery 専用の解決経路を
     作らない)。`notification_mode` は VALIDATION 専用の補助設定であり、
     自動 recovery の対象は NORMAL のみのため載せない。
+
+    `trade_detection_confirmed` は**常に False** を載せる(Issue #211 / #70 F-B3)。
+    recovery は停滞 batch を finalize するだけの経路であり、
+    `TradeCooldownService.detect_and_apply()` を**この実行では走らせていない**。
+    「検知完了を確認していない」という事実どおりの値を送ることで、
+    invoke 先の `check_trade_cooldown_eligibility()` が通常通知を抑止する
+    (line_notification_service §5-1: 完了未確認のままクールダウン未適用で
+    通常通知を送る fail-open は採用しない)。
+
+    ★ 値を省略して invoke 先の既定に委ねない。省略した値の解釈は
+      呼び出し先の既定に依存し、既定が変わると意味が黙って反転するためである。
     """
     if record.family is None or record.execution_context is None:
         raise ValueError(f"cannot build finalize-only payload: batch_id={record.batch_id}")
@@ -49,6 +60,7 @@ def build_finalize_only_payload(record: CompletionBatchRecord) -> dict[str, Any]
         "batch_id": record.batch_id,
         "batch_family": record.family.value,
         "execution_mode": record.execution_context.mode.value,
+        "trade_detection_confirmed": False,
     }
 
 
