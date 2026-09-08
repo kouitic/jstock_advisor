@@ -252,6 +252,34 @@ class NotificationLogRepository:
         """直近1件を含む再送判定用の結果(Issue #279)。直近は `.latest`。"""
         return self.list_by_holding_and_type(holding_id, notification_type)
 
+    def list_by_stock(self, stock_code: str) -> NotificationLookup:
+        """**通知種別を問わず**、同じ銘柄の履歴を返す(Issue #273)。
+
+        ★ 用途は**急変検知の比較相手**であり、再送判定ではない。
+          急変(適正価格・株価が前回分析から大きく動いた)は
+          **推奨種別と無関係に起きる**ため、種別で絞ると
+          種別が切り替わった直後だけ比較相手が消えて検知できなくなる。
+
+        ★ 再送判定は従来どおり `list_by_stock_and_type()` を使うこと。
+          あちらは「同じ種別の通知を短期間に繰り返さない」ための判定であり、
+          種別で絞ることに意味がある。**2つを取り違えないこと。**
+
+        ★ 走査コストは `list_by_stock_and_type()` と同じである
+          (どちらも述語走査であり、述語から種別の条件を外しただけ)。
+        """
+        return NotificationLookup.from_outcome(
+            self._store.find_with_outcome(lambda n: n.stock_code == stock_code)
+        )
+
+    def list_by_holding(self, holding_id: str) -> NotificationLookup:
+        """**通知種別を問わず**、同じ保有(holding_id)の履歴を返す(Issue #273)。
+
+        holding-scopeの急変検知用。理由と注意は `list_by_stock()` と同じ。
+        """
+        return NotificationLookup.from_outcome(
+            self._store.find_with_outcome(lambda n: n.holding_id == holding_id)
+        )
+
     def list_by_recommendation_id(self, recommendation_id: str) -> NotificationLookup:
         """backtest/compareのhistory replayが「実際にLINE送信が成功したか」を
         判定するために使う(コードレビュー対応)。複数件ある場合は重複送信の
