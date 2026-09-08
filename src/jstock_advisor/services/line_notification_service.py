@@ -59,6 +59,7 @@ from jstock_advisor.domain.entities.notification_claim import (
     compute_claim_id,
 )
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
+from jstock_advisor.domain.entities.owner import log_ref
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst, format_jst
 from jstock_advisor.domain.notification.message_formatter import format_notification_text
@@ -4475,13 +4476,23 @@ class LineNotificationService:
         latest_log = lookup.latest
         if latest_log is None:
             return NotificationStatus.SENT
-        if previous is None:
+        # Issue #271(N-03): previousが無くても**日数判定は通す**。
+        #
+        # ここへ到達した時点でlatest_logは必ず存在する(直前の行で処理済み)
+        # = **過去に送信済み**である。したがってprevious is Noneが意味しうるのは
+        #     (1) latest_log.related_recommendation_idがNone(参照IDを持たない古いログ)
+        #     (2) 参照先のRecommendationが**消えている**(purge/#63の隔離等)
+        # のどちらかであり、いずれも「未送信」ではなく「**比較できない**」である。
+        #
+        # 修正前はここで`return SENT`しており、resend_after_daysを待たずに
+        # 再送していた(=**重複送信**)。日数判定はlatest_log.sent_atだけで計算でき
+        # previousを1つも参照しないため、比較できない項目だけをskipすればよい。
+        if previous is not None and (
+            previous.recommendation_type != recommendation.recommendation_type
+        ):
             return NotificationStatus.SENT
 
-        if previous.recommendation_type != recommendation.recommendation_type:
-            return NotificationStatus.SENT
-
-        prev_price = _representative_price(previous)
+        prev_price = _representative_price(previous) if previous is not None else None
         new_price = _representative_price(recommendation)
         price_comparable = prev_price is not None and new_price is not None and prev_price > 0
         if price_comparable:
@@ -4495,8 +4506,11 @@ class LineNotificationService:
         # 同一recommendation_type内の状態変化を価格変化だけでは検知できない。
         # 構造化フィールド(_earnings_waiting_state_key)が変化していれば、
         # 再送資格ありとみなす(自由文の比較は文言変更に対して脆いため使わない)。
+        # Issue #271: previousが無い場合は比較対象が無いためskipする
+        # (「変化していない」ではなく「**確かめられない**」。日数判定へ委ねる)。
         if (
-            recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
+            previous is not None
+            and recommendation.recommendation_type == RecommendationType.REVIEW_AFTER_EARNINGS
             and _earnings_waiting_state_key(previous) != _earnings_waiting_state_key(recommendation)
         ):
             return NotificationStatus.SENT
@@ -4511,6 +4525,39 @@ class LineNotificationService:
         days_elapsed = (
             evaluation_date_jst(now) - evaluation_date_jst(latest_log.sent_at)
         ).days
+        if previous is None:
+            # Issue #271: 前回の内容と**比較できないまま日数だけで判断した**ことを残す。
+            # この事実はこれ以外のどこにも現れない(戻り値は通常の抑止/送信と同じで、
+            # 通知本文にも出ない)。放置すると参照先の消失が増えても気づけないため、
+            # 判定の前に1件ずつ記録する。
+            #
+            # ★ 送信/抑止の**どちらへ倒れても**出す。消失そのものが観測対象であり、
+            #   結果はdays_elapsedとresend_after_daysの対比から読める。
+            # ★ 戻り値・判定順は1つも変えていない(記録のみ)。
+            # ★ 銘柄・所有者は**平文で出さない**(Issue #135)。scope_refはholding-scopeなら
+            #   holding_id、stock-scopeならstock_codeをlog_ref()で符号化したものである。
+            # ★ scope の判定は logger 呼び出しの**外**で行う。#135 の AST guard は
+            #   「holding_id / owner を logger の書式引数へ渡していないか」を
+            #   **渡し方の形**で見るため、値が出ない三項演算子であっても
+            #   引数の中に holding_id が現れる時点で検出される(正しい厳しさである)。
+            scope = "holding" if recommendation.holding_id is not None else "stock"
+            scope_ref_source = recommendation.holding_id or recommendation.stock_code
+            cause = (
+                "NO_RELATED_RECOMMENDATION_ID"
+                if latest_log.related_recommendation_id is None
+                else "RECOMMENDATION_NOT_FOUND"
+            )
+            logger.warning(
+                "resend judged by elapsed days only: previous recommendation unavailable "
+                "type=%s scope=%s scope_ref=%s cause=%s "
+                "days_elapsed=%d resend_after_days=%d",
+                notification_type.value,
+                scope,
+                log_ref(scope_ref_source),
+                cause,
+                days_elapsed,
+                self._config.notification.resend_after_days,
+            )
         if days_elapsed >= self._config.notification.resend_after_days:
             return NotificationStatus.SENT
 
@@ -4518,6 +4565,12 @@ class LineNotificationService:
         # 場合はDUPLICATE_SUPPRESSED、価格を比較できたが閾値未満だった場合は
         # PRICE_CHANGE_BELOW_THRESHOLD、価格を比較できず日数のみで判断した場合は
         # RESEND_INTERVAL_NOT_REACHEDとする。
+        if previous is None:
+            # Issue #271: 前回の内容と比較していない。DUPLICATE_SUPPRESSED
+            # (=まったく同一内容の再送)へ落とすと、**比較していないのに
+            # 「同一内容だった」と記録する**ことになり事実に反する。
+            # 実際に行ったのは日数だけの判断であるため、その値をそのまま返す。
+            return NotificationStatus.RESEND_INTERVAL_NOT_REACHED
         if price_comparable:
             return NotificationStatus.PRICE_CHANGE_BELOW_THRESHOLD
         if prev_price is None and new_price is None:
