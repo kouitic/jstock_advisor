@@ -4,6 +4,23 @@
 項目(優待条件維持・利益CF前提維持・財務前提維持)は、比較不能な場合
 (呼び出し側がNoneを渡す。SYSTEM_INITIALIZED baselineの初回評価等)は
 NOT_EVALUATEDとし、current=baselineで自動的に満点を付与しない。
+
+## NOT_EVALUATED には性質の違う2つが同居する(Issue #249)
+
+    a  データ不足で算出不能        total_yield / custom_conditions
+    b  baselineが無く比較不能      上記3項目(入力がNone)
+
+bは「比較する相手がまだ無い」だけであり、悪い状態が観測されたわけではない。
+これを0点として分母に数えると、**買った直後の初回評価だけが不当に低く出る**
+(Issue #249。実測で最大18.75点の下振れ)。そのためbのみをスコアの分母から
+除く。aは従来どおり分母に残す(**Issue #55 Phase A Decision 3は変更しない**。
+欠測は「不足として計上する」という別の意図的な決定であり、
+tests/unit/test_missing_yield_semantics.py が契約として固定している)。
+
+## coverage_ratioの分母は変えない
+
+「評価できなかった」事実はcoverage_ratioに残し続ける。スコアだけを直し、
+確認できていないことを隠さない。coverageが下がればcoverage gateが働く。
 """
 
 from __future__ import annotations
@@ -22,6 +39,14 @@ from jstock_advisor.domain.entities.holding_decision import (
     InvestmentThesisScore,
     ScoreItemDetail,
 )
+
+_BASELINE_NOT_COMPARABLE = "BASELINE_NOT_COMPARABLE"
+"""baseline比較が必要な項目で、比較対象がまだ無いことを表す理由(Issue #249)。
+
+`status`には新しい値を足さずNOT_EVALUATEDのままとし、既存の`reason`フィールドで
+区別する。enumを増やすと共通enum(S-16)の変更となり、保存済みレコードの
+読み手すべてに波及するため。**保存形式は変わらない。**
+"""
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -106,6 +131,7 @@ def score_investment_thesis(
                 axis="benefit_condition",
                 weight=weights.benefit_condition,
                 status=EvidenceCoverageStatus.NOT_EVALUATED,
+                reason=_BASELINE_NOT_COMPARABLE,
             )
         )
     else:
@@ -129,6 +155,7 @@ def score_investment_thesis(
                 axis="profit_cf_premise",
                 weight=weights.profit_cf_premise,
                 status=EvidenceCoverageStatus.NOT_EVALUATED,
+                reason=_BASELINE_NOT_COMPARABLE,
             )
         )
     else:
@@ -152,6 +179,7 @@ def score_investment_thesis(
                 axis="financial_premise",
                 weight=weights.financial_premise,
                 status=EvidenceCoverageStatus.NOT_EVALUATED,
+                reason=_BASELINE_NOT_COMPARABLE,
             )
         )
     else:
@@ -224,10 +252,30 @@ def score_investment_thesis(
     available_weight = sum(
         i.weight for i in items if i.status != EvidenceCoverageStatus.NOT_APPLICABLE
     )
+    # Issue #249: baseline比較不能の項目はスコアの分母から外す。
+    # NOT_APPLICABLE(評価対象外)と同じ扱いであり、「悪い」わけではないため。
+    # ★ available_weight自体は減らさない。coverage_ratioの分母は据え置き、
+    #   「評価できなかった」事実をcoverageに残すため(下のcoverage_ratio参照)。
+    not_comparable_weight = sum(
+        i.weight
+        for i in items
+        if i.status == EvidenceCoverageStatus.NOT_EVALUATED
+        and i.reason == _BASELINE_NOT_COMPARABLE
+    )
+    score_weight = available_weight - not_comparable_weight
     raw_points = sum(i.points_earned for i in items)
 
-    score = (raw_points / available_weight * 50.0) if available_weight > 0 else 0.0
-    coverage_ratio = (evaluated_weight / available_weight) if available_weight > 0 else 0.0
+    # score_weight <= 0 はfail-closed。現行configでは到達しない
+    # (dividend_policyはbaseline不要で常にEVALUATEDのため分母に残る)が、
+    # weightsのvalidatorは合計50点しか検査しないため構造的には起こりうる。
+    # そのときscoreだけを0.0にするとcoverageが高いまま残りgateをすり抜けるため、
+    # **coverage_ratioも0.0にして「評価できていない」ことを示す。**
+    score = (raw_points / score_weight * 50.0) if score_weight > 0 else 0.0
+    coverage_ratio = (
+        (evaluated_weight / available_weight)
+        if available_weight > 0 and score_weight > 0
+        else 0.0
+    )
 
     return InvestmentThesisScore(
         score=score,
