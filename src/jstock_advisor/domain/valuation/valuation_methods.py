@@ -490,8 +490,37 @@ def compute_valuation_anchor(
 
     - 信頼度HIGHかつばらつき小: weighted_median
     - 信頼度MEDIUMまたはばらつき中: min(weighted_median, trimmed_mean)
-    - ばらつき大: percentile_40
+    - ばらつき大: min(weighted_median, trimmed_mean, percentile_40)
     - 信頼度LOW: None(自動買付価格を生成しない)
+
+    ばらつきが悪化するほどanchorが単調に下がる(= より保守的になる)ことを、
+    band間で前段の値とのminを取ることで式の上で保証する(Issue #260)。
+
+    Issue #260の是正前は、ばらつき大のときpercentile_40を**単独で**採っていた。
+    percentile_40は中央値より下であり「中央値と比べれば保守的」ではあるが、
+    ばらつき中が採るmin(weighted_median, trimmed_mean)は中央値よりさらに
+    下がり得るため、percentile_40がそれを下回る保証が無かった。実際、方式値が
+    左に裾を引く分布(安い方式値が1つ突出して低い)では平均が下へ引かれ、
+    mean < percentile_40 <= weighted_median となる。このときばらつきが
+    **悪化した**ほうが高いanchor(= 高い買付価格)になっていた。
+    Production実測では、ばらつき大かつ再構成を検証できた765件のうち437件
+    (57.1%)がこの状態で、買付価格は中央値で+2.82%高く出ていた。
+
+    2026-07-31の設計文書(before_after_report_2026-07-31_buy_pipeline_redesign.md)
+    は「バラつき率と信頼度に応じて**保守的に**決定する」と定めており、本是正は
+    その意図の**変更ではなく復元**である。各集約器を中央値とだけ比べ、
+    前段のbandの集約器と比べていなかったことが欠陥の正体だった。
+
+    関連Issue:
+      #187 band境界(1.30 / 1.60)でanchorが不連続に跳ぶ挙動。本是正では
+           不連続は残る(跳ぶ向きが下方向のみに限定される)。別PRで扱う。
+      #263 _trimmed_mean()はtrim_count = int(n * 0.1)のため本番の方式数
+           (3〜5)では一度もtrimせず単純平均と同一。挙動は本Issueで変えない。
+           上記のminは項が増えるだけなので、この性質があってもanchorは
+           現行以下にしかならない。
+      #189 判定時点スナップショットに集約規則のバージョンが記録されないため、
+           保存済みRecommendationを後から再計算して検証する際に、
+           是正前後のどちらの規則で判定されたかを区別できない。
     """
     if valuation_confidence == ConfidenceLevel.LOW:
         return ValuationAnchorResult(anchor=None)
@@ -516,7 +545,12 @@ def compute_valuation_anchor(
         )
 
     if dispersion_band == "HIGH":
-        return ValuationAnchorResult(anchor=_percentile(values, 40))
+        # Issue #260: 前段(ばらつき中)の値とのminを取り、band悪化でanchorが
+        # 上がらないことを式で保証する。percentile_40単独では保証されない。
+        trimmed_mean = _trimmed_mean(values)
+        return ValuationAnchorResult(
+            anchor=min(weighted_median, trimmed_mean, _percentile(values, 40))
+        )
     if valuation_confidence == ConfidenceLevel.MEDIUM or dispersion_band == "MEDIUM":
         trimmed_mean = _trimmed_mean(values)
         return ValuationAnchorResult(anchor=min(weighted_median, trimmed_mean))
