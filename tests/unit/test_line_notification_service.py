@@ -4100,10 +4100,25 @@ def test_attention_sent_then_buy_is_not_blocked(service_and_repos) -> None:
     first = service.notify_recommendation_with_status(attention_rec, _NOW)
     assert first.sent is True
 
+    # Issue #273: 急変検知の比較相手が**種別横断**になったため、同じ銘柄の
+    # BUY と ATTENTION で price_at_recommendation を揃える。
+    # ★ 揃えるのは本テストの意図（priority による可否）を保つためである。
+    #   従来は fixture の既定値のまま 4200 対 1400 = **ちょうど 3.0 倍**で、
+    #   price_change_resembles_split_ratio（株式分割らしい価格変化）が発火し、
+    #   priority の判定へ到達しなくなる。
+    # ★ 実運用では price_at_recommendation は「その時点の市場価格」であり、
+    #   同じ銘柄を同じ時刻に見れば種別が違っても**同じ値**になる。
+    #   3 倍差のほうが非現実的であり、fixture 側の不備である
+    #   （期待値は 1 つも変えていない）。
     buy_rec = _make_recommendation(
         recommendation_id="prio-p-buy", recommendation_type=RecommendationType.BUY,
         standard_price="3359",
-    ).model_copy(update={"stock_code": attention_rec.stock_code})
+    ).model_copy(
+        update={
+            "stock_code": attention_rec.stock_code,
+            "price_at_recommendation": attention_rec.price_at_recommendation,
+        }
+    )
     repo.save(buy_rec)
     second = service.notify_recommendation_with_status(buy_rec, _NOW + dt.timedelta(minutes=5))
 
@@ -4115,10 +4130,20 @@ def test_buy_sent_then_attention_is_blocked(service_and_repos) -> None:
     """指摘10-Q: BUY送信後にATTENTION → ATTENTIONはpriorityが低いため抑止される
     (LOW_PRIORITY)。"""
     service, repo, client = service_and_repos
+    # Issue #273: 急変検知の比較相手が**種別横断**になったため、同じ銘柄の
+    # BUY と ATTENTION で price_at_recommendation を揃える。
+    # ★ 揃えるのは本テストの意図（priority による可否）を保つためである。
+    #   従来は fixture の既定値のまま 4200 対 1400 = **ちょうど 3.0 倍**で、
+    #   price_change_resembles_split_ratio（株式分割らしい価格変化）が発火し、
+    #   priority の判定へ到達しなくなる。
+    # ★ 実運用では price_at_recommendation は「その時点の市場価格」であり、
+    #   同じ銘柄を同じ時刻に見れば種別が違っても**同じ値**になる。
+    #   3 倍差のほうが非現実的であり、fixture 側の不備である
+    #   （期待値は 1 つも変えていない）。
     buy_rec = _make_recommendation(
         recommendation_id="prio-q-buy", recommendation_type=RecommendationType.BUY,
         standard_price="3359",
-    )
+    ).model_copy(update={"price_at_recommendation": Decimal("1400")})
     repo.save(buy_rec)
     first = service.notify_recommendation_with_status(buy_rec, _NOW)
     assert first.sent is True

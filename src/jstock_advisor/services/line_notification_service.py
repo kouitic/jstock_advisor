@@ -2227,6 +2227,10 @@ class LineNotificationService:
 
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
         previous = self._previous_recommendation(recommendation, notification_type)
+        # Issue #273: 急変検知の比較相手は**種別を問わない**直近を使う。
+        # 再送防止(下の _notification_status_for_send)は従来どおり種別つきの
+        # `previous` を使う。**同じ名前の値を使い回さない**(scopeの意味が違う)。
+        previous_any_type = self._previous_recommendation_any_type(recommendation)
 
         # 再コードレビュー対応(2026-08、指摘3): NON_ACTIONABLEゲートは、内部論理・
         # 計算異常の安全弁(notify_manual_review_required)より後に評価する。
@@ -2238,7 +2242,7 @@ class LineNotificationService:
         # 従来どおりLINE安全弁を発火させず、NON_ACTIONABLE経由でAudit記録のみに
         # 留める。
         alert, requires_manual_review = self._check_data_quality(
-            recommendation, previous, notification_type, now
+            recommendation, previous_any_type, notification_type, now
         )
         if alert is not None:
             if requires_manual_review and context is not NotificationContext.BUY_CANDIDATE_BATCH:
@@ -2329,9 +2333,12 @@ class LineNotificationService:
         チェックより前にデータ品質だけを先に確認するための分離)。
         """
         notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
-        previous = self._previous_recommendation(recommendation, notification_type)
+        # Issue #273: 本メソッドはデータ品質だけを見る(再送判定は
+        # check_resend_eligibility が別途行う)。したがって比較相手は
+        # **種別を問わない**直近だけでよい。
+        previous_any_type = self._previous_recommendation_any_type(recommendation)
         alert, requires_manual_review = self._check_data_quality(
-            recommendation, previous, notification_type, now
+            recommendation, previous_any_type, notification_type, now
         )
         if alert is None:
             return NotificationEligibility(eligible=True)
@@ -4380,6 +4387,53 @@ class LineNotificationService:
         latest_log = self._log_lookup_for_recommendation_scope(
             recommendation, notification_type
         ).latest
+        if latest_log is None or latest_log.related_recommendation_id is None:
+            return None
+        return self._recommendation_repo.get(latest_log.related_recommendation_id)
+
+    def _log_lookup_for_recommendation_scope_any_type(
+        self, recommendation: Recommendation
+    ) -> NotificationLookup:
+        """scopeは同じまま、**通知種別だけ問わない**直近履歴(Issue #273)。
+
+        `_log_lookup_for_recommendation_scope()` と scope の決め方は同一である
+        (holding_idがあればholding単位、無ければstock_code単位)。
+        違うのは**種別で絞らない**ことだけである。
+        """
+        if recommendation.holding_id is not None:
+            return self._log_repo.list_by_holding(recommendation.holding_id)
+        return self._log_repo.list_by_stock(recommendation.stock_code)
+
+    def _previous_recommendation_any_type(
+        self, recommendation: Recommendation
+    ) -> Recommendation | None:
+        """急変検知の比較相手: **種別を問わない**直近のRecommendation(Issue #273)。
+
+        ## なぜ種別で絞らないのか
+
+        急変検知(data_quality_service.detect_anomalies)が見るのは
+        「適正価格・株価・利確目安・配当利回りが前回分析からどれだけ動いたか」であり、
+        ★ **推奨種別を1つも参照していない**(実測)。
+        種別で絞っていたのは**再送防止の都合**であり、急変検知がその scope を
+        借りているのが構造上の誤りだった。
+
+        そのため通知種別が切り替わった直後は新種別の履歴が無く、
+        ★ **急変検知が丸ごとskipされていた**(検知の欠落)。
+
+        ## 再送防止とは別に引く理由
+
+        `_previous_recommendation()`(種別つき)は**変更しない**。
+        あちらを種別横断にすると再送判定の scope まで変わり、
+        「種別が変わったのに前回送ったばかりとして抑止される」= **通知の欠落**
+        という別方向の欠陥を作る。**2つの判断は別の比較相手を必要とする。**
+
+        ## 判定不能(Issue #279)の扱い
+
+        `undecidable` でもNoneを返す。既存の `_previous_recommendation()` と
+        同じ扱いであり、送信可否は `_notification_status_for_send()` 側が
+        `undecidable` を見て抑止するため、ここで送信へ倒れることはない。
+        """
+        latest_log = self._log_lookup_for_recommendation_scope_any_type(recommendation).latest
         if latest_log is None or latest_log.related_recommendation_id is None:
             return None
         return self._recommendation_repo.get(latest_log.related_recommendation_id)
