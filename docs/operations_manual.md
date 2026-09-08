@@ -2405,18 +2405,21 @@ integrity_error の early return より後にあるため、何度実行して�
 1  dry-run で対象を確認する(★ 読み取りのみ。書き込みは行わない)
      jstock baseline-repair scan
 
-   出力は holding_ref(sha256 の先頭 8 文字)・理由区分・baseline 履歴の一覧。
-   ★ 所有者名・銘柄コードは出力しない(Issue #135)。
+   出力は holding_ref(sha256 の先頭 8 文字)・理由区分・baseline 履歴(version / status /
+   origin)の一覧。★ 所有者名・銘柄コードは出力しない(Issue #135)。
+   ★ baseline_id も出力しない。生成規則が `<holding_id>:v<version>` であり
+     **holding_id(= 所有者#銘柄コード)がそのまま埋め込まれている**ため。
+     holding 内では version が一意なので、version だけで特定できる。
 
 2  ★ 対象が 0 件なら、そこで終わる。
    ★ 0 件は「壊れている」ではなく「対象なし」を意味する。
 
 3  対象があれば、採用する baseline を**人が決める**。
    (A) は履歴の最新 version が既定候補として表示される。
-   ★ (B) は候補を自動で選ばない。--baseline-id の明示指定が必須である。
+   ★ (B) は候補を自動で選ばない。--baseline-version の明示指定が必須である。
 
 4  ★ Production に対する修復の実行は **利用者の承認**を得てから行う。
-     jstock baseline-repair apply --holding-ref <ref> [--baseline-id <id>]
+     jstock baseline-repair apply --holding-ref <ref> [--baseline-version <n>]
 
 5  次の 08:00 の自然実行で、その保有の判定が再開することを確認する
    (BATCH_SUMMARY の failed が減る)。

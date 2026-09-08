@@ -21,6 +21,8 @@ import datetime as dt
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from jstock_advisor.cli.baseline_repair import RepairReason, _detect, _resolve_baseline
 from jstock_advisor.domain.entities.enums import (
     AccountType,
@@ -230,27 +232,27 @@ def test_a_default_candidate_is_the_latest_version(tmp_path: Path) -> None:
     assert chosen.version == 3
 
 
-def test_explicit_baseline_id_overrides_the_default(tmp_path: Path) -> None:
-    """--baseline-id を指定すると、その baseline が採用される。"""
+def test_explicit_baseline_version_overrides_the_default(tmp_path: Path) -> None:
+    """--baseline-version を指定すると、その version が採用される。"""
     holding = _holding(tmp_path, "0011")
-    older = _baseline(tmp_path, holding.holding_id, 1)
+    _baseline(tmp_path, holding.holding_id, 1)
     _baseline(tmp_path, holding.holding_id, 2)
 
     target = _detect_all(tmp_path)[0]
-    chosen = _resolve_baseline(target, older.baseline_id)
+    chosen = _resolve_baseline(target, 1)
 
     assert chosen is not None
     assert chosen.version == 1
 
 
-def test_unknown_baseline_id_is_rejected(tmp_path: Path) -> None:
-    """履歴に無い baseline_id を指定しても採用しない。"""
+def test_unknown_baseline_version_is_rejected(tmp_path: Path) -> None:
+    """履歴に無い version を指定しても採用しない。"""
     holding = _holding(tmp_path, "0012")
     _baseline(tmp_path, holding.holding_id, 1)
 
     target = _detect_all(tmp_path)[0]
 
-    assert _resolve_baseline(target, "bl-not-in-history") is None
+    assert _resolve_baseline(target, 99) is None
 
 
 # --- 出力に PII を含めないこと -------------------------------------------------
@@ -266,3 +268,62 @@ def test_holding_ref_does_not_expose_owner_or_stock_code(tmp_path: Path) -> None
     assert ref.startswith("sha256:")
     assert _OWNER not in ref
     assert "0013" not in ref
+
+
+# --- holding_ref の衝突 -------------------------------------------------------
+
+
+def test_apply_refuses_when_holding_ref_is_not_unique(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ holding_ref が複数の保有に一致したら、どれも書き換えずに中断する。
+
+    holding_ref は sha256 の先頭 8 文字であり、理論上は衝突しうる。1 件目を
+    黙って採用すると **別の保有の pointer を書き換える**ことになる。
+    """
+    from typer.testing import CliRunner
+
+    from jstock_advisor.cli import baseline_repair
+
+    first = _holding(tmp_path, "0014")
+    second = _holding(tmp_path, "0015")
+    _baseline(tmp_path, first.holding_id, 1)
+    _baseline(tmp_path, second.holding_id, 1)
+
+    # 2 つの保有が同じ holding_ref を返す状況を作る(衝突の模擬)
+    monkeypatch.setattr(baseline_repair, "log_ref", lambda _value: "sha256:collide")
+
+    result = CliRunner().invoke(
+        baseline_repair.app,
+        ["apply", "--holding-ref", "sha256:collide", "--store-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "一意ではありません" in result.stdout
+    # ★ どちらの pointer も作られていないこと(肯定形で状態を述べる)
+    assert get_pointer(first.holding_id, tmp_path) is None
+    assert get_pointer(second.holding_id, tmp_path) is None
+
+
+# --- 出力に baseline_id を含めないこと ----------------------------------------
+
+
+def test_scan_output_does_not_contain_baseline_id(tmp_path: Path) -> None:
+    """★ baseline_id は `<所有者>#<銘柄コード>:v<version>` であり PII を含む。
+
+    scan の出力に現れてはならない(version だけで holding 内は一意に特定できる)。
+    """
+    from typer.testing import CliRunner
+
+    from jstock_advisor.cli import baseline_repair
+
+    holding = _holding(tmp_path, "0016")
+    baseline = _baseline(tmp_path, holding.holding_id, 1)
+
+    result = CliRunner().invoke(baseline_repair.app, ["scan", "--store-dir", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "version=1" in result.stdout
+    assert baseline.baseline_id not in result.stdout
+    assert _OWNER not in result.stdout
+    assert "0016" not in result.stdout

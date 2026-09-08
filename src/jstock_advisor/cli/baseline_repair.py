@@ -146,35 +146,44 @@ def _detect(
 
 
 def _print_target(target: RepairTarget) -> None:
-    """★ holding_id・銘柄コード・所有者名を平文で出さない(Issue #135)。"""
+    """★ holding_id・銘柄コード・所有者名を平文で出さない(Issue #135)。
+
+    ★ `baseline_id` も出さない。生成規則が
+      `investment_thesis_service.py:129` の `f"{holding_id}:v{version}"` であり、
+      **holding_id(= 所有者#銘柄コード)がそのまま埋め込まれている**ため。
+      baseline は holding 内で version が一意(baseline_id の主キー構成上)なので、
+      **version だけで特定できる**。
+    """
     typer.echo(f"holding_ref={log_ref(target.holding_id)}  reason={target.reason.value}")
     if target.pointed_version is not None:
         typer.echo(f"  pointer が指す version: {target.pointed_version}")
     typer.echo(f"  履歴 {len(target.history)} 件:")
     for baseline in sorted(target.history, key=lambda b: b.version):
         typer.echo(
-            f"    baseline_id={baseline.baseline_id} version={baseline.version}"
+            f"    version={baseline.version}"
             f" status={baseline.status.value} origin={baseline.origin.value}"
         )
     if target.requires_explicit_baseline:
-        typer.echo("  ★ 修復には --baseline-id の明示指定が必要です(自動で選びません)")
+        typer.echo("  ★ 修復には --baseline-version の明示指定が必要です(自動で選びません)")
     else:
         candidate = target.default_candidate
         if candidate is not None:
             typer.echo(
-                f"  既定の候補: baseline_id={candidate.baseline_id}"
-                f" version={candidate.version}"
-                "  ★ --baseline-id で上書きできます"
+                f"  既定の候補: version={candidate.version}  ★ --baseline-version で上書きできます"
             )
 
 
 def _resolve_baseline(
-    target: RepairTarget, baseline_id: str | None
+    target: RepairTarget, baseline_version: int | None
 ) -> InvestmentThesisBaseline | None:
-    """採用する baseline を決める。決められなければ None を返す。"""
-    if baseline_id is not None:
+    """採用する baseline を決める。決められなければ None を返す。
+
+    ★ version で指定する(baseline_id は PII を含むため入出力に使わない)。
+      version は 1 つの holding の履歴内で一意である。
+    """
+    if baseline_version is not None:
         for baseline in target.history:
-            if baseline.baseline_id == baseline_id:
+            if baseline.version == baseline_version:
                 return baseline
         return None
     if target.requires_explicit_baseline:
@@ -208,8 +217,9 @@ def apply(
     holding_ref: str = typer.Option(
         ..., help="修復する保有の holding_ref(scan が表示した sha256 形式)"
     ),
-    baseline_id: str | None = typer.Option(
-        None, help="採用する baseline_id。version 不一致・baseline 不在では必須"
+    baseline_version: int | None = typer.Option(
+        None,
+        help="採用する baseline の version。version 不一致・baseline 不在では必須",
     ),
     store_dir: Path | None = typer.Option(None, help="ローカルストアのディレクトリ"),
 ) -> None:
@@ -225,17 +235,25 @@ def apply(
     if not matched:
         typer.echo(f"holding_ref={holding_ref} は現在の対象に含まれません(既に整合している可能性)")
         raise typer.Exit(code=1)
+    if len(matched) > 1:
+        # holding_ref は sha256 の先頭 8 文字であり、理論上は衝突しうる。
+        # ★ どれか 1 件を黙って選ぶと **別の保有の pointer を書き換える**。
+        typer.echo(
+            f"holding_ref={holding_ref}: 一意ではありません({len(matched)} 件が該当)。"
+            "誤った保有を書き換えないため中断します"
+        )
+        raise typer.Exit(code=1)
 
     target = matched[0]
-    baseline = _resolve_baseline(target, baseline_id)
+    baseline = _resolve_baseline(target, baseline_version)
     if baseline is None:
-        if target.requires_explicit_baseline and baseline_id is None:
+        if target.requires_explicit_baseline and baseline_version is None:
             typer.echo(
                 f"holding_ref={holding_ref}: reason={target.reason.value} では"
-                " --baseline-id の指定が必要です(自動で選びません)"
+                " --baseline-version の指定が必要です(自動で選びません)"
             )
         else:
-            typer.echo(f"holding_ref={holding_ref}: 指定された baseline が履歴にありません")
+            typer.echo(f"holding_ref={holding_ref}: 指定された version が履歴にありません")
         raise typer.Exit(code=1)
 
     try:
@@ -268,6 +286,5 @@ def apply(
 
     typer.echo(
         f"holding_ref={holding_ref}: pointer を復元しました"
-        f"(reason={target.reason.value} baseline_id={baseline.baseline_id}"
-        f" version={baseline.version})"
+        f"(reason={target.reason.value} version={baseline.version})"
     )
