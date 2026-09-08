@@ -1494,8 +1494,21 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     providers = build_real_provider_bundle(now, config)
-    # 常に本番テーブル(同一実行内でRecommendationを再読込みする経路が無いため)
-    recommendation_repo = RecommendationRepository()
+    # Issue #70 F-B5: buy側(buy_candidates_handler)と同じく**repository自体を
+    # 切り替える**。VALIDATIONでは検証用テーブルへ向くため、保存が1箇所でも
+    # ガードを漏らしたときの着地点が本番ではなくなる。
+    #
+    # ★ 既存の個別ガード(`if not execution_context.is_validation:` の5か所)は
+    #   **そのまま残す**。VALIDATIONで保存しないという方針は変えていない。
+    #   切り替えは方針の変更ではなく、**ガードの書き忘れに対する二重の安全
+    #   (fail-safe)**である。したがって観測可能な挙動は変わらない。
+    #
+    # ★ ガードを外さない理由: ガードの中にはDecisionSnapshot /
+    #   HoldingDecisionResultの保存が同居しており、それらのrepositoryは
+    #   for_execution_context()を持たない。外すとVALIDATIONがそれらの
+    #   本番テーブルを汚す(本Issueが防ごうとしている状態そのもの)。
+    #   3 repositoryのfactory化は別Issueで扱う。
+    recommendation_repo = RecommendationRepository.for_execution_context(execution_context)
     # BUY候補裾野拡大機能(2026-08、§5-1): 子Lambda(task=holding)は親Lambdaが
     # detect_and_apply()の結果をイベントペイロード経由で伝播した
     # trade_detection_confirmedをそのまま使う。
