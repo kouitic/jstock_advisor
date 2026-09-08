@@ -962,6 +962,33 @@ development_workflow.md 2.6.7 に従って設計変更・待機・Issue 分割�
 いずれかを選ぶ。
 ```
 
+### DoD 申告の確認
+
+`DOD_DECLARATION_REVIEW_OWNER = MANAGER`
+
+作業 AI の実装レビューでは、領域・lock の観点に加えて次を確認する。
+判定基準の本文は development_workflow.md 3節が正本であり、本節へ複製しない。
+
+```
+DoD 5 項目の申告があるか(空欄・無言の省略が無いか)
+申告と diff が矛盾していないか
+```
+
+```
+★ レビュワーが「正しいか」を判定するのではなく、
+  **「申告されているか」「矛盾していないか」**を見る。
+  正しさの一次責任は実装者にある。
+
+  例  閾値の定数に diff があるのに「1 境界の連続性 = 該当なし」-> FAIL
+      「該当あり・未解消」と書かれているが引き継ぎ先の Issue が無い -> FAIL
+```
+
+```
+本節は Human Gate を増やすものではない。DoD の申告は CI で強制せず
+(development_workflow.md 3節)、未記入は 3節の判定 4 種のうち
+INSUFFICIENT_EVIDENCE として扱い、記入を求める。
+```
+
 ### 適用範囲
 
 ```
@@ -1675,3 +1702,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-06 | 3.7節へ発効後の正本の所在と `MERGE_APPROVAL_IS_BOUND_TO_EXACT_REVIEWED_HEAD = YES` を追記した(Issue #184)。docs/ai_operation_message_contract.md の merge から発効までの間、提示形式の正本が本節と同文書のどちらかが曖昧になりうるため、`BEFORE_ISSUE_184_ACTIVATION` は本節、`AFTER_ISSUE_184_ACTIVATION` は同文書 8節と明示し、発効後に本節を並列の規範として扱わないことにした(`DUPLICATE_SSOT` の回避)。**本節が定める `REVIEW_VERDICT` / `MERGE_BLOCKING_CONCERN` 等の判断の中身は発効後も本節が正本であり、変わるのは提示のしかただけである。** あわせて merge 承認がレビューした exact PR head SHA に紐づき、head が変われば失効することを明記した(2節の「承認はその操作・その対象に限る」と同じ原則であり、新設の緩和ではない)。コード・Production 挙動の変更なし |
 | 2026-09-06 | Instruction ID の使用済み判定を補完し、Human Gate の提示形式の正本を参照へ移した(Issue #184)。(1)4.1節の「使用済み」の列挙へ `ANSWERED` / `FAILED` / `BLOCKED` を追加し、`ONE_ID_ONE_RELAY_EVENT = YES` を明記した。従来の列挙(実行完了 / CANCELLED / SUPERSEDED / 途中停止 / 作業開始後の取消)には、**指示が失敗した場合と作業者が BLOCKED を返した場合**が含まれておらず、その ID を再利用すると回答の対応付けが壊れる余地が残っていた。採番規則そのもの(Asia/Tokyo の日付 / 作業者別の日次連番 / 日付変更で 001 へリセット)は変更していない。(2)2節へ「提示のフォーマット」を追加し、承認を求める際の形式(固定 4 節 + AUDIT_INFO の分離、gate 種別ごとの exact identifier の扱い)の正本が新設した docs/ai_operation_message_contract.md 8節であることを参照で示した。**本文書は「どの操作に承認が要るか」を定め、形式を複製しない。** 同文書は提示形式のみを定めるものであり `APPROVAL_UNIT_CONSOLIDATION = NO`、本節の承認単位を 1 つも統合・緩和していない。(3)12節へ正本の所在を 1 行追加した。既存の Human Gate 一覧 / `MERGE_EXECUTOR = USER` / exact ChangeSet approval / レビュー判定 4 種 / 指示プロトコル / 3.8節の lock omission 判定はいずれも変更していない。コード・Production 挙動の変更なし |
 | 2026-09-06 | 役割を製品非依存にし、ファイル名を chatgpt_collaboration_protocol.md から改称した(Issue #190)。管理・レビュー役が 2026-09-06 に ChatGPT 上の AI から交代したことで、**役割が特定の生成AI製品名で書かれていると、担当が変わるたびに正本を書き換えることになる**という構造的な問題が表面化した。そこで `PRODUCT_AGNOSTIC_ROLE_NAMING = YES` とし、役割を権限と責務で定義する。(1)1節を 4 役割(`USER` / `MANAGER` / `DEVELOPER_WITH_DEPLOY` / `DEVELOPER`)で書き直し、各役割の権限・責務・禁止事項を明記した。開発者 2 役割の差は「deploy 実作業を行うか」の 1 点だけであり、調査・設計・実装・報告・state 書き戻しの規則はすべて共通である。(2)**現在の担当は本文書へ焼き込まない**(`ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録`)。恒久文書と現在状態を分ける 10節の原則に従う。(3)1.5節の `PRODUCTION_DEPLOYMENT_EXECUTOR` と `DEPLOY_OPERATION_DELEGATION` を役割ベースへ改めた(担当者名を書かない)。(4)識別子を `<対象>_OWNER = <役割>` 形式へ統一した(`LOCK_REVIEW_OWNER` / `ASSIGNMENT_READ_BARRIER_OWNER` / `PRIORITY_READ_OWNER` / `STATE_READ_OWNER` = `MANAGER`、`NEXT_MANAGER_GATE_OWNS_RECONCILIATION`、`USER_MANAGER_COLLABORATION_SSOT`)。接頭辞へ役割名を埋め込まないため、次に体制が変わっても識別子名が変わらない。(5)本文中の "ChatGPT" 47 か所を役割名へ置換し、歴史的名称として 1 節で 1 か所だけ定義した(過去の記録が誰を指すか分かるようにするため)。(6)ファイル名を製品非依存へ改称した。**転送用スタブは残さない。** 過去の GitHub metadata からの参照 61 件を実測したところ**すべて平文で markdown link は 0 件**であり、改称で壊れるリンクが存在しないためである。**過去の Issue コメント・snapshot に残る "ChatGPT" / `ACTOR = CHATGPT` は append-only の記録であり書き換えていない。** 本文書の変更履歴の過去エントリも編集していない。承認単位・Human Gate・レビュー判定 4 種・指示プロトコル・merge 実行者はいずれも変更していない。コード・Production 挙動の変更なし |
+| 2026-09-08 | 3.8節へ「DoD 申告の確認」を追加した(Issue #252、打ち手 D-1)。development_workflow.md 3節が新設した DoD 5 項目の申告について、`DOD_DECLARATION_REVIEW_OWNER = MANAGER` とし、**「DoD 5 項目の申告があるか(空欄・無言の省略が無いか)」「申告と diff が矛盾していないか」**の2 項目を実装レビューの確認観点へ加えた。**レビュワーが「正しいか」を判定するのではなく「申告されているか」「矛盾していないか」を見る**(正しさの一次責任は実装者にある)。閾値の定数に diff があるのに「境界の連続性 = 該当なし」と書かれている場合や、「該当あり・未解消」と書かれているのに引き継ぎ先の Issue が無い場合は FAIL とする。**判定基準の本文は development_workflow.md 3節が正本であり本文書へ複製していない。**DoD の申告は CI で強制せず(H-252-3)、未記入は 3節の判定 4 種のうち INSUFFICIENT_EVIDENCE として扱い記入を求める(判定語を独自に増やさない)。**3.8節の既存の観点(PRIMARY_DOMAIN / LOCKED_DOMAINS / SHARED_TOUCHED / LOCK_LEVEL / LEVEL_1 の compatibility evidence / SCOPE_EXPANSION)と `LOCK_OMISSION_REVIEW_PASS_ALLOWED = NO`、2節の Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet approval、レビュー判定 4 種はいずれも変更していない。** 既存節の削除・書き換えは行っていない(純粋な追加)。コード・Production 挙動の変更なし |
