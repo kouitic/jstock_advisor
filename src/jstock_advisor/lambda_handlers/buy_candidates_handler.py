@@ -2034,9 +2034,15 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     latest_batch_pointer_repo = LatestBuyCandidateBatchPointerRepository()
     # BUY候補裾野拡大機能(2026-08、§5-1): 子Lambda(task=buy_candidate)は
     # 親Lambdaがdetect_and_apply()の結果をイベントペイロード経由で伝播した
-    # trade_detection_confirmedをそのまま使う(親自身は通知を送らないため
-    # このフラグ自体は不要、既定Trueのままでよい)。
-    trade_detection_confirmed = event.get("trade_detection_confirmed", True)
+    # trade_detection_confirmedをそのまま使う。
+    # ★ 既定は**False(fail-close)**である(Issue #211 / #70 F-B3)。
+    #   キーが無い = 「この実行で検知完了を確認できていない」であり、
+    #   確認できていないまま通常通知を送るfail-openは採用しない
+    #   (line_notification_service §5-1)。
+    #   通常のscheduled経路では親が必ず実値を渡すためキーは常に存在し、
+    #   この既定は参照されない(挙動不変)。既定が効くのは
+    #   finalize-only recovery等、親が値を持たない経路だけである。
+    trade_detection_confirmed = event.get("trade_detection_confirmed", False)
     notification_service = LineNotificationService(
         line_client=build_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
