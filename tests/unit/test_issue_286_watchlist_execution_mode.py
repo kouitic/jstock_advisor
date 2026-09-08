@@ -22,6 +22,7 @@ F-B8  batch auditの `execution_mode` が実際の起動経路を反映する
 
 from __future__ import annotations
 
+import datetime as dt
 from types import SimpleNamespace
 from typing import Any
 
@@ -342,6 +343,54 @@ def test_dispatcher_no_longer_hardcodes_scheduled() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("batch_row", "expected"),
+    [
+        (
+            {
+                "batch_id": "watchlist-maint-00000000",
+                "triggered_by_batch_id": "watchlist-00000000",
+                "trigger_type": "POST_NEW_CANDIDATE_SCREENING",
+            },
+            EXECUTION_MODE_TRIGGERED,
+        ),
+        ({"batch_id": "watchlist-maint-00000000"}, EXECUTION_MODE_SCHEDULED),
+    ],
+    ids=["triggered_by_previous_batch", "no_trigger_info"],
+)
+def test_maintenance_finalize_audit_reflects_the_batch_row(
+    batch_row: dict[str, Any], expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """finalize側の呼び出し箇所も起動経路を載せること(修正前は "scheduled" 固定)。
+
+    ★ 2つ目のケースが本Issueで**解消していない限界**である。
+      手動dispatchでもbatch行にtrigger情報が残らないため "scheduled" になる。
+    """
+    from jstock_advisor.services import watchlist_batch_finalizer
+
+    audits: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        watchlist_batch_finalizer, "query_all_candidate_progress", lambda *a, **k: []
+    )
+    monkeypatch.setattr(watchlist_batch_finalizer, "WatchlistRepository", lambda *a, **k: object())
+    monkeypatch.setattr(
+        watchlist_batch_finalizer, "WatchlistRemovalHistoryRepository", lambda *a, **k: object()
+    )
+    monkeypatch.setattr(watchlist_batch_finalizer, "get_watchlist_batch", lambda _b: batch_row)
+    monkeypatch.setattr(
+        watchlist_batch_finalizer, "record_batch_audit", lambda **kw: audits.append(kw)
+    )
+    monkeypatch.setattr(
+        watchlist_batch_finalizer, "mark_watchlist_batch_completed", lambda *a, **k: True
+    )
+
+    watchlist_batch_finalizer._finalize_maintenance_completed(
+        "watchlist-maint-00000000", _NOW, _fake_maintenance_config()
+    )
+
+    assert [audit["execution_mode"] for audit in audits] == [expected]
+
+
 # --- helpers -----------------------------------------------------------------
 
 
@@ -351,3 +400,16 @@ def _raise_reached(*args: Any, **kwargs: Any) -> Any:
 
 def _fail_if_called(*args: Any, **kwargs: Any) -> bool:
     pytest.fail("拒否ガードの後でdispatch leaseまで進んではいけない")
+
+_NOW = dt.datetime(2026, 9, 8, 3, 0, tzinfo=dt.UTC)
+
+
+def _fake_maintenance_config() -> SimpleNamespace:
+    """`_finalize_maintenance_completed` が読む設定だけを持つ最小のconfig。"""
+    return SimpleNamespace(
+        watchlist_screening=SimpleNamespace(
+            candidate_universe=SimpleNamespace(provider="csv"),
+            auto_removal=SimpleNamespace(readd_cooldown_days=30),
+            screening_policy="multi_style_monitoring",
+        )
+    )

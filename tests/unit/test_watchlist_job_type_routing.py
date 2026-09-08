@@ -339,6 +339,11 @@ def test_maintenance_finalizer_audits_with_maintenance_universe_provider() -> No
         ),
         patch.object(finalizer_module, "record_batch_audit", lambda **kw: audits.append(kw)),
         patch.object(finalizer_module, "mark_watchlist_batch_completed", lambda *a, **k: True),
+        # Issue #286 (F-B8): 監査の execution_mode を batch 行から復元するため、
+        # この関数は batch 行を読むようになった(未 patch だと実 DynamoDB を引く)。
+        patch.object(
+            finalizer_module, "get_watchlist_batch", lambda _b: {"batch_id": _BATCH_ID}
+        ),
     ):
         finalizer_module._finalize_maintenance_completed(_BATCH_ID, _NOW, _fake_config())
 
