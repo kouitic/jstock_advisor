@@ -42,6 +42,11 @@ from pydantic import BaseModel
 
 from jstock_advisor.domain.entities.enums import NotificationType
 from jstock_advisor.domain.entities.notification import NotificationLog
+from jstock_advisor.domain.entities.notification_claim import (
+    NotificationClaim,
+    NotificationClaimMember,
+    NotificationClaimStatus,
+)
 from jstock_advisor.infrastructure.local_repository.json_store import JsonCollectionStore
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
@@ -51,6 +56,7 @@ from jstock_advisor.infrastructure.record_failure_policy import (
     ItemIdDisclosure,
     RecordFailurePolicy,
 )
+from jstock_advisor.services.line_notification_service import LineNotificationService
 
 _STOCK = "0000"
 _NOW = dt.datetime(2026, 9, 8, tzinfo=dt.UTC)
@@ -370,3 +376,149 @@ def test_records_are_sorted_by_sent_at() -> None:
 
     assert [n.notification_id for n in lookup.records] == ["id-old", "id-new"]
     assert lookup.latest is newer
+
+
+# =============================================================================
+# D) claim repair — get() の fail-closed を呼び出し側で捕捉する（A-U4-3'）
+# =============================================================================
+#
+# notification_log は FAIL_SAFE_SUPPRESS を宣言したため、主キー指定の get() は
+# **fail-closed(例外)** になる(DynamoDbCollectionStore._decode_one)。
+# 捕捉しなければ、壊れた1件のせいで repair 全体が中断し、
+# **後続の member の NotificationLog まで復元されない**。
+
+
+class _RaisingLogRepo:
+    """get() が必ず例外を投げる repository（DynamoDB 実装の fail-closed 相当）。
+
+    save() は素通しし、どの member が保存されたかを記録する。
+    """
+
+    def __init__(self, broken_ids: set[str]) -> None:
+        self._broken_ids = broken_ids
+        self.saved: list[NotificationLog] = []
+
+    def get(self, notification_id: str) -> NotificationLog | None:
+        if notification_id in self._broken_ids:
+            raise ValueError("decode failed")
+        return None
+
+    def save(self, log: NotificationLog) -> None:
+        self.saved.append(log)
+
+
+def _member(notification_id: str) -> NotificationClaimMember:
+    return NotificationClaimMember(
+        notification_id=notification_id,
+        notification_type=NotificationType.SELL_SIGNAL,
+        stock_code=_STOCK,
+        content_hash="hash-0001",
+    )
+
+
+def _claim(member_ids: list[str]) -> NotificationClaim:
+    return NotificationClaim(
+        claim_id="c" * 64,
+        identity="v1|test|0000",
+        claim_token="token-0001",
+        status=NotificationClaimStatus.SENT,
+        claimed_at=_NOW,
+        sent_at=_NOW,
+        evaluated_at=_NOW,
+        notification_type=NotificationType.SELL_SIGNAL,
+        scope=_STOCK,
+        members=[_member(i) for i in member_ids],
+    )
+
+
+def _service_with_repo(repo: object) -> LineNotificationService:
+    """`_repair_member_logs` だけを呼ぶための最小構成。
+
+    `__new__` で生成し、当該メソッドが読む属性だけを差し込む
+    (LINE client・config・他 repository は repair 経路で使われない)。
+    """
+    service = LineNotificationService.__new__(LineNotificationService)
+    service._log_repo = repo  # type: ignore[assignment]
+    return service
+
+
+def test_repair_skips_the_undecidable_member_and_restores_the_others(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★ get() が例外でも repair 全体が止まらず、他の member は復元される。
+
+    捕捉していないと最初の member で中断し、
+    **後続の NotificationLog が復元されないまま残る**(= 再送判定の材料が欠ける)。
+    """
+    repo = _RaisingLogRepo(broken_ids={_BROKEN_ID})
+    service = _service_with_repo(repo)
+
+    with caplog.at_level(logging.WARNING):
+        service._repair_member_logs(_claim([_BROKEN_ID, _GOOD_ID]))
+
+    assert [log.notification_id for log in repo.saved] == [_GOOD_ID]
+
+
+def test_repair_does_not_swallow_the_failure(caplog: pytest.LogCaptureFixture) -> None:
+    """★ 飛ばした member は WARNING に出る(黙って捨てない)。
+
+    notification_id / claim_id / 例外種別が出ることで、
+    監視・集計から「何が復元できなかったか」を追える。
+    """
+    repo = _RaisingLogRepo(broken_ids={_BROKEN_ID})
+    service = _service_with_repo(repo)
+
+    with caplog.at_level(logging.WARNING):
+        service._repair_member_logs(_claim([_BROKEN_ID, _GOOD_ID]))
+
+    assert "notification claim repair skipped" in caplog.text
+    assert _BROKEN_ID in caplog.text
+    assert "error=ValueError" in caplog.text
+
+
+def test_repair_does_not_overwrite_when_undecidable() -> None:
+    """★ 判定不能の member は **save しない**。
+
+    「既に保存済みか」が分からない状態で seed から書くと、
+    壊れた既存レコードを上書きしてよいかを判断しないまま置換することになる。
+    """
+    repo = _RaisingLogRepo(broken_ids={_BROKEN_ID})
+    service = _service_with_repo(repo)
+
+    service._repair_member_logs(_claim([_BROKEN_ID]))
+
+    assert repo.saved == []
+
+
+def test_repair_replaces_a_broken_record_on_json_store(tmp_path: Path) -> None:
+    """★ ローカル JSON 実装では、壊れたレコードが seed で置き換わる。
+
+    JSON 実装は壊れた1件を `quarantined` へ退避するため `get()` は None を返し、
+    seed からの `save()`(upsert)が走る。`_write_all()` の docstring が述べる
+    **正当な復旧手段**であり(同じ id への upsert は壊れたレコードを置換してよい)、
+    意図した動作である。backend によってこの差が出ることをここで固定する。
+    """
+    _seed(tmp_path, [_broken_row()])
+    repo = NotificationLogRepository(store_dir=tmp_path)
+    service = _service_with_repo(repo)
+
+    service._repair_member_logs(_claim([_BROKEN_ID]))
+
+    restored = repo.list_all()
+    assert [n.notification_id for n in restored] == [_BROKEN_ID]
+    assert restored[0].sent_at == _NOW, "seed の evaluated_at で復元されること"
+    lookup = repo.latest_by_stock_and_type(_STOCK, NotificationType.SELL_SIGNAL)
+    assert lookup.undecidable is False, "置換後は判定不能が解消していること"
+
+
+def test_repair_leaves_a_healthy_record_untouched(tmp_path: Path) -> None:
+    """既に保存済みの member は触らない(既存の冪等性を変えていない)。"""
+    _seed(tmp_path, [_good_row()])
+    repo = NotificationLogRepository(store_dir=tmp_path)
+    service = _service_with_repo(repo)
+
+    service._repair_member_logs(_claim([_GOOD_ID]))
+
+    records = repo.list_all()
+    assert len(records) == 1
+    assert records[0].content_hash == "hash-0001"

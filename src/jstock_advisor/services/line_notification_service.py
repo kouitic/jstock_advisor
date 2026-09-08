@@ -4309,9 +4309,46 @@ class LineNotificationService:
         sent_atにはclaim.evaluated_at(元実行のnow)を使い、元実行が保存する
         はずだったlogと同一内容にする。owner/holding_id(Issue #33)もseedから
         そのまま復元する。
+
+        ## get() が失敗しうること(Issue #279 / A-U4-3')
+
+        notification_log は `FAIL_SAFE_SUPPRESS` を宣言している。この policy では
+        主キー指定の `get()` は **fail-closed(例外)** である
+        (`DynamoDbCollectionStore._decode_one()`。`None` を返すと呼び出し側が
+        「レコードが無い」と読み、判定不能を握り潰してしまうため)。
+
+        ★ 捕捉しなければ、**壊れた1件のせいでrepair全体が中断**し、
+          後続のmemberのNotificationLogまで復元されない。
+          そこでmemberごとに捕捉し、そのmemberだけを飛ばして次へ進む。
+
+            捕捉する      そのmemberは**保存しない**(壊れた既存レコードを
+                          seedで上書きしてよいかを、ここでは判断できないため)
+            握り潰さない  WARNINGへ notification_id / claim_id / 例外種別を出す
+                          (既存のrepair WARNINGと同じ体裁。監視・集計に載る)
+
+        ★ ローカルJSON実装では挙動が異なり、壊れたレコードは `quarantined` に
+          退避されて `get()` が `None` を返す。この場合はseedからの保存が走り、
+          `upsert` が壊れたレコードを**正しい値で置き換える**。
+          これは`_write_all()`のdocstringが述べる**正当な復旧手段**であり
+          (同じidへのupsertは壊れたレコードを置換してよい)、
+          意図した動作である。backendによってこの差が出ることを明記しておく。
         """
         for member in claim.members:
-            if self._log_repo.get(member.notification_id) is not None:
+            try:
+                existing = self._log_repo.get(member.notification_id)
+            except Exception as error:  # noqa: BLE001 - policyのfail-closedをここで受ける
+                # Issue #279: 「既に保存済みか」を判断できなかった。
+                # 保存すると壊れたレコードを上書きすることになり、
+                # 飛ばせば復元されないまま残る。**判断できない以上は触らない**。
+                logger.warning(
+                    "notification claim repair skipped: existing log undecidable "
+                    "notification_id=%s claim_id=%s error=%s",
+                    member.notification_id,
+                    claim.claim_id,
+                    type(error).__name__,
+                )
+                continue
+            if existing is not None:
                 continue
             self._log_repo.save(
                 NotificationLog(
