@@ -89,6 +89,7 @@ from jstock_advisor.infrastructure.local_repository.watchlist_repository import 
     WatchlistRepository,
 )
 from jstock_advisor.interfaces.candidate_universe import CandidateUniverseError
+from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_execution_mode
 from jstock_advisor.services.candidate_universe_downloader import (
     DownloadOutcome,
     refresh_candidate_universe_cache,
@@ -108,7 +109,10 @@ from jstock_advisor.services.watchlist_candidate_collector import (
     WatchlistCandidateCollector,
 )
 from jstock_advisor.services.watchlist_data_cache import build_cached_provider_bundle
-from jstock_advisor.services.watchlist_screening_audit import record_batch_audit
+from jstock_advisor.services.watchlist_screening_audit import (
+    record_batch_audit,
+    resolve_dispatch_execution_mode,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -329,6 +333,14 @@ def _collect_maintenance_targets(event: dict[str, Any]) -> tuple[list[str], dict
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    # Issue #286 (#70 F-B4): watchlist系は execution_mode を**受け付けない**。
+    # 黙って本番実行せず、指定されていたら理由をログへ出して失敗させる。
+    # (対応しない理由は _watchlist_execution_mode の docstring を参照)
+    reject_execution_mode(event, handler_name="watchlist dispatcher")
+    # Issue #286 (#70 F-B8): 監査へ載せる起動経路をここで1度だけ解決する。
+    # 以前はこのhandlerの5か所すべてが "scheduled" のハードコードで、
+    # 手動起動もmaintenanceの連鎖起動も同じ値で記録されていた。
+    audit_execution_mode = resolve_dispatch_execution_mode(event)
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     wc = config.watchlist_screening
@@ -374,7 +386,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             "(candidate_limit=null but ALLOW_FULL_MARKET_SCREENING is not 'true')"
         )
         record_batch_audit(
-            execution_mode="scheduled",
+            execution_mode=audit_execution_mode,
             universe_provider=cu.provider,
             screening_policies=[wc.screening_policy],
             output_values={"execution_result": "full_market_screening_blocked"},
@@ -431,7 +443,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 lease_expires_at,
             )
             record_batch_audit(
-                execution_mode="scheduled",
+                execution_mode=audit_execution_mode,
                 universe_provider=cu.provider,
                 screening_policies=[wc.screening_policy],
                 output_values={
@@ -459,7 +471,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         if rotation_lease_held:
             release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
-            execution_mode="scheduled",
+            execution_mode=audit_execution_mode,
             universe_provider=cu.provider,
             screening_policies=[wc.screening_policy],
             output_values={"execution_result": "universe_load_failed"},
@@ -478,7 +490,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         if rotation_lease_held:
             release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
-            execution_mode="scheduled",
+            execution_mode=audit_execution_mode,
             universe_provider=cu.provider,
             screening_policies=[wc.screening_policy],
             output_values={
@@ -515,7 +527,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         if rotation_lease_held:
             release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
-            execution_mode="scheduled",
+            execution_mode=audit_execution_mode,
             universe_provider=cu.provider,
             screening_policies=[wc.screening_policy],
             output_values={

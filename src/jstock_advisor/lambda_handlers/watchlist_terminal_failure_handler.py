@@ -36,6 +36,7 @@ from jstock_advisor.infrastructure.local_repository.notification_log_repository 
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_execution_mode
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.watchlist_batch_finalizer import (
@@ -61,6 +62,9 @@ def _build_notification_service(config: AppConfig) -> LineNotificationService:
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    # Issue #286 (#70 F-B4): watchlist系は execution_mode を**受け付けない**。
+    # SQS経由が通常だが、手動invokeでキーを渡された場合も黙殺しない。
+    reject_execution_mode(event, handler_name="watchlist terminal failure")
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
