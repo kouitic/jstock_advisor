@@ -90,6 +90,7 @@ from jstock_advisor.infrastructure.local_repository.notification_claim_repositor
 )
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
+    NotificationLookup,
 )
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
@@ -3328,9 +3329,18 @@ class LineNotificationService:
         # 影響されない。
         latest_log: NotificationLog | None = None
         if not self._execution_context.is_validation:
-            latest_log = self._latest_log_for_recommendation_scope(
-                recommendation, notification_type
-            )
+            lookup = self._log_lookup_for_recommendation_scope(recommendation, notification_type)
+            if lookup.undecidable:
+                # Issue #279: 過去の送信実績を読めなかった。
+                # 「送っていない」と読んで送ると**重複送信**になるため送らない。
+                logger.warning(
+                    "manual_review_required suppressed: past log undecidable "
+                    "stock_code=%s skipped=%d",
+                    recommendation.stock_code,
+                    lookup.skipped,
+                )
+                return False
+            latest_log = lookup.latest
             if latest_log is not None:
                 # Issue #23と同じくJST暦日同士の差分で数える(UTC暦日だと
                 # JST 09:00の境界を跨いだだけで1日経過と誤判定する)。
@@ -3439,9 +3449,21 @@ class LineNotificationService:
         content_hash = hashlib.sha256(
             f"{stock_code}|{published_at.isoformat()}|{disclosure_title}".encode()
         ).hexdigest()[:16]
-        latest = self._log_repo.latest_by_stock_and_type(
+        lookup = self._log_repo.latest_by_stock_and_type(
             stock_code, NotificationType.IMPORTANT_DISCLOSURE
         )
+        if lookup.undecidable:
+            # Issue #279: 過去の送信実績を読めなかった。
+            # 「送っていない」と読んで送ると**重複送信**になるため送らない。
+            logger.warning(
+                "notification suppressed: past log undecidable "
+                "type=%s scope=%s skipped=%d",
+                NotificationType.IMPORTANT_DISCLOSURE.value,
+                stock_code,
+                lookup.skipped,
+            )
+            return False
+        latest = lookup.latest
         if latest is not None and latest.content_hash == content_hash:
             return False
 
@@ -3676,9 +3698,20 @@ class LineNotificationService:
         # 直近サマリーlogのid)。VALIDATIONではclaim機構自体が無効のため未使用。
         prev_log_id = "NONE"
         if not self._execution_context.is_validation:
-            latest = self._log_repo.latest_by_stock_and_type(
+            lookup = self._log_repo.latest_by_stock_and_type(
                 pseudo_stock_code, NotificationType.BATCH_SUMMARY
             )
+            if lookup.undecidable:
+                # Issue #279: 過去のサマリーlogを読めなかった。
+                # 「まだ送っていない」と読んで送ると**重複送信**になるため送らない。
+                logger.warning(
+                    "batch_summary suppressed: past log undecidable "
+                    "process_name=%s skipped=%d",
+                    process_name,
+                    lookup.skipped,
+                )
+                return False
+            latest = lookup.latest
             if latest is not None:
                 prev_log_id = latest.notification_id
             if is_holdings_call:
@@ -4014,9 +4047,18 @@ class LineNotificationService:
             return False
 
         pseudo_stock_code = "__batch__:watchlist_auto_addition"
-        latest = self._log_repo.latest_by_stock_and_type(
+        lookup = self._log_repo.latest_by_stock_and_type(
             pseudo_stock_code, NotificationType.WATCHLIST_AUTO_ADDITION
         )
+        if lookup.undecidable:
+            # Issue #279: 過去のサマリーlogを読めなかった。
+            # 「まだ送っていない」と読んで送ると**重複送信**になるため送らない。
+            logger.warning(
+                "watchlist_auto_addition suppressed: past log undecidable skipped=%d",
+                lookup.skipped,
+            )
+            return False
+        latest = lookup.latest
         if latest is not None and latest.content_hash == content_hash:
             logger.info(
                 "watchlist_auto_addition duplicate suppressed count=%d", len(summary.items)
@@ -4070,14 +4112,19 @@ class LineNotificationService:
             )
         return True
 
-    def _latest_log_for_recommendation_scope(
+    def _log_lookup_for_recommendation_scope(
         self, recommendation: Recommendation, notification_type: NotificationType
-    ) -> NotificationLog | None:
+    ) -> NotificationLookup:
         """M3(保有銘柄オーナー機能): holding-scope(SELL/PARTIAL/ATTENTION等、
         holding_idが設定されている)はholding_id単位で、stock-scope(BUY系、
         holding_id=None)は従来どおりstock_code単位で直近のNotificationLogを
         検索する。同一stock_codeを複数ownerが保有していても、一方のownerの
-        通知がもう一方のownerの再送判定を抑止しない。"""
+        通知がもう一方のownerの再送判定を抑止しない。
+
+        Issue #279: 戻り値は NotificationLookup である。呼び出し側は
+        `.latest` を見る前に **`.undecidable` を確認**すること
+        (読めなかったのに「送っていない」と読むと重複送信になる)。
+        """
         if recommendation.holding_id is not None:
             return self._log_repo.latest_by_holding_and_type(
                 recommendation.holding_id, notification_type
@@ -4118,7 +4165,12 @@ class LineNotificationService:
         """claim identityの`prev`要素: 既存read判定が参照する「直近送信実績」の
         notification_id(無ければ"NONE")。#33でscope-aware化された読み取りを
         そのまま使う(claim層で独自のscope解決を再実装しない)。"""
-        latest = self._latest_log_for_recommendation_scope(recommendation, notification_type)
+        # ★ ここは送信可否の判断ではなく claim identity の材料である。
+        #   判定不能なら上流の送信判断が既に抑止しているため、ここでは
+        #   `.latest` をそのまま使う(Issue #279)。
+        latest = self._log_lookup_for_recommendation_scope(
+            recommendation, notification_type
+        ).latest
         return latest.notification_id if latest is not None else "NONE"
 
     def _acquire_send_claim(
@@ -4283,7 +4335,13 @@ class LineNotificationService:
     def _previous_recommendation(
         self, recommendation: Recommendation, notification_type: NotificationType
     ) -> Recommendation | None:
-        latest_log = self._latest_log_for_recommendation_scope(recommendation, notification_type)
+        # ★ 判定不能でも None を返す(Issue #279)。
+        #   「前回が無い」と同じ見え方になるが、送信可否は
+        #   _notification_status_for_send() 側が undecidable を見て抑止するため、
+        #   ここで送信へ倒れることはない。
+        latest_log = self._log_lookup_for_recommendation_scope(
+            recommendation, notification_type
+        ).latest
         if latest_log is None or latest_log.related_recommendation_id is None:
             return None
         return self._recommendation_repo.get(latest_log.related_recommendation_id)
@@ -4304,9 +4362,19 @@ class LineNotificationService:
         """
         if self._execution_context.is_validation:
             return NotificationStatus.SENT
-        latest_log = self._latest_log_for_recommendation_scope(
+        lookup = self._log_lookup_for_recommendation_scope(
             recommendation, NotificationType.PROFIT_PROTECTION_ATTENTION
         )
+        if lookup.undecidable:
+            # Issue #279: 過去の送信実績を読めなかった。SENT を返すと送信され、
+            # 既に知らせた局面をもう一度送る(**重複通知**)ことになる。
+            logger.warning(
+                "attention suppressed: past log undecidable stock_code=%s skipped=%d",
+                recommendation.stock_code,
+                lookup.skipped,
+            )
+            return NotificationStatus.DATA_INSUFFICIENT
+        latest_log = lookup.latest
         if latest_log is None:
             return NotificationStatus.SENT
         if latest_log.content_hash == _compute_attention_event_identity(recommendation):
@@ -4355,7 +4423,19 @@ class LineNotificationService:
         # 保有する場合に別ownerの送信時刻が再送間隔判定へ影響するscope非対称が
         # あった。再送条件そのもの(resend_after_daysの値・JST暦日計算・価格閾値
         # 等)は変更しない。
-        latest_log = self._latest_log_for_recommendation_scope(recommendation, notification_type)
+        lookup = self._log_lookup_for_recommendation_scope(recommendation, notification_type)
+        if lookup.undecidable:
+            # Issue #279: 過去の送信実績を読めなかった。SENT を返すと送信され、
+            # 直近に送った通知をもう一度送る(**重複送信**)ことになる。
+            logger.warning(
+                "notification suppressed: past log undecidable "
+                "type=%s stock_code=%s skipped=%d",
+                notification_type.value,
+                recommendation.stock_code,
+                lookup.skipped,
+            )
+            return NotificationStatus.DATA_INSUFFICIENT
+        latest_log = lookup.latest
         if latest_log is None:
             return NotificationStatus.SENT
         if previous is None:

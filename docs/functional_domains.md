@@ -358,6 +358,24 @@ code WIP を取得すべき領域である(L節)。呼び出し元の実測に�
 
 `SHARED_ID` は再利用しない。
 
+### S-17 の読み取り API(2026-09-08 / Issue #279 で 1 つ追加)
+
+```
+既存(変更していない)
+  list_all / iter_all / get / get_consistent / find /
+  query_by_index / get_many / get_raw_data
+  -> いずれも `list[T]` / `T | None` を返し、**decode の成否を返さない**
+
+追加  find_with_outcome(predicate) -> DecodeOutcome[T]
+  `find()` と同じ絞り込みに、decode の成否(`undecidable` / `failures`)を添える。
+  `RecordFailurePolicy.FAIL_SAFE_SUPPRESS` の核心である「判定不能」を
+  呼び出し側へ渡す口がどの読み取り API にも無かったため追加した(Issue #279)。
+  実装は既存の `decode_records()` を経由する。
+```
+
+★ **既存 API の signature も挙動も変えていない。** 宣言していない collection は
+既定の `STRICT` のままであり、本メソッドを呼ばない限り何も変わらない。
+
 ### S-17 の実測(2026-09-06 / main = 6ae201bc)
 
 ```
@@ -806,3 +824,4 @@ DEAD_REFERENCE   = 0
 | 2026-09-06 | S-17(永続化ストア層)の主要 source へ `infrastructure/record_failure_policy.py` を追加(Issue #63 / A-U1a)。per-record のデコード失敗をコレクション単位のポリシー(STRICT 既定 / LENIENT / FAIL_SAFE_SUPPRESS)で扱う機構を新規 module として追加したことによる。M.1(共通部品を追加・変更した場合はカタログを更新する維持契約)に基づく更新である。**本 module は追加のみであり、既存の呼び出し元を 1 つも変更していない**(`src/` 内で本 module を import する module は実測 0 件)ため `LOCK_LEVEL_1`(ADDITIVE_AND_BACKWARD_COMPATIBLE)として領域 WIP を取得せずに実施した(2.6.5「新しい関数・モジュールの追加 — 既存の呼び出し元をひとつも変更しない場合に限り LOCK_LEVEL_1」)。`json_store.py` / `dynamodb_store.py` / `collection_store.py` を本機構へ差し替えるのは PR-2(A-U1b)であり、その時点で `LOCK_LEVEL_2` として全領域を取得する。**領域一覧・機能一覧・既存の S-01〜S-16 の行・S-17 の lock する領域(全領域)・維持契約の内容は変更していない。** 判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
 | 2026-09-06 | 機能一覧へ F-46(保有監視日次バッチ)と F-47(batch finalize recovery)を追加(Issue #209)。`lambda_handlers` 配下 16 ファイルを全件走査したところ、`holdings_watchlist_handler.py` と `_finalize_recovery.py` の 2 件が F 行に無く、**L 節の手順(参照元がどの機能に属するかを本書の表で引く)が成立しない**状態だった。前者は B 節が「1 つの handler が 6 領域のサービスを呼ぶ」実例として名指ししているファイルでありながら行が無く、後者は本書に 1 度も現れていなかった。判定できない場合は fail-closed で `LOCK_LEVEL_3` となるため、この 2 ファイルを変更する Issue #70(execution context の伝播と fail-close 統一)が影響領域をカタログから導出できずにいた。呼び出し先を実測し、F-46 は `D3 / D1 / D2 / D4 / D5 / D9 / S`(保有台帳 D6 は**読み取りのみで書き込まないため含めない**。F-10 が holdings を読みながら D3 / S に留めているのと同じ扱い。株主優待は判定利用側のため S-15 として数える)、F-47 は `D9 / D4 / D1 / D3`(生産側 = reconciler / 消費側 = buy・holdings の両 handler)とした。F-47 の PRIMARY を D9 としたのは `_execution_mode.py` / `_scheduling.py`(F-42)と同じ実行基盤側の共通部品であるためである。あわせて E-L 節の「全 45 機能」を「全 47 機能」へ更新した(行追加により本文と表が食い違うため)。M.1(新しい機能を追加したときのカタログ維持契約)に基づく追記であり、**領域一覧・既存の F-01〜F-45 の行・K 節の共通部品一覧・維持契約の内容は変更していない。** lock ルール本文は development_workflow.md 2.6節が正本であり本書へ複製していない。判定ロジック・通知内容・保存データ形式・Production 挙動の変更なし |
 | 2026-09-07 | 網羅性の不変条件(M.5)・「主要 source」列の意味・UNCATALOGED 一覧を追加した(Issue #212 Phase B)。本書は機能の列挙(top-down)で作られ主要 source は代表ファイルのみだったが、L節は「変更する module を表から引く」bottom-up の使い方を要求しており、**作り方と使い方が噛み合っていなかった**。表に無い module に当たると fail-closed で `LOCK_LEVEL_3` となり作業が止まる(#201 の永続化ストア層 / #209 の handler / #135 の owner.py で実際に発生)。維持契約 M.1〜M.4 はいずれもイベント駆動(機能を足したら行を足す)であり、**初期作成時の抜けを検出する不変条件が無かった**。M.5 として「src 配下の全 module は F 行 / S 行の主要 source に属する」を定め、属さないものは UNCATALOGED 一覧へ割り当て予定つきで載せることとした。**属し方はファイル指定とディレクトリ指定の 2 通りをどちらも有効とする**(M.5 C2)。L節の目的は lock 範囲を引くことであり、`domain/valuation/` のようなディレクトリ指定でも配下の全 module についてその目的を果たすためである。この扱いにより baseline は 183 件ではなく **102 件**になる(Phase A の実測 183 はディレクトリ指定を数えていなかった。差の 75 件は既に覆われている)。あわせて本 PR で 6 件を割り当てまで済ませた: `services/stock_snapshot_service.py` を F-14 へ(#208 で判明した保有側の適正価格集約)、`services/watchlist_screening_audit.py` を F-15 へ / `services/watchlist_batch_finalizer.py` を F-47 へ(いずれも #62 で判明)、`services/holding_decision_notification_builder.py` を F-22 へ、`domain/entities/owner.py` を新規 S-18(所有者と holding_id 規約 / lock D3 D5 D6 / src 内 importer 15 module)へ、`domain/signals/_price_range_shared.py` を新規 S-19(価格レンジ共通 / lock D1 D2 / F-03 と F-09 の両方が使う)へ。S-18 は #135(ログへの個人識別情報)の実装が lock 範囲を引けずにいた直接の原因である。M.1 N4(2 領域以上が読む共通部品は K節へ)に基づく追加であり、**領域一覧・既存の F 行 / S-01〜S-17 の lock する領域・維持契約 M.1〜M.4 の内容はいずれも変更していない**(F-14 / F-15 / F-22 / F-47 は主要 source へ追記したのみで影響領域を変えていない)。UNCATALOGED 一覧は Phase D の作業表を兼ね、割り当てが済んだ行を削り、空になった時点で C1 が成立する。CI(`catalog-coverage`)による機械検査は Phase C であり本 PR には含まない。**docs のみの変更であり、判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない** |
+| 2026-09-08 | S-17(永続化ストア層)の読み取り API へ `find_with_outcome()` を 1 つ追加した(Issue #279)。既存の読み取り API(list_all / iter_all / get / get_consistent / find / query_by_index / get_many / get_raw_data)はいずれも `list[T]` / `T | None` を返すため、**`RecordFailurePolicy.FAIL_SAFE_SUPPRESS` の核心である「判定不能」を呼び出し側へ渡す口がどこにも無かった**。notification_log の再送判定では、skip すると過去の送信実績を見落として重複送信になり、例外にすると通知が出せなくなるため、どちらでもない第三の答え(判定できなかった)を返せる必要がある。実装は既存の `decode_records()` を経由し、失敗の記録・開示レベルの適用・走査単位の集計ログはすべて既存の機構と同一である。**既存 API の signature も挙動も 1 つも変えていない**(宣言していない collection は既定の STRICT のままで、本メソッドを呼ばない限り何も変わらない)。領域一覧・機能一覧・S-01〜S-19 の lock する領域・維持契約 M.1〜M.5 はいずれも変更していない |

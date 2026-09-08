@@ -151,7 +151,7 @@ def test_normal_mode_sends_via_line_client(tmp_path: Path) -> None:
     assert audit_service.dry_run_calls() == []
     from jstock_advisor.domain.entities.enums import NotificationType
 
-    latest = log_repo.latest_by_stock_and_type("2914", NotificationType.DAILY_BUY_CANDIDATES)
+    latest = log_repo.latest_by_stock_and_type("2914", NotificationType.DAILY_BUY_CANDIDATES).latest
     assert latest is not None
 
 
@@ -243,7 +243,12 @@ def test_validation_dry_run_does_not_write_notification_log(tmp_path: Path) -> N
 
     from jstock_advisor.domain.entities.enums import NotificationType
 
-    assert log_repo.latest_by_stock_and_type("2914", NotificationType.DAILY_BUY_CANDIDATES) is None
+    assert (
+        log_repo.latest_by_stock_and_type(
+            "2914", NotificationType.DAILY_BUY_CANDIDATES
+        ).latest
+        is None
+    )
 
 
 def test_validation_dry_run_does_not_grow_production_style_audit_log(tmp_path: Path) -> None:

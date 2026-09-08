@@ -384,15 +384,24 @@ def _notification_facts(
     send_recommendation_notificationが唯一の書き込み元。抑止・失敗時には作られない)
     ため、ログが無い=「未送信と確定」ではなく「確認不能」を意味する(UNKNOWN)。
     """
-    logs = notification_log_repo.list_by_recommendation_id(recommendation_id)
+    lookup = notification_log_repo.list_by_recommendation_id(recommendation_id)
+    logs = lookup.records
     if not logs:
-        return BacktestNotificationStatus.UNKNOWN, None, None
+        # Issue #279: この経路は分析であり送信判断ではないため、読めなかった
+        # レコードがあっても止めない。ただし件数の欠落は黙って隠さず注記する。
+        skipped_note = (
+            f"(読み取れなかった送信ログが{lookup.skipped}件あります)" if lookup.skipped else None
+        )
+        return BacktestNotificationStatus.UNKNOWN, None, skipped_note
     warning = (
         f"recommendation_id={recommendation_id}に{len(logs)}件の送信ログがあり"
         "重複の可能性があります"
         if len(logs) > 1
         else None
     )
+    if lookup.skipped:
+        note = f"読み取れなかった送信ログが{lookup.skipped}件あります"
+        warning = f"{warning} / {note}" if warning else note
     return BacktestNotificationStatus.SENT, True, warning
 
 

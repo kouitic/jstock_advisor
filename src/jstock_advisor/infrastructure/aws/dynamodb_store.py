@@ -24,9 +24,11 @@ from botocore.exceptions import ClientError
 from pydantic import BaseModel
 
 from jstock_advisor.infrastructure.record_failure_policy import (
+    DecodeOutcome,
     ItemIdDisclosure,
     RecordFailureCollector,
     RecordFailurePolicy,
+    decode_records,
 )
 
 if TYPE_CHECKING:
@@ -168,10 +170,19 @@ class DynamoDbCollectionStore[T: BaseModel]:
         列挙順・件数・内容が両者で一致することが構造的に保証される。
         """
         collector = self._collector()
+        for page in self._scan_raw_pages():
+            yield from self._decode_page(page, collector)
+
+    def _scan_raw_pages(self) -> Iterator[list[dict[str, Any]]]:
+        """Scanの結果を1ページずつ生のまま返す(decodeしない)。
+
+        `iter_all()` と `find_with_outcome()` が同じ走査(pagination完走)を
+        共有するために切り出したもので、**走査の挙動は変えていない**。
+        """
         scan_kwargs: dict[str, Any] = {}
         while True:
             response = self._table.scan(**scan_kwargs)
-            yield from self._decode_page(response.get("Items", []), collector)
+            yield response.get("Items", [])
             last_key = response.get("LastEvaluatedKey")
             if not last_key:
                 break
@@ -231,6 +242,41 @@ class DynamoDbCollectionStore[T: BaseModel]:
 
     def find(self, predicate: Callable[[T], bool]) -> list[T]:
         return [item for item in self.list_all() if predicate(item)]
+
+    def find_with_outcome(self, predicate: Callable[[T], bool]) -> DecodeOutcome[T]:
+        """`find()` と同じ絞り込みに、decodeの成否を添えて返す(Issue #279)。
+
+        `find()` は `list[T]` しか返せないため、**FAIL_SAFE_SUPPRESSで
+        skipした事実が呼び出し側へ届かない**。再送判定のように
+        「読めなかったなら送らない」を選びたい経路では、
+        skipされた件数と「判定不能」を知る必要がある。
+
+        既存の `decode_records()` を経由するため、失敗の記録・開示レベルの
+        適用・走査単位の集計ログはすべて既存の機構と同一である。
+        走査は `iter_all()` と同じ `_scan_raw_pages()`(pagination完走)を使う。
+
+        ★ `find()` と同じく全件を材料化する(`iter_all()`のピークメモリ有界性
+          (Issue #113)は本メソッドの対象外。`find()`も同様に全件を持つ)。
+        ★ `predicate` はdecodeできたレコードにのみ適用する。
+          decodeできなかったレコードは絞り込みの対象にできないため、
+          `failures` として別に数える(黙って0件へ寄せない)。
+        """
+        outcome = decode_records(
+            (
+                (str(raw.get(self._id_field, "")), raw)
+                for page in self._scan_raw_pages()
+                for raw in page
+            ),
+            self._from_item,
+            collection=self._table_name,
+            policy=self._failure_policy,
+            item_id_disclosure=self._item_id_disclosure,
+        )
+        return DecodeOutcome(
+            records=[item for item in outcome.records if predicate(item)],
+            failures=outcome.failures,
+            undecidable=outcome.undecidable,
+        )
 
     def upsert_with_index_attributes(
         self, item: T, index_attributes: Mapping[str, str | int]
