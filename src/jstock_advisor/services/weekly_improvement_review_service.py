@@ -29,7 +29,11 @@ from jstock_advisor.domain.entities.improvement import (
     ImprovementCandidate,
     WeeklyReviewMetrics,
 )
-from jstock_advisor.domain.evaluation_rules import is_entry_type, is_performance_evaluated_type
+from jstock_advisor.domain.evaluation_rules import (
+    is_entry_type,
+    is_evaluation_excluded_type,
+    is_performance_evaluated_type,
+)
 from jstock_advisor.domain.improvement_rules import build_candidate_key
 from jstock_advisor.domain.jst import evaluation_date_jst, require_timezone_aware, to_jst
 from jstock_advisor.infrastructure.aws import improvement_task_tracker as tracker
@@ -508,7 +512,12 @@ class WeeklyImprovementReviewService:
 
     def _is_issue_eligible(self, candidate: ImprovementCandidate) -> bool:
         if candidate.problem_category == PROBLEM_CATEGORY_EVALUATION_CRITERIA_UNDEFINED:
-            return True
+            # Issue #270: 評価対象外であることが**仕様として妥当**な型は起票しない。
+            # 起票しても直しようがなく(直すべき未整備ではない)、
+            # 同じIssueが**毎週立ち続ける**だけになる(#10 / #241 がその実例)。
+            # ★ 改善候補そのものは従来どおり生成する。止めるのは**起票だけ**であり、
+            #   週次指標からその型が消えるわけではない。
+            return not is_evaluation_excluded_type(candidate.recommendation_type)
         return (
             "WEEK_OVER_WEEK_DROP" in candidate.reason_codes
             or "CRITICAL_DROP" in candidate.reason_codes
