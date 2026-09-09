@@ -1,5 +1,7 @@
 """保有判断スコアのbase/final合成・判定区分境界・通知条件のテスト(実装プラン20節)。"""
 
+import pytest
+
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import (
     HoldingDecisionCategory,
@@ -160,11 +162,18 @@ def test_risk_deduction_coverage_between_block_and_confidence_minimum_does_not_b
     通知はブロックされずconfidenceのみ制限される。"""
     q = CompanyQualityScore(score=25, coverage_ratio=1.0)
     i = InvestmentThesisScore(score=25, coverage_ratio=1.0)
-    r = RiskDeductionScore(score=52, coverage_ratio=0.5)  # block=0.30 <= 0.5 < confidence=0.70
+    r = RiskDeductionScore(score=52, coverage_ratio=0.5)  # block=0.30 <= 0.5 < confidence=0.60
     out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
     assert out.coverage_satisfied is True
     assert out.should_notify is True
-    assert out.confidence != HoldingDecisionConfidenceLevel.HIGH
+    # Issue #269 / #254 P-1: 「HIGHでない」ではなく**何になるか**を肯定形で固定する。
+    # ★ この MEDIUM は confidence_thresholds(overall=0.75 < high 0.79)で決まっており、
+    #   risk_deduction_confidence_minimum による降格分岐は**通っていない**。
+    #   降格分岐そのものは
+    #   tests/unit/test_issue_269_risk_deduction_coverage.py::
+    #   test_t7b_high_is_still_demoted_when_risk_evidence_is_thin が固定する。
+    assert out.coverage.overall == pytest.approx(0.75)
+    assert out.confidence == HoldingDecisionConfidenceLevel.MEDIUM
 
 
 def test_risk_deduction_coverage_below_block_minimum_blocks_notification():
