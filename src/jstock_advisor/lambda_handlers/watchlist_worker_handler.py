@@ -55,6 +55,7 @@ from jstock_advisor.services.line_notification_service import LineNotificationSe
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.screening_data_provider import (
+    ScreeningDataResult,
     ScreeningDataStatus,
     build_screening_data_provider,
 )
@@ -62,7 +63,11 @@ from jstock_advisor.services.watchlist_batch_finalizer import (
     maybe_finalize,
     maybe_finalize_maintenance,
 )
-from jstock_advisor.services.watchlist_data_cache import CacheStats, build_cached_provider_bundle
+from jstock_advisor.services.watchlist_data_cache import (
+    CacheStats,
+    CacheVintage,
+    build_cached_provider_bundle,
+)
 from jstock_advisor.services.watchlist_maintenance_service import (
     build_maintenance_screening_summary,
 )
@@ -103,6 +108,35 @@ class _EvaluationOutcome:
     # 取得自体は試みているため)。scoring_duration_msはデータ取得成功時のみ。
     data_fetch_duration_ms: int | None = None
     scoring_duration_ms: int | None = None
+    # --- Issue #69 U-2(2026-09-09)で追加 ---------------------------------------
+    # この銘柄のこの回で財務・配当キャッシュをどれだけ再利用したか / どれだけ
+    # 古い値を使ったか。ScreeningDataResultから写すだけで、ここで再計算はしない
+    # (同じ数字の出所を2つ作らない)。取得自体ができなかった回(handler側の
+    # 想定外エラー経路)ではNoneのまま。
+    cache_vintage: _CacheVintageSummary | None = None
+
+
+@dataclass(frozen=True)
+class _CacheVintageSummary:
+    """Issue #69 U-2: 銘柄単位のキャッシュvintage(単位は**hours**)。
+
+    ★ 再利用が0件のとき max/min は**0ではなくNone**である。
+    ★ 価格系キャッシュは含まない(CacheVintageのdocstring参照)。
+    """
+
+    reused_count: int | None = None
+    refetched_count: int | None = None
+    age_hours_max: float | None = None
+    age_hours_min: float | None = None
+
+
+def _cache_vintage_of(result: ScreeningDataResult) -> _CacheVintageSummary:
+    return _CacheVintageSummary(
+        reused_count=result.financial_cache_reused_count,
+        refetched_count=result.financial_cache_refetched_count,
+        age_hours_max=result.financial_cache_age_hours_max,
+        age_hours_min=result.financial_cache_age_hours_min,
+    )
 
 
 def _evaluate_candidate(
@@ -112,8 +146,11 @@ def _evaluate_candidate(
     providers: ProviderBundle,
     config: AppConfig,
     job_type: WatchlistJobType = WatchlistJobType.NEW_CANDIDATE_SCREENING,
+    vintage: CacheVintage | None = None,
 ) -> _EvaluationOutcome:
-    screening_data_provider = build_screening_data_provider(providers, config)
+    # Issue #69 U-2: vintageを渡すと、get_screening_input()の入口でreset()され
+    # 出口で集計値がScreeningDataResultへ載る(=**銘柄単位のスコープ**)。
+    screening_data_provider = build_screening_data_provider(providers, config, vintage)
     fetch_start = dt.datetime.now(dt.UTC)
     screening_data = screening_data_provider.get_screening_input(stock_code, now)
     data_fetch_duration_ms = int(
@@ -144,6 +181,7 @@ def _evaluate_candidate(
             screening_data.is_provider_failure_suspected,
             screening_data.missing_fields,
             data_fetch_duration_ms=data_fetch_duration_ms,
+            cache_vintage=_cache_vintage_of(screening_data),
         )
 
     scoring_start = dt.datetime.now(dt.UTC)
@@ -182,6 +220,7 @@ def _evaluate_candidate(
             screening_summary_json=summary.model_dump_json(),
             data_fetch_duration_ms=data_fetch_duration_ms,
             scoring_duration_ms=scoring_duration_ms,
+            cache_vintage=_cache_vintage_of(screening_data),
         )
 
     ranking_entry_json = None
@@ -217,6 +256,7 @@ def _evaluate_candidate(
         notification_detail=notification_detail,
         data_fetch_duration_ms=data_fetch_duration_ms,
         scoring_duration_ms=scoring_duration_ms,
+        cache_vintage=_cache_vintage_of(screening_data),
     )
 
 
@@ -241,8 +281,18 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # 計画Part B-1: Before/After比較用のキャッシュhit/miss計測(この1回のLambda
     # 呼び出し内、通常SQS BatchSize=1のため1銘柄分)。永続化はせずログのみ。
     cache_stats = CacheStats()
+    # Issue #69 U-2: 財務・配当キャッシュの「使った古さ」を銘柄単位で集める。
+    # ★ cache_statsと違い、**1レコードごとにreset()される**
+    #   (reset()はScreeningDataProvider.get_screening_input()の入口で行う)。
+    #   SQSのBatchSizeは引き上げ可能なパラメータであり、共有したままでは
+    #   2銘柄目の値に1銘柄目が混ざるため。
+    cache_vintage = CacheVintage()
     providers = build_cached_provider_bundle(
-        build_real_provider_bundle(now, config), config, now, stats=cache_stats
+        build_real_provider_bundle(now, config),
+        config,
+        now,
+        stats=cache_stats,
+        vintage=cache_vintage,
     )
     notification_service = _build_notification_service(config)
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
@@ -280,7 +330,13 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
         try:
             outcome = _evaluate_candidate(
-                stock_code, batch_id, claim_time, providers, config, job_type
+                stock_code,
+                batch_id,
+                claim_time,
+                providers,
+                config,
+                job_type,
+                vintage=cache_vintage,
             )
         except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーでバッチ全体を止めない
             logger.exception(
@@ -294,6 +350,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
         completion_time = dt.datetime.now(dt.UTC)
         duration_ms = int((completion_time - claim_time).total_seconds() * 1000)
+        vintage_summary = outcome.cache_vintage or _CacheVintageSummary()
         completed = complete_candidate(
             batch_id,
             stock_code,
@@ -310,6 +367,12 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             screening_summary_json=outcome.screening_summary_json,
             data_fetch_duration_ms=outcome.data_fetch_duration_ms,
             scoring_duration_ms=outcome.scoring_duration_ms,
+            # Issue #69 U-2: 銘柄単位のキャッシュvintage(単位はhours)。
+            # 取得自体ができなかった回は4項目ともNoneのまま。
+            financial_cache_reused_count=vintage_summary.reused_count,
+            financial_cache_refetched_count=vintage_summary.refetched_count,
+            financial_cache_age_hours_max=vintage_summary.age_hours_max,
+            financial_cache_age_hours_min=vintage_summary.age_hours_min,
         )
         if completed:
             if job_type == JOB_TYPE_WATCHLIST_MAINTENANCE:

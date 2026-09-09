@@ -21,7 +21,8 @@ Range・Market/Sector/Environment・Earnings Surprise/Trend・次回決算日は
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
@@ -43,6 +44,7 @@ from jstock_advisor.interfaces.disclosure import DisclosureAvailability
 from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, ShareholderBenefit
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+from jstock_advisor.services.watchlist_data_cache import CacheVintage
 from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_retry
 
 # WatchlistScreeningInputの必須項目・スコア項目の分類(要求仕様§5・§8)。
@@ -140,6 +142,49 @@ class ScreeningDataResult:
     # 「障害疑い件数/率」を算出できるようにする(10節のABORTED判定に使う)。
     # 提供元障害以外の理由によるDATA_ERRORでは常にFalse。
     is_provider_failure_suspected: bool = False
+    # --- Issue #69 U-2(2026-09-09)で追加。この銘柄のこの回で、財務・配当キャッシュを
+    # どれだけ再利用したか / どれだけ古い値を使ったか。監査から「どの銘柄がどの時点の
+    # データで評価されたか」を追跡できるようにする(受入条件1)。
+    # ★ 単位は**hours**(小数)。JPX universe 側の *_days(暦日)とは基準が違う。
+    # ★ 価格系キャッシュは**含めない**(JST暦日キーがあり日またぎの再利用が
+    #   構造的に起きないため。CacheVintageのdocstring参照)。
+    # ★ 再利用が0件のとき max/min は**0ではなくNone**である
+    #   (「測れなかった」を「0時間だった」と同じ値へ潰さない)。
+    # ★ 収集器を渡さなかった呼び出し(Dispatcher/CLI等)では4項目ともNoneのまま。
+    financial_cache_reused_count: int | None = None
+    financial_cache_refetched_count: int | None = None
+    financial_cache_age_hours_max: float | None = None
+    financial_cache_age_hours_min: float | None = None
+
+
+def _with_cache_vintage(
+    vintage: CacheVintage | None,
+    collect: Callable[[str, dt.datetime], ScreeningDataResult],
+    stock_code: str,
+    now: dt.datetime,
+) -> ScreeningDataResult:
+    """Issue #69 U-2: 1銘柄分のキャッシュvintageを集めて結果へ載せる。
+
+    ★ **ここが銘柄単位のスコープの境界**である。`get_screening_input()`は
+    1銘柄につき1回だけ呼ばれるため、入口で`reset()`し、出口で集計値を載せる。
+    収集器をLambda呼び出し全体で共有したままにすると、SQSのBatchSizeを
+    引き上げた時点で2銘柄目の値に1銘柄目が混ざる(`CacheStats`が現にそうなって
+    いる。あちらはログのみのため本Issueでは変更しない)。
+
+    ★ DATA_ERROR / NOT_FOUND の回も、取得を試みた分の集計は載せる
+    (「取得できなかった」ことと「キャッシュをどう使ったか」は別の情報である)。
+    """
+    if vintage is None:
+        return collect(stock_code, now)
+    vintage.reset()
+    result = collect(stock_code, now)
+    return replace(
+        result,
+        financial_cache_reused_count=vintage.reused_count,
+        financial_cache_refetched_count=vintage.refetched_count,
+        financial_cache_age_hours_max=vintage.age_hours_max,
+        financial_cache_age_hours_min=vintage.age_hours_min,
+    )
 
 
 class ScreeningDataProvider(Protocol):
@@ -267,11 +312,21 @@ def _to_screening_input(snapshot: StockSnapshot) -> WatchlistScreeningInput:
 
 
 class StockSnapshotScreeningDataProvider:
-    def __init__(self, providers: ProviderBundle, config: AppConfig) -> None:
+    def __init__(
+        self,
+        providers: ProviderBundle,
+        config: AppConfig,
+        vintage: CacheVintage | None = None,
+    ) -> None:
         self._providers = providers
         self._config = config
+        # Issue #69 U-2: 省略時は収集しない(既存呼び出し元の挙動を変えない)。
+        self._vintage = vintage
 
     def get_screening_input(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:
+        return _with_cache_vintage(self._vintage, self._collect, stock_code, now)
+
+    def _collect(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:
         # 429対応(案B、5節): build_stock_snapshot()全体をcall_with_rate_limit_retry()で
         # 包み、429疑いの例外のみ再試行する。build_stock_snapshot()自体・共有yfinance
         # Provider実装は一切変更しない(欠点は同関数のdocstring参照)。429疑いでない
@@ -324,11 +379,21 @@ class LightweightScreeningDataProvider:
     一切取得・計算しない。next_earnings_dateは判定に使われないため常にNone。
     """
 
-    def __init__(self, providers: ProviderBundle, config: AppConfig) -> None:
+    def __init__(
+        self,
+        providers: ProviderBundle,
+        config: AppConfig,
+        vintage: CacheVintage | None = None,
+    ) -> None:
         self._providers = providers
         self._config = config
+        # Issue #69 U-2: 省略時は収集しない(既存呼び出し元の挙動を変えない)。
+        self._vintage = vintage
 
     def get_screening_input(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:
+        return _with_cache_vintage(self._vintage, self._collect, stock_code, now)
+
+    def _collect(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:
         try:
             retry_result = call_with_rate_limit_retry(
                 lambda: self._fetch_and_build(stock_code, now)
@@ -458,13 +523,20 @@ class LightweightScreeningDataProvider:
 
 
 def build_screening_data_provider(
-    providers: ProviderBundle, config: AppConfig
+    providers: ProviderBundle,
+    config: AppConfig,
+    vintage: CacheVintage | None = None,
 ) -> ScreeningDataProvider:
     """`config.watchlist_screening.screening_data_provider`に基づき、実際に
     使うProviderを生成する(計画Part B-2)。Dispatcher/Worker/CLIの3箇所の
     生成ロジックをここへ集約する。
+
+    Issue #69 U-2: `vintage`を渡すと、1銘柄ごとに財務・配当キャッシュの
+    「使った古さ」を集計して`ScreeningDataResult`へ載せる。★ 渡さない
+    呼び出し(Dispatcherの候補収集・CLI)では4項目ともNoneのままであり、
+    挙動は変わらない。
     """
     provider_name = config.watchlist_screening.screening_data_provider
     if provider_name == "lightweight":
-        return LightweightScreeningDataProvider(providers, config)
-    return StockSnapshotScreeningDataProvider(providers, config)
+        return LightweightScreeningDataProvider(providers, config, vintage)
+    return StockSnapshotScreeningDataProvider(providers, config, vintage)
