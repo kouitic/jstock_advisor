@@ -56,7 +56,11 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "maybe_finalize_maintenance": [],
     }
 
-    def _fake_evaluate_candidate(stock_code, batch_id, now, providers, config, job_type):  # noqa: ANN001, ANN201
+    def _fake_evaluate_candidate(  # noqa: ANN001, ANN202
+        stock_code, batch_id, now, providers, config, job_type, vintage=None
+    ):
+        # Issue #69 U-2: handler が銘柄単位のキャッシュvintage収集器を渡すように
+        # なったため、fake の署名だけを合わせる(検証している結論は変えていない)。
         calls["evaluate_candidate"].append(job_type)
         return handler_module._EvaluationOutcome(
             WatchlistProgressStatus.COMPLETED, "PASSED", None, False, []

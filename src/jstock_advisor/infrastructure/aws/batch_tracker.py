@@ -1215,6 +1215,17 @@ class CandidateProgressRecord:
     # セットされうる)。
     data_fetch_duration_ms: int | None = None
     scoring_duration_ms: int | None = None
+    # --- Issue #69 U-2(2026-09-09)で追加 ---------------------------------------
+    # この銘柄のこの回で財務・配当キャッシュをどれだけ再利用したか / どれだけ
+    # 古い値を使ったか(単位は**hours**)。「どの銘柄がどの時点のデータで評価
+    # されたか」を事後に説明できるようにする(Issue #69 受入条件1)。
+    # ★ 再利用0件のときmax/minはNoneであり、0ではない。
+    # ★ 価格系キャッシュは含まない(JST暦日キーがあり日またぎの再利用が
+    #   構造的に起きないため)。
+    financial_cache_reused_count: int | None = None
+    financial_cache_refetched_count: int | None = None
+    financial_cache_age_hours_max: float | None = None
+    financial_cache_age_hours_min: float | None = None
 
 
 def _parse_notification_detail(raw: str | None) -> WatchlistScoreDetail | None:
@@ -1252,6 +1263,28 @@ def _to_progress_record(item: dict[str, Any]) -> CandidateProgressRecord:
         scoring_duration_ms=(
             int(item["scoring_duration_ms"])
             if item.get("scoring_duration_ms") is not None
+            else None
+        ),
+        # Issue #69 U-2: 属性が無い行(本変更の反映前に書かれた行、および
+        # 再利用0件の回)はNoneのまま。**0で埋めない**。
+        financial_cache_reused_count=(
+            int(item["financial_cache_reused_count"])
+            if item.get("financial_cache_reused_count") is not None
+            else None
+        ),
+        financial_cache_refetched_count=(
+            int(item["financial_cache_refetched_count"])
+            if item.get("financial_cache_refetched_count") is not None
+            else None
+        ),
+        financial_cache_age_hours_max=(
+            float(item["financial_cache_age_hours_max"])
+            if item.get("financial_cache_age_hours_max") is not None
+            else None
+        ),
+        financial_cache_age_hours_min=(
+            float(item["financial_cache_age_hours_min"])
+            if item.get("financial_cache_age_hours_min") is not None
             else None
         ),
     )
@@ -1670,6 +1703,10 @@ def complete_candidate(
     screening_summary_json: str | None = None,
     data_fetch_duration_ms: int | None = None,
     scoring_duration_ms: int | None = None,
+    financial_cache_reused_count: int | None = None,
+    financial_cache_refetched_count: int | None = None,
+    financial_cache_age_hours_max: float | None = None,
+    financial_cache_age_hours_min: float | None = None,
 ) -> bool:
     """7/11節: Workerの通常完了経路。TransactWriteItemsで進捗行の終端確定と
     BatchRunsTable.completedの+1を原子的に行う(通常経路。17節のタイムアウト
@@ -1720,6 +1757,29 @@ def complete_candidate(
             if scoring_duration_ms is not None
             else ""
         )
+        # Issue #69 U-2: 銘柄単位のキャッシュvintage(単位はhours)。
+        # ★ 再利用0件のときmax/minはNoneであり、その場合は属性自体を書かない
+        #   (0を書くと「0時間の新しいデータを使った」と読めてしまうため)。
+        + (
+            ", financial_cache_reused_count = :financial_cache_reused_count"
+            if financial_cache_reused_count is not None
+            else ""
+        )
+        + (
+            ", financial_cache_refetched_count = :financial_cache_refetched_count"
+            if financial_cache_refetched_count is not None
+            else ""
+        )
+        + (
+            ", financial_cache_age_hours_max = :financial_cache_age_hours_max"
+            if financial_cache_age_hours_max is not None
+            else ""
+        )
+        + (
+            ", financial_cache_age_hours_min = :financial_cache_age_hours_min"
+            if financial_cache_age_hours_min is not None
+            else ""
+        )
         + " ADD total_processing_duration_ms :duration_ms"
         + " REMOVE lease_owner_id, lease_expires_at"
     )
@@ -1748,6 +1808,15 @@ def complete_candidate(
         values[":data_fetch_duration_ms"] = data_fetch_duration_ms
     if scoring_duration_ms is not None:
         values[":scoring_duration_ms"] = scoring_duration_ms
+    if financial_cache_reused_count is not None:
+        values[":financial_cache_reused_count"] = financial_cache_reused_count
+    if financial_cache_refetched_count is not None:
+        values[":financial_cache_refetched_count"] = financial_cache_refetched_count
+    if financial_cache_age_hours_max is not None:
+        # float直渡しはboto3がTypeErrorを送出するためDecimalへ(total_scoreと同じ)。
+        values[":financial_cache_age_hours_max"] = Decimal(str(financial_cache_age_hours_max))
+    if financial_cache_age_hours_min is not None:
+        values[":financial_cache_age_hours_min"] = Decimal(str(financial_cache_age_hours_min))
 
     client = boto3.client("dynamodb")
     try:
