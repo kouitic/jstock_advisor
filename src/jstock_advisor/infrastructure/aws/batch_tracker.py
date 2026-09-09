@@ -1442,6 +1442,10 @@ def set_watchlist_batch_total(
     universe_promoted: bool | None = None,
     universe_source_date: str | None = None,
     universe_cache_age_days: int | None = None,
+    universe_jpx400_promoted: bool | None = None,
+    universe_jpx400_source_date: str | None = None,
+    universe_jpx400_cache_age_days: int | None = None,
+    universe_vintage_gap_days: int | None = None,
 ) -> None:
     """1節ステップ2: 候補リスト確定後にtotalを設定し、dispatch_completedを
     falseで初期化する(この時点ではまだSQS送信を開始していないため)。
@@ -1477,6 +1481,15 @@ def set_watchlist_batch_total(
     (watchlist_batch_finalizer._finalize_completed)が読み出す。
     WATCHLIST_MAINTENANCEおよびcandidate_universe.provider!="jpx"では
     Downloaderを実行しないためいずれもNoneのまま。
+
+    Issue #69(U-1、2026-09-09): `universe_jpx400_promoted`/
+    `universe_jpx400_source_date`/`universe_jpx400_cache_age_days`は
+    JPX400構成銘柄側の同じ観測値であり、`universe_vintage_gap_days`は
+    2ファイルのsource_dateの差(暦日)である。上場銘柄一覧(45日)と
+    JPX400(90日)は独立した閾値で個別に判定されるだけで相互の整合を
+    検査していないため、混成vintageを外形的に知る手段が無かった。
+    ★ 差があっても処理は中断しない(記録とWARNINGのみ)。
+    ★ どちらかのsource_dateが不明な場合、gapは0ではなくNoneとする。
     """
     ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
     _table().update_item(
@@ -1500,7 +1513,11 @@ def set_watchlist_batch_total(
             "universe_source = :universe_source, "
             "universe_promoted = :universe_promoted, "
             "universe_source_date = :universe_source_date, "
-            "universe_cache_age_days = :universe_cache_age_days"
+            "universe_cache_age_days = :universe_cache_age_days, "
+            "universe_jpx400_promoted = :universe_jpx400_promoted, "
+            "universe_jpx400_source_date = :universe_jpx400_source_date, "
+            "universe_jpx400_cache_age_days = :universe_jpx400_cache_age_days, "
+            "universe_vintage_gap_days = :universe_vintage_gap_days"
         ),
         ExpressionAttributeNames={"#total": "total", "#ttl": "ttl"},
         ExpressionAttributeValues={
@@ -1525,6 +1542,10 @@ def set_watchlist_batch_total(
             ":universe_promoted": universe_promoted,
             ":universe_source_date": universe_source_date,
             ":universe_cache_age_days": universe_cache_age_days,
+            ":universe_jpx400_promoted": universe_jpx400_promoted,
+            ":universe_jpx400_source_date": universe_jpx400_source_date,
+            ":universe_jpx400_cache_age_days": universe_jpx400_cache_age_days,
+            ":universe_vintage_gap_days": universe_vintage_gap_days,
         },
     )
 
