@@ -21,7 +21,12 @@ class EvaluationResult(Entity):
     horizon_calendar_days: int | None = None
     # evaluation_date: 評価基準日(ホライズンの到来日)。evaluated_at: 実際に処理が
     # 成功しこの結果が確定した日時。株価取得失敗等により両者はずれることがある
-    # (振り返り機能改修で明確化。週次集計はevaluated_atを基準にする)。
+    # (振り返り機能改修で明確化)。
+    # ★ 週次集計の軸は evaluation_date である(Issue #114 Phase B2 で
+    #   evaluated_at から変更した)。evaluated_at は「いつ処理を走らせたか」しか
+    #   表さず、遅延処理分が処理した週へ一括計上されて母数が歪むため。
+    #   evaluation_date はホライズンから決定論的に定まり、遅れて処理しても
+    #   評価値そのものは on-time 実行と一致する。
     evaluated_at: dt.datetime
     evaluation_date: dt.date
 

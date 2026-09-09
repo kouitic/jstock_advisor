@@ -188,9 +188,7 @@ def test_resolve_review_period_is_previous_monday_to_sunday() -> None:
     assert review_week == f"{period_start.isocalendar()[0]}-W{period_start.isocalendar()[1]:02d}"
 
 
-def test_evaluation_date_last_week_but_evaluated_at_this_week_is_included(
-    aws_env, repos
-) -> None:
+def test_evaluation_date_last_week_but_evaluated_at_this_week_is_included(aws_env, repos) -> None:
     period_start, period_end, review_week = _resolve_review_period(_RUN_AT)
     # evaluation_date(基準日)は前週より前だが、evaluated_at(確定日時)は対象週内
     stale_evaluated_at = dt.datetime.combine(
@@ -216,9 +214,7 @@ def test_evaluation_confirmed_next_week_is_excluded_from_this_week(aws_env, repo
     next_week_evaluated_at = dt.datetime.combine(
         period_end + dt.timedelta(days=2), dt.time(10, 0), tzinfo=dt.UTC
     )
-    repos["recommendation"].save(
-        _recommendation("r1", RecommendationType.BUY, "v1", period_start)
-    )
+    repos["recommendation"].save(_recommendation("r1", RecommendationType.BUY, "v1", period_start))
     repos["evaluation"].save(
         _evaluation("e1", "r1", EvaluationLabel.SUCCESS, next_week_evaluated_at)
     )
@@ -529,9 +525,7 @@ def test_success_rate_just_below_threshold_is_candidate(aws_env, repos) -> None:
     assert "SUCCESS_RATE_LOW" in candidate.reason_codes
 
 
-def test_success_rate_just_above_threshold_is_not_a_candidate_on_that_axis(
-    aws_env, repos
-) -> None:
+def test_success_rate_just_above_threshold_is_not_a_candidate_on_that_axis(aws_env, repos) -> None:
     """success_rate_pct=51.0(閾値50.0)→成功率理由ではCandidateにしない
     (超過リターンも中立なので全くCandidateにならない)。"""
     period_start, _, _ = _resolve_review_period(_RUN_AT)
@@ -856,9 +850,7 @@ def test_new_issue_creation_triggers_notification(
         )
         return ImprovementTaskStatus.ISSUE_CREATED
 
-    monkeypatch.setattr(
-        module.github_issue_service, "process_candidate", _fake_process_candidate
-    )
+    monkeypatch.setattr(module.github_issue_service, "process_candidate", _fake_process_candidate)
 
     period_start, _, review_week = _resolve_review_period(_RUN_AT)
     previous_week_label = module._previous_week_label(review_week)
@@ -904,9 +896,7 @@ def test_existing_issue_comment_does_not_trigger_notification(
         # 呼ばれる前に既にISSUE_CREATED状態(既存Issue)がセットされている前提
         return ImprovementTaskStatus.ISSUE_CREATED
 
-    monkeypatch.setattr(
-        module.github_issue_service, "process_candidate", _fake_process_candidate
-    )
+    monkeypatch.setattr(module.github_issue_service, "process_candidate", _fake_process_candidate)
 
     period_start, _, review_week = _resolve_review_period(_RUN_AT)
     previous_week_label = module._previous_week_label(review_week)
@@ -952,3 +942,244 @@ def test_existing_issue_comment_does_not_trigger_notification(
 
     assert outcome.notified_new_issue_count == 0
     assert line_client.sent_messages == []
+
+
+# --- Issue #114 Phase B2: 集計軸を evaluation_date へ ---------------------
+#
+# 従来は evaluated_at(処理をいつ走らせたか)で絞っていたため、定点評価が遅延して
+# 後からまとめて処理されると、過去の基準日の評価が「処理した週」へ一括計上され、
+# 回復週の母数だけが膨らんでいた。以下はその是正の固定である。
+
+
+def _evaluation_with_dates(
+    eval_id: str,
+    rec_id: str,
+    label: EvaluationLabel,
+    evaluation_date: dt.date,
+    evaluated_at: dt.datetime,
+) -> EvaluationResult:
+    """evaluation_date と evaluated_at を**別々に**指定できる版。
+
+    既存の_evaluation()は evaluation_date = evaluated_at.date() と揃えてしまうため、
+    遅延処理(両者がずれる)を再現できない。
+    """
+    return EvaluationResult(
+        evaluation_id=eval_id,
+        recommendation_id=rec_id,
+        horizon_calendar_days=7,
+        evaluated_at=evaluated_at,
+        evaluation_date=evaluation_date,
+        price_at_evaluation=Decimal("1010"),
+        price_return_pct=1.0,
+        excess_return_pct=1.0,
+        evaluation_label=label,
+        label_evidence="x",
+    )
+
+
+def _seed_one(
+    repos: dict,
+    prefix: str,
+    evaluation_date: dt.date,
+    evaluated_at: dt.datetime,
+    label: EvaluationLabel = EvaluationLabel.SUCCESS,
+) -> None:
+    rec_id = f"{prefix}-rec"
+    repos["recommendation"].save(
+        _recommendation(rec_id, RecommendationType.BUY, "v1", evaluated_at)
+    )
+    repos["evaluation"].save(
+        _evaluation_with_dates(f"{prefix}-eval", rec_id, label, evaluation_date, evaluated_at)
+    )
+
+
+def test_delayed_evaluations_are_not_piled_into_the_catch_up_week(aws_env, repos) -> None:
+    """遅延評価が回復週へ集中しない(本Issueの中心)。
+
+    evaluated_atは全件同一日(catch-up実行日)だが、evaluation_dateは複数週へ
+    散っている入力を与える。集計軸がevaluated_atのままなら1週へ寄る。
+    """
+    period_start, period_end, review_week = _resolve_review_period(_RUN_AT)
+    catch_up_at = dt.datetime.combine(
+        period_start + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC
+    )
+
+    # 対象週(前週)の基準日
+    _seed_one(repos, "cur", period_start + dt.timedelta(days=2), catch_up_at)
+    # 1週前・2週前の基準日。処理はどちらも catch_up_at(= 対象週)に行われている。
+    _seed_one(repos, "w1", period_start - dt.timedelta(days=5), catch_up_at)
+    _seed_one(repos, "w2", period_start - dt.timedelta(days=12), catch_up_at)
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    # 対象週へ入るのは基準日が対象週のもの1件だけ。
+    assert outcome.total_evaluation_results == 1
+
+    saved = {m.review_week: m for m in repos["metrics"].list_all()}
+    assert saved[review_week].sample_count == 1
+    # 過去週は作り直され、それぞれの基準日の週へ1件ずつ入る。
+    assert saved[module._previous_week_label(review_week)].sample_count == 1
+    two_weeks_ago = module._previous_week_label(module._previous_week_label(review_week))
+    assert saved[two_weeks_ago].sample_count == 1
+    assert outcome.past_weeks_metrics_recomputed >= 2
+
+
+def test_normal_week_metrics_are_unchanged_by_the_axis_switch(aws_env, repos) -> None:
+    """通常運用(evaluation_dateとevaluated_atがほぼ一致)では結果が変わらない。"""
+    period_start, _period_end, review_week = _resolve_review_period(_RUN_AT)
+    for i in range(3):
+        day = period_start + dt.timedelta(days=i)
+        at = dt.datetime.combine(day, dt.time(9), tzinfo=dt.UTC)
+        _seed_one(repos, f"n{i}", day, at)
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.total_evaluation_results == 3
+    saved = {m.review_week: m for m in repos["metrics"].list_all()}
+    assert saved[review_week].sample_count == 3
+    assert saved[review_week].success_rate_pct == 100.0
+
+
+def test_week_boundary_is_inclusive_on_both_ends(aws_env, repos) -> None:
+    """period_start / period_end ちょうどは含み、その1日外は含まない。"""
+    period_start, period_end, review_week = _resolve_review_period(_RUN_AT)
+    at = dt.datetime.combine(period_start, dt.time(9), tzinfo=dt.UTC)
+
+    _seed_one(repos, "start", period_start, at)
+    _seed_one(repos, "end", period_end, at)
+    _seed_one(repos, "before", period_start - dt.timedelta(days=1), at)
+    _seed_one(repos, "after", period_end + dt.timedelta(days=1), at)
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.total_evaluation_results == 2
+    saved = {m.review_week: m for m in repos["metrics"].list_all()}
+    assert saved[review_week].sample_count == 2
+
+
+def test_recompute_does_not_fail_when_no_past_metrics_exist(aws_env, repos) -> None:
+    """初回(過去週のmetricsが1件も無い)でも落ちない。"""
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.total_evaluation_results == 0
+    assert outcome.past_weeks_metrics_recomputed == 0
+    assert repos["metrics"].list_all() == []
+
+
+def test_stale_row_from_the_old_axis_is_overwritten_with_zero(aws_env, repos) -> None:
+    """古い軸で作られた行が、新しい軸では0件になる場合も上書きされる。
+
+    放置すると誤った母数の行が残り続けるため、0件として書き直す。
+    """
+    _period_start, _period_end, review_week = _resolve_review_period(_RUN_AT)
+    past_week = module._previous_week_label(review_week)
+    past_monday = module._monday_of_iso_week(past_week)
+
+    from jstock_advisor.domain.entities.improvement import WeeklyReviewMetrics
+
+    repos["metrics"].save(
+        WeeklyReviewMetrics(
+            metrics_id=f"{RecommendationType.BUY.value}|v1|ALL|{past_week}",
+            review_week=past_week,
+            recommendation_type=RecommendationType.BUY,
+            rule_version="v1",
+            segment_key=None,
+            sample_count=99,
+            conclusive_count=99,
+            success_rate_pct=10.0,
+            average_return_pct=-5.0,
+            average_excess_return_pct=-5.0,
+            period_start=past_monday,
+            period_end=past_monday + dt.timedelta(days=6),
+            generated_at=_RUN_AT,
+        )
+    )
+
+    service = _build_service(repos)
+    service.run(_RUN_AT)
+
+    rewritten = repos["metrics"].get(f"{RecommendationType.BUY.value}|v1|ALL|{past_week}")
+    assert rewritten is not None
+    assert rewritten.sample_count == 0
+    assert rewritten.success_rate_pct is None
+
+
+def test_past_weeks_produce_no_candidates_and_no_notification(aws_env, repos) -> None:
+    """過去週の再集計では候補もIssueも通知も作らない(metricsのupsertのみ)。"""
+    period_start, _period_end, review_week = _resolve_review_period(_RUN_AT)
+    past_monday = module._monday_of_iso_week(module._previous_week_label(review_week))
+    catch_up_at = dt.datetime.combine(
+        period_start + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC
+    )
+
+    # 過去週の基準日に、閾値を割る成績の評価だけを置く(対象週は0件)。
+    for i in range(5):
+        _seed_one(repos, f"ok{i}", past_monday, catch_up_at, EvaluationLabel.SUCCESS)
+    for i in range(15):
+        _seed_one(repos, f"ng{i}", past_monday, catch_up_at, EvaluationLabel.PRICE_TOO_HIGH)
+
+    line_client = ConsoleLineClient()
+    service = _build_service(repos, line_client=line_client, issue_creation_enabled=True)
+    outcome = service.run(_RUN_AT)
+
+    # 過去週のmetricsは作られている。
+    saved = {m.review_week: m for m in repos["metrics"].list_all()}
+    assert saved[module._previous_week_label(review_week)].sample_count == 20
+    # しかし候補も通知も作られない。
+    assert outcome.candidates_detected == 0
+    assert repos["candidate"].list_all() == []
+    assert line_client.sent_messages == []
+
+
+def test_past_week_recompute_is_idempotent(aws_env, repos) -> None:
+    """2回続けて実行しても過去週の行は同じ値になる(冪等)。
+
+    metrics_idは決定的、対象週は現在週から機械的に導出され、値は保存済みの
+    EvaluationResultだけから決まる。動くのはgenerated_atのみである。
+    """
+    period_start, _period_end, review_week = _resolve_review_period(_RUN_AT)
+    past_monday = module._monday_of_iso_week(module._previous_week_label(review_week))
+    catch_up_at = dt.datetime.combine(
+        period_start + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC
+    )
+    for i in range(3):
+        _seed_one(repos, f"idem{i}", past_monday + dt.timedelta(days=i), catch_up_at)
+
+    service = _build_service(repos)
+    first = service.run(_RUN_AT)
+    snapshot_first = {
+        (m.metrics_id, m.sample_count, m.success_rate_pct, m.review_week)
+        for m in repos["metrics"].list_all()
+    }
+
+    second = service.run(_RUN_AT)
+    snapshot_second = {
+        (m.metrics_id, m.sample_count, m.success_rate_pct, m.review_week)
+        for m in repos["metrics"].list_all()
+    }
+
+    assert snapshot_first == snapshot_second
+    assert (
+        first.past_weeks_metrics_recomputed_by_week == second.past_weeks_metrics_recomputed_by_week
+    )
+
+
+def test_recomputed_weeks_are_recorded_per_week(aws_env, repos) -> None:
+    """どの週を何行書き直したかが outcome に残る(総数だけにしない)。"""
+    period_start, _period_end, review_week = _resolve_review_period(_RUN_AT)
+    one_week_ago = module._previous_week_label(review_week)
+    past_monday = module._monday_of_iso_week(one_week_ago)
+    catch_up_at = dt.datetime.combine(
+        period_start + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC
+    )
+    _seed_one(repos, "detail", past_monday, catch_up_at)
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.past_weeks_metrics_recomputed_by_week == {one_week_ago: 1}
+    assert outcome.past_weeks_metrics_recomputed == 1
