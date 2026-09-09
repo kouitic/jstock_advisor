@@ -58,9 +58,7 @@ def _service(store_dir: Path) -> StockAnalysisViewService:
             store_dir=store_dir
         ),
         recommendation_repository=RecommendationRepository(store_dir=store_dir),
-        holding_evaluation_record_repository=HoldingEvaluationRecordRepository(
-            store_dir=store_dir
-        ),
+        holding_evaluation_record_repository=HoldingEvaluationRecordRepository(store_dir=store_dir),
         audit_log_repository=AuditLogRepository(store_dir=store_dir),
     )
 
@@ -1592,9 +1590,7 @@ def _save_holding_eval_record(store_dir: Path, **overrides) -> None:
         authoritative_outcome_category="sold_partial",
     )
     defaults.update(overrides)
-    HoldingEvaluationRecordRepository(store_dir=store_dir).save(
-        HoldingEvaluationRecord(**defaults)
-    )
+    HoldingEvaluationRecordRepository(store_dir=store_dir).save(HoldingEvaluationRecord(**defaults))
 
 
 def test_partial_profit_take_shows_quantity_flow_with_ratio_snapshot(tmp_path: Path) -> None:
@@ -2015,9 +2011,7 @@ def test_n1_amounts_under_one_oku_use_the_existing_yen_formatting(tmp_path: Path
 
     小さい金額まで億円へ丸めると、丸めで情報が落ちるだけで読みやすくならない。
     """
-    _audit_with_continuous_decline(
-        tmp_path, current_value="8000000.0", previous_value="12345678.0"
-    )
+    _audit_with_continuous_decline(tmp_path, current_value="8000000.0", previous_value="12345678.0")
 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
@@ -2166,3 +2160,164 @@ def test_n5_upside_line_is_omitted_when_the_ceiling_price_is_unusable(
     assert "含み益率：41.0%" in text
     assert "上値余地" not in text
     assert "価格基準の利確判定に使用していません" in text
+
+
+# --- Issue #222 残件 R-1 / R-2 / R-3（2026-09-09）------------------------
+#
+# 本番での D-1 観測（#222 issuecomment-5594591787 / -5594684716）で、
+# 受入条件の 1 / 2 / 4 / 6 が未達であることが確定したため是正した。
+# いずれも表示層のみで、判定・閾値・保存データは変えていない。
+
+
+def test_r1_buy_side_amounts_are_thousands_separated(tmp_path: Path) -> None:
+    """R-1: BUY 側の金額が桁区切りで出る（4 桁で "1,234円"）。
+
+    従来は判定時株価・積極/標準/打診買付が Decimal をそのまま埋めており、
+    "1234円" や "1234.0円" と出ていた。SELL/HOLD 側は桁区切り済みで、
+    受入条件「BUY 側と SELL/HOLD 側で形式が揃っている」を満たしていなかった。
+    """
+    _seed_batch(tmp_path, "batch-1", "8306")
+    _save_buy_recommendation(
+        tmp_path,
+        price_at_recommendation=Decimal("1234.0"),
+        buy_prices=BuyPriceLevels(
+            entry=PriceWithRationale(price=Decimal("1300"), rationale="x"),
+            standard=PriceWithRationale(price=Decimal("1200"), rationale="x"),
+            strong=PriceWithRationale(price=Decimal("1100"), rationale="x"),
+        ),
+    )
+    _save_eval_record(
+        tmp_path,
+        "batch-1",
+        "8306",
+        purchase_category=PurchaseCategory.BUY_CANDIDATE,
+        final_buy_action=BuyAction.BUY,
+        recommendation_id="rec-1",
+    )
+
+    text = _service(tmp_path).build_buy_analysis_text("8306")
+
+    assert "判定時株価：1,234円" in text
+    assert "1234.0円" not in text
+    assert "積極買付：1,100円以下" in text
+    assert "標準買付：1,200円以下" in text
+    assert "打診買付：1,300円以下" in text
+
+
+def test_r2_continuous_decline_line_states_the_fact_only_once(tmp_path: Path) -> None:
+    """R-2: 継続悪化行で同じ事実が 2 回以上出ない。
+
+    label（〜の継続悪化）+ status_word（該当なし）が既に述べている事実を
+    explanation が言い換えていた。必要期数・実際期数（N-2a の成果）は残す。
+    """
+    from jstock_advisor.domain.entities.enums import PeriodType
+    from jstock_advisor.domain.financial_series import FinancialPeriodValue
+    from jstock_advisor.domain.signals.sell_signal import (
+        _continuous_decline_not_triggered_explanation,
+    )
+
+    periods = [
+        FinancialPeriodValue(
+            period_end=dt.date(2026, 3, 31),
+            value=Decimal("100"),
+            period_type=PeriodType.QUARTER,
+            is_cumulative=False,
+        ),
+        FinancialPeriodValue(
+            period_end=dt.date(2026, 6, 30),
+            value=Decimal("90"),
+            period_type=PeriodType.QUARTER,
+            is_cumulative=False,
+        ),
+    ]
+    explanation = _continuous_decline_not_triggered_explanation("営業利益", periods, 2)
+
+    assert "継続悪化" not in explanation
+    assert "検出されなかった" not in explanation
+    assert "必要は" in explanation
+    assert "実際は" in explanation
+
+
+def test_r3_profit_taking_section_is_shown_for_a_pure_hold(tmp_path: Path) -> None:
+    """R-3(i): 「保有継続」（純粋 HOLD）でも利確判定の節が出る。
+
+    従来は recommendation が無い分岐が early return しており、利確の節へ
+    構造的に到達しなかった。利確せずに持ち続けている保有こそ理由を知りたい。
+    """
+    pt = Recommendation(
+        recommendation_id="rec-r3-pt",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+        profit_protection_current_gain_pct=27.5,
+        not_yet_action_reasons=["想定上限価格を使えないため保留しています"],
+    )
+    RecommendationRepository(store_dir=tmp_path).save(pt)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id=None,
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="hold",
+        profit_taking_ran=True,
+        profit_taking_recommendation_id="rec-r3-pt",
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "保有継続" in text
+    assert "■ 利確判定の状況" in text
+    # R-3(ii): unrealized_profit_loss_pct が無くても実値を出す
+    assert "含み益率：27.5%" in text
+    assert "・想定上限価格を使えないため保留しています" in text
+
+
+def test_r3_profit_taking_absence_is_not_silent_for_a_pure_hold(tmp_path: Path) -> None:
+    """R-3(i): 実行されたのに記録が無い場合、無音にせず復元できない旨を出す。"""
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id=None,
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="hold",
+        profit_taking_ran=True,
+        profit_taking_recommendation_id=None,
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "■ 利確判定の状況" in text
+    assert "復元できません" in text
+
+
+def test_r3_gain_pct_falls_back_and_is_never_silent(tmp_path: Path) -> None:
+    """R-3(ii): 含み益率の読み先の優先順位と、両方無いときの表示。"""
+    from jstock_advisor.services.stock_analysis_view_service import (
+        _profit_taking_status_lines,
+    )
+
+    base = dict(
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+    )
+    # a  買い候補側の項目があればそれを使う
+    a = Recommendation(
+        recommendation_id="a",
+        unrealized_profit_loss_pct=Decimal("11.1"),
+        profit_protection_current_gain_pct=22.2,
+        **base,
+    )
+    assert "含み益率：11.1%" in _profit_taking_status_lines(a)
+    # b  無ければ保有側の項目へフォールバックする
+    b = Recommendation(recommendation_id="b", profit_protection_current_gain_pct=22.2, **base)
+    assert "含み益率：22.2%" in _profit_taking_status_lines(b)
+    # c  両方無くても行を消さない
+    c = Recommendation(recommendation_id="c", **base)
+    assert any("含み益率：不明" in line for line in _profit_taking_status_lines(c))

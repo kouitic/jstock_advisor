@@ -135,11 +135,11 @@ def _buy_price_lines(buy_prices: BuyPriceLevels | None) -> list[str]:
         return []
     lines: list[str] = []
     if buy_prices.strong is not None:
-        lines.append(f"積極買付：{buy_prices.strong.price}円以下")
+        lines.append(f"積極買付：{_yen(buy_prices.strong.price)}以下")
     if buy_prices.standard is not None:
-        lines.append(f"標準買付：{buy_prices.standard.price}円以下")
+        lines.append(f"標準買付：{_yen(buy_prices.standard.price)}以下")
     if buy_prices.entry is not None:
-        lines.append(f"打診買付：{buy_prices.entry.price}円以下")
+        lines.append(f"打診買付：{_yen(buy_prices.entry.price)}以下")
     return lines
 
 
@@ -254,9 +254,7 @@ def _component_fact_clause(field_name: str, facts: dict[str, Any], is_positive: 
             if is_positive
             else _UNDERVALUATION_SIGNAL_LABELS_FALSE
         )
-        matched = [
-            label for name, label in labels.items() if signals.get(name) is is_positive
-        ]
+        matched = [label for name, label in labels.items() if signals.get(name) is is_positive]
         if not matched:
             return None
         return "、".join(matched)
@@ -287,7 +285,7 @@ def _direction_suffix(label: str, is_positive: bool) -> str:
 def _buy_facts_lines(recommendation: Recommendation) -> list[str]:
     """■ 判断根拠となった事実。判定時点に実際に保存された値のみを表示する
     (現在値の再取得・現在configの流用は一切行わない)。"""
-    lines = [f"判定時株価：{recommendation.price_at_recommendation}円"]
+    lines = [f"判定時株価：{_yen(recommendation.price_at_recommendation)}"]
     if recommendation.company_quality_score is not None:
         lines.append(f"企業魅力度スコア：{recommendation.company_quality_score}点")
     if recommendation.dividend_yield_pct_at_recommendation is not None:
@@ -404,14 +402,22 @@ def _buy_reason_text(
     if last.code == "PRICE_TIER":
         final_action = record.final_buy_action
         if final_action == BuyAction.STRONG_BUY and prices and prices.strong:
-            return f"判定時点の現在値{price}円は積極買付価格{prices.strong.price}円以内でした。"
+            return (
+                f"判定時点の現在値{_yen(price)}は"
+                f"積極買付価格{_yen(prices.strong.price)}以内でした。"
+            )
         if final_action == BuyAction.BUY and prices and prices.standard:
-            return f"判定時点の現在値{price}円は標準買付価格{prices.standard.price}円以内でした。"
+            return (
+                f"判定時点の現在値{_yen(price)}は"
+                f"標準買付価格{_yen(prices.standard.price)}以内でした。"
+            )
         if final_action == BuyAction.SMALL_ENTRY and prices and prices.entry:
-            return f"判定時点の現在値{price}円は打診買付価格{prices.entry.price}円以内でした。"
+            return (
+                f"判定時点の現在値{_yen(price)}は打診買付価格{_yen(prices.entry.price)}以内でした。"
+            )
         if final_action == BuyAction.WATCH_FOR_PRICE and prices and prices.entry:
             return (
-                f"判定時点の現在値{price}円は打診買付価格{prices.entry.price}円を"
+                f"判定時点の現在値{_yen(price)}は打診買付価格{_yen(prices.entry.price)}を"
                 "上回っていました。"
             )
         return None
@@ -731,12 +737,16 @@ def _reliability_concern_line(
         # された方式・理由のみを保存したbuy_score_input_facts
         # ["valuation_outlier_exclusions"](新規スナップショット)を参照する。
         exclusions = facts.get("valuation_outlier_exclusions")
-        reasons = [
-            f"{_VALUATION_METHOD_LABELS.get(str(e.get('method')), str(e.get('method')))}: "
-            f"{e.get('message')}"
-            for e in exclusions
-            if isinstance(e, dict) and e.get("method") and e.get("message")
-        ] if isinstance(exclusions, list) else []
+        reasons = (
+            [
+                f"{_VALUATION_METHOD_LABELS.get(str(e.get('method')), str(e.get('method')))}: "
+                f"{e.get('message')}"
+                for e in exclusions
+                if isinstance(e, dict) and e.get("method") and e.get("message")
+            ]
+            if isinstance(exclusions, list)
+            else []
+        )
         if reasons:
             return f"・{label}（{'／'.join(reasons)}）"
         return f"・{label}"
@@ -1020,9 +1030,7 @@ class StockAnalysisViewService:
         batch_records = fetch_latest_normal_batch_records(self._pointer, self._evaluation_records)
         if isinstance(batch_records, LatestBatchStillPropagating):
             return STILL_PROPAGATING_MESSAGE
-        record = (
-            batch_records.records_by_stock_code.get(stock_code) if batch_records else None
-        )
+        record = batch_records.records_by_stock_code.get(stock_code) if batch_records else None
         if record is None:
             return f"{stock_code}の直近の購入判定データが見つかりませんでした。"
 
@@ -1154,6 +1162,32 @@ class StockAnalysisViewService:
                 ]
             else:
                 lines += ["", "■ 理由", _UNRESTORABLE]
+
+            # Issue #222 N-5 の残件(2026-09-09): 「保有継続」(純粋HOLD)は
+            # recommendation が無いためこの return で抜けており、下の
+            # 「■ 利確判定の状況」へ**構造的に到達しなかった**。利確せずに
+            # 持ち続けている保有こそ「なぜ利確しないのか」を知りたい場面であり、
+            # まさにその経路で節が出ていなかった。
+            # ★ 判定は行わない。同じ評価サイクルの利確判定の記録を**表示するだけ**。
+            profit_taking_recommendation = (
+                self._recommendations.get(record.profit_taking_recommendation_id)
+                if record.profit_taking_recommendation_id is not None
+                else None
+            )
+            if profit_taking_recommendation is not None:
+                lines += [
+                    "",
+                    "■ 利確判定の状況",
+                    *_profit_taking_status_lines(profit_taking_recommendation),
+                ]
+            elif record.profit_taking_ran:
+                # 実行はされたが記録が残っていない。無音にすると「利確を見ていない」と
+                # 誤読されるため、見ていることと復元できないことの両方を出す。
+                lines += [
+                    "",
+                    "■ 利確判定の状況",
+                    "利確判定は実行されましたが、判定時点の記録が残っていないため内容を復元できません。",
+                ]
             return "\n".join(lines)
 
         lines += ["", "■ 理由"]
@@ -1204,9 +1238,22 @@ def _profit_taking_status_lines(recommendation: Recommendation) -> list[str]:
     委ねて、上値余地の行そのものを出さない。
     """
     lines: list[str] = []
-    gain_pct = recommendation.unrealized_profit_loss_pct
+    # ★ 含み益率の読み先(Issue #222 N-5 の残件、2026-09-09)
+    #   `unrealized_profit_loss_pct`は**買い候補側(追加購入判断)の経路でのみ**
+    #   設定され(buy_candidates_handler)、保有判定の経路では設定されない。
+    #   そのため保有側ではこの行が**1度も出ていなかった**。保有側の実値は
+    #   `profit_protection_current_gain_pct`にあるためそちらへフォールバックする。
+    #   ★ どちらも無いときは行を消さず「不明」と出す(行が出ないのか値が無いのかを
+    #     読み手が区別できないため)。★ どちらの値も判定には使わない。
+    #   ★ 2つの項目は型が違う(Decimal と float)。表示は :.1f で揃うため
+    #     union のまま扱い、暗黙の変換で桁が変わることを避ける。
+    gain_pct: Decimal | float | None = recommendation.unrealized_profit_loss_pct
+    if gain_pct is None:
+        gain_pct = recommendation.profit_protection_current_gain_pct
     if gain_pct is not None:
         lines.append(f"含み益率：{gain_pct:.1f}%")
+    else:
+        lines.append("含み益率：不明（判定時点の記録に含み益率が残っていません）")
     upside_pct = recommendation.profit_taking_upside_pct
     if upside_pct is not None:
         lines.append(f"想定上限価格までの上値余地：{upside_pct:.1f}%")

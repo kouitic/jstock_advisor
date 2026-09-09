@@ -240,26 +240,31 @@ def _actual_decline_streak(periods: list[FinancialPeriodValue]) -> int | None:
 def _continuous_decline_not_triggered_explanation(
     metric_label: str, periods: list[FinancialPeriodValue], consecutive_quarters: int
 ) -> str:
-    """継続悪化ルールがNOT_TRIGGEREDのときの説明文(Issue #222 N-2a / N-2b)。
+    """継続悪化ルールがNOT_TRIGGEREDのときの説明文(Issue #222 N-2a / N-2b / N-3)。
 
     従来は「継続悪化は検出されなかった」という結論の言い換えのみで、
     「何期連続の悪化が必要で、実際は何期だったか」が分からなかった。
     利用者から見ると「減っているのに、なぜ該当しないのか」が読み取れない。
+
+    ★ 説明文へ「{metric_label}の継続悪化は検出されなかった」を含めない
+      (Issue #222 N-3 の残件、2026-09-09)。表示層は
+      `{label}：{status_word}（{explanation}）` の形で組み立てるため、
+      label(「営業利益の継続悪化」)と status_word(「該当なし」)が既に同じ事実を
+      述べており、explanation が3度目の言い換えになっていた。
+      **必要期数と実際の期数だけ**を残す(これはN-2aで足した新しい情報であり、
+      落とすとN-2aの是正が失われる)。
+
+    ★ metric_labelは引数として残す。呼び出し側の署名を変えないためであり、
+      将来この説明文を単独で(labelなしで)使う経路が出たときに再び必要になる。
     """
     unit = _continuous_decline_unit_label(periods[-(consecutive_quarters + 1) :])
     required = f"{consecutive_quarters}{unit}連続"
     streak = _actual_decline_streak(periods)
     if streak is None:
-        return f"{metric_label}の継続悪化は検出されなかった(必要は{required}の悪化)"
+        return f"必要は{required}の悪化"
     if streak == 0:
-        return (
-            f"{metric_label}の継続悪化は検出されなかった"
-            f"(必要は{required}の悪化。直近は前期比で悪化していない)"
-        )
-    return (
-        f"{metric_label}の継続悪化は検出されなかった"
-        f"(必要は{required}の悪化。実際は{streak}{unit}連続)"
-    )
+        return f"必要は{required}の悪化。直近は前期比で悪化していない"
+    return f"必要は{required}の悪化。実際は{streak}{unit}連続"
 
 
 @dataclass(frozen=True)
@@ -671,13 +676,15 @@ def build_sell_rule_inputs_from_data(
             "比較対象期間のperiod_typeが揃っていない、または期間データが不足しており、"
             "継続悪化を判定できない"
             if income_declined is None
+            # Issue #222(N-2b): TRIGGERED側も評価単位を明示する
+            # (「2四半期連続 = 約半年」と読むと必要な悪化の長さを誤る)。
             else (
-                # Issue #222(N-2b): TRIGGERED側も評価単位を明示する
-                # (「2四半期連続 = 約半年」と読むと必要な悪化の長さを誤る)。
                 f"営業利益が{income_quarters}"
-                f"{_continuous_decline_unit_label(
-                    quarterly_operating_income_periods[-(income_quarters + 1) :]
-                )}連続で悪化している"
+                f"{
+                    _continuous_decline_unit_label(
+                        quarterly_operating_income_periods[-(income_quarters + 1) :]
+                    )
+                }連続で悪化している"
                 if income_declined
                 else _continuous_decline_not_triggered_explanation(
                     "営業利益", quarterly_operating_income_periods, income_quarters
