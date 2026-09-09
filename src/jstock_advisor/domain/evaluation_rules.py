@@ -7,6 +7,31 @@ DATA_ISSUE/INCONCLUSIVEとする(要求仕様12節「推測で補完しない」
 LATE/PROFIT_TAKE_TOO_LATEは、推奨"前"の株価推移(いつ本来売るべきだったか)が
 必要になるため、現時点の実装では自動付与しない(将来、価格履歴の遡り取得に
 対応した際の拡張ポイントとする)。
+
+## RecommendationTypeの分類(Issue #270)
+
+**すべてのRecommendationTypeは、次の4つのいずれか1つに必ず属する。**
+分類漏れは`tests/unit/test_issue_270_evaluation_target_types.py`の網羅テストが
+CIで落として知らせる(本Issueの欠陥は、新しい型が増えたのに
+`_EXIT_TYPES`が追随せず**静かにINCONCLUSIVEになり続けた**ことだった)。
+
+    _ENTRY_TYPES     株価の**上昇**がSUCCESSを意味する。7暦日後の超過リターンで測る
+    _EXIT_TYPES      株価の**下落**がSUCCESSを意味する。同じくlabel判定の対象
+    _EXCLUDED_TYPES  ★ **方向性を持たない「状態」**であり、
+                     株価による成否の定義が業務上そもそも不適切な型。
+                     常にINCONCLUSIVEであることが**仕様として妥当**であり、
+                     週次改善レビューは「評価定義が未整備」として扱わない
+                     (= GitHub Issueを自動起票しない)
+    _EVALUATION_UNDEFINED_TYPES
+                     ★ 評価基準が**まだ決まっていない**型。現状INCONCLUSIVEだが、
+                     それは仕様ではなく**未整備**である。週次改善レビューは
+                     従来どおり「評価定義が未整備」として改善候補を出す
+                     (Issue #25が型ごとに要否を判断し、仕様として妥当と決まった型を
+                      `_EXCLUDED_TYPES`へ移す)
+
+★ `_EXCLUDED_TYPES`と`_EVALUATION_UNDEFINED_TYPES`は**どちらも常にINCONCLUSIVE**
+  であり、`determine_evaluation_label()`の挙動は同一である。違うのは
+  **週次改善レビューがそれを「直すべき未整備」とみなすかどうか**だけである。
 """
 
 from __future__ import annotations
@@ -27,8 +52,63 @@ _EXIT_TYPES = (
     # (Rule Improvement対応2026-08、Issue #9・#11)。
     RecommendationType.WATCH,
     RecommendationType.REVIEW,
+    # Issue #270: 保有判断エンジンの売却系。上と同じ論理で、
+    # 「売却を検討すべき」という警告の正しさは株価下落の発生で測れる。
+    # ★ `SELL_LIKE_RECOMMENDATION_TYPES`(enums.py)で置き換えてはならない。
+    #   あちらは通知側の概念で利確2型とWATCHを含まないため、置換すると
+    #   PARTIAL_PROFIT_TAKE/FULL_PROFIT_TAKE/WATCHが評価対象から**外れ**、
+    #   `_PROFIT_TAKE_TYPES`分岐(PROFIT_TAKE_TOO_EARLYへの唯一の経路)が
+    #   **到達不能**になる。
+    RecommendationType.SELL_CONSIDERATION,
+    RecommendationType.STRONG_SELL_CONSIDERATION,
 )
 _PROFIT_TAKE_TYPES = (RecommendationType.PARTIAL_PROFIT_TAKE, RecommendationType.FULL_PROFIT_TAKE)
+
+#: ★ 評価対象外であることが**仕様として妥当**な型(Issue #270)。
+#: 常にINCONCLUSIVEになるが、それは欠陥ではないため、週次改善レビューは
+#: 「評価定義が未整備」の改善候補としてGitHub Issueを自動起票しない。
+#:
+#: URGENT_HOLDING_REVIEW(ハードゲート発動「重大リスクのため緊急確認」)は、
+#: 名称・意味ともに「**確認**」であって「売却」ではない。債務超過・継続企業の疑義
+#: 等の発動を人間へ知らせる**状態**であり、「7暦日後に株価が下がったか」で
+#: 妥当性を測ること自体が業務上不適切である
+#: (WATCH_BEFORE_EARNINGSについて#10 / #241 / #25が確立した判断と同じ)。
+#:
+#: ★ ここへ型を足すのは**その型の評価定義を「不要」と決めた**ときだけである。
+#:   「まだ決めていない」型は`_EVALUATION_UNDEFINED_TYPES`側であり、
+#:   区別せずにここへ入れると**未整備が仕様として固定**されてしまう。
+_EXCLUDED_TYPES = (RecommendationType.URGENT_HOLDING_REVIEW,)
+
+#: ★ 評価基準が**まだ決まっていない**型(Issue #270 / #25)。
+#: 現状INCONCLUSIVEだが、それは仕様ではなく未整備である。
+#: 週次改善レビューは従来どおり改善候補(EVALUATION_CRITERIA_UNDEFINED)を出す。
+#:
+#: ★ Issue #25が型ごとに「評価すべきか / 仕様として対象外か」を判断し、
+#:   後者と決まった型を`_EXCLUDED_TYPES`へ移す。本Issueでは**移さない**
+#:   (#25の設計判断を先取りしないため)。
+_EVALUATION_UNDEFINED_TYPES = (
+    RecommendationType.WATCH_BEFORE_EARNINGS,
+    RecommendationType.REVIEW_BEFORE_EARNINGS,
+    RecommendationType.REVIEW_AFTER_EARNINGS,
+    RecommendationType.MANUAL_REVIEW_REQUIRED,
+    RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
+    RecommendationType.PARTIAL_RISK_REDUCTION,
+)
+
+
+def is_evaluation_excluded_type(recommendation_type: RecommendationType) -> bool:
+    """評価対象外であることが**仕様として妥当**な型かどうか(Issue #270)。
+
+    週次改善レビューがこれをTrueと判定した型については、
+    「評価定義が未整備」の改善候補をGitHub Issueへ起票しない
+    (毎週同じIssueが立ち続けるノイズを止めるため)。
+
+    ★ `is_performance_evaluated_type()`がFalseを返す型のうち、
+      **「決めた結果、対象外」**なのがこちらで、
+      **「まだ決めていない」**のが`_EVALUATION_UNDEFINED_TYPES`である。
+      determine_evaluation_label()の挙動は両者で同一(INCONCLUSIVE)。
+    """
+    return recommendation_type in _EXCLUDED_TYPES
 
 
 def is_performance_evaluated_type(recommendation_type: RecommendationType) -> bool:
