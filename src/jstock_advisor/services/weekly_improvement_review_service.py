@@ -19,6 +19,7 @@ GitHub未設定の週は一切通知しない。
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -66,6 +67,8 @@ from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.performance_metrics_service import build_metrics_bucket
 from jstock_advisor.services.rule_version_service import RuleVersionService
 
+logger = logging.getLogger(__name__)
+
 _AUDIT_RULE_VERSION = "review-improvement-v1"  # 本サービス自体のロジックバージョン
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
 
@@ -86,6 +89,9 @@ class WeeklyImprovementReviewOutcome:
     # Issue #114 Phase B2: 過去週を作り直した件数。0でも「やらなかった」ではなく
     # 「作り直す対象が無かった」を意味する(無音にしないため監査へも出す)。
     past_weeks_metrics_recomputed: int = 0
+    # 週ラベル -> その週で書き直した行数。総数だけでは「どの週を触ったか」が
+    # 分からず、上書きの影響範囲を後から検証できないため併せて残す。
+    past_weeks_metrics_recomputed_by_week: dict[str, int] = field(default_factory=dict)
 
 
 def _iso_week_label(d: dt.date) -> str:
@@ -216,7 +222,7 @@ class WeeklyImprovementReviewService:
         # 計上されるべきだが、その週の集計は既に走り終わっている。ここで作り直す。
         # ★ 起票・通知の後に置くのは、過去週の再集計が今週の起票判断へ影響しない
         #   ことを実行順序でも明らかにするため(metricsの再集計と自動起票の分離)。
-        past_weeks_recomputed = self._recompute_past_weeks(review_week, now)
+        past_weeks_recomputed, past_weeks_detail = self._recompute_past_weeks(review_week, now)
 
         outcome = WeeklyImprovementReviewOutcome(
             review_week=review_week,
@@ -227,6 +233,7 @@ class WeeklyImprovementReviewService:
             missing_recommendation_ids=missing_ids,
             metrics_saved=metrics_saved,
             past_weeks_metrics_recomputed=past_weeks_recomputed,
+            past_weeks_metrics_recomputed_by_week=past_weeks_detail,
             candidates_detected=len(candidates),
             issue_eligible_candidates=len(issue_eligible),
             github_statuses=github_statuses,
@@ -264,7 +271,9 @@ class WeeklyImprovementReviewService:
                 results.append(evaluation)
         return results
 
-    def _recompute_past_weeks(self, current_review_week: str, now: dt.datetime) -> int:
+    def _recompute_past_weeks(
+        self, current_review_week: str, now: dt.datetime
+    ) -> tuple[int, dict[str, int]]:
         """直近history_weeks_for_comparison週のmetricsを作り直す(Issue #114 Phase B2)。
 
         遅延して処理された評価は、その基準日が属する過去週へ計上されるべきだが、
@@ -279,14 +288,31 @@ class WeeklyImprovementReviewService:
 
         ★ EvaluationResultは1件も書き換えない。`evaluated_at`は「処理した日時」
           として正しく記録されているままにする。
+
+        ★ 冪等である。metrics_idは`{型}|{ルール版}|ALL|{週}`で決定的、対象週は
+          現在週から機械的に導出され、値は保存済みEvaluationResultだけから決まる。
+          同じ入力で何度実行しても同じ行になる(generated_atのみnowで動く)。
+
+        ★ 反映後の**初回**の週次レビューでは、旧軸(evaluated_at)で作られていた
+          直近4週の行が新軸の値へ**1回だけ書き換わる**。これは想定内である。
+          2回目以降は同じ値の上書きとなり、内容は変化しない。
+
+        戻り値は(作り直した行の総数, 週ごとの件数)。週ごとの件数はINFOログと
+        監査へ残す(どの週を触ったかが後から分からないと、上書きの影響範囲を
+        検証できないため)。
         """
         weeks_back = self._review_config.history_weeks_for_comparison
         if weeks_back <= 0:
-            return 0
+            logger.info(
+                "weekly review past-week recompute skipped history_weeks_for_comparison=%d",
+                weeks_back,
+            )
+            return 0, {}
         # 既存行は「古い軸(evaluated_at)で作られた行が、新しい軸では0件になる」
         # 組み合わせを拾うために使う。放置すると誤った母数の行が残り続ける。
         existing = self._metrics_repo.list_all()
         recomputed = 0
+        per_week: dict[str, int] = {}
         label = current_review_week
         for _ in range(weeks_back):
             label = _previous_week_label(label)
@@ -309,7 +335,16 @@ class WeeklyImprovementReviewService:
                     )
                 )
                 recomputed += 1
-        return recomputed
+                per_week[label] = per_week.get(label, 0) + 1
+        # 上書きは「どの週を何行」触ったかまで残す。総数だけでは影響範囲を
+        # 後から検証できない(0件でも「対象が無かった」として記録する)。
+        logger.info(
+            "weekly review past-week recompute weeks_back=%d rows=%d per_week=%s",
+            weeks_back,
+            recomputed,
+            per_week,
+        )
+        return recomputed, per_week
 
     def _join_recommendations(
         self, evaluations: list[EvaluationResult]
@@ -641,6 +676,9 @@ class WeeklyImprovementReviewService:
                 # (再集計を「やらなかった」のか「対象が無かった」のかを
                 #  後から区別できるようにする)。
                 "past_weeks_metrics_recomputed": outcome.past_weeks_metrics_recomputed,
+                "past_weeks_metrics_recomputed_by_week": (
+                    outcome.past_weeks_metrics_recomputed_by_week
+                ),
                 "candidates_detected": outcome.candidates_detected,
                 "issue_eligible_candidates": outcome.issue_eligible_candidates,
                 "github_statuses": outcome.github_statuses,

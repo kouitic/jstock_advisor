@@ -1133,3 +1133,53 @@ def test_past_weeks_produce_no_candidates_and_no_notification(aws_env, repos) ->
     assert outcome.candidates_detected == 0
     assert repos["candidate"].list_all() == []
     assert line_client.sent_messages == []
+
+
+def test_past_week_recompute_is_idempotent(aws_env, repos) -> None:
+    """2回続けて実行しても過去週の行は同じ値になる(冪等)。
+
+    metrics_idは決定的、対象週は現在週から機械的に導出され、値は保存済みの
+    EvaluationResultだけから決まる。動くのはgenerated_atのみである。
+    """
+    period_start, _period_end, review_week = _resolve_review_period(_RUN_AT)
+    past_monday = module._monday_of_iso_week(module._previous_week_label(review_week))
+    catch_up_at = dt.datetime.combine(
+        period_start + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC
+    )
+    for i in range(3):
+        _seed_one(repos, f"idem{i}", past_monday + dt.timedelta(days=i), catch_up_at)
+
+    service = _build_service(repos)
+    first = service.run(_RUN_AT)
+    snapshot_first = {
+        (m.metrics_id, m.sample_count, m.success_rate_pct, m.review_week)
+        for m in repos["metrics"].list_all()
+    }
+
+    second = service.run(_RUN_AT)
+    snapshot_second = {
+        (m.metrics_id, m.sample_count, m.success_rate_pct, m.review_week)
+        for m in repos["metrics"].list_all()
+    }
+
+    assert snapshot_first == snapshot_second
+    assert (
+        first.past_weeks_metrics_recomputed_by_week == second.past_weeks_metrics_recomputed_by_week
+    )
+
+
+def test_recomputed_weeks_are_recorded_per_week(aws_env, repos) -> None:
+    """どの週を何行書き直したかが outcome に残る(総数だけにしない)。"""
+    period_start, _period_end, review_week = _resolve_review_period(_RUN_AT)
+    one_week_ago = module._previous_week_label(review_week)
+    past_monday = module._monday_of_iso_week(one_week_ago)
+    catch_up_at = dt.datetime.combine(
+        period_start + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC
+    )
+    _seed_one(repos, "detail", past_monday, catch_up_at)
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.past_weeks_metrics_recomputed_by_week == {one_week_ago: 1}
+    assert outcome.past_weeks_metrics_recomputed == 1
