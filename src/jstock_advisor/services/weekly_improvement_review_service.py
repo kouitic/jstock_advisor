@@ -1,12 +1,19 @@
 """週次改善レビュー(振り返り機能改修)。
 
 毎週月曜、その日の日次評価(EvaluationFunction)完了後に実行する。前週
-(月曜00:00〜日曜23:59:59 JST)にevaluated_atが確定した7暦日評価
-(EvaluationResult.horizon_calendar_days=7)を集計し、RecommendationType×
+(月曜〜日曜 JST)を**評価基準日(EvaluationResult.evaluation_date)**とする
+7暦日評価(EvaluationResult.horizon_calendar_days=7)を集計し、RecommendationType×
 rule_version単位でWeeklyReviewMetricsを保存、閾値に基づき改善候補
 (ImprovementCandidate)を検出する。十分な証拠がある候補のみGitHub Issueを
 自動起票し、Issue作成に成功した場合のみLINE通知する。改善候補が無い週・
 GitHub未設定の週は一切通知しない。
+
+★ 集計軸は`evaluation_date`である(Issue #114 Phase B2で`evaluated_at`から
+  変更した)。加えて、遅延して処理された評価をその基準日の週へ反映するため、
+  直近history_weeks_for_comparison週のmetricsを毎回作り直す。
+  ★ 過去週では候補検出・GitHub Issue起票・LINE通知を一切行わない
+    (正しいmetricsを後から作れることと、その時点で改善判断してよいことは別問題。
+     catch-up中の起票抑止そのものはPhase B3の担当であり本モジュールにはまだ無い)。
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from jstock_advisor.domain.evaluation_rules import (
     is_performance_evaluated_type,
 )
 from jstock_advisor.domain.improvement_rules import build_candidate_key
-from jstock_advisor.domain.jst import evaluation_date_jst, require_timezone_aware, to_jst
+from jstock_advisor.domain.jst import evaluation_date_jst, require_timezone_aware
 from jstock_advisor.infrastructure.aws import improvement_task_tracker as tracker
 from jstock_advisor.infrastructure.line.client import LineClient
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
@@ -76,6 +83,9 @@ class WeeklyImprovementReviewOutcome:
     issue_eligible_candidates: int = 0
     github_statuses: dict[str, int] = field(default_factory=dict)
     notified_new_issue_count: int = 0
+    # Issue #114 Phase B2: 過去週を作り直した件数。0でも「やらなかった」ではなく
+    # 「作り直す対象が無かった」を意味する(無音にしないため監査へも出す)。
+    past_weeks_metrics_recomputed: int = 0
 
 
 def _iso_week_label(d: dt.date) -> str:
@@ -121,9 +131,7 @@ class WeeklyImprovementReviewService:
         self._evaluations = evaluation_repository or EvaluationResultRepository()
         self._recommendations = recommendation_repository or RecommendationRepository()
         self._metrics_repo = weekly_review_metrics_repository or WeeklyReviewMetricsRepository()
-        self._candidates_repo = (
-            improvement_candidate_repository or ImprovementCandidateRepository()
-        )
+        self._candidates_repo = improvement_candidate_repository or ImprovementCandidateRepository()
         self._rule_versions = rule_version_service or RuleVersionService(RuleVersionRepository())
         self._audit = audit_service or AuditService(AuditLogRepository())
         self._line_client = line_client
@@ -144,7 +152,7 @@ class WeeklyImprovementReviewService:
                 joined_count=0,
             )
 
-        candidate_results = self._collect_this_week_evaluations(period_start, period_end)
+        candidate_results = self._collect_evaluations_for_period(period_start, period_end)
         joined, missing_ids = self._join_recommendations(candidate_results)
 
         groups = self._group_by_type_and_rule_version(joined)
@@ -153,9 +161,7 @@ class WeeklyImprovementReviewService:
         current_rule_version_cache: dict[RecommendationType, str | None] = {}
 
         for (rec_type, rule_version), evaluations in groups.items():
-            history = self._metrics_repo.list_by_type_version_segment(
-                rec_type, rule_version, None
-            )
+            history = self._metrics_repo.list_by_type_version_segment(rec_type, rule_version, None)
             metrics = self._build_metrics(
                 rec_type, rule_version, review_week, period_start, period_end, now, evaluations
             )
@@ -163,9 +169,7 @@ class WeeklyImprovementReviewService:
             metrics_saved += 1
 
             if rec_type not in current_rule_version_cache:
-                current_rule_version_cache[rec_type] = self._resolve_current_rule_version(
-                    rec_type
-                )
+                current_rule_version_cache[rec_type] = self._resolve_current_rule_version(rec_type)
             is_current = self._compare_rule_version(
                 current_rule_version_cache[rec_type], rule_version
             )
@@ -199,9 +203,7 @@ class WeeklyImprovementReviewService:
                 status == ImprovementTaskStatus.CONFIGURATION_ERROR
                 and self._line_client is not None
             ):
-                self._line_client.push_message(
-                    _format_configuration_error_notification(candidate)
-                )
+                self._line_client.push_message(_format_configuration_error_notification(candidate))
             elif (
                 status == ImprovementTaskStatus.ISSUE_CREATION_FAILED
                 and self._line_client is not None
@@ -209,6 +211,12 @@ class WeeklyImprovementReviewService:
                 self._line_client.push_message(
                     _format_issue_creation_failed_notification(candidate)
                 )
+
+        # Issue #114 Phase B2: 遅延して処理された評価はその基準日が属する過去週へ
+        # 計上されるべきだが、その週の集計は既に走り終わっている。ここで作り直す。
+        # ★ 起票・通知の後に置くのは、過去週の再集計が今週の起票判断へ影響しない
+        #   ことを実行順序でも明らかにするため(metricsの再集計と自動起票の分離)。
+        past_weeks_recomputed = self._recompute_past_weeks(review_week, now)
 
         outcome = WeeklyImprovementReviewOutcome(
             review_week=review_week,
@@ -218,6 +226,7 @@ class WeeklyImprovementReviewService:
             joined_count=len(joined),
             missing_recommendation_ids=missing_ids,
             metrics_saved=metrics_saved,
+            past_weeks_metrics_recomputed=past_weeks_recomputed,
             candidates_detected=len(candidates),
             issue_eligible_candidates=len(issue_eligible),
             github_statuses=github_statuses,
@@ -228,9 +237,22 @@ class WeeklyImprovementReviewService:
 
     # --- データ収集・join ---------------------------------------------
 
-    def _collect_this_week_evaluations(
+    def _collect_evaluations_for_period(
         self, period_start: dt.date, period_end: dt.date
     ) -> list[EvaluationResult]:
+        """対象週へ計上する評価を集める(Issue #114 Phase B2)。
+
+        ★ 絞り込みは `evaluation_date`(業務上の基準日)で行う。`evaluated_at`
+          (処理をいつ走らせたか)ではない。
+
+        従来は`evaluated_at`で絞っていたため、定点評価が遅延して後からまとめて
+        処理されると、過去の基準日の評価が「処理した週」へ一括計上され、
+        回復週の母数だけが膨張し、入力ゼロだった各週は遡って再構成できなかった。
+        `evaluation_date`はホライズンから決定論的に定まり、遅れて処理しても
+        評価値そのものはon-time実行と一致するため、こちらが業務上の集計軸である。
+
+        ★ `evaluation_date`は既にJST暦日のdateであり、to_jst()による変換は不要。
+        """
         # config/review_improvement.yamlのevaluation_horizon_daysと一致するものだけを
         # 対象にする(値を変更した場合に、異なるホライズンの評価結果が混在しないため)。
         target_horizon = self._review_config.evaluation_horizon_days
@@ -238,10 +260,56 @@ class WeeklyImprovementReviewService:
         for evaluation in self._evaluations.list_all():
             if evaluation.horizon_calendar_days != target_horizon:
                 continue
-            evaluated_date_jst = to_jst(evaluation.evaluated_at).date()
-            if period_start <= evaluated_date_jst <= period_end:
+            if period_start <= evaluation.evaluation_date <= period_end:
                 results.append(evaluation)
         return results
+
+    def _recompute_past_weeks(self, current_review_week: str, now: dt.datetime) -> int:
+        """直近history_weeks_for_comparison週のmetricsを作り直す(Issue #114 Phase B2)。
+
+        遅延して処理された評価は、その基準日が属する過去週へ計上されるべきだが、
+        その週の集計は既に走り終わっている。`evaluation_date`は決定論的で、
+        遅れて処理しても評価値はon-time実行と一致するため、後から作り直した値は
+        「捏造」ではなく**本来あるべきだった値**である(Phase A 6節の判断)。
+
+        ★ 行うのはmetricsのupsertだけである。過去週では候補検知・GitHub Issue
+          起票・LINE通知を**一切行わない**。正しいmetricsを後から作れることと、
+          その時点で改善判断してよいことは別問題であるため(Phase A 7節)。
+          catch-up中の起票抑止そのものはPhase B3の担当であり本実装には含まない。
+
+        ★ EvaluationResultは1件も書き換えない。`evaluated_at`は「処理した日時」
+          として正しく記録されているままにする。
+        """
+        weeks_back = self._review_config.history_weeks_for_comparison
+        if weeks_back <= 0:
+            return 0
+        # 既存行は「古い軸(evaluated_at)で作られた行が、新しい軸では0件になる」
+        # 組み合わせを拾うために使う。放置すると誤った母数の行が残り続ける。
+        existing = self._metrics_repo.list_all()
+        recomputed = 0
+        label = current_review_week
+        for _ in range(weeks_back):
+            label = _previous_week_label(label)
+            period_start = _monday_of_iso_week(label)
+            period_end = period_start + dt.timedelta(days=6)
+            evaluations = self._collect_evaluations_for_period(period_start, period_end)
+            joined, _missing = self._join_recommendations(evaluations)
+            groups = self._group_by_type_and_rule_version(joined)
+            for stale in existing:
+                if stale.review_week != label:
+                    continue
+                # 0件として上書きする。sample_count=0の行はsuccess_rate等がNoneに
+                # なり_breaches_threshold()はFalseを返すため、誤検知の方向へは
+                # 働かない(連続悪化週のカウントを不当に伸ばさない)。
+                groups.setdefault((stale.recommendation_type, stale.rule_version), [])
+            for (rec_type, rule_version), grouped in groups.items():
+                self._metrics_repo.save(
+                    self._build_metrics(
+                        rec_type, rule_version, label, period_start, period_end, now, grouped
+                    )
+                )
+                recomputed += 1
+        return recomputed
 
     def _join_recommendations(
         self, evaluations: list[EvaluationResult]
@@ -569,6 +637,10 @@ class WeeklyImprovementReviewService:
                 ),
                 "weekly_review_recommendation_missing_ids": outcome.missing_recommendation_ids,
                 "metrics_saved": outcome.metrics_saved,
+                # Issue #114 Phase B2: 過去週を作り直した件数。0でも記録する
+                # (再集計を「やらなかった」のか「対象が無かった」のかを
+                #  後から区別できるようにする)。
+                "past_weeks_metrics_recomputed": outcome.past_weeks_metrics_recomputed,
                 "candidates_detected": outcome.candidates_detected,
                 "issue_eligible_candidates": outcome.issue_eligible_candidates,
                 "github_statuses": outcome.github_statuses,
