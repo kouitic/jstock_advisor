@@ -916,6 +916,18 @@ def _finish_batch(
                 "universe_promoted": batch_item.get("universe_promoted"),
                 "universe_source_date": batch_item.get("universe_source_date"),
                 "universe_cache_age_days": batch_item.get("universe_cache_age_days"),
+                # Issue #69(U-1): JPX400側の同じ観測値と、2ファイルの
+                # source_dateの差(暦日)。dispatch時点でDispatcherが測った値。
+                "universe_jpx400_promoted": batch_item.get("universe_jpx400_promoted"),
+                "universe_jpx400_source_date": batch_item.get(
+                    "universe_jpx400_source_date"
+                ),
+                "universe_jpx400_cache_age_days": batch_item.get(
+                    "universe_jpx400_cache_age_days"
+                ),
+                "universe_vintage_gap_days": batch_item.get(
+                    "universe_vintage_gap_days"
+                ),
                 **metrics,
             },
             now=now,
