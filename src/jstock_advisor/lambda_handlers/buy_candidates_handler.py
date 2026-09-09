@@ -1975,7 +1975,12 @@ def _finalize_batch(
     # 完成しているため、ポインタ更新には影響させない)。
     if latest_batch_pointer_repo is not None and execution_context.mode == ExecutionMode.NORMAL:
         saved_count = len(progress.evaluation_record_saved_stock_codes)
-        if saved_count == progress.total:
+        # Issue #65 F-F8: totalが不明なときはポインタを進めない(fail-closed)。
+        # ★ totalを0とみなすと、saved_count==0の回に条件が成立し、
+        # **不完全なバッチで最新バッチポインタが前進**してしまう。
+        # 進めなかった場合は前回正常batchのポインタが維持され、
+        # 次回の実行で改めて判定される。
+        if progress.total_known and saved_count == progress.total:
             latest_batch_pointer_repo.update_latest_completed(
                 LatestBuyCandidateBatchPointer(
                     latest_completed_batch_id=batch_id,
@@ -1987,10 +1992,10 @@ def _finalize_batch(
             logger.error(
                 "buy_candidates_handler: evaluation record save incomplete, "
                 "latest batch pointer NOT updated (前回正常batchのまま維持) "
-                "batch_id=%s saved=%d total=%d",
+                "batch_id=%s saved=%d total=%s",
                 batch_id,
                 saved_count,
-                progress.total,
+                progress.total if progress.total_known else "UNKNOWN",
             )
 
     if execution_context.is_validation:

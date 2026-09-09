@@ -154,6 +154,13 @@ class BatchProgress:
     # VALIDATION実行で保存された全件を把握し、_finalize_batch完了後に検証用
     # テーブルから削除するため)。NORMAL実行では常に空。デフォルト空リストとし、
     # 既存のBatchProgress()呼び出し(テスト含む)を変更不要にする。
+    # Issue #65 F-F8: batch itemの`total`属性が読めなかった場合にFalseになる。
+    # ★ **totalを0で埋めない**ため(0で埋めると`completed >= total`が常に真となり、
+    # 未処理銘柄を残したまま即座にfinalize可能になる。元の欠陥=KeyErrorより重い)。
+    # 既定Trueのため既存の構築箇所は無改変であり、通常経路の挙動は変わらない。
+    # ★ この値がFalseのとき、totalは**意味を持たない**(0が入っているが「0件」では
+    # なく「不明」である)。totalと数を比べる判定は必ずこのフラグで守ること。
+    total_known: bool = True
     validation_recommendation_ids: list[str] = field(default_factory=list)
     # NEAR BUY/WATCH_BEFORE_EARNINGS用のランキングエントリ(BUY候補裾野拡大
     # 機能2026-08)。ranking_entriesとは別集計とし、finalize側で独立した
@@ -242,6 +249,11 @@ class BatchProgress:
         DynamoDB側で評価する(アプリ側でread→len→writeする非原子的な実装は
         しない)。両者は同じ意味論であることをテストで固定している。
         """
+        # Issue #65 F-F8: totalが不明ならfinalizeしない(fail-closed)。
+        # 「未処理を残してfinalizeする」より「finalizeが遅れる」方が安全側であり、
+        # 遅れた場合は既存のrecovery経路(Issue #57 Phase B2 / reconciler)が拾う。
+        if not self.total_known:
+            return False
         if self.has_completion_ids:
             return len(self.completed_codes) >= self.total
         return self.completed >= self.total
@@ -465,9 +477,17 @@ def record_result(
         ReturnValues="ALL_NEW",
     )
     item = response["Attributes"]
+    # Issue #65 F-F8: 属性が読めない場合に0で埋めない(total_knownで表す)。
+    total_raw = item.get("total")
+    if total_raw is None:
+        logger.warning(
+            "batch progress total is unknown (attribute missing) batch_id=%s",
+            batch_id,
+        )
     return BatchProgress(
-        total=int(item["total"]),
-        completed=int(item["completed"]),
+        total=int(total_raw) if total_raw is not None else 0,
+        total_known=total_raw is not None,
+        completed=int(item.get("completed", 0)),
         category_counts={category: int(item.get(category, 0)) for category in SUMMARY_CATEGORIES},
         data_insufficient_stock_codes=sorted(item.get("data_insufficient_codes", set())),
         failed_stock_codes=sorted(item.get("failed_codes", set())),
@@ -769,8 +789,16 @@ def _build_batch_progress(item: dict[str, Any]) -> BatchProgress:
     finalize-only recoveryのために読み取り専用の復元経路を追加する。
     属性名・型はrecord_result()の組み立てと必ず一致させること。
     """
+    # Issue #65 F-F8: record_result()と同じく、属性欠落を0で埋めない。
+    total_raw = item.get("total")
+    if total_raw is None:
+        logger.warning(
+            "batch progress total is unknown (attribute missing) batch_id=%s",
+            item.get("batch_id"),
+        )
     return BatchProgress(
-        total=int(item["total"]),
+        total=int(total_raw) if total_raw is not None else 0,
+        total_known=total_raw is not None,
         completed=int(item.get("completed", 0)),
         category_counts={category: int(item.get(category, 0)) for category in SUMMARY_CATEGORIES},
         data_insufficient_stock_codes=sorted(item.get("data_insufficient_codes", set())),
