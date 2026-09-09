@@ -75,14 +75,36 @@ coverage_thresholds:
   company_quality_minimum: 0.60
   investment_thesis_minimum: 0.60
   risk_deduction_block_minimum: 0.30
-  risk_deduction_confidence_minimum: 0.70
+  # Issue #269: リスク控除のcoverageは実測すると上限0.6712(=98/146)である。
+  # 0.70のままだと「HIGHになった瞬間に必ずMEDIUMへ降格」となりHIGHが到達不能に
+  # なるため0.60へ下げる。0.60はcoverageの取りうる範囲[0.3836, 0.6712]の中にあり、
+  # 「リスク側の根拠が薄いときはHIGHと呼ばない」というガードとして機能する。
+  risk_deduction_confidence_minimum: 0.60
 
 # overall_coverageからHoldingDecisionConfidenceLevelを決める閾値。
 # 0.6未満はINSUFFICIENT_EVIDENCE(通常の売却通知を禁止)。
+# Issue #269: リスク控除に実coverageを入れたことで、overall coverageの
+# **取りうる最大が 1.0 から 0.8356 へ変わった**(下記)。閾値は「取りうる最大のうち
+# 何割の根拠が揃っているか」を表すため、旧値のままだと全段が正しく機能しない
+# (high 0.95 は到達不能、medium 0.80 は極端に狭い)。
+#
+#   overall = 0.25*company_quality + 0.25*investment_thesis + 0.5*risk_deduction
+#   risk_deductionの上限 = 98/146 = 0.6712  (override未指定の5本48点が常に評価不能)
+#   -> overallの上限 = 0.5 + 0.5*0.6712 = **0.8356**
+#
+# 新値 = 旧値 x 0.8356(到達可能な最大を新しい満点とみなす比例配分)。
+#
+#   段        旧      新      新値の根拠
+#   high    0.95 -> 0.79   0.95 x 0.8356 = 0.7938
+#   medium  0.80 -> 0.67   0.80 x 0.8356 = 0.6685
+#   low     0.60 -> 0.50   0.60 x 0.8356 = 0.5014
+#
+# ★ 意味は変えていない。分母(取りうる最大)が実態へ変わっただけである。
+# ★ 同じ「0.80」という数値が旧と新で別の意味になるため、上の対比表を残す。
 confidence_thresholds:
-  high_minimum: 0.95
-  medium_minimum: 0.80
-  low_minimum: 0.60
+  high_minimum: 0.79
+  medium_minimum: 0.67
+  low_minimum: 0.50
 
 # 再通知抑止条件。
 renotification:
