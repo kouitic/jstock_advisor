@@ -180,6 +180,25 @@ def _compute_universe_signature(eligible_universe_count: int, selected_codes: li
 
 
 _LISTED_ISSUES_SOURCE = "listed_issues"
+_JPX400_SOURCE = "jpx400"
+
+
+def _cache_age_days(source_date: dt.date | None, now: dt.datetime) -> int | None:
+    """source_dateからの経過日数(切り捨て)。source_dateが無い場合はNoneを返す。
+
+    JpxCandidateUniverseProvider._check_staleness()と同じ基準(source_dateの
+    00:00 UTCからの経過)で数える。**0との取り違えを避けるため、算出できない
+    場合は0ではなくNoneを返す**(Issue #69: 「評価できなかった」を「該当しない」と
+    同じ値へ潰さない)。
+
+    なおsource_date(JST公表日)を00:00 UTCとみなす約9時間のバイアスは既知で
+    あり、45日/90日の閾値に対しては無視できる。日付semanticsそのものの是正は
+    Issue #66のScope 16Cへ移した(本Issueでは既存の基準を変更しない)。
+    """
+    if source_date is None:
+        return None
+    elapsed = now - dt.datetime.combine(source_date, dt.time(), tzinfo=dt.UTC)
+    return int(elapsed.total_seconds() // 86400)
 
 
 def _universe_observation(
@@ -196,15 +215,47 @@ def _universe_observation(
     cache_age_daysはJpxCandidateUniverseProvider._check_staleness()と同じ
     基準(source_dateの00:00 UTCからの経過)で数え、切り捨てた日数を入れる
     (BatchRunsTableはDynamoDBのため小数を入れられない)。
+
+    Issue #69(U-1、2026-09-09): JPX400側も同じ形で記録し、2ファイルの
+    source_dateの差(universe_vintage_gap_days)を残す。上場銘柄一覧(45日)と
+    JPX400(90日)はそれぞれ独立した閾値で個別にstaleness判定されるだけで、
+    **相互の整合は一度も検査されていなかった**ため、90日前の構成銘柄リストを
+    当日の上場一覧へ結合しても外から分からなかった(本IssueのF-J12)。
+
+    ★ 差があっても**処理は中断しない**(WARNINGのみ)。取得の一時的な失敗で
+    候補の自動追加そのものが止まることを避けるため(Issue #223が防いだ状態と
+    同じになる)。許容幅を決めてgateするかどうかは別の作業単位(U-3)で扱う。
+
+    ★ universe_vintage_gap_daysは**暦日(source_dateどうしの差)**であり、
+    universe_cache_age_days(現在時刻からの経過日数)とは基準が異なる。
+    どちらか一方でもsource_dateが無ければ**0ではなくNone**を入れる。
     """
     listed = next((o for o in outcomes if o.source == _LISTED_ISSUES_SOURCE), None)
     if listed is None:
         return {}
+    jpx400 = next((o for o in outcomes if o.source == _JPX400_SOURCE), None)
     source_date = listed.effective_source_date
-    cache_age_days: int | None = None
-    if source_date is not None:
-        elapsed = now - dt.datetime.combine(source_date, dt.time(), tzinfo=dt.UTC)
-        cache_age_days = int(elapsed.total_seconds() // 86400)
+    jpx400_source_date = jpx400.effective_source_date if jpx400 is not None else None
+
+    gap_days: int | None = None
+    if source_date is not None and jpx400_source_date is not None:
+        gap_days = abs((source_date - jpx400_source_date).days)
+        if gap_days > 0:
+            logger.warning(
+                "candidate universe vintage mismatch "
+                "listed_source_date=%s jpx400_source_date=%s gap_days=%d (処理は継続する)",
+                source_date,
+                jpx400_source_date,
+                gap_days,
+            )
+    else:
+        logger.warning(
+            "candidate universe vintage gap unavailable "
+            "listed_source_date=%s jpx400_source_date=%s (処理は継続する)",
+            source_date,
+            jpx400_source_date,
+        )
+
     return {
         "universe_source": (
             UNIVERSE_SOURCE_DOWNLOADED if listed.promoted else UNIVERSE_SOURCE_CACHE
@@ -213,7 +264,16 @@ def _universe_observation(
         "universe_source_date": (
             source_date.isoformat() if source_date is not None else None
         ),
-        "universe_cache_age_days": cache_age_days,
+        "universe_cache_age_days": _cache_age_days(source_date, now),
+        # Issue #69(U-1): JPX400側。outcome自体が無い場合もNoneのままとし、
+        # 「取得したが日付が不明」と「そもそも対象外」を値では区別しない
+        # (前者はjpx400_promotedがTrue/Falseで、後者はNoneで判別できる)。
+        "universe_jpx400_promoted": jpx400.promoted if jpx400 is not None else None,
+        "universe_jpx400_source_date": (
+            jpx400_source_date.isoformat() if jpx400_source_date is not None else None
+        ),
+        "universe_jpx400_cache_age_days": _cache_age_days(jpx400_source_date, now),
+        "universe_vintage_gap_days": gap_days,
     }
 
 
