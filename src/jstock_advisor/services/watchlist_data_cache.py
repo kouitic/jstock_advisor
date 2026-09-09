@@ -131,6 +131,56 @@ class CacheStats:
     def record_miss(self) -> None:
         self.miss_count += 1
 
+@dataclass
+class CacheVintage:
+    """Issue #69 U-2: 財務・配当キャッシュの「実際に使った古さ」を銘柄単位で集める。
+
+    `get_or_fetch()`はcache hitの判定でage_hoursを計算しているが、従来はそれを
+    ログへ出すだけで捨てており、呼び出し元は「その銘柄をどれだけ古い財務で
+    評価したか」を知る手段が無かった(本Issueの F-J3。受入条件1が未充足だった
+    直接の理由)。
+
+    ★ **価格系キャッシュは対象外**である。この収集器は
+    `_CachingFinancialDataProvider`/`_CachingDividendDataProvider`(=
+    financial_repo、168時間TTL)にのみ渡し、`_CachingMarketDataProvider`には
+    渡さない。価格系はキャッシュキーにJST暦日を含むため日をまたいだ再利用が
+    構造的に起きず、本Issueの対象ではない(cache_key接頭辞での判別に頼らず、
+    **配線そのもので**混入を防ぐ)。
+
+    ★ **1銘柄ごとにスコープを切る**こと。`CacheStats`はhandler()で1個だけ作られ
+    Lambda呼び出し全体で共有されているが、SQSのBatchSize
+    (`WatchlistSqsBatchSize`)は「安定稼働後に引き上げ可能」なパラメータであり、
+    共有したままでは2銘柄目の値に1銘柄目が混ざる。
+    `ScreeningDataProvider.get_screening_input()`が銘柄単位の入口であるため、
+    そこで`reset()`してから使う。
+
+    ★ 「取り直した」件数には期限切れと初回(キャッシュ不在)の両方を数えるが、
+    どちらも**使った古さには入れない**。再利用が0件のときmax/minは
+    **0ではなくNone**である(「測れなかった」を「0時間だった」と同じ値へ
+    潰さない)。
+    """
+
+    reused_count: int = 0
+    refetched_count: int = 0
+    age_hours_max: float | None = None
+    age_hours_min: float | None = None
+
+    def record_reused(self, age_hours: float) -> None:
+        self.reused_count += 1
+        if self.age_hours_max is None or age_hours > self.age_hours_max:
+            self.age_hours_max = age_hours
+        if self.age_hours_min is None or age_hours < self.age_hours_min:
+            self.age_hours_min = age_hours
+
+    def record_refetched(self) -> None:
+        self.refetched_count += 1
+
+    def reset(self) -> None:
+        self.reused_count = 0
+        self.refetched_count = 0
+        self.age_hours_max = None
+        self.age_hours_min = None
+
 
 class CacheEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -180,6 +230,7 @@ def get_or_fetch[T](
     classify_quality: Callable[[T], CacheQualityStatus],
     log_label: str,
     stats: CacheStats | None = None,
+    vintage: CacheVintage | None = None,
 ) -> T:
     """キャッシュヒット時はCloudWatch Logsへ`cache hit`、ミス/期限切れ時は
     `cache miss`を出力する(運用ハードニング4節、quality_statusも出力する)。
@@ -210,6 +261,9 @@ def get_or_fetch[T](
             )
             if stats is not None:
                 stats.record_hit()
+            if vintage is not None:
+                # Issue #69 U-2: 実際にこの値を使ったので、その古さを記録する。
+                vintage.record_reused(age_hours)
             return type_adapter.validate_json(cached.payload_json)
         logger.info(
             "watchlist cache miss(expired) %s cache_key=%s age_hours=%.2f quality_status=%s",
@@ -220,10 +274,16 @@ def get_or_fetch[T](
         )
         if stats is not None:
             stats.record_miss()
+        if vintage is not None:
+            # Issue #69 U-2: 捨てた古さは「使った古さ」に入れない(取り直したため)。
+            vintage.record_refetched()
     else:
         logger.info("watchlist cache miss(absent) %s cache_key=%s", log_label, cache_key)
         if stats is not None:
             stats.record_miss()
+        if vintage is not None:
+            # Issue #69 U-2: 初回はageが存在しない。0を作らない。
+            vintage.record_refetched()
 
     value = fetch_fn()
     quality_status = classify_quality(value)
@@ -327,6 +387,8 @@ class _CachingFinancialDataProvider:
     negative_ttl_minutes: int
     now: dt.datetime
     stats: CacheStats | None = None
+    # Issue #69 U-2: 財務系のみvintageを集める(価格系には渡さない)。
+    vintage: CacheVintage | None = None
 
     def get_financial_summary(self, stock_code: str) -> FinancialSummary | None:
         return get_or_fetch(
@@ -340,6 +402,7 @@ class _CachingFinancialDataProvider:
             _classify_financial_summary,
             "get_financial_summary",
             stats=self.stats,
+            vintage=self.vintage,
         )
 
     def get_historical_valuation(self, stock_code: str, years: int) -> list[HistoricalValuation]:
@@ -354,6 +417,7 @@ class _CachingFinancialDataProvider:
             _classify_historical_valuation_list,
             "get_historical_valuation",
             stats=self.stats,
+            vintage=self.vintage,
         )
 
     def get_cashflow_decomposition(self, stock_code: str) -> CashflowDecomposition | None:
@@ -368,6 +432,7 @@ class _CachingFinancialDataProvider:
             _classify_optional,
             "get_cashflow_decomposition",
             stats=self.stats,
+            vintage=self.vintage,
         )
 
     def get_earnings_surprise_history(self, stock_code: str) -> list[EarningsSurpriseRecord]:
@@ -385,6 +450,7 @@ class _CachingFinancialDataProvider:
             _classify_earnings_surprise_record_list,
             "get_earnings_surprise_history",
             stats=self.stats,
+            vintage=self.vintage,
         )
 
 
@@ -396,6 +462,8 @@ class _CachingDividendDataProvider:
     negative_ttl_minutes: int
     now: dt.datetime
     stats: CacheStats | None = None
+    # Issue #69 U-2: 財務系のみvintageを集める(価格系には渡さない)。
+    vintage: CacheVintage | None = None
 
     def get_dividend_info(
         self, stock_code: str, fiscal_year_end_month: int | None = None
@@ -415,6 +483,7 @@ class _CachingDividendDataProvider:
             _classify_optional,
             "get_dividend_info",
             stats=self.stats,
+            vintage=self.vintage,
         )
 
 
@@ -427,6 +496,7 @@ def build_cached_provider_bundle(
     config: AppConfig,
     now: dt.datetime,
     stats: CacheStats | None = None,
+    vintage: CacheVintage | None = None,
 ) -> ProviderBundle:
     """ウォッチリストの4つのLambdaハンドラのみで使う。`shareholder_benefit`
     (ローカル手動登録データ)・`disclosure`/`corporate_action`(既にEDINET専用
@@ -435,6 +505,11 @@ def build_cached_provider_bundle(
     `stats`(計画Part B-1、Before/After比較用)を渡すと、このbundle経由の
     全get_or_fetch()呼び出しのhit/missを集計できる。省略時は計測を行わない
     (既存呼び出し元の挙動は変えない)。
+
+    Issue #69 U-2: `vintage`を渡すと、財務・配当キャッシュについて「実際に使った
+    古さ」を集計できる。★ **価格系(`market_data`)には渡さない**。価格系は
+    キャッシュキーにJST暦日を含むため日をまたいだ再利用が構造的に起きず、
+    本Issueの対象外だからである(混入を配線で防ぐ)。省略時は収集しない。
     """
     cache_config = _cache_config(config)
     # Issue #63 PR-3a: cacheのdecode失敗は1件skipしても次回取得で置き換わるため、
@@ -473,6 +548,7 @@ def build_cached_provider_bundle(
             cache_config.negative_cache_ttl_minutes,
             now,
             stats=stats,
+            vintage=vintage,
         ),
         dividend_data=_CachingDividendDataProvider(
             base_bundle.dividend_data,
@@ -481,6 +557,7 @@ def build_cached_provider_bundle(
             cache_config.negative_cache_ttl_minutes,
             now,
             stats=stats,
+            vintage=vintage,
         ),
         shareholder_benefit=base_bundle.shareholder_benefit,
         disclosure=base_bundle.disclosure,
