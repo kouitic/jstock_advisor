@@ -2454,31 +2454,83 @@ def mark_watchlist_batch_completed(
     )
 
 
+# Issue #65 F-E10(3): finalize失敗の記録を許容する遷移元の集合。
+# finalize処理中の4段階に加えて、`mark_watchlist_batch_completed()`が書き込みうる
+# 終端3状態も含める。後者を含めるのは、完了遷移の後に残る`_maybe_commit_rotation`/
+# `maybe_trigger_maintenance`が失敗した場合に、現状どおりFINALIZE_FAILEDへ遷移して
+# Reconcilerが再試行できるようにするため(本修正の目的は同時実行による二重計上の
+# 防止であり、完了後の失敗を無音にすることではない)。
+# 終端3状態は`resolve_watchlist_batch_completion_status()`が返しうる全てであり、
+# 取りこぼすと「正当な試行が計上されず再試行上限が発火しない」という、二重計上より
+# 重い逆方向の失敗になる(集合の網羅性はtest_issue_65_fe10_3で機械的に固定する)。
+_FINALIZE_FAILURE_RECORDABLE_STATUSES = (
+    *_FINALIZE_IN_PROGRESS_STATUSES,
+    WatchlistBatchStatus.COMPLETED,
+    WatchlistBatchStatus.COMPLETED_WITH_NOTIFICATION_FAILURE,
+    WatchlistBatchStatus.ABORTED,
+)
+
+
 def mark_watchlist_finalize_failed(
     batch_id: str, now: dt.datetime, error_message: str | None
 ) -> None:
     """FINALIZING→FINALIZE_FAILEDへ遷移し、finalize_attempt_countを+1する
     (運用ハードニング5節: Reconcilerの自動再試行回数の上限判定に使う)。
+
+    Issue #65 F-E10(3): 加算は`_FINALIZE_FAILURE_RECORDABLE_STATUSES`のいずれか
+    からの遷移である場合に限る。2つのfinalizerが同時に走ると同じ失敗が2回記録され、
+    再試行予算が倍速で減って本来の半分の回数で打ち切られるため
+    (= 復旧できたはずのバッチが復旧しない)。既にFINALIZE_FAILEDの項目へ2人目が
+    重ねて記録することが実害であり、条件はそれを弾く。
+
+    ★ 条件とADDは**同一のUpdateItem**に置く(別writeへ分けると「加算したのに遷移
+      していない」中間状態が生まれる。`try_acquire_completion_finalize()`
+      = Issue #57 B2と同じ理由)。
+    ★ 条件不成立でも**例外を送出しない**。送出すると「後片付けの失敗でfinalize全体が
+      落ちる」という別の欠陥になる(呼び出し側4箇所はいずれも記録後に元の例外を
+      再送出する形で、本関数の失敗を前提にしていない)。
+    ★ 既知の限界(Issue #213 (g)): `mark_watchlist_batch_completed()`が無条件の
+      ため、FINALIZE_FAILED→COMPLETEDへ「蘇生」してから再び失敗する経路では
+      二重計上が残る。根は完了遷移が無条件であることで、その条件付けは別の設計
+      判断を要する。
     """
     now_iso = now.isoformat()
     truncated = (
         (error_message or "")[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH] if error_message else None
     )
-    _table().update_item(
-        Key={"batch_id": batch_id},
-        UpdateExpression=(
-            "SET #status = :status, finalize_failed_at = :now, "
-            "finalize_error_message = :error_message, updated_at = :now "
-            "ADD finalize_attempt_count :one"
-        ),
-        ExpressionAttributeNames={"#status": "status"},
-        ExpressionAttributeValues={
-            ":status": WatchlistBatchStatus.FINALIZE_FAILED.value,
-            ":now": now_iso,
-            ":error_message": truncated,
-            ":one": 1,
-        },
-    )
+    status_values = {
+        f":s{i}": s.value for i, s in enumerate(_FINALIZE_FAILURE_RECORDABLE_STATUSES)
+    }
+    status_condition = " OR ".join(f"#status = {placeholder}" for placeholder in status_values)
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET #status = :status, finalize_failed_at = :now, "
+                "finalize_error_message = :error_message, updated_at = :now "
+                "ADD finalize_attempt_count :one"
+            ),
+            ConditionExpression=status_condition,
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":status": WatchlistBatchStatus.FINALIZE_FAILED.value,
+                ":now": now_iso,
+                ":error_message": truncated,
+                ":one": 1,
+                **status_values,
+            },
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] not in _TRANSACTION_CONDITION_FAILURE_CODES:
+            raise
+        # 失敗の可視性: 記録できなかったことを残す(平常時は出ない。出た場合は
+        # 同時実行が実在した証拠、または項目が存在しない異常のいずれか)。
+        # Issue #135: batch_id以外の可変文字列(例外本文等)はログへ出さない。
+        logger.warning(
+            "watchlist finalize failure not recorded (status was not one of %s) batch_id=%s",
+            [s.value for s in _FINALIZE_FAILURE_RECORDABLE_STATUSES],
+            batch_id,
+        )
 
 
 def get_watchlist_batch(batch_id: str) -> dict[str, Any] | None:

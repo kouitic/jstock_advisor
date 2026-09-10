@@ -572,10 +572,11 @@ def test_mark_watchlist_batch_completed_composite_execution_result_is_aborted(dy
 
 
 def test_try_retry_finalize_succeeds_from_finalize_failed(dynamo) -> None:
-    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
-    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, _NOW)
-    batch_tracker.mark_dispatch_completed("batch-1", _NOW)
-    batch_tracker.try_finalize_if_ready("batch-1", _NOW)
+    # Issue #65 F-E10(3): mark_watchlist_finalize_failedがfinalize中の状態からの
+    # 遷移に限定されたため、実運用どおりFINALIZE_PREPARINGまで進めてから失敗させる
+    # (従来はtry_finalize_if_readyが条件不成立でRUNNINGのままでも、無条件の加算に
+    # よってFINALIZE_FAILEDへ落ちていた)。結論は変えていない。
+    _drive_batch_to_finalize_preparing(_NOW)
     batch_tracker.mark_watchlist_finalize_failed("batch-1", _NOW, "boom")
 
     ok = batch_tracker.try_retry_finalize("batch-1")
@@ -602,10 +603,9 @@ def test_try_retry_finalize_fails_conditional_check_when_not_finalize_failed(dyn
 def test_mark_watchlist_finalize_failed_increments_attempt_count(dynamo) -> None:
     """Reconcilerの再試行回数上限判定に使うfinalize_attempt_countが、
     finalize失敗のたびに加算されること。"""
-    batch_tracker.try_acquire_dispatch_lease("batch-1", "dispatcher", _NOW, 360, 72)
-    batch_tracker.set_watchlist_batch_total("batch-1", 1, 72, _NOW)
-    batch_tracker.mark_dispatch_completed("batch-1", _NOW)
-    batch_tracker.try_finalize_if_ready("batch-1", _NOW)
+    # Issue #65 F-E10(3): 到達手順のみ実運用に合わせた(上のテストと同じ理由)。
+    # 期待値(1回の失敗につき+1)は変えていない。
+    _drive_batch_to_finalize_preparing(_NOW)
 
     batch_tracker.mark_watchlist_finalize_failed("batch-1", _NOW, "boom-1")
     item = batch_tracker.get_watchlist_batch("batch-1")
