@@ -37,16 +37,23 @@ candidate_universe:
     - "プライム（内国株式）"
     - "スタンダード（内国株式）"
   # キャッシュの最大許容経過時間(8節)。source_date基準。超過すると処理中断。
-  # Issue #223(PR-1a、2026-09-07): listed_issuesを1080(45日)から2160(90日)へ
-  # **暫定的に**延長した。JPXが2026-09-03にdata_j.xls→data_j.xlsxへ差し替えた
-  # ため上記jpx_listed_issues_urlが404となり、2026-09-03公開分を最後に
-  # キャッシュが更新されていない。1080hのままだと2026-09-15の実行で
-  # staleness判定を超え、自動追加自体が停止する。
-  # ★ 戻し条件: PR-2(.xlsx対応)がProduction反映され、listed_issuesの
-  #   取得成功(promoted=true)が実際に観測できた時点で1080へ戻す。
-  #   延長したまま放置すると「最大90日間、上場廃止銘柄が候補に残り続ける」
-  #   状態を許すことになるため、恒久的な値ではない。
-  listed_issues_max_stale_hours: 2160  # 90日(暫定。Issue #223 PR-2反映後に1080へ戻す)
+  # Issue #223(2026-09-10): ★ **1080(45日)へ戻し済み**。
+  #
+  # 経緯: PR-1a(2026-09-07)でJPXが2026-09-03にdata_j.xls→data_j.xlsxへ差し替えた
+  # ことにより取得が404となり、キャッシュが更新されなくなったため、1080hのままだと
+  # 2026-09-15の実行でstaleness判定を超えて自動追加自体が停止する状況にあった。
+  # そこで**暫定的に**2160(90日)へ延長していた。
+  #
+  # 戻した根拠: PR-2(.xlsx対応)がW3としてProductionへ反映され(2026-09-09)、
+  # 2026-09-10 06:00 JSTの候補取得で ★ **promoted=true を実測**した
+  # (universe_source=DOWNLOADED / universe_source_date=2026-08-31 /
+  #  universe_cache_age_days=9 / universe_count=3104)。
+  # 観測記録 = Issue #236 issuecomment-5618046263。
+  # 観測時点のcache_ageは9日であり、1080h(45日)に対して十分な余裕がある。
+  #
+  # ★ 2160のまま放置すると「最大90日間、上場廃止銘柄が候補に残り続ける」状態を
+  #   許すことになる。恒久的な値ではないため戻した。
+  listed_issues_max_stale_hours: 1080  # 45日
   jpx400_max_stale_hours: 2160  # 90日
 
 # 2026-08-16: lightweight本番切替後、本番300銘柄実測でdata_fetch p50が
