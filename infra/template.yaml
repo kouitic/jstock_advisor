@@ -1559,6 +1559,16 @@ Resources:
                 - !Sub "${AuditLogTable.Arn}/index/*"
                 - !GetAtt RecommendationsTable.Arn
                 - !Sub "${RecommendationsTable.Arn}/index/*"
+                # Issue #310: VALIDATION実行では RecommendationRepository.
+                # for_execution_context() が検証用テーブルを指すが、本FunctionのIAMに
+                # だけ含まれておらず、_previous_recommendation()のGetItemが
+                # AccessDeniedになっていた(BuyCandidatesFunction側には元からある)。
+                # 粒度をCRUDとするのは、同じrepositoryインスタンスに対して
+                # holdings_watchlist_handler.pyがsave()を4箇所で呼ぶため
+                # (Readのみだと今度はsave()がAccessDeniedになる。CLAUDE.md 3節:
+                # メソッド名だけを根拠にread-onlyと判断しない)。
+                - !GetAtt ValidationRecommendationsTable.Arn
+                - !Sub "${ValidationRecommendationsTable.Arn}/index/*"
                 - !GetAtt NotificationLogTable.Arn
                 - !Sub "${NotificationLogTable.Arn}/index/*"
                 # LINE通知dedupの原子化(Issue #17): 送信決定claim

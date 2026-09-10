@@ -270,3 +270,95 @@ def test_v2_table_logical_ids_exist_as_dynamodb_resources(template: dict[str, An
     }
     all_v2_tables = {t for tables in _V2_OWNER_MODULE_TO_TABLES.values() for t in tables}
     assert all_v2_tables <= dynamodb_resources
+
+
+# --- Issue #310: 検証モード(VALIDATION)用テーブルの IAM 網羅 -----------------------------
+# HoldingsWatchlistFunction の IAM に ValidationRecommendationsTable が無く、
+# VALIDATION 実行の `_previous_recommendation()` が GetItem で AccessDenied になっていた
+# (BuyCandidatesFunction 側には元から入っており、片方だけの付け忘れだった)。
+#
+# ★ 上の V2 監査と同じ「import グラフから必要なテーブルを導出する」方式は
+#   **ここでは使えない**。`RecommendationRepository()` と
+#   `RecommendationRepository.for_execution_context(ctx)` を import では区別できず、
+#   前者しか使わない DisclosureCheckFunction にも検証用テーブルを要求してしまい、
+#   ★ **過剰付与を強制する**誤りになるためである(実測: disclosure_check_handler.py は
+#   `recommendation_repository=RecommendationRepository()` を明示注入している)。
+# -> したがって **Function 名を明示した期待値表**で書く(推測させない)。
+
+# infra/template.yaml が定義する検証モード用テーブルの論理 ID(全件)。
+_VALIDATION_TABLE_IDS = frozenset(
+    {
+        "ValidationRecommendationsTable",
+        "ValidationWatchStateTable",
+        "ValidationHoldingsSnapshotTable",
+        "ValidationHoldingsSnapshotTableV2",
+        "ValidationDailyNotificationPriorityTable",
+    }
+)
+
+# VALIDATION を受け付ける Function ごとの、付与されているべき検証用テーブル。
+# ★ 実測に基づく(JIRO-20260911-001 の同型 sweep)。
+#   BuyCandidates / HoldingsWatchlist  … handler が
+#       `RecommendationRepository.for_execution_context()` を呼び、
+#       service 層が WatchState / HoldingsSnapshot / DailyNotificationPriority の
+#       `for_execution_context()` を呼ぶ -> 5 件すべて必要。
+#   DisclosureCheck                     … `RecommendationRepository()` を明示注入し、
+#       `notify_disclosure_risk()` が触る repo は NotificationLogRepository だけ
+#       (実行モード非依存) -> ★ **0 件が正しい**。付与すると過剰付与になる。
+# ★ watchlist 系 handler は Issue #286 で VALIDATION を**明示的に拒否**するため対象外。
+_VALIDATION_EXPECTED_TABLES: dict[str, frozenset[str]] = {
+    "BuyCandidatesFunction": _VALIDATION_TABLE_IDS,
+    "HoldingsWatchlistFunction": _VALIDATION_TABLE_IDS,
+    "DisclosureCheckFunction": frozenset(),
+}
+
+
+@pytest.mark.parametrize("function_logical_id", sorted(_VALIDATION_EXPECTED_TABLES))
+def test_validation_tables_are_granted_exactly_as_expected(
+    template: dict[str, Any], function_logical_id: str
+) -> None:
+    """★ 過不足の**両方**を固定する。
+
+    不足すると VALIDATION が AccessDenied で落ち(Issue #310 の欠陥そのもの)、
+    過剰だと最小権限に反する。片方だけ見ても検出できない。
+    """
+    granted = _function_granted_table_ids(template, function_logical_id) & _VALIDATION_TABLE_IDS
+    expected = _VALIDATION_EXPECTED_TABLES[function_logical_id]
+
+    missing = expected - granted
+    assert not missing, (
+        f"{function_logical_id} に検証モード用テーブル{sorted(missing)}への IAM 権限が無い"
+        "(VALIDATION 実行が AccessDenied で失敗する。Issue #310)"
+    )
+    unnecessary = granted - expected
+    assert not unnecessary, (
+        f"{function_logical_id} は参照しない検証モード用テーブル{sorted(unnecessary)}への"
+        "IAM 権限を持っている(最小権限の原則に反する、過剰付与)"
+    )
+
+
+def test_validation_table_logical_ids_exist_as_dynamodb_resources(
+    template: dict[str, Any],
+) -> None:
+    """_VALIDATION_TABLE_IDS が実在の DynamoDB テーブル論理 ID であること。
+
+    ★ あわせて「template 側に検証用テーブルが増えたのに、この表を更新し忘れる」
+      ドリフトも検出する(論理 ID が `Validation` で始まる DynamoDB リソースの集合と
+      一致することを見る)。
+    """
+    dynamodb_resources = {
+        logical_id
+        for logical_id, resource in template["Resources"].items()
+        if resource.get("Type") == "AWS::DynamoDB::Table"
+    }
+    assert dynamodb_resources >= _VALIDATION_TABLE_IDS
+
+    declared_validation_tables = {
+        logical_id for logical_id in dynamodb_resources if logical_id.startswith("Validation")
+    }
+    assert declared_validation_tables == set(_VALIDATION_TABLE_IDS), (
+        "検証モード用テーブルの一覧が template と食い違っている"
+        f"(template={sorted(declared_validation_tables)} / "
+        f"期待値表={sorted(_VALIDATION_TABLE_IDS)})。"
+        "テーブルを増やしたなら _VALIDATION_EXPECTED_TABLES も見直すこと"
+    )
