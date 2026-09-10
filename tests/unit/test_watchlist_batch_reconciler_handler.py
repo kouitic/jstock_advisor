@@ -282,7 +282,14 @@ def test_reconciler_retries_finalize_failed_under_attempt_cap(
 
 def test_reconciler_does_not_retry_finalize_failed_once_attempts_exhausted(dynamo) -> None:
     _drive_batch_to_finalizing("batch-1", _NOW)
+    # Issue #65 F-E10(3): 加算がfinalize中の状態からの遷移に限定されたため、
+    # 実運用と同じ往復(FINALIZE_FAILED -> try_retry_finalize -> FINALIZE_PREPARING
+    # -> 失敗)で3回試行する。従来は遷移を挟まず3連打していたが、それは本Issueが
+    # 防ごうとしている「同じ失敗が重ねて記録される」形そのものだった。
+    # 期待値(上限3で打ち切る)は変えていない。
     for attempt in range(3):
+        if attempt:
+            assert batch_tracker.try_retry_finalize("batch-1") is True
         batch_tracker.mark_watchlist_finalize_failed("batch-1", _NOW, f"failure-{attempt}")
     batch = batch_tracker.get_watchlist_batch("batch-1")
     assert batch is not None
