@@ -2261,23 +2261,63 @@ def record_notification_failed(batch_id: str, now: dt.datetime, error_message: s
     この例外を外へ伝播させない設計のため)。notification_failure_countを+1し、
     更新後の値を返す(呼び出し側がmax_notification_retry_attempts以上かを
     判定するために使う)。
+
+    Issue #65 F-E10(2): **ADDと同一UpdateItemでConditionExpressionを評価する**。
+    従来この加算は無条件であり、2つのfinalizerが同時に走ると通知retry予算が
+    倍速で減って、本来の半分の試行回数でCOMPLETED_WITH_NOTIFICATION_FAILUREへ
+    到達しえた(= 通知が届かないまま打ち切られる)。
+    ★ 条件はstatus == NOTIFICATION_PENDING。PENDINGは
+    mark_notification_pending()が`#status = :write_completed`の条件付きで
+    一度だけ立てるため、2つ目のfinalizerは弾かれて**予算を消費しない**。
+    前後の遷移(PENDINGを立てる / try_retry_notification()でFAILEDから戻す)は
+    既に条件付きであり、本関数だけが無条件で非対称だった。
+    ★ 別writeへ分けない理由はtry_acquire_completion_finalize()(Issue #57 B2)と
+    同じ(加算と条件が別writeだと、加算したのに遷移していない/遷移したのに
+    加算されていない中間状態が生まれ、予算管理が破綻する)。
+
+    ★ 条件不成立でも**例外を送出しない**。ここで送出すると「通知に失敗した
+    だけでfinalize全体も落ちる」という別の欠陥になる(呼び出し側は戻り値だけで
+    予算を判定しており、例外を前提にしていない)。加算せずに**現在の
+    notification_failure_countを読んで返す**。他の主体が既に記録済みであれば
+    予算はその値のままであり、それが呼び出し側にとって正しい判定材料である。
+    属性が無い場合は0(まだ1度も失敗していない)を返す。
     """
     truncated = error_message[:_MAX_NOTIFICATION_ERROR_MESSAGE_LENGTH]
-    response = _table().update_item(
-        Key={"batch_id": batch_id},
-        UpdateExpression=(
-            "SET #status = :failed, last_notification_error = :error, updated_at = :now "
-            "ADD notification_failure_count :one"
-        ),
-        ExpressionAttributeNames={"#status": "status"},
-        ExpressionAttributeValues={
-            ":failed": WatchlistBatchStatus.NOTIFICATION_FAILED.value,
-            ":error": truncated,
-            ":now": now.isoformat(),
-            ":one": 1,
-        },
-        ReturnValues="UPDATED_NEW",
-    )
+    try:
+        response = _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET #status = :failed, last_notification_error = :error, updated_at = :now "
+                "ADD notification_failure_count :one"
+            ),
+            # Issue #65 F-E10(2): 加算と同一UpdateItemで評価する(上記docstring)。
+            ConditionExpression="#status = :pending",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":failed": WatchlistBatchStatus.NOTIFICATION_FAILED.value,
+                ":pending": WatchlistBatchStatus.NOTIFICATION_PENDING.value,
+                ":error": truncated,
+                ":now": now.isoformat(),
+                ":one": 1,
+            },
+            ReturnValues="UPDATED_NEW",
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] not in _TRANSACTION_CONDITION_FAILURE_CODES:
+            raise
+        # 他の主体が既にNOTIFICATION_PENDINGから遷移させている(競合)。
+        # ★ 予算は消費せず、現在値をそのまま返す。黙って進めないようWARNINGを残す。
+        current = get_watchlist_batch(batch_id) or {}
+        failure_count = int(current.get("notification_failure_count", 0))
+        logger.warning(
+            "watchlist notification failure not recorded (status was not %s) "
+            "batch_id=%s current_status=%s notification_failure_count=%d",
+            WatchlistBatchStatus.NOTIFICATION_PENDING.value,
+            batch_id,
+            current.get("status"),
+            failure_count,
+        )
+        return failure_count
     return int(response["Attributes"]["notification_failure_count"])
 
 
