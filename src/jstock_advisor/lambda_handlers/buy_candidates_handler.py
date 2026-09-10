@@ -2115,7 +2115,17 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             evaluation_record_repo,
             latest_batch_pointer_repo,
         )
-        logger.info("buy_candidates_handler single candidate done: %s", result)
+        # Issue #309 同型 sweep: ここは現時点では stock_code と真偽値しか持たないが、
+        # dict を丸ごと出す形そのものが、後からキーが 1 つ増えただけで漏れる。
+        # ★ 「いま PII が無いから良い」とはしない。形を揃えて塞ぐ。
+        logger.info(
+            "buy_candidates_handler single candidate done stock_code=%s "
+            "recommended=%s notified=%s failed=%s",
+            result.get("stock_code"),
+            result.get("recommended"),
+            result.get("notified"),
+            result.get("failed"),
+        )
         return result
 
     # 通常のスケジュール起動(ディスパッチのみ行い、銘柄ごとの実処理は非同期の
