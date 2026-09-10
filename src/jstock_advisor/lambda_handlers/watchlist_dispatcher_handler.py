@@ -50,6 +50,7 @@ import boto3
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    EXECUTION_RESULT_NORMAL,
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
     UNIVERSE_SOURCE_CACHE,
     UNIVERSE_SOURCE_DOWNLOADED,
@@ -60,6 +61,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     mark_candidate_dispatched,
     mark_dispatch_completed,
     mark_dispatch_failed,
+    mark_watchlist_batch_completed,
     query_all_candidate_progress,
     record_dispatch_send_failure,
     resolve_watchlist_job_type,
@@ -528,6 +530,13 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             stock_codes, extra_kwargs = _collect_maintenance_targets(event)
     except CandidateUniverseError:
         logger.exception("watchlist candidate universe load failed batch_id=%s", batch_id)
+        # Issue #65 F-E5: 母集団が作れていないので**失敗**として終端させる。
+        # ★ 終端遷移を rotation lease の解放**より前**に置く。逆にすると、
+        # 解放後・遷移前に異常終了した場合に「lease は空いているのに batch は
+        # DISPATCHING」という、いま直そうとしている状態が別の形で残る。
+        # ★ mark_dispatch_failed() は ConditionExpression="#status = :dispatching"
+        # を持つため、Reconcilerが先に確定していても冪等に無視される。
+        mark_dispatch_failed(batch_id, now)
         if rotation_lease_held:
             release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
@@ -547,6 +556,17 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             batch_id,
             job_type,
         )
+        # Issue #65 F-E5: 候補0件は**失敗ではない**(バッチは正常に走り、やるべき
+        # ことが無かっただけ)。したがってDISPATCH_FAILEDではなくCOMPLETEDで終端
+        # させる。★ ABORTEDにはしない。ABOTEDは「安全弁が働いた」ことを表す語で
+        # あり、_ABORTED_EXECUTION_RESULTSへ新しい理由を足すとその語の意味が
+        # 変わってしまうため(20節: statusはライフサイクルのみを表し、終了理由は
+        # execution_result属性で区別する)。
+        # ★ 「0件だった」という理由は直後のrecord_batch_audit()が
+        # execution_result="no_candidates"として記録しており、失われない。
+        # ★ 終端遷移はrotation leaseの解放**より前**に置く(理由は上記の
+        # CandidateUniverseError経路と同じ)。
+        mark_watchlist_batch_completed(batch_id, EXECUTION_RESULT_NORMAL, now)
         if rotation_lease_held:
             release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
@@ -571,9 +591,35 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         job_type=job_type,
         **extra_kwargs,
     )
-    create_missing_candidate_progress_rows(
-        batch_id, stock_codes, now, wc.candidate_progress_ttl_hours
-    )
+    try:
+        create_missing_candidate_progress_rows(
+            batch_id, stock_codes, now, wc.candidate_progress_ttl_hours
+        )
+    except Exception:  # noqa: BLE001 - 契約どおりDISPATCH_FAILEDへ倒すため広く捕捉する
+        # Issue #65 F-E6: create_missing_candidate_progress_rows()のdocstringは
+        # 「RuntimeErrorを送出し、呼び出し側がDISPATCH_FAILEDへ遷移できるように
+        # する」と約束しているのに、受け手が居なかった(契約と実装の乖離)。
+        # ★ RuntimeError以外(DynamoDBのClientError等)も同じ扱いにする。
+        # 呼び出し側から見れば「進捗行が作れなかった」ことに変わりはなく、
+        # DISPATCHINGのままleaseを保持し続ける方が有害なため(fail-fast)。
+        logger.exception(
+            "watchlist dispatcher: progress row creation failed batch_id=%s", batch_id
+        )
+        mark_dispatch_failed(batch_id, now)
+        if rotation_lease_held:
+            release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
+        record_batch_audit(
+            execution_mode=audit_execution_mode,
+            universe_provider=cu.provider,
+            screening_policies=[wc.screening_policy],
+            output_values={
+                "execution_result": "progress_row_creation_failed",
+                "job_type": job_type,
+            },
+            now=now,
+            batch_id=batch_id,
+        )
+        return {"error": "progress_row_creation_failed"}
 
     progress_rows = query_all_candidate_progress(batch_id, consistent_read=True)
     if len(progress_rows) != total:

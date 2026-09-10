@@ -199,6 +199,11 @@ def test_watchlist_maintenance_is_not_blocked_by_rotation_lease(
     )
     monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", lambda *a, **kw: True)
     monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
+    # Issue #65 F-E5: 候補0件の経路が終端遷移するようになったため、
+    # fakeを足す(本テストが検証している結論は変えていない)。
+    monkeypatch.setattr(
+        handler_module, "mark_watchlist_batch_completed", lambda *a, **kw: None
+    )
 
     def _fail_if_called(*args: Any, **kwargs: Any) -> bool:
         pytest.fail("rotation dispatch lease must not be touched for WATCHLIST_MAINTENANCE")
@@ -229,6 +234,11 @@ def test_new_candidate_screening_not_gated_when_rotation_disabled(
     )
     monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", lambda *a, **kw: True)
     monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
+    # Issue #65 F-E5: 候補0件の経路が終端遷移するようになったため、
+    # fakeを足す(本テストが検証している結論は変えていない)。
+    monkeypatch.setattr(
+        handler_module, "mark_watchlist_batch_completed", lambda *a, **kw: None
+    )
 
     def _fail_if_called(*args: Any, **kwargs: Any) -> bool:
         pytest.fail("rotation dispatch lease must not be touched when rotation.enabled=false")
