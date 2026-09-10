@@ -29,7 +29,6 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from jstock_advisor.infrastructure.aws import batch_tracker
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     WatchlistBatchStatus,
     get_watchlist_batch,
