@@ -1,5 +1,10 @@
-"""Issue #223 PR-1a: 候補ユニバースの鮮度上限の暫定延長(U2)と、取得結果の観測
+"""Issue #223: 候補ユニバースの鮮度上限(U2)と、取得結果の観測
 (U3 logger / U5 batch audit のキー)の検証。
+
+★ 2026-09-10: PR-1a の暫定延長(1080 -> 2160)を **1080 へ戻した**。
+  PR-2(.xlsx対応)が W3 として Production へ反映され、2026-09-10 06:00 JST の
+  候補取得で promoted=true を実測したためである(Issue #236 の観測記録)。
+  下の境界テストは上限そのものの振る舞いを固定するもので、戻しの前後で不変である。
 
 中心は **「2026-09-15 の停止が起きないこと」と「その代わりに新しい停止日が
 いつになるか」を同時に固定すること**である。上限を延ばす変更は、延ばしたことを
@@ -64,26 +69,34 @@ def _jst_0600_run(date: dt.date) -> dt.datetime:
 # --- U2: 設定値と staleness の境界 --------------------------------------------------
 
 
-def test_shipped_config_extends_listed_issues_max_stale_hours() -> None:
-    """出荷される config が 2160(90日)であること。
+def test_shipped_config_reverted_listed_issues_max_stale_hours() -> None:
+    """出荷される config が 1080(45日)へ **戻されている** こと(2026-09-10)。
 
-    jpx400 側は元から 2160 であり、本 Issue で変更していないことも併せて固定する
-    (「両方を一律に緩めた」のではなく listed_issues だけを揃えた変更である)。
+    2160(90日)は PR-1a による**暫定**延長であり、PR-2(.xlsx対応)が Production へ
+    反映され取得成功(promoted=true)を実測した時点で戻す約束だった。
+    ★ 戻し忘れると「上場廃止銘柄が最大90日候補に残る」状態が既定になるため、
+      戻ったことをテストで固定する(延長時に 2160 を固定していたのと対になる)。
+
+    jpx400 側は元から 2160 であり、延長でも戻しでも **触っていない**ことを併せて
+    固定する(「両方を一律に緩めた/締めた」のではない)。
     """
     cu = load_config().watchlist_screening.candidate_universe
-    assert cu.listed_issues_max_stale_hours == _NEW_MAX_STALE_HOURS
+    assert cu.listed_issues_max_stale_hours == _OLD_MAX_STALE_HOURS
     assert cu.jpx400_max_stale_hours == _NEW_MAX_STALE_HOURS
 
 
-def test_config_comment_records_the_revert_condition() -> None:
-    """暫定値であることと戻し条件が config に書かれていること。
+def test_config_comment_records_that_the_revert_was_done_and_why() -> None:
+    """戻したことと、その根拠が config に書かれていること。
 
-    値だけを変えて戻し条件を書き忘れると、延長が恒久化して
-    「上場廃止銘柄が最大90日候補に残る」状態が既定になってしまう。
+    値だけを戻して経緯を消すと、次に同じ障害が起きたときに
+    「なぜ一度 90 日へ延ばしたのか」「何を確認して戻したのか」が失われる。
+    ★ 延長時は「戻し条件」を、戻した後は「戻した根拠(観測記録)」を残す。
     """
     text = Path("config/watchlist_screening_rules.yaml").read_text(encoding="utf-8")
-    assert "listed_issues_max_stale_hours: 2160" in text
-    assert "1080" in text  # 戻し先の値
+    assert "listed_issues_max_stale_hours: 1080" in text
+    assert "2160" in text  # 暫定延長していた経緯が残っていること
+    assert "promoted=true" in text  # 戻した根拠(実測した事象)
+    assert "#236" in text  # 観測記録の所在
     assert "#223" in text
 
 
@@ -390,10 +403,10 @@ def test_finalize_batch_audit_carries_the_four_keys() -> None:
     ここが繋がっていないと「成功した日も含めて観測できる」という受入条件を
     満たさない。
     """
-    source = Path(
-        "src/jstock_advisor/services/watchlist_batch_finalizer.py"
-    ).read_text(encoding="utf-8")
-    block = source.split("if not batch_item.get(\"finalize_batch_audit_recorded\"):", 1)[1]
+    source = Path("src/jstock_advisor/services/watchlist_batch_finalizer.py").read_text(
+        encoding="utf-8"
+    )
+    block = source.split('if not batch_item.get("finalize_batch_audit_recorded"):', 1)[1]
     block = block.split("mark_batch_audit_recorded", 1)[0]
     for key in (
         "universe_source",
