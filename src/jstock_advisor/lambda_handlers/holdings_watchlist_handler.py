@@ -1585,7 +1585,22 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             portfolio_total_acquisition_cost,
             execution_context,
         )
-        logger.info("holdings_watchlist_handler single holding done: %s", result)
+        # Issue #309: result を丸ごと出すと holding_id(所有者名を含む)が
+        # CloudWatch Logs へ平文で残る。所在は log_ref の符号で辿れるため、
+        # 生値は出さず、PII を含まないフィールドだけを明示して出す。
+        # ★ dict を丸ごと渡さない。渡すとキーが増えたときに黙って漏れる。
+        logger.info(
+            "holdings_watchlist_handler single holding done holding_ref=%s "
+            "recommended=%s notified=%s found=%s failed=%s "
+            "evaluation_status=%s notification_status=%s",
+            log_ref(event["holding_id"]),
+            result.get("recommended"),
+            result.get("notified"),
+            result.get("found"),
+            result.get("failed"),
+            result.get("evaluation_status"),
+            result.get("notification_status"),
+        )
         return result
 
     # 通常のスケジュール起動(ディスパッチのみ行い、銘柄ごとの実処理は非同期の

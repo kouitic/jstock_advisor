@@ -21,6 +21,7 @@ import datetime as dt
 import hashlib
 import logging
 import pathlib
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -112,19 +113,70 @@ def test_no_logger_call_passes_owner_or_holding_id_as_a_format_argument() -> Non
     assert offenders == [], f"logger の書式引数へ生の値を渡している: {offenders}"
 
 
+def test_no_logger_call_passes_an_aggregate_object_as_a_format_argument() -> None:
+    """★ T-6b  AST guard。**集約オブジェクトを丸ごと**渡す箇所が 0 件であることを固定する。
+
+    Issue #309: T-6 は書式引数の**ソース断片の文字列**に `holding_id` / `owner` が
+    含まれるかで判定していた。そのため
+
+        logger.info("... single holding done: %s", result)
+
+    のように **dict を変数 1 つで丸ごと渡す**形は、断片が `"result"` でしかなく
+    ★ **構造的に当たらない**(すり抜けたのではなく検査対象になっていない)。
+    実際にこの経路から所有者名が Production の CloudWatch Logs へ出ていた。
+
+    ここでは名前ではなく **束縛の実体**を見る。同じ関数の中でその名前が
+    dict リテラル、または `-> dict[...]` / `-> Mapping[...]` と注釈された関数の
+    戻り値に束縛されているなら、中身が何であれ offender とする。
+
+    ★ 「いま PII を含んでいないから良い」とはしない。dict を丸ごと出す形が
+      残っている限り、後からキーが 1 つ増えただけで再び漏れるためである。
+
+    ★ 限界を明記する: 本 guard が判定できるのは dict リテラルと dict/Mapping 注釈の
+      関数戻り値だけである。dataclass / BaseModel の丸ごと出力は **検出できない**。
+      検査で塞げていない範囲があることを、テスト側に残しておく。
+    """
+    offenders = _scan_logger_aggregate_arguments()
+
+    assert offenders == [], f"logger の書式引数へ集約オブジェクトを丸ごと渡している: {offenders}"
+
+
+_LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical", "log"}
+#: 集約とみなす戻り値注釈。`-> Any` は広すぎるため含めない(誤検知を避ける)。
+_AGGREGATE_ANNOTATIONS = ("dict[", "Dict[", "Mapping[", "MutableMapping[")
+
+#: レビュー済みで PII を含まないと確認した集約。**既定は禁止**であり、
+#: ここへ追加してよいのは次の 2 つを満たす場合だけである(Issue #309)。
+#:
+#:   1  キー集合がモジュール定数等で**固定**されており、後から増えない
+#:   2  値に所有者・保有数量・取得価格・通知本文が入り得ない
+#:
+#: ★ 限界: 照合は (モジュール, 変数名) であり行番号を見ない。同じモジュールに
+#:   同名の別変数が現れると、そちらも免除されてしまう。追加時は現物を読むこと。
+_REVIEWED_NON_PII_AGGREGATES = {
+    # batch_summary の件数内訳。キーは _BATCH_SUMMARY_CATEGORIES(モジュール定数)で
+    # 固定され、値は int のみ。所有者・銘柄・金額を含まない。
+    ("services/line_notification_service.py", "counts"),
+}
+
+
+def _iter_logger_calls(tree: ast.AST) -> Iterator[ast.Call]:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr not in _LOG_METHODS:
+            continue
+        if not (isinstance(func.value, ast.Name) and func.value.id == "logger"):
+            continue
+        yield node
+
+
 def _scan_logger_format_arguments() -> list[str]:
-    log_methods = {"debug", "info", "warning", "error", "exception", "critical", "log"}
     offenders: list[str] = []
     for path in sorted(pathlib.Path("src").rglob("*.py")):
         source = path.read_text(encoding="utf-8")
-        for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not isinstance(func, ast.Attribute) or func.attr not in log_methods:
-                continue
-            if not (isinstance(func.value, ast.Name) and func.value.id == "logger"):
-                continue
+        for node in _iter_logger_calls(ast.parse(source)):
             for argument in node.args[1:]:
                 segment = ast.get_source_segment(source, argument) or ""
                 if "log_ref(" in segment:
@@ -132,6 +184,70 @@ def _scan_logger_format_arguments() -> list[str]:
                 if "holding_id" in segment or "owner" in segment:
                     offenders.append(f"{path}:{node.lineno}: {segment}")
     return offenders
+
+
+def _aggregate_returning_functions(source: str, tree: ast.Module) -> set[str]:
+    """`-> dict[...]` 等と注釈された関数名を集める(同一モジュール内のみ)。"""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if node.returns is None:
+            continue
+        annotation = ast.get_source_segment(source, node.returns) or ""
+        if annotation.startswith(_AGGREGATE_ANNOTATIONS):
+            names.add(node.name)
+    return names
+
+
+def _names_bound_to_aggregates(
+    source: str, function: ast.FunctionDef | ast.AsyncFunctionDef, aggregate_funcs: set[str]
+) -> set[str]:
+    """関数内で dict リテラル / dict を返す関数へ束縛されている名前を集める。
+
+    1 つでも集約に束縛されていれば集約とみなす(再代入で紛れるのを防ぐ)。
+    """
+    bound: set[str] = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if not targets:
+            continue
+        value = node.value
+        is_aggregate = isinstance(value, ast.Dict | ast.DictComp)
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            is_aggregate = is_aggregate or value.func.id in aggregate_funcs
+        if is_aggregate:
+            bound.update(targets)
+    return bound
+
+
+def _scan_logger_aggregate_arguments() -> list[str]:
+    offenders: list[str] = []
+    for path in sorted(pathlib.Path("src").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        aggregate_funcs = _aggregate_returning_functions(source, tree)
+        for function in ast.walk(tree):
+            if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            aggregates = _names_bound_to_aggregates(source, function, aggregate_funcs)
+            if not aggregates:
+                continue
+            for node in _iter_logger_calls(function):
+                for argument in node.args[1:]:
+                    if not (isinstance(argument, ast.Name) and argument.id in aggregates):
+                        continue
+                    if _is_reviewed_non_pii(path, argument.id):
+                        continue
+                    offenders.append(f"{path}:{node.lineno}: {argument.id}")
+    return offenders
+
+
+def _is_reviewed_non_pii(path: pathlib.Path, name: str) -> bool:
+    suffix = path.as_posix().removeprefix("src/jstock_advisor/")
+    return (suffix, name) in _REVIEWED_NON_PII_AGGREGATES
 
 
 # --- T-3  E-2 例外 message ----------------------------------------------------
