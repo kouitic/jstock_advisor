@@ -3450,9 +3450,16 @@ class LineNotificationService:
         同一開示(published_at+タイトルで識別)は再送しない。この再送抑止は
         通知検証モード機能(2026-08追加、およびそのDRY_RUN拡張)の対象外
         (個別銘柄の売買判断通知ではなく、適時開示の存在を知らせる事実通知の
-        ため)。現時点で本メソッドを呼び出すハンドラ(disclosure_check_handler.py)
-        はexecution_mode/notification_modeを一切扱わず常にNORMALで動くため、
-        この分岐に到達することはない。
+        ため)。
+
+        ★ Issue #109: 以前ここには「呼び出し元のdisclosure_check_handler.pyは
+        execution_modeを扱わず常にNORMALで動くため、VALIDATIONの分岐へ到達する
+        ことはない」と書かれていたが、**同Issueでhandlerがexecution_modeを読む
+        ようになったため、その記述は既に誤りである**。本メソッドはVALIDATIONで
+        到達し、そのとき外部push(_push()のis_dry_run)・NotificationLogの保存
+        (下記のis_validationガード)・NotificationClaim(_claims_enabled())の
+        いずれも抑止される。到達したうえで抑止されることは
+        tests/unit/test_line_notification_service_dry_run.pyで固定している。
         """
         content_hash = hashlib.sha256(
             f"{stock_code}|{published_at.isoformat()}|{disclosure_title}".encode()

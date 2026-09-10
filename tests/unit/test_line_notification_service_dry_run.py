@@ -33,6 +33,9 @@ from jstock_advisor.infrastructure.local_repository.daily_notification_priority_
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
 )
+from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
+    NotificationClaimRepository,
+)
 from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -115,8 +118,17 @@ def _make_recommendation(
 
 
 def _build_service(
-    tmp_path: Path, execution_context: ExecutionContext
+    tmp_path: Path,
+    execution_context: ExecutionContext,
+    *,
+    claim_repository: NotificationClaimRepository | None = None,
 ) -> tuple[LineNotificationService, _FakeLineClient, _SpyAuditService, NotificationLogRepository]:
+    """Issue #109: `claim_repository` は既定 None(従来どおり)。
+
+    渡した場合のみ `_claims_enabled()` の判定が「repo あり AND not is_validation」の
+    AND 条件として意味を持つ。既定を変えないのは、既存 test の期待値
+    (claim を使わない前提)を 1 つも動かさないためである。
+    """
     store_dir = tmp_path / "local_store"
     client = _FakeLineClient()
     notification_log_repo = NotificationLogRepository(store_dir=store_dir)
@@ -126,6 +138,7 @@ def _build_service(
     service = LineNotificationService(
         line_client=client,
         notification_log_repository=notification_log_repo,
+        notification_claim_repository=claim_repository,
         recommendation_repository=RecommendationRepository(store_dir=store_dir),
         config=_CONFIG,
         audit_service=audit_service,
@@ -356,3 +369,156 @@ def test_notify_buy_candidates_digest_validation_send_unaffected(tmp_path: Path)
     assert client.sent[0].startswith("🧪検証｜")
     assert results == {"2914": "SENT_VALIDATION"}
     assert audit_service.dry_run_calls() == []
+
+
+# --- Issue #109: 開示速報(notify_disclosure_risk)の VALIDATION 抑止 -----------------
+# 本番の VALIDATION 手動起動(2026-09-10)は alerts=0 で notify_disclosure_risk へ
+# 一度も到達せず、「LINE 0 / NotificationLog 0 / NotificationClaim 0」が
+# ★ **抑止の結果ではなく 0 件だったから 0** という状態だった(#109 の snapshot)。
+# ここでは §7.4.2 (a) として「**送信境界まで到達したうえで抑止される**」ことを固定する。
+# 到達の証拠は戻り値 True と DRY_RUN 監査記録(最終本文)であり、
+# 「呼ばれなかったから 0」では通らない形にしてある。
+#
+# ★ 実在の銘柄コード・銘柄名は使用しない(架空値のみ)。
+
+_DISCLOSURE_STOCK_CODE = "0000"
+_DISCLOSED_AT = _NOW - dt.timedelta(hours=1)
+# 既存 test と同じ literal を使う(src の `_VALIDATION_BANNER` を import すると
+# 「実装と同じ値を実装から取ってくる」形になり、banner が変わったことを検出できない)。
+_VALIDATION_BANNER_PREFIX = "🧪検証｜"
+
+
+def _notify_disclosure(service: LineNotificationService) -> bool:
+    return service.notify_disclosure_risk(
+        stock_code=_DISCLOSURE_STOCK_CODE,
+        disclosure_title="特別損失の計上に関するお知らせ",
+        disclosure_summary="特別損失を計上します。",
+        matched_keywords=["特別損失"],
+        published_at=_DISCLOSED_AT,
+        now=_NOW,
+        stock_name="銘柄 X",
+    )
+
+
+def _persisted_audit_count(tmp_path: Path) -> int:
+    """本番 AuditLogTable 相当への**永続化件数**。
+
+    `_SpyAuditService` は `record()` の呼び出しを記録するだけで保存有無を表さない。
+    VALIDATION では `AuditService.record()` が save より前に return するため、
+    「呼ばれたが保存されていない」を区別するには store を直接読む必要がある。
+    """
+    return len(AuditLogRepository(store_dir=tmp_path / "local_store").list_all())
+
+
+def test_disclosure_risk_normal_reaches_send_boundary_and_persists(tmp_path: Path) -> None:
+    """対照(NORMAL): 開示速報が実際に送信され、log / claim / audit が残ること。
+
+    ★ この 1 本があることで、下の VALIDATION 側の 0 件が
+      「そもそも到達しないから 0」ではないと言える。
+    """
+    ctx = ExecutionContext(mode=ExecutionMode.NORMAL, notification_mode=NotificationMode.SEND)
+    claim_repo = NotificationClaimRepository(store_dir=tmp_path / "local_store")
+    service, client, audit_service, log_repo = _build_service(
+        tmp_path, ctx, claim_repository=claim_repo
+    )
+
+    assert _notify_disclosure(service) is True
+
+    assert len(client.sent) == 1, "NORMAL では実 push が起きること"
+    assert not client.sent[0].startswith(_VALIDATION_BANNER_PREFIX)
+    assert len(log_repo.list_all()) == 1, "NORMAL では NotificationLog が残ること"
+    assert len(claim_repo.list_all()) == 1, "NORMAL では NotificationClaim が残ること"
+    assert audit_service.dry_run_calls() == [], "NORMAL では DRY_RUN 記録を出さない"
+    # ★ 実測: 本経路は NORMAL では監査を 1 件も書かない。DRY_RUN 記録は
+    #   `_push()` の DRY_RUN 分岐でのみ生成されるためである。
+    #   したがって「VALIDATION で監査 0 件」だけを見ても抑止の証拠にならず、
+    #   ★ **生成された DRY_RUN 記録が永続化されていない**ことまで見る必要がある
+    #   (下の test_..._suppresses_every_production_write で対にして固定する)。
+    assert _persisted_audit_count(tmp_path) == 0, "本経路は NORMAL でも監査を永続化しない"
+
+
+def test_disclosure_risk_validation_dry_run_suppresses_every_production_write(
+    tmp_path: Path,
+) -> None:
+    """★ VALIDATION+DRY_RUN で、本番side effect が **4 つとも** 起きないこと。
+
+    抑止点(実測)
+      1 `_push()` の `is_dry_run`            -> 外部 LINE push
+      2 `notify_disclosure_risk()` の
+        `if not ...is_validation`             -> NotificationLog の保存
+      3 `_claims_enabled()`                   -> NotificationClaim の取得・保存
+      4 `AuditService.record()` の
+        `if ...is_validation`                 -> DRY_RUN 監査記録の**永続化**
+    ★ 4 は #109 の snapshot が挙げた 3 点に含まれていないが、同じ経路で本番
+      AuditLog へ書きうるため合わせて固定する。★ ただし 4 は
+      「**生成されたのに永続化されない**」という対で見ないと意味がない
+      (本経路は NORMAL では監査を 1 件も書かないため、0 件だけでは抑止の証拠に
+      ならない)。そのため下で `dry_run_calls()` が 1 件あることも同時に assert する。
+    """
+    ctx = ExecutionContext(
+        mode=ExecutionMode.VALIDATION, notification_mode=NotificationMode.DRY_RUN
+    )
+    claim_repo = NotificationClaimRepository(store_dir=tmp_path / "local_store")
+    service, client, audit_service, log_repo = _build_service(
+        tmp_path, ctx, claim_repository=claim_repo
+    )
+
+    # ★ 戻り値 True = 抑止で早期 return したのではなく、送信境界まで到達している。
+    assert _notify_disclosure(service) is True
+
+    assert client.sent == [], "1: 外部 LINE push が発生してはならない"
+    assert log_repo.list_all() == [], "2: NotificationLog を保存してはならない"
+    assert claim_repo.list_all() == [], "3: NotificationClaim を保存してはならない"
+    assert len(audit_service.dry_run_calls()) == 1, "4: DRY_RUN 監査記録は**生成される**"
+    assert _persisted_audit_count(tmp_path) == 0, "4: しかし**永続化されない**"
+
+
+def test_disclosure_risk_validation_dry_run_still_reaches_the_send_boundary(
+    tmp_path: Path,
+) -> None:
+    """★ 抑止が「到達したうえで止めた」ことの直接証拠を固定する。
+
+    DRY_RUN 監査には**最終本文**(VALIDATION banner 付与後)が載る。これが 1 件ある
+    ことは、判定・本文生成・banner 付与まで NORMAL と同じ経路を通り、
+    ★ 外部 push の直前で止まったことを意味する。
+    ★ 本番で観測できなかったのはまさにこの点(alerts=0 で未到達だった)。
+    """
+    ctx = ExecutionContext(
+        mode=ExecutionMode.VALIDATION, notification_mode=NotificationMode.DRY_RUN
+    )
+    service, _client, audit_service, _log_repo = _build_service(tmp_path, ctx)
+
+    assert _notify_disclosure(service) is True
+
+    dry_run_calls = audit_service.dry_run_calls()
+    assert len(dry_run_calls) == 1, "DRY_RUN 記録が 1 件だけ出ること"
+    message_text = dry_run_calls[0]["output_values"]["message_text"]
+    assert message_text.startswith(_VALIDATION_BANNER_PREFIX), "banner が付与されていること"
+    assert _DISCLOSURE_STOCK_CODE in message_text, "最終本文が開示速報のものであること"
+    assert "特別損失" in message_text, "検出キーワードが本文に載っていること"
+
+
+def test_disclosure_risk_validation_send_pushes_with_banner_but_records_nothing(
+    tmp_path: Path,
+) -> None:
+    """VALIDATION+SEND は既存の共通契約どおり **送信される**(disclosure だけ独自にしない)。
+
+    `is_dry_run` は `is_validation AND notification_mode == DRY_RUN` の AND 条件で
+    あるため、SEND では push が起きる。一方 NotificationLog / NotificationClaim は
+    `is_validation` 単独のガードなので **保存されない**。この非対称は意図的であり、
+    片方だけ見て「抑止できていない」と誤読しないために固定する。
+    """
+    ctx = ExecutionContext(mode=ExecutionMode.VALIDATION, notification_mode=NotificationMode.SEND)
+    claim_repo = NotificationClaimRepository(store_dir=tmp_path / "local_store")
+    service, client, audit_service, log_repo = _build_service(
+        tmp_path, ctx, claim_repository=claim_repo
+    )
+
+    assert _notify_disclosure(service) is True
+
+    assert len(client.sent) == 1, "VALIDATION+SEND では push される"
+    assert client.sent[0].startswith(_VALIDATION_BANNER_PREFIX)
+    assert log_repo.list_all() == [], "VALIDATION では NotificationLog を保存しない"
+    assert claim_repo.list_all() == [], "VALIDATION では claim を使わない"
+    assert _persisted_audit_count(tmp_path) == 0, "VALIDATION では監査を永続化しない"
+    assert audit_service.dry_run_calls() == [], "SEND では DRY_RUN 記録を出さない"
