@@ -213,6 +213,21 @@ class _CountingEvaluationRepository:
     def save(self, evaluation: EvaluationResult) -> None:
         self.saved.append(evaluation)
 
+    def insert_if_absent(self, evaluation: EvaluationResult) -> bool:
+        """本物と同じ契約(Issue #71 F-C12)。
+
+        ★ 常に True を返すダミーにはしない。成功前提のダミーは、本体が
+        条件付き insert に弾かれたときに通る経路をテスト側で覆い隠す。
+        一意キーの一致で既存判定を行う(本物は attribute_not_exists 相当)。
+        """
+        if any(e.evaluation_id == evaluation.evaluation_id for e in self.saved):
+            return False
+        self.saved.append(evaluation)
+        return True
+
+    def get(self, evaluation_id: str) -> EvaluationResult | None:
+        return next((e for e in self.saved if e.evaluation_id == evaluation_id), None)
+
 
 class _CountingMarketDataProvider:
     """下位provider呼び出し回数を数える。既定では要求範囲外のバーも返し、
