@@ -45,6 +45,7 @@ from pathlib import Path
 import pytest
 
 from jstock_advisor.infrastructure.local_repository import json_store
+from tests.support.time_semantics_registry import _REGISTRY, _SOLO_PREFIX
 
 
 @pytest.fixture(autouse=True)
@@ -69,3 +70,49 @@ def _isolated_default_store_dir(
     store_dir = tmp_path / "local_store"
     monkeypatch.setattr(json_store, "DEFAULT_STORE_DIR", store_dir)
     yield store_dir
+
+
+# --- Issue #277: cohort marker の自動付与 -----------------------------------------
+#
+# cohort の正本は tests/support/time_semantics_registry.py の _REGISTRY である。
+# ここでは収集時に marker を**動的に付ける**だけで、テスト側へ pytestmark を
+# 手で書かせない。手で書かせると registry と二重管理になり、必ず drift する
+# (registry の V8 が防ごうとした「静かに外れる」経路を、もう 1 本作ることになる)。
+#
+# ★ 「付け忘れる対象」が存在しないため、移行漏れは原理的に起きない。
+# ★ それでも自動付与そのものは壊れうるので、
+#   tests/unit/test_issue_277_cohort_markers.py が
+#   「registry の全エントリに marker が実際に付いていること」を検証する。
+
+
+def cohort_marker_name(cohort: str) -> str:
+    """cohort 名から marker 名を作る。
+
+    pytest の `-m` は marker 名でしか選べないため、1 cohort = 1 marker 名とする
+    (引数つき marker は `-m` の式に入らない)。`SOLO:` 接頭辞は marker 名に
+    使えない文字を含むため置き換える。
+    """
+    if cohort.startswith(_SOLO_PREFIX):
+        return "cohort_solo_" + cohort[len(_SOLO_PREFIX) :]
+    return "cohort_" + cohort
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """registry に登録されたモジュールの item へ cohort marker を付ける。
+
+    ★ items の**順序は変えない**。並べ替えも間引きもせず、marker を足すだけである。
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    by_module = {entry.module: entry.cohort for entry in _REGISTRY}
+    for item in items:
+        path = getattr(item, "path", None)
+        if path is None:  # pragma: no cover - 古い pytest との互換
+            continue
+        try:
+            relative = Path(path).resolve().relative_to(repo_root).as_posix()
+        except ValueError:  # pragma: no cover - repo 外のテストは対象外
+            continue
+        cohort = by_module.get(relative)
+        if cohort is None:
+            continue
+        item.add_marker(getattr(pytest.mark, cohort_marker_name(cohort)))

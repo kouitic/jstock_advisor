@@ -61,6 +61,14 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Issue #277: cohort marker。cohort は tests/support/time_semantics_registry.py の
+# _REGISTRY が正本であり、ここは pytest へ登録するだけである。
+# 付与は tests/conftest.py が registry から自動で行う(手で書く場所を作らない)。
+# ここと registry の食い違いは tests/unit/test_issue_277_cohort_markers.py が検出する。
+markers = [
+  "cohort_holding_decision_runtime_config: holding_decision_runtime_config_service の module-global state を共有する cohort(Issue #148 / #145)",
+  "cohort_market_session: 市場セッションの日付 semantics と mock provider の系列を共有する cohort(Issue #52 / #143)",
+]
 
 [tool.ruff]
 target-version = "py312"
