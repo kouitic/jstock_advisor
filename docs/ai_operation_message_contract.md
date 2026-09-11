@@ -635,6 +635,40 @@ APPROVAL_UNIT_CONSOLIDATION = NO
     まとめると「作って内容を確認してから実行する」という安全弁が消える。
 ```
 
+### 8.4 例
+
+```
+Human Gate — MERGE_GATE / PR #183
+
+承認対象
+  PR #183 / head 4f9c1a2... を main へ merge すること
+
+承認すると起きること
+  - main への merge
+  - main CI の実行と確認
+  - Issue #181 の post-merge state reconciliation
+  - #181 の code WIP 解放(main CI PASS と head 一致の確認後)
+
+この承認では起きないこと
+  - Production deploy
+  - ChangeSet の CREATE / EXECUTE
+  - Issue #181 の close
+  - 新ルールの発効(別途 activation 承認が必要)
+
+推奨と理由
+  承認
+  exact diff レビュー PASS / PR CI 7 of 7 green / 変更は docs のみ /
+  merge blocker なし
+
+---
+AUDIT_INFO
+  PR base  9bbc2ac...
+  CI run   33979357372(event=pull_request / head 一致)
+  review   <レビュー結果の URL>
+```
+
+---
+
 ### 8.5 承認・判断の記録 field
 
 Human Gate の提示に対して**利用者が判断を下した事実**を Issue へ残すときの書式。
@@ -695,40 +729,6 @@ Human Gate の操作許可       APPROVED_BY のみ。DECIDED_BY は書かない
 書ける。この field が示すのは**誰の判断として記録されたか**であって
 **誰が書いたか**ではない。本人性の保証は Issue #332 の論点であり、本項では
 解決しない。
-
-### 8.4 例
-
-```
-Human Gate — MERGE_GATE / PR #183
-
-承認対象
-  PR #183 / head 4f9c1a2... を main へ merge すること
-
-承認すると起きること
-  - main への merge
-  - main CI の実行と確認
-  - Issue #181 の post-merge state reconciliation
-  - #181 の code WIP 解放(main CI PASS と head 一致の確認後)
-
-この承認では起きないこと
-  - Production deploy
-  - ChangeSet の CREATE / EXECUTE
-  - Issue #181 の close
-  - 新ルールの発効(別途 activation 承認が必要)
-
-推奨と理由
-  承認
-  exact diff レビュー PASS / PR CI 7 of 7 green / 変更は docs のみ /
-  merge blocker なし
-
----
-AUDIT_INFO
-  PR base  9bbc2ac...
-  CI run   33979357372(event=pull_request / head 一致)
-  review   <レビュー結果の URL>
-```
-
----
 
 ## 9. 確認質問の要否
 
