@@ -102,4 +102,28 @@ class EvaluationResultRepository:
         )
 
     def save(self, evaluation: EvaluationResult) -> None:
+        """無条件に書き込む(CLI・テスト・既存呼び出し用)。
+
+        ★ 定点評価ループからは使わない。並行実行下で二重保存になるため。
+        ループは `insert_if_absent()` を使うこと(Issue #71 F-C12)。
+        """
         self._store.upsert(evaluation)
+
+    def insert_if_absent(self, evaluation: EvaluationResult) -> bool:
+        """同じ一意キーの評価が無い場合だけ保存する(Issue #71 F-C12)。
+
+        ★ 保存できたら True、既に存在していたら False。
+        DynamoDB 実装は `attribute_not_exists(evaluation_id)` の条件付き
+        put_item で**原子的**に判定する。したがって、2 つの実行が同時に
+        事前確認(CompletedHorizonIndex)を通り抜けても、保存に成功するのは
+        片方だけになる。
+
+        ★ これが効くのは `evaluation_id` が**決定的なキー**であるときだけである
+        (`build_evaluation_id()`)。uuid4 のままでは毎回違うキーになるため、
+        条件が常に成立して二重保存を防げない。
+
+        ★ False のとき、呼び出し側は**保存成功数へ加算してはならない**。
+        加算すると、実際には 1 件しか保存されていないのに 2 件成功したと
+        集計され、定点評価の母数が実態からずれる。
+        """
+        return self._store.insert_if_absent(evaluation)

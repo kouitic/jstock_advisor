@@ -10,6 +10,66 @@ from pydantic import model_validator
 from jstock_advisor.domain.entities.base import Entity
 from jstock_advisor.domain.entities.enums import EvaluationLabel
 
+# 評価意味論の版(Issue #71 F-C12)。
+#
+# ★ この版は「同じ推奨・同じ軸・同じホライズンでも、**評価の定め方が違えば
+#   別の評価である**」ことを表す。現行の定め方は次のとおりで、これを "v1" とする。
+#
+#     営業日ホライズン  起点 = recommended_at の **UTC 暦日**
+#     暦日ホライズン    起点 = recommended_at の **JST 暦日**
+#
+#   この非対称は Issue #23 で**意図的に維持された既存仕様**であり
+#   (functional_spec.md 2026-08-28「評価期間の起点日・評価対象日の算出方法自体は
+#   変更していない」)、recommendation_evaluation_service.py の
+#   `_evaluate_pending_work` にも「【意図的に変更しない】」と明記がある。
+#
+# ★ なぜ一意キーへ最初から版を入れるのか(後付けにしない理由)
+#   #66-F-L3 は起点を JST 業務日へ変える案を検討中である。版を入れずに
+#   一意キーを (推奨 ID, 軸, ホライズン) だけで定めると、F-L3 で定め方が
+#   変わったとき、**同じキーが別意味論の評価と衝突する**。条件付き insert は
+#   衝突を「既に評価済み」と解釈するため、★ 新しい意味論の評価が
+#   **黙って保存されない**。版を持てば "v2" を足すだけで移行窓を表現できる。
+EVALUATION_SEMANTICS_V1 = "v1"
+
+# 一意キーの軸(営業日 / 暦日)。キー文字列に直接現れるため値は変更しない。
+_AXIS_BUSINESS = "B"
+_AXIS_CALENDAR = "C"
+
+# 一意キーの区切り。★ recommendation_id は uuid4 文字列であり、この区切りを
+# 含まない。含む値が将来入りうるなら、キーの組み立て自体を見直すこと。
+_KEY_SEPARATOR = "#"
+
+
+def build_evaluation_id(
+    recommendation_id: str,
+    *,
+    horizon_business_days: int | None = None,
+    horizon_calendar_days: int | None = None,
+    semantics_version: str = EVALUATION_SEMANTICS_V1,
+) -> str:
+    """定点評価の一意キーを組み立てる(Issue #71 F-C12)。
+
+    キー = 推奨 ID + 評価軸 + ホライズン + ★ 評価意味論の版。
+
+    ★ この文字列がそのまま `EvaluationResult.evaluation_id`(= 永続層の
+    パーティションキー)になる。`insert_if_absent()` の
+    `attribute_not_exists(evaluation_id)` が効くのは、キーが**決定的**で
+    あるときだけである。uuid4 のままでは、同じ評価を 2 回保存しても
+    キーが違うため条件が成立してしまう。
+    """
+    if (horizon_business_days is None) == (horizon_calendar_days is None):
+        raise ValueError(
+            "horizon_business_daysとhorizon_calendar_daysはどちらか一方のみ指定してください"
+        )
+    if horizon_business_days is not None:
+        axis, horizon = _AXIS_BUSINESS, horizon_business_days
+    else:
+        # 上の排他チェックを通っているため、ここでは必ず暦日側が入っている
+        # (型の絞り込みのみを目的とした表明)。
+        assert horizon_calendar_days is not None  # noqa: S101 - 直前の検証で保証済み
+        axis, horizon = _AXIS_CALENDAR, horizon_calendar_days
+    return _KEY_SEPARATOR.join((recommendation_id, axis, str(horizon), semantics_version))
+
 
 class EvaluationResult(Entity):
     evaluation_id: str
@@ -62,6 +122,12 @@ class EvaluationResult(Entity):
     evaluation_label: EvaluationLabel
     label_evidence: str
     notes: str | None = None
+
+    # Issue #71 F-C12: 評価意味論の版。★ 既定値を持たせてあるのは、本変更より前に
+    # 保存された行(このフィールドを持たない)が読めなくなると、
+    # load_completed_horizon_index() が壊れて**全推奨が未評価扱いになる**ため。
+    # 既存行はすべて現行の定め方で作られているので "v1" とみなしてよい。
+    evaluation_semantics_version: str = EVALUATION_SEMANTICS_V1
 
     # --- 判定精度向上機能(Phase A)で追加。セクターETF proxy(config.sector_etf_map)
     # による指数比較用の予約フィールド。セクターproxy選定・安定取得可否の検証は

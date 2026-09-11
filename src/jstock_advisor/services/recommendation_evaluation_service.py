@@ -41,7 +41,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import time
-import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -50,7 +49,11 @@ from typing import Protocol
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import RecommendationType
-from jstock_advisor.domain.entities.evaluation import EvaluationResult
+from jstock_advisor.domain.entities.evaluation import (
+    EVALUATION_SEMANTICS_V1,
+    EvaluationResult,
+    build_evaluation_id,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.evaluation_rules import determine_evaluation_label
 from jstock_advisor.domain.jst import evaluation_date_jst, require_timezone_aware, to_jst
@@ -137,6 +140,10 @@ class EvaluationRunSummary:
     missing_recommendation_count: int = 0
     provider_call_count: int = 0
     duration_ms: int = 0
+    # Issue #71 F-C12: 事前確認を通ったのに条件付き insert が弾かれた件数
+    # (= 別実行が同じ評価を先に保存していた)。★ 0 でないこと自体は異常ではなく、
+    # 並行実行が起きた事実を見えるようにするための計数である。
+    concurrent_conflict_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -158,6 +165,7 @@ class _RunAccumulator:
     calendar_evaluated: int = 0
     business_skipped: int = 0
     calendar_skipped: int = 0
+    concurrent_conflicts: int = 0
 
 
 @dataclass(frozen=True)
@@ -397,6 +405,7 @@ class RecommendationEvaluationService:
             skipped_due_to_data_error_count=len(acc.skipped),
             business_evaluated_count=acc.business_evaluated,
             calendar_evaluated_count=acc.calendar_evaluated,
+            concurrent_conflict_count=acc.concurrent_conflicts,
             business_skipped_count=acc.business_skipped,
             calendar_skipped_count=acc.calendar_skipped,
             backlog_remaining=(due_count - already_evaluated) - len(acc.evaluated),
@@ -500,7 +509,14 @@ class RecommendationEvaluationService:
                 )
                 acc.business_skipped += 1
                 continue
-            self._evaluations.save(result)
+            # Issue #71 F-C12: 無条件 upsert から条件付き insert へ。★ ここが本修正の肝。
+            # CompletedHorizonIndex は run 開始時の 1 回読みであり、**別実行が
+            # その後に保存した分は見えない**。事前確認を通っても競合しうる。
+            if not self._evaluations.insert_if_absent(result):
+                self._record_conflict(recommendation, horizon, axis="business")
+                index.record_business_horizon(recommendation.recommendation_id, horizon)
+                acc.concurrent_conflicts += 1
+                continue
             index.record_business_horizon(recommendation.recommendation_id, horizon)
             acc.evaluated.append(result)
             acc.business_evaluated += 1
@@ -527,10 +543,43 @@ class RecommendationEvaluationService:
             )
             acc.calendar_skipped += 1
             return
-        self._evaluations.save(result)
+        if not self._evaluations.insert_if_absent(result):
+            self._record_conflict(recommendation, horizon_days, axis="calendar")
+            index.record_calendar_horizon(recommendation.recommendation_id, horizon_days)
+            acc.concurrent_conflicts += 1
+            return
         index.record_calendar_horizon(recommendation.recommendation_id, horizon_days)
         acc.evaluated.append(result)
         acc.calendar_evaluated += 1
+
+    def _record_conflict(
+        self, recommendation: Recommendation, horizon: int, *, axis: str
+    ) -> None:
+        """条件付き insert が弾かれたとき、既存結果を読んで記録する(Issue #71 F-C12)。
+
+        ★ 黙って握りつぶさない。弾かれたのは「別実行が同じ評価を先に保存した」
+        という**正常な競合**だが、起きた事実が見えないと、保存成功数と
+        評価対象数の差を後から説明できなくなる。
+
+        ★ 既存結果は読むだけで、**上書きしない**。先に保存した側の値が正である
+        (どちらも同じ入力・同じ意味論で計算しているため値は一致するはずだが、
+        一致を前提に上書きしてよい理由にはならない)。
+        """
+        key = build_evaluation_id(
+            recommendation.recommendation_id,
+            horizon_business_days=horizon if axis == "business" else None,
+            horizon_calendar_days=horizon if axis == "calendar" else None,
+        )
+        existing = self._evaluations.get(key)
+        logger.info(
+            "evaluation already stored by a concurrent run; skipping save "
+            "recommendation_id=%s axis=%s horizon=%s semantics=%s existing_evaluated_at=%s",
+            recommendation.recommendation_id,
+            axis,
+            horizon,
+            EVALUATION_SEMANTICS_V1,
+            existing.evaluated_at.isoformat() if existing is not None else "unknown",
+        )
 
     # --- due判定 -----------------------------------------------------------
 
@@ -637,7 +686,14 @@ class RecommendationEvaluationService:
         )
 
         return EvaluationResult(
-            evaluation_id=str(uuid.uuid4()),
+            # Issue #71 F-C12: uuid4 から**決定的な一意キー**へ。
+            # uuid のままだと、同じ評価を 2 実行が同時に保存しても
+            # キーが違うため条件付き insert が両方成立してしまう。
+            evaluation_id=build_evaluation_id(
+                recommendation.recommendation_id,
+                horizon_business_days=horizon_business_days,
+                horizon_calendar_days=horizon_calendar_days,
+            ),
             recommendation_id=recommendation.recommendation_id,
             horizon_business_days=horizon_business_days,
             horizon_calendar_days=horizon_calendar_days,
