@@ -294,9 +294,13 @@ def test_case_b_stale_is_unknown_and_never_pass(
     assert report["policy_ref_freshness"] == STALE
     assert report["result"] == UNKNOWN
     assert report["result"] != PASS
-    # ★ 古い SHA が残っていても current policy として扱われない
-    assert report["policy_ref"] == _FAKE_SHA
+    # ★ policy_ref は REVISION 経路でのみ設定する。STALE では読んでいないので None。
+    #   古い SHA を current policy の revision として表示しない。
+    assert report["policy_ref"] is None
     assert report["policy_source_revision"] is None
+    assert report["freshness_applies_to_judgment"] is False
+    # ★ 診断に必要な local SHA は problems 側へ残す
+    assert any(_FAKE_SHA in p for p in report["problems"])
     assert report["required_policies"] == []
     assert any("origin/main" in p for p in report["problems"])
 
@@ -441,10 +445,13 @@ def test_freshness_failure_is_unverified_not_verified(
 def test_revision_reader_returns_none_for_missing_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _raise(*args: str) -> str:
+    def _fake_git(*args: str) -> str:
+        # ★ revision の検証は通す。失敗させるのは show だけ（= path の不在）。
+        if args[0] == "rev-parse":
+            return _FAKE_SHA
         raise subprocess.CalledProcessError(128, "git show")
 
-    monkeypatch.setattr(policy_check, "_git", _raise)
+    monkeypatch.setattr(policy_check, "_git", _fake_git)
     reader = policy_check.make_revision_reader(_FAKE_SHA)
     assert reader("docs/absent.md") is None
 
@@ -544,6 +551,9 @@ def test_decode_failure_surfaces_as_source_read_error(
     """
 
     def _fake_git(*args: str) -> str:
+        # ★ revision の検証は通す。復号に失敗するのは show である。
+        if args[0] == "rev-parse":
+            return _FAKE_SHA
         raise UnicodeDecodeError(
             "cp932", bytes([0x81]), 0, 1, "illegal multibyte sequence"
         )
@@ -553,3 +563,103 @@ def test_decode_failure_surfaces_as_source_read_error(
 
     with pytest.raises(policy_check.SourceReadError):
         reader("docs/development_workflow.md")
+# --- ★ WORKING_TREE 経路に policy_ref を付けないこと ---------------------------
+
+
+def test_working_tree_source_does_not_carry_policy_ref(fresh: None) -> None:
+    """★ working tree を読んだ report へ origin/main の SHA を付けないこと。
+
+    付けると「表示している revision」と「実際に読んだ source」が食い違う。
+    Finding 1 と同じ型の誤りであり、USER 指示が明文で禁じている。
+
+    ★ policy_source_kind で区別できることと、★ policy_ref を付けないことは
+    別の要求である。両方を満たす。
+    """
+    report = policy_check.check("PR_CREATE", read_source=_worktree_reader())
+
+    assert report["policy_source_kind"] == policy_check.SOURCE_KIND_WORKING_TREE
+    assert report["policy_ref"] is None
+    assert report["policy_source_revision"] is None
+    # ★ freshness は独立した事実として残すが、判定に使っていないことを明示する
+    assert report["freshness_applies_to_judgment"] is False
+
+
+def test_revision_source_carries_policy_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    """REVISION 経路では policy_ref を設定し、判定に使ったことを示す。"""
+    revision_registry = {
+        "operations": ["PR_CREATE"],
+        "policies": [
+            {
+                "policy_id": "FROM.REVISION",
+                "ssot_file": "docs/development_workflow.md",
+                "ssot_anchor": "### Definition of Done(DoD) の申告",
+                "applicable_operations": ["PR_CREATE"],
+                "human_gate_required": False,
+                "machine_enforceable": True,
+            }
+        ],
+    }
+
+    def _fake_git(*args: str) -> str:
+        if args[0] == "rev-parse" and args[1] == "--verify":
+            return _FAKE_SHA + chr(10)
+        if args[0] == "rev-parse":
+            return _FAKE_SHA + chr(10)
+        if args[0] == "ls-remote":
+            return _FAKE_SHA + chr(9) + "refs/heads/main" + chr(10)
+        if args[0] == "show":
+            _, _, relpath = args[1].partition(":")
+            if relpath == policy_check.REGISTRY_RELPATH:
+                return yaml.safe_dump(revision_registry, allow_unicode=True)
+            return "### Definition of Done(DoD) の申告"
+        raise AssertionError(f"想定外の git 呼び出し: {args}")
+
+    monkeypatch.setattr(policy_check, "_git", _fake_git)
+    report = policy_check.check("PR_CREATE")
+
+    assert report["policy_source_kind"] == SOURCE_KIND_REVISION
+    assert report["policy_ref"] == _FAKE_SHA
+    assert report["policy_source_revision"] == _FAKE_SHA
+    assert report["freshness_applies_to_judgment"] is True
+
+
+# --- ★ revision の不在を path の不在と報告しないこと ----------------------------
+
+
+def test_missing_path_at_valid_revision_is_none() -> None:
+    """存在する revision の、存在しない path -> ★ None（= 不在）。"""
+    reader = policy_check.make_revision_reader("HEAD")
+    assert reader("docs/no_such_file_for_test.md") is None
+
+
+def test_invalid_revision_is_read_error_not_absence() -> None:
+    """★ 存在しない revision -> ★ SourceReadError。★ None ではない。
+
+    None を返すと呼び出し側は「その path が無い」と解釈する。
+    ★ revision 自体が無いことと、path が無いことは別の事実である。
+    stderr の文言に依存せず、★ 失敗の単位を構造で分ける
+    (reader の生成時に revision を 1 回検証する)。
+    """
+    with pytest.raises(policy_check.SourceReadError):
+        policy_check.make_revision_reader("de" + "ad" * 19)
+
+
+def test_unresolvable_revision_in_check_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既定経路で revision を解決できなかったら ★ UNKNOWN。★ 「policy が無い」ではない。"""
+
+    def _fake_git(*args: str) -> str:
+        if args[0] == "rev-parse" and args[1] == "--verify":
+            raise subprocess.CalledProcessError(1, "git rev-parse")
+        if args[0] == "rev-parse":
+            return _FAKE_SHA + chr(10)
+        if args[0] == "ls-remote":
+            return _FAKE_SHA + chr(9) + "refs/heads/main" + chr(10)
+        raise AssertionError(f"想定外の git 呼び出し: {args}")
+
+    monkeypatch.setattr(policy_check, "_git", _fake_git)
+    report = policy_check.check("PR_CREATE")
+
+    assert report["result"] == UNKNOWN
+    assert any("revision" in p for p in report["problems"])

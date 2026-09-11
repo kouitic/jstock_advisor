@@ -156,7 +156,23 @@ def make_revision_reader(revision: str) -> SourceReader:
     """指定 revision から repository 相対 path の内容を読む reader を作る。
 
     ★ working tree を読まない。`git show <revision>:<path>` を使う。
+
+    ★ **revision の有効性を、reader を作る時点で 1 回だけ検証する。**
+    検証しないと、`git show` の失敗が
+    「その path が revision に無い」なのか「revision 自体が無い」なのかを
+    区別できず、**revision の不在を path の不在として報告してしまう**。
+    これは `SourceReadError` を設けて分けたのと同じ型の誤りである
+    (取得の失敗を事実の不在として報告する)。
+
+    stderr の文言では区別しない。git の版で変わりうるためである。
+    **失敗の単位(revision 単位 / path 単位)を構造で分ける。**
+
+    revision が無効なら `SourceReadError` を送出する。
     """
+    try:
+        _git("rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}")
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise SourceReadError(f"revision を解決できなかった: {revision}") from exc
 
     def _read(relpath: str) -> str | None:
         try:
@@ -167,7 +183,7 @@ def make_revision_reader(revision: str) -> SourceReader:
                 f"{relpath} を UTF-8 として復号できなかった: {exc}"
             ) from exc
         except (subprocess.SubprocessError, OSError):
-            # ★ 対象 revision にその path が無い。
+            # ★ revision は検証済みなので、ここは ★ path が無い場合だけである。
             return None
 
     return _read
@@ -323,8 +339,16 @@ def check(
 
     report: dict[str, Any] = {
         "operation": operation,
-        "policy_ref": local_sha,
+        # ★ policy_ref は ★ REVISION 経路でのみ設定する。
+        #   working tree を読んだ report へ origin/main の SHA を付けると、
+        #   「表示している revision」と「実際に読んだ source」が食い違う。
+        #   Finding 1 と同じ型の誤りであり、USER 指示が明文で禁じている。
+        "policy_ref": None,
         "policy_ref_freshness": freshness,
+        # ★ freshness は「origin/main の鮮度」という独立した事実である。
+        #   WORKING_TREE 経路では ★ 判定に使っていない。それが読み手に分かるよう
+        #   本 flag で明示する。
+        "freshness_applies_to_judgment": False,
         "policy_source_kind": None,
         "policy_source_revision": None,
         "required_policies": [],
@@ -346,18 +370,28 @@ def check(
                 "policy source が検証済みでないため判定しない"
                 f"(freshness = {freshness})",
                 (
-                    "git fetch origin main で origin/main を更新してから再実行してください"
+                    "git fetch origin main で origin/main を更新してから再実行して"
+                    f"ください(local origin/main = {local_sha})"
                     if freshness == STALE
                     else "remote の main SHA を取得できませんでした"
                 ),
             ]
             return report
-        read_source = make_revision_reader(local_sha)
+        try:
+            read_source = make_revision_reader(local_sha)
+        except SourceReadError as exc:
+            # ★ revision を解決できなかった。「policy が無い」ではない。
+            report["result"] = UNKNOWN
+            report["problems"] = [str(exc)]
+            return report
+        report["policy_ref"] = local_sha
+        report["freshness_applies_to_judgment"] = True
         report["policy_source_kind"] = SOURCE_KIND_REVISION
         report["policy_source_revision"] = local_sha
     else:
         # 呼び出し側が読み取り経路を明示した場合。
-        # ★ current effective policy と区別できるよう source を記録する。
+        # ★ current effective policy と区別できるよう source を記録し、
+        # ★ policy_ref は付けない（USER 指示の明文）。
         report["policy_source_kind"] = SOURCE_KIND_WORKING_TREE
 
     try:
