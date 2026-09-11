@@ -104,7 +104,10 @@ _MAIN_REF = "refs/heads/main"
 # 気づけるようにする(検査そのものは tests/unit/test_policy_registry.py が行う)。
 MAX_REGISTRY_FIELD_LENGTH = 200
 
-# repository 相対 path を受け取り、内容を返す。存在しなければ None。
+# repository 相対 path を受け取り、内容を返す。
+# ★ None を返すのは「存在しない」場合だけである。取得に失敗した場合は
+#   None ではなく SourceReadError を送出する(「読めなかった」を「無い」に
+#   化けさせないため)。
 SourceReader = Callable[[str], "str | None"]
 
 
@@ -112,17 +115,41 @@ class RegistryError(Exception):
     """registry を読めない、または内容が壊れている。"""
 
 
+class SourceReadError(Exception):
+    """source の**取得に失敗した**。
+
+    ★ 「存在しない」と区別する。取得の失敗を不在として報告すると、
+    「読めなかった」が「無い」に化ける。Issue #337 で実際に起きた誤診断であり、
+    本 exception はその再発を型で防ぐためにある。
+
+    reader は **存在しない場合にだけ None を返す**。取得はできたが復号できない
+    等の失敗は、None ではなく本 exception で表す。
+    """
+
+
 def _git(*args: str) -> str:
-    """git を呼ぶ。失敗したら CalledProcessError を送出する。"""
+    """git を呼ぶ。失敗したら CalledProcessError を送出する。
+
+    ★ `text=True` を使わない。`text=True` は **locale の encoding** で復号するため、
+    cp932 のような環境では ★ 日本語を含む正本を復号できない(実測: Windows で
+    `UnicodeDecodeError`)。本 repository の管理ファイルは UTF-8 であるから、
+    bytes で受けて ★ 明示的に UTF-8 で復号する。
+
+    ★ 復号に失敗した場合は `UnicodeDecodeError` がそのまま送出される。
+    呼び出し側はこれを ★ 「存在しない」ではなく「取得に失敗した」として扱う
+    (`SourceReadError` を参照)。
+
+    ★ `check=True` かつ `text=True` でないため、`CalledProcessError.stderr` は
+    bytes である。本モジュールは stderr を文字列として組み立てないため影響しない。
+    """
     completed = subprocess.run(
         ["git", *args],
         cwd=_REPO_ROOT,
         capture_output=True,
-        text=True,
         timeout=60,
         check=True,
     )
-    return completed.stdout
+    return completed.stdout.decode("utf-8")
 
 
 def make_revision_reader(revision: str) -> SourceReader:
@@ -134,7 +161,13 @@ def make_revision_reader(revision: str) -> SourceReader:
     def _read(relpath: str) -> str | None:
         try:
             return _git("show", f"{revision}:{relpath}")
+        except UnicodeDecodeError as exc:
+            # ★ 取得はできたが復号できない。★ 「無い」ではない。
+            raise SourceReadError(
+                f"{relpath} を UTF-8 として復号できなかった: {exc}"
+            ) from exc
         except (subprocess.SubprocessError, OSError):
+            # ★ 対象 revision にその path が無い。
             return None
 
     return _read
@@ -152,7 +185,12 @@ def make_working_tree_reader() -> SourceReader:
         target = _REPO_ROOT / relpath
         if not target.is_file():
             return None
-        return target.read_text(encoding="utf-8")
+        try:
+            return target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise SourceReadError(
+                f"{relpath} を UTF-8 として復号できなかった: {exc}"
+            ) from exc
 
     return _read
 
@@ -188,7 +226,11 @@ def check_policy_freshness() -> tuple[str, str | None]:
 
 def load_registry(read_source: SourceReader) -> dict[str, Any]:
     """registry を読む。壊れていれば RegistryError を送出する。"""
-    raw_text = read_source(REGISTRY_RELPATH)
+    try:
+        raw_text = read_source(REGISTRY_RELPATH)
+    except SourceReadError as exc:
+        # ★ 「読めなかった」を「無い」と報告しない。
+        raise RegistryError(f"registry を取得できなかった: {exc}") from exc
     if raw_text is None:
         raise RegistryError(f"registry が見つからない: {REGISTRY_RELPATH}")
     try:
@@ -245,7 +287,12 @@ def validate_references(
             problems.append(f"{policy_id}: ssot_file または ssot_anchor が無い")
             continue
 
-        text = read_source(ssot_file)
+        try:
+            text = read_source(ssot_file)
+        except SourceReadError as exc:
+            # ★ 取得の失敗を「無い」と報告しない。診断が変わると原因を誤らせる。
+            problems.append(f"{policy_id}: ssot_file を取得できなかった: {exc}")
+            continue
         if text is None:
             problems.append(f"{policy_id}: ssot_file が対象 revision に無い: {ssot_file}")
             continue

@@ -470,3 +470,86 @@ def test_missing_registry_is_registry_error() -> None:
 def test_registry_without_required_sections_is_error() -> None:
     with pytest.raises(policy_check.RegistryError):
         policy_check.load_registry(lambda _relpath: yaml.safe_dump({"policies": []}))
+# --- ★ 実際の git を通す（monkeypatch しない）-----------------------------------
+
+
+def test_revision_reader_decodes_utf8_from_real_git() -> None:
+    """★ `_git` を monkeypatch せず、★ 実際の git 出力を復号する。
+
+    ★ この 1 件が無いと、Issue #337 で実際に起きた欠陥を捕まえられない。
+    `subprocess.run(..., text=True)` は ★ locale の encoding で復号するため、
+    cp932 の環境では ★ 日本語を含む正本を読めず `UnicodeDecodeError` になる。
+    ★ 他のテストはすべて `_git` を monkeypatch しており、★ 実際の復号を
+    1 度も通していなかった。CI は Linux / UTF-8 なので ★ green でも検出できない。
+
+    revision は `HEAD` を使う。`origin/main` は ★ CI の shallow checkout では
+    存在しないことがあるためである(actions/checkout の既定は fetch-depth = 1)。
+    """
+    reader = policy_check.make_revision_reader("HEAD")
+    text = reader("docs/development_workflow.md")
+
+    assert text is not None, "HEAD から正本を読めていない"
+    # ★ 日本語を含む見出しが復号できていること
+    assert "### Definition of Done(DoD) の申告" in text
+
+
+def test_working_tree_reader_decodes_utf8_from_real_file() -> None:
+    """working tree 側も同じく実ファイルで確認する。"""
+    reader = policy_check.make_working_tree_reader()
+    text = reader("docs/development_workflow.md")
+
+    assert text is not None
+    assert "### Definition of Done(DoD) の申告" in text
+
+
+# --- ★ 取得の失敗を「不在」と報告しないこと -------------------------------------
+
+
+def _undecodable_reader(relpath: str) -> str | None:
+    """復号できない source を模す reader。"""
+    raise policy_check.SourceReadError(f"{relpath} を UTF-8 として復号できなかった")
+
+
+def test_unreadable_registry_is_not_reported_as_absent() -> None:
+    """★ registry を取得できなかったとき「見つからない」と言わないこと。
+
+    ★ 今回の欠陥の本質はここである。encoding を直しても、別の理由で読めなければ
+    同じ誤診断が出る。★ 取得の失敗と事実の不在を分ける。
+    """
+    with pytest.raises(policy_check.RegistryError) as exc_info:
+        policy_check.load_registry(_undecodable_reader)
+
+    message = str(exc_info.value)
+    assert "取得できなかった" in message
+    assert "見つからない" not in message
+
+
+def test_unreadable_ssot_file_is_not_reported_as_absent(
+    registry: dict[str, Any],
+) -> None:
+    """★ ssot_file を取得できなかったとき「対象 revision に無い」と言わないこと。"""
+    problems = policy_check.validate_references(registry, _undecodable_reader)
+
+    assert problems
+    assert all("取得できなかった" in p for p in problems)
+    assert not any("revision に無い" in p for p in problems)
+
+
+def test_decode_failure_surfaces_as_source_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 復号失敗が None ではなく SourceReadError になること。
+
+    None を返すと呼び出し側は「存在しない」と解釈する。★ そこを型で分ける。
+    """
+
+    def _fake_git(*args: str) -> str:
+        raise UnicodeDecodeError(
+            "cp932", bytes([0x81]), 0, 1, "illegal multibyte sequence"
+        )
+
+    monkeypatch.setattr(policy_check, "_git", _fake_git)
+    reader = policy_check.make_revision_reader(_FAKE_SHA)
+
+    with pytest.raises(policy_check.SourceReadError):
+        reader("docs/development_workflow.md")
