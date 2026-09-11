@@ -158,6 +158,11 @@ def _build_output_values(summary: EvaluationRunSummary) -> dict[str, Any]:
         "missing_recommendation_count": summary.missing_recommendation_count,
         "provider_call_count": summary.provider_call_count,
         "duration_ms": summary.duration_ms,
+        # Issue #71 F-C12: 事前確認を通ったのに条件付き insert が弾かれた件数。
+        # ★ 監査へ載せないと「評価対象だったのに保存成功数に入っていない分」を
+        # 後から説明できない。0 でないこと自体は異常ではなく、並行実行が
+        # 起きた事実の記録である。
+        "concurrent_conflict_count": summary.concurrent_conflict_count,
     }
 
 
