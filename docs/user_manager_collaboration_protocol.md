@@ -32,6 +32,7 @@ USER_MANAGER_COLLABORATION_SSOT
 | [docs/issue_label_policy.md](issue_label_policy.md) | Issue 分類 / Priority / release-blocker / Progress Status |
 | [docs/operations_manual.md](operations_manual.md) | Production 運用手順 |
 | **本文書** | **利用者 ↔ 管理者 間の会話・意思決定・レビュー・作業指示・Human Gate の運用** |
+| `docs/policy_registry.yaml` | 操作 -> 読むべき正本の節の**索引**(`REGISTRY_IS_NOT_SSOT = YES`。規則本文を持たない) |
 
 同じルールが複数箇所にあると必ず片方が古くなる。
 本文書は「誰が何を決めるか」「どう指示し、どう受け取るか」に限定する。
@@ -1527,6 +1528,124 @@ LATEST_EXPLICIT_HUMAN_DECISION_WINS_TEMPORARILY
 [development_workflow.md](development_workflow.md) 9.5節により
 **Issue を起点とする**(doc-only であっても governance rule の変更は Issue 必須)。
 
+### POLICY_AUTHORITY = HUMAN_ONLY
+
+```
+POLICY_AUTHORITY = HUMAN_ONLY
+```
+
+**本節が既に定めていることへ識別子を与えるものであり、規則の内容は変更しない。**
+上の「ルール」は以前から「`管理者 が独自の判断でルールを追加・変更してよい`という
+意味ではない」「作業 AI が独自にルールを変える根拠にはならない」と定めている。
+参照可能な識別子が無かったため、機械からも入口からも指せなかった。
+本項はそれを指せるようにする(Issue #337)。
+
+恒久規則が成立する条件。
+
+```
+利用者の明示的な承認  +  本文書または該当 SSoT への反映
+```
+
+管理者・開発者は、いずれの役割であっても恒久規則を制定できない。
+
+#### AI が制定してはならないもの
+
+```
+新しい義務 / 新しい禁止 / 新しい Human Gate / 新しい承認条件
+新しい必須フィールド / 新しい必須フォーマット
+新しい作業停止条件 / 新しい完了条件
+正本に無い status / gate / declaration を、強制力のあるものとして運用すること
+```
+
+**この列挙は例示である。** 他の AI に対する義務・禁止・Gate・完了条件として
+扱うものは、名称がここに無くてもすべて本項の対象である。
+
+#### 一回限りの指示と恒久ルールの判定
+
+```
+判定質問  その指示を「他の AI に対する義務・禁止・Gate・完了条件」として扱うか
+
+扱う      -> 恒久ルール。下記 RULE_PROPOSAL の手続きへ
+扱わない  -> 一回限りの作業指示。文書化しない
+```
+
+利用者のその場限りの具体的な操作指示(「この Issue を先に見て」等)は
+恒久ルールではなく、本項によって無効化されない。
+
+#### 単独では恒久規則の正本にならないもの
+
+```
+チャットの合意 / AI の memory / handoff / Issue コメント /
+過去の AI の出力 / 慣行 / 多数回使用されている用語
+```
+
+いずれも記録としては有効である。**恒久規則の正本になるのは本文書と各 SSoT だけ**
+であるという意味である。
+
+### RULE_PROPOSAL(恒久規則を追加・変更する手続き)
+
+上の「ルール」が求める Issue 起点の同期を、手続きとして具体化する。
+**新しい承認を追加するものではない。** 既存の Issue 起点の原則
+([development_workflow.md](development_workflow.md) 9.5節)と、
+governance / docs 改善の集約(同 9.6節)に接続する。
+
+```
+1  提案      Issue へ RULE_PROPOSAL として書く
+             何を / なぜ / どの正本のどの節へ入れるか / 既存規則との関係
+             (新設か、既存規則の明確化か)を区別して書く
+2  承認      利用者が承認する。承認の記録は下記
+3  反映      正本へ PR で反映する。CLAUDE.md へ規則本文を複製しない
+4  発効      merge と main CI PASS の後。必要なら明示的な発効宣言を置く
+```
+
+**docs が main に入っただけでは発効しない規則がある。** 前例として
+[development_workflow.md](development_workflow.md) 2.6.10節と
+[ai_operation_message_contract.md](ai_operation_message_contract.md) 0節が
+「人間による明示的な発効宣言」を要件としている。新しい発効方式を作らず、
+この形を踏襲する。
+
+```
+IMPLEMENTATION_INSTRUCTION != NEW_POLICY_EFFECTIVE_FOR_ALL_WORK
+```
+
+規則を作るための作業指示が出たことと、その規則が全作業へ適用されることは別である。
+
+**承認記録の書式は
+[ai_operation_message_contract.md](ai_operation_message_contract.md) 8節が正本**
+であり、本文書へ複製しない。
+
+### MEMORY_POLICY_AUTHORITY = NONE
+
+```
+MEMORY_POLICY_AUTHORITY = NONE
+```
+
+AI の memory は恒久規則の正本にならない。本節の適用範囲の明示であり、
+新しい規則ではない。
+
+memory は repository の外にあり、CI からも review からも見えない。そこへ規範情報を
+保存すると、セッションをまたいで正本と同じ強さで再現する。実際に、撤回された
+運用ルールが作業 AI の memory へ「利用者からのフィードバック」として保存されていた
+(Issue #337)。撤回の連絡が無ければ、翌日以降も従い続ける状態だった。
+
+```
+保持してよい    作業途中の事実 / Issue 番号 / branch / commit SHA /
+                未完了の作業 / 調査結果 / 環境の癖
+保持してはいけない
+                「〜しなければならない」「〜は禁止」といった規範
+                Human Gate / 必須フィールド / 必須フォーマット / 完了条件
+                新しい status / 新しい承認条件
+```
+
+**出所を区別して保存する。** 利用者が述べたことと、AI が自分で決めたことを
+混ぜない。**自分が作った運用を「利用者からのフィードバック」として保存しない。**
+
+#### session bootstrap
+
+セッション開始時に規則を memory から復元しない。必要になった時点で
+正本を読む(JIT lookup)。どの操作でどの節を読むかの索引は
+`docs/policy_registry.yaml` にある(索引であり正本ではない)。
+
 ### 例
 
 ```
@@ -1703,3 +1822,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-06 | Instruction ID の使用済み判定を補完し、Human Gate の提示形式の正本を参照へ移した(Issue #184)。(1)4.1節の「使用済み」の列挙へ `ANSWERED` / `FAILED` / `BLOCKED` を追加し、`ONE_ID_ONE_RELAY_EVENT = YES` を明記した。従来の列挙(実行完了 / CANCELLED / SUPERSEDED / 途中停止 / 作業開始後の取消)には、**指示が失敗した場合と作業者が BLOCKED を返した場合**が含まれておらず、その ID を再利用すると回答の対応付けが壊れる余地が残っていた。採番規則そのもの(Asia/Tokyo の日付 / 作業者別の日次連番 / 日付変更で 001 へリセット)は変更していない。(2)2節へ「提示のフォーマット」を追加し、承認を求める際の形式(固定 4 節 + AUDIT_INFO の分離、gate 種別ごとの exact identifier の扱い)の正本が新設した docs/ai_operation_message_contract.md 8節であることを参照で示した。**本文書は「どの操作に承認が要るか」を定め、形式を複製しない。** 同文書は提示形式のみを定めるものであり `APPROVAL_UNIT_CONSOLIDATION = NO`、本節の承認単位を 1 つも統合・緩和していない。(3)12節へ正本の所在を 1 行追加した。既存の Human Gate 一覧 / `MERGE_EXECUTOR = USER` / exact ChangeSet approval / レビュー判定 4 種 / 指示プロトコル / 3.8節の lock omission 判定はいずれも変更していない。コード・Production 挙動の変更なし |
 | 2026-09-06 | 役割を製品非依存にし、ファイル名を chatgpt_collaboration_protocol.md から改称した(Issue #190)。管理・レビュー役が 2026-09-06 に ChatGPT 上の AI から交代したことで、**役割が特定の生成AI製品名で書かれていると、担当が変わるたびに正本を書き換えることになる**という構造的な問題が表面化した。そこで `PRODUCT_AGNOSTIC_ROLE_NAMING = YES` とし、役割を権限と責務で定義する。(1)1節を 4 役割(`USER` / `MANAGER` / `DEVELOPER_WITH_DEPLOY` / `DEVELOPER`)で書き直し、各役割の権限・責務・禁止事項を明記した。開発者 2 役割の差は「deploy 実作業を行うか」の 1 点だけであり、調査・設計・実装・報告・state 書き戻しの規則はすべて共通である。(2)**現在の担当は本文書へ焼き込まない**(`ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録`)。恒久文書と現在状態を分ける 10節の原則に従う。(3)1.5節の `PRODUCTION_DEPLOYMENT_EXECUTOR` と `DEPLOY_OPERATION_DELEGATION` を役割ベースへ改めた(担当者名を書かない)。(4)識別子を `<対象>_OWNER = <役割>` 形式へ統一した(`LOCK_REVIEW_OWNER` / `ASSIGNMENT_READ_BARRIER_OWNER` / `PRIORITY_READ_OWNER` / `STATE_READ_OWNER` = `MANAGER`、`NEXT_MANAGER_GATE_OWNS_RECONCILIATION`、`USER_MANAGER_COLLABORATION_SSOT`)。接頭辞へ役割名を埋め込まないため、次に体制が変わっても識別子名が変わらない。(5)本文中の "ChatGPT" 47 か所を役割名へ置換し、歴史的名称として 1 節で 1 か所だけ定義した(過去の記録が誰を指すか分かるようにするため)。(6)ファイル名を製品非依存へ改称した。**転送用スタブは残さない。** 過去の GitHub metadata からの参照 61 件を実測したところ**すべて平文で markdown link は 0 件**であり、改称で壊れるリンクが存在しないためである。**過去の Issue コメント・snapshot に残る "ChatGPT" / `ACTOR = CHATGPT` は append-only の記録であり書き換えていない。** 本文書の変更履歴の過去エントリも編集していない。承認単位・Human Gate・レビュー判定 4 種・指示プロトコル・merge 実行者はいずれも変更していない。コード・Production 挙動の変更なし |
 | 2026-09-08 | 3.8節へ「DoD 申告の確認」を追加した(Issue #252、打ち手 D-1)。development_workflow.md 3節が新設した DoD 5 項目の申告について、`DOD_DECLARATION_REVIEW_OWNER = MANAGER` とし、**「DoD 5 項目の申告があるか(空欄・無言の省略が無いか)」「申告と diff が矛盾していないか」**の2 項目を実装レビューの確認観点へ加えた。**レビュワーが「正しいか」を判定するのではなく「申告されているか」「矛盾していないか」を見る**(正しさの一次責任は実装者にある)。閾値の定数に diff があるのに「境界の連続性 = 該当なし」と書かれている場合や、「該当あり・未解消」と書かれているのに引き継ぎ先の Issue が無い場合は FAIL とする。**判定基準の本文は development_workflow.md 3節が正本であり本文書へ複製していない。**DoD の申告は CI で強制せず(H-252-3)、未記入は 3節の判定 4 種のうち INSUFFICIENT_EVIDENCE として扱い記入を求める(判定語を独自に増やさない)。**3.8節の既存の観点(PRIMARY_DOMAIN / LOCKED_DOMAINS / SHARED_TOUCHED / LOCK_LEVEL / LEVEL_1 の compatibility evidence / SCOPE_EXPANSION)と `LOCK_OMISSION_REVIEW_PASS_ALLOWED = NO`、2節の Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet approval、レビュー判定 4 種はいずれも変更していない。** 既存節の削除・書き換えは行っていない(純粋な追加)。コード・Production 挙動の変更なし |
+| 2026-09-12 | 8節へ `POLICY_AUTHORITY = HUMAN_ONLY` / `RULE_PROPOSAL` / `MEMORY_POLICY_AUTHORITY = NONE` の 3 項を追記し、0節の責務分離表へ `docs/policy_registry.yaml` の 1 行を追加した(Issue #337)。★ **`POLICY_AUTHORITY` は既存規則への識別子付与であり、規則の内容を変更していない**(8節は以前から「管理者が独自の判断でルールを追加・変更してよいという意味ではない」「作業 AI が独自にルールを変える根拠にはならない」と定めていた。参照可能な識別子が無かったため機械からも入口からも指せず、実際に正本外の運用ルールが 4 件課された)。AI が制定してはならないものの列挙・一回限りの指示と恒久ルールの判定質問・単独では恒久規則の正本にならないものの列挙を追加したが、いずれも**既存規則の適用範囲の明示**である。`RULE_PROPOSAL` は 8節が既に要求する Issue 起点の同期(development_workflow.md 9.5節)へ手続きを与えるものであり、★ **新しい承認を追加していない**。発効の形は 2.6.10節と ai_operation_message_contract.md 0節の前例を踏襲し、新方式を作っていない。`MEMORY_POLICY_AUTHORITY` は 8節の適用範囲の明示である(memory は repository の外にあり CI からも review からも見えないため、規範情報を保存するとセッションをまたいで正本と同じ強さで再現する。実例 = 撤回された運用ルールが作業 AI の memory へ「利用者からのフィードバック」として保存されていた)。**承認記録の書式は ai_operation_message_contract.md 8節が正本であり複製していない。****1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節のレビュー判定 4 種・4節の指示形式・10節の恒久ルールと現在状態の分離はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |

@@ -1,0 +1,188 @@
+# REGISTRY_IS_NOT_SSOT = YES
+# 本ファイルは index である。規則の正本は各 docs であり、
+# 本ファイルと食い違う場合は各 docs が優先する。
+# 本ファイルは規則本文を持たない。pointer のみを持つ。
+#
+# 由来 = Issue #337。operation ごとに「どの正本のどの節を読むべきか」を
+# 機械可読に引けるようにする。docs/functional_domains.md が
+# 「ルール本文を本書へ複製しない。判定材料を提供する」と自己限定しているのと
+# 同じ性格の文書である。
+#
+# ssot_anchor は見出し文字列である。行番号は動くため使わない。
+# entry へ規則本文を書き始めたら tests/unit/test_policy_registry.py が落ちる
+# (文字列長の上限で検出する)。これは二重正本化の予防である。
+#
+# operations は既存正本から導出したものであり、新しい操作概念を作っていない。
+
+operations:
+  - IMPLEMENTATION_START
+  - GIT_PUSH
+  - PR_CREATE
+  - MERGE
+  - ISSUE_CLOSE
+  - PRODUCTION_MANUAL_INVOKE
+  - CHANGESET_CREATE
+  - CHANGESET_EXECUTE
+
+policies:
+  # --- 実装の着手 ---------------------------------------------------------
+  - policy_id: DEVELOPMENT_WORKFLOW.DOMAIN_WIP_DECLARATION
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 2.6.4 掲示(DOMAIN_WIP_DECLARATION)"
+    applicable_operations: [IMPLEMENTATION_START]
+    human_gate_required: false
+    machine_enforceable: true
+
+  - policy_id: DEVELOPMENT_WORKFLOW.SHARED_LOCK_LEVEL
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 2.6.5 SHARED の LOCK_LEVEL"
+    applicable_operations: [IMPLEMENTATION_START]
+    human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: DEVELOPMENT_WORKFLOW.ISSUE_ORIGINATED_CHANGE
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "## 9.5 すべての変更を Issue 起点とする"
+    applicable_operations: [IMPLEMENTATION_START, PR_CREATE]
+    human_gate_required: false
+    machine_enforceable: false
+
+  # --- push ---------------------------------------------------------------
+  - policy_id: DEVELOPMENT_WORKFLOW.LOCAL_TEST_POLICY
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "## 4. ローカルテスト方針(D)"
+    applicable_operations: [GIT_PUSH]
+    human_gate_required: false
+    machine_enforceable: false
+
+  # --- PR 作成 ------------------------------------------------------------
+  - policy_id: DEVELOPMENT_WORKFLOW.DOD_DECLARATION
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### Definition of Done(DoD) の申告"
+    applicable_operations: [PR_CREATE]
+    human_gate_required: false
+    machine_enforceable: true
+
+  - policy_id: DEVELOPMENT_WORKFLOW.NO_AUTO_CLOSE_KEYWORD
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### Issue の自動 close を避ける"
+    applicable_operations: [PR_CREATE]
+    human_gate_required: false
+    machine_enforceable: true
+
+  - policy_id: DEVELOPMENT_WORKFLOW.TIME_SEMANTICS_DECLARATION
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 3.5.8 PR での宣言"
+    applicable_operations: [PR_CREATE]
+    human_gate_required: false
+    machine_enforceable: true
+
+  - policy_id: PROTOCOL.DOD_REVIEW
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "### DoD 申告の確認"
+    applicable_operations: [PR_CREATE]
+    human_gate_required: false
+    machine_enforceable: false
+
+  # --- merge --------------------------------------------------------------
+  - policy_id: DEVELOPMENT_WORKFLOW.HUMAN_APPROVAL_BOUNDARY
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "## 10. 人間承認の境界(J)"
+    applicable_operations:
+      [MERGE, PRODUCTION_MANUAL_INVOKE, CHANGESET_CREATE, CHANGESET_EXECUTE]
+    human_gate_required: true
+    machine_enforceable: false
+
+  - policy_id: PROTOCOL.MERGE_EXECUTOR
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 2.6 merge の実行者"
+    applicable_operations: [MERGE]
+    human_gate_required: true
+    machine_enforceable: false
+
+  - policy_id: DEVELOPMENT_WORKFLOW.CODE_WIP_RELEASE
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 2.6.6 code WIP の解放"
+    applicable_operations: [MERGE]
+    human_gate_required: false
+    machine_enforceable: true
+
+  # --- Issue close --------------------------------------------------------
+  - policy_id: DEVELOPMENT_WORKFLOW.SAME_TYPE_SWEEP
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 同型 sweep(close 前)"
+    applicable_operations: [ISSUE_CLOSE]
+    human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: DEVELOPMENT_WORKFLOW.PRE_CLOSE_SYNC
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### close 前の最小同期"
+    applicable_operations: [ISSUE_CLOSE]
+    human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: ISSUE_LABEL_POLICY.RELEASE_BLOCKER
+    ssot_file: docs/issue_label_policy.md
+    ssot_anchor: "## 6. Release Blocker"
+    applicable_operations: [ISSUE_CLOSE]
+    human_gate_required: true
+    machine_enforceable: false
+
+  - policy_id: ISSUE_LABEL_POLICY.CLOSE_FLOW
+    ssot_file: docs/issue_label_policy.md
+    ssot_anchor: "### 13.4 Issue close 前"
+    applicable_operations: [ISSUE_CLOSE]
+    human_gate_required: true
+    machine_enforceable: false
+
+  # --- Production ---------------------------------------------------------
+  - policy_id: DEVELOPMENT_WORKFLOW.VERIFICATION_MANUAL_INVOCATION
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 10.1 検証目的の Production 手動起動(VERIFICATION_MANUAL_INVOCATION)"
+    applicable_operations: [PRODUCTION_MANUAL_INVOKE]
+    human_gate_required: true
+    machine_enforceable: false
+
+  - policy_id: PROTOCOL.HUMAN_GATE
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 2. Human Gate"
+    applicable_operations:
+      [MERGE, PRODUCTION_MANUAL_INVOKE, CHANGESET_CREATE, CHANGESET_EXECUTE]
+    human_gate_required: true
+    machine_enforceable: false
+
+  - policy_id: MESSAGE_CONTRACT.HUMAN_GATE_FORMAT
+    ssot_file: docs/ai_operation_message_contract.md
+    ssot_anchor: "## 8. Human Gate の提示フォーマット"
+    applicable_operations:
+      [MERGE, PRODUCTION_MANUAL_INVOKE, CHANGESET_CREATE, CHANGESET_EXECUTE]
+    human_gate_required: true
+    machine_enforceable: false
+
+  # --- 全 operation に共通する記録 ----------------------------------------
+  - policy_id: DEVELOPMENT_WORKFLOW.ISSUE_STATE_SNAPSHOT
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 6.5.3 ISSUE_STATE_SNAPSHOT contract"
+    applicable_operations:
+      [IMPLEMENTATION_START, PR_CREATE, MERGE, ISSUE_CLOSE]
+    human_gate_required: false
+    machine_enforceable: true
+
+  - policy_id: MESSAGE_CONTRACT.NORMAL_REPORT_FIELDS
+    ssot_file: docs/ai_operation_message_contract.md
+    ssot_anchor: "### 2.2 NORMAL_REPORT の必須フィールド"
+    applicable_operations:
+      [IMPLEMENTATION_START, GIT_PUSH, PR_CREATE, MERGE, ISSUE_CLOSE,
+       PRODUCTION_MANUAL_INVOKE, CHANGESET_CREATE, CHANGESET_EXECUTE]
+    human_gate_required: false
+    machine_enforceable: true
+
+  - policy_id: PROTOCOL.POLICY_AUTHORITY
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 8. ルール変更の扱い"
+    applicable_operations:
+      [IMPLEMENTATION_START, GIT_PUSH, PR_CREATE, MERGE, ISSUE_CLOSE,
+       PRODUCTION_MANUAL_INVOKE, CHANGESET_CREATE, CHANGESET_EXECUTE]
+    human_gate_required: false
+    machine_enforceable: false
