@@ -992,7 +992,7 @@ REQUIRED_CONTROLS = 該当する全トリガの control の union
 
 **`C-CO` / `C-CS`(T4)** — 1 ファイルだけ clock を固定して他モジュールとの整合を
 壊さないこと。固定化後、単独実行だけでなく **cohort の組み合わせ実行**で回帰が
-無いことを確認する。cohort は `tests/unit/test_time_semantics_guard.py` の
+無いことを確認する。cohort は `tests/support/time_semantics_registry.py` の
 registry に定義されている。
 
 Issue #143 は単独実行と全件 CI では確認したが、**部分集合の組み合わせ実行を
@@ -1024,9 +1024,10 @@ pytest の収集順(アルファベット)は `handler -> integration` であり
 新規の失敗が 1 件でもあれば、それは当該変更の regression として扱う。
 ```
 
-order case は `tests/unit/test_time_semantics_guard.py` に宣言し、
-同ファイルが metadata の健全性(登録済みモジュールのみ / cohort 外を参照しない /
-重複が無い / 順序依存と宣言した cohort が order case を持つ)を検証する。
+order case は `tests/support/time_semantics_registry.py` に宣言し、
+`tests/unit/test_time_semantics_guard.py` が metadata の健全性(登録済みモジュールのみ /
+cohort 外を参照しない / 重複が無い / 順序依存と宣言した cohort が order case を持つ)を
+検証する。
 **実行そのものは自動化しない**(1 回あたり数分を要するため、CI を重くしない)。
 
 
@@ -1070,8 +1071,9 @@ CI の複数時刻実行 / 時刻別 matrix job / sleep・wait / 現在時刻依
 ### 3.5.6 registry
 
 時刻に敏感なテストモジュールは
-`tests/unit/test_time_semantics_guard.py` の registry に登録する。
-registry 自身の健全性(登録漏れ・削除・化石化した例外)も同ファイルで検証される。
+`tests/support/time_semantics_registry.py` の registry に登録する。
+registry 自身の健全性(登録漏れ・削除・化石化した例外)は
+`tests/unit/test_time_semantics_guard.py` が検証する。
 
 ```
 FORBIDDEN         wall clock 呼び出しがあれば FAIL
@@ -2446,3 +2448,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-08 | P1 以外の governance / 開発運用 docs の改善を**週次 1 PR へまとめる**9.6節を新設した(Issue #251、GOVERNANCE_CHANGE_BATCHING = WEEKLY)。運用ルールの改善は 1 件ずつが小さく、その都度 Issue と PR を作ると**改善そのものが Issue 数を押し上げる**(2026-09-05〜07 の新規 48 件のうち 17 件が運用ルール整備だった)。集約先は Issue #213(棚卸)または #220 とし、週 1 回 1 PR で反映する。P1(運用が止まる・誤判定を生む・公開面へ影響する)は従来どおり即時に扱う。★ **9.5節の Issue 起点の原則は変えていない**(集約先が Issue であり、「Issue なしで直してよい」という意味ではない)。**3節の実装パイプライン・3.5節の時間意味論変更ゲート・4節のローカルテスト方針(LOCAL_FULL_PYTEST_DEFAULT / FULL_SUITE_AUTHORITY)・2.5節の指示プロトコル・2.6節の WIP と domain lock・10節の人間承認の境界・OPPORTUNISTIC_FIX_FORBIDDEN はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-08 | §3 へ `DOD_DECLARATION_REQUIRED = YES`(DoD 5 項目の申告)と `SAME_TYPE_SWEEP_REQUIRED = YES`(根本原因が確定した Issue の close 前に同型を 1 回掃く)の 2 節を新設した(Issue #252、打ち手 D-1 / D-4)。直近の欠陥を根本原因で束ねると**境界の連続性 / 単調性 / 定常でない 1 回目 / 単位・スケール / 失敗の可視性**の 5 型に収まり、いずれも実装した本人が PR の時点で確認できたものだった。レビューで毎回指摘するのではなく**実装者に申告させる**形に変える(レビュワーが気づけるかどうかに依存させないため)。**「該当なし」も 1 行で申告し空欄を許さない**(確認したうえで該当しないのか、確認していないのかを読み手が区別できないため)。**満たしていない項目は「該当あり・未解消」とし、理由と引き継ぎ先の Issue を1 行で書く**(未解消のまま追跡が切れるのを防ぐため)。申告は自己申告であり正しさの保証ではなく、レビュワーは申告と diff の矛盾を見る(3.5節の TIME_SEMANTICS_IMPACT と同じ扱い)。同型 sweep は**値ではなく形で探し、0 件でも記録する**(「調べていない」と「調べて無かった」を区別するため)。見つかった同型は 1 件の Issue へ束ね、3〜5 件に分裂させない。**sweep は「見つけたら全部直す」ではなく**、同じ PR で直すのは同じファイル・同じ lock の範囲内に限る(9.5節の scope と食い違わせないため)。あわせて .github/PULL_REQUEST_TEMPLATE.md へ `## DoD` と `## 同型 sweep` の 2 節を `## 確認` の前へ挿入した(**既存の 概要 / TIME_SEMANTICS_IMPACT / 確認 の 3 節は byte 単位で不変**。Issue #145 のゲートをそのまま残す)。**DoD と同型 sweep は CI で強制しない**(未記入でも CI を落とさない。人が読む欄として運用し、強制の要否は効果と副作用を見てから別途判断する。いきなり強制すると通すためだけの記入が増えて申告の意味が失われる)。**§3.5 時間意味論変更ゲート / §4 ローカルテスト方針(LOCAL_FULL_PYTEST_DEFAULT・FULL_SUITE_AUTHORITY を含む) / §2.5 指示プロトコル / §2.6 WIP・domain lock / §9.5 Issue 起点の原則(OPPORTUNISTIC_FIX_FORBIDDEN を含む) / §10 人間承認の境界 / CI の必須 job 構成はいずれも変更していない。** 既存節の削除・書き換えは行っていない(純粋な追加)。コード・Production 挙動の変更なし |
 | 2026-09-09 | 10 節へ **10.1 検証目的の Production 手動起動**を新設し、2.6.9 へ **read model の識別子**の規則を追記した(Issue #213 / #188)。10.1: `manual Production Lambda invocation` は検証目的でも人間承認を要する例外であることを明示し、手順を定めた(自然実行で確認できないことを示す / ★ VALIDATION mode を優先し NORMAL は最後の手段 / ★ 副作用を列挙してから承認を求める / ★ 1 回の承認で 1 回の起動 / 08:00・18:00・毎時 :25〜:35 を避ける / 承認は利用者)。★ **Production failure injection の禁止と「人工的な Production 実行は禁止」という原則は変えていない**(本項は例外の手続きを定めるものであり、原則を緩めない)。利用者判断(2026-09-08 / #213 issuecomment-5584115344)による明文化である。2.6.9: read model の各更新は **GENERATED_AT(UTC の実測値)** で識別し、`UPDATE_LATEST_<n>` のような連番を識別子にしない(★ 並行更新で同じ番号が別の更新へ割り当てられ、後から辿れなくなる実例が 2026-09-09 に発生した)。**3 節の実装パイプライン・4 節のローカルテスト方針・2.5 節の指示プロトコル・2.6 節の WIP と domain lock の判定・10 節のその他の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-12 | §3.5 の 3 か所で registry の所在を実体へ追随させた(Issue #277)。cohort / order case / 登録先の参照が `tests/unit/test_time_semantics_guard.py` のままだったが、registry(データと語彙)は `tests/support/time_semantics_registry.py` へ移動している。conftest から参照する必要が生じ、conftest がテストモジュールを import するのは収集時にテスト本体が実行されるため収集経路として不健全だからである。あわせて「同ファイルが検証する」という記述を 2 か所で分けた。**宣言・登録は registry、健全性の検証(V1-V8 / O1-O6)は guard** であり、移動により両者が別ファイルになったためである。★ **パスの追随のみであり、規則の内容は 1 文字も変更していない**(トリガ T1-T4 / control / 決定表 / FORBIDDEN と ALLOWED_EXISTING の扱い / order case の自動化しない方針 / registry を全走査にしない方針はいずれも変更していない)。2026-09-03 の変更履歴は当時の事実であり書き換えていない。コード・Production 挙動の変更なし |
