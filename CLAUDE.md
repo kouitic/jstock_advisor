@@ -115,6 +115,17 @@ ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録
   別であり、`PASS_WITH_CONDITIONS`はHuman Gate通過を意味しない。
   `INSUFFICIENT_EVIDENCE`は不合格ではなく証拠不足であり、推測でPASSにしない。
 
+- **恒久規則を制定・変更できるのは利用者だけである**
+  (`POLICY_AUTHORITY = HUMAN_ONLY`)。管理者・開発者は、いずれの役割であっても
+  正本に無い運用ルールを制定してはならない。必要を認めた場合は
+  `RULE_PROPOSAL`として利用者へ提案し、承認と正本への反映を経てから発効する。
+  **AIのmemoryは恒久規則の正本にならない**
+  (`MEMORY_POLICY_AUTHORITY = NONE`)。操作ごとに読むべき正本の節は
+  `docs/policy_registry.yaml`が索引として持つ(索引であり正本ではない)。
+  正本は
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  §8であり、**本ファイルへ複製しない**。
+
 - **GitHub Issueを作成・調査・更新・closeする場合は、
   [docs/issue_label_policy.md](docs/issue_label_policy.md) を必ず読み、
   そのルールに従うこと。** labelはIssue Type / Priority /
