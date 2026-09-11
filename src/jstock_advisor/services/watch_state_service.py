@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -33,6 +34,8 @@ from jstock_advisor.domain.signals.trade_event_detection import TradeEvent
 from jstock_advisor.infrastructure.local_repository.watch_state_repository import (
     WatchStateRepository,
 )
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
@@ -110,7 +113,10 @@ class WatchStateService:
         cooldown_until_date >= today)の銘柄についてはこのメソッド自体を
         呼ばないこと(§5-2)。
         """
-        existing = self._repo.get_active(stock_code, WatchType.NEAR_BUY)
+        # Issue #71 F-C13: CASに使う生JSONを、読み取りと**同じ呼び出し**で得る
+        # (後からget_raw_data()し直すと、その間に別実行が書いた値を掴みうる)。
+        fetched = self._repo.get_active_with_raw(stock_code, WatchType.NEAR_BUY)
+        existing, existing_raw = fetched if fetched is not None else (None, None)
 
         # コードレビュー対応(2026-08、指摘1): 「今日実際に買い水準へ到達した」
         # という最新の有効な評価結果を、stale終了より優先する。数営業日の
@@ -122,7 +128,7 @@ class WatchStateService:
             previous_days = existing.consecutive_business_days
             started_at = existing.started_at
             best_distance = existing.best_distance_pct
-            self._end(existing, today, END_REASON_PROMOTED_TO_BUY)
+            self._end(existing, today, END_REASON_PROMOTED_TO_BUY, existing_raw)
             return WatchTransitionResult(
                 watch_type=WatchType.NEAR_BUY,
                 transition_type=WatchTransitionType.PROMOTED_TO_BUY,
@@ -138,7 +144,7 @@ class WatchStateService:
                 previous_days = existing.consecutive_business_days
                 started_at = existing.started_at
                 best_distance = existing.best_distance_pct
-                self._end(existing, today, END_REASON_STALE)
+                self._end(existing, today, END_REASON_STALE, existing_raw)
                 # コードレビュー対応: STALE終了直後に同一営業日内で新規監視を
                 # 再開させない(終了通知の意味を保つため、既存の「即日再開」
                 # 挙動は廃止し、次回評価から改めて開始条件を満たすか判定する)。
@@ -163,7 +169,7 @@ class WatchStateService:
                 previous_days = existing.consecutive_business_days
                 started_at = existing.started_at
                 best_distance = existing.best_distance_pct
-                self._end(existing, today, end_reason)
+                self._end(existing, today, end_reason, existing_raw)
                 return WatchTransitionResult(
                     watch_type=WatchType.NEAR_BUY,
                     transition_type=WatchTransitionType.ENDED,
@@ -203,7 +209,34 @@ class WatchStateService:
                     ),
                 }
             )
-            self._repo.upsert(updated)
+            # get_active_with_raw()はstateとrawを同時に返すため、existingが
+            # Noneでなければrawも必ずある(型の絞り込みのみを目的とした表明)。
+            assert existing_raw is not None  # noqa: S101 - 取得元が同一呼び出しのため
+            # Issue #71 F-C13: 無条件upsertからCASへ。**ここが本修正の肝**である。
+            # 従来は読み取り時点の`existing`を土台に無条件で書き戻していたため、
+            # 読んでから書くまでの間に別実行(売買検知によるend_for_trade_events)が
+            # 終了させていても、`ended_at`を含まないこのupdate辞書が
+            # 「終了していない状態」をそのまま復活させていた。
+            # ★ CASが失敗し、再読込で終了済みだと分かったら**書かずに終える**。
+            #   終端状態を後退させないため、ここで再試行してはならない
+            #   (再試行して上書きし直すと、CASを入れた意味が無くなる)。
+            if not self._repo.replace_if_raw_matches(existing_raw, updated):
+                refetched = self._repo.get_with_raw(existing.watch_id)
+                if refetched is not None and refetched[0].ended_at is not None:
+                    logger.info(
+                        "watch state was ended concurrently; skipping evaluation write "
+                        "watch_id=%s end_reason=%s",
+                        existing.watch_id,
+                        refetched[0].end_reason,
+                    )
+                else:
+                    # 別実行が終了以外の更新を行った場合。上書きすると相手の
+                    # 更新を失うため、こちらも書かない(この評価は次回へ委ねる)。
+                    logger.warning(
+                        "watch state changed during evaluation; skipping write watch_id=%s",
+                        existing.watch_id,
+                    )
+                return _NO_TRANSITION
             return WatchTransitionResult(
                 watch_type=WatchType.NEAR_BUY,
                 transition_type=(
@@ -271,8 +304,43 @@ class WatchStateService:
                 if state is not None:
                     self._end(state, today, END_REASON_TRADE_EVENT)
 
-    def _end(self, state: WatchState, today: dt.date, end_reason: str) -> None:
-        updated = state.model_copy(
-            update={"ended_at": today, "end_reason": end_reason, "last_evaluated_at": today}
+    def _end(
+        self, state: WatchState, today: dt.date, end_reason: str, expected_raw: str | None = None
+    ) -> None:
+        """WatchStateを終了させる(Issue #71 F-C13: 無条件upsertからCASへ)。
+
+        ★ 終了は**単調**である(一度終わったものは終わったまま)。そのため
+        CASが失敗しても、再読込した結果が既に終了済みなら**目的は達成されて
+        いる**ので何もしない。まだ終了していない(= 別実行が評価で更新した)
+        場合だけ、最新の状態に載せ替えて1度だけ再試行する。
+
+        ★ 評価側(`evaluate_and_update`の継続更新)と違い、ここは再試行して
+        よい。終了の再適用は結果を変えないためである。
+        """
+        raw = expected_raw
+        current = state
+        for _ in range(2):
+            if raw is None:
+                fetched = self._repo.get_with_raw(current.watch_id)
+                if fetched is None:
+                    return
+                current, raw = fetched
+                if current.ended_at is not None:
+                    return
+            updated = current.model_copy(
+                update={"ended_at": today, "end_reason": end_reason, "last_evaluated_at": today}
+            )
+            if self._repo.replace_if_raw_matches(raw, updated):
+                return
+            fetched = self._repo.get_with_raw(current.watch_id)
+            if fetched is None:
+                return
+            current, raw = fetched
+            if current.ended_at is not None:
+                # 別実行が先に終了させていた。終了は単調なのでこれで足りる。
+                return
+        logger.warning(
+            "watch state end could not be applied after retry watch_id=%s end_reason=%s",
+            current.watch_id,
+            end_reason,
         )
-        self._repo.upsert(updated)
