@@ -28,6 +28,25 @@ _VALID_TRIGGERS = frozenset({"T1", "T2", "T3", "T4"})
 _SOLO_PREFIX = "SOLO:"
 
 
+def cohort_marker_name(cohort: str) -> str:
+    """cohort 名から pytest の marker 名を作る（Issue #277）。
+
+    pytest の -m は marker 名でしか選べないため、1 cohort = 1 marker 名とする
+    （引数つき marker は -m の式に入らない）。SOLO 接頭辞のコロンは marker 名に
+    使えない文字なので置き換える。
+
+    導出規則を registry と同じモジュールに置いているのは、cohort の正本が
+    ここだからである。付与する conftest 側にも、検証する guard 側にも置かない
+    （どちらへ置いても、正本から離れた場所に規則の写しができる）。
+
+    ★ 本モジュールで唯一の公開名である。他は Issue #145 当時の名前を
+      そのまま保っている（先頭アンダースコア）。
+    """
+    if cohort.startswith(_SOLO_PREFIX):
+        return "cohort_solo_" + cohort[len(_SOLO_PREFIX) :]
+    return "cohort_" + cohort
+
+
 @dataclass(frozen=True)
 class _Entry:
     """registry の 1 エントリ。

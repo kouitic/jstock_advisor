@@ -38,8 +38,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import cohort_marker_name
-from tests.support.time_semantics_registry import _REGISTRY, _SOLO_PREFIX
+from tests.support.time_semantics_registry import (
+    _REGISTRY,
+    _SOLO_PREFIX,
+    cohort_marker_name,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 

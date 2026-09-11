@@ -45,7 +45,7 @@ from pathlib import Path
 import pytest
 
 from jstock_advisor.infrastructure.local_repository import json_store
-from tests.support.time_semantics_registry import _REGISTRY, _SOLO_PREFIX
+from tests.support.time_semantics_registry import _REGISTRY, cohort_marker_name
 
 
 @pytest.fixture(autouse=True)
@@ -83,18 +83,6 @@ def _isolated_default_store_dir(
 # ★ それでも自動付与そのものは壊れうるので、
 #   tests/unit/test_issue_277_cohort_markers.py が
 #   「registry の全エントリに marker が実際に付いていること」を検証する。
-
-
-def cohort_marker_name(cohort: str) -> str:
-    """cohort 名から marker 名を作る。
-
-    pytest の `-m` は marker 名でしか選べないため、1 cohort = 1 marker 名とする
-    (引数つき marker は `-m` の式に入らない)。`SOLO:` 接頭辞は marker 名に
-    使えない文字を含むため置き換える。
-    """
-    if cohort.startswith(_SOLO_PREFIX):
-        return "cohort_solo_" + cohort[len(_SOLO_PREFIX) :]
-    return "cohort_" + cohort
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
