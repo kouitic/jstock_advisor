@@ -1,9 +1,9 @@
 """Issue #64 F-A2 / F-A3 / F-I3: 集中度の分子・分母 scope と、根拠の保存。
 
 3 件をまとめて 1 ファイルにする理由:
-  いずれも ★ **同じ 2 関数**（`_estimate_portfolio_totals` /
-  `_evaluate_portfolio_concentration_and_notify`）を触る。別々に直すと同じ場所を
-  3 回触ることになる。
+  いずれも ★ **同じ 2 関数**（`_estimate_portfolio_totals` と、集中度を判定する
+  関数）を触る。別々に直すと同じ場所を 3 回触ることになる。
+  ★ 後者は本変更で `evaluate_household_concentration_and_notify` へ作り替えた。
 
   F-A3  分子が 1 owner・分母が全 owner という ★ **中間状態**を、
         ★ **家計全体**（分子も全 owner の同一銘柄合算）へ揃える。

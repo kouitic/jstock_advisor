@@ -386,8 +386,6 @@ def test_task_holding_validation_mode_does_not_grow_production_audit_log(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            "portfolio_total_market_value": None,
-            "portfolio_total_acquisition_cost": "100000",
             "execution_mode": "VALIDATION",
         },
         _FakeContext(),
@@ -1074,8 +1072,6 @@ def _run_attention_scenario(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            "portfolio_total_market_value": "100000",
-            "portfolio_total_acquisition_cost": "100000",
             # VALIDATION: Recommendation保存を実行しない(実ローカルストアを
             # 汚染しない、かつ固定recommendation_idの複数テスト間再利用を許容する)。
             "execution_mode": "VALIDATION",
@@ -1324,8 +1320,6 @@ def _run_attention_scenario_and_capture_record_result(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            "portfolio_total_market_value": "100000",
-            "portfolio_total_acquisition_cost": "100000",
             "batch_id": "test-batch-if-attention",
             "execution_mode": "VALIDATION",
         },
@@ -1551,8 +1545,6 @@ def _run_holding_task_with_profit_taking_outcome(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            "portfolio_total_market_value": None,
-            "portfolio_total_acquisition_cost": None,
         },
         _FakeContext(),
     )
