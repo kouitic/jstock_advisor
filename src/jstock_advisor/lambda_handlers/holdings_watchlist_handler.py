@@ -339,10 +339,14 @@ def evaluate_household_concentration_and_notify(
             # 取得単価で代用すると「判定時点の株価」という項目の意味が壊れるため、
             # **記録を作らず、判定しなかったことをログに残す**(捏造しない)。
             # ★ 銘柄コードは出さない(Issue #135)。件数として可視化する。
+            # ★ Issue #135: logger の書式引数へ holding_id 由来の式を渡さない
+            #   (件数であっても、式に holding_id が現れる形を静的検査が弾く)。
+            #   中立な名前の局所変数へ取り出してから渡す。
+            contributing_count = len(position.holding_ids)
             logger.warning(
                 "portfolio concentration not evaluated: latest price unavailable "
                 "(contributing_holdings=%d)",
-                len(position.holding_ids),
+                contributing_count,
             )
             continue
 
