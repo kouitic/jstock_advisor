@@ -214,11 +214,35 @@ def test_case8_threshold_is_reached_only_by_real_business_days() -> None:
 
 
 class _InMemoryWatchStateRepository:
+    """WatchStateRepository の最小代替。
+
+    Issue #71 F-C13 で読み書きが CAS(`replace_if_raw_matches`)になったため、
+    ここも同じ契約を持つ。★ 常に True を返すダミーにはしない。成功前提の
+    ダミーは、本体が CAS 失敗時に通る経路をテストダブル側で覆い隠すためである。
+    生 JSON の同一性は本物(CollectionStore)と同じく文字列比較で判定する。
+    """
+
     def __init__(self, state=None) -> None:
         self.saved = state
 
     def get_active(self, stock_code: str, watch_type):  # noqa: ANN001, ARG002
         return self.saved
+
+    def get_active_with_raw(self, stock_code: str, watch_type):  # noqa: ANN001, ARG002
+        if self.saved is None or self.saved.ended_at is not None:
+            return None
+        return self.saved, self.saved.model_dump_json()
+
+    def get_with_raw(self, watch_id: str):  # noqa: ANN001, ARG002
+        if self.saved is None:
+            return None
+        return self.saved, self.saved.model_dump_json()
+
+    def replace_if_raw_matches(self, expected_raw_data: str, state) -> bool:  # noqa: ANN001
+        if self.saved is None or self.saved.model_dump_json() != expected_raw_data:
+            return False
+        self.saved = state
+        return True
 
     def upsert(self, state) -> None:  # noqa: ANN001
         self.saved = state
