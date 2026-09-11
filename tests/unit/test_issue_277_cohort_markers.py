@@ -116,13 +116,14 @@ stderr=
     return frozenset(collected)
 
 
-def test_all_registry_modules_are_collectable() -> None:
-    """registry の全モジュールが実在し、収集できること。
+def _selections() -> dict[str, frozenset[str]]:
+    """cohort ごとの選択結果。子プロセスの起動は cohort 数だけで済ませる。
 
-    以降の marker 検証が「そもそも収集されていないから 0 件」を
-    「marker が付いていないから 0 件」と取り違えないための土台である。
+    受入条件 4(CI の実行時間が悪化しないこと)があるため、起動回数は必要最小限に
+    する。フィルタ無しの収集を別途行っていた時期があるが、ある cohort marker で
+    選択されたなら、そのモジュールは収集もされている。冗長なので畳んだ。
     """
-    assert _collect() == frozenset(_REGISTRY_MODULES)
+    return {cohort: _collect(("-m", cohort_marker_name(cohort))) for cohort in _COHORTS}
 
 
 @pytest.mark.parametrize("cohort", _COHORTS)
@@ -131,9 +132,13 @@ def test_cohort_marker_selects_exactly_its_registry_modules(cohort: str) -> None
 
     ★ これが本モジュールの中心である。等号で確かめるので、
       付いていない(不足)と、余計に付いている(混入)の両方を検出する。
+
+    `-m` を実際に通すことが重要である。marker が item に付いてさえいれば選べる、
+    とは限らない。pytest 本体の deselect も収集フックであり、**自動付与がその後に
+    走れば marker は付くのに選べない**。その順序まで含めて確かめられるのは
+    実際に `-m` で起動したときだけである。
     """
-    selected = _collect(("-m", cohort_marker_name(cohort)))
-    assert selected == _modules_of(cohort)
+    assert _selections()[cohort] == _modules_of(cohort)
 
 
 def test_every_registry_module_is_selected_by_exactly_one_cohort_marker() -> None:
@@ -142,10 +147,11 @@ def test_every_registry_module_is_selected_by_exactly_one_cohort_marker() -> Non
     cohort ごとの検証を全て通しても、registry に cohort が増えたときに
     「どの marker でも選ばれないモジュール」が残りうる。ここで塞ぐ。
     """
-    selections = {cohort: _collect(("-m", cohort_marker_name(cohort))) for cohort in _COHORTS}
+    selections = _selections()
     for module in _REGISTRY_MODULES:
         owners = sorted(cohort for cohort, modules in selections.items() if module in modules)
         assert len(owners) == 1, f"{module} を選択する cohort marker が {owners} 件ある"
+
 
 
 def test_registered_markers_match_registry_cohorts() -> None:
