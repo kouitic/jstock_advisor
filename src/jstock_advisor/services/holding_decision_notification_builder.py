@@ -47,6 +47,10 @@ from jstock_advisor.domain.signals.market_environment import (
     market_environment_config_values,
     market_environment_result_to_metrics,
 )
+from jstock_advisor.domain.signals.record_date_resolution import (
+    resolve_benefit_record_date_recurring_label,
+    resolve_benefit_record_date_source_type,
+)
 from jstock_advisor.domain.signals.sector_environment import (
     sector_environment_config_values,
     sector_environment_result_to_metrics,
@@ -167,6 +171,24 @@ def build_holding_decision_recommendation(
         counter_factors=counter_factors,
         confidence=_CONFIDENCE_MAP.get(result.confidence, ConfidenceLevel.LOW),
         next_earnings_date=snapshot.next_earnings_date,
+        # Issue #67 F-I4: 決算日は「日付」だけでは確度を復元できない。同じ
+        # snapshotが既に持っているstatus(検証結果)とraw(検証前の生値)を対で
+        # 転記する。★日付を再解決しない・入力に無いrawはNoneのまま。
+        # statusがUNAVAILABLEでもrawが残ることがあり(取得はできたが検証を
+        # 通らなかった場合)、rawを落とすと「解釈不能」と「欠落」が区別できなくなる。
+        earnings_date_status=snapshot.earnings_date_status,
+        earnings_date_raw=snapshot.earnings_date_raw,
+        # Issue #67 F-I5: 権利確定日の「由来」をBUY・利確と同じ意味で保存する。
+        # ★resolverへ渡すのは判定に使ったsnapshot由来の値だけであり、保存時に
+        # 現在日付で解決し直さない。確定日があるときlabelがNoneになるのは正しい。
+        benefit_record_date_recurring_label=resolve_benefit_record_date_recurring_label(
+            snapshot.benefit, snapshot.financial.fiscal_year_end_month
+        ),
+        benefit_record_date_source_type=resolve_benefit_record_date_source_type(snapshot.benefit),
+        # Issue #67 F-I1: 判定に使った財務データのprovenance(#20 Phase B2-A)。
+        # ★snapshot構築時点の事実の転記のみで、取得し直して補完しない。
+        # 入力がNoneなら保存もNone(「未取得」と「転記漏れ」を混同しない)。
+        financial_input_provenance=snapshot.financial_input_provenance,
         rule_version=rule_version,
         config_values_used={
             "holding_decision_result_id": result.holding_decision_result_id,
