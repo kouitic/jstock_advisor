@@ -566,6 +566,17 @@ class ProfitTakingService:
             )
             return ProfitTakingOutcome(holding.stock_code, None, error)
 
+        # Issue #66 F-L4: 評価日(JST)はこの評価の**最初**に1回だけ確定させ、
+        # 以降はこの値だけを使う。従来は下の期間末解決の直前(旧:713付近)で
+        # 計算しており、それより前にある`_is_long_term_benefit_imminent()`が
+        # `now.date()`(=UTC暦日)を独自に使っていた。定期実行は08:00 JST
+        # (=前日23:00 UTC)であるため、UTC暦日は**毎回JSTの前日**になり、
+        # 長期優待の条件達成日までの残日数が常に1日ずれていた
+        # (緩和要因の成立/不成立が1日ずれ、最終Actionが変わりうる)。
+        # 「各所で個別にnow.date()/evaluation_date_jst(now)を再計算しない」という
+        # 既存方針(下記コメント)の対象へ、本helperを含める。
+        evaluation_date = evaluation_date_jst(now)
+
         mitigating_inputs = MitigatingFactorInputs(
             fair_value_rising_with_earnings_growth=(
                 snapshot.fair_value is not None
@@ -587,7 +598,7 @@ class ProfitTakingService:
             ),
             is_progressive_or_doe_policy=snapshot.dividend.is_progressive_or_doe_policy,
             long_term_holding_benefit_imminent=_is_long_term_benefit_imminent(
-                holding, snapshot.benefit, now, self._config
+                holding, snapshot.benefit, evaluation_date, self._config
             ),
             few_reinvestment_alternatives=False,  # 将来: 買い候補件数から動的算出する拡張ポイント
             is_nisa_account=holding.account_type == AccountType.NISA,
@@ -710,7 +721,8 @@ class ProfitTakingService:
         # 評価日(JST)は1回だけ計算し、期間末解決・関連性判定の両方で使い回す
         # (デプロイ前対応: 各所で個別にnow.date()/evaluation_date_jst(now)を
         # 再計算しない)。
-        evaluation_date = evaluation_date_jst(now)
+        # Issue #66 F-L4: 確定はこのメソッドの冒頭へ移した(緩和要因の判定が
+        # ここより前にあり、そちらが取り残されていたため)。
         # 決算反映確認には年次のfiscal_period_endではなく、recent_quartersを
         # 優先した最新財務期間末を使う(デプロイ前対応: 四半期決算の反映を
         # 検知できないバグの修正)。評価日より未来のperiod_endは候補から除外する。
@@ -1263,7 +1275,7 @@ class ProfitTakingService:
 def _is_long_term_benefit_imminent(
     holding: Holding,
     benefit: ShareholderBenefit | None,
-    now: dt.datetime,
+    evaluation_date: dt.date,
     config: AppConfig,
 ) -> bool:
     """保有銘柄が優待の長期保有条件をまもなく満たすかどうかを判定する。
@@ -1296,7 +1308,10 @@ def _is_long_term_benefit_imminent(
         if months is None:
             continue
         qualify_date = _add_months(holding.first_purchase_date, months)
-        days_remaining = (qualify_date - now.date()).days
+        # Issue #66 F-L4: 呼び出し側が確定させた**JST評価日**と比較する。
+        # 以前は `now.date()` = **UTC暦日**で比較しており、定期実行(08:00 JST
+        # = 前日23:00 UTC)では毎回JSTの前日と比較していた。
+        days_remaining = (qualify_date - evaluation_date).days
         if 0 <= days_remaining <= within_days * 2:  # 営業日ベースの概算(週末考慮の簡易マージン)
             return True
     return False
