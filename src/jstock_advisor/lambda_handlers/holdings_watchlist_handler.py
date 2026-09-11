@@ -47,6 +47,7 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.financial_industry import classify_industry
+from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     DecisionType,
@@ -263,11 +264,9 @@ def _resolve_suppression_reason(outcome: NotificationOutcome) -> str | None:
     return outcome.status.value
 
 
-def _evaluate_portfolio_concentration_and_notify(
-    holding: Holding,
-    current_price: Decimal,
-    portfolio_total_market_value: Decimal | None,
-    portfolio_total_acquisition_cost: Decimal | None,
+def evaluate_household_concentration_and_notify(
+    holdings: list[Holding],
+    providers: ProviderBundle,
     config: AppConfig,
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
@@ -276,52 +275,123 @@ def _evaluate_portfolio_concentration_and_notify(
     notification_enabled: bool,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> None:
-    """企業価値判断とは独立に、ポートフォリオ内保有比率が高い場合に別途通知する
-    (要求仕様§14)。銘柄単体の判定結果には影響しない(常に別のRecommendationとして扱う)。
+    """企業価値判断とは独立に、家計全体での銘柄集中を別途通知する(要求仕様§14)。
 
+    銘柄単体の判定結果には影響しない(常に別のRecommendationとして扱う)。
     kill switch(notification_enabled=False)中でもRecommendationの生成・保存は継続し、
     LINE送信のみを止める(コードレビュー対応)。
-    """
-    holding_market_value = current_price * holding.shares
-    portfolio_weight_pct = (
-        float(holding_market_value / portfolio_total_market_value * 100)
-        if portfolio_total_market_value and portfolio_total_market_value > 0
-        else None
-    )
-    acquisition_cost_weight_pct = (
-        float(holding.total_purchase_amount / portfolio_total_acquisition_cost * 100)
-        if portfolio_total_acquisition_cost and portfolio_total_acquisition_cost > 0
-        else None
-    )
-    result = evaluate_portfolio_concentration(
-        portfolio_weight_pct,
-        acquisition_cost_weight_pct,
-        config.portfolio_concentration.single_stock_weight_threshold_pct,
-    )
-    if not result.is_concentrated:
-        return
 
-    recommendation = Recommendation(
-        recommendation_id=str(uuid.uuid4()),
-        stock_code=holding.stock_code,
-        stock_name=holding.stock_name,
-        recommended_at=now,
-        recommendation_type=RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
-        price_at_recommendation=current_price,
-        shares_at_recommendation=holding.shares,
-        average_purchase_price_at_recommendation=holding.average_purchase_price,
-        reasons=result.reasons,
-        # 保有比率自体は直接計算できる事実値であり、モデル推定を伴わないためHIGHとする。
-        confidence=ConfidenceLevel.HIGH,
-        rule_version=rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
-        portfolio_weight_pct=result.portfolio_weight_pct,
-        portfolio_acquisition_cost_weight_pct=result.acquisition_cost_weight_pct,
+    --- Issue #64 F-A3(2026-09-11)で是正 ---
+    従来は**子Lambda(holding単位)**がこの判定を行い、分子に自分のholding 1件の値を、
+    分母に全ownerの合計を使っていた。分子と分母のscopeが揃っておらず、
+    **ownerごとに見ても家計全体で見ても過小**になっていた(#64 issuecomment-5629210621)。
+
+    USER判断(#64 issuecomment-5629242431)により基準を**家計全体**とし、分子を
+    全ownerの同一銘柄合算へ揃える。あわせて判定自体を**親Lambdaの銘柄単位**へ移した。
+    子(holding単位)のまま合算比率を判定すると、同一銘柄を2ownerが持つ場合に
+    **同じ事実に対してRecommendationが2件**作られるためである(構造的に防ぐ)。
+
+    Issue #64 F-A2: owner / holding_id / raw_recommendation_type を保存する。
+    家計全体基準では「どのholdingか」が一意でないため、寄与が1件のときだけ
+    owner / holding_id を入れ、2件以上は**一覧**をconfig_values_usedへ残す。
+    代表1件を選ぶと「その人の話」と読めてしまい、事実と異なるため。
+
+    Issue #67 F-I3: 判定に使った価格のsource・閾値・対象scopeを保存する。
+    **保存のために価格を取り直さない**。財務snapshotは消費しないため、
+    financial_input_provenanceは**入れない**(捏造しない)。
+
+    ★本判定は従来どおりINTERNAL_ONLY(LINE送信対象ではない)である。本是正で
+    通知の宛先・文面は変更していない。閾値も変更していない(保存するだけ)。
+    """
+    total_market_value, total_acquisition_cost, positions = _estimate_portfolio_totals(
+        holdings, providers
     )
-    # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
-    # 汚さないため保存自体をスキップする(kill switchとは独立した別の抑止軸)。
-    if not execution_context.is_validation:
-        recommendation_repo.save(recommendation)
-    _send_or_suppress_notification(recommendation, notification_enabled, notification_service, now)
+    threshold = config.portfolio_concentration.single_stock_weight_threshold_pct
+    for position in positions:
+        # 分母不明(価格が1件でも欠けた)なら時価ベースは**判定しない**。ゼロや部分
+        # 合計で強い判定を作らない(Issue #64 F-A3 M-1)。取得価格ベースは価格に
+        # 依存せず確定できるため**引き続き判定する**。ここを止めると「価格取得に
+        # 失敗した日は集中リスクを見ない」というfail-openになる。
+        market_value_basis_available = (
+            position.market_value is not None
+            and total_market_value is not None
+            and total_market_value > 0
+        )
+        portfolio_weight_pct = (
+            float(position.market_value / total_market_value * 100)  # type: ignore[operator]
+            if market_value_basis_available
+            else None
+        )
+        acquisition_cost_weight_pct = (
+            float(position.total_purchase_amount / total_acquisition_cost * 100)
+            if total_acquisition_cost and total_acquisition_cost > 0
+            else None
+        )
+        result = evaluate_portfolio_concentration(
+            portfolio_weight_pct, acquisition_cost_weight_pct, threshold
+        )
+        if not result.is_concentrated:
+            continue
+
+        if position.close_price is None:
+            # その銘柄自身の株価が取れなかった場合、Recommendationの必須項目
+            # price_at_recommendation(Decimal、null不可)を**事実で埋められない**。
+            # 取得単価で代用すると「判定時点の株価」という項目の意味が壊れるため、
+            # **記録を作らず、判定しなかったことをログに残す**(捏造しない)。
+            # ★ 銘柄コードは出さない(Issue #135)。件数として可視化する。
+            # ★ Issue #135: logger の書式引数へ holding_id 由来の式を渡さない
+            #   (件数であっても、式に holding_id が現れる形を静的検査が弾く)。
+            #   中立な名前の局所変数へ取り出してから渡す。
+            contributing_count = len(position.holding_ids)
+            logger.warning(
+                "portfolio concentration not evaluated: latest price unavailable "
+                "(contributing_holdings=%d)",
+                contributing_count,
+            )
+            continue
+
+        single_contributor = len(position.holding_ids) == 1
+        recommendation = Recommendation(
+            recommendation_id=str(uuid.uuid4()),
+            # Issue #64 F-A2: 寄与が1件なら確定できるので入れる。2件以上は一意に
+            # 定まらないためNoneとし、一覧をconfig_values_usedへ残す。
+            owner=position.owners[0] if single_contributor else None,
+            holding_id=position.holding_ids[0] if single_contributor else None,
+            stock_code=position.stock_code,
+            stock_name=position.stock_name,
+            recommended_at=now,
+            recommendation_type=RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
+            # Issue #64 F-A2: 生成時のTypeと整合させる(後段で書き換えていない事実を残す)。
+            raw_recommendation_type=RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
+            price_at_recommendation=position.close_price,
+            shares_at_recommendation=position.shares,
+            average_purchase_price_at_recommendation=(
+                position.total_purchase_amount / position.shares if position.shares else None
+            ),
+            reasons=result.reasons,
+            # 保有比率自体は直接計算できる事実値であり、モデル推定を伴わないためHIGHとする。
+            confidence=ConfidenceLevel.HIGH,
+            rule_version=rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            portfolio_weight_pct=result.portfolio_weight_pct,
+            portfolio_acquisition_cost_weight_pct=result.acquisition_cost_weight_pct,
+            # Issue #67 F-I3: 判定に使った価格の出所と取得時刻。再取得していない。
+            data_sources=list(position.price_sources),
+            config_values_used={
+                "single_stock_weight_threshold_pct": threshold,
+                "concentration_scope": "HOUSEHOLD",
+                "denominator_scope": "ALL_OWNERS",
+                "market_value_basis_available": market_value_basis_available,
+                "contributing_holding_ids": list(position.holding_ids),
+                "contributing_owner_count": len(position.owners),
+            },
+        )
+        # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
+        # 汚さないため保存自体をスキップする(kill switchとは独立した別の抑止軸)。
+        if not execution_context.is_validation:
+            recommendation_repo.save(recommendation)
+        _send_or_suppress_notification(
+            recommendation, notification_enabled, notification_service, now
+        )
 
 
 def _notify_legacy_sell_and_build_result(
@@ -576,8 +646,6 @@ def _analyze_one_holding(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     rule_version_service: RuleVersionService,
-    portfolio_total_market_value: Decimal | None,
-    portfolio_total_acquisition_cost: Decimal | None,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> _HoldingResult:
     """1銘柄を判定・通知する。
@@ -713,25 +781,15 @@ def _analyze_one_holding(
         return result
 
     # kill switchは緊急停止用途のため、mode等のTTLキャッシュを経由せず毎回
-    # 最新値を取得する(実装プラン修正2)。ポートフォリオ集中リスク通知より前に取得し、
-    # このサイクル内のすべての通知経路(集中リスク・旧売却・新保有判断・利確)へ
-    # 同一の値を渡す(コードレビュー対応: kill switchの適用範囲を保有銘柄分析の
-    # 全通知経路へ拡張する)。
+    # 最新値を取得する(実装プラン修正2)。このサイクル内のすべての通知経路
+    # (旧売却・新保有判断・利確)へ同一の値を渡す(コードレビュー対応: kill switchの
+    # 適用範囲を保有銘柄分析の全通知経路へ拡張する)。
+    #
+    # Issue #64 F-A3: ポートフォリオ集中リスクの判定は**ここでは行わない**。
+    # 家計全体(全ownerの同一銘柄合算)を分子とする銘柄単位の判定であり、
+    # holding単位のこの経路で行うと同一銘柄で重複して発火するため、
+    # 親Lambda側のevaluate_household_concentration_and_notify()へ移した。
     notification_enabled = runtime_config_service.get_notification_enabled()
-
-    _evaluate_portfolio_concentration_and_notify(
-        holding,
-        snapshot.current_price,
-        portfolio_total_market_value,
-        portfolio_total_acquisition_cost,
-        config,
-        recommendation_repo,
-        notification_service,
-        rule_version_service,
-        now,
-        notification_enabled,
-        execution_context,
-    )
 
     # --- 新旧エンジンの排他制御(実装プラン11節) ---------------------------
     runtime_lookup = runtime_config_service.get_config(now)
@@ -1378,8 +1436,6 @@ def _process_single_holding(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     rule_version_service: RuleVersionService,
-    portfolio_total_market_value: Decimal | None,
-    portfolio_total_acquisition_cost: Decimal | None,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> dict[str, Any]:
     """M3(保有銘柄オーナー機能): holding_id(= owner + "#" + stock_code)単位で
@@ -1425,8 +1481,6 @@ def _process_single_holding(
             recommendation_repo,
             notification_service,
             rule_version_service,
-            portfolio_total_market_value,
-            portfolio_total_acquisition_cost,
             execution_context,
         )
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
@@ -1458,32 +1512,84 @@ def _process_single_holding(
     }
 
 
+@dataclass(frozen=True)
+class _StockPosition:
+    """家計全体(全owner)で見た、1銘柄ぶんの保有(Issue #64 F-A3)。
+
+    集中度は「家全体で見て、この**銘柄**に偏っているか」を問う判定であり、
+    holding単位ではなく**銘柄単位**で成り立つ。したがって分子も
+    全ownerの同一銘柄を合算した値とする(USER判断 = #64 issuecomment-5629242431)。
+    """
+
+    stock_code: str
+    stock_name: str
+    # 寄与したholdingのidとowner(Issue #64 F-A2)。代表1件を選ばず一覧で残し、
+    # 「誰の分がいくら寄与したか」を後から追えるようにする。
+    holding_ids: tuple[str, ...]
+    owners: tuple[str, ...]
+    shares: int
+    total_purchase_amount: Decimal
+    # 価格が取れなければNone(=時価ベースは判定せず、記録も作らない)。
+    close_price: Decimal | None
+    market_value: Decimal | None
+    price_sources: tuple[DataSourceReference, ...]
+
+
 def _estimate_portfolio_totals(
     holdings: list[Holding], providers: ProviderBundle
-) -> tuple[Decimal | None, Decimal | None]:
-    """ポートフォリオ全体の時価総額・取得価格総額を概算する(要求仕様§14)。
+) -> tuple[Decimal | None, Decimal | None, list[_StockPosition]]:
+    """ポートフォリオ全体の時価総額・取得価格総額と、銘柄単位の保有を概算する(§14)。
 
     フルスナップショット(財務・適正価格等)は取得コストが高いため、時価総額の
     概算には現在株価のみを取得する軽量なget_latest_priceを使う。1銘柄でも
     価格取得に失敗した場合、時価総額ベースの比率は算出不能(None)とする
     (一部の銘柄を除外した不正確な合計を「全体」として扱わない)。
+
+    Issue #64 F-A3: 銘柄単位の集計(_StockPosition)も併せて返す。従来は分母だけを
+    ここで作り、分子は子Lambdaが自分のholding 1件から作っていたため、
+    **分子=1owner / 分母=全owner**という中間状態になっていた。価格取得は
+    **銘柄ごとに1回**にまとめる(同一銘柄を複数ownerが持つ場合に重複取得しない)。
+
+    Issue #64 F-I3: 使った価格のsource(提供元・取得時刻)もそのまま持ち回る。
+    保存のために価格を取り直さないため、判定に使った値と記録が必ず一致する。
     """
+    by_stock: dict[str, list[Holding]] = {}
+    for holding in holdings:
+        by_stock.setdefault(holding.stock_code, []).append(holding)
+
     total_acquisition_cost = sum((h.total_purchase_amount for h in holdings), start=Decimal("0"))
     total_market_value: Decimal | None = Decimal("0")
-    for holding in holdings:
+    positions: list[_StockPosition] = []
+    for stock_code, group in by_stock.items():
         try:
-            snap = providers.market_data.get_latest_price(holding.stock_code)
+            snap = providers.market_data.get_latest_price(stock_code)
         except Exception:  # noqa: BLE001 - 1銘柄の株価取得エラーでバッチ全体を落とさない
             logger.exception(
-                "portfolio total estimation: price fetch failed stock_code=%s", holding.stock_code
+                "portfolio total estimation: price fetch failed stock_code=%s", stock_code
             )
             snap = None
-        if snap is None:
+        shares = sum(h.shares for h in group)
+        market_value = None if snap is None else snap.close_price * shares
+        if market_value is None:
             total_market_value = None
-            continue
-        if total_market_value is not None:
-            total_market_value += snap.close_price * holding.shares
-    return total_market_value, total_acquisition_cost
+        elif total_market_value is not None:
+            total_market_value += market_value
+        positions.append(
+            _StockPosition(
+                stock_code=stock_code,
+                stock_name=group[0].stock_name,
+                holding_ids=tuple(sorted(h.holding_id for h in group)),
+                owners=tuple(sorted({h.owner for h in group})),
+                shares=shares,
+                total_purchase_amount=sum(
+                    (h.total_purchase_amount for h in group), start=Decimal("0")
+                ),
+                close_price=None if snap is None else snap.close_price,
+                market_value=market_value,
+                price_sources=() if snap is None else (snap.source,),
+            )
+        )
+    return total_market_value, total_acquisition_cost, positions
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
@@ -1562,16 +1668,6 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 event.get("batch_id"),
                 log_ref(event["holding_id"]),
             )
-        portfolio_total_market_value = (
-            Decimal(event["portfolio_total_market_value"])
-            if event.get("portfolio_total_market_value") is not None
-            else None
-        )
-        portfolio_total_acquisition_cost = (
-            Decimal(event["portfolio_total_acquisition_cost"])
-            if event.get("portfolio_total_acquisition_cost") is not None
-            else None
-        )
         result = _process_single_holding(
             event["holding_id"],
             event.get("batch_id"),
@@ -1581,8 +1677,6 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             recommendation_repo,
             notification_service,
             rule_version_service,
-            portfolio_total_market_value,
-            portfolio_total_acquisition_cost,
             execution_context,
         )
         # Issue #309: result を丸ごと出すと holding_id(所有者名を含む)が
@@ -1661,8 +1755,24 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             total,
         )
 
-    portfolio_total_market_value, portfolio_total_acquisition_cost = _estimate_portfolio_totals(
-        holdings, providers
+    # Issue #64 F-A3: ポートフォリオ集中リスクは**家計全体(全ownerの同一銘柄合算)**を
+    # 分子とする銘柄単位の判定である。holding単位の子Lambdaで判定すると同一銘柄で
+    # 重複して発火するため、ここ(親)で1回だけ評価する。価格取得も銘柄ごとに1回で済む。
+    # ★ 総額を子payloadへ渡す必要は無くなった(子は集中度を判定しない)。
+    # kill switchは緊急停止用途のため、TTLキャッシュを経由せず毎回最新値を取得する
+    # (子Lambda側と同じ扱い。実装プラン修正2)。
+    evaluate_household_concentration_and_notify(
+        holdings,
+        providers,
+        config,
+        recommendation_repo,
+        notification_service,
+        rule_version_service,
+        now,
+        HoldingDecisionRuntimeConfigService(
+            cache_ttl_seconds=config.holding_decision.runtime_config_cache_ttl_seconds
+        ).get_notification_enabled(),
+        execution_context,
     )
 
     for holding in holdings:
@@ -1670,12 +1780,6 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             "task": "holding",
             "holding_id": holding.holding_id,
             "batch_id": batch_id,
-            "portfolio_total_market_value": (
-                str(portfolio_total_market_value)
-                if portfolio_total_market_value is not None
-                else None
-            ),
-            "portfolio_total_acquisition_cost": str(portfolio_total_acquisition_cost),
             "execution_mode": execution_context.mode.value,
             "trade_detection_confirmed": detection_outcome.confirmed,
         }

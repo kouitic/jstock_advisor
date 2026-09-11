@@ -152,8 +152,6 @@ def _run(store_dir: Path, mode: RuntimeConfigMode, stock_code: str = "2914"):
         services["recommendation_repo"],
         services["notification_service"],
         services["rule_version_service"],
-        None,
-        None,
     )
     return result, services
 
@@ -268,8 +266,6 @@ def test_kill_switch_on_suppresses_legacy_notification(store_dir: Path, monkeypa
         services["recommendation_repo"],
         services["notification_service"],
         services["rule_version_service"],
-        None,
-        None,
     )
 
     saved_ids = {r.recommendation_id for r in services["recommendation_repo"].list_all()}
@@ -303,8 +299,6 @@ def test_kill_switch_off_allows_legacy_notification(store_dir: Path, monkeypatch
         services["recommendation_repo"],
         services["notification_service"],
         services["rule_version_service"],
-        None,
-        None,
     )
 
     saved_ids = {r.recommendation_id for r in services["recommendation_repo"].list_all()}

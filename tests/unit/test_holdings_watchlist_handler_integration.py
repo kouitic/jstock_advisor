@@ -60,7 +60,10 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers import holdings_watchlist_handler as handler_module
-from jstock_advisor.lambda_handlers.holdings_watchlist_handler import _analyze_one_holding
+from jstock_advisor.lambda_handlers.holdings_watchlist_handler import (
+    _analyze_one_holding,
+    evaluate_household_concentration_and_notify,
+)
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.holding_decision_runtime_config_service import (
     HoldingDecisionRuntimeConfigService,
@@ -211,8 +214,6 @@ def _build_services(store_dir: Path, mode: RuntimeConfigMode, notification_enabl
 def _run(
     services: dict,
     stock_code: str = _STOCK_CODE,
-    portfolio_total_market_value: Decimal | None = None,
-    portfolio_total_acquisition_cost: Decimal | None = None,
 ):
     return _analyze_one_holding(
         _holding(stock_code),
@@ -228,8 +229,6 @@ def _run(
         services["recommendation_repo"],
         services["notification_service"],
         services["rule_version_service"],
-        portfolio_total_market_value,
-        portfolio_total_acquisition_cost,
     )
 
 
@@ -581,14 +580,24 @@ def test_kill_switch_on_suppresses_concentration_notification_but_still_saves_re
     store_dir: Path,
 ):
     """kill switch ONの場合でも、ポートフォリオ集中リスクRecommendationは通常どおり
-    作成・保存され、LINE送信のみが行われない(コードレビュー対応)。"""
+    作成・保存され、LINE送信のみが行われない(コードレビュー対応)。
+
+    ★ Issue #64 F-A3: 集中度の判定は親Lambdaの銘柄単位へ移した。確認している挙動
+      (kill switch中も保存は続き、LINE送信だけ止まる)は同じで、呼び出し先だけを
+      新しい入口へ付け替えている。
+    """
     services = _build_services(store_dir, RuntimeConfigMode.LEGACY, notification_enabled=False)
     # 保有銘柄1件がポートフォリオ取得価格総額と完全一致 → 取得価格ベース比率100%で
     # 確実に集中警告の閾値を超える。
-    _run(
-        services,
-        portfolio_total_market_value=None,
-        portfolio_total_acquisition_cost=Decimal("100000"),
+    evaluate_household_concentration_and_notify(
+        [_holding(_STOCK_CODE)],
+        _PROVIDERS,
+        _CFG,
+        services["recommendation_repo"],
+        services["notification_service"],
+        services["rule_version_service"],
+        _NOW,
+        False,
     )
 
     concentration_recs = [

@@ -6,7 +6,11 @@ import pytest
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
+from jstock_advisor.domain.entities.common import (
+    BuyPriceLevels,
+    DataSourceReference,
+    PriceWithRationale,
+)
 from jstock_advisor.domain.entities.enums import (
     AccountType,
     ConfidenceLevel,
@@ -143,15 +147,12 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
         return {k: v for k, v in payload.items() if k != "batch_id"}
 
     stripped = [_without_batch_id(d) for d in dispatched]
-    # 保有銘柄タスクにはポートフォリオ集中リスク判定用の全体集計値が付与される
-    # (要求仕様§14)。フェイクのmarket_dataは常にNoneを返すため時価総額ベースは
-    # 算出不能(None)、取得価格ベースは2銘柄分(10万円×2)が合算される。
+    # Issue #64 F-A3: 集中度の判定は**親側で銘柄単位に1回**行うよう移したため、
+    # 子payloadへ全体集計値を渡さなくなった(子は集中度を判定しない)。
     assert {
         "fn": "jstock-advisor-holdings-watchlist",
         "task": "holding",
         "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-        "portfolio_total_market_value": None,
-        "portfolio_total_acquisition_cost": "200000",
         "execution_mode": "NORMAL",
         "trade_detection_confirmed": True,
     } in stripped
@@ -159,8 +160,6 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
         "fn": "jstock-advisor-holdings-watchlist",
         "task": "holding",
         "holding_id": build_holding_id(DEFAULT_OWNER, "8136"),
-        "portfolio_total_market_value": None,
-        "portfolio_total_acquisition_cost": "200000",
         "execution_mode": "NORMAL",
         "trade_detection_confirmed": True,
     } in stripped
@@ -257,12 +256,17 @@ class _NoSignalOutcome:
     audit_id: str | None = None
 
 
-def test_task_holding_hold_category_and_portfolio_concentration_notified(
+def test_task_holding_hold_category_and_no_concentration_from_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """sell/profit_takingがともに無シグナルでも、単一銘柄で取得価格ベースの保有比率が
-    閾値(20%)を超える場合はPORTFOLIO_CONCENTRATION_REVIEW通知が別途送られ(要求仕様§14)、
-    かつ評価監査上のカテゴリはNO_SIGNAL相当の"hold"になる(要求仕様§12・§13)。
+    """sell/profit_takingがともに無シグナルのとき、評価監査上のカテゴリは
+    NO_SIGNAL相当の"hold"になる(要求仕様§12・§13)。
+
+    ★ Issue #64 F-A3: 集中度の判定は**親側の銘柄単位**へ移した。したがって子
+      (holding単位)のこの経路からは**集中度通知は出ない**。以前はここで
+      PORTFOLIO_CONCENTRATION_REVIEWが送られることを確認していたが、同一銘柄を
+      複数ownerが持つ場合に重複発火するため構造ごと変更した。家計全体基準での
+      発火はtests/unit/test_issue_64_household_concentration_scope.pyが固定する。
     """
     _patch_common(monkeypatch)
     target = _holding("2914")
@@ -312,22 +316,17 @@ def test_task_holding_hold_category_and_portfolio_concentration_notified(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            # 単一銘柄で全体の取得価格を占めるため取得価格ベースの比率は100%になる
-            "portfolio_total_market_value": None,
-            "portfolio_total_acquisition_cost": "100000",
         },
         _FakeContext(),
     )
 
     assert result["evaluation_status"] == "COMPLETED"
-    assert len(notified) == 1
-    concentration_recommendation = notified[0]
-    assert concentration_recommendation.recommendation_type == (
-        RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW
-    )
-    assert concentration_recommendation.portfolio_acquisition_cost_weight_pct == pytest.approx(
-        100.0
-    )
+    # ★ 子経路からは集中度通知が出ないこと(親へ移したため)。
+    assert [
+        r
+        for r in notified
+        if r.recommendation_type == RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW
+    ] == []
 
 
 def test_task_holding_validation_mode_does_not_grow_production_audit_log(
@@ -387,8 +386,6 @@ def test_task_holding_validation_mode_does_not_grow_production_audit_log(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            "portfolio_total_market_value": None,
-            "portfolio_total_acquisition_cost": "100000",
             "execution_mode": "VALIDATION",
         },
         _FakeContext(),
@@ -408,7 +405,32 @@ class _RaisingThenOkMarketData:
         self.calls.append(stock_code)
         if stock_code == "2914":
             raise RuntimeError("yfinance boom")
-        return type("_Snap", (), {"close_price": Decimal("1000")})()
+        return type(
+            "_Snap",
+            (),
+            {
+                "close_price": Decimal("1000"),
+                # Issue #67 F-I3: 判定に使った価格のsourceをそのまま持ち回るため
+                # フェイクにも同じ形を持たせる(確認している挙動は変えていない)。
+                "source": DataSourceReference(
+                    provider="fake-market-data", fetched_at=_NOW
+                ),
+            },
+        )()
+
+
+class _OkMarketData:
+    """常に価格を返すfake(集中度の保存経路の確認用)。"""
+
+    def get_latest_price(self, stock_code: str) -> object:
+        return type(
+            "_Snap",
+            (),
+            {
+                "close_price": Decimal("1000"),
+                "source": DataSourceReference(provider="fake-market-data", fetched_at=_NOW),
+            },
+        )()
 
 
 class _RaisingProviders:
@@ -423,14 +445,19 @@ def test_estimate_portfolio_totals_isolates_single_holding_price_fetch_error() -
     market_data = _RaisingThenOkMarketData()
     providers = _RaisingProviders(market_data)
 
-    total_market_value, total_acquisition_cost = handler_module._estimate_portfolio_totals(
-        holdings, providers
+    total_market_value, total_acquisition_cost, positions = (
+        handler_module._estimate_portfolio_totals(holdings, providers)
     )
 
     assert total_market_value is None
     assert total_acquisition_cost == Decimal("200000")
     # 例外が発生した銘柄で処理が止まらず、2銘柄目も呼び出されていることを確認する
     assert market_data.calls == ["2914", "8136"]
+    # Issue #64 F-A3: 銘柄単位の集計も返す。価格が取れた銘柄だけがmarket_valueを持つ。
+    assert {p.stock_code: p.market_value is not None for p in positions} == {
+        "2914": False,
+        "8136": True,
+    }
 
 
 # --- 通知検証モード機能(2026-08追加) -------------------------------------
@@ -599,18 +626,20 @@ def test_handler_invalid_execution_mode_raises_before_any_processing(
     assert called == []
 
 
-def test_evaluate_portfolio_concentration_and_notify_validation_mode_skips_save(
+def test_household_concentration_validation_mode_skips_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    holding = _holding("2914")
+    """★ 期待値は従来どおり: VALIDATIONでは保存せず、通知だけ行う。
+
+    ★ Issue #64 F-A3 で判定が親側の銘柄単位へ移ったため、呼び出し方だけを新APIへ
+      合わせた(harnessの変更であり、確認している挙動は同じ)。
+    """
     repo = _SpyRecommendationRepository()
     notification_service = _AlwaysSendsNotificationService()
 
-    handler_module._evaluate_portfolio_concentration_and_notify(
-        holding,
-        Decimal("1000"),
-        None,
-        Decimal("100000"),
+    handler_module.evaluate_household_concentration_and_notify(
+        [_holding("2914")],
+        _RaisingProviders(_OkMarketData()),
         handler_module.load_config(),
         repo,
         notification_service,
@@ -624,19 +653,16 @@ def test_evaluate_portfolio_concentration_and_notify_validation_mode_skips_save(
     assert len(notification_service.notified) == 1
 
 
-def test_evaluate_portfolio_concentration_and_notify_normal_mode_still_saves(
+def test_household_concentration_normal_mode_still_saves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """NORMAL回帰確認: VALIDATION対応追加後もRecommendation保存は従来通り行われる。"""
-    holding = _holding("2914")
     repo = _SpyRecommendationRepository()
     notification_service = _AlwaysSendsNotificationService()
 
-    handler_module._evaluate_portfolio_concentration_and_notify(
-        holding,
-        Decimal("1000"),
-        None,
-        Decimal("100000"),
+    handler_module.evaluate_household_concentration_and_notify(
+        [_holding("2914")],
+        _RaisingProviders(_OkMarketData()),
         handler_module.load_config(),
         repo,
         notification_service,
@@ -1046,8 +1072,6 @@ def _run_attention_scenario(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            "portfolio_total_market_value": "100000",
-            "portfolio_total_acquisition_cost": "100000",
             # VALIDATION: Recommendation保存を実行しない(実ローカルストアを
             # 汚染しない、かつ固定recommendation_idの複数テスト間再利用を許容する)。
             "execution_mode": "VALIDATION",
@@ -1296,8 +1320,6 @@ def _run_attention_scenario_and_capture_record_result(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            "portfolio_total_market_value": "100000",
-            "portfolio_total_acquisition_cost": "100000",
             "batch_id": "test-batch-if-attention",
             "execution_mode": "VALIDATION",
         },
@@ -1523,8 +1545,6 @@ def _run_holding_task_with_profit_taking_outcome(
         {
             "task": "holding",
             "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
-            "portfolio_total_market_value": None,
-            "portfolio_total_acquisition_cost": None,
         },
         _FakeContext(),
     )
