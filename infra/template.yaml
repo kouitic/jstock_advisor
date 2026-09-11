@@ -2287,7 +2287,15 @@ Resources:
             # point_in_time_evaluation(平日18:00)完了後に実行する。
             ScheduleExpression: "cron(0 19 ? * MON *)"
             ScheduleExpressionTimezone: Asia/Tokyo
-            # Issue #318: 群D — ファンアウトせず、二重実行の害が小さい(開示はcontent_hash、定点評価は索引で重複を抑止。月次・四半期は無条件skip)
+            # Issue #318: 群D — ファンアウトしない。ただし本関数だけは根拠が他の6本と違う。
+            # 週次はGitHub Issueを自動起票し、**新規作成できたときだけ**LINEを送る。
+            # 重複を防いでいるのはcontent_hashでも索引でもなく、ImprovementTaskStatus.
+            # ISSUE_CREATING(新規作成中の原子的なclaim)である。claim期限切れ(stale)を
+            # 検出した場合もGitHub側の実在確認を先に行ってから復旧・再claimするため、
+            # 再試行で同じIssueが二重起票されることはない(enums.py ImprovementTaskStatus)。
+            # ★ ただしCONFIGURATION_ERROR/ISSUE_CREATION_FAILEDのLINE送信は**claimの外**に
+            #   あり、再試行で同じ失敗を繰り返せば**エラー通知は重複する**(retry=2なので上限3通)。
+            #   実害は小さいが「害が小さい」と書く以上、何が重複しうるかを明示しておく。
             RetryPolicy:
               MaximumRetryAttempts: 2
               MaximumEventAgeInSeconds: 3600
