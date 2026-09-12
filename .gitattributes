@@ -1,0 +1,16 @@
+# Issue #338 C / USER 判断 DECISION_6 = A（2026-09-12）
+#
+# 目的: 同じ commit から package すれば ★ 同じ ConfigLayer の入力バイト列になること
+#       （SAME_GIT_COMMIT -> SAME_CONFIG_LAYER_INPUT_BYTES）。
+#
+# 背景: infra/template.yaml の ConfigLayer は ContentUri: ../config/ で
+#       ★ ソースツリーを直接 zip する（.aws-sam/build を経由しない）。
+#       そのため zip の中身が ★ package する環境の core.autocrlf に依存し、
+#       同じ commit でも異なる zip になりうる。
+#       2026-09-11 の W5 で ConfigLayer の版が不要に上がったのはこの経路である。
+#
+# 範囲: ★ config/ のみ。他の path には適用しない（必要最小限）。
+#       text=auto とすることで ★ git が binary と判定したファイルは正規化しない
+#       （現時点の config/ は 32 件すべて text。将来 binary が追加されても壊さない）。
+
+config/** text=auto eol=lf
