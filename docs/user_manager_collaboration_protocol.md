@@ -808,12 +808,23 @@ PRODUCTION_IMPACT            NONE / NOT_DEPLOYED / HAS_IMPACT 等
 
 RECOMMENDED_ACTION           MERGE / FIX_BEFORE_MERGE / HOLD /
                              MERGE_AND_TRACK_SEPARATELY 等
+
+INDEPENDENT_REVIEW_SNAPSHOT  3.14節の snapshot comment の URL
+                             独立レビューを行った場合は省略しない
+
+REVIEW_INPUT_EVIDENCE        Phase 1 で取得した primary evidence の identity
+                             BASE_SHA / HEAD_SHA / MERGE_BASE / DIFF_HASH /
+                             CI_RUN_ID 等(3.11節 / 3.14節)
 ```
 
 ```
 残課題があっても今回の merge を妨げない   -> MERGE_BLOCKING_CONCERN = NO
 merge 前に修正が必要                      -> MERGE_BLOCKING_CONCERN = YES
 ```
+
+後ろの 2 項目は、**判定が何を読んで出されたか**を提示へ残すためのものである。
+判定語だけを示すと、その判定を支える根拠は後からいくらでも作れる(3.14節)。
+独立レビュー(3.9節〜3.14節)を行った場合、この 2 項目を省略しない。
 
 ### 例
 
@@ -834,6 +845,13 @@ PR #<番号>
   PRODUCTION_IMPACT = NOT_DEPLOYED
 
   RECOMMENDED_ACTION = MERGE
+
+  INDEPENDENT_REVIEW_SNAPSHOT =
+    https://github.com/<owner>/<repo>/issues/<n>#issuecomment-<id>
+
+  REVIEW_INPUT_EVIDENCE =
+    BASE_SHA <base> / HEAD_SHA <head> / MERGE_BASE <mb>
+    DIFF_HASH <hash> / CI_RUN_ID <run>
 ```
 
 ユーザーはこれを見て GitHub 上で merge を判断できる。
@@ -2275,4 +2293,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-06 | 役割を製品非依存にし、ファイル名を chatgpt_collaboration_protocol.md から改称した(Issue #190)。管理・レビュー役が 2026-09-06 に ChatGPT 上の AI から交代したことで、**役割が特定の生成AI製品名で書かれていると、担当が変わるたびに正本を書き換えることになる**という構造的な問題が表面化した。そこで `PRODUCT_AGNOSTIC_ROLE_NAMING = YES` とし、役割を権限と責務で定義する。(1)1節を 4 役割(`USER` / `MANAGER` / `DEVELOPER_WITH_DEPLOY` / `DEVELOPER`)で書き直し、各役割の権限・責務・禁止事項を明記した。開発者 2 役割の差は「deploy 実作業を行うか」の 1 点だけであり、調査・設計・実装・報告・state 書き戻しの規則はすべて共通である。(2)**現在の担当は本文書へ焼き込まない**(`ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録`)。恒久文書と現在状態を分ける 10節の原則に従う。(3)1.5節の `PRODUCTION_DEPLOYMENT_EXECUTOR` と `DEPLOY_OPERATION_DELEGATION` を役割ベースへ改めた(担当者名を書かない)。(4)識別子を `<対象>_OWNER = <役割>` 形式へ統一した(`LOCK_REVIEW_OWNER` / `ASSIGNMENT_READ_BARRIER_OWNER` / `PRIORITY_READ_OWNER` / `STATE_READ_OWNER` = `MANAGER`、`NEXT_MANAGER_GATE_OWNS_RECONCILIATION`、`USER_MANAGER_COLLABORATION_SSOT`)。接頭辞へ役割名を埋め込まないため、次に体制が変わっても識別子名が変わらない。(5)本文中の "ChatGPT" 47 か所を役割名へ置換し、歴史的名称として 1 節で 1 か所だけ定義した(過去の記録が誰を指すか分かるようにするため)。(6)ファイル名を製品非依存へ改称した。**転送用スタブは残さない。** 過去の GitHub metadata からの参照 61 件を実測したところ**すべて平文で markdown link は 0 件**であり、改称で壊れるリンクが存在しないためである。**過去の Issue コメント・snapshot に残る "ChatGPT" / `ACTOR = CHATGPT` は append-only の記録であり書き換えていない。** 本文書の変更履歴の過去エントリも編集していない。承認単位・Human Gate・レビュー判定 4 種・指示プロトコル・merge 実行者はいずれも変更していない。コード・Production 挙動の変更なし |
 | 2026-09-08 | 3.8節へ「DoD 申告の確認」を追加した(Issue #252、打ち手 D-1)。development_workflow.md 3節が新設した DoD 5 項目の申告について、`DOD_DECLARATION_REVIEW_OWNER = MANAGER` とし、**「DoD 5 項目の申告があるか(空欄・無言の省略が無いか)」「申告と diff が矛盾していないか」**の2 項目を実装レビューの確認観点へ加えた。**レビュワーが「正しいか」を判定するのではなく「申告されているか」「矛盾していないか」を見る**(正しさの一次責任は実装者にある)。閾値の定数に diff があるのに「境界の連続性 = 該当なし」と書かれている場合や、「該当あり・未解消」と書かれているのに引き継ぎ先の Issue が無い場合は FAIL とする。**判定基準の本文は development_workflow.md 3節が正本であり本文書へ複製していない。**DoD の申告は CI で強制せず(H-252-3)、未記入は 3節の判定 4 種のうち INSUFFICIENT_EVIDENCE として扱い記入を求める(判定語を独自に増やさない)。**3.8節の既存の観点(PRIMARY_DOMAIN / LOCKED_DOMAINS / SHARED_TOUCHED / LOCK_LEVEL / LEVEL_1 の compatibility evidence / SCOPE_EXPANSION)と `LOCK_OMISSION_REVIEW_PASS_ALLOWED = NO`、2節の Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet approval、レビュー判定 4 種はいずれも変更していない。** 既存節の削除・書き換えは行っていない(純粋な追加)。コード・Production 挙動の変更なし |
 | 2026-09-12 | 8節へ `POLICY_AUTHORITY = HUMAN_ONLY` / `RULE_PROPOSAL` / `MEMORY_POLICY_AUTHORITY = NONE` の 3 項を追記し、0節の責務分離表へ `docs/policy_registry.yaml` の 1 行を追加した(Issue #337)。★ **`POLICY_AUTHORITY` は既存規則への識別子付与であり、規則の内容を変更していない**(8節は以前から「管理者が独自の判断でルールを追加・変更してよいという意味ではない」「作業 AI が独自にルールを変える根拠にはならない」と定めていた。参照可能な識別子が無かったため機械からも入口からも指せず、実際に正本外の運用ルールが 4 件課された)。AI が制定してはならないものの列挙・一回限りの指示と恒久ルールの判定質問・単独では恒久規則の正本にならないものの列挙を追加したが、いずれも**既存規則の適用範囲の明示**である。`RULE_PROPOSAL` は 8節が既に要求する Issue 起点の同期(development_workflow.md 9.5節)へ手続きを与えるものであり、★ **新しい承認を追加していない**。発効の形は 2.6.10節と ai_operation_message_contract.md 0節の前例を踏襲し、新方式を作っていない。`MEMORY_POLICY_AUTHORITY` は 8節の適用範囲の明示である(memory は repository の外にあり CI からも review からも見えないため、規範情報を保存するとセッションをまたいで正本と同じ強さで再現する。実例 = 撤回された運用ルールが作業 AI の memory へ「利用者からのフィードバック」として保存されていた)。**承認記録の書式は ai_operation_message_contract.md 8節が正本であり複製していない。****1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節のレビュー判定 4 種・4節の指示形式・10節の恒久ルールと現在状態の分離はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
-| 2026-09-12 | 3節へ ★ **3.9〜3.14 を新設**し、3.5節へ順序の 1 行を追記した(Issue #333)。レビューが独立していなかった。fresh session であることは独立したレビューを意味せず、最初に Issue の全コメントや PR 本文を一括取得すると ★ **その時点で開発者の結論を読んでしまう**。3.9 で入力の境界(BLIND_FIRST_PHASE_1_ALLOWED / FORBIDDEN)と Phase の定義を、3.10 で設計レビューの 17 観点と traceability を、3.11 でコードレビューの手順を、3.12 で証拠の強度(LEVEL_A / B / C)を、3.13 で反証確認を、3.14 で INDEPENDENT_REVIEW_SNAPSHOT と REVIEW_SESSION_LIFECYCLE を定めた。★ **節番号は末尾へ追加し、既存の 3.6〜3.8 を繰り下げていない**(ai_operation_message_contract.md 2026-09-07 の前例。他文書からの参照を無効にしないため)。★ **判定語を増やしていない**。3節の 4 語をそのまま使い、LEVEL_A/B/C は★ 証拠の強度であって判定語ではないことを明記した。★ **3.6節を置き換えていない**(3.6 = 鮮度 × 検証可能性 / 3.12 = 誰が取得したか。軸が違うため併存)。★ **新しい役割を作っていない**(reviewer session は管理者役割の別インスタンス。1節は不変)。DISCONFIRMING_CHECKS_PERFORMED のみ ★ NONE を認めないのは、「Finding が無かった」と「反証を試みなかった」が別だからである。EVIDENCE_GAPS = NONE の乱用の禁止は ★ 新しい禁止ではなく、3節の「推測で PASS にしない」と issue_label_policy.md 7.4.2 の「未観測を PASS と書かない」の適用である。**1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節の判定語 4 種・3.5〜3.8節の既存本文・4節の指示形式・8節のルール変更の扱い・10節・11節はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-12 | 3節へ ★ **3.9〜3.14 を新設**し、3.5節へ順序の 1 行を追記した(Issue #333)。レビューが独立していなかった。fresh session であることは独立したレビューを意味せず、最初に Issue の全コメントや PR 本文を一括取得すると ★ **その時点で開発者の結論を読んでしまう**。3.9 で入力の境界(BLIND_FIRST_PHASE_1_ALLOWED / FORBIDDEN)と Phase の定義を、3.10 で設計レビューの 17 観点と traceability を、3.11 でコードレビューの手順を、3.12 で証拠の強度(LEVEL_A / B / C)を、3.13 で反証確認を、3.14 で INDEPENDENT_REVIEW_SNAPSHOT と REVIEW_SESSION_LIFECYCLE を定めた。★ **節番号は末尾へ追加し、既存の 3.6〜3.8 を繰り下げていない**(ai_operation_message_contract.md 2026-09-07 の前例。他文書からの参照を無効にしないため)。★ **判定語を増やしていない**。3節の 4 語をそのまま使い、LEVEL_A/B/C は★ 証拠の強度であって判定語ではないことを明記した。★ **3.6節を置き換えていない**(3.6 = 鮮度 × 検証可能性 / 3.12 = 誰が取得したか。軸が違うため併存)。★ **新しい役割を作っていない**(reviewer session は管理者役割の別インスタンス。1節は不変)。DISCONFIRMING_CHECKS_PERFORMED のみ ★ NONE を認めないのは、「Finding が無かった」と「反証を試みなかった」が別だからである。EVIDENCE_GAPS = NONE の乱用の禁止は ★ 新しい禁止ではなく、3節の「推測で PASS にしない」と issue_label_policy.md 7.4.2 の「未観測を PASS と書かない」の適用である。**1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節の判定語 4 種・3.5〜3.8節の既存本文・4節の指示形式・8節のルール変更の扱い・10節・11節はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし。**3.7節へ 2 項目を追記した**(INDEPENDENT_REVIEW_SNAPSHOT / REVIEW_INPUT_EVIDENCE)。判定語だけを提示すると、その判定を支える根拠が後から作れてしまうため、**判定が何を読んで出されたか**を提示へ残す。**既存 8 項目は 1 文字も変更していない**(追加は末尾のみ)。例にも同じ 2 項目を反映し、本文と例が食い違わないようにした。設計は当初この拡張先を ai_operation_message_contract.md の 3.7節としていたが、**同文書に 3.7節は存在せず**(3節は BASELINE_INVARIANTS)、「merge 判断を支援する提示形式」を持つ節は本書の 3.7節だけであるため、**設計の誤記として MANAGER 判断で訂正した**(項目数も 6 ではなく 8 であった) |
