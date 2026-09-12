@@ -30,6 +30,7 @@
 役割                       識別子
 利用者・承認者             USER
 管理者                     MANAGER
+レビュワー                 REVIEWER
 開発者(デプロイ権限あり)   DEVELOPER_WITH_DEPLOY
 開発者(デプロイ権限なし)   DEVELOPER
 ```
