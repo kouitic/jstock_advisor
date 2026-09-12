@@ -706,6 +706,10 @@ EVIDENCE_FIRST = YES
 すべての報告を毎回検証し直すルールではない。
 **誤ると取り返しがつかない判断**に絞って適用する。
 
+**独立に取得する場合、その取得は開発者の報告を読む ★ 前に行う。**
+順序だけを定めるものであり、本節の適用範囲は変えない
+(入力の境界は 3.9節、証跡は 3.14節)。
+
 ### 例外
 
 なし。ただし上記の適用範囲を超えて検証コストを広げない。
@@ -1012,6 +1016,454 @@ INSUFFICIENT_EVIDENCE として扱い、記入を求める。
 `LOCKED_DOMAINS` の確認は Human Gate を増やすものではない。**2節の
 Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet
 approval はいずれも変更しない。**
+
+---
+
+## 3.9 レビューの入力境界(BLIND_FIRST_INPUT_BOUNDARY)
+
+### 目的
+
+fresh session であることは、独立したレビューであることを意味しない。
+
+```
+fresh session != blind-first review
+```
+
+reviewer が最初に Issue の全コメント・PR 本文・PR Conversation を一括取得すると、
+その時点で開発者の結論・リスク評価・テストの説明を読んでしまう。以後の判断は
+それに引きずられる。**何を先に読むかを規則にする。**
+
+### Phase の定義
+
+```
+PHASE_1  primary evidence の取得 / independent review / snapshot の固定
+PHASE_2  developer report の取得 / developer claim との比較
+PHASE_3  final review verdict
+```
+
+### Phase 1 で取得してよいもの
+
+```
+BLIND_FIRST_PHASE_1_ALLOWED
+
+  Issue body
+  USER requirements
+  USER decisions
+  current classification(label / Progress Status / Priority)
+  current SSOT(該当条文の原文)
+  origin/main SHA
+  base SHA / head SHA / merge-base
+  exact diff
+  design artifact(設計そのもの。設計者の自己評価を除く)
+  related source code
+  related tests
+  CI result(job ごとの conclusion)
+  workflow definition / ruleset
+  machine-readable repository state(branch / tag / label / file の実体)
+```
+
+### Phase 1 で読まないもの
+
+```
+BLIND_FIRST_PHASE_1_FORBIDDEN
+
+  developer completion report
+  developer self-review
+  developer risk assessment
+  developer root-cause explanation
+  developer test interpretation
+  developer の「PASS / 問題なし」という結論
+  developer implementation summary
+  PR 本文のうち developer が記載した説明・自己評価部分
+```
+
+### Issue コメントの扱い
+
+Issue コメントには利用者の要求・決定、開発者の報告、管理者の指示、レビュー結果が
+混在する。**「Issue の全コメントを最初に読む」としてはならない。**
+
+```
+★ 全セッションが同一の GitHub identity で投稿する。
+  -> comment の author からは利用者の要求と開発者の報告を区別できない
+  -> 本文の ACTOR / DECIDED_BY 等のマーカーは自己申告であり、機械的な境界にならない
+  -> 本人性の識別は Issue #332 の論点であり、本節では解決しない
+```
+
+したがって自動分類は成立しない。**Phase 1 の入力は manifest で与える。**
+
+```
+PHASE_1_INPUT_MANIFEST
+  Phase 1 で読んでよい comment / artifact の URL を列挙したもの
+
+作成者  ORCHESTRATOR(3.14 の REVIEW_SESSION_CREATOR)
+制約    manifest の作成者と reviewer が ★ 同一であってはならない
+        manifest に developer completion report を ★ 含めてはならない
+        manifest は snapshot へ記録し、事後に検査できる形にする
+```
+
+```
+★ この方式は依存を消さない。範囲を orchestrator が決める構造は残る。
+  manifest を snapshot へ記録することで、「developer report が含まれていなかったか」を
+  第三者が後から検査できるようにする。★ 依存を消すのではなく、監査可能にする。
+```
+
+### PR 本文の扱い
+
+**PR 本文の全体を Phase 1 の必須入力にしない。** コードレビューの Phase 1 で必要な
+ものは、すべて GitHub artifact から直接取得できる。
+
+```
+base / head SHA   gh pr view --json baseRefOid,headRefOid
+changed files     gh pr diff --name-only / git diff --name-only
+exact diff        git diff <merge-base>..<head>
+CI                gh pr view --json statusCheckRollup
+Issue reference   Issue 側から辿る
+```
+
+**PR 本文は Phase 2 の developer claim comparison で読む。** ただし 1 点の例外がある。
+
+```
+★ PR 本文の「正本が必須と定める節が存在するか」の検査は Phase 1 で行う
+  理由 = 節の存在は構文であり、developer の主張ではない
+★ 節の中身(宣言の内容が正しいか)は Phase 1 で読まない。Phase 2 で読む
+```
+
+---
+
+## 3.10 設計レビューの観点(DESIGN_REVIEW_PROTOCOL)
+
+### 17 の観点
+
+**該当しない観点は `NOT_APPLICABLE` と理由を書く。** 空欄にしない。
+
+```
+ 1 REQUIREMENT_COVERAGE        10 TESTABILITY
+ 2 SSOT_CONSISTENCY            11 ROLLBACK
+ 3 ROOT_CAUSE_FIT              12 ACTIVATION_BOUNDARY
+ 4 RESPONSIBILITY_BOUNDARY     13 DATA / STATE MIGRATION
+ 5 ARCHITECTURE_FIT            14 CONCURRENCY / RETRY / IDEMPOTENCY
+ 6 FAILURE_MODE                15 UNKNOWN / ASSUMPTION
+ 7 BACKWARD_COMPATIBILITY      16 ISSUE_SPLIT / LIFECYCLE
+ 8 SECURITY                    17 HUMAN_GATE
+ 9 OPERABILITY
+```
+
+### traceability
+
+**reviewer 自身が作る。開発者の対応表を写さない。**
+
+```
+REQUIREMENT -> DESIGN_ELEMENT -> EVIDENCE -> GAP -> VERDICT
+```
+
+### 手順
+
+```
+DESIGN_REVIEW_PHASE_1
+  1  Issue body / 利用者の要求 / 利用者の決定を取得する
+  2  current SSOT を ★ 原文で取得する(設計者の引用を根拠にしない)
+  3  design artifact を取得する
+  4  ★ developer explanation を見ずに requirements を再構築する
+  5  17 の観点を評価する
+  6  failure mode / counterexample を探す
+  7  requirement traceability を作成する
+  8  ★ INDEPENDENT_REVIEW_SNAPSHOT を固定する(3.14)
+
+DESIGN_REVIEW_PHASE_2
+  9  developer rationale / self-review を読む
+  10 independent finding との差を比較する
+  11 必要なら finding を更新する
+  12 ★ 更新理由を記録する
+  13 final verdict
+```
+
+---
+
+## 3.11 コードレビューの観点(CODE_REVIEW_PROTOCOL)
+
+### 既存規則を再利用する
+
+```
+merge-base からの exact diff   development_workflow.md 3節「レビュー対象の指定」
+実装パイプラインの diff review  同 3節
+機能領域 WIP の観点             本文書 3.8節
+```
+
+**新設しない。** 本節が加えるのは次の 4 点だけである。
+
+```
+取得する artifact の列挙
+requirement traceability
+surrounding code の確認
+PR 本文の必須節の確認
+```
+
+### 手順
+
+```
+CODE_REVIEW_PHASE_1
+  1  Issue requirement / 利用者の決定を取得する
+  2  base / head / merge-base を取得する
+  3  exact diff を取得する
+  4  changed files を取得する
+  5  ★ surrounding code を取得する
+  6  caller / callee / interface を確認する
+  7  tests を取得する
+  8  CI 結果を取得する
+  9  requirement -> implementation -> test を追跡する
+  10 counterexample / missing path を探す
+  11 ★ PR 本文の必須節が存在するかを確認する(★ 節の中身は読まない)
+  12 ★ INDEPENDENT_REVIEW_SNAPSHOT を固定する(3.14)
+
+CODE_REVIEW_PHASE_2
+  13 PR 本文 / developer completion report を読む
+  14 developer claim との差を比較する
+  15 ★ developer assertion only の項目を LEVEL_C として分類する(3.12)
+  16 final finding / verdict
+```
+
+```
+★ 5 と 11 を独立させている理由
+
+  diff だけを読むと、diff の外にある呼び出し元・既存の契約・
+  必須節の欠落を見落とす。実際に、変更されたファイルを列挙しながら
+  その中身を読まないまま PASS を出した事例がある。
+  ★ 5 は「列挙したファイルを読む」ことを、★ 11 は「PR 本文の構文を見る」ことを、
+  それぞれ独立した手順として置く。
+```
+
+### developer report の位置づけ
+
+```
+DEVELOPER_REPORT = SECONDARY_EVIDENCE
+```
+
+**価値が無いという意味ではない。** Phase 2 で次の用途に使う。
+
+```
+developer intent       なぜその設計にしたか
+known limitation       本人が把握している限界
+local-only evidence    reviewer が取得できない実行結果
+test command / output  再現の手がかり(3.12 の LEVEL_B の材料)
+design rationale       設計の根拠
+unverified measurement 観測値など(LEVEL_B または LEVEL_C)
+```
+
+---
+
+## 3.12 証拠の強度(EVIDENCE_CLASSIFICATION)
+
+### 3.6節とは軸が違う。置き換えない
+
+```
+3.6節  鮮度 × 検証可能性   どの記述を採用するか
+本節   誰が取得したか       その証拠の強度
+```
+
+**併存させる。** 一方が他方を上書きしない。
+
+### 3 段階
+
+```
+LEVEL_A  INDEPENDENTLY_VERIFIED      reviewer 自身が取得・再現した
+LEVEL_B  REPRODUCIBLE_EVIDENCE       手順が示され、第三者が再現できる
+LEVEL_C  DEVELOPER_ASSERTION_ONLY    開発者の申告のみ
+```
+
+### 測定の独立性(MEASUREMENT_INDEPENDENCE)
+
+```
+(a) 測定コマンドを添える(どこで測ったかを含む)
+(b) sanitize 済みの生出力を添える
+(c) 高リスク項目は独立に再測定する(★ 管理者自身の測定も対象)
+(d) 開発者の申告のみで支えられる測定は ★ LEVEL_C とする。別の語を作らない
+```
+
+### PASS の条件
+
+**判定語は 3節の 4 語のままである。本節は新しい判定語を作らない。**
+
+```
+★ 重要な要求が LEVEL_C だけで支えられている場合、PASS を出さない
+  -> INSUFFICIENT_EVIDENCE とする(3節の語彙の適用であり、新設ではない)
+```
+
+```
+★ LEVEL_A / B / C は ★ 証拠の強度であって ★ 判定語ではない。混同しない。
+```
+
+---
+
+## 3.13 反証確認(DISCONFIRMING_REVIEW)
+
+**「壊れていないか」を探す工程を、明示的に置く。**
+
+```
+DISCONFIRMING_CHECKS_PERFORMED
+  何を「壊れている可能性」として調べたかを列挙する
+```
+
+```
+記載例
+  別の caller が存在しないか確認
+  error path を確認
+  stale state のときの挙動を確認
+  requirement が未実装の経路を確認
+  CI が green でも漏れる経路がないか確認
+```
+
+```
+★ Finding の件数にノルマを作らない。0 件でよい。
+★ ただし「反証を試みたこと」の記録は省略できない(3.14 を参照)。
+  Finding は「無かった」が成立する。反証は「しなかった」であって「無かった」ではない。
+```
+
+---
+
+## 3.14 独立レビューの証跡(INDEPENDENT_REVIEW_SNAPSHOT)
+
+### 目的
+
+最終報告で reviewer 自身が「先に独立レビューしました」と書くだけでは証拠にならない。
+**判定だけを先に置いても、その判定を支える根拠は後から作れる。**
+
+```
+★ 本 snapshot は development_workflow.md 6.5.3 の ISSUE_STATE_SNAPSHOT とは別物である。
+  あちら = Issue の現在状態 / こちら = レビューの証跡
+  ★ 6.5.3 の約 30 の固定キーを要求しない。
+```
+
+### 必須 field(全レビュー共通)
+
+```
+REVIEW_ID                       <YYYYMMDDTHHMMSSffffffZ>-REVIEWER-<NONCE>
+                                ★ 6.5.3 の STATE_ID と同じ生成方式。新方式を作らない
+REVIEW_TARGET                   DESIGN | CODE
+ISSUE_REF                       #NNN
+SSOT_REF                        読んだ条文(file + anchor)の列挙
+CREATED_AT                      実測 UTC
+PHASE_1_INPUT_MANIFEST          Phase 1 で読んだ comment / artifact の URL の列挙
+PRELIMINARY_FINDINGS            ★ 必須
+EVIDENCE_GAPS                   ★ 必須
+DISCONFIRMING_CHECKS_PERFORMED  ★ 必須
+PRELIMINARY_VERDICT             3節の 4 語のいずれか(★ 新語を作らない)
+```
+
+### 対象ごとに追加で必須
+
+```
+CODE    BASE_SHA / HEAD_SHA / MERGE_BASE / DIFF_HASH / REVIEWED_FILES / CI_RUN_ID
+        DIFF_HASH = git diff <merge-base>..<head> の sha256
+DESIGN  DESIGN_ARTIFACT_REF(設計が書かれた comment の URL)
+```
+
+### 任意
+
+```
+REQUIREMENTS_RECONSTRUCTED / CONSTRAINTS_RECONSTRUCTED
+```
+
+### NONE の扱い
+
+```
+PRELIMINARY_FINDINGS = NONE
+  ★ 有効値である。Finding を無理に作らせない。
+
+EVIDENCE_GAPS = NONE
+  ★ 有効値である。ただし ★ 未確認事項が存在するのに NONE と書いてはならない。
+  区別する
+    NONE       確認した結果、未確認事項が存在しない
+    項目の列挙  未確認事項がある
+  ★ 「確認していないので分からない」を NONE と書かない。
+  ★ これは新しい禁止ではない。3節の「推測で PASS にしてはならない」と
+    issue_label_policy.md 7.4.2 の「未観測を PASS と書かない」が既に禁じている。
+
+DISCONFIRMING_CHECKS_PERFORMED
+  ★ NONE を認めない。Finding が 0 件でも必須である。
+  理由 = Finding が無いことと、反証を試みなかったことは別である。
+```
+
+### 保存先
+
+```
+SNAPSHOT_DESTINATION = 対象 Issue の comment
+```
+
+```
+★ repository の file にしない。reviewer 自身が commit することになり、
+  「reviewer は修正者にならない」という原則に反する。
+★ 外部(gist 等)にしない。公開面が増える(11節)。
+★ コードレビューでは PR comment でもよいが、設計レビューには PR が
+  存在しない場合があるため、★ 形式を揃えて Issue comment を第一候補とする。
+```
+
+### Phase 1 の完了条件
+
+```
+PHASE_1_COMPLETE =
+      必須 field がすべて埋まっている(REVIEW_TARGET に応じた追加分を含む)
+  AND snapshot が Issue comment として投稿されている
+  AND その comment の URL が確定している
+```
+
+```
+★ 埋まっていない field を残して Phase 2 へ進まない。
+★ 空欄にしない。
+  確認できなかったのであれば EVIDENCE_GAPS へ「何を確認できなかったか」を書く。
+  反証を試みられなかったのであれば、その理由を
+  DISCONFIRMING_CHECKS_PERFORMED へ書く(試みなかったことを隠さない)。
+```
+
+### REVIEW_SESSION_LIFECYCLE
+
+```
+ 1  DEVELOPER      implementation / design を作成する
+ 2  DEVELOPER      artifact を GitHub へ固定する(branch push / design comment)
+ 3  REVIEW_TRIGGER developer が完了を報告した時点
+ 4  ORCHESTRATOR   fresh reviewer session を起動し、Phase 1 input manifest を渡す
+ 5  REVIEWER P1    BLIND_FIRST_PHASE_1_ALLOWED のみ取得する
+ 6  REVIEWER       INDEPENDENT_REVIEW_SNAPSHOT を Issue comment として固定する
+ 7  HANDOFF_POINT  ★ snapshot の URL を確認した後、developer report を渡す
+ 8  REVIEWER P2    developer claim と独立の結論を比較する
+ 9  REVIEWER       final finding / verdict を出す
+10  ORCHESTRATOR / USER  finding を処理し、判断する
+```
+
+```
+REVIEW_SESSION_CREATOR   ORCHESTRATOR(管理者の persistent session)
+                         ★ 新しい役割を作らない。reviewer session は
+                           管理者役割の別インスタンスとする(1節を変更しない)
+REVIEW_TRIGGER           developer の完了報告を受けた時点
+                         ★ developer が push した時点ではない
+                           (artifact が固定されていない可能性がある)
+PHASE_1_INPUT_PROVIDER   ORCHESTRATOR が manifest を渡す
+                         ★ 渡すのは URL の列挙だけである。本文を要約して渡さない
+DEVELOPER_REPORT_HANDOFF_POINT
+                         snapshot が comment として投稿され、その URL を
+                         ORCHESTRATOR が確認した後
+                         ★ それより前に渡してはならない
+REVIEW_SESSION_END_CONDITION
+                         final verdict が投稿され、finding が ORCHESTRATOR へ
+                         返された時点
+                         ★ reviewer session は finding を直さない
+```
+
+### この規則が埋めないもの
+
+```
+★ ORCHESTRATOR が manifest を誤って作れば blind-first は崩れる。
+  manifest を snapshot へ記録することで ★ 崩れたことを事後に検査できる。
+  ★ 崩れないことは保証しない。
+
+★ reviewer が manifest 外の情報を取得しても検出できない。
+  PHASE_1_INPUT_MANIFEST と REVIEWED_FILES は ★ 自己申告である。
+  ★ DIFF_HASH と changed files の一致で「対象が正しいか」は検査できるが、
+    「読んだか」は検査できない。
+
+★ Phase の順序は追跡できるが、「読んでいなかったこと」は証明できない。
+  確認方法 = snapshot comment の created_at と、Phase 2 の最終報告が引用する
+  developer report の comment URL を突き合わせる。
+```
 
 ---
 
@@ -1823,3 +2275,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-06 | 役割を製品非依存にし、ファイル名を chatgpt_collaboration_protocol.md から改称した(Issue #190)。管理・レビュー役が 2026-09-06 に ChatGPT 上の AI から交代したことで、**役割が特定の生成AI製品名で書かれていると、担当が変わるたびに正本を書き換えることになる**という構造的な問題が表面化した。そこで `PRODUCT_AGNOSTIC_ROLE_NAMING = YES` とし、役割を権限と責務で定義する。(1)1節を 4 役割(`USER` / `MANAGER` / `DEVELOPER_WITH_DEPLOY` / `DEVELOPER`)で書き直し、各役割の権限・責務・禁止事項を明記した。開発者 2 役割の差は「deploy 実作業を行うか」の 1 点だけであり、調査・設計・実装・報告・state 書き戻しの規則はすべて共通である。(2)**現在の担当は本文書へ焼き込まない**(`ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録`)。恒久文書と現在状態を分ける 10節の原則に従う。(3)1.5節の `PRODUCTION_DEPLOYMENT_EXECUTOR` と `DEPLOY_OPERATION_DELEGATION` を役割ベースへ改めた(担当者名を書かない)。(4)識別子を `<対象>_OWNER = <役割>` 形式へ統一した(`LOCK_REVIEW_OWNER` / `ASSIGNMENT_READ_BARRIER_OWNER` / `PRIORITY_READ_OWNER` / `STATE_READ_OWNER` = `MANAGER`、`NEXT_MANAGER_GATE_OWNS_RECONCILIATION`、`USER_MANAGER_COLLABORATION_SSOT`)。接頭辞へ役割名を埋め込まないため、次に体制が変わっても識別子名が変わらない。(5)本文中の "ChatGPT" 47 か所を役割名へ置換し、歴史的名称として 1 節で 1 か所だけ定義した(過去の記録が誰を指すか分かるようにするため)。(6)ファイル名を製品非依存へ改称した。**転送用スタブは残さない。** 過去の GitHub metadata からの参照 61 件を実測したところ**すべて平文で markdown link は 0 件**であり、改称で壊れるリンクが存在しないためである。**過去の Issue コメント・snapshot に残る "ChatGPT" / `ACTOR = CHATGPT` は append-only の記録であり書き換えていない。** 本文書の変更履歴の過去エントリも編集していない。承認単位・Human Gate・レビュー判定 4 種・指示プロトコル・merge 実行者はいずれも変更していない。コード・Production 挙動の変更なし |
 | 2026-09-08 | 3.8節へ「DoD 申告の確認」を追加した(Issue #252、打ち手 D-1)。development_workflow.md 3節が新設した DoD 5 項目の申告について、`DOD_DECLARATION_REVIEW_OWNER = MANAGER` とし、**「DoD 5 項目の申告があるか(空欄・無言の省略が無いか)」「申告と diff が矛盾していないか」**の2 項目を実装レビューの確認観点へ加えた。**レビュワーが「正しいか」を判定するのではなく「申告されているか」「矛盾していないか」を見る**(正しさの一次責任は実装者にある)。閾値の定数に diff があるのに「境界の連続性 = 該当なし」と書かれている場合や、「該当あり・未解消」と書かれているのに引き継ぎ先の Issue が無い場合は FAIL とする。**判定基準の本文は development_workflow.md 3節が正本であり本文書へ複製していない。**DoD の申告は CI で強制せず(H-252-3)、未記入は 3節の判定 4 種のうち INSUFFICIENT_EVIDENCE として扱い記入を求める(判定語を独自に増やさない)。**3.8節の既存の観点(PRIMARY_DOMAIN / LOCKED_DOMAINS / SHARED_TOUCHED / LOCK_LEVEL / LEVEL_1 の compatibility evidence / SCOPE_EXPANSION)と `LOCK_OMISSION_REVIEW_PASS_ALLOWED = NO`、2節の Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet approval、レビュー判定 4 種はいずれも変更していない。** 既存節の削除・書き換えは行っていない(純粋な追加)。コード・Production 挙動の変更なし |
 | 2026-09-12 | 8節へ `POLICY_AUTHORITY = HUMAN_ONLY` / `RULE_PROPOSAL` / `MEMORY_POLICY_AUTHORITY = NONE` の 3 項を追記し、0節の責務分離表へ `docs/policy_registry.yaml` の 1 行を追加した(Issue #337)。★ **`POLICY_AUTHORITY` は既存規則への識別子付与であり、規則の内容を変更していない**(8節は以前から「管理者が独自の判断でルールを追加・変更してよいという意味ではない」「作業 AI が独自にルールを変える根拠にはならない」と定めていた。参照可能な識別子が無かったため機械からも入口からも指せず、実際に正本外の運用ルールが 4 件課された)。AI が制定してはならないものの列挙・一回限りの指示と恒久ルールの判定質問・単独では恒久規則の正本にならないものの列挙を追加したが、いずれも**既存規則の適用範囲の明示**である。`RULE_PROPOSAL` は 8節が既に要求する Issue 起点の同期(development_workflow.md 9.5節)へ手続きを与えるものであり、★ **新しい承認を追加していない**。発効の形は 2.6.10節と ai_operation_message_contract.md 0節の前例を踏襲し、新方式を作っていない。`MEMORY_POLICY_AUTHORITY` は 8節の適用範囲の明示である(memory は repository の外にあり CI からも review からも見えないため、規範情報を保存するとセッションをまたいで正本と同じ強さで再現する。実例 = 撤回された運用ルールが作業 AI の memory へ「利用者からのフィードバック」として保存されていた)。**承認記録の書式は ai_operation_message_contract.md 8節が正本であり複製していない。****1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節のレビュー判定 4 種・4節の指示形式・10節の恒久ルールと現在状態の分離はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-12 | 3節へ ★ **3.9〜3.14 を新設**し、3.5節へ順序の 1 行を追記した(Issue #333)。レビューが独立していなかった。fresh session であることは独立したレビューを意味せず、最初に Issue の全コメントや PR 本文を一括取得すると ★ **その時点で開発者の結論を読んでしまう**。3.9 で入力の境界(BLIND_FIRST_PHASE_1_ALLOWED / FORBIDDEN)と Phase の定義を、3.10 で設計レビューの 17 観点と traceability を、3.11 でコードレビューの手順を、3.12 で証拠の強度(LEVEL_A / B / C)を、3.13 で反証確認を、3.14 で INDEPENDENT_REVIEW_SNAPSHOT と REVIEW_SESSION_LIFECYCLE を定めた。★ **節番号は末尾へ追加し、既存の 3.6〜3.8 を繰り下げていない**(ai_operation_message_contract.md 2026-09-07 の前例。他文書からの参照を無効にしないため)。★ **判定語を増やしていない**。3節の 4 語をそのまま使い、LEVEL_A/B/C は★ 証拠の強度であって判定語ではないことを明記した。★ **3.6節を置き換えていない**(3.6 = 鮮度 × 検証可能性 / 3.12 = 誰が取得したか。軸が違うため併存)。★ **新しい役割を作っていない**(reviewer session は管理者役割の別インスタンス。1節は不変)。DISCONFIRMING_CHECKS_PERFORMED のみ ★ NONE を認めないのは、「Finding が無かった」と「反証を試みなかった」が別だからである。EVIDENCE_GAPS = NONE の乱用の禁止は ★ 新しい禁止ではなく、3節の「推測で PASS にしない」と issue_label_policy.md 7.4.2 の「未観測を PASS と書かない」の適用である。**1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節の判定語 4 種・3.5〜3.8節の既存本文・4節の指示形式・8節のルール変更の扱い・10節・11節はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
