@@ -178,6 +178,49 @@ policies:
     human_gate_required: false
     machine_enforceable: true
 
+  # --- レビューの独立性(Issue #333) ---------------------------------------
+  - policy_id: PROTOCOL.REVIEW_INPUT_BOUNDARY
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 3.9 レビューの入力境界(BLIND_FIRST_INPUT_BOUNDARY)"
+    applicable_operations: [PR_CREATE, MERGE]
+    human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: PROTOCOL.DESIGN_REVIEW_PROTOCOL
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 3.10 設計レビューの観点(DESIGN_REVIEW_PROTOCOL)"
+    applicable_operations: [IMPLEMENTATION_START]
+    human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: PROTOCOL.CODE_REVIEW_PROTOCOL
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 3.11 コードレビューの観点(CODE_REVIEW_PROTOCOL)"
+    applicable_operations: [PR_CREATE, MERGE]
+    human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: PROTOCOL.EVIDENCE_CLASSIFICATION
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 3.12 証拠の強度(EVIDENCE_CLASSIFICATION)"
+    applicable_operations: [PR_CREATE, MERGE, ISSUE_CLOSE]
+    human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: PROTOCOL.DISCONFIRMING_REVIEW
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 3.13 反証確認(DISCONFIRMING_REVIEW)"
+    applicable_operations: [PR_CREATE, MERGE]
+    human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: PROTOCOL.INDEPENDENT_REVIEW_SNAPSHOT
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 3.14 独立レビューの証跡(INDEPENDENT_REVIEW_SNAPSHOT)"
+    applicable_operations: [PR_CREATE, MERGE]
+    human_gate_required: false
+    machine_enforceable: false
+
   - policy_id: PROTOCOL.POLICY_AUTHORITY
     ssot_file: docs/user_manager_collaboration_protocol.md
     ssot_anchor: "## 8. ルール変更の扱い"
