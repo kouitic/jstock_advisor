@@ -105,8 +105,10 @@ MANAGER_ROLE = WORK_PLANNING_AND_EXECUTION_MANAGEMENT
 担当割当の管理
 Progress Status / Phase の管理
 実績・dependency・scope・WIP の管理
-調査・設計・実装結果のレビュー
-  ★ 独立レビュー(3.9〜3.14節)の代替にはならない。下記の禁止を参照
+management review(計画のレビュー / scope の確認 / 進捗・実績の確認 /
+                 acceptance と Progress Status の管理上の確認)
+  ★ 3.9〜3.14節の independent review ではない。あちらは REVIEWER が行う
+  ★ MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO(下記の禁止を参照)
 review trigger の管理
 PHASE_1_INPUT_MANIFEST の作成(3.9節 / 3.14節)
 REVIEWER への review 依頼と developer report の handoff
@@ -710,9 +712,21 @@ Production deploy は本節とは別の Human Gate である(2節)。
 
 ```
 FINAL_REVIEW_VERDICT_OWNER = REVIEWER(1節 / 3.14節)
+REVIEW_KIND = MANAGEMENT_REVIEW | INDEPENDENT_REVIEW
 
 本節は判定語を定める。review lifecycle 上で最終 verdict を出す主体は
 REVIEWER であり、管理者は自分が管理した対象の最終 reviewer を兼務しない。
+```
+
+**判定語は両方の review で共通である。どちらの review の結論かは `REVIEW_KIND` で
+示す。** review 結果を durable record へ残すときは `REVIEW_KIND` を verdict と
+併記し、記録だけを読んで一意に判別できるようにする。
+
+```
+例  REVIEW_KIND = INDEPENDENT_REVIEW / REVIEW_VERDICT = PASS
+    REVIEW_KIND = MANAGEMENT_REVIEW  / REVIEW_VERDICT = PASS
+
+★ 判定語は 4 種のままである。REVIEW_KIND は判定語ではない。
 ```
 
 使用する判定は4つ。
@@ -1362,6 +1376,19 @@ merge-base からの exact diff   development_workflow.md 3節「レビュー対
 機能領域 WIP の観点             本文書 3.8節
 ```
 
+**3.8節の観点は REVIEWER が独立に確認する。ただし所有者は移らない。**
+
+```
+REVIEWER    3.8節の観点(LOCKED_DOMAINS / LOCK_LEVEL / compatibility evidence /
+            DoD 申告)を ★ 独立に確認する
+MANAGER     3.8節の management responsibility / ownership を ★ 引き続き持つ
+            LOCK_REVIEW_OWNER = MANAGER
+            DOD_DECLARATION_REVIEW_OWNER = MANAGER
+
+★ REVIEWER が確認しても ownership は REVIEWER へ ★ 移らない。
+★ 3.8節の本文は変更していない。
+```
+
 **新設しない。** 本節が加えるのは次の 4 点だけである。
 
 ```
@@ -1554,6 +1581,7 @@ DISCONFIRMING_CHECKS_PERFORMED
 ```
 REVIEW_ID                       <YYYYMMDDTHHMMSSffffffZ>-REVIEWER-<NONCE>
                                 ★ 6.5.3 の STATE_ID と同じ生成方式。新方式を作らない
+REVIEW_KIND                     INDEPENDENT_REVIEW(3節。★ 追加。既存 field は変えない)
 REVIEW_TARGET                   DESIGN | CODE
 ISSUE_REF                       #NNN
 SSOT_REF                        読んだ条文(file + anchor)の列挙
@@ -1675,17 +1703,107 @@ DEVELOPER_REPORT_HANDOFF_POINT
                          MANAGER が確認した後
                          ★ それより前に渡してはならない
 REVIEW_SESSION_END_CONDITION
-                         final verdict が投稿され、finding が MANAGER へ
-                         返された時点
+                         次のいずれか(下記 E)
+                           FINAL_VERDICT = PASS
+                           REVIEW_TARGET_ABANDONED
+                           REVIEW_TARGET_REPLACED
+                           USER による review 終了判断
                          ★ REVIEWER は finding を直さない
+```
+
+### review session の再利用(REVIEW_SESSION_REUSE_POLICY)
+
+**修正のたびに新しい fresh session を作り直さない。**
+独立性が要るのは「最初の評価を developer の自己評価より前に形成すること」であり、
+最初の snapshot を固定した後に同じ reviewer が developer report や修正内容を読むことは、
+Phase 2 と remediation review の ★ 本来の仕事である。
+
+```
+INITIAL_INDEPENDENCE      fresh session + blind-first Phase 1
+CONTINUITY_AFTER_SNAPSHOT same reviewer session
+
+★ blind-first を弱める規則ではない。要求する時点を明示するだけである。
+```
+
+```
+FRESHNESS_REQUIRED_AT       INITIAL_PHASE_1_ONLY
+SESSION_REUSE_ALLOWED_FOR   PHASE_2 / FINDING_REMEDIATION_REVIEW / RE_REVIEW /
+                            NEW_COMMIT_ON_SAME_REVIEW_TARGET /
+                            PR_CREATED_FROM_THE_SAME_REVIEWED_BRANCH /
+                            CI_RECHECK_FOR_THE_SAME_TARGET
+SESSION_REUSE_FORBIDDEN_FOR DIFFERENT_ISSUE / DIFFERENT_INDEPENDENT_REVIEW_TARGET /
+                            UNRELATED_PR / NEW_REVIEW_LIFECYCLE
+
+★ 同じ session を使える範囲は 同一の REVIEW_ID / REVIEW_TARGET_LIFECYCLE に限る。
+```
+
+```
+A INITIAL REVIEW  上記 12 段階の 1〜6
+                  MANAGER が PHASE_1_INPUT_MANIFEST を作り、fresh な REVIEWER
+                  session が Phase 1 を行い INDEPENDENT_REVIEW_SNAPSHOT を固定する。
+                  ★ ここで REVIEW_ID を発行し、freshness の要件を充足する
+B PHASE 2         上記 12 段階の 7〜10
+                  ★ 同じ review session で developer claim と比較し verdict を出す
+C REMEDIATION     MANAGER が finding を開発者へ指示する(12 段階の 11) ->
+                  開発者が修正し new HEAD と evidence を固定する ->
+                  MANAGER が remediation handoff を行う ->
+                  ★ 同じ review session が 前回レビュー済み HEAD からの exact diff を見て、
+                  finding の解消 / regression / 新しい finding を確認し verdict を更新する
+D REPEAT          必要な回数だけ C を繰り返す。★ fresh session を作り直さない
+E TERMINATION     FINAL_VERDICT = PASS / REVIEW_TARGET_ABANDONED /
+                  REVIEW_TARGET_REPLACED / USER による review 終了判断
+```
+
+**同じ session でも「前回の記憶だけ」でレビューしない。**
+再 review のとき MANAGER は少なくとも次を渡す。
+
+```
+REVIEW_ID
+PREVIOUS_REVIEWED_HEAD
+NEW_HEAD
+DIFF_RANGE
+RESOLVED_FINDINGS
+DEVELOPER_RESPONSE
+CI_RESULT
+NEW_EVIDENCE
+```
+
+```
+REVIEWER が確認すること
+  前回の finding が ★ 本当に解消されたか
+  修正による regression が無いか
+  scope creep が無いか
+  新しい finding が生じていないか
+```
+
+再 review の結果も append-only で記録する。
+
+```
+例  REVIEW_ID        = <初回に発行したもの>
+    REVIEW_ITERATION = 2
+    REVIEW_KIND      = INDEPENDENT_REVIEW
+    PREVIOUS_HEAD    = <前回レビュー済み SHA>
+    CURRENT_HEAD     = <今回の SHA>
+    RESOLVED_FINDINGS = <解消した finding>
+    NEW_FINDINGS      = <新しい finding>
+    REVIEW_VERDICT    = <3節の 4 語のいずれか>
+
+★ 旧 verdict を書き換えない。新しい iteration として足す。
 ```
 
 ### この role 分離の発効
 
 ```
 ROLE_SEPARATION_ACTIVATION = Issue #353 の activation boundary(12 条件)
+ROLE_SEPARATION_ACTIVE     = YES | NO
+ACTIVATION_STATE_SSOT      = Issue #353 の最新の durable な activation 記録
 CURRENT_POLICY_APPLIES_TO_ITS_OWN_CHANGE = YES
 ```
+
+**発効状態の固定値を本書へ埋め込まない。**
+`ROLE_SEPARATION_ACTIVE` の現在値は上記 SSoT を fresh に読んで確認する
+(2.6節の `CURRENT_WIP_RULE` / ai_operation_message_contract.md の
+`NEW_CONTRACT_ACTIVE` と同じ方式であり、新方式を作らない)。
 
 MANAGER と REVIEWER を別の役割とする改訂は、**Issue #353 が定める 12 の
 activation 条件を満たした時点で発効する**。この改訂自身のレビューは改訂前の
@@ -2520,4 +2638,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-08 | 3.8節へ「DoD 申告の確認」を追加した(Issue #252、打ち手 D-1)。development_workflow.md 3節が新設した DoD 5 項目の申告について、`DOD_DECLARATION_REVIEW_OWNER = MANAGER` とし、**「DoD 5 項目の申告があるか(空欄・無言の省略が無いか)」「申告と diff が矛盾していないか」**の2 項目を実装レビューの確認観点へ加えた。**レビュワーが「正しいか」を判定するのではなく「申告されているか」「矛盾していないか」を見る**(正しさの一次責任は実装者にある)。閾値の定数に diff があるのに「境界の連続性 = 該当なし」と書かれている場合や、「該当あり・未解消」と書かれているのに引き継ぎ先の Issue が無い場合は FAIL とする。**判定基準の本文は development_workflow.md 3節が正本であり本文書へ複製していない。**DoD の申告は CI で強制せず(H-252-3)、未記入は 3節の判定 4 種のうち INSUFFICIENT_EVIDENCE として扱い記入を求める(判定語を独自に増やさない)。**3.8節の既存の観点(PRIMARY_DOMAIN / LOCKED_DOMAINS / SHARED_TOUCHED / LOCK_LEVEL / LEVEL_1 の compatibility evidence / SCOPE_EXPANSION)と `LOCK_OMISSION_REVIEW_PASS_ALLOWED = NO`、2節の Human Gate、2.6節の merge 実行者、Production approval、exact ChangeSet approval、レビュー判定 4 種はいずれも変更していない。** 既存節の削除・書き換えは行っていない(純粋な追加)。コード・Production 挙動の変更なし |
 | 2026-09-12 | 8節へ `POLICY_AUTHORITY = HUMAN_ONLY` / `RULE_PROPOSAL` / `MEMORY_POLICY_AUTHORITY = NONE` の 3 項を追記し、0節の責務分離表へ `docs/policy_registry.yaml` の 1 行を追加した(Issue #337)。★ **`POLICY_AUTHORITY` は既存規則への識別子付与であり、規則の内容を変更していない**(8節は以前から「管理者が独自の判断でルールを追加・変更してよいという意味ではない」「作業 AI が独自にルールを変える根拠にはならない」と定めていた。参照可能な識別子が無かったため機械からも入口からも指せず、実際に正本外の運用ルールが 4 件課された)。AI が制定してはならないものの列挙・一回限りの指示と恒久ルールの判定質問・単独では恒久規則の正本にならないものの列挙を追加したが、いずれも**既存規則の適用範囲の明示**である。`RULE_PROPOSAL` は 8節が既に要求する Issue 起点の同期(development_workflow.md 9.5節)へ手続きを与えるものであり、★ **新しい承認を追加していない**。発効の形は 2.6.10節と ai_operation_message_contract.md 0節の前例を踏襲し、新方式を作っていない。`MEMORY_POLICY_AUTHORITY` は 8節の適用範囲の明示である(memory は repository の外にあり CI からも review からも見えないため、規範情報を保存するとセッションをまたいで正本と同じ強さで再現する。実例 = 撤回された運用ルールが作業 AI の memory へ「利用者からのフィードバック」として保存されていた)。**承認記録の書式は ai_operation_message_contract.md 8節が正本であり複製していない。****1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節のレビュー判定 4 種・4節の指示形式・10節の恒久ルールと現在状態の分離はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-12 | 3節へ ★ **3.9〜3.14 を新設**し、3.5節へ順序の 1 行を追記した(Issue #333)。レビューが独立していなかった。fresh session であることは独立したレビューを意味せず、最初に Issue の全コメントや PR 本文を一括取得すると ★ **その時点で開発者の結論を読んでしまう**。3.9 で入力の境界(BLIND_FIRST_PHASE_1_ALLOWED / FORBIDDEN)と Phase の定義を、3.10 で設計レビューの 17 観点と traceability を、3.11 でコードレビューの手順を、3.12 で証拠の強度(LEVEL_A / B / C)を、3.13 で反証確認を、3.14 で INDEPENDENT_REVIEW_SNAPSHOT と REVIEW_SESSION_LIFECYCLE を定めた。★ **節番号は末尾へ追加し、既存の 3.6〜3.8 を繰り下げていない**(ai_operation_message_contract.md 2026-09-07 の前例。他文書からの参照を無効にしないため)。★ **判定語を増やしていない**。3節の 4 語をそのまま使い、LEVEL_A/B/C は★ 証拠の強度であって判定語ではないことを明記した。★ **3.6節を置き換えていない**(3.6 = 鮮度 × 検証可能性 / 3.12 = 誰が取得したか。軸が違うため併存)。★ **新しい役割を作っていない**(reviewer session は管理者役割の別インスタンス。1節は不変)。DISCONFIRMING_CHECKS_PERFORMED のみ ★ NONE を認めないのは、「Finding が無かった」と「反証を試みなかった」が別だからである。EVIDENCE_GAPS = NONE の乱用の禁止は ★ 新しい禁止ではなく、3節の「推測で PASS にしない」と issue_label_policy.md 7.4.2 の「未観測を PASS と書かない」の適用である。**1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節の判定語 4 種・3.5〜3.8節の既存本文・4節の指示形式・8節のルール変更の扱い・10節・11節はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし。**3.7節へ 2 項目を追記した**(INDEPENDENT_REVIEW_SNAPSHOT / REVIEW_INPUT_EVIDENCE)。判定語だけを提示すると、その判定を支える根拠が後から作れてしまうため、**判定が何を読んで出されたか**を提示へ残す。**既存 8 項目は 1 文字も変更していない**(追加は末尾のみ)。例にも同じ 2 項目を反映し、本文と例が食い違わないようにした。設計は当初この拡張先を ai_operation_message_contract.md の 3.7節としていたが、**同文書に 3.7節は存在せず**(3節は BASELINE_INVARIANTS)、「merge 判断を支援する提示形式」を持つ節は本書の 3.7節だけであるため、**設計の誤記として MANAGER 判断で訂正した**(項目数も 6 ではなく 8 であった)。**レビューの深さは 3.5節の適用範囲をそのまま使う**(3.9節「適用の深さ」)。全レビューで blind-first の入力境界・primary evidence の独立取得・developer report を読む前の snapshot 固定・証拠の強度の分類を行い、**3.5節の主対象(誤ると取り返しがつかない判断)に該当する場合にだけ** traceability と反証確認(3.13節)を必須とする。該当しない場合は独立取得のみ必須で、traceability と反証確認は省略してよい。**新しい深さの軸も label も判定語も作っていない**(3.5節の既存の境界を参照するだけである)。3.14節の DISCONFIRMING_CHECKS_PERFORMED は **field 自体は全レビューで必須**とし、主対象外では `NOT_APPLICABLE` を認める(欠落にせず、実施対象外であることを明示する)。主対象では NONE も NOT_APPLICABLE も認めない。3.12節の測定の独立性のうち **(b) sanitize 済み生出力は `CURRENTLY_NOT_ACTIVE` とし、本節の発効に含めない**。何を sanitize すれば公開してよいかは repository の公開方針に依存し、それは Issue #334 の判断対象であるため、**本書の merge が提出義務の発効を意味しないようにした**((a)(c)(d) は発効する)。PRELIMINARY_FINDINGS / EVIDENCE_GAPS の必須と NONE の semantics は変更していない |
-| 2026-09-12 | 1節へ **REVIEWER(レビュワー)の役割を追加**し、3.9〜3.14節のレビュー実施主体を `MANAGER` と `REVIEWER` へ分離した(Issue #353。#333 から split)。**利用者が role model を変更した**ものであり、旧記録(REVIEWER_ROLE = MANAGER / reviewer session は管理者役割の別インスタンス)が当時誤っていたという意味ではない。旧記録は historical record として残し、本行で新しい決定を記録する。変更の理由は、管理者が「作業計画・指示・進捗管理」と「独立レビュー」を同一役割で兼ねる構造では、**自分が管理した対象の最終 reviewer を自分が務める**ことになり、独立レビューが成立しないためである。実際に role boundary が未確定であることを理由に通常の review lifecycle が進められない状態が生じた。1節へ `MANAGER_AND_REVIEWER = SEPARATE_ROLES` / `SAME_SESSION_DUAL_ROLE = FORBIDDEN` / `REVIEWER_ROLE_SEPARATION = REQUIRED` / `FRESH_REVIEW_SESSION = REQUIRED` / `MANAGER_REVIEWER_ROLE_COMBINATION = FORBIDDEN_FOR_SAME_REVIEW_TARGET` / `REVIEWER != USER` / `REVIEWER_VERDICT != USER_APPROVAL` を置き、MANAGER の禁止へ `MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` と「自分が管理した review target の最終 reviewer 兼務」「REVIEWER の finding を自分で消す」「REVIEWER の verdict を自分の判断だけで PASS へ変更する」「REVIEWER を経由しない MANAGER review を独立レビューの代替として扱う」を追加した。**役割を分けることとセッションを分けることは別である**ため、`FRESH_REVIEW_SESSION = REQUIRED` を残している(役割が別でも、開発者の報告や管理者の結論を先に読んでいれば blind-first の独立性は成立しない)。3.9節は manifest の作成者を `PHASE_1_INPUT_MANIFEST_CREATOR = MANAGER` / レビュー実施主体を `PHASE_1_REVIEWER = REVIEWER` とし、制約を `MANAGER != REVIEWER` へ改めた(分ける根拠は**役割の分離**であってセッションの分離ではない)。3.14節の `REVIEW_SESSION_LIFECYCLE` を **10 段階から 12 段階**へ改め、`REVIEW_SESSION_CREATOR = MANAGER` / `REVIEWER_ROLE = REVIEWER` / `PHASE_1_INPUT_PROVIDER = MANAGER` とし、**「新しい役割を作らない。reviewer session は管理者役割の別インスタンスとする」の 2 行を削除**した。3.10 / 3.11 / 3.12 / 3.13節はレビュー実施主体を `REVIEWER` と明示しただけであり(3.10節へ `DESIGN_REVIEW_ACTOR = REVIEWER` / 3.11節へ `CODE_REVIEW_ACTOR = REVIEWER` / 3.13節へ `DISCONFIRMING_REVIEW_ACTOR = REVIEWER` の 1 ブロックずつ、3.12節は `LEVEL_A` の主体語を `REVIEWER` へ)、**17 の観点・traceability・手順・exact diff・surrounding code・PR 本文の必須節の確認・`LEVEL_A` / `LEVEL_B` / `LEVEL_C` の意味・反証確認の REQUIRED / OPTIONAL 条件・レビューの深さはいずれも変更していない**。3節は**題名も判定語 4 種も変更しておらず**、`FINAL_REVIEW_VERDICT_OWNER = REVIEWER` の 1 ブロックを冒頭へ足しただけである。**2節の Human Gate・2.6節の merge 実行者・利用者と開発者の権限・1.5節の Production 担当・8節のルール変更の扱い・10節・11節はいずれも変更していない。**`policy_registry.yaml` は見出し(anchor)が 1 つも変わらないため更新していない。CLAUDE.md は**役割識別子の一覧に `REVIEWER` の 1 行を足しただけ**であり、役割定義の本文も現在の担当も書いていない(定義の正本は本書 1節、担当の正本は `ROLE_ASSIGNMENT_SSOT`)。**本改訂は Issue #353 の activation boundary(12 条件)を満たした時点で発効する**。`CURRENT_POLICY_APPLIES_TO_ITS_OWN_CHANGE = YES` であり、**この改訂自身のレビューは改訂前の規則(管理者役割の fresh な別セッション)で行う**。発効前に「REVIEWER がレビューした」と記録しない。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-12 | 1節へ **REVIEWER(レビュワー)の役割を追加**し、3.9〜3.14節のレビュー実施主体を `MANAGER` と `REVIEWER` へ分離した(Issue #353。#333 から split)。**利用者が role model を変更した**ものであり、旧記録(REVIEWER_ROLE = MANAGER / reviewer session は管理者役割の別インスタンス)が当時誤っていたという意味ではない。旧記録は historical record として残し、本行で新しい決定を記録する。変更の理由は、管理者が「作業計画・指示・進捗管理」と「独立レビュー」を同一役割で兼ねる構造では、**自分が管理した対象の最終 reviewer を自分が務める**ことになり、独立レビューが成立しないためである。実際に role boundary が未確定であることを理由に通常の review lifecycle が進められない状態が生じた。1節へ `MANAGER_AND_REVIEWER = SEPARATE_ROLES` / `SAME_SESSION_DUAL_ROLE = FORBIDDEN` / `REVIEWER_ROLE_SEPARATION = REQUIRED` / `FRESH_REVIEW_SESSION = REQUIRED` / `MANAGER_REVIEWER_ROLE_COMBINATION = FORBIDDEN_FOR_SAME_REVIEW_TARGET` / `REVIEWER != USER` / `REVIEWER_VERDICT != USER_APPROVAL` を置き、MANAGER の禁止へ `MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` と「自分が管理した review target の最終 reviewer 兼務」「REVIEWER の finding を自分で消す」「REVIEWER の verdict を自分の判断だけで PASS へ変更する」「REVIEWER を経由しない MANAGER review を独立レビューの代替として扱う」を追加した。**役割を分けることとセッションを分けることは別である**ため、`FRESH_REVIEW_SESSION = REQUIRED` を残している(役割が別でも、開発者の報告や管理者の結論を先に読んでいれば blind-first の独立性は成立しない)。3.9節は manifest の作成者を `PHASE_1_INPUT_MANIFEST_CREATOR = MANAGER` / レビュー実施主体を `PHASE_1_REVIEWER = REVIEWER` とし、制約を `MANAGER != REVIEWER` へ改めた(分ける根拠は**役割の分離**であってセッションの分離ではない)。3.14節の `REVIEW_SESSION_LIFECYCLE` を **10 段階から 12 段階**へ改め、`REVIEW_SESSION_CREATOR = MANAGER` / `REVIEWER_ROLE = REVIEWER` / `PHASE_1_INPUT_PROVIDER = MANAGER` とし、**「新しい役割を作らない。reviewer session は管理者役割の別インスタンスとする」の 2 行を削除**した。3.10 / 3.11 / 3.12 / 3.13節はレビュー実施主体を `REVIEWER` と明示しただけであり(3.10節へ `DESIGN_REVIEW_ACTOR = REVIEWER` / 3.11節へ `CODE_REVIEW_ACTOR = REVIEWER` / 3.13節へ `DISCONFIRMING_REVIEW_ACTOR = REVIEWER` の 1 ブロックずつ、3.12節は `LEVEL_A` の主体語を `REVIEWER` へ)、**17 の観点・traceability・手順・exact diff・surrounding code・PR 本文の必須節の確認・`LEVEL_A` / `LEVEL_B` / `LEVEL_C` の意味・反証確認の REQUIRED / OPTIONAL 条件・レビューの深さはいずれも変更していない**。3節は**題名も判定語 4 種も変更しておらず**、`FINAL_REVIEW_VERDICT_OWNER = REVIEWER` の 1 ブロックを冒頭へ足しただけである。**2節の Human Gate・2.6節の merge 実行者・利用者と開発者の権限・1.5節の Production 担当・8節のルール変更の扱い・10節・11節はいずれも変更していない。**`policy_registry.yaml` は見出し(anchor)が 1 つも変わらないため更新していない。CLAUDE.md は**役割識別子の一覧に `REVIEWER` の 1 行を足しただけ**であり、役割定義の本文も現在の担当も書いていない(定義の正本は本書 1節、担当の正本は `ROLE_ASSIGNMENT_SSOT`)。**本改訂は Issue #353 の activation boundary(12 条件)を満たした時点で発効する**。`CURRENT_POLICY_APPLIES_TO_ITS_OWN_CHANGE = YES` であり、**この改訂自身のレビューは改訂前の規則(管理者役割の fresh な別セッション)で行う**。発効前に「REVIEWER がレビューした」と記録しない。**独立レビュー(現行規則による fresh な管理者セッション)の条件へ対応して次を加えた。**3.10節へ `DESIGN_REVIEW_ACTOR = REVIEWER` / 3.11節へ `CODE_REVIEW_ACTOR = REVIEWER` を置きレビュー実施主体を 3.9節 / 3.13節と同じ形式で明示した。1節へ `MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` を識別子として置いた(規範は既にあり、**参照可能な名前が無かった**。2026-09-12 の #337 の行が同じ失敗形を記録している)。3.11節へ「**REVIEWER は 3.8節の観点を独立に確認するが、`LOCK_REVIEW_OWNER` / `DOD_DECLARATION_REVIEW_OWNER` は MANAGER のままである**」を明記した(**3.8節の本文は変更していない**。確認しても ownership は移らない)。3.14節へ `ROLE_SEPARATION_ACTIVE` と `ACTIVATION_STATE_SSOT` を置いた(**発効状態の固定値を本書へ埋め込まず**、Issue #353 の最新の durable な記録を fresh に読む。2.6節の `CURRENT_WIP_RULE` / ai_operation_message_contract.md の `NEW_CONTRACT_ACTIVE` と同じ方式)。3節へ `REVIEW_KIND = MANAGEMENT_REVIEW | INDEPENDENT_REVIEW` を加え、review 結果の durable record では verdict と併記して一意に判別できるようにした。3.14節の snapshot へも `REVIEW_KIND` を **追加のみ**で足した(**判定語 4 種は不変であり、既存 field も変更していない**。`REVIEW_KIND` は判定語ではない)。1節の MANAGER の責務から「調査・設計・実装結果のレビュー」という**包括表現を外し**、management review(計画のレビュー / scope の確認 / 進捗・実績の確認 / acceptance と Progress Status の管理上の確認)として書き直した。同じ語で independent review まで担うように読めたためである。CLAUDE.md へは 0節の読み分けへ 1 行、2節へ pointer を 1 項だけ足した(**規則本文も現在の担当も書いていない**)。あわせて `REVIEW_SESSION_REUSE_POLICY` を 3.14節へ定めた。`FRESHNESS_REQUIRED_AT = INITIAL_PHASE_1_ONLY` とし、Phase 2・finding 対応後の再レビュー・同一対象への追加 commit の確認は**同じ review session を継続してよい**こととし、別 Issue / 別のレビュー対象 / 無関係な PR / 新しい review lifecycle では**新しい fresh session を開始する**ことを明示した。A〜E の段階・再レビュー時に管理者が渡す 8 項目・`REVIEW_ITERATION` を持つ append-only の記録例・`REVIEW_SESSION_END_CONDITION` の 4 条件を加えている。**12 段階の順序と文言は変更しておらず、A と B がそれを指す**(拡張であって書き換えではない)。**blind-first を弱める変更ではない**。独立性が要るのは「最初の評価を開発者の自己評価より前に形成すること」であり、`INITIAL_INDEPENDENCE`(fresh session + blind な Phase 1)と `CONTINUITY_AFTER_SNAPSHOT`(同じ reviewer session)として**要求する時点を明示した**ものである。docs のみの変更であり、コード・Production 挙動の変更なし |
