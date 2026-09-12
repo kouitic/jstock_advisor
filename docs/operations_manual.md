@@ -2574,3 +2574,63 @@ baseline は保有判断スコアの比較基準であり、**active が変わ�
 ★ scan の出力を、holding_ref 以外の形(所有者名・銘柄コード)で記録・共有しない。
 ```
 
+
+## 23. Production の手動実行の基準(MANUAL_PRODUCTION_RUN_POLICY_V1、Issue #195、2026-09-12追加)
+
+前提  対象コードが Production へ deploy 済みであること。
+未 deploy のコードを本番で動かしても、その反映を検証したことにはならない。
+
+### 23.1 実行前に宣言する 5 項目(すべて必須)
+
+```
+CLAIM_SCOPE            その実行で証明できることと証明できないことを分けて書く
+  証明できる    application logic / データの正しさ / 実行経路の IAM /
+                ログ署名 / 保存件数 / 下流への書き込み
+  証明できない  scheduler の trigger / payload の delivery /
+                schedule 式と timezone / 所定時刻に動くこと /
+                実日付に依存する営業日判定 / 他ジョブとの同時実行
+
+EVIDENCE_CONSUMPTION   dedup / idempotency / claim 抑止を経由して、
+                       保留中の mandatory natural verification を no-op に
+                       しないことを経路ごとにコードで確認する。
+                       確認できなければ実行しない(fail-closed)
+
+SIDE_EFFECTS           書き換わる Production state を列挙し、
+                       後続の分析で手動由来と識別する方法を示す
+
+NOTIFICATION_PATH      実利用者へ通知が飛ぶか。飛ぶなら自然実行と同一内容に
+                       なる根拠。suppress する手段が無ければ実行しない
+
+MARKET_DAY_SEMANTICS   非営業日の実行が「被験体」(営業日判定そのものの検証)か
+                       「解釈不能」(市場データが更新されておらず結果を読めない)か。
+                       後者なら実行しない
+```
+
+### 23.2 controlled と artificial の境界
+
+```
+controlled manual verification(許可)
+  上記 5 項目を宣言し USER が承認したうえで、
+  自然実行と同一 payload・同一契約で 1 回だけ実行し、durable に記録する
+
+artificial production execution(禁止)
+  結果を作るための実行。failure injection / 合成入力 / 時刻や data の改変 /
+  mandatory natural verification の代替・免除・前倒し
+```
+
+**境界は「本番で動かしたか」ではなく「自然実行と同じものを観測したか」にある。**
+
+### 23.3 承認単位と執行者
+
+```
+計画された実行  Verification Plan の承認に含める(回数と CLAIM_SCOPE を明記)
+計画外の実行    都度の Human Gate
+執行者          DEVELOPER_WITH_DEPLOY
+```
+
+### 23.4 release runbook との接続
+
+Release Issue([development_workflow.md](development_workflow.md) 9.7)の
+「対象 Issue ごとの verification 要件」に手動実行が含まれる場合、
+本節の 5 項目を Release Issue へ記載する。
+自然実行で足りる場合は手動実行を計画しない。

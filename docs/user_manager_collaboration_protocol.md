@@ -433,6 +433,11 @@ Production rollback / corrective mutation
 release-blocker REMOVE
 ```
 
+FREEZE 中は上記のうち Production ChangeSet CREATE / EXECUTE を行わない。
+Release Issue の起票・scope 導出・readiness review・検証計画の集約・
+gate の提示は freeze 中でも行ってよい(承認の効力は解除後に生じる)。
+FREEZE の定義は [development_workflow.md](development_workflow.md) 9.7 が正本である。
+
 これに加えて、既存 governance が人間承認を要求する操作
 (Production deploy / manual Production Lambda invocation /
 Production data write / migration / backfill / failure injection 等)は

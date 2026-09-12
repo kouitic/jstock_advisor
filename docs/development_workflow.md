@@ -2347,6 +2347,80 @@ P1(運用が止まる・誤判定を生む・公開面へ影響する)は **即�
 
 ---
 
+## 9.7 Release Issue(release の審査単位)
+
+```
+RELEASE_REVIEW_UNIT = ONE_RELEASE_ONE_ISSUE
+Issue Type = tracking
+```
+
+Production release は Issue を審査単位とする。設計は Phase A 設計書、実装は PR という
+審査可能な物体を持つが、**Production 反映だけが物体を持たなかった**。
+その結果 scope の確定が作業報告の外へ送られ、PRODUCTION_SHA の正本が
+Issue snapshot に散在していた(2026-09-06 の実測では 2 世代古い値を保持した Issue があった)。
+
+### 必須 field
+
+```
+RELEASE_ID              Wave 等の識別
+PRODUCTION_SHA_BEFORE   この release の直前に Production で動いていた SHA
+TARGET_MAIN_SHA         反映しようとする exact SHA(候補。CREATE gate で確定)
+INVENTORY               baseline -> target の全 commit と、その導出コマンド
+GENERATED_AT            inventory を導出した時刻
+SOURCE_MAIN             導出時点の main SHA
+SOURCE_PRODUCTION_SHA   導出に使った PRODUCTION_SHA
+                        対象 Issue ごとの verification 要件
+GATES                   CREATE / EXECUTE の承認記録
+```
+
+`INVENTORY` は **CACHE_ONLY** である。正本は git であり、導出コマンドを併記して
+**いつでも再導出できる形**にする。
+
+**`TARGET_MAIN_SHA` は起票時点では候補である。** 確定は CREATE gate で行う。
+起票時に確定扱いにすると、Wave の分割対象が混入したまま CREATE gate まで
+持ち込まれる(2026-09-06 に実際に起きた)。
+
+### PRODUCTION_SHA の正本
+
+```
+PRODUCTION_SHA_SSOT = 最新の Release Issue の EXECUTE 記録(append-only)
+UNDEPLOYED_SET      = git log <PRODUCTION_SHA>..main -- src config infra を都度導出
+```
+
+**未反映の集合を保持しない。** label から導出すると取りこぼす
+(2026-09-06 の実測: git 導出 7 Issue / 9 commit に対し label から見えるのは 4 件)。
+管理すべきは集合ではなく PRODUCTION_SHA という 1 値である。
+
+### FREEZE の定義
+
+```
+FREEZE = CHANGESET_CREATE と CHANGESET_EXECUTE を行わない
+
+freeze 中でも可  Release Issue の起票 / scope 導出 / readiness review /
+                 検証計画の集約 / gate の提示(承認の効力は解除後)
+```
+
+**CREATE も止める理由。** 作成済み ChangeSet は stack に pending 状態を残し、
+自然検証中の stack へ人為的な変化を足すためである。
+
+### 状態遷移と owner
+
+```
+未着手        DEVELOPER_WITH_DEPLOY が git から inventory を導出して起票
+調査・設計中  MANAGER の readiness review
+設計済        CHANGESET_CREATE_GATE 通過(USER)
+開発中        sam build -> CREATE -> ARN 記録 -> ChangeSet review(MANAGER)
+              -> CHANGESET_EXECUTE_GATE(USER / exact ARN)
+デプロイ済    EXECUTE -> terminal state -> immediate verification
+              ここで PRODUCTION_SHA の新しい正本が確定する
+本番検証済    scope 内の全 Issue の mandatory natural verification 完了
+              (MANAGER が集約判定)
+CLOSED        close review -> USER
+```
+
+既存の Human Gate(CREATE / EXECUTE)に scope を含めるだけであり、
+**新しい gate 種別を作らない**。
+
 ## 10. 人間承認の境界(J)
 
 次の操作には**人間の明示承認が必要**である。Sprint による高速化でこれらを

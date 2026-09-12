@@ -1140,6 +1140,28 @@ release / verification を全体として俯瞰する必要がある
 child が 2 つでも必要なら作ってよく、4 つでも Related の相互参照で足りるなら
 作らなくてよい。
 
+##### Release Issue の扱い
+
+Release Issue([development_workflow.md](development_workflow.md) 9.7)は tracking Type だが、
+**自身の lifecycle を持つ**ため、上記 2 点について次のとおり扱う。
+
+```
+status   Release Issue 自身の活動段階を表す。
+         起票 -> readiness review -> CREATE 承認 -> EXECUTE -> 検証 という
+         自身の工程に対応して 未着手 から 本番検証済 まで進む。
+         これは child の到達点を代表させたものではない。
+
+close    scope 内 Issue の close を待たない。
+         Release Issue の完了条件は
+         「その release で反映した変更について、scope 内の各 Issue が
+           要求する mandatory natural verification が完了したこと」であり、
+         各 Issue が抱える別の残作業とは独立である。
+
+         RELEASE_ISSUE_CLOSE != SCOPE_ISSUE_CLOSE
+```
+
+**他の tracking Issue(#49 / #73 等)の close 条件は変更しない。**
+
 #### 7.3.6 分割の手続き
 
 ```

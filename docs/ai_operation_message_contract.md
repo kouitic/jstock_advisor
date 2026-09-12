@@ -553,7 +553,7 @@ AUDIT_INFO
 |---|---|---|
 | `DESIGN_GATE` | 対象 Issue と Phase | 参照 URL |
 | `MERGE_GATE` | **PR 番号 + exact PR head SHA** | base SHA / CI run / review URL |
-| `PRODUCTION_CHANGESET_CREATE_GATE` | **対象 stack + release 対象の exact SHA + CREATE する scope** | build 情報 / 参照 URL |
+| `PRODUCTION_CHANGESET_CREATE_GATE` | **対象 stack + release 対象の exact SHA + CREATE する scope(Release Issue 番号)** | build 情報 / 参照 URL |
 | `PRODUCTION_CHANGESET_EXECUTE_GATE` | **exact ChangeSet ARN** | stack event / diff の参照 URL |
 | `ROLLBACK_GATE` | **巻き戻し対象と、戻し先の exact 識別子** | 経緯 / 参照 URL |
 | `RELEASE_BLOCKER_REMOVAL_GATE` | 対象 Issue と label | 検証証拠の参照 URL |
