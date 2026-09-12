@@ -17,6 +17,8 @@
 §3  開発者に適用される
 §4  デプロイ権限を持つ開発者のみに適用される
 §5  管理者に適用される
+
+REVIEWER は §2 と docs/user_manager_collaboration_protocol.md 1節 / 3.9〜3.14節を読む
 ```
 
 **規則の本文は本ファイルへ複製しない。** 各正本への入口だけを置く。
@@ -30,6 +32,7 @@
 役割                       識別子
 利用者・承認者             USER
 管理者                     MANAGER
+レビュワー                 REVIEWER
 開発者(デプロイ権限あり)   DEVELOPER_WITH_DEPLOY
 開発者(デプロイ権限なし)   DEVELOPER
 ```
@@ -107,6 +110,12 @@ ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録
   snapshotがcurrent stateの主要記録であり、handoffは次担当への補足情報
   (理由・推奨する次の行動・注意点)である。current state全体をhandoffへ
   再コピーしない。旧snapshotは監査履歴として削除・改変しない(append-only)。
+
+- **MANAGER と REVIEWER は別の役割である。** 役割の定義と review lifecycle は
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  1節 / 3.9〜3.14節が正本であり、**本ファイルへ規則本文を複製しない**。
+  発効状態は変わりうるため、確認が必要な場合はIssue #353の最新のdurableな
+  activation記録をfreshに読むこと(静的な文書を唯一の根拠にしない)。
 
 - **利用者と管理者の間の協働ルール(役割分担・Human Gate・レビュー判定・
   指示の対応付け・セッション開始時のbootstrap)は
