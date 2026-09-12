@@ -669,6 +669,67 @@ AUDIT_INFO
 
 ---
 
+### 8.5 承認・判断の記録 field
+
+Human Gate の提示に対して**利用者が判断を下した事実**を Issue へ残すときの書式。
+**本項は形式だけを定める。** 承認の要否は
+[user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md) 2節と
+[development_workflow.md](development_workflow.md) 10節が正本である。
+
+```
+FIELD        DECIDED_BY
+MEANING      その判断を下した主体。判断の内容に責任を持つ者
+REQUIRED_WHEN
+             利用者が方針・設計・優先度・分類などの判断を下したとき
+AUTHORITY_SEMANTICS
+             判断の帰属を示す。操作の許可を意味しない
+
+FIELD        APPROVED_BY
+MEANING      その操作の実施を許可した主体
+REQUIRED_WHEN
+             Human Gate に該当する操作を実施するとき
+AUTHORITY_SEMANTICS
+             exact な対象に対する操作の許可を示す。
+             承認はその操作・その対象に限り、別の文脈へ拡張しない
+
+FIELD        RECORDED_BY
+MEANING      その記録を GitHub へ書いた主体
+REQUIRED_WHEN
+             常に
+AUTHORITY_SEMANTICS
+             権限を一切示さない。記録の作成者を示すだけである。
+             DECIDED_BY と異なる場合がある
+
+FIELD        DECIDED_AT
+MEANING      判断または承認が行われた時刻
+REQUIRED_WHEN
+             常に
+AUTHORITY_SEMANTICS
+             実測値であること。推測・概数を書かない
+```
+
+#### 両方を必須にしない
+
+```
+方針・設計・分類の判断      DECIDED_BY のみ。APPROVED_BY は書かない
+Human Gate の操作許可       APPROVED_BY のみ。DECIDED_BY は書かない
+判断と許可が同時に起きた場合 両方書く。ただし対象が異なることを明記する
+```
+
+両方を常に必須にすると、同じ事実が 2 つの field へ重複し、どちらが操作の許可で
+どちらが判断の帰属なのかが読み取れなくなる。
+
+#### 本人性を保証しない
+
+```
+`DECIDED_BY = USER` という文字列は、利用者本人であることを機械的に保証しない。
+```
+
+すべてのセッションが同一の GitHub identity で投稿する。管理者も同じ文字列を
+書ける。この field が示すのは**誰の判断として記録されたか**であって
+**誰が書いたか**ではない。本人性の保証は Issue #332 の論点であり、本項では
+解決しない。
+
 ## 9. 確認質問の要否
 
 ### 9.1 判定
@@ -841,3 +902,4 @@ Instruction に VERIFICATION_REQUIRED が無い場合は、その旨を報告し
 | 2026-09-06 | 新規作成(Issue #184)。作業 AI・ChatGPT・人間の間のメッセージ形式に正本が無く、Instruction ごとに報告項目が定義されていたため、「Instruction 側が毎回フィールドを書き下ろす」「Worker 側が ISSUE_STATE_SNAPSHOT をチャット報告へ再掲する」という二重化が構造的に発生していた(Issue #177 の 7 コメント 141,409 文字のうち、機械可読キー 659 出現中 146 出現が毎回同一値)。(1)圧縮してよい範囲を channel で分け、durable な snapshot の必須項目は削らないことを明記した(`COMPACT_REPORT != SSOT_WRITEBACK_OMISSION`)。(2)Worker の完了報告を `FIXED_SCHEMA_NOT_FIXED_LENGTH` として 11 の論理フィールドで固定し、Production 関連 Instruction のみ `PRODUCTION_CHANGED` を追加必須とした。`CHANGED_STATE = NONE` は有効な報告だが、state を変えたのに `DURABLE = NONE` は契約違反とした。(3)`BASELINE_INVARIANTS` を導入し、8 つの baseline を定義した。baseline 名の省略と、逸脱があるのに `UNCHANGED` と書くことを禁止した。phase enum とは `MANY_TO_ONE` とし、無理に 1 対 1 へ揃えない。(4)FORENSIC 昇格条件を 16 定め、`REPORT_MODE_OWNER = WORKER`(Instruction は NORMAL を強制できない)、迷ったら FORENSIC(FAIL_VERBOSE)とした。**短くするために証拠を捨てる設計を禁止**している。(5)`AUTHORIZED_PHASES`(11 phase + 補助 permission)を定め、`UNLISTED_PHASE = NOT_AUTHORIZED` / 未記載は `INSTRUCTION_INVALID` として STOP することとした。暗黙の既定を置くと記載漏れが既成事実になるためである。`AUTHORIZED_PHASES != HUMAN_GATE_APPROVAL` および `!= STATE_WRITE_PERMISSION_AUTOMATIC_GRANT` を明記した。(6)報告が人間により手作業で転送される前提を正本化し、一括コピー可能性を要求した(chatgpt_collaboration_protocol.md 4.5 が明示的に対象外としていた側)。(7)Human Gate の提示を固定 4 節 + AUDIT_INFO 分離とし、exact 承認では識別子を承認対象の本文へ残すこととした。**`APPROVAL_UNIT_CONSOLIDATION = NO` であり承認単位は 1 つも統合・緩和していない。** (8)確認質問の要否(Q-1〜Q-12)と UNKNOWN の扱い(調査 -> SSoT -> 質問 -> 明示保留)を定め、`GUESS = FORBIDDEN` とした。**本文書は形式の正本であり、承認の要否・作業の可否・WIP・label の規則はいずれも他文書が正本で、複製していない。** 作成時点で `NEW_CONTRACT_ACTIVE = NO` であり、merge だけでは発効しない。判定ロジック・通知内容・保存データ形式・Production 挙動はいずれも変更していない |
 | 2026-09-06 | 発効状態を現況へ同期し、役割名を製品非依存へ改めた(Issue #190)。0節と 10節の `NEW_CONTRACT_ACTIVE = NO` を発効済み(2026-09-06 13:57 JST)へ更新し、`ACTIVATION_STATE_SSOT = Issue #184 の最新の durable な activation 記録` を明記した。**静的な文書を、変わりうる発効状態の唯一の根拠にしない**方式(#185 が development_workflow.md 2.6 節へ適用したもの)を踏襲している。あわせて channel 名を役割ベースへ改め(`C-1 開発者 -> 管理者` / `C-3 管理者 -> 利用者`)、`READY_FOR` の例を `MANAGER_PR_REVIEW` へ、参照先ファイル名を user_manager_collaboration_protocol.md へ更新した。**報告 schema・FORENSIC 16 条件・BASELINE_INVARIANTS・AUTHORIZED_PHASES・Human Gate の提示形式・確認質問ポリシーはいずれも変更していない。** 変更履歴の過去エントリも書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-07 | post-merge / post-deploy の Instruction と報告へ `VERIFICATION_REQUIRED = <項目 | NONE>` を必須項目として追加した(11節を新設 / 2.2節へ条件付き必須を追記。Issue #220)。指示側がこの 1 行を書く時点で「待つべき事象が無い」ことに気付けるようにするためであり、#36(待ち先の無い status:デプロイ済 が 4 日滞留)と #209(指示文が誤って status:マージ済 を指定していた)の両方に効く。**Instruction 側の必須項目を定める文書は本書である**(development_workflow.md 2.5節は回答の冒頭 3 行のみを定め、Instruction の必須項目を列挙していない。user_manager_collaboration_protocol.md 4.5節は出力形式の規定である)ため本書へ置き、他文書へは複製しない。★ **新設は 11節とし、既存の節番号を繰り下げていない**。他文書から本書の 4節 / 8節 / 10節への参照が実在するため(development_workflow.md と user_manager_collaboration_protocol.md の計 4 箇所)、途中への挿入はそれらの参照を無効にする。何を verification とするかの内容の正本は issue_label_policy.md 7.4節と各 Issue の Acceptance criteria である。**既存の NORMAL_REPORT 必須フィールド・BASELINE_INVARIANTS・FORENSIC の昇格条件・AUTHORIZED_PHASES・報告の転送契約・Human Gate の提示フォーマット・確認質問の要否・発効の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-12 | 8節へ 8.5「承認・判断の記録 field」を新設した(Issue #337)。`DECIDED_BY` / `APPROVED_BY` / `RECORDED_BY` / `DECIDED_AT` は運用で 100 件以上の Issue に使われていたが docs 全体で定義が 0 件であり、書式も意味差も各自の判断になっていた。MEANING / REQUIRED_WHEN / AUTHORITY_SEMANTICS を定め、★ **判断の帰属(`DECIDED_BY`)と操作の許可(`APPROVED_BY`)を区別**した。★ **両方を常に必須にしない**(同じ事実が 2 つの field へ重複し、どちらが操作の許可か読み取れなくなるため)。★ **`DECIDED_BY = USER` は利用者本人であることを機械的に保証しない**ことを明記した(全セッションが同一の GitHub identity で投稿する。本人性の保証は Issue #332 の論点であり本項では解決しない)。★ **本項は形式だけを定める。承認の要否は user_manager_collaboration_protocol.md 2節と development_workflow.md 10節が正本であり複製していない。** **2.2 の NORMAL_REPORT 必須 11 field・3節の BASELINE_INVARIANTS・4節の FORENSIC 昇格条件・5節の AUTHORIZED_PHASES・6節の転送契約・8.1〜8.4 の提示フォーマットと `APPROVAL_UNIT_CONSOLIDATION = NO`・11節の VERIFICATION_REQUIRED はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |

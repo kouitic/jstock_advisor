@@ -759,6 +759,7 @@ implementation
   → related regression
   → ruff
   → mypy
+  → preflight(任意)
   → local commit
   → remote branch push
   → 管理者の remote diff review
@@ -781,6 +782,30 @@ implementation
 - merge method は通常の merge commit。squash / rebase merge / auto-merge /
   `--admin` は使用しない。承認対象の exact SHA に対してのみ成立させるため
   `--match-head-commit` を指定する。
+
+### preflight(policy_check)
+
+操作の前に「どの正本のどの節を読む必要があるか」を引ける。
+
+```
+python scripts/policy_check.py --operation PR_CREATE
+```
+
+索引は `docs/policy_registry.yaml` にある(`REGISTRY_IS_NOT_SSOT = YES`。
+規則本文を持たず pointer だけを持つ)。全文書を毎回読まず、読むべき節だけを返す。
+
+```
+PREFLIGHT_REQUIRED = NO(任意実行)
+```
+
+**任意である。通さなくても作業は進められる。**
+**通したことは遵守の証拠にならない。** required_policies を示すだけであり、
+読んだことも守ったことも保証しない。遵守の確認はレビューと各正本が担う。
+
+結果は三値である。`UNKNOWN` を `PASS` として扱わない
+(policy source の鮮度を確認できなかった場合も `UNKNOWN` になる)。
+
+---
 
 ### レビュー対象の指定
 
@@ -2449,3 +2474,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-08 | §3 へ `DOD_DECLARATION_REQUIRED = YES`(DoD 5 項目の申告)と `SAME_TYPE_SWEEP_REQUIRED = YES`(根本原因が確定した Issue の close 前に同型を 1 回掃く)の 2 節を新設した(Issue #252、打ち手 D-1 / D-4)。直近の欠陥を根本原因で束ねると**境界の連続性 / 単調性 / 定常でない 1 回目 / 単位・スケール / 失敗の可視性**の 5 型に収まり、いずれも実装した本人が PR の時点で確認できたものだった。レビューで毎回指摘するのではなく**実装者に申告させる**形に変える(レビュワーが気づけるかどうかに依存させないため)。**「該当なし」も 1 行で申告し空欄を許さない**(確認したうえで該当しないのか、確認していないのかを読み手が区別できないため)。**満たしていない項目は「該当あり・未解消」とし、理由と引き継ぎ先の Issue を1 行で書く**(未解消のまま追跡が切れるのを防ぐため)。申告は自己申告であり正しさの保証ではなく、レビュワーは申告と diff の矛盾を見る(3.5節の TIME_SEMANTICS_IMPACT と同じ扱い)。同型 sweep は**値ではなく形で探し、0 件でも記録する**(「調べていない」と「調べて無かった」を区別するため)。見つかった同型は 1 件の Issue へ束ね、3〜5 件に分裂させない。**sweep は「見つけたら全部直す」ではなく**、同じ PR で直すのは同じファイル・同じ lock の範囲内に限る(9.5節の scope と食い違わせないため)。あわせて .github/PULL_REQUEST_TEMPLATE.md へ `## DoD` と `## 同型 sweep` の 2 節を `## 確認` の前へ挿入した(**既存の 概要 / TIME_SEMANTICS_IMPACT / 確認 の 3 節は byte 単位で不変**。Issue #145 のゲートをそのまま残す)。**DoD と同型 sweep は CI で強制しない**(未記入でも CI を落とさない。人が読む欄として運用し、強制の要否は効果と副作用を見てから別途判断する。いきなり強制すると通すためだけの記入が増えて申告の意味が失われる)。**§3.5 時間意味論変更ゲート / §4 ローカルテスト方針(LOCAL_FULL_PYTEST_DEFAULT・FULL_SUITE_AUTHORITY を含む) / §2.5 指示プロトコル / §2.6 WIP・domain lock / §9.5 Issue 起点の原則(OPPORTUNISTIC_FIX_FORBIDDEN を含む) / §10 人間承認の境界 / CI の必須 job 構成はいずれも変更していない。** 既存節の削除・書き換えは行っていない(純粋な追加)。コード・Production 挙動の変更なし |
 | 2026-09-09 | 10 節へ **10.1 検証目的の Production 手動起動**を新設し、2.6.9 へ **read model の識別子**の規則を追記した(Issue #213 / #188)。10.1: `manual Production Lambda invocation` は検証目的でも人間承認を要する例外であることを明示し、手順を定めた(自然実行で確認できないことを示す / ★ VALIDATION mode を優先し NORMAL は最後の手段 / ★ 副作用を列挙してから承認を求める / ★ 1 回の承認で 1 回の起動 / 08:00・18:00・毎時 :25〜:35 を避ける / 承認は利用者)。★ **Production failure injection の禁止と「人工的な Production 実行は禁止」という原則は変えていない**(本項は例外の手続きを定めるものであり、原則を緩めない)。利用者判断(2026-09-08 / #213 issuecomment-5584115344)による明文化である。2.6.9: read model の各更新は **GENERATED_AT(UTC の実測値)** で識別し、`UPDATE_LATEST_<n>` のような連番を識別子にしない(★ 並行更新で同じ番号が別の更新へ割り当てられ、後から辿れなくなる実例が 2026-09-09 に発生した)。**3 節の実装パイプライン・4 節のローカルテスト方針・2.5 節の指示プロトコル・2.6 節の WIP と domain lock の判定・10 節のその他の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-12 | §3.5 の 3 か所で registry の所在を実体へ追随させた(Issue #277)。cohort / order case / 登録先の参照が `tests/unit/test_time_semantics_guard.py` のままだったが、registry(データと語彙)は `tests/support/time_semantics_registry.py` へ移動している。conftest から参照する必要が生じ、conftest がテストモジュールを import するのは収集時にテスト本体が実行されるため収集経路として不健全だからである。あわせて「同ファイルが検証する」という記述を 2 か所で分けた。**宣言・登録は registry、健全性の検証(V1-V8 / O1-O6)は guard** であり、移動により両者が別ファイルになったためである。★ **パスの追随のみであり、規則の内容は 1 文字も変更していない**(トリガ T1-T4 / control / 決定表 / FORBIDDEN と ALLOWED_EXISTING の扱い / order case の自動化しない方針 / registry を全走査にしない方針はいずれも変更していない)。2026-09-03 の変更履歴は当時の事実であり書き換えていない。コード・Production 挙動の変更なし |
+| 2026-09-12 | 3節へ preflight(`scripts/policy_check.py`)を 1 段追加した(Issue #337)。操作の前に「どの正本のどの節を読む必要があるか」を `docs/policy_registry.yaml` から引ける。★ **`PREFLIGHT_REQUIRED = NO` の任意実行であり、通さなくても作業は進められる**(誰の作業も止めない)。★ **通したことは遵守の証拠にならない**(required_policies を示すだけであり、読んだことも守ったことも保証しない。遵守の確認はレビューと各正本が担う)。結果は三値であり ★ **`UNKNOWN` を `PASS` として扱わない**(policy source の鮮度を確認できなかった場合も `UNKNOWN` とし、古い規則へ自動 fallback して操作を許可しない)。**実装パイプラインの他の段・レビュー対象の指定・Issue の自動 close を避ける・DoD の申告・同型 sweep・3.5節の時間意味論変更ゲート・4節のローカルテスト方針・2.6節の WIP と domain lock・6.5節の state 同期・10節の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |

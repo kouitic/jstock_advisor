@@ -115,6 +115,12 @@ ROLE_ASSIGNMENT_SSOT = Issue #122 の最新の durable な体制記録
   別であり、`PASS_WITH_CONDITIONS`はHuman Gate通過を意味しない。
   `INSUFFICIENT_EVIDENCE`は不合格ではなく証拠不足であり、推測でPASSにしない。
 
+- **恒久規則の制定・変更権限およびAI memoryの扱いは
+  `POLICY_AUTHORITY = HUMAN_ONLY` /
+  `MEMORY_POLICY_AUTHORITY = NONE` とし、
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  §8を正本とする。詳細は同節を参照し、本ファイルへ規則本文を複製しない。**
+
 - **GitHub Issueを作成・調査・更新・closeする場合は、
   [docs/issue_label_policy.md](docs/issue_label_policy.md) を必ず読み、
   そのルールに従うこと。** labelはIssue Type / Priority /
