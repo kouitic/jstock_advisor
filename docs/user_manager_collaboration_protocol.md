@@ -1310,6 +1310,45 @@ PHASE_1_REVIEWER                REVIEWER
 ```
 
 ```
+MANIFEST_VERSION
+  manifest comment の 1 つの版を一意に指すもの。次の 3 つの組で表す。
+
+  対象コメント            comment の URL と id
+  MANIFEST_UPDATED_AT     その版の updated_at(GitHub が持つ値)
+  MANIFEST_CONTENT_HASH   その版の本文の SHA-256
+
+MANIFEST_VERSION_PRIMARY_IDENTITY = MANIFEST_CONTENT_HASH
+
+★ 本文の hash を ★ 最も強い識別情報とする。
+★ updated_at を単独の版識別にしない(同一秒内の 2 回目の編集を区別できない)。
+★ 手で振る版番号(v1 / v2)を唯一の正本にしない(本文と一致する保証が無い)。
+★ 版番号の併記は禁止しない(可読性のために有用である)。
+★ MANIFEST_CONTENT_HASH を ★ 別の必須項目として ★ 二重に記録しない
+  (同じ値を 2 か所へ書くと食い違う。本 field の構成要素として 1 か所に持つ)。
+```
+
+```
+MANIFEST_CONTENT_HASH の計算
+
+  対象   GitHub から取得した本文そのもの(exact retrieved UTF-8 body)
+         Markdown の原文であり、描画結果ではない
+  正規化 ★ 行わない(MANIFEST_HASH_NORMALIZATION = NONE)
+         改行コード(CRLF / LF)・末尾改行・空白も本文の一部として hash に入る
+  方法   SHA-256(6.5.3節の STATE_ID / 本節の DIFF_HASH と同じ道具。新方式を作らない)
+
+  取得   REST の comment を取得し、★ JSON の body の値を UTF-8 bytes にしたものを hash する
+         ★ shell の pipeline へ流すと ★ 末尾へ改行が足される実装があるため、
+           ★ 「1 バイトも足さない」ことを満たす手順で計算する
+
+  長さを併記する場合は ★ bytes で書く(文字数と混同しない)
+```
+
+```
+★ 監査対象を都合よく normalize して差を消さない。
+★ 空白や改行だけの変更も ★ 変更として検出する。
+```
+
+```
 ★ この方式は依存を消さない。範囲を MANAGER が決める構造は残る。
   manifest を snapshot へ記録することで、「developer report が含まれていなかったか」を
   第三者が後から検査できるようにする。★ 依存を消すのではなく、監査可能にする。
@@ -1669,6 +1708,9 @@ ISSUE_REF                       #NNN
 SSOT_REF                        読んだ条文(file + anchor)の列挙
 CREATED_AT                      実測 UTC
 PHASE_1_INPUT_MANIFEST          Phase 1 で読んだ comment / artifact の URL の列挙
+MANIFEST_VERSION                ★ 必須。★ 読んだ manifest ごとに 1 件
+                                (3.9節の 3 つの組。追補を読んだ場合は ★ 追補も 1 件として列挙)
+                                ★ primary identity = 本文の hash
 PRIOR_EXPOSURE                  ★ 必須。NONE か、目にした他者の結論の申告
                                 (下記 REVIEW_SESSION_REUSE_POLICY が定める形式)
 TARGET_FRESHNESS_CHECK          ★ 必須。PASS | UNKNOWN
@@ -1748,6 +1790,8 @@ PHASE_1_COMPLETE =
       必須 field がすべて埋まっている(REVIEW_TARGET に応じた追加分を含む)
   AND TARGET_FRESHNESS_CHECK と CONTAMINATION_CHECK が埋まっている
       (★ 判定だけを後から作れないようにするため、明示して条件に含める)
+  AND MANIFEST_VERSION が ★ 読んだ manifest の全件について埋まっている
+      (★ 追補を読んだ場合は ★ 追補も含む)
   AND snapshot が Issue comment として投稿されている
   AND その comment の URL が確定している
 ```
@@ -1882,6 +1926,80 @@ CONTAMINATION_CHECK = PASS
   (PHASE_1_COMPLETE の条件に明示して含める)。
 ★ 記録先を持たない判定は ★ 事後に検査できない。3.9節が manifest について
   求めていることと同じ扱いにする。
+```
+
+**レビュー対象ごとに、読んだ manifest の版を固定する。**
+
+```
+MANIFEST_VERSION_FIXED_AFTER_FRESHNESS_CHECK
+
+  順序  1  TARGET_FRESHNESS_CHECK を通す(上記 1〜6)
+        2  ★ REVIEWER が manifest を取得し、その版を MANIFEST_VERSION として固定する
+        3  ★ その後に Phase 1 を開始する
+
+★ 上記 TARGET_FRESHNESS_CHECK が定めるのは
+  「この対象について blind-first が成立するか」である。
+★ 本項が定めるのは「そのとき ★ 実際に読んだ manifest の版はどれか」である。
+★ 2 つは別の問いであり、★ 前者の 6 step を ★ 増やさない。
+```
+
+```
+MANIFEST_IMMUTABILITY_AFTER_PHASE_1_START
+
+  REVIEWER が manifest を取得し、その版で Phase 1 を開始した後は、
+  ★ MANAGER はその版を編集してはならない。
+
+  訂正・追加が必要になった場合
+    ★ 新しい comment(追補 / supplement)として出す
+    ★ REVIEWER は ★ 取り込むかどうかを決め、★ どちらであっても ★ 記録する
+      取り込む     その版も MANIFEST_VERSION へ足す(再度固定して記録する)
+      取り込まない 「当該 iteration には反映しない」と snapshot へ記録する
+    ★ 記録しないことは ★ 認めない
+
+PREFER_APPEND_ONLY = YES
+
+★ Phase 1 開始 ★ 前 の訂正は ★ 禁止しない(正当な修正を止めない)。
+★ 禁止するのは ★ 「REVIEWER が読んだ後にその版を書き換えること」だけである。
+```
+
+```
+MANIFEST_EDIT_DETECTION
+
+  (a) updated_at != created_at        -> 投稿後に編集された
+  (b) 現在の本文の hash != snapshot の MANIFEST_CONTENT_HASH
+                                      -> ★ 読んだ版と現在の版が違う
+  (c) 過去の版の一覧と hash を突き合わせる
+                                      -> ★ 読んだ版を ★ 事後に特定できる
+
+★ (b) が成立したときの扱い(★ 自動で無効にしない)
+  まず ★ 原因と編集履歴を確認する。そのうえで
+    A  ★ 読んだ版を ★ 一意に特定できる
+       -> ★ その版を証拠として ★ 当該 Phase 1 を継続してよい(記録を追補する)
+    B  ★ 特定できない
+       -> ★ 当該 Phase 1 は ★ 有効として扱わず、★ やり直す
+★ 無条件の FAIL にも、★ 理由の分からない PASS にも ★ 倒さない。
+```
+
+**manifest の版の contract の発効と適用開始。**
+
+```
+MANIFEST_VERSION_CONTRACT_ACTIVE = YES | NO
+MANIFEST_CONTRACT_ACTIVATION_STATE_SSOT
+                           = Issue #356 の最新の durable な activation 記録
+
+MANIFEST_VERSION_CONTRACT_APPLIES_FROM
+                           = 本 contract の発効後に ★ 開始する
+                             ★ 新しい review lifecycle から
+
+★ 進行中の review へ ★ 遡及しない。
+★ 既に投稿済みの manifest へ ★ hash を付け直さない
+  (issue_label_policy.md の BULK_REWRITE_FORBIDDEN と同じ考え方)。
+★ ACTIVATION_STATE_SSOT という限定なしの名前は使わない
+  (同じ名前が同一文書で複数の Issue へ束縛されると一意に読めない)。
+★ 発効状態の固定値を本書へ埋め込まない。現在値は上記 SSoT を fresh に読む。
+★ 本 contract は ★ 追記のみであり、既存の manifest 規定を削除しない。
+  そのため発効前の読み先を別に固定する必要はない
+  (発効前は MANIFEST_VERSION の記録を必須としないだけである)。
 ```
 
 ```
@@ -2150,6 +2268,20 @@ activation 条件を満たした時点で発効する**。この改訂自身の�
     構造的な保証は無い。
   ★ 記録することで ★ 事後に検査できる形にするだけである
     (申告と snapshot の created_at / manifest / 引用 URL を突き合わせる)。
+
+★ MANIFEST_CONTENT_HASH も ★ REVIEWER の自己申告である。
+  ★ 「その版を実際に読んだか」は ★ 検査できない
+    (PHASE_1_INPUT_MANIFEST / REVIEWED_FILES / TARGET_FRESHNESS_CHECK と同じ性質)。
+  ★ 検査できるのは ★ 「申告された hash の版が実在するか」
+    「現在の版と同じか」である。
+
+★ 過去の版の本文は ★ GitHub の API から取得でき、★ 同じ規則で hash すると
+  ★ snapshot の値と突き合わせられる(2026-09-13 に実測)。
+  ★ ただし ★ 削除された版・private repository での挙動は ★ 未確認である。
+
+★ hash が一致しないことは ★ それだけでは ★ 「不正」を意味しない。
+  ★ 正当な追補の後に ★ 記録を足していない場合も ★ 同じ見え方になる。
+  -> ★ MANIFEST_EDIT_DETECTION の A / B の判断を行う。★ 自動で FAIL にしない。
 ```
 
 ---
@@ -2965,3 +3097,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-12 | 3節へ ★ **3.9〜3.14 を新設**し、3.5節へ順序の 1 行を追記した(Issue #333)。レビューが独立していなかった。fresh session であることは独立したレビューを意味せず、最初に Issue の全コメントや PR 本文を一括取得すると ★ **その時点で開発者の結論を読んでしまう**。3.9 で入力の境界(BLIND_FIRST_PHASE_1_ALLOWED / FORBIDDEN)と Phase の定義を、3.10 で設計レビューの 17 観点と traceability を、3.11 でコードレビューの手順を、3.12 で証拠の強度(LEVEL_A / B / C)を、3.13 で反証確認を、3.14 で INDEPENDENT_REVIEW_SNAPSHOT と REVIEW_SESSION_LIFECYCLE を定めた。★ **節番号は末尾へ追加し、既存の 3.6〜3.8 を繰り下げていない**(ai_operation_message_contract.md 2026-09-07 の前例。他文書からの参照を無効にしないため)。★ **判定語を増やしていない**。3節の 4 語をそのまま使い、LEVEL_A/B/C は★ 証拠の強度であって判定語ではないことを明記した。★ **3.6節を置き換えていない**(3.6 = 鮮度 × 検証可能性 / 3.12 = 誰が取得したか。軸が違うため併存)。★ **新しい役割を作っていない**(reviewer session は管理者役割の別インスタンス。1節は不変)。DISCONFIRMING_CHECKS_PERFORMED のみ ★ NONE を認めないのは、「Finding が無かった」と「反証を試みなかった」が別だからである。EVIDENCE_GAPS = NONE の乱用の禁止は ★ 新しい禁止ではなく、3節の「推測で PASS にしない」と issue_label_policy.md 7.4.2 の「未観測を PASS と書かない」の適用である。**1節の役割定義・2節の Human Gate・2.6節の merge 実行者・3節の判定語 4 種・3.5〜3.8節の既存本文・4節の指示形式・8節のルール変更の扱い・10節・11節はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし。**3.7節へ 2 項目を追記した**(INDEPENDENT_REVIEW_SNAPSHOT / REVIEW_INPUT_EVIDENCE)。判定語だけを提示すると、その判定を支える根拠が後から作れてしまうため、**判定が何を読んで出されたか**を提示へ残す。**既存 8 項目は 1 文字も変更していない**(追加は末尾のみ)。例にも同じ 2 項目を反映し、本文と例が食い違わないようにした。設計は当初この拡張先を ai_operation_message_contract.md の 3.7節としていたが、**同文書に 3.7節は存在せず**(3節は BASELINE_INVARIANTS)、「merge 判断を支援する提示形式」を持つ節は本書の 3.7節だけであるため、**設計の誤記として MANAGER 判断で訂正した**(項目数も 6 ではなく 8 であった)。**レビューの深さは 3.5節の適用範囲をそのまま使う**(3.9節「適用の深さ」)。全レビューで blind-first の入力境界・primary evidence の独立取得・developer report を読む前の snapshot 固定・証拠の強度の分類を行い、**3.5節の主対象(誤ると取り返しがつかない判断)に該当する場合にだけ** traceability と反証確認(3.13節)を必須とする。該当しない場合は独立取得のみ必須で、traceability と反証確認は省略してよい。**新しい深さの軸も label も判定語も作っていない**(3.5節の既存の境界を参照するだけである)。3.14節の DISCONFIRMING_CHECKS_PERFORMED は **field 自体は全レビューで必須**とし、主対象外では `NOT_APPLICABLE` を認める(欠落にせず、実施対象外であることを明示する)。主対象では NONE も NOT_APPLICABLE も認めない。3.12節の測定の独立性のうち **(b) sanitize 済み生出力は `CURRENTLY_NOT_ACTIVE` とし、本節の発効に含めない**。何を sanitize すれば公開してよいかは repository の公開方針に依存し、それは Issue #334 の判断対象であるため、**本書の merge が提出義務の発効を意味しないようにした**((a)(c)(d) は発効する)。PRELIMINARY_FINDINGS / EVIDENCE_GAPS の必須と NONE の semantics は変更していない |
 | 2026-09-12 | 1節へ **REVIEWER(レビュワー)の役割を追加**し、3.9〜3.14節のレビュー実施主体を `MANAGER` と `REVIEWER` へ分離した(Issue #353。#333 から split)。**利用者が role model を変更した**ものであり、旧記録(REVIEWER_ROLE = MANAGER / reviewer session は管理者役割の別インスタンス)が当時誤っていたという意味ではない。旧記録は historical record として残し、本行で新しい決定を記録する。変更の理由は、管理者が「作業計画・指示・進捗管理」と「独立レビュー」を同一役割で兼ねる構造では、**自分が管理した対象の最終 reviewer を自分が務める**ことになり、独立レビューが成立しないためである。実際に role boundary が未確定であることを理由に通常の review lifecycle が進められない状態が生じた。1節へ `MANAGER_AND_REVIEWER = SEPARATE_ROLES` / `SAME_SESSION_DUAL_ROLE = FORBIDDEN` / `REVIEWER_ROLE_SEPARATION = REQUIRED` / `FRESH_REVIEW_SESSION = REQUIRED` / `MANAGER_REVIEWER_ROLE_COMBINATION = FORBIDDEN_FOR_SAME_REVIEW_TARGET` / `REVIEWER != USER` / `REVIEWER_VERDICT != USER_APPROVAL` を置き、MANAGER の禁止へ `MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` と「自分が管理した review target の最終 reviewer 兼務」「REVIEWER の finding を自分で消す」「REVIEWER の verdict を自分の判断だけで PASS へ変更する」「REVIEWER を経由しない MANAGER review を独立レビューの代替として扱う」を追加した。**役割を分けることとセッションを分けることは別である**ため、`FRESH_REVIEW_SESSION = REQUIRED` を残している(役割が別でも、開発者の報告や管理者の結論を先に読んでいれば blind-first の独立性は成立しない)。3.9節は manifest の作成者を `PHASE_1_INPUT_MANIFEST_CREATOR = MANAGER` / レビュー実施主体を `PHASE_1_REVIEWER = REVIEWER` とし、制約を `MANAGER != REVIEWER` へ改めた(分ける根拠は**役割の分離**であってセッションの分離ではない)。3.14節の `REVIEW_SESSION_LIFECYCLE` を **10 段階から 12 段階**へ改め、`REVIEW_SESSION_CREATOR = MANAGER` / `REVIEWER_ROLE = REVIEWER` / `PHASE_1_INPUT_PROVIDER = MANAGER` とし、**「新しい役割を作らない。reviewer session は管理者役割の別インスタンスとする」の 2 行を削除**した。3.10 / 3.11 / 3.12 / 3.13節はレビュー実施主体を `REVIEWER` と明示しただけであり(3.10節へ `DESIGN_REVIEW_ACTOR = REVIEWER` / 3.11節へ `CODE_REVIEW_ACTOR = REVIEWER` / 3.13節へ `DISCONFIRMING_REVIEW_ACTOR = REVIEWER` の 1 ブロックずつ、3.12節は `LEVEL_A` の主体語を `REVIEWER` へ)、**17 の観点・traceability・手順・exact diff・surrounding code・PR 本文の必須節の確認・`LEVEL_A` / `LEVEL_B` / `LEVEL_C` の意味・反証確認の REQUIRED / OPTIONAL 条件・レビューの深さはいずれも変更していない**。3節は**題名も判定語 4 種も変更しておらず**、`FINAL_REVIEW_VERDICT_OWNER = REVIEWER` の 1 ブロックを冒頭へ足しただけである。**2節の Human Gate・2.6節の merge 実行者・利用者と開発者の権限・1.5節の Production 担当・8節のルール変更の扱い・10節・11節はいずれも変更していない。**`policy_registry.yaml` は見出し(anchor)が 1 つも変わらないため更新していない。CLAUDE.md は**役割識別子の一覧に `REVIEWER` の 1 行を足しただけ**であり、役割定義の本文も現在の担当も書いていない(定義の正本は本書 1節、担当の正本は `ROLE_ASSIGNMENT_SSOT`)。**本改訂は Issue #353 の activation boundary(12 条件)を満たした時点で発効する**。`CURRENT_POLICY_APPLIES_TO_ITS_OWN_CHANGE = YES` であり、**この改訂自身のレビューは改訂前の規則(管理者役割の fresh な別セッション)で行う**。発効前に「REVIEWER がレビューした」と記録しない。**独立レビュー(現行規則による fresh な管理者セッション)の条件へ対応して次を加えた。**3.10節へ `DESIGN_REVIEW_ACTOR = REVIEWER` / 3.11節へ `CODE_REVIEW_ACTOR = REVIEWER` を置きレビュー実施主体を 3.9節 / 3.13節と同じ形式で明示した。1節へ `MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` を識別子として置いた(規範は既にあり、**参照可能な名前が無かった**。2026-09-12 の #337 の行が同じ失敗形を記録している)。3.11節へ「**REVIEWER は 3.8節の観点を独立に確認するが、`LOCK_REVIEW_OWNER` / `DOD_DECLARATION_REVIEW_OWNER` は MANAGER のままである**」を明記した(**3.8節の本文は変更していない**。確認しても ownership は移らない)。3.14節へ `ROLE_SEPARATION_ACTIVE` と `ACTIVATION_STATE_SSOT` を置いた(**発効状態の固定値を本書へ埋め込まず**、Issue #353 の最新の durable な記録を fresh に読む。2.6節の `CURRENT_WIP_RULE` / ai_operation_message_contract.md の `NEW_CONTRACT_ACTIVE` と同じ方式)。3節へ `REVIEW_KIND = MANAGEMENT_REVIEW | INDEPENDENT_REVIEW` を加え、review 結果の durable record では verdict と併記して一意に判別できるようにした。3.14節の snapshot と 3.7節の提示形式へも `REVIEW_KIND` を **追加のみ**で足した(3.7節は利用者へ merge 判断を提示する境界であり、ここで種別が落ちると**最終提示だけを読んだときにどちらのレビューの結論か分からない**ためである。適用と禁止を併記し、既存 8+2 項目の本文・順序・必須性は 1 文字も変えていない。例にも同じ field を足し、本文と例が食い違わないようにした)(**判定語 4 種は不変であり、既存 field も変更していない**。`REVIEW_KIND` は判定語ではない)。1節の MANAGER の責務から「調査・設計・実装結果のレビュー」という**包括表現を外し**、management review(計画のレビュー / scope の確認 / 進捗・実績の確認 / acceptance と Progress Status の管理上の確認)として書き直した。同じ語で independent review まで担うように読めたためである。CLAUDE.md へは 0節の読み分けへ 1 行、2節へ pointer を 1 項だけ足した(**規則本文も現在の担当も書いていない**)。あわせて `REVIEW_SESSION_REUSE_POLICY` を 3.14節へ定めた。`FRESHNESS_REQUIRED_AT = INITIAL_PHASE_1_ONLY` とし、Phase 2・finding 対応後の再レビュー・同一対象への追加 commit の確認は**同じ review session を継続してよい**こととし、別 Issue / 別のレビュー対象 / 無関係な PR / 新しい review lifecycle では**新しい fresh session を開始する**ことを明示した。A〜E の段階・再レビュー時に管理者が渡す 8 項目・`REVIEW_ITERATION` を持つ append-only の記録例・`REVIEW_SESSION_END_CONDITION` の 4 条件を加えている。**12 段階の順序と文言は変更しておらず、A と B がそれを指す**(拡張であって書き換えではない)。**blind-first を弱める変更ではない**。独立性が要るのは「最初の評価を開発者の自己評価より前に形成すること」であり、`INITIAL_INDEPENDENCE`(fresh session + blind な Phase 1)と `CONTINUITY_AFTER_SNAPSHOT`(同じ reviewer session)として**要求する時点を明示した**ものである。あわせて 1節の `FRESH_REVIEW_SESSION = REQUIRED` へ **(初回の blind-first Phase 1 の開始時)** の限定を添え、3.14節の `FRESHNESS_REQUIRED_AT` を正本とする pointer を1節と 3.14節の双方へ置いた。**1節だけを読むと「レビューのたびに fresh session が必要」と読めた**ためである(限定は 3.14節にしかなく、入口の CLAUDE.md は 1節を指している。実際にこの改訂自身の再レビューで「同じ session を使ってよいか」が現行規則から一意に読めず、利用者の判断を要した)。**追加のみであり、既存の文は変更していない。新しい規則も作っていない。**さらに 3.14節の発効ブロックへ `ACTIVE_ROLE_MODEL_SSOT` と `PRE_ACTIVATION_ROLE_MODEL_SSOT` を加えた。**本改訂が main へ入ると旧い役割規則の本文は main から消えるが、`ROLE_SEPARATION_ACTIVE = NO` の間に有効なのは旧いほうである**ため、その期間にどこを読めばよいかが一意に決まらないという指摘(PR #354 の merge を止める finding)への対応である。発効前は Issue #353 の durable な pre-activation 記録が固定した **immutable な base commit の本書 1節 / 3.9〜3.14節**を読む、という pointer だけを置き、**旧い本文を複製していない**(同じ規則が 2 か所にあると正本が分からなくなる)。**base commit の SHA も本書へ書いていない**(変わりうる値は Issue 側の durable record で固定する。`ACTIVATION_STATE_SSOT` / `CURRENT_WIP_RULE` / `NEW_CONTRACT_ACTIVE` と同じ扱いであり、新しい方式を作っていない)。あわせて 1節の末尾へ **どちらの役割規則が現在有効かは 3.14節の `ACTIVE_ROLE_MODEL_SSOT` による**という pointer を 1 行置いた。1節へ直接入った読み手が、**発効前であることに気づかないまま新しい役割規則を有効と読む**経路が残っていたためである(入口の CLAUDE.md は レビュワーへ 1節を読むよう指示している)。**追加のみであり、責務・禁止・識別子・既存の文はいずれも変更していない。**docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 1節 / 3.9節 / 3.14節の **review session に関する要件を「session の新規作成」から「レビュー対象ごとの入力境界」へ改めた**(Issue #355。#353 で入れた `REVIEW_SESSION_REUSE_POLICY` の設計欠陥)。**利用者の要件は「レビュー対象ごとに新しい session を作ること」ではなく、「REVIEWER の session を Issue をまたいで継続し、対象ごとに blind-first を立て直すこと」であった**。旧規定は `SESSION_REUSE_FORBIDDEN_FOR = DIFFERENT_ISSUE / DIFFERENT_INDEPENDENT_REVIEW_TARGET / UNRELATED_PR / NEW_REVIEW_LIFECYCLE` と定めており、**発効直後に実際に独立レビューが開始できなくなった**(REVIEWER は現行規則を正しく適用して停止した。停止の判断は正しく、規則の側が誤っていた)。1節は `FRESH_REVIEW_SESSION = REQUIRED` を **`TARGET_REVIEW_FRESHNESS = REQUIRED`(レビュー対象ごと)と `SESSION_CREATION_FRESHNESS = NOT_REQUIRED`(原則)へ置き換え**、`REVIEWER_ACTOR` と `REVIEWER_SESSION`(原則 persistent)を分けて、**対象の分離は session を分けることではなく `REVIEW_ID` / `PHASE_1_INPUT_MANIFEST` / `TARGET_FRESHNESS_CHECK` / `INDEPENDENT_REVIEW_SNAPSHOT` で作る**ことを明記した。3.9節へ `TARGET_REVIEW_FRESHNESS` / `SESSION_CREATION_FRESHNESS` の定義を置いた(**新しい session でもその対象の開発者報告を先に読んでいれば成立せず、続いている session でもその対象について読んでいなければ成立する**)。3.14節は `PERSISTENT_REVIEWER_SESSION = YES` とし、`SESSION_REUSE_ALLOWED_FOR` へ **`DIFFERENT_ISSUE` / `DIFFERENT_INDEPENDENT_REVIEW_TARGET` / `UNRELATED_PR` / `NEW_REVIEW_LIFECYCLE` を含め**、**`SESSION_REUSE_FORBIDDEN_FOR` の 4 項目を削除**した。代わりに `TARGET_FRESHNESS_CHECK`(6 step)と `NEW_REVIEW_SESSION_REQUIRED_IF`(A〜E)を識別子つきで置き、**別の Issue / 別の PR / 新しい lifecycle であることだけを理由に新しい session を要求してはならない**と明記した。対象ごとの開始時に `REVIEW_TARGET` / `REVIEW_ID` / `TARGET_FRESHNESS_CHECK` / `PHASE_1_INPUT_MANIFEST` / `CONTAMINATION_CHECK = PASS` を記録する。発効は `PERSISTENT_REVIEWER_SESSION_POLICY_ACTIVE = YES | NO` と `SESSION_POLICY_ACTIVATION_STATE_SSOT = Issue #355 の最新の durable な activation 記録`で表し、**固定値を本書へ埋め込まない**(`ROLE_SEPARATION_ACTIVE` / `CURRENT_WIP_RULE` と同じ方式であり、新しい方式を作っていない)。**blind-first は弱めていない**。Phase 1 は開発者報告の受領前であり、入力は manifest で限定し、disallowed input を読まず、snapshot を先に固定し、Phase 2 で比較し、finding と verdict は REVIEWER が独立して出す。**変えたのは「blind-first の成立に物理的な新規 session 作成が必須」という部分だけである**。`TARGET_FRESHNESS_CHECK` の 4 の範囲は **利用者の判断**により `TARGET_FRESHNESS_SCOPE = BLIND_FIRST_PHASE_1_FORBIDDEN_ONLY` とした(Issue #355 issuecomment-5647258830)。**他の対象を通じて Issue 名や進行状況を偶発的に目にしただけでは contamination として扱わない**(目的は完全な情報遮断ではなく、開発者の自己評価等による anchoring より前に独立した Phase 1 を固定することである。範囲をここまで広げる案は**persistent な session と両立しない**ため採らなかった)。あわせて `PRIOR_EXPOSURE` を **必須**とした(同判断)。**persistent な session では完全な無知状態を前提にしない**ため、Phase 1 の開始時に `NONE` か、`source` / `summary` / `exposure_type` / `BLIND_FIRST_FORBIDDEN_MATCH` / `independence_impact` を記録する。判定の目安(一般 metadata や workflow 情報は原則 freshness を失わない / 開発者の完了報告・自己評価・root-cause 説明・`PASS` 等の結論、およびそれを実質的に転記した管理者の結論は blind-first forbidden の候補)と、**曖昧なら `TARGET_FRESHNESS = UNKNOWN` として管理者へ戻す**ことも本文へ置いた。**role separation・`REVIEW_KIND`・判定語 4 種・レビューの深さ・Phase 1 / Phase 2 の構造・Human Gate・利用者の権限・`MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO`・finding remediation の流れ・Production gate・`ACTIVE_ROLE_MODEL_SSOT` の分岐・12 段階の順序はいずれも変更していない。** `policy_registry.yaml` は見出し(anchor)が変わらないため更新していない。CLAUDE.md も変更していない(入口からの到達は既存の pointer で成立する)。**本改訂は Issue #355 の activation 記録をもって発効する**。独立レビュー(iteration 1)の finding へ対応して次を加えた。3.14節の発効ブロックへ `ACTIVE_SESSION_POLICY_SSOT` と `PRE_ACTIVATION_SESSION_POLICY_SSOT` を置いた(F1 / HIGH)。**本改訂が main へ入ると旧い session 規則の本文は main から消えるが、`PERSISTENT_REVIEWER_SESSION_POLICY_ACTIVE = NO` の間に有効なのは旧いほうである**ため、その期間にどこを読めばよいかが一意に決まらなかった。発効前は Issue #355 の durable な pre-activation 記録が固定した **immutable な base commit の本書 1節 / 3.9節 / 3.14節の session 規則**を読む、という pointer だけを置き、**旧い本文を複製していない**。**base commit の SHA も本書へ書いていない**(変わりうる値は Issue 側の durable record で固定する。`ACTIVE_ROLE_MODEL_SSOT` / `ACTIVATION_STATE_SSOT` / `CURRENT_WIP_RULE` と同じ扱いであり、新しい方式を作っていない)。あわせて 1節の末尾へ**どちらの session 規則が現在有効かは 3.14節の `ACTIVE_SESSION_POLICY_SSOT` による**という pointer を置いた(1節へ直接入った読み手が、発効前であることに気づかないまま新しい session 規則を有効と読む経路が残っていたためである)。新設側の識別子は `ACTIVATION_STATE_SSOT` から **`SESSION_POLICY_ACTIVATION_STATE_SSOT` へ改名**した(F2 / MEDIUM。同一文書内で同じ名前が #353 と #355 の 2 値へ束縛され、限定なしの参照がどちらを指すか一意に読めなかった。**#353 側の `ACTIVATION_STATE_SSOT` は変更していない**)。`TARGET_FRESHNESS_CHECK`(PASS | UNKNOWN)と `CONTAMINATION_CHECK`(PASS | FAIL)を3.14節の **snapshot の必須 field** へ追加し、`PHASE_1_COMPLETE` の条件へ**両者が埋まっていること**を明示した(F3 / MEDIUM。利用者判断は両者を「各 target 開始時に記録」と定めていたが記録先が無く、**未記録のまま Phase 1 完了が成立した**。判定だけを先に置いて根拠を後から作れる状態を防ぐという 3.14節の目的に反する。`PRIOR_EXPOSURE` について適用した是正原則を他の 2 項目へ広げたものである)。対象の一意性は `REVIEW_TARGET_REF`(CODE = Issue 番号 + BASE / HEAD、DESIGN = artifact の URL)として**`REVIEW_TARGET`(種別)と分け**、`TARGET_FRESHNESS_CHECK` の 1 と開始時の記録を同 field へ改めた(F4。**`REVIEW_TARGET` の定義と値域は変更していない**)。無置換で削除されていた `REVIEW_TARGET_LIFECYCLE` は**同一 `REVIEW_ID` の初回 Phase 1 から E TERMINATION までの範囲**として定義を置き直した(**旧規定の session 制限は復活させない**。範囲を指す語だけを戻す)。「この規則が埋めないもの」へ、`TARGET_FRESHNESS_CHECK` / `CONTAMINATION_CHECK` / `PRIOR_EXPOSURE` が**いずれも自己申告であり「読んでいない」ことは検査できない**(物理的な新規 session を要求しないため session 境界による構造的な保証が無い。記録することで事後に検査できる形にするだけである)を追記した(F5)。`TARGET_FRESHNESS = UNKNOWN` を管理者へ戻した後の経路を、(a) `BLIND_FIRST_PHASE_1_FORBIDDEN` に当たる場合は `NEW_REVIEW_SESSION_REQUIRED_IF` の A / (b) 当たらない場合は `PRIOR_EXPOSURE` へ記録して同 session 継続 / (c) 管理者でも一意に判定できない場合は利用者判断(8節 `POLICY_AUTHORITY = HUMAN_ONLY`)として定義した(F6。**新しい判定基準を作らず既存の A〜E と `PRIOR_EXPOSURE` へ接続するだけであり**、管理者が単独で freshness の成立を宣言しないことを明示した)。**いずれも追加であり、role separation・`REVIEW_KIND`・判定語 4 種・12 段階の順序・Human Gate・利用者の権限・`ACTIVE_ROLE_MODEL_SSOT` の分岐・`TARGET_FRESHNESS_SCOPE`・`SESSION_REUSE_ALLOWED_FOR`・`NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E はいずれも変更していない。**さらに `TARGET_FRESHNESS_CHECK` の 4 を **内容基準へ統一**した(利用者の判断。FINDING_ID = TARGET_FRESHNESS_CHECK_SCOPE_MISMATCH)。旧記述は「developer report / developer self-assessment / **MANAGER の review 結論** / その他の disallowed input を取得していないか」であり、**`MANAGER の review 結論` を送信者基準で一律に禁止対象としていた**。これは確定済みの `TARGET_FRESHNESS_SCOPE = BLIND_FIRST_PHASE_1_FORBIDDEN_ONLY`(OPTION_I)と一致しない(MANAGER から来た情報であることだけで freshness を失うなら、persistent な session では実質的に OPTION_II へ戻る)。4 を「**その対象について 3.9節の `BLIND_FIRST_PHASE_1_FORBIDDEN` に分類される情報を Phase 1 の snapshot 固定より前に既に取得していないかを確認する**」へ改め、**判定は「誰から来た情報か」ではなく「その内容が禁止情報か」で行う**ことを明記した。あわせて `TARGET_FRESHNESS_SCOPE` のブロックへ、**MANAGER / USER / 他の対象の記録から得た情報であっても、その内容が developer completion report / self-assessment / root-cause explanation / test interpretation / developer の結論 / implementation summary 等を実質的に転記・要約したものであれば `BLIND_FIRST_PHASE_1_FORBIDDEN` として扱う**(逆に、MANAGER から得た情報であることだけを理由に freshness を失わせない)ことと、判定の例(失わない / 失う候補)を置いた。例には**個別の Issue 番号を書いていない**。これにより 3.9節の `TARGET_REVIEW_FRESHNESS`、3.14節の 4 / `TARGET_FRESHNESS_SCOPE` / `CONTAMINATION_CHECK` / `PRIOR_EXPOSURE` の判定の目安が**同一の条件を指す**。**`PRIOR_EXPOSURE` の仕組み・`CONTAMINATION_CHECK`・`UNKNOWN` の経路・`NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E・persistent 方針・actor と session の分離・`REVIEW_ID`・manifest・Phase 構造・禁止項目そのもの・activation 方式・pre-activation SSoT はいずれも変更していない。OPTION_II は再導入していない。**さらに 1節の「役割を分けることとセッションを分けることは別である」の段落を **内容基準へ統一**した(利用者の review による指摘。MEDIUM)。旧表現は「役割が別でも、**開発者の報告や管理者の結論を先に読んでいれば** blind-first の独立性は成立しない」であり、**送信者(管理者)を条件にしていると読めた**。3.14節の `TARGET_FRESHNESS_SCOPE` と 3.9節の `TARGET_REVIEW_FRESHNESS` は内容基準であるため、**1節だけを読むと freshness の条件が食い違って読める**(1節は入口であり、CLAUDE.md がレビュワーへ 1節を読むよう指示している)。「その対象について 3.9節の `BLIND_FIRST_PHASE_1_FORBIDDEN` に該当する情報を先に取得していれば成立しない」へ改め、**判定は情報の送信者ではなく内容で行う**(管理者・利用者・他対象の記録から得た情報であることだけを理由に失わせない / 内容が開発者の完了報告・自己評価・原因説明・テスト結果の解釈・結論を実質的に転記・要約したものであれば送信者が誰であっても禁止情報として扱う)ことを明記した。あわせて 3.9節の「新しい session でも、その対象の開発者報告を先に読んでいれば成立しない」を **同じ参照(`BLIND_FIRST_PHASE_1_FORBIDDEN` に該当する情報)へ表現を揃えた**(意味は変えていない)。**1節の識別子・責務・禁止、`REVIEWER_ACTOR` / `REVIEWER_SESSION` の分離、`PRIOR_EXPOSURE`、`CONTAMINATION_CHECK`、`UNKNOWN` の経路、`NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E、`TARGET_FRESHNESS_SCOPE` の定義、Phase 構造、禁止項目そのもの、role separation、Human Gate、activation 方式、pre-activation SSoT はいずれも変更していない。OPTION_II は再導入していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-13 | 3.9節 / 3.14節へ **Phase 1 の入力 manifest の版を一意に識別する contract を追加**した(Issue #356。#353 で入れた `PHASE_1_INPUT_MANIFEST` の設計欠陥)。旧規定は **manifest を URL の列挙としてのみ定めており、その URL が指す comment の どの版を読んだのかを表す手段が無かった**。GitHub の comment は投稿後に編集できるため、**REVIEWER が読んだ後に MANAGER が manifest を書き換えても記録上は同じ URL のまま**であり、事後に「何を読んで Phase 1 を固定したのか」を検査できなかった(実例 = Issue #353 の manifest が 3 版存在した)。3.9節へ `MANIFEST_VERSION`(対象コメントの URL と id / `MANIFEST_UPDATED_AT` / `MANIFEST_CONTENT_HASH` の 3 つの組)と `MANIFEST_VERSION_PRIMARY_IDENTITY = MANIFEST_CONTENT_HASH` を置き、**本文の hash を最も強い識別情報**とした(`updated_at` は同一秒内の 2 回目の編集を区別できず、手で振る版番号は本文と一致する保証が無い。ただし版番号の併記は禁止しない)。hash の計算は **exact retrieved UTF-8 body を対象とし、`MANIFEST_HASH_NORMALIZATION = NONE`** とした(改行コード・末尾改行・空白も本文の一部として hash に入る。**監査対象を都合よく normalize して差を消さない**)。取得時に **JSON の body の値を UTF-8 bytes にしたものを hash する**ことと、**shell の pipeline へ流すと末尾へ改行が足される実装がある**ため「1 バイトも足さない」手順で計算することを明記した(実測で 1 バイトの差が別の hash になることを確認している)。長さを併記する場合は **bytes** で書く(文字数と混同しない)。3.14節は `MANIFEST_VERSION` を **snapshot の必須 field** へ `PHASE_1_INPUT_MANIFEST` の直後に追加し、`PHASE_1_COMPLETE` の条件へ**読んだ manifest の全件(追補を含む)について埋まっていること**を明示した(判定だけを先に置いて根拠を後から作れる状態にしないという 3.14節の目的に合わせた)。`MANIFEST_VERSION_FIXED_AFTER_FRESHNESS_CHECK` として **`TARGET_FRESHNESS_CHECK`(6 step)を通した後に manifest の版を固定し、その後 Phase 1 を開始する**順序を定めた(**6 step は増やしていない**。Issue #355 が定めるのは「この対象について blind-first が成立するか」、本項が定めるのは「そのとき実際に読んだ版はどれか」であり、別の問いである)。`MANIFEST_IMMUTABILITY_AFTER_PHASE_1_START` として **Phase 1 開始後の当該版の編集を禁止**し、訂正・追加は **新しい comment(追補 / supplement)**で行い、REVIEWER が取り込むか否かを決め **どちらであっても記録する**(`PREFER_APPEND_ONLY = YES`)こととした。**Phase 1 開始前の訂正は禁止していない**(正当な修正を止めない)。`MANIFEST_EDIT_DETECTION` として (a) `updated_at != created_at` / (b) 現在の本文の hash が snapshot の値と違う / (c) 過去の版の一覧と hash の照合 を置き、(b) が成立しても **自動で無効にせず**、まず原因と編集履歴を確認したうえで **A 読んだ版を一意に特定できるなら当該 Phase 1 を継続してよい / B 特定できないならやり直す**と定めた(**無条件の FAIL にも理由の分からない PASS にも倒さない**。利用者判断)。「この規則が埋めないもの」へ **hash も REVIEWER の自己申告であり「実際に読んだか」は検査できない**(検査できるのは申告された版が実在するか・現在の版と同じかである) / **過去の版の本文は API から取得でき同じ規則で hash すると突き合わせられる**(2026-09-13 に実測) / **削除された版・private repository での挙動は未確認** / **hash の不一致はそれだけでは不正を意味しない**(正当な追補の後に記録を足していない場合も同じ見え方になる) を追記した。発効は `MANIFEST_VERSION_CONTRACT_ACTIVE = YES | NO` と `MANIFEST_CONTRACT_ACTIVATION_STATE_SSOT = Issue #356 の最新の durable な activation 記録`で表し、**固定値を本書へ埋め込まない**(`SESSION_POLICY_ACTIVATION_STATE_SSOT` / `ROLE_SEPARATION_ACTIVE` / `CURRENT_WIP_RULE` と同じ方式であり、新しい方式を作っていない。**限定なしの `ACTIVATION_STATE_SSOT` は使わない**)。適用は `MANIFEST_VERSION_CONTRACT_APPLIES_FROM` のとおり **発効後に開始する新しい review lifecycle から**であり、**進行中の review へ遡及せず、既に投稿済みの manifest へ hash を付け直さない**。**本改訂は追記のみであり既存の manifest 規定を削除しないため、発効前の読み先を別に固定する pointer は置いていない**(発効前は `MANIFEST_VERSION` の記録を必須としないだけである)。**Issue #355 の規定(`TARGET_FRESHNESS_CHECK` の 6 step と step 4 の内容基準 / `TARGET_FRESHNESS_SCOPE` / `PRIOR_EXPOSURE` / `CONTAMINATION_CHECK` / `REVIEW_TARGET_REF` / `SESSION_REUSE_ALLOWED_FOR` / `NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E / `PERSISTENT_REVIEWER_SESSION_POLICY_ACTIVE` と pre-activation の pointer)は 1 つも変更していない。** role separation・`REVIEW_KIND`・判定語 4 種・12 段階の順序・Phase 1 / Phase 2 の構造・Human Gate・利用者の権限・レビューの深さ・`MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` も変更していない。`policy_registry.yaml` は見出し(anchor)が 1 つも変わらないため更新しておらず、CLAUDE.md も変更していない(入口からの到達は既存の pointer で成立する)。docs のみの変更であり、コード・Production 挙動の変更なし |
