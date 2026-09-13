@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +40,10 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
 import policy_check  # type: ignore[import-not-found]  # noqa: E402
 from policy_check import (  # noqa: E402
+    EXIT_CLI_USAGE_ERROR,
+    EXIT_FAIL,
+    EXIT_PASS,
+    EXIT_UNKNOWN,
     FAIL,
     PASS,
     SOURCE_KIND_REVISION,
@@ -663,3 +668,140 @@ def test_unresolvable_revision_in_check_is_unknown(
 
     assert report["result"] == UNKNOWN
     assert any("revision" in p for p in report["problems"])
+
+# --- exit code の契約(Issue #343) ---------------------------------------------
+
+
+@pytest.fixture
+def fresh_at_head(monkeypatch: pytest.MonkeyPatch) -> None:
+    """freshness を VERIFIED に固定する。★ revision は ★ 実在する HEAD を使う。
+
+    ★ `fresh` fixture は架空の SHA を返すため、`main()` の既定経路
+    (revision 固定の reader)では revision を解決できず UNKNOWN になる。
+    exit code の契約を `main()` 越しに確かめるには実在の revision が要る。
+    ★ ネットワークへは出ない(`ls-remote` を呼ばずに VERIFIED を返すため)。
+    """
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    ).stdout.decode("utf-8").strip()
+
+    def _verified() -> tuple[str, str]:
+        return VERIFIED, head
+
+    monkeypatch.setattr(policy_check, "check_policy_freshness", _verified)
+
+
+def _stale_git(*args: str) -> str:
+    """local と remote の main が食い違う状態(STALE)を作る。"""
+    if args[0] == "rev-parse":
+        return _FAKE_SHA + chr(10)
+    if args[0] == "ls-remote":
+        return _OTHER_SHA + chr(9) + "refs/heads/main" + chr(10)
+    raise AssertionError("STALE のとき policy を読んではいけない")
+
+
+def test_exit_code_is_zero_for_pass(
+    fresh_at_head: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PASS -> exit 0。"""
+    code = policy_check.main(["--operation", "PR_CREATE"])
+
+    assert code == EXIT_PASS == 0
+    assert json.loads(capsys.readouterr().out)["result"] == PASS
+
+
+def test_exit_code_is_one_for_fail(
+    fresh_at_head: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """FAIL -> exit 1。未知の operation はここへ来る。"""
+    code = policy_check.main(["--operation", "NO_SUCH_OPERATION"])
+
+    assert code == EXIT_FAIL == 1
+    assert json.loads(capsys.readouterr().out)["result"] == FAIL
+
+
+def test_exit_code_is_two_for_cli_usage_error() -> None:
+    """CLI の使い方が不正 -> exit 2(argparse が返す)。
+
+    ★ この 2 は argparse のものであり、policy 判定の結果ではない。
+    UNKNOWN と同じ値にしないために契約を分けている。
+    """
+    with pytest.raises(SystemExit) as exc:
+        policy_check.main([])  # --operation が無い
+
+    assert exc.value.code == EXIT_CLI_USAGE_ERROR == 2
+
+
+def test_exit_code_is_three_for_unknown_when_policy_source_is_stale(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """★ STALE -> UNKNOWN -> exit 3。
+
+    ★ 本 Issue(#343)が閉じる fail-open そのものである。
+    exit code だけを見る呼び出し側から見て、PASS(0)と区別できなければならない。
+    """
+    monkeypatch.setattr(policy_check, "_git", _stale_git)
+
+    code = policy_check.main(["--operation", "PR_CREATE"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["policy_ref_freshness"] == STALE
+    assert report["result"] == UNKNOWN
+    assert code == EXIT_UNKNOWN == 3
+    # ★ PASS(0)と区別できること。ここが 0 なら fail-open へ戻る。
+    assert code != EXIT_PASS
+    # ★ argparse の 2 と衝突しないこと(受入条件 3)。
+    assert code != EXIT_CLI_USAGE_ERROR
+
+
+def test_exit_code_is_three_for_unknown_when_freshness_is_unverified(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """UNVERIFIED(ネットワーク断など) -> UNKNOWN -> exit 3。"""
+
+    def _fake_git(*args: str) -> str:
+        if args[0] == "rev-parse":
+            return _FAKE_SHA + chr(10)
+        if args[0] == "ls-remote":
+            raise OSError("network down")
+        raise AssertionError("UNVERIFIED のとき policy を読んではいけない")
+
+    monkeypatch.setattr(policy_check, "_git", _fake_git)
+
+    code = policy_check.main(["--operation", "PR_CREATE"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["policy_ref_freshness"] == UNVERIFIED
+    assert report["result"] == UNKNOWN
+    assert code == EXIT_UNKNOWN == 3
+
+
+def test_exit_codes_are_four_distinct_values() -> None:
+    """4 値が互いに異なること。★ UNKNOWN に 2 を割り当てない(受入条件 3)。"""
+    codes = [EXIT_PASS, EXIT_FAIL, EXIT_CLI_USAGE_ERROR, EXIT_UNKNOWN]
+
+    assert codes == [0, 1, 2, 3]
+    assert len(set(codes)) == 4
+
+
+def test_unexpected_result_does_not_exit_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """想定外の result は ★ 0 へ倒さない(fail-close)。
+
+    判定語が増えた/壊れたときに、黙って「成功」として返るのを防ぐ。
+    """
+
+    def _fake_check(operation: str, **kwargs: Any) -> dict[str, Any]:
+        return {"result": "SOMETHING_ELSE", "operation": operation}
+
+    monkeypatch.setattr(policy_check, "check", _fake_check)
+
+    code = policy_check.main(["--operation", "PR_CREATE"])
+
+    assert code == EXIT_UNKNOWN
+    assert code != EXIT_PASS
+    assert json.loads(capsys.readouterr().out)["result"] == "SOMETHING_ELSE"
