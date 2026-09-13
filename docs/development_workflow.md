@@ -2319,7 +2319,29 @@ GOVERNANCE_CHANGE_BATCHING = WEEKLY
 ```
 
 P1 以外の governance / 開発運用 docs の改善は、その都度 PR を出さず
-**Issue #213(棚卸)または #220 へ集約し、週 1 回 1 PR で反映する**。
+**週 1 回 1 PR で main へ反映する**。
+
+**Issue の追跡責任と PR の batching は別である。**
+
+```
+DEDICATED_ISSUE_ALLOWED != STANDALONE_PR_ALLOWED
+
+【Issue】独立した欠陥・設計論点として追跡する必要がある場合は
+        専用 Issue を作ってよい
+          独立した root cause がある
+          専用の Acceptance Criteria が必要である
+          独自の lifecycle を持つ
+          別の Issue へ入れると責任範囲が曖昧になる
+        ★ duplicate check は必須(issue_label_policy.md 13.1節)
+        ★ 上記に当たらない小さな改善は Issue #213(棚卸)または #220 へ集約する
+
+【PR】  P1 例外等を除き、governance / docs 変更の main 反映は
+        従来どおり週次 batch へまとめる
+        ★ 専用 Issue を作ってよいことは、単独 PR を出してよいことを意味しない
+```
+
+**「governance 改善は何でも個別 Issue を作ってよい」という意味ではない。**
+上の 4 つに当たるかを確かめたうえで判断する。
 
 ```
 対象  issue_label_policy.md / development_workflow.md /
@@ -2340,6 +2362,7 @@ P1(運用が止まる・誤判定を生む・公開面へ影響する)は **即�
 
   集約先の #213 / #220 が Issue であり、そこへ提案を積む。
   「Issue なしで直してよい」という意味ではない。
+  ★ 専用 Issue を作る場合も、その Issue が起点である(原則は同じ)。
 
 ★ 緊急性の判定は Priority で行う。
   P1 以上を即時とするのは、待たせると運用判断を誤らせるためである。
@@ -2475,3 +2498,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-09 | 10 節へ **10.1 検証目的の Production 手動起動**を新設し、2.6.9 へ **read model の識別子**の規則を追記した(Issue #213 / #188)。10.1: `manual Production Lambda invocation` は検証目的でも人間承認を要する例外であることを明示し、手順を定めた(自然実行で確認できないことを示す / ★ VALIDATION mode を優先し NORMAL は最後の手段 / ★ 副作用を列挙してから承認を求める / ★ 1 回の承認で 1 回の起動 / 08:00・18:00・毎時 :25〜:35 を避ける / 承認は利用者)。★ **Production failure injection の禁止と「人工的な Production 実行は禁止」という原則は変えていない**(本項は例外の手続きを定めるものであり、原則を緩めない)。利用者判断(2026-09-08 / #213 issuecomment-5584115344)による明文化である。2.6.9: read model の各更新は **GENERATED_AT(UTC の実測値)** で識別し、`UPDATE_LATEST_<n>` のような連番を識別子にしない(★ 並行更新で同じ番号が別の更新へ割り当てられ、後から辿れなくなる実例が 2026-09-09 に発生した)。**3 節の実装パイプライン・4 節のローカルテスト方針・2.5 節の指示プロトコル・2.6 節の WIP と domain lock の判定・10 節のその他の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-12 | §3.5 の 3 か所で registry の所在を実体へ追随させた(Issue #277)。cohort / order case / 登録先の参照が `tests/unit/test_time_semantics_guard.py` のままだったが、registry(データと語彙)は `tests/support/time_semantics_registry.py` へ移動している。conftest から参照する必要が生じ、conftest がテストモジュールを import するのは収集時にテスト本体が実行されるため収集経路として不健全だからである。あわせて「同ファイルが検証する」という記述を 2 か所で分けた。**宣言・登録は registry、健全性の検証(V1-V8 / O1-O6)は guard** であり、移動により両者が別ファイルになったためである。★ **パスの追随のみであり、規則の内容は 1 文字も変更していない**(トリガ T1-T4 / control / 決定表 / FORBIDDEN と ALLOWED_EXISTING の扱い / order case の自動化しない方針 / registry を全走査にしない方針はいずれも変更していない)。2026-09-03 の変更履歴は当時の事実であり書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-12 | 3節へ preflight(`scripts/policy_check.py`)を 1 段追加した(Issue #337)。操作の前に「どの正本のどの節を読む必要があるか」を `docs/policy_registry.yaml` から引ける。★ **`PREFLIGHT_REQUIRED = NO` の任意実行であり、通さなくても作業は進められる**(誰の作業も止めない)。★ **通したことは遵守の証拠にならない**(required_policies を示すだけであり、読んだことも守ったことも保証しない。遵守の確認はレビューと各正本が担う)。結果は三値であり ★ **`UNKNOWN` を `PASS` として扱わない**(policy source の鮮度を確認できなかった場合も `UNKNOWN` とし、古い規則へ自動 fallback して操作を許可しない)。**実装パイプラインの他の段・レビュー対象の指定・Issue の自動 close を避ける・DoD の申告・同型 sweep・3.5節の時間意味論変更ゲート・4節のローカルテスト方針・2.6節の WIP と domain lock・6.5節の state 同期・10節の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-13 | 9.6節の **Issue の追跡責任と PR の batching を分離**した(Issue #357 / USER 判断 7。RULE_PROPOSAL = #213 issuecomment-5649751837)。旧本文は「P1 以外の governance / 開発運用 docs の改善は、その都度 PR を出さず**Issue #213 または #220 へ集約し**、週 1 回 1 PR で反映する」と書いており、**専用の Acceptance Criteria や独立した設計判断を必要とする欠陥まで #213 / #220 へ押し込む、と読めた**(Issue の追跡責任と PR の batching の混同)。実際に、独立したroot cause を持つ設計欠陥を起票したことが 9.6節と食い違うのではないかという申告が生じた。**9.6節の目的(小さな docs 改善ごとに PR を乱立させない / governance 変更を週単位でまとめる)は維持したまま**、`DEDICATED_ISSUE_ALLOWED != STANDALONE_PR_ALLOWED` として、**【Issue】独立した root cause がある / 専用の Acceptance Criteria が必要 / 独自の lifecycle を持つ / 別 Issue へ入れると責任範囲が曖昧になる のいずれかに当たるなら専用 Issue を作ってよい(duplicate check は必須)**、**【PR】P1 例外等を除き main 反映は従来どおり週次 batch へまとめる**、と定めた。上記に当たらない小さな改善は従来どおり #213 / #220 へ集約する。**「governance 改善は何でも個別 Issue を作ってよい」とは変更していない。**9.5節の Issue 起点の原則は不変であり(専用 Issue を作る場合もその Issue が起点である)、`GOVERNANCE_CHANGE_BATCHING = WEEKLY`・対象文書の一覧・P1 を即時とする扱い・「なぜまとめるか」の理由・緊急性を Priority で判定することはいずれも変更していない。見出しを変えていないため `policy_registry.yaml` は更新していない(本節を指す entry は実測で 0 件である)。docs のみの変更であり、コード・Production 挙動の変更なし |
