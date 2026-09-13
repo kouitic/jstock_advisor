@@ -29,6 +29,7 @@ from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.domain.signals.watchlist_screening import RankingEntry
 from jstock_advisor.infrastructure.aws import batch_tracker
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    NOTIFICATION_OUTCOME_NOT_REQUIRED,
     UNIVERSE_SOURCE_CACHE,
     UNIVERSE_SOURCE_DOWNLOADED,
     WatchlistBatchStatus,
@@ -1311,3 +1312,127 @@ def test_only_promoted_false_without_the_source_is_not_a_failure_day(
     )
 
     assert _UNIVERSE_FAILURE_NOTICE_HEAD not in body
+
+
+# ---------------------------------------------------------------------------
+# Issue #234(U4) 条件 C1: universe_fetch_failed の消費先は 2 つある。
+#
+#   (i)  L1088 追加 0 件ガード  取得に失敗した日は、追加 0 件でも通知経路へ進める
+#   (ii) L1126 summary へ渡す  本文の 1 行
+#
+# 上の 5 本はいずれも追加 1 件で走るため、(i) の判断ではフラグが一度も使われない。
+# 実装コメント自身が「失敗日は追加 0 件になりやすい」と述べており、ここが外れると
+# NOT_REQUIRED で打ち切られて通知に届かない = 本 Issue が防ごうとしている事象その
+# ものになる。現時点でそこを守っているのは字面を読むテスト 1 本だけであるため、
+# 本番経路を通す形で固定する。
+# ---------------------------------------------------------------------------
+
+
+def _drive_zero_addition_batch_with_universe_observation(
+    now: dt.datetime,
+    *,
+    universe_source: str | None,
+    universe_promoted: bool | None,
+    universe_source_date: str | None,
+    batch_id: str = "batch-1",
+) -> None:
+    """追加 0 件(合格銘柄なし)の回を、候補一覧の取得結果つきで作る。
+
+    合格させないことで added_stock_codes を空にする(既存の
+    test_zero_additions_marks_not_required と同じ作り方)。
+    """
+    batch_tracker.try_acquire_dispatch_lease(batch_id, "dispatcher", now, 360, 72)
+    batch_tracker.set_watchlist_batch_total(
+        batch_id,
+        1,
+        72,
+        now,
+        universe_source=universe_source,
+        universe_promoted=universe_promoted,
+        universe_source_date=universe_source_date,
+    )
+    batch_tracker.create_missing_candidate_progress_rows(batch_id, ["1111"], now, 72)
+    batch_tracker.mark_dispatch_completed(batch_id, now)
+    batch_tracker.claim_candidate_lease(batch_id, "1111", "owner-a", now, 240)
+    batch_tracker.complete_candidate(
+        batch_id,
+        "1111",
+        "owner-a",
+        terminal_status=WatchlistProgressStatus.COMPLETED,
+        evaluation_result="REQUIRED_CONDITION_FAILED",
+        ranking_entry=None,
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=now,
+    )
+
+
+def _finalize_zero_addition(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    universe_source: str | None,
+    universe_promoted: bool | None,
+    universe_source_date: str | None,
+) -> _SummaryCapturingNotificationService:
+    _drive_zero_addition_batch_with_universe_observation(
+        _NOW,
+        universe_source=universe_source,
+        universe_promoted=universe_promoted,
+        universe_source_date=universe_source_date,
+    )
+    monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: _FakeWatchlistRepository())
+    notification = _SummaryCapturingNotificationService()
+
+    assert maybe_finalize("batch-1", _NOW, _providers(), _fake_config(), notification) is True
+    return notification
+
+
+def test_failure_day_with_zero_additions_still_reaches_the_notification_path(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取得に失敗した日は、追加 0 件でも NOT_REQUIRED で打ち切られない。
+
+    0 件ガードから失敗日の条件が外れると、ここで止まって通知 service へ到達しない
+    (= 通知側をいくら直しても効かない)。本文の 1 行まで見て、実際に届いたことを
+    確かめる。
+    """
+    notification = _finalize_zero_addition(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_CACHE,
+        universe_promoted=False,
+        universe_source_date="2026-07-31",
+    )
+
+    assert len(notification.summaries) == 1
+    summary = notification.summaries[0]
+    # 追加 0 件であることを前提として確かめる(1 件以上あるなら 0 件ガードを通らない)。
+    assert list(summary.items) == []
+
+    body = render_watchlist_addition_message(summary)
+    assert _UNIVERSE_FAILURE_NOTICE_HEAD in body
+
+    batch = batch_tracker.get_watchlist_batch("batch-1")
+    assert batch is not None
+    assert batch.get("finalize_notification_outcome") != NOTIFICATION_OUTCOME_NOT_REQUIRED
+
+
+def test_success_day_with_zero_additions_is_cut_off_as_not_required(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取得に成功した日の追加 0 件は、従来どおり打ち切られる(対の 1 本)。
+
+    これが無いと「常に通知経路へ進む」実装でも上のテストは通る。
+    """
+    notification = _finalize_zero_addition(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_DOWNLOADED,
+        universe_promoted=True,
+        universe_source_date="2026-09-13",
+    )
+
+    assert notification.summaries == []
+
+    batch = batch_tracker.get_watchlist_batch("batch-1")
+    assert batch is not None
+    assert batch.get("finalize_notification_outcome") == NOTIFICATION_OUTCOME_NOT_REQUIRED
