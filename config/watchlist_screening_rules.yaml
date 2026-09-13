@@ -20,6 +20,14 @@ scheduled_run_enabled: true
 # CLIで従来どおり確認できる。
 notification_enabled: false
 
+# Issue #234(U4): 候補一覧の取得に失敗した日だけ送る要約通知のON/OFF。
+# notification_enabled(通常の追加通知)とは独立した安全弁である。上の
+# notification_enabled=false は「追加があったことをLINEで知らせない」方針
+# (2026-08)であり、取得失敗という運用上の警告まで止める意図ではなかった。
+# 両者を1つのフラグで兼ねていたため、知らせたい日ほど届かない状態になっていた。
+# 既定trueはUSER判断「取得失敗日のみ送る」(Issue #234)を実装した値である。
+universe_failure_notification_enabled: true
+
 candidate_universe:
   # "csv": 固定CSV(旧v1、テスト・小規模検証用に残す)。
   # "jpx": 東証プライム+スタンダード全銘柄を自動取得(候補ユニバース本格対応・2026-08)。

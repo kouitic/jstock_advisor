@@ -1804,6 +1804,11 @@ class WatchlistScreeningRulesConfig(StrictModel):
     # 一括で制御しており、特定のcadence(週次/日次)専用ではないため。
     scheduled_run_enabled: bool
     notification_enabled: bool
+    # Issue #234(U4): 候補一覧の取得に失敗した日だけ送る要約通知のON/OFF。
+    # notification_enabledとは独立した安全弁であり、既定は送る(True)。
+    # 既定値を持たせているのは、この項目を持たない既存configでも読み込めること
+    # (後方互換)を保つためである。
+    universe_failure_notification_enabled: bool = True
     candidate_universe: CandidateUniverseConfig
     # Part B(高速化): "lightweight"は必要最小限の項目のみ取得するProviderへ
     # 切り替える(既定は引き続き"stock_snapshot"、同値性テスト通過後に本番既定を

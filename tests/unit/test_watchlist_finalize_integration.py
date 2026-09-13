@@ -30,6 +30,8 @@ from jstock_advisor.domain.signals.watchlist_screening import RankingEntry
 from jstock_advisor.infrastructure.aws import batch_tracker
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     NOTIFICATION_OUTCOME_NOT_REQUIRED,
+    NOTIFICATION_OUTCOME_SENT,
+    NOTIFICATION_OUTCOME_SKIPPED,
     UNIVERSE_SOURCE_CACHE,
     UNIVERSE_SOURCE_DOWNLOADED,
     WatchlistBatchStatus,
@@ -131,12 +133,14 @@ def _fake_config(
     max_required_field_missing_rate_pct: float = 100.0,
     max_notification_retry_attempts: int = 3,
     notification_enabled: bool = True,
+    universe_failure_notification_enabled: bool = True,
 ) -> SimpleNamespace:
     watchlist_screening = SimpleNamespace(
         candidate_universe=SimpleNamespace(provider="jpx"),
         screening_policy="high_dividend_financial_health",
         max_watchlist_additions_per_run=20,
         notification_enabled=notification_enabled,
+        universe_failure_notification_enabled=universe_failure_notification_enabled,
         high_throttle_rate_threshold_pct=high_throttle_rate_threshold_pct,
         max_scoring_field_missing_rate_pct=max_scoring_field_missing_rate_pct,
         max_data_error_rate_pct=max_data_error_rate_pct,
@@ -1200,14 +1204,18 @@ def _drive_batch_with_universe_observation(
     )
 
 
-def _finalize_and_render(
+def _finalize_capturing(
     monkeypatch: pytest.MonkeyPatch,
     *,
     universe_source: str | None,
     universe_promoted: bool | None,
     universe_source_date: str | None,
-) -> str:
-    """本番経路を通し、利用者が読む通知本文を組み立てて返す。"""
+    config: Any | None = None,
+) -> _SummaryCapturingNotificationService:
+    """追加 1 件の回を本番経路で finalize し、通知 service の呼ばれ方を返す。
+
+    config を渡さない場合は既定(_fake_config())であり、従来と同一である。
+    """
     _drive_batch_with_universe_observation(
         _NOW,
         universe_source=universe_source,
@@ -1216,8 +1224,26 @@ def _finalize_and_render(
     )
     monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: _FakeWatchlistRepository())
     notification = _SummaryCapturingNotificationService()
+    effective_config = _fake_config() if config is None else config
 
-    assert maybe_finalize("batch-1", _NOW, _providers(), _fake_config(), notification) is True
+    assert maybe_finalize("batch-1", _NOW, _providers(), effective_config, notification) is True
+    return notification
+
+
+def _finalize_and_render(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    universe_source: str | None,
+    universe_promoted: bool | None,
+    universe_source_date: str | None,
+) -> str:
+    """本番経路を通し、利用者が読む通知本文を組み立てて返す。"""
+    notification = _finalize_capturing(
+        monkeypatch,
+        universe_source=universe_source,
+        universe_promoted=universe_promoted,
+        universe_source_date=universe_source_date,
+    )
 
     assert len(notification.summaries) == 1
     return render_watchlist_addition_message(notification.summaries[0])
@@ -1374,6 +1400,7 @@ def _finalize_zero_addition(
     universe_source: str | None,
     universe_promoted: bool | None,
     universe_source_date: str | None,
+    config: Any | None = None,
 ) -> _SummaryCapturingNotificationService:
     _drive_zero_addition_batch_with_universe_observation(
         _NOW,
@@ -1383,8 +1410,9 @@ def _finalize_zero_addition(
     )
     monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: _FakeWatchlistRepository())
     notification = _SummaryCapturingNotificationService()
+    effective_config = _fake_config() if config is None else config
 
-    assert maybe_finalize("batch-1", _NOW, _providers(), _fake_config(), notification) is True
+    assert maybe_finalize("batch-1", _NOW, _providers(), effective_config, notification) is True
     return notification
 
 
@@ -1436,3 +1464,201 @@ def test_success_day_with_zero_additions_is_cut_off_as_not_required(
     batch = batch_tracker.get_watchlist_batch("batch-1")
     assert batch is not None
     assert batch.get("finalize_notification_outcome") == NOTIFICATION_OUTCOME_NOT_REQUIRED
+
+
+# ---------------------------------------------------------------------------
+# Issue #234(U4) 案 4: 「失敗日だけは送信の打ち切りを越える」ことを固定する。
+#
+# 直すまでの状態: 失敗日の 1 行の組み立て・0 件ガードはいずれも Production へ
+# 入っていたが、`notification_enabled = false` が **その 1 行の送信までまとめて
+# 止めていた**。止める switch が 1 つしか無く「追加を知らせない」と「取得の失敗を
+# 知らせない」を兼ねていたため、**知らせたい日ほど届かない**状態が残っていた。
+#
+# ここで採らない形(上の経路 2 と同じ基準):
+#   ・判定式をテスト内へ書き直して assert する(本番を変えても落ちない)
+#   ・source の字面を assert する
+#   ・本文の文字列だけを見る(**送ったか**を見ないと、打ち切りを越えたことにならない)
+#
+# 代わりに **通知 service が呼ばれたか** と **batch 行へ残る outcome** を見る。
+# これは利用者へ届いたかに最も近い観測点であり、かつ finalizer の外側にある。
+#
+# 対で固定する(片側だけでは通ってしまう実装を、対側が落とす):
+#   A1  失敗日は届く            <-> 新 switch を false にすれば止まる
+#   A2  通常の追加通知は不変     <-> notification_enabled を true にすれば届く
+#   A3  2 つの switch は独立(OR) <-> どちらも false なら止まる
+# ---------------------------------------------------------------------------
+
+
+def _outcome_of(batch_id: str = "batch-1") -> str | None:
+    batch = batch_tracker.get_watchlist_batch(batch_id)
+    assert batch is not None
+    outcome = batch.get("finalize_notification_outcome")
+    return None if outcome is None else str(outcome)
+
+
+# --- A1  失敗日は、通常の追加通知が無効でも届く ----------------------------
+
+
+def test_a1_failure_day_is_delivered_even_while_addition_notification_is_disabled(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本 Issue の本体。notification_enabled=false は本番の実際の値である。
+
+    この 1 本が、直すまでは SKIPPED で止まっていた経路そのものである。
+    """
+    notification = _finalize_capturing(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_CACHE,
+        universe_promoted=False,
+        universe_source_date="2026-07-31",
+        config=_fake_config(
+            notification_enabled=False,
+            universe_failure_notification_enabled=True,
+        ),
+    )
+
+    assert len(notification.summaries) == 1
+    assert _outcome_of() == NOTIFICATION_OUTCOME_SENT
+
+
+def test_a1_failure_day_with_zero_additions_is_delivered_while_disabled(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本番で実際に起きる形(追加 0 件)でも届く。
+
+    取得に失敗した日は候補一覧が前回のまま凍結するため追加 0 件になりやすい。
+    0 件ガードと送信の打ち切りは別の場所にあり、**両方**を越えないと届かない。
+    追加 1 件の 1 本だけでは、0 件ガードを越える経路が一度も通らない。
+    """
+    notification = _finalize_zero_addition(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_CACHE,
+        universe_promoted=False,
+        universe_source_date="2026-07-31",
+        config=_fake_config(
+            notification_enabled=False,
+            universe_failure_notification_enabled=True,
+        ),
+    )
+
+    assert len(notification.summaries) == 1
+    assert list(notification.summaries[0].items) == []  # 前提(0 件)を確かめる
+    assert _outcome_of() == NOTIFICATION_OUTCOME_SENT
+
+
+def test_a1_failure_day_is_stopped_when_its_own_switch_is_off(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """対の 1 本。失敗日の送信にも、それ専用の止め方が残っている。
+
+    これが無いと「常に送る」実装でも上の 2 本は通る。
+    """
+    notification = _finalize_capturing(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_CACHE,
+        universe_promoted=False,
+        universe_source_date="2026-07-31",
+        config=_fake_config(
+            notification_enabled=False,
+            universe_failure_notification_enabled=False,
+        ),
+    )
+
+    assert notification.summaries == []
+    assert _outcome_of() == NOTIFICATION_OUTCOME_SKIPPED
+
+
+# --- A2  取得に成功した日の扱いは変えていない ------------------------------
+
+
+def test_a2_success_day_stays_silent_while_addition_notification_is_disabled(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """失敗日用の switch を true にしても、**通常の追加通知は開かない**。
+
+    新しい switch が既存の kill switch を丸ごと無効化していないことを固定する。
+    ここが外れると、2026-08 に決めた「追加は LINE へ送らない」方針が崩れる。
+    """
+    notification = _finalize_capturing(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_DOWNLOADED,
+        universe_promoted=True,
+        universe_source_date="2026-09-13",
+        config=_fake_config(
+            notification_enabled=False,
+            universe_failure_notification_enabled=True,
+        ),
+    )
+
+    assert notification.summaries == []
+    assert _outcome_of() == NOTIFICATION_OUTCOME_SKIPPED
+
+
+def test_a2_success_day_is_delivered_when_addition_notification_is_enabled(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """対の 1 本。上の沈黙が notification_enabled 由来であることを示す。
+
+    これが無いと、上のテストは「そもそも届かない壊れた作り」でも通る。
+    """
+    notification = _finalize_capturing(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_DOWNLOADED,
+        universe_promoted=True,
+        universe_source_date="2026-09-13",
+        config=_fake_config(
+            notification_enabled=True,
+            universe_failure_notification_enabled=False,
+        ),
+    )
+
+    assert len(notification.summaries) == 1
+    assert _outcome_of() == NOTIFICATION_OUTCOME_SENT
+
+
+# --- A3  2 つの switch は独立している(OR であって AND でない) --------------
+
+
+def test_a3_failure_day_is_delivered_via_the_addition_switch_alone(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """失敗日用の switch が false でも、通常の追加通知が有効なら届く。
+
+    新しい switch を **既存 switch への上乗せの条件**(AND)として実装すると、
+    失敗日だけが通常より厳しくなり、ここで落ちる。
+    """
+    notification = _finalize_capturing(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_CACHE,
+        universe_promoted=False,
+        universe_source_date="2026-07-31",
+        config=_fake_config(
+            notification_enabled=True,
+            universe_failure_notification_enabled=False,
+        ),
+    )
+
+    assert len(notification.summaries) == 1
+    assert _outcome_of() == NOTIFICATION_OUTCOME_SENT
+
+
+def test_a3_failure_day_is_stopped_only_when_both_switches_are_off(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """対の 1 本。両方 false のときだけ止まる(= 2026-09-14 より前と同じ状態)。
+
+    A3 の上の 1 本と対で、2 つの switch が **OR** で効くことを固定する。
+    """
+    notification = _finalize_zero_addition(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_CACHE,
+        universe_promoted=False,
+        universe_source_date="2026-07-31",
+        config=_fake_config(
+            notification_enabled=False,
+            universe_failure_notification_enabled=False,
+        ),
+    )
+
+    assert notification.summaries == []
+    assert _outcome_of() == NOTIFICATION_OUTCOME_SKIPPED

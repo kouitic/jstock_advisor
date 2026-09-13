@@ -21,8 +21,11 @@ WATCHLIST_WRITE_COMPLETED→NOTIFICATION_PENDING→NOTIFICATION_SENT→COMPLETED
   (`add_if_new`自体も条件付き書き込みのため、たとえ永続化自体が欠落しても実際の
   重複追加は発生しない、二重の安全策)。
 - `finalize_notification_outcome`が無ければ、通知フェーズを解決する。追加0件なら
-  `NOT_REQUIRED`、`notification_enabled=false`なら`SKIPPED`として即座に解決する。
-  それ以外は`notify_watchlist_additions()`を試みる。**運用ハードニング第3弾1節**:
+  `NOT_REQUIRED`(ただし候補一覧の取得に失敗した日は追加0件でも通知経路へ進む)、
+  送ってよいかの判定(`_notification_allowed()`)が偽なら`SKIPPED`として即座に
+  解決する。それ以外は`notify_watchlist_additions()`を試みる。**Issue #234**:
+  この可否は`notification_enabled`だけでは決まらない。取得に失敗した日は
+  `universe_failure_notification_enabled`(既定true)で判定する。**運用ハードニング第3弾1節**:
   この呼び出しが例外を送出した場合、Phase3は例外を自分自身で捕捉し
   `NOTIFICATION_FAILED`(通知失敗回数+1、エラー概要を保存)として記録したうえで
   **`_finalize_completed`自体は正常returnする**(finalize全体をFINALIZE_FAILEDに
@@ -958,6 +961,28 @@ def _finish_batch(
     )
 
 
+def _notification_allowed(wc: Any, universe_fetch_failed: bool) -> bool:
+    """この回の要約通知を送ってよいかを返す(Issue #234 U4)。
+
+    kill switchは2つある。**1つで兼ねない。**
+
+      notification_enabled                    追加があったことを知らせる通知
+      universe_failure_notification_enabled   取得に失敗した日の警告
+
+    `notification_enabled = false`(2026-08の方針。ウォッチリスト追加は即時の
+    売買アクションを求めないためLINEへ送らない)は、**取得失敗という運用上の
+    警告まで止める意図ではなかった**。1つのフラグで兼ねていたため、取得に
+    失敗した日は候補が凍結して追加0件になりやすく、**知らせたい日ほど届かない**
+    状態になっていた(Issue #234)。
+
+    したがって失敗日は専用のフラグで判定する。通常の追加通知の可否は
+    `notification_enabled` のままであり、**こちらは変えない**。
+    """
+    if universe_fetch_failed and wc.universe_failure_notification_enabled:
+        return True
+    return bool(wc.notification_enabled)
+
+
 def _finalize_completed(
     batch_id: str,
     now: dt.datetime,
@@ -1088,7 +1113,7 @@ def _finalize_completed(
         if not pending_notification_codes and not universe_fetch_failed:
             record_notification_resolved(batch_id, now, [], NOTIFICATION_OUTCOME_NOT_REQUIRED)
             notification_outcome = NOTIFICATION_OUTCOME_NOT_REQUIRED
-        elif not wc.notification_enabled:
+        elif not _notification_allowed(wc, universe_fetch_failed):
             record_notification_resolved(batch_id, now, [], NOTIFICATION_OUTCOME_SKIPPED)
             notification_outcome = NOTIFICATION_OUTCOME_SKIPPED
         else:
