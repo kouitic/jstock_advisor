@@ -1670,6 +1670,121 @@ def test_b2_inputs_do_not_change_v1_score_or_action(
 
 
 # ---------------------------------------------------------------------------
+# Issue #22 Phase B3(2026-09-13): 共有Common Qualityのshadow算出。
+# 保有判断側と同じ共有関数・同じconfigをBUY経路から呼び、結果を観測用factsへ
+# 保存する。v1のスコア・BuyAction・通知・価格判定へは接続しない。
+# ---------------------------------------------------------------------------
+
+
+def test_b3_common_quality_shadow_matches_shared_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUY経路のshadowが、共有モデルを同じ入力で呼んだ結果と一致することを固定する。
+
+    共有モデルを作り直すと経路間で値がずれ、責務分離のshadow検証が成立しない
+    (設計のFILES_PROHIBITED=「共有スコアリング本体を作り直さない」)。ここでは
+    テスト側で共有関数を直接呼び、BUY経路が保存した値と突き合わせる。
+    """
+    from jstock_advisor.domain.classification.financial_industry import classify_industry
+    from jstock_advisor.domain.entities.enums import PeriodType
+    from jstock_advisor.domain.financial_series import FinancialPeriodValue
+    from jstock_advisor.domain.signals.company_quality_scoring import (
+        CompanyQualityInputs,
+        score_company_quality,
+    )
+
+    snapshot = _build_snapshot(_NIHON_SHINYAKU)
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (snapshot, None))
+    service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
+    outcome = service.analyze(_NIHON_SHINYAKU.stock_code, _NOW, RecommendationType.BUY)
+
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+    shadow = facts["common_quality_shadow"]
+    assert isinstance(shadow, dict)
+
+    expected = score_company_quality(
+        CompanyQualityInputs(
+            financial=snapshot.financial,
+            quarterly_operating_income_periods=(snapshot.quarterly_operating_income_periods),
+            quarterly_operating_cashflow_periods=(snapshot.quarterly_operating_cashflow_periods),
+            eps_period_values=[
+                FinancialPeriodValue(
+                    value=hv.eps, period_end=hv.date, period_type=PeriodType.ANNUAL
+                )
+                for hv in snapshot.historical_valuations
+                if hv.eps is not None
+            ],
+            cashflow_decomposition=snapshot.cashflow_decomposition,
+            industry_classification=classify_industry(
+                snapshot.financial.sector, snapshot.financial.industry
+            ),
+            listing_risk_keyword_confirmed=bool(snapshot.material_event_keywords_found),
+        ),
+        _CONFIG.holding_decision.company_quality_weights,
+        _CONFIG.holding_decision.company_quality_score_thresholds,
+        _CONFIG.holding_decision_ratio,
+    )
+
+    assert shadow["score"] == expected.score
+    assert shadow["coverage_ratio"] == expected.coverage_ratio
+    assert [i["item_code"] for i in shadow["items"]] == [i.item_code for i in expected.items]
+
+
+def test_b3_data_missing_is_separated_from_low_quality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """欠測が「品質が低い」と区別できる形で記録されることを固定する。
+
+    共有モデルはNOT_EVALUATED(データ欠測)を分母に残して0点として合算するため、
+    scoreだけでは「品質が低い」と「データが無い」を区別できない(要件6)。
+    coverage_ratioと項目別statusを併せて保存することで判定層が分離できる。
+    ここでは閾値を置かない(COVERAGE_THRESHOLDはshadow calibrationで決める)。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+    shadow = facts["common_quality_shadow"]
+    assert isinstance(shadow, dict)
+
+    statuses = [i["status"] for i in shadow["items"]]
+    # 3値がそのまま残っていること(NOT_EVALUATEDをNOT_APPLICABLEへ潰さない)。
+    assert set(statuses) <= {"EVALUATED", "NOT_EVALUATED", "NOT_APPLICABLE"}
+    # fixtureは財務データが乏しく、少なくとも1項目は欠測として記録される。
+    assert "NOT_EVALUATED" in statuses
+    # 欠測がある以上、coverage_ratioは1.0未満になる(scoreだけを見ない)。
+    coverage = shadow["coverage_ratio"]
+    assert isinstance(coverage, float)
+    assert coverage < 1.0
+
+
+def test_b3_shadow_does_not_change_v1_score_or_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """shadow算出がv1のスコア・BuyActionを変えないことを固定する。
+
+    V2_SHADOW_DECISION = CURRENT_PRODUCTION_DECISION_UNCHANGED。shadowは観測用
+    factsへ保存するだけであり、算出式にも判定にも参加しない。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    # shadowはscore_formulasに現れない(v1の算出に参加していない)。
+    formulas = facts["score_formulas"]
+    assert isinstance(formulas, dict)
+    assert "common_quality_shadow" not in formulas
+    # 版はv1のまま(v2の書き込み開始は本Phaseの承認範囲外)。
+    assert rec.company_quality_score_model_version == "v1"
+
+
+# ---------------------------------------------------------------------------
 # Issue #52 Phase B3-B1: 財務データの「報告サイクル上の鮮度」をBUYへ接続する
 #
 # data_age_business_days(いつ取得したか)とは別concept である。無料providerは

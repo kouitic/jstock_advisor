@@ -42,6 +42,7 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     BuyIndustrySector,
     ConfidenceLevel,
+    PeriodType,
     RecommendationType,
     StockType,
     WatchTransitionType,
@@ -77,6 +78,10 @@ from jstock_advisor.domain.signals.buy_signal import (
     is_earnings_trend_non_decreasing,
     score_areas,
     undervaluation_signal_threshold_values,
+)
+from jstock_advisor.domain.signals.company_quality_scoring import (
+    CompanyQualityInputs,
+    score_company_quality,
 )
 from jstock_advisor.domain.signals.earnings_surprise import (
     earnings_surprise_config_values,
@@ -1006,6 +1011,47 @@ class BuySignalService:
         # Issue #22 Phase B2: StockType分類の判定時点閾値をsnapshotするために
         # 参照する(分類ロジック本体は呼ばない。値の読み取りのみ)。
         stock_classification_rules = self._config.stock_classification
+
+        # --- Issue #22 Phase B3(2026-09-13): 共有Common Qualityのshadow算出 ---
+        # 保有判断側と同じ score_company_quality() を同じconfigで呼ぶ。共有
+        # モデルを作り直さない(作り直すと経路間で値がずれ、責務分離の検証が
+        # 成立しない)。結果はobservation用factsへ保存するだけであり、v1の
+        # スコア・BuyAction・通知・価格判定には一切接続しない。
+        #
+        # 保存先をRecommendationの新フィールドにしない理由: Recommendationは
+        # extra="forbid" であり、新フィールドの書き込みを始めると、その
+        # フィールドを知らない版へ戻したときに読み込みが失敗する。設計の
+        # READ_COMPATIBILITY_FIRST -> THEN WRITE に従い、read互換が本番へ
+        # 入っている既存のdict(buy_score_input_facts)へ保存する。
+        # 業種分類は保有判断側と同じ関数・同じ入力で求める(共有Common Quality
+        # の金融業分岐がこの分類に依存するため。分類ロジック本体は変更しない)。
+        common_quality_industry = classify_industry(
+            snapshot.financial.sector, snapshot.financial.industry
+        )
+        common_quality_shadow = score_company_quality(
+            CompanyQualityInputs(
+                financial=snapshot.financial,
+                quarterly_operating_income_periods=(snapshot.quarterly_operating_income_periods),
+                quarterly_operating_cashflow_periods=(
+                    snapshot.quarterly_operating_cashflow_periods
+                ),
+                eps_period_values=[
+                    FinancialPeriodValue(
+                        value=hv.eps,
+                        period_end=hv.date,
+                        period_type=PeriodType.ANNUAL,
+                    )
+                    for hv in snapshot.historical_valuations
+                    if hv.eps is not None
+                ],
+                cashflow_decomposition=snapshot.cashflow_decomposition,
+                industry_classification=common_quality_industry,
+                listing_risk_keyword_confirmed=bool(snapshot.material_event_keywords_found),
+            ),
+            self._config.holding_decision.company_quality_weights,
+            self._config.holding_decision.company_quality_score_thresholds,
+            self._config.holding_decision_ratio,
+        )
         buy_score_input_facts: dict[str, object] = {
             **score_result.input_facts,
             # レビュー対応(2026-08): current_per/current_pbr自体は既に保存しているが、
@@ -1196,6 +1242,30 @@ class BuySignalService:
             # (score_thresholds / undervaluation_category_capsと同じ理由)。
             # keyword列(cyclical / defensive / event_driven)は数値閾値を持たず、
             # 設計上Style AttractivenessがNOT_APPLICABLEであるため保存しない。
+            # --- Issue #22 Phase B3(2026-09-13): 共有Common Qualityのshadow ---
+            # 保有判断側と同じ共有関数・同じconfigで算出した結果をそのまま保存する。
+            # scoreだけでは「品質が低い」と「データが無い」を区別できないため、
+            # coverage_ratioと項目別のstatusを併せて保存する(要件6)。
+            # 判定に使う閾値はここでは持たない。COVERAGE_THRESHOLDは
+            # shadow calibrationで決めるものであり、実装都合で仮の値を
+            # 固定しない(設計のMISSING_DATA_CONTRACT)。
+            "common_quality_shadow": {
+                "score": common_quality_shadow.score,
+                "coverage_ratio": common_quality_shadow.coverage_ratio,
+                # 項目別の評価状況。EVALUATED / NOT_EVALUATED(データ欠測) /
+                # NOT_APPLICABLE(該当しないため分母から除外)の3値をそのまま残す。
+                "items": [
+                    {
+                        "item_code": item.item_code,
+                        "axis": item.axis,
+                        "weight": item.weight,
+                        "status": item.status.value,
+                        "points_earned": item.points_earned,
+                        "reason": item.reason,
+                    }
+                    for item in common_quality_shadow.items
+                ],
+            },
             "stock_classification_thresholds": {
                 "version": stock_classification_rules.version,
                 "income_min_dividend_yield_pct": (
