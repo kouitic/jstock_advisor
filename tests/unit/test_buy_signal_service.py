@@ -1540,7 +1540,7 @@ def test_all_jpx_lookup_states_yield_identical_buy_decision(
         )
 
 
-def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
+def test_observation_key_is_additive_and_keeps_other_keys_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """観測キーの追加はoptional key追加であり、既存レコードとの互換性を壊さない。
@@ -1550,10 +1550,14 @@ def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
     観測キーの追加それ自体はbackfillを必要としない
     (`FACTS_SCHEMA_VERSION` の方針コメント参照)。この判断をテストで固定する。
 
-    Issue #22 Phase B2(2026-09-13)でversionは"v2"へ上がっているが、それは
-    B2の設計がforward replayの識別のために引き上げを要求したからであり、
-    「観測キーを足したら必ず上げる」という意味ではない。ここで固定するのは
-    あくまで「観測キーを取り除いても他のキーが変わらない」ことである。
+    Issue #22 C1(2026-09-14): 本テストは以前
+    test_observation_key_is_additive_and_does_not_bump_facts_schema_version
+    という名前だったが、B2でversionが"v2"へ上がった際にassertだけを
+    書き換えたため、名前(引き上げない)と中身(引き上がっている)が逆の
+    意味になっていた。名前を実体へ合わせる。名前が固定していた命題
+    (観測キーの追加それ自体はversionの引き上げを必要としない)は、
+    下の test_facts_schema_version_is_not_derived_from_the_observation_key_set
+    で別に固定する。
     """
     outcome = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
     rec = outcome.recommendation
@@ -1566,6 +1570,122 @@ def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
     legacy_view = {k: v for k, v in facts.items() if k != "canonical_industry_observation"}
     assert "canonical_industry_observation" not in legacy_view
     assert legacy_view["buy_score_input_facts_schema_version"] == "v2"
+
+
+def test_facts_schema_version_is_not_derived_from_the_observation_key_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """観測キーを1つ増やしたこと自体は、schema versionの引き上げを要求しない。
+
+    Issue #22 C1(2026-09-14)で復元した命題である。B2でassertを
+    "v1" -> "v2" へ書き換えた際に、この命題を固定するテストが
+    どこにも残らなくなっていた。
+
+    versionを上げること自体は妥当である(B2はforward replayの識別のために
+    引き上げを要求した)。ここで固定するのは「キー集合が変わったから
+    上げる」ではない、という方針の側である。
+
+    観測できる形にすると次になる。同じ判定から作ったfactsについて、
+    観測キーを含むviewと含まないviewでキー集合は異なるが、
+    `buy_score_input_facts_schema_version` の値は同一である。
+    すなわちversionはキー集合から導出されていない。
+    """
+    outcome = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    # B2 / B3 / B4 で追加した観測専用キー。いずれもv1の判定へ接続しない。
+    observation_only_keys = [
+        "canonical_industry_observation",
+        "common_quality_shadow",
+        "style_attractiveness_shadow",
+        "stock_classification_thresholds",
+    ]
+    present = [k for k in observation_only_keys if k in facts]
+    # 前提が崩れたら(観測キーが1つも無い)テストの意味が無くなるため明示する。
+    assert present, observation_only_keys
+
+    without_observation_keys = {k: v for k, v in facts.items() if k not in present}
+    # キー集合は実際に変わっている。
+    assert set(without_observation_keys) != set(facts)
+    # それでもversionの値は変わらない = versionはキー集合の関数ではない。
+    assert (
+        without_observation_keys["buy_score_input_facts_schema_version"]
+        == facts["buy_score_input_facts_schema_version"]
+    )
+    # 観測キー以外のキーは1つも値が変わらない(純粋な追加である)。
+    for key, value in without_observation_keys.items():
+        assert facts[key] == value
+
+
+def test_shadow_failure_is_isolated_from_the_v1_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """shadowの算出で例外が出ても、v1の判定結果は1つも変わらない(Issue #22 C2)。
+
+    STYLE_ATTRACTIVENESS = SHADOW_ONLY / NON_BLOCKING はUSERが承認した性質
+    であり、「BUY判定へ接続しない」だけでは満たさない。算出がanalyze()の
+    本流にある限り、例外が出ればその銘柄だけでなくbatch全体が止まる。
+
+    ここで固定するのは次の3点である。
+      ・shadowが落ちてもv1の出力(BuyAction / score / 買付価格)が変わらない
+      ・失敗を握りつぶさない(「算出できなかった」がfactsに残る)
+      ・失敗を0.0や空へ潰さない(「魅力が無い」と読める形で保存しない)
+
+    隔離の粒度は観測ごとである。片方が落ちても、もう片方の観測は残る。
+    """
+    baseline = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    baseline_rec = baseline.recommendation
+    assert baseline_rec is not None
+    baseline_facts = baseline_rec.buy_score_input_facts
+    assert baseline_facts is not None
+    assert baseline_facts["style_attractiveness_shadow"]["shadow_state"] == "COMPUTED"
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected shadow failure")
+
+    monkeypatch.setattr(service_module, "score_style_attractiveness", _boom)
+    degraded = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    degraded_rec = degraded.recommendation
+    assert degraded_rec is not None
+
+    # 1 v1の出力が変わらない。
+    assert degraded_rec.buy_action == baseline_rec.buy_action
+    assert degraded_rec.raw_buy_action == baseline_rec.raw_buy_action
+    assert degraded_rec.total_score == baseline_rec.total_score
+    assert degraded_rec.company_quality_score == baseline_rec.company_quality_score
+    assert degraded_rec.entry_buy_price == baseline_rec.entry_buy_price
+    assert degraded_rec.standard_buy_price == baseline_rec.standard_buy_price
+    assert degraded_rec.strong_buy_price == baseline_rec.strong_buy_price
+    assert degraded_rec.valuation_anchor == baseline_rec.valuation_anchor
+    assert degraded_rec.confidence == baseline_rec.confidence
+
+    degraded_facts = degraded_rec.buy_score_input_facts
+    assert degraded_facts is not None
+
+    # 2 失敗が記録に残る(黙って何も保存しない、にしない)。
+    failed = degraded_facts["style_attractiveness_shadow"]
+    assert failed["shadow_state"] == "COMPUTATION_FAILED"
+    assert failed["error_type"] == "ZeroDivisionError"
+
+    # 3 0.0や空へ潰さない。「該当0件」「魅力が無い」と読める形で残さない。
+    assert "styles" not in failed
+    assert "style_layer_state" not in failed
+
+    # 4 隔離は観測ごと。もう片方のshadowは算出されたまま残る。
+    assert degraded_facts["common_quality_shadow"]["shadow_state"] == "COMPUTED"
+    assert (
+        degraded_facts["common_quality_shadow"]["score"]
+        == baseline_facts["common_quality_shadow"]["score"]
+    )
+
+    # 5 shadow以外の観測キーも残る(失敗がfacts全体を巻き込まない)。
+    assert (
+        degraded_facts["stock_classification_thresholds"]
+        == (baseline_facts["stock_classification_thresholds"])
+    )
 
 
 # ---------------------------------------------------------------------------
