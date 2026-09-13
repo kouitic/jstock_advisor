@@ -805,6 +805,20 @@ PREFLIGHT_REQUIRED = NO(任意実行)
 結果は三値である。`UNKNOWN` を `PASS` として扱わない
 (policy source の鮮度を確認できなかった場合も `UNKNOWN` になる)。
 
+**exit code も三値を保つ**(Issue #343)。
+
+```
+0  PASS
+1  FAIL
+2  CLI usage / argument error(argparse が使う)
+3  UNKNOWN
+```
+
+判定語だけを分けても、**exit code が `PASS` と同じなら fail-open は閉じない**。
+exit code だけを見る呼び出し側からは「確認できなかった」が「成功」として伝わる。
+`UNKNOWN` には **3** を割り当てる。**2 は使わない**(`argparse` が引数不正で 2 を
+返すため、「呼び出し方が不正」と「判定できなかった」が区別できなくなる)。
+
 ---
 
 ### レビュー対象の指定

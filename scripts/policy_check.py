@@ -43,6 +43,20 @@ working tree は読まない。
 **UNKNOWN を PASS へ倒さない。** 倒すと「確認できなかった」が「問題なし」に
 化ける。これは fail-open であり、Issue #337 が問題にしている構図そのものである。
 
+## exit code も三値を保つ(Issue #343)
+
+    0  PASS
+    1  FAIL
+    2  CLI usage / argument error(argparse が使う)
+    3  UNKNOWN
+
+**判定語だけを分けても、exit code が PASS と同じなら fail-open は閉じない。**
+呼び出し側が exit code だけを見る場合、`UNKNOWN` が 0 では「確認できなかった」が
+「成功」として伝わる。`UNKNOWN` には **3** を割り当てる。
+
+**`UNKNOWN` に 2 を使わない。** `argparse` が引数不正で 2 を返すため、
+「呼び出し方が不正」と「判定できなかった」が区別できなくなる。
+
 ## policy source の鮮度(POLICY_SOURCE_FRESHNESS)
 
 ローカルの `origin/main` は remote-tracking ref であり、最後の fetch 以降に
@@ -89,6 +103,19 @@ REGISTRY_RELPATH = "docs/policy_registry.yaml"
 PASS = "PASS"
 FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
+
+# exit code の契約(Issue #343)。判定語と 1 対 1 に対応させる。
+EXIT_PASS = 0
+EXIT_FAIL = 1
+# ★ 2 は argparse が引数不正で使う。ここからは返さない(契約を分離するため)。
+EXIT_CLI_USAGE_ERROR = 2
+EXIT_UNKNOWN = 3
+
+_EXIT_CODE_BY_RESULT = {
+    PASS: EXIT_PASS,
+    FAIL: EXIT_FAIL,
+    UNKNOWN: EXIT_UNKNOWN,
+}
 
 VERIFIED = "VERIFIED"
 STALE = "STALE"
@@ -447,9 +474,11 @@ def main(argv: list[str] | None = None) -> int:
         report["pr"] = args.pr
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    # FAIL のときだけ非 0 とする。UNKNOWN は「判定できなかった」であり、
-    # 呼び出し側が止まるかどうかを決める(Issue #337 で扱い方を検討中)。
-    return 1 if report["result"] == FAIL else 0
+    # 判定語ごとに exit code を分ける(Issue #343)。
+    # UNKNOWN を 0 で返すと「確認できなかった」が「成功」として伝わる。
+    # 未知の result は判定できていないのと同じであり、fail-close して
+    # EXIT_UNKNOWN とする(0 へ倒さない)。
+    return _EXIT_CODE_BY_RESULT.get(report["result"], EXIT_UNKNOWN)
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
