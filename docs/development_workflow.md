@@ -2392,7 +2392,8 @@ INVENTORY               baseline -> target の全 commit と、その導出コ�
 GENERATED_AT            inventory を導出した時刻
 SOURCE_MAIN             導出時点の main SHA
 SOURCE_PRODUCTION_SHA   導出に使った PRODUCTION_SHA
-                        対象 Issue ごとの verification 要件
+VERIFICATION_REQUIREMENTS  対象 Issue ごとの verification 要件
+                        (自然検証 / 手動実行の別を含む。operations_manual.md 23.4)
 GATES                   CREATE / EXECUTE の承認記録
 ```
 
@@ -2431,15 +2432,31 @@ freeze 中でも可  Release Issue の起票 / scope 導出 / readiness review /
 ```
 未着手        DEVELOPER_WITH_DEPLOY が git から inventory を導出して起票
 調査・設計中  MANAGER の readiness review
+              (REVIEW_KIND = MANAGEMENT_REVIEW。独立レビューではない)
 設計済        CHANGESET_CREATE_GATE 通過(USER)
-開発中        sam build -> CREATE -> ARN 記録 -> ChangeSet review(MANAGER)
+開発中        sam build -> CREATE -> ARN 記録
+              -> ChangeSet の independent review
+                 (REVIEWER。REVIEW_KIND = INDEPENDENT_REVIEW)
               -> CHANGESET_EXECUTE_GATE(USER / exact ARN)
 デプロイ済    EXECUTE -> terminal state -> immediate verification
               ここで PRODUCTION_SHA の新しい正本が確定する
 本番検証済    scope 内の全 Issue の mandatory natural verification 完了
-              (MANAGER が集約判定)
+              (MANAGER が完了状況を集約する management review。
+               final review verdict ではない)
 CLOSED        close review -> USER
 ```
+
+**審査の主体は
+[user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md)
+の役割分離に従う。**
+
+```
+FINAL_REVIEW_VERDICT_OWNER = REVIEWER(同 3節)
+MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO(同 1節)
+```
+
+本節は審査の主体を新たに定めない。正本は同文書であり、本書へ複製しない。
+ChangeSet の審査は Production 反映の可否に直結するため、同文書 3.5節の主対象である。
 
 既存の Human Gate(CREATE / EXECUTE)に scope を含めるだけであり、
 **新しい gate 種別を作らない**。
@@ -2573,3 +2590,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-12 | §3.5 の 3 か所で registry の所在を実体へ追随させた(Issue #277)。cohort / order case / 登録先の参照が `tests/unit/test_time_semantics_guard.py` のままだったが、registry(データと語彙)は `tests/support/time_semantics_registry.py` へ移動している。conftest から参照する必要が生じ、conftest がテストモジュールを import するのは収集時にテスト本体が実行されるため収集経路として不健全だからである。あわせて「同ファイルが検証する」という記述を 2 か所で分けた。**宣言・登録は registry、健全性の検証(V1-V8 / O1-O6)は guard** であり、移動により両者が別ファイルになったためである。★ **パスの追随のみであり、規則の内容は 1 文字も変更していない**(トリガ T1-T4 / control / 決定表 / FORBIDDEN と ALLOWED_EXISTING の扱い / order case の自動化しない方針 / registry を全走査にしない方針はいずれも変更していない)。2026-09-03 の変更履歴は当時の事実であり書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-12 | 3節へ preflight(`scripts/policy_check.py`)を 1 段追加した(Issue #337)。操作の前に「どの正本のどの節を読む必要があるか」を `docs/policy_registry.yaml` から引ける。★ **`PREFLIGHT_REQUIRED = NO` の任意実行であり、通さなくても作業は進められる**(誰の作業も止めない)。★ **通したことは遵守の証拠にならない**(required_policies を示すだけであり、読んだことも守ったことも保証しない。遵守の確認はレビューと各正本が担う)。結果は三値であり ★ **`UNKNOWN` を `PASS` として扱わない**(policy source の鮮度を確認できなかった場合も `UNKNOWN` とし、古い規則へ自動 fallback して操作を許可しない)。**実装パイプラインの他の段・レビュー対象の指定・Issue の自動 close を避ける・DoD の申告・同型 sweep・3.5節の時間意味論変更ゲート・4節のローカルテスト方針・2.6節の WIP と domain lock・6.5節の state 同期・10節の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 9.6節の **Issue の追跡責任と PR の batching を分離**した(Issue #357 / USER 判断 7。RULE_PROPOSAL = #213 issuecomment-5649751837)。旧本文は「P1 以外の governance / 開発運用 docs の改善は、その都度 PR を出さず**Issue #213 または #220 へ集約し**、週 1 回 1 PR で反映する」と書いており、**専用の Acceptance Criteria や独立した設計判断を必要とする欠陥まで #213 / #220 へ押し込む、と読めた**(Issue の追跡責任と PR の batching の混同)。実際に、独立したroot cause を持つ設計欠陥を起票したことが 9.6節と食い違うのではないかという申告が生じた。**9.6節の目的(小さな docs 改善ごとに PR を乱立させない / governance 変更を週単位でまとめる)は維持したまま**、`DEDICATED_ISSUE_ALLOWED != STANDALONE_PR_ALLOWED` として、**【Issue】独立した root cause がある / 専用の Acceptance Criteria が必要 / 独自の lifecycle を持つ / 別 Issue へ入れると責任範囲が曖昧になる のいずれかに当たるなら専用 Issue を作ってよい(duplicate check は必須)**、**【PR】P1 例外等を除き main 反映は従来どおり週次 batch へまとめる**、と定めた。上記に当たらない小さな改善は従来どおり #213 / #220 へ集約する。**「governance 改善は何でも個別 Issue を作ってよい」とは変更していない。**9.5節の Issue 起点の原則は不変であり(専用 Issue を作る場合もその Issue が起点である)、`GOVERNANCE_CHANGE_BATCHING = WEEKLY`・対象文書の一覧・P1 を即時とする扱い・「なぜまとめるか」の理由・緊急性を Priority で判定することはいずれも変更していない。見出しを変えていないため `policy_registry.yaml` は更新していない(本節を指す entry は実測で 0 件である)。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-13 | 9.7節を **発効済みの役割分離へ整合させ**、必須 field の **名前の無い 1 行へ `VERIFICATION_REQUIREMENTS` という名前を与えた**(Issue #195。独立レビューの指摘 = #195 issuecomment-5653375042 の条件 C1 / C2)。9.7節の設計は **2026-09-06** に承認されたものであり、`MANAGER` と `REVIEWER` の役割分離(Issue #353)が発効した **2026-09-12** より前である。そのため状態遷移の owner に `REVIEWER` が 1 度も現れず、**ChangeSet の審査が `MANAGER` で完結する**と読めた。user_manager_collaboration_protocol.md は 1節で `MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` と**自分が管理した review target の最終 reviewer 兼務の禁止**を、3節で `FINAL_REVIEW_VERDICT_OWNER = REVIEWER` を定めており、**このまま main へ入ると発効済みの規則と食い違う lifecycle が正本に載る**ため整合させた。状態遷移の `調査・設計中` を `REVIEW_KIND = MANAGEMENT_REVIEW`、`開発中` の ChangeSet 審査を **`REVIEWER` による `INDEPENDENT_REVIEW`**、`本番検証済` の集約を **完了状況の management review(final review verdict ではない)** と明示し、審査主体の正本が同文書であることと 3.5節の主対象に当たることを 1 ブロックで示した(**審査主体を本書で新たに定めておらず、役割分離の定義も再定義していない**)。必須 field は `SOURCE_PRODUCTION_SHA` の説明が 2 行あるようにも読める状態であり、operations_manual.md 23.4節が「対象 Issue ごとの verification 要件」を**名前で参照しようとしていたが参照先に名前が無かった**ため、`VERIFICATION_REQUIREMENTS` を与えて23.4節の参照と exact に一致させた(自然検証 / 手動実行の別を含むことと 23.4節へのpointer を説明へ添えている)。**`RELEASE_REVIEW_UNIT` / `PRODUCTION_SHA_SSOT` / `UNDEPLOYED_SET` / FREEZE の定義 / `INVENTORY` の CACHE_ONLY / `TARGET_MAIN_SHA` を候補とする扱い / 既存 8 つの必須 field の名前と説明 / Human Gate の種別はいずれも変更していない。**policy_registry.yaml は本改訂の対象外である(独立レビューの参考指摘 F3。別途判断)。docs のみの変更であり、コード・Production 挙動の変更なし |

@@ -2631,6 +2631,7 @@ artificial production execution(禁止)
 ### 23.4 release runbook との接続
 
 Release Issue([development_workflow.md](development_workflow.md) 9.7)の
-「対象 Issue ごとの verification 要件」に手動実行が含まれる場合、
+必須 field `VERIFICATION_REQUIREMENTS`(対象 Issue ごとの verification 要件)に
+手動実行が含まれる場合、
 本節の 5 項目を Release Issue へ記載する。
 自然実行で足りる場合は手動実行を計画しない。
