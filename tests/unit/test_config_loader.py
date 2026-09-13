@@ -182,6 +182,51 @@ def test_watchlist_screening_rejects_unknown_screening_policy() -> None:
         )
 
 
+# --- universe_failure_notification_enabled の既定値(Issue #234) ---------------
+#
+# この既定値は実装の都合ではなく、**USER 判断「取得失敗日のみ送る」をそのまま
+# 表した値**である。したがって既定値そのものを固定する。
+#
+# 固定しないと何が起きるか: この項目を持たない config(既定値に頼る経路)で、
+# 既定値が False へ変わる・既定値が消えるといずれも**黙って通知が止まる**。
+# それは本 Issue が防ごうとしている形(知らせたい日ほど届かない)そのものである。
+#
+# 下の 2 本は**どちらも単独で**その 2 通りを落とす。yaml に key があるかどうかに
+# 依存させない(key を明示的に外してから組み立てる)ため、「既定値を外す」と
+# 「yaml の key を消す」の 2 つが重なって初めて落ちる形にはしていない。
+
+
+def test_universe_failure_notification_defaults_to_sending_when_the_key_is_absent() -> None:
+    """この項目を持たない config でも、既定で「送る」になる。
+
+    既定値が False になれば値で落ち、既定値が無くなれば必須項目となって
+    ValidationError で落ちる。
+    """
+    from jstock_advisor.config.models import WatchlistScreeningRulesConfig
+
+    base = load_config().watchlist_screening.model_dump()
+    payload = {k: v for k, v in base.items() if k != "universe_failure_notification_enabled"}
+    assert "universe_failure_notification_enabled" not in payload
+
+    built = WatchlistScreeningRulesConfig(**payload)
+
+    assert built.universe_failure_notification_enabled is True
+
+
+def test_universe_failure_notification_default_is_pinned_to_true_in_the_schema() -> None:
+    """既定値が「存在すること」と「True であること」を、schema 上で固定する。
+
+    上のテストと役割が違う: あちらは組み立てた結果を見る。こちらは
+    **既定値が宣言されていること自体**を見る(必須項目へ変えられたら落ちる)。
+    """
+    from jstock_advisor.config.models import WatchlistScreeningRulesConfig
+
+    field = WatchlistScreeningRulesConfig.model_fields["universe_failure_notification_enabled"]
+
+    assert field.is_required() is False  # 既定値が存在する
+    assert field.default is True  # その既定値は「送る」
+
+
 # --- StockDisplayNameConfig(LINE通知品質改善: negative cache TTL) --------------
 
 
