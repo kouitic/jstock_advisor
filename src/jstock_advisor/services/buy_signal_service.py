@@ -59,6 +59,10 @@ from jstock_advisor.domain.financial_freshness import (
 from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.scoring.score import compute_score
+from jstock_advisor.domain.scoring.style_attractiveness import (
+    StyleAttractivenessInputs,
+    score_style_attractiveness,
+)
 from jstock_advisor.domain.scoring.undervaluation_categories import (
     UndervaluationCategoryDetail,
     build_undervaluation_category_details,
@@ -1028,6 +1032,31 @@ class BuySignalService:
         common_quality_industry = classify_industry(
             snapshot.financial.sector, snapshot.financial.industry
         )
+        # --- Issue #22 Phase B4(2026-09-13): Style Attractivenessのshadow算出 ---
+        # 分類threshold からの距離だけを使う(設計のH-1)。valuation anchor /
+        # fair value / entry price は使わない(同PROHIBITED)。分類ロジック本体は
+        # 呼ばず、既に確定しているmatched stylesと、config上の閾値だけを読む。
+        # SHADOW_ONLY / NON_BLOCKING であり、BUY判定へは接続しない。
+        style_dividend_growth_pct: float | None = None
+        forecast_dps = snapshot.dividend.forecast_annual_dividend_per_share
+        previous_dps = snapshot.dividend.previous_fiscal_year_dividend_per_share
+        if forecast_dps is not None and previous_dps is not None and previous_dps > 0:
+            style_dividend_growth_pct = float((forecast_dps - previous_dps) / previous_dps * 100)
+        style_attractiveness_shadow = score_style_attractiveness(
+            StyleAttractivenessInputs(
+                matched_styles=tuple(snapshot.stock_type_classification.types),
+                dividend_yield_pct=snapshot.dividend_yield_pct,
+                consecutive_dividend_increase_years=(
+                    snapshot.dividend.consecutive_dividend_increase_years
+                ),
+                dividend_growth_pct=style_dividend_growth_pct,
+                quarterly_operating_incomes=snapshot.quarterly_operating_incomes,
+                current_per=current_per,
+                current_pbr=current_pbr,
+            ),
+            stock_classification_rules,
+        )
+
         common_quality_shadow = score_company_quality(
             CompanyQualityInputs(
                 financial=snapshot.financial,
@@ -1264,6 +1293,34 @@ class BuySignalService:
                         "reason": item.reason,
                     }
                     for item in common_quality_shadow.items
+                ],
+            },
+            # --- Issue #22 Phase B4(2026-09-13): Style Attractivenessのshadow ---
+            # matched styleごとに独立して保持する。primary_typeは作らず、
+            # 最大値も代表値として持たない(要件7)。qualified stylesは
+            # 決めない(qualification thresholdはshadow calibrationで決める)。
+            "style_attractiveness_shadow": {
+                "style_layer_state": style_attractiveness_shadow.style_layer_state,
+                "qualification_state": (style_attractiveness_shadow.qualification_state),
+                "matched_styles": [s.value for s in snapshot.stock_type_classification.types],
+                "styles": [
+                    {
+                        "style": d.style,
+                        "state": d.state,
+                        "degree": d.degree,
+                        "reason": d.reason,
+                        "features": [
+                            {
+                                "feature": f.feature,
+                                "value": f.value,
+                                "threshold": f.threshold,
+                                "direction": f.direction,
+                                "degree": f.degree,
+                            }
+                            for f in d.features
+                        ],
+                    }
+                    for d in style_attractiveness_shadow.details
                 ],
             },
             "stock_classification_thresholds": {
