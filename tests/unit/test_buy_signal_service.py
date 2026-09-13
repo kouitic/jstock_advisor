@@ -1555,9 +1555,14 @@ def test_observation_key_is_additive_and_keeps_other_keys_unchanged(
     という名前だったが、B2でversionが"v2"へ上がった際にassertだけを
     書き換えたため、名前(引き上げない)と中身(引き上がっている)が逆の
     意味になっていた。名前を実体へ合わせる。名前が固定していた命題
-    (観測キーの追加それ自体はversionの引き上げを必要としない)は、
-    下の test_facts_schema_version_is_not_derived_from_the_observation_key_set
-    で別に固定する。
+    (観測キーの追加それ自体はversionの引き上げを必要としない)は、下の
+    test_facts_schema_version_is_read_from_the_constant_not_derived_from_facts
+    と test_facts_schema_version_constant_is_pinned_to_an_explicit_value
+    で固定する。
+
+    C1'(2026-09-14): 最初に書いた復元テストは恒真だった(同じfactsを絞って
+    作った2つのviewを比べており、本番コードへ与え直していなかった)。
+    独立レビューの反証で落ちないことが実測され、上記2件へ置き換えた。
     """
     outcome = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
     rec = outcome.recommendation
@@ -1572,52 +1577,65 @@ def test_observation_key_is_additive_and_keeps_other_keys_unchanged(
     assert legacy_view["buy_score_input_facts_schema_version"] == "v2"
 
 
-def test_facts_schema_version_is_not_derived_from_the_observation_key_set(
+def test_facts_schema_version_is_read_from_the_constant_not_derived_from_facts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """観測キーを1つ増やしたこと自体は、schema versionの引き上げを要求しない。
+    """観測キーを増やしたこと自体はschema versionを動かさない(Issue #22 C1')。
 
-    Issue #22 C1(2026-09-14)で復元した命題である。B2でassertを
-    "v1" -> "v2" へ書き換えた際に、この命題を固定するテストが
-    どこにも残らなくなっていた。
+    固定したい命題は「versionはfactsの中身(とくに観測キーの集合)から
+    導出されない」ことである。導出されないなら、観測キーを足しただけで
+    versionは動かず、動かすには定数を書き換える判断が要る。
 
-    versionを上げること自体は妥当である(B2はforward replayの識別のために
-    引き上げを要求した)。ここで固定するのは「キー集合が変わったから
-    上げる」ではない、という方針の側である。
+    ★ 恒真にしないための形
+      本番コードが返す値と、**本番コードの外から注入した値**を比べる。
+      同じfactsを絞って作ったviewどうしを比べない(それは同一物の比較で
+      あり、どんな実装でも通る)。
 
-    観測できる形にすると次になる。同じ判定から作ったfactsについて、
-    観測キーを含むviewと含まないviewでキー集合は異なるが、
-    `buy_score_input_facts_schema_version` の値は同一である。
-    すなわちversionはキー集合から導出されていない。
+    ★ 反証
+      version をキー集合から導出する実装
+      (例: f"v{len(buy_score_input_facts)}")へ差し替えると、注入した定数は
+      無視されるため本テストはFAILする。C1'(2026-09-14)で実際に
+      差し替えて落ちることを確認した。
+
+    最初に書いた復元テストはこの反証で落ちなかった(恒真だった)。
     """
+    # factsに現れうるどのキー名・キー数からも導出できない値を注入する。
+    sentinel = "v-sentinel-not-derivable-from-any-key-set"
+    monkeypatch.setattr(service_module, "FACTS_SCHEMA_VERSION", sentinel)
+
     outcome = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
     rec = outcome.recommendation
     assert rec is not None
     facts = rec.buy_score_input_facts
     assert facts is not None
 
-    # B2 / B3 / B4 で追加した観測専用キー。いずれもv1の判定へ接続しない。
+    # 観測キーが実際に入っていること(前提が崩れたらテストの意味が無くなる)。
     observation_only_keys = [
         "canonical_industry_observation",
         "common_quality_shadow",
         "style_attractiveness_shadow",
         "stock_classification_thresholds",
     ]
-    present = [k for k in observation_only_keys if k in facts]
-    # 前提が崩れたら(観測キーが1つも無い)テストの意味が無くなるため明示する。
-    assert present, observation_only_keys
+    assert [k for k in observation_only_keys if k in facts] == observation_only_keys
 
-    without_observation_keys = {k: v for k, v in facts.items() if k not in present}
-    # キー集合は実際に変わっている。
-    assert set(without_observation_keys) != set(facts)
-    # それでもversionの値は変わらない = versionはキー集合の関数ではない。
-    assert (
-        without_observation_keys["buy_score_input_facts_schema_version"]
-        == facts["buy_score_input_facts_schema_version"]
-    )
-    # 観測キー以外のキーは1つも値が変わらない(純粋な追加である)。
-    for key, value in without_observation_keys.items():
-        assert facts[key] == value
+    # 本番コードは定数をそのまま書いている = factsの中身から導出していない。
+    assert facts["buy_score_input_facts_schema_version"] == sentinel
+
+
+def test_facts_schema_version_constant_is_pinned_to_an_explicit_value() -> None:
+    """versionの値そのものを固定し、変更に必ず判断を挟ませる(Issue #22 C1')。
+
+    上のテストは「定数から読んでいる」ことを固定するが、定数の値が
+    いくつであるべきかは固定しない。観測キーを足したついでに値を動かす
+    変更は、ここで必ず落ちる。落ちたときは「今回の変更はforward replayの
+    識別のためにversionを動かす必要があるのか」を判断してから直す
+    (B2ではその判断の結果として v1 -> v2 へ上げた)。
+
+    ★ 反証
+      定数を消してキー集合から導出する実装にすると、参照そのものが
+      失敗して本テストもFAILする。
+    """
+    assert service_module.FACTS_SCHEMA_VERSION == "v2"
 
 
 def test_shadow_failure_is_isolated_from_the_v1_decision(
