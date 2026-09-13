@@ -167,6 +167,14 @@ policies:
     human_gate_required: true
     machine_enforceable: false
 
+  - policy_id: PROTOCOL.USER_EXPLANATION_LEVEL
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 1.6 ユーザーへの説明の水準"
+    applicable_operations:
+      [MERGE, PRODUCTION_MANUAL_INVOKE, CHANGESET_CREATE, CHANGESET_EXECUTE]
+    human_gate_required: true
+    machine_enforceable: false
+
   # --- 全 operation に共通する記録 ----------------------------------------
   - policy_id: DEVELOPMENT_WORKFLOW.ISSUE_STATE_SNAPSHOT
     ssot_file: docs/development_workflow.md

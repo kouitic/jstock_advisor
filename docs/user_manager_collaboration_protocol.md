@@ -393,6 +393,7 @@ USER_CAN_MAKE_AN_INFORMED_DECISION = REQUIRED
 ```
 Lambda / DynamoDB / CloudFormation / S3 / Secrets Manager / EventBridge / IAM
 CI / PR / merge / main / Production / PITR / RPO / RTO
+Issue / deploy / rollback / branch / commit / review / bug / ChangeSet / API / log / hash
 ```
 
 ```
@@ -416,6 +417,8 @@ B  AWS でも挙動を取り違えやすい概念
    Deletion Protection / DeletionPolicy / UpdateReplacePolicy の違い
    PITR の restore が新しいテーブルとして作られること
    merge 済みだが Production 未反映という状態
+   Lambda の Layer(版が上がっても中身が同じ場合がある)
+   Replacement(既存 resource を削除して作り直すこと)
 
 C  Human Gate の範囲
    今回何を承認するのか / 承認すると何が起きるか /
@@ -443,6 +446,9 @@ INTERNAL_STATUS_ONLY_RESPONSE = FORBIDDEN
 4  次に何をするのか
 5  今ユーザーがすることは何か
 6  次にユーザーの判断が必要になるのはいつか
+7  今それを止める必要があるか
+8  取り返しがつくか(元へ戻せるか)
+9  選択肢がある場合は、その一覧と管理者の推奨
 ```
 
 ユーザーの操作・判断が不要なときは、
@@ -466,18 +472,117 @@ C を落とすと、ユーザーは「承認＝本番反映」と受け取る。
 2.5節の `PROPOSED / APPROVED / EXECUTED / VERIFIED` の区別が
 説明の側で崩れないようにするための必須項目である。
 
-### 回答の順序
+### 回答の構成
 
 ```
-1  結論
-2  今どうなっているか
-3  理由・影響
-4  これからの順番
-5  今ユーザーがすること
-6  必要なら技術的な証拠
+【結論】
+【状況】
+【影響】
+【これからの進め方】
+【USER に判断してほしいこと】
+【技術詳細・監査情報】(必要な場合のみ)
 ```
+
+**「安全面」を独立した見出しにしない。**【影響】の中で次を書く。
+
+```
+何が危険か / 今進めてよいか / 失敗したときに元へ戻せるか
+```
+
+**毎回 6 つすべてを機械的に出さない。**
+判断してほしいことが無ければ、【USER に判断してほしいこと】へ
+「今 USER がすることはありません」と 1 行だけ書く。
+短い報告を、見出しを埋めるために冗長にしない。
 
 機械可読の状態値や SHA を回答の冒頭へ大量に並べることを標準としない。
+AI どうしの handoff / durable record / 監査では構造化した key = value を
+引き続き使ってよい(本節の対象は管理者から利用者への回答である)。
+
+### 内部の英語表記は日本語で示す
+
+system 固有の識別子・内部の状態値・英語の判定語は、**日本語の意味を主として示す**。
+内部表記は併記にとどめる。一般的な開発用語(上記「そのまま使ってよいもの」)は
+言い換えない。
+
+```
+例(意味のほうを主に書く)
+  作成は正常に完了した(内部表記 = CREATE_COMPLETE)
+  未反映のまま実行できる待機状態である(AVAILABLE)
+  現時点で本番へ反映してはいけない(EXECUTE_READY = NO)
+  技術的な完了条件は満たしており閉じてよい(CLOSE_READY = YES)
+  必要な確認が足りていない(INCOMPLETE)
+  条件つきで問題なし(PASS_WITH_CONDITIONS)
+```
+
+内部の ID(state の識別子 / instruction 番号 / run id / comment id /
+review の識別子 / 長い SHA)を本文の主役にしない。必要なものは
+【技術詳細・監査情報】へ置く。**記録をやめるという意味ではない。**
+
+### 承認をお願いするときの識別情報は短縮しない
+
+**分かりやすさのために承認の対象を曖昧にしてはならない。**
+
+```
+普段の本文            読みやすさを優先してよい(例「PR #○○ の変更」)
+承認をお願いする場面  「今回承認する対象」として exact な識別情報を明示する
+                      (PR 番号と head の完全な SHA / ChangeSet の完全な ARN 等)
+```
+
+省略・短縮しない。監査情報へ追いやらない。
+提示のしかたの正本は ai_operation_message_contract.md 8節である。
+ただし**「8節に従う」とだけ書いて済ませない。**
+その識別情報が何を特定するものかを日本語でも 1 行で説明する
+(例「この SHA の内容を main へ取り込む、という承認です」)。
+
+### 選択肢を示すときに書くこと
+
+選択肢を A / B / C と並べるだけで終わらせない。各案について次を書く。
+
+```
+何をする案か
+メリット
+デメリット・リスク
+管理者の推奨(どれを推すか。推さない場合はその理由)
+```
+
+**推奨を書かないまま「どれにしますか」と尋ねない。**
+推奨は承認ではない(2.5節)。
+
+### 大きな変更の一覧は意味へ翻訳してから示す
+
+変更の一覧が大きい場合、生の一覧を先に出さない。次の 4 つへ分類して示す。
+
+```
+予定どおりのもの
+予定外だが、確認して問題ないと判断したもの
+原因を調査中のもの
+本番反映を止めるべきもの
+```
+
+件数・追加 / 更新 / 削除の内訳・技術的な識別子は【技術詳細・監査情報】へ置く。
+
+```
+悪い例  「変更 44 件、追加 5 件、更新 28 件、削除 0 件です。確認してください」
+良い例  「予定していた変更に加えて想定外の変更が含まれています。
+         本番へ反映する前に、実際のプログラム内容が変わっていないかを確認します」
+```
+
+例には特定の Issue 番号・release 番号・実測件数を書かない
+(恒久文書であるため。個別の事例は Issue 側の記録に残す)。
+
+### 測っていない値を実測値として示さない
+
+**時刻・件数・所要時間を、測っていないのに実測値として書かない。**
+確認していない場合は「未計測」または「概算」と明示する。
+利用者は書かれた値を実際の記録として読むため、
+見込みの値をそのまま書くと、後から記録と食い違う。
+
+```
+悪い例  「17:48 頃に投稿しました」(実際には測っていない)
+良い例  「投稿時刻は未計測です」/「所要はおよそ 10 分です(概算)」
+```
+
+**監査証跡へ残す値は、記録する直前に実測する。**
 
 ### 技術的な正確さを落とさない
 
@@ -515,6 +620,27 @@ IT_FOUNDATION_AWS_LITERATE != TECHNICAL_DETAIL_FORBIDDEN
 
 Issue 番号 / PR 番号 / SHA / CI run / ChangeSet の識別子 / 内部状態値は、
 **監査証跡として残してよい**。ユーザー向けの説明と、監査用の情報を分けて示す。
+分ける場所は【技術詳細・監査情報】である(上記「回答の構成」)。
+
+### 送信前の確認
+
+利用者へ送る前に、次を自分で確かめる。
+
+```
+1  結論が最初に書かれているか
+2  内部の変数名を使わずに意味が通るか
+3  ID や SHA を読まなくても判断できるか
+   (承認をお願いする場面の exact な識別情報は別である。上記)
+4  英語の状態値に日本語の説明が添えてあるか
+5  判断してほしいことが明確か(無いなら「ありません」と書いてあるか)
+6  推奨に理由が添えてあるか
+7  選択肢にメリットとデメリットが書いてあるか
+8  【技術詳細・監査情報】を読まなくても判断できるか
+9  時刻・件数に、測っていない値が実測値として混じっていないか
+```
+
+1 つでも満たしていなければ直してから送る。
+これは**送信者自身の確認**である。満たしたことを相手が検査する手段は無い。
 
 ### 適用範囲
 
@@ -3075,3 +3201,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-13 | 1節 / 3.9節 / 3.14節の **review session に関する要件を「session の新規作成」から「レビュー対象ごとの入力境界」へ改めた**(Issue #355。#353 で入れた `REVIEW_SESSION_REUSE_POLICY` の設計欠陥)。**利用者の要件は「レビュー対象ごとに新しい session を作ること」ではなく、「REVIEWER の session を Issue をまたいで継続し、対象ごとに blind-first を立て直すこと」であった**。旧規定は `SESSION_REUSE_FORBIDDEN_FOR = DIFFERENT_ISSUE / DIFFERENT_INDEPENDENT_REVIEW_TARGET / UNRELATED_PR / NEW_REVIEW_LIFECYCLE` と定めており、**発効直後に実際に独立レビューが開始できなくなった**(REVIEWER は現行規則を正しく適用して停止した。停止の判断は正しく、規則の側が誤っていた)。1節は `FRESH_REVIEW_SESSION = REQUIRED` を **`TARGET_REVIEW_FRESHNESS = REQUIRED`(レビュー対象ごと)と `SESSION_CREATION_FRESHNESS = NOT_REQUIRED`(原則)へ置き換え**、`REVIEWER_ACTOR` と `REVIEWER_SESSION`(原則 persistent)を分けて、**対象の分離は session を分けることではなく `REVIEW_ID` / `PHASE_1_INPUT_MANIFEST` / `TARGET_FRESHNESS_CHECK` / `INDEPENDENT_REVIEW_SNAPSHOT` で作る**ことを明記した。3.9節へ `TARGET_REVIEW_FRESHNESS` / `SESSION_CREATION_FRESHNESS` の定義を置いた(**新しい session でもその対象の開発者報告を先に読んでいれば成立せず、続いている session でもその対象について読んでいなければ成立する**)。3.14節は `PERSISTENT_REVIEWER_SESSION = YES` とし、`SESSION_REUSE_ALLOWED_FOR` へ **`DIFFERENT_ISSUE` / `DIFFERENT_INDEPENDENT_REVIEW_TARGET` / `UNRELATED_PR` / `NEW_REVIEW_LIFECYCLE` を含め**、**`SESSION_REUSE_FORBIDDEN_FOR` の 4 項目を削除**した。代わりに `TARGET_FRESHNESS_CHECK`(6 step)と `NEW_REVIEW_SESSION_REQUIRED_IF`(A〜E)を識別子つきで置き、**別の Issue / 別の PR / 新しい lifecycle であることだけを理由に新しい session を要求してはならない**と明記した。対象ごとの開始時に `REVIEW_TARGET` / `REVIEW_ID` / `TARGET_FRESHNESS_CHECK` / `PHASE_1_INPUT_MANIFEST` / `CONTAMINATION_CHECK = PASS` を記録する。発効は `PERSISTENT_REVIEWER_SESSION_POLICY_ACTIVE = YES | NO` と `SESSION_POLICY_ACTIVATION_STATE_SSOT = Issue #355 の最新の durable な activation 記録`で表し、**固定値を本書へ埋め込まない**(`ROLE_SEPARATION_ACTIVE` / `CURRENT_WIP_RULE` と同じ方式であり、新しい方式を作っていない)。**blind-first は弱めていない**。Phase 1 は開発者報告の受領前であり、入力は manifest で限定し、disallowed input を読まず、snapshot を先に固定し、Phase 2 で比較し、finding と verdict は REVIEWER が独立して出す。**変えたのは「blind-first の成立に物理的な新規 session 作成が必須」という部分だけである**。`TARGET_FRESHNESS_CHECK` の 4 の範囲は **利用者の判断**により `TARGET_FRESHNESS_SCOPE = BLIND_FIRST_PHASE_1_FORBIDDEN_ONLY` とした(Issue #355 issuecomment-5647258830)。**他の対象を通じて Issue 名や進行状況を偶発的に目にしただけでは contamination として扱わない**(目的は完全な情報遮断ではなく、開発者の自己評価等による anchoring より前に独立した Phase 1 を固定することである。範囲をここまで広げる案は**persistent な session と両立しない**ため採らなかった)。あわせて `PRIOR_EXPOSURE` を **必須**とした(同判断)。**persistent な session では完全な無知状態を前提にしない**ため、Phase 1 の開始時に `NONE` か、`source` / `summary` / `exposure_type` / `BLIND_FIRST_FORBIDDEN_MATCH` / `independence_impact` を記録する。判定の目安(一般 metadata や workflow 情報は原則 freshness を失わない / 開発者の完了報告・自己評価・root-cause 説明・`PASS` 等の結論、およびそれを実質的に転記した管理者の結論は blind-first forbidden の候補)と、**曖昧なら `TARGET_FRESHNESS = UNKNOWN` として管理者へ戻す**ことも本文へ置いた。**role separation・`REVIEW_KIND`・判定語 4 種・レビューの深さ・Phase 1 / Phase 2 の構造・Human Gate・利用者の権限・`MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO`・finding remediation の流れ・Production gate・`ACTIVE_ROLE_MODEL_SSOT` の分岐・12 段階の順序はいずれも変更していない。** `policy_registry.yaml` は見出し(anchor)が変わらないため更新していない。CLAUDE.md も変更していない(入口からの到達は既存の pointer で成立する)。**本改訂は Issue #355 の activation 記録をもって発効する**。独立レビュー(iteration 1)の finding へ対応して次を加えた。3.14節の発効ブロックへ `ACTIVE_SESSION_POLICY_SSOT` と `PRE_ACTIVATION_SESSION_POLICY_SSOT` を置いた(F1 / HIGH)。**本改訂が main へ入ると旧い session 規則の本文は main から消えるが、`PERSISTENT_REVIEWER_SESSION_POLICY_ACTIVE = NO` の間に有効なのは旧いほうである**ため、その期間にどこを読めばよいかが一意に決まらなかった。発効前は Issue #355 の durable な pre-activation 記録が固定した **immutable な base commit の本書 1節 / 3.9節 / 3.14節の session 規則**を読む、という pointer だけを置き、**旧い本文を複製していない**。**base commit の SHA も本書へ書いていない**(変わりうる値は Issue 側の durable record で固定する。`ACTIVE_ROLE_MODEL_SSOT` / `ACTIVATION_STATE_SSOT` / `CURRENT_WIP_RULE` と同じ扱いであり、新しい方式を作っていない)。あわせて 1節の末尾へ**どちらの session 規則が現在有効かは 3.14節の `ACTIVE_SESSION_POLICY_SSOT` による**という pointer を置いた(1節へ直接入った読み手が、発効前であることに気づかないまま新しい session 規則を有効と読む経路が残っていたためである)。新設側の識別子は `ACTIVATION_STATE_SSOT` から **`SESSION_POLICY_ACTIVATION_STATE_SSOT` へ改名**した(F2 / MEDIUM。同一文書内で同じ名前が #353 と #355 の 2 値へ束縛され、限定なしの参照がどちらを指すか一意に読めなかった。**#353 側の `ACTIVATION_STATE_SSOT` は変更していない**)。`TARGET_FRESHNESS_CHECK`(PASS | UNKNOWN)と `CONTAMINATION_CHECK`(PASS | FAIL)を3.14節の **snapshot の必須 field** へ追加し、`PHASE_1_COMPLETE` の条件へ**両者が埋まっていること**を明示した(F3 / MEDIUM。利用者判断は両者を「各 target 開始時に記録」と定めていたが記録先が無く、**未記録のまま Phase 1 完了が成立した**。判定だけを先に置いて根拠を後から作れる状態を防ぐという 3.14節の目的に反する。`PRIOR_EXPOSURE` について適用した是正原則を他の 2 項目へ広げたものである)。対象の一意性は `REVIEW_TARGET_REF`(CODE = Issue 番号 + BASE / HEAD、DESIGN = artifact の URL)として**`REVIEW_TARGET`(種別)と分け**、`TARGET_FRESHNESS_CHECK` の 1 と開始時の記録を同 field へ改めた(F4。**`REVIEW_TARGET` の定義と値域は変更していない**)。無置換で削除されていた `REVIEW_TARGET_LIFECYCLE` は**同一 `REVIEW_ID` の初回 Phase 1 から E TERMINATION までの範囲**として定義を置き直した(**旧規定の session 制限は復活させない**。範囲を指す語だけを戻す)。「この規則が埋めないもの」へ、`TARGET_FRESHNESS_CHECK` / `CONTAMINATION_CHECK` / `PRIOR_EXPOSURE` が**いずれも自己申告であり「読んでいない」ことは検査できない**(物理的な新規 session を要求しないため session 境界による構造的な保証が無い。記録することで事後に検査できる形にするだけである)を追記した(F5)。`TARGET_FRESHNESS = UNKNOWN` を管理者へ戻した後の経路を、(a) `BLIND_FIRST_PHASE_1_FORBIDDEN` に当たる場合は `NEW_REVIEW_SESSION_REQUIRED_IF` の A / (b) 当たらない場合は `PRIOR_EXPOSURE` へ記録して同 session 継続 / (c) 管理者でも一意に判定できない場合は利用者判断(8節 `POLICY_AUTHORITY = HUMAN_ONLY`)として定義した(F6。**新しい判定基準を作らず既存の A〜E と `PRIOR_EXPOSURE` へ接続するだけであり**、管理者が単独で freshness の成立を宣言しないことを明示した)。**いずれも追加であり、role separation・`REVIEW_KIND`・判定語 4 種・12 段階の順序・Human Gate・利用者の権限・`ACTIVE_ROLE_MODEL_SSOT` の分岐・`TARGET_FRESHNESS_SCOPE`・`SESSION_REUSE_ALLOWED_FOR`・`NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E はいずれも変更していない。**さらに `TARGET_FRESHNESS_CHECK` の 4 を **内容基準へ統一**した(利用者の判断。FINDING_ID = TARGET_FRESHNESS_CHECK_SCOPE_MISMATCH)。旧記述は「developer report / developer self-assessment / **MANAGER の review 結論** / その他の disallowed input を取得していないか」であり、**`MANAGER の review 結論` を送信者基準で一律に禁止対象としていた**。これは確定済みの `TARGET_FRESHNESS_SCOPE = BLIND_FIRST_PHASE_1_FORBIDDEN_ONLY`(OPTION_I)と一致しない(MANAGER から来た情報であることだけで freshness を失うなら、persistent な session では実質的に OPTION_II へ戻る)。4 を「**その対象について 3.9節の `BLIND_FIRST_PHASE_1_FORBIDDEN` に分類される情報を Phase 1 の snapshot 固定より前に既に取得していないかを確認する**」へ改め、**判定は「誰から来た情報か」ではなく「その内容が禁止情報か」で行う**ことを明記した。あわせて `TARGET_FRESHNESS_SCOPE` のブロックへ、**MANAGER / USER / 他の対象の記録から得た情報であっても、その内容が developer completion report / self-assessment / root-cause explanation / test interpretation / developer の結論 / implementation summary 等を実質的に転記・要約したものであれば `BLIND_FIRST_PHASE_1_FORBIDDEN` として扱う**(逆に、MANAGER から得た情報であることだけを理由に freshness を失わせない)ことと、判定の例(失わない / 失う候補)を置いた。例には**個別の Issue 番号を書いていない**。これにより 3.9節の `TARGET_REVIEW_FRESHNESS`、3.14節の 4 / `TARGET_FRESHNESS_SCOPE` / `CONTAMINATION_CHECK` / `PRIOR_EXPOSURE` の判定の目安が**同一の条件を指す**。**`PRIOR_EXPOSURE` の仕組み・`CONTAMINATION_CHECK`・`UNKNOWN` の経路・`NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E・persistent 方針・actor と session の分離・`REVIEW_ID`・manifest・Phase 構造・禁止項目そのもの・activation 方式・pre-activation SSoT はいずれも変更していない。OPTION_II は再導入していない。**さらに 1節の「役割を分けることとセッションを分けることは別である」の段落を **内容基準へ統一**した(利用者の review による指摘。MEDIUM)。旧表現は「役割が別でも、**開発者の報告や管理者の結論を先に読んでいれば** blind-first の独立性は成立しない」であり、**送信者(管理者)を条件にしていると読めた**。3.14節の `TARGET_FRESHNESS_SCOPE` と 3.9節の `TARGET_REVIEW_FRESHNESS` は内容基準であるため、**1節だけを読むと freshness の条件が食い違って読める**(1節は入口であり、CLAUDE.md がレビュワーへ 1節を読むよう指示している)。「その対象について 3.9節の `BLIND_FIRST_PHASE_1_FORBIDDEN` に該当する情報を先に取得していれば成立しない」へ改め、**判定は情報の送信者ではなく内容で行う**(管理者・利用者・他対象の記録から得た情報であることだけを理由に失わせない / 内容が開発者の完了報告・自己評価・原因説明・テスト結果の解釈・結論を実質的に転記・要約したものであれば送信者が誰であっても禁止情報として扱う)ことを明記した。あわせて 3.9節の「新しい session でも、その対象の開発者報告を先に読んでいれば成立しない」を **同じ参照(`BLIND_FIRST_PHASE_1_FORBIDDEN` に該当する情報)へ表現を揃えた**(意味は変えていない)。**1節の識別子・責務・禁止、`REVIEWER_ACTOR` / `REVIEWER_SESSION` の分離、`PRIOR_EXPOSURE`、`CONTAMINATION_CHECK`、`UNKNOWN` の経路、`NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E、`TARGET_FRESHNESS_SCOPE` の定義、Phase 構造、禁止項目そのもの、role separation、Human Gate、activation 方式、pre-activation SSoT はいずれも変更していない。OPTION_II は再導入していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 3.9節 / 3.14節へ **Phase 1 の入力 manifest の版を一意に識別する contract を追加**した(Issue #356。#353 で入れた `PHASE_1_INPUT_MANIFEST` の設計欠陥)。旧規定は **manifest を URL の列挙としてのみ定めており、その URL が指す comment の どの版を読んだのかを表す手段が無かった**。GitHub の comment は投稿後に編集できるため、**REVIEWER が読んだ後に MANAGER が manifest を書き換えても記録上は同じ URL のまま**であり、事後に「何を読んで Phase 1 を固定したのか」を検査できなかった(実例 = Issue #353 の manifest が 3 版存在した)。3.9節へ `MANIFEST_VERSION`(対象コメントの URL と id / `MANIFEST_UPDATED_AT` / `MANIFEST_CONTENT_HASH` の 3 つの組)と `MANIFEST_VERSION_PRIMARY_IDENTITY = MANIFEST_CONTENT_HASH` を置き、**本文の hash を最も強い識別情報**とした(`updated_at` は同一秒内の 2 回目の編集を区別できず、手で振る版番号は本文と一致する保証が無い。ただし版番号の併記は禁止しない)。hash の計算は **exact retrieved UTF-8 body を対象とし、`MANIFEST_HASH_NORMALIZATION = NONE`** とした(改行コード・末尾改行・空白も本文の一部として hash に入る。**監査対象を都合よく normalize して差を消さない**)。取得時に **JSON の body の値を UTF-8 bytes にしたものを hash する**ことと、**shell の pipeline へ流すと末尾へ改行が足される実装がある**ため「1 バイトも足さない」手順で計算することを明記した(実測で 1 バイトの差が別の hash になることを確認している)。長さを併記する場合は **bytes** で書く(文字数と混同しない)。3.14節は `MANIFEST_VERSION` を **snapshot の必須 field** へ `PHASE_1_INPUT_MANIFEST` の直後に追加し、`PHASE_1_COMPLETE` の条件へ**読んだ manifest の全件(追補を含む)について埋まっていること**を明示した(判定だけを先に置いて根拠を後から作れる状態にしないという 3.14節の目的に合わせた)。`MANIFEST_VERSION_FIXED_AFTER_FRESHNESS_CHECK` として **`TARGET_FRESHNESS_CHECK`(6 step)を通した後に manifest の版を固定し、その後 Phase 1 を開始する**順序を定めた(**6 step は増やしていない**。Issue #355 が定めるのは「この対象について blind-first が成立するか」、本項が定めるのは「そのとき実際に読んだ版はどれか」であり、別の問いである)。`MANIFEST_IMMUTABILITY_AFTER_PHASE_1_START` として **Phase 1 開始後の当該版の編集を禁止**し、訂正・追加は **新しい comment(追補 / supplement)**で行い、REVIEWER が取り込むか否かを決め **どちらであっても記録する**(`PREFER_APPEND_ONLY = YES`)こととした。**Phase 1 開始前の訂正は禁止していない**(正当な修正を止めない)。`MANIFEST_EDIT_DETECTION` として (a) `updated_at != created_at` / (b) 現在の本文の hash が snapshot の値と違う / (c) 過去の版の一覧と hash の照合 を置き、(b) が成立しても **自動で無効にせず**、まず原因と編集履歴を確認したうえで **A 読んだ版を一意に特定できるなら当該 Phase 1 を継続してよい / B 特定できないならやり直す**と定めた(**無条件の FAIL にも理由の分からない PASS にも倒さない**。利用者判断)。「この規則が埋めないもの」へ **hash も REVIEWER の自己申告であり「実際に読んだか」は検査できない**(検査できるのは申告された版が実在するか・現在の版と同じかである) / **過去の版の本文は API から取得でき同じ規則で hash すると突き合わせられる**(2026-09-13 に実測) / **削除された版・private repository での挙動は未確認** / **hash の不一致はそれだけでは不正を意味しない**(正当な追補の後に記録を足していない場合も同じ見え方になる) を追記した。発効は `MANIFEST_VERSION_CONTRACT_ACTIVE = YES | NO` と `MANIFEST_CONTRACT_ACTIVATION_STATE_SSOT = Issue #356 の最新の durable な activation 記録`で表し、**固定値を本書へ埋め込まない**(`SESSION_POLICY_ACTIVATION_STATE_SSOT` / `ROLE_SEPARATION_ACTIVE` / `CURRENT_WIP_RULE` と同じ方式であり、新しい方式を作っていない。**限定なしの `ACTIVATION_STATE_SSOT` は使わない**)。適用は `MANIFEST_VERSION_CONTRACT_APPLIES_FROM` のとおり **発効後に開始する新しい review lifecycle から**であり、**進行中の review へ遡及せず、既に投稿済みの manifest へ hash を付け直さない**。**本改訂は追記のみであり既存の manifest 規定を削除しないため、発効前の読み先を別に固定する pointer は置いていない**(発効前は `MANIFEST_VERSION` の記録を必須としないだけである)。**Issue #355 の規定(`TARGET_FRESHNESS_CHECK` の 6 step と step 4 の内容基準 / `TARGET_FRESHNESS_SCOPE` / `PRIOR_EXPOSURE` / `CONTAMINATION_CHECK` / `REVIEW_TARGET_REF` / `SESSION_REUSE_ALLOWED_FOR` / `NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E / `PERSISTENT_REVIEWER_SESSION_POLICY_ACTIVE` と pre-activation の pointer)は 1 つも変更していない。** role separation・`REVIEW_KIND`・判定語 4 種・12 段階の順序・Phase 1 / Phase 2 の構造・Human Gate・利用者の権限・レビューの深さ・`MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` も変更していない。`policy_registry.yaml` は見出し(anchor)が 1 つも変わらないため更新しておらず、CLAUDE.md も変更していない(入口からの到達は既存の pointer で成立する)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 3.7節を **merge 可否の判断だけを定める節へ改め、提示項目を ai_operation_message_contract.md 8節へ実体として移した**(Issue #345)。旧 3.7節は「発効後は提示形式の正本を contract 8節とし、本節の提示項目はそこへ吸収される」と**宣言していたが、吸収先に提示項目が存在せず**、実体としては 3.7節が唯一の提示項目の定義であり続けていた(#353 の review finding F9 が同じ食い違いを指摘している)。見出しを `## 3.7 merge 判断を支援する提示形式` から **`## 3.7 merge 可否の判断(MERGE_DECISION_RULES)`** へ改称し(旧題を文字列参照している箇所は本節以外に 0 件、節番号「3.7節」での参照 5 件は番号参照のため影響しないことを実測済み)、11 項目の提示 field を定義する fence を削除して、**`MERGE_DECISION_RULES` の 6 点**(1 対象を一意に特定できる形で提示する / 2 可否は `MERGE_READY` で表し YES は承認でも実行でもない / 3 本番影響と他 Issue 影響を必ず評価する / 4 残課題があることとそれが merge を止めるべきかは別 / 5 「技術的に merge 可能」と「利用者が承認した」は別 / 6 判定が何を読んで出されたかを提示に残し `REVIEW_VERDICT` には `REVIEW_KIND` を併記する)へ置き換えた。**`RECOMMENDED_ACTION` は廃止**した(唯一廃止した語である。判断の意味は 2 と 6 が持ち、利用者への見せ方は 8節が持つ)。`PR_NUMBER` / `PRODUCTION_IMPACT` / `OTHER_ISSUE_IMPACT` / `REMAINING_ISSUES_OR_CONCERNS` の**項目名**は本節から外し、意味は 1 / 3 / 4 の日本語の規範として残した。`MERGE_READY` / `REVIEW_VERDICT` / `REVIEW_KIND` / `MERGE_BLOCKING_CONCERN` / `INDEPENDENT_REVIEW_SNAPSHOT` / `REVIEW_INPUT_EVIDENCE` は**両文書に残るが役割が異なる**(本節 = 判断の意味 / 8節 = 提示の項目)。同じ識別子が両方にあること自体は重複ではなく、**同義の段落が両方にあること**が重複であるため、移動した 2 ブロック(11 項目を並べた例 / 「表へ固定しない」の注記)は移動元から削除した。例は**判断の例**(残課題ありで `MERGE_BLOCKING_CONCERN = NO`)だけを残し、提示のレイアウトは 8節の `MERGE_GATE` の例を正本とした。「発効後の正本」ブロックは BEFORE / AFTER の 2 行を歴史的記述として残したうえで、**この吸収が Issue #345 で実体化したこと**と**本節は判断の中身の正本であって提示項目の正本ではない**ことを追記した。`MERGE_APPROVAL_IS_BOUND_TO_EXACT_REVIEWED_HEAD = YES` は承認の境界であるため本節に残している。**判定語 4 種・Human Gate・承認単位・`MERGE_EXECUTOR`・2.6節の G2・3.9〜3.14節の独立レビューはいずれも変更していない。**`policy_registry.yaml` へ `PROTOCOL.MERGE_DECISION_RULES`(operation = MERGE)を 1 件追加した(改称後の見出しを anchor とする。operation MERGE から本節を引けない状態の解消であり、既存 entry は変更していない)。CLAUDE.md は変更していない(参照は節番号であり改称の影響を受けない)。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-13 | 1.6節へ **利用者向けの回答の構成と、内部表記を日本語の意味へ翻訳する規則を追加**した(Issue #357)。旧 1.6節は語彙(そのまま使ってよい用語 / 説明が必要な概念)と最低限の説明内容を定めていたが、**回答をどう組み立てるか・内部の状態値や識別子をどう扱うか・選択肢や大きな変更一覧をどう示すか・送る前に何を確かめるかが正本に無く**、内部識別子を並べた回答が Human Gate の判断材料にならない状態が実際に生じた。「回答の順序」の 6 段を**【結論】【状況】【影響】【これからの進め方】【USER に判断してほしいこと】【技術詳細・監査情報】の 6 見出しへ置き換え**(並存させない)、**「安全面」は独立見出しにせず【影響】の中で「何が危険か / 今進めてよいか / 失敗したときに戻せるか」として書く**こと、**毎回 6 つを機械的に出さない**(判断が不要なら「今 USER がすることはありません」と1 行で書き、短い報告を冗長にしない)ことを定めた。**AI どうしの handoff / durable record / 監査で構造化した key = value を使うことは変えていない**(本節の対象は管理者から利用者への回答である)。新しい小節として「内部の英語表記は日本語で示す」(意味を主・内部表記は併記。内部 ID を本文の主役にしない。**記録をやめるという意味ではない**)、「承認をお願いするときの識別情報は短縮しない」(**分かりやすさのために承認対象を曖昧にしない**。普段の本文は読みやすさ優先でよいが、承認の場面では exact な識別情報を明示し、**それが何を特定するものかを日本語でも 1 行説明する**。提示のしかたの正本は ai_operation_message_contract.md 8節であるが「8節に従う」とだけ書いて済ませない)、「選択肢を示すときに書くこと」(各案の内容・メリット・デメリット・管理者の推奨。**推奨を書かないまま「どれにしますか」と尋ねない**。推奨は承認ではない)、「大きな変更の一覧は意味へ翻訳してから示す」(予定どおり / 予定外だが確認済み / 調査中 / 本番反映を止めるべき の 4 分類。件数や内訳は【技術詳細・監査情報】へ)、「**測っていない値を実測値として示さない**」(未計測 / 概算と明示する。監査証跡へ残す値は記録する直前に実測する。利用者判断)、「送信前の確認」(9 項目の自己確認。**満たしたことを相手が検査する手段は無い**)を置いた。あわせて「そのまま使ってよいもの」へ一般的な開発用語を 1 行、「説明が必要なもの」の B へ Lambda の Layer と Replacement を、「最低限説明する内容」へ 3 項目(止める必要があるか / 取り返しがつくか / 選択肢と推奨)を追加し、「技術的な情報は残す」へ分ける場所が【技術詳細・監査情報】であることを 1 文足した。**新しい内部用語(識別子)を 1 つも増やしていない**(利用者判断。既存の `USER_EXPLANATION_LEVEL` / `USER_CAN_MAKE_AN_INFORMED_DECISION` / `INTERNAL_STATUS_ONLY_RESPONSE` をそのまま使う)。**適用範囲(管理者 -> 利用者)・例外・目的・前提とする知識水準・「内部コードだけで回答しない」・Human Gate の依頼の 6 項目・技術的な正確さを落とさないの各ブロックは変更していない。開発者 -> 管理者の機械可読形式も不変である。** ai_operation_message_contract.md 8.1節へ**本節を指す参照 1 行**を置き、`policy_registry.yaml` へ `PROTOCOL.USER_EXPLANATION_LEVEL` を 1 件追加した(索引に限定し本文は書かない。見出しを変えていないため既存 anchor は有効なままである)。docs のみの変更であり、コード・Production 挙動の変更なし |
