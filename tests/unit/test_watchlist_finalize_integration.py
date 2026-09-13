@@ -29,6 +29,8 @@ from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.domain.signals.watchlist_screening import RankingEntry
 from jstock_advisor.infrastructure.aws import batch_tracker
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    UNIVERSE_SOURCE_CACHE,
+    UNIVERSE_SOURCE_DOWNLOADED,
     WatchlistBatchStatus,
     WatchlistProgressStatus,
 )
@@ -38,6 +40,9 @@ from jstock_advisor.infrastructure.local_repository.audit_log_repository import 
 from jstock_advisor.services import audit_service as audit_service_module
 from jstock_advisor.services import watchlist_batch_finalizer as finalizer_module
 from jstock_advisor.services.audit_service import AuditService
+from jstock_advisor.services.line_notification_service import (
+    render_watchlist_addition_message,
+)
 from jstock_advisor.services.watchlist_batch_finalizer import (
     maybe_finalize,
     retry_finalize,
@@ -1111,3 +1116,198 @@ def test_crash_after_audit_recorded_before_completed_does_not_rerecord_audit(
     batch_after = batch_tracker.get_watchlist_batch("batch-1")
     assert batch_after is not None
     assert batch_after["status"] == WatchlistBatchStatus.COMPLETED.value
+
+
+# ---------------------------------------------------------------------------
+# Issue #234(U4) 経路 2: 「その日が失敗日か」の判定を、本番の finalizer を
+# 通して固定する。
+#
+# 判定は watchlist_batch_finalizer._finalize_completed() の内側に inline の式
+# として置かれており、**名前の付いた関数が存在しない**。したがって直接呼ぶ
+# ことはできず、公開経路(maybe_finalize / retry_finalize / retry_notification)
+# を通す以外に実コードで確かめる方法が無い。
+#
+# ここで採らない形(#234 issuecomment-5655409951 / #22 C1' と同じ基準):
+#   ・判定式をテスト内に書き直して assert する(本番を変えても落ちない)
+#   ・source を文字列として読み、字面の部分一致を assert する
+#     (変数名を変えるだけで落ち、字面を保って挙動を変えると通る)
+#
+# 代わりに、batch 行へ**判定の入力**を与えて本番経路を走らせ、**出力**
+# (利用者が読む通知本文の 1 行)で判定が成立したことを確かめる。
+# 片側だけでは「常に出す」実装でも通るため、失敗日でない入力との対で固定する。
+# ---------------------------------------------------------------------------
+
+
+_UNIVERSE_FAILURE_NOTICE_HEAD = "候補一覧の取得に失敗しました。"
+
+
+class _SummaryCapturingNotificationService:
+    """通知 service の代わりに summary をそのまま捕まえる。
+
+    finalizer が組み立てた summary を本物の描画関数へ渡すため、
+    items だけでなく summary 自体を保持する(既存の _FakeNotificationService は
+    items しか持たないため、失敗日の 1 行を観測できない)。
+    """
+
+    def __init__(self) -> None:
+        self.summaries: list[Any] = []
+
+    def notify_watchlist_additions(self, summary, content_hash):  # noqa: ANN001, ANN201
+        self.summaries.append(summary)
+        return True
+
+
+def _drive_batch_with_universe_observation(
+    now: dt.datetime,
+    *,
+    universe_source: str | None,
+    universe_promoted: bool | None,
+    universe_source_date: str | None,
+    batch_id: str = "batch-1",
+) -> None:
+    """候補一覧の取得結果を batch 行へ残したうえで、1 銘柄を PASSED まで進める。
+
+    観測値の書き込みは本番の set_watchlist_batch_total() を使う
+    (テストから put_item で直接書くと、本番が実際に保存している形と
+     ずれても気づけないため)。
+    """
+    batch_tracker.try_acquire_dispatch_lease(batch_id, "dispatcher", now, 360, 72)
+    batch_tracker.set_watchlist_batch_total(
+        batch_id,
+        1,
+        72,
+        now,
+        universe_source=universe_source,
+        universe_promoted=universe_promoted,
+        universe_source_date=universe_source_date,
+    )
+    batch_tracker.create_missing_candidate_progress_rows(batch_id, ["1111"], now, 72)
+    batch_tracker.mark_dispatch_completed(batch_id, now)
+    batch_tracker.claim_candidate_lease(batch_id, "1111", "owner-a", now, 240)
+    batch_tracker.complete_candidate(
+        batch_id,
+        "1111",
+        "owner-a",
+        terminal_status=WatchlistProgressStatus.COMPLETED,
+        evaluation_result="PASSED",
+        ranking_entry=_make_ranking_entry("1111"),
+        is_provider_failure_suspected=False,
+        missing_field_names=[],
+        processing_duration_ms=100,
+        now=now,
+        total_score=80.0,
+    )
+
+
+def _finalize_and_render(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    universe_source: str | None,
+    universe_promoted: bool | None,
+    universe_source_date: str | None,
+) -> str:
+    """本番経路を通し、利用者が読む通知本文を組み立てて返す。"""
+    _drive_batch_with_universe_observation(
+        _NOW,
+        universe_source=universe_source,
+        universe_promoted=universe_promoted,
+        universe_source_date=universe_source_date,
+    )
+    monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: _FakeWatchlistRepository())
+    notification = _SummaryCapturingNotificationService()
+
+    assert maybe_finalize("batch-1", _NOW, _providers(), _fake_config(), notification) is True
+
+    assert len(notification.summaries) == 1
+    return render_watchlist_addition_message(notification.summaries[0])
+
+
+def test_failure_day_is_detected_through_the_production_finalizer(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取得失敗を示す batch 行を与えると、通知本文へ失敗の 1 行が出る。
+
+    判定式はテスト側に持たない。与えるのは判定の**入力**だけであり、
+    判定そのものは本番の finalizer が行う。
+    """
+    body = _finalize_and_render(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_CACHE,
+        universe_promoted=False,
+        universe_source_date="2026-07-31",
+    )
+
+    assert _UNIVERSE_FAILURE_NOTICE_HEAD in body
+    # 前回取得の時点が本文に出る(「不明」へ落ちていない)。
+    assert "2026-07-31" in body
+
+
+def test_success_day_does_not_get_the_failure_notice_through_the_finalizer(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取得成功を示す batch 行では、その 1 行が出ない(対の 1 本)。
+
+    これが無いと「常に出す」実装でも上のテストは通る。
+    """
+    body = _finalize_and_render(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_DOWNLOADED,
+        universe_promoted=True,
+        universe_source_date="2026-09-13",
+    )
+
+    assert _UNIVERSE_FAILURE_NOTICE_HEAD not in body
+
+
+def test_downloader_not_run_is_not_treated_as_a_failure_day(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Downloader を走らせていない回(いずれも None)は失敗日ではない。
+
+    maintenance や provider != "jpx" の回がここに来る。片方だけを見る実装だと
+    取り違えるため、本番経路で区別されることを固定する。
+    """
+    body = _finalize_and_render(
+        monkeypatch,
+        universe_source=None,
+        universe_promoted=None,
+        universe_source_date=None,
+    )
+
+    assert _UNIVERSE_FAILURE_NOTICE_HEAD not in body
+
+
+def test_only_the_cache_source_without_promoted_is_not_a_failure_day(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """片方(universe_source)だけでは失敗日と判定しない。
+
+    PR-1a より前の古い batch 行が混ざった場合の保険であり、条件の片方を
+    落とした実装をここで捕まえる(universe_source だけを見る実装はこれで落ちる)。
+    """
+    body = _finalize_and_render(
+        monkeypatch,
+        universe_source=UNIVERSE_SOURCE_CACHE,
+        universe_promoted=None,
+        universe_source_date="2026-07-31",
+    )
+
+    assert _UNIVERSE_FAILURE_NOTICE_HEAD not in body
+
+
+def test_only_promoted_false_without_the_source_is_not_a_failure_day(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """もう片方(universe_promoted)だけでも失敗日と判定しない。
+
+    universe_promoted だけを見る実装はこれで落ちる。上のテストと対で、
+    2 条件の **両方** が要ることを固定する。
+    """
+    body = _finalize_and_render(
+        monkeypatch,
+        universe_source=None,
+        universe_promoted=False,
+        universe_source_date="2026-07-31",
+    )
+
+    assert _UNIVERSE_FAILURE_NOTICE_HEAD not in body
