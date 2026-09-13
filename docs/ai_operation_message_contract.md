@@ -547,12 +547,43 @@ AUDIT_INFO
   肯定形だけの提示では防げないため、否定形を固定節にする。
 ```
 
+```
+各節へ書くもの(MERGE_GATE の場合)
+
+  推奨と理由
+    REVIEW_VERDICT と REVIEW_KIND を本文側に併記する
+      (種別を書かないと、提示だけを読んだときにどちらの結論か分からない)
+    MERGE_READY の値をこの節に含める
+      (MERGE / HOLD 等の別項目を作らない)
+    残課題の有無と、それが今回の merge を止めるかどうかを理由に含める
+
+  承認すると起きること / この承認では起きないこと
+    本番への影響(deploy されるか / されないか)をこの 2 節で表す
+    他の Issue への影響もこの 2 節で表す
+      (本番影響・他 Issue 影響のための独立した項目を作らない)
+
+  AUDIT_INFO
+    INDEPENDENT_REVIEW_SNAPSHOT  独立レビューの snapshot comment の URL
+    REVIEW_INPUT_EVIDENCE        BASE / HEAD / MERGE_BASE / DIFF_HASH / CI_RUN_ID
+    独立レビューを行った場合、この 2 つを省略しない
+```
+
+```
+この形式を Markdown の表へ固定しない。
+通常の回答として読みやすく提示できればよく、項目が揃っていることが要件である。
+```
+
+merge 可否の**判断の中身**(何を判断するか)は
+user_manager_collaboration_protocol.md 3.7節が正本である。
+利用者向けの**説明の水準**(分かりやすさ)は
+user_manager_collaboration_protocol.md 1.6節が正本である。
+
 ### 8.2 適用する gate 種別
 
 | GATE_TYPE | 「承認対象」節へ必ず書く識別子 | AUDIT_INFO へ分離してよいもの |
 |---|---|---|
 | `DESIGN_GATE` | 対象 Issue と Phase | 参照 URL |
-| `MERGE_GATE` | **PR 番号 + exact PR head SHA** | base SHA / CI run / review URL |
+| `MERGE_GATE` | **PR 番号 + exact PR head SHA** | base SHA / CI run / review URL / 独立レビューの snapshot URL / review 入力の identity |
 | `PRODUCTION_CHANGESET_CREATE_GATE` | **対象 stack + release 対象の exact SHA + CREATE する scope(Release Issue 番号)** | build 情報 / 参照 URL |
 | `PRODUCTION_CHANGESET_EXECUTE_GATE` | **exact ChangeSet ARN** | stack event / diff の参照 URL |
 | `ROLLBACK_GATE` | **巻き戻し対象と、戻し先の exact 識別子** | 経緯 / 参照 URL |
@@ -657,14 +688,18 @@ Human Gate — MERGE_GATE / PR #183
 
 推奨と理由
   承認
+  REVIEW_VERDICT = PASS(REVIEW_KIND = INDEPENDENT_REVIEW)/ MERGE_READY = YES
   exact diff レビュー PASS / PR CI 7 of 7 green / 変更は docs のみ /
-  merge blocker なし
+  残課題は命名の軽微なズレのみで、今回の merge は止めない
 
 ---
 AUDIT_INFO
   PR base  9bbc2ac...
   CI run   33979357372(event=pull_request / head 一致)
   review   <レビュー結果の URL>
+  独立レビューの snapshot  <3.14節の snapshot comment の URL>
+  review 入力の identity   BASE <base> / HEAD <head> / MERGE_BASE <mb> /
+                           DIFF_HASH <hash> / CI_RUN_ID <run>
 ```
 
 ---
@@ -903,3 +938,5 @@ Instruction に VERIFICATION_REQUIRED が無い場合は、その旨を報告し
 | 2026-09-06 | 発効状態を現況へ同期し、役割名を製品非依存へ改めた(Issue #190)。0節と 10節の `NEW_CONTRACT_ACTIVE = NO` を発効済み(2026-09-06 13:57 JST)へ更新し、`ACTIVATION_STATE_SSOT = Issue #184 の最新の durable な activation 記録` を明記した。**静的な文書を、変わりうる発効状態の唯一の根拠にしない**方式(#185 が development_workflow.md 2.6 節へ適用したもの)を踏襲している。あわせて channel 名を役割ベースへ改め(`C-1 開発者 -> 管理者` / `C-3 管理者 -> 利用者`)、`READY_FOR` の例を `MANAGER_PR_REVIEW` へ、参照先ファイル名を user_manager_collaboration_protocol.md へ更新した。**報告 schema・FORENSIC 16 条件・BASELINE_INVARIANTS・AUTHORIZED_PHASES・Human Gate の提示形式・確認質問ポリシーはいずれも変更していない。** 変更履歴の過去エントリも書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-07 | post-merge / post-deploy の Instruction と報告へ `VERIFICATION_REQUIRED = <項目 | NONE>` を必須項目として追加した(11節を新設 / 2.2節へ条件付き必須を追記。Issue #220)。指示側がこの 1 行を書く時点で「待つべき事象が無い」ことに気付けるようにするためであり、#36(待ち先の無い status:デプロイ済 が 4 日滞留)と #209(指示文が誤って status:マージ済 を指定していた)の両方に効く。**Instruction 側の必須項目を定める文書は本書である**(development_workflow.md 2.5節は回答の冒頭 3 行のみを定め、Instruction の必須項目を列挙していない。user_manager_collaboration_protocol.md 4.5節は出力形式の規定である)ため本書へ置き、他文書へは複製しない。★ **新設は 11節とし、既存の節番号を繰り下げていない**。他文書から本書の 4節 / 8節 / 10節への参照が実在するため(development_workflow.md と user_manager_collaboration_protocol.md の計 4 箇所)、途中への挿入はそれらの参照を無効にする。何を verification とするかの内容の正本は issue_label_policy.md 7.4節と各 Issue の Acceptance criteria である。**既存の NORMAL_REPORT 必須フィールド・BASELINE_INVARIANTS・FORENSIC の昇格条件・AUTHORIZED_PHASES・報告の転送契約・Human Gate の提示フォーマット・確認質問の要否・発効の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-12 | 8節へ 8.5「承認・判断の記録 field」を新設した(Issue #337)。`DECIDED_BY` / `APPROVED_BY` / `RECORDED_BY` / `DECIDED_AT` は運用で 100 件以上の Issue に使われていたが docs 全体で定義が 0 件であり、書式も意味差も各自の判断になっていた。MEANING / REQUIRED_WHEN / AUTHORITY_SEMANTICS を定め、★ **判断の帰属(`DECIDED_BY`)と操作の許可(`APPROVED_BY`)を区別**した。★ **両方を常に必須にしない**(同じ事実が 2 つの field へ重複し、どちらが操作の許可か読み取れなくなるため)。★ **`DECIDED_BY = USER` は利用者本人であることを機械的に保証しない**ことを明記した(全セッションが同一の GitHub identity で投稿する。本人性の保証は Issue #332 の論点であり本項では解決しない)。★ **本項は形式だけを定める。承認の要否は user_manager_collaboration_protocol.md 2節と development_workflow.md 10節が正本であり複製していない。** **2.2 の NORMAL_REPORT 必須 11 field・3節の BASELINE_INVARIANTS・4節の FORENSIC 昇格条件・5節の AUTHORIZED_PHASES・6節の転送契約・8.1〜8.4 の提示フォーマットと `APPROVAL_UNIT_CONSOLIDATION = NO`・11節の VERIFICATION_REQUIRED はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-13 | 8節へ **merge 判断の提示項目を実体として受け入れた**(Issue #345)。0節は発効後の正本を本文書 8節と宣言していたが、**user_manager_collaboration_protocol.md 3.7節の 11 項目が本文書へ移っておらず**、宣言と実体が食い違っていた。8.1節の固定 4 節はそのままに、**各節へ書くもの(MERGE_GATE の場合)**を追加し、「推奨と理由」へ `REVIEW_VERDICT` と `REVIEW_KIND` の併記・`MERGE_READY` の値・残課題が merge を止めるかどうかを含めること、「承認すると起きること」「この承認では起きないこと」で**本番への影響と他 Issue への影響を表す**こと(そのための独立した項目を作らない)、AUDIT_INFO へ `INDEPENDENT_REVIEW_SNAPSHOT` と `REVIEW_INPUT_EVIDENCE` を置き**独立レビューを行った場合に省略しない**ことを明記した。あわせて 3.7節から移した注記(**この形式を Markdown の表へ固定しない**。項目が揃っていることが要件である)と、**merge 可否の判断の中身は protocol 3.7節が正本である**という 1 行の pointer を置いた。8.2節の `MERGE_GATE` 行の「AUDIT_INFO へ分離してよいもの」へ独立レビューの snapshot URL と review 入力の identity を加えた(**「承認対象」列の PR 番号 + exact PR head SHA は変更していない**)。8.4節の既存の `MERGE_GATE` の例へ同じ項目を追記した(例を増やしていない)。**固定 4 節の構成・「起きないこと」を必須とする理由・8.3節の `APPROVAL_UNIT_CONSOLIDATION = NO`・8.5節の記録 field・他の gate 種別の行・2.2節の報告 schema・3節・4節・5節・6節・11節はいずれも変更していない。**見出し(anchor)を 1 つも変えていないため `policy_registry.yaml` の既存 entry は有効なままである。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-13 | 8.1節へ **利用者向けの説明の水準を指す参照 1 行**を追加した(Issue #357)。8節は承認時に何を必ず提示するかを定めるが、**その提示を利用者が理解できる形にするための規則**(user_manager_collaboration_protocol.md 1.6節)への入口が無かった。**説明ルールの本文は複製していない**(二重管理しない。利用者判断)。1 行の pointer のみであり、**固定 4 節・gate 種別の表・例・8.3節・8.5節・見出し(anchor)はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
