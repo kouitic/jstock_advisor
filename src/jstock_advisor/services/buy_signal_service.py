@@ -21,10 +21,11 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from jstock_advisor.config.models import AppConfig
+from jstock_advisor.config.models import AppConfig, StockClassificationRulesConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.buy_industry import (
     CYCLICAL_SECTORS,
@@ -42,6 +43,7 @@ from jstock_advisor.domain.entities.enums import (
     BuyAction,
     BuyIndustrySector,
     ConfidenceLevel,
+    PeriodType,
     RecommendationType,
     StockType,
     WatchTransitionType,
@@ -50,6 +52,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
 from jstock_advisor.domain.financial_freshness import (
     FinancialFreshnessVerdict,
     evaluate_financial_freshness,
@@ -57,6 +60,10 @@ from jstock_advisor.domain.financial_freshness import (
 from jstock_advisor.domain.financial_series import FinancialPeriodValue
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.scoring.score import compute_score
+from jstock_advisor.domain.scoring.style_attractiveness import (
+    StyleAttractivenessInputs,
+    score_style_attractiveness,
+)
 from jstock_advisor.domain.scoring.undervaluation_categories import (
     UndervaluationCategoryDetail,
     build_undervaluation_category_details,
@@ -76,6 +83,10 @@ from jstock_advisor.domain.signals.buy_signal import (
     is_earnings_trend_non_decreasing,
     score_areas,
     undervaluation_signal_threshold_values,
+)
+from jstock_advisor.domain.signals.company_quality_scoring import (
+    CompanyQualityInputs,
+    score_company_quality,
 )
 from jstock_advisor.domain.signals.earnings_surprise import (
     earnings_surprise_config_values,
@@ -170,7 +181,25 @@ _WEAK_SCORE_RATIO = 0.3
 # このキーを持たない既存Recommendation(2026-08-28以前)はLEGACY_UNVERSIONED
 # として扱う(キー数から世代を推測しない。backfillもしない)。optional keyの
 # 追加だけで互換性を壊さない場合は必ずしもversionを上げる必要はない。
-FACTS_SCHEMA_VERSION = "v1"
+#
+# Issue #22 Phase B2(2026-09-13): v2 shadowのforward replayに必要な判定時点
+# 入力を追加したためv2へ上げる。追加したのは観測用のキーだけであり、v1の
+# 判定ロジック・スコア・BuyActionからは一切参照されない(既存キーは1つも
+# 削除・改名していない。backfillもしない)。
+FACTS_SCHEMA_VERSION = "v2"
+
+# Issue #22 C2(2026-09-14): v2 shadowの観測結果が「算出できた」のか
+# 「算出に失敗した」のかをfacts上で区別するための状態値。
+# STYLE_ATTRACTIVENESS = SHADOW_ONLY / NON_BLOCKING はUSERが承認した性質で
+# あり(#22)、「BUY判定へ接続しない」だけでは満たさない。shadow側で例外が
+# 出てもv1の判定・保存・通知が止まらないことを構造で保証する。
+#
+# 失敗を握りつぶさない。COMPUTATION_FAILEDとしてfactsへ残す(黙って何も
+# 保存しない、はfail-openであり#343 / #348と同型になる)。0.0・空dict・
+# 空listへ潰さない(「魅力が無い」「該当が無い」と「算出できなかった」を
+# 混ぜない。三値の扱いと同じ原則)。
+SHADOW_STATE_COMPUTED = "COMPUTED"
+SHADOW_STATE_COMPUTATION_FAILED = "COMPUTATION_FAILED"
 
 # 観測用に保存する財務時系列(営業利益・営業CF・EPS)の1系列あたり保存上限
 # (直近N期のみ保存)。providerが将来取得期間を拡大してもRecommendation
@@ -283,6 +312,39 @@ def _serialize_undervaluation_categories(
 
 
 logger = logging.getLogger(__name__)
+
+
+def _isolated_shadow_observation(
+    observation_name: str,
+    build: Callable[[], dict[str, object]],
+) -> dict[str, object]:
+    """v2 shadowの観測を、v1の判定経路から隔離して組み立てる(Issue #22 C2)。
+
+    shadowはv1の判定へ接続しないが、算出がanalyze()の本流にある限り、
+    例外が出ればその銘柄だけでなくbatch全体が止まる。NON_BLOCKINGは
+    承認された性質であり、宣言ではなく構造で満たす。
+
+    失敗は握りつぶさない。COMPUTATION_FAILEDと例外の型をfactsへ残し、
+    warningをログへ出す。値を0.0や空へ潰さない(「算出できなかった」を
+    「魅力が無い」と読める形で保存しない)。
+
+    銘柄コードはログへ出さない(Issue #135)。どの銘柄かはfacts側の
+    Recommendationに紐づいており、ログへ平文で出す必要がない。
+    """
+    try:
+        return build()
+    except Exception as exc:  # noqa: BLE001 - shadowの失敗をv1へ伝播させない
+        logger.warning(
+            "v2 shadow observation failed and was recorded as %s: observation=%s error=%s",
+            SHADOW_STATE_COMPUTATION_FAILED,
+            observation_name,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return {
+            "shadow_state": SHADOW_STATE_COMPUTATION_FAILED,
+            "error_type": type(exc).__name__,
+        }
 
 
 @dataclass(frozen=True)
@@ -404,6 +466,138 @@ class BuySignalService:
             # 到達不能である現状をProductionデータで裏づけるために記録する。
             "provider_security_type": snapshot.financial.security_type,
             "provider_market_segment": snapshot.financial.market_segment,
+        }
+
+    def _observe_common_quality_shadow(self, snapshot: StockSnapshot) -> dict[str, object]:
+        """共有Common Qualityのshadowを算出し、観測用factsの形へ整える(B3 / C2)。
+
+        保有判断側と同じ score_company_quality() を同じconfigで呼ぶ。共有
+        モデルを作り直さない(作り直すと経路間で値がずれ、責務分離の検証が
+        成立しない)。結果はobservation用factsへ保存するだけであり、v1の
+        スコア・BuyAction・通知・価格判定には一切接続しない。
+
+        保存先をRecommendationの新フィールドにしない理由: Recommendationは
+        extra="forbid" であり、新フィールドの書き込みを始めると、その
+        フィールドを知らない版へ戻したときに読み込みが失敗する。設計の
+        READ_COMPATIBILITY_FIRST -> THEN WRITE に従い、read互換が本番へ
+        入っている既存のdict(buy_score_input_facts)へ保存する。
+
+        C2(2026-09-14): 入力の組み立てからdictへの整形までをこのmethodへ
+        まとめた。算出だけを隔離すると、結果を展開する箇所がanalyze()の
+        本流に残り、そこで例外が出たときに隔離が成立しないためである。
+        """
+        # 業種分類は保有判断側と同じ関数・同じ入力で求める(共有Common Quality
+        # の金融業分岐がこの分類に依存するため。分類ロジック本体は変更しない)。
+        common_quality_industry = classify_industry(
+            snapshot.financial.sector, snapshot.financial.industry
+        )
+        shadow = score_company_quality(
+            CompanyQualityInputs(
+                financial=snapshot.financial,
+                quarterly_operating_income_periods=(snapshot.quarterly_operating_income_periods),
+                quarterly_operating_cashflow_periods=(
+                    snapshot.quarterly_operating_cashflow_periods
+                ),
+                eps_period_values=[
+                    FinancialPeriodValue(
+                        value=hv.eps,
+                        period_end=hv.date,
+                        period_type=PeriodType.ANNUAL,
+                    )
+                    for hv in snapshot.historical_valuations
+                    if hv.eps is not None
+                ],
+                cashflow_decomposition=snapshot.cashflow_decomposition,
+                industry_classification=common_quality_industry,
+                listing_risk_keyword_confirmed=bool(snapshot.material_event_keywords_found),
+            ),
+            self._config.holding_decision.company_quality_weights,
+            self._config.holding_decision.company_quality_score_thresholds,
+            self._config.holding_decision_ratio,
+        )
+        # scoreだけでは「品質が低い」と「データが無い」を区別できないため、
+        # coverage_ratioと項目別のstatusを併せて保存する(要件6)。判定に使う
+        # 閾値はここでは持たない。COVERAGE_THRESHOLDはshadow calibrationで
+        # 決めるものであり、実装都合で仮の値を固定しない。
+        return {
+            "shadow_state": SHADOW_STATE_COMPUTED,
+            "score": shadow.score,
+            "coverage_ratio": shadow.coverage_ratio,
+            # 項目別の評価状況。EVALUATED / NOT_EVALUATED(データ欠測) /
+            # NOT_APPLICABLE(該当しないため分母から除外)の3値をそのまま残す。
+            "items": [
+                {
+                    "item_code": item.item_code,
+                    "axis": item.axis,
+                    "weight": item.weight,
+                    "status": item.status.value,
+                    "points_earned": item.points_earned,
+                    "reason": item.reason,
+                }
+                for item in shadow.items
+            ],
+        }
+
+    def _observe_style_attractiveness_shadow(
+        self,
+        snapshot: StockSnapshot,
+        stock_classification_rules: StockClassificationRulesConfig,
+        current_per: Decimal | None,
+        current_pbr: Decimal | None,
+    ) -> dict[str, object]:
+        """Style Attractivenessのshadowを算出し、観測用factsの形へ整える(B4 / C2)。
+
+        分類thresholdからの距離だけを使う(設計のH-1)。valuation anchor /
+        fair value / entry price は使わない(同PROHIBITED)。分類ロジック本体は
+        呼ばず、既に確定しているmatched stylesと、config上の閾値だけを読む。
+        SHADOW_ONLY / NON_BLOCKING であり、BUY判定へは接続しない。
+        """
+        style_dividend_growth_pct: float | None = None
+        forecast_dps = snapshot.dividend.forecast_annual_dividend_per_share
+        previous_dps = snapshot.dividend.previous_fiscal_year_dividend_per_share
+        if forecast_dps is not None and previous_dps is not None and previous_dps > 0:
+            style_dividend_growth_pct = float((forecast_dps - previous_dps) / previous_dps * 100)
+        shadow = score_style_attractiveness(
+            StyleAttractivenessInputs(
+                matched_styles=tuple(snapshot.stock_type_classification.types),
+                dividend_yield_pct=snapshot.dividend_yield_pct,
+                consecutive_dividend_increase_years=(
+                    snapshot.dividend.consecutive_dividend_increase_years
+                ),
+                dividend_growth_pct=style_dividend_growth_pct,
+                quarterly_operating_incomes=snapshot.quarterly_operating_incomes,
+                current_per=current_per,
+                current_pbr=current_pbr,
+            ),
+            stock_classification_rules,
+        )
+        # matched styleごとに独立して保持する。primary_typeは作らず、最大値も
+        # 代表値として持たない(要件7)。qualified stylesは決めない
+        # (qualification thresholdはshadow calibrationで決める)。
+        return {
+            "shadow_state": SHADOW_STATE_COMPUTED,
+            "style_layer_state": shadow.style_layer_state,
+            "qualification_state": shadow.qualification_state,
+            "matched_styles": [s.value for s in snapshot.stock_type_classification.types],
+            "styles": [
+                {
+                    "style": d.style,
+                    "state": d.state,
+                    "degree": d.degree,
+                    "reason": d.reason,
+                    "features": [
+                        {
+                            "feature": f.feature,
+                            "value": f.value,
+                            "threshold": f.threshold,
+                            "direction": f.direction,
+                            "degree": f.degree,
+                        }
+                        for f in d.features
+                    ],
+                }
+                for d in shadow.details
+            ],
         }
 
     def _active_rule_version(self) -> str:
@@ -997,6 +1191,25 @@ class BuySignalService:
         # (buy_signal_service.py側でのみ計算される)PER/PBR関連の判定時点入力事実を
         # score_result.input_facts(compute_score()自身が保持する分)へ合流させる。
         # 投資判断ロジックには一切使用しない、表示専用の記録。
+        # Issue #22 Phase B2: StockType分類の判定時点閾値をsnapshotするために
+        # 参照する(分類ロジック本体は呼ばない。値の読み取りのみ)。
+        stock_classification_rules = self._config.stock_classification
+
+        # --- Issue #22 C2(2026-09-14): shadowの算出と保存をv1から隔離する ---
+        # NON_BLOCKINGはUSERが承認した性質であり、「BUY判定へ接続しない」
+        # だけでは満たさない。算出・整形の両方を_isolated_shadow_observation()
+        # の内側へ入れ、shadow側で例外が出てもv1の判定・保存・通知が止まらない
+        # ことを構造で保証する。失敗は握りつぶさずfactsとログへ残す。
+        common_quality_shadow_facts = _isolated_shadow_observation(
+            "common_quality_shadow",
+            lambda: self._observe_common_quality_shadow(snapshot),
+        )
+        style_attractiveness_shadow_facts = _isolated_shadow_observation(
+            "style_attractiveness_shadow",
+            lambda: self._observe_style_attractiveness_shadow(
+                snapshot, stock_classification_rules, current_per, current_pbr
+            ),
+        )
         buy_score_input_facts: dict[str, object] = {
             **score_result.input_facts,
             # レビュー対応(2026-08): current_per/current_pbr自体は既に保存しているが、
@@ -1161,6 +1374,70 @@ class BuySignalService:
             # 相当=NOT_EVALUATED / NOT_APPLICABLE の3値。v1では推測を伴う
             # NOT_APPLICABLEを生成しない。score.py参照)。
             "component_states": score_result.component_states,
+            # --- Issue #22 Phase B2(2026-09-13): v2 shadowの判定時点入力 ---
+            # いずれもv1の判定からは参照しない観測用であり、forward replayで
+            # Common Quality / Style Attractivenessを再現するために保存する。
+            # 得点から逆算できない生値だけを保存し、既に保存済みの値
+            # (undervaluation_categories / component_states等)は重複保存しない。
+            #
+            # 自己資本比率の生値。Common Qualityの最大配点componentの入力であり、
+            # 得点からは低位帯(0点側)の実値を復元できない。
+            "equity_ratio_pct": financial.equity_ratio_pct,
+            # 継続企業の疑義。Common Qualityのガバナンス配点の入力。
+            "is_going_concern_doubt": financial.is_going_concern_doubt,
+            # 上場継続リスクの確認結果(重要事象キーワードの検出有無)。
+            # 保有判断側と同じ導出(material_event_keywords_foundの有無)であり、
+            # ここでは判定に使わず観測のみを行う。
+            "listing_risk_keyword_confirmed": bool(snapshot.material_event_keywords_found),
+            # キャッシュフロー分解の判定結果(本業要因主導か/運転資本・一過性
+            # 要因主導か/判定不能か)。True / False / Noneの三値をそのまま保存し、
+            # NoneをFalseへ潰さない(データ不足と判定済みを区別する)。
+            "cashflow_fundamentally_driven": is_fundamentally_driven(
+                snapshot.cashflow_decomposition
+            ),
+            # StockType分類の判定時点閾値。Style Attractivenessは分類閾値からの
+            # 距離を使うため、事後に現在のconfigで再解釈すると値が変わる
+            # (score_thresholds / undervaluation_category_capsと同じ理由)。
+            # keyword列(cyclical / defensive / event_driven)は数値閾値を持たず、
+            # 設計上Style AttractivenessがNOT_APPLICABLEであるため保存しない。
+            # --- Issue #22 Phase B3 / B4 + C2: v2 shadowの観測結果 ---
+            # 算出と整形は_isolated_shadow_observation()の内側で行っており、
+            # ここでは既に組み上がったdictを置くだけである(本流で展開すると
+            # 隔離が成立しない)。算出に失敗した場合は
+            # shadow_state = "COMPUTATION_FAILED" が入る。
+            "common_quality_shadow": common_quality_shadow_facts,
+            "style_attractiveness_shadow": style_attractiveness_shadow_facts,
+            "stock_classification_thresholds": {
+                "version": stock_classification_rules.version,
+                "income_min_dividend_yield_pct": (
+                    stock_classification_rules.income.min_dividend_yield_pct
+                ),
+                "income_max_payout_ratio_pct": (
+                    stock_classification_rules.income.max_payout_ratio_pct
+                ),
+                "growth_min_consecutive_growth_quarters": (
+                    stock_classification_rules.growth.min_consecutive_growth_quarters
+                ),
+                "value_max_pbr": stock_classification_rules.value.max_pbr,
+                "value_max_per": stock_classification_rules.value.max_per,
+                "dividend_growth_min_consecutive_years": (
+                    stock_classification_rules.dividend_growth.min_consecutive_dividend_increase_years
+                ),
+                "dividend_growth_min_growth_pct": (
+                    stock_classification_rules.dividend_growth.min_dividend_growth_pct
+                ),
+                "quality_min_equity_ratio_pct": (
+                    stock_classification_rules.quality.min_equity_ratio_pct
+                ),
+                "quality_min_roe_pct": stock_classification_rules.quality.min_roe_pct,
+                "turnaround_min_consecutive_improvement_quarters": (
+                    stock_classification_rules.turnaround.min_consecutive_improvement_quarters
+                ),
+                "asset_play_max_pbr": stock_classification_rules.asset_play.max_pbr,
+                "asset_play_min_equity_ratio_pct": (
+                    stock_classification_rules.asset_play.min_equity_ratio_pct
+                ),
+            },
             # --- Issue #54 Phase B-1(2026-08-29): 業種分類のcanonical観測 ---
             # JPX 33業種(canonical)と、既存4分類器が同一銘柄に対して実際に
             # 出した分類を判定時点の事実として並べて記録する。**判定・スコア・
