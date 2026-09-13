@@ -879,16 +879,22 @@ def test_in_trade_cooldown_still_blocks_watch_state_within_jst_business_date(
 def test_phase35_observation_snapshot_stored_with_schema_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 3.5の観測用snapshotが正式schema version("v1")付きで、判定時点値
+    """Phase 3.5の観測用snapshotが正式schema version付きで、判定時点値
     のまま保存されることを確認する。このキーを持たない既存レコードは
-    LEGACY_UNVERSIONEDとして扱う(キー数から世代を推測しない)。"""
+    LEGACY_UNVERSIONEDとして扱う(キー数から世代を推測しない)。
+
+    Issue #22 Phase B2(2026-09-13)でv2 shadowのforward replay用の判定時点
+    入力を追加したため、期待値は"v1"から"v2"へ変わる。観測キーの追加自体が
+    互換性を壊さないという方針(下記のadditiveテスト)は変えていない。B2の
+    設計がschema versionの引き上げを要求しているため上げたものである。
+    """
     outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
     rec = outcome.recommendation
     assert rec is not None
     facts = rec.buy_score_input_facts
     assert facts is not None
 
-    assert facts["buy_score_input_facts_schema_version"] == "v1"
+    assert facts["buy_score_input_facts_schema_version"] == "v2"
     # Common Quality候補の本来値(fixtureではいずれも未設定=判定時点の事実)
     assert facts["net_income"] is None
     assert facts["is_deficit"] is False
@@ -1541,8 +1547,13 @@ def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
 
     `buy_score_input_facts` は判定に使わない観測用snapshotであり、消費者
     (calibration dataset等)は必要なキーを個別に取り出す。したがって
-    schema versionの引き上げもbackfillも不要である
+    観測キーの追加それ自体はbackfillを必要としない
     (`FACTS_SCHEMA_VERSION` の方針コメント参照)。この判断をテストで固定する。
+
+    Issue #22 Phase B2(2026-09-13)でversionは"v2"へ上がっているが、それは
+    B2の設計がforward replayの識別のために引き上げを要求したからであり、
+    「観測キーを足したら必ず上げる」という意味ではない。ここで固定するのは
+    あくまで「観測キーを取り除いても他のキーが変わらない」ことである。
     """
     outcome = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
     rec = outcome.recommendation
@@ -1550,11 +1561,112 @@ def test_observation_key_is_additive_and_does_not_bump_facts_schema_version(
     facts = rec.buy_score_input_facts
     assert facts is not None
 
-    assert facts["buy_score_input_facts_schema_version"] == "v1"
+    assert facts["buy_score_input_facts_schema_version"] == "v2"
     # 観測キーを取り除いた状態(=既存レコード)でも、他のキーは何も変わらない。
     legacy_view = {k: v for k, v in facts.items() if k != "canonical_industry_observation"}
     assert "canonical_industry_observation" not in legacy_view
-    assert legacy_view["buy_score_input_facts_schema_version"] == "v1"
+    assert legacy_view["buy_score_input_facts_schema_version"] == "v2"
+
+
+# ---------------------------------------------------------------------------
+# Issue #22 Phase B2(2026-09-13): v2 shadowのforward replayに必要な判定時点
+# 入力の保存。いずれも観測用であり、v1の判定・スコア・BuyActionへは接続しない。
+# 「得点から逆算できない生値」だけを保存する(既に保存済みの値は重複保存しない)。
+# ---------------------------------------------------------------------------
+
+
+def test_b2_shadow_inputs_are_stored_in_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2で追加した判定時点入力が、判定時点の値のまま保存されることを固定する。
+
+    Common Qualityは自己資本比率・継続企業の疑義・上場継続リスク・CF分解の
+    判定結果を入力に持つが、いずれも得点からは実値を復元できない
+    (0点側に潰れるため)。forward replayのためにそのまま保存する。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    # fixtureの財務サマリの判定時点値をそのまま保存する(推測で埋めない)。
+    assert "equity_ratio_pct" in facts
+    assert facts["is_going_concern_doubt"] is False
+    # 重要事象キーワードが検出されていないfixtureでは False。
+    assert facts["listing_risk_keyword_confirmed"] is False
+    # CF分解が無い場合は判定不能。NoneをFalseへ潰さない。
+    assert facts["cashflow_fundamentally_driven"] is None
+
+
+def test_b2_stores_classification_thresholds_at_judgment_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """StockType分類の判定時点閾値が保存されることを固定する。
+
+    Style Attractivenessは分類閾値からの距離を使うため、事後に現在のconfigで
+    再解釈すると値が変わる(score_thresholds / undervaluation_category_capsと
+    同じ理由)。keyword列を持つだけのstyleは数値閾値が無く、設計上SAが
+    NOT_APPLICABLEであるため保存しない。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    thresholds = facts["stock_classification_thresholds"]
+    assert isinstance(thresholds, dict)
+    # 数値閾値を持つstyleの閾値がそろっていること。
+    for key in (
+        "income_min_dividend_yield_pct",
+        "income_max_payout_ratio_pct",
+        "growth_min_consecutive_growth_quarters",
+        "value_max_pbr",
+        "value_max_per",
+        "dividend_growth_min_consecutive_years",
+        "dividend_growth_min_growth_pct",
+        "quality_min_equity_ratio_pct",
+        "quality_min_roe_pct",
+        "turnaround_min_consecutive_improvement_quarters",
+        "asset_play_max_pbr",
+        "asset_play_min_equity_ratio_pct",
+    ):
+        assert key in thresholds, key
+        assert thresholds[key] is not None, key
+    # 由来を追えるようにconfigのversionも保存する。
+    assert "version" in thresholds
+    # keyword列のstyleは保存しない(数値閾値が無く、SAはNOT_APPLICABLE)。
+    assert "cyclical_industry_keywords" not in thresholds
+    assert "defensive_industry_keywords" not in thresholds
+    assert "event_driven_disclosure_keywords" not in thresholds
+
+
+def test_b2_inputs_do_not_change_v1_score_or_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2で追加した保存が、v1のスコアとBuyActionを変えないことを固定する。
+
+    B2は観測用snapshotへの追加のみであり、判定は不変である
+    (V2_SHADOW_DECISION = CURRENT_PRODUCTION_DECISION_UNCHANGED)。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    facts = rec.buy_score_input_facts
+    assert facts is not None
+
+    # 追加したキーはいずれもscore_formulasへ現れない(算出に参加していない)。
+    formulas = facts["score_formulas"]
+    assert isinstance(formulas, dict)
+    for key in (
+        "equity_ratio_pct",
+        "is_going_concern_doubt",
+        "listing_risk_keyword_confirmed",
+        "cashflow_fundamentally_driven",
+        "stock_classification_thresholds",
+    ):
+        assert key not in formulas, key
 
 
 # ---------------------------------------------------------------------------

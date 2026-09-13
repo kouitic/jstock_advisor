@@ -50,6 +50,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
 from jstock_advisor.domain.financial_freshness import (
     FinancialFreshnessVerdict,
     evaluate_financial_freshness,
@@ -170,7 +171,12 @@ _WEAK_SCORE_RATIO = 0.3
 # このキーを持たない既存Recommendation(2026-08-28以前)はLEGACY_UNVERSIONED
 # として扱う(キー数から世代を推測しない。backfillもしない)。optional keyの
 # 追加だけで互換性を壊さない場合は必ずしもversionを上げる必要はない。
-FACTS_SCHEMA_VERSION = "v1"
+#
+# Issue #22 Phase B2(2026-09-13): v2 shadowのforward replayに必要な判定時点
+# 入力を追加したためv2へ上げる。追加したのは観測用のキーだけであり、v1の
+# 判定ロジック・スコア・BuyActionからは一切参照されない(既存キーは1つも
+# 削除・改名していない。backfillもしない)。
+FACTS_SCHEMA_VERSION = "v2"
 
 # 観測用に保存する財務時系列(営業利益・営業CF・EPS)の1系列あたり保存上限
 # (直近N期のみ保存)。providerが将来取得期間を拡大してもRecommendation
@@ -997,6 +1003,9 @@ class BuySignalService:
         # (buy_signal_service.py側でのみ計算される)PER/PBR関連の判定時点入力事実を
         # score_result.input_facts(compute_score()自身が保持する分)へ合流させる。
         # 投資判断ロジックには一切使用しない、表示専用の記録。
+        # Issue #22 Phase B2: StockType分類の判定時点閾値をsnapshotするために
+        # 参照する(分類ロジック本体は呼ばない。値の読み取りのみ)。
+        stock_classification_rules = self._config.stock_classification
         buy_score_input_facts: dict[str, object] = {
             **score_result.input_facts,
             # レビュー対応(2026-08): current_per/current_pbr自体は既に保存しているが、
@@ -1161,6 +1170,63 @@ class BuySignalService:
             # 相当=NOT_EVALUATED / NOT_APPLICABLE の3値。v1では推測を伴う
             # NOT_APPLICABLEを生成しない。score.py参照)。
             "component_states": score_result.component_states,
+            # --- Issue #22 Phase B2(2026-09-13): v2 shadowの判定時点入力 ---
+            # いずれもv1の判定からは参照しない観測用であり、forward replayで
+            # Common Quality / Style Attractivenessを再現するために保存する。
+            # 得点から逆算できない生値だけを保存し、既に保存済みの値
+            # (undervaluation_categories / component_states等)は重複保存しない。
+            #
+            # 自己資本比率の生値。Common Qualityの最大配点componentの入力であり、
+            # 得点からは低位帯(0点側)の実値を復元できない。
+            "equity_ratio_pct": financial.equity_ratio_pct,
+            # 継続企業の疑義。Common Qualityのガバナンス配点の入力。
+            "is_going_concern_doubt": financial.is_going_concern_doubt,
+            # 上場継続リスクの確認結果(重要事象キーワードの検出有無)。
+            # 保有判断側と同じ導出(material_event_keywords_foundの有無)であり、
+            # ここでは判定に使わず観測のみを行う。
+            "listing_risk_keyword_confirmed": bool(snapshot.material_event_keywords_found),
+            # キャッシュフロー分解の判定結果(本業要因主導か/運転資本・一過性
+            # 要因主導か/判定不能か)。True / False / Noneの三値をそのまま保存し、
+            # NoneをFalseへ潰さない(データ不足と判定済みを区別する)。
+            "cashflow_fundamentally_driven": is_fundamentally_driven(
+                snapshot.cashflow_decomposition
+            ),
+            # StockType分類の判定時点閾値。Style Attractivenessは分類閾値からの
+            # 距離を使うため、事後に現在のconfigで再解釈すると値が変わる
+            # (score_thresholds / undervaluation_category_capsと同じ理由)。
+            # keyword列(cyclical / defensive / event_driven)は数値閾値を持たず、
+            # 設計上Style AttractivenessがNOT_APPLICABLEであるため保存しない。
+            "stock_classification_thresholds": {
+                "version": stock_classification_rules.version,
+                "income_min_dividend_yield_pct": (
+                    stock_classification_rules.income.min_dividend_yield_pct
+                ),
+                "income_max_payout_ratio_pct": (
+                    stock_classification_rules.income.max_payout_ratio_pct
+                ),
+                "growth_min_consecutive_growth_quarters": (
+                    stock_classification_rules.growth.min_consecutive_growth_quarters
+                ),
+                "value_max_pbr": stock_classification_rules.value.max_pbr,
+                "value_max_per": stock_classification_rules.value.max_per,
+                "dividend_growth_min_consecutive_years": (
+                    stock_classification_rules.dividend_growth.min_consecutive_dividend_increase_years
+                ),
+                "dividend_growth_min_growth_pct": (
+                    stock_classification_rules.dividend_growth.min_dividend_growth_pct
+                ),
+                "quality_min_equity_ratio_pct": (
+                    stock_classification_rules.quality.min_equity_ratio_pct
+                ),
+                "quality_min_roe_pct": stock_classification_rules.quality.min_roe_pct,
+                "turnaround_min_consecutive_improvement_quarters": (
+                    stock_classification_rules.turnaround.min_consecutive_improvement_quarters
+                ),
+                "asset_play_max_pbr": stock_classification_rules.asset_play.max_pbr,
+                "asset_play_min_equity_ratio_pct": (
+                    stock_classification_rules.asset_play.min_equity_ratio_pct
+                ),
+            },
             # --- Issue #54 Phase B-1(2026-08-29): 業種分類のcanonical観測 ---
             # JPX 33業種(canonical)と、既存4分類器が同一銘柄に対して実際に
             # 出した分類を判定時点の事実として並べて記録する。**判定・スコア・
