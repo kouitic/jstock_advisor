@@ -100,6 +100,13 @@ policies:
     human_gate_required: true
     machine_enforceable: false
 
+  - policy_id: PROTOCOL.MERGE_DECISION_RULES
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 3.7 merge 可否の判断(MERGE_DECISION_RULES)"
+    applicable_operations: [MERGE]
+    human_gate_required: true
+    machine_enforceable: false
+
   - policy_id: DEVELOPMENT_WORKFLOW.CODE_WIP_RELEASE
     ssot_file: docs/development_workflow.md
     ssot_anchor: "### 2.6.6 code WIP の解放"
@@ -155,6 +162,14 @@ policies:
   - policy_id: MESSAGE_CONTRACT.HUMAN_GATE_FORMAT
     ssot_file: docs/ai_operation_message_contract.md
     ssot_anchor: "## 8. Human Gate の提示フォーマット"
+    applicable_operations:
+      [MERGE, PRODUCTION_MANUAL_INVOKE, CHANGESET_CREATE, CHANGESET_EXECUTE]
+    human_gate_required: true
+    machine_enforceable: false
+
+  - policy_id: PROTOCOL.USER_EXPLANATION_LEVEL
+    ssot_file: docs/user_manager_collaboration_protocol.md
+    ssot_anchor: "## 1.6 ユーザーへの説明の水準"
     applicable_operations:
       [MERGE, PRODUCTION_MANUAL_INVOKE, CHANGESET_CREATE, CHANGESET_EXECUTE]
     human_gate_required: true
