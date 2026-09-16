@@ -1186,12 +1186,29 @@ def test_recomputed_weeks_are_recorded_per_week(aws_env, repos) -> None:
     assert outcome.past_weeks_metrics_recomputed == 1
 
 
+def _oracle_collect_for_period(
+    repos: dict, target_horizon: int, period_start: dt.date, period_end: dt.date
+) -> list[EvaluationResult]:
+    """`_collect_evaluations_for_windows()`とは独立に、単一期間だけを
+    filterする対照実装(Issue #377)。旧`_collect_evaluations_for_period()`
+    (単位3で削除済み)と同じ述語をテスト側で再現し、1回のstreaming scanが
+    「対象週ごとに個別filterした場合の和集合」と一致することを、本番実装から
+    独立したoracleで確認する。
+    """
+    return [
+        e
+        for e in repos["evaluation"].list_all()
+        if e.horizon_calendar_days == target_horizon
+        and period_start <= e.evaluation_date <= period_end
+    ]
+
+
 def test_collect_evaluations_for_windows_matches_per_period_collection(
     aws_env, repos
 ) -> None:
-    """1回のstreaming scanでの振り分け結果が、windowごとに個別に
-    _collect_evaluations_for_period()を呼んだ場合の結果と一致すること
-    (Issue #377。#114 C-5への影響評価の裏付けの一部)。
+    """1回のstreaming scanでの振り分け結果が、windowごとに個別filterした
+    場合の結果(oracle)と一致すること(Issue #377。#114 C-5への影響評価の
+    裏付けの一部)。
     """
     service = _build_service(repos)
     review_week = "2026-W38"
@@ -1225,9 +1242,10 @@ def test_collect_evaluations_for_windows_matches_per_period_collection(
     )
 
     single_pass = service._collect_evaluations_for_windows(windows)
+    target_horizon = service._review_config.evaluation_horizon_days
 
     for wlabel, wstart, wend in windows:
-        individual = service._collect_evaluations_for_period(wstart, wend)
+        individual = _oracle_collect_for_period(repos, target_horizon, wstart, wend)
         assert {e.evaluation_id for e in single_pass[wlabel]} == {
             e.evaluation_id for e in individual
         }
@@ -1246,3 +1264,56 @@ def test_collect_evaluations_for_windows_returns_empty_buckets_when_no_data(
     result = service._collect_evaluations_for_windows(windows)
 
     assert result == {"2026-W38": []}
+
+
+def test_run_produces_identical_metrics_to_running_five_separate_scans(
+    aws_env, repos
+) -> None:
+    """Issue #377の核心: run()が1回のstreaming scanへ変わっても、
+    5回個別にscanしていた旧方式と全く同じmetricsが生成されることを、
+    実際にrun()を呼んだ結果で確認する(#114 C-5への影響評価の最終確認)。
+
+    比較対象(oracle)は`_oracle_collect_for_period()`で、旧
+    `_collect_evaluations_for_period()`(単位3で削除済み)と同じ述語を
+    本番実装から独立に再現したものである。
+    """
+    period_start, period_end, review_week = _resolve_review_period(_RUN_AT)
+    weeks_back = 4
+    windows = [(review_week, period_start, period_end)]
+    label = review_week
+    for _ in range(weeks_back):
+        label = module._previous_week_label(label)
+        p_start = module._monday_of_iso_week(label)
+        windows.append((label, p_start, p_start + dt.timedelta(days=6)))
+
+    counter = 0
+    for _wlabel, wstart, wend in windows:
+        catch_up_at = dt.datetime.combine(wstart + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC)
+        for _ in range(3):
+            counter += 1
+            _seed_one(repos, f"w{counter}", wstart, catch_up_at, EvaluationLabel.SUCCESS)
+        for _ in range(2):
+            counter += 1
+            _seed_one(repos, f"w{counter}", wend, catch_up_at, EvaluationLabel.PRICE_TOO_HIGH)
+
+    service = _build_service(repos)
+    service.run(_RUN_AT)
+
+    actual = {
+        (m.recommendation_type, m.rule_version, m.review_week): (m.sample_count, m.success_rate_pct)
+        for m in repos["metrics"].list_all()
+    }
+
+    expected_service = _build_service(repos)
+    target_horizon = expected_service._review_config.evaluation_horizon_days
+    for wlabel, wstart, wend in windows:
+        evaluations = _oracle_collect_for_period(repos, target_horizon, wstart, wend)
+        joined, _ = expected_service._join_recommendations(evaluations)
+        groups = expected_service._group_by_type_and_rule_version(joined)
+        for (rec_type, rule_version), grouped in groups.items():
+            metrics = expected_service._build_metrics(
+                rec_type, rule_version, wlabel, wstart, wend, _RUN_AT, grouped
+            )
+            key = (rec_type, rule_version, wlabel)
+            assert key in actual, f"{key} が run() の保存結果に無い"
+            assert actual[key] == (metrics.sample_count, metrics.success_rate_pct)
