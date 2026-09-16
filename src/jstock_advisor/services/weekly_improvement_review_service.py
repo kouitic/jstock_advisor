@@ -72,6 +72,17 @@ logger = logging.getLogger(__name__)
 _AUDIT_RULE_VERSION = "review-improvement-v1"  # 本サービス自体のロジックバージョン
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
 
+# Issue #377 PR #379是正: _join_recommendations()がRecommendationRepository.get()を
+# 対象件数ぶん繰り返すN+1になっていた。get_many()(BatchGetItem)へ切り替えるが、
+# 全IDを一度に渡すと戻り値のdictが対象週の全Recommendationを同時保持することに
+# なる(Recommendationは1件あたり実測約26KB。jstock-recommendations実測)。
+# evaluationsをこの件数ずつのchunkに区切り、chunkごとにget_many()を呼んで
+# 直ちにjoinすることでピークメモリを1chunk分に有界化する(iter_all()と同じ
+# 設計思想)。DynamoDbCollectionStore.get_many()自体もBatchGetItemの上限
+# (100件/リクエスト)でAPI呼び出しを内部chunkするため、本値をそれと揃えることで
+# 1chunk = 1 BatchGetItemリクエストになり、無駄な往復を作らない。
+_RECOMMENDATION_JOIN_CHUNK_SIZE = 100
+
 
 @dataclass(frozen=True)
 class WeeklyImprovementReviewOutcome:
@@ -393,14 +404,36 @@ class WeeklyImprovementReviewService:
     def _join_recommendations(
         self, evaluations: list[EvaluationResult]
     ) -> tuple[list[tuple[EvaluationResult, Any]], list[str]]:
-        joined = []
+        """evaluationsへ対応するRecommendationをjoinする(Issue #377 PR #379是正)。
+
+        `RecommendationRepository.get_many()`(BatchGetItem)を使い、対象件数ぶん
+        `get()`(GetItem)を繰り返さない(N+1回避)。evaluationsを
+        `_RECOMMENDATION_JOIN_CHUNK_SIZE`件ずつのchunkへ区切り、chunkごとに
+        `get_many()`を1回呼んでから直ちにjoinし、次のchunkへ進む。全件ぶんの
+        Recommendationを同時に保持しない(ピークメモリは1chunk分に有界)。
+
+        ★ evaluationsの順序をそのまま保持する。`joined`は入力の順序で追加され、
+          `missing_ids`も見つからなかった評価ごとに(重複IDでも1件ずつ)追加する。
+          旧実装(`get()`を1件ずつ呼ぶ版)と、同じ入力に対して同じ`joined`・
+          同じ`missing_ids`を返す。
+        ★ 同じrecommendation_idを複数のevaluationが参照する場合(horizonの
+          異なる複数評価が同一推奨を指す等)、`get_many()`はID単位で重複排除して
+          1回だけ取得する。`joined`内では同じRecommendationオブジェクトが
+          複数のタプルから参照される(Recommendationの取得回数は増えない)。
+        """
+        joined: list[tuple[EvaluationResult, Any]] = []
         missing_ids: list[str] = []
-        for evaluation in evaluations:
-            recommendation = self._recommendations.get(evaluation.recommendation_id)
-            if recommendation is None:
-                missing_ids.append(evaluation.recommendation_id)
-                continue
-            joined.append((evaluation, recommendation))
+        for start in range(0, len(evaluations), _RECOMMENDATION_JOIN_CHUNK_SIZE):
+            chunk = evaluations[start : start + _RECOMMENDATION_JOIN_CHUNK_SIZE]
+            found = self._recommendations.get_many(
+                evaluation.recommendation_id for evaluation in chunk
+            )
+            for evaluation in chunk:
+                recommendation = found.get(evaluation.recommendation_id)
+                if recommendation is None:
+                    missing_ids.append(evaluation.recommendation_id)
+                    continue
+                joined.append((evaluation, recommendation))
         return joined, missing_ids
 
     def _group_by_type_and_rule_version(

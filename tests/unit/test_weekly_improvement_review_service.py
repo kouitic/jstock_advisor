@@ -1317,3 +1317,161 @@ def test_run_produces_identical_metrics_to_running_five_separate_scans(
             key = (rec_type, rule_version, wlabel)
             assert key in actual, f"{key} が run() の保存結果に無い"
             assert actual[key] == (metrics.sample_count, metrics.success_rate_pct)
+
+
+# --- Issue #377 PR #379是正: _join_recommendations()のN+1解消 -------------
+
+
+def _oracle_join_via_get(
+    repos: dict, evaluations: list[EvaluationResult]
+) -> tuple[list[tuple[EvaluationResult, Recommendation]], list[str]]:
+    """旧実装(RecommendationRepository.get()を1件ずつ呼ぶ版)を、本番コードから
+    独立にテスト側で再現したoracle(Issue #377 PR #379是正)。get_many()ベースの
+    新実装が、これと同じjoined/missing_idsを返すことを突き合わせる。
+    """
+    joined: list[tuple[EvaluationResult, Recommendation]] = []
+    missing_ids: list[str] = []
+    for evaluation in evaluations:
+        recommendation = repos["recommendation"].get(evaluation.recommendation_id)
+        if recommendation is None:
+            missing_ids.append(evaluation.recommendation_id)
+            continue
+        joined.append((evaluation, recommendation))
+    return joined, missing_ids
+
+
+def _seed_join_fixture(
+    repos: dict, count: int, *, missing_every: int = 0
+) -> list[EvaluationResult]:
+    """count件のevaluationを、対応するrecommendationとともにシードする。
+    missing_everyを指定すると、その倍数番目のevaluationだけ存在しない
+    recommendation_idを参照させる(missing_idsのテスト用)。
+    """
+    base = dt.datetime(2026, 8, 10, 9, 0, tzinfo=dt.UTC)
+    evaluations = []
+    for i in range(count):
+        rec_id = f"missing-{i}" if missing_every and i % missing_every == 0 else f"rec{i}"
+        if not (missing_every and i % missing_every == 0):
+            repos["recommendation"].save(
+                _recommendation(rec_id, RecommendationType.BUY, "v1", base)
+            )
+        ev = _evaluation(f"e{i}", rec_id, EvaluationLabel.SUCCESS, base)
+        repos["evaluation"].save(ev)
+        evaluations.append(ev)
+    return evaluations
+
+
+def test_join_recommendations_does_not_call_get(aws_env, repos, monkeypatch) -> None:
+    """A: _join_recommendations()実行時にRecommendationRepository.get()が
+    呼ばれないこと(N+1解消の直接確認)。
+    """
+    evaluations = _seed_join_fixture(repos, 5)
+    service = _build_service(repos)
+
+    calls = []
+    original_get = repos["recommendation"].get
+
+    def spy_get(recommendation_id):
+        calls.append(recommendation_id)
+        return original_get(recommendation_id)
+
+    monkeypatch.setattr(repos["recommendation"], "get", spy_get)
+
+    joined, missing = service._join_recommendations(evaluations)
+
+    assert calls == []
+    assert len(joined) == 5
+    assert missing == []
+
+
+def test_join_recommendations_uses_bounded_get_many_calls(aws_env, repos, monkeypatch) -> None:
+    """B/C: get_many()が呼ばれ、対象件数がchunk上限を超えると複数回のbounded
+    callに分割されること。1回のget_many()引数件数がchunk上限を超えないこと。
+    """
+    chunk_size = module._RECOMMENDATION_JOIN_CHUNK_SIZE
+    total = chunk_size * 2 + 3  # ちょうど3チャンクに分かれる件数
+    evaluations = _seed_join_fixture(repos, total)
+    service = _build_service(repos)
+
+    calls: list[list[str]] = []
+    original_get_many = repos["recommendation"].get_many
+
+    def spy_get_many(recommendation_ids):
+        ids = list(recommendation_ids)
+        calls.append(ids)
+        return original_get_many(ids)
+
+    monkeypatch.setattr(repos["recommendation"], "get_many", spy_get_many)
+
+    joined, missing = service._join_recommendations(evaluations)
+
+    assert len(joined) == total
+    assert missing == []
+    assert len(calls) == 3  # ceil(total / chunk_size)
+    for call_ids in calls:
+        assert len(call_ids) <= chunk_size
+    assert sum(len(c) for c in calls) == total
+
+
+def test_join_recommendations_missing_id_semantics_match_oracle(aws_env, repos) -> None:
+    """D/E: missing_idsの意味・joined結果が、旧get()方式のoracleと同値であること。
+    欠落IDが複数(重複を含む)ケースで確認する。
+    """
+    evaluations = _seed_join_fixture(repos, 20, missing_every=3)
+    # 同じ欠落IDを複数のevaluationに参照させ、重複した欠落が重複排除されずに
+    # 残ることも確認する。
+    dup_missing = _evaluation("e-dup-missing", "missing-0", EvaluationLabel.SUCCESS,
+                               dt.datetime(2026, 8, 10, 9, 0, tzinfo=dt.UTC))
+    repos["evaluation"].save(dup_missing)
+    evaluations = [*evaluations, dup_missing]
+
+    service = _build_service(repos)
+
+    actual_joined, actual_missing = service._join_recommendations(evaluations)
+    oracle_joined, oracle_missing = _oracle_join_via_get(repos, evaluations)
+
+    assert [(e.evaluation_id, r.recommendation_id) for e, r in actual_joined] == [
+        (e.evaluation_id, r.recommendation_id) for e, r in oracle_joined
+    ]
+    assert actual_missing == oracle_missing
+    # missing-0 は evaluations 内で複数回参照されており、重複排除されず
+    # 2回(元のevaluation + dup_missing)残ることを明示的に確認する。
+    assert actual_missing.count("missing-0") == 2
+
+
+def test_join_recommendations_duplicate_recommendation_id_is_fetched_once(
+    aws_env, repos, monkeypatch
+) -> None:
+    """F: 同じrecommendation_idを複数のEvaluationResultが参照する場合、
+    Recommendation取得回数を必要以上に増やさず、join結果はEvaluationResult
+    件数ぶん正しく残ること。
+    """
+    base = dt.datetime(2026, 8, 10, 9, 0, tzinfo=dt.UTC)
+    repos["recommendation"].save(_recommendation("shared-rec", RecommendationType.BUY, "v1", base))
+    evaluations = [
+        _evaluation(f"e{i}", "shared-rec", EvaluationLabel.SUCCESS, base) for i in range(5)
+    ]
+    for ev in evaluations:
+        repos["evaluation"].save(ev)
+    service = _build_service(repos)
+
+    calls: list[list[str]] = []
+    original_get_many = repos["recommendation"].get_many
+
+    def spy_get_many(recommendation_ids):
+        ids = list(recommendation_ids)
+        calls.append(ids)
+        return original_get_many(ids)
+
+    monkeypatch.setattr(repos["recommendation"], "get_many", spy_get_many)
+
+    joined, missing = service._join_recommendations(evaluations)
+
+    assert len(joined) == 5  # EvaluationResult件数ぶん残る
+    assert missing == []
+    assert len(calls) == 1  # 1チャンクで済む件数のためget_many呼び出しは1回
+    # get_many()へ渡すID列は評価件数ぶん(5件、"shared-rec"が5回)であってよい。
+    # dedupはget_many()内部(dict.fromkeys)の責務であり、呼び出し側では
+    # 重複除去済みである必要はない(実測: 呼んだ回数=1回のみが要件)。
+    recs = {id(r) for _, r in joined}
+    assert len(recs) == 1  # 同一Recommendationオブジェクトが再利用されている
