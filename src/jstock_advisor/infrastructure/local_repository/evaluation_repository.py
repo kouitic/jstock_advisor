@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +54,19 @@ class EvaluationResultRepository:
 
     def list_all(self) -> list[EvaluationResult]:
         return self._store.list_all()
+
+    def iter_all(self) -> Iterator[EvaluationResult]:
+        """全件を1件ずつ遅延生成する(Issue #377)。
+
+        `RecommendationRepository.iter_all()`(Issue #113)と同じ理由・同じ契約。
+        `list_all()`と異なり全ページを`list`へ保持しないため、ピークメモリは
+        「1ページ分」に有界となる。週次改善レビュー(weekly_improvement_review_
+        service.py)が本コレクションを毎回全件走査しており、対象が本番実測で
+        3万件規模へ育っている(Issue #377)。定点評価ループのように全件を1回
+        走査するだけの用途では必ずこちらを使うこと。列挙順・件数・内容は
+        `list_all()`と一致する(CollectionStoreの契約。collection_store.py参照)。
+        """
+        return self._store.iter_all()
 
     def list_by_recommendation(self, recommendation_id: str) -> list[EvaluationResult]:
         return self._store.find(lambda e: e.recommendation_id == recommendation_id)
