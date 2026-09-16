@@ -271,6 +271,53 @@ class WeeklyImprovementReviewService:
                 results.append(evaluation)
         return results
 
+    def _collect_evaluations_for_windows(
+        self, windows: list[tuple[str, dt.date, dt.date]]
+    ) -> dict[str, list[EvaluationResult]]:
+        """1回のstreaming scanで、複数の対象週(当該週+過去N週)へ同時に振り分ける
+        (Issue #377)。
+
+        `windows`は`(review_week_label, period_start, period_end)`の列。
+        呼び出し側は互いに重複しない7日間の集合を渡すこと(呼び出し側が
+        `_previous_week_label()`の連鎖で作るため、設計上必ず非重複・連続する)。
+
+        evaluation_dateがどのwindowにも該当しない評価は捨てる。これは
+        `_collect_evaluations_for_period()`を対象週ごとに個別に呼んだ場合と
+        集合として同じ結果になる(個別に絞り込んで含まれないレコードは、
+        まとめて絞り込んでも含まれない。windowsが非重複であるため、1件の
+        evaluationが複数のwindowへ二重に入ることもない)。
+
+        Issue #113と同じ理由でiter_all()を使う(全ページをlistへ保持しない)。
+        Issue #377: 従来は対象週ごとに`list_all()`(または個別filter)を
+        呼んでおり、history_weeks_for_comparison分だけ全件走査が繰り返されて
+        いた(1 + weeks_back回)。本メソッドは1回の走査で済ませる。
+        """
+        target_horizon = self._review_config.evaluation_horizon_days
+        buckets: dict[str, list[EvaluationResult]] = {label: [] for label, _, _ in windows}
+        scanned = matched = 0
+        for evaluation in self._evaluations.iter_all():
+            scanned += 1
+            if scanned % 10_000 == 0:
+                logger.info(
+                    "weekly review single-pass scan progress scanned=%d matched=%d",
+                    scanned,
+                    matched,
+                )
+            if evaluation.horizon_calendar_days != target_horizon:
+                continue
+            for label, period_start, period_end in windows:
+                if period_start <= evaluation.evaluation_date <= period_end:
+                    buckets[label].append(evaluation)
+                    matched += 1
+                    break  # windowsは非重複なので複数バケツへは入らない
+        logger.info(
+            "weekly review single-pass scan done scanned=%d matched=%d windows=%d",
+            scanned,
+            matched,
+            len(windows),
+        )
+        return buckets
+
     def _recompute_past_weeks(
         self, current_review_week: str, now: dt.datetime
     ) -> tuple[int, dict[str, int]]:

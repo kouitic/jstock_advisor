@@ -1183,3 +1183,66 @@ def test_recomputed_weeks_are_recorded_per_week(aws_env, repos) -> None:
 
     assert outcome.past_weeks_metrics_recomputed_by_week == {one_week_ago: 1}
     assert outcome.past_weeks_metrics_recomputed == 1
+    assert outcome.past_weeks_metrics_recomputed == 1
+
+
+def test_collect_evaluations_for_windows_matches_per_period_collection(
+    aws_env, repos
+) -> None:
+    """1回のstreaming scanでの振り分け結果が、windowごとに個別に
+    _collect_evaluations_for_period()を呼んだ場合の結果と一致すること
+    (Issue #377。#114 C-5への影響評価の裏付けの一部)。
+    """
+    service = _build_service(repos)
+    review_week = "2026-W38"
+    monday = module._monday_of_iso_week(review_week)
+    windows = []
+    label = review_week
+    for _ in range(5):
+        period_start = module._monday_of_iso_week(label)
+        period_end = period_start + dt.timedelta(days=6)
+        windows.append((label, period_start, period_end))
+        label = module._previous_week_label(label)
+
+    for i, (_wlabel, wstart, wend) in enumerate(windows):
+        repos["evaluation"].save(
+            _evaluation(f"mon{i}", f"rec{i}a", EvaluationLabel.SUCCESS,
+                        dt.datetime.combine(wstart, dt.time(0), tzinfo=dt.UTC))
+        )
+        repos["evaluation"].save(
+            _evaluation(f"sun{i}", f"rec{i}b", EvaluationLabel.SUCCESS,
+                        dt.datetime.combine(wend, dt.time(23), tzinfo=dt.UTC))
+        )
+    outside_date = monday - dt.timedelta(days=365)
+    repos["evaluation"].save(
+        _evaluation("outside", "rec-outside", EvaluationLabel.SUCCESS,
+                    dt.datetime.combine(outside_date, dt.time(0), tzinfo=dt.UTC))
+    )
+    repos["evaluation"].save(
+        _evaluation("wrong_horizon", "rec-wh", EvaluationLabel.SUCCESS,
+                    dt.datetime.combine(windows[0][1], dt.time(12), tzinfo=dt.UTC),
+                    horizon_calendar_days=14)
+    )
+
+    single_pass = service._collect_evaluations_for_windows(windows)
+
+    for wlabel, wstart, wend in windows:
+        individual = service._collect_evaluations_for_period(wstart, wend)
+        assert {e.evaluation_id for e in single_pass[wlabel]} == {
+            e.evaluation_id for e in individual
+        }
+        assert len(single_pass[wlabel]) == 2
+
+    total_bucketed = sum(len(v) for v in single_pass.values())
+    assert total_bucketed == 10
+
+
+def test_collect_evaluations_for_windows_returns_empty_buckets_when_no_data(
+    aws_env, repos
+) -> None:
+    service = _build_service(repos)
+    windows = [("2026-W38", dt.date(2026, 9, 14), dt.date(2026, 9, 20))]
+
+    result = service._collect_evaluations_for_windows(windows)
+
+    assert result == {"2026-W38": []}
