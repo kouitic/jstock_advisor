@@ -1483,9 +1483,18 @@ def test_success_day_with_zero_additions_is_cut_off_as_not_required(
 # これは利用者へ届いたかに最も近い観測点であり、かつ finalizer の外側にある。
 #
 # 対で固定する(片側だけでは通ってしまう実装を、対側が落とす):
-#   A1  失敗日は届く            <-> 新 switch を false にすれば止まる
-#   A2  通常の追加通知は不変     <-> notification_enabled を true にすれば届く
-#   A3  2 つの switch は独立(OR) <-> どちらも false なら止まる
+#   A1  失敗日は届く              <-> 新 switch を false にすれば止まる
+#   A2  通常の追加通知は不変       <-> notification_enabled を true にすれば届く
+#   A3  失敗日は 失敗日用 switch でのみ 判定される(if/else。OR ではない)
+#       <-> 通常の switch が true でも 失敗日用が false なら 止まる
+#
+# ★ ★ レビュー対応(PR #378): 当初の実装は
+#     `if universe_fetch_failed and universe_failure_notification_enabled: True`
+#     `return notification_enabled`(= OR)であり、失敗日用の switch が false でも
+#     notification_enabled が true なら 送ってしまっていた。
+#     docstring は当初から「専用のフラグで判定する」(= if/else)と 書いており、
+#     ★ ★ 実装だけが docstring とずれていた。以下の A3 の 2 本は
+#     この ずれを 固定する(★ 1 本目は 期待値を SKIPPED へ 修正)。
 # ---------------------------------------------------------------------------
 
 
@@ -1619,13 +1628,14 @@ def test_a2_success_day_is_delivered_when_addition_notification_is_enabled(
 # --- A3  2 つの switch は独立している(OR であって AND でない) --------------
 
 
-def test_a3_failure_day_is_delivered_via_the_addition_switch_alone(
+def test_a3_failure_day_is_stopped_when_its_own_switch_is_off_even_with_general_notification_on(
     dynamo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """失敗日用の switch が false でも、通常の追加通知が有効なら届く。
+    """失敗日は、通常の追加通知が有効でも、失敗日用 switch が false なら 止まる。
 
-    新しい switch を **既存 switch への上乗せの条件**(AND)として実装すると、
-    失敗日だけが通常より厳しくなり、ここで落ちる。
+    ★ ★ レビュー対応(PR #378)。当初の実装は OR であり、この象限
+    (失敗日 + 通常 switch=ON + 失敗日用 switch=OFF)で 誤って SENT していた。
+    失敗日は **失敗日用の switch だけ**で判定する(通常 switch の値は 無関係)。
     """
     notification = _finalize_capturing(
         monkeypatch,
@@ -1638,16 +1648,18 @@ def test_a3_failure_day_is_delivered_via_the_addition_switch_alone(
         ),
     )
 
-    assert len(notification.summaries) == 1
-    assert _outcome_of() == NOTIFICATION_OUTCOME_SENT
+    assert notification.summaries == []
+    assert _outcome_of() == NOTIFICATION_OUTCOME_SKIPPED
 
 
-def test_a3_failure_day_is_stopped_only_when_both_switches_are_off(
+def test_a3_failure_day_is_stopped_when_its_own_switch_is_off_and_general_notification_is_disabled(
     dynamo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """対の 1 本。両方 false のときだけ止まる(= 2026-09-14 より前と同じ状態)。
+    """失敗日用 switch が false かつ 通常 switch も false のとき 止まる。
 
-    A3 の上の 1 本と対で、2 つの switch が **OR** で効くことを固定する。
+    ★ ★ 上のテストと対で、失敗日の 可否が **通常 switch の値に 関わらず**
+    失敗日用 switch だけで 決まることを 確かめる(= 2026-09-14 より前と 同じ
+    最終状態だが、判定の 経路が 異なる)。
     """
     notification = _finalize_zero_addition(
         monkeypatch,

@@ -978,8 +978,8 @@ def _notification_allowed(wc: Any, universe_fetch_failed: bool) -> bool:
     したがって失敗日は専用のフラグで判定する。通常の追加通知の可否は
     `notification_enabled` のままであり、**こちらは変えない**。
     """
-    if universe_fetch_failed and wc.universe_failure_notification_enabled:
-        return True
+    if universe_fetch_failed:
+        return bool(wc.universe_failure_notification_enabled)
     return bool(wc.notification_enabled)
 
 
