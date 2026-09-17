@@ -52,11 +52,9 @@ _PARTIAL_RISK_REDUCTION_LABEL = "一部縮小"
 # 範囲内(entry以下)であることは、target_priceの表示だけでは読み取れない
 # (「まで」はNEAR BUYの接近方向専用の文言であり、BUY側の「既に範囲内」に
 # 転用すると意味が反転し誤読を増やすため転用しない。#374 Phase A報告
-# 3-1節参照)。★ ★ 具体的な文言はUSER向け表示文面であり、以下の2定数は
-# MANAGERの確定判断待ちの候補である(候補1を既定値として仮置き)。
-# 確定後はこの2定数の値を差し替えるだけで済む。
-_ENTRY_PRICE_WITHIN_RANGE_LABEL = "打診圏内"  # 候補1(Phase A報告 3-1節 案b)
-_ENTRY_PRICE_ABOVE_RANGE_LABEL = "打診超過"  # 候補1(Phase A報告 3-1節 案b)
+# 3-1節参照)。文言はUSER確定(2026-09-17)。
+_ENTRY_PRICE_WITHIN_RANGE_LABEL = "打診価格内"
+_ENTRY_PRICE_ABOVE_RANGE_LABEL = "打診価格超過"
 
 
 def _entry_price_range_label(recommendation: Recommendation) -> str | None:

@@ -119,7 +119,8 @@ class NotificationTextInput:
     # adapter層が構造上の値(current_vs_entry_price_pct)から短い状態語を
     # 事前に計算して渡す(formatter側では判定ロジックを持たず、渡された
     # 文字列をそのまま1つの任意セグメントとして表示するのみ)。
-    # ラベル文言自体はUSER向け表示文面のため未確定(adapter側で候補管理)。
+    # ラベル文言(「打診価格内」/「打診価格超過」)はUSER確定(2026-09-17、
+    # adapter層の_ENTRY_PRICE_WITHIN_RANGE_LABEL等を参照)。
     entry_price_range_label: str | None = None
 
 
@@ -191,15 +192,18 @@ def format_notification_text(
         optional_segments.append((f"あと{data.distance_pct:.1f}%", False))
     elif data.target_price_withheld_label is not None:
         optional_segments.append((data.target_price_withheld_label, True))
+    # Issue #374 (N-1): 「現在値が打診買いの範囲内かどうか」を示す短い状態語。
+    # target_priceの直後(secondary_target_price・銘柄分類より優先)に置く
+    # (USER確定: 銘柄分類より表示優先度を高くする)。非必須(70文字上限で
+    # 落ちてよいが、secondary_target_price・type_labelより先に評価されるため
+    # 逼迫時に生き残りやすい)。
+    if data.entry_price_range_label:
+        optional_segments.append((data.entry_price_range_label, False))
     if data.target_price is not None and data.secondary_target_price is not None:
         secondary_label = data.secondary_target_price_label or "目安"
         optional_segments.append(
             (f"{secondary_label}{_fmt_price(data.secondary_target_price)}", False)
         )
-    # Issue #374 (N-1): 「現在値が打診買いの範囲内かどうか」を示す短い状態語。
-    # target_priceの後(価格情報のすぐ後ろ)に置く。非必須(70文字上限で落ちてよい)。
-    if data.entry_price_range_label:
-        optional_segments.append((data.entry_price_range_label, False))
     if data.is_resumed_after_gap:
         optional_segments.append(("監視再開", False))
     elif data.promoted_from_watch_days is not None:

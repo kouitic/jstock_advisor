@@ -262,18 +262,18 @@ def test_entry_price_range_label_is_shown_as_optional_segment() -> None:
     data = _base(
         category=NotificationCategory.BUY,
         target_price=Decimal("3600"),
-        entry_price_range_label="打診圏内",
+        entry_price_range_label="打診価格内",
     )
     text = format_notification_text(data)
-    assert "打診圏内" in text
+    assert "打診価格内" in text
     assert len(text) <= MAX_CHARS
 
 
 def test_entry_price_range_label_absent_when_none() -> None:
     data = _base(category=NotificationCategory.BUY, target_price=Decimal("3600"))
     text = format_notification_text(data)
-    assert "打診圏内" not in text
-    assert "打診超過" not in text
+    assert "打診価格内" not in text
+    assert "打診価格超過" not in text
 
 
 def test_entry_price_range_label_can_be_dropped_under_soft_limit() -> None:
@@ -283,12 +283,64 @@ def test_entry_price_range_label_can_be_dropped_under_soft_limit() -> None:
         stock_name="非常に長い銘柄名" * 6,
         target_price=Decimal("3600"),
         reason="配当性向の余力評価に基づく非常に長い理由テキストがここに続きます" * 3,
-        entry_price_range_label="打診圏内",
+        entry_price_range_label="打診価格内",
     )
     text = format_notification_text(data)
     assert len(text) <= MAX_CHARS
     # 落ちた場合はセグメントが無いだけであり、例外にはならない(isinstance確認のみ)
     assert isinstance(text, str)
+
+
+def test_entry_price_range_label_survives_before_type_label_at_moderate_overflow() -> None:
+    """N-1(entry_price_range_label)はtype_label(銘柄分類)より先に評価される
+    ため、中程度のoverflow(secondary_target_price相当が無い単純な構成で
+    target_price+N-1+type_labelがちょうど競合する境界)ではN-1が残り
+    type_labelが落ちる(実測: 銘柄名43文字でこの境界に達する)。
+    """
+    data = _base(
+        category=NotificationCategory.BUY,
+        stock_code="9432",
+        stock_name="あ" * 43,
+        target_price=Decimal("3600"),
+        entry_price_range_label="打診価格超過",
+        stock_types=[StockType.GROWTH],
+    )
+    text = format_notification_text(data)
+    assert len(text) <= MAX_CHARS
+    assert "打診価格超過" in text
+    assert "成長株" not in text
+
+
+def test_entry_price_range_label_can_still_drop_while_type_label_survives() -> None:
+    """★ ★ 既知の限界(Issue #374、実測で確認・未解決)。format_notification_text()の
+    soft limitは「候補文字列が上限を超えたセグメントだけをskipし、後続を
+    諦めない」設計(再コードレビュー対応2026-08)であり、出現順=厳密な
+    生存優先順位ではない。skipされたセグメントは`text`を伸ばさないため、
+    その後に評価される、より短い後続セグメント(type_label等)が代わりに
+    入る余地が生まれる。
+
+    このテストは、銘柄名の文字数を1文字ずつ動かして実際に見つけた
+    反例(43文字はN-1が残りtype_labelが落ちる。47文字はN-1が落ち
+    type_labelが残る)を固定するものであり、「発生しないことの証明」では
+    なく「現状は発生することの記録」である(このテスト自体は現状の実際の
+    挙動と一致するためPASSする)。N-1をtype_labelより厳密に優先させたい
+    場合は、soft limitのアルゴリズム自体(全カテゴリ共通)を変更する必要が
+    あり、対応方針が決まるまでの未解決事項としてIssue #374へ報告済み。
+    """
+    data = _base(
+        category=NotificationCategory.BUY,
+        stock_code="9432",
+        stock_name="あ" * 47,
+        target_price=Decimal("3600"),
+        entry_price_range_label="打診価格超過",
+        stock_types=[StockType.GROWTH],
+    )
+    text = format_notification_text(data)
+    assert len(text) <= MAX_CHARS
+    # ★ ★ 現状の実際の挙動(望ましい優先順位の逆転)を記録する。
+    # 対応方針が決まったらこのアサーションを更新し、xfailを外すこと。
+    assert "打診価格超過" not in text
+    assert "成長株" in text
 
 
 # --- Issue #374 (N-2): 銘柄分類(type_label)は価格・理由群と別行("\n")にする ---

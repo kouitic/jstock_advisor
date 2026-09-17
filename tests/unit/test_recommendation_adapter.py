@@ -59,6 +59,29 @@ def test_review_routes_to_manual_review_not_sell() -> None:
     assert text_input.target_price is None
 
 
+# --- Issue #374 (1/2節の調査): 算定不可(A)と決算前抑制(B)は別経路であり、
+# B側はtarget_price_withheld_labelを一切使わないことを固定する
+# (「算定保留」系labelとBが混同されていないことの回帰テスト)。
+
+
+@pytest.mark.parametrize(
+    ("recommendation_type", "expected_reason"),
+    [
+        (RecommendationType.WATCH_BEFORE_EARNINGS, "決算発表接近のため様子見"),
+        (RecommendationType.REVIEW_BEFORE_EARNINGS, "決算発表状況確認待ち"),
+        (RecommendationType.REVIEW_AFTER_EARNINGS, "決算発表状況確認待ち"),
+    ],
+)
+def test_earnings_suppressed_types_never_use_withheld_label(
+    recommendation_type: RecommendationType, expected_reason: str
+) -> None:
+    rec = _make_recommendation(recommendation_type=recommendation_type)
+    text_input = build_notification_text_input(rec, NotificationCategory.WATCH)
+    assert text_input.target_price is None
+    assert text_input.target_price_withheld_label is None
+    assert text_input.reason == expected_reason
+
+
 def test_watch_price_field_uses_partial_profit_start_price() -> None:
     rec = _make_recommendation(
         recommendation_type=RecommendationType.WATCH,
@@ -213,10 +236,9 @@ def test_buy_shows_tentative_and_standard_prices() -> None:
 
 
 # --- Issue #374 (N-1): 現在値がentry(打診買い価格)の範囲内かどうかの状態語 ---
-# 文言自体はrecommendation_adapter.py側の候補定数(_ENTRY_PRICE_WITHIN_RANGE_
-# LABEL/_ENTRY_PRICE_ABOVE_RANGE_LABEL)がMANAGER確定待りのため、ここでは
-# 文言の具体値ではなく「範囲内/範囲外/算定不能」の3値が正しく区別されることを
-# 確認する(確定後に文言だけ変わってもテストの意図は壊れない)。
+# 文言はUSER確定(2026-09-17): 「打診価格内」/「打診価格超過」。
+# 境界(current_vs_entry_price_pct<=0、すなわち現在値<=entry)は「打診価格内」
+# 側とする(USER確定どおり。既存のpct<=0分岐から変更していない)。
 
 
 @pytest.mark.parametrize(
@@ -240,9 +262,9 @@ def test_buy_entry_price_range_label_reflects_current_vs_entry_sign(
     )
     text_input = build_notification_text_input(rec, NotificationCategory.BUY)
     if expect_within_range:
-        assert text_input.entry_price_range_label == "打診圏内"
+        assert text_input.entry_price_range_label == "打診価格内"
     else:
-        assert text_input.entry_price_range_label == "打診超過"
+        assert text_input.entry_price_range_label == "打診価格超過"
 
 
 def test_buy_entry_price_range_label_absent_when_pct_not_calculable() -> None:
