@@ -136,6 +136,19 @@ def build_holding_decision_recommendation(
         fair_value_range=snapshot.fair_value_range,
     )
 
+    # Issue #67 F-I2: 上のrecommend_sell_prices()が実際に使うfair_value_range
+    # (usable_for_trading_judgmentを条件に売却価格の決定へ使用している)を、
+    # 利確側(profit_taking_service.py)と同じ規約でRecommendationへ保存する。
+    # 保存し忘れていたため、価格を提示できなかった理由がレコードに残らず
+    # (#21が解こうとした失敗モードの再発)、DecisionSnapshotへも伝播しない
+    # 状態だった。
+    fv_range = snapshot.fair_value_range
+    fair_value_spread_ratio = (
+        float(fv_range.bull / fv_range.bear)
+        if fv_range.bear is not None and fv_range.bull is not None and fv_range.bear > 0
+        else None
+    )
+
     reasons = [_reason_label(r) for r in result.negative_reasons]
     counter_factors = [_reason_label(r) for r in result.positive_reasons]
 
@@ -167,6 +180,31 @@ def build_holding_decision_recommendation(
         shareholder_benefit_yield_pct_at_recommendation=snapshot.benefit_yield_pct,
         total_yield_pct_at_recommendation=snapshot.total_yield_pct,
         fair_value_at_recommendation=snapshot.fair_value,
+        # Issue #67 F-I2: fair value 6フィールド + #21の3フィールド。
+        # profit_taking_service.pyと完全に同じ規約(enumは.value、
+        # fair_value_methodsはmethod/fair_value/confidence/exclusion_reasonの
+        # dict列)で転記する。
+        fair_value_bear=fv_range.bear,
+        fair_value_neutral=fv_range.neutral,
+        fair_value_bull=fv_range.bull,
+        fair_value_overall_confidence=fv_range.overall_confidence,
+        fair_value_methods=[
+            {
+                "method": m.method,
+                "fair_value": str(m.fair_value) if m.fair_value is not None else None,
+                "confidence": m.confidence.value,
+                "exclusion_reason": m.exclusion_reason,
+            }
+            for m in (fv_range.methods_used + fv_range.methods_excluded)
+        ],
+        fair_value_spread_ratio=fair_value_spread_ratio,
+        fair_value_usable_for_trading_judgment=fv_range.usable_for_trading_judgment,
+        fair_value_unusable_reason_code=(
+            fv_range.unusable_reason_code.value
+            if fv_range.unusable_reason_code is not None
+            else None
+        ),
+        fair_value_unusable_reason=fv_range.unusable_reason,
         reasons=reasons,
         counter_factors=counter_factors,
         confidence=_CONFIDENCE_MAP.get(result.confidence, ConfidenceLevel.LOW),
@@ -191,6 +229,13 @@ def build_holding_decision_recommendation(
         financial_input_provenance=snapshot.financial_input_provenance,
         rule_version=rule_version,
         config_values_used={
+            # Issue #67 F-I6: rule_versionへ「ルール版」(RuleVersionService管理)
+            # を格納するよう是正した(呼び出し元の変更)のに伴い、従来
+            # rule_versionへ入っていたscoring_model_versionを明示キーとして
+            # 保存する(2つの版概念を分離。値そのものはholding_decision_
+            # result_id経由でHoldingDecisionResult側からも復元可能だが、
+            # Recommendation側にも直接残すことで参照を1段減らす)。
+            "scoring_model_version": str(config.holding_decision.scoring_model_version),
             "holding_decision_result_id": result.holding_decision_result_id,
             "base_score": result.base_score,
             "final_score": result.final_score,
