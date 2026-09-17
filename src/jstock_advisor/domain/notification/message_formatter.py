@@ -112,6 +112,15 @@ class NotificationTextInput:
     # Recommendation生成時点で数量と整合していることを保証すること(通知層では
     # 独立に再計算せず、保存済みのratio値を信頼)。
     suggested_sell_ratio: float | None = None
+    # Issue #374 (N-1): 打診買い価格(target_price)は上限価格であり、
+    # 現在値がその範囲内(entry以下)かどうかは打診買い価格の表示だけでは
+    # 読み取れない(「まで」はNEAR BUYの接近方向専用の文言であり、BUY側の
+    # 「既に範囲内」に転用すると意味が反転し誤読を増やすため転用しない)。
+    # adapter層が構造上の値(current_vs_entry_price_pct)から短い状態語を
+    # 事前に計算して渡す(formatter側では判定ロジックを持たず、渡された
+    # 文字列をそのまま1つの任意セグメントとして表示するのみ)。
+    # ラベル文言自体はUSER向け表示文面のため未確定(adapter側で候補管理)。
+    entry_price_range_label: str | None = None
 
 
 def _fmt_price(price: Decimal) -> str:
@@ -187,6 +196,10 @@ def format_notification_text(
         optional_segments.append(
             (f"{secondary_label}{_fmt_price(data.secondary_target_price)}", False)
         )
+    # Issue #374 (N-1): 「現在値が打診買いの範囲内かどうか」を示す短い状態語。
+    # target_priceの後(価格情報のすぐ後ろ)に置く。非必須(70文字上限で落ちてよい)。
+    if data.entry_price_range_label:
+        optional_segments.append((data.entry_price_range_label, False))
     if data.is_resumed_after_gap:
         optional_segments.append(("監視再開", False))
     elif data.promoted_from_watch_days is not None:
@@ -197,9 +210,6 @@ def format_notification_text(
         optional_segments.append((f"{data.consecutive_business_days}日連続", False))
     if data.reason:
         optional_segments.append((data.reason, False))
-    type_label = _representative_stock_types(data.stock_types)
-    if type_label:
-        optional_segments.append((type_label, False))
 
     text = required
     for segment, is_required_segment in optional_segments:
@@ -215,5 +225,17 @@ def format_notification_text(
         # (再コードレビュー対応2026-08、指摘2再修正)。breakをやめてスキップに
         # 変えることで、後続の必須セグメントの評価を打ち切らないようにする。
         if is_critical_risk or is_required_segment or len(candidate) <= max_chars:
+            text = candidate
+
+    # Issue #374 (N-2): 銘柄分類(type_label)は価格・理由等とは種類が異なる
+    # 情報であり、他の任意セグメントと同じ"｜"区切りで直列に連結すると、
+    # 価格の3段と銘柄分類が同列の情報に見えてしまう(区別できない)。
+    # 価格・理由群とは別の行として"\n"で区切ることで、視覚的に別ブロックだと
+    # 分かるようにする(必須直後の1件目セグメントに使っている"\n"の使い方と
+    # 揃える)。type_label自体は非必須のまま(70文字上限で落ちてよい)。
+    type_label = _representative_stock_types(data.stock_types)
+    if type_label:
+        candidate = f"{text}\n{type_label}"
+        if is_critical_risk or len(candidate) <= max_chars:
             text = candidate
     return text

@@ -28,6 +28,7 @@ def _make_recommendation(
     buy_prices: BuyPriceLevels | None = None,
     suggested_sell_shares: int | None = None,
     suggested_sell_ratio: float | None = None,
+    current_vs_entry_price_pct: Decimal | None = None,
 ) -> Recommendation:
     return Recommendation(
         recommendation_id="rec-1",
@@ -42,6 +43,7 @@ def _make_recommendation(
         rule_version="v1-mvp",
         suggested_sell_shares=suggested_sell_shares,
         suggested_sell_ratio=suggested_sell_ratio,
+        current_vs_entry_price_pct=current_vs_entry_price_pct,
     )
 
 
@@ -208,6 +210,51 @@ def test_buy_shows_tentative_and_standard_prices() -> None:
     assert text_input.target_price == Decimal("3600")
     assert text_input.secondary_target_price == Decimal("3400")
     assert text_input.secondary_target_price_label == "通常"
+
+
+# --- Issue #374 (N-1): 現在値がentry(打診買い価格)の範囲内かどうかの状態語 ---
+# 文言自体はrecommendation_adapter.py側の候補定数(_ENTRY_PRICE_WITHIN_RANGE_
+# LABEL/_ENTRY_PRICE_ABOVE_RANGE_LABEL)がMANAGER確定待りのため、ここでは
+# 文言の具体値ではなく「範囲内/範囲外/算定不能」の3値が正しく区別されることを
+# 確認する(確定後に文言だけ変わってもテストの意図は壊れない)。
+
+
+@pytest.mark.parametrize(
+    ("pct", "expect_within_range"),
+    [
+        (Decimal("-3.2"), True),  # 現在値がentry以下(範囲内)
+        (Decimal("0"), True),  # 境界(entryと同値も範囲内側とする)
+        (Decimal("4.5"), False),  # 現在値がentryを上回る(範囲外)
+    ],
+    ids=["below_entry", "at_entry_boundary", "above_entry"],
+)
+def test_buy_entry_price_range_label_reflects_current_vs_entry_sign(
+    pct: Decimal, expect_within_range: bool
+) -> None:
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.BUY,
+        buy_prices=BuyPriceLevels(
+            tentative=PriceWithRationale(price=Decimal("3600"), rationale="x"),
+        ),
+        current_vs_entry_price_pct=pct,
+    )
+    text_input = build_notification_text_input(rec, NotificationCategory.BUY)
+    if expect_within_range:
+        assert text_input.entry_price_range_label == "打診圏内"
+    else:
+        assert text_input.entry_price_range_label == "打診超過"
+
+
+def test_buy_entry_price_range_label_absent_when_pct_not_calculable() -> None:
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.BUY,
+        buy_prices=BuyPriceLevels(
+            tentative=PriceWithRationale(price=Decimal("3600"), rationale="x"),
+        ),
+        current_vs_entry_price_pct=None,
+    )
+    text_input = build_notification_text_input(rec, NotificationCategory.BUY)
+    assert text_input.entry_price_range_label is None
 
 
 # --- 指摘3対応: suggested_sell_shares/ratio 整合性(コードレビュー対応2026-08) ---

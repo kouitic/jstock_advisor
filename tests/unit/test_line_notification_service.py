@@ -1674,7 +1674,9 @@ def test_notify_buy_candidates_digest_sends_one_message_for_multiple_winners(
     # 銘柄名)になった(送信順序自体が優先度順を表す)。
     assert "買い 4516 日本新薬" in message
     assert "買い 1111 日本新薬" in message
-    assert "対象: 最大2銘柄" in message
+    # Issue #374 (N-3): len(winners)は実数であり上限ではないため「最大」を外す
+    assert "対象: 2銘柄" in message
+    assert "最大" not in message
     blocks = [line for line in message.split("\n\n") if line.startswith("買い ")]
     assert all(len(block) <= 70 for block in blocks)
 

@@ -253,3 +253,65 @@ def test_non_partial_sell_never_displays_stray_quantity(
 # quantity_segment()と同一のArrange/Act/Assert(PARTIAL_SELL+shares=None+
 # ratio=None→「株」非表示)であったため削除した(テストコード削減対応2026-08)。
 # 当該観点はCase Jがそのまま維持している。
+
+
+# --- Issue #374 (N-1): entry_price_range_labelセグメントの表示 ---
+
+
+def test_entry_price_range_label_is_shown_as_optional_segment() -> None:
+    data = _base(
+        category=NotificationCategory.BUY,
+        target_price=Decimal("3600"),
+        entry_price_range_label="打診圏内",
+    )
+    text = format_notification_text(data)
+    assert "打診圏内" in text
+    assert len(text) <= MAX_CHARS
+
+
+def test_entry_price_range_label_absent_when_none() -> None:
+    data = _base(category=NotificationCategory.BUY, target_price=Decimal("3600"))
+    text = format_notification_text(data)
+    assert "打診圏内" not in text
+    assert "打診超過" not in text
+
+
+def test_entry_price_range_label_can_be_dropped_under_soft_limit() -> None:
+    """他の非必須セグメントと同様、70文字を超える場合は落ちてよい(non-required)。"""
+    data = _base(
+        category=NotificationCategory.BUY,
+        stock_name="非常に長い銘柄名" * 6,
+        target_price=Decimal("3600"),
+        reason="配当性向の余力評価に基づく非常に長い理由テキストがここに続きます" * 3,
+        entry_price_range_label="打診圏内",
+    )
+    text = format_notification_text(data)
+    assert len(text) <= MAX_CHARS
+    # 落ちた場合はセグメントが無いだけであり、例外にはならない(isinstance確認のみ)
+    assert isinstance(text, str)
+
+
+# --- Issue #374 (N-2): 銘柄分類(type_label)は価格・理由群と別行("\n")にする ---
+
+
+def test_stock_type_label_is_separated_by_newline_not_pipe() -> None:
+    data = _base(
+        current_price=Decimal("158"),
+        target_price=Decimal("150"),
+        distance_pct=Decimal("5.1"),
+        stock_types=[StockType.INCOME, StockType.QUALITY],
+    )
+    text = format_notification_text(data)
+    type_label = "・".join(["高配当", "優良株"])
+    # 価格情報(現在値・目安価格)と銘柄分類の間は"｜"ではなく改行で区切る
+    assert f"\n{type_label}" in text
+    assert f"｜{type_label}" not in text
+
+
+def test_stock_type_label_alone_still_uses_newline_from_required() -> None:
+    """他の任意セグメントが無い場合(type_labelのみ)も、既存の1件目セグメント
+    規則(header直後は"\n")と同じ挙動になる(区切り文字の一貫性)。
+    """
+    data = _base(stock_types=[StockType.GROWTH])
+    text = format_notification_text(data)
+    assert "\n成長株" in text

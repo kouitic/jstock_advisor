@@ -48,6 +48,30 @@ _WATCH_PRICE_WITHHELD_LABEL = "価格目安は算定保留"
 _PARTIAL_SELL_WITHHELD_LABEL = "売却目安は算定保留"
 _PARTIAL_RISK_REDUCTION_LABEL = "一部縮小"
 
+# Issue #374 (N-1): 打診買い価格(entry)は上限価格であり、現在値がその
+# 範囲内(entry以下)であることは、target_priceの表示だけでは読み取れない
+# (「まで」はNEAR BUYの接近方向専用の文言であり、BUY側の「既に範囲内」に
+# 転用すると意味が反転し誤読を増やすため転用しない。#374 Phase A報告
+# 3-1節参照)。★ ★ 具体的な文言はUSER向け表示文面であり、以下の2定数は
+# MANAGERの確定判断待ちの候補である(候補1を既定値として仮置き)。
+# 確定後はこの2定数の値を差し替えるだけで済む。
+_ENTRY_PRICE_WITHIN_RANGE_LABEL = "打診圏内"  # 候補1(Phase A報告 3-1節 案b)
+_ENTRY_PRICE_ABOVE_RANGE_LABEL = "打診超過"  # 候補1(Phase A報告 3-1節 案b)
+
+
+def _entry_price_range_label(recommendation: Recommendation) -> str | None:
+    """現在値がentry(打診買い価格)以下(範囲内)かどうかを示す短い状態語。
+
+    current_vs_entry_price_pct(entities/recommendation.py)は「現在値がentryを
+    何%上回っているか」であり、0以下(現在値<=entry)が範囲内を意味する。
+    値が無い(算定不能)場合はNoneを返し、セグメント自体を生成しない
+    (formatter側のNotificationTextInput.entry_price_range_label参照)。
+    """
+    pct = recommendation.current_vs_entry_price_pct
+    if pct is None:
+        return None
+    return _ENTRY_PRICE_WITHIN_RANGE_LABEL if pct <= 0 else _ENTRY_PRICE_ABOVE_RANGE_LABEL
+
 
 def _entry_price(recommendation: Recommendation) -> Decimal | None:
     prices = recommendation.buy_prices
@@ -76,6 +100,7 @@ def _build_buy(recommendation: Recommendation) -> NotificationTextInput:
         # 埋め込みはしない)。
         secondary_target_price=_standard_price(recommendation),
         secondary_target_price_label="通常",
+        entry_price_range_label=_entry_price_range_label(recommendation),
         label_override="到達" if promoted else None,
         promoted_from_watch_days=(
             recommendation.watch_previous_consecutive_business_days if promoted else None
