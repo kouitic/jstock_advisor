@@ -365,6 +365,33 @@ def test_active_mode_general_corporate_new_engine_notifies(store_dir: Path, monk
     assert len(services["line_client"].sent_messages) == 1
 
 
+def test_active_mode_new_engine_uses_rule_version_service_not_scoring_model_version(
+    store_dir: Path, monkeypatch
+):
+    """Issue #67 F-I6: 保有判断のRecommendation.rule_versionは
+    RuleVersionService由来の値(このテスト環境では未運用のためデフォルトの
+    RULE_VERSION_PLACEHOLDER="v1-mvp")であり、scoring_model_version
+    (_RULES.scoring_model_version)そのものが入らないことを固定する。
+    scoring_model_versionはconfig_values_usedへ明示キーとして残る。
+    """
+    services = _build_services(store_dir, RuntimeConfigMode.ACTIVE)
+
+    def _fake_evaluate(self, *args, **kwargs):
+        return HoldingDecisionEvaluationOutcome(
+            _STOCK_CODE, _notifying_holding_decision_result(_STOCK_CODE)
+        )
+
+    monkeypatch.setattr(HoldingDecisionService, "evaluate", _fake_evaluate)
+    _run(services)
+
+    saved_recommendations = services["recommendation_repo"].list_all()
+    assert len(saved_recommendations) == 1
+    rec = saved_recommendations[0]
+    assert rec.rule_version == "v1-mvp"
+    assert rec.rule_version != str(_RULES.scoring_model_version)
+    assert rec.config_values_used["scoring_model_version"] == str(_RULES.scoring_model_version)
+
+
 def test_active_mode_general_corporate_legacy_never_notifies(store_dir: Path, monkeypatch):
     """mode=active(一般事業会社)ではSellSignalService.analyze自体が呼ばれない
     (run_legacy_sell_evaluation=False)。"""
