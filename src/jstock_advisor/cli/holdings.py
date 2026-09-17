@@ -85,8 +85,8 @@ def list_holdings() -> None:
         return
     for h in holdings:
         typer.echo(
-            f"{h.stock_code}\t{h.stock_name}\t{h.shares}株\t平均取得単価:{h.average_purchase_price}円\t"
-            f"口座:{h.account_type.value}"
+            f"owner:{h.owner}\t{h.stock_code}\t{h.stock_name}\t{h.shares}株\t"
+            f"平均取得単価:{h.average_purchase_price}円\t口座:{h.account_type.value}"
         )
 
 
