@@ -882,8 +882,9 @@ def _process_single_candidate(
                 # (Issue #71 F-D2/F-C8)。
                 logger.info(
                     "buy candidates: duplicate delivery skipped (recommendation "
-                    "already exists) batch_id=%s",
+                    "already exists) batch_id=%s stock_code=%s",
                     batch_id,
+                    stock_code,
                 )
             if execution_context.is_validation:
                 # 通知検証モード機能(2026-08追加): _finalize_batchが正常完了後に

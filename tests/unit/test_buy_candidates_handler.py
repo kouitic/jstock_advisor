@@ -3275,7 +3275,14 @@ def test_different_batch_id_produces_different_recommendation_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     """別のbatch_id(=別日の正当な再評価)は別recommendation_idのまま、
-    どちらも保存される(決定的ID化が別バッチまで潰さないことの確認)。"""
+    どちらも保存される(決定的ID化が別バッチまで潰さないことの確認)。
+
+    ★ REVIEWER FINDING F2対応: 期待値を_deterministic_recommendation_id()
+    自身から作らない(鍵の式がbatch_idを無視するよう壊れても、期待値と実装が
+    同じ壊れた式を共有していれば検知できないため)。ここではSAVED_COUNTと
+    「2件のidが互いに異なること」という、生成式を参照しない observable な
+    事実だけを固定する。
+    """
     _patch_snapshot(monkeypatch)
     _patch_audit(monkeypatch)
     recommendation = _make_recommendation(
@@ -3292,11 +3299,53 @@ def test_different_batch_id_produces_different_recommendation_id(
             object(), repo, fake_service,
         )
 
-    saved_ids = {r.recommendation_id for r in repo.list_all() if r.stock_code == "2914"}
-    assert saved_ids == {
-        handler_module._deterministic_recommendation_id("batch-1", "2914"),
-        handler_module._deterministic_recommendation_id("batch-2", "2914"),
+    saved = [r for r in repo.list_all() if r.stock_code == "2914"]
+    assert len(saved) == 2
+    assert saved[0].recommendation_id != saved[1].recommendation_id
+
+
+def test_same_batch_different_stock_codes_are_saved_independently(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★ REVIEWER FINDING F2対応(必須): 同一batch_idの別stock_codeは別idに
+    なり、両方とも保存される。
+
+    決定的idの鍵からstock_codeが脱落する変異(F2で反証済み)が起きると、
+    同一batch内の2銘柄目以降が「重複としてスキップ」の正常ログで静かに
+    失われる。期待値をここでも_deterministic_recommendation_id()から
+    作らず、SAVED_COUNT=2という観測事実だけで固定する。
+    """
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendations = {
+        "2914": _make_recommendation(
+            "2914", company_quality_score=72.5, recommendation_id="rec-2914",
+            buy_action=BuyAction.BUY,
+        ),
+        "7203": _make_recommendation(
+            "7203", company_quality_score=60.0, recommendation_id="rec-7203",
+            buy_action=BuyAction.BUY,
+        ),
     }
+
+    def _fake_analyze(self: object, stock_code: str, *a: object, **kw: object):
+        return _outcome(recommendations[stock_code], ranking_group="buy_candidate")
+
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", _fake_analyze)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    for stock_code in ("2914", "7203"):
+        result = handler_module._process_single_candidate(
+            stock_code, CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(), _CONFIG,
+            object(), repo, fake_service,
+        )
+        assert result == {"stock_code": stock_code, "recommended": True, "notified": False}
+
+    saved = repo.list_all()
+    assert len(saved) == 2
+    assert {r.stock_code for r in saved} == {"2914", "7203"}
+    assert len({r.recommendation_id for r in saved}) == 2
 
 
 def test_batch_id_none_keeps_analyze_assigned_recommendation_id(
