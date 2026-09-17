@@ -145,6 +145,19 @@ def test_partial_sell_target_price_selection(
         assert getattr(text_input, field) == expected
 
 
+def test_partial_sell_withheld_label_when_no_price_candidate() -> None:
+    # サブちゃんF1対応(#374): _PARTIAL_SELL_WITHHELD_LABELの実際の文字列値を
+    # 検証する(recommended_limit_price・partial_profit_start_priceがいずれも
+    # 無い場合)。
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        sell_prices=SellPriceLevels(),
+    )
+    text_input = build_notification_text_input(rec, NotificationCategory.PARTIAL_SELL)
+    assert text_input.target_price is None
+    assert text_input.target_price_withheld_label == "売却目安は算定不可"
+
+
 @pytest.mark.parametrize(
     ("recommendation_type", "sell_prices_kwargs", "expected_checks"),
     [
@@ -218,6 +231,19 @@ def test_sell_consideration_uses_stop_review_price() -> None:
     assert text_input.target_price == Decimal("4000")
     assert text_input.target_price_label == "見直し"
     assert text_input.label_override is None
+
+
+def test_sell_consideration_withheld_label_when_stop_review_price_missing() -> None:
+    # サブちゃんF1対応(#374): _SELL_WITHHELD_LABELの実際の文字列値を検証する
+    # (target_priceがNoneであることだけでなく、withheld_labelの文言自体が
+    # 「算定保留」へ回帰していないことを固定する)。
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.SELL_CONSIDERATION,
+        sell_prices=SellPriceLevels(),
+    )
+    text_input = build_notification_text_input(rec, NotificationCategory.SELL)
+    assert text_input.target_price is None
+    assert text_input.target_price_withheld_label == "売却目安は算定不可"
 
 
 def test_buy_shows_tentative_and_standard_prices() -> None:
