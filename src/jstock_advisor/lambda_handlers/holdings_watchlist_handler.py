@@ -485,6 +485,7 @@ def _notify_holding_decision_and_build_result(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     notification_enabled: bool,
+    rule_version_service: RuleVersionService,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> tuple[_HoldingResult, HoldingDecisionResult]:
     """保有判断スコアの通知を行う。
@@ -510,7 +511,11 @@ def _notify_holding_decision_and_build_result(
         holding,
         result,
         snapshot,
-        str(config.holding_decision.scoring_model_version),
+        # Issue #67 F-I6: rule_versionへ判定に使った「ルール版」を渡す
+        # (RuleVersionServiceが管理する既存概念。他9箇所と同じ既存パターン)。
+        # scoring_model_versionは別の版概念であり、rule_versionへ混在させず
+        # config_values_used(builder側)へ明示キーとして保存する。
+        rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
         config,
         exit_price_range,
         recommendation_id=recommendation_id,
@@ -931,6 +936,7 @@ def _analyze_one_holding(
                     recommendation_repo,
                     notification_service,
                     notification_enabled,
+                    rule_version_service,
                     execution_context,
                 )
             # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
