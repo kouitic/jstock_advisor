@@ -97,6 +97,19 @@ class RecommendationRepository:
             )
         self._store.upsert(recommendation)
 
+    def insert_if_absent(self, recommendation: Recommendation) -> bool:
+        """recommendation_idが未存在の場合のみ原子的に追加してTrue、
+        既に存在すればFalse(既存の値は変更しない)。
+
+        Issue #71 F-D2/F-C8: 非同期fan-outの再試行で同一(batch_id, stock_code)が
+        2回処理されても、recommendation_idを決定的にした呼び出し元と組み合わせる
+        ことで判定履歴が複製されないようにする(save()の既存契約は変更しない。
+        呼び出し元がget→raiseの例外を望まない場合にこちらを使う)。
+        DecisionSnapshotに対するinsert_if_absent()(decision_snapshot_repository.py)
+        と同じ設計方針。
+        """
+        return self._store.insert_if_absent(recommendation)
+
     def latest_by_stock(self, stock_code: str) -> Recommendation | None:
         items = self.list_by_stock(stock_code)
         return items[-1] if items else None
