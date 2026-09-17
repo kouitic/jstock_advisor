@@ -53,18 +53,46 @@ def test_transactions_cli_default_date_uses_jst_business_date(
 def test_holding_decision_cli_replay_end_date_default_uses_jst_business_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """backtest()の実経路(--end-date省略時のreplayモード分岐)を実際に呼び出し、
+    run_history_replay()へ渡されるend_dateがJST業務日になることを検証する
+    (日付変換式をテスト側で再実装しない)。
+    """
     monkeypatch.setattr(holding_decision_cli.dt, "datetime", _FixedDatetime)
-    # end_date省略時の既定値算出だけを切り出して検証する(コマンド全体の実行は
-    # run_history_replay()のfixtureが重いため対象外。#66 F-L5の対象は
-    # 既定値の算出のみ)。
-    end_date: str | None = None
-    parsed_end = (
-        dt.date.fromisoformat(end_date)
-        if end_date
-        else holding_decision_cli.evaluation_date_jst(dt.datetime.now(dt.UTC))
+
+    captured: dict[str, dt.date] = {}
+
+    def _fake_run_history_replay(
+        stock_codes: list[str],
+        start_date: dt.date,
+        end_date: dt.date,
+        holding_decision_result_repo: object | None = None,
+        recommendation_repo: object | None = None,
+        notification_log_repo: object | None = None,
+        allow_same_day_fallback: bool = False,
+    ) -> list[object]:
+        captured["stock_codes"] = stock_codes
+        captured["start_date"] = start_date
+        captured["end_date"] = end_date
+        return []
+
+    monkeypatch.setattr(
+        holding_decision_cli, "run_history_replay", _fake_run_history_replay
     )
-    assert parsed_end == _EXPECTED_JST_DATE
-    assert parsed_end != _WRONG_UTC_DATE
+
+    holding_decision_cli.backtest(
+        stock_code=["9999"],
+        start_date="2026-01-01",
+        end_date=None,
+        source="mock",
+        allow_same_day_fallback=False,
+        purchase_price=None,
+        purchase_date=None,
+        shares=None,
+        csv_path=None,
+    )
+
+    assert captured["end_date"] == _EXPECTED_JST_DATE
+    assert captured["end_date"] != _WRONG_UTC_DATE
 
 
 def test_csv_import_default_purchase_date_uses_jst_business_date(
