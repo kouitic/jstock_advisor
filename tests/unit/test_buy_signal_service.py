@@ -1706,6 +1706,72 @@ def test_shadow_failure_is_isolated_from_the_v1_decision(
     )
 
 
+def test_canonical_industry_observation_failure_is_isolated_from_the_v1_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """canonical業種観測(Issue #54 Phase B-1)で例外が出ても、v1の判定は変わらない(Issue #371)。
+
+    #22 C2と同型: 観測(_observe_canonical_industry())がanalyze()の本流に
+    inlineで置かれ、try/exceptが無かった。想定外の例外はjpx_lookup_status
+    という想定済みの失敗経路を通らず、v1のBUY判定まで巻き込んで止まる。
+
+    ここで固定するのは次の3点である(#22 C2のテストと同じ観点)。
+      ・観測が落ちてもv1の出力(BuyAction / score / 買付価格)が変わらない
+      ・失敗を握りつぶさない(「算出できなかった」がfactsに残る)
+      ・失敗を0.0や空へ潰さない(canonical業種が「未分類」と読める形にしない)
+
+    隔離の粒度は観測ごとである。他の観測(style/common_quality)は影響を
+    受けない。
+    """
+    baseline = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    baseline_rec = baseline.recommendation
+    assert baseline_rec is not None
+    baseline_facts = baseline_rec.buy_score_input_facts
+    assert baseline_facts is not None
+    assert "canonical_industry_33_code" in baseline_facts["canonical_industry_observation"]
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected canonical industry observation failure")
+
+    monkeypatch.setattr(service_module, "classify_canonical_industry", _boom)
+    degraded = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    degraded_rec = degraded.recommendation
+    assert degraded_rec is not None
+
+    # 1 v1の出力が変わらない。
+    assert degraded_rec.buy_action == baseline_rec.buy_action
+    assert degraded_rec.raw_buy_action == baseline_rec.raw_buy_action
+    assert degraded_rec.total_score == baseline_rec.total_score
+    assert degraded_rec.company_quality_score == baseline_rec.company_quality_score
+    assert degraded_rec.entry_buy_price == baseline_rec.entry_buy_price
+    assert degraded_rec.standard_buy_price == baseline_rec.standard_buy_price
+    assert degraded_rec.strong_buy_price == baseline_rec.strong_buy_price
+    assert degraded_rec.valuation_anchor == baseline_rec.valuation_anchor
+    assert degraded_rec.confidence == baseline_rec.confidence
+
+    degraded_facts = degraded_rec.buy_score_input_facts
+    assert degraded_facts is not None
+
+    # 2 失敗が記録に残る(黙って何も保存しない、にしない)。
+    failed = degraded_facts["canonical_industry_observation"]
+    assert failed["shadow_state"] == "COMPUTATION_FAILED"
+    assert failed["error_type"] == "RuntimeError"
+
+    # 3 0.0や空へ潰さない。「未分類」「該当なし」と読める形で残さない。
+    assert "canonical_industry_33_code" not in failed
+    assert "jpx_lookup_status" not in failed
+
+    # 4 隔離は観測ごと。他の観測は算出されたまま残る。
+    assert degraded_facts["style_attractiveness_shadow"]["shadow_state"] == "COMPUTED"
+    assert degraded_facts["common_quality_shadow"]["shadow_state"] == "COMPUTED"
+
+    # 5 判定ロジック・閾値は変更していない(観測専用のキーが失敗しただけ)。
+    assert (
+        degraded_facts["stock_classification_thresholds"]
+        == baseline_facts["stock_classification_thresholds"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Issue #22 Phase B2(2026-09-13): v2 shadowのforward replayに必要な判定時点
 # 入力の保存。いずれも観測用であり、v1の判定・スコア・BuyActionへは接続しない。
