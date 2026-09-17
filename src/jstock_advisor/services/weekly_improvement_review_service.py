@@ -72,6 +72,17 @@ logger = logging.getLogger(__name__)
 _AUDIT_RULE_VERSION = "review-improvement-v1"  # 本サービス自体のロジックバージョン
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
 
+# Issue #377 PR #379是正: _join_recommendations()がRecommendationRepository.get()を
+# 対象件数ぶん繰り返すN+1になっていた。get_many()(BatchGetItem)へ切り替えるが、
+# 全IDを一度に渡すと戻り値のdictが対象週の全Recommendationを同時保持することに
+# なる(Recommendationは1件あたり実測約26KB。jstock-recommendations実測)。
+# evaluationsをこの件数ずつのchunkに区切り、chunkごとにget_many()を呼んで
+# 直ちにjoinすることでピークメモリを1chunk分に有界化する(iter_all()と同じ
+# 設計思想)。DynamoDbCollectionStore.get_many()自体もBatchGetItemの上限
+# (100件/リクエスト)でAPI呼び出しを内部chunkするため、本値をそれと揃えることで
+# 1chunk = 1 BatchGetItemリクエストになり、無駄な往復を作らない。
+_RECOMMENDATION_JOIN_CHUNK_SIZE = 100
+
 
 @dataclass(frozen=True)
 class WeeklyImprovementReviewOutcome:
@@ -158,7 +169,26 @@ class WeeklyImprovementReviewService:
                 joined_count=0,
             )
 
-        candidate_results = self._collect_evaluations_for_period(period_start, period_end)
+        # Issue #377: 当該週+過去history_weeks_for_comparison週の窓を先に
+        # 全部確定してから、1回のstreaming scanでまとめて集める(従来は
+        # 週ごとに個別へ全件走査していた。1 + weeks_back回 -> 1回)。
+        # 窓の計算自体は純粋計算であり副作用を持たない。
+        weeks_back = self._review_config.history_weeks_for_comparison
+        windows: list[tuple[str, dt.date, dt.date]] = [
+            (review_week, period_start, period_end)
+        ]
+        past_labels: list[str] = []
+        label = review_week
+        for _ in range(max(weeks_back, 0)):
+            label = _previous_week_label(label)
+            past_period_start = _monday_of_iso_week(label)
+            windows.append(
+                (label, past_period_start, past_period_start + dt.timedelta(days=6))
+            )
+            past_labels.append(label)
+
+        buckets = self._collect_evaluations_for_windows(windows)
+        candidate_results = buckets[review_week]
         joined, missing_ids = self._join_recommendations(candidate_results)
 
         groups = self._group_by_type_and_rule_version(joined)
@@ -222,7 +252,9 @@ class WeeklyImprovementReviewService:
         # 計上されるべきだが、その週の集計は既に走り終わっている。ここで作り直す。
         # ★ 起票・通知の後に置くのは、過去週の再集計が今週の起票判断へ影響しない
         #   ことを実行順序でも明らかにするため(metricsの再集計と自動起票の分離)。
-        past_weeks_recomputed, past_weeks_detail = self._recompute_past_weeks(review_week, now)
+        past_weeks_recomputed, past_weeks_detail = self._recompute_past_weeks_from_buckets(
+            past_labels, buckets, now
+        )
 
         outcome = WeeklyImprovementReviewOutcome(
             review_week=review_week,
@@ -244,37 +276,63 @@ class WeeklyImprovementReviewService:
 
     # --- データ収集・join ---------------------------------------------
 
-    def _collect_evaluations_for_period(
-        self, period_start: dt.date, period_end: dt.date
-    ) -> list[EvaluationResult]:
-        """対象週へ計上する評価を集める(Issue #114 Phase B2)。
+    def _collect_evaluations_for_windows(
+        self, windows: list[tuple[str, dt.date, dt.date]]
+    ) -> dict[str, list[EvaluationResult]]:
+        """1回のstreaming scanで、複数の対象週(当該週+過去N週)へ同時に振り分ける
+        (Issue #377)。
 
-        ★ 絞り込みは `evaluation_date`(業務上の基準日)で行う。`evaluated_at`
-          (処理をいつ走らせたか)ではない。
+        `windows`は`(review_week_label, period_start, period_end)`の列。
+        呼び出し側は互いに重複しない7日間の集合を渡すこと(呼び出し側が
+        `_previous_week_label()`の連鎖で作るため、設計上必ず非重複・連続する)。
 
-        従来は`evaluated_at`で絞っていたため、定点評価が遅延して後からまとめて
-        処理されると、過去の基準日の評価が「処理した週」へ一括計上され、
-        回復週の母数だけが膨張し、入力ゼロだった各週は遡って再構成できなかった。
-        `evaluation_date`はホライズンから決定論的に定まり、遅れて処理しても
-        評価値そのものはon-time実行と一致するため、こちらが業務上の集計軸である。
+        evaluation_dateがどのwindowにも該当しない評価は捨てる。これは
+        `_collect_evaluations_for_period()`を対象週ごとに個別に呼んだ場合と
+        集合として同じ結果になる(個別に絞り込んで含まれないレコードは、
+        まとめて絞り込んでも含まれない。windowsが非重複であるため、1件の
+        evaluationが複数のwindowへ二重に入ることもない)。
 
-        ★ `evaluation_date`は既にJST暦日のdateであり、to_jst()による変換は不要。
+        Issue #113と同じ理由でiter_all()を使う(全ページをlistへ保持しない)。
+        Issue #377: 従来は対象週ごとに`list_all()`(または個別filter)を
+        呼んでおり、history_weeks_for_comparison分だけ全件走査が繰り返されて
+        いた(1 + weeks_back回)。本メソッドは1回の走査で済ませる。
         """
-        # config/review_improvement.yamlのevaluation_horizon_daysと一致するものだけを
-        # 対象にする(値を変更した場合に、異なるホライズンの評価結果が混在しないため)。
         target_horizon = self._review_config.evaluation_horizon_days
-        results = []
-        for evaluation in self._evaluations.list_all():
+        buckets: dict[str, list[EvaluationResult]] = {label: [] for label, _, _ in windows}
+        scanned = matched = 0
+        for evaluation in self._evaluations.iter_all():
+            scanned += 1
+            if scanned % 10_000 == 0:
+                logger.info(
+                    "weekly review single-pass scan progress scanned=%d matched=%d",
+                    scanned,
+                    matched,
+                )
             if evaluation.horizon_calendar_days != target_horizon:
                 continue
-            if period_start <= evaluation.evaluation_date <= period_end:
-                results.append(evaluation)
-        return results
+            for label, period_start, period_end in windows:
+                if period_start <= evaluation.evaluation_date <= period_end:
+                    buckets[label].append(evaluation)
+                    matched += 1
+                    break  # windowsは非重複なので複数バケツへは入らない
+        logger.info(
+            "weekly review single-pass scan done scanned=%d matched=%d windows=%d",
+            scanned,
+            matched,
+            len(windows),
+        )
+        return buckets
 
-    def _recompute_past_weeks(
-        self, current_review_week: str, now: dt.datetime
+    def _recompute_past_weeks_from_buckets(
+        self,
+        past_labels: list[str],
+        buckets: dict[str, list[EvaluationResult]],
+        now: dt.datetime,
     ) -> tuple[int, dict[str, int]]:
-        """直近history_weeks_for_comparison週のmetricsを作り直す(Issue #114 Phase B2)。
+        """buckets(既に1回のstreaming scanで振り分け済み)から、直近
+        history_weeks_for_comparison週分のmetricsを作り直す(Issue #377。
+        旧`_recompute_past_weeks`から「窓の計算」と「表の再scan」を除いたもの。
+        upsertのロジック・冪等性・以下の設計判断はいずれも変更していない)。
 
         遅延して処理された評価は、その基準日が属する過去週へ計上されるべきだが、
         その週の集計は既に走り終わっている。`evaluation_date`は決定論的で、
@@ -301,11 +359,10 @@ class WeeklyImprovementReviewService:
         監査へ残す(どの週を触ったかが後から分からないと、上書きの影響範囲を
         検証できないため)。
         """
-        weeks_back = self._review_config.history_weeks_for_comparison
-        if weeks_back <= 0:
+        if not past_labels:
             logger.info(
                 "weekly review past-week recompute skipped history_weeks_for_comparison=%d",
-                weeks_back,
+                self._review_config.history_weeks_for_comparison,
             )
             return 0, {}
         # 既存行は「古い軸(evaluated_at)で作られた行が、新しい軸では0件になる」
@@ -313,12 +370,10 @@ class WeeklyImprovementReviewService:
         existing = self._metrics_repo.list_all()
         recomputed = 0
         per_week: dict[str, int] = {}
-        label = current_review_week
-        for _ in range(weeks_back):
-            label = _previous_week_label(label)
+        for label in past_labels:
             period_start = _monday_of_iso_week(label)
             period_end = period_start + dt.timedelta(days=6)
-            evaluations = self._collect_evaluations_for_period(period_start, period_end)
+            evaluations = buckets[label]
             joined, _missing = self._join_recommendations(evaluations)
             groups = self._group_by_type_and_rule_version(joined)
             for stale in existing:
@@ -340,7 +395,7 @@ class WeeklyImprovementReviewService:
         # 後から検証できない(0件でも「対象が無かった」として記録する)。
         logger.info(
             "weekly review past-week recompute weeks_back=%d rows=%d per_week=%s",
-            weeks_back,
+            len(past_labels),
             recomputed,
             per_week,
         )
@@ -349,14 +404,36 @@ class WeeklyImprovementReviewService:
     def _join_recommendations(
         self, evaluations: list[EvaluationResult]
     ) -> tuple[list[tuple[EvaluationResult, Any]], list[str]]:
-        joined = []
+        """evaluationsへ対応するRecommendationをjoinする(Issue #377 PR #379是正)。
+
+        `RecommendationRepository.get_many()`(BatchGetItem)を使い、対象件数ぶん
+        `get()`(GetItem)を繰り返さない(N+1回避)。evaluationsを
+        `_RECOMMENDATION_JOIN_CHUNK_SIZE`件ずつのchunkへ区切り、chunkごとに
+        `get_many()`を1回呼んでから直ちにjoinし、次のchunkへ進む。全件ぶんの
+        Recommendationを同時に保持しない(ピークメモリは1chunk分に有界)。
+
+        ★ evaluationsの順序をそのまま保持する。`joined`は入力の順序で追加され、
+          `missing_ids`も見つからなかった評価ごとに(重複IDでも1件ずつ)追加する。
+          旧実装(`get()`を1件ずつ呼ぶ版)と、同じ入力に対して同じ`joined`・
+          同じ`missing_ids`を返す。
+        ★ 同じrecommendation_idを複数のevaluationが参照する場合(horizonの
+          異なる複数評価が同一推奨を指す等)、`get_many()`はID単位で重複排除して
+          1回だけ取得する。`joined`内では同じRecommendationオブジェクトが
+          複数のタプルから参照される(Recommendationの取得回数は増えない)。
+        """
+        joined: list[tuple[EvaluationResult, Any]] = []
         missing_ids: list[str] = []
-        for evaluation in evaluations:
-            recommendation = self._recommendations.get(evaluation.recommendation_id)
-            if recommendation is None:
-                missing_ids.append(evaluation.recommendation_id)
-                continue
-            joined.append((evaluation, recommendation))
+        for start in range(0, len(evaluations), _RECOMMENDATION_JOIN_CHUNK_SIZE):
+            chunk = evaluations[start : start + _RECOMMENDATION_JOIN_CHUNK_SIZE]
+            found = self._recommendations.get_many(
+                evaluation.recommendation_id for evaluation in chunk
+            )
+            for evaluation in chunk:
+                recommendation = found.get(evaluation.recommendation_id)
+                if recommendation is None:
+                    missing_ids.append(evaluation.recommendation_id)
+                    continue
+                joined.append((evaluation, recommendation))
         return joined, missing_ids
 
     def _group_by_type_and_rule_version(

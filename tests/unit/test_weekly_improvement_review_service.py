@@ -1183,3 +1183,295 @@ def test_recomputed_weeks_are_recorded_per_week(aws_env, repos) -> None:
 
     assert outcome.past_weeks_metrics_recomputed_by_week == {one_week_ago: 1}
     assert outcome.past_weeks_metrics_recomputed == 1
+    assert outcome.past_weeks_metrics_recomputed == 1
+
+
+def _oracle_collect_for_period(
+    repos: dict, target_horizon: int, period_start: dt.date, period_end: dt.date
+) -> list[EvaluationResult]:
+    """`_collect_evaluations_for_windows()`とは独立に、単一期間だけを
+    filterする対照実装(Issue #377)。旧`_collect_evaluations_for_period()`
+    (単位3で削除済み)と同じ述語をテスト側で再現し、1回のstreaming scanが
+    「対象週ごとに個別filterした場合の和集合」と一致することを、本番実装から
+    独立したoracleで確認する。
+    """
+    return [
+        e
+        for e in repos["evaluation"].list_all()
+        if e.horizon_calendar_days == target_horizon
+        and period_start <= e.evaluation_date <= period_end
+    ]
+
+
+def test_collect_evaluations_for_windows_matches_per_period_collection(
+    aws_env, repos
+) -> None:
+    """1回のstreaming scanでの振り分け結果が、windowごとに個別filterした
+    場合の結果(oracle)と一致すること(Issue #377。#114 C-5への影響評価の
+    裏付けの一部)。
+    """
+    service = _build_service(repos)
+    review_week = "2026-W38"
+    monday = module._monday_of_iso_week(review_week)
+    windows = []
+    label = review_week
+    for _ in range(5):
+        period_start = module._monday_of_iso_week(label)
+        period_end = period_start + dt.timedelta(days=6)
+        windows.append((label, period_start, period_end))
+        label = module._previous_week_label(label)
+
+    for i, (_wlabel, wstart, wend) in enumerate(windows):
+        repos["evaluation"].save(
+            _evaluation(f"mon{i}", f"rec{i}a", EvaluationLabel.SUCCESS,
+                        dt.datetime.combine(wstart, dt.time(0), tzinfo=dt.UTC))
+        )
+        repos["evaluation"].save(
+            _evaluation(f"sun{i}", f"rec{i}b", EvaluationLabel.SUCCESS,
+                        dt.datetime.combine(wend, dt.time(23), tzinfo=dt.UTC))
+        )
+    outside_date = monday - dt.timedelta(days=365)
+    repos["evaluation"].save(
+        _evaluation("outside", "rec-outside", EvaluationLabel.SUCCESS,
+                    dt.datetime.combine(outside_date, dt.time(0), tzinfo=dt.UTC))
+    )
+    repos["evaluation"].save(
+        _evaluation("wrong_horizon", "rec-wh", EvaluationLabel.SUCCESS,
+                    dt.datetime.combine(windows[0][1], dt.time(12), tzinfo=dt.UTC),
+                    horizon_calendar_days=14)
+    )
+
+    single_pass = service._collect_evaluations_for_windows(windows)
+    target_horizon = service._review_config.evaluation_horizon_days
+
+    for wlabel, wstart, wend in windows:
+        individual = _oracle_collect_for_period(repos, target_horizon, wstart, wend)
+        assert {e.evaluation_id for e in single_pass[wlabel]} == {
+            e.evaluation_id for e in individual
+        }
+        assert len(single_pass[wlabel]) == 2
+
+    total_bucketed = sum(len(v) for v in single_pass.values())
+    assert total_bucketed == 10
+
+
+def test_collect_evaluations_for_windows_returns_empty_buckets_when_no_data(
+    aws_env, repos
+) -> None:
+    service = _build_service(repos)
+    windows = [("2026-W38", dt.date(2026, 9, 14), dt.date(2026, 9, 20))]
+
+    result = service._collect_evaluations_for_windows(windows)
+
+    assert result == {"2026-W38": []}
+
+
+def test_run_produces_identical_metrics_to_running_five_separate_scans(
+    aws_env, repos
+) -> None:
+    """Issue #377の核心: run()が1回のstreaming scanへ変わっても、
+    5回個別にscanしていた旧方式と全く同じmetricsが生成されることを、
+    実際にrun()を呼んだ結果で確認する(#114 C-5への影響評価の最終確認)。
+
+    比較対象(oracle)は`_oracle_collect_for_period()`で、旧
+    `_collect_evaluations_for_period()`(単位3で削除済み)と同じ述語を
+    本番実装から独立に再現したものである。
+    """
+    period_start, period_end, review_week = _resolve_review_period(_RUN_AT)
+    weeks_back = 4
+    windows = [(review_week, period_start, period_end)]
+    label = review_week
+    for _ in range(weeks_back):
+        label = module._previous_week_label(label)
+        p_start = module._monday_of_iso_week(label)
+        windows.append((label, p_start, p_start + dt.timedelta(days=6)))
+
+    counter = 0
+    for _wlabel, wstart, wend in windows:
+        catch_up_at = dt.datetime.combine(wstart + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC)
+        for _ in range(3):
+            counter += 1
+            _seed_one(repos, f"w{counter}", wstart, catch_up_at, EvaluationLabel.SUCCESS)
+        for _ in range(2):
+            counter += 1
+            _seed_one(repos, f"w{counter}", wend, catch_up_at, EvaluationLabel.PRICE_TOO_HIGH)
+
+    service = _build_service(repos)
+    service.run(_RUN_AT)
+
+    actual = {
+        (m.recommendation_type, m.rule_version, m.review_week): (m.sample_count, m.success_rate_pct)
+        for m in repos["metrics"].list_all()
+    }
+
+    expected_service = _build_service(repos)
+    target_horizon = expected_service._review_config.evaluation_horizon_days
+    for wlabel, wstart, wend in windows:
+        evaluations = _oracle_collect_for_period(repos, target_horizon, wstart, wend)
+        joined, _ = expected_service._join_recommendations(evaluations)
+        groups = expected_service._group_by_type_and_rule_version(joined)
+        for (rec_type, rule_version), grouped in groups.items():
+            metrics = expected_service._build_metrics(
+                rec_type, rule_version, wlabel, wstart, wend, _RUN_AT, grouped
+            )
+            key = (rec_type, rule_version, wlabel)
+            assert key in actual, f"{key} が run() の保存結果に無い"
+            assert actual[key] == (metrics.sample_count, metrics.success_rate_pct)
+
+
+# --- Issue #377 PR #379是正: _join_recommendations()のN+1解消 -------------
+
+
+def _oracle_join_via_get(
+    repos: dict, evaluations: list[EvaluationResult]
+) -> tuple[list[tuple[EvaluationResult, Recommendation]], list[str]]:
+    """旧実装(RecommendationRepository.get()を1件ずつ呼ぶ版)を、本番コードから
+    独立にテスト側で再現したoracle(Issue #377 PR #379是正)。get_many()ベースの
+    新実装が、これと同じjoined/missing_idsを返すことを突き合わせる。
+    """
+    joined: list[tuple[EvaluationResult, Recommendation]] = []
+    missing_ids: list[str] = []
+    for evaluation in evaluations:
+        recommendation = repos["recommendation"].get(evaluation.recommendation_id)
+        if recommendation is None:
+            missing_ids.append(evaluation.recommendation_id)
+            continue
+        joined.append((evaluation, recommendation))
+    return joined, missing_ids
+
+
+def _seed_join_fixture(
+    repos: dict, count: int, *, missing_every: int = 0
+) -> list[EvaluationResult]:
+    """count件のevaluationを、対応するrecommendationとともにシードする。
+    missing_everyを指定すると、その倍数番目のevaluationだけ存在しない
+    recommendation_idを参照させる(missing_idsのテスト用)。
+    """
+    base = dt.datetime(2026, 8, 10, 9, 0, tzinfo=dt.UTC)
+    evaluations = []
+    for i in range(count):
+        rec_id = f"missing-{i}" if missing_every and i % missing_every == 0 else f"rec{i}"
+        if not (missing_every and i % missing_every == 0):
+            repos["recommendation"].save(
+                _recommendation(rec_id, RecommendationType.BUY, "v1", base)
+            )
+        ev = _evaluation(f"e{i}", rec_id, EvaluationLabel.SUCCESS, base)
+        repos["evaluation"].save(ev)
+        evaluations.append(ev)
+    return evaluations
+
+
+def test_join_recommendations_does_not_call_get(aws_env, repos, monkeypatch) -> None:
+    """A: _join_recommendations()実行時にRecommendationRepository.get()が
+    呼ばれないこと(N+1解消の直接確認)。
+    """
+    evaluations = _seed_join_fixture(repos, 5)
+    service = _build_service(repos)
+
+    calls = []
+    original_get = repos["recommendation"].get
+
+    def spy_get(recommendation_id):
+        calls.append(recommendation_id)
+        return original_get(recommendation_id)
+
+    monkeypatch.setattr(repos["recommendation"], "get", spy_get)
+
+    joined, missing = service._join_recommendations(evaluations)
+
+    assert calls == []
+    assert len(joined) == 5
+    assert missing == []
+
+
+def test_join_recommendations_uses_bounded_get_many_calls(aws_env, repos, monkeypatch) -> None:
+    """B/C: get_many()が呼ばれ、対象件数がchunk上限を超えると複数回のbounded
+    callに分割されること。1回のget_many()引数件数がchunk上限を超えないこと。
+    """
+    chunk_size = module._RECOMMENDATION_JOIN_CHUNK_SIZE
+    total = chunk_size * 2 + 3  # ちょうど3チャンクに分かれる件数
+    evaluations = _seed_join_fixture(repos, total)
+    service = _build_service(repos)
+
+    calls: list[list[str]] = []
+    original_get_many = repos["recommendation"].get_many
+
+    def spy_get_many(recommendation_ids):
+        ids = list(recommendation_ids)
+        calls.append(ids)
+        return original_get_many(ids)
+
+    monkeypatch.setattr(repos["recommendation"], "get_many", spy_get_many)
+
+    joined, missing = service._join_recommendations(evaluations)
+
+    assert len(joined) == total
+    assert missing == []
+    assert len(calls) == 3  # ceil(total / chunk_size)
+    for call_ids in calls:
+        assert len(call_ids) <= chunk_size
+    assert sum(len(c) for c in calls) == total
+
+
+def test_join_recommendations_missing_id_semantics_match_oracle(aws_env, repos) -> None:
+    """D/E: missing_idsの意味・joined結果が、旧get()方式のoracleと同値であること。
+    欠落IDが複数(重複を含む)ケースで確認する。
+    """
+    evaluations = _seed_join_fixture(repos, 20, missing_every=3)
+    # 同じ欠落IDを複数のevaluationに参照させ、重複した欠落が重複排除されずに
+    # 残ることも確認する。
+    dup_missing = _evaluation("e-dup-missing", "missing-0", EvaluationLabel.SUCCESS,
+                               dt.datetime(2026, 8, 10, 9, 0, tzinfo=dt.UTC))
+    repos["evaluation"].save(dup_missing)
+    evaluations = [*evaluations, dup_missing]
+
+    service = _build_service(repos)
+
+    actual_joined, actual_missing = service._join_recommendations(evaluations)
+    oracle_joined, oracle_missing = _oracle_join_via_get(repos, evaluations)
+
+    assert [(e.evaluation_id, r.recommendation_id) for e, r in actual_joined] == [
+        (e.evaluation_id, r.recommendation_id) for e, r in oracle_joined
+    ]
+    assert actual_missing == oracle_missing
+    # missing-0 は evaluations 内で複数回参照されており、重複排除されず
+    # 2回(元のevaluation + dup_missing)残ることを明示的に確認する。
+    assert actual_missing.count("missing-0") == 2
+
+
+def test_join_recommendations_duplicate_recommendation_id_is_fetched_once(
+    aws_env, repos, monkeypatch
+) -> None:
+    """F: 同じrecommendation_idを複数のEvaluationResultが参照する場合、
+    Recommendation取得回数を必要以上に増やさず、join結果はEvaluationResult
+    件数ぶん正しく残ること。
+    """
+    base = dt.datetime(2026, 8, 10, 9, 0, tzinfo=dt.UTC)
+    repos["recommendation"].save(_recommendation("shared-rec", RecommendationType.BUY, "v1", base))
+    evaluations = [
+        _evaluation(f"e{i}", "shared-rec", EvaluationLabel.SUCCESS, base) for i in range(5)
+    ]
+    for ev in evaluations:
+        repos["evaluation"].save(ev)
+    service = _build_service(repos)
+
+    calls: list[list[str]] = []
+    original_get_many = repos["recommendation"].get_many
+
+    def spy_get_many(recommendation_ids):
+        ids = list(recommendation_ids)
+        calls.append(ids)
+        return original_get_many(ids)
+
+    monkeypatch.setattr(repos["recommendation"], "get_many", spy_get_many)
+
+    joined, missing = service._join_recommendations(evaluations)
+
+    assert len(joined) == 5  # EvaluationResult件数ぶん残る
+    assert missing == []
+    assert len(calls) == 1  # 1チャンクで済む件数のためget_many呼び出しは1回
+    # get_many()へ渡すID列は評価件数ぶん(5件、"shared-rec"が5回)であってよい。
+    # dedupはget_many()内部(dict.fromkeys)の責務であり、呼び出し側では
+    # 重複除去済みである必要はない(実測: 呼んだ回数=1回のみが要件)。
+    recs = {id(r) for _, r in joined}
+    assert len(recs) == 1  # 同一Recommendationオブジェクトが再利用されている
