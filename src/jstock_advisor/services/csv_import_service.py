@@ -249,7 +249,7 @@ class HoldingsCsvImportService:
             # Issue #66 F-L5: dt.date.today()はマシンローカルのnaive日付であり、
             # TZ=UTC等の環境で実行するとJSTより1日前になりうる。永続化される
             # 取得日の既定値はimport開始時に1回だけ計算済みのnow(引数)から
-            # JST業務日で決める(行ごとに再計算しない。日付境界をまたぐ長い
+            # JST暦日で決める(行ごとに再計算しない。日付境界をまたぐ長い
             # CSVでも全行が同じ既定日になる)。
             purchase_date = evaluation_date_jst(now)
 

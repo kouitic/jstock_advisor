@@ -371,7 +371,7 @@ def backtest(
             parsed_start = dt.date.fromisoformat(start_date)
             # Issue #66 F-L5: dt.date.today()はマシンローカルのnaive日付であり、
             # TZ=UTC等の環境で実行するとJSTより1日前になりうる。replay終了日の
-            # 既定値はJST業務日で決める(#23の既存規約と統一)。
+            # 既定値はJST暦日で決める(#23の既存規約と統一)。
             parsed_end = (
                 dt.date.fromisoformat(end_date)
                 if end_date

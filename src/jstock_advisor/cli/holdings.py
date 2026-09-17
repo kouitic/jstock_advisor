@@ -31,7 +31,7 @@ def _parse_date(value: str | None) -> dt.date:
     if not value:
         # Issue #66 F-L5: dt.date.today()はマシンローカルのnaive日付であり、
         # TZ=UTC等の環境で実行するとJSTより1日前になりうる。永続化される
-        # 業務日付(取得日等)の既定値はJST業務日で決める(#23の既存規約と統一)。
+        # 業務日付(取得日等)の既定値はJST暦日で決める(#23の既存規約と統一)。
         return evaluation_date_jst(dt.datetime.now(dt.UTC))
     parsed = ExternalValueParser.date(value)
     if parsed is None:

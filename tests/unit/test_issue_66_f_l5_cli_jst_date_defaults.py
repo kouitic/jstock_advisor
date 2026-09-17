@@ -2,7 +2,7 @@
 に依存しており、TZ=UTC等の環境で実行するとJSTより1日前になっていた欠陥。
 
 対象4箇所すべてで、JST 00:00〜08:59(UTC上は前日)のnowを与えたときに
-JST業務日(=当日)が返ることを固定する。
+JST暦日(=当日)が返ることを固定する。
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ class _FixedDatetime(dt.datetime):
         return _JST_EARLY_MORNING_UTC_INSTANT.astimezone(tz)
 
 
-def test_holdings_cli_default_purchase_date_uses_jst_business_date(
+def test_holdings_cli_default_purchase_date_uses_jst_calendar_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(holdings_cli.dt, "datetime", _FixedDatetime)
@@ -41,7 +41,7 @@ def test_holdings_cli_default_purchase_date_uses_jst_business_date(
     assert result != _WRONG_UTC_DATE
 
 
-def test_transactions_cli_default_date_uses_jst_business_date(
+def test_transactions_cli_default_date_uses_jst_calendar_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(transactions_cli.dt, "datetime", _FixedDatetime)
@@ -50,11 +50,11 @@ def test_transactions_cli_default_date_uses_jst_business_date(
     assert result != _WRONG_UTC_DATE
 
 
-def test_holding_decision_cli_replay_end_date_default_uses_jst_business_date(
+def test_holding_decision_cli_replay_end_date_default_uses_jst_calendar_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """backtest()の実経路(--end-date省略時のreplayモード分岐)を実際に呼び出し、
-    run_history_replay()へ渡されるend_dateがJST業務日になることを検証する
+    run_history_replay()へ渡されるend_dateがJST暦日になることを検証する
     (日付変換式をテスト側で再実装しない)。
     """
     monkeypatch.setattr(holding_decision_cli.dt, "datetime", _FixedDatetime)
@@ -95,11 +95,11 @@ def test_holding_decision_cli_replay_end_date_default_uses_jst_business_date(
     assert captured["end_date"] != _WRONG_UTC_DATE
 
 
-def test_csv_import_default_purchase_date_uses_jst_business_date(
+def test_csv_import_default_purchase_date_uses_jst_calendar_date(
     tmp_path, monkeypatch: pytest.MonkeyPatch, csv_import_service, portfolio_service
 ) -> None:
     """purchase_date列を省略した行の既定値が、import開始時に1回だけ計算される
-    now(JST境界)からJST業務日で決まることを、HoldingsCsvImportService経由の
+    now(JST境界)からJST暦日で決まることを、HoldingsCsvImportService経由の
     公開APIで検証する(_process_row()単体ではなくimport_file()を通す)。
     """
     from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
