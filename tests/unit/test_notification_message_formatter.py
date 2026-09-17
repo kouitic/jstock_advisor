@@ -291,58 +291,50 @@ def test_entry_price_range_label_can_be_dropped_under_soft_limit() -> None:
     assert isinstance(text, str)
 
 
-def test_entry_price_range_label_survives_before_type_label_at_moderate_overflow() -> None:
-    """N-1(entry_price_range_label)はtype_label(銘柄分類)より先に評価される
-    ため、中程度のoverflow(secondary_target_price相当が無い単純な構成で
-    target_price+N-1+type_labelがちょうど競合する境界)ではN-1が残り
-    type_labelが落ちる(実測: 銘柄名43文字でこの境界に達する)。
-    """
+# Issue #374(N-1/N-2逆転対策)。USER確定仕様(2026-09-17、issuecomment-5710334471)
+# の4ケースをそのまま固定する。「N-1自体が存在しない」場合はN-2抑止と無関係
+# (通常どおり表示してよい)。「N-1は存在するが70文字soft limitで表示できな
+# かった」場合のみN-2も表示しない。この区別はentry_price_range_label_index
+# (実装側で「entry_price_range_labelがそもそも要求されたか」を示す)と
+# entry_price_range_label_survived(要求されたうち実際に生き残ったか)の
+# 2軸で行っており、「N-1がNoneだから問答無用でN-2を抑止する」形にはなって
+# いない(下記case4がその区別の証拠)。
+
+
+@pytest.mark.parametrize(
+    ("case_id", "name_len", "has_entry_price_range_label", "expect_n1", "expect_n2"),
+    [
+        ("case1_both_fit", 5, True, True, True),
+        ("case2_n1_fits_n2_does_not", 43, True, True, False),
+        ("case3_n1_itself_overflows", 47, True, False, False),
+        ("case4_no_n1_n2_shown_normally", 5, False, False, True),
+    ],
+    ids=[
+        "case1_十分な文字数_N-1とN-2とも表示可能",
+        "case2_N-1は入るがN-2は入らない_N-1のみ表示",
+        "case3_N-1自体が文字数不足_N-1とN-2とも非表示",
+        "case4_N-1なし_N-2は従来どおり表示",
+    ],
+)
+def test_entry_price_range_label_and_type_label_coupling_4_cases(
+    case_id: str,
+    name_len: int,
+    has_entry_price_range_label: bool,
+    expect_n1: bool,
+    expect_n2: bool,
+) -> None:
     data = _base(
         category=NotificationCategory.BUY,
         stock_code="9432",
-        stock_name="あ" * 43,
+        stock_name="あ" * name_len,
         target_price=Decimal("3600"),
-        entry_price_range_label="打診価格超過",
+        entry_price_range_label=("打診価格超過" if has_entry_price_range_label else None),
         stock_types=[StockType.GROWTH],
     )
     text = format_notification_text(data)
     assert len(text) <= MAX_CHARS
-    assert "打診価格超過" in text
-    assert "成長株" not in text
-
-
-def test_entry_price_range_label_dropping_also_drops_type_label() -> None:
-    """Issue #374(N-1/N-2逆転対策、案ii)。entry_price_range_labelが70文字
-    上限でskipされる場合、type_labelも追加しない(N-1が落ちてtype_labelだけ
-    残る優先順位の逆転を防ぐ)。
-
-    対策前は銘柄名47文字でこの逆転(N-1が落ち、type_labelが残る)が実際に
-    発生することを実測で確認していた。対策後は両方が落ちることを固定する
-    (「N-1が落ちてN-2の対象=type_labelが残るケースが発生しないこと」の
-    回帰テスト)。
-    """
-    data = _base(
-        category=NotificationCategory.BUY,
-        stock_code="9432",
-        stock_name="あ" * 47,
-        target_price=Decimal("3600"),
-        entry_price_range_label="打診価格超過",
-        stock_types=[StockType.GROWTH],
-    )
-    text = format_notification_text(data)
-    assert len(text) <= MAX_CHARS
-    assert "打診価格超過" not in text
-    assert "成長株" not in text
-
-
-def test_entry_price_range_label_absent_does_not_suppress_type_label() -> None:
-    """entry_price_range_label自体が未設定(None)の場合、案iiの紐付けは
-    無関係であり、type_labelは通常どおり単独で評価される
-    (BUY以外のカテゴリ・pct算定不能時の既存挙動を壊さないことの確認)。
-    """
-    data = _base(stock_types=[StockType.GROWTH])
-    text = format_notification_text(data)
-    assert "成長株" in text
+    assert ("打診価格超過" in text) is expect_n1, case_id
+    assert ("成長株" in text) is expect_n2, case_id
 
 
 # --- Issue #374 (N-2): 銘柄分類(type_label)は価格・理由群と別行("\n")にする ---
