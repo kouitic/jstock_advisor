@@ -10,6 +10,7 @@ import typer
 
 from jstock_advisor.domain.entities.enums import AccountType, SkipReason, TransactionType
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.transaction_csv_import_service import TransactionCsvImportService
@@ -20,7 +21,10 @@ app = typer.Typer(help="実際の売買記録(推奨に基づく執行結果・�
 
 def _parse_date(value: str | None) -> dt.date:
     if not value:
-        return dt.date.today()
+        # Issue #66 F-L5: dt.date.today()はマシンローカルのnaive日付であり、
+        # TZ=UTC等の環境で実行するとJSTより1日前になりうる。永続化される
+        # 業務日付(執行日等)の既定値はJST暦日で決める(#23の既存規約と統一)。
+        return evaluation_date_jst(dt.datetime.now(dt.UTC))
     parsed = ExternalValueParser.date(value)
     if parsed is None:
         raise typer.BadParameter("日付はYYYY-MM-DD形式で指定してください")

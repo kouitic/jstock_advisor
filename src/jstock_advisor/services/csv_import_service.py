@@ -37,6 +37,7 @@ from jstock_advisor.domain.entities.owner import (
     build_holding_id,
     normalize_and_validate_owner,
 )
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.csv_import_ledger import (
     CsvImportLedger,
@@ -245,7 +246,12 @@ class HoldingsCsvImportService:
                     message="購入日はYYYY-MM-DD形式で指定してください",
                 )
         else:
-            purchase_date = dt.date.today()
+            # Issue #66 F-L5: dt.date.today()はマシンローカルのnaive日付であり、
+            # TZ=UTC等の環境で実行するとJSTより1日前になりうる。永続化される
+            # 取得日の既定値はimport開始時に1回だけ計算済みのnow(引数)から
+            # JST暦日で決める(行ごとに再計算しない。日付境界をまたぐ長い
+            # CSVでも全行が同じ既定日になる)。
+            purchase_date = evaluation_date_jst(now)
 
         messages: list[str] = []
 

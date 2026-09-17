@@ -26,6 +26,7 @@ from jstock_advisor.domain.entities.enums import (
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import ReasonImpact
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.aws.baseline_pointer import BaselinePointerConflictError
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.local_repository import (
@@ -368,7 +369,14 @@ def backtest(
     if start_date is not None:
         try:
             parsed_start = dt.date.fromisoformat(start_date)
-            parsed_end = dt.date.fromisoformat(end_date) if end_date else dt.date.today()
+            # Issue #66 F-L5: dt.date.today()はマシンローカルのnaive日付であり、
+            # TZ=UTC等の環境で実行するとJSTより1日前になりうる。replay終了日の
+            # 既定値はJST暦日で決める(#23の既存規約と統一)。
+            parsed_end = (
+                dt.date.fromisoformat(end_date)
+                if end_date
+                else evaluation_date_jst(dt.datetime.now(dt.UTC))
+            )
         except ValueError as e:
             typer.echo("--start-date/--end-dateはYYYY-MM-DD形式で指定してください。")
             raise typer.Exit(code=1) from e
