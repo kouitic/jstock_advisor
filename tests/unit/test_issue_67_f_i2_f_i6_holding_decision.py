@@ -12,6 +12,9 @@ fixtureは既存のtest_issue_67_recommendation_provenance_transfer.pyの
 from __future__ import annotations
 
 import dataclasses
+from decimal import Decimal
+
+import pytest
 
 from jstock_advisor.domain.decision_snapshot_builder import build_decision_snapshot
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, DecisionType
@@ -97,7 +100,33 @@ def test_unusable_fair_value_range_reason_is_preserved() -> None:
 
 def test_fair_value_spread_ratio_uses_the_same_formula_as_profit_taking() -> None:
     """fair_value_spread_ratio = bull/bear(profit_taking_service.pyと同じ式)。
-    bearが0またはNoneの場合はNoneのまま(ゼロ除算・捏造をしない)。
+
+    bear=1000/bull=1500という具体値でspread_ratio=1.5を直接assertする
+    (レビュー指摘対応: bear=None一本槍のテストでは、実装をbull/bearから
+    bear/bullへ反転してもPASSしてしまい、「式の固定」になっていなかった。
+    具体値のassertにより、逆式(bear/bull=1000/1500=0.666...)ならこの
+    assertが必ず失敗する)。
+    """
+    snapshot = _base_snapshot()
+    fv_range = snapshot.fair_value_range.model_copy(
+        update={"bear": Decimal("1000"), "bull": Decimal("1500")}
+    )
+    snapshot = dataclasses.replace(snapshot, fair_value_range=fv_range)
+
+    rec = build_holding_decision_recommendation(
+        _holding(),
+        _holding_decision_result(),
+        snapshot,
+        "rule-v1",
+        _CONFIG,
+        _NOT_EVALUATED_EXIT_PRICE_RANGE,
+    )
+    assert rec.fair_value_spread_ratio == pytest.approx(1.5)
+
+
+def test_fair_value_spread_ratio_is_none_when_bear_is_missing() -> None:
+    """bearが0またはNoneの場合はNoneのまま(ゼロ除算・捏造をしない)既存契約を
+    維持する(上のテストとは別観点として残す)。
     """
     snapshot = _base_snapshot()
     fv_range = snapshot.fair_value_range.model_copy(
