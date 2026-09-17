@@ -1210,6 +1210,16 @@ class BuySignalService:
                 snapshot, stock_classification_rules, current_per, current_pbr
             ),
         )
+        # Issue #371: #22 C2と同型(観測がanalyze()の本流にinlineでありtry/exceptが
+        # 無い)。算出・整形は_observe_canonical_industry()の内側で完結しており
+        # 展開箇所が本流に残らないため、呼び出しを_isolated_shadow_observation()
+        # で包むだけで隔離が成立する(観測の意味・BUY判定ロジックは変更しない)。
+        canonical_industry_observation_facts = _isolated_shadow_observation(
+            "canonical_industry_observation",
+            lambda: self._observe_canonical_industry(
+                stock_code, snapshot, buy_industry_sector, is_growth_stock
+            ),
+        )
         buy_score_input_facts: dict[str, object] = {
             **score_result.input_facts,
             # レビュー対応(2026-08): current_per/current_pbr自体は既に保存しているが、
@@ -1444,9 +1454,10 @@ class BuySignalService:
             # BuyActionからは一切参照されない観測専用**であり、死んでいる判定
             # (CYCLICAL/DEFENSIVE・REIT除外)の復活はPhase B-2で、この観測結果を
             # 確認したうえで実施する(適正価格と対象母集団が変わるため)。
-            "canonical_industry_observation": self._observe_canonical_industry(
-                stock_code, snapshot, buy_industry_sector, is_growth_stock
-            ),
+            # Issue #371: 算出は_isolated_shadow_observation()の内側で行っており、
+            # ここでは既に組み上がったdictを置くだけである(本流で展開すると
+            # 隔離が成立しない)。失敗時はshadow_state="COMPUTATION_FAILED"が入る。
+            "canonical_industry_observation": canonical_industry_observation_facts,
         }
 
         # --- 13. purchase_attractiveness_score算出 ---
