@@ -3193,7 +3193,12 @@ def test_process_single_candidate_validation_mode_reports_validation_recommendat
         object(), repo, fake_service, ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
-    assert captured["validation_recommendation_id"] == "rec-1"
+    # Issue #71 F-D2/F-C8: batch_idが確定しているため、analyze()が返した
+    # recommendation_id("rec-1")はbatch_id+stock_codeから決定的な値へ
+    # 上書きされる(重複配信の判定に使う)。report対象はその上書き後の値。
+    assert captured["validation_recommendation_id"] == (
+        handler_module._deterministic_recommendation_id("batch-1", "2914")
+    )
 
 
 def test_process_single_candidate_normal_mode_reports_no_validation_recommendation_id(
@@ -3225,6 +3230,176 @@ def test_process_single_candidate_normal_mode_reports_no_validation_recommendati
     )
 
     assert captured["validation_recommendation_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #71 F-D2/F-C8: _fanout.dispatch_async()にdedupトークンが無いため、
+# AWSの非同期invoke失敗時リトライ(最大2回)が同一(batch_id, stock_code)を
+# 再処理すると、recommendation_id=uuid4()により毎回新規のRecommendationが
+# 二重保存されていた。batch_id+stock_codeから決定的なrecommendation_idを
+# 導出し、RecommendationRepository.insert_if_absent()で原子的に一度だけ
+# 保存する。D1(BUYパス)のみが対象(D2/D3は後続の別Issue)。
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_delivery_does_not_raise_and_saves_recommendation_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """同一(batch_id, stock_code)を2回処理しても例外を投げず、
+    Recommendationは1件しか保存されない(非同期invokeの再試行を模す)。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    for _ in range(2):
+        result = handler_module._process_single_candidate(
+            "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(), _CONFIG,
+            object(), repo, fake_service,
+        )
+        assert result == {"stock_code": "2914", "recommended": True, "notified": False}
+
+    saved = [r for r in repo.list_all() if r.stock_code == "2914"]
+    assert len(saved) == 1
+    assert saved[0].recommendation_id == handler_module._deterministic_recommendation_id(
+        "batch-1", "2914"
+    )
+
+
+def test_different_batch_id_produces_different_recommendation_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """別のbatch_id(=別日の正当な再評価)は別recommendation_idのまま、
+    どちらも保存される(決定的ID化が別バッチまで潰さないことの確認)。
+
+    ★ REVIEWER FINDING F2対応: 期待値を_deterministic_recommendation_id()
+    自身から作らない(鍵の式がbatch_idを無視するよう壊れても、期待値と実装が
+    同じ壊れた式を共有していれば検知できないため)。ここではSAVED_COUNTと
+    「2件のidが互いに異なること」という、生成式を参照しない observable な
+    事実だけを固定する。
+    """
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    for batch_id in ("batch-1", "batch-2"):
+        handler_module._process_single_candidate(
+            "2914", CandidateSource.WATCHLIST, None, None, batch_id, _NOW, object(), _CONFIG,
+            object(), repo, fake_service,
+        )
+
+    saved = [r for r in repo.list_all() if r.stock_code == "2914"]
+    assert len(saved) == 2
+    assert saved[0].recommendation_id != saved[1].recommendation_id
+
+
+def test_same_batch_different_stock_codes_are_saved_independently(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★ REVIEWER FINDING F2対応(必須): 同一batch_idの別stock_codeは別idに
+    なり、両方とも保存される。
+
+    決定的idの鍵からstock_codeが脱落する変異(F2で反証済み)が起きると、
+    同一batch内の2銘柄目以降が「重複としてスキップ」の正常ログで静かに
+    失われる。期待値をここでも_deterministic_recommendation_id()から
+    作らず、SAVED_COUNT=2という観測事実だけで固定する。
+    """
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendations = {
+        "2914": _make_recommendation(
+            "2914", company_quality_score=72.5, recommendation_id="rec-2914",
+            buy_action=BuyAction.BUY,
+        ),
+        "7203": _make_recommendation(
+            "7203", company_quality_score=60.0, recommendation_id="rec-7203",
+            buy_action=BuyAction.BUY,
+        ),
+    }
+
+    def _fake_analyze(self: object, stock_code: str, *a: object, **kw: object):
+        return _outcome(recommendations[stock_code], ranking_group="buy_candidate")
+
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", _fake_analyze)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    for stock_code in ("2914", "7203"):
+        result = handler_module._process_single_candidate(
+            stock_code, CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(), _CONFIG,
+            object(), repo, fake_service,
+        )
+        assert result == {"stock_code": stock_code, "recommended": True, "notified": False}
+
+    saved = repo.list_all()
+    assert len(saved) == 2
+    assert {r.stock_code for r in saved} == {"2914", "7203"}
+    assert len({r.recommendation_id for r in saved}) == 2
+
+
+def test_batch_id_none_keeps_analyze_assigned_recommendation_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """batch_id=None(白箱テスト等の呼び出し元)は従来どおりanalyze()が
+    割り当てたrecommendation_idのまま変更しない(挙動不変)。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, None, _NOW, object(), _CONFIG,
+        object(), repo, fake_service,
+    )
+
+    assert repo.get("rec-1") is not None
+
+
+def test_duplicate_delivery_skips_decision_snapshot_resave(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """重複配信ではDecisionSnapshotの保存を再試行しない(save_decision_snapshot_
+    safely()の呼び出し回数で確認)。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    snapshot_calls: list[str] = []
+    monkeypatch.setattr(
+        handler_module,
+        "save_decision_snapshot_safely",
+        lambda repo, rec, decision_type, logger: snapshot_calls.append(rec.recommendation_id),
+    )
+
+    for _ in range(2):
+        handler_module._process_single_candidate(
+            "2914", CandidateSource.WATCHLIST, None, None, "batch-1", _NOW, object(), _CONFIG,
+            object(), repo, fake_service,
+        )
+
+    assert snapshot_calls == [handler_module._deterministic_recommendation_id("batch-1", "2914")]
 
 
 def test_finalize_batch_validation_mode_deletes_validation_recommendations(

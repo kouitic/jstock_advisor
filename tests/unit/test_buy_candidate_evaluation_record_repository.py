@@ -360,7 +360,13 @@ def test_save_evaluation_record_safely_swallows_exception_and_still_returns_resu
     )
 
     assert result == {"stock_code": "2914", "recommended": True, "notified": False}
-    assert recommendation_repo.get("rec-1") is not None
+    # Issue #71 F-D2/F-C8: batch_id="batch-1"が確定しているため、
+    # recommendation_idはanalyze()が返した"rec-1"ではなく決定的idへ
+    # 上書きされて保存される(参照先idのみ更新。本テストの命題である
+    # 「evaluation record保存が失敗してもRecommendationは保存される」は
+    # 変えない)。
+    saved_id = handler_module._deterministic_recommendation_id("batch-1", "2914")
+    assert recommendation_repo.get(saved_id) is not None
 
 
 def test_update_evaluation_record_outcome_safely_swallows_exception(tmp_path: Path) -> None:
