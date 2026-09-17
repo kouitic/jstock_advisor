@@ -171,6 +171,20 @@ _RANKING_ENTRY_DELIMITER = "|"
 _SECTOR_ENTRY_DELIMITER = "|"
 _STOCK_CODE_PATTERN = re.compile(r"^[0-9]{4,5}$")
 
+# Issue #71 F-D2/F-C8: _fanout.dispatch_async()はdedupトークンを持たないため、
+# AWSの非同期invoke失敗時リトライ(最大2回)が同一(batch_id, stock_code)を
+# 再処理するとrecommendation_id=uuid4()により毎回新規のRecommendationが
+# 二重保存されていた。batch_id+stock_codeから決定的に導出したUUID(既存の
+# recommendation_id列がUUID文字列であることを前提にしている呼び出し元への
+# 影響を避けるため、フォーマットはuuid4と同じUUID文字列のまま保つ)を使い、
+# 同一の再処理は同じrecommendation_idになるようにする。異なるbatch_id
+# (=別日の正当な再評価)は別IDのまま変わらない。
+_RECOMMENDATION_ID_NAMESPACE = uuid.UUID("6f1b1b4a-6b2d-4c7b-9b1a-2a6b7c8d9e0f")
+
+
+def _deterministic_recommendation_id(batch_id: str, stock_code: str) -> str:
+    return str(uuid.uuid5(_RECOMMENDATION_ID_NAMESPACE, f"{batch_id}:{stock_code}"))
+
 # 購入候補ランキングの第一ソートキー(BuyActionの強さ。数値が大きいほど優先)。
 _ACTION_PRIORITY: dict[BuyAction, int] = {
     BuyAction.SMALL_ENTRY: 0,
@@ -849,7 +863,28 @@ def _process_single_candidate(
                     }
                 )
 
-            recommendation_repo.save(final_recommendation)
+            # Issue #71 F-D2/F-C8: batch_idが確定している(=通常の非同期fan-out
+            # 経路)場合のみrecommendation_idを決定的にする。batch_id=Noneの
+            # 呼び出し元(白箱テスト等)は対象外とし、従来どおりanalyze()が
+            # 割り当てたuuid4のままにする(挙動不変)。
+            if batch_id is not None:
+                final_recommendation = final_recommendation.model_copy(
+                    update={
+                        "recommendation_id": _deterministic_recommendation_id(
+                            batch_id, stock_code
+                        )
+                    }
+                )
+            is_new_recommendation = recommendation_repo.insert_if_absent(final_recommendation)
+            if not is_new_recommendation:
+                # 非同期invokeの再試行等による同一(batch_id, stock_code)の
+                # 重複配信。Recommendationは既に保存済みのため再保存しない
+                # (Issue #71 F-D2/F-C8)。
+                logger.info(
+                    "buy candidates: duplicate delivery skipped (recommendation "
+                    "already exists) batch_id=%s",
+                    batch_id,
+                )
             if execution_context.is_validation:
                 # 通知検証モード機能(2026-08追加): _finalize_batchが正常完了後に
                 # 検証用テーブルから削除するため、このバッチで保存した
@@ -859,7 +894,11 @@ def _process_single_candidate(
             # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
             # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
             # 汚さないため保存自体をスキップする。
-            if not execution_context.is_validation:
+            # Issue #71: 重複配信でRecommendationが既に存在した場合はスキップする
+            # (決定的IDにより同一のdecision_idになるため再実行しても安全ではあるが、
+            # 判定に使ったsnapshotの時刻等がリトライごとに変わり得ることに起因する
+            # 不要な内容比較・警告ログを避けるため、ここで打ち切る)。
+            if not execution_context.is_validation and is_new_recommendation:
                 save_decision_snapshot_safely(
                     DecisionSnapshotRepository(), final_recommendation, DecisionType.BUY, logger
                 )
