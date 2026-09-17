@@ -74,10 +74,12 @@ class NotificationTextInput:
     # recommendation_adapter.py側で「即時執行」「見直し」等を明示的に設定する。
     target_price_label: str | None = None
     # 目安価格が構造上存在しない/算定不能な場合に、価格の代わりに表示する文言
-    # (コードレビュー対応2026-08、LINE通知/監査分離)。例:「売却目安は算定保留」。
-    # target_priceがNoneの場合のみ意味を持つ。他の任意セグメントと異なり、
-    # 70文字上限でも欠落させない必須セグメントとして扱う(重大リスクのreasonと
-    # 同様、「価格が取れたか算定保留か」はユーザーが必ず知るべき優先度4の情報)。
+    # (コードレビュー対応2026-08、LINE通知/監査分離)。例:「売却目安は算定不可」
+    # (Issue #374、2026-09-17。旧文言「算定保留」は「保留=いつか出る」という
+    # 誤読を招くため改めた)。target_priceがNoneの場合のみ意味を持つ。
+    # 他の任意セグメントと異なり、70文字上限でも欠落させない必須セグメントとして
+    # 扱う(重大リスクのreasonと同様、「価格が取れたか算定不可か」はユーザーが
+    # 必ず知るべき優先度4の情報)。
     target_price_withheld_label: str | None = None
     # 打診/通常のように、同じ判定内で2つ目の目安価格を併記する場合に使う
     # (コードレビュー対応2026-08)。reason文字列への埋め込みはしない。
@@ -160,7 +162,7 @@ def format_notification_text(
     price_label = data.target_price_label or "打診"
     # (segment_text, required)のリスト。requiredなセグメントはmax_charsを
     # 超えても欠落させない(コードレビュー対応2026-08、LINE通知/監査分離:
-    # 「価格が取れたか、算定保留か」はユーザーが必ず知るべき優先度4の情報のため)。
+    # 「価格が取れたか、算定不可か」はユーザーが必ず知るべき優先度4の情報のため)。
     optional_segments: list[tuple[str, bool]] = []  # 優先度の高い順
     if data.current_price is not None:
         optional_segments.append((_fmt_price(data.current_price), False))
@@ -197,7 +199,9 @@ def format_notification_text(
     # (USER確定: 銘柄分類より表示優先度を高くする)。非必須(70文字上限で
     # 落ちてよいが、secondary_target_price・type_labelより先に評価されるため
     # 逼迫時に生き残りやすい)。
+    entry_price_range_label_index: int | None = None
     if data.entry_price_range_label:
+        entry_price_range_label_index = len(optional_segments)
         optional_segments.append((data.entry_price_range_label, False))
     if data.target_price is not None and data.secondary_target_price is not None:
         secondary_label = data.secondary_target_price_label or "目安"
@@ -216,9 +220,10 @@ def format_notification_text(
         optional_segments.append((data.reason, False))
 
     text = required
-    for segment, is_required_segment in optional_segments:
+    entry_price_range_label_survived = False
+    for index, (segment, is_required_segment) in enumerate(optional_segments):
         candidate = f"{text}｜{segment}" if text != required else f"{text}\n{segment}"
-        # 重大リスク・requiredなセグメント(PARTIAL売却数量・算定保留の明示)は
+        # 重大リスク・requiredなセグメント(PARTIAL売却数量・算定不可の明示)は
         # max_charsを厳密な上限として扱わず欠落させない。それ以外は候補文字列が
         # 上限を超える場合そのセグメントのみ追加をスキップする(要求仕様の
         # soft limit)。
@@ -230,6 +235,8 @@ def format_notification_text(
         # 変えることで、後続の必須セグメントの評価を打ち切らないようにする。
         if is_critical_risk or is_required_segment or len(candidate) <= max_chars:
             text = candidate
+            if index == entry_price_range_label_index:
+                entry_price_range_label_survived = True
 
     # Issue #374 (N-2): 銘柄分類(type_label)は価格・理由等とは種類が異なる
     # 情報であり、他の任意セグメントと同じ"｜"区切りで直列に連結すると、
@@ -237,8 +244,18 @@ def format_notification_text(
     # 価格・理由群とは別の行として"\n"で区切ることで、視覚的に別ブロックだと
     # 分かるようにする(必須直後の1件目セグメントに使っている"\n"の使い方と
     # 揃える)。type_label自体は非必須のまま(70文字上限で落ちてよい)。
+    #
+    # Issue #374 (N-1/N-2逆転対策、案ii): entry_price_range_labelが70文字
+    # 上限でskipされた場合、type_labelも追加しない(N-1がskipされたのに
+    # type_labelだけ生き残る優先順位の逆転を防ぐため、両segmentを紐付ける)。
+    # この紐付けはN-1/N-2の関係にのみ適用し、他の既存skip挙動(PARTIAL_SELLの
+    # 数量保護等)には影響させない。entry_price_range_labelが未設定
+    # (entry_price_range_label_index is None、BUY以外のカテゴリやpct算定
+    # 不能時)の場合は、この制約自体が無関係のため通常どおり追加する。
     type_label = _representative_stock_types(data.stock_types)
-    if type_label:
+    if type_label and (
+        entry_price_range_label_index is None or entry_price_range_label_survived
+    ):
         candidate = f"{text}\n{type_label}"
         if is_critical_risk or len(candidate) <= max_chars:
             text = candidate

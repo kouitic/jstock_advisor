@@ -41,11 +41,15 @@ _CRITICAL_RISK_DEFAULT_REASON = "重大リスクのため緊急に保有内容�
 # frozensetを持っていたため、holdings_watchlist_handler.pyのまとめ通知集計と
 # 判定基準が乖離していた。SELLカテゴリを共用しつつlabel_overrideで区別する。
 _FULL_SELL_LABEL = "全部売却検討"
-_FULL_SELL_WITHHELD_LABEL = "全部売却目安は算定保留"
-_SELL_WITHHELD_LABEL = "売却目安は算定保留"
+# Issue #374 (2節): 4定数とも「算定不可」で統一する(USER確定2026-09-17、
+# MANAGER権限による確定。#374調査で4箇所とも算定不能(A)のみが原因であり、
+# 決算接近等の意図的な提示保留(B)とは混同していないことを確認済み。
+# 「算定保留」は「保留=いつか出る」という誤読を招くため「算定不可」へ改める)。
+_FULL_SELL_WITHHELD_LABEL = "全部売却目安は算定不可"
+_SELL_WITHHELD_LABEL = "売却目安は算定不可"
 _MANUAL_REVIEW_REASON = "売買判断を保留"
-_WATCH_PRICE_WITHHELD_LABEL = "価格目安は算定保留"
-_PARTIAL_SELL_WITHHELD_LABEL = "売却目安は算定保留"
+_WATCH_PRICE_WITHHELD_LABEL = "価格目安は算定不可"
+_PARTIAL_SELL_WITHHELD_LABEL = "売却目安は算定不可"
 _PARTIAL_RISK_REDUCTION_LABEL = "一部縮小"
 
 # Issue #374 (N-1): 打診買い価格(entry)は上限価格であり、現在値がその

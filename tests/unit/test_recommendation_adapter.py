@@ -61,7 +61,7 @@ def test_review_routes_to_manual_review_not_sell() -> None:
 
 # --- Issue #374 (1/2節の調査): 算定不可(A)と決算前抑制(B)は別経路であり、
 # B側はtarget_price_withheld_labelを一切使わないことを固定する
-# (「算定保留」系labelとBが混同されていないことの回帰テスト)。
+# (「算定不可」系labelとBが混同されていないことの回帰テスト)。
 
 
 @pytest.mark.parametrize(
@@ -100,7 +100,7 @@ def test_watch_price_withheld_when_no_partial_profit_start_price() -> None:
     )
     text_input = build_notification_text_input(rec, NotificationCategory.WATCH)
     assert text_input.target_price is None
-    assert text_input.target_price_withheld_label == "価格目安は算定保留"
+    assert text_input.target_price_withheld_label == "価格目安は算定不可"
 
 
 # テストコード削減対応2026-08: 価格選択ペアをparametrizeへ統合。各ケースが
@@ -204,7 +204,7 @@ def test_full_sell_never_shows_stop_review_price() -> None:
     )
     text_input = build_notification_text_input(rec, NotificationCategory.SELL)
     assert text_input.target_price is None
-    assert text_input.target_price_withheld_label == "全部売却目安は算定保留"
+    assert text_input.target_price_withheld_label == "全部売却目安は算定不可"
 
 
 def test_sell_consideration_uses_stop_review_price() -> None:

@@ -311,21 +311,15 @@ def test_entry_price_range_label_survives_before_type_label_at_moderate_overflow
     assert "成長株" not in text
 
 
-def test_entry_price_range_label_can_still_drop_while_type_label_survives() -> None:
-    """★ ★ 既知の限界(Issue #374、実測で確認・未解決)。format_notification_text()の
-    soft limitは「候補文字列が上限を超えたセグメントだけをskipし、後続を
-    諦めない」設計(再コードレビュー対応2026-08)であり、出現順=厳密な
-    生存優先順位ではない。skipされたセグメントは`text`を伸ばさないため、
-    その後に評価される、より短い後続セグメント(type_label等)が代わりに
-    入る余地が生まれる。
+def test_entry_price_range_label_dropping_also_drops_type_label() -> None:
+    """Issue #374(N-1/N-2逆転対策、案ii)。entry_price_range_labelが70文字
+    上限でskipされる場合、type_labelも追加しない(N-1が落ちてtype_labelだけ
+    残る優先順位の逆転を防ぐ)。
 
-    このテストは、銘柄名の文字数を1文字ずつ動かして実際に見つけた
-    反例(43文字はN-1が残りtype_labelが落ちる。47文字はN-1が落ち
-    type_labelが残る)を固定するものであり、「発生しないことの証明」では
-    なく「現状は発生することの記録」である(このテスト自体は現状の実際の
-    挙動と一致するためPASSする)。N-1をtype_labelより厳密に優先させたい
-    場合は、soft limitのアルゴリズム自体(全カテゴリ共通)を変更する必要が
-    あり、対応方針が決まるまでの未解決事項としてIssue #374へ報告済み。
+    対策前は銘柄名47文字でこの逆転(N-1が落ち、type_labelが残る)が実際に
+    発生することを実測で確認していた。対策後は両方が落ちることを固定する
+    (「N-1が落ちてN-2の対象=type_labelが残るケースが発生しないこと」の
+    回帰テスト)。
     """
     data = _base(
         category=NotificationCategory.BUY,
@@ -337,9 +331,17 @@ def test_entry_price_range_label_can_still_drop_while_type_label_survives() -> N
     )
     text = format_notification_text(data)
     assert len(text) <= MAX_CHARS
-    # ★ ★ 現状の実際の挙動(望ましい優先順位の逆転)を記録する。
-    # 対応方針が決まったらこのアサーションを更新し、xfailを外すこと。
     assert "打診価格超過" not in text
+    assert "成長株" not in text
+
+
+def test_entry_price_range_label_absent_does_not_suppress_type_label() -> None:
+    """entry_price_range_label自体が未設定(None)の場合、案iiの紐付けは
+    無関係であり、type_labelは通常どおり単独で評価される
+    (BUY以外のカテゴリ・pct算定不能時の既存挙動を壊さないことの確認)。
+    """
+    data = _base(stock_types=[StockType.GROWTH])
+    text = format_notification_text(data)
     assert "成長株" in text
 
 
