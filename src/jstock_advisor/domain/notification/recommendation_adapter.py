@@ -41,12 +41,38 @@ _CRITICAL_RISK_DEFAULT_REASON = "重大リスクのため緊急に保有内容�
 # frozensetを持っていたため、holdings_watchlist_handler.pyのまとめ通知集計と
 # 判定基準が乖離していた。SELLカテゴリを共用しつつlabel_overrideで区別する。
 _FULL_SELL_LABEL = "全部売却検討"
-_FULL_SELL_WITHHELD_LABEL = "全部売却目安は算定保留"
-_SELL_WITHHELD_LABEL = "売却目安は算定保留"
+# Issue #374 (2節): 4定数とも「算定不可」で統一する(USER確定2026-09-17、
+# MANAGER権限による確定。#374調査で4箇所とも算定不能(A)のみが原因であり、
+# 決算接近等の意図的な提示保留(B)とは混同していないことを確認済み。
+# 「算定保留」は「保留=いつか出る」という誤読を招くため「算定不可」へ改める)。
+_FULL_SELL_WITHHELD_LABEL = "全部売却目安は算定不可"
+_SELL_WITHHELD_LABEL = "売却目安は算定不可"
 _MANUAL_REVIEW_REASON = "売買判断を保留"
-_WATCH_PRICE_WITHHELD_LABEL = "価格目安は算定保留"
-_PARTIAL_SELL_WITHHELD_LABEL = "売却目安は算定保留"
+_WATCH_PRICE_WITHHELD_LABEL = "価格目安は算定不可"
+_PARTIAL_SELL_WITHHELD_LABEL = "売却目安は算定不可"
 _PARTIAL_RISK_REDUCTION_LABEL = "一部縮小"
+
+# Issue #374 (N-1): 打診買い価格(entry)は上限価格であり、現在値がその
+# 範囲内(entry以下)であることは、target_priceの表示だけでは読み取れない
+# (「まで」はNEAR BUYの接近方向専用の文言であり、BUY側の「既に範囲内」に
+# 転用すると意味が反転し誤読を増やすため転用しない。#374 Phase A報告
+# 3-1節参照)。文言はUSER確定(2026-09-17)。
+_ENTRY_PRICE_WITHIN_RANGE_LABEL = "打診価格内"
+_ENTRY_PRICE_ABOVE_RANGE_LABEL = "打診価格超過"
+
+
+def _entry_price_range_label(recommendation: Recommendation) -> str | None:
+    """現在値がentry(打診買い価格)以下(範囲内)かどうかを示す短い状態語。
+
+    current_vs_entry_price_pct(entities/recommendation.py)は「現在値がentryを
+    何%上回っているか」であり、0以下(現在値<=entry)が範囲内を意味する。
+    値が無い(算定不能)場合はNoneを返し、セグメント自体を生成しない
+    (formatter側のNotificationTextInput.entry_price_range_label参照)。
+    """
+    pct = recommendation.current_vs_entry_price_pct
+    if pct is None:
+        return None
+    return _ENTRY_PRICE_WITHIN_RANGE_LABEL if pct <= 0 else _ENTRY_PRICE_ABOVE_RANGE_LABEL
 
 
 def _entry_price(recommendation: Recommendation) -> Decimal | None:
@@ -76,6 +102,7 @@ def _build_buy(recommendation: Recommendation) -> NotificationTextInput:
         # 埋め込みはしない)。
         secondary_target_price=_standard_price(recommendation),
         secondary_target_price_label="通常",
+        entry_price_range_label=_entry_price_range_label(recommendation),
         label_override="到達" if promoted else None,
         promoted_from_watch_days=(
             recommendation.watch_previous_consecutive_business_days if promoted else None

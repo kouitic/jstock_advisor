@@ -28,6 +28,7 @@ def _make_recommendation(
     buy_prices: BuyPriceLevels | None = None,
     suggested_sell_shares: int | None = None,
     suggested_sell_ratio: float | None = None,
+    current_vs_entry_price_pct: Decimal | None = None,
 ) -> Recommendation:
     return Recommendation(
         recommendation_id="rec-1",
@@ -42,6 +43,7 @@ def _make_recommendation(
         rule_version="v1-mvp",
         suggested_sell_shares=suggested_sell_shares,
         suggested_sell_ratio=suggested_sell_ratio,
+        current_vs_entry_price_pct=current_vs_entry_price_pct,
     )
 
 
@@ -55,6 +57,29 @@ def test_review_routes_to_manual_review_not_sell() -> None:
     assert text_input.category == NotificationCategory.MANUAL_REVIEW
     assert text_input.reason == "売買判断を保留"
     assert text_input.target_price is None
+
+
+# --- Issue #374 (1/2節の調査): 算定不可(A)と決算前抑制(B)は別経路であり、
+# B側はtarget_price_withheld_labelを一切使わないことを固定する
+# (「算定不可」系labelとBが混同されていないことの回帰テスト)。
+
+
+@pytest.mark.parametrize(
+    ("recommendation_type", "expected_reason"),
+    [
+        (RecommendationType.WATCH_BEFORE_EARNINGS, "決算発表接近のため様子見"),
+        (RecommendationType.REVIEW_BEFORE_EARNINGS, "決算発表状況確認待ち"),
+        (RecommendationType.REVIEW_AFTER_EARNINGS, "決算発表状況確認待ち"),
+    ],
+)
+def test_earnings_suppressed_types_never_use_withheld_label(
+    recommendation_type: RecommendationType, expected_reason: str
+) -> None:
+    rec = _make_recommendation(recommendation_type=recommendation_type)
+    text_input = build_notification_text_input(rec, NotificationCategory.WATCH)
+    assert text_input.target_price is None
+    assert text_input.target_price_withheld_label is None
+    assert text_input.reason == expected_reason
 
 
 def test_watch_price_field_uses_partial_profit_start_price() -> None:
@@ -75,7 +100,7 @@ def test_watch_price_withheld_when_no_partial_profit_start_price() -> None:
     )
     text_input = build_notification_text_input(rec, NotificationCategory.WATCH)
     assert text_input.target_price is None
-    assert text_input.target_price_withheld_label == "価格目安は算定保留"
+    assert text_input.target_price_withheld_label == "価格目安は算定不可"
 
 
 # テストコード削減対応2026-08: 価格選択ペアをparametrizeへ統合。各ケースが
@@ -179,7 +204,7 @@ def test_full_sell_never_shows_stop_review_price() -> None:
     )
     text_input = build_notification_text_input(rec, NotificationCategory.SELL)
     assert text_input.target_price is None
-    assert text_input.target_price_withheld_label == "全部売却目安は算定保留"
+    assert text_input.target_price_withheld_label == "全部売却目安は算定不可"
 
 
 def test_sell_consideration_uses_stop_review_price() -> None:
@@ -208,6 +233,50 @@ def test_buy_shows_tentative_and_standard_prices() -> None:
     assert text_input.target_price == Decimal("3600")
     assert text_input.secondary_target_price == Decimal("3400")
     assert text_input.secondary_target_price_label == "通常"
+
+
+# --- Issue #374 (N-1): 現在値がentry(打診買い価格)の範囲内かどうかの状態語 ---
+# 文言はUSER確定(2026-09-17): 「打診価格内」/「打診価格超過」。
+# 境界(current_vs_entry_price_pct<=0、すなわち現在値<=entry)は「打診価格内」
+# 側とする(USER確定どおり。既存のpct<=0分岐から変更していない)。
+
+
+@pytest.mark.parametrize(
+    ("pct", "expect_within_range"),
+    [
+        (Decimal("-3.2"), True),  # 現在値がentry以下(範囲内)
+        (Decimal("0"), True),  # 境界(entryと同値も範囲内側とする)
+        (Decimal("4.5"), False),  # 現在値がentryを上回る(範囲外)
+    ],
+    ids=["below_entry", "at_entry_boundary", "above_entry"],
+)
+def test_buy_entry_price_range_label_reflects_current_vs_entry_sign(
+    pct: Decimal, expect_within_range: bool
+) -> None:
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.BUY,
+        buy_prices=BuyPriceLevels(
+            tentative=PriceWithRationale(price=Decimal("3600"), rationale="x"),
+        ),
+        current_vs_entry_price_pct=pct,
+    )
+    text_input = build_notification_text_input(rec, NotificationCategory.BUY)
+    if expect_within_range:
+        assert text_input.entry_price_range_label == "打診価格内"
+    else:
+        assert text_input.entry_price_range_label == "打診価格超過"
+
+
+def test_buy_entry_price_range_label_absent_when_pct_not_calculable() -> None:
+    rec = _make_recommendation(
+        recommendation_type=RecommendationType.BUY,
+        buy_prices=BuyPriceLevels(
+            tentative=PriceWithRationale(price=Decimal("3600"), rationale="x"),
+        ),
+        current_vs_entry_price_pct=None,
+    )
+    text_input = build_notification_text_input(rec, NotificationCategory.BUY)
+    assert text_input.entry_price_range_label is None
 
 
 # --- 指摘3対応: suggested_sell_shares/ratio 整合性(コードレビュー対応2026-08) ---

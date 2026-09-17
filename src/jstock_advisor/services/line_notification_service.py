@@ -3002,7 +3002,10 @@ class LineNotificationService:
         ]
         footer = [
             "",
-            f"対象: 最大{len(winners)}銘柄",
+            # Issue #374 (N-3): len(winners)は実際に送る件数(実数)であり、
+            # winners自体はこのメソッドの呼び出し時点で既に確定済み(呼び出し側の
+            # 上限適用後)。「最大」(上限)ではなく実数であることを明示する。
+            f"対象: {len(winners)}銘柄",
             f"評価日時: {format_jst(now)}",
             _DISCLAIMER,
         ]
