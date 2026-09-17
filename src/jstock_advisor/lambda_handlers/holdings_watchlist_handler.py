@@ -307,6 +307,12 @@ def evaluate_household_concentration_and_notify(
         holdings, providers
     )
     threshold = config.portfolio_concentration.single_stock_weight_threshold_pct
+    # Issue #348: 発火件数を数える手段が無く、#329の本番検証観測が構造的に
+    # 未了になっていた。銘柄コード等は出さず件数のみをループ終了後に1回集計する
+    # (0件の日も出力自体は必ず行い、「出力が無い」と「0件」を区別できるようにする)。
+    evaluated_count = len(positions)
+    triggered_count = 0
+    unjudgeable_count = 0
     for position in positions:
         # 分母不明(価格が1件でも欠けた)なら時価ベースは**判定しない**。ゼロや部分
         # 合計で強い判定を作らない(Issue #64 F-A3 M-1)。取得価格ベースは価格に
@@ -348,8 +354,10 @@ def evaluate_household_concentration_and_notify(
                 "(contributing_holdings=%d)",
                 contributing_count,
             )
+            unjudgeable_count += 1
             continue
 
+        triggered_count += 1
         single_contributor = len(position.holding_ids) == 1
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
@@ -392,6 +400,15 @@ def evaluate_household_concentration_and_notify(
         _send_or_suppress_notification(
             recommendation, notification_enabled, notification_service, now
         )
+
+    # Issue #348: 発火0件の日も必ず1回出す(「出力が無い」と「0件」を区別できる
+    # ようにするため)。銘柄コード・owner・holding_id・数量・単価・評価額は含めない。
+    logger.info(
+        "portfolio concentration summary: evaluated=%d triggered=%d unjudgeable=%d",
+        evaluated_count,
+        triggered_count,
+        unjudgeable_count,
+    )
 
 
 def _notify_legacy_sell_and_build_result(
