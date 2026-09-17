@@ -11,6 +11,7 @@ import typer
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.corporate_action_service import CorporateActionService
@@ -28,7 +29,10 @@ _SOURCE_HELP = "企業行動データの取得元: mock(既定)/ real(yfinance+�
 
 def _parse_date(value: str | None) -> dt.date:
     if not value:
-        return dt.date.today()
+        # Issue #66 F-L5: dt.date.today()はマシンローカルのnaive日付であり、
+        # TZ=UTC等の環境で実行するとJSTより1日前になりうる。永続化される
+        # 業務日付(取得日等)の既定値はJST業務日で決める(#23の既存規約と統一)。
+        return evaluation_date_jst(dt.datetime.now(dt.UTC))
     parsed = ExternalValueParser.date(value)
     if parsed is None:
         raise typer.BadParameter("日付はYYYY-MM-DD形式で指定してください")
