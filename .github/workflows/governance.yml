@@ -1,0 +1,40 @@
+name: Governance
+
+# PR本文の必須節・DoD項目・Issue参照を構文検査する(Issue #342)。
+# 意味判定(宣言内容が変更と矛盾しないか)は行わない。それは引き続き
+# レビュワーの責務である(development_workflow.md 3.5.8)。
+#
+# ci.ymlはrequired 8 jobの出所であり、job を足すとrequired_status_checks
+# との対応を誤りやすいこと、また本workflowはPR本文を読むためGitHub APIに
+# 依存することから、pii-metadata-audit.yml と同じ理由でci.ymlとは別
+# workflowとして追加している(functional_domains.md 2026-09-06の変更履歴)。
+#
+# 本workflowが失敗してもmergeはブロックされない(F_IMPLEMENTED = YES /
+# F_REQUIRED_ENFORCEMENT = NO)。required checkとしての登録はUSERが
+# 別途1回だけ行う操作である(development_workflow.md 3.5.8参照)。
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-body-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # PR本文をenv経由でファイルへ書き出す(shell injection対策。
+      # run: のtemplate文字列へ直接埋め込まない)。
+      - name: Write PR body to file
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr_body.txt"
+      - name: Check PR body (syntax only)
+        run: python scripts/governance_pr_check.py --body-file "$RUNNER_TEMP/pr_body.txt"
