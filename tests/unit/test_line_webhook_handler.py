@@ -355,3 +355,23 @@ def test_handler_uses_live_client_when_all_credentials_present(
     assert response["statusCode"] == 200
     assert len(captured) == 1
     assert isinstance(captured[0], LiveLineClient)
+
+
+def test_handler_rejects_invalid_signature_before_building_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """レビュー指摘F1: 署名検証 -> クライアント構築の順序を固定する。
+
+    access token欠落でも、署名が不正なリクエストは構築(例外)に到達する前に403で
+    拒否される。構築を署名検証より前へ移すと、不正な第三者のリクエストでも
+    LineCredentialsMissingErrorでLambdaを失敗させられてしまう。
+    """
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
+    monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    event = _build_event("ウォッチ,7203", _AUTHORIZED_USER)
+    event["headers"]["x-line-signature"] = "tampered"
+
+    response = handler(event, None)
+
+    assert response["statusCode"] == 403
