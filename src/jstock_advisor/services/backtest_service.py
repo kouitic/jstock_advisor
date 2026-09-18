@@ -22,7 +22,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from jstock_advisor.domain.entities.enums import RecommendationType
-from jstock_advisor.domain.entities.evaluation import EvaluationResult
+from jstock_advisor.domain.entities.evaluation import (
+    EVALUATION_SEMANTICS_V1,
+    EvaluationResult,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
     EvaluationResultRepository,
@@ -65,6 +68,9 @@ class BacktestResult:
     current_performance: MetricsBucket | None = None
     proposed_performance: MetricsBucket | None = None
     excluded_recommendation_ids: list[str] | None = None
+    # Issue #389(#66 F-L3): v1/v2のEvaluationResultを混在集計しないため、
+    # このbacktestが対象にしたsemanticsを明示する(AC-11)。
+    evaluation_semantics_version: str = EVALUATION_SEMANTICS_V1
 
 
 class BacktestService:
@@ -76,7 +82,14 @@ class BacktestService:
         self._recommendations = recommendation_repository or RecommendationRepository()
         self._evaluations = evaluation_repository or EvaluationResultRepository()
 
-    def run(self, target: str, current_value: float, proposed_value: float) -> BacktestResult:
+    def run(
+        self,
+        target: str,
+        current_value: float,
+        proposed_value: float,
+        *,
+        evaluation_semantics_version: str = EVALUATION_SEMANTICS_V1,
+    ) -> BacktestResult:
         spec = _METRIC_REGISTRY.get(target)
         if spec is None:
             return BacktestResult(
@@ -102,7 +115,7 @@ class BacktestService:
                 proposed_value=proposed_value,
             )
 
-        pairs = self._collect_pairs(spec)
+        pairs = self._collect_pairs(spec, evaluation_semantics_version)
         if not pairs:
             return BacktestResult(
                 target=target,
@@ -110,6 +123,7 @@ class BacktestService:
                 reason_unsupported="対象となる評価済みの推奨がありません(データ不足)",
                 current_value=current_value,
                 proposed_value=proposed_value,
+                evaluation_semantics_version=evaluation_semantics_version,
             )
 
         retained_ids: set[str] = set()
@@ -135,11 +149,20 @@ class BacktestService:
             current_performance=build_metrics_bucket("current", [e for e, _ in pairs]),
             proposed_performance=build_metrics_bucket("proposed", proposed_evals),
             excluded_recommendation_ids=excluded_ids,
+            evaluation_semantics_version=evaluation_semantics_version,
         )
 
-    def _collect_pairs(self, spec: _MetricSpec) -> list[tuple[EvaluationResult, Recommendation]]:
+    def _collect_pairs(
+        self, spec: _MetricSpec, evaluation_semantics_version: str
+    ) -> list[tuple[EvaluationResult, Recommendation]]:
+        # Issue #389(#66 F-L3): v1/v2のEvaluationResultが並存する期間、
+        # 明示的にsemanticsを揃えたペアのみを対象にする(BACKTEST_MIXED_
+        # SEMANTICS=PROHIBITED)。既定はEVALUATION_SEMANTICS_V1であり、
+        # 呼び出し側を変えない限り既存の挙動と完全に一致する。
         pairs: list[tuple[EvaluationResult, Recommendation]] = []
         for evaluation in self._evaluations.list_all():
+            if evaluation.evaluation_semantics_version != evaluation_semantics_version:
+                continue
             recommendation = self._recommendations.get(evaluation.recommendation_id)
             if recommendation is None or recommendation.recommendation_type not in (
                 spec.applicable_types

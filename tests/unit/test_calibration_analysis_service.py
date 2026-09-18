@@ -103,6 +103,49 @@ def test_parse_rejects_empty_and_missing_metadata() -> None:
         parse_dataset_jsonl(json.dumps({"record_type": "row"}) + "\n")
 
 
+def _jsonl(rows: list[dict]) -> str:
+    metadata = {
+        "record_type": "metadata",
+        "calibration_dataset_schema_version": "1",
+        "as_of": "2026-08-28T07:00:00+00:00",
+        "sample_definition": "RAW",
+        "sample_selector_parameters": {},
+        "return_basis": "PRICE_ONLY",
+        "row_count": len(rows),
+    }
+    lines = [json.dumps(metadata)] + [json.dumps(row) for row in rows]
+    return "\n".join(lines) + "\n"
+
+
+# --- Issue #389(#66 F-L3): CALIBRATION_MIXED_SEMANTICS=PROHIBITED --------------
+
+
+def test_parse_rejects_mixed_evaluation_semantics_versions() -> None:
+    rows = [
+        _row("rec-1", evaluation_semantics_version="v1"),
+        _row("rec-2", evaluation_semantics_version="v2"),
+    ]
+    with pytest.raises(ValueError, match="evaluation_semantics_version"):
+        parse_dataset_jsonl(_jsonl(rows))
+
+
+def test_parse_accepts_single_evaluation_semantics_version() -> None:
+    rows = [
+        _row("rec-1", evaluation_semantics_version="v2"),
+        _row("rec-2", evaluation_semantics_version="v2"),
+    ]
+    parsed = parse_dataset_jsonl(_jsonl(rows))
+    assert len(parsed.rows) == 2
+
+
+def test_parse_accepts_rows_without_evaluation_semantics_version_field() -> None:
+    """#389より前にexportされたdataset(フィールド自体が無い)は、混在チェックの
+    対象にせず後方互換で読めること。"""
+    rows = [_row("rec-1"), _row("rec-2")]
+    parsed = parse_dataset_jsonl(_jsonl(rows))
+    assert len(parsed.rows) == 2
+
+
 # --- RAW / 非RAWのsemantics ----------------------------------------------------
 
 

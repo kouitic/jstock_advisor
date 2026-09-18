@@ -34,7 +34,10 @@ from typing import Any
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.evaluation import EvaluationResult
+from jstock_advisor.domain.entities.evaluation import (
+    EVALUATION_SEMANTICS_V1,
+    EvaluationResult,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst, require_timezone_aware, to_jst
 from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
@@ -50,7 +53,13 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 # 週次改善レビュー用のJST暦日ホライズン。recommendation_evaluation_service.pyの
 # _CALENDAR_HORIZON_DAYS(config/review_improvement.yamlのevaluation_horizon_daysと
 # 同期)を正本として参照する(独自定義しない)。
-from jstock_advisor.services.recommendation_evaluation_service import _CALENDAR_HORIZON_DAYS
+# Issue #389(#66 F-L3): 営業日ホライズンのday-zero(v1/v2)判定も同ファイルを
+# 正本とし、独自に算出式を複製しない(片方だけJST化すると評価とcalibration
+# 母集団の意味論が割れるため)。
+from jstock_advisor.services.recommendation_evaluation_service import (
+    _CALENDAR_HORIZON_DAYS,
+    resolve_business_day_zero,
+)
 
 CALIBRATION_DATASET_SCHEMA_VERSION = "1"
 
@@ -106,6 +115,12 @@ class CalibrationRow:
     recommendation_date_jst: dt.date
     recommended_at: dt.datetime
     row_status: RowStatus
+    # Issue #389(#66 F-L3): このrowのhorizon起点(day-zero)がv1(UTC暦日)/v2
+    # (JST暦日)のどちらの意味論で算出されたか。BUSINESS_DAYS行は
+    # resolve_business_day_zero()の結果、CALENDAR_DAYS行は暦日軸の意味論を
+    # 変更していないため常に"v1"(EvaluationResult.evaluation_semantics_versionと
+    # 同じ値域。値そのものは重複定義せず参照する)。
+    evaluation_semantics_version: str
     # --- horizon ---
     evaluation_due_date: dt.date  # 既存意味論で算出したhorizon到来日
     evaluation_date: dt.date | None
@@ -220,8 +235,10 @@ class CalibrationDatasetBuilder:
         return sorted(set(specific) | set(common))
 
     def _business_due_date(self, recommendation: Recommendation, horizon: int) -> dt.date:
-        # 営業日評価のstartは「recommended_atのUTC暦日」(既存仕様。JST化しない)
-        return self._calendar.add_business_days(recommendation.recommended_at.date(), horizon)
+        # Issue #389(#66 F-L3): startはrecommendation_evaluation_service.
+        # resolve_business_day_zero()を正本とする(v1=UTC暦日/v2=JST暦日)。
+        start_date, _semantics = resolve_business_day_zero(recommendation.recommended_at)
+        return self._calendar.add_business_days(start_date, horizon)
 
     @staticmethod
     def _calendar_due_date(recommendation: Recommendation, horizon_days: int) -> dt.date:
@@ -274,6 +291,9 @@ class CalibrationDatasetBuilder:
 
         rows: list[CalibrationRow] = []
         for recommendation in recommendations:
+            _business_start, business_semantics = resolve_business_day_zero(
+                recommendation.recommended_at
+            )
             for horizon in self._business_horizons_for(recommendation.recommendation_type.value):
                 rows.append(
                     self._build_row(
@@ -285,9 +305,11 @@ class CalibrationDatasetBuilder:
                         evaluations_by_key,
                         snapshot_by_recommendation,
                         diagnostics,
+                        business_semantics,
                     )
                 )
             calendar_horizon = _CALENDAR_HORIZON_DAYS
+            # 暦日軸の意味論は変更していないため常にv1(EVALUATION_SEMANTICS_V1)。
             rows.append(
                 self._build_row(
                     recommendation,
@@ -298,6 +320,7 @@ class CalibrationDatasetBuilder:
                     evaluations_by_key,
                     snapshot_by_recommendation,
                     diagnostics,
+                    EVALUATION_SEMANTICS_V1,
                 )
             )
 
@@ -314,7 +337,15 @@ class CalibrationDatasetBuilder:
 
         _apply_sample_definition(rows, sample_definition, self._calendar)
 
-        metadata = self._build_metadata(now, sample_definition, diagnostics, len(rows))
+        rows_by_semantics_version: dict[str, int] = {}
+        for row in rows:
+            rows_by_semantics_version[row.evaluation_semantics_version] = (
+                rows_by_semantics_version.get(row.evaluation_semantics_version, 0) + 1
+            )
+
+        metadata = self._build_metadata(
+            now, sample_definition, diagnostics, len(rows), rows_by_semantics_version
+        )
         return CalibrationDataset(metadata=metadata, rows=rows, diagnostics=diagnostics)
 
     def _build_row(
@@ -327,6 +358,7 @@ class CalibrationDatasetBuilder:
         evaluations_by_key: dict[tuple[str, HorizonUnit, int], list[EvaluationResult]],
         snapshot_by_recommendation: dict[str, Any],
         diagnostics: DatasetDiagnostics,
+        semantics_version: str,
     ) -> CalibrationRow:
         key = (recommendation.recommendation_id, unit, horizon_value)
         matched = evaluations_by_key.get(key, [])
@@ -360,6 +392,7 @@ class CalibrationDatasetBuilder:
             recommendation_date_jst=to_jst(recommendation.recommended_at).date(),
             recommended_at=recommendation.recommended_at,
             row_status=row_status,
+            evaluation_semantics_version=semantics_version,
             evaluation_due_date=due_date,
             evaluation_date=evaluation.evaluation_date if evaluation else None,
             evaluated_at=evaluation.evaluated_at if evaluation else None,
@@ -443,6 +476,7 @@ class CalibrationDatasetBuilder:
         sample_definition: SampleDefinition,
         diagnostics: DatasetDiagnostics,
         row_count: int,
+        rows_by_evaluation_semantics_version: dict[str, int],
     ) -> dict[str, Any]:
         horizons_cfg = self._config.schedule.evaluation_horizons_business_days
         # 保存済み事実(benchmark_symbol="TOPIX")と、export時点の現在コードによる
@@ -478,6 +512,11 @@ class CalibrationDatasetBuilder:
             "orphan_evaluation_count": diagnostics.orphan_evaluation_count,
             "orphan_evaluation_ids_sample": diagnostics.orphan_evaluation_ids_sample,
             "duplicate_evaluation_row_count": diagnostics.duplicate_evaluation_row_count,
+            # Issue #389(#66 F-L3): v1/v2が並存する期間、downstream(calibration
+            # analysis等)がsemanticsを混在集計しないための内訳。
+            "rows_by_evaluation_semantics_version": dict(
+                sorted(rows_by_evaluation_semantics_version.items())
+            ),
         }
 
 
@@ -612,6 +651,7 @@ CSV_COLUMNS: tuple[str, ...] = (
     "recommendation_date_jst",
     "recommended_at",
     "row_status",
+    "evaluation_semantics_version",
     # horizon
     "evaluation_due_date",
     "evaluation_date",

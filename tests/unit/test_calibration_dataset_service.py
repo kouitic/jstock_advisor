@@ -25,8 +25,13 @@ from jstock_advisor.domain.entities.enums import (
     EvaluationLabel,
     RecommendationType,
 )
-from jstock_advisor.domain.entities.evaluation import EvaluationResult
+from jstock_advisor.domain.entities.evaluation import (
+    EVALUATION_SEMANTICS_V1,
+    EVALUATION_SEMANTICS_V2,
+    EvaluationResult,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.jst import to_jst
 from jstock_advisor.services.calibration_dataset_service import (
     CALIBRATION_DATASET_SCHEMA_VERSION,
     CalibrationDatasetBuilder,
@@ -37,7 +42,10 @@ from jstock_advisor.services.calibration_dataset_service import (
     to_csv,
     to_jsonl,
 )
-from jstock_advisor.services.recommendation_evaluation_service import _CALENDAR_HORIZON_DAYS
+from jstock_advisor.services.recommendation_evaluation_service import (
+    _CALENDAR_HORIZON_DAYS,
+    V2_CUTOVER_AT,
+)
 
 _CONFIG = load_config()
 _CALENDAR = BusinessCalendar.from_config(_CONFIG.holiday_calendar)
@@ -505,6 +513,81 @@ def test_repositories_receive_no_writes_and_sources_unchanged() -> None:
     assert rec.model_dump_json() == rec_dump  # source entity不変
     assert ev.model_dump_json() == ev_dump
     assert snap.model_dump_json() == snap_dump
+
+
+# --- Issue #389(#66 F-L3): calibration側のv1/v2分離 ----------------------------
+
+
+def test_business_rows_are_tagged_v1_for_pre_cutover_recommendation() -> None:
+    rec = _recommendation(recommended_at=dt.datetime(2026, 7, 30, 1, 0, tzinfo=dt.UTC))
+    dataset = _builder([rec], [], []).build(_NOW)
+
+    business_rows = _rows_for(dataset, "rec-a", unit=HorizonUnit.BUSINESS_DAYS)
+    calendar_rows = _rows_for(dataset, "rec-a", unit=HorizonUnit.CALENDAR_DAYS)
+    assert business_rows and calendar_rows
+    for row in business_rows + calendar_rows:
+        assert row.evaluation_semantics_version == EVALUATION_SEMANTICS_V1
+
+
+def test_business_rows_are_tagged_v2_for_post_cutover_recommendation() -> None:
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(hours=1)
+    now = recommended_at + dt.timedelta(days=200)
+    rec = _recommendation(recommended_at=recommended_at)
+    dataset = _builder([rec], [], []).build(now)
+
+    business_rows = _rows_for(dataset, "rec-a", unit=HorizonUnit.BUSINESS_DAYS)
+    calendar_rows = _rows_for(dataset, "rec-a", unit=HorizonUnit.CALENDAR_DAYS)
+    assert business_rows and calendar_rows
+    for row in business_rows:
+        assert row.evaluation_semantics_version == EVALUATION_SEMANTICS_V2
+    # 暦日軸は今回の変更対象外であり、v2推奨でも"v1"のまま(意味論自体は不変)。
+    for row in calendar_rows:
+        assert row.evaluation_semantics_version == EVALUATION_SEMANTICS_V1
+
+
+def test_business_due_date_uses_jst_start_for_post_cutover_recommendation() -> None:
+    """cutover後の推奨は、evaluation_due_dateの起点がJST暦日になり、
+    UTC暦日を起点にした場合と異なる日になりうることを固定する。"""
+    recommended_at = V2_CUTOVER_AT.replace(hour=16)  # UTC 16:00 = JST 翌01:00
+    now = recommended_at + dt.timedelta(days=200)
+    rec = _recommendation(recommended_at=recommended_at)
+    dataset = _builder([rec], [], []).build(now)
+
+    horizon = _BUSINESS_HORIZONS[0]
+    row = _rows_for(dataset, "rec-a", unit=HorizonUnit.BUSINESS_DAYS, value=horizon)[0]
+    jst_start = to_jst(recommended_at).date()
+    utc_start = recommended_at.date()
+    assert jst_start != utc_start
+    assert row.evaluation_due_date == _CALENDAR.add_business_days(jst_start, horizon)
+
+
+def test_metadata_reports_rows_by_evaluation_semantics_version() -> None:
+    v1_rec = _recommendation(
+        recommendation_id="rec-v1", recommended_at=dt.datetime(2026, 7, 30, 1, 0, tzinfo=dt.UTC)
+    )
+    v2_recommended_at = V2_CUTOVER_AT + dt.timedelta(hours=1)
+    v2_rec = _recommendation(
+        recommendation_id="rec-v2", recommended_at=v2_recommended_at
+    )
+    now = v2_recommended_at + dt.timedelta(days=200)
+    dataset = _builder([v1_rec, v2_rec], [], []).build(now)
+
+    breakdown = dataset.metadata["rows_by_evaluation_semantics_version"]
+    v1_rows = [r for r in dataset.rows if r.evaluation_semantics_version == EVALUATION_SEMANTICS_V1]
+    v2_rows = [r for r in dataset.rows if r.evaluation_semantics_version == EVALUATION_SEMANTICS_V2]
+    assert breakdown[EVALUATION_SEMANTICS_V1] == len(v1_rows)
+    assert breakdown[EVALUATION_SEMANTICS_V2] == len(v2_rows)
+    assert v1_rows and v2_rows
+    assert sum(breakdown.values()) == len(dataset.rows)
+
+
+def test_jsonl_export_includes_evaluation_semantics_version_column() -> None:
+    import json
+
+    dataset = _builder([_recommendation()], [_evaluation("ev-1")], []).build(_NOW)
+    lines = to_jsonl(dataset, selected_only=False, include_pending=True).splitlines()
+    first_row = json.loads(lines[1])
+    assert first_row["evaluation_semantics_version"] == EVALUATION_SEMANTICS_V1
 
 
 def test_naive_now_is_rejected() -> None:

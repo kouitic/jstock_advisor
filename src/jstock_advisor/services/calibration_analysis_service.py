@@ -101,6 +101,23 @@ def parse_dataset_jsonl(text: str) -> ParsedDataset:
         if record.get("record_type") != "row":
             raise ValueError(f"未知のrecord_typeです: {record.get('record_type')}")
         rows.append(record)
+    # Issue #389(#66 F-L3): CALIBRATION_MIXED_SEMANTICS=PROHIBITED。
+    # evaluation_semantics_versionを持たない行(本変更より前にexportされた
+    # dataset)は混在チェックの対象にしない(既存datasetをそのまま読めなくする
+    # 後方互換破壊を避ける)。値を持つ行が複数のsemanticsにまたがっている
+    # 場合のみ拒否する。
+    semantics_versions = {
+        row["evaluation_semantics_version"]
+        for row in rows
+        if "evaluation_semantics_version" in row
+    }
+    if len(semantics_versions) > 1:
+        raise ValueError(
+            "datasetにevaluation_semantics_versionが複数混在しています"
+            f"({sorted(semantics_versions)})。v1/v2を分けてexportし、"
+            "analysisはsemanticsごとに個別に実行してください"
+            "(CALIBRATION_MIXED_SEMANTICS=PROHIBITED)。"
+        )
     return ParsedDataset(metadata=metadata, rows=rows)
 
 
