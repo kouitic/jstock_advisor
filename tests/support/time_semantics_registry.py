@@ -170,6 +170,8 @@ _KNOWN_TIME_SENSITIVE_MODULES = frozenset(
         "tests/unit/test_holding_decision_service_audit_fields.py",
         "tests/unit/test_issue_52_session_aware_future_date.py",
         "tests/unit/test_issue_143_test_clock_determinism.py",
+        "tests/unit/test_recommendation_evaluation_service.py",
+        "tests/unit/test_calibration_dataset_service.py",
     }
 )
 
