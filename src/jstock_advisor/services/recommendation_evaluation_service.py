@@ -51,6 +51,7 @@ from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import RecommendationType
 from jstock_advisor.domain.entities.evaluation import (
     EVALUATION_SEMANTICS_V1,
+    EVALUATION_SEMANTICS_V2,
     EvaluationResult,
     build_evaluation_id,
 )
@@ -71,6 +72,32 @@ from jstock_advisor.services.run_scoped_market_data import RunScopedMarketDataCa
 logger = logging.getLogger(__name__)
 
 DEFAULT_BENCHMARK_SYMBOL = "TOPIX"
+
+# Issue #389(#66 F-L3): 営業日ホライズン評価のday-zero(start_date)意味論の
+# 切替境界。recommendation.recommended_at >= V2_CUTOVER_AT のRecommendationは
+# "v2"(JST暦日起点)、それ未満は"v1"(UTC暦日起点、既存仕様のまま)で評価する。
+#
+# ★ 評価実行時刻・deploy時刻・wall clockからは動的に決めない(コード上の
+#   明示定数)。境界は`recommendation.recommended_at`という不変値のみで
+#   決まるため、同一Recommendationは何度re-run/retryしても必ず同じ
+#   semanticsへ解決される。
+# = 2026-09-22T00:00:00+09:00(JST)
+V2_CUTOVER_AT = dt.datetime(2026, 9, 21, 15, 0, 0, tzinfo=dt.UTC)
+
+
+def resolve_business_day_zero(recommended_at: dt.datetime) -> tuple[dt.date, str]:
+    """営業日ホライズン評価のday-zero(start_date)と適用semanticsを解決する。
+
+    V2_CUTOVER_AT以降のRecommendationはJST暦日起点("v2")、それより前は
+    従来どおりUTC暦日起点("v1")。呼び出し側(recommendation_evaluation_service.py
+    自身とcalibration_dataset_service.py)は両方ともこの関数を正本として使い、
+    day-zeroの算出式を重複定義しない。
+    """
+    if recommended_at >= V2_CUTOVER_AT:
+        return to_jst(recommended_at).date(), EVALUATION_SEMANTICS_V2
+    return recommended_at.date(), EVALUATION_SEMANTICS_V1
+
+
 # 振り返り機能改修(週次改善レビュー)で使うJST暦日ベースの既定ホライズン。
 # config/review_improvement.yamlのevaluation_horizon_daysと一致させること。
 _CALENDAR_HORIZON_DAYS = 7
@@ -485,11 +512,12 @@ class RecommendationEvaluationService:
         market_data: RunScopedMarketDataCache,
         acc: _RunAccumulator,
     ) -> None:
-        # start_date(評価期間の起点)は従来どおりUTC暦日のまま【意図的に変更しない】。
-        # 「営業日評価はUTC暦日、暦日評価はJST暦日」という呼び出し側基準が
-        # 文書化された既存設計であり、ここをJST化するとhorizon評価日・
-        # max_gain/max_drawdown・ベンチマークwindowが変わる別仕様変更になる。
-        start_date = recommendation.recommended_at.date()
+        # start_date(評価期間の起点)。Issue #389(#66 F-L3)により、
+        # V2_CUTOVER_AT以降のRecommendationはJST暦日、それ未満は従来どおり
+        # UTC暦日のまま(v1は【意図的に変更しない】。Issue #23参照)。
+        # 「営業日評価はUTC暦日、暦日評価はJST暦日」という非対称はv1のみに残り、
+        # v2では両軸ともJST暦日に揃う。
+        start_date, semantics_version = resolve_business_day_zero(recommendation.recommended_at)
         for horizon, evaluation_date in work.business_horizons:
             result = self._evaluate_one(
                 recommendation,
@@ -498,6 +526,7 @@ class RecommendationEvaluationService:
                 now,
                 market_data,
                 horizon_business_days=horizon,
+                semantics_version=semantics_version,
             )
             if result is None:
                 acc.skipped.append(
@@ -513,7 +542,9 @@ class RecommendationEvaluationService:
             # CompletedHorizonIndex は run 開始時の 1 回読みであり、**別実行が
             # その後に保存した分は見えない**。事前確認を通っても競合しうる。
             if not self._evaluations.insert_if_absent(result):
-                self._record_conflict(recommendation, horizon, axis="business")
+                self._record_conflict(
+                    recommendation, horizon, axis="business", semantics_version=semantics_version
+                )
                 index.record_business_horizon(recommendation.recommendation_id, horizon)
                 acc.concurrent_conflicts += 1
                 continue
@@ -553,7 +584,12 @@ class RecommendationEvaluationService:
         acc.calendar_evaluated += 1
 
     def _record_conflict(
-        self, recommendation: Recommendation, horizon: int, *, axis: str
+        self,
+        recommendation: Recommendation,
+        horizon: int,
+        *,
+        axis: str,
+        semantics_version: str = EVALUATION_SEMANTICS_V1,
     ) -> None:
         """条件付き insert が弾かれたとき、既存結果を読んで記録する(Issue #71 F-C12)。
 
@@ -569,6 +605,7 @@ class RecommendationEvaluationService:
             recommendation.recommendation_id,
             horizon_business_days=horizon if axis == "business" else None,
             horizon_calendar_days=horizon if axis == "calendar" else None,
+            semantics_version=semantics_version,
         )
         existing = self._evaluations.get(key)
         logger.info(
@@ -577,7 +614,7 @@ class RecommendationEvaluationService:
             recommendation.recommendation_id,
             axis,
             horizon,
-            EVALUATION_SEMANTICS_V1,
+            semantics_version,
             existing.evaluated_at.isoformat() if existing is not None else "unknown",
         )
 
@@ -594,6 +631,9 @@ class RecommendationEvaluationService:
     ) -> list[tuple[int, dt.date]]:
         """到来済みの営業日horizonと、その評価基準日を返す。
 
+        Issue #389(#66 F-L3): day-zero(start_date)はresolve_business_day_zero()
+        で決まる(V2_CUTOVER_AT以降はJST暦日、それ未満はUTC暦日)。
+
         Issue #23(2026-08-28): 「評価を実施してよい日に達したか」の当日判定は
         JST暦日(JST calendar date)で行う。UTC暦日(now.date())だとJST 00:00〜
         08:59の実行(reconciler等の再実行)で前日扱いとなり、本来当日実施すべき
@@ -608,7 +648,7 @@ class RecommendationEvaluationService:
         単調非減少であることに基づく(より長いhorizonの評価日が
         より早くなることはない)。
         """
-        start_date = recommendation.recommended_at.date()
+        start_date, _semantics = resolve_business_day_zero(recommendation.recommended_at)
         due: list[tuple[int, dt.date]] = []
         cursor_date = start_date
         cursor_horizon = 0
@@ -637,6 +677,7 @@ class RecommendationEvaluationService:
         *,
         horizon_business_days: int | None = None,
         horizon_calendar_days: int | None = None,
+        semantics_version: str = EVALUATION_SEMANTICS_V1,
     ) -> EvaluationResult | None:
         # evaluation_start_dateは呼び出し側が計算基準(営業日評価はUTC暦日、暦日評価は
         # JST暦日)に応じて算出済みの値をそのまま渡す。ここでrecommended_atから
@@ -693,12 +734,14 @@ class RecommendationEvaluationService:
                 recommendation.recommendation_id,
                 horizon_business_days=horizon_business_days,
                 horizon_calendar_days=horizon_calendar_days,
+                semantics_version=semantics_version,
             ),
             recommendation_id=recommendation.recommendation_id,
             horizon_business_days=horizon_business_days,
             horizon_calendar_days=horizon_calendar_days,
             evaluated_at=now,
             evaluation_date=evaluation_date,
+            evaluation_semantics_version=semantics_version,
             price_at_evaluation=price_at_evaluation,
             price_return_pct=price_return_pct,
             buy_price_based_return_pct=buy_price_based_return_pct,
