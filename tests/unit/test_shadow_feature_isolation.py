@@ -101,6 +101,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.providers.market_data.mock_impl import MockMarketDataProvider
+from jstock_advisor.services import buy_signal_service as buy_signal_service_module
 from jstock_advisor.services import holding_decision_notification_builder as builder_module
 from jstock_advisor.services import profit_taking_service as profit_taking_service_module
 from jstock_advisor.services import sell_signal_service as sell_signal_service_module
@@ -853,6 +854,93 @@ def test_holding_decision_builder_shadow_metrics_failure_is_isolated_per_signal(
     assert degraded.historical_valuation_metrics["error_type"] == "ZeroDivisionError"
     assert degraded.timing_metrics == baseline.timing_metrics
     assert degraded.market_metrics == baseline.market_metrics
+
+
+def test_buy_signal_shadow_metrics_failure_in_all_8_does_not_break_recommendation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUYパイプラインで、DecisionSnapshot記録専用の8箇所の*_metrics算出が
+    すべて例外で落ちても、analyze()自体は失敗せず、v1の判定(buy_action・
+    company_quality_score)は変わらない(Issue #384 PR-6。PR-5[holding_
+    decision_notification_builder.py]と同型のisolationをbuy_signal_
+    service.pyへ適用したことの固定)。"""
+    snapshot = _base_snapshot()
+    service = BuySignalService(providers=_PROVIDERS, config=_CFG, business_calendar=_CALENDAR)
+
+    baseline = service.analyze(_STOCK_CODE, _NOW, snapshot=snapshot)
+    assert baseline.recommendation is not None
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected shadow metrics failure")
+
+    for name in (
+        "historical_valuation_result_to_metrics",
+        "timing_score_result_to_metrics",
+        "earnings_surprise_result_to_metrics",
+        "earnings_trend_result_to_metrics",
+        "entry_price_range_result_to_metrics",
+        "market_environment_result_to_metrics",
+        "sector_environment_result_to_metrics",
+        "environment_result_to_metrics",
+    ):
+        monkeypatch.setattr(buy_signal_service_module, name, _boom)
+
+    degraded = service.analyze(_STOCK_CODE, _NOW, snapshot=snapshot)
+    assert degraded.recommendation is not None
+
+    # 1 v1の出力が変わらない。
+    assert degraded.recommendation.buy_action == baseline.recommendation.buy_action
+    assert (
+        degraded.recommendation.company_quality_score
+        == baseline.recommendation.company_quality_score
+    )
+
+    # 2 失敗が記録に残る(黙って何も保存しない、にしない)。0.0/空へも潰さない。
+    for field in (
+        "historical_valuation_metrics",
+        "timing_metrics",
+        "earnings_surprise_metrics",
+        "earnings_trend_metrics",
+        "entry_price_range_metrics",
+        "market_metrics",
+        "sector_metrics",
+        "environment_metrics",
+    ):
+        failed = getattr(degraded.recommendation, field)
+        assert failed["shadow_state"] == "COMPUTATION_FAILED"
+        assert failed["error_type"] == "ZeroDivisionError"
+
+
+def test_buy_signal_shadow_metrics_failure_is_isolated_per_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """隔離は算出ごと。historical_valuation_metricsだけが失敗しても、他の
+    *_metrics(timing_metrics等)は影響を受けず算出されたまま残る。"""
+    snapshot = _base_snapshot()
+    service = BuySignalService(providers=_PROVIDERS, config=_CFG, business_calendar=_CALENDAR)
+
+    baseline = service.analyze(_STOCK_CODE, _NOW, snapshot=snapshot)
+    assert baseline.recommendation is not None
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected historical_valuation_metrics failure")
+
+    monkeypatch.setattr(
+        buy_signal_service_module, "historical_valuation_result_to_metrics", _boom
+    )
+
+    degraded = service.analyze(_STOCK_CODE, _NOW, snapshot=snapshot)
+    assert degraded.recommendation is not None
+
+    assert degraded.recommendation.buy_action == baseline.recommendation.buy_action
+    assert degraded.recommendation.historical_valuation_metrics["shadow_state"] == (
+        "COMPUTATION_FAILED"
+    )
+    assert degraded.recommendation.historical_valuation_metrics["error_type"] == (
+        "ZeroDivisionError"
+    )
+    assert degraded.recommendation.timing_metrics == baseline.recommendation.timing_metrics
+    assert degraded.recommendation.market_metrics == baseline.recommendation.market_metrics
 
 
 def test_sell_signal_service_ignores_exit_price_range() -> None:

@@ -1687,6 +1687,59 @@ class BuySignalService:
             timestamp=now,
         )
 
+        # Issue #384 PR-6: 記録専用(DecisionSnapshot記録用)の*_to_metrics()
+        # 整形がRecommendation構築のinline引数として本流に直接置かれており、
+        # いずれかが例外を出すとanalyze()自体が失敗し、当該銘柄のBUY判定
+        # 結果全体が失われるリスクがあった(#384本体・#22 C2・#371と同型。
+        # PR-5[holding_decision_notification_builder.py]で同一9関数のうち
+        # 8関数[exit_price_rangeを除く]へ既に適用した隔離をそのまま踏襲)。
+        # 9関数はいずれもdict[str, object]を返すため、PR-1で抽出済みの
+        # isolated_shadow_observation()(dict専用契約。本ファイルは既に
+        # common_quality_shadow等3箇所で利用中)でそのまま隔離できる。
+        historical_valuation_metrics = isolated_shadow_observation(
+            "historical_valuation_metrics",
+            lambda: historical_valuation_result_to_metrics(snapshot.historical_valuation),
+        )
+        timing_metrics = isolated_shadow_observation(
+            "timing_metrics",
+            lambda: timing_score_result_to_metrics(
+                snapshot.timing, snapshot.momentum, snapshot.current_price
+            ),
+        )
+        earnings_surprise_metrics = isolated_shadow_observation(
+            "earnings_surprise_metrics",
+            lambda: earnings_surprise_result_to_metrics(snapshot.earnings_surprise),
+        )
+        earnings_trend_metrics = isolated_shadow_observation(
+            "earnings_trend_metrics",
+            lambda: earnings_trend_result_to_metrics(snapshot.earnings_trend),
+        )
+        entry_price_range_metrics = isolated_shadow_observation(
+            "entry_price_range_metrics",
+            lambda: entry_price_range_result_to_metrics(
+                snapshot.entry_price_range,
+                snapshot.fair_value_range,
+                snapshot.historical_valuation,
+                snapshot.timing,
+                snapshot.momentum,
+                self._config.entry_exit_price.entry,
+            ),
+        )
+        market_metrics = isolated_shadow_observation(
+            "market_metrics",
+            lambda: market_environment_result_to_metrics(snapshot.market_environment),
+        )
+        sector_metrics = isolated_shadow_observation(
+            "sector_metrics",
+            lambda: sector_environment_result_to_metrics(snapshot.sector_environment),
+        )
+        environment_metrics = isolated_shadow_observation(
+            "environment_metrics",
+            lambda: environment_result_to_metrics(
+                snapshot.environment, snapshot.market_environment, snapshot.sector_environment
+            ),
+        )
+
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
             stock_code=stock_code,
@@ -1862,30 +1915,24 @@ class BuySignalService:
             historical_valuation_confidence=snapshot.historical_valuation.confidence,
             historical_valuation_coverage=snapshot.historical_valuation.coverage,
             historical_valuation_reason_codes=snapshot.historical_valuation.reason_codes,
-            historical_valuation_metrics=historical_valuation_result_to_metrics(
-                snapshot.historical_valuation
-            ),
+            historical_valuation_metrics=historical_valuation_metrics,
             # 判定精度向上機能Phase B第二弾: DecisionSnapshot記録専用(Shadow計測)。
             timing_score=snapshot.timing.score,
             timing_confidence=snapshot.timing.confidence,
             timing_coverage=snapshot.timing.coverage,
             timing_reason_codes=snapshot.timing.reason_codes,
-            timing_metrics=timing_score_result_to_metrics(
-                snapshot.timing, snapshot.momentum, snapshot.current_price
-            ),
+            timing_metrics=timing_metrics,
             # 判定精度向上機能Phase C: DecisionSnapshot記録専用(Shadow計測)。
             earnings_surprise_score=snapshot.earnings_surprise.score,
             earnings_surprise_confidence=snapshot.earnings_surprise.confidence,
             earnings_surprise_coverage=snapshot.earnings_surprise.coverage,
             earnings_surprise_reason_codes=snapshot.earnings_surprise.reason_codes,
-            earnings_surprise_metrics=earnings_surprise_result_to_metrics(
-                snapshot.earnings_surprise
-            ),
+            earnings_surprise_metrics=earnings_surprise_metrics,
             earnings_trend_score=snapshot.earnings_trend.score,
             earnings_trend_confidence=snapshot.earnings_trend.confidence,
             earnings_trend_coverage=snapshot.earnings_trend.coverage,
             earnings_trend_reason_codes=snapshot.earnings_trend.reason_codes,
-            earnings_trend_metrics=earnings_trend_result_to_metrics(snapshot.earnings_trend),
+            earnings_trend_metrics=earnings_trend_metrics,
             # 判定精度向上機能次フェーズSTEP2: DecisionSnapshot記録専用(Shadow
             # 計測)。BUYパイプラインはExit Price Rangeを計算しないため
             # exit_price_range_*は全てNoneのまま(デフォルト)。
@@ -1893,14 +1940,7 @@ class BuySignalService:
             entry_price_range_confidence=snapshot.entry_price_range.confidence,
             entry_price_range_coverage=snapshot.entry_price_range.coverage,
             entry_price_range_reason_codes=snapshot.entry_price_range.reason_codes,
-            entry_price_range_metrics=entry_price_range_result_to_metrics(
-                snapshot.entry_price_range,
-                snapshot.fair_value_range,
-                snapshot.historical_valuation,
-                snapshot.timing,
-                snapshot.momentum,
-                self._config.entry_exit_price.entry,
-            ),
+            entry_price_range_metrics=entry_price_range_metrics,
             entry_price_range_starter_price=snapshot.entry_price_range.starter_entry_price,
             entry_price_range_preferred_price=snapshot.entry_price_range.preferred_entry_price,
             entry_price_range_strong_price=snapshot.entry_price_range.strong_entry_price,
@@ -1911,19 +1951,17 @@ class BuySignalService:
             market_confidence=snapshot.market_environment.confidence,
             market_coverage=snapshot.market_environment.coverage,
             market_reason_codes=snapshot.market_environment.reason_codes,
-            market_metrics=market_environment_result_to_metrics(snapshot.market_environment),
+            market_metrics=market_metrics,
             sector_score=snapshot.sector_environment.score,
             sector_confidence=snapshot.sector_environment.confidence,
             sector_coverage=snapshot.sector_environment.coverage,
             sector_reason_codes=snapshot.sector_environment.reason_codes,
-            sector_metrics=sector_environment_result_to_metrics(snapshot.sector_environment),
+            sector_metrics=sector_metrics,
             environment_score=snapshot.environment.score,
             environment_confidence=snapshot.environment.confidence,
             environment_coverage=snapshot.environment.coverage,
             environment_reason_codes=snapshot.environment.reason_codes,
-            environment_metrics=environment_result_to_metrics(
-                snapshot.environment, snapshot.market_environment, snapshot.sector_environment
-            ),
+            environment_metrics=environment_metrics,
         )
 
         return BuyAnalysisOutcome(
