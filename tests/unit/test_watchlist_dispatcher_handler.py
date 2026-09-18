@@ -33,6 +33,14 @@ def _fake_config(
     return SimpleNamespace(watchlist_screening=watchlist_screening)
 
 
+@pytest.fixture(autouse=True)
+def _line_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #117 (B1b-2): dispatcherはNEW_CANDIDATE_SCREENINGでLINE認証情報を必須とする
+    (欠落時はlease取得前に例外)。開始後の経路を検証する既存テストは有効な認証情報を前提とする。"""
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
+    monkeypatch.setenv("LINE_USER_ID", "user-value")
+
+
 def _fail_if_called(*args: Any, **kwargs: Any) -> bool:
     pytest.fail("try_acquire_dispatch_lease should not be called when the guard blocks startup")
 
@@ -388,3 +396,42 @@ def test_collect_maintenance_targets_omits_trigger_metadata_when_absent(
 
     assert codes == []
     assert extra_kwargs == {}
+
+
+def test_new_candidate_screening_fails_before_lease_when_line_credentials_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LINE認証情報の欠落は、dispatch lease・BatchRuns行の作成より前に例外で止まる
+    (状態を作った後に失敗してDISPATCHINGのまま残る中途状態を作らない)。"""
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_FULL_MARKET_SCREENING", "true")
+    monkeypatch.setattr(handler_module, "load_config", lambda: _fake_config(candidate_limit=None))
+    monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", _fail_if_called)
+
+    with pytest.raises(LineCredentialsMissingError):
+        handler_module.handler({}, object())
+
+
+def test_maintenance_job_does_not_require_line_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """maintenanceは通知サービスを使わないため、LINE認証情報が無くても構築で失敗しない
+    (認証情報欠落による新たな失敗を持ち込まない)。leaseゲートまで到達することで確認する。"""
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+    monkeypatch.setattr(handler_module, "load_config", lambda: _fake_config(candidate_limit=5))
+    monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
+    reached: list[bool] = []
+
+    def _lease(*args: Any, **kwargs: Any) -> bool:
+        reached.append(True)
+        return False
+
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", _lease)
+
+    handler_module.handler({"job_type": "WATCHLIST_MAINTENANCE"}, object())
+
+    assert reached == [True]

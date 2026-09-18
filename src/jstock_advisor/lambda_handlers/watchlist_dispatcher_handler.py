@@ -77,7 +77,7 @@ from jstock_advisor.infrastructure.aws.watchlist_rotation_state import (
     DEFAULT_ROTATION_ID,
     create_rotation_state_if_absent,
 )
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -163,7 +163,7 @@ def _send_batch_with_retry(
 
 def _build_notification_service(config: Any) -> LineNotificationService:
     return LineNotificationService(
-        line_client=build_line_client_from_env(),
+        line_client=build_live_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
@@ -456,6 +456,18 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         )
         return {"error": "full_market_screening_blocked"}
 
+    # Issue #117 (B1b-2): LINE認証情報の欠落はここ(dispatch lease・BatchRuns行・
+    # 進捗行の作成より前)で例外にする。以前は構築がSQS投入の直前(状態作成後)に
+    # あり、strict版へ切り替えるとbatchがDISPATCHINGのままleaseを保持した中途状態で
+    # 失敗してしまうため、上のゲートと同じ「開始前に中止する」位置へ移した。
+    # 通知サービスを使うのはNEW_CANDIDATE_SCREENINGのfinalizeのみ(maintenanceは
+    # 未使用)のため、maintenanceが不要な認証情報で新たに失敗しないようNoneにする。
+    notification_service = (
+        _build_notification_service(config)
+        if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING
+        else None
+    )
+
     batch_prefix = (
         "watchlist" if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING else "watchlist-maint"
     )
@@ -649,10 +661,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     queue_url = os.environ["WATCHLIST_SCREENING_QUEUE_URL"]
     sqs = boto3.client("sqs")
     providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
-    notification_service = _build_notification_service(config)
 
     def _finalize(batch_id: str, now: dt.datetime) -> None:
-        if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING:
+        if notification_service is not None:
             maybe_finalize(batch_id, now, providers, config, notification_service)
         else:
             maybe_finalize_maintenance(batch_id, now, config)
