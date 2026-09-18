@@ -151,7 +151,7 @@ def fake_client(monkeypatch: pytest.MonkeyPatch) -> _FakeLineClient:
     client = _FakeLineClient()
     monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
     monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
-    monkeypatch.setattr(line_webhook_handler, "build_line_client_from_env", lambda: client)
+    monkeypatch.setattr(line_webhook_handler, "build_live_line_client_from_env", lambda: client)
     monkeypatch.setattr(line_webhook_handler, "build_line_event_router", lambda: _FakeRouter())
     return client
 
@@ -231,7 +231,7 @@ def test_handler_sends_internal_error_reply_when_text_handling_raises(
     client = _FakeLineClient()
     monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
     monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
-    monkeypatch.setattr(line_webhook_handler, "build_line_client_from_env", lambda: client)
+    monkeypatch.setattr(line_webhook_handler, "build_live_line_client_from_env", lambda: client)
     monkeypatch.setattr(
         line_webhook_handler, "build_line_event_router", lambda: _FakeFailingRouter()
     )
@@ -257,7 +257,7 @@ def test_handler_sends_internal_error_reply_when_postback_handling_raises(
     client = _FakeLineClient()
     monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
     monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
-    monkeypatch.setattr(line_webhook_handler, "build_line_client_from_env", lambda: client)
+    monkeypatch.setattr(line_webhook_handler, "build_live_line_client_from_env", lambda: client)
     monkeypatch.setattr(
         line_webhook_handler, "build_line_event_router", lambda: _FakeFailingRouter()
     )
@@ -279,7 +279,7 @@ def test_handler_continues_processing_remaining_events_after_one_fails(
     client = _FakeLineClient()
     monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
     monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
-    monkeypatch.setattr(line_webhook_handler, "build_line_client_from_env", lambda: client)
+    monkeypatch.setattr(line_webhook_handler, "build_live_line_client_from_env", lambda: client)
     monkeypatch.setattr(line_webhook_handler, "build_line_event_router", lambda: _FakeMixedRouter())
 
     event = _build_multi_text_event(["fail", "ok-text"], _AUTHORIZED_USER)
@@ -301,7 +301,7 @@ def test_handler_does_not_crash_when_internal_error_reply_itself_fails(
     client = _FailingReplyLineClient()
     monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
     monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
-    monkeypatch.setattr(line_webhook_handler, "build_line_client_from_env", lambda: client)
+    monkeypatch.setattr(line_webhook_handler, "build_live_line_client_from_env", lambda: client)
     monkeypatch.setattr(
         line_webhook_handler, "build_line_event_router", lambda: _FakeFailingRouter()
     )
@@ -310,3 +310,48 @@ def test_handler_does_not_crash_when_internal_error_reply_itself_fails(
     response = handler(event, None)
 
     assert response["statusCode"] == 200
+
+
+# --- Issue #117 Phase B1b-1: クライアント構築関数を丸ごと差し替えず、実際の分岐を通す ---
+
+
+def test_handler_raises_when_access_token_missing_instead_of_silent_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LINE_CHANNEL_ACCESS_TOKEN欠落時、ConsoleLineClientへ黙って落ちず例外で
+    Lambda呼び出しを失敗させる(署名検証を通った後の経路)。"""
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
+    monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(line_webhook_handler, "build_line_event_router", lambda: _FakeRouter())
+
+    with pytest.raises(LineCredentialsMissingError):
+        handler(_build_event("ウォッチ,7203", _AUTHORIZED_USER), None)
+
+
+def test_handler_uses_live_client_when_all_credentials_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jstock_advisor.infrastructure.line.client import LiveLineClient
+
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", _SECRET)
+    monkeypatch.setenv("LINE_USER_ID", _AUTHORIZED_USER)
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
+    captured: list[object] = []
+
+    class _CapturingRouter(_FakeRouter):
+        pass
+
+    def _fake_send_reply(client: object, reply_token: str, reply: object) -> None:
+        captured.append(client)
+
+    monkeypatch.setattr(line_webhook_handler, "build_line_event_router", lambda: _CapturingRouter())
+    monkeypatch.setattr(line_webhook_handler, "_send_reply", _fake_send_reply)
+
+    response = handler(_build_event("ウォッチ,7203", _AUTHORIZED_USER), None)
+
+    assert response["statusCode"] == 200
+    assert len(captured) == 1
+    assert isinstance(captured[0], LiveLineClient)
