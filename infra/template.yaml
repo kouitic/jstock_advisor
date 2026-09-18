@@ -60,6 +60,40 @@ Parameters:
     Description: >
       候補ユニバース本格対応(2026-08)。WatchlistScreeningQueueのLambdaトリガー
       BatchSize。初期値は1(3節)、安定稼働後に引き上げ可能。
+  BuyCandidateReservedConcurrentExecutions:
+    Type: Number
+    Default: 50
+    Description: >
+      Issue #319 Phase 1。BuyCandidateQueue経由のfan-out先(将来のworker)の
+      同時実行数上限。恒久値ではなく初期値であり、Queue depth・Oldest
+      message age・worker duration・throttles・account全体の同時実行数・
+      DLQ流入・batch完了時間をnatural verificationで実測してから増減判断する
+      (USER判断、2026-09-18)。account全体の同時実行上限(実測400、
+      unreserved396)の13%に相当し、無予約プールを奪い合わないための
+      backpressureとして機能する。Service Quota引上げ(#387)はこの初期値の
+      前提にしない。
+  BuyCandidateSqsBatchSize:
+    Type: Number
+    Default: 1
+    Description: >
+      Issue #319 Phase 1。BuyCandidateQueueのLambdaトリガーBatchSize。
+      Watchlistと同じ理由(1メッセージ=1銘柄、1銘柄の失敗が他銘柄を
+      巻き込まない)で初期値は1とする。
+  HoldingsWatchlistReservedConcurrentExecutions:
+    Type: Number
+    Default: 50
+    Description: >
+      Issue #319 Phase 1。HoldingsWatchlistQueue経由のfan-out先(将来の
+      worker)の同時実行数上限。buy-candidates側の初回natural verification
+      結果とholdings自身の負荷実測を踏まえてProduction activation直前に
+      確定する初期値であり、BuyCandidateReservedConcurrentExecutionsの値を
+      無条件にコピーしたものではない(USER判断、2026-09-18)。
+  HoldingsWatchlistSqsBatchSize:
+    Type: Number
+    Default: 1
+    Description: >
+      Issue #319 Phase 1。HoldingsWatchlistQueueのLambdaトリガーBatchSize。
+      buy-candidates側と同じ理由で初期値は1とする。
   AllowFullMarketScreening:
     Type: String
     Default: "false"
@@ -189,6 +223,63 @@ Resources:
       VisibilityTimeout: 1080 # 3節: WatchlistWorkerFunctionのLambda Timeout(180秒)の6倍
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt WatchlistTerminalFailureQueue.Arn
+        maxReceiveCount: 3
+
+  # --- Issue #319 Phase 1: buy-candidates / holdings-watchlist SQSキュー -----
+  # ★ Phase 1時点では、いずれのキューもコードから一切参照されない
+  # (Production挙動を変えない基盤実装)。dispatch側の切替(Phase 2)・
+  # worker Lambdaの新設(Phase 2)・Production activation(Phase 3、別Human
+  # Gate)は本段階では行わない。3段構成(メイン→terminal failure→真正DLQ)は
+  # WatchlistScreeningQueue/WatchlistTerminalFailureQueue/
+  # WatchlistTerminalFailureDLQと同じ設計を踏襲する(#319 Phase A設計S-1)。
+
+  BuyCandidateTerminalFailureDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-buy-candidate-terminal-failure-dlq"
+      MessageRetentionPeriod: 1209600 # 14日(WatchlistTerminalFailureDLQと同じ)
+
+  BuyCandidateTerminalFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-buy-candidate-terminal-failure"
+      VisibilityTimeout: 120 # 将来のBuyCandidateTerminalFailureHandlerFunctionを
+                             # 60秒想定として、Watchlistと同じ比率(Timeoutの2倍)で確保
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BuyCandidateTerminalFailureDLQ.Arn
+        maxReceiveCount: 3
+
+  BuyCandidateQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-buy-candidate-queue"
+      VisibilityTimeout: 5400 # #319 Phase A設計S-1: 対象関数のTimeout(900秒)の6倍
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BuyCandidateTerminalFailureQueue.Arn
+        maxReceiveCount: 3
+
+  HoldingsWatchlistTerminalFailureDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-holdings-watchlist-terminal-failure-dlq"
+      MessageRetentionPeriod: 1209600
+
+  HoldingsWatchlistTerminalFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-holdings-watchlist-terminal-failure"
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt HoldingsWatchlistTerminalFailureDLQ.Arn
+        maxReceiveCount: 3
+
+  HoldingsWatchlistQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-holdings-watchlist-queue"
+      VisibilityTimeout: 5400 # HoldingsWatchlistFunctionのTimeout(900秒)の6倍
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt HoldingsWatchlistTerminalFailureQueue.Arn
         maxReceiveCount: 3
 
   # Issue #318: Lambdaの**非同期呼び出し**(InvocationType="Event")が再試行を
