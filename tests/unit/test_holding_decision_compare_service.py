@@ -30,6 +30,8 @@ from jstock_advisor.services.holding_decision_compare_service import (
     summarize_compare_rows,
     write_compare_csv,
 )
+from jstock_advisor.services.holding_decision_service import HoldingDecisionService
+from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 
@@ -66,6 +68,35 @@ def test_run_compare_non_holding_stock_does_not_evaluate_legacy(store_dir: Path)
     assert row.new_score is not None
     assert row.should_notify_diff == ShouldNotifyComparison.NOT_COMPARABLE
     assert row.category_diff == "対象外(非保有・比較不能)"
+
+
+def test_run_compare_wires_first_evaluation_flag_onto_the_returned_row(store_dir: Path):
+    """レビュー指摘F1対応: `_is_first_evaluation()`は単体テストで固定されて
+    いても、その結果が`run_compare()`の返す行へ実際に載ることは別途検証が
+    要る(`first_evaluation=False`固定という結線ミスでも、判定関数自体の
+    単体テストは全て通ってしまうため)。
+
+    isolated store(store_dir)で同一銘柄を2回評価する: 1回目はbaseline未作成
+    のため`_is_first_evaluation`のAND条件(SYSTEM_INITIALIZED かつ
+    coverage_ratio<1.0)を満たしTrueになり、2回目はbaselineが作成済みの
+    ためFalseになる(holding_decision_service.evaluate()の実装が、初回評価
+    時にSYSTEM_INITIALIZEDのbaselineを自動作成する副作用を持つことに基づく
+    実際の状態遷移。合成fixtureではなく実サービスを実行して確認する)。
+    """
+    thesis_service = InvestmentThesisService(store_dir=store_dir)
+    holding_decision_service = HoldingDecisionService(
+        _PROVIDERS, _CFG, investment_thesis_service=thesis_service
+    )
+
+    first_rows = run_compare(
+        ["2914"], _PROVIDERS, _CFG, _NOW, holding_decision_service=holding_decision_service
+    )
+    assert first_rows[0].first_evaluation is True
+
+    second_rows = run_compare(
+        ["2914"], _PROVIDERS, _CFG, _NOW, holding_decision_service=holding_decision_service
+    )
+    assert second_rows[0].first_evaluation is False
 
 
 def _row(
