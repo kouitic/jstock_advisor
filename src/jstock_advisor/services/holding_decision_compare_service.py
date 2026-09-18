@@ -20,8 +20,8 @@ from enum import StrEnum
 from pathlib import Path
 
 from jstock_advisor.config.models import AppConfig
-from jstock_advisor.domain.entities.enums import ExecutionPlanReason
-from jstock_advisor.domain.entities.holding_decision import ReasonImpact
+from jstock_advisor.domain.entities.enums import BaselineOrigin, ExecutionPlanReason
+from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult, ReasonImpact
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.services.holding_decision_backtest_service import placeholder_holding
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
@@ -42,6 +42,7 @@ _CSV_HEADER = (
     "hard_gate_reason_codes",
     "positive_reasons",
     "negative_reasons",
+    "first_evaluation",
 )
 
 
@@ -57,6 +58,23 @@ class ShouldNotifyComparison(StrEnum):
 
 def _format_reasons(reasons: tuple[ReasonImpact, ...]) -> str:
     return "; ".join(f"{r.reason_code}({r.score_impact:+.1f})" for r in reasons)
+
+
+def _is_first_evaluation(result: HoldingDecisionResult) -> bool:
+    """Issue #258: baseline未確定(SYSTEM_INITIALIZED)かつinvestment_thesisの
+    coverage_ratioが1.0未満(baseline比較項目が未評価)の初回評価かどうかを
+    判定する(2条件のAND)。
+
+    origin単独では、baselineがHUMAN_APPROVEDへ昇格していないままの通常の
+    保有(SYSTEM_INITIALIZED以外の理由で2回目以降になっている記録)まで
+    拾ってしまう。coverage単独では、データ欠測でcoverageが下がった
+    2回目以降を誤って除外する(#55 Decision 3の対象と非該当を混同する)。
+    ANDにすることで、除外対象を初回評価だけに限定する。
+    """
+    return (
+        result.baseline_origin == BaselineOrigin.SYSTEM_INITIALIZED
+        and result.investment_thesis.coverage_ratio < 1.0
+    )
 
 
 @dataclass(frozen=True)
@@ -75,6 +93,12 @@ class CompareRow:
     positive_reasons: tuple[ReasonImpact, ...]
     negative_reasons: tuple[ReasonImpact, ...]
     data_error: str | None = None
+    # Issue #258: baseline未確定(SYSTEM_INITIALIZED)かつinvestment_thesisの
+    # coverage_ratioが1.0未満の初回評価であることを示すflag(削除ではなく
+    # 除外判定用)。#249のPhase A Decision 3(NOT_EVALUATEDは分母に残す契約)は
+    # 変更しない別軸の判定であり、本flagは「新旧比較の集計対象として妥当か」
+    # だけを表す。判定不能(new_outcome.result取得失敗等)の行は常にFalse。
+    first_evaluation: bool = False
 
     @property
     def category_diff(self) -> str:
@@ -117,6 +141,7 @@ class CompareRow:
             ";".join(self.hard_gate_reason_codes),
             _format_reasons(self.positive_reasons),
             _format_reasons(self.negative_reasons),
+            str(self.first_evaluation),
         )
 
 
@@ -215,6 +240,7 @@ def run_compare(
                 coverage_overall=result.coverage.overall,
                 hard_gate_triggered=result.hard_gate.triggered,
                 hard_gate_reason_codes=result.hard_gate.reason_codes,
+                first_evaluation=_is_first_evaluation(result),
                 positive_reasons=result.positive_reasons,
                 negative_reasons=result.negative_reasons,
             )
@@ -228,3 +254,36 @@ def write_compare_csv(rows: list[CompareRow], path: Path) -> None:
         writer.writerow(_CSV_HEADER)
         for row in rows:
             writer.writerow(row.as_csv_row())
+
+
+@dataclass(frozen=True)
+class CompareSummary:
+    """ACTIVE切替判断の材料となる集計(Issue #258)。
+
+    first_evaluation=Trueの行は既定で除外する。除外件数は0件でも必ず
+    保持する(黙って捨てない。受入条件3)。
+    """
+
+    total_rows: int
+    excluded_first_evaluation: int
+    included_rows: int
+    should_notify_comparable_count: int
+    should_notify_match_count: int
+
+
+def summarize_compare_rows(rows: list[CompareRow]) -> CompareSummary:
+    """first_evaluation=Trueの行を除外したうえで、should_notifyの一致件数を
+    集計する(Issue #258)。除外しなかった場合との件数差を示すため、
+    total_rowsとexcluded_first_evaluationの両方を返す。"""
+    included = [r for r in rows if not r.first_evaluation]
+    comparable = [
+        r for r in included if r.should_notify_diff != ShouldNotifyComparison.NOT_COMPARABLE
+    ]
+    matched = [r for r in comparable if r.should_notify_diff == ShouldNotifyComparison.MATCH]
+    return CompareSummary(
+        total_rows=len(rows),
+        excluded_first_evaluation=len(rows) - len(included),
+        included_rows=len(included),
+        should_notify_comparable_count=len(comparable),
+        should_notify_match_count=len(matched),
+    )
