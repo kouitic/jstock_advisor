@@ -31,6 +31,15 @@ from jstock_advisor.domain.entities.enums import EvaluationLabel
 #   **黙って保存されない**。版を持てば "v2" を足すだけで移行窓を表現できる。
 EVALUATION_SEMANTICS_V1 = "v1"
 
+# Issue #389(#66 F-L3): 営業日ホライズンの起点をJST暦日へ統一した意味論。
+#
+#     営業日ホライズン  起点 = recommended_at の **JST 暦日**(v1はUTC暦日)
+#     暦日ホライズン    起点 = recommended_at の JST 暦日(変更なし。v1と同じ)
+#
+# 適用境界は recommendation_evaluation_service.V2_CUTOVER_AT を正本とする
+# (この定数自体は「意味論の名前」のみを持ち、境界日時は持たない)。
+EVALUATION_SEMANTICS_V2 = "v2"
+
 # 一意キーの軸(営業日 / 暦日)。キー文字列に直接現れるため値は変更しない。
 _AXIS_BUSINESS = "B"
 _AXIS_CALENDAR = "C"

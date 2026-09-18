@@ -9,7 +9,11 @@ from jstock_advisor.domain.entities.enums import (
     EvaluationLabel,
     RecommendationType,
 )
-from jstock_advisor.domain.entities.evaluation import EvaluationResult
+from jstock_advisor.domain.entities.evaluation import (
+    EVALUATION_SEMANTICS_V1,
+    EVALUATION_SEMANTICS_V2,
+    EvaluationResult,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
     EvaluationResultRepository,
@@ -40,7 +44,12 @@ def _recommendation(
 
 
 def _evaluation(
-    eval_id: str, rec_id: str, label: EvaluationLabel, price_return_pct: float
+    eval_id: str,
+    rec_id: str,
+    label: EvaluationLabel,
+    price_return_pct: float,
+    *,
+    evaluation_semantics_version: str = EVALUATION_SEMANTICS_V1,
 ) -> EvaluationResult:
     return EvaluationResult(
         evaluation_id=eval_id,
@@ -52,6 +61,7 @@ def _evaluation(
         price_return_pct=price_return_pct,
         evaluation_label=label,
         label_evidence="test",
+        evaluation_semantics_version=evaluation_semantics_version,
     )
 
 
@@ -108,3 +118,73 @@ def test_non_applicable_recommendation_type_is_excluded_from_pairs(tmp_path: Pat
 
     result = service.run(_TARGET, 3.5, 4.0)
     assert result.supported is False
+
+
+# --- Issue #389(#66 F-L3): backtest側のv1/v2分離(AC-11) ------------------------
+
+
+def test_run_defaults_to_v1_and_ignores_v2_evaluations(tmp_path: Path) -> None:
+    """既定(evaluation_semantics_version未指定)ではv1のEvaluationResultのみを
+    対象にし、v2データが混ざっていても既存の集計結果を変えないことを固定する。"""
+    rec_repo = RecommendationRepository(store_dir=tmp_path)
+    eval_repo = EvaluationResultRepository(store_dir=tmp_path)
+    rec_repo.save(_recommendation("low", 3.6))
+    rec_repo.save(_recommendation("mid", 4.0))
+    rec_repo.save(_recommendation("high", 5.0))
+    eval_repo.save(_evaluation("e-low", "low", EvaluationLabel.PRICE_TOO_HIGH, -5.0))
+    eval_repo.save(_evaluation("e-mid", "mid", EvaluationLabel.SUCCESS, 8.0))
+    eval_repo.save(_evaluation("e-high", "high", EvaluationLabel.SUCCESS, 12.0))
+    # v2の重複データ(同じ推奨だが別semantics)を紛れ込ませる。
+    eval_repo.save(
+        _evaluation(
+            "e-high-v2",
+            "high",
+            EvaluationLabel.SUCCESS,
+            999.0,
+            evaluation_semantics_version=EVALUATION_SEMANTICS_V2,
+        )
+    )
+    service = BacktestService(recommendation_repository=rec_repo, evaluation_repository=eval_repo)
+
+    result = service.run(_TARGET, 3.5, 4.0)
+
+    assert result.supported is True
+    assert result.evaluation_semantics_version == EVALUATION_SEMANTICS_V1
+    # v2の e-high-v2 が混入していても current の件数は v1 の3件のまま。
+    assert result.evaluation_count_current == 3
+    assert result.evaluation_count_proposed == 2
+
+
+def test_run_can_target_v2_evaluations_explicitly(tmp_path: Path) -> None:
+    rec_repo = RecommendationRepository(store_dir=tmp_path)
+    eval_repo = EvaluationResultRepository(store_dir=tmp_path)
+    rec_repo.save(_recommendation("mid", 4.0))
+    rec_repo.save(_recommendation("high", 5.0))
+    eval_repo.save(
+        _evaluation(
+            "e-mid-v2",
+            "mid",
+            EvaluationLabel.SUCCESS,
+            8.0,
+            evaluation_semantics_version=EVALUATION_SEMANTICS_V2,
+        )
+    )
+    eval_repo.save(
+        _evaluation(
+            "e-high-v1",
+            "high",
+            EvaluationLabel.SUCCESS,
+            12.0,
+            evaluation_semantics_version=EVALUATION_SEMANTICS_V1,
+        )
+    )
+    service = BacktestService(recommendation_repository=rec_repo, evaluation_repository=eval_repo)
+
+    result = service.run(
+        _TARGET, 3.5, 4.0, evaluation_semantics_version=EVALUATION_SEMANTICS_V2
+    )
+
+    assert result.supported is True
+    assert result.evaluation_semantics_version == EVALUATION_SEMANTICS_V2
+    # v1の"high"は対象外、v2の"mid"のみが母集団になる。
+    assert result.evaluation_count_current == 1

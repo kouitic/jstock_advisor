@@ -13,7 +13,12 @@ from jstock_advisor.domain.entities.common import (
     PriceWithRationale,
 )
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
+from jstock_advisor.domain.entities.evaluation import (
+    EVALUATION_SEMANTICS_V1,
+    EVALUATION_SEMANTICS_V2,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.jst import to_jst
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
     EvaluationResultRepository,
 )
@@ -23,7 +28,9 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot
 from jstock_advisor.providers.market_data.mock_impl import MockMarketDataProvider
 from jstock_advisor.services.recommendation_evaluation_service import (
+    V2_CUTOVER_AT,
     RecommendationEvaluationService,
+    resolve_business_day_zero,
 )
 
 _STOCK_CODE = "2914"
@@ -535,3 +542,144 @@ def test_run_summary_reports_backlog_for_partial_progress(
         outcome.summary.pending_count - outcome.summary.evaluated_count
     )
     assert outcome.summary.budget_exhausted is False
+
+
+# --- Issue #389(#66 F-L3): 営業日ホライズンday-zeroのv1/v2境界 -----------------
+
+
+def test_resolve_business_day_zero_v1_just_before_cutover() -> None:
+    recommended_at = V2_CUTOVER_AT - dt.timedelta(seconds=1)
+    start_date, semantics = resolve_business_day_zero(recommended_at)
+    assert semantics == EVALUATION_SEMANTICS_V1
+    assert start_date == recommended_at.date()
+
+
+def test_resolve_business_day_zero_v2_exactly_at_cutover() -> None:
+    start_date, semantics = resolve_business_day_zero(V2_CUTOVER_AT)
+    assert semantics == EVALUATION_SEMANTICS_V2
+    assert start_date == to_jst(V2_CUTOVER_AT).date()
+
+
+def test_resolve_business_day_zero_v2_just_after_cutover() -> None:
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(seconds=1)
+    start_date, semantics = resolve_business_day_zero(recommended_at)
+    assert semantics == EVALUATION_SEMANTICS_V2
+    assert start_date == to_jst(recommended_at).date()
+
+
+def test_resolve_business_day_zero_v2_uses_jst_date_not_utc_date() -> None:
+    """v2の起点はJST暦日であり、UTC暦日とは異なる日になりうることを固定する
+    (JST 00:00〜08:59に相当するUTC時刻の推奨で、UTC暦日とJST暦日がずれる)。"""
+    recommended_at = V2_CUTOVER_AT.replace(hour=16)  # UTC 16:00 = JST 翌01:00
+    start_date, semantics = resolve_business_day_zero(recommended_at)
+    assert semantics == EVALUATION_SEMANTICS_V2
+    assert start_date != recommended_at.date()
+    assert start_date == to_jst(recommended_at).date()
+
+
+def test_resolve_business_day_zero_is_deterministic_across_calls() -> None:
+    """同一recommended_atは何度呼んでも同じ(day_zero, semantics)へ解決される
+    (retry/re-runでsemanticsが変化しないことの土台)。"""
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(days=3, hours=5)
+    first = resolve_business_day_zero(recommended_at)
+    second = resolve_business_day_zero(recommended_at)
+    assert first == second
+
+
+def test_issue389_v2_recommendation_is_tagged_v2_end_to_end(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """cutover後のrecommended_atを持つ推奨は、実際の評価実行でも
+    evaluation_semantics_version="v2"として保存されること。"""
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(hours=1)
+    now = recommended_at + dt.timedelta(days=10)
+    service, recommendation_repo, evaluation_repo = _build_service(
+        tmp_path, config, calendar, now
+    )
+    recommendation_repo.save(
+        _make_recommendation().model_copy(update={"recommended_at": recommended_at})
+    )
+
+    outcome = service.run_due_evaluations(now)
+
+    business_results = [r for r in outcome.evaluated if r.horizon_business_days is not None]
+    assert business_results
+    for result in business_results:
+        assert result.evaluation_semantics_version == EVALUATION_SEMANTICS_V2
+        assert result.evaluation_id.endswith(f"#{EVALUATION_SEMANTICS_V2}")
+
+    saved = evaluation_repo.list_by_recommendation("rec-1")
+    assert saved
+    for result in saved:
+        if result.horizon_business_days is not None:
+            assert result.evaluation_semantics_version == EVALUATION_SEMANTICS_V2
+
+
+def test_issue389_v1_recommendation_still_tagged_v1_end_to_end(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """cutover前のrecommended_atを持つ推奨は、今回の変更後も従来どおり
+    evaluation_semantics_version="v1"のまま保存される(v1は不変)。"""
+    now = dt.datetime(2024, 3, 1, tzinfo=dt.UTC)
+    service, recommendation_repo, _ = _build_service(tmp_path, config, calendar, now)
+    recommendation_repo.save(_make_recommendation())
+
+    outcome = service.run_due_evaluations(now)
+
+    business_results = [r for r in outcome.evaluated if r.horizon_business_days is not None]
+    assert business_results
+    for result in business_results:
+        assert result.evaluation_semantics_version == EVALUATION_SEMANTICS_V1
+        assert result.evaluation_id.endswith(f"#{EVALUATION_SEMANTICS_V1}")
+
+
+def test_issue389_retry_does_not_change_semantics_or_key(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """同一Recommendationをrun_due_evaluationsで再実行(retry/re-run)しても、
+    2回目はevaluation_id(=semanticsを含む一意キー)の重複としてskipされ、
+    新しいsemanticsの評価が紛れ込まないことを固定する。"""
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(hours=1)
+    now = recommended_at + dt.timedelta(days=10)
+    service, recommendation_repo, evaluation_repo = _build_service(
+        tmp_path, config, calendar, now
+    )
+    recommendation_repo.save(
+        _make_recommendation().model_copy(update={"recommended_at": recommended_at})
+    )
+
+    first = service.run_due_evaluations(now)
+    second = service.run_due_evaluations(now)
+
+    assert first.evaluated
+    assert second.evaluated == []
+    saved_ids = {r.evaluation_id for r in evaluation_repo.list_by_recommendation("rec-1")}
+    first_ids = {r.evaluation_id for r in first.evaluated}
+    assert saved_ids == first_ids
+
+
+def test_issue389_v2_preserves_business_day_window_length(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """v2でも評価期間の営業日長(horizon)はv1と同じに維持される。
+    (start_dateだけJST化し、evaluation_dateの算出方法自体は変えていないこと
+    を、独立したBusinessCalendar計算で検証する)。"""
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(hours=1)
+    now = recommended_at + dt.timedelta(days=10)
+    service, recommendation_repo, evaluation_repo = _build_service(
+        tmp_path, config, calendar, now
+    )
+    recommendation_repo.save(
+        _make_recommendation().model_copy(update={"recommended_at": recommended_at})
+    )
+
+    service.run_due_evaluations(now)
+
+    jst_start_date = to_jst(recommended_at).date()
+    for result in evaluation_repo.list_by_recommendation("rec-1"):
+        if result.horizon_business_days is None:
+            continue
+        expected_evaluation_date = calendar.add_business_days(
+            jst_start_date, result.horizon_business_days
+        )
+        assert result.evaluation_date == expected_evaluation_date
