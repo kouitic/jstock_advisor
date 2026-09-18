@@ -137,6 +137,26 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="market_session",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #389(#66 F-L3): 営業日ホライズン評価のday-zero(v1=UTC暦日/
+    # v2=JST暦日)切替。T3 = recommended_at(時刻由来値)を受け取って
+    # v1/v2を業務分岐するconsumer(resolve_business_day_zero())。
+    # T4 = 境界値(V2_CUTOVER_AT前後)を固定clockで検証する新規fixtureを
+    # 導入した。V2_CUTOVER_AT・resolve_business_day_zero()自体は
+    # market_session.py/business_calendar.py/jst.py/price_freshness.py
+    # 本体には無く(それらを呼び出すだけ)、T1には該当しない。
+    # 可変のmodule-level stateを持たないため、cohortの相手はいない(SOLO)。
+    _Entry(
+        module="tests/unit/test_recommendation_evaluation_service.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:recommendation_evaluation_v2_cutover",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    _Entry(
+        module="tests/unit/test_calibration_dataset_service.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:calibration_dataset_v2_cutover",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
