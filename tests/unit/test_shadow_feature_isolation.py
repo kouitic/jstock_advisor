@@ -101,6 +101,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.providers.market_data.mock_impl import MockMarketDataProvider
+from jstock_advisor.services import holding_decision_notification_builder as builder_module
 from jstock_advisor.services import profit_taking_service as profit_taking_service_module
 from jstock_advisor.services import sell_signal_service as sell_signal_service_module
 from jstock_advisor.services.buy_signal_service import BuySignalService
@@ -765,6 +766,93 @@ def test_holding_decision_builder_ignores_exit_price_range() -> None:
     assert rec_b.exit_price_range_strong_price == Decimal("1600")
     assert rec_a.recommendation_type == rec_b.recommendation_type
     assert rec_a.sell_prices == rec_b.sell_prices
+
+
+def test_holding_decision_builder_shadow_metrics_failure_in_all_9_does_not_break_recommendation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HoldingDecisionパイプラインで、DecisionSnapshot記録専用の9箇所の
+    *_metrics算出がすべて例外で落ちても、build_holding_decision_
+    recommendation()自体は失敗せず、v1の判定(recommendation_type・
+    sell_prices)は変わらない(Issue #384 PR-5。sell_signal_service.py/
+    profit_taking_service.py[PR-2]と同型のisolationをholding_decision_
+    notification_builder.pyへ適用したことの固定)。"""
+    base = _base_snapshot()
+    holding = _holding()
+    result = _holding_decision_result()
+
+    baseline = build_holding_decision_recommendation(
+        holding, result, base, "v1", _CFG, _NOT_EVALUATED_EXIT_PRICE_RANGE
+    )
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected shadow metrics failure")
+
+    for name in (
+        "historical_valuation_result_to_metrics",
+        "timing_score_result_to_metrics",
+        "earnings_surprise_result_to_metrics",
+        "earnings_trend_result_to_metrics",
+        "entry_price_range_result_to_metrics",
+        "exit_price_range_result_to_metrics",
+        "market_environment_result_to_metrics",
+        "sector_environment_result_to_metrics",
+        "environment_result_to_metrics",
+    ):
+        monkeypatch.setattr(builder_module, name, _boom)
+
+    degraded = build_holding_decision_recommendation(
+        holding, result, base, "v1", _CFG, _NOT_EVALUATED_EXIT_PRICE_RANGE
+    )
+
+    # 1 v1の出力が変わらない。
+    assert degraded.recommendation_type == baseline.recommendation_type
+    assert degraded.sell_prices == baseline.sell_prices
+
+    # 2 失敗が記録に残る(黙って何も保存しない、にしない)。0.0/空へも潰さない。
+    for field in (
+        "historical_valuation_metrics",
+        "timing_metrics",
+        "earnings_surprise_metrics",
+        "earnings_trend_metrics",
+        "entry_price_range_metrics",
+        "exit_price_range_metrics",
+        "market_metrics",
+        "sector_metrics",
+        "environment_metrics",
+    ):
+        failed = getattr(degraded, field)
+        assert failed["shadow_state"] == "COMPUTATION_FAILED"
+        assert failed["error_type"] == "ZeroDivisionError"
+
+
+def test_holding_decision_builder_shadow_metrics_failure_is_isolated_per_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """隔離は算出ごと。historical_valuation_metricsだけが失敗しても、他の
+    *_metrics(timing_metrics等)は影響を受けず算出されたまま残る。"""
+    base = _base_snapshot()
+    holding = _holding()
+    result = _holding_decision_result()
+
+    baseline = build_holding_decision_recommendation(
+        holding, result, base, "v1", _CFG, _NOT_EVALUATED_EXIT_PRICE_RANGE
+    )
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected historical_valuation_metrics failure")
+
+    monkeypatch.setattr(builder_module, "historical_valuation_result_to_metrics", _boom)
+
+    degraded = build_holding_decision_recommendation(
+        holding, result, base, "v1", _CFG, _NOT_EVALUATED_EXIT_PRICE_RANGE
+    )
+
+    assert degraded.recommendation_type == baseline.recommendation_type
+    assert degraded.historical_valuation_metrics["shadow_state"] == "COMPUTATION_FAILED"
+    assert degraded.historical_valuation_metrics["error_type"] == "ZeroDivisionError"
+    assert degraded.timing_metrics == baseline.timing_metrics
+    assert degraded.market_metrics == baseline.market_metrics
 
 
 def test_sell_signal_service_ignores_exit_price_range() -> None:

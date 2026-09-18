@@ -19,6 +19,7 @@ from jstock_advisor.domain.entities.exit_price_range import ExitPriceRangeResult
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult, ReasonImpact
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.shadow_observation import isolated_shadow_observation
 from jstock_advisor.domain.signals.earnings_surprise import (
     earnings_surprise_config_values,
     earnings_surprise_result_to_metrics,
@@ -163,6 +164,70 @@ def build_holding_decision_recommendation(
 
     next_review_conditions = ["次回決算発表後に再評価する"]
 
+    # Issue #384 PR-5: 記録専用(DecisionSnapshot/Recommendation記録用)の
+    # *_to_metrics()整形がRecommendation構築のinline引数として本流に
+    # 直接置かれており、いずれかが例外を出すとbuild_holding_decision_
+    # recommendation()自体が失敗し、呼び出し元(HoldingDecision通知)全体が
+    # 失われるリスクがあった(#384本体・#22 C2・#371と同型)。9関数はいずれも
+    # dict[str, object]を返すため、PR-1で抽出済みのisolated_shadow_
+    # observation()(dict専用契約)でそのまま隔離できる(新規helperの追加は
+    # 不要)。命名・fallback形式はPR-2(sell_signal_service.py/profit_taking_
+    # service.py)の同一9関数への適用とまったく同じパターンを踏襲する。
+    historical_valuation_metrics = isolated_shadow_observation(
+        "historical_valuation_metrics",
+        lambda: historical_valuation_result_to_metrics(snapshot.historical_valuation),
+    )
+    timing_metrics = isolated_shadow_observation(
+        "timing_metrics",
+        lambda: timing_score_result_to_metrics(
+            snapshot.timing, snapshot.momentum, snapshot.current_price
+        ),
+    )
+    earnings_surprise_metrics = isolated_shadow_observation(
+        "earnings_surprise_metrics",
+        lambda: earnings_surprise_result_to_metrics(snapshot.earnings_surprise),
+    )
+    earnings_trend_metrics = isolated_shadow_observation(
+        "earnings_trend_metrics",
+        lambda: earnings_trend_result_to_metrics(snapshot.earnings_trend),
+    )
+    entry_price_range_metrics = isolated_shadow_observation(
+        "entry_price_range_metrics",
+        lambda: entry_price_range_result_to_metrics(
+            snapshot.entry_price_range,
+            snapshot.fair_value_range,
+            snapshot.historical_valuation,
+            snapshot.timing,
+            snapshot.momentum,
+            config.entry_exit_price.entry,
+        ),
+    )
+    exit_price_range_metrics = isolated_shadow_observation(
+        "exit_price_range_metrics",
+        lambda: exit_price_range_result_to_metrics(
+            exit_price_range,
+            snapshot.fair_value_range,
+            snapshot.historical_valuation,
+            snapshot.timing,
+            holding.average_purchase_price,
+            config.entry_exit_price.exit,
+        ),
+    )
+    market_metrics = isolated_shadow_observation(
+        "market_metrics",
+        lambda: market_environment_result_to_metrics(snapshot.market_environment),
+    )
+    sector_metrics = isolated_shadow_observation(
+        "sector_metrics",
+        lambda: sector_environment_result_to_metrics(snapshot.sector_environment),
+    )
+    environment_metrics = isolated_shadow_observation(
+        "environment_metrics",
+        lambda: environment_result_to_metrics(
+            snapshot.environment, snapshot.market_environment, snapshot.sector_environment
+        ),
+    )
+
     return Recommendation(
         recommendation_id=recommendation_id or str(uuid.uuid4()),
         owner=holding.owner,
@@ -268,28 +333,24 @@ def build_holding_decision_recommendation(
         historical_valuation_confidence=snapshot.historical_valuation.confidence,
         historical_valuation_coverage=snapshot.historical_valuation.coverage,
         historical_valuation_reason_codes=snapshot.historical_valuation.reason_codes,
-        historical_valuation_metrics=historical_valuation_result_to_metrics(
-            snapshot.historical_valuation
-        ),
+        historical_valuation_metrics=historical_valuation_metrics,
         # 判定精度向上機能Phase B第二弾: DecisionSnapshot記録専用(Shadow計測)。
         timing_score=snapshot.timing.score,
         timing_confidence=snapshot.timing.confidence,
         timing_coverage=snapshot.timing.coverage,
         timing_reason_codes=snapshot.timing.reason_codes,
-        timing_metrics=timing_score_result_to_metrics(
-            snapshot.timing, snapshot.momentum, snapshot.current_price
-        ),
+        timing_metrics=timing_metrics,
         # 判定精度向上機能Phase C: DecisionSnapshot記録専用(Shadow計測)。
         earnings_surprise_score=snapshot.earnings_surprise.score,
         earnings_surprise_confidence=snapshot.earnings_surprise.confidence,
         earnings_surprise_coverage=snapshot.earnings_surprise.coverage,
         earnings_surprise_reason_codes=snapshot.earnings_surprise.reason_codes,
-        earnings_surprise_metrics=earnings_surprise_result_to_metrics(snapshot.earnings_surprise),
+        earnings_surprise_metrics=earnings_surprise_metrics,
         earnings_trend_score=snapshot.earnings_trend.score,
         earnings_trend_confidence=snapshot.earnings_trend.confidence,
         earnings_trend_coverage=snapshot.earnings_trend.coverage,
         earnings_trend_reason_codes=snapshot.earnings_trend.reason_codes,
-        earnings_trend_metrics=earnings_trend_result_to_metrics(snapshot.earnings_trend),
+        earnings_trend_metrics=earnings_trend_metrics,
         # 判定精度向上機能次フェーズSTEP2: DecisionSnapshot記録専用
         # (Shadow計測)。Entryはsnapshot算出済みの値をそのままコピー、
         # Exitは呼び出し元が算出済みのexit_price_rangeをコピーする
@@ -298,14 +359,7 @@ def build_holding_decision_recommendation(
         entry_price_range_confidence=snapshot.entry_price_range.confidence,
         entry_price_range_coverage=snapshot.entry_price_range.coverage,
         entry_price_range_reason_codes=snapshot.entry_price_range.reason_codes,
-        entry_price_range_metrics=entry_price_range_result_to_metrics(
-            snapshot.entry_price_range,
-            snapshot.fair_value_range,
-            snapshot.historical_valuation,
-            snapshot.timing,
-            snapshot.momentum,
-            config.entry_exit_price.entry,
-        ),
+        entry_price_range_metrics=entry_price_range_metrics,
         entry_price_range_starter_price=snapshot.entry_price_range.starter_entry_price,
         entry_price_range_preferred_price=snapshot.entry_price_range.preferred_entry_price,
         entry_price_range_strong_price=snapshot.entry_price_range.strong_entry_price,
@@ -315,14 +369,7 @@ def build_holding_decision_recommendation(
         exit_price_range_confidence=exit_price_range.confidence,
         exit_price_range_coverage=exit_price_range.coverage,
         exit_price_range_reason_codes=exit_price_range.reason_codes,
-        exit_price_range_metrics=exit_price_range_result_to_metrics(
-            exit_price_range,
-            snapshot.fair_value_range,
-            snapshot.historical_valuation,
-            snapshot.timing,
-            holding.average_purchase_price,
-            config.entry_exit_price.exit,
-        ),
+        exit_price_range_metrics=exit_price_range_metrics,
         exit_price_range_partial_low_price=exit_price_range.partial_profit_take_low_price,
         exit_price_range_partial_high_price=exit_price_range.partial_profit_take_high_price,
         exit_price_range_strong_price=exit_price_range.strong_profit_take_price,
@@ -335,17 +382,15 @@ def build_holding_decision_recommendation(
         market_confidence=snapshot.market_environment.confidence,
         market_coverage=snapshot.market_environment.coverage,
         market_reason_codes=snapshot.market_environment.reason_codes,
-        market_metrics=market_environment_result_to_metrics(snapshot.market_environment),
+        market_metrics=market_metrics,
         sector_score=snapshot.sector_environment.score,
         sector_confidence=snapshot.sector_environment.confidence,
         sector_coverage=snapshot.sector_environment.coverage,
         sector_reason_codes=snapshot.sector_environment.reason_codes,
-        sector_metrics=sector_environment_result_to_metrics(snapshot.sector_environment),
+        sector_metrics=sector_metrics,
         environment_score=snapshot.environment.score,
         environment_confidence=snapshot.environment.confidence,
         environment_coverage=snapshot.environment.coverage,
         environment_reason_codes=snapshot.environment.reason_codes,
-        environment_metrics=environment_result_to_metrics(
-            snapshot.environment, snapshot.market_environment, snapshot.sector_environment
-        ),
+        environment_metrics=environment_metrics,
     )
