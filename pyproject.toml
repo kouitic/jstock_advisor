@@ -68,6 +68,8 @@ pythonpath = ["src"]
 markers = [
   "cohort_holding_decision_runtime_config: holding_decision_runtime_config_service の module-global state を共有する cohort(Issue #148 / #145)",
   "cohort_market_session: 市場セッションの日付 semantics と mock provider の系列を共有する cohort(Issue #52 / #143)",
+  "cohort_solo_recommendation_evaluation_v2_cutover: 営業日ホライズンday-zero(v1/v2)切替のsolo cohort(Issue #389 / #145)",
+  "cohort_solo_calibration_dataset_v2_cutover: calibration datasetのv1/v2切替のsolo cohort(Issue #389 / #145)",
 ]
 
 [tool.ruff]
