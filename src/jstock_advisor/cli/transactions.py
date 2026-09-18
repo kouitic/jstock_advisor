@@ -179,8 +179,8 @@ def list_transactions(
             else ""
         )
         typer.echo(
-            f"{t.execution_date} [{t.transaction_type.value}] {t.stock_code} "
-            f"{t.shares}株 @{t.execution_price}円 {followed}{diff}"
+            f"owner:{t.owner or '-'} {t.execution_date} [{t.transaction_type.value}] "
+            f"{t.stock_code} {t.shares}株 @{t.execution_price}円 {followed}{diff}"
         )
 
 
