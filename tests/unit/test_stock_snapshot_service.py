@@ -545,6 +545,10 @@ def test_shadow_earnings_phase_c_precondition_failure_does_not_break_snapshot_bu
     いずれも例外を出しても、build_stock_snapshot()自体は失敗しない(Issue
     #384 PR-8)。これら3つはearnings_surprise/earnings_trendのShadow計測
     専用inputであり、v1判定(historical_valuation/timing等)には使われない。
+
+    サブちゃんのPR #408レビューF1対応: 縮退が発生した事実がearnings_
+    surprise/earnings_trend自身のstate/reason_codesへ残ること(正常時と
+    区別できない値にならないこと)も固定する。
     """
     monkeypatch.setattr(stock_snapshot_service_module, "resolve_latest_financial_period_end", _boom)
     monkeypatch.setattr(
@@ -558,10 +562,14 @@ def test_shadow_earnings_phase_c_precondition_failure_does_not_break_snapshot_bu
     assert error is None
     assert snapshot is not None
     # 下流のearnings_surprise/earnings_trend(既存のisolated_shadow_
-    # computation)自体は、fallback入力を受け取って正常に完走する(例外を
-    # 再伝播しない)。
-    assert snapshot.earnings_surprise is not None
-    assert snapshot.earnings_trend is not None
+    # computation)は、精度前提の失敗を検知してNOT_EVALUATED +
+    # SHADOW_COMPUTATION_FAILEDへ強制される(fallback値で正常系を装って
+    # 完走しない)。build_stock_snapshot()自体は失敗しない。
+    expected_reason_codes = ("SHADOW_COMPUTATION_FAILED:ZeroDivisionError",)
+    assert snapshot.earnings_surprise.state == EarningsSurpriseEvaluationState.NOT_EVALUATED
+    assert snapshot.earnings_surprise.reason_codes == expected_reason_codes
+    assert snapshot.earnings_trend.state == EarningsTrendEvaluationState.NOT_EVALUATED
+    assert snapshot.earnings_trend.reason_codes == expected_reason_codes
     # v1判定に使われる他のShadow計測は影響を受けない。
     assert snapshot.historical_valuation.state == HistoricalValuationEvaluationState.EVALUATED
     assert snapshot.timing.state == TimingScoreEvaluationState.EVALUATED
@@ -575,7 +583,11 @@ def test_shadow_earnings_surprise_history_external_io_failure_does_not_break_sna
     snapshot()自体は失敗しない(Issue #384 PR-8)。サブちゃんのPR #406
     レビューが実測した、939 passed中160件が落ちる反例に対する固定。
 
-    隔離は観測ごと: 他のShadow計測(historical_valuation/timing等)・
+    サブちゃんのPR #408レビューF1対応: earnings_surpriseはNOT_EVALUATED +
+    SHADOW_COMPUTATION_FAILEDへ強制される(「本当にアナリスト予想が無い」
+    というANALYST_CONSENSUS_UNAVAILABLE等の別の業務事実として記録されない
+    ことの固定)。隔離は観測ごと: earnings_surprise_historyを使わない
+    earnings_trend、および他のShadow計測(historical_valuation/timing等)・
     resolved_period側の3箇所は影響を受けない。
     """
     base = build_mock_provider_bundle(_NOW)
@@ -587,7 +599,66 @@ def test_shadow_earnings_surprise_history_external_io_failure_does_not_break_sna
 
     assert error is None
     assert snapshot is not None
-    assert snapshot.earnings_surprise is not None
-    assert snapshot.earnings_trend is not None
+    assert snapshot.earnings_surprise.state == EarningsSurpriseEvaluationState.NOT_EVALUATED
+    assert snapshot.earnings_surprise.reason_codes == (
+        "SHADOW_COMPUTATION_FAILED:ZeroDivisionError",
+    )
+    # earnings_trendはearnings_surprise_historyを入力に使わないため、
+    # この失敗の影響を受けず正常に完走する(隔離は観測ごとの原則)。
+    assert snapshot.earnings_trend.state == EarningsTrendEvaluationState.EVALUATED
     assert snapshot.historical_valuation.state == HistoricalValuationEvaluationState.EVALUATED
     assert snapshot.timing.state == TimingScoreEvaluationState.EVALUATED
+
+
+def test_shadow_release_confirmation_fallback_value_is_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """release_confirmation_stateのfallback値(NOT_APPLICABLE)そのものを
+    固定する(サブちゃんのPR #408レビューF2対応、Y5変異への固定)。
+
+    decision_relevanceは自然にRELEVANTへ解決するfixtureを使い、
+    release_confirmation_stateの算出のみを失敗させる。fallbackが
+    NOT_APPLICABLE(現在の値、抑止しない側)であればphase_c_earnings_
+    blocked=Falseとなり外部I/Oが呼ばれる。fallbackがAWAITING_
+    CONFIRMATION(抑止する側)へ変異すると、decision_relevance=RELEVANTと
+    組み合わさってphase_c_earnings_blocked=Trueとなり、外部I/Oが呼ばれなく
+    なるため本テストが落ちる。
+    """
+    earnings_date_raw = _NOW.date() - dt.timedelta(days=1)
+    fetched_at_override = _NOW - dt.timedelta(days=10)
+    providers, spy = _providers_for_phase_c_earnings_window(earnings_date_raw, fetched_at_override)
+    monkeypatch.setattr(
+        stock_snapshot_service_module, "resolve_earnings_release_confirmation", _boom
+    )
+
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    assert spy.earnings_surprise_history_call_count == 1
+
+
+def test_shadow_decision_relevance_fallback_value_is_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """decision_relevanceのfallback値(UNKNOWN)そのものを固定する(サブ
+    ちゃんのPR #408レビューF2対応、Y6変異への固定)。
+
+    release_confirmation_stateは自然にAWAITING_CONFIRMATION/DELAYEDへ
+    解決するfixtureを使い、decision_relevanceの算出のみを失敗させる。
+    fallbackがUNKNOWN(現在の値、抑止しない側)であればphase_c_earnings_
+    blocked=Falseとなり外部I/Oが呼ばれる。fallbackがRELEVANT(抑止する側)
+    へ変異すると、release_confirmation_state側の自然な値と組み合わさって
+    phase_c_earnings_blocked=Trueとなり、外部I/Oが呼ばれなくなるため本
+    テストが落ちる。
+    """
+    earnings_date_raw = _NOW.date() - dt.timedelta(days=1)
+    fetched_at_override = _NOW - dt.timedelta(days=10)
+    providers, spy = _providers_for_phase_c_earnings_window(earnings_date_raw, fetched_at_override)
+    monkeypatch.setattr(stock_snapshot_service_module, "resolve_earnings_decision_relevance", _boom)
+
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    assert spy.earnings_surprise_history_call_count == 1
