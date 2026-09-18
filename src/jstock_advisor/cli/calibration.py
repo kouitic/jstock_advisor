@@ -15,6 +15,10 @@ import typer
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.entities.evaluation import (
+    EVALUATION_SEMANTICS_V1,
+    EVALUATION_SEMANTICS_V2,
+)
 from jstock_advisor.services.calibration_dataset_service import (
     CalibrationDatasetBuilder,
     SampleDefinition,
@@ -29,6 +33,10 @@ _SAMPLE_DEFINITIONS = {
     "non-overlapping-window": SampleDefinition.NON_OVERLAPPING_WINDOW,
     "action-change": SampleDefinition.ACTION_CHANGE,
 }
+# PRレビュー対応(#389 F1): analysisへ渡すdatasetはsemantics単一が正常経路。
+# CLIで明示指定できるようにする(未指定=Noneは全件exportのまま。
+# analysisへ直接渡すとparse_dataset_jsonl()が混在を拒否する設計は変更しない)。
+_EVALUATION_SEMANTICS_VERSIONS = (EVALUATION_SEMANTICS_V1, EVALUATION_SEMANTICS_V2)
 
 
 @app.command("export-dataset")
@@ -50,6 +58,16 @@ def export_dataset(
         "--include-pending/--no-include-pending",
         help="horizon未到来(NOT_YET_EVALUABLE)行を含めるか(既定: 含める)",
     ),
+    evaluation_semantics_version: str | None = typer.Option(
+        None,
+        "--evaluation-semantics-version",
+        help=(
+            "v1またはv2を指定すると、そのsemanticsのrowのみをexportする"
+            "(単一semanticsのdatasetはそのままanalyzeへ渡せる)。"
+            "未指定(既定)は全件exportする(v1/v2が混在しうる。analyzeへ"
+            "直接渡すとparse時に拒否される。export専用・分離目的で使うこと)"
+        ),
+    ),
 ) -> None:
     if export_format not in _FORMATS:
         typer.echo(f"未対応のformatです: {export_format}(jsonl/csvのみ)")
@@ -58,6 +76,15 @@ def export_dataset(
         typer.echo(
             f"未対応のsample definitionです: {sample_definition}"
             f"({'/'.join(sorted(_SAMPLE_DEFINITIONS))}のみ)"
+        )
+        raise typer.Exit(code=1)
+    if (
+        evaluation_semantics_version is not None
+        and evaluation_semantics_version not in _EVALUATION_SEMANTICS_VERSIONS
+    ):
+        typer.echo(
+            f"未対応のevaluation-semantics-versionです: {evaluation_semantics_version}"
+            f"({'/'.join(_EVALUATION_SEMANTICS_VERSIONS)}のみ)"
         )
         raise typer.Exit(code=1)
 
@@ -69,6 +96,7 @@ def export_dataset(
     dataset = builder.build(
         now=dt.datetime.now(dt.UTC),
         sample_definition=_SAMPLE_DEFINITIONS[sample_definition],
+        evaluation_semantics_version=evaluation_semantics_version,
     )
     written = write_export(
         dataset,

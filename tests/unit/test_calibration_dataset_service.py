@@ -590,6 +590,155 @@ def test_jsonl_export_includes_evaluation_semantics_version_column() -> None:
     assert first_row["evaluation_semantics_version"] == EVALUATION_SEMANTICS_V1
 
 
+# --- Issue #389 F1(PRレビュー対応): version filter(mixed export許容/analysis分離) --
+
+
+def test_build_with_no_filter_includes_both_v1_and_v2_rows() -> None:
+    """cutover後のRecommendationはBUSINESS_DAYS=v2・CALENDAR_DAYS=v1を同一
+    Recommendation内に持つため、filter無指定(既定)のdatasetはv1/v2混在になる
+    (これ自体は許容する設計。analysisへ直接渡すことだけを禁止する)。"""
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(hours=1)
+    now = recommended_at + dt.timedelta(days=200)
+    rec = _recommendation(recommended_at=recommended_at)
+    dataset = _builder([rec], [], []).build(now)
+
+    versions = {r.evaluation_semantics_version for r in dataset.rows}
+    assert versions == {EVALUATION_SEMANTICS_V1, EVALUATION_SEMANTICS_V2}
+
+
+def test_build_with_v1_filter_returns_only_v1_rows() -> None:
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(hours=1)
+    now = recommended_at + dt.timedelta(days=200)
+    rec = _recommendation(recommended_at=recommended_at)
+    dataset = _builder([rec], [], []).build(
+        now, evaluation_semantics_version=EVALUATION_SEMANTICS_V1
+    )
+
+    assert dataset.rows  # CALENDAR_DAYS行はv1のまま残るため空にならない
+    assert all(r.evaluation_semantics_version == EVALUATION_SEMANTICS_V1 for r in dataset.rows)
+    assert all(r.horizon_unit == HorizonUnit.CALENDAR_DAYS for r in dataset.rows)
+    assert dataset.metadata["evaluation_semantics_version"] == EVALUATION_SEMANTICS_V1
+
+
+def test_build_with_v2_filter_returns_only_v2_rows() -> None:
+    recommended_at = V2_CUTOVER_AT + dt.timedelta(hours=1)
+    now = recommended_at + dt.timedelta(days=200)
+    rec = _recommendation(recommended_at=recommended_at)
+    dataset = _builder([rec], [], []).build(
+        now, evaluation_semantics_version=EVALUATION_SEMANTICS_V2
+    )
+
+    assert dataset.rows
+    assert all(r.evaluation_semantics_version == EVALUATION_SEMANTICS_V2 for r in dataset.rows)
+    assert all(r.horizon_unit == HorizonUnit.BUSINESS_DAYS for r in dataset.rows)
+    assert dataset.metadata["evaluation_semantics_version"] == EVALUATION_SEMANTICS_V2
+
+
+def test_build_rejects_invalid_evaluation_semantics_version_filter() -> None:
+    rec = _recommendation()
+    with pytest.raises(ValueError, match="evaluation_semantics_version"):
+        _builder([rec], [], []).build(_NOW, evaluation_semantics_version="v3")
+
+
+def test_metadata_evaluation_semantics_version_is_none_when_unfiltered() -> None:
+    dataset = _builder([_recommendation()], [], []).build(_NOW)
+    assert dataset.metadata["evaluation_semantics_version"] is None
+
+
+# --- Issue #389 F2(PRレビュー対応): sample selectorのversion分離とstart一貫性 -----
+
+
+def test_v2_business_row_evaluation_start_date_is_jst() -> None:
+    recommended_at = V2_CUTOVER_AT.replace(hour=16)  # UTC 16:00 = JST 翌01:00
+    now = recommended_at + dt.timedelta(days=200)
+    rec = _recommendation(recommended_at=recommended_at)
+    dataset = _builder([rec], [], []).build(now)
+
+    horizon = _BUSINESS_HORIZONS[0]
+    row = _rows_for(dataset, "rec-a", HorizonUnit.BUSINESS_DAYS, horizon)[0]
+    assert row.evaluation_semantics_version == EVALUATION_SEMANTICS_V2
+    assert row.evaluation_start_date == to_jst(recommended_at).date()
+    assert row.evaluation_start_date != recommended_at.date()
+    # due_dateもevaluation_start_dateから一貫して算出されていること
+    assert row.evaluation_due_date == _CALENDAR.add_business_days(
+        row.evaluation_start_date, horizon
+    )
+
+
+def test_v1_business_row_evaluation_start_date_is_utc() -> None:
+    recommended_at = dt.datetime(2026, 7, 30, 1, 0, tzinfo=dt.UTC)
+    rec = _recommendation(recommended_at=recommended_at)
+    dataset = _builder([rec], [], []).build(_NOW)
+
+    horizon = _BUSINESS_HORIZONS[0]
+    row = _rows_for(dataset, "rec-a", HorizonUnit.BUSINESS_DAYS, horizon)[0]
+    assert row.evaluation_semantics_version == EVALUATION_SEMANTICS_V1
+    assert row.evaluation_start_date == recommended_at.date()
+
+
+def test_calendar_row_evaluation_start_date_is_jst_and_unaffected_by_cutover() -> None:
+    recommended_at = V2_CUTOVER_AT.replace(hour=16)
+    now = recommended_at + dt.timedelta(days=200)
+    rec = _recommendation(recommended_at=recommended_at)
+    dataset = _builder([rec], [], []).build(now)
+
+    row = _rows_for(dataset, "rec-a", HorizonUnit.CALENDAR_DAYS)[0]
+    assert row.evaluation_semantics_version == EVALUATION_SEMANTICS_V1
+    assert row.evaluation_start_date == to_jst(recommended_at).date()
+    assert row.evaluation_start_date == row.recommendation_date_jst
+
+
+def test_non_overlapping_window_isolates_v1_and_v2_groups() -> None:
+    """同一銘柄・同一horizonでも、v1/v2は別groupとして扱われ、暦日が近接して
+    いても互いをoverlapとして扱わないことを固定する(AC-6)。"""
+    rec_v1 = _recommendation(
+        "rec-v1", recommended_at=V2_CUTOVER_AT - dt.timedelta(hours=1)
+    )
+    rec_v2 = _recommendation(
+        "rec-v2", recommended_at=V2_CUTOVER_AT + dt.timedelta(hours=1)
+    )
+    now = V2_CUTOVER_AT + dt.timedelta(days=200)
+    dataset = _builder([rec_v1, rec_v2], [], []).build(
+        now, sample_definition=SampleDefinition.NON_OVERLAPPING_WINDOW
+    )
+
+    horizon = _BUSINESS_HORIZONS[0]
+    v1_row = _rows_for(dataset, "rec-v1", HorizonUnit.BUSINESS_DAYS, horizon)[0]
+    v2_row = _rows_for(dataset, "rec-v2", HorizonUnit.BUSINESS_DAYS, horizon)[0]
+    # 修正前(groupにversionを含めない)なら、暦日的に近接するv2_rowは
+    # v1_rowのwindowとのoverlapとしてFalseになっていたはずである。
+    assert v1_row.sample_selected is True
+    assert v1_row.selection_reason == SelectionReason.FIRST_IN_WINDOW
+    assert v2_row.sample_selected is True
+    assert v2_row.selection_reason == SelectionReason.FIRST_IN_WINDOW
+    assert v1_row.sample_group_id != v2_row.sample_group_id
+
+
+def test_action_change_isolates_v1_and_v2_groups() -> None:
+    rec_v1 = _recommendation(
+        "rec-v1",
+        recommended_at=V2_CUTOVER_AT - dt.timedelta(hours=1),
+        buy_action=BuyAction.WATCH_FOR_PRICE,
+    )
+    rec_v2 = _recommendation(
+        "rec-v2",
+        recommended_at=V2_CUTOVER_AT + dt.timedelta(hours=1),
+        buy_action=BuyAction.WATCH_FOR_PRICE,
+    )
+    now = V2_CUTOVER_AT + dt.timedelta(days=200)
+    dataset = _builder([rec_v1, rec_v2], [], []).build(
+        now, sample_definition=SampleDefinition.ACTION_CHANGE
+    )
+
+    horizon = _BUSINESS_HORIZONS[0]
+    v1_row = _rows_for(dataset, "rec-v1", HorizonUnit.BUSINESS_DAYS, horizon)[0]
+    v2_row = _rows_for(dataset, "rec-v2", HorizonUnit.BUSINESS_DAYS, horizon)[0]
+    # 修正前(groupにversionを含めない)なら、同一buy_actionのv2_rowは
+    # NO_ACTION_CHANGEとして扱われていたはずである(直前行と同じaction)。
+    assert v1_row.selection_reason == SelectionReason.FIRST_OBSERVED
+    assert v2_row.selection_reason == SelectionReason.FIRST_OBSERVED
+
+
 def test_naive_now_is_rejected() -> None:
     with pytest.raises(ValueError):
         _builder([], [], []).build(dt.datetime(2026, 8, 28, 7, 0))  # tzなしは拒否

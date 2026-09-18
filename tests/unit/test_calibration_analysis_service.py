@@ -393,6 +393,55 @@ def test_cli_export_then_analyze_smoke(tmp_path, monkeypatch) -> None:
     assert first["record_type"] == "analysis_metadata"
 
 
+# --- Issue #389 F1(PRレビュー対応): CLIのversion filterオプション --------------
+
+
+def test_cli_export_accepts_valid_evaluation_semantics_version(tmp_path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from jstock_advisor.cli.calibration import app
+
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    runner = CliRunner()
+    for version in ("v1", "v2"):
+        dataset_path = tmp_path / f"dataset-{version}.jsonl"
+        result = runner.invoke(
+            app,
+            [
+                "export-dataset",
+                "--output",
+                str(dataset_path),
+                "--evaluation-semantics-version",
+                version,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        metadata = json.loads(dataset_path.read_text(encoding="utf-8").splitlines()[0])
+        assert metadata["evaluation_semantics_version"] == version
+
+
+def test_cli_export_rejects_invalid_evaluation_semantics_version(tmp_path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from jstock_advisor.cli.calibration import app
+
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    runner = CliRunner()
+    dataset_path = tmp_path / "dataset.jsonl"
+    result = runner.invoke(
+        app,
+        [
+            "export-dataset",
+            "--output",
+            str(dataset_path),
+            "--evaluation-semantics-version",
+            "v3",
+        ],
+    )
+    assert result.exit_code != 0
+    assert not dataset_path.exists()
+
+
 # --- Phase B dataset由来のend-to-end(builder→jsonl→analyze) -------------------
 
 
