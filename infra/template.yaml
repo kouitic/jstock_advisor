@@ -592,6 +592,77 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # Issue #71 F-C11 Phase 1: TradeCooldownServiceが検知した売買イベントを
+  # HoldingsSnapshotEntry更新より前に耐久性のある形で記録する
+  # (trade_event_record_repository.py参照)。sparse GSI(pending-marker-index)
+  # により、未消費(pending_marker属性を持つ)イベントのみを効率的に取得できる
+  # (消費[consumed_at設定・pending_marker削除]はPhase 2のスコープ)。
+  # 失うと再検知できないわけではない(次回実行が同じイベントを再検知できる)が、
+  # 取りこぼされたイベントの復旧(WatchState終了)に必要な唯一の記録であるため
+  # Issue #137と同じ保護方針(Retain + PITR)を適用する。保持期間は未定義
+  # (Issue #138のretention policy整備を待つ。TTLは設定しない)。
+  TradeEventRecordsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TableName: !Sub "${TablePrefix}-trade_event_records"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+        - AttributeName: pending_marker
+          AttributeType: S
+        - AttributeName: detected_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: pending-marker-index
+          KeySchema:
+            - AttributeName: pending_marker
+              KeyType: HASH
+            - AttributeName: detected_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # 通知検証モード(VALIDATION)用。本番の永続状態・通常運用へ影響させない
+  # という既存方針(HoldingsSnapshotRepository等と同じ)。検証実行の一時データ
+  # のためTTLで自動失効する(TradeEventRecordRepository._VALIDATION_TTL_SECONDS
+  # =2時間)。
+  ValidationTradeEventRecordsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${TablePrefix}-validation_trade_event_records"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+        - AttributeName: pending_marker
+          AttributeType: S
+        - AttributeName: detected_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: pending-marker-index
+          KeySchema:
+            - AttributeName: pending_marker
+              KeyType: HASH
+            - AttributeName: detected_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # cross-pipeline通知重複抑止(コードレビュー対応2026-08、指摘5)。
   # BUY候補Lambda・保有銘柄Lambdaのどちらから送信した通知でも、当日・同一銘柄の
   # 最も高い優先度をここへ記録し、低優先度の重複通知をbest-effortで抑止する
@@ -1570,6 +1641,12 @@ Resources:
                 - !Sub "${DailyNotificationPriorityTable.Arn}/index/*"
                 - !GetAtt ValidationDailyNotificationPriorityTable.Arn
                 - !Sub "${ValidationDailyNotificationPriorityTable.Arn}/index/*"
+                # Issue #71 F-C11 Phase 1: TradeCooldownService.detect_and_apply()
+                # がTradeEventRecordRepository経由で参照する。
+                - !GetAtt TradeEventRecordsTable.Arn
+                - !Sub "${TradeEventRecordsTable.Arn}/index/*"
+                - !GetAtt ValidationTradeEventRecordsTable.Arn
+                - !Sub "${ValidationTradeEventRecordsTable.Arn}/index/*"
             # 統合BUY候補パイプライン(2026-07)で保有銘柄を購入判断対象へ統合したため追加
             - Sid: DynamoDbReadOnlyAccess
               Effect: Allow
@@ -1751,6 +1828,12 @@ Resources:
                 - !Sub "${DailyNotificationPriorityTable.Arn}/index/*"
                 - !GetAtt ValidationDailyNotificationPriorityTable.Arn
                 - !Sub "${ValidationDailyNotificationPriorityTable.Arn}/index/*"
+                # Issue #71 F-C11 Phase 1: TradeCooldownService.detect_and_apply()
+                # がTradeEventRecordRepository経由で参照する。
+                - !GetAtt TradeEventRecordsTable.Arn
+                - !Sub "${TradeEventRecordsTable.Arn}/index/*"
+                - !GetAtt ValidationTradeEventRecordsTable.Arn
+                - !Sub "${ValidationTradeEventRecordsTable.Arn}/index/*"
                 # Phase 2-B「銘柄分析」向け(2026-08)。
                 - !GetAtt HoldingEvaluationRecordsTable.Arn
                 - !Sub "${HoldingEvaluationRecordsTable.Arn}/index/*"

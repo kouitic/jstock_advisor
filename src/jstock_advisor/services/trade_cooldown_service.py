@@ -4,7 +4,10 @@
 `WatchStateRepository`/`WatchStateService`を一切import・呼び出ししない
 (責務分離。売買イベント検知後のWatchState強制終了は、呼び出し元の
 ハンドラが本サービスの戻り値(TradeEvent一覧)を`WatchStateService.
-end_for_trade_events()`へ明示的に渡す形で連結する)。
+end_for_trade_events()`へ明示的に渡す形で連結する)。Issue #71 F-C11
+Phase 1でTradeEventRecordの永続化を追加した後も、この責務分離は変更していない
+(TradeEventRecordの消費(consumption)はPhase 2のスコープであり、本サービスは
+引き続きWatchStateへ非依存のまま)。
 """
 
 from __future__ import annotations
@@ -20,11 +23,15 @@ from jstock_advisor.domain.entities.enums import TransactionType
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holdings_snapshot import HoldingsSnapshotEntry
+from jstock_advisor.domain.entities.trade_event_record import TradeEventRecord, build_trade_event_id
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.trade_event_detection import TradeEvent, detect_trade_events
 from jstock_advisor.infrastructure.aws import trade_detection_lock
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
+)
+from jstock_advisor.infrastructure.local_repository.trade_event_record_repository import (
+    TradeEventRecordRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,12 +66,17 @@ class TradeCooldownService:
         config: TradeCooldownConfig,
         repository: HoldingsSnapshotRepository | None = None,
         execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+        trade_event_repository: TradeEventRecordRepository | None = None,
     ) -> None:
         self._calendar = business_calendar
         self._config = config
         self._execution_context = execution_context
         self._repo = repository or HoldingsSnapshotRepository.for_execution_context(
             execution_context
+        )
+        self._trade_events = (
+            trade_event_repository
+            or TradeEventRecordRepository.for_execution_context(execution_context)
         )
 
     def detect_and_apply(
@@ -101,7 +113,7 @@ class TradeCooldownService:
         business_date = f"{self._execution_context.mode.value}:{evaluation_date.isoformat()}"
 
         if trade_detection_lock.try_acquire(business_date, now, _LEASE_SECONDS):
-            events = self._do_detect_and_apply(current_holdings, evaluation_date)
+            events = self._do_detect_and_apply(current_holdings, evaluation_date, now)
             trade_detection_lock.mark_completed(business_date, leased_at_iso=now.isoformat())
             return TradeDetectionOutcome(confirmed=True, events=events)
 
@@ -116,7 +128,7 @@ class TradeCooldownService:
                 and lease_expires_at < now.isoformat()
                 and trade_detection_lock.try_acquire(business_date, now, _LEASE_SECONDS)
             ):
-                events = self._do_detect_and_apply(current_holdings, evaluation_date)
+                events = self._do_detect_and_apply(current_holdings, evaluation_date, now)
                 trade_detection_lock.mark_completed(business_date, leased_at_iso=now.isoformat())
                 return TradeDetectionOutcome(confirmed=True, events=events)
             time.sleep(_BOUNDED_RETRY_INTERVAL_SECONDS)
@@ -129,7 +141,7 @@ class TradeCooldownService:
         return TradeDetectionOutcome(confirmed=False, events=[])
 
     def _do_detect_and_apply(
-        self, current_holdings: dict[str, Holding], today: dt.date
+        self, current_holdings: dict[str, Holding], today: dt.date, now: dt.datetime
     ) -> list[TradeEvent]:
         """current_holdingsはholding_id(= owner + "#" + stock_code)キー(M3)。"""
         previous_entries = {e.holding_id: e for e in self._repo.list_all()}
@@ -141,6 +153,26 @@ class TradeCooldownService:
 
         events = detect_trade_events(previous_entries, current_holdings, today)
         for event in events:
+            # Issue #71 F-C11 Phase 1: TradeEventRecordをHoldingsSnapshotEntry
+            # 更新より前に永続化する。insert_if_absent()の結果(新規作成できたか)は
+            # 後続のsnapshot更新をスキップする理由にしない(★ ここでreturn・
+            # continueしない)。snapshot更新はこのイベントが検知されたという
+            # 事実を反映するために常に必要であり、TradeEventRecordの永続化に
+            # 失敗しても(create_pending()が例外を出さない限り)snapshotは
+            # 更新されなければならない。
+            self._trade_events.create_pending(
+                TradeEventRecord(
+                    event_id=build_trade_event_id(event.holding_id, event.detected_at),
+                    holding_id=event.holding_id,
+                    owner=event.owner,
+                    stock_code=event.stock_code,
+                    event_type=event.event_type,
+                    detected_at=event.detected_at,
+                    shares=event.shares,
+                    average_purchase_price=event.average_purchase_price,
+                    created_at=now,
+                )
+            )
             cooldown_until = None
             if self._config.enabled:
                 cooldown_days = _cooldown_business_days(event.event_type, self._config)

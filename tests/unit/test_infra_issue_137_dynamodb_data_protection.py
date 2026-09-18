@@ -65,13 +65,17 @@ _UNPROTECTED_RESOURCES = frozenset(
         "ValidationHoldingsSnapshotTable",
         "ValidationHoldingsSnapshotTableV2",
         "ValidationRecommendationsTable",
+        "ValidationTradeEventRecordsTable",
         "ValidationWatchStateTable",
     }
 )
 
 #: Phase A のデータ分類にもとづく件数。分類が変わったら意図的に更新する。
-_EXPECTED_PROTECTED_COUNT = 37
-_EXPECTED_UNPROTECTED_COUNT = 17
+#: Issue #71 F-C11 Phase 1: TradeEventRecordsTable(保護対象)を追加。
+#: 対応するValidationTradeEventRecordsTableは上記_UNPROTECTED_RESOURCESへ
+#: 追加済み(VALIDATION実行専用の一時データのため)。
+_EXPECTED_PROTECTED_COUNT = 38
+_EXPECTED_UNPROTECTED_COUNT = 18
 
 
 def _load_template() -> dict[str, Any]:
