@@ -31,6 +31,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsSurpriseEvaluationState,
     EarningsTrendEvaluationState,
     EnvironmentEvaluationState,
+    FinancialPeriodEndSource,
     HistoricalValuationEvaluationState,
     MarketEnvironmentEvaluationState,
     PriceRangeEvaluationState,
@@ -65,6 +66,7 @@ from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.signals.earnings_surprise import evaluate_earnings_surprise
 from jstock_advisor.domain.signals.earnings_trend import evaluate_earnings_trend
 from jstock_advisor.domain.signals.earnings_window import (
+    ResolvedFinancialPeriodEnd,
     resolve_earnings_decision_relevance,
     resolve_earnings_release_confirmation,
     resolve_latest_financial_period_end,
@@ -102,6 +104,7 @@ from jstock_advisor.interfaces.types import (
     CashflowDecomposition,
     Disclosure,
     DividendInfo,
+    EarningsSurpriseRecord,
     FinancialSummary,
     HistoricalValuation,
     PriceBar,
@@ -606,25 +609,85 @@ def build_stock_snapshot(
     # と同じ関数呼び出しで独立に解決する(既存パイプラインの計算経路には触れず、
     # 副作用の無い純関数呼び出しをこちらでも行うのみ。同じ入力からは同じ結果に
     # なるため、既存のprofit_taking判定結果には一切影響しない)。
-    resolved_period = resolve_latest_financial_period_end(financial, evaluation_date)
-    release_confirmation_state = resolve_earnings_release_confirmation(
-        earnings_date_status,
-        earnings_date_raw,
-        resolved_period.period_end,
-        financial.source.fetched_at,
-        now,
-        config.earnings_window,
+    # レビュー対応(Issue #384 PR-8、サブちゃんのPR #406レビューF1): 以下4箇所は
+    # いずれもShadow計測(earnings_surprise/earnings_trend)専用の入力であり、
+    # 名前が`*_to_metrics()`/`evaluate_*()`ではないため従来の名前軸sweepでは
+    # 見つからなかったが、出力先はShadow計測のみ(全数grep確認済み)。本流の
+    # 実行文にinlineで置かれたままだと、例外1件(特にL649の外部I/O)で
+    # build_stock_snapshot()全体が失敗し当該銘柄のBUY/SELL/ProfitTaking判定
+    # 結果全体が失われるため、isolated_shadow_computation()で個別に隔離する。
+    #
+    # レビュー対応(サブちゃんのPR #408レビューF1): 上記4箇所の型(bare enum /
+    # dataclass / list)はいずれもreason_codesを持たないため、fallback値
+    # (NOT_APPLICABLE/UNKNOWN/空list等)は「正常時にも起こりうる値そのもの」
+    # であり、DecisionSnapshotに残るearnings_surprise/earnings_trend側の
+    # reason_codesだけを見ても「縮退した」という事実と「本当にその業務状態
+    # だった」場合を区別できなかった(特に外部I/O失敗時は
+    # ANALYST_CONSENSUS_UNAVAILABLEという別の業務事実として記録されていた)。
+    # 4箇所いずれかが失敗したかどうかを_phase_c_shadow_errorsへ記録し、
+    # 下流のearnings_surprise/earnings_trend(既存のisolated_shadow_
+    # computation)のbuild()内で該当する失敗を再送出することで、PR-3から
+    # 既にある「SHADOW_COMPUTATION_FAILED:<例外型名>」をreason_codesへ積む
+    # 既存のon_failureをそのまま再利用する(S-20系列の既存の慣行に合わせ、
+    # 新しいtagging方式は導入しない)。
+    _phase_c_shadow_errors: dict[str, Exception] = {}
+
+    def _record_phase_c_failure(name: str, exc: Exception) -> None:
+        _phase_c_shadow_errors[name] = exc
+
+    def _resolved_period_fallback(exc: Exception) -> ResolvedFinancialPeriodEnd:
+        _record_phase_c_failure("resolved_financial_period_end", exc)
+        return ResolvedFinancialPeriodEnd(
+            period_end=None, source=FinancialPeriodEndSource.UNAVAILABLE
+        )
+
+    def _release_confirmation_fallback(exc: Exception) -> EarningsReleaseConfirmationState:
+        _record_phase_c_failure("earnings_release_confirmation_state", exc)
+        # NOT_APPLICABLEは「決算予定日抑制の対象外」を表す既存の業務上の値であり、
+        # phase_c_earnings_blockedをFalse側へ倒す(=外部I/O取得を抑止しない)
+        # 安全側のfallback(下流のearnings_surprise/earnings_trend自体は、
+        # この失敗が記録されているため後述のとおりNOT_EVALUATEDへ強制される)。
+        return EarningsReleaseConfirmationState.NOT_APPLICABLE
+
+    def _decision_relevance_fallback(exc: Exception) -> EarningsDecisionRelevance:
+        _record_phase_c_failure("earnings_decision_relevance", exc)
+        return EarningsDecisionRelevance.UNKNOWN
+
+    def _earnings_surprise_history_fallback(exc: Exception) -> list[EarningsSurpriseRecord]:
+        _record_phase_c_failure("earnings_surprise_history", exc)
+        return []
+
+    resolved_period = isolated_shadow_computation(
+        "resolved_financial_period_end",
+        lambda: resolve_latest_financial_period_end(financial, evaluation_date),
+        _resolved_period_fallback,
+    )
+    release_confirmation_state = isolated_shadow_computation(
+        "earnings_release_confirmation_state",
+        lambda: resolve_earnings_release_confirmation(
+            earnings_date_status,
+            earnings_date_raw,
+            resolved_period.period_end,
+            financial.source.fetched_at,
+            now,
+            config.earnings_window,
+        ),
+        _release_confirmation_fallback,
     )
     # コードレビュー対応(v3): 古い決算予定日が現在の判断にまだ関連するかを
     # profit_taking_service.pyと全く同じ関数・同じ引数で解決する(既存の
     # 無期限停止防止設計をPhase Cでも踏襲する。呼び出しを分けても副作用の
     # 無い純関数のため、既存のProfitTaking側の判定結果には一切影響しない)。
-    decision_relevance = resolve_earnings_decision_relevance(
-        earnings_date_status,
-        earnings_date_raw,
-        release_confirmation_state,
-        evaluation_date,
-        config.earnings_window,
+    decision_relevance = isolated_shadow_computation(
+        "earnings_decision_relevance",
+        lambda: resolve_earnings_decision_relevance(
+            earnings_date_status,
+            earnings_date_raw,
+            release_confirmation_state,
+            evaluation_date,
+            config.earnings_window,
+        ),
+        _decision_relevance_fallback,
     )
     # コードレビュー対応(第3回): release_confirmation_state/decision_relevanceの
     # 組み合わせがevaluate_earnings_surprise()自身のNOT_APPLICABLE条件と完全に
@@ -643,25 +706,44 @@ def build_stock_snapshot(
         )
         and decision_relevance == EarningsDecisionRelevance.RELEVANT
     )
-    earnings_surprise_history = (
-        []
-        if phase_c_earnings_blocked
-        else providers.financial_data.get_earnings_surprise_history(stock_code)
+    earnings_surprise_history = isolated_shadow_computation(
+        "earnings_surprise_history",
+        lambda: (
+            []
+            if phase_c_earnings_blocked
+            else providers.financial_data.get_earnings_surprise_history(stock_code)
+        ),
+        _earnings_surprise_history_fallback,
     )
+
+    def _raise_recorded_phase_c_failure(*names: str) -> None:
+        for name in names:
+            error = _phase_c_shadow_errors.get(name)
+            if error is not None:
+                raise error
     # コードレビュー対応(v2): Dividend Revisionは意味の異なるデータ
     # (前年度実績 vs 現在予想の比較)であるためEarnings Surpriseからは
     # 除外した(dividend_comparison_outcomeを渡さない)。Earnings Trend側の
     # dividend_directionとしては引き続き渡す。
-    earnings_surprise = isolated_shadow_computation(
-        "earnings_surprise",
-        lambda: evaluate_earnings_surprise(
+    def _build_earnings_surprise() -> EarningsSurpriseResult:
+        _raise_recorded_phase_c_failure(
+            "resolved_financial_period_end",
+            "earnings_release_confirmation_state",
+            "earnings_decision_relevance",
+            "earnings_surprise_history",
+        )
+        return evaluate_earnings_surprise(
             earnings_surprise_history,
             resolved_period.period_end,
             release_confirmation_state,
             decision_relevance,
             now,
             config.earnings_surprise,
-        ),
+        )
+
+    earnings_surprise = isolated_shadow_computation(
+        "earnings_surprise",
+        _build_earnings_surprise,
         lambda exc: EarningsSurpriseResult(
             state=EarningsSurpriseEvaluationState.NOT_EVALUATED,
             reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
@@ -669,9 +751,12 @@ def build_stock_snapshot(
             model_version=config.earnings_surprise.model_version,
         ),
     )
-    earnings_trend = isolated_shadow_computation(
-        "earnings_trend",
-        lambda: evaluate_earnings_trend(
+
+    def _build_earnings_trend() -> EarningsTrendResult:
+        _raise_recorded_phase_c_failure(
+            "earnings_release_confirmation_state", "earnings_decision_relevance"
+        )
+        return evaluate_earnings_trend(
             # コードレビュー対応(v3): 値とperiod_end/period_typeの対応を
             # indexに依存させないよう、裸のlist[Decimal]ではなく
             # FinancialPeriodValueの系列を渡す。
@@ -685,7 +770,11 @@ def build_stock_snapshot(
             decision_relevance,
             now,
             config.earnings_trend,
-        ),
+        )
+
+    earnings_trend = isolated_shadow_computation(
+        "earnings_trend",
+        _build_earnings_trend,
         lambda exc: EarningsTrendResult(
             state=EarningsTrendEvaluationState.NOT_EVALUATED,
             reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
