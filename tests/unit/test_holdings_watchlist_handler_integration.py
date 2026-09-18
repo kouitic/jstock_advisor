@@ -25,6 +25,7 @@ from jstock_advisor.domain.entities.enums import (
     FinancialPolicyOverride,
     IndustryClassification,
     NotificationStatus,
+    PriceRangeEvaluationState,
     RecommendationType,
     RuntimeConfigMode,
     classify_recommendation_source,
@@ -1036,3 +1037,45 @@ def test_batch_continues_after_one_holding_hits_data_integrity_error(store_dir: 
     assert first.succeeded is False
     assert second.succeeded is True
     assert call_count["n"] == 2
+
+
+# ===== Issue #384 PR-4: exit_price_range(Shadow計測)の隔離 =====
+
+
+def test_shadow_exit_price_range_failure_does_not_break_holding_decision_notification(
+    store_dir: Path, monkeypatch
+):
+    """exit_price_range(Shadow計測、v1判定へ非接続)の算出が想定外の例外を
+    出しても、HoldingDecisionの通知・Recommendation保存自体は失われない
+    (isolated_shadow_computation()による隔離。#384本体・#22 C2・#371と
+    同型のリスクパターンの固定)。"""
+    services = _build_services(store_dir, RuntimeConfigMode.ACTIVE)
+
+    def _fake_evaluate(self, *args, **kwargs):
+        return HoldingDecisionEvaluationOutcome(
+            _STOCK_CODE, _notifying_holding_decision_result(_STOCK_CODE)
+        )
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected shadow computation failure")
+
+    monkeypatch.setattr(HoldingDecisionService, "evaluate", _fake_evaluate)
+    monkeypatch.setattr(handler_module, "evaluate_exit_price_range", _boom)
+
+    result = _run(services)
+
+    assert result.succeeded is True
+    assert result.notified is True
+    assert len(services["line_client"].sent_messages) == 1
+
+    saved_recommendations = services["recommendation_repo"].list_all()
+    assert len(saved_recommendations) == 1
+    rec = saved_recommendations[0]
+    assert rec.exit_price_range_state == PriceRangeEvaluationState.NOT_EVALUATED
+    assert rec.exit_price_range_reason_codes == ("SHADOW_COMPUTATION_FAILED:ZeroDivisionError",)
+    # 0.0/空値への偽装なし: 価格帯fieldはすべてNoneのまま(デフォルト)
+    assert rec.exit_price_range_partial_low_price is None
+    assert rec.exit_price_range_partial_high_price is None
+    assert rec.exit_price_range_strong_price is None
+    assert rec.exit_price_range_downside_review_price is None
+    assert rec.exit_price_range_exit_review_price is None
