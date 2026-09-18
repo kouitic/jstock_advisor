@@ -246,3 +246,33 @@ def build_line_client_from_env() -> LineClient:
     if token and user_id:
         return LiveLineClient(channel_access_token=token, user_id=user_id)
     return ConsoleLineClient()
+
+
+class LineCredentialsMissingError(RuntimeError):
+    """Lambda実行でLINE_CHANNEL_ACCESS_TOKEN/LINE_USER_IDが取得できない場合(Issue #117)。
+
+    build_line_client_from_env()はCLIでの利用を想定しており、未設定時に
+    ConsoleLineClient(標準出力のみのドライラン)へ黙ってフォールバックする
+    (CLIの--notifyヘルプが明示的にそう定義しており、この挙動はCLIにとって
+    正しい)。しかしLambda実行で同じフォールバックが起きると、通知が実際には
+    送られていないのにLambda呼び出し自体は正常終了して見える不可視の障害になる
+    (Secrets Managerからの取得失敗・IAM権限変更・env var設定漏れ等が原因でも
+    気づく手段が無かった)。build_live_line_client_from_env()はこの区別のため
+    に追加した別関数であり、Lambda handler専用に黙って落ちず即座に例外を送出する。
+    """
+
+
+def build_live_line_client_from_env() -> LiveLineClient:
+    """Lambda handler専用。認証情報が無ければConsoleLineClientへ逃げず例外を送出する。
+
+    build_line_client_from_env()とは独立した関数であり、既存の呼び出し元
+    (CLI 3箇所)には一切影響しない(Issue #117 Phase B1a)。
+    """
+    token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+    user_id = os.environ.get("LINE_USER_ID")
+    if not token or not user_id:
+        raise LineCredentialsMissingError(
+            "LINE_CHANNEL_ACCESS_TOKEN/LINE_USER_IDが取得できません"
+            "(Lambda実行のためConsoleLineClientへはフォールバックしません。Issue #117)"
+        )
+    return LiveLineClient(channel_access_token=token, user_id=user_id)
