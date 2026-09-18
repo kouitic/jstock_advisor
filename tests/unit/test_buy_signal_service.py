@@ -1638,6 +1638,71 @@ def test_facts_schema_version_constant_is_pinned_to_an_explicit_value() -> None:
     assert service_module.FACTS_SCHEMA_VERSION == "v2"
 
 
+def test_common_quality_shadow_failure_is_isolated_from_the_v1_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """common_quality shadowの算出で例外が出ても、v1の判定結果は1つも変わらない
+    (Issue #22 C2 / #384 PR-1レビュー対応)。
+
+    style_attractiveness_shadow・canonical_industry_observationには既に
+    同型のcaller-level例外注入テストがあったが、common_quality_shadowには
+    無く、この観測だけisolated_shadow_observation()を外す変異を入れても
+    既存テストがPASSしてしまう状態だった(独立レビューで指摘)。
+
+    固定するのは次の3点である(他2つのshadowテストと同じ観点)。
+      ・common_qualityの算出が落ちてもv1の出力(BuyAction / score / 買付価格)
+        が変わらない
+      ・失敗を握りつぶさない(「算出できなかった」がfactsに残る)
+      ・失敗を0.0や空へ潰さない
+    """
+    baseline = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    baseline_rec = baseline.recommendation
+    assert baseline_rec is not None
+    baseline_facts = baseline_rec.buy_score_input_facts
+    assert baseline_facts is not None
+    assert baseline_facts["common_quality_shadow"]["shadow_state"] == "COMPUTED"
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected common quality shadow failure")
+
+    monkeypatch.setattr(service_module, "score_company_quality", _boom)
+    degraded = _analyze_with_jpx(monkeypatch, _NIHON_SHINYAKU, _jpx_source({}))
+    degraded_rec = degraded.recommendation
+    assert degraded_rec is not None
+
+    # 1 v1の出力が変わらない。
+    assert degraded_rec.buy_action == baseline_rec.buy_action
+    assert degraded_rec.raw_buy_action == baseline_rec.raw_buy_action
+    assert degraded_rec.total_score == baseline_rec.total_score
+    assert degraded_rec.company_quality_score == baseline_rec.company_quality_score
+    assert degraded_rec.entry_buy_price == baseline_rec.entry_buy_price
+    assert degraded_rec.standard_buy_price == baseline_rec.standard_buy_price
+    assert degraded_rec.strong_buy_price == baseline_rec.strong_buy_price
+    assert degraded_rec.valuation_anchor == baseline_rec.valuation_anchor
+    assert degraded_rec.confidence == baseline_rec.confidence
+
+    degraded_facts = degraded_rec.buy_score_input_facts
+    assert degraded_facts is not None
+
+    # 2 失敗が記録に残る(黙って何も保存しない、にしない)。
+    failed = degraded_facts["common_quality_shadow"]
+    assert failed["shadow_state"] == "COMPUTATION_FAILED"
+    assert failed["error_type"] == "ZeroDivisionError"
+
+    # 3 0.0や空へ潰さない。「算出できなかった」を「スコア0」「該当0件」と
+    # 読める形で保存しない。
+    assert "score" not in failed
+    assert "coverage_ratio" not in failed
+    assert "items" not in failed
+
+    # 4 隔離は観測ごと。もう片方のshadowは算出されたまま残る。
+    assert degraded_facts["style_attractiveness_shadow"]["shadow_state"] == "COMPUTED"
+    assert (
+        degraded_facts["style_attractiveness_shadow"]
+        == baseline_facts["style_attractiveness_shadow"]
+    )
+
+
 def test_shadow_failure_is_isolated_from_the_v1_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
