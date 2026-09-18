@@ -72,30 +72,51 @@ def _non_code_non_quote_lines(body: str) -> list[str]:
     return out
 
 
-def _find_section_headers(body: str) -> set[str]:
-    found: set[str] = set()
-    for line in body.splitlines():
-        m = re.match(r"^#{1,6}\s+(.+?)\s*$", line.strip())
+_SECTION_HEADER_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
+
+
+def _split_into_sections(non_code_non_quote_lines: list[str]) -> dict[str, list[str]]:
+    """code block外・quote外の有効行から、section名 -> section本文行、の構造化map
+    を作る(レビュー対応: PR #394 issuecomment BLOCKING finding)。
+
+    入力は既に_non_code_non_quote_lines()を通した行であるため、code block内・
+    blockquote内(先頭 > )の見出しはここへ到達しない(=構造上、必須節・DoD項目
+    として認識されない)。同名sectionが複数回現れた場合は本文行を連結する
+    (存在確認・部分一致の判定なので結合しても判定は変わらない)。
+    """
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in non_code_non_quote_lines:
+        m = _SECTION_HEADER_RE.match(line.strip())
         if m:
-            found.add(m.group(1).strip())
-    return found
+            current = m.group(1).strip()
+            sections.setdefault(current, [])
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return sections
 
 
 def check_pr_body(body: str) -> CheckResult:
     """PR本文を構文検査する(意味判定は行わない)。"""
     result = CheckResult(result=PASS)
 
-    section_headers = _find_section_headers(body)
-    for required in REQUIRED_SECTIONS:
-        if required not in section_headers:
-            result.missing_sections.append(required)
-
-    for item in DOD_ITEMS:
-        if item not in body:
-            result.missing_dod_items.append(item)
-
     non_code_lines = _non_code_non_quote_lines(body)
     non_code_text = "\n".join(non_code_lines)
+    sections = _split_into_sections(non_code_lines)
+
+    for required in REQUIRED_SECTIONS:
+        if required not in sections:
+            result.missing_sections.append(required)
+
+    # レビュー対応: DoD 5項目は本文全体ではなく実際の"## DoD" section本文
+    # (code block/quote除外済み)のみを対象にする。別sectionやcode block
+    # 内に同じ語句があるだけでは充足と判定しない。DoD section自体が無い/
+    # 空の場合はdod_bodyが空文字列になり、5項目とも自然にmissing扱いになる。
+    dod_body = "\n".join(sections.get("DoD", []))
+    for item in DOD_ITEMS:
+        if item not in dod_body:
+            result.missing_dod_items.append(item)
 
     result.has_issue_reference = bool(_ISSUE_REF_ANYWHERE_RE.search(non_code_text))
 
