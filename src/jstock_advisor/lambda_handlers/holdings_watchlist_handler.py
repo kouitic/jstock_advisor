@@ -56,11 +56,13 @@ from jstock_advisor.domain.entities.enums import (
     NotificationCategory,
     NotificationIntent,
     NotificationStatus,
+    PriceRangeEvaluationState,
     RecommendationType,
     resolve_holding_summary_action,
 )
 from jstock_advisor.domain.entities.evaluation_audit import HoldingEvaluationAudit, summary_category
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
+from jstock_advisor.domain.entities.exit_price_range import ExitPriceRangeResult
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
 from jstock_advisor.domain.entities.holding_evaluation_record import (
@@ -74,6 +76,7 @@ from jstock_advisor.domain.price_freshness import (
     PriceFreshnessVerdict,
     evaluate_holdings_price_freshness,
 )
+from jstock_advisor.domain.shadow_observation import isolated_shadow_computation
 from jstock_advisor.domain.signals.exit_price_range import evaluate_exit_price_range
 from jstock_advisor.domain.signals.holding_decision_execution_plan import (
     resolve_execution_plan,
@@ -498,14 +501,28 @@ def _notify_holding_decision_and_build_result(
     # 判定精度向上機能次フェーズSTEP2: Exit Price Range(Shadow計測)。
     # HoldingDecisionパイプラインではここ(holdingとsnapshotが揃う唯一の
     # 箇所)で1回だけ計算し、Builderへ渡す(Builder自身は算出しない)。
-    exit_price_range = evaluate_exit_price_range(
-        snapshot.fair_value_range,
-        snapshot.historical_valuation,
-        snapshot.timing,
-        holding.average_purchase_price,
-        snapshot.current_price,
-        now,
-        config.entry_exit_price.exit,
+    # Issue #384 PR-4: v1判定へ非接続のShadow計測が例外を出すと、本関数
+    # (ひいてはholding 1件のHoldingDecision通知全体)が失われるリスクが
+    # あったため、isolated_shadow_computation()で隔離する(#384本体・
+    # #22 C2・#371と同型のリスクパターン)。
+    exit_price_range = isolated_shadow_computation(
+        "exit_price_range",
+        lambda: evaluate_exit_price_range(
+            snapshot.fair_value_range,
+            snapshot.historical_valuation,
+            snapshot.timing,
+            holding.average_purchase_price,
+            snapshot.current_price,
+            now,
+            config.entry_exit_price.exit,
+        ),
+        lambda exc: ExitPriceRangeResult(
+            state=PriceRangeEvaluationState.NOT_EVALUATED,
+            current_price=snapshot.current_price,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.entry_exit_price.exit.model_version,
+        ),
     )
     recommendation = build_holding_decision_recommendation(
         holding,
