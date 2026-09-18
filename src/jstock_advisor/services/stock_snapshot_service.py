@@ -28,6 +28,14 @@ from jstock_advisor.domain.entities.enums import (
     EarningsDateStatus,
     EarningsDecisionRelevance,
     EarningsReleaseConfirmationState,
+    EarningsSurpriseEvaluationState,
+    EarningsTrendEvaluationState,
+    EnvironmentEvaluationState,
+    HistoricalValuationEvaluationState,
+    MarketEnvironmentEvaluationState,
+    PriceRangeEvaluationState,
+    SectorEnvironmentEvaluationState,
+    TimingScoreEvaluationState,
     ValuationBasis,
 )
 from jstock_advisor.domain.entities.environment import EnvironmentResult
@@ -52,6 +60,7 @@ from jstock_advisor.domain.screening.rules import (
     detect_disclosure_risk_keywords,
     detect_material_event_keywords,
 )
+from jstock_advisor.domain.shadow_observation import isolated_shadow_computation
 from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.signals.earnings_surprise import evaluate_earnings_surprise
 from jstock_advisor.domain.signals.earnings_trend import evaluate_earnings_trend
@@ -552,21 +561,45 @@ def build_stock_snapshot(
     current_pbr_basis = (
         ValuationBasis.TRAILING if current_pbr is not None else ValuationBasis.UNKNOWN
     )
-    historical_valuation = evaluate_historical_valuation(
-        historical_valuations,
-        stock_code,
-        current_per,
-        current_per_basis,
-        current_pbr,
-        current_pbr_basis,
-        now,
-        config.historical_valuation,
+    # レビュー対応(Issue #384、#22 C2 / #371と同型): 以下8件のevaluate_*()
+    # 呼び出しはいずれもShadow計測(v1判定への非接続)だが、算出がinlineで
+    # あるため例外1件でsnapshot全体(=呼び出し元4パイプライン全て)が失われる
+    # リスクがあった。isolated_shadow_computation()で隔離し、失敗時は各型が
+    # 既に持つNOT_EVALUATED state + reason_codesへのタグ付けで表現する
+    # (「業務上の未評価」と区別するため、0.0や空値への偽装はしない)。
+    historical_valuation = isolated_shadow_computation(
+        "historical_valuation",
+        lambda: evaluate_historical_valuation(
+            historical_valuations,
+            stock_code,
+            current_per,
+            current_per_basis,
+            current_pbr,
+            current_pbr_basis,
+            now,
+            config.historical_valuation,
+        ),
+        lambda exc: HistoricalValuationResult(
+            state=HistoricalValuationEvaluationState.NOT_EVALUATED,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.historical_valuation.model_version,
+        ),
     )
 
     # 判定精度向上機能Phase B第二弾: Timing Score(Shadow計測)。既に計算済みの
     # momentum_snapshotを基に算出する派生値であり、既存のBUY/保有/売却/
     # ProfitTaking判定・LINE通知には一切影響しない。
-    timing = evaluate_timing_score(momentum_snapshot, current_price, now, config.timing_score)
+    timing = isolated_shadow_computation(
+        "timing",
+        lambda: evaluate_timing_score(momentum_snapshot, current_price, now, config.timing_score),
+        lambda exc: TimingScoreResult(
+            state=TimingScoreEvaluationState.NOT_EVALUATED,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.timing_score.model_version,
+        ),
+    )
 
     # 判定精度向上機能Phase C: Earnings Surprise/Trend Score(Shadow計測)。
     # 決算反映確認(EarningsReleaseConfirmationState)はprofit_taking_service.py
@@ -619,28 +652,46 @@ def build_stock_snapshot(
     # (前年度実績 vs 現在予想の比較)であるためEarnings Surpriseからは
     # 除外した(dividend_comparison_outcomeを渡さない)。Earnings Trend側の
     # dividend_directionとしては引き続き渡す。
-    earnings_surprise = evaluate_earnings_surprise(
-        earnings_surprise_history,
-        resolved_period.period_end,
-        release_confirmation_state,
-        decision_relevance,
-        now,
-        config.earnings_surprise,
+    earnings_surprise = isolated_shadow_computation(
+        "earnings_surprise",
+        lambda: evaluate_earnings_surprise(
+            earnings_surprise_history,
+            resolved_period.period_end,
+            release_confirmation_state,
+            decision_relevance,
+            now,
+            config.earnings_surprise,
+        ),
+        lambda exc: EarningsSurpriseResult(
+            state=EarningsSurpriseEvaluationState.NOT_EVALUATED,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.earnings_surprise.model_version,
+        ),
     )
-    earnings_trend = evaluate_earnings_trend(
-        # コードレビュー対応(v3): 値とperiod_end/period_typeの対応を
-        # indexに依存させないよう、裸のlist[Decimal]ではなく
-        # FinancialPeriodValueの系列を渡す。
-        quarterly_operating_income_periods,
-        quarterly_operating_cashflow_periods,
-        dividend.dividend_comparison_outcome,
-        # コードレビュー対応(v2): 四半期実績由来か年次決算へのフォール
-        # バック由来かをconfidence算出へ反映する。
-        financial.recent_periods_source,
-        release_confirmation_state,
-        decision_relevance,
-        now,
-        config.earnings_trend,
+    earnings_trend = isolated_shadow_computation(
+        "earnings_trend",
+        lambda: evaluate_earnings_trend(
+            # コードレビュー対応(v3): 値とperiod_end/period_typeの対応を
+            # indexに依存させないよう、裸のlist[Decimal]ではなく
+            # FinancialPeriodValueの系列を渡す。
+            quarterly_operating_income_periods,
+            quarterly_operating_cashflow_periods,
+            dividend.dividend_comparison_outcome,
+            # コードレビュー対応(v2): 四半期実績由来か年次決算へのフォール
+            # バック由来かをconfidence算出へ反映する。
+            financial.recent_periods_source,
+            release_confirmation_state,
+            decision_relevance,
+            now,
+            config.earnings_trend,
+        ),
+        lambda exc: EarningsTrendResult(
+            state=EarningsTrendEvaluationState.NOT_EVALUATED,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.earnings_trend.model_version,
+        ),
     )
 
     # 判定精度向上機能次フェーズSTEP2: Entry Price Range(Shadow計測)。
@@ -648,14 +699,24 @@ def build_stock_snapshot(
     # 値をそのまま使う(新規Provider呼び出しは行わない)。既存のBUY候補判定・
     # entry_buy_price/standard_buy_price/strong_buy_price・保有判断スコア・
     # 旧売却判定・ProfitTaking判定・LINE通知には一切影響しない。
-    entry_price_range = evaluate_entry_price_range(
-        fair_value_range,
-        historical_valuation,
-        timing,
-        momentum_snapshot,
-        current_price,
-        now,
-        config.entry_exit_price.entry,
+    entry_price_range = isolated_shadow_computation(
+        "entry_price_range",
+        lambda: evaluate_entry_price_range(
+            fair_value_range,
+            historical_valuation,
+            timing,
+            momentum_snapshot,
+            current_price,
+            now,
+            config.entry_exit_price.entry,
+        ),
+        lambda exc: EntryPriceRangeResult(
+            state=PriceRangeEvaluationState.NOT_EVALUATED,
+            current_price=current_price,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.entry_exit_price.entry.model_version,
+        ),
     )
 
     # 判定精度向上機能Phase D: Market/Sector Environment Score(Shadow計測)。
@@ -663,20 +724,50 @@ def build_stock_snapshot(
     # ものをそのまま使う(新規Provider呼び出しは行わない)。既存のBUY候補判定・
     # 保有判断スコア・旧売却判定・ProfitTaking判定・LINE通知・Entry/Exit
     # Price Rangeには一切影響しない。
-    market_environment = evaluate_market_environment(
-        topix_bars, snap.as_of_date, now, config.market_sector_environment.market, calendar
+    market_environment = isolated_shadow_computation(
+        "market_environment",
+        lambda: evaluate_market_environment(
+            topix_bars, snap.as_of_date, now, config.market_sector_environment.market, calendar
+        ),
+        lambda exc: MarketEnvironmentResult(
+            state=MarketEnvironmentEvaluationState.NOT_EVALUATED,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.market_sector_environment.market.model_version,
+        ),
     )
-    sector_environment = evaluate_sector_environment(
-        sector_bars or None,
-        topix_bars,
-        sector_etf,
-        snap.as_of_date,
-        now,
-        config.market_sector_environment.sector,
-        calendar,
+    sector_environment = isolated_shadow_computation(
+        "sector_environment",
+        lambda: evaluate_sector_environment(
+            sector_bars or None,
+            topix_bars,
+            sector_etf,
+            snap.as_of_date,
+            now,
+            config.market_sector_environment.sector,
+            calendar,
+        ),
+        lambda exc: SectorEnvironmentResult(
+            state=SectorEnvironmentEvaluationState.NOT_EVALUATED,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.market_sector_environment.sector.model_version,
+        ),
     )
-    environment = evaluate_environment(
-        market_environment, sector_environment, now, config.market_sector_environment.environment
+    environment = isolated_shadow_computation(
+        "environment",
+        lambda: evaluate_environment(
+            market_environment,
+            sector_environment,
+            now,
+            config.market_sector_environment.environment,
+        ),
+        lambda exc: EnvironmentResult(
+            state=EnvironmentEvaluationState.NOT_EVALUATED,
+            reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+            evaluated_at=now,
+            model_version=config.market_sector_environment.environment.model_version,
+        ),
     )
 
     financial_input_provenance = build_financial_input_provenance(financial, dividend)

@@ -21,7 +21,12 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     EarningsSurpriseEvaluationState,
     EarningsTrendEvaluationState,
+    EnvironmentEvaluationState,
     HistoricalValuationEvaluationState,
+    MarketEnvironmentEvaluationState,
+    PriceRangeEvaluationState,
+    SectorEnvironmentEvaluationState,
+    TimingScoreEvaluationState,
     ValuationBasis,
 )
 from jstock_advisor.interfaces.provider_errors import (
@@ -29,6 +34,7 @@ from jstock_advisor.interfaces.provider_errors import (
     ProviderFailureCategory,
 )
 from jstock_advisor.interfaces.types import Disclosure
+from jstock_advisor.services import stock_snapshot_service as stock_snapshot_service_module
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
@@ -405,3 +411,96 @@ def test_provider_failure_is_not_converted_to_unavailable_status() -> None:
 
     assert excinfo.value.operation == "get_next_earnings_date"
     assert excinfo.value.retryable is True
+
+
+# --- Shadow計測の隔離(Issue #384 PR-3) -----------------------------------
+
+
+def _boom(*args: object, **kwargs: object) -> object:
+    raise ZeroDivisionError("injected shadow computation failure")
+
+
+def test_shadow_computation_failure_in_all_8_signals_does_not_break_snapshot_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """8箇所のevaluate_*()すべてが例外を出しても、build_stock_snapshot()
+    自体は失敗せず、各fieldがNOT_EVALUATED + SHADOW_COMPUTATION_FAILEDタグ
+    付きreason_codesで表現される(Issue #384 PR-3。8箇所すべてを隔離しな
+    ければsnapshot全体が失われるという#384本体の発見に対する固定)。
+
+    0.0/空dict/空値への偽装がないことも、各fieldの他の値がNoneのまま
+    (デフォルト値どおり)であることで併せて確認する。
+    """
+    for name in (
+        "evaluate_historical_valuation",
+        "evaluate_timing_score",
+        "evaluate_earnings_surprise",
+        "evaluate_earnings_trend",
+        "evaluate_entry_price_range",
+        "evaluate_market_environment",
+        "evaluate_sector_environment",
+        "evaluate_environment",
+    ):
+        monkeypatch.setattr(stock_snapshot_service_module, name, _boom)
+
+    providers = build_mock_provider_bundle(_NOW)
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+
+    # entry_price_rangeはscoreを持たず価格帯fieldを持つため、共通loopとは
+    # 分けて検証する(EntryPriceRangeResultだけ形状が異なる)。
+    score_bearing_checks = (
+        (snapshot.historical_valuation, HistoricalValuationEvaluationState.NOT_EVALUATED),
+        (snapshot.timing, TimingScoreEvaluationState.NOT_EVALUATED),
+        (snapshot.earnings_surprise, EarningsSurpriseEvaluationState.NOT_EVALUATED),
+        (snapshot.earnings_trend, EarningsTrendEvaluationState.NOT_EVALUATED),
+        (snapshot.market_environment, MarketEnvironmentEvaluationState.NOT_EVALUATED),
+        (snapshot.sector_environment, SectorEnvironmentEvaluationState.NOT_EVALUATED),
+        (snapshot.environment, EnvironmentEvaluationState.NOT_EVALUATED),
+    )
+    for result, expected_state in score_bearing_checks:
+        assert result.state == expected_state
+        assert len(result.reason_codes) == 1
+        assert result.reason_codes[0] == "SHADOW_COMPUTATION_FAILED:ZeroDivisionError"
+        # 0.0や空へ偽装しない: scoreはNone(デフォルト)のまま、EVALUATEDの
+        # ときのように具体的な数値が入らない。
+        assert result.score is None
+
+    entry_price_range = snapshot.entry_price_range
+    assert entry_price_range.state == PriceRangeEvaluationState.NOT_EVALUATED
+    assert len(entry_price_range.reason_codes) == 1
+    assert entry_price_range.reason_codes[0] == "SHADOW_COMPUTATION_FAILED:ZeroDivisionError"
+    # entry_price_rangeはscoreの代わりに価格帯fieldを持つ。0.0や空へ偽装
+    # せず、いずれもNone(デフォルト)のままであることを確認する。
+    assert entry_price_range.valuation_ceiling is None
+    assert entry_price_range.starter_entry_price is None
+    assert entry_price_range.preferred_entry_price is None
+    assert entry_price_range.strong_entry_price is None
+    assert entry_price_range.max_entry_price is None
+    assert entry_price_range.stop_review_price is None
+    assert entry_price_range.current_price == snapshot.current_price
+
+
+def test_shadow_computation_failure_is_isolated_per_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """隔離は算出ごと。historical_valuationだけが失敗しても、他の
+    Shadow計測(timing等)は影響を受けず算出されたまま残る。
+    """
+    monkeypatch.setattr(stock_snapshot_service_module, "evaluate_historical_valuation", _boom)
+
+    providers = build_mock_provider_bundle(_NOW)
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.historical_valuation.state == HistoricalValuationEvaluationState.NOT_EVALUATED
+    assert snapshot.historical_valuation.reason_codes == (
+        "SHADOW_COMPUTATION_FAILED:ZeroDivisionError",
+    )
+    # historical_valuationを入力に使うentry_price_rangeも、隔離された
+    # NOT_EVALUATED入力を受け取って正常に完走する(例外を再伝播しない)。
+    assert snapshot.entry_price_range is not None
+    assert snapshot.timing.state == TimingScoreEvaluationState.EVALUATED

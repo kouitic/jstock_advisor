@@ -50,3 +50,31 @@ def isolated_shadow_observation(
             "shadow_state": SHADOW_STATE_COMPUTATION_FAILED,
             "error_type": type(exc).__name__,
         }
+
+
+def isolated_shadow_computation[T](
+    observation_name: str,
+    build: Callable[[], T],
+    on_failure: Callable[[Exception], T],
+) -> T:
+    """dict以外(domain object)を返すshadow計測の隔離(Issue #384 PR-3)。
+
+    isolated_shadow_observation()はdict専用のため、domain object(例:
+    HistoricalValuationResult等のResult型)を返す算出には使えない。
+    on_failureは呼び出し側が型ごとに用意するfallback constructorであり、
+    「業務上のNOT_EVALUATED」と区別できる形(reason_codesへ
+    SHADOW_STATE_COMPUTATION_FAILEDを含むタグを積む等)で構築すること。
+    既存のisolated_shadow_observation()の実装・契約は変更しない
+    (本関数は追加のみ)。
+    """
+    try:
+        return build()
+    except Exception as exc:  # noqa: BLE001 - shadowの失敗をv1へ伝播させない
+        logger.warning(
+            "shadow observation failed and was recorded as %s: observation=%s error=%s",
+            SHADOW_STATE_COMPUTATION_FAILED,
+            observation_name,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return on_failure(exc)
