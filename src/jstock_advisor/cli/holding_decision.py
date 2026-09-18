@@ -43,6 +43,7 @@ from jstock_advisor.services.holding_decision_backtest_service import (
 from jstock_advisor.services.holding_decision_compare_service import (
     CompareRow,
     run_compare,
+    summarize_compare_rows,
     write_compare_csv,
 )
 from jstock_advisor.services.holding_decision_runtime_config_service import (
@@ -439,6 +440,8 @@ def _print_compare_rows(rows: list[CompareRow]) -> None:
         )
         typer.echo(f"  保有を支持する要因: {_format_reasons(row.positive_reasons) or '-'}")
         typer.echo(f"  主な減点要因: {_format_reasons(row.negative_reasons) or '-'}")
+        if row.first_evaluation:
+            typer.echo("  ★ 初回評価(baseline未確定)のため集計からは既定で除外されます")
 
 
 @app.command("compare")
@@ -471,6 +474,15 @@ def compare(
     rows = run_compare(stock_codes, providers, config, now)
 
     _print_compare_rows(rows)
+
+    summary = summarize_compare_rows(rows)
+    typer.echo(
+        f"■ 集計(ACTIVE切替判断材料): 全{summary.total_rows}件のうち"
+        f"初回評価として{summary.excluded_first_evaluation}件を既定で除外、"
+        f"対象{summary.included_rows}件(うち比較可能"
+        f"{summary.should_notify_comparable_count}件・一致"
+        f"{summary.should_notify_match_count}件)"
+    )
 
     if csv_path is not None:
         write_compare_csv(rows, csv_path)

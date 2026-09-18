@@ -2,15 +2,32 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 from pathlib import Path
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.entities.enums import (
+    BaselineOrigin,
+    ExecutionPlanReason,
+    HoldingDecisionCategory,
+    HoldingDecisionConfidenceLevel,
+)
+from jstock_advisor.domain.entities.holding_decision import (
+    CompanyQualityScore,
+    ComponentCoverage,
+    HoldingDecisionHardGate,
+    HoldingDecisionResult,
+    InvestmentThesisScore,
+    RiskDeductionScore,
+)
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.services.holding_decision_compare_service import (
     CompareRow,
     ShouldNotifyComparison,
+    _is_first_evaluation,
     run_compare,
+    summarize_compare_rows,
     write_compare_csv,
 )
 from jstock_advisor.services.portfolio_service import PortfolioService
@@ -144,7 +161,7 @@ def test_write_compare_csv_round_trips(tmp_path: Path):
     assert lines[0] == (
         "stock_code,legacy_category,new_category,score,category_diff,"
         "should_notify_diff,coverage_overall,hard_gate_triggered,"
-        "hard_gate_reason_codes,positive_reasons,negative_reasons"
+        "hard_gate_reason_codes,positive_reasons,negative_reasons,first_evaluation"
     )
     assert len(lines) == 2
 
@@ -154,3 +171,114 @@ def test_write_compare_csv_handles_empty_rows(tmp_path: Path):
     write_compare_csv([], csv_path)
     content = csv_path.read_text(encoding="utf-8-sig")
     assert len(content.strip().splitlines()) == 1
+
+
+def _hd_result(
+    *,
+    baseline_origin: BaselineOrigin | None,
+    coverage_ratio: float,
+) -> HoldingDecisionResult:
+    """Issue #258のAND判定テスト用に、baseline_originと
+    investment_thesis.coverage_ratioだけを可変にした最小限の
+    HoldingDecisionResultを組み立てる(他フィールドは判定に無関係な固定値)。
+    """
+    return HoldingDecisionResult(
+        holding_decision_result_id="test-result-id",
+        holding_id="test-holding-id",
+        stock_code="2914",
+        evaluated_at=_NOW,
+        company_quality=CompanyQualityScore(score=40.0, coverage_ratio=1.0),
+        investment_thesis=InvestmentThesisScore(score=40.0, coverage_ratio=coverage_ratio),
+        risk_deduction=RiskDeductionScore(score=90.0, coverage_ratio=1.0),
+        base_score=170.0,
+        hard_gate=HoldingDecisionHardGate(triggered=False),
+        final_score=90.0,
+        display_value=90,
+        category=HoldingDecisionCategory.STRONG_HOLD,
+        coverage=ComponentCoverage(
+            overall=1.0, company_quality=1.0, investment_thesis=coverage_ratio, risk_deduction=1.0
+        ),
+        confidence=HoldingDecisionConfidenceLevel.HIGH,
+        should_notify=False,
+        baseline_origin=baseline_origin,
+        scoring_model_version=1,
+        runtime_config_version=1,
+        execution_plan_reason=ExecutionPlanReason.NORMAL_SHADOW,
+    )
+
+
+def test_is_first_evaluation_true_when_both_conditions_hold():
+    """Issue #258受入条件: originとcoverageの両方が揃って初めてTrue。"""
+    result = _hd_result(baseline_origin=BaselineOrigin.SYSTEM_INITIALIZED, coverage_ratio=0.8)
+    assert _is_first_evaluation(result) is True
+
+
+def test_is_first_evaluation_false_when_origin_only():
+    """origin=SYSTEM_INITIALIZEDでもcoverage_ratio=1.0(欠測なし)なら
+    初回評価として除外しない(origin単独判定だと実測8件の通常保有まで
+    誤除外してしまう回帰を防ぐ)。"""
+    result = _hd_result(baseline_origin=BaselineOrigin.SYSTEM_INITIALIZED, coverage_ratio=1.0)
+    assert _is_first_evaluation(result) is False
+
+
+def test_is_first_evaluation_false_when_coverage_only():
+    """coverage_ratio<1.0でもbaseline_originがSYSTEM_INITIALIZED以外
+    (=baseline確定済み)なら、単なるデータ欠測の2回目以降であり初回評価
+    ではない(coverage単独判定だと#55 Decision 3対象を誤除外する)。"""
+    result = _hd_result(baseline_origin=BaselineOrigin.HUMAN_APPROVED, coverage_ratio=0.8)
+    assert _is_first_evaluation(result) is False
+
+
+def test_is_first_evaluation_false_when_neither_condition_holds():
+    result = _hd_result(baseline_origin=BaselineOrigin.HUMAN_APPROVED, coverage_ratio=1.0)
+    assert _is_first_evaluation(result) is False
+
+
+def test_is_first_evaluation_false_when_baseline_origin_is_none():
+    result = _hd_result(baseline_origin=None, coverage_ratio=0.8)
+    assert _is_first_evaluation(result) is False
+
+
+def test_summarize_compare_rows_excludes_first_evaluation_by_default():
+    rows = [
+        _row(new_should_notify=False, legacy_should_notify=False),
+        dataclasses.replace(
+            _row(new_should_notify=False, legacy_should_notify=False), first_evaluation=True
+        ),
+    ]
+
+    summary = summarize_compare_rows(rows)
+
+    assert summary.total_rows == 2
+    assert summary.excluded_first_evaluation == 1
+    assert summary.included_rows == 1
+    assert summary.should_notify_comparable_count == 1
+    assert summary.should_notify_match_count == 1
+
+
+def test_summarize_compare_rows_reports_zero_exclusions_explicitly():
+    """除外0件でもexcluded_first_evaluationを必ず保持する(受入条件3: 黙って
+    捨てない)。"""
+    rows = [_row(new_should_notify=False, legacy_should_notify=False)]
+
+    summary = summarize_compare_rows(rows)
+
+    assert summary.total_rows == 1
+    assert summary.excluded_first_evaluation == 0
+    assert summary.included_rows == 1
+
+
+def test_summarize_compare_rows_counts_not_comparable_rows_separately():
+    """非保有銘柄(NOT_COMPARABLE)はcomparable/matchの分母・分子どちらにも
+    含めない。"""
+    rows = [
+        _row(legacy_should_notify=None, new_should_notify=True),
+        _row(new_should_notify=True, legacy_should_notify=False),
+    ]
+
+    summary = summarize_compare_rows(rows)
+
+    assert summary.total_rows == 2
+    assert summary.excluded_first_evaluation == 0
+    assert summary.should_notify_comparable_count == 1
+    assert summary.should_notify_match_count == 0
