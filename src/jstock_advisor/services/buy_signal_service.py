@@ -21,7 +21,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -69,6 +68,7 @@ from jstock_advisor.domain.scoring.undervaluation_categories import (
     build_undervaluation_category_details,
 )
 from jstock_advisor.domain.screening.rules import evaluate_screening
+from jstock_advisor.domain.shadow_observation import isolated_shadow_observation
 from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
 from jstock_advisor.domain.signals.buy_decision import (
     compute_purchase_attractiveness_score,
@@ -199,7 +199,6 @@ FACTS_SCHEMA_VERSION = "v2"
 # 空listへ潰さない(「魅力が無い」「該当が無い」と「算出できなかった」を
 # 混ぜない。三値の扱いと同じ原則)。
 SHADOW_STATE_COMPUTED = "COMPUTED"
-SHADOW_STATE_COMPUTATION_FAILED = "COMPUTATION_FAILED"
 
 # 観測用に保存する財務時系列(営業利益・営業CF・EPS)の1系列あたり保存上限
 # (直近N期のみ保存)。providerが将来取得期間を拡大してもRecommendation
@@ -312,39 +311,6 @@ def _serialize_undervaluation_categories(
 
 
 logger = logging.getLogger(__name__)
-
-
-def _isolated_shadow_observation(
-    observation_name: str,
-    build: Callable[[], dict[str, object]],
-) -> dict[str, object]:
-    """v2 shadowの観測を、v1の判定経路から隔離して組み立てる(Issue #22 C2)。
-
-    shadowはv1の判定へ接続しないが、算出がanalyze()の本流にある限り、
-    例外が出ればその銘柄だけでなくbatch全体が止まる。NON_BLOCKINGは
-    承認された性質であり、宣言ではなく構造で満たす。
-
-    失敗は握りつぶさない。COMPUTATION_FAILEDと例外の型をfactsへ残し、
-    warningをログへ出す。値を0.0や空へ潰さない(「算出できなかった」を
-    「魅力が無い」と読める形で保存しない)。
-
-    銘柄コードはログへ出さない(Issue #135)。どの銘柄かはfacts側の
-    Recommendationに紐づいており、ログへ平文で出す必要がない。
-    """
-    try:
-        return build()
-    except Exception as exc:  # noqa: BLE001 - shadowの失敗をv1へ伝播させない
-        logger.warning(
-            "v2 shadow observation failed and was recorded as %s: observation=%s error=%s",
-            SHADOW_STATE_COMPUTATION_FAILED,
-            observation_name,
-            type(exc).__name__,
-            exc_info=True,
-        )
-        return {
-            "shadow_state": SHADOW_STATE_COMPUTATION_FAILED,
-            "error_type": type(exc).__name__,
-        }
 
 
 @dataclass(frozen=True)
@@ -1197,14 +1163,14 @@ class BuySignalService:
 
         # --- Issue #22 C2(2026-09-14): shadowの算出と保存をv1から隔離する ---
         # NON_BLOCKINGはUSERが承認した性質であり、「BUY判定へ接続しない」
-        # だけでは満たさない。算出・整形の両方を_isolated_shadow_observation()
+        # だけでは満たさない。算出・整形の両方をisolated_shadow_observation()
         # の内側へ入れ、shadow側で例外が出てもv1の判定・保存・通知が止まらない
         # ことを構造で保証する。失敗は握りつぶさずfactsとログへ残す。
-        common_quality_shadow_facts = _isolated_shadow_observation(
+        common_quality_shadow_facts = isolated_shadow_observation(
             "common_quality_shadow",
             lambda: self._observe_common_quality_shadow(snapshot),
         )
-        style_attractiveness_shadow_facts = _isolated_shadow_observation(
+        style_attractiveness_shadow_facts = isolated_shadow_observation(
             "style_attractiveness_shadow",
             lambda: self._observe_style_attractiveness_shadow(
                 snapshot, stock_classification_rules, current_per, current_pbr
@@ -1212,9 +1178,9 @@ class BuySignalService:
         )
         # Issue #371: #22 C2と同型(観測がanalyze()の本流にinlineでありtry/exceptが
         # 無い)。算出・整形は_observe_canonical_industry()の内側で完結しており
-        # 展開箇所が本流に残らないため、呼び出しを_isolated_shadow_observation()
+        # 展開箇所が本流に残らないため、呼び出しをisolated_shadow_observation()
         # で包むだけで隔離が成立する(観測の意味・BUY判定ロジックは変更しない)。
-        canonical_industry_observation_facts = _isolated_shadow_observation(
+        canonical_industry_observation_facts = isolated_shadow_observation(
             "canonical_industry_observation",
             lambda: self._observe_canonical_industry(
                 stock_code, snapshot, buy_industry_sector, is_growth_stock
@@ -1411,7 +1377,7 @@ class BuySignalService:
             # keyword列(cyclical / defensive / event_driven)は数値閾値を持たず、
             # 設計上Style AttractivenessがNOT_APPLICABLEであるため保存しない。
             # --- Issue #22 Phase B3 / B4 + C2: v2 shadowの観測結果 ---
-            # 算出と整形は_isolated_shadow_observation()の内側で行っており、
+            # 算出と整形はisolated_shadow_observation()の内側で行っており、
             # ここでは既に組み上がったdictを置くだけである(本流で展開すると
             # 隔離が成立しない)。算出に失敗した場合は
             # shadow_state = "COMPUTATION_FAILED" が入る。
@@ -1454,7 +1420,7 @@ class BuySignalService:
             # BuyActionからは一切参照されない観測専用**であり、死んでいる判定
             # (CYCLICAL/DEFENSIVE・REIT除外)の復活はPhase B-2で、この観測結果を
             # 確認したうえで実施する(適正価格と対象母集団が変わるため)。
-            # Issue #371: 算出は_isolated_shadow_observation()の内側で行っており、
+            # Issue #371: 算出はisolated_shadow_observation()の内側で行っており、
             # ここでは既に組み上がったdictを置くだけである(本流で展開すると
             # 隔離が成立しない)。失敗時はshadow_state="COMPUTATION_FAILED"が入る。
             "canonical_industry_observation": canonical_industry_observation_facts,
