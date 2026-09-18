@@ -17,7 +17,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import boto3
 import pytest
+from moto import mock_aws
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import TradeCooldownConfig
@@ -151,6 +153,21 @@ class _RaisingBeforePersistTradeEventRepository:
 
     def create_pending(self, record: TradeEventRecord) -> bool:
         raise RuntimeError("simulated crash before event persisted (crash-point A)")
+
+
+class _CountingTradeEventRepository:
+    """create_pending()の呼び出し回数を数えるスパイ(F1: 初回実行regression)。
+
+    実体(TradeEventRecordRepository)へ委譲しつつ、呼び出し回数だけ記録する。
+    """
+
+    def __init__(self, real: TradeEventRecordRepository) -> None:
+        self._real = real
+        self.call_count = 0
+
+    def create_pending(self, record: TradeEventRecord) -> bool:
+        self.call_count += 1
+        return self._real.create_pending(record)
 
 
 class _RaisingSnapshotRepository:
@@ -311,6 +328,50 @@ def test_crash_point_b_recovers_without_duplicating_the_event_record(tmp_path: P
     assert all_records[0].event_id == event_id
 
 
+# --- F1(レビュー対応): 初回実行(前回スナップショット皆無)ではcreate_pending()を
+# 呼ばないこと ------------------------------------------------------------------
+
+
+def test_first_execution_does_not_create_any_pending_events(tmp_path: Path) -> None:
+    """初回実行(前回スナップショットが皆無)は誤検知防止のためbaselineの
+    書き込みのみを行い、TradeEventRecordの永続化(create_pending())を
+    1回も呼ばないこと。
+
+    ★ サブちゃんレビュー(PR #402)指摘F1: この保証はテストで固定されておらず、
+    `if not previous_entries:`の早期returnを外す変異(N5/N5b)を入れても
+    既存の関連テスト8ファイル・285件が1件も赤くならなかった(反証で実測済み)。
+    再発すると保有全銘柄に実在しないBUYが検知され、TradeEventRecordが
+    全銘柄分永続化されてcooldownが広範に設定され、Phase 2実装後は
+    全銘柄のWatchStateが強制終了されるリスクがある。
+    """
+    snapshot_repo = HoldingsSnapshotRepository(store_dir=tmp_path)
+    # 前回スナップショットを一切seedしない(=初回実行の状態)。
+    real_trade_event_repo = TradeEventRecordRepository(store_dir=tmp_path)
+    counting_trade_event_repo = _CountingTradeEventRepository(real_trade_event_repo)
+    current_holdings = _current_holdings(shares=100)
+
+    service = TradeCooldownService(
+        business_calendar=_calendar(),
+        config=_config(),
+        repository=snapshot_repo,
+        execution_context=ExecutionContext.normal(),
+        trade_event_repository=counting_trade_event_repo,  # type: ignore[arg-type]
+    )
+    outcome = service.detect_and_apply(current_holdings, _NOW)
+
+    assert outcome.confirmed is True
+    assert outcome.events == []
+    assert counting_trade_event_repo.call_count == 0, (
+        "初回実行でcreate_pending()が呼ばれている(実在しないBUYが検知された可能性)"
+    )
+    # baselineとしてsnapshotは書き込まれること(既存の初回実行契約は不変)。
+    entry_after_first_run = snapshot_repo.get(_HID)
+    assert entry_after_first_run is not None
+    assert entry_after_first_run.shares == 100
+    # TradeEventRecordは1件も作成されていないこと。
+    assert real_trade_event_repo._store.list_all() == []
+
+
 def test_existing_responsibility_boundary_is_preserved() -> None:
     """★ Phase 1完了後もtrade_cooldown_service.pyがWatchStateService/
     WatchStateRepositoryを一切import・呼び出ししないこと(TARO-20260918-045の
@@ -331,3 +392,114 @@ def test_existing_responsibility_boundary_is_preserved() -> None:
         for alias in node.names
     }
     assert not any("WatchState" in name for name in imported_names)
+
+
+# --- F2(レビュー対応): create_pending()のステップ2(GSI用トップレベル属性書込み)を
+# 実際のDynamoDB実装で固定する ---------------------------------------------------
+#
+# ★ サブちゃんレビュー(PR #402)指摘F2: ローカルJSON実装のquery_by_index()は
+# index_nameを無視し、モデル自体へのgetattr()による全件フィルタで代用する
+# (collection_store.py参照)。pending_markerはTradeEventRecordの通常の
+# モデルfieldであり、ステップ1(insert_if_absent())だけで既に永続化される
+# ため、ステップ2(upsert_with_index_attributes())を丸ごと無効化しても
+# ローカルJSON上のquery_by_index()は区別できない(恒真テスト)。
+# 主対象であるDynamoDB実装(本番で実際に使われる経路)でトップレベル属性の
+# 有無を直接確認する(test_dynamodb_store.py:213の既存パターンを踏襲)。
+
+_REGION = "ap-northeast-1"
+_DYNAMO_TABLE_NAME = "jstock-trade_event_records"
+
+
+@pytest.fixture
+def dynamo_lambda_env(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """running_on_lambda()==Trueを模擬し、infra/template.yamlの
+    TradeEventRecordsTable定義(event_idをHASHキーとし、pending_marker(HASH)/
+    detected_at(RANGE)のGSI[pending-marker-index]を持つ)と同一のテーブルを
+    moto上に作成する。"""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "holdings-watchlist")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name=_REGION)
+        client.create_table(
+            TableName=_DYNAMO_TABLE_NAME,
+            KeySchema=[{"AttributeName": "event_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "event_id", "AttributeType": "S"},
+                {"AttributeName": "pending_marker", "AttributeType": "S"},
+                {"AttributeName": "detected_at", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "pending-marker-index",
+                    "KeySchema": [
+                        {"AttributeName": "pending_marker", "KeyType": "HASH"},
+                        {"AttributeName": "detected_at", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield client
+
+
+def test_create_pending_writes_pending_marker_as_top_level_dynamodb_attribute(
+    dynamo_lambda_env: Any,
+) -> None:
+    """create_pending()のステップ2が、DynamoDB実装上でpending_marker/
+    detected_atをトップレベル属性として書き込むこと(sparse GSIから
+    Query可能になるために必須)。
+
+    ステップ2を無効化すると、項目はevent_id/dataのみを持ち、pending_marker/
+    detected_atはトップレベルに現れない(dataのJSON文字列の中に埋もれたまま
+    になる)。本テストはトップレベル属性の有無を直接見るため、ステップ2が
+    無効化されると必ず失敗する。
+    """
+    repo = TradeEventRecordRepository()
+    record = _sample_record()
+
+    repo.create_pending(record)
+
+    raw_item = dynamo_lambda_env.get_item(
+        TableName=_DYNAMO_TABLE_NAME, Key={"event_id": {"S": record.event_id}}
+    )["Item"]
+    assert raw_item["pending_marker"]["S"] == PENDING_MARKER_VALUE
+    assert raw_item["detected_at"]["S"] == record.detected_at.isoformat()
+    # トップレベル属性の追加が、通常のモデルシリアライズ(data属性経由の読み戻し)を
+    # 壊していないこと。
+    assert repo.get(record.event_id) == record
+
+
+def test_query_by_index_on_dynamodb_finds_only_pending_events(
+    dynamo_lambda_env: Any,
+) -> None:
+    """DynamoDB実装のquery_by_index()が、実際にGSI(pending-marker-index)を
+    通じてpending_marker="PENDING"の項目のみを返すこと(sparse GSIの
+    実利用シナリオをPhase 2着手前に固定する)。"""
+    repo = TradeEventRecordRepository()
+    pending_record = _sample_record(event_id="pending-event")
+    repo.create_pending(pending_record)
+
+    # 消費済み(pending_marker=None)の項目は、ステップ2で属性が書かれないため
+    # GSIには現れないはずである(sparse index)。
+    consumed_record = TradeEventRecord(
+        event_id="consumed-event",
+        holding_id=_HID,
+        owner=DEFAULT_OWNER,
+        stock_code="2914",
+        event_type=TransactionType.PARTIAL_SELL,
+        detected_at=dt.date(2026, 8, 21),
+        shares=50,
+        average_purchase_price=Decimal("1000"),
+        created_at=_NOW,
+        consumed_at=_NOW + dt.timedelta(hours=1),
+        pending_marker=None,
+    )
+    repo.create_pending(consumed_record)
+
+    found = repo._store.query_by_index(
+        PENDING_INDEX_NAME, "pending_marker", PENDING_MARKER_VALUE
+    )
+    assert [r.event_id for r in found] == [pending_record.event_id]
