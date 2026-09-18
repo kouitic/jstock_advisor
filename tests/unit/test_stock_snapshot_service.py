@@ -504,3 +504,90 @@ def test_shadow_computation_failure_is_isolated_per_signal(
     # NOT_EVALUATED入力を受け取って正常に完走する(例外を再伝播しない)。
     assert snapshot.entry_price_range is not None
     assert snapshot.timing.state == TimingScoreEvaluationState.EVALUATED
+
+
+# --- Shadow計測専用inputの隔離(Issue #384 PR-8、サブちゃんのPR #406レビュー
+# F1対応) ---------------------------------------------------------------
+#
+# resolved_period / release_confirmation_state / decision_relevance /
+# earnings_surprise_historyは、いずれもearnings_surprise/earnings_trendの
+# Shadow計測専用input(全数grepで他の出力先が無いことを確認済み)。
+# `*_to_metrics()`/`evaluate_*()`という名前ではないため従来の名前軸sweepでは
+# 見つからなかったが、例外1件(特に外部I/Oのearnings_surprise_history)で
+# build_stock_snapshot()全体が失敗しうる形だった。
+
+
+class _FailingFinancialDataProvider:
+    """financial_data providerのフェイクラッパー。get_earnings_surprise_
+    history()のみ例外を出す(Issue #384 PR-8回帰テスト用)。他のメソッドは
+    委譲元へそのまま委譲する(_SpyFinancialDataProviderと同じ4メソッド)。"""
+
+    def __init__(self, delegate: object) -> None:
+        self._delegate = delegate
+
+    def get_financial_summary(self, stock_code: str):
+        return self._delegate.get_financial_summary(stock_code)  # type: ignore[attr-defined]
+
+    def get_historical_valuation(self, stock_code: str, years: int):
+        return self._delegate.get_historical_valuation(stock_code, years)  # type: ignore[attr-defined]
+
+    def get_cashflow_decomposition(self, stock_code: str):
+        return self._delegate.get_cashflow_decomposition(stock_code)  # type: ignore[attr-defined]
+
+    def get_earnings_surprise_history(self, stock_code: str):
+        raise ZeroDivisionError("injected earnings_surprise_history failure")
+
+
+def test_shadow_earnings_phase_c_precondition_failure_does_not_break_snapshot_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """resolved_period/release_confirmation_state/decision_relevanceの算出が
+    いずれも例外を出しても、build_stock_snapshot()自体は失敗しない(Issue
+    #384 PR-8)。これら3つはearnings_surprise/earnings_trendのShadow計測
+    専用inputであり、v1判定(historical_valuation/timing等)には使われない。
+    """
+    monkeypatch.setattr(stock_snapshot_service_module, "resolve_latest_financial_period_end", _boom)
+    monkeypatch.setattr(
+        stock_snapshot_service_module, "resolve_earnings_release_confirmation", _boom
+    )
+    monkeypatch.setattr(stock_snapshot_service_module, "resolve_earnings_decision_relevance", _boom)
+
+    providers = build_mock_provider_bundle(_NOW)
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    # 下流のearnings_surprise/earnings_trend(既存のisolated_shadow_
+    # computation)自体は、fallback入力を受け取って正常に完走する(例外を
+    # 再伝播しない)。
+    assert snapshot.earnings_surprise is not None
+    assert snapshot.earnings_trend is not None
+    # v1判定に使われる他のShadow計測は影響を受けない。
+    assert snapshot.historical_valuation.state == HistoricalValuationEvaluationState.EVALUATED
+    assert snapshot.timing.state == TimingScoreEvaluationState.EVALUATED
+
+
+def test_shadow_earnings_surprise_history_external_io_failure_does_not_break_snapshot_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """earnings_surprise_history算出(外部I/O、providers.financial_data.
+    get_earnings_surprise_history())が例外を出しても、build_stock_
+    snapshot()自体は失敗しない(Issue #384 PR-8)。サブちゃんのPR #406
+    レビューが実測した、939 passed中160件が落ちる反例に対する固定。
+
+    隔離は観測ごと: 他のShadow計測(historical_valuation/timing等)・
+    resolved_period側の3箇所は影響を受けない。
+    """
+    base = build_mock_provider_bundle(_NOW)
+    providers = dataclasses.replace(
+        base, financial_data=_FailingFinancialDataProvider(base.financial_data)
+    )
+
+    snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, _CFG)
+
+    assert error is None
+    assert snapshot is not None
+    assert snapshot.earnings_surprise is not None
+    assert snapshot.earnings_trend is not None
+    assert snapshot.historical_valuation.state == HistoricalValuationEvaluationState.EVALUATED
+    assert snapshot.timing.state == TimingScoreEvaluationState.EVALUATED

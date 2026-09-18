@@ -31,6 +31,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsSurpriseEvaluationState,
     EarningsTrendEvaluationState,
     EnvironmentEvaluationState,
+    FinancialPeriodEndSource,
     HistoricalValuationEvaluationState,
     MarketEnvironmentEvaluationState,
     PriceRangeEvaluationState,
@@ -65,6 +66,7 @@ from jstock_advisor.domain.signals.buy_signal import has_severe_earnings_decline
 from jstock_advisor.domain.signals.earnings_surprise import evaluate_earnings_surprise
 from jstock_advisor.domain.signals.earnings_trend import evaluate_earnings_trend
 from jstock_advisor.domain.signals.earnings_window import (
+    ResolvedFinancialPeriodEnd,
     resolve_earnings_decision_relevance,
     resolve_earnings_release_confirmation,
     resolve_latest_financial_period_end,
@@ -606,25 +608,49 @@ def build_stock_snapshot(
     # と同じ関数呼び出しで独立に解決する(既存パイプラインの計算経路には触れず、
     # 副作用の無い純関数呼び出しをこちらでも行うのみ。同じ入力からは同じ結果に
     # なるため、既存のprofit_taking判定結果には一切影響しない)。
-    resolved_period = resolve_latest_financial_period_end(financial, evaluation_date)
-    release_confirmation_state = resolve_earnings_release_confirmation(
-        earnings_date_status,
-        earnings_date_raw,
-        resolved_period.period_end,
-        financial.source.fetched_at,
-        now,
-        config.earnings_window,
+    # レビュー対応(Issue #384 PR-8、サブちゃんのPR #406レビューF1): 以下4箇所は
+    # いずれもShadow計測(earnings_surprise/earnings_trend)専用の入力であり、
+    # 名前が`*_to_metrics()`/`evaluate_*()`ではないため従来の名前軸sweepでは
+    # 見つからなかったが、出力先はShadow計測のみ(全数grep確認済み)。本流の
+    # 実行文にinlineで置かれたままだと、例外1件(特にL649の外部I/O)で
+    # build_stock_snapshot()全体が失敗し当該銘柄のBUY/SELL/ProfitTaking判定
+    # 結果全体が失われるため、isolated_shadow_computation()で個別に隔離する。
+    resolved_period = isolated_shadow_computation(
+        "resolved_financial_period_end",
+        lambda: resolve_latest_financial_period_end(financial, evaluation_date),
+        lambda exc: ResolvedFinancialPeriodEnd(
+            period_end=None, source=FinancialPeriodEndSource.UNAVAILABLE
+        ),
+    )
+    release_confirmation_state = isolated_shadow_computation(
+        "earnings_release_confirmation_state",
+        lambda: resolve_earnings_release_confirmation(
+            earnings_date_status,
+            earnings_date_raw,
+            resolved_period.period_end,
+            financial.source.fetched_at,
+            now,
+            config.earnings_window,
+        ),
+        # NOT_APPLICABLEは「決算予定日抑制の対象外」を表す既存の業務上の値であり、
+        # phase_c_earnings_blockedをFalse側へ倒す(=外部I/O取得を抑止しない)
+        # 安全側のfallback。
+        lambda exc: EarningsReleaseConfirmationState.NOT_APPLICABLE,
     )
     # コードレビュー対応(v3): 古い決算予定日が現在の判断にまだ関連するかを
     # profit_taking_service.pyと全く同じ関数・同じ引数で解決する(既存の
     # 無期限停止防止設計をPhase Cでも踏襲する。呼び出しを分けても副作用の
     # 無い純関数のため、既存のProfitTaking側の判定結果には一切影響しない)。
-    decision_relevance = resolve_earnings_decision_relevance(
-        earnings_date_status,
-        earnings_date_raw,
-        release_confirmation_state,
-        evaluation_date,
-        config.earnings_window,
+    decision_relevance = isolated_shadow_computation(
+        "earnings_decision_relevance",
+        lambda: resolve_earnings_decision_relevance(
+            earnings_date_status,
+            earnings_date_raw,
+            release_confirmation_state,
+            evaluation_date,
+            config.earnings_window,
+        ),
+        lambda exc: EarningsDecisionRelevance.UNKNOWN,
     )
     # コードレビュー対応(第3回): release_confirmation_state/decision_relevanceの
     # 組み合わせがevaluate_earnings_surprise()自身のNOT_APPLICABLE条件と完全に
@@ -643,10 +669,14 @@ def build_stock_snapshot(
         )
         and decision_relevance == EarningsDecisionRelevance.RELEVANT
     )
-    earnings_surprise_history = (
-        []
-        if phase_c_earnings_blocked
-        else providers.financial_data.get_earnings_surprise_history(stock_code)
+    earnings_surprise_history = isolated_shadow_computation(
+        "earnings_surprise_history",
+        lambda: (
+            []
+            if phase_c_earnings_blocked
+            else providers.financial_data.get_earnings_surprise_history(stock_code)
+        ),
+        lambda exc: [],
     )
     # コードレビュー対応(v2): Dividend Revisionは意味の異なるデータ
     # (前年度実績 vs 現在予想の比較)であるためEarnings Surpriseからは
