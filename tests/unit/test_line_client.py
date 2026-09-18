@@ -43,6 +43,34 @@ def test_build_line_client_from_env_returns_live_client_when_credentials_present
     assert isinstance(client, LiveLineClient)
 
 
+def test_build_line_client_from_env_returns_console_client_when_only_token_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """レビュー指摘F1対応: token/user_idの片側だけ揃っている中間ケース。
+
+    両方欠落・両方あり、の両端だけでなく、`and`判定が`or`へ後退した場合に
+    LiveLineClient(user_id=None)のような不完全なclientを黙って返さないことを
+    固定する。
+    """
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+
+    client = build_line_client_from_env()
+
+    assert isinstance(client, ConsoleLineClient)
+
+
+def test_build_line_client_from_env_returns_console_client_when_only_user_id_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("LINE_USER_ID", "user-value")
+
+    client = build_line_client_from_env()
+
+    assert isinstance(client, ConsoleLineClient)
+
+
 def test_build_live_line_client_from_env_raises_when_both_credentials_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
