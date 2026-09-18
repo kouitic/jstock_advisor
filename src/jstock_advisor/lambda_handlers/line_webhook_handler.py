@@ -20,7 +20,7 @@ import logging
 import os
 from typing import Any
 
-from jstock_advisor.infrastructure.line.client import LineClient, build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import LineClient, build_live_line_client_from_env
 from jstock_advisor.infrastructure.line.webhook import (
     parse_postback_events,
     parse_text_message_events,
@@ -82,7 +82,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         logger.warning("invalid or missing X-Line-Signature")
         return {"statusCode": 403, "body": "invalid signature"}
 
-    line_client = build_line_client_from_env()
+    line_client = build_live_line_client_from_env()
     router = build_line_event_router()
     now = dt.datetime.now(dt.UTC)
 
