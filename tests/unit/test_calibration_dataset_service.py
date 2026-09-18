@@ -547,8 +547,19 @@ def test_business_rows_are_tagged_v2_for_post_cutover_recommendation() -> None:
 
 def test_business_due_date_uses_jst_start_for_post_cutover_recommendation() -> None:
     """cutover後の推奨は、evaluation_due_dateの起点がJST暦日になり、
-    UTC暦日を起点にした場合と異なる日になりうることを固定する。"""
-    recommended_at = V2_CUTOVER_AT.replace(hour=16)  # UTC 16:00 = JST 翌01:00
+    UTC暦日を起点にした場合と異なる日になりうることを固定する。
+
+    レビュー指摘対応(2026-09-18): 旧fixture(V2_CUTOVER_AT.replace(hour=16))は
+    非営業日が連続する期間に当たり、UTC起点・JST起点いずれで
+    add_business_days()しても同じ due date(2026-09-24)になってしまい、
+    start_dateの相違(jst_start != utc_start)しか検証できず、
+    due_dateレベルでの契約(AC-2: v2はJST day-zeroからBusinessCalendarで
+    再計算する)を実際にはguardできていなかった。実運用に近い形
+    (JST平日08:00 = UTC前日23:00)かつ祝日・週末が連続しない
+    2026-09-24(木)08:00 JSTへ変更し、due dateそのものが異なることまで
+    明示的に固定する。
+    """
+    recommended_at = dt.datetime(2026, 9, 23, 23, 0, tzinfo=dt.UTC)  # JST 2026-09-24(木) 08:00
     now = recommended_at + dt.timedelta(days=200)
     rec = _recommendation(recommended_at=recommended_at)
     dataset = _builder([rec], [], []).build(now)
@@ -557,8 +568,13 @@ def test_business_due_date_uses_jst_start_for_post_cutover_recommendation() -> N
     row = _rows_for(dataset, "rec-a", unit=HorizonUnit.BUSINESS_DAYS, value=horizon)[0]
     jst_start = to_jst(recommended_at).date()
     utc_start = recommended_at.date()
+    expected_jst_due = _CALENDAR.add_business_days(jst_start, horizon)
+    expected_utc_due = _CALENDAR.add_business_days(utc_start, horizon)
     assert jst_start != utc_start
-    assert row.evaluation_due_date == _CALENDAR.add_business_days(jst_start, horizon)
+    # ★ start_dateが違うだけでは不十分。due_date自体が異なることまで固定する
+    # (旧UTC起点実装へ後退した場合に、このassertが確実にFAILするようにする)。
+    assert expected_jst_due != expected_utc_due
+    assert row.evaluation_due_date == expected_jst_due
 
 
 def test_metadata_reports_rows_by_evaluation_semantics_version() -> None:
