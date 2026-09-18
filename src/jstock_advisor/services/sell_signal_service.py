@@ -21,14 +21,19 @@ from jstock_advisor.domain.classification.financial_industry import classify_ind
 from jstock_advisor.domain.entities.common import SellPriceLevels
 from jstock_advisor.domain.entities.enums import (
     IndustryClassification,
+    PriceRangeEvaluationState,
     RecommendationType,
     TriggerStatus,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
+from jstock_advisor.domain.entities.exit_price_range import ExitPriceRangeResult
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
-from jstock_advisor.domain.shadow_observation import isolated_shadow_observation
+from jstock_advisor.domain.shadow_observation import (
+    isolated_shadow_computation,
+    isolated_shadow_observation,
+)
 from jstock_advisor.domain.signals.confidence_scoring import (
     ConfidenceFactors,
     ConfidenceScoreResult,
@@ -465,21 +470,36 @@ class SellSignalService:
         # 判定条件分岐の実行順は一切変更しない。Builder(holding_decision_
         # notification_builder.py)は算出せずコピーのみ行う設計のため、ここが
         # 唯一の算出箇所。
-        exit_price_range = evaluate_exit_price_range(
-            snapshot.fair_value_range,
-            snapshot.historical_valuation,
-            snapshot.timing,
-            holding.average_purchase_price,
-            snapshot.current_price,
-            now,
-            self._config.entry_exit_price.exit,
+        # レビュー対応(Issue #384 PR-7): exit_price_range自体もDecisionSnapshot
+        # 記録専用のShadow計測であり(exit_price_range.pyモジュールdocstring
+        # 「既存のSELL(legacy)判定・ProfitTaking判定[sell_prices]には一切依存
+        # せず、また一切影響しない」)、sell_pricesは既に確定済み(上記)である
+        # ため対象外にはならない。返り値がdict以外(ExitPriceRangeResult)のため
+        # isolated_shadow_computation()(PR-3で追加、dict以外用)を使う。
+        exit_price_range = isolated_shadow_computation(
+            "exit_price_range",
+            lambda: evaluate_exit_price_range(
+                snapshot.fair_value_range,
+                snapshot.historical_valuation,
+                snapshot.timing,
+                holding.average_purchase_price,
+                snapshot.current_price,
+                now,
+                self._config.entry_exit_price.exit,
+            ),
+            lambda exc: ExitPriceRangeResult(
+                state=PriceRangeEvaluationState.NOT_EVALUATED,
+                current_price=snapshot.current_price,
+                reason_codes=(f"SHADOW_COMPUTATION_FAILED:{type(exc).__name__}",),
+                evaluated_at=now,
+                model_version=self._config.entry_exit_price.exit.model_version,
+            ),
         )
 
         # レビュー対応(Issue #384、#22 C2 / #371と同型): 以下の*_metrics(いずれも
         # DecisionSnapshot記録専用のShadow計測)は、算出・整形の両方をisolated_
         # shadow_observation()の内側へ入れ、shadow側で例外が出てもv1の判定・
-        # 保存・通知が止まらないことを構造で保証する。exit_price_range自体(上記)
-        # はsell_pricesの実判定に使われるため対象外。
+        # 保存・通知が止まらないことを構造で保証する。
         historical_valuation_metrics = isolated_shadow_observation(
             "historical_valuation_metrics",
             lambda: historical_valuation_result_to_metrics(snapshot.historical_valuation),

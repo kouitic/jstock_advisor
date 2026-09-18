@@ -694,6 +694,121 @@ def test_profit_taking_shadow_metric_failure_is_isolated_from_the_v1_decision(
     assert degraded.recommendation.timing_metrics == baseline.recommendation.timing_metrics
 
 
+def test_sell_signal_shadow_exit_price_range_failure_is_isolated_from_the_v1_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """legacy SELLパイプラインで、DecisionSnapshot記録専用のexit_price_range
+    算出(evaluate_exit_price_range())自体が例外で落ちても、v1の判定
+    (recommendation_type・sell_prices等)は変わらない(Issue #384 PR-7)。
+
+    exit_price_rangeは過去「sell_pricesの実判定に使われるため対象外」と
+    されていたが、sell_pricesは本呼び出しより前に確定済みであり誤りだった
+    (USER決定、#384のコメント参照)。
+    """
+    monkeypatch.setattr(
+        sell_signal_service_module, "evaluate_sell_signal", lambda *a, **kw: _canned_sell_result()
+    )
+    snapshot = _base_snapshot()
+    service = SellSignalService(providers=_PROVIDERS, config=_CFG)
+    holding = _holding()
+
+    baseline = service.analyze(holding, _NOW, snapshot=snapshot)
+    assert baseline.recommendation is not None
+    assert baseline.recommendation.exit_price_range_state is not None
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected exit_price_range failure")
+
+    monkeypatch.setattr(sell_signal_service_module, "evaluate_exit_price_range", _boom)
+    degraded = service.analyze(holding, _NOW, snapshot=snapshot)
+    assert degraded.recommendation is not None
+
+    # 1 v1の出力が変わらない。
+    assert (
+        degraded.recommendation.recommendation_type
+        == baseline.recommendation.recommendation_type
+    )
+    assert degraded.recommendation.sell_prices == baseline.recommendation.sell_prices
+    assert degraded.recommendation.reasons == baseline.recommendation.reasons
+
+    # 2 失敗はNOT_EVALUATED + reason_codesへ残る(黙って握りつぶさない)。
+    assert (
+        degraded.recommendation.exit_price_range_state == PriceRangeEvaluationState.NOT_EVALUATED
+    )
+    assert degraded.recommendation.exit_price_range_confidence is None
+    assert any(
+        "SHADOW_COMPUTATION_FAILED:ZeroDivisionError" in code
+        for code in degraded.recommendation.exit_price_range_reason_codes
+    )
+
+    # 3 5価格をNoneへ揃える(0や偽装値にしない)。
+    assert degraded.recommendation.exit_price_range_partial_low_price is None
+    assert degraded.recommendation.exit_price_range_partial_high_price is None
+    assert degraded.recommendation.exit_price_range_strong_price is None
+    assert degraded.recommendation.exit_price_range_downside_review_price is None
+    assert degraded.recommendation.exit_price_range_exit_review_price is None
+
+    # 4 下流の別Shadow計測(exit_price_range_metrics)もクラッシュせず記録される。
+    assert degraded.recommendation.exit_price_range_metrics["state"] == "NOT_EVALUATED"
+
+    # 5 隔離は観測ごと。他のmetricsは算出されたまま残る。
+    assert degraded.recommendation.timing_metrics == baseline.recommendation.timing_metrics
+
+
+def test_profit_taking_shadow_exit_price_range_failure_is_isolated_from_the_v1_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ProfitTakingパイプラインで、DecisionSnapshot記録専用のexit_price_range
+    算出(evaluate_exit_price_range())自体が例外で落ちても、v1の判定
+    (recommendation_type・sell_prices等)は変わらない(Issue #384 PR-7)。
+    """
+    snapshot = _base_snapshot()
+    service = ProfitTakingService(providers=_PROVIDERS, config=_CFG)
+    holding = _holding()
+
+    baseline = service.analyze(holding, _NOW, snapshot=snapshot)
+    assert baseline.recommendation is not None
+    assert baseline.recommendation.exit_price_range_state is not None
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected exit_price_range failure")
+
+    monkeypatch.setattr(profit_taking_service_module, "evaluate_exit_price_range", _boom)
+    degraded = service.analyze(holding, _NOW, snapshot=snapshot)
+    assert degraded.recommendation is not None
+
+    # 1 v1の出力が変わらない。
+    assert (
+        degraded.recommendation.recommendation_type
+        == baseline.recommendation.recommendation_type
+    )
+    assert degraded.recommendation.sell_prices == baseline.recommendation.sell_prices
+    assert degraded.recommendation.reasons == baseline.recommendation.reasons
+
+    # 2 失敗はNOT_EVALUATED + reason_codesへ残る。
+    assert (
+        degraded.recommendation.exit_price_range_state == PriceRangeEvaluationState.NOT_EVALUATED
+    )
+    assert degraded.recommendation.exit_price_range_confidence is None
+    assert any(
+        "SHADOW_COMPUTATION_FAILED:ZeroDivisionError" in code
+        for code in degraded.recommendation.exit_price_range_reason_codes
+    )
+
+    # 3 5価格をNoneへ揃える。
+    assert degraded.recommendation.exit_price_range_partial_low_price is None
+    assert degraded.recommendation.exit_price_range_partial_high_price is None
+    assert degraded.recommendation.exit_price_range_strong_price is None
+    assert degraded.recommendation.exit_price_range_downside_review_price is None
+    assert degraded.recommendation.exit_price_range_exit_review_price is None
+
+    # 4 下流の別Shadow計測もクラッシュせず記録される。
+    assert degraded.recommendation.exit_price_range_metrics["state"] == "NOT_EVALUATED"
+
+    # 5 隔離は観測ごと。他のmetricsは算出されたまま残る。
+    assert degraded.recommendation.timing_metrics == baseline.recommendation.timing_metrics
+
+
 @pytest.mark.parametrize("feature", _FEATURE_IDS, ids=_FEATURE_IDS)
 def test_holding_decision_builder_ignores_shadow_feature(feature: str) -> None:
     """HoldingDecisionBuilderは各Shadow機能のスコア変化を記録するが、保有判断
