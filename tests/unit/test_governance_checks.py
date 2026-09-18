@@ -70,6 +70,15 @@ def test_closes_after_bullet_is_detected() -> None:
     assert len(result.closes_matches) == 1
 
 
+def test_closes_mid_sentence_is_detected() -> None:
+    """PR #394レビューFINDING F1: 行頭に限らず文中のCloses/Fixes/Resolves
+    ("This PR closes #1 as well."のような、GitHubが実際にauto-closeする
+    書き方)もWARNINGとして検出する(行頭限定では素通りしていた)。"""
+    result = check_pr_body(_read_fixture("closes_mid_sentence.md"))
+    assert result.result == WARNING
+    assert len(result.closes_matches) == 1
+
+
 def test_closes_explained_in_prose_is_not_detected() -> None:
     """「Closesは使わずRefsとしています」のような説明文は誤検出しない。"""
     result = check_pr_body(_read_fixture("closes_explained_away.md"))

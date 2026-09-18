@@ -22,9 +22,14 @@ REQUIRED_SECTIONS = ["概要", "TIME_SEMANTICS_IMPACT", "DoD", "同型 sweep", "
 DOD_ITEMS = ["境界の連続性", "単調性", "定常でない1回目", "単位・スケール", "失敗の可視性"]
 
 # GitHub が linked issue として解釈する keyword(大文字小文字を問わない)。
+# レビュー対応(PR #394 issuecomment、FINDING F1): 行頭アンカーは誤検出を
+# 1件も防いでおらず(fixture 9件で無変化、実測済み)、文中の"This PR closes #1
+# as well."のようなGitHubが実際にauto-closeする書き方を検出漏れにしていた。
+# 誤検出を防いでいるのは"\s+#(\d+)"(数字を伴う)の方であるため、アンカーを外し
+# 文中のCloses/Fixes/Resolvesも検出対象に含める。
 _CLOSE_KEYWORDS = r"close[sd]?|fix(?:e[sd])?|resolve[sd]?"
 _CLOSE_LINE_RE = re.compile(
-    rf"^\s*(?:[-*+]\s+|\d+[.)]\s+)?({_CLOSE_KEYWORDS})\s+#(\d+)",
+    rf"({_CLOSE_KEYWORDS})\s+#(\d+)",
     re.IGNORECASE,
 )
 _ISSUE_REF_ANYWHERE_RE = re.compile(
@@ -95,7 +100,8 @@ def check_pr_body(body: str) -> CheckResult:
     result.has_issue_reference = bool(_ISSUE_REF_ANYWHERE_RE.search(non_code_text))
 
     for line in non_code_lines:
-        m = _CLOSE_LINE_RE.match(line)
+        # アンカーを外したため、行頭固定の.match()ではなく行中を探す.search()を使う。
+        m = _CLOSE_LINE_RE.search(line)
         if m:
             result.closes_matches.append(line.strip())
 
