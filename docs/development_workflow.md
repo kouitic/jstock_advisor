@@ -1144,7 +1144,14 @@ wall clock の使用は正当であり、リスクベースの登録制とする
 `TRIGGERS` / `REQUIRED_CONTROLS` / `EVIDENCE` を記録する。
 
 `NO` の宣言は免罪符ではない。変更内容と矛盾する場合、レビュワーはこれを FAIL とする。
-PR 本文を CI で自動解析する仕組みは導入しない。
+PR 本文の必須節・DoD 5 項目の各行・Issue 参照の有無は
+`.github/workflows/governance.yml` が構文のみ検査する(意味判定は含まない。
+Issue #342)。宣言の内容が変更と矛盾しないかの意味判定は、引き続き
+レビュワーの責務である(前行の運用は変更しない)。`Closes` / `Fixes` /
+`Resolves` の使用は一律禁止せず WARNING に留める(正本の許容条件は変更
+しない。意味判定はレビュワーが行う)。CI の実装(`F_IMPLEMENTED`)と
+required check 登録による merge 阻止(`F_REQUIRED_ENFORCEMENT`)は別であり、
+登録は USER が別途 1 回だけ行う操作である。
 
 #### order-sensitive cohort に該当する場合
 
@@ -2513,3 +2520,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-12 | §3.5 の 3 か所で registry の所在を実体へ追随させた(Issue #277)。cohort / order case / 登録先の参照が `tests/unit/test_time_semantics_guard.py` のままだったが、registry(データと語彙)は `tests/support/time_semantics_registry.py` へ移動している。conftest から参照する必要が生じ、conftest がテストモジュールを import するのは収集時にテスト本体が実行されるため収集経路として不健全だからである。あわせて「同ファイルが検証する」という記述を 2 か所で分けた。**宣言・登録は registry、健全性の検証(V1-V8 / O1-O6)は guard** であり、移動により両者が別ファイルになったためである。★ **パスの追随のみであり、規則の内容は 1 文字も変更していない**(トリガ T1-T4 / control / 決定表 / FORBIDDEN と ALLOWED_EXISTING の扱い / order case の自動化しない方針 / registry を全走査にしない方針はいずれも変更していない)。2026-09-03 の変更履歴は当時の事実であり書き換えていない。コード・Production 挙動の変更なし |
 | 2026-09-12 | 3節へ preflight(`scripts/policy_check.py`)を 1 段追加した(Issue #337)。操作の前に「どの正本のどの節を読む必要があるか」を `docs/policy_registry.yaml` から引ける。★ **`PREFLIGHT_REQUIRED = NO` の任意実行であり、通さなくても作業は進められる**(誰の作業も止めない)。★ **通したことは遵守の証拠にならない**(required_policies を示すだけであり、読んだことも守ったことも保証しない。遵守の確認はレビューと各正本が担う)。結果は三値であり ★ **`UNKNOWN` を `PASS` として扱わない**(policy source の鮮度を確認できなかった場合も `UNKNOWN` とし、古い規則へ自動 fallback して操作を許可しない)。**実装パイプラインの他の段・レビュー対象の指定・Issue の自動 close を避ける・DoD の申告・同型 sweep・3.5節の時間意味論変更ゲート・4節のローカルテスト方針・2.6節の WIP と domain lock・6.5節の state 同期・10節の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 9.6節の **Issue の追跡責任と PR の batching を分離**した(Issue #357 / USER 判断 7。RULE_PROPOSAL = #213 issuecomment-5649751837)。旧本文は「P1 以外の governance / 開発運用 docs の改善は、その都度 PR を出さず**Issue #213 または #220 へ集約し**、週 1 回 1 PR で反映する」と書いており、**専用の Acceptance Criteria や独立した設計判断を必要とする欠陥まで #213 / #220 へ押し込む、と読めた**(Issue の追跡責任と PR の batching の混同)。実際に、独立したroot cause を持つ設計欠陥を起票したことが 9.6節と食い違うのではないかという申告が生じた。**9.6節の目的(小さな docs 改善ごとに PR を乱立させない / governance 変更を週単位でまとめる)は維持したまま**、`DEDICATED_ISSUE_ALLOWED != STANDALONE_PR_ALLOWED` として、**【Issue】独立した root cause がある / 専用の Acceptance Criteria が必要 / 独自の lifecycle を持つ / 別 Issue へ入れると責任範囲が曖昧になる のいずれかに当たるなら専用 Issue を作ってよい(duplicate check は必須)**、**【PR】P1 例外等を除き main 反映は従来どおり週次 batch へまとめる**、と定めた。上記に当たらない小さな改善は従来どおり #213 / #220 へ集約する。**「governance 改善は何でも個別 Issue を作ってよい」とは変更していない。**9.5節の Issue 起点の原則は不変であり(専用 Issue を作る場合もその Issue が起点である)、`GOVERNANCE_CHANGE_BATCHING = WEEKLY`・対象文書の一覧・P1 を即時とする扱い・「なぜまとめるか」の理由・緊急性を Priority で判定することはいずれも変更していない。見出しを変えていないため `policy_registry.yaml` は更新していない(本節を指す entry は実測で 0 件である)。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-18 | 3.5.8 の「PR 本文を CI で自動解析する仕組みは導入しない。」を改訂した(Issue #342、#337 の follow-up)。#337 の監査で、TIME_SEMANTICS_IMPACT 宣言の欠落 6 本・DoD 5 項目の欠落 2 本・`Closes` による close gate の飛び越え 1 本が実際に発生しており、いずれも PR 本文の形式で機械的に検出できるにもかかわらず検出されていなかった。`.github/workflows/governance.yml`(新設、`ci.yml` とは別 workflow。理由は `pii-metadata-audit.yml` と同じで、PR 本文を読むため GitHub API に依存すること)が必須節(概要 / TIME_SEMANTICS_IMPACT / DoD / 同型 sweep / 確認)・DoD 5 項目の各行・Issue 参照の有無を構文のみで検査する。`Closes` / `Fixes` / `Resolves` の使用は正本が条件つきで許容しているため一律 FAIL にはせず WARNING に留め、意味判定(後続 Phase が残るか等)は引き続きレビュワーが行う(前行「`NO` の宣言は免罪符ではない...FAIL とする」の運用は変更していない)。**CI の実装(`F_IMPLEMENTED`)と、required check として登録し merge を実際に止められること(`F_REQUIRED_ENFORCEMENT`)は別であり、登録は USER が別途 1 回だけ行う操作である**(本 PR の時点では `F_REQUIRED_ENFORCEMENT = NO`。job は走るが merge を止めない)。registry の schema violation / anchor の不在は `scripts/policy_check.py` 由来の `tests/unit/test_policy_registry.py` が既に通常の CI(`ci.yml` の `test` job)で検査済みのため、governance.yml では重複実装していない(CI 実行時間の悪化を避けるため)。**3.5.8 のこの 1 行以外・1146 行目(免罪符ではない、の行)・§2.6 WIP と domain lock・§4 ローカルテスト方針・§9.5 Issue 起点の原則・§10 人間承認の境界・CI の必須 job 構成はいずれも変更していない。** コード・Production 挙動の変更なし(governance.yml は required check 未登録のため、既存の PR merge 手順を変えない) |
