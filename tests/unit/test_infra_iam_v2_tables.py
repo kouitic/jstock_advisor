@@ -293,6 +293,7 @@ _VALIDATION_TABLE_IDS = frozenset(
         "ValidationHoldingsSnapshotTable",
         "ValidationHoldingsSnapshotTableV2",
         "ValidationDailyNotificationPriorityTable",
+        "ValidationTradeEventRecordsTable",
     }
 )
 
