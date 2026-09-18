@@ -100,6 +100,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.providers.market_data.mock_impl import MockMarketDataProvider
+from jstock_advisor.services import profit_taking_service as profit_taking_service_module
 from jstock_advisor.services.buy_signal_service import BuySignalService
 from jstock_advisor.services.holding_decision_notification_builder import (
     build_holding_decision_recommendation,
@@ -568,6 +569,52 @@ def test_profit_taking_ignores_shadow_feature(feature: str) -> None:
             assert getattr(outcome_a.recommendation, invariant) == getattr(
                 outcome_b.recommendation, invariant
             )
+
+
+def test_profit_taking_shadow_metric_failure_is_isolated_from_the_v1_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ProfitTakingパイプラインで、DecisionSnapshot記録専用のhistorical_
+    valuation_metrics算出が例外で落ちても、v1の判定(recommendation_type・
+    sell_prices等)は変わらない(Issue #384 PR-2。#22 C2 / #371と同型の
+    isolationをprofit_taking_service.pyへ適用したことの固定)。
+    """
+    snapshot = _base_snapshot()
+    service = ProfitTakingService(providers=_PROVIDERS, config=_CFG)
+    holding = _holding()
+
+    baseline = service.analyze(holding, _NOW, snapshot=snapshot)
+    assert baseline.recommendation is not None
+    assert baseline.recommendation.historical_valuation_metrics.get("state") is not None
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise ZeroDivisionError("injected historical_valuation_metrics failure")
+
+    monkeypatch.setattr(
+        profit_taking_service_module, "historical_valuation_result_to_metrics", _boom
+    )
+    degraded = service.analyze(holding, _NOW, snapshot=snapshot)
+    assert degraded.recommendation is not None
+
+    # 1 v1の出力が変わらない。
+    assert (
+        degraded.recommendation.recommendation_type
+        == baseline.recommendation.recommendation_type
+    )
+    assert degraded.recommendation.sell_prices == baseline.recommendation.sell_prices
+    assert degraded.recommendation.reasons == baseline.recommendation.reasons
+
+    # 2 失敗が記録に残る。
+    failed = degraded.recommendation.historical_valuation_metrics
+    assert failed["shadow_state"] == "COMPUTATION_FAILED"
+    assert failed["error_type"] == "ZeroDivisionError"
+
+    # 3 0.0や空へ潰さない。
+    assert "state" not in failed
+    assert "per_score" not in failed
+
+    # 4 隔離は観測ごと。他のmetricsは算出されたまま残る。
+    assert degraded.recommendation.timing_metrics == baseline.recommendation.timing_metrics
 
 
 @pytest.mark.parametrize("feature", _FEATURE_IDS, ids=_FEATURE_IDS)
