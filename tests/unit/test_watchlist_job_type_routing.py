@@ -266,7 +266,9 @@ def _run_reconciler_rescue(job_type: str | None) -> list[str]:
         patch.object(reconciler_module, "load_config", lambda: _fake_config()),
         patch.object(reconciler_module, "build_real_provider_bundle", lambda *a, **k: object()),
         patch.object(reconciler_module, "build_cached_provider_bundle", lambda *a, **k: object()),
-        patch.object(reconciler_module, "_build_notification_service", lambda _c: object()),
+        patch.object(
+            reconciler_module, "_build_notification_service", lambda _c, _l=None: object()
+        ),
         patch.object(
             reconciler_module,
             "list_watchlist_batches_by_status",

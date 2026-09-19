@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
-from typing import Any
+from typing import Any, NoReturn
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
@@ -50,7 +50,12 @@ from jstock_advisor.infrastructure.aws.watchlist_rotation_dispatch_lease import 
     release_rotation_dispatch_lease,
 )
 from jstock_advisor.infrastructure.aws.watchlist_rotation_state import DEFAULT_ROTATION_ID
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import (
+    LineClient,
+    LineCredentialsMissingError,
+    QuickReplyButton,
+    build_live_line_client_from_env,
+)
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -124,9 +129,71 @@ _FINALIZE_IN_PROGRESS_STATUSES = frozenset(
 )
 
 
-def _build_notification_service(config: AppConfig) -> LineNotificationService:
+class _CredentialDeferredLineClient:
+    """LINE認証情報が無いときに渡す、送信の瞬間に必ず失敗するclient(Issue #117)。
+
+    reconcilerは複数の独立した回復処理を担う「最後の安全網」であり、LINEを使うのは
+    finalizerのPhase 3(通知)の1点だけである。認証情報の欠落を通知サービスの「構築失敗」として
+    扱うと、その手前のPhase 1/2(ランキング確定・ウォッチリスト登録)や、通知と無関係な回復処理
+    まで止まり、24時間を超えるとTIMED_OUT(部分結果は登録しない)で候補が失われる。
+
+    そこで欠落は「実際の送信時の失敗」として扱う。送信メソッド(push_message等)は**必ず**
+    `LineCredentialsMissingError`を送出し、決して成功を返さない(黙って成功扱いにしない)。
+    finalizerのPhase 3は例外を捕捉してNOTIFICATION_FAILEDとして記録し(ウォッチリスト登録は
+    保持される)、通知だけが既存のretry_notification()の再試行機構に載る。
+
+    ★ Phase 3の例外捕捉により、このままではLambda呼び出しが成功扱いになり欠落が不可視に
+      なる(#117が防ぎたい障害の再現)。そのため「欠落のまま送信が試みられた」事実を保持し、
+      `raise_if_send_attempted()`をhandlerの全処理完了後に呼んで送出する(登録・
+      NOTIFICATION_FAILEDの記録は、その時点で完了している)。
+    """
+
+    def __init__(self, missing: LineCredentialsMissingError) -> None:
+        self._missing = missing
+        self.send_attempted = False
+
+    def _fail(self) -> NoReturn:
+        self.send_attempted = True
+        raise LineCredentialsMissingError(str(self._missing))
+
+    def push_message(self, text: str) -> None:
+        self._fail()
+
+    def reply_message(
+        self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
+    ) -> None:
+        self._fail()
+
+    def reply_messages(
+        self,
+        reply_token: str,
+        texts: list[str],
+        quick_reply: list[QuickReplyButton] | None = None,
+    ) -> None:
+        self._fail()
+
+    def raise_if_send_attempted(self) -> None:
+        if self.send_attempted:
+            raise LineCredentialsMissingError(str(self._missing))
+
+
+def _build_reconciler_line_client() -> LineClient:
+    """認証情報があればLiveLineClient、無ければ送信時に必ず失敗するclientを返す。
+
+    構築の失敗(`LineCredentialsMissingError`)だけを送信時の失敗へ変える。認証情報の欠落以外の
+    例外は握りつぶさず、従来どおり伝播する。
+    """
+    try:
+        return build_live_line_client_from_env()
+    except LineCredentialsMissingError as exc:
+        return _CredentialDeferredLineClient(exc)
+
+
+def _build_notification_service(
+    config: AppConfig, line_client: LineClient | None = None
+) -> LineNotificationService:
     return LineNotificationService(
-        line_client=build_line_client_from_env(),
+        line_client=line_client if line_client is not None else _build_reconciler_line_client(),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
@@ -333,7 +400,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     providers: ProviderBundle = build_cached_provider_bundle(
         build_real_provider_bundle(now, config), config, now
     )
-    notification_service = _build_notification_service(config)
+    # Issue #117: 認証情報の欠落は構築の失敗にせず、送信時の失敗として扱う。
+    # (_CredentialDeferredLineClient)
+    line_client = _build_reconciler_line_client()
+    notification_service = _build_notification_service(config, line_client)
 
     candidates = list_watchlist_batches_by_status(_RECONCILE_TARGET_STATUSES)
 
@@ -561,6 +631,12 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         completion_recovery_invoked,
         completion_recovery_skipped,
     )
+    # Issue #117: 通知と無関係な回復処理・ウォッチリスト登録・NOTIFICATION_FAILEDの記録を全て
+    # 終えた後に、認証情報の欠落を顕在化させる(Lambda呼び出しをErrorsとして失敗させる)。
+    # Phase 3が例外を捕捉するため、これが無いと欠落が不可視になる。Schedulerの再試行は各処理が
+    # 冪等(repository_results・claim補償delete・NotificationLog未保存)で無害。
+    if isinstance(line_client, _CredentialDeferredLineClient):
+        line_client.raise_if_send_attempted()
     return {
         "candidates": len(candidates),
         "dispatch_failed": dispatch_failed,

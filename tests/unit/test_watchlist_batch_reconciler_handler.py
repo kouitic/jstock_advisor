@@ -181,7 +181,9 @@ def _stub_expensive_dependencies(monkeypatch: pytest.MonkeyPatch) -> SimpleNames
     )
     fake_notification = _FakeNotificationService()
     monkeypatch.setattr(
-        handler_module, "_build_notification_service", lambda config: fake_notification
+        handler_module,
+        "_build_notification_service",
+        lambda config, line_client=None: fake_notification,
     )
     monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
     monkeypatch.setattr(finalizer_module, "record_batch_audit", lambda **kw: None)
@@ -862,3 +864,375 @@ def test_b2_missing_function_name_is_fail_closed(monkeypatch) -> None:
 
     assert outcome is False
     assert invoked == []
+
+
+# --- Issue #117 Phase B1b-4c: LINE認証情報の欠落は「構築の失敗」でなく「送信時の失敗」 ---
+#
+# 認証情報が欠落しても、finalizerのPhase 1(target確定)・Phase 2(ウォッチリスト登録)は完了させる。
+# 通知(Phase 3)だけが、送信の瞬間にLineCredentialsMissingErrorで失敗し、既存の
+# NOTIFICATION_FAILED / retry_notification / COMPLETED_WITH_NOTIFICATION_FAILURE の仕組みに載る。
+# 欠落は、全処理の後にhandlerがLineCredentialsMissingErrorを送出して可視化する(Errors)。
+#
+# ★ 契約(R1、USER承認): credential復旧前に既存のretry上限へ達した場合は自動通知されない
+#   (COMPLETED_WITH_NOTIFICATION_FAILURE。手動のretry-notificationが必要)。
+
+_HOURS = dt.timedelta(hours=1)
+
+
+class _RecordingLineClient:
+    """認証情報が復旧した状態のLINE client(送信を記録する)。"""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def push_message(self, text: str) -> None:
+        self.sent.append(text)
+
+
+@pytest.fixture
+def real_notification_service(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """自動fixtureの偽サービスを、実のLineNotificationServiceへ差し替える。
+
+    log/claimはtmp_pathへ隔離する(実データ領域を汚さない)。clientはhandlerが渡したもの
+    (認証情報の状態に応じたLive/送信時に失敗するclient)をそのまま使う。
+    """
+    from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
+        NotificationClaimRepository,
+    )
+    from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
+        NotificationLogRepository,
+    )
+    from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
+        RecommendationRepository,
+    )
+    from jstock_advisor.services.line_notification_service import LineNotificationService
+
+    def _build(config: Any, line_client: Any = None) -> LineNotificationService:
+        return LineNotificationService(
+            line_client=line_client,
+            notification_log_repository=NotificationLogRepository(store_dir=tmp_path / "log"),
+            notification_claim_repository=NotificationClaimRepository(
+                store_dir=tmp_path / "claims"
+            ),
+            recommendation_repository=RecommendationRepository(store_dir=tmp_path / "rec"),
+            config=config,
+            audit_service=SimpleNamespace(),
+            holdings_snapshot_repository=SimpleNamespace(),
+            daily_notification_priority_repository=SimpleNamespace(),
+        )
+
+    monkeypatch.setattr(handler_module, "_build_notification_service", _build)
+
+
+@pytest.fixture
+def credentials_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """認証情報を欠落させる。構築関数は差し替えず、実分岐(欠落→送信時に失敗するclient)を通す。"""
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+
+
+@pytest.fixture
+def add_if_new_calls(
+    monkeypatch: pytest.MonkeyPatch, _stub_expensive_dependencies: SimpleNamespace
+) -> list[str]:
+    calls: list[str] = []
+    repo = _stub_expensive_dependencies.repo
+    original = repo.add_if_new
+
+    def _counting(item: Any) -> bool:
+        calls.append(item.stock_code)
+        return original(item)
+
+    monkeypatch.setattr(repo, "add_if_new", _counting)
+    return calls
+
+
+def _status_of(batch_id: str) -> str:
+    batch = batch_tracker.get_watchlist_batch(batch_id)
+    assert batch is not None
+    return str(batch["status"])
+
+
+def _batch(batch_id: str) -> dict[str, Any]:
+    batch = batch_tracker.get_watchlist_batch(batch_id)
+    assert batch is not None
+    return dict(batch)
+
+
+def _run_expecting_credentials_error() -> None:
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    with pytest.raises(LineCredentialsMissingError):
+        handler_module.handler({}, object())
+
+
+def test_t1_missing_credentials_at_23h_still_registers_and_marks_notification_failed(
+    dynamo,
+    credentials_missing: None,
+    real_notification_service: None,
+    _stub_expensive_dependencies: SimpleNamespace,
+) -> None:
+    """欠落・started_at+23時間台: ウォッチリスト登録は行われ、通知だけがNOTIFICATION_FAILEDになり、
+    欠落は(同一実行の末尾で)可視化される。"""
+    started = dt.datetime.now(dt.UTC) - 23 * _HOURS
+    _drive_batch_to_running_with_passed_candidate("batch-1", started)
+
+    _run_expecting_credentials_error()
+
+    assert [i.stock_code for i in _stub_expensive_dependencies.repo.added] == ["1111"]
+    batch = _batch("batch-1")
+    assert batch["status"] == WatchlistBatchStatus.NOTIFICATION_FAILED.value
+    assert int(batch["notification_failure_count"]) == 1
+    assert batch["repository_results"] == {"1111": "added"}
+
+
+def test_t2_missing_credentials_beyond_24h_keeps_the_registration_and_does_not_time_out(
+    dynamo,
+    credentials_missing: None,
+    real_notification_service: None,
+    _stub_expensive_dependencies: SimpleNamespace,
+) -> None:
+    """欠落・started_at+24時間超: 救済finalizeで登録が確定し、TIMED_OUTで登録結果が失われない。"""
+    started = dt.datetime.now(dt.UTC) - 25 * _HOURS
+    _drive_batch_to_running_with_passed_candidate("batch-1", started)
+
+    _run_expecting_credentials_error()
+
+    assert [i.stock_code for i in _stub_expensive_dependencies.repo.added] == ["1111"]
+    assert _status_of("batch-1") == WatchlistBatchStatus.NOTIFICATION_FAILED.value
+
+
+def test_t3_recovery_retries_only_the_notification_without_rerunning_registration(
+    dynamo,
+    monkeypatch: pytest.MonkeyPatch,
+    credentials_missing: None,
+    real_notification_service: None,
+    add_if_new_calls: list[str],
+    _stub_expensive_dependencies: SimpleNamespace,
+) -> None:
+    """復旧後は、retry_notificationだけで通知が回復しCOMPLETEDになる。Phase 1/2は再実行されない。"""
+    started = dt.datetime.now(dt.UTC) - 2 * _HOURS
+    _drive_batch_to_running_with_passed_candidate("batch-1", started)
+    _run_expecting_credentials_error()
+    assert _status_of("batch-1") == WatchlistBatchStatus.NOTIFICATION_FAILED.value
+    assert add_if_new_calls == ["1111"]
+
+    recovered = _RecordingLineClient()
+    monkeypatch.setattr(handler_module, "build_live_line_client_from_env", lambda: recovered)
+    result = handler_module.handler({}, object())
+
+    assert result["notification_retried"] == 1
+    assert _status_of("batch-1") == WatchlistBatchStatus.COMPLETED.value
+    assert len(recovered.sent) == 1  # 通知が実際に送られた
+    assert add_if_new_calls == ["1111"]  # 登録は再実行されていない
+    assert len(_stub_expensive_dependencies.repo.added) == 1
+
+
+def test_t4_persistent_outage_reaches_the_retry_cap_and_keeps_the_registration(
+    dynamo,
+    credentials_missing: None,
+    real_notification_service: None,
+    _stub_expensive_dependencies: SimpleNamespace,
+) -> None:
+    """欠落が継続しmax_notification_retry_attempts(3)へ到達すると、COMPLETED_WITH_NOTIFICATION_FAILURE。
+    登録は保持される。★契約(R1): 復旧前に上限へ達した場合は自動通知されない。"""
+    started = dt.datetime.now(dt.UTC) - 2 * _HOURS
+    _drive_batch_to_running_with_passed_candidate("batch-1", started)
+
+    for _ in range(3):
+        _run_expecting_credentials_error()
+
+    batch = _batch("batch-1")
+    assert batch["status"] == WatchlistBatchStatus.COMPLETED_WITH_NOTIFICATION_FAILURE.value
+    assert int(batch["notification_failure_count"]) == 3
+    assert [i.stock_code for i in _stub_expensive_dependencies.repo.added] == ["1111"]
+
+    # 上限到達後は、復旧しても自動では通知されない(手動のretry-notificationが必要)
+    result = handler_module.handler({}, object())
+    assert result["candidates"] == 0
+    assert _status_of("batch-1") == WatchlistBatchStatus.COMPLETED_WITH_NOTIFICATION_FAILURE.value
+
+
+def test_t5_crash_after_registration_does_not_double_add_or_double_notify(
+    dynamo,
+    monkeypatch: pytest.MonkeyPatch,
+    real_notification_service: None,
+    add_if_new_calls: list[str],
+    _stub_expensive_dependencies: SimpleNamespace,
+) -> None:
+    """登録直後(通知の前)に異常終了して再実行しても、二重に追加せず、通知は1回だけ送られる。"""
+    from jstock_advisor.services import watchlist_batch_finalizer as finalizer
+
+    recovered = _RecordingLineClient()
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("LINE_USER_ID", "test-user")
+    monkeypatch.setattr(handler_module, "build_live_line_client_from_env", lambda: recovered)
+    started = dt.datetime.now(dt.UTC) - 2 * _HOURS
+    _drive_batch_to_running_with_passed_candidate("batch-1", started)
+
+    original = finalizer.record_notification_pending
+    crashed: list[bool] = []
+
+    def _crash_once(*a: Any, **kw: Any) -> Any:
+        if not crashed:
+            crashed.append(True)
+            raise RuntimeError("simulated crash after registration")
+        return original(*a, **kw)
+
+    monkeypatch.setattr(finalizer, "record_notification_pending", _crash_once)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        handler_module.handler({}, object())
+    assert add_if_new_calls == ["1111"]
+    assert _status_of("batch-1") == WatchlistBatchStatus.FINALIZE_FAILED.value
+
+    handler_module.handler({}, object())  # retry_finalize で再開
+
+    assert add_if_new_calls == ["1111"]  # 二重追加なし(repository_resultsで再開時にスキップ)
+    assert len(_stub_expensive_dependencies.repo.added) == 1
+    assert len(recovered.sent) == 1  # 通知も1回だけ
+    assert _status_of("batch-1") == WatchlistBatchStatus.COMPLETED.value
+
+
+def test_t7_missing_credentials_do_not_fail_when_no_notification_is_needed(
+    dynamo,
+    monkeypatch: pytest.MonkeyPatch,
+    credentials_missing: None,
+    real_notification_service: None,
+) -> None:
+    """通知が不要な経路(kill switch OFFのSKIPPED)はsendに到達しない。認証情報が無くても失敗せず、
+    末尾送出もしない(不要な障害を作らない)。登録は行われCOMPLETEDになる。"""
+    config = _fake_config()
+    config.watchlist_screening.notification_enabled = False
+    monkeypatch.setattr(handler_module, "load_config", lambda: config)
+    started = dt.datetime.now(dt.UTC) - 2 * _HOURS
+    _drive_batch_to_running_with_passed_candidate("batch-1", started)
+
+    result = handler_module.handler({}, object())
+
+    assert result["rescued"] == 1
+    assert _status_of("batch-1") == WatchlistBatchStatus.COMPLETED.value
+
+
+def test_t8_unrelated_recovery_runs_regardless_of_the_credentials(
+    dynamo, credentials_missing: None
+) -> None:
+    """通知と無関係な回復(DISPATCHING失敗確定・finalize stuck確定)は、認証情報が無くても実行され、
+    失敗しない(通知が要らないためLINE送信に到達しない)。"""
+    far_past = dt.datetime(2000, 1, 1, tzinfo=dt.UTC)
+    batch_tracker.try_acquire_dispatch_lease("batch-stuck", "dispatcher", far_past, 360, 72)
+    _drive_batch_to_finalizing("batch-fin", far_past)
+
+    result = handler_module.handler({}, object())
+
+    assert result["dispatch_failed"] == 1
+    assert result["finalizing_marked_stuck"] == 1
+
+
+def test_t8_maintenance_rescue_runs_without_credentials(
+    dynamo, monkeypatch: pytest.MonkeyPatch, credentials_missing: None
+) -> None:
+    now = _NOW
+    batch_tracker.try_acquire_dispatch_lease("watchlist-maint-1", "dispatcher", now, 360, 72)
+    batch_tracker.set_watchlist_batch_total(
+        "watchlist-maint-1",
+        1,
+        72,
+        now,
+        job_type=batch_tracker.WatchlistJobType.WATCHLIST_MAINTENANCE,
+    )
+    batch_tracker.create_missing_candidate_progress_rows("watchlist-maint-1", ["1111"], now, 72)
+    batch_tracker.mark_dispatch_completed("watchlist-maint-1", now)
+    rescued: list[str] = []
+    monkeypatch.setattr(
+        handler_module,
+        "maybe_finalize_maintenance",
+        lambda batch_id, *_a, **_kw: rescued.append(batch_id) or True,
+    )
+
+    result = handler_module.handler({}, object())
+
+    assert rescued == ["watchlist-maint-1"]
+    assert result["rescued"] == 1
+
+
+def test_t9_other_exceptions_are_not_mistaken_for_missing_credentials(
+    dynamo,
+    monkeypatch: pytest.MonkeyPatch,
+    real_notification_service: None,
+    _stub_expensive_dependencies: SimpleNamespace,
+) -> None:
+    """認証情報が有り、送信が認証情報以外の例外(RuntimeError等)で失敗した場合は、既存どおり
+    NOTIFICATION_FAILEDとして記録されるだけで、LineCredentialsMissingErrorとして送出しない。"""
+
+    class _BrokenClient:
+        def push_message(self, text: str) -> None:
+            raise RuntimeError("LINE API unavailable (simulated)")
+
+    monkeypatch.setattr(handler_module, "build_live_line_client_from_env", lambda: _BrokenClient())
+    started = dt.datetime.now(dt.UTC) - 2 * _HOURS
+    _drive_batch_to_running_with_passed_candidate("batch-1", started)
+
+    handler_module.handler({}, object())  # LineCredentialsMissingErrorを送出しない
+
+    assert _status_of("batch-1") == WatchlistBatchStatus.NOTIFICATION_FAILED.value
+
+
+# --- T10: credential-deferred clientの単体テスト ---
+
+
+def test_t10_deferred_client_never_succeeds_and_remembers_the_attempt() -> None:
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    client = handler_module._CredentialDeferredLineClient(LineCredentialsMissingError("missing"))
+
+    assert client.send_attempted is False
+    client.raise_if_send_attempted()  # 送信を試みていなければ送出しない
+    with pytest.raises(LineCredentialsMissingError):
+        client.push_message("hello")  # 決して成功を返さない
+    assert client.send_attempted is True
+    with pytest.raises(LineCredentialsMissingError):
+        client.raise_if_send_attempted()
+
+
+@pytest.mark.parametrize("method", ["reply_message", "reply_messages"])
+def test_t10_deferred_client_fails_for_every_send_method(method: str) -> None:
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    client = handler_module._CredentialDeferredLineClient(LineCredentialsMissingError("missing"))
+    args: tuple[Any, ...] = ("token", "text") if method == "reply_message" else ("token", ["t"])
+
+    with pytest.raises(LineCredentialsMissingError):
+        getattr(client, method)(*args)
+    assert client.send_attempted is True
+
+
+def test_builder_returns_a_live_client_when_credentials_are_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jstock_advisor.infrastructure.line.client import LiveLineClient
+
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("LINE_USER_ID", "test-user")
+
+    assert isinstance(handler_module._build_reconciler_line_client(), LiveLineClient)
+
+
+def test_builder_returns_the_deferred_client_when_credentials_are_missing(
+    monkeypatch: pytest.MonkeyPatch, credentials_missing: None
+) -> None:
+    client = handler_module._build_reconciler_line_client()
+
+    assert isinstance(client, handler_module._CredentialDeferredLineClient)
+
+
+def test_builder_does_not_swallow_other_construction_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom() -> Any:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(handler_module, "build_live_line_client_from_env", _boom)
+
+    with pytest.raises(RuntimeError, match="unexpected"):
+        handler_module._build_reconciler_line_client()
