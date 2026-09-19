@@ -137,6 +137,34 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="market_session",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #440: 東証休場日gate(_market_holiday)。T3 = 営業日判定(BusinessCalendar)の
+    # 新規consumer、T4 = 全テストの既定clock意味論を変える(tests/unit/conftest.pyの
+    # autouse fixtureが`_market_holiday.is_market_closed`を既定「営業日」へ中和し、
+    # `real_market_calendar` markerを持つテストだけ実カレンダーへ戻す)。
+    # cohort = gateを持つ3 handlerのうち、holdings以外の2系統 + gate自身のテスト。
+    # holdings系(test_holdings_watchlist_handler*.py)は既存のholding_decision_runtime_config
+    # cohortに在籍するため、そちらが担う(1 moduleは1 cohortにしか属せない)。
+    # 2 handlerテスト自体はwall clockを直接呼ばない(handler()内部が読む)ため FORBIDDEN。
+    # 共有するのは可変のmodule-level stateではなく「conftestの既定中和とその解除」であり、
+    # 順序依存はない(monkeypatchはtest単位で元へ戻る。逆順実行で確認済み)。
+    _Entry(
+        module="tests/unit/test_market_holiday_gate.py",
+        triggers=("T3", "T4"),
+        cohort="market_holiday_gate",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    _Entry(
+        module="tests/unit/test_buy_candidates_handler.py",
+        triggers=("T4",),
+        cohort="market_holiday_gate",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    _Entry(
+        module="tests/unit/test_watchlist_dispatcher_handler.py",
+        triggers=("T4",),
+        cohort="market_holiday_gate",
+        wall_clock_policy=_FORBIDDEN,
+    ),
     # Issue #389(#66 F-L3): 営業日ホライズン評価のday-zero(v1=UTC暦日/
     # v2=JST暦日)切替。T3 = recommended_at(時刻由来値)を受け取って
     # v1/v2を業務分岐するconsumer(resolve_business_day_zero())。
@@ -172,6 +200,9 @@ _KNOWN_TIME_SENSITIVE_MODULES = frozenset(
         "tests/unit/test_issue_143_test_clock_determinism.py",
         "tests/unit/test_recommendation_evaluation_service.py",
         "tests/unit/test_calibration_dataset_service.py",
+        "tests/unit/test_market_holiday_gate.py",
+        "tests/unit/test_buy_candidates_handler.py",
+        "tests/unit/test_watchlist_dispatcher_handler.py",
     }
 )
 

@@ -142,3 +142,27 @@ def create_collection_table() -> Callable[..., None]:
         )
 
     return _create
+
+
+@pytest.fixture(autouse=True)
+def _market_calendar_is_business_day_by_default(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #440: 市場休場日gate(`_market_holiday`)の休場判定を、既定では「常に営業日」にする。
+
+    3つの市場依存entry(BuyCandidates / HoldingsWatchlist parent、WatchlistDispatcher
+    NEW_CANDIDATE)は、JPX休場日に判定・通知を行わずno-opで返る。既存の親経路のテストは、
+    実時刻(`dt.datetime.now`)で動き、`{"dispatched": n}`のような返り値を厳密に比較する。
+    実時刻が土日祝のとき(CIが週末に走る等)にそれらが落ちないよう、gateの休場判定だけを
+    既定で「営業日」へ固定する(テストが実行時刻に依存しないようにする。Issue #143と同じ方針)。
+
+    gateそのものを検証するテストは、`@pytest.mark.real_market_calendar`(モジュール単位なら
+    `pytestmark`)で実際の判定(BusinessCalendar)へ戻す。
+    """
+    if request.node.get_closest_marker("real_market_calendar") is not None:
+        return
+    from jstock_advisor.lambda_handlers import _market_holiday
+
+    monkeypatch.setattr(
+        _market_holiday, "is_market_closed", lambda business_date_jst, config: False
+    )
