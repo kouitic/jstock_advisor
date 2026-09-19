@@ -177,6 +177,10 @@ from jstock_advisor.services.watchlist_screening_service import WatchlistScreeni
 _ranking_entry_list_adapter: TypeAdapter[list[RankingEntry]] = TypeAdapter(list[RankingEntry])
 
 logger = logging.getLogger(__name__)
+# Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
+# module が宣言しないと INFO は出ない)。出力する値に、生の owner / holding_id 等を含めない
+# (#135 / #416)。有効化の時点の PII 確認は PR に記録した。
+logger.setLevel(logging.INFO)
 
 # Issue #56: maintenance batchの監査記録で使うuniverse_provider。
 # ADD用のcandidate_universe.providerと取り違えると、メンテナンス実行が

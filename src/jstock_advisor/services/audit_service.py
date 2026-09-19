@@ -19,6 +19,10 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 
 logger = logging.getLogger(__name__)
+# Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
+# module が宣言しないと INFO は出ない)。出力する値に、生の owner / holding_id 等を含めない
+# (#135 / #416)。有効化の時点の PII 確認は PR に記録した。
+logger.setLevel(logging.INFO)
 
 # 通知検証モード機能(2026-08)コードレビュー対応: 呼び出し元(HoldingDecisionService等)
 # ごとにif not validationガードを散在させず、AuditServiceのrecord()/record_if_absent()と
