@@ -1,8 +1,9 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
+from jstock_advisor.infrastructure.collection_store import running_on_lambda
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
@@ -80,3 +81,64 @@ def _isolated_jpx_industry_source(
     reset_default_jpx_industry_source()
     yield entries
     reset_default_jpx_industry_source()
+
+
+_LAMBDA_ENV_FUNCTION_NAME = "jstock-advisor-test-lambda"
+
+
+@pytest.fixture
+def lambda_runtime_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Issue #367(b): mocked AWS(moto)テストを、本番と同じ「Lambda上」の経路で動かす。
+
+    本番のrepository / batch trackerは`running_on_lambda()`(=環境変数
+    `AWS_LAMBDA_FUNCTION_NAME`の有無)でDynamoDBかローカルJSONかを選ぶ。motoを使う
+    テストがこの変数を設定しないと、同じテスト内で「motoのDynamoDB」と「ローカルJSON
+    フォールバック」が混在し、本番には無い組み合わせを検証してしまう(#275 H11)。
+
+    **opt-in**: autouseにしない。対象テストが明示的に要求する。
+    **環境変数で設定する**: module属性だけをmonkeypatchするとrepository側と
+    batch tracker側で経路が分裂するため、プロセス全体で`running_on_lambda()`が
+    Trueになる形にする。fixture自身がそれを確認する。
+    """
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", _LAMBDA_ENV_FUNCTION_NAME)
+    assert running_on_lambda() is True
+    yield
+
+
+@pytest.fixture
+def assert_dynamodb_backend(lambda_runtime_env: None) -> Callable[[object], None]:
+    """Issue #367(b)条件4: 「fixtureを付けただけ」で完了扱いにしないための確認。
+
+    `build_collection_store()`が返したstoreがDynamoDBバックエンドであることを
+    テスト内でassertするための関数を返す(JSONへフォールバックしていないことの証明)。
+    """
+    from jstock_advisor.infrastructure.aws.dynamodb_store import DynamoDbCollectionStore
+
+    def _check(store: object) -> None:
+        assert isinstance(store, DynamoDbCollectionStore), (
+            f"DynamoDBバックエンドを通っていない: {type(store).__name__}"
+        )
+
+    return _check
+
+
+@pytest.fixture
+def create_collection_table() -> Callable[..., None]:
+    """Issue #367(b): motoへ、repositoryが本番で使うcollection表(HASHキー1本)を作る。
+
+    表名は本番と同じ`resolve_table_name(file_name)`で決める(表名をテスト側へ
+    ハードコードして本番とずれることを避ける)。`mock_aws()`の内側で呼ぶこと。
+    """
+    import boto3
+
+    from jstock_advisor.infrastructure.collection_store import resolve_table_name
+
+    def _create(file_name: str, id_field: str, *, region: str = "ap-northeast-1") -> None:
+        boto3.client("dynamodb", region_name=region).create_table(
+            TableName=resolve_table_name(file_name),
+            KeySchema=[{"AttributeName": id_field, "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": id_field, "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+    return _create
