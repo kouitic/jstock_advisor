@@ -42,6 +42,7 @@ import ast
 import importlib
 import logging
 import pathlib
+from collections.abc import Iterator
 
 import pytest
 
@@ -76,33 +77,101 @@ _UNDECLARED_ALLOWLIST = {
 _QUIET_LEVEL_METHODS = {"info", "debug"}
 
 
-def _is_get_logger_call(node: ast.AST) -> bool:
-    """`logging.getLogger(...)` または `getLogger(...)` の呼び出し。"""
+def _get_logger_names(tree: ast.AST) -> set[str]:
+    """`getLogger` を指す名前。`from logging import getLogger as gl` の `gl` も含める。"""
+    names = {"getLogger"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "logging":
+            names.update(a.asname or a.name for a in node.names if a.name == "getLogger")
+    return names
+
+
+def _is_get_logger_call(node: ast.AST, names: set[str]) -> bool:
+    """`logging.getLogger(...)` / `getLogger(...)` / 別名 import した getLogger の呼び出し。"""
     if not isinstance(node, ast.Call):
         return False
     func = node.func
     if isinstance(func, ast.Attribute):
         return func.attr == "getLogger"
-    return isinstance(func, ast.Name) and func.id == "getLogger"
+    return isinstance(func, ast.Name) and func.id in names
+
+
+def _binding_pairs(target: ast.expr, value: ast.expr) -> Iterator[tuple[ast.expr, ast.expr]]:
+    """(束縛先, 値)の対を作る。tuple / list 同士の代入は要素ごとに対応させる。"""
+    if (
+        isinstance(target, ast.Tuple | ast.List)
+        and isinstance(value, ast.Tuple | ast.List)
+        and len(target.elts) == len(value.elts)
+    ):
+        for inner_target, inner_value in zip(target.elts, value.elts, strict=True):
+            yield from _binding_pairs(inner_target, inner_value)
+    else:
+        yield target, value
+
+
+def _bound_logger_keys(tree: ast.AST) -> set[str]:
+    """logger を束縛している式(`logger` / `self._logger` 等)を、ソース断片の文字列で集める。
+
+    対応する束縛の形(PR #436 のレビュー指摘 F1):
+        代入            `logger = logging.getLogger(...)`
+        注釈つき代入     `logger: logging.Logger = logging.getLogger(...)`
+        walrus          `(logger := logging.getLogger(...))`
+        tuple 代入      `a, logger = 1, logging.getLogger(...)`
+        属性への代入     `self._logger = logging.getLogger(...)`
+        別名            `log = logger`(すでに logger と分かっている名前の別名)
+        別名 import     `from logging import getLogger as gl` の `gl(...)`
+    """
+    names = _get_logger_names(tree)
+    bound: set[str] = set()
+
+    def is_logger(expression: ast.expr) -> bool:
+        if _is_get_logger_call(expression, names):
+            return True
+        return isinstance(expression, ast.Name | ast.Attribute) and ast.unparse(expression) in bound
+
+    changed = True
+    while changed:  # 別名(log = logger)は、束縛の順序に依らず解決するため不動点まで繰り返す
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                pairs = [p for t in node.targets for p in _binding_pairs(t, node.value)]
+            elif isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value is not None:
+                pairs = [(node.target, node.value)]
+            else:
+                continue
+            for target, value in pairs:
+                if not isinstance(target, ast.Name | ast.Attribute) or not is_logger(value):
+                    continue
+                key = ast.unparse(target)
+                if key not in bound:
+                    bound.add(key)
+                    changed = True
+    return bound
 
 
 def _logger_facts(source: str) -> tuple[bool, bool]:
     """(INFO / DEBUG を呼ぶか, ログレベルを宣言しているか)を返す。
 
-    logger は次の 2 形で見つける。
-        束縛:  `name = logging.getLogger(...)` の name への `name.info(...)` / `name.setLevel(...)`
-        連鎖:  `logging.getLogger(...).info(...)` / `.setLevel(...)`
+    logger は、束縛した式(`_bound_logger_keys` の各形)と、連鎖呼び出し
+    (`logging.getLogger(...).info(...)` / `.setLevel(...)`)で見つける。
+
+    **検出できない形(対象外。実際の src には無いことを、`_scan_src` の実測と
+    11 件の allowlist の一致で確認している)**
+        ・関数の戻り値から得た logger        `logger = make_logger()`
+        ・コンテナの要素・引数として渡された logger
+          `loggers["x"].info(...)` / `def f(log): log.info(...)`
+        ・`getattr(...)` 等の動的な取得
+    これらは検出器の限界であり、見えているから安全だとは主張しない。新しい形が src に現れたら、
+    検出器を広げる(`test_known_blind_spots_*` がその変更に気づくための固定である)。
     """
     tree = ast.parse(source)
-    bound: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and _is_get_logger_call(node.value):
-            bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    bound = _bound_logger_keys(tree)
+    names = _get_logger_names(tree)
 
     def is_logger(expression: ast.expr) -> bool:
-        return (isinstance(expression, ast.Name) and expression.id in bound) or _is_get_logger_call(
-            expression
-        )
+        if _is_get_logger_call(expression, names):
+            return True
+        return isinstance(expression, ast.Name | ast.Attribute) and ast.unparse(expression) in bound
 
     calls_quiet_level = False
     declares_level = False
@@ -212,6 +281,99 @@ def test_detector_classifies_logger_usage(
     source: str, calls_quiet_level: bool, declares_level: bool
 ) -> None:
     assert _logger_facts(source) == (calls_quiet_level, declares_level)
+
+
+_SUPPORTED_BINDING_FORMS = {
+    "annotated assignment": (
+        "import logging\nlogger: logging.Logger = logging.getLogger(__name__)\nlogger.info('x')\n"
+    ),
+    "walrus": "import logging\nif (logger := logging.getLogger(__name__)):\n    logger.info('x')\n",
+    "tuple assignment": (
+        "import logging\nversion, logger = 1, logging.getLogger(__name__)\nlogger.info('x')\n"
+    ),
+    "attribute binding": (
+        "import logging\nclass A:\n    def __init__(self):\n"
+        "        self._logger = logging.getLogger(__name__)\n"
+        "    def run(self):\n        self._logger.info('x')\n"
+    ),
+    "alias of a bound logger": (
+        "import logging\nlogger = logging.getLogger(__name__)\nlog = logger\nlog.info('x')\n"
+    ),
+    "alias defined before use (order independent)": (
+        "import logging\ndef f():\n    log.info('x')\n"
+        "log = logger\nlogger = logging.getLogger(__name__)\n"
+    ),
+    "aliased getLogger import": (
+        "from logging import getLogger as gl\nlogger = gl(__name__)\nlogger.info('x')\n"
+    ),
+    "chained call": "import logging\nlogging.getLogger(__name__).info('x')\n",
+}
+
+
+@pytest.mark.parametrize("form", sorted(_SUPPORTED_BINDING_FORMS))
+def test_detector_recognizes_every_supported_binding_form(form: str) -> None:
+    """PR #436 F1: 代入以外の束縛形でも、INFO を呼ぶ module を「未宣言」として拾う。
+
+    検出器が見ない形があると、その形で logger を束縛した未宣言 module が黙ってすり抜け、
+    PR-2〜PR-6 が依存するこの guard の保証が崩れる。
+    """
+    source = _SUPPORTED_BINDING_FORMS[form]
+
+    assert _logger_facts(source) == (True, False), form
+
+
+@pytest.mark.parametrize("form", sorted(_SUPPORTED_BINDING_FORMS))
+def test_setlevel_is_recognized_through_every_supported_binding_form(form: str) -> None:
+    """宣言(setLevel)の側も、同じ束縛形で見つける(宣言済みを未宣言と誤認しない)。"""
+    source = _SUPPORTED_BINDING_FORMS[form].replace(".info('x')", ".setLevel(20)")
+
+    assert _logger_facts(source) == (False, True), form
+
+
+_KNOWN_BLIND_SPOTS = {
+    "logger from a function's return value": (
+        "import logging\nlogger = make_logger()\nlogger.info('x')\n"
+    ),
+    "logger from a container element": (
+        "import logging\nloggers = {'x': logging.getLogger('x')}\nloggers['x'].info('x')\n"
+    ),
+    "logger passed as an argument": "def f(log):\n    log.info('x')\n",
+    "dynamic lookup": "import logging\ngetattr(logging, 'x').info('x')\n",
+}
+
+
+@pytest.mark.parametrize("form", sorted(_KNOWN_BLIND_SPOTS))
+def test_known_blind_spots_are_not_detected(form: str) -> None:
+    """検出できない形(検出器の限界)を、固定して記録する。**見えているから安全、とは主張しない。**
+
+    実際の src にこの形の未宣言 module が無いことは、`_scan_src` の実測
+    (11 件の allowlist との一致)で確認している。
+    新しい形が src に現れたら検出器を広げる。将来この形を検出できるようにしたときは、このテストが
+    落ちて気づけるようにしてある(その場合は本テストの期待と `_logger_facts` の docstring を
+    更新する)。
+    """
+    assert _logger_facts(_KNOWN_BLIND_SPOTS[form]) == (False, False), form
+
+
+def test_non_logger_bindings_are_not_mistaken_for_loggers() -> None:
+    """logger でない値の束縛(同じ tuple 代入・注釈つき代入・属性代入)を、logger と誤認しない。"""
+    source = (
+        "import logging\n"
+        "a, b = 1, 2\n"
+        "counter: int = 0\n"
+        "class A:\n    def __init__(self):\n        self.value = object()\n"
+        "counter.info('x')\nb.info('x')\nA().value.info('x')\n"
+    )
+
+    assert _logger_facts(source) == (False, False)
+
+
+def test_tuple_assignment_pairs_elements_by_position() -> None:
+    """tuple 代入は位置で対応させる(2 番目だけが logger なら、1 番目を logger と誤認しない)。"""
+    source = "import logging\nfirst, second = 1, logging.getLogger(__name__)\nfirst.info('x')\n"
+
+    assert _logger_facts(source) == (False, False)
+    assert _logger_facts(source.replace("first.info", "second.info")) == (True, False)
 
 
 def test_scan_reports_an_undeclared_module_and_ignores_a_declared_one(
