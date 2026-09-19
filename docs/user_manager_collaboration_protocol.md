@@ -1152,8 +1152,10 @@ USER 本人性は解決しない。
 
 ### preflight の検査項目
 
-read-only の preflight checker が検査する項目は、次の **15 項目**である。1 つでも満たさなければ fail-close とする。
-**出典が異なる 2 つの群に分けて示す**(どの項目が v3 由来で、どれが v3 の外かを、本文だけで判別できるようにする)。
+read-only の preflight checker は、**上の HUMAN_GATE_VALID の各条件のうち機械で検査できるものに加え**、
+次の **15 項目**を検査する。1 つでも満たさなければ、または判定できなければ fail-close とする。
+15 項目は、**出典が異なる 2 つの群に分けて示す**(どの項目が v3 由来で、どれが v3 の外かを、本文だけで判別できるようにする)。
+15 項目は HUMAN_GATE_VALID の 17 条件を**置き換えるものではない**(17 条件との対応は、下の「17 条件との対応」)。
 
 ```
 【A】Issue #332 の v3 §6(b) の検査項目(14 項目)
@@ -1184,6 +1186,36 @@ read-only の preflight checker が検査する項目は、次の **15 項目**�
 v3 が定義しておらず、本節も定めない。checker の実装(Issue #332 Unit 1-B)の前に、
 その内容を確認する必要がある(AI が推測で補わない)。
 ```
+
+#### 17 条件との対応
+
+```
+HUMAN_GATE_VALID の条件                     preflight での扱い
+APPROVAL_REQUEST_EXISTS                     15 項目の「request が存在する」で検査する
+RECEIPT_EXISTS                              15 項目の「receipt が存在する」と、【B】で検査する
+REQUEST_ID_MATCHES / GATE_TYPE_MATCHES /    15 項目の同名の項目で検査する
+  SCOPE_MATCHES / EXECUTOR_MATCHES /
+  TARGET_IDENTITY_MATCHES / TARGET_VERSION_MATCHES
+NOT_EXPIRED / NOT_REVOKED / NOT_CONSUMED    15 項目の「有効期限内」「revoked でない」「consumed でない」で検査する
+NOT_EXECUTING_BY_OTHER                      15 項目の「executing の競合がない」で検査する
+RECEIPT_NOT_EDITED                          15 項目の「receipt が未編集」で検査する
+
+RECEIVED_AT_AFTER_REQUESTED_AT              15 項目には載っていないが、機械で検査できる(GitHub の created_at 同士の
+TARGET_MATCHES_AT_REQUEST_TIME              比較 / REQUEST と RECEIPT の TARGET_VERSION の比較)。HUMAN_GATE_VALID の
+                                            条件であるため、preflight は検査する。
+
+USER_DIRECT_TURN                            機械では検査できない(USER 本人の直接の入力であったかは、実行者の申告に
+EXPLICIT_APPROVAL_INTENT                    依存する。残余リスク R-1・R-6。承認の意思が明示的であったかも、機械では判定できない)。
+                                            preflight は、これらを検査せず、結果に「機械では検査できない」ことを明示する
+                                            (PASS を、これらを含めた真正性の保証として読ませない)。
+```
+
+```
+上の 2 条件(RECEIVED_AT_AFTER_REQUESTED_AT / TARGET_MATCHES_AT_REQUEST_TIME)は、15 項目にも、v3 §6(b) の
+14 項目にも載っていない。これらは v3 §2 の HUMAN_GATE_VALID に由来する。本節は、それらを preflight の
+検査対象から外さない。
+```
+
 
 ### 実行者の義務(発効後)
 
@@ -3544,4 +3576,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-13 | 3.7節を **merge 可否の判断だけを定める節へ改め、提示項目を ai_operation_message_contract.md 8節へ実体として移した**(Issue #345)。旧 3.7節は「発効後は提示形式の正本を contract 8節とし、本節の提示項目はそこへ吸収される」と**宣言していたが、吸収先に提示項目が存在せず**、実体としては 3.7節が唯一の提示項目の定義であり続けていた(#353 の review finding F9 が同じ食い違いを指摘している)。見出しを `## 3.7 merge 判断を支援する提示形式` から **`## 3.7 merge 可否の判断(MERGE_DECISION_RULES)`** へ改称し(旧題を文字列参照している箇所は本節以外に 0 件、節番号「3.7節」での参照 5 件は番号参照のため影響しないことを実測済み)、11 項目の提示 field を定義する fence を削除して、**`MERGE_DECISION_RULES` の 6 点**(1 対象を一意に特定できる形で提示する / 2 可否は `MERGE_READY` で表し YES は承認でも実行でもない / 3 本番影響と他 Issue 影響を必ず評価する / 4 残課題があることとそれが merge を止めるべきかは別 / 5 「技術的に merge 可能」と「利用者が承認した」は別 / 6 判定が何を読んで出されたかを提示に残し `REVIEW_VERDICT` には `REVIEW_KIND` を併記する)へ置き換えた。**`RECOMMENDED_ACTION` は廃止**した(唯一廃止した語である。判断の意味は 2 と 6 が持ち、利用者への見せ方は 8節が持つ)。`PR_NUMBER` / `PRODUCTION_IMPACT` / `OTHER_ISSUE_IMPACT` / `REMAINING_ISSUES_OR_CONCERNS` の**項目名**は本節から外し、意味は 1 / 3 / 4 の日本語の規範として残した。`MERGE_READY` / `REVIEW_VERDICT` / `REVIEW_KIND` / `MERGE_BLOCKING_CONCERN` / `INDEPENDENT_REVIEW_SNAPSHOT` / `REVIEW_INPUT_EVIDENCE` は**両文書に残るが役割が異なる**(本節 = 判断の意味 / 8節 = 提示の項目)。同じ識別子が両方にあること自体は重複ではなく、**同義の段落が両方にあること**が重複であるため、移動した 2 ブロック(11 項目を並べた例 / 「表へ固定しない」の注記)は移動元から削除した。例は**判断の例**(残課題ありで `MERGE_BLOCKING_CONCERN = NO`)だけを残し、提示のレイアウトは 8節の `MERGE_GATE` の例を正本とした。「発効後の正本」ブロックは BEFORE / AFTER の 2 行を歴史的記述として残したうえで、**この吸収が Issue #345 で実体化したこと**と**本節は判断の中身の正本であって提示項目の正本ではない**ことを追記した。`MERGE_APPROVAL_IS_BOUND_TO_EXACT_REVIEWED_HEAD = YES` は承認の境界であるため本節に残している。**判定語 4 種・Human Gate・承認単位・`MERGE_EXECUTOR`・2.6節の G2・3.9〜3.14節の独立レビューはいずれも変更していない。**`policy_registry.yaml` へ `PROTOCOL.MERGE_DECISION_RULES`(operation = MERGE)を 1 件追加した(改称後の見出しを anchor とする。operation MERGE から本節を引けない状態の解消であり、既存 entry は変更していない)。CLAUDE.md は変更していない(参照は節番号であり改称の影響を受けない)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 1.6節へ **利用者向けの回答の構成と、内部表記を日本語の意味へ翻訳する規則を追加**した(Issue #357)。旧 1.6節は語彙(そのまま使ってよい用語 / 説明が必要な概念)と最低限の説明内容を定めていたが、**回答をどう組み立てるか・内部の状態値や識別子をどう扱うか・選択肢や大きな変更一覧をどう示すか・送る前に何を確かめるかが正本に無く**、内部識別子を並べた回答が Human Gate の判断材料にならない状態が実際に生じた。「回答の順序」の 6 段を**【結論】【状況】【影響】【これからの進め方】【USER に判断してほしいこと】【技術詳細・監査情報】の 6 見出しへ置き換え**(並存させない)、**「安全面」は独立見出しにせず【影響】の中で「何が危険か / 今進めてよいか / 失敗したときに戻せるか」として書く**こと、**毎回 6 つを機械的に出さない**(判断が不要なら「今 USER がすることはありません」と1 行で書き、短い報告を冗長にしない)ことを定めた。**AI どうしの handoff / durable record / 監査で構造化した key = value を使うことは変えていない**(本節の対象は管理者から利用者への回答である)。新しい小節として「内部の英語表記は日本語で示す」(意味を主・内部表記は併記。内部 ID を本文の主役にしない。**記録をやめるという意味ではない**)、「承認をお願いするときの識別情報は短縮しない」(**分かりやすさのために承認対象を曖昧にしない**。普段の本文は読みやすさ優先でよいが、承認の場面では exact な識別情報を明示し、**それが何を特定するものかを日本語でも 1 行説明する**。提示のしかたの正本は ai_operation_message_contract.md 8節であるが「8節に従う」とだけ書いて済ませない)、「選択肢を示すときに書くこと」(各案の内容・メリット・デメリット・管理者の推奨。**推奨を書かないまま「どれにしますか」と尋ねない**。推奨は承認ではない)、「大きな変更の一覧は意味へ翻訳してから示す」(予定どおり / 予定外だが確認済み / 調査中 / 本番反映を止めるべき の 4 分類。件数や内訳は【技術詳細・監査情報】へ)、「**測っていない値を実測値として示さない**」(未計測 / 概算と明示する。監査証跡へ残す値は記録する直前に実測する。利用者判断)、「送信前の確認」(9 項目の自己確認。**満たしたことを相手が検査する手段は無い**)を置いた。あわせて「そのまま使ってよいもの」へ一般的な開発用語を 1 行、「説明が必要なもの」の B へ Lambda の Layer と Replacement を、「最低限説明する内容」へ 3 項目(止める必要があるか / 取り返しがつくか / 選択肢と推奨)を追加し、「技術的な情報は残す」へ分ける場所が【技術詳細・監査情報】であることを 1 文足した。**新しい内部用語(識別子)を 1 つも増やしていない**(利用者判断。既存の `USER_EXPLANATION_LEVEL` / `USER_CAN_MAKE_AN_INFORMED_DECISION` / `INTERNAL_STATUS_ONLY_RESPONSE` をそのまま使う)。**適用範囲(管理者 -> 利用者)・例外・目的・前提とする知識水準・「内部コードだけで回答しない」・Human Gate の依頼の 6 項目・技術的な正確さを落とさないの各ブロックは変更していない。開発者 -> 管理者の機械可読形式も不変である。** ai_operation_message_contract.md 8.1節へ**本節を指す参照 1 行**を置き、`policy_registry.yaml` へ `PROTOCOL.USER_EXPLANATION_LEVEL` を 1 件追加した(索引に限定し本文は書かない。見出しを変えていないため既存 anchor は有効なままである)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-19 | 2.7節「Human Gate の真正性(HUMAN_GATE_AUTHENTICITY)」を新設した(Issue #332 Unit 1-A)。全 AI セッションが同一の GitHub アカウントで投稿するため、author / mergedBy から USER 本人の承認を識別できず、承認が本文の自己申告に依存し、読み飛ばしを検出する仕組みも無い、という欠陥への対処である。(1)`HUMAN_GATE_VALID` の条件(USER_DIRECT_TURN・EXPLICIT_APPROVAL_INTENT・APPROVAL_REQUEST / RECEIPT の存在と REQUEST_ID・GATE_TYPE・SCOPE・EXECUTOR・TARGET_IDENTITY・TARGET_VERSION の一致・時系列整合・NOT_EXPIRED / NOT_REVOKED / NOT_CONSUMED・EXECUTING の single-writer・RECEIPT 未編集)、(2)Human Gate の状態遷移(REQUESTED / APPROVED / EXECUTING / CONSUMED / EXPIRED / REVOKED / INVALIDATED_BY_TARGET_CHANGE)、(3)GitHub 上の身元共有(R-7。author / mergedBy を USER 本人の証拠にしない。真正性の起点は USER_DIRECT_TURN と同一ターンの RECEIPT のみ)、(4)gate 別の TTL・binding・retry、(5)緊急時 `EMERGENCY_USER_ABSENT_POLICY = FAIL_CLOSE`(USER 不在時の bypass 経路を設けない)、(6)残余リスク R-1〜R-13、(7)発効条件 `EFFECTIVE_FROM_CONDITIONS` と `OPERATIONAL_READINESS_CONFIRMED`、過去の承認記録の扱い(`LEGACY_UNVERIFIED_APPROVAL`)、(8)preflight の検査項目(v3 §6(b) の 14 項目。うち「必要な MANAGER scope check」の内容は v3 が定義しておらず、本節も定めない)を正本へ反映した。**本改訂は発効しない**(`MERGE_IS_NOT_ACTIVATION = YES`。発効状態の正本は `HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録で、固定値を本書へ埋め込まない。発効前は旧運用を継続し、新旧を途中で混在させない。識別子は既存の `ACTIVATION_STATE_SSOT` [#353]・`SESSION_POLICY_ACTIVATION_STATE_SSOT` [#355] と衝突しない名前にした)。**2節の承認単位・例外なしの原則・2.5節・2.6節・3節以降・1節の役割定義はいずれも変更・緩和していない。** 表に行が無い gate(release-blocker 解除・rollback 等)の TTL・binding・retry は v3 に定めが無く、AI が補わず「未決定」と明記した(発効前に USER の決定を要する)。**preflight の自動化は形式の検査を機械化するにすぎず、USER 本人性は解決しない**ことも明記した。本文書は形式(書式)を定めず、書式は ai_operation_message_contract.md 8.6節が正本である。設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |
-| 2026-09-19 | 2.7節の 3 か所を補正した(Issue #332 Unit 1-A の追補)。(1)`RECEIPT_EXISTS` を「**有効な** RECEIPT が存在する」と明確化し、`RECEIPT_STATE` が `APPROVAL_DECISION` と一致しない RECEIPT(APPROVE 以外なのに APPROVED 等)は無効で存在するものとして数えないことを明記した。(2)preflight の検査項目へ「`RECEIPT_STATE` が `APPROVAL_DECISION` と一致する」を追加した(検査項目を【A】v3 §6(b) 由来の14項目と【B】v3 の外[contract 8.6.2節由来]の1項目に分け、出典を本文で判別できるようにした)。**いずれも新しい規則ではなく、PR #426 のレビュー(F1)で ai_operation_message_contract.md 8.6.2節に既に定めた不変条件が、本節の一覧に無かったための所在の補正である**(一覧から実装すると、却下の受領証を承認として読む向きの検査が抜ける)。(3)標準の TTL より長い `VALID_UNTIL` を許すかを、v3 に定めが無い「未決定」として明記した(AI が推測で補わない)。**HUMAN_GATE_VALID の17条件の名前・状態遷移・TTL の表・発効条件・残余リスクはいずれも変更していない。本改訂は発効しない**(発効状態の正本は #332 の最新の durable な記録)。MANAGER 判断(2026-09-19)により、Unit 1-B の実装(scripts/)の前に正本を整えるために行う。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-19 | 2.7節の 3 か所を補正した(Issue #332 Unit 1-A の追補)。(1)`RECEIPT_EXISTS` を「**有効な** RECEIPT が存在する」と明確化し、`RECEIPT_STATE` が `APPROVAL_DECISION` と一致しない RECEIPT(APPROVE 以外なのに APPROVED 等)は無効で存在するものとして数えないことを明記した。(2)preflight の検査項目へ「`RECEIPT_STATE` が `APPROVAL_DECISION` と一致する」を追加した(検査項目を【A】v3 §6(b) 由来の14項目と【B】v3 の外[contract 8.6.2節由来]の1項目に分け、出典を本文で判別できるようにした。15 項目が HUMAN_GATE_VALID の17条件を置き換えるものではないことと、17条件との対応[15項目で覆われるもの・15項目に無いが機械で検査できるもの・機械では検査できないもの]を「17 条件との対応」として明記した)。**いずれも新しい規則ではなく、PR #426 のレビュー(F1)で ai_operation_message_contract.md 8.6.2節に既に定めた不変条件が、本節の一覧に無かったための所在の補正である**(一覧から実装すると、却下の受領証を承認として読む向きの検査が抜ける)。(3)標準の TTL より長い `VALID_UNTIL` を許すかを、v3 に定めが無い「未決定」として明記した(AI が推測で補わない)。**HUMAN_GATE_VALID の17条件の名前・状態遷移・TTL の表・発効条件・残余リスクはいずれも変更していない。本改訂は発効しない**(発効状態の正本は #332 の最新の durable な記録)。MANAGER 判断(2026-09-19)により、Unit 1-B の実装(scripts/)の前に正本を整えるために行う。docs のみの変更であり、コード・Production 挙動の変更なし |
