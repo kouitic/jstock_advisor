@@ -36,6 +36,11 @@ from jstock_advisor.infrastructure.local_repository.watch_state_repository impor
 )
 
 logger = logging.getLogger(__name__)
+# Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
+# module が宣言しないと INFO は出ない)。この module は owner・holding_id を受け取らない
+# (watch_id = 銘柄コード:監視種別)。出力する値に、状態の中身(価格・距離)を含めない。
+# 有効化の時点の PII 確認は PR に記録した。
+logger.setLevel(logging.INFO)
 
 _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
