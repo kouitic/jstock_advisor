@@ -16,6 +16,7 @@ from jstock_advisor.infrastructure.line.client import (
     ConsoleLineClient,
     LineCredentialsMissingError,
     LiveLineClient,
+    build_line_client_for_run,
     build_line_client_from_env,
     build_live_line_client_from_env,
 )
@@ -110,3 +111,42 @@ def test_build_live_line_client_from_env_returns_live_client_when_credentials_pr
     client = build_live_line_client_from_env()
 
     assert isinstance(client, LiveLineClient)
+
+
+def test_build_line_client_for_run_dry_run_falls_back_to_console_when_credentials_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DRY_RUN(外部送信なし)は認証情報が無くても検証できる。"""
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+
+    assert isinstance(build_line_client_for_run(dry_run=True), ConsoleLineClient)
+
+
+def test_build_line_client_for_run_dry_run_uses_live_client_when_credentials_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
+    monkeypatch.setenv("LINE_USER_ID", "user-value")
+
+    assert isinstance(build_line_client_for_run(dry_run=True), LiveLineClient)
+
+
+def test_build_line_client_for_run_sending_run_raises_when_credentials_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NORMAL / VALIDATION+SEND(外部送信が起きうる実行)は、欠落を黙って通さない。"""
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+
+    with pytest.raises(LineCredentialsMissingError):
+        build_line_client_for_run(dry_run=False)
+
+
+def test_build_line_client_for_run_sending_run_uses_live_client_when_credentials_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
+    monkeypatch.setenv("LINE_USER_ID", "user-value")
+
+    assert isinstance(build_line_client_for_run(dry_run=False), LiveLineClient)
