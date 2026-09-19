@@ -2574,3 +2574,118 @@ baseline は保有判断スコアの比較基準であり、**active が変わ�
 ★ scan の出力を、holding_ref 以外の形(所有者名・銘柄コード)で記録・共有しない。
 ```
 
+
+## 23. LINE認証情報の欠落を可視化する変更(Issue #117 stage (b))のProduction反映の運用条件(2026-09-19追加)
+
+この節は、Issue #117 stage (b)(LINE通知clientの構築を、認証情報が無い場合に黙って
+ConsoleLineClientへ落とさず可視化する変更)をProductionへ反映するときの運用条件を定める。
+決定の出典は #117 issuecomment-5740707381(USERの決定、MANAGER経由の伝達)。
+`PRODUCTION_DEPLOY_APPROVED = NO` であり、**ChangeSetのCREATEとEXECUTEは従来どおりそれぞれ別のHuman Gate**である
+(正本は `docs/user_manager_collaboration_protocol.md` 1.5節と本書19.2節)。
+
+### 23.0 反映で何が変わるか(前提)
+
+認証情報が正常な運用の挙動は変わらない。**欠落した場合だけ**、従来は黙って通知が失われていたものが、
+次のとおり可視化される(失敗する)。
+
+```
+line_webhook                 Lambda失敗(Errors)
+dispatcher(NEW_CANDIDATE)    lease取得・BatchRuns作成の前に失敗(バッチが作られない。状態変更なし)
+buy_candidates / holdings /  NORMAL・VALIDATION+SENDは失敗。DRY_RUNは従来どおり(認証情報不要)
+  disclosure_check
+worker / terminal_failure    NEW_CANDIDATE_SCREENINGを含む呼び出しは、状態変更の前に失敗。MAINTENANCEのみは影響なし
+reconciler                   ウォッチリスト登録は継続し、通知だけNOTIFICATION_FAILED。全処理の後にErrors
+weekly_review・CLI 3本        未変更(従来どおり)
+```
+
+LINE認証情報は `infra/template.yaml` の `Globals.Function.Environment.Variables` で、`{{resolve:secretsmanager:...}}` により
+**デプロイ時に全Lambda共通の値として固定**される(19.0節)。実行時にSecrets Managerを読みに行くのではない。
+
+### 23.1 反映の窓と、実行直前の必須確認(D1。#430の運用条件を含む)
+
+```
+推奨する窓        土曜 12:00 以降 〜 日曜(JST)
+                  ★ 時刻だけを安全条件にしない。次の必須確認を全て満たさなければ、土曜12:00以降であっても実行しない。
+```
+
+窓の根拠: dispatchは月〜金の06:00のみで、バッチは遅くとも24時間(`batch_processing_timeout_hours`)で毎時のreconcilerが確定する。
+金曜開始のバッチは土曜の朝までに終端する。土曜10:00・11:00の月次・四半期レビューの後なら、LINEを使うジョブとも重ならず、
+月曜06:00のdispatchまで丸1日の是正時間が取れる。
+
+**実行直前の必須確認(全て満たすこと。read-onlyで確認する)**
+
+```
+C1 NEW_CANDIDATE_SCREENINGの進行中バッチが0であること。
+   batch_runsの最新バッチが終端状態(COMPLETED / COMPLETED_WITH_NOTIFICATION_FAILURE / ABORTED / TIMED_OUT / DISPATCH_FAILED)であり、
+   DISPATCHING / RUNNING / FINALIZE_* / NOTIFICATION_* / TIMEOUT_* が無いこと。
+   ★ 運用条件: NEW_CANDIDATEのバッチ処理中は、LINE credentialのrotation・再デプロイを行わない(#430)。
+     dispatch時点では認証情報があり、バッチ処理中に認証情報が欠落した状態で再デプロイされると、workerが評価を行えず、
+     候補が登録されないままバッチが24時間後にTIMED_OUTになる見込みがある(#430。DLQ Alarmが無いため気づかれない)。
+C2 WatchlistScreeningQueue / WatchlistTerminalFailureQueue / WatchlistTerminalFailureDLQ の滞留が0であること。
+   (デプロイ後に増減を判定する基準にもなる)
+C3 LINE credential関連のデプロイ前確認が正常であること。
+   Secrets Managerの該当シークレットが**空でない**ことを、値を読まずメタデータ(存在・最新バージョン・更新日時)だけで確認する。
+   空のシークレットで再デプロイすると、全Lambdaの LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID が空になる。
+   値・環境変数を全件出力しない(19.6節のガードレール)。
+C4 ChangeSet差分が想定内であること。Lambda関数がModifyのみで、Replacementが無く、意図しない資源が含まれないこと(19.3節の7と同じ観点)。
+```
+
+read-onlyの確認は `AWS_PROFILE=jstock-observer` で行う。観測用の権限で許可されない項目が
+ある場合は、権限を回避せず、その旨を報告して判断を仰ぐ。
+
+### 23.2 デプロイ後の手動確認(D2。暫定監視。期間限定)
+
+恒久のAlarmが未整備であるため、**このデプロイ固有の暫定監視**として次を行う。
+
+```
+V3 06:00のdispatcher: Errors = 0、BatchRunsが作成される(認証情報が有効であることの証拠)
+V4 worker: Errors = 0、WatchlistTerminalFailureDLQ(C2の基準)が増えていない
+V5 バッチが終端し、NOTIFICATION_FAILED / TIMED_OUT が無い(通知が実際に送信できた)
+V6 08:00のbuy / holdings、10:00・12:30・15:30のdisclosure、毎時のreconciler: Errors = 0
+V7 ログ検索(CloudWatch Logs Insights、read-only): LineCredentialsMissingError が0件
+```
+
+```
+期間     デプロイ直後 / 翌営業日 / その次の営業日
+         ・デプロイ直後は確認できる範囲(毎時のreconcilerのErrors・キュー/DLQの滞留・ログ検索。V4・V6・V7の一部)
+         ・営業日(月〜金)はV3〜V7を確認する
+終了     ★ 2営業日連続で異常が無ければ、今回のデプロイ固有の手動監視は終了してよい。
+         恒久監視が入るまで無期限の日次手作業にはしない。
+```
+
+**留意点**: 「Errorsが止まった = 復旧」とは限らない。worker・terminal_failureの連鎖(#430)が進んだ後は、
+認証情報を直してErrorsが止まっても、DLQに残ったメッセージ・TIMED_OUTになったバッチは自動では復旧しない。
+Errorsの有無だけでなく、DLQの滞留とバッチの終端状態(NOTIFICATION_FAILED / TIMED_OUT)も見ること。
+
+**恒久監視の未整備(残る問題)**: CloudWatch AlarmはEvaluationFunctionのErrors/Durationの2本のみで、AlarmActionsも無い。
+`infra/template.yaml` のコメントが「運用側で設定すること」とするDLQの滞留Alarmも存在しない。
+次の3点を #132(本番ジョブ異常の自動検知)の要件として記録した(#132 issuecomment-5740709204):
+(1) WatchlistTerminalFailureDLQのメッセージ滞留監視 (2) LINE関連LambdaのErrors監視 (3) 「Errorsが止まった=復旧」とは限らない点。
+
+### 23.3 DLQ redrive(障害時の候補案。★未検証。正式な復旧手順ではない)
+
+```
+REDRIVE_VERIFIED = NO
+```
+
+★ **この節は、正式な復旧手順ではない。** 検証(下記の6項目)を経るまでは「障害時の候補案」としてのみ扱う。
+なお、通知だけが欠落した場合(NOTIFICATION_FAILED)は、credential復旧前に既存のretry上限へ達すると
+自動通知されず、手動の retry-notification が必要になる(USER承認済みの契約。#117 issuecomment-5740407445)。
+
+worker・terminal_failureの連鎖(#430)でDLQに溜まったメッセージについて、認証情報を直した後にWatchlistScreeningQueueへ
+戻す(SQSのDLQ redrive。移動先を指定する)ことで、dispatchから24時間以内でバッチがRUNNINGのままなら、workerが再評価して
+バッチが完了する見込みがある。**これは検証を経ていない候補案であり、この節を根拠にProductionへ実行してはならない**
+(実行はいずれにせよ、別のHuman Gateが必要なProductionの書き込みである)。
+
+正式な手順として本書へ反映する前に、次を検証で確認する(検証の実施はUSERの別途承認が必要):
+
+```
+1 RUNNINGのバッチへのredriveで、バッチが正常に復旧すること
+2 batch_id / job_type がredriveの前後で維持されること
+3 candidate lease / progress(進捗行)との整合(PENDING / PROCESSINGの行、リース取得)
+4 二重評価・二重登録が起きないこと
+5 TIMED_OUT後のredriveは安全に無効化されること(終端済みのためリース取得が失敗し、何も起きない)
+6 24時間の境界付近(タイムアウト確定の直前・直後)の挙動
+```
+
+`REDRIVE_VERIFIED = YES` になるまでは、上記は「障害時の候補案」としてのみ扱う。
