@@ -28,6 +28,10 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
 )
 
 logger = logging.getLogger(__name__)
+# Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
+# module が宣言しないと INFO は出ない)。出力する値に、生の owner / holding_id 等を含めない
+# (#135 / #416)。有効化の時点の PII 確認は PR に記録した。
+logger.setLevel(logging.INFO)
 
 RECOVERY_ACTION_KEY = "recovery_action"
 FINALIZE_ONLY_ACTION = "FINALIZE_ONLY"

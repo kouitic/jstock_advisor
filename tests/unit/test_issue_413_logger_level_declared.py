@@ -50,7 +50,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src"
 
 #: 現在、ログレベルを宣言していない(= INFO が出力されない)module。
-#: #413 の Phase A の走査と一致する 11 件。
+#: #413 の Phase A の走査で 11 件(PR-2 で 3 件を外し、現在は 8 件)。
 #: 各 PR が有効化(または WARNING の明示)とともに 1 件ずつ外す。最後に空になる。
 #:
 #:   PR-2  audit_service / _finalize_recovery / watchlist_batch_finalizer      (D9・D4・D1・D3)
@@ -61,14 +61,11 @@ _SRC = _REPO_ROOT / "src"
 #:         watchlist_data_cache と cross_validating_impl は「明示的に WARNING」)
 #:   PR-6  investment_thesis_service                                            (D3。#416 は済み)
 _UNDECLARED_ALLOWLIST = {
-    "src/jstock_advisor/lambda_handlers/_finalize_recovery.py",
     "src/jstock_advisor/providers/dividend_data/cross_validating_impl.py",
-    "src/jstock_advisor/services/audit_service.py",
     "src/jstock_advisor/services/investment_thesis_service.py",
     "src/jstock_advisor/services/recommendation_evaluation_service.py",
     "src/jstock_advisor/services/shareholder_benefit_registry_service.py",
     "src/jstock_advisor/services/watch_state_service.py",
-    "src/jstock_advisor/services/watchlist_batch_finalizer.py",
     "src/jstock_advisor/services/watchlist_data_cache.py",
     "src/jstock_advisor/services/watchlist_display_name.py",
     "src/jstock_advisor/services/weekly_improvement_review_service.py",
@@ -252,7 +249,7 @@ def _logger_facts(source: str) -> tuple[bool, bool]:
         ・logger を束縛した変数を、あとで別の値へ再代入し、その後に `.info(...)` を呼ぶ
     誤認の結果は「未宣言と判定される module が増える」ことだけで、
     宣言の無い INFO を通す方向には働かない。
-    現在の src に該当は無い(`_scan_src` の実測と 11 件の allowlist の一致)。将来この形が書かれて
+    現在の src に該当は無い(測定は PR #436 の本文に記録した)。将来この形が書かれて
     テストが落ちたときは、名前の衝突による過剰検出を疑う(理由が分かりにくい失敗になるため、ここに
     記す。scope 対応にはしていない。`test_known_over_detections_*` が現在の挙動を固定している)。
     """
@@ -684,11 +681,11 @@ def test_scan_reports_an_undeclared_module_and_ignores_a_declared_one(
 
 
 def test_current_undeclared_modules_match_the_allowlist_exactly() -> None:
-    """実測(11 件)と allowlist が完全に一致する(#413 の Phase A の測定と同じ件数)。"""
+    """実測と allowlist が完全に一致する(Phase A の 11 件から、各 PR が 1 件以上ずつ減らす)。"""
     undeclared, _ = _scan_src()
 
     assert undeclared == _UNDECLARED_ALLOWLIST
-    assert len(_UNDECLARED_ALLOWLIST) == 11
+    assert len(_UNDECLARED_ALLOWLIST) == 8
 
 
 # --- 3 実行時 ------------------------------------------------------------------------------
