@@ -210,11 +210,14 @@ class InvestmentThesisService:
             supersedes_baseline_id=None,
             baseline_values=baseline_values,
         )
+        # ★ baseline_id(= f"{holding_id}:v{version}")は所有者名を含むため、生のまま出さない
+        #   (Issue #416)。holding_ref(log_ref 済み)と version で、どの holding の何番目の
+        #   baseline かは等価に特定できる。
         logger.info(
             "VALIDATION MODE baseline activation transient (not persisted) holding_ref=%s "
-            "baseline_id=%s",
+            "version=%d",
             log_ref(holding_id),
-            baseline_id,
+            version,
         )
         return baseline
 
