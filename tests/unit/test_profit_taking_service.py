@@ -1449,3 +1449,169 @@ def test_issue_419_non_hold_record_has_the_same_shape(monkeypatch: pytest.Monkey
     assert outcome.recommendation.recommendation_type == RecommendationType.WATCH
     for key in _HOLD_BASIS_KEYS:
         assert key in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #160 shadow計測 PR-2b: 利確の緩和要因のうち、UNKNOWN(None)を事実として識別できる
+# 2項目の実値を、判定に入る前の事実(非永続)として載せる。判定式・MitigatingFactorInputsは不変。
+# ---------------------------------------------------------------------------
+
+
+def _analyze_with_dividend(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    years: int | None,
+    policy: bool | None,
+    recommendation_type: RecommendationType = RecommendationType.FULL_PROFIT_TAKE,
+):
+    from jstock_advisor.services import profit_taking_service as service_module
+
+    real_build = service_module.build_stock_snapshot
+
+    def _build(*args: object, **kwargs: object):
+        snapshot, error = real_build(*args, **kwargs)  # type: ignore[arg-type]
+        assert snapshot is not None
+        dividend = snapshot.dividend.model_copy(
+            update={
+                "consecutive_dividend_increase_years": years,
+                "is_progressive_or_doe_policy": policy,
+            }
+        )
+        return dataclasses.replace(snapshot, dividend=dividend), error
+
+    monkeypatch.setattr(service_module, "build_stock_snapshot", _build)
+    canned = _canned_result(recommendation_type)
+    monkeypatch.setattr(service_module, "evaluate_profit_taking", lambda **kw: canned)
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    return service.analyze(_holding("2914"), _NOW)
+
+
+@pytest.mark.parametrize(
+    ("years", "policy"),
+    [(None, None), (None, True), (3, None), (0, False), (5, True)],
+)
+def test_safety_facts_carry_the_actual_values_including_none(
+    monkeypatch: pytest.MonkeyPatch, years: int | None, policy: bool | None
+) -> None:
+    """Noneは「取得できていない」、0年・Falseは「確認した結果」。そのまま転記する。"""
+    outcome = _analyze_with_dividend(monkeypatch, years=years, policy=policy)
+
+    assert outcome.recommendation is not None
+    assert outcome.safety_facts is not None
+    facts = outcome.safety_facts.profit_taking_mitigation
+    assert facts is not None
+    assert facts.continuous_dividend_increase_years == years
+    assert facts.is_progressive_or_doe_policy == policy
+    assert outcome.safety_facts.financials_are_stale is None  # BUY側の事実は利確では載せない(Q-D)
+    assert outcome.safety_facts.corporate_action is None  # G4はPR-2c
+
+
+def test_safety_facts_do_not_change_the_existing_decision_or_audit_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unknown = _analyze_with_dividend(monkeypatch, years=None, policy=None)
+    known = _analyze_with_dividend(monkeypatch, years=0, policy=False)
+
+    assert unknown.recommendation is not None
+    assert known.recommendation is not None
+    # 不明(None)と確認済み(0年・False)は、判定上は従来どおり同じ扱い(緩和要因に該当しない)
+    assert unknown.recommendation.recommendation_type == known.recommendation.recommendation_type
+    assert unknown.recommendation.reasons == known.recommendation.reasons
+    assert unknown.recommendation.confidence == known.recommendation.confidence
+    assert not hasattr(unknown.recommendation, "safety_facts")  # 永続schemaへは載せない
+
+
+def test_safety_facts_are_unset_when_no_recommendation_is_produced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hold = _analyze_with_dividend(
+        monkeypatch, years=None, policy=None, recommendation_type=RecommendationType.HOLD
+    )
+
+    assert hold.recommendation is None
+    assert hold.data_error is None
+    assert hold.safety_facts is None
+
+
+def test_safety_facts_are_unset_on_data_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jstock_advisor.services import profit_taking_service as service_module
+
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (None, "boom"))
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.data_error == "boom"
+    assert outcome.safety_facts is None
+
+
+def test_safety_facts_are_excluded_from_equality_and_repr() -> None:
+    from jstock_advisor.domain.signals.judgment_safety import (
+        ProfitTakingMitigationFacts,
+        SafetyFacts,
+    )
+    from jstock_advisor.services.profit_taking_service import ProfitTakingOutcome
+
+    facts = SafetyFacts(profit_taking_mitigation=ProfitTakingMitigationFacts(None, None))
+
+    assert ProfitTakingOutcome("0000", None, None) == ProfitTakingOutcome(
+        "0000", None, None, safety_facts=facts
+    )
+    assert "safety_facts" not in repr(ProfitTakingOutcome("0000", None, None, safety_facts=facts))
+
+
+def _outcome_invalid_input(monkeypatch: pytest.MonkeyPatch):
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    return service.analyze(
+        _invalid_cost_holding(
+            "2914", average_purchase_price=Decimal("0"), total_purchase_amount=Decimal("0")
+        ),
+        _NOW,
+    )
+
+
+def _outcome_snapshot_failure(monkeypatch: pytest.MonkeyPatch):
+    from jstock_advisor.services import profit_taking_service as service_module
+
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (None, "boom"))
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    return service.analyze(_holding("2914"), _NOW)
+
+
+def _outcome_partial_fail_closed(monkeypatch: pytest.MonkeyPatch):
+    canned = _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE)
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    holding = _holding("2914").model_copy(update={"shares": 100})  # 売買単位ちょうど
+    return service.analyze(holding, _NOW)
+
+
+def _outcome_hold(monkeypatch: pytest.MonkeyPatch):
+    return _analyze_with_dividend(
+        monkeypatch, years=None, policy=None, recommendation_type=RecommendationType.HOLD
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param(_outcome_invalid_input, id="invalid_input(取得原価が不正)"),
+        pytest.param(_outcome_snapshot_failure, id="snapshot_failure(取得失敗)"),
+        pytest.param(_outcome_partial_fail_closed, id="partial_fail_closed(不変条件違反)"),
+        pytest.param(_outcome_hold, id="hold(判定できたうえでのHOLD)"),
+    ],
+)
+def test_safety_facts_are_unset_on_every_path_that_produces_no_recommendation(
+    monkeypatch: pytest.MonkeyPatch, path: object
+) -> None:
+    """推奨が生成されない**全4経路**でfactsを持たない(経路ごとに独立して落ちる)。
+
+    shadowが「推奨が出た件」を数え始めたとき、推奨の無い件が母数へ紛れ込まないようにする。
+    """
+    outcome = path(monkeypatch)  # type: ignore[operator]
+
+    assert outcome.recommendation is None
+    assert outcome.safety_facts is None
