@@ -1079,3 +1079,74 @@ def test_shadow_exit_price_range_failure_does_not_break_holding_decision_notific
     assert rec.exit_price_range_strong_price is None
     assert rec.exit_price_range_downside_review_price is None
     assert rec.exit_price_range_exit_review_price is None
+
+
+def _pure_hold_services_with_audit_id(store_dir: Path, monkeypatch, pt_audit_id: str | None):
+    """Legacy SELL・利確とも推奨なし(純粋HOLD)で、利確判定が指定のaudit_idを返す構成。"""
+    from jstock_advisor.services.profit_taking_service import ProfitTakingOutcome
+
+    services = _build_services(store_dir, RuntimeConfigMode.LEGACY)
+    monkeypatch.setattr(
+        SellSignalService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: SellSignalOutcome(holding.stock_code, None, None),
+    )
+    monkeypatch.setattr(
+        ProfitTakingService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: ProfitTakingOutcome(
+            holding.stock_code, None, None, audit_id=pt_audit_id
+        ),
+    )
+    return services
+
+
+def _saved_holding_evaluation_records(store_dir: Path):
+    latest = HoldingEvaluationRecordRepository(store_dir).get_latest_by_holding_id(
+        build_holding_id(DEFAULT_OWNER, _STOCK_CODE)
+    )
+    return [] if latest is None else [latest]
+
+
+def test_issue_369_pure_hold_persists_profit_taking_audit_log_id(store_dir: Path, monkeypatch):
+    """#369: 利確判定がHOLDのとき、その監査記録のidが評価recordへ保存される。"""
+    services = _pure_hold_services_with_audit_id(store_dir, monkeypatch, "pt-audit-369")
+
+    _run(services)
+
+    records = _saved_holding_evaluation_records(store_dir)
+    assert len(records) == 1
+    assert records[0].profit_taking_ran is True
+    assert records[0].profit_taking_audit_log_id == "pt-audit-369"
+
+
+def test_issue_369_non_hold_profit_taking_leaves_audit_log_id_none(store_dir: Path, monkeypatch):
+    """利確が推奨を作った経路は従来どおりrecommendation idで参照し、audit idは持たない。"""
+    from jstock_advisor.services.profit_taking_service import ProfitTakingOutcome
+
+    services = _build_services(store_dir, RuntimeConfigMode.LEGACY)
+    monkeypatch.setattr(
+        SellSignalService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: SellSignalOutcome(holding.stock_code, None, None),
+    )
+    fake = _fake_sell_recommendation(_STOCK_CODE).model_copy(
+        update={
+            "recommendation_id": "pt-369-rec",
+            "recommendation_type": RecommendationType.PARTIAL_PROFIT_TAKE,
+        }
+    )
+    monkeypatch.setattr(
+        ProfitTakingService,
+        "analyze",
+        lambda self, holding, now, snapshot=None: ProfitTakingOutcome(
+            holding.stock_code, fake, None, audit_id="pt-audit-ignored"
+        ),
+    )
+
+    _run(services)
+
+    records = _saved_holding_evaluation_records(store_dir)
+    assert len(records) == 1
+    assert records[0].profit_taking_recommendation_id == "pt-369-rec"
+    assert records[0].profit_taking_audit_log_id is None

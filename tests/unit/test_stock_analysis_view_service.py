@@ -2292,6 +2292,82 @@ def test_r3_profit_taking_absence_is_not_silent_for_a_pure_hold(tmp_path: Path) 
     assert "復元できません" in text
 
 
+def _save_profit_taking_audit(
+    store_dir: Path, audit_id: str = "audit-pt-1", decision_type: str = "profit_taking"
+) -> None:
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    AuditLogRepository(store_dir=store_dir).save(
+        AuditLogEntry(
+            audit_id=audit_id,
+            timestamp=_NOW,
+            stock_code="8306",
+            decision_type=decision_type,
+            input_values={"average_purchase_price": "1234.5", "shares": 777},
+            calculation_formulas={},
+            data_sources=[],
+            rule_version="v1",
+            output_values={
+                "unrealized_pnl_pct": 27.5,
+                "current_price_vs_neutral_fair_value_pct": -3.2,
+                "current_price_vs_bull_fair_value_pct": "-15.0",
+                "triggered_reasons": ["含み益が基準に達している"],
+                "mitigating_factors_applied": ["上値余地が残っている"],
+            },
+        )
+    )
+
+
+def _save_pure_hold_record(store_dir: Path, audit_id: str | None) -> None:
+    _save_holding_eval_record(
+        store_dir,
+        authoritative_recommendation_id=None,
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="hold",
+        profit_taking_ran=True,
+        profit_taking_recommendation_id=None,
+        profit_taking_audit_log_id=audit_id,
+    )
+
+
+def test_issue_369_pure_hold_profit_taking_is_restored_from_audit_log(tmp_path: Path) -> None:
+    """#369: 純粋HOLDの利確判定は、監査記録から比率と理由を復元して表示する。"""
+    _save_profit_taking_audit(tmp_path)
+    _save_pure_hold_record(tmp_path, "audit-pt-1")
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "■ 利確判定の状況" in text
+    assert "判定時点の記録が残っていないため" not in text
+    assert "含み益率：27.5%" in text
+    assert "中立の適正価格に対して-3.2%" in text
+    assert "強気の適正価格に対して-15.0%" in text
+    assert "・含み益が基準に達している" in text
+    assert "・上値余地が残っている" in text
+    # 金額・数量は表示に使わない
+    assert "1234.5" not in text
+    assert "777" not in text
+
+
+def test_issue_369_missing_audit_log_falls_back_to_unrestorable_message(tmp_path: Path) -> None:
+    _save_pure_hold_record(tmp_path, "audit-does-not-exist")
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "■ 利確判定の状況" in text
+    assert "判定時点の記録が残っていないため" in text
+
+
+def test_issue_369_audit_of_other_decision_type_is_not_shown(tmp_path: Path) -> None:
+    _save_profit_taking_audit(tmp_path, decision_type="sell_signal")
+    _save_pure_hold_record(tmp_path, "audit-pt-1")
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "判定時点の記録が残っていないため" in text
+    assert "含み益率：27.5%" not in text
+
+
 def test_r3_gain_pct_falls_back_and_is_never_silent(tmp_path: Path) -> None:
     """R-3(ii): 含み益率の読み先の優先順位と、両方無いときの表示。"""
     from jstock_advisor.services.stock_analysis_view_service import (
@@ -2321,3 +2397,24 @@ def test_r3_gain_pct_falls_back_and_is_never_silent(tmp_path: Path) -> None:
     # c  両方無くても行を消さない
     c = Recommendation(recommendation_id="c", **base)
     assert any("含み益率：不明" in line for line in _profit_taking_status_lines(c))
+
+
+def test_issue_369_record_without_new_field_reads_as_none() -> None:
+    """#369: 新fieldの無い旧schemaのrecordは既定Noneで読め、round tripも保たれる。"""
+    payload = dict(
+        holding_evaluation_id="h:1",
+        holding_id="h",
+        owner="owner-a",
+        stock_code="0000",
+        evaluated_at=_NOW,
+        rule_version="v1",
+        authoritative_outcome_category="hold",
+    )
+    old = HoldingEvaluationRecord(**payload)
+    assert old.profit_taking_audit_log_id is None
+
+    new = HoldingEvaluationRecord(**payload, profit_taking_audit_log_id="audit-x")
+    assert (
+        HoldingEvaluationRecord.model_validate(new.model_dump()).profit_taking_audit_log_id
+        == "audit-x"
+    )

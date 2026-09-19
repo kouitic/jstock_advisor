@@ -1181,13 +1181,24 @@ class StockAnalysisViewService:
                     *_profit_taking_status_lines(profit_taking_recommendation),
                 ]
             elif record.profit_taking_ran:
-                # 実行はされたが記録が残っていない。無音にすると「利確を見ていない」と
-                # 誤読されるため、見ていることと復元できないことの両方を出す。
-                lines += [
-                    "",
-                    "■ 利確判定の状況",
-                    "利確判定は実行されましたが、判定時点の記録が残っていないため内容を復元できません。",
-                ]
+                # Issue #369: 利確判定がHOLD(Recommendationを作らない)の場合、判定時点の
+                # 証跡は監査記録にだけ残る。その参照(profit_taking_audit_log_id)があれば
+                # 監査記録から状況を復元して表示する(判定は行わない)。
+                hold_status_lines: list[str] = []
+                if record.profit_taking_audit_log_id is not None:
+                    profit_taking_audit = self._audit_log.get(record.profit_taking_audit_log_id)
+                    if profit_taking_audit is not None:
+                        hold_status_lines = _profit_taking_hold_audit_lines(profit_taking_audit)
+                if hold_status_lines:
+                    lines += ["", "■ 利確判定の状況", *hold_status_lines]
+                else:
+                    # 実行はされたが記録が残っていない。無音にすると「利確を見ていない」と
+                    # 誤読されるため、見ていることと復元できないことの両方を出す。
+                    lines += [
+                        "",
+                        "■ 利確判定の状況",
+                        "利確判定は実行されましたが、判定時点の記録が残っていないため内容を復元できません。",
+                    ]
             return "\n".join(lines)
 
         lines += ["", "■ 理由"]
@@ -1260,6 +1271,63 @@ def _profit_taking_status_lines(recommendation: Recommendation) -> list[str]:
     if recommendation.not_yet_action_reasons:
         lines.append("まだ利確しない理由：")
         lines += [f"・{reason}" for reason in recommendation.not_yet_action_reasons]
+    return lines
+
+
+def _audit_pct(value: object) -> float | None:
+    """監査記録のoutput_valuesに残る比率値を表示用のfloatへ変換する。数値でなければNone。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _profit_taking_hold_audit_lines(audit_entry: AuditLogEntry) -> list[str]:
+    """利確判定がHOLD(Recommendationを作らない)だった評価サイクルの、判定時点の
+    状況(含み益率・適正価格との位置・利確を見送った要因)を、その評価が書き込んだ
+    監査記録から組み立てる(Issue #369)。
+
+    判定は行わず、記録されている値を表示するだけである。表示するのは比率と理由のみで、
+    監査記録のinput_valuesに含まれる金額・数量(取得単価・保有株数等)は使わない。
+    profit_takingの監査記録でなければ何も出さない(誤った記録を参照しても
+    無関係な内容を表示しないため)。値が1つも取れない場合は空を返し、呼び出し側が
+    「復元できません」の文言へfallbackする。
+    """
+    if audit_entry.decision_type != "profit_taking":
+        return []
+    out = audit_entry.output_values
+    gain_pct = _audit_pct(out.get("unrealized_pnl_pct"))
+    neutral_pct = _audit_pct(out.get("current_price_vs_neutral_fair_value_pct"))
+    bull_pct = _audit_pct(out.get("current_price_vs_bull_fair_value_pct"))
+    mitigating = [str(f) for f in (out.get("mitigating_factors_applied") or [])]
+    triggered = [str(r) for r in (out.get("triggered_reasons") or [])]
+    if (
+        gain_pct is None
+        and neutral_pct is None
+        and bull_pct is None
+        and not (mitigating or triggered)
+    ):
+        return []
+    lines: list[str] = []
+    if gain_pct is not None:
+        lines.append(f"含み益率：{gain_pct:.1f}%")
+    else:
+        lines.append("含み益率：不明（判定時点の記録に含み益率が残っていません）")
+    if neutral_pct is not None or bull_pct is not None:
+        parts = []
+        if neutral_pct is not None:
+            parts.append(f"中立の適正価格に対して{neutral_pct:+.1f}%")
+        if bull_pct is not None:
+            parts.append(f"強気の適正価格に対して{bull_pct:+.1f}%")
+        lines.append("現在価格の位置（プラスは適正価格を上回る）：" + "、".join(parts))
+    if triggered:
+        lines.append("判定に該当した理由：")
+        lines += [f"・{reason}" for reason in triggered]
+    if mitigating:
+        lines.append("利確を見送った要因：")
+        lines += [f"・{factor}" for factor in mitigating]
     return lines
 
 
