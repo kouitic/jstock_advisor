@@ -866,6 +866,24 @@ class ProfitTakingService:
                 "mitigating_factors_applied": result.mitigating_factors_applied,
                 "unrealized_pnl_pct": result.pnl.unrealized_pnl_pct,
                 "total_return_pct": result.pnl.total_return_pct,
+                # --- Issue #419: 純粋HOLD(利確を見送った)の理由を、後から銘柄分析で表示する
+                # ための構造化事実。値は比率・件数・bool・codeのみで、金額・株数を運ぶ
+                # fieldは持たない(表示側はこの許可リストのキーだけを読む)。
+                # hold_reasons(固定1文)や理由文ではなく事実を保存する理由はIssue #419。
+                "gain_watch_threshold_pct": (
+                    self._config.profit_taking.thresholds.unrealized_gain_watch_pct
+                ),
+                "upside_pct": result.upside_pct,
+                "independent_condition_count": result.independent_condition_count,
+                "fair_value_action_usable": result.fair_value_action_usable,
+                "fair_value_action_block_reason_code": (
+                    result.fair_value_action_block_reason_code
+                ),
+                "fair_value_unusable_reason_code": (
+                    snapshot.fair_value_range.unusable_reason_code.value
+                    if snapshot.fair_value_range.unusable_reason_code is not None
+                    else None
+                ),
                 "confidence": confidence_result.level.value,
                 "confidence_score": confidence_result.score,
                 "confidence_reasons": confidence_result.reasons_not_high,

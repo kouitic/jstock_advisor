@@ -35,6 +35,10 @@ from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
 from jstock_advisor.domain.entities.common import BuyPriceLevels, ScoreBreakdown
 from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.entities.valuation import (
+    FairValueUnusableReasonCode,
+    ProfitTakingFairValueBlockReasonCode,
+)
 from jstock_advisor.domain.valuation.downside_valuation_scenario import (
     DownsideScenarioKind,
     derive_downside_valuation_observation,
@@ -1284,41 +1288,90 @@ def _audit_pct(value: object) -> float | None:
         return None
 
 
+# Issue #419: 純粋HOLDの利確判定の状況として、監査記録から読むキーの許可リスト。
+# ここに無いキー(理由文・input_values・fair_value_results等の金額や株数を含み得るもの)は
+# 読まない。値の型は比率・件数・bool・codeに限る(保存側 profit_taking_service の
+# output_values への追加キーと1対1)。
+_PROFIT_TAKING_HOLD_AUDIT_KEYS = (
+    "unrealized_pnl_pct",
+    "current_price_vs_neutral_fair_value_pct",
+    "current_price_vs_bull_fair_value_pct",
+    "gain_watch_threshold_pct",
+    "upside_pct",
+    "independent_condition_count",
+    "fair_value_action_block_reason_code",
+    "fair_value_unusable_reason_code",
+)
+
+# 適正価格を利確判定に使えなかった理由の固定文言(codeで分岐し、自由文をparseしない)。
+# 未知のcodeは汎用文言にする(将来codeが増えても表示が壊れない)。
+_FAIR_VALUE_UNUSABLE_TEXTS: dict[str, str] = {
+    FairValueUnusableReasonCode.NO_VALID_METHODS.value: (
+        "適正価格を算出できる有効な評価手法がないため、価格基準の利確判定に使用していません"
+    ),
+    FairValueUnusableReasonCode.TOO_FEW_METHODS.value: (
+        "適正価格を算出できる評価手法が不足しているため、価格基準の利確判定に使用していません"
+    ),
+    FairValueUnusableReasonCode.METHOD_SPREAD_TOO_WIDE.value: (
+        "適正価格の算出手法間の乖離が大きいため、価格基準の利確判定に使用していません"
+    ),
+    ProfitTakingFairValueBlockReasonCode.METHOD_SPREAD_TOO_WIDE_FOR_ACTION.value: (
+        "適正価格の手法間の広がりが利確判定の基準を超えているため、"
+        "価格基準の利確判定に使用していません"
+    ),
+}
+_FAIR_VALUE_UNUSABLE_GENERIC_TEXT = "適正価格を価格基準の利確判定に使用できませんでした"
+
+
 def _profit_taking_hold_audit_lines(audit_entry: AuditLogEntry) -> list[str]:
     """利確判定がHOLD(Recommendationを作らない)だった評価サイクルの、判定時点の
-    状況(含み益率・現在価格と適正価格との位置)を、その評価が書き込んだ監査記録から
-    組み立てる(Issue #369)。
+    状況を、その評価が書き込んだ監査記録から組み立てる(Issue #369 / #419)。
 
-    判定は行わず、記録されている値を表示するだけである。表示するのは比率のみで、
-    監査記録のinput_valuesに含まれる金額・数量(取得単価・保有株数等)は使わない。
+    判定は行わず、記録されている値を並べるだけである(HOLDであることは、この記録が
+    参照されていること自体が示す。含み益率と監視水準の大小も断定せず、2つの値を並べる)。
+    表示するのは比率・件数・固定文言のみである。
+
+    ★ 読むキーは _PROFIT_TAKING_HOLD_AUDIT_KEYS の許可リストだけである(Issue #419)。
+      監査記録のinput_values(取得単価・保有株数等)や理由文(triggered_reasons /
+      mitigating_factors_applied等。価格を埋め込んだ文言があり得る)は読まない。
+      「金額・数量を表示しない」を、別moduleの不変条件(最終HOLDなら理由リストが空)に
+      依存させず、読むキーを限ることで表示側だけで保証する(PR #414 F1/M2)。
+      なお、保有継続の理由文(hold_reasons)は固定1文で情報量が無いため保存していない。
+      代わりに、利確を見送った根拠となる事実(閾値・上値余地・適正価格の可否・該当条件数)
+      を保存している。
     profit_takingの監査記録でなければ何も出さない(誤った記録を参照しても
     無関係な内容を表示しないため)。値が1つも取れない場合は空を返し、呼び出し側が
     「復元できません」の文言へfallbackする。
-
-    ★ triggered_reasons / mitigating_factors_applied は意図して表示しない(PR #414の
-      レビュー指摘F1/M2)。
-      ・この関数へ来る記録は最終判定がHOLDのものだけである(audit_idを返すのは
-        effective_recommendation_type == HOLDのときだけ)。domain/signals/profit_taking.py
-        は、何かが発火したraw_level > HOLDの判定を最低でもWATCHへ床上げするため、
-        最終HOLDのときは2つとも常に空であり、表示しても出ない。
-      ・triggered_reasons には金額を埋め込んだ文言(ユーザー設定の全利確目標価格等)が
-        あり得る。これを表示対象に含めると、「金額を表示しない」という要件が、別moduleの
-        不変条件(最終HOLDなら空)に暗黙に依存してしまう。表示しないことで、その依存を
-        表示側から取り除いている。
-      ・保有継続の実際の理由(hold_reasons)は監査記録へ保存されていないため、
-        現状では復元できない(別途の判断事項)。
     """
     if audit_entry.decision_type != "profit_taking":
         return []
-    out = audit_entry.output_values
-    gain_pct = _audit_pct(out.get("unrealized_pnl_pct"))
-    neutral_pct = _audit_pct(out.get("current_price_vs_neutral_fair_value_pct"))
-    bull_pct = _audit_pct(out.get("current_price_vs_bull_fair_value_pct"))
-    if gain_pct is None and neutral_pct is None and bull_pct is None:
+    out = {k: audit_entry.output_values.get(k) for k in _PROFIT_TAKING_HOLD_AUDIT_KEYS}
+    gain_pct = _audit_pct(out["unrealized_pnl_pct"])
+    neutral_pct = _audit_pct(out["current_price_vs_neutral_fair_value_pct"])
+    bull_pct = _audit_pct(out["current_price_vs_bull_fair_value_pct"])
+    watch_pct = _audit_pct(out["gain_watch_threshold_pct"])
+    upside_pct = _audit_pct(out["upside_pct"])
+    condition_count = out["independent_condition_count"]
+    if isinstance(condition_count, bool) or not isinstance(condition_count, int):
+        condition_count = None
+    unusable_code = (
+        out["fair_value_unusable_reason_code"] or out["fair_value_action_block_reason_code"]
+    )
+    if (
+        gain_pct is None
+        and neutral_pct is None
+        and bull_pct is None
+        and upside_pct is None
+        and condition_count is None
+        and not unusable_code
+    ):
         return []
     lines: list[str] = []
     if gain_pct is not None:
-        lines.append(f"含み益率：{gain_pct:.1f}%")
+        gain_line = f"含み益率：{gain_pct:.1f}%"
+        if watch_pct is not None:
+            gain_line += f"（利確の監視を始める水準：{watch_pct:.1f}%）"
+        lines.append(gain_line)
     else:
         lines.append("含み益率：不明（判定時点の記録に含み益率が残っていません）")
     if neutral_pct is not None or bull_pct is not None:
@@ -1328,6 +1381,14 @@ def _profit_taking_hold_audit_lines(audit_entry: AuditLogEntry) -> list[str]:
         if bull_pct is not None:
             parts.append(f"強気の適正価格に対して{bull_pct:+.1f}%")
         lines.append("現在価格の位置（プラスは適正価格を上回る）：" + "、".join(parts))
+    if upside_pct is not None:
+        lines.append(f"想定上限価格までの上値余地：{upside_pct:.1f}%")
+    if unusable_code:
+        lines.append(
+            _FAIR_VALUE_UNUSABLE_TEXTS.get(str(unusable_code), _FAIR_VALUE_UNUSABLE_GENERIC_TEXT)
+        )
+    if condition_count is not None:
+        lines.append(f"利確を検討する独立した条件：該当{condition_count}件")
     return lines
 
 

@@ -2387,6 +2387,125 @@ def test_issue_369_reason_strings_are_never_displayed_even_if_recorded(tmp_path:
     assert "43210" not in text
 
 
+def _save_hold_basis_audit(tmp_path: Path, audit_id: str, output_values: dict) -> None:
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    AuditLogRepository(store_dir=tmp_path).save(
+        AuditLogEntry(
+            audit_id=audit_id,
+            timestamp=_NOW,
+            stock_code="8306",
+            decision_type="profit_taking",
+            input_values={"average_purchase_price": "1234.5", "shares": 777},
+            calculation_formulas={},
+            data_sources=[],
+            rule_version="v1",
+            output_values=output_values,
+        )
+    )
+    _save_pure_hold_record(tmp_path, audit_id)
+
+
+def test_issue_419_pure_hold_shows_structured_hold_basis(tmp_path: Path) -> None:
+    """#419: 利確を見送った根拠の事実(監視水準・上値余地・適正価格の可否・該当条件数)を表示する。"""
+    _save_hold_basis_audit(
+        tmp_path,
+        "audit-419-a",
+        {
+            "unrealized_pnl_pct": 8.0,
+            "current_price_vs_neutral_fair_value_pct": -3.2,
+            "gain_watch_threshold_pct": 20.0,
+            "upside_pct": 12.5,
+            "independent_condition_count": 0,
+            "fair_value_action_block_reason_code": None,
+            "fair_value_unusable_reason_code": "TOO_FEW_METHODS",
+        },
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：8.0%（利確の監視を始める水準：20.0%）" in text
+    assert "想定上限価格までの上値余地：12.5%" in text
+    assert (
+        "適正価格を算出できる評価手法が不足しているため、価格基準の利確判定に使用していません"
+        in text
+    )
+    assert "利確を検討する独立した条件：該当0件" in text
+    assert "1234.5" not in text
+    assert "777" not in text
+
+
+def test_issue_419_partial_keys_show_only_available_lines(tmp_path: Path) -> None:
+    """新キーが一部だけ残る記録でも、無い行を出さないだけで表示は壊れない。"""
+    _save_hold_basis_audit(tmp_path, "audit-419-b", {"unrealized_pnl_pct": 8.0})
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：8.0%" in text
+    assert "監視を始める水準" not in text
+    assert "上値余地" not in text
+    assert "独立した条件" not in text
+
+
+def test_issue_419_unknown_unusable_code_uses_generic_text(tmp_path: Path) -> None:
+    _save_hold_basis_audit(
+        tmp_path,
+        "audit-419-c",
+        {"unrealized_pnl_pct": 8.0, "fair_value_unusable_reason_code": "SOME_FUTURE_CODE"},
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "適正価格を価格基準の利確判定に使用できませんでした" in text
+    assert "SOME_FUTURE_CODE" not in text
+
+
+def test_issue_419_only_allowlisted_keys_are_read(tmp_path: Path) -> None:
+    """許可リスト外のキー(理由文・金額入りの自由文・任意のキー)は、記録に載っても表示しない。
+
+    「金額・数量を表示しない」を、記録側の不変条件ではなく、表示が読むキーを限ることで
+    保証していることを固定する(#419 / PR #414 M2)。
+    """
+    _save_hold_basis_audit(
+        tmp_path,
+        "audit-419-d",
+        {
+            "unrealized_pnl_pct": 8.0,
+            "triggered_reasons": ["全利確目標価格(98765円)に到達"],
+            "mitigating_factors_applied": ["緩和要因(43210円)"],
+            "hold_reasons": ["保有株数(555株)"],
+            "suggested_sell_shares": 321,
+            "fair_value_results": [{"fair_value": "77777"}],
+            "an_unlisted_free_text": "取得単価66666円",
+        },
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：8.0%" in text
+    for leaked in ("98765", "43210", "555株", "321", "77777", "66666"):
+        assert leaked not in text
+
+
+def test_issue_419_old_record_without_new_keys_keeps_ratio_lines(tmp_path: Path) -> None:
+    """#414時点の記録(新キー無し)は、従来どおり比率だけを表示する(後方互換)。"""
+    _save_hold_basis_audit(
+        tmp_path,
+        "audit-419-e",
+        {
+            "unrealized_pnl_pct": 27.5,
+            "current_price_vs_neutral_fair_value_pct": -3.2,
+            "current_price_vs_bull_fair_value_pct": "-15.0",
+        },
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：27.5%" in text
+    assert "中立の適正価格に対して-3.2%" in text
+    assert "監視を始める水準" not in text
+
+
 def test_issue_369_missing_audit_log_falls_back_to_unrestorable_message(tmp_path: Path) -> None:
     _save_pure_hold_record(tmp_path, "audit-does-not-exist")
 
