@@ -48,6 +48,10 @@ _REGION = "ap-northeast-1"
 _NOW = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
 _BATCH_TABLE = "jstock-batch_runs"
 _PROGRESS_TABLE = "jstock-watchlist_candidate_progress"
+# Issue #367(b): Lambda実行環境(running_on_lambda()==True)ではrepositoryも
+# DynamoDBを使うため、テストが読み書きする2つのrepositoryの表もmotoに用意する。
+_REMOVAL_HISTORY_TABLE = "jstock-watchlist_removal_history"
+_AUDIT_LOG_TABLE = "jstock-audit_log"
 _CODE = "1111"
 
 
@@ -73,7 +77,7 @@ def audit_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def dynamo(monkeypatch: pytest.MonkeyPatch):
+def dynamo(monkeypatch: pytest.MonkeyPatch, lambda_runtime_env: None):
     monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
@@ -97,6 +101,16 @@ def dynamo(monkeypatch: pytest.MonkeyPatch):
             ],
             BillingMode="PAY_PER_REQUEST",
         )
+        for table_name, key in (
+            (_REMOVAL_HISTORY_TABLE, "stock_code"),
+            (_AUDIT_LOG_TABLE, "audit_id"),
+        ):
+            client.create_table(
+                TableName=table_name,
+                KeySchema=[{"AttributeName": key, "KeyType": "HASH"}],
+                AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
         yield client
 
 
@@ -552,3 +566,27 @@ def test_normal_run_reports_zero_interrupted_counts(
     assert len(batch_audits) == 1
     assert batch_audits[0].output_values["removal_audit_completion_attempted_count"] == 0
     assert batch_audits[0].output_values["removal_audit_completion_written_count"] == 0
+
+
+# --- Issue #367(b): 本番と同じDynamoDBバックエンドを実際に通っていることの確認 ---
+
+
+def test_repositories_run_on_dynamodb_backend_not_local_json(
+    dynamo, assert_dynamodb_backend, history_repo: WatchlistRemovalHistoryRepository,
+    tmp_path: Path,
+) -> None:
+    """opt-in fixtureを付けただけで完了扱いにしない(条件4)。
+
+    running_on_lambda()==Trueの下で、repositoryがDynamoDBバックエンドを選び、
+    書込みがmotoの表に入り、ローカルJSONファイルは作られないことを確認する。
+    """
+    assert_dynamodb_backend(history_repo._store)
+    assert_dynamodb_backend(AuditLogRepository(store_dir=tmp_path / "audit")._store)
+
+    _preexisting_removal(history_repo, _NOW - dt.timedelta(days=1))
+
+    items = dynamo.scan(TableName=_REMOVAL_HISTORY_TABLE)["Items"]
+    assert [i["stock_code"]["S"] for i in items] == [_CODE]
+    assert not list((tmp_path / "removal_history").glob("*.json")), (
+        "ローカルJSONへ書いている(本番と異なる経路)"
+    )
