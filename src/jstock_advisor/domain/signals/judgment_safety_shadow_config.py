@@ -31,7 +31,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from jstock_advisor.config.loader import DEFAULT_CONFIG_DIR, _load_yaml
 
@@ -62,6 +62,16 @@ class JudgmentSafetyShadowConfig(BaseModel):
     g3_required_inputs: tuple[G3MeasurableInput, ...] = Field(
         default=_DEFAULT_G3_INPUTS, min_length=1
     )
+
+    @field_validator("g3_required_inputs")
+    @classmethod
+    def _reject_duplicate_inputs(
+        cls, value: tuple[G3MeasurableInput, ...]
+    ) -> tuple[G3MeasurableInput, ...]:
+        # 同じ項目を重ねて書いただけでG3の件数が水増しされないようにする(不正 -> fail-closedでOFF)。
+        if len(set(value)) != len(value):
+            raise ValueError("g3_required_inputs must not contain duplicates")
+        return value
 
     @property
     def enabled(self) -> bool:
