@@ -25,6 +25,7 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.signals.judgment_safety import (
     UNMEASURABLE_G3_INPUTS,
     CorporateActionFacts,
+    CorporateActionIssueKind,
     ProfitTakingMitigationFacts,
     SafetyFacts,
     SafetyFinding,
@@ -149,7 +150,7 @@ def test_sell_side_and_other_types_are_never_flagged_q_b(rtype: RecommendationTy
     facts = SafetyFacts(
         financials_are_stale=True,
         profit_taking_mitigation=ProfitTakingMitigationFacts(None, None),
-        corporate_action=CorporateActionFacts("EVALUATED", ("SPLIT", "REVERSE_SPLIT")),
+        corporate_action=CorporateActionFacts("EVALUATED", tuple(_KINDS)),  # type: ignore[arg-type]
     )
     rec = _rec(recommendation_type=rtype, earnings_date_status=EarningsDateStatus.UNAVAILABLE)
 
@@ -181,9 +182,7 @@ def test_g2_unsupplied_fact_is_not_evaluated() -> None:
 
 def test_g2_does_not_apply_to_profit_taking_q_d() -> None:
     """利確ではsafety conditionとして再使用しない(既存のconfidence減点/HIGH禁止で消費済み)。"""
-    result = evaluate_safety_conditions(
-        _full_take(), SafetyFacts(financials_are_stale=True), _CFG
-    )
+    result = evaluate_safety_conditions(_full_take(), SafetyFacts(financials_are_stale=True), _CFG)
 
     assert "STALE_FINANCIALS" not in [f.reason_code for f in result.findings]
     assert "G2" not in result.not_evaluated
@@ -263,53 +262,156 @@ def test_g3_unmeasurable_inputs_are_declared_and_never_counted() -> None:
 
 
 # ============================================================================
-# G4: 株式分割・併合が未解決(SPLIT / REVERSE_SPLITのみ・Q-A)
+# G4: 既存の株式分割・併合整合性検査が未解決の問題を検出した状態(U8。向きの推定はしない)
 # ============================================================================
 
+_KINDS = [
+    "price_discontinuity_unexplained",
+    "fair_value_divergence_resembles_split_ratio",
+    "dividend_change_resembles_split_ratio",
+    "purchase_price_basis_mismatch",
+]
 
-@pytest.mark.parametrize("kind", ["SPLIT", "REVERSE_SPLIT"])
+
+def _ca(state: str = "EVALUATED", *kinds: str) -> SafetyFacts:
+    return SafetyFacts(corporate_action=CorporateActionFacts(state, tuple(kinds)))  # type: ignore[arg-type]
+
+
+def test_c1_the_four_check_names_are_representable() -> None:
+    """C1: check_split_consistency()が実際に返す4種のcheck_nameを、型として表現できる。"""
+    from typing import get_args
+
+    assert list(get_args(CorporateActionIssueKind)) == _KINDS
+    facts = CorporateActionFacts("EVALUATED", tuple(_KINDS))  # type: ignore[arg-type]
+    assert facts.unresolved_checks == tuple(_KINDS)
+
+
+def test_c2_split_or_reverse_split_input_is_not_required_or_modeled() -> None:
+    """C2: SPLIT / REVERSE_SPLITを必須情報にしない(向き・種別の概念を持たない)。"""
+    import dataclasses
+
+    assert CorporateActionFacts("EVALUATED").unresolved_checks == ()  # 種別なしで構築できる
+    assert {f.name for f in dataclasses.fields(CorporateActionFacts)} == {
+        "state",
+        "unresolved_checks",
+    }
+    # 4種すべてを与えても、SPLIT / REVERSE_SPLITというreason codeは生成されない
+    codes = _codes(_buy(), _ca("EVALUATED", *_KINDS))
+    assert codes  # 空でないこと(下のassertが自明に通らないため)
+    assert not any("SPLIT" in c.replace("split_ratio", "") for c in codes)
+
+
 @pytest.mark.parametrize("make", [_buy, _full_take])
-def test_g4_unresolved_split_or_reverse_split_is_flagged(
-    kind: str, make: Callable[[], Recommendation]
+def test_c3_evaluated_with_no_unresolved_check_has_no_finding(
+    make: Callable[[], Recommendation],
 ) -> None:
-    facts = SafetyFacts(corporate_action=CorporateActionFacts("EVALUATED", (kind,)))  # type: ignore[arg-type]
-
-    assert _codes(make(), facts) == [f"CORPORATE_ACTION_UNRESOLVED:{kind}"]
-
-
-def test_g4_both_kinds_are_reported_once_each_in_stable_order() -> None:
-    facts = SafetyFacts(
-        corporate_action=CorporateActionFacts("EVALUATED", ("SPLIT", "REVERSE_SPLIT", "SPLIT"))
-    )
-
-    assert _codes(_buy(), facts) == [
-        "CORPORATE_ACTION_UNRESOLVED:REVERSE_SPLIT",
-        "CORPORATE_ACTION_UNRESOLVED:SPLIT",
-    ]
-
-
-def test_g4_evaluated_with_nothing_unresolved_is_clean() -> None:
-    result = evaluate_safety_conditions(
-        _buy(), SafetyFacts(corporate_action=CorporateActionFacts("EVALUATED", ())), _CFG
-    )
+    result = evaluate_safety_conditions(make(), _ca("EVALUATED"), _CFG)
 
     assert result.findings == ()
     assert "G4" not in result.not_evaluated
 
 
-@pytest.mark.parametrize("state", ["NOT_EVALUATED", "COMPUTATION_FAILED"])
-def test_g4_failed_or_not_evaluated_is_not_counted_as_a_finding(state: str) -> None:
-    """取得・評価に失敗した銘柄は「未解決」ではなく「評価していない」(件数に含めない)。"""
-    facts = SafetyFacts(corporate_action=CorporateActionFacts(state, ("SPLIT",)))  # type: ignore[arg-type]
+@pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("make", [_buy, _full_take])
+def test_c4_each_check_name_yields_exactly_one_matching_finding(
+    kind: str, make: Callable[[], Recommendation]
+) -> None:
+    assert _codes(make(), _ca("EVALUATED", kind)) == [f"CORPORATE_ACTION_UNRESOLVED:{kind}"]
 
-    result = evaluate_safety_conditions(_buy(), facts, _CFG)
+
+def test_c5_all_four_check_names_yield_four_findings() -> None:
+    result = evaluate_safety_conditions(_buy(), _ca("EVALUATED", *_KINDS), _CFG)
+
+    assert [f.reason_code for f in result.findings] == [
+        f"CORPORATE_ACTION_UNRESOLVED:{k}" for k in _KINDS
+    ]
+    assert all(f.condition_id == "G4" for f in result.findings)
+
+
+def test_c6_duplicate_check_names_never_inflate_the_count() -> None:
+    kinds = [_KINDS[0], _KINDS[0], _KINDS[2], _KINDS[2], _KINDS[2]]
+
+    assert _codes(_buy(), _ca("EVALUATED", *kinds)) == [
+        f"CORPORATE_ACTION_UNRESOLVED:{_KINDS[0]}",
+        f"CORPORATE_ACTION_UNRESOLVED:{_KINDS[2]}",
+    ]
+
+
+def test_c7_finding_order_is_deterministic_and_independent_of_input_order() -> None:
+    import itertools
+
+    expected = [f"CORPORATE_ACTION_UNRESOLVED:{k}" for k in _KINDS]
+    for permutation in itertools.permutations(_KINDS):
+        assert _codes(_buy(), _ca("EVALUATED", *permutation)) == expected
+
+
+@pytest.mark.parametrize("state", ["NOT_EVALUATED", "COMPUTATION_FAILED"])
+def test_c8_c9_failed_or_not_evaluated_is_not_counted_as_a_finding(state: str) -> None:
+    """C8 / C9: 取得・評価に失敗した銘柄は「未解決」ではなく「評価していない」(件数に含めない)。"""
+    result = evaluate_safety_conditions(_buy(), _ca(state, *_KINDS), _CFG)
 
     assert result.findings == ()
     assert "G4" in result.not_evaluated
 
 
-def test_g4_unsupplied_facts_are_not_evaluated() -> None:
+def test_c10_unsupplied_facts_are_not_evaluated() -> None:
     assert "G4" in evaluate_safety_conditions(_buy(), SafetyFacts(), _CFG).not_evaluated
+
+
+@pytest.mark.parametrize("rtype", _NON_STRONG_TYPES)
+def test_c11_out_of_scope_recommendations_never_get_g4_findings(
+    rtype: RecommendationType,
+) -> None:
+    """C11: SELL / URGENT_REVIEW等のG4対象外へ、最悪条件のfactsを渡してもfindingを出さない(Q-B)。"""
+    rec = _rec(recommendation_type=rtype, earnings_date_status=EarningsDateStatus.UNAVAILABLE)
+
+    result = evaluate_safety_conditions(rec, _ca("EVALUATED", *_KINDS), _CFG)
+
+    assert result.findings == ()
+    assert "G4" not in result.not_evaluated
+
+
+def test_c12_g1_g2_g3_are_unchanged_by_the_presence_of_g4_facts() -> None:
+    """C12: G4のfactsの有無・中身は、G1 / G2 / G3の結果を変えない。"""
+    rec = _rec(
+        recommendation_type=RecommendationType.FULL_PROFIT_TAKE,
+        buy_action=BuyAction.BUY,
+        earnings_date_status=EarningsDateStatus.UNAVAILABLE,
+    )
+    base = SafetyFacts(
+        financials_are_stale=True,
+        profit_taking_mitigation=ProfitTakingMitigationFacts(None, None),
+    )
+    with_g4 = SafetyFacts(
+        financials_are_stale=True,
+        profit_taking_mitigation=ProfitTakingMitigationFacts(None, None),
+        corporate_action=CorporateActionFacts("EVALUATED", tuple(_KINDS)),  # type: ignore[arg-type]
+    )
+
+    without = [
+        f.reason_code
+        for f in evaluate_safety_conditions(rec, base, _CFG).findings
+        if f.condition_id != "G4"
+    ]
+    with_ = [
+        f.reason_code
+        for f in evaluate_safety_conditions(rec, with_g4, _CFG).findings
+        if f.condition_id != "G4"
+    ]
+
+    assert without == with_
+    assert {"EARNINGS_DATE_UNKNOWN", "STALE_FINANCIALS"} <= set(with_)
+
+
+def test_c13_g4_findings_carry_no_identifier_owner_holding_or_price() -> None:
+    result = evaluate_safety_conditions(_buy(), _ca("EVALUATED", *_KINDS), _CFG)
+
+    assert result.findings
+    for finding in result.findings:
+        assert set(vars(finding)) == {"condition_id", "reason_code", "would_suppress"}
+        assert "0000" not in repr(finding)
+        assert "銘柄A" not in repr(finding)
+        assert "1000" not in repr(finding)
 
 
 # ============================================================================
@@ -329,7 +431,10 @@ def test_evaluation_contains_no_identifier_or_price_even_when_findings_exist() -
     rec = _rec(buy_action=BuyAction.BUY, earnings_date_status=EarningsDateStatus.UNAVAILABLE)
     facts = SafetyFacts(
         financials_are_stale=True,
-        corporate_action=CorporateActionFacts("EVALUATED", ("SPLIT",)),
+        corporate_action=CorporateActionFacts(
+            "EVALUATED",
+            ("price_discontinuity_unexplained",),
+        ),
     )
 
     result = evaluate_safety_conditions(rec, facts, _CFG)
@@ -345,7 +450,10 @@ def test_evaluation_is_deterministic_and_does_not_mutate_inputs() -> None:
     rec = _buy(EarningsDateStatus.UNAVAILABLE)
     facts = SafetyFacts(
         financials_are_stale=True,
-        corporate_action=CorporateActionFacts("EVALUATED", ("REVERSE_SPLIT", "SPLIT")),
+        corporate_action=CorporateActionFacts(
+            "EVALUATED",
+            ("purchase_price_basis_mismatch", "price_discontinuity_unexplained"),
+        ),
     )
     rec_before, facts_before = rec.model_dump(), copy.deepcopy(facts)
 
@@ -440,7 +548,10 @@ def test_every_finding_is_suppressible_by_default() -> None:
     facts = SafetyFacts(
         financials_are_stale=True,
         profit_taking_mitigation=ProfitTakingMitigationFacts(None, None),
-        corporate_action=CorporateActionFacts("EVALUATED", ("SPLIT",)),
+        corporate_action=CorporateActionFacts(
+            "EVALUATED",
+            ("price_discontinuity_unexplained",),
+        ),
     )
 
     findings = evaluate_safety_conditions(rec, facts, _CFG).findings
