@@ -16,7 +16,9 @@ I/O・時刻・module-globalを持たない。入力(推奨・非永続のfacts�
   G1 EARNINGS_DATE_UNKNOWN            決算日が不明のまま強い判定が出る
   G2 STALE_FINANCIALS                 BUYの強い判定で財務が古い(BUYのみ。USER決定 Q-D)
   G3 REQUIRED_INPUT_MISSING:<field>   利確FULLの緩和要因が不明のまま強い判定が出る
-  G4 CORPORATE_ACTION_UNRESOLVED:<T>  株式分割・併合が未解決のまま強い判定が出る(Q-A)
+  G4 CORPORATE_ACTION_UNRESOLVED:<check_name>
+                                      既存の株式分割・併合整合性検査(check_split_consistency)が
+                                      未解決の問題を検出したまま強い判定が出る(Q-A・U8)
 
 G5(単一根拠の重複checkの整理)と条件8(適正価格LOW)は既存validatorとの整理を伴うため本モジュールには
 含めない(別PR)。
@@ -76,7 +78,24 @@ UNMEASURABLE_G3_INPUTS: Final[tuple[str, ...]] = (
 )
 
 CorporateActionState = Literal["EVALUATED", "NOT_EVALUATED", "COMPUTATION_FAILED"]
-UnresolvedCorporateAction = Literal["SPLIT", "REVERSE_SPLIT"]
+
+#: `check_split_consistency()`が実際に返す`DataQualityIssue.check_name`(4種)。
+#: G4は「SPLIT / REVERSE_SPLITの種別」ではなく、既存の整合性検査が**未解決の問題を検出した根拠**
+#: (check_name)を保持する(USER決定 U8 = OPTION_A_DETECTION_BASIS。向きの推定は行わない)。
+CorporateActionIssueKind = Literal[
+    "price_discontinuity_unexplained",
+    "fair_value_divergence_resembles_split_ratio",
+    "dividend_change_resembles_split_ratio",
+    "purchase_price_basis_mismatch",
+]
+
+#: 出力順の正本(入力の順序に依存しない。finding順序をdeterministicにする)。
+_ISSUE_KIND_ORDER: Final[tuple[CorporateActionIssueKind, ...]] = (
+    "price_discontinuity_unexplained",
+    "fair_value_divergence_resembles_split_ratio",
+    "dividend_change_resembles_split_ratio",
+    "purchase_price_basis_mismatch",
+)
 
 
 @dataclass(frozen=True)
@@ -93,10 +112,16 @@ class ProfitTakingMitigationFacts:
 
 @dataclass(frozen=True)
 class CorporateActionFacts:
-    """株式分割・併合の評価結果(SPLIT / REVERSE_SPLIT のみ。MERGER等は表現しない)。"""
+    """既存の株式分割・併合整合性検査(`check_split_consistency`)の評価結果。
+
+    `unresolved_checks`は、その検査が未解決の問題として実際に返した`check_name`である。
+    SPLIT / REVERSE_SPLITの種別・向きは保持しない(検査自体が区別を返さない。推定もしない)。
+    MERGER・株式交換・上場廃止等は表現しない(スコープ外)。永続化しない。識別子・価格・保有情報を
+    持たない。`DataQualityIssue`本体は持たない。
+    """
 
     state: CorporateActionState
-    unresolved: tuple[UnresolvedCorporateAction, ...] = ()
+    unresolved_checks: tuple[CorporateActionIssueKind, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -188,11 +213,13 @@ def evaluate_safety_conditions(
         if action is None or action.state != "EVALUATED":
             not_evaluated.append("G4")
         else:
-            for kind in _sorted_unique(action.unresolved):
+            for kind in _canonical_kinds(action.unresolved_checks):
                 findings.append(SafetyFinding("G4", f"{REASON_CORPORATE_ACTION_UNRESOLVED}:{kind}"))
 
     return SafetyEvaluation(findings=tuple(findings), not_evaluated=tuple(not_evaluated))
 
 
-def _sorted_unique(values: Iterable[UnresolvedCorporateAction]) -> list[UnresolvedCorporateAction]:
-    return sorted(set(values))
+def _canonical_kinds(values: Iterable[CorporateActionIssueKind]) -> list[CorporateActionIssueKind]:
+    """重複を除き、入力の順序に依存しない固定の順序(`_ISSUE_KIND_ORDER`)で返す。"""
+    present = set(values)
+    return [kind for kind in _ISSUE_KIND_ORDER if kind in present]
