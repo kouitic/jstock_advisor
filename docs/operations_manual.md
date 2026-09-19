@@ -2662,21 +2662,15 @@ Errorsの有無だけでなく、DLQの滞留とバッチの終端状態(NOTIFIC
 次の3点を #132(本番ジョブ異常の自動検知)の要件として記録した(#132 issuecomment-5740709204):
 (1) WatchlistTerminalFailureDLQのメッセージ滞留監視 (2) LINE関連LambdaのErrors監視 (3) 「Errorsが止まった=復旧」とは限らない点。
 
-### 23.3 認証情報が欠落した場合
-
-```
-a  原因の特定: マーカー(LINE_CREDENTIAL_ROTATION_VERSION)とSecretsのメタデータを確認する(値は読まない)。
-   Secretが空・欠落なら、正しい値へ更新してから LineCredentialRotationVersion を変えて再デプロイする(19.3〜19.5節。ROLLBACK = FORWARD_FIX)。
-b  通知だけが欠落した場合(NOTIFICATION_FAILED → COMPLETED_WITH_NOTIFICATION_FAILURE): 手動の retry-notification が必要
-   (credential復旧前に既存のretry上限に達した場合は自動通知されない。#429の契約)。
-c  worker・terminal_failureの連鎖(#430)が進んでいる場合(DLQにメッセージがある): 下の23.4は**検証前の候補案**であり、正式な復旧手順ではない。
-```
-
-### 23.4 DLQ redrive(障害時の候補案。★未検証。正式な復旧手順ではない)
+### 23.3 DLQ redrive(障害時の候補案。★未検証。正式な復旧手順ではない)
 
 ```
 REDRIVE_VERIFIED = NO
 ```
+
+★ **この節は、正式な復旧手順ではない。** 検証(下記の6項目)を経るまでは「障害時の候補案」としてのみ扱う。
+なお、通知だけが欠落した場合(NOTIFICATION_FAILED)は、credential復旧前に既存のretry上限へ達すると
+自動通知されず、手動の retry-notification が必要になる(USER承認済みの契約。#117 issuecomment-5740407445)。
 
 worker・terminal_failureの連鎖(#430)でDLQに溜まったメッセージについて、認証情報を直した後にWatchlistScreeningQueueへ
 戻す(SQSのDLQ redrive。移動先を指定する)ことで、dispatchから24時間以内でバッチがRUNNINGのままなら、workerが再評価して
