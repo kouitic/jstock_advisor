@@ -28,12 +28,16 @@ import pytest
 
 from jstock_advisor.domain.entities.enums import ExecutionMode, NotificationMode
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
+from jstock_advisor.domain.entities.holding_decision import BaselineOrigin, BaselineValueSnapshot
 from jstock_advisor.domain.entities.owner import (
     InvalidOwnerError,
     build_holding_id,
     log_ref,
     split_holding_id,
     validate_owner,
+)
+from jstock_advisor.infrastructure.local_repository.investment_thesis_baseline_repository import (
+    InvestmentThesisBaselineRepository,
 )
 from jstock_advisor.services.investment_thesis_service import InvestmentThesisService
 
@@ -97,6 +101,117 @@ def test_validation_log_does_not_contain_the_owner_but_does_contain_the_ref(
     assert _OWNER not in caplog.text, "所有者名がログへ出てはならない"
     assert _HOLDING_ID not in caplog.text, "holding_id そのものが出てはならない"
     assert _expected_ref(_HOLDING_ID) in caplog.text, "符号は出る(所在は失われない)"
+
+
+def test_validation_activation_log_does_not_contain_the_owner_or_baseline_id(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ #416 の実経路。`activate_baseline` の VALIDATION INFO に所有者名も baseline_id も出ない。
+
+    baseline_id は f"{holding_id}:v{version}" であり所有者名を内包する。生のまま出していたのに、
+    既存の caplog テストは `get_or_create_thesis` 経路しか通らず、この INFO を通っていなかった
+    (見逃しの一因)。
+    符号(holding_ref)と version は出る(所在・世代は追える)。
+    """
+    service = InvestmentThesisService(
+        store_dir=tmp_path,
+        execution_context=ExecutionContext(
+            mode=ExecutionMode.VALIDATION, notification_mode=NotificationMode.DRY_RUN
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        baseline = service.activate_baseline(
+            _HOLDING_ID,
+            _STOCK_CODE,
+            BaselineOrigin.SYSTEM_INITIALIZED,
+            BaselineValueSnapshot(total_yield_pct=4.0, equity_ratio_pct=45.0),
+        )
+
+    # 前提: 出してはならない baseline_id は、実際に所有者名を含んでいる
+    assert baseline.baseline_id == f"{_HOLDING_ID}:v1"
+    assert _OWNER in baseline.baseline_id
+    # このテストが「何も出ていない」ことで通らないよう、対象の INFO が出ていることを先に確認する
+    assert "transient (not persisted)" in caplog.text
+    assert _OWNER not in caplog.text, "所有者名がログへ出てはならない"
+    assert _HOLDING_ID not in caplog.text, "holding_id そのものが出てはならない"
+    assert baseline.baseline_id not in caplog.text, "baseline_id(所有者名を含む)が出てはならない"
+    assert _expected_ref(_HOLDING_ID) in caplog.text, "符号は出る(所在は失われない)"
+    assert "version=1" in caplog.text, "世代(version)は出る"
+
+
+def test_baseline_repository_duplicate_save_message_does_not_leak_the_owner(
+    tmp_path: pathlib.Path,
+) -> None:
+    """★ #416 の潜在箇所。例外 message も露出面である(捕捉されず traceback ごとログへ出うる)。
+
+    **型は変えない**(ValueError のまま)。呼び出し元の捕捉を変えないためである。
+    """
+    service = InvestmentThesisService(store_dir=tmp_path)
+    baseline = service.activate_baseline(
+        _HOLDING_ID,
+        _STOCK_CODE,
+        BaselineOrigin.SYSTEM_INITIALIZED,
+        BaselineValueSnapshot(total_yield_pct=4.0, equity_ratio_pct=45.0),
+    )
+
+    with pytest.raises(ValueError) as error:
+        InvestmentThesisBaselineRepository(tmp_path).save(baseline)
+
+    message = str(error.value)
+    assert _OWNER not in message
+    assert _HOLDING_ID not in message
+    assert baseline.baseline_id not in message
+    assert _expected_ref(_HOLDING_ID) in message, "符号は出る(所在は失われない)"
+    assert f"version={baseline.version}" in message
+
+
+def _write_source(tmp_path: pathlib.Path, body: str) -> pathlib.Path:
+    path = tmp_path / "sample.py"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    "argument",
+    ["baseline_id", "baseline.baseline_id", "active_baseline_id", "holding_evaluation_id"],
+)
+def test_logger_guard_catches_composite_ids_that_contain_the_holding_id(
+    tmp_path: pathlib.Path, argument: str
+) -> None:
+    """#416: 合成 ID(baseline_id 等)を生で渡す logger 呼び出しを検出する。
+
+    従来の判定は "holding_id" / "owner" のみで、変数名が baseline_id の引数は素通しだった。
+    """
+    _write_source(tmp_path, f'logger.info("x %s", {argument})\n')
+
+    offenders = _scan_logger_format_arguments(tmp_path)
+
+    assert len(offenders) == 1, offenders
+
+
+def test_logger_guard_allows_composite_ids_only_through_log_ref(tmp_path: pathlib.Path) -> None:
+    _write_source(tmp_path, 'logger.info("x %s v%d", log_ref(baseline_id), version)\n')
+
+    assert _scan_logger_format_arguments(tmp_path) == []
+
+
+def test_raise_guard_catches_composite_ids_in_the_message(tmp_path: pathlib.Path) -> None:
+    """#416: 例外 message の f-string へ baseline_id を埋める形を検出する(型は問わない)。"""
+    path = _write_source(
+        tmp_path, 'raise ValueError(f"baseline_id={baseline.baseline_id} exists")\n'
+    )
+
+    offenders = _scan_raise_messages([str(path)])
+
+    assert len(offenders) == 1, offenders
+
+
+def test_raise_guard_covers_the_baseline_repository() -> None:
+    """検査対象のモジュール一覧に、#416 の潜在箇所(baseline repository)が入っている。"""
+    assert any(
+        m.endswith("investment_thesis_baseline_repository.py") for m in _RAISE_GUARDED_MODULES
+    )
 
 
 def test_no_logger_call_passes_owner_or_holding_id_as_a_format_argument() -> None:
@@ -172,16 +287,31 @@ def _iter_logger_calls(tree: ast.AST) -> Iterator[ast.Call]:
         yield node
 
 
-def _scan_logger_format_arguments() -> list[str]:
+#: 所有者名を(内包して)運ぶ名前。**部分文字列**で判定する(既存の判定を弱めないため、名前の完全一致や
+#: AST の Name 判定へは切り替えない)。
+#:   holding_id                   = <所有者>#<銘柄コード>
+#:   baseline_id                  = f"{holding_id}:v{version}"
+#:                                  (active_baseline_id / supersedes_baseline_id も含む)
+#:   holding_evaluation_id        = f"{holding_id}:{evaluated_at}"
+#: baseline_id / holding_evaluation_id は holding_id を内包する合成 ID だが、名前に "holding_id" を
+#: 含まないため、従来の判定(holding_id / owner のみ)を素通りしていた(Issue #416)。
+_PII_BEARING_NAMES = ("holding_id", "owner", "baseline_id", "holding_evaluation_id")
+
+
+def _contains_pii_bearing_name(segment: str) -> bool:
+    return any(name in segment for name in _PII_BEARING_NAMES)
+
+
+def _scan_logger_format_arguments(root: pathlib.Path = pathlib.Path("src")) -> list[str]:
     offenders: list[str] = []
-    for path in sorted(pathlib.Path("src").rglob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         for node in _iter_logger_calls(ast.parse(source)):
             for argument in node.args[1:]:
                 segment = ast.get_source_segment(source, argument) or ""
                 if "log_ref(" in segment:
                     continue
-                if "holding_id" in segment or "owner" in segment:
+                if _contains_pii_bearing_name(segment):
                     offenders.append(f"{path}:{node.lineno}: {segment}")
     return offenders
 
@@ -287,12 +417,24 @@ def test_no_raise_embeds_owner_or_holding_id_in_the_changed_modules() -> None:
     「message に生の値を埋めていないこと」そのものなので、埋め込み式を
     直接検査する。
     """
-    modules = [
-        "src/jstock_advisor/domain/entities/owner.py",
-        "src/jstock_advisor/infrastructure/aws/baseline_pointer.py",
-        "src/jstock_advisor/services/portfolio_service.py",
-        "src/jstock_advisor/services/investment_thesis_service.py",
-    ]
+    offenders = _scan_raise_messages(_RAISE_GUARDED_MODULES)
+
+    assert offenders == [], f"例外 message へ生の値を埋めている: {offenders}"
+
+
+#: raise の検査対象。**#416 の scope に限定して**、baseline repository を加えた。
+#: src 全体へ広げると、別 Issue の既知の 1 件(#256: migrations/conversions.py の例外 message)を
+#: 検出して落ちるため広げていない(#256 の解消時に、Issue 番号付きの許容リストと併せて検討する)。
+_RAISE_GUARDED_MODULES = [
+    "src/jstock_advisor/domain/entities/owner.py",
+    "src/jstock_advisor/infrastructure/aws/baseline_pointer.py",
+    "src/jstock_advisor/infrastructure/local_repository/investment_thesis_baseline_repository.py",
+    "src/jstock_advisor/services/portfolio_service.py",
+    "src/jstock_advisor/services/investment_thesis_service.py",
+]
+
+
+def _scan_raise_messages(modules: list[str]) -> list[str]:
     offenders: list[str] = []
     for module in modules:
         source = pathlib.Path(module).read_text(encoding="utf-8")
@@ -308,10 +450,9 @@ def test_no_raise_embeds_owner_or_holding_id_in_the_changed_modules() -> None:
                     segment = ast.get_source_segment(source, part.value) or ""
                     if "log_ref(" in segment or segment.startswith("len("):
                         continue
-                    if "holding_id" in segment or "owner" in segment:
+                    if _contains_pii_bearing_name(segment):
                         offenders.append(f"{module}:{node.lineno}: {segment}")
-
-    assert offenders == [], f"例外 message へ生の値を埋めている: {offenders}"
+    return offenders
 
 
 # --- T-4  E-3 通知本文の複製 --------------------------------------------------

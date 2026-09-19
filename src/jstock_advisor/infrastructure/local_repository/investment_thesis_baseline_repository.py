@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from jstock_advisor.domain.entities.holding_decision import InvestmentThesisBaseline
+from jstock_advisor.domain.entities.owner import log_ref
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
 
@@ -23,8 +24,11 @@ class InvestmentThesisBaselineRepository:
 
     def save(self, baseline: InvestmentThesisBaseline) -> None:
         if self._store.get(baseline.baseline_id) is not None:
+            # ★ baseline_id は所有者名を含む(holding_id を内包する)ため、message へ生で
+            #   埋め込まない(Issue #416)。holding_ref と version で特定できる。
             raise ValueError(
-                f"baseline_id={baseline.baseline_id} は既に保存済みです"
+                f"baseline holding_ref={log_ref(baseline.holding_id)} "
+                f"version={baseline.version} は既に保存済みです"
                 "(不変スナップショットのため上書きできません)"
             )
         self._store.upsert(baseline)
