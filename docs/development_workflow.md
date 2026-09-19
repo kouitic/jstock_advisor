@@ -2466,6 +2466,31 @@ VERIFICATION_MANUAL_INVOCATION
 本項の承認  利用者判断(2026-09-08。Issue #213 issuecomment-5584115344)
 適用の先例  #109 / #70 / #286 の VALIDATION 起動(Release W4。Issue #290 の C 節)
 ```
+### 10.2 承認の真正性(HUMAN_GATE_AUTHENTICITY)への入口
+
+全 AI セッションが同一の GitHub アカウントで投稿するため、Issue・comment・PR の author からは
+USER 本人の承認を識別できない(Issue #332)。承認が有効であることを、**誰の直接の操作か・何に対する
+承認か・いつ有効か**まで検査する契約は、次が正本である。本節は入口であり、規則の本文を複製しない。
+
+```
+承認が有効である条件 / 状態遷移 / TTL・binding・retry / 発効条件
+                                       -> user_manager_collaboration_protocol.md 2.7節
+承認要求(APPROVAL_REQUEST)・受領証(RECEIPT)の書式
+                                       -> ai_operation_message_contract.md 8.6節
+```
+
+```
+HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT = Issue #332 の最新の durable な activation 記録
+```
+
+```
+発効前  本節・上記の 2 節が main に入っても、旧運用を継続する(新旧を途中で混在させない)。
+        本節は、10節の人間承認の要否を 1 つも緩和・変更しない。
+発効後  gated action の実行者は、実行の直前に GitHub 上の APPROVAL_REQUEST と RECEIPT を再読し、
+        read-only の preflight で承認の有効性を検査する(記憶・要約・handoff を根拠にしない)。
+        preflight は実行者が呼ぶものであり、hook ではない。満たさなければ実行しない。
+```
+
 ---
 
 ## 11. docs のみの変更(DOC_ONLY_CHANGE)
@@ -2521,3 +2546,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-12 | 3節へ preflight(`scripts/policy_check.py`)を 1 段追加した(Issue #337)。操作の前に「どの正本のどの節を読む必要があるか」を `docs/policy_registry.yaml` から引ける。★ **`PREFLIGHT_REQUIRED = NO` の任意実行であり、通さなくても作業は進められる**(誰の作業も止めない)。★ **通したことは遵守の証拠にならない**(required_policies を示すだけであり、読んだことも守ったことも保証しない。遵守の確認はレビューと各正本が担う)。結果は三値であり ★ **`UNKNOWN` を `PASS` として扱わない**(policy source の鮮度を確認できなかった場合も `UNKNOWN` とし、古い規則へ自動 fallback して操作を許可しない)。**実装パイプラインの他の段・レビュー対象の指定・Issue の自動 close を避ける・DoD の申告・同型 sweep・3.5節の時間意味論変更ゲート・4節のローカルテスト方針・2.6節の WIP と domain lock・6.5節の state 同期・10節の人間承認の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 9.6節の **Issue の追跡責任と PR の batching を分離**した(Issue #357 / USER 判断 7。RULE_PROPOSAL = #213 issuecomment-5649751837)。旧本文は「P1 以外の governance / 開発運用 docs の改善は、その都度 PR を出さず**Issue #213 または #220 へ集約し**、週 1 回 1 PR で反映する」と書いており、**専用の Acceptance Criteria や独立した設計判断を必要とする欠陥まで #213 / #220 へ押し込む、と読めた**(Issue の追跡責任と PR の batching の混同)。実際に、独立したroot cause を持つ設計欠陥を起票したことが 9.6節と食い違うのではないかという申告が生じた。**9.6節の目的(小さな docs 改善ごとに PR を乱立させない / governance 変更を週単位でまとめる)は維持したまま**、`DEDICATED_ISSUE_ALLOWED != STANDALONE_PR_ALLOWED` として、**【Issue】独立した root cause がある / 専用の Acceptance Criteria が必要 / 独自の lifecycle を持つ / 別 Issue へ入れると責任範囲が曖昧になる のいずれかに当たるなら専用 Issue を作ってよい(duplicate check は必須)**、**【PR】P1 例外等を除き main 反映は従来どおり週次 batch へまとめる**、と定めた。上記に当たらない小さな改善は従来どおり #213 / #220 へ集約する。**「governance 改善は何でも個別 Issue を作ってよい」とは変更していない。**9.5節の Issue 起点の原則は不変であり(専用 Issue を作る場合もその Issue が起点である)、`GOVERNANCE_CHANGE_BATCHING = WEEKLY`・対象文書の一覧・P1 を即時とする扱い・「なぜまとめるか」の理由・緊急性を Priority で判定することはいずれも変更していない。見出しを変えていないため `policy_registry.yaml` は更新していない(本節を指す entry は実測で 0 件である)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-18 | 3.5.8 の「PR 本文を CI で自動解析する仕組みは導入しない。」を改訂した(Issue #342、#337 の follow-up)。#337 の監査で、TIME_SEMANTICS_IMPACT 宣言の欠落 6 本・DoD 5 項目の欠落 2 本・`Closes` による close gate の飛び越え 1 本が実際に発生しており、いずれも PR 本文の形式で機械的に検出できるにもかかわらず検出されていなかった。`.github/workflows/governance.yml`(新設、`ci.yml` とは別 workflow。理由は `pii-metadata-audit.yml` と同じで、PR 本文を読むため GitHub API に依存すること)が必須節(概要 / TIME_SEMANTICS_IMPACT / DoD / 同型 sweep / 確認)・DoD 5 項目の各行・Issue 参照の有無を構文のみで検査する。`Closes` / `Fixes` / `Resolves` の使用は正本が条件つきで許容しているため一律 FAIL にはせず WARNING に留め、意味判定(後続 Phase が残るか等)は引き続きレビュワーが行う(前行「`NO` の宣言は免罪符ではない...FAIL とする」の運用は変更していない)。**CI の実装(`F_IMPLEMENTED`)と、required check として登録し merge を実際に止められること(`F_REQUIRED_ENFORCEMENT`)は別であり、登録は USER が別途 1 回だけ行う操作である**(本 PR の時点では `F_REQUIRED_ENFORCEMENT = NO`。job は走るが merge を止めない)。registry の schema violation / anchor の不在は `scripts/policy_check.py` 由来の `tests/unit/test_policy_registry.py` が既に通常の CI(`ci.yml` の `test` job)で検査済みのため、governance.yml では重複実装していない(CI 実行時間の悪化を避けるため)。**3.5.8 のこの 1 行以外・1146 行目(免罪符ではない、の行)・§2.6 WIP と domain lock・§4 ローカルテスト方針・§9.5 Issue 起点の原則・§10 人間承認の境界・CI の必須 job 構成はいずれも変更していない。** コード・Production 挙動の変更なし(governance.yml は required check 未登録のため、既存の PR merge 手順を変えない) |
+| 2026-09-19 | §10 へ 10.2「承認の真正性(HUMAN_GATE_AUTHENTICITY)への入口」を追加した(Issue #332 Unit 1-A)。全 AI セッションが同一の GitHub アカウントで投稿するため、author / mergedBy から USER 本人の承認を識別できず、承認が本文の自己申告に依存する、という Issue #332 の欠陥への対処である。**規則の本文は user_manager_collaboration_protocol.md 2.7節と ai_operation_message_contract.md 8.6節が正本であり、本文書へ複製していない**(入口と、発効状態の正本[`HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録]だけを置いた)。**本改訂は発効しない**(発効条件が成立して durable に記録されるまで、旧運用を継続する。新旧を混在させない)。**10節の人間承認の要否・10.1 の VERIFICATION_MANUAL_INVOCATION・承認の単位はいずれも変更・緩和していない。** 設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |

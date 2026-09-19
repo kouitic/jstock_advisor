@@ -861,6 +861,332 @@ Production deploy は本節とは別の Human Gate である(2節)。
 
 ---
 
+## 2.7 Human Gate の真正性(HUMAN_GATE_AUTHENTICITY)
+
+### 目的
+
+全 AI セッションが同一の GitHub アカウントで投稿するため、Issue・comment・PR の
+author からは USER / MANAGER / DEVELOPER を区別できない。現在の運用は、本文に
+「USER 判断記録」「DECIDED_BY = USER」と書かれているかを読んで判定しており、
+これは**自己申告**である。管理者が同じ文言を書けば同じ効力を持ち、悪意を必要とせず
+善意の誤りだけで Human Gate が通る。さらに、読み飛ばしを検出する仕組みが無い
+(Issue #332)。
+
+本節は、承認の**有無**だけでなく、**誰の直接の操作か・何に対する承認か・いつ有効か**を
+検査できる形にする。設計の正本(確定版)は Issue #332 の v3 最終版
+(issuecomment-5737842742)であり、本節はそれを本文書へ反映したものである。
+
+```
+本節は 2節(Human Gate)の承認単位・例外なしの原則を緩和しない。
+2節が「どの操作に承認が要るか」を定め、本節は「承認が有効であることをどう確かめるか」を定める。
+承認の提示形式・承認要求(APPROVAL_REQUEST)と受領証(RECEIPT)の書式は
+ai_operation_message_contract.md 8節が正本であり、本文書へ複製しない。
+```
+
+### 発効状態
+
+```
+HUMAN_GATE_AUTHENTICITY_ACTIVE = YES | NO
+```
+
+```
+HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT = Issue #332 の最新の durable な activation 記録
+```
+
+発効状態は運用の中で変わりうる。**本節のような静的な文書を、変わりうる状態の唯一の
+根拠にしない。** 現在の状態を確認する必要がある場合は上記を fresh に読む。
+固定値を本書へ埋め込まない。
+
+```
+MERGE_IS_NOT_ACTIVATION = YES
+```
+
+本節が main に入っただけでは発効しない。発効は次の条件がすべて成立した後に、
+durable に記録される(`EFFECTIVE_FROM`)。
+
+```
+EFFECTIVE_FROM_CONDITIONS =
+    USER_DESIGN_APPROVED
+AND IMPLEMENTATION_COMPLETE
+AND REQUIRED_DOCS_UPDATED
+AND REQUIRED_TESTS_GREEN
+AND MIGRATION_RULES_RECORDED
+AND OPERATIONAL_READINESS_CONFIRMED
+```
+
+```
+OPERATIONAL_READINESS_CONFIRMED =
+  実装後、低リスクな gate(Issue close)を1件使い、
+    request -> receipt -> preflight -> EXECUTING -> CONSUMED
+  の drill を行い、期待どおり fail-close と consume が動作することを記録した時点
+```
+
+#### 発効前後でどちらが正本か
+
+```
+BEFORE_ACTIVATION
+  旧運用を継続する。新旧を途中で混在させない。
+  本節の要求(下記 HUMAN_GATE_VALID の各条件・状態遷移・preflight)は、強制されない。
+  Human Gate の有効性は、2節と user_manager_collaboration_protocol.md 3.7節・
+  ai_operation_message_contract.md 8節の提示形式に従って従来どおり判断する。
+
+AFTER_ACTIVATION
+  以降の新規 Human Gate は新方式のみ有効とする。
+  MANAGER 記録だけの新規承認は禁止する。
+  旧方式の承認記録を、新しい gated action の根拠に使う場合は再承認する。
+  旧方式へ自動 fallback しない。
+```
+
+```
+特定の将来日時を固定した grace period は設けない。
+発効後も、進行中の作業へ遡及して過去の承認記録を無効にしない(下記 LEGACY_UNVERIFIED_APPROVAL)。
+```
+
+### 過去の承認記録の扱い(LEGACY_UNVERIFIED_APPROVAL)
+
+```
+・発効日前の記録を、直ちに全無効化しない。
+・ただし、その旧承認を根拠に発効後に新たな gated action を行う場合は、
+  USER へ直接再確認し、新方式の APPROVAL_REQUEST / RECEIPT を新規に発行する。
+・過去に既に完了した Production 変更等を、遡及的に無効扱いしない。
+・後付けで「正式な RECEIPT」を捏造しない。必要なら historical_observation として
+  別種別に残す。
+```
+
+### HUMAN_GATE_VALID(有効な承認の条件)
+
+```
+HUMAN_GATE_VALID =
+    USER_DIRECT_TURN
+AND EXPLICIT_APPROVAL_INTENT
+AND APPROVAL_REQUEST_EXISTS
+AND RECEIPT_EXISTS
+AND REQUEST_ID_MATCHES
+AND GATE_TYPE_MATCHES
+AND SCOPE_MATCHES
+AND EXECUTOR_MATCHES
+AND TARGET_IDENTITY_MATCHES
+AND TARGET_VERSION_MATCHES
+AND RECEIVED_AT_AFTER_REQUESTED_AT
+AND TARGET_MATCHES_AT_REQUEST_TIME
+AND NOT_EXPIRED
+AND NOT_REVOKED
+AND NOT_CONSUMED
+AND NOT_EXECUTING_BY_OTHER
+AND RECEIPT_NOT_EDITED
+```
+
+```
+1 つでも成立しない、または判定できない場合は無効である(fail-close)。
+「不明」は「有効」ではない。
+```
+
+```
+TARGET_MATCHES_AT_REQUEST_TIME   TARGET_VERSION が REQUESTED_AT 時点の対象と一致する
+RECEIVED_AT_AFTER_REQUESTED_AT   時系列が整合する(承認が依頼より後である)
+NOT_EXECUTING_BY_OTHER           下記 EXECUTING の single-writer
+RECEIPT_NOT_EDITED               RECEIPT の created_at と updated_at が一致する(事後編集の検出)
+時刻の権威                        GitHub が付与する created_at を正とする(実行者の申告時刻を使わない)
+```
+
+#### USER_DIRECT_TURN
+
+```
+有効な例
+  ・実行者のセッションへの、USER 本人の直接入力
+  ・実行者自身が発行した確認(確認ダイアログ等)への、USER 本人の回答
+
+無効な例
+  ・他の AI セッションからの転送
+  ・管理者による要約
+  ・system reminder
+  ・background task の通知
+  ・context compaction 後の要約に残った「承認済み」という記載
+```
+
+#### EXPLICIT_APPROVAL_INTENT
+
+```
+Production への影響が大きい gate(ChangeSet EXECUTE / IAM 変更 / 破壊的削除 /
+Production Lambda invoke)
+  -> 文脈上の「はい」だけでは不十分とし、原則として REQUEST_ID を明示した承認を必須とする。
+
+低リスクな gate(merge・Issue close 等)
+  -> 直前に提示された唯一の依頼を指すことが文脈上明確な場合に限り、文脈指示を許容する。
+
+APPROVAL_DECISION が APPROVE 以外(HOLD / REJECT)の RECEIPT は、承認の意思ではない。
+RECEIPT_STATE と APPROVAL_DECISION が食い違う RECEIPT は無効である
+(ai_operation_message_contract.md 8.6.2節)。
+```
+
+### 状態遷移
+
+```
+REQUESTED  -> APPROVED    HUMAN_GATE_VALID の全条件が成立したとき
+APPROVED   -> EXECUTING   実行開始の宣言。1 実行者のみが遷移させられる(single-writer claim)
+EXECUTING  -> CONSUMED    副作用が発生した、または発生有無を否定できない場合
+EXECUTING  -> APPROVED    副作用が発生していないことを明確に確認できる失敗の場合(差し戻し。再実行可)
+EXECUTING  -> CONSUMED    判定不能な場合は安全側(消費済み扱い)、または再承認を要求する
+APPROVED   -> EXPIRED     VALID_UNTIL を過ぎて未消費のまま
+APPROVED   -> INVALIDATED_BY_TARGET_CHANGE   TARGET_IDENTITY / TARGET_VERSION が変化した
+APPROVED   -> REVOKED     USER_DIRECT_TURN での明示的な取消し
+
+CONSUMED / EXPIRED / REVOKED / INVALIDATED_BY_TARGET_CHANGE は終端状態である。
+再実行には、新しい APPROVAL_REQUEST からやり直す(自動 fallback しない)。
+```
+
+### GitHub 上の身元共有(R-7、最重要)
+
+```
+事実  本リポジトリでは、実行者(各 AI セッション)の gh 認証も、GitHub 上の投稿者も、
+      すべて同一のアカウントである。
+
+次は USER 本人の操作の独立した証拠として扱わない。
+  ・PR の mergedBy がそのアカウントであること
+  ・Issue / PR comment の author がそのアカウントであること
+  ・commit の author がそのアカウントであること
+
+「mergedBy が同アカウント」「comment author が同アカウント」だけを根拠に、
+「USER 本人が merge した」「USER 本人が承認した」と判断してはならない。
+
+真正性の起点は次のみである。
+  USER_DIRECT_TURN  +  同一ターンで作成された RECEIPT
+```
+
+役割ごとの独立した GitHub identity(machine user・PAT 等)は、将来の緩和策の候補として
+記録するが、本節の範囲外である。
+
+### GATE_TYPE 別の TTL・binding・retry
+
+```
+GATE                       TTL(標準)   binding                        retry 方針
+merge                      4 時間      HEAD_SHA。最終 HEAD の確定・     1 回の attempt で消費。
+                                        mergeStateStatus = CLEAN・       HEAD_SHA が変化したら
+                                        CI green・Governance green・     INVALIDATED_BY_TARGET_CHANGE。
+                                        必要なレビュー完了の後にのみ     実行は承認された SHA へ
+                                        Human Gate へ出す               機械的に束縛する
+                                                                        (gh pr merge --match-head-commit 等)
+ChangeSet CREATE           2 時間      TEMPLATE_HASH + parameters +     条件付きで retry 可。
+                                        target。副作用のある操作として   同一 TEMPLATE_HASH・同一 parameters・
+                                        扱う(「read-only 相当」と        同一 target・同一 ChangeSet 種別・
+                                        表現しない)                     上限回数あり。いずれかが変われば
+                                                                        retry ではなく TARGET_VERSION_CHANGED
+                                                                        = 再承認必須
+ChangeSet EXECUTE          1 時間      CHANGESET_ID + TEMPLATE_HASH    1 回の attempt で消費。
+                                                                        再試行は新規承認が必須
+IAM 変更                   1 時間      policy document のハッシュ       1 回の attempt で消費。
+                                        または差分                       再試行は新規承認が必須
+破壊的削除                  30 分       対象 resource の識別子           1 回の attempt で消費。
+                                                                        再試行は新規承認が必須
+Production Lambda invoke   VALIDATION / DRY_RUN: 2 時間   target + purpose
+                           NORMAL: 1 時間
+                                                                        VALIDATION / DRY_RUN: 副作用なしが
+                                                                        契約上成立している場合のみ、同一 target・
+                                                                        同一 parameters・同一 version で retry 可
+                                                                        (上限あり)。
+                                                                        NORMAL: 1 回の invoke attempt で承認を
+                                                                        消費する(success / failure を問わず原則
+                                                                        CONSUMED)。「失敗 = 何も起きていない」
+                                                                        とは扱わない。再実行は新規 Human Gate が必須
+Issue close                24 時間     STATE_ID(依頼時点の最新)        1 回で完結。再試行の概念は薄い
+```
+
+```
+本表に行が無い gate(2節に挙がる release-blocker 解除 / Production rollback 等)の TTL・binding・
+retry は、本節は定めない(Issue #332 の v3 に定めが無い。未決定)。それらを新方式の対象へ
+含める時期と条件は、発効の前に USER が決定する必要がある(発効条件の USER_DESIGN_APPROVED の範囲)。
+本節は、その決定を AI が推測で補わないために、定めが無いことをここに明記する。
+```
+
+### 緊急時(P0・USER 不在)
+
+```
+EMERGENCY_USER_ABSENT_POLICY = FAIL_CLOSE
+
+USER 不在時に、Human Gate を bypass する経路は設けない。
+
+許可      read-only 調査 / ログ確認 / 状況整理 / 復旧案の作成 / rollback 案・ChangeSet 案の準備
+禁止      Production mutation / IAM 変更 / rollback 実行 / 破壊的削除 /
+          Production Lambda の NORMAL invoke / ChangeSet EXECUTE /
+          continue-update-rollback・cancel-update-stack 等の Production 変更操作
+```
+
+将来、緊急時用の break-glass 経路を設ける場合は、Issue #332 へ例外として追加せず、
+別 Issue で独立に設計する。最低限の検討事項は、事前に USER が承認した限定 runbook /
+rollback-only / target 固定 / command 固定 / 専用 credential・role / 最小権限 /
+durable な audit / USER 復帰後の必須レビューである。
+
+### 残余リスク(本節が埋めないもの)
+
+```
+R-1   実行者自身の誤認・偽造
+R-2   USER が管理者のセッションで承認する習慣(運用が徹底されるまでの過渡的リスク)
+R-3   RECEIPT の書き損ね(fail-close で止まる)
+R-4   過去の承認記録(LEGACY_UNVERIFIED_APPROVAL)
+R-5   USER の承認負担の増加
+R-6   実行者側の gate の読み飛ばし
+R-7   GitHub 上の身元共有(上記。author / mergedBy は真正性の証拠にならない)
+R-8   context compaction・引き継ぎ後の「承認済み」の誤認
+      (preflight は必ず GitHub 上の RECEIPT を再読し、記憶・要約を根拠にしない)
+R-9   承認の要約と実行対象(ARN / SHA / コマンド)の TOCTOU
+      (RECEIPT に正確な識別子を含め、実行時に機械的な一致を取る)
+R-10  RECEIPT・comment の事後の編集・削除
+      (created_at と updated_at の一致を確認する。編集済みの RECEIPT は無効)
+R-11  preflight 後の target 変更(TOCTOU)。SHA binding 等の機械的束縛で縮小する
+R-12  USER 不在時は fail-close で復旧が止まる(上記のとおり明示的に受容する)
+R-13  複数の実行者・複数の request の競合(EXECUTING の single-writer で縮小する)
+```
+
+```
+本節は真正性を「完全に」保証しない。とくに R-1・R-5・R-6 は、preflight を自動化しても残る。
+preflight の自動化(hook への統合等)は形式の検査(RECEIPT の存在等)を機械化するにすぎず、
+USER 本人性は解決しない。
+```
+
+### preflight の検査項目
+
+read-only の preflight checker が検査する項目は次のとおりである(Issue #332 の v3 §6(b))。
+上の HUMAN_GATE_VALID の各条件に加え、次を検査する。1 つでも満たさなければ fail-close とする。
+
+```
+・request が存在する
+・receipt が存在する
+・REQUEST_ID が一致する
+・GATE_TYPE が一致する
+・SCOPE が一致する
+・EXECUTOR が一致する
+・TARGET_IDENTITY が一致する
+・TARGET_VERSION が一致する
+・有効期限内である(VALID_UNTIL。時刻の権威は GitHub の created_at)
+・revoked でない
+・consumed でない
+・executing の競合がない(single-writer)
+・receipt が未編集である(created_at と updated_at が一致する。R-10)
+・必要な MANAGER scope check が済んでいる
+```
+
+```
+「必要な MANAGER scope check」が何を指すか(どの gate で必要か・何を確認するか)は、
+v3 が定義しておらず、本節も定めない。checker の実装(Issue #332 Unit 1-B)の前に、
+その内容を確認する必要がある(AI が推測で補わない)。
+```
+
+### 実行者の義務(発効後)
+
+```
+gated action の実行者は、実行の直前に、GitHub 上の APPROVAL_REQUEST と RECEIPT を再読し、
+read-only の preflight で HUMAN_GATE_VALID を検査する(記憶・要約・handoff を根拠にしない)。
+preflight は実行者が呼ぶものであり、hook ではない。
+1 つでも満たさなければ実行しない(fail-close)。
+実行の開始・結果(CONSUMED / APPROVED への差し戻し等)は、状態遷移に従って durable に記録する。
+```
+
+### 例外
+
+なし。緊急時であっても、上記の FAIL_CLOSE を除いて Human Gate は省略しない。
+
+---
+
 ## 3. 管理者のレビュー判定
 
 ### 目的
@@ -3203,3 +3529,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-13 | 3.9節 / 3.14節へ **Phase 1 の入力 manifest の版を一意に識別する contract を追加**した(Issue #356。#353 で入れた `PHASE_1_INPUT_MANIFEST` の設計欠陥)。旧規定は **manifest を URL の列挙としてのみ定めており、その URL が指す comment の どの版を読んだのかを表す手段が無かった**。GitHub の comment は投稿後に編集できるため、**REVIEWER が読んだ後に MANAGER が manifest を書き換えても記録上は同じ URL のまま**であり、事後に「何を読んで Phase 1 を固定したのか」を検査できなかった(実例 = Issue #353 の manifest が 3 版存在した)。3.9節へ `MANIFEST_VERSION`(対象コメントの URL と id / `MANIFEST_UPDATED_AT` / `MANIFEST_CONTENT_HASH` の 3 つの組)と `MANIFEST_VERSION_PRIMARY_IDENTITY = MANIFEST_CONTENT_HASH` を置き、**本文の hash を最も強い識別情報**とした(`updated_at` は同一秒内の 2 回目の編集を区別できず、手で振る版番号は本文と一致する保証が無い。ただし版番号の併記は禁止しない)。hash の計算は **exact retrieved UTF-8 body を対象とし、`MANIFEST_HASH_NORMALIZATION = NONE`** とした(改行コード・末尾改行・空白も本文の一部として hash に入る。**監査対象を都合よく normalize して差を消さない**)。取得時に **JSON の body の値を UTF-8 bytes にしたものを hash する**ことと、**shell の pipeline へ流すと末尾へ改行が足される実装がある**ため「1 バイトも足さない」手順で計算することを明記した(実測で 1 バイトの差が別の hash になることを確認している)。長さを併記する場合は **bytes** で書く(文字数と混同しない)。3.14節は `MANIFEST_VERSION` を **snapshot の必須 field** へ `PHASE_1_INPUT_MANIFEST` の直後に追加し、`PHASE_1_COMPLETE` の条件へ**読んだ manifest の全件(追補を含む)について埋まっていること**を明示した(判定だけを先に置いて根拠を後から作れる状態にしないという 3.14節の目的に合わせた)。`MANIFEST_VERSION_FIXED_AFTER_FRESHNESS_CHECK` として **`TARGET_FRESHNESS_CHECK`(6 step)を通した後に manifest の版を固定し、その後 Phase 1 を開始する**順序を定めた(**6 step は増やしていない**。Issue #355 が定めるのは「この対象について blind-first が成立するか」、本項が定めるのは「そのとき実際に読んだ版はどれか」であり、別の問いである)。`MANIFEST_IMMUTABILITY_AFTER_PHASE_1_START` として **Phase 1 開始後の当該版の編集を禁止**し、訂正・追加は **新しい comment(追補 / supplement)**で行い、REVIEWER が取り込むか否かを決め **どちらであっても記録する**(`PREFER_APPEND_ONLY = YES`)こととした。**Phase 1 開始前の訂正は禁止していない**(正当な修正を止めない)。`MANIFEST_EDIT_DETECTION` として (a) `updated_at != created_at` / (b) 現在の本文の hash が snapshot の値と違う / (c) 過去の版の一覧と hash の照合 を置き、(b) が成立しても **自動で無効にせず**、まず原因と編集履歴を確認したうえで **A 読んだ版を一意に特定できるなら当該 Phase 1 を継続してよい / B 特定できないならやり直す**と定めた(**無条件の FAIL にも理由の分からない PASS にも倒さない**。利用者判断)。「この規則が埋めないもの」へ **hash も REVIEWER の自己申告であり「実際に読んだか」は検査できない**(検査できるのは申告された版が実在するか・現在の版と同じかである) / **過去の版の本文は API から取得でき同じ規則で hash すると突き合わせられる**(2026-09-13 に実測) / **削除された版・private repository での挙動は未確認** / **hash の不一致はそれだけでは不正を意味しない**(正当な追補の後に記録を足していない場合も同じ見え方になる) を追記した。発効は `MANIFEST_VERSION_CONTRACT_ACTIVE = YES | NO` と `MANIFEST_CONTRACT_ACTIVATION_STATE_SSOT = Issue #356 の最新の durable な activation 記録`で表し、**固定値を本書へ埋め込まない**(`SESSION_POLICY_ACTIVATION_STATE_SSOT` / `ROLE_SEPARATION_ACTIVE` / `CURRENT_WIP_RULE` と同じ方式であり、新しい方式を作っていない。**限定なしの `ACTIVATION_STATE_SSOT` は使わない**)。適用は `MANIFEST_VERSION_CONTRACT_APPLIES_FROM` のとおり **発効後に開始する新しい review lifecycle から**であり、**進行中の review へ遡及せず、既に投稿済みの manifest へ hash を付け直さない**。**本改訂は追記のみであり既存の manifest 規定を削除しないため、発効前の読み先を別に固定する pointer は置いていない**(発効前は `MANIFEST_VERSION` の記録を必須としないだけである)。**Issue #355 の規定(`TARGET_FRESHNESS_CHECK` の 6 step と step 4 の内容基準 / `TARGET_FRESHNESS_SCOPE` / `PRIOR_EXPOSURE` / `CONTAMINATION_CHECK` / `REVIEW_TARGET_REF` / `SESSION_REUSE_ALLOWED_FOR` / `NEW_REVIEW_SESSION_REQUIRED_IF` の A〜E / `PERSISTENT_REVIEWER_SESSION_POLICY_ACTIVE` と pre-activation の pointer)は 1 つも変更していない。** role separation・`REVIEW_KIND`・判定語 4 種・12 段階の順序・Phase 1 / Phase 2 の構造・Human Gate・利用者の権限・レビューの深さ・`MANAGER_REVIEW_CAN_SUBSTITUTE_INDEPENDENT_REVIEW = NO` も変更していない。`policy_registry.yaml` は見出し(anchor)が 1 つも変わらないため更新しておらず、CLAUDE.md も変更していない(入口からの到達は既存の pointer で成立する)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 3.7節を **merge 可否の判断だけを定める節へ改め、提示項目を ai_operation_message_contract.md 8節へ実体として移した**(Issue #345)。旧 3.7節は「発効後は提示形式の正本を contract 8節とし、本節の提示項目はそこへ吸収される」と**宣言していたが、吸収先に提示項目が存在せず**、実体としては 3.7節が唯一の提示項目の定義であり続けていた(#353 の review finding F9 が同じ食い違いを指摘している)。見出しを `## 3.7 merge 判断を支援する提示形式` から **`## 3.7 merge 可否の判断(MERGE_DECISION_RULES)`** へ改称し(旧題を文字列参照している箇所は本節以外に 0 件、節番号「3.7節」での参照 5 件は番号参照のため影響しないことを実測済み)、11 項目の提示 field を定義する fence を削除して、**`MERGE_DECISION_RULES` の 6 点**(1 対象を一意に特定できる形で提示する / 2 可否は `MERGE_READY` で表し YES は承認でも実行でもない / 3 本番影響と他 Issue 影響を必ず評価する / 4 残課題があることとそれが merge を止めるべきかは別 / 5 「技術的に merge 可能」と「利用者が承認した」は別 / 6 判定が何を読んで出されたかを提示に残し `REVIEW_VERDICT` には `REVIEW_KIND` を併記する)へ置き換えた。**`RECOMMENDED_ACTION` は廃止**した(唯一廃止した語である。判断の意味は 2 と 6 が持ち、利用者への見せ方は 8節が持つ)。`PR_NUMBER` / `PRODUCTION_IMPACT` / `OTHER_ISSUE_IMPACT` / `REMAINING_ISSUES_OR_CONCERNS` の**項目名**は本節から外し、意味は 1 / 3 / 4 の日本語の規範として残した。`MERGE_READY` / `REVIEW_VERDICT` / `REVIEW_KIND` / `MERGE_BLOCKING_CONCERN` / `INDEPENDENT_REVIEW_SNAPSHOT` / `REVIEW_INPUT_EVIDENCE` は**両文書に残るが役割が異なる**(本節 = 判断の意味 / 8節 = 提示の項目)。同じ識別子が両方にあること自体は重複ではなく、**同義の段落が両方にあること**が重複であるため、移動した 2 ブロック(11 項目を並べた例 / 「表へ固定しない」の注記)は移動元から削除した。例は**判断の例**(残課題ありで `MERGE_BLOCKING_CONCERN = NO`)だけを残し、提示のレイアウトは 8節の `MERGE_GATE` の例を正本とした。「発効後の正本」ブロックは BEFORE / AFTER の 2 行を歴史的記述として残したうえで、**この吸収が Issue #345 で実体化したこと**と**本節は判断の中身の正本であって提示項目の正本ではない**ことを追記した。`MERGE_APPROVAL_IS_BOUND_TO_EXACT_REVIEWED_HEAD = YES` は承認の境界であるため本節に残している。**判定語 4 種・Human Gate・承認単位・`MERGE_EXECUTOR`・2.6節の G2・3.9〜3.14節の独立レビューはいずれも変更していない。**`policy_registry.yaml` へ `PROTOCOL.MERGE_DECISION_RULES`(operation = MERGE)を 1 件追加した(改称後の見出しを anchor とする。operation MERGE から本節を引けない状態の解消であり、既存 entry は変更していない)。CLAUDE.md は変更していない(参照は節番号であり改称の影響を受けない)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 1.6節へ **利用者向けの回答の構成と、内部表記を日本語の意味へ翻訳する規則を追加**した(Issue #357)。旧 1.6節は語彙(そのまま使ってよい用語 / 説明が必要な概念)と最低限の説明内容を定めていたが、**回答をどう組み立てるか・内部の状態値や識別子をどう扱うか・選択肢や大きな変更一覧をどう示すか・送る前に何を確かめるかが正本に無く**、内部識別子を並べた回答が Human Gate の判断材料にならない状態が実際に生じた。「回答の順序」の 6 段を**【結論】【状況】【影響】【これからの進め方】【USER に判断してほしいこと】【技術詳細・監査情報】の 6 見出しへ置き換え**(並存させない)、**「安全面」は独立見出しにせず【影響】の中で「何が危険か / 今進めてよいか / 失敗したときに戻せるか」として書く**こと、**毎回 6 つを機械的に出さない**(判断が不要なら「今 USER がすることはありません」と1 行で書き、短い報告を冗長にしない)ことを定めた。**AI どうしの handoff / durable record / 監査で構造化した key = value を使うことは変えていない**(本節の対象は管理者から利用者への回答である)。新しい小節として「内部の英語表記は日本語で示す」(意味を主・内部表記は併記。内部 ID を本文の主役にしない。**記録をやめるという意味ではない**)、「承認をお願いするときの識別情報は短縮しない」(**分かりやすさのために承認対象を曖昧にしない**。普段の本文は読みやすさ優先でよいが、承認の場面では exact な識別情報を明示し、**それが何を特定するものかを日本語でも 1 行説明する**。提示のしかたの正本は ai_operation_message_contract.md 8節であるが「8節に従う」とだけ書いて済ませない)、「選択肢を示すときに書くこと」(各案の内容・メリット・デメリット・管理者の推奨。**推奨を書かないまま「どれにしますか」と尋ねない**。推奨は承認ではない)、「大きな変更の一覧は意味へ翻訳してから示す」(予定どおり / 予定外だが確認済み / 調査中 / 本番反映を止めるべき の 4 分類。件数や内訳は【技術詳細・監査情報】へ)、「**測っていない値を実測値として示さない**」(未計測 / 概算と明示する。監査証跡へ残す値は記録する直前に実測する。利用者判断)、「送信前の確認」(9 項目の自己確認。**満たしたことを相手が検査する手段は無い**)を置いた。あわせて「そのまま使ってよいもの」へ一般的な開発用語を 1 行、「説明が必要なもの」の B へ Lambda の Layer と Replacement を、「最低限説明する内容」へ 3 項目(止める必要があるか / 取り返しがつくか / 選択肢と推奨)を追加し、「技術的な情報は残す」へ分ける場所が【技術詳細・監査情報】であることを 1 文足した。**新しい内部用語(識別子)を 1 つも増やしていない**(利用者判断。既存の `USER_EXPLANATION_LEVEL` / `USER_CAN_MAKE_AN_INFORMED_DECISION` / `INTERNAL_STATUS_ONLY_RESPONSE` をそのまま使う)。**適用範囲(管理者 -> 利用者)・例外・目的・前提とする知識水準・「内部コードだけで回答しない」・Human Gate の依頼の 6 項目・技術的な正確さを落とさないの各ブロックは変更していない。開発者 -> 管理者の機械可読形式も不変である。** ai_operation_message_contract.md 8.1節へ**本節を指す参照 1 行**を置き、`policy_registry.yaml` へ `PROTOCOL.USER_EXPLANATION_LEVEL` を 1 件追加した(索引に限定し本文は書かない。見出しを変えていないため既存 anchor は有効なままである)。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-19 | 2.7節「Human Gate の真正性(HUMAN_GATE_AUTHENTICITY)」を新設した(Issue #332 Unit 1-A)。全 AI セッションが同一の GitHub アカウントで投稿するため、author / mergedBy から USER 本人の承認を識別できず、承認が本文の自己申告に依存し、読み飛ばしを検出する仕組みも無い、という欠陥への対処である。(1)`HUMAN_GATE_VALID` の条件(USER_DIRECT_TURN・EXPLICIT_APPROVAL_INTENT・APPROVAL_REQUEST / RECEIPT の存在と REQUEST_ID・GATE_TYPE・SCOPE・EXECUTOR・TARGET_IDENTITY・TARGET_VERSION の一致・時系列整合・NOT_EXPIRED / NOT_REVOKED / NOT_CONSUMED・EXECUTING の single-writer・RECEIPT 未編集)、(2)Human Gate の状態遷移(REQUESTED / APPROVED / EXECUTING / CONSUMED / EXPIRED / REVOKED / INVALIDATED_BY_TARGET_CHANGE)、(3)GitHub 上の身元共有(R-7。author / mergedBy を USER 本人の証拠にしない。真正性の起点は USER_DIRECT_TURN と同一ターンの RECEIPT のみ)、(4)gate 別の TTL・binding・retry、(5)緊急時 `EMERGENCY_USER_ABSENT_POLICY = FAIL_CLOSE`(USER 不在時の bypass 経路を設けない)、(6)残余リスク R-1〜R-13、(7)発効条件 `EFFECTIVE_FROM_CONDITIONS` と `OPERATIONAL_READINESS_CONFIRMED`、過去の承認記録の扱い(`LEGACY_UNVERIFIED_APPROVAL`)、(8)preflight の検査項目(v3 §6(b) の 14 項目。うち「必要な MANAGER scope check」の内容は v3 が定義しておらず、本節も定めない)を正本へ反映した。**本改訂は発効しない**(`MERGE_IS_NOT_ACTIVATION = YES`。発効状態の正本は `HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録で、固定値を本書へ埋め込まない。発効前は旧運用を継続し、新旧を途中で混在させない。識別子は既存の `ACTIVATION_STATE_SSOT` [#353]・`SESSION_POLICY_ACTIVATION_STATE_SSOT` [#355] と衝突しない名前にした)。**2節の承認単位・例外なしの原則・2.5節・2.6節・3節以降・1節の役割定義はいずれも変更・緩和していない。** 表に行が無い gate(release-blocker 解除・rollback 等)の TTL・binding・retry は v3 に定めが無く、AI が補わず「未決定」と明記した(発効前に USER の決定を要する)。**preflight の自動化は形式の検査を機械化するにすぎず、USER 本人性は解決しない**ことも明記した。本文書は形式(書式)を定めず、書式は ai_operation_message_contract.md 8.6節が正本である。設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |
