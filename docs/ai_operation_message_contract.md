@@ -765,6 +765,150 @@ Human Gate の操作許可       APPROVED_BY のみ。DECIDED_BY は書かない
 **誰が書いたか**ではない。本人性の保証は Issue #332 の論点であり、本項では
 解決しない。
 
+---
+
+### 8.6 承認要求(APPROVAL_REQUEST)と受領証(RECEIPT)の機械可読形式
+
+Human Gate の承認が「誰の直接の操作か・何に対する承認か・いつ有効か」を検査できるよう、
+**承認要求**と**受領証**の書式を固定する(Issue #332 Unit 1)。8.1〜8.5 の提示形式・記録 field を
+置き換えない。**本項は形式だけを定める。** 承認が有効である条件・状態遷移・TTL・binding は
+[user_manager_collaboration_protocol.md](user_manager_collaboration_protocol.md) 2.7節が正本であり、
+本項は複製しない。
+
+```
+本項の要求は、発効するまで強制されない。
+  発効状態の正本 = user_manager_collaboration_protocol.md 2.7節の
+                   HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT(Issue #332 の最新の durable な activation 記録)
+  発効前は 8.1〜8.5 に従い、旧運用を継続する。新旧を途中で混在させない。
+```
+
+固定するのは schema(固定キー・固定値集合)であり長さではない。ISSUE_STATE_SNAPSHOT と同じ発想で、
+機械が読める形にする。
+
+#### 8.6.1 APPROVAL_REQUEST
+
+承認を求める側(実行者または管理者)が、Human Gate の提示と同時に Issue または PR へ書く。
+
+```
+APPROVAL_REQUEST
+REQUEST_ID     = <8.6.3 の形式>
+GATE_TYPE      = <8.6.4 の値集合のいずれか>
+SCOPE          = <何を承認するか。8.2 の「承認対象」節へ書く識別子と同じ範囲>
+EXECUTOR       = <実行者の役割識別子。user_manager_collaboration_protocol.md 1節>
+TARGET_IDENTITY = <対象の exact な識別子。8.2 の gate 種別ごとの識別子(PR 番号 / ARN / resource 識別子 等)>
+TARGET_VERSION = <変化しうる版。protocol 2.7節の binding(HEAD SHA / TEMPLATE_HASH / STATE_ID 等)>
+ISSUE_OR_PR    = <対象の Issue または PR>
+REQUESTED_AT   = <依頼の時刻。時刻の権威は GitHub の created_at であり、本欄は参考値>
+VALID_UNTIL    = <有効期限。protocol 2.7節の TTL(標準)を上限とする>
+APPROVAL_USE   = <SINGLE_ATTEMPT | BOUNDED_RETRY>
+```
+
+```
+APPROVAL_USE
+  SINGLE_ATTEMPT   1 回の attempt で承認を消費する(protocol 2.7節の retry 方針が「1 回の attempt で消費」の gate)
+  BOUNDED_RETRY    同一 target・同一 parameters・同一 version に限り、上限回数まで retry できる
+                   (retry 方針が条件付きで retry 可の gate。上限回数を SCOPE に併記する)
+```
+
+#### 8.6.2 RECEIPT(受領証)
+
+**USER の直接の操作(USER_DIRECT_TURN)を受けた実行者が、同一ターンで**、Issue または PR へ書く。
+RECEIPT は**編集しない**(事後編集の検出のため、created_at と updated_at の一致を検査する)。
+
+```
+APPROVAL_RECEIPT
+REQUEST_ID       = <対応する APPROVAL_REQUEST の REQUEST_ID>
+APPROVAL_DECISION = <APPROVE | HOLD | REJECT>
+RECEIPT_CHANNEL  = <DIRECT_INPUT | EXECUTOR_ISSUED_CONFIRMATION>
+APPROVAL_SUMMARY = <承認内容の要約。PUBLIC_SANITIZED。正確な識別子は TARGET_IDENTITY / TARGET_VERSION に置く>
+TARGET_IDENTITY  = <承認を受けた時点の対象の exact な識別子>
+TARGET_VERSION   = <承認を受けた時点の版>
+RECEIVED_AT      = <受領の時刻。時刻の権威は GitHub の created_at であり、本欄は参考値>
+RECEIPT_STATE    = <APPROVED>
+```
+
+```
+RECEIPT_CHANNEL
+  DIRECT_INPUT                     実行者のセッションへの、USER 本人の直接入力
+  EXECUTOR_ISSUED_CONFIRMATION     実行者自身が発行した確認(確認ダイアログ等)への、USER 本人の回答
+  ※ 他の AI セッションからの転送・管理者による要約・system reminder・background task の通知・
+    context compaction 後の要約に残った記載は、いずれも USER_DIRECT_TURN ではない(protocol 2.7節)。
+    これらを RECEIPT_CHANNEL として書いてはならない。
+
+APPROVAL_DECISION
+  APPROVE   承認する      HOLD   保留する      REJECT   却下する
+  (8.1 の「推奨と理由」の 承認 | 保留 | 却下 に対応する。APPROVE 以外の RECEIPT は承認として扱わない)
+
+RECEIPT_STATE
+  RECEIPT の作成時点の値は APPROVED のみである。以後の状態遷移(EXECUTING / CONSUMED / EXPIRED /
+  REVOKED / INVALIDATED_BY_TARGET_CHANGE。遷移の定義は protocol 2.7節)は、RECEIPT を編集せず、
+  同じ REQUEST_ID を持つ追記の記録として残す(RECEIPT の編集は無効の根拠になるため)。
+```
+
+#### 8.6.3 REQUEST_ID
+
+```
+単純な連番は使わない。
+STATE_ID(development_workflow.md 6.5節)と同様の、衝突耐性のある形式とする。
+
+形式の例    <UTC 時刻(マイクロ秒まで)>-<ACTOR>-<NONCE>
+```
+
+同一の REQUEST_ID を別の gate へ再利用しない。再実行は新しい APPROVAL_REQUEST(新しい REQUEST_ID)からやり直す。
+
+#### 8.6.4 GATE_TYPE の値集合
+
+```
+8.2 の gate 種別の識別子
+  DESIGN_GATE / MERGE_GATE / PRODUCTION_CHANGESET_CREATE_GATE / PRODUCTION_CHANGESET_EXECUTE_GATE /
+  ROLLBACK_GATE / RELEASE_BLOCKER_REMOVAL_GATE / ACTIVATION_GATE
+
+protocol 2.7節の TTL・binding・retry の表に行がある gate のうち、8.2 に識別子が無いもの
+  IAM_CHANGE_GATE(IAM 変更)/ DESTRUCTIVE_DELETE_GATE(破壊的削除)/
+  PRODUCTION_LAMBDA_INVOKE_GATE(Production Lambda invoke)/ ISSUE_CLOSE_GATE(Issue close)
+```
+
+```
+protocol 2.7節の表に TTL・binding・retry の行が無い gate(DESIGN_GATE / ROLLBACK_GATE /
+RELEASE_BLOCKER_REMOVAL_GATE / ACTIVATION_GATE)を、新方式の対象へ含める時期と条件は
+未決定である(protocol 2.7節)。本項はその決定を補わない。
+```
+
+#### 8.6.5 例(識別子は架空の値。実在の識別子・個人情報を書かない)
+
+```
+APPROVAL_REQUEST
+REQUEST_ID      = 20260101T000000000000Z-DEVELOPER_A-0a1b2c3d
+GATE_TYPE       = ISSUE_CLOSE_GATE
+SCOPE           = Issue #9999 を close する
+EXECUTOR        = DEVELOPER
+TARGET_IDENTITY = Issue #9999
+TARGET_VERSION  = STATE_ID 20260101T000000000000Z-DEVELOPER_A-EXAMPLE
+ISSUE_OR_PR     = Issue #9999
+REQUESTED_AT    = 2026-01-01T00:00:00Z
+VALID_UNTIL     = 2026-01-02T00:00:00Z
+APPROVAL_USE    = SINGLE_ATTEMPT
+
+APPROVAL_RECEIPT
+REQUEST_ID        = 20260101T000000000000Z-DEVELOPER_A-0a1b2c3d
+APPROVAL_DECISION = APPROVE
+RECEIPT_CHANNEL   = DIRECT_INPUT
+APPROVAL_SUMMARY  = Issue #9999 の close を承認
+TARGET_IDENTITY   = Issue #9999
+TARGET_VERSION    = STATE_ID 20260101T000000000000Z-DEVELOPER_A-EXAMPLE
+RECEIVED_AT       = 2026-01-01T00:05:00Z
+RECEIPT_STATE     = APPROVED
+```
+
+#### 8.6.6 本項が定めないもの
+
+```
+・承認が有効である条件・状態遷移・TTL・binding・retry     -> protocol 2.7節
+・read-only の preflight checker の実装                  -> 別の変更(Issue #332 Unit 1-B)。発効前は未使用
+・hook への統合 / 日次の監査 workflow                      -> 別 Issue(Issue #332 の Unit 2 / Unit 3)
+・本人性の完全な保証                                       -> 保証しない(protocol 2.7節の残余リスク)
+```
+
 ## 9. 確認質問の要否
 
 ### 9.1 判定
@@ -940,3 +1084,4 @@ Instruction に VERIFICATION_REQUIRED が無い場合は、その旨を報告し
 | 2026-09-12 | 8節へ 8.5「承認・判断の記録 field」を新設した(Issue #337)。`DECIDED_BY` / `APPROVED_BY` / `RECORDED_BY` / `DECIDED_AT` は運用で 100 件以上の Issue に使われていたが docs 全体で定義が 0 件であり、書式も意味差も各自の判断になっていた。MEANING / REQUIRED_WHEN / AUTHORITY_SEMANTICS を定め、★ **判断の帰属(`DECIDED_BY`)と操作の許可(`APPROVED_BY`)を区別**した。★ **両方を常に必須にしない**(同じ事実が 2 つの field へ重複し、どちらが操作の許可か読み取れなくなるため)。★ **`DECIDED_BY = USER` は利用者本人であることを機械的に保証しない**ことを明記した(全セッションが同一の GitHub identity で投稿する。本人性の保証は Issue #332 の論点であり本項では解決しない)。★ **本項は形式だけを定める。承認の要否は user_manager_collaboration_protocol.md 2節と development_workflow.md 10節が正本であり複製していない。** **2.2 の NORMAL_REPORT 必須 11 field・3節の BASELINE_INVARIANTS・4節の FORENSIC 昇格条件・5節の AUTHORIZED_PHASES・6節の転送契約・8.1〜8.4 の提示フォーマットと `APPROVAL_UNIT_CONSOLIDATION = NO`・11節の VERIFICATION_REQUIRED はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 8節へ **merge 判断の提示項目を実体として受け入れた**(Issue #345)。0節は発効後の正本を本文書 8節と宣言していたが、**user_manager_collaboration_protocol.md 3.7節の 11 項目が本文書へ移っておらず**、宣言と実体が食い違っていた。8.1節の固定 4 節はそのままに、**各節へ書くもの(MERGE_GATE の場合)**を追加し、「推奨と理由」へ `REVIEW_VERDICT` と `REVIEW_KIND` の併記・`MERGE_READY` の値・残課題が merge を止めるかどうかを含めること、「承認すると起きること」「この承認では起きないこと」で**本番への影響と他 Issue への影響を表す**こと(そのための独立した項目を作らない)、AUDIT_INFO へ `INDEPENDENT_REVIEW_SNAPSHOT` と `REVIEW_INPUT_EVIDENCE` を置き**独立レビューを行った場合に省略しない**ことを明記した。あわせて 3.7節から移した注記(**この形式を Markdown の表へ固定しない**。項目が揃っていることが要件である)と、**merge 可否の判断の中身は protocol 3.7節が正本である**という 1 行の pointer を置いた。8.2節の `MERGE_GATE` 行の「AUDIT_INFO へ分離してよいもの」へ独立レビューの snapshot URL と review 入力の identity を加えた(**「承認対象」列の PR 番号 + exact PR head SHA は変更していない**)。8.4節の既存の `MERGE_GATE` の例へ同じ項目を追記した(例を増やしていない)。**固定 4 節の構成・「起きないこと」を必須とする理由・8.3節の `APPROVAL_UNIT_CONSOLIDATION = NO`・8.5節の記録 field・他の gate 種別の行・2.2節の報告 schema・3節・4節・5節・6節・11節はいずれも変更していない。**見出し(anchor)を 1 つも変えていないため `policy_registry.yaml` の既存 entry は有効なままである。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 8.1節へ **利用者向けの説明の水準を指す参照 1 行**を追加した(Issue #357)。8節は承認時に何を必ず提示するかを定めるが、**その提示を利用者が理解できる形にするための規則**(user_manager_collaboration_protocol.md 1.6節)への入口が無かった。**説明ルールの本文は複製していない**(二重管理しない。利用者判断)。1 行の pointer のみであり、**固定 4 節・gate 種別の表・例・8.3節・8.5節・見出し(anchor)はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-19 | 8.6節「承認要求(APPROVAL_REQUEST)と受領証(RECEIPT)の機械可読形式」を新設した(Issue #332 Unit 1-A)。承認が「誰の直接の操作か・何に対する承認か・いつ有効か」を検査できるよう、APPROVAL_REQUEST(REQUEST_ID / GATE_TYPE / SCOPE / EXECUTOR / TARGET_IDENTITY / TARGET_VERSION / ISSUE_OR_PR / REQUESTED_AT / VALID_UNTIL / APPROVAL_USE)と RECEIPT(REQUEST_ID / APPROVAL_DECISION / RECEIPT_CHANNEL / APPROVAL_SUMMARY / TARGET_IDENTITY / TARGET_VERSION / RECEIVED_AT / RECEIPT_STATE)の固定キー・固定値集合、REQUEST_ID の生成方式(単純連番を使わず、STATE_ID と同様の衝突耐性のある形式)、GATE_TYPE の値集合、架空値の例を定めた。RECEIPT は編集しない(事後編集の検出のため)。以後の状態遷移は RECEIPT を編集せず追記の記録として残す。**本節は形式だけを定め、承認が有効である条件・状態遷移・TTL・binding は user_manager_collaboration_protocol.md 2.7節が正本である。** **本改訂は発効しない**(発効状態の正本は `HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録。発効前は 8.1〜8.5 に従い、旧運用を継続する)。**8.1〜8.5 の提示形式・記録 field・8.5 の「本人性を保証しない」の記述はいずれも変更していない**(本人性は 8.6節でも保証しない)。protocol 2.7節の表に行が無い gate の新方式への含め方は未決定であり、AI が補っていない。設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |
