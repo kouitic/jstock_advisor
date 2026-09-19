@@ -278,7 +278,7 @@ def test_without_a_collector_the_result_keeps_all_four_fields_none(repo) -> None
 
 
 @pytest.fixture
-def dynamo(monkeypatch: pytest.MonkeyPatch):
+def dynamo(monkeypatch: pytest.MonkeyPatch, lambda_runtime_env: None):
     monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
@@ -418,3 +418,20 @@ def test_reset_clears_every_field() -> None:
     assert vintage.refetched_count == 0
     assert vintage.age_hours_max is None
     assert vintage.age_hours_min is None
+
+
+# --- Issue #367(b): 本番と同じDynamoDBバックエンドを実際に通っていることの確認 ---
+
+
+def test_progress_row_lands_in_the_dynamodb_table_under_lambda_runtime(dynamo) -> None:
+    """opt-in fixtureを付けただけで完了扱いにしない(条件4)。
+
+    running_on_lambda()==Trueの下で、進捗行がmotoのDynamoDB表へ実際に書かれる。
+    """
+    from jstock_advisor.infrastructure.collection_store import running_on_lambda
+
+    assert running_on_lambda() is True
+    _claim("b-367", "0000", "owner-1")
+
+    items = dynamo.scan(TableName="jstock-watchlist_candidate_progress")["Items"]
+    assert [(i["batch_id"]["S"], i["stock_code"]["S"]) for i in items] == [("b-367", "0000")]
