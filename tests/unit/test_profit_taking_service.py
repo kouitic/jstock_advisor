@@ -1558,3 +1558,60 @@ def test_safety_facts_are_excluded_from_equality_and_repr() -> None:
         "0000", None, None, safety_facts=facts
     )
     assert "safety_facts" not in repr(ProfitTakingOutcome("0000", None, None, safety_facts=facts))
+
+
+def _outcome_invalid_input(monkeypatch: pytest.MonkeyPatch):
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    return service.analyze(
+        _invalid_cost_holding(
+            "2914", average_purchase_price=Decimal("0"), total_purchase_amount=Decimal("0")
+        ),
+        _NOW,
+    )
+
+
+def _outcome_snapshot_failure(monkeypatch: pytest.MonkeyPatch):
+    from jstock_advisor.services import profit_taking_service as service_module
+
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (None, "boom"))
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    return service.analyze(_holding("2914"), _NOW)
+
+
+def _outcome_partial_fail_closed(monkeypatch: pytest.MonkeyPatch):
+    canned = _canned_result(RecommendationType.PARTIAL_PROFIT_TAKE)
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: canned,
+    )
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    holding = _holding("2914").model_copy(update={"shares": 100})  # 売買単位ちょうど
+    return service.analyze(holding, _NOW)
+
+
+def _outcome_hold(monkeypatch: pytest.MonkeyPatch):
+    return _analyze_with_dividend(
+        monkeypatch, years=None, policy=None, recommendation_type=RecommendationType.HOLD
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param(_outcome_invalid_input, id="invalid_input(取得原価が不正)"),
+        pytest.param(_outcome_snapshot_failure, id="snapshot_failure(取得失敗)"),
+        pytest.param(_outcome_partial_fail_closed, id="partial_fail_closed(不変条件違反)"),
+        pytest.param(_outcome_hold, id="hold(判定できたうえでのHOLD)"),
+    ],
+)
+def test_safety_facts_are_unset_on_every_path_that_produces_no_recommendation(
+    monkeypatch: pytest.MonkeyPatch, path: object
+) -> None:
+    """推奨が生成されない**全4経路**でfactsを持たない(経路ごとに独立して落ちる)。
+
+    shadowが「推奨が出た件」を数え始めたとき、推奨の無い件が母数へ紛れ込まないようにする。
+    """
+    outcome = path(monkeypatch)  # type: ignore[operator]
+
+    assert outcome.recommendation is None
+    assert outcome.safety_facts is None
