@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from jstock_advisor.config.loader import _load_yaml
 from jstock_advisor.domain.signals import judgment_safety_shadow_config as shadow_cfg
 from jstock_advisor.domain.signals.judgment_safety_shadow_config import (
     CONFIG_FILE_NAME,
@@ -28,12 +29,62 @@ def _write(tmp_path: Path, text: str) -> Path:
     return tmp_path
 
 
-def test_repository_config_is_off_and_targets_only_the_two_measurable_inputs() -> None:
+def test_shipped_config_passes_validation_without_falling_back(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """出荷ファイルがfallbackを経ずに検証を通ること(fallbackの値と偶然一致しても通してはならない)。
+
+    modeを引用符なしで書くと、YAML 1.1では真偽値Falseと解釈されて検証に失敗し、ファイル全体が
+    読まれなくなる(g3_required_inputsの編集も効かなくなる)。fallbackの返す値(OFF・2項目)は
+    出荷ファイルの値と一致するため、結果の値だけでは「読めた」と「読めずに落ちた」を区別できない。
+    """
+    caplog.set_level(logging.DEBUG, logger=shadow_cfg.__name__)
+    path = _REPO_ROOT / "config" / CONFIG_FILE_NAME
+
+    # fallbackを経ない直接の検証(不正なら例外で赤になる)
+    parsed = JudgmentSafetyShadowConfig.model_validate(_load_yaml(path))
+    loaded = load_judgment_safety_shadow_config(_REPO_ROOT / "config")
+
+    assert loaded == parsed
+    assert [r for r in caplog.records if r.name == shadow_cfg.__name__] == []  # 警告なし
+    assert isinstance(_load_yaml(path)["mode"], str)  # 真偽値として解釈されていない
+
+
+def test_shipped_config_values_are_exactly_what_the_file_says() -> None:
+    """出荷ファイルの値そのものを検証する(fallbackの既定値と区別できる形で、ファイルから導出)。"""
+    raw = _load_yaml(_REPO_ROOT / "config" / CONFIG_FILE_NAME)
+
     cfg = load_judgment_safety_shadow_config(_REPO_ROOT / "config")
 
+    assert raw["mode"] == "OFF"
     assert cfg.mode is ShadowMode.OFF
-    assert cfg.enabled is False
-    assert cfg.g3_required_inputs == _TWO_INPUTS
+    assert list(cfg.g3_required_inputs) == raw["g3_required_inputs"]
+    assert set(cfg.g3_required_inputs) == set(_TWO_INPUTS)  # U1/U3/U4: この2項目のみ
+
+
+def test_editing_the_g3_list_in_a_copy_of_the_shipped_file_changes_the_result(
+    tmp_path: Path,
+) -> None:
+    """ファイルが実際に効いていること: 出荷ファイルの写しのg3リストを編集すると結果が変わる。"""
+    text = (_REPO_ROOT / "config" / CONFIG_FILE_NAME).read_text(encoding="utf-8")
+    edited = text.replace("  - is_progressive_or_doe_policy\n", "")
+    assert edited != text
+    (tmp_path / CONFIG_FILE_NAME).write_text(edited, encoding="utf-8")
+
+    cfg = load_judgment_safety_shadow_config(tmp_path)
+
+    assert cfg.g3_required_inputs == ("continuous_dividend_increase_years",)
+
+
+def test_unquoted_off_is_a_boolean_in_yaml_and_is_rejected_not_silently_accepted(
+    tmp_path: Path,
+) -> None:
+    """引用符なしのOFFはYAML 1.1でFalse。検証に失敗する(この事故を明示的に固定する)。"""
+    raw = _load_yaml(_write(tmp_path, "mode: OFF\n") / CONFIG_FILE_NAME)
+
+    assert raw["mode"] is False
+    with pytest.raises(ValueError, match="mode"):
+        JudgmentSafetyShadowConfig.model_validate(raw)
 
 
 def test_default_model_is_off() -> None:
