@@ -1,0 +1,24 @@
+# 判断の安全条件(shadow計測)の設定(Issue #160)。
+# shadow = 「もし安全条件を適用していたら何件がどうなったか」を、判定・通知・保存を
+# 一切変えずに観測だけする機構。ここではmodeと、G3(利確の緩和要因不明)の必須入力だけを定める。
+#
+# mode:
+# ★ 値は必ず引用符で囲むこと("OFF")。引用符なしのOFFはYAML 1.1で真偽値Falseと解釈され、検証に失敗して
+#   設定ファイル全体が読まれなくなる(いわゆるNorway problem)。
+#   OFF     既定。shadow処理を一切実行しない(新規I/Oも行わない)。
+#   SHADOW  観測のみ行う。判定・通知・保存は変えない。SHADOW化は別のconfig変更(人間承認)で行う。
+#
+# このファイルが無い・読めない・不正な場合は、mode=OFFとして扱う(shadowを実行しない側へ倒す)。
+# 本流の起動を落とさない。
+version: 1
+mode: "OFF"
+
+# G3: 利確の緩和要因が不明のまま強い判定が出るかを測る入力。
+# ★ 「不明(UNKNOWN)を事実として識別できる」2項目だけを対象にする(USER決定 U1/U3/U4)。
+#   いずれか1つでもUNKNOWNなら該当とする。
+#   fair_value_rising_with_earnings_growth / long_term_holding_benefit_imminent /
+#   few_reinvestment_alternatives は現状のコードでUNKNOWNを識別できないため、測定不能として
+#   対象に含めない(Falseを不明と推測しない)。
+g3_required_inputs:
+  - continuous_dividend_increase_years
+  - is_progressive_or_doe_policy
