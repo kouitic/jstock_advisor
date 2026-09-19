@@ -115,6 +115,11 @@ def test_t4_additional_closure_in_the_config_is_respected(config: Any) -> None:
         (dt.datetime(2026, 9, 23, 14, 59, tzinfo=_UTC), dt.date(2026, 9, 23), True),
         # UTC 9/23 15:00 = JST 9/24 00:00(営業日)→ 実行(JST日跨ぎの境界)
         (dt.datetime(2026, 9, 23, 15, 0, tzinfo=_UTC), dt.date(2026, 9, 24), False),
+        # 識別ペア: UTCの日付とJSTの日付で結果が逆になる(UTC/JST取り違えを必ず検出する)
+        # UTC 9/18 21:00 = JST 9/19(土) 06:00 → 休場(UTC日付は金曜9/18で営業日)
+        (dt.datetime(2026, 9, 18, 21, 0, tzinfo=_UTC), dt.date(2026, 9, 19), True),
+        # UTC 9/23 21:00 = JST 9/24(木) 06:00 → 実行(UTC日付は水曜9/23で休場)
+        (dt.datetime(2026, 9, 23, 21, 0, tzinfo=_UTC), dt.date(2026, 9, 24), False),
         # UTC 9/18 15:00 = JST 9/19 00:00(土曜)→ 休場(金曜のUTC日付のままなら実行してしまう)
         (dt.datetime(2026, 9, 18, 15, 0, tzinfo=_UTC), dt.date(2026, 9, 19), True),
     ],
@@ -189,9 +194,10 @@ def test_validation_without_the_flag_is_skipped_on_a_holiday_no_implicit_bypass(
     )
 
 
-def test_bypass_flag_on_a_business_day_has_no_effect_and_is_not_recorded(
+def test_bypass_flag_on_a_business_day_runs_normally_and_is_still_recorded(
     config: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """営業日にVALIDATION+trueを指定しても実行は変わらない(skipされない)が、使用の事実は記録する。"""
     caplog.set_level(logging.INFO, logger=gate.__name__)
 
     skipped = gate.should_skip_for_market_closed(
@@ -199,7 +205,9 @@ def test_bypass_flag_on_a_business_day_has_no_effect_and_is_not_recorded(
     )
 
     assert skipped is False
-    assert [r for r in caplog.records if r.name == gate.__name__] == []
+    (record,) = [r for r in caplog.records if r.name == gate.__name__]
+    assert "event=MARKET_CLOSED_BYPASS" in record.getMessage()
+    assert "business_date_jst=2026-09-18" in record.getMessage()
 
 
 # ============================================================================
@@ -624,6 +632,58 @@ class TestNonTargetBranchesAreNeverGated:
 
         assert processed == ["holding-x"]
         assert result["found"] is True
+
+
+class TestRecoveryAndChildIgnoreTheBypassKey:
+    """Q-1: recovery/childはgateを通らず、bypassキーは(不正値でも)無視する(エラーにしない)。"""
+
+    @pytest.mark.parametrize("flag", [True, "yes", 1])
+    def test_buy_recovery_ignores_the_flag(
+        self, monkeypatch: pytest.MonkeyPatch, flag: Any
+    ) -> None:
+        _prepare_buy(monkeypatch)
+        _freeze(monkeypatch, buy_module, _JST_9_21_MON_0800)
+        monkeypatch.setattr(buy_module, "resolve_finalize_only_request", lambda *a, **kw: None)
+
+        result = buy_module.handler(
+            {"recovery_action": "FINALIZE_ONLY", "batch_id": "b", "allow_market_closed": flag}, None
+        )
+
+        assert result == {"finalize_recovery": "REJECTED"}
+
+    @pytest.mark.parametrize("flag", [True, "yes", 1])
+    def test_holdings_child_ignores_the_flag(
+        self, monkeypatch: pytest.MonkeyPatch, flag: Any
+    ) -> None:
+        _prepare_holdings(monkeypatch)
+        _freeze(monkeypatch, holdings_module, _JST_9_21_MON_0800)
+        monkeypatch.setattr(
+            holdings_module, "_process_single_holding", lambda *a, **kw: {"found": True}
+        )
+
+        result = holdings_module.handler(
+            {"task": "holding", "holding_id": "h", "batch_id": "b", "allow_market_closed": flag},
+            None,
+        )
+
+        assert result == {"found": True}
+
+
+def test_provider_bundle_construction_performs_no_network_io(
+    monkeypatch: pytest.MonkeyPatch, config: Any
+) -> None:
+    """gateの前にprovider構築が走る。構築だけでは外部通信をしない(skip時に無駄な通信が出ない)。"""
+    import socket
+
+    from jstock_advisor.services.provider_factory import build_real_provider_bundle
+
+    def _no_network(*a: Any, **kw: Any) -> None:
+        raise AssertionError("network access during provider construction")
+
+    monkeypatch.setattr(socket, "create_connection", _no_network)
+    monkeypatch.setattr(socket.socket, "connect", _no_network)
+
+    build_real_provider_bundle(_JST_9_21_MON_0800, config)
 
 
 class TestValidationBypassOnAHoliday:

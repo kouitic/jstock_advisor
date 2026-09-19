@@ -102,7 +102,10 @@ class MarketClosedDecision:
 def decide_market_closed(
     now: dt.datetime, config: AppConfig, *, allow_market_closed: bool
 ) -> MarketClosedDecision:
-    """休場日か・skipするか・bypassしたかを判定する(副作用なし)。
+    """休場日か・skipするか・bypass指定があったかを判定する(副作用なし)。
+
+    `bypassed`は「bypass指定(VALIDATION+true)があった」ことで、営業日でも真になる(実行は変わらないが、
+    使用の事実は無条件に記録する: MANAGER判断・USER決定D1)。
 
     `now`はtimezone-awareであること(naiveを暗黙にUTC扱いしない)。日付は
     `evaluation_date_jst(now)`で決める(JST 00:00-09:00にUTC上の前日になる境界に注意)。
@@ -113,7 +116,7 @@ def decide_market_closed(
     return MarketClosedDecision(
         skip=closed and not allow_market_closed,
         business_date_jst=business_date,
-        bypassed=closed and allow_market_closed,
+        bypassed=allow_market_closed,
     )
 
 
