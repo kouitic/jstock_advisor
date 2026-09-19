@@ -2307,12 +2307,15 @@ def _save_profit_taking_audit(
             calculation_formulas={},
             data_sources=[],
             rule_version="v1",
+            # domainが最終HOLDのときに実際に作る形: 2つの理由リストは常に空
+            # (raw_level == HOLDのときtriggered_reasons/applied_factorsは空で初期化され、
+            #  何か発火すればWATCH以上へ床上げされ最終HOLDにならない。PR #414 F1)。
             output_values={
                 "unrealized_pnl_pct": 27.5,
                 "current_price_vs_neutral_fair_value_pct": -3.2,
                 "current_price_vs_bull_fair_value_pct": "-15.0",
-                "triggered_reasons": ["含み益が基準に達している"],
-                "mitigating_factors_applied": ["上値余地が残っている"],
+                "triggered_reasons": [],
+                "mitigating_factors_applied": [],
             },
         )
     )
@@ -2342,11 +2345,46 @@ def test_issue_369_pure_hold_profit_taking_is_restored_from_audit_log(tmp_path: 
     assert "含み益率：27.5%" in text
     assert "中立の適正価格に対して-3.2%" in text
     assert "強気の適正価格に対して-15.0%" in text
-    assert "・含み益が基準に達している" in text
-    assert "・上値余地が残っている" in text
+    # 理由の見出しは出さない(HOLDでは常に空で、表示しても意味を持たない)
+    assert "判定に該当した理由" not in text
+    assert "利確を見送った要因" not in text
     # 金額・数量は表示に使わない
     assert "1234.5" not in text
     assert "777" not in text
+
+
+def test_issue_369_reason_strings_are_never_displayed_even_if_recorded(tmp_path: Path) -> None:
+    """#369 / PR #414 M2: 金額を埋め込んだ理由文言が仮に記録に載っても表示しない。
+
+    「金額・数量を表示しない」要件を、別moduleの不変条件(最終HOLDなら理由リストが空)
+    へ依存させず、表示側で担保していることを固定する。
+    """
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    AuditLogRepository(store_dir=tmp_path).save(
+        AuditLogEntry(
+            audit_id="audit-pt-amt",
+            timestamp=_NOW,
+            stock_code="8306",
+            decision_type="profit_taking",
+            input_values={},
+            calculation_formulas={},
+            data_sources=[],
+            rule_version="v1",
+            output_values={
+                "unrealized_pnl_pct": 27.5,
+                "triggered_reasons": ["ユーザー設定の全利確目標価格(98765円)に到達"],
+                "mitigating_factors_applied": ["緩和要因(43210円)"],
+            },
+        )
+    )
+    _save_pure_hold_record(tmp_path, "audit-pt-amt")
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：27.5%" in text
+    assert "98765" not in text
+    assert "43210" not in text
 
 
 def test_issue_369_missing_audit_log_falls_back_to_unrestorable_message(tmp_path: Path) -> None:

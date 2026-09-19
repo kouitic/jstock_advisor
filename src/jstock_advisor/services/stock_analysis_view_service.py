@@ -1286,14 +1286,27 @@ def _audit_pct(value: object) -> float | None:
 
 def _profit_taking_hold_audit_lines(audit_entry: AuditLogEntry) -> list[str]:
     """利確判定がHOLD(Recommendationを作らない)だった評価サイクルの、判定時点の
-    状況(含み益率・適正価格との位置・利確を見送った要因)を、その評価が書き込んだ
-    監査記録から組み立てる(Issue #369)。
+    状況(含み益率・現在価格と適正価格との位置)を、その評価が書き込んだ監査記録から
+    組み立てる(Issue #369)。
 
-    判定は行わず、記録されている値を表示するだけである。表示するのは比率と理由のみで、
+    判定は行わず、記録されている値を表示するだけである。表示するのは比率のみで、
     監査記録のinput_valuesに含まれる金額・数量(取得単価・保有株数等)は使わない。
     profit_takingの監査記録でなければ何も出さない(誤った記録を参照しても
     無関係な内容を表示しないため)。値が1つも取れない場合は空を返し、呼び出し側が
     「復元できません」の文言へfallbackする。
+
+    ★ triggered_reasons / mitigating_factors_applied は意図して表示しない(PR #414の
+      レビュー指摘F1/M2)。
+      ・この関数へ来る記録は最終判定がHOLDのものだけである(audit_idを返すのは
+        effective_recommendation_type == HOLDのときだけ)。domain/signals/profit_taking.py
+        は、何かが発火したraw_level > HOLDの判定を最低でもWATCHへ床上げするため、
+        最終HOLDのときは2つとも常に空であり、表示しても出ない。
+      ・triggered_reasons には金額を埋め込んだ文言(ユーザー設定の全利確目標価格等)が
+        あり得る。これを表示対象に含めると、「金額を表示しない」という要件が、別moduleの
+        不変条件(最終HOLDなら空)に暗黙に依存してしまう。表示しないことで、その依存を
+        表示側から取り除いている。
+      ・保有継続の実際の理由(hold_reasons)は監査記録へ保存されていないため、
+        現状では復元できない(別途の判断事項)。
     """
     if audit_entry.decision_type != "profit_taking":
         return []
@@ -1301,14 +1314,7 @@ def _profit_taking_hold_audit_lines(audit_entry: AuditLogEntry) -> list[str]:
     gain_pct = _audit_pct(out.get("unrealized_pnl_pct"))
     neutral_pct = _audit_pct(out.get("current_price_vs_neutral_fair_value_pct"))
     bull_pct = _audit_pct(out.get("current_price_vs_bull_fair_value_pct"))
-    mitigating = [str(f) for f in (out.get("mitigating_factors_applied") or [])]
-    triggered = [str(r) for r in (out.get("triggered_reasons") or [])]
-    if (
-        gain_pct is None
-        and neutral_pct is None
-        and bull_pct is None
-        and not (mitigating or triggered)
-    ):
+    if gain_pct is None and neutral_pct is None and bull_pct is None:
         return []
     lines: list[str] = []
     if gain_pct is not None:
@@ -1322,12 +1328,6 @@ def _profit_taking_hold_audit_lines(audit_entry: AuditLogEntry) -> list[str]:
         if bull_pct is not None:
             parts.append(f"強気の適正価格に対して{bull_pct:+.1f}%")
         lines.append("現在価格の位置（プラスは適正価格を上回る）：" + "、".join(parts))
-    if triggered:
-        lines.append("判定に該当した理由：")
-        lines += [f"・{reason}" for reason in triggered]
-    if mitigating:
-        lines.append("利確を見送った要因：")
-        lines += [f"・{factor}" for factor in mitigating]
     return lines
 
 

@@ -79,8 +79,9 @@ class HoldingEvaluationRecord(Entity):
     # Issue #369: 利確判定がHOLD(Recommendationを作らない)だった評価サイクルで、
     # 利確判定が書き込んだAuditLogEntryのID(profit_taking_recommendation_idと
     # 対の、authoritativeでないエンジンの実行結果参照)。表示側が判定時点の
-    # 含み益率・上値余地・保留理由を復元するために使う。Noneは「監査記録が無い」
-    # (利確判定がaudit記録より前に中断した場合を含む)と一致する。
+    # 含み益率・現在価格と適正価格との位置を復元するために使う(保留理由
+    # hold_reasonsは監査記録へ保存されておらず、現状は復元できない。PR #414 F1)。
+    # Noneは「監査記録が無い」(利確判定がaudit記録より前に中断した場合を含む)と一致する。
     # 旧schemaのrecord(本fieldが無い)は既定Noneで読める。
     profit_taking_audit_log_id: str | None = None
     holding_decision_ran: bool = False
