@@ -22,7 +22,7 @@ import logging
 from typing import Any
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import build_line_client_for_run
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -53,7 +53,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     providers = build_real_provider_bundle(now, config)
     service = DisclosureCheckService(disclosure_provider=providers.disclosure, config=config)
     notification_service = LineNotificationService(
-        line_client=build_line_client_from_env(),
+        line_client=build_line_client_for_run(dry_run=execution_context.is_dry_run),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
