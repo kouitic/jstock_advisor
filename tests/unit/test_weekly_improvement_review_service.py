@@ -58,7 +58,9 @@ _RUN_AT = dt.datetime(2026, 8, 10, 10, 0, tzinfo=dt.UTC)  # JST 19:00
 
 
 @pytest.fixture
-def aws_env(monkeypatch: pytest.MonkeyPatch):
+def aws_env(
+    monkeypatch: pytest.MonkeyPatch, lambda_runtime_env: None, create_collection_table
+):
     monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
@@ -70,6 +72,13 @@ def aws_env(monkeypatch: pytest.MonkeyPatch):
             AttributeDefinitions=[{"AttributeName": "candidate_key", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
+        # Issue #367(b): Lambda実行環境では6つのrepositoryも本番と同じDynamoDBを使う
+        create_collection_table("evaluation_results.json", "evaluation_id")
+        create_collection_table("recommendations.json", "recommendation_id")
+        create_collection_table("weekly_review_metrics.json", "metrics_id")
+        create_collection_table("improvement_candidates.json", "candidate_id")
+        create_collection_table("rule_versions.json", "rule_version")
+        create_collection_table("audit_log.json", "audit_id")
         yield
 
 
@@ -1475,3 +1484,31 @@ def test_join_recommendations_duplicate_recommendation_id_is_fetched_once(
     # 重複除去済みである必要はない(実測: 呼んだ回数=1回のみが要件)。
     recs = {id(r) for _, r in joined}
     assert len(recs) == 1  # 同一Recommendationオブジェクトが再利用されている
+
+
+# --- Issue #367(b): 本番と同じDynamoDBバックエンドを実際に通っていることの確認 ---
+
+
+def test_review_repositories_run_on_dynamodb_not_local_json(
+    aws_env, repos, tmp_path: Path, assert_dynamodb_backend
+) -> None:
+    """opt-in fixtureを付けただけで完了扱いにしない(条件4)。
+
+    running_on_lambda()==Trueの下で、週次レビューが使う6つのrepositoryが
+    すべてDynamoDBバックエンドを選び(store_dirを渡してもローカルJSONへ落ちない)、
+    ローカルJSONが作られないことを確認する。
+    """
+    for repo in repos.values():
+        assert_dynamodb_backend(repo._store)
+    repos["rule_version"].save(
+        RuleVersion(
+            rule_version="v-367",
+            created_at=_RUN_AT,
+            change_description="x",
+            change_reason="x",
+            approval_status="ACTIVE",
+            is_active=True,
+        )
+    )
+    assert [v.rule_version for v in repos["rule_version"].list_all()] == ["v-367"]
+    assert not list(tmp_path.glob("*.json")), "ローカルJSONへ書いている(本番と異なる経路)"
