@@ -2326,3 +2326,28 @@ def test_financials_are_stale_fact_covers_every_verdict(
 
     assert service_module._financials_are_stale_fact(FinancialFreshnessVerdict(verdict)) is expected
     assert {v.value for v in FinancialFreshnessVerdict} == {"STALE", "FRESH", "UNKNOWN"}
+
+
+def test_safety_facts_are_unset_on_the_excluded_and_disclosure_unavailable_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """推奨が生成されない全経路(data_error / 開示取得不能 / excluded)でfactsを持たない。
+
+    shadowが「推奨が出た件」を数え始めたとき、推奨の無い件が母数へ紛れ込まないようにする。
+    """
+    excluded = _analyze_with_disclosure(
+        monkeypatch,
+        _NIHON_SHINYAKU,
+        DisclosureAvailability.AVAILABLE,
+        disclosure_risk_keywords_found=["上場廃止"],
+    )
+    unavailable = _analyze_with_disclosure(
+        monkeypatch, _NIHON_SHINYAKU, DisclosureAvailability.UNAVAILABLE
+    )
+
+    assert excluded.buy_action == BuyAction.EXCLUDED
+    assert excluded.recommendation is None
+    assert excluded.safety_facts is None
+    assert unavailable.buy_action == BuyAction.DATA_INSUFFICIENT
+    assert unavailable.recommendation is None
+    assert unavailable.safety_facts is None
