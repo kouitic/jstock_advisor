@@ -70,6 +70,10 @@ from jstock_advisor.interfaces.types import PriceBar, PriceHistory
 from jstock_advisor.services.run_scoped_market_data import RunScopedMarketDataCache
 
 logger = logging.getLogger(__name__)
+# Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
+# module が宣言しないと INFO は出ない)。出力する値に、生の owner / holding_id 等を含めない
+# (#135 / #416)。有効化の時点の PII 確認は PR に記録した。
+logger.setLevel(logging.INFO)
 
 DEFAULT_BENCHMARK_SYMBOL = "TOPIX"
 

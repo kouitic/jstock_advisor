@@ -68,6 +68,10 @@ from jstock_advisor.services.performance_metrics_service import build_metrics_bu
 from jstock_advisor.services.rule_version_service import RuleVersionService
 
 logger = logging.getLogger(__name__)
+# Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
+# module が宣言しないと INFO は出ない)。出力する値に、生の owner / holding_id 等を含めない
+# (#135 / #416)。有効化の時点の PII 確認は PR に記録した。
+logger.setLevel(logging.INFO)
 
 _AUDIT_RULE_VERSION = "review-improvement-v1"  # 本サービス自体のロジックバージョン
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
