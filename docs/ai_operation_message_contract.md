@@ -799,7 +799,7 @@ TARGET_IDENTITY = <対象の exact な識別子。8.2 の gate 種別ごとの�
 TARGET_VERSION = <変化しうる版。protocol 2.7節の binding(HEAD SHA / TEMPLATE_HASH / STATE_ID 等)>
 ISSUE_OR_PR    = <対象の Issue または PR>
 REQUESTED_AT   = <依頼の時刻。時刻の権威は GitHub の created_at であり、本欄は参考値>
-VALID_UNTIL    = <有効期限。protocol 2.7節の TTL(標準)を上限とする>
+VALID_UNTIL    = <有効期限。protocol 2.7節の gate 別の TTL(標準)に基づく>
 APPROVAL_USE   = <SINGLE_ATTEMPT | BOUNDED_RETRY>
 ```
 
@@ -824,7 +824,7 @@ APPROVAL_SUMMARY = <承認内容の要約。PUBLIC_SANITIZED。正確な識別�
 TARGET_IDENTITY  = <承認を受けた時点の対象の exact な識別子>
 TARGET_VERSION   = <承認を受けた時点の版>
 RECEIVED_AT      = <受領の時刻。時刻の権威は GitHub の created_at であり、本欄は参考値>
-RECEIPT_STATE    = <APPROVED>
+RECEIPT_STATE    = <APPROVED | NOT_APPROVED(APPROVAL_DECISION に従う。下記)>
 ```
 
 ```
@@ -839,10 +839,17 @@ APPROVAL_DECISION
   APPROVE   承認する      HOLD   保留する      REJECT   却下する
   (8.1 の「推奨と理由」の 承認 | 保留 | 却下 に対応する。APPROVE 以外の RECEIPT は承認として扱わない)
 
-RECEIPT_STATE
-  RECEIPT の作成時点の値は APPROVED のみである。以後の状態遷移(EXECUTING / CONSUMED / EXPIRED /
-  REVOKED / INVALIDATED_BY_TARGET_CHANGE。遷移の定義は protocol 2.7節)は、RECEIPT を編集せず、
-  同じ REQUEST_ID を持つ追記の記録として残す(RECEIPT の編集は無効の根拠になるため)。
+RECEIPT_STATE(APPROVAL_DECISION と必ず一致させる)
+  APPROVAL_DECISION = APPROVE          ->  RECEIPT_STATE = APPROVED
+  APPROVAL_DECISION = HOLD / REJECT    ->  RECEIPT_STATE = NOT_APPROVED
+  上記以外の組合せ(たとえば APPROVAL_DECISION = REJECT かつ RECEIPT_STATE = APPROVED)は、
+  内部矛盾であり、**その RECEIPT は無効である**(fail-close。承認として読まない)。
+  RECEIPT_STATE = APPROVED の RECEIPT だけが、承認として protocol 2.7節の状態遷移
+  (REQUESTED -> APPROVED)の入力になりうる。NOT_APPROVED の RECEIPT は状態遷移を進めない
+  (承認されなかったという記録であり、その gate は新しい APPROVAL_REQUEST からやり直す)。
+  RECEIPT 作成後の状態遷移(EXECUTING / CONSUMED / EXPIRED / REVOKED / INVALIDATED_BY_TARGET_CHANGE。
+  遷移の定義は protocol 2.7節)は、RECEIPT を編集せず、同じ REQUEST_ID を持つ追記の記録として残す
+  (RECEIPT の編集は無効の根拠になるため)。
 ```
 
 #### 8.6.3 REQUEST_ID
@@ -1084,4 +1091,4 @@ Instruction に VERIFICATION_REQUIRED が無い場合は、その旨を報告し
 | 2026-09-12 | 8節へ 8.5「承認・判断の記録 field」を新設した(Issue #337)。`DECIDED_BY` / `APPROVED_BY` / `RECORDED_BY` / `DECIDED_AT` は運用で 100 件以上の Issue に使われていたが docs 全体で定義が 0 件であり、書式も意味差も各自の判断になっていた。MEANING / REQUIRED_WHEN / AUTHORITY_SEMANTICS を定め、★ **判断の帰属(`DECIDED_BY`)と操作の許可(`APPROVED_BY`)を区別**した。★ **両方を常に必須にしない**(同じ事実が 2 つの field へ重複し、どちらが操作の許可か読み取れなくなるため)。★ **`DECIDED_BY = USER` は利用者本人であることを機械的に保証しない**ことを明記した(全セッションが同一の GitHub identity で投稿する。本人性の保証は Issue #332 の論点であり本項では解決しない)。★ **本項は形式だけを定める。承認の要否は user_manager_collaboration_protocol.md 2節と development_workflow.md 10節が正本であり複製していない。** **2.2 の NORMAL_REPORT 必須 11 field・3節の BASELINE_INVARIANTS・4節の FORENSIC 昇格条件・5節の AUTHORIZED_PHASES・6節の転送契約・8.1〜8.4 の提示フォーマットと `APPROVAL_UNIT_CONSOLIDATION = NO`・11節の VERIFICATION_REQUIRED はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 8節へ **merge 判断の提示項目を実体として受け入れた**(Issue #345)。0節は発効後の正本を本文書 8節と宣言していたが、**user_manager_collaboration_protocol.md 3.7節の 11 項目が本文書へ移っておらず**、宣言と実体が食い違っていた。8.1節の固定 4 節はそのままに、**各節へ書くもの(MERGE_GATE の場合)**を追加し、「推奨と理由」へ `REVIEW_VERDICT` と `REVIEW_KIND` の併記・`MERGE_READY` の値・残課題が merge を止めるかどうかを含めること、「承認すると起きること」「この承認では起きないこと」で**本番への影響と他 Issue への影響を表す**こと(そのための独立した項目を作らない)、AUDIT_INFO へ `INDEPENDENT_REVIEW_SNAPSHOT` と `REVIEW_INPUT_EVIDENCE` を置き**独立レビューを行った場合に省略しない**ことを明記した。あわせて 3.7節から移した注記(**この形式を Markdown の表へ固定しない**。項目が揃っていることが要件である)と、**merge 可否の判断の中身は protocol 3.7節が正本である**という 1 行の pointer を置いた。8.2節の `MERGE_GATE` 行の「AUDIT_INFO へ分離してよいもの」へ独立レビューの snapshot URL と review 入力の identity を加えた(**「承認対象」列の PR 番号 + exact PR head SHA は変更していない**)。8.4節の既存の `MERGE_GATE` の例へ同じ項目を追記した(例を増やしていない)。**固定 4 節の構成・「起きないこと」を必須とする理由・8.3節の `APPROVAL_UNIT_CONSOLIDATION = NO`・8.5節の記録 field・他の gate 種別の行・2.2節の報告 schema・3節・4節・5節・6節・11節はいずれも変更していない。**見出し(anchor)を 1 つも変えていないため `policy_registry.yaml` の既存 entry は有効なままである。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-13 | 8.1節へ **利用者向けの説明の水準を指す参照 1 行**を追加した(Issue #357)。8節は承認時に何を必ず提示するかを定めるが、**その提示を利用者が理解できる形にするための規則**(user_manager_collaboration_protocol.md 1.6節)への入口が無かった。**説明ルールの本文は複製していない**(二重管理しない。利用者判断)。1 行の pointer のみであり、**固定 4 節・gate 種別の表・例・8.3節・8.5節・見出し(anchor)はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
-| 2026-09-19 | 8.6節「承認要求(APPROVAL_REQUEST)と受領証(RECEIPT)の機械可読形式」を新設した(Issue #332 Unit 1-A)。承認が「誰の直接の操作か・何に対する承認か・いつ有効か」を検査できるよう、APPROVAL_REQUEST(REQUEST_ID / GATE_TYPE / SCOPE / EXECUTOR / TARGET_IDENTITY / TARGET_VERSION / ISSUE_OR_PR / REQUESTED_AT / VALID_UNTIL / APPROVAL_USE)と RECEIPT(REQUEST_ID / APPROVAL_DECISION / RECEIPT_CHANNEL / APPROVAL_SUMMARY / TARGET_IDENTITY / TARGET_VERSION / RECEIVED_AT / RECEIPT_STATE)の固定キー・固定値集合、REQUEST_ID の生成方式(単純連番を使わず、STATE_ID と同様の衝突耐性のある形式)、GATE_TYPE の値集合、架空値の例を定めた。RECEIPT は編集しない(事後編集の検出のため)。以後の状態遷移は RECEIPT を編集せず追記の記録として残す。**本節は形式だけを定め、承認が有効である条件・状態遷移・TTL・binding は user_manager_collaboration_protocol.md 2.7節が正本である。** **本改訂は発効しない**(発効状態の正本は `HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録。発効前は 8.1〜8.5 に従い、旧運用を継続する)。**8.1〜8.5 の提示形式・記録 field・8.5 の「本人性を保証しない」の記述はいずれも変更していない**(本人性は 8.6節でも保証しない)。protocol 2.7節の表に行が無い gate の新方式への含め方は未決定であり、AI が補っていない。設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-19 | 8.6節「承認要求(APPROVAL_REQUEST)と受領証(RECEIPT)の機械可読形式」を新設した(Issue #332 Unit 1-A)。承認が「誰の直接の操作か・何に対する承認か・いつ有効か」を検査できるよう、APPROVAL_REQUEST(REQUEST_ID / GATE_TYPE / SCOPE / EXECUTOR / TARGET_IDENTITY / TARGET_VERSION / ISSUE_OR_PR / REQUESTED_AT / VALID_UNTIL / APPROVAL_USE)と RECEIPT(REQUEST_ID / APPROVAL_DECISION / RECEIPT_CHANNEL / APPROVAL_SUMMARY / TARGET_IDENTITY / TARGET_VERSION / RECEIVED_AT / RECEIPT_STATE)の固定キー・固定値集合、REQUEST_ID の生成方式(単純連番を使わず、STATE_ID と同様の衝突耐性のある形式)、GATE_TYPE の値集合、架空値の例を定めた。RECEIPT は編集しない(事後編集の検出のため)。RECEIPT_STATE は APPROVAL_DECISION と一致させ(APPROVE のみ APPROVED、HOLD / REJECT は NOT_APPROVED)、食い違う RECEIPT は無効とする。以後の状態遷移は RECEIPT を編集せず追記の記録として残す。**本節は形式だけを定め、承認が有効である条件・状態遷移・TTL・binding は user_manager_collaboration_protocol.md 2.7節が正本である。** **本改訂は発効しない**(発効状態の正本は `HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録。発効前は 8.1〜8.5 に従い、旧運用を継続する)。**8.1〜8.5 の提示形式・記録 field・8.5 の「本人性を保証しない」の記述はいずれも変更していない**(本人性は 8.6節でも保証しない)。protocol 2.7節の表に行が無い gate の新方式への含め方は未決定であり、AI が補っていない。設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |
