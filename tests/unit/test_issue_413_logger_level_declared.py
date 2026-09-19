@@ -163,6 +163,17 @@ def _logger_facts(source: str) -> tuple[bool, bool]:
         ・`getattr(...)` 等の動的な取得
     これらは検出器の限界であり、見えているから安全だとは主張しない。新しい形が src に現れたら、
     検出器を広げる(`test_known_blind_spots_*` がその変更に気づくための固定である)。
+
+    **過剰検出がありうる形(名前の衝突。fail-close の側 = 見逃しではなく余計に拾う)**
+    束縛の鍵は式の文字列(`logger` / `self._logger`)であり、scope や代入の順序を見ない
+    (flow-insensitive)。そのため次の場合、logger でないものを logger と誤認しうる。
+        ・同じ module の別クラスが、同じ属性名(`self._logger`)を別の用途で使う
+        ・logger を束縛した変数を、あとで別の値へ再代入し、その後に `.info(...)` を呼ぶ
+    誤認の結果は「未宣言と判定される module が増える」ことだけで、
+    宣言の無い INFO を通す方向には働かない。
+    現在の src に該当は無い(`_scan_src` の実測と 11 件の allowlist の一致)。将来この形が書かれて
+    テストが落ちたときは、名前の衝突による過剰検出を疑う(理由が分かりにくい失敗になるため、ここに
+    記す。scope 対応にはしていない。`test_known_over_detections_*` が現在の挙動を固定している)。
     """
     tree = ast.parse(source)
     bound = _bound_logger_keys(tree)
@@ -353,6 +364,34 @@ def test_known_blind_spots_are_not_detected(form: str) -> None:
     更新する)。
     """
     assert _logger_facts(_KNOWN_BLIND_SPOTS[form]) == (False, False), form
+
+
+_KNOWN_OVER_DETECTIONS = {
+    "same attribute name used by another class": (
+        "import logging\n"
+        "class A:\n    def __init__(self):\n        self._logger = logging.getLogger(__name__)\n"
+        "class B:\n    def __init__(self):\n        self._logger = object()\n"
+        "    def run(self):\n        self._logger.info('x')\n"
+    ),
+    "variable rebound to another value after the logger": (
+        "import logging\n"
+        "logger = logging.getLogger(__name__)\n"
+        "logger = object()\n"
+        "logger.info('x')\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("form", sorted(_KNOWN_OVER_DETECTIONS))
+def test_known_over_detections_are_fail_close(form: str) -> None:
+    """名前の衝突による過剰検出を、固定して記録する(PR #436 のレビュー指摘 F2)。
+
+    束縛の鍵が式の文字列で、scope・代入の順序を見ない(flow-insensitive)ため、logger でない値を
+    logger と誤認することがある。**向きは fail-close**(余計に「未宣言」と判定する)で、宣言の無い
+    INFO を通す方向には働かない。scope 対応にはしていない(過剰検出の分かりにくさは、docstring と
+    本テストで明記する)。将来 scope 対応にしたときは、このテストの期待を更新する。
+    """
+    assert _logger_facts(_KNOWN_OVER_DETECTIONS[form]) == (True, False), form
 
 
 def test_non_logger_bindings_are_not_mistaken_for_loggers() -> None:
