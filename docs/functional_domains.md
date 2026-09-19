@@ -172,7 +172,7 @@ SHARED は置き場所ではなく**性質**である。`domain/` 配下にあ�
 機能の粒度は**「利用者から見て意味のある能力、または運用上独立して
 差し替えられる単位」**とする。`1 関数 = 1 機能`にはしない。
 
-全 47 機能。各表の列は次を表す。
+全 48 機能。各表の列は次を表す。
 
 ```
 ID                FUNCTION_ID。再利用しない(I節)
@@ -312,6 +312,7 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | F-44 | CLI 運用コマンド | `src/jstock_advisor/cli/` | — | なし | D9 / 全領域 |
 | F-45 | CI・品質ゲート | `.github/workflows/ci.yml` `.github/workflows/pii-metadata-audit.yml` `scripts/` `docs/policy_registry.yaml` | — | なし | D9 |
 | F-47 | batch finalize recovery | `lambda_handlers/_finalize_recovery.py` `services/watchlist_batch_finalizer.py` | — | `BuyCandidateBatchCompletionTable`(読み取り) | D9 / D4 / D1 / D3 |
+| F-48 | 判断の安全条件のshadow計測 | `domain/signals/judgment_safety_shadow_config.py` | `judgment_safety_shadow.yaml`(専用loader。AppConfigへは載せない) | —(PR-3以降でAuditLogTableへshadow監査記録を書く予定。PR-0は設定のみ・未接続) | D1 / D2 / D3 |
 
 ```
 ★ F-47 の影響領域は「生産側」と「消費側」の両方から成る。
@@ -862,3 +863,4 @@ DEAD_REFERENCE   = 0
 | 2026-09-19 | S-21(LINE通知clientの実行時構築)の`infrastructure/line/client.py`で、`build_line_client_from_env()`へ関数docstringを追加した(Issue #117。**docstringのみ・挙動不変**。LOCK_LEVEL 1、D9)。この関数が「CLI専用」であり、認証情報が無い場合は**この関数自身が**ConsoleLineClient(標準出力のみ・送信しない)へ黙ってフォールバックすること、Lambda handlerでは使わず`build_live_line_client_from_env()`または`build_line_client_for_run(dry_run=...)`を使うこと、CLIでも`--notify`の無い経路(`cli/watchlist_screening.py`の4コマンド。Issue #434)では「送信済み」と誤って表示・記録されうることを、関数自身の契約として明記した。従来この区別は`LineCredentialsMissingError`と`build_live_line_client_from_env()`のdocstringが**間接的に**述べているのみで、関数自体には未記載だった(PR #433の本文の記述が不正確だったことの是正)。関数シグネチャ・本体の実行コード・呼び出し元は不変(ASTからdocstringを除いた比較で同一)。**領域一覧・機能一覧・既存のF行・S-01〜S-20は変更していない。** 判定ロジック・通知内容・保存データ形式の変更なし |
 | 2026-09-19 | F-04(見送り理由と整合性検証)から、Production判定経路から到達不能だった`domain/signals/judgment_safety_ladder.py`とそのテスト`tests/unit/test_judgment_safety_ladder.py`を削除した(Issue #160 Q-E。USER決定 #160 issuecomment-5741496634、先行の独立PR-A)。ladderの公開名(`max_allowed_strength` / `cap_judgment_strength` / `JudgmentSafetyInputs`)の参照元は、ladder自身とそのテストのみ(src / tests / scripts / docs / infraを全件検索して0件を確認)。9条件はすべて「移管済み・不要(USER決定)・新安全機構として別途実装(G1〜G5)」に分類済みで、cap規則は移管しない(#160 issuecomment-5738713711)。★ 本PRに**含めていない**もの: `config/confidence_rules.yaml`の`judgment_safety_ladder`ブロックと`config/models.py`の`JudgmentSafetyLadderConfig`(共通部品S-13=全領域のため、config field削除はLOCK_LEVEL_2=全領域lock)、`JudgmentStrength`(S-16=全領域)。これらは、ladder削除後にfreshで参照0を確認したうえで、全領域lockを伴う最後の独立PR(PR-B)で扱う。**領域一覧・機能一覧・F-04以外の行・S-01〜S-21は変更していない。** 判定ロジック・通知内容・保存データ形式・設定の挙動は不変(削除したのは未使用のmoduleとそのテストのみ) |
 | 2026-09-19 | 共通部品S-22(市場休場日gate)を追加し、F-01(買い候補日次バッチ)・F-46(保有監視日次バッチ)・F-16(分散実行のdispatcher)の3 entryが、東証休場日に何も行わず正常終了するようにした(Issue #440)。`lambda_handlers/_market_holiday.py`を新設(営業日判定は既存のS-04へ委譲)。★ 新機能ではないためF番号は増やしていない。領域一覧・既存のF行の領域割当は変更していない。判定ロジック・通知内容・保存データ形式の変更なし(休場日に実行しないのみ) |
+| 2026-09-20 | 機能一覧へ F-48(判断の安全条件のshadow計測)を追加した(Issue #160 PR-0)。shadow = 判定・通知・保存を変えずに「安全条件を適用していたら何件がどうなったか」を観測する機構で、PR-0は**設定(`config/judgment_safety_shadow.yaml`と専用の設定モデル・loader)のみ**であり、判定経路のどこにも接続していない(参照元0件をテストで固定)。mode既定はOFFで、ファイルが無い・不正な場合もOFFへ縮退する(fail-closed)。★ **S-13(`config/models.py` / `loader.py`)は変更していない**(AppConfigへ載せず専用loaderにしたため、全領域lockを増やしていない)。既存のF行・S行・領域一覧・維持契約は変更していない。判定ロジック・通知内容・保存データ形式・Production挙動の変更なし。後続PR(PR-1〜PR-4)で主要sourceを更新する |
