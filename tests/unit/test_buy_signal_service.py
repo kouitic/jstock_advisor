@@ -2243,3 +2243,111 @@ def test_b3_b1_audit_records_the_lag_actually_used(monkeypatch: pytest.MonkeyPat
     assert facts["latest_financial_period_end"] == "2026-03-31"
     assert facts["expected_next_financial_period_end"] == "2026-06-30"
     assert facts["financial_freshness_basis"] == "QUARTERLY_HISTORY"
+
+
+# ---------------------------------------------------------------------------
+# Issue #160 shadow計測 PR-2a: 財務鮮度のverdictを、判定に入る前の事実(非永続)として載せる
+#
+# STALE -> True / FRESH -> False / UNKNOWN -> None(評価していない)。判定・警告・保存は変えない。
+# ---------------------------------------------------------------------------
+
+
+def test_safety_facts_map_stale_to_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    outcome = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_quarterly_financial)
+
+    assert outcome.safety_facts is not None
+    assert outcome.safety_facts.financials_are_stale is True
+
+
+def test_safety_facts_map_fresh_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    outcome = _b3_analyze(monkeypatch, _B3_FRESH_NOW, _b3_quarterly_financial)
+
+    assert outcome.safety_facts is not None
+    assert outcome.safety_facts.financials_are_stale is False
+
+
+def test_safety_facts_map_unknown_to_none_not_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UNKNOWN(判定できなかった)は「古くない」ではない。Noneのまま(評価していない)。"""
+    outcome = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_unresolvable_financial)
+
+    assert outcome.safety_facts is not None
+    assert outcome.safety_facts.financials_are_stale is None
+
+
+def test_safety_facts_are_unset_when_no_recommendation_is_produced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service_module, "build_stock_snapshot", lambda *a, **kw: (None, "boom"))
+    service = BuySignalService(providers=_providers(), config=_CONFIG, business_calendar=_CALENDAR)
+
+    outcome = service.analyze("0000", _B3_FRESH_NOW, RecommendationType.BUY)
+
+    assert outcome.data_error == "boom"
+    assert outcome.recommendation is None
+    assert outcome.safety_facts is None
+
+
+def test_safety_facts_do_not_change_the_recommendation_or_the_existing_audit_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既存の出力(警告・反対材料・監査項目)はfactsの有無と無関係で、従来どおり。"""
+    stale = _b3_analyze(monkeypatch, _B3_STALE_NOW, _b3_quarterly_financial).recommendation
+    fresh = _b3_analyze(monkeypatch, _B3_FRESH_NOW, _b3_quarterly_financial).recommendation
+
+    assert stale is not None
+    assert fresh is not None
+    assert _B3_STALE_COUNTER_FACTOR in stale.counter_factors
+    assert _B3_STALE_COUNTER_FACTOR not in fresh.counter_factors
+    assert (stale.buy_score_input_facts or {})["financial_freshness_warning"] is True
+    assert (fresh.buy_score_input_facts or {})["financial_freshness_warning"] is False
+    assert not hasattr(stale, "safety_facts")  # Recommendation(永続schema)へは載せない
+
+
+def test_safety_facts_are_excluded_from_equality_and_repr() -> None:
+    from jstock_advisor.domain.signals.judgment_safety import SafetyFacts
+
+    plain = service_module.BuyAnalysisOutcome("0000", None, False, [], None)
+    with_facts = service_module.BuyAnalysisOutcome(
+        "0000", None, False, [], None, safety_facts=SafetyFacts(financials_are_stale=True)
+    )
+
+    assert plain == with_facts  # 既存の比較を変えない
+    assert "safety_facts" not in repr(with_facts)  # 既存のログを変えない
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [("STALE", True), ("FRESH", False), ("UNKNOWN", None)],
+)
+def test_financials_are_stale_fact_covers_every_verdict(
+    verdict: str, expected: bool | None
+) -> None:
+    from jstock_advisor.domain.financial_freshness import FinancialFreshnessVerdict
+
+    assert service_module._financials_are_stale_fact(FinancialFreshnessVerdict(verdict)) is expected
+    assert {v.value for v in FinancialFreshnessVerdict} == {"STALE", "FRESH", "UNKNOWN"}
+
+
+def test_safety_facts_are_unset_on_the_excluded_and_disclosure_unavailable_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """推奨が生成されない全経路(data_error / 開示取得不能 / excluded)でfactsを持たない。
+
+    shadowが「推奨が出た件」を数え始めたとき、推奨の無い件が母数へ紛れ込まないようにする。
+    """
+    excluded = _analyze_with_disclosure(
+        monkeypatch,
+        _NIHON_SHINYAKU,
+        DisclosureAvailability.AVAILABLE,
+        disclosure_risk_keywords_found=["上場廃止"],
+    )
+    unavailable = _analyze_with_disclosure(
+        monkeypatch, _NIHON_SHINYAKU, DisclosureAvailability.UNAVAILABLE
+    )
+
+    assert excluded.buy_action == BuyAction.EXCLUDED
+    assert excluded.recommendation is None
+    assert excluded.safety_facts is None
+    assert unavailable.buy_action == BuyAction.DATA_INSUFFICIENT
+    assert unavailable.recommendation is None
+    assert unavailable.safety_facts is None

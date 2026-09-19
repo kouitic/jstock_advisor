@@ -21,7 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from jstock_advisor.config.models import AppConfig, StockClassificationRulesConfig
@@ -112,6 +112,7 @@ from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
     historical_valuation_result_to_metrics,
 )
+from jstock_advisor.domain.signals.judgment_safety import SafetyFacts
 from jstock_advisor.domain.signals.market_environment import (
     market_environment_config_values,
     market_environment_result_to_metrics,
@@ -324,6 +325,27 @@ class BuyAnalysisOutcome:
     buy_action: BuyAction | None = None
     # "buy_candidate" | "watch_price" | "excluded" | None(データ不足等)
     ranking_group: str | None = None
+    # --- Issue #160 shadow計測(PR-2a): 判定に入る前の事実(非永続・判定へ使わない) ---
+    # 推奨が生成された経路でのみ設定する(data_error / excludedはNone)。等価比較・reprには
+    # 含めない(既存の比較・ログを変えない)。shadowの評価点(PR-3以降)だけが読む。
+    safety_facts: SafetyFacts | None = field(default=None, compare=False, repr=False)
+
+
+def _financials_are_stale_fact(verdict: FinancialFreshnessVerdict) -> bool | None:
+    """財務鮮度のverdictを、shadow用の事実(`SafetyFacts.financials_are_stale`)へ写す。
+
+    STALE -> True / FRESH -> False / UNKNOWN -> None(判定できなかった=評価していない)。
+    UNKNOWNを「古い」とも「新しい」とも推測しない(USER決定 F1)。純粋な変換で、例外・I/Oを持たない。
+
+    ★ 本関数を`domain/signals/judgment_safety.py`ではなく本モジュールに置くのは、財務鮮度の
+      呼び出し元を固定するガードテスト(`test_production_call_sites_are_limited_to_the_current_phase`)
+      が既に許可したimporterであるためである。
+    """
+    if verdict is FinancialFreshnessVerdict.STALE:
+        return True
+    if verdict is FinancialFreshnessVerdict.FRESH:
+        return False
+    return None
 
 
 class BuySignalService:
@@ -1972,4 +1994,7 @@ class BuySignalService:
             None,
             buy_action=buy_action,
             ranking_group=ranking_group,
+            safety_facts=SafetyFacts(
+                financials_are_stale=_financials_are_stale_fact(financial_freshness.verdict)
+            ),
         )

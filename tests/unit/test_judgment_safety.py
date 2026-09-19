@@ -383,15 +383,26 @@ def test_module_is_pure_no_io_time_or_global_state_imports() -> None:
     assert _imported_top_level_modules(_MODULE) & forbidden == set()
 
 
-def test_the_module_is_not_wired_into_the_production_call_graph() -> None:
-    """PR-1は型と純関数だけ。判定経路のどこからも参照されない(挙動不変)。参照が増えるのはPR-2以降。"""
-    referrers = [
-        str(p.relative_to(_REPO_ROOT))
+def test_the_module_is_wired_only_into_the_buy_signal_service_facts_supply() -> None:
+    """判定経路で参照してよいのは、PR-2aの事実供給(`buy_signal_service`)のみ。
+
+    PR-1は型と純関数だけで参照元0件だった。PR-2aで、BUYの財務鮮度の事実を`SafetyFacts`へ載せる
+    ため`buy_signal_service.py`が`SafetyFacts`だけをimportする(評価関数は呼ばない)。
+    評価関数`evaluate_safety_conditions`を呼ぶのはPR-3(handler合流点)以降である。
+    """
+    referrers = sorted(
+        p.relative_to(_REPO_ROOT).as_posix()
         for p in (_REPO_ROOT / "src").rglob("*.py")
         if p != _MODULE and "signals.judgment_safety import" in p.read_text(encoding="utf-8")
+    )
+    callers = [
+        p.relative_to(_REPO_ROOT).as_posix()
+        for p in (_REPO_ROOT / "src").rglob("*.py")
+        if p != _MODULE and "evaluate_safety_conditions" in p.read_text(encoding="utf-8")
     ]
 
-    assert referrers == []
+    assert referrers == ["src/jstock_advisor/services/buy_signal_service.py"]
+    assert callers == []  # 評価は本流から呼ばれない(挙動不変)
 
 
 def test_g3_duplicate_config_inputs_never_inflate_the_count() -> None:
