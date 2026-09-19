@@ -50,7 +50,10 @@ from jstock_advisor.infrastructure.aws.watchlist_rotation_dispatch_lease import 
     release_rotation_dispatch_lease,
 )
 from jstock_advisor.infrastructure.aws.watchlist_rotation_state import DEFAULT_ROTATION_ID
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import (
+    LineCredentialsMissingError,
+    build_live_line_client_from_env,
+)
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -126,7 +129,7 @@ _FINALIZE_IN_PROGRESS_STATUSES = frozenset(
 
 def _build_notification_service(config: AppConfig) -> LineNotificationService:
     return LineNotificationService(
-        line_client=build_line_client_from_env(),
+        line_client=build_live_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
@@ -134,6 +137,43 @@ def _build_notification_service(config: AppConfig) -> LineNotificationService:
         recommendation_repository=RecommendationRepository(),
         config=config,
     )
+
+
+class _LazyNotificationService:
+    """通知が必要な操作の直前で、通知サービスを1回だけ構築する(Issue #117)。
+
+    reconcilerは複数の独立した回復処理を担う最後の安全網であり、通知を使うのは
+    RUNNING+NEW_CANDIDATEのmaybe_finalize / retry_finalize / retry_notificationの3か所だけ。
+    LINE認証情報の欠落で、通知と無関係な回復処理(DISPATCHING失敗確定・MAINTENANCE救済・
+    timeout確定・maintenance trigger再試行・buy/holdingsのcompletion recovery)まで止めない。
+
+    ★ 構築の失敗(`LineCredentialsMissingError`)は、そのバッチの通知が必要な処理だけを
+      skipするために`get()`がNoneを返す(状態は変えない。認証情報が直れば次回の実行で処理される)。
+      黙って捨てない: 最初の例外を保持し、全処理の後に`raise_if_missing()`が送出する
+      (Lambda呼び出しがErrorsとして可視化される)。
+    """
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+        self._service: LineNotificationService | None = None
+        self._missing: LineCredentialsMissingError | None = None
+        self.skipped_count = 0
+
+    def get(self) -> LineNotificationService | None:
+        if self._service is not None:
+            return self._service
+        if self._missing is None:
+            try:
+                self._service = _build_notification_service(self._config)
+                return self._service
+            except LineCredentialsMissingError as exc:
+                self._missing = exc
+        self.skipped_count += 1
+        return None
+
+    def raise_if_missing(self) -> None:
+        if self._missing is not None:
+            raise self._missing
 
 
 def _is_timed_out(batch_item: dict[str, Any], timeout_hours: int, now: dt.datetime) -> bool:
@@ -333,7 +373,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     providers: ProviderBundle = build_cached_provider_bundle(
         build_real_provider_bundle(now, config), config, now
     )
-    notification_service = _build_notification_service(config)
+    notification = _LazyNotificationService(config)
 
     candidates = list_watchlist_batches_by_status(_RECONCILE_TARGET_STATUSES)
 
@@ -399,11 +439,17 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     batch_id,
                 )
                 continue
-            rescued_now = (
-                maybe_finalize_maintenance(batch_id, now, config)
-                if job_type is WatchlistJobType.WATCHLIST_MAINTENANCE
-                else maybe_finalize(batch_id, now, providers, config, notification_service)
-            )
+            if job_type is WatchlistJobType.WATCHLIST_MAINTENANCE:
+                rescued_now = maybe_finalize_maintenance(batch_id, now, config)
+            else:
+                # Issue #117: 通知が必要なのはこの分岐だけ。認証情報欠落時は救済(finalize)のみを
+                # skipし、続くtimeout判定(通知しない)は従来どおり行う。
+                notification_service = notification.get()
+                rescued_now = (
+                    maybe_finalize(batch_id, now, providers, config, notification_service)
+                    if notification_service is not None
+                    else False
+                )
             if rescued_now:
                 rescued += 1
                 continue
@@ -442,6 +488,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     attempt_count,
                 )
                 continue
+            notification_service = notification.get()
+            if notification_service is None:
+                continue  # 認証情報欠落: このバッチの再試行のみskip(状態不変、末尾で送出)
             try:
                 if retry_finalize(batch_id, now, providers, config, notification_service):
                     finalize_retried += 1
@@ -468,6 +517,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     notification_attempt_count,
                 )
                 continue
+            notification_service = notification.get()
+            if notification_service is None:
+                continue  # 認証情報欠落: このバッチの通知再試行のみskip(状態不変、末尾で送出)
             try:
                 if retry_notification(batch_id, now, providers, config, notification_service):
                     notification_retried += 1
@@ -544,7 +596,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "notification_retried=%d notification_retry_exhausted=%d timeout_processed=%d "
         "maintenance_trigger_retried=%d maintenance_trigger_retry_failed=%d "
         "maintenance_trigger_retry_skipped=%d maintenance_trigger_retry_configuration_error=%d "
-        "completion_recovery_invoked=%d completion_recovery_skipped=%d",
+        "completion_recovery_invoked=%d completion_recovery_skipped=%d "
+        "notification_skipped_missing_credentials=%d",
         len(candidates),
         dispatch_failed,
         rescued,
@@ -560,7 +613,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         maintenance_trigger_retry_configuration_error,
         completion_recovery_invoked,
         completion_recovery_skipped,
+        notification.skipped_count,
     )
+    # Issue #117: 通知と無関係な回復処理を全て終えた後に、認証情報の欠落を顕在化させる
+    # (Lambda呼び出しをErrorsとして失敗させる。Schedulerの再試行は各処理が冪等で無害)。
+    notification.raise_if_missing()
     return {
         "candidates": len(candidates),
         "dispatch_failed": dispatch_failed,
