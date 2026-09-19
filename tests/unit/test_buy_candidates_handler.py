@@ -119,9 +119,17 @@ def _fake_snapshot(
     )
 
 
+@pytest.fixture(autouse=True)
+def _line_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #117 (B1b-3b): 外部送信が起きうる実行(NORMAL等)はLINE認証情報を必須とする。
+    構築関数を差し替えずに開始する既存テストは有効な認証情報を前提とする。"""
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
+    monkeypatch.setenv("LINE_USER_ID", "user-value")
+
+
 def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(handler_module, "build_real_provider_bundle", lambda now, config: object())
-    monkeypatch.setattr(handler_module, "build_line_client_from_env", lambda: object())
+    monkeypatch.setattr(handler_module, "build_line_client_for_run", lambda **kw: object())
     monkeypatch.setattr(
         handler_module, "build_stock_snapshot", lambda *a, **kw: (_fake_snapshot(), None)
     )
@@ -4545,3 +4553,70 @@ def test_b2_exhausted_recovery_does_not_acquire_gate(
     )
 
     assert result == {"finalize_recovery": "EXHAUSTED"}
+
+
+# --- Issue #117 Phase B1b-3b: 実行モード別のLINE client構築を実際に通す ---
+
+
+class _StopAfterClientBuiltError(Exception):
+    """構築の直後でhandlerを止めるための番兵(以降の重い処理を実行しない)。"""
+
+
+@pytest.mark.parametrize(
+    ("event", "expected_dry_run"),
+    [
+        ({}, False),
+        ({"execution_mode": "VALIDATION", "notification_mode": "SEND"}, False),
+        ({"execution_mode": "VALIDATION", "notification_mode": "DRY_RUN"}, True),
+    ],
+)
+def test_handler_passes_execution_context_dry_run_to_client_builder(
+    monkeypatch: pytest.MonkeyPatch, event: dict[str, str], expected_dry_run: bool
+) -> None:
+    """外部送信が起きうる実行(NORMAL / VALIDATION+SEND)はdry_run=False(strict)、
+    DRY_RUN(外部送信なし)のみdry_run=True(従来のフォールバック)で構築される。"""
+    monkeypatch.setattr(handler_module, "build_real_provider_bundle", lambda now, config: object())
+    seen: list[bool] = []
+
+    def _recording_builder(*, dry_run: bool) -> object:
+        seen.append(dry_run)
+        raise _StopAfterClientBuiltError
+
+    monkeypatch.setattr(handler_module, "build_line_client_for_run", _recording_builder)
+
+    with pytest.raises(_StopAfterClientBuiltError):
+        handler_module.handler(event, None)
+
+    assert seen == [expected_dry_run]
+
+
+def test_normal_run_fails_when_line_credentials_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NORMAL実行で認証情報が欠落していれば、ConsoleLineClientへ黙って落ちず
+    LineCredentialsMissingErrorでhandlerが失敗する(構築関数を差し替えない実分岐)。"""
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+    monkeypatch.setattr(handler_module, "build_real_provider_bundle", lambda now, config: object())
+
+    with pytest.raises(LineCredentialsMissingError):
+        handler_module.handler({}, None)
+
+
+def test_dry_run_does_not_require_line_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DRY_RUN(外部送信なし)は認証情報が無くても構築を通る(検証できることが趣旨)。"""
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+    monkeypatch.setattr(handler_module, "build_real_provider_bundle", lambda now, config: object())
+
+    def _stop(**kwargs: object) -> object:
+        raise _StopAfterClientBuiltError
+
+    monkeypatch.setattr(handler_module, "LineNotificationService", _stop)
+
+    with pytest.raises(_StopAfterClientBuiltError):
+        handler_module.handler(
+            {"execution_mode": "VALIDATION", "notification_mode": "DRY_RUN"}, None
+        )

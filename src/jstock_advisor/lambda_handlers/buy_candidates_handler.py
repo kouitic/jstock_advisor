@@ -111,7 +111,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     start_batch,
     try_acquire_completion_finalize,
 )
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import build_line_client_for_run
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
 )
@@ -2089,7 +2089,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     #   finalize-only recovery等、親が値を持たない経路だけである。
     trade_detection_confirmed = event.get("trade_detection_confirmed", False)
     notification_service = LineNotificationService(
-        line_client=build_line_client_from_env(),
+        line_client=build_line_client_for_run(dry_run=execution_context.is_dry_run),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
