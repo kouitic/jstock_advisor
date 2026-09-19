@@ -51,6 +51,11 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
     """中断経路で呼ばれる副作用を**順序つきで**記録する。"""
     recorded: list[tuple[str, Any]] = []
 
+    # Issue #117 (B1b-2): dispatcherはNEW_CANDIDATE_SCREENINGでLINE認証情報を必須とする
+    # (欠落時はlease取得前に例外)。本ファイルは開始後の中断経路を検証するため有効な
+    # 認証情報を前提とする。
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
+    monkeypatch.setenv("LINE_USER_ID", "user-value")
     monkeypatch.setattr(handler_module, "load_config", _config)
     monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", lambda *a, **kw: True)
     monkeypatch.setattr(
