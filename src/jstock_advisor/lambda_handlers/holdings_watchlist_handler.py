@@ -119,6 +119,10 @@ from jstock_advisor.lambda_handlers._finalize_recovery import (
     is_recovery_event,
     resolve_finalize_only_request,
 )
+from jstock_advisor.lambda_handlers._market_holiday import (
+    SKIP_REASON,
+    should_skip_for_market_closed,
+)
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
 from jstock_advisor.services.holding_decision_notification_builder import (
@@ -1741,6 +1745,16 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             result.get("notification_status"),
         )
         return result
+
+    # Issue #440: JPX休場日は、市場依存のこのentryをskipする(正常なno-op)。
+    # 順序: validation(上のresolve_execution_context)→ recovery/child等の非対象分岐(上)→
+    # 本gate(allow_market_closedの検証 → JST日付 → BusinessCalendar)→ 通常処理。
+    # 最初の状態変更(trade検知・batch行・fan-out・市場依存の通知)より前で判定する。
+    # recovery(前営業日のbatchの回復)とchildは休場日でも止めない(gateの上で処理済み)。
+    if should_skip_for_market_closed(
+        event, execution_context, now, config, handler="holdings_watchlist"
+    ):
+        return {"dispatched_holdings": 0, "skipped": SKIP_REASON}
 
     # 通常のスケジュール起動(ディスパッチのみ行い、銘柄ごとの実処理は非同期の
     # 自己再帰呼び出しに委ねる。全銘柄を直列処理するとLambdaの最大タイムアウト

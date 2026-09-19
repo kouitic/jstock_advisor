@@ -49,6 +49,7 @@ import boto3
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
+from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     EXECUTION_RESULT_NORMAL,
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
@@ -91,6 +92,11 @@ from jstock_advisor.infrastructure.local_repository.watchlist_repository import 
     WatchlistRepository,
 )
 from jstock_advisor.interfaces.candidate_universe import CandidateUniverseError
+from jstock_advisor.lambda_handlers._market_holiday import (
+    SKIP_REASON,
+    resolve_allow_market_closed,
+    should_skip_for_market_closed,
+)
 from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_execution_mode
 from jstock_advisor.services.candidate_universe_downloader import (
     DownloadOutcome,
@@ -399,6 +405,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # 黙って本番実行せず、指定されていたら理由をログへ出して失敗させる。
     # (対応しない理由は _watchlist_execution_mode の docstring を参照)
     reject_execution_mode(event, handler_name="watchlist dispatcher")
+    # Issue #440: allow_market_closed(VALIDATION限定の明示bypass)の指定を、休場日の判定より前に
+    # 検証する。dispatcherはexecution_modeを受け付けない(VALIDATIONが無い)ため、trueは常に
+    # NORMAL+trueとしてエラー。bool以外もエラー。job_typeに関わらず(MAINTENANCEでも)検証する。
+    resolve_allow_market_closed(event, ExecutionContext.normal())
     # Issue #286 (#70 F-B8): 監査へ載せる起動経路をここで1度だけ解決する。
     # 以前はこのhandlerの5か所すべてが "scheduled" のハードコードで、
     # 手動起動もmaintenanceの連鎖起動も同じ値で記録されていた。
@@ -455,6 +465,20 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             now=now,
         )
         return {"error": "full_market_screening_blocked"}
+
+    # Issue #440: JPX休場日は、市場依存のNEW_CANDIDATE_SCREENINGのdispatchをskipする(正常なno-op)。
+    # 順序: validation(reject_execution_mode・allow_market_closed・job_type・enabled gate・
+    # full-market gate)の後、通知サービスの構築・dispatch lease・BatchRuns行・rotation lease・
+    # SQS投入・自己invokeの前。WATCHLIST_MAINTENANCEは今回のscope外(D2=DEFER)で判定しない。
+    if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING and should_skip_for_market_closed(
+        event,
+        ExecutionContext.normal(),
+        now,
+        config,
+        handler="watchlist_dispatcher",
+        job_type=str(job_type),
+    ):
+        return {"skipped": SKIP_REASON}
 
     # Issue #117 (B1b-2): LINE認証情報の欠落はここ(dispatch lease・BatchRuns行・
     # 進捗行の作成より前)で例外にする。以前は構築がSQS投入の直前(状態作成後)に
