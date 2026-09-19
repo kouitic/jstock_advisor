@@ -40,7 +40,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     complete_candidate,
     resolve_watchlist_job_type,
 )
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -51,6 +51,9 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_execution_mode
+from jstock_advisor.lambda_handlers._watchlist_notification_prescan import (
+    sqs_records_require_notification_service,
+)
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
@@ -262,7 +265,7 @@ def _evaluate_candidate(
 
 def _build_notification_service(config: AppConfig) -> LineNotificationService:
     return LineNotificationService(
-        line_client=build_line_client_from_env(),
+        line_client=build_live_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
@@ -294,7 +297,15 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         stats=cache_stats,
         vintage=cache_vintage,
     )
-    notification_service = _build_notification_service(config)
+    # Issue #117: 通知サービスを使うのはNEW_CANDIDATE_SCREENINGのfinalizeだけ。
+    # 認証情報欠落を黙ってConsoleLineClientへ落とさず、状態変更(リース取得・完了記録)
+    # より前に失敗させる。MAINTENANCEしか処理しない呼び出しは不要な認証情報で新たに
+    # 失敗させない(メッセージを事前に走査。判定は本処理と同じresolve関数)。
+    notification_service = (
+        _build_notification_service(config)
+        if sqs_records_require_notification_service(event, missing_job_type_default=None)
+        else None
+    )
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
 
     processed: list[dict[str, Any]] = []
@@ -378,6 +389,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             if job_type == JOB_TYPE_WATCHLIST_MAINTENANCE:
                 maybe_finalize_maintenance(batch_id, completion_time, config)
             else:
+                if notification_service is None:
+                    # prescanがNEW_CANDIDATE_SCREENINGを検出した場合は必ず構築済み。
+                    raise RuntimeError(
+                        "notification service was not built for a NEW_CANDIDATE message"
+                    )
                 maybe_finalize(batch_id, completion_time, providers, config, notification_service)
         else:
             # リース失効後に別Workerが再クレームしていた、またはReconcilerが先に
