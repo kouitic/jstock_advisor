@@ -363,6 +363,55 @@ def test_valid_records_are_covered_even_when_their_comment_has_extra_prose() -> 
     assert _evaluate(_valid_comments())["result"] == pf.PASS
 
 
+def test_another_requests_field_mentioning_this_request_id_is_not_covered() -> None:
+    """PR #431 G1: 別の request の SCOPE 欄にこの REQUEST_ID が書かれても、解釈済みとして数えない。
+
+    実運用で起こりうる書き方(「旧 <ID> は消費済みのため再依頼」)。判定が「block の REQUEST_ID が
+    一致すること」という条件を失うと、この言及が黙って許され、消費済みの承認が PASS に戻る
+    (F1 と同系統の穴)。
+    """
+    other = _request_body(
+        REQUEST_ID="OTHER-REQUEST-ID", SCOPE=f"旧 {_REQUEST_ID} は消費済みのため再依頼"
+    )
+    comments = _valid_comments() + [_comment(3, other, "2026-01-01T00:20:00+00:00")]
+
+    report = _evaluate(comments)
+
+    assert report["result"] == pf.UNKNOWN
+    assert _by_id(report)["NOT_CONSUMED"]["result"] == pf.UNKNOWN
+
+
+def test_request_id_mentioned_outside_the_block_makes_a_valid_receipt_unknown() -> None:
+    """PR #431 G2: block の外の地の文に REQUEST_ID を書くと、正しい承認でも UNKNOWN になる。
+
+    fail-close の側の偽陽性。書き手は block の中にだけ書く(docstring と --help に案内がある)。
+    """
+    prose = f"承認 {_REQUEST_ID} を受領しました。"
+    comments = [
+        _comment(1, _request_body(), "2026-01-01T00:00:00+00:00"),
+        _comment(2, prose + "\n\n" + _receipt_body(), "2026-01-01T00:05:00+00:00"),
+    ]
+
+    assert _evaluate(comments)["result"] == pf.UNKNOWN
+    # block だけを書けば PASS(基準)
+    assert _evaluate(_valid_comments())["result"] == pf.PASS
+
+
+def test_writer_guidance_is_in_the_docstring_and_the_help_text(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """PR #431 G2: 「REQUEST_ID は block の中にだけ書く」という案内が、目に触れる場所にある。"""
+    assert "承認依頼・受領証を書く人へ" in (pf.__doc__ or "")
+
+    with pytest.raises(SystemExit) as exited:
+        pf.main(["--help"])
+
+    assert exited.value.code == 0
+    out = "".join(capsys.readouterr().out.split())  # argparse が折り返すため空白を除いて照合する
+    assert "blockの中に書き" in out
+    assert "地の文" in out
+
+
 def test_unrelated_comments_do_not_affect_the_result() -> None:
     comments = _valid_comments() + [
         _comment(3, "レビューコメントです。REQUEST_ID の話ではない。", "2026-01-01T00:20:00+00:00"),

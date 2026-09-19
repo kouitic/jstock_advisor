@@ -70,6 +70,16 @@ contract 8.6.2節は、RECEIPT 作成後の状態遷移を「RECEIPT を編集�
 場合を含む)、状態を判定できないため UNKNOWN とする(記録の書式の違いを PASS にしない)。
 副作用として、地の文で REQUEST_ID に言及しただけの行があっても UNKNOWN になる(fail-close の側)。
 
+## 承認依頼・受領証を書く人へ(偽陽性を避けるための書き方)
+
+**REQUEST_ID は、必ず APPROVAL_REQUEST / APPROVAL_RECEIPT の block の中
+(`REQUEST_ID = ...` の行)に書く。block の外の地の文では REQUEST_ID に言及しない。**
+block の外の行に REQUEST_ID を書くと、その行は「記録として解釈できない言及」になり、
+正しい承認でも UNKNOWN になる(fail-close の側であり、安全性の欠陥ではない)。
+たとえば受領証の comment に「承認 <ID> を受領しました。」という1行を添えず、block だけを書く。
+別の承認を指したいとき(「旧 <ID> は消費済みのため再依頼」等)も、
+block の SCOPE 欄などに REQUEST_ID を書かない。
+
 ## 依存
 
 標準ライブラリと gh CLI のみ。
@@ -741,7 +751,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Human Gate の承認要求・受領証を検査する read-only の preflight"
         "(Issue #332 Unit 1-B)。"
-        "PASS は承認の真正性の証拠ではない(形式の検査のみ)。"
+        "PASS は承認の真正性の証拠ではない(形式の検査のみ)。",
+        epilog="承認依頼・受領証を書く人へ: REQUEST_ID は必ず APPROVAL_REQUEST / "
+        "APPROVAL_RECEIPT の block の中に書き、block の外の地の文では言及しない"
+        "(block の外の行に書くと、正しい承認でも UNKNOWN になる)。",
     )
     parser.add_argument("--request-id", required=True)
     parser.add_argument(
