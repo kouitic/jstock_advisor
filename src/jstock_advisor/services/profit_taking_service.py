@@ -13,7 +13,7 @@ import calendar
 import datetime as dt
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
@@ -88,6 +88,10 @@ from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
     historical_valuation_result_to_metrics,
 )
+from jstock_advisor.domain.signals.judgment_safety import (
+    ProfitTakingMitigationFacts,
+    SafetyFacts,
+)
 from jstock_advisor.domain.signals.market_environment import (
     market_environment_config_values,
     market_environment_result_to_metrics,
@@ -153,6 +157,10 @@ class ProfitTakingOutcome:
     # AuditLogEntryのID(judgment audit呼び出しに到達しなかった場合はNone)。
     # HoldingEvaluationRecord.authoritative_audit_log_idへ橋渡しするための参照。
     audit_id: str | None = None
+    # --- Issue #160 shadow計測(PR-2b): 判定に入る前の事実(非永続・判定へ使わない) ---
+    # 推奨が生成された経路でのみ設定する(data_error / HOLD等の推奨なし経路はNone)。等価比較・
+    # reprには含めない(既存の比較・ログを変えない)。shadowの評価点(PR-3以降)だけが読む。
+    safety_facts: SafetyFacts | None = field(default=None, compare=False, repr=False)
 
 
 def _dividend_decrease_explanation(
@@ -1346,7 +1354,20 @@ class ProfitTakingService:
             environment_metrics=environment_metrics,
         )
         return ProfitTakingOutcome(
-            holding.stock_code, recommendation, None, audit_id=audit_entry.audit_id
+            holding.stock_code,
+            recommendation,
+            None,
+            audit_id=audit_entry.audit_id,
+            # UNKNOWN(None)を事実として識別できる2項目の**実値**を、判定式を変えずに転記する。
+            # Noneは「取得できていない」、0年・Falseは「確認した結果」(FalseをUNKNOWNと推測しない)。
+            safety_facts=SafetyFacts(
+                profit_taking_mitigation=ProfitTakingMitigationFacts(
+                    continuous_dividend_increase_years=(
+                        mitigating_inputs.continuous_dividend_increase_years
+                    ),
+                    is_progressive_or_doe_policy=mitigating_inputs.is_progressive_or_doe_policy,
+                )
+            ),
         )
 
 
