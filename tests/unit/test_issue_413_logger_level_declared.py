@@ -109,6 +109,72 @@ def _binding_pairs(target: ast.expr, value: ast.expr) -> Iterator[tuple[ast.expr
         yield target, value
 
 
+def _constant_key(node: ast.expr) -> int | str | None:
+    """固定のキー・添字(文字列・整数。`-1` のような負の整数を含む)。動的な式は None。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int | str):
+        return node.value
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.USub)
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, int)
+    ):
+        return -node.operand.value
+    return None
+
+
+def _expr_key(expression: ast.expr) -> str | None:
+    """束縛・参照の対象になりうる式を、比較用の文字列へ直す。対象外の式は None。
+
+    `logger` / `self._logger` / `loggers["main"]` / `loggers[0]` / `groups["a"][1]` を対象とする。
+    キー・添字が固定(文字列・整数のリテラル)でない `loggers[name]` は、対象外(None)。
+    """
+    if isinstance(expression, ast.Name | ast.Attribute):
+        return ast.unparse(expression)
+    if isinstance(expression, ast.Subscript):
+        base = _expr_key(expression.value)
+        index = _constant_key(expression.slice)
+        if base is not None and index is not None:
+            return f"{base}[{index!r}]"
+    return None
+
+
+def _is_logger_expression(expression: ast.expr, names: set[str], bound: set[str]) -> bool:
+    """getLogger の呼び出し、または logger と分かっている束縛(コンテナの固定の要素を含む)。"""
+    if _is_get_logger_call(expression, names):
+        return True
+    key = _expr_key(expression)
+    return key is not None and key in bound
+
+
+def _container_element_keys(
+    prefix: str, value: ast.expr, names: set[str], bound: set[str]
+) -> Iterator[str]:
+    """dict / list / tuple のリテラルへ直接格納された logger の、要素の鍵を返す。
+
+    dict は固定のキー、list / tuple は固定の添字(先頭からの番号と、末尾からの負の番号の両方)で
+    参照できる。入れ子のリテラルもたどる。`*rest` を含む list / tuple は位置が定まらないため、
+    `**other` を含む dict は展開分の鍵が分からないため、その要素は対象外とする。
+    """
+    entries: list[tuple[str, ast.expr]] = []
+    if isinstance(value, ast.Dict):
+        for key_node, element in zip(value.keys, value.values, strict=True):
+            key = None if key_node is None else _constant_key(key_node)
+            if key is not None:
+                entries.append((f"{prefix}[{key!r}]", element))
+    elif isinstance(value, ast.List | ast.Tuple) and not any(
+        isinstance(e, ast.Starred) for e in value.elts
+    ):
+        size = len(value.elts)
+        for index, element in enumerate(value.elts):
+            entries.append((f"{prefix}[{index!r}]", element))
+            entries.append((f"{prefix}[{index - size!r}]", element))
+    for element_key, element in entries:
+        if _is_logger_expression(element, names, bound):
+            yield element_key
+        yield from _container_element_keys(element_key, element, names, bound)
+
+
 def _bound_logger_keys(tree: ast.AST) -> set[str]:
     """logger を束縛している式(`logger` / `self._logger` 等)を、ソース断片の文字列で集める。
 
@@ -120,14 +186,13 @@ def _bound_logger_keys(tree: ast.AST) -> set[str]:
         属性への代入     `self._logger = logging.getLogger(...)`
         別名            `log = logger`(すでに logger と分かっている名前の別名)
         別名 import     `from logging import getLogger as gl` の `gl(...)`
+        コンテナ        `loggers = {"main": logging.getLogger(...)}` の `loggers["main"]`、
+                        `loggers = [logging.getLogger(...)]` の `loggers[0]` / `loggers[-1]`、
+                        `loggers["main"] = logging.getLogger(...)`(固定のキー・添字だけ。
+                        dict / list / tuple のリテラルと入れ子。詳細は `_container_element_keys`)
     """
     names = _get_logger_names(tree)
     bound: set[str] = set()
-
-    def is_logger(expression: ast.expr) -> bool:
-        if _is_get_logger_call(expression, names):
-            return True
-        return isinstance(expression, ast.Name | ast.Attribute) and ast.unparse(expression) in bound
 
     changed = True
     while changed:  # 別名(log = logger)は、束縛の順序に依らず解決するため不動点まで繰り返す
@@ -140,11 +205,14 @@ def _bound_logger_keys(tree: ast.AST) -> set[str]:
             else:
                 continue
             for target, value in pairs:
-                if not isinstance(target, ast.Name | ast.Attribute) or not is_logger(value):
+                key = _expr_key(target)
+                if key is None:
                     continue
-                key = ast.unparse(target)
-                if key not in bound:
-                    bound.add(key)
+                found = set(_container_element_keys(key, value, names, bound))
+                if _is_logger_expression(value, names, bound):
+                    found.add(key)
+                if not found <= bound:
+                    bound |= found
                     changed = True
     return bound
 
@@ -155,14 +223,27 @@ def _logger_facts(source: str) -> tuple[bool, bool]:
     logger は、束縛した式(`_bound_logger_keys` の各形)と、連鎖呼び出し
     (`logging.getLogger(...).info(...)` / `.setLevel(...)`)で見つける。
 
-    **検出できない形(対象外。実際の src には無いことを、`_scan_src` の実測と
-    11 件の allowlist の一致で確認している)**
+    **保証の範囲(対応する構文に限る。「未宣言の module をすべて防ぐ」ものではない)**
+    上の `_bound_logger_keys` の各形と連鎖呼び出しで logger と分かるものだけを対象とする。
+    「走査結果が allowlist と一致した」ことは、対象外の構文が src に無い証拠にならない
+    (検出器が見ない形は、一致にも現れない)。対象外の構文が src に無いことは、別の方法で確認する
+    (方法と結果は PR #436 の本文に書いた)。
+
+    **検出できない形(対象外。`test_known_blind_spots_*` が「今は検出しない」ことを固定している)**
         ・関数の戻り値から得た logger        `logger = make_logger()`
-        ・コンテナの要素・引数として渡された logger
-          `loggers["x"].info(...)` / `def f(log): log.info(...)`
+        ・関数の引数として渡された logger     `def f(log): log.info(...)`
+        ・動的なキー・添字のコンテナ要素      `loggers[name].info(...)`
+        ・作成後に追加した要素                `loggers.append(logging.getLogger(...))`
         ・`getattr(...)` 等の動的な取得
+        ・`*rest` を含む list / tuple、`**other` を含む dict の、位置・鍵が定まらない要素
     これらは検出器の限界であり、見えているから安全だとは主張しない。新しい形が src に現れたら、
-    検出器を広げる(`test_known_blind_spots_*` がその変更に気づくための固定である)。
+    検出器を広げる(対応範囲を広げたときは、`test_known_blind_spots_*` が落ちて気づける)。
+
+    **宣言(setLevel)は module 単位で判定する**: 同じ module の logger のどれか 1 つでも
+    `setLevel` を呼んでいれば「宣言あり」とする(logger ごとの区別はしない)。ただし、対象は
+    logger と分かる式だけで、logger でない要素(`objs["other"].setLevel(...)`)の `setLevel` は
+    宣言として数えない。複数の logger を持つ module で、一部にだけ宣言がある場合の見逃しは、
+    `test_known_declaration_is_per_module_not_per_logger` が固定している。
 
     **過剰検出がありうる形(名前の衝突。fail-close の側 = 見逃しではなく余計に拾う)**
     束縛の鍵は式の文字列(`logger` / `self._logger`)であり、scope や代入の順序を見ない
@@ -179,17 +260,12 @@ def _logger_facts(source: str) -> tuple[bool, bool]:
     bound = _bound_logger_keys(tree)
     names = _get_logger_names(tree)
 
-    def is_logger(expression: ast.expr) -> bool:
-        if _is_get_logger_call(expression, names):
-            return True
-        return isinstance(expression, ast.Name | ast.Attribute) and ast.unparse(expression) in bound
-
     calls_quiet_level = False
     declares_level = False
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        if not is_logger(node.func.value):
+        if not _is_logger_expression(node.func.value, names, bound):
             continue
         if node.func.attr in _QUIET_LEVEL_METHODS:
             calls_quiet_level = True
@@ -345,11 +421,22 @@ _KNOWN_BLIND_SPOTS = {
     "logger from a function's return value": (
         "import logging\nlogger = make_logger()\nlogger.info('x')\n"
     ),
-    "logger from a container element": (
-        "import logging\nloggers = {'x': logging.getLogger('x')}\nloggers['x'].info('x')\n"
-    ),
     "logger passed as an argument": "def f(log):\n    log.info('x')\n",
     "dynamic lookup": "import logging\ngetattr(logging, 'x').info('x')\n",
+    "container element with a dynamic key": (
+        "import logging\nloggers = {'x': logging.getLogger('x')}\nk = 'x'\nloggers[k].info('x')\n"
+    ),
+    "container element added after creation": (
+        "import logging\nloggers = []\nloggers.append(logging.getLogger('x'))\n"
+        "loggers[0].info('x')\n"
+    ),
+    "container with unpacking (position unknown)": (
+        "import logging\nloggers = [*others, logging.getLogger('x')]\nloggers[1].info('x')\n"
+    ),
+    "dict with ** expansion (only the literal keys are known)": (
+        "import logging\nloggers = {**others, 'x': logging.getLogger('x')}\n"
+        "loggers['y'].info('x')\n"
+    ),
 }
 
 
@@ -357,13 +444,173 @@ _KNOWN_BLIND_SPOTS = {
 def test_known_blind_spots_are_not_detected(form: str) -> None:
     """検出できない形(検出器の限界)を、固定して記録する。**見えているから安全、とは主張しない。**
 
-    実際の src にこの形の未宣言 module が無いことは、`_scan_src` の実測
-    (11 件の allowlist との一致)で確認している。
+    対象外の形が src に無いことは、allowlist との一致では示せない(検出器が見ない形は、一致にも
+    現れない)。別の方法での確認は PR #436 の本文に書いた。
     新しい形が src に現れたら検出器を広げる。将来この形を検出できるようにしたときは、このテストが
     落ちて気づけるようにしてある(その場合は本テストの期待と `_logger_facts` の docstring を
     更新する)。
     """
     assert _logger_facts(_KNOWN_BLIND_SPOTS[form]) == (False, False), form
+
+
+_CONTAINER_FORMS = {
+    "dict literal": ("loggers = {'main': logging.getLogger(__name__)}\n", "loggers['main']", ""),
+    "list literal": ("loggers = [logging.getLogger(__name__)]\n", "loggers[0]", ""),
+    "tuple literal": ("loggers = (logging.getLogger(__name__),)\n", "loggers[0]", ""),
+    "negative index": (
+        "loggers = [logging.getLogger('a'), logging.getLogger(__name__)]\n",
+        "loggers[-1]",
+        "",
+    ),
+    "nested literal": (
+        "loggers = {'group': [logging.getLogger('a'), logging.getLogger(__name__)]}\n",
+        "loggers['group'][1]",
+        "",
+    ),
+    "element assignment": (
+        "loggers = {}\nloggers['main'] = logging.getLogger(__name__)\n",
+        "loggers['main']",
+        "",
+    ),
+    "attribute container": (
+        "class A:\n    def __init__(self):\n"
+        "        self._loggers = {'main': logging.getLogger(__name__)}\n"
+        "    def run(self):\n",
+        "self._loggers['main']",
+        "        ",
+    ),
+}
+
+
+def _container_source(form: str, *statements: str) -> str:
+    """コンテナの形を作り、その要素(`{ref}`)に対する文を続ける。"""
+    setup, reference, indent = _CONTAINER_FORMS[form]
+    lines = [indent + statement.format(ref=reference) + "\n" for statement in statements]
+    return "import logging\n" + setup + "".join(lines)
+
+
+@pytest.mark.parametrize("method", ["info", "debug"])
+@pytest.mark.parametrize("form", sorted(_CONTAINER_FORMS))
+def test_container_element_logger_is_detected_as_undeclared(form: str, method: str) -> None:
+    """PR #436 の USER 指摘: dict / list / tuple へ直接格納した logger を、固定キー・固定添字で
+    参照して INFO / DEBUG を呼ぶ module を、「未宣言」として拾う(`_KNOWN_BLIND_SPOTS` から移した)。
+    """
+    source = _container_source(form, "{ref}." + method + "('x')")
+
+    assert _logger_facts(source) == (True, False), form
+
+
+@pytest.mark.parametrize("level", ["logging.INFO", "logging.WARNING"])
+@pytest.mark.parametrize("form", sorted(_CONTAINER_FORMS))
+def test_setlevel_on_the_same_container_element_is_a_declaration(form: str, level: str) -> None:
+    """同じ要素への `setLevel(logging.INFO)` / `(logging.WARNING)` を、宣言として認識する。"""
+    source = _container_source(form, "{ref}.setLevel(" + level + ")", "{ref}.info('x')")
+
+    assert _logger_facts(source) == (True, True), form
+
+
+def test_setlevel_on_a_non_logger_element_is_not_a_declaration() -> None:
+    """logger でない別の要素への `setLevel` は、対象 logger の宣言として数えない。"""
+    source = (
+        "import logging\n"
+        "objs = {'main': logging.getLogger(__name__), 'other': object()}\n"
+        "objs['main'].info('x')\n"
+        "objs['other'].setLevel(logging.INFO)\n"
+    )
+
+    assert _logger_facts(source) == (True, False)
+
+
+def test_setlevel_on_another_index_of_a_list_is_not_a_declaration() -> None:
+    """list の logger でない添字への `setLevel` も、宣言として数えない(添字を取り違えない)。"""
+    source = (
+        "import logging\n"
+        "objs = [logging.getLogger(__name__), object()]\n"
+        "objs[0].info('x')\n"
+        "objs[1].setLevel(logging.INFO)\n"
+    )
+
+    assert _logger_facts(source) == (True, False)
+
+
+def test_known_declaration_is_per_module_not_per_logger() -> None:
+    """複数の logger を持つ module では、どれか 1 つの `setLevel` で「宣言あり」になる(限界の固定)。
+
+    宣言の判定は module 単位である。片方の logger にだけ宣言があると、もう片方の INFO の未宣言は
+    見逃される。logger ごとの判定にはしていない(最小修正。実際の src の module は logger を 1 つだけ
+    持つ形で、複数の logger を持つ形は無い確認は PR #436 の本文に書いた)。
+    """
+    source = (
+        "import logging\n"
+        "loggers = {'a': logging.getLogger('a'), 'b': logging.getLogger('b')}\n"
+        "loggers['a'].setLevel(logging.INFO)\n"
+        "loggers['b'].info('x')\n"
+    )
+
+    assert _logger_facts(source) == (True, True)
+
+
+def test_scan_src_reports_a_new_module_with_a_container_logger(tmp_path: pathlib.Path) -> None:
+    """仮の src 配下へ新規 module を作り、`_scan_src` が「未宣言」として拾う(USER 指示 4)。
+
+    宣言なし・宣言あり(INFO / WARNING)・INFO / DEBUG・別要素の `setLevel` を、まとめて検証する。
+    """
+    root = tmp_path / "src"
+    (root / "pkg").mkdir(parents=True)
+    head = "import logging\nloggers = {'main': logging.getLogger(__name__), 'other': object()}\n"
+    modules = {
+        "info_no_decl": head + "loggers['main'].info('x')\n",
+        "debug_no_decl": head + "loggers['main'].debug('x')\n",
+        "info_declared_info": head
+        + "loggers['main'].setLevel(logging.INFO)\nloggers['main'].info('x')\n",
+        "info_declared_warning": head
+        + "loggers['main'].setLevel(logging.WARNING)\nloggers['main'].info('x')\n",
+        "debug_declared": head
+        + "loggers['main'].setLevel(logging.DEBUG)\nloggers['main'].debug('x')\n",
+        "other_element_setlevel": head
+        + "loggers['main'].info('x')\nloggers['other'].setLevel(logging.INFO)\n",
+        "no_quiet_call": head + "loggers['main'].warning('x')\n",
+    }
+    for name, source in modules.items():
+        (root / "pkg" / f"{name}.py").write_text(source, encoding="utf-8")
+
+    undeclared, declared = _scan_src(root)
+
+    assert undeclared == {
+        "src/pkg/info_no_decl.py",
+        "src/pkg/debug_no_decl.py",
+        "src/pkg/other_element_setlevel.py",
+    }
+    assert declared == {
+        "src/pkg/info_declared_info.py",
+        "src/pkg/info_declared_warning.py",
+        "src/pkg/debug_declared.py",
+    }
+
+
+def test_a_new_undeclared_container_module_fails_the_guard_and_declaring_resolves_it(
+    tmp_path: pathlib.Path,
+) -> None:
+    """完了条件: 新規の未宣言 module(コンテナ経由)は、allowlist に無いため guard の判定で違反に
+    なり、同じ logger へ宣言を足すと解消する。別の非 logger 要素への宣言では解消しない。
+    """
+    root = tmp_path / "src"
+    (root / "pkg").mkdir(parents=True)
+    module = root / "pkg" / "new_module.py"
+    head = "import logging\nloggers = {'main': logging.getLogger(__name__), 'aux': object()}\n"
+
+    def offenders(source: str) -> list[str]:
+        module.write_text(source, encoding="utf-8")
+        undeclared, _ = _scan_src(root)
+        return sorted(undeclared - _UNDECLARED_ALLOWLIST)
+
+    body = "loggers['main'].info('started')\n"
+
+    assert offenders(head + body) == ["src/pkg/new_module.py"]
+    assert offenders(head + "loggers['aux'].setLevel(logging.INFO)\n" + body) == [
+        "src/pkg/new_module.py"
+    ]
+    assert offenders(head + "loggers['main'].setLevel(logging.INFO)\n" + body) == []
 
 
 _KNOWN_OVER_DETECTIONS = {
