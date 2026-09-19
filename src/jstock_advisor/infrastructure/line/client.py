@@ -241,6 +241,23 @@ class ConsoleLineClient:
 
 
 def build_line_client_from_env() -> LineClient:
+    """CLI専用。環境変数からLINE clientを構築する。
+
+    LINE_CHANNEL_ACCESS_TOKENとLINE_USER_IDの**両方**が設定されていればLiveLineClientを返す。
+    **どちらか一方でも無い場合は、この関数自身がConsoleLineClientへ黙ってフォールバックする**
+    (例外は送出しない)。ConsoleLineClientは標準出力に表示するだけで、LINEへは送信しない。
+    CLIの--notifyのヘルプが「未設定時は標準出力のみ」と明示しており、CLI(人が出力を見る対話的な
+    実行)にとってはこれが意図された挙動である。
+
+    ★ **Lambda handlerでは使用しないこと。** 同じフォールバックが起きると、通知が実際には
+    送られていないのにLambda呼び出しは正常終了して見え、送信の失敗が不可視になる(Issue #117)。
+    Lambdaでは、認証情報の欠落を`LineCredentialsMissingError`で顕在化させる
+    `build_live_line_client_from_env()`、または実行モード別の`build_line_client_for_run(dry_run=...)`
+    を使う(Lambda handlerは全てこちらへ切り替え済み)。
+
+    ★ CLIでも、`--notify`のような明示の指定が無いまま通知を送る経路では、このフォールバックにより
+    「送信済み」と表示・記録されうる(cli/watchlist_screening.pyの4コマンド。Issue #434)。
+    """
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
     user_id = os.environ.get("LINE_USER_ID")
     if token and user_id:
