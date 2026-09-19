@@ -70,7 +70,9 @@ def _stub_display_name_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def dynamo(monkeypatch: pytest.MonkeyPatch):
+def dynamo(
+    monkeypatch: pytest.MonkeyPatch, lambda_runtime_env: None, create_collection_table
+):
     monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
@@ -94,6 +96,13 @@ def dynamo(monkeypatch: pytest.MonkeyPatch):
             ],
             BillingMode="PAY_PER_REQUEST",
         )
+        # Issue #367(b): Lambda実行環境ではfinalizerが使うrepositoryもDynamoDBを使う
+        create_collection_table("watchlist_removal_history.json", "stock_code")
+        create_collection_table("audit_log.json", "audit_id")
+        create_collection_table("notification_log.json", "notification_id")
+        create_collection_table("notification_claims.json", "claim_id")
+        create_collection_table("watchlist_rotation_dispatch_lease.json", "rotation_id")
+        create_collection_table("watchlist_screening_rotation_state.json", "rotation_id")
         yield client
 
 
@@ -1674,3 +1683,39 @@ def test_a3_failure_day_is_stopped_when_its_own_switch_is_off_and_general_notifi
 
     assert notification.summaries == []
     assert _outcome_of() == NOTIFICATION_OUTCOME_SKIPPED
+
+
+# --- Issue #367(b): 本番と同じDynamoDBバックエンドを実際に通っていることの確認 ---
+
+
+def test_finalizer_repositories_run_on_dynamodb_not_local_json(
+    dynamo, assert_dynamodb_backend, tmp_path: Any
+) -> None:
+    """opt-in fixtureを付けただけで完了扱いにしない(条件4)。
+
+    running_on_lambda()==Trueの下で、finalizerが使うrepositoryがDynamoDB
+    バックエンドを選び(store_dirを渡してもローカルJSONへ落ちない)、書込みが
+    motoの表へ入ることを確認する。
+    """
+    from jstock_advisor.domain.entities.watchlist import WatchlistRemovalHistory
+    from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (  # noqa: E501
+        WatchlistRemovalHistoryRepository,
+    )
+
+    history_repo = WatchlistRemovalHistoryRepository(30, store_dir=tmp_path)
+    assert_dynamodb_backend(history_repo._store)
+    assert_dynamodb_backend(AuditLogRepository(store_dir=tmp_path)._store)
+
+    history_repo.upsert(
+        WatchlistRemovalHistory(
+            stock_code="1111",
+            removed_at=_NOW,
+            removal_reason="test",
+            removal_category="IMMEDIATE",
+            cooldown_until=_NOW + dt.timedelta(days=30),
+        )
+    )
+
+    items = dynamo.scan(TableName="jstock-watchlist_removal_history")["Items"]
+    assert [i["stock_code"]["S"] for i in items] == ["1111"]
+    assert not list(tmp_path.glob("*.json")), "ローカルJSONへ書いている(本番と異なる経路)"

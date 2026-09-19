@@ -120,3 +120,25 @@ def assert_dynamodb_backend(lambda_runtime_env: None) -> Callable[[object], None
         )
 
     return _check
+
+
+@pytest.fixture
+def create_collection_table() -> Callable[..., None]:
+    """Issue #367(b): motoへ、repositoryが本番で使うcollection表(HASHキー1本)を作る。
+
+    表名は本番と同じ`resolve_table_name(file_name)`で決める(表名をテスト側へ
+    ハードコードして本番とずれることを避ける)。`mock_aws()`の内側で呼ぶこと。
+    """
+    import boto3
+
+    from jstock_advisor.infrastructure.collection_store import resolve_table_name
+
+    def _create(file_name: str, id_field: str, *, region: str = "ap-northeast-1") -> None:
+        boto3.client("dynamodb", region_name=region).create_table(
+            TableName=resolve_table_name(file_name),
+            KeySchema=[{"AttributeName": id_field, "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": id_field, "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+    return _create
