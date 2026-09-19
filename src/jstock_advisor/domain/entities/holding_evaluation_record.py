@@ -61,7 +61,8 @@ class HoldingEvaluationRecord(Entity):
     #   しかし純粋HOLD(保有継続)の利確判定はRecommendationを作らないため、
     #   実行結果を参照できる記録がaudit idだけであり、かつauthoritative_audit_log_id
     #   は別のエンジン(Legacy SELL等)のidで占有されるため、「なぜ利確しないのか」
-    #   (含み益率・上値余地・保留理由)を表示側が復元できなかった。
+    #   (含み益率・上値余地・保留理由)を表示側が復元できなかった
+    #   (→ Issue #419で、利確を見送った根拠の事実を監査記録へ保存することで解決した)。
     #   反転の範囲は「authoritativeでないエンジンの、Recommendationを持たない実行結果の
     #   証跡」に限り、profit_taking_audit_log_idのみを追加する(legacy_sell_audit_id等は
     #   必要な事実が無いため追加しない)。authoritative_audit_log_idの意味は変えない。
@@ -79,8 +80,10 @@ class HoldingEvaluationRecord(Entity):
     # Issue #369: 利確判定がHOLD(Recommendationを作らない)だった評価サイクルで、
     # 利確判定が書き込んだAuditLogEntryのID(profit_taking_recommendation_idと
     # 対の、authoritativeでないエンジンの実行結果参照)。表示側が判定時点の
-    # 含み益率・現在価格と適正価格との位置を復元するために使う(保留理由
-    # hold_reasonsは監査記録へ保存されておらず、現状は復元できない。PR #414 F1)。
+    # 含み益率・現在価格と適正価格との位置に加え、Issue #419で保存する
+    # 利確を見送った根拠の事実(監視水準・上値余地・適正価格を使えなかった理由・
+    # 独立条件の該当件数)を復元するために使う。保留理由の文章(hold_reasons)は
+    # 固定1文で情報量が無いため保存せず、根拠の事実を保存する(#419)。
     # Noneは「監査記録が無い」(利確判定がaudit記録より前に中断した場合を含む)と一致する。
     # 旧schemaのrecord(本fieldが無い)は既定Noneで読める。
     profit_taking_audit_log_id: str | None = None
