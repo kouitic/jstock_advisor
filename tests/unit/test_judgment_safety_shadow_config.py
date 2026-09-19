@@ -164,15 +164,19 @@ def test_valid_config_logs_nothing(tmp_path: Path, caplog: pytest.LogCaptureFixt
 
 
 def test_the_module_is_not_wired_into_the_production_call_graph() -> None:
-    """PR-0は設定だけ。判定経路のどこからも参照されない(挙動不変)。参照が増えるのはPR-1以降。"""
+    """設定は判定経路のどこからも参照されない(挙動不変)。参照してよいのは、自身も未接続の純関数のみ。
+
+    PR-1で`judgment_safety.py`(純関数。それ自体を参照する本番コードは0件で、
+    test_judgment_safety.pyが固定する)が参照元に加わった。接続はPR-3以降。
+    """
     referrers = [
-        str(p.relative_to(_REPO_ROOT))
+        p.relative_to(_REPO_ROOT).as_posix()
         for p in (_REPO_ROOT / "src").rglob("*.py")
         if p.name != "judgment_safety_shadow_config.py"
         and "judgment_safety_shadow_config" in p.read_text(encoding="utf-8")
     ]
 
-    assert referrers == []
+    assert referrers == ["src/jstock_advisor/domain/signals/judgment_safety.py"]
 
 
 def test_app_config_is_unchanged_and_does_not_carry_the_shadow_block() -> None:
@@ -182,3 +186,18 @@ def test_app_config_is_unchanged_and_does_not_carry_the_shadow_block() -> None:
     cfg = load_config()
 
     assert not hasattr(cfg, "judgment_safety_shadow")
+
+
+def test_duplicate_g3_inputs_are_rejected_and_fall_back_to_off(tmp_path: Path) -> None:
+    text = (
+        'mode: "SHADOW"\n'
+        "g3_required_inputs:\n"
+        "  - continuous_dividend_increase_years\n"
+        "  - continuous_dividend_increase_years\n"
+    )
+
+    with pytest.raises(ValueError, match="duplicates"):
+        JudgmentSafetyShadowConfig.model_validate(
+            {"mode": "SHADOW", "g3_required_inputs": ["is_progressive_or_doe_policy"] * 2}
+        )
+    assert load_judgment_safety_shadow_config(_write(tmp_path, text)) == off_config()
