@@ -1329,3 +1329,123 @@ def test_valid_cost_holding_behaviour_is_unchanged(monkeypatch: pytest.MonkeyPat
 
     assert outcome.data_error is None
     assert outcome.recommendation is not None
+
+
+# --- Issue #419: 純粋HOLDの「利確を見送った理由」を、判定時点の構造化事実として監査記録へ残す ---
+
+_HOLD_BASIS_KEYS = {
+    "gain_watch_threshold_pct": (float,),
+    "upside_pct": (float, type(None)),
+    "independent_condition_count": (int,),
+    "fair_value_action_usable": (bool,),
+    "fair_value_action_block_reason_code": (str, type(None)),
+    "fair_value_unusable_reason_code": (str, type(None)),
+}
+
+
+def _analyze_recording_profit_taking_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    result: ProfitTakingResult,
+    *,
+    force_unusable_fair_value: bool = False,
+) -> tuple[object, dict[str, object]]:
+    """evaluate_profit_taking()の結果を固定してanalyze()し、利確判定の監査記録
+    (output_values)と outcome を返す。"""
+    import jstock_advisor.services.profit_taking_service as service_module
+    from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
+
+    recorded: list[dict[str, object]] = []
+
+    class _Entry:
+        audit_id = "audit-419"
+
+    class _RecordingAudit:
+        def record(self, **kwargs: object) -> object:
+            recorded.append(kwargs)
+            return _Entry()
+
+    if force_unusable_fair_value:
+        original_build = service_module.build_stock_snapshot
+
+        def _build(*args: object, **kwargs: object) -> object:
+            snapshot, error = original_build(*args, **kwargs)
+            if snapshot is None:
+                return snapshot, error
+            forced = snapshot.fair_value_range.model_copy(
+                update={
+                    "usable_for_trading_judgment": False,
+                    "unusable_reason": "test",
+                    "unusable_reason_code": FairValueUnusableReasonCode.TOO_FEW_METHODS,
+                }
+            )
+            return dataclasses.replace(snapshot, fair_value_range=forced), error
+
+        monkeypatch.setattr(service_module, "build_stock_snapshot", _build)
+
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: result,
+    )
+    service = ProfitTakingService(providers=_providers(None, dt.date(2026, 6, 30)), config=_CONFIG)
+    monkeypatch.setattr(service, "_audit", _RecordingAudit())
+    outcome = service.analyze(_holding("2914"), _NOW)
+    profit_records = [r for r in recorded if r.get("decision_type") == "profit_taking"]
+    assert len(profit_records) == 1
+    return outcome, profit_records[0]["output_values"]  # type: ignore[return-value]
+
+
+def test_issue_419_pure_hold_audit_records_structured_hold_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """純粋HOLDでは、利確を見送った根拠の事実(監視水準・上値余地・適正価格の可否・
+    該当条件数)が監査記録へ残る。値は比率・件数・bool・codeのみで、金額・株数は運ばない。"""
+    result = dataclasses.replace(
+        _canned_result(RecommendationType.HOLD, sell_intensity=None),
+        triggered_reasons=[],
+        upside_pct=12.5,
+        independent_condition_count=0,
+    )
+
+    outcome, out = _analyze_recording_profit_taking_audit(monkeypatch, result)
+
+    # 判定ロジック・結果は変わらない(HOLDはRecommendationを作らず、audit_idだけを返す)
+    assert outcome.recommendation is None
+    assert outcome.data_error is None
+    assert outcome.audit_id == "audit-419"
+    watch_pct = _CONFIG.profit_taking.thresholds.unrealized_gain_watch_pct
+    assert out["gain_watch_threshold_pct"] == watch_pct
+    assert out["upside_pct"] == 12.5
+    assert out["independent_condition_count"] == 0
+    assert out["fair_value_action_usable"] is False
+    assert out["fair_value_action_block_reason_code"] is None
+    for key, allowed_types in _HOLD_BASIS_KEYS.items():
+        assert isinstance(out[key], allowed_types), key
+        # bool は int の subclass のため、件数がboolでないことを別途固定する
+    assert not isinstance(out["independent_condition_count"], bool)
+
+
+def test_issue_419_unusable_fair_value_code_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = dataclasses.replace(
+        _canned_result(RecommendationType.HOLD, sell_intensity=None),
+        triggered_reasons=[],
+        upside_pct=None,
+    )
+
+    _, out = _analyze_recording_profit_taking_audit(
+        monkeypatch, result, force_unusable_fair_value=True
+    )
+
+    assert out["fair_value_unusable_reason_code"] == "TOO_FEW_METHODS"
+    assert out["upside_pct"] is None
+
+
+def test_issue_419_non_hold_record_has_the_same_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """記録の形は1つに保つ(HOLD専用の分岐にしない)。判定結果は従来どおりRecommendationを作る。"""
+    result = _canned_result(RecommendationType.WATCH, sell_intensity=None)
+
+    outcome, out = _analyze_recording_profit_taking_audit(monkeypatch, result)
+
+    assert outcome.recommendation is not None
+    assert outcome.recommendation.recommendation_type == RecommendationType.WATCH
+    for key in _HOLD_BASIS_KEYS:
+        assert key in out
