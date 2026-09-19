@@ -276,3 +276,19 @@ def build_live_line_client_from_env() -> LiveLineClient:
             "(Lambda実行のためConsoleLineClientへはフォールバックしません。Issue #117)"
         )
     return LiveLineClient(channel_access_token=token, user_id=user_id)
+
+
+def build_line_client_for_run(*, dry_run: bool) -> LineClient:
+    """実行モードに応じてLINE clientを構築する(Issue #117 Phase B1b-3a)。
+
+    dry_run=True  外部LINE送信が起きない実行(DRY_RUN)。認証情報が無くても検証できる
+                  ことがDRY_RUNの趣旨のため、従来関数(未設定ならConsoleLineClient)を使う。
+    dry_run=False 外部送信が起きうる実行(NORMAL / VALIDATION+SEND)。認証情報の欠落を
+                  黙って通さず、LineCredentialsMissingErrorで顕在化させる。
+
+    infrastructure層はdomainのExecutionContextをimportしないため、呼び出し側が
+    `execution_context.is_dry_run`を渡す。
+    """
+    if dry_run:
+        return build_line_client_from_env()
+    return build_live_line_client_from_env()
