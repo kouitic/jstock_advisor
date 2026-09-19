@@ -8,11 +8,12 @@ rotation commitは「銘柄評価が完了したか」ではなく「その選�
 その境界を、実際に`maybe_finalize`/`maybe_finalize_maintenance`を駆動して確認する。
 
 test_watchlist_finalize_integration.pyと同じmoto DynamoDBフィクスチャ・
-フェイクRepository/NotificationServiceパターンを踏襲する。rotation状態
-(WatchlistScreeningRotationState)はDynamoDBではなくローカルJSON実装
-(`_commit_local`、非Lambda環境の既定)を使うため、`get_rotation_state`/
-`try_commit_rotation_advance`をtmp_path束縛のラッパーへ差し替えて、実データ
-ディレクトリ(data/local_store/)を汚染しないようにする。
+フェイクRepository/NotificationServiceパターンを踏襲する。
+Issue #367(b): 本ファイルは`lambda_runtime_env`(AWS_LAMBDA_FUNCTION_NAME)の下で
+動かす。rotation状態(WatchlistScreeningRotationState)も本番と同じDynamoDB実装
+(`_commit_dynamodb`)を通る(従来はローカルJSON実装`_commit_local`で動いていた)。
+`rotation_store`のtmp_path束縛のラッパーは、Lambda環境ではstore_dirが無視される
+ため実質的に無効(名前と呼び出し形を保つためだけに残している)。
 """
 
 from __future__ import annotations
@@ -75,7 +76,9 @@ def _isolate_audit_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture
-def dynamo(monkeypatch: pytest.MonkeyPatch):
+def dynamo(
+    monkeypatch: pytest.MonkeyPatch, lambda_runtime_env: None, create_collection_table
+):
     monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
@@ -99,12 +102,22 @@ def dynamo(monkeypatch: pytest.MonkeyPatch):
             ],
             BillingMode="PAY_PER_REQUEST",
         )
+        # Issue #367(b): Lambda実行環境ではfinalizerが使うrepositoryもDynamoDBを使う
+        create_collection_table("watchlist_removal_history.json", "stock_code")
+        create_collection_table("audit_log.json", "audit_id")
+        create_collection_table("notification_log.json", "notification_id")
+        create_collection_table("notification_claims.json", "claim_id")
+        create_collection_table("watchlist_rotation_dispatch_lease.json", "rotation_id")
+        create_collection_table("watchlist_screening_rotation_state.json", "rotation_id")
         yield client
 
 
 @pytest.fixture
 def rotation_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """rotation stateの読み書きをtmp_path束縛のローカルJSONストアへ固定する。"""
+    """rotation stateの呼び出しにtmp_path束縛のstore_dirを渡す(非Lambda環境向けの旧設計)。
+
+    Issue #367(b)以降、本ファイルはLambda環境(DynamoDB)で動くためstore_dirは無視される。
+    """
     store_dir = tmp_path / "rotation"
 
     def _get(rotation_id: str = "default") -> Any:
@@ -578,3 +591,24 @@ def test_maintenance_job_never_touches_rotation_state(
     assert batch["status"] == WatchlistBatchStatus.COMPLETED.value
     # rotation stateが一切参照されなかったこと(_fail_if_calledが呼ばれれば
     # AssertionErrorでこのテスト自体が失敗する)。
+
+
+# --- Issue #367(b): 本番と同じDynamoDBバックエンドを実際に通っていることの確認 ---
+
+
+def test_rotation_state_lives_in_dynamodb_not_local_json(
+    dynamo, assert_dynamodb_backend, rotation_store: Path
+) -> None:
+    """opt-in fixtureを付けただけで完了扱いにしない(条件4)。
+
+    running_on_lambda()==Trueの下で、rotation stateがDynamoDBバックエンドへ
+    書かれ(store_dirを渡してもローカルJSONへ落ちない)、motoの表に入ることを確認する。
+    """
+    from jstock_advisor.infrastructure.aws.watchlist_rotation_state import _store
+
+    assert_dynamodb_backend(_store(rotation_store))
+    create_rotation_state_if_absent(_NOW, store_dir=rotation_store)
+
+    items = dynamo.scan(TableName="jstock-watchlist_screening_rotation_state")["Items"]
+    assert len(items) == 1
+    assert not list(rotation_store.glob("*.json")), "ローカルJSONへ書いている"
