@@ -2156,7 +2156,7 @@ Resources:
                 - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-dispatcher"
       Events:
         # ウォッチリスト新規候補評価・自動メンテナンスの平日毎日起動化(2026-08)。
-        # NEW_CANDIDATE_SCREENINGは月曜〜金曜06:00 JST(祝日判定なし)に起動する。
+        # NEW_CANDIDATE_SCREENINGは月曜〜金曜06:00 JST(cron自体は祝日判定なし。東証休場日は起動後にhandler側でskip: Issue #440)に起動する。
         # 市場取引時間外、既存のBUY候補バッチ(平日08:00 JST)より十分前に完了
         # できる時間帯として選定した。WATCHLIST_MAINTENANCEはもはや独立した
         # 定期Scheduleを持たず、当日のNEW_CANDIDATE_SCREENINGが業務finalizeを

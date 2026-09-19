@@ -168,7 +168,7 @@ AWSデプロイ後はEventBridge Schedulerが下表のLambda関数を自動実�
 
 | 時刻 | schedule.yamlのジョブ | 対応コマンド | 対応Lambda関数 |
 |---|---|---|---|
-| 平日(月曜〜金曜)06:00(2026-08-16改訂。旧: 毎週土曜07:00。祝日判定なし) | (未登録。`infra/template.yaml`の`WeekdayMorning` ScheduleV2にcron直書き) | `jstock watchlist-screening run` | `WatchlistDispatcherFunction`(`job_type=NEW_CANDIDATE_SCREENING`) |
+| 平日(月曜〜金曜)06:00(2026-08-16改訂。旧: 毎週土曜07:00。cron自体は祝日判定なし。★ 2026-09-19以降、東証休場日は起動後にskip: 本節末の「市場休場日のskip」) | (未登録。`infra/template.yaml`の`WeekdayMorning` ScheduleV2にcron直書き) | `jstock watchlist-screening run` | `WatchlistDispatcherFunction`(`job_type=NEW_CANDIDATE_SCREENING`) |
 | 毎時 | (未登録。`infra/template.yaml`にcron直書き) | ― | `WatchlistBatchReconcilerFunction` |
 
 **WATCHLIST_MAINTENANCEに独立したScheduleは存在しない(2026-08-16改訂)**:
@@ -396,7 +396,7 @@ NOTIFICATION_FAILURE/ABORTED/DISPATCH_FAILED/TIMED_OUT)に至った場合も
 **起動方式の平日毎日化(2026-08-16改訂・同日再修正)**: NEW_CANDIDATE_SCREENINGの
 スケジュールを毎週土曜07:00から平日(月曜〜金曜)06:00へ変更した
 (`infra/template.yaml`の`WeekdayMorning` ScheduleV2、`cron(0 6 ? * MON-FRI *)`、
-日本の祝日は考慮しない)。これに伴いWATCHLIST_MAINTENANCEの独立した
+cron自体は日本の祝日を考慮しない。休場日のskipは起動後のhandler側で行う: Issue #440)。これに伴いWATCHLIST_MAINTENANCEの独立した
 定期実行(旧`SundayMaintenanceReview`)は廃止し、同日のNEW_CANDIDATE_SCREENING
 バッチが**信頼できる状態で正常finalizeした場合のみ**、後続処理として
 自動的に起動する方式へ変更した。
@@ -495,6 +495,36 @@ p50/p95・平均値が追加された。判定に必要な最小限の項目の�
 Provider(`LightweightScreeningDataProvider`)も実装済みだが、
 `config/watchlist_screening_rules.yaml`の`screening_data_provider`の本番既定値は
 引き続き`stock_snapshot`のまま(`lightweight`への切替は同値性検証後に別途判断)。
+
+### 4.1.2 市場休場日のskip(2026-09-19追加・Issue #440)
+
+EventBridgeのcronは月〜金で固定であり、祝日・国民の休日を考慮しない。東証(JPX)の休場日
+(判定は`BusinessCalendar.is_business_day`と同一。土日・祝日・国民の休日・
+`config/holiday_calendar.json`の臨時休業)には、**市場依存の3 entryのみ**が
+起動直後に何も行わず正常終了する(`lambda_handlers/_market_holiday.py`)。
+
+| entry | 休場日の返却値 |
+|---|---|
+| BuyCandidates親(平日08:00) | `{"dispatched": 0, "skipped": "MARKET_CLOSED"}` |
+| HoldingsWatchlist親(平日08:00) | `{"dispatched_holdings": 0, "skipped": "MARKET_CLOSED"}` |
+| WatchlistDispatcher `NEW_CANDIDATE_SCREENING`(平日06:00) | `{"skipped": "MARKET_CLOSED"}` |
+
+- **止めないもの**: 適時開示・評価・週次/月次/四半期・recovery(`FINALIZE_ONLY`等)・child・
+  worker・reconciler・`WATCHLIST_MAINTENANCE`(今回はscope外)。
+- **skipの位置**: eventとmodeのvalidationの後、最初の状態変更(売買検知・batch行・lease・SQS・
+  fan-out・保有集中通知)の前。不正なeventは休場日でも従来どおりエラーになる(休場日で隠さない)。
+- **ログ**: skip時にINFOを1件(`event=MARKET_CLOSED_SKIP handler=... business_date_jst=... execution_mode=...`)。
+  PIIを含まない。CloudWatchで`MARKET_CLOSED_SKIP`を検索すると、いつ・どのentryがskipしたか確認できる。
+  「起動したが何も起きていない」のは異常ではなく、この行があれば休場日のskipである。
+- **VALIDATIONのbypass**: `execution_mode=VALIDATION`かつ`allow_market_closed=true`のときだけ
+  休場日でも実行できる(使用時は`MARKET_CLOSED_BYPASS`を記録)。NORMALでtrue・真偽値以外はエラー。
+- **★ WatchlistDispatcherは検証モードを持たない**(`execution_mode`を拒否する)ため、`allow_market_closed=true`は
+  常にエラーとなり、**休場日に手動起動(例: S3キャッシュ更新目的)してもskipされる**。
+  休場日に実行が必要な場合は、営業日まで待つか、別途Issueで対応を判断する。
+- **連休明け**: 次の営業日は通常どおり起動する。連休中の売買は、前回保存した保有スナップショットとの
+  差分として、その営業日に検知される(日数の連続性に依存しない。テストで確認済み)。
+- **ロールバック**: 追加は返却値の`skipped`とログのみで、保存データ形式は変えていない。
+  旧版へ戻すと休場日にも従来どおり起動する(直前営業日の値で判定・通知が出る従来の挙動)。
 
 ---
 
