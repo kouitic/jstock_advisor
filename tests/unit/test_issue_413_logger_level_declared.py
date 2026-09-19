@@ -50,7 +50,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src"
 
 #: 現在、ログレベルを宣言していない(= INFO が出力されない)module。
-#: #413 の Phase A の走査で 11 件(PR-2 で 3 件、PR-3 で 2 件を外し、現在は 6 件)。
+#: #413 の Phase A の走査で 11 件(PR-2 で 3 件、PR-3 で 2 件、PR-4 で 1 件を外し、現在は 5 件)。
 #: 各 PR が有効化(または WARNING の明示)とともに 1 件ずつ外す。最後に空になる。
 #:
 #:   PR-2  audit_service / _finalize_recovery / watchlist_batch_finalizer      (D9・D4・D1・D3)
@@ -64,7 +64,6 @@ _UNDECLARED_ALLOWLIST = {
     "src/jstock_advisor/providers/dividend_data/cross_validating_impl.py",
     "src/jstock_advisor/services/investment_thesis_service.py",
     "src/jstock_advisor/services/shareholder_benefit_registry_service.py",
-    "src/jstock_advisor/services/watch_state_service.py",
     "src/jstock_advisor/services/watchlist_data_cache.py",
     "src/jstock_advisor/services/watchlist_display_name.py",
 }
@@ -683,7 +682,7 @@ def test_current_undeclared_modules_match_the_allowlist_exactly() -> None:
     undeclared, _ = _scan_src()
 
     assert undeclared == _UNDECLARED_ALLOWLIST
-    assert len(_UNDECLARED_ALLOWLIST) == 6
+    assert len(_UNDECLARED_ALLOWLIST) == 5
 
 
 # --- 3 実行時 ------------------------------------------------------------------------------
