@@ -611,6 +611,7 @@ def _persist_holding_evaluation_record(
     legacy_sell_recommendation_id: str | None,
     profit_taking_ran: bool,
     profit_taking_recommendation_id: str | None,
+    profit_taking_audit_log_id: str | None = None,
     holding_decision_ran: bool,
     holding_decision_result_id: str | None,
     holding_decision_notified: bool,
@@ -645,6 +646,7 @@ def _persist_holding_evaluation_record(
         legacy_sell_recommendation_id=legacy_sell_recommendation_id,
         profit_taking_ran=profit_taking_ran,
         profit_taking_recommendation_id=profit_taking_recommendation_id,
+        profit_taking_audit_log_id=profit_taking_audit_log_id,
         holding_decision_ran=holding_decision_ran,
         holding_decision_result_id=holding_decision_result_id,
         holding_decision_notified=holding_decision_notified,
@@ -1234,6 +1236,9 @@ def _analyze_one_holding(
         legacy_sell_recommendation_id=None,
         profit_taking_ran=True,
         profit_taking_recommendation_id=None,
+        # Issue #369: 利確判定がHOLD(Recommendationを作らない)だった場合の判定時点の
+        # 証跡。含み益率・上値余地・保留理由は、この監査記録にだけ残っている。
+        profit_taking_audit_log_id=pt_outcome.audit_id,
         holding_decision_ran=plan.run_holding_decision_evaluation,
         holding_decision_result_id=None,
         holding_decision_notified=False,

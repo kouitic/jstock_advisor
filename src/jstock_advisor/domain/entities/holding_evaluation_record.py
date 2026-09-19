@@ -51,14 +51,22 @@ class HoldingEvaluationRecord(Entity):
     authoritative_recommendation_id: str | None = None
     # Phase 2-B「銘柄分析」向け追加調査(2026-08)対応: 本来の判定担当エンジンが
     # そのサイクルで実際に書き込んだAuditLogEntryのID。authoritative_engineと
-    # 同じエンジンのものだけを保持する(legacy_sell_audit_id/profit_taking_
-    # audit_idのようなエンジン別フィールドは持たない。理由: 表示側は常に
-    # 「本来の判定担当が何を根拠にしたか」だけを知りたく、どのエンジンかを
-    # 意識させないため。エンジン別の実行有無・紐づくRecommendation IDは既存の
-    # legacy_sell_ran/profit_taking_recommendation_id等が担うため、ここへ
-    # 同じ情報をエンジン別に複製しない)。HOLDING_DECISION_SCORE(SHADOW)が
-    # 担当の場合は、SHADOWデータをauthoritativeな理由として使わない方針
-    # (Phase 2-B文章仕様)のため常にNoneのまま。
+    # 同じエンジンのものだけを保持する(意味は不変)。
+    # ★ 方針の経緯(Issue #369、2026-09-19にMANAGER判断で一部反転):
+    #   当初は「legacy_sell_audit_id/profit_taking_audit_idのようなエンジン別
+    #   フィールドは持たない」とした。理由は、表示側は常に「本来の判定担当が何を
+    #   根拠にしたか」だけを知りたく、どのエンジンかを意識させないためである
+    #   (エンジン別の実行有無・紐づくRecommendation IDは既存の
+    #   legacy_sell_ran/profit_taking_recommendation_id等が担う)。
+    #   しかし純粋HOLD(保有継続)の利確判定はRecommendationを作らないため、
+    #   実行結果を参照できる記録がaudit idだけであり、かつauthoritative_audit_log_id
+    #   は別のエンジン(Legacy SELL等)のidで占有されるため、「なぜ利確しないのか」
+    #   (含み益率・上値余地・保留理由)を表示側が復元できなかった。
+    #   反転の範囲は「authoritativeでないエンジンの、Recommendationを持たない実行結果の
+    #   証跡」に限り、profit_taking_audit_log_idのみを追加する(legacy_sell_audit_id等は
+    #   必要な事実が無いため追加しない)。authoritative_audit_log_idの意味は変えない。
+    # HOLDING_DECISION_SCORE(SHADOW)が担当の場合は、SHADOWデータをauthoritativeな
+    # 理由として使わない方針(Phase 2-B文章仕様)のため常にNoneのまま。
     authoritative_audit_log_id: str | None = None
     # 実際にLINE個別通知が送信されたか(notification_enabledとは独立。kill switch
     # 抑止・DataQualityブロック等で送信されなければFalse)。
@@ -68,6 +76,14 @@ class HoldingEvaluationRecord(Entity):
     legacy_sell_recommendation_id: str | None = None
     profit_taking_ran: bool = False
     profit_taking_recommendation_id: str | None = None
+    # Issue #369: 利確判定がHOLD(Recommendationを作らない)だった評価サイクルで、
+    # 利確判定が書き込んだAuditLogEntryのID(profit_taking_recommendation_idと
+    # 対の、authoritativeでないエンジンの実行結果参照)。表示側が判定時点の
+    # 含み益率・現在価格と適正価格との位置を復元するために使う(保留理由
+    # hold_reasonsは監査記録へ保存されておらず、現状は復元できない。PR #414 F1)。
+    # Noneは「監査記録が無い」(利確判定がaudit記録より前に中断した場合を含む)と一致する。
+    # 旧schemaのrecord(本fieldが無い)は既定Noneで読める。
+    profit_taking_audit_log_id: str | None = None
     holding_decision_ran: bool = False
     holding_decision_result_id: str | None = None
     holding_decision_notified: bool = False
