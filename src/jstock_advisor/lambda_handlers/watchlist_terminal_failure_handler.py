@@ -26,7 +26,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     record_terminal_failure,
     resolve_watchlist_job_type,
 )
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -37,6 +37,9 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_execution_mode
+from jstock_advisor.lambda_handlers._watchlist_notification_prescan import (
+    sqs_records_require_notification_service,
+)
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.watchlist_batch_finalizer import (
@@ -51,7 +54,7 @@ logger.setLevel(logging.INFO)
 
 def _build_notification_service(config: AppConfig) -> LineNotificationService:
     return LineNotificationService(
-        line_client=build_line_client_from_env(),
+        line_client=build_live_line_client_from_env(),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
@@ -68,7 +71,17 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
-    notification_service = _build_notification_service(config)
+    # Issue #117: 通知サービスを使うのはNEW_CANDIDATE_SCREENINGのfinalizeだけ。認証情報欠落を
+    # 黙ってConsoleLineClientへ落とさず、状態変更(終端記録)より前に失敗させる。
+    # 終端記録の後に失敗すると、再配信では「既に終端」となりfinalizeが呼ばれない中途状態になる。
+    # job_type欠損時の既定は本処理(下のresolve_watchlist_job_type)と同じNEW_CANDIDATE_SCREENING。
+    notification_service = (
+        _build_notification_service(config)
+        if sqs_records_require_notification_service(
+            event, missing_job_type_default=WatchlistJobType.NEW_CANDIDATE_SCREENING
+        )
+        else None
+    )
 
     processed: list[dict[str, str]] = []
     for record in event.get("Records", []):
@@ -105,6 +118,12 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             if job_type is WatchlistJobType.WATCHLIST_MAINTENANCE:
                 maybe_finalize_maintenance(batch_id, now, config)
             else:
+                if notification_service is None:
+                    # prescanがNEW_CANDIDATE_SCREENINGを検出した場合は必ず構築済み。乖離したら
+                    # 通知が黙って欠落するのではなく、明示的に失敗させる。
+                    raise RuntimeError(
+                        "notification service was not built for a NEW_CANDIDATE message"
+                    )
                 maybe_finalize(batch_id, now, providers, config, notification_service)
         else:
             # 既に他の主体(Worker/Reconciler)が終端状態へ確定済み(冪等スキップ)。
