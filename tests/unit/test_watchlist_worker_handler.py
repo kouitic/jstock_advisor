@@ -35,7 +35,9 @@ def _sqs_event(body: dict[str, Any]) -> dict[str, Any]:
     return {"Records": [{"body": json.dumps(body)}]}
 
 
-def _patch_common(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
+def _patch_common(
+    monkeypatch: pytest.MonkeyPatch, *, patch_notification_service: bool = True
+) -> dict[str, list[Any]]:
     """job_type解決より後段の重い依存をすべてフェイク化する。呼び出しの
     記録用に各種callのリストを返す。"""
     monkeypatch.setattr(handler_module, "load_config", _fake_config)
@@ -43,9 +45,10 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     monkeypatch.setattr(
         handler_module, "build_cached_provider_bundle", lambda *a, **kw: object()
     )
-    monkeypatch.setattr(
-        handler_module, "_build_notification_service", lambda config: object()
-    )
+    if patch_notification_service:
+        monkeypatch.setattr(
+            handler_module, "_build_notification_service", lambda config: object()
+        )
     monkeypatch.setattr(
         handler_module, "claim_candidate_lease", lambda *a, **kw: True
     )
@@ -178,3 +181,108 @@ def test_worker_receives_maintenance_job_type_propagated_from_dispatcher(
 
     assert calls["evaluate_candidate"] == [WatchlistJobType.WATCHLIST_MAINTENANCE]
     assert len(calls["maybe_finalize_maintenance"]) == 1
+
+
+# --- Issue #117 Phase B1b-4a: 通知サービスの構築(認証情報)を状態変更より前に行う ---
+
+
+def _patch_order_recording(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """_build_notification_service と claim_candidate_lease の呼び出し順を記録する。"""
+    order: list[str] = []
+    _patch_common(monkeypatch)
+
+    def _build(config: Any) -> object:
+        order.append("build_notification_service")
+        return object()
+
+    def _claim(*a: Any, **kw: Any) -> bool:
+        order.append("claim_candidate_lease")
+        return True
+
+    monkeypatch.setattr(handler_module, "_build_notification_service", _build)
+    monkeypatch.setattr(handler_module, "claim_candidate_lease", _claim)
+    return order
+
+
+def test_new_candidate_builds_the_service_before_any_state_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = _patch_order_recording(monkeypatch)
+    event = _sqs_event(
+        {"batch_id": "batch-1", "stock_code": "1111", "job_type": "NEW_CANDIDATE_SCREENING"}
+    )
+
+    handler_module.handler(event, object())
+
+    assert order == ["build_notification_service", "claim_candidate_lease"]
+
+
+def test_maintenance_only_call_does_not_build_the_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """通知に使わないMAINTENANCEの呼び出しが、LINE認証情報の欠落で新たに失敗しない。"""
+    order = _patch_order_recording(monkeypatch)
+    event = _sqs_event(
+        {"batch_id": "watchlist-maint-1", "stock_code": "1111", "job_type": "WATCHLIST_MAINTENANCE"}
+    )
+
+    handler_module.handler(event, object())
+
+    assert order == ["claim_candidate_lease"]
+
+
+def test_new_candidate_fails_before_state_change_when_line_credentials_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """構築関数を差し替えない実分岐。認証情報が無ければConsoleLineClientへ黙って落ちず、
+    リース取得(状態変更)の前にLineCredentialsMissingErrorで失敗する。"""
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    _patch_common(monkeypatch, patch_notification_service=False)
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+
+    def _claim_must_not_run(*a: Any, **kw: Any) -> bool:
+        pytest.fail("claim_candidate_lease must not run before the notification service is built")
+
+    monkeypatch.setattr(handler_module, "claim_candidate_lease", _claim_must_not_run)
+    event = _sqs_event(
+        {"batch_id": "batch-1", "stock_code": "1111", "job_type": "NEW_CANDIDATE_SCREENING"}
+    )
+
+    with pytest.raises(LineCredentialsMissingError):
+        handler_module.handler(event, object())
+
+
+def test_maintenance_call_runs_without_line_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """認証情報が無くてもMAINTENANCEは通常どおり完了する(構築しないため)。"""
+    calls = _patch_common(monkeypatch, patch_notification_service=False)
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+    event = _sqs_event(
+        {"batch_id": "watchlist-maint-1", "stock_code": "1111", "job_type": "WATCHLIST_MAINTENANCE"}
+    )
+
+    result = handler_module.handler(event, object())
+
+    assert len(calls["maybe_finalize_maintenance"]) == 1
+    assert result["processed"][0]["completed"] is True
+
+
+def test_new_candidate_with_credentials_builds_a_live_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """認証情報があれば、通知サービスへ渡るclientはConsoleLineClientではなくLiveLineClient。"""
+    from jstock_advisor.infrastructure.line.client import LiveLineClient
+
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("LINE_USER_ID", "test-user")
+    service = handler_module._build_notification_service(_real_config())
+
+    assert isinstance(service._client, LiveLineClient)
+
+
+def _real_config() -> Any:
+    from jstock_advisor.config.loader import load_config
+
+    return load_config()
