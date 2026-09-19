@@ -14,7 +14,7 @@ import os
 from typing import Any
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
 from jstock_advisor.services.weekly_improvement_review_service import (
     WeeklyImprovementReviewService,
 )
@@ -38,9 +38,13 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     owner, repo = _split_github_repository()
+    # Issue #117: LINE認証情報の欠落は、集計・メトリクス保存・候補検出(service.run)の前に
+    # 失敗させる(fail-early)。serviceはline_clientがあるときだけ送信するが、送信時に失敗させる
+    # 方式にすると、候補を保存した後に失敗し、再実行時は「既存候補」(is_newが立たない)となって
+    # 通知が永久に失われうる。mode(VALIDATION/DRY_RUN)の概念を持たないため、strict版を直接使う。
     service = WeeklyImprovementReviewService(
         config=config,
-        line_client=build_line_client_from_env(),
+        line_client=build_live_line_client_from_env(),
         github_repo_owner=owner,
         github_repo_name=repo,
         github_secret_arn=os.environ.get("GITHUB_APP_SECRET_ARN"),
