@@ -67,6 +67,7 @@ pythonpath = ["src"]
 # ここと registry の食い違いは tests/unit/test_issue_277_cohort_markers.py が検出する。
 markers = [
   "cohort_holding_decision_runtime_config: holding_decision_runtime_config_service の module-global state を共有する cohort(Issue #148 / #145)",
+  "cohort_market_holiday_gate: 東証休場日gate(_market_holiday)の既定中和fixtureを共有するcohort(Issue #440 / #145)",
   "cohort_market_session: 市場セッションの日付 semantics と mock provider の系列を共有する cohort(Issue #52 / #143)",
   "cohort_solo_recommendation_evaluation_v2_cutover: 営業日ホライズンday-zero(v1/v2)切替のsolo cohort(Issue #389 / #145)",
   "cohort_solo_calibration_dataset_v2_cutover: calibration datasetのv1/v2切替のsolo cohort(Issue #389 / #145)",
