@@ -177,7 +177,8 @@ def evaluate_safety_conditions(
         if facts.profit_taking_mitigation is None:
             not_evaluated.append("G3")
         else:
-            for name in config.g3_required_inputs:
+            # 設定側でも重複は弾くが、評価側でも除去する(件数の水増しを構造的に防ぐ。G4と同じ扱い)
+            for name in dict.fromkeys(config.g3_required_inputs):
                 if _g3_value(facts.profit_taking_mitigation, name) is None:
                     findings.append(SafetyFinding("G3", f"{REASON_REQUIRED_INPUT_MISSING}:{name}"))
 

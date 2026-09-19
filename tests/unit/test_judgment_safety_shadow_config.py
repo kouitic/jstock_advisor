@@ -186,3 +186,18 @@ def test_app_config_is_unchanged_and_does_not_carry_the_shadow_block() -> None:
     cfg = load_config()
 
     assert not hasattr(cfg, "judgment_safety_shadow")
+
+
+def test_duplicate_g3_inputs_are_rejected_and_fall_back_to_off(tmp_path: Path) -> None:
+    text = (
+        'mode: "SHADOW"\n'
+        "g3_required_inputs:\n"
+        "  - continuous_dividend_increase_years\n"
+        "  - continuous_dividend_increase_years\n"
+    )
+
+    with pytest.raises(ValueError, match="duplicates"):
+        JudgmentSafetyShadowConfig.model_validate(
+            {"mode": "SHADOW", "g3_required_inputs": ["is_progressive_or_doe_policy"] * 2}
+        )
+    assert load_judgment_safety_shadow_config(_write(tmp_path, text)) == off_config()

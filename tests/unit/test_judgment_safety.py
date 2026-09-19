@@ -392,3 +392,45 @@ def test_the_module_is_not_wired_into_the_production_call_graph() -> None:
     ]
 
     assert referrers == []
+
+
+def test_g3_duplicate_config_inputs_never_inflate_the_count() -> None:
+    """同じ項目が複数回書かれても、G3の件数は変わらない(評価側の防御。設定側でも弾く)。"""
+    cfg = JudgmentSafetyShadowConfig.model_construct(  # 検証を迂回して重複を注入する
+        version=1,
+        mode=ShadowMode.SHADOW,
+        g3_required_inputs=(
+            "continuous_dividend_increase_years",
+            "continuous_dividend_increase_years",
+            "is_progressive_or_doe_policy",
+        ),
+    )
+    facts = SafetyFacts(profit_taking_mitigation=ProfitTakingMitigationFacts(None, None))
+
+    result = evaluate_safety_conditions(_full_take(), facts, cfg)
+
+    assert [f.reason_code for f in result.findings] == [_YEARS, _POLICY]
+
+
+def test_every_finding_is_suppressible_by_default() -> None:
+    """would_suppressの既定値(True)を固定する。
+
+    「将来のenforcementで抑止対象になるか」を表す値であり、既定が静かにFalseへ反転すると、
+    shadow集計で「抑止されうる件数」が0として観測される。全条件がvalidator型(抑止対象)である。
+    """
+    rec = _rec(
+        recommendation_type=RecommendationType.FULL_PROFIT_TAKE,
+        buy_action=BuyAction.BUY,
+        earnings_date_status=EarningsDateStatus.UNAVAILABLE,
+    )
+    facts = SafetyFacts(
+        financials_are_stale=True,
+        profit_taking_mitigation=ProfitTakingMitigationFacts(None, None),
+        corporate_action=CorporateActionFacts("EVALUATED", ("SPLIT",)),
+    )
+
+    findings = evaluate_safety_conditions(rec, facts, _CFG).findings
+
+    assert {f.condition_id for f in findings} == {"G1", "G2", "G3", "G4"}
+    assert all(f.would_suppress is True for f in findings)
+    assert SafetyFinding("G1", "X").would_suppress is True
