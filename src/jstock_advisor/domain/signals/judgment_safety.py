@@ -106,8 +106,8 @@ class SafetyFacts:
     Noneは「供給されていない」を意味し、該当なしとは区別する(not_evaluatedになる)。
     """
 
-    #: 財務データが古いか(BUY側。`buy_signal_service`のfinancial_freshnessから供給)。
-    financial_freshness_stale: bool | None = None
+    #: 財務データが古いか(BUY側。BUYの財務鮮度判定(STALE)から供給)。
+    financials_are_stale: bool | None = None
     profit_taking_mitigation: ProfitTakingMitigationFacts | None = None
     corporate_action: CorporateActionFacts | None = None
 
@@ -167,9 +167,9 @@ def evaluate_safety_conditions(
 
     # G2: BUYの強い判定で財務が古い(BUYのみ)
     if is_strong_buy_side(recommendation):
-        if facts.financial_freshness_stale is None:
+        if facts.financials_are_stale is None:
             not_evaluated.append("G2")
-        elif facts.financial_freshness_stale:
+        elif facts.financials_are_stale:
             findings.append(SafetyFinding("G2", REASON_STALE_FINANCIALS))
 
     # G3: 利確FULLで、測定可能な必須入力のいずれかがUNKNOWN

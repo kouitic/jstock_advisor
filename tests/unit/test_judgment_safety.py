@@ -147,7 +147,7 @@ def test_g1_non_strong_buy_actions_are_out_of_scope(action: BuyAction) -> None:
 def test_sell_side_and_other_types_are_never_flagged_q_b(rtype: RecommendationType) -> None:
     """SELL/URGENT等へは拡張しない(USER決定 Q-B)。全factsが最悪でも該当しない。"""
     facts = SafetyFacts(
-        financial_freshness_stale=True,
+        financials_are_stale=True,
         profit_taking_mitigation=ProfitTakingMitigationFacts(None, None),
         corporate_action=CorporateActionFacts("EVALUATED", ("SPLIT", "REVERSE_SPLIT")),
     )
@@ -165,11 +165,11 @@ def test_sell_side_and_other_types_are_never_flagged_q_b(rtype: RecommendationTy
 
 
 def test_g2_stale_financials_on_buy_is_flagged() -> None:
-    assert _codes(_buy(), SafetyFacts(financial_freshness_stale=True)) == ["STALE_FINANCIALS"]
+    assert _codes(_buy(), SafetyFacts(financials_are_stale=True)) == ["STALE_FINANCIALS"]
 
 
 def test_g2_fresh_financials_are_not_flagged() -> None:
-    result = evaluate_safety_conditions(_buy(), SafetyFacts(financial_freshness_stale=False), _CFG)
+    result = evaluate_safety_conditions(_buy(), SafetyFacts(financials_are_stale=False), _CFG)
 
     assert result.findings == ()
     assert "G2" not in result.not_evaluated
@@ -182,7 +182,7 @@ def test_g2_unsupplied_fact_is_not_evaluated() -> None:
 def test_g2_does_not_apply_to_profit_taking_q_d() -> None:
     """利確ではsafety conditionとして再使用しない(既存のconfidence減点/HIGH禁止で消費済み)。"""
     result = evaluate_safety_conditions(
-        _full_take(), SafetyFacts(financial_freshness_stale=True), _CFG
+        _full_take(), SafetyFacts(financials_are_stale=True), _CFG
     )
 
     assert "STALE_FINANCIALS" not in [f.reason_code for f in result.findings]
@@ -328,7 +328,7 @@ def test_findings_are_frozen_and_carry_only_condition_id_and_reason_code() -> No
 def test_evaluation_contains_no_identifier_or_price_even_when_findings_exist() -> None:
     rec = _rec(buy_action=BuyAction.BUY, earnings_date_status=EarningsDateStatus.UNAVAILABLE)
     facts = SafetyFacts(
-        financial_freshness_stale=True,
+        financials_are_stale=True,
         corporate_action=CorporateActionFacts("EVALUATED", ("SPLIT",)),
     )
 
@@ -344,7 +344,7 @@ def test_evaluation_contains_no_identifier_or_price_even_when_findings_exist() -
 def test_evaluation_is_deterministic_and_does_not_mutate_inputs() -> None:
     rec = _buy(EarningsDateStatus.UNAVAILABLE)
     facts = SafetyFacts(
-        financial_freshness_stale=True,
+        financials_are_stale=True,
         corporate_action=CorporateActionFacts("EVALUATED", ("REVERSE_SPLIT", "SPLIT")),
     )
     rec_before, facts_before = rec.model_dump(), copy.deepcopy(facts)
