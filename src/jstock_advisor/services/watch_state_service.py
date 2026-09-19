@@ -37,8 +37,11 @@ from jstock_advisor.infrastructure.local_repository.watch_state_repository impor
 
 logger = logging.getLogger(__name__)
 # Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
-# module が宣言しないと INFO は出ない)。この module は owner・holding_id を受け取らない
-# (watch_id = 銘柄コード:監視種別)。出力する値に、状態の中身(価格・距離)を含めない。
+# module が宣言しないと INFO は出ない)。出力するのは watch_id(= 銘柄コード:監視種別)と
+# 終了理由だけで、状態の中身(価格・距離)は出さない。
+# ★ end_for_trade_events() は TradeEvent(owner・holding_id・保有数量・取得単価を持つ)を
+#   受け取るが、この module が読むのは stock_code だけである(テストが AST で固定している)。
+#   TradeEvent の他の値は、ログにも、判定にも使わないこと。
 # 有効化の時点の PII 確認は PR に記録した。
 logger.setLevel(logging.INFO)
 
