@@ -64,8 +64,11 @@ contract 8.6.2節は、RECEIPT 作成後の状態遷移を「RECEIPT を編集�
     REQUEST_ID    = <対応する REQUEST_ID>
     RECEIPT_STATE = <EXECUTING | CONSUMED | EXPIRED | REVOKED | INVALIDATED_BY_TARGET_CHANGE>
 
-同じ REQUEST_ID を本文に含むが、要求・受領証・上の形のいずれとしても解釈できない comment が
-ある場合は、状態を判定できないため UNKNOWN とする(記録の書式の違いを PASS にしない)。
+同じ REQUEST_ID を本文に含む**行**が、その REQUEST_ID を持つ記録(要求・受領証・上の形)の一部として
+解釈できない場合は(判定は comment 単位ではなく行単位。同じ comment に別の正常な記録があっても、
+解釈できない言及は見逃さない。REQUEST_ID の誤記された遷移記録に、地の文で正しい ID が書かれている
+場合を含む)、状態を判定できないため UNKNOWN とする(記録の書式の違いを PASS にしない)。
+副作用として、地の文で REQUEST_ID に言及しただけの行があっても UNKNOWN になる(fail-close の側)。
 
 ## 依存
 
@@ -202,11 +205,24 @@ NOT_IMPLEMENTED = {
         "SKIPPED(未定義): v3 §6(b) の検査項目だが、内容が #332 に定義されていない。"
         "TODO: 定義された時点で別の変更として実装する"
     ),
+    "ACTUAL_TARGET_STATE_AT_REQUEST_TIME": (
+        "SKIPPED(未取得): TARGET_MATCHES_AT_REQUEST_TIME は、要求と受領証の記録同士の"
+        "一致だけを見ている。"
+        "依頼時点の実際の対象の状態は取得・参照していない"
+    ),
     "VALID_UNTIL_TTL_CAP": (
         "SKIPPED(未決定): 標準の TTL より長い VALID_UNTIL を許すかが未決定(USER の決定を要する)。"
         "TODO: 決定後に実装する。現状は VALID_UNTIL の経過だけを検査する"
     ),
 }
+
+
+def _not_checked_items() -> list[dict[str, str]]:
+    """検査しなかった項目(常に結果へ明示する。取得に失敗した報告にも含める)。"""
+    return [
+        {"id": cid, "reason": reason}
+        for cid, reason in {**NOT_MECHANICALLY_CHECKABLE, **NOT_IMPLEMENTED}.items()
+    ]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,6 +241,8 @@ class Block:
     fields: dict[str, str]
     comment: Comment
     duplicate_keys: tuple[str, ...] = ()
+    # comment 本文の行番号(0 始まり)のうち、この block が占める行(ヘッダ行 + `KEY = value` の行)
+    line_indexes: frozenset[int] = frozenset()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -288,6 +306,7 @@ def parse_blocks(comment: Comment) -> list[Block]:
             continue
         fields: dict[str, str] = {}
         duplicates: list[str] = []
+        occupied = {index}
         index += 1
         while index < len(lines):
             match = _KEY_VALUE.match(lines[index].strip())
@@ -297,8 +316,9 @@ def parse_blocks(comment: Comment) -> list[Block]:
             if key in fields:
                 duplicates.append(key)
             fields[key] = value
+            occupied.add(index)
             index += 1
-        blocks.append(Block(kind, fields, comment, tuple(duplicates)))
+        blocks.append(Block(kind, fields, comment, tuple(duplicates), frozenset(occupied)))
     return blocks
 
 
@@ -320,6 +340,28 @@ def _result_of(checks: list[Check]) -> str:
     if UNKNOWN in results or not checks:
         return UNKNOWN
     return PASS
+
+
+def _uninterpretable_mentions(
+    comments: list[Comment], blocks: list[Block], request_id: str
+) -> list[tuple[int, int]]:
+    """REQUEST_ID を含むが、**その REQUEST_ID を持つ記録**(block)の一部として解釈できない行。
+
+    判定は comment 単位ではなく**行(記録)単位**である。同じ comment に別の REQUEST_ID の正常な
+    block や、この REQUEST_ID の別の block が含まれていても、その comment 内の解釈できない言及
+    (状態遷移の記録の誤記・書式違い・地の文)は見逃さない(Issue #332 PR #431 のレビュー指摘 F1)。
+    (comment_id, 行番号(0 始まり))を返す。
+    """
+    covered: dict[int, set[int]] = {}
+    for block in blocks:
+        if block.fields.get("REQUEST_ID") == request_id:
+            covered.setdefault(block.comment.comment_id, set()).update(block.line_indexes)
+    found: list[tuple[int, int]] = []
+    for comment in comments:
+        for line_number, line in enumerate(comment.body.splitlines()):
+            if request_id in line and line_number not in covered.get(comment.comment_id, set()):
+                found.append((comment.comment_id, line_number))
+    return found
 
 
 def evaluate(
@@ -495,7 +537,8 @@ def evaluate(
         add(
             "TARGET_MATCHES_AT_REQUEST_TIME",
             PASS if same else FAIL,
-            "受領証の対象・版が、依頼時点(要求)の対象・版と一致"
+            "受領証の対象・版が、要求の対象・版と一致(記録同士の比較のみ。"
+            "依頼時点の実際の対象の状態は参照していない)"
             if same
             else "受領証の対象・版が、依頼時点(要求)の対象・版と一致しない",
         )
@@ -533,10 +576,7 @@ def evaluate(
         add("NOT_EXPIRED", PASS, "VALID_UNTIL 以内")
 
     # --- 状態遷移の追記記録 ------------------------------------------------------------------
-    recognized_ids = {b.comment.comment_id for b in all_blocks}
-    unreadable = [
-        c for c in comments if request_id in c.body and c.comment_id not in recognized_ids
-    ]
+    unreadable = _uninterpretable_mentions(comments, all_blocks, request_id)
     transition_states = [t.fields.get("RECEIPT_STATE", "") for t in transitions]
     invalid_states = [s for s in transition_states if s not in TRANSITION_STATES]
     for state, condition in _CONDITION_BROKEN_BY_TRANSITION.items():
@@ -556,9 +596,9 @@ def evaluate(
             add(
                 condition,
                 UNKNOWN,
-                "同じ REQUEST_ID を含むが解釈できない comment がある"
-                "(状態遷移の記録の書式が違う可能性): "
-                + ", ".join(str(c.comment_id) for c in unreadable),
+                "同じ REQUEST_ID を含むが、その REQUEST_ID を持つ記録として解釈できない行がある"
+                "(状態遷移の記録の書式・REQUEST_ID の誤記の可能性): "
+                + ", ".join(f"comment {cid} の {line + 1} 行目" for cid, line in unreadable),
             )
         elif request is None:
             add(condition, UNKNOWN, "要求が無いため判定できない")
@@ -566,10 +606,7 @@ def evaluate(
             add(condition, PASS, "状態遷移の記録なし(認識できる書式の範囲)")
 
     checked_ids = {c.check_id for c in checks}
-    not_checked = [
-        {"id": cid, "reason": reason}
-        for cid, reason in {**NOT_MECHANICALLY_CHECKABLE, **NOT_IMPLEMENTED}.items()
-    ]
+    not_checked = _not_checked_items()
     # 17 条件は checks か not_checked のどちらかに現れる(黙って省略しない)。
     missing = [
         c
@@ -685,7 +722,7 @@ def check(
                     Check("READ_COMMENTS", UNKNOWN, f"comment を取得できない: {exc}")
                 )
             ],
-            "not_checked": [],
+            "not_checked": _not_checked_items(),
             "disclaimer": DISCLAIMER,
         }
     try:
@@ -734,7 +771,7 @@ def main(argv: list[str] | None = None) -> int:
                     Check("READ_REPOSITORY", UNKNOWN, f"repository を特定できない: {exc}")
                 )
             ],
-            "not_checked": [],
+            "not_checked": _not_checked_items(),
             "disclaimer": DISCLAIMER,
         }
     else:

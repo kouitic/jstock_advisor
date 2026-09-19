@@ -331,6 +331,38 @@ def test_transition_record_with_an_invalid_state_is_unknown() -> None:
     assert _evaluate(comments)["result"] == pf.UNKNOWN
 
 
+def test_uninterpretable_mention_is_judged_per_record_not_per_comment() -> None:
+    """PR #431 F1: 同じ comment に別の REQUEST_ID の正常な block があっても、
+    この REQUEST_ID の解釈できない言及(消費済みの報告など)を見逃さない。"""
+    other_request = _request_body(REQUEST_ID="OTHER-REQUEST-ID")
+    prose = f"この承認 {_REQUEST_ID} は実行済みです。CONSUMED。"
+    mixed = prose + "\n\n" + other_request
+    comments = _valid_comments() + [_comment(3, mixed, "2026-01-01T00:20:00+00:00")]
+
+    report = _evaluate(comments)
+
+    assert report["result"] == pf.UNKNOWN
+    assert _by_id(report)["NOT_CONSUMED"]["result"] == pf.UNKNOWN
+
+
+def test_misspelled_transition_record_with_the_correct_id_in_prose_is_unknown() -> None:
+    """PR #431 F1(最も現実的な形): 遷移記録の REQUEST_ID が誤記で、地の文には正しい ID がある。"""
+    typo = _transition_body("CONSUMED", request_id=_REQUEST_ID[:-1] + "X")
+    body = f"承認 {_REQUEST_ID} を使いました。" + "\n\n" + typo
+    comments = _valid_comments() + [_comment(3, body, "2026-01-01T00:20:00+00:00")]
+
+    report = _evaluate(comments)
+
+    assert report["result"] == pf.UNKNOWN
+    assert _by_id(report)["NOT_CONSUMED"]["result"] == pf.UNKNOWN
+    assert "行目" in _by_id(report)["NOT_CONSUMED"]["detail"]
+
+
+def test_valid_records_are_covered_even_when_their_comment_has_extra_prose() -> None:
+    """この REQUEST_ID を持つ記録の行は解釈済みとして数える(要求・受領証で UNKNOWN にならない)。"""
+    assert _evaluate(_valid_comments())["result"] == pf.PASS
+
+
 def test_unrelated_comments_do_not_affect_the_result() -> None:
     comments = _valid_comments() + [
         _comment(3, "レビューコメントです。REQUEST_ID の話ではない。", "2026-01-01T00:20:00+00:00"),
@@ -452,6 +484,68 @@ def test_now_reader_uses_the_github_date_header() -> None:
 def test_now_reader_without_a_date_header_raises() -> None:
     with pytest.raises(pf.ReadError):
         pf.make_now_reader(lambda args: "HTTP/2.0 200 OK\n")()
+
+
+def test_not_checked_is_always_reported_even_when_reading_fails() -> None:
+    """PR #431 F2: 取得に失敗した報告でも、検査しなかった項目を常に明示する。"""
+
+    def failing_reader(number: int) -> list[pf.Comment]:
+        raise pf.ReadError("network down")
+
+    report = pf.check(
+        request_id=_REQUEST_ID,
+        source=1,
+        expected=_EXPECTED,
+        read_comments=failing_reader,
+        read_now=lambda: _NOW,
+    )
+
+    assert report["result"] == pf.UNKNOWN
+    assert {n["id"] for n in report["not_checked"]} >= {
+        "USER_DIRECT_TURN",
+        "EXPLICIT_APPROVAL_INTENT",
+        "MANAGER_SCOPE_CHECK",
+        "VALID_UNTIL_TTL_CAP",
+    }
+
+
+def test_not_checked_is_reported_when_the_repository_cannot_be_resolved(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PR #431 F2: repository を特定できない報告でも、検査しなかった項目を明示する。"""
+
+    def failing_detect(*args: object, **kwargs: object) -> str:
+        raise pf.ReadError("gh not found")
+
+    monkeypatch.setattr(pf, "_detect_repo", failing_detect)
+
+    code = pf.main(
+        [
+            "--request-id", _REQUEST_ID,
+            "--source", "1",
+            "--gate-type", _EXPECTED.gate_type,
+            "--scope", _EXPECTED.scope,
+            "--executor", _EXPECTED.executor,
+            "--target-identity", _EXPECTED.target_identity,
+            "--target-version", _EXPECTED.target_version,
+        ]
+    )  # fmt: skip
+
+    out = capsys.readouterr().out
+    assert code == pf.EXIT_UNKNOWN
+    assert "USER_DIRECT_TURN" in out
+    assert "MANAGER_SCOPE_CHECK" in out
+
+
+def test_target_state_at_request_time_is_disclosed_as_not_fetched() -> None:
+    """PR #431 F3: TARGET_MATCHES_AT_REQUEST_TIME は記録同士の一致だけを見ており、
+    依頼時点の実際の対象の状態は参照していない。PASS を「対象を確かめた」と読ませない。"""
+    report = _evaluate(_valid_comments())
+
+    reasons = {n["id"]: n["reason"] for n in report["not_checked"]}
+    assert "ACTUAL_TARGET_STATE_AT_REQUEST_TIME" in reasons
+    assert "実際の対象" in reasons["ACTUAL_TARGET_STATE_AT_REQUEST_TIME"]
+    assert "記録同士" in _by_id(report)["TARGET_MATCHES_AT_REQUEST_TIME"]["detail"]
 
 
 # --- exit code の三値 ------------------------------------------------------------------------
