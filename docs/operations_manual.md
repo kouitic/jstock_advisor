@@ -2869,7 +2869,23 @@ aws dynamodb get-item --table-name jstock-batch_runs \
   --expression-attribute-names '{"#st":"status","#tot":"total","#tt":"ttl"}' --output json
 ```
 
-- ★ **読む属性は上のとおりに限定する(ProjectionExpression)**。同じ項目の `failed_stock_codes` / `data_insufficient_stock_codes` には、holdings では `holding_id`(所有者を含む)が入る。**これらを読まない・出力しない・記録に書かない**(個人情報の露出を避ける。CLAUDE.md の個人情報の規則)。
+- ★ **読む属性は上のとおりに限定する(ProjectionExpression。許可リスト方式)**。同じ項目には、銘柄コード・holding_id(所有者を含む)・評価額を含みうる集合の属性が保存されている。**これらを読まない・出力しない・記録に書かない**(個人情報の露出を避ける。CLAUDE.md の個人情報の規則)。**項目に保存されている実際の属性名**は次のとおりである(`batch_tracker.py` の集計の読み出し。一部は Python 側の `BatchProgress` の field 名〔例: `failed_stock_codes`〕と異なる)。
+```
+項目に保存されている属性名(読まない)                  中身
+failed_codes                                          失敗した対象の識別子(buy = 銘柄コード / holdings = holding_id)
+data_insufficient_codes                               データ不足の対象の識別子(同上)
+completed_codes                                       完了報告された識別子(同上)
+attention_detected_stock_codes / attention_sent_stock_codes / evaluation_record_saved_stock_codes
+                                                      銘柄コード(holdings では holding_id)の集合
+notification_categories / detected_categories         「種別|識別子」形式の文字列の集合
+ranking_entries / near_buy_ranking_entries / watch_end_ranking_entries
+                                                      「スコア|銘柄コード|…」形式の文字列の集合
+sector_entries                                        「業種|評価額|銘柄コード」形式の文字列の集合(全保有銘柄)
+validation_recommendation_ids                         検証用の recommendation_id の集合
+```
+
+- ★ 一覧は、`batch_tracker.py` の読み出しで確認できた集合の属性である。**一覧に無い属性も、許可リストに無ければ読まない**(許可リストが安全の根拠であり、この一覧は「なぜ限定するか」を示す例)。
+- holdings では、識別子の引数に `holding_id`(= 所有者 + `#` + 銘柄コード)が渡される(`batch_tracker.py` の `BatchProgress` の docstring)。
 - `batch_id` の入手方法は、本節では定めない(Lambda のログに `batch_id=` として出る箇所があるが、正常系のすべての経路で出るとは確認していない)。**full scan で探さない**。分からなければ MANAGER へ確認する。
 - 出力が空(項目が無い)のときは、25.3 の「項目が無い」のとおりに読む(完了とも未完了とも判断しない)。
 - 検証: このコマンドの構文と観測用 role での `GetItem` の許可は、存在しない `batch_id` を指定して、エラーにならず空の応答になることを確認した(2026-09-20。実際の項目を読んだ確認ではない)。
