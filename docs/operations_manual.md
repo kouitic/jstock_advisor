@@ -2799,3 +2799,118 @@ watchlist-terminal-failure-dlq     直近 14 日の日次の最大値 = 0(デー
 async-invoke-failure-dlq           同 = 0(データ点 5 日分。キューの作成が比較的新しい)
 ```
 出典: Issue #349 issuecomment-5746509139。
+
+## 25. BUY / holdings バッチの完了判定の手順(Issue #344、2026-09-20追加)
+
+この節は、**買い候補(BUY)と保有銘柄(holdings)のバッチが完了したかどうかを、`batch_runs` から判定する手順**を定める。
+release 後の手動実行の完了確認など、`jstock-batch_runs` を読んで完了を判断するときに使う。
+
+### 25.1 なぜ必要か(★ 最初に読むこと)
+
+```
+BUY / holdings のバッチは、完了しても batch_runs の status が RUNNING のまま残る。
+これは欠陥ではなく設計である。status を見て「まだ実行中」「ハングした」と判断してはならない。
+```
+
+- `status` は、**ウォッチリスト自動追加(永続データを更新するバッチ)の finalize 排他制御のための field** であり、BUY / holdings にとっては適用対象外である(`batch_tracker.py` の `BatchFinalizeStatus` の docstring)。
+  BUY / holdings の項目は、作成時の既定値として `RUNNING` が入るだけで、以後 `status` は更新されない。
+- 2026-09-12 の release 検証(手動実行)で、`completed` が `total` に達し `failed` が 0 なのに `status` が `RUNNING` のままであるため、完了かハングかを判断できず、運用者の手が止まった。
+  このとき運用文書に記載が無く、実装を読んで初めて判断できた。
+- ★ 危険な側の失敗: `RUNNING` を見て「ハングした」と判断し、**再 invoke(本番の二重実行)を提案する**。実行されなくても(Human Gate がある)、提案の前提が誤っていること自体が危険である。
+
+### 25.2 完了判定の手順
+
+```
+1  status は見ない。BUY / holdings にとって対象外の field である。
+2  完了は completion_finalize_completed_at で判定する(この属性があれば、finalize は完了している)。
+3  種別は batch_family で識別する(BUY_CANDIDATES / HOLDINGS_WATCHLIST)。
+4  batch item は TTL 6 時間で消える。作成から 6 時間より後には、そもそも読めない(項目が無い = 完了していない、ではない)。
+5  watchlist 系(NEW_CANDIDATE_SCREENING / WATCHLIST_MAINTENANCE)は別である。
+   そちらは status の state machine が正本である(4.1 節)。本節の手順を当てはめない。
+```
+
+### 25.3 読み方
+
+読む属性(いずれも batch item の属性。項目は `batch_id` で 1 件だけ指定する):
+
+| 属性 | 意味 |
+|---|---|
+| `batch_family` | 種別。`BUY_CANDIDATES` または `HOLDINGS_WATCHLIST`。無い・未知の値なら、本節の対象ではない(判断しない) |
+| `total` / `completed` | 対象件数と、処理が終わった件数 |
+| `completion_finalize_completed_at` | **完了の判定に使う属性**。値があれば finalize 完了 |
+| `completion_finalize_started_at` | finalize の取得時刻 |
+| `completion_finalize_failed_at` | finalize の失敗時刻(捕捉できた失敗のみ) |
+| `completion_finalize_attempt_count` | finalize の試行回数 |
+| `ttl` | 項目が消える時刻(UNIX 秒) |
+| `status` | ★ 判断に使わない(既定値の `RUNNING` が残るだけ) |
+
+```
+completion_finalize_completed_at がある                 → 完了している(status が RUNNING でも)
+completion_finalize_completed_at が無く、started_at がある → finalize の処理中、または途中で止まった(失敗の記録があれば failed_at も見る)
+                                                          started_at から 20 分(1200 秒)以上経っていれば、毎時の reconciler が再駆動の候補として扱う(バッチ側の仕組み)
+completed < total                                        → 個別の処理がまだ終わっていない(finalize の前)
+項目が無い                                                → 作成から 6 時間より後(TTL で削除された)、または batch_id の誤り。★「完了していない」とは読まない
+```
+
+★ 1 つの属性だけで結論を出さない。`completed = total` でも `completion_finalize_completed_at` が無ければ、finalize が終わったとは言えない。
+逆に、`status` が `RUNNING` であることは、完了の否定にならない。
+
+### 25.4 確認の方法(read-only)
+
+観測用 role(`AWS_PROFILE=jstock-observer`。18節・24節と同じ)で、`batch_id` を指定して 1 件だけ読む(`GetItem`)。**スキャンはしない**。
+
+```bash
+# BATCH_ID を対象のバッチの batch_id へ置き換える。
+# (Git Bash では MSYS_NO_PATHCONV=1 を付ける。status / total / ttl は DynamoDB の予約語のため別名を使う)
+export AWS_PROFILE=jstock-observer AWS_DEFAULT_REGION=ap-northeast-1
+aws dynamodb get-item --table-name jstock-batch_runs \
+  --key "{\"batch_id\":{\"S\":\"$BATCH_ID\"}}" \
+  --projection-expression "batch_id,batch_family,#st,#tot,completed,completion_finalize_started_at,completion_finalize_completed_at,completion_finalize_failed_at,completion_finalize_attempt_count,#tt" \
+  --expression-attribute-names '{"#st":"status","#tot":"total","#tt":"ttl"}' --output json
+```
+
+- ★ **読む属性は上のとおりに限定する(ProjectionExpression。許可リスト方式)**。同じ項目には、銘柄コード・holding_id(所有者を含む)・評価額を含みうる集合の属性が保存されている。**これらを読まない・出力しない・記録に書かない**(個人情報の露出を避ける。CLAUDE.md の個人情報の規則)。**項目に保存されている実際の属性名**は次のとおりである(`batch_tracker.py` の集計の読み出し。一部は Python 側の `BatchProgress` の field 名〔例: `failed_stock_codes`〕と異なる)。
+```
+項目に保存されている属性名(読まない)                  中身
+failed_codes                                          失敗した対象の識別子(buy = 銘柄コード / holdings = holding_id)
+data_insufficient_codes                               データ不足の対象の識別子(同上)
+completed_codes                                       完了報告された識別子(同上)
+attention_detected_stock_codes / attention_sent_stock_codes / evaluation_record_saved_stock_codes
+                                                      銘柄コード(holdings では holding_id)の集合
+notification_categories / detected_categories         「種別|識別子」形式の文字列の集合
+ranking_entries / near_buy_ranking_entries / watch_end_ranking_entries
+                                                      「スコア|銘柄コード|…」形式の文字列の集合
+sector_entries                                        「業種|評価額|銘柄コード」形式の文字列の集合(全保有銘柄)
+validation_recommendation_ids                         検証用の recommendation_id の集合
+```
+
+- ★ 一覧は、`batch_tracker.py` の読み出しで確認できた集合の属性である。**一覧に無い属性も、許可リストに無ければ読まない**(許可リストが安全の根拠であり、この一覧は「なぜ限定するか」を示す例)。
+- holdings では、識別子の引数に `holding_id`(= 所有者 + `#` + 銘柄コード)が渡される(`batch_tracker.py` の `BatchProgress` の docstring)。
+- `batch_id` の入手方法は、本節では定めない(Lambda のログに `batch_id=` として出る箇所があるが、正常系のすべての経路で出るとは確認していない)。**full scan で探さない**。分からなければ MANAGER へ確認する。
+- 出力が空(項目が無い)のときは、25.3 の「項目が無い」のとおりに読む(完了とも未完了とも判断しない)。
+- 検証: このコマンドの構文と観測用 role での `GetItem` の許可は、存在しない `batch_id` を指定して、エラーにならず空の応答になることを確認した(2026-09-20。実際の項目を読んだ確認ではない)。
+
+### 25.5 「終端 status を入れる」案を採らない理由(★ この節を消さないこと)
+
+```
+finalize 時に、BUY / holdings の batch item へ終端の status を入れる案は採らない。
+これは Issue #31 の承認済み設計であり、本手順で覆さない。
+```
+
+理由(`batch_tracker.py` の記述):
+
+- watchlist パイプラインの `try_acquire_finalize()` / status の state machine とは、**意図的に統合しない**。
+  毎時の reconciler が `status` の値で scan・分岐しており、BUY / holdings の項目は `status = RUNNING` のままで、`started_at` 等を持たないことで無害に skip されている。この既存の前提を壊さないため。
+  そのため BUY / holdings には、専用の `completion_finalize_*` 属性だけを追加している。
+- あわせて、`status` を BUY / holdings から取り除く案も採らない。reconciler が completion recovery の候補を見つける手段が、この `status` による scan であり、取り除くと発見できなくなる。
+- 書かなければ、後から「終端 status を付ければ直る」と考えた担当が、承認済みの設計を壊す。
+
+### 25.6 したがって、やってはいけないこと
+
+```
+・batch_runs の status = RUNNING だけを根拠に、「ハングした」「未完了」と判断する
+・上の判断に基づいて、再 invoke(本番の二重実行)を提案する
+・BUY / holdings のバッチ項目へ、終端の status を入れるコード変更を提案・実施する(25.5)
+・完了の確認のために batch_runs を full scan する、または失敗銘柄・不足銘柄の属性(所有者を含みうる)を読み出す(25.4)
+・watchlist 系のバッチへ、本節の判定を当てはめる(4.1 節の status の state machine が正本)
+```
