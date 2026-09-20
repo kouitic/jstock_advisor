@@ -60,6 +60,10 @@ from jstock_advisor.domain.signals.timing_score import (
     timing_score_config_values,
     timing_score_result_to_metrics,
 )
+from jstock_advisor.services.financial_freshness_integration import (
+    FINANCIAL_STALE_USER_WARNING,
+    assess_financial_freshness,
+)
 from jstock_advisor.services.sell_price_recommendation_service import recommend_sell_prices
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot
 
@@ -163,6 +167,17 @@ def build_holding_decision_recommendation(
     )
 
     next_review_conditions = ["次回決算発表後に再評価する"]
+
+    # Issue #468(U17): 財務データが報告サイクル上の最新でない(STALE)場合の留意事項。
+    # 売却を促す理由(reasons)でも保有を支持する要因(counter_factors)でもないため、
+    # 混ぜず key_risks(留意事項)へ入れる(SELL・利確と同じ格納先)。文言は既存の共通定数。
+    # 判定は評価時(HoldingDecisionService)と同じ関数・同じ入力(評価時刻 = evaluated_at)。
+    # FRESH・UNKNOWNは空(空のままなら通知本文にも節を出さない)。
+    key_risks = (
+        [FINANCIAL_STALE_USER_WARNING]
+        if assess_financial_freshness(snapshot.financial, result.evaluated_at, config).is_stale
+        else []
+    )
 
     # Issue #384 PR-5: 記録専用(DecisionSnapshot/Recommendation記録用)の
     # *_to_metrics()整形がRecommendation構築のinline引数として本流に
@@ -272,6 +287,7 @@ def build_holding_decision_recommendation(
         fair_value_unusable_reason=fv_range.unusable_reason,
         reasons=reasons,
         counter_factors=counter_factors,
+        key_risks=key_risks,
         confidence=_CONFIDENCE_MAP.get(result.confidence, ConfidenceLevel.LOW),
         next_earnings_date=snapshot.next_earnings_date,
         # Issue #67 F-I4: 決算日は「日付」だけでは確度を復元できない。同じ

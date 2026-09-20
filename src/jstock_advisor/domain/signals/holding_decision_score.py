@@ -77,7 +77,17 @@ def combine_holding_decision(
     risk_deduction: RiskDeductionScore,
     hard_gate: HoldingDecisionHardGate,
     rules: HoldingDecisionRulesConfig,
+    *,
+    financial_stale: bool = False,
 ) -> HoldingDecisionOutcome:
+    """3スコアを合成し、判定区分・coverage・confidence・通知判定を返す。
+
+    financial_stale(Issue #468 / U17 = OPTION_B_CONFIDENCE_CAP): 判定に使った財務データが
+    報告サイクル上の最新でない(STALE)場合のみTrue。既定Falseは従来と完全に同じ結果を返す。
+    Trueのとき、confidenceは**HIGHを許可しない**(上限MEDIUM)。MEDIUM以下はそのまま。
+    score・component score・coverage・coverage gate・通知判定は一切変更しない
+    (STALEをcoverage不足・不評価へ変換しない。それを行うとOPTION_Cになる)。
+    """
     base_score = _clip(
         company_quality.score + investment_thesis.score - risk_deduction.score, -100.0, 100.0
     )
@@ -113,6 +123,12 @@ def combine_holding_decision(
         confidence == HoldingDecisionConfidenceLevel.HIGH
         and coverage.risk_deduction < rules.coverage_thresholds.risk_deduction_confidence_minimum
     ):
+        confidence = HoldingDecisionConfidenceLevel.MEDIUM
+    # Issue #468: 既存のcoverage由来の上限の**後**に適用する最終の上限。STALEなら
+    # HIGHを許可しない(HIGH→MEDIUMのみ。MEDIUM・LOW・INSUFFICIENT_EVIDENCEは不変)。
+    # confidenceはscore・coverage・通知判定のいずれの入力にもならないため、ここで
+    # 下げても下流へ波及しない。
+    if financial_stale and confidence == HoldingDecisionConfidenceLevel.HIGH:
         confidence = HoldingDecisionConfidenceLevel.MEDIUM
 
     coverage_satisfied = (
