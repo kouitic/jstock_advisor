@@ -2719,3 +2719,83 @@ worker・terminal_failureの連鎖(#430)でDLQに溜まったメッセージに�
 ```
 
 `REDRIVE_VERIFIED = YES` になるまでは、上記は「障害時の候補案」としてのみ扱う。
+
+## 24. DLQ の滞留の確認手順(Issue #349 ⑤、2026-09-20追加)
+
+この節は、SQS の DLQ(処理に失敗したメッセージが最終的に入るキュー)に**メッセージが溜まっていないかを、観測用 role で確認する手順**を定める。
+**確認するための手順であって、気づく仕組みではない**(24.1)。
+
+### 24.1 この手順の限界(★ 最初に読むこと)
+
+```
+・現在、DLQ にメッセージが入っても、誰にも通知されない(CloudWatch Alarm は SQS を見ておらず、発報先〔SNS 等〕も無い。Issue #349)。
+・DLQ のメッセージは 14 日で自動的に消える(MessageRetentionPeriod = 14 日)。
+・したがって、**この手順は「見に行った時点の状態を知る」ものであり、「見に行かなければ気づかない」**。
+  気づく仕組み(Alarm・通知・Issue の自動起票)の代替にならない。それらは Issue #349 ①・Issue #132 の担当である。
+・「誰が・いつ(どの頻度で)確認するか」は、本節では**決めていない**(未決定。Issue #349 ⑤ の残り)。
+```
+
+### 24.2 対象のキュー
+
+キューの名前は `jstock-advisor-<種別>`(スタック名が前置される)。
+
+```
+Production に現在ある DLQ
+  jstock-advisor-watchlist-terminal-failure-dlq     ウォッチリスト評価の終端失敗の DLQ
+  jstock-advisor-async-invoke-failure-dlq           BuyCandidates / HoldingsWatchlist の非同期 invoke の失敗(OnFailure の宛先)
+
+#396(#319 Phase 1)を含む反映の後に存在するキュー(反映前は無い。現時点でコードから参照されない)
+  jstock-advisor-buy-candidate-terminal-failure-dlq
+  jstock-advisor-holdings-watchlist-terminal-failure-dlq
+
+参考(DLQ ではない。作業用のキュー。滞留は通常の処理中の値であり、DLQ の滞留と混同しない)
+  jstock-advisor-watchlist-screening / jstock-advisor-watchlist-terminal-failure
+```
+
+### 24.3 確認の方法(read-only)
+
+観測用 role(`AWS_PROFILE=jstock-observer`。18節と同じ)で、CloudWatch の SQS メトリクス `ApproximateNumberOfMessagesVisible`(見えているメッセージの数)を、日次の最大値で読む。
+
+```bash
+# 直近 14 日の日次の最大値。QUEUE を対象のキューの名前へ置き換える。
+# (Git Bash では MSYS_NO_PATHCONV=1 を付ける)
+export AWS_PROFILE=jstock-observer AWS_DEFAULT_REGION=ap-northeast-1
+QUEUE=jstock-advisor-async-invoke-failure-dlq
+aws cloudwatch get-metric-statistics --namespace AWS/SQS --metric-name ApproximateNumberOfMessagesVisible \
+  --dimensions Name=QueueName,Value=$QUEUE \
+  --start-time "$(date -u -d '14 days ago' +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --period 86400 --statistics Maximum \
+  --query "sort_by(Datapoints,&Timestamp)[].[Timestamp,Maximum]" --output text
+```
+
+- **SQS の API(`ListQueues` / `GetQueueAttributes` 等)は、観測用 role に許可されていない**(AccessDenied を実測。権限を広げて回避しない)。したがって、キューの属性(実際の保持期間・redrive の設定)は、この手順では確認できない(`infra/template.yaml` の記載のみ)。
+- 古い滞留を知りたいときは、同じ形で `ApproximateAgeOfOldestMessage`(最も古いメッセージの経過秒数。Statistic = Maximum)を読む。
+
+### 24.4 結果の読み方
+
+```
+すべての日次の最大値が 0                          → その期間、見えているメッセージは無かった
+0 より大きい日がある                              → その日に DLQ にメッセージがあった(24.5 へ)
+データ点が無い日がある                            → ★ 「0 だった」ではなく「メトリクスが出なかった」。SQS のメトリクスは、キューに動きがあるときだけ出る。
+                                                    DLQ は通常 動かないため、データ点が飛ぶのは正常でありうる。ただし、「データ点が無い = 安全」と読んではならない
+                                                    (最新のデータ点の日付と、キューの作成日を確認する。作成が新しいキューは、データ点が少ない)
+コマンドがエラーになる                            → 「異常なし」ではなく「確認できなかった」。エラーを記録し、確認できたとは書かない
+```
+
+### 24.5 見つかったとき
+
+```
+・この手順は read-only である。**DLQ のメッセージの再処理(redrive)・削除・キューの purge は、Production の書き込みであり、Human Gate の対象**(docs/user_manager_collaboration_protocol.md)。
+  本節の範囲外であり、確認した者が実行してはならない。
+・記録して報告する(どのキューか / どの日か / 最大値 / 最古のメッセージの経過時間 / 確認した日時)。メッセージの内容は、この手順では読まない(読む方法も、許可されていない)。
+・MANAGER / USER へ報告し、対応(原因の調査・redrive の要否)の判断を仰ぐ。
+・14 日で消えるため、最古のメッセージの経過時間が 14 日に近い場合は、消える前に判断が要ることを、報告に含める。
+```
+
+### 24.6 実測の例(2026-09-20。参考値であり、保証ではない)
+
+```
+watchlist-terminal-failure-dlq     直近 14 日の日次の最大値 = 0(データ点 11 日分)
+async-invoke-failure-dlq           同 = 0(データ点 5 日分。キューの作成が比較的新しい)
+```
+出典: Issue #349 issuecomment-5746509139。
