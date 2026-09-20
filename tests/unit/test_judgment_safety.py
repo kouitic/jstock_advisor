@@ -496,7 +496,8 @@ def test_the_module_is_wired_only_into_the_facts_supply_of_buy_and_profit_taking
 
     PR-1は型と純関数だけで参照元0件だった。以降は、判定前の事実を`SafetyFacts`へ載せるため
     供給側が型だけをimportする(評価関数は呼ばない)。評価関数`evaluate_safety_conditions`を
-    呼ぶのはPR-3(handler合流点)以降である。
+    呼ぶのは、PR-3(#457)の`services/judgment_safety_shadow_service.py`だけである(handlerの
+    合流点から呼ばれ、shadowがOFFなら評価しない。handlerは評価関数を直接呼ばない)。
     """
     referrers = sorted(
         p.relative_to(_REPO_ROOT).as_posix()
@@ -511,9 +512,12 @@ def test_the_module_is_wired_only_into_the_facts_supply_of_buy_and_profit_taking
 
     assert referrers == [
         "src/jstock_advisor/services/buy_signal_service.py",
+        # PR-3(#457): shadowの評価と監査記録(handlerの合流点から呼ばれる。OFFなら何もしない)
+        "src/jstock_advisor/services/judgment_safety_shadow_service.py",
         "src/jstock_advisor/services/profit_taking_service.py",
     ]
-    assert callers == []  # 評価は本流から呼ばれない(挙動不変)
+    # 評価関数の呼び出し元は、shadowサービスのみ(handlerが直接呼ぶ経路は無い)。
+    assert callers == ["src/jstock_advisor/services/judgment_safety_shadow_service.py"]
 
 
 def test_g3_duplicate_config_inputs_never_inflate_the_count() -> None:

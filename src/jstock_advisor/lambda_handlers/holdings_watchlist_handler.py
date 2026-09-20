@@ -132,6 +132,10 @@ from jstock_advisor.services.holding_decision_runtime_config_service import (
     HoldingDecisionRuntimeConfigService,
 )
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
+from jstock_advisor.services.judgment_safety_shadow_service import (
+    ENGINE_HOLDINGS_PROFIT_TAKING,
+    observe_judgment_safety_shadow,
+)
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     NotificationOutcome,
@@ -1077,6 +1081,18 @@ def _analyze_one_holding(
                 pt_outcome.recommendation,
                 DecisionType.PROFIT_TAKING,
                 logger,
+            )
+            # Issue #160 / #457(PR-3): 判断の安全条件(G1〜G4)のshadow計測。**保存が完了した
+            # 後・通知の前**に置くため、Recommendation・DecisionSnapshot・通知・戻り値を
+            # 変えられない。
+            # shadowがOFF(既定)なら何もしない。SHADOWでも評価・記録の失敗は隔離される。
+            # VALIDATIONは上のifが既に除外している(shadowを実行しない)。
+            observe_judgment_safety_shadow(
+                pt_outcome.recommendation,
+                pt_outcome,
+                ENGINE_HOLDINGS_PROFIT_TAKING,
+                now,
+                execution_context=execution_context,
             )
         outcome = _send_or_suppress_notification(
             pt_outcome.recommendation, notification_enabled, notification_service, now

@@ -143,6 +143,10 @@ from jstock_advisor.lambda_handlers._market_holiday import (
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
+from jstock_advisor.services.judgment_safety_shadow_service import (
+    ENGINE_BUY_CANDIDATES,
+    observe_judgment_safety_shadow,
+)
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     notification_priority_for_recommendation,
@@ -906,6 +910,19 @@ def _process_single_candidate(
             if not execution_context.is_validation and is_new_recommendation:
                 save_decision_snapshot_safely(
                     DecisionSnapshotRepository(), final_recommendation, DecisionType.BUY, logger
+                )
+                # Issue #160 / #457(PR-3): 判断の安全条件(G1〜G4)のshadow計測。**保存が完了した
+                # 後**に置くため、Recommendation・DecisionSnapshot・通知・戻り値を変えられない。
+                # shadowがOFF(既定)なら何もしない。SHADOWでも評価・記録の失敗は隔離され、
+                # 例外は本流へ伝播しない(このtry全体が銘柄の判定結果を失うことを防ぐ)。
+                # VALIDATIONは上のifが既に除外している。
+                observe_judgment_safety_shadow(
+                    final_recommendation,
+                    outcome,
+                    ENGINE_BUY_CANDIDATES,
+                    now,
+                    execution_context=execution_context,
+                    audit_service=audit_service,
                 )
 
             # --- WATCH終了通知(コードレビュー対応2026-08、§3)。

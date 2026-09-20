@@ -1870,3 +1870,271 @@ def test_issue_362_holdings_child_audit_log_without_batch_id_is_explicit_none(
     message = _run_holdings_child_and_get_audit_log(monkeypatch, caplog, {})
 
     assert message.endswith(" batch_id=None")
+
+
+# ===== Issue #160 PR-3(#457): shadow ON/OFF golden(保有銘柄の利確の合流点) =====
+#
+# 不変条件: shadowが有効でも無効でも、返り値・保存されたRecommendation・DecisionSnapshot・通知・
+# 評価記録が完全に一致する。許可する差分は judgment_safety_shadow の監査記録のみ。
+
+_SHADOW_AUDIT_TYPE = "judgment_safety_shadow"
+
+
+class _HoldingsGoldenAudit:
+    def __init__(self, events: list[str], fail_shadow: bool) -> None:
+        self.records: list[dict[str, object]] = []
+        self._events = events
+        self._fail_shadow = fail_shadow
+
+    def record_if_absent(self, **kwargs: object) -> object | None:
+        self._events.append("shadow_recorded")
+        if self._fail_shadow:
+            raise PermissionError("AccessDenied(架空)")
+        self.records.append(dict(kwargs))
+        return object()
+
+
+class _HoldingsGoldenOutcome:
+    def __init__(self, recommendation: Recommendation, safety_facts: object) -> None:
+        self.recommendation = recommendation
+        self.stock_code = recommendation.stock_code
+        self.data_error = None
+        self.audit_id: str | None = None
+        self.safety_facts = safety_facts
+
+
+def _run_holding_shadow_golden(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    shadow_mode: str,
+    fail_shadow: bool = False,
+    validation: bool = False,
+    dry_run: bool = False,
+    recommendation_type: RecommendationType = RecommendationType.FULL_PROFIT_TAKE,
+) -> dict[str, object]:
+    from jstock_advisor.domain.signals.judgment_safety import (
+        ProfitTakingMitigationFacts,
+        SafetyFacts,
+    )
+    from jstock_advisor.domain.signals.judgment_safety_shadow_config import (
+        JudgmentSafetyShadowConfig,
+        ShadowMode,
+    )
+    from jstock_advisor.services import judgment_safety_shadow_service as shadow_module
+
+    events: list[str] = []
+    audit = _HoldingsGoldenAudit(events, fail_shadow)
+    _patch_common(monkeypatch)
+    target = _holding("2914")
+    monkeypatch.setattr(handler_module.HoldingRepository, "get", lambda self, holding_id: target)
+    monkeypatch.setattr(
+        handler_module,
+        "build_stock_snapshot",
+        lambda *a, **kw: (_FakeSnapshot(current_price=Decimal("1400")), None),
+    )
+    monkeypatch.setattr(
+        handler_module.SellSignalService, "analyze", lambda self, *a, **kw: _NoSignalOutcome()
+    )
+    recommendation = _recommendation_of_type(recommendation_type)
+    outcome = _HoldingsGoldenOutcome(
+        recommendation,
+        SafetyFacts(profit_taking_mitigation=ProfitTakingMitigationFacts(None, True)),
+    )
+    monkeypatch.setattr(
+        handler_module.ProfitTakingService, "analyze", lambda self, *a, **kw: outcome
+    )
+    saved: list[object] = []
+
+    class _GoldenRepo:
+        @classmethod
+        def for_execution_context(cls, *_a: object, **_kw: object) -> "_GoldenRepo":
+            return cls()
+
+        def save(self, rec: Recommendation) -> None:
+            events.append("recommendation_saved")
+            saved.append(rec.model_dump(mode="json"))
+
+    monkeypatch.setattr(handler_module, "RecommendationRepository", _GoldenRepo)
+    snapshots: list[object] = []
+
+    def _fake_save_snapshot(repo_, rec, decision_type, log):  # noqa: ANN001, ANN202
+        events.append("decision_snapshot_saved")
+        snapshots.append((rec.model_dump(mode="json"), decision_type))
+
+    monkeypatch.setattr(handler_module, "save_decision_snapshot_safely", _fake_save_snapshot)
+    notified: list[object] = []
+
+    class _GoldenNotification:
+        def notify_data_error(self, *a: object, **kw: object) -> bool:
+            return False
+
+        def notify_recommendation_with_status(
+            self, rec: Recommendation, now: dt.datetime
+        ) -> NotificationOutcome:
+            events.append("notified")
+            notified.append(rec.model_dump(mode="json"))
+            return NotificationOutcome(
+                status=NotificationStatus.SENT, sent=True, data_quality_blocked=False
+            )
+
+        def check_data_quality_eligibility(
+            self, rec: Recommendation, now: dt.datetime
+        ) -> NotificationEligibility:
+            return NotificationEligibility(eligible=True)
+
+    monkeypatch.setattr(
+        handler_module, "LineNotificationService", lambda **kw: _GoldenNotification()
+    )
+    monkeypatch.setattr(
+        handler_module.HoldingDecisionRuntimeConfigService,
+        "get_notification_enabled",
+        lambda self: True,
+    )
+    captured = _capture_record_result(monkeypatch)
+    monkeypatch.setattr(
+        shadow_module,
+        "load_judgment_safety_shadow_config",
+        lambda: JudgmentSafetyShadowConfig(mode=ShadowMode(shadow_mode)),
+    )
+    monkeypatch.setattr(shadow_module, "AuditService", lambda *a, **kw: audit)
+    event: dict[str, object] = {
+        "task": "holding",
+        "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
+        "batch_id": "test-batch-457",
+    }
+    if validation:
+        event["execution_mode"] = "VALIDATION"
+    if dry_run:
+        event["notification_mode"] = "DRY_RUN"
+    result = handler_module.handler(event, _FakeContext())
+    return {
+        "result": result,
+        "saved": saved,
+        "snapshots": snapshots,
+        "notified": notified,
+        "record_result": dict(captured),
+        "shadow_audits": [r for r in audit.records if r.get("decision_type") == _SHADOW_AUDIT_TYPE],
+        "events": events,
+    }
+
+
+_HOLDINGS_GOLDEN_KEYS = ("result", "saved", "snapshots", "notified", "record_result")
+
+
+def test_issue_457_holdings_shadow_on_and_off_are_identical_except_the_shadow_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """golden: 返り値・保存・DecisionSnapshot・通知・評価記録が、ON/OFFで完全一致する。"""
+    off = _run_holding_shadow_golden(monkeypatch, shadow_mode="OFF")
+    on = _run_holding_shadow_golden(monkeypatch, shadow_mode="SHADOW")
+
+    for key in _HOLDINGS_GOLDEN_KEYS:
+        assert on[key] == off[key], key
+    assert off["shadow_audits"] == []
+    assert len(on["shadow_audits"]) == 1
+
+
+def test_issue_457_holdings_shadow_record_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """記録は強い判定(FULL_PROFIT_TAKE)について1件。G3(緩和要因の不明)のfindingが付く。"""
+    on = _run_holding_shadow_golden(monkeypatch, shadow_mode="SHADOW")
+
+    (record,) = on["shadow_audits"]
+    assert record["audit_id"] == "judgment_safety_shadow:rec-1"
+    assert record["input_values"]["engine"] == "HOLDINGS_PROFIT_TAKING"
+    assert record["input_values"]["recommendation_type"] == "FULL_PROFIT_TAKE"
+    assert [f["reason_code"] for f in record["output_values"]["findings"]] == [
+        "REQUIRED_INPUT_MISSING:continuous_dividend_increase_years"
+    ]
+    # 保有情報(holding_id・owner)は記録に含めない。
+    assert build_holding_id(DEFAULT_OWNER, "2914") not in repr(record)
+    assert DEFAULT_OWNER not in repr(record["input_values"])
+
+
+def test_issue_457_holdings_shadow_is_recorded_after_the_saves_and_before_the_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """保存(Recommendation・DecisionSnapshot)が完了した後・通知の前に実行される。"""
+    on = _run_holding_shadow_golden(monkeypatch, shadow_mode="SHADOW")
+    off = _run_holding_shadow_golden(monkeypatch, shadow_mode="OFF")
+
+    assert on["events"] == [
+        "recommendation_saved",
+        "decision_snapshot_saved",
+        "shadow_recorded",
+        "notified",
+    ]
+    assert off["events"] == ["recommendation_saved", "decision_snapshot_saved", "notified"]
+
+
+def test_issue_457_holdings_shadow_record_failure_does_not_change_the_main_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """記録(AuditService)が失敗しても、返り値・保存・通知は変わらない。"""
+    off = _run_holding_shadow_golden(monkeypatch, shadow_mode="OFF")
+    failing = _run_holding_shadow_golden(monkeypatch, shadow_mode="SHADOW", fail_shadow=True)
+
+    for key in _HOLDINGS_GOLDEN_KEYS:
+        assert failing[key] == off[key], key
+    assert failing["shadow_audits"] == []
+
+
+def test_issue_457_holdings_shadow_evaluation_failure_does_not_change_the_main_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """評価関数が例外を出しても、本流(返り値・保存・通知)は変わらない。"""
+    from jstock_advisor.services import judgment_safety_shadow_service as shadow_module
+
+    off = _run_holding_shadow_golden(monkeypatch, shadow_mode="OFF")
+
+    def _boom(*_a: object, **_kw: object) -> None:
+        raise RuntimeError("評価の失敗(架空)")
+
+    monkeypatch.setattr(shadow_module, "evaluate_safety_conditions", _boom)
+    failing = _run_holding_shadow_golden(monkeypatch, shadow_mode="SHADOW")
+
+    for key in _HOLDINGS_GOLDEN_KEYS:
+        assert failing[key] == off[key], key
+    assert failing["shadow_audits"] == []
+
+
+def test_issue_457_holdings_shadow_is_not_recorded_in_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VALIDATION(NORMAL / DRY_RUN)では、shadowを有効にしても記録しない(既存のifが除外する)。"""
+    for dry_run in (False, True):
+        on = _run_holding_shadow_golden(
+            monkeypatch, shadow_mode="SHADOW", validation=True, dry_run=dry_run
+        )
+
+        assert on["shadow_audits"] == [], dry_run
+        assert "shadow_recorded" not in on["events"], dry_run
+
+
+def test_issue_457_holdings_non_strong_judgment_is_not_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """強い判定(FULL_PROFIT_TAKE)でなければ(PARTIAL等)、shadowを有効にしても記録しない。"""
+    on = _run_holding_shadow_golden(
+        monkeypatch,
+        shadow_mode="SHADOW",
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+    )
+
+    assert on["shadow_audits"] == []
+
+
+def test_issue_457_holdings_shadow_off_never_calls_the_evaluator_or_the_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OFF: 評価関数もAuditService.record_if_absentも、一度も呼ばれない(到達しないことの固定)。"""
+    from jstock_advisor.services import judgment_safety_shadow_service as shadow_module
+
+    def _must_not_run(*_a: object, **_kw: object) -> None:
+        raise AssertionError("shadow OFF なのに到達した")
+
+    monkeypatch.setattr(shadow_module, "evaluate_safety_conditions", _must_not_run)
+
+    off = _run_holding_shadow_golden(monkeypatch, shadow_mode="OFF")
+
+    assert off["shadow_audits"] == []
+    assert "shadow_recorded" not in off["events"]
