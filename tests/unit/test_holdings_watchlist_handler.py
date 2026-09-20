@@ -1771,3 +1771,102 @@ def test_dry_run_does_not_require_line_credentials(monkeypatch: pytest.MonkeyPat
         handler_module.handler(
             {"execution_mode": "VALIDATION", "notification_mode": "DRY_RUN"}, None
         )
+
+
+# ===== Issue #362: 子の正常系の終端ログへ batch_id を出す =====
+
+_BATCH_ID_362_HOLDINGS = "holdings-watchlist-20260920T230000Z-4567cdef"
+
+
+def _run_holdings_child_and_get_audit_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    event_extra: dict[str, object],
+) -> str:
+    _patch_common(monkeypatch)
+    _capture_record_result(monkeypatch)
+    holding = _holding("2914")
+    monkeypatch.setattr(
+        handler_module.HoldingRepository,
+        "get",
+        lambda self, holding_id: (
+            holding if holding_id == build_holding_id(DEFAULT_OWNER, "2914") else None
+        ),
+    )
+    monkeypatch.setattr(
+        handler_module, "build_stock_snapshot", lambda *a, **kw: (None, "テストエラー")
+    )
+
+    with caplog.at_level("INFO"):
+        handler_module.handler(
+            {
+                "task": "holding",
+                "holding_id": build_holding_id(DEFAULT_OWNER, "2914"),
+                **event_extra,
+            },
+            _FakeContext(),
+        )
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("holding_evaluation_audit:")
+    ]
+    assert len(lines) == 1
+    return lines[0]
+
+
+def test_issue_362_holdings_child_audit_log_carries_batch_id_at_the_end(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """子の正常系の終端ログ(holding_evaluation_audit)に batch_id が出る。
+
+    batch_id を含まないと、正常に終わった1件を、後から run へ結びつける手段がログに無い。
+    """
+    message = _run_holdings_child_and_get_audit_log(
+        monkeypatch, caplog, {"batch_id": _BATCH_ID_362_HOLDINGS}
+    )
+
+    assert message.endswith(f" batch_id={_BATCH_ID_362_HOLDINGS}")
+
+
+def test_issue_362_holdings_child_audit_log_keeps_the_existing_prefix_and_audit_position(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """既存の抽出手順(先頭のprefixと audit の位置)を壊さない: batch_id は末尾へ足すのみ。"""
+    message = _run_holdings_child_and_get_audit_log(
+        monkeypatch, caplog, {"batch_id": _BATCH_ID_362_HOLDINGS}
+    )
+
+    suffix = f" batch_id={_BATCH_ID_362_HOLDINGS}"
+    legacy_line = message[: -len(suffix)]
+    # 変更前は "holding_evaluation_audit: <audit>" だった。その形式で使っていた前方一致の
+    # 抽出が、同じ行を返す。
+    assert legacy_line.startswith("holding_evaluation_audit: HoldingEvaluationAudit(")
+    assert legacy_line.endswith(")")
+    assert message == legacy_line + suffix
+
+
+def test_issue_362_holdings_child_audit_log_does_not_leak_owner_or_holding_id(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """batch_id の追加で、owner・holding_id(= owner を含む)が新たにログへ出ない(#135 / #309)。
+
+    追加した項目は batch_id のみで、親が生成する識別子(時刻 + 乱数)であり、
+    owner・holding_id を含まない。
+    """
+    message = _run_holdings_child_and_get_audit_log(
+        monkeypatch, caplog, {"batch_id": _BATCH_ID_362_HOLDINGS}
+    )
+
+    assert DEFAULT_OWNER not in message
+    assert build_holding_id(DEFAULT_OWNER, "2914") not in message
+
+
+def test_issue_362_holdings_child_audit_log_without_batch_id_is_explicit_none(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """batch_id を持たない呼び出しでも、行が壊れず None と明示される。"""
+    message = _run_holdings_child_and_get_audit_log(monkeypatch, caplog, {})
+
+    assert message.endswith(" batch_id=None")
