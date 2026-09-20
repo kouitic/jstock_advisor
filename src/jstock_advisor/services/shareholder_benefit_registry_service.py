@@ -27,6 +27,11 @@ from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry
 from jstock_advisor.interfaces.types import BenefitDetail, ShareholderBenefit
 
 logger = logging.getLogger(__name__)
+# Issue #413 / #493: Lambda の root logger は WARNING のため、module が宣言しないと INFO は出ない。
+# check_registry_health() の「登録件数を INFO で常時記録する」(CSV の取込漏れを見つけるための
+# 観測)は、宣言が無いと Production では一度も出力されていなかった。出力するのは登録件数のみで、
+# 優待の内容・銘柄・所有者は出さない(WARNING / exception の既存の行は変更していない)。
+logger.setLevel(logging.INFO)
 
 _PROVIDER_NAME = "manual_registry"
 
