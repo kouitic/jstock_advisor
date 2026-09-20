@@ -34,6 +34,12 @@ from jstock_advisor.interfaces.types import AnnualDividendActual, DividendInfo
 from jstock_advisor.services.corporate_action_service import CorporateActionService
 
 logger = logging.getLogger(__name__)
+# Issue #413 / #494: Lambda の root logger は WARNING のため、module が宣言しないと INFO は出ない。
+# この module の INFO(5 か所)は「候補ごとの条件付き」で高頻度になりうるため、**意図して出さない**
+# (当初設計 #413 issuecomment-5738498397 §2。「宣言しない」ではなく WARNING を明示する)。
+# 各 INFO が伝える状態(NOT_YET_VALIDATABLE / VALIDATED とその理由)は、返り値の
+# DividendInfo.validation_status に残る。真の乖離の WARNING は、これまでどおり出力される。
+logger.setLevel(logging.WARNING)
 
 
 def _representative_value(info: DividendInfo) -> Decimal | None:
