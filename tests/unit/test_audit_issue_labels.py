@@ -241,3 +241,16 @@ def test_audit_is_deterministic_for_a_fixed_now() -> None:
     first = ail.audit(issues, now=NOW, deployed_days=3)
     second = ail.audit(issues, now=NOW, deployed_days=3)
     assert first == second
+
+
+def test_without_now_the_runtime_clock_is_used(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--now を省略すると実行時の UTC を使う(docstring の記述との一致。レビュー F1)。"""
+    old = _write(tmp_path, [_deployed(1, "2000-01-01T00:00:00Z")])
+    assert ail.main(["--input", str(old), "--deployed-days", "1"]) == 0
+    assert "STALE_DEPLOYED" in capsys.readouterr().out  # 2000 年 = 現在から十分に古い
+
+    future = _write(tmp_path, [_deployed(2, "2999-01-01T00:00:00Z")])
+    assert ail.main(["--input", str(future), "--deployed-days", "1"]) == 0
+    assert "STALE_DEPLOYED" not in capsys.readouterr().out  # 未来の起点は滞留にならない
