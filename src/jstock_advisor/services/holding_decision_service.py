@@ -54,6 +54,7 @@ from jstock_advisor.domain.signals.risk_deduction_scoring import (
 )
 from jstock_advisor.domain.signals.sell_signal import build_sell_rule_inputs_from_data
 from jstock_advisor.services.audit_service import AuditService
+from jstock_advisor.services.financial_freshness_integration import assess_financial_freshness
 from jstock_advisor.services.holding_decision_runtime_config_service import (
     HoldingDecisionRuntimeConfigService,
 )
@@ -366,8 +367,18 @@ class HoldingDecisionService:
             )
         )
 
+        # Issue #468(U17): 財務データが報告サイクル上の最新でない(STALE)場合、confidenceに
+        # HIGHを許可しない(上限MEDIUM)。判定は SELL / 利確と同じ共通部品
+        # (assess_financial_freshness。同じ猶予日数・同じ入力・同じ監査項目)を使い、
+        # 保有判断専用の定義は持たない。UNKNOWN(判定できない)はSTALE扱いにしない。
+        financial_freshness = assess_financial_freshness(snapshot.financial, now, self._config)
         outcome = combine_holding_decision(
-            company_quality, investment_thesis, risk_deduction, hard_gate, rules
+            company_quality,
+            investment_thesis,
+            risk_deduction,
+            hard_gate,
+            rules,
+            financial_stale=financial_freshness.is_stale,
         )
 
         positive_reasons, negative_reasons = _build_reason_impacts(
@@ -433,6 +444,11 @@ class HoldingDecisionService:
                 "should_notify": outcome.should_notify,
                 "hard_gate_triggered": hard_gate.triggered,
                 "hard_gate_reason_codes": list(hard_gate.reason_codes),
+                # Issue #468: 財務データの期間鮮度(SELL・利確と同一の項目)と、最終的な
+                # confidence(STALEでも元がMEDIUM以下なら値は変わらないため、実際に
+                # 変わったかを事後に確認できるようにする)。
+                "confidence": outcome.confidence.value,
+                **financial_freshness.audit_values(self._config),
             },
             data_sources=list(snapshot.data_sources),
             rule_version=str(rules.scoring_model_version),

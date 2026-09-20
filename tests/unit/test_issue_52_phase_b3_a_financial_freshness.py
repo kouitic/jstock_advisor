@@ -601,15 +601,18 @@ def test_production_call_sites_are_limited_to_the_current_phase() -> None:
     """接続先を Phase 単位で固定する。
 
     B3-A の時点では call site 0 だった(pure domain contract のみ)。
-    B3-B1 で BUY へ、B3-B2 で SELL / 利確へ接続した。**接続のしかたは経路ごとに
-    異なる**(BUY は共通 confidence score を持たないため警告のみ、SELL / 利確は
-    既存の `compute_confidence` へ減点を接続する)ため、どこへ繋がっているかを
+    B3-B1 で BUY へ、B3-B2 で SELL / 利確へ、Issue #468 で保有判断へ接続した。
+    **接続のしかたは経路ごとに異なる**(BUY は共通 confidence score を持たないため
+    警告のみ、SELL / 利確は既存の `compute_confidence` へ減点を接続する、保有判断は
+    confidence に HIGH を許可しない[上限 MEDIUM]+ 留意事項)ため、どこへ繋がっているかを
     ここで一元的に固定し、次の Phase で無自覚に広がらないようにする。
 
     接続のしかたそのものは各 Phase のテストが固定する。
     B3-B1(BUY)  tests/unit/test_issue_52_phase_b3_b1_buy_financial_freshness.py
     B3-B2(SELL / 利確)
                  tests/unit/test_issue_52_phase_b3_b2_sell_profit_financial_freshness.py
+    #468(保有判断)
+                 tests/unit/test_issue_468_holding_decision_financial_freshness.py
     """
     src_root = Path(__file__).resolve().parents[2] / "src" / "jstock_advisor"
     importers = sorted(
@@ -623,6 +626,11 @@ def test_production_call_sites_are_limited_to_the_current_phase() -> None:
         "services/buy_signal_service.py",
         # SELL / 利確(B3-B2)が共有する接続部分
         "services/financial_freshness_integration.py",
+        # 保有判断(Issue #468 / U17): STALEのときconfidenceにHIGHを許可しない(上限MEDIUM)。
+        # 同じ共通部品(SELL・利確と同じ接続部分)を呼び、保有判断専用の判定は持たない。
+        # service = cap判定と監査 / builder = 利用者向けの留意事項(key_risks)
+        "services/holding_decision_notification_builder.py",
+        "services/holding_decision_service.py",
         "services/profit_taking_service.py",
         "services/sell_signal_service.py",
     ], f"unexpected call sites: {importers}"

@@ -1966,6 +1966,14 @@ def _format_holding_decision_message(recommendation: Recommendation) -> str:
         lines.extend(f"・{c}" for c in recommendation.next_review_conditions)
         lines.append("")
 
+    # Issue #468(U17 / Q1 = W2): 留意事項があるときだけの節。空なら見出しも空行も出さず、
+    # 留意事項が無い通知の本文は1バイトも変わらない。信頼度の行の直前に置き、
+    # 「なぜ信頼度が上限を受けたか」を信頼度の行の直前で読めるようにする。
+    if recommendation.key_risks:
+        lines.append("留意事項：")
+        lines.extend(f"・{r}" for r in recommendation.key_risks)
+        lines.append("")
+
     lines.append(f"判定の信頼度：{recommendation.confidence.value}")
     if recommendation.data_sources:
         fetched_at = min(s.fetched_at for s in recommendation.data_sources)
