@@ -14,6 +14,7 @@ import datetime as dt
 import logging
 import uuid
 from dataclasses import dataclass, field
+from typing import cast, get_args
 
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
@@ -89,8 +90,14 @@ from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_result_to_metrics,
 )
 from jstock_advisor.domain.signals.judgment_safety import (
+    CorporateActionFacts,
+    CorporateActionIssueKind,
     ProfitTakingMitigationFacts,
     SafetyFacts,
+)
+from jstock_advisor.domain.signals.judgment_safety_shadow_config import (
+    JudgmentSafetyShadowConfig,
+    load_judgment_safety_shadow_config,
 )
 from jstock_advisor.domain.signals.market_environment import (
     market_environment_config_values,
@@ -126,10 +133,11 @@ from jstock_advisor.domain.signals.trading_unit_feasibility import (
     compute_suggested_sell_shares,
     evaluate_trading_unit_feasibility,
 )
-from jstock_advisor.interfaces.types import DividendInfo, ShareholderBenefit
+from jstock_advisor.interfaces.types import CorporateActionEvent, DividendInfo, ShareholderBenefit
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.corporate_action_service import CorporateActionService
+from jstock_advisor.services.data_quality_service import check_split_consistency
 from jstock_advisor.services.financial_freshness_integration import (
     FINANCIAL_STALE_USER_WARNING,
     FinancialFreshnessAssessment,
@@ -366,9 +374,12 @@ class ProfitTakingService:
         rule_version_service: RuleVersionService | None = None,
         business_calendar: BusinessCalendar | None = None,
         execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+        shadow_config: JudgmentSafetyShadowConfig | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
+        # Issue #160 shadow計測: 未指定なら専用loaderで1回だけ読む(不備はOFFへ縮退。例外なし)。
+        self._shadow_config = shadow_config or load_judgment_safety_shadow_config()
         self._audit = audit_service or AuditService(execution_context=execution_context)
         self._rule_version_service = rule_version_service or RuleVersionService()
         self._calendar = business_calendar or BusinessCalendar.from_config(config.holiday_calendar)
@@ -454,8 +465,40 @@ class ProfitTakingService:
             basis_date = holding.last_sale_date
         return basis_date
 
+    def _split_consistency_lookback_start(self, now: dt.datetime) -> dt.date:
+        """`check_split_consistency()`が内部で使う`lookback_start`と**同じ式**(値の一致をテストで固定)。
+
+        Issue #160 / #456(U9): 企業行動の取得開始日を、G4が必要とする窓まで広げるために使う。
+        `data_quality_service.py`は変更しないため、式はここで再現し、パリティをテストで固定する。
+        """
+        lookback_years = self._config.data_validation.split_consistency.lookback_years
+        return now.date() - dt.timedelta(days=365 * lookback_years)
+
+    def _fetch_corporate_action_events(
+        self, holding: Holding, now: dt.datetime
+    ) -> list[CorporateActionEvent]:
+        """企業行動eventsを**1回だけ**取得する(Issue #160 / #456 U7 OPTION_B_SINGLE_WIDENED_FETCH)。
+
+        取得開始日を`min(profit_protection_basis_date, lookback_start)`へ広げる。yfinance providerは
+        履歴を取得した後に`since`より古いeventsをローカルで除外するため、`since`を過去へ広げても外部通信は
+        増えない(追加のprovider呼び出しは0)。★ 「取得範囲を広げる」は
+        「Profit Protectionの判定対象期間を広げる」ではない: 既存の判定は、取得済みeventsを
+        `effective_date >= basis_date`で再filterする
+        (`_compute_profit_protection_metrics`)ため、結果は変わらない。shadowのmodeには依存しない
+        (単一のコード経路。MANAGER判断 D-b)。
+        """
+        basis_date = self._profit_protection_basis_date(holding)
+        since = min(basis_date, self._split_consistency_lookback_start(now))
+        corporate_action_service = CorporateActionService(self._providers.corporate_action, now=now)
+        return corporate_action_service.get_effective_events(holding.stock_code, since)
+
     def _compute_profit_protection_metrics(
-        self, holding: Holding, snapshot: StockSnapshot, now: dt.datetime
+        self,
+        holding: Holding,
+        snapshot: StockSnapshot,
+        now: dt.datetime,
+        *,
+        events: list[CorporateActionEvent] | None = None,
     ) -> ProfitProtectionMetrics:
         """利益保全(Profit Protection)判定の指標を算出する(要求仕様§1・§9)。
 
@@ -498,7 +541,10 @@ class ProfitTakingService:
         """
         basis_date = self._profit_protection_basis_date(holding)
         corporate_action_service = CorporateActionService(self._providers.corporate_action, now=now)
-        events = corporate_action_service.get_effective_events(holding.stock_code, basis_date)
+        if events is None:
+            events = self._fetch_corporate_action_events(holding, now)
+        # ★ 取得は広い窓(basis_dateより古いeventsを含む)だが、既存の判定はここで
+        #   `effective_date >= basis_date`のeventsだけを見る(従来と同じ観測窓。意味を変えない)。
         ratio_events = corporate_action_service.get_ratio_adjustment_events(events)
         ratio_adjustment_event_since_basis = any(
             e.effective_date is not None and e.effective_date >= basis_date for e in ratio_events
@@ -513,6 +559,64 @@ class ProfitTakingService:
             config=self._config.profit_taking.profit_protection,
             business_calendar=self._calendar,
         )
+
+    def _corporate_action_shadow_facts(
+        self,
+        recommendation: Recommendation,
+        holding: Holding,
+        snapshot: StockSnapshot,
+        events: list[CorporateActionEvent],
+        now: dt.datetime,
+    ) -> CorporateActionFacts | None:
+        """G4(shadow)の事実を作る。shadow OFF・G4の対象外はNone(評価しない)。
+
+        対象は保有の`FULL_PROFIT_TAKE`のみ(USER決定 U2)。**評価の失敗は本流へ伝播させない**
+        (`isolated_shadow_computation`。S-20)。`on_failure`は例外を出さない定数構築のみ。
+        """
+        if not self._shadow_config.enabled:
+            return None
+        if recommendation.recommendation_type is not RecommendationType.FULL_PROFIT_TAKE:
+            return None
+        return isolated_shadow_computation(
+            "judgment_safety_corporate_action",
+            lambda: self._build_corporate_action_facts(holding, snapshot, events, now),
+            lambda _exc: CorporateActionFacts("COMPUTATION_FAILED"),
+        )
+
+    def _build_corporate_action_facts(
+        self,
+        holding: Holding,
+        snapshot: StockSnapshot,
+        events: list[CorporateActionEvent],
+        now: dt.datetime,
+    ) -> CorporateActionFacts:
+        """既存の`check_split_consistency()`の結果を、`CorporateActionFacts`へ写す(U8)。
+
+        `unresolved_checks`は検査が実際に返した`check_name`である。向きの推定・descriptionの解析は
+        しない。**未知のcheck_name(将来の検査追加)は黙って捨てず`COMPUTATION_FAILED`にする**
+        (「未解決なし」と誤認しない。MANAGER判断 D-a)。
+        """
+        issues = check_split_consistency(
+            stock_code=holding.stock_code,
+            current_price=snapshot.current_price,
+            bars_close_by_date=[(bar.date, bar.close) for bar in snapshot.bars],
+            fair_value=snapshot.fair_value,
+            actual_annual_dividend_per_share=snapshot.dividend.actual_annual_dividend_per_share,
+            previous_fiscal_year_dividend_per_share=(
+                snapshot.dividend.previous_fiscal_year_dividend_per_share
+            ),
+            corporate_action_events=events,
+            holding=holding,
+            now=now,
+            config=self._config.data_validation.split_consistency,
+        )
+        known = set(get_args(CorporateActionIssueKind))
+        kinds: list[CorporateActionIssueKind] = []
+        for issue in issues:
+            if issue.check_name not in known:
+                return CorporateActionFacts("COMPUTATION_FAILED")
+            kinds.append(cast(CorporateActionIssueKind, issue.check_name))
+        return CorporateActionFacts("EVALUATED", tuple(kinds))
 
     def _compute_confidence(
         self,
@@ -662,7 +766,11 @@ class ProfitTakingService:
             )
         )
 
-        profit_protection_metrics = self._compute_profit_protection_metrics(holding, snapshot, now)
+        # Issue #160 / #456: 企業行動eventsの1回の取得を、Profit ProtectionとG4(shadow)で共用する。
+        corporate_action_events = self._fetch_corporate_action_events(holding, now)
+        profit_protection_metrics = self._compute_profit_protection_metrics(
+            holding, snapshot, now, events=corporate_action_events
+        )
 
         # Issue #53 Phase B2: accounting_or_scandal_or_delisting_riskはここで一切
         # 設定せず、既定のFalseのままとする(開示情報を取得できなかったことを
@@ -1366,7 +1474,10 @@ class ProfitTakingService:
                         mitigating_inputs.continuous_dividend_increase_years
                     ),
                     is_progressive_or_doe_policy=mitigating_inputs.is_progressive_or_doe_policy,
-                )
+                ),
+                corporate_action=self._corporate_action_shadow_facts(
+                    recommendation, holding, snapshot, corporate_action_events, now
+                ),
             ),
         )
 
