@@ -2162,13 +2162,18 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # Issue #309 同型 sweep: ここは現時点では stock_code と真偽値しか持たないが、
         # dict を丸ごと出す形そのものが、後からキーが 1 つ増えただけで漏れる。
         # ★ 「いま PII が無いから良い」とはしない。形を揃えて塞ぐ。
+        # Issue #362: 子の正常系の終端にも batch_id を出し、「うまくいった1件」を run へ
+        # 結びつけられるようにする。既存の抽出手順を壊さないよう、既存のprefixと
+        # 各フィールドの並びは変えず、**末尾へ足す**。batch_id は event 由来で、
+        # owner・holding_id を含まない識別子(PIIではない)。
         logger.info(
             "buy_candidates_handler single candidate done stock_code=%s "
-            "recommended=%s notified=%s failed=%s",
+            "recommended=%s notified=%s failed=%s batch_id=%s",
             result.get("stock_code"),
             result.get("recommended"),
             result.get("notified"),
             result.get("failed"),
+            event.get("batch_id"),
         )
         return result
 

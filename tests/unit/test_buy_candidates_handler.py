@@ -4620,3 +4620,75 @@ def test_dry_run_does_not_require_line_credentials(monkeypatch: pytest.MonkeyPat
         handler_module.handler(
             {"execution_mode": "VALIDATION", "notification_mode": "DRY_RUN"}, None
         )
+
+
+# ===== Issue #362: 子の正常系の終端ログへ batch_id を出す =====
+
+_BATCH_ID_362_BUY = "buy-candidates-20260920T230000Z-0123abcd"
+
+
+def _run_buy_child_and_get_done_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    event_extra: dict[str, object],
+) -> str:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(handler_module.WatchlistService, "get_item", lambda self, code: None)
+    monkeypatch.setattr(handler_module, "record_result", lambda *a, **kw: None)
+
+    class _FakeOutcome:
+        data_error = "テストエラー"
+        recommendation = None
+        buy_action = None
+        ranking_group = None
+
+    monkeypatch.setattr(
+        handler_module.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
+    )
+
+    with caplog.at_level("INFO"):
+        handler_module.handler(
+            {"task": "buy_candidate", "stock_code": "2914", "source": "WATCHLIST", **event_extra},
+            _FakeContext(),
+        )
+
+    done = [r.getMessage() for r in caplog.records if "single candidate done" in r.getMessage()]
+    assert len(done) == 1
+    return done[0]
+
+
+def test_issue_362_buy_child_done_log_carries_batch_id_at_the_end(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """子の正常系の終端ログに batch_id が出る(「うまくいった1件」を run へ結びつける)。
+
+    batch_id を含まないと、正常に終わった1件を、後から run へ結びつける手段がログに無い
+    (時間窓と stream の総当たりでしか辿れない)。
+    """
+    message = _run_buy_child_and_get_done_log(monkeypatch, caplog, {"batch_id": _BATCH_ID_362_BUY})
+
+    assert message.endswith(f" batch_id={_BATCH_ID_362_BUY}")
+
+
+def test_issue_362_buy_child_done_log_keeps_the_existing_prefix_and_field_order(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """既存の抽出手順(先頭のprefixと各フィールドの並び)を壊さない: batch_id は末尾へ足すのみ。"""
+    message = _run_buy_child_and_get_done_log(monkeypatch, caplog, {"batch_id": _BATCH_ID_362_BUY})
+
+    legacy = (
+        "buy_candidates_handler single candidate done stock_code=2914 "
+        "recommended=False notified=False failed=None"
+    )
+    assert message == f"{legacy} batch_id={_BATCH_ID_362_BUY}"
+    # 変更前の形式(batch_id なし)で使っていた完全一致・前方一致の抽出が、同じ行を返す。
+    assert message.startswith(legacy)
+
+
+def test_issue_362_buy_child_done_log_without_batch_id_is_explicit_none(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """batch_id を持たない呼び出し(バッチ外の単発実行)でも、行が壊れず None と明示される。"""
+    message = _run_buy_child_and_get_done_log(monkeypatch, caplog, {})
+
+    assert message.endswith(" batch_id=None")

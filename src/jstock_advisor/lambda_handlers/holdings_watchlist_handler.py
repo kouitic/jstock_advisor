@@ -1539,7 +1539,11 @@ def _process_single_holding(
         )
         return {"holding_id": holding_id, "recommended": False, "notified": False, "failed": True}
 
-    logger.info("holding_evaluation_audit: %s", result.audit)
+    # Issue #362: 子の正常系の終端にも batch_id を出し、「うまくいった1件」を run へ
+    # 結びつけられるようにする。既存の抽出手順を壊さないよう、既存のprefixと
+    # audit の出力位置は変えず、**末尾へ足す**。batch_id は親が生成する識別子で、
+    # owner・holding_id を含まない(PIIではない)。
+    logger.info("holding_evaluation_audit: %s batch_id=%s", result.audit, batch_id)
     _finish_batch_item(
         batch_id,
         result.category,
