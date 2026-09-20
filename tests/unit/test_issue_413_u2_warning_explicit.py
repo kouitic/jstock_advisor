@@ -8,7 +8,9 @@
     1 宣言が実際に効く: Lambda の root logger の既定(WARNING)のもとで、INFO は無効・WARNING は有効。
     2 意図した静音: INFO の 5 か所(全経路)を実際に通しても、INFO は出力されない。
       root logger を INFO にしても出ない(module の宣言が効いている)。
-    3 静音にした情報が失われない: 各 INFO が伝えていた状態は、返り値の `validation_status` に残る。
+    3 返り値に残るのは「状態」だけ: `validation_status`(VALIDATED / NOT_YET_VALIDATABLE)は残るが、
+      NOT_YET_VALIDATABLE の 4 つの理由の区別は残らない(理由は INFO の文面にだけあった。INFO は
+      従来も Production で出力されていない)。この事実を、テストで固定している。
     4 既存の WARNING が変わっていない(共通決算期で正規化後も乖離した場合。文面・level・値)。
 
 宣言があること自体は tests/unit/test_issue_413_logger_level_declared.py(#413 の guard)が見る。
@@ -218,7 +220,7 @@ def test_declared_level_takes_effect_under_the_lambda_root_default(
 def test_info_paths_are_silent_even_when_the_root_logger_is_at_info(
     scenario_id: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """意図した静音: root を INFO にしても、この module の INFO は出ない。状態は返り値に残る。"""
+    """意図した静音: root を INFO にしても INFO は出ない。返り値に残るのは状態だけ。"""
     monkeypatch.setattr(logging.getLogger(), "level", logging.INFO)
     _, provider, expected_status = next(s for s in _scenarios() if s[0] == scenario_id)
 
@@ -226,7 +228,7 @@ def test_info_paths_are_silent_even_when_the_root_logger_is_at_info(
         result = provider.get_dividend_info(_CODE)
 
     assert result is not None
-    assert result.validation_status == expected_status  # 静音にした情報はデータに残る
+    assert result.validation_status == expected_status  # 残るのは状態(理由の区別ではない)
     assert _records(caplog) == []  # INFO は出ない(WARNING も、この経路では出ない)
 
 
@@ -268,3 +270,18 @@ def test_every_info_call_site_is_reached_by_a_scenario() -> None:
         and n.func.value.id == "logger"
     ]
     assert len(infos) == len(_scenarios()) == 5
+
+
+def test_the_four_not_yet_validatable_reasons_are_not_distinguishable_in_the_result() -> None:
+    """返り値に残るのは状態だけ: 4 つの理由(INFO の文面にだけあった)は、同じ状態に畳まれる。
+
+    この事実を固定する(記述が実装と一致していること。レビュー F1)。INFO は従来も
+    Production で出力されておらず、理由の区別が新たに失われるわけではない。
+    """
+    statuses = {
+        scenario_id: provider.get_dividend_info(_CODE).validation_status  # type: ignore[union-attr]
+        for scenario_id, provider, _ in _scenarios()
+        if scenario_id != "validated"
+    }
+    assert len(statuses) == 4
+    assert set(statuses.values()) == {_NYV}
