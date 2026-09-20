@@ -163,20 +163,24 @@ def test_valid_config_logs_nothing(tmp_path: Path, caplog: pytest.LogCaptureFixt
     assert [r for r in caplog.records if r.name == shadow_cfg.__name__] == []
 
 
-def test_the_module_is_not_wired_into_the_production_call_graph() -> None:
-    """設定は判定経路のどこからも参照されない(挙動不変)。参照してよいのは、自身も未接続の純関数のみ。
+def test_the_config_is_read_only_by_the_pure_evaluator_and_the_profit_taking_supply() -> None:
+    """設定を読んでよいのは、純関数(`judgment_safety.py`)と、事実の供給側(利確)のみ。
 
-    PR-1で`judgment_safety.py`(純関数。それ自体を参照する本番コードは0件で、
-    test_judgment_safety.pyが固定する)が参照元に加わった。接続はPR-3以降。
+    - PR-1: `judgment_safety.py`(純関数。本番からは呼ばれない)。
+    - #456(PR-2c): `profit_taking_service.py`が、G4(shadow)を評価するか(mode)を決めるために読む。
+      modeがOFFなら評価せず、既存の判定・通知・保存は変えない。
     """
-    referrers = [
+    referrers = sorted(
         p.relative_to(_REPO_ROOT).as_posix()
         for p in (_REPO_ROOT / "src").rglob("*.py")
         if p.name != "judgment_safety_shadow_config.py"
         and "judgment_safety_shadow_config" in p.read_text(encoding="utf-8")
-    ]
+    )
 
-    assert referrers == ["src/jstock_advisor/domain/signals/judgment_safety.py"]
+    assert referrers == [
+        "src/jstock_advisor/domain/signals/judgment_safety.py",
+        "src/jstock_advisor/services/profit_taking_service.py",
+    ]
 
 
 def test_app_config_is_unchanged_and_does_not_carry_the_shadow_block() -> None:
