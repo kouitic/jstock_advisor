@@ -164,11 +164,13 @@ def test_valid_config_logs_nothing(tmp_path: Path, caplog: pytest.LogCaptureFixt
 
 
 def test_the_config_is_read_only_by_the_pure_evaluator_and_the_profit_taking_supply() -> None:
-    """設定を読んでよいのは、純関数(`judgment_safety.py`)と、事実の供給側(利確)のみ。
+    """設定を読んでよいのは、純関数(`judgment_safety.py`)・事実の供給側(利確)・shadowサービスのみ。
 
-    - PR-1: `judgment_safety.py`(純関数。本番からは呼ばれない)。
+    - PR-1: `judgment_safety.py`(純関数)。
     - #456(PR-2c): `profit_taking_service.py`が、G4(shadow)を評価するか(mode)を決めるために読む。
       modeがOFFなら評価せず、既存の判定・通知・保存は変えない。
+    - #457(PR-3): `judgment_safety_shadow_service.py`が、shadowを実行するか(mode)を決めるために
+      読む。handlerはこのサービスを呼ぶだけで、設定を直接読まない。
     """
     referrers = sorted(
         p.relative_to(_REPO_ROOT).as_posix()
@@ -179,6 +181,7 @@ def test_the_config_is_read_only_by_the_pure_evaluator_and_the_profit_taking_sup
 
     assert referrers == [
         "src/jstock_advisor/domain/signals/judgment_safety.py",
+        "src/jstock_advisor/services/judgment_safety_shadow_service.py",
         "src/jstock_advisor/services/profit_taking_service.py",
     ]
 
