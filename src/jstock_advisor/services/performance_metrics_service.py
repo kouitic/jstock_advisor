@@ -9,6 +9,7 @@ recommendation_evaluation_serviceが生成したEvaluationResultを、推奨種�
 from __future__ import annotations
 
 import datetime as dt
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -81,6 +82,106 @@ def build_metrics_bucket(key: str, evaluations: list[EvaluationResult]) -> Metri
         avg_excess_return_pct=avg_excess_return_pct,
         label_counts=label_counts,
     )
+
+
+class _FloatSum:
+    """float の合計を、組み込みの `sum()`(Python 3.12 以降)と**同じ手順・同じ結果**で累積する。
+
+    Python 3.12 の `sum()` は float に補償付き加算(Neumaier)を使う。`build_metrics_bucket()` は
+    値のリストを `sum()` するため、値を 1 件ずつ足し込む集計器が同じ結果(bit 単位)を返すには、
+    同じ手順で累積する必要がある(通常の `+=` では、最後の桁が食い違いうる)。
+    """
+
+    __slots__ = ("_compensation", "_total")
+
+    def __init__(self) -> None:
+        self._total = 0.0
+        self._compensation = 0.0
+
+    def add(self, value: float) -> None:
+        total = self._total
+        new_total = total + value
+        if abs(total) >= abs(value):
+            self._compensation += (total - new_total) + value
+        else:
+            self._compensation += (value - new_total) + total
+        self._total = new_total
+
+    @property
+    def value(self) -> float:
+        # sum() と同じ: 補償項が 0 でなく有限のときだけ足し戻す。
+        if self._compensation and math.isfinite(self._compensation):
+            return self._total + self._compensation
+        return self._total
+
+
+class MetricsAccumulator:
+    """評価を 1 件ずつ足し込んで `MetricsBucket` を作る集計器(Issue #377)。
+
+    `build_metrics_bucket()` は評価の**リスト全体**を受け取るため、呼び出し側が対象の評価を
+    全件保持する必要がある(週次改善レビューで、保持したまま Lambda の Memory が上限に
+    達した)。本クラスは、必要な集計値(件数・成功件数・合計)だけを持ち、評価そのものは保持しない。
+
+    ★ **意味論は `build_metrics_bucket()` と完全に同じ**である(同じ入力を、同じ順序で
+      `add()` すれば、`to_bucket()` は `build_metrics_bucket()` と同じ値を返す)。
+      - DATA_ISSUE / INCONCLUSIVE は成功率の分母(conclusive)から除外する。
+      - SUCCESS / ACCEPTABLE を成功として数える。
+      - 平均リターンは、全件の price_return_pct の平均。excess_return_pct は None を除いた平均。
+      - 分母が 0 のときの成功率・平均は None。
+    """
+
+    __slots__ = (
+        "_conclusive",
+        "_count",
+        "_excess_count",
+        "_excess_sum",
+        "_label_counts",
+        "_price_sum",
+        "_success",
+    )
+
+    def __init__(self) -> None:
+        self._count = 0
+        self._conclusive = 0
+        self._success = 0
+        self._price_sum = _FloatSum()
+        self._excess_sum = _FloatSum()
+        self._excess_count = 0
+        self._label_counts: dict[str, int] = {}
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def add(self, evaluation: EvaluationResult) -> None:
+        label = evaluation.evaluation_label
+        self._count += 1
+        self._label_counts[label.value] = self._label_counts.get(label.value, 0) + 1
+        if label not in _EXCLUDED_FROM_SUCCESS_RATE:
+            self._conclusive += 1
+            if label in _SUCCESS_LABELS:
+                self._success += 1
+        self._price_sum.add(evaluation.price_return_pct)
+        if evaluation.excess_return_pct is not None:
+            self._excess_sum.add(evaluation.excess_return_pct)
+            self._excess_count += 1
+
+    def to_bucket(self, key: str) -> MetricsBucket:
+        return MetricsBucket(
+            key=key,
+            count=self._count,
+            conclusive_count=self._conclusive,
+            success_rate_pct=(
+                self._success / self._conclusive * 100 if self._conclusive else None
+            ),
+            avg_price_return_pct=(
+                self._price_sum.value / self._count if self._count else None
+            ),
+            avg_excess_return_pct=(
+                self._excess_sum.value / self._excess_count if self._excess_count else None
+            ),
+            label_counts=dict(self._label_counts),
+        )
 
 
 def _group_bucket(

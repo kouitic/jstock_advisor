@@ -195,13 +195,13 @@ def test_weekly_review_scan_and_recompute_info_is_emitted_and_the_data_carries_t
     assert (stored.owner, stored.holding_id) == (_OWNER, _HOLDING_ID)
     window = (past_label, dt.date(2026, 9, 7), dt.date(2026, 9, 13))
 
-    buckets = service._collect_evaluations_for_windows([window])
-    recomputed, per_week = service._recompute_past_weeks_from_buckets(
-        [past_label], buckets, dt.datetime(2026, 9, 20, tzinfo=dt.UTC)
+    aggregates = service._aggregate_windows([window], current_label=window[0])
+    recomputed, per_week = service._recompute_past_weeks_from_aggregates(
+        [past_label], aggregates, dt.datetime(2026, 9, 20, tzinfo=dt.UTC)
     )
 
     # 走査・join・集計が実際にデータを通った(空のデータではない)
-    assert len(buckets[past_label]) == 1
+    assert aggregates[past_label].matched == 1
     assert (recomputed, per_week) == (1, {past_label: 1})
     messages = _assert_no_raw_owner_or_holding_id(
         caplog, weekly_improvement_review_service.__name__
