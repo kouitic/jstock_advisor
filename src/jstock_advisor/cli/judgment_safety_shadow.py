@@ -7,7 +7,9 @@
 * **既定はローカル(`--source local`)。Productionを既定で読まない。** `--source dynamodb`のときは、
   read-onlyであること・対象テーブル・資格情報が呼び出し元の環境(AWS_PROFILE等)であることを標準
   エラーへ明示する。
-* 書き込み・保存・削除・invoke・通知のいずれにも到達しない(allowlistのproxy + テストで固定)。
+* `--source dynamodb`は、書き込み・保存・削除・invoke・通知のいずれにも到達しない(allowlistのproxy +
+  テストで固定)。`--source local`は、ローカルの保管ディレクトリを作る(共有storeの既存挙動。
+  `AuditLogRepository()`の構築時にmkdirする。冪等で、ファイルもデータも作らない)以外の書き込みをしない。
 * 閾値の判定・専用Tableへの移行の提案はしない(判断はUSER/MANAGER。U13 = OPTION_C)。
 
 終了コード: 0 = 正常(記録が0件でも0。ただし0件を明示表示する)/ 2 = 引数不正 / 3 = 読み取り失敗。

@@ -2923,7 +2923,9 @@ Phase 2(誤検出・過剰抑制のレビュー)と、専用 Table への移行�
 ### 26.1 これは何を「しない」か(★ 最初に読むこと)
 
 ```
-・書き込み・保存・削除・invoke・通知のいずれも行わない(scan / describe_table だけを通す allowlist の proxy。それ以外の呼び出しは例外)
+・【--source dynamodb(Production)】書き込み・保存・削除・invoke・通知のいずれも行わない(scan / describe_table だけを通す allowlist の proxy。それ以外の呼び出しは例外)
+・【--source local(既定)】ローカルの保管ディレクトリを作る(既存の共有 store の挙動。`AuditLogRepository()` の構築時に mkdir する。冪等で、ファイルもデータも作らない)。
+  それ以外(保存・削除・invoke・通知)は行わない。Production(DynamoDB)には触れない
 ・閾値の判定・「専用 Table へ移行すべき」等の提案をしない(判断は USER / MANAGER)
 ・Production を既定で読まない(既定は --source local)
 ・shadow の有効化(mode の変更)はしない(別の Human Gate)
