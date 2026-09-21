@@ -220,7 +220,7 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | F-10 | 保有継続判断 | `domain/signals/holding_decision_score.py` `domain/signals/holding_decision_hard_gate.py` `domain/signals/holding_decision_execution_plan.py` `services/holding_decision_service.py` | `holding_decision_rules.yaml` `holding_decision_risk_rules.yaml` `holding_decision_ratio_rules.yaml` | `HoldingDecisionResultsTable` `HoldingEvaluationRecordsTable` | D3 / S |
 | F-11 | 投資仮説の管理と採点 | `services/investment_thesis_service.py` `domain/signals/investment_thesis_scoring.py` `cli/baseline_repair.py` | `investment_thesis_template.yaml` | `InvestmentThesesTable` `InvestmentThesisBaselinesTable` `InvestmentThesisBaselineSequencesTable` `InvestmentThesisBaselinePointersTable` | D3 |
 | F-12 | 保有判断の実行時設定 | `services/holding_decision_runtime_config_service.py` | — | `HoldingDecisionRuntimeConfigTable` | D3 / D9 |
-| F-13 | 取引停止・クールダウン | `services/trading_pause_service.py` `services/trade_cooldown_service.py` `infrastructure/aws/trading_pause_config.py` | — | `TradingPauseConfigTable` `TradeEventRecordsTable`(Issue #71 F-C11 Phase 1) | D3 / D1 / D2 |
+| F-13 | 取引停止・クールダウン | `services/trading_pause_service.py` `services/trade_cooldown_service.py` `infrastructure/aws/trading_pause_config.py` `domain/entities/trade_event_record.py` `infrastructure/local_repository/trade_event_record_repository.py` | — | `TradingPauseConfigTable` `TradeEventRecordsTable`(Issue #71 F-C11 Phase 1) | D3 / D1 / D2 |
 | F-14 | 保有スナップショット | `services/holdings_view_service.py` `domain/entities/holdings_snapshot.py` `services/stock_snapshot_service.py` | — | `HoldingsSnapshotTable` | D3 / D6 |
 | F-46 | 保有監視日次バッチ | `lambda_handlers/holdings_watchlist_handler.py` `lambda_handlers/_fanout.py` | `schedule.yaml` | `RecommendationsTable` `DecisionSnapshotsTable` `HoldingDecisionResultsTable` `HoldingEvaluationRecordsTable` `NotificationLogTable` | D3 / D1 / D2 / D4 / D5 / D9 / S |
 
@@ -254,7 +254,7 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
 | F-15 | 監視候補スクリーニング | `domain/signals/watchlist_screening.py` `domain/screening/rules.py` `services/watchlist_screening_service.py` `services/watchlist_screening_audit.py` | `watchlist_screening_rules.yaml` `screening_rules.yaml` | `WatchlistTable` | D4 / S |
-| F-16 | 分散実行(dispatcher / worker / 回収) | `lambda_handlers/watchlist_dispatcher_handler.py` `lambda_handlers/watchlist_worker_handler.py` `lambda_handlers/watchlist_batch_reconciler_handler.py` `lambda_handlers/watchlist_terminal_failure_handler.py` `lambda_handlers/_watchlist_execution_mode.py` | `schedule.yaml` | `WatchlistCandidateProgressTable` `WatchlistScreeningRotationStateTable` `WatchlistRotationDispatchLeaseTable` | D4 / D9 |
+| F-16 | 分散実行(dispatcher / worker / 回収) | `lambda_handlers/watchlist_dispatcher_handler.py` `lambda_handlers/watchlist_worker_handler.py` `lambda_handlers/watchlist_batch_reconciler_handler.py` `lambda_handlers/watchlist_terminal_failure_handler.py` `lambda_handlers/_watchlist_execution_mode.py` `lambda_handlers/_watchlist_notification_prescan.py` | `schedule.yaml` | `WatchlistCandidateProgressTable` `WatchlistScreeningRotationStateTable` `WatchlistRotationDispatchLeaseTable` | D4 / D9 |
 | F-17 | 監視状態遷移・営業日カウント | `services/watch_state_service.py` `domain/signals/near_buy.py` | `notification_rules.yaml` | `WatchStateTable` `ValidationWatchStateTable` | D4 / D1 / D5 |
 | F-18 | 監視銘柄の登録・削除・維持 | `services/watchlist_service.py` `services/watchlist_maintenance_service.py` `services/watchlist_csv_import_service.py` | — | `WatchlistTable` `WatchlistRemovalHistoryTable` | D4 |
 | F-19 | 監視データ cache | `services/watchlist_data_cache.py` | — | `WatchlistPriceCacheTable` `WatchlistFinancialCacheTable` | D4 / D8 |
@@ -585,7 +585,7 @@ C3  どちらにも属さない module は、下の UNCATALOGED 一覧へ
 C4  「主要 source」に書かれた path は実在しなければならない
     (削除・改名した module への参照を残さない)
 
-C5  C1〜C4 は CI job `catalog-coverage` が機械的に検査する(Phase C。未実装)。
+C5  C1〜C4 は CI job `catalog-coverage` が機械的に検査する(Phase C。実装済み: Issue #481。required check ではない)。
     検査は本書の**全文ではなく F 行 / S 行の主要 source 列**に対して行う
 ```
 
@@ -595,6 +595,7 @@ C5  C1〜C4 は CI job `catalog-coverage` が機械的に検査する(Phase C。
   何をもって「属する」とするかを文書側で先に決めないと、CI の実装が
   baseline を勝手に決めてしまう。実際、Phase A の実測はディレクトリ指定を
   数えなかったため未登録を 183 件と算出したが、C2 を適用すると 108 件である
+  (これは Phase B の docs を入れる前の a3dca50 での測定値。BASELINE_AT の 172287d では 102 件)
   (差の 75 件は `domain/valuation/` 等のディレクトリ指定で既に覆われている)。
 
   ディレクトリ指定を数えるのは、本書の目的が L節すなわち
@@ -624,7 +625,7 @@ module を**すべて**挙げる(ディレクトリ単位でまとめてよい�
 ### UNCATALOGED 一覧(Issue #212 / baseline)
 
 ```
-BASELINE_AT      = main a3dca50a7d3aaeb2575983f415155e5ae9944686
+BASELINE_AT      = main 172287dcd04da486d6a595906a0ad1fb11ef8b78
 MODULE_TOTAL     = 324(`__init__.py` を除く)
 COVERED_BY_FILE  = 147
 COVERED_BY_DIR   = 75
@@ -675,11 +676,9 @@ DEAD_REFERENCE   = 0
 | `domain/entities/holding_evaluation_record.py` | F-14 |
 | `domain/entities/improvement.py` | F-34 |
 | `domain/entities/market_environment.py` | S-12 |
-| `domain/entities/momentum.py` | S-09 |
 | `domain/entities/notification.py` | F-23 |
 | `domain/entities/rule_version.py` | F-34 |
 | `domain/entities/sector_environment.py` | S-12 |
-| `domain/entities/timing_score.py` | S-09 |
 | `domain/entities/trading_pause.py` | F-13 |
 | `domain/entities/transaction.py` | F-27 |
 | `domain/entities/valuation.py` | S-05 |
@@ -702,11 +701,8 @@ DEAD_REFERENCE   = 0
 | `domain/signals/environment.py` | S-12 |
 | `domain/signals/eps_normalization.py` | F-02 |
 | `domain/signals/historical_valuation.py` | F-33 |
-| `domain/signals/momentum.py` | S-09 |
 | `domain/signals/portfolio_concentration.py` | F-14 |
-| `domain/signals/risk_deduction_scoring.py` | S-09 |
 | `domain/signals/simple_roe.py` | S-01 |
-| `domain/signals/timing_score.py` | S-09 |
 | `domain/signals/trading_unit_feasibility.py` | F-03 |
 
 #### `infrastructure/aws/`  8 件
@@ -888,3 +884,4 @@ DEAD_REFERENCE   = 0
 | 2026-09-21 | `docs/operations_manual.md`へ**27節「異常を知ったときの手順」(障害対応のrunbook)を追加**した(Issue #500〔#132 X-1〕。docsのみ)。異常に気づいた人(通知を受けた人・自分で気づいた人)が、最初にやること(記録・状態を変えない・read-onlyで観測)、read-onlyの観測の手順(Lambdaのメトリクス・DLQ〔24節〕・バッチ完了判定〔25節〕・BatchRuns〔23.2〕)、「Errorsが止まった=復旧」ではないこと(バッチの終端・DLQ・通知の送信・処理件数を別々に確認)、Human Gateの対象(再実行・手動invoke・redrive・purge・再送・書き込み・設定変更等。確認した者が実行しない)、報告の形を定めた。Lambdaのメトリクスは呼び出された期間にだけ出ること(データ点が無い=起動していない疑い)、観測用roleではAlarmの状態(DescribeAlarms)とLogs Insightsを読めないこと(AccessDeniedを実測)を明記した。通知の文面(#501)・通知経路(#503)・Alarmの拡張(#504・#505)・検知の相乗り(#506)には依存せず、状態は#132の最新の記録を読むとした。code・設定・infra・IAMの変更なし。共通部品・領域・既存のF行/S行への影響なし |
 | 2026-09-21 | F-10(保有継続判断)の優待条件で、**明示的な廃止(`is_abolished`)を EVALUATED・0 点にした**(Issue #476。USER決定 U-A)。`domain/signals/investment_thesis_scoring.py`の優待条件の状態(#470 が導入した導出関数`derive_benefit_condition_state`)に、**新しい状態 ABOLISHED**(評価・0点)を追加した。以前は、廃止は`not is_abolished` が偽になるため NOT_APPLICABLE(理由「優待非保有銘柄」)となり、大幅改悪(評価・0点)と非対称だった。ABOLISHED と DOWNGRADED は、スコア上は同じ(既存の`benefit_condition`の重みに対する 0 点)で、状態は分けて残す(廃止と大幅改悪が同時なら廃止を優先)。**baselineに優待なし + 現在が廃止登録は従来どおり NOT_APPLICABLE**(U-B)。初回評価(比較不能)・データ欠落(DATA_MISSING)・維持・大幅改悪の扱いは変更していない。**リスク控除(`shareholder_benefit_abolished`)・企業品質・重み・閾値・共通enum S-16・永続schema・config・IAMは変更していない**。廃止が登録された保有の投資ストーリー維持スコアは 50.0 → 44.4(優待の項目のみ 0 点。他が満点のとき)。現在は`mode=shadow`で通知に未到達のため、利用者への通知・判定の挙動は変わらない。既存のF行・S行・領域一覧・維持契約は変更していない |
 | 2026-09-21 | `domain/notification/incident_message.py`(F-49 / D5)を**新設**した(Issue #501〔#132 X-2〕。純粋な関数と型だけ)。LINEへ送る「異常1通」の本文を組み立てる`build_incident_message()`と、内部の関数名・job名を利用者向けの名称(列挙`IncidentJob`)へ引く`resolve_incident_job()`。本文はallowlist(#132 H-30)を不変条件とし、出してよいのはjobの利用者向けの名称・時刻(JSTの時:分)・件数・日数・真偽値だけ。自由な文字列を受け取らず(`IncidentNotice`の型と値の検査)、内部名は返り値にも本文にも残らず、対応表に無い名前は汎用の名称(その他の処理)へ落ちる。全Lambda関数(12本)を対応表が網羅することを、infra/template.yamlとの突き合わせのテストで固定した。ネットワーク・ファイル・AWS・永続化に触れない(import検査)。既存の通知のmodule・判定・文面・送信経路は変更しない。この関数を送信へ接続するのは#503(X-4)で、本Issueは接続しない。共通部品・領域への影響なし |
+| 2026-09-21 | **catalog-coverageのCI job(`.github/workflows/ci.yml`)を追加し、本書を現在のmainに同期した**(Issue #481〔#212のatomic分割 W2〕)。jobは`python scripts/check_catalog_coverage.py`(#480。read-only・標準ライブラリのみ)を実行する。**required checkではない**(USER決定済み。ruleset変更なし。失敗は赤で表示するが既存のPRを止めない)。同期の内容: (1)M.5の「108件」に測定時点(Phase Bのdocsを入れる前のa3dca50)を添え、baselineブロックのBASELINE_ATを、baselineの値(MODULE_TOTAL 324 / COVERED_BY_FILE 147 / COVERED_BY_DIR 75 / UNCATALOGED 102 / 違反0)が実測で一致する172287d(PR #238のmerge)へ改めた。(2)UNCATALOGED一覧から、既にS-09の主要pathに覆われている5件(`domain/entities/momentum.py` `domain/entities/timing_score.py` `domain/signals/momentum.py` `domain/signals/risk_deduction_scoring.py` `domain/signals/timing_score.py`)を削り、一覧に載せずに追加されていた3件をF行の主要sourceへ足した(`domain/entities/trade_event_record.py`と`infrastructure/local_repository/trade_event_record_repository.py`はF-13へ〔`trade_cooldown_service`が使う〕、`lambda_handlers/_watchlist_notification_prescan.py`はF-16へ〔worker・terminal failureのhandlerが使う〕)。網羅の修正のみで、領域(D1〜D9)・既存のF行/S行の影響領域は変更していない。`python scripts/check_catalog_coverage.py`が違反0で終了する |
