@@ -59,9 +59,7 @@ _RUN_AT = dt.datetime(2026, 8, 10, 10, 0, tzinfo=dt.UTC)  # JST 19:00
 
 
 @pytest.fixture
-def aws_env(
-    monkeypatch: pytest.MonkeyPatch, lambda_runtime_env: None, create_collection_table
-):
+def aws_env(monkeypatch: pytest.MonkeyPatch, lambda_runtime_env: None, create_collection_table):
     monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
@@ -1266,24 +1264,28 @@ def test_aggregate_windows_matches_per_period_collection(aws_env, repos) -> None
         for kind, day, hour in (("mon", wstart, 0), ("sun", wend, 23)):
             rec_id = f"rec{i}{kind}"
             at = dt.datetime.combine(day, dt.time(hour), tzinfo=dt.UTC)
-            repos["recommendation"].save(
-                _recommendation(rec_id, RecommendationType.BUY, "v1", at)
-            )
-            repos["evaluation"].save(
-                _evaluation(f"{kind}{i}", rec_id, EvaluationLabel.SUCCESS, at)
-            )
+            repos["recommendation"].save(_recommendation(rec_id, RecommendationType.BUY, "v1", at))
+            repos["evaluation"].save(_evaluation(f"{kind}{i}", rec_id, EvaluationLabel.SUCCESS, at))
     outside_date = monday - dt.timedelta(days=365)
     repos["evaluation"].save(
-        _evaluation("outside", "rec-outside", EvaluationLabel.SUCCESS,
-                    dt.datetime.combine(outside_date, dt.time(0), tzinfo=dt.UTC))
+        _evaluation(
+            "outside",
+            "rec-outside",
+            EvaluationLabel.SUCCESS,
+            dt.datetime.combine(outside_date, dt.time(0), tzinfo=dt.UTC),
+        )
     )
     repos["evaluation"].save(
-        _evaluation("wrong_horizon", "rec-wh", EvaluationLabel.SUCCESS,
-                    dt.datetime.combine(windows[0][1], dt.time(12), tzinfo=dt.UTC),
-                    horizon_calendar_days=14)
+        _evaluation(
+            "wrong_horizon",
+            "rec-wh",
+            EvaluationLabel.SUCCESS,
+            dt.datetime.combine(windows[0][1], dt.time(12), tzinfo=dt.UTC),
+            horizon_calendar_days=14,
+        )
     )
 
-    aggregates = service._aggregate_windows(windows)
+    aggregates = service._aggregate_windows(windows, current_label=windows[0][0])
     target_horizon = service._review_config.evaluation_horizon_days
 
     for wlabel, wstart, wend in windows:
@@ -1309,7 +1311,7 @@ def test_aggregate_windows_returns_empty_aggregates_when_no_data(aws_env, repos)
     service = _build_service(repos)
     windows = [("2026-W38", dt.date(2026, 9, 14), dt.date(2026, 9, 20))]
 
-    result = service._aggregate_windows(windows)
+    result = service._aggregate_windows(windows, current_label=windows[0][0])
 
     assert list(result) == ["2026-W38"]
     aggregate = result["2026-W38"]
@@ -1317,9 +1319,7 @@ def test_aggregate_windows_returns_empty_aggregates_when_no_data(aws_env, repos)
     assert aggregate.groups == {}
 
 
-def test_run_produces_identical_metrics_to_running_five_separate_scans(
-    aws_env, repos
-) -> None:
+def test_run_produces_identical_metrics_to_running_five_separate_scans(aws_env, repos) -> None:
     """Issue #377の核心: run()が、評価もRecommendationも保持しない集計へ変わっても、
     週ごとに評価を集めて結合・集計していた旧方式と全く同じmetricsが生成されることを、
     実際にrun()を呼んだ結果で確認する(#114 C-5への影響評価の最終確認)。
@@ -1482,7 +1482,9 @@ def test_aggregate_windows_does_not_call_get(aws_env, repos, monkeypatch) -> Non
 
     monkeypatch.setattr(repos["recommendation"], "get", spy_get)
 
-    aggregate = service._aggregate_windows(_JOIN_WINDOW)["2026-W33"]
+    aggregate = service._aggregate_windows(_JOIN_WINDOW, current_label=_JOIN_WINDOW[0][0])[
+        "2026-W33"
+    ]
 
     assert calls == []
     assert aggregate.joined == 5
@@ -1508,7 +1510,9 @@ def test_aggregate_windows_uses_bounded_get_many_calls(aws_env, repos, monkeypat
 
     monkeypatch.setattr(repos["recommendation"], "get_many", spy_get_many)
 
-    aggregate = service._aggregate_windows(_JOIN_WINDOW)["2026-W33"]
+    aggregate = service._aggregate_windows(_JOIN_WINDOW, current_label=_JOIN_WINDOW[0][0])[
+        "2026-W33"
+    ]
 
     assert aggregate.joined == total
     assert aggregate.missing_ids == []
@@ -1525,16 +1529,24 @@ def test_aggregate_windows_missing_id_semantics_match_oracle(aws_env, repos) -> 
     _seed_join_fixture(repos, 20, missing_every=3)
     # 同じ欠落IDを複数のevaluationに参照させ、重複した欠落が重複排除されずに
     # 残ることも確認する。
-    dup_missing = _evaluation("e-dup-missing", "missing-0", EvaluationLabel.SUCCESS,
-                               dt.datetime(2026, 8, 10, 9, 0, tzinfo=dt.UTC))
+    dup_missing = _evaluation(
+        "e-dup-missing",
+        "missing-0",
+        EvaluationLabel.SUCCESS,
+        dt.datetime(2026, 8, 10, 9, 0, tzinfo=dt.UTC),
+    )
     repos["evaluation"].save(dup_missing)
 
     service = _build_service(repos)
 
-    aggregate = service._aggregate_windows(_JOIN_WINDOW)["2026-W33"]
+    aggregate = service._aggregate_windows(_JOIN_WINDOW, current_label=_JOIN_WINDOW[0][0])[
+        "2026-W33"
+    ]
     evaluations = _oracle_collect_for_period(
-        repos, service._review_config.evaluation_horizon_days,
-        dt.date(2026, 8, 10), dt.date(2026, 8, 16),
+        repos,
+        service._review_config.evaluation_horizon_days,
+        dt.date(2026, 8, 10),
+        dt.date(2026, 8, 16),
     )
     oracle_joined, oracle_missing = _oracle_join_via_get(repos, evaluations)
 
@@ -1548,9 +1560,7 @@ def test_aggregate_windows_missing_id_semantics_match_oracle(aws_env, repos) -> 
         key: build_metrics_bucket(key[0].value, evals)
         for key, evals in _oracle_groups(oracle_joined).items()
     }
-    assert {
-        key: acc.to_bucket(key[0].value) for key, acc in aggregate.groups.items()
-    } == expected
+    assert {key: acc.to_bucket(key[0].value) for key, acc in aggregate.groups.items()} == expected
 
 
 def test_aggregate_windows_duplicate_recommendation_id_is_fetched_once(
@@ -1575,14 +1585,16 @@ def test_aggregate_windows_duplicate_recommendation_id_is_fetched_once(
 
     monkeypatch.setattr(repos["recommendation"], "get_many", spy_get_many)
 
-    aggregate = service._aggregate_windows(_JOIN_WINDOW)["2026-W33"]
+    aggregate = service._aggregate_windows(_JOIN_WINDOW, current_label=_JOIN_WINDOW[0][0])[
+        "2026-W33"
+    ]
 
     assert aggregate.joined == 5  # EvaluationResult件数ぶん集計に残る
     assert aggregate.missing_ids == []
     assert len(calls) == 1  # 1チャンクで済む件数のためget_many呼び出しは1回
     # dedupはget_many()内部(dict.fromkeys)の責務であり、呼び出し側では重複除去済みである
     # 必要はない(要件は、呼んだ回数=1回のみ)。
-    ((rec_type, rule_version), accumulator), = aggregate.groups.items()
+    (((rec_type, rule_version), accumulator),) = aggregate.groups.items()
     assert (rec_type, rule_version) == (RecommendationType.BUY, "v1")
     assert accumulator.count == 5
 
@@ -1613,3 +1625,156 @@ def test_review_repositories_run_on_dynamodb_not_local_json(
     )
     assert [v.rule_version for v in repos["rule_version"].list_all()] == ["v-367"]
     assert not list(tmp_path.glob("*.json")), "ローカルJSONへ書いている(本番と異なる経路)"
+
+
+# --- Issue #377 Track1(PR #539 再レビュー): 過去週の結合失敗の契約 ----------------
+
+
+class _JoinBoomError(RuntimeError):
+    pass
+
+
+def _fail_join_for(repos: dict, monkeypatch, prefixes: tuple[str, ...], on_call: int = 1) -> list:
+    """recommendation_idが`prefixes`のいずれかで始まるIDを含むget_many()の`on_call`回目以降を
+    失敗させる(呼ばれた回の記録を返す)。例外本文には識別子らしい文字列を入れる(漏れの検査用)。
+    """
+    original = repos["recommendation"].get_many
+    calls: list[list[str]] = []
+
+    def wrapper(ids):
+        id_list = list(ids)
+        if any(i.startswith(p) for i in id_list for p in prefixes):
+            calls.append(id_list)
+            if len(calls) >= on_call:
+                raise _JoinBoomError("SECRET-DETAIL-should-not-leak")
+        return original(id_list)
+
+    monkeypatch.setattr(repos["recommendation"], "get_many", wrapper)
+    return calls
+
+
+def _seed_week(
+    repos: dict, prefix: str, week_label: str, count: int, label=EvaluationLabel.SUCCESS
+):
+    start = module._monday_of_iso_week(week_label)
+    at = dt.datetime.combine(start + dt.timedelta(days=1), dt.time(9), tzinfo=dt.UTC)
+    for i in range(count):
+        _seed_one(repos, f"{prefix}{i}", start + dt.timedelta(days=i % 7), at, label)
+
+
+def _labels() -> tuple[str, str, str]:
+    _s, _e, review_week = _resolve_review_period(_RUN_AT)
+    w1 = module._previous_week_label(review_week)
+    w2 = module._previous_week_label(w1)
+    return review_week, w1, w2
+
+
+def test_current_week_join_failure_fails_the_whole_run(aws_env, repos, monkeypatch) -> None:
+    """T1: current weekの結合失敗は従来どおりrun全体を失敗させ、metrics・candidateを作らない。"""
+    review_week, w1, _w2 = _labels()
+    _seed_week(repos, "cur", review_week, 3)
+    _seed_week(repos, "pa", w1, 2)
+    _fail_join_for(repos, monkeypatch, ("cur",))
+
+    with pytest.raises(_JoinBoomError):
+        _build_service(repos).run(_RUN_AT)
+
+    assert repos["metrics"].list_all() == []
+    assert repos["candidate"].list_all() == []
+
+
+def test_past_week_join_failure_does_not_stop_the_current_week(
+    aws_env, repos, monkeypatch, caplog
+) -> None:
+    """T2: 過去週の結合失敗でも、current weekのmetrics保存・候補検知・監査記録は行われ、
+    失敗した週のmetricsは保存されない。失敗は週・段階・例外の型名で識別でき、例外本文は出ない。
+    """
+    review_week, w1, _w2 = _labels()
+    _seed_week(repos, "cur", review_week, 3)
+    _seed_week(repos, "cur-bad", review_week, 1, EvaluationLabel.PRICE_TOO_HIGH)
+    _seed_week(repos, "pa", w1, 2)
+    _fail_join_for(repos, monkeypatch, ("pa",))
+
+    with caplog.at_level("WARNING"):
+        outcome = _build_service(repos).run(_RUN_AT)
+
+    saved = {(m.review_week): m for m in repos["metrics"].list_all()}
+    assert set(saved) == {review_week}  # 失敗した過去週は保存されない
+    assert saved[review_week].sample_count == 4
+    assert outcome.metrics_saved == 1
+    assert outcome.total_evaluation_results == 4
+    assert outcome.past_weeks_metrics_recomputed == 0
+    expected_failure = "phase=recommendation_join exception=_JoinBoomError"
+    assert outcome.past_weeks_join_failed == {w1: expected_failure}
+    # 候補検知・GitHub/LINE判定へ進んでいる(currentの処理の後段まで到達し、監査が残る)
+    assert outcome.candidates_detected == len(repos["candidate"].list_all())
+    audit = repos["audit"].list_all()
+    assert len(audit) == 1
+    assert audit[0].output_values["past_weeks_join_failed"] == outcome.past_weeks_join_failed
+    # 可視性: WARNINGに週・段階・型名。例外本文は出さない
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert w1 in text and "recommendation_join" in text and "_JoinBoomError" in text
+    assert "SECRET-DETAIL" not in text
+    assert "SECRET-DETAIL" not in str(audit[0].output_values)
+
+
+def test_partial_past_week_aggregate_is_never_saved(aws_env, repos, monkeypatch) -> None:
+    """T3: chunk1は成功しchunk2で失敗する過去週について、chunk1分だけのmetricsを保存しない。
+    既に保存済みの同じ週の行も、そのまま変えない。
+    """
+    from jstock_advisor.domain.entities.improvement import WeeklyReviewMetrics
+
+    monkeypatch.setattr(module, "_RECOMMENDATION_JOIN_CHUNK_SIZE", 2)
+    review_week, w1, _w2 = _labels()
+    _seed_week(repos, "cur", review_week, 1)
+    _seed_week(repos, "pa", w1, 5)  # chunk 2 + 2 + 1
+    w1_start = module._monday_of_iso_week(w1)
+    previous = WeeklyReviewMetrics(
+        metrics_id=f"BUY|v1|ALL|{w1}",
+        review_week=w1,
+        recommendation_type=RecommendationType.BUY,
+        rule_version="v1",
+        segment_key=None,
+        sample_count=99,
+        conclusive_count=99,
+        success_rate_pct=10.0,
+        average_return_pct=0.1,
+        average_excess_return_pct=0.1,
+        period_start=w1_start,
+        period_end=w1_start + dt.timedelta(days=6),
+        generated_at=_RUN_AT,
+    )
+    repos["metrics"].save(previous)
+    calls = _fail_join_for(repos, monkeypatch, ("pa",), on_call=2)
+
+    outcome = _build_service(repos).run(_RUN_AT)
+
+    assert len(calls) == 2  # 1回目は成功、2回目で失敗、以後はfoldしない
+    assert repos["metrics"].get(previous.metrics_id) == previous  # 部分値で上書きされていない
+    assert outcome.past_weeks_metrics_recomputed == 0
+    assert w1 in outcome.past_weeks_join_failed
+
+
+def test_other_past_weeks_continue_when_one_past_week_fails(aws_env, repos, monkeypatch) -> None:
+    """T4: 過去週の1週だけ失敗しても、current weekと失敗していない過去週は通常どおり処理する。"""
+    review_week, w1, w2 = _labels()
+    _seed_week(repos, "cur", review_week, 2)
+    _seed_week(repos, "pa", w1, 3)  # 失敗させる
+    _seed_week(repos, "pb", w2, 4)  # 成功する
+    _fail_join_for(repos, monkeypatch, ("pa",))
+
+    outcome = _build_service(repos).run(_RUN_AT)
+
+    saved = {m.review_week: m for m in repos["metrics"].list_all()}
+    assert set(saved) == {review_week, w2}
+    assert saved[review_week].sample_count == 2
+    assert saved[w2].sample_count == 4
+    assert outcome.past_weeks_metrics_recomputed_by_week == {w2: 1}
+    assert list(outcome.past_weeks_join_failed) == [w1]
+
+
+def test_aggregate_windows_requires_current_label_among_windows() -> None:
+    """current weekは位置で暗黙に決めず、windowsに含まれるラベルを明示して渡す。"""
+    service = object.__new__(WeeklyImprovementReviewService)
+    with pytest.raises(ValueError):
+        service._aggregate_windows([("W1", dt.date(2026, 8, 3), dt.date(2026, 8, 9))], "W0")

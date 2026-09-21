@@ -195,7 +195,7 @@ def test_weekly_review_scan_and_recompute_info_is_emitted_and_the_data_carries_t
     assert (stored.owner, stored.holding_id) == (_OWNER, _HOLDING_ID)
     window = (past_label, dt.date(2026, 9, 7), dt.date(2026, 9, 13))
 
-    aggregates = service._aggregate_windows([window])
+    aggregates = service._aggregate_windows([window], current_label=window[0])
     recomputed, per_week = service._recompute_past_weeks_from_aggregates(
         [past_label], aggregates, dt.datetime(2026, 9, 20, tzinfo=dt.UTC)
     )

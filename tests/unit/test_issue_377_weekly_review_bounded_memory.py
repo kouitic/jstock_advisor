@@ -49,9 +49,7 @@ _LABELS = list(EvaluationLabel)
 
 def _stub(label: EvaluationLabel, price: float, excess: float | None) -> Any:
     """build_metrics_bucket() と MetricsAccumulator が読む 3 項目だけを持つ評価の代役。"""
-    return SimpleNamespace(
-        evaluation_label=label, price_return_pct=price, excess_return_pct=excess
-    )
+    return SimpleNamespace(evaluation_label=label, price_return_pct=price, excess_return_pct=excess)
 
 
 def _random_stubs(rnd: random.Random, n: int) -> list[Any]:
@@ -199,9 +197,7 @@ class _FakeEvaluations:
 
 
 class _FakeRecommendations:
-    def __init__(
-        self, tracker: _Tracker, kinds: dict[str, tuple[RecommendationType, str]]
-    ) -> None:
+    def __init__(self, tracker: _Tracker, kinds: dict[str, tuple[RecommendationType, str]]) -> None:
         self._tracker = tracker
         self._kinds = kinds  # recommendation_id -> (種別, rule_version)。無いIDは「欠落」
 
@@ -279,7 +275,7 @@ def test_chunk_boundaries_counts_and_get_many_calls(count: int) -> None:
     specs, kinds = _generate(count, missing_every=7)
     service = _service(tracker, specs, kinds)
 
-    aggregates = service._aggregate_windows(_WINDOWS[:1])
+    aggregates = service._aggregate_windows(_WINDOWS[:1], current_label="W0")
     aggregate = aggregates["W0"]
 
     missing = sum(1 for i in range(count) if i % 7 == 0)
@@ -300,7 +296,7 @@ def test_get_many_is_called_per_window_and_never_exceeds_the_chunk_size() -> Non
     specs, kinds = _generate(1234, windows=5)
     service = _service(tracker, specs, kinds)
 
-    aggregates = service._aggregate_windows(_WINDOWS)
+    aggregates = service._aggregate_windows(_WINDOWS, current_label="W0")
 
     assert sum(a.matched for a in aggregates.values()) == 1234
     assert all(size <= _CHUNK for size in tracker.get_many_sizes)
@@ -317,7 +313,7 @@ def test_recommendations_and_evaluations_alive_at_once_are_bounded_by_the_chunk(
     specs, kinds = _generate(2500, windows=5)
     service = _service(tracker, specs, kinds)
 
-    service._aggregate_windows(_WINDOWS)
+    service._aggregate_windows(_WINDOWS, current_label="W0")
 
     assert tracker.peak_recs <= _CHUNK
     assert tracker.peak_evals <= len(_WINDOWS) * _CHUNK + 2
@@ -340,7 +336,7 @@ def test_peak_traced_memory_does_not_grow_with_the_number_of_matched_evaluations
     try:
         tracemalloc.reset_peak()
         base, _ = tracemalloc.get_traced_memory()
-        aggregates = service._aggregate_windows(_WINDOWS)
+        aggregates = service._aggregate_windows(_WINDOWS, current_label="W0")
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -363,7 +359,7 @@ def test_aggregation_equals_the_list_based_oracle_for_every_week_group_and_missi
     evaluations = [_evaluation(*spec) for spec in specs]  # oracle 用(実サービスとは別物)
     service = _service(tracker, specs, kinds)
 
-    aggregates = service._aggregate_windows(_WINDOWS)
+    aggregates = service._aggregate_windows(_WINDOWS, current_label="W0")
 
     for label, start, end in _WINDOWS:
         in_window = [e for e in evaluations if start <= e.evaluation_date <= end]
@@ -404,7 +400,7 @@ def test_missing_ids_are_kept_once_per_evaluation_even_when_the_id_repeats() -> 
     ]
     service = _service(tracker, specs, {"rec2": (RecommendationType.BUY, "v1")})
 
-    aggregate = service._aggregate_windows(_WINDOWS[:1])["W0"]
+    aggregate = service._aggregate_windows(_WINDOWS[:1], current_label="W0")["W0"]
 
     assert aggregate.missing_ids == ["missing-x", "missing-x", "missing-y"]
     assert (aggregate.matched, aggregate.joined) == (4, 1)
@@ -427,6 +423,6 @@ def test_only_the_target_horizon_and_windows_are_aggregated() -> None:
 
     service._evaluations.iter_all = with_noise
 
-    aggregates = service._aggregate_windows(_WINDOWS[:2])
+    aggregates = service._aggregate_windows(_WINDOWS[:2], current_label="W0")
 
     assert sum(a.matched for a in aggregates.values()) == 60  # 別ホライズンと範囲外は捨てる

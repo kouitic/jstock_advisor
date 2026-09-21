@@ -114,6 +114,10 @@ class WeeklyImprovementReviewOutcome:
     # 週ラベル -> その週で書き直した行数。総数だけでは「どの週を触ったか」が
     # 分からず、上書きの影響範囲を後から検証できないため併せて残す。
     past_weeks_metrics_recomputed_by_week: dict[str, int] = field(default_factory=dict)
+    # 週ラベル -> 失敗の識別子(`phase=recommendation_join exception=<型名>`)。Recommendation結合に
+    # 失敗した過去週。その週のmetricsは保存していない(途中までの集計を保存しない)。例外の
+    # 本文は含めない(識別子・内部情報を増やさない)。current weekの失敗はrun()自体が失敗する。
+    past_weeks_join_failed: dict[str, str] = field(default_factory=dict)
 
 
 def _iso_week_label(d: dt.date) -> str:
@@ -152,6 +156,9 @@ class _WindowAggregate:
     missing_ids: list[str] = field(default_factory=list)
     # 挿入順 = この週で最初に現れた順(従来の`_group_by_type_and_rule_version()`と同じ)。
     groups: dict[tuple[RecommendationType, str], MetricsAccumulator] = field(default_factory=dict)
+    # 過去週のRecommendation結合が失敗した場合の識別子。Noneでない週は「途中まで集計した不完全な
+    # 状態」なので、以後foldせず、metricsの再集計でも必ずスキップする(部分値を保存しない)。
+    failure: str | None = None
 
 
 class WeeklyImprovementReviewService:
@@ -200,23 +207,21 @@ class WeeklyImprovementReviewService:
         # 週ごとに個別へ全件走査していた。1 + weeks_back回 -> 1回)。
         # 窓の計算自体は純粋計算であり副作用を持たない。
         weeks_back = self._review_config.history_weeks_for_comparison
-        windows: list[tuple[str, dt.date, dt.date]] = [
-            (review_week, period_start, period_end)
-        ]
+        windows: list[tuple[str, dt.date, dt.date]] = [(review_week, period_start, period_end)]
         past_labels: list[str] = []
         label = review_week
         for _ in range(max(weeks_back, 0)):
             label = _previous_week_label(label)
             past_period_start = _monday_of_iso_week(label)
-            windows.append(
-                (label, past_period_start, past_period_start + dt.timedelta(days=6))
-            )
+            windows.append((label, past_period_start, past_period_start + dt.timedelta(days=6)))
             past_labels.append(label)
 
         # Issue #377 Track1: 1回のstreaming scanの中で、評価をchunkごとにRecommendationと
         # 結合して集計器へ足し込む。評価のリストもjoinした結果も保持しない(メモリは
         # scanの1ページ + chunk1つ + 集計の組の数に有界)。
-        aggregates = self._aggregate_windows(windows)
+        # current weekの結合失敗はrun全体の失敗(不完全なmetrics/candidateで続行しない)。
+        # 過去週の結合失敗はその週だけを失敗扱いにし、current weekの処理は続ける。
+        aggregates = self._aggregate_windows(windows, current_label=review_week)
         current = aggregates[review_week]
         missing_ids = current.missing_ids
 
@@ -300,6 +305,11 @@ class WeeklyImprovementReviewService:
             metrics_saved=metrics_saved,
             past_weeks_metrics_recomputed=past_weeks_recomputed,
             past_weeks_metrics_recomputed_by_week=past_weeks_detail,
+            past_weeks_join_failed={
+                label: failure
+                for label in past_labels
+                if (failure := aggregates[label].failure) is not None
+            },
             candidates_detected=len(candidates),
             issue_eligible_candidates=len(issue_eligible),
             github_statuses=github_statuses,
@@ -311,12 +321,13 @@ class WeeklyImprovementReviewService:
     # --- データ収集・join ---------------------------------------------
 
     def _aggregate_windows(
-        self, windows: list[tuple[str, dt.date, dt.date]]
+        self, windows: list[tuple[str, dt.date, dt.date]], current_label: str
     ) -> dict[str, _WindowAggregate]:
         """1回のstreaming scanで、複数の対象週(当該週+過去N週)へ同時に振り分けて集計する
         (Issue #377 / Track1)。
 
-        `windows`は`(review_week_label, period_start, period_end)`の列。
+        `windows`は`(review_week_label, period_start, period_end)`の列。`current_label`は
+        そのうちの当該週(明示的に渡す。位置で暗黙に決めない)。
         呼び出し側は互いに重複しない7日間の集合を渡すこと(呼び出し側が
         `_previous_week_label()`の連鎖で作るため、設計上必ず非重複・連続する)。
 
@@ -334,6 +345,8 @@ class WeeklyImprovementReviewService:
           したがって、集計の値(float の合計の順序を含む)も、`groups`の挿入順も、
           従来(週ごとに評価のリストを作って結合・集計する方式)と同じになる。
         """
+        if current_label not in {label for label, _, _ in windows}:
+            raise ValueError("current_label must be one of the windows")
         target_horizon = self._review_config.evaluation_horizon_days
         aggregates: dict[str, _WindowAggregate] = {
             label: _WindowAggregate() for label, _, _ in windows
@@ -354,16 +367,16 @@ class WeeklyImprovementReviewService:
                 if period_start <= evaluation.evaluation_date <= period_end:
                     matched += 1
                     aggregates[label].matched += 1
+                    if aggregates[label].failure is not None:
+                        break  # 失敗した過去週は以後foldしない(メモリも増やさない)
                     chunk = pending[label]
                     chunk.append(evaluation)
                     if len(chunk) >= _RECOMMENDATION_JOIN_CHUNK_SIZE:
-                        self._fold_chunk(aggregates[label], chunk)
-                        chunk.clear()
+                        self._fold_or_fail(aggregates[label], label, current_label, chunk)
                     break  # windowsは非重複なので複数の週へは入らない
         for label, chunk in pending.items():
             if chunk:
-                self._fold_chunk(aggregates[label], chunk)
-                chunk.clear()
+                self._fold_or_fail(aggregates[label], label, current_label, chunk)
         logger.info(
             "weekly review single-pass scan done scanned=%d matched=%d windows=%d",
             scanned,
@@ -371,6 +384,35 @@ class WeeklyImprovementReviewService:
             len(windows),
         )
         return aggregates
+
+    def _fold_or_fail(
+        self,
+        aggregate: _WindowAggregate,
+        label: str,
+        current_label: str,
+        chunk: list[EvaluationResult],
+    ) -> None:
+        """chunkをfoldし、chunkを空にする。失敗時の契約(Issue #377 Track1):
+
+        - current week: 例外をそのまま伝播する(run全体が失敗。不完全なまま続行しない)。
+        - 過去週: その週を失敗扱いにして続行する。途中までの集計は捨てる(保存しない)。
+          記録するのは週ラベル・段階・例外の型名だけ(本文・識別子は出さない)。
+        """
+        try:
+            self._fold_chunk(aggregate, chunk)
+        except Exception as exc:
+            if label == current_label:
+                raise
+            aggregate.failure = f"phase=recommendation_join exception={type(exc).__name__}"
+            aggregate.groups.clear()
+            aggregate.missing_ids.clear()
+            logger.warning(
+                "weekly review past-week join failed review_week=%s %s (metrics not saved)",
+                label,
+                aggregate.failure,
+            )
+        finally:
+            chunk.clear()
 
     def _fold_chunk(self, aggregate: _WindowAggregate, chunk: list[EvaluationResult]) -> None:
         """chunk(評価)へ対応するRecommendationを結合し、集計器へ足し込む(Issue #377 Track1)。
@@ -386,9 +428,7 @@ class WeeklyImprovementReviewService:
         ★ 同じrecommendation_idを複数の評価が参照する場合、`get_many()`はID単位で重複排除して
           1回だけ取得する(Recommendationの取得回数は増えない)。
         """
-        found = self._recommendations.get_many(
-            evaluation.recommendation_id for evaluation in chunk
-        )
+        found = self._recommendations.get_many(evaluation.recommendation_id for evaluation in chunk)
         for evaluation in chunk:
             recommendation = found.get(evaluation.recommendation_id)
             if recommendation is None:
@@ -449,6 +489,9 @@ class WeeklyImprovementReviewService:
         recomputed = 0
         per_week: dict[str, int] = {}
         for label in past_labels:
+            if aggregates[label].failure is not None:
+                # 結合に失敗した週は不完全な集計しか無い。保存しない(既存の行もそのまま残す)。
+                continue
             period_start = _monday_of_iso_week(label)
             period_end = period_start + dt.timedelta(days=6)
             groups = dict(aggregates[label].groups)
@@ -795,6 +838,7 @@ class WeeklyImprovementReviewService:
                 "past_weeks_metrics_recomputed_by_week": (
                     outcome.past_weeks_metrics_recomputed_by_week
                 ),
+                "past_weeks_join_failed": outcome.past_weeks_join_failed,
                 "candidates_detected": outcome.candidates_detected,
                 "issue_eligible_candidates": outcome.issue_eligible_candidates,
                 "github_statuses": outcome.github_statuses,
