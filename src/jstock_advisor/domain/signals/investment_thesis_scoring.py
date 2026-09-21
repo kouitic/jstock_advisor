@@ -27,11 +27,15 @@ tests/unit/test_missing_yield_semantics.py が契約として固定している)
     baselineに優待なし                          -> NOT_APPLICABLE(現在が廃止登録でも同じ。U-B)
     baselineの値が不明(None)/ 初回評価          -> BASELINE_NOT_COMPARABLE(不評価。分母から外す)
     baselineに優待あり かつ 現在の登録なし      -> DATA_MISSING(不評価。★廃止とみなさない)
-    baselineに優待あり かつ 明示的な改悪        -> DOWNGRADED(評価・0点)
+    baselineに優待あり かつ 明示的な廃止        -> ABOLISHED(評価・0点。Issue #476)
+    baselineに優待あり かつ 明示的な大幅改悪    -> DOWNGRADED(評価・0点)
     baselineに優待あり かつ 維持                -> MAINTAINED(評価・満点)
 
-★ 明示的な**廃止**(`is_abolished`)は、従来どおり NOT_APPLICABLE のまま変えていない(Issue #476 が、
-  同じ関数の状態として「評価・0点」へ改める。本Issueの範囲外)。
+★ 明示的な**廃止**(`is_abolished`)は、以前は「現在の優待の有無」(`not is_abolished`)が偽になるため
+  NOT_APPLICABLE(理由「優待非保有銘柄」)となり、大幅改悪(評価・0点)と非対称だった(Issue #476。
+  USER決定 U-A)。ABOLISHEDとDOWNGRADEDは、スコア上は同じ(評価・0点。既存の`benefit_condition`の
+  重みに対する0点)で、状態は分けて残す。リスク控除(`shareholder_benefit_abolished`)は別の軸で、
+  既存の挙動のまま変えない(新しい重みは足さない)。
 
 DATA_MISSINGは、不評価の理由コード`BENEFIT_DATA_MISSING`で BASELINE_NOT_COMPARABLE と区別する。
 `status`には新しい値を足さない(共通enum S-16は変えず、保存形式も変わらない)。スコアの分母からは
@@ -90,6 +94,7 @@ class BenefitConditionState(enum.StrEnum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
     BASELINE_NOT_COMPARABLE = "BASELINE_NOT_COMPARABLE"
     DATA_MISSING = "DATA_MISSING"
+    ABOLISHED = "ABOLISHED"
     DOWNGRADED = "DOWNGRADED"
     MAINTAINED = "MAINTAINED"
 
@@ -108,7 +113,8 @@ def derive_benefit_condition_state(
     * baselineの値が不明(None。テスト・repair経路のみ)は、優待なしにも維持にも倒さず不評価。
     * 初回評価(baselineを今作った)は比較不能(Issue #249の既存挙動)。
     * baselineに優待ありで現在の登録が無い場合は、DATA_MISSING(廃止とみなさない)。
-    * ★ 明示的な廃止は従来どおり NOT_APPLICABLE(Issue #476 で「評価・0点」へ改める)。
+    * 明示的な廃止は ABOLISHED(評価・0点。Issue #476。大幅改悪も同時なら廃止を優先)、
+      大幅改悪は DOWNGRADED(評価・0点)、それ以外は MAINTAINED。
     """
     if baseline_has_benefit is False:
         return BenefitConditionState.NOT_APPLICABLE
@@ -117,8 +123,7 @@ def derive_benefit_condition_state(
     if not benefit_registered:
         return BenefitConditionState.DATA_MISSING
     if benefit_is_abolished:
-        # 従来の挙動を保つ(has_benefit = not is_abolished が False → NOT_APPLICABLE)。#476で改める。
-        return BenefitConditionState.NOT_APPLICABLE
+        return BenefitConditionState.ABOLISHED
     if benefit_is_major_downgrade:
         return BenefitConditionState.DOWNGRADED
     return BenefitConditionState.MAINTAINED
@@ -225,7 +230,9 @@ def score_investment_thesis(
                 weight=weights.benefit_condition,
                 status=EvidenceCoverageStatus.EVALUATED,
                 points_earned=(
-                    0.0 if state is BenefitConditionState.DOWNGRADED else weights.benefit_condition
+                    0.0
+                    if state in (BenefitConditionState.ABOLISHED, BenefitConditionState.DOWNGRADED)
+                    else weights.benefit_condition
                 ),
             )
         )
