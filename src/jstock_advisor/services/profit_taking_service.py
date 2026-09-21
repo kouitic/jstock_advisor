@@ -260,13 +260,34 @@ def _profit_taking_fair_value_block_reason_text(
     閾値は文言へハードコードせず、必ずconfigの実値を埋め込む
     (configを変えたときに説明文だけが古い値のまま残らないようにする)。
     """
+    cbj = config.profit_taking.condition_based_judgment
     if code is ProfitTakingFairValueBlockReasonCode.METHOD_SPREAD_TOO_WIDE_FOR_ACTION:
-        cbj = config.profit_taking.condition_based_judgment
         threshold = cbj.max_fair_value_spread_ratio_for_partial
         return (
             f"適正価格の手法間の広がりが利確判定の基準({threshold:.2f}倍)を超えているため、"
             "価格基準の利確判定に使用していません"
         )
+    # Issue #471(USER決定 U-b): 下の4つの文言は、USER確定の原文どおり(nはconfigの実値)。
+    if code is ProfitTakingFairValueBlockReasonCode.TOO_FEW_METHODS_FOR_ACTION:
+        return (
+            "適正価格の根拠がまだ十分ではないため、今回は価格を基準にした利確判断を見送ります"
+            f"(必要:{cbj.min_fair_value_methods_for_partial}手法以上)"
+        )
+    if code is ProfitTakingFairValueBlockReasonCode.FAIR_VALUE_NOT_REFLECTING_LATEST_EARNINGS:
+        return (
+            "適正価格に最新の決算が反映されていないため、"
+            "今回は価格を基準にした利確判断を見送ります"
+        )
+    if code is ProfitTakingFairValueBlockReasonCode.FAIR_VALUE_EARNINGS_REFLECTION_UNKNOWN:
+        return (
+            "適正価格に最新の決算が反映されているか確認できないため、"
+            "今回は価格を基準にした利確判断を見送ります"
+        )
+    if code is ProfitTakingFairValueBlockReasonCode.EARNINGS_TOO_CLOSE_FOR_ACTION:
+        # 遮断の条件は「営業日数 < 下限」。n = 遮断される最大の営業日数(下限 - 1)。
+        # 表示と遮断の閾値を、この1か所(遮断側のconfig)へ一本化する(U-a)。
+        days = cbj.min_business_days_to_earnings_for_fair_value_action - 1
+        return f"次回決算まで{days}営業日以内のため、今回は価格を基準にした利確判断を見送ります"
     raise ValueError(f"未対応の利確判定側ブロック理由コードです: {code}")
 
 
@@ -276,7 +297,6 @@ def _build_not_yet_action_reasons(
     fair_value_overall_confidence: ConfidenceLevel | None,
     industry_sector: ProfitTakingIndustrySector,
     industry_model_applied: bool,
-    days_to_next_earnings_business_days: int | None,
     trading_unit_feasibility: TradingUnitFeasibility,
     has_strong_counter_material: bool,
     is_uptrend: bool,
@@ -331,12 +351,9 @@ def _build_not_yet_action_reasons(
         else:
             label = _INDUSTRY_SECTOR_LABELS[industry_sector]
             reasons.append(f"{label}の事業特性を十分に反映した専用評価モデルではありません")
-    if (
-        days_to_next_earnings_business_days is not None
-        and days_to_next_earnings_business_days
-        <= config.earnings_window.profit_taking_suppression_business_days
-    ):
-        reasons.append(f"次回決算まで{days_to_next_earnings_business_days}営業日")
+    # Issue #471(USER決定 U-b = REPLACE): 以前ここにあった「次回決算まで N 営業日」は、上限価格を
+    # 使えなかった原因の1つ(EARNINGS_TOO_CLOSE_FOR_ACTION)として、上の理由コードの文言へ置き換えた
+    # (同じ事実を2行にしない。閾値も遮断側の1か所へ一本化)。
     if not trading_unit_feasibility.partial_sale_executable:
         reasons.append(
             f"保有株数が売買単位({trading_unit_feasibility.trading_unit}株)に届かず"
@@ -995,6 +1012,10 @@ class ProfitTakingService:
                 "fair_value_action_block_reason_code": (
                     result.fair_value_action_block_reason_code
                 ),
+                # Issue #471(USER決定 U-c): 利用者表示は最初の原因1つ、監査は全原因。
+                "fair_value_action_block_reason_codes": list(
+                    result.fair_value_action_block_reason_codes
+                ),
                 "fair_value_unusable_reason_code": (
                     snapshot.fair_value_range.unusable_reason_code.value
                     if snapshot.fair_value_range.unusable_reason_code is not None
@@ -1317,7 +1338,6 @@ class ProfitTakingService:
                 fv_range.overall_confidence,
                 industry_sector,
                 industry_model_applied,
-                days_to_earnings,
                 trading_unit_feasibility,
                 has_strong_counter_material,
                 snapshot.momentum.trend_classification

@@ -1319,6 +1319,20 @@ _FAIR_VALUE_UNUSABLE_TEXTS: dict[str, str] = {
         "適正価格の手法間の広がりが利確判定の基準を超えているため、"
         "価格基準の利確判定に使用していません"
     ),
+    # Issue #471(USER決定 U-b): 利用者向けの原文どおり。この辞書は固定文言のため、configの実値
+    # (必要な手法数・決算直前の営業日数)は埋め込まない(既存のスプレッド超過の文言と同じ扱い)。
+    ProfitTakingFairValueBlockReasonCode.TOO_FEW_METHODS_FOR_ACTION.value: (
+        "適正価格の根拠がまだ十分ではないため、今回は価格を基準にした利確判断を見送ります"
+    ),
+    ProfitTakingFairValueBlockReasonCode.FAIR_VALUE_NOT_REFLECTING_LATEST_EARNINGS.value: (
+        "適正価格に最新の決算が反映されていないため、今回は価格を基準にした利確判断を見送ります"
+    ),
+    ProfitTakingFairValueBlockReasonCode.FAIR_VALUE_EARNINGS_REFLECTION_UNKNOWN.value: (
+        "適正価格に最新の決算が反映されているか確認できないため、今回は価格を基準にした利確判断を見送ります"
+    ),
+    ProfitTakingFairValueBlockReasonCode.EARNINGS_TOO_CLOSE_FOR_ACTION.value: (
+        "次回決算までの営業日数が少ないため、今回は価格を基準にした利確判断を見送ります"
+    ),
 }
 _FAIR_VALUE_UNUSABLE_GENERIC_TEXT = "適正価格を価格基準の利確判定に使用できませんでした"
 
