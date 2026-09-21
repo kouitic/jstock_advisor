@@ -11,7 +11,7 @@ baseline時に優待があった保有で、現在の台帳に登録が無くな
   * スコアは変わらず(分母から外す)、coverageだけが下がる(確認できていない事実を残す)。
   * Issue #55 Phase A Decision 3(total_yieldの欠測は分母に残る)は変えない。
   * 共通enum(`EvidenceCoverageStatus`)の値の集合と、保存形式(`ScoreItemDetail`)は変えない。
-  * 明示的な廃止は従来どおり NOT_APPLICABLE(#476で「評価・0点」へ改める。本Issueの範囲外)。
+  * 明示的な廃止の扱いは #476 の範囲(本ファイルは廃止の期待値を、#476 で ABOLISHED へ更新済み)。
 
 ★ 銘柄コード・優待は架空値のみ(実在の銘柄・所有者・保有データを含まない)。
 """
@@ -121,9 +121,9 @@ def test_state_4_downgrade_is_evaluated_and_maintained_is_evaluated() -> None:
     assert _derive(True) is _S.MAINTAINED
 
 
-def test_abolished_stays_not_applicable_until_issue_476() -> None:
-    """★ 明示的な廃止は従来どおり(NOT_APPLICABLE)。#476で「評価・0点」へ改めるとき更新する。"""
-    assert _derive(True, abolished=True) is _S.NOT_APPLICABLE
+def test_abolished_is_its_own_evaluated_state_since_issue_476() -> None:
+    """明示的な廃止は、NOT_APPLICABLEではなくABOLISHED(評価・0点)。詳細は #476 のテスト。"""
+    assert _derive(True, abolished=True) is _S.ABOLISHED
 
 
 def test_state_6_unknown_baseline_value_is_not_evaluated_not_no_benefit_nor_maintained() -> None:
@@ -146,8 +146,8 @@ def _reference(
     if not registered:
         return _S.DATA_MISSING
     return {
-        (True, False): _S.NOT_APPLICABLE,
-        (True, True): _S.NOT_APPLICABLE,
+        (True, False): _S.ABOLISHED,
+        (True, True): _S.ABOLISHED,
         (False, True): _S.DOWNGRADED,
         (False, False): _S.MAINTAINED,
     }[(abolished, downgraded)]
@@ -381,10 +381,12 @@ def test_service_baseline_with_benefit_downgraded_is_zero_points(tmp_path: Path)
     assert item.points_earned == 0.0
 
 
-def test_service_abolished_is_unchanged_not_applicable_until_issue_476(tmp_path: Path) -> None:
+def test_service_abolished_is_evaluated_zero_points_since_issue_476(tmp_path: Path) -> None:
     _, second, _ = _evaluate_twice(tmp_path, _benefit(), _benefit(abolished=True))
 
-    assert _benefit_item(second).status == EvidenceCoverageStatus.NOT_APPLICABLE
+    item = _benefit_item(second)
+    assert item.status == EvidenceCoverageStatus.EVALUATED
+    assert item.points_earned == 0.0
 
 
 def test_service_first_evaluation_is_not_comparable_and_uses_the_baseline_just_created(
