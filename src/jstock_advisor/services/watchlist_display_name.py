@@ -32,6 +32,11 @@ from jstock_advisor.providers.candidate_universe.jpx_impl import parse_listed_is
 from jstock_advisor.services.candidate_universe_downloader import CandidateUniverseCacheIO
 
 logger = logging.getLogger(__name__)
+# Issue #413 / #496: Lambda の root logger は WARNING のため、module が宣言しないと INFO は出ない。
+# この module の INFO は「JPX 銘柄名 map の読み込み件数」の 1 行だけで、読み込みは成功キャッシュが
+# あるコンテナ生存期間中は再実行されない(cold start 相当。出力は無視できる量)。件数のみで、銘柄名・
+# stock_code は出さない。Lambda で出力されるよう INFO を宣言する。既存の WARNING は変更しない。
+logger.setLevel(logging.INFO)
 
 _LISTED_ISSUES_SOURCE = "listed_issues"
 
