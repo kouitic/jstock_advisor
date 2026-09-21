@@ -46,6 +46,18 @@ class ProfitTakingFairValueBlockReasonCode(StrEnum):
     """
 
     METHOD_SPREAD_TOO_WIDE_FOR_ACTION = "METHOD_SPREAD_TOO_WIDE_FOR_ACTION"
+    # --- Issue #471: 利確判定側の他の不成立条件も、原因ごとに構造化する(追加のみ。既存の値は不変)。
+    #: 手法数が利確判定側の下限(condition_based_judgment.min_fair_value_methods_for_partial)未満。
+    #: レンジ側の下限(min_methods_required)より厳しいため、レンジは使えるのに
+    #: 利確側で弾かれる帯がある。
+    TOO_FEW_METHODS_FOR_ACTION = "TOO_FEW_METHODS_FOR_ACTION"
+    #: 適正価格が最新の決算を反映していない(fair_value_reflects_latest_earnings が False)。
+    FAIR_VALUE_NOT_REFLECTING_LATEST_EARNINGS = "FAIR_VALUE_NOT_REFLECTING_LATEST_EARNINGS"
+    #: 最新の決算を反映しているか判定できない(None)。「反映していない」と断定しない。
+    FAIR_VALUE_EARNINGS_REFLECTION_UNKNOWN = "FAIR_VALUE_EARNINGS_REFLECTION_UNKNOWN"
+    #: 次回決算までの営業日数が利確判定側の下限
+    #: (min_business_days_to_earnings_for_fair_value_action)未満。
+    EARNINGS_TOO_CLOSE_FOR_ACTION = "EARNINGS_TOO_CLOSE_FOR_ACTION"
 
 
 class ValuationExclusionReason(ImmutableSnapshot):

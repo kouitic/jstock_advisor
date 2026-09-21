@@ -303,38 +303,29 @@ def test_smallest_unrealized_gain_makes_the_range_usable() -> None:
     assert result.final_action == RecommendationType.HOLD
 
 
-# --- 理由コード(現状の観測。原因のうち構造化されているのはスプレッド超過のみ)-------
+# --- 理由コード(#471 で、手法数不足・決算反映・決算直前を構造化した。それ以外は従来どおり)--
 
 
-def test_block_reason_code_is_none_for_causes_without_a_structured_reason() -> None:
-    """スプレッド超過以外の原因では、利用者・監査へ渡る理由コードが無い(現状の観測)。
+def test_block_reason_code_is_none_for_causes_outside_the_structured_scope() -> None:
+    """構造化の対象外(USER決定 U-a)の原因では、理由コードは従来どおり無い。
 
-    上限価格が使えない原因のうち、構造化された理由コードを持つのはスプレッド超過だけ
-    である(`_fair_value_action_block_reason`のdocstringが既知の空白として明記している)。
-    本テストはその現状を記録する。**理由コードを拡張する場合(#471)は、意図した変更
-    として本テストを更新する**(本Issueでは理由コードを追加しない)。
+    #471 は、手法数不足・最新決算の未反映・反映不明・決算直前を構造化した
+    (`test_issue_471_fair_value_action_block_reasons.py`)。**対象外**は次のとおり:
+    レンジ自体が無い / レンジが使えない(別の軸 FairValueUnusableReasonCode)/ bull なし /
+    bear なし・0 以下 / 業種区分(業種別モデル未適用)。これらでは、理由コードは None のままである。
 
     ★ 純粋なHOLD / WATCHで`usable=False`かつ`block_reason=None`が同時に成立することを
-      固定する(=「使えなかった」ことは分かるが「なぜか」は伝わらない)。
+      固定する(=「使えなかった」ことは分かるが、この軸では「なぜか」を持たない)。
     """
     causes = [
         _evaluate(fair_value_range=None),
         _evaluate(fair_value_range=_range(usable=False)),
         _evaluate(fair_value_range=_range(bull=None)),
         _evaluate(fair_value_range=_range(bear=None)),
-        _evaluate(
-            fair_value_range=_range(method_count=_CBJ.min_fair_value_methods_for_partial - 1)
-        ),
-        _evaluate(fair_value_reflects_latest_earnings=False),
-        _evaluate(fair_value_reflects_latest_earnings=None),
-        _evaluate(
-            days_to_next_earnings_business_days=(
-                _CBJ.min_business_days_to_earnings_for_fair_value_action - 1
-            )
-        ),
         _evaluate(industry_classification=None),
     ]
 
     for result in causes:
         assert result.fair_value_action_usable is False
         assert result.fair_value_action_block_reason_code is None
+        assert result.fair_value_action_block_reason_codes == ()
