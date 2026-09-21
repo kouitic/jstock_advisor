@@ -2914,3 +2914,45 @@ finalize 時に、BUY / holdings の batch item へ終端の status を入れる
 ・完了の確認のために batch_runs を full scan する、または失敗銘柄・不足銘柄の属性(所有者を含みうる)を読み出す(25.4)
 ・watchlist 系のバッチへ、本節の判定を当てはめる(4.1 節の status の state machine が正本)
 ```
+
+## 26. shadow 監査記録の集計 CLI の使い方(Issue #458、2026-09-21追加)
+
+判断の安全条件(G1〜G4)の shadow 監査記録(`decision_type=judgment_safety_shadow`)を集計し、`AuditLogTable` の増加量・scan の実測値を出す、**読み取り専用**の CLI である。
+Phase 2(誤検出・過剰抑制のレビュー)と、専用 Table への移行の要否を判断する材料(U13 = OPTION_C)を出すためにある。
+
+### 26.1 これは何を「しない」か(★ 最初に読むこと)
+
+```
+・【--source dynamodb(Production)】書き込み・保存・削除・invoke・通知のいずれも行わない(scan / describe_table だけを通す allowlist の proxy。それ以外の呼び出しは例外)
+・【--source local(既定)】ローカルの保管ディレクトリを作る(既存の共有 store の挙動。`AuditLogRepository()` の構築時に mkdir する。冪等で、ファイルもデータも作らない)。
+  それ以外(保存・削除・invoke・通知)は行わない。Production(DynamoDB)には触れない
+・閾値の判定・「専用 Table へ移行すべき」等の提案をしない(判断は USER / MANAGER)
+・Production を既定で読まない(既定は --source local)
+・shadow の有効化(mode の変更)はしない(別の Human Gate)
+```
+
+### 26.2 使い方
+
+```
+jstock judgment-safety-shadow report                           # ローカルの JSON(既定)
+jstock judgment-safety-shadow report --source dynamodb         # Production(read-only)
+    [--table jstock-audit_log] [--from YYYY-MM-DD] [--to YYYY-MM-DD]   # 期間は JST 暦日
+    [--describe-only]   # 表のメトリクスだけ(scan しない)。dynamodb のみ
+    [--metrics-only]    # 表・scan のメトリクスだけ(shadow の集計は出さない)
+    [--json]            # 機械可読
+    [--baseline-records 78700] [--baseline-size-bytes 153000000] [--baseline-date 2026-09-20]
+```
+
+- `--source dynamodb` は、呼び出し元の資格情報(`AWS_PROFILE` 等)で読む。観測用の `jstock-observer` で `jstock-audit_log` を Scan できる(write 権限は不要)。実行時、標準エラーへ「read-only・対象テーブル」を表示する。
+- 全件 Scan になる(2026-09-20 時点で約 78,700 件・約 153MB、概算で約 2 万読み取りユニット)。**定期実行には組み込まれていない。実行は運用者の判断で行う。**
+- 終了コード: 0 = 正常(記録が 0 件でも 0)/ 2 = 引数不正 / 3 = 読み取り失敗(認証・ネットワーク。例外の型だけを表示する)。
+
+### 26.3 読み方(誤読の防止)
+
+- **0 件は「問題なし」ではない。** SHADOW の有効化の前、または期間外である。CLI も明示する。
+- 条件別の率の分母は、`not_evaluated`(入力が無く評価できなかった条件)を**除いた**評価済みの記録数である。`not_evaluated` は「該当なし」ではなく、別掲する。
+- G3 は測定可能な 2 項目の**下限値**(測定不能の 3 項目は含まない)。G4 は保有の `FULL_PROFIT_TAKE` のみが対象(買い経路は対象外)。
+- `ItemCount` / `TableSizeBytes`(DescribeTable)は**概算**で、およそ 6 時間ごとに更新される。実測値は Scan の結果である。両者を区別して表示する。
+- 推定コストは公開単価(コード内の定数)に基づく**概算**。単価は AWS Price List API(ap-northeast-1・Standard table class・オンデマンド読み取り = 100 万読み取りユニットあたり 0.1425 USD。公開日 2026-09-11)で 2026-09-21 に確認した値。単価は変わりうるため、出力の `estimated_read_cost_basis` の確認日を見る。table class が Standard-IA の場合は別の単価(0.178)になる。
+- 月次の外挿は、shadow 記録がある日が 3 日未満のときは参考値である。
+- `unparsed` は読めなかった項目の件数(沈黙させない)。未知の `schema_version` は `unparsed` ではなく別掲する。
