@@ -262,6 +262,10 @@ class ProfitTakingResult:
     # の場合のみ設定する(「何株売るか」の判定強度)。それ以外は常にNone
     # (WATCH/HOLD/FULLでは適用しない)。
     sell_intensity: SellIntensity | None
+    # --- Issue #471(USER決定 U-c): 上限価格を使えなかった**全原因**のcode。
+    # 利用者への表示は最初の1つ(`fair_value_action_block_reason_code`)だけで、監査には全原因を残す。
+    # 順序は`_FAIR_VALUE_ACTION_BLOCK_REASON_ORDER`で明示的に固定している。空 = 該当なし。
+    fair_value_action_block_reason_codes: tuple[str, ...] = ()
 
 
 class InvalidProfitTakingInputError(ValueError):
@@ -465,36 +469,59 @@ def _fair_value_action_usable(
     )
 
 
-def _fair_value_action_block_reason(
+#: 上限価格を使えなかった原因を並べる**明示的な順序**(Issue #471。USER決定 U-c)。
+#: `_fair_value_action_usable()`の評価順(手法数 → スプレッド → 決算反映 → 決算直前)と同じ。
+#: 暗黙の実装順に依存しないよう定数として固定し、テストで固定する。業種・bull/bear欠如・レンジ無し
+#: は対象外(USER決定 U-a)。
+_FAIR_VALUE_ACTION_BLOCK_REASON_ORDER: tuple[ProfitTakingFairValueBlockReasonCode, ...] = (
+    ProfitTakingFairValueBlockReasonCode.TOO_FEW_METHODS_FOR_ACTION,
+    ProfitTakingFairValueBlockReasonCode.METHOD_SPREAD_TOO_WIDE_FOR_ACTION,
+    ProfitTakingFairValueBlockReasonCode.FAIR_VALUE_NOT_REFLECTING_LATEST_EARNINGS,
+    ProfitTakingFairValueBlockReasonCode.FAIR_VALUE_EARNINGS_REFLECTION_UNKNOWN,
+    ProfitTakingFairValueBlockReasonCode.EARNINGS_TOO_CLOSE_FOR_ACTION,
+)
+
+
+def _fair_value_action_block_reasons(
     fv_range: FairValueRange | None,
+    inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
-) -> ProfitTakingFairValueBlockReasonCode | None:
-    """_fair_value_action_usable()がFalseを返した直接原因のうち、
-    既存の説明経路では利用者へ伝わらないものを構造化して返す(Issue #221 Phase 1)。
+) -> tuple[ProfitTakingFairValueBlockReasonCode, ...]:
+    """_fair_value_action_usable()がFalseを返した原因のうち、構造化するものを**すべて**返す
+    (Issue #221 Phase 1 → Issue #471)。順序は`_FAIR_VALUE_ACTION_BLOCK_REASON_ORDER`。
 
-    現時点で返すのは「レンジ自体は売買判断に使える(usable_for_trading_judgment
-    =True)が、利確判定側のより厳しい手法間スプレッド基準
-    (condition_based_judgment.max_fair_value_spread_ratio_for_partial)を
-    超えている」場合のみである。
+    ★ 判定の真偽は変えない。各原因は`_fair_value_action_usable()`の各条件と**同じ入力・同じ比較**で
+      導く(理由の表現のみ)。1つでも返れば、`_fair_value_action_usable()`はFalseである。
 
-    レンジ自体が使えない場合(usable_for_trading_judgment=False)は
-    FairValueRange.unusable_reason_code(Issue #21)が既に理由を持っているため、
-    ここでは重ねてNoneを返す(同じ事実を2系統で表示しない)。
+    返すもの: 手法数不足 / 手法間スプレッド超過 / 最新決算の未反映 / 最新決算の反映不明(None) /
+    次回決算までの営業日数が下限未満。
 
-    ★ _fair_value_action_usable()の他の不成立条件(手法数・最新決算の反映・
-      次回決算までの営業日数・業種)については、本関数はNoneを返す。
-      それらにも既存の説明経路では埋まらない帯が存在するが、Issue #221
-      Phase 1のscope外であり、推測で文言を足さずGitHub Issueへ報告する
-      (development_workflow.md §9.5 OPPORTUNISTIC_FIX_FORBIDDEN)。
+    返さないもの(USER決定 U-a): レンジ自体が使えない場合(usable_for_trading_judgment=False。
+    FairValueRange.unusable_reason_code[Issue #21]が既に理由を持つ。同じ事実を2系統で表示しない)/
+    bull・bearの欠如 / 業種区分(金融業・業種不明で業種別モデル未適用)/
+    含み損(「利確」が成立しない)。
     """
     if fv_range is None or not fv_range.usable_for_trading_judgment or fv_range.bull is None:
-        return None
-    if fv_range.bear is None or fv_range.bear <= 0:
-        return None
-    spread_ratio = float(fv_range.bull / fv_range.bear)
-    if spread_ratio > config.condition_based_judgment.max_fair_value_spread_ratio_for_partial:
-        return ProfitTakingFairValueBlockReasonCode.METHOD_SPREAD_TOO_WIDE_FOR_ACTION
-    return None
+        return ()
+    cbj = config.condition_based_judgment
+    found: set[ProfitTakingFairValueBlockReasonCode] = set()
+    if len(fv_range.methods_used) < cbj.min_fair_value_methods_for_partial:
+        found.add(ProfitTakingFairValueBlockReasonCode.TOO_FEW_METHODS_FOR_ACTION)
+    if fv_range.bear is not None and fv_range.bear > 0:
+        spread_ratio = float(fv_range.bull / fv_range.bear)
+        if spread_ratio > cbj.max_fair_value_spread_ratio_for_partial:
+            found.add(ProfitTakingFairValueBlockReasonCode.METHOD_SPREAD_TOO_WIDE_FOR_ACTION)
+    if inputs.fair_value_reflects_latest_earnings is False:
+        found.add(ProfitTakingFairValueBlockReasonCode.FAIR_VALUE_NOT_REFLECTING_LATEST_EARNINGS)
+    elif inputs.fair_value_reflects_latest_earnings is None:
+        found.add(ProfitTakingFairValueBlockReasonCode.FAIR_VALUE_EARNINGS_REFLECTION_UNKNOWN)
+    if (
+        inputs.days_to_next_earnings_business_days is not None
+        and inputs.days_to_next_earnings_business_days
+        < cbj.min_business_days_to_earnings_for_fair_value_action
+    ):
+        found.add(ProfitTakingFairValueBlockReasonCode.EARNINGS_TOO_CLOSE_FOR_ACTION)
+    return tuple(code for code in _FAIR_VALUE_ACTION_BLOCK_REASON_ORDER if code in found)
 
 
 def _level_from_price_position(
@@ -1324,10 +1351,10 @@ def evaluate_profit_taking(
     )
     # Issue #221 Phase 1(U2): 使えなかった場合の直接原因を構造化して残す。
     # 含み損の場合は「利確」自体が成立せず遮断要因の話にならないためNoneとする。
-    fair_value_action_block_reason = (
-        _fair_value_action_block_reason(fv_range, config)
+    fair_value_action_block_reasons = (
+        _fair_value_action_block_reasons(fv_range, condition_inputs, config)
         if has_unrealized_gain and not fair_value_action_usable
-        else None
+        else ()
     )
     ceiling_price = (
         fv_range.bull if fair_value_action_usable and fv_range is not None else None
@@ -1675,10 +1702,12 @@ def evaluate_profit_taking(
         fair_value_action_usable=fair_value_action_usable,
         ceiling_price=ceiling_price,
         upside_pct=upside_pct,
+        # 利用者への表示は最初の原因1つ。監査には全原因を残す(Issue #471。USER決定 U-c)。
         fair_value_action_block_reason_code=(
-            fair_value_action_block_reason.value
-            if fair_value_action_block_reason is not None
-            else None
+            fair_value_action_block_reasons[0].value if fair_value_action_block_reasons else None
+        ),
+        fair_value_action_block_reason_codes=tuple(
+            code.value for code in fair_value_action_block_reasons
         ),
         mitigating_downgrade_applied=mitigating_downgrade_applied,
         timing_downgrade_applied=timing_downgrade_applied,
