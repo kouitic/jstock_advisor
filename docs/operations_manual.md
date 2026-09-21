@@ -2956,3 +2956,170 @@ jstock judgment-safety-shadow report --source dynamodb         # Production(read
 - 推定コストは公開単価(コード内の定数)に基づく**概算**。単価は AWS Price List API(ap-northeast-1・Standard table class・オンデマンド読み取り = 100 万読み取りユニットあたり 0.1425 USD。公開日 2026-09-11)で 2026-09-21 に確認した値。単価は変わりうるため、出力の `estimated_read_cost_basis` の確認日を見る。table class が Standard-IA の場合は別の単価(0.178)になる。
 - 月次の外挿は、shadow 記録がある日が 3 日未満のときは参考値である。
 - `unparsed` は読めなかった項目の件数(沈黙させない)。未知の `schema_version` は `unparsed` ではなく別掲する。
+
+## 27. 異常を知ったときの手順(障害対応の runbook。Issue #500〔#132 X-1〕、2026-09-21追加)
+
+この節は、**本番のジョブの異常に気づいた人(通知を受けた人、または自分で気づいた人)が、最初に何をするか**を定める。20節(DynamoDB 復旧)・21節(PII 是正)と同じ形の runbook である。
+**確認して報告するための手順であって、復旧の手順ではない**。復旧の操作(再実行・redrive・purge 等)は Production の書き込みであり、Human Gate の対象である(27.5)。
+
+### 27.1 この節の限界(★ 最初に読むこと)
+
+```
+・現在(2026-09-21 時点の infra/template.yaml)、異常を自動で知らせる経路は無い。CloudWatch Alarm は evaluation Lambda の Errors / Duration の 2 本だけで、
+  どちらも AlarmActions が空(鳴っても誰にも届かない)。DLQ の滞留にも Alarm は無い(24.1)。
+  通知経路・alarm の拡張は Issue #132 の段階的な実装で入る。**最新の状態は #132 の最新の記録を読むこと**(この節へ焼き込まない)。
+・したがって「通知が来ない = 正常」ではない。24.1 と同じく、**見に行かなければ気づかない**異常がある。
+・通知が入った後も、対象外がある。秘密の取得失敗(SECRET_UNAVAILABLE)は LINE では知らせない方針(Issue #117)。
+  監視の対象は段階的に広がる(Lambda は 12 本あり、最初から全てではない)。
+・この節は「通知の文面」に依存しない。文面は Issue #501(#132 X-2)が決める。通知本文は、job 名・件数・日数・真偽値・時刻だけを出す想定
+  (識別子・銘柄・所有者を出さない。#132 の承認済み計画)。本文に無い情報は、27.3 の read-only 観測で自分で取る。
+・「誰が・いつ(どの頻度で)確認するか」は、この節では決めていない(24.1 と同じ。Issue #349 ⑤ の残り)。
+```
+
+### 27.2 最初にやること(3 つ。この順で)
+
+```
+1 記録する
+    いつ(通知の時刻、または自分が気づいた時刻)/ どの job か / 何が異常と言われたか / どの手順で知ったか。
+    記録を公開面(GitHub の Issue・PR・コメント)へ書くときは、銘柄コード・銘柄名・所有者・保有数量・AWS アカウント識別子・ARN を書かない(21節)。
+2 状態を変えない
+    急いで直そうとして、27.5 の操作(再実行・手動 invoke・redrive 等)をしない。
+3 read-only で観測し(27.3)、27.6 の形で MANAGER / USER へ報告する
+```
+
+### 27.3 観測の手順(read-only)
+
+観測用 role(`AWS_PROFILE=jstock-observer`。18節・24節と同じ)で行う。**名前が read 系でも副作用が無いとは限らない**(18節)。ここに書いたコマンドは、参照系の API だけを使う。
+
+| 疑うこと | 見るもの | 手順 |
+|---|---|---|
+| Lambda の失敗(例外・timeout。timeout は Errors に計上される) | `AWS/Lambda` の `Errors` | 27.3.1 |
+| 実行時間が Timeout に近づいている | `AWS/Lambda` の `Duration`(Maximum) | 27.3.1 の `--metric-name` を置き換える |
+| 同時実行の枠に当たっている | `AWS/Lambda` の `Throttles` と `Invocations` | 27.3.1 の `--metric-name` を置き換える。watchlist-worker の Throttles は**平常時も日次で数百〜数千**あり、単日の値ではなく傾向で読む(Issue #4・#224) |
+| メッセージが DLQ に溜まっている | SQS の `ApproximateNumberOfMessagesVisible` | 24節 |
+| BUY / holdings のバッチが完了したか | 完了判定 | 25節 |
+| ウォッチリストのバッチが終端したか / 通知が送れたか | BatchRuns の `status` と `execution_result`(終端か。`NOTIFICATION_FAILED` / `TIMED_OUT` / `FINALIZE_FAILED` 等でないか) | 27.3.4(読み方の基準は 4.1 の状態遷移と 23.2 の V5)。BatchRuns には TTL があり、古い記録は消える |
+| ジョブが起動しなかった(missed schedule) | 該当の Lambda の `Invocations` / `Errors` のデータ点が、動くはずの日にあるか | 27.3.1(データ点の読み方を含む)。**当日が実行対象の日か**を先に確認する(weekly / monthly / quarterly は曜日条件で実行されない日がある。休場日の扱いは Issue #440) |
+| 認証情報の欠落 | ログ検索で `LineCredentialsMissingError` の**件数** | 27.3.3(参照系の `filter-log-events`。23.2 の V7 は Logs Insights を名指しするが、観測用 role では使えない) |
+| Alarm の状態 | (観測用 role では読めない) | 27.3.2 |
+
+#### 27.3.1 Lambda のメトリクスを読む
+
+```bash
+# 直近 3 日の 1 時間ごとの合計。FN を対象の関数の名前へ置き換える。
+# (Git Bash では MSYS_NO_PATHCONV=1 を付ける)
+export AWS_PROFILE=jstock-observer AWS_DEFAULT_REGION=ap-northeast-1
+FN=jstock-advisor-watchlist-worker
+aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Errors \
+  --dimensions Name=FunctionName,Value=$FN \
+  --start-time "$(date -u -d '3 days ago' +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --period 3600 --statistics Sum --query "sort_by(Datapoints,&Timestamp)[].[Timestamp,Sum]" --output text
+```
+
+```
+関数の名前(`jstock-advisor-` に続く部分。スタック名が前置される)
+  buy-candidates / holdings-watchlist / disclosure-check / evaluation / watchlist-dispatcher / watchlist-worker /
+  watchlist-terminal-failure-handler / watchlist-batch-reconciler / weekly-review / monthly-review / quarterly-review / line-webhook
+```
+
+- **データ点が無い日**は「0 だった」ではなく「メトリクスが出なかった」である(24.4 と同じ読み方)。**Lambda のメトリクスは、その関数が呼び出された期間にだけ出る**(2026-09-21 の実測: 呼び出しのあった日は `Errors` が `0.0` のデータ点として出て、呼び出しの無い日〔週末など〕は出ない)。したがって、
+  - `Errors = 0.0` は「動いて、失敗が無かった」。
+  - **動くはずの日に `Invocations` も `Errors` もデータ点が無い**のは、「異常なし」ではなく「起動していない」の疑い(missed schedule)。
+  - 「データ点が無い = 安全」と読まない。
+- コマンドがエラーになったときは「異常なし」ではなく「確認できなかった」。エラーを記録し、確認できたとは書かない。**AccessDenied は、権限を広げて回避しない**(24.3)。
+
+#### 27.3.2 Alarm の状態は、観測用 role では読めない
+
+- 観測用 role では、CloudWatch Alarm の状態(`DescribeAlarms`)を読めない(AccessDenied を 2026-09-21 に実測。**権限を広げて回避しない**)。
+- Alarm の定義(どの関数のどの値を見ているか)は `infra/template.yaml` で確認する。現在の Alarm は evaluation Lambda の 2 本だけである(27.1)。Alarm が鳴っていないことは「他の関数も正常」を意味しない。
+- Alarm の状態を確認する必要があるときは、確認できる人(AWS の画面を見られる権限を持つ人)へ依頼する。
+
+#### 27.3.3 ログを読む(認証情報の欠落の件数)
+
+- ログの検索は参照系の `aws logs filter-log-events` を使う。Logs Insights の `start-query` は、観測用 role に許可されていない(2026-09-20 の観測で AccessDenied を実測)。回避しない。
+- **ログの本文には、銘柄コード等が含まれうる。** 本文は出力せず、**件数だけ**を読む(`--query 'length(events)'`)。公開面へは、件数・時刻・種別だけを書く(27.2 の 1)。
+
+```bash
+# LineCredentialsMissingError が、直近 3 日に何件出たか(件数のみ。本文は読まない)。FN を対象の関数の名前へ置き換える。
+# LINE の認証情報は全 Lambda 共通の値で(23.0)、LINE を送る関数(line-webhook / watchlist-dispatcher / buy-candidates /
+# holdings-watchlist / disclosure-check / watchlist-worker / watchlist-terminal-failure-handler / watchlist-batch-reconciler)で欠落が可視化される。
+export AWS_PROFILE=jstock-observer AWS_DEFAULT_REGION=ap-northeast-1
+FN=jstock-advisor-watchlist-dispatcher
+aws logs filter-log-events --log-group-name /aws/lambda/$FN \
+  --start-time $(( $(date -u -d '3 days ago' +%s) * 1000 )) \
+  --filter-pattern LineCredentialsMissingError --query 'length(events)' --output text
+```
+
+- 結果はページごとに 1 行ずつ出ることがある(合計する)。すべて 0 なら、その期間、その関数でこのエラーは記録されていない。
+- `0` は「その関数が動いて、このエラーが出なかった」とは限らない。動いたか(27.3.1 の `Invocations`)と合わせて読む。
+
+#### 27.3.4 ウォッチリストのバッチの状態を読む
+
+ウォッチリストのバッチ(NEW_CANDIDATE_SCREENING / WATCHLIST_MAINTENANCE)は、BUY / holdings と同じ `jstock-batch_runs` に入っている。**読み方は 25 節と違う**: 25.2 のとおり、ウォッチリスト系は `status` の状態遷移が正本である(4.1 の「バッチの状態遷移」。`completion_finalize_completed_at` で判定しない)。
+
+```bash
+# BATCH_ID を対象のバッチの batch_id へ置き換える。(Git Bash では MSYS_NO_PATHCONV=1 を付ける。status は予約語のため別名を使う)
+export AWS_PROFILE=jstock-observer AWS_DEFAULT_REGION=ap-northeast-1
+aws dynamodb get-item --table-name jstock-batch_runs \
+  --key "{\"batch_id\":{\"S\":\"$BATCH_ID\"}}" \
+  --projection-expression "batch_id,#st,execution_result,finalize_failed_at,updated_at" \
+  --expression-attribute-names '{"#st":"status"}' --output json
+```
+
+- **読む属性は上のとおりに限定する(許可リスト方式。25.4 と同じ考え方)。** 項目には、銘柄コードや集計の内容を含みうる属性がある。**全属性を読まない**。`finalize_error_message` も読まない(エラーの本文を含みうる)。
+- 25.4 と同じ制約: `batch_id` の入手方法は定めていない(dispatcher のログに `batch_id=` として出る箇所がある)。**full scan で探さない**。項目が無いときは、完了とも未完了とも判断しない(TTL で消えた場合がある)。
+- 読み方の基準は 4.1 の状態遷移: `COMPLETED`(`execution_result = NORMAL`)が正常。`ABORTED` / `DISPATCH_FAILED` / `FINALIZE_FAILED` / `TIMED_OUT` / `COMPLETED_WITH_NOTIFICATION_FAILURE` は終端だが異常(4.1 の各説明を読む)。`DISPATCHING` / `RUNNING` / `FINALIZING` / `TIMEOUT_FINALIZING` は処理中、または止まっている可能性がある(長時間 `updated_at` が動かなければ、毎時の reconciler が処理する。バッチの仕組み)。
+- 検証: このコマンドの構文と観測用 role での `GetItem` の許可は、存在しない `batch_id` を指定して、エラーにならず空の応答になることを確認した(2026-09-21)。実際の項目の中身は読んでいない。
+
+### 27.4 「Errors が止まった = 復旧」ではない
+
+Errors が 0 に戻っても、次を**別々に**確認するまでは、復旧したと書かない。
+
+```
+a バッチが終端したか
+    BUY / holdings は 25節。ウォッチリストは BatchRuns の終端 status と、NOTIFICATION_FAILED / TIMED_OUT の有無(27.3.4。基準は 23.2 の V5)。
+b DLQ に残っていないか(24節)
+    worker・terminal_failure の連鎖(Issue #430)の後は、認証情報を直して Errors が止まっても、DLQ に残ったメッセージ・TIMED_OUT になったバッチは自動では復旧しない(23.2)。
+c 通知が実際に送られたか
+    通知だけが欠落した場合、retry の上限に達すると自動では再送されない(23.3)。手動の再送は Production の書き込みで、Human Gate の対象(27.5)。
+d 「何も出さなかった」障害でないか
+    18.1 の 2026-09-02 の障害は、判定・LINE 通知が 0 件の「何も出さなかった」障害だった。Errors だけでなく、処理した件数・通知の件数が期待どおりかも見る。
+```
+
+### 27.5 してはいけないこと(Human Gate の対象。確認した者が実行してはならない)
+
+```
+・Lambda の手動 invoke、バッチの再実行、スケジュールの手動起動
+・DLQ のメッセージの redrive・削除、キューの purge(23.3 の redrive は未検証の候補案。REDRIVE_VERIFIED = NO)
+・通知の再送(retry-notification 等)、LINE への手動送信
+・4.1 に「手動で実行してください」と書かれている操作(`jstock watchlist-screening run` 等)。これも Production への書き込みなので、確認した者が独断で実行せず、報告して判断を仰ぐ
+・DynamoDB・S3 への書き込み・削除(手動での編集を含む)
+・設定(config)・kill switch・IAM・infra の変更(ChangeSet の CREATE と EXECUTE は別々の Human Gate で、承認は exact な対象に対してのみ有効)
+・Secret のローテーション・変更
+・権限を広げて AccessDenied を回避すること
+```
+
+実行の可否は docs/user_manager_collaboration_protocol.md(Human Gate)が正本である。**この節を根拠に、これらを実行してはならない。**
+
+### 27.6 報告の形
+
+MANAGER / USER へ、次を分けて報告する。
+
+```
+1 いつ・どの job・何が異常と言われたか(通知の時刻と、自分が確認した時刻)
+2 観測した値(件数・時刻・最大値。銘柄・所有者・保有数量は書かない)
+3 実行した手順(27.3 のどれか)と、確認できなかったこと(AccessDenied・データ点が無い・コマンドのエラー)
+4 状態を変えていないこと(27.5 の操作を行っていないこと)
+5 判断してほしいこと(原因調査の要否。再実行・redrive・再送の要否は Human Gate)
+```
+
+- 観測の結果と、原因の推測を混ぜない。**原因が分かったと書くのは、原因を実測で確かめた後**に限る。
+- GitHub の Issue・コメントへ書くときは、PUBLIC_SANITIZED を守る(21節。混入した場合の是正手順も 21節)。
+
+### 27.7 この節が決めていないこと
+
+```
+・通知の文面(Issue #501)/ 通知経路の新設(Issue #503)/ Alarm の拡張(Issue #504・#505)/ 検知の相乗り(Issue #506)。状態は #132 の最新の記録を読む
+・誰が・いつ確認するか(24.1。Issue #349 ⑤ の残り)
+・復旧の手順そのもの(DLQ の redrive の検証は 23.3。検証には USER の別途の承認が要る)
+```
