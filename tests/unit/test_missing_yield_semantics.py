@@ -23,6 +23,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.signals.investment_thesis_scoring import (
+    BenefitConditionState,
     InvestmentThesisInputs,
     score_investment_thesis,
 )
@@ -44,8 +45,7 @@ _NOW = dt.datetime(2026, 8, 20, tzinfo=dt.UTC)
 def _inputs(**overrides) -> InvestmentThesisInputs:
     base = dict(
         current_total_yield_pct=_TEMPLATE.min_total_yield_pct,
-        has_shareholder_benefit=True,
-        benefit_abolished_or_downgraded=False,
+        benefit_state=BenefitConditionState.MAINTAINED,
         dividend_cut_or_omission_confirmed=False,
         profit_cf_premise_broken=False,
         financial_premise_broken=False,
@@ -116,10 +116,9 @@ def test_no_benefit_program_alone_does_not_degrade_coverage() -> None:
     confidence が市場全体で一斉降格する。制度なしは benefit_condition が
     NOT_APPLICABLE になるだけで、total_yield は配当のみで EVALUATED となる。
     """
-    with_benefit = _score(has_shareholder_benefit=True, current_total_yield_pct=3.7)
+    with_benefit = _score(current_total_yield_pct=3.7)
     without_benefit = _score(
-        has_shareholder_benefit=False,
-        benefit_abolished_or_downgraded=None,
+        benefit_state=BenefitConditionState.NOT_APPLICABLE,
         current_total_yield_pct=3.7,
     )
 

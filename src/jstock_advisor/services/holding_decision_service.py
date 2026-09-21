@@ -46,6 +46,7 @@ from jstock_advisor.domain.signals.holding_decision_hard_gate import (
 from jstock_advisor.domain.signals.holding_decision_score import combine_holding_decision
 from jstock_advisor.domain.signals.investment_thesis_scoring import (
     InvestmentThesisInputs,
+    derive_benefit_condition_state,
     score_investment_thesis,
 )
 from jstock_advisor.domain.signals.risk_deduction_scoring import (
@@ -278,14 +279,22 @@ class HoldingDecisionService:
         else:
             baseline = lookup.baseline
 
+        # Issue #470: 優待条件の状態は、baselineの値(初回評価ではbaselineを今作った値)と
+        # 現在の入力から1つの純関数で導く。現在の優待の有無だけでNOT_APPLICABLEにしない
+        # (データ欠落を、廃止・優待なしと区別する)。
+        benefit_state = derive_benefit_condition_state(
+            baseline_has_benefit=baseline.baseline_values.has_shareholder_benefit,
+            is_first_evaluation=is_first_evaluation,
+            benefit_registered=snapshot.benefit is not None,
+            benefit_is_abolished=snapshot.benefit is not None and snapshot.benefit.is_abolished,
+            benefit_is_major_downgrade=(
+                snapshot.benefit is not None and snapshot.benefit.is_major_downgrade
+            ),
+        )
         if is_first_evaluation:
-            benefit_abolished_or_downgraded = None
             profit_cf_premise_broken = None
             financial_premise_broken = None
         else:
-            benefit_abolished_or_downgraded = snapshot.benefit is not None and (
-                snapshot.benefit.is_abolished or snapshot.benefit.is_major_downgrade
-            )
             profit_cf_premise_broken = any(
                 sell_rule_inputs.evaluations.get(name, None) is not None
                 and sell_rule_inputs.evaluations[name].status == TriggerStatus.TRIGGERED
@@ -311,8 +320,7 @@ class HoldingDecisionService:
         investment_thesis = score_investment_thesis(
             InvestmentThesisInputs(
                 current_total_yield_pct=snapshot.total_yield_pct,
-                has_shareholder_benefit=has_benefit,
-                benefit_abolished_or_downgraded=benefit_abolished_or_downgraded,
+                benefit_state=benefit_state,
                 dividend_cut_or_omission_confirmed=dividend_cut_or_omission_confirmed,
                 profit_cf_premise_broken=profit_cf_premise_broken,
                 financial_premise_broken=financial_premise_broken,
