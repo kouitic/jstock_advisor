@@ -50,7 +50,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src"
 
 #: 現在、ログレベルを宣言していない(= INFO が出力されない)module。
-#: #413 の Phase A の走査で 11 件(PR-2 で 3、PR-3 で 2、PR-4 で 1、#493・#494 で各 1、現在 3 件)。
+#: #413 の Phase A の走査で 11 件(PR-2 で 3、PR-3 で 2、PR-4 で 1、#493・#494 で各 1、現在 2 件)。
 #: 各 PR が有効化(または WARNING の明示)とともに 1 件ずつ外す。最後に空になる。
 #:
 #:   PR-2  audit_service / _finalize_recovery / watchlist_batch_finalizer      (D9・D4・D1・D3)
@@ -58,12 +58,12 @@ _SRC = _REPO_ROOT / "src"
 #:   PR-4  watch_state_service                                                 (D4・D1・D5)
 #:   #493  shareholder_benefit_registry_service                                (D6)
 #:   #494  cross_validating_impl(WARNING を明示。意図した静音)                (D8)
-#:   残り  watchlist_data_cache(#495。WARNING を明示)/ watchlist_display_name(#496)/
+#:   #495  watchlist_data_cache(WARNING を明示。意図した静音)                  (D4)
+#:   残り  watchlist_display_name(#496)/
 #:         investment_thesis_service(#497。D3)
 #:         (旧 PR-5 / PR-6 は #413 の atomic 分割で #493〜#497 へ置き換えた)
 _UNDECLARED_ALLOWLIST = {
     "src/jstock_advisor/services/investment_thesis_service.py",
-    "src/jstock_advisor/services/watchlist_data_cache.py",
     "src/jstock_advisor/services/watchlist_display_name.py",
 }
 
@@ -681,7 +681,7 @@ def test_current_undeclared_modules_match_the_allowlist_exactly() -> None:
     undeclared, _ = _scan_src()
 
     assert undeclared == _UNDECLARED_ALLOWLIST
-    assert len(_UNDECLARED_ALLOWLIST) == 3
+    assert len(_UNDECLARED_ALLOWLIST) == 2
 
 
 # --- 3 実行時 ------------------------------------------------------------------------------
