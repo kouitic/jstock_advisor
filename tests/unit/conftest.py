@@ -10,6 +10,7 @@ from jstock_advisor.infrastructure.local_repository.holding_repository import (
     PurchaseLotRepository,
 )
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import WatchlistRepository
+from jstock_advisor.services import holding_decision_runtime_config_service as runtime_config_module
 from jstock_advisor.services import jpx_industry_source as jpx_industry_source_module
 from jstock_advisor.services.csv_import_ledger import CsvImportLedger
 from jstock_advisor.services.csv_import_service import HoldingsCsvImportService
@@ -50,9 +51,7 @@ def csv_import_ledger(store_dir: Path) -> CsvImportLedger:
 def csv_import_service(
     portfolio_service: PortfolioService, csv_import_ledger: CsvImportLedger
 ) -> HoldingsCsvImportService:
-    return HoldingsCsvImportService(
-        portfolio_service=portfolio_service, ledger=csv_import_ledger
-    )
+    return HoldingsCsvImportService(portfolio_service=portfolio_service, ledger=csv_import_ledger)
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +80,35 @@ def _isolated_jpx_industry_source(
     reset_default_jpx_industry_source()
     yield entries
     reset_default_jpx_industry_source()
+
+
+def reset_holding_decision_runtime_config_cache() -> None:
+    """`holding_decision_runtime_config_service`のプロセス内cache(2つのモジュール変数)を破棄する。
+
+    `_cached_config`(直近に取得できた設定)と`_cached_at`(その取得時刻)は、常に**対**で
+    持ち越される。片方だけを消すと、TTL判定が食い違うため、必ず同時に消す。
+    """
+    runtime_config_module._cached_config = None
+    runtime_config_module._cached_at = None
+
+
+@pytest.fixture(autouse=True)
+def _isolated_holding_decision_runtime_config_cache() -> Iterator[None]:
+    """保有判断のRuntimeConfig cache(Issue #148)を、unit testから隔離する。
+
+    `HoldingDecisionRuntimeConfigService.get_config()`は、取得に成功した設定を**モジュール
+    レベル**の`_cached_config` / `_cached_at`へ保持し、後続の取得失敗(レコード未作成を含む)では
+    安全側の既定値(LEGACY)ではなく、この持ち越した値を使う。テスト間でリセットされないため、
+    先行テストが書いた mode(SHADOW / ACTIVE)が、別の保存先で動く後続テストへ漏れ、
+    新エンジンが呼ばれて偽の失敗になる(#148 の11件失敗。実行順序で結果が変わる)。
+
+    本fixtureが**各テストの前後で必ずresetする**(monkeypatchの復元では、漏れた値へ戻るため
+    使わない)。cacheそのものの挙動を検証するテストは、テスト内で明示的にcacheを設定する
+    (tests/unit/test_holding_decision_runtime_config.py)。
+    """
+    reset_holding_decision_runtime_config_cache()
+    yield
+    reset_holding_decision_runtime_config_cache()
 
 
 _LAMBDA_ENV_FUNCTION_NAME = "jstock-advisor-test-lambda"
