@@ -17,6 +17,27 @@ bは「比較する相手がまだ無い」だけであり、悪い状態が観�
 欠測は「不足として計上する」という別の意図的な決定であり、
 tests/unit/test_missing_yield_semantics.py が契約として固定している)。
 
+## 優待条件の状態は1つの純関数で導出する(Issue #470)
+
+優待条件(benefit_condition)は、以前は「現在の優待の有無」
+(`benefit is not None and not is_abolished`)だけで NOT_APPLICABLE かどうかを決めていた。
+そのため**baseline時に優待があった保有で、現在の台帳に登録が無くなった(取得不能・台帳の削除・移行漏れ)場合**も「優待非保有銘柄」と区別できず、減点も
+不評価もされなかった。状態は`derive_benefit_condition_state`で、**baselineの値**と現在の入力から導く。
+
+    baselineに優待なし                          -> NOT_APPLICABLE(現在が廃止登録でも同じ。U-B)
+    baselineの値が不明(None)/ 初回評価          -> BASELINE_NOT_COMPARABLE(不評価。分母から外す)
+    baselineに優待あり かつ 現在の登録なし      -> DATA_MISSING(不評価。★廃止とみなさない)
+    baselineに優待あり かつ 明示的な改悪        -> DOWNGRADED(評価・0点)
+    baselineに優待あり かつ 維持                -> MAINTAINED(評価・満点)
+
+★ 明示的な**廃止**(`is_abolished`)は、従来どおり NOT_APPLICABLE のまま変えていない(Issue #476 が、
+  同じ関数の状態として「評価・0点」へ改める。本Issueの範囲外)。
+
+DATA_MISSINGは、不評価の理由コード`BENEFIT_DATA_MISSING`で BASELINE_NOT_COMPARABLE と区別する。
+`status`には新しい値を足さない(共通enum S-16は変えず、保存形式も変わらない)。スコアの分母からは
+外し(悪い状態が観測されたわけではないため)、coverage_ratioの分母は据え置く(確認できていない
+事実はcoverageに残る。coverageが下がればcoverage gateが働く)。
+
 ## coverage_ratioの分母は変えない
 
 「評価できなかった」事実はcoverage_ratioに残し続ける。スコアだけを直し、
@@ -26,6 +47,7 @@ tests/unit/test_missing_yield_semantics.py が契約として固定している)
 from __future__ import annotations
 
 import datetime as dt
+import enum
 from dataclasses import dataclass
 
 from jstock_advisor.config.models import InvestmentThesisTemplateConfig, InvestmentThesisWeights
@@ -49,6 +71,59 @@ _BASELINE_NOT_COMPARABLE = "BASELINE_NOT_COMPARABLE"
 """
 
 
+_BENEFIT_DATA_MISSING = "BENEFIT_DATA_MISSING"
+"""baselineに優待があったのに、現在は台帳に登録が無い(Issue #470)ことを表す理由。
+
+`status`は既存のNOT_EVALUATEDのまま、`reason`で区別する(共通enum S-16は変えない)。
+"""
+
+#: スコアの分母から外す不評価の理由(悪い状態が観測されたわけではない項目)。
+#: total_yield等のデータ欠測(理由なし)は、Issue #55 Phase A Decision 3により分母に残す(変更しない)。
+_EXCLUDED_FROM_SCORE_DENOMINATOR: frozenset[str] = frozenset(
+    {_BASELINE_NOT_COMPARABLE, _BENEFIT_DATA_MISSING}
+)
+
+
+class BenefitConditionState(enum.StrEnum):
+    """優待条件(benefit_condition)の状態(Issue #470)。"""
+
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    BASELINE_NOT_COMPARABLE = "BASELINE_NOT_COMPARABLE"
+    DATA_MISSING = "DATA_MISSING"
+    DOWNGRADED = "DOWNGRADED"
+    MAINTAINED = "MAINTAINED"
+
+
+def derive_benefit_condition_state(
+    *,
+    baseline_has_benefit: bool | None,
+    is_first_evaluation: bool,
+    benefit_registered: bool,
+    benefit_is_abolished: bool,
+    benefit_is_major_downgrade: bool,
+) -> BenefitConditionState:
+    """優待条件の状態を導く(純関数。I/Oなし)。
+
+    * baselineに優待なし(False)は、現在が廃止登録でも NOT_APPLICABLE(U-B)。
+    * baselineの値が不明(None。テスト・repair経路のみ)は、優待なしにも維持にも倒さず不評価。
+    * 初回評価(baselineを今作った)は比較不能(Issue #249の既存挙動)。
+    * baselineに優待ありで現在の登録が無い場合は、DATA_MISSING(廃止とみなさない)。
+    * ★ 明示的な廃止は従来どおり NOT_APPLICABLE(Issue #476 で「評価・0点」へ改める)。
+    """
+    if baseline_has_benefit is False:
+        return BenefitConditionState.NOT_APPLICABLE
+    if baseline_has_benefit is None or is_first_evaluation:
+        return BenefitConditionState.BASELINE_NOT_COMPARABLE
+    if not benefit_registered:
+        return BenefitConditionState.DATA_MISSING
+    if benefit_is_abolished:
+        # 従来の挙動を保つ(has_benefit = not is_abolished が False → NOT_APPLICABLE)。#476で改める。
+        return BenefitConditionState.NOT_APPLICABLE
+    if benefit_is_major_downgrade:
+        return BenefitConditionState.DOWNGRADED
+    return BenefitConditionState.MAINTAINED
+
+
 def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -56,10 +131,10 @@ def _clip(value: float, low: float, high: float) -> float:
 @dataclass(frozen=True)
 class InvestmentThesisInputs:
     current_total_yield_pct: float | None
-    has_shareholder_benefit: bool
-    # None = baseline比較不能(SYSTEM_INITIALIZED初回評価等)。以下3項目共通。
-    benefit_abolished_or_downgraded: bool | None
+    # 優待条件の状態(Issue #470。`derive_benefit_condition_state`で導く)。
+    benefit_state: BenefitConditionState
     dividend_cut_or_omission_confirmed: bool
+    # None = baseline比較不能(SYSTEM_INITIALIZED初回評価等)。以下2項目共通。
     profit_cf_premise_broken: bool | None
     financial_premise_broken: bool | None
     thesis: InvestmentThesis | None
@@ -113,8 +188,9 @@ def score_investment_thesis(
             )
         )
 
-    # 3. 優待条件の維持(baseline比較が必要)
-    if not inputs.has_shareholder_benefit:
+    # 3. 優待条件の維持(baseline比較が必要。状態は derive_benefit_condition_state で導く)
+    state = inputs.benefit_state
+    if state is BenefitConditionState.NOT_APPLICABLE:
         items.append(
             ScoreItemDetail(
                 item_code="benefit_condition",
@@ -124,14 +200,21 @@ def score_investment_thesis(
                 reason="優待非保有銘柄",
             )
         )
-    elif inputs.benefit_abolished_or_downgraded is None:
+    elif state in (
+        BenefitConditionState.BASELINE_NOT_COMPARABLE,
+        BenefitConditionState.DATA_MISSING,
+    ):
         items.append(
             ScoreItemDetail(
                 item_code="benefit_condition",
                 axis="benefit_condition",
                 weight=weights.benefit_condition,
                 status=EvidenceCoverageStatus.NOT_EVALUATED,
-                reason=_BASELINE_NOT_COMPARABLE,
+                reason=(
+                    _BENEFIT_DATA_MISSING
+                    if state is BenefitConditionState.DATA_MISSING
+                    else _BASELINE_NOT_COMPARABLE
+                ),
             )
         )
     else:
@@ -142,7 +225,7 @@ def score_investment_thesis(
                 weight=weights.benefit_condition,
                 status=EvidenceCoverageStatus.EVALUATED,
                 points_earned=(
-                    0.0 if inputs.benefit_abolished_or_downgraded else weights.benefit_condition
+                    0.0 if state is BenefitConditionState.DOWNGRADED else weights.benefit_condition
                 ),
             )
         )
@@ -246,13 +329,12 @@ def score_investment_thesis(
                 )
             )
 
-    evaluated_weight = sum(
-        i.weight for i in items if i.status == EvidenceCoverageStatus.EVALUATED
-    )
+    evaluated_weight = sum(i.weight for i in items if i.status == EvidenceCoverageStatus.EVALUATED)
     available_weight = sum(
         i.weight for i in items if i.status != EvidenceCoverageStatus.NOT_APPLICABLE
     )
     # Issue #249: baseline比較不能の項目はスコアの分母から外す。
+    # Issue #470: 優待のデータ欠落(BENEFIT_DATA_MISSING)も同じ扱い(廃止とみなさない)。
     # NOT_APPLICABLE(評価対象外)と同じ扱いであり、「悪い」わけではないため。
     # ★ available_weight自体は減らさない。coverage_ratioの分母は据え置き、
     #   「評価できなかった」事実をcoverageに残すため(下のcoverage_ratio参照)。
@@ -260,7 +342,7 @@ def score_investment_thesis(
         i.weight
         for i in items
         if i.status == EvidenceCoverageStatus.NOT_EVALUATED
-        and i.reason == _BASELINE_NOT_COMPARABLE
+        and i.reason in _EXCLUDED_FROM_SCORE_DENOMINATOR
     )
     score_weight = available_weight - not_comparable_weight
     raw_points = sum(i.points_earned for i in items)
@@ -272,9 +354,7 @@ def score_investment_thesis(
     # **coverage_ratioも0.0にして「評価できていない」ことを示す。**
     score = (raw_points / score_weight * 50.0) if score_weight > 0 else 0.0
     coverage_ratio = (
-        (evaluated_weight / available_weight)
-        if available_weight > 0 and score_weight > 0
-        else 0.0
+        (evaluated_weight / available_weight) if available_weight > 0 and score_weight > 0 else 0.0
     )
 
     return InvestmentThesisScore(
