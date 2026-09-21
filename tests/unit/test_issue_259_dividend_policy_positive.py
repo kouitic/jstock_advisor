@@ -47,7 +47,10 @@ def test_sum_check_still_applies() -> None:
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
 def test_non_finite_dividend_policy_is_rejected(value: float) -> None:
     """NaNは`> 0`も合計の比較も常にFalseになり、検査をすり抜ける(レビュー指摘)。"""
-    with pytest.raises(ValidationError, match="dividend_policy"):
+    # ★ matchは検査固有の文言にする。"dividend_policy"だけだと、Pydanticのエラー表示に入る
+    #   入力値のecho(input_value={'dividend_policy': inf, ...})で満たされてしまい、
+    #   +infが既存の合計検査で拒否されても通る(有限性の検査を外した変異を検出できない)。
+    with pytest.raises(ValidationError, match="0より大きい有限値"):
         InvestmentThesisWeights(**{**_VALID, "dividend_policy": value})
 
 
