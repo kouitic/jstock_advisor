@@ -209,14 +209,16 @@ def test_second_evaluation_has_no_not_comparable_items() -> None:
 def test_zero_denominator_is_fail_closed() -> None:
     """★ 分母が0なら score 0.0 かつ **coverage_ratio も 0.0**。
 
-    現行configでは到達しない（dividend_policyはbaseline不要で常に評価される）が、
-    weightsのvalidatorは合計50点しか検査しないため、構造的には起こりうる。
+    現行configでは到達しない（dividend_policyはbaseline不要で常に評価される）。
+    Issue #259でweightsのvalidatorがdividend_policy > 0を要求するようになったため、
+    通常の構築ではこの分岐へ到達できない。本テストは多層防御として、validatorを
+    迂回（model_construct）してもfail-closedになることを固定する。
 
     scoreだけを0.0にしてcoverageを据え置くと、「評価できていない」のに
     coverageが高いままとなりgateをすり抜ける。0点は最も低い評価とも
     区別できない。そのため**両方を0.0にする**。
     """
-    weights = InvestmentThesisWeights(
+    weights = InvestmentThesisWeights.model_construct(
         dividend_policy=0.0,
         total_yield=0.0,
         benefit_condition=10.0,
