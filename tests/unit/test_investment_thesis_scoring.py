@@ -19,6 +19,7 @@ from jstock_advisor.domain.entities.holding_decision import (
     ThesisConditionAttestation,
 )
 from jstock_advisor.domain.signals.investment_thesis_scoring import (
+    BenefitConditionState,
     InvestmentThesisInputs,
     score_investment_thesis,
 )
@@ -34,8 +35,7 @@ _NOW = dt.datetime(2026, 8, 5, tzinfo=dt.UTC)
 def _inputs(**overrides) -> InvestmentThesisInputs:
     base = dict(
         current_total_yield_pct=_TEMPLATE.min_total_yield_pct,
-        has_shareholder_benefit=True,
-        benefit_abolished_or_downgraded=False,
+        benefit_state=BenefitConditionState.MAINTAINED,
         dividend_cut_or_omission_confirmed=False,
         profit_cf_premise_broken=False,
         financial_premise_broken=False,
@@ -87,20 +87,20 @@ def test_total_yield_none_is_not_evaluated():
 
 
 def test_benefit_condition_not_applicable_when_no_shareholder_benefit():
-    result = _score(has_shareholder_benefit=False, benefit_abolished_or_downgraded=None)
+    result = _score(benefit_state=BenefitConditionState.NOT_APPLICABLE)
     item = _item(result, "benefit_condition")
     assert item.status == EvidenceCoverageStatus.NOT_APPLICABLE
 
 
 def test_benefit_condition_abolished_gives_zero_points():
-    result = _score(has_shareholder_benefit=True, benefit_abolished_or_downgraded=True)
+    result = _score(benefit_state=BenefitConditionState.DOWNGRADED)
     item = _item(result, "benefit_condition")
     assert item.status == EvidenceCoverageStatus.EVALUATED
     assert item.points_earned == 0.0
 
 
 def test_benefit_condition_not_evaluated_when_baseline_unavailable():
-    result = _score(has_shareholder_benefit=True, benefit_abolished_or_downgraded=None)
+    result = _score(benefit_state=BenefitConditionState.BASELINE_NOT_COMPARABLE)
     item = _item(result, "benefit_condition")
     assert item.status == EvidenceCoverageStatus.NOT_EVALUATED
 

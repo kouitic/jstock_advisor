@@ -32,6 +32,7 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import InvestmentThesisWeights
 from jstock_advisor.domain.entities.enums import BaselineOrigin, EvidenceCoverageStatus
 from jstock_advisor.domain.signals.investment_thesis_scoring import (
+    BenefitConditionState,
     InvestmentThesisInputs,
     score_investment_thesis,
 )
@@ -50,8 +51,7 @@ def _inputs(**overrides: Any) -> InvestmentThesisInputs:
     """2回目以降(baselineあり・すべて維持)を既定とする。"""
     base: dict[str, Any] = {
         "current_total_yield_pct": _TEMPLATE.min_total_yield_pct,
-        "has_shareholder_benefit": True,
-        "benefit_abolished_or_downgraded": False,
+        "benefit_state": BenefitConditionState.MAINTAINED,
         "dividend_cut_or_omission_confirmed": False,
         "profit_cf_premise_broken": False,
         "financial_premise_broken": False,
@@ -64,7 +64,7 @@ def _inputs(**overrides: Any) -> InvestmentThesisInputs:
 def _first_evaluation(**overrides: Any) -> InvestmentThesisInputs:
     """初回評価(baseline比較3項目がNone)。"""
     return _inputs(
-        benefit_abolished_or_downgraded=None,
+        benefit_state=BenefitConditionState.BASELINE_NOT_COMPARABLE,
         profit_cf_premise_broken=None,
         financial_premise_broken=None,
         **overrides,
@@ -155,9 +155,9 @@ def test_baseline_not_comparable_is_excluded_like_not_applicable() -> None:
     スコアが一致することで示す。どちらも「その項目で減点しない」が正しい。
     """
     not_applicable = _score(
-        _inputs(has_shareholder_benefit=False, benefit_abolished_or_downgraded=None)
+        _inputs(benefit_state=BenefitConditionState.NOT_APPLICABLE)
     )
-    not_comparable = _score(_inputs(benefit_abolished_or_downgraded=None))
+    not_comparable = _score(_inputs(benefit_state=BenefitConditionState.BASELINE_NOT_COMPARABLE))
 
     assert not_applicable.score == not_comparable.score
 
@@ -282,7 +282,7 @@ def test_broken_premises_are_still_scored_zero_not_excluded() -> None:
     """
     broken = _score(
         _inputs(
-            benefit_abolished_or_downgraded=True,
+            benefit_state=BenefitConditionState.DOWNGRADED,
             profit_cf_premise_broken=True,
             financial_premise_broken=True,
         )
