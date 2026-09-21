@@ -34,8 +34,24 @@ _UTC = dt.UTC
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _HEADLINE = "⚠️ 本番処理でエラーが発生しました。システム側で調査情報を記録しました。"
 
-# 本文の全体が一致すべき、固定の文型(allowlist。job の名称は列挙の値だけを許す)。
-_LABELS = "|".join(re.escape(job.value) for job in IncidentJob)
+# ★ 本文に出してよい job の利用者向けの名称の、完全一致リスト(人がレビューして固定した集合)。
+# 検査側の allowlist は、`IncidentJob` から自動生成せず、ここから作る。列挙へ値を足しても、
+# この集合を意図して更新しない限り、検査は許容範囲を広げない(列挙の中身は人のレビューを経る)。
+_REVIEWED_JOB_LABELS = {
+    "BUY_CANDIDATES": "買い候補チェック",
+    "HOLDINGS_WATCHLIST": "保有株チェック",
+    "DISCLOSURE_CHECK": "開示チェック",
+    "EVALUATION": "過去の推奨の評価",
+    "WATCHLIST_SCREENING": "ウォッチリスト自動追加",
+    "WEEKLY_REVIEW": "週次レビュー",
+    "MONTHLY_REVIEW": "月次レビュー",
+    "QUARTERLY_REVIEW": "四半期レビュー",
+    "LINE_WEBHOOK": "LINE の応答",
+    "OTHER": "その他の処理",
+}
+
+# 本文の全体が一致すべき、固定の文型(allowlist)。job の名称は、上の完全一致リストの値だけを許す。
+_LABELS = "|".join(re.escape(label) for label in _REVIEWED_JOB_LABELS.values())
 _ALLOWLISTED = re.compile(
     rf"{re.escape(_HEADLINE)}\n"
     rf"対象: (?:{_LABELS})\n"
@@ -160,6 +176,33 @@ def test_a_known_name_with_extra_text_is_not_treated_as_known() -> None:
 def test_a_non_string_name_falls_back_to_the_generic_job(value: object) -> None:
     """異常の通知を組み立てる経路で、入力の不備によって通知が失われない(例外にしない)。"""
     assert resolve_incident_job(value) is IncidentJob.OTHER
+
+
+def test_the_incident_job_enum_is_exactly_the_reviewed_set() -> None:
+    """★ 列挙の中身を、完全一致リストで固定する(他の allowlist の型パターンと同じ手法)。
+
+    `IncidentJob` の値は、そのまま本文に出る。列挙へ値を足す・値を書き換えると、この検査が赤に
+    なり、`_REVIEWED_JOB_LABELS`(人のレビューを経た集合)を意図して更新するまで通らない。
+    検査側の allowlist(`_LABELS`)もこの集合から作っているため、列挙を足しても許容範囲は
+    自動では広がらない(本文の allowlist 検査も、未レビューの値を持つ本文を拒否する)。
+    """
+    assert {job.name: job.value for job in IncidentJob} == _REVIEWED_JOB_LABELS
+
+
+def test_every_mapped_job_is_a_member_of_the_reviewed_set() -> None:
+    """対応表の写し先も、レビュー済みの集合に含まれる(対応表から未レビューの値へ引けない)。"""
+    reviewed = set(_REVIEWED_JOB_LABELS.values())
+
+    assert {job.value for job in incident_message._INTERNAL_NAME_TO_JOB.values()} <= reviewed
+
+
+def test_the_allowlist_rejects_a_message_with_an_unreviewed_job_label() -> None:
+    """未レビューの名称(たとえば列挙へ足された値)を持つ本文は、allowlist 検査が拒否する。"""
+    unreviewed = "所有者Aの保有株情報"  # 架空の値。列挙へ足されても、検査は許容範囲を広げない
+    text = f"{_HEADLINE}\n対象: {unreviewed}\n発生時刻: 08:03"
+
+    with pytest.raises(AssertionError):
+        _assert_allowlisted(text)
 
 
 # --- 4 型で締める --------------------------------------------------------------------------
