@@ -253,7 +253,9 @@ def test_cache_hit_log_includes_quality_status(repo, caplog: pytest.LogCaptureFi
         _classify_optional,
         "test",
     )
-    with caplog.at_level("INFO"):
+    # Issue #495: この module の logger は WARNING を明示している(意図した静音)。ここで確認するのは
+    # hit ログの「文面」(quality_status を含む)なので、この間だけ module の logger を INFO にする。
+    with caplog.at_level("INFO", logger="jstock_advisor.services.watchlist_data_cache"):
         get_or_fetch(
             repo,
             "k1",
