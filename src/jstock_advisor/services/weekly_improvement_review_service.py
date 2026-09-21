@@ -21,7 +21,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 from jstock_advisor.config.models import AppConfig, ReviewImprovementConfig
 from jstock_advisor.domain.entities.enums import (
@@ -64,7 +63,10 @@ from jstock_advisor.infrastructure.local_repository.weekly_review_metrics_reposi
 )
 from jstock_advisor.services import github_issue_service
 from jstock_advisor.services.audit_service import AuditService
-from jstock_advisor.services.performance_metrics_service import build_metrics_bucket
+from jstock_advisor.services.performance_metrics_service import (
+    MetricsAccumulator,
+    MetricsBucket,
+)
 from jstock_advisor.services.rule_version_service import RuleVersionService
 
 logger = logging.getLogger(__name__)
@@ -76,15 +78,20 @@ logger.setLevel(logging.INFO)
 _AUDIT_RULE_VERSION = "review-improvement-v1"  # 本サービス自体のロジックバージョン
 _DISCLAIMER = "※最終的な投資判断は利用者が行ってください。"
 
-# Issue #377 PR #379是正: _join_recommendations()がRecommendationRepository.get()を
-# 対象件数ぶん繰り返すN+1になっていた。get_many()(BatchGetItem)へ切り替えるが、
-# 全IDを一度に渡すと戻り値のdictが対象週の全Recommendationを同時保持することに
-# なる(Recommendationは1件あたり実測約26KB。jstock-recommendations実測)。
-# evaluationsをこの件数ずつのchunkに区切り、chunkごとにget_many()を呼んで
-# 直ちにjoinすることでピークメモリを1chunk分に有界化する(iter_all()と同じ
-# 設計思想)。DynamoDbCollectionStore.get_many()自体もBatchGetItemの上限
-# (100件/リクエスト)でAPI呼び出しを内部chunkするため、本値をそれと揃えることで
-# 1chunk = 1 BatchGetItemリクエストになり、無駄な往復を作らない。
+# Issue #377 PR #379是正 / Track1: Recommendationの取得はN+1(get()を対象件数ぶん
+# 繰り返す)にせず、get_many()(BatchGetItem)を使う。全IDを一度に渡すと戻り値のdictが
+# 対象週の全Recommendationを同時保持することになる(Recommendationは1件あたり実測約
+# 26KB。jstock-recommendations実測)ため、evaluationsをこの件数ずつのchunkに区切り、
+# chunkごとにget_many()を呼ぶ。
+# ★ **取得だけでなく、保持も有界にする**(Issue #377 Track1)。PR #379は取得をchunkに
+#   区切ったが、結果の`joined`へ(evaluation, recommendation)の組を全件追加して保持して
+#   いたため、対象件数に比例してメモリが増え、本番(該当14,256件)でRuntime.OutOfMemory
+#   になった(2026-09-21 19:00 JSTの自然実行。Max Memory Used = 512MB / 512MB)。
+#   現在は、chunkごとにrecommendation_typeとrule_versionだけを取り出して`MetricsAccumulator`
+#   へ足し込み、Recommendationのオブジェクトも、評価のリストも保持しない。
+# DynamoDbCollectionStore.get_many()自体もBatchGetItemの上限(100件/リクエスト)で
+# API呼び出しを内部chunkするため、本値をそれと揃えることで1chunk = 1 BatchGetItem
+# リクエストになり、無駄な往復を作らない。
 _RECOMMENDATION_JOIN_CHUNK_SIZE = 100
 
 
@@ -130,6 +137,21 @@ def _resolve_review_period(now: dt.datetime) -> tuple[dt.date, dt.date, str]:
     period_end = this_week_monday - dt.timedelta(days=1)
     period_start = period_end - dt.timedelta(days=6)
     return period_start, period_end, _iso_week_label(period_start)
+
+
+@dataclass
+class _WindowAggregate:
+    """1つの対象週の集計(Issue #377 Track1)。評価・Recommendationは保持しない。
+
+    メモリは「対象週×(推奨種別, rule_version)の組」の数に比例し、該当件数には比例しない。
+    """
+
+    matched: int = 0  # この週に該当した評価の件数(従来の len(candidate_results))
+    joined: int = 0  # Recommendationと結合できた件数(従来の len(joined))
+    # 対応するRecommendationが見つからなかった評価のID(評価ごとに1件。重複IDも1件ずつ)。
+    missing_ids: list[str] = field(default_factory=list)
+    # 挿入順 = この週で最初に現れた順(従来の`_group_by_type_and_rule_version()`と同じ)。
+    groups: dict[tuple[RecommendationType, str], MetricsAccumulator] = field(default_factory=dict)
 
 
 class WeeklyImprovementReviewService:
@@ -191,19 +213,27 @@ class WeeklyImprovementReviewService:
             )
             past_labels.append(label)
 
-        buckets = self._collect_evaluations_for_windows(windows)
-        candidate_results = buckets[review_week]
-        joined, missing_ids = self._join_recommendations(candidate_results)
+        # Issue #377 Track1: 1回のstreaming scanの中で、評価をchunkごとにRecommendationと
+        # 結合して集計器へ足し込む。評価のリストもjoinした結果も保持しない(メモリは
+        # scanの1ページ + chunk1つ + 集計の組の数に有界)。
+        aggregates = self._aggregate_windows(windows)
+        current = aggregates[review_week]
+        missing_ids = current.missing_ids
 
-        groups = self._group_by_type_and_rule_version(joined)
         metrics_saved = 0
         candidates: list[ImprovementCandidate] = []
         current_rule_version_cache: dict[RecommendationType, str | None] = {}
 
-        for (rec_type, rule_version), evaluations in groups.items():
+        for (rec_type, rule_version), accumulator in current.groups.items():
             history = self._metrics_repo.list_by_type_version_segment(rec_type, rule_version, None)
             metrics = self._build_metrics(
-                rec_type, rule_version, review_week, period_start, period_end, now, evaluations
+                rec_type,
+                rule_version,
+                review_week,
+                period_start,
+                period_end,
+                now,
+                accumulator.to_bucket(rec_type.value),
             )
             self._metrics_repo.save(metrics)
             metrics_saved += 1
@@ -256,16 +286,16 @@ class WeeklyImprovementReviewService:
         # 計上されるべきだが、その週の集計は既に走り終わっている。ここで作り直す。
         # ★ 起票・通知の後に置くのは、過去週の再集計が今週の起票判断へ影響しない
         #   ことを実行順序でも明らかにするため(metricsの再集計と自動起票の分離)。
-        past_weeks_recomputed, past_weeks_detail = self._recompute_past_weeks_from_buckets(
-            past_labels, buckets, now
+        past_weeks_recomputed, past_weeks_detail = self._recompute_past_weeks_from_aggregates(
+            past_labels, aggregates, now
         )
 
         outcome = WeeklyImprovementReviewOutcome(
             review_week=review_week,
             period_start=period_start,
             period_end=period_end,
-            total_evaluation_results=len(candidate_results),
-            joined_count=len(joined),
+            total_evaluation_results=current.matched,
+            joined_count=current.joined,
             missing_recommendation_ids=missing_ids,
             metrics_saved=metrics_saved,
             past_weeks_metrics_recomputed=past_weeks_recomputed,
@@ -280,29 +310,35 @@ class WeeklyImprovementReviewService:
 
     # --- データ収集・join ---------------------------------------------
 
-    def _collect_evaluations_for_windows(
+    def _aggregate_windows(
         self, windows: list[tuple[str, dt.date, dt.date]]
-    ) -> dict[str, list[EvaluationResult]]:
-        """1回のstreaming scanで、複数の対象週(当該週+過去N週)へ同時に振り分ける
-        (Issue #377)。
+    ) -> dict[str, _WindowAggregate]:
+        """1回のstreaming scanで、複数の対象週(当該週+過去N週)へ同時に振り分けて集計する
+        (Issue #377 / Track1)。
 
         `windows`は`(review_week_label, period_start, period_end)`の列。
         呼び出し側は互いに重複しない7日間の集合を渡すこと(呼び出し側が
         `_previous_week_label()`の連鎖で作るため、設計上必ず非重複・連続する)。
 
-        evaluation_dateがどのwindowにも該当しない評価は捨てる。これは
-        `_collect_evaluations_for_period()`を対象週ごとに個別に呼んだ場合と
-        集合として同じ結果になる(個別に絞り込んで含まれないレコードは、
-        まとめて絞り込んでも含まれない。windowsが非重複であるため、1件の
+        evaluation_dateがどのwindowにも該当しない評価は捨てる。これは対象週ごとに個別に
+        絞り込んだ場合と集合として同じ結果になる(windowsが非重複であるため、1件の
         evaluationが複数のwindowへ二重に入ることもない)。
 
         Issue #113と同じ理由でiter_all()を使う(全ページをlistへ保持しない)。
-        Issue #377: 従来は対象週ごとに`list_all()`(または個別filter)を
-        呼んでおり、history_weeks_for_comparison分だけ全件走査が繰り返されて
-        いた(1 + weeks_back回)。本メソッドは1回の走査で済ませる。
+        Issue #377: 従来は対象週ごとに全件走査しており(1 + weeks_back回)、さらに
+        該当した評価と、結合したRecommendationを全件保持していた。本メソッドは、
+        1回の走査で、該当した評価を週ごとに`_RECOMMENDATION_JOIN_CHUNK_SIZE`件までためて、
+        溜まるたびにRecommendationと結合し、集計器へ足し込んで捨てる。
+
+        ★ 各週の中で、評価は走査の順のままchunkにまとまり、その順で集計器へ足し込まれる。
+          したがって、集計の値(float の合計の順序を含む)も、`groups`の挿入順も、
+          従来(週ごとに評価のリストを作って結合・集計する方式)と同じになる。
         """
         target_horizon = self._review_config.evaluation_horizon_days
-        buckets: dict[str, list[EvaluationResult]] = {label: [] for label, _, _ in windows}
+        aggregates: dict[str, _WindowAggregate] = {
+            label: _WindowAggregate() for label, _, _ in windows
+        }
+        pending: dict[str, list[EvaluationResult]] = {label: [] for label, _, _ in windows}
         scanned = matched = 0
         for evaluation in self._evaluations.iter_all():
             scanned += 1
@@ -316,24 +352,62 @@ class WeeklyImprovementReviewService:
                 continue
             for label, period_start, period_end in windows:
                 if period_start <= evaluation.evaluation_date <= period_end:
-                    buckets[label].append(evaluation)
                     matched += 1
-                    break  # windowsは非重複なので複数バケツへは入らない
+                    aggregates[label].matched += 1
+                    chunk = pending[label]
+                    chunk.append(evaluation)
+                    if len(chunk) >= _RECOMMENDATION_JOIN_CHUNK_SIZE:
+                        self._fold_chunk(aggregates[label], chunk)
+                        chunk.clear()
+                    break  # windowsは非重複なので複数の週へは入らない
+        for label, chunk in pending.items():
+            if chunk:
+                self._fold_chunk(aggregates[label], chunk)
+                chunk.clear()
         logger.info(
             "weekly review single-pass scan done scanned=%d matched=%d windows=%d",
             scanned,
             matched,
             len(windows),
         )
-        return buckets
+        return aggregates
 
-    def _recompute_past_weeks_from_buckets(
+    def _fold_chunk(self, aggregate: _WindowAggregate, chunk: list[EvaluationResult]) -> None:
+        """chunk(評価)へ対応するRecommendationを結合し、集計器へ足し込む(Issue #377 Track1)。
+
+        `RecommendationRepository.get_many()`(BatchGetItem)を1回だけ呼ぶ(N+1にしない)。
+        結合できた評価は、`recommendation_type`と`rule_version`だけを取り出して該当の集計器へ
+        足す。**Recommendationのオブジェクトは、この関数を出た時点で参照が無くなる**
+        (`found`は関数のローカルで、集計器も`_WindowAggregate`も保持しない)。
+
+        ★ chunkの順序をそのまま保つ。見つからなかった評価は、評価ごとに(重複IDでも1件ずつ)
+          `missing_ids`へ追加する。旧実装(`get()`を1件ずつ呼ぶ版)と、同じ入力に対して同じ
+          結合の結果・同じ`missing_ids`になる。
+        ★ 同じrecommendation_idを複数の評価が参照する場合、`get_many()`はID単位で重複排除して
+          1回だけ取得する(Recommendationの取得回数は増えない)。
+        """
+        found = self._recommendations.get_many(
+            evaluation.recommendation_id for evaluation in chunk
+        )
+        for evaluation in chunk:
+            recommendation = found.get(evaluation.recommendation_id)
+            if recommendation is None:
+                aggregate.missing_ids.append(evaluation.recommendation_id)
+                continue
+            aggregate.joined += 1
+            key = (recommendation.recommendation_type, recommendation.rule_version)
+            accumulator = aggregate.groups.get(key)
+            if accumulator is None:
+                accumulator = aggregate.groups[key] = MetricsAccumulator()
+            accumulator.add(evaluation)
+
+    def _recompute_past_weeks_from_aggregates(
         self,
         past_labels: list[str],
-        buckets: dict[str, list[EvaluationResult]],
+        aggregates: dict[str, _WindowAggregate],
         now: dt.datetime,
     ) -> tuple[int, dict[str, int]]:
-        """buckets(既に1回のstreaming scanで振り分け済み)から、直近
+        """aggregates(既に1回のstreaming scanで週ごとに集計済み)から、直近
         history_weeks_for_comparison週分のmetricsを作り直す(Issue #377。
         旧`_recompute_past_weeks`から「窓の計算」と「表の再scan」を除いたもの。
         upsertのロジック・冪等性・以下の設計判断はいずれも変更していない)。
@@ -377,20 +451,26 @@ class WeeklyImprovementReviewService:
         for label in past_labels:
             period_start = _monday_of_iso_week(label)
             period_end = period_start + dt.timedelta(days=6)
-            evaluations = buckets[label]
-            joined, _missing = self._join_recommendations(evaluations)
-            groups = self._group_by_type_and_rule_version(joined)
+            groups = dict(aggregates[label].groups)
             for stale in existing:
                 if stale.review_week != label:
                     continue
                 # 0件として上書きする。sample_count=0の行はsuccess_rate等がNoneに
                 # なり_breaches_threshold()はFalseを返すため、誤検知の方向へは
                 # 働かない(連続悪化週のカウントを不当に伸ばさない)。
-                groups.setdefault((stale.recommendation_type, stale.rule_version), [])
-            for (rec_type, rule_version), grouped in groups.items():
+                groups.setdefault(
+                    (stale.recommendation_type, stale.rule_version), MetricsAccumulator()
+                )
+            for (rec_type, rule_version), accumulator in groups.items():
                 self._metrics_repo.save(
                     self._build_metrics(
-                        rec_type, rule_version, label, period_start, period_end, now, grouped
+                        rec_type,
+                        rule_version,
+                        label,
+                        period_start,
+                        period_end,
+                        now,
+                        accumulator.to_bucket(rec_type.value),
                     )
                 )
                 recomputed += 1
@@ -405,50 +485,6 @@ class WeeklyImprovementReviewService:
         )
         return recomputed, per_week
 
-    def _join_recommendations(
-        self, evaluations: list[EvaluationResult]
-    ) -> tuple[list[tuple[EvaluationResult, Any]], list[str]]:
-        """evaluationsへ対応するRecommendationをjoinする(Issue #377 PR #379是正)。
-
-        `RecommendationRepository.get_many()`(BatchGetItem)を使い、対象件数ぶん
-        `get()`(GetItem)を繰り返さない(N+1回避)。evaluationsを
-        `_RECOMMENDATION_JOIN_CHUNK_SIZE`件ずつのchunkへ区切り、chunkごとに
-        `get_many()`を1回呼んでから直ちにjoinし、次のchunkへ進む。全件ぶんの
-        Recommendationを同時に保持しない(ピークメモリは1chunk分に有界)。
-
-        ★ evaluationsの順序をそのまま保持する。`joined`は入力の順序で追加され、
-          `missing_ids`も見つからなかった評価ごとに(重複IDでも1件ずつ)追加する。
-          旧実装(`get()`を1件ずつ呼ぶ版)と、同じ入力に対して同じ`joined`・
-          同じ`missing_ids`を返す。
-        ★ 同じrecommendation_idを複数のevaluationが参照する場合(horizonの
-          異なる複数評価が同一推奨を指す等)、`get_many()`はID単位で重複排除して
-          1回だけ取得する。`joined`内では同じRecommendationオブジェクトが
-          複数のタプルから参照される(Recommendationの取得回数は増えない)。
-        """
-        joined: list[tuple[EvaluationResult, Any]] = []
-        missing_ids: list[str] = []
-        for start in range(0, len(evaluations), _RECOMMENDATION_JOIN_CHUNK_SIZE):
-            chunk = evaluations[start : start + _RECOMMENDATION_JOIN_CHUNK_SIZE]
-            found = self._recommendations.get_many(
-                evaluation.recommendation_id for evaluation in chunk
-            )
-            for evaluation in chunk:
-                recommendation = found.get(evaluation.recommendation_id)
-                if recommendation is None:
-                    missing_ids.append(evaluation.recommendation_id)
-                    continue
-                joined.append((evaluation, recommendation))
-        return joined, missing_ids
-
-    def _group_by_type_and_rule_version(
-        self, joined: list[tuple[EvaluationResult, Any]]
-    ) -> dict[tuple[RecommendationType, str], list[EvaluationResult]]:
-        groups: dict[tuple[RecommendationType, str], list[EvaluationResult]] = {}
-        for evaluation, recommendation in joined:
-            key = (recommendation.recommendation_type, recommendation.rule_version)
-            groups.setdefault(key, []).append(evaluation)
-        return groups
-
     # --- WeeklyReviewMetrics -------------------------------------------
 
     def _build_metrics(
@@ -459,9 +495,8 @@ class WeeklyImprovementReviewService:
         period_start: dt.date,
         period_end: dt.date,
         now: dt.datetime,
-        evaluations: list[EvaluationResult],
+        bucket: MetricsBucket,
     ) -> WeeklyReviewMetrics:
-        bucket = build_metrics_bucket(rec_type.value, evaluations)
         return WeeklyReviewMetrics(
             metrics_id=f"{rec_type.value}|{rule_version}|ALL|{review_week}",
             review_week=review_week,
