@@ -202,7 +202,7 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | F-02 | 買いシグナル判定 | `domain/signals/buy_signal.py` `domain/signals/buy_decision.py` `domain/signals/buy_consistency.py` `services/buy_signal_service.py` `domain/entities/buy_decision.py` `domain/signals/add_on_risk.py` `domain/signals/eps_normalization.py` | `buy_decision_rules.yaml` `add_on_rules.yaml` | `RecommendationsTable` | D1 / S |
 | F-03 | 買値レンジ算出 | `domain/signals/entry_price_range.py` `domain/valuation/buy_price_levels.py` `domain/valuation/buy_price_reliability.py` `domain/entities/entry_price_range.py` | `entry_exit_price_rules.yaml` | `EntryPriceRange`(Recommendation 内) | D1 / S |
 | F-04 | 見送り理由と整合性検証 | `services/recommendation_consistency_validator.py` | `confidence_rules.yaml` | `SkippedRecommendationsTable` | D1 / D2 / D3 |
-| F-05 | 買い候補・保有銘柄の表示整形 | `services/buy_candidate_target_view_service.py` `services/stock_analysis_view_service.py` | — | なし(読み取りのみ) | D1 / D3 / D5 |
+| F-05 | 買い候補・保有銘柄の表示整形 | `services/buy_candidate_target_view_service.py` `services/stock_analysis_view_service.py` `services/latest_batch_records_provider.py` | — | なし(読み取りのみ) | D1 / D3 / D5 |
 
 ### D2 SELL
 
@@ -254,7 +254,7 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
 | F-15 | 監視候補スクリーニング | `domain/signals/watchlist_screening.py` `domain/screening/rules.py` `services/watchlist_screening_service.py` `services/watchlist_screening_audit.py` `services/screening_data_provider.py` | `watchlist_screening_rules.yaml` `screening_rules.yaml` | `WatchlistTable` | D4 / S |
-| F-16 | 分散実行(dispatcher / worker / 回収) | `lambda_handlers/watchlist_dispatcher_handler.py` `lambda_handlers/watchlist_worker_handler.py` `lambda_handlers/watchlist_batch_reconciler_handler.py` `lambda_handlers/watchlist_terminal_failure_handler.py` `lambda_handlers/_watchlist_execution_mode.py` `lambda_handlers/_watchlist_notification_prescan.py` `infrastructure/aws/watchlist_rotation_dispatch_lease.py` `infrastructure/aws/watchlist_rotation_state.py` | `schedule.yaml` | `WatchlistCandidateProgressTable` `WatchlistScreeningRotationStateTable` `WatchlistRotationDispatchLeaseTable` | D4 / D9 |
+| F-16 | 分散実行(dispatcher / worker / 回収) | `lambda_handlers/watchlist_dispatcher_handler.py` `lambda_handlers/watchlist_worker_handler.py` `lambda_handlers/watchlist_batch_reconciler_handler.py` `lambda_handlers/watchlist_terminal_failure_handler.py` `lambda_handlers/_watchlist_execution_mode.py` `lambda_handlers/_watchlist_notification_prescan.py` `infrastructure/aws/watchlist_rotation_dispatch_lease.py` `infrastructure/aws/watchlist_rotation_state.py` `services/watchlist_candidate_collector.py` | `schedule.yaml` | `WatchlistCandidateProgressTable` `WatchlistScreeningRotationStateTable` `WatchlistRotationDispatchLeaseTable` | D4 / D9 |
 | F-17 | 監視状態遷移・営業日カウント | `services/watch_state_service.py` `domain/signals/near_buy.py` `domain/entities/watch_state.py` `infrastructure/local_repository/watch_state_repository.py` | `notification_rules.yaml` | `WatchStateTable` `ValidationWatchStateTable` | D4 / D1 / D5 |
 | F-18 | 監視銘柄の登録・削除・維持 | `services/watchlist_service.py` `services/watchlist_maintenance_service.py` `services/watchlist_csv_import_service.py` `domain/entities/watchlist.py` `infrastructure/local_repository/watchlist_removal_history_repository.py` `infrastructure/local_repository/watchlist_repository.py` | — | `WatchlistTable` `WatchlistRemovalHistoryTable` | D4 |
 | F-19 | 監視データ cache | `services/watchlist_data_cache.py` | — | `WatchlistPriceCacheTable` `WatchlistFinancialCacheTable` | D4 / D8 |
@@ -298,7 +298,7 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | F-37 | 開示情報取得 | `providers/disclosure/` `infrastructure/edinet/` `lambda_handlers/disclosure_check_handler.py` `services/disclosure_check_service.py` | `schedule.yaml` | `EdinetFilingCacheTable` `EdinetDisclosureCacheTable` `EdinetDailyDocumentListCacheTable` | D8 / D5 |
 | F-38 | データ鮮度・品質監視 | `domain/price_freshness.py` `domain/financial_freshness.py` `services/data_quality_service.py` `services/financial_freshness_integration.py` | `data_validation_rules.yaml` | データ品質アラートの保存先 | D8 / S |
 | F-39 | 銘柄ユニバース収集 | `services/candidate_universe_downloader.py` `services/jpx_industry_source.py` `providers/candidate_universe/` | — | なし | D8 / D1 / D4 |
-| F-40 | provider 障害分類 | `providers/_failure.py` `services/provider_failure_classifier.py` `services/provider_factory.py` `services/provider_bundle.py` `interfaces/provider_errors.py` | — | なし | D8 / S |
+| F-40 | provider 障害分類 | `providers/_failure.py` `services/provider_failure_classifier.py` `services/provider_factory.py` `services/provider_bundle.py` `interfaces/provider_errors.py` `providers/mock_fixtures.py` `providers/news/mock_impl.py` | — | なし | D8 / S |
 
 ### D9 PLATFORM
 
@@ -664,24 +664,12 @@ DEAD_REFERENCE   = 0
 | `migrations/target.py` | 要判断(F 行新設 or 恒久例外) |
 | `migrations/v2_entities.py` | 要判断(F 行新設 or 恒久例外) |
 
-#### `providers/`  1 件
+
+
+#### `services/`  1 件
 
 | module | 割り当て予定 |
 |---|---|
-| `providers/mock_fixtures.py` | 要判断(2026-09-22の実測: 参照元 = providers/market_data/mock_impl.py〔F-35〕・providers/financial_data/mock_impl.py と providers/dividend_data/mock_impl.py〔F-36〕・providers/disclosure/mock_impl.py〔F-37〕・providers/shareholder_benefit/mock_impl.py〔F-29〕・cli/analyze.py〔F-44〕。単一の行に属さない。提案の F-35 は1件分しか覆わない) |
-
-#### `providers/news/`  1 件
-
-| module | 割り当て予定 |
-|---|---|
-| `providers/news/mock_impl.py` | 要判断(2026-09-22の実測: 参照元の module は無い〔`provider_factory.py` も import しない〕。テスト `tests/unit/test_mock_providers.py` だけが参照する。対応する契約 `interfaces/news.py` は S-14。提案の F-40 は参照関係に裏付けがない) |
-
-#### `services/`  4 件
-
-| module | 割り当て予定 |
-|---|---|
-| `services/latest_batch_records_provider.py` | 要判断(2026-09-22の実測: 参照元 = services/buy_candidate_target_view_service.py・services/stock_analysis_view_service.py〔いずれも F-05〕と services/watchlist_view_service.py〔F-20〕。F-43 を使う module は無い。読む対象は F-01 の評価レコード・最新batch pointer〔いずれも F-01 が所有〕。提案の F-43 は実測と合わない。F-01 / F-05 のどちらか、または F-05 と F-20 の共通部品として決める) |
-| `services/watchlist_candidate_collector.py` | 要判断(2026-09-22の実測: 実行時の参照元 = lambda_handlers/watchlist_dispatcher_handler.py〔F-16〕のみ。CLI は cli/watchlist_screening.py〔F-44〕。収集はユニバース取得(F-39 の provider)・保有/ウォッチ除外・ローテーション選択〔ローテーション状態は F-16 が所有〕。提案の F-39 か、F-16 かを決める) |
 | `services/write_plan.py` | 要判断(実測: 参照元 = infrastructure/aws/conversation_commit.py〔F-24〕・infrastructure/aws/dynamodb_transaction.py〔割り当て未定〕・infrastructure/aws/holding_replacement_commit.py〔F-26〕・services/portfolio_service.py〔F-26〕。F-24 と F-26 の両方が使う書き込み計画のデータ構造。`dynamodb_transaction.py` と一体で決める) |
 
 ```
@@ -775,4 +763,4 @@ DEAD_REFERENCE   = 0
 | 2026-09-21 | **UNCATALOGED一覧の`infrastructure/`配下を、F行/S行の主要sourceへ割り当て、#482で「要判断」とした`domain/`の4件をMANAGERの決定どおり反映した**(Issue #483〔#212のatomic分割 W4〕。docsのみ)。38件を割り当てて一覧から削った(UNCATALOGED 60→22): `infrastructure/`の34件(24件は割り当て予定の行にimport元があり提案どおり。10件は、F行の永続契約〔テーブル〕と対応するentityの割り当て〔#482〕から決めた: `buy_candidate_evaluation_record_repository`→F-01 / `daily_notification_priority_repository`・`notification_claim_repository`→F-23 / `holding_decision_result_repository`→F-10 / `holding_evaluation_record_repository`→F-46 / `holdings_snapshot_repository`→F-14 / `improvement_candidate_repository`→F-34 / `notification_log_repository`→F-21 / `stock_name_override_repository`→F-20 / `watchlist_removal_history_repository`→F-18)と、`domain/`の4件(`_legacy_migration`→S-16 / `data_quality_alert`→F-21 / `evaluation_audit`→F-46 / `financial_input_provenance`→S-03)。参照関係の実測だけでは所有が決まらない2件(`infrastructure/aws/dynamodb_transaction.py`・`infrastructure/external_value_parser.py`)は、割り当てず、実測の事実と推奨を添えて一覧に残した(MANAGERの判断)。「主要source」の列へpathを足したのみで、領域(D1〜D9)・既存のF行/S行の影響領域は変更していない。`python scripts/check_catalog_coverage.py`が違反0で終了する |
 | 2026-09-21 | S-13(設定モデル)で、**投資ストーリー維持スコアの配点`dividend_policy`が0以下の設定を、起動時の検証で拒否するようにした**(Issue #259)。`config/models.py`の`InvestmentThesisWeights`へ検査を1つ追加した(合計50点の検査・他項目・config値は不変。現行の`dividend_policy: 15`は通る)。`dividend_policy`は絶対条件で常に評価対象であり、#249の分母0のfail-closed分岐が現行configで到達不能である根拠は「この配点が正であること」だけだったため、その根拠をvalidatorで守る。永続schema・IAM・判定ロジックは変更していない |
 | 2026-09-21 | 週次改善レビュー(F-31。`services/weekly_improvement_review_service.py`)が、**評価もRecommendationも全件保持せずに集計する**ようにした(Issue #377 Track1。D7)。2026-09-21 19:00 JSTの自然実行で、streaming scan(scanned=53,906 / matched=14,256)は約8秒で完了したが、その後の`_join_recommendations()`が`joined`へ(evaluation, recommendation)の組を全件追加してRecommendationを保持し続け、Runtime.OutOfMemory(Max Memory Used 512MB / 512MB)になった(取得はchunkに区切っていたが、保持は該当件数に比例していた)。1回のscanの中で、評価を週ごとに100件までためてはget_many()でRecommendationと結合し、`recommendation_type`と`rule_version`だけを取り出して集計器へ足し込み、評価もRecommendationも捨てる構造へ改めた(メモリは「scanの1ページ + chunk1つ + 集計の組の数」に有界。同一の合成データで、旧方式のピーク305MB〔Recommendation 14,256件が同時に生存〕→ 新方式3MB〔同時に生存100件〕)。集計器`MetricsAccumulator`(`services/performance_metrics_service.py`)を追加した。`build_metrics_bucket()`と意味論を完全に同じにし、floatの合計はPython 3.12の`sum()`と同じ補償付き加算で累積することで、bit単位で同じ値になる。WeeklyReviewMetrics・ImprovementCandidate・起票・通知・保存形式・history_weeks_for_comparisonの意味は変更していない。Lambda Memory・TTL・GSI・テーブルの再設計は本変更に含めない(Track2)。過去週のRecommendation結合が失敗しても、current weekの処理(metrics保存・候補検出・起票・LINE・監査)は止めない。失敗した過去週はmetricsを保存せず(部分集計を残さない)、週ラベル・段階・例外の型名だけを警告ログ・監査(`past_weeks_join_failed`)へ残す。current weekの結合失敗は従来どおりrun全体の失敗。共通部品・領域・既存のF行/S行への影響なし |
-| 2026-09-22 | **UNCATALOGED一覧の`services/` `analysis/`の8件を割り当て、新規共通部品S-23(外部入力値の解析)を追加した**(Issue #484〔#212のatomic分割 W5〕。docsのみ)。UNCATALOGED 22→14。割り当て: `analysis/valuation_shadow_analysis.py`・`analysis/valuation_shadow_hypotheses.py`〔#212の横断監査から申し送られた2件〕・`services/holding_decision_compare_service.py`→F-33 / `services/csv_import_service.py`→F-26 / `services/performance_metrics_service.py`→F-32 / `services/screening_data_provider.py`→F-15 / `services/watchlist_display_name.py`→F-20。いずれもimport元の解析(ast)で、提案どおりで実測と矛盾しないことを確かめた。`infrastructure/external_value_parser.py`はUSER決定どおりS-23とし、影響領域は参照元12 moduleが属する行のunionから「全領域」とした(名称・影響領域はMANAGERが確認する)。**再測定で提案と実測が合わなかった6件は、割り当てず、実測の事実を添えて一覧に残した**: `infrastructure/aws/dynamodb_transaction.py`〔#483では参照元をF-26の1 moduleとしたが、F-24の`conversation_commit.py`も参照する〕・`services/write_plan.py`〔同じ2経路〕・`services/latest_batch_records_provider.py`〔F-43を使うmoduleが無い〕・`services/watchlist_candidate_collector.py`〔F-39かF-16か〕・`providers/mock_fixtures.py`〔F-35/F-36/F-37/F-29にまたがる〕・`providers/news/mock_impl.py`〔参照するmoduleが無い〕。`migrations/`の8件は判断待ちのまま。「主要source」の列へpathを足したのみで、領域(D1〜D9)・既存のF行/S行の影響領域は変更していない。`python scripts/check_catalog_coverage.py`が違反0で終了する |
+| 2026-09-22 | **UNCATALOGED一覧の`services/` `analysis/` `providers/`の11件を割り当て、新規共通部品S-23(外部入力値の解析)を追加した**(Issue #484〔#212のatomic分割 W5〕。docsのみ)。UNCATALOGED 22→10。割り当て: `analysis/valuation_shadow_analysis.py`・`analysis/valuation_shadow_hypotheses.py`〔#212の横断監査から申し送られた2件〕・`services/holding_decision_compare_service.py`→F-33 / `services/csv_import_service.py`→F-26 / `services/performance_metrics_service.py`→F-32 / `services/screening_data_provider.py`→F-15 / `services/watchlist_display_name.py`→F-20。再測定で提案と実測が合わなかった4件は、MANAGERの決定どおり改めた: `services/latest_batch_records_provider.py`→F-05〔提案のF-43を使うmoduleが無い。参照元はF-05とF-20の表示整形〕 / `services/watchlist_candidate_collector.py`→F-16〔実行時の参照元はdispatcherのみ。ローテーション状態はF-16が所有〕 / `providers/mock_fixtures.py`と`providers/news/mock_impl.py`→F-40〔mock providerの家族としての一貫性を優先。参照するmoduleが無い/複数の行にまたがるため、単一の行には決まらない〕。割り当てはいずれもimport元の解析(ast)で裏付けた(最初の7件は提案どおりで実測と矛盾しない)。`infrastructure/external_value_parser.py`はUSER決定どおりS-23とし、影響領域は参照元12 moduleが属する行のunionから「全領域」とした(名称・影響領域はMANAGERが承認した)。**再測定で、承認済みの前提と実測が合わなかった2件は、割り当てず、実測の事実を添えて一覧に残した**: `infrastructure/aws/dynamodb_transaction.py`〔#483では参照元をF-26の1 moduleとしてF-26が承認されたが、F-24の`conversation_commit.py`も参照する〕・`services/write_plan.py`〔同じ2経路。新規共通部品S-24として追加する案は、USERの確認待ち〕。`migrations/`の8件は判断待ちのまま。「主要source」の列へpathを足したのみで、領域(D1〜D9)・既存のF行/S行の影響領域は変更していない。`python scripts/check_catalog_coverage.py`が違反0で終了する |
