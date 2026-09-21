@@ -2953,6 +2953,6 @@ jstock judgment-safety-shadow report --source dynamodb         # Production(read
 - 条件別の率の分母は、`not_evaluated`(入力が無く評価できなかった条件)を**除いた**評価済みの記録数である。`not_evaluated` は「該当なし」ではなく、別掲する。
 - G3 は測定可能な 2 項目の**下限値**(測定不能の 3 項目は含まない)。G4 は保有の `FULL_PROFIT_TAKE` のみが対象(買い経路は対象外)。
 - `ItemCount` / `TableSizeBytes`(DescribeTable)は**概算**で、およそ 6 時間ごとに更新される。実測値は Scan の結果である。両者を区別して表示する。
-- 推定コストは公開単価(コード内の定数。更新日を併記)に基づく**概算**。単価は変わりうるため、必要なら確認する。
+- 推定コストは公開単価(コード内の定数)に基づく**概算**。単価は AWS Price List API(ap-northeast-1・Standard table class・オンデマンド読み取り = 100 万読み取りユニットあたり 0.1425 USD。公開日 2026-09-11)で 2026-09-21 に確認した値。単価は変わりうるため、出力の `estimated_read_cost_basis` の確認日を見る。table class が Standard-IA の場合は別の単価(0.178)になる。
 - 月次の外挿は、shadow 記録がある日が 3 日未満のときは参考値である。
 - `unparsed` は読めなかった項目の件数(沈黙させない)。未知の `schema_version` は `unparsed` ではなく別掲する。

@@ -22,10 +22,15 @@ from jstock_advisor.domain.jst import to_jst
 SUPPORTED_SCHEMA_VERSION: Final = 1
 CONDITION_IDS: Final[tuple[str, ...]] = ("G1", "G2", "G3", "G4")
 
-#: 概算コストの単価(USD / 100万 読み取りユニット)。**公開単価は変更されうる概算値**。
-READ_UNIT_PRICE_USD_PER_MILLION: Final = 0.285
+#: 概算コストの単価(USD / 100万 読み取りユニット)。AWS Price List API(AmazonDynamoDB /
+#: ap-northeast-1。公開日 2026-09-11)の `APN1-ReadRequestUnits`(Standard table class・
+#: オンデマンド)を 2026-09-21 に確認した値。**単価は変更されうる**ため、確認日を
+#: `READ_UNIT_PRICE_NOTE`へ併記する。
+#: (Standard-IA table classは 0.178 で別の値。本CLIはStandardを前提にした概算である。)
+READ_UNIT_PRICE_USD_PER_MILLION: Final = 0.1425
 READ_UNIT_PRICE_NOTE: Final = (
-    "ap-northeast-1のオンデマンド読み取り単価(2026-09-21時点の想定値。要確認)"
+    "ap-northeast-1のオンデマンド読み取り単価(Standard table class。AWS Price List API"
+    "[公開日 2026-09-11]で2026-09-21に確認)"
 )
 
 #: 記録が3日未満のときの月次外挿は参考値。

@@ -20,6 +20,8 @@ from jstock_advisor.domain.entities.audit import AuditLogEntry
 from jstock_advisor.services.judgment_safety_shadow_report import (
     NO_RECORDS_MESSAGE,
     NOTES,
+    READ_UNIT_PRICE_NOTE,
+    READ_UNIT_PRICE_USD_PER_MILLION,
     Baseline,
     ScanSnapshot,
     TableSnapshot,
@@ -267,10 +269,19 @@ def test_storage_metrics_combine_estimate_and_measurement_separately() -> None:
     assert result["audit_total_examined"] == 1_000
     assert result["match_ratio"] == 0.1
     assert result["consumed_capacity"] == {"total_rru": 20_000.0}
-    assert abs(result["estimated_read_cost_usd"] - 20_000 * 0.285 / 1_000_000) < 1e-12
+    # 20,000 RRU × $0.1425 / 100万 = $0.00285(桁・単価を直書きし、定数を写さない)
+    assert abs(result["estimated_read_cost_usd"] - 0.00285) < 1e-12
+    assert "2026-09-21に確認" in result["estimated_read_cost_basis"]
     assert result["baseline"]["records"] == 78_700
     assert list(result["decision_type_counts"]) == ["buy_signal", "judgment_safety_shadow"]
     assert result["estimated_monthly_shadow_growth"]["records"] == 3_000
+
+
+def test_read_unit_price_matches_the_confirmed_aws_price() -> None:
+    """単価は、AWS Price List API(ap-northeast-1・Standard・オンデマンド)で確認した値。"""
+    assert READ_UNIT_PRICE_USD_PER_MILLION == 0.1425
+    assert "Standard" in READ_UNIT_PRICE_NOTE
+    assert "要確認" not in READ_UNIT_PRICE_NOTE  # 確認済みの事実として記す
 
 
 def test_describe_only_has_no_scan_metrics() -> None:
