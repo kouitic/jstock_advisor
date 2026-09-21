@@ -198,9 +198,9 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
-| F-01 | 買い候補日次バッチ | `lambda_handlers/buy_candidates_handler.py` `lambda_handlers/_fanout.py` | `schedule.yaml` | `BuyCandidateEvaluationRecordsTable` `BuyCandidateBatchCompletionTable` | D1 / D5 / D9 |
-| F-02 | 買いシグナル判定 | `domain/signals/buy_signal.py` `domain/signals/buy_decision.py` `domain/signals/buy_consistency.py` `services/buy_signal_service.py` | `buy_decision_rules.yaml` `add_on_rules.yaml` | `RecommendationsTable` | D1 / S |
-| F-03 | 買値レンジ算出 | `domain/signals/entry_price_range.py` `domain/valuation/buy_price_levels.py` `domain/valuation/buy_price_reliability.py` | `entry_exit_price_rules.yaml` | `EntryPriceRange`(Recommendation 内) | D1 / S |
+| F-01 | 買い候補日次バッチ | `lambda_handlers/buy_candidates_handler.py` `lambda_handlers/_fanout.py` `domain/entities/buy_candidate_batch_pointer.py` `domain/entities/buy_candidate_evaluation_record.py` `domain/entities/buy_evaluation_target.py` | `schedule.yaml` | `BuyCandidateEvaluationRecordsTable` `BuyCandidateBatchCompletionTable` | D1 / D5 / D9 |
+| F-02 | 買いシグナル判定 | `domain/signals/buy_signal.py` `domain/signals/buy_decision.py` `domain/signals/buy_consistency.py` `services/buy_signal_service.py` `domain/entities/buy_decision.py` `domain/signals/add_on_risk.py` `domain/signals/eps_normalization.py` | `buy_decision_rules.yaml` `add_on_rules.yaml` | `RecommendationsTable` | D1 / S |
+| F-03 | 買値レンジ算出 | `domain/signals/entry_price_range.py` `domain/valuation/buy_price_levels.py` `domain/valuation/buy_price_reliability.py` `domain/entities/entry_price_range.py` | `entry_exit_price_rules.yaml` | `EntryPriceRange`(Recommendation 内) | D1 / S |
 | F-04 | 見送り理由と整合性検証 | `services/recommendation_consistency_validator.py` | `confidence_rules.yaml` | `SkippedRecommendationsTable` | D1 / D2 / D3 |
 | F-05 | 買い候補・保有銘柄の表示整形 | `services/buy_candidate_target_view_service.py` `services/stock_analysis_view_service.py` | — | なし(読み取りのみ) | D1 / D3 / D5 |
 
@@ -209,20 +209,20 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
 | F-06 | 売却シグナル判定 | `domain/signals/sell_signal.py` `services/sell_signal_service.py` | `sell_rules.yaml` | `RecommendationsTable` | D2 / S |
-| F-07 | 利確判定 | `domain/signals/profit_taking.py` `services/profit_taking_service.py` `domain/classification/profit_taking_industry.py` | `profit_taking_rules.yaml` | `RecommendationsTable` | D2 / S |
+| F-07 | 利確判定 | `domain/signals/profit_taking.py` `services/profit_taking_service.py` `domain/classification/profit_taking_industry.py` `domain/signals/trading_unit_feasibility.py` | `profit_taking_rules.yaml` | `RecommendationsTable` | D2 / S |
 | F-08 | 下落保護 | `domain/signals/profit_protection.py` | `sell_rules.yaml` | `RecommendationsTable` | D2 |
-| F-09 | 売値レンジ算出 | `domain/signals/exit_price_range.py` `services/sell_price_recommendation_service.py` | `entry_exit_price_rules.yaml` | `ExitPriceRange`(Recommendation 内) | D2 / S |
+| F-09 | 売値レンジ算出 | `domain/signals/exit_price_range.py` `services/sell_price_recommendation_service.py` `domain/entities/exit_price_range.py` | `entry_exit_price_rules.yaml` | `ExitPriceRange`(Recommendation 内) | D2 / S |
 
 ### D3 HOLDING
 
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
-| F-10 | 保有継続判断 | `domain/signals/holding_decision_score.py` `domain/signals/holding_decision_hard_gate.py` `domain/signals/holding_decision_execution_plan.py` `services/holding_decision_service.py` | `holding_decision_rules.yaml` `holding_decision_risk_rules.yaml` `holding_decision_ratio_rules.yaml` | `HoldingDecisionResultsTable` `HoldingEvaluationRecordsTable` | D3 / S |
+| F-10 | 保有継続判断 | `domain/signals/holding_decision_score.py` `domain/signals/holding_decision_hard_gate.py` `domain/signals/holding_decision_execution_plan.py` `services/holding_decision_service.py` `domain/entities/holding_decision.py` | `holding_decision_rules.yaml` `holding_decision_risk_rules.yaml` `holding_decision_ratio_rules.yaml` | `HoldingDecisionResultsTable` `HoldingEvaluationRecordsTable` | D3 / S |
 | F-11 | 投資仮説の管理と採点 | `services/investment_thesis_service.py` `domain/signals/investment_thesis_scoring.py` `cli/baseline_repair.py` | `investment_thesis_template.yaml` | `InvestmentThesesTable` `InvestmentThesisBaselinesTable` `InvestmentThesisBaselineSequencesTable` `InvestmentThesisBaselinePointersTable` | D3 |
 | F-12 | 保有判断の実行時設定 | `services/holding_decision_runtime_config_service.py` | — | `HoldingDecisionRuntimeConfigTable` | D3 / D9 |
-| F-13 | 取引停止・クールダウン | `services/trading_pause_service.py` `services/trade_cooldown_service.py` `infrastructure/aws/trading_pause_config.py` `domain/entities/trade_event_record.py` `infrastructure/local_repository/trade_event_record_repository.py` | — | `TradingPauseConfigTable` `TradeEventRecordsTable`(Issue #71 F-C11 Phase 1) | D3 / D1 / D2 |
+| F-13 | 取引停止・クールダウン | `services/trading_pause_service.py` `services/trade_cooldown_service.py` `infrastructure/aws/trading_pause_config.py` `domain/entities/trade_event_record.py` `infrastructure/local_repository/trade_event_record_repository.py` `domain/entities/trading_pause.py` | — | `TradingPauseConfigTable` `TradeEventRecordsTable`(Issue #71 F-C11 Phase 1) | D3 / D1 / D2 |
 | F-14 | 保有スナップショット | `services/holdings_view_service.py` `domain/entities/holdings_snapshot.py` `services/stock_snapshot_service.py` | — | `HoldingsSnapshotTable` | D3 / D6 |
-| F-46 | 保有監視日次バッチ | `lambda_handlers/holdings_watchlist_handler.py` `lambda_handlers/_fanout.py` | `schedule.yaml` | `RecommendationsTable` `DecisionSnapshotsTable` `HoldingDecisionResultsTable` `HoldingEvaluationRecordsTable` `NotificationLogTable` | D3 / D1 / D2 / D4 / D5 / D9 / S |
+| F-46 | 保有監視日次バッチ | `lambda_handlers/holdings_watchlist_handler.py` `lambda_handlers/_fanout.py` `domain/entities/holding_evaluation_record.py` `domain/signals/portfolio_concentration.py` | `schedule.yaml` | `RecommendationsTable` `DecisionSnapshotsTable` `HoldingDecisionResultsTable` `HoldingEvaluationRecordsTable` `NotificationLogTable` | D3 / D1 / D2 / D4 / D5 / D9 / S |
 
 ```
 ★ F-46 は B節「実行単位(Lambda)を領域の境界にしない」の実例そのものである。
@@ -255,46 +255,46 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 |---|---|---|---|---|---|
 | F-15 | 監視候補スクリーニング | `domain/signals/watchlist_screening.py` `domain/screening/rules.py` `services/watchlist_screening_service.py` `services/watchlist_screening_audit.py` | `watchlist_screening_rules.yaml` `screening_rules.yaml` | `WatchlistTable` | D4 / S |
 | F-16 | 分散実行(dispatcher / worker / 回収) | `lambda_handlers/watchlist_dispatcher_handler.py` `lambda_handlers/watchlist_worker_handler.py` `lambda_handlers/watchlist_batch_reconciler_handler.py` `lambda_handlers/watchlist_terminal_failure_handler.py` `lambda_handlers/_watchlist_execution_mode.py` `lambda_handlers/_watchlist_notification_prescan.py` | `schedule.yaml` | `WatchlistCandidateProgressTable` `WatchlistScreeningRotationStateTable` `WatchlistRotationDispatchLeaseTable` | D4 / D9 |
-| F-17 | 監視状態遷移・営業日カウント | `services/watch_state_service.py` `domain/signals/near_buy.py` | `notification_rules.yaml` | `WatchStateTable` `ValidationWatchStateTable` | D4 / D1 / D5 |
-| F-18 | 監視銘柄の登録・削除・維持 | `services/watchlist_service.py` `services/watchlist_maintenance_service.py` `services/watchlist_csv_import_service.py` | — | `WatchlistTable` `WatchlistRemovalHistoryTable` | D4 |
+| F-17 | 監視状態遷移・営業日カウント | `services/watch_state_service.py` `domain/signals/near_buy.py` `domain/entities/watch_state.py` | `notification_rules.yaml` | `WatchStateTable` `ValidationWatchStateTable` | D4 / D1 / D5 |
+| F-18 | 監視銘柄の登録・削除・維持 | `services/watchlist_service.py` `services/watchlist_maintenance_service.py` `services/watchlist_csv_import_service.py` `domain/entities/watchlist.py` | — | `WatchlistTable` `WatchlistRemovalHistoryTable` | D4 |
 | F-19 | 監視データ cache | `services/watchlist_data_cache.py` | — | `WatchlistPriceCacheTable` `WatchlistFinancialCacheTable` | D4 / D8 |
-| F-20 | 監視結果の表示・要約整形 | `services/watchlist_view_service.py` `services/watchlist_judgment_summary_formatter.py` `services/watchlist_score_detail.py` `services/watchlist_addition_summary_builder.py` | — | なし | D4 / D5 |
+| F-20 | 監視結果の表示・要約整形 | `services/watchlist_view_service.py` `services/watchlist_judgment_summary_formatter.py` `services/watchlist_score_detail.py` `services/watchlist_addition_summary_builder.py` `domain/ranking.py` | — | なし | D4 / D5 |
 
 ### D5 NOTIFICATION
 
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
-| F-21 | LINE 通知送信 | `services/line_notification_service.py` `infrastructure/line/` | `notification_rules.yaml` | `NotificationLogTable` | D5 |
+| F-21 | LINE 通知送信 | `services/line_notification_service.py` `infrastructure/line/` `domain/entities/notification.py` | `notification_rules.yaml` | `NotificationLogTable` | D5 |
 | F-22 | メッセージ整形 | `domain/notification/message_formatter.py` `domain/notification/recommendation_adapter.py` `domain/notification/notification_intent.py` `services/holding_decision_notification_builder.py` | `notification_rules.yaml` | なし | D5 |
 | F-23 | 重複抑止・優先度 | `domain/entities/notification_claim.py` `domain/entities/daily_notification_priority.py` `domain/entities/notification_eligibility.py` | `notification_rules.yaml` | `NotificationClaimsTable` `DailyNotificationPriorityTable` `ValidationDailyNotificationPriorityTable` | D5 |
 | F-24 | LINE 受信と対話応答 | `lambda_handlers/line_webhook_handler.py` `services/line_event_router.py` `services/conversation_service.py` `infrastructure/aws/conversation_state_store.py` | — | `ConversationStatesTable` | D5 |
-| F-25 | 利用者フィードバック収集 | `services/user_feedback_service.py` | — | `UserFeedbackTable` | D5 / D7 |
+| F-25 | 利用者フィードバック収集 | `services/user_feedback_service.py` `domain/entities/feedback.py` | — | `UserFeedbackTable` | D5 / D7 |
 
 ### D6 PORTFOLIO
 
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
 | F-26 | 保有・取得ロット管理 | `services/portfolio_service.py` `domain/entities/holding.py` | — | `HoldingsTable` `PurchaseLotsTable` | D6 |
-| F-27 | 取引履歴の取り込み | `services/transaction_csv_import_service.py` `services/transaction_history_service.py` `services/csv_import_ledger.py` | — | `TransactionsTable` | D6 |
+| F-27 | 取引履歴の取り込み | `services/transaction_csv_import_service.py` `services/transaction_history_service.py` `services/csv_import_ledger.py` `domain/entities/transaction.py` | — | `TransactionsTable` | D6 |
 | F-28 | 取引イベント検知 | `domain/signals/trade_event_detection.py` `infrastructure/aws/trade_detection_lock.py` | — | `TradeDetectionRunLockTable` | D6 / D3 |
 | F-29 | 株主優待レジストリ | `services/shareholder_benefit_registry_service.py` `services/shareholder_benefit_csv_import_service.py` `providers/shareholder_benefit/` | `shareholder_return_policies.yaml` | `ShareholderBenefitsTable` | D6 |
-| F-30 | コーポレートアクション反映 | `services/corporate_action_service.py` `providers/corporate_action/` | — | `CorporateActionRegistryTable` `StockNameOverridesTable` | D6 / D8 |
+| F-30 | コーポレートアクション反映 | `services/corporate_action_service.py` `providers/corporate_action/` `domain/entities/corporate_action.py` | — | `CorporateActionRegistryTable` `StockNameOverridesTable` | D6 / D8 |
 
 ### D7 REVIEW
 
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
 | F-31 | 週次・月次・四半期レビュー | `lambda_handlers/weekly_review_handler.py` `lambda_handlers/monthly_review_handler.py` `lambda_handlers/quarterly_review_handler.py` `services/review_report_service.py` `services/weekly_improvement_review_service.py` | `review_improvement.yaml` `schedule.yaml` | 週次レビュー指標の保存先 | D7 / D5 |
-| F-32 | 判定の事後評価 | `lambda_handlers/evaluation_handler.py` `services/recommendation_evaluation_service.py` `services/decision_performance_service.py` | `evaluation_rules.yaml` `decision_evaluation.yaml` | `EvaluationResultsTable` | D7 |
+| F-32 | 判定の事後評価 | `lambda_handlers/evaluation_handler.py` `services/recommendation_evaluation_service.py` `services/decision_performance_service.py` `domain/entities/evaluation.py` `domain/evaluation_rules.py` | `evaluation_rules.yaml` `decision_evaluation.yaml` | `EvaluationResultsTable` | D7 |
 | F-33 | 較正・バックテスト | `services/calibration_analysis_service.py` `services/calibration_dataset_service.py` `services/backtest_service.py` `services/holding_decision_backtest_service.py` `services/before_after_report_service.py` | — | なし(読み取り中心) | D7 |
-| F-34 | 改善提案・ルール版管理 | `services/rule_proposal_service.py` `services/rule_version_service.py` `services/github_issue_service.py` `domain/improvement_rules.py` | `review_improvement.yaml` | `RuleVersionsTable` | D7 / D9 |
+| F-34 | 改善提案・ルール版管理 | `services/rule_proposal_service.py` `services/rule_version_service.py` `services/github_issue_service.py` `domain/improvement_rules.py` `domain/entities/improvement.py` `domain/entities/rule_version.py` | `review_improvement.yaml` | `RuleVersionsTable` | D7 / D9 |
 
 ### D8 DATA
 
 | ID | 機能 | 主要 source | 主要 config | 永続契約 | 影響領域 |
 |---|---|---|---|---|---|
 | F-35 | 市場価格取得 | `providers/market_data/` `services/yfinance_rate_limit.py` `services/run_scoped_market_data.py` | — | なし | D8 |
-| F-36 | 財務・配当データ取得 | `providers/financial_data/` `providers/dividend_data/` `domain/financial_series.py` `domain/financial_decomposition.py` | — | なし | D8 / S |
+| F-36 | 財務・配当データ取得 | `providers/financial_data/` `providers/dividend_data/` `domain/financial_series.py` `domain/financial_decomposition.py` `domain/signals/dividend_cut_analysis.py` | — | なし | D8 / S |
 | F-37 | 開示情報取得 | `providers/disclosure/` `infrastructure/edinet/` `lambda_handlers/disclosure_check_handler.py` `services/disclosure_check_service.py` | `schedule.yaml` | `EdinetFilingCacheTable` `EdinetDisclosureCacheTable` `EdinetDailyDocumentListCacheTable` | D8 / D5 |
 | F-38 | データ鮮度・品質監視 | `domain/price_freshness.py` `domain/financial_freshness.py` `services/data_quality_service.py` `services/financial_freshness_integration.py` | `data_validation_rules.yaml` | データ品質アラートの保存先 | D8 / S |
 | F-39 | 銘柄ユニバース収集 | `services/candidate_universe_downloader.py` `services/jpx_industry_source.py` `providers/candidate_universe/` | — | なし | D8 / D1 / D4 |
@@ -308,7 +308,7 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 |---|---|---|---|---|---|
 | F-41 | インフラ定義・デプロイ | `infra/template.yaml` `infra/` | — | 全 table 定義 / IAM / Secrets 参照 | D9 / 全領域 |
 | F-42 | 実行モード・スケジュール | `src/jstock_advisor/lambda_handlers/_execution_mode.py` `src/jstock_advisor/lambda_handlers/_scheduling.py` `src/jstock_advisor/domain/entities/execution_context.py` | `schedule.yaml` `holiday_calendar.json` | `BatchRunsTable` | D9 / 全領域 |
-| F-43 | 監査ログ・実行追跡 | `src/jstock_advisor/services/audit_service.py` `src/jstock_advisor/services/evaluation_run_audit.py` `src/jstock_advisor/infrastructure/aws/batch_tracker.py` | — | `AuditLogTable` `BatchRunsTable` | D9 |
+| F-43 | 監査ログ・実行追跡 | `src/jstock_advisor/services/audit_service.py` `src/jstock_advisor/services/evaluation_run_audit.py` `src/jstock_advisor/infrastructure/aws/batch_tracker.py` `domain/entities/audit.py` | — | `AuditLogTable` `BatchRunsTable` | D9 |
 | F-44 | CLI 運用コマンド | `src/jstock_advisor/cli/` | — | なし | D9 / 全領域 |
 | F-45 | CI・品質ゲート | `.github/workflows/ci.yml` `.github/workflows/pii-metadata-audit.yml` `scripts/` `docs/policy_registry.yaml` | — | なし | D9 |
 | F-47 | batch finalize recovery | `lambda_handlers/_finalize_recovery.py` `services/watchlist_batch_finalizer.py` | — | `BuyCandidateBatchCompletionTable`(読み取り) | D9 / D4 / D1 / D3 |
@@ -338,18 +338,18 @@ code WIP を取得すべき領域である(L節)。呼び出し元の実測に�
 
 | SHARED_ID | 共通部品 | 主要 path | lock する領域 | 実測した主な参照元 |
 |---|---|---|---|---|
-| S-01 | 企業品質スコア | `domain/signals/company_quality_scoring.py` | D1 / D3 | `buy_signal_service` `holding_decision_service` `simple_roe` |
+| S-01 | 企業品質スコア | `domain/signals/company_quality_scoring.py` `domain/signals/simple_roe.py` | D1 / D3 | `buy_signal_service` `holding_decision_service` `simple_roe` |
 | S-02 | 判定スナップショット | `domain/entities/decision_snapshot.py` `domain/decision_snapshot_builder.py` `services/decision_snapshot_service.py` | D1 / D3 / D4 / D7 | 買い候補 handler / 保有監視 handler / 較正 / 実績評価 |
 | S-03 | 推奨エンティティ | `domain/entities/recommendation.py` `infrastructure/local_repository/recommendation_repository.py` | D1 / D2 / D3 / D4 / D5 / D7 | 全判定系 + 通知 + 評価 |
 | S-04 | 営業日カレンダー | `domain/business_calendar.py` `domain/jst.py` `domain/market_session.py` `config/holiday_calendar.json` | D1 / D2 / D3 / D4 / D8 / D9 | screening / 環境 / 鮮度 / 決算窓 / handler / CLI |
-| S-05 | バリュエーション | `domain/valuation/` | D1 / D2 / D4 / D5 / D6 / D7 | `entry_price_range` `exit_price_range` `profit_taking` `buy_signal_service` `stock_snapshot_service` `screening_data_provider`(F-15) `stock_analysis_view_service`(F-05) `watchlist_judgment_summary_formatter`(F-20) `shareholder_benefit_registry_service`(F-29) `valuation_shadow_analysis`(F-33) |
+| S-05 | バリュエーション | `domain/valuation/` `domain/entities/historical_valuation.py` `domain/entities/valuation.py` `domain/signals/historical_valuation.py` | D1 / D2 / D4 / D5 / D6 / D7 | `entry_price_range` `exit_price_range` `profit_taking` `buy_signal_service` `stock_snapshot_service` `screening_data_provider`(F-15) `stock_analysis_view_service`(F-05) `watchlist_judgment_summary_formatter`(F-20) `shareholder_benefit_registry_service`(F-29) `valuation_shadow_analysis`(F-33) |
 | S-06 | 信頼度スコア | `domain/signals/confidence_scoring.py` `config/confidence_rules.yaml` | D1 / D2 / D8 | `valuation_confidence` `sell_signal_service` `profit_taking_service` `financial_freshness_integration` |
-| S-07 | 銘柄・業種分類 | `domain/classification/` `config/stock_classification_rules.yaml` `config/industry_scoring_policy.yaml` | D1 / D2 / D3 / D4 | 買い / 利確 / 財務 / 正規化の各分類 |
+| S-07 | 銘柄・業種分類 | `domain/classification/` `config/stock_classification_rules.yaml` `config/industry_scoring_policy.yaml` `domain/entities/classification.py` | D1 / D2 / D3 / D4 | 買い / 利確 / 財務 / 正規化の各分類 |
 | S-08 | 監視接近判定 | `domain/signals/near_buy.py` | D1 / D4 / D5 | `buy_candidates_handler` `watch_state_service` `line_notification_service` `recommendation_adapter` |
 | S-09 | スコアリング基盤 | `domain/scoring/` `config/scoring_weights.yaml` `domain/signals/risk_deduction_scoring.py` `domain/signals/momentum.py` `domain/signals/timing_score.py` `domain/entities/momentum.py` `domain/entities/timing_score.py` | D1 / D3 / D4 | 全スコア算出 |
 | S-10 | 財務系列・鮮度 | `domain/financial_series.py` `domain/financial_freshness.py` `domain/price_freshness.py` | D1 / D2 / D3 / D8 | 判定系全般 + 品質監視 |
-| S-11 | 決算イベント | `domain/signals/earnings_surprise.py` `domain/signals/earnings_trend.py` `domain/signals/earnings_window.py` | D1 / D2 / D3 | 各判定 |
-| S-12 | 市場・セクター環境 | `domain/signals/market_environment.py` `domain/signals/sector_environment.py` `domain/signals/_environment_shared.py` | D1 / D2 / D4 | 各判定 |
+| S-11 | 決算イベント | `domain/signals/earnings_surprise.py` `domain/signals/earnings_trend.py` `domain/signals/earnings_window.py` `domain/entities/earnings_surprise.py` `domain/entities/earnings_trend.py` | D1 / D2 / D3 | 各判定 |
+| S-12 | 市場・セクター環境 | `domain/signals/market_environment.py` `domain/signals/sector_environment.py` `domain/signals/_environment_shared.py` `domain/entities/environment.py` `domain/entities/market_environment.py` `domain/entities/sector_environment.py` `domain/signals/environment.py` | D1 / D2 / D4 | 各判定 |
 | S-13 | 設定ロードとスキーマ | `config/loader.py` `config/models.py` | 全領域 | すべての config 読み込み |
 | S-14 | provider 契約 | `interfaces/` | D1 / D2 / D3 / D4 / D8 | provider 実装と全利用側 |
 | S-15 | 優待の判定利用 | `domain/valuation/shareholder_benefit_matching.py` `domain/signals/record_date_resolution.py` | D1 / D2 / D3 / D4 | 買い / 売り / 保有 / 監視 / スコア / 投資仮説 |
@@ -649,61 +649,16 @@ DEAD_REFERENCE   = 0
 | `analysis/valuation_shadow_analysis.py` | F-33 |
 | `analysis/valuation_shadow_hypotheses.py` | F-33 |
 
-#### `domain/entities/`  33 件
+#### `domain/entities/`  4 件
+
+(`domain/` 配下は、下の 4 件を除いて F 行 / S 行の主要 source へ割り当て済み〔Issue #482〕。4 件は参照関係の実測だけでは所有が決まらないため、実測の事実を添えて残している。決めるのは MANAGER)
 
 | module | 割り当て予定 |
 |---|---|
-| `domain/entities/_legacy_migration.py` | 要判断 |
-| `domain/entities/audit.py` | F-43 |
-| `domain/entities/buy_candidate_batch_pointer.py` | F-01 |
-| `domain/entities/buy_candidate_evaluation_record.py` | F-32 |
-| `domain/entities/buy_decision.py` | F-02 |
-| `domain/entities/buy_evaluation_target.py` | F-02 |
-| `domain/entities/classification.py` | S-07 |
-| `domain/entities/corporate_action.py` | F-30 |
-| `domain/entities/data_quality_alert.py` | F-38 |
-| `domain/entities/earnings_surprise.py` | S-11 |
-| `domain/entities/earnings_trend.py` | S-11 |
-| `domain/entities/entry_price_range.py` | F-03 |
-| `domain/entities/environment.py` | S-12 |
-| `domain/entities/evaluation.py` | F-32 |
-| `domain/entities/evaluation_audit.py` | F-32 |
-| `domain/entities/exit_price_range.py` | F-09 |
-| `domain/entities/feedback.py` | F-25 |
-| `domain/entities/financial_input_provenance.py` | F-38 |
-| `domain/entities/historical_valuation.py` | F-33 |
-| `domain/entities/holding_decision.py` | F-10 |
-| `domain/entities/holding_evaluation_record.py` | F-14 |
-| `domain/entities/improvement.py` | F-34 |
-| `domain/entities/market_environment.py` | S-12 |
-| `domain/entities/notification.py` | F-23 |
-| `domain/entities/rule_version.py` | F-34 |
-| `domain/entities/sector_environment.py` | S-12 |
-| `domain/entities/trading_pause.py` | F-13 |
-| `domain/entities/transaction.py` | F-27 |
-| `domain/entities/valuation.py` | S-05 |
-| `domain/entities/watch_state.py` | F-17 |
-| `domain/entities/watchlist.py` | F-18 |
-
-#### `domain/`  2 件
-
-| module | 割り当て予定 |
-|---|---|
-| `domain/evaluation_rules.py` | F-32 |
-| `domain/ranking.py` | F-05 |
-
-#### `domain/signals/`  11 件
-
-| module | 割り当て予定 |
-|---|---|
-| `domain/signals/add_on_risk.py` | F-10 |
-| `domain/signals/dividend_cut_analysis.py` | F-06 |
-| `domain/signals/environment.py` | S-12 |
-| `domain/signals/eps_normalization.py` | F-02 |
-| `domain/signals/historical_valuation.py` | F-33 |
-| `domain/signals/portfolio_concentration.py` | F-14 |
-| `domain/signals/simple_roe.py` | S-01 |
-| `domain/signals/trading_unit_feasibility.py` | F-03 |
+| `domain/entities/_legacy_migration.py` | 要判断(実測: 参照元 = S-16 の 1 module のみ。旧フィールド名の読み替えの共通 helper。S-16 は全領域の lock になるため、MANAGER の判断) |
+| `domain/entities/data_quality_alert.py` | 要判断(実測: 参照元 = F-21 の line_notification_service のみ〔生成と送信〕。F-38 の永続契約に「データ品質アラートの保存先」がある。F-21 か F-38 か) |
+| `domain/entities/evaluation_audit.py` | 要判断(実測: 参照元 = F-46 の handler / F-43 の batch_tracker / F-21 の通知。保有 1 件ごとの評価・通知の監査記録。F-46 か F-43 か) |
+| `domain/entities/financial_input_provenance.py` | 要判断(実測: 参照元 = S-03 の recommendation〔保存の容器〕/ F-14 の stock_snapshot_service〔生成〕。S-03 か F-14 か F-38 か) |
 
 #### `infrastructure/aws/`  8 件
 
@@ -885,4 +840,5 @@ DEAD_REFERENCE   = 0
 | 2026-09-21 | F-10(保有継続判断)の優待条件で、**明示的な廃止(`is_abolished`)を EVALUATED・0 点にした**(Issue #476。USER決定 U-A)。`domain/signals/investment_thesis_scoring.py`の優待条件の状態(#470 が導入した導出関数`derive_benefit_condition_state`)に、**新しい状態 ABOLISHED**(評価・0点)を追加した。以前は、廃止は`not is_abolished` が偽になるため NOT_APPLICABLE(理由「優待非保有銘柄」)となり、大幅改悪(評価・0点)と非対称だった。ABOLISHED と DOWNGRADED は、スコア上は同じ(既存の`benefit_condition`の重みに対する 0 点)で、状態は分けて残す(廃止と大幅改悪が同時なら廃止を優先)。**baselineに優待なし + 現在が廃止登録は従来どおり NOT_APPLICABLE**(U-B)。初回評価(比較不能)・データ欠落(DATA_MISSING)・維持・大幅改悪の扱いは変更していない。**リスク控除(`shareholder_benefit_abolished`)・企業品質・重み・閾値・共通enum S-16・永続schema・config・IAMは変更していない**。廃止が登録された保有の投資ストーリー維持スコアは 50.0 → 44.4(優待の項目のみ 0 点。他が満点のとき)。現在は`mode=shadow`で通知に未到達のため、利用者への通知・判定の挙動は変わらない。既存のF行・S行・領域一覧・維持契約は変更していない |
 | 2026-09-21 | `domain/notification/incident_message.py`(F-49 / D5)を**新設**した(Issue #501〔#132 X-2〕。純粋な関数と型だけ)。LINEへ送る「異常1通」の本文を組み立てる`build_incident_message()`と、内部の関数名・job名を利用者向けの名称(列挙`IncidentJob`)へ引く`resolve_incident_job()`。本文はallowlist(#132 H-30)を不変条件とし、出してよいのはjobの利用者向けの名称・時刻(JSTの時:分)・件数・日数・真偽値だけ。自由な文字列を受け取らず(`IncidentNotice`の型と値の検査)、内部名は返り値にも本文にも残らず、対応表に無い名前は汎用の名称(その他の処理)へ落ちる。全Lambda関数(12本)を対応表が網羅することを、infra/template.yamlとの突き合わせのテストで固定した。ネットワーク・ファイル・AWS・永続化に触れない(import検査)。既存の通知のmodule・判定・文面・送信経路は変更しない。この関数を送信へ接続するのは#503(X-4)で、本Issueは接続しない。共通部品・領域への影響なし |
 | 2026-09-21 | **catalog-coverageのCI job(`.github/workflows/ci.yml`)を追加し、本書を現在のmainに同期した**(Issue #481〔#212のatomic分割 W2〕)。jobは`python scripts/check_catalog_coverage.py`(#480。read-only・標準ライブラリのみ)を実行する。**required checkではない**(USER決定済み。ruleset変更なし。失敗は赤で表示するが既存のPRを止めない)。同期の内容: (1)M.5の「108件」に測定時点(Phase Bのdocsを入れる前のa3dca50)を添え、baselineブロックのBASELINE_ATを、baselineの値(MODULE_TOTAL 324 / COVERED_BY_FILE 147 / COVERED_BY_DIR 75 / UNCATALOGED 102 / 違反0)が実測で一致する172287d(PR #238のmerge)へ改めた。(2)UNCATALOGED一覧から、既にS-09の主要pathに覆われている5件(`domain/entities/momentum.py` `domain/entities/timing_score.py` `domain/signals/momentum.py` `domain/signals/risk_deduction_scoring.py` `domain/signals/timing_score.py`)を削り、一覧に載せずに追加されていた3件をF行の主要sourceへ足した(`domain/entities/trade_event_record.py`と`infrastructure/local_repository/trade_event_record_repository.py`はF-13へ〔`trade_cooldown_service`が使う〕、`lambda_handlers/_watchlist_notification_prescan.py`はF-16へ〔worker・terminal failureのhandlerが使う〕)。網羅の修正のみで、領域(D1〜D9)・既存のF行/S行の影響領域は変更していない。`python scripts/check_catalog_coverage.py`が違反0で終了する |
+| 2026-09-21 | **UNCATALOGED一覧の`domain/`配下を、F行/S行の主要sourceへ割り当てた**(Issue #482〔#212のatomic分割 W3〕。docsのみ)。41件のうち37件を割り当て、一覧から削った(UNCATALOGED 97→60)。割り当ては、B節「DOMAIN != DIRECTORY。判定は参照関係の実測による」に従い、import元の解析(ast)で裏付けた: 24件は割り当て予定の行にimport元があり(提案どおり)、13件は実測に従って割り当て先を改めた(`buy_candidate_evaluation_record`・`buy_evaluation_target`→F-01 / `holding_evaluation_record`・`portfolio_concentration`→F-46 / `notification`→F-21 / `ranking`→F-20 / `add_on_risk`→F-02 / `dividend_cut_analysis`→F-36 / `trading_unit_feasibility`→F-07 / `environment`の2件→S-12 / `historical_valuation`の2件→S-05)。参照関係の実測だけでは所有が決まらない4件(`_legacy_migration`・`data_quality_alert`・`evaluation_audit`・`financial_input_provenance`)は、割り当てず、実測の事実を添えて一覧に残した(MANAGERの判断)。「主要source」の列へpathを足したのみで、領域(D1〜D9)・既存のF行/S行の影響領域は変更していない。`python scripts/check_catalog_coverage.py`が違反0で終了する |
 | 2026-09-21 | F-07(利確判定)で、**上限価格(想定上限価格)が使えない原因を、原因ごとの理由コードで利用者・監査へ伝えるようにした**(Issue #471。USER決定 U-a〜U-d)。`domain/entities/valuation.py`(共通部品 S-05)の`ProfitTakingFairValueBlockReasonCode`へ4値を追加した(`TOO_FEW_METHODS_FOR_ACTION` / `FAIR_VALUE_NOT_REFLECTING_LATEST_EARNINGS` / `FAIR_VALUE_EARNINGS_REFLECTION_UNKNOWN` / `EARNINGS_TOO_CLOSE_FOR_ACTION`。既存の値は不変。**追加のみ**)。`domain/signals/profit_taking.py`の理由の導出は、`_fair_value_action_usable()`と**同じ入力・同じ比較**で行い(判定の真偽は変更していない。全組合せで矛盾しないことをテストで固定)、複数原因は評価順を**定数で固定**して全原因を保持する(`ProfitTakingResult.fair_value_action_block_reason_codes`。末尾の任意field。既定は空)。利用者表示は最初の1つ(`fair_value_action_block_reason_code`。従来どおり)、**監査は全原因**(`profit_taking`の監査記録の`output_values`へ`fair_value_action_block_reason_codes`を追加。dictの値のため永続schemaは不変)。`services/profit_taking_service.py`の文言は USER確定の原文どおりで、閾値はconfigの実値。**既存の「次回決算まで N 営業日」の行は、EARNINGS_TOO_CLOSE_FOR_ACTIONの文言へ置き換えた**(U-b = REPLACE。決算直前の閾値は、遮断側`min_business_days_to_earnings_for_fair_value_action`の1か所へ一本化)。`services/stock_analysis_view_service.py`の固定文言辞書へ4値を追加した(未知のコードは従来どおり汎用文言へ落ちる。rollbackで新旧が混在しても崩れない)。**Recommendation・永続schema・config・IAM・共通enum S-16は変更していない**。対象外(U-a): 業種区分・bull/bear欠如・レンジ無し・含み損。別Issue(U-d)= #509(財務鮮度の定義の2重化)。既存のF行・S行・領域一覧・維持契約は変更していない |
