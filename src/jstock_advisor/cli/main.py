@@ -18,6 +18,7 @@ from jstock_advisor.cli import (
     feedback,
     holding_decision,
     holdings,
+    judgment_safety_shadow,
     migrate,
     performance,
     review,
@@ -54,6 +55,7 @@ app.add_typer(valuation_shadow.app, name="valuation-shadow")
 app.add_typer(holding_decision.app, name="holding-decision")
 app.add_typer(baseline_repair.app, name="baseline-repair")
 app.add_typer(trading_pause.app, name="trading-pause")
+app.add_typer(judgment_safety_shadow.app, name="judgment-safety-shadow")
 app.add_typer(migrate.app, name="migrate")
 
 
