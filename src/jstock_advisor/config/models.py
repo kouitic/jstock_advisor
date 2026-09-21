@@ -1920,9 +1920,11 @@ class InvestmentThesisWeights(StrictModel):
         # Issue #259: dividend_policyは絶対条件で常に評価対象(EVALUATED)であり、分母の下限を
         # 保証する唯一の項目である(#249のfail-closed分岐が現行configで到達不能である根拠)。
         # 合計50点の検査だけでは`dividend_policy: 0`を書けてしまうため、ここで守る。
-        if self.dividend_policy <= 0:
+        # NaNは`<= 0`も後続の合計の比較(`abs(total - 50.0) > 0.01`)も常にFalseになり、
+        # 検査をすり抜ける。`not (x > 0)`(NaNもFalse側へ倒れる)と有限性で明示的に弾く。
+        if not (math.isfinite(self.dividend_policy) and self.dividend_policy > 0):
             raise ValueError(
-                "投資ストーリー維持スコアのdividend_policyの配点は0より大きい必要があります"
+                "投資ストーリー維持スコアのdividend_policyの配点は0より大きい有限値である必要があります"
                 f"(現在{self.dividend_policy}点)"
             )
         return self
