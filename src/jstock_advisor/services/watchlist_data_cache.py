@@ -75,6 +75,13 @@ from jstock_advisor.interfaces.types import (
 from jstock_advisor.services.provider_bundle import ProviderBundle
 
 logger = logging.getLogger(__name__)
+# Issue #413 / #495: Lambda の root logger は WARNING のため、module が宣言しないと INFO は出ない。
+# この module の INFO(cache の hit / miss〔期限切れ〕/ miss〔不在〕の 3 か所)は候補ごとに最大 9 行で
+# 高頻度になるため、**意図して出さない**(当初設計 #413 issuecomment-5738498397 §2。「宣言しない」
+# ではなく WARNING を明示する)。集計は handler 側の CacheStats ログ("watchlist worker cache stats
+# hit=… miss=…")で既に出ており、候補ごとの詳細を出さなくても取得できる。calibration 用の高粒度な
+# 計測(呼び出し種別・所要時間)は別責務(#5)で、通常運用のログでは行わない。
+logger.setLevel(logging.WARNING)
 
 _PRICE_CACHE_FILE = "watchlist_price_cache.json"
 _FINANCIAL_CACHE_FILE = "watchlist_financial_cache.json"
