@@ -47,6 +47,7 @@ _REVIEWED_JOB_LABELS = {
     "MONTHLY_REVIEW": "月次レビュー",
     "QUARTERLY_REVIEW": "四半期レビュー",
     "LINE_WEBHOOK": "LINE の応答",
+    "INCIDENT_NOTIFIER": "異常通知の中継処理",
     "OTHER": "その他の処理",
 }
 
@@ -85,9 +86,7 @@ def test_the_message_matches_the_example_in_the_issue() -> None:
 
 def test_the_optional_items_are_added_only_when_given() -> None:
     bare = build_incident_message(_notice())
-    full = build_incident_message(
-        _notice(failure_count=3, consecutive_days=2, is_ongoing=True)
-    )
+    full = build_incident_message(_notice(failure_count=3, consecutive_days=2, is_ongoing=True))
 
     assert "件数" not in bare and "連続日数" not in bare and "継続中" not in bare
     assert full.endswith("件数: 3件\n連続日数: 2日\n継続中: はい")
@@ -261,7 +260,7 @@ def test_every_lambda_function_in_the_template_has_an_entry() -> None:
     template = (_REPO_ROOT / "infra" / "template.yaml").read_text(encoding="utf-8")
     functions = set(re.findall(r'FunctionName: !Sub "\$\{AWS::StackName\}-([a-z0-9-]+)"', template))
 
-    assert len(functions) == 12  # 監視対象の Lambda は 12 本(#132)
+    assert len(functions) == 13  # 監視対象の Lambda は 12 本(#132)+ incident-notifier(#503)
     assert functions == set(incident_message._INTERNAL_NAME_TO_JOB)
 
 
@@ -281,6 +280,7 @@ def test_every_lambda_function_in_the_template_has_an_entry() -> None:
         ("monthly-review", "月次レビュー"),
         ("quarterly-review", "四半期レビュー"),
         ("line-webhook", "LINE の応答"),
+        ("incident-notifier", "異常通知の中継処理"),
     ],
 )
 def test_internal_names_map_to_user_facing_labels(internal_name: str, label: str) -> None:

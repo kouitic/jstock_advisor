@@ -686,6 +686,38 @@ class ReviewImprovementConfig(StrictModel):
     issue_labels: list[str]
 
 
+# --- incident_notification.yaml(本番ジョブ異常の検知。Issue #132 X-4〔#503〕) -----
+
+
+class IncidentNotificationConfig(StrictModel):
+    version: int
+    # #502 is_duplicate_within_window() の window。SENT からこの時間以内の同一
+    # fingerprint は再通知しない(Lambda retry で3通にならないための抑止時間)。
+    dedup_window_minutes: int
+    # CLAIMED からこの時間を超えたら、他の実行が stale takeover してよい
+    # (LINE push成功後SENT記録前にLambdaがcrashした場合の回復用)。
+    claim_stale_minutes: int
+
+    @model_validator(mode="after")
+    def _check_positive_minutes(self) -> IncidentNotificationConfig:
+        # レビュー指摘 F6: 0 以下(0 や負の値)が通ると、is_duplicate_within_window() /
+        # try_claim() の cutoff が「今この瞬間」以前になり、直後の retry が即座に
+        # dedup window / claim stale を「経過済み」と判定してしまう。#502 が解決した
+        # 「Lambda retry で3通になる」問題が構造的に復活するため、正の値のみ許可する
+        # (#259 で InvestmentThesisWeights に加えたのと同じ型の検査)。
+        if self.dedup_window_minutes <= 0:
+            raise ValueError(
+                "incident_notification.dedup_window_minutesは0より大きい必要があります"
+                f"(現在{self.dedup_window_minutes})"
+            )
+        if self.claim_stale_minutes <= 0:
+            raise ValueError(
+                "incident_notification.claim_stale_minutesは0より大きい必要があります"
+                f"(現在{self.claim_stale_minutes})"
+            )
+        return self
+
+
 # --- decision_evaluation.yaml(判定精度向上機能Phase A) -------------------------
 
 
@@ -2949,3 +2981,5 @@ class AppConfig(StrictModel):
     market_sector_environment: MarketSectorEnvironmentRulesConfig
     # --- 株主還元方針レジストリ(Issue #30 Phase 1、2026-08)で追加 ---
     shareholder_return_policies: ShareholderReturnPoliciesConfig
+    # --- 本番ジョブ異常の検知(Issue #132 X-4〔#503〕、2026-09)で追加 ---
+    incident_notification: IncidentNotificationConfig

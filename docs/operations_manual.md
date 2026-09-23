@@ -3195,3 +3195,76 @@ Aggregate Table       削除しない(DeletionPolicy Retain)。raw の Evaluatio
 ・切替の各段の実施の可否・時期(別の Human Gate)
 ・EvaluationResults の retention(本 Issue は変更しない。データ保持期間は Issue #138)
 ```
+
+## 29. 本番ジョブ異常の検知(通知経路)の Production Verification Plan(Issue #503、2026-09-24追加)
+
+CloudWatch Alarm → SNS Topic(`IncidentNotificationTopic`)→ `IncidentNotifierFunction` → LINE、
+という通知経路(段階1。#132 X-4)を Production へ反映する際の確認手順である。
+**Production の SNS Topic 新設・deploy 自体は別 Human Gate**(本節は反映後の確認のみを扱う)。
+
+### 29.1 何が変わるか(実装の要約)
+
+```
+新規  IncidentStateTable(fingerprint単位のclaim/dedup/stale takeover。他の履歴Tableと同じ保護)
+      IncidentNotificationTopic + IncidentNotificationTopicPolicy(cloudwatch.amazonaws.comへのPublish許可)
+      IncidentNotifierFunction(IAMは最小権限。GetItem/PutItem/UpdateItem/DeleteItemのみ)
+      IncidentNotifierFunctionErrorsAlarm(AlarmActionsは意図的に空。自己再帰を避ける)
+変更  EvaluationFunctionErrorsAlarm / EvaluationFunctionDurationAlarm へ AlarmActions を追加
+      (閾値・メトリクス・Dimensions は変更しない)
+```
+
+### 29.2 確認手順(USER baseline #503 issuecomment-5796588796 の10項目を具体化)
+
+```
+1  ChangeSet差分確認   新規4資源(Table/Topic/TopicPolicy/Function/自身のAlarm)+ 既存2 alarmの
+                      AlarmActions追加のみであること(他プロパティの差分ゼロ)
+2  存在確認            DescribeTable(IncidentStateTable)/ GetTopicAttributes /
+                      GetFunction(IncidentNotifierFunction)/ 既存2 alarmのAlarmActionsに
+                      Topic ARNが入っていること(DescribeAlarms)
+3  人工障害を起こさない  実際のjob失敗でのみ発火する。人工的にjobを失敗させない
+4  test SNS publish    write操作のため、テスト目的のPublishは別Human Gate(本節では実行しない)
+5  正常ジョブへの影響なし deploy直後の次回 evaluation Lambda 実行(平日18:00)が、従来どおり
+                      完走し、Durationに変化がないこと
+6  IncidentNotifier    deploy後、実際にAlarmが鳴るまでInvocations=0のまま(0件は「正常」の
+   Errors/Throttles確認  確認にはならない。実着信確認[8]まで「配線済みだが未検証」として扱う)
+7  IncidentState        実際にAlarmが鳴った後、GetItemでfingerprint行のstatus=SENT・
+   claim/SENT確認        occurrence_countを確認(値そのものはPUBLIC repoへ書かない。件数・statusのみ)
+8  LINE実着信確認        実際にAlarmが鳴った際に、LINEへ#501の文面が届くこと(利用者の実機確認)
+9  duplicate suppression 7の直後にretry等で同一fingerprintが再度届いた場合、2件目以降が
+   確認                  LINE送信されないことをCloudWatch Logsで確認(本文は出さない。件数のみ)
+10 rollback方法確認      AlarmActionsを空へ戻すChangeSet(新資源自体はRetainのため残してよい。
+                      既存の判定・通知経路には一切関与しないため実害はない)
+11 運用者への明示        「Errors Alarmが鳴らないこと」は「12関数すべてが正常」を意味しない旨を
+                      明記する(下記29.3参照)
+```
+
+### 29.3 既知の限界(必ず理解しておくこと)
+
+```
+Errorsメトリクスへ計上される(このAlarmで検知できる)
+  disclosure-check / evaluation / weekly-review / monthly-review / quarterly-review /
+  watchlist-terminal-failure-handler(未捕捉例外がハンドラを抜けて伝播する)
+
+Errorsメトリクスへ計上されない(このAlarmでは検知できない)
+  buy-candidates / holdings-watchlist / watchlist-dispatcher / watchlist-worker /
+  watchlist-batch-reconciler / line-webhook
+  (per-item/per-batchの`except Exception`が広く捕捉し、re-raiseしない設計。既存の設計意図どおり)
+```
+
+**段階1の完了は自動検知の完成を意味しない。監視対象はLambda12本中1本で、W6で新設した
+待避先は含まない。** 加えて、Errorsベースの検知は上記6関数には効かない(担当は#506。
+reconcilerが持つ終端状態〔完了判定・DLQの滞留等〕を見る仕組みが要る)。
+
+### 29.4 self-monitoring の残存リスク
+
+`IncidentNotifierFunction`自身のErrorsは、自己再帰(Alarm→自身のTopic→自身のFunction→…)を
+避けるため、同一Topicへは接続していない。**このLambda自身が失敗した場合、本段階では誰にも
+通知されない。** 第二の通知経路は本Issueのscope外(#504以降)。
+
+### 29.5 この節が決めていないこと
+
+```
+・Production の SNS Topic 新設・deploy 自体(別 Human Gate)
+・#504(第二の通知経路)/ #506(reconciler相乗り検知)/ #508(GitHub Issue接続)の実装
+・6関数(per-item捕捉型)の内部異常検知の方式そのもの(#506の担当)
+```

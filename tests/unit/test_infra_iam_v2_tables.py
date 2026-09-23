@@ -57,6 +57,7 @@ _ALL_FUNCTIONS = frozenset(
         "DisclosureCheckFunction",
         "EvaluationFunction",
         "HoldingsWatchlistFunction",
+        "IncidentNotifierFunction",
         "LineWebhookFunction",
         "MonthlyReviewFunction",
         "QuarterlyReviewFunction",

@@ -115,9 +115,7 @@ def test_a3_full_sell_recommendation_types_is_subset_of_sell_like_or_explicitly_
     (FULL_PROFIT_TAKE)のいずれかであり、どちらの経路でも最終的にSELL
     カテゴリへ到達することを固定する。"""
     for rt in FULL_SELL_RECOMMENDATION_TYPES:
-        assert (
-            rt in SELL_LIKE_RECOMMENDATION_TYPES or rt == RecommendationType.FULL_PROFIT_TAKE
-        )
+        assert rt in SELL_LIKE_RECOMMENDATION_TYPES or rt == RecommendationType.FULL_PROFIT_TAKE
 
 
 @pytest.mark.parametrize("recommendation_type", sorted(CRITICAL_RISK_RECOMMENDATION_TYPES))
@@ -659,6 +657,20 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
         ),
         _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
     },
+    # Issue #503(#132 X-4): CloudWatch Alarm → SNS → LINE の中継 Lambda。
+    # スケジュール実行でも子 Lambda への dispatch でもなく、execution_mode /
+    # notification_mode / trade_detection / job_type のいずれの概念も持たない。
+    "incident_notifier_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.NOT_APPLICABLE,
+            "SNS(CloudWatch Alarm)経由の中継 Lambda であり、スケジュール実行の mode 概念を持たない",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
 }
 
 
@@ -780,8 +792,7 @@ def test_d7_issue_70_findings_are_tracked_in_the_inventory() -> None:
         "F-B3 は Issue #211 で解消済み。KNOWN_GAP として台帳へ戻さないこと"
     )
     assert "F-B4" not in tracked, (
-        "F-B4 は Issue #286 で解消済み(REJECTS_EXPLICITLY)。"
-        "KNOWN_GAP として台帳へ戻さないこと"
+        "F-B4 は Issue #286 で解消済み(REJECTS_EXPLICITLY)。KNOWN_GAP として台帳へ戻さないこと"
     )
     assert not tracked, f"#70 由来の KNOWN_GAP が残っている: {sorted(tracked)}"
 
@@ -875,10 +886,9 @@ def test_d7_trade_detection_confirmed_is_fail_closed() -> None:
     どちらかが戻れば、台帳の PROPAGATES は嘘になるためここで落ちる。
     """
     for module in ("buy_candidates_handler", "holdings_watchlist_handler"):
-        source = (
-            Path(inspect.getfile(importlib.import_module(f"jstock_advisor.lambda_handlers.{module}")))
-            .read_text(encoding="utf-8")
-        )
+        source = Path(
+            inspect.getfile(importlib.import_module(f"jstock_advisor.lambda_handlers.{module}"))
+        ).read_text(encoding="utf-8")
         assert 'event.get("trade_detection_confirmed", False)' in source, (
             f"{module}: 既定値が fail-close(False)でない。"
             "既定 True へ戻すと payload 欠落時に通知抑止が効かなくなる(#70 F-B3)"
@@ -887,9 +897,7 @@ def test_d7_trade_detection_confirmed_is_fail_closed() -> None:
             f"{module}: 既定 True の読み取りが残っている"
         )
 
-    recovery_source = (
-        Path(inspect.getfile(_finalize_recovery)).read_text(encoding="utf-8")
-    )
+    recovery_source = Path(inspect.getfile(_finalize_recovery)).read_text(encoding="utf-8")
     assert '"trade_detection_confirmed": False' in recovery_source, (
         "finalize-only payload が trade_detection_confirmed を載せていない。"
         "省略して呼び出し先の既定に委ねると、既定が変わったとき意味が黙って反転する"

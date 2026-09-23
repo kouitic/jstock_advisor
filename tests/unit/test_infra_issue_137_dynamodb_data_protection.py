@@ -77,7 +77,10 @@ _UNPROTECTED_RESOURCES = frozenset(
 #: Issue #537: WeeklyEvaluationAggregateTable(保護対象)を追加。raw の EvaluationResult から
 #: 得られる中間集計で、失うと再生成に raw の全件走査が要るため、他の履歴 Table と同じ保護を持つ。
 #: VALIDATION実行専用の対応テーブルは無い(既定 false で書き込み自体を行わないため)。
-_EXPECTED_PROTECTED_COUNT = 39
+#: Issue #503: IncidentStateTable(保護対象)を追加。occurrence_count等の運用履歴を失うと
+#: 再構築できないため、他の履歴 Table と同じ保護を持つ(一時claimのNotificationClaimsTable
+#: とは異なる。#508でも同じテーブルを再利用する設計のため)。VALIDATION実行専用の対応テーブルは無い。
+_EXPECTED_PROTECTED_COUNT = 40
 _EXPECTED_UNPROTECTED_COUNT = 18
 
 
