@@ -3202,22 +3202,40 @@ CloudWatch Alarm → SNS Topic(`IncidentNotificationTopic`)→ `IncidentNotifier
 という通知経路(段階1。#132 X-4)を Production へ反映する際の確認手順である。
 **Production の SNS Topic 新設・deploy 自体は別 Human Gate**(本節は反映後の確認のみを扱う)。
 
-### 29.1 何が変わるか(実装の要約)
+### 29.1 何が変わるか(実装の要約。PR #545 merge後・infra/template.yaml実物に基づき具体化)
 
 ```
-新規  IncidentStateTable(fingerprint単位のclaim/dedup/stale takeover。他の履歴Tableと同じ保護)
-      IncidentNotificationTopic + IncidentNotificationTopicPolicy(cloudwatch.amazonaws.comへのPublish許可)
+新規(infra/template.yamlに明示的に定義した5資源)
+      IncidentStateTable(fingerprint単位のclaim/dedup/stale takeover。他の履歴Tableと同じ保護)
+      IncidentNotificationTopic
+      IncidentNotificationTopicPolicy(cloudwatch.amazonaws.comへのPublish許可)
       IncidentNotifierFunction(IAMは最小権限。GetItem/PutItem/UpdateItem/DeleteItemのみ)
       IncidentNotifierFunctionErrorsAlarm(AlarmActionsは意図的に空。自己再帰を避ける)
+
+新規(SAMのtransformがIncidentNotifierFunctionから自動生成する付随リソース。
+      明示的にtemplate.yamlへは書いていないため、ChangeSetには上記5資源に加えて
+      これらのADDも現れる。正確なLogicalIdはChangeSet CREATE実物で確認する)
+      IncidentNotifierFunctionの実行role(IAM Role。Policiesで宣言したReadWriteIncidentState
+      Statementを含む)
+      SNSがLambdaを起動するためのLambda::Permission(Events.AlarmTopicから生成)
+      IncidentNotificationTopicへのAWS::SNS::Subscription(同じくEvents.AlarmTopicから生成)
+
 変更  EvaluationFunctionErrorsAlarm / EvaluationFunctionDurationAlarm へ AlarmActions を追加
       (閾値・メトリクス・Dimensions は変更しない)
+
+既存2 alarm以外の既存123資源(Table/Queue/他のFunction等。ListStackResourcesで実測。
+2026-09-23時点デプロイ済みは計125資源)への差分は無い見込み(git diff bceaca29の^1との差分が
+config/infra/lambda_handlers/domain配下の#503関連ファイルのみであることをmain merge後に
+実測済み。「incident」を含むLogicalResourceIdは現行スタックに0件であることも確認済み
+= 新資源の名前衝突なし)。
 ```
 
 ### 29.2 確認手順(USER baseline #503 issuecomment-5796588796 の10項目を具体化)
 
 ```
-1  ChangeSet差分確認   新規4資源(Table/Topic/TopicPolicy/Function/自身のAlarm)+ 既存2 alarmの
-                      AlarmActions追加のみであること(他プロパティの差分ゼロ)
+1  ChangeSet差分確認   29.1の新規資源(明示5資源+SAM自動生成の付随リソース)のADDと、
+                      既存2 alarmのAlarmActions追加(MODIFY)のみであること。
+                      それ以外の既存リソースにMODIFY/REMOVEが無いこと(他プロパティの差分ゼロ)
 2  存在確認            DescribeTable(IncidentStateTable)/ GetTopicAttributes /
                       GetFunction(IncidentNotifierFunction)/ 既存2 alarmのAlarmActionsに
                       Topic ARNが入っていること(DescribeAlarms)
