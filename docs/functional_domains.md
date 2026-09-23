@@ -316,6 +316,8 @@ SHARED_COMPONENTS 「影響領域」に S を含む機能は K節の該当 ID �
 | F-49 | 異常通知の本文組み立て(#132 X-2。純粋な関数と型。送信・接続・永続化は含まない) | `domain/notification/incident_message.py` | — | なし | D5 |
 | F-50 | 異常通知の fingerprint / dedup 判定(#132 X-3。純粋な関数と型。永続化・接続は含まない) | `domain/notification/incident_fingerprint.py` | — | なし | D5 |
 | F-51 | 異常通知の中継・状態管理(#132 X-4。段階1。CloudWatch Alarm→SNS→LINE) | `lambda_handlers/incident_notifier_handler.py` `infrastructure/aws/incident_state_tracker.py` | `incident_notification.yaml` | `IncidentStateTable`(fingerprint単位のclaim/dedup/stale takeover。#508でも再利用予定) | D5 / D9 |
+| F-52 | 保有銘柄オーナー機能移行(M2。CLI専用の一回限りの移行。Production経路〔lambda_handlers〕からは到達しない) | `migrations/holdings_owner_migration.py` `migrations/holdings_owner_preflight.py` `migrations/conversions.py` `migrations/legacy_shapes.py` `migrations/v2_entities.py` | — | `HoldingsTableV2`(新設。M3切替までProductionは未読) `PurchaseLotsTable`(既存V1・Production稼働中。owner/holding_idの追加のみ) `InvestmentThesesTable`等V2系(holdings_owner_migration.py経由) | D6 / D3 |
+| F-53 | 保有データのowner実態補正(M4.1。CLI専用。新たな誤帰属が判明するたび再実行されうる設計〔一回限りではない〕) | `migrations/holdings_owner_reclassification.py` `migrations/target.py` | — | `HoldingsTableV2` `PurchaseLotsTable`(既存V1・Production稼働中。current-stateのowner補正) `InvestmentThesesTable`等V2系(current-state) | D6 / D3 |
 
 ```
 ★ F-47 の影響領域は「生産側」と「消費側」の両方から成る。
@@ -653,18 +655,11 @@ DEAD_REFERENCE   = 0
 | `infrastructure/aws/dynamodb_transaction.py` | 要判断(2026-09-22に再測定: 参照元 = infrastructure/aws/holding_replacement_commit.py〔F-26〕と infrastructure/aws/conversation_commit.py〔F-24〕の2 module。#483での「F-26の1 moduleのみ」は、この時点の実測と一致しない。F-26を選ぶと、F-24の書き込み経路で使う共通の helper が F-26 の影響領域にしか覆われない。同じ理由で `services/write_plan.py` も同じ2経路が使う。推奨 = 2つを一体として、共通部品〔S行の新設。MANAGER・USERの判断〕または F-26 のままにするかを再決定) |
 
 
-#### `migrations/`  8 件
+#### `migrations/`  1 件(恒久UNCATALOGED例外。残り7件はF-52/F-53へ割り当て済み。Issue #485)
 
 | module | 割り当て予定 |
 |---|---|
-| `migrations/baseline_migration.py` | 要判断(F 行新設 or 恒久例外) |
-| `migrations/conversions.py` | 要判断(F 行新設 or 恒久例外) |
-| `migrations/holdings_owner_migration.py` | 要判断(F 行新設 or 恒久例外) |
-| `migrations/holdings_owner_preflight.py` | 要判断(F 行新設 or 恒久例外) |
-| `migrations/holdings_owner_reclassification.py` | 要判断(F 行新設 or 恒久例外) |
-| `migrations/legacy_shapes.py` | 要判断(F 行新設 or 恒久例外) |
-| `migrations/target.py` | 要判断(F 行新設 or 恒久例外) |
-| `migrations/v2_entities.py` | 要判断(F 行新設 or 恒久例外) |
+| `migrations/baseline_migration.py` | **恒久UNCATALOGED例外(確定。MANAGER判断 2026-09-24。Issue #485)**: InvestmentThesisBaselineSequence/Pointerのholding_id移行(M2)専用のCLIスクリプト。#212 issuecomment-5575015538の3条件(Production経路〔lambda_handlers〕から到達しない/一回限り/挙動不変)をすべて満たす: 書き込み先はV2の物理テーブルのみで、現在のProductionコードはV2テーブルをまだ一切読まない(M3切替まで)。current_versionは移行前後で不変(自身のdocstringで明記)。M2という特定の1回のスキーマ移行イベントに紐づき、再実行の必要性は薄い(holdings_owner_reclassification.pyと異なり、再実行を前提とした冪等性設計は持たない)。F行を新設しない。 |
 
 
 
@@ -675,12 +670,17 @@ DEAD_REFERENCE   = 0
 | `services/write_plan.py` | 要判断(実測: 参照元 = infrastructure/aws/conversation_commit.py〔F-24〕・infrastructure/aws/dynamodb_transaction.py〔割り当て未定〕・infrastructure/aws/holding_replacement_commit.py〔F-26〕・services/portfolio_service.py〔F-26〕。F-24 と F-26 の両方が使う書き込み計画のデータ構造。`dynamodb_transaction.py` と一体で決める) |
 
 ```
-★ `migrations/` 8 件の扱いは未確定である(要判断)。
+★ `migrations/` 8 件は Issue #485(Phase D)で判断済み(MANAGER判断 2026-09-24)。
 
-  一回限りの移行スクリプトであり恒常的な機能ではない。新規 F 行を起こすか、
-  UNCATALOGED の恒久例外とするかを Phase D の着手時に決める。
-  `holdings_owner_*` は保有台帳(D6)と保有判断(D3)に触れるため、
-  lock 範囲を引けない状態のまま実行するのは危険である。
+  `migrations/baseline_migration.py` のみ恒久UNCATALOGED例外として残す(上表)。
+  残り7件は、リスク評価(Production経路からは到達しないが、一部が現行V1の
+  Production稼働中テーブルへ書き込む/再実行が設計上想定される)に応じて
+  F-52・F-53へ新設した: `holdings_owner_migration.py` / `holdings_owner_preflight.py` /
+  `conversions.py` / `legacy_shapes.py` / `v2_entities.py` は F-52 へ、
+  `holdings_owner_reclassification.py` / `target.py` は F-53 へ。
+  `holdings_owner_*` は保有台帳(D6)と保有判断(D3)に触れるため、F-52/F-53の
+  影響領域を D6 / D3 とした(lock 範囲をカタログ上で追跡できるようにするため、
+  恒久例外にしなかった)。
 
 ★ `domain/entities/_legacy_migration.py` と `services/write_plan.py` も
   用途の実測が要る(要判断)。
@@ -769,3 +769,4 @@ DEAD_REFERENCE   = 0
 | 2026-09-22 | F-31(週次レビュー)/ F-32(定点評価)で、**週次改善レビューが毎週 raw の EvaluationResult を全件 Scan・再集計する構造を、週次集計(`WeeklyEvaluationAggregate`)を読む方式へ変える基盤を追加した**(Issue #537。USER 決定 Q-1〜Q-3 + 訂正 2 点)。**既定はすべて無効(従来の挙動のまま)**で、環境変数 `WEEKLY_AGGREGATE_WRITE_ENABLED`(評価の保存側)・`WEEKLY_AGGREGATE_READ_ENABLED`(週次レビューの読み取り側)で有効化する(Production の deploy・backfill・切替は別 Human Gate。本 PR は実施しない)。新設: `domain/entities/weekly_evaluation_aggregate.py`(集計行・増分・週ラベル)/ `infrastructure/weekly_evaluation_aggregate_store.py`(契約 + ローカル実装)/ `infrastructure/aws/weekly_evaluation_aggregate_dynamodb.py`(DynamoDB 実装。1 回の TransactWriteItems = EvaluationResult の条件付き Put + 集計の ADD + 週の状態 + 再計算対象の一覧)/ `services/weekly_evaluation_aggregate_service.py`(集計行 → 指標の変換・backfill・照合・rebuild)/ `cli/weekly_aggregate.py`(ローカル専用・dry-run 既定)。変更: `services/recommendation_evaluation_service.py`(暦日 7 日の評価の保存だけを、設定 ON のとき Transaction 経由にする。集計の更新に失敗したら EvaluationResult も保存せず、翌日に再試行)/ `services/weekly_improvement_review_service.py`(設定 ON かつ backfill 完了のとき、集計を読む。再生成する過去週は raw の再集計範囲ではなく、marker[REVIEW_RECOMPUTE_PENDING]から特定する。`history_weeks_for_comparison`は raw の再集計範囲の意味を持たなくなった。改善判断の比較[consecutive_bad_weeks 等]は、本 Issue 以前から rule_version 内の連続週を無制限に遡る実装であり、このパラメータで比較期間を区切ってはいない[本 PR でも変更しない])/ `services/evaluation_run_audit.py`(監査に`aggregate_commit_failed_count`を追加)。**EvaluationResult・WeeklyReviewMetrics・Recommendation の型と保存形式、判定・閾値・通知の意味、retention は変更していない。** F-31 の主要 source と F-32 の永続の列を更新した。領域一覧・共通部品一覧は変更していない |
 | 2026-09-23 | `domain/notification/incident_fingerprint.py`(F-50 / D5)を**新設**した(Issue #502〔#132 X-3〕。純粋な関数と型だけ)。incidentのfingerprint(`environment + job_name + failure_stage + failure_type + normalized_error_signature`のSHA-256)を計算する`compute_fingerprint()`と、一定時間内の同一fingerprintを重複として判定する`is_duplicate_within_window()`を追加した。`job_name`は`incident_message.py`の`IncidentJob`(本文表示用の集約名。watchlistの4関数が1つにまとまる)ではなく、呼び出し元が渡す内部のjob識別子の粒度で区別する(異なるLambda関数の同時障害を同一incidentへ丸めない)。`normalize_error_signature()`は識別子・タイムスタンプ・16進数・数字の並びをプレースホルダへ置換し、例外の種類(`error_type`)は区別を保つ。dedupの時間窓の境界(ちょうどwindow経過)は「重複ではない」側に固定した。ネットワーク・ファイル・AWS・永続化には触れない(送信・接続・fingerprintの保存は別Issue〔X-3b。今回は起票しない〕の責務)。既存の`NotificationClaim`(F-21。LINE送信の原子的claim)は、stock_code/owner/holding_id等の保有・銘柄スコープのdedupであり、job/environmentスコープの本Issueとは対象が異なるため再構成せず、識別文字列をSHA-256でハッシュ化するパターンのみ踏襲した。共通部品・領域・既存のF行/S行への影響なし |
 | 2026-09-24 | F-51(異常通知の中継・状態管理)を**新設**した(Issue #503〔#132 X-4。段階1〕。USER baseline = issuecomment-5796588796)。CloudWatch Alarm(定点評価Lambdaの既存2 alarm)→ SNS Topic(`IncidentNotificationTopic`)→ `IncidentNotifierFunction` → LINE、という通知経路を新設した(**これまでAlarmは可視化のみでAlarmActionsを意図的に付けていなかった。「鳴っても届かない」が本Issueで解消する**)。`infrastructure/aws/incident_state_tracker.py`(fingerprint単位のclaim/dedup/stale takeoverをDynamoDBのConditionExpressionで原子的に管理。`improvement_task_tracker.py`と同じ「専用module + raw boto3 + フィールド単位の条件」方式を踏襲し、`NotificationClaim`のレコード全体一致方式は使わない)/ `lambda_handlers/incident_notifier_handler.py`(#502 `compute_fingerprint()`で識別 → #503 tracker で claim → #501 `build_incident_message()`で本文組み立て → LINE push。失敗時はclaimを解除してLambdaを失敗させ、SNS/Lambdaのretryに任せる)。`config/incident_notification.yaml` + `IncidentNotificationConfig`(dedup_window_minutes=30 / claim_stale_minutes=5。`review_improvement.yaml`の`github_issue_claim_timeout_minutes`と同じ位置づけの業務閾値としてconfigへ置いた)。`IncidentStateTable`は他の履歴Tableと同じ保護(Retain・PITR・DeletionProtection。TTLはcleanup専用で本Issueでは書かない。後続#508でも再利用予定)。IAMは最小権限(GetItem/PutItem/UpdateItem/DeleteItemのみ。Scan/Queryは付与しない)。IncidentNotifier自身のErrors Alarmは、自己再帰を避けるため同一Topicへは接続しない(self-monitoringの残存リスクとして記録)。既存2 alarmはAlarmActionsの追加のみで、閾値・メトリクス・判定は変更しない(LOCK_LEVEL 1)。**既知の限界(#504)**: buy-candidates / holdings-watchlist / watchlist-dispatcher / watchlist-worker / watchlist-batch-reconciler / line-webhookの6関数はper-item/per-batchの例外を`except Exception`で広く捕捉しre-raiseしない設計のため、Errorsメトリクスに計上されず、本Issueでは検知できない(担当は#506)。段階1の完了は自動検知の完成を意味しない(監視対象はLambda12本中1本)。Production の SNS Topic 新設・deploy は別 Human Gate(本 PR は実施しない)。既存の判定・通知内容・保存形式・領域一覧は変更していない |
+| 2026-09-24 | **UNCATALOGED一覧の`migrations/`8件をIssue #485(#212 Phase D)で判断した**(MANAGER判断 2026-09-24。docsのみ)。3条件(Production経路〔lambda_handlers〕から到達しない/一回限り/挙動不変)を8件それぞれで実測した結果に基づく: `migrations/baseline_migration.py`は3条件をすべて満たす(V2シャドウテーブルのみへ書き込み、現在のProductionは未読、M2完了済みで再実行の必要性が薄い)ため**恒久UNCATALOGED例外**とした。残り7件は、`holdings_owner_migration.py`・`holdings_owner_preflight.py`・`conversions.py`・`legacy_shapes.py`・`v2_entities.py`を新規**F-52**(保有銘柄オーナー機能移行。M2)へ、`holdings_owner_reclassification.py`・`target.py`を新規**F-53**(保有データのowner実態補正。M4.1)へ割り当てた。F-52/F-53を恒久例外にしなかった理由: 実測すると`holdings_owner_migration.py`と`holdings_owner_reclassification.py`はいずれもHoldingsTableV2だけでなく**現行V1・Production稼働中のPurchaseLotsTable**へもowner/holding_idを書き込む(v2_entities.pyのdocstringで確認)。特にholdings_owner_reclassification.pyは自身のdocstringに「冪等性・再実行安全性の設計」節を持ち、新たな誤帰属が判明するたび**都度再実行されうる**設計であり(実測: 既に移行済みのstock_codeをスキップする実装がある)、恒久例外にするとlock宣言なしに再実行される危険がある(#485が引用するMANAGERの懸念どおり)。F-52/F-53の影響領域はD6(保有台帳)/D3(current-stateのInvestmentThesis/BaselineSequence/BaselinePointer等の保有判断側読み取り)とした。**領域一覧・既存のF行/S行の影響領域・維持契約は変更していない。**判定ロジック・通知内容・保存データ形式・Production挙動の変更なし。`python scripts/check_catalog_coverage.py`が違反0で終了する |
