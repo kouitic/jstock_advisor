@@ -53,6 +53,10 @@ class IncidentJob(StrEnum):
     MONTHLY_REVIEW = "月次レビュー"
     QUARTERLY_REVIEW = "四半期レビュー"
     LINE_WEBHOOK = "LINE の応答"
+    # Issue #503: IncidentNotifierFunction自身(異常通知の中継Lambda)。自身のErrors Alarmは
+    # 自己再帰を避けるため同一Topicへは接続しない(本段階では実際にはこの経路を通らない)が、
+    # 対応表の網羅性テスト(全Lambda関数を列挙する)のために明示のIncidentJobを持つ。
+    INCIDENT_NOTIFIER = "異常通知の中継処理"
     OTHER = "その他の処理"  # 対応表に無い名前の落ち先(内部名を出さない)
 
 
@@ -72,6 +76,7 @@ _INTERNAL_NAME_TO_JOB: dict[str, IncidentJob] = {
     "monthly-review": IncidentJob.MONTHLY_REVIEW,
     "quarterly-review": IncidentJob.QUARTERLY_REVIEW,
     "line-webhook": IncidentJob.LINE_WEBHOOK,
+    "incident-notifier": IncidentJob.INCIDENT_NOTIFIER,
 }
 
 

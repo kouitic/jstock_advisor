@@ -1,0 +1,15 @@
+# 本番ジョブ異常の検知・LINE通知の設定(Issue #132 X-4〔#503〕)。
+# CloudWatch Alarm → SNS → IncidentNotifierFunction が、incident(#502の
+# fingerprintで識別)の dedup・claimのタイムアウトに使う値をまとめる。
+# すべて運用者が変更可能。
+
+version: 1
+
+# 同一fingerprintについて、直近の通知(SENT)からこの時間以内は再通知しない
+# (#502 is_duplicate_within_window()の window)。Lambda の retry で同じ障害が
+# 3通にならないための抑止時間。
+dedup_window_minutes: 30
+
+# claim(CLAIMED状態)を取得してからこの時間を超えたら、他の実行がtakeoverしてよい
+# (LINE push成功後SENT記録前にLambdaがcrashした場合の回復用)。
+claim_stale_minutes: 5

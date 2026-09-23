@@ -2059,10 +2059,13 @@ Resources:
   # Issue #113: 定点評価Lambdaが11日以上「一度も成功していない」ことに
   # 気づけなかったため、最低限の検知を追加する。本スタックにはこれ以前
   # CloudWatch AlarmもSNS Topicも1つも存在しなかった。
-  # 通知配信基盤(SNS/LINE/GitHub)の新設は本Issueのscope外とし、
-  # ここではAlarm stateの可視化までを担保する(AlarmActionsは意図的に付けない)。
+  # ★ Issue #132 X-4(#503。段階1)で、AlarmActionsへIncidentNotificationTopicを
+  # 接続した(以前は「通知配信基盤の新設はscope外」として意図的に付けていなかった)。
   # なお**Lambdaのタイムアウトはerrorsメトリクスに計上される**ため、
   # このErrors Alarmが1本あれば今回の37回の失敗はすべて検知できていた。
+  # ★ 段階1の完了は自動検知の完成を意味しない(監視対象はLambda12本中1本。
+  # #504の調査: per-item/per-batchの例外を握り潰す設計の6関数の内部異常は、
+  # Errorsに計上されないためこのAlarmでは検知できない。担当は#506)。
   EvaluationFunctionErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -2081,6 +2084,8 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       # 実行されない時間帯(平日18:00のみ稼働)をALARMにしないため。
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
 
   # Timeout(900秒)の80%=720秒に達したら、まだ失敗していなくても
   # 予算超過が近いことを検知する(backlogの発散を早期に捉えるため)。
@@ -2099,6 +2104,108 @@ Resources:
       Period: 900
       EvaluationPeriods: 1
       Threshold: 720000 # ミリ秒。EvaluationFunctionのTimeout 900秒 × 0.8
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  # --- 本番ジョブ異常の検知(Issue #132 X-4〔#503〕。段階1) -------------------
+  # CloudWatch Alarm(上記2本)→ SNS → IncidentNotifierFunction → LINE、という
+  # 通知経路1本を新設する。既存Alarmの閾値・メトリクスは変更しない(AlarmActions
+  # の追加のみ)。判定・通知内容・保存形式・領域への影響なし(LOCK_LEVEL 1)。
+
+  # CloudWatch AlarmからSNSへのPublishには、Topic側のリソースポリシーで
+  # cloudwatch.amazonaws.comへの許可が要る(SAMは自動生成しない)。
+  IncidentNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-incident-notifications"
+
+  IncidentNotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref IncidentNotificationTopic
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+
+  # fingerprint(#502 compute_fingerprint()の出力。SHA-256 hex 64桁)をPKとする
+  # claim/dedup状態(infrastructure.aws.incident_state_tracker.py参照)。
+  # 後続の#508(GitHub Issue接続)でも同じテーブルを利用できる構造にするため、
+  # 他の履歴Tableと同じ保護を持つ(NotificationClaimsTableのような一時claimでは
+  # なく、occurrence_count等の運用履歴を失うと再構築できないため)。
+  IncidentStateTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TableName: !Sub "${TablePrefix}-incident_state"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: fingerprint
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fingerprint
+          KeyType: HASH
+
+  IncidentNotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-incident-notifier"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.incident_notifier_handler.handler
+      Policies:
+        # incident_state_tracker.pyが使う操作のみ(最小権限)。Scan/Queryは
+        # 付与しない(GSIが無く、fingerprint単位のGetItem/PutItem/UpdateItem/
+        # DeleteItemだけで足りるため)。
+        - Statement:
+            - Sid: ReadWriteIncidentState
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource:
+                - !GetAtt IncidentStateTable.Arn
+      Events:
+        AlarmTopic:
+          Type: SNS
+          Properties:
+            Topic: !Ref IncidentNotificationTopic
+
+  # IncidentNotifier自身の異常を検知するAlarm。★ AlarmActionsは意図的に空にする
+  # (同じIncidentNotificationTopicへ流すと自己再帰になる)。self-monitoringの
+  # 残存リスク: このLambda自身が失敗した場合、本段階では誰にも通知されない
+  # (第二の通知経路は本Issueのscope外。baseline: 「本段階では第二の通知経路
+  # までは作らない」)。
+  IncidentNotifierFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-incident-notifier-errors"
+      AlarmDescription: >-
+        異常通知の中継Lambda自体が失敗した。Issue #503参照。
+        AlarmActionsは意図的に空(同一Topicへの自己再帰を避ける)。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IncidentNotifierFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
