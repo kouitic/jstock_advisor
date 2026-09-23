@@ -42,10 +42,17 @@ def _alarm_message(
     metric_name: str = "Errors",
     function_name: str = "jstock-advisor-evaluation",
     state_change_time: str = "2026-09-24T09:00:00.000+0000",
+    new_state_reason: str = (
+        "Threshold Crossed: 1 datapoint [2.0] was greater than the threshold (1.0)."
+    ),
 ) -> dict[str, Any]:
+    # ★ レビュー指摘 R1: NewStateReason(自由文)へ実際の値を入れる。空文字だと
+    # 「本文へNewStateReasonを連結する」変異が(連結内容が空になるため)無害化され、
+    # F1の等値固定テストで検知できなくなる。
     return {
         "AlarmName": alarm_name,
         "NewStateValue": "ALARM",
+        "NewStateReason": new_state_reason,
         "StateChangeTime": state_change_time,
         "Trigger": {
             "MetricName": metric_name,
@@ -243,10 +250,7 @@ def test_credentials_missing_releases_the_claim_and_raises(monkeypatch: pytest.M
 
 
 def test_fingerprint_input_does_not_use_the_free_text_state_reason() -> None:
-    message = _alarm_message()
-    message["NewStateReason"] = (
-        "Threshold Crossed: 1 datapoint [2.0] was greater than the threshold (1.0)."
-    )
+    message = _alarm_message()  # NewStateReasonに実際の自由文が入っている(既定値)
 
     fp_input = handler_module._build_fingerprint_input(message)
 
