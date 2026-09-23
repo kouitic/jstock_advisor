@@ -54,13 +54,16 @@ _MAX_NORMALIZED_LENGTH = 500
 
 
 def normalize_error_signature(error_type: str, error_message: str) -> str:
-    """例外の種類とメッセージから、識別子・タイムスタンプ・件数等の揺れを吸収した署名を作る。
+    """例外の種類とメッセージから、既知パターンの識別子・タイムスタンプ・件数の揺れを吸収した
+    署名を作る(ベストエフォート)。
 
-    **同じ根本原因の別発生(異なる ID・時刻・件数を持つだけ)を同じ値にし、異なる例外の種類は
-    区別する**(`error_type` を先頭に必ず含めるため、正規化後のメッセージが偶然一致しても
-    例外の種類が違えば別の値になる)。`error_message` に識別子・銘柄・所有者・stack trace の
-    生の値が入っていても、この関数を通した時点でそれらは除去される(数字・UUID・16進数の並びを
-    プレースホルダへ置換するため)。
+    `error_type` を先頭に必ず含めるため、正規化後のメッセージが偶然一致しても例外の種類が
+    違えば別の値になる。`error_message` に含まれる **UUID 形式・ISO8601 風の日時・8桁以上の
+    16進数の並び・数字の並び** は、この関数を通した時点で固定のプレースホルダへ置換され、
+    元の値は残らない。**これらのパターンに一致しない識別子(英字だけの ID・独自書式の値等)は
+    吸収されない**(同じ根本原因でもそのような識別子が変わると、別の署名になりうる)。
+    「同じ根本原因なら必ず同じ署名になる」ことは保証しない。逆方向(異なる根本原因を誤って
+    同じ署名にする)を避けることを優先した設計である。
     """
     text = error_message
     text = _UUID_RE.sub("<ID>", text)
@@ -104,13 +107,32 @@ class IncidentFingerprintInput:
             raise ValueError(f"error_message must be a str, got {self.error_message!r}")
 
 
+def _field_digest(value: str) -> str:
+    """1 つのフィールドの生の値を、SHA-256 hex(64 桁の固定長)へ変換する。
+
+    フィールドを個別にハッシュしてから連結することで、フィールド値そのものに `|` や `=`
+    (区切り文字・ラベルに使う文字)が含まれていても、連結後の文字列の**どこがフィールドの
+    境界か**があいまいにならない(各要素は必ず 64 桁の16進文字列になり、値の中身に何を
+    含んでいても、その値のダイジェスト自身が別の要素の一部と混ざることはない)。
+    """
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def compute_fingerprint(signal: IncidentFingerprintInput) -> str:
     """5 要素から、決定的な fingerprint(SHA-256 hex、64 桁)を計算する。
 
     同じ入力からは常に同じ値、異なる `failure_type` / `failure_stage` / `job_name` /
     `environment` / 例外の種類・正規化後メッセージのいずれかが違えば異なる値になる。
-    要素は**名前付き**で区切り文字とともに連結するため(`key=value` を `|` で結合)、
-    ある要素の末尾と次の要素の先頭がたまたま連結して同じ文字列になる、という衝突を避ける。
+
+    **各フィールドは先に個別に `_field_digest()` でハッシュしてから連結する**(生の文字列を
+    そのまま `key=value` で連結しない)。生の文字列を連結する方式では、あるフィールドの値に
+    区切り文字や次のフィールドのラベル(`|failure_stage=` 等)が偶然含まれていると、
+    異なる `(environment, job_name, failure_stage, ...)` の組み合わせが同じ連結文字列に
+    なりうる(= 異なる root cause が同一 fingerprint になる。AC 違反)。個別にハッシュしてから
+    連結すれば、各要素は必ず固定長 64 桁の16進文字列になり、値の中身によらず境界があいまいに
+    ならない(反証テスト `test_delimiter_injection_does_not_cause_a_fingerprint_collision`
+    で確認)。
+
     フィールドの並び順は `IncidentFingerprintInput` の定義順に固定されており(dataclass の
     フィールド順は inputs の与え方に依存しない)、呼び出し側がキーワード引数をどの順で
     渡しても同じ `IncidentFingerprintInput` になり、同じ fingerprint になる。
@@ -118,11 +140,11 @@ def compute_fingerprint(signal: IncidentFingerprintInput) -> str:
     normalized = normalize_error_signature(signal.error_type, signal.error_message)
     identity = "|".join(
         [
-            f"environment={signal.environment}",
-            f"job_name={signal.job_name}",
-            f"failure_stage={signal.failure_stage}",
-            f"failure_type={signal.failure_type}",
-            f"normalized_error_signature={normalized}",
+            f"environment={_field_digest(signal.environment)}",
+            f"job_name={_field_digest(signal.job_name)}",
+            f"failure_stage={_field_digest(signal.failure_stage)}",
+            f"failure_type={_field_digest(signal.failure_type)}",
+            f"normalized_error_signature={_field_digest(normalized)}",
         ]
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()

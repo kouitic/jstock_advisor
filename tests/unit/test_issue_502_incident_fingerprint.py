@@ -107,6 +107,33 @@ def test_mutation_that_ignores_job_name_would_wrongly_merge_two_different_jobs()
     assert a != b
 
 
+def test_delimiter_injection_does_not_cause_a_fingerprint_collision() -> None:
+    """★ USER レビュー指摘(#542 issuecomment-5795071265)の反証テスト。
+
+    フィールドの値そのものに、次のフィールドのラベル(`|failure_stage=` 等。区切り文字の
+    `|` とキー名の `=` の組み合わせ)が偶然含まれていると、**生の文字列をそのまま
+    `key=value` で連結する実装**では、フィールドの境界がずれて異なる組み合わせが同じ
+    連結文字列になりうる。
+
+    次の 2 つの入力は、`(job_name, failure_stage)` として見れば別の組み合わせ
+    (`("B|failure_stage=C", "D")` と `("B", "C|failure_stage=D")`)だが、生の文字列を
+    そのまま `|` で連結すると**どちらも同じ文字列**になる
+    (`...|job_name=B|failure_stage=C|failure_stage=D|failure_type=...`)。
+    フィールドを個別にハッシュしてから連結する実装であれば、これらは異なる fingerprint に
+    なる(境界があいまいにならない)。
+    """
+    a = compute_fingerprint(_signal(job_name="B|failure_stage=C", failure_stage="D"))
+    b = compute_fingerprint(_signal(job_name="B", failure_stage="C|failure_stage=D"))
+    assert a != b
+
+
+def test_delimiter_injection_across_environment_and_job_name_does_not_collide() -> None:
+    """同じ形の衝突を environment / job_name の境界でも確認する。"""
+    a = compute_fingerprint(_signal(environment="A|job_name=B", job_name="C"))
+    b = compute_fingerprint(_signal(environment="A", job_name="B|job_name=C"))
+    assert a != b
+
+
 # --- 3. job_name は内部識別子の粒度(IncidentJob の集約名ではない) -----------
 
 
