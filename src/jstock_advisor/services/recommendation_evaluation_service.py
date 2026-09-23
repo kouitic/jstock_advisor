@@ -65,6 +65,11 @@ from jstock_advisor.infrastructure.local_repository.evaluation_repository import
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from jstock_advisor.infrastructure.weekly_evaluation_aggregate_store import (
+    WeeklyEvaluationAggregateStore,
+    aggregate_write_enabled,
+    build_weekly_evaluation_aggregate_store,
+)
 from jstock_advisor.interfaces.market_data import MarketDataProvider
 from jstock_advisor.interfaces.types import PriceBar, PriceHistory
 from jstock_advisor.services.run_scoped_market_data import RunScopedMarketDataCache
@@ -175,6 +180,11 @@ class EvaluationRunSummary:
     # (= 別実行が同じ評価を先に保存していた)。★ 0 でないこと自体は異常ではなく、
     # 並行実行が起きた事実を見えるようにするための計数である。
     concurrent_conflict_count: int = 0
+    # Issue #537: 週次評価集計(Aggregate)の更新に失敗したため、EvaluationResult を保存しなかった件数
+    # (Aggregate と raw の原子的整合を優先する = USER 決定 Q-2)。保存していないので、
+    # 翌日の日次実行で
+    # 再試行される。0 でなければ、Aggregate 側の障害(権限・テーブル・競合)を調べること。
+    aggregate_commit_failed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -197,6 +207,7 @@ class _RunAccumulator:
     business_skipped: int = 0
     calendar_skipped: int = 0
     concurrent_conflicts: int = 0
+    aggregate_commit_failures: int = 0
 
 
 @dataclass(frozen=True)
@@ -265,6 +276,8 @@ class RecommendationEvaluationService:
         recommendation_repository: RecommendationRepository | None = None,
         evaluation_repository: EvaluationResultRepository | None = None,
         benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
+        aggregate_store: WeeklyEvaluationAggregateStore | None = None,
+        aggregate_write: bool | None = None,
     ) -> None:
         self._market_data = market_data_provider
         self._config = config
@@ -272,6 +285,12 @@ class RecommendationEvaluationService:
         self._recommendations = recommendation_repository or RecommendationRepository()
         self._evaluations = evaluation_repository or EvaluationResultRepository()
         self._benchmark_symbol = benchmark_symbol
+        # Issue #537: 既定は環境変数(WEEKLY_AGGREGATE_WRITE_ENABLED)。未設定 = 従来どおり
+        # insert_if_absent。
+        self._aggregate_write = (
+            aggregate_write_enabled() if aggregate_write is None else aggregate_write
+        )
+        self._aggregate_store = aggregate_store
 
     # --- 公開エントリポイント --------------------------------------------
 
@@ -437,6 +456,7 @@ class RecommendationEvaluationService:
             business_evaluated_count=acc.business_evaluated,
             calendar_evaluated_count=acc.calendar_evaluated,
             concurrent_conflict_count=acc.concurrent_conflicts,
+            aggregate_commit_failed_count=acc.aggregate_commit_failures,
             business_skipped_count=acc.business_skipped,
             calendar_skipped_count=acc.calendar_skipped,
             backlog_remaining=(due_count - already_evaluated) - len(acc.evaluated),
@@ -578,7 +598,20 @@ class RecommendationEvaluationService:
             )
             acc.calendar_skipped += 1
             return
-        if not self._evaluations.insert_if_absent(result):
+        inserted = self._insert_calendar_result(result, recommendation, horizon_days, now, acc)
+        if inserted is None:
+            # Aggregate の更新に失敗した。EvaluationResult も保存していない(原子的整合)。
+            # index へ載せない = 翌日の日次実行で再試行される。評価済みとして数えない。
+            acc.skipped.append(
+                (
+                    recommendation.stock_code,
+                    horizon_days,
+                    "週次評価集計の更新に失敗したため保存していません(翌日に再試行します)",
+                )
+            )
+            acc.calendar_skipped += 1
+            return
+        if not inserted:
             self._record_conflict(recommendation, horizon_days, axis="calendar")
             index.record_calendar_horizon(recommendation.recommendation_id, horizon_days)
             acc.concurrent_conflicts += 1
@@ -586,6 +619,46 @@ class RecommendationEvaluationService:
         index.record_calendar_horizon(recommendation.recommendation_id, horizon_days)
         acc.evaluated.append(result)
         acc.calendar_evaluated += 1
+
+    def _insert_calendar_result(
+        self,
+        result: EvaluationResult,
+        recommendation: Recommendation,
+        horizon_days: int,
+        now: dt.datetime,
+        acc: _RunAccumulator,
+    ) -> bool | None:
+        """暦日評価 1 件を保存する。True = 保存した / False = 既に存在した / None = 保存しなかった。
+
+        Issue #537(USER 決定 Q-1 / Q-2): 週次改善レビューが読む評価(暦日 =
+          evaluation_horizon_days)は、
+        設定が有効なら、EvaluationResult の条件付き insert と週次評価集計(Aggregate)の加算・
+          marker を
+        **1 回の Transaction** で行う(insert に成功した実行だけが加算する = 二重加算しない)。
+        Aggregate の更新に失敗したら EvaluationResult も保存しない(None)。
+        設定が無効(既定)/ 週次レビューの対象でないホライズンは、従来どおりの `insert_if_absent`。
+        """
+        if not self._aggregate_write or horizon_days != (
+            self._config.review_improvement.evaluation_horizon_days
+        ):
+            return self._evaluations.insert_if_absent(result)
+        if self._aggregate_store is None:
+            self._aggregate_store = build_weekly_evaluation_aggregate_store(
+                evaluation_inserter=self._evaluations.insert_if_absent
+            )
+        try:
+            return self._aggregate_store.commit_evaluation(
+                result, recommendation.recommendation_type, recommendation.rule_version, now
+            )
+        except Exception as exc:  # noqa: BLE001 - 種別を問わず「保存しない」に倒す(rollback の契約)
+            acc.aggregate_commit_failures += 1
+            # 例外の本文は出さない(識別子・内部情報を増やさない)。型名だけを残す。
+            logger.warning(
+                "evaluation aggregate commit failed horizon=%d exception=%s (evaluation not saved)",
+                horizon_days,
+                type(exc).__name__,
+            )
+            return None
 
     def _record_conflict(
         self,

@@ -74,7 +74,10 @@ _UNPROTECTED_RESOURCES = frozenset(
 #: Issue #71 F-C11 Phase 1: TradeEventRecordsTable(保護対象)を追加。
 #: 対応するValidationTradeEventRecordsTableは上記_UNPROTECTED_RESOURCESへ
 #: 追加済み(VALIDATION実行専用の一時データのため)。
-_EXPECTED_PROTECTED_COUNT = 38
+#: Issue #537: WeeklyEvaluationAggregateTable(保護対象)を追加。raw の EvaluationResult から
+#: 得られる中間集計で、失うと再生成に raw の全件走査が要るため、他の履歴 Table と同じ保護を持つ。
+#: VALIDATION実行専用の対応テーブルは無い(既定 false で書き込み自体を行わないため)。
+_EXPECTED_PROTECTED_COUNT = 39
 _EXPECTED_UNPROTECTED_COUNT = 18
 
 

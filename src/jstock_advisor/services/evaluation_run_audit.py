@@ -163,6 +163,8 @@ def _build_output_values(summary: EvaluationRunSummary) -> dict[str, Any]:
         # 後から説明できない。0 でないこと自体は異常ではなく、並行実行が
         # 起きた事実の記録である。
         "concurrent_conflict_count": summary.concurrent_conflict_count,
+        # Issue #537: 週次評価集計の更新失敗により、保存しなかった評価の件数(翌日に再試行)。
+        "aggregate_commit_failed_count": summary.aggregate_commit_failed_count,
     }
 
 

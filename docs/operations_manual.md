@@ -3123,3 +3123,75 @@ MANAGER / USER へ、次を分けて報告する。
 ・誰が・いつ確認するか(24.1。Issue #349 ⑤ の残り)
 ・復旧の手順そのもの(DLQ の redrive の検証は 23.3。検証には USER の別途の承認が要る)
 ```
+
+## 28. 週次評価集計(WeeklyEvaluationAggregate)の切替・照合・rebuild の手順(Issue #537、2026-09-22追加)
+
+週次改善レビューが、毎週 raw の EvaluationResult を全件 Scan する方式から、週ごとの集計済みデータ(Aggregate)を読む方式へ移るための手順である。
+**実装は既定で無効**(従来の挙動のまま)。有効化・過去分の作成・切替は、それぞれ**別の Human Gate**で、本節はその順序と、各段の確認・戻し方を定める。
+
+### 28.1 何が変わるか(有効にした場合)
+
+```
+評価の保存(日次の定点評価。書き込み側)
+    暦日 7 日(evaluation_horizon_days)の評価だけ、EvaluationResult の条件付き Put と、Aggregate の加算・週の状態・再計算対象の一覧を
+    1 回の TransactWriteItems で行う。Aggregate の更新に失敗したら EvaluationResult も保存しない(翌日の日次実行で再試行)。
+週次レビュー(月曜 19:00。読み取り側)
+    前週の Aggregate を Query で読む。EvaluationResultsTable も Aggregate Table も全件 Scan しない。
+    遅延評価が届いた過去週は、marker(REVIEW_RECOMPUTE_PENDING)から特定し、その週の Metrics だけを Aggregate から再生成する。
+環境変数(SAM Parameter。既定 = false)
+    WEEKLY_AGGREGATE_WRITE_ENABLED   評価の保存側
+    WEEKLY_AGGREGATE_READ_ENABLED    週次レビューの読み取り側(backfill が COMPLETE でなければ、有効にしても読まない = 従来の経路へ戻る)
+```
+
+### 28.2 切替の順序(各段が別の Human Gate。順序を入れ替えない)
+
+```
+段 1  deploy(Aggregate Table・IAM・環境変数を追加。書き込み・読み取りとも false のまま)
+        確認: 週次レビュー・日次評価の挙動が変わっていない(従来どおり完走。監査の aggregate_read = false)
+段 2  backfill の dry-run(read-only。対象週数・行数・想定 write 数を報告) -> USER が対象と実行の可否を判断
+段 3  backfill の実行(全履歴の Aggregate を、raw から週ごとに SET で作る。再実行しても二重加算にならない。backfill 状態 = COMPLETE)
+        ★ 書き込み側を有効にする**前**に行う(実行中に届く評価を取りこぼさないため)。
+段 4  書き込み側を有効にする(WEEKLY_AGGREGATE_WRITE_ENABLED = true)+ 直後に照合(verify)
+        段 3 と段 4 の間に確定した評価を、対象週だけの照合で確認する。不一致の週は AGGREGATE_REBUILD_REQUIRED にして、指定週だけ rebuild する。
+段 5  旧方式との一致確認(照合が一致 + 同じ週の Metrics を旧方式・新方式で比較)
+段 6  読み取り側を有効にする(WEEKLY_AGGREGATE_READ_ENABLED = true)
+        確認: 次の月曜の週次レビューが完走し、監査の aggregate_read = true、EvaluationResultsTable の Scan が無いこと(ログの scan の行が出ない)
+```
+
+### 28.3 backfill・照合・rebuild の使い方(CLI。**ローカル専用**)
+
+```
+jstock weekly-aggregate backfill                 # dry-run(既定)。対象週数・行数・想定 write 数を出す(何も書かない)
+jstock weekly-aggregate backfill --execute       # ローカルの Aggregate ストアへ書く
+jstock weekly-aggregate verify [--week 2026-W38] [--mark-rebuild-required]   # raw と Aggregate の突合。不一致があれば終了コード 1
+jstock weekly-aggregate rebuild --week 2026-W38 [--week ...] [--execute]      # 指定週だけ raw から作り直す(dry-run 既定)
+```
+
+- 本 CLI は**ローカルの保管ディレクトリだけ**を読み書きする(Lambda 以外では、本番のテーブルにアクセスしない)。
+- ★ **Production の Aggregate に対する backfill / verify / rebuild の実行手段**(どの主体・どの経路で実行するか)は、本 PR では決めていない。段 2 の前に、USER の判断で決める(実行手段の新設は別の作業・別の承認)。
+- rebuild は、その週の raw を読んだ後に新しい評価が届いた場合、上書きせずに失敗する(届いた評価を消さないため)。もう一度実行する。
+
+### 28.4 戻し方(rollback)
+
+```
+読み取り側を戻す      WEEKLY_AGGREGATE_READ_ENABLED = false -> 従来の経路(raw の走査。#377 の有界メモリ版)へ即座に戻る。Aggregate・Metrics は変わらない。
+書き込み側を戻す      WEEKLY_AGGREGATE_WRITE_ENABLED = false -> 以後の評価は従来どおり保存され、Aggregate は古くなる。
+                     ★ 再び有効にする前に、対象の週を verify し、不一致の週を rebuild する(古くなった期間の評価を取りこぼしたまま読まない)。
+Aggregate Table       削除しない(DeletionPolicy Retain)。raw の EvaluationResult は常に正本として残る。
+```
+
+### 28.5 異常のとき
+
+```
+日次評価の監査 aggregate_commit_failed_count > 0    Aggregate の更新に失敗し、その評価は保存されていない(翌日に再試行される)。Aggregate Table の権限・存在・競合を調べる。
+週次レビューが「rebuild が必要」で失敗            current week が AGGREGATE_REBUILD_REQUIRED。verify で不一致を確認し、その週を rebuild してから再実行する。
+過去週が「aggregate_rebuild_required」でスキップ    その週の Metrics は作られていない(marker は残る)。rebuild の後の次回のレビューで再生成される。
+```
+
+### 28.6 この節が決めていないこと
+
+```
+・Production の Aggregate への backfill / verify / rebuild の実行手段(28.3)
+・切替の各段の実施の可否・時期(別の Human Gate)
+・EvaluationResults の retention(本 Issue は変更しない。データ保持期間は Issue #138)
+```

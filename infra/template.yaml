@@ -54,6 +54,23 @@ Parameters:
       実施基準充足(SQS OldestMessage最大69分・Throttles最大3,158件/日・
       429率実質0%)を確認し、3→4へ段階的に引き上げ(検証用、悪化があれば3へ
       ロールバック)。
+  WeeklyAggregateWriteEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Issue #537。true にすると、定点評価が暦日7日の評価を保存するとき、EvaluationResultの条件付きPutと
+      週次評価集計(WeeklyEvaluationAggregateTable)の加算・marker を1回のTransactWriteItemsで行う。
+      **既定は false(従来どおり insert_if_absent)。** 有効化は backfill(全履歴の集計の作成)の後の
+      別の承認による(docs/operations_manual.md 28節)。
+  WeeklyAggregateReadEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Issue #537。true にすると、週次改善レビューが集計済みの WeeklyEvaluationAggregateTable を読む
+      (EvaluationResultsTable を全件 Scan しない)。backfill が COMPLETE でなければ、true でも読まない
+      (従来の経路へ戻る)。**既定は false。** 有効化は別の承認による(docs/operations_manual.md 28節)。
   WatchlistSqsBatchSize:
     Type: Number
     Default: 1
@@ -1060,6 +1077,32 @@ Resources:
         - AttributeName: metrics_id
           KeyType: HASH
 
+  # Issue #537: 週次評価集計(raw の EvaluationResult から得られる中間集計)。WeeklyReviewMetrics(レビュー結果)
+  # とは別のテーブル。raw は正本として EvaluationResultsTable に残る(削除・TTL は行わない)。
+  # HASH = review_week / RANGE = item_key(集計行 `AGG#...`・週の状態 `#STATE`・一覧 `#INDEX`・制御 `#CONTROL`)。
+  # 1 週の集計行は Query 1 回で取れる(Scan しない)。
+  WeeklyEvaluationAggregateTable:
+    Type: AWS::DynamoDB::Table
+    # Issue #137: 失うと再生成に raw の全件走査が要るデータのため、stack 削除・置換で実体を消さない。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TableName: !Sub "${TablePrefix}-weekly_evaluation_aggregate"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: review_week
+          AttributeType: S
+        - AttributeName: item_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: review_week
+          KeyType: HASH
+        - AttributeName: item_key
+          KeyType: RANGE
+
   ImprovementCandidatesTable:
     Type: AWS::DynamoDB::Table
     # Issue #137: 失うと再生成できないデータのため、stack 削除・置換で
@@ -1971,9 +2014,22 @@ Resources:
       # backlogを消化するための実行枠として900秒を割り当てる
       # (MemorySizeはstreaming化により512MBのまま据え置く)。
       Timeout: 900
+      Environment:
+        Variables:
+          # Issue #537: 既定 false。true のとき、暦日7日の評価の保存が Transaction(EvaluationResult + Aggregate)になる。
+          WEEKLY_AGGREGATE_WRITE_ENABLED: !Ref WeeklyAggregateWriteEnabled
+          WEEKLY_EVALUATION_AGGREGATE_TABLE: !Ref WeeklyEvaluationAggregateTable
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref EvaluationResultsTable }
+        # Issue #537: 評価の保存 Transaction が Aggregate へ書くのは UpdateItem だけ(加算・週の状態・一覧)。
+        # 読み取り・削除・Scan/Query は行わない(最小権限)。
+        - Statement:
+            - Sid: UpdateWeeklyEvaluationAggregate
+              Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource:
+                - !GetAtt WeeklyEvaluationAggregateTable.Arn
         # Issue #114 Phase B1: run summaryをAuditLogへ記録する。
         # 書き込みはAuditLogRepository.save_if_absent()の条件付きPutItemのみで、
         # 読み取り・削除・Scan/Queryは行わない。DynamoDBCrudPolicyでは
@@ -2435,6 +2491,9 @@ Resources:
       Handler: jstock_advisor.lambda_handlers.weekly_review_handler.handler
       Environment:
         Variables:
+          # Issue #537: 既定 false。true かつ backfill が COMPLETE のとき、集計済みの Aggregate を読む。
+          WEEKLY_AGGREGATE_READ_ENABLED: !Ref WeeklyAggregateReadEnabled
+          WEEKLY_EVALUATION_AGGREGATE_TABLE: !Ref WeeklyEvaluationAggregateTable
           # GitHub App秘密鍵は環境変数へ直接展開せず、ARNのみを渡し実行時に
           # secretsmanager:GetSecretValueで取得する(値そのものをログ・環境変数へ
           # 残さないため)。GitHub App未設定の間はissue_creation_enabled=falseに
@@ -2446,6 +2505,17 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         - DynamoDBReadPolicy: { TableName: !Ref RuleVersionsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref WeeklyReviewMetricsTable }
+        # Issue #537: 週次レビューが Aggregate に対して行うのは、Query / GetItem(週の集計・状態・一覧・制御)と、
+        # marker の解消(UpdateItem)だけ。Scan・PutItem・DeleteItem は付与しない(最小権限。全件 Scan をしないことの担保)。
+        - Statement:
+            - Sid: ReadAndResolveWeeklyEvaluationAggregate
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+              Resource:
+                - !GetAtt WeeklyEvaluationAggregateTable.Arn
         - DynamoDBCrudPolicy: { TableName: !Ref ImprovementCandidatesTable }
         - DynamoDBCrudPolicy: { TableName: !Ref ImprovementTasksTable }
         - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }

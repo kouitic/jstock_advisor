@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from jstock_advisor.config.models import AppConfig, ReviewImprovementConfig
 from jstock_advisor.domain.entities.enums import (
@@ -36,6 +37,7 @@ from jstock_advisor.domain.entities.improvement import (
     ImprovementCandidate,
     WeeklyReviewMetrics,
 )
+from jstock_advisor.domain.entities.weekly_evaluation_aggregate import WeeklyEvaluationAggregate
 from jstock_advisor.domain.evaluation_rules import (
     is_entry_type,
     is_evaluation_excluded_type,
@@ -61,6 +63,11 @@ from jstock_advisor.infrastructure.local_repository.rule_version_repository impo
 from jstock_advisor.infrastructure.local_repository.weekly_review_metrics_repository import (
     WeeklyReviewMetricsRepository,
 )
+from jstock_advisor.infrastructure.weekly_evaluation_aggregate_store import (
+    WeeklyEvaluationAggregateStore,
+    aggregate_read_enabled,
+    build_weekly_evaluation_aggregate_store,
+)
 from jstock_advisor.services import github_issue_service
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.performance_metrics_service import (
@@ -68,6 +75,7 @@ from jstock_advisor.services.performance_metrics_service import (
     MetricsBucket,
 )
 from jstock_advisor.services.rule_version_service import RuleVersionService
+from jstock_advisor.services.weekly_evaluation_aggregate_service import aggregate_to_bucket
 
 logger = logging.getLogger(__name__)
 # Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
@@ -118,6 +126,14 @@ class WeeklyImprovementReviewOutcome:
     # 失敗した過去週。その週のmetricsは保存していない(途中までの集計を保存しない)。例外の
     # 本文は含めない(識別子・内部情報を増やさない)。current weekの失敗はrun()自体が失敗する。
     past_weeks_join_failed: dict[str, str] = field(default_factory=dict)
+    # Issue #537: 集計済みの Aggregate から作った週か(True = raw の EvaluationResult
+    # を走査していない)。
+    aggregate_read: bool = False
+    # Issue #537: Aggregate 読みで、Metrics を再生成して marker(REVIEW_RECOMPUTE_PENDING)
+    # を解消した週。
+    aggregate_weeks_recomputed: list[str] = field(default_factory=list)
+    # Issue #537: 再生成の間に新しい評価が届いたため、marker を残した週(次回に再生成される)。
+    aggregate_weeks_marker_kept: list[str] = field(default_factory=list)
 
 
 def _iso_week_label(d: dt.date) -> str:
@@ -143,6 +159,24 @@ def _resolve_review_period(now: dt.datetime) -> tuple[dt.date, dt.date, str]:
     return period_start, period_end, _iso_week_label(period_start)
 
 
+class _BucketSource(Protocol):
+    """`MetricsBucket` を作れる集計(旧方式の `MetricsAccumulator` と、Aggregate 読みの行の両方)。"""
+
+    def to_bucket(self, key: str) -> MetricsBucket: ...
+
+
+class _AggregateRowBuckets:
+    """Aggregate の集計行を、`MetricsAccumulator` と同じ呼び方(`to_bucket`)で使うための薄い包み。"""
+
+    __slots__ = ("_row",)
+
+    def __init__(self, row: WeeklyEvaluationAggregate) -> None:
+        self._row = row
+
+    def to_bucket(self, key: str) -> MetricsBucket:
+        return aggregate_to_bucket(self._row, key)
+
+
 @dataclass
 class _WindowAggregate:
     """1つの対象週の集計(Issue #377 Track1)。評価・Recommendationは保持しない。
@@ -155,7 +189,7 @@ class _WindowAggregate:
     # 対応するRecommendationが見つからなかった評価のID(評価ごとに1件。重複IDも1件ずつ)。
     missing_ids: list[str] = field(default_factory=list)
     # 挿入順 = この週で最初に現れた順(従来の`_group_by_type_and_rule_version()`と同じ)。
-    groups: dict[tuple[RecommendationType, str], MetricsAccumulator] = field(default_factory=dict)
+    groups: dict[tuple[RecommendationType, str], _BucketSource] = field(default_factory=dict)
     # 過去週のRecommendation結合が失敗した場合の識別子。Noneでない週は「途中まで集計した不完全な
     # 状態」なので、以後foldせず、metricsの再集計でも必ずスキップする(部分値を保存しない)。
     failure: str | None = None
@@ -175,6 +209,8 @@ class WeeklyImprovementReviewService:
         github_repo_owner: str | None = None,
         github_repo_name: str | None = None,
         github_secret_arn: str | None = None,
+        aggregate_store: WeeklyEvaluationAggregateStore | None = None,
+        aggregate_read: bool | None = None,
     ) -> None:
         self._config = config
         self._review_config: ReviewImprovementConfig = config.review_improvement
@@ -188,6 +224,12 @@ class WeeklyImprovementReviewService:
         self._github_repo_owner = github_repo_owner
         self._github_repo_name = github_repo_name
         self._github_secret_arn = github_secret_arn
+        # Issue #537: 既定は環境変数(WEEKLY_AGGREGATE_READ_ENABLED)。未設定 = 従来どおり raw
+        # の走査。
+        self._aggregate_read_requested = (
+            aggregate_read_enabled() if aggregate_read is None else aggregate_read
+        )
+        self._aggregate_store = aggregate_store
 
     def run(self, now: dt.datetime) -> WeeklyImprovementReviewOutcome:
         require_timezone_aware(now)
@@ -202,26 +244,36 @@ class WeeklyImprovementReviewService:
                 joined_count=0,
             )
 
-        # Issue #377: 当該週+過去history_weeks_for_comparison週の窓を先に
-        # 全部確定してから、1回のstreaming scanでまとめて集める(従来は
-        # 週ごとに個別へ全件走査していた。1 + weeks_back回 -> 1回)。
-        # 窓の計算自体は純粋計算であり副作用を持たない。
-        weeks_back = self._review_config.history_weeks_for_comparison
-        windows: list[tuple[str, dt.date, dt.date]] = [(review_week, period_start, period_end)]
-        past_labels: list[str] = []
-        label = review_week
-        for _ in range(max(weeks_back, 0)):
-            label = _previous_week_label(label)
-            past_period_start = _monday_of_iso_week(label)
-            windows.append((label, past_period_start, past_period_start + dt.timedelta(days=6)))
-            past_labels.append(label)
+        seen_marks: dict[str, int] = {}
+        store = self._resolve_aggregate_store()
+        if store is not None:
+            # Issue #537: 集計済みの Aggregate を読む(raw の EvaluationResultsTable を走査しない)。
+            aggregates, past_labels, seen_marks = self._aggregates_from_store(store, review_week)
+        else:
+            # Issue #377: 当該週+過去history_weeks_for_comparison週の窓を先に
+            # 全部確定してから、1回のstreaming scanでまとめて集める(従来は
+            # 週ごとに個別へ全件走査していた。1 + weeks_back回 -> 1回)。
+            # 窓の計算自体は純粋計算であり副作用を持たない。
+            weeks_back = self._review_config.history_weeks_for_comparison
+            windows: list[tuple[str, dt.date, dt.date]] = [
+                (review_week, period_start, period_end)
+            ]
+            past_labels = []
+            label = review_week
+            for _ in range(max(weeks_back, 0)):
+                label = _previous_week_label(label)
+                past_period_start = _monday_of_iso_week(label)
+                windows.append(
+                    (label, past_period_start, past_period_start + dt.timedelta(days=6))
+                )
+                past_labels.append(label)
 
-        # Issue #377 Track1: 1回のstreaming scanの中で、評価をchunkごとにRecommendationと
-        # 結合して集計器へ足し込む。評価のリストもjoinした結果も保持しない(メモリは
-        # scanの1ページ + chunk1つ + 集計の組の数に有界)。
-        # current weekの結合失敗はrun全体の失敗(不完全なmetrics/candidateで続行しない)。
-        # 過去週の結合失敗はその週だけを失敗扱いにし、current weekの処理は続ける。
-        aggregates = self._aggregate_windows(windows, current_label=review_week)
+            # Issue #377 Track1: 1回のstreaming scanの中で、評価をchunkごとにRecommendationと
+            # 結合して集計器へ足し込む。評価のリストもjoinした結果も保持しない(メモリは
+            # scanの1ページ + chunk1つ + 集計の組の数に有界)。
+            # current weekの結合失敗はrun全体の失敗(不完全なmetrics/candidateで続行しない)。
+            # 過去週の結合失敗はその週だけを失敗扱いにし、current weekの処理は続ける。
+            aggregates = self._aggregate_windows(windows, current_label=review_week)
         current = aggregates[review_week]
         missing_ids = current.missing_ids
 
@@ -294,6 +346,18 @@ class WeeklyImprovementReviewService:
         past_weeks_recomputed, past_weeks_detail = self._recompute_past_weeks_from_aggregates(
             past_labels, aggregates, now
         )
+        # Issue #537: Metrics を再生成できた週の marker
+        # を解消する(読んだ後に新しい評価が届いた週は残す)。
+        weeks_recomputed: list[str] = []
+        weeks_marker_kept: list[str] = []
+        if store is not None:
+            for week in [review_week, *past_labels]:
+                if aggregates[week].failure is not None or seen_marks.get(week, 0) == 0:
+                    continue
+                if store.finish_recompute(week, seen_marks[week]):
+                    weeks_recomputed.append(week)
+                else:
+                    weeks_marker_kept.append(week)
 
         outcome = WeeklyImprovementReviewOutcome(
             review_week=review_week,
@@ -314,9 +378,80 @@ class WeeklyImprovementReviewService:
             issue_eligible_candidates=len(issue_eligible),
             github_statuses=github_statuses,
             notified_new_issue_count=notified_new_issue_count,
+            aggregate_read=store is not None,
+            aggregate_weeks_recomputed=weeks_recomputed,
+            aggregate_weeks_marker_kept=weeks_marker_kept,
         )
         self._record_audit(outcome, now)
         return outcome
+
+    # --- Aggregate 読み(Issue #537) ----------------------------------------
+
+    def _resolve_aggregate_store(self) -> WeeklyEvaluationAggregateStore | None:
+        """Aggregate を読む経路を使うなら、そのストアを返す。使わないなら None(従来の raw の走査)。
+
+        使う条件: 設定で有効(WEEKLY_AGGREGATE_READ_ENABLED)**かつ** backfill が COMPLETE。
+        backfill が済んでいない間は、部分的な Aggregate で既存の WeeklyReviewMetrics
+          を上書きしないよう、
+        Aggregate を読まない(WARNING を残して従来の経路へ戻る)。
+        """
+        if not self._aggregate_read_requested:
+            return None
+        store = self._aggregate_store or build_weekly_evaluation_aggregate_store()
+        if not store.get_backfill_status().complete:
+            logger.warning(
+                "weekly review aggregate read requested but backfill is not complete; "
+                "falling back to the raw scan"
+            )
+            return None
+        return store
+
+    def _aggregates_from_store(
+        self, store: WeeklyEvaluationAggregateStore, review_week: str
+    ) -> tuple[dict[str, _WindowAggregate], list[str], dict[str, int]]:
+        """当該週の集計と、再生成が要る過去週(REVIEW_RECOMPUTE_PENDING)の集計を Aggregate から作る。
+
+        ★ EvaluationResultsTable も WeeklyEvaluationAggregateTable も全件 Scan しない。読むのは、
+          再計算対象の一覧(1 件)・週の状態(GetItem)・週ごとの集計行(Query)だけである。
+        ★ 過去週の対象は「固定の過去 N 週」ではなく、marker が付いた週(遅延評価が届いた週・
+          rebuild で作り直した週)である。`history_weeks_for_comparison` は raw の再集計範囲の
+          意味を持たない(この対象週の決定には使わない)。改善判断の比較(consecutive_bad_weeks
+          等)は、本 Issue 以前から rule_version 内の連続週を無制限に遡る実装であり、この
+          パラメータで比較期間を区切ってはいない(本 PR でも変更しない)。
+        ★ mark_seq は、集計行を読む**前**に読む(読んだ後に届いた評価があれば、完了の記録が失敗して
+          marker が残る = 取りこぼさない)。
+        """
+        rebuild_weeks = set(store.list_rebuild_weeks())
+        # ISO 週ラベル(YYYY-Www)は辞書順 = 時系列。当該週より後の週(進行中の週)
+        # はまだレビューしない。
+        pending = [w for w in store.list_pending_weeks() if w < review_week]
+        if review_week in rebuild_weeks:
+            # current week の Aggregate が不整合な間は、疑わしい値で Metrics・候補・起票をしない。
+            raise RuntimeError(
+                f"週次改善レビュー: {review_week} の Aggregate は rebuild が必要です"
+                "(AGGREGATE_REBUILD_REQUIRED)。rebuild の後に再実行してください"
+            )
+        aggregates: dict[str, _WindowAggregate] = {}
+        seen_marks: dict[str, int] = {}
+        for week in [review_week, *pending]:
+            aggregate = _WindowAggregate()
+            aggregates[week] = aggregate
+            if week in rebuild_weeks:
+                # 過去週: Aggregate 自体が不整合。Metrics を保存せず、rebuild を待つ(marker
+                # は残す)。
+                aggregate.failure = "phase=aggregate_rebuild_required"
+                logger.warning(
+                    "weekly review past-week skipped review_week=%s %s", week, aggregate.failure
+                )
+                continue
+            seen_marks[week] = store.get_state(week).mark_seq
+            for row in store.query_week(week):
+                aggregate.matched += row.sample_count
+                aggregate.joined += row.sample_count
+                aggregate.groups[(row.recommendation_type, row.rule_version)] = (
+                    _AggregateRowBuckets(row)
+                )
+        return aggregates, pending, seen_marks
 
     # --- データ収集・join ---------------------------------------------
 
@@ -436,8 +571,10 @@ class WeeklyImprovementReviewService:
                 continue
             aggregate.joined += 1
             key = (recommendation.recommendation_type, recommendation.rule_version)
-            accumulator = aggregate.groups.get(key)
-            if accumulator is None:
+            existing = aggregate.groups.get(key)
+            if isinstance(existing, MetricsAccumulator):
+                accumulator = existing
+            else:
                 accumulator = aggregate.groups[key] = MetricsAccumulator()
             accumulator.add(evaluation)
 
@@ -839,6 +976,10 @@ class WeeklyImprovementReviewService:
                     outcome.past_weeks_metrics_recomputed_by_week
                 ),
                 "past_weeks_join_failed": outcome.past_weeks_join_failed,
+                # Issue #537: Aggregate 読みか / marker を解消した週 / 残した週。
+                "aggregate_read": outcome.aggregate_read,
+                "aggregate_weeks_recomputed": outcome.aggregate_weeks_recomputed,
+                "aggregate_weeks_marker_kept": outcome.aggregate_weeks_marker_kept,
                 "candidates_detected": outcome.candidates_detected,
                 "issue_eligible_candidates": outcome.issue_eligible_candidates,
                 "github_statuses": outcome.github_statuses,
