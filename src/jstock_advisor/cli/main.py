@@ -29,6 +29,7 @@ from jstock_advisor.cli import (
     valuation_shadow,
     watchlist,
     watchlist_screening,
+    weekly_aggregate,
 )
 
 # プロジェクトルートの .env を読み込む(LINE_CHANNEL_ACCESS_TOKEN等)。
@@ -57,6 +58,7 @@ app.add_typer(baseline_repair.app, name="baseline-repair")
 app.add_typer(trading_pause.app, name="trading-pause")
 app.add_typer(judgment_safety_shadow.app, name="judgment-safety-shadow")
 app.add_typer(migrate.app, name="migrate")
+app.add_typer(weekly_aggregate.app, name="weekly-aggregate")
 
 
 @app.callback()
