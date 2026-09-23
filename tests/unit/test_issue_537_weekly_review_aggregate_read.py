@@ -751,3 +751,74 @@ def test_cli_verify_exits_nonzero_on_mismatch_and_rebuild_needs_a_week(
     monkeypatch.setattr(weekly_aggregate, "_service", env.maintenance)
     no_week = runner.invoke(app, ["weekly-aggregate", "rebuild"])
     assert no_week.exit_code != 0  # --week は必須
+
+
+def test_cli_wiring_uses_a_reusable_callable_not_a_pre_called_iterator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """レビュー指摘 R2: 既存の CLI テストは `_service` 自体を monkeypatch するため、
+    `cli/weekly_aggregate.py::_service()` 本体(`evaluations=evaluations.iter_all` の配線)を
+    実際には通らない。ここでは `_service()` を差し替えず、CLI をそのまま呼ぶ。
+
+    `EvaluationResultRepository()` / `RecommendationRepository()` / `build_weekly_evaluation_
+    aggregate_store()` は、いずれも明示の `store_dir` を渡さない(`json_store.DEFAULT_STORE_DIR`
+    に頼る)。`tests/conftest.py` の autouse fixture(Issue #229)がこれをテストごとの一時
+    ディレクトリへ向けるため、実データはリポジトリ直下を汚さない。
+
+    `evaluations=evaluations.iter_all()`(呼び出し済みの iterator を渡す)へ戻す変異(N6)は、
+    この配線を通る限り `self._evaluations_source()` が `TypeError: 'generator' object is not
+    callable` を起こす(★ 保存の前に落ちるため、黙って空にはならない。それでも「検出できる
+    テストが無い」こと自体がレビュー指摘であり、本テストはそれを埋める)。
+    """
+    from typer.testing import CliRunner
+
+    from jstock_advisor.cli.main import app
+    from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
+    from jstock_advisor.domain.entities.recommendation import Recommendation
+    from jstock_advisor.infrastructure.weekly_evaluation_aggregate_store import (
+        build_weekly_evaluation_aggregate_store,
+    )
+
+    monkeypatch.setenv("DYNAMODB_TABLE_PREFIX", "jstock")
+    evaluations = EvaluationResultRepository()
+    recommendations = RecommendationRepository()
+    recommendations.save(
+        Recommendation(
+            recommendation_id="rec-cli-wiring",
+            stock_code="1234",
+            stock_name="test",
+            recommended_at=dt.datetime.combine(
+                _WEEK38_DAY - dt.timedelta(days=_HORIZON), dt.time(3, 0), tzinfo=dt.UTC
+            ),
+            recommendation_type=RecommendationType.BUY,
+            price_at_recommendation=Decimal("1000"),
+            confidence=ConfidenceLevel.HIGH,
+            rule_version="v1",
+        )
+    )
+    evaluations.save(
+        EvaluationResult(
+            evaluation_id="ev-cli-wiring",
+            recommendation_id="rec-cli-wiring",
+            horizon_calendar_days=_HORIZON,
+            evaluated_at=_NOW,
+            evaluation_date=_WEEK38_DAY,
+            price_at_evaluation=Decimal("1010"),
+            price_return_pct=1.5,
+            excess_return_pct=0.5,
+            evaluation_label=EvaluationLabel.SUCCESS,
+            label_evidence="x",
+        )
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["weekly-aggregate", "backfill", "--execute"])
+
+    assert result.exit_code == 0, result.output
+    assert "weeks=1" in result.output and "aggregate_rows=1" in result.output
+    store = build_weekly_evaluation_aggregate_store(
+        evaluation_inserter=evaluations.insert_if_absent
+    )
+    assert store.get_backfill_status().complete
+    [row] = store.query_week("2026-W38")
+    assert row.sample_count == 1

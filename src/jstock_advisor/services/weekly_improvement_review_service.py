@@ -414,9 +414,10 @@ class WeeklyImprovementReviewService:
         ★ EvaluationResultsTable も WeeklyEvaluationAggregateTable も全件 Scan しない。読むのは、
           再計算対象の一覧(1 件)・週の状態(GetItem)・週ごとの集計行(Query)だけである。
         ★ 過去週の対象は「固定の過去 N 週」ではなく、marker が付いた週(遅延評価が届いた週・
-          rebuild で
-          作り直した週)である。`history_weeks_for_comparison` は比較に使う過去 Metrics
-            の期間だけを意味する。
+          rebuild で作り直した週)である。`history_weeks_for_comparison` は raw の再集計範囲の
+          意味を持たない(この対象週の決定には使わない)。改善判断の比較(consecutive_bad_weeks
+          等)は、本 Issue 以前から rule_version 内の連続週を無制限に遡る実装であり、この
+          パラメータで比較期間を区切ってはいない(本 PR でも変更しない)。
         ★ mark_seq は、集計行を読む**前**に読む(読んだ後に届いた評価があれば、完了の記録が失敗して
           marker が残る = 取りこぼさない)。
         """
