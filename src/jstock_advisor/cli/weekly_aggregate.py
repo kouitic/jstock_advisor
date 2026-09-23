@@ -40,7 +40,7 @@ def _service() -> WeeklyAggregateMaintenanceService:
         store=build_weekly_evaluation_aggregate_store(
             evaluation_inserter=evaluations.insert_if_absent
         ),
-        evaluations=evaluations.iter_all(),
+        evaluations=evaluations.iter_all,  # 束縛メソッドそのもの(呼ぶたびに新しい走査になる)
         recommendations=RecommendationRepository(),
         horizon_calendar_days=load_config().review_improvement.evaluation_horizon_days,
     )

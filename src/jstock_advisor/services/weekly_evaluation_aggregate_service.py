@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -25,6 +25,7 @@ from jstock_advisor.domain.entities.evaluation import EvaluationResult
 from jstock_advisor.domain.entities.weekly_evaluation_aggregate import (
     WeeklyEvaluationAggregate,
     delta_of,
+    review_week_label,
 )
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
@@ -177,14 +178,27 @@ class VerifyReport:
 
 _PER_WEEK_FIXED_WRITE_ITEMS = 3  # 週の状態 + PENDING + REBUILD
 
+#: raw の EvaluationResult を読む走査元。**呼ぶたびに新しい iterable を返す 0 引数の callable**
+#: (例: `EvaluationResultRepository.iter_all`、束縛メソッドそのもの。呼び出し済みの
+#: generator を渡さない)。理由は `WeeklyAggregateMaintenanceService` の docstring 参照。
+EvaluationsSource = Callable[[], Iterable[EvaluationResult]]
+
 
 class WeeklyAggregateMaintenanceService:
-    """backfill / 照合 / rebuild。dry-run が既定(`execute=False`)。"""
+    """backfill / 照合 / rebuild。dry-run が既定(`execute=False`)。
+
+    ★ `evaluations` は **0 引数の callable**(`EvaluationsSource`)である。1 つの
+      インスタンスに対して `plan_backfill()` → `execute_backfill()` のように raw を複数回
+      走査する呼び出しが自然に起こりうるため、呼ぶたびに新しい iterable(= 新しい Scan)を
+      返せる必要がある。呼び出し済みの generator を直接渡すと、2 回目の走査が黙って
+      0 件になり、`execute_backfill()` が空の結果を COMPLETE として確定してしまう
+      (レビュー指摘 F3)。
+    """
 
     def __init__(
         self,
         store: WeeklyEvaluationAggregateStore,
-        evaluations: Iterable[EvaluationResult] | None,
+        evaluations: EvaluationsSource | None,
         recommendations: RecommendationRepository,
         horizon_calendar_days: int,
     ) -> None:
@@ -197,12 +211,30 @@ class WeeklyAggregateMaintenanceService:
         if self._evaluations_source is None:
             raise ValueError("raw の EvaluationResult の走査元がありません")
         return scan_raw_aggregates(
-            self._evaluations_source,
+            self._evaluations_source(),
             self._recommendations,
             self._horizon,
             now,
             only_weeks=only_weeks,
         )
+
+    def _discover_weeks(self, now: dt.datetime) -> set[str]:
+        """raw を Recommendation の結合なしで軽く走査し、対象週のラベルだけを集める。
+
+        `execute_backfill()` が、raw の本走査(`_scan`。Recommendation との結合を含む)より
+        **前**に各週の現在の状態(`mark_seq`)を読むために使う(レビュー指摘 F2: `rebuild_weeks()`
+        と同じ「状態を読む → raw を走査する」の順序に揃える。逆順だと、走査中に届いた新しい評価を
+        `states_before` が「走査後の値」として拾ってしまい、`replace_week()` の楽観ロックが
+        素通りして黙って上書きされうる)。
+        """
+        if self._evaluations_source is None:
+            raise ValueError("raw の EvaluationResult の走査元がありません")
+        weeks: set[str] = set()
+        for evaluation in self._evaluations_source():
+            if evaluation.horizon_calendar_days != self._horizon:
+                continue
+            weeks.add(review_week_label(evaluation.evaluation_date))
+        return weeks
 
     # --- backfill ---------------------------------------------------------
 
@@ -216,12 +248,28 @@ class WeeklyAggregateMaintenanceService:
         ★ Aggregate の書き込み経路(評価の保存 Transaction)を ON にする**前**に実行する想定
           (切替の順序: deploy[OFF] → backfill → 書き込み ON + 照合)。ON にした後に実行した場合は、
           走査後に届いた評価を取りこぼしうるため、`verify()` で照合する。
+
+        ★ 状態(`mark_seq`)は、raw の本走査(`_scan`。Recommendation 結合を含む重い走査)より
+          **前**に `_discover_weeks()`(軽量な走査)で読む(F2 是正。`rebuild_weeks()` と同じ順序)。
+          本走査の**後**に読むと、走査中に届いた新しい評価の分だけ状態が進んでしまい、
+          `replace_week()` の楽観ロックが「変化なし」と誤認して素通りし、その評価が backfill の
+          結果へ反映されないまま COMPLETE になりうる。
+        ★ `scan.scanned == 0`(raw を 1 件も読めなかった)は、genuinely 空のテーブルではなく、
+          走査元の配線ミス(例: 呼び出し済みの iterator を渡した)を強く疑う値のため、
+          COMPLETE にせず例外にする(F3 是正)。対象ホライズンの評価が単に存在しない場合
+          (`matched == 0` だが `scanned > 0`)は、正当な空の backfill として許容する。
         """
-        states_before = {}
+        weeks = self._discover_weeks(now)
+        states_before = {
+            week: (state.mark_seq if state.mark_seq else None)
+            for week, state in ((w, self._store.get_state(w)) for w in weeks)
+        }
         scan = self._scan(now)
-        for week in sorted(scan.rows_by_week):
-            state = self._store.get_state(week)
-            states_before[week] = state.mark_seq if state.mark_seq else None
+        if scan.scanned == 0:
+            raise RuntimeError(
+                "週次評価集計の backfill: raw の EvaluationResult を 1 件も読めませんでした"
+                "(走査元の配線を確認してください。空の結果を COMPLETE にはしません)"
+            )
         replaced = 0
         for week in sorted(scan.rows_by_week):
             # ★ request_recompute=False: backfill だけを理由に、保存済みの過去の Metrics
@@ -229,7 +277,7 @@ class WeeklyAggregateMaintenanceService:
             ok = self._store.replace_week(
                 week,
                 scan.rows_by_week[week].values(),
-                states_before[week],
+                states_before.get(week),
                 now,
                 request_recompute=False,
             )

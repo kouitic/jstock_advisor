@@ -372,6 +372,13 @@ def build_weekly_evaluation_aggregate_store(
 
     ローカルでは、`evaluation_inserter`(既定 = EvaluationResultRepository.insert_if_absent)を
     使って EvaluationResult を保存する。ローカルは本番のテーブルへ一切アクセスしない。
+
+    既定の保存先は `json_store.DEFAULT_STORE_DIR`(他の全リポジトリと同じ `data/local_store`)である。
+    **モジュール属性を都度読む**(`from ... import DEFAULT_STORE_DIR` で値を束縛しない)。
+    `tests/conftest.py` の autouse fixture(Issue #229)が `json_store.DEFAULT_STORE_DIR` を
+    テストごとの一時ディレクトリへ monkeypatch するため、束縛すると単体テスト実行中に
+    リポジトリ直下(`data/local_store` の外・.gitignore 対象外)へ実ファイルを作ってしまう
+    (#229 の audit_log.json 91.8MB の事故と同じ形)。
     """
     if running_on_lambda():
         from jstock_advisor.infrastructure.aws.weekly_evaluation_aggregate_dynamodb import (
@@ -385,7 +392,7 @@ def build_weekly_evaluation_aggregate_store(
         )
 
         evaluation_inserter = EvaluationResultRepository().insert_if_absent
-    path = local_path or (
-        Path(__file__).resolve().parents[3] / "data" / "weekly_evaluation_aggregate.json"
-    )
+    from jstock_advisor.infrastructure.local_repository import json_store
+
+    path = local_path or (json_store.DEFAULT_STORE_DIR / "weekly_evaluation_aggregate.json")
     return LocalWeeklyEvaluationAggregateStore(evaluation_inserter, path)

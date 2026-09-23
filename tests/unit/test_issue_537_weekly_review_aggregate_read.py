@@ -135,13 +135,12 @@ class Env:
         return evaluation
 
     def backfill(self) -> None:
-        WeeklyAggregateMaintenanceService(
-            self.store, self.evaluations.iter_all(), self.recommendations, _HORIZON
-        ).execute_backfill(_NOW)
+        self.maintenance().execute_backfill(_NOW)
 
     def maintenance(self) -> WeeklyAggregateMaintenanceService:
+        # 束縛メソッドそのものを渡す(呼ぶたびに新しい走査になる。#537 レビュー指摘 F2/F3)。
         return WeeklyAggregateMaintenanceService(
-            self.store, self.evaluations.iter_all(), self.recommendations, _HORIZON
+            self.store, self.evaluations.iter_all, self.recommendations, _HORIZON
         )
 
     def service(
@@ -568,6 +567,103 @@ def test_verify_detects_a_mismatch_and_rebuild_fixes_only_the_named_week(env: En
     assert env.store.list_rebuild_weeks() == []
     assert "2026-W37" in env.store.list_pending_weeks()  # Metrics の再生成を要求する
     assert env.maintenance().verify(_NOW).consistent
+
+
+def test_plan_backfill_then_execute_backfill_on_the_same_service_still_sees_all_data(
+    env: Env,
+) -> None:
+    """レビュー指摘 F3: `plan_backfill()` の後に同じ service で `execute_backfill()` を
+    呼ぶという自然な使い方(dry-run で確認してから実行する)で、2 回目の走査が
+    空にならないこと(呼び出し済みの iterator を渡すと、2 回目が黙って 0 件になっていた)。
+    """
+    for weeks_before in range(0, 5):
+        env.add(_week_day(weeks_before), via_store=False)
+    service = env.maintenance()
+
+    plan = service.plan_backfill(_NOW)
+    executed = service.execute_backfill(_NOW)  # ★ 同じ service インスタンスで 2 回目の走査
+
+    assert plan.week_count == executed.week_count == 5
+    assert plan.row_count == executed.row_count == 5
+    assert executed.scanned_evaluations == 5
+    assert env.store.get_backfill_status().complete
+    assert env.store.get_backfill_status().week_count == 5
+
+
+def test_execute_backfill_does_not_complete_on_an_empty_scan(env: Env) -> None:
+    """レビュー指摘 F3: raw を 1 件も読めなかった(走査元が空)場合は COMPLETE にせず例外にする。
+
+    genuinely 空のテーブル(scanned=0)と、対象ホライズンの評価が単に無いだけ(scanned>0 /
+    matched=0)を区別する: 後者は正当な空の backfill として許容する(下のテストで確認)。
+    """
+    empty_service = WeeklyAggregateMaintenanceService(
+        env.store, lambda: iter(()), env.recommendations, _HORIZON
+    )
+
+    with pytest.raises(RuntimeError, match="1 件も読めません"):
+        empty_service.execute_backfill(_NOW)
+
+    assert not env.store.get_backfill_status().complete
+
+
+def test_execute_backfill_completes_when_no_evaluation_matches_the_horizon(env: Env) -> None:
+    """scanned > 0(他のホライズンの評価は存在する)だが matched = 0 は、正当な空の backfill。"""
+    other_horizon_only = env.add(_WEEK38_DAY, via_store=False).model_copy(
+        update={"evaluation_id": "ev-other-only", "horizon_calendar_days": _HORIZON + 1}
+    )
+    env.evaluations.save(other_horizon_only)
+    only_service = WeeklyAggregateMaintenanceService(
+        env.store, lambda: [other_horizon_only], env.recommendations, _HORIZON
+    )
+
+    plan = only_service.execute_backfill(_NOW)
+
+    assert plan.week_count == 0 and plan.scanned_evaluations == 1 and plan.matched_evaluations == 0
+    assert env.store.get_backfill_status().complete
+
+
+def test_backfill_reads_pre_existing_week_state_before_scanning_raw_not_after(env: Env) -> None:
+    """レビュー指摘 F2 + Phase 2 追記(DoD3): 「既存 state を引き継いだ状態」での backfill を
+    実際に通す。事前に評価を確定してある週(mark_seq > 0 が既に付いている)に対して、
+    `_discover_weeks()` の後・本走査の前にもう 1 件確定すると、`states_before` はその新着より
+    **前**の値を捉えていなければならない。もし本走査の**後**に状態を読んでいたら
+    (是正前の順序)、`states_before` が新着分だけ進んだ値を拾ってしまい、
+    `replace_week()` の楽観ロックが「変化なし」と誤認して新着分を欠いたまま上書き・
+    COMPLETE してしまう(is_from_stale_state の欠陥)。是正後は、新着を検出して
+    RuntimeError で拒否する(もう一度実行すれば新着分を含めて成功する)。
+    """
+    for weeks_before in range(0, 2):
+        env.add(_week_day(weeks_before), via_store=True)  # 各週の state を mark_seq=1 にする
+    before_counts = {r.item_key: r.sample_count for r in env.store.query_week("2026-W38")}
+    assert before_counts  # 前提: 既に state が存在する週がある
+    service = env.maintenance()
+    original_scan = service._scan
+
+    def scan_then_arrival(now: dt.datetime, only_weeks: Any = None) -> Any:
+        # ★ 状態(_discover_weeksによる`states_before`)は素のまま(pre-arrival)。
+        #   raw の本走査だけを、完了後に新着が届く形で差し替える(既存の rebuild 用テストと同型)。
+        scan = original_scan(now, only_weeks)
+        env.add(_WEEK38_DAY, via_store=True)  # raw の本走査を読み終えた直後に新着が届く
+        return scan
+
+    service._scan = scan_then_arrival  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="新しい評価"):
+        service.execute_backfill(_NOW)
+
+    # ★ 拒否されたので、backfill 自身は書き込んでいない。新着(commit_evaluation の増分書き込み)
+    #   による正しい値(1 + 新着1件 = 2)がそのまま残っている。もし is_from_stale_state のまま
+    #   (是正前の順序)なら、backfill はここを raw スキャン時点の古い値(新着を含まない1)で
+    #   SET してしまい、増分書き込みの結果を消してしまう。
+    after_counts = {r.item_key: r.sample_count for r in env.store.query_week("2026-W38")}
+    assert after_counts == {k: v + 1 for k, v in before_counts.items()}
+    assert not env.store.get_backfill_status().complete
+
+    # もう一度(素の状態で)実行すれば、新着を含めて成功する(raw と一致する値になる)。
+    env.maintenance().execute_backfill(_NOW)
+    final_counts = {r.item_key: r.sample_count for r in env.store.query_week("2026-W38")}
+    assert final_counts == after_counts
+    assert env.store.get_backfill_status().complete
 
 
 def test_rebuild_refuses_when_a_new_evaluation_arrives_after_the_raw_read(env: Env) -> None:

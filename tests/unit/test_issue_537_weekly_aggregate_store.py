@@ -13,6 +13,7 @@ import datetime as dt
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -395,3 +396,152 @@ def test_replace_week_without_recompute_request_does_not_touch_the_marker(harnes
     assert harness.store.commit_evaluation(_eval(9, evaluation_date=_W37), _BUY, _RV, _NOW)
     assert _only_row(harness, _WEEK37).sample_count == 5
     assert harness.store.list_pending_weeks() == [_WEEK37]
+
+
+# --- F1(レビュー指摘): Transaction 取消理由の分類を、テストで固定する ---------------------
+
+
+def _canceled_error(reason_codes: list[str | None]) -> ClientError:
+    """`TransactionCanceledException` を、`CancellationReasons` を指定して組み立てる。
+
+    `tests/unit/test_conversation_commit.py::_canceled_error` と同じ形(項目の並び順は
+    Transaction の項目順)。`None` は AWS の規約どおり文字列 `"None"` として渡す。
+    """
+    return ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+            "CancellationReasons": [{"Code": code or "None"} for code in reason_codes],
+        },
+        "TransactWriteItems",
+    )
+
+
+def test_is_first_item_conditional_failure_true_only_for_the_evaluation_result_itself() -> None:
+    """★ Transaction の 4 項目 = [EvaluationResult の Put, Aggregate の Update,
+    週の状態の Update, PENDING 一覧の Update]。「既存として扱ってよい(False を返す)」のは、
+    **先頭(EvaluationResult)だけ**が条件不成立で、他の項目は全て無関係(`None`)の場合のみ。
+    """
+    from jstock_advisor.infrastructure.aws.weekly_evaluation_aggregate_dynamodb import (
+        _is_first_item_conditional_failure,
+    )
+
+    # (i) 正しい「既存の評価」パターン: 先頭だけ条件不成立。
+    assert _is_first_item_conditional_failure(
+        _canceled_error(["ConditionalCheckFailed", None, None, None])
+    )
+
+
+def test_is_first_item_conditional_failure_false_when_a_later_item_conflicts() -> None:
+    """★ Aggregate 側・週の状態側が競合した場合(先頭は成功=`None`)は、**既存として扱わない**
+    (raise させる)。これを誤って True にすると、実際には何も保存されていない評価が
+    `CompletedHorizonIndex` へ記録され、その評価が恒久的に欠落しうる(レビュー指摘 F1)。
+    """
+    from jstock_advisor.infrastructure.aws.weekly_evaluation_aggregate_dynamodb import (
+        _is_first_item_conditional_failure,
+    )
+
+    assert not _is_first_item_conditional_failure(
+        _canceled_error([None, "TransactionConflict", None, None])
+    )
+    assert not _is_first_item_conditional_failure(
+        _canceled_error([None, None, "TransactionConflict", None])
+    )
+    assert not _is_first_item_conditional_failure(
+        _canceled_error([None, None, None, "TransactionConflict"])
+    )
+
+
+def test_is_first_item_conditional_failure_false_when_ambiguous() -> None:
+    """先頭が条件不成立**かつ**他の項目も競合している場合(通常は起こらない組合せ)は、
+    fail-closed(False = 既存として扱わず raise する)側へ倒す。"""
+    from jstock_advisor.infrastructure.aws.weekly_evaluation_aggregate_dynamodb import (
+        _is_first_item_conditional_failure,
+    )
+
+    assert not _is_first_item_conditional_failure(
+        _canceled_error(["ConditionalCheckFailed", "TransactionConflict", None, None])
+    )
+
+
+def test_is_first_item_conditional_failure_false_for_non_canceled_exceptions() -> None:
+    from jstock_advisor.infrastructure.aws.weekly_evaluation_aggregate_dynamodb import (
+        _is_first_item_conditional_failure,
+    )
+
+    other = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "no table"}},
+        "TransactWriteItems",
+    )
+    assert not _is_first_item_conditional_failure(other)
+
+
+class _RaisingClient:
+    """`transact_write_items` を呼ぶと、指定した ClientError を毎回送出するテスト用 client。"""
+
+    def __init__(self, error: ClientError) -> None:
+        self._error = error
+        self.call_count = 0
+
+    def transact_write_items(self, **kwargs: Any) -> Any:
+        self.call_count += 1
+        raise self._error
+
+
+def test_commit_evaluation_raises_and_does_not_return_false_on_a_non_duplicate_conflict() -> None:
+    """★ commit_evaluation() レベルの固定(F1)。EvaluationResult 自体は成功([None])だが
+    Aggregate 側が競合した場合、`False`(= 呼び出し側が既存評価として `CompletedHorizonIndex`
+    へ記録し、二度と保存を試みなくなる)を返してはならない。必ず例外を送出する。
+    """
+    store = DynamoWeeklyEvaluationAggregateStore(
+        "jstock-weekly_evaluation_aggregate", "jstock-evaluation_results", None
+    )
+    client = _RaisingClient(_canceled_error([None, "TransactionConflict", None, None]))
+    store._client = client  # type: ignore[assignment]
+
+    with pytest.raises(ClientError):
+        store.commit_evaluation(_eval(1), _BUY, _RV, _NOW)
+
+    # リトライ対象(TransactionConflict)のため、最大試行回数まで呼ばれたうえで最終的に送出する。
+    assert client.call_count > 1
+
+
+def test_commit_evaluation_returns_false_only_for_the_genuine_duplicate_pattern() -> None:
+    """対照: 先頭だけが条件不成立の場合は、期待どおり `False`(重複。呼び出し側は正しく
+    「既に保存済み」として扱ってよい)を返す。"""
+    store = DynamoWeeklyEvaluationAggregateStore(
+        "jstock-weekly_evaluation_aggregate", "jstock-evaluation_results", None
+    )
+    client = _RaisingClient(_canceled_error(["ConditionalCheckFailed", None, None, None]))
+    store._client = client  # type: ignore[assignment]
+
+    assert store.commit_evaluation(_eval(1), _BUY, _RV, _NOW) is False
+    assert client.call_count == 1  # 条件不成立はリトライ対象ではない
+
+
+# --- F4(レビュー指摘): ローカルの既定パスは data/local_store 配下(gitignore・隔離の対象) ------
+
+
+def test_default_local_path_is_under_the_shared_local_store_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`build_weekly_evaluation_aggregate_store()` の既定パスは、他の全リポジトリと同じ
+    `json_store.DEFAULT_STORE_DIR` 配下でなければならない。この属性は
+    `tests/conftest.py` の autouse fixture(Issue #229)がテストごとに一時ディレクトリへ
+    monkeypatch するため、束縛(import 時の値コピー)ではなく **都度の属性参照**が必須である
+    (束縛すると、この monkeypatch の効果が及ばず、リポジトリ直下へ実ファイルを作ってしまう)。
+    """
+    from jstock_advisor.infrastructure.local_repository import json_store
+    from jstock_advisor.infrastructure.weekly_evaluation_aggregate_store import (
+        build_weekly_evaluation_aggregate_store,
+    )
+
+    isolated = tmp_path / "isolated_local_store"
+    monkeypatch.setattr(json_store, "DEFAULT_STORE_DIR", isolated)
+
+    store = build_weekly_evaluation_aggregate_store()
+
+    assert isinstance(store, LocalWeeklyEvaluationAggregateStore)
+    assert store._path == isolated / "weekly_evaluation_aggregate.json"
+    assert not (
+        Path(__file__).resolve().parents[2] / "data" / "weekly_evaluation_aggregate.json"
+    ).exists()
