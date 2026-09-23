@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from typing import Any
 
@@ -10,6 +11,11 @@ import pytest
 from moto import mock_aws
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.notification.incident_message import (
+    IncidentNotice,
+    build_incident_message,
+    resolve_incident_job,
+)
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.line import client as line_client_module
 from jstock_advisor.lambda_handlers import incident_notifier_handler as handler_module
@@ -100,6 +106,26 @@ def test_new_alarm_sends_line_and_marks_sent(recording_line_client: _RecordingLi
     assert state["status"] == "SENT"
 
 
+def test_line_body_is_exactly_the_builder_output_with_nothing_appended(
+    recording_line_client: _RecordingLineClient,
+) -> None:
+    """★ レビュー指摘 F1 の直接固定: 送信本文が build_incident_message() の出力と完全一致する
+    (部分一致〔in〕ではない)。本文末尾へ何か(例: AlarmのStateReason)を連結する変異を検知する。
+    """
+    message = _alarm_message()
+
+    handler_module.handler(_sns_event(message), None)
+
+    expected = build_incident_message(
+        IncidentNotice(
+            job=resolve_incident_job(handler_module._extract_function_name(message)),
+            occurred_at=handler_module._extract_occurred_at(message, dt.datetime.now(dt.UTC)),
+            failure_count=1,
+        )
+    )
+    assert recording_line_client.sent[0] == expected
+
+
 def test_occurred_at_uses_the_alarm_state_change_time(
     recording_line_client: _RecordingLineClient,
 ) -> None:
@@ -181,6 +207,23 @@ def test_retry_after_line_push_failure_succeeds(monkeypatch: pytest.MonkeyPatch)
 
     assert len(fake.sent) == 1
     assert "件数: 1件" in fake.sent[0]  # release済みなので初出扱い(occurrence_countは1から)
+
+
+def test_handler_uses_the_strict_line_constructor_not_the_cli_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ レビュー指摘 F2 の直接固定: build_line_client_from_env()(CLI用フォールバック)へ
+    差し替える変異を検知する。LINE構築関数そのものはmonkeypatchせず、認証情報だけを
+    未設定にしてhandlerを直接呼ぶ。strictな構築(build_live_line_client_from_env)なら
+    LineCredentialsMissingErrorが送出されるが、CLI用フォールバックへ差し替えられていると
+    ConsoleLineClientへ黙って逃げて例外が出ない(Issue #117の再発検知)。
+    """
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+    message = _alarm_message()
+
+    with pytest.raises(line_client_module.LineCredentialsMissingError):
+        handler_module.handler(_sns_event(message), None)
 
 
 def test_credentials_missing_releases_the_claim_and_raises(monkeypatch: pytest.MonkeyPatch) -> None:

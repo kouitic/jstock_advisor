@@ -698,6 +698,25 @@ class IncidentNotificationConfig(StrictModel):
     # (LINE push成功後SENT記録前にLambdaがcrashした場合の回復用)。
     claim_stale_minutes: int
 
+    @model_validator(mode="after")
+    def _check_positive_minutes(self) -> IncidentNotificationConfig:
+        # レビュー指摘 F6: 0 以下(0 や負の値)が通ると、is_duplicate_within_window() /
+        # try_claim() の cutoff が「今この瞬間」以前になり、直後の retry が即座に
+        # dedup window / claim stale を「経過済み」と判定してしまう。#502 が解決した
+        # 「Lambda retry で3通になる」問題が構造的に復活するため、正の値のみ許可する
+        # (#259 で InvestmentThesisWeights に加えたのと同じ型の検査)。
+        if self.dedup_window_minutes <= 0:
+            raise ValueError(
+                "incident_notification.dedup_window_minutesは0より大きい必要があります"
+                f"(現在{self.dedup_window_minutes})"
+            )
+        if self.claim_stale_minutes <= 0:
+            raise ValueError(
+                "incident_notification.claim_stale_minutesは0より大きい必要があります"
+                f"(現在{self.claim_stale_minutes})"
+            )
+        return self
+
 
 # --- decision_evaluation.yaml(判定精度向上機能Phase A) -------------------------
 

@@ -131,16 +131,51 @@ def test_existing_evaluation_alarms_are_wired_to_the_incident_topic() -> None:
         assert props["AlarmActions"] == [{"Fn::Ref": _TOPIC_LOGICAL_ID}]
 
 
-def test_existing_evaluation_alarms_thresholds_are_unchanged() -> None:
-    """LOCK_LEVEL 1(追加のみ)の裏付け: 閾値・メトリクス・比較演算子は変更していない。"""
-    errors_props = _resources()["EvaluationFunctionErrorsAlarm"]["Properties"]
-    assert errors_props["MetricName"] == "Errors"
-    assert errors_props["Threshold"] == 1
-    assert errors_props["ComparisonOperator"] == "GreaterThanOrEqualToThreshold"
+_ERRORS_ALARM_FIXED_PROPS = {
+    "AlarmName": {"Fn::Sub": "${AWS::StackName}-evaluation-errors"},
+    "AlarmDescription": "定点評価Lambdaが失敗した(タイムアウトを含む)。Issue #113参照。",
+    "Namespace": "AWS/Lambda",
+    "MetricName": "Errors",
+    "Dimensions": [{"Name": "FunctionName", "Value": {"Fn::Ref": "EvaluationFunction"}}],
+    "Statistic": "Sum",
+    "Period": 900,
+    "EvaluationPeriods": 1,
+    "Threshold": 1,
+    "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+    "TreatMissingData": "notBreaching",
+}
 
-    duration_props = _resources()["EvaluationFunctionDurationAlarm"]["Properties"]
-    assert duration_props["MetricName"] == "Duration"
-    assert duration_props["Threshold"] == 720000
+_DURATION_ALARM_FIXED_PROPS = {
+    "AlarmName": {"Fn::Sub": "${AWS::StackName}-evaluation-duration"},
+    "AlarmDescription": "定点評価Lambdaの実行時間がTimeoutの80%(720秒)に達した。Issue #113参照。",
+    "Namespace": "AWS/Lambda",
+    "MetricName": "Duration",
+    "Dimensions": [{"Name": "FunctionName", "Value": {"Fn::Ref": "EvaluationFunction"}}],
+    "Statistic": "Maximum",
+    "Period": 900,
+    "EvaluationPeriods": 1,
+    "Threshold": 720000,
+    "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+    "TreatMissingData": "notBreaching",
+}
+
+
+def test_existing_evaluation_alarms_thresholds_are_unchanged() -> None:
+    """★ レビュー指摘 F3 の直接固定: LOCK_LEVEL 1(追加のみ)の裏付けとして、AlarmActions
+    以外の全プロパティ(閾値・比較演算子・TreatMissingData・EvaluationPeriods等)が一切
+    変わっていないことを網羅的に固定する。
+
+    対象Lambdaは平日18:00のみ稼働のため、TreatMissingDataがnotBreachingから変わると
+    非稼働時間のたびにALARMとなり、AlarmActionsが繋がった今はLINEへの誤送信に直結する
+    (3プロパティだけの部分確認では、この種の変異を検知できなかった)。
+    """
+    for name, expected in (
+        ("EvaluationFunctionErrorsAlarm", _ERRORS_ALARM_FIXED_PROPS),
+        ("EvaluationFunctionDurationAlarm", _DURATION_ALARM_FIXED_PROPS),
+    ):
+        props = dict(_resources()[name]["Properties"])
+        props.pop("AlarmActions", None)  # #503で追加した唯一の差分。ここでは比較しない
+        assert props == expected, name
 
 
 # --- self-monitoring(自己再帰を避ける) -------------------------------------------

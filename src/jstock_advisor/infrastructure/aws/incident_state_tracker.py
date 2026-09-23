@@ -84,7 +84,14 @@ def _table() -> Any:
 
 
 def get_incident_state(fingerprint: str) -> dict[str, Any] | None:
-    response = _table().get_item(Key={"fingerprint": fingerprint})
+    """現在の状態を読む。
+
+    ★ レビュー指摘 F5: `try_claim()` は自分が直前に書いた値(`occurrence_count` 等)を
+    呼び出し元(handler)へ本文用に返すため、結果整合読み取り(デフォルト)では自分自身の
+    書き込みが読めない可能性がある。`ConsistentRead=True` を指定し、直前の書き込みを
+    確実に読む。
+    """
+    response = _table().get_item(Key={"fingerprint": fingerprint}, ConsistentRead=True)
     item: dict[str, Any] | None = response.get("Item")
     return item
 
@@ -264,6 +271,12 @@ def release_claim(fingerprint: str, claim_token: str, *, is_new: bool) -> None:
     (baseline「LINE push失敗 → claim解除 → retryに任せる」の具体化。claim_stale の
     満了を待つと、SNS/Lambdaの速いretryが5分間ずっと抑止されてしまうため)。
 
+    ★ レビュー指摘 F4(実測欠陥): このとき `occurrence_count` を **-1 して、この claim が
+    加算した分を打ち消す**。打ち消さないと、次の retry が stale takeover でもう一度 +1 する
+    ため、同じ 1 回の incident が 2 回分としてカウントされ、利用者が受け取る本文の「件数」が
+    不当に増える(`is_new=True` の delete は item ごと消すことで同じ効果を得ている。
+    こちらは履歴を残したまま、加算だけを対称的に打ち消す)。
+
     いずれも `claim_token` が現在の値と一致する場合のみ実行する(他の実行が既に
     takeoverしていたら、そのclaimを壊さない)。
     """
@@ -285,9 +298,13 @@ def release_claim(fingerprint: str, claim_token: str, *, is_new: bool) -> None:
     try:
         _table().update_item(
             Key={"fingerprint": fingerprint},
-            UpdateExpression="SET claimed_at = :ancient",
+            UpdateExpression="SET claimed_at = :ancient ADD occurrence_count :minus_one",
             ConditionExpression="claim_token = :token",
-            ExpressionAttributeValues={":ancient": ancient_iso, ":token": claim_token},
+            ExpressionAttributeValues={
+                ":ancient": ancient_iso,
+                ":token": claim_token,
+                ":minus_one": -1,
+            },
         )
     except ClientError as e:
         if e.response["Error"]["Code"] not in _CONDITION_FAILURE_CODES:

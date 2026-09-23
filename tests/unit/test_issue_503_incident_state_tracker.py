@@ -226,18 +226,20 @@ def test_release_claim_for_a_new_claim_deletes_the_item() -> None:
 
 
 def test_release_claim_for_a_reclaim_keeps_history_but_allows_immediate_retry() -> None:
-    """★ is_new=False の release は削除しない(occurrence_count等の履歴を保つ)。
+    """★ is_new=False の release は削除しない(first_seen_at等の履歴を保つ)。
     claim_stale の満了を待たずに、直後のretryが即座にtakeoverできる(baselineの意図)。
     """
     _, old_token = _claim()
     later = _NOW + _STALE + dt.timedelta(seconds=1)
-    _, token = _claim(later)  # stale takeover(occurrence_count=2)
+    _, token = _claim(later)  # stale takeover(このclaim自体がoccurrence_countを+1する)
 
     tracker.release_claim(_FP, token, is_new=False)
 
     state = tracker.get_incident_state(_FP)
-    assert state is not None  # 削除されていない(履歴を保持)
-    assert int(state["occurrence_count"]) == 2  # 履歴は失われない
+    assert state is not None  # 削除されていない(first_seen_at等の履歴を保持)
+    # ★ レビュー指摘 F4: releaseは、このclaimが加算した分を打ち消す(-1)。打ち消さないと、
+    #   次のretryがもう一度+1し、同じ1回のincidentが2回分としてカウントされてしまう。
+    assert int(state["occurrence_count"]) == 1  # 元の1へ戻る(2のままにしない)
     # ★ claimed_atは「実行時点のnow()から見て古い値」ではなく、claim_staleの長さに
     #   依存しない絶対的に古い値(datetime.min)へ書き換わっていること(タイミング依存の
     #   偶然の一致でテストが通ってしまわないよう、直接値を検証する)。
@@ -247,6 +249,29 @@ def test_release_claim_for_a_reclaim_keeps_history_but_allows_immediate_retry() 
     outcome, new_token = _claim(later + dt.timedelta(seconds=1))
     assert outcome is tracker.IncidentClaimOutcome.CLAIMED_STALE_TAKEOVER
     assert new_token != token
+    # ★ retryのtakeoverが+1し、元の1へ戻る(打ち消し前の2から数え直しにならない)。
+    assert int(tracker.get_incident_state(_FP)["occurrence_count"]) == 2
+
+
+def test_release_and_retry_cycle_does_not_inflate_occurrence_count_across_multiple_failures() -> (
+    None
+):
+    """★ レビュー指摘 F4 の直接固定: 同一 incident に対して claim → 失敗 → release →
+    retry を何度繰り返しても、最終的に成功した時点の occurrence_count は「実際に起きた
+    回数」と一致する(release のたびに増え続けない)。
+    """
+    _, token = _claim()  # 1回目の発火(occurrence_count=1)
+    later = _NOW + _WINDOW + dt.timedelta(minutes=1)  # dedup window 経過後 = 2回目の発火
+
+    _, token = _claim(later)  # occurrence_count=2
+    tracker.release_claim(_FP, token, is_new=False)  # 送信失敗(1回目のretry)
+    _, token = _claim(later + dt.timedelta(seconds=1))  # 即座にretry(まだ同じ2回目の発火)
+    tracker.release_claim(_FP, token, is_new=False)  # また送信失敗(2回目のretry)
+    outcome, token = _claim(later + dt.timedelta(seconds=2))  # 3回目のretryでようやく成功
+    tracker.mark_sent(_FP, token, later + dt.timedelta(seconds=2))
+
+    state = tracker.get_incident_state(_FP)
+    assert int(state["occurrence_count"]) == 2  # 実際の発火は2回。retryの失敗回数(2回)を含めない
 
 
 def test_release_claim_with_the_wrong_token_does_not_touch_another_executions_claim() -> None:
@@ -268,3 +293,29 @@ def test_release_claim_new_with_the_wrong_token_does_not_delete() -> None:
     tracker.release_claim(_FP, "not-my-token", is_new=True)
 
     assert tracker.get_incident_state(_FP) is not None  # 削除されていない
+
+
+# --- get_incident_state の読み取り一貫性(F5) -----------------------------------
+
+
+def test_get_incident_state_reads_with_consistent_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ レビュー指摘 F5 の直接固定: get_incident_state() は結果整合読み取り(デフォルト)
+    ではなく ConsistentRead=True で読む(handlerがtry_claim()直後に自分の書き込みを
+    本文の「件数」用に読むため。結果整合読み取りだと直前の自分の書き込みが読めない
+    ことがある)。
+    """
+    _claim()
+    real_table = tracker._table()
+    captured: dict[str, object] = {}
+    real_get_item = real_table.get_item
+
+    def _spy_get_item(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return real_get_item(**kwargs)
+
+    monkeypatch.setattr(real_table, "get_item", _spy_get_item)
+    monkeypatch.setattr(tracker, "_table", lambda: real_table)
+
+    tracker.get_incident_state(_FP)
+
+    assert captured.get("ConsistentRead") is True
