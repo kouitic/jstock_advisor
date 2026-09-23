@@ -30,6 +30,7 @@ from jstock_advisor.config.models import (
     HoldingDecisionRiskRulesConfig,
     HoldingDecisionRulesConfig,
     HolidayCalendarConfig,
+    IncidentNotificationConfig,
     IndustryScoringPolicyConfig,
     InvestmentThesisTemplateConfig,
     MarketSectorEnvironmentRulesConfig,
@@ -175,6 +176,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     shareholder_return_policies = ShareholderReturnPoliciesConfig.model_validate(
         _load_yaml(directory / "shareholder_return_policies.yaml")
     )
+    incident_notification = IncidentNotificationConfig.model_validate(
+        _load_yaml(directory / "incident_notification.yaml")
+    )
 
     return AppConfig(
         screening=screening,
@@ -209,4 +213,5 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
         entry_exit_price=entry_exit_price,
         market_sector_environment=market_sector_environment,
         shareholder_return_policies=shareholder_return_policies,
+        incident_notification=incident_notification,
     )
