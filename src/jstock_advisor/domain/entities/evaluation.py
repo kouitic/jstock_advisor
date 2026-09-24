@@ -126,12 +126,23 @@ class EvaluationResult(Entity):
 
     # SELL側の利確目安到達判定(Issue #368)。BUY側と対称にhigh>=priceで判定する。
     # この3フィールドはhorizon_business_days(種別依存。1,5,20,60,120,250)と
-    # horizon_calendar_days(常に7暦日)の両方の行に書かれ、horizonの種類を
+    # horizon_calendar_days(常に7暦日固定)の両方の行に書かれ、horizonの種類を
     # 区別しない。利用時は必ずhorizon_business_days/horizon_calendar_daysと
     # 併せて読むこと(reached=Trueだけでは「どの窓で到達したか」が分からない)。
-    # horizon_business_days=1の行はday-zero(推奨当日)と翌営業日の2営業日窓で
-    # あり、reached=Falseは当日未到達を含意するが、reached=Trueは当日か翌営業日
-    # かを区別できない(#368設計R2/N1〜N3)。
+    #
+    # horizon_business_days=1の行は「day-zero」と翌営業日の2営業日窓だが、
+    # day-zeroの決め方はevaluation_semantics_versionでは判別できない
+    # (resolve_business_day_zero(): v2〔recommended_at >= V2_CUTOVER_AT〕は
+    # JST暦日=推奨当日。v1〔cutover前〕はrecommended_atのUTC暦日で、推奨時刻が
+    # JST 00:00〜08:59だと実際のJST当日より1日前へずれうる。horizon_calendar_days
+    # の行は軸自体が異なり〔常にJST暦日起点で当日を指す〕、常にevaluation_
+    # semantics_version="v1"だがこのずれの対象ではない。判別条件は
+    # `horizon_business_days is not None and recommended_at < V2_CUTOVER_AT`
+    # であり、version単独では判別できない)。
+    # reached=Falseはこの窓のどちらの日でも到達しなかったことを意味し当日
+    # 未到達を含意するが、reached=Trueは窓内のどの日に到達したか(v1のずれた
+    # 行では推奨より前の営業日を含むこともある)を区別できない(#368設計
+    # R2/N1〜N3)。
     reached_partial_profit_start_price: bool | None = None
     reached_recommended_limit_price: bool | None = None
     reached_full_profit_consideration_price: bool | None = None

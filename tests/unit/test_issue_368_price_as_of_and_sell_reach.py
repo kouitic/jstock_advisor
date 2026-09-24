@@ -188,6 +188,68 @@ def test_holding_decision_message_uses_as_of_label_not_current_value_label() -> 
     assert "現在値1,192円" not in message
 
 
+# サブちゃんレビュー(PR #551 blind-first Phase 1)F1: #368のB(_price_as_of_label)を
+# 適用した9関数のうち、上記2件(買い候補・保有判断)と
+# test_watch_profit_taking_formatting.py(_fair_value_dispersion_warning_lines)の
+# 3関数分しか表示の回帰ガードが無く、残り6関数は旧表示(「現在値」「現在 」)へ
+# 戻す実験でテストが1件も落ちなかった(6関数中6関数がSURVIVED)。残り6関数分を
+# 固定する。
+
+
+def test_watch_for_price_message_uses_as_of_label_not_current_value_label() -> None:
+    rec = _rec_for_label(dt.date(2026, 9, 10)).model_copy(
+        update={"recommendation_type": RecommendationType.WATCH_BUY}
+    )
+    message = line_module._format_watch_for_price_message(rec)
+    assert "09/10終値: 1,192円" in message
+    assert "現在値: 1,192円" not in message
+
+
+def test_watch_profit_taking_message_uses_as_of_label_not_current_value_label() -> None:
+    rec = _rec_for_label(dt.date(2026, 9, 10)).model_copy(
+        update={"recommendation_type": RecommendationType.WATCH}
+    )
+    message = line_module._format_watch_profit_taking_message(rec)
+    assert "09/10終値1,192円" in message
+    assert "現在値1,192円" not in message
+
+
+def test_earnings_suppressed_message_uses_as_of_label_not_current_value_label() -> None:
+    rec = _rec_for_label(dt.date(2026, 9, 10)).model_copy(
+        update={"recommendation_type": RecommendationType.REVIEW_BEFORE_EARNINGS}
+    )
+    message = line_module._format_earnings_suppressed_message(rec)
+    assert "09/10終値 1,192円" in message
+    assert "現在 1,192円" not in message
+
+
+def test_earnings_release_pending_message_uses_as_of_label_not_current_value_label() -> None:
+    rec = _rec_for_label(dt.date(2026, 9, 10)).model_copy(
+        update={"recommendation_type": RecommendationType.REVIEW_AFTER_EARNINGS}
+    )
+    message = line_module._format_earnings_release_pending_message(rec)
+    assert "09/10終値 1,192円" in message
+    assert "現在 1,192円" not in message
+
+
+def test_profit_taking_message_uses_as_of_label_not_current_value_label() -> None:
+    rec = _rec_for_label(dt.date(2026, 9, 10)).model_copy(
+        update={"recommendation_type": RecommendationType.PARTIAL_PROFIT_TAKE}
+    )
+    message = line_module._format_profit_taking_message(rec)
+    assert "09/10終値 1,192円" in message
+    assert "現在 1,192円" not in message
+
+
+def test_sell_message_uses_as_of_label_not_current_value_label() -> None:
+    rec = _rec_for_label(dt.date(2026, 9, 10)).model_copy(
+        update={"recommendation_type": RecommendationType.SELL}
+    )
+    message = line_module._format_sell_message(rec)
+    assert "09/10終値 1,192円" in message
+    assert "現在 1,192円" not in message
+
+
 # --- D/E: SELL側の利確目安到達判定 ----------------------------------------------
 
 
@@ -324,6 +386,65 @@ def test_sell_price_reach_is_true_when_high_actually_reaches_target(
     assert result.reached_partial_profit_start_price is True
     assert result.reached_full_profit_consideration_price is False
     assert result.business_days_to_reach_sell_price == 1
+
+
+def test_sell_price_reach_at_exact_boundary_price_is_true(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """サブちゃんレビュー(PR #551 blind-first Phase 1)F2: high>=price(境界値
+    ちょうど到達)がSELL側で固定されていなかった。high>price(境界を除く)へ
+    差し替える変異でもテストが落ちない状態だったため、high==priceでTrueに
+    なることを固定する(BUY側にも同じ未固定の穴があるが、サブちゃんの判定どおり
+    #368の退行ではないため対象外〔便乗修正禁止〕。SELL側のみ対応)。"""
+    recommended_at = dt.datetime(2026, 8, 3, 7, 0, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 8, 10, 7, 0, tzinfo=dt.UTC)
+    bars = [
+        _bar(dt.date(2026, 8, 3), high="2000", low="1950", close="2000"),
+        _bar(dt.date(2026, 8, 4), high="2200", low="2100", close="2150"),
+    ]
+    service, recommendation_repo = _build_evaluation_service(
+        tmp_path, config, calendar, now, _FakeMarketDataProvider(bars)
+    )
+    recommendation_repo.save(_make_sell_recommendation(recommended_at))
+
+    outcome = service.run_due_evaluations(now)
+
+    assert outcome.evaluated
+    result = next(r for r in outcome.evaluated if r.horizon_business_days == 1)
+    assert result.reached_recommended_limit_price is True
+    assert result.business_days_to_reach_sell_price == 1
+
+
+def test_sell_price_reach_is_none_not_false_when_no_bars_in_window(
+    tmp_path: Path, config: AppConfig, calendar: BusinessCalendar
+) -> None:
+    """サブちゃんレビュー(PR #551 blind-first Phase 1)F4: period_bars(評価窓
+    内のbar)が0本のときNoneを返すのが正しい動作(設計Gの「推測で埋めない」に
+    従う)だが、Falseを返す変異(`sell_prices is None or not period_bars`の
+    `or not period_bars`を落とす)が通ってしまう状態だった(`any()`は空集合で
+    Falseを返すため。Falseは「到達しなかった」という積極的な記録になり、
+    「データが無い」ことと区別できなくなる)。
+
+    `_evaluate_one()`経由の統合テストではperiod_bars=[]は再現できない
+    (`RunScopedMarketDataCache._slice()`が返すbarsは常に`[start,
+    evaluation_date]`へ絞り込まれているため、evaluation_barが見つかる
+    ならperiod_barsも必ず非空になり、逆にperiod_barsが空ならevaluation_bar
+    も見つからず評価自体がスキップされる。したがってこの2変数が
+    「evaluation_barは見つかるがperiod_barsは空」という状態になる経路は
+    現在の呼び出し元には存在しない)。そのため`_compute_sell_price_reach()`
+    自体の契約(period_bars=[]ならNoneを返す)を直接呼び出して固定する
+    (BUY側の`_compute_buy_price_reach()`にも同じ未固定の穴があるが、
+    サブちゃんの判定どおり#368の退行ではないため対象外。SELL側のみ対応)。
+    """
+    now = dt.datetime(2026, 8, 10, tzinfo=dt.UTC)
+    service, _ = _build_evaluation_service(
+        tmp_path, config, calendar, now, _FakeMarketDataProvider([])
+    )
+    rec = _make_sell_recommendation(dt.datetime(2026, 8, 3, 7, 0, tzinfo=dt.UTC))
+
+    result = service._compute_sell_price_reach(rec, [], dt.date(2026, 8, 3))
+
+    assert result == (None, None, None, None)
 
 
 def test_sell_price_reach_is_none_when_recommendation_has_no_sell_prices(
