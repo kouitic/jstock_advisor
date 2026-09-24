@@ -2182,6 +2182,15 @@ Resources:
       FunctionName: !Sub "${AWS::StackName}-incident-notifier"
       CodeUri: ../src/
       Handler: jstock_advisor.lambda_handlers.incident_notifier_handler.handler
+      Environment:
+        Variables:
+          # Issue #508: GitHub App秘密鍵は環境変数へ直接展開せず、ARNのみを渡し
+          # 実行時にsecretsmanager:GetSecretValueで取得する(WeeklyReviewFunctionと
+          # 同じPattern。値そのものをログ・環境変数へ残さないため)。
+          # config.incident_notification.issue_creation_enabled=falseの間は
+          # 参照されない(config/incident_notification.yaml参照)。
+          GITHUB_APP_SECRET_ARN: !Ref GithubAppSecretArn
+          GITHUB_REPOSITORY: !Ref GithubRepository
       Policies:
         # incident_state_tracker.pyが使う操作のみ(最小権限)。Scan/Queryは
         # 付与しない(GSIが無く、fingerprint単位のGetItem/PutItem/UpdateItem/
@@ -2196,6 +2205,14 @@ Resources:
                 - dynamodb:DeleteItem
               Resource:
                 - !GetAtt IncidentStateTable.Arn
+        # Issue #508: GitHub App秘密鍵の取得のみ。PR #563レビュー時のU-2条件
+        # (#133 PARTIAL)どおり、resource-scoped(exact ARN)でありwildcardは
+        # 使わない。WeeklyReviewFunction(#132付録の既存資産)と同一secretを
+        # 共有する(新規secret作成なし)。
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref GithubAppSecretArn
       Events:
         AlarmTopic:
           Type: SNS
