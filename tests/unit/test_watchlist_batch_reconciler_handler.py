@@ -203,6 +203,15 @@ def _stub_expensive_dependencies(monkeypatch: pytest.MonkeyPatch) -> SimpleNames
     # Issue #506(O-1): 本ファイルの既存テストはS-2/S-4検知を検証対象としないため、
     # 実際のSNS publish(boto3)は行わせない(専用テストはこの関数自体を直接検証する)。
     monkeypatch.setattr(handler_module, "_publish_incident_envelope", lambda envelope: None)
+    # Issue #507(O-1): 本ファイルの既存テストはS-6/S-7検知を検証対象としないため、
+    # 実際のCloudWatch呼び出し・WatchlistRemovalHistoryRepositoryの構築(ローカル
+    # JSONストアへの実I/O)は行わせない(専用テストはこれらを直接検証する)。
+    monkeypatch.setattr(handler_module, "_fetch_watchlist_worker_metrics", lambda now: {})
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRemovalHistoryRepository",
+        lambda *_a, **_kw: SimpleNamespace(list_all=lambda: []),
+    )
     fake_repo = _FakeWatchlistRepository()
     monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: fake_repo)
     monkeypatch.setattr(
