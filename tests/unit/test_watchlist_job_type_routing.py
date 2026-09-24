@@ -275,15 +275,17 @@ def _run_reconciler_rescue(job_type: str | None) -> list[str]:
             lambda _statuses: [batch_item],
         ),
         patch.object(reconciler_module, "list_stale_maintenance_triggers", lambda *a, **k: []),
-        # Issue #506(O-1): このファイルはjob_type routingのみを検証し、S-2/S-4検知は
-        # 無関係(実AWSに触れず`_fake_config()`もholiday_calendarを持たないため、
-        # 検知自体をno-opにする)。
+        # Issue #506/#507(O-1): このファイルはjob_type routingのみを検証し、S-2/S-4/
+        # S-6/S-7検知は無関係(実AWSに触れず`_fake_config()`もholiday_calendarを
+        # 持たないため、検知自体をno-opにする)。
         patch.object(
             reconciler_module,
             "_detect_and_notify_watchlist_incidents",
             lambda *a, **k: {
                 "missed_schedule_notified": False,
                 "universe_load_failure_streak_notified": False,
+                "queue_backlog_notified": False,
+                "deletion_zero_streak_notified": False,
             },
         ),
         patch.object(

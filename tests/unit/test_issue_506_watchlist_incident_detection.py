@@ -445,8 +445,24 @@ def _fake_reconciler_config(
             additional_closures=SimpleNamespace(dates=[]),
         ),
         watchlist_screening=SimpleNamespace(
-            enabled=enabled, scheduled_run_enabled=scheduled_run_enabled
+            enabled=enabled,
+            scheduled_run_enabled=scheduled_run_enabled,
+            auto_removal=SimpleNamespace(readd_cooldown_days=30),
         ),
+    )
+
+
+def _stub_507_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #507(O-1): これらのテストはS-2(missed schedule)を検証対象とし、
+    S-6/S-7とは無関係なため、実際のCloudWatch呼び出し・
+    WatchlistRemovalHistoryRepositoryの構築(ローカルJSONストアへの実I/O)は
+    行わせない。
+    """
+    monkeypatch.setattr(handler_module, "_fetch_watchlist_worker_metrics", lambda now: {})
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRemovalHistoryRepository",
+        lambda *_a, **_kw: SimpleNamespace(list_all=lambda: []),
     )
 
 
@@ -455,6 +471,7 @@ def test_detect_and_notify_publishes_missed_schedule_once_per_day(
 ) -> None:
     published: list[dict] = []
     monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    _stub_507_dependencies(monkeypatch)
     config = _fake_reconciler_config()
     now = _now_jst(_MON, 7)  # 営業日・猶予後・BatchRunsTableは空
 
@@ -464,10 +481,14 @@ def test_detect_and_notify_publishes_missed_schedule_once_per_day(
     assert first == {
         "missed_schedule_notified": True,
         "universe_load_failure_streak_notified": False,
+        "queue_backlog_notified": False,
+        "deletion_zero_streak_notified": False,
     }
     assert second == {
         "missed_schedule_notified": False,  # 同日2回目は1日1回抑止で送られない
         "universe_load_failure_streak_notified": False,
+        "queue_backlog_notified": False,
+        "deletion_zero_streak_notified": False,
     }
     assert len(published) == 1
     assert published[0]["reason_code"] == "watchlist_missed_schedule"
@@ -481,6 +502,7 @@ def test_detect_and_notify_finds_no_missed_schedule_when_real_batch_started_toda
     """
     published: list[dict] = []
     monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    _stub_507_dependencies(monkeypatch)
     config = _fake_reconciler_config()
     now = _now_jst(_MON, 7)
     batch_tracker.try_acquire_dispatch_lease(
@@ -506,6 +528,7 @@ def test_detect_and_notify_skips_entirely_when_scheduled_dispatch_disabled(
     """
     published: list[dict] = []
     monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    _stub_507_dependencies(monkeypatch)
     config = _fake_reconciler_config(enabled=enabled, scheduled_run_enabled=scheduled_run_enabled)
     now = _now_jst(_MON, 7)  # 営業日・猶予後・BatchRunsTableは空(dispatcher停止中)
 
@@ -514,6 +537,8 @@ def test_detect_and_notify_skips_entirely_when_scheduled_dispatch_disabled(
     assert result == {
         "missed_schedule_notified": False,
         "universe_load_failure_streak_notified": False,
+        "queue_backlog_notified": False,
+        "deletion_zero_streak_notified": False,
     }
     assert published == []
 
@@ -525,6 +550,7 @@ def test_detect_and_notify_resumes_missed_schedule_detection_once_reenabled(
     (F2是正が「恒久的に検知しなくなる」副作用を持たないことの確認)。"""
     published: list[dict] = []
     monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    _stub_507_dependencies(monkeypatch)
     now = _now_jst(_MON, 7)
 
     disabled_result = handler_module._detect_and_notify_watchlist_incidents(

@@ -2498,6 +2498,10 @@ Resources:
           # Issue #506(O-1): missed schedule / 候補ユニバース連続失敗の検知結果を
           # Internal structured incident payloadとしてpublishする先。
           INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
+          # Issue #507(S-6): queue backlog(OldestMessageAge)検知の対象キュー、
+          # throttle_rate(補助指標)観測対象のworker関数名。
+          WATCHLIST_SCREENING_QUEUE_NAME: !GetAtt WatchlistScreeningQueue.QueueName
+          WATCHLIST_WORKER_FUNCTION_NAME: !Sub "${AWS::StackName}-watchlist-worker"
       Policies:
         # 本番検証(2026-08)で発覚: retry_finalize()経由でDispatcher/Worker
         # と同じ_finalize_completed()/_maybe_commit_rotation()を呼ぶため、
@@ -2593,6 +2597,25 @@ Resources:
               Action: sns:Publish
               Resource:
                 - !Ref IncidentNotificationTopic
+        # Issue #507(S-6): queue backlog(OldestMessageAge)・throttle_rate(補助指標)の
+        # 観測。読み取り専用(GetMetricData/GetQueueAttributes)のみで書き込み・削除
+        # 権限は一切含まない。
+        # ★ cloudwatch:GetMetricDataはCloudWatch側がリソースレベル権限自体を
+        #   サポートしていない(メトリクスはARNを持たない。AWSの既知の制約であり
+        #   本プロジェクト固有の設計判断ではない)ため、Resource="*"が必須。
+        - Statement:
+            - Sid: ObserveWatchlistWorkerMetrics
+              Effect: Allow
+              Action: cloudwatch:GetMetricData
+              Resource: "*"
+        # sqs:GetQueueAttributesはSQSキュー単位でリソースレベル権限をサポートする
+        # ため、対象キューへ厳密にscopeする。
+        - Statement:
+            - Sid: ObserveWatchlistScreeningQueueDepth
+              Effect: Allow
+              Action: sqs:GetQueueAttributes
+              Resource:
+                - !GetAtt WatchlistScreeningQueue.Arn
       Events:
         Hourly:
           Type: ScheduleV2

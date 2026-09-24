@@ -23,6 +23,12 @@ S-2(missed schedule。本日のNEW_CANDIDATE_SCREENING試行が無い)/ S-4(候�
 Internal structured incident payloadをpublishする(#503のIncidentNotifierFunction
 が共通処理する。LINE送信・fingerprint計算・claim/release・本文生成はここでは
 一切持たない)。同一reason_codeへの通知は1日1回(JST)に抑止する。
+
+Issue #507(#132 U-5。同じ相乗り検知にS-6/S-7を追加): S-6(SQS
+ApproximateAgeOfOldestMessageが15分以上600秒を超えて継続=queue backlog。
+watchlist-workerのThrottles/Invocations比率〔throttle_rate〕は補助指標として
+ログにのみ出し、SNS envelopeには含めない)/ S-7(watchlistからの削除実績が
+3営業日連続で0件)。いずれも#506と同じ経路・同じ1日1回抑止を再利用する。
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import ExecutionMode
+from jstock_advisor.domain.entities.watchlist import WatchlistRemovalHistory
 from jstock_advisor.domain.jst import evaluation_date_jst, to_jst
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     BatchFamily,
@@ -81,6 +88,9 @@ from jstock_advisor.infrastructure.local_repository.notification_log_repository 
 )
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
+)
+from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (
+    WatchlistRemovalHistoryRepository,
 )
 from jstock_advisor.lambda_handlers._fanout import dispatch_async
 from jstock_advisor.lambda_handlers._finalize_recovery import build_finalize_only_payload
@@ -164,13 +174,32 @@ _INCIDENT_SOURCE_WATCHLIST_RECONCILER = "watchlist_reconciler"
 # IncidentJobの対応表(domain/notification/incident_message.py)は既に
 # "watchlist-dispatcher" → WATCHLIST_SCREENING を持つため、新しい対応の追加は不要。
 _INCIDENT_JOB_NAME_WATCHLIST_DISPATCHER = "watchlist-dispatcher"
+_INCIDENT_JOB_NAME_WATCHLIST_WORKER = "watchlist-worker"
 
 _REASON_CODE_WATCHLIST_MISSED_SCHEDULE = "watchlist_missed_schedule"
 _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK = "watchlist_universe_load_failure_streak"
+_REASON_CODE_WATCHLIST_QUEUE_BACKLOG = "watchlist_queue_backlog"
+_REASON_CODE_WATCHLIST_DELETION_ZERO_STREAK = "watchlist_deletion_zero_streak"
 
 # USER決定: 3営業日連続(#506 issuecomment-5805034769。2日=一過性障害を拾いやすい、
 # 5日=検知が遅すぎる、3日=バランス良いとして確定)。
 _UNIVERSE_LOAD_FAILURE_STREAK_THRESHOLD_DAYS = 3
+
+# USER決定(#507 issuecomment。転記元 HANAKO-20260924-USERDECISION-507)どおり:
+#   - S-6主指標はSQS OldestMessageAge。閾値>600秒が15分以上継続
+#     (Period=300sなら3 datapoint連続相当)。throttle_rateは補助指標のみで
+#     単独ではincidentにしない
+#   - S-7は削除実績0件が3営業日連続でwarning(重大incidentではない)
+#   - 永続化は既存batch/audit系のみ。新規Table禁止
+_QUEUE_BACKLOG_THRESHOLD_SECONDS = 600
+_QUEUE_BACKLOG_SUSTAINED_DATAPOINTS = 3
+_QUEUE_BACKLOG_METRIC_PERIOD_SECONDS = 300
+_QUEUE_BACKLOG_LOOKBACK_MINUTES = 20
+_DELETION_ZERO_STREAK_THRESHOLD_DAYS = 3
+
+_METRIC_ID_OLDEST_MESSAGE_AGE = "oldest_message_age"
+_METRIC_ID_THROTTLES = "throttles"
+_METRIC_ID_INVOCATIONS = "invocations"
 
 # dispatchの平日Scheduleはcron(0 6 ? * MON-FRI *) JST(infra/template.yaml
 # WeekdayMorning)。reconciler自身はrate(1 hour)で起動時刻の固定アンカーを持たない
@@ -254,25 +283,24 @@ def _detect_watchlist_missed_schedule(
     }
 
 
-def _evaluate_and_persist_universe_load_failure_streak(
-    todays_batches: list[dict[str, Any]], calendar: BusinessCalendar, now: dt.datetime
+def _evaluate_and_persist_business_day_streak(
+    reason_code: str, today_continues_streak: bool, calendar: BusinessCalendar, now: dt.datetime
 ) -> int | None:
-    """S-4: 候補ユニバース取得の失敗(`failure_reason == "universe_load_failed"`)が
-    何営業日連続しているかを、営業日ごとに1回だけインクリメンタルに評価・永続化する
-    (副作用あり: DynamoDB書き込みを行う。戻り値は「本日時点で確定した」
-    streak_countで、本日分をまだ評価できない場合は`None`を返す)。
+    """営業日ごとに1回だけインクリメンタルに評価・永続化する汎用実装(副作用あり:
+    DynamoDB書き込みを行う。戻り値は「本日時点で確定した」streak_countで、
+    本日分をまだ評価できない場合は`None`を返す)。
 
-    ★ #506レビューF1是正: 過去のBatchRunsTable行を読み返して連続日数を
-    再計算する設計を採らない。BatchRunsTableのTTL(`candidate_progress_ttl_hours`。
-    既定72時間)は候補進捗行という短命なデータのためのものであり、週末・祝日を
-    跨ぐ複数営業日の履歴を保持する契約ではない(実測: 週をまたぐと対象行が
-    既にTTL経過で消えている。TTL削除自体も最大48時間遅延するため、同じ
-    「3営業日連続」でも検知の成否が非決定的になっていた)。
-    代わりに、`todays_batches`(本日分のみ。常に新しく期限切れの心配が無い)から
-    「本日失敗したか」だけを読み取り、`get_streak_state`/`record_streak_state`
-    (この関数自身が管理する別行)へ積み上げる。評価に断絶(reconcilerが長期間
-    停止していた等)があれば継続性を信用せず、本日の結果だけでリセットする
-    (誤って長い連続を主張しないためのfail-safe。ログで可視化する)。
+    #506 S-4(候補ユニバース連続失敗)・#507 S-7(watchlist削除実績ゼロ連続)が
+    共有する(いずれも「ある条件を満たした営業日が何日連続しているか」という
+    同型の判定のため)。
+
+    ★ #506レビューF1是正: 過去の実データ行(BatchRunsTable等)を読み返して
+    連続日数を再計算する設計を採らない。呼び出し元が`today_continues_streak`
+    (本日分のみの判定結果)を渡し、この関数自身が`get_streak_state`/
+    `record_streak_state`(reason_codeごとの別行)へ積み上げる。評価に断絶
+    (reconcilerが長期間停止していた等)があれば継続性を信用せず、本日の
+    結果だけでリセットする(誤って長い連続を主張しないためのfail-safe。
+    ログで可視化する)。
 
     ★ #506レビューiteration 2 R1/R2是正: 非営業日・猶予時刻前は、直前に
     永続化された`streak_count`(=過去の営業日の状態)をそのまま返さない。
@@ -282,16 +310,8 @@ def _evaluate_and_persist_universe_load_failure_streak(
     ステータスを「本日の状態」として誤ってpublishし、その後の本日分の
     正しい再評価(結果が変わっていても)を1日1回抑止が握りつぶす。
     「本日時点でまだ確定していない」ことを`None`で明示的に表現し、
-    呼び出し元(`_detect_watchlist_universe_load_failure_streak`)がpublish
-    対象にしない。
-
-    `mark_dispatch_failed(..., reason="universe_load_failed")`は
-    `watchlist_dispatcher_handler.py`の`CandidateUniverseError`経路の1箇所のみが
-    設定する(実装側で確認済み。`_collect_maintenance_targets()`は候補ユニバース
-    providerに触れず、この例外を送出できない構造のため、この理由コードは
-    NEW_CANDIDATE_SCREENINGにのみ発生する)。
+    呼び出し元(閾値判定関数)がpublish対象にしない。
     """
-    reason_code = _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK
     today_jst = evaluation_date_jst(now)
     if not calendar.is_business_day(today_jst):
         return None
@@ -304,24 +324,51 @@ def _evaluate_and_persist_universe_load_failure_streak(
     if last_evaluated == today_jst.isoformat():
         return prior_streak  # 本日分は評価済み(今日確定した値をそのまま返す)
 
-    today_failed = any(
-        batch_item.get("failure_reason") == "universe_load_failed"
-        and _started_at_jst_date(batch_item) == today_jst
-        for batch_item in todays_batches
-    )
     expected_previous = _previous_business_day(calendar, today_jst).isoformat()
     if last_evaluated is not None and last_evaluated != expected_previous:
         logger.warning(
-            "watchlist reconciler: universe_load_failure streak evaluation gap "
+            "watchlist reconciler: %s streak evaluation gap "
             "last_evaluated=%s expected_previous=%s today=%s (resetting from gap)",
+            reason_code,
             last_evaluated,
             expected_previous,
             today_jst.isoformat(),
         )
         prior_streak = 0
-    new_streak = prior_streak + 1 if today_failed else 0
+    new_streak = prior_streak + 1 if today_continues_streak else 0
     record_streak_state(reason_code, today_jst.isoformat(), new_streak, now)
     return new_streak
+
+
+def _evaluate_and_persist_universe_load_failure_streak(
+    todays_batches: list[dict[str, Any]], calendar: BusinessCalendar, now: dt.datetime
+) -> int | None:
+    """S-4: 候補ユニバース取得の失敗(`failure_reason == "universe_load_failed"`)が
+    何営業日連続しているかを評価する。
+
+    ★ BatchRunsTableのTTL(`candidate_progress_ttl_hours`。既定72時間)は候補進捗行
+    という短命なデータのためのものであり、週末・祝日を跨ぐ複数営業日の履歴を保持
+    する契約ではない(実測: 週をまたぐと対象行が既にTTL経過で消えている。TTL削除
+    自体も最大48時間遅延するため、同じ「3営業日連続」でも検知の成否が非決定的に
+    なっていた)。そのため過去の行を読み返さず、`todays_batches`(本日分のみ。
+    常に新しく期限切れの心配が無い)から「本日失敗したか」だけを読み取り、
+    `_evaluate_and_persist_business_day_streak()`へ渡す。
+
+    `mark_dispatch_failed(..., reason="universe_load_failed")`は
+    `watchlist_dispatcher_handler.py`の`CandidateUniverseError`経路の1箇所のみが
+    設定する(実装側で確認済み。`_collect_maintenance_targets()`は候補ユニバース
+    providerに触れず、この例外を送出できない構造のため、この理由コードは
+    NEW_CANDIDATE_SCREENINGにのみ発生する)。
+    """
+    today_jst = evaluation_date_jst(now)
+    today_failed = any(
+        batch_item.get("failure_reason") == "universe_load_failed"
+        and _started_at_jst_date(batch_item) == today_jst
+        for batch_item in todays_batches
+    )
+    return _evaluate_and_persist_business_day_streak(
+        _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK, today_failed, calendar, now
+    )
 
 
 def _detect_watchlist_universe_load_failure_streak(
@@ -341,6 +388,162 @@ def _detect_watchlist_universe_load_failure_streak(
         "failure_stage": "UNIVERSE_LOAD",
         "failure_type": "CONSECUTIVE_UNIVERSE_LOAD_FAILURE",
         "reason_code": _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK,
+        "occurred_at": now.isoformat(),
+        "failure_count": streak_count,
+        "consecutive_days": streak_count,
+        "is_ongoing": True,
+    }
+
+
+def _fetch_watchlist_worker_metrics(now: dt.datetime) -> dict[str, list[float]]:
+    """S-6: SQS OldestMessageAge(判定対象)・Lambda Throttles/Invocations
+    (throttle_rate計算用の補助指標)を1回のGetMetricDataでまとめて取得する
+    (副作用あり: CloudWatchへの読み取り専用API呼び出し。書き込みは一切行わない)。
+
+    ★ `cloudwatch:GetMetricData`はCloudWatch側がリソースレベル権限自体を
+    サポートしていない(メトリクスはARNを持たない。AWSの既知の制約であり
+    本プロジェクト固有の設計判断ではない)ため、IAM側のResourceは"*"になる
+    (infra/template.yamlのコメント参照)。
+    """
+    cloudwatch = boto3.client("cloudwatch")
+    queue_name = os.environ["WATCHLIST_SCREENING_QUEUE_NAME"]
+    function_name = os.environ["WATCHLIST_WORKER_FUNCTION_NAME"]
+    start_time = now - dt.timedelta(minutes=_QUEUE_BACKLOG_LOOKBACK_MINUTES)
+    response = cloudwatch.get_metric_data(
+        MetricDataQueries=[
+            {
+                "Id": _METRIC_ID_OLDEST_MESSAGE_AGE,
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "AWS/SQS",
+                        "MetricName": "ApproximateAgeOfOldestMessage",
+                        "Dimensions": [{"Name": "QueueName", "Value": queue_name}],
+                    },
+                    "Period": _QUEUE_BACKLOG_METRIC_PERIOD_SECONDS,
+                    "Stat": "Maximum",
+                },
+                "ReturnData": True,
+            },
+            {
+                "Id": _METRIC_ID_THROTTLES,
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "AWS/Lambda",
+                        "MetricName": "Throttles",
+                        "Dimensions": [{"Name": "FunctionName", "Value": function_name}],
+                    },
+                    "Period": 86400,
+                    "Stat": "Sum",
+                },
+                "ReturnData": True,
+            },
+            {
+                "Id": _METRIC_ID_INVOCATIONS,
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "AWS/Lambda",
+                        "MetricName": "Invocations",
+                        "Dimensions": [{"Name": "FunctionName", "Value": function_name}],
+                    },
+                    "Period": 86400,
+                    "Stat": "Sum",
+                },
+                "ReturnData": True,
+            },
+        ],
+        StartTime=start_time,
+        EndTime=now,
+    )
+    metrics: dict[str, list[float]] = {}
+    for result in response.get("MetricDataResults", []):
+        metric_id = result.get("Id")
+        if metric_id is not None:
+            metrics[metric_id] = list(result.get("Values") or [])
+    return metrics
+
+
+def _detect_watchlist_queue_backlog(
+    metrics: dict[str, list[float]], now: dt.datetime
+) -> dict[str, Any] | None:
+    """S-6: SQS OldestMessageAgeが直近3 datapoint(Period=300秒=15分)連続で
+    600秒を超えていることを検知する(USER決定どおり。瞬間的な超過だけでは
+    incident化しない)。
+
+    throttle_rate(watchlist-workerのThrottles/Invocations比率)は補助指標として
+    ログにのみ出す(#132 H-30のallowlistに比率を運ぶフィールドが無いため、SNS
+    envelopeには含めない。USER決定どおり単独ではincidentを発生させない。この
+    「envelopeに含めない」という構造自体がその決定を強制する)。
+    """
+    throttles = sum(metrics.get(_METRIC_ID_THROTTLES, []))
+    invocations = sum(metrics.get(_METRIC_ID_INVOCATIONS, []))
+    if invocations > 0:
+        throttle_rate = throttles / (throttles + invocations)
+        logger.info(
+            "watchlist reconciler: watchlist-worker throttle_rate=%.4f throttles=%.0f "
+            "invocations=%.0f(補助指標。単独ではincidentにしない)",
+            throttle_rate,
+            throttles,
+            invocations,
+        )
+
+    datapoints = metrics.get(_METRIC_ID_OLDEST_MESSAGE_AGE, [])
+    recent = datapoints[-_QUEUE_BACKLOG_SUSTAINED_DATAPOINTS:]
+    if len(recent) < _QUEUE_BACKLOG_SUSTAINED_DATAPOINTS:
+        return None
+    if not all(value > _QUEUE_BACKLOG_THRESHOLD_SECONDS for value in recent):
+        return None
+    return {
+        "source": _INCIDENT_SOURCE_WATCHLIST_RECONCILER,
+        "job_name": _INCIDENT_JOB_NAME_WATCHLIST_WORKER,
+        "failure_stage": "QUEUE_BACKLOG",
+        "failure_type": "OLDEST_MESSAGE_AGE_EXCEEDED",
+        "reason_code": _REASON_CODE_WATCHLIST_QUEUE_BACKLOG,
+        "occurred_at": now.isoformat(),
+    }
+
+
+def _evaluate_and_persist_watchlist_deletion_zero_streak(
+    removal_history: list[WatchlistRemovalHistory], calendar: BusinessCalendar, now: dt.datetime
+) -> int | None:
+    """S-7: watchlistからの削除実績が0件の営業日が何日連続しているかを評価する。
+
+    「母数が増えること」自体は正常業務(NEW_CANDIDATE_SCREENINGが営業日ごとに
+    候補を追加する設計のため)であり異常ではない。異常とみなすのは「削除が機能
+    していない」ことのみ(#224と同じ整理。#132本文4節)。
+
+    ★ `WatchlistRemovalHistoryRepository`は「銘柄ごとの最新の削除のみ」を保持する
+    設計であり(`removed_at`は再削除で上書きされる。完全な履歴はAuditLogTableが
+    正本)、`readd_cooldown_days`(既定30日)のTTLで自動的に消える。3営業日分の
+    判定には十分な保持期間があるが、同一銘柄が短期間に複数回削除された場合、
+    古い削除イベントの`removed_at`が上書きで失われる可能性がある(readd_cooldown_
+    daysが3営業日を大きく上回るため実務上の影響は無視できる規模と判断。PR本文に
+    明記)。
+    """
+    today_jst = evaluation_date_jst(now)
+    today_had_deletion = any(
+        evaluation_date_jst(item.removed_at) == today_jst for item in removal_history
+    )
+    return _evaluate_and_persist_business_day_streak(
+        _REASON_CODE_WATCHLIST_DELETION_ZERO_STREAK, not today_had_deletion, calendar, now
+    )
+
+
+def _detect_watchlist_deletion_zero_streak(
+    streak_count: int | None, now: dt.datetime
+) -> dict[str, Any] | None:
+    """S-7: 削除実績ゼロの連続日数が閾値(3営業日)以上ならincident envelopeを
+    返す。USER決定どおりwarning(重大incidentではない運用warning)として扱う
+    (allowlist自体にseverityを表すフィールドは無いため、区別は#503側の運用判断
+    〔本文の文言等〕に委ねる。本Issueのscopeは検知・通知の配線のみ)。
+    """
+    if streak_count is None or streak_count < _DELETION_ZERO_STREAK_THRESHOLD_DAYS:
+        return None
+    return {
+        "source": _INCIDENT_SOURCE_WATCHLIST_RECONCILER,
+        "job_name": _INCIDENT_JOB_NAME_WATCHLIST_DISPATCHER,
+        "failure_stage": "WATCHLIST_SIZE",
+        "failure_type": "DELETION_NOT_KEEPING_PACE",
+        "reason_code": _REASON_CODE_WATCHLIST_DELETION_ZERO_STREAK,
         "occurred_at": now.isoformat(),
         "failure_count": streak_count,
         "consecutive_days": streak_count,
@@ -406,10 +609,16 @@ def _scheduled_watchlist_dispatch_enabled(config: AppConfig) -> bool:
 
 
 def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) -> dict[str, bool]:
-    """S-2/S-4を検知し、未通知のものだけ#503経路へpublishする(副作用あり。
-    read-onlyではない: DynamoDB書き込み・SNS publishを行う。CLAUDE.md §3参照)。
+    """S-2/S-4(#506)/ S-6/S-7(#507)を検知し、未通知のものだけ#503経路へpublishする
+    (副作用あり。read-onlyではない: DynamoDB書き込み・CloudWatch読み取り・SQS
+    読み取り・SNS publishを行う。CLAUDE.md §3参照)。
     """
-    no_op = {"missed_schedule_notified": False, "universe_load_failure_streak_notified": False}
+    no_op = {
+        "missed_schedule_notified": False,
+        "universe_load_failure_streak_notified": False,
+        "queue_backlog_notified": False,
+        "deletion_zero_streak_notified": False,
+    }
     if not _scheduled_watchlist_dispatch_enabled(config):
         return no_op
 
@@ -423,11 +632,25 @@ def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) 
     missed_schedule = _detect_watchlist_missed_schedule(todays_batches, calendar, now)
     streak_count = _evaluate_and_persist_universe_load_failure_streak(todays_batches, calendar, now)
     universe_load_failure_streak = _detect_watchlist_universe_load_failure_streak(streak_count, now)
+
+    worker_metrics = _fetch_watchlist_worker_metrics(now)
+    queue_backlog = _detect_watchlist_queue_backlog(worker_metrics, now)
+
+    removal_history = WatchlistRemovalHistoryRepository(
+        config.watchlist_screening.auto_removal.readd_cooldown_days
+    ).list_all()
+    deletion_streak_count = _evaluate_and_persist_watchlist_deletion_zero_streak(
+        removal_history, calendar, now
+    )
+    deletion_zero_streak = _detect_watchlist_deletion_zero_streak(deletion_streak_count, now)
+
     return {
         "missed_schedule_notified": _notify_if_new_today(missed_schedule, today_jst, now),
         "universe_load_failure_streak_notified": _notify_if_new_today(
             universe_load_failure_streak, today_jst, now
         ),
+        "queue_backlog_notified": _notify_if_new_today(queue_backlog, today_jst, now),
+        "deletion_zero_streak_notified": _notify_if_new_today(deletion_zero_streak, today_jst, now),
     }
 
 
@@ -950,6 +1173,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "watchlist_missed_schedule_notified": incident_detection["missed_schedule_notified"],
         "watchlist_universe_load_failure_streak_notified": (
             incident_detection["universe_load_failure_streak_notified"]
+        ),
+        "watchlist_queue_backlog_notified": incident_detection["queue_backlog_notified"],
+        "watchlist_deletion_zero_streak_notified": (
+            incident_detection["deletion_zero_streak_notified"]
         ),
         "dispatch_failed": dispatch_failed,
         "rescued": rescued,

@@ -36,3 +36,15 @@ class WatchlistRemovalHistoryRepository:
     def is_in_cooldown(self, stock_code: str, now: dt.datetime) -> bool:
         record = self.get(stock_code)
         return record is not None and record.cooldown_until > now
+
+    def list_all(self) -> list[WatchlistRemovalHistory]:
+        """Issue #507(S-7)向け: 削除実績が0件の営業日が連続していないかを見るために
+        全件を返す(read-only)。
+
+        ★ このTableは「銘柄ごとの最新の削除のみ」を保持する設計であり
+        (`removed_at`は再削除で上書きされる。完全な削除履歴はAuditLogTableが正本。
+        `WatchlistRemovalHistory`のdocstring参照)、`readd_cooldown_days`(既定30日)の
+        TTLで自動的に消える。`readd_cooldown_days`が3営業日を大きく上回るため、
+        直近3営業日分の削除有無の判定には十分な保持期間がある。
+        """
+        return self._store.list_all()
