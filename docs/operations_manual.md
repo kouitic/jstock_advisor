@@ -3343,14 +3343,16 @@ IAM権限の拡大・Alarmのthreshold等の変更が無いこと。240秒とい
 
 ## 30. Release W9 の Production Verification Plan(2026-09-24追加。骨子)
 
-段階2〜3の複数Issue(#504・#505・#506・#507・#368)をまとめてProductionへ反映する
+段階2〜3の複数Issue(#504・#505・#506・#507・#368・#349)をまとめてProductionへ反映する
 grouped release(社内呼称 W9)の確認手順である。29節(#503。段階1)の実行経路
 (Alarm → SNS → IncidentNotifier → LINE)を前提に、その先の監視対象・通知内容の
 拡張分を扱う。
 
-★ **この節は骨子であり、対象Issueが確定するまで更新され続ける**。2026-09-24時点で
-USER決定によりIssue #349(DLQ滞留の監視・発報)がW9候補へ追加された(JIRO実装中)。
-#349のmerge完了後、本節へDLQ監視の観点を追記する。**最新の対象範囲はIssue #503の
+★ **W9の正式対象はこの6件(#504・#505・#506・#507・#368・#349)である**(USER決定)。
+このうち#349は2026-09-24時点で**実装完了・PR #554でレビュー中(未merge)**であり、
+**W9 ChangeSet CREATEは#349のmerge完了後まで保留**する(既存USER決定〔HANAKO-20260924-075〕
+のとおり)。#349のVerification観点は30.8として下記に追加した(実装・PR段階の内容に
+基づく。merge・deployを前提にした記載ではない)。**最新の対象範囲・進捗はIssue #503の
 最新コメント(Release W9 inventory)を読むこと**(この節へ焼き込まない)。
 
 ### 30.1 この節が扱わないこと
@@ -3427,3 +3429,50 @@ USER決定によりIssue #349(DLQ滞留の監視・発報)がW9候補へ追加�
 model_version`〕と同型の既知パターン)。**実害が出るのは「W9反映後に新規保存された
 レコードを、その後rollbackした旧コードが読む」場合のみ**で、反映直後(新規レコードが
 まだ無い間)のrollbackは安全である。
+
+### 30.8 #349(DLQ滞留の監視・発報)のVerification観点
+
+★ 2026-09-24時点、#349はPR #554として実装完了・レビュー中(未merge)。以下はPR #554の
+本文(USER決定〔#349 issuecomment-5812898603〕どおりの実装)に基づく記載であり、
+merge・deployを前提にしたものではない。実装内容が変わった場合はこの節も更新する。
+
+```
+対象4本(真正のDLQ。命名規約ではなくredrive chainの構造で特定)
+  WatchlistTerminalFailureDLQ / AsyncInvokeFailureDLQ /
+  BuyCandidateTerminalFailureDLQ / HoldingsWatchlistTerminalFailureDLQ
+  (後2本は#319 Phase 1で未wiringのdormant DLQだが、Phase 2でdispatch側が
+  切り替わった際の監視漏れを防ぐため先行して対象に含める。USER決定)
+
+Alarm設計(4本共通)
+  Namespace=AWS/SQS, MetricName=ApproximateNumberOfMessagesVisible,
+  Statistic=Maximum, Period=300, EvaluationPeriods=1, Threshold=1,
+  ComparisonOperator=GreaterThanOrEqualToThreshold, TreatMissingData=notBreaching,
+  AlarmActions=[IncidentNotificationTopic](#503。新規のTopic・Topic Policyは追加しない)
+```
+
+P0(deploy直後・read-only。#349分)
+```
+・AsyncInvokeFailureDLQ・WatchlistTerminalFailureDLQ・BuyCandidateTerminalFailureDLQ・
+  HoldingsWatchlistTerminalFailureDLQの4本すべてにAlarmが接続されていること
+  (Namespace/MetricName/Statistic/Period/EvaluationPeriods/Threshold/
+  ComparisonOperator/TreatMissingData/AlarmActionsが上記設計どおりであること)
+・新規のSNS Topic・Topic Policyが追加されていないこと(既存IncidentNotificationTopicを
+  そのまま再利用する設計のため)
+```
+
+P1(次回reconciler自然実行等。平常時のノイズ確認)
+```
+・4本のDLQがいずれも空(平常時)のあいだ、通知・ログのノイズが増えないこと
+  (TreatMissingData=notBreachingにより、データ点が飛ぶ時間帯もALARMにならないことを含む)
+```
+
+P4相当(自然発生時。人工的なDLQ投入・人工Alarm発火は行わない)
+```
+・DLQへメッセージが実際に滞留した場合、既存の#132/#503通知経路(Alarm→SNS→
+  IncidentNotifier→LINE)へ正しく接続され、実際にLINEへ届くこと
+  (`_extract_alarm_target()`のQueueName dimensionへのfallback経路を含む。
+  FunctionName dimensionを持つ既存alarm〔#503〜#505〕の経路は変更していない)
+・Alarmが「OK」へ戻っても、対象job・batchが復旧したことを意味しない
+  (redrive・purge・retention経過のいずれでもQueue depthは0に戻るため。
+  「OK = 復旧」と読まない。29節の「Errorsが止まった = 復旧ではない」と同種の注意)
+```
