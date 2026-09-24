@@ -219,6 +219,27 @@ def test_t1_recent_quarters_available_uses_the_latest_quarter_end(
     assert value is True
 
 
+def test_t1b_annual_fiscal_period_end_newer_than_the_only_recent_quarter_can_suppress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T1b(レビュー対応。PR #564 F1): `resolve_latest_financial_period_end()`は
+    有効な四半期(評価日以前)が1件でもあれば、年次`fiscal_period_end`と新旧を
+    比較せず無条件にその四半期を採用する。そのため、年次の方が四半期実績より
+    **新しい**場合、修正はTrue→Falseの**抑制方向**にも動きうる
+    (双方向の性質であり、「四半期優先で常にfreshになる」という単純化は
+    誤りである。PR本文のBefore/After記述をこの実測に合わせて是正した)。
+
+    fixture: 年次fiscal_period_end=2026-06-30(87日で新しい。直接参照ならTrue)。
+    唯一のrecent_quarter=2025-03-31(543日で古い。四半期優先だとFalse)。
+    """
+    value = _captured_fair_value_reflects_latest_earnings(
+        monkeypatch,
+        fiscal_period_end=dt.date(2026, 6, 30),
+        recent_quarters=[_quarter(dt.date(2025, 3, 31))],
+    )
+    assert value is False
+
+
 def test_t2_no_recent_quarters_falls_back_to_fiscal_period_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
