@@ -113,13 +113,56 @@ def test_topic_policy_grants_cloudwatch_publish_scoped_to_this_account() -> None
     policy = _resources()["IncidentNotificationTopicPolicy"]
     assert policy["Type"] == "AWS::SNS::TopicPolicy"
     assert policy["Properties"]["Topics"] == [{"Fn::Ref": _TOPIC_LOGICAL_ID}]
-    [statement] = policy["Properties"]["PolicyDocument"]["Statement"]
+    statements = policy["Properties"]["PolicyDocument"]["Statement"]
+    cloudwatch_statements = [
+        s for s in statements if s.get("Principal") == {"Service": "cloudwatch.amazonaws.com"}
+    ]
+    [statement] = cloudwatch_statements
     assert statement["Effect"] == "Allow"
-    assert statement["Principal"] == {"Service": "cloudwatch.amazonaws.com"}
     assert statement["Action"] == "sns:Publish"
     assert statement["Condition"]["StringEquals"]["aws:SourceAccount"] == {
         "Fn::Ref": "AWS::AccountId"
     }
+
+
+def test_reconciler_sns_publish_iam_is_scoped_to_the_topic_without_wildcard() -> None:
+    """Issue #506レビューD3是正: reconciler実行ロール自身のIAM(Function Policies側)の
+    sns:Publish Resourceが、IncidentNotificationTopicのみに限定されていること
+    (Resource="*"の付与禁止)。Topic Policy側(SNSリソースポリシー)とは別の
+    IAM面であり、両方が最小権限であることを個別に固定する。
+    """
+    policies = _resources()["WatchlistBatchReconcilerFunction"]["Properties"]["Policies"]
+    sns_statements = [
+        statement
+        for policy in policies
+        if isinstance(policy, dict)
+        for statement in policy.get("Statement", []) or []
+        if statement.get("Sid") == "PublishIncidentNotification"
+    ]
+    [statement] = sns_statements
+    assert statement["Effect"] == "Allow"
+    actions = _actions(statement)
+    assert actions == {"sns:Publish"}
+    resources = statement["Resource"]
+    resources = resources if isinstance(resources, list) else [resources]
+    assert resources == [{"Fn::Ref": _TOPIC_LOGICAL_ID}]
+    assert "*" not in str(resources)
+
+
+def test_topic_policy_grants_reconciler_publish_without_wildcard_resource() -> None:
+    """Issue #506(O-1): reconciler発のInternal payloadも同じTopicへpublishできるよう、
+    reconciler実行ロール向けのStatementを追加した(Resource="*"は付与しない)。
+    """
+    policy = _resources()["IncidentNotificationTopicPolicy"]
+    statements = policy["Properties"]["PolicyDocument"]["Statement"]
+    reconciler_statements = [
+        s for s in statements if s.get("Principal") != {"Service": "cloudwatch.amazonaws.com"}
+    ]
+    [statement] = reconciler_statements
+    assert statement["Effect"] == "Allow"
+    assert statement["Action"] == "sns:Publish"
+    assert statement["Resource"] == {"Fn::Ref": _TOPIC_LOGICAL_ID}
+    assert "*" not in str(statement["Principal"])
 
 
 # --- 既存2 alarmへの接続(閾値・メトリクスは変更しない) ---------------------------

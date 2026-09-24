@@ -1099,6 +1099,7 @@ def resolve_watchlist_job_type(
     except ValueError as exc:
         raise UnknownWatchlistJobTypeError(f"unknown watchlist job_type: {raw!r}") from exc
 
+
 EXECUTION_RESULT_NORMAL = "NORMAL"
 EXECUTION_RESULT_HIGH_THROTTLE_RATE = "HIGH_THROTTLE_RATE"
 # 運用ハードニング3節: 429疑い率以外に、主要スコア項目の欠損率が閾値を超えた
@@ -1635,19 +1636,33 @@ def mark_dispatch_completed(batch_id: str, now: dt.datetime) -> None:
         raise
 
 
-def mark_dispatch_failed(batch_id: str, now: dt.datetime) -> bool:
-    """2節ステップ4(Reconciler): DISPATCHINGのままタイムアウトしたバッチを終端確定する。"""
+def mark_dispatch_failed(batch_id: str, now: dt.datetime, *, reason: str | None = None) -> bool:
+    """2節ステップ4(Reconciler): DISPATCHINGのままタイムアウトしたバッチを終端確定する。
+
+    Issue #506(#132 O-1): `reason`は追加のoptional引数(既定None、後方互換)。
+    渡された場合、`failure_reason`属性へそのまま記録する。呼び出し元がすでに
+    `record_batch_audit()`へ渡している`execution_result`文字列と同じ値を渡すことを
+    想定する(例: `"universe_load_failed"`)。AuditLogTableは全件JSONスキャンが
+    必要で毎時実行のreconcilerからは参照できないため、BatchRunsTable側にも
+    同じ理由をこの属性で持たせ、S-4(連続ユニバース取得失敗)検知がAuditLogTableの
+    フルスキャンなしに理由を判別できるようにする。
+    """
+    update_expression = "SET #status = :failed, updated_at = :now"
+    expression_values: dict[str, Any] = {
+        ":failed": WatchlistBatchStatus.DISPATCH_FAILED.value,
+        ":dispatching": WatchlistBatchStatus.DISPATCHING.value,
+        ":now": now.isoformat(),
+    }
+    if reason is not None:
+        update_expression += ", failure_reason = :reason"
+        expression_values[":reason"] = reason
     try:
         _table().update_item(
             Key={"batch_id": batch_id},
-            UpdateExpression="SET #status = :failed, updated_at = :now",
+            UpdateExpression=update_expression,
             ConditionExpression="#status = :dispatching",
             ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={
-                ":failed": WatchlistBatchStatus.DISPATCH_FAILED.value,
-                ":dispatching": WatchlistBatchStatus.DISPATCHING.value,
-                ":now": now.isoformat(),
-            },
+            ExpressionAttributeValues=expression_values,
         )
         return True
     except ClientError as e:
@@ -2495,12 +2510,8 @@ def mark_watchlist_finalize_failed(
       判断を要する。
     """
     now_iso = now.isoformat()
-    truncated = (
-        (error_message or "")[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH] if error_message else None
-    )
-    status_values = {
-        f":s{i}": s.value for i, s in enumerate(_FINALIZE_FAILURE_RECORDABLE_STATUSES)
-    }
+    truncated = (error_message or "")[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH] if error_message else None
+    status_values = {f":s{i}": s.value for i, s in enumerate(_FINALIZE_FAILURE_RECORDABLE_STATUSES)}
     status_condition = " OR ".join(f"#status = {placeholder}" for placeholder in status_values)
     try:
         _table().update_item(
@@ -2537,6 +2548,109 @@ def get_watchlist_batch(batch_id: str) -> dict[str, Any] | None:
     response = _table().get_item(Key={"batch_id": batch_id})
     item: dict[str, Any] | None = response.get("Item")
     return item
+
+
+# --- Issue #506(#132 O-1): reconcilerのincident検知(S-2/S-4)の「1日1回」抑止状態。
+# 新規Tableを作らず(USER決定)、既存のBatchRunsTable(batch_id単一キー)へ
+# reason_code単位の合成キーで小さな行を1つ持たせる。特定のbatch_idとは無関係の
+# 状態であり、既存のbatch行(status/completed等)とは属性を共有しない。
+#
+# ★ これは#503のIncidentStateTracker(claim/release token方式)とは別物である。
+#   ここで持つのは「今日この理由コードで既にSNSへpublishしたか」という、
+#   reconciler自身の検知頻度を抑えるための単純な状態にすぎない
+#   (USER決定: reconcilerはIncidentState claim/releaseを持たない)。
+_INCIDENT_DETECTOR_STATE_KEY_PREFIX = "incident-detector-state:"
+# 検知対象の理由コードが今後増えても各行は小さく、数年分保持しても実害が無い規模のため、
+# 一時集計データ(_TTL_HOURS=6時間)より十分に長いTTLを個別に設定する。
+_INCIDENT_DETECTOR_STATE_TTL_DAYS = 90
+
+
+def _incident_detector_state_key(reason_code: str) -> str:
+    return f"{_INCIDENT_DETECTOR_STATE_KEY_PREFIX}{reason_code}"
+
+
+def get_incident_detector_state(reason_code: str) -> dict[str, Any] | None:
+    """指定した理由コードの直近の検知状態を読む(read-only)。
+
+    戻り値の`last_notified_date_jst`(YYYY-MM-DD文字列)が本日(JST)と一致するなら、
+    呼び出し側は同じ理由コードでの新規publishを見送る(1日1回に抑止する)。
+    行が無ければ一度も検知・通知していない。
+
+    ★ watchlist系のreconciler/dispatcher専用の状態(このIssueで新設)であり、CLIから
+    ローカルJSONへフォールバックする経路を持たない(`try_acquire_dispatch_lease`等の
+    既存watchlist関数と同じ設計。`running_on_lambda()`によるガードは付けない)。
+    """
+    response = _table().get_item(Key={"batch_id": _incident_detector_state_key(reason_code)})
+    item: dict[str, Any] | None = response.get("Item")
+    return item
+
+
+def record_incident_detector_state(
+    reason_code: str,
+    last_notified_date_jst: str,
+    consecutive_days: int | None,
+    now: dt.datetime,
+) -> None:
+    """検知・publish後に呼ぶ。単純なupsert(CASなし)。
+
+    reconcilerは1時間に1回しか実行されず、同一reason_codeの検知・書き込みが
+    同時に競合する見込みは実務上無いため、原子性を求める複雑な条件式は持たない
+    (#503のIncidentStateTracker.try_claim()のような排他制御はここでは不要。
+    USER決定どおり、reconcilerはこの種の複雑な状態管理を持たない)。
+    """
+    ttl = int((now + dt.timedelta(days=_INCIDENT_DETECTOR_STATE_TTL_DAYS)).timestamp())
+    item: dict[str, Any] = {
+        "batch_id": _incident_detector_state_key(reason_code),
+        "last_notified_date_jst": last_notified_date_jst,
+        "ttl": ttl,
+    }
+    if consecutive_days is not None:
+        item["consecutive_days"] = consecutive_days
+    _table().put_item(Item=item)
+
+
+def _streak_state_key(reason_code: str) -> str:
+    # 通知抑止状態(_incident_detector_state_key)とは別行にする。同じ行へ
+    # put_item(全置換)すると、通知していない営業日の評価更新が
+    # last_notified_date_jstを消してしまう(逆も同様)ため、書き込みの
+    # 競合を構造的に避ける。
+    return f"{_INCIDENT_DETECTOR_STATE_KEY_PREFIX}{reason_code}:streak"
+
+
+def get_streak_state(reason_code: str) -> dict[str, Any] | None:
+    """Issue #506 レビューF1是正: 連続営業日カウントの永続状態を読む(read-only)。
+
+    ★ S-4(候補ユニバース取得の連続失敗)は、過去のBatchRunsTable行を都度
+    読み返す設計にしない。BatchRunsTableのTTL(`candidate_progress_ttl_hours`。
+    既定72時間)は候補進捗行という短命なデータのためのものであり、週末・祝日を
+    跨ぐ複数営業日の履歴を保持する契約ではない(実測: 週をまたぐと対象行が
+    既にTTL経過で消えている。TTL削除自体も最大48時間遅延するため、同じ
+    「3営業日連続」でも検知の成否が非決定的になる)。この関数が返す状態は、
+    reconciler自身が営業日ごとに1回だけ評価し積み上げた結果であり、
+    元のBatchRunsTable行が生きているかどうかに依存しない。
+    """
+    response = _table().get_item(Key={"batch_id": _streak_state_key(reason_code)})
+    item: dict[str, Any] | None = response.get("Item")
+    return item
+
+
+def record_streak_state(
+    reason_code: str,
+    last_evaluated_date_jst: str,
+    streak_count: int,
+    now: dt.datetime,
+) -> None:
+    """営業日ごとの評価結果を積み上げて永続化する。単純なupsert(CASなし。理由は
+    `record_incident_detector_state`と同じ: reconcilerは1時間に1回のみ実行される)。
+    """
+    ttl = int((now + dt.timedelta(days=_INCIDENT_DETECTOR_STATE_TTL_DAYS)).timestamp())
+    item: dict[str, Any] = {
+        "batch_id": _streak_state_key(reason_code),
+        "last_evaluated_date_jst": last_evaluated_date_jst,
+        "streak_count": streak_count,
+        "ttl": ttl,
+    }
+    _table().put_item(Item=item)
 
 
 # --- 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの業務finalize確定後、
@@ -2650,7 +2764,13 @@ def list_stale_maintenance_triggers(now: dt.datetime) -> list[dict[str, Any]]:
 
 
 def list_watchlist_batches_by_status(statuses: list[WatchlistBatchStatus]) -> list[dict[str, Any]]:
-    """Reconciler(毎時起動)向け。バッチは週1件程度のためフルスキャンで十分(2節)。"""
+    """Reconciler(毎時起動)向け。バッチは週1件程度のためフルスキャンで十分(2節)。
+
+    ★ この結果集合はCOMPLETED/ABORTEDを含まない(statusesに指定した値のみ)。
+    「その日のバッチが存在するか」を確認する目的(missed schedule検知等)には
+    使えない(正常に完了した日を0件と誤検知する。#506レビューD1)。その用途には
+    `list_watchlist_batches_by_job_type()`を使うこと。
+    """
     table = _table()
     values = {f":s{i}": status.value for i, status in enumerate(statuses)}
     filter_expr = " OR ".join(f"#status = {placeholder}" for placeholder in values)
@@ -2663,6 +2783,45 @@ def list_watchlist_batches_by_status(statuses: list[WatchlistBatchStatus]) -> li
     while True:
         response = table.scan(**scan_kwargs)
         items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_kwargs["ExclusiveStartKey"] = last_key
+    return items
+
+
+#: NEW_CANDIDATE_SCREENINGのbatch_idの接頭辞(watchlist_dispatcher_handler.pyの
+#: `batch_prefix`と同じ値。他方のWATCHLIST_MAINTENANCEは`"watchlist-maint-"`)。
+_NEW_CANDIDATE_SCREENING_BATCH_ID_PREFIX = "watchlist-"
+_WATCHLIST_MAINTENANCE_BATCH_ID_PREFIX = "watchlist-maint-"
+
+
+def list_new_candidate_screening_batches() -> list[dict[str, Any]]:
+    """Issue #506(#132 O-1)。missed schedule検知・連続失敗検知向け: statusを問わず
+    (COMPLETED/ABORTEDを含む)、NEW_CANDIDATE_SCREENINGのバッチだけを全件返す
+    (#506レビューD1: `list_watchlist_batches_by_status()`は進行中・失敗系のみで
+    完了バッチを含まないため流用できない)。
+
+    ★ `job_type`属性ではなく**batch_idの接頭辞**で絞る。理由: `job_type`属性は
+    `set_watchlist_batch_total()`が書くが、これは候補ユニバースの取得に**成功した後**
+    にしか呼ばれない。候補ユニバース取得に失敗した(`universe_load_failed`)バッチや、
+    DISPATCHING状態のままタイムアウトしたバッチには`job_type`属性が存在しない
+    (実測)。一方、batch_idの接頭辞(`try_acquire_dispatch_lease()`より前に
+    handler側で決定)はどちらの失敗でも必ず設定されているため、これを使う。
+    """
+    table = _table()
+    items: list[dict[str, Any]] = []
+    scan_kwargs: dict[str, Any] = {
+        "FilterExpression": "begins_with(batch_id, :prefix)",
+        "ExpressionAttributeValues": {":prefix": _NEW_CANDIDATE_SCREENING_BATCH_ID_PREFIX},
+    }
+    while True:
+        response = table.scan(**scan_kwargs)
+        items.extend(
+            item
+            for item in response.get("Items", [])
+            if not str(item.get("batch_id", "")).startswith(_WATCHLIST_MAINTENANCE_BATCH_ID_PREFIX)
+        )
         last_key = response.get("LastEvaluatedKey")
         if not last_key:
             break

@@ -275,6 +275,17 @@ def _run_reconciler_rescue(job_type: str | None) -> list[str]:
             lambda _statuses: [batch_item],
         ),
         patch.object(reconciler_module, "list_stale_maintenance_triggers", lambda *a, **k: []),
+        # Issue #506(O-1): このファイルはjob_type routingのみを検証し、S-2/S-4検知は
+        # 無関係(実AWSに触れず`_fake_config()`もholiday_calendarを持たないため、
+        # 検知自体をno-opにする)。
+        patch.object(
+            reconciler_module,
+            "_detect_and_notify_watchlist_incidents",
+            lambda *a, **k: {
+                "missed_schedule_notified": False,
+                "universe_load_failure_streak_notified": False,
+            },
+        ),
         patch.object(
             reconciler_module, "maybe_finalize", lambda *a, **k: routed.append("add") or True
         ),
@@ -343,9 +354,7 @@ def test_maintenance_finalizer_audits_with_maintenance_universe_provider() -> No
         patch.object(finalizer_module, "mark_watchlist_batch_completed", lambda *a, **k: True),
         # Issue #286 (F-B8): 監査の execution_mode を batch 行から復元するため、
         # この関数は batch 行を読むようになった(未 patch だと実 DynamoDB を引く)。
-        patch.object(
-            finalizer_module, "get_watchlist_batch", lambda _b: {"batch_id": _BATCH_ID}
-        ),
+        patch.object(finalizer_module, "get_watchlist_batch", lambda _b: {"batch_id": _BATCH_ID}),
     ):
         finalizer_module._finalize_maintenance_completed(_BATCH_ID, _NOW, _fake_config())
 
@@ -371,16 +380,12 @@ def _run_timeout_finalizing(job_type: str | None) -> str:
             reconciler_module, "set_timeout_finalize_completed_count", lambda *a, **k: True
         ),
         patch.object(reconciler_module, "get_watchlist_batch", lambda _b: batch_item),
-        patch.object(
-            reconciler_module, "compute_batch_metrics", lambda _r: {"processed_count": 3}
-        ),
+        patch.object(reconciler_module, "compute_batch_metrics", lambda _r: {"processed_count": 3}),
         patch.object(reconciler_module, "record_batch_audit", lambda **kw: audits.append(kw)),
         patch.object(
             reconciler_module, "transition_timeout_finalizing_to_timed_out", lambda *a, **k: True
         ),
-        patch.object(
-            reconciler_module, "release_rotation_dispatch_lease", lambda *a, **k: True
-        ),
+        patch.object(reconciler_module, "release_rotation_dispatch_lease", lambda *a, **k: True),
     ):
         reconciler_module._process_timeout_finalizing(_BATCH_ID, _NOW, 100, _fake_config())
 

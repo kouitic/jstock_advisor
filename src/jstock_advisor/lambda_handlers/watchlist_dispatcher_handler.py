@@ -209,9 +209,7 @@ def _cache_age_days(source_date: dt.date | None, now: dt.datetime) -> int | None
     return int(elapsed.total_seconds() // 86400)
 
 
-def _universe_observation(
-    outcomes: list[DownloadOutcome], now: dt.datetime
-) -> dict[str, Any]:
+def _universe_observation(outcomes: list[DownloadOutcome], now: dt.datetime) -> dict[str, Any]:
     """Issue #223(O-A): 候補ユニバースを「今回取得したもの」で回したのか
     「前回までのキャッシュ」で回したのかを、成功した回も含めて監査に残す。
 
@@ -269,9 +267,7 @@ def _universe_observation(
             UNIVERSE_SOURCE_DOWNLOADED if listed.promoted else UNIVERSE_SOURCE_CACHE
         ),
         "universe_promoted": listed.promoted,
-        "universe_source_date": (
-            source_date.isoformat() if source_date is not None else None
-        ),
+        "universe_source_date": (source_date.isoformat() if source_date is not None else None),
         "universe_cache_age_days": _cache_age_days(source_date, now),
         # Issue #69(U-1): JPX400側。outcome自体が無い場合もNoneのままとし、
         # 「取得したが日付が不明」と「そもそも対象外」を値では区別しない
@@ -429,9 +425,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             raw_job_type, default=WatchlistJobType.NEW_CANDIDATE_SCREENING
         )
     except UnknownWatchlistJobTypeError:
-        logger.error(
-            "watchlist dispatcher: unknown job_type=%r, refusing to start", raw_job_type
-        )
+        logger.error("watchlist dispatcher: unknown job_type=%r, refusing to start", raw_job_type)
         return {"error": "unknown_job_type", "job_type": raw_job_type}
 
     if not (wc.enabled and wc.scheduled_run_enabled):
@@ -572,7 +566,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # DISPATCHING」という、いま直そうとしている状態が別の形で残る。
         # ★ mark_dispatch_failed() は ConditionExpression="#status = :dispatching"
         # を持つため、Reconcilerが先に確定していても冪等に無視される。
-        mark_dispatch_failed(batch_id, now)
+        mark_dispatch_failed(batch_id, now, reason="universe_load_failed")
         if rotation_lease_held:
             release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
@@ -638,10 +632,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # ★ RuntimeError以外(DynamoDBのClientError等)も同じ扱いにする。
         # 呼び出し側から見れば「進捗行が作れなかった」ことに変わりはなく、
         # DISPATCHINGのままleaseを保持し続ける方が有害なため(fail-fast)。
-        logger.exception(
-            "watchlist dispatcher: progress row creation failed batch_id=%s", batch_id
-        )
-        mark_dispatch_failed(batch_id, now)
+        logger.exception("watchlist dispatcher: progress row creation failed batch_id=%s", batch_id)
+        mark_dispatch_failed(batch_id, now, reason="progress_row_creation_failed")
         if rotation_lease_held:
             release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(
@@ -665,7 +657,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             total,
             len(progress_rows),
         )
-        mark_dispatch_failed(batch_id, now)
+        mark_dispatch_failed(batch_id, now, reason="dispatch_failed_row_count_mismatch")
         if rotation_lease_held:
             release_rotation_dispatch_lease(DEFAULT_ROTATION_ID, batch_id)
         record_batch_audit(

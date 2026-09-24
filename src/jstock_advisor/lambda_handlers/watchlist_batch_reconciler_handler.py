@@ -16,29 +16,46 @@ EventBridge毎時トリガー。`batch_processing_timeout_hours`を超えて`DIS
 - `NOTIFICATION_FAILED`(運用ハードニング第3弾1節): LINE送信のみが例外で
   失敗した状態。`notification_failure_count`が上限未満なら`retry_notification`で
   通知のみを再試行する(ウォッチリスト書込みは再実行されない)。
+
+Issue #506(#132 O-1。上記の既存タイムアウト回復処理とは独立した相乗り検知):
+S-2(missed schedule。本日のNEW_CANDIDATE_SCREENING試行が無い)/ S-4(候補
+ユニバース取得失敗が3営業日連続)を検知し、IncidentNotificationTopicへ
+Internal structured incident payloadをpublishする(#503のIncidentNotifierFunction
+が共通処理する。LINE送信・fingerprint計算・claim/release・本文生成はここでは
+一切持たない)。同一reason_codeへの通知は1日1回(JST)に抑止する。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import os
 from typing import Any, NoReturn
 
+import boto3
+
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.entities.enums import ExecutionMode
+from jstock_advisor.domain.jst import evaluation_date_jst, to_jst
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     BatchFamily,
     UnknownWatchlistJobTypeError,
     WatchlistBatchStatus,
     WatchlistJobType,
     get_completion_batch,
+    get_incident_detector_state,
+    get_streak_state,
     get_watchlist_batch,
+    list_new_candidate_screening_batches,
     list_stale_maintenance_triggers,
     list_watchlist_batches_by_status,
     mark_dispatch_failed,
     mark_finalizing_stuck_as_failed,
+    record_incident_detector_state,
+    record_streak_state,
     resolve_watchlist_job_type,
     run_timeout_finalization_pass,
     set_timeout_finalize_completed_count,
@@ -127,6 +144,291 @@ _FINALIZE_IN_PROGRESS_STATUSES = frozenset(
         WatchlistBatchStatus.NOTIFICATION_SENT.value,
     }
 )
+
+
+# --- Issue #506(#132 O-1): S-2(missed schedule)/ S-4(候補ユニバース連続失敗)検知 ---
+#
+# USER決定(#506 issuecomment-5805034769。転記元 INSTRUCTION_ID =
+# HANAKO-20260924-USERDECISION-506)どおり:
+#   - watchlist系のNEW_CANDIDATE_SCREENINGに限定する(他10関数は対象外)
+#   - S-4の閾値は3営業日連続
+#   - 通知はreason_codeごとに1日1回(JST)。#503の30分dedupには依存せず、
+#     reason_code + last_notified_date_jstをBatchRunsTable(既存)へ保持する
+#   - reconcilerはallowlist済みのincident envelopeを組み立てSNS publishのみ行う
+#     (LINE client構築・LINE push・fingerprint計算・claim/release・本文生成は
+#     一切持たない。すべてIncidentNotifierFunction〔#503〕側の共通処理に委ねる)
+#   - cloudwatch:GetMetricDataは追加しない(「起動されなかった」/「起動後に途中
+#     失敗した」の区別は#506単独では行わない)
+
+_INCIDENT_SOURCE_WATCHLIST_RECONCILER = "watchlist_reconciler"
+# IncidentJobの対応表(domain/notification/incident_message.py)は既に
+# "watchlist-dispatcher" → WATCHLIST_SCREENING を持つため、新しい対応の追加は不要。
+_INCIDENT_JOB_NAME_WATCHLIST_DISPATCHER = "watchlist-dispatcher"
+
+_REASON_CODE_WATCHLIST_MISSED_SCHEDULE = "watchlist_missed_schedule"
+_REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK = "watchlist_universe_load_failure_streak"
+
+# USER決定: 3営業日連続(#506 issuecomment-5805034769。2日=一過性障害を拾いやすい、
+# 5日=検知が遅すぎる、3日=バランス良いとして確定)。
+_UNIVERSE_LOAD_FAILURE_STREAK_THRESHOLD_DAYS = 3
+
+# dispatchの平日Scheduleはcron(0 6 ? * MON-FRI *) JST(infra/template.yaml
+# WeekdayMorning)。reconciler自身はrate(1 hour)で起動時刻の固定アンカーを持たない
+# (実測)。dispatch開始直後の一時的な未反映(コールドスタート等)をmissed scheduleと
+# 誤判定しないよう、reconciler自身の実行周期(1時間)と同じ幅の猶予を置く。
+_MISSED_SCHEDULE_GRACE_HOUR_JST = 7
+
+# #506 USER決定のInternal payload allowlist(incident_notifier_handler.pyの
+# _normalize_internal_message()が受け付けるキーと同一。stock_code/owner/
+# holding_id/stack trace/生exception message/AWS account ID/ARN/request ID等は
+# 決して含めない)。
+_SNS_PAYLOAD_ALLOWLIST = frozenset(
+    {
+        "source",
+        "job_name",
+        "failure_stage",
+        "failure_type",
+        "reason_code",
+        "occurred_at",
+        "failure_count",
+        "consecutive_days",
+        "is_ongoing",
+    }
+)
+
+
+def _started_at_jst_date(batch_item: dict[str, Any]) -> dt.date | None:
+    """BatchRunsTable項目の`started_at`(UTCのISO文字列)をJST暦日へ変換する。
+
+    ★ `batch_id`の日時部分(UTC基準。`now.strftime(...)`)ではなく`started_at`を
+    使う(#506 D1/実装時の注意点として記録済み: batch_idの日時はUTC基準であり、
+    JST営業日境界とずれる)。`started_at`は`try_acquire_dispatch_lease()`が
+    `if_not_exists`で設定するため、成功・失敗を問わずbatch項目に必ず存在する。
+    """
+    raw = batch_item.get("started_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.UTC)
+    return evaluation_date_jst(parsed)
+
+
+def _previous_business_day(calendar: BusinessCalendar, date: dt.date) -> dt.date:
+    current = date - dt.timedelta(days=1)
+    while not calendar.is_business_day(current):
+        current -= dt.timedelta(days=1)
+    return current
+
+
+def _detect_watchlist_missed_schedule(
+    batches: list[dict[str, Any]], calendar: BusinessCalendar, now: dt.datetime
+) -> dict[str, Any] | None:
+    """S-2: 本日(JST営業日)、NEW_CANDIDATE_SCREENINGの試行が一件も無いことを検知する。
+
+    正常な非営業日(休日・週末)は対象外(#132本文4節: 仕様どおりのfail-softは障害
+    としない)。「起動されなかった」と「起動後に候補ユニバース取得等で失敗した」は
+    ここでは区別しない(cloudwatch:GetMetricDataを追加しないというUSER決定により、
+    #506単独ではその区別を持たない。区別が必要な場合は#504のErrors監視と組み合わせる)。
+    `batches`は起動できたか否かに関わらず全status(COMPLETED/ABORTEDを含む)を含む
+    ため、DISPATCH_FAILEDで終端した試行も「起動された」側として正しく数えられる。
+    """
+    today_jst = evaluation_date_jst(now)
+    if not calendar.is_business_day(today_jst):
+        return None
+    if to_jst(now).hour < _MISSED_SCHEDULE_GRACE_HOUR_JST:
+        return None
+    for batch_item in batches:
+        if _started_at_jst_date(batch_item) == today_jst:
+            return None
+    return {
+        "source": _INCIDENT_SOURCE_WATCHLIST_RECONCILER,
+        "job_name": _INCIDENT_JOB_NAME_WATCHLIST_DISPATCHER,
+        "failure_stage": "SCHEDULE",
+        "failure_type": "MISSED_SCHEDULE",
+        "reason_code": _REASON_CODE_WATCHLIST_MISSED_SCHEDULE,
+        "occurred_at": now.isoformat(),
+    }
+
+
+def _evaluate_and_persist_universe_load_failure_streak(
+    todays_batches: list[dict[str, Any]], calendar: BusinessCalendar, now: dt.datetime
+) -> int | None:
+    """S-4: 候補ユニバース取得の失敗(`failure_reason == "universe_load_failed"`)が
+    何営業日連続しているかを、営業日ごとに1回だけインクリメンタルに評価・永続化する
+    (副作用あり: DynamoDB書き込みを行う。戻り値は「本日時点で確定した」
+    streak_countで、本日分をまだ評価できない場合は`None`を返す)。
+
+    ★ #506レビューF1是正: 過去のBatchRunsTable行を読み返して連続日数を
+    再計算する設計を採らない。BatchRunsTableのTTL(`candidate_progress_ttl_hours`。
+    既定72時間)は候補進捗行という短命なデータのためのものであり、週末・祝日を
+    跨ぐ複数営業日の履歴を保持する契約ではない(実測: 週をまたぐと対象行が
+    既にTTL経過で消えている。TTL削除自体も最大48時間遅延するため、同じ
+    「3営業日連続」でも検知の成否が非決定的になっていた)。
+    代わりに、`todays_batches`(本日分のみ。常に新しく期限切れの心配が無い)から
+    「本日失敗したか」だけを読み取り、`get_streak_state`/`record_streak_state`
+    (この関数自身が管理する別行)へ積み上げる。評価に断絶(reconcilerが長期間
+    停止していた等)があれば継続性を信用せず、本日の結果だけでリセットする
+    (誤って長い連続を主張しないためのfail-safe。ログで可視化する)。
+
+    ★ #506レビューiteration 2 R1/R2是正: 非営業日・猶予時刻前は、直前に
+    永続化された`streak_count`(=過去の営業日の状態)をそのまま返さない。
+    これを返すと、(R1)非営業日にも関わらず「本日確定した」として毎日
+    再publishされてしまい(1日1回抑止のキーが暦日単位のため、非営業日も
+    「新しい1日」として扱われてしまう)、(R2)猶予時刻前の実行が前日の
+    ステータスを「本日の状態」として誤ってpublishし、その後の本日分の
+    正しい再評価(結果が変わっていても)を1日1回抑止が握りつぶす。
+    「本日時点でまだ確定していない」ことを`None`で明示的に表現し、
+    呼び出し元(`_detect_watchlist_universe_load_failure_streak`)がpublish
+    対象にしない。
+
+    `mark_dispatch_failed(..., reason="universe_load_failed")`は
+    `watchlist_dispatcher_handler.py`の`CandidateUniverseError`経路の1箇所のみが
+    設定する(実装側で確認済み。`_collect_maintenance_targets()`は候補ユニバース
+    providerに触れず、この例外を送出できない構造のため、この理由コードは
+    NEW_CANDIDATE_SCREENINGにのみ発生する)。
+    """
+    reason_code = _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK
+    today_jst = evaluation_date_jst(now)
+    if not calendar.is_business_day(today_jst):
+        return None
+    if to_jst(now).hour < _MISSED_SCHEDULE_GRACE_HOUR_JST:
+        return None
+
+    state = get_streak_state(reason_code)
+    prior_streak = int(state["streak_count"]) if state else 0
+    last_evaluated = state.get("last_evaluated_date_jst") if state else None
+    if last_evaluated == today_jst.isoformat():
+        return prior_streak  # 本日分は評価済み(今日確定した値をそのまま返す)
+
+    today_failed = any(
+        batch_item.get("failure_reason") == "universe_load_failed"
+        and _started_at_jst_date(batch_item) == today_jst
+        for batch_item in todays_batches
+    )
+    expected_previous = _previous_business_day(calendar, today_jst).isoformat()
+    if last_evaluated is not None and last_evaluated != expected_previous:
+        logger.warning(
+            "watchlist reconciler: universe_load_failure streak evaluation gap "
+            "last_evaluated=%s expected_previous=%s today=%s (resetting from gap)",
+            last_evaluated,
+            expected_previous,
+            today_jst.isoformat(),
+        )
+        prior_streak = 0
+    new_streak = prior_streak + 1 if today_failed else 0
+    record_streak_state(reason_code, today_jst.isoformat(), new_streak, now)
+    return new_streak
+
+
+def _detect_watchlist_universe_load_failure_streak(
+    streak_count: int | None, now: dt.datetime
+) -> dict[str, Any] | None:
+    """S-4: 連続日数が閾値(3営業日)以上ならincident envelopeを返す(単発は対象外。
+    #132本文/#234)。連続日数の評価・永続化自体は
+    `_evaluate_and_persist_universe_load_failure_streak`が行う(この関数は
+    その結果を閾値判定するだけの純粋関数)。`streak_count`が`None`(本日分は
+    まだ評価できていない)なら検知しない。
+    """
+    if streak_count is None or streak_count < _UNIVERSE_LOAD_FAILURE_STREAK_THRESHOLD_DAYS:
+        return None
+    return {
+        "source": _INCIDENT_SOURCE_WATCHLIST_RECONCILER,
+        "job_name": _INCIDENT_JOB_NAME_WATCHLIST_DISPATCHER,
+        "failure_stage": "UNIVERSE_LOAD",
+        "failure_type": "CONSECUTIVE_UNIVERSE_LOAD_FAILURE",
+        "reason_code": _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK,
+        "occurred_at": now.isoformat(),
+        "failure_count": streak_count,
+        "consecutive_days": streak_count,
+        "is_ongoing": True,
+    }
+
+
+def _publish_incident_envelope(envelope: dict[str, Any]) -> None:
+    """allowlist済みのincident envelopeをIncidentNotificationTopicへpublishする。
+
+    #506 USER決定のallowlist(source/job_name/failure_stage/failure_type/
+    reason_code/occurred_at/failure_count/consecutive_days/is_ongoing)以外の
+    キーは、この関数の呼び出し元(検知関数)が最初から持たせない構造にしているが、
+    最後の防御としてここでも再確認する(fail-closed: allowlist外のキーがあれば
+    publishせず例外にする)。
+    """
+    if not set(envelope) <= _SNS_PAYLOAD_ALLOWLIST:
+        raise ValueError(f"incident envelope has non-allowlisted keys: {set(envelope)}")
+    topic_arn = os.environ["INCIDENT_NOTIFICATION_TOPIC_ARN"]
+    sns = boto3.client("sns")
+    sns.publish(TopicArn=topic_arn, Message=json.dumps(envelope))
+
+
+def _already_notified_today(reason_code: str, today_jst: dt.date) -> bool:
+    state = get_incident_detector_state(reason_code)
+    if state is None:
+        return False
+    return state.get("last_notified_date_jst") == today_jst.isoformat()
+
+
+def _notify_if_new_today(
+    envelope: dict[str, Any] | None, today_jst: dt.date, now: dt.datetime
+) -> bool:
+    """検知結果(あれば)を、本日まだ通知していない場合のみpublishする(1日1回抑止)。
+
+    戻り値はpublishを実行したかどうか(handler()側のログ・返り値集計用)。
+    """
+    if envelope is None:
+        return False
+    reason_code = envelope["reason_code"]
+    if _already_notified_today(reason_code, today_jst):
+        return False
+    _publish_incident_envelope(envelope)
+    record_incident_detector_state(
+        reason_code, today_jst.isoformat(), envelope.get("consecutive_days"), now
+    )
+    return True
+
+
+def _scheduled_watchlist_dispatch_enabled(config: AppConfig) -> bool:
+    """dispatcherが実際に起動する条件と同じkill switchを見る(#506レビューF2是正)。
+
+    `watchlist_dispatcher_handler.handler()`は`wc.enabled and wc.scheduled_run_enabled`
+    がFalseならbatch行を作る前に早期returnする(意図した運用停止。#132本文4節の
+    「仕様どおりのfail-softは障害として扱わない」に該当)。この判定を見ずに
+    「本日のbatchが無い」ことだけを見ると、意図的な停止中は毎営業日
+    missed scheduleを誤検知し続けてしまう。S-2/S-4いずれもこの間は評価自体を
+    見送る(streak状態も進めない。再開後は評価の断絶としてfail-safeに扱われる。
+    `_evaluate_and_persist_universe_load_failure_streak`のgap検知を参照)。
+    """
+    wc = config.watchlist_screening
+    return bool(wc.enabled and wc.scheduled_run_enabled)
+
+
+def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) -> dict[str, bool]:
+    """S-2/S-4を検知し、未通知のものだけ#503経路へpublishする(副作用あり。
+    read-onlyではない: DynamoDB書き込み・SNS publishを行う。CLAUDE.md §3参照)。
+    """
+    no_op = {"missed_schedule_notified": False, "universe_load_failure_streak_notified": False}
+    if not _scheduled_watchlist_dispatch_enabled(config):
+        return no_op
+
+    calendar = BusinessCalendar.from_config(config.holiday_calendar)
+    today_jst = evaluation_date_jst(now)
+    todays_batches = [
+        batch_item
+        for batch_item in list_new_candidate_screening_batches()
+        if _started_at_jst_date(batch_item) == today_jst
+    ]
+    missed_schedule = _detect_watchlist_missed_schedule(todays_batches, calendar, now)
+    streak_count = _evaluate_and_persist_universe_load_failure_streak(todays_batches, calendar, now)
+    universe_load_failure_streak = _detect_watchlist_universe_load_failure_streak(streak_count, now)
+    return {
+        "missed_schedule_notified": _notify_if_new_today(missed_schedule, today_jst, now),
+        "universe_load_failure_streak_notified": _notify_if_new_today(
+            universe_load_failure_streak, today_jst, now
+        ),
+    }
 
 
 class _CredentialDeferredLineClient:
@@ -439,7 +741,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
         if status == WatchlistBatchStatus.DISPATCHING.value:
             timed_out = _is_timed_out(batch_item, wc.batch_processing_timeout_hours, now)
-            if timed_out and mark_dispatch_failed(batch_id, now):
+            if timed_out and mark_dispatch_failed(batch_id, now, reason="dispatch_timeout"):
                 dispatch_failed += 1
                 # 本番検証2026-08対応: Dispatcher Lambdaが候補選択・SQS投入の
                 # 途中で異常終了しDISPATCHINGのまま放置された場合、rotation
@@ -631,6 +933,12 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         completion_recovery_invoked,
         completion_recovery_skipped,
     )
+    # Issue #506(O-1): 既存の回復処理とは独立した検知(相乗り)。既存処理の成否には
+    # 依存させない(既存の回復処理が例外を出しても、ここへは到達しない現状の挙動を
+    # 変えない。検知自体の失敗は後述のLINE欠落顕在化より前に出す: 検知の例外は
+    # ここで停止させ、既存の回復処理の完了報告〔返り値〕を汚染しない)。
+    incident_detection = _detect_and_notify_watchlist_incidents(now, config)
+
     # Issue #117: 通知と無関係な回復処理・ウォッチリスト登録・NOTIFICATION_FAILEDの記録を全て
     # 終えた後に、認証情報の欠落を顕在化させる(Lambda呼び出しをErrorsとして失敗させる)。
     # Phase 3が例外を捕捉するため、これが無いと欠落が不可視になる。Schedulerの再試行は各処理が
@@ -639,6 +947,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         line_client.raise_if_send_attempted()
     return {
         "candidates": len(candidates),
+        "watchlist_missed_schedule_notified": incident_detection["missed_schedule_notified"],
+        "watchlist_universe_load_failure_streak_notified": (
+            incident_detection["universe_load_failure_streak_notified"]
+        ),
         "dispatch_failed": dispatch_failed,
         "rescued": rescued,
         "finalizing_marked_stuck": finalizing_marked_stuck,
