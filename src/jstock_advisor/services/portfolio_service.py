@@ -37,6 +37,8 @@ from jstock_advisor.services.write_plan import (
     HoldingReplacementPlan,
     PurchaseWritePlan,
     SaleWritePlan,
+    apply_conditional_delete,
+    apply_conditional_put,
 )
 
 PURCHASE_PRICE_MUST_BE_POSITIVE = "購入単価は0より大きい値を指定してください"
@@ -210,8 +212,18 @@ class PortfolioService:
             memo=memo,
             lot_id=lot_id,
         )
+        # Issue #530: Holdingは複数の別購入・別経路の更新が競合しうる読み取り時点
+        # のexpected_dataで楽観ロックする(#530が対象とするlost update)。
+        #
+        # ★ Lotは意図的にupsert(無条件)のまま変更しない。Issue #61 Phase B1で
+        # 確立済みの「CSV取込は同じ行から決定的なlot_idを作り、同じ行の再適用
+        # (retry)ではロットを増やさない」設計は、同一lot_idの再書き込みが
+        # *同じ内容の再適用*であることを前提にした意図的な冪等機構である
+        # (`plan.lot_put.expected_data`は常にNoneのため、CASの`insert_if_absent`
+        # を適用すると2回目の適用がConcurrentUpdateErrorになり、この冪等retryが
+        # 壊れる。実測: tests/unit/test_issue_61_row_commit_atomicity.py)。
         self._lots.upsert(plan.lot_put.model)  # type: ignore[arg-type]
-        self._holdings.upsert(plan.holding_put.model)  # type: ignore[arg-type]
+        apply_conditional_put(self._holdings, plan.holding_put)
         return plan.resulting_holding
 
     def build_purchase_write_plan(
@@ -396,6 +408,10 @@ class PortfolioService:
         holding_id = build_holding_id(normalized_owner, stock_code)
         lots = self._lots.list_by_holding(holding_id)
         existing = self._holdings.get(holding_id)
+        # Issue #530: 読み取り時点の生JSON(新規ならNone)を楽観ロック条件として
+        # 保持する。読んでから書くまでの間に別実行が変更・削除していた場合、
+        # 古いexistingを土台にした無条件upsertで上書きしない。
+        existing_raw = self._holdings.get_raw_data(holding_id)
         now = dt.datetime.now(dt.UTC)
         holding = self._compute_holding(
             normalized_owner,
@@ -411,7 +427,10 @@ class PortfolioService:
             profit_target_rate=profit_target_rate,
             memo=memo,
         )
-        self._holdings.upsert(holding)
+        apply_conditional_put(
+            self._holdings,
+            ConditionalPut(model=holding, id_field="holding_id", expected_data=existing_raw),
+        )
         return holding
 
     def _split_adjusted_summary(
@@ -479,6 +498,9 @@ class PortfolioService:
         if not lots:
             return False
         existing = self._holdings.get(holding_id)
+        # Issue #530: 読み取り時点の生JSON(新規ならNone)を楽観ロック条件として
+        # 保持する(_recompute_holding()と同じ理由)。
+        existing_raw = self._holdings.get_raw_data(holding_id)
         expected = self._compute_holding(
             normalized_owner,
             holding_id,
@@ -489,7 +511,10 @@ class PortfolioService:
             stock_name=stock_name,
         )
         if existing is None:
-            self._holdings.upsert(expected)
+            apply_conditional_put(
+                self._holdings,
+                ConditionalPut(model=expected, id_field="holding_id", expected_data=None),
+            )
             return True
         # ロットから導出される項目だけを比較する(メタ情報は再計算対象外)。
         derived = (
@@ -501,7 +526,11 @@ class PortfolioService:
         )
         if all(getattr(existing, field) == getattr(expected, field) for field in derived):
             return False
-        self._holdings.upsert(expected)
+        assert existing_raw is not None  # existing is not Noneのため必ず取得できている
+        apply_conditional_put(
+            self._holdings,
+            ConditionalPut(model=expected, id_field="holding_id", expected_data=existing_raw),
+        )
         return True
 
     def update_holding_meta(self, owner: str, stock_code: str, **fields: Any) -> Holding:
@@ -513,13 +542,19 @@ class PortfolioService:
         existing = self._holdings.get(holding_id)
         if existing is None:
             raise ValueError(f"holding_ref={log_ref(holding_id)}の保有銘柄が見つかりません")
+        # Issue #530: existingを読んだ時点の生JSONを楽観ロック条件として保持する。
+        existing_raw = self._holdings.get_raw_data(holding_id)
+        assert existing_raw is not None  # 直前にexisting is not Noneを確認済み
         merged = {
             **existing.model_dump(mode="python"),
             **fields,
             "updated_at": dt.datetime.now(dt.UTC),
         }
         updated = Holding.model_validate(merged)
-        self._holdings.upsert(updated)
+        apply_conditional_put(
+            self._holdings,
+            ConditionalPut(model=updated, id_field="holding_id", expected_data=existing_raw),
+        )
         return updated
 
     def sell_shares(
@@ -535,15 +570,17 @@ class PortfolioService:
         使われる。
         """
         plan = self.build_sale_write_plan(owner, stock_code, shares, now=now)
+        # Issue #530: build_sale_write_plan()が計画構築時点で持つexpected_data
+        # (楽観ロック条件)を、無条件delete/upsertで捨てずに適用する。
         for lot_delete in plan.lot_deletes:
-            self._lots.delete(lot_delete.id_value)
+            apply_conditional_delete(self._lots, lot_delete)
         for lot_put in plan.lot_puts:
-            self._lots.upsert(lot_put.model)  # type: ignore[arg-type]
+            apply_conditional_put(self._lots, lot_put)
         if plan.holding_delete is not None:
-            self._holdings.delete(plan.holding_delete.id_value)
+            apply_conditional_delete(self._holdings, plan.holding_delete)
             return None
         if plan.holding_put is not None:
-            self._holdings.upsert(plan.holding_put.model)  # type: ignore[arg-type]
+            apply_conditional_put(self._holdings, plan.holding_put)
             return plan.resulting_holding
         # 全部売却だが、そもそもHoldingが存在しなかった場合(データ不整合時の
         # 安全側フォールバック)。何も削除操作を行わずNoneを返す。
@@ -646,10 +683,25 @@ class PortfolioService:
         lot = self._lots.get(lot_id)
         if lot is None or lot.holding_id != holding_id:
             raise ValueError(f"ロットID{lot_id}が見つかりません")
-        self._lots.delete(lot_id)
+        # Issue #530: 読み取り時点の生JSONを楽観ロック条件として削除する
+        # (build_sale_write_plan()と同じ観点。他実行が既に更新・削除していれば
+        # 上書き削除しない)。
+        lot_raw = self._lots.get_raw_data(lot_id)
+        if lot_raw is None:
+            raise ValueError(f"ロットID{lot_id}のデータ取得に失敗しました")
+        apply_conditional_delete(
+            self._lots, ConditionalDelete(id_value=lot_id, id_field="lot_id", expected_data=lot_raw)
+        )
         remaining = self._lots.list_by_holding(holding_id)
         if not remaining:
-            self._holdings.delete(holding_id)
+            holding_raw = self._holdings.get_raw_data(holding_id)
+            if holding_raw is not None:
+                apply_conditional_delete(
+                    self._holdings,
+                    ConditionalDelete(
+                        id_value=holding_id, id_field="holding_id", expected_data=holding_raw
+                    ),
+                )
             return None
         return self._recompute_holding(owner, stock_code)
 
@@ -893,7 +945,6 @@ class PortfolioService:
             elif holding_id is not None:
                 self._holdings.apply_batch([holding_id], [])
             raise
-
 
     def replace_holding_with_purchase(self, **purchase_kwargs: Any) -> Holding:
         """既存の保有を破棄し、指定した購入1件だけの状態へ**原子的に**置き換える。

@@ -34,5 +34,16 @@ class WatchlistRepository:
         """
         return self._store.insert_if_absent(item)
 
+    def insert_if_absent(self, item: WatchlistItem) -> bool:
+        """Issue #530: `add_if_new()`と同じ(CASを汎用の名前でも呼べるようにする)。"""
+        return self._store.insert_if_absent(item)
+
+    def replace_if_raw_matches(
+        self, stock_code: str, expected_raw_data: str, item: WatchlistItem
+    ) -> bool:
+        """Issue #530: 保存中の生JSONがexpected_raw_dataと完全一致する場合のみ
+        置き換える(楽観ロック)。"""
+        return self._store.replace_if_raw_matches(stock_code, expected_raw_data, item)
+
     def delete(self, stock_code: str) -> bool:
         return self._store.delete(stock_code)
