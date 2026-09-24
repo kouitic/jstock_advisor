@@ -113,13 +113,32 @@ def test_topic_policy_grants_cloudwatch_publish_scoped_to_this_account() -> None
     policy = _resources()["IncidentNotificationTopicPolicy"]
     assert policy["Type"] == "AWS::SNS::TopicPolicy"
     assert policy["Properties"]["Topics"] == [{"Fn::Ref": _TOPIC_LOGICAL_ID}]
-    [statement] = policy["Properties"]["PolicyDocument"]["Statement"]
+    statements = policy["Properties"]["PolicyDocument"]["Statement"]
+    cloudwatch_statements = [
+        s for s in statements if s.get("Principal") == {"Service": "cloudwatch.amazonaws.com"}
+    ]
+    [statement] = cloudwatch_statements
     assert statement["Effect"] == "Allow"
-    assert statement["Principal"] == {"Service": "cloudwatch.amazonaws.com"}
     assert statement["Action"] == "sns:Publish"
     assert statement["Condition"]["StringEquals"]["aws:SourceAccount"] == {
         "Fn::Ref": "AWS::AccountId"
     }
+
+
+def test_topic_policy_grants_reconciler_publish_without_wildcard_resource() -> None:
+    """Issue #506(O-1): reconciler発のInternal payloadも同じTopicへpublishできるよう、
+    reconciler実行ロール向けのStatementを追加した(Resource="*"は付与しない)。
+    """
+    policy = _resources()["IncidentNotificationTopicPolicy"]
+    statements = policy["Properties"]["PolicyDocument"]["Statement"]
+    reconciler_statements = [
+        s for s in statements if s.get("Principal") != {"Service": "cloudwatch.amazonaws.com"}
+    ]
+    [statement] = reconciler_statements
+    assert statement["Effect"] == "Allow"
+    assert statement["Action"] == "sns:Publish"
+    assert statement["Resource"] == {"Fn::Ref": _TOPIC_LOGICAL_ID}
+    assert "*" not in str(statement["Principal"])
 
 
 # --- 既存2 alarmへの接続(閾値・メトリクスは変更しない) ---------------------------
