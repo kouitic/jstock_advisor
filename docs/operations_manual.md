@@ -3363,3 +3363,139 @@ C4相当の判定基準: 上記ADD 1・MODIFY 0・REMOVE 0と一致し、既存r
 IAM権限の拡大・Alarmのthreshold等の変更が無いこと。240秒という値の実測による裏付けは
 次回自然実行(2026-09-28 19:00 JST)後に行う(29.2項目3〔人工障害を起こさない〕と同じ理由で、
 それまでの人工的な実行はしない)。
+
+## 30. Release W9 の Production Verification Plan(2026-09-24追加。骨子)
+
+段階2〜3の複数Issue(#504・#505・#506・#507・#368・#349)をまとめてProductionへ反映する
+grouped release(社内呼称 W9)の確認手順である。29節(#503。段階1)の実行経路
+(Alarm → SNS → IncidentNotifier → LINE)を前提に、その先の監視対象・通知内容の
+拡張分を扱う。
+
+★ **W9の正式対象はこの6件(#504・#505・#506・#507・#368・#349)である**(USER決定)。
+このうち#349は2026-09-24時点で**実装完了・PR #554でレビュー中(未merge)**であり、
+**W9 ChangeSet CREATEは#349のmerge完了後まで保留**する(既存USER決定〔HANAKO-20260924-075〕
+のとおり)。#349のVerification観点は30.8として下記に追加した(実装・PR段階の内容に
+基づく。merge・deployを前提にした記載ではない)。**最新の対象範囲・進捗はIssue #503の
+最新コメント(Release W9 inventory)を読むこと**(この節へ焼き込まない)。
+
+### 30.1 この節が扱わないこと
+
+```
+・#503自体のend-to-end(Alarm→SNS→IncidentNotifier→IncidentState claim/SENT→LINE→
+  duplicate suppression)の自然発生確認は29.2項目7〜9が正本であり、本節では重複させない
+  (W9反映後もこの経路自体の設計は変わらないため)
+・#508(GitHub Issue自動起票)は本節の対象外(別release候補。#132 Phase 4)
+・Production の ChangeSet 新設・deploy 自体(別 Human Gate)
+```
+
+### 30.2 P0: deploy直後(read-only)
+
+```
+・stack status = UPDATE_COMPLETE / FAILED event 0件 / rollbackなし
+・#537(Issue #537)のWRITE/READ flagが両方ともfalseのまま(環境変数を直接確認。
+  W9はこの2値を変更しない)
+・#504由来の新設Errors alarm 11本・#505由来の新設Duration alarm 1本、計12資源の存在確認
+・WatchlistBatchReconcilerFunctionRoleのIAM差分が想定どおり(#506由来のsns:Publish
+  〔Resource=IncidentNotificationTopicのみ〕・#507由来のcloudwatch:GetMetricData
+  〔Resource="*"。CloudWatchメトリクスがARNを持たないため〕の2 Statement追加のみで、
+  想定外の権限拡大が無いこと)
+```
+
+### 30.3 P1: 次回reconciler自然実行(毎時)
+
+```
+・invocation正常終了(Errors=0を最優先で確認)。
+  ★ #507が追加したCloudWatch GetMetricData呼び出しには例外処理が無く、この呼び出しが
+  失敗(throttling・AccessDenied等)すると、reconciler Lambdaの実行全体が失敗する
+  (この回に本来行うはずだったtimeout finalize retry・maintenance trigger等の処理も
+  含めて失敗として記録される。実装が意図した「握り潰さない」設計であり、バグ修正の
+  対象ではないが、Errorsの原因切り分けにおいて最優先で確認すべき項目)
+・GetMetricData成功(AccessDeniedなし)
+・#506/#507が追加した検知(missed schedule / 候補ユニバース連続失敗 / queue backlog /
+  watchlist削除ゼロ継続)のfalse positiveが無いこと(誤検知でLINEが飛んでいないこと)
+・既存flag(config/watchlist_screening_rules.yamlのenabled / scheduled_run_enabled。
+  #506/#507は専用のkill switchを新設せずこれらを再利用している)のsemanticsが
+  変わっていないこと
+```
+
+### 30.4 P2: 次回対象通知(#368)
+
+```
+・通知本文の株価表示が「MM/DD終値」の形(as-of日付付き)になっていること
+・#368のdeploy前に保存された既存Recommendationレコード(price_as_of_dateを持たない)を
+  参照する通知では、日付を省略した「終値」表示にfallbackし、エラーにならないこと
+```
+
+### 30.5 P3: Evaluation horizon経過後(#368)
+
+```
+・reached_partial_profit_start_price / reached_recommended_limit_price /
+  reached_full_profit_consideration_price / business_days_to_reach_sell_priceが
+  EvaluationResultへ実際に保存されること(利確目安への到達確認。SELL側)
+```
+
+### 30.6 P5: 2026-09-28 19:00 JST(週次レビュー自然実行。#377/#539)
+
+```
+・Errors=0・正常完了(W9反映後、実際にこの時刻の自然実行で確認する初回)
+・Max Memory Used・実際のDuration値を実測し、#377(PR #539)のOOM修正がProduction
+  反映後も有効であることを確認する
+・#505のWeeklyReviewFunctionDurationAlarmがOKのままであること(240秒を大きく
+  下回ることを期待。既存の9/21実行の実測値はpre-#539のデータのため参考にしない)
+```
+
+### 30.7 ロールバック時の留意点(#368)
+
+`Recommendation`はImmutableSnapshot(`extra="forbid"`のfrozenモデル)である。W9反映後に
+新規保存された`price_as_of_date`入りのRecommendationレコードを、rollback後の旧コードが
+読もうとするとデシリアライズに失敗する(既存の別フィールド〔`company_quality_score_
+model_version`〕と同型の既知パターン)。**実害が出るのは「W9反映後に新規保存された
+レコードを、その後rollbackした旧コードが読む」場合のみ**で、反映直後(新規レコードが
+まだ無い間)のrollbackは安全である。
+
+### 30.8 #349(DLQ滞留の監視・発報)のVerification観点
+
+★ 2026-09-24時点、#349はPR #554として実装完了・レビュー中(未merge)。以下はPR #554の
+本文(USER決定〔#349 issuecomment-5812898603〕どおりの実装)に基づく記載であり、
+merge・deployを前提にしたものではない。実装内容が変わった場合はこの節も更新する。
+
+```
+対象4本(真正のDLQ。命名規約ではなくredrive chainの構造で特定)
+  WatchlistTerminalFailureDLQ / AsyncInvokeFailureDLQ /
+  BuyCandidateTerminalFailureDLQ / HoldingsWatchlistTerminalFailureDLQ
+  (後2本は#319 Phase 1で未wiringのdormant DLQだが、Phase 2でdispatch側が
+  切り替わった際の監視漏れを防ぐため先行して対象に含める。USER決定)
+
+Alarm設計(4本共通)
+  Namespace=AWS/SQS, MetricName=ApproximateNumberOfMessagesVisible,
+  Statistic=Maximum, Period=300, EvaluationPeriods=1, Threshold=1,
+  ComparisonOperator=GreaterThanOrEqualToThreshold, TreatMissingData=notBreaching,
+  AlarmActions=[IncidentNotificationTopic](#503。新規のTopic・Topic Policyは追加しない)
+```
+
+P0(deploy直後・read-only。#349分)
+```
+・AsyncInvokeFailureDLQ・WatchlistTerminalFailureDLQ・BuyCandidateTerminalFailureDLQ・
+  HoldingsWatchlistTerminalFailureDLQの4本すべてにAlarmが接続されていること
+  (Namespace/MetricName/Statistic/Period/EvaluationPeriods/Threshold/
+  ComparisonOperator/TreatMissingData/AlarmActionsが上記設計どおりであること)
+・新規のSNS Topic・Topic Policyが追加されていないこと(既存IncidentNotificationTopicを
+  そのまま再利用する設計のため)
+```
+
+P1(次回reconciler自然実行等。平常時のノイズ確認)
+```
+・4本のDLQがいずれも空(平常時)のあいだ、通知・ログのノイズが増えないこと
+  (TreatMissingData=notBreachingにより、データ点が飛ぶ時間帯もALARMにならないことを含む)
+```
+
+P4相当(自然発生時。人工的なDLQ投入・人工Alarm発火は行わない)
+```
+・DLQへメッセージが実際に滞留した場合、既存の#132/#503通知経路(Alarm→SNS→
+  IncidentNotifier→LINE)へ正しく接続され、実際にLINEへ届くこと
+  (`_extract_alarm_target()`のQueueName dimensionへのfallback経路を含む。
+  FunctionName dimensionを持つ既存alarm〔#503〜#505〕の経路は変更していない)
+・Alarmが「OK」へ戻っても、対象job・batchが復旧したことを意味しない
+  (redrive・purge・retention経過のいずれでもQueue depthは0に戻るため。
+  「OK = 復旧」と読まない。29節の「Errorsが止まった = 復旧ではない」と同種の注意)
+```
