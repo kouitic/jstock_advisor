@@ -784,6 +784,12 @@ class RecommendationEvaluationService:
         reached_tentative, reached_standard, reached_aggressive, business_days_to_reach = (
             self._compute_buy_price_reach(recommendation, period_bars, start)
         )
+        (
+            reached_partial_profit_start,
+            reached_recommended_limit,
+            reached_full_profit_consideration,
+            business_days_to_reach_sell,
+        ) = self._compute_sell_price_reach(recommendation, period_bars, start)
 
         buy_price_based_return_pct = None
         if recommendation.buy_prices is not None and recommendation.buy_prices.standard is not None:
@@ -828,6 +834,10 @@ class RecommendationEvaluationService:
             reached_standard_buy_price=reached_standard,
             reached_aggressive_buy_price=reached_aggressive,
             business_days_to_reach_price=business_days_to_reach,
+            reached_partial_profit_start_price=reached_partial_profit_start,
+            reached_recommended_limit_price=reached_recommended_limit,
+            reached_full_profit_consideration_price=reached_full_profit_consideration,
+            business_days_to_reach_sell_price=business_days_to_reach_sell,
             benchmark_symbol=self._benchmark_symbol if benchmark_return_pct is not None else None,
             benchmark_return_pct=benchmark_return_pct,
             excess_return_pct=excess_return_pct,
@@ -863,6 +873,48 @@ class RecommendationEvaluationService:
             _reached(standard_price),
             _reached(buy_prices.strong.price if buy_prices.strong else None),
             _first_reach_business_days(standard_price),
+        )
+
+    def _compute_sell_price_reach(
+        self, recommendation: Recommendation, period_bars: list[PriceBar], start: dt.date
+    ) -> tuple[bool | None, bool | None, bool | None, int | None]:
+        sell_prices = recommendation.sell_prices
+        if sell_prices is None or not period_bars:
+            return None, None, None, None
+
+        sorted_bars = sorted(period_bars, key=lambda b: b.date)
+
+        def _reached(price: Decimal | None) -> bool | None:
+            if price is None:
+                return None
+            return any(b.high >= price for b in sorted_bars)
+
+        def _first_reach_business_days(price: Decimal | None) -> int | None:
+            if price is None:
+                return None
+            for bar in sorted_bars:
+                if bar.high >= price:
+                    return self._calendar.business_days_between(start, bar.date)
+            return None
+
+        recommended_limit_price = (
+            sell_prices.recommended_limit_price.price
+            if sell_prices.recommended_limit_price
+            else None
+        )
+        return (
+            _reached(
+                sell_prices.partial_profit_start_price.price
+                if sell_prices.partial_profit_start_price
+                else None
+            ),
+            _reached(recommended_limit_price),
+            _reached(
+                sell_prices.full_profit_consideration_price.price
+                if sell_prices.full_profit_consideration_price
+                else None
+            ),
+            _first_reach_business_days(recommended_limit_price),
         )
 
     def _compute_benchmark_returns(

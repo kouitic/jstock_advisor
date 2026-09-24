@@ -602,6 +602,18 @@ def _yen(value: Decimal | int | float | str | None) -> str:
     return f"{amount:,}円"
 
 
+def _price_as_of_label(recommendation: Recommendation) -> str:
+    """price_at_recommendationが「いつの終値か」を明示するラベル(Issue #368)。
+
+    price_as_of_dateが無い(旧データ。#368設計C)場合は日付を省略し、「終値」
+    であることだけを明示する(現在値と誤読されることを防ぐ最低限の修正は、
+    日付が無くても効く)。
+    """
+    if recommendation.price_as_of_date is None:
+        return "終値"
+    return f"{recommendation.price_as_of_date:%m/%d}終値"
+
+
 # 判定区分の表示ラベル(要求仕様レビュー対応)。
 # RecommendationTypeは業務ロジック上13種類に分かれるが、通知で読む側にとって重要なのは
 # 「買い候補」「保有継続(様子見)」「一部売却を検討」「全部売却を検討」という
@@ -1229,7 +1241,9 @@ def _format_buy_candidate_message(recommendation: Recommendation) -> str:
             lines.append(
                 f"評価損益(参考): {_yen(recommendation.unrealized_profit_loss)}{pct_part}"
             )
-    lines.append(f"現在値: {_yen(recommendation.price_at_recommendation)}")
+    lines.append(
+        f"{_price_as_of_label(recommendation)}: {_yen(recommendation.price_at_recommendation)}"
+    )
     lines.extend(_valuation_range_lines(recommendation))
     price_line = _buy_price_levels_line(recommendation)
     if price_line is not None:
@@ -1276,7 +1290,9 @@ def _format_watch_for_price_message(recommendation: Recommendation) -> str:
     action = recommendation.buy_action
     title = buy_action_label(action) if action is not None else "監視継続"
     lines = [f"【{title}】{recommendation.stock_code} {recommendation.stock_name}"]
-    lines.append(f"現在値: {_yen(recommendation.price_at_recommendation)}")
+    lines.append(
+        f"{_price_as_of_label(recommendation)}: {_yen(recommendation.price_at_recommendation)}"
+    )
     lines.extend(_valuation_range_lines(recommendation))
     price_line = _buy_price_levels_line(recommendation)
     if price_line is not None:
@@ -1489,7 +1505,7 @@ def _fair_value_dispersion_warning_lines(
         "適正価格に関する注意:",
         "・手法間の推定差が大きいため、強気価格だけを根拠に保有継続を判断できません",
         f"・{max_method}を除く適正価格は{_yen(rest_min)}〜{_yen(rest_max)}で、"
-        f"現在値{_yen(price)}はその{direction}",
+        f"{_price_as_of_label(recommendation)}{_yen(price)}はその{direction}",
     ]
 
 
@@ -1512,7 +1528,7 @@ def _format_watch_profit_taking_message(
     avg = recommendation.average_purchase_price_at_recommendation
     price = recommendation.price_at_recommendation
     lines.append(f"{shares}株／平均取得{_yen(avg)}")
-    lines.append(f"現在値{_yen(price)}")
+    lines.append(f"{_price_as_of_label(recommendation)}{_yen(price)}")
     if shares is not None and avg is not None:
         # Issue #55 Phase B-2(N7 / F-G4): 平均取得単価が0以下はデータ品質異常であり、
         # 正当な業務状態ではない。従来は騰落率を 0.0% と断定し、さらに
@@ -1636,7 +1652,7 @@ def _format_earnings_suppressed_message(recommendation: Recommendation) -> str:
         "",
         f"【保有状況】{recommendation.shares_at_recommendation}株 / "
         f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
-        f"現在 {_yen(recommendation.price_at_recommendation)}",
+        f"{_price_as_of_label(recommendation)} {_yen(recommendation.price_at_recommendation)}",
         "",
     ]
     if recommendation.not_yet_action_reasons or recommendation.reasons:
@@ -1687,7 +1703,7 @@ def _format_earnings_release_pending_message(recommendation: Recommendation) -> 
         "",
         f"【保有状況】{recommendation.shares_at_recommendation}株 / "
         f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
-        f"現在 {_yen(recommendation.price_at_recommendation)}",
+        f"{_price_as_of_label(recommendation)} {_yen(recommendation.price_at_recommendation)}",
         "",
         status_line,
     ]
@@ -1752,7 +1768,7 @@ def _format_profit_taking_message(
         f"【利確検討】{recommendation.stock_code} {recommendation.stock_name}",
         f"【保有状況】{recommendation.shares_at_recommendation}株 / "
         f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
-        f"現在 {_yen(recommendation.price_at_recommendation)}",
+        f"{_price_as_of_label(recommendation)} {_yen(recommendation.price_at_recommendation)}",
         f"判定: {_recommendation_type_label(recommendation.recommendation_type)}",
     ]
     if recommendation.reasons:
@@ -1817,7 +1833,7 @@ def _format_sell_message(recommendation: Recommendation) -> str:
         f"判定: {label}",
         f"【保有状況】{recommendation.shares_at_recommendation}株 / "
         f"平均取得 {_yen(recommendation.average_purchase_price_at_recommendation)} → "
-        f"現在 {_yen(recommendation.price_at_recommendation)}",
+        f"{_price_as_of_label(recommendation)} {_yen(recommendation.price_at_recommendation)}",
     ]
     if recommendation.reasons:
         lines.append("悪化懸念(投資前提が悪化した理由): " + " / ".join(recommendation.reasons))
@@ -1899,7 +1915,7 @@ def _format_holding_decision_message(recommendation: Recommendation) -> str:
             f"{recommendation.shares_at_recommendation}株／平均取得"
             f"{_yen(recommendation.average_purchase_price_at_recommendation)}"
         )
-    lines.append(f"現在値{_yen(recommendation.price_at_recommendation)}")
+    lines.append(f"{_price_as_of_label(recommendation)}{_yen(recommendation.price_at_recommendation)}")
     if (
         recommendation.average_purchase_price_at_recommendation is not None
         and recommendation.shares_at_recommendation is not None

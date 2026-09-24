@@ -55,6 +55,11 @@ class Recommendation(ImmutableSnapshot):
     sell_prices: SellPriceLevels | None = None
 
     price_at_recommendation: Decimal
+    # price_at_recommendationの終値が「いつの終値か」(Issue #368)。旧データは
+    # このfieldを持たないためNone(通知側はNoneのとき日付を省略して「終値」と
+    # だけ表示する。Cのbackward compatibility)。recommended_at(判定を行った
+    # 時刻)とは別概念であり、遡って推測で埋めない。
+    price_as_of_date: dt.date | None = None
     average_purchase_price_at_recommendation: Decimal | None = None
     shares_at_recommendation: int | None = None
 

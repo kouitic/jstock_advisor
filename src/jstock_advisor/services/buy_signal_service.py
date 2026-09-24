@@ -1771,6 +1771,7 @@ class BuySignalService:
             raw_recommendation_type=recommendation_type,
             buy_prices=buy_price_levels,
             price_at_recommendation=current_price,
+            price_as_of_date=snapshot.price_as_of_date,
             dividend_yield_pct_at_recommendation=snapshot.dividend_yield_pct,
             shareholder_benefit_yield_pct_at_recommendation=snapshot.benefit_yield_pct,
             total_yield_pct_at_recommendation=snapshot.total_yield_pct,
