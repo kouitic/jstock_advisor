@@ -3504,3 +3504,111 @@ P4相当(自然発生時。人工的なDLQ投入・人工Alarm発火は行わな
   (redrive・purge・retention経過のいずれでもQueue depthは0に戻るため。
   「OK = 復旧」と読まない。29節の「Errorsが止まった = 復旧ではない」と同種の注意)
 ```
+
+## 31. release前validationの責務境界とChangeSet CREATE/EXECUTEの限界(Issue #559、2026-09-25追加)
+
+Release W9のChangeSet EXECUTEが、`IncidentNotificationTopicPolicy`(AWS::SNS::
+TopicPolicy)の2 StatementにSidが無いことをSNS APIが拒否して失敗した事象(直接原因は
+Issue #557で修正済み。Production は自動rollbackによりW8時点のまま安全に保たれた)を
+受け、release前のvalidation層それぞれが**何を検証でき、何を検証できないか**を
+Issue #559で調査し、本節へ反映する。
+
+### 31.1 CHANGESET_CREATE_COMPLETE ≠ EXECUTION_WILL_SUCCEED
+
+```
+CloudFormationは、ExecuteChangeSetを呼ぶまでリソースへの実際の変更を一切行わない
+(AWS公式ドキュメント: "CloudFormation doesn't make changes until you execute the
+change set." — CreateChangeSet APIリファレンス)。
+```
+
+ChangeSet **CREATE**が`CREATE_COMPLETE`になることは、テンプレートの構文・型・
+IAM capability・既存stackとの差分計算が成功したことを意味するのみであり、
+**実際のリソースプロバイダAPI(例: SNSの`SetTopicAttributes`)がその内容を受理する
+ことを保証しない。** downstream AWS APIが呼び出し時にのみ行うbusiness rule検証
+(今回のSNS TopicPolicyの複数Statement Sid一意性制約はその一例)は、CREATE_COMPLETE
+では検出できず、**EXECUTEで初めて顕在化する。**
+
+`CREATE_COMPLETE = このChangeSetをEXECUTEしてよい`という運用上の意味は変わらない
+(差分確認・Human Gateの前提として引き続き必須)。ただし`CREATE_COMPLETE = EXECUTEが
+必ず成功する`ではないことを、release実施者・承認者の双方が前提として持つこと。
+
+### 31.2 validation層ごとの責務境界(現状の実測。2026-09-25時点)
+
+```
+sam validate / --lint        テンプレートの構文・SAM構文・基本的な型検証。
+                              CI未導入(手動実行のみ)。AWS API固有のsemantic制約は
+                              検証しない(設計上の対象外)
+
+cfn-lint(v1.57.0で実測)     テンプレートのresource schema検証(例: 存在しない
+                              propertyの検出。E3002)。Issue #559のスパイクで実測
+                              (レビュー対応: PR #562。当初の記載を訂正): 今回
+                              #557で実際に起きた欠陥(Sidの**欠落**。複数Statementの
+                              いずれかにSid自体が無い)は**検出できない**(exit=0)。
+                              一方、Sidの**重複**(複数StatementのSidが同じ値)は
+                              **検出できる**(E3512 "array items are not unique
+                              for keys ['Sid']")。つまりcfn-lintは一意性
+                              (uniqueness)チェックは持つが、必須性
+                              (presence/required)チェックを持たない、という
+                              非対称な検出力である。今回のIncidentNotificationTopic
+                              Policyの実際の欠陥は「欠落」型だったため、cfn-lintを
+                              CIへ導入していても本件は防げなかった。CI未導入
+
+repo独自のinfra unit test    `tests/unit/test_infra_*.py`。repo内の情報(template.yaml
+(tests/unit/test_infra_*.py)  の静的構造)から導出できる契約を検証する。AWS API固有の
+                              semantic制約は、**過去に実際にAWS APIから拒否された
+                              制約について、resource typeベースで汎用化した契約を
+                              都度追加する**ことでのみカバーされる(例:
+                              `test_infra_issue_557_topic_policy_sid.py`の
+                              AWS::SNS::TopicPolicy横断テスト、
+                              `test_infra_issue_559_sqs_policy_sid_contract.py`の
+                              AWS::SQS::QueuePolicy予防的テスト)。**悉皆的な
+                              AWS API仕様の再実装ではない**(全AWS semantic
+                              constraintを事前に網羅することは現実的でない)
+
+CloudFormation ChangeSet     テンプレート差分の計算のみ。AWS API側のbusiness
+CREATE                       rule検証は行わない(31.1)
+
+Production ChangeSet EXECUTE 実際のリソースプロバイダAPI呼び出しが発生する、
+                              唯一AWS API側のsemantic制約を検証できる段階。
+                              ここで失敗した場合はCloudFormationの自動rollbackが
+                              安全網として働く(実害ゼロで収束する設計)が、
+                              「事前検知ができた」ことは意味しない
+```
+
+**実AWS環境でのpreflight/dry-run(ChangeSet CREATE〜EXECUTEを別accountの
+staging環境で先行実行する等)は、本節時点では採用していない。** CI/release
+pipelineへAWS credentialを新規・広範に持たせることになり、Issue #164(長期
+broad credentialの恒久利用)・Issue #359(deploy principalの権限設計)が指摘する
+懸念と衝突するため、着手にはUSER判断が必要(Issue #559 USER_DECISIONS_REQUIRED。
+2026-09-25時点でDEFER)。
+
+### 31.3 新しいAWS API semantic制約が判明した場合の拡張方針
+
+将来、今回と同種の欠陥(CloudFormation上はvalidだが実AWS APIで拒否される設定)が
+別のresource typeで判明した場合の追加手順:
+
+```
+1  実際のAWS APIエラー(HandlerErrorCode・エラーメッセージ)を実測で記録する
+   (推測で一般化しない。31.2の「悉皆的な再実装ではない」原則どおり、実際に
+   遭遇した制約のみを個別に追加していく)
+2  制約の対象がresource type固有か、Issue固有のLogicalIdに限定されるかを
+   AWS公式ドキュメントで一次確認する(可能な範囲で。今回のSNS/SQSのように、
+   AWS公式が「一部のサービスではSidを要求する場合がある」と例示している
+   ケースもあれば、明示の一次情報が見つからない場合もある〔#559参照〕)
+3  `tests/unit/test_infra_issue_<N>_*.py`へ、そのresource type全体を走査する
+   汎用テストを追加する(LogicalId固有の回帰テストと、resource typeベースの
+   汎用テストの2段構成。#557/#559のパターンを踏襲する)
+4  一次情報が無い・未確認のまま予防的に対象を広げる場合は、テストの
+   docstringで「確認済みの制約」と「予防的な備え」を明確に区別する
+   (#559のAWS::SQS::QueuePolicyテストの例に倣う)
+5  cfn-lintは一意性(uniqueness)違反は検出できるが必須性(presence)違反は
+   検出できないという非対称な検出力を持つ(31.2実測)。新しい制約が
+   「欠落」型か「重複」型かを見極めたうえで、欠落型はcfn-lintに頼らず
+   3の repo独自contract testを主たる防御とする。重複型はcfn-lintが既に
+   検出できる可能性があるため、CI導入時はその点を活かせる(ただし本節
+   時点でcfn-lint自体はCI未導入)。いずれの型であっても、Production
+   ChangeSet EXECUTE時のHuman Gateでの差分確認を最終防御として維持する
+```
+
+本節は Issue #559(design-defect・priority:P2)の実装(PR-1〜PR-3)の一部として
+追加した。判定ロジック・通知内容・保存データ形式・Production挙動は変更していない。
