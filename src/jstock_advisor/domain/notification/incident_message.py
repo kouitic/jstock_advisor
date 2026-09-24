@@ -57,6 +57,11 @@ class IncidentJob(StrEnum):
     # 自己再帰を避けるため同一Topicへは接続しない(本段階では実際にはこの経路を通らない)が、
     # 対応表の網羅性テスト(全Lambda関数を列挙する)のために明示のIncidentJobを持つ。
     INCIDENT_NOTIFIER = "異常通知の中継処理"
+    # Issue #349: AsyncInvokeFailureDLQは、BuyCandidatesFunction/HoldingsWatchlistFunctionの
+    # 両方が非同期呼び出し失敗時の送信先として共有する(#318)。DLQへ入ったメッセージ単体からは
+    # どちらの関数由来かを区別できないため、既存の2 job(買い候補チェック/保有株チェック)の
+    # どちらか一方へ誤って割り当てず、専用の名称を持つ(USER決定)。
+    ASYNC_INVOKE_FAILURE = "非同期実行の失敗"
     OTHER = "その他の処理"  # 対応表に無い名前の落ち先(内部名を出さない)
 
 
@@ -79,17 +84,33 @@ _INTERNAL_NAME_TO_JOB: dict[str, IncidentJob] = {
     "incident-notifier": IncidentJob.INCIDENT_NOTIFIER,
 }
 
+# Issue #349: SQS の DLQ(キュー名。スタック名の前置を除いたもの)→ 利用者向けの名称。
+# `_INTERNAL_NAME_TO_JOB` とは別の対応表にする(全 Lambda 関数を網羅する既存の網羅性テスト
+# `test_every_lambda_function_in_the_template_has_an_entry` が完全一致検査のため、Lambda
+# 関数ではないキュー名をそこへ混ぜると赤くなる)。
+_QUEUE_NAME_TO_JOB: dict[str, IncidentJob] = {
+    "watchlist-terminal-failure-dlq": IncidentJob.WATCHLIST_SCREENING,
+    "buy-candidate-terminal-failure-dlq": IncidentJob.BUY_CANDIDATES,
+    "holdings-watchlist-terminal-failure-dlq": IncidentJob.HOLDINGS_WATCHLIST,
+    "async-invoke-failure-dlq": IncidentJob.ASYNC_INVOKE_FAILURE,
+}
+
 
 def resolve_incident_job(internal_name: object) -> IncidentJob:
-    """内部の関数名・job 名を、利用者向けの名称(列挙)へ引く。
+    """内部の関数名・キュー名・job 名を、利用者向けの名称(列挙)へ引く。
 
     対応表に無い名前・文字列でない値は `IncidentJob.OTHER` へ落ちる(例外にしない: 異常の通知を
     組み立てる経路で、入力の不備によって通知自体が失われないようにする)。**入力の文字列は返り値へ
     残らない**(識別子・ARN・例外文が紛れ込んでいても、列挙のどれかへ引かれるか OTHER になる)。
+    Lambda 関数名の対応表(`_INTERNAL_NAME_TO_JOB`)を先に見て、無ければ SQS キュー名の対応表
+    (`_QUEUE_NAME_TO_JOB`。Issue #349)を見る。
     """
     if not isinstance(internal_name, str):
         return IncidentJob.OTHER
-    return _INTERNAL_NAME_TO_JOB.get(internal_name.removeprefix(_STACK_PREFIX), IncidentJob.OTHER)
+    name = internal_name.removeprefix(_STACK_PREFIX)
+    if name in _INTERNAL_NAME_TO_JOB:
+        return _INTERNAL_NAME_TO_JOB[name]
+    return _QUEUE_NAME_TO_JOB.get(name, IncidentJob.OTHER)
 
 
 def _require_count(name: str, value: object) -> None:

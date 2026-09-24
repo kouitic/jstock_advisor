@@ -2736,10 +2736,14 @@ worker・terminal_failureの連鎖(#430)でDLQに溜まったメッセージに�
 ### 24.1 この手順の限界(★ 最初に読むこと)
 
 ```
-・現在、DLQ にメッセージが入っても、誰にも通知されない(CloudWatch Alarm は SQS を見ておらず、発報先〔SNS 等〕も無い。Issue #349)。
+・4本のDLQいずれにも、CloudWatch Alarm(ApproximateNumberOfMessagesVisible>=1で即時)
+  →既存のIncidentNotificationTopic(#503)→LINE、という気づく仕組みが入った
+  (Issue #349。infra/template.yamlへのmerge時点の記載。Production deployは別
+  Human Gateのため、実際にLINEへ届くようになるのはdeploy後)。
+・ただしAlarmは「1件以上見えるか(ALARM/OK)」の1bitしか伝えない。件数・最古
+  メッセージの経過時間・メッセージ内容は本節の手順で別途確認する必要がある。
 ・DLQ のメッセージは 14 日で自動的に消える(MessageRetentionPeriod = 14 日)。
-・したがって、**この手順は「見に行った時点の状態を知る」ものであり、「見に行かなければ気づかない」**。
-  気づく仕組み(Alarm・通知・Issue の自動起票)の代替にならない。それらは Issue #349 ①・Issue #132 の担当である。
+  Alarmが後からOKへ戻っても、原因が直ったとは限らない(24.5参照)。
 ・「誰が・いつ(どの頻度で)確認するか」は、本節では**決めていない**(未決定。Issue #349 ⑤ の残り)。
 ```
 
@@ -2748,11 +2752,15 @@ worker・terminal_failureの連鎖(#430)でDLQに溜まったメッセージに�
 キューの名前は `jstock-advisor-<種別>`(スタック名が前置される)。
 
 ```
-Production に現在ある DLQ
+Production に現在ある DLQ(4本とも Issue #349 で CloudWatch Alarm を接続済み)
   jstock-advisor-watchlist-terminal-failure-dlq     ウォッチリスト評価の終端失敗の DLQ
-  jstock-advisor-async-invoke-failure-dlq           BuyCandidates / HoldingsWatchlist の非同期 invoke の失敗(OnFailure の宛先)
+  jstock-advisor-async-invoke-failure-dlq           BuyCandidates / HoldingsWatchlist の非同期 invoke の失敗(OnFailure の宛先。
+                                                     1本のDLQを両関数が共有するため、メッセージ単体からはどちらの関数由来か
+                                                     区別できない。LINE通知の対象名は「非同期実行の失敗」〔#349〕)
 
-#396(#319 Phase 1)を含む反映の後に存在するキュー(反映前は無い。現時点でコードから参照されない)
+#396(#319 Phase 1)を含む反映の後に存在するキュー(現時点でコードから参照されない。dormant。
+Phase 2でdispatch側が切り替わるまで構造的にメッセージが入らないが、Alarmは監視漏れ防止のため
+USER決定により先行接続済み)
   jstock-advisor-buy-candidate-terminal-failure-dlq
   jstock-advisor-holdings-watchlist-terminal-failure-dlq
 
@@ -2799,6 +2807,21 @@ aws cloudwatch get-metric-statistics --namespace AWS/SQS --metric-name Approxima
 ・MANAGER / USER へ報告し、対応(原因の調査・redrive の要否)の判断を仰ぐ。
 ・14 日で消えるため、最古のメッセージの経過時間が 14 日に近い場合は、消える前に判断が要ることを、報告に含める。
 ```
+
+★ **DLQ Alarm が OK へ戻っても、対象 job・batch が復旧したことを意味しない**(Issue #349。
+27.4 と同じ考え方)。DLQ には自動消費者が無いため、OK へ戻る経路は次の 3 通りしかなく、
+いずれも「原因が直った」ことを直接には意味しない。
+
+```
+(a) 人手で redrive/purge した           → 対応者の作業内容を別途確認する(本節の範囲外)
+(b) 14 日retentionで自然に消えた         → メッセージの内容は既に失われている
+                                          (read-only観測でも読めない。24.5のとおり、
+                                          消える前の redrive 要否判断は Human Gate)
+(c) 対応job側で根本原因が直り、再実行が成功した → これだけが実際の復旧だが、Alarmの状態
+                                          だけからは(a)(b)と区別できない
+```
+
+OKへ戻った場合も、対応するjobの直近の完了判定(4節・25節・27.3.4)を別途確認すること。
 
 ### 24.6 実測の例(2026-09-20。参考値であり、保証ではない)
 

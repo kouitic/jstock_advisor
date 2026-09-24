@@ -294,6 +294,48 @@ def test_function_name_is_picked_by_name_not_by_position() -> None:
     assert "$LATEST" not in fp_input.job_name
 
 
+def test_queue_name_dimension_is_used_when_function_name_is_absent() -> None:
+    """Issue #349: SQSベースのAlarm(DLQ滞留)はFunctionName dimensionを持たず、
+    QueueName dimensionを持つ。この場合job_nameはQueueNameから解決されること
+    (是正前は"unknown"に落ちていた)。"""
+    message = {
+        "AlarmName": "jstock-advisor-watchlist-terminal-failure-dlq-messages",
+        "Trigger": {
+            "MetricName": "ApproximateNumberOfMessagesVisible",
+            "Namespace": "AWS/SQS",
+            "Dimensions": [
+                {"name": "QueueName", "value": "jstock-advisor-watchlist-terminal-failure-dlq"}
+            ],
+        },
+    }
+
+    signal = handler_module._normalize_alarm_message(message, dt.datetime.now(dt.UTC))
+    fp_input = handler_module._build_fingerprint_input(signal)
+
+    assert fp_input.job_name == "jstock-advisor-watchlist-terminal-failure-dlq"
+    assert resolve_incident_job(signal.job_name).value == "ウォッチリスト自動追加"
+
+
+def test_function_name_dimension_is_preferred_over_queue_name() -> None:
+    """FunctionName dimensionがあれば、QueueName dimensionが同時にあってもFunctionName
+    を優先する(既存のLambda alarm経路の挙動を変更しない)。"""
+    message = {
+        "AlarmName": "x",
+        "Trigger": {
+            "MetricName": "Errors",
+            "Dimensions": [
+                {"name": "QueueName", "value": "jstock-advisor-some-queue"},
+                {"name": "FunctionName", "value": "jstock-advisor-evaluation"},
+            ],
+        },
+    }
+
+    signal = handler_module._normalize_alarm_message(message, dt.datetime.now(dt.UTC))
+    fp_input = handler_module._build_fingerprint_input(signal)
+
+    assert fp_input.job_name == "jstock-advisor-evaluation"
+
+
 # --- 複数レコード ---------------------------------------------------------------
 
 
