@@ -125,6 +125,23 @@ def test_queue_backlog_ignores_zero_invocations_without_crashing() -> None:
     assert result is not None
 
 
+def test_queue_backlog_logs_throttle_rate_when_fully_throttled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★ #507レビュー非BLOCKING指摘の直接固定: 全スロットル
+    (throttles>0だがinvocations=0。呼び出しが1件も受理されない、最も見たい
+    状況)でもthrottle_rateのログが出ること。以前は`if invocations > 0`が
+    ガードだったため、この状況ではログが1行も出なかった。
+    """
+    now = _now_jst(_MON, 8)
+    metrics = _metrics([100, 200, 300], invocations=0, throttles=10)
+
+    with caplog.at_level("INFO", logger=handler_module.logger.name):
+        handler_module._detect_watchlist_queue_backlog(metrics, now)
+
+    assert "throttle_rate=1.0000" in caplog.text
+
+
 def test_queue_backlog_envelope_does_not_carry_throttle_rate() -> None:
     """★ USER決定の直接固定: throttle_rateは補助指標のみで、SNS envelopeへは
     含めない(#132 H-30のallowlistに比率を運ぶフィールドが無いため)。
@@ -140,26 +157,37 @@ def test_queue_backlog_envelope_does_not_carry_throttle_rate() -> None:
     assert "failure_count" not in result
 
 
+def _timestamps_for(count: int, *, start: dt.datetime | None = None) -> list[dt.datetime]:
+    base = start if start is not None else _now_jst(_MON, 7)
+    return [base + dt.timedelta(minutes=5 * i) for i in range(count)]
+
+
 def test_fetch_watchlist_worker_metrics_builds_expected_metric_data_queries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """S-6が観測するNamespace/MetricName/Dimensionsが正しいこと(実測に基づく:
     AWS/SQS ApproximateAgeOfOldestMessage(QueueName)/ AWS/Lambda Throttles・
-    Invocations(FunctionName))。
+    Invocations(FunctionName))。ScanBy=TimestampAscendingを明示していること
+    (#507レビューF1是正)も固定する。
     """
     monkeypatch.setenv("WATCHLIST_SCREENING_QUEUE_NAME", "my-queue")
     monkeypatch.setenv("WATCHLIST_WORKER_FUNCTION_NAME", "my-stack-watchlist-worker")
 
     captured: dict[str, object] = {}
+    ages_ts = _timestamps_for(3)
 
     class _FakeCloudWatch:
         def get_metric_data(self, **kwargs: object) -> dict:
             captured.update(kwargs)
             return {
                 "MetricDataResults": [
-                    {"Id": "oldest_message_age", "Values": [601.0, 602.0, 603.0]},
-                    {"Id": "throttles", "Values": [5.0]},
-                    {"Id": "invocations", "Values": [100.0]},
+                    {
+                        "Id": "oldest_message_age",
+                        "Timestamps": ages_ts,
+                        "Values": [601.0, 602.0, 603.0],
+                    },
+                    {"Id": "throttles", "Timestamps": ages_ts[:1], "Values": [5.0]},
+                    {"Id": "invocations", "Timestamps": ages_ts[:1], "Values": [100.0]},
                 ]
             }
 
@@ -172,6 +200,7 @@ def test_fetch_watchlist_worker_metrics_builds_expected_metric_data_queries(
         "throttles": [5.0],
         "invocations": [100.0],
     }
+    assert captured["ScanBy"] == "TimestampAscending"
     queries = {q["Id"]: q for q in captured["MetricDataQueries"]}
     oldest = queries["oldest_message_age"]["MetricStat"]
     assert oldest["Metric"]["Namespace"] == "AWS/SQS"
@@ -185,9 +214,57 @@ def test_fetch_watchlist_worker_metrics_builds_expected_metric_data_queries(
     assert throttles["Metric"]["Dimensions"] == [
         {"Name": "FunctionName", "Value": "my-stack-watchlist-worker"}
     ]
+    # #507レビュー非BLOCKING指摘: Periodは問い合わせ窓(20分)と一致させる
+    # (以前のPeriod=86400は「本日の累積」であるかのような誤解を招いていた)。
+    assert throttles["Period"] == handler_module._QUEUE_BACKLOG_LOOKBACK_MINUTES * 60
 
     invocations = queries["invocations"]["MetricStat"]
     assert invocations["Metric"]["MetricName"] == "Invocations"
+
+
+def test_fetch_watchlist_worker_metrics_sorts_by_timestamp_regardless_of_api_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ #507レビューF1の直接固定: GetMetricDataの既定のScanBy
+    (TimestampDescending。boto3のAPIモデルに明記)を模してAPIが**降順**
+    (新→古)でValues/Timestampsを返してきても、`_fetch_watchlist_worker_metrics`
+    は timestamp昇順(古→新)へ並べ替えて返すこと。並べ替えていなければ、
+    呼び出し元の`datapoints[-3:]`は最古3点を取ってしまい、直近の滞留を
+    検知できない(false negative)。
+    """
+    monkeypatch.setenv("WATCHLIST_SCREENING_QUEUE_NAME", "my-queue")
+    monkeypatch.setenv("WATCHLIST_WORKER_FUNCTION_NAME", "my-stack-watchlist-worker")
+
+    now = _now_jst(_MON, 8)
+    # 古い→新しい の実際の時系列(値は昇順のタイムスタンプに対応させる)。
+    oldest_first_timestamps = [now - dt.timedelta(minutes=15), now - dt.timedelta(minutes=10), now]
+    oldest_first_values = [100.0, 601.0, 700.0]  # 直近2点(601, 700)が閾値超過
+
+    class _DescendingFakeCloudWatch:
+        def get_metric_data(self, **kwargs: object) -> dict:
+            # AWSの既定(ScanBy未指定 = TimestampDescending)を模して、
+            # 新しい→古い の順で返す(呼び出し側がScanByを渡していても、
+            # このフェイクは無視してAPIの実際の既定挙動を再現する)。
+            return {
+                "MetricDataResults": [
+                    {
+                        "Id": "oldest_message_age",
+                        "Timestamps": list(reversed(oldest_first_timestamps)),
+                        "Values": list(reversed(oldest_first_values)),
+                    },
+                    {"Id": "throttles", "Timestamps": [now], "Values": [0.0]},
+                    {"Id": "invocations", "Timestamps": [now], "Values": [0.0]},
+                ]
+            }
+
+    monkeypatch.setattr(
+        handler_module.boto3, "client", lambda _service: _DescendingFakeCloudWatch()
+    )
+
+    metrics = handler_module._fetch_watchlist_worker_metrics(now)
+
+    # 並べ替え後は古い→新しいの順(=API返却順そのままではない)。
+    assert metrics["oldest_message_age"] == oldest_first_values
 
 
 # --- S-7: watchlist削除実績ゼロの連続営業日 ---------------------------------------

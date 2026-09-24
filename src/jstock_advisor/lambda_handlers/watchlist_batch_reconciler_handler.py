@@ -395,6 +395,24 @@ def _detect_watchlist_universe_load_failure_streak(
     }
 
 
+def _sorted_values_ascending_by_timestamp(result: dict[str, Any]) -> list[float]:
+    """GetMetricDataの1件分の結果から、timestamp昇順(古い→新しい)のValuesを返す。
+
+    ★ #507レビューF1是正: `Values`/`Timestamps`の並び順はAPIの`ScanBy`
+    パラメータに依存する(boto3のAPIモデル: 省略時の既定は
+    `TimestampDescending`〔新→古〕)。呼び出し側で`ScanBy=TimestampAscending`
+    を明示していても、**それだけを信用せず**、ここで`Timestamps`を使って
+    明示的に並べ替える(返却順の仮定に依存しない設計。降順のまま
+    `datapoints[-3:]`のようにtail-sliceすると、直近3点ではなく最古3点を
+    取ってしまい、①滞留の検知漏れ〔false negative〕/ ②解消済みの古い状態を
+    検知し続ける〔stale〕という2方向の誤りが起こる)。
+    """
+    timestamps = result.get("Timestamps") or []
+    values = result.get("Values") or []
+    paired = sorted(zip(timestamps, values, strict=True), key=lambda pair: pair[0])
+    return [value for _timestamp, value in paired]
+
+
 def _fetch_watchlist_worker_metrics(now: dt.datetime) -> dict[str, list[float]]:
     """S-6: SQS OldestMessageAge(判定対象)・Lambda Throttles/Invocations
     (throttle_rate計算用の補助指標)を1回のGetMetricDataでまとめて取得する
@@ -404,11 +422,20 @@ def _fetch_watchlist_worker_metrics(now: dt.datetime) -> dict[str, list[float]]:
     サポートしていない(メトリクスはARNを持たない。AWSの既知の制約であり
     本プロジェクト固有の設計判断ではない)ため、IAM側のResourceは"*"になる
     (infra/template.yamlのコメント参照)。
+
+    Throttles/Invocationsの`Period`は、直近`_QUEUE_BACKLOG_LOOKBACK_MINUTES`分
+    の問い合わせ窓とちょうど一致させる(#507レビュー非BLOCKING指摘: 以前は
+    Period=86400〔1日〕を使っていたため、ログのthrottle_rateが「直近20分」
+    ではなく「本日の累積」であるかのように見えてしまっていた。実際の
+    集計対象はStartTime/EndTimeで指定した窓のデータのみであり、Periodの
+    値そのものが集計範囲を広げるわけではないが、値の意味を紛らわしくして
+    いたため、窓の長さと一致させて誤解を防ぐ)。
     """
     cloudwatch = boto3.client("cloudwatch")
     queue_name = os.environ["WATCHLIST_SCREENING_QUEUE_NAME"]
     function_name = os.environ["WATCHLIST_WORKER_FUNCTION_NAME"]
     start_time = now - dt.timedelta(minutes=_QUEUE_BACKLOG_LOOKBACK_MINUTES)
+    lookback_period_seconds = _QUEUE_BACKLOG_LOOKBACK_MINUTES * 60
     response = cloudwatch.get_metric_data(
         MetricDataQueries=[
             {
@@ -432,7 +459,7 @@ def _fetch_watchlist_worker_metrics(now: dt.datetime) -> dict[str, list[float]]:
                         "MetricName": "Throttles",
                         "Dimensions": [{"Name": "FunctionName", "Value": function_name}],
                     },
-                    "Period": 86400,
+                    "Period": lookback_period_seconds,
                     "Stat": "Sum",
                 },
                 "ReturnData": True,
@@ -445,7 +472,7 @@ def _fetch_watchlist_worker_metrics(now: dt.datetime) -> dict[str, list[float]]:
                         "MetricName": "Invocations",
                         "Dimensions": [{"Name": "FunctionName", "Value": function_name}],
                     },
-                    "Period": 86400,
+                    "Period": lookback_period_seconds,
                     "Stat": "Sum",
                 },
                 "ReturnData": True,
@@ -453,12 +480,17 @@ def _fetch_watchlist_worker_metrics(now: dt.datetime) -> dict[str, list[float]]:
         ],
         StartTime=start_time,
         EndTime=now,
+        # #507レビューF1是正: 返却順の既定(TimestampDescending)に依存しない
+        # よう明示するが、_sorted_values_ascending_by_timestamp()側でも
+        # Timestampsを使って独立に並べ替える(二重の防御。片方が外れても
+        # 誤判定しない)。
+        ScanBy="TimestampAscending",
     )
     metrics: dict[str, list[float]] = {}
     for result in response.get("MetricDataResults", []):
         metric_id = result.get("Id")
         if metric_id is not None:
-            metrics[metric_id] = list(result.get("Values") or [])
+            metrics[metric_id] = _sorted_values_ascending_by_timestamp(result)
     return metrics
 
 
@@ -476,11 +508,17 @@ def _detect_watchlist_queue_backlog(
     """
     throttles = sum(metrics.get(_METRIC_ID_THROTTLES, []))
     invocations = sum(metrics.get(_METRIC_ID_INVOCATIONS, []))
-    if invocations > 0:
+    # #507レビュー非BLOCKING指摘: 全スロットル(throttles>0だがinvocations=0。
+    # 呼び出しが1件も受理されず「最も見たい状況」)でもログへ残すため、
+    # ガードを`invocations > 0`ではなく`throttles + invocations > 0`にする
+    # (どちらも0=直近window内にそもそも呼び出し試行が無かった、というときだけ
+    # 出力を省略する)。
+    if throttles + invocations > 0:
         throttle_rate = throttles / (throttles + invocations)
         logger.info(
-            "watchlist reconciler: watchlist-worker throttle_rate=%.4f throttles=%.0f "
-            "invocations=%.0f(補助指標。単独ではincidentにしない)",
+            "watchlist reconciler: watchlist-worker 直近%d分のthrottle_rate=%.4f "
+            "throttles=%.0f invocations=%.0f(補助指標。単独ではincidentにしない)",
+            _QUEUE_BACKLOG_LOOKBACK_MINUTES,
             throttle_rate,
             throttles,
             invocations,

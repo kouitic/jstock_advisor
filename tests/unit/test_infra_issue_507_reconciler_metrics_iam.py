@@ -2,9 +2,14 @@
 観測)の最小権限どおりであることの回帰テスト。
 
 `cloudwatch:GetMetricData`はCloudWatch側がリソースレベル権限自体をサポートして
-いない(メトリクスはARNを持たない。AWSの既知の制約)ため`Resource: "*"`が必須だが、
-`sqs:GetQueueAttributes`はSQSキュー単位でリソースレベル権限をサポートするため
-厳密にscopeされていることを固定する。
+いない(メトリクスはARNを持たない。AWSの既知の制約)ため`Resource: "*"`が必須。
+
+★ #507レビューF2是正: 実装(`_fetch_watchlist_worker_metrics`)はCloudWatch
+GetMetricDataのみでOldestMessageAge/Throttles/Invocationsをすべて取得しており、
+`boto3.client("sqs")`を一度も構築しない。当初付与していた
+`sqs:GetQueueAttributes`は未使用の権限だったため削除した(最小権限の原則。
+使わない権限は持たせない)。本ファイルはその削除を固定し、将来の再追加を
+検知する(実際に使うようになった場合のみ、使用箇所とともに再度追加すること)。
 
 テンプレートの静的検証のみで、AWSへのアクセスは行わない。
 """
@@ -63,31 +68,21 @@ def test_cloudwatch_get_metric_data_requires_wildcard_resource() -> None:
     assert statement["Resource"] == "*"
 
 
-def test_sqs_get_queue_attributes_is_scoped_to_the_screening_queue_without_wildcard() -> None:
-    [statement] = _statements_by_sid(_RECONCILER_FUNCTION, "ObserveWatchlistScreeningQueueDepth")
-    assert statement["Effect"] == "Allow"
-    assert _actions(statement) == {"sqs:GetQueueAttributes"}
-    resources = statement["Resource"]
-    resources = resources if isinstance(resources, list) else [resources]
-    assert resources == [{"Fn::GetAtt": f"{_QUEUE_LOGICAL_ID}.Arn"}]
-    assert "*" not in str(resources)
-
-
-def test_reconciler_has_no_write_or_delete_permission_on_the_screening_queue() -> None:
-    """S-6は読み取り専用の観測であり、SQSメッセージの送信・削除・変更権限を
-    一切持たない(hidden writeが無いことのIAM側の担保。CLAUDE.md §3)。
+def test_reconciler_has_no_sqs_permission_at_all() -> None:
+    """★ #507レビューF2の直接固定: S-6はCloudWatch GetMetricData経由で
+    OldestMessageAgeを観測するため、SQSへの直接API権限(GetQueueAttributes
+    含む)を一切必要としない。未使用の権限を持たせない(最小権限の原則。
+    hidden writeが無いことの確認と同種。CLAUDE.md §3)。
     """
-    statement = _statements_by_sid(_RECONCILER_FUNCTION, "ObserveWatchlistScreeningQueueDepth")[0]
-    actions = _actions(statement)
-    forbidden = {
-        "sqs:SendMessage",
-        "sqs:SendMessageBatch",
-        "sqs:DeleteMessage",
-        "sqs:DeleteMessageBatch",
-        "sqs:PurgeQueue",
-        "sqs:ChangeMessageVisibility",
-    }
-    assert not (actions & forbidden)
+    policies = _resources()[_RECONCILER_FUNCTION]["Properties"].get("Policies", [])
+    all_actions: set[str] = set()
+    for policy in policies:
+        if not isinstance(policy, dict):
+            continue
+        for statement in policy.get("Statement", []) or []:
+            all_actions |= _actions(statement)
+    sqs_actions = {action for action in all_actions if action.startswith("sqs:")}
+    assert sqs_actions == set()
 
 
 def test_reconciler_environment_has_queue_and_worker_function_names() -> None:
