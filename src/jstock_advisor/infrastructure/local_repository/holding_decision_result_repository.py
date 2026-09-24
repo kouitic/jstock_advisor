@@ -29,6 +29,18 @@ class HoldingDecisionResultRepository:
             )
         self._store.upsert(result)
 
+    def insert_if_absent(self, result: HoldingDecisionResult) -> bool:
+        """holding_decision_result_idが未存在の場合のみ原子的に追加してTrue、
+        既に存在すればFalse(既存の値は変更しない)。
+
+        Issue #528(#71 F-D2/F-C8のD3分): 非同期fan-outの再試行で同一
+        (batch_id, holding_id)が2回処理されても、holding_decision_result_idを
+        決定的にした呼び出し元と組み合わせることで判定履歴が複製されないように
+        する(save()の既存契約は変更しない)。RecommendationRepository.
+        insert_if_absent()(recommendation_repository.py)と同じ設計方針。
+        """
+        return self._store.insert_if_absent(result)
+
     def list_by_holding(self, holding_id: str) -> list[HoldingDecisionResult]:
         items = self._store.find(lambda r: r.holding_id == holding_id)
         return sorted(items, key=lambda r: r.evaluated_at)

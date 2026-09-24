@@ -500,6 +500,14 @@ class _SpyRecommendationRepository:
     def get(self, recommendation_id: str) -> Recommendation | None:
         return None
 
+    def insert_if_absent(self, recommendation: Recommendation) -> bool:
+        """Issue #528対応: 実装のRecommendationRepository.insert_if_absent()と
+        同じ意味(既存recommendation_idなら追加せずFalse)をこのspyでも再現する。"""
+        if any(r.recommendation_id == recommendation.recommendation_id for r in self.saved):
+            return False
+        self.saved.append(recommendation)
+        return True
+
 
 class _SpyHoldingDecisionResultRepository:
     def __init__(self) -> None:
@@ -507,6 +515,18 @@ class _SpyHoldingDecisionResultRepository:
 
     def save(self, result: object) -> None:
         self.saved.append(result)
+
+    def insert_if_absent(self, result: object) -> bool:
+        """Issue #528対応: 実装のHoldingDecisionResultRepository.insert_if_absent()
+        と同じ意味をこのspyでも再現する。"""
+        result_id = result.holding_decision_result_id  # type: ignore[attr-defined]
+        if any(
+            r.holding_decision_result_id == result_id  # type: ignore[attr-defined]
+            for r in self.saved
+        ):
+            return False
+        self.saved.append(result)
+        return True
 
 
 class _AlwaysSendsNotificationService:
@@ -1954,6 +1974,15 @@ def _run_holding_shadow_golden(
             events.append("recommendation_saved")
             saved.append(rec.model_dump(mode="json"))
 
+        def insert_if_absent(self, rec: Recommendation) -> bool:
+            """Issue #528対応: このgoldenテストは重複配信を検証対象にしていない
+            (batch_idは固定文字列で毎回同じだが、recommendation_idはテスト側で
+            固定値を使わないため実質衝突しない)。常にTrue(新規)として振る舞い、
+            recommendation_saved以下のevent順序を従来どおり再現する。"""
+            events.append("recommendation_saved")
+            saved.append(rec.model_dump(mode="json"))
+            return True
+
     monkeypatch.setattr(handler_module, "RecommendationRepository", _GoldenRepo)
     snapshots: list[object] = []
 
@@ -2035,11 +2064,20 @@ def test_issue_457_holdings_shadow_on_and_off_are_identical_except_the_shadow_re
 
 
 def test_issue_457_holdings_shadow_record_content(monkeypatch: pytest.MonkeyPatch) -> None:
-    """記録は強い判定(FULL_PROFIT_TAKE)について1件。G3(緩和要因の不明)のfindingが付く。"""
+    """記録は強い判定(FULL_PROFIT_TAKE)について1件。G3(緩和要因の不明)のfindingが付く。
+
+    Issue #528対応: `_run_holding_shadow_golden`がevent["batch_id"]="test-batch-457"
+    を渡すため、fixtureの固定recommendation_id("rec-1")は
+    `_deterministic_recommendation_id()`(PROFIT_TAKING engine)で上書きされる。
+    期待値はfixtureの固定文字列ではなく、この関数で実際に計算する。
+    """
     on = _run_holding_shadow_golden(monkeypatch, shadow_mode="SHADOW")
 
+    expected_recommendation_id = handler_module._deterministic_recommendation_id(
+        "test-batch-457", build_holding_id(DEFAULT_OWNER, "2914"), "PROFIT_TAKING"
+    )
     (record,) = on["shadow_audits"]
-    assert record["audit_id"] == "judgment_safety_shadow:rec-1"
+    assert record["audit_id"] == f"judgment_safety_shadow:{expected_recommendation_id}"
     assert record["input_values"]["engine"] == "HOLDINGS_PROFIT_TAKING"
     assert record["input_values"]["recommendation_type"] == "FULL_PROFIT_TAKE"
     assert [f["reason_code"] for f in record["output_values"]["findings"]] == [

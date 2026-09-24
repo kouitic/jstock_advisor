@@ -164,6 +164,31 @@ _PROCESS_NAME = "保有銘柄分析"
 # 後方互換専用で、本番の呼び出し経路では使われない。
 _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
 
+# Issue #528(#71 F-D2/F-C8のD2/D3分。D1〔buy_candidates_handler.py〕で確立済みの
+# パターンをそのまま横展開する): 非同期fan-outの再試行・二重配信・部分失敗後の
+# 再配信で、Recommendation/HoldingDecisionResultが複製保存されないようにする。
+# batch_idが確定している(=通常のfan-out経路)場合のみIDを決定的にする。
+# batch_id=Noneの呼び出し元(白箱テスト等)は対象外とし、従来どおりuuid4のまま
+# にする(挙動不変)。LEGACY_SELL/PROFIT_TAKING/HOLDING_DECISIONの3 engineは
+# 互いに排他的にしか発火しないが(:843節「新旧エンジンの排他制御」)、engine名を
+# IDの入力へ含めることで、将来この排他性が変わっても衝突しない(USER決定)。
+_DETERMINISTIC_ID_NAMESPACE = uuid.UUID("8a2f1c3d-5e6b-4a7c-9d8e-1f2a3b4c5d6e")
+
+
+def _deterministic_recommendation_id(batch_id: str, holding_id: str, engine: str) -> str:
+    return str(
+        uuid.uuid5(_DETERMINISTIC_ID_NAMESPACE, f"recommendation:{batch_id}:{holding_id}:{engine}")
+    )
+
+
+def _deterministic_holding_decision_result_id(batch_id: str, holding_id: str) -> str:
+    """HOLDING_DECISION_SCORE engineのみがHoldingDecisionResultを生成するため、
+    engine名は不要(recommendation_idとは別のprefixを使い、値空間が
+    絶対に重ならないようにする)。"""
+    return str(
+        uuid.uuid5(_DETERMINISTIC_ID_NAMESPACE, f"holding_decision_result:{batch_id}:{holding_id}")
+    )
+
 
 @dataclass(frozen=True)
 class _HoldingResult:
@@ -434,14 +459,30 @@ def _notify_legacy_sell_and_build_result(
     """Recommendation保存はkill switchの影響を受けず常に行う(コードレビュー対応)。
     LINE送信のみ`notification_enabled`で制御する。通知検証モード機能(2026-08追加)
     ではkill switchとは独立に、Recommendation/DecisionSnapshot保存自体をスキップする。
+
+    Issue #528: `recommendation`は呼び出し元(`_analyze_one_holding`)で
+    batch_id確定時のみ決定的IDへ既に上書きされている。ここでは
+    `insert_if_absent()`(D1と同じ既存プリミティブ)で原子的に保存し、
+    非同期fan-outの再試行等による重複配信時は再保存をスキップする。
     """
     if not execution_context.is_validation:
-        recommendation_repo.save(recommendation)
+        is_new_recommendation = recommendation_repo.insert_if_absent(recommendation)
+        if not is_new_recommendation:
+            logger.info(
+                "holdings legacy sell: duplicate delivery skipped (recommendation "
+                "already exists) recommendation_id=%s",
+                recommendation.recommendation_id,
+            )
         # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
         # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
-        save_decision_snapshot_safely(
-            DecisionSnapshotRepository(), recommendation, DecisionType.SELL, logger
-        )
+        # Issue #528: 重複配信でRecommendationが既に存在した場合はスキップする
+        # (decision_idはrecommendation_idの決定的関数のため再実行しても安全だが、
+        # 判定に使ったsnapshotの時刻等がリトライごとに変わり得ることに起因する
+        # 不要な内容比較・警告ログを避ける。D1と同じ理由)。
+        if is_new_recommendation:
+            save_decision_snapshot_safely(
+                DecisionSnapshotRepository(), recommendation, DecisionType.SELL, logger
+            )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
     )
@@ -497,6 +538,7 @@ def _notify_holding_decision_and_build_result(
     notification_service: LineNotificationService,
     notification_enabled: bool,
     rule_version_service: RuleVersionService,
+    batch_id: str | None,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> tuple[_HoldingResult, HoldingDecisionResult]:
     """保有判断スコアの通知を行う。
@@ -504,8 +546,16 @@ def _notify_holding_decision_and_build_result(
     戻り値は(_HoldingResult, 保存用に更新したHoldingDecisionResult)。
     Recommendation生成・保存・recommendation_id設定はkill switchの影響を受けず常に行う
     (コードレビュー対応)。LINE送信のみ`notification_enabled`で制御する。
+
+    Issue #528: batch_idが確定している場合はrecommendation_idを決定的にし、
+    `insert_if_absent()`で原子的に保存する(D1と同じパターン)。batch_id=None
+    (白箱テスト等)は従来どおりuuid4のまま(挙動不変)。
     """
-    recommendation_id = str(uuid.uuid4())
+    recommendation_id = (
+        _deterministic_recommendation_id(batch_id, holding.holding_id, "HOLDING_DECISION")
+        if batch_id is not None
+        else str(uuid.uuid4())
+    )
     # 判定精度向上機能次フェーズSTEP2: Exit Price Range(Shadow計測)。
     # HoldingDecisionパイプラインではここ(holdingとsnapshotが揃う唯一の
     # 箇所)で1回だけ計算し、Builderへ渡す(Builder自身は算出しない)。
@@ -549,12 +599,20 @@ def _notify_holding_decision_and_build_result(
     # 通知検証モード機能(2026-08追加): kill switchとは独立に、VALIDATIONでは
     # Recommendation/DecisionSnapshot保存自体をスキップする。
     if not execution_context.is_validation:
-        recommendation_repo.save(recommendation)
+        is_new_recommendation = recommendation_repo.insert_if_absent(recommendation)
+        if not is_new_recommendation:
+            logger.info(
+                "holdings holding_decision: duplicate delivery skipped (recommendation "
+                "already exists) recommendation_id=%s",
+                recommendation.recommendation_id,
+            )
         # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目はPhase Bまで
         # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
-        save_decision_snapshot_safely(
-            DecisionSnapshotRepository(), recommendation, DecisionType.HOLDING_DECISION, logger
-        )
+        # Issue #528: 重複配信時はスキップする(D1と同じ理由)。
+        if is_new_recommendation:
+            save_decision_snapshot_safely(
+                DecisionSnapshotRepository(), recommendation, DecisionType.HOLDING_DECISION, logger
+            )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
     )
@@ -695,9 +753,14 @@ def _analyze_one_holding(
     recommendation_repo: RecommendationRepository,
     notification_service: LineNotificationService,
     rule_version_service: RuleVersionService,
+    batch_id: str | None = None,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
 ) -> _HoldingResult:
     """1銘柄を判定・通知する。
+
+    `batch_id`(Issue #528): 確定している場合、Recommendation/HoldingDecisionResultの
+    IDを決定的にし、非同期fan-outの再試行・二重配信での複製保存を防ぐ(D1と同じ
+    パターン)。Noneの場合(白箱テスト等)は従来どおりuuid4のまま(挙動不変)。
 
     sell_signal/profit_takingは同一銘柄のデータを必要とするため、
     stock_snapshotを一度だけ取得して両方に渡す(実データ取得の重複を避ける)。
@@ -872,10 +935,21 @@ def _analyze_one_holding(
         sell_outcome = sell_service.analyze(holding, now, snapshot=snapshot)
         legacy_reason_codes = sell_outcome.triggered_rule_names
         if sell_outcome.recommendation is not None and mode_plan.allow_legacy_sell_notification:
+            # Issue #528: batch_id確定時はrecommendation_idを決定的にする
+            # (_notify_legacy_sell_and_build_result側でinsert_if_absent()を使う)。
+            sell_recommendation = sell_outcome.recommendation
+            if batch_id is not None:
+                sell_recommendation = sell_recommendation.model_copy(
+                    update={
+                        "recommendation_id": _deterministic_recommendation_id(
+                            batch_id, holding.holding_id, "LEGACY_SELL"
+                        )
+                    }
+                )
             legacy_result = _notify_legacy_sell_and_build_result(
                 holding,
                 now,
-                sell_outcome.recommendation,
+                sell_recommendation,
                 recommendation_repo,
                 notification_service,
                 notification_enabled,
@@ -951,6 +1025,17 @@ def _analyze_one_holding(
             )
         elif hd_outcome.result is not None:
             hd_result = hd_outcome.result
+            # Issue #528: batch_id確定時はholding_decision_result_idを決定的にする
+            # (recommendation_idの決定化はこの後の`_notify_holding_decision_and_
+            # build_result`呼び出しが別途行う。両者は別のprefixのため衝突しない)。
+            if batch_id is not None:
+                hd_result = hd_result.model_copy(
+                    update={
+                        "holding_decision_result_id": _deterministic_holding_decision_result_id(
+                            batch_id, holding.holding_id
+                        )
+                    }
+                )
             if mode_plan.allow_holding_decision_notification and hd_result.should_notify:
                 notify_fn = _notify_holding_decision_and_build_result
                 holding_decision_result_notified, hd_result = notify_fn(
@@ -964,12 +1049,22 @@ def _analyze_one_holding(
                     notification_service,
                     notification_enabled,
                     rule_version_service,
+                    batch_id,
                     execution_context,
                 )
             # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
             # 汚さないため保存自体をスキップする。
+            # Issue #528: insert_if_absent()で原子的に保存する(非同期fan-outの
+            # 再試行・二重配信での複製保存を防ぐ)。
             if not execution_context.is_validation:
-                holding_decision_result_repo.save(hd_result)
+                is_new_result = holding_decision_result_repo.insert_if_absent(hd_result)
+                if not is_new_result:
+                    logger.info(
+                        "holdings holding_decision: duplicate delivery skipped "
+                        "(holding_decision_result already exists) "
+                        "holding_decision_result_id=%s",
+                        hd_result.holding_decision_result_id,
+                    )
 
     if legacy_result is not None:
         _persist_holding_evaluation_record(
@@ -1069,33 +1164,55 @@ def _analyze_one_holding(
         return result
 
     pt_outcome = profit_service.analyze(holding, now, snapshot=snapshot)
-    if pt_outcome.recommendation is not None:
+    # Issue #528: batch_id確定時はrecommendation_idを決定的にする(insert_if_absent()
+    # と組み合わせて非同期fan-outの再試行・二重配信での複製保存を防ぐ。D1と同じ
+    # パターン)。`pt_outcome`自体は変更せず(白箱テストがduck-typeの代替
+    # 実装を返す場合があり、dataclasses.replace()が使えないため)、以降はこの
+    # ローカル変数`pt_recommendation`を使う。
+    pt_recommendation = pt_outcome.recommendation
+    if batch_id is not None and pt_recommendation is not None:
+        pt_recommendation = pt_recommendation.model_copy(
+            update={
+                "recommendation_id": _deterministic_recommendation_id(
+                    batch_id, holding.holding_id, "PROFIT_TAKING"
+                )
+            }
+        )
+    if pt_recommendation is not None:
         # 通知検証モード機能(2026-08追加): kill switchとは独立に、VALIDATIONでは
         # Recommendation/DecisionSnapshot保存自体をスキップする。
         if not execution_context.is_validation:
-            recommendation_repo.save(pt_outcome.recommendation)
+            is_new_recommendation = recommendation_repo.insert_if_absent(pt_recommendation)
+            if not is_new_recommendation:
+                logger.info(
+                    "holdings profit_taking: duplicate delivery skipped (recommendation "
+                    "already exists) recommendation_id=%s",
+                    pt_recommendation.recommendation_id,
+                )
             # 判定精度向上機能Phase A: DecisionSnapshotを記録する(スコア項目は
             # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
-            save_decision_snapshot_safely(
-                DecisionSnapshotRepository(),
-                pt_outcome.recommendation,
-                DecisionType.PROFIT_TAKING,
-                logger,
-            )
-            # Issue #160 / #457(PR-3): 判断の安全条件(G1〜G4)のshadow計測。**保存が完了した
-            # 後・通知の前**に置くため、Recommendation・DecisionSnapshot・通知・戻り値を
-            # 変えられない。
-            # shadowがOFF(既定)なら何もしない。SHADOWでも評価・記録の失敗は隔離される。
-            # VALIDATIONは上のifが既に除外している(shadowを実行しない)。
-            observe_judgment_safety_shadow(
-                pt_outcome.recommendation,
-                pt_outcome,
-                ENGINE_HOLDINGS_PROFIT_TAKING,
-                now,
-                execution_context=execution_context,
-            )
+            # Issue #528: 重複配信時はスキップする(D1と同じ理由)。
+            if is_new_recommendation:
+                save_decision_snapshot_safely(
+                    DecisionSnapshotRepository(),
+                    pt_recommendation,
+                    DecisionType.PROFIT_TAKING,
+                    logger,
+                )
+                # Issue #160 / #457(PR-3): 判断の安全条件(G1〜G4)のshadow計測。**保存が完了した
+                # 後・通知の前**に置くため、Recommendation・DecisionSnapshot・通知・戻り値を
+                # 変えられない。
+                # shadowがOFF(既定)なら何もしない。SHADOWでも評価・記録の失敗は隔離される。
+                # VALIDATIONは上のifが既に除外している(shadowを実行しない)。
+                observe_judgment_safety_shadow(
+                    pt_recommendation,
+                    pt_outcome,
+                    ENGINE_HOLDINGS_PROFIT_TAKING,
+                    now,
+                    execution_context=execution_context,
+                )
         outcome = _send_or_suppress_notification(
-            pt_outcome.recommendation, notification_enabled, notification_service, now
+            pt_recommendation, notification_enabled, notification_service, now
         )
         # 通知意図3段階化(2026-08): _send_or_suppress_notification()が返す
         # outcome.notification_intentは設定されないため(値を使わない設計、
@@ -1104,9 +1221,9 @@ def _analyze_one_holding(
         # 実送信経路(evaluate_notification_status内)と同じ唯一の正本
         # (resolve_notification_intent_for_recommendation)を使うため判定基準の
         # 重複は生じない。
-        detected_intent = resolve_notification_intent_for_recommendation(pt_outcome.recommendation)
+        detected_intent = resolve_notification_intent_for_recommendation(pt_recommendation)
         attention_origin = (
-            resolve_attention_origin_for_recommendation(pt_outcome.recommendation)
+            resolve_attention_origin_for_recommendation(pt_recommendation)
             if detected_intent is NotificationIntent.ATTENTION
             else None
         )
@@ -1119,19 +1236,19 @@ def _analyze_one_holding(
                 else EvaluationStatus.COMPLETED
             ),
             raw_sell_recommendation_type=None,
-            raw_profit_recommendation_type=pt_outcome.recommendation.raw_recommendation_type,
-            final_recommendation_type=pt_outcome.recommendation.recommendation_type,
+            raw_profit_recommendation_type=pt_recommendation.raw_recommendation_type,
+            final_recommendation_type=pt_recommendation.recommendation_type,
             notification_status=outcome.status,
             notification_suppression_reason=_resolve_suppression_reason(outcome),
             sell_signal_status="NO_SIGNAL",
             profit_taking_status="TRIGGERED",
             fair_value_status=(
-                pt_outcome.recommendation.fair_value_overall_confidence.value
-                if pt_outcome.recommendation.fair_value_overall_confidence
+                pt_recommendation.fair_value_overall_confidence.value
+                if pt_recommendation.fair_value_overall_confidence
                 else "NOT_AVAILABLE"
             ),
             data_quality_status="BLOCKED" if outcome.data_quality_blocked else "OK",
-            confidence=pt_outcome.recommendation.confidence,
+            confidence=pt_recommendation.confidence,
             error_code=None,
             notification_intent=detected_intent,
             attention_origin=attention_origin,
@@ -1160,17 +1277,15 @@ def _analyze_one_holding(
                 outcome.sent and data_quality_ok and detected_intent is NotificationIntent.ATTENTION
             ),
             notification_category=(
-                resolve_notification_category(pt_outcome.recommendation) if outcome.sent else None
+                resolve_notification_category(pt_recommendation) if outcome.sent else None
             ),
             recommendation_type_at_send=(
-                pt_outcome.recommendation.recommendation_type
-                if outcome.sent and data_quality_ok
-                else None
+                pt_recommendation.recommendation_type if outcome.sent and data_quality_ok else None
             ),
             detected_recommendation_type=(
-                pt_outcome.recommendation.recommendation_type if data_quality_ok else None
+                pt_recommendation.recommendation_type if data_quality_ok else None
             ),
-            recommendation_id=pt_outcome.recommendation.recommendation_id,
+            recommendation_id=pt_recommendation.recommendation_id,
         )
         _persist_holding_evaluation_record(
             holding_evaluation_record_repo,
@@ -1546,6 +1661,7 @@ def _process_single_holding(
             recommendation_repo,
             notification_service,
             rule_version_service,
+            batch_id,
             execution_context,
         )
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
