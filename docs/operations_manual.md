@@ -3460,7 +3460,12 @@ model_version`〕と同型の既知パターン)。**実害が出るのは「W9�
 merge・deployを前提にしたものではない。実装内容が変わった場合はこの節も更新する。
 
 ```
-対象4本(真正のDLQ。命名規約ではなくredrive chainの構造で特定)
+対象4本(真正のDLQ。命名規約ではなく、(a)redrive chainの終端として配線されている
+  〔RedrivePolicy.deadLetterTargetArn / EventInvokeConfig.DestinationConfig.OnFailure.
+  Destinationの宛先として参照〕、または(b)MessageRetentionPeriod=1209600〔14日。
+  運用調査用の長期保持〕を持つ、の**和集合**〔かつ自身はRedrivePolicyを持たない〕で特定。
+  (b)はiteration 3で追加された基準で、まだどこからも配線されていない孤立DLQを
+  (a)だけでは拾えない退行への対応)
   WatchlistTerminalFailureDLQ / AsyncInvokeFailureDLQ /
   BuyCandidateTerminalFailureDLQ / HoldingsWatchlistTerminalFailureDLQ
   (後2本は#319 Phase 1で未wiringのdormant DLQだが、Phase 2でdispatch側が
