@@ -8,11 +8,17 @@ Statementに一意なSidが無く、SNSのSetTopicAttributes APIが
 YAML検証(sam validate --lint)では検出できず、実際にAWS APIへ到達して初めて
 顕在化する。
 
-本テストは対象resourceを個別に固定するだけでなく、テンプレート全体を走査して
-「複数Statementを持つPolicyDocumentは全StatementがSidを持ち、かつそのSidが
-同一PolicyDocument内で一意である」ことを汎用的に固定する。#557と同型の
-defect(将来別のresourceへ複数StatementのPolicyDocumentが追加され、Sidを
-付け忘れるケース)を、resourceの種類やLogicalIdに関わらず検知するため。
+本テストは対象resourceを個別に固定する専用テストに加え、
+`AWS::SNS::TopicPolicy`というresource type全体を走査して「複数Statementを
+持つPolicyDocumentは全StatementがSidを持ち、かつそのSidが同一
+PolicyDocument内で一意である」ことを固定する横断テストを持つ(#557
+issuecomment MEDIUM-1レビュー対応)。
+
+この契約はSNS TopicPolicy固有のもの(SNSのSetTopicAttributes APIがSid一意性
+を要求する)であり、AWS::S3::BucketPolicyやIAM inline policy、SQS
+QueuePolicy等、他のPolicyDocumentへは適用されない(それらがSidなしの複数
+Statementを許容するかどうかはサービスごとに異なり、本Issueでは検証していない)。
+そのため横断テストの対象はAWS::SNS::TopicPolicyに限定する。
 
 テンプレートの静的検証のみで、AWSへのアクセスは行わない。
 """
@@ -42,28 +48,21 @@ def _resources() -> dict[str, Any]:
     return _load_template()["Resources"]
 
 
-def _iter_policy_documents(resources: dict[str, Any]) -> list[tuple[str, str, list[Any]]]:
-    """(logical_id, 出現箇所のラベル, Statementリスト)のタプルを、テンプレート内の
-    全PolicyDocumentから収集する(TopicPolicy/QueuePolicy/Role.Policiesの
-    PolicyDocument等、形は問わない)。
+def _sns_topic_policy_statements(resources: dict[str, Any]) -> list[tuple[str, list[Any]]]:
+    """(logical_id, Statementリスト)のタプルを、`AWS::SNS::TopicPolicy` resourceの
+    `Properties.PolicyDocument.Statement`からのみ収集する。
+
+    横断テストの対象をSNS TopicPolicyに限定するため、他のresource type
+    (AWS::S3::BucketPolicy、IAM inline policy、AWS::SQS::QueuePolicy等)は
+    意図的に対象外とする(#557 issuecomment MEDIUM-1)。
     """
-    found: list[tuple[str, str, list[Any]]] = []
-
-    def _walk(node: Any, logical_id: str, path: str) -> None:
-        if isinstance(node, dict):
-            if "PolicyDocument" in node and isinstance(node["PolicyDocument"], dict):
-                statement = node["PolicyDocument"].get("Statement")
-                if isinstance(statement, list):
-                    found.append((logical_id, f"{path}.PolicyDocument", statement))
-            for key, value in node.items():
-                _walk(value, logical_id, f"{path}.{key}")
-        elif isinstance(node, list):
-            for index, item in enumerate(node):
-                _walk(item, logical_id, f"{path}[{index}]")
-
+    found: list[tuple[str, list[Any]]] = []
     for logical_id, resource in resources.items():
-        _walk(resource.get("Properties", {}), logical_id, "Properties")
-
+        if resource.get("Type") != "AWS::SNS::TopicPolicy":
+            continue
+        statement = resource.get("Properties", {}).get("PolicyDocument", {}).get("Statement")
+        if isinstance(statement, list):
+            found.append((logical_id, statement))
     return found
 
 
@@ -84,29 +83,32 @@ def test_incident_notification_topic_policy_statements_have_unique_sids() -> Non
     ]
 
 
-def test_all_multi_statement_policy_documents_in_template_have_unique_sids() -> None:
-    """★ Issue #557と同型のdefectを、resourceの種類・LogicalIdに関わらず汎用的に
-    検知する(レビューでの反証: 将来別のresourceへ複数StatementのPolicyDocumentが
+def test_all_sns_topic_policy_statements_have_unique_sids() -> None:
+    """★ Issue #557と同型のdefectを、`AWS::SNS::TopicPolicy` resourceであれば
+    LogicalIdに関わらず検知する(レビューでの反証: 将来別のAWS::SNS::TopicPolicyが
     追加され、Sidを付け忘れた場合でも、本テストが個別修正なしに検知できる)。
 
+    対象はAWS::SNS::TopicPolicyのみ(#557 issuecomment MEDIUM-1: この契約は
+    SNSのSetTopicAttributes API固有の制約であり、AWS::S3::BucketPolicyやIAM
+    inline policy等、他のPolicyDocumentへ一般化しない)。
     Statementが1件のみのPolicyDocument(Sid省略がAWS API上も問題にならない)は
     対象外とする。
     """
     resources = _resources()
     violations: list[str] = []
 
-    for logical_id, path, statement in _iter_policy_documents(resources):
+    for logical_id, statement in _sns_topic_policy_statements(resources):
         if len(statement) < 2:
             continue
 
         sids = [entry.get("Sid") for entry in statement]
         if any(sid is None for sid in sids):
-            violations.append(f"{logical_id} ({path}): Sid未設定のStatementがある(Sid一覧: {sids})")
+            violations.append(f"{logical_id}: Sid未設定のStatementがある(Sid一覧: {sids})")
         elif len(sids) != len(set(sids)):
-            violations.append(f"{logical_id} ({path}): Sidが重複している(Sid一覧: {sids})")
+            violations.append(f"{logical_id}: Sidが重複している(Sid一覧: {sids})")
 
     assert not violations, (
-        "複数StatementのPolicyDocumentで、Sid欠落または重複が検出された"
-        "(SNS/SQS等のAPIはSid一意性を要求し、テンプレートのYAML検証だけでは"
-        "検出できない。Issue #557参照):\n" + "\n".join(violations)
+        "AWS::SNS::TopicPolicyの複数Statementで、Sid欠落または重複が検出された"
+        "(SNSのSetTopicAttributes APIはSid一意性を要求し、テンプレートのYAML"
+        "検証だけでは検出できない。Issue #557参照):\n" + "\n".join(violations)
     )
