@@ -3321,3 +3321,22 @@ C4相当の判定基準: 上記ADD 11・MODIFY 0・REMOVE 0と一致し、既存
 IAM権限の拡大・Alarmのthreshold等の変更が無いこと。実物のChangeSetとの照合は、他のPRが
 先にdeployされていた場合(config/srcの通常のCode差分)を含めて、ChangeSet CREATE後に
 再確認する(#503のRelease W8で確立した手順と同じ)。
+
+### 29.7 Issue #505のChangeSet想定差分(2026-09-24追加)
+
+段階2(#505)は、WeeklyReviewFunctionのみへDuration alarmを追加する(既存の
+EvaluationFunctionDurationAlarmは変更しない)。他10関数(WatchlistWorker/
+WatchlistDispatcher/LineWebhook/BuyCandidates/HoldingsWatchlist/DisclosureCheck/
+WatchlistBatchReconciler/MonthlyReview/QuarterlyReview/WatchlistTerminalFailureHandler)
+への追加は今回見送り(MANAGER判断)。
+
+```
+ADD     1(WeeklyReviewFunctionDurationAlarm。Threshold=240,000ms=Timeout 300秒×0.8)
+MODIFY  0(既存のEvaluationFunctionDurationAlarm/12関数のErrors alarmは変更しない)
+REMOVE  0
+```
+
+C4相当の判定基準: 上記ADD 1・MODIFY 0・REMOVE 0と一致し、既存resourceへの想定外のMODIFY・
+IAM権限の拡大・Alarmのthreshold等の変更が無いこと。240秒という値の実測による裏付けは
+次回自然実行(2026-09-28 19:00 JST)後に行う(29.2項目3〔人工障害を起こさない〕と同じ理由で、
+それまでの人工的な実行はしない)。

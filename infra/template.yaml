@@ -2404,6 +2404,34 @@ Resources:
       AlarmActions:
         - !Ref IncidentNotificationTopic
 
+  # Issue #132 X-6(#505。段階2): Timeout(300秒)の80%=240秒に達したら、まだ失敗して
+  # いなくても予算超過が近いことを検知する(EvaluationFunctionDurationAlarmと同じ考え方)。
+  # 対象はWeeklyReviewFunctionのみ(#377〔PR #539〕のOOM修正後もTimeout自体は変更して
+  # いないため、80%=240秒の計算根拠に変更はない。#539後の実際のDuration実測値による
+  # 再検証は、次回自然実行〔2026-09-28 19:00 JST〕後に行う。人工的な実行はしない)。
+  # 他10関数(WatchlistWorker/WatchlistDispatcher/LineWebhook/BuyCandidates/
+  # HoldingsWatchlist/DisclosureCheck/WatchlistBatchReconciler/MonthlyReview/
+  # QuarterlyReview/WatchlistTerminalFailureHandler)は今回見送り(MANAGER判断)。
+  WeeklyReviewFunctionDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-weekly-review-duration"
+      AlarmDescription: >-
+        週次改善レビューLambdaの実行時間がTimeoutの80%(240秒)に達した。Issue #505参照。
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WeeklyReviewFunction
+      Statistic: Maximum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 240000 # ミリ秒。WeeklyReviewFunctionのTimeout 300秒 × 0.8
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
   MonthlyReviewFunctionErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
