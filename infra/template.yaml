@@ -2722,6 +2722,15 @@ Resources:
               MaximumEventAgeInSeconds: 3600
             FlexibleTimeWindow:
               Mode: "OFF"
+            # Issue #65 F-E7: EventBridge Schedulerのcontext attribute
+            # <aws.scheduler.scheduled-time>(同一の論理実行のretry間で不変。
+            # AWS公式ドキュメントで確認済み)をLambdaのeventへ渡し、
+            # watchlist_dispatcher_handler.py::_derive_batch_id()がbatch_idを
+            # 決定論的に導出できるようにする。これによりScheduler retryでも
+            # 同一batch_idになり、既存のdispatch lease(batch_id key)が
+            # 多重dispatchを拒否できる。値は常にUTCで渡る(handler側でJSTへ
+            # 変換する)。
+            Input: '{"scheduled_time": "<aws.scheduler.scheduled-time>"}'
 
   WatchlistWorkerFunction:
     Type: AWS::Serverless::Function

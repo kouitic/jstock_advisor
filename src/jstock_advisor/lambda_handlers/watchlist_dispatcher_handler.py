@@ -50,6 +50,7 @@ import boto3
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
+from jstock_advisor.domain.jst import to_jst
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     EXECUTION_RESULT_NORMAL,
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
@@ -396,6 +397,54 @@ def _collect_maintenance_targets(event: dict[str, Any]) -> tuple[list[str], dict
     return codes, extra_kwargs
 
 
+def _derive_batch_id(event: dict[str, Any], batch_prefix: str, now: dt.datetime) -> str:
+    """batch_idを決定する(Issue #65 F-E7: dispatcher末尾例外後の二重dispatch防止)。
+
+    優先順位:
+
+    1. `event["batch_id"]`が明示されていればそのまま使う(手動での同一batch_id
+       再起動〔18節「案B」〕、または`watchlist_batch_finalizer.
+       maybe_trigger_maintenance()`が親batch_idから決定論的に算出して渡す
+       後続起動。いずれも既存の挙動を変更しない)。
+    2. EventBridge Schedulerのcontext attribute`<aws.scheduler.scheduled-time>`
+       (`infra/template.yaml`のSchedule Input経由で`event["scheduled_time"]`
+       として渡す)が有効なISO8601文字列であれば、そこから決定論的に生成する。
+       `scheduled-time`はEventBridge Schedulerの仕様上、同一の論理実行の
+       retry(再配送)間で不変である(実際に試行した時刻ではなく、スケジュール
+       定義上の起動予定時刻を表す。`<aws.scheduler.execution-id>`や
+       `<aws.scheduler.attempt-number>`は逆にretryごとに変わるため使わない)。
+       これにより、`try_acquire_dispatch_lease()`の既存のConditionExpression
+       (同一batch_idの手動re-runを許容しつつ多重実行を排除する設計。
+       `infrastructure/aws/batch_tracker.py`)がScheduler retryに対しても
+       そのまま働くようになる(rotation dispatch leaseの有無に依存しないため、
+       WATCHLIST_MAINTENANCE・rotation.enabled=falseの経路も保護される)。
+       `scheduled-time`は常にUTCで渡ってくるため(ScheduleExpressionTimezone
+       の設定に関わらない)、JST日付境界での前日化けを避けるため
+       `domain/jst.py::to_jst()`で変換してからフォーマットする(新しい独自の
+       タイムゾーン変換は作らない)。
+    3. 上記どちらも無い場合(手動invoke・ローカルテスト等、Scheduler経由でない
+       起動)は、従来どおり時刻+ランダムサフィックスで生成する(この経路は
+       Scheduler retryの対象ではないため、retry間の安定性は不要)。
+    """
+    explicit_batch_id = event.get("batch_id")
+    if explicit_batch_id:
+        return str(explicit_batch_id)
+
+    scheduled_time_raw = event.get("scheduled_time")
+    if isinstance(scheduled_time_raw, str) and scheduled_time_raw:
+        try:
+            scheduled_time = dt.datetime.fromisoformat(scheduled_time_raw.replace("Z", "+00:00"))
+        except ValueError:
+            scheduled_time = None
+        if scheduled_time is not None:
+            if scheduled_time.tzinfo is None:
+                scheduled_time = scheduled_time.replace(tzinfo=dt.UTC)
+            jst_scheduled_time = to_jst(scheduled_time)
+            return f"{batch_prefix}-{jst_scheduled_time.strftime('%Y%m%dT%H%M%S')}"
+
+    return f"{batch_prefix}-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # Issue #286 (#70 F-B4): watchlist系は execution_mode を**受け付けない**。
     # 黙って本番実行せず、指定されていたら理由をログへ出して失敗させる。
@@ -494,12 +543,13 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # から決定論的に算出したbatch_idをevent["batch_id"]として渡す。これにより
     # 「同一parentからのinvoke重複」が万一発生しても、この後のtry_acquire_
     # dispatch_lease()が同一batch_idへの二重DISPATCHINGを構造的に拒否する
-    # (親側のexactly-onceトリガーに加えた二重の安全策)。通常のEventBridge
-    # Schedule起動(Input未指定)ではevent["batch_id"]は存在せず、従来どおり
-    # 自動生成する。
-    batch_id = event.get("batch_id") or (
-        f"{batch_prefix}-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    )
+    # (親側のexactly-onceトリガーに加えた二重の安全策)。
+    # Issue #65 F-E7: 通常のEventBridge Schedule起動では、event["batch_id"]の
+    # 代わりにevent["scheduled_time"](Schedulerのcontext attribute経由。
+    # _derive_batch_id()のdocstring参照)からbatch_idを決定論的に導出する。
+    # これにより、Schedulerのretry(再配送)で同一batch_idが再利用され、
+    # dispatch leaseが多重dispatchを拒否できるようになる。
+    batch_id = _derive_batch_id(event, batch_prefix, now)
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
 
     if not try_acquire_dispatch_lease(
