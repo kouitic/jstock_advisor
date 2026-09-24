@@ -697,6 +697,19 @@ class IncidentNotificationConfig(StrictModel):
     # CLAIMED からこの時間を超えたら、他の実行が stale takeover してよい
     # (LINE push成功後SENT記録前にLambdaがcrashした場合の回復用)。
     claim_stale_minutes: int
+    # Issue #508: falseの間はGitHub API・Secrets Manager呼び出しを一切行わない
+    # (正常なスキップ。LINE通知には一切影響しない)。既定false。
+    # trueへ切り替える際はinfra/template.yamlのGitHub App配線(env var・IAM)が
+    # 別途必要(#508 Phase Bの別PR)。
+    issue_creation_enabled: bool = False
+    # GitHub Issue作成・コメント投稿の原子的claim(IncidentStateTable)が失効した
+    # とみなすまでの分数。失効後はGitHub側の実在確認を先に行ってから再claimする
+    # (二重Issue・二重コメント防止。review_improvement.yamlと同じ設計)。
+    github_issue_claim_timeout_minutes: int = 10
+    # 新規作成するGitHub Issueへ付与するlabel。
+    issue_labels: list[str] = Field(
+        default_factory=lambda: ["production-incident", "auto-generated"]
+    )
 
     @model_validator(mode="after")
     def _check_positive_minutes(self) -> IncidentNotificationConfig:
@@ -714,6 +727,11 @@ class IncidentNotificationConfig(StrictModel):
             raise ValueError(
                 "incident_notification.claim_stale_minutesは0より大きい必要があります"
                 f"(現在{self.claim_stale_minutes})"
+            )
+        if self.github_issue_claim_timeout_minutes <= 0:
+            raise ValueError(
+                "incident_notification.github_issue_claim_timeout_minutesは0より"
+                f"大きい必要があります(現在{self.github_issue_claim_timeout_minutes})"
             )
         return self
 
@@ -1482,9 +1500,7 @@ class ValuationDispersionThresholds(StrictModel):
 
     @model_validator(mode="after")
     def _check_order(self) -> ValuationDispersionThresholds:
-        if not (
-            0 < self.low_max < self.medium_max < self.auto_buy_block < self.anchor_block
-        ):
+        if not (0 < self.low_max < self.medium_max < self.auto_buy_block < self.anchor_block):
             raise ValueError(
                 "valuation_dispersionはlow_max < medium_max < auto_buy_block < "
                 "anchor_blockの順序が必要です"

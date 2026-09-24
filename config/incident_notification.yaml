@@ -13,3 +13,21 @@ dedup_window_minutes: 30
 # claim(CLAIMED状態)を取得してからこの時間を超えたら、他の実行がtakeoverしてよい
 # (LINE push成功後SENT記録前にLambdaがcrashした場合の回復用)。
 claim_stale_minutes: 5
+
+# Issue #508: GitHub Issue自動起票の有効/無効。falseの間はGitHub API・
+# Secrets Manager呼び出しを一切行わない(正常なスキップ。既存のLINE通知経路には
+# 一切影響しない)。GitHub App設定・疎通確認・infra/template.yamlへの配線
+# (別PR)が完了するまではfalseにしておくこと。
+issue_creation_enabled: false
+
+# GitHub Issue作成・コメント投稿の原子的claim(IncidentStateTable)が失効した
+# とみなすまでの分数。失効後はGitHub側の実在確認を先に行ってから再claimする
+# (二重Issue・二重コメント防止)。
+github_issue_claim_timeout_minutes: 10
+
+# 新規作成するGitHub Issueへ付与するlabel。既存の週次改善レビュー機能
+# (rule-improvement/auto-generated)とラベル・重複判定・close運用を混在させない
+# ため、production-incidentを専用のsearch用labelとする(#132付録の論点)。
+issue_labels:
+  - production-incident
+  - auto-generated
