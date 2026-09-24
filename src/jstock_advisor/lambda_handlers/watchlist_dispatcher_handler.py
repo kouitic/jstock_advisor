@@ -436,6 +436,11 @@ def _derive_batch_id(event: dict[str, Any], batch_prefix: str, now: dt.datetime)
             scheduled_time = dt.datetime.fromisoformat(scheduled_time_raw.replace("Z", "+00:00"))
         except ValueError:
             scheduled_time = None
+            logger.warning(
+                "watchlist dispatcher: unparseable scheduled_time=%r, "
+                "falling back to random batch_id (retry-stability lost for this invocation)",
+                scheduled_time_raw,
+            )
         if scheduled_time is not None:
             if scheduled_time.tzinfo is None:
                 scheduled_time = scheduled_time.replace(tzinfo=dt.UTC)
