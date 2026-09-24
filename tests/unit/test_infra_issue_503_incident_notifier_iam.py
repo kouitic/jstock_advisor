@@ -221,6 +221,53 @@ def test_existing_evaluation_alarms_thresholds_are_unchanged() -> None:
         assert props == expected, name
 
 
+# --- GitHub App秘密鍵の配線(Issue #508。D9範囲) ---------------------------------
+
+
+def test_incident_notifier_github_secret_env_vars_reference_the_shared_parameters() -> None:
+    """Issue #508: GITHUB_APP_SECRET_ARN/GITHUB_REPOSITORYは、WeeklyReviewFunction
+    (既存のGitHub App資産)と同じパラメータをそのまま参照する(新規secret・
+    新規パラメータを作らない)。
+    """
+    env_vars = _resources()["IncidentNotifierFunction"]["Properties"]["Environment"]["Variables"]
+    assert env_vars["GITHUB_APP_SECRET_ARN"] == {"Fn::Ref": "GithubAppSecretArn"}
+    assert env_vars["GITHUB_REPOSITORY"] == {"Fn::Ref": "GithubRepository"}
+
+
+def test_incident_notifier_github_secret_iam_is_resource_scoped_without_wildcard() -> None:
+    """★ PR #563 USER決定U-2の条件(#133 PARTIAL): secretsmanager:GetSecretValueは
+    exact ARN指定のみで、wildcard(Resource="*")を使わない
+    (WeeklyReviewFunctionの既存パターンと同一)。
+    """
+    policies = _resources()["IncidentNotifierFunction"]["Properties"]["Policies"]
+    secret_statements = [
+        statement
+        for policy in policies
+        if isinstance(policy, dict)
+        for statement in policy.get("Statement", []) or []
+        if _actions(statement) == {"secretsmanager:GetSecretValue"}
+    ]
+    assert len(secret_statements) == 1
+    statement = secret_statements[0]
+    assert statement["Effect"] == "Allow"
+    assert statement["Resource"] == {"Fn::Ref": "GithubAppSecretArn"}
+    assert "*" not in str(statement["Resource"])
+
+
+def test_incident_notifier_does_not_have_any_wildcard_resource_statement() -> None:
+    """★ 網羅的な反証: IncidentNotifierFunctionの全Policies Statementのうち、
+    どれか1つでもResource="*"を持てば検知する(個別Statementの確認漏れを防ぐ)。
+    """
+    policies = _resources()["IncidentNotifierFunction"]["Properties"]["Policies"]
+    for policy in policies:
+        if not isinstance(policy, dict):
+            continue
+        for statement in policy.get("Statement", []) or []:
+            resource = statement.get("Resource")
+            resources = resource if isinstance(resource, list) else [resource]
+            assert "*" not in resources, f"wildcard Resourceを検出: {statement}"
+
+
 # --- self-monitoring(自己再帰を避ける) -------------------------------------------
 
 
