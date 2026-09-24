@@ -135,16 +135,27 @@ def test_new_alarms_do_not_touch_duration_alarm() -> None:
     assert props["AlarmActions"] == [{"Fn::Ref": _TOPIC_LOGICAL_ID}]
 
 
-def test_alarm_names_across_all_12_functions_are_unique() -> None:
-    """★ レビュー指摘 F2 の直接固定: 11本を手書きの`!Sub`のAlarmNameで一度に追加するため、
-    衝突すると deploy失敗、またはCloudFormationが同名resourceの一方を暗黙に置換してしまい、
-    いずれの場合も「12関数それぞれに1本」が壊れる。AlarmNameの`Fn::Sub`文字列が
-    12本すべてで一意であることを固定する。
+def test_alarm_names_are_unique_across_every_alarm_in_the_stack() -> None:
+    """★ レビュー指摘 F2 の直接固定(iteration 2): 11本を手書きの`!Sub`のAlarmNameで
+    一度に追加するため、衝突すると deploy失敗、またはCloudFormationが同名resourceの
+    一方を暗黙に置換してしまう。固定したい性質は「AlarmNameはスタック内で一意」であり、
+    本Issueの12関数分だけに限定する理由はない(Duration alarm・IncidentNotifierFunction
+    自身のalarmを含む、templateに存在する`AWS::CloudWatch::Alarm`全件を対象にする。
+    将来alarmが増えてもこのテストがそのまま効く)。
     """
     resources = _resources()
+    alarm_logical_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource.get("Type") == "AWS::CloudWatch::Alarm"
+    ]
+    assert len(alarm_logical_ids) >= 14, (
+        "既知のalarm数(12関数のErrors alarm + Duration alarm + IncidentNotifierFunction自身の"
+        "alarm)を下回っている"
+    )
     alarm_names = [
-        resources[alarm_logical_id]["Properties"]["AlarmName"]["Fn::Sub"]
-        for alarm_logical_id in _ALL_12_FUNCTIONS_TO_ALARM.values()
+        resources[logical_id]["Properties"]["AlarmName"]["Fn::Sub"]
+        for logical_id in alarm_logical_ids
     ]
     assert len(alarm_names) == len(set(alarm_names)), (
         f"AlarmNameに重複がある: {sorted(n for n in alarm_names if alarm_names.count(n) > 1)}"
