@@ -97,7 +97,10 @@ def test_dispersion_warning_identifies_outlier_method_dynamically() -> None:
     )
     lines = _fair_value_dispersion_warning_lines(rec, _THRESHOLD)
     assert lines
-    assert "DCFを除く適正価格は3,100円〜3,200円で、現在値3,500円はその上回っています" in "\n".join(
+    # price_as_of_date未指定(旧データ)のため、ラベルは日付を省略した「終値」になる
+    # (Issue #368。price_as_of_dateがある場合の表示はtest_issue_368_price_as_of_
+    # and_sell_reach.pyで検証済み)。
+    assert "DCFを除く適正価格は3,100円〜3,200円で、終値3,500円はその上回っています" in "\n".join(
         lines
     )
 
