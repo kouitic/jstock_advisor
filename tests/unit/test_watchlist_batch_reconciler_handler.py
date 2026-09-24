@@ -103,6 +103,10 @@ def _fake_config(
     *, max_finalize_retry_attempts: int = 3, max_notification_retry_attempts: int = 3
 ) -> SimpleNamespace:
     watchlist_screening = SimpleNamespace(
+        # Issue #506(O-1レビューF2是正): _detect_and_notify_watchlist_incidents()の
+        # kill switchチェックが読む(dispatcherの早期return条件と同じ2フラグ)。
+        enabled=True,
+        scheduled_run_enabled=True,
         candidate_universe=SimpleNamespace(provider="jpx"),
         screening_policy="high_dividend_financial_health",
         max_watchlist_additions_per_run=20,

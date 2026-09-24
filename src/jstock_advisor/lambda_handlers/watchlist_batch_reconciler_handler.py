@@ -47,6 +47,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     WatchlistJobType,
     get_completion_batch,
     get_incident_detector_state,
+    get_streak_state,
     get_watchlist_batch,
     list_new_candidate_screening_batches,
     list_stale_maintenance_triggers,
@@ -54,6 +55,7 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     mark_dispatch_failed,
     mark_finalizing_stuck_as_failed,
     record_incident_detector_state,
+    record_streak_state,
     resolve_watchlist_job_type,
     run_timeout_finalization_pass,
     set_timeout_finalize_completed_count,
@@ -252,11 +254,24 @@ def _detect_watchlist_missed_schedule(
     }
 
 
-def _detect_watchlist_universe_load_failure_streak(
-    batches: list[dict[str, Any]], calendar: BusinessCalendar, now: dt.datetime
-) -> dict[str, Any] | None:
+def _evaluate_and_persist_universe_load_failure_streak(
+    todays_batches: list[dict[str, Any]], calendar: BusinessCalendar, now: dt.datetime
+) -> int:
     """S-4: 候補ユニバース取得の失敗(`failure_reason == "universe_load_failed"`)が
-    本日を含め3営業日以上連続していることを検知する(単発は対象外。#132本文/#234)。
+    何営業日連続しているかを、営業日ごとに1回だけインクリメンタルに評価・永続化する
+    (副作用あり: DynamoDB書き込みを行う。戻り値は更新後のstreak_count)。
+
+    ★ #506レビューF1是正: 過去のBatchRunsTable行を読み返して連続日数を
+    再計算する設計を採らない。BatchRunsTableのTTL(`candidate_progress_ttl_hours`。
+    既定72時間)は候補進捗行という短命なデータのためのものであり、週末・祝日を
+    跨ぐ複数営業日の履歴を保持する契約ではない(実測: 週をまたぐと対象行が
+    既にTTL経過で消えている。TTL削除自体も最大48時間遅延するため、同じ
+    「3営業日連続」でも検知の成否が非決定的になっていた)。
+    代わりに、`todays_batches`(本日分のみ。常に新しく期限切れの心配が無い)から
+    「本日失敗したか」だけを読み取り、`get_streak_state`/`record_streak_state`
+    (この関数自身が管理する別行)へ積み上げる。評価に断絶(reconcilerが長期間
+    停止していた等)があれば継続性を信用せず、本日の結果だけでリセットする
+    (誤って長い連続を主張しないためのfail-safe。ログで可視化する)。
 
     `mark_dispatch_failed(..., reason="universe_load_failed")`は
     `watchlist_dispatcher_handler.py`の`CandidateUniverseError`経路の1箇所のみが
@@ -264,23 +279,47 @@ def _detect_watchlist_universe_load_failure_streak(
     providerに触れず、この例外を送出できない構造のため、この理由コードは
     NEW_CANDIDATE_SCREENINGにのみ発生する)。
     """
+    reason_code = _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK
     today_jst = evaluation_date_jst(now)
+    state = get_streak_state(reason_code)
+    prior_streak = int(state["streak_count"]) if state else 0
     if not calendar.is_business_day(today_jst):
-        return None
-    failed_dates: set[dt.date] = set()
-    for batch_item in batches:
-        if batch_item.get("failure_reason") != "universe_load_failed":
-            continue
-        failed_date = _started_at_jst_date(batch_item)
-        if failed_date is not None:
-            failed_dates.add(failed_date)
+        return prior_streak
+    if to_jst(now).hour < _MISSED_SCHEDULE_GRACE_HOUR_JST:
+        return prior_streak
+    last_evaluated = state.get("last_evaluated_date_jst") if state else None
+    if last_evaluated == today_jst.isoformat():
+        return prior_streak  # 本日分は評価済み
 
-    streak = 0
-    current = today_jst
-    while current in failed_dates:
-        streak += 1
-        current = _previous_business_day(calendar, current)
-    if streak < _UNIVERSE_LOAD_FAILURE_STREAK_THRESHOLD_DAYS:
+    today_failed = any(
+        batch_item.get("failure_reason") == "universe_load_failed"
+        and _started_at_jst_date(batch_item) == today_jst
+        for batch_item in todays_batches
+    )
+    expected_previous = _previous_business_day(calendar, today_jst).isoformat()
+    if last_evaluated is not None and last_evaluated != expected_previous:
+        logger.warning(
+            "watchlist reconciler: universe_load_failure streak evaluation gap "
+            "last_evaluated=%s expected_previous=%s today=%s (resetting from gap)",
+            last_evaluated,
+            expected_previous,
+            today_jst.isoformat(),
+        )
+        prior_streak = 0
+    new_streak = prior_streak + 1 if today_failed else 0
+    record_streak_state(reason_code, today_jst.isoformat(), new_streak, now)
+    return new_streak
+
+
+def _detect_watchlist_universe_load_failure_streak(
+    streak_count: int, now: dt.datetime
+) -> dict[str, Any] | None:
+    """S-4: 連続日数が閾値(3営業日)以上ならincident envelopeを返す(単発は対象外。
+    #132本文/#234)。連続日数の評価・永続化自体は
+    `_evaluate_and_persist_universe_load_failure_streak`が行う(この関数は
+    その結果を閾値判定するだけの純粋関数)。
+    """
+    if streak_count < _UNIVERSE_LOAD_FAILURE_STREAK_THRESHOLD_DAYS:
         return None
     return {
         "source": _INCIDENT_SOURCE_WATCHLIST_RECONCILER,
@@ -289,8 +328,8 @@ def _detect_watchlist_universe_load_failure_streak(
         "failure_type": "CONSECUTIVE_UNIVERSE_LOAD_FAILURE",
         "reason_code": _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK,
         "occurred_at": now.isoformat(),
-        "failure_count": streak,
-        "consecutive_days": streak,
+        "failure_count": streak_count,
+        "consecutive_days": streak_count,
         "is_ongoing": True,
     }
 
@@ -337,17 +376,39 @@ def _notify_if_new_today(
     return True
 
 
+def _scheduled_watchlist_dispatch_enabled(config: AppConfig) -> bool:
+    """dispatcherが実際に起動する条件と同じkill switchを見る(#506レビューF2是正)。
+
+    `watchlist_dispatcher_handler.handler()`は`wc.enabled and wc.scheduled_run_enabled`
+    がFalseならbatch行を作る前に早期returnする(意図した運用停止。#132本文4節の
+    「仕様どおりのfail-softは障害として扱わない」に該当)。この判定を見ずに
+    「本日のbatchが無い」ことだけを見ると、意図的な停止中は毎営業日
+    missed scheduleを誤検知し続けてしまう。S-2/S-4いずれもこの間は評価自体を
+    見送る(streak状態も進めない。再開後は評価の断絶としてfail-safeに扱われる。
+    `_evaluate_and_persist_universe_load_failure_streak`のgap検知を参照)。
+    """
+    wc = config.watchlist_screening
+    return bool(wc.enabled and wc.scheduled_run_enabled)
+
+
 def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) -> dict[str, bool]:
     """S-2/S-4を検知し、未通知のものだけ#503経路へpublishする(副作用あり。
     read-onlyではない: DynamoDB書き込み・SNS publishを行う。CLAUDE.md §3参照)。
     """
+    no_op = {"missed_schedule_notified": False, "universe_load_failure_streak_notified": False}
+    if not _scheduled_watchlist_dispatch_enabled(config):
+        return no_op
+
     calendar = BusinessCalendar.from_config(config.holiday_calendar)
     today_jst = evaluation_date_jst(now)
-    batches = list_new_candidate_screening_batches()
-    missed_schedule = _detect_watchlist_missed_schedule(batches, calendar, now)
-    universe_load_failure_streak = _detect_watchlist_universe_load_failure_streak(
-        batches, calendar, now
-    )
+    todays_batches = [
+        batch_item
+        for batch_item in list_new_candidate_screening_batches()
+        if _started_at_jst_date(batch_item) == today_jst
+    ]
+    missed_schedule = _detect_watchlist_missed_schedule(todays_batches, calendar, now)
+    streak_count = _evaluate_and_persist_universe_load_failure_streak(todays_batches, calendar, now)
+    universe_load_failure_streak = _detect_watchlist_universe_load_failure_streak(streak_count, now)
     return {
         "missed_schedule_notified": _notify_if_new_today(missed_schedule, today_jst, now),
         "universe_load_failure_streak_notified": _notify_if_new_today(

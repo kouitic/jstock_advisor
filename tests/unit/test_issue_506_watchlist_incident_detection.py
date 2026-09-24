@@ -108,126 +108,7 @@ def test_missed_schedule_envelope_has_only_allowlisted_keys() -> None:
     assert set(result) <= handler_module._SNS_PAYLOAD_ALLOWLIST
 
 
-# --- S-4: 候補ユニバース連続失敗 -------------------------------------------------
-
-
-def test_universe_load_failure_streak_below_threshold_is_not_detected() -> None:
-    now = _now_jst(_WED, 7)
-    batches = [
-        _batch(_TUE, failure_reason="universe_load_failed"),
-        _batch(_WED, failure_reason="universe_load_failed"),
-    ]
-    result = handler_module._detect_watchlist_universe_load_failure_streak(
-        batches, _calendar(), now
-    )
-    assert result is None  # 2営業日連続(閾値3未満)
-
-
-def test_universe_load_failure_streak_at_threshold_is_detected() -> None:
-    now = _now_jst(_THU, 7)
-    batches = [
-        _batch(_TUE, failure_reason="universe_load_failed"),
-        _batch(_WED, failure_reason="universe_load_failed"),
-        _batch(_THU, failure_reason="universe_load_failed"),
-    ]
-    result = handler_module._detect_watchlist_universe_load_failure_streak(
-        batches, _calendar(), now
-    )
-    assert result is not None
-    assert result["consecutive_days"] == 3
-    assert result["failure_count"] == 3
-    assert result["is_ongoing"] is True
-    assert result["reason_code"] == "watchlist_universe_load_failure_streak"
-
-
-def test_universe_load_failure_streak_worsening_keeps_same_reason_code() -> None:
-    """★ 3日→5日と悪化しても、error_type/fingerprintの入力となるreason_codeは
-    変わらない(#501/#502の設計どおり。悪化はconsecutive_days/failure_countで表す)。
-    """
-    now_3 = _now_jst(_THU, 7)
-    batches_3 = [
-        _batch(_TUE, failure_reason="universe_load_failed"),
-        _batch(_WED, failure_reason="universe_load_failed"),
-        _batch(_THU, failure_reason="universe_load_failed"),
-    ]
-    result_3 = handler_module._detect_watchlist_universe_load_failure_streak(
-        batches_3, _calendar(), now_3
-    )
-
-    now_5 = _now_jst(_SAT + dt.timedelta(days=2), 7)  # 翌週月曜(月火水木金の5営業日連続)
-    batches_5 = batches_3 + [
-        _batch(_FRI, failure_reason="universe_load_failed"),
-        _batch(_SAT + dt.timedelta(days=2), failure_reason="universe_load_failed"),
-    ]
-    result_5 = handler_module._detect_watchlist_universe_load_failure_streak(
-        batches_5, _calendar(), now_5
-    )
-    assert result_3 is not None
-    assert result_5 is not None
-    assert result_3["reason_code"] == result_5["reason_code"]
-    assert result_5["consecutive_days"] == 5
-
-
-def test_universe_load_failure_streak_spans_weekend_without_resetting() -> None:
-    """営業日ベースで数えるため、金曜failed→(週末は非営業日でスキップ)→月曜failed→
-    火曜failedは3営業日連続として数える(休場日を「連続を切る日」にしない)。
-    """
-    now = _now_jst(_NEXT_TUE, 7)
-    batches = [
-        _batch(_FRI, failure_reason="universe_load_failed"),
-        _batch(_NEXT_MON, failure_reason="universe_load_failed"),
-        _batch(_NEXT_TUE, failure_reason="universe_load_failed"),
-    ]
-    result = handler_module._detect_watchlist_universe_load_failure_streak(
-        batches, _calendar(), now
-    )
-    assert result is not None
-    assert result["consecutive_days"] == 3
-
-
-def test_universe_load_failure_streak_gap_resets_the_streak() -> None:
-    """火曜success(failure_reason無し)を挟むと連続が切れる。"""
-    now = _now_jst(_THU, 7)
-    batches = [
-        _batch(_MON, failure_reason="universe_load_failed"),
-        _batch(_TUE),  # 成功(failure_reasonなし)
-        _batch(_WED, failure_reason="universe_load_failed"),
-        _batch(_THU, failure_reason="universe_load_failed"),
-    ]
-    result = handler_module._detect_watchlist_universe_load_failure_streak(
-        batches, _calendar(), now
-    )
-    assert result is None  # 水木の2営業日連続のみ(閾値3未満)
-
-
-def test_universe_load_failure_streak_not_checked_on_non_business_day() -> None:
-    now = _now_jst(_SAT, 7)
-    batches = [
-        _batch(_WED, failure_reason="universe_load_failed"),
-        _batch(_THU, failure_reason="universe_load_failed"),
-        _batch(_FRI, failure_reason="universe_load_failed"),
-    ]
-    result = handler_module._detect_watchlist_universe_load_failure_streak(
-        batches, _calendar(), now
-    )
-    assert result is None
-
-
-def test_universe_load_failure_streak_envelope_has_only_allowlisted_keys() -> None:
-    now = _now_jst(_THU, 7)
-    batches = [
-        _batch(_TUE, failure_reason="universe_load_failed"),
-        _batch(_WED, failure_reason="universe_load_failed"),
-        _batch(_THU, failure_reason="universe_load_failed"),
-    ]
-    result = handler_module._detect_watchlist_universe_load_failure_streak(
-        batches, _calendar(), now
-    )
-    assert result is not None
-    assert set(result) <= handler_module._SNS_PAYLOAD_ALLOWLIST
-
-
-# --- 1日1回抑止(BatchRunsTableの状態) -------------------------------------------
+# --- 1日1回抑止・S-4状態永続化(BatchRunsTableの状態) ----------------------------
 
 
 @pytest.fixture
@@ -244,6 +125,152 @@ def dynamo(monkeypatch: pytest.MonkeyPatch):
             BillingMode="PAY_PER_REQUEST",
         )
         yield client
+
+
+# --- S-4: 候補ユニバース連続失敗(#506レビューF1是正: 本日分のみを見て、営業日
+# ごとに1回だけstreakを積み上げる永続状態。過去のBatchRunsTable行は読み返さない) --
+
+
+def _evaluate_day(date: dt.date, *, failed: bool, hour_jst: int = 7) -> int:
+    now = _now_jst(date, hour_jst)
+    todays_batches = [_batch(date, failure_reason="universe_load_failed")] if failed else []
+    return handler_module._evaluate_and_persist_universe_load_failure_streak(
+        todays_batches, _calendar(), now
+    )
+
+
+def test_universe_load_failure_streak_below_threshold_is_not_detected(dynamo) -> None:
+    _evaluate_day(_TUE, failed=True)
+    streak = _evaluate_day(_WED, failed=True)
+    result = handler_module._detect_watchlist_universe_load_failure_streak(
+        streak, _now_jst(_WED, 7)
+    )
+    assert streak == 2
+    assert result is None  # 2営業日連続(閾値3未満)
+
+
+def test_universe_load_failure_streak_at_threshold_is_detected(dynamo) -> None:
+    _evaluate_day(_TUE, failed=True)
+    _evaluate_day(_WED, failed=True)
+    streak = _evaluate_day(_THU, failed=True)
+    result = handler_module._detect_watchlist_universe_load_failure_streak(
+        streak, _now_jst(_THU, 7)
+    )
+    assert streak == 3
+    assert result is not None
+    assert result["consecutive_days"] == 3
+    assert result["failure_count"] == 3
+    assert result["is_ongoing"] is True
+    assert result["reason_code"] == "watchlist_universe_load_failure_streak"
+
+
+def test_universe_load_failure_streak_worsening_keeps_same_reason_code(dynamo) -> None:
+    """★ 3日→5日と悪化しても、error_type/fingerprintの入力となるreason_codeは
+    変わらない(#501/#502の設計どおり。悪化はconsecutive_days/failure_countで表す)。
+    """
+    _evaluate_day(_TUE, failed=True)
+    _evaluate_day(_WED, failed=True)
+    streak_3 = _evaluate_day(_THU, failed=True)
+    result_3 = handler_module._detect_watchlist_universe_load_failure_streak(
+        streak_3, _now_jst(_THU, 7)
+    )
+
+    _evaluate_day(_FRI, failed=True)
+    streak_5 = _evaluate_day(_NEXT_MON, failed=True)
+    result_5 = handler_module._detect_watchlist_universe_load_failure_streak(
+        streak_5, _now_jst(_NEXT_MON, 7)
+    )
+    assert result_3 is not None
+    assert result_5 is not None
+    assert result_3["reason_code"] == result_5["reason_code"]
+    assert streak_5 == 5
+    assert result_5["consecutive_days"] == 5
+
+
+def test_universe_load_failure_streak_spans_weekend_without_resetting(dynamo) -> None:
+    """営業日ベースで数えるため、金曜failed→(週末は非営業日でスキップ)→月曜failed→
+    火曜failedは3営業日連続として数える(休場日を「連続を切る日」にしない)。
+    """
+    _evaluate_day(_FRI, failed=True)
+    _evaluate_day(_NEXT_MON, failed=True)
+    streak = _evaluate_day(_NEXT_TUE, failed=True)
+    result = handler_module._detect_watchlist_universe_load_failure_streak(
+        streak, _now_jst(_NEXT_TUE, 7)
+    )
+    assert result is not None
+    assert result["consecutive_days"] == 3
+
+
+def test_universe_load_failure_streak_gap_resets_the_streak(dynamo) -> None:
+    """火曜success(failure_reason無し)を挟むと連続が切れる。"""
+    _evaluate_day(_MON, failed=True)
+    _evaluate_day(_TUE, failed=False)  # 成功
+    _evaluate_day(_WED, failed=True)
+    streak = _evaluate_day(_THU, failed=True)
+    result = handler_module._detect_watchlist_universe_load_failure_streak(
+        streak, _now_jst(_THU, 7)
+    )
+    assert streak == 2  # 水木の2営業日連続のみ(閾値3未満)
+    assert result is None
+
+
+def test_universe_load_failure_streak_not_evaluated_on_non_business_day(dynamo) -> None:
+    """非営業日は評価自体をskipし、永続状態(streak_count)を変えない。"""
+    _evaluate_day(_WED, failed=True)
+    _evaluate_day(_THU, failed=True)
+    before = handler_module.get_streak_state(
+        handler_module._REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK
+    )
+    streak_on_saturday = _evaluate_day(_SAT, failed=True)
+    after = handler_module.get_streak_state(
+        handler_module._REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK
+    )
+    assert streak_on_saturday == 2  # 変化なし(土曜は評価しない)
+    assert after == before
+
+
+def test_universe_load_failure_streak_envelope_has_only_allowlisted_keys(dynamo) -> None:
+    _evaluate_day(_TUE, failed=True)
+    _evaluate_day(_WED, failed=True)
+    streak = _evaluate_day(_THU, failed=True)
+    result = handler_module._detect_watchlist_universe_load_failure_streak(
+        streak, _now_jst(_THU, 7)
+    )
+    assert result is not None
+    assert set(result) <= handler_module._SNS_PAYLOAD_ALLOWLIST
+
+
+def test_universe_load_failure_streak_ignores_same_day_reevaluation(dynamo) -> None:
+    """同じ営業日内で複数回呼ばれても(reconcilerは毎時実行)、1日1回しか
+    streak_countを進めない(2回評価しても2にならない)。"""
+    first = _evaluate_day(_TUE, failed=True, hour_jst=7)
+    second = _evaluate_day(_TUE, failed=True, hour_jst=8)
+    assert first == 1
+    assert second == 1
+
+
+def test_universe_load_failure_streak_survives_batch_row_ttl_expiry(dynamo) -> None:
+    """★ #506レビューF1の直接固定: 過去(火・水)のBatchRunsTable行が既にTTLで
+    消えていても(週末を跨ぐ本番実測で確認された事象)、月〜木の4営業日連続を
+    正しく検知できること。streak状態は`_evaluate_and_persist_universe_load_failure_streak`
+    自身が営業日ごとに積み上げるため、古いbatch行の生死に依存しない。
+    """
+    _evaluate_day(_MON, failed=True)
+    _evaluate_day(_TUE, failed=True)
+    # 火曜のbatch行をTTL経過相当として明示的に削除する(本番のTTL遅延・
+    # 早期削除いずれの場合も再現するため、ここでは即時削除で近似する)。
+    dynamo.delete_item(
+        TableName=_BATCH_TABLE,
+        Key={"batch_id": {"S": f"watchlist-{_TUE.isoformat()}-abcd1234"}},
+    )
+    _evaluate_day(_WED, failed=True)
+    streak = _evaluate_day(_THU, failed=True)
+    result = handler_module._detect_watchlist_universe_load_failure_streak(
+        streak, _now_jst(_THU, 7)
+    )
+    assert streak == 4
+    assert result is not None
+    assert result["consecutive_days"] == 4
 
 
 def test_get_incident_detector_state_is_none_when_never_recorded(dynamo) -> None:
@@ -302,12 +329,17 @@ def test_notify_if_new_today_is_noop_when_no_signal(
 # --- _detect_and_notify_watchlist_incidents(): scan → 検知 → 1日1回抑止の統合 -----
 
 
-def _fake_reconciler_config() -> SimpleNamespace:
+def _fake_reconciler_config(
+    *, enabled: bool = True, scheduled_run_enabled: bool = True
+) -> SimpleNamespace:
     return SimpleNamespace(
         holiday_calendar=SimpleNamespace(
             recurring_market_closures=SimpleNamespace(dates_mm_dd=[]),
             additional_closures=SimpleNamespace(dates=[]),
-        )
+        ),
+        watchlist_screening=SimpleNamespace(
+            enabled=enabled, scheduled_run_enabled=scheduled_run_enabled
+        ),
     )
 
 
@@ -352,3 +384,155 @@ def test_detect_and_notify_finds_no_missed_schedule_when_real_batch_started_toda
 
     assert result["missed_schedule_notified"] is False
     assert published == []
+
+
+@pytest.mark.parametrize(
+    ("enabled", "scheduled_run_enabled"),
+    [(False, True), (True, False), (False, False)],
+)
+def test_detect_and_notify_skips_entirely_when_scheduled_dispatch_disabled(
+    dynamo, monkeypatch: pytest.MonkeyPatch, enabled: bool, scheduled_run_enabled: bool
+) -> None:
+    """★ #506レビューF2の直接固定: dispatcherが早期returnして一切batch行を
+    作らない(kill switch OFF)の間、S-2は「missed schedule」を誤検知しては
+    ならない(#132本文4節: 仕様どおりのfail-softは障害として扱わない)。
+    """
+    published: list[dict] = []
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    config = _fake_reconciler_config(enabled=enabled, scheduled_run_enabled=scheduled_run_enabled)
+    now = _now_jst(_MON, 7)  # 営業日・猶予後・BatchRunsTableは空(dispatcher停止中)
+
+    result = handler_module._detect_and_notify_watchlist_incidents(now, config)
+
+    assert result == {
+        "missed_schedule_notified": False,
+        "universe_load_failure_streak_notified": False,
+    }
+    assert published == []
+
+
+def test_detect_and_notify_resumes_missed_schedule_detection_once_reenabled(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """kill switchが有効に戻れば、通常どおりmissed scheduleを検知する
+    (F2是正が「恒久的に検知しなくなる」副作用を持たないことの確認)。"""
+    published: list[dict] = []
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    now = _now_jst(_MON, 7)
+
+    disabled_result = handler_module._detect_and_notify_watchlist_incidents(
+        now, _fake_reconciler_config(enabled=False)
+    )
+    enabled_result = handler_module._detect_and_notify_watchlist_incidents(
+        now, _fake_reconciler_config(enabled=True)
+    )
+
+    assert disabled_result["missed_schedule_notified"] is False
+    assert enabled_result["missed_schedule_notified"] is True
+    assert len(published) == 1
+
+
+# --- #506レビュー非BLOCKING指摘(D1/D2/D4)の直接固定 ------------------------------
+
+
+def test_list_new_candidate_screening_batches_includes_completed_and_aborted(dynamo) -> None:
+    """D1是正: list_watchlist_batches_by_status()と違い、COMPLETED/ABORTEDを含む
+    全statusを対象にすること(missed schedule検知が正常終了したバッチも
+    「起動された」側として数えられなければならない)。
+    """
+    dynamo.put_item(
+        TableName=_BATCH_TABLE,
+        Item={
+            "batch_id": {"S": "watchlist-completed-1"},
+            "status": {"S": "COMPLETED"},
+            "started_at": {"S": _now_jst(_MON, 6).isoformat()},
+        },
+    )
+    dynamo.put_item(
+        TableName=_BATCH_TABLE,
+        Item={
+            "batch_id": {"S": "watchlist-aborted-1"},
+            "status": {"S": "ABORTED"},
+            "started_at": {"S": _now_jst(_MON, 6).isoformat()},
+        },
+    )
+
+    items = batch_tracker.list_new_candidate_screening_batches()
+
+    batch_ids = {item["batch_id"] for item in items}
+    assert "watchlist-completed-1" in batch_ids
+    assert "watchlist-aborted-1" in batch_ids
+
+
+class _FakePaginatedTable:
+    """`_table().scan()`のページングだけを模擬する最小フェイク(motoを使わない)。"""
+
+    def __init__(self, pages: list[dict]) -> None:
+        self._pages = pages
+        self.calls: list[dict] = []
+
+    def scan(self, **kwargs: object) -> dict:
+        self.calls.append(kwargs)
+        return self._pages[len(self.calls) - 1]
+
+
+def test_list_new_candidate_screening_batches_completes_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4是正: LastEvaluatedKeyが返る限りScanを繰り返し、全ページを結合すること。
+    S-2は「0件」を根拠に通知するため、pagination打ち切りはfalse positiveに
+    直結する(#506レビュー指摘)。
+    """
+    page1 = {
+        "Items": [{"batch_id": "watchlist-1"}],
+        "LastEvaluatedKey": {"batch_id": "watchlist-1"},
+    }
+    page2 = {"Items": [{"batch_id": "watchlist-2"}]}
+    fake_table = _FakePaginatedTable([page1, page2])
+    monkeypatch.setattr(batch_tracker, "_table", lambda: fake_table)
+
+    items = batch_tracker.list_new_candidate_screening_batches()
+
+    assert {item["batch_id"] for item in items} == {"watchlist-1", "watchlist-2"}
+    assert len(fake_table.calls) == 2
+    assert "ExclusiveStartKey" not in fake_table.calls[0]
+    assert fake_table.calls[1]["ExclusiveStartKey"] == {"batch_id": "watchlist-1"}
+
+
+class _RecordingSnsClient:
+    def __init__(self) -> None:
+        self.published: list[dict] = []
+
+    def publish(self, **kwargs: object) -> None:
+        self.published.append(kwargs)
+
+
+def test_publish_incident_envelope_rejects_non_allowlisted_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2是正: SNS publish直前のallowlist検査(最後の防御)を直接固定する。
+    許可外のキー(例: stock_code)が混入していたらpublishせず例外にする。
+    """
+    fake_sns = _RecordingSnsClient()
+    monkeypatch.setattr(handler_module.boto3, "client", lambda _service: fake_sns)
+    monkeypatch.setenv("INCIDENT_NOTIFICATION_TOPIC_ARN", "arn:aws:sns:ap-northeast-1:1:topic")
+    envelope = {"reason_code": "watchlist_missed_schedule", "stock_code": "1111"}
+
+    with pytest.raises(ValueError, match="non-allowlisted"):
+        handler_module._publish_incident_envelope(envelope)
+
+    assert fake_sns.published == []
+
+
+def test_publish_incident_envelope_publishes_allowlisted_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_sns = _RecordingSnsClient()
+    monkeypatch.setattr(handler_module.boto3, "client", lambda _service: fake_sns)
+    monkeypatch.setenv("INCIDENT_NOTIFICATION_TOPIC_ARN", "arn:aws:sns:ap-northeast-1:1:topic")
+    envelope = {"reason_code": "watchlist_missed_schedule", "source": "watchlist_reconciler"}
+
+    handler_module._publish_incident_envelope(envelope)
+
+    assert len(fake_sns.published) == 1
+    assert fake_sns.published[0]["TopicArn"] == "arn:aws:sns:ap-northeast-1:1:topic"

@@ -125,6 +125,30 @@ def test_topic_policy_grants_cloudwatch_publish_scoped_to_this_account() -> None
     }
 
 
+def test_reconciler_sns_publish_iam_is_scoped_to_the_topic_without_wildcard() -> None:
+    """Issue #506レビューD3是正: reconciler実行ロール自身のIAM(Function Policies側)の
+    sns:Publish Resourceが、IncidentNotificationTopicのみに限定されていること
+    (Resource="*"の付与禁止)。Topic Policy側(SNSリソースポリシー)とは別の
+    IAM面であり、両方が最小権限であることを個別に固定する。
+    """
+    policies = _resources()["WatchlistBatchReconcilerFunction"]["Properties"]["Policies"]
+    sns_statements = [
+        statement
+        for policy in policies
+        if isinstance(policy, dict)
+        for statement in policy.get("Statement", []) or []
+        if statement.get("Sid") == "PublishIncidentNotification"
+    ]
+    [statement] = sns_statements
+    assert statement["Effect"] == "Allow"
+    actions = _actions(statement)
+    assert actions == {"sns:Publish"}
+    resources = statement["Resource"]
+    resources = resources if isinstance(resources, list) else [resources]
+    assert resources == [{"Fn::Ref": _TOPIC_LOGICAL_ID}]
+    assert "*" not in str(resources)
+
+
 def test_topic_policy_grants_reconciler_publish_without_wildcard_resource() -> None:
     """Issue #506(O-1): reconciler発のInternal payloadも同じTopicへpublishできるよう、
     reconciler実行ロール向けのStatementを追加した(Resource="*"は付与しない)。

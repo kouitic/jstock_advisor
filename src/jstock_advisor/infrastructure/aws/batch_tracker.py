@@ -2609,6 +2609,50 @@ def record_incident_detector_state(
     _table().put_item(Item=item)
 
 
+def _streak_state_key(reason_code: str) -> str:
+    # 通知抑止状態(_incident_detector_state_key)とは別行にする。同じ行へ
+    # put_item(全置換)すると、通知していない営業日の評価更新が
+    # last_notified_date_jstを消してしまう(逆も同様)ため、書き込みの
+    # 競合を構造的に避ける。
+    return f"{_INCIDENT_DETECTOR_STATE_KEY_PREFIX}{reason_code}:streak"
+
+
+def get_streak_state(reason_code: str) -> dict[str, Any] | None:
+    """Issue #506 レビューF1是正: 連続営業日カウントの永続状態を読む(read-only)。
+
+    ★ S-4(候補ユニバース取得の連続失敗)は、過去のBatchRunsTable行を都度
+    読み返す設計にしない。BatchRunsTableのTTL(`candidate_progress_ttl_hours`。
+    既定72時間)は候補進捗行という短命なデータのためのものであり、週末・祝日を
+    跨ぐ複数営業日の履歴を保持する契約ではない(実測: 週をまたぐと対象行が
+    既にTTL経過で消えている。TTL削除自体も最大48時間遅延するため、同じ
+    「3営業日連続」でも検知の成否が非決定的になる)。この関数が返す状態は、
+    reconciler自身が営業日ごとに1回だけ評価し積み上げた結果であり、
+    元のBatchRunsTable行が生きているかどうかに依存しない。
+    """
+    response = _table().get_item(Key={"batch_id": _streak_state_key(reason_code)})
+    item: dict[str, Any] | None = response.get("Item")
+    return item
+
+
+def record_streak_state(
+    reason_code: str,
+    last_evaluated_date_jst: str,
+    streak_count: int,
+    now: dt.datetime,
+) -> None:
+    """営業日ごとの評価結果を積み上げて永続化する。単純なupsert(CASなし。理由は
+    `record_incident_detector_state`と同じ: reconcilerは1時間に1回のみ実行される)。
+    """
+    ttl = int((now + dt.timedelta(days=_INCIDENT_DETECTOR_STATE_TTL_DAYS)).timestamp())
+    item: dict[str, Any] = {
+        "batch_id": _streak_state_key(reason_code),
+        "last_evaluated_date_jst": last_evaluated_date_jst,
+        "streak_count": streak_count,
+        "ttl": ttl,
+    }
+    _table().put_item(Item=item)
+
+
 # --- 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENINGの業務finalize確定後、
 # WATCHLIST_MAINTENANCEを後続起動するexactly-once相当のトリガー状態機械。
 # try_acquire_dispatch_lease/try_acquire_rotation_dispatch_leaseと同じ
