@@ -267,6 +267,92 @@ def test_fetch_watchlist_worker_metrics_sorts_by_timestamp_regardless_of_api_ord
     assert metrics["oldest_message_age"] == oldest_first_values
 
 
+def test_sorted_values_ascending_by_timestamp_sorts_by_timestamp_not_by_value() -> None:
+    """★ #507レビューiteration 2 R1の直接固定: 並べ替えの基準が`Timestamps`で
+    あって`Values`ではないことを、時刻順と値の大小順が**一致しない**系列で
+    固定する。
+
+    以前の反証テスト(降順API・値が時刻に対して単調増加)は、並べ替えの
+    keyをValuesへ差し替える変異(A4)が通ってしまっていた(時刻順と値順が
+    偶然一致するため、どちらのkeyで並べ替えても同じ結果になっていた)。
+    本テストは時刻順(古→新: 900, 100, 700)と値の大小順(100, 700, 900)が
+    異なるように選ぶことで、この変異を検知する(Valuesでソートすると
+    [100, 700, 900]になり、Timestampsでソートした[900, 100, 700]とは
+    一致しない)。
+    """
+    now = _now_jst(_MON, 8)
+    chronological_timestamps = [
+        now - dt.timedelta(minutes=10),
+        now - dt.timedelta(minutes=5),
+        now,
+    ]
+    chronological_values = [900.0, 100.0, 700.0]  # 時刻順と値の大小順が食い違う
+
+    # APIからは(このフェイクに限り)意図的にシャッフルした順で返す。
+    shuffled_timestamps = [
+        chronological_timestamps[1],
+        chronological_timestamps[2],
+        chronological_timestamps[0],
+    ]
+    shuffled_values = [chronological_values[1], chronological_values[2], chronological_values[0]]
+
+    result = {"Timestamps": shuffled_timestamps, "Values": shuffled_values}
+
+    sorted_values = handler_module._sorted_values_ascending_by_timestamp(result)
+
+    assert sorted_values == chronological_values  # [900, 100, 700](時刻順)
+    assert sorted_values != sorted(chronological_values)  # [100, 700, 900](値順)ではない
+
+
+def test_queue_backlog_not_detected_when_just_resolved_with_non_monotonic_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ #507レビューiteration 2 R1の直接固定(サブちゃんの実測シナリオ
+    「直前に解消」): 3営業日分ではなく直近3 datapointが600秒超だった状態から、
+    最新のdatapointだけが解消(600秒以下)した場合、正しく「検知しない」こと。
+
+    並べ替えのkeyをValuesへ差し替える変異があると、値の小さい(=解消した)
+    datapointが並べ替え後に先頭へ来てしまい、`[-3:]`が古い(まだ超過していた)
+    3点を取ってしまうため、誤って「まだ滞留している」と検知してしまう
+    (stale検知)。本テストは値が時刻に対して単調増加しない系列
+    (700, 800, 900, 100)を使うことで、この変異を検知する。
+    """
+    monkeypatch.setenv("WATCHLIST_SCREENING_QUEUE_NAME", "my-queue")
+    monkeypatch.setenv("WATCHLIST_WORKER_FUNCTION_NAME", "my-stack-watchlist-worker")
+
+    now = _now_jst(_MON, 8)
+    chronological_timestamps = [
+        now - dt.timedelta(minutes=15),
+        now - dt.timedelta(minutes=10),
+        now - dt.timedelta(minutes=5),
+        now,
+    ]
+    # 700→800→900(滞留が悪化)→100(直前に解消)。値は時刻に対して単調増加しない。
+    chronological_values = [700.0, 800.0, 900.0, 100.0]
+
+    class _FakeCloudWatch:
+        def get_metric_data(self, **kwargs: object) -> dict:
+            return {
+                "MetricDataResults": [
+                    {
+                        "Id": "oldest_message_age",
+                        "Timestamps": chronological_timestamps,
+                        "Values": chronological_values,
+                    },
+                    {"Id": "throttles", "Timestamps": [now], "Values": [0.0]},
+                    {"Id": "invocations", "Timestamps": [now], "Values": [0.0]},
+                ]
+            }
+
+    monkeypatch.setattr(handler_module.boto3, "client", lambda _service: _FakeCloudWatch())
+
+    metrics = handler_module._fetch_watchlist_worker_metrics(now)
+    result = handler_module._detect_watchlist_queue_backlog(metrics, now)
+
+    # 直近3点(800, 900, 100)のうち100は閾値以下 -> 検知しない。
+    assert result is None
+
+
 # --- S-7: watchlist削除実績ゼロの連続営業日 ---------------------------------------
 
 

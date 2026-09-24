@@ -424,12 +424,19 @@ def _fetch_watchlist_worker_metrics(now: dt.datetime) -> dict[str, list[float]]:
     (infra/template.yamlのコメント参照)。
 
     Throttles/Invocationsの`Period`は、直近`_QUEUE_BACKLOG_LOOKBACK_MINUTES`分
-    の問い合わせ窓とちょうど一致させる(#507レビュー非BLOCKING指摘: 以前は
-    Period=86400〔1日〕を使っていたため、ログのthrottle_rateが「直近20分」
-    ではなく「本日の累積」であるかのように見えてしまっていた。実際の
-    集計対象はStartTime/EndTimeで指定した窓のデータのみであり、Periodの
-    値そのものが集計範囲を広げるわけではないが、値の意味を紛らわしくして
-    いたため、窓の長さと一致させて誤解を防ぐ)。
+    の問い合わせ窓とちょうど一致させる。
+
+    ★ #507レビューiteration 2 R2是正: 以前はPeriod=86400(1日)を使っていたが、
+    これは「表記が紛らわしい」という表現の問題ではなく、**実際に集計範囲が
+    広がる正しさの問題**だった。サブちゃんが本番CloudWatchで実測した結果、
+    `Period`が実際の問い合わせ窓(StartTime〜EndTime)より大きい場合、
+    CloudWatchは`StartTime`を起点に`Period`長のバケットを構成し、
+    `EndTime`の外側までデータを含めて集計する(実測: Period=86400・実際の
+    窓20分に対し、値が約10倍〔2434 vs 実際の窓243〕になることを確認)。
+    つまり旧実装のthrottle_rateは日次スケールの値で、直近20分の状況を
+    表していなかった。Periodを問い合わせ窓と一致させることで、この
+    過大集計そのものを解消する(表記の修正ではなく、集計対象を正しい
+    範囲に収める修正)。
     """
     cloudwatch = boto3.client("cloudwatch")
     queue_name = os.environ["WATCHLIST_SCREENING_QUEUE_NAME"]
