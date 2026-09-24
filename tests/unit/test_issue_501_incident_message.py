@@ -19,8 +19,10 @@ import ast
 import datetime as dt
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from jstock_advisor.domain.notification import incident_message
 from jstock_advisor.domain.notification.incident_message import (
@@ -265,18 +267,82 @@ def test_every_lambda_function_in_the_template_has_an_entry() -> None:
     assert functions == set(incident_message._INTERNAL_NAME_TO_JOB)
 
 
-def test_every_dlq_in_the_template_has_an_entry() -> None:
-    """全 DLQ(名前が `-dlq` で終わるキュー)が対応表にある(Issue #349)。
+def _load_template_resources() -> dict[str, Any]:
+    class _Loader(yaml.SafeLoader):
+        pass
+
+    _Loader.add_multi_constructor("!", lambda _l, suffix, node: {f"Fn::{suffix}": node.value})
+    loaded = yaml.load(
+        (_REPO_ROOT / "infra" / "template.yaml").read_text(encoding="utf-8"), Loader=_Loader
+    )
+    return loaded["Resources"]
+
+
+def _referenced_logical_id(value: object) -> str | None:
+    """`!GetAtt X.Arn`(ロード後は{"Fn::GetAtt": "X.Arn"})からXを取り出す。"""
+    if isinstance(value, dict) and isinstance(value.get("Fn::GetAtt"), str):
+        return value["Fn::GetAtt"].split(".")[0]
+    return None
+
+
+def _terminal_failure_sink_queue_names(resources: dict[str, Any]) -> set[str]:
+    """真正のDLQ(終端の失敗の受け皿)のQueueName(スタック名の前置を除いたもの)を、
+    命名規約
+    (例: `-dlq`サフィックス)ではなく実際の構造から特定する(Issue #349サブちゃん
+    レビューF1: 名前の綴りに依存すると、別の命名規約〔例: `-deadletter`〕で
+    追加された5本目のDLQを検知できない。#505 F1と同じ「内容で特定する」考え方)。
+
+    「終端の失敗の受け皿」とは、(a) 他のQueueのRedrivePolicy.deadLetterTargetArnの
+    宛先、または(b) LambdaのEventInvokeConfig.DestinationConfig.OnFailure.
+    Destinationの宛先として参照されており、かつ(c) 自身はRedrivePolicyを持たない
+    (さらに先へリダイレクトされない=redrive chainの終端である)Queueである。
+    """
+    queue_logical_ids = {
+        name for name, r in resources.items() if r.get("Type") == "AWS::SQS::Queue"
+    }
+    has_own_redirect = {
+        name for name in queue_logical_ids if "RedrivePolicy" in resources[name]["Properties"]
+    }
+
+    referenced_as_failure_target: set[str] = set()
+    for resource in resources.values():
+        props = resource.get("Properties", {})
+        redrive = props.get("RedrivePolicy")
+        if isinstance(redrive, dict):
+            target = _referenced_logical_id(redrive.get("deadLetterTargetArn"))
+            if target:
+                referenced_as_failure_target.add(target)
+        on_failure = (
+            props.get("EventInvokeConfig", {}).get("DestinationConfig", {}).get("OnFailure", {})
+        )
+        if isinstance(on_failure, dict):
+            target = _referenced_logical_id(on_failure.get("Destination"))
+            if target:
+                referenced_as_failure_target.add(target)
+
+    terminal_ids = (referenced_as_failure_target & queue_logical_ids) - has_own_redirect
+    # !Sub "${AWS::StackName}-xxx" は {"Fn::Sub": "${AWS::StackName}-xxx"} へロードされる。
+    names: set[str] = set()
+    for name in terminal_ids:
+        queue_name = resources[name]["Properties"]["QueueName"]
+        if isinstance(queue_name, dict) and isinstance(queue_name.get("Fn::Sub"), str):
+            names.add(queue_name["Fn::Sub"].removeprefix("${AWS::StackName}-"))
+    return names
+
+
+def test_every_terminal_dlq_in_the_template_has_an_entry() -> None:
+    """全ての終端DLQ(redrive chainの終端。命名規約ではなく構造で特定する。
+    Issue #349)が対応表にある。
 
     増減したら、ここが赤くなり `_QUEUE_NAME_TO_JOB` を更新する合図になる
     (test_every_lambda_function_in_the_template_has_an_entry と同型のガード)。
     """
-    template = (_REPO_ROOT / "infra" / "template.yaml").read_text(encoding="utf-8")
-    queues = set(re.findall(r'QueueName: !Sub "\$\{AWS::StackName\}-([a-z0-9-]+-dlq)"', template))
+    resources = _load_template_resources()
+    stripped = _terminal_failure_sink_queue_names(resources)
 
-    assert len(queues) == 4  # #349: WatchlistTerminalFailure / BuyCandidateTerminalFailure /
+    assert len(stripped) == 4  # #349: WatchlistTerminalFailure / BuyCandidateTerminalFailure /
     # HoldingsWatchlistTerminalFailure / AsyncInvokeFailure の4本
-    assert queues == set(incident_message._QUEUE_NAME_TO_JOB)
+    assert stripped == set(incident_message._QUEUE_NAME_TO_JOB)
 
 
 @pytest.mark.parametrize(

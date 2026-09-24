@@ -112,6 +112,69 @@ def test_exactly_four_dlq_alarms_exist() -> None:
     assert alarm_logical_ids == set(_ALARM_LOGICAL_IDS)
 
 
+def _referenced_logical_id(value: object) -> str | None:
+    """`!GetAtt X.Arn`(ロード後は{"Fn::GetAtt": "X.Arn"})からXを取り出す。"""
+    if isinstance(value, dict) and isinstance(value.get("Fn::GetAtt"), str):
+        return value["Fn::GetAtt"].split(".")[0]
+    return None
+
+
+def _terminal_failure_sink_queue_logical_ids(resources: dict[str, Any]) -> set[str]:
+    """真正のDLQ(終端の失敗の受け皿)のlogical IDを、命名規約(例: `-dlq`サフィックス)
+    ではなく実際の構造から特定する(サブちゃんレビューF1。#505 F1と同じ「内容で
+    特定する」考え方。tests/unit/test_issue_501_incident_message.pyの同名の関数と
+    同型)。「終端の失敗の受け皿」とは、他のQueueのRedrivePolicy.deadLetterTargetArn
+    またはLambdaのEventInvokeConfig.DestinationConfig.OnFailure.Destinationの宛先
+    として参照されており、かつ自身はRedrivePolicyを持たないQueueである。
+    """
+    queue_logical_ids = {
+        name for name, r in resources.items() if r.get("Type") == "AWS::SQS::Queue"
+    }
+    has_own_redirect = {
+        name for name in queue_logical_ids if "RedrivePolicy" in resources[name]["Properties"]
+    }
+
+    referenced_as_failure_target: set[str] = set()
+    for resource in resources.values():
+        props = resource.get("Properties", {})
+        redrive = props.get("RedrivePolicy")
+        if isinstance(redrive, dict):
+            target = _referenced_logical_id(redrive.get("deadLetterTargetArn"))
+            if target:
+                referenced_as_failure_target.add(target)
+        on_failure = (
+            props.get("EventInvokeConfig", {}).get("DestinationConfig", {}).get("OnFailure", {})
+        )
+        if isinstance(on_failure, dict):
+            target = _referenced_logical_id(on_failure.get("Destination"))
+            if target:
+                referenced_as_failure_target.add(target)
+
+    return (referenced_as_failure_target & queue_logical_ids) - has_own_redirect
+
+
+def test_every_terminal_dlq_has_a_queue_depth_alarm_watching_it() -> None:
+    """全ての終端DLQ(redrive chainの終端。命名規約ではなく構造で特定する)が、
+    ApproximateNumberOfMessagesVisibleを見るAlarmを持つ(Issue #349サブちゃん
+    レビューF1: `-dlq`という名前ではなく、実際にredrive chainの終端であるかで
+    判定することで、別の命名規約で追加されたDLQの監視漏れを防ぐ)。"""
+    resources = _resources()
+    terminal_ids = _terminal_failure_sink_queue_logical_ids(resources)
+
+    watched_queue_logical_ids = {
+        _referenced_logical_id(dimension["Value"])
+        for name, resource in resources.items()
+        if resource.get("Type") == "AWS::CloudWatch::Alarm"
+        and resource.get("Properties", {}).get("Namespace") == "AWS/SQS"
+        and resource.get("Properties", {}).get("MetricName")
+        == "ApproximateNumberOfMessagesVisible"
+        for dimension in resource["Properties"]["Dimensions"]
+        if dimension.get("Name") == "QueueName"
+    }
+
+    assert terminal_ids == watched_queue_logical_ids
+
+
 def test_no_new_topic_or_topic_policy_was_added() -> None:
     """#503のIncidentNotificationTopic/IncidentNotificationTopicPolicyを再利用し、
     新規のSNS Topic・Topic Policyを追加していないこと(USER決定どおり)。"""
