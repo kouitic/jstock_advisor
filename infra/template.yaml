@@ -2218,6 +2218,252 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
+  # --- 本番ジョブ異常の検知(Issue #132 X-5〔#504〕。段階2) -------------------
+  # 段階1(#503)はEvaluationFunctionのみを監視対象としていた。ここで残る11関数へ
+  # Errors alarmを追加し、Lambda 12本すべてをIncidentNotificationTopicへ接続する
+  # (EvaluationFunctionErrorsAlarmは既に接続済みのため再利用し、ここでは変更しない)。
+  # 各alarmはEvaluationFunctionErrorsAlarmと同一設計(Statistic=Sum, EvaluationPeriods=1,
+  # Threshold=1, TreatMissingData=notBreaching)に統一する。
+  #
+  # ★ 検知範囲の限界(#504調査で確認済み。#506/#507が別途補完する)。
+  #   分類の基準はハンドラ本体の制御フロー(per-item/per-batchの例外を明示的に捕捉し
+  #   re-raiseしない設計かどうか)であり、呼び出し先moduleの個別のexcept節の有無までは
+  #   分類していない(下記の残存リスク参照)。
+  #   グループA(per-item/per-batchの例外を明示的に捕捉しre-raiseしない設計。
+  #   BuyCandidates/HoldingsWatchlist/WatchlistDispatcher/WatchlistWorker/
+  #   WatchlistBatchReconciler/LineWebhook)では、この種の内部異常はLambdaの
+  #   Errorsメトリクスに計上されないため、本alarmだけでは検知できない
+  #   (終端状態の監視は#506/#507の担当)。
+  #   グループB(DisclosureCheck/Evaluation/WeeklyReview/MonthlyReview/
+  #   QuarterlyReview/WatchlistTerminalFailureHandler)は、ハンドラ本体で
+  #   per-item/per-batchの例外を握り潰さないため、グループAより検知範囲が広い。
+  #   ★ ただし「Errorsだけで完全に検知できる関数」は無い: グループBであっても、
+  #   ハンドラが呼ぶ個別module内に独自のexcept Exceptionがあれば、その範囲の異常は
+  #   同様に計上されない(実例: `evaluation_run_audit.py`の監査書き込み失敗は、
+  #   flagに依らず常にexcept Exceptionで握り潰され、EvaluationFunction自体は
+  #   グループBだがこの一点は検知できない)。この限界も#506/#507の担当領域として
+  #   引き継ぐ。
+
+  BuyCandidatesFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-buy-candidates-errors"
+      AlarmDescription: >-
+        買い候補日次バッチLambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BuyCandidatesFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  HoldingsWatchlistFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-holdings-watchlist-errors"
+      AlarmDescription: >-
+        保有株チェックLambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref HoldingsWatchlistFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  DisclosureCheckFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-disclosure-check-errors"
+      AlarmDescription: >-
+        適時開示チェックLambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DisclosureCheckFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  WatchlistDispatcherFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-watchlist-dispatcher-errors"
+      AlarmDescription: >-
+        ウォッチリスト自動追加(dispatcher)Lambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WatchlistDispatcherFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  WatchlistWorkerFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-watchlist-worker-errors"
+      AlarmDescription: >-
+        ウォッチリスト自動追加(worker)Lambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WatchlistWorkerFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  WatchlistTerminalFailureHandlerFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-watchlist-terminal-failure-handler-errors"
+      AlarmDescription: >-
+        ウォッチリスト自動追加(terminal failure handler)Lambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WatchlistTerminalFailureHandlerFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  WatchlistBatchReconcilerFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-watchlist-batch-reconciler-errors"
+      AlarmDescription: >-
+        ウォッチリスト自動追加(reconciler)Lambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WatchlistBatchReconcilerFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  WeeklyReviewFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-weekly-review-errors"
+      AlarmDescription: >-
+        週次改善レビューLambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WeeklyReviewFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  MonthlyReviewFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-monthly-review-errors"
+      AlarmDescription: >-
+        月次レビューLambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MonthlyReviewFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  QuarterlyReviewFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-quarterly-review-errors"
+      AlarmDescription: >-
+        四半期レビューLambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref QuarterlyReviewFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  LineWebhookFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-line-webhook-errors"
+      AlarmDescription: >-
+        LINE WebhookLambdaが失敗した。Issue #504参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LineWebhookFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
   # --- ウォッチリスト自動追加(候補ユニバース本格対応・2026-08) ---------------
   # 旧WatchlistAutoAdditionFunction(単一Lambdaの自己再帰fan-out)を、
   # Dispatcher→SQS→Worker、TerminalFailureQueue→Handler、毎時Reconcilerという
