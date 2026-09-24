@@ -14,6 +14,7 @@ USER決定(#506 issuecomment-5805034769)の要点をそのまま検証する:
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from types import SimpleNamespace
 
 import boto3
@@ -36,6 +37,7 @@ _FRI = dt.date(2026, 9, 11)
 _SAT = dt.date(2026, 9, 12)  # 非営業日(週末)
 _NEXT_MON = dt.date(2026, 9, 14)  # _FRIの次の営業日(週末を挟む)
 _NEXT_TUE = dt.date(2026, 9, 15)
+_SUN = dt.date(2026, 9, 13)  # 非営業日(週末)
 
 
 def _calendar() -> BusinessCalendar:
@@ -215,7 +217,13 @@ def test_universe_load_failure_streak_gap_resets_the_streak(dynamo) -> None:
 
 
 def test_universe_load_failure_streak_not_evaluated_on_non_business_day(dynamo) -> None:
-    """非営業日は評価自体をskipし、永続状態(streak_count)を変えない。"""
+    """非営業日は評価自体をskipし、永続状態(streak_count)を変えない。
+
+    ★ #506レビューiteration 2 R1是正の直接固定: 戻り値は前回の営業日の値
+    (例: 2)をそのまま返してはならない(それを閾値判定へ流すと、非営業日にも
+    関わらず「本日確定した3営業日連続」として毎日再通知されてしまう。
+    「本日はまだ確定していない」ことを表す`None`を返す)。
+    """
     _evaluate_day(_WED, failed=True)
     _evaluate_day(_THU, failed=True)
     before = handler_module.get_streak_state(
@@ -225,8 +233,8 @@ def test_universe_load_failure_streak_not_evaluated_on_non_business_day(dynamo) 
     after = handler_module.get_streak_state(
         handler_module._REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK
     )
-    assert streak_on_saturday == 2  # 変化なし(土曜は評価しない)
-    assert after == before
+    assert streak_on_saturday is None  # 「本日は未確定」。2のような数値を返さない
+    assert after == before  # 永続状態も変化しない(土曜は評価しない)
 
 
 def test_universe_load_failure_streak_envelope_has_only_allowlisted_keys(dynamo) -> None:
@@ -247,6 +255,105 @@ def test_universe_load_failure_streak_ignores_same_day_reevaluation(dynamo) -> N
     second = _evaluate_day(_TUE, failed=True, hour_jst=8)
     assert first == 1
     assert second == 1
+
+
+def test_universe_load_failure_streak_three_hourly_reruns_in_one_day_do_not_reach_threshold(
+    dynamo,
+) -> None:
+    """★ #506レビューiteration 2 R3の直接固定: 「1営業日1回だけ評価する」guardが
+    壊れると、reconcilerが毎時起動するだけで(実際には1日しか失敗していないのに)
+    3時間後にstreak=3へ達し「3営業日連続」として誤通知しうる
+    (USER決定の閾値が実質無意味になる重大な検知力の穴)。
+    """
+    streaks = [
+        _evaluate_day(_TUE, failed=True, hour_jst=7),
+        _evaluate_day(_TUE, failed=True, hour_jst=8),
+        _evaluate_day(_TUE, failed=True, hour_jst=9),
+    ]
+    assert streaks == [1, 1, 1]
+    result = handler_module._detect_watchlist_universe_load_failure_streak(
+        streaks[-1], _now_jst(_TUE, 9)
+    )
+    assert result is None  # 1営業日だけの失敗では閾値(3)に達しない
+
+
+def test_universe_load_failure_streak_resets_on_evaluation_gap_from_downtime(
+    dynamo, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★ #506レビューiteration 2 R4の直接固定: reconcilerが複数営業日停止して
+    復帰した場合(直前の評価日と「本日の前営業日」が一致しない)、断絶前の
+    streakを引き継がず、本日の結果だけでリセットする(fail-safe)。
+    """
+    _evaluate_day(_MON, failed=True)
+    _evaluate_day(_TUE, failed=True)  # streak=2。ここでreconcilerが停止したとする
+    # 水曜の評価は行われない(reconciler停止のシミュレーション。_evaluate_dayを
+    # 呼ばない)。
+
+    with caplog.at_level(logging.WARNING, logger=handler_module.logger.name):
+        streak = _evaluate_day(_THU, failed=True)
+
+    assert streak == 1  # 断絶前のstreak(2)を引き継がず、本日分だけで再スタート
+    assert "evaluation gap" in caplog.text
+
+
+def _run_universe_load_failure_pass(date: dt.date, *, failed: bool, hour_jst: int = 7) -> bool:
+    """reconcilerの1回の呼び出し相当(評価 → 閾値判定 → 1日1回抑止つきpublish)を
+    模擬する。戻り値はpublishしたかどうか。
+    """
+    now = _now_jst(date, hour_jst)
+    todays_batches = [_batch(date, failure_reason="universe_load_failed")] if failed else []
+    streak = handler_module._evaluate_and_persist_universe_load_failure_streak(
+        todays_batches, _calendar(), now
+    )
+    envelope = handler_module._detect_watchlist_universe_load_failure_streak(streak, now)
+    return handler_module._notify_if_new_today(envelope, date, now)
+
+
+def test_universe_load_failure_streak_does_not_renotify_on_non_business_days(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ #506レビューiteration 2 R1の直接固定(本番実データで確認): 水曜に
+    3営業日連続として通知された後、土曜・日曜(非営業日)に新しいbatchが無くても
+    再publishしてはならない。1日1回抑止のキーが暦日単位のため、非営業日を
+    「新しい1日」として素通りさせるとここが破綻していた(累計1→3)。
+    """
+    published: list[dict] = []
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+
+    assert _run_universe_load_failure_pass(_MON, failed=True) is False
+    assert _run_universe_load_failure_pass(_TUE, failed=True) is False
+    assert _run_universe_load_failure_pass(_WED, failed=True) is True  # streak=3、初回通知
+    assert len(published) == 1
+
+    assert _run_universe_load_failure_pass(_SAT, failed=True) is False
+    assert _run_universe_load_failure_pass(_SUN, failed=True) is False
+
+    assert len(published) == 1  # 累計1のまま(週末の再通知が起きない)
+
+
+def test_universe_load_failure_streak_does_not_publish_stale_value_before_grace_hour(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ #506レビューiteration 2 R2の直接固定(本番実データで確認): 猶予時刻より
+    前の実行が、前日確定したstreakを「本日の状態」として誤ってpublishして
+    いた(例: 木曜06:00にconsecutive_days=3・継続中として通知したのに、
+    木曜08:00の当日評価ではstreak=0。1日1回抑止のため訂正も届かなかった)。
+    """
+    published: list[dict] = []
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+
+    assert _run_universe_load_failure_pass(_MON, failed=True) is False
+    assert _run_universe_load_failure_pass(_TUE, failed=True) is False
+    assert _run_universe_load_failure_pass(_WED, failed=True) is True  # streak=3、初回通知
+    assert len(published) == 1
+
+    # 木曜06:00(猶予前)。前日確定値(3)を「本日の状態」としてpublishしない。
+    assert _run_universe_load_failure_pass(_THU, failed=False, hour_jst=6) is False
+    assert len(published) == 1
+
+    # 木曜08:00(猶予後)。本日は実際には失敗していない(streak=0) → 通知不要。
+    assert _run_universe_load_failure_pass(_THU, failed=False, hour_jst=8) is False
+    assert len(published) == 1
 
 
 def test_universe_load_failure_streak_survives_batch_row_ttl_expiry(dynamo) -> None:

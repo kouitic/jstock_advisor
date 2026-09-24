@@ -256,10 +256,11 @@ def _detect_watchlist_missed_schedule(
 
 def _evaluate_and_persist_universe_load_failure_streak(
     todays_batches: list[dict[str, Any]], calendar: BusinessCalendar, now: dt.datetime
-) -> int:
+) -> int | None:
     """S-4: 候補ユニバース取得の失敗(`failure_reason == "universe_load_failed"`)が
     何営業日連続しているかを、営業日ごとに1回だけインクリメンタルに評価・永続化する
-    (副作用あり: DynamoDB書き込みを行う。戻り値は更新後のstreak_count)。
+    (副作用あり: DynamoDB書き込みを行う。戻り値は「本日時点で確定した」
+    streak_countで、本日分をまだ評価できない場合は`None`を返す)。
 
     ★ #506レビューF1是正: 過去のBatchRunsTable行を読み返して連続日数を
     再計算する設計を採らない。BatchRunsTableのTTL(`candidate_progress_ttl_hours`。
@@ -273,6 +274,17 @@ def _evaluate_and_persist_universe_load_failure_streak(
     停止していた等)があれば継続性を信用せず、本日の結果だけでリセットする
     (誤って長い連続を主張しないためのfail-safe。ログで可視化する)。
 
+    ★ #506レビューiteration 2 R1/R2是正: 非営業日・猶予時刻前は、直前に
+    永続化された`streak_count`(=過去の営業日の状態)をそのまま返さない。
+    これを返すと、(R1)非営業日にも関わらず「本日確定した」として毎日
+    再publishされてしまい(1日1回抑止のキーが暦日単位のため、非営業日も
+    「新しい1日」として扱われてしまう)、(R2)猶予時刻前の実行が前日の
+    ステータスを「本日の状態」として誤ってpublishし、その後の本日分の
+    正しい再評価(結果が変わっていても)を1日1回抑止が握りつぶす。
+    「本日時点でまだ確定していない」ことを`None`で明示的に表現し、
+    呼び出し元(`_detect_watchlist_universe_load_failure_streak`)がpublish
+    対象にしない。
+
     `mark_dispatch_failed(..., reason="universe_load_failed")`は
     `watchlist_dispatcher_handler.py`の`CandidateUniverseError`経路の1箇所のみが
     設定する(実装側で確認済み。`_collect_maintenance_targets()`は候補ユニバース
@@ -281,15 +293,16 @@ def _evaluate_and_persist_universe_load_failure_streak(
     """
     reason_code = _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK
     today_jst = evaluation_date_jst(now)
+    if not calendar.is_business_day(today_jst):
+        return None
+    if to_jst(now).hour < _MISSED_SCHEDULE_GRACE_HOUR_JST:
+        return None
+
     state = get_streak_state(reason_code)
     prior_streak = int(state["streak_count"]) if state else 0
-    if not calendar.is_business_day(today_jst):
-        return prior_streak
-    if to_jst(now).hour < _MISSED_SCHEDULE_GRACE_HOUR_JST:
-        return prior_streak
     last_evaluated = state.get("last_evaluated_date_jst") if state else None
     if last_evaluated == today_jst.isoformat():
-        return prior_streak  # 本日分は評価済み
+        return prior_streak  # 本日分は評価済み(今日確定した値をそのまま返す)
 
     today_failed = any(
         batch_item.get("failure_reason") == "universe_load_failed"
@@ -312,14 +325,15 @@ def _evaluate_and_persist_universe_load_failure_streak(
 
 
 def _detect_watchlist_universe_load_failure_streak(
-    streak_count: int, now: dt.datetime
+    streak_count: int | None, now: dt.datetime
 ) -> dict[str, Any] | None:
     """S-4: 連続日数が閾値(3営業日)以上ならincident envelopeを返す(単発は対象外。
     #132本文/#234)。連続日数の評価・永続化自体は
     `_evaluate_and_persist_universe_load_failure_streak`が行う(この関数は
-    その結果を閾値判定するだけの純粋関数)。
+    その結果を閾値判定するだけの純粋関数)。`streak_count`が`None`(本日分は
+    まだ評価できていない)なら検知しない。
     """
-    if streak_count < _UNIVERSE_LOAD_FAILURE_STREAK_THRESHOLD_DAYS:
+    if streak_count is None or streak_count < _UNIVERSE_LOAD_FAILURE_STREAK_THRESHOLD_DAYS:
         return None
     return {
         "source": _INCIDENT_SOURCE_WATCHLIST_RECONCILER,
