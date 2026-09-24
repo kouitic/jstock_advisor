@@ -124,6 +124,19 @@ class EvaluationResult(Entity):
     reached_aggressive_buy_price: bool | None = None
     business_days_to_reach_price: int | None = None
 
+    # SELL側の利確目安到達判定(Issue #368)。BUY側と対称にhigh>=priceで判定する。
+    # この3フィールドはhorizon_business_days(種別依存。1,5,20,60,120,250)と
+    # horizon_calendar_days(常に7暦日)の両方の行に書かれ、horizonの種類を
+    # 区別しない。利用時は必ずhorizon_business_days/horizon_calendar_daysと
+    # 併せて読むこと(reached=Trueだけでは「どの窓で到達したか」が分からない)。
+    # horizon_business_days=1の行はday-zero(推奨当日)と翌営業日の2営業日窓で
+    # あり、reached=Falseは当日未到達を含意するが、reached=Trueは当日か翌営業日
+    # かを区別できない(#368設計R2/N1〜N3)。
+    reached_partial_profit_start_price: bool | None = None
+    reached_recommended_limit_price: bool | None = None
+    reached_full_profit_consideration_price: bool | None = None
+    business_days_to_reach_sell_price: int | None = None
+
     benchmark_symbol: str | None = None
     benchmark_return_pct: float | None = None
     excess_return_pct: float | None = None
