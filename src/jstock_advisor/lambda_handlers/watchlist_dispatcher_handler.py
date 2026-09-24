@@ -409,19 +409,23 @@ def _derive_batch_id(event: dict[str, Any], batch_prefix: str, now: dt.datetime)
     2. EventBridge Schedulerのcontext attribute`<aws.scheduler.scheduled-time>`
        (`infra/template.yaml`のSchedule Input経由で`event["scheduled_time"]`
        として渡す)が有効なISO8601文字列であれば、そこから決定論的に生成する。
-       `scheduled-time`はEventBridge Schedulerの仕様上、同一の論理実行の
-       retry(再配送)間で不変である(実際に試行した時刻ではなく、スケジュール
-       定義上の起動予定時刻を表す。`<aws.scheduler.execution-id>`や
-       `<aws.scheduler.attempt-number>`は逆にretryごとに変わるため使わない)。
-       これにより、`try_acquire_dispatch_lease()`の既存のConditionExpression
+       AWS公式ドキュメントに「同一の論理実行のretry(再配送)間で不変」という
+       明示の保証文は無いが、`<aws.scheduler.execution-id>`/
+       `<aws.scheduler.attempt-number>`が「試行ごとに変わる」と明記されている
+       こととの対比から、scheduled-time(スケジュール定義上の起動予定時刻。
+       実際に試行した時刻ではない)は試行に依存しない値と解釈できる(妥当な
+       推論。レビュー対応: PR #556 F2)。これにより、
+       `try_acquire_dispatch_lease()`の既存のConditionExpression
        (同一batch_idの手動re-runを許容しつつ多重実行を排除する設計。
        `infrastructure/aws/batch_tracker.py`)がScheduler retryに対しても
        そのまま働くようになる(rotation dispatch leaseの有無に依存しないため、
        WATCHLIST_MAINTENANCE・rotation.enabled=falseの経路も保護される)。
-       `scheduled-time`は常にUTCで渡ってくるため(ScheduleExpressionTimezone
-       の設定に関わらない)、JST日付境界での前日化けを避けるため
-       `domain/jst.py::to_jst()`で変換してからフォーマットする(新しい独自の
-       タイムゾーン変換は作らない)。
+       ドキュメントの例はZ付き(UTC表記)だが、「常にUTC」という明記は無い。
+       offsetなし(naive)で渡ってきた場合はUTCとみなす既定に倒す(下記実装。
+       この既定がJST日付境界での前日化けを避ける唯一の安全網であるため、
+       naive入力を固定するテストを持つ。レビュー対応: PR #556 F1)。
+       offset付きの場合は`domain/jst.py::to_jst()`で変換してからフォーマット
+       する(新しい独自のタイムゾーン変換は作らない)。
     3. 上記どちらも無い場合(手動invoke・ローカルテスト等、Scheduler経由でない
        起動)は、従来どおり時刻+ランダムサフィックスで生成する(この経路は
        Scheduler retryの対象ではないため、retry間の安定性は不要)。

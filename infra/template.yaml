@@ -2723,13 +2723,21 @@ Resources:
             FlexibleTimeWindow:
               Mode: "OFF"
             # Issue #65 F-E7: EventBridge Schedulerのcontext attribute
-            # <aws.scheduler.scheduled-time>(同一の論理実行のretry間で不変。
-            # AWS公式ドキュメントで確認済み)をLambdaのeventへ渡し、
+            # <aws.scheduler.scheduled-time>をLambdaのeventへ渡し、
             # watchlist_dispatcher_handler.py::_derive_batch_id()がbatch_idを
             # 決定論的に導出できるようにする。これによりScheduler retryでも
             # 同一batch_idになり、既存のdispatch lease(batch_id key)が
-            # 多重dispatchを拒否できる。値は常にUTCで渡る(handler側でJSTへ
-            # 変換する)。
+            # 多重dispatchを拒否できる。
+            # AWS公式ドキュメントには、この値がretry間で不変であることの明示の
+            # 保証文は無い。ただし<aws.scheduler.execution-id>/
+            # <aws.scheduler.attempt-number>が「試行ごとに変わる」と明記されて
+            # いることとの対比から、scheduled-timeは試行に依存しない値と解釈
+            # できる(妥当な推論。レビュー対応: PR #556 F2)。ドキュメントの例は
+            # Z付き(UTC表記)だが、「常にUTC」という明記も無い。handler側は
+            # offsetなし(naive)で渡ってきた場合のみUTCとみなす既定へ依存する
+            # (watchlist_dispatcher_handler.py::_derive_batch_id()参照)。
+            # deploy後、最初のScheduler起動時のログで実際に渡ってくる値の形式を
+            # 確認すること(verification項目)。
             Input: '{"scheduled_time": "<aws.scheduler.scheduled-time>"}'
 
   WatchlistWorkerFunction:

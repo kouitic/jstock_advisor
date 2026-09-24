@@ -100,6 +100,26 @@ def test_t6_utc_scheduled_time_is_converted_to_jst_before_formatting() -> None:
     assert "20260924" not in batch_id  # UTC日付(9/24)がそのまま出ていないこと
 
 
+def test_t6b_naive_scheduled_time_without_offset_defaults_to_utc() -> None:
+    """T6b(レビュー対応: PR #556 F1): scheduled_timeにoffsetが無い(naive)場合の
+    既定を固定する。AWS公式ドキュメントには常にUTCで渡るという明記は無く、
+    offset無しで渡ってきた場合にどう解釈するかはhandler側の既定次第である。
+    現行実装はUTCとみなす(offset付きの場合と同じくto_jst()でJST変換する)。
+    この既定が崩れると、値自体は変わらず(冪等性は壊れない)batch_idの日時
+    表記だけが9時間ずれるため、人が気づかない限りサイレントに誤り続ける
+    (レビューで反証G4「naiveをJSTとみなす」がSURVIVEDし、実測で9時間ずれる
+    ことを確認済み)。"""
+    event = {"scheduled_time": "2026-09-24T21:00:00"}  # offset無し(naive)
+    now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
+
+    batch_id = handler_module._derive_batch_id(event, "watchlist", now)
+
+    # UTCとみなした場合: 2026-09-24T21:00:00Z -> JST 2026-09-25T06:00:00
+    assert "20260925T060000" in batch_id
+    # naiveをJSTとみなす変異が入ると 20260924T210000 になる(9時間ずれ)。
+    assert "20260924T210000" not in batch_id
+
+
 def test_malformed_scheduled_time_falls_back_to_the_random_generator() -> None:
     """scheduled_timeが不正な文字列の場合、handler自体を失敗させず、従来の
     時刻+ランダムサフィックス方式へfallbackする(fail-safe)。"""
