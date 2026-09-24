@@ -566,6 +566,7 @@ class SellSignalService:
             raw_recommendation_type=raw_recommendation_type,
             sell_prices=sell_prices,
             price_at_recommendation=snapshot.current_price,
+            price_as_of_date=snapshot.price_as_of_date,
             average_purchase_price_at_recommendation=holding.average_purchase_price,
             shares_at_recommendation=holding.shares,
             dividend_yield_pct_at_recommendation=snapshot.dividend_yield_pct,
