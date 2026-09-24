@@ -2121,6 +2121,12 @@ Resources:
     Properties:
       TopicName: !Sub "${AWS::StackName}-incident-notifications"
 
+  # Issue #557: PolicyDocumentが複数Statementを持つ場合、SNSのSetTopicAttributes
+  # APIは各StatementのSidが一意であることを要求する(未指定=null同士は「同一」と
+  # 判定される)。この制約はCloudFormationテンプレートのYAML検証(sam validate
+  # --lint)では検出できず、実際のChangeSet EXECUTEがSNS APIへ到達して初めて
+  # HandlerErrorCode: InvalidRequestとして顕在化する(Release W9で発生・
+  # ロールバック済み)。Statementを追加する際は必ず一意なSidを付けること。
   IncidentNotificationTopicPolicy:
     Type: AWS::SNS::TopicPolicy
     Properties:
@@ -2128,7 +2134,8 @@ Resources:
         - !Ref IncidentNotificationTopic
       PolicyDocument:
         Statement:
-          - Effect: Allow
+          - Sid: AllowCloudWatchAlarmPublish
+            Effect: Allow
             Principal:
               Service: cloudwatch.amazonaws.com
             Action: sns:Publish
@@ -2140,7 +2147,8 @@ Resources:
           # reconcilerが検知したInternal structured incident payloadも同じTopicを
           # 通す(発生源に関わらず単一経路)。CloudWatch Alarm以外にpublishを許すのは
           # このreconciler実行ロールのみ(Resource="*"の付与は行わない)。
-          - Effect: Allow
+          - Sid: AllowWatchlistBatchReconcilerPublish
+            Effect: Allow
             Principal:
               AWS: !GetAtt WatchlistBatchReconcilerFunctionRole.Arn
             Action: sns:Publish
