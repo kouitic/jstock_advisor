@@ -292,10 +292,18 @@ def _terminal_failure_sink_queue_names(resources: dict[str, Any]) -> set[str]:
     レビューF1: 名前の綴りに依存すると、別の命名規約〔例: `-deadletter`〕で
     追加された5本目のDLQを検知できない。#505 F1と同じ「内容で特定する」考え方)。
 
-    「終端の失敗の受け皿」とは、(a) 他のQueueのRedrivePolicy.deadLetterTargetArnの
-    宛先、または(b) LambdaのEventInvokeConfig.DestinationConfig.OnFailure.
-    Destinationの宛先として参照されており、かつ(c) 自身はRedrivePolicyを持たない
-    (さらに先へリダイレクトされない=redrive chainの終端である)Queueである。
+    「終端の失敗の受け皿」とは、次のいずれかを満たし、かつ自身はRedrivePolicyを
+    持たない(さらに先へリダイレクトされない=redrive chainの終端である)Queueで
+    ある(サブちゃんレビューR1: 判定基準を「配線されている(参照されている)」
+    だけにすると、まだどこからも配線されていない孤立DLQを拾えない退行が
+    あったため、和集合にした)。
+
+        (a) 他のQueueのRedrivePolicy.deadLetterTargetArnの宛先、または
+            LambdaのEventInvokeConfig.DestinationConfig.OnFailure.Destinationの
+            宛先として参照されている(配線済み)
+        (b) MessageRetentionPeriod=1209600(14日。運用調査用の長期保持。既存4本
+            すべてがこの値を明示的に持つ。中間キューはVisibilityTimeout/
+            RedrivePolicyのみでMessageRetentionPeriodを明示しない=既定4日)
     """
     queue_logical_ids = {
         name for name, r in resources.items() if r.get("Type") == "AWS::SQS::Queue"
@@ -320,7 +328,15 @@ def _terminal_failure_sink_queue_names(resources: dict[str, Any]) -> set[str]:
             if target:
                 referenced_as_failure_target.add(target)
 
-    terminal_ids = (referenced_as_failure_target & queue_logical_ids) - has_own_redirect
+    long_retention = {
+        name
+        for name in queue_logical_ids
+        if resources[name]["Properties"].get("MessageRetentionPeriod") == 1209600
+    }
+
+    terminal_ids = ((referenced_as_failure_target & queue_logical_ids) | long_retention) - (
+        has_own_redirect
+    )
     # !Sub "${AWS::StackName}-xxx" は {"Fn::Sub": "${AWS::StackName}-xxx"} へロードされる。
     names: set[str] = set()
     for name in terminal_ids:

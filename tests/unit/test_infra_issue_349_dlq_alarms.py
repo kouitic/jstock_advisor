@@ -123,9 +123,16 @@ def _terminal_failure_sink_queue_logical_ids(resources: dict[str, Any]) -> set[s
     """真正のDLQ(終端の失敗の受け皿)のlogical IDを、命名規約(例: `-dlq`サフィックス)
     ではなく実際の構造から特定する(サブちゃんレビューF1。#505 F1と同じ「内容で
     特定する」考え方。tests/unit/test_issue_501_incident_message.pyの同名の関数と
-    同型)。「終端の失敗の受け皿」とは、他のQueueのRedrivePolicy.deadLetterTargetArn
-    またはLambdaのEventInvokeConfig.DestinationConfig.OnFailure.Destinationの宛先
-    として参照されており、かつ自身はRedrivePolicyを持たないQueueである。
+    同型)。「終端の失敗の受け皿」とは、次のいずれかを満たし、かつ自身は
+    RedrivePolicyを持たないQueueである(サブちゃんレビューR1: 「配線されている
+    (参照されている)」だけでは、まだどこからも配線されていない孤立DLQを
+    拾えない退行があったため、和集合にした)。
+
+        (a) 他のQueueのRedrivePolicy.deadLetterTargetArn、または
+            LambdaのEventInvokeConfig.DestinationConfig.OnFailure.Destinationの
+            宛先として参照されている(配線済み)
+        (b) MessageRetentionPeriod=1209600(14日。運用調査用の長期保持。既存4本
+            すべてがこの値を明示的に持つ。中間キューは既定4日で明示しない)
     """
     queue_logical_ids = {
         name for name, r in resources.items() if r.get("Type") == "AWS::SQS::Queue"
@@ -150,7 +157,15 @@ def _terminal_failure_sink_queue_logical_ids(resources: dict[str, Any]) -> set[s
             if target:
                 referenced_as_failure_target.add(target)
 
-    return (referenced_as_failure_target & queue_logical_ids) - has_own_redirect
+    long_retention = {
+        name
+        for name in queue_logical_ids
+        if resources[name]["Properties"].get("MessageRetentionPeriod") == 1209600
+    }
+
+    return ((referenced_as_failure_target & queue_logical_ids) | long_retention) - (
+        has_own_redirect
+    )
 
 
 def test_every_terminal_dlq_has_a_queue_depth_alarm_watching_it() -> None:
