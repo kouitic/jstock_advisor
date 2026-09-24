@@ -26,6 +26,15 @@ resourceは1件も無いため、`test_all_sqs_queue_policy_statements_have_uniq
 現時点では走査対象0件で自明にpassする。ロジック自体が正しく機能することは、
 合成データを使った`test_*_synthetic_*`系のテストで別途固定する(Production
 templateへ偽のresourceを追加する必要を避けるため)。
+
+**Statementが1件のみの場合の扱い(レビュー対応。MEDIUM-1)**: 当初「単一
+StatementのPolicyDocumentはSid省略がAWS API上も問題にならない」という前提で
+対象外としていたが、この前提を裏づけるAWS公式情報は無い(確認できているのは
+「SQS/SNS等一部サービスはSidを要求する場合があり、一意性要件を持つ場合がある」
+までで、Statement数による例外は確認できていない)。**未確認の前提を
+repository contractへ組み込まない**という原則に従い、AWS仕様を断定せず、
+本repository独自の予防的contractとして、Statement数(1件・複数のいずれ)に
+関わらずAWS::SQS::QueuePolicyの全StatementへSidを要求する方針へ改めた。
 """
 
 from __future__ import annotations
@@ -75,13 +84,15 @@ def _policy_statements_of_type(
 
 
 def _sid_violations(entries: list[tuple[str, list[Any]]]) -> list[str]:
-    """複数StatementのPolicyDocumentについて、Sid欠落・重複を検出する。
-    単一StatementのPolicyDocumentはSid省略がAWS API上も問題にならないため対象外。
+    """PolicyDocumentのStatement全件について、Sid欠落・重複を検出する。
+
+    Statement数(1件・複数のいずれ)に関わらず全StatementへSidを要求する
+    (レビュー対応: MEDIUM-1)。AWS仕様として「Statement 1件ならSid省略可」と
+    確認できているわけではないため、本repository独自の予防的contractとして、
+    意図的にAWS仕様より厳しくしている(全件Sid必須 + 複数件の場合は一意性も要求)。
     """
     violations: list[str] = []
     for logical_id, statement in entries:
-        if len(statement) < 2:
-            continue
         sids = [entry.get("Sid") for entry in statement]
         if any(sid is None for sid in sids):
             violations.append(f"{logical_id}: Sid未設定のStatementがある(Sid一覧: {sids})")
@@ -94,8 +105,9 @@ def _sid_violations(entries: list[tuple[str, list[Any]]]) -> list[str]:
 
 
 def test_all_sqs_queue_policy_statements_have_unique_sids() -> None:
-    """AWS::SQS::QueuePolicyが複数Statementを持つ場合、全StatementがSidを持ち
-    一意であることを固定する(予防的。#559)。現在このtemplate.yamlに
+    """AWS::SQS::QueuePolicyのStatement数(1件・複数のいずれ)に関わらず、
+    全StatementがSidを持つこと(複数の場合はさらに一意であること)を固定する
+    (予防的contract。#559。レビュー対応: MEDIUM-1)。現在このtemplate.yamlに
     AWS::SQS::QueuePolicyは存在しないため、本テストは現時点で走査対象0件で
     自明にpassする。将来SQS QueuePolicyが追加された場合に、Sid欠落・重複を
     個別対応なしに検知するために存在する。
@@ -120,7 +132,11 @@ def test_no_sqs_queue_policy_currently_exists_in_the_template() -> None:
     """
     resources = _resources()
     entries = _policy_statements_of_type(resources, _SQS_QUEUE_POLICY_TYPE)
-    assert entries == []
+    assert entries == [], (
+        "AWS::SQS::QueuePolicyが新規追加された。予防的Sid契約テストの適用対象に"
+        "なったため、本trip-wireの更新/削除とSid契約(test_all_sqs_queue_policy_"
+        "statements_have_unique_sids)の確認が必要(Issue #559)"
+    )
 
 
 # --- 合成データによるロジック検証(negative verificationを兼ねる) -----------------
@@ -191,14 +207,32 @@ def test_synthetic_sqs_queue_policy_with_valid_sids_passes() -> None:
     assert _sid_violations(entries) == []
 
 
-def test_synthetic_single_statement_sqs_queue_policy_without_sid_is_not_flagged() -> None:
-    """#559 T5相当: Statementが1件のみの場合、Sid省略はAWS API上も問題にならない
-    ため、falseに検知しない(scope discipline)。"""
+def test_synthetic_single_statement_sqs_queue_policy_without_sid_is_detected() -> None:
+    """レビュー対応(MEDIUM-1): 「Statementが1件ならSid省略可」というAWS仕様は
+    確認できていないため、この前提をrepository contractへ組み込まない。
+    Statementが1件のみでもSid省略はviolationとして検出する(本repository独自の
+    予防的contract。AWS仕様として必須と断定するものではない)。"""
     resources = {
         "FakeQueuePolicy": {
             "Type": _SQS_QUEUE_POLICY_TYPE,
             "Properties": {
                 "PolicyDocument": {"Statement": [{"Effect": "Allow"}]}  # Sid無し・単一
+            },
+        }
+    }
+    entries = _policy_statements_of_type(resources, _SQS_QUEUE_POLICY_TYPE)
+    violations = _sid_violations(entries)
+
+    assert violations == ["FakeQueuePolicy: Sid未設定のStatementがある(Sid一覧: [None])"]
+
+
+def test_synthetic_single_statement_sqs_queue_policy_with_sid_passes() -> None:
+    """N4相当: Statementが1件でSidがあれば、当然violationにならない。"""
+    resources = {
+        "FakeQueuePolicy": {
+            "Type": _SQS_QUEUE_POLICY_TYPE,
+            "Properties": {
+                "PolicyDocument": {"Statement": [{"Sid": "AllowA", "Effect": "Allow"}]}
             },
         }
     }
