@@ -133,3 +133,19 @@ def test_new_alarms_do_not_touch_duration_alarm() -> None:
     assert props["MetricName"] == "Duration"
     assert props["Threshold"] == 720000
     assert props["AlarmActions"] == [{"Fn::Ref": _TOPIC_LOGICAL_ID}]
+
+
+def test_alarm_names_across_all_12_functions_are_unique() -> None:
+    """★ レビュー指摘 F2 の直接固定: 11本を手書きの`!Sub`のAlarmNameで一度に追加するため、
+    衝突すると deploy失敗、またはCloudFormationが同名resourceの一方を暗黙に置換してしまい、
+    いずれの場合も「12関数それぞれに1本」が壊れる。AlarmNameの`Fn::Sub`文字列が
+    12本すべてで一意であることを固定する。
+    """
+    resources = _resources()
+    alarm_names = [
+        resources[alarm_logical_id]["Properties"]["AlarmName"]["Fn::Sub"]
+        for alarm_logical_id in _ALL_12_FUNCTIONS_TO_ALARM.values()
+    ]
+    assert len(alarm_names) == len(set(alarm_names)), (
+        f"AlarmNameに重複がある: {sorted(n for n in alarm_names if alarm_names.count(n) > 1)}"
+    )

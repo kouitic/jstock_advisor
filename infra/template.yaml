@@ -2225,15 +2225,24 @@ Resources:
   # 各alarmはEvaluationFunctionErrorsAlarmと同一設計(Statistic=Sum, EvaluationPeriods=1,
   # Threshold=1, TreatMissingData=notBreaching)に統一する。
   #
-  # ★ 検知範囲の限界(#504調査で確認済み。#506/#507が別途補完する):
+  # ★ 検知範囲の限界(#504調査で確認済み。#506/#507が別途補完する)。
+  #   分類の基準はハンドラ本体の制御フロー(per-item/per-batchの例外を明示的に捕捉し
+  #   re-raiseしない設計かどうか)であり、呼び出し先moduleの個別のexcept節の有無までは
+  #   分類していない(下記の残存リスク参照)。
   #   グループA(per-item/per-batchの例外を明示的に捕捉しre-raiseしない設計。
   #   BuyCandidates/HoldingsWatchlist/WatchlistDispatcher/WatchlistWorker/
   #   WatchlistBatchReconciler/LineWebhook)では、この種の内部異常はLambdaの
   #   Errorsメトリクスに計上されないため、本alarmだけでは検知できない
   #   (終端状態の監視は#506/#507の担当)。
   #   グループB(DisclosureCheck/Evaluation/WeeklyReview/MonthlyReview/
-  #   QuarterlyReview/WatchlistTerminalFailureHandler)は未捕捉の例外が
-  #   Errorsへ確実に計上されるため、本alarmで検知できる。
+  #   QuarterlyReview/WatchlistTerminalFailureHandler)は、ハンドラ本体で
+  #   per-item/per-batchの例外を握り潰さないため、グループAより検知範囲が広い。
+  #   ★ ただし「Errorsだけで完全に検知できる関数」は無い: グループBであっても、
+  #   ハンドラが呼ぶ個別module内に独自のexcept Exceptionがあれば、その範囲の異常は
+  #   同様に計上されない(実例: `evaluation_run_audit.py`の監査書き込み失敗は、
+  #   flagに依らず常にexcept Exceptionで握り潰され、EvaluationFunction自体は
+  #   グループBだがこの一点は検知できない)。この限界も#506/#507の担当領域として
+  #   引き継ぐ。
 
   BuyCandidatesFunctionErrorsAlarm:
     Type: AWS::CloudWatch::Alarm

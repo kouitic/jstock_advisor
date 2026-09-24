@@ -591,8 +591,10 @@ evaluation_handler done: evaluated=N (business=N calendar=N) skipped=N
 | `<stack>-evaluation-errors` | `Errors >= 1`(**Lambdaのタイムアウトもここに計上される**) |
 | `<stack>-evaluation-duration` | `Duration >= 720,000ms`(Timeout 900秒の80%) |
 
-**通知先(SNS/LINE/GitHub)は設定していない**ため、`AlarmActions`は空である。
-現時点ではCloudWatchコンソールでAlarm stateを確認する運用とする。
+★ **2026-09-24更新(Issue #504)**: 上記2本を含むLambda 12本すべてに`AlarmActions`(SNS Topic
+`IncidentNotificationTopic`経由でLINEへ通知)が接続された。「通知先は設定していない」は
+2026-09-23時点までの記述であり、現在は誤り。**最新の状態は29節・#132の最新の記録を読むこと**
+(この節へ焼き込まない)。
 
 #### run summaryの監査ログへの記録(Issue #114 Phase B1、2026-09-02追加)
 
@@ -2687,10 +2689,16 @@ V7 ログ検索(CloudWatch Logs Insights、read-only): LineCredentialsMissingErr
 認証情報を直してErrorsが止まっても、DLQに残ったメッセージ・TIMED_OUTになったバッチは自動では復旧しない。
 Errorsの有無だけでなく、DLQの滞留とバッチの終端状態(NOTIFICATION_FAILED / TIMED_OUT)も見ること。
 
-**恒久監視の未整備(残る問題)**: CloudWatch AlarmはEvaluationFunctionのErrors/Durationの2本のみで、AlarmActionsも無い。
-`infra/template.yaml` のコメントが「運用側で設定すること」とするDLQの滞留Alarmも存在しない。
+**恒久監視の未整備(残る問題。2026-09-24更新)**: CloudWatch AlarmはLambda 12本すべてに
+Errors alarmが接続された(Issue #504。#503のEvaluationFunctionを含む)が、**DLQの滞留Alarm
+は依然として存在しない**。また、per-item/per-batchの例外を握り潰す設計の6関数
+(BuyCandidates/HoldingsWatchlist/WatchlistDispatcher/WatchlistWorker/
+WatchlistBatchReconciler/LineWebhook)は、Errors alarmだけでは内部異常を検知できない
+(#506/#507が終端状態の監視で補完中)。Duration alarmはEvaluationFunctionのみ(#505で
+WeeklyReviewFunctionへの追加を検討中)。
 次の3点を #132(本番ジョブ異常の自動検知)の要件として記録した(#132 issuecomment-5740709204):
 (1) WatchlistTerminalFailureDLQのメッセージ滞留監視 (2) LINE関連LambdaのErrors監視 (3) 「Errorsが止まった=復旧」とは限らない点。
+**最新の状態は29節・#132の最新の記録を読むこと**(この節へ焼き込まない)。
 
 ### 23.3 DLQ redrive(障害時の候補案。★未検証。正式な復旧手順ではない)
 
@@ -2965,9 +2973,13 @@ jstock judgment-safety-shadow report --source dynamodb         # Production(read
 ### 27.1 この節の限界(★ 最初に読むこと)
 
 ```
-・現在(2026-09-21 時点の infra/template.yaml)、異常を自動で知らせる経路は無い。CloudWatch Alarm は evaluation Lambda の Errors / Duration の 2 本だけで、
+・(2026-09-21 時点の記述。原文のまま残す)現在の infra/template.yaml、異常を自動で知らせる経路は無い。CloudWatch Alarm は evaluation Lambda の Errors / Duration の 2 本だけで、
   どちらも AlarmActions が空(鳴っても誰にも届かない)。DLQ の滞留にも Alarm は無い(24.1)。
   通知経路・alarm の拡張は Issue #132 の段階的な実装で入る。**最新の状態は #132 の最新の記録を読むこと**(この節へ焼き込まない)。
+  ★ **2026-09-24更新**: #503(段階1)でEvaluationFunction、#504(段階2)で残る11関数へも
+  AlarmActions(IncidentNotificationTopic経由のLINE通知)が接続され、上記「どちらもAlarmActions
+  が空」は解消済み。DLQの滞留Alarmは依然として無い(未解消のまま)。per-item例外を握る6関数の
+  内部異常はErrors alarmだけでは検知できない点も未解消(#506/#507が担当)。
 ・したがって「通知が来ない = 正常」ではない。24.1 と同じく、**見に行かなければ気づかない**異常がある。
 ・通知が入った後も、対象外がある。秘密の取得失敗(SECRET_UNAVAILABLE)は LINE では知らせない方針(Issue #117)。
   監視の対象は段階的に広がる(Lambda は 12 本あり、最初から全てではない)。
@@ -3283,6 +3295,29 @@ reconcilerが持つ終端状態〔完了判定・DLQの滞留等〕を見る仕�
 
 ```
 ・Production の SNS Topic 新設・deploy 自体(別 Human Gate)
-・#504(第二の通知経路)/ #506(reconciler相乗り検知)/ #508(GitHub Issue接続)の実装
-・6関数(per-item捕捉型)の内部異常検知の方式そのもの(#506の担当)
+・#504(Errors alarmを全12関数へ拡大)/ #505(Duration alarmの拡大)/
+  #506・#507(reconciler相乗り検知)/ #508(GitHub Issue接続)の実装
+・6関数(per-item捕捉型)の内部異常検知の方式そのもの(#506/#507の担当)
 ```
+
+### 29.6 Issue #504のChangeSet想定差分(2026-09-24追加)
+
+段階2(#504)は、EvaluationFunction以外の残る11関数へErrors alarmを追加する
+(既存2 alarmは#503で反映済みのため変更しない)。
+
+```
+ADD     11(BuyCandidatesFunctionErrorsAlarm / HoldingsWatchlistFunctionErrorsAlarm /
+           DisclosureCheckFunctionErrorsAlarm / WatchlistDispatcherFunctionErrorsAlarm /
+           WatchlistWorkerFunctionErrorsAlarm /
+           WatchlistTerminalFailureHandlerFunctionErrorsAlarm /
+           WatchlistBatchReconcilerFunctionErrorsAlarm / WeeklyReviewFunctionErrorsAlarm /
+           MonthlyReviewFunctionErrorsAlarm / QuarterlyReviewFunctionErrorsAlarm /
+           LineWebhookFunctionErrorsAlarm)
+MODIFY  0(既存のEvaluationFunctionErrorsAlarm/DurationAlarmは変更しない。再利用のみ)
+REMOVE  0
+```
+
+C4相当の判定基準: 上記ADD 11・MODIFY 0・REMOVE 0と一致し、既存resourceへの想定外のMODIFY・
+IAM権限の拡大・Alarmのthreshold等の変更が無いこと。実物のChangeSetとの照合は、他のPRが
+先にdeployされていた場合(config/srcの通常のCode差分)を含めて、ChangeSet CREATE後に
+再確認する(#503のRelease W8で確立した手順と同じ)。
