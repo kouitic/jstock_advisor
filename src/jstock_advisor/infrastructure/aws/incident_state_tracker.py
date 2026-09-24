@@ -31,12 +31,30 @@ CLAIMED は、claimed_at から claim_stale を超えたら他の実行が takeo
 retry を新しい occurrence として二重に数えないため。#502 の目的「retry で3通にならない」と
 対称)。
 
-## 予約フィールド(#503では書かない)
+## GitHub Issue接続(#508)
 
-`github_issue_number` / `github_issue_create_status` / `resolved_at` / `notification_status` は、
-後続の #508(GitHub Issue接続)がこのテーブルを再利用できるように、baseline 設計
-(USER決定。#503 issuecomment-5796588796)が予約したフィールドである。**本 module はこれらを
-一切読み書きしない**(#508 の責務)。
+`github_issue_number` / `github_issue_create_status` は、baseline 設計(USER決定。
+#503 issuecomment-5796588796)が予約していたフィールドを #508 で実装したものである。
+LINE の `status`(CLAIMED/SENT)とは独立した別の状態機械とし、LINE の claim/dedup 判定に
+一切影響しない(`try_claim()` 等の既存関数は変更していない)。`resolved_at` /
+`notification_status` は本 Issue の scope 外のため未実装のまま予約を継続する。
+
+```
+(無し) --try_claim_new_github_issue_creation--> CREATING --mark_github_issue_created--> CREATED
+  CREATINGは失敗すると2種類の終端状態へ遷移する(mark_github_issue_creation_failed →
+  ISSUE_CREATION_FAILED、mark_github_issue_configuration_error → CONFIGURATION_ERROR)。
+  いずれも次のoccurrenceでCREATINGへ即座に再claim可能(claimを解放しているため)。
+
+CREATED 到達後、同一fingerprintの再発時は github_issue_number へ GitHub 側の実在確認
+(get_issue)を行い、OPEN ならコメント追記(comment_claim_occurrence_count による
+occurrence単位の重複防止)、CLOSED なら新規Issueを作成して github_issue_number を
+更新する(previous_github_issue_number に旧番号を残す)。reopenはしない。
+```
+
+CREATING の claim(`github_issue_claimed_at` / `github_issue_claim_expires_at`)が
+timeout を超えて stale になった場合、`improvement_task_tracker.py` と同じ2段階方式
+(呼び出し側が先にGitHub側の実在確認を行い、見つからない場合のみ
+`try_reclaim_stale_github_issue_creation` で明示的に再claim)を踏襲する。
 
 ## TTL
 
@@ -77,6 +95,15 @@ class IncidentClaimOutcome(StrEnum):
     CLAIMED_STALE_TAKEOVER = "CLAIMED_STALE_TAKEOVER"  # CLAIMED + claim_stale経過 → 引き継ぎ
     SUPPRESSED_DUPLICATE = "SUPPRESSED_DUPLICATE"  # SENT + dedup_window内 → 抑止(通知しない)
     SUPPRESSED_ACTIVE_CLAIM = "SUPPRESSED_ACTIVE_CLAIM"  # CLAIMED + claim_stale未経過 → 抑止
+
+
+class IncidentGithubIssueStatus(StrEnum):
+    """`github_issue_create_status` の値(Issue #508)。LINEの`status`とは独立。"""
+
+    CREATING = "CREATING"
+    CREATED = "CREATED"
+    CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+    ISSUE_CREATION_FAILED = "ISSUE_CREATION_FAILED"
 
 
 def _table() -> Any:
@@ -309,3 +336,226 @@ def release_claim(fingerprint: str, claim_token: str, *, is_new: bool) -> None:
     except ClientError as e:
         if e.response["Error"]["Code"] not in _CONDITION_FAILURE_CODES:
             raise
+
+
+# --- GitHub Issue接続(Issue #508) ---------------------------------------------
+#
+# `improvement_task_tracker.py`(週次改善レビューのGitHub連携)で確立済みの
+# 「claim(原子的なUpdateItem) → stale時はGitHub側の実在確認 → 明示的な再claim」
+# という2段階方式をそのまま踏襲する。LINEの`status`/`claim_token`とは別の属性
+# (`github_issue_create_status`等)で完全に独立した状態機械とする。
+
+
+def try_claim_new_github_issue_creation(
+    fingerprint: str, now: dt.datetime, timeout_minutes: int
+) -> bool:
+    """github_issue_create_stateが「進行中(CREATING)」ではないときだけ、原子的に
+    CREATINGへ遷移する。CREATING中は期限に関わらず絶対に奪わない(staleな場合は
+    呼び出し側が先にGitHub側の実在確認〔reconciliation〕を行ってから、
+    `try_reclaim_stale_github_issue_creation`を明示的に呼ぶこと)。
+    """
+    now_iso = now.isoformat()
+    expires_iso = (now + dt.timedelta(minutes=timeout_minutes)).isoformat()
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression=(
+                "SET github_issue_create_status = :creating, "
+                "github_issue_claimed_at = :now, github_issue_claim_expires_at = :expires"
+            ),
+            ConditionExpression=(
+                "attribute_not_exists(github_issue_create_status) OR "
+                "github_issue_create_status <> :creating"
+            ),
+            ExpressionAttributeValues={
+                ":creating": IncidentGithubIssueStatus.CREATING.value,
+                ":now": now_iso,
+                ":expires": expires_iso,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
+def try_reclaim_stale_github_issue_creation(
+    fingerprint: str,
+    expected_claimed_at: str,
+    now: dt.datetime,
+    timeout_minutes: int,
+) -> bool:
+    """CREATINGかつclaim期限切れの項目だけを対象に再claimする。呼び出し側は必ず
+    このメソッドを呼ぶ前にGitHub側の実在確認(reconciliation)を行うこと(見つかれば
+    `mark_github_issue_created`で復旧し、このメソッドは呼ばない)。
+    `expected_claimed_at`はreconciliation時に読んだ`github_issue_claimed_at`を
+    そのまま渡し、その間に他の実行が既に再claimしていた場合は失敗する(楽観的排他)。
+    """
+    now_iso = now.isoformat()
+    expires_iso = (now + dt.timedelta(minutes=timeout_minutes)).isoformat()
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression=(
+                "SET github_issue_claimed_at = :now, github_issue_claim_expires_at = :expires"
+            ),
+            ConditionExpression=(
+                "github_issue_create_status = :creating AND "
+                "github_issue_claimed_at = :expected AND "
+                "github_issue_claim_expires_at < :now"
+            ),
+            ExpressionAttributeValues={
+                ":creating": IncidentGithubIssueStatus.CREATING.value,
+                ":expected": expected_claimed_at,
+                ":now": now_iso,
+                ":expires": expires_iso,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
+def mark_github_issue_created(
+    fingerprint: str,
+    issue_number: int,
+    *,
+    previous_issue_number: int | None = None,
+) -> None:
+    """新規Issue作成成功、stale reconciliationでの実在Issue復旧、またはClosed Issue
+    検出後の再発Issue作成のいずれでも使う。`previous_issue_number`はClosed Issue
+    検出後の再発Issue作成時のみ指定する。
+    """
+    update_expression = (
+        "SET github_issue_create_status = :created, github_issue_number = :number "
+        "REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
+    )
+    values: dict[str, Any] = {
+        ":created": IncidentGithubIssueStatus.CREATED.value,
+        ":number": issue_number,
+    }
+    if previous_issue_number is not None:
+        update_expression = update_expression.replace(
+            "github_issue_number = :number ",
+            "github_issue_number = :number, previous_github_issue_number = :prev ",
+        )
+        values[":prev"] = previous_issue_number
+    _table().update_item(
+        Key={"fingerprint": fingerprint},
+        UpdateExpression=update_expression,
+        ExpressionAttributeValues=values,
+    )
+
+
+def mark_github_issue_creation_failed(fingerprint: str) -> None:
+    """GitHub API呼び出し自体の失敗(timeout・5xx・4xx等)。claimを解放し(REMOVE)、
+    次のoccurrence(次にこのfingerprintが検知されたとき)での再試行を許可する。
+    """
+    _table().update_item(
+        Key={"fingerprint": fingerprint},
+        UpdateExpression=(
+            "SET github_issue_create_status = :failed "
+            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
+        ),
+        ExpressionAttributeValues={
+            ":failed": IncidentGithubIssueStatus.ISSUE_CREATION_FAILED.value
+        },
+    )
+
+
+def mark_github_issue_configuration_error(fingerprint: str) -> None:
+    """issue_creation_enabled=trueなのにGitHub認証情報が不備・取得失敗している状態。
+    claimを解放し、次のoccurrenceでの再試行を許可する(週次改善レビューと同じ設計。
+    設定不備が解消されない限り同じ失敗を繰り返すが、実害は小さい)。
+    """
+    _table().update_item(
+        Key={"fingerprint": fingerprint},
+        UpdateExpression=(
+            "SET github_issue_create_status = :error "
+            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
+        ),
+        ExpressionAttributeValues={":error": IncidentGithubIssueStatus.CONFIGURATION_ERROR.value},
+    )
+
+
+def try_claim_new_github_comment(
+    fingerprint: str, occurrence_count: int, now: dt.datetime, timeout_minutes: int
+) -> bool:
+    """当該occurrence_countについて、既存の(未失効・失効済み問わず)claimが一切
+    無く、かつ既にこのoccurrenceへコメント済みでもない場合のみ成功する。既に
+    claimがある場合(staleかどうかに関わらず)は失敗し、呼び出し側はstale判定
+    (期限切れか)を自分で確認したうえで`try_reclaim_stale_github_comment`へ
+    進む(reconciliation後にのみ)。
+    """
+    expires_iso = (now + dt.timedelta(minutes=timeout_minutes)).isoformat()
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression=(
+                "SET comment_claim_occurrence_count = :occ, comment_claim_expires_at = :expires"
+            ),
+            ConditionExpression=(
+                "(attribute_not_exists(last_commented_occurrence_count) OR "
+                "last_commented_occurrence_count <> :occ) AND "
+                "(attribute_not_exists(comment_claim_occurrence_count) OR "
+                "comment_claim_occurrence_count <> :occ)"
+            ),
+            ExpressionAttributeValues={
+                ":occ": occurrence_count,
+                ":expires": expires_iso,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
+def try_reclaim_stale_github_comment(
+    fingerprint: str,
+    occurrence_count: int,
+    expected_claim_expires_at: str,
+    now: dt.datetime,
+    timeout_minutes: int,
+) -> bool:
+    """comment_claim_occurrence_count=occurrence_countかつ失効済みの場合のみ
+    再claimする。呼び出し側は必ず先にGitHub側の実在コメント確認(reconciliation)を
+    行うこと。
+    """
+    now_iso = now.isoformat()
+    expires_iso = (now + dt.timedelta(minutes=timeout_minutes)).isoformat()
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression="SET comment_claim_expires_at = :expires",
+            ConditionExpression=(
+                "comment_claim_occurrence_count = :occ AND "
+                "comment_claim_expires_at = :expected AND comment_claim_expires_at < :now"
+            ),
+            ExpressionAttributeValues={
+                ":occ": occurrence_count,
+                ":expected": expected_claim_expires_at,
+                ":now": now_iso,
+                ":expires": expires_iso,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _CONDITION_FAILURE_CODES:
+            return False
+        raise
+
+
+def mark_github_comment_posted(fingerprint: str, occurrence_count: int) -> None:
+    _table().update_item(
+        Key={"fingerprint": fingerprint},
+        UpdateExpression=(
+            "SET last_commented_occurrence_count = :occ "
+            "REMOVE comment_claim_occurrence_count, comment_claim_expires_at"
+        ),
+        ExpressionAttributeValues={":occ": occurrence_count},
+    )

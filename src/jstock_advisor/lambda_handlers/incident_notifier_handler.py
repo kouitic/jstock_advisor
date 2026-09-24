@@ -26,6 +26,12 @@ Internal payloadのallowlist(#506 USER決定): source / job_name / failure_stage
 failure_type / reason_code / occurred_at / failure_count / consecutive_days /
 is_ongoing のみ。stock_code / owner / holding_id / stack trace / 生exception message /
 AWS account ID / ARN / request ID は禁止(#501/#503のH-30契約を維持する)。
+
+Issue #508(#132 X-9): LINE送信後(成功・失敗いずれの場合も)、GitHub Issue自動起票
+(`services/incident_github_issue_service.py`)を試行する。GitHub側の処理は独立した
+try/exceptで例外を完全に握りつぶし、本handlerの成否・LINE通知経路には一切影響しない
+(★最重要要件)。config.incident_notification.issue_creation_enabled=false(既定)の
+間はGitHub API・Secrets Manager呼び出しを一切行わない。
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 from typing import Any
 
 from jstock_advisor.config.loader import load_config
@@ -42,6 +49,9 @@ from jstock_advisor.domain.notification.incident_fingerprint import (
     IncidentFingerprintInput,
     compute_fingerprint,
 )
+from jstock_advisor.domain.notification.incident_github_issue_message import (
+    IncidentIssueNotice,
+)
 from jstock_advisor.domain.notification.incident_message import (
     IncidentNotice,
     build_incident_message,
@@ -50,6 +60,7 @@ from jstock_advisor.domain.notification.incident_message import (
 from jstock_advisor.domain.notification.incident_signal import IncidentSignal
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
+from jstock_advisor.services import incident_github_issue_service
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -219,6 +230,18 @@ def _build_fingerprint_input(signal: IncidentSignal) -> IncidentFingerprintInput
     )
 
 
+def _split_github_repository() -> tuple[str | None, str | None]:
+    """GITHUB_REPOSITORY環境変数("owner/repo"形式)からowner/repoを取り出す
+    (`weekly_review_handler.py`の同名関数と同じ契約。infra配線がまだ無い間は
+    未設定のため両方Noneを返す=正常にnot configured扱いとなる)。
+    """
+    value = os.environ.get("GITHUB_REPOSITORY")
+    if not value or "/" not in value:
+        return None, None
+    owner, _, repo = value.partition("/")
+    return owner, repo
+
+
 def _process_signal(signal: IncidentSignal, config: AppConfig, now: dt.datetime) -> None:
     fingerprint = compute_fingerprint(_build_fingerprint_input(signal))
     dedup_window = dt.timedelta(minutes=config.incident_notification.dedup_window_minutes)
@@ -231,9 +254,48 @@ def _process_signal(signal: IncidentSignal, config: AppConfig, now: dt.datetime)
         fingerprint,
         outcome.value,
     )
-    if outcome not in _CLAIMED_OUTCOMES or claim_token is None:
-        return  # 抑止(重複 or 他実行が処理中)。LINEは送らない。
 
+    line_failure: Exception | None = None
+    github_safe_to_attempt = True
+    if outcome in _CLAIMED_OUTCOMES and claim_token is not None:
+        line_failure = _send_line(fingerprint, claim_token, outcome, signal, now)
+        if line_failure is not None and outcome is tracker.IncidentClaimOutcome.CLAIMED_NEW:
+            # ★ release_claim(is_new=True)はfingerprint行そのものをDeleteItemする
+            # (#503既存契約。まだ何の記録も無い「初出」の履歴なので消しても失う
+            # ものが無い、という前提)。#508でGitHub側の記録先をこの行に同居させた
+            # ため、この場合にGitHub側を書き込むと削除後の行を部分的に再生成して
+            # しまい、status欠落のままfingerprintが「存在する」状態になって
+            # 以降のLINE再claim(_put_new)が永久に失敗する重大な回帰になる
+            # (テストで実測・検知済み)。このケースに限りGitHub側は今回試行せず、
+            # SNS/Lambda retryによる次のCLAIMED_NEWへ委ねる。
+            github_safe_to_attempt = False
+
+    # Issue #508: GitHub Issue作成はLINEの成否・claim outcomeに関わらず試行する
+    # (★最重要要件。GitHub側の失敗はLINE経路に一切影響せず、LINE失敗時もGitHub側の
+    # 記録機会を失わない)。ただし上記のCLAIMED_NEW削除競合を避けるため、fingerprint行が
+    # 削除された可能性がある場合は例外的に今回スキップする。fingerprintごとの
+    # 重複防止はincident_github_issue_service側の独立したclaim/statusが担う。
+    if github_safe_to_attempt:
+        _attempt_github_issue(signal, fingerprint, config, now)
+
+    if line_failure is not None:
+        # baseline: LINE push失敗 → claimは_send_line内でCAS解除済み → Lambdaを
+        # 失敗させてSNS/Lambda retryに任せる(通知欠落を避けることを、稀な二重通知
+        # より優先する)。GitHub側の試行を終えてから元の例外を再raiseする。
+        raise line_failure
+
+
+def _send_line(
+    fingerprint: str,
+    claim_token: str,
+    outcome: tracker.IncidentClaimOutcome,
+    signal: IncidentSignal,
+    now: dt.datetime,
+) -> Exception | None:
+    """LINE送信を行う。成功時はNoneを返す。失敗時はclaimを解放し、例外をraiseせず
+    呼び出し元へ返す(GitHub側の試行を先に終えてから、呼び出し元がまとめて
+    re-raiseできるようにするため)。
+    """
     state = tracker.get_incident_state(fingerprint)
     occurrence_count = int(state["occurrence_count"]) if state else 1
     occurred_at = signal.occurred_at
@@ -255,15 +317,47 @@ def _process_signal(signal: IncidentSignal, config: AppConfig, now: dt.datetime)
     try:
         line_client = build_live_line_client_from_env()
         line_client.push_message(text)
-    except Exception:
-        # baseline: LINE push失敗 → claimをCASで解除 → Lambdaを失敗させてSNS/Lambda
-        # retryに任せる(通知欠落を避けることを、稀な二重通知より優先する)。
+    except Exception as exc:
         tracker.release_claim(fingerprint, claim_token, is_new=is_new)
         logger.warning("incident_notifier line push failed fingerprint=%s", fingerprint)
-        raise
+        return exc
 
     tracker.mark_sent(fingerprint, claim_token, now)
     logger.info("incident_notifier line push done fingerprint=%s", fingerprint)
+    return None
+
+
+def _attempt_github_issue(
+    signal: IncidentSignal, fingerprint: str, config: AppConfig, now: dt.datetime
+) -> None:
+    """GitHub Issue自動起票(Issue #508)を試行する。例外は
+    `incident_github_issue_service.process_incident_issue()`内で完全に握りつぶされる
+    (★最重要要件。ここでは追加のtry/exceptを重ねない)。
+    """
+    state = tracker.get_incident_state(fingerprint)
+    occurrence_count = int(state["occurrence_count"]) if state else 1
+    occurred_at = signal.occurred_at
+    require_timezone_aware(occurred_at)
+    failure_count = signal.failure_count if signal.failure_count is not None else occurrence_count
+    notice = IncidentIssueNotice(
+        job=resolve_incident_job(signal.job_name),
+        occurred_at=occurred_at,
+        fingerprint=fingerprint,
+        occurrence_count=occurrence_count,
+        failure_stage=signal.failure_stage,
+        failure_count=failure_count,
+        consecutive_days=signal.consecutive_days,
+        is_ongoing=signal.is_ongoing,
+    )
+    repo_owner, repo_name = _split_github_repository()
+    incident_github_issue_service.process_incident_issue(
+        notice,
+        config.incident_notification,
+        now,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        github_secret_arn=os.environ.get("GITHUB_APP_SECRET_ARN"),
+    )
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
