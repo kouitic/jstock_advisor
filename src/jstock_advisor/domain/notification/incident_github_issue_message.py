@@ -9,17 +9,63 @@ fingerprint(dedup用マーカー)のみを本文へ出す。
 識別子・銘柄・所有者・stack trace・生exception message・AWS account ID・ARN・
 request ID・secret・tokenのいずれも受け取らない(型で締める)。PUBLIC repositoryへ
 そのまま公開されることを前提とする(CLAUDE.md §2 / operations_manual.md 21節)。
+
+`failure_stage`はPR #563レビュー指摘(サブちゃん F1)への対応として、`job`と同じ
+「既知集合の列挙のみ受理・不明値はOTHERへ丸める」型締めを行う(`IncidentFailureStage` /
+`resolve_incident_failure_stage()`)。#506のInternal payload allowlistが定義するのは
+「failure_stageというキーを許可する」ことだけであり、値そのものの既知集合は保証しない
+自由文字列だったため、生の`IncidentSignal.failure_stage`をそのままPUBLIC repositoryの
+本文へ出さない。
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from enum import StrEnum
 
 from jstock_advisor.domain.jst import require_timezone_aware, to_jst
 from jstock_advisor.domain.notification.incident_message import IncidentJob
 
 _ISSUE_TITLE_PREFIX = "[Production Incident]"
+
+
+class IncidentFailureStage(StrEnum):
+    """`分類`としてGitHub Issue本文へ出してよい、既知の失敗stageの利用者向け名称
+    (値がそのまま本文に出る)。`IncidentJob`と同じ設計(`resolve_incident_job()`参照)。
+    """
+
+    CLOUDWATCH_ALARM = "CloudWatch Alarmによる検知"
+    SCHEDULE = "スケジュール未実行の検知"
+    UNIVERSE_LOAD = "銘柄ユニバース取得の継続失敗"
+    QUEUE_BACKLOG = "処理キューの滞留"
+    WATCHLIST_SIZE = "ウォッチリスト件数の異常"
+    OTHER = "その他の異常"  # 対応表に無い値の落ち先(内部の生文字列を出さない)
+
+
+# 内部のfailure_stage生文字列(IncidentSignal.failure_stage)→ 利用者向けの分類名。
+# alarm経路の固定値(`_ALARM_METRIC_NAMESPACE_STAGE`)と、reconciler(Internal payload。
+# #506)が現時点で発行する4種の固定値を網羅する(watchlist_batch_reconciler_handler.py)。
+_INTERNAL_STAGE_TO_CATEGORY: dict[str, IncidentFailureStage] = {
+    "cloudwatch_alarm": IncidentFailureStage.CLOUDWATCH_ALARM,
+    "SCHEDULE": IncidentFailureStage.SCHEDULE,
+    "UNIVERSE_LOAD": IncidentFailureStage.UNIVERSE_LOAD,
+    "QUEUE_BACKLOG": IncidentFailureStage.QUEUE_BACKLOG,
+    "WATCHLIST_SIZE": IncidentFailureStage.WATCHLIST_SIZE,
+}
+
+
+def resolve_incident_failure_stage(internal_value: object) -> IncidentFailureStage:
+    """内部のfailure_stage生文字列を、利用者向けの分類(列挙)へ引く。
+
+    対応表に無い値・文字列でない値は`IncidentFailureStage.OTHER`へ落ちる
+    (`resolve_incident_job()`と同じ理由: 入力の不備によって通知自体を失わない。
+    かつ**入力の生文字列は返り値へ残らない**ため、将来未知のfailure_stageが
+    追加されても、対応表を更新するまでPUBLIC repositoryへ自由文字列が漏れることはない)。
+    """
+    if not isinstance(internal_value, str):
+        return IncidentFailureStage.OTHER
+    return _INTERNAL_STAGE_TO_CATEGORY.get(internal_value, IncidentFailureStage.OTHER)
 
 
 def _require_count(name: str, value: object) -> None:
@@ -56,7 +102,7 @@ class IncidentIssueNotice:
     occurred_at: dt.datetime  # timezone-aware(内部はUTCのまま。表示時にJSTへ変換)
     fingerprint: str  # dedup用マーカーとしてのみ本文へ埋め込む(#502)
     occurrence_count: int
-    failure_stage: str
+    failure_stage: IncidentFailureStage
     failure_count: int | None = None
     consecutive_days: int | None = None
     is_ongoing: bool | None = None
@@ -73,8 +119,8 @@ class IncidentIssueNotice:
             raise TypeError("occurrence_count must be int")
         if self.occurrence_count < 1:
             raise ValueError("occurrence_count must be >= 1")
-        if not isinstance(self.failure_stage, str) or not self.failure_stage:
-            raise ValueError("failure_stage must be a non-empty str")
+        if not isinstance(self.failure_stage, IncidentFailureStage):
+            raise TypeError("failure_stage must be an IncidentFailureStage")
         _require_count("failure_count", self.failure_count)
         _require_count("consecutive_days", self.consecutive_days)
         if self.is_ongoing is not None and not isinstance(self.is_ongoing, bool):
@@ -105,7 +151,7 @@ def build_incident_issue_body(
         "",
         "## 検知情報",
         f"対象: {notice.job.value}",
-        f"分類: {notice.failure_stage}",
+        f"分類: {notice.failure_stage.value}",
         f"発生時刻: {to_jst(notice.occurred_at).strftime('%Y-%m-%d %H:%M')} JST",
         f"発生回数: {notice.occurrence_count}回目",
     ]

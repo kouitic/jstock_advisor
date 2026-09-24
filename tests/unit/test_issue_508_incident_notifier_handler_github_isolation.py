@@ -253,6 +253,31 @@ def test_line_success_and_github_unexpected_bug_does_not_fail_the_handler(
     assert len(recording_line_client.sent) == 1
 
 
+def test_line_success_and_notice_construction_bug_does_not_fail_the_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_line_client: _RecordingLineClient,
+    github_enabled,
+) -> None:
+    """★ 最重要要件の反証(PR #563レビュー対応で追加した防衛線の固定):
+    `incident_github_issue_service.process_incident_issue()`のtry/exceptより
+    "手前"のコード(`IncidentIssueNotice`構築等)がバグで例外を投げても、
+    handler全体は成功として返り、LINEは影響を受けない。"""
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("bug in notice construction, before process_incident_issue is called")
+
+    monkeypatch.setattr(handler_module, "IncidentIssueNotice", _boom)
+    message = _alarm_message()
+
+    result = handler_module.handler(_sns_event(message), None)
+
+    assert result == {"processed": 1}
+    assert len(recording_line_client.sent) == 1
+    state = tracker.get_incident_state(_fingerprint_of(message))
+    assert state["status"] == "SENT"
+    assert "github_issue_create_status" not in state  # 試行自体が例外で止まっている
+
+
 # --- LINE失敗 × GitHub成功(★最重要) ----------------------------------------------
 
 

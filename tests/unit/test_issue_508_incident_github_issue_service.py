@@ -20,6 +20,7 @@ from moto import mock_aws
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.notification.incident_github_issue_message import (
+    IncidentFailureStage,
     IncidentIssueNotice,
     issue_marker,
 )
@@ -83,7 +84,7 @@ def _notice(**overrides: object) -> IncidentIssueNotice:
         "occurred_at": _NOW,
         "fingerprint": _FP,
         "occurrence_count": 1,
-        "failure_stage": "cloudwatch_alarm",
+        "failure_stage": IncidentFailureStage.CLOUDWATCH_ALARM,
     }
     defaults.update(overrides)
     return IncidentIssueNotice(**defaults)  # type: ignore[arg-type]

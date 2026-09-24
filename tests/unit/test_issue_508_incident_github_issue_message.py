@@ -12,12 +12,14 @@ import datetime as dt
 import pytest
 
 from jstock_advisor.domain.notification.incident_github_issue_message import (
+    IncidentFailureStage,
     IncidentIssueNotice,
     build_incident_comment_body,
     build_incident_issue_body,
     build_incident_issue_title,
     comment_marker,
     issue_marker,
+    resolve_incident_failure_stage,
 )
 from jstock_advisor.domain.notification.incident_message import IncidentJob
 
@@ -31,7 +33,7 @@ def _notice(**overrides: object) -> IncidentIssueNotice:
         "occurred_at": _NOW,
         "fingerprint": _FP,
         "occurrence_count": 1,
-        "failure_stage": "cloudwatch_alarm",
+        "failure_stage": IncidentFailureStage.CLOUDWATCH_ALARM,
     }
     defaults.update(overrides)
     return IncidentIssueNotice(**defaults)  # type: ignore[arg-type]
@@ -70,8 +72,16 @@ def test_notice_rejects_occurrence_count_below_one() -> None:
         _notice(occurrence_count=0)
 
 
-def test_notice_rejects_empty_failure_stage() -> None:
-    with pytest.raises(ValueError, match="failure_stage"):
+def test_notice_rejects_non_enum_failure_stage() -> None:
+    """★ PR #563レビュー指摘(サブちゃん F1)への直接固定: failure_stageは
+    `IncidentFailureStage`列挙のみを受理し、生の自由文字列は型で拒否する
+    (`job`と同じ締め方)。"""
+    with pytest.raises(TypeError, match="failure_stage"):
+        _notice(failure_stage="cloudwatch_alarm")  # 生文字列(列挙ではない)
+
+
+def test_notice_rejects_empty_string_failure_stage() -> None:
+    with pytest.raises(TypeError, match="failure_stage"):
         _notice(failure_stage="")
 
 
@@ -147,7 +157,7 @@ def test_issue_body_includes_allowlisted_fields() -> None:
     notice = _notice(
         job=IncidentJob.EVALUATION,
         occurrence_count=3,
-        failure_stage="cloudwatch_alarm",
+        failure_stage=IncidentFailureStage.QUEUE_BACKLOG,
         failure_count=5,
         consecutive_days=2,
         is_ongoing=True,
@@ -156,13 +166,48 @@ def test_issue_body_includes_allowlisted_fields() -> None:
     body = build_incident_issue_body(notice)
 
     assert "対象: 過去の推奨の評価" in body
-    assert "分類: cloudwatch_alarm" in body
+    assert "分類: 処理キューの滞留" in body
     assert "発生時刻: 2026-09-25 09:03 JST" in body
     assert "発生回数: 3回目" in body
     assert "件数: 5件" in body
     assert "連続日数: 2日" in body
     assert "継続中: はい" in body
     assert issue_marker(_FP) in body
+
+
+# --- resolve_incident_failure_stage(): 既知集合以外を出さない(★F1対応) --------
+
+
+def test_resolve_incident_failure_stage_maps_all_known_internal_values() -> None:
+    assert (
+        resolve_incident_failure_stage("cloudwatch_alarm") is IncidentFailureStage.CLOUDWATCH_ALARM
+    )
+    assert resolve_incident_failure_stage("SCHEDULE") is IncidentFailureStage.SCHEDULE
+    assert resolve_incident_failure_stage("UNIVERSE_LOAD") is IncidentFailureStage.UNIVERSE_LOAD
+    assert resolve_incident_failure_stage("QUEUE_BACKLOG") is IncidentFailureStage.QUEUE_BACKLOG
+    assert resolve_incident_failure_stage("WATCHLIST_SIZE") is IncidentFailureStage.WATCHLIST_SIZE
+
+
+def test_resolve_incident_failure_stage_falls_back_to_other_for_unknown_string() -> None:
+    """★ F1の直接固定: 未知の内部文字列(将来の新設含む)は、値そのものではなく
+    OTHERへ丸められ、生文字列はPUBLIC repositoryへ一切現れない。"""
+    resolved = resolve_incident_failure_stage(
+        "some-未来-new_stage-arn:aws:iam::970547364058:role/x"
+    )
+    assert resolved is IncidentFailureStage.OTHER
+    assert "arn:aws" not in resolved.value
+    assert "970547364058" not in resolved.value
+
+
+def test_resolve_incident_failure_stage_falls_back_to_other_for_non_string() -> None:
+    assert resolve_incident_failure_stage(None) is IncidentFailureStage.OTHER
+    assert resolve_incident_failure_stage(123) is IncidentFailureStage.OTHER
+
+
+def test_resolve_incident_failure_stage_does_not_partial_match() -> None:
+    """`resolve_incident_job`の部分一致拒否と同じ観点。"""
+    assert resolve_incident_failure_stage("SCHEDULE_EXTRA") is IncidentFailureStage.OTHER
+    assert resolve_incident_failure_stage("X_SCHEDULE") is IncidentFailureStage.OTHER
 
 
 def test_issue_body_includes_previous_issue_reference_when_given() -> None:

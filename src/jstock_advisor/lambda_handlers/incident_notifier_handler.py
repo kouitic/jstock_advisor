@@ -51,6 +51,7 @@ from jstock_advisor.domain.notification.incident_fingerprint import (
 )
 from jstock_advisor.domain.notification.incident_github_issue_message import (
     IncidentIssueNotice,
+    resolve_incident_failure_stage,
 )
 from jstock_advisor.domain.notification.incident_message import (
     IncidentNotice,
@@ -275,8 +276,20 @@ def _process_signal(signal: IncidentSignal, config: AppConfig, now: dt.datetime)
     # 記録機会を失わない)。ただし上記のCLAIMED_NEW削除競合を避けるため、fingerprint行が
     # 削除された可能性がある場合は例外的に今回スキップする。fingerprintごとの
     # 重複防止はincident_github_issue_service側の独立したclaim/statusが担う。
+    #
+    # ★ _attempt_github_issue()自体(IncidentIssueNotice構築等)はGitHub APIを
+    # 呼ぶ前の段階であり、`incident_github_issue_service.process_incident_issue()`
+    # 内部のtry/exceptより外側にある。このtry/exceptが無いと、GitHub側の
+    # セットアップコードの不具合がLINE成功後の応答まで壊してしまい、最重要要件
+    # (LINE側はGitHub側の失敗の影響を一切受けない)に違反する。
     if github_safe_to_attempt:
-        _attempt_github_issue(signal, fingerprint, config, now)
+        try:
+            _attempt_github_issue(signal, fingerprint, config, now)
+        except Exception:
+            logger.exception(
+                "incident_notifier github issue attempt failed unexpectedly fingerprint=%s",
+                fingerprint,
+            )
 
     if line_failure is not None:
         # baseline: LINE push失敗 → claimは_send_line内でCAS解除済み → Lambdaを
@@ -330,9 +343,11 @@ def _send_line(
 def _attempt_github_issue(
     signal: IncidentSignal, fingerprint: str, config: AppConfig, now: dt.datetime
 ) -> None:
-    """GitHub Issue自動起票(Issue #508)を試行する。例外は
-    `incident_github_issue_service.process_incident_issue()`内で完全に握りつぶされる
-    (★最重要要件。ここでは追加のtry/exceptを重ねない)。
+    """GitHub Issue自動起票(Issue #508)を試行する。GitHub API呼び出し自体の例外は
+    `incident_github_issue_service.process_incident_issue()`内で完全に握りつぶされる。
+    本関数自身(`IncidentIssueNotice`構築等、API呼び出し前のセットアップ)の例外は、
+    呼び出し元(`_process_signal()`)側のtry/exceptが最終防衛線として捕捉する
+    (★最重要要件: いずれの段階の例外も、LINE通知経路の成否に影響しない)。
     """
     state = tracker.get_incident_state(fingerprint)
     occurrence_count = int(state["occurrence_count"]) if state else 1
@@ -344,7 +359,7 @@ def _attempt_github_issue(
         occurred_at=occurred_at,
         fingerprint=fingerprint,
         occurrence_count=occurrence_count,
-        failure_stage=signal.failure_stage,
+        failure_stage=resolve_incident_failure_stage(signal.failure_stage),
         failure_count=failure_count,
         consecutive_days=signal.consecutive_days,
         is_ongoing=signal.is_ongoing,
