@@ -93,7 +93,13 @@ def test_existing_evaluation_duration_alarm_is_unchanged() -> None:
 
 
 def test_no_duration_alarm_added_for_the_deferred_functions() -> None:
-    """★ 今回見送った10関数へDuration alarmを誤って追加していないことを固定する。"""
+    """★ レビュー指摘F1の直接固定: 今回見送った10関数へDuration alarmを誤って追加して
+    いないことを、LogicalIdの綴り(`f"{function_name}DurationAlarm"`)ではなく内容
+    (MetricName=Durationかつ、Dimensionsが当該関数を指すalarmの有無)で判定する。
+    LogicalIdの綴りだけを見る判定は、「Function」を落とした綴り(例:
+    MonthlyReviewDurationAlarm)で追加された場合に検知できない(#552レビューで実際に
+    サブちゃんが変異後のtemplateをパースし、検知漏れを確認済み)。
+    """
     resources = _resources()
     deferred_functions = [
         "WatchlistWorkerFunction",
@@ -107,9 +113,23 @@ def test_no_duration_alarm_added_for_the_deferred_functions() -> None:
         "QuarterlyReviewFunction",
         "WatchlistTerminalFailureHandlerFunction",
     ]
+    duration_alarm_targets: set[str] = set()
+    for resource in resources.values():
+        if resource.get("Type") != "AWS::CloudWatch::Alarm":
+            continue
+        props = resource["Properties"]
+        if props.get("MetricName") != "Duration":
+            continue
+        for dimension in props.get("Dimensions", []):
+            if dimension.get("Name") == "FunctionName":
+                ref = dimension.get("Value", {})
+                if isinstance(ref, dict) and "Fn::Ref" in ref:
+                    duration_alarm_targets.add(ref["Fn::Ref"])
+
     for function_name in deferred_functions:
-        assert f"{function_name}DurationAlarm" not in resources, (
-            f"{function_name}へのDuration alarmは今回見送りのはずだが存在する"
+        assert function_name not in duration_alarm_targets, (
+            f"{function_name}へのDuration alarmは今回見送りのはずだが、"
+            "LogicalIdの綴りに関わらず実在する(MetricName/Dimensionsで検出)"
         )
 
 
