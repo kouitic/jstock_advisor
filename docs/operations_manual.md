@@ -3539,11 +3539,19 @@ sam validate / --lint        テンプレートの構文・SAM構文・基本的
                               CI未導入(手動実行のみ)。AWS API固有のsemantic制約は
                               検証しない(設計上の対象外)
 
-cfn-lint                     テンプレートのresource schema検証(例: 存在しない
-                              propertyの検出)。Issue #559のスパイクで実測: 今回の
-                              SNS TopicPolicy Sid制約は**検出できない**(E3002等の
-                              schema違反は検出できるが、AWS API側のbusiness rule
-                              〔今回のSid一意性〕はcfn-lintの検証範囲外)。CI未導入
+cfn-lint(v1.57.0で実測)     テンプレートのresource schema検証(例: 存在しない
+                              propertyの検出。E3002)。Issue #559のスパイクで実測
+                              (レビュー対応: PR #562。当初の記載を訂正): 今回
+                              #557で実際に起きた欠陥(Sidの**欠落**。複数Statementの
+                              いずれかにSid自体が無い)は**検出できない**(exit=0)。
+                              一方、Sidの**重複**(複数StatementのSidが同じ値)は
+                              **検出できる**(E3512 "array items are not unique
+                              for keys ['Sid']")。つまりcfn-lintは一意性
+                              (uniqueness)チェックは持つが、必須性
+                              (presence/required)チェックを持たない、という
+                              非対称な検出力である。今回のIncidentNotificationTopic
+                              Policyの実際の欠陥は「欠落」型だったため、cfn-lintを
+                              CIへ導入していても本件は防げなかった。CI未導入
 
 repo独自のinfra unit test    `tests/unit/test_infra_*.py`。repo内の情報(template.yaml
 (tests/unit/test_infra_*.py)  の静的構造)から導出できる契約を検証する。AWS API固有の
@@ -3593,9 +3601,13 @@ broad credentialの恒久利用)・Issue #359(deploy principalの権限設計)�
 4  一次情報が無い・未確認のまま予防的に対象を広げる場合は、テストの
    docstringで「確認済みの制約」と「予防的な備え」を明確に区別する
    (#559のAWS::SQS::QueuePolicyテストの例に倣う)
-5  cfn-lintはこの種のAWS API semantic制約を一般には検出しないことを前提とし
-   (31.2実測)、この種の欠陥に対する主たる防御は3の repo独自contract testと
-   Production ChangeSet EXECUTE時のHuman Gateでの差分確認に置く
+5  cfn-lintは一意性(uniqueness)違反は検出できるが必須性(presence)違反は
+   検出できないという非対称な検出力を持つ(31.2実測)。新しい制約が
+   「欠落」型か「重複」型かを見極めたうえで、欠落型はcfn-lintに頼らず
+   3の repo独自contract testを主たる防御とする。重複型はcfn-lintが既に
+   検出できる可能性があるため、CI導入時はその点を活かせる(ただし本節
+   時点でcfn-lint自体はCI未導入)。いずれの型であっても、Production
+   ChangeSet EXECUTE時のHuman Gateでの差分確認を最終防御として維持する
 ```
 
 本節は Issue #559(design-defect・priority:P2)の実装(PR-1〜PR-3)の一部として
