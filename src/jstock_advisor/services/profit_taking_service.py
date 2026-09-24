@@ -454,16 +454,32 @@ class ProfitTakingService:
         )
         return ProfitTakingOutcome(holding.stock_code, None, message)
 
-    def _fair_value_reflects_latest_earnings(self, snapshot: StockSnapshot) -> bool | None:
+    def _fair_value_reflects_latest_earnings(
+        self, snapshot: StockSnapshot, evaluation_date: dt.date
+    ) -> bool | None:
         """適正価格算出の入力が最新決算を反映しているかの簡易判定(要求仕様レビュー対応)。
 
-        手法別の入力日付を個別に厳密照合する手段が無いため、決算期末
-        (fiscal_period_end)が一定期間内(データ鮮度の許容日数を年換算した目安)で
-        あることを代理指標とする。fiscal_period_endが取得できない場合は判定不能。
+        手法別の入力日付を個別に厳密照合する手段が無いため、決算期末が一定期間内
+        (データ鮮度の許容日数を年換算した目安。400日は本Issueでは変更しない)で
+        あることを代理指標とする。決算期末を解決できない場合は判定不能。
+
+        Issue #509(#128②着手前ゲート): 決算期末の解決に
+        `snapshot.financial.fiscal_period_end`(年次決算期末)を直接参照していたが、
+        `domain/financial_freshness.py`(financial_freshness_integration.py経由)の
+        鮮度判定は同じ目的で`resolve_latest_financial_period_end()`を使い、
+        四半期実績(recent_quarters)を優先して解決している。直接参照だと、
+        年次決算後に四半期決算が新たに発表されていても検知できず(直接参照は
+        年次決算期末のまま古い値を返す)、両者が食い違う経路があった。
+        `resolve_latest_financial_period_end()`へ統一し、同じ基準日解決ロジックを
+        再利用する(独自の解決ロジックは作らない)。400日しきい値・age_daysの
+        算出方法(data_fetched_at基準)自体は変更しない(基準日の解決方法のみを
+        是正する。「Fair Valueを何日まで利用可能とみなすか」の再評価は別途)。
         """
         if not snapshot.fair_value_range.methods_used:
             return None
-        fiscal_period_end = snapshot.financial.fiscal_period_end
+        fiscal_period_end = resolve_latest_financial_period_end(
+            snapshot.financial, evaluation_date
+        ).period_end
         if fiscal_period_end is None:
             return None
         age_days = (snapshot.data_fetched_at.date() - fiscal_period_end).days
@@ -804,7 +820,9 @@ class ProfitTakingService:
             severe_earnings_decline=snapshot.severe_earnings_decline,
             profit_target_price=holding.profit_target_price,
             profit_target_rate=holding.profit_target_rate,
-            fair_value_reflects_latest_earnings=self._fair_value_reflects_latest_earnings(snapshot),
+            fair_value_reflects_latest_earnings=self._fair_value_reflects_latest_earnings(
+                snapshot, evaluation_date
+            ),
             industry_model_applied=industry_model_applied,
             industry_sector=industry_sector,
             industry_classification=industry_classification,
