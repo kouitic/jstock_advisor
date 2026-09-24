@@ -526,7 +526,11 @@ class PortfolioService:
         )
         if all(getattr(existing, field) == getattr(expected, field) for field in derived):
             return False
-        assert existing_raw is not None  # existing is not Noneのため必ず取得できている
+        # サブちゃんレビュー(#530 F3): get()とget_raw_data()は別呼び出しのため、
+        # その間に並行削除されるとexisting_raw is Noneに実際に到達しうる
+        # (assertではなく明示的なValueErrorとする)。
+        if existing_raw is None:
+            raise ValueError(f"holding_ref={log_ref(holding_id)}のデータ取得に失敗しました")
         apply_conditional_put(
             self._holdings,
             ConditionalPut(model=expected, id_field="holding_id", expected_data=existing_raw),
@@ -544,7 +548,11 @@ class PortfolioService:
             raise ValueError(f"holding_ref={log_ref(holding_id)}の保有銘柄が見つかりません")
         # Issue #530: existingを読んだ時点の生JSONを楽観ロック条件として保持する。
         existing_raw = self._holdings.get_raw_data(holding_id)
-        assert existing_raw is not None  # 直前にexisting is not Noneを確認済み
+        # サブちゃんレビュー(#530 F3): get()とget_raw_data()は別呼び出しのため、
+        # その間に並行削除されるとexisting_raw is Noneに実際に到達しうる
+        # (assertではなく明示的なValueErrorとする)。
+        if existing_raw is None:
+            raise ValueError(f"holding_ref={log_ref(holding_id)}のデータ取得に失敗しました")
         merged = {
             **existing.model_dump(mode="python"),
             **fields,

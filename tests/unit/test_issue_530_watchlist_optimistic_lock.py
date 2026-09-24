@@ -118,6 +118,47 @@ def test_n1_success_path_is_unaffected_when_no_conflict(
     assert item.memo == "通常の更新"
 
 
+# --- F3(サブちゃんレビュー): get()とget_raw_data()の間の並行削除 ----------------
+
+
+def test_f3_add_item_raises_value_error_when_concurrently_deleted(
+    watchlist_service: WatchlistService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`existing is not None`確認後、`get_raw_data()`呼び出しまでの間に別実行が
+    このitemを削除すると、existing_raw is Noneに実際に到達しうる。
+    assertではなく明示的なValueErrorとし、AssertionErrorとして生tracebackを
+    見せない(サブちゃんレビューF3)。"""
+    watchlist_service.add_item("7203", patch={"memo": "初期メモ"})
+    repository = watchlist_service._repository  # noqa: SLF001
+    original_get_raw_data = repository.get_raw_data
+
+    def racy_get_raw_data(stock_code: str) -> str | None:
+        repository.delete(stock_code)  # get()確認後、get_raw_data()前の並行削除
+        return original_get_raw_data(stock_code)
+
+    monkeypatch.setattr(repository, "get_raw_data", racy_get_raw_data)
+
+    with pytest.raises(ValueError):
+        watchlist_service.add_item("7203", patch={"memo": "更新しようとした値"})
+
+
+def test_f3_update_item_raises_value_error_when_concurrently_deleted(
+    watchlist_service: WatchlistService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    watchlist_service.add_item("7203", patch={"memo": "初期メモ"})
+    repository = watchlist_service._repository  # noqa: SLF001
+    original_get_raw_data = repository.get_raw_data
+
+    def racy_get_raw_data(stock_code: str) -> str | None:
+        repository.delete(stock_code)
+        return original_get_raw_data(stock_code)
+
+    monkeypatch.setattr(repository, "get_raw_data", racy_get_raw_data)
+
+    with pytest.raises(ValueError):
+        watchlist_service.update_item("7203", memo="更新しようとした値")
+
+
 # --- N2: build_add_item_plan()作成後に別update → commit時に競合検出 -----------
 
 

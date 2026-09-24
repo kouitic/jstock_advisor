@@ -128,20 +128,25 @@ def add_holding(
 ) -> None:
     """保有銘柄を1件登録する(既存銘柄の場合は追加購入ロットとして扱う)。"""
     service = PortfolioService()
-    holding = service.register_purchase(
-        owner=owner,
-        stock_code=stock_code,
-        stock_name=stock_name,
-        shares=_parse_positive_int(shares, "購入株数"),
-        purchase_price=_parse_positive_decimal(price, "購入単価"),
-        purchase_date=_parse_date(purchase_date),
-        account_type=account_type,
-        fee=_parse_decimal(fee, "手数料"),
-        investment_purpose=investment_purpose,
-        sell_policy=sell_policy,
-        profit_target_rate=profit_target_rate,
-        memo=memo,
-    )
+    try:
+        holding = service.register_purchase(
+            owner=owner,
+            stock_code=stock_code,
+            stock_name=stock_name,
+            shares=_parse_positive_int(shares, "購入株数"),
+            purchase_price=_parse_positive_decimal(price, "購入単価"),
+            purchase_date=_parse_date(purchase_date),
+            account_type=account_type,
+            fee=_parse_decimal(fee, "手数料"),
+            investment_purpose=investment_purpose,
+            sell_policy=sell_policy,
+            profit_target_rate=profit_target_rate,
+            memo=memo,
+        )
+    except ValueError as e:
+        # ConcurrentUpdateError(Issue #530)を含む。サブちゃんレビューF4対応。
+        typer.echo(str(e))
+        raise typer.Exit(code=1) from e
     typer.echo(
         f"登録しました: {holding.stock_code} {holding.stock_name} "
         f"平均取得単価{holding.average_purchase_price}円"
@@ -260,7 +265,13 @@ def recompute_all(
 
     for holding in holdings:
         before_shares, before_price = holding.shares, holding.average_purchase_price
-        updated = service.recompute_holding(holding.owner, holding.stock_code)
+        try:
+            updated = service.recompute_holding(holding.owner, holding.stock_code)
+        except ValueError as e:
+            # ConcurrentUpdateError(Issue #530)を含む。1件の競合で全体を止めず、
+            # 該当銘柄をスキップして残りの再計算を続ける(サブちゃんレビューF4対応)。
+            typer.echo(f"スキップしました: {holding.stock_code}({e})")
+            continue
         audit.record(
             decision_type="holding_split_adjustment",
             stock_code=holding.stock_code,

@@ -24,6 +24,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.holding import Holding, PurchaseLot
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
+from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.aws import (
     conversation_commit,
     conversation_state_store,
@@ -587,6 +588,67 @@ def test_commit_watch_fails_on_operation_id_mismatch(moto_conversation_tables: N
     assert ok is False
     assert WatchlistRepository().get(_STOCK) is None
     assert conversation_state_store.get(_USER, _NOW) is not None
+
+
+def test_commit_watch_fails_when_existing_item_changed_after_plan_built(
+    moto_conversation_tables: None,
+) -> None:
+    """Issue #530 F1(サブちゃんレビュー): 既存アイテムの楽観ロック更新分岐
+    (expected_data != None)がcommit_watch経由で一度も検証されていなかった。
+    計画構築後に別経路(CLI手動編集等)で変更された場合、confirm操作の
+    TransactWriteItems全体が失敗し、割込んだ側の変更を上書きしないこと。"""
+    seeded = WatchlistItem(
+        stock_code=_STOCK,
+        memo="original",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    WatchlistRepository().upsert(seeded)
+    state = _start_watch_confirm()
+    assert state is not None
+    plan = WatchlistService().build_add_item_plan(stock_code=_STOCK, patch={"memo": "re-register"})
+
+    # 計画構築後、別経路でこのアイテムが変更されたことを模擬する。
+    mutated = WatchlistRepository().get(_STOCK)
+    assert mutated is not None
+    WatchlistRepository().upsert(mutated.model_copy(update={"memo": "concurrent edit"}))
+
+    ok = conversation_commit.commit_watch(_USER, state.operation_id, plan, _NOW)
+
+    assert ok is False
+    assert conversation_state_store.get(_USER, _NOW) is not None
+    item = WatchlistRepository().get(_STOCK)
+    assert item is not None
+    # 割込んだ側の変更が保たれ、confirm側のmemo="re-register"では上書きされない。
+    assert item.memo == "concurrent edit"
+
+
+def test_commit_watch_fails_when_item_created_concurrently_for_new_stock(
+    moto_conversation_tables: None,
+) -> None:
+    """新規アイテム(attribute_not_exists条件)についても、計画構築後に
+    別経路で先に作成された場合はcommit_watchが失敗すること。"""
+    state = _start_watch_confirm()
+    assert state is not None
+    plan = WatchlistService().build_add_item_plan(stock_code=_STOCK)
+    assert plan.expected_data is None
+
+    # 計画構築後、別経路で同じ銘柄コードが先に登録されたことを模擬する。
+    concurrent = WatchlistItem(
+        stock_code=_STOCK,
+        memo="concurrently created",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    WatchlistRepository().upsert(concurrent)
+
+    ok = conversation_commit.commit_watch(_USER, state.operation_id, plan, _NOW)
+
+    assert ok is False
+    assert conversation_state_store.get(_USER, _NOW) is not None
+    item = WatchlistRepository().get(_STOCK)
+    assert item is not None
+    assert item.memo == "concurrently created"
 
 
 # --- TransactionConflictException リトライ ---------------------------------

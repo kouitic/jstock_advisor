@@ -182,6 +182,53 @@ def test_n5_sell_shares_detects_concurrent_lot_update(
     assert sum(lot.shares for lot in lot_list) == 90
 
 
+def test_n5_sell_shares_detects_concurrent_lot_delete_on_full_consumption(
+    portfolio_service: PortfolioService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """サブちゃんレビューF2: 既存の`test_n5_sell_shares_detects_concurrent_lot_update`
+    は部分売却(lot_puts分岐)しか通らず、ロットを全消費して削除する
+    (lot_deletes分岐、`apply_conditional_delete`)側のCASは未検証だった。
+    単一ロットの全株売却で固定する。"""
+    _seed_purchase(portfolio_service)  # 単一ロット100株
+    lots = portfolio_service._lots  # noqa: SLF001
+    original_get_raw_data = lots.get_raw_data
+
+    def racy_get_raw_data(lot_id: str) -> str | None:
+        raw = original_get_raw_data(lot_id)
+        current = lots.get(lot_id)
+        if current is not None:
+            lots.replace_if_raw_matches(
+                lot_id, raw, current.model_copy(update={"shares": current.shares - 10})
+            )
+        return raw
+
+    monkeypatch.setattr(lots, "get_raw_data", racy_get_raw_data)
+
+    with pytest.raises(ConcurrentUpdateError):
+        portfolio_service.sell_shares(DEFAULT_OWNER, _STOCK, 100)  # 全株売却(delete分岐)
+
+    # 別経路の変更(90株)が残っており、削除されていない。
+    remaining = portfolio_service.list_lots(DEFAULT_OWNER, _STOCK)
+    assert len(remaining) == 1
+    assert remaining[0].shares == 90
+    # lot deleteの時点で失敗するため、Holdingへは到達せず削除されない。
+    assert portfolio_service.get_holding(DEFAULT_OWNER, _STOCK) is not None
+
+
+def test_n5_sell_shares_full_consumption_succeeds_when_no_conflict(
+    portfolio_service: PortfolioService,
+) -> None:
+    """★ 反証: 競合が無ければ全株売却(ロット削除+Holding削除)はこれまでどおり
+    成功する。"""
+    _seed_purchase(portfolio_service)
+
+    holding = portfolio_service.sell_shares(DEFAULT_OWNER, _STOCK, 100)
+
+    assert holding is None
+    assert portfolio_service.list_lots(DEFAULT_OWNER, _STOCK) == []
+    assert portfolio_service.get_holding(DEFAULT_OWNER, _STOCK) is None
+
+
 def test_n5_sell_shares_detects_concurrent_holding_update_on_full_sale(
     portfolio_service: PortfolioService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -206,6 +253,35 @@ def test_n5_sell_shares_detects_concurrent_holding_update_on_full_sale(
         portfolio_service.sell_shares(DEFAULT_OWNER, _STOCK, 100)  # 全株売却
 
     # Holdingは削除されず、別経路の更新が残っている。
+    holding = portfolio_service.get_holding(DEFAULT_OWNER, _STOCK)
+    assert holding is not None
+    assert holding.memo == "別経路が先に更新"
+
+
+def test_n5_sell_shares_detects_concurrent_holding_update_on_partial_sale(
+    portfolio_service: PortfolioService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """サブちゃんレビューF2: 既存のHolding競合テストは全部売却(holding_delete
+    分岐)のみを対象としており、最も一般的な部分売却(holding_put分岐)の
+    CASは未検証だった。"""
+    _seed_purchase(portfolio_service)  # 単一ロット100株
+    holdings = portfolio_service._holdings  # noqa: SLF001
+    original_get_raw_data = holdings.get_raw_data
+
+    def racy_get_raw_data(holding_id: str) -> str | None:
+        raw = original_get_raw_data(holding_id)
+        current = holdings.get(holding_id)
+        if current is not None:
+            holdings.replace_if_raw_matches(
+                holding_id, raw, current.model_copy(update={"memo": "別経路が先に更新"})
+            )
+        return raw
+
+    monkeypatch.setattr(holdings, "get_raw_data", racy_get_raw_data)
+
+    with pytest.raises(ConcurrentUpdateError):
+        portfolio_service.sell_shares(DEFAULT_OWNER, _STOCK, 30)  # 部分売却(holding_put分岐)
+
     holding = portfolio_service.get_holding(DEFAULT_OWNER, _STOCK)
     assert holding is not None
     assert holding.memo == "別経路が先に更新"
@@ -248,7 +324,140 @@ def test_n5_delete_lot_detects_concurrent_lot_update(
     assert remaining[0].shares == 99
 
 
+def test_n5_delete_lot_detects_concurrent_holding_delete(
+    portfolio_service: PortfolioService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """サブちゃんレビューF2: 既存の`test_n5_delete_lot_detects_concurrent_lot_update`
+    はロット自体の削除競合のみを対象としており、最後の1件を消して0件になった際に
+    行うHolding削除(`apply_conditional_delete`)自体のCASは未検証だった。"""
+    _seed_purchase(portfolio_service)  # 単一ロットのみ
+    lot = portfolio_service.list_lots(DEFAULT_OWNER, _STOCK)[0]
+    holdings = portfolio_service._holdings  # noqa: SLF001
+    original_get_raw_data = holdings.get_raw_data
+
+    def racy_get_raw_data(holding_id: str) -> str | None:
+        raw = original_get_raw_data(holding_id)
+        current = holdings.get(holding_id)
+        if current is not None:
+            holdings.replace_if_raw_matches(
+                holding_id, raw, current.model_copy(update={"memo": "別経路が先に更新"})
+            )
+        return raw
+
+    monkeypatch.setattr(holdings, "get_raw_data", racy_get_raw_data)
+
+    with pytest.raises(ConcurrentUpdateError):
+        portfolio_service.delete_lot(DEFAULT_OWNER, _STOCK, lot.lot_id)
+
+    # ロット自体は削除されている(こちらは競合させていない)が、Holdingは
+    # 割込んだ側の変更が残ったまま削除されない。
+    assert portfolio_service.list_lots(DEFAULT_OWNER, _STOCK) == []
+    holding = portfolio_service.get_holding(DEFAULT_OWNER, _STOCK)
+    assert holding is not None
+    assert holding.memo == "別経路が先に更新"
+
+
+def test_n5_delete_lot_full_deletion_succeeds_when_no_conflict(
+    portfolio_service: PortfolioService,
+) -> None:
+    """★ 反証: 競合が無ければ最後の1件のロット削除+Holding削除はこれまでどおり
+    成功する。"""
+    _seed_purchase(portfolio_service)
+    lot = portfolio_service.list_lots(DEFAULT_OWNER, _STOCK)[0]
+
+    result = portfolio_service.delete_lot(DEFAULT_OWNER, _STOCK, lot.lot_id)
+
+    assert result is None
+    assert portfolio_service.list_lots(DEFAULT_OWNER, _STOCK) == []
+    assert portfolio_service.get_holding(DEFAULT_OWNER, _STOCK) is None
+
+
+# --- F3(サブちゃんレビュー): get()とget_raw_data()の間の並行削除 ----------------
+
+
+def test_f3_update_holding_meta_raises_value_error_when_concurrently_deleted(
+    portfolio_service: PortfolioService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`existing is not None`確認後、`get_raw_data()`呼び出しまでの間に別実行が
+    このHoldingを削除すると、existing_raw is Noneに実際に到達しうる。
+    assertではなく明示的なValueErrorとする(サブちゃんレビューF3)。"""
+    _seed_purchase(portfolio_service)
+    holdings = portfolio_service._holdings  # noqa: SLF001
+    original_get_raw_data = holdings.get_raw_data
+
+    def racy_get_raw_data(hid: str) -> str | None:
+        holdings.delete(hid)  # get()確認後、get_raw_data()前の並行削除
+        return original_get_raw_data(hid)
+
+    monkeypatch.setattr(holdings, "get_raw_data", racy_get_raw_data)
+
+    with pytest.raises(ValueError):
+        portfolio_service.update_holding_meta(DEFAULT_OWNER, _STOCK, memo="A")
+
+
+def test_f3_repair_holding_projection_raises_value_error_when_concurrently_deleted(
+    portfolio_service: PortfolioService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_purchase(portfolio_service)
+    holdings = portfolio_service._holdings  # noqa: SLF001
+    holding = portfolio_service.get_holding(DEFAULT_OWNER, _STOCK)
+    assert holding is not None
+    holdings.upsert(holding.model_copy(update={"shares": 1}))  # ロットとずれた値(再計算対象)
+    original_get_raw_data = holdings.get_raw_data
+
+    def racy_get_raw_data(hid: str) -> str | None:
+        holdings.delete(hid)
+        return original_get_raw_data(hid)
+
+    monkeypatch.setattr(holdings, "get_raw_data", racy_get_raw_data)
+
+    with pytest.raises(ValueError):
+        portfolio_service.repair_holding_projection(DEFAULT_OWNER, _STOCK)
+
+
 # --- N6: repair_holding_projection vs通常更新 → newer stateを上書きしない -------
+
+
+def test_n6_recompute_holding_detects_concurrent_update(
+    portfolio_service: PortfolioService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """サブちゃんレビューF2: `_recompute_holding()`(`recompute_holding()`の実体。
+    USER決定〔U-1〜U-5〕が対象として明示的に列挙したメソッド)自体を直接呼んだ
+    場合のlost update再現テスト。既存の`repair_holding_projection`向けテストは
+    `repair_holding_projection()`経由であり、`_recompute_holding()`自体のCASが
+    外れても検知できていなかった。"""
+    _seed_purchase(portfolio_service)
+    holdings = portfolio_service._holdings  # noqa: SLF001
+    original_get_raw_data = holdings.get_raw_data
+
+    def racy_get_raw_data(holding_id: str) -> str | None:
+        raw = original_get_raw_data(holding_id)
+        current = holdings.get(holding_id)
+        assert current is not None
+        holdings.replace_if_raw_matches(
+            holding_id, raw, current.model_copy(update={"memo": "別経路が先に更新"})
+        )
+        return raw
+
+    monkeypatch.setattr(holdings, "get_raw_data", racy_get_raw_data)
+
+    with pytest.raises(ConcurrentUpdateError):
+        portfolio_service.recompute_holding(DEFAULT_OWNER, _STOCK)
+
+    holding = portfolio_service.get_holding(DEFAULT_OWNER, _STOCK)
+    assert holding is not None
+    assert holding.memo == "別経路が先に更新"
+
+
+def test_n6_recompute_holding_succeeds_when_no_conflict(
+    portfolio_service: PortfolioService,
+) -> None:
+    """★ 反証: 競合が無ければこれまでどおり成功する。"""
+    _seed_purchase(portfolio_service)
+
+    holding = portfolio_service.recompute_holding(DEFAULT_OWNER, _STOCK)
+
+    assert holding.shares == 100
 
 
 def test_n6_repair_holding_projection_detects_concurrent_update(

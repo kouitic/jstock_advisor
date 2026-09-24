@@ -123,7 +123,13 @@ class WatchlistService:
             # no-op(実質的な変更なし)。writeもupdated_atの前進も行わない。
             return existing
         item = existing.model_copy(update={**effective, "updated_at": now})
-        assert existing_raw is not None  # 直前にexisting is not Noneを確認済み
+        # サブちゃんレビュー(#530 F3): existing is not Noneを確認済みでも、
+        # get()とget_raw_data()は別呼び出しのため、その間に並行削除されると
+        # existing_raw is Noneに実際に到達しうる(assertではなく明示的な
+        # ValueErrorとする。AssertionErrorはCLIのexcept ValueErrorで
+        # 捕捉されないため)。
+        if existing_raw is None:
+            raise ValueError(f"銘柄コード{stock_code}のデータ取得に失敗しました")
         if not self._repository.replace_if_raw_matches(stock_code, existing_raw, item):
             raise ConcurrentUpdateError(stock_code)
         return item
@@ -190,7 +196,11 @@ class WatchlistService:
             raise ValueError(f"銘柄コード{stock_code}はウォッチリストに登録されていません")
         # Issue #530: existingを読んだ時点の生JSONを楽観ロック条件として保持する。
         existing_raw = self._repository.get_raw_data(stock_code)
-        assert existing_raw is not None  # 直前にexisting is not Noneを確認済み
+        # サブちゃんレビュー(#530 F3): get()とget_raw_data()は別呼び出しのため、
+        # その間に並行削除されるとexisting_raw is Noneに実際に到達しうる
+        # (assertではなく明示的なValueErrorとする)。
+        if existing_raw is None:
+            raise ValueError(f"銘柄コード{stock_code}のデータ取得に失敗しました")
         effective = {k: v for k, v in fields.items() if getattr(existing, k) != v}
         if not effective:
             return existing
