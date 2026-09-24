@@ -131,7 +131,16 @@ def _fake_config(
             maximum_unconfirmed_days=180,
         ),
     )
-    return SimpleNamespace(watchlist_screening=watchlist_screening)
+    # Issue #506(O-1): _detect_and_notify_watchlist_incidents()がBusinessCalendar
+    # 構築のため config.holiday_calendar を読む(既存テストは追加の休業日を必要
+    # としないため空)。
+    holiday_calendar = SimpleNamespace(
+        recurring_market_closures=SimpleNamespace(dates_mm_dd=[]),
+        additional_closures=SimpleNamespace(dates=[]),
+    )
+    return SimpleNamespace(
+        watchlist_screening=watchlist_screening, holiday_calendar=holiday_calendar
+    )
 
 
 class _FakeStockDisplayNameResolver:
@@ -187,6 +196,9 @@ def _stub_expensive_dependencies(monkeypatch: pytest.MonkeyPatch) -> SimpleNames
     )
     monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
     monkeypatch.setattr(finalizer_module, "record_batch_audit", lambda **kw: None)
+    # Issue #506(O-1): 本ファイルの既存テストはS-2/S-4検知を検証対象としないため、
+    # 実際のSNS publish(boto3)は行わせない(専用テストはこの関数自体を直接検証する)。
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", lambda envelope: None)
     fake_repo = _FakeWatchlistRepository()
     monkeypatch.setattr(finalizer_module, "WatchlistRepository", lambda: fake_repo)
     monkeypatch.setattr(
@@ -662,9 +674,7 @@ def _b2_record(
     return _B2Record(
         batch_id=batch_id,
         family=family,
-        execution_context=(
-            context if context is not None else _B2ExecutionContext.normal()
-        ),
+        execution_context=(context if context is not None else _B2ExecutionContext.normal()),
         progress=progress if progress is not None else _b2_progress(),
         attempt_count=attempt_count,
         finalize_started_at=None,
@@ -755,9 +765,7 @@ def test_b2_unknown_family_is_fail_closed(monkeypatch) -> None:
 def test_b2_validation_batch_is_not_invoked(monkeypatch) -> None:
     """T17: VALIDATIONバッチは自動re-driveしない。"""
     invoked: list[tuple[str, dict]] = []
-    record = _b2_record(
-        context=_B2ExecutionContext(mode=_B2ExecutionMode.VALIDATION)
-    )
+    record = _b2_record(context=_B2ExecutionContext(mode=_B2ExecutionMode.VALIDATION))
     _b2_patch(monkeypatch, record, invoked)
 
     outcome = handler_module._handle_completion_recovery_candidate(

@@ -93,7 +93,8 @@ def recording_line_client(monkeypatch: pytest.MonkeyPatch) -> _RecordingLineClie
 def _fingerprint_of(message: dict[str, Any]) -> str:
     from jstock_advisor.domain.notification.incident_fingerprint import compute_fingerprint
 
-    return compute_fingerprint(handler_module._build_fingerprint_input(message))
+    signal = handler_module._normalize_alarm_message(message, dt.datetime.now(dt.UTC))
+    return compute_fingerprint(handler_module._build_fingerprint_input(signal))
 
 
 # --- 正常系: 新規 incident → LINE 送信 → SENT ------------------------------------
@@ -123,10 +124,11 @@ def test_line_body_is_exactly_the_builder_output_with_nothing_appended(
 
     handler_module.handler(_sns_event(message), None)
 
+    signal = handler_module._normalize_alarm_message(message, dt.datetime.now(dt.UTC))
     expected = build_incident_message(
         IncidentNotice(
-            job=resolve_incident_job(handler_module._extract_function_name(message)),
-            occurred_at=handler_module._extract_occurred_at(message, dt.datetime.now(dt.UTC)),
+            job=resolve_incident_job(signal.job_name),
+            occurred_at=signal.occurred_at,
             failure_count=1,
         )
     )
@@ -252,7 +254,8 @@ def test_credentials_missing_releases_the_claim_and_raises(monkeypatch: pytest.M
 def test_fingerprint_input_does_not_use_the_free_text_state_reason() -> None:
     message = _alarm_message()  # NewStateReasonに実際の自由文が入っている(既定値)
 
-    fp_input = handler_module._build_fingerprint_input(message)
+    signal = handler_module._normalize_alarm_message(message, dt.datetime.now(dt.UTC))
+    fp_input = handler_module._build_fingerprint_input(signal)
 
     assert fp_input.error_message == "jstock-advisor-evaluation-errors"  # AlarmName
     assert "Threshold Crossed" not in fp_input.error_message
@@ -264,7 +267,8 @@ def test_fingerprint_input_does_not_use_the_free_text_state_reason() -> None:
 def test_unresolvable_dimensions_fall_back_to_unknown_without_raising() -> None:
     message = {"AlarmName": "x", "Trigger": {"MetricName": "Errors", "Dimensions": []}}
 
-    fp_input = handler_module._build_fingerprint_input(message)
+    signal = handler_module._normalize_alarm_message(message, dt.datetime.now(dt.UTC))
+    fp_input = handler_module._build_fingerprint_input(signal)
 
     assert fp_input.job_name == "unknown"
 
@@ -283,7 +287,8 @@ def test_function_name_is_picked_by_name_not_by_position() -> None:
         },
     }
 
-    fp_input = handler_module._build_fingerprint_input(message)
+    signal = handler_module._normalize_alarm_message(message, dt.datetime.now(dt.UTC))
+    fp_input = handler_module._build_fingerprint_input(signal)
 
     assert fp_input.job_name == "jstock-advisor-evaluation"
     assert "$LATEST" not in fp_input.job_name

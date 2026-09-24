@@ -1,10 +1,17 @@
-"""異常通知の中継 Lambda(Issue #132 X-4〔#503〕。段階1)。
+"""異常通知の中継 Lambda(Issue #132 X-4〔#503〕。段階1。Issue #506〔O-1〕でInternal
+structured incident payloadの共通処理を追加)。
 
-CloudWatch Alarm → SNS Topic(IncidentNotificationTopic)→ 本 handler、という経路の終端。
-1件の SNS メッセージ(= 1回の Alarm 状態遷移)から:
+CloudWatch Alarm → SNS Topic(IncidentNotificationTopic)→ 本 handler、という経路と、
+reconciler等が発行するInternal structured incident payload → 同じSNS Topic → 本 handler、
+という経路の両方の終端(USER決定。#506 issuecomment-5805278274。通知経路のOption 1
+採用: 発生源に関わらず単一のIncidentNotificationTopicを通り、以降は完全共通処理とする)。
 
-    1. Alarm の SNS payload から、fingerprint 計算に使う**安定した値**を取り出す
-       (StateReason の自由文はそのまま使わない。baseline: 「Alarm payload の扱い」)
+1件の SNS メッセージから:
+
+    0. payloadの形状(CloudWatch Alarm由来かInternal由来か)を判別し、
+       `domain.notification.incident_signal.IncidentSignal`へ正規化する(本Issueで追加)
+    1. IncidentSignalから、#502 fingerprint計算に使う**安定した値**を取り出す
+       (StateReason等の自由文はそのまま使わない。baseline: 「Alarm payload の扱い」)
     2. #502 compute_fingerprint() で fingerprint を計算する
     3. incident_state_tracker.try_claim() で原子的に claim する(dedup・stale takeover)
     4. claim できたときだけ、#501 build_incident_message() で本文を組み立て、LINE push する
@@ -14,6 +21,11 @@ CloudWatch Alarm → SNS Topic(IncidentNotificationTopic)→ 本 handler、と�
 **この handler 自身は fingerprint・claim_token 等の内部値を CloudWatch Logs へ出す**
 (識別子ではなく運用上のハッシュ値・状態遷移名であり、H-30 の allowlist が禁じる
 「識別子・銘柄・所有者」ではない)。
+
+Internal payloadのallowlist(#506 USER決定): source / job_name / failure_stage /
+failure_type / reason_code / occurred_at / failure_count / consecutive_days /
+is_ongoing のみ。stock_code / owner / holding_id / stack trace / 生exception message /
+AWS account ID / ARN / request ID は禁止(#501/#503のH-30契約を維持する)。
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ from jstock_advisor.domain.notification.incident_message import (
     build_incident_message,
     resolve_incident_job,
 )
+from jstock_advisor.domain.notification.incident_signal import IncidentSignal
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
 
@@ -49,6 +62,12 @@ _ENVIRONMENT = "production"
 _ALARM_METRIC_NAMESPACE_STAGE = "cloudwatch_alarm"
 _ALARM_ERROR_TYPE = "CloudWatchAlarm"
 
+# Internal payload(reconciler等)の発生源識別子(source)の既知値。
+# fingerprintの入力(job_name)としてそのまま使うのはこれらの値ではなく、
+# payload自身が持つjob_nameフィールドである(sourceは「誰が検知したか」、
+# job_nameは「どのjobの異常か」で意味が異なる)。
+_INTERNAL_SOURCE_WATCHLIST_RECONCILER = "watchlist_reconciler"
+
 _CLAIMED_OUTCOMES = frozenset(
     {
         tracker.IncidentClaimOutcome.CLAIMED_NEW,
@@ -56,6 +75,18 @@ _CLAIMED_OUTCOMES = frozenset(
         tracker.IncidentClaimOutcome.CLAIMED_STALE_TAKEOVER,
     }
 )
+
+
+def _is_internal_payload(message: dict[str, Any]) -> bool:
+    """CloudWatch AlarmのSNS payloadと区別する。
+
+    CloudWatch AlarmのSNS payloadは必ず`AlarmName`と`Trigger`を持つ(AWSの固定形式)。
+    Internal payload(reconciler等)はこの2つを持たず、代わりに`source`を持つ
+    (本system内部の約束。#506で新設)。両方が欠けている場合はAlarm由来として扱う
+    (fail-closedではなく既存動作を優先する。既存のAlarm処理はこの2つが無くても
+    "unknown"へ落ちる安全側の実装のため、誤判定しても致命的にならない)。
+    """
+    return "source" in message and "AlarmName" not in message and "Trigger" not in message
 
 
 def _extract_function_name(alarm_message: dict[str, Any]) -> str:
@@ -79,9 +110,8 @@ def _extract_metric_name(alarm_message: dict[str, Any]) -> str:
     return metric_name if isinstance(metric_name, str) and metric_name else "unknown"
 
 
-def _extract_occurred_at(alarm_message: dict[str, Any], now: dt.datetime) -> dt.datetime:
-    """Alarm の StateChangeTime(ISO8601、通常UTC)を使う。解釈できなければ now にfallbackする。"""
-    raw = alarm_message.get("StateChangeTime")
+def _extract_occurred_at(raw: object, now: dt.datetime) -> dt.datetime:
+    """ISO8601文字列(通常UTC)を解釈する。解釈できなければ now にfallbackする。"""
     if not isinstance(raw, str):
         return now
     try:
@@ -93,34 +123,103 @@ def _extract_occurred_at(alarm_message: dict[str, Any], now: dt.datetime) -> dt.
     return parsed
 
 
-def _build_fingerprint_input(alarm_message: dict[str, Any]) -> IncidentFingerprintInput:
-    """Alarm payload から、fingerprint 計算用の安定した5要素を組み立てる。
+def _normalize_alarm_message(alarm_message: dict[str, Any], now: dt.datetime) -> IncidentSignal:
+    """CloudWatch AlarmのSNS payloadをIncidentSignalへ正規化する。
 
     baseline(#503 issuecomment-5796588796)「Alarm payload の扱い」のとおり、
     StateReason の自由文(タイムスタンプ・実測値を含む)はそのまま使わない。
     AlarmName(deploy 時に固定される安定した文字列)を error_message とし、
     MetricName(Errors / Duration)を failure_type とする。
+    failure_count / consecutive_days / is_ongoingはAlarm payload自体には無い情報のため
+    Noneのままにする(failure_countは、claim後にIncidentStateTrackerのoccurrence_countから
+    別途補う。#503から変更しない既存の挙動)。
     """
-    return IncidentFingerprintInput(
-        environment=_ENVIRONMENT,
+    return IncidentSignal(
+        source=_ALARM_METRIC_NAMESPACE_STAGE,
         job_name=_extract_function_name(alarm_message),
         failure_stage=_ALARM_METRIC_NAMESPACE_STAGE,
         failure_type=_extract_metric_name(alarm_message),
         error_type=_ALARM_ERROR_TYPE,
         error_message=alarm_message.get("AlarmName") or "unknown",
+        occurred_at=_extract_occurred_at(alarm_message.get("StateChangeTime"), now),
     )
 
 
-def _process_alarm_message(
-    alarm_message: dict[str, Any], config: AppConfig, now: dt.datetime
-) -> None:
-    fingerprint = compute_fingerprint(_build_fingerprint_input(alarm_message))
+def _require_allowlisted_str(message: dict[str, Any], key: str) -> str:
+    value = message.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"internal incident payload missing required field: {key}")
+    return value
+
+
+def _optional_int(message: dict[str, Any], key: str) -> int | None:
+    value = message.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"internal incident payload field {key} must be int or null")
+    return value
+
+
+def _optional_bool(message: dict[str, Any], key: str) -> bool | None:
+    value = message.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise TypeError(f"internal incident payload field {key} must be bool or null")
+    return value
+
+
+def _normalize_internal_message(message: dict[str, Any], now: dt.datetime) -> IncidentSignal:
+    """Internal structured incident payload(reconciler等)をIncidentSignalへ正規化する。
+
+    許可するキーは#506 USER決定のallowlistのみ(source / job_name / failure_stage /
+    failure_type / reason_code / occurred_at / failure_count / consecutive_days /
+    is_ongoing)。reason_codeはfingerprint計算のerror_type(識別性の高い安定値)として
+    使う(#502のnormalize_error_signature()が数字列を正規化してしまうため、
+    failure_count/consecutive_daysのような可変値はfingerprintの入力に含めない。
+    reason_codeは固定の識別子文字列であり数字を含まない設計とする)。
+    """
+    return IncidentSignal(
+        source=_require_allowlisted_str(message, "source"),
+        job_name=_require_allowlisted_str(message, "job_name"),
+        failure_stage=_require_allowlisted_str(message, "failure_stage"),
+        failure_type=_require_allowlisted_str(message, "failure_type"),
+        error_type=_require_allowlisted_str(message, "reason_code"),
+        error_message=_require_allowlisted_str(message, "reason_code"),
+        occurred_at=_extract_occurred_at(message.get("occurred_at"), now),
+        failure_count=_optional_int(message, "failure_count"),
+        consecutive_days=_optional_int(message, "consecutive_days"),
+        is_ongoing=_optional_bool(message, "is_ongoing"),
+    )
+
+
+def _normalize(message: dict[str, Any], now: dt.datetime) -> IncidentSignal:
+    if _is_internal_payload(message):
+        return _normalize_internal_message(message, now)
+    return _normalize_alarm_message(message, now)
+
+
+def _build_fingerprint_input(signal: IncidentSignal) -> IncidentFingerprintInput:
+    return IncidentFingerprintInput(
+        environment=_ENVIRONMENT,
+        job_name=signal.job_name,
+        failure_stage=signal.failure_stage,
+        failure_type=signal.failure_type,
+        error_type=signal.error_type,
+        error_message=signal.error_message,
+    )
+
+
+def _process_signal(signal: IncidentSignal, config: AppConfig, now: dt.datetime) -> None:
+    fingerprint = compute_fingerprint(_build_fingerprint_input(signal))
     dedup_window = dt.timedelta(minutes=config.incident_notification.dedup_window_minutes)
     claim_stale = dt.timedelta(minutes=config.incident_notification.claim_stale_minutes)
 
     outcome, claim_token = tracker.try_claim(fingerprint, now, dedup_window, claim_stale)
     logger.info(
-        "incident_notifier claim fingerprint=%s outcome=%s",
+        "incident_notifier claim source=%s fingerprint=%s outcome=%s",
+        signal.source,
         fingerprint,
         outcome.value,
     )
@@ -129,12 +228,18 @@ def _process_alarm_message(
 
     state = tracker.get_incident_state(fingerprint)
     occurrence_count = int(state["occurrence_count"]) if state else 1
-    occurred_at = _extract_occurred_at(alarm_message, now)
+    occurred_at = signal.occurred_at
     require_timezone_aware(occurred_at)
+    # Internal payloadがfailure_countを明示している場合はそれを使う(reconciler等が
+    # 業務上の意味〔連続営業日数等〕を持つ値として計算済みのため)。無ければ、Alarm経路の
+    # 既存挙動どおりIncidentStateTrackerのoccurrence_countを使う。
+    failure_count = signal.failure_count if signal.failure_count is not None else occurrence_count
     notice = IncidentNotice(
-        job=resolve_incident_job(_extract_function_name(alarm_message)),
+        job=resolve_incident_job(signal.job_name),
         occurred_at=occurred_at,
-        failure_count=occurrence_count,
+        failure_count=failure_count,
+        consecutive_days=signal.consecutive_days,
+        is_ongoing=signal.is_ongoing,
     )
     text = build_incident_message(notice)
 
@@ -159,7 +264,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     records = event.get("Records") or []
     for record in records:
         sns = record.get("Sns") or {}
-        alarm_message = json.loads(sns["Message"])
-        _process_alarm_message(alarm_message, config, now)
+        message = json.loads(sns["Message"])
+        signal = _normalize(message, now)
+        _process_signal(signal, config, now)
     logger.info("incident_notifier_handler done: records=%d", len(records))
     return {"processed": len(records)}
