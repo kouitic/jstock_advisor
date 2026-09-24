@@ -89,18 +89,26 @@ def _is_internal_payload(message: dict[str, Any]) -> bool:
     return "source" in message and "AlarmName" not in message and "Trigger" not in message
 
 
-def _extract_function_name(alarm_message: dict[str, Any]) -> str:
-    """Alarm の SNS payload から、対象 Lambda 関数名(Dimensions の FunctionName)を取り出す。
+_ALARM_TARGET_DIMENSION_NAMES = ("FunctionName", "QueueName")
 
-    見つからない場合は "unknown" とする(handler 自体を失敗させない。#503 は Errors/Duration
-    の2 alarm のみが対象で、いずれも FunctionName dimension を持つ)。
+
+def _extract_alarm_target(alarm_message: dict[str, Any]) -> str:
+    """Alarm の SNS payload から、対象(Lambda 関数名 または SQS キュー名)の Dimension 値を
+    取り出す。
+
+    FunctionName dimension を優先し、無ければ QueueName dimension を見る(Issue #349:
+    DLQ 滞留の Alarm〔SQS ベース〕にも対応するため。#503 時点の Errors/Duration の2 alarm は
+    いずれも FunctionName dimension のみを持ち、既存の解決結果は変わらない)。
+    どちらも見つからない場合は "unknown" とする(handler 自体を失敗させない)。
     """
     trigger = alarm_message.get("Trigger") or {}
-    for dimension in trigger.get("Dimensions") or []:
-        if dimension.get("name") == "FunctionName":
-            value = dimension.get("value")
-            if isinstance(value, str) and value:
-                return value
+    dimensions = trigger.get("Dimensions") or []
+    for wanted in _ALARM_TARGET_DIMENSION_NAMES:
+        for dimension in dimensions:
+            if dimension.get("name") == wanted:
+                value = dimension.get("value")
+                if isinstance(value, str) and value:
+                    return value
     return "unknown"
 
 
@@ -136,7 +144,7 @@ def _normalize_alarm_message(alarm_message: dict[str, Any], now: dt.datetime) ->
     """
     return IncidentSignal(
         source=_ALARM_METRIC_NAMESPACE_STAGE,
-        job_name=_extract_function_name(alarm_message),
+        job_name=_extract_alarm_target(alarm_message),
         failure_stage=_ALARM_METRIC_NAMESPACE_STAGE,
         failure_type=_extract_metric_name(alarm_message),
         error_type=_ALARM_ERROR_TYPE,

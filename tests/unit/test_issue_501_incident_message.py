@@ -48,6 +48,7 @@ _REVIEWED_JOB_LABELS = {
     "QUARTERLY_REVIEW": "四半期レビュー",
     "LINE_WEBHOOK": "LINE の応答",
     "INCIDENT_NOTIFIER": "異常通知の中継処理",
+    "ASYNC_INVOKE_FAILURE": "非同期実行の失敗",
     "OTHER": "その他の処理",
 }
 
@@ -264,6 +265,20 @@ def test_every_lambda_function_in_the_template_has_an_entry() -> None:
     assert functions == set(incident_message._INTERNAL_NAME_TO_JOB)
 
 
+def test_every_dlq_in_the_template_has_an_entry() -> None:
+    """全 DLQ(名前が `-dlq` で終わるキュー)が対応表にある(Issue #349)。
+
+    増減したら、ここが赤くなり `_QUEUE_NAME_TO_JOB` を更新する合図になる
+    (test_every_lambda_function_in_the_template_has_an_entry と同型のガード)。
+    """
+    template = (_REPO_ROOT / "infra" / "template.yaml").read_text(encoding="utf-8")
+    queues = set(re.findall(r'QueueName: !Sub "\$\{AWS::StackName\}-([a-z0-9-]+-dlq)"', template))
+
+    assert len(queues) == 4  # #349: WatchlistTerminalFailure / BuyCandidateTerminalFailure /
+    # HoldingsWatchlistTerminalFailure / AsyncInvokeFailure の4本
+    assert queues == set(incident_message._QUEUE_NAME_TO_JOB)
+
+
 @pytest.mark.parametrize(
     ("internal_name", "label"),
     [
@@ -281,6 +296,14 @@ def test_every_lambda_function_in_the_template_has_an_entry() -> None:
         ("quarterly-review", "四半期レビュー"),
         ("line-webhook", "LINE の応答"),
         ("incident-notifier", "異常通知の中継処理"),
+        # Issue #349: SQS DLQ(キュー名)からの解決。
+        ("watchlist-terminal-failure-dlq", "ウォッチリスト自動追加"),
+        ("jstock-advisor-watchlist-terminal-failure-dlq", "ウォッチリスト自動追加"),
+        ("buy-candidate-terminal-failure-dlq", "買い候補チェック"),
+        ("holdings-watchlist-terminal-failure-dlq", "保有株チェック"),
+        # ★ BuyCandidatesFunction/HoldingsWatchlistFunctionの両方が共有するため、
+        # どちらか一方の既存jobへ誤って割り当てず専用の名称を持つ(USER決定)。
+        ("async-invoke-failure-dlq", "非同期実行の失敗"),
     ],
 )
 def test_internal_names_map_to_user_facing_labels(internal_name: str, label: str) -> None:
@@ -289,6 +312,18 @@ def test_internal_names_map_to_user_facing_labels(internal_name: str, label: str
     assert f"対象: {label}\n" in text
     assert internal_name not in text  # 内部名は本文に出ない
     _assert_allowlisted(text)
+
+
+def test_async_invoke_failure_dlq_is_not_attributed_to_either_sharing_function() -> None:
+    """AsyncInvokeFailureDLQはBuyCandidatesFunction/HoldingsWatchlistFunctionの両方が
+    共有する(Issue #318)。メッセージ単体からはどちらの関数由来か区別できないため、
+    どちらか一方の既存jobへ誤って割り当てないこと(USER決定)を固定する。"""
+    job = resolve_incident_job("async-invoke-failure-dlq")
+
+    assert job is IncidentJob.ASYNC_INVOKE_FAILURE
+    assert job is not IncidentJob.BUY_CANDIDATES
+    assert job is not IncidentJob.HOLDINGS_WATCHLIST
+    assert job is not IncidentJob.OTHER
 
 
 def test_an_unknown_job_falls_back_to_the_generic_label_without_the_internal_name() -> None:

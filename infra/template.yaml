@@ -2492,6 +2492,107 @@ Resources:
       AlarmActions:
         - !Ref IncidentNotificationTopic
 
+  # --- DLQ滞留の検知(Issue #349。#132 X-7相当の恒久監視) -----------------------
+  # 真正のDLQ(自動消費者が無く、メッセージは手動のredrive/purgeか14日retentionの
+  # 経過でしか0に戻らない)へメッセージが1件でも見えたら、即座にincident化する
+  # (処理遅延のような一時的な揺らぎではなく、再試行を使い切った終端失敗が
+  # 既に確定した事実であるため、S-6〔#507〕のような持続判定は不要)。
+  # SQSのApproximateNumberOfMessagesVisibleは、キューが動かない時間帯には
+  # データ点が飛ぶことがある(observer roleでの実測。24節)。TreatMissingData=
+  # notBreachingは、この「動きが無い」状態を誤ってALARMにしないための既存の
+  # Errors/Duration alarmと同じ判断根拠であり、実際に閾値を超える値が発行された
+  # 時点のデータ点はAlarmの評価対象になるため検知の信頼性は損なわれない。
+  # USER決定により、dormant(コードから未参照)な2本(BuyCandidate/
+  # HoldingsWatchlist)も、将来Phase 2でdispatch側が切り替わった際の監視漏れを
+  # 防ぐため先行して追加する(現時点では構造的に発火しえない)。
+
+  WatchlistTerminalFailureDLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-watchlist-terminal-failure-dlq-messages"
+      AlarmDescription: >-
+        ウォッチリスト評価の終端失敗DLQへメッセージが見えている。Issue #349参照。
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt WatchlistTerminalFailureDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  AsyncInvokeFailureDLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-async-invoke-failure-dlq-messages"
+      AlarmDescription: >-
+        非同期Lambda呼び出し(BuyCandidates/HoldingsWatchlist)の失敗DLQへ
+        メッセージが見えている。Issue #349参照。
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AsyncInvokeFailureDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  # ★ dormant(#319 Phase 1。dispatch側の切替=Phase 2は未着手のため、現時点では
+  # コードから一切参照されず、構造的にメッセージが入らない)。Phase 2で
+  # dispatch側が切り替わった際の監視漏れを防ぐため、USER決定により先行して追加する。
+  BuyCandidateTerminalFailureDLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-buy-candidate-terminal-failure-dlq-messages"
+      AlarmDescription: >-
+        買い候補探索の終端失敗DLQへメッセージが見えている(#319 Phase 1。
+        Phase 2でdispatch側が切り替わるまでは構造的に発火しない)。Issue #349参照。
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt BuyCandidateTerminalFailureDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  # ★ dormant(上記と同じ理由。#319 Phase 1)。
+  HoldingsWatchlistTerminalFailureDLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-holdings-watchlist-terminal-failure-dlq-messages"
+      AlarmDescription: >-
+        保有株監視の終端失敗DLQへメッセージが見えている(#319 Phase 1。
+        Phase 2でdispatch側が切り替わるまでは構造的に発火しない)。Issue #349参照。
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt HoldingsWatchlistTerminalFailureDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
   # --- ウォッチリスト自動追加(候補ユニバース本格対応・2026-08) ---------------
   # 旧WatchlistAutoAdditionFunction(単一Lambdaの自己再帰fan-out)を、
   # Dispatcher→SQS→Worker、TerminalFailureQueue→Handler、毎時Reconcilerという
