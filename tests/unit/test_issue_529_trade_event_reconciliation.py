@@ -78,6 +78,12 @@ def _active_watch_state(stock_code: str = _STOCK) -> WatchState:
     )
 
 
+def _list_pending(repo: TradeEventRecordRepository, limit: int = 1000) -> list[Any]:
+    """`list_pending_with_raw()`は(結果, 全pending件数)のtupleを返すため、
+    テストで結果一覧だけを見たい箇所向けの薄いヘルパー。"""
+    return repo.list_pending_with_raw(limit)[0]
+
+
 def _get_watch_state(repo: WatchStateRepository, stock_code: str = _STOCK) -> WatchState | None:
     """`WatchStateRepository`は`get()`を持たない(`get_active`/`get_with_raw`
     のみ)ため、終了済みも含めて取得するテスト用ヘルパー。"""
@@ -152,7 +158,7 @@ def test_t2_marks_consumed_and_removes_from_pending_index(tmp_path: Path) -> Non
     assert stored is not None
     assert stored.consumed_at == _NOW
     assert stored.pending_marker is None
-    assert trade_event_repo.list_pending_with_raw() == []
+    assert _list_pending(trade_event_repo) == []
 
 
 # --- T3: 同じeventを2回reconcile → 2回目no-op ---------------------------------
@@ -191,7 +197,7 @@ def test_t4_concurrent_reconcilers_converge_to_single_consumption(tmp_path: Path
     watch_state_repo.upsert(_active_watch_state())
 
     # 両方の実行が同じ時点のraw値を読んだ状態を模擬する。
-    pending = trade_event_repo.list_pending_with_raw()
+    pending = _list_pending(trade_event_repo)
     assert len(pending) == 1
     stored_record, raw = pending[0]
 
@@ -269,7 +275,83 @@ def test_bounded_processing_leaves_remainder_for_next_run(tmp_path: Path) -> Non
 
     assert outcome.processed == 2
     assert outcome.remaining == 1
-    assert len(trade_event_repo.list_pending_with_raw()) == 1
+    assert len(_list_pending(trade_event_repo)) == 1
+
+
+# --- F1(サブちゃんレビュー): WatchState終了→消費の順序が本質 -------------------
+
+
+class _RaisingWatchStateService:
+    """`end_for_trade_events()`が必ず例外を送出するスタブ(F1固定用)。"""
+
+    def end_for_trade_events(self, events: list[Any], today: dt.date) -> None:
+        raise RuntimeError("simulated end_for_trade_events failure")
+
+
+def test_f1_record_stays_pending_when_watch_state_end_fails(tmp_path: Path) -> None:
+    """サブちゃんレビュー(#529 F1): `end_for_trade_events()`が例外を送出した
+    場合、`mark_consumed()`へは絶対に到達せず、recordはPENDINGのまま
+    (pending-marker-indexに残る)こと。
+
+    順序が逆(先にconsumed_atを設定してからWatchState終了)だと、終了前に
+    クラッシュした際にrecordがPENDINGでなくなりGSIから外れ、#529が解消
+    しようとしたギャップ(WatchState終了が二度と実行されない)をこの
+    consumption step自身が再導入してしまう。
+    """
+    trade_event_repo = TradeEventRecordRepository(store_dir=tmp_path)
+    record = _pending_record()
+    trade_event_repo.create_pending(record)
+
+    with pytest.raises(RuntimeError, match="simulated end_for_trade_events failure"):
+        reconcile_pending_trade_events(
+            _NOW,
+            200,
+            trade_event_repo,
+            _RaisingWatchStateService(),  # type: ignore[arg-type]
+        )
+
+    stored = trade_event_repo.get(record.event_id)
+    assert stored is not None
+    assert stored.consumed_at is None
+    assert stored.pending_marker == "PENDING"
+    assert len(_list_pending(trade_event_repo)) == 1
+
+
+# --- F2(サブちゃんレビュー): read側(GetItem)もmax_records_per_runで縛る -------
+
+
+class _CountingGetRawDataStore:
+    """`get_raw_data()`の呼び出し回数を数えるスパイ(F2固定用)。"""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+        self.call_count = 0
+
+    def query_by_index(self, index_name: str, key_name: str, key_value: str) -> list[Any]:
+        return self._real.query_by_index(index_name, key_name, key_value)
+
+    def get_raw_data(self, item_id: str) -> str | None:
+        self.call_count += 1
+        return self._real.get_raw_data(item_id)
+
+
+def test_f2_get_raw_data_is_bounded_by_limit(tmp_path: Path) -> None:
+    """サブちゃんレビュー(#529 F2): `list_pending_with_raw(limit)`は、
+    pending全件ぶんGetItem(`get_raw_data()`)を発行するのではなく、`limit`
+    件に達した時点で打ち切ること。"""
+    trade_event_repo = TradeEventRecordRepository(store_dir=tmp_path)
+    for i in range(5):
+        trade_event_repo.create_pending(
+            _pending_record(event_id=f"event-{i}", stock_code=f"100{i}")
+        )
+    counting_store = _CountingGetRawDataStore(trade_event_repo._store)
+    trade_event_repo._store = counting_store  # type: ignore[assignment]
+
+    result, total_pending = trade_event_repo.list_pending_with_raw(2)
+
+    assert len(result) == 2
+    assert total_pending == 5
+    assert counting_store.call_count == 2, "pending5件のうちlimit(2件)を超えてGetItemを発行している"
 
 
 # --- T7/T8: handler()レベルのfailure isolation --------------------------------
@@ -437,7 +519,7 @@ def test_t8_existing_reconciliation_failure_does_not_prevent_prior_trade_event_c
     assert ended is not None
     assert ended.ended_at is not None
     assert ended.end_reason == END_REASON_TRADE_EVENT
-    assert trade_event_repo.list_pending_with_raw() == []
+    assert _list_pending(trade_event_repo) == []
 
 
 # --- DynamoDB実装: mark_consumed()がsparse GSIから正しく除外すること -----------

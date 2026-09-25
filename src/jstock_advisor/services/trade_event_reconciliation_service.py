@@ -100,13 +100,22 @@ def reconcile_pending_trade_events(
     USER/MANAGER判断の必須契約)。
     """
     today = evaluation_date_jst(now)
-    pending = trade_event_repo.list_pending_with_raw()
-    to_process = pending[:max_records_per_run]
+    # サブちゃんレビュー(#529 F2)対応: 上限(max_records_per_run)をrepository
+    # メソッド側へ渡し、GetItem(get_raw_data())の発行自体を上限件数までで
+    # 打ち切る(以前はPythonスライスがread側の後で効いており、pending全件分
+    # GetItemが発行されていた)。
+    to_process, total_pending = trade_event_repo.list_pending_with_raw(max_records_per_run)
 
     processed = 0
     already_consumed_by_other_run = 0
     for record, raw in to_process:
         event = _record_to_trade_event(record)
+        # ★ 順序が本質(#529 F1レビュー対応): 必ずWatchState終了を先に完遂
+        # させてから消費済みにする。逆順(先にconsumed_atを設定してから
+        # WatchState終了)にすると、終了前にcrashした場合、recordが既に
+        # PENDINGでなくなりGSIから外れてしまい、#529が解消しようとした
+        # ギャップ(WatchState終了が二度と実行されない)をこのconsumption
+        # step自身が再導入することになる。
         watch_state_service.end_for_trade_events([event], today)
         if trade_event_repo.mark_consumed(record, raw, now):
             processed += 1
@@ -123,7 +132,7 @@ def reconcile_pending_trade_events(
                 event.detected_at.isoformat(),
             )
 
-    remaining = max(0, len(pending) - len(to_process))
+    remaining = max(0, total_pending - len(to_process))
     if processed or already_consumed_by_other_run:
         logger.info(
             "trade_event_reconciliation: processed=%d already_consumed_by_other_run=%d "

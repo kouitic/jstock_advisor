@@ -78,9 +78,9 @@ class TradeEventRecordRepository:
             )
         return created
 
-    def list_pending_with_raw(self) -> list[tuple[TradeEventRecord, str]]:
+    def list_pending_with_raw(self, limit: int) -> tuple[list[tuple[TradeEventRecord, str]], int]:
         """未消費(`pending_marker=PENDING`)のイベントを、CASに使う生JSONと組で
-        返す(Issue #71 F-C11 Phase 2。consumption stepの読み取り)。
+        最大`limit`件返す(Issue #71 F-C11 Phase 2。consumption stepの読み取り)。
 
         `watch_state_repository.py::get_active_with_raw()`と同じ理由で、
         「読んだ値」と「その時点の生JSON」を同じ呼び出しで返す(get()と
@@ -88,16 +88,30 @@ class TradeEventRecordRepository:
         既に消費済み[get_raw_data()がNone]になっている場合があるため、その
         項目は静かにスキップする。次回のreconcile実行がその時点の最新状態を
         改めて読み直す)。
+
+        サブちゃんレビュー(#529 F2)対応: `query_by_index()`(GSI Query)は
+        Projection=ALLのためモデル自体はGetItem無しで取得できるが、CASに
+        必要な**生JSON文字列**は`get_raw_data()`(GetItem)を別途要する。
+        以前は全pending件数ぶんGetItemを発行しており、`limit`(bounded
+        processing用の上限)はその後のPythonスライスにしか効いていなかった
+        (read側が無制限だった)。`limit`件に達したらGetItem発行を打ち切る
+        ことで、read側もwrite側と同じ上限で縛る。
+
+        戻り値は`(結果, 全pending件数)`。全件数は`query_by_index()`自体の
+        結果件数(GetItem不要、モデルのみ)からそのまま数えるため、追加の
+        読み取りコストは発生しない。
         """
         pending = self._store.query_by_index(
             PENDING_INDEX_NAME, "pending_marker", PENDING_MARKER_VALUE
         )
         result: list[tuple[TradeEventRecord, str]] = []
         for record in pending:
+            if len(result) >= limit:
+                break
             raw = self._store.get_raw_data(record.event_id)
             if raw is not None:
                 result.append((record, raw))
-        return result
+        return result, len(pending)
 
     def mark_consumed(
         self, record: TradeEventRecord, expected_raw_data: str, consumed_at: dt.datetime
