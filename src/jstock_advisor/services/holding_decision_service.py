@@ -261,6 +261,11 @@ class HoldingDecisionService:
         has_benefit = snapshot.benefit is not None and not snapshot.benefit.is_abolished
         is_first_evaluation = lookup.baseline is None
         if lookup.baseline is None:
+            # Issue #469: baseline比較へ実際に使われるのはhas_shareholder_benefit
+            # のみ(BaselineValueSnapshotのdocstring参照)。total_yield_pct/
+            # equity_ratio_pctは監査・将来拡張用に保存するが書き込み専用であり、
+            # 総合利回り(絶対条件)・財務健全性(別トリガー評価経由)いずれの
+            # baseline比較にも読み出されない。
             baseline_values = BaselineValueSnapshot(
                 total_yield_pct=snapshot.total_yield_pct,
                 has_shareholder_benefit=has_benefit,
