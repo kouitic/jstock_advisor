@@ -199,8 +199,9 @@ class HoldingDecisionResult(ImmutableSnapshot):
 class BaselineValueSnapshot(ImmutableSnapshot):
     """投資ストーリー維持スコアの標準5軸(配当方針/総合利回り/優待条件/利益CF前提/
     財務健全性)のうち、baselineとの比較に実際に使われるのは`has_shareholder_
-    benefit`(優待条件、Issue #470/#476)のみである(Issue #469 Phase A実測、
-    holding_decision_service.pyへのgrepで裏取り済み)。
+    benefit`(優待条件、Issue #470/#476)のみである(Issue #469 Phase A実測。
+    `holding_decision_service.py`内の`baseline\\.baseline_values\\.`参照が
+    唯一の読み出し箇所)。
 
     配当方針・総合利回りは絶対条件でbaseline比較が不要(investment_thesis_
     scoring.pyのコメントに明記)であり、本構造体を経由しない設計そのものが
@@ -212,28 +213,36 @@ class BaselineValueSnapshot(ImmutableSnapshot):
     同じではない)。
 
     したがって`total_yield_pct`・`equity_ratio_pct`は生成時に値を入れるが、
-    baseline比較のいずれからも読み出されない(書き込み専用。Issue #469
-    Phase A実測: grep 0件)。`dividend_policy_note`・`benefit_condition_note`・
-    `operating_income_trend_note`・`operating_cashflow_trend_note`の4項目は
-    現時点で生成時に値を設定されず、判定にも使用されない(Currently persisted
-    for compatibility / audit only. Not currently consumed by baseline
-    comparison logic. Reserved for a possible future unification of the
-    利益CF前提・財務健全性 comparison method — 削除方針は未承認)。
+    `baseline_values.total_yield_pct`/`baseline_values.equity_ratio_pct`
+    という限定した参照パターンでのgrepでは読み出し箇所が0件である(書き込み
+    専用。field名自体は他のentityにも同名で存在するため、field名単独の
+    grepでは再現しない。Issue #469 Phase A実測)。`dividend_policy_note`・
+    `benefit_condition_note`・`operating_income_trend_note`・
+    `operating_cashflow_trend_note`の4項目は現時点で生成時に値を設定されず、
+    判定にも使用されない(Currently persisted for compatibility / audit
+    only. Not currently consumed by baseline comparison logic. 削除方針は
+    未承認)。
     """
 
-    # 生成時に値を設定されない(Issue #469)。将来利益CF前提のbaseline比較を
-    # 本構造体経由へ統一する場合の予約領域。
+    # 生成時に値を設定されない(Issue #469)。配当方針は絶対条件でbaseline
+    # 比較自体を必要としない軸のため、本構造体経由での将来利用も想定されて
+    # いない。
     dividend_policy_note: str | None = None
     # 生成時に値を入れるが、baseline比較からは読み出されない(書き込み専用。
     # 総合利回りは絶対条件で比較不要のため。Issue #469)。
     total_yield_pct: float | None = None
     # baseline比較へ実際に使われる唯一のfield(優待条件。Issue #470/#476)。
     has_shareholder_benefit: bool | None = None
-    # 生成時に値を設定されない(Issue #469)。
+    # 生成時に値を設定されない(Issue #469)。優待条件のbaseline比較は
+    # 本構造体の`has_shareholder_benefit`で既に実装されており、本noteは
+    # 重複した経路として使われていない。
     benefit_condition_note: str | None = None
     # 生成時に値を設定されない(Issue #469)。利益CF前提のbaseline/トレンド
-    # 比較は`sell_rule_inputs.evaluations`側で実際に行われている。
+    # 比較は`sell_rule_inputs.evaluations`側で実際に行われている。将来この
+    # 比較を本構造体経由へ統一する場合の予約領域(削除方針は未承認)。
     operating_income_trend_note: str | None = None
+    # 上記operating_income_trend_noteと同じ理由・同じ予約領域(利益CF前提の
+    # トレンド判定は`sell_rule_inputs.evaluations`側)。
     operating_cashflow_trend_note: str | None = None
     # 生成時に値を入れるが、baseline比較からは読み出されない(書き込み専用。
     # 財務健全性のbaseline/トレンド比較は`financial_health_severe_
