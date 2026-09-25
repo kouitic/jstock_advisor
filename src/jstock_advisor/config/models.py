@@ -321,9 +321,11 @@ def _check_profit_protection_threshold_ranges(
     あるため上限を設けない。drawdown/givebackは比率(%)のため0〜100が
     自然な範囲とする。
     """
-    if min_current_gain_pct < 0:
+    # Issue #538: min_current_gain_pctは上限を持たないため、`< 0`だけではNaN(全ての比較が
+    # False)も+infもすり抜ける。有限性を明示的に確かめる(上限は引き続き設けない)。
+    if not (math.isfinite(min_current_gain_pct) and min_current_gain_pct >= 0):
         raise ValueError(
-            f"profit_protection.{label}.min_current_gain_pctは0以上である必要があります"
+            f"profit_protection.{label}.min_current_gain_pctは0以上の有限値である必要があります"
         )
     if not (0 <= min_drawdown_from_peak_pct <= 100):
         raise ValueError(
@@ -801,23 +803,40 @@ class HistoricalValuationRulesConfig(StrictModel):
     def _check_values(self) -> HistoricalValuationRulesConfig:
         if self.min_data_points_required < 2:
             raise ValueError("min_data_points_requiredは2以上である必要があります")
-        if self.per_weight < 0 or self.pbr_weight < 0:
-            raise ValueError("per_weight/pbr_weightは0以上である必要があります")
+        # Issue #538: NaNは`< 0`も合計の`<= 0`も常にFalseになり、+infは合計の検査を
+        # 満たしてしまうため、重みは有限性から確かめる(Phase Dの環境スコアと同じ書き方)。
+        if any((not math.isfinite(w)) or w < 0 for w in (self.per_weight, self.pbr_weight)):
+            raise ValueError("per_weight/pbr_weightは0以上の有限値である必要があります")
+        # 上の検査で両方が有限かつ0以上であることが保証されるため、この合計は有限である。
         if self.per_weight + self.pbr_weight <= 0:
             raise ValueError("per_weightとpbr_weightの合計は0より大きい必要があります")
         if self.outlier_detection_min_data_points < 2:
             raise ValueError("outlier_detection_min_data_pointsは2以上である必要があります")
-        if self.outlier_mad_threshold <= 0:
-            raise ValueError("outlier_mad_thresholdは正の値である必要があります")
-        if self.per_absolute_min >= self.per_absolute_max:
-            raise ValueError("per_absolute_minはper_absolute_max未満である必要があります")
-        if self.pbr_absolute_min >= self.pbr_absolute_max:
-            raise ValueError("pbr_absolute_minはpbr_absolute_max未満である必要があります")
+        if not (math.isfinite(self.outlier_mad_threshold) and self.outlier_mad_threshold > 0):
+            raise ValueError("outlier_mad_thresholdは正の有限値である必要があります")
+        # Issue #538: 大小関係の検査はNaNだと常にFalse側(=合格)へ倒れ、-inf/+infの組では
+        # 「レンジとして無意味な値」がそのまま通る。有限性と順序を同時に要求する。
+        if not (
+            math.isfinite(self.per_absolute_min)
+            and math.isfinite(self.per_absolute_max)
+            and self.per_absolute_min < self.per_absolute_max
+        ):
+            raise ValueError("per_absolute_minはper_absolute_max未満の有限値である必要があります")
+        if not (
+            math.isfinite(self.pbr_absolute_min)
+            and math.isfinite(self.pbr_absolute_max)
+            and self.pbr_absolute_min < self.pbr_absolute_max
+        ):
+            raise ValueError("pbr_absolute_minはpbr_absolute_max未満の有限値である必要があります")
         if self.full_confidence_data_points < 1:
             raise ValueError("full_confidence_data_pointsは1以上である必要があります")
-        if self.coverage_medium_threshold >= self.coverage_high_threshold:
+        if not (
+            math.isfinite(self.coverage_medium_threshold)
+            and math.isfinite(self.coverage_high_threshold)
+            and self.coverage_medium_threshold < self.coverage_high_threshold
+        ):
             raise ValueError(
-                "coverage_medium_thresholdはcoverage_high_threshold未満である必要があります"
+                "coverage_medium_thresholdはcoverage_high_threshold未満の有限値である必要があります"
             )
         return self
 
@@ -937,8 +956,10 @@ class TimingScoreRulesConfig(StrictModel):
             self.drawdown_weight,
             self.volume_weight,
         )
-        if any(w < 0 for w in weights):
-            raise ValueError("各成分の重みは0以上である必要があります")
+        # Issue #538: NaNは`< 0`も合計の`<= 0`も常にFalseになり、+infは合計の検査を
+        # 満たしてしまうため、有限性から確かめる(Phase Dの環境スコアと同じ書き方)。
+        if any((not math.isfinite(w)) or w < 0 for w in weights):
+            raise ValueError("各成分の重みは0以上の有限値である必要があります")
         if sum(weights) <= 0:
             raise ValueError("各成分の重みの合計は0より大きい必要があります")
         if self.trend_slope_full_scale_pct <= 0:
@@ -1083,8 +1104,9 @@ class EarningsSurpriseRulesConfig(StrictModel):
 
     @model_validator(mode="after")
     def _check_values(self) -> EarningsSurpriseRulesConfig:
-        if self.analyst_consensus_weight <= 0:
-            raise ValueError("analyst_consensus_weightは正の値である必要があります")
+        # Issue #538: NaNは`<= 0`が常にFalseになりすり抜ける。有限性と併せて弾く。
+        if not (math.isfinite(self.analyst_consensus_weight) and self.analyst_consensus_weight > 0):
+            raise ValueError("analyst_consensus_weightは正の有限値である必要があります")
 
         if not (
             self.analyst_consensus_strong_negative_pct
@@ -1192,8 +1214,10 @@ class EarningsTrendRulesConfig(StrictModel):
             self.dividend_direction_weight,
             self.acceleration_weight,
         )
-        if any(w < 0 for w in weights):
-            raise ValueError("各成分の重みは0以上である必要があります")
+        # Issue #538: NaNは`< 0`も合計の`<= 0`も常にFalseになり、+infは合計の検査を
+        # 満たしてしまうため、有限性から確かめる(Phase Dの環境スコアと同じ書き方)。
+        if any((not math.isfinite(w)) or w < 0 for w in weights):
+            raise ValueError("各成分の重みは0以上の有限値である必要があります")
         if sum(weights) <= 0:
             raise ValueError("各成分の重みの合計は0より大きい必要があります")
 
@@ -1207,8 +1231,10 @@ class EarningsTrendRulesConfig(StrictModel):
                 "trend区分境界はstrong_decline < decline < improve < strong_improveの"
                 "順(同値不可)である必要があります"
             )
-        if self.acceleration_full_scale_pct <= 0:
-            raise ValueError("acceleration_full_scale_pctは正の値である必要があります")
+        if not (
+            math.isfinite(self.acceleration_full_scale_pct) and self.acceleration_full_scale_pct > 0
+        ):
+            raise ValueError("acceleration_full_scale_pctは正の有限値である必要があります")
 
         dividend_scores = (
             self.dividend_actual_cut_score,
@@ -1622,6 +1648,23 @@ class UndervaluationCategoryCaps(StrictModel):
     market_price_action: float
 
     @model_validator(mode="after")
+    def _check_finite_non_negative(self) -> UndervaluationCategoryCaps:
+        # Issue #538: 合計20点の検査だけでは、NaN(比較が常にFalse)や、2項目へ入れた
+        # +infと-infがNaNへ相殺する組み合わせがすり抜ける。項目ごとに先に弾く。
+        for name, value in (
+            ("valuation_multiple", self.valuation_multiple),
+            ("yield", self.yield_),
+            ("fair_value", self.fair_value),
+            ("market_price_action", self.market_price_action),
+        ):
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(
+                    f"undervaluation_category_capsの{name}は0以上の有限値である必要があります"
+                    f"(現在{value}点)"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _check_sum(self) -> UndervaluationCategoryCaps:
         total = self.valuation_multiple + self.yield_ + self.fair_value + self.market_price_action
         if abs(total - 20.0) > 1e-9:
@@ -1645,9 +1688,16 @@ class NearBuyConfig(StrictModel):
 
     @model_validator(mode="after")
     def _check_order(self) -> NearBuyConfig:
-        if self.start_required_decline_pct > self.continue_required_decline_pct:
+        # Issue #538: NaNは`>`が常にFalseになり検査をすり抜け、+inf/-infの組はヒステリシス
+        # として意味を持たない。有限性と順序を同時に要求する。
+        if not (
+            math.isfinite(self.start_required_decline_pct)
+            and math.isfinite(self.continue_required_decline_pct)
+            and self.start_required_decline_pct <= self.continue_required_decline_pct
+        ):
             raise ValueError(
                 "near_buyはstart_required_decline_pct <= continue_required_decline_pctが必要です"
+                "(いずれも有限値である必要があります)"
             )
         for value in (self.daily_max_notifications, self.max_stale_business_days):
             if value < 1:
@@ -1935,6 +1985,29 @@ class CompanyQualityWeights(StrictModel):
     governance_listing_risk: float
 
     @model_validator(mode="after")
+    def _check_finite_non_negative(self) -> CompanyQualityWeights:
+        # Issue #538: 合計50点の検査だけでは、NaN(`abs(total - 50.0) > 0.01`が常にFalse)や、
+        # 2項目へ入れた+infと-infがNaNへ相殺する組み合わせがすり抜ける。項目ごとに先に弾く。
+        for name, value in (
+            ("financial_health_equity_ratio", self.financial_health_equity_ratio),
+            ("financial_health_debt_excess", self.financial_health_debt_excess),
+            ("cash_generation_cf_income_ratio", self.cash_generation_cf_income_ratio),
+            ("cash_generation_cf_streak", self.cash_generation_cf_streak),
+            ("profitability_roe", self.profitability_roe),
+            ("profitability_eps_stability", self.profitability_eps_stability),
+            ("stability_operating_income", self.stability_operating_income),
+            ("stability_deficit", self.stability_deficit),
+            ("governance_going_concern", self.governance_going_concern),
+            ("governance_listing_risk", self.governance_listing_risk),
+        ):
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(
+                    f"企業品質スコアの{name}の配点は0以上の有限値である必要があります"
+                    f"(現在{value}点)"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _check_sum(self) -> CompanyQualityWeights:
         total = (
             self.financial_health_equity_ratio
@@ -1975,6 +2048,25 @@ class InvestmentThesisWeights(StrictModel):
                 "投資ストーリー維持スコアのdividend_policyの配点は0より大きい有限値である必要があります"
                 f"(現在{self.dividend_policy}点)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_other_weights_finite_non_negative(self) -> InvestmentThesisWeights:
+        # Issue #538: #259はdividend_policyだけを守った。残りの5項目は合計50点の検査しか
+        # 無く、NaN(比較が常にFalse)や+infと-infの相殺がすり抜ける。0点は既存の検査でも
+        # 許されているため引き続き許す(絶対条件のdividend_policyのみ#259で0を禁じている)。
+        for name, value in (
+            ("total_yield", self.total_yield),
+            ("benefit_condition", self.benefit_condition),
+            ("profit_cf_premise", self.profit_cf_premise),
+            ("financial_premise", self.financial_premise),
+            ("custom_conditions", self.custom_conditions),
+        ):
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(
+                    f"投資ストーリー維持スコアの{name}の配点は0以上の有限値である必要があります"
+                    f"(現在{value}点)"
+                )
         return self
 
     @model_validator(mode="after")
@@ -2178,6 +2270,24 @@ class RiskCategoryCaps(StrictModel):
     structural_change: float
 
     @model_validator(mode="after")
+    def _check_finite_non_negative(self) -> RiskCategoryCaps:
+        # Issue #538: 合計100点の検査だけでは、NaN(比較が常にFalse)や、2項目へ入れた
+        # +infと-infがNaNへ相殺する組み合わせがすり抜ける。項目ごとに先に弾く。
+        for name, value in (
+            ("business_cashflow_deterioration", self.business_cashflow_deterioration),
+            ("shareholder_return_deterioration", self.shareholder_return_deterioration),
+            ("financial_crisis", self.financial_crisis),
+            ("governance_and_listing_risk", self.governance_and_listing_risk),
+            ("structural_change", self.structural_change),
+        ):
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(
+                    f"リスク控除カテゴリ上限の{name}は0以上の有限値である必要があります"
+                    f"(現在{value}点)"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _check_sum(self) -> RiskCategoryCaps:
         total = (
             self.business_cashflow_deterioration
@@ -2211,8 +2321,10 @@ class RiskFactorTable(StrictModel):
             ("confidence_primary_source_confirmed", self.confidence_primary_source_confirmed),
             ("confidence_secondary_source_only", self.confidence_secondary_source_only),
         ):
-            if value < 0:
-                raise ValueError(f"RiskFactorTable.{name}は負値にできません")
+            # Issue #538: NaNは`< 0`が常にFalseになり検査をすり抜け、+infは係数として
+            # risk_pointsを無限大にする。有限性と併せて弾く(0は従来通り許す)。
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(f"RiskFactorTable.{name}は0以上の有限値である必要があります")
         return self
 
 
@@ -2232,6 +2344,18 @@ class RiskSignal(StrictModel):
         "structural_change",
     ]
     hard_gate_excluded: bool = False
+
+    @model_validator(mode="after")
+    def _check_base_points_finite(self) -> RiskSignal:
+        # Issue #538: base_pointsには従来何の検査も無かった。控除点(base_points × 各係数)
+        # だけでなくcoverageの分母(available_weight)にも入る重みであり、NaN/infが入ると
+        # 控除点とcoverageの双方が壊れる(domain/signals/risk_deduction_scoring.py)。
+        # 符号の契約は既存コードにも既存検査にも無いため、有限性のみを要求する。
+        if not math.isfinite(self.base_points):
+            raise ValueError(
+                f"RiskSignal.base_pointsは有限値である必要があります(現在{self.base_points})"
+            )
+        return self
 
 
 class HoldingDecisionRiskRulesConfig(StrictModel):
@@ -2266,10 +2390,20 @@ class RatioClampRange(StrictModel):
 
     @model_validator(mode="after")
     def _check_order(self) -> RatioClampRange:
-        if self.ratio_clamp_min >= self.ratio_clamp_max:
-            raise ValueError("ratio_clamp_minはratio_clamp_max未満である必要があります")
-        if self.roe_clamp_min >= self.roe_clamp_max:
-            raise ValueError("roe_clamp_minはroe_clamp_max未満である必要があります")
+        # Issue #538: NaNは`>=`が常にFalseになり検査をすり抜け、±infのclamp境界は
+        # clampとして機能しない。有限性と順序を同時に要求する。
+        if not (
+            math.isfinite(self.ratio_clamp_min)
+            and math.isfinite(self.ratio_clamp_max)
+            and self.ratio_clamp_min < self.ratio_clamp_max
+        ):
+            raise ValueError("ratio_clamp_minはratio_clamp_max未満の有限値である必要があります")
+        if not (
+            math.isfinite(self.roe_clamp_min)
+            and math.isfinite(self.roe_clamp_max)
+            and self.roe_clamp_min < self.roe_clamp_max
+        ):
+            raise ValueError("roe_clamp_minはroe_clamp_max未満の有限値である必要があります")
         return self
 
 
@@ -2288,9 +2422,10 @@ class HoldingDecisionRatioRulesConfig(StrictModel):
             ("min_mean_for_cv_yen", self.min_mean_for_cv_yen),
             ("outlier_clip_zscore", self.outlier_clip_zscore),
         ):
-            if value <= 0:
+            # Issue #538: NaNは`<= 0`が常にFalseになり検査をすり抜ける。有限性と併せて弾く。
+            if not (math.isfinite(value) and value > 0):
                 raise ValueError(
-                    f"HoldingDecisionRatioRulesConfig.{name}は正値である必要があります"
+                    f"HoldingDecisionRatioRulesConfig.{name}は正の有限値である必要があります"
                 )
         if self.min_periods_for_stability_score < 2:
             raise ValueError("min_periods_for_stability_scoreは2以上である必要があります")
