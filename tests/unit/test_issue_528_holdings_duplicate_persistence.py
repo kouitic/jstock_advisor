@@ -268,13 +268,26 @@ def test_n1_legacy_sell_duplicate_delivery_saves_recommendation_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     """N1: LEGACY_SELLの同一(batch_id, holding_id)payloadを2回処理しても、
-    Recommendationは1件しか保存されない。"""
+    Recommendationは1件しか保存されない。
+
+    サブちゃんレビュー(PR #567 iteration2 F2): `insert_if_absent()`を`save()`へ
+    戻す変異は、2回目の配信を"failed"にする(F2の別テストで固定済み)。しかし
+    その変異が実際に混入したかどうかは、**変異していない現在のコードで
+    2回目がfailedに"ならない"こと**を別途固定しない限り検知できない
+    (F2の4テストはrepositoryをmonkeypatchで置き換えて検知の可否を示すだけで、
+    handler呼び出し側が実際に`insert_if_absent()`を使っているかどうか自体は
+    固定していなかったため)。ここで`assert not second.get("failed")`を追加する
+    ことで、将来handler側が`insert_if_absent()`から`save()`へ戻す変異が混入した
+    場合に本テストが直接赤くなるようにする。
+    """
     _patch_common(monkeypatch, tmp_path)
     _patch_legacy_sell(monkeypatch, {_STOCK_CODE: _minimal_recommendation()})
 
-    for _ in range(2):
-        handler_module.handler(_event("batch-528-1"), _FakeContext())
+    first = handler_module.handler(_event("batch-528-1"), _FakeContext())
+    second = handler_module.handler(_event("batch-528-1"), _FakeContext())
 
+    assert not first.get("failed")
+    assert not second.get("failed")
     repo = RecommendationRepository(store_dir=tmp_path)
     saved = [r for r in repo.list_all() if r.stock_code == _STOCK_CODE]
     assert len(saved) == 1
@@ -330,13 +343,18 @@ def _patch_profit_taking(
 def test_n2_profit_taking_duplicate_delivery_saves_recommendation_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """N2: PROFIT_TAKINGの同一payloadを2回処理してもRecommendationは1件のみ。"""
+    """N2: PROFIT_TAKINGの同一payloadを2回処理してもRecommendationは1件のみ。
+
+    サブちゃんレビュー(PR #567 iteration2 F2): 2回目が"failed"にならないことを
+    明示的に固定する(N1と同じ理由)。"""
     _patch_common(monkeypatch, tmp_path)
     _patch_profit_taking(monkeypatch, {_STOCK_CODE: _minimal_recommendation()})
 
-    for _ in range(2):
-        handler_module.handler(_event("batch-528-2"), _FakeContext())
+    first = handler_module.handler(_event("batch-528-2"), _FakeContext())
+    second = handler_module.handler(_event("batch-528-2"), _FakeContext())
 
+    assert not first.get("failed")
+    assert not second.get("failed")
     repo = RecommendationRepository(store_dir=tmp_path)
     saved = [r for r in repo.list_all() if r.stock_code == _STOCK_CODE]
     assert len(saved) == 1
@@ -381,15 +399,20 @@ def test_n3_holding_decision_notified_duplicate_delivery_saves_all_three_once(
 ) -> None:
     """N3: HOLDING_DECISION(通知あり)の同一payloadを2回処理しても、
     Recommendation・HoldingDecisionResultとも1件のみ(DecisionSnapshotの1件は
-    N1b/N2で契約を確認済みのためここでは重複しない)。"""
+    N1b/N2で契約を確認済みのためここでは重複しない)。
+
+    サブちゃんレビュー(PR #567 iteration2 F2): 2回目が"failed"にならないことを
+    明示的に固定する(N1と同じ理由)。"""
     _patch_common(monkeypatch, tmp_path)
     _patch_holding_decision(
         monkeypatch, _HOLDING_DECISION_NOTIFIED_PLAN, {_STOCK_CODE: _holding_decision_result()}
     )
 
-    for _ in range(2):
-        handler_module.handler(_event("batch-528-3"), _FakeContext())
+    first = handler_module.handler(_event("batch-528-3"), _FakeContext())
+    second = handler_module.handler(_event("batch-528-3"), _FakeContext())
 
+    assert not first.get("failed")
+    assert not second.get("failed")
     reco_repo = RecommendationRepository(store_dir=tmp_path)
     hd_repo = HoldingDecisionResultRepository(store_dir=tmp_path)
     assert len([r for r in reco_repo.list_all() if r.stock_code == _STOCK_CODE]) == 1
@@ -425,14 +448,19 @@ def test_n4_holding_decision_not_notified_duplicate_delivery_saves_result_once(
     """N4: 通知条件を満たさない(SHADOW既定。should_notify=Falseまたは
     allow_holding_decision_notification=False)場合でも、HoldingDecisionResult
     自体は`run_holding_decision_evaluation=True`である限り保存される
-    (11節)。同一payloadを2回処理してもHoldingDecisionResultは1件のみ。"""
+    (11節)。同一payloadを2回処理してもHoldingDecisionResultは1件のみ。
+
+    サブちゃんレビュー(PR #567 iteration2 F2): 2回目が"failed"にならないことを
+    明示的に固定する(N1と同じ理由)。"""
     _patch_common(monkeypatch, tmp_path)
     result = _holding_decision_result()
     _patch_holding_decision(monkeypatch, _HOLDING_DECISION_SHADOW_PLAN, {_STOCK_CODE: result})
 
-    for _ in range(2):
-        handler_module.handler(_event("batch-528-4"), _FakeContext())
+    first = handler_module.handler(_event("batch-528-4"), _FakeContext())
+    second = handler_module.handler(_event("batch-528-4"), _FakeContext())
 
+    assert not first.get("failed")
+    assert not second.get("failed")
     hd_repo = HoldingDecisionResultRepository(store_dir=tmp_path)
     saved = [r for r in hd_repo.list_all() if r.stock_code == _STOCK_CODE]
     assert len(saved) == 1
@@ -548,6 +576,29 @@ def test_batch_id_none_keeps_analyze_assigned_recommendation_id(
     _patch_common(monkeypatch, tmp_path)
     fixed_recommendation = _minimal_recommendation()
     _patch_legacy_sell(monkeypatch, {_STOCK_CODE: fixed_recommendation})
+
+    handler_module.handler(_event(None), _FakeContext())
+
+    repo = RecommendationRepository(store_dir=tmp_path)
+    assert repo.get(fixed_recommendation.recommendation_id) is not None
+
+
+def test_profit_taking_batch_id_none_keeps_analyze_assigned_recommendation_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """F3(サブちゃんレビュー PR #567 iteration2): PROFIT_TAKING経路でも
+    batch_id=None(白箱テスト等の呼び出し元)は従来どおりanalyze()が割り当てた
+    recommendation_idのまま変更しない(挙動不変)。
+
+    従来の`test_batch_id_none_keeps_analyze_assigned_recommendation_id`は
+    LEGACY_SELL経路のみを固定しており、PROFIT_TAKING経路の`pt_recommendation`
+    ローカル変数(`pt_outcome.recommendation`と`batch_id is not None`時の
+    上書き結果のいずれを指すか)がbatch_id=Noneのときに正しく前者のままである
+    ことは別途固定されていなかった。
+    """
+    _patch_common(monkeypatch, tmp_path)
+    fixed_recommendation = _minimal_recommendation()
+    _patch_profit_taking(monkeypatch, {_STOCK_CODE: fixed_recommendation})
 
     handler_module.handler(_event(None), _FakeContext())
 
