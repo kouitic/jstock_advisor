@@ -87,6 +87,13 @@ def test_watch_end_is_recorded_as_non_actionable_without_sending(
     「監視をやめた」ことの報告であり、ユーザーに売買アクションを促す通知では
     ないため、全ゲート通過後ももはやLINE送信しない(send_watch_end_notification
     は呼ばれない)。送らなかったこと自体はNON_ACTIONABLEとしてAuditへ記録する。
+
+    Issue #568: `send_empty_summary`の既定がtrueへ変わったことで、
+    バッチ完了サマリー自体は(0件でも「該当なし」を明示するため)送信される
+    ようになった。本テストが固定したいのは「監視終了専用の個別通知が
+    送られないこと」であり、バッチ完了サマリーの送信有無ではないため、
+    送信されたメッセージが完了サマリー1件のみであり、監視終了固有の
+    call-to-actionを含まないことを確認する形へ更新した。
     """
     audit_repo = AuditLogRepository(store_dir=tmp_path)
     _patch_audit(monkeypatch, tmp_path)
@@ -121,7 +128,10 @@ def test_watch_end_is_recorded_as_non_actionable_without_sending(
 
     handler_module._finalize_batch(progress, "batch-1", _CONFIG, _NOW, repo, notification_service)
 
-    assert client.sent == []
+    # Issue #568: バッチ完了サマリー(0件でも「該当なし」を明示)は送信される
+    # ようになったが、監視終了専用の個別通知は引き続き送信されない。
+    assert len(client.sent) == 1
+    assert "監視終了" not in client.sent[0]
     audit_entries = audit_repo.list_by_stock("9432")
     assert any(
         e.output_values.get("block_category") == "NON_ACTIONABLE" for e in audit_entries

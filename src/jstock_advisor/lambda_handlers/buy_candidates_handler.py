@@ -40,9 +40,11 @@ evaluation監査を追加で記録する)。各ワーカーはBuyAction判定が
 ならず、本来のブロック理由(SECTOR_CONCENTRATION等)が監査へ記録される。
 OUTSIDE_TOP_5は全ゲートを通過したうえで6位以下だった場合のみ付与される。
 
-購入候補が1件も無い場合、config.notification.send_empty_summaryがfalseなら
-バッチ完了サマリー自体を送信しない(要求仕様16節: 無理に候補を作らず、
-何も無い日は通知しない)。
+購入候補が1件も無い場合も、バッチ完了サマリーで「今回の購入候補: 該当なし」を
+明示送信する(Issue #568。docs/functional_spec.md 10.2節、保有銘柄側
+[holdings_watchlist_handler.py]と対称)。config.notification.
+send_empty_summaryがfalseの場合のみ例外的に送信を抑止できるが、既定はtrueで
+あり、通常運用でfalseにする想定はない。
 
 個別のデータ取得エラーは既定でLINEへ配信せず(config.notification.
 buy_candidates.notify_data_errorsで制御)、CloudWatch警告ログとバッチサマリーの
