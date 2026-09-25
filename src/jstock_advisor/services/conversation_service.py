@@ -263,9 +263,7 @@ class ConversationService:
         if not owners:
             return ConversationReply(_NO_OWNERS_REGISTERED)
         quick_reply = [
-            QuickReplyButton(
-                label=name, postback_data=f"action=show_holdings&owner={quote(name)}"
-            )
+            QuickReplyButton(label=name, postback_data=f"action=show_holdings&owner={quote(name)}")
             for name in owners
         ]
         return ConversationReply(_SELECT_OWNER_PROMPT, quick_reply=quick_reply)
@@ -311,9 +309,7 @@ class ConversationService:
             return ConversationReply(_NO_ANALYSIS_DATA)
         return ConversationReply(self._stock_analysis_view.build_buy_analysis_text(stock_code))
 
-    def _show_analysis_sell(
-        self, stock_code: str | None, owner: str | None
-    ) -> ConversationReply:
+    def _show_analysis_sell(self, stock_code: str | None, owner: str | None) -> ConversationReply:
         if stock_code is None:
             return ConversationReply(_NO_ANALYSIS_DATA)
         if owner is not None:
@@ -326,9 +322,7 @@ class ConversationService:
             return ConversationReply(_NO_ANALYSIS_DATA)
         if len(holdings) == 1:
             return ConversationReply(
-                self._stock_analysis_view.build_holding_analysis_text(
-                    holdings[0].owner, stock_code
-                )
+                self._stock_analysis_view.build_holding_analysis_text(holdings[0].owner, stock_code)
             )
         # 複数owner保有(修正4): owner名を一切ハードコードせず、既存Holdingから
         # 動的にQuick Replyを組み立てる(HoldingRepository.list_distinct_owners()
@@ -348,10 +342,14 @@ class ConversationService:
     def _start(
         self, user_id: str, action: ConversationAction, now: dt.datetime
     ) -> ConversationReply:
-        if action in (
-            ConversationAction.BUY,
-            ConversationAction.SELL,
-        ) and self._trading_pause.is_buy_sell_paused():
+        if (
+            action
+            in (
+                ConversationAction.BUY,
+                ConversationAction.SELL,
+            )
+            and self._trading_pause.is_buy_sell_paused()
+        ):
             return ConversationReply(_TRADING_PAUSED)
         conversation_state_store.start_or_replace(user_id, action, now)
         return ConversationReply(_START_PROMPTS[action])
@@ -694,10 +692,8 @@ class ConversationService:
         self, user_id: str, state: ConversationState, now: dt.datetime
     ) -> ConversationReply:
         assert state.stock_code is not None
-        watchlist_item = self._watchlist.build_add_item_plan(stock_code=state.stock_code)
-        success = conversation_commit.commit_watch(
-            user_id, state.operation_id, watchlist_item, now
-        )
+        plan = self._watchlist.build_add_item_plan(stock_code=state.stock_code)
+        success = conversation_commit.commit_watch(user_id, state.operation_id, plan, now)
         if not success:
             return ConversationReply(_WRITE_CONFLICT)
         display_name = self._display_name_resolver.resolve(state.stock_code)
