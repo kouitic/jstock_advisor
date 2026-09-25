@@ -119,10 +119,10 @@ def test_conversation_re_registration_preserves_all_system_fields(
     """T1: conversationはstock_codeしか渡さない。system stateを一切壊さない。"""
     plan = service.build_add_item_plan(stock_code="9999")
 
-    _assert_system_state_preserved(seeded, plan)
-    assert plan.registration_source is WatchlistRegistrationSource.AUTO_SCREENING
-    assert plan.consecutive_not_qualified_count == 2
-    assert plan.removal_candidate_since == seeded.removal_candidate_since
+    _assert_system_state_preserved(seeded, plan.model)
+    assert plan.model.registration_source is WatchlistRegistrationSource.AUTO_SCREENING
+    assert plan.model.consecutive_not_qualified_count == 2
+    assert plan.model.removal_candidate_since == seeded.removal_candidate_since
 
 
 def test_conversation_re_registration_preserves_user_fields(
@@ -131,14 +131,14 @@ def test_conversation_re_registration_preserves_user_fields(
     """T2: 利用者が設定した項目も既定値へ戻さない。"""
     plan = service.build_add_item_plan(stock_code="9999")
 
-    assert plan.memo == "決算後に再確認"
-    assert plan.priority is Priority.HIGH
-    assert plan.notify_enabled is False
-    assert plan.benefit_interest is True
-    assert plan.desired_buy_price == Decimal("1200")
-    assert plan.desired_total_yield_pct == 4.5
-    assert plan.stock_name == "テスト株式会社"
-    assert plan.reason == "高配当"
+    assert plan.model.memo == "決算後に再確認"
+    assert plan.model.priority is Priority.HIGH
+    assert plan.model.notify_enabled is False
+    assert plan.model.benefit_interest is True
+    assert plan.model.desired_buy_price == Decimal("1200")
+    assert plan.model.desired_total_yield_pct == 4.5
+    assert plan.model.stock_name == "テスト株式会社"
+    assert plan.model.reason == "高配当"
 
 
 def test_conversation_no_op_does_not_advance_updated_at(
@@ -151,13 +151,14 @@ def test_conversation_no_op_does_not_advance_updated_at(
     """
     plan = service.build_add_item_plan(stock_code="9999")
 
-    assert plan.updated_at == seeded.updated_at
-    assert plan == seeded
+    assert plan.model.updated_at == seeded.updated_at
+    assert plan.model == seeded
+    # Issue #530: no-opでも計画は既存の生JSONを楽観ロック条件として保持する
+    # (呼び出し側がこの計画をcommitしても、内容が同一であるため成功する)。
+    assert plan.expected_data is not None
 
 
-def test_add_item_no_op_does_not_write(
-    service: WatchlistService, seeded: WatchlistItem
-) -> None:
+def test_add_item_no_op_does_not_write(service: WatchlistService, seeded: WatchlistItem) -> None:
     """no-op の add_item は repository へ書き込まない。"""
     result = service.add_item(stock_code="9999", patch={})
 
@@ -260,9 +261,7 @@ def test_update_item_cannot_change_created_at(
         service.update_item("9999", created_at=_NOW)
 
 
-def test_user_patch_rejects_unknown_field(
-    service: WatchlistService, seeded: WatchlistItem
-) -> None:
+def test_user_patch_rejects_unknown_field(service: WatchlistService, seeded: WatchlistItem) -> None:
     with pytest.raises(WatchlistFieldOwnershipError, match="unknown_field"):
         service.add_item(stock_code="9999", patch={"unknown_field": 1})
 
@@ -296,5 +295,7 @@ def test_new_item_is_created_normally(service: WatchlistService) -> None:
 def test_new_item_plan_is_created_normally(service: WatchlistService) -> None:
     plan = service.build_add_item_plan(stock_code="7203")
 
-    assert plan.stock_code == "7203"
-    assert plan.registration_source is WatchlistRegistrationSource.MANUAL
+    assert plan.model.stock_code == "7203"
+    assert plan.model.registration_source is WatchlistRegistrationSource.MANUAL
+    # Issue #530: 新規アイテムはexpected_data=None(attribute_not_exists条件)。
+    assert plan.expected_data is None

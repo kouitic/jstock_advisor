@@ -248,15 +248,20 @@ def test_retry_repairs_holding_when_lot_persisted_but_holding_write_failed(
     )
     path = _write(tmp_path, _ADDITIONAL_CSV)
 
-    original_upsert = portfolio_service._holdings.upsert  # noqa: SLF001
+    # Issue #530: Holdingの書き込みはCAS(既存Holdingありのためreplace_if_raw_
+    # matches)経由になった。以前upsert()を直接patchしていた箇所を、実際の
+    # 書き込み経路へ合わせる。
+    original_replace = portfolio_service._holdings.replace_if_raw_matches  # noqa: SLF001
 
     def _boom(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("simulated holding write failure")
 
-    monkeypatch.setattr(portfolio_service._holdings, "upsert", _boom)  # noqa: SLF001
+    monkeypatch.setattr(portfolio_service._holdings, "replace_if_raw_matches", _boom)  # noqa: SLF001
     with pytest.raises(RuntimeError):
         service.import_file(path, on_duplicate="additional_purchase")
-    monkeypatch.setattr(portfolio_service._holdings, "upsert", original_upsert)  # noqa: SLF001
+    monkeypatch.setattr(  # noqa: SLF001
+        portfolio_service._holdings, "replace_if_raw_matches", original_replace
+    )
 
     # 部分状態: ロットは保存済み・Holdingは古い。
     assert len(portfolio_service.list_lots(_OWNER, "2914")) == 2
@@ -292,9 +297,10 @@ def test_retry_repairs_holding_for_a_brand_new_holding(
     )
     path = _write(tmp_path)  # 100株の新規取込
 
+    # Issue #530: Holding未存在のため、書き込み経路はinsert_if_absent。
     monkeypatch.setattr(
         portfolio_service._holdings,  # noqa: SLF001
-        "upsert",
+        "insert_if_absent",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("holding write failure")),
     )
     with pytest.raises(RuntimeError):
@@ -332,7 +338,7 @@ def test_applied_lot_with_missing_ledger_repairs_projection(
 
     monkeypatch.setattr(
         portfolio_service._holdings,  # noqa: SLF001
-        "upsert",
+        "replace_if_raw_matches",  # Issue #530: 既存Holdingへの書き込み経路
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("holding write failure")),
     )
     with pytest.raises(RuntimeError):
@@ -369,7 +375,7 @@ def test_stale_claim_with_applied_lot_repairs_projection(
 
     monkeypatch.setattr(
         portfolio_service._holdings,  # noqa: SLF001
-        "upsert",
+        "replace_if_raw_matches",  # Issue #530: 既存Holdingへの書き込み経路
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("holding write failure")),
     )
     monkeypatch.setattr(
@@ -458,12 +464,8 @@ def test_concurrent_same_row_commit_applies_once(
 
     2つのサービスは同じ永続層を共有し、片方が先にclaimを獲得する。
     """
-    first = HoldingsCsvImportService(
-        portfolio_service=portfolio_service, ledger=csv_import_ledger
-    )
-    second = HoldingsCsvImportService(
-        portfolio_service=portfolio_service, ledger=csv_import_ledger
-    )
+    first = HoldingsCsvImportService(portfolio_service=portfolio_service, ledger=csv_import_ledger)
+    second = HoldingsCsvImportService(portfolio_service=portfolio_service, ledger=csv_import_ledger)
     path = _write(tmp_path)
 
     first.import_file(path)
@@ -491,9 +493,7 @@ def test_claim_without_applied_data_is_recovered_not_skipped(
 
     # 取り残されたclaim(適用前に落ちて解放にも失敗した状態)を作る。
     assert (
-        csv_import_ledger.claim(
-            import_id, 2, owner=_OWNER, stock_code="2914", shares=100, now=_NOW
-        )
+        csv_import_ledger.claim(import_id, 2, owner=_OWNER, stock_code="2914", shares=100, now=_NOW)
         is True
     )
 

@@ -7,6 +7,7 @@ from typing import Any
 
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import WatchlistRepository
+from jstock_advisor.services.write_plan import ConcurrentUpdateError, ConditionalPut
 
 # --- Issue #58 Phase B1: field ownership -------------------------------------
 # ユーザーが登録・編集してよいfield(user-owned)。会話型UI・CSV取込・CLIの
@@ -102,6 +103,10 @@ class WatchlistService:
         patch = dict(patch or {})
         _reject_non_user_fields(patch)
         existing = self._repository.get(stock_code)
+        # Issue #530: 読み取り時点の生JSON(新規ならNone)を楽観ロック条件として
+        # 保持する。読んでから書くまでの間に別実行が変更していた場合、その変更を
+        # 無条件upsertで上書きしない。
+        existing_raw = self._repository.get_raw_data(stock_code)
         if existing is None:
             item = WatchlistItem(
                 stock_code=stock_code,
@@ -109,7 +114,8 @@ class WatchlistService:
                 updated_at=now,
                 **patch,
             )
-            self._repository.upsert(item)
+            if not self._repository.insert_if_absent(item):
+                raise ConcurrentUpdateError(stock_code)
             return item
 
         effective = {k: v for k, v in patch.items() if getattr(existing, k) != v}
@@ -117,18 +123,29 @@ class WatchlistService:
             # no-op(実質的な変更なし)。writeもupdated_atの前進も行わない。
             return existing
         item = existing.model_copy(update={**effective, "updated_at": now})
-        self._repository.upsert(item)
+        # サブちゃんレビュー(#530 F3): existing is not Noneを確認済みでも、
+        # get()とget_raw_data()は別呼び出しのため、その間に並行削除されると
+        # existing_raw is Noneに実際に到達しうる(assertではなく明示的な
+        # ValueErrorとする。AssertionErrorはCLIのexcept ValueErrorで
+        # 捕捉されないため)。
+        if existing_raw is None:
+            raise ValueError(f"銘柄コード{stock_code}のデータ取得に失敗しました")
+        if not self._repository.replace_if_raw_matches(stock_code, existing_raw, item):
+            raise ConcurrentUpdateError(stock_code)
         return item
 
     def build_add_item_plan(
         self,
         stock_code: str,
         patch: dict[str, Any] | None = None,
-    ) -> WatchlistItem:
-        """登録(新規)または再登録(既存)後のWatchlistItemを、永続化せずに返す。
+    ) -> ConditionalPut:
+        """登録(新規)または再登録(既存)後の書き込み計画を、永続化せずに返す。
 
         LINEボタン起点会話型UI(実装プランv2 3節)がTransactWriteItemsで
-        Put(無条件)するための「書き込み予定の完成形」を組み立てる。
+        Put(Issue #530以降は楽観ロック付き)するための「書き込み予定の完成形」を
+        組み立てる。戻り値は`ConditionalPut`(`model`がWatchlistItem本体、
+        `expected_data`が本メソッドの読み取り時点の生JSON。新規なら`None`)であり、
+        呼び出し側は`conversation_commit.commit_watch()`へそのまま渡すこと。
 
         **Issue #58: 既存itemがある場合は全置換せずmergeする。**
         従来は`created_at`だけを引き継ぎ、他はすべて引数(未指定ならdefault)から
@@ -144,19 +161,27 @@ class WatchlistService:
         patch = dict(patch or {})
         _reject_non_user_fields(patch)
         existing = self._repository.get(stock_code)
+        # Issue #530: 読み取り時点の生JSON(新規ならNone)を計画へ含める。
+        # これが無いと、計画構築(propose)から実際のcommit(confirm。利用者の
+        # LINE操作を挟むため秒~分単位の間隔が空きうる)までの間に別実行が
+        # このitemを変更していても検出できない。
+        existing_raw = self._repository.get_raw_data(stock_code)
         if existing is None:
-            return WatchlistItem(
+            item = WatchlistItem(
                 stock_code=stock_code,
                 created_at=now,
                 updated_at=now,
                 **patch,
             )
+            return ConditionalPut(model=item, id_field="stock_code", expected_data=None)
         effective = {k: v for k, v in patch.items() if getattr(existing, k) != v}
         if not effective:
             # no-op(実質的な変更なし)。呼び出し側がこれをPutしても内容は変わらず、
             # `updated_at`も進まない(単なる再登録を更新として記録しない)。
-            return existing
-        return existing.model_copy(update={**effective, "updated_at": now})
+            item = existing
+        else:
+            item = existing.model_copy(update={**effective, "updated_at": now})
+        return ConditionalPut(model=item, id_field="stock_code", expected_data=existing_raw)
 
     def update_item(self, stock_code: str, **fields: Any) -> WatchlistItem:
         """既存itemのuser-owned fieldを明示的に更新する(CLI editの正本)。
@@ -169,13 +194,19 @@ class WatchlistService:
         existing = self._repository.get(stock_code)
         if existing is None:
             raise ValueError(f"銘柄コード{stock_code}はウォッチリストに登録されていません")
+        # Issue #530: existingを読んだ時点の生JSONを楽観ロック条件として保持する。
+        existing_raw = self._repository.get_raw_data(stock_code)
+        # サブちゃんレビュー(#530 F3): get()とget_raw_data()は別呼び出しのため、
+        # その間に並行削除されるとexisting_raw is Noneに実際に到達しうる
+        # (assertではなく明示的なValueErrorとする)。
+        if existing_raw is None:
+            raise ValueError(f"銘柄コード{stock_code}のデータ取得に失敗しました")
         effective = {k: v for k, v in fields.items() if getattr(existing, k) != v}
         if not effective:
             return existing
-        updated = existing.model_copy(
-            update={**effective, "updated_at": dt.datetime.now(dt.UTC)}
-        )
-        self._repository.upsert(updated)
+        updated = existing.model_copy(update={**effective, "updated_at": dt.datetime.now(dt.UTC)})
+        if not self._repository.replace_if_raw_matches(stock_code, existing_raw, updated):
+            raise ConcurrentUpdateError(stock_code)
         return updated
 
     def delete_item(self, stock_code: str) -> bool:

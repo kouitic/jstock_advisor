@@ -48,6 +48,20 @@ class PurchaseLotRepository:
     def upsert(self, lot: PurchaseLot) -> None:
         self._store.upsert(lot)
 
+    def insert_if_absent(self, lot: PurchaseLot) -> bool:
+        """Issue #530: 既存があれば触らずFalse、無ければ追加してTrue(CAS)。"""
+        return self._store.insert_if_absent(lot)
+
+    def replace_if_raw_matches(self, lot_id: str, expected_raw_data: str, lot: PurchaseLot) -> bool:
+        """Issue #530: 保存中の生JSONがexpected_raw_dataと完全一致する場合のみ
+        置き換える(楽観ロック)。"""
+        return self._store.replace_if_raw_matches(lot_id, expected_raw_data, lot)
+
+    def delete_if_raw_matches(self, lot_id: str, expected_raw_data: str) -> bool:
+        """Issue #530: 保存中の生JSONがexpected_raw_dataと完全一致する場合のみ
+        削除する(楽観ロック)。"""
+        return self._store.delete_if_raw_matches(lot_id, expected_raw_data)
+
     def delete(self, lot_id: str) -> bool:
         return self._store.delete(lot_id)
 
@@ -101,6 +115,22 @@ class HoldingRepository:
 
     def upsert(self, holding: Holding) -> None:
         self._store.upsert(holding)
+
+    def insert_if_absent(self, holding: Holding) -> bool:
+        """Issue #530: 既存があれば触らずFalse、無ければ追加してTrue(CAS)。"""
+        return self._store.insert_if_absent(holding)
+
+    def replace_if_raw_matches(
+        self, holding_id: str, expected_raw_data: str, holding: Holding
+    ) -> bool:
+        """Issue #530: 保存中の生JSONがexpected_raw_dataと完全一致する場合のみ
+        置き換える(楽観ロック)。"""
+        return self._store.replace_if_raw_matches(holding_id, expected_raw_data, holding)
+
+    def delete_if_raw_matches(self, holding_id: str, expected_raw_data: str) -> bool:
+        """Issue #530: 保存中の生JSONがexpected_raw_dataと完全一致する場合のみ
+        削除する(楽観ロック)。"""
+        return self._store.delete_if_raw_matches(holding_id, expected_raw_data)
 
     def apply_batch(self, delete_holding_ids: list[str], puts: list[Holding]) -> None:
         """保有の削除と追加/更新を1回の書き込みで適用する(Issue #61 Phase B2)。"""
