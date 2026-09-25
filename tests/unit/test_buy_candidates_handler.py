@@ -1394,6 +1394,26 @@ def test_finalize_batch_reports_zero_buy_candidates_sent_when_none_ranked(
     assert fake_service.digest_calls == [[]]
 
 
+def test_finalize_batch_sends_empty_summary_with_default_config(monkeypatch, tmp_path) -> None:
+    """Issue #568: config/notification_rules.yamlの実値(既定config、`_CONFIG`
+    経由)で購入候補0件の日に、完了サマリー(「今回の購入候補: 該当なし」)を
+    送信すること(send_empty_summary=True)を固定する。
+
+    docs/functional_spec.md 10.2節は【買い候補分析完了】が0件でも「該当なし」を
+    明示送信する設計だと既に文書化しており、保有銘柄側はこれに合わせて実装済み
+    だったが、買い候補側だけがconfig/notification_rules.yamlの
+    send_empty_summary=false経由で送信自体を抑止していた(Issue #568)。
+    """
+    _patch_audit(monkeypatch)
+    repo = RecommendationRepository(store_dir=tmp_path)
+    progress = _progress([], total=1, category_counts={"hold": 1})
+    fake_service = _FakeNotificationServiceForRanking()
+
+    handler_module._finalize_batch(progress, "batch-1", _CONFIG, _NOW, repo, fake_service)
+
+    assert fake_service.batch_summary_calls[0]["send_empty_summary"] is True
+
+
 def test_finalize_batch_passes_send_empty_summary_from_config(monkeypatch, tmp_path) -> None:
     _patch_audit(monkeypatch)
     repo = RecommendationRepository(store_dir=tmp_path)
