@@ -1980,6 +1980,32 @@ LINEとEDINETを同一波でローテーションしない。
 失敗時にどちらが原因か切り分けられなくなるため。
 ```
 
+#### 例外: marker-only検証deploy(実際のcredential rotationには適用されない)
+
+「marker-only検証deploy」とは、**secretの値そのものは一切変更せず**、
+ChangeSetのparameter override等でマーカー値のみ(例: 0→1)を変更し、
+dynamic referenceの再解決が実際に起きることを確認する操作を指す。
+具体例: Issue #227(2026-09-10実施、Release W4)。LINE・EDINET両方の
+マーカーを同時に0→1へ変更したが、Secrets Manager側の値は1つも
+変更していない。
+
+```
+marker-only検証deployは、上記「LINEとEDINETを同一波でローテーションしない」
+の対象外である。
+
+理由: 同一波を禁じる目的は、失敗時にどちらのcredential変更が原因か
+切り分けられなくなることを防ぐためである。marker-only検証deployは
+credentialを1つも変更しないため、その失敗自体が原理的に起こらない。
+```
+
+```
+★ この例外は、実際のcredential rotation(secretの値そのものを更新する操作)
+  には一切適用されない。credentialを1つでも変更する波は、検証目的を
+  兼ねていても本節冒頭の制約(同一波で行わない)を通常どおり適用する。
+  「marker-only」と呼べるのは、その波でSecrets Managerへの書き込みが
+  ゼロ件である場合に限る。
+```
+
 ### 19.3 LINEチャネルアクセストークンのローテーション
 
 本システムのトークンは**長期チャネルアクセストークン(long-lived)**である
