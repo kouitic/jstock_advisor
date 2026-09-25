@@ -2734,16 +2734,17 @@ def test_dispatch_mode_holding_count_counts_unique_stock_codes_not_holding_recor
     monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: holdings)
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        handler_module,
-        "start_batch",
-        lambda batch_id, total, now, family, execution_context, holding_count=0: captured.update(
+
+    def _fake_start_batch(batch_id, total, now, family, execution_context, holding_count=0):
+        captured.update(
             total=total,
             holding_count=holding_count,
             family=family,
             execution_context=execution_context,
-        ),
-    )
+        )
+        return True
+
+    monkeypatch.setattr(handler_module, "start_batch", _fake_start_batch)
     monkeypatch.setattr(handler_module, "dispatch_async", lambda *a, **kw: None)
 
     result = handler_module.handler({}, _FakeContext())

@@ -1,9 +1,11 @@
 """Issue #65 F-E7: dispatcher末尾例外後、EventBridge Schedulerのretryが同じ論理実行を
 新しいbatch_idで再dispatchしてしまう欠陥の修正テスト。
 
-`_derive_batch_id()`(純粋関数。T1/T2/T4/T5/T6)と、そこから導出したbatch_idを
-`try_acquire_dispatch_lease()`(既存・未変更)へ渡した場合の実際の排他挙動
-(moto。T3/T7/T8/T9相当)、Schedulerのcontext attribute契約(T10)を確認する。
+`derive_scheduled_batch_id()`(純粋関数。T1/T2/T4/T5/T6。Issue #558でbuy_candidates/
+holdings_watchlist handlerと共有するため`lambda_handlers/_scheduling.py`へ昇格した)
+と、そこから導出したbatch_idを`try_acquire_dispatch_lease()`(既存・未変更)へ渡した
+場合の実際の排他挙動(moto。T3/T7/T8/T9相当)、Schedulerのcontext attribute契約(T10)
+を確認する。
 
 対象外なテスト: try_acquire_dispatch_lease()自体のConditionExpressionの網羅的な
 検証はtest_batch_tracker.pyの責務であり、ここでは再定義しない(#65 F-E7が実際に
@@ -22,13 +24,13 @@ import yaml
 from moto import mock_aws
 
 from jstock_advisor.infrastructure.aws import batch_tracker
-from jstock_advisor.lambda_handlers import watchlist_dispatcher_handler as handler_module
+from jstock_advisor.lambda_handlers._scheduling import derive_scheduled_batch_id
 
 _REGION = "ap-northeast-1"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATE_PATH = _REPO_ROOT / "infra" / "template.yaml"
 
-# --- T1/T2/T4/T5/T6: _derive_batch_id()は純粋関数 --------------------------------
+# --- T1/T2/T4/T5/T6: derive_scheduled_batch_id()は純粋関数 --------------------------------
 
 
 def test_t1_scheduled_invocation_derives_a_batch_id() -> None:
@@ -36,7 +38,7 @@ def test_t1_scheduled_invocation_derives_a_batch_id() -> None:
     event = {"scheduled_time": "2026-09-24T21:00:00Z"}
     now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
 
-    batch_id = handler_module._derive_batch_id(event, "watchlist", now)
+    batch_id = derive_scheduled_batch_id("watchlist", event, now)
 
     assert batch_id
     assert batch_id.startswith("watchlist-")
@@ -50,8 +52,8 @@ def test_t2_retry_of_the_same_logical_execution_yields_the_same_batch_id() -> No
     first_attempt_now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
     retry_now = dt.datetime(2026, 9, 24, 21, 15, 30, tzinfo=dt.UTC)  # 15分後のretry
 
-    first_batch_id = handler_module._derive_batch_id(event, "watchlist", first_attempt_now)
-    retry_batch_id = handler_module._derive_batch_id(event, "watchlist", retry_now)
+    first_batch_id = derive_scheduled_batch_id("watchlist", event, first_attempt_now)
+    retry_batch_id = derive_scheduled_batch_id("watchlist", event, retry_now)
 
     assert first_batch_id == retry_batch_id
 
@@ -66,18 +68,18 @@ def test_t4_explicit_batch_id_is_used_unchanged_and_scheduled_time_is_ignored() 
     }
     now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
 
-    batch_id = handler_module._derive_batch_id(event, "watchlist-maint", now)
+    batch_id = derive_scheduled_batch_id("watchlist-maint", event, now)
 
     assert batch_id == "watchlist-maint-parent-triggered"
 
 
 def test_t5_a_different_schedule_slot_yields_a_different_batch_id() -> None:
     """T5: 別の定期実行(翌営業日等)はscheduled_timeが異なるため別batch_idになる。"""
-    monday = handler_module._derive_batch_id(
-        {"scheduled_time": "2026-09-20T21:00:00Z"}, "watchlist", dt.datetime.now(dt.UTC)
+    monday = derive_scheduled_batch_id(
+        "watchlist", {"scheduled_time": "2026-09-20T21:00:00Z"}, dt.datetime.now(dt.UTC)
     )
-    tuesday = handler_module._derive_batch_id(
-        {"scheduled_time": "2026-09-21T21:00:00Z"}, "watchlist", dt.datetime.now(dt.UTC)
+    tuesday = derive_scheduled_batch_id(
+        "watchlist", {"scheduled_time": "2026-09-21T21:00:00Z"}, dt.datetime.now(dt.UTC)
     )
 
     assert monday != tuesday
@@ -94,7 +96,7 @@ def test_t6_utc_scheduled_time_is_converted_to_jst_before_formatting() -> None:
     event = {"scheduled_time": "2026-09-24T21:00:00Z"}
     now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
 
-    batch_id = handler_module._derive_batch_id(event, "watchlist", now)
+    batch_id = derive_scheduled_batch_id("watchlist", event, now)
 
     assert "20260925T060000" in batch_id  # JST日付・時刻(9/25 06:00)
     assert "20260924" not in batch_id  # UTC日付(9/24)がそのまま出ていないこと
@@ -112,7 +114,7 @@ def test_t6b_naive_scheduled_time_without_offset_defaults_to_utc() -> None:
     event = {"scheduled_time": "2026-09-24T21:00:00"}  # offset無し(naive)
     now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
 
-    batch_id = handler_module._derive_batch_id(event, "watchlist", now)
+    batch_id = derive_scheduled_batch_id("watchlist", event, now)
 
     # UTCとみなした場合: 2026-09-24T21:00:00Z -> JST 2026-09-25T06:00:00
     assert "20260925T060000" in batch_id
@@ -126,7 +128,7 @@ def test_malformed_scheduled_time_falls_back_to_the_random_generator() -> None:
     event = {"scheduled_time": "not-a-valid-timestamp"}
     now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
 
-    batch_id = handler_module._derive_batch_id(event, "watchlist", now)
+    batch_id = derive_scheduled_batch_id("watchlist", event, now)
 
     assert batch_id.startswith("watchlist-20260924T210005-")
     assert len(batch_id.rsplit("-", 1)[-1]) == 8  # ランダムサフィックス(hex 8桁)
@@ -138,7 +140,7 @@ def test_manual_invocation_without_batch_id_or_scheduled_time_is_unchanged() -> 
     event: dict[str, Any] = {}
     now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
 
-    batch_id = handler_module._derive_batch_id(event, "watchlist", now)
+    batch_id = derive_scheduled_batch_id("watchlist", event, now)
 
     assert batch_id.startswith("watchlist-20260924T210005-")
     assert len(batch_id.rsplit("-", 1)[-1]) == 8
@@ -172,16 +174,12 @@ def test_t3_retry_with_the_same_batch_id_cannot_reacquire_an_active_lease(
     2回目の試行はtry_acquire_dispatch_lease()(既存・未変更)が拒否し、
     二重dispatchが発生しない。job_type・rotation.enabledに一切依存しない
     (batch_id keyのdispatch leaseのみで完結する)ことがF-E7の核心。"""
-    scheduled_time = "2026-09-24T21:00:00Z"
+    event = {"scheduled_time": "2026-09-24T21:00:00Z"}
     first_now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
     retry_now = dt.datetime(2026, 9, 24, 21, 2, 0, tzinfo=dt.UTC)  # リース有効期間内(360秒)
 
-    first_batch_id = handler_module._derive_batch_id(
-        {"scheduled_time": scheduled_time}, "watchlist", first_now
-    )
-    retry_batch_id = handler_module._derive_batch_id(
-        {"scheduled_time": scheduled_time}, "watchlist", retry_now
-    )
+    first_batch_id = derive_scheduled_batch_id("watchlist", event, first_now)
+    retry_batch_id = derive_scheduled_batch_id("watchlist", event, retry_now)
     assert first_batch_id == retry_batch_id  # 前提(T2の再確認)
 
     first_acquired = batch_tracker.try_acquire_dispatch_lease(
@@ -202,13 +200,11 @@ def test_t7_rotation_disabled_path_is_still_protected_by_the_dispatch_lease(
     (watchlist_dispatcher_handler.py:521)、batch_id自体が安定するようになった
     ため、job_type・rotation設定に一切関知しないdispatch lease(batch_id key)
     だけでretry時の二重dispatchを防止できる。"""
-    scheduled_time = "2026-09-24T21:00:00Z"
+    event = {"scheduled_time": "2026-09-24T21:00:00Z"}
     first_now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
     retry_now = dt.datetime(2026, 9, 24, 21, 2, 0, tzinfo=dt.UTC)
 
-    batch_id = handler_module._derive_batch_id(
-        {"scheduled_time": scheduled_time}, "watchlist", first_now
-    )
+    batch_id = derive_scheduled_batch_id("watchlist", event, first_now)
 
     first_acquired = batch_tracker.try_acquire_dispatch_lease(
         batch_id, "attempt-1", first_now, 360, 72
@@ -227,13 +223,11 @@ def test_t8_watchlist_maintenance_path_is_still_protected_by_the_dispatch_lease(
     """T8: WATCHLIST_MAINTENANCE(rotation_lease_held=False固定)も、
     batch_prefix="watchlist-maint"で導出したbatch_idがdispatch leaseにより
     retryでの二重dispatchから保護される。"""
-    scheduled_time = "2026-09-24T21:00:00Z"
+    event = {"scheduled_time": "2026-09-24T21:00:00Z"}
     first_now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
     retry_now = dt.datetime(2026, 9, 24, 21, 2, 0, tzinfo=dt.UTC)
 
-    batch_id = handler_module._derive_batch_id(
-        {"scheduled_time": scheduled_time}, "watchlist-maint", first_now
-    )
+    batch_id = derive_scheduled_batch_id("watchlist-maint", event, first_now)
     assert batch_id.startswith("watchlist-maint-")
 
     first_acquired = batch_tracker.try_acquire_dispatch_lease(
@@ -257,22 +251,18 @@ def test_t9_retry_after_a_late_failure_near_the_end_of_dispatch_does_not_start_a
     有効期間が過ぎていても、いずれの場合もretryは「新規batch」としては扱われない
     (有効期間内はリース拒否〔本テスト〕。期間経過後は同一batch_idの再開に
     なり、新規batchにはならない)。"""
-    scheduled_time = "2026-09-24T21:00:00Z"
+    event = {"scheduled_time": "2026-09-24T21:00:00Z"}
     original_now = dt.datetime(2026, 9, 24, 21, 0, 5, tzinfo=dt.UTC)
     # dispatcher末尾(SQS送信直前〜completed直前)で例外が起きたと仮定し、
     # status=DISPATCHINGのまま終わる(mark_dispatch_completedは呼ばれない)。
-    original_batch_id = handler_module._derive_batch_id(
-        {"scheduled_time": scheduled_time}, "watchlist", original_now
-    )
+    original_batch_id = derive_scheduled_batch_id("watchlist", event, original_now)
     assert batch_tracker.try_acquire_dispatch_lease(
         original_batch_id, "original-attempt", original_now, 360, 72
     )
 
     # Schedulerのretry。同じscheduled_timeのため同一batch_idになる。
     retry_now = dt.datetime(2026, 9, 24, 21, 3, 0, tzinfo=dt.UTC)  # リース有効期間内
-    retry_batch_id = handler_module._derive_batch_id(
-        {"scheduled_time": scheduled_time}, "watchlist", retry_now
-    )
+    retry_batch_id = derive_scheduled_batch_id("watchlist", event, retry_now)
 
     assert retry_batch_id == original_batch_id  # 新規batchにならない(同一batch_id)
     retry_acquired = batch_tracker.try_acquire_dispatch_lease(

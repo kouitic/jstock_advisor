@@ -50,7 +50,6 @@ import boto3
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.jst import to_jst
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     EXECUTION_RESULT_NORMAL,
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
@@ -98,6 +97,7 @@ from jstock_advisor.lambda_handlers._market_holiday import (
     resolve_allow_market_closed,
     should_skip_for_market_closed,
 )
+from jstock_advisor.lambda_handlers._scheduling import derive_scheduled_batch_id
 from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_execution_mode
 from jstock_advisor.services.candidate_universe_downloader import (
     DownloadOutcome,
@@ -397,63 +397,6 @@ def _collect_maintenance_targets(event: dict[str, Any]) -> tuple[list[str], dict
     return codes, extra_kwargs
 
 
-def _derive_batch_id(event: dict[str, Any], batch_prefix: str, now: dt.datetime) -> str:
-    """batch_idを決定する(Issue #65 F-E7: dispatcher末尾例外後の二重dispatch防止)。
-
-    優先順位:
-
-    1. `event["batch_id"]`が明示されていればそのまま使う(手動での同一batch_id
-       再起動〔18節「案B」〕、または`watchlist_batch_finalizer.
-       maybe_trigger_maintenance()`が親batch_idから決定論的に算出して渡す
-       後続起動。いずれも既存の挙動を変更しない)。
-    2. EventBridge Schedulerのcontext attribute`<aws.scheduler.scheduled-time>`
-       (`infra/template.yaml`のSchedule Input経由で`event["scheduled_time"]`
-       として渡す)が有効なISO8601文字列であれば、そこから決定論的に生成する。
-       AWS公式ドキュメントに「同一の論理実行のretry(再配送)間で不変」という
-       明示の保証文は無いが、`<aws.scheduler.execution-id>`/
-       `<aws.scheduler.attempt-number>`が「試行ごとに変わる」と明記されている
-       こととの対比から、scheduled-time(スケジュール定義上の起動予定時刻。
-       実際に試行した時刻ではない)は試行に依存しない値と解釈できる(妥当な
-       推論。レビュー対応: PR #556 F2)。これにより、
-       `try_acquire_dispatch_lease()`の既存のConditionExpression
-       (同一batch_idの手動re-runを許容しつつ多重実行を排除する設計。
-       `infrastructure/aws/batch_tracker.py`)がScheduler retryに対しても
-       そのまま働くようになる(rotation dispatch leaseの有無に依存しないため、
-       WATCHLIST_MAINTENANCE・rotation.enabled=falseの経路も保護される)。
-       ドキュメントの例はZ付き(UTC表記)だが、「常にUTC」という明記は無い。
-       offsetなし(naive)で渡ってきた場合はUTCとみなす既定に倒す(下記実装。
-       この既定がJST日付境界での前日化けを避ける唯一の安全網であるため、
-       naive入力を固定するテストを持つ。レビュー対応: PR #556 F1)。
-       offset付きの場合は`domain/jst.py::to_jst()`で変換してからフォーマット
-       する(新しい独自のタイムゾーン変換は作らない)。
-    3. 上記どちらも無い場合(手動invoke・ローカルテスト等、Scheduler経由でない
-       起動)は、従来どおり時刻+ランダムサフィックスで生成する(この経路は
-       Scheduler retryの対象ではないため、retry間の安定性は不要)。
-    """
-    explicit_batch_id = event.get("batch_id")
-    if explicit_batch_id:
-        return str(explicit_batch_id)
-
-    scheduled_time_raw = event.get("scheduled_time")
-    if isinstance(scheduled_time_raw, str) and scheduled_time_raw:
-        try:
-            scheduled_time = dt.datetime.fromisoformat(scheduled_time_raw.replace("Z", "+00:00"))
-        except ValueError:
-            scheduled_time = None
-            logger.warning(
-                "watchlist dispatcher: unparseable scheduled_time=%r, "
-                "falling back to random batch_id (retry-stability lost for this invocation)",
-                scheduled_time_raw,
-            )
-        if scheduled_time is not None:
-            if scheduled_time.tzinfo is None:
-                scheduled_time = scheduled_time.replace(tzinfo=dt.UTC)
-            jst_scheduled_time = to_jst(scheduled_time)
-            return f"{batch_prefix}-{jst_scheduled_time.strftime('%Y%m%dT%H%M%S')}"
-
-    return f"{batch_prefix}-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
-
-
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # Issue #286 (#70 F-B4): watchlist系は execution_mode を**受け付けない**。
     # 黙って本番実行せず、指定されていたら理由をログへ出して失敗させる。
@@ -555,10 +498,13 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # (親側のexactly-onceトリガーに加えた二重の安全策)。
     # Issue #65 F-E7: 通常のEventBridge Schedule起動では、event["batch_id"]の
     # 代わりにevent["scheduled_time"](Schedulerのcontext attribute経由。
-    # _derive_batch_id()のdocstring参照)からbatch_idを決定論的に導出する。
+    # derive_scheduled_batch_id()のdocstring参照)からbatch_idを決定論的に導出する。
     # これにより、Schedulerのretry(再配送)で同一batch_idが再利用され、
     # dispatch leaseが多重dispatchを拒否できるようになる。
-    batch_id = _derive_batch_id(event, batch_prefix, now)
+    # Issue #558: buy_candidates/holdings_watchlist handlerでも同じ導出ロジックが
+    # 必要になったため、_scheduling.py(F-42)の共有関数へ昇格した(private実装の
+    # 複製を避ける)。
+    batch_id = derive_scheduled_batch_id(batch_prefix, event, now)
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
 
     if not try_acquire_dispatch_lease(
