@@ -609,9 +609,11 @@ WIP_STATE_SSOT は変更しない。
 ```
 保管      専用の tracking Issue へ、append-only のコメントで現況を追記する。
           最新の判定は LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER
-          (6.5.3 と同じ規約)に従い、コメント順で最後のものを現況とする。
-          本文(body)は恒久的な使い方の説明(掲示・label・更新責務等、下記)
-          のみを保持し、可変 cache としては使わない
+          (6.5.3 と同じ規約)に従い、コメント順で**最後に現れる有効な
+          read model snapshot/update**を現況とする(単純な「最後のコメント」
+          ではない。★下記参照)。本文(body)は恒久的な使い方の説明
+          (掲示・label・更新責務等、下記)のみを保持し、可変 cache としては
+          使わない
           (2026-09-25 改訂。旧来「本文を可変 cache として使う」としていたが、
            運用上 prepend 方式となり body 上限〔約 262,144 文字〕へ到達する
            事故が発生した。経緯は本書末尾の変更履歴を参照)
@@ -635,6 +637,32 @@ label     Issue Type = tracking / status:調査・設計中 / 恒久 OPEN
 
 GENERATED_AT と SOURCE_MAIN の無い read model は無効として扱う。
 各行は SOURCE_ISSUES を持ち、必ず SSoT へ辿れるようにする。
+```
+
+```
+★ VALID_READ_MODEL_UPDATE の定義(2026-09-25 追加。レビュー対応 F1)
+
+有効な read model update とは、上記の必須 field(GENERATED_AT / SOURCE_MAIN /
+SOURCE_ISSUES / ACTIVE_DOMAIN_WIP / SHARED_LOCKS / WORKER_WIP /
+GRANDFATHERED_WIP / UNKNOWN_BRANCH_STATE)をすべて持つ**自己完結した
+snapshot**を指すコメントのみである。
+
+★ tracking Issue #188 自身へは、read model の更新以外にも、通常の Issue
+  コメント(個別 Issue の DOMAIN_WIP_DECLARATION の引用・USER 判断の記録・
+  訂正・障害記録・本節の改訂に関する議論等)が投稿されうる。これらは
+  read model の snapshot ではないため、GITHUB_COMMENT_ORDER で「最後」に
+  投稿されていても現況として読んではならない。
+
+現況の判定手順は次のとおりである。
+
+  1  コメントをコメント順で新しい方から辿る
+  2  各コメントが上記の必須 field をすべて含む自己完結 snapshot かどうかを
+     確認する(field が 1 つでも欠けていれば対象外)
+  3  最初に該当した snapshot を現況とする
+
+必須 field を欠くコメントを「現況」として扱わない(GENERATED_AT と
+SOURCE_MAIN が必須であることは上記のとおりだが、他の必須 field を欠く
+コメントも同様に無効として扱う)。
 ```
 
 不一致と staleness の扱い。
@@ -2554,4 +2582,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-13 | 9.6節の **Issue の追跡責任と PR の batching を分離**した(Issue #357 / USER 判断 7。RULE_PROPOSAL = #213 issuecomment-5649751837)。旧本文は「P1 以外の governance / 開発運用 docs の改善は、その都度 PR を出さず**Issue #213 または #220 へ集約し**、週 1 回 1 PR で反映する」と書いており、**専用の Acceptance Criteria や独立した設計判断を必要とする欠陥まで #213 / #220 へ押し込む、と読めた**(Issue の追跡責任と PR の batching の混同)。実際に、独立したroot cause を持つ設計欠陥を起票したことが 9.6節と食い違うのではないかという申告が生じた。**9.6節の目的(小さな docs 改善ごとに PR を乱立させない / governance 変更を週単位でまとめる)は維持したまま**、`DEDICATED_ISSUE_ALLOWED != STANDALONE_PR_ALLOWED` として、**【Issue】独立した root cause がある / 専用の Acceptance Criteria が必要 / 独自の lifecycle を持つ / 別 Issue へ入れると責任範囲が曖昧になる のいずれかに当たるなら専用 Issue を作ってよい(duplicate check は必須)**、**【PR】P1 例外等を除き main 反映は従来どおり週次 batch へまとめる**、と定めた。上記に当たらない小さな改善は従来どおり #213 / #220 へ集約する。**「governance 改善は何でも個別 Issue を作ってよい」とは変更していない。**9.5節の Issue 起点の原則は不変であり(専用 Issue を作る場合もその Issue が起点である)、`GOVERNANCE_CHANGE_BATCHING = WEEKLY`・対象文書の一覧・P1 を即時とする扱い・「なぜまとめるか」の理由・緊急性を Priority で判定することはいずれも変更していない。見出しを変えていないため `policy_registry.yaml` は更新していない(本節を指す entry は実測で 0 件である)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-18 | 3.5.8 の「PR 本文を CI で自動解析する仕組みは導入しない。」を改訂した(Issue #342、#337 の follow-up)。#337 の監査で、TIME_SEMANTICS_IMPACT 宣言の欠落 6 本・DoD 5 項目の欠落 2 本・`Closes` による close gate の飛び越え 1 本が実際に発生しており、いずれも PR 本文の形式で機械的に検出できるにもかかわらず検出されていなかった。`.github/workflows/governance.yml`(新設、`ci.yml` とは別 workflow。理由は `pii-metadata-audit.yml` と同じで、PR 本文を読むため GitHub API に依存すること)が必須節(概要 / TIME_SEMANTICS_IMPACT / DoD / 同型 sweep / 確認)・DoD 5 項目の各行・Issue 参照の有無を構文のみで検査する。`Closes` / `Fixes` / `Resolves` の使用は正本が条件つきで許容しているため一律 FAIL にはせず WARNING に留め、意味判定(後続 Phase が残るか等)は引き続きレビュワーが行う(前行「`NO` の宣言は免罪符ではない...FAIL とする」の運用は変更していない)。**CI の実装(`F_IMPLEMENTED`)と、required check として登録し merge を実際に止められること(`F_REQUIRED_ENFORCEMENT`)は別であり、登録は USER が別途 1 回だけ行う操作である**(本 PR の時点では `F_REQUIRED_ENFORCEMENT = NO`。job は走るが merge を止めない)。registry の schema violation / anchor の不在は `scripts/policy_check.py` 由来の `tests/unit/test_policy_registry.py` が既に通常の CI(`ci.yml` の `test` job)で検査済みのため、governance.yml では重複実装していない(CI 実行時間の悪化を避けるため)。**3.5.8 のこの 1 行以外・1146 行目(免罪符ではない、の行)・§2.6 WIP と domain lock・§4 ローカルテスト方針・§9.5 Issue 起点の原則・§10 人間承認の境界・CI の必須 job 構成はいずれも変更していない。** コード・Production 挙動の変更なし(governance.yml は required check 未登録のため、既存の PR merge 手順を変えない) |
 | 2026-09-19 | §10 へ 10.2「承認の真正性(HUMAN_GATE_AUTHENTICITY)への入口」を追加した(Issue #332 Unit 1-A)。全 AI セッションが同一の GitHub アカウントで投稿するため、author / mergedBy から USER 本人の承認を識別できず、承認が本文の自己申告に依存する、という Issue #332 の欠陥への対処である。**規則の本文は user_manager_collaboration_protocol.md 2.7節と ai_operation_message_contract.md 8.6節が正本であり、本文書へ複製していない**(入口と、発効状態の正本[`HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録]だけを置いた)。**本改訂は発効しない**(発効条件が成立して durable に記録されるまで、旧運用を継続する。新旧を混在させない)。**10節の人間承認の要否・10.1 の VERIFICATION_MANUAL_INVOCATION・承認の単位はいずれも変更・緩和していない。** 設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |
-| 2026-09-25 | 2.6.9 の集約 read model(Issue #188)の**保管方式を「本文の可変 cache」から「append-only のコメント」へ正式移行**した(USER決定)。旧本文は「専用の tracking Issue の本文を可変 cache として使う(append-only のコメントで現況を管理しない。最新がどれか埋もれるため)」としていたが、実際の運用ではこの「本文上書き」方式が prepend 方式(新しい内容を先頭へ足し続ける運用)で行われ、2026-09-25 に #188 の本文が GitHub Issue body の上限(約 262,144 文字)へ到達する事故が発生した(JIRO が本文を READ_MODEL_REBUILD で圧縮し復旧)。一方、同じ本文書 6.5.3 節の `ISSUE_STATE_SNAPSHOT` は append-only のコメントを使いながら `LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` という規約で「最新がどれか埋もれる」問題を既に解決しており、2.6.9 が append-only を避けた根拠(最新が埋もれる)は、同じ文書内に既に解決策が存在していたことになる。本改訂は「保管」行を、tracking Issue へ append-only のコメントで現況を追記し、最新の判定は 6.5.3 と同じ `LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` に従う形へ改めた。本文(body)は恒久的な使い方の説明(掲示・label・更新責務)のみを保持し、可変 cache としては使わない。「更新責務」行もコメント追記による更新であることを明記した。**#188 自体の本文の訂正は本改訂とは別に MANAGER が行う(本 PR の scope 外)。WIP_STATE_SSOT(各 Issue の宣言 + 最新 snapshot)・READ_MODEL_IS_SSOT = NO・INDEX_ONLY・READ_MODEL_MISMATCH の扱い・着手前の確認手順・Human Gate / merge 承認 / Production approval / release-blocker lifecycle / label 4 軸 / §2.6 の取得ゲートと解放条件はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-25 | 2.6.9 の集約 read model(Issue #188)の**保管方式を「本文の可変 cache」から「append-only のコメント」へ正式移行**した(USER決定)。旧本文は「専用の tracking Issue の本文を可変 cache として使う(append-only のコメントで現況を管理しない。最新がどれか埋もれるため)」としていたが、実際の運用ではこの「本文上書き」方式が prepend 方式(新しい内容を先頭へ足し続ける運用)で行われ、2026-09-25 に #188 の本文が GitHub Issue body の上限(約 262,144 文字)へ到達する事故が発生した(JIRO が本文を READ_MODEL_REBUILD で圧縮し復旧)。一方、同じ本文書 6.5.3 節の `ISSUE_STATE_SNAPSHOT` は append-only のコメントを使いながら `LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` という規約で「最新がどれか埋もれる」問題を既に解決しており、2.6.9 が append-only を避けた根拠(最新が埋もれる)は、同じ文書内に既に解決策が存在していたことになる。本改訂は「保管」行を、tracking Issue へ append-only のコメントで現況を追記し、最新の判定は 6.5.3 と同じ `LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` に従う形へ改めた。本文(body)は恒久的な使い方の説明(掲示・label・更新責務)のみを保持し、可変 cache としては使わない。「更新責務」行もコメント追記による更新であることを明記した。**レビュー対応(USER 指摘 F1)**: 当初案の「コメント順で最後のものを現況とする」は、tracking Issue #188 自身へ投稿されうる通常の Issue コメント(個別 Issue の `DOMAIN_WIP_DECLARATION` の引用・USER 判断の記録・訂正・障害記録等。read model の snapshot ではないもの)を、単純な「最後のコメント」判定では現況として誤読しうる欠陥があった。`VALID_READ_MODEL_UPDATE` を新設し、必須 field(`GENERATED_AT` / `SOURCE_MAIN` / `SOURCE_ISSUES` / `ACTIVE_DOMAIN_WIP` / `SHARED_LOCKS` / `WORKER_WIP` / `GRANDFATHERED_WIP` / `UNKNOWN_BRANCH_STATE`)をすべて持つ自己完結 snapshot のみを現況判定の対象とし、それ以外のコメントは(投稿順で最後であっても)対象外と明記した。**#188 自体の本文の訂正は本改訂とは別に MANAGER が行う(本 PR の scope 外)。WIP_STATE_SSOT(各 Issue の宣言 + 最新 snapshot)・READ_MODEL_IS_SSOT = NO・INDEX_ONLY・READ_MODEL_MISMATCH の扱い・着手前の確認手順・Human Gate / merge 承認 / Production approval / release-blocker lifecycle / label 4 軸 / §2.6 の取得ゲートと解放条件はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
