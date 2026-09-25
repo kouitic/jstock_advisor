@@ -80,3 +80,14 @@ trade_cooldown:
 watch_end_notification:
   enabled: true
   min_consecutive_business_days: 5
+
+# 売買検知の部分適用クラッシュ時のtakeover再検知漏れを解消するconsumption step
+# (Issue #71 F-C11 Phase 2 = Issue #529)。毎時の既存reconciler(watchlist_batch_
+# reconciler_handler.py)へ相乗りし、pending_marker=PENDINGのまま取り残された
+# TradeEventRecordを検出してWatchState終了を再実行する。1回のreconciler実行
+# あたりの処理上限件数(watchlist_screening_rules.yamlのmax_timeout_finalize_
+# rows_per_runと同じ「無制限に長時間化させない」ための境界。TradeEventの
+# 想定発生頻度〔保有銘柄の売買イベントのみ〕はwatchlist finalizeより大幅に
+# 少ないため、この値自体で詰まることは通常想定しない)。
+trade_event_reconciliation:
+  max_records_per_run: 200
