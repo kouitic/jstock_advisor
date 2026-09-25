@@ -89,6 +89,9 @@ from jstock_advisor.infrastructure.local_repository.notification_log_repository 
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from jstock_advisor.infrastructure.local_repository.trade_event_record_repository import (
+    TradeEventRecordRepository,
+)
 from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (
     WatchlistRemovalHistoryRepository,
 )
@@ -98,6 +101,10 @@ from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_exec
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
+from jstock_advisor.services.trade_event_reconciliation_service import (
+    reconcile_pending_trade_events,
+)
+from jstock_advisor.services.watch_state_service import WatchStateService
 from jstock_advisor.services.watchlist_batch_finalizer import (
     MAINTENANCE_UNIVERSE_PROVIDER,
     MaintenanceTriggerOutcome,
@@ -967,6 +974,36 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     wc = config.watchlist_screening
+
+    # Issue #529(#71 F-C11 Phase 2): 売買検知の部分適用クラッシュ時のtakeover
+    # 再検知漏れを解消するconsumption stepへ相乗りする。既存のwatchlist batch
+    # reconciliation(このメソッドの本体)とは無関係な処理のため、独立した
+    # try/except境界とし、どちらか一方の失敗がもう一方を止めないようにする
+    # (USER/MANAGER判断の必須契約)。main loopより前に置くことで、main loop
+    # 側が例外で止まった場合でもtrade-event側は毎時必ず実行機会を得る。
+    try:
+        trade_event_outcome = reconcile_pending_trade_events(
+            now,
+            config.notification.trade_event_reconciliation.max_records_per_run,
+            TradeEventRecordRepository(),
+            WatchStateService(
+                business_calendar=BusinessCalendar.from_config(config.holiday_calendar)
+            ),
+        )
+        if trade_event_outcome.remaining > 0:
+            logger.warning(
+                "watchlist reconciler: trade_event_reconciliation backlog remaining=%d "
+                "(processed=%d, already_consumed_by_other_run=%d)",
+                trade_event_outcome.remaining,
+                trade_event_outcome.processed,
+                trade_event_outcome.already_consumed_by_other_run,
+            )
+    except Exception:
+        logger.exception(
+            "watchlist reconciler: trade_event_reconciliation failed "
+            "(isolated from watchlist batch reconciliation, continuing)"
+        )
+
     providers: ProviderBundle = build_cached_provider_bundle(
         build_real_provider_bundle(now, config), config, now
     )

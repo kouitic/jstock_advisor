@@ -588,6 +588,25 @@ class WatchEndNotificationConfig(StrictModel):
     min_consecutive_business_days: int
 
 
+class TradeEventReconciliationConfig(StrictModel):
+    """売買検知の部分適用クラッシュ時のtakeover再検知漏れconsumption stepの
+    設定(Issue #71 F-C11 Phase 2 = Issue #529)。既存reconciler(毎時起動)へ
+    相乗りするため、1回の実行で処理する上限件数のみを持つ
+    (`watchlist_screening_rules.yaml`の`max_timeout_finalize_rows_per_run`
+    と同じ「1回のreconciler実行を無制限に長時間化させない」ための境界)。
+    """
+
+    max_records_per_run: int
+
+    @model_validator(mode="after")
+    def _check_values(self) -> TradeEventReconciliationConfig:
+        if self.max_records_per_run < 1:
+            raise ValueError(
+                "trade_event_reconciliationのmax_records_per_runは1以上である必要があります"
+            )
+        return self
+
+
 class NotificationRulesConfig(StrictModel):
     version: int
     resend_after_days: int
@@ -612,6 +631,7 @@ class NotificationRulesConfig(StrictModel):
     notification_policy: NotificationPolicyConfig
     trade_cooldown: TradeCooldownConfig
     watch_end_notification: WatchEndNotificationConfig
+    trade_event_reconciliation: TradeEventReconciliationConfig
 
 
 # --- data_validation_rules.yaml -------------------------------------------
