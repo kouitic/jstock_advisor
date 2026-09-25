@@ -197,16 +197,47 @@ class HoldingDecisionResult(ImmutableSnapshot):
 
 
 class BaselineValueSnapshot(ImmutableSnapshot):
-    """baseline比較対象の実値スナップショット(投資ストーリー維持スコアの
-    標準5軸: 配当方針/総合利回り/優待条件/利益CF前提/財務健全性)。
+    """投資ストーリー維持スコアの標準5軸(配当方針/総合利回り/優待条件/利益CF前提/
+    財務健全性)のうち、baselineとの比較に実際に使われるのは`has_shareholder_
+    benefit`(優待条件、Issue #470/#476)のみである(Issue #469 Phase A実測、
+    holding_decision_service.pyへのgrepで裏取り済み)。
+
+    配当方針・総合利回りは絶対条件でbaseline比較が不要(investment_thesis_
+    scoring.pyのコメントに明記)であり、本構造体を経由しない設計そのものが
+    正しい。利益CF前提・財務健全性は、本構造体を経由せず**別の既存機構**
+    (`sell_rule_inputs.evaluations`のトレンド判定・
+    `financial_health_severe_deterioration`のトリガー評価)がbaseline/トレンド
+    比較の役割を実際に果たしており、投資判断としての誤りは無い
+    (「baseline_valuesを経由しない」ことと「baseline比較をしていない」ことは
+    同じではない)。
+
+    したがって`total_yield_pct`・`equity_ratio_pct`は生成時に値を入れるが、
+    baseline比較のいずれからも読み出されない(書き込み専用。Issue #469
+    Phase A実測: grep 0件)。`dividend_policy_note`・`benefit_condition_note`・
+    `operating_income_trend_note`・`operating_cashflow_trend_note`の4項目は
+    現時点で生成時に値を設定されず、判定にも使用されない(Currently persisted
+    for compatibility / audit only. Not currently consumed by baseline
+    comparison logic. Reserved for a possible future unification of the
+    利益CF前提・財務健全性 comparison method — 削除方針は未承認)。
     """
 
+    # 生成時に値を設定されない(Issue #469)。将来利益CF前提のbaseline比較を
+    # 本構造体経由へ統一する場合の予約領域。
     dividend_policy_note: str | None = None
+    # 生成時に値を入れるが、baseline比較からは読み出されない(書き込み専用。
+    # 総合利回りは絶対条件で比較不要のため。Issue #469)。
     total_yield_pct: float | None = None
+    # baseline比較へ実際に使われる唯一のfield(優待条件。Issue #470/#476)。
     has_shareholder_benefit: bool | None = None
+    # 生成時に値を設定されない(Issue #469)。
     benefit_condition_note: str | None = None
+    # 生成時に値を設定されない(Issue #469)。利益CF前提のbaseline/トレンド
+    # 比較は`sell_rule_inputs.evaluations`側で実際に行われている。
     operating_income_trend_note: str | None = None
     operating_cashflow_trend_note: str | None = None
+    # 生成時に値を入れるが、baseline比較からは読み出されない(書き込み専用。
+    # 財務健全性のbaseline/トレンド比較は`financial_health_severe_
+    # deterioration`のトリガー評価側で実際に行われている。Issue #469)。
     equity_ratio_pct: float | None = None
 
 
