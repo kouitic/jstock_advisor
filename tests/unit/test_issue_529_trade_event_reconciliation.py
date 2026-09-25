@@ -286,12 +286,27 @@ class _RaisingReconcile:
         raise RuntimeError("simulated trade_event_reconciliation failure")
 
 
+_HANDLER_REGION = "ap-northeast-1"
+_BATCH_TABLE = "jstock-batch_runs"
+_PROGRESS_TABLE = "jstock-watchlist_candidate_progress"
+
+
 def test_t7_trade_event_reconciliation_failure_does_not_break_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T7: trade replayが例外 → existing batch reconcileは継続する。"""
+    """T7: trade replayが例外 → existing batch reconcileは継続する。
+
+    `handler()`本体はDynamoDB(batch_runs/watchlist_candidate_progress)を
+    複数箇所で参照するため、`test_watchlist_batch_reconciler_handler.py`の
+    `dynamo`フィクスチャと同じ手法(moto + 2テーブル作成)で環境を用意する
+    (CIランナーにはAWS_DEFAULT_REGIONが無く、region未設定だとboto3の
+    クライアント構築自体がNoRegionErrorになるため)。
+    """
     from jstock_advisor.lambda_handlers import watchlist_batch_reconciler_handler as handler_module
 
+    monkeypatch.setenv("AWS_DEFAULT_REGION", _HANDLER_REGION)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.setattr(handler_module, "reconcile_pending_trade_events", _RaisingReconcile())
     # 既存テストファイルのautouse fixture相当を最小限で再現する。
     monkeypatch.setattr(handler_module, "load_config", lambda: _minimal_handler_config())
@@ -308,9 +323,29 @@ def test_t7_trade_event_reconciliation_failure_does_not_break_handler(
     monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
     monkeypatch.setattr(handler_module, "_publish_incident_envelope", lambda envelope: None)
     monkeypatch.setattr(handler_module, "_fetch_watchlist_worker_metrics", lambda now: {})
-    monkeypatch.setattr(handler_module, "list_watchlist_batches_by_status", lambda statuses: [])
 
-    result = handler_module.handler({}, object())
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name=_HANDLER_REGION)
+        client.create_table(
+            TableName=_BATCH_TABLE,
+            KeySchema=[{"AttributeName": "batch_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "batch_id", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        client.create_table(
+            TableName=_PROGRESS_TABLE,
+            KeySchema=[
+                {"AttributeName": "batch_id", "KeyType": "HASH"},
+                {"AttributeName": "stock_code", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "batch_id", "AttributeType": "S"},
+                {"AttributeName": "stock_code", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        result = handler_module.handler({}, object())
 
     assert result["candidates"] == 0  # 既存のwatchlist batch reconciliationは正常完了
 
