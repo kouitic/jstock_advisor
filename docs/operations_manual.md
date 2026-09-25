@@ -3765,15 +3765,72 @@ Issue #508 の USER 決定 U-2(PARTIAL/resource-scoped限定でPROCEED。#133 �
                         本文冒頭に "Previous issue: #<旧番号>" を含む
                         新規Issueが作成されること
                     確認は自然発生時のみ。人工的に再発条件を作らない(32.6)
-3  LINE経路からの独立性確認  GitHub Issue作成が失敗した場合(IncidentStateTableの
-                    github_issue_create_status が CONFIGURATION_ERROR または
-                    ISSUE_CREATION_FAILED になった場合)でも、同一incidentの
-                    LINE通知(29節の経路。IncidentStateTableの既存status
-                    フィールド)が正常に送信されていること。
-                    `process_incident_issue()`は例外を外へ伝播させない設計
-                    (コード実読で確認済み)だが、Production実測でも
-                    IncidentNotifierFunctionのErrors(29節のself-monitoring)が
-                    増えていないことを合わせて確認する
+
+   ★ 上記は「occurrence_countが実際に増えた場合」の期待結果であり、
+     「同一fingerprintを再受信するたびに必ず新しいコメントが付く」という
+     意味ではない(`services/incident_github_issue_service.py`の
+     `_post_comment()`/`_reconcile_stale_comment()`実読で確認)。
+
+     - 既存OPEN Issueへのコメント追記は**occurrence単位の重複抑止**に従う。
+       `last_commented_occurrence_count == notice.occurrence_count`の場合
+       (今回のoccurrenceについて既に投稿済み)は追加投稿しない
+     - 同一fingerprintの再受信(例: dedup window内でのSNS/Lambda retry)は、
+       LINE側がSUPPRESSEDのままoccurrence_countを進めないことが多く、
+       **同一fingerprintの再受信とoccurrence_countの増加を同一視しない**
+       (occurrence_countは`IncidentStateTracker`の状態から読むのみで、
+       GitHub側の呼び出し自体はoccurrence_countを進めない)
+     - 処理中claim(`comment_claim_occurrence_count`が今回のoccurrenceと
+       一致し、`comment_claim_expires_at`が未失効)の間は、他実行が
+       処理中のため何もしない(無条件の即時投稿を要求しない)。
+       stale claim(claim期限切れ)の場合は、GitHub側の実在確認
+       (`find_comment_by_marker()`)を先に行ってから再claimして投稿する
+       (既存実装のstale takeover契約どおり)
+3  LINE経路からの独立性確認  `lambda_handlers/incident_notifier_handler.py`の
+                    `_process_signal()`/`_send_line()`と
+                    `services/incident_github_issue_service.py`を実読して
+                    確認した設計は次のとおりであり、GitHub処理の成否と
+                    LINE経路の挙動は独立に確認する(いずれのケースも、対象
+                    実行のCloudWatch Logs INFOログ`incident_notifier claim
+                    source=... fingerprint=... outcome=...`でclaim outcomeを
+                    確認したうえで、期待結果と実測を照合する。Lambdaの
+                    ErrorsメトリクスやDynamoDBのstatusだけで因果関係を
+                    断定しない)。
+
+   a  LINE送信対象・LINE成功
+      (outcome ∈ {CLAIMED_NEW, CLAIMED_AFTER_DEDUP_WINDOW,
+       CLAIMED_STALE_TAKEOVER}、`_send_line()`のpush_messageが成功)
+      期待結果: LINEは`mark_sent`済みで正常に完了していること。GitHub処理
+      (`_attempt_github_issue()`)は成功・失敗いずれの場合も、その例外が
+      `_process_signal()`側の外側try/exceptで完全に捕捉され、Lambda呼び出し
+      自体を失敗させないこと(=この場合IncidentNotifierFunctionのErrorsが
+      増えないこと)。GitHub側の失敗がLINEの成功結果を覆さないことを確認する
+   b  LINE送信が重複・処理中により抑止
+      (outcome ∈ {SUPPRESSED_DUPLICATE, SUPPRESSED_ACTIVE_CLAIM})
+      期待結果: 既存の抑止動作(LINE送信を行わない)がそのまま維持されて
+      いること。GitHub処理はLINEのoutcomeに関わらず試行される設計だが、
+      これは既存の抑止契約を変更するものではない。**「抑止されたので
+      GitHub処理側がLINEを追加送信する」ことを合格条件にしない**
+      (そのような経路はコード上存在しない)
+   c  LINE自体が失敗(outcome ∈ 上記CLAIMED_*、push_messageが例外)
+      期待結果: 既存の`release_claim()`(outcomeがCLAIMED_NEWならfingerprint
+      行を削除。それ以外は行を残したまま`claimed_at`を古い値へ書き換えて
+      即座にstale takeover可能にし、`occurrence_count`を-1して打ち消す)と、
+      例外の再送出(SNS/Lambda retryへ委ねる既存契約)が変わっていないこと。
+      **この場合、IncidentNotifierFunctionのErrorsが増えることは想定内**
+      (LINE自身の既存retry契約による。#508より前から存在する挙動)であり、
+      これを「GitHub経路がLINE経路を壊した」証拠として使わない。
+      outcomeがCLAIMED_NEWでLINEが失敗した場合は、fingerprint行削除後の
+      部分再生成による重大な回帰(既存コードのコメントに実測記録あり)を
+      避けるため、GitHub処理自体が今回スキップされる
+      (`github_safe_to_attempt = False`)。CLAIMED_AFTER_DEDUP_WINDOW /
+      CLAIMED_STALE_TAKEOVERでLINEが失敗した場合はGitHub処理は試行される
+      (LINE失敗との因果関係を混同せず、GitHub側の成否とLINE側のErrors
+      増加を別々に確認する)
+
+   ★ 上記3ケースのうち、対象期間中に自然発生しなかったものは
+     「未観測/検証待ち」とし、確認できなかったことをもってPASS扱いにしない
+     (検証のための人工障害〔LINE認証情報の意図的な無効化等〕は発生させない。
+     32.6参照)
 4  DynamoDB確認       IncidentStateTableをfingerprint単位でGetItemし、
                     github_issue_number・github_issue_create_status・
                     previous_github_issue_number(再作成時のみ)を確認する
