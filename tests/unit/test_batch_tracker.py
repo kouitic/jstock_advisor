@@ -23,8 +23,21 @@ class _FakeTable:
     def __init__(self) -> None:
         self.items: dict[str, dict[str, object]] = {}
 
-    def put_item(self, Item: dict[str, object]) -> None:  # noqa: N803 - boto3のAPI引数名に合わせる
-        self.items[Item["batch_id"]] = dict(Item)  # type: ignore[index]
+    def put_item(
+        self,
+        Item: dict[str, object],  # noqa: N803 - boto3のAPI引数名に合わせる
+        ConditionExpression: str | None = None,  # noqa: N803 - 同上
+    ) -> None:
+        batch_id = Item["batch_id"]  # type: ignore[index]
+        # start_batch()が使う唯一のConditionExpression("attribute_not_exists(batch_id)")
+        # のみを模倣する(Issue #558)。実際のDynamoDBはConditionalCheckFailedException
+        # を送出する。
+        if ConditionExpression == "attribute_not_exists(batch_id)" and batch_id in self.items:
+            raise ClientError(
+                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "boom"}},
+                "PutItem",
+            )
+        self.items[batch_id] = dict(Item)  # type: ignore[index]
 
     def update_item(self, **kwargs: object) -> dict[str, object]:
         key = kwargs["Key"]["batch_id"]  # type: ignore[index]

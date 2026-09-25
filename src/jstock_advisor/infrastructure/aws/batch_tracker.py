@@ -32,6 +32,10 @@ from jstock_advisor.domain.signals.watchlist_screening import WatchlistScoreDeta
 from jstock_advisor.infrastructure.collection_store import resolve_table_name, running_on_lambda
 
 logger = logging.getLogger(__name__)
+# Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
+# module が宣言しないと INFO は出ない)。出力するのはbatch_id(所有者・銘柄コードを含まない
+# 識別子)とbatch_family(enum値)だけであり、PIIを含まない(Issue #558のduplicate検出ログ)。
+logger.setLevel(logging.INFO)
 
 _TABLE_FILE_NAME = "batch_runs.json"  # resolve_table_nameの命名規則(jstock-batch_runs)に合わせる
 _TTL_HOURS = 6  # 集計用の一時データのため、数時間で自動削除する
@@ -270,8 +274,8 @@ def start_batch(
     family: BatchFamily,
     execution_context: ExecutionContext,
     holding_count: int = 0,
-) -> None:
-    """ファンアウト開始時に呼ぶ。ローカル環境・対象0件の場合は何もしない。
+) -> bool:
+    """ファンアウト開始時に呼ぶ。ローカル環境・対象0件の場合は何もせずTrueを返す。
 
     holding_count(統合BUY候補パイプライン2026-07で追加)は、このバッチで
     dispatchされた保有銘柄(HOLDING/BOTH)の総数。finalize側がsector_entriesの
@@ -287,9 +291,17 @@ def start_batch(
     NORMALとして再実行してはならない(Issue #105で永続化契約を是正した直後の
     ため、ここで取り違えると同じ問題を再導入する)。値が無い/未知の項目は
     recovery側でfail-closeする。
+
+    戻り値(Issue #558): Trueは今回の呼び出しがbatch開始権を取得したことを
+    意味する(呼び出し側はfanout等のbatch開始後の副作用を続けてよい)。
+    Falseは同一batch_idが既に存在すること(EventBridge Schedulerのretry等に
+    よるduplicate呼び出し)を意味し、正常なidempotency結果として扱う
+    (呼び出し側はfanout等の副作用を行わずに終了すべきで、ERRORにしない)。
+    total<=0・ローカル環境では、保護すべき状態が無いため常にTrueを返す
+    (従来どおりの無条件no-op)。
     """
     if total <= 0 or not running_on_lambda():
-        return
+        return True
     ttl = int((now + dt.timedelta(hours=_TTL_HOURS)).timestamp())
     item: dict[str, Any] = {
         "batch_id": batch_id,
@@ -308,7 +320,18 @@ def start_batch(
     }
     for category in SUMMARY_CATEGORIES:
         item[category] = 0
-    _table().put_item(Item=item)
+    try:
+        _table().put_item(Item=item, ConditionExpression="attribute_not_exists(batch_id)")
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _TRANSACTION_CONDITION_FAILURE_CODES:
+            logger.info(
+                "start_batch: duplicate batch start ignored batch_id=%s batch_family=%s",
+                batch_id,
+                family.value,
+            )
+            return False
+        raise
 
 
 def record_result(

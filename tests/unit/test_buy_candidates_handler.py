@@ -2674,12 +2674,12 @@ def test_build_unified_targets_skips_holdings_when_exceeding_max_sector_entries(
     recorded: list[dict[str, object]] = []
 
     class _RecordingAudit:
-        def record(self, decision_type: str, **kwargs: object) -> None:
-            recorded.append({"decision_type": decision_type, **kwargs})
+        def record_if_absent(self, audit_id: str, decision_type: str, **kwargs: object) -> None:
+            recorded.append({"audit_id": audit_id, "decision_type": decision_type, **kwargs})
 
     monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: _RecordingAudit())
 
-    targets = handler_module._build_unified_targets(_CONFIG, _NOW)
+    targets = handler_module._build_unified_targets(_CONFIG, _NOW, batch_id="batch-1")
 
     assert len(targets) == 1
     assert targets[0].stock_code == "2914"
@@ -2687,6 +2687,7 @@ def test_build_unified_targets_skips_holdings_when_exceeding_max_sector_entries(
     aborted = [r for r in recorded if r["decision_type"] == "unified_buy_candidate_batch_aborted"]
     assert len(aborted) == 1
     assert aborted[0]["output_values"]["reason"] == "SECTOR_ENTRIES_LIMIT_EXCEEDED"
+    assert aborted[0]["audit_id"] == "unified_buy_candidate_batch_aborted:batch-1"
 
 
 # --- M3.1: buy_candidates_handler.pyの複数owner対応 --------------------------
@@ -2734,16 +2735,17 @@ def test_dispatch_mode_holding_count_counts_unique_stock_codes_not_holding_recor
     monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: holdings)
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        handler_module,
-        "start_batch",
-        lambda batch_id, total, now, family, execution_context, holding_count=0: captured.update(
+
+    def _fake_start_batch(batch_id, total, now, family, execution_context, holding_count=0):
+        captured.update(
             total=total,
             holding_count=holding_count,
             family=family,
             execution_context=execution_context,
-        ),
-    )
+        )
+        return True
+
+    monkeypatch.setattr(handler_module, "start_batch", _fake_start_batch)
     monkeypatch.setattr(handler_module, "dispatch_async", lambda *a, **kw: None)
 
     result = handler_module.handler({}, _FakeContext())

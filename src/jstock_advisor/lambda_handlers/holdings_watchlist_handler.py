@@ -123,6 +123,7 @@ from jstock_advisor.lambda_handlers._market_holiday import (
     SKIP_REASON,
     should_skip_for_market_closed,
 )
+from jstock_advisor.lambda_handlers._scheduling import derive_scheduled_batch_id
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
 from jstock_advisor.services.holding_decision_notification_builder import (
@@ -1935,10 +1936,21 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         )
 
     total = len(holdings)
-    batch_id = f"holdings-watchlist-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    # Issue #558: EventBridge Schedulerのretryで同一論理実行が新しいbatch_idで
+    # 再dispatchされることを防ぐため、event["scheduled_time"]から決定論的に
+    # batch_idを導出する(#65 F-E7と同じ導出ロジック。_scheduling.py参照)。
+    batch_id = derive_scheduled_batch_id("holdings-watchlist", event, now)
     # Issue #57 B2: reconcilerがstatusではなくfamily markerで積極識別するため、
     # 種別と実行文脈をここで必ず永続化する。
-    start_batch(batch_id, total, now, BatchFamily.HOLDINGS_WATCHLIST, execution_context)
+    started = start_batch(batch_id, total, now, BatchFamily.HOLDINGS_WATCHLIST, execution_context)
+    if not started:
+        # Issue #558: 同一batch_idでの2回目の開始(Scheduler retry等)。正常な
+        # idempotency結果として扱い、fanout・通知・進捗初期化のいずれも
+        # 行わずに終了する(ERROR/例外にしない。retryをさらに誘発しない)。
+        logger.info(
+            "holdings_watchlist_handler: duplicate batch start ignored batch_id=%s", batch_id
+        )
+        return {"dispatched_holdings": 0, "skipped": "duplicate_batch_start"}
     if execution_context.is_validation:
         # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、
         # イベント解析直後ではなくこの時点でVALIDATION開始ログを出す。

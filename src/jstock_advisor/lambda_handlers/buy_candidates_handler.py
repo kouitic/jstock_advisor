@@ -142,6 +142,7 @@ from jstock_advisor.lambda_handlers._market_holiday import (
     SKIP_REASON,
     should_skip_for_market_closed,
 )
+from jstock_advisor.lambda_handlers._scheduling import derive_scheduled_batch_id
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
@@ -459,6 +460,7 @@ def _build_unified_targets(
     config: AppConfig,
     now: dt.datetime,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+    batch_id: str | None = None,
 ) -> list[BuyEvaluationTarget]:
     """気になる銘柄と保有銘柄を銘柄コード単位で統合する(要求仕様§2)。
 
@@ -470,6 +472,12 @@ def _build_unified_targets(
     評価はowner別に分割せず銘柄コード単位で1回だけ行う(要求仕様§2)。
     holding_quantity/average_acquisition_priceは全owner分を集約した値とする
     (単純なowner間平均ではなく、購入金額合計÷株数合計の加重平均)。
+
+    batch_id(Issue #558レビュー対応F1): 上記ガード発火時の中断監査記録を
+    `record_if_absent()`で決定的audit_idとして書き込むために使う。Scheduler
+    retryは同一batch_idになるため、retryのたびに監査レコードが重複しない
+    (呼び出し元がbatch_idを渡さない場合はNone。呼び出し元は現状handler()
+    のみでbatch_id確定後に呼ぶため、実際にはNoneにならない)。
     """
     watchlist_names: dict[str, str | None] = {}
     if config.notification.include_watchlist:
@@ -487,7 +495,17 @@ def _build_unified_targets(
                 len(unique_stock_codes),
                 MAX_SECTOR_ENTRIES,
             )
-            AuditService(execution_context=execution_context).record(
+            # Issue #558レビュー対応F1: Scheduler retryは同一batch_idになるため、
+            # record()(呼び出しごとにaudit_idをuuid4で新規生成)のままだと
+            # retryのたびに監査レコードが重複する。record_if_absent()で
+            # batch_id由来の決定的audit_idを使い、2回目以降は書き込まない。
+            audit_id = (
+                f"unified_buy_candidate_batch_aborted:{batch_id}"
+                if batch_id
+                else str(uuid.uuid4())
+            )
+            AuditService(execution_context=execution_context).record_if_absent(
+                audit_id=audit_id,
                 decision_type="unified_buy_candidate_batch_aborted",
                 stock_code=None,
                 input_values={"holding_count": len(unique_stock_codes)},
@@ -2244,12 +2262,17 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         )
 
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
-    targets = _build_unified_targets(config, now, execution_context)
+    # Issue #558: EventBridge Schedulerのretryで同一論理実行が新しいbatch_idで
+    # 再dispatchされることを防ぐため、event["scheduled_time"]から決定論的に
+    # batch_idを導出する(#65 F-E7と同じ導出ロジック。_scheduling.py参照)。
+    # _build_unified_targets()より前に確定させる(レビュー対応F1: 同関数内の
+    # 中断監査記録がbatch_id由来の決定的audit_idを必要とするため)。
+    batch_id = derive_scheduled_batch_id("buy-candidates", event, now)
+    targets = _build_unified_targets(config, now, execution_context, batch_id)
     holding_count = sum(
         1 for t in targets if t.source in (CandidateSource.HOLDING, CandidateSource.BOTH)
     )
-    batch_id = f"buy-candidates-{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    start_batch(
+    started = start_batch(
         batch_id,
         len(targets),
         now,
@@ -2259,6 +2282,14 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         execution_context,
         holding_count=holding_count,
     )
+    if not started:
+        # Issue #558: 同一batch_idでの2回目の開始(Scheduler retry等)。正常な
+        # idempotency結果として扱い、fanout・通知・進捗初期化のいずれも
+        # 行わずに終了する(ERROR/例外にしない。retryをさらに誘発しない)。
+        logger.info(
+            "buy_candidates_handler: duplicate batch start ignored batch_id=%s", batch_id
+        )
+        return {"dispatched": 0, "skipped": "duplicate_batch_start"}
     if execution_context.is_validation:
         # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、
         # イベント解析直後ではなくこの時点でVALIDATION開始ログを出す。

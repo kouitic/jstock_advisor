@@ -1746,10 +1746,13 @@ Resources:
       # Issue #318: _fanout.dispatch_async(InvocationType="Event")による
       # 自己呼び出しと、Reconcilerからの完了リカバリ呼び出しが**非同期**である。
       # 既定は「2回再試行/最大6時間」で、行き先が無いため失敗は静かに消えていた。
-      # ★ 本関数はleaseを1つも取らないため、再試行はそのまま判定の二重実行になる。
-      # ★ ★ 回数を下げても**根治ではない**。1回でも再試行されれば二重実行は起こる
-      #     (dedupトークンの付与は Issue #71 F-D2。未着手)。ここで下げているのは
-      #     **被害の上限**であって、二重実行の可能性そのものではない。
+      # ★ 本関数(子Lambdaへのfanout自体)はdedupトークンを持たないため、この
+      #   自己呼び出しの再試行は個別銘柄の二重評価になりうる(Issue #71 F-D2。
+      #   未着手)。ここで下げているのは**被害の上限**であって、二重実行の
+      #   可能性そのものではない。
+      # ★ 一方、下記ScheduleV2自体の再試行(この関数の**最初の**起動)による
+      #   batch全体の二重dispatchは、Issue #558でbatch_id決定論化+
+      #   start_batch()のatomicity化により防止済み(Input参照)。
       EventInvokeConfig:
         MaximumRetryAttempts: 1
         MaximumEventAgeInSeconds: 3600
@@ -1763,12 +1766,20 @@ Resources:
           Properties:
             ScheduleExpression: "cron(0 8 ? * MON-FRI *)"
             ScheduleExpressionTimezone: Asia/Tokyo
-            # Issue #318: 群A — ファンアウトし、再試行を止めるleaseが無い(実測)。回数を増やすと子Lambdaの二重起動が積み上がる
+            # Issue #318: 群A。#558: batch_id決定論化によりScheduler retryでの
+            # batch全体二重dispatchは防止済み(下記Input参照)。子Lambda
+            # fanoutの再試行による個別銘柄の二重評価はIssue #71 F-D2のまま
+            # (回数を増やすと積み上がるため据え置き)。
             RetryPolicy:
               MaximumRetryAttempts: 1
               MaximumEventAgeInSeconds: 3600
             FlexibleTimeWindow:
               Mode: "OFF"
+            # Issue #558: dispatcher(#65 F-E7)と同じ意味論。Schedulerのcontext
+            # attributeをevent["scheduled_time"]として渡し、derive_scheduled_
+            # batch_id()がbatch_idを決定論的に導出できるようにする(retryで
+            # 同一batch_idになり、start_batch()のatomicityが多重開始を拒否する)。
+            Input: '{"scheduled_time": "<aws.scheduler.scheduled-time>"}'
 
   HoldingsWatchlistFunction:
     Type: AWS::Serverless::Function
@@ -1921,10 +1932,13 @@ Resources:
       # Issue #318: _fanout.dispatch_async(InvocationType="Event")による
       # 自己呼び出しと、Reconcilerからの完了リカバリ呼び出しが**非同期**である。
       # 既定は「2回再試行/最大6時間」で、行き先が無いため失敗は静かに消えていた。
-      # ★ 本関数はleaseを1つも取らないため、再試行はそのまま判定の二重実行になる。
-      # ★ ★ 回数を下げても**根治ではない**。1回でも再試行されれば二重実行は起こる
-      #     (dedupトークンの付与は Issue #71 F-D2。未着手)。ここで下げているのは
-      #     **被害の上限**であって、二重実行の可能性そのものではない。
+      # ★ 本関数(子Lambdaへのfanout自体)はdedupトークンを持たないため、この
+      #   自己呼び出しの再試行は個別銘柄の二重評価になりうる(Issue #71 F-D2。
+      #   未着手)。ここで下げているのは**被害の上限**であって、二重実行の
+      #   可能性そのものではない。
+      # ★ 一方、下記ScheduleV2自体の再試行(この関数の**最初の**起動)による
+      #   batch全体の二重dispatchは、Issue #558でbatch_id決定論化+
+      #   start_batch()のatomicity化により防止済み(Input参照)。
       EventInvokeConfig:
         MaximumRetryAttempts: 1
         MaximumEventAgeInSeconds: 3600
@@ -1941,12 +1955,20 @@ Resources:
           Properties:
             ScheduleExpression: "cron(0 8 ? * MON-FRI *)"
             ScheduleExpressionTimezone: Asia/Tokyo
-            # Issue #318: 群A — ファンアウトし、再試行を止めるleaseが無い(実測)。回数を増やすと子Lambdaの二重起動が積み上がる
+            # Issue #318: 群A。#558: batch_id決定論化によりScheduler retryでの
+            # batch全体二重dispatchは防止済み(下記Input参照)。子Lambda
+            # fanoutの再試行による個別銘柄の二重評価はIssue #71 F-D2のまま
+            # (回数を増やすと積み上がるため据え置き)。
             RetryPolicy:
               MaximumRetryAttempts: 1
               MaximumEventAgeInSeconds: 3600
             FlexibleTimeWindow:
               Mode: "OFF"
+            # Issue #558: dispatcher(#65 F-E7)と同じ意味論。Schedulerのcontext
+            # attributeをevent["scheduled_time"]として渡し、derive_scheduled_
+            # batch_id()がbatch_idを決定論的に導出できるようにする(retryで
+            # 同一batch_idになり、start_batch()のatomicityが多重開始を拒否する)。
+            Input: '{"scheduled_time": "<aws.scheduler.scheduled-time>"}'
 
   DisclosureCheckFunction:
     Type: AWS::Serverless::Function
