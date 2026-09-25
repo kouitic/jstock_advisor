@@ -3638,3 +3638,245 @@ broad credentialの恒久利用)・Issue #359(deploy principalの権限設計)�
 
 本節は Issue #559(design-defect・priority:P2)の実装(PR-1〜PR-3)の一部として
 追加した。判定ロジック・通知内容・保存データ形式・Production挙動は変更していない。
+
+## 32. 本番ジョブ異常のGitHub Issue自動起票(Issue #508。#132 X-9)の Verification Plan(2026-09-25追加)
+
+`IncidentNotifierFunction`(29節の通知経路)へ、本番ジョブ異常のGitHub Issue自動起票・
+コメント追記(`services/incident_github_issue_service.py`)を追加する機能である。
+**本節は`issue_creation_enabled`をfalse→trueへ切り替える際の確認手順のみを扱う。
+切替操作自体・コード変更・config値の変更は本節の対象外**(32.6参照)。
+
+### 32.1 前提
+
+```
+config/incident_notification.yaml の issue_creation_enabled(既定 false)
+  false の間: GitHub API・Secrets Manager呼び出しを一切行わない
+             (正常なスキップ。LINE通知経路〔29節〕には一切影響しない)
+  true化    : deployとは別のHuman Gate(#508 USER決定。追加条件として明記)。
+             Lambda LayerでYAMLを配布する静的設定のため、YAML編集だけでは
+             反映されない(config編集 + 再deployが必要。5.1節のreview_improvement.yaml
+             と同じ制約)
+```
+
+Issue #508 の USER 決定(issuecomment。Phase A の USER_DECISIONS_REQUIRED への回答)。
+
+```
+U-3  ALLOW(PUBLIC repositoryへの自動Issue作成を許可)。ただし
+     Production環境での人工テストIssue作成は禁止
+U-4  EXISTING_GITHUB_APP_REUSE(既存のGitHub App資産〔infrastructure/github/
+     client.py。5.1節でWeeklyReviewFunctionが使うものと同一〕を再利用。
+     新規認証方式は導入しない)
+U-5  OPEN→COMMENT / CLOSED→NEW ISSUE(同一fingerprintの再発時、OPEN Issueには
+     コメント追記、CLOSED後は旧Issue番号参照付きの新規Issueを作成する。
+     reopenはしない)
+```
+
+### 32.2 切替前の確認事項(1): GitHub App資産の疎通確認
+
+`IncidentNotifierFunction`は新規のGitHub Appを作らず、5.1節でセットアップ済みの
+GitHub App資産(`GithubAppSecretArn`/`GithubRepository`のCloudFormation parameter・
+Secrets Managerの秘密鍵)を`WeeklyReviewFunction`と共有する(U-4)。したがって
+本節の確認は**新規セットアップではなく、既存資産が引き続き有効であることの確認**である。
+
+```
+1  Lambda環境変数確認   IncidentNotifierFunctionの環境変数に GITHUB_APP_SECRET_ARN /
+                       GITHUB_REPOSITORY が設定されていること(値そのものではなく
+                       変数名の存在のみをPUBLIC repositoryへ書く。ARN実値は書かない)
+2  Secret疎通確認       secretsmanager:GetSecretValueで復号できること・JSON形式が
+                       {app_id, installation_id, private_key} の3項目を持つこと
+                       (5.1節の既存確認手順と同一。値そのものは記録しない)
+3  GitHub App権限確認   対象リポジトリへのインストールが有効であり、
+                       Issues: Read and write / Metadata: Read-only の権限を
+                       保持していること(GitHub UI。5.1節セットアップ時に付与した
+                       ものが失効・変更されていないかの再確認)
+4  既存機能への相乗り確認 5.1節のWeeklyReviewFunction側(review_improvement.yaml の
+                       issue_creation_enabled)が現在どちらの値でも、本節の確認には
+                       影響しない(secretは共有だが、GithubIssueClientの呼び出しは
+                       関数ごとに独立しており、片方の状態がもう片方の疎通確認結果を
+                       左右しない)
+```
+
+### 32.3 切替前の確認事項(2): labelの非混在確認
+
+```
+config/review_improvement.yaml   issue_labels: [rule-improvement, auto-generated]
+config/incident_notification.yaml issue_labels: [production-incident, auto-generated]
+```
+
+両者は`auto-generated`を共有するが、重複判定・close運用の実体は`auto-generated`
+ではない。`services/incident_github_issue_service.py`の`_SEARCH_LABEL`は
+`"production-incident"`固定であり、stale claim復旧時の実在確認
+(`search_open_issue_by_marker()`)は`production-incident`ラベル**かつ**
+fingerprintマーカー(HTMLコメント)の両方が一致する場合のみ既存Issueとして扱う。
+`rule-improvement`ラベルのIssue(週次改善レビュー由来)を誤って本機能のdedup対象に
+取り込むことはない(実装を実読して確認済み)。
+
+```
+1  既存label確認   切替前に `production-incident` ラベルを持つ既存OPEN Issueが
+                  0件であること(gh issue list --label production-incident)。
+                  0件でなければ、それが本機能によるものか他の経路による手動付与かを
+                  切替前に確認する(手動付与された同名labelがあると、fingerprint
+                  マーカーが一致しない限り実害は無いが、誤認の元になるため)
+2  search label確認  `_SEARCH_LABEL`(コード実読)と
+                  `config/incident_notification.yaml`の`issue_labels`先頭要素が
+                  一致していること(現状は両方"production-incident"。切替前に
+                  再読して確認する)
+```
+
+### 32.4 切替前の確認事項(3): IAM(exact resource scope)の確認
+
+Issue #508 の USER 決定 U-2(PARTIAL/resource-scoped限定でPROCEED。#133 全体の
+解消は待たない条件として「exact ARN指定・wildcard禁止」を付した)に対応する。
+
+```
+1  template確認     infra/template.yaml の IncidentNotifierFunction の Policies で、
+                   secretsmanager:GetSecretValue の Resource が
+                   !Ref GithubAppSecretArn(exact ARN 1件)のみであり、
+                   `*` や `arn:aws:secretsmanager:...:secret:jstock/*` 等の
+                   wildcard/prefixマッチが無いこと(コード実読で確認済み。
+                   デプロイ前にも再確認する)
+2  IncidentStateTableのIAMも同様に確認  dynamodb:GetItem/PutItem/UpdateItem/DeleteItemの
+                   Resourceが!GetAtt IncidentStateTable.Arn(exact ARN)のみで
+                   あり、Scan/Queryの権限が付与されていないこと(GSIが無く
+                   fingerprint単位のみで足りるため。既存設計)
+3  ChangeSet差分確認  デプロイ時のChangeSet CREATEで、上記2つのStatement以外に
+                   IncidentNotifierFunctionへ新たなIAM Permissionが追加されて
+                   いないこと(30〜31節の一般手順どおり、想定外のADD/MODIFYが
+                   無いことを確認してからEXECUTEする)
+```
+
+### 32.5 切替後に確認すること(自然発生のincidentのみ。32.6参照)
+
+```
+1  allowlist確認     実際に作成されたGitHub Issueの本文・コメントが、
+                    IncidentIssueNotice が持つフィールドのみで構成されていること
+                    (job・occurred_at・fingerprint・occurrence_count・
+                    failure_stage・failure_count・consecutive_days・is_ongoing)。
+                    stack trace・生exception message・AWS account ID・ARN・
+                    request ID・secret・tokenのいずれも含まれないこと
+                    (`domain/notification/incident_github_issue_message.py`の
+                    build_incident_issue_body()/build_incident_comment_body()が
+                    出力する固定の文型どおりであることを実物で確認する)
+2  再発契約(U-5)確認  同一fingerprintが再発した場合:
+                      - 前回のIssueがOPENのまま      -> 新規Issueを作らず、
+                        既存Issueへ「### 再発(N回目)」形式のコメントが
+                        追記されること(occurrence_countが前回と異なる)
+                      - 前回のIssueがCLOSED済み       -> reopenされず、
+                        本文冒頭に "Previous issue: #<旧番号>" を含む
+                        新規Issueが作成されること
+                    確認は自然発生時のみ。人工的に再発条件を作らない(32.6)
+
+   ★ 上記は「occurrence_countが実際に増えた場合」の期待結果であり、
+     「同一fingerprintを再受信するたびに必ず新しいコメントが付く」という
+     意味ではない(`services/incident_github_issue_service.py`の
+     `_post_comment()`/`_reconcile_stale_comment()`実読で確認)。
+
+     - 既存OPEN Issueへのコメント追記は**occurrence単位の重複抑止**に従う。
+       `last_commented_occurrence_count == notice.occurrence_count`の場合
+       (今回のoccurrenceについて既に投稿済み)は追加投稿しない
+     - 同一fingerprintの再受信(例: dedup window内でのSNS/Lambda retry)は、
+       LINE側がSUPPRESSEDのままoccurrence_countを進めないことが多く、
+       **同一fingerprintの再受信とoccurrence_countの増加を同一視しない**
+       (occurrence_countは`IncidentStateTracker`の状態から読むのみで、
+       GitHub側の呼び出し自体はoccurrence_countを進めない)
+     - 処理中claim(`comment_claim_occurrence_count`が今回のoccurrenceと
+       一致し、`comment_claim_expires_at`が未失効)の間は、他実行が
+       処理中のため何もしない(無条件の即時投稿を要求しない)。
+       stale claim(claim期限切れ)の場合は、GitHub側の実在確認
+       (`find_comment_by_marker()`)を先に行ってから再claimして投稿する
+       (既存実装のstale takeover契約どおり)
+3  LINE経路からの独立性確認  `lambda_handlers/incident_notifier_handler.py`の
+                    `_process_signal()`/`_send_line()`と
+                    `services/incident_github_issue_service.py`を実読して
+                    確認した設計は次のとおりであり、GitHub処理の成否と
+                    LINE経路の挙動は独立に確認する(いずれのケースも、対象
+                    実行のCloudWatch Logs INFOログ`incident_notifier claim
+                    source=... fingerprint=... outcome=...`でclaim outcomeを
+                    確認したうえで、期待結果と実測を照合する。Lambdaの
+                    ErrorsメトリクスやDynamoDBのstatusだけで因果関係を
+                    断定しない)。
+
+   a  LINE送信対象・LINE成功
+      (outcome ∈ {CLAIMED_NEW, CLAIMED_AFTER_DEDUP_WINDOW,
+       CLAIMED_STALE_TAKEOVER}、`_send_line()`のpush_messageが成功)
+      期待結果: LINEは`mark_sent`済みで正常に完了していること。GitHub処理
+      (`_attempt_github_issue()`)は成功・失敗いずれの場合も、その例外が
+      `_process_signal()`側の外側try/exceptで完全に捕捉され、Lambda呼び出し
+      自体を失敗させないこと(=この場合IncidentNotifierFunctionのErrorsが
+      増えないこと)。GitHub側の失敗がLINEの成功結果を覆さないことを確認する
+   b  LINE送信が重複・処理中により抑止
+      (outcome ∈ {SUPPRESSED_DUPLICATE, SUPPRESSED_ACTIVE_CLAIM})
+      期待結果: 既存の抑止動作(LINE送信を行わない)がそのまま維持されて
+      いること。GitHub処理はLINEのoutcomeに関わらず試行される設計だが、
+      これは既存の抑止契約を変更するものではない。**「抑止されたので
+      GitHub処理側がLINEを追加送信する」ことを合格条件にしない**
+      (そのような経路はコード上存在しない)
+   c  LINE自体が失敗(outcome ∈ 上記CLAIMED_*、push_messageが例外)
+      期待結果: 既存の`release_claim()`(outcomeがCLAIMED_NEWならfingerprint
+      行を削除。それ以外は行を残したまま`claimed_at`を古い値へ書き換えて
+      即座にstale takeover可能にし、`occurrence_count`を-1して打ち消す)と、
+      例外の再送出(SNS/Lambda retryへ委ねる既存契約)が変わっていないこと。
+      **この場合、IncidentNotifierFunctionのErrorsが増えることは想定内**
+      (LINE自身の既存retry契約による。#508より前から存在する挙動)であり、
+      これを「GitHub経路がLINE経路を壊した」証拠として使わない。
+      outcomeがCLAIMED_NEWでLINEが失敗した場合は、fingerprint行削除後の
+      部分再生成による重大な回帰(既存コードのコメントに実測記録あり)を
+      避けるため、GitHub処理自体が今回スキップされる
+      (`github_safe_to_attempt = False`)。CLAIMED_AFTER_DEDUP_WINDOW /
+      CLAIMED_STALE_TAKEOVERでLINEが失敗した場合はGitHub処理は試行される
+      (LINE失敗との因果関係を混同せず、GitHub側の成否とLINE側のErrors
+      増加を別々に確認する)
+
+   ★ 上記3ケースのうち、対象期間中に自然発生しなかったものは
+     「未観測/検証待ち」とし、確認できなかったことをもってPASS扱いにしない
+     (検証のための人工障害〔LINE認証情報の意図的な無効化等〕は発生させない。
+     32.6参照)
+4  DynamoDB確認       IncidentStateTableをfingerprint単位でGetItemし、
+                    github_issue_number・github_issue_create_status・
+                    previous_github_issue_number(再作成時のみ)を確認する
+                    (値そのものはPUBLIC repositoryへ書かない。件数・statusのみ)
+```
+
+### 32.6 禁止事項・この節が決めていないこと
+
+```
+・Production環境での人工的なテストIssue作成は禁止(U-3)。CloudWatch Alarmの
+  人工発火・SNS Publish・Lambdaの手動invokeによる本機能の動作確認は行わない。
+  自然発生のincidentでのみ32.5を確認する
+・issue_creation_enabledをfalseからtrueへ実際に切り替える操作(別Human Gate。
+  本節はその後の確認手順のみ)
+・コード変更・config値の変更(本節はいずれも行わない。#508はコード面では
+  PR #563〔D5〕・PR #565〔D9〕で完了済み)
+・GitHub App本体の新規作成・インストール(5.1節で既に完了済み。本機能は
+  U-4により既存資産を再利用するのみ)
+```
+
+### 32.7 ロールバック手順
+
+```
+1  config/incident_notification.yaml の issue_creation_enabled を true から
+   false へ戻す
+2  sam build && sam deploy で再デプロイする(静的設定のため、config編集単独では
+   反映されない。32.1参照)
+3  ロールバック後もIncidentStateTableの既存レコード(github_issue_number等)と、
+   既に作成済みのGitHub Issueはそのまま残る(削除・close操作は本節の対象外。
+   必要な場合は別のHuman Gateで判断する)
+4  ロールバック後はfalse運用時と同じ挙動に戻る(GitHub API・Secrets Manager
+   呼び出しは発生しない。29節のLINE通知経路には影響しない)
+```
+
+### 32.8 参考
+
+```
+・障害対応runbook(27節。Issue #500)
+・#508 Acceptance Criteria(Issue本文)・USER決定 U-1〜U-5(issuecomment)
+・GitHub App資産のセットアップ手順(5.1節。本節は再実行しない。既存資産の
+  疎通確認のみ)
+・本番ジョブ異常の検知(通知経路)のVerification Plan(29節。Issue #503)
+```
+
+本節はIssue #508(#132 X-9)のPhase B(PR #563・PR #565。コードはmainへmerge済み)
+の残作業として、docsのみ追加した。判定ロジック・通知内容・保存データ形式・
+Production挙動は変更していない。`issue_creation_enabled`の実際の切替はいずれの
+Human Gateも経ておらず、本節の追加によってもProduction上の挙動(既定falseのまま)は
+変わらない。
