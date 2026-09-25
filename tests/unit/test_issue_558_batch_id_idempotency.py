@@ -23,6 +23,13 @@ batch_idになること(回帰)。
 T11: total=0(対象0件)の既存挙動(fanoutなし・duplicate扱いにしない)を
 維持すること。
 T12: 異なるscheduled_time(別batch_id)なら独立して開始できること。
+
+F1(サブちゃんレビュー対応。issuecomment on PR #588): `_build_unified_targets()`の
+MAX_SECTOR_ENTRIES超過時の中断監査記録(`unified_buy_candidate_batch_aborted`)が
+`AuditService.record()`(呼び出しごとにaudit_idをuuid4で新規生成)のままだと、
+Scheduler retry(同一batch_id)のたびに監査レコードが重複していた。
+`record_if_absent()`とbatch_id由来の決定的audit_idへ変更し、同一batch_idでの
+2回目の呼び出しでは記録が増えないことを固定する。
 """
 
 from __future__ import annotations
@@ -429,3 +436,78 @@ def test_t12_a_different_scheduled_time_starts_independently(
     assert second_result == {"dispatched": 1}  # 別batch_idのため拒否されない
     assert len(dispatched) == 2
     assert dispatched[0]["batch_id"] != dispatched[1]["batch_id"]
+
+
+# --- F1(サブちゃんレビュー対応): 中断監査記録の重複防止 ------------------------
+
+
+class _FakeAuditRepository:
+    """AuditLogRepository.save_if_absent()の意味論(決定的audit_idの原子的な
+    条件付き挿入)を最小限で模倣する。"""
+
+    def __init__(self) -> None:
+        self.saved_audit_ids: list[str] = []
+
+    def save_if_absent(self, entry: object) -> bool:
+        audit_id = entry.audit_id  # type: ignore[attr-defined]
+        if audit_id in self.saved_audit_ids:
+            return False
+        self.saved_audit_ids.append(audit_id)
+        return True
+
+
+def test_f1_sector_entries_limit_abort_audit_is_not_duplicated_on_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一batch_id(=Scheduler retry)で_build_unified_targets()が2回呼ばれても、
+    MAX_SECTOR_ENTRIES超過の中断監査記録は1件だけ書かれる(record_if_absent()
+    + batch_id由来の決定的audit_id)。"""
+    from jstock_advisor.services.audit_service import AuditService
+
+    fake_repo = _FakeAuditRepository()
+    monkeypatch.setattr(
+        buy_candidates_handler,
+        "AuditService",
+        lambda *a, **kw: AuditService(repository=fake_repo, **kw),
+    )
+    too_many_holdings = [
+        {"stock_code": str(9000 + i)} for i in range(buy_candidates_handler.MAX_SECTOR_ENTRIES + 1)
+    ]
+    from decimal import Decimal
+
+    from jstock_advisor.domain.entities.enums import AccountType
+    from jstock_advisor.domain.entities.holding import Holding
+    from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
+
+    now = dt.datetime(2026, 7, 29, 7, 0, tzinfo=dt.UTC)
+    holdings = [
+        Holding(
+            owner=DEFAULT_OWNER,
+            holding_id=build_holding_id(DEFAULT_OWNER, h["stock_code"]),
+            stock_code=h["stock_code"],
+            stock_name=f"銘柄{h['stock_code']}",
+            shares=100,
+            average_purchase_price=Decimal("1000"),
+            total_purchase_amount=Decimal("100000"),
+            first_purchase_date=dt.date(2024, 1, 1),
+            last_purchase_date=dt.date(2024, 1, 1),
+            account_type=AccountType.SPECIFIC,
+            created_at=now,
+            updated_at=now,
+        )
+        for h in too_many_holdings
+    ]
+    monkeypatch.setattr(buy_candidates_handler.WatchlistService, "list_items", lambda self: [])
+    monkeypatch.setattr(
+        buy_candidates_handler.PortfolioService, "list_holdings", lambda self: holdings
+    )
+
+    from jstock_advisor.config.loader import load_config
+
+    config = load_config()
+
+    buy_candidates_handler._build_unified_targets(config, now, batch_id="batch-f1")
+    buy_candidates_handler._build_unified_targets(config, now, batch_id="batch-f1")  # retry相当
+
+    assert len(fake_repo.saved_audit_ids) == 1
+    assert fake_repo.saved_audit_ids[0] == "unified_buy_candidate_batch_aborted:batch-f1"
