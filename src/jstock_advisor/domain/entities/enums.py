@@ -1003,13 +1003,9 @@ _BUY_ACTION_LABELS: dict[BuyAction, str] = {
 }
 
 # 購入候補ランキングに含めるBuyAction(価格条件を満たしている状態)。
-BUY_FAMILY_ACTIONS = frozenset(
-    {BuyAction.STRONG_BUY, BuyAction.BUY, BuyAction.SMALL_ENTRY}
-)
+BUY_FAMILY_ACTIONS = frozenset({BuyAction.STRONG_BUY, BuyAction.BUY, BuyAction.SMALL_ENTRY})
 # 価格待ちランキングに含めるBuyAction。
-WATCH_FAMILY_ACTIONS = frozenset(
-    {BuyAction.WATCH_FOR_PRICE, BuyAction.WATCH_BEFORE_EARNINGS}
-)
+WATCH_FAMILY_ACTIONS = frozenset({BuyAction.WATCH_FOR_PRICE, BuyAction.WATCH_BEFORE_EARNINGS})
 
 
 class WatchType(StrEnum):
@@ -1483,3 +1479,16 @@ class ShareholderReturnPolicyType(StrEnum):
     DOE = "DOE"
     BOTH = "BOTH"
     NONE = "NONE"
+
+
+class AvailableCashUpdateType(StrEnum):
+    """AvailableCashの最終更新理由(Issue #584、#128 A1)。
+
+    TRADE_UPDATEは売買継続による残高変更、USER_RECONCILIATIONは利用者が
+    証券会社等の実額と照合して明示的に棚卸しした結果である。両者は
+    last_reconciled_at(棚卸し済みの最終時刻)を更新するかどうかで扱いが
+    分かれる(TRADE_UPDATEでは更新しない)。
+    """
+
+    TRADE_UPDATE = "TRADE_UPDATE"
+    USER_RECONCILIATION = "USER_RECONCILIATION"
