@@ -148,7 +148,7 @@ _QUALITY_FIELDS = (
 @pytest.mark.parametrize("value", NON_FINITE)
 def test_company_quality_weights_rejects_non_finite(config: Any, field: str, value: float) -> None:
     base = _dump(config.holding_decision.company_quality_weights)
-    with pytest.raises(ValidationError, match="0以上の有限値"):
+    with pytest.raises(ValidationError, match="有限値"):
         CompanyQualityWeights(**{**base, field: value})
 
 
@@ -164,6 +164,21 @@ def test_company_quality_weights_rejects_zero_weight_is_not_introduced(config: A
     assert CompanyQualityWeights(**weights).governance_listing_risk == 0.0
 
 
+def test_company_quality_weights_negative_sign_contract_is_unchanged(config: Any) -> None:
+    """サブちゃんレビュー(PR #571 F1): 修正前は項目ごとの下限検査が無く、有限の負値も
+    合計検査(50点)だけ通れば受理されていた。#538(NaN/inf対策)の範囲外の新規制約を
+    入れないため、有限の負値は引き続き受理する(isfinite以外の新しい制約を入れていない
+    ことの直接固定。#5 RiskSignal.base_pointsと同じ判断)。"""
+    base = _dump(config.holding_decision.company_quality_weights)
+    moved = base["governance_listing_risk"] + 1.0
+    weights = {
+        **base,
+        "governance_listing_risk": -1.0,
+        "governance_going_concern": base["governance_going_concern"] + moved,
+    }
+    assert CompanyQualityWeights(**weights).governance_listing_risk == -1.0
+
+
 def test_company_quality_weights_rejects_cancelling_infinities(config: Any) -> None:
     """+infと-infは合計がNaNになり`abs(total - 50) > 0.01`がFalse=合格へ倒れる。"""
     base = _dump(config.holding_decision.company_quality_weights)
@@ -175,7 +190,7 @@ def test_company_quality_weights_rejects_cancelling_infinities(config: Any) -> N
     total = sum(broken.values())
     assert math.isnan(total)
     assert not abs(total - 50.0) > 0.01  # 修正前の合計検査は通ってしまう
-    with pytest.raises(ValidationError, match="0以上の有限値"):
+    with pytest.raises(ValidationError, match="有限値"):
         CompanyQualityWeights(**broken)
 
 
@@ -203,7 +218,7 @@ def test_investment_thesis_other_weights_reject_non_finite(
     config: Any, field: str, value: float
 ) -> None:
     base = _dump(config.holding_decision.investment_thesis_weights)
-    with pytest.raises(ValidationError, match="0以上の有限値"):
+    with pytest.raises(ValidationError, match="有限値"):
         InvestmentThesisWeights(**{**base, field: value})
 
 
@@ -229,11 +244,25 @@ def test_investment_thesis_zero_is_still_legal_for_other_weights(config: Any) ->
     assert InvestmentThesisWeights(**weights).benefit_condition == 0.0
 
 
+def test_investment_thesis_other_weights_negative_sign_contract_is_unchanged(config: Any) -> None:
+    """サブちゃんレビュー(PR #571 F1)対応: dividend_policy以外の5項目には符号契約が
+    元から無く、有限の負値も合計検査だけ通れば受理されていた。#538の範囲外の新規制約
+    (>=0)を入れないため、有限の負値は引き続き受理する。"""
+    base = _dump(config.holding_decision.investment_thesis_weights)
+    moved = base["benefit_condition"] + 1.0
+    weights = {
+        **base,
+        "benefit_condition": -1.0,
+        "total_yield": base["total_yield"] + moved,
+    }
+    assert InvestmentThesisWeights(**weights).benefit_condition == -1.0
+
+
 def test_investment_thesis_weights_reject_cancelling_infinities(config: Any) -> None:
     base = _dump(config.holding_decision.investment_thesis_weights)
     broken = {**base, "total_yield": math.inf, "custom_conditions": -math.inf}
     assert math.isnan(sum(broken.values()))
-    with pytest.raises(ValidationError, match="0以上の有限値"):
+    with pytest.raises(ValidationError, match="有限値"):
         InvestmentThesisWeights(**broken)
 
 
@@ -253,7 +282,7 @@ _RISK_CAP_FIELDS = (
 @pytest.mark.parametrize("value", NON_FINITE)
 def test_risk_category_caps_reject_non_finite(config: Any, field: str, value: float) -> None:
     base = _dump(config.holding_decision_risk.category_caps)
-    with pytest.raises(ValidationError, match="0以上の有限値"):
+    with pytest.raises(ValidationError, match="有限値"):
         RiskCategoryCaps(**{**base, field: value})
 
 
@@ -263,7 +292,7 @@ def test_risk_category_caps_reject_cancelling_infinities(config: Any) -> None:
     total = sum(broken.values())
     assert math.isnan(total)
     assert not abs(total - 100.0) > 0.01
-    with pytest.raises(ValidationError, match="0以上の有限値"):
+    with pytest.raises(ValidationError, match="有限値"):
         RiskCategoryCaps(**broken)
 
 
@@ -271,6 +300,20 @@ def test_risk_category_caps_sum_check_still_applies(config: Any) -> None:
     base = _dump(config.holding_decision_risk.category_caps)
     with pytest.raises(ValidationError, match="合計は100点"):
         RiskCategoryCaps(**{**base, "structural_change": base["structural_change"] + 1.0})
+
+
+def test_risk_category_caps_negative_sign_contract_is_unchanged(config: Any) -> None:
+    """サブちゃんレビュー(PR #571 F1)対応: 修正前は項目ごとの下限検査が無く、有限の
+    負値も合計検査(100点)だけ通れば受理されていた。#538の範囲外の新規制約(>=0)を
+    入れないため、有限の負値は引き続き受理する。"""
+    base = _dump(config.holding_decision_risk.category_caps)
+    moved = base["structural_change"] + 1.0
+    caps = {
+        **base,
+        "structural_change": -1.0,
+        "financial_crisis": base["financial_crisis"] + moved,
+    }
+    assert RiskCategoryCaps(**caps).structural_change == -1.0
 
 
 # --------------------------------------------------------------------------
@@ -336,7 +379,7 @@ def test_undervaluation_category_caps_reject_non_finite(
     config: Any, field: str, value: float
 ) -> None:
     base = _dump(config.buy_decision.undervaluation_category_caps)
-    with pytest.raises(ValidationError, match="0以上の有限値"):
+    with pytest.raises(ValidationError, match="有限値"):
         UndervaluationCategoryCaps(**{**base, field: value})
 
 
@@ -346,7 +389,7 @@ def test_undervaluation_category_caps_reject_cancelling_infinities(config: Any) 
     total = sum(broken.values())
     assert math.isnan(total)
     assert not abs(total - 20.0) > 1e-9
-    with pytest.raises(ValidationError, match="0以上の有限値"):
+    with pytest.raises(ValidationError, match="有限値"):
         UndervaluationCategoryCaps(**broken)
 
 
@@ -354,6 +397,16 @@ def test_undervaluation_category_caps_sum_check_still_applies(config: Any) -> No
     base = _dump(config.buy_decision.undervaluation_category_caps)
     with pytest.raises(ValidationError, match="合計は20点"):
         UndervaluationCategoryCaps(**{**base, "yield": base["yield"] + 1.0})
+
+
+def test_undervaluation_category_caps_negative_sign_contract_is_unchanged(config: Any) -> None:
+    """サブちゃんレビュー(PR #571 F1)対応: 修正前は項目ごとの下限検査が無く、有限の
+    負値も合計検査(20点)だけ通れば受理されていた。#538の範囲外の新規制約(>=0)を
+    入れないため、有限の負値は引き続き受理する。"""
+    base = _dump(config.buy_decision.undervaluation_category_caps)
+    moved = base["yield"] + 1.0
+    caps = {**base, "yield": -1.0, "fair_value": base["fair_value"] + moved}
+    assert UndervaluationCategoryCaps(**caps).yield_ == -1.0
 
 
 # --------------------------------------------------------------------------

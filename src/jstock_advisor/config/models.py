@@ -1648,18 +1648,22 @@ class UndervaluationCategoryCaps(StrictModel):
     market_price_action: float
 
     @model_validator(mode="after")
-    def _check_finite_non_negative(self) -> UndervaluationCategoryCaps:
+    def _check_finite(self) -> UndervaluationCategoryCaps:
         # Issue #538: 合計20点の検査だけでは、NaN(比較が常にFalse)や、2項目へ入れた
         # +infと-infがNaNへ相殺する組み合わせがすり抜ける。項目ごとに先に弾く。
+        # ★ サブちゃんレビュー(PR #571 F1): 修正前は項目ごとの下限検査自体が無く、
+        #   有限の負値も合計検査だけを通れば受理されていた。符号制約は#538(NaN/inf対策)
+        #   の範囲外の新規semanticであり、RiskSignal.base_pointsでの判断(符号契約が
+        #   既存に無いため新設しない)と一貫させ、有限性のみを要求する(範囲を狭めた)。
         for name, value in (
             ("valuation_multiple", self.valuation_multiple),
             ("yield", self.yield_),
             ("fair_value", self.fair_value),
             ("market_price_action", self.market_price_action),
         ):
-            if not (math.isfinite(value) and value >= 0):
+            if not math.isfinite(value):
                 raise ValueError(
-                    f"undervaluation_category_capsの{name}は0以上の有限値である必要があります"
+                    f"undervaluation_category_capsの{name}は有限値である必要があります"
                     f"(現在{value}点)"
                 )
         return self
@@ -1985,9 +1989,13 @@ class CompanyQualityWeights(StrictModel):
     governance_listing_risk: float
 
     @model_validator(mode="after")
-    def _check_finite_non_negative(self) -> CompanyQualityWeights:
+    def _check_finite(self) -> CompanyQualityWeights:
         # Issue #538: 合計50点の検査だけでは、NaN(`abs(total - 50.0) > 0.01`が常にFalse)や、
         # 2項目へ入れた+infと-infがNaNへ相殺する組み合わせがすり抜ける。項目ごとに先に弾く。
+        # ★ サブちゃんレビュー(PR #571 F1): 修正前は項目ごとの下限検査自体が無く、
+        #   有限の負値も合計検査だけを通れば受理されていた。符号制約は#538(NaN/inf対策)
+        #   の範囲外の新規semanticであり、RiskSignal.base_pointsでの判断(符号契約が
+        #   既存に無いため新設しない)と一貫させ、有限性のみを要求する(範囲を狭めた)。
         for name, value in (
             ("financial_health_equity_ratio", self.financial_health_equity_ratio),
             ("financial_health_debt_excess", self.financial_health_debt_excess),
@@ -2000,10 +2008,9 @@ class CompanyQualityWeights(StrictModel):
             ("governance_going_concern", self.governance_going_concern),
             ("governance_listing_risk", self.governance_listing_risk),
         ):
-            if not (math.isfinite(value) and value >= 0):
+            if not math.isfinite(value):
                 raise ValueError(
-                    f"企業品質スコアの{name}の配点は0以上の有限値である必要があります"
-                    f"(現在{value}点)"
+                    f"企業品質スコアの{name}の配点は有限値である必要があります(現在{value}点)"
                 )
         return self
 
@@ -2051,10 +2058,13 @@ class InvestmentThesisWeights(StrictModel):
         return self
 
     @model_validator(mode="after")
-    def _check_other_weights_finite_non_negative(self) -> InvestmentThesisWeights:
+    def _check_other_weights_finite(self) -> InvestmentThesisWeights:
         # Issue #538: #259はdividend_policyだけを守った。残りの5項目は合計50点の検査しか
-        # 無く、NaN(比較が常にFalse)や+infと-infの相殺がすり抜ける。0点は既存の検査でも
-        # 許されているため引き続き許す(絶対条件のdividend_policyのみ#259で0を禁じている)。
+        # 無く、NaN(比較が常にFalse)や+infと-infの相殺がすり抜ける。
+        # ★ サブちゃんレビュー(PR #571 F1): 修正前は項目ごとの下限検査自体が無く、
+        #   有限の負値も合計検査だけを通れば受理されていた。符号制約は#538(NaN/inf対策)
+        #   の範囲外の新規semanticであり、RiskSignal.base_pointsでの判断と一貫させ、
+        #   有限性のみを要求する(範囲を狭めた。dividend_policyの>0契約は#259のまま不変)。
         for name, value in (
             ("total_yield", self.total_yield),
             ("benefit_condition", self.benefit_condition),
@@ -2062,9 +2072,9 @@ class InvestmentThesisWeights(StrictModel):
             ("financial_premise", self.financial_premise),
             ("custom_conditions", self.custom_conditions),
         ):
-            if not (math.isfinite(value) and value >= 0):
+            if not math.isfinite(value):
                 raise ValueError(
-                    f"投資ストーリー維持スコアの{name}の配点は0以上の有限値である必要があります"
+                    f"投資ストーリー維持スコアの{name}の配点は有限値である必要があります"
                     f"(現在{value}点)"
                 )
         return self
@@ -2270,9 +2280,13 @@ class RiskCategoryCaps(StrictModel):
     structural_change: float
 
     @model_validator(mode="after")
-    def _check_finite_non_negative(self) -> RiskCategoryCaps:
+    def _check_finite(self) -> RiskCategoryCaps:
         # Issue #538: 合計100点の検査だけでは、NaN(比較が常にFalse)や、2項目へ入れた
         # +infと-infがNaNへ相殺する組み合わせがすり抜ける。項目ごとに先に弾く。
+        # ★ サブちゃんレビュー(PR #571 F1): 修正前は項目ごとの下限検査自体が無く、
+        #   有限の負値も合計検査だけを通れば受理されていた。符号制約は#538(NaN/inf対策)
+        #   の範囲外の新規semanticであり、RiskSignal.base_pointsでの判断と一貫させ、
+        #   有限性のみを要求する(範囲を狭めた)。
         for name, value in (
             ("business_cashflow_deterioration", self.business_cashflow_deterioration),
             ("shareholder_return_deterioration", self.shareholder_return_deterioration),
@@ -2280,10 +2294,9 @@ class RiskCategoryCaps(StrictModel):
             ("governance_and_listing_risk", self.governance_and_listing_risk),
             ("structural_change", self.structural_change),
         ):
-            if not (math.isfinite(value) and value >= 0):
+            if not math.isfinite(value):
                 raise ValueError(
-                    f"リスク控除カテゴリ上限の{name}は0以上の有限値である必要があります"
-                    f"(現在{value}点)"
+                    f"リスク控除カテゴリ上限の{name}は有限値である必要があります(現在{value}点)"
                 )
         return self
 
