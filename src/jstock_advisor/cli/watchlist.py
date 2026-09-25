@@ -85,7 +85,13 @@ def add_item(
         patch["notify_enabled"] = notify
 
     service = WatchlistService()
-    item = service.add_item(stock_code=stock_code, patch=patch)
+    try:
+        item = service.add_item(stock_code=stock_code, patch=patch)
+    except ValueError as e:
+        # WatchlistFieldOwnershipError・ConcurrentUpdateError(Issue #530。
+        # いずれもValueError派生)を含む。サブちゃんレビューF4対応。
+        typer.echo(str(e))
+        raise typer.Exit(code=1) from e
     typer.echo(f"登録しました: {item.stock_code} {item.stock_name or ''}")
 
 

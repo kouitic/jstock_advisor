@@ -120,9 +120,8 @@ def conditional_put_transact_item(table_name: str, put: ConditionalPut) -> dict[
         }
     }
 
-def conditional_delete_transact_item(
-    table_name: str, delete: ConditionalDelete
-) -> dict[str, Any]:
+
+def conditional_delete_transact_item(table_name: str, delete: ConditionalDelete) -> dict[str, Any]:
     """ConditionalDeleteをTransactWriteItemsのDelete項目へ変換する。"""
     return {
         "Delete": {
@@ -134,15 +133,6 @@ def conditional_delete_transact_item(
         }
     }
 
-
-def unconditional_put_transact_item(table_name: str, item: dict[str, Any]) -> dict[str, Any]:
-    """条件を付与しないPut項目(冪等なupsertにのみ使う)。"""
-    return {
-        "Put": {
-            "TableName": table_name,
-            "Item": {k: serialize(v) for k, v in item.items()},
-        }
-    }
 
 def is_safe_business_conflict(error: ClientError) -> bool:
     """安全に「もう一度操作してください」へ変換してよい業務競合か判定する

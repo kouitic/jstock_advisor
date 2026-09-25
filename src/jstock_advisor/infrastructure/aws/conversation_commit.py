@@ -9,8 +9,9 @@ TransactWriteItemsによる単一の原子コミットとして実行する(実�
   2. Transaction Put(transaction_id = operation_id、決定的ID化)
   3. PurchaseLotのPut/Update/Delete(BUY/SELLのみ、既存アイテムは楽観ロック。追加条件1)
   4. HoldingのPut/Delete(BUY/SELLのみ、既存アイテムは楽観ロック。追加条件1)
-  または(WATCHの場合)WatchlistItemのPut(冪等なため楽観ロック無し。pauseの
-  ConditionCheckも含めない。WATCHはHoldings/PurchaseLotsを更新しないため対象外)
+  または(WATCHの場合)WatchlistItemのPut(Issue #530以降、既存アイテムは
+  楽観ロック。pauseのConditionCheckは含めない。WATCHはHoldings/PurchaseLotsを
+  更新しないため対象外)
 
 DynamoDBが「全部成功 or 全部不成功」を保証するため、「Transactionのみ登録
 済みでHoldingsが未更新」のような部分状態は構造的に発生しない。
@@ -40,9 +41,7 @@ from boto3.dynamodb.types import TypeSerializer
 
 from jstock_advisor.domain.entities.enums import ConversationAction
 from jstock_advisor.domain.entities.transaction import Transaction
-from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.aws import conversation_state_store, dynamodb_transaction
-from jstock_advisor.infrastructure.aws.dynamodb_store import to_dynamo_item
 from jstock_advisor.infrastructure.collection_store import resolve_table_name
 from jstock_advisor.services.write_plan import (
     ConditionalPut,
@@ -70,10 +69,6 @@ _TRANSACTION_CONFLICT_RETRY_BASE_DELAY_SECONDS = 0.05
 _serializer = TypeSerializer()
 
 
-
-
-
-
 def _trading_pause_condition_check_item() -> dict[str, Any]:
     """BUY/SELL確定と同一トランザクションでTradingPauseConfig.pause_buy_sell
     を検証する(コードレビュー対応: サービス層でのpause確認とTransactWriteItems
@@ -95,10 +90,6 @@ def _trading_pause_condition_check_item() -> dict[str, Any]:
             "ExpressionAttributeValues": {":not_paused": dynamodb_transaction.serialize(False)},
         }
     }
-
-
-
-
 
 
 def commit_buy(
@@ -146,9 +137,7 @@ def commit_sell(
     ]
     lots_table = resolve_table_name(_PURCHASE_LOTS_TABLE_FILE)
     for lot_delete in plan.lot_deletes:
-        items.append(
-            dynamodb_transaction.conditional_delete_transact_item(lots_table, lot_delete)
-        )
+        items.append(dynamodb_transaction.conditional_delete_transact_item(lots_table, lot_delete))
     for lot_put in plan.lot_puts:
         items.append(dynamodb_transaction.conditional_put_transact_item(lots_table, lot_put))
 
@@ -170,21 +159,24 @@ def commit_sell(
 def commit_watch(
     user_id: str,
     expected_operation_id: str,
-    watchlist_item: WatchlistItem,
+    plan: ConditionalPut,
     now: dt.datetime,
 ) -> bool:
-    """WatchlistService.add_item()と同じくupsertで自然に冪等なため、
-    WatchlistItem自体には楽観ロック条件を付与しない(実装プランv2 3節)。
+    """Issue #530: `plan`はWatchlistService.build_add_item_plan()の戻り値
+    (WatchlistItem本体 + 計画構築時点で読み取った既存アイテムの生JSON)を
+    そのまま渡す。既存アイテムには楽観ロック条件(#data = :expected_data)を
+    付与する(以前はupsertで自然に冪等という理由で無条件だったが、計画構築
+    〔propose〕から本コミット〔confirm。利用者のLINE操作を挟むため間隔が
+    空きうる〕までの間に別経路で変更されていた場合を検出できていなかった)。
     ConversationStateのclaim消費とウォッチリスト登録を同一トランザクション
-    にすることで、片方だけ成立する状態を避ける点のみが目的。
+    にすることで、片方だけ成立する状態を避ける点も従来どおり維持する。
     """
     items = [
         conversation_state_store.build_confirm_delete_transact_item(
             user_id, ConversationAction.WATCH, expected_operation_id, now
         ),
-        dynamodb_transaction.unconditional_put_transact_item(
-            resolve_table_name(_WATCHLIST_TABLE_FILE),
-            to_dynamo_item(watchlist_item, "stock_code"),
+        dynamodb_transaction.conditional_put_transact_item(
+            resolve_table_name(_WATCHLIST_TABLE_FILE), plan
         ),
     ]
     return dynamodb_transaction.commit(items)
