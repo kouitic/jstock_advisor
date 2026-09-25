@@ -31,6 +31,13 @@ class AvailableCash(Entity):
       棚卸しした最終時刻。TRADE_UPDATEでupdated_atが新しくなっても
       last_reconciled_atは更新しない(売買継続と棚卸し済みを混同しない)。
       未棚卸しの場合はNone。
+
+    ★ A1(本Issue)ではこの契約を**強制する仕組みを持たない**(entity/
+      repository層はどちらの値を引き継ぐかを自動判断しない。呼び出し側が
+      明示的にlast_reconciled_atを引き継いだ新しいインスタンスを構築する
+      ことに依存する)。TRADE_UPDATE経路(trade登録時のcash減算等)はA2/A3
+      〔trade + available cash atomicity〕のscopeであり、この契約を実際に
+      強制する責務はA2/A3の実装時に持たせること(サブちゃんレビュー#587 F1)。
     """
 
     owner: str

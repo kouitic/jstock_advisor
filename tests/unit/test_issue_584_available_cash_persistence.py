@@ -53,24 +53,17 @@ def test_t1_owner_a_and_owner_b_are_independent(tmp_path) -> None:
 # --- T2: available_cash負値拒否 -------------------------------------------------------
 
 
-def test_t2_negative_available_cash_is_rejected() -> None:
+@pytest.mark.parametrize("negative_value", [Decimal("-1"), Decimal("-0.01")])
+def test_t2_negative_available_cash_is_rejected(negative_value: Decimal) -> None:
+    """整数境界(-1)と小数境界(-0.01)の両方で拒否されることを固定する。
+
+    実装(_check_non_negative)を実際に一時的に無効化して赤くなることを確認
+    する手作業のmutation testは、PR本文のNegative verification節に記録した
+    (production codeを変更する必要があるため、恒久的なテストとしては
+    ここへ含めていない。サブちゃんレビューF2対応)。
+    """
     with pytest.raises(ValidationError, match="0以上"):
-        _record(available_cash=Decimal("-1"))
-
-
-def test_t2_negative_available_cash_negative_verification() -> None:
-    """反証: 負値拒否のvalidatorを外した場合に構築が通ってしまうことを、実装の
-    関数自身ではなく直接のpydantic構築で確認する(このテスト自体はvalidatorの
-    存在を前提としないため、is_deficit的な自己参照にはならない)。"""
-    # AvailableCashのバリデータが機能していない場合、この構築はValidationErrorに
-    # ならずに通ってしまう。したがってT2(上記)がこの回帰を検出する。
-    with pytest.raises(ValidationError):
-        AvailableCash(
-            owner="owner-a",
-            available_cash=Decimal("-0.01"),
-            updated_at=_NOW,
-            last_update_type=AvailableCashUpdateType.TRADE_UPDATE,
-        )
+        _record(available_cash=negative_value)
 
 
 # --- T3: 0円は合法 --------------------------------------------------------------------
@@ -124,11 +117,13 @@ def test_t7_user_reconciliation_is_persisted(tmp_path) -> None:
 # --- T9: reconciliation時のみlast_reconciled_at更新可能 -------------------------------
 
 
-def test_t8_trade_update_does_not_advance_last_reconciled_at(tmp_path) -> None:
-    """呼び出し側の責務であることを固定する: TRADE_UPDATEで更新する場合は、
-    呼び出し側が前回のlast_reconciled_atを引き継いだ新しいAvailableCashを
-    構築してreplace_if_raw_matches()へ渡す(repository自体はどちらの値を
-    引き継ぐかを判断しない、という契約をテストで示す)。"""
+def test_t8_last_reconciled_at_is_preserved_when_caller_carries_it_forward(tmp_path) -> None:
+    """呼び出し側が前回のlast_reconciled_atを明示的に引き継いだ場合、その値が
+    保存されることを固定する(repository/entity層はどちらの値を引き継ぐかを
+    自動では判断しない。判断・強制の責務はA1のscope外であり、将来のA2/A3
+    〔trade+available cash atomicity〕側で担う。サブちゃんレビューF1対応:
+    本テストは「repositoryが勝手に更新しないこと」の強い主張ではなく、
+    「呼び出し側が引き継いだ値がそのまま保存されること」のみを確認する)。"""
     repo = AvailableCashRepository(store_dir=tmp_path)
     original = _record(
         available_cash=Decimal("1000"),
@@ -222,10 +217,17 @@ def test_t11_stale_update_is_rejected_by_cas(tmp_path) -> None:
     assert repo.get("owner-a").available_cash == Decimal("800")
 
 
-def test_t11_negative_verification_cas_actually_detects_conflict(tmp_path) -> None:
-    """反証: expected_raw_dataを常に「現在の実際の生値」に差し替えてしまうと
-    (CASを無効化した場合と等価)、本来検知すべき競合が検知できなくなることを
-    示す。T11本体はこの誤りが無いことを確認済み(stale_rawを使い続けている)。"""
+def test_caller_misuse_of_always_fresh_raw_data_defeats_cas(tmp_path) -> None:
+    """これはCAS機構自体の反証テストではない(サブちゃんレビューF2対応:
+    誤って「negative_verification」と名付けていたが、実装を変異させておらず
+    本物の反証ではなかった)。CASの安全性は呼び出し側が「更新前に読んだ
+    raw値」をexpected_raw_dataへ渡すことに懸かっており、呼び出し側が誤って
+    都度`get_raw()`し直した値を渡すと、古い前提に基づく更新でも常に成功して
+    しまう、という**呼び出し側の誤用パターン**を記録するデモンストレーション
+    である。CAS実装自体の反証(replace_if_raw_matches()を無条件upsert()へ
+    変異させ、T11本体が正しく赤くなることの確認)はPR本文のNegative
+    verification節に記録した(production codeを変更する必要があるため、
+    恒久的なテストとしてはここへ含めていない)。"""
     repo = AvailableCashRepository(store_dir=tmp_path)
     original = _record(available_cash=Decimal("1000"))
     repo.initialize(original)
@@ -233,8 +235,6 @@ def test_t11_negative_verification_cas_actually_detects_conflict(tmp_path) -> No
     first_update = original.model_copy(update={"available_cash": Decimal("800")})
     repo.replace_if_raw_matches("owner-a", repo.get_raw("owner-a"), first_update)
 
-    # CASを無効化した場合の挙動(比較用。expected_raw_dataを都度最新値に
-    # 差し替えると、古い前提に基づく更新でも常に成功してしまう)。
     always_fresh_raw = repo.get_raw("owner-a")
     second_update = first_update.model_copy(update={"available_cash": Decimal("700")})
     assert repo.replace_if_raw_matches("owner-a", always_fresh_raw, second_update)
