@@ -360,7 +360,15 @@ def _patch_holding_decision(
     )
 
     def _evaluate(self: object, holding: Holding, now: dt.datetime, *a: object, **kw: object):
-        result = results[holding.stock_code]
+        # サブちゃんレビュー(PR #567 F1): 本番のholding_decision_service.py:408は
+        # 呼び出しごとに新しいuuid4を発行する。同一インスタンスをそのまま2回返すと、
+        # 決定的上書きの有無に関わらずholding_decision_result_idが2回の呼び出しで
+        # 偶然一致してしまい(同一object参照のため)、#528の決定的ID化の効果が
+        # テストで検証できなくなる。呼び出しごとに新しいuuid4を発行し、本番と
+        # 同じ条件(呼び出しごとに異なる素のID)を再現する。
+        result = results[holding.stock_code].model_copy(
+            update={"holding_decision_result_id": str(uuid.uuid4())}
+        )
         return HoldingDecisionEvaluationOutcome(
             stock_code=holding.stock_code, result=result, data_error=None, integrity_error=False
         )
@@ -623,6 +631,135 @@ def test_n8_reverting_to_uuid4_and_save_changes_the_result(
         "修正前ロジックの再現でも1件しか保存されなかった(反証が本Issueの欠陥を"
         "正しく捉えられていない)"
     )
+
+
+# --- F3(サブちゃんレビュー PR #567): PROFIT_TAKING経路でのbatch_id確定時の -----------
+# --- 決定的ID使用を直接固定する(従来はtest_n2のdedup経由でのみ間接確認していた) ---
+
+
+def test_profit_taking_batch_id_not_none_uses_deterministic_recommendation_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """F3: PROFIT_TAKING経路でbatch_idが確定している場合、保存されるRecommendationの
+    recommendation_idは`_deterministic_recommendation_id(batch_id, holding_id,
+    "PROFIT_TAKING")`と一致する(analyze()が返した素のIDのままではない)。
+
+    test_n2はこの分岐を通ってdedupの結果(SAVED_COUNT==1)だけを見ており、
+    ID自体がPROFIT_TAKING経路で実際に上書きされていることは検証していなかった。
+    """
+    _patch_common(monkeypatch, tmp_path)
+    _patch_profit_taking(monkeypatch, {_STOCK_CODE: _minimal_recommendation()})
+
+    handler_module.handler(_event("batch-528-f3"), _FakeContext())
+
+    repo = RecommendationRepository(store_dir=tmp_path)
+    [saved] = [r for r in repo.list_all() if r.stock_code == _STOCK_CODE]
+    expected_id = handler_module._deterministic_recommendation_id(
+        "batch-528-f3", _HOLDING_ID, "PROFIT_TAKING"
+    )
+    assert saved.recommendation_id == expected_id
+
+
+# --- F2(サブちゃんレビュー PR #567): insert_if_absent()をsave()へ戻すと ----------------
+# --- (a)例外が_process_single_holdingで飲み込まれ"failed"になる、または ---------------
+# --- (b)保存件数が増える、のいずれかを検知する回帰テスト(4箇所それぞれ) --------------
+#
+# save()は既存ID保存時にValueErrorを送出する非upsertの契約であり、insert_if_absent()
+# 無しで決定的IDだけを導入すると、2回目の配信は毎回ValueErrorになる。
+# _process_single_hodling()のexcept Exceptionがこれを飲み込み、保存件数は1件のまま
+# 変わらないため、「保存件数==1」だけを見るテスト(N1〜N4)ではこの回帰を検知できない
+# (2回目の呼び出し結果がfailedになっていることを別途確認する必要がある)。
+
+
+def _revert_insert_if_absent_to_save(monkeypatch: pytest.MonkeyPatch, repo_class: type) -> None:
+    def _reverted(self: object, item: object) -> bool:
+        # #528以前の実装(insert_if_absent()を使わないplainなsave())を再現する。
+        self.save(item)
+        return True
+
+    monkeypatch.setattr(repo_class, "insert_if_absent", _reverted)
+
+
+def test_f2_legacy_sell_reverting_to_save_fails_second_delivery_instead_of_duplicating(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """F2-1(LEGACY_SELL): `_notify_legacy_sell_and_build_result`のinsert_if_absent()を
+    save()相当へ戻すと、2回目の配信はValueErrorになり"failed"扱いになる
+    (保存件数が2件に増えるのではない)。"""
+    _patch_common(monkeypatch, tmp_path)
+    _patch_legacy_sell(monkeypatch, {_STOCK_CODE: _minimal_recommendation()})
+    _revert_insert_if_absent_to_save(monkeypatch, RecommendationRepository)
+
+    first = handler_module.handler(_event("batch-528-f2-legacy"), _FakeContext())
+    second = handler_module.handler(_event("batch-528-f2-legacy"), _FakeContext())
+
+    assert not first.get("failed")
+    assert second.get("failed") is True
+    repo = RecommendationRepository(store_dir=tmp_path)
+    assert len([r for r in repo.list_all() if r.stock_code == _STOCK_CODE]) == 1
+
+
+def test_f2_profit_taking_reverting_to_save_fails_second_delivery_instead_of_duplicating(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """F2-2(PROFIT_TAKING): 同様に、PROFIT_TAKING経路のinsert_if_absent()を
+    save()相当へ戻すと2回目は"failed"になる。"""
+    _patch_common(monkeypatch, tmp_path)
+    _patch_profit_taking(monkeypatch, {_STOCK_CODE: _minimal_recommendation()})
+    _revert_insert_if_absent_to_save(monkeypatch, RecommendationRepository)
+
+    first = handler_module.handler(_event("batch-528-f2-pt"), _FakeContext())
+    second = handler_module.handler(_event("batch-528-f2-pt"), _FakeContext())
+
+    assert not first.get("failed")
+    assert second.get("failed") is True
+    repo = RecommendationRepository(store_dir=tmp_path)
+    assert len([r for r in repo.list_all() if r.stock_code == _STOCK_CODE]) == 1
+
+
+def test_f2_holding_decision_notified_reverting_to_save_fails_second_delivery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """F2-3(HOLDING_DECISION、通知あり): `_notify_holding_decision_and_build_result`
+    側のRecommendation保存のinsert_if_absent()をsave()相当へ戻すと、2回目は
+    "failed"になる(この経路ではrecommendation保存がHoldingDecisionResult保存より先に
+    実行されるため、HoldingDecisionResult側は2回目も保存されないまま1件で止まる)。"""
+    _patch_common(monkeypatch, tmp_path)
+    _patch_holding_decision(
+        monkeypatch, _HOLDING_DECISION_NOTIFIED_PLAN, {_STOCK_CODE: _holding_decision_result()}
+    )
+    _revert_insert_if_absent_to_save(monkeypatch, RecommendationRepository)
+
+    first = handler_module.handler(_event("batch-528-f2-hd"), _FakeContext())
+    second = handler_module.handler(_event("batch-528-f2-hd"), _FakeContext())
+
+    assert not first.get("failed")
+    assert second.get("failed") is True
+    reco_repo = RecommendationRepository(store_dir=tmp_path)
+    hd_repo = HoldingDecisionResultRepository(store_dir=tmp_path)
+    assert len([r for r in reco_repo.list_all() if r.stock_code == _STOCK_CODE]) == 1
+    assert len([r for r in hd_repo.list_all() if r.stock_code == _STOCK_CODE]) == 1
+
+
+def test_f2_holding_decision_result_reverting_to_save_fails_second_delivery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """F2-4(HoldingDecisionResult): SHADOW計画(Recommendation非生成)でHoldingDecision
+    Result自体のinsert_if_absent()をsave()相当へ戻すと、2回目は"failed"になる
+    (この計画ではRecommendation側は関与しないため、HoldingDecisionResultの
+    insert_if_absent()単独の必須性を切り離して確認できる)。"""
+    _patch_common(monkeypatch, tmp_path)
+    result = _holding_decision_result()
+    _patch_holding_decision(monkeypatch, _HOLDING_DECISION_SHADOW_PLAN, {_STOCK_CODE: result})
+    _revert_insert_if_absent_to_save(monkeypatch, HoldingDecisionResultRepository)
+
+    first = handler_module.handler(_event("batch-528-f2-hdr"), _FakeContext())
+    second = handler_module.handler(_event("batch-528-f2-hdr"), _FakeContext())
+
+    assert not first.get("failed")
+    assert second.get("failed") is True
+    hd_repo = HoldingDecisionResultRepository(store_dir=tmp_path)
+    assert len([r for r in hd_repo.list_all() if r.stock_code == _STOCK_CODE]) == 1
 
 
 # --- HoldingDecisionResultRepository.insert_if_absent()単体(D3。新規追加メソッド) ---
