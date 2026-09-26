@@ -21,6 +21,15 @@ Transactionへの`save_if_absent()`(Issue #61 Phase B3の既存プリミティ�
 `idempotency_key`をそのまま`lot_id`として渡すことで、CSV importが確立した
 「同一lot_idの再適用は安全」契約(Issue #61 Phase B1)にそのまま乗る
 (新しい冪等機構を作らない)。
+
+★ サブちゃんレビュー#624 F1対応: 既存の冪等キー(CSV importの
+`csv:{sha256}:{row}`等)はすべて内容由来で取り違えが構造的に起こらないが、
+本Issueで初めて「人が手で打つ自由入力のキー」を導入したため、同一キーを
+別の取引(銘柄・株数・単価・BUY/SELL区分のいずれか)へ誤って使うと、
+その取引が黙って消える(`already_registered=True`が返るだけで、実際には
+何も登録されない)欠陥があった。既存Transactionと要求内容が一致するかを
+fast-path・raceのいずれの経路でも検証し、不一致なら
+`IdempotencyKeyReusedForDifferentTradeError`で明示的に拒否する。
 """
 
 from __future__ import annotations
@@ -53,6 +62,54 @@ from jstock_advisor.services.write_plan import (
     apply_conditional_delete,
     apply_conditional_put,
 )
+
+
+def _is_buy_type(transaction_type: TransactionType) -> bool:
+    return transaction_type in (TransactionType.BUY, TransactionType.ADDITIONAL_BUY)
+
+
+class IdempotencyKeyReusedForDifferentTradeError(ValueError):
+    """同一`idempotency_key`が、既存の登録内容と異なる取引(銘柄・株数・単価・
+    BUY/SELL区分のいずれか)に対して指定された(Issue #619 サブちゃんレビューF1)。
+
+    CSV importの既存冪等キー(`csv:{sha256}:{row}`等)はすべて内容由来で
+    取り違えが構造的に起こらないが、本Issueで初めて導入した「人が手で打つ
+    自由入力のキー」にはその保証が無い。取り違えたまま黙って進めると、
+    対象取引がno-op扱いで消え、保有株数・買付余力が実態より多いまま残る
+    (利確判定・買い候補判定・余力不足判定の入力が狂う)ため、明示的に
+    検出して拒否する。
+    """
+
+    def __init__(
+        self,
+        existing: Transaction,
+        stock_code: str,
+        shares: int,
+        price: Decimal,
+        is_buy: bool,
+    ) -> None:
+        super().__init__(
+            f"idempotency-key={existing.transaction_id}は既に別の取引"
+            f"({existing.stock_code} {existing.shares}株 @{existing.execution_price}円 "
+            f"[{existing.transaction_type.value}])として登録済みのため、今回の取引"
+            f"({stock_code} {shares}株 @{price}円 [{'BUY' if is_buy else 'SELL'}])には"
+            "使用できません。別のidempotency-keyを指定してください。"
+        )
+
+
+def _verify_idempotency_key_matches(
+    existing: Transaction, *, stock_code: str, shares: int, price: Decimal, is_buy: bool
+) -> None:
+    mismatch = (
+        existing.stock_code != stock_code
+        or existing.shares != shares
+        or existing.execution_price != price
+        or _is_buy_type(existing.transaction_type) != is_buy
+    )
+    if mismatch:
+        raise IdempotencyKeyReusedForDifferentTradeError(
+            existing, stock_code, shares, price, is_buy
+        )
 
 
 @dataclass(frozen=True)
@@ -99,7 +156,9 @@ class TradeRegistrationService:
         account_type: AccountType = AccountType.GENERAL,
     ) -> TradeRegistrationResult:
         owner = normalize_and_validate_owner(owner)
-        fast_path = self._fast_path_if_already_registered(owner, stock_code, idempotency_key)
+        fast_path = self._fast_path_if_already_registered(
+            owner, stock_code, idempotency_key, shares=shares, price=price, is_buy=True
+        )
         if fast_path is not None:
             return fast_path
 
@@ -136,6 +195,9 @@ class TradeRegistrationService:
         return self._commit_locally(
             owner=owner,
             stock_code=stock_code,
+            shares=shares,
+            price=price,
+            is_buy=True,
             idempotency_key=idempotency_key,
             transaction=transaction,
             lot_puts=[plan.lot_put],
@@ -158,7 +220,9 @@ class TradeRegistrationService:
         now: dt.datetime,
     ) -> TradeRegistrationResult:
         owner = normalize_and_validate_owner(owner)
-        fast_path = self._fast_path_if_already_registered(owner, stock_code, idempotency_key)
+        fast_path = self._fast_path_if_already_registered(
+            owner, stock_code, idempotency_key, shares=shares, price=price, is_buy=False
+        )
         if fast_path is not None:
             return fast_path
 
@@ -185,6 +249,9 @@ class TradeRegistrationService:
         return self._commit_locally(
             owner=owner,
             stock_code=stock_code,
+            shares=shares,
+            price=price,
+            is_buy=False,
             idempotency_key=idempotency_key,
             transaction=transaction,
             lot_puts=plan.lot_puts,
@@ -197,11 +264,21 @@ class TradeRegistrationService:
         )
 
     def _fast_path_if_already_registered(
-        self, owner: str, stock_code: str, idempotency_key: str
+        self,
+        owner: str,
+        stock_code: str,
+        idempotency_key: str,
+        *,
+        shares: int,
+        price: Decimal,
+        is_buy: bool,
     ) -> TradeRegistrationResult | None:
         existing = self._transaction_repo.get_consistent(idempotency_key)
         if existing is None:
             return None
+        _verify_idempotency_key_matches(
+            existing, stock_code=stock_code, shares=shares, price=price, is_buy=is_buy
+        )
         return TradeRegistrationResult(
             transaction=existing,
             resulting_holding=self._portfolio.get_holding(owner, stock_code),
@@ -213,6 +290,9 @@ class TradeRegistrationService:
         *,
         owner: str,
         stock_code: str,
+        shares: int,
+        price: Decimal,
+        is_buy: bool,
         idempotency_key: str,
         transaction: Transaction,
         lot_puts: list[ConditionalPut],
@@ -240,8 +320,12 @@ class TradeRegistrationService:
             # 一切の書き込みを行っていないため、そのままno-opとして返す
             # (`save_if_absent()`はDynamoDB実装ではattribute_not_exists条件付き
             # 書き込みで原子的にこれを保証するため、check-then-actにならない)。
+            raced_existing = self._transaction_repo.get(idempotency_key) or transaction
+            _verify_idempotency_key_matches(
+                raced_existing, stock_code=stock_code, shares=shares, price=price, is_buy=is_buy
+            )
             return TradeRegistrationResult(
-                transaction=self._transaction_repo.get(idempotency_key) or transaction,
+                transaction=raced_existing,
                 resulting_holding=self._portfolio.get_holding(owner, stock_code),
                 already_registered=True,
             )

@@ -13,7 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from jstock_advisor.cli import transactions as transactions_cli
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.infrastructure.local_repository.available_cash_repository import (
     AvailableCashRepository,
 )
@@ -129,5 +129,6 @@ def test_register_buy_without_idempotency_key_generates_one_each_call(env) -> No
 
     assert first.exit_code == 0
     assert second.exit_code == 0
-    assert env["holding_repo"].get_raw_data is not None
+    holding_id = build_holding_id(DEFAULT_OWNER, "8306")
+    assert env["holding_repo"].get(holding_id).shares == 200  # 2回分の購入が反映されている
     assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("800000")  # 2回分減算
