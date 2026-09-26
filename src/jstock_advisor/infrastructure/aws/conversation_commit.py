@@ -53,6 +53,7 @@ _TRANSACTIONS_TABLE_FILE = "transactions.json"
 _PURCHASE_LOTS_TABLE_FILE = "purchase_lots.json"
 _HOLDINGS_TABLE_FILE = "holdings_v2.json"  # M3: owner/holding_id対応後のV2テーブル
 _WATCHLIST_TABLE_FILE = "watchlist.json"
+_AVAILABLE_CASH_TABLE_FILE = "available_cash.json"
 _TRADING_PAUSE_CONFIG_TABLE_FILE = "trading_pause_config.json"
 _TRADING_PAUSE_CONFIG_ID = "trading_pause"
 
@@ -177,6 +178,29 @@ def commit_watch(
         ),
         dynamodb_transaction.conditional_put_transact_item(
             resolve_table_name(_WATCHLIST_TABLE_FILE), plan
+        ),
+    ]
+    return dynamodb_transaction.commit(items)
+
+
+def commit_available_cash_reconcile(
+    user_id: str,
+    expected_operation_id: str,
+    plan: ConditionalPut,
+    now: dt.datetime,
+) -> bool:
+    """Issue #592: `plan`はAvailableCashService.build_reconcile_plan()の戻り値
+    (新しいAvailableCash本体 + 計画構築時点で読み取った既存アイテムの生JSON、
+    未登録ownerの場合はNone)をそのまま渡す。commit_watch()と同型の最小構成
+    (ConversationStateのclaim消費 + 対象1件のPut、pauseチェックは不要。
+    BUY/SELLではなくavailable_cash単独の操作のため)。
+    """
+    items = [
+        conversation_state_store.build_confirm_delete_transact_item(
+            user_id, ConversationAction.AVAILABLE_CASH_RECONCILE, expected_operation_id, now
+        ),
+        dynamodb_transaction.conditional_put_transact_item(
+            resolve_table_name(_AVAILABLE_CASH_TABLE_FILE), plan
         ),
     ]
     return dynamodb_transaction.commit(items)

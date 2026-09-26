@@ -18,6 +18,7 @@ from jstock_advisor.domain.entities.owner import log_ref, normalize_and_validate
 from jstock_advisor.infrastructure.local_repository.available_cash_repository import (
     AvailableCashRepository,
 )
+from jstock_advisor.services.write_plan import ConditionalPut
 
 _DEFAULT_MAX_RETRIES = 3
 
@@ -89,3 +90,27 @@ class AvailableCashService:
             f"owner_ref={log_ref(owner)}: 買付余力の棚卸し更新が{retries}回失敗しました。"
             "最新状態を確認し、改めて実行してください。"
         )
+
+    def build_reconcile_plan(
+        self, raw_owner: str, new_amount: Decimal, now: dt.datetime
+    ) -> ConditionalPut:
+        """LINE会話型UI(Issue #592)向け: 確認(「登録する」)実行時、
+        TransactWriteItemsへ含める単一Putの計画のみを返す(このメソッド自体は
+        一切永続化しない)。
+
+        `reconcile()`(#589、CLI向け)の内蔵bounded retryとは異なり、本メソッドは
+        `WatchlistService.build_add_item_plan()`と同型の単発読み取りである
+        (会話の確認画面表示から実際の「登録する」押下までの間隔でも競合しうる
+        ため、conversation_commit側のTransactWriteItemsが持つ楽観ロック
+        〔expected_data不一致で失敗〕へ委ねる。ここで再試行はしない)。
+        """
+        owner = normalize_and_validate_owner(raw_owner)
+        record = AvailableCash(
+            owner=owner,
+            available_cash=new_amount,
+            updated_at=now,
+            last_update_type=AvailableCashUpdateType.USER_RECONCILIATION,
+            last_reconciled_at=now,
+        )
+        existing_raw = self._repo.get_raw(owner)
+        return ConditionalPut(model=record, id_field="owner", expected_data=existing_raw)

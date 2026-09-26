@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from urllib.parse import quote
 
+from jstock_advisor.domain.entities.available_cash import AvailableCash
 from jstock_advisor.domain.entities.enums import (
     AccountType,
     ConversationAction,
@@ -40,6 +41,7 @@ from jstock_advisor.infrastructure.aws.conversation_state_store import Conversat
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.line.client import QuickReplyButton
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
+from jstock_advisor.services.available_cash_service import AvailableCashService
 from jstock_advisor.services.buy_candidate_target_view_service import (
     CATEGORY_DISPLAY_LABELS,
     BuyCandidateTargetViewService,
@@ -101,6 +103,15 @@ _SELECT_TARGET_CATEGORY_PROMPT = "確認する対象を選択してください�
 _NO_TARGETS_FOR_CATEGORY = "該当する銘柄がありません。"
 _UNKNOWN_CATEGORY = "認識できないカテゴリーです。メニューからやり直してください。"
 
+# --- 買付余力(available cash)の参照・棚卸し更新(Issue #592、#128 A5a) ---
+_AVAILABLE_CASH_SELECT_OWNER_PROMPT = (
+    "買付余力を確認・更新する所有者を選択するか、新しい所有者名を入力してください。"
+)
+_AVAILABLE_CASH_AMOUNT_PROMPT_TEMPLATE = (
+    "所有者：{owner}\n現在の買付余力：{current}\n新しい買付余力を入力してください(0以上の数値)。"
+)
+_AVAILABLE_CASH_NEGATIVE_AMOUNT = "買付余力は0以上の数値で指定してください"
+
 # --- 銘柄分析(Phase 2-B、2026-08、読み取り専用) --------------------------
 _NO_ANALYSIS_DATA = (
     "この銘柄コードは分析対象データに見つかりませんでした。"
@@ -113,6 +124,13 @@ _ANALYSIS_SELL_LABEL = "売却・保有判定を見る"
 # LINEテキストメッセージの上限(公式5000文字)に対する安全マージン込みの
 # 打ち切り基準。件数ではなく実際の生成文字数を基準にする(v2 5節)。
 _MESSAGE_CHAR_BUDGET = 4500
+
+
+def _format_available_cash(record: AvailableCash | None) -> str:
+    """未登録(None)と0円を表示上も区別する(#584 T4と同じ契約)。"""
+    if record is None:
+        return "未登録"
+    return f"{record.available_cash:,}円"
 
 
 def _unknown_stock_code_reply(stock_code: str) -> ConversationReply:
@@ -187,6 +205,7 @@ class ConversationService:
         target_view_service: BuyCandidateTargetViewService | None = None,
         stock_analysis_view_service: StockAnalysisViewService | None = None,
         holding_repository: HoldingRepository | None = None,
+        available_cash_service: AvailableCashService | None = None,
     ) -> None:
         self._portfolio = portfolio_service or PortfolioService()
         self._transactions = transaction_history_service or TransactionHistoryService()
@@ -213,6 +232,7 @@ class ConversationService:
             display_name_resolver=self._display_name_resolver
         )
         self._holdings_repo = holding_repository or HoldingRepository()
+        self._available_cash = available_cash_service or AvailableCashService()
 
     # --- postback(リッチメニュー起点・Quick Reply起点) ---------------------
 
@@ -234,6 +254,8 @@ class ConversationService:
             return self._start(user_id, ConversationAction.WATCH, now)
         if action == "start_analyze":
             return self._start(user_id, ConversationAction.ANALYZE, now)
+        if action == "start_available_cash_reconcile":
+            return self._start_available_cash_reconcile(user_id, owner, op, now)
         if action == "confirm":
             return self._confirm(user_id, op, now)
         if action == "retry":
@@ -354,6 +376,83 @@ class ConversationService:
         conversation_state_store.start_or_replace(user_id, action, now)
         return ConversationReply(_START_PROMPTS[action])
 
+    # --- 買付余力(available cash)の参照・棚卸し更新(Issue #592) -------------
+
+    def _start_available_cash_reconcile(
+        self, user_id: str, owner: str | None, op: str | None, now: dt.datetime
+    ) -> ConversationReply:
+        if owner is not None:
+            return self._select_available_cash_owner(user_id, op, owner, now)
+        new_state = conversation_state_store.start_or_replace(
+            user_id, ConversationAction.AVAILABLE_CASH_RECONCILE, now
+        )
+        return self._available_cash_owner_prompt(new_state.operation_id)
+
+    def _available_cash_owner_prompt(self, operation_id: str) -> ConversationReply:
+        owners = self._holdings_view.list_owners()
+        quick_reply = [
+            QuickReplyButton(
+                label=name,
+                postback_data=(
+                    f"action=start_available_cash_reconcile&owner={quote(name)}&op={operation_id}"
+                ),
+            )
+            for name in owners
+        ]
+        return ConversationReply(
+            _AVAILABLE_CASH_SELECT_OWNER_PROMPT, quick_reply=quick_reply or None
+        )
+
+    def _select_available_cash_owner(
+        self, user_id: str, op: str | None, raw_owner: str, now: dt.datetime
+    ) -> ConversationReply:
+        if not op:
+            return ConversationReply(_NO_ACTIVE_OPERATION)
+        try:
+            owner = normalize_and_validate_owner(raw_owner)
+        except InvalidOwnerError:
+            return ConversationReply(_INVALID_OWNER)
+        new_state = conversation_state_store.set_available_cash_owner(user_id, op, owner, now)
+        if new_state is None:
+            return ConversationReply(_STATE_CHANGED)
+        current = self._available_cash.get(owner)
+        return ConversationReply(
+            _AVAILABLE_CASH_AMOUNT_PROMPT_TEMPLATE.format(
+                owner=owner, current=_format_available_cash(current)
+            )
+        )
+
+    def _handle_available_cash_input(
+        self, user_id: str, state: ConversationState, text: str, now: dt.datetime
+    ) -> ConversationReply:
+        if state.owner is None:
+            return self._select_available_cash_owner(
+                user_id, state.operation_id, text.strip(), now
+            )
+        parsed_amount = ExternalValueParser.decimal(text)
+        if parsed_amount is None or parsed_amount < 0:
+            return ConversationReply(_AVAILABLE_CASH_NEGATIVE_AMOUNT)
+        new_state = conversation_state_store.record_input(
+            user_id,
+            ConversationAction.AVAILABLE_CASH_RECONCILE,
+            None,
+            now,
+            owner=state.owner,
+            amount=parsed_amount,
+        )
+        if new_state is None:
+            return ConversationReply(_STATE_CHANGED)
+        current = self._available_cash.get(state.owner)
+        text_body = (
+            "以下の内容で買付余力を更新します。よろしければ「登録する」を押してください。\n\n"
+            f"所有者：{state.owner}\n"
+            f"現在の買付余力：{_format_available_cash(current)}\n"
+            f"新しい買付余力：{parsed_amount:,}円"
+        )
+        return ConversationReply(
+            text_body, quick_reply=_confirm_quick_reply(new_state.operation_id)
+        )
+
     def _confirm_waiting_state_or_none(
         self, user_id: str, op: str | None, now: dt.datetime
     ) -> ConversationState | None:
@@ -377,6 +476,8 @@ class ConversationService:
                 return self._commit_buy(user_id, state, now)
             if state.action == ConversationAction.SELL:
                 return self._commit_sell(user_id, state, now)
+            if state.action == ConversationAction.AVAILABLE_CASH_RECONCILE:
+                return self._commit_available_cash_reconcile(user_id, state, now)
             return self._commit_watch(user_id, state, now)
         except ValueError:
             # build_*_write_plan()が計画構築直前の状態不整合(保有株数不足等)を
@@ -391,6 +492,11 @@ class ConversationService:
         new_state = conversation_state_store.retry(user_id, state.action, state.operation_id, now)
         if new_state is None:
             return ConversationReply(_RETRY_FAILED)
+        if new_state.action == ConversationAction.AVAILABLE_CASH_RECONCILE:
+            # owner/amountの両方がクリアされるため、owner選択のQuick Replyを
+            # 再提示する(#592。BUY/SELL/WATCH/ANALYZEのような固定文言の
+            # _START_PROMPTSでは表現できない)。
+            return self._available_cash_owner_prompt(new_state.operation_id)
         return ConversationReply(_START_PROMPTS[new_state.action])
 
     def _cancel(self, user_id: str, op: str | None, now: dt.datetime) -> ConversationReply:
@@ -412,6 +518,8 @@ class ConversationService:
             return self._handle_watch_input(user_id, state, text, now)
         if state.action == ConversationAction.ANALYZE:
             return self._handle_analyze_input(user_id, state, text, now)
+        if state.action == ConversationAction.AVAILABLE_CASH_RECONCILE:
+            return self._handle_available_cash_input(user_id, state, text, now)
         return self._handle_trade_input(user_id, state.action, text, now)
 
     def _handle_trade_input(
@@ -699,4 +807,19 @@ class ConversationService:
         display_name = self._display_name_resolver.resolve(state.stock_code)
         return ConversationReply(
             f"ウォッチリストに追加しました: {display_name}({state.stock_code})"
+        )
+
+    def _commit_available_cash_reconcile(
+        self, user_id: str, state: ConversationState, now: dt.datetime
+    ) -> ConversationReply:
+        assert state.owner is not None
+        assert state.amount is not None
+        plan = self._available_cash.build_reconcile_plan(state.owner, state.amount, now)
+        success = conversation_commit.commit_available_cash_reconcile(
+            user_id, state.operation_id, plan, now
+        )
+        if not success:
+            return ConversationReply(_WRITE_CONFLICT)
+        return ConversationReply(
+            f"買付余力を更新しました。\n所有者：{state.owner}\n買付余力：{state.amount:,}円"
         )
