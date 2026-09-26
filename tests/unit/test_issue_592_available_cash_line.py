@@ -21,7 +21,7 @@ from jstock_advisor.domain.entities.enums import (
     ConversationAction,
     ConversationStateName,
 )
-from jstock_advisor.infrastructure.aws import conversation_state_store
+from jstock_advisor.infrastructure.aws import conversation_commit, conversation_state_store
 from jstock_advisor.infrastructure.local_repository.available_cash_repository import (
     AvailableCashRepository,
 )
@@ -284,6 +284,28 @@ def test_duplicate_confirm_does_not_double_update(
     record = AvailableCashRepository().get(_NEW_OWNER)
     assert record is not None
     assert record.available_cash == Decimal("500000")
+
+
+def test_write_conflict_shows_available_cash_specific_message(
+    moto_conversation_tables: None,
+    service: ConversationService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """書き込み競合(#589/#594と別経路での同時更新等)時、保有株数を主語に
+    した既存の汎用メッセージ(「最新の保有状況が変更されたため」)ではなく、
+    買付余力向けの文言を表示する(サブちゃんレビューF3対応)。状態は
+    変更されない(#584/#589と同じ安全側の挙動)。
+    """
+    op = _advance_to_confirm_waiting(service, _NEW_OWNER, "500000")
+    monkeypatch.setattr(
+        conversation_commit, "commit_available_cash_reconcile", lambda *a, **kw: False
+    )
+
+    reply = service.handle_postback(_USER, "confirm", op, _NOW)
+
+    assert "最新の買付余力が変更されたため" in reply.text
+    assert "最新の保有状況が変更されたため" not in reply.text
+    assert AvailableCashRepository().get(_NEW_OWNER) is None
 
 
 # --- retry / cancel ----------------------------------------------------------

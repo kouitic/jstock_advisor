@@ -111,6 +111,9 @@ _AVAILABLE_CASH_AMOUNT_PROMPT_TEMPLATE = (
     "所有者：{owner}\n現在の買付余力：{current}\n新しい買付余力を入力してください(0以上の数値)。"
 )
 _AVAILABLE_CASH_NEGATIVE_AMOUNT = "買付余力は0以上の数値で指定してください"
+_AVAILABLE_CASH_WRITE_CONFLICT = (
+    "最新の買付余力が変更されたため登録できませんでした。\nもう一度操作してください。"
+)
 
 # --- 銘柄分析(Phase 2-B、2026-08、読み取り専用) --------------------------
 _NO_ANALYSIS_DATA = (
@@ -819,7 +822,7 @@ class ConversationService:
             user_id, state.operation_id, plan, now
         )
         if not success:
-            return ConversationReply(_WRITE_CONFLICT)
+            return ConversationReply(_AVAILABLE_CASH_WRITE_CONFLICT)
         return ConversationReply(
             f"買付余力を更新しました。\n所有者：{state.owner}\n買付余力：{state.amount:,}円"
         )
