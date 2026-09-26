@@ -920,8 +920,20 @@ python infra/line_rich_menu/register_rich_menu.py --rich-menu-id <richMenuId> --
 LineWebhookFunctionと、AvailableCashTable/IAM配線(#595)の両方が
 Productionへ反映済みであること。いずれかが未反映のままset-defaultすると、
 このボタンをタップした利用者に対して「認識できない操作です」という
-案内、またはAccessDeniedException経由のエラーが返る(既存7ボタンの
+案内が返るか、以下いずれかの例外でLambdaが停止する(既存7ボタンの
 動作には影響しない)。
+
+```
+#592未反映(LineWebhookFunctionが新actionを処理できない)
+  → 「認識できない操作です」の案内(_UNKNOWN_POSTBACK、正常応答)
+#595未反映かつtable自体が存在しない
+  → ResourceNotFoundException
+#595未反映(tableは存在するがIAM権限が無い)
+  → AccessDeniedException
+```
+
+いずれの場合も原因の切り分けに使えるが、「両方がProductionへ反映済みで
+なければset-defaultしない」という運用上の結論は変わらない。
 
 ### 6.3 保有銘柄・ウォッチリスト・対象確認(参照専用、Phase 2-A・2026-08追加)
 
