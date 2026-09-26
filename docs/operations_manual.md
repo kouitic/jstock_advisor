@@ -132,6 +132,24 @@ jstock candidate-universe status    # ローカルキャッシュの現在の状
 **本番S3キャッシュを定例スケジュール外で手動更新したい場合**: ローカルCLIからは行えません。
 `WatchlistDispatcherFunction`を直接手動起動してください(4.1節参照)。
 
+### 3.5 買付余力(available cash)の参照・棚卸し更新(2026-09-26追加、Issue #594)
+
+所有者(owner)単位の買付余力を、証券会社等の実額と照合して登録・確認します。
+自動取得できないデータのため、実際の残高と乖離しないよう定期的に棚卸し
+(reconcile)してください。**未登録owner(過去に一度も棚卸ししていない)と
+0円(棚卸しした結果0円だった)は明示的に区別されます**(#584/#589の契約)。
+
+```bash
+jstock available-cash show --owner 本人
+jstock available-cash reconcile --owner 本人 --amount 500000
+```
+
+`reconcile`は絶対値での上書きです(前回値との差額計算は行いません)。
+負の金額は拒否されます。LINE経由の棚卸し操作は別Issue(#592)で開発中です。
+本コマンドはローカル専用であり、Lambda/IAMを必要としません
+(`AWS_LAMBDA_FUNCTION_NAME`環境変数の有無に関わらず常にローカルストアのみを
+読み書きします)。
+
 ---
 
 ## 4. 日次運用
