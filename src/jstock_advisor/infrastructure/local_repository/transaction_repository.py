@@ -57,6 +57,13 @@ class TransactionRepository:
         """
         return self._store.insert_if_absent(transaction)
 
+    def delete(self, transaction_id: str) -> bool:
+        """Issue #619: CLI経由の売買登録がHolding/AvailableCash側の書き込みで
+        失敗した場合、先に`save_if_absent()`で確保したTransactionをロール
+        バックするために使う(部分適用状態を残さないため)。通常の運用フローで
+        Transactionを削除することはない。"""
+        return self._store.delete(transaction_id)
+
 
 class SkippedRecommendationRepository:
     def __init__(self, store_dir: Path | None = None) -> None:
