@@ -312,19 +312,25 @@ def build_stock_snapshot(
     current_price = snap.close_price
     price_as_of_date = snap.as_of_date
 
-    history_start = now.date() - dt.timedelta(
+    # Issue #475: 価格窓の基準日もJST暦日(evaluation_date)へ統一する。決算関連は
+    # 既にevaluation_dateを使っており、now.date()(UTC暦日)を使うと同じsnapshot内で
+    # 決算はJST・価格窓はUTCという基準日の不整合が生じる(JST 00:00-08:59台の
+    # 実行では前日UTC日付になり、窓の始端が1日広くなる)。
+    history_start = evaluation_date - dt.timedelta(
         days=365 * config.valuation.historical_range_method.lookback_years
     )
-    history = providers.market_data.get_price_history(stock_code, history_start, now.date())
+    history = providers.market_data.get_price_history(stock_code, history_start, evaluation_date)
     bars = history.bars if history is not None else []
 
     topix_history = providers.market_data.get_benchmark_price_history(
-        "TOPIX", history_start, now.date()
+        "TOPIX", history_start, evaluation_date
     )
     topix_bars = topix_history.bars if topix_history is not None else []
     sector_etf = config.momentum.sector_etf_map.get(financial.industry or "")
     sector_history = (
-        providers.market_data.get_benchmark_price_history(sector_etf, history_start, now.date())
+        providers.market_data.get_benchmark_price_history(
+            sector_etf, history_start, evaluation_date
+        )
         if sector_etf
         else None
     )
@@ -390,7 +396,7 @@ def build_stock_snapshot(
     pbr_price = compute_pbr_price(financial.forecast_bps, pbr_median)
     range_price = compute_historical_range_price(
         bars,
-        now.date(),
+        evaluation_date,
         config.valuation.historical_range_method.lookback_years,
         config.valuation.historical_range_method.use_52_week_low,
     )
@@ -458,7 +464,7 @@ def build_stock_snapshot(
     # build_valuation_summary() を保有側からも呼ぶだけである。閾値
     # (max_method_spread_ratio / max_fair_value_spread_ratio_for_partial 等)も
     # 変更していない。
-    low_52_week = compute_52_week_low(bars, now.date())
+    low_52_week = compute_52_week_low(bars, evaluation_date)
     fair_value_range = build_valuation_summary(
         fair_value_method_results,
         config.valuation.fair_value_methods.aggregation_method,
