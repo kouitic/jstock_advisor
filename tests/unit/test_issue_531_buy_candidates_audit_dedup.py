@@ -28,6 +28,7 @@ from decimal import Decimal
 
 import pytest
 
+from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
 from jstock_advisor.domain.entities.enums import (
     BuyAction,
@@ -35,11 +36,20 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     PortfolioValuationBasis,
     RecommendationType,
+    WatchType,
 )
 from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.infrastructure.local_repository.audit_log_repository import (
+    AuditLogRepository,
+)
+from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
+    RecommendationRepository,
+)
 from jstock_advisor.lambda_handlers import buy_candidates_handler
 from jstock_advisor.services.audit_service import AuditService
+
+_CONFIG = load_config()
 
 _NOW = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
 
@@ -322,3 +332,117 @@ def test_record_notification_outcome_audit_negative_verification_without_record_
     _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n5")
 
     assert repo.save_calls == 2, "この壊れた実装は2件保存する(=重複防止が効いていない確認)"
+
+
+# --- F1'(サブちゃんレビュー対応。PR #625issuecomment): pathwayの配線自体を
+# 固定する直接の回帰テスト。上記の単体テストはnotification_pathwayを明示的に
+# 引数で渡すため、_finalize_batch()内の19箇所がどのpathway文字列を実際に
+# 渡すかという「配線」自体は検証できていなかった。 -------------------------
+
+
+class _FakeFinalizeNotificationService:
+    """全ゲートを素通しし、送信は行わない最小fake(NON_ACTIONABLEで記録される
+    経路のみを通す。test_buy_candidates_handler_near_buy_flow.pyの
+    `_FakeNearBuyNotificationService`と同型)。
+    """
+
+    def check_data_quality_eligibility(
+        self, recommendation: object, now: object, context: object = None
+    ) -> NotificationEligibility:
+        return NotificationEligibility(eligible=True)
+
+    def check_trade_cooldown_eligibility(
+        self, recommendation: object, now: object
+    ) -> NotificationEligibility:
+        return NotificationEligibility(eligible=True)
+
+    def check_cross_pipeline_priority_eligibility(
+        self, recommendation: object, now: object
+    ) -> NotificationEligibility:
+        return NotificationEligibility(eligible=True)
+
+    def check_resend_eligibility(
+        self, recommendation: object, now: object
+    ) -> NotificationEligibility:
+        return NotificationEligibility(eligible=True)
+
+    def notify_buy_candidates_digest(
+        self, winners: object, now: object, *, batch_id: object = None
+    ) -> dict[str, str]:
+        return {}
+
+    def notify_batch_summary(self, *args: object, **kwargs: object) -> bool:
+        return True
+
+
+def test_same_stock_code_in_near_buy_and_watch_end_records_two_notification_outcomes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """F1'(SHOULD。#625issuecomment): 同一stock_codeが同一batchの
+    near_buy_ranking_entriesとwatch_end_ranking_entriesの両方に載る
+    BatchProgressで`_finalize_batch()`を実際に走らせ、通知結果監査が2件とも
+    残ることを固定する(F1の直接の回帰テスト。19箇所のpathway配線自体を検証する)。
+    """
+    audit_repo = AuditLogRepository(store_dir=tmp_path)
+    monkeypatch.setattr(
+        buy_candidates_handler,
+        "AuditService",
+        lambda *a, **kw: AuditService(repository=audit_repo),
+    )
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    rec = Recommendation(
+        recommendation_id="rec-dual-1",
+        stock_code="9432",
+        stock_name="銘柄9432",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.BUY,
+        buy_prices=BuyPriceLevels(
+            entry=PriceWithRationale(price=Decimal("150"), rationale="x"),
+            standard=PriceWithRationale(price=Decimal("140"), rationale="x"),
+            strong=PriceWithRationale(price=Decimal("130"), rationale="x"),
+        ),
+        price_at_recommendation=Decimal("158"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        buy_action=BuyAction.WATCH_FOR_PRICE,
+        watch_type=WatchType.NEAR_BUY,
+        company_quality_score=65.0,
+        required_decline_to_entry_pct=Decimal("5.1"),
+        watch_transition_type="ENDED",
+        watch_end_reason="PRICE_OUT_OF_RANGE",
+        watch_previous_consecutive_business_days=6,
+    )
+    repo.save(rec)
+
+    progress = buy_candidates_handler.BatchProgress(
+        total=1,
+        completed=1,
+        category_counts={"watch_not_ranked": 1},
+        data_insufficient_stock_codes=[],
+        failed_stock_codes=[],
+        ranking_entries=[],
+        sector_entries=[],
+        holding_count=0,
+        near_buy_ranking_entries=[buy_candidates_handler._encode_near_buy_ranking_entry(rec)],
+        watch_end_ranking_entries=[rec.recommendation_id],
+    )
+
+    buy_candidates_handler._finalize_batch(
+        progress, "batch-dual-1", _CONFIG, _NOW, repo, _FakeFinalizeNotificationService()
+    )
+
+    audit_entries = audit_repo.list_by_stock("9432")
+    notification_outcome_entries = [
+        e
+        for e in audit_entries
+        if e.decision_type == "unified_buy_candidate_notification_outcome"
+    ]
+    assert len(notification_outcome_entries) == 2, (
+        "near_buyパスとwatch_endパスの両方の記録が残ること"
+        "(pathwayの配線を欠くと2件目が黙って抑止される)"
+    )
+    pathways = {
+        e.input_values.get("notification_pathway") for e in notification_outcome_entries
+    }
+    assert pathways == {"near_buy", "watch_end"}
