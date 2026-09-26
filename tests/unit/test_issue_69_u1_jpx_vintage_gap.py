@@ -223,12 +223,16 @@ def test_jpx400_cache_age_uses_the_same_basis_as_the_staleness_gate() -> None:
 
     ここがずれると「監査では余裕があるように見えるのに実際は停止する」という、
     観測が判断を誤らせる状態になる(#223 が listed 側で固定したのと同じ不変条件)。
+
+    Issue #612(#66 16C)対応: source_dateのJST 00:00
+    (2026-07-31のJST 00:00 = 2026-07-30 15:00 UTC)をリテラルで固定する
+    (domain.jst.JSTを経由すると、判定側〔production〕とテスト側の期待値が
+    同じ定数を参照する自己参照になる。#578 D2と同じ理由)。
     """
     now = _jst_0600_run(dt.date(2026, 10, 29))
     source_date = dt.date(2026, 7, 31)
-    age_hours = (
-        now - dt.datetime.combine(source_date, dt.time(), tzinfo=dt.UTC)
-    ).total_seconds() / 3600
+    source_date_jst_midnight_utc = dt.datetime(2026, 7, 30, 15, 0, tzinfo=dt.UTC)
+    age_hours = (now - source_date_jst_midnight_utc).total_seconds() / 3600
     observed = _universe_observation([_listed(source_date), _jpx400(source_date)], now)
     assert observed["universe_jpx400_cache_age_days"] == int(age_hours // 24)
 
@@ -237,22 +241,24 @@ def test_cache_age_days_helper_returns_none_for_an_unknown_source_date() -> None
     """DoD 3(定常でない1回目): 初回でキャッシュが無い場合に 0 を作らない。"""
     now = _jst_0600_run(dt.date(2026, 9, 7))
     assert _cache_age_days(None, now) is None
-    assert _cache_age_days(dt.date(2026, 9, 6), now) == 0
+    # Issue #612によりJST基準へ統一(9時間のズレを是正)したため、
+    # 2026-09-06 06:00 JST実行時点でのsource_date=2026-09-06のageは
+    # ちょうど24h(=1日)経過している(以前のUTC基準では0だった)。
+    assert _cache_age_days(dt.date(2026, 9, 6), now) == 1
 
 
-def test_cache_age_days_can_be_negative_on_the_publication_day_known_limitation() -> None:
-    """★ 既知の制約: JST 公表日を 00:00 UTC とみなすため、公表当日は -1 になりうる。
+def test_cache_age_days_is_zero_on_the_publication_day_after_jst_fix() -> None:
+    """Issue #612(#66 16C)によりsource_dateの起点をJST 00:00へ統一した後は、
+    公表当日のJST 06:00実行でcache_age_daysが0になる
+    (`JpxCandidateUniverseProvider._check_staleness()`。#578と同じ基準)。
 
-    JST 06:00 の定期実行は UTC では前日 21:00 であり、その日に公表された
-    source_date(当日 00:00 UTC とみなす)より **9 時間前**になる。
-    本 Issue は vintage の記録が主題であり、この日付 semantics 自体は
-    **変更しない**(Issue #66 の Scope 16C へ移送済み)。
-
-    ★ 望ましい挙動として固定しているのではなく、**現状の基準を明示して
-      引き継ぐため**のテストである。#66 で 16C を直す際にここが落ちる。
+    ★ 修正前はUTC基準の約9時間のズレにより-1になっていた(旧テスト
+      test_cache_age_days_can_be_negative_on_the_publication_day_known_limitation
+      が明示的に「#66で16Cを直す際にここが落ちる」と予告していたとおり、
+      本Issueで置き換えた)。
     """
     now = _jst_0600_run(dt.date(2026, 9, 7))
-    assert _cache_age_days(dt.date(2026, 9, 7), now) == -1
+    assert _cache_age_days(dt.date(2026, 9, 7), now) == 0
 
 
 # --- T-13: 既存の listed_issues 観測が変わっていないこと -------------------------------
@@ -277,7 +283,8 @@ def test_existing_listed_issues_observation_is_unchanged() -> None:
         assert without_jpx400[key] == with_jpx400[key], key
     assert with_jpx400["universe_source"] == UNIVERSE_SOURCE_CACHE
     assert with_jpx400["universe_source_date"] == "2026-07-31"
-    assert with_jpx400["universe_cache_age_days"] == 37
+    # Issue #612によりJST基準へ統一したため、37(UTC基準)から38へ変わった。
+    assert with_jpx400["universe_cache_age_days"] == 38
 
 
 def test_observation_is_still_empty_without_a_listed_issues_outcome() -> None:
@@ -324,7 +331,8 @@ def test_the_jpx400_observation_is_persisted_to_the_batch_row(dynamo) -> None:
     assert item is not None
     assert item["universe_jpx400_promoted"] is True
     assert item["universe_jpx400_source_date"] == "2026-05-12"
-    assert int(item["universe_jpx400_cache_age_days"]) == 117
+    # Issue #612によりJST基準へ統一したため、117(UTC基準)から118へ変わった。
+    assert int(item["universe_jpx400_cache_age_days"]) == 118
     assert int(item["universe_vintage_gap_days"]) == 80
 
 
@@ -351,7 +359,8 @@ def test_a_none_gap_is_persisted_as_none_not_zero(dynamo) -> None:
     assert item is not None
     assert item["universe_vintage_gap_days"] is None
     # ★ 同じ回に listed 側は測れているので、そちらは 0 ではなく実測値が入る。
-    assert int(item["universe_cache_age_days"]) == 37
+    # Issue #612によりJST基準へ統一したため、37(UTC基準)から38へ変わった。
+    assert int(item["universe_cache_age_days"]) == 38
 
 
 def test_finalize_batch_audit_carries_the_jpx400_keys() -> None:

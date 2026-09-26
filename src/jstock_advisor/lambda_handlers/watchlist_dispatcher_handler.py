@@ -50,6 +50,7 @@ import boto3
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
+from jstock_advisor.domain.jst import JST
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     EXECUTION_RESULT_NORMAL,
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
@@ -196,17 +197,15 @@ def _cache_age_days(source_date: dt.date | None, now: dt.datetime) -> int | None
     """source_dateからの経過日数(切り捨て)。source_dateが無い場合はNoneを返す。
 
     JpxCandidateUniverseProvider._check_staleness()と同じ基準(source_dateの
-    00:00 UTCからの経過)で数える。**0との取り違えを避けるため、算出できない
-    場合は0ではなくNoneを返す**(Issue #69: 「評価できなかった」を「該当しない」と
-    同じ値へ潰さない)。
-
-    なおsource_date(JST公表日)を00:00 UTCとみなす約9時間のバイアスは既知で
-    あり、45日/90日の閾値に対しては無視できる。日付semanticsそのものの是正は
-    Issue #66のScope 16Cへ移した(本Issueでは既存の基準を変更しない)。
+    JST 00:00からの経過。Issue #578で#66 16Cへ統一済み)で数える。
+    **0との取り違えを避けるため、算出できない場合は0ではなくNoneを返す**
+    (Issue #69: 「評価できなかった」を「該当しない」と同じ値へ潰さない)。
     """
     if source_date is None:
         return None
-    elapsed = now - dt.datetime.combine(source_date, dt.time(), tzinfo=dt.UTC)
+    # Issue #612(#66 16C): source_dateはJST公表日であり、UTC 00:00ではなく
+    # JST 00:00を起点にする(9時間のズレを是正する。#578〔jpx_impl.py側〕と同じ変換)。
+    elapsed = now - dt.datetime.combine(source_date, dt.time(), tzinfo=JST)
     return int(elapsed.total_seconds() // 86400)
 
 
@@ -220,8 +219,9 @@ def _universe_observation(outcomes: list[DownloadOutcome], now: dt.datetime) -> 
     (listed_issues_max_stale_hours)まであとどれだけかを後から確認できる。
 
     cache_age_daysはJpxCandidateUniverseProvider._check_staleness()と同じ
-    基準(source_dateの00:00 UTCからの経過)で数え、切り捨てた日数を入れる
-    (BatchRunsTableはDynamoDBのため小数を入れられない)。
+    基準(source_dateのJST 00:00からの経過。Issue #612で#66 16Cへ統一済み)
+    で数え、切り捨てた日数を入れる(BatchRunsTableはDynamoDBのため小数を
+    入れられない)。
 
     Issue #69(U-1、2026-09-09): JPX400側も同じ形で記録し、2ファイルの
     source_dateの差(universe_vintage_gap_days)を残す。上場銘柄一覧(45日)と

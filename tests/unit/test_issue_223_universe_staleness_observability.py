@@ -267,7 +267,8 @@ def test_observation_reports_cache_when_download_failed() -> None:
     assert observed["universe_source"] == UNIVERSE_SOURCE_CACHE
     assert observed["universe_promoted"] is False
     assert observed["universe_source_date"] == "2026-07-31"
-    assert observed["universe_cache_age_days"] == 37
+    # Issue #612によりJST基準へ統一したため、37(UTC基準)から38へ変わった。
+    assert observed["universe_cache_age_days"] == 38
 
 
 def test_observation_reports_downloaded_on_success() -> None:
@@ -285,19 +286,22 @@ def test_observation_reports_downloaded_on_success() -> None:
     assert observed["universe_source"] == UNIVERSE_SOURCE_DOWNLOADED
     assert observed["universe_promoted"] is True
     assert observed["universe_source_date"] == "2026-09-06"
-    assert observed["universe_cache_age_days"] == 0
+    # Issue #612によりJST基準へ統一したため、0(UTC基準)から1へ変わった。
+    assert observed["universe_cache_age_days"] == 1
 
 
-def test_observation_cache_age_days_matches_the_legacy_cache_age_days_basis() -> None:
-    """★ cache_age_days(監査記録)の内部一貫性のみを固定する。
+def test_observation_cache_age_days_uses_the_same_basis_as_the_staleness_gate() -> None:
+    """★ cache_age_days が staleness 判定と同じ基準(JST起点)であること。
 
-    `_universe_observation()`(`lambda_handlers/watchlist_dispatcher_handler.py::
-    _cache_age_days()`)は、Issue #578で`_check_staleness()`(gate)がJST基準へ
-    統一された後も、まだUTC基準のままである(#612で対応予定。#578はD9の
-    自己競合のためscopeに含めていない)。このテストはgateとの一致ではなく、
-    `_cache_age_days()`自身の(現行の)算出式との内部一貫性のみを見る
-    (テスト名・意図をこの実態に合わせて訂正した。旧名はgateとの一致を
-    主張していたが実際には一度もgate側を呼んでいなかった)。
+    ここがずれると「監査では上限に余裕があるように見えるのに実際は停止する」
+    という、観測が判断を誤らせる状態になる。Issue #612で`_cache_age_days()`
+    (audit側)を`_check_staleness()`(gate側。#578で統一済み)と同じJST基準へ
+    揃えたことで、この一致が回復した(#578〜#612のinterim windowでは
+    一致していなかった。旧テストのdocstring参照)。
+
+    サブちゃんレビュー対応D2(#578)と同じ理由で、期待値の起点はリテラルの
+    瞬間として固定する(domain.jst.JSTを経由すると、判定側〔production〕と
+    テスト側が同じ定数を参照する自己参照になるため)。
     """
     now = _jst_0600_run(dt.date(2026, 9, 7))
     outcomes = [
@@ -309,23 +313,21 @@ def test_observation_cache_age_days_matches_the_legacy_cache_age_days_basis() ->
             effective_source_date=_PRODUCTION_SOURCE_DATE,
         )
     ]
-    age_hours = (
-        now - dt.datetime.combine(_PRODUCTION_SOURCE_DATE, dt.time(), tzinfo=dt.UTC)
-    ).total_seconds() / 3600
+    # 2026-07-31のJST 00:00 = 2026-07-30 15:00 UTC(JST = UTC+9)。
+    source_date_jst_midnight_utc = dt.datetime(2026, 7, 30, 15, 0, tzinfo=dt.UTC)
+    age_hours = (now - source_date_jst_midnight_utc).total_seconds() / 3600
     assert _universe_observation(outcomes, now)["universe_cache_age_days"] == int(age_hours // 24)
 
 
-def test_observation_cache_age_days_diverges_from_the_staleness_gate_pending_612() -> None:
-    """★ サブちゃんレビュー対応F1'-a: Issue #578〜#612のinterim windowで、
-    gate(`_check_staleness()`。JST基準)とaudit(`universe_cache_age_days`。
-    UTC基準)の基準がずれていることを、無言のままにせず明示的に検出する。
+def test_observation_cache_age_days_agrees_with_the_staleness_gate_after_612() -> None:
+    """サブちゃんレビュー対応F1'-a(#578)が検出したinterim windowの不整合
+    (gateはstale判定済みなのにauditは上限未達に見える)が、Issue #612で
+    解消されたことを固定する。
 
-    2026-10-29 06:00 JSTの実行が実例: gateはこの時点で既にstale(90日上限
-    超過。2166h)と判定するが、audit側のcache_age_daysはUTC基準のため89日
-    (2136h。90日未満)にしか見えず、上限に余裕があるかのように表示する
-    (「監査では上限に余裕があるように見えるのに実際は停止する」不整合。
-    サブちゃん実測)。#612でaudit側もJST基準へ統一されたら、本テストの
-    数値は更新または削除が必要になる。
+    2026-10-29 06:00 JSTの実行が実例: gateはこの時点でstale(90日上限
+    超過。2166h)と判定し、audit側のcache_age_daysも同じJST基準で90日
+    (=2160h以上経過)を示す。もはや「監査では上限に余裕があるように見える」
+    という不整合は生じない。
     """
     now = _jst_0600_run(dt.date(2026, 10, 29))
 
@@ -344,9 +346,9 @@ def test_observation_cache_age_days_diverges_from_the_staleness_gate_pending_612
         )
     ]
     observed_cache_age_days = _universe_observation(outcomes, now)["universe_cache_age_days"]
-    assert observed_cache_age_days == 89
-    assert observed_cache_age_days * 24 < _NEW_MAX_STALE_HOURS, (
-        "gateはstale判定済みなのに、audit側は上限未達に見える(#612までの既知の不整合)"
+    assert observed_cache_age_days == 90
+    assert observed_cache_age_days * 24 >= _NEW_MAX_STALE_HOURS, (
+        "gateがstale判定した時点で、audit側も上限に達したことを示す(#612で一致)"
     )
 
 
@@ -420,7 +422,8 @@ def test_observation_is_persisted_to_the_batch_row(dynamo) -> None:
     assert item["universe_source"] == UNIVERSE_SOURCE_CACHE
     assert item["universe_promoted"] is False
     assert item["universe_source_date"] == "2026-07-31"
-    assert int(item["universe_cache_age_days"]) == 37
+    # Issue #612によりJST基準へ統一したため、37(UTC基準)から38へ変わった。
+    assert int(item["universe_cache_age_days"]) == 38
 
 
 def test_batch_row_keeps_the_keys_absent_when_the_downloader_did_not_run(dynamo) -> None:
