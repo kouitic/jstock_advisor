@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,7 +13,13 @@ from jstock_advisor.domain.entities.enums import AccountType, SkipReason, Transa
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
+from jstock_advisor.services.available_cash_service import (
+    AvailableCashNotRegisteredError,
+    AvailableCashService,
+    InsufficientAvailableCashError,
+)
 from jstock_advisor.services.portfolio_service import PortfolioService
+from jstock_advisor.services.trade_registration_service import TradeRegistrationService
 from jstock_advisor.services.transaction_csv_import_service import TransactionCsvImportService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 
@@ -143,6 +150,109 @@ def sell_executed(
     )
     if transaction.price_diff_from_recommendation is not None:
         typer.echo(f"  推奨価格との差: {transaction.price_diff_from_recommendation}円")
+
+
+@app.command("register-buy")
+def register_buy(
+    stock_code: str = typer.Argument(..., help="銘柄コード"),
+    shares: int = typer.Argument(..., help="約定株数"),
+    price: str = typer.Argument(..., help="約定単価(円)"),
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者"),
+    date: str = typer.Option(None, "--date", help="約定日(YYYY-MM-DD、省略時は本日)"),
+    idempotency_key: str = typer.Option(
+        None,
+        "--idempotency-key",
+        help="省略時は毎回新規登録として扱う(非冪等)。指定すると同一キーの再実行は"
+        "二重登録されない",
+    ),
+) -> None:
+    """買付を、保有銘柄データ・買付余力(available cash)と整合した1つの登録
+    単位として記録する(Issue #619、#128 A3-CLI)。買付余力が未登録・不足の
+    場合は明示的に拒否され、記録は一切行われない。既存の`buy-executed`
+    (Transactionのみ記録)とは独立した経路であり、互いに影響しない。"""
+    key = idempotency_key or str(uuid.uuid4())
+    service = TradeRegistrationService()
+    try:
+        result = service.register_buy(
+            owner=owner,
+            stock_code=stock_code,
+            shares=shares,
+            price=_parse_decimal(price, "約定単価"),
+            trade_date=_parse_date(date),
+            idempotency_key=key,
+            now=dt.datetime.now(dt.UTC),
+        )
+    except (AvailableCashNotRegisteredError, InsufficientAvailableCashError, ValueError) as e:
+        typer.echo(str(e))
+        raise typer.Exit(code=1) from e
+
+    if result.already_registered:
+        typer.echo(f"既に登録済みです(idempotency-key={key}): {result.transaction.transaction_id}")
+        return
+    typer.echo(
+        f"記録しました: {result.transaction.transaction_id} {stock_code} {shares}株 @{price}円 "
+        f"(idempotency-key={key})"
+    )
+    if result.resulting_holding is not None:
+        typer.echo(
+            f"  保有: {result.resulting_holding.shares:,}株"
+            f"(平均取得単価 {result.resulting_holding.average_purchase_price:,}円)"
+        )
+    cash = AvailableCashService().get(owner)
+    if cash is not None:
+        typer.echo(f"  買付余力: {cash.available_cash:,}円")
+
+
+@app.command("register-sell")
+def register_sell(
+    stock_code: str = typer.Argument(..., help="銘柄コード"),
+    shares: int = typer.Argument(..., help="約定株数"),
+    price: str = typer.Argument(..., help="約定単価(円)"),
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者"),
+    date: str = typer.Option(None, "--date", help="約定日(YYYY-MM-DD、省略時は本日)"),
+    idempotency_key: str = typer.Option(
+        None,
+        "--idempotency-key",
+        help="省略時は毎回新規登録として扱う(非冪等)。指定すると同一キーの再実行は"
+        "二重登録されない",
+    ),
+) -> None:
+    """売却を、保有銘柄データ・買付余力(available cash)と整合した1つの登録
+    単位として記録する(Issue #619、#128 A3-CLI)。既存の`sell-executed`
+    (Transactionのみ記録)とは独立した経路であり、互いに影響しない。"""
+    key = idempotency_key or str(uuid.uuid4())
+    service = TradeRegistrationService()
+    try:
+        result = service.register_sell(
+            owner=owner,
+            stock_code=stock_code,
+            shares=shares,
+            price=_parse_decimal(price, "約定単価"),
+            trade_date=_parse_date(date),
+            idempotency_key=key,
+            now=dt.datetime.now(dt.UTC),
+        )
+    except (AvailableCashNotRegisteredError, ValueError) as e:
+        typer.echo(str(e))
+        raise typer.Exit(code=1) from e
+
+    if result.already_registered:
+        typer.echo(f"既に登録済みです(idempotency-key={key}): {result.transaction.transaction_id}")
+        return
+    typer.echo(
+        f"記録しました: {result.transaction.transaction_id} {stock_code} {shares}株 @{price}円 "
+        f"(idempotency-key={key})"
+    )
+    if result.resulting_holding is not None:
+        typer.echo(
+            f"  保有: {result.resulting_holding.shares:,}株"
+            f"(平均取得単価 {result.resulting_holding.average_purchase_price:,}円)"
+        )
+    else:
+        typer.echo("  保有: 全部売却済み")
+    cash = AvailableCashService().get(owner)
+    if cash is not None:
+        typer.echo(f"  買付余力: {cash.available_cash:,}円")
 
 
 @app.command("skip-recommendation")
