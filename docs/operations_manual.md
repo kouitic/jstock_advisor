@@ -915,6 +915,14 @@ python infra/line_rich_menu/register_rich_menu.py --rich-menu-id <richMenuId> --
 コードをデプロイしただけではLINEトーク画面のメニュー表示は変わらず、
 本手順を別途手動で実行して初めて利用者の画面に反映される。
 
+**「💰 余力管理」ボタンを含む本レイアウトをset-default(手順3)する前提**:
+`action=start_available_cash_reconcile`(#592)を実際に処理できる
+LineWebhookFunctionと、AvailableCashTable/IAM配線(#595)の両方が
+Productionへ反映済みであること。いずれかが未反映のままset-defaultすると、
+このボタンをタップした利用者に対して「認識できない操作です」という
+案内、またはAccessDeniedException経由のエラーが返る(既存7ボタンの
+動作には影響しない)。
+
 ### 6.3 保有銘柄・ウォッチリスト・対象確認(参照専用、Phase 2-A・2026-08追加)
 
 利用者向けの操作方法は機能仕様書10.5節を参照。運用担当者が把握しておくべき
