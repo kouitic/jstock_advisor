@@ -25,11 +25,21 @@ Transactionへの`save_if_absent()`(Issue #61 Phase B3の既存プリミティ�
 ★ サブちゃんレビュー#624 F1対応: 既存の冪等キー(CSV importの
 `csv:{sha256}:{row}`等)はすべて内容由来で取り違えが構造的に起こらないが、
 本Issueで初めて「人が手で打つ自由入力のキー」を導入したため、同一キーを
-別の取引(銘柄・株数・単価・BUY/SELL区分のいずれか)へ誤って使うと、
-その取引が黙って消える(`already_registered=True`が返るだけで、実際には
-何も登録されない)欠陥があった。既存Transactionと要求内容が一致するかを
+別の取引(所有者・銘柄・株数・単価・約定日・BUY/SELL区分のいずれか)へ誤って
+使うと、その取引が黙って消える(`already_registered=True`が返るだけで、
+実際には何も登録されない)欠陥があった。既存Transactionと要求内容が一致するかを
 fast-path・raceのいずれの経路でも検証し、不一致なら
-`IdempotencyKeyReusedForDifferentTradeError`で明示的に拒否する。
+`IdempotencyKeyReusedForDifferentTradeError`で明示的に拒否する
+(F6でownerを、F1'でexecution_dateを照合対象へ追加済み)。
+
+★ サブちゃんレビュー#624 F7対応: `register_buy()`はaccount_type(既定GENERAL)を
+`build_purchase_write_plan()`(Lot/Holding)へは渡していたが、
+`build_execution_plan()`(Transaction)へは渡しておらず、Transaction側だけ
+account_type=Noneになっていた。サービスAPIとしてaccount_typeを公開している
+以上、同一取引から生成される永続データ間でaccount_typeも一致させるべき
+(USER判断: 決定A)であるため、Transactionへも渡すよう修正し、あわせて
+「所有者・銘柄・株数・単価・約定日・BUY/SELL区分が同一でaccount_typeだけが
+異なる」場合も別取引として扱い、idempotency照合対象へaccount_typeを追加した。
 """
 
 from __future__ import annotations
@@ -69,32 +79,40 @@ def _is_buy_type(transaction_type: TransactionType) -> bool:
 
 
 class IdempotencyKeyReusedForDifferentTradeError(ValueError):
-    """同一`idempotency_key`が、既存の登録内容と異なる取引(銘柄・株数・単価・
-    BUY/SELL区分のいずれか)に対して指定された(Issue #619 サブちゃんレビューF1)。
+    """同一`idempotency_key`が、既存の登録内容と異なる取引(所有者・銘柄・
+    株数・単価・約定日・BUY/SELL区分のいずれか)に対して指定された
+    (Issue #619 サブちゃんレビューF1、F6でowner照合を追加)。
 
     CSV importの既存冪等キー(`csv:{sha256}:{row}`等)はすべて内容由来で
     取り違えが構造的に起こらないが、本Issueで初めて導入した「人が手で打つ
     自由入力のキー」にはその保証が無い。取り違えたまま黙って進めると、
     対象取引がno-op扱いで消え、保有株数・買付余力が実態より多いまま残る
     (利確判定・買い候補判定・余力不足判定の入力が狂う)ため、明示的に
-    検出して拒否する。
+    検出して拒否する。owner不一致も同じ失敗モード(所有者Aの1回目登録に
+    使ったキーを所有者Bの2回目登録へ誤って使い回すと、Bの取引が黙って
+    消える)であるため同様に扱う。
     """
 
     def __init__(
         self,
         existing: Transaction,
+        *,
+        owner: str,
         stock_code: str,
         shares: int,
         price: Decimal,
         trade_date: dt.date,
         is_buy: bool,
+        account_type: AccountType | None,
     ) -> None:
         super().__init__(
             f"idempotency-key={existing.transaction_id}は既に別の取引"
-            f"({existing.stock_code} {existing.shares}株 @{existing.execution_price}円 "
-            f"{existing.execution_date} [{existing.transaction_type.value}])として"
-            f"登録済みのため、今回の取引({stock_code} {shares}株 @{price}円 "
-            f"{trade_date} [{'BUY' if is_buy else 'SELL'}])には使用できません。"
+            f"(owner={existing.owner} {existing.stock_code} {existing.shares}株 "
+            f"@{existing.execution_price}円 {existing.execution_date} "
+            f"[{existing.transaction_type.value}] account_type={existing.account_type})"
+            f"として登録済みのため、今回の取引(owner={owner} {stock_code} {shares}株 "
+            f"@{price}円 {trade_date} [{'BUY' if is_buy else 'SELL'}] "
+            f"account_type={account_type})には使用できません。"
             "別のidempotency-keyを指定してください。"
         )
 
@@ -102,14 +120,21 @@ class IdempotencyKeyReusedForDifferentTradeError(ValueError):
 def _verify_idempotency_key_matches(
     existing: Transaction,
     *,
+    owner: str,
     stock_code: str,
     shares: int,
     price: Decimal,
     trade_date: dt.date,
     is_buy: bool,
+    account_type: AccountType | None = None,
 ) -> None:
     """既存Transactionと要求内容を照合する(Issue #619 サブちゃんレビュー
-    F1・F1'対応)。
+    F1・F1'・F6・F7対応)。
+
+    所有者(`owner`)も照合対象に含める(サブちゃんレビュー#624 F6)。
+    Transactionはowner-scopeであり、CLIには`--owner`があるため、
+    銘柄・株数・単価・約定日・BUY/SELL区分が全て同一でownerだけが異なる
+    場合も、F1と同じ失敗モード(所有者Bの取引が黙って消える)が起こる。
 
     約定日(`execution_date`)も照合対象に含める。同一キーで銘柄・株数・
     単価・区分が全て一致し約定日だけが異なる場合も、日付違いの別取引が
@@ -118,17 +143,32 @@ def _verify_idempotency_key_matches(
     `--date`省略で再実行すると拒否され、別キーで打ち直すと二重登録に
     なりうるtrade-offは認識したうえで、「exit 0で登録済みと報告した
     まま取引が消える」実害の方が大きいためfail-closedを優先する)。
+
+    account_type(SELLは概念が無いため常にNone)も照合対象に含める
+    (サブちゃんレビュー#624 F7。USER判断: 決定A。所有者・銘柄・株数・
+    単価・約定日・BUY/SELL区分が同一でも、口座種別(特定/NISA/一般)が
+    異なれば税務上別の取引として扱うべきであり、他の項目と同じ
+    fail-closed方針を適用する)。
     """
     mismatch = (
-        existing.stock_code != stock_code
+        existing.owner != owner
+        or existing.stock_code != stock_code
         or existing.shares != shares
         or existing.execution_price != price
         or existing.execution_date != trade_date
         or _is_buy_type(existing.transaction_type) != is_buy
+        or existing.account_type != account_type
     )
     if mismatch:
         raise IdempotencyKeyReusedForDifferentTradeError(
-            existing, stock_code, shares, price, trade_date, is_buy
+            existing,
+            owner=owner,
+            stock_code=stock_code,
+            shares=shares,
+            price=price,
+            trade_date=trade_date,
+            is_buy=is_buy,
+            account_type=account_type,
         )
 
 
@@ -184,6 +224,7 @@ class TradeRegistrationService:
             price=price,
             trade_date=trade_date,
             is_buy=True,
+            account_type=account_type,
         )
         if fast_path is not None:
             return fast_path
@@ -213,6 +254,7 @@ class TradeRegistrationService:
             shares=shares,
             execution_price=price,
             execution_date=trade_date,
+            account_type=account_type,
             now=now,
         )
         available_cash_put = self._available_cash.build_trade_update_plan(
@@ -225,6 +267,7 @@ class TradeRegistrationService:
             price=price,
             trade_date=trade_date,
             is_buy=True,
+            account_type=account_type,
             idempotency_key=idempotency_key,
             transaction=transaction,
             lot_puts=[plan.lot_put],
@@ -255,6 +298,7 @@ class TradeRegistrationService:
             price=price,
             trade_date=trade_date,
             is_buy=False,
+            account_type=None,
         )
         if fast_path is not None:
             return fast_path
@@ -286,6 +330,7 @@ class TradeRegistrationService:
             price=price,
             trade_date=trade_date,
             is_buy=False,
+            account_type=None,
             idempotency_key=idempotency_key,
             transaction=transaction,
             lot_puts=plan.lot_puts,
@@ -307,17 +352,20 @@ class TradeRegistrationService:
         price: Decimal,
         trade_date: dt.date,
         is_buy: bool,
+        account_type: AccountType | None = None,
     ) -> TradeRegistrationResult | None:
         existing = self._transaction_repo.get_consistent(idempotency_key)
         if existing is None:
             return None
         _verify_idempotency_key_matches(
             existing,
+            owner=owner,
             stock_code=stock_code,
             shares=shares,
             price=price,
             trade_date=trade_date,
             is_buy=is_buy,
+            account_type=account_type,
         )
         return TradeRegistrationResult(
             transaction=existing,
@@ -334,6 +382,7 @@ class TradeRegistrationService:
         price: Decimal,
         trade_date: dt.date,
         is_buy: bool,
+        account_type: AccountType | None = None,
         idempotency_key: str,
         transaction: Transaction,
         lot_puts: list[ConditionalPut],
@@ -371,11 +420,13 @@ class TradeRegistrationService:
             raced_existing = self._transaction_repo.get(idempotency_key) or transaction
             _verify_idempotency_key_matches(
                 raced_existing,
+                owner=owner,
                 stock_code=stock_code,
                 shares=shares,
                 price=price,
                 trade_date=trade_date,
                 is_buy=is_buy,
+                account_type=account_type,
             )
             return TradeRegistrationResult(
                 transaction=raced_existing,
