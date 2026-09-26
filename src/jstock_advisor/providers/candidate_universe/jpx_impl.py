@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import xlrd
 
+from jstock_advisor.domain.jst import JST
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.interfaces.candidate_universe import (
     CandidateUniverseError,
@@ -483,10 +484,12 @@ class JpxCandidateUniverseProvider:
             for item in listed.items
         ]
 
+        # Issue #578: source_dateはJST公表日であり、UTC 00:00ではなくJST 00:00を
+        # 起点にする(9時間のズレを是正する。#66 16C)。
         cache_age_hours = (
             (
                 self._now
-                - dt.datetime.combine(listed_metadata.source_date, dt.time(), tzinfo=dt.UTC)
+                - dt.datetime.combine(listed_metadata.source_date, dt.time(), tzinfo=JST)
             ).total_seconds()
             / 3600
             if listed_metadata.source_date is not None
@@ -512,8 +515,10 @@ class JpxCandidateUniverseProvider:
             raise CandidateUniverseError(
                 f"{label}のソース日付が不明なためキャッシュを利用できません"
             )
+        # Issue #578: source_dateはJST公表日であり、UTC 00:00ではなくJST 00:00を
+        # 起点にする(9時間のズレを是正する。#66 16C)。
         age_hours = (
-            self._now - dt.datetime.combine(source_date, dt.time(), tzinfo=dt.UTC)
+            self._now - dt.datetime.combine(source_date, dt.time(), tzinfo=JST)
         ).total_seconds() / 3600
         if age_hours > max_stale_hours:
             raise CandidateUniverseError(
