@@ -118,17 +118,21 @@ def test_2026_09_15_run_stops_before_the_change_and_survives_after() -> None:
     )
 
 
-def test_new_hard_stop_is_2026_10_30_jst() -> None:
+def test_new_hard_stop_is_2026_10_29_jst() -> None:
     """延長後の新しい停止日を固定する。
 
-    source_date 2026-07-31 00:00 UTC + 2160h = 2026-10-29 00:00 UTC。
-    定期実行は JST 06:00(= 前日 21:00 UTC)のため、
-      10-29(木) 06:00 JST -> 2157h  継続
-      10-30(金) 06:00 JST -> 2181h  停止
-    となる。PR-2(.xlsx 対応)はこの日までに反映されている必要がある。
+    Issue #578(JST基準統一)により、source_dateの起点はJST 00:00
+    (2026-07-31のJST 00:00 = 2026-07-30 15:00 UTC)へ変わった。
+    + 2160h(90日) = 2026-10-28 15:00 UTC。定期実行は JST 06:00
+    (= 前日 21:00 UTC)のため、
+      10-28(水) 06:00 JST(2026-10-27 21:00 UTC) -> 2142h  継続
+      10-29(木) 06:00 JST(2026-10-28 21:00 UTC) -> 2166h  停止
+    となる(#578以前はUTC基準で10-30が境界だったが、JST基準統一により
+    9時間早い10-29へ変わった)。PR-2(.xlsx 対応)はこの日までに
+    反映されている必要がある。
     """
-    last_ok = _jst_0600_run(dt.date(2026, 10, 29))
-    first_stop = _jst_0600_run(dt.date(2026, 10, 30))
+    last_ok = _jst_0600_run(dt.date(2026, 10, 28))
+    first_stop = _jst_0600_run(dt.date(2026, 10, 29))
 
     _provider(last_ok, _NEW_MAX_STALE_HOURS)._check_staleness(
         "東証上場銘柄一覧", _PRODUCTION_SOURCE_DATE, _NEW_MAX_STALE_HOURS
