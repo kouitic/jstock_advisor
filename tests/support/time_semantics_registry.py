@@ -185,6 +185,19 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:calibration_dataset_v2_cutover",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #475(#472の修正): build_stock_snapshotの価格窓・52週安値の基準日を
+    # UTC暦日からJST暦日へ統一。T3 = evaluation_date(時刻由来値)を受け取って
+    # 価格履歴window・compute_historical_range_price()・compute_52_week_low()の
+    # 呼び出し先を分岐させるconsumer(stock_snapshot_service.py自体はT1の対象
+    # 〔domain/jst.py等〕ではない)。T4 = JST/UTC暦日境界を跨ぐ固定clock
+    # (08:00 JST/10:00 JST)を新規に導入した。可変のmodule-level stateを
+    # 持たないため、cohortの相手はいない(SOLO)。
+    _Entry(
+        module="tests/unit/test_issue_475_stock_snapshot_jst_date_window.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:stock_snapshot_jst_price_window",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
@@ -203,6 +216,7 @@ _KNOWN_TIME_SENSITIVE_MODULES = frozenset(
         "tests/unit/test_market_holiday_gate.py",
         "tests/unit/test_buy_candidates_handler.py",
         "tests/unit/test_watchlist_dispatcher_handler.py",
+        "tests/unit/test_issue_475_stock_snapshot_jst_date_window.py",
     }
 )
 
