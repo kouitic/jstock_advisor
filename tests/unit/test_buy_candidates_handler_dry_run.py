@@ -78,6 +78,9 @@ class _NoopAuditService:
     def record(self, *args: object, **kwargs: object) -> None:
         return None
 
+    def record_if_absent(self, *args: object, **kwargs: object) -> None:
+        return None
+
 
 def _patch_audit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(handler_module, "AuditService", lambda *a, **kw: _NoopAuditService())
@@ -91,6 +94,7 @@ class _RecordingAuditService:
 
     def __init__(self) -> None:
         self.records: list[dict[str, object]] = []
+        self._seen_audit_ids: set[str] = set()
 
     def record(
         self,
@@ -108,6 +112,30 @@ class _RecordingAuditService:
                 "output_values": output_values or {},
             }
         )
+
+    def record_if_absent(
+        self,
+        audit_id: str,
+        decision_type: str,
+        stock_code: str | None = None,
+        input_values: dict[str, object] | None = None,
+        calculation_formulas: dict[str, object] | None = None,
+        output_values: dict[str, object] | None = None,
+        **kwargs: object,
+    ) -> dict[str, object] | None:
+        # Issue #531: 本物のAuditService.record_if_absent()と同じく、同一
+        # audit_idの2回目以降は何もしない。
+        if audit_id in self._seen_audit_ids:
+            return None
+        self._seen_audit_ids.add(audit_id)
+        self.records.append(
+            {
+                "decision_type": decision_type,
+                "stock_code": stock_code,
+                "output_values": output_values or {},
+            }
+        )
+        return self.records[-1]
 
     def records_by_type(self, decision_type: str) -> list[dict[str, object]]:
         return [r for r in self.records if r["decision_type"] == decision_type]

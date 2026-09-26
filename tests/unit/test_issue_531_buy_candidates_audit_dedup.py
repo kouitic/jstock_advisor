@@ -8,6 +8,7 @@ record()`〔呼び出しごとにaudit_idをuuid4で新規生成〕が監査ロ�
 (Tier 1)である。
 
 - `lambda_handlers/buy_candidates_handler.py::_record_evaluation_audit()`
+- `lambda_handlers/buy_candidates_handler.py::_record_notification_outcome_audit()`
 
 `AuditService(repository=fake_repo)`(実サービス+`save_if_absent()`の意味論を
 最小限で模倣したfake repository。test_issue_558_batch_id_idempotency.pyの
@@ -23,10 +24,20 @@ record_if_absent()ではなくrecord()(常に成功)を呼ぶよう変異させ�
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 
-from jstock_advisor.domain.entities.enums import BuyAction, CandidateSource
+from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
+from jstock_advisor.domain.entities.enums import (
+    BuyAction,
+    CandidateSource,
+    ConfidenceLevel,
+    PortfolioValuationBasis,
+    RecommendationType,
+)
+from jstock_advisor.domain.entities.notification_eligibility import NotificationEligibility
+from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.lambda_handlers import buy_candidates_handler
 from jstock_advisor.services.audit_service import AuditService
 
@@ -151,5 +162,133 @@ def test_record_evaluation_audit_negative_verification_without_record_if_absent(
 
     _call_record_evaluation_audit(audit_service, batch_id="batch-531-broken")
     _call_record_evaluation_audit(audit_service, batch_id="batch-531-broken")
+
+    assert repo.save_calls == 2, "この壊れた実装は2件保存する(=重複防止が効いていない確認)"
+
+
+# --- buy_candidates_handler.py::_record_notification_outcome_audit() ---------
+
+
+def _make_recommendation(stock_code: str) -> Recommendation:
+    return Recommendation(
+        recommendation_id="rec-1",
+        stock_code=stock_code,
+        stock_name=f"銘柄{stock_code}",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.BUY,
+        buy_prices=BuyPriceLevels(
+            entry=PriceWithRationale(price=Decimal("3500"), rationale="x"),
+            standard=PriceWithRationale(price=Decimal("3300"), rationale="x"),
+            strong=PriceWithRationale(price=Decimal("3100"), rationale="x"),
+        ),
+        price_at_recommendation=Decimal("4200"),
+        total_score=60.0,
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1-mvp",
+        buy_action=BuyAction.BUY,
+        base_buy_action=BuyAction.BUY,
+        company_quality_score=60.0,
+        purchase_attractiveness_score=50.0,
+    )
+
+
+def _call_record_notification_outcome_audit(
+    audit_service: AuditService, batch_id: str, stock_code: str = "2914"
+) -> None:
+    buy_candidates_handler._record_notification_outcome_audit(
+        audit_service,
+        "v1-mvp",
+        _NOW,
+        _make_recommendation(stock_code),
+        1,
+        None,
+        "NOT_REQUIRED",
+        NotificationEligibility(eligible=True),
+        PortfolioValuationBasis.MARKET_VALUE,
+        None,
+        1.0,
+        batch_id=batch_id,
+    )
+
+
+def test_record_notification_outcome_audit_is_not_duplicated_on_retry_with_the_same_batch_id() -> (
+    None
+):
+    """AC1: 同一(batch_id, stock_code)の通知結果監査が非同期fan-out再配信で
+    複製されない。
+    """
+    audit_service, repo = _fake_audit_service()
+
+    _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n1")
+    _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n1")  # retry相当
+
+    assert repo.save_calls == 1
+    assert repo.saved_audit_ids == [
+        "unified_buy_candidate_notification_outcome:batch-531-n1:2914"
+    ]
+
+
+def test_record_notification_outcome_audit_uses_a_separate_id_for_a_different_stock_code() -> (
+    None
+):
+    """異なるstock_codeは別の監査記録として残る(取り違えて潰さない)。"""
+    audit_service, repo = _fake_audit_service()
+
+    _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n2")
+    _call_record_notification_outcome_audit(
+        audit_service, batch_id="batch-531-n2", stock_code="7239"
+    )
+
+    assert repo.save_calls == 2
+
+
+def test_record_notification_outcome_audit_uses_a_separate_id_for_a_different_batch_id() -> (
+    None
+):
+    """F2(粒度): 同一stock_codeでもbatch_idが異なれば別の監査記録として残る
+    (batch_idを落とすと、別batchの同一銘柄の通知結果が黒く抑止されて失われる
+    ことの固定。#622 F2と同型)。
+    """
+    audit_service, repo = _fake_audit_service()
+
+    _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n3a")
+    _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n3b")
+
+    assert repo.save_calls == 2
+    assert repo.saved_audit_ids == [
+        "unified_buy_candidate_notification_outcome:batch-531-n3a:2914",
+        "unified_buy_candidate_notification_outcome:batch-531-n3b:2914",
+    ]
+
+
+def test_record_evaluation_and_notification_outcome_audit_ids_do_not_collide() -> None:
+    """F2(粒度): decision_type prefixが異なるため、同一batch_id・stock_codeでも
+    evaluation監査とnotification_outcome監査は互いを抑止しない。
+    """
+    audit_service, repo = _fake_audit_service()
+
+    _call_record_evaluation_audit(audit_service, batch_id="batch-531-n4")
+    _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n4")
+
+    assert repo.save_calls == 2
+
+
+def test_record_notification_outcome_audit_negative_verification_without_record_if_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mutation-based negative verification: production関数を一時的に
+    record_if_absent()ではなくrecord()を呼ぶよう変異させ、このテストが
+    検出したい実装欠陥(#528/#558と同型の重複記録)そのものを再現する。
+    """
+    audit_service, repo = _fake_audit_service()
+
+    def _broken_record_if_absent(**kwargs: object) -> object:
+        kwargs.pop("audit_id", None)
+        return audit_service.record(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(audit_service, "record_if_absent", _broken_record_if_absent)
+
+    _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n5")
+    _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n5")
 
     assert repo.save_calls == 2, "この壊れた実装は2件保存する(=重複防止が効いていない確認)"
