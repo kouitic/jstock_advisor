@@ -118,6 +118,11 @@ def test_all_consumed_doc_type_codes_are_kept(
 
 
 def test_not_configured_is_failure_without_http_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Issue #586: 他テストが`EDINET_API_KEY`をos.environへ残す(load_dotenv経由。
+    # test_judgment_safety_shadow_cli.py参照)と、api_key=Noneでもコンストラクタの
+    # フォールバックで環境変数を拾ってしまい、このテストの前提(未設定)が崩れる。
+    monkeypatch.delenv("EDINET_API_KEY", raising=False)
+
     def fail(*args: object, **kwargs: object) -> None:
         raise AssertionError("APIキー未設定ではHTTP呼び出しを行わない")
 
@@ -208,7 +213,22 @@ def test_download_empty_payload_is_failure(monkeypatch: pytest.MonkeyPatch) -> N
     assert result.failure_reason is EdinetFailureReason.DOWNLOAD_ERROR
 
 
-def test_download_not_configured_is_failure() -> None:
+def test_download_not_configured_is_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Issue #586: 上記test_not_configured_is_failure_without_http_callと同じ理由。
+    monkeypatch.delenv("EDINET_API_KEY", raising=False)
+
+    # サブちゃんレビューC1: delenvだけでは「envの状態に関わらず外部HTTPへ到達し
+    # 得ない」ことをテスト自身が保証しない(delenv自体が将来regressするか、
+    # 他の経路でapi_keyが真になった場合、このテストは無防備に実際のEDINET APIへ
+    # HTTP要求を出しうる。汚染再現時に実際に外部通信が発生したことを実測済み)。
+    # 上記test_not_configured_is_failure_without_http_callと同じ構造的な防御
+    # (urlopen自体をブロックし、呼ばれたらAssertionErrorにする)をこちらにも
+    # 追加し、1つの防壁(delenv)だけに依存しないようにする。
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("APIキー未設定ではHTTP呼び出しを行わない")
+
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", fail)
+
     result = EdinetClient(api_key=None).download_document_zip("DOC1")
 
     assert result.status is EdinetFetchStatus.FETCH_FAILED
