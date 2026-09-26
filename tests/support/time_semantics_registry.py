@@ -210,6 +210,18 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:jpx_staleness_jst_basis",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # サブちゃんレビュー対応Phase1 F5: Issue #223由来の既存module。#578で
+    # test_new_hard_stop_is_2026_10_30_jst -> test_new_hard_stop_is_2026_10_29_jst
+    # (期待する境界日そのもの)を書き換えたにもかかわらずregistry未登録だった。
+    # T2 = `_check_staleness()`(provider自身の値決定ロジック)を直接呼ぶ
+    # consumer。T4 = 固定clock(`_jst_0600_run()`)と期待日を#578で変更した。
+    # 可変のmodule-level stateを持たないため、cohortの相手はいない(SOLO)。
+    _Entry(
+        module="tests/unit/test_issue_223_universe_staleness_observability.py",
+        triggers=("T2", "T4"),
+        cohort="SOLO:jpx_universe_staleness_observability",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
@@ -230,6 +242,7 @@ _KNOWN_TIME_SENSITIVE_MODULES = frozenset(
         "tests/unit/test_watchlist_dispatcher_handler.py",
         "tests/unit/test_issue_475_stock_snapshot_jst_date_window.py",
         "tests/unit/test_issue_578_jpx_staleness_jst.py",
+        "tests/unit/test_issue_223_universe_staleness_observability.py",
     }
 )
 

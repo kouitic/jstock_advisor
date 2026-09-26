@@ -288,13 +288,18 @@ def test_observation_reports_downloaded_on_success() -> None:
     assert observed["universe_cache_age_days"] == 0
 
 
-def test_observation_cache_age_days_uses_the_same_basis_as_the_staleness_gate() -> None:
-    """★ cache_age_days が staleness 判定と別の数え方になっていないこと。
+def test_observation_cache_age_days_matches_the_legacy_cache_age_days_basis() -> None:
+    """★ cache_age_days(監査記録)の内部一貫性のみを固定する。
 
-    ここがずれると「監査では上限に余裕があるように見えるのに実際は停止する」
-    という、観測が判断を誤らせる状態になる。
+    `_universe_observation()`(`lambda_handlers/watchlist_dispatcher_handler.py::
+    _cache_age_days()`)は、Issue #578で`_check_staleness()`(gate)がJST基準へ
+    統一された後も、まだUTC基準のままである(#612で対応予定。#578はD9の
+    自己競合のためscopeに含めていない)。このテストはgateとの一致ではなく、
+    `_cache_age_days()`自身の(現行の)算出式との内部一貫性のみを見る
+    (テスト名・意図をこの実態に合わせて訂正した。旧名はgateとの一致を
+    主張していたが実際には一度もgate側を呼んでいなかった)。
     """
-    now = _jst_0600_run(dt.date(2026, 10, 29))  # 新上限に達する直前の実行
+    now = _jst_0600_run(dt.date(2026, 9, 7))
     outcomes = [
         DownloadOutcome(
             source="listed_issues",
@@ -308,6 +313,41 @@ def test_observation_cache_age_days_uses_the_same_basis_as_the_staleness_gate() 
         now - dt.datetime.combine(_PRODUCTION_SOURCE_DATE, dt.time(), tzinfo=dt.UTC)
     ).total_seconds() / 3600
     assert _universe_observation(outcomes, now)["universe_cache_age_days"] == int(age_hours // 24)
+
+
+def test_observation_cache_age_days_diverges_from_the_staleness_gate_pending_612() -> None:
+    """★ サブちゃんレビュー対応F1'-a: Issue #578〜#612のinterim windowで、
+    gate(`_check_staleness()`。JST基準)とaudit(`universe_cache_age_days`。
+    UTC基準)の基準がずれていることを、無言のままにせず明示的に検出する。
+
+    2026-10-29 06:00 JSTの実行が実例: gateはこの時点で既にstale(90日上限
+    超過。2166h)と判定するが、audit側のcache_age_daysはUTC基準のため89日
+    (2136h。90日未満)にしか見えず、上限に余裕があるかのように表示する
+    (「監査では上限に余裕があるように見えるのに実際は停止する」不整合。
+    サブちゃん実測)。#612でaudit側もJST基準へ統一されたら、本テストの
+    数値は更新または削除が必要になる。
+    """
+    now = _jst_0600_run(dt.date(2026, 10, 29))
+
+    with pytest.raises(CandidateUniverseError):
+        _provider(now, _NEW_MAX_STALE_HOURS)._check_staleness(
+            "東証上場銘柄一覧", _PRODUCTION_SOURCE_DATE, _NEW_MAX_STALE_HOURS
+        )
+
+    outcomes = [
+        DownloadOutcome(
+            source="listed_issues",
+            promoted=False,
+            reason="HTTP Error 404",
+            metadata=None,
+            effective_source_date=_PRODUCTION_SOURCE_DATE,
+        )
+    ]
+    observed_cache_age_days = _universe_observation(outcomes, now)["universe_cache_age_days"]
+    assert observed_cache_age_days == 89
+    assert observed_cache_age_days * 24 < _NEW_MAX_STALE_HOURS, (
+        "gateはstale判定済みなのに、audit側は上限未達に見える(#612までの既知の不整合)"
+    )
 
 
 def test_observation_tolerates_missing_source_date() -> None:
