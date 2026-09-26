@@ -571,6 +571,7 @@ def _record_evaluation_audit(
     holding_owner_count: int | None = None,
     holding_ids: tuple[str, ...] | None = None,
     exclusion_reasons: list[str] | None = None,
+    batch_id: str | None = None,
 ) -> None:
     """全評価対象銘柄(BUY系以外も含む)について記録する監査(要求仕様§4・§14)。
 
@@ -578,38 +579,66 @@ def _record_evaluation_audit(
     owner横断の集約値であり、単一ownerの値ではない。holding_owner_count/
     holding_idsを渡すことで、何名分・どのholding_id分の集約かを監査から
     追跡できるようにする(owner単位の別Auditは作らない)。
+
+    Issue #531(#71 F-C14): batch_idを渡した場合、record()(呼び出しごとに
+    audit_idをuuid4で新規生成)ではなくrecord_if_absent()でbatch_id+
+    stock_code由来の決定的audit_idを使い、非同期fan-outの再配信(#528/#558と
+    同型の欠陥)による監査ログの重複を防ぐ。batch_id=None(白箱テスト等の
+    既存呼び出し)は従来どおりrecord()のまま(後方互換)。
+
+    audit_idは`f"unified_buy_candidate_evaluation:{batch_id}:{stock_code}"`
+    の3構成要素からなる(PR #622 F2と同型の粒度)。decision_type prefixを
+    落とすと他のdecision_typeの記録と衝突しうる。batch_idを落とすと、
+    別batchの同一stock_codeの評価がrecord_if_absent()に黒く抑止され
+    正当な監査記録が失われる。stock_codeを落とすと、同一batch内の
+    異なる銘柄の評価が互いを抑止する。
     """
+    input_values = {
+        "candidate_source": source.value,
+        "holding_quantity": holding_quantity,
+        "average_acquisition_price": (
+            str(average_acquisition_price) if average_acquisition_price is not None else None
+        ),
+        "holding_owner_count": holding_owner_count,
+        "holding_ids": list(holding_ids) if holding_ids is not None else None,
+        "exclusion_reasons": exclusion_reasons,
+    }
+    output_values = {
+        "current_market_value": (
+            str(current_market_value) if current_market_value is not None else None
+        ),
+        "unrealized_profit_loss": (
+            str(unrealized_profit_loss) if unrealized_profit_loss is not None else None
+        ),
+        "unrealized_profit_loss_pct": (
+            str(unrealized_profit_loss_pct) if unrealized_profit_loss_pct is not None else None
+        ),
+        "base_buy_action": base_buy_action.value,
+        "final_buy_action": final_buy_action.value,
+        "conflicting_holding_action": (
+            conflicting_holding_action.value if conflicting_holding_action is not None else None
+        ),
+        "holding_data_inconsistent": holding_data_inconsistent,
+    }
+    if batch_id is not None:
+        audit_service.record_if_absent(
+            audit_id=f"unified_buy_candidate_evaluation:{batch_id}:{stock_code}",
+            decision_type="unified_buy_candidate_evaluation",
+            stock_code=stock_code,
+            input_values=input_values,
+            calculation_formulas={},
+            output_values=output_values,
+            data_sources=[],
+            rule_version=rule_version,
+            timestamp=now,
+        )
+        return
     audit_service.record(
         decision_type="unified_buy_candidate_evaluation",
         stock_code=stock_code,
-        input_values={
-            "candidate_source": source.value,
-            "holding_quantity": holding_quantity,
-            "average_acquisition_price": (
-                str(average_acquisition_price) if average_acquisition_price is not None else None
-            ),
-            "holding_owner_count": holding_owner_count,
-            "holding_ids": list(holding_ids) if holding_ids is not None else None,
-            "exclusion_reasons": exclusion_reasons,
-        },
+        input_values=input_values,
         calculation_formulas={},
-        output_values={
-            "current_market_value": (
-                str(current_market_value) if current_market_value is not None else None
-            ),
-            "unrealized_profit_loss": (
-                str(unrealized_profit_loss) if unrealized_profit_loss is not None else None
-            ),
-            "unrealized_profit_loss_pct": (
-                str(unrealized_profit_loss_pct) if unrealized_profit_loss_pct is not None else None
-            ),
-            "base_buy_action": base_buy_action.value,
-            "final_buy_action": final_buy_action.value,
-            "conflicting_holding_action": (
-                conflicting_holding_action.value if conflicting_holding_action is not None else None
-            ),
-            "holding_data_inconsistent": holding_data_inconsistent,
-        },
+        output_values=output_values,
         data_sources=[],
         rule_version=rule_version,
         timestamp=now,
@@ -750,6 +779,7 @@ def _process_single_candidate(
                 final_buy_action=BuyAction.DATA_INSUFFICIENT,
                 conflicting_holding_action=None,
                 holding_data_inconsistent=False,
+                batch_id=batch_id,
             )
         elif outcome.buy_action == BuyAction.EXCLUDED or outcome.recommendation is None:
             # 投資対象スクリーニングで除外(第1段階)。screening_passed=Falseの場合、
@@ -779,6 +809,7 @@ def _process_single_candidate(
                 conflicting_holding_action=None,
                 holding_data_inconsistent=False,
                 exclusion_reasons=record_exclusion_reasons,
+                batch_id=batch_id,
             )
         else:
             recommendation = outcome.recommendation
@@ -1022,6 +1053,7 @@ def _process_single_candidate(
                 holding_data_inconsistent=holding_data_inconsistent,
                 holding_owner_count=holding_owner_count,
                 holding_ids=holding_ids,
+                batch_id=batch_id,
             )
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
         logger.exception("buy candidate analysis failed unexpectedly stock_code=%s", stock_code)

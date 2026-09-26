@@ -150,10 +150,14 @@ class _NoopAuditService:
     def record(self, *args: object, **kwargs: object) -> None:
         return None
 
+    def record_if_absent(self, *args: object, **kwargs: object) -> None:
+        return None
+
 
 class _RecordingAuditService:
     def __init__(self) -> None:
         self.records: list[dict[str, object]] = []
+        self._seen_audit_ids: set[str] = set()
 
     def record(
         self,
@@ -172,6 +176,31 @@ class _RecordingAuditService:
                 "output_values": output_values or {},
             }
         )
+
+    def record_if_absent(
+        self,
+        audit_id: str,
+        decision_type: str,
+        stock_code: str | None = None,
+        input_values: dict[str, object] | None = None,
+        calculation_formulas: dict[str, object] | None = None,
+        output_values: dict[str, object] | None = None,
+        **kwargs: object,
+    ) -> dict[str, object] | None:
+        # Issue #531: 本物のAuditService.record_if_absent()と同じく、同一
+        # audit_idの2回目以降は何もしない(重複配信のテストが実際に効くように)。
+        if audit_id in self._seen_audit_ids:
+            return None
+        self._seen_audit_ids.add(audit_id)
+        self.records.append(
+            {
+                "decision_type": decision_type,
+                "stock_code": stock_code,
+                "input_values": input_values or {},
+                "output_values": output_values or {},
+            }
+        )
+        return self.records[-1]
 
     def records_by_type(self, decision_type: str) -> list[dict[str, object]]:
         return [r for r in self.records if r["decision_type"] == decision_type]
@@ -4725,17 +4754,33 @@ _SHADOW_AUDIT_TYPE = "judgment_safety_shadow"
 
 
 class _GoldenAudit:
-    """既存のAuditService呼び出しと、shadowの記録を区別して集めるフェイク。"""
+    """既存のAuditService呼び出しと、shadowの記録を区別して集めるフェイク。
+
+    Issue #531: record_if_absent()はjudgment_safety_shadow専用ではなくなった
+    (unified_buy_candidate_evaluation等もbatch_id指定時に使う)。decision_type
+    がshadow用(_SHADOW_AUDIT_TYPE)の場合のみ"shadow_recorded"イベント・
+    fail_shadow動作とし、それ以外は本物のAuditService.record_if_absent()と
+    同じくaudit_id単位でdedupするだけの通常記録として扱う。
+    """
 
     def __init__(self, events: list[str], fail_shadow: bool = False) -> None:
         self.records: list[dict[str, object]] = []
         self._events = events
         self._fail_shadow = fail_shadow
+        self._seen_audit_ids: set[str] = set()
 
     def record(self, *args: object, **kwargs: object) -> None:
         self.records.append({"args": args, "kwargs": dict(kwargs)})
 
     def record_if_absent(self, **kwargs: object) -> object | None:
+        if kwargs.get("decision_type") != _SHADOW_AUDIT_TYPE:
+            audit_id = kwargs.get("audit_id")
+            if audit_id in self._seen_audit_ids:
+                return None
+            if isinstance(audit_id, str):
+                self._seen_audit_ids.add(audit_id)
+            self.records.append(dict(kwargs))
+            return object()
         self._events.append("shadow_recorded")
         if self._fail_shadow:
             raise PermissionError("AccessDenied(架空)")
