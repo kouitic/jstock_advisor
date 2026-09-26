@@ -242,8 +242,8 @@ def test_cache_age_days_helper_returns_none_for_an_unknown_source_date() -> None
     now = _jst_0600_run(dt.date(2026, 9, 7))
     assert _cache_age_days(None, now) is None
     # Issue #612によりJST基準へ統一(9時間のズレを是正)したため、
-    # 2026-09-06 06:00 JST実行時点でのsource_date=2026-09-06のageは
-    # ちょうど24h(=1日)経過している(以前のUTC基準では0だった)。
+    # 2026-09-07 06:00 JST実行時点でのsource_date=2026-09-06のageは
+    # 30h(=1日)経過している(以前のUTC基準では0だった)。
     assert _cache_age_days(dt.date(2026, 9, 6), now) == 1
 
 
