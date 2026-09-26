@@ -3946,3 +3946,123 @@ Issue #508 の USER 決定 U-2(PARTIAL/resource-scoped限定でPROCEED。#133 �
 Production挙動は変更していない。`issue_creation_enabled`の実際の切替はいずれの
 Human Gateも経ておらず、本節の追加によってもProduction上の挙動(既定falseのまま)は
 変わらない。
+
+## 33. 買付余力(available cash)機能のProduction初期化・rollout(Issue #596、#128 A6b、2026-09-26追加)
+
+`#128`(Portfolio Capital Allocation Epic)の基盤機能A1〜A6a(下表)が、
+本節執筆時点(2026-09-26)ですべて`main`へmerge済みだが、**いずれもまだ
+Productionへdeployされていない**(ChangeSet CREATE/EXECUTEはいずれも
+別Human Gate。各PRのmerge自体はAWSリソースを一切作成・変更しない)。
+本節は、これらをまとめて初めてdeployする際の初期化戦略・順序・
+rollback・verificationを整理する。
+
+### 33.1 merge済みの内訳
+
+```
+A1  #584(available_cashモデル/永続化)             PR #587  556e6ae5  2026-09-25T09:34:53Z
+A2  #589(棚卸し更新reconcile、CLI)                PR #599  00b0b536  2026-09-26T00:28:34Z
+A3  #590(LINE会話型BUY/SELLとの整合)              PR #620  97fe226e  2026-09-26T09:12:50Z
+A4  #591(BUY時のavailable cash不足検知)           PR #621  616d4e48  2026-09-26T11:10:26Z
+A5a #592(LINE会話型UIからの参照・棚卸し更新)      PR #614  f543b85f  2026-09-26T06:05:47Z
+A5b #593(LINEリッチメニュー8ボタン化定義)         PR #615  ff158f89  2026-09-26T07:15:33Z
+A5c #594(CLIからの参照・棚卸し更新)               PR #608  b0912a54  2026-09-26T02:54:12Z
+A6a #595(AvailableCashTable新設・IAM配線)         PR #617  46d30a80  2026-09-26T07:26:04Z
+```
+
+A6b(本Issue、#596)自体はコード変更を伴わない(本節の追加のみ)。
+
+### 33.2 初期化戦略(既存owner・auto-backfillしない契約)
+
+**既存owner(既に保有銘柄・ウォッチリスト等を利用中の所有者)へ
+`available_cash=0`を自動的に割り当てることはしない。** 未登録owner
+(=一度も棚卸ししていない)と、棚卸しした結果0円である状態は明確に
+区別する契約(#584 T4・#589 T12)であり、自動backfillはこの契約と
+根本的に矛盾する(backfillした瞬間、実際には棚卸しをしていないという
+事実が失われる)。
+
+deploy後、既存ownerが初めてLINE「買った」「売った」を試みると、
+`AvailableCashNotRegisteredError`により明示的に拒否される(#590/#591。
+「買付余力が未登録のため、売買登録ができませんでした。」)。この影響を
+避けたい場合は、**deploy直後に、本CLIコマンド(3.5節)で対象owner全員の
+初回棚卸しを事前に済ませておくこと**(自動化はしない。対応するかは
+運用判断)。
+
+```bash
+jstock available-cash show --owner <owner名>
+jstock available-cash reconcile --owner <owner名> --amount <実際の残高>
+```
+
+### 33.3 デプロイ順序
+
+A1〜A6aはすべて同一の`main`上に既にmergeされているため、**初回deployは
+これらすべてを含む1回のChangeSet CREATE/EXECUTE(`sam build && sam deploy`)
+で行う**。個別のPRごとに段階的にdeployする必要はない(Phase A設計時点
+〔#590 issuecomment〕では並行実装中で段階deployを想定していたが、
+全PRがmerge済みの現時点ではその前提は解消している)。
+
+```
+1  infra/template.yaml(AvailableCashTable新設・LineWebhookFunctionへの
+   IAM配線)とLambdaコード(conversation_service.py等)は同一ChangeSetで
+   同時に反映される(SAMの通常のdeployフロー。個別のtable/IAMのみを
+   先行させる特別な手順は不要)
+2  デプロイ前に、上記33.1の8 PRがすべて対象branch(main)に含まれている
+   ことをfresh確認する(`git log --oneline` 等で各mergeCommitの存在を
+   確認)
+3  ChangeSet実行後、リッチメニュー(#593)の実際のset-default(画像
+   アップロード・LINE側への登録)は本節の対象外の別Human Gate(6.2節末尾
+   参照)。この切替が済むまで、利用者はメニューボタンから「余力管理」を
+   選べない(「買った」「売った」経由の連動自体は#590/#591によりデプロイ
+   直後から有効になる)
+```
+
+### 33.4 ロールバック
+
+```
+infra(#595)  AvailableCashTableは`DeletionPolicy: Retain`・
+             `UpdateReplacePolicy: Retain`(Issue #137と同水準)のため、
+             ChangeSetのロールバックでtable自体が失われることはない。
+             ロールバックしてもtableは残る(空のまま、または途中まで
+             書き込まれたデータを保持したまま)ため、再度前方向へ
+             deployし直せば整合する
+code         既存のLambda deployロールバックと同型(前回のPRODUCTION_SHAへ
+             再deploy。本Issue固有の新しい手順は不要)
+data         backfillを行わないため、ロールバックによる「不整合な
+             部分適用データ」のクリーンアップは原理上発生しない
+             (#590のTransactWriteItems原子性により、部分書き込みは
+             残らない)
+```
+
+### 33.5 Production verification
+
+本機能はscheduled batchではなくuser-initiated操作(LINE/CLI)のため、
+既存の「次回自然実行(平日08:00等)の観測」というverification様式は
+そのままでは当てはまらない。
+
+```
+推奨verification: 「次に実際の利用者がLINE/CLIでreconcile・BUY・SELLを
+実行した際、AvailableCashTableへ正しく記録されること」を自然な初回利用
+機会として観測する(#377等、他Issueの「次回自然実行観測」と同じ精神を
+user-initiated機能向けに読み替えたもの)。人工的なProduction実行
+(検証目的のLambda手動起動等)は18節の例外手続きが必要なため、基本方針
+としない。
+
+確認観点:
+  - AvailableCashTableに実際にレコードが作成/更新されること
+  - 未登録ownerでのBUY/SELLが明示的に拒否されること(誤って自動0円初期化
+    されていないこと)
+  - 余力不足のBUYが「買付余力が不足しているため」の専用メッセージで
+    拒否されること(汎用の「最新の保有状況が変更された」メッセージに
+    なっていないこと)
+```
+
+### 33.6 参考
+
+```
+・買付余力の参照・棚卸し更新(CLI、3.5節)
+・LINEメニューボタンからの登録(6.2節末尾、rich menu set-default前提)
+・DynamoDBの復旧手順(20節。AvailableCashTableも同水準の保護対象)
+```
+
+本節はIssue #596(#128 A6b)として、docsのみ追加した(コード変更を伴わない)。
+実際のChangeSet CREATE/EXECUTE・rich menu set-defaultはいずれも別Human Gate
+であり、本節の追加によってもProduction上の挙動は変わらない。
