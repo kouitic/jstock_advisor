@@ -358,6 +358,84 @@ def test_genuinely_identical_sell_retry_is_still_treated_as_already_registered(e
     assert retry.already_registered is True
 
 
+def test_race_path_also_accepts_genuine_buy_retry(env) -> None:
+    """サブちゃんレビュー#624 F9再レビュー指摘対応(任意・追加実施): 上記
+    `test_genuinely_identical_retry_still_treated_as_already_registered`は
+    fast-pathのみを固定しており、race経路(`_commit_locally()`内、
+    `save_if_absent()`がFalseを返す分岐)自身でBUYの真の冪等retryが正しく
+    受理されることは固定されていなかった(register_buy()が`_commit_locally()`
+    へ渡すaccount_typeを誤って固定値へ変更する変異がSURVIVEDしうる)。
+    fast-pathを迂回させ(F5/F6/F7と同じmonkeypatchパターン)、race経路自身の
+    成功側契約を固定する。"""
+    _seed_cash(env, "1000000")
+    service = env["service"]
+    service.register_buy(
+        DEFAULT_OWNER,
+        _STOCK,
+        100,
+        Decimal("1000"),
+        _NOW.date(),
+        "idem-1",
+        _NOW,
+        account_type=AccountType.NISA,
+    )
+
+    service._fast_path_if_already_registered = lambda *args, **kwargs: None  # noqa: SLF001
+
+    retry = service.register_buy(
+        DEFAULT_OWNER,
+        _STOCK,
+        100,
+        Decimal("1000"),
+        _NOW.date(),
+        "idem-1",
+        _NOW,
+        account_type=AccountType.NISA,
+    )
+
+    assert retry.already_registered is True
+    assert env["holding_repo"].get(_HOLDING_ID).shares == 100  # 二重適用されていない
+    assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("900000")  # 二重減算なし
+
+
+def test_race_path_also_accepts_genuine_sell_retry(env) -> None:
+    """サブちゃんレビュー#624 F9再レビュー指摘対応(任意・追加実施): 上記
+    `test_genuinely_identical_sell_retry_is_still_treated_as_already_registered`
+    はfast-pathのみを固定しており、race経路自身でSELLの真の冪等retryが
+    正しく受理されることは固定されていなかった(サブちゃんの実測で、
+    `register_sell()`が`_commit_locally()`へ渡すaccount_type=Noneを誤って
+    別の値へ変更する変異がSURVIVEDすることを確認済み)。retry時にも
+    `build_sale_write_plan()`(plan構築のみ、race経路がsave_if_absent()で
+    Falseと判定すれば適用されない)が成立するよう、1回目のSELLで保有株を
+    使い切らない数量にしておく。"""
+    _seed_cash(env, "1000000")
+    env["portfolio"].register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code=_STOCK,
+        stock_name=None,
+        shares=250,
+        purchase_price=Decimal("1000"),
+        purchase_date=_NOW.date(),
+        account_type=AccountType.GENERAL,
+    )
+    service = env["service"]
+    service.register_sell(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1800"), _NOW.date(), "idem-sell", _NOW
+    )
+    assert env["holding_repo"].get(_HOLDING_ID).shares == 150
+
+    service._fast_path_if_already_registered = lambda *args, **kwargs: None  # noqa: SLF001
+
+    retry = service.register_sell(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1800"), _NOW.date(), "idem-sell", _NOW
+    )
+
+    assert retry.already_registered is True
+    # race経路のno-opがLot/Holdingへ二重適用されていない(150株のまま)。
+    assert env["holding_repo"].get(_HOLDING_ID).shares == 150
+    assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("1180000")  # 1回分のみ
+
+
 # --- サブちゃんレビュー#624 F6対応: idempotency-key照合へownerを追加 ---------
 # Transactionはowner-scopeでCLIにも--ownerがある。owner=Aの1回目登録と、
 # 銘柄・株数・単価・約定日・BUY/SELL区分が全て同一だがownerだけ異なる
