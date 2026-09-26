@@ -31,8 +31,12 @@ from jstock_advisor.services.available_cash_service import (
     InsufficientAvailableCashError,
 )
 from jstock_advisor.services.portfolio_service import PortfolioService
-from jstock_advisor.services.trade_registration_service import TradeRegistrationService
+from jstock_advisor.services.trade_registration_service import (
+    IdempotencyKeyReusedForDifferentTradeError,
+    TradeRegistrationService,
+)
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
+from jstock_advisor.services.write_plan import ConcurrentUpdateError
 
 _NOW = dt.datetime(2026, 9, 26, 9, 0, tzinfo=dt.UTC)
 _STOCK = "8306"
@@ -151,6 +155,80 @@ def test_omitting_idempotency_key_each_call_is_treated_as_a_new_trade(env) -> No
     assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("700000")
 
 
+# --- サブちゃんレビュー#624 F1対応: idempotency-keyの取り違え検出 -------------
+# 既存の冪等キー(CSV importのcsv:{sha256}:{row}等)は内容由来で取り違えが
+# 構造的に起こらないが、本Issueで初めて「人が手で打つ自由入力のキー」を
+# 導入したため、別の取引へ誤って使い回した場合を明示的に検出する契約を固定する。
+
+
+def test_reusing_key_from_buy_for_a_different_sell_is_rejected_not_silently_dropped(env) -> None:
+    """取り違えの実害を固定する回帰テスト: 修正前はこの誤用でSELLがno-opとして
+    黙って消え、保有株数・買付余力が実態より多いまま残っていた。"""
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_sell(
+            DEFAULT_OWNER, _STOCK, 100, Decimal("1800"), _NOW.date(), "shared-key", _NOW
+        )
+
+    # SELLが黙って消えていない(保有株数・買付余力とも変化しない)ことを確認する。
+    assert env["holding_repo"].get(_HOLDING_ID).shares == 100
+    assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("900000")
+
+
+def test_reusing_key_for_different_shares_is_rejected(env) -> None:
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_buy(
+            DEFAULT_OWNER, _STOCK, 200, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+        )
+
+
+def test_reusing_key_for_different_price_is_rejected(env) -> None:
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_buy(
+            DEFAULT_OWNER, _STOCK, 100, Decimal("2000"), _NOW.date(), "shared-key", _NOW
+        )
+
+
+def test_reusing_key_for_different_stock_code_is_rejected(env) -> None:
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_buy(
+            DEFAULT_OWNER, "7203", 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+        )
+
+
+def test_genuinely_identical_retry_still_treated_as_already_registered(env) -> None:
+    """取り違え検出が、真の冪等retry(全項目が一致)を誤って拒否しないこと。"""
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    result = env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    assert result.already_registered is True
+
+
 # --- D3: 未登録owner・余力不足の拒否(#591のAvailableCashServiceをそのまま再利用) ---
 
 
@@ -217,7 +295,10 @@ def test_concurrent_cash_change_between_plan_build_and_commit_rolls_back_everyth
 
     ac_service.build_trade_update_plan = racy
 
-    with pytest.raises(Exception):  # noqa: B017 - ConcurrentUpdateError(write_plan.py)
+    # ConcurrentUpdateErrorはValueErrorのサブクラス(write_plan.py)であり、
+    # CLI層がgeneric except ValueErrorで捕捉して生のtracebackを出さずに
+    # 済んでいる(サブちゃんレビュー#624 F3)。型を固定して検証する。
+    with pytest.raises(ConcurrentUpdateError):
         env["service"].register_buy(
             DEFAULT_OWNER, _STOCK, 100, Decimal("1500"), _NOW.date(), "idem-1", _NOW
         )
@@ -252,4 +333,60 @@ def test_holding_update_failure_rolls_back_already_created_lot(env) -> None:
     assert env["tx_repo"].get("idem-1") is None
     assert env["lot_repo"].get("idem-1") is None  # 直前に書いたLotもロールバック
     assert env["holding_repo"].get(_HOLDING_ID) is None
+    assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("1000000")  # 変化なし
+
+
+def test_sell_failure_restores_deleted_and_updated_lots(env) -> None:
+    """サブちゃんレビュー#624 F2対応: SELLは「消費した既存ロットを戻す」形状
+    (lot_deletes/lot_puts)であり、BUY(新規lot_putのみ)とは異なる。この
+    ロールバック経路がBUYの検証だけでは1件もカバーされていなかった
+    (lot_deletesのsnapshotを取らない変異がSURVIVEDした、という指摘)ため、
+    FIFO消費で1ロットを全部消費(delete)+もう1ロットを一部消費(put)する
+    ケースで、失敗時に両方とも元の内容へ戻ることを固定する。"""
+    _seed_cash(env, "1000000")
+    portfolio = env["portfolio"]
+    # 2ロットを直接作る(register_buyを2回使うとavailable_cashも絡むため、
+    # 既存のregister_purchase()〔available_cashに触れない既存経路〕で
+    # FIFO対象のロット構成だけを単純に用意する)。
+    portfolio.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code=_STOCK,
+        stock_name=None,
+        shares=50,
+        purchase_price=Decimal("1000"),
+        purchase_date=dt.date(2026, 9, 1),
+        account_type=AccountType.GENERAL,
+        lot_id="lot-a",
+    )
+    portfolio.register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code=_STOCK,
+        stock_name=None,
+        shares=60,
+        purchase_price=Decimal("1000"),
+        purchase_date=dt.date(2026, 9, 2),
+        account_type=AccountType.GENERAL,
+        lot_id="lot-b",
+    )
+    assert env["holding_repo"].get(_HOLDING_ID).shares == 110
+
+    # SELL 70株: FIFOでlot-a(50株)を全部消費(delete)、lot-b(60株)を
+    # 一部消費(40株へ更新)する構成になる。
+    holding_repo = env["holding_repo"]
+
+    def failing_replace(item_id, expected_raw_data, item):
+        raise RuntimeError("simulated holding write failure")
+
+    holding_repo._store.replace_if_raw_matches = failing_replace
+
+    with pytest.raises(RuntimeError):
+        env["service"].register_sell(
+            DEFAULT_OWNER, _STOCK, 70, Decimal("1800"), _NOW.date(), "idem-sell", _NOW
+        )
+
+    assert env["tx_repo"].get("idem-sell") is None
+    assert env["lot_repo"].get("lot-a") is not None  # 削除されたロットが復元されている
+    assert env["lot_repo"].get("lot-a").shares == 50
+    assert env["lot_repo"].get("lot-b").shares == 60  # 更新されたロットが元に戻っている
+    assert env["holding_repo"].get(_HOLDING_ID).shares == 110  # 変化なし
     assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("1000000")  # 変化なし
