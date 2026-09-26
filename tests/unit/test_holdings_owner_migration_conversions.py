@@ -192,6 +192,24 @@ def test_migrate_holding_id_field_value_fails_closed_on_malformed_multi_prefix()
         migrate_holding_id_field_value("本人#本人#8306", "本人")
 
 
+def test_migrate_holding_id_field_value_error_message_omits_raw_owner_and_holding_id() -> None:
+    """Issue #256: 例外messageに所有者・holding_idの生の値が出ないこと。
+
+    #135 O-Aと同型の是正(log_ref()による符号化)。fixtureは架空値のみ
+    (所有者A/所有者B、実在しない銘柄コード0000)を使う。
+    """
+    old_owner_value = "所有者B#0000"
+    with pytest.raises(InvalidOwnerError) as excinfo:
+        migrate_holding_id_field_value(old_owner_value, "所有者A")
+
+    message = str(excinfo.value)
+    assert "所有者A" not in message
+    assert "所有者B" not in message
+    assert old_owner_value not in message
+    # 例外の型は変えない(受入条件2)。
+    assert isinstance(excinfo.value, InvalidOwnerError)
+
+
 def test_convert_holding_with_custom_owner() -> None:
     legacy = LegacyHoldingV1(
         stock_code="8306",

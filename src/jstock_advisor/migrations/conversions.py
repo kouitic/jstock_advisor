@@ -12,6 +12,7 @@ from __future__ import annotations
 from jstock_advisor.domain.entities.owner import (
     InvalidOwnerError,
     build_holding_id,
+    log_ref,
     normalize_and_validate_owner,
     split_holding_id,
 )
@@ -100,5 +101,5 @@ def migrate_holding_id_field_value(old_value: str, owner: str = DEFAULT_MIGRATIO
         return old_value
     raise InvalidOwnerError(
         f"holding_idが既に別ownerで移行済みのため、fail-closedで中止しました: "
-        f"{old_value!r}(期待owner={normalized_owner!r})"
+        f"holding_ref={log_ref(old_value)}(期待owner_ref={log_ref(normalized_owner)})"
     )

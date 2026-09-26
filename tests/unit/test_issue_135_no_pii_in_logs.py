@@ -434,8 +434,8 @@ def test_no_raise_embeds_owner_or_holding_id_in_the_changed_modules() -> None:
 
 
 #: raise の検査対象。**#416 の scope に限定して**、baseline repository を加えた。
-#: src 全体へ広げると、別 Issue の既知の 1 件(#256: migrations/conversions.py の例外 message)を
-#: 検出して落ちるため広げていない(#256 の解消時に、Issue 番号付きの許容リストと併せて検討する)。
+#: src 全体へ広げると他の未是正箇所を検出して落ちるため広げていない。
+#: migrations/conversions.py は#256の是正(log_ref()化)により追加した。
 _RAISE_GUARDED_MODULES = [
     "src/jstock_advisor/domain/entities/owner.py",
     "src/jstock_advisor/infrastructure/aws/baseline_pointer.py",
@@ -443,6 +443,7 @@ _RAISE_GUARDED_MODULES = [
     "src/jstock_advisor/services/portfolio_service.py",
     "src/jstock_advisor/services/investment_thesis_service.py",
     "src/jstock_advisor/services/available_cash_service.py",
+    "src/jstock_advisor/migrations/conversions.py",
 ]
 
 
