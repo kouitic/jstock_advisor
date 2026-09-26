@@ -72,8 +72,8 @@ def env(tmp_path):
     }
 
 
-def _seed_cash(env, amount: str) -> None:
-    env["ac_service"].reconcile(DEFAULT_OWNER, Decimal(amount), _NOW)
+def _seed_cash(env, amount: str, owner: str = DEFAULT_OWNER) -> None:
+    env["ac_service"].reconcile(owner, Decimal(amount), _NOW)
 
 
 # --- 基本のBUY/SELL契約 ------------------------------------------------------
@@ -284,6 +284,136 @@ def test_genuinely_identical_retry_still_treated_as_already_registered(env) -> N
     )
 
     assert result.already_registered is True
+
+
+# --- サブちゃんレビュー#624 F6対応: idempotency-key照合へownerを追加 ---------
+# Transactionはowner-scopeでCLIにも--ownerがある。owner=Aの1回目登録と、
+# 銘柄・株数・単価・約定日・BUY/SELL区分が全て同一だがownerだけ異なる
+# owner=Bの2回目が、F1/F1'と同じ失敗モード(黙って消える)にならないことを
+# 固定する(fast-path・race-pathの双方)。
+
+_OTHER_OWNER = "owner-b"
+
+
+def test_reusing_key_for_different_owner_is_rejected(env) -> None:
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    # owner=Bはavailable_cash未登録のままでも、fast-pathでの照合が
+    # cashチェックより先に働き拒否されることを確認する(owner不一致検出が
+    # 他のガードに依存しない独立した防御であることの確認を兼ねる)。
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_buy(
+            _OTHER_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+        )
+
+    # owner=Aの取引が黙って消えていない(owner=Bのholdingが作られていない)ことを確認する。
+    assert env["holding_repo"].get(build_holding_id(DEFAULT_OWNER, _STOCK)).shares == 100
+    assert env["holding_repo"].get(build_holding_id(_OTHER_OWNER, _STOCK)) is None
+
+
+def test_race_path_also_rejects_owner_mismatch(env) -> None:
+    """F5(N2)と同じ考え方: fast-pathを迂回させ、race経路
+    (`_commit_locally()`内、`save_if_absent()`がFalseを返す分岐)自身の
+    owner照合が独立して機能することを固定する。"""
+    _seed_cash(env, "1000000")
+    _seed_cash(env, "1000000", owner=_OTHER_OWNER)
+    service = env["service"]
+    service.register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    service._fast_path_if_already_registered = lambda *args, **kwargs: None  # noqa: SLF001
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        service.register_buy(
+            _OTHER_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+        )
+
+
+# --- サブちゃんレビュー#624 F7対応: account_typeをTransactionへも伝搬・照合 ---
+# register_buy()はaccount_type(既定GENERAL)をLot/Holdingへは反映していたが、
+# Transactionへは渡しておらずaccount_type=Noneになっていた(サービスAPIとして
+# account_typeを公開している以上、永続データ間で一致させるべき、というUSER
+# 判断〔決定A〕)。あわせて、口座種別だけが異なる場合も別取引として扱う。
+
+
+def test_register_buy_propagates_account_type_to_lot_holding_and_transaction(env) -> None:
+    _seed_cash(env, "1000000")
+
+    env["service"].register_buy(
+        DEFAULT_OWNER,
+        _STOCK,
+        100,
+        Decimal("1000"),
+        _NOW.date(),
+        "idem-nisa",
+        _NOW,
+        account_type=AccountType.NISA,
+    )
+
+    assert env["holding_repo"].get(_HOLDING_ID).account_type == AccountType.NISA
+    assert env["lot_repo"].get("idem-nisa").account_type == AccountType.NISA
+    assert env["tx_repo"].get("idem-nisa").account_type == AccountType.NISA
+
+
+def test_reusing_key_for_different_account_type_is_rejected(env) -> None:
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER,
+        _STOCK,
+        100,
+        Decimal("1000"),
+        _NOW.date(),
+        "shared-key",
+        _NOW,
+        account_type=AccountType.GENERAL,
+    )
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_buy(
+            DEFAULT_OWNER,
+            _STOCK,
+            100,
+            Decimal("1000"),
+            _NOW.date(),
+            "shared-key",
+            _NOW,
+            account_type=AccountType.NISA,
+        )
+
+
+def test_race_path_also_rejects_account_type_mismatch(env) -> None:
+    """F5(N2)と同じ考え方: fast-pathを迂回させ、race経路自身の
+    account_type照合が独立して機能することを固定する。"""
+    _seed_cash(env, "1000000")
+    service = env["service"]
+    service.register_buy(
+        DEFAULT_OWNER,
+        _STOCK,
+        100,
+        Decimal("1000"),
+        _NOW.date(),
+        "shared-key",
+        _NOW,
+        account_type=AccountType.GENERAL,
+    )
+
+    service._fast_path_if_already_registered = lambda *args, **kwargs: None  # noqa: SLF001
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        service.register_buy(
+            DEFAULT_OWNER,
+            _STOCK,
+            100,
+            Decimal("1000"),
+            _NOW.date(),
+            "shared-key",
+            _NOW,
+            account_type=AccountType.NISA,
+        )
 
 
 # --- D3: 未登録owner・余力不足の拒否(#591のAvailableCashServiceをそのまま再利用) ---
