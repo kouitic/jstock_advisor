@@ -1440,18 +1440,33 @@ def _record_notification_outcome_audit(
     basis: PortfolioValuationBasis,
     portfolio_total_market_value: Decimal | None,
     coverage_ratio: float,
+    batch_id: str,
 ) -> None:
     """ランキングに登録された候補(BUY系)について記録する監査(要求仕様§4・§10・§14)。
 
     unified_rank=Noneは、順位付けを行わない一過性の通知(WATCH終了通知等、
     コードレビュー対応2026-08)を記録する場合に使う。
+
+    Issue #531(#71 F-C14): 唯一の呼び出し元`_finalize_batch()`はbatch_idを
+    必ず持つ(白箱テストからの直接呼び出しは存在しない)ため、
+    `_record_evaluation_audit()`と異なりbatch_id=Noneの後方互換分岐は無く、
+    常に`record_if_absent()`(batch_id+stock_code由来の決定的audit_id)で
+    非同期fan-outの再配信(#528/#558/#622と同型の欠陥)による監査ログの重複を
+    防ぐ。audit_idは`f"unified_buy_candidate_notification_outcome:{batch_id}:
+    {stock_code}"`の3構成要素からなる(PR #622 F2と同型の粒度。#622と同じ理由で
+    decision_type prefix/batch_id/stock_codeのいずれを落としても正当な監査
+    記録が失われうる)。`_finalize_batch()`のランキングループは1銘柄につき
+    ちょうど1回だけこの関数を呼ぶ(早期continueによる相互排他分岐)ため、
+    同一batch内で同一stock_codeが2回呼ばれることはない。
     """
     reliable = basis == PortfolioValuationBasis.MARKET_VALUE
     block_category = eligibility.block_category.value if eligibility.block_category else None
     portfolio_total_str = (
         str(portfolio_total_market_value) if portfolio_total_market_value is not None else None
     )
-    audit_service.record(
+    audit_service.record_if_absent(
+        audit_id=f"unified_buy_candidate_notification_outcome:{batch_id}:"
+        f"{recommendation.stock_code}",
         decision_type="unified_buy_candidate_notification_outcome",
         stock_code=recommendation.stock_code,
         input_values={"recommendation_id": recommendation.recommendation_id},
@@ -1605,6 +1620,7 @@ def _finalize_batch(
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 "NOT_REQUIRED", dq, basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, stock_code, unified_rank, None,
@@ -1628,6 +1644,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 buy_cooldown.block_reason or "NOT_REQUIRED", buy_cooldown,
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, stock_code, unified_rank, None,
@@ -1650,6 +1667,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 buy_priority.block_reason or "NOT_REQUIRED", buy_priority,
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, stock_code, unified_rank, None,
@@ -1727,6 +1745,7 @@ def _finalize_batch(
                 _record_notification_outcome_audit(
                     audit_service, rule_version, now, recommendation, unified_rank, None,
                     "NOT_REQUIRED", addon_eligibility, basis, portfolio_total, coverage_ratio,
+                    batch_id=batch_id,
                 )
                 _update_evaluation_record_outcome_safely(
                     evaluation_record_repo, batch_id, stock_code, unified_rank, None,
@@ -1745,6 +1764,7 @@ def _finalize_batch(
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, recommendation, unified_rank, None,
                 resend.block_reason or "SUPPRESSED", resend, basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, stock_code, unified_rank, None,
@@ -1768,6 +1788,7 @@ def _finalize_batch(
                     block_reason="OUTSIDE_TOP_5",
                 ),
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, stock_code, unified_rank, None,
@@ -1817,6 +1838,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, rec, unified_rank, None,
                 outcome, NotificationEligibility(eligible=True),
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
@@ -1830,6 +1852,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, rec, unified_rank, notification_rank,
                 "SENT", NotificationEligibility(eligible=True),
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, notification_rank,
@@ -1848,6 +1871,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, rec, unified_rank, None,
                 outcome, NotificationEligibility(eligible=True),
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
@@ -1860,6 +1884,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, rec, unified_rank, None,
                 outcome, NotificationEligibility(eligible=False, block_reason=outcome),
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             _update_evaluation_record_outcome_safely(
                 evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
@@ -1907,6 +1932,7 @@ def _finalize_batch(
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
                 "NOT_REQUIRED", nb_dq, basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             continue
 
@@ -1916,6 +1942,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
                 nb_cooldown.block_reason or "NOT_REQUIRED", nb_cooldown,
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             continue
 
@@ -1928,6 +1955,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
                 nb_priority.block_reason or "NOT_REQUIRED", nb_priority,
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             continue
 
@@ -1937,6 +1965,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
                 nb_resend.block_reason or "SUPPRESSED", nb_resend,
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             continue
 
@@ -1953,6 +1982,7 @@ def _finalize_batch(
                     block_reason="DAILY_LIMIT_NEAR_BUY",
                 ),
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             continue
 
@@ -1974,6 +2004,7 @@ def _finalize_batch(
                 block_reason="NON_ACTIONABLE",
             ),
             basis, portfolio_total, coverage_ratio,
+            batch_id=batch_id,
         )
 
     # --- WATCH終了通知の実送信経路(コードレビュー対応2026-08、§3)。
@@ -1996,6 +2027,7 @@ def _finalize_batch(
             _record_notification_outcome_audit(
                 audit_service, rule_version, now, we_recommendation, None, None,
                 "NOT_REQUIRED", we_dq, basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             continue
 
@@ -2005,6 +2037,7 @@ def _finalize_batch(
                 audit_service, rule_version, now, we_recommendation, None, None,
                 we_cooldown.block_reason or "NOT_REQUIRED", we_cooldown,
                 basis, portfolio_total, coverage_ratio,
+                batch_id=batch_id,
             )
             continue
 
@@ -2021,6 +2054,7 @@ def _finalize_batch(
                 block_reason="NON_ACTIONABLE",
             ),
             basis, portfolio_total, coverage_ratio,
+            batch_id=batch_id,
         )
 
     # 買い候補サマリー表示改修(2026-08): 「購入判定」(判定状態)と「買い候補の
