@@ -164,6 +164,138 @@ def test_record_rotation_commit_audit_is_not_duplicated_on_retry(
     assert repo.save_calls == 1
 
 
+def test_record_candidate_audit_id_includes_stock_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: audit_idからstock_codeを落とすと、同一batch_id内の別銘柄の記録が
+    「既に存在する」と誤判定され、正当な監査記録が黙って失われる
+    (#62 build_removal_audit_id()の前例に倣い、各構成要素の必要性を固定する)。
+    """
+    audit_service, repo = _fake_audit_service()
+    monkeypatch.setattr(watchlist_screening_audit, "AuditService", lambda: audit_service)
+
+    watchlist_screening_audit.record_candidate_audit(
+        "1111", None, "DATA_INSUFFICIENT", _NOW, batch_id="batch-531-f2a"
+    )
+    watchlist_screening_audit.record_candidate_audit(
+        "2222", None, "DATA_INSUFFICIENT", _NOW, batch_id="batch-531-f2a"
+    )
+
+    assert repo.save_calls == 2
+
+
+def test_record_candidate_audit_id_includes_batch_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: audit_idからbatch_idを落とすと、別バッチの同一銘柄の記録が失われる。"""
+    audit_service, repo = _fake_audit_service()
+    monkeypatch.setattr(watchlist_screening_audit, "AuditService", lambda: audit_service)
+
+    watchlist_screening_audit.record_candidate_audit(
+        "1111", None, "DATA_INSUFFICIENT", _NOW, batch_id="batch-531-f2b1"
+    )
+    watchlist_screening_audit.record_candidate_audit(
+        "1111", None, "DATA_INSUFFICIENT", _NOW, batch_id="batch-531-f2b2"
+    )
+
+    assert repo.save_calls == 2
+
+
+def test_record_repository_result_audit_id_includes_stock_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: repository_result側でも、同一batch_id内の別銘柄の記録が
+    stock_code抜きのidで衝突しないことを固定する。"""
+    audit_service, repo = _fake_audit_service()
+    monkeypatch.setattr(watchlist_screening_audit, "AuditService", lambda: audit_service)
+
+    for stock_code in ("1111", "2222"):
+        watchlist_screening_audit.record_repository_result_audit(
+            batch_id="batch-531-f2c",
+            stock_code=stock_code,
+            stock_name="テスト",
+            rank=1,
+            total_score=80.0,
+            repository_result=watchlist_screening_audit.REPOSITORY_RESULT_ADDED,
+            added_to_watchlist=True,
+            registration_source="AUTO_SCREENING",
+            registration_policy="policy-a",
+            now=_NOW,
+        )
+
+    assert repo.save_calls == 2
+
+
+def test_record_repository_result_audit_id_includes_batch_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: repository_result側でも、別バッチの同一銘柄の記録がbatch_id抜きの
+    idで衝突しないことを固定する。"""
+    audit_service, repo = _fake_audit_service()
+    monkeypatch.setattr(watchlist_screening_audit, "AuditService", lambda: audit_service)
+
+    for batch_id in ("batch-531-f2d1", "batch-531-f2d2"):
+        watchlist_screening_audit.record_repository_result_audit(
+            batch_id=batch_id,
+            stock_code="1111",
+            stock_name="テスト",
+            rank=1,
+            total_score=80.0,
+            repository_result=watchlist_screening_audit.REPOSITORY_RESULT_ADDED,
+            added_to_watchlist=True,
+            registration_source="AUTO_SCREENING",
+            registration_policy="policy-a",
+            now=_NOW,
+        )
+
+    assert repo.save_calls == 2
+
+
+def test_record_rotation_commit_audit_id_includes_batch_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: rotation_commit側でも、別バッチの記録がbatch_id抜きのidで
+    衝突しないことを固定する。"""
+    audit_service, repo = _fake_audit_service()
+    monkeypatch.setattr(watchlist_screening_audit, "AuditService", lambda: audit_service)
+
+    for batch_id in ("batch-531-f2e1", "batch-531-f2e2"):
+        watchlist_screening_audit.record_rotation_commit_audit(
+            batch_id, 1, ["S"], ["E"], False, 10, {"passed": 10}, True, _NOW
+        )
+
+    assert repo.save_calls == 2
+
+
+def test_record_candidate_and_repository_result_audit_ids_do_not_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: 同一(batch_id, stock_code)でも、decision_type prefixが異なるため
+    candidate側とrepository_result側のaudit_idは衝突しない。prefixを落とすと、
+    片方の記録がもう片方を「既に存在する」としてスキップし、別種の監査記録が
+    黙って失われる(サブちゃん指摘: 候補種別の衝突)。"""
+    audit_service, repo = _fake_audit_service()
+    monkeypatch.setattr(watchlist_screening_audit, "AuditService", lambda: audit_service)
+
+    watchlist_screening_audit.record_candidate_audit(
+        "1111", None, "DATA_INSUFFICIENT", _NOW, batch_id="batch-531-f2f"
+    )
+    watchlist_screening_audit.record_repository_result_audit(
+        batch_id="batch-531-f2f",
+        stock_code="1111",
+        stock_name="テスト",
+        rank=1,
+        total_score=80.0,
+        repository_result=watchlist_screening_audit.REPOSITORY_RESULT_ADDED,
+        added_to_watchlist=True,
+        registration_source="AUTO_SCREENING",
+        registration_policy="policy-a",
+        now=_NOW,
+    )
+
+    assert repo.save_calls == 2
+
+
 def test_record_candidate_audit_negative_verification_without_record_if_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

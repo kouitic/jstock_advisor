@@ -42,6 +42,7 @@ from jstock_advisor.infrastructure.local_repository.audit_log_repository import 
 )
 from jstock_advisor.services import audit_service as audit_service_module
 from jstock_advisor.services import watchlist_batch_finalizer as finalizer_module
+from jstock_advisor.services import watchlist_screening_audit
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.line_notification_service import (
     render_watchlist_addition_message,
@@ -1042,12 +1043,16 @@ def test_batch_audit_is_not_duplicated_when_flag_update_fails(
         finalizer_module, "mark_batch_audit_recorded", _flaky_mark_batch_audit_recorded
     )
 
+    # Issue #531でrecord_candidate_audit()等もrecord_if_absent()経由になった
+    # ため、このテストがinsert_if_absentの新規保存の有無を検証したいのは
+    # record_batch_audit()自身の呼び出しのみ(decision_typeでフィルタする)。
     insert_results: list[bool] = []
     original_record_if_absent = AuditService.record_if_absent
 
     def _counting_record_if_absent(self: AuditService, *args: Any, **kwargs: Any) -> Any:
         result = original_record_if_absent(self, *args, **kwargs)
-        insert_results.append(result is not None)
+        if kwargs.get("decision_type") == watchlist_screening_audit.DECISION_TYPE_BATCH:
+            insert_results.append(result is not None)
         return result
 
     monkeypatch.setattr(AuditService, "record_if_absent", _counting_record_if_absent)
