@@ -27,6 +27,22 @@ class AvailableCashReconciliationExhaustedError(RuntimeError):
     """棚卸し更新が競合により max_retries 回失敗した(#589)。"""
 
 
+class AvailableCashNotRegisteredError(ValueError):
+    """未登録ownerに対して売買登録(TRADE_UPDATE)を試みた(#590 D3)。
+
+    #584/#589で確立した「未登録owner != 実際の買付余力0円」契約と整合させる
+    ため、trade登録時に未登録ownerを自動0円初期化しない(fail-closedで
+    利用者に先に棚卸し登録〔#589 reconcile〕を行わせる)。
+    """
+
+    def __init__(self, owner: str) -> None:
+        super().__init__(
+            f"owner_ref={log_ref(owner)}: 買付余力が未登録のため、売買登録と連動した"
+            "更新ができません。先に買付余力の棚卸し登録を行ってください。"
+        )
+        self.owner = owner
+
+
 class AvailableCashService:
     def __init__(
         self,
@@ -113,4 +129,52 @@ class AvailableCashService:
             last_reconciled_at=now,
         )
         existing_raw = self._repo.get_raw(owner)
+        return ConditionalPut(model=record, id_field="owner", expected_data=existing_raw)
+
+    def build_trade_update_plan(
+        self, raw_owner: str, delta: Decimal, now: dt.datetime
+    ) -> ConditionalPut:
+        """通常売買登録(BUY/SELL)確定時、TransactWriteItemsへ含める単一Putの
+        計画のみを返す(Issue #590、#128 A3-LINE。このメソッド自体は一切
+        永続化しない)。
+
+        `delta`は呼び出し側(conversation_service.py)が符号込みで渡す
+        (BUY: -purchase_price*shares、SELL: +sale_price*shares)。本メソッドは
+        単純に現在値へ加算するのみで、符号の業務ルールは持たない。
+
+        未登録ownerへのTRADE_UPDATEは`AvailableCashNotRegisteredError`で
+        明示的に拒否する(D3。自動0円初期化はしない)。available_cash<0は
+        entityの既存validator(`_check_non_negative`)がValidationErrorとして
+        送出する(`build_reconcile_plan()`と同じくPydanticの通常のconstructor
+        経由で新レコードを構築するため検証が働く。`model_copy(update=...)`は
+        フィールド検証を行わないため使わない)。この失敗はplan構築フェーズ
+        (I/O前)で起きるため、Holding/Transaction/Cashのいずれも書き込まれ
+        ない(#591のinsufficient cash guardが依拠する契約)。
+
+        last_reconciled_atは既存値をそのまま引き継ぐ(TRADE_UPDATEでは進め
+        ない。#584 entity docstringの契約をここで強制する)。
+
+        **deltaの基準値(現在残高)とCASの`expected_data`は、同一の読み取り
+        (`get_raw()`1回)から導出する。**`get()`と`get_raw()`を別々に呼ぶと、
+        両者の間に別経路(#589の棚卸し等)の更新が割り込んだ場合、
+        `expected_data`は新しい値になるためCAS自体は成立してしまうにも
+        関わらず、delta計算は古い基準値のまま行われ、更新が黙って失われる
+        (サブちゃんレビュー#620指摘F1。実測: 初期100万→並行更新で200万→
+        旧100万を基準にdelta計算→CAS成立→最終85万、期待値185万との差
+        100万円)。`build_reconcile_plan()`は絶対値上書きのため基準値
+        自体が不要で単発読み取りで問題にならないが、本メソッドは相対計算
+        (delta)であるため、読み取りを1回に統合する必要がある。
+        """
+        owner = normalize_and_validate_owner(raw_owner)
+        existing_raw = self._repo.get_raw(owner)
+        if existing_raw is None:
+            raise AvailableCashNotRegisteredError(owner)
+        existing = AvailableCash.model_validate_json(existing_raw)
+        record = AvailableCash(
+            owner=owner,
+            available_cash=existing.available_cash + delta,
+            updated_at=now,
+            last_update_type=AvailableCashUpdateType.TRADE_UPDATE,
+            last_reconciled_at=existing.last_reconciled_at,
+        )
         return ConditionalPut(model=record, id_field="owner", expected_data=existing_raw)

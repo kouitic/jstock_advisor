@@ -17,8 +17,10 @@ import boto3
 import pytest
 from botocore.exceptions import ClientError
 
+from jstock_advisor.domain.entities.available_cash import AvailableCash
 from jstock_advisor.domain.entities.enums import (
     AccountType,
+    AvailableCashUpdateType,
     ConversationAction,
     TransactionType,
 )
@@ -30,6 +32,9 @@ from jstock_advisor.infrastructure.aws import (
     conversation_state_store,
     dynamodb_transaction,
 )
+from jstock_advisor.infrastructure.local_repository.available_cash_repository import (
+    AvailableCashRepository,
+)
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -40,9 +45,18 @@ from jstock_advisor.infrastructure.local_repository.transaction_repository impor
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
     WatchlistRepository,
 )
+from jstock_advisor.services.available_cash_service import AvailableCashService
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
 from jstock_advisor.services.watchlist_service import WatchlistService
+
+# commit_buy/commit_sellのTransactWriteItemsが対象owner分のAvailableCashへも
+# ConditionalPutを含めるようになった(Issue #590)ため、既存テストが暗黙に
+# 前提とする「余力は十分にある」状態を1箇所で用意する。
+_DEFAULT_AVAILABLE_CASH = Decimal("10000000")
+# _NOWとは別の値にすることで、TRADE_UPDATEがlast_reconciled_atを進めない
+# (既存値をそのまま引き継ぐ)ことを「たまたま同じ値」ではなく実際に検証する。
+_SEEDED_RECONCILED_AT = dt.datetime(2026, 8, 1, 0, 0, tzinfo=dt.UTC)
 
 _REGION = "ap-northeast-1"
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
@@ -71,6 +85,9 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             # 保有銘柄オーナー機能移行: commit_buy/commit_sellのTransactWriteItems
             # がTradingPauseConfigをConditionCheckするため必要(コードレビュー対応)。
             ("jstock-trading_pause_config", "config_id"),
+            # Issue #590: commit_buy/commit_sellのTransactWriteItemsがAvailableCash
+            # へのConditionalPutを含むため必要。
+            ("jstock-available_cash", "owner"),
         ):
             client.create_table(
                 TableName=table_name,
@@ -78,7 +95,32 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                 AttributeDefinitions=[{"AttributeName": key, "AttributeType": "S"}],
                 BillingMode="PAY_PER_REQUEST",
             )
+        _seed_available_cash()
         yield
+
+
+def _seed_available_cash(
+    amount: Decimal = _DEFAULT_AVAILABLE_CASH, owner: str = DEFAULT_OWNER
+) -> None:
+    AvailableCashRepository().initialize(
+        AvailableCash(
+            owner=owner,
+            available_cash=amount,
+            updated_at=_NOW,
+            last_update_type=AvailableCashUpdateType.USER_RECONCILIATION,
+            last_reconciled_at=_SEEDED_RECONCILED_AT,
+        )
+    )
+
+
+def _buy_available_cash_put(shares: int, price: str, owner: str = DEFAULT_OWNER) -> Any:
+    return AvailableCashService().build_trade_update_plan(
+        owner, -(Decimal(price) * shares), _NOW
+    )
+
+
+def _sell_available_cash_put(shares: int, price: str, owner: str = DEFAULT_OWNER) -> Any:
+    return AvailableCashService().build_trade_update_plan(owner, Decimal(price) * shares, _NOW)
 
 
 def _start_buy_confirm(shares: int = 100, price: str = "1500") -> Any:
@@ -168,8 +210,11 @@ def test_commit_buy_succeeds_for_new_stock(moto_conversation_tables: None) -> No
         execution_date=dt.date(2026, 8, 17),
         now=_NOW,
     )
+    available_cash_put = _buy_available_cash_put(100, "1500")
 
-    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+    ok = conversation_commit.commit_buy(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is True
     holding = HoldingRepository().get(_HOLDING_ID)
@@ -179,6 +224,11 @@ def test_commit_buy_succeeds_for_new_stock(moto_conversation_tables: None) -> No
     assert len(lots) == 1
     assert TransactionRepository().get(state.operation_id) is not None
     assert conversation_state_store.get(_USER, _NOW) is None
+    available_cash = AvailableCashRepository().get(DEFAULT_OWNER)
+    assert available_cash is not None
+    assert available_cash.available_cash == _DEFAULT_AVAILABLE_CASH - Decimal("150000")
+    assert available_cash.last_update_type == AvailableCashUpdateType.TRADE_UPDATE
+    assert available_cash.last_reconciled_at == _SEEDED_RECONCILED_AT  # TRADE_UPDATEで進めない
 
 
 def test_commit_buy_fails_when_existing_holding_changed_after_plan_built(
@@ -215,13 +265,21 @@ def test_commit_buy_fails_when_existing_holding_changed_after_plan_built(
     mutated = HoldingRepository().get(_HOLDING_ID)
     assert mutated is not None
     HoldingRepository().upsert(mutated.model_copy(update={"memo": "concurrent edit"}))
+    available_cash_put = _buy_available_cash_put(50, "1500")
 
-    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+    ok = conversation_commit.commit_buy(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is False
     # ConversationStateは消費されず(まだCONFIRM_WAITING)、Transactionも作られない。
     assert conversation_state_store.get(_USER, _NOW) is not None
     assert TransactionRepository().get(state.operation_id) is None
+    # AvailableCashも他アイテムとまとめて失敗し、変更されない。
+    unchanged_cash = AvailableCashRepository().get(DEFAULT_OWNER)
+    assert unchanged_cash is not None
+    assert unchanged_cash.available_cash == _DEFAULT_AVAILABLE_CASH
+    assert unchanged_cash.last_update_type == AvailableCashUpdateType.USER_RECONCILIATION
     # 元の(競合させた側の)変更はそのまま保たれている。
     assert HoldingRepository().get(_HOLDING_ID).memo == "concurrent edit"  # type: ignore[union-attr]
     # 新規ロットは追加されない(既存の1件のみ)。
@@ -259,8 +317,11 @@ def test_commit_buy_fails_when_holding_created_concurrently_for_new_stock(
 
     # 計画構築後、別経路が先にHoldingを作成した状況を模擬する。
     _seed_holding_with_one_lot(shares=10, price="999")
+    available_cash_put = _buy_available_cash_put(100, "1500")
 
-    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+    ok = conversation_commit.commit_buy(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is False
     assert conversation_state_store.get(_USER, _NOW) is not None
@@ -299,8 +360,11 @@ def test_commit_buy_fails_when_transaction_id_already_exists(
     )
     # 同じtransaction_id(=operation_id)のTransactionが既に存在する状況を模擬する。
     TransactionRepository().save(transaction)
+    available_cash_put = _buy_available_cash_put(100, "1500")
 
-    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+    ok = conversation_commit.commit_buy(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is False
     assert HoldingRepository().get(_HOLDING_ID) is None
@@ -332,7 +396,11 @@ def test_commit_buy_fails_on_operation_id_mismatch(moto_conversation_tables: Non
         now=_NOW,
     )
 
-    ok = conversation_commit.commit_buy(_USER, "wrong-op-id", plan, transaction, _NOW)
+    available_cash_put = _buy_available_cash_put(100, "1500")
+
+    ok = conversation_commit.commit_buy(
+        _USER, "wrong-op-id", plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is False
     assert HoldingRepository().get(_HOLDING_ID) is None
@@ -360,13 +428,22 @@ def test_commit_sell_full_sell_deletes_lot_and_holding(moto_conversation_tables:
         now=_NOW,
     )
 
-    ok = conversation_commit.commit_sell(_USER, state.operation_id, plan, transaction, _NOW)
+    available_cash_put = _sell_available_cash_put(100, "1500")
+
+    ok = conversation_commit.commit_sell(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is True
     assert HoldingRepository().get(_HOLDING_ID) is None
     assert PurchaseLotRepository().list_by_stock(_STOCK) == []
     assert TransactionRepository().get(state.operation_id) is not None
     assert conversation_state_store.get(_USER, _NOW) is None
+    available_cash = AvailableCashRepository().get(DEFAULT_OWNER)
+    assert available_cash is not None
+    assert available_cash.available_cash == _DEFAULT_AVAILABLE_CASH + Decimal("150000")
+    assert available_cash.last_update_type == AvailableCashUpdateType.TRADE_UPDATE
+    assert available_cash.last_reconciled_at == _SEEDED_RECONCILED_AT
 
 
 def test_commit_sell_partial_sell_updates_lot_and_holding(moto_conversation_tables: None) -> None:
@@ -386,7 +463,11 @@ def test_commit_sell_partial_sell_updates_lot_and_holding(moto_conversation_tabl
         now=_NOW,
     )
 
-    ok = conversation_commit.commit_sell(_USER, state.operation_id, plan, transaction, _NOW)
+    available_cash_put = _sell_available_cash_put(30, "1500")
+
+    ok = conversation_commit.commit_sell(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is True
     holding = HoldingRepository().get(_HOLDING_ID)
@@ -421,8 +502,11 @@ def test_commit_sell_fails_when_lot_changed_after_plan_built(
     lot = PurchaseLotRepository().get("existing-lot")
     assert lot is not None
     PurchaseLotRepository().upsert(lot.model_copy(update={"shares": 40}))
+    available_cash_put = _sell_available_cash_put(100, "1500")
 
-    ok = conversation_commit.commit_sell(_USER, state.operation_id, plan, transaction, _NOW)
+    ok = conversation_commit.commit_sell(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is False
     assert conversation_state_store.get(_USER, _NOW) is not None
@@ -479,8 +563,11 @@ def test_commit_buy_succeeds_when_trading_pause_uninitialized(
         execution_date=dt.date(2026, 8, 17),
         now=_NOW,
     )
+    available_cash_put = _buy_available_cash_put(100, "1500")
 
-    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+    ok = conversation_commit.commit_buy(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is True
 
@@ -519,8 +606,11 @@ def test_commit_buy_rejected_when_trading_paused_after_plan_built(
 
     # 計画構築後・TransactWriteItems実行前に、運用者がpauseへ切り替えたことを模擬する。
     _set_trading_pause(True)
+    available_cash_put = _buy_available_cash_put(100, "1500")
 
-    ok = conversation_commit.commit_buy(_USER, state.operation_id, plan, transaction, _NOW)
+    ok = conversation_commit.commit_buy(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is False
     assert HoldingRepository().get(_HOLDING_ID) is None
@@ -549,8 +639,11 @@ def test_commit_sell_rejected_when_trading_paused_after_plan_built(
     )
 
     _set_trading_pause(True)
+    available_cash_put = _sell_available_cash_put(100, "1500")
 
-    ok = conversation_commit.commit_sell(_USER, state.operation_id, plan, transaction, _NOW)
+    ok = conversation_commit.commit_sell(
+        _USER, state.operation_id, plan, transaction, _NOW, available_cash_put
+    )
 
     assert ok is False
     holding = HoldingRepository().get(_HOLDING_ID)
