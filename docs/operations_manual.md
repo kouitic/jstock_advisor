@@ -888,10 +888,13 @@ CSVコマンドは廃止済み)。利用者向けの操作方法は機能仕様�
 リッチメニューの作成・画像アップロードは`infra/line_rich_menu/
 register_rich_menu.py`で行う(このスクリプトはLambda/CIからは呼ばれない、
 人間が手元で実行する運用スクリプト)。定義は`infra/line_rich_menu/
-rich_menu.json`にリポジトリ管理されている。**Phase 2-A(2026-08、6.3節)で
-2500×1686px・上段3分割/下段3分割の2段構成へ更新済み**のため、画像ファイルも
-この構成(上段: 買った/売った/お気に入り登録、下段: 保有銘柄/ウォッチリスト/
-対象確認)に合わせて別途用意すること。
+rich_menu.json`にリポジトリ管理されている。**Issue #593(2026-09-26)で
+2500×1686px・2行×4列の均等grid(各セル625×843)へ更新済み**(USER確定
+レイアウト、issuecomment-5842895208)のため、画像ファイルもこの構成
+(上段: 買った/売った/お気に入り登録/余力管理、下段: 保有銘柄/
+ウォッチリスト/対象確認/銘柄分析)に合わせて別途用意すること。
+「余力管理」に対応するLINE会話ロジック自体はIssue #592で別途実装する
+(本Issueのscope外)。
 
 ```bash
 # 1. 環境変数にチャネルアクセストークンを設定する(Secrets Managerの値をコピー)
@@ -911,6 +914,26 @@ python infra/line_rich_menu/register_rich_menu.py --rich-menu-id <richMenuId> --
 (Lambda)のデプロイと、このリッチメニュー登録手順は完全に独立している**。
 コードをデプロイしただけではLINEトーク画面のメニュー表示は変わらず、
 本手順を別途手動で実行して初めて利用者の画面に反映される。
+
+**「💰 余力管理」ボタンを含む本レイアウトをset-default(手順3)する前提**:
+`action=start_available_cash_reconcile`(#592)を実際に処理できる
+LineWebhookFunctionと、AvailableCashTable/IAM配線(#595)の両方が
+Productionへ反映済みであること。いずれかが未反映のままset-defaultすると、
+このボタンをタップした利用者に対して「認識できない操作です」という
+案内が返るか、以下いずれかの例外でLambdaが停止する(既存7ボタンの
+動作には影響しない)。
+
+```
+#592未反映(LineWebhookFunctionが新actionを処理できない)
+  → 「認識できない操作です」の案内(_UNKNOWN_POSTBACK、正常応答)
+#595未反映かつtable自体が存在しない
+  → ResourceNotFoundException
+#595未反映(tableは存在するがIAM権限が無い)
+  → AccessDeniedException
+```
+
+いずれの場合も原因の切り分けに使えるが、「両方がProductionへ反映済みで
+なければset-defaultしない」という運用上の結論は変わらない。
 
 ### 6.3 保有銘柄・ウォッチリスト・対象確認(参照専用、Phase 2-A・2026-08追加)
 

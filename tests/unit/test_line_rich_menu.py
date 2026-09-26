@@ -1,13 +1,14 @@
 """infra/line_rich_menu/rich_menu.json のスキーマ検証(LINEボタン起点会話型UI・
-実装プランv2 4節、LINE UI第二弾Phase 2-B・7ボタン版で更新)。
+実装プランv2 4節、Issue #593で8ボタン版〔2行×4列の均等grid〕へ更新)。
 
 register_rich_menu.py自体は人間が手元で実行する運用スクリプトのため自動テスト
 対象外とするが(Lambda/CIからは呼ばれない)、定義JSONの面積合計・重複領域の
 有無・action.data値が確定postback data定義と一致することは回帰的に検証する。
 
-Phase 2-B(銘柄分析、start_analyze)を含む7ボタン版
-(上段: 買った/売った/お気に入り登録、下段: 保有銘柄/ウォッチリスト/対象確認/
-銘柄分析)を対象とする。
+買付余力(Issue #592、A5a)の「💰 余力管理」を含む8ボタン版
+(上段: 買った/売った/お気に入り登録/余力管理、下段: 保有銘柄/ウォッチリスト/
+対象確認/銘柄分析。USER確定レイアウト、Issue #593 issuecomment-5842895208)
+を対象とする。
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ _EXPECTED_POSTBACK_DATA = {
     "action=start_buy",
     "action=start_sell",
     "action=start_watch",
+    "action=start_available_cash_reconcile",
     "action=show_holdings",
     "action=show_watchlist",
     "action=show_targets",
@@ -44,7 +46,7 @@ def test_rich_menu_json_is_valid_json_with_required_top_level_fields() -> None:
     assert data["name"]
     assert data["chatBarText"]
     assert isinstance(data["areas"], list)
-    assert len(data["areas"]) == 7
+    assert len(data["areas"]) == 8
 
 
 def test_rich_menu_areas_cover_full_grid_without_gaps_or_overlap() -> None:
@@ -91,3 +93,31 @@ def test_rich_menu_actions_are_all_postback_type_with_display_text() -> None:
         action = area["action"]
         assert action["type"] == "postback"
         assert action["displayText"]
+
+
+def test_rich_menu_areas_form_uniform_4x2_grid() -> None:
+    """Issue #593(USER確定レイアウト): 全8領域が均等なgrid(各625x843)を成す。
+
+    旧版は上段3(833/834/833)+下段4(625ずつ)の非対称配置だったが、新版は
+    2行×4列すべて均等サイズへ変更された(issuecomment-5842895208)。
+    """
+    data = _load()
+    for area in data["areas"]:
+        bounds = area["bounds"]
+        assert bounds["width"] == 625
+        assert bounds["height"] == 843
+
+
+def test_rich_menu_available_cash_button_is_positioned_as_confirmed() -> None:
+    """買付余力(#592)の「余力管理」は上段4列目(x=1875, y=0)に配置する
+    (USER確定レイアウト: お気に入り登録の右隣)。
+    """
+    data = _load()
+    matches = [
+        area
+        for area in data["areas"]
+        if area["action"]["data"] == "action=start_available_cash_reconcile"
+    ]
+    assert len(matches) == 1
+    bounds = matches[0]["bounds"]
+    assert (bounds["x"], bounds["y"]) == (1875, 0)
