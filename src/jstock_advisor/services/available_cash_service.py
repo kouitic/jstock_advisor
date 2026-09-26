@@ -43,6 +43,25 @@ class AvailableCashNotRegisteredError(ValueError):
         self.owner = owner
 
 
+class InsufficientAvailableCashError(ValueError):
+    """BUY登録時、購入金額がavailable_cashを超える(Issue #591、#128 A4)。
+
+    呼び出し側(LINE#592/CLI#619)がこの型だけを捕捉して業務メッセージへ
+    翻訳できるようにする(entity側の汎用ValidationErrorと型で区別する)。
+    SELLはこのチェックの対象外(cashを増やすだけのため、そもそも
+    available_cash不足という状態が発生しない)。
+    """
+
+    def __init__(self, owner: str, available_cash: Decimal, purchase_amount: Decimal) -> None:
+        self.owner = owner
+        self.available_cash = available_cash
+        self.purchase_amount = purchase_amount
+        super().__init__(
+            f"owner_ref={log_ref(owner)}: 購入金額({purchase_amount})が"
+            f"買付余力({available_cash})を超えています"
+        )
+
+
 class AvailableCashService:
     def __init__(
         self,
@@ -143,13 +162,19 @@ class AvailableCashService:
         単純に現在値へ加算するのみで、符号の業務ルールは持たない。
 
         未登録ownerへのTRADE_UPDATEは`AvailableCashNotRegisteredError`で
-        明示的に拒否する(D3。自動0円初期化はしない)。available_cash<0は
-        entityの既存validator(`_check_non_negative`)がValidationErrorとして
-        送出する(`build_reconcile_plan()`と同じくPydanticの通常のconstructor
-        経由で新レコードを構築するため検証が働く。`model_copy(update=...)`は
-        フィールド検証を行わないため使わない)。この失敗はplan構築フェーズ
-        (I/O前)で起きるため、Holding/Transaction/Cashのいずれも書き込まれ
-        ない(#591のinsufficient cash guardが依拠する契約)。
+        明示的に拒否する(D3。自動0円初期化はしない)。
+
+        購入金額が現在の買付余力を上回る場合(BUY、delta<0の場合のみ該当。
+        SELLは常にdelta>=0のためこの条件には該当しない)は
+        `InsufficientAvailableCashError`を明示的に送出する(Issue #591、
+        #128 A4。呼び出し側〔LINE#592/CLI#619〕がentity側の汎用
+        ValidationErrorと型で区別して業務メッセージへ翻訳できるようにする
+        ため)。entity側の既存validator(`_check_non_negative`)はこの専用
+        チェックが機能している限り理論上到達しないが、削除しない
+        (defense-in-depth。将来別の呼び出し元がこのチェックを経由せず
+        直接構築した場合の最後の安全網として残す)。この失敗はplan構築
+        フェーズ(I/O前)で起きるため、Holding/Transaction/Cashのいずれも
+        書き込まれない。
 
         last_reconciled_atは既存値をそのまま引き継ぐ(TRADE_UPDATEでは進め
         ない。#584 entity docstringの契約をここで強制する)。
@@ -170,9 +195,12 @@ class AvailableCashService:
         if existing_raw is None:
             raise AvailableCashNotRegisteredError(owner)
         existing = AvailableCash.model_validate_json(existing_raw)
+        new_amount = existing.available_cash + delta
+        if new_amount < 0:
+            raise InsufficientAvailableCashError(owner, existing.available_cash, -delta)
         record = AvailableCash(
             owner=owner,
-            available_cash=existing.available_cash + delta,
+            available_cash=new_amount,
             updated_at=now,
             last_update_type=AvailableCashUpdateType.TRADE_UPDATE,
             last_reconciled_at=existing.last_reconciled_at,

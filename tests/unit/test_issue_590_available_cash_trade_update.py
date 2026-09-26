@@ -3,7 +3,9 @@
 semanticsのみを固定する(実際のTransactWriteItems原子性はtest_conversation_
 commit.py側で検証する)。
 
-CLI経路(#619)・余力不足時の拒否ロジック(#591)はいずれもscope外。
+CLI経路(#619)はscope外。余力不足時の拒否ロジックの具体的な契約
+(専用例外の型・境界値・SELL側の非対象化)はIssue #591固有のため
+test_issue_591_insufficient_cash_guard.pyで固定する。
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
-from pydantic import ValidationError
 
 from jstock_advisor.domain.entities.enums import AvailableCashUpdateType
 from jstock_advisor.infrastructure.local_repository.available_cash_repository import (
@@ -207,14 +208,19 @@ def test_unregistered_owner_error_does_not_leak_raw_owner_value(tmp_path) -> Non
 # --- 残高不足はentity側validatorがplan構築フェーズ(I/O前)で拒否する -------------
 
 
-def test_insufficient_balance_raises_validation_error_before_any_write(tmp_path) -> None:
-    """#591の余力不足guardが依拠する契約: available_cash<0はplan構築時点
-    (I/O前)で拒否され、何も書き込まれない。"""
+def test_insufficient_balance_rejected_before_any_write(tmp_path) -> None:
+    """余力不足はplan構築時点(I/O前)で拒否され、何も書き込まれない。
+
+    具体的な例外の型(InsufficientAvailableCashError)・境界値・SELL側の
+    非対象化はIssue #591固有の契約のため、
+    test_issue_591_insufficient_cash_guard.pyで固定する(本テストは
+    #590の「plan構築フェーズで拒否され書き込みが発生しない」という
+    atomicity契約のみを確認する)。"""
     service = AvailableCashService(store_dir=tmp_path)
     _seed(service, "owner-a", "1000", _NOW)
     repo = AvailableCashRepository(store_dir=tmp_path)
 
-    with pytest.raises(ValidationError, match="0以上"):
+    with pytest.raises(ValueError):
         service.build_trade_update_plan("owner-a", Decimal("-1001"), _LATER)
 
     assert repo.get("owner-a").available_cash == Decimal("1000")  # 変化なし
