@@ -80,7 +80,9 @@ def convert_holdings_snapshot_entry(
     )
 
 
-def migrate_holding_id_field_value(old_value: str, owner: str = DEFAULT_MIGRATION_OWNER) -> str:
+def migrate_holding_id_field_value(
+    old_holding_id: str, owner: str = DEFAULT_MIGRATION_OWNER
+) -> str:
     """holding_id"field-only"移行(HoldingDecisionResult/InvestmentThesis/
     InvestmentThesisBaseline共通)を冪等かつfail-closedに行う。
 
@@ -93,13 +95,13 @@ def migrate_holding_id_field_value(old_value: str, owner: str = DEFAULT_MIGRATIO
       レコードを生成したりしない)。
     """
     normalized_owner = normalize_and_validate_owner(owner)
-    parsed = split_holding_id(old_value)
+    parsed = split_holding_id(old_holding_id)
     if parsed is None:
-        return build_holding_id(normalized_owner, old_value)
+        return build_holding_id(normalized_owner, old_holding_id)
     existing_owner, _stock_code = parsed
     if existing_owner == normalized_owner:
-        return old_value
+        return old_holding_id
     raise InvalidOwnerError(
         f"holding_idが既に別ownerで移行済みのため、fail-closedで中止しました: "
-        f"holding_ref={log_ref(old_value)}(期待owner_ref={log_ref(normalized_owner)})"
+        f"holding_ref={log_ref(old_holding_id)}(期待owner_ref={log_ref(normalized_owner)})"
     )
