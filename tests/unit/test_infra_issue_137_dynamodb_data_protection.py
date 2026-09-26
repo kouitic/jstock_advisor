@@ -80,7 +80,11 @@ _UNPROTECTED_RESOURCES = frozenset(
 #: Issue #503: IncidentStateTable(保護対象)を追加。occurrence_count等の運用履歴を失うと
 #: 再構築できないため、他の履歴 Table と同じ保護を持つ(一時claimのNotificationClaimsTable
 #: とは異なる。#508でも同じテーブルを再利用する設計のため)。VALIDATION実行専用の対応テーブルは無い。
-_EXPECTED_PROTECTED_COUNT = 40
+#: Issue #595: AvailableCashTable(保護対象)を追加。owner単位の買付余力は利用者の実際の
+#: 資金管理データであり、失うと再生成できないため、HoldingDecisionRuntimeConfigTable
+#: (#137)と同水準の保護を適用する。VALIDATION実行専用の対応テーブルは無い(A6a時点では
+#: LineWebhookFunctionのみが読み書きし、VALIDATION実行モード専用の分岐を持たないため)。
+_EXPECTED_PROTECTED_COUNT = 41
 _EXPECTED_UNPROTECTED_COUNT = 18
 
 

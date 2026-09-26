@@ -1591,6 +1591,26 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # Issue #595(#128 A6a): owner単位の買付余力(available_cash)。利用者の
+  # 実際の資金管理データであり、失うと再生成できない。
+  # HoldingDecisionRuntimeConfigTable(Issue #137)と同水準の保護を適用する。
+  AvailableCashTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TableName: !Sub "${TablePrefix}-available_cash"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: owner
+          AttributeType: S
+      KeySchema:
+        - AttributeName: owner
+          KeyType: HASH
+
   # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
 
   BuyCandidatesFunction:
@@ -3235,6 +3255,12 @@ Resources:
                 - !Sub "${PurchaseLotsTable.Arn}/index/*"
                 - !GetAtt ConversationStatesTable.Arn
                 - !Sub "${ConversationStatesTable.Arn}/index/*"
+                # Issue #592(#128 A5a): 買付余力の参照・棚卸し更新
+                # (AvailableCashService経由。TransactWriteItemsで
+                # ConversationStatesの消費と同一トランザクション)。GSIは
+                # 無いが、本Statement内の他テーブルと表記を揃える。
+                - !GetAtt AvailableCashTable.Arn
+                - !Sub "${AvailableCashTable.Arn}/index/*"
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         # StockDisplayNameResolverのoverrideソース(手動上書き名称)・JPXソース用
         # (指摘対応、上記CANDIDATE_UNIVERSE_CACHE_BUCKET環境変数とあわせて追加)。
