@@ -117,7 +117,7 @@ def test_record_evaluation_audit_uses_a_separate_id_for_a_different_stock_code()
 
 def test_record_evaluation_audit_uses_a_separate_id_for_a_different_batch_id() -> None:
     """F2(粒度): 同一stock_codeでもbatch_idが異なれば別の監査記録として残る
-    (batch_idを落とすと、別batchの同一銘柄評価が黒く抑止されて失われることの
+    (batch_idを落とすと、別batchの同一銘柄評価が黙って抑止されて失われることの
     固定。#622 F2〔build_removal_audit_id()前例〕と同型)。
     """
     audit_service, repo = _fake_audit_service()
@@ -193,7 +193,10 @@ def _make_recommendation(stock_code: str) -> Recommendation:
 
 
 def _call_record_notification_outcome_audit(
-    audit_service: AuditService, batch_id: str, stock_code: str = "2914"
+    audit_service: AuditService,
+    batch_id: str,
+    stock_code: str = "2914",
+    notification_pathway: str = "buy",
 ) -> None:
     buy_candidates_handler._record_notification_outcome_audit(
         audit_service,
@@ -208,6 +211,7 @@ def _call_record_notification_outcome_audit(
         None,
         1.0,
         batch_id=batch_id,
+        notification_pathway=notification_pathway,
     )
 
 
@@ -224,7 +228,7 @@ def test_record_notification_outcome_audit_is_not_duplicated_on_retry_with_the_s
 
     assert repo.save_calls == 1
     assert repo.saved_audit_ids == [
-        "unified_buy_candidate_notification_outcome:batch-531-n1:2914"
+        "unified_buy_candidate_notification_outcome:batch-531-n1:buy:2914"
     ]
 
 
@@ -246,7 +250,7 @@ def test_record_notification_outcome_audit_uses_a_separate_id_for_a_different_ba
     None
 ):
     """F2(粒度): 同一stock_codeでもbatch_idが異なれば別の監査記録として残る
-    (batch_idを落とすと、別batchの同一銘柄の通知結果が黒く抑止されて失われる
+    (batch_idを落とすと、別batchの同一銘柄の通知結果が黙って抑止されて失われる
     ことの固定。#622 F2と同型)。
     """
     audit_service, repo = _fake_audit_service()
@@ -256,8 +260,8 @@ def test_record_notification_outcome_audit_uses_a_separate_id_for_a_different_ba
 
     assert repo.save_calls == 2
     assert repo.saved_audit_ids == [
-        "unified_buy_candidate_notification_outcome:batch-531-n3a:2914",
-        "unified_buy_candidate_notification_outcome:batch-531-n3b:2914",
+        "unified_buy_candidate_notification_outcome:batch-531-n3a:buy:2914",
+        "unified_buy_candidate_notification_outcome:batch-531-n3b:buy:2914",
     ]
 
 
@@ -271,6 +275,32 @@ def test_record_evaluation_and_notification_outcome_audit_ids_do_not_collide() -
     _call_record_notification_outcome_audit(audit_service, batch_id="batch-531-n4")
 
     assert repo.save_calls == 2
+
+
+def test_record_notification_outcome_audit_uses_a_separate_id_for_a_different_pathway() -> (
+    None
+):
+    """F1(サブちゃんレビュー対応。PR #625自身が持ち込んだ退行の修正):
+    同一batch_id・同一stock_codeでもnotification_pathwayが異なれば別の監査
+    記録として残る。NEAR_BUY監視中の銘柄が決算接近で当日WATCH_BEFORE_EARNINGS
+    へ切り替わる場合、同一銘柄がnear_buyパスとwatch_endパスの両方から異なる
+    内容で記録されうる(_finalize_batch()の別々のループから)。
+    notification_pathwayを欠くと2件目が黙って抑止される。
+    """
+    audit_service, repo = _fake_audit_service()
+
+    _call_record_notification_outcome_audit(
+        audit_service, batch_id="batch-531-n6", notification_pathway="near_buy"
+    )
+    _call_record_notification_outcome_audit(
+        audit_service, batch_id="batch-531-n6", notification_pathway="watch_end"
+    )
+
+    assert repo.save_calls == 2
+    assert repo.saved_audit_ids == [
+        "unified_buy_candidate_notification_outcome:batch-531-n6:near_buy:2914",
+        "unified_buy_candidate_notification_outcome:batch-531-n6:watch_end:2914",
+    ]
 
 
 def test_record_notification_outcome_audit_negative_verification_without_record_if_absent(
