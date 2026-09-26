@@ -222,6 +222,18 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:jpx_universe_staleness_observability",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #612(#66 16C): watchlist_dispatcher_handler.py::_cache_age_days()の
+    # staleness監査基準日を、UTC 00:00からJST 00:00へ統一(#578と同じ変換を
+    # 適用)。T2 = _cache_age_days()自身(_universe_observation()経由で呼ばれる
+    # provider寄りの値決定ロジック)を直接呼ぶconsumer。T4 = 固定clock
+    # (`_jst_0600_run()`)と期待値(cache_age_days)を#612で書き換えた。
+    # 可変のmodule-level stateを持たないため、cohortの相手はいない(SOLO)。
+    _Entry(
+        module="tests/unit/test_issue_69_u1_jpx_vintage_gap.py",
+        triggers=("T2", "T4"),
+        cohort="SOLO:jpx_vintage_gap_cache_age_jst_basis",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
@@ -243,6 +255,7 @@ _KNOWN_TIME_SENSITIVE_MODULES = frozenset(
         "tests/unit/test_issue_475_stock_snapshot_jst_date_window.py",
         "tests/unit/test_issue_578_jpx_staleness_jst.py",
         "tests/unit/test_issue_223_universe_staleness_observability.py",
+        "tests/unit/test_issue_69_u1_jpx_vintage_gap.py",
     }
 )
 
