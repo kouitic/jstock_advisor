@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from jstock_advisor.domain.entities.enums import AccountType
+from jstock_advisor.domain.entities.enums import AccountType, TransactionType
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.infrastructure.local_repository.available_cash_repository import (
     AvailableCashRepository,
@@ -183,12 +183,54 @@ def test_reusing_key_for_buy_vs_sell_with_identical_amounts_is_rejected(env) -> 
     """サブちゃんレビュー#624 F5(N3)対応: 上記テストは単価もずれている
     (1000→1800)ため、実際にはBUY/SELL区分ではなく単価不一致で通っていた
     (区分そのものの取り違え検出を検証していなかった、という指摘)。銘柄・
-    株数・単価・日付を全て揃え、BUY/SELL区分のみを変えて、区分の照合が
-    単独で機能することを固定する。"""
+    株数・単価・日付を全て揃え、BUY/SELL区分のみを変える。
+
+    ★ サブちゃんレビュー#624 F8注記: F7でaccount_typeを照合対象へ追加した
+    ため、本テストはBUY(既定account_type=GENERAL)とSELL(常にaccount_type=
+    None)の比較になり、区分ではなくaccount_type不一致でも拒否されうる
+    (区分照合の単独固定にはならない)。区分照合を単独で固定するテストは
+    下記`test_reusing_key_for_buy_vs_sell_with_identical_account_type_is_rejected`
+    が担う。本テストはそれとは別に「実際のCLI利用(account_type省略)での
+    BUY/SELL取り違えが拒否される」という現実的な回帰として残す。"""
     _seed_cash(env, "1000000")
     env["service"].register_buy(
         DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
     )
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_sell(
+            DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+        )
+
+
+def test_reusing_key_for_buy_vs_sell_with_identical_account_type_is_rejected(env) -> None:
+    """サブちゃんレビュー#624 F8対応: 上記テストはaccount_type(BUYの既定
+    GENERAL・SELLの常にNone)も異なるため、区分(is_buy)照合だけを落とす
+    変異がSURVIVEDしていた(F7でaccount_typeを照合対象へ追加した副作用。
+    F5(N3)で一度固定した「区分照合の単独性」が退行していた)。
+
+    register_buy()/register_sell()の公開APIだけではaccount_typeを完全に
+    揃えたBUY/SELLの組を作れない(register_sell()はaccount_type概念を
+    持たず常にNoneを要求するため、register_buy()側もaccount_type=Noneを
+    渡す必要があるが、それはPurchaseLot/Holdingの必須フィールド検証で
+    失敗する)。そのため、既存Transaction側を`TransactionHistoryService`
+    経由で直接account_type=None(SELLが要求する値と同一)で用意し、
+    stock_code/shares/price/execution_date/owner/account_typeの6条件を
+    全て揃えたうえで、区分(is_buy)だけを変えたSELLが拒否されることを
+    固定する。"""
+    tx_history = TransactionHistoryService(transaction_repository=env["tx_repo"])
+    existing = tx_history.build_execution_plan(
+        transaction_id="shared-key",
+        owner=DEFAULT_OWNER,
+        stock_code=_STOCK,
+        transaction_type=TransactionType.BUY,
+        shares=100,
+        execution_price=Decimal("1000"),
+        execution_date=_NOW.date(),
+        account_type=None,
+        now=_NOW,
+    )
+    assert env["tx_repo"].save_if_absent(existing)
 
     with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
         env["service"].register_sell(
@@ -284,6 +326,36 @@ def test_genuinely_identical_retry_still_treated_as_already_registered(env) -> N
     )
 
     assert result.already_registered is True
+
+
+def test_genuinely_identical_sell_retry_is_still_treated_as_already_registered(env) -> None:
+    """サブちゃんレビュー#624 F9対応: SELLの真の冪等retry(同一owner・銘柄・
+    株数・単価・約定日・区分)を固定するテストが無かった。BUY側の対称テスト
+    (`test_genuinely_identical_retry_still_treated_as_already_registered`)は
+    account_type既定GENERALを暗黙に使うためBUY専用の検証にしかならず、
+    `register_sell()`がaccount_type=Noneを渡すべきところを誤って別の値へ
+    変更する変異が入っても検出できなかった(崩れると正当なSELLのretryが
+    exit 1で誤って拒否される。fail-closed側の誤りなのでF1/F6/F7ほど深刻
+    ではないがSHOULD FIX)。"""
+    _seed_cash(env, "1000000")
+    env["portfolio"].register_purchase(
+        owner=DEFAULT_OWNER,
+        stock_code=_STOCK,
+        stock_name=None,
+        shares=100,
+        purchase_price=Decimal("1000"),
+        purchase_date=_NOW.date(),
+        account_type=AccountType.GENERAL,
+    )
+    env["service"].register_sell(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1800"), _NOW.date(), "idem-sell", _NOW
+    )
+
+    retry = env["service"].register_sell(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1800"), _NOW.date(), "idem-sell", _NOW
+    )
+
+    assert retry.already_registered is True
 
 
 # --- サブちゃんレビュー#624 F6対応: idempotency-key照合へownerを追加 ---------
