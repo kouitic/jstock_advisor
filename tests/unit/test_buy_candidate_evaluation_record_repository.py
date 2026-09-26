@@ -250,6 +250,9 @@ class _NoopAuditService:
     def record(self, *args: object, **kwargs: object) -> None:
         return None
 
+    def record_if_absent(self, *args: object, **kwargs: object) -> None:
+        return None
+
 
 class _FakeNotificationService:
     def notify_data_error(self, *args: object, **kwargs: object) -> bool:
