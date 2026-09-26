@@ -153,12 +153,23 @@ class AvailableCashService:
 
         last_reconciled_atは既存値をそのまま引き継ぐ(TRADE_UPDATEでは進め
         ない。#584 entity docstringの契約をここで強制する)。
+
+        **deltaの基準値(現在残高)とCASの`expected_data`は、同一の読み取り
+        (`get_raw()`1回)から導出する。**`get()`と`get_raw()`を別々に呼ぶと、
+        両者の間に別経路(#589の棚卸し等)の更新が割り込んだ場合、
+        `expected_data`は新しい値になるためCAS自体は成立してしまうにも
+        関わらず、delta計算は古い基準値のまま行われ、更新が黙って失われる
+        (サブちゃんレビュー#620指摘F1。実測: 初期100万→並行更新で200万→
+        旧100万を基準にdelta計算→CAS成立→最終85万、期待値185万との差
+        100万円)。`build_reconcile_plan()`は絶対値上書きのため基準値
+        自体が不要で単発読み取りで問題にならないが、本メソッドは相対計算
+        (delta)であるため、読み取りを1回に統合する必要がある。
         """
         owner = normalize_and_validate_owner(raw_owner)
-        existing = self._repo.get(owner)
-        if existing is None:
-            raise AvailableCashNotRegisteredError(owner)
         existing_raw = self._repo.get_raw(owner)
+        if existing_raw is None:
+            raise AvailableCashNotRegisteredError(owner)
+        existing = AvailableCash.model_validate_json(existing_raw)
         record = AvailableCash(
             owner=owner,
             available_cash=existing.available_cash + delta,

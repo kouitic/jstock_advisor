@@ -96,6 +96,91 @@ def test_expected_data_reflects_raw_value_read_at_plan_build_time(tmp_path) -> N
     assert plan.expected_data == repo.get_raw("owner-a")
 
 
+class _SingleReadRepository:
+    """delta基準値とCASのexpected_dataを同一の読み取りから導出することを
+    固定するためのfake(サブちゃんレビュー#620 F1対応)。
+
+    `get()`が一切呼ばれないこと(二重読み取りの片方を無くしたこと)・
+    `get_raw()`がちょうど1回だけ呼ばれることを検証する。`get_raw()`の
+    呼び出し中に別経路(#589の棚卸し等)の並行更新を割り込ませることで、
+    delta計算とCASのexpected_dataが常に同じ(最新の)値を基準にすることを
+    確認する(以前の実装は`get()`→`get_raw()`の2回読みだったため、この間に
+    割り込まれると、CASは新しい値に対して成立するにも関わらずdelta計算は
+    古い値のまま行われ、更新が黙って失われていた)。
+    """
+
+    def __init__(self, inner: AvailableCashRepository, concurrent_update: object) -> None:
+        self._inner = inner
+        self._concurrent_update = concurrent_update
+        self.get_calls = 0
+        self.get_raw_calls = 0
+
+    def get(self, owner: str):  # noqa: ANN001, ANN201 - 呼ばれないことのみ検証するfake
+        self.get_calls += 1
+        return self._inner.get(owner)
+
+    def get_raw(self, owner: str) -> str | None:
+        self.get_raw_calls += 1
+        if self.get_raw_calls == 1 and self._concurrent_update is not None:
+            self._concurrent_update()
+        return self._inner.get_raw(owner)
+
+    def initialize(self, record) -> bool:  # noqa: ANN001, ANN201 - fake、未使用
+        return self._inner.initialize(record)
+
+    def replace_if_raw_matches(self, owner: str, expected_raw_data: str, record) -> bool:  # noqa: ANN001
+        return self._inner.replace_if_raw_matches(owner, expected_raw_data, record)
+
+
+def test_build_trade_update_plan_reads_the_current_balance_only_once(tmp_path) -> None:
+    """delta基準値の取得に`get()`を呼ばない(`get_raw()`1回のみに統合済み)
+    ことを固定する。"""
+    inner = AvailableCashRepository(store_dir=tmp_path)
+    service_for_seed = AvailableCashService(repository=inner)
+    _seed(service_for_seed, "owner-a", "1000000", _NOW)
+    spy = _SingleReadRepository(inner, concurrent_update=None)
+    service = AvailableCashService(repository=spy)
+
+    service.build_trade_update_plan("owner-a", Decimal("-150000"), _LATER)
+
+    assert spy.get_calls == 0
+    assert spy.get_raw_calls == 1
+
+
+def test_concurrent_update_between_reads_no_longer_silently_lost(tmp_path) -> None:
+    """サブちゃんレビュー#620 F1の実測プローブと同型の回帰テスト。
+
+    旧実装(get()とget_raw()を別々に読む)では、初期100万円に対し並行して
+    別経路が200万円へ棚卸しした場合、delta計算は割り込み前の100万円を
+    基準にしてしまい、CASのexpected_dataだけが新しい値になるため
+    (CAS自体は成立してしまう)、最終的に古い基準額+deltaという誤った値
+    (このケースでは85万円、正しくは185万円)で上書きされていた。
+
+    現在の実装は`get_raw()`1回の読み取り結果からdelta基準値・
+    expected_dataの両方を導出するため、この割り込みが起きても常に
+    最新値(200万円)を基準にdeltaが計算され、CASのexpected_dataも同じ
+    値になる(=書き込み時点でさらに変化していない限りCASは正しく成立し、
+    値も正しい)。
+    """
+    inner = AvailableCashRepository(store_dir=tmp_path)
+    service_for_seed = AvailableCashService(repository=inner)
+    _seed(service_for_seed, "owner-a", "1000000", _NOW)
+
+    def _concurrent_reconcile() -> None:
+        service_for_seed.reconcile("owner-a", Decimal("2000000"), _NOW)
+
+    spy = _SingleReadRepository(inner, concurrent_update=_concurrent_reconcile)
+    service = AvailableCashService(repository=spy)
+
+    plan = service.build_trade_update_plan("owner-a", Decimal("-150000"), _LATER)
+
+    # 修正前は850000(100万-15万、古い基準額)になっていた。
+    assert plan.model.available_cash == Decimal("1850000")
+    # expected_dataも同じ(最新の)読み取りに基づいており、基準値との
+    # 不整合が無い。
+    assert plan.expected_data == inner.get_raw("owner-a")
+
+
 # --- D3: 未登録ownerは明示エラーで拒否(自動0円初期化しない) -------------------
 
 

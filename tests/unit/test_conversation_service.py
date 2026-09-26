@@ -206,6 +206,33 @@ def test_buy_confirm_rejected_when_owner_has_no_available_cash_registered(
     assert conversation_state_store.get(_USER, _NOW) is not None
 
 
+def test_buy_confirm_rejected_with_dedicated_message_when_available_cash_insufficient(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """Issue #590 サブちゃんレビューF2対応: 余力不足によるAvailableCash側の
+    ValidationErrorは、並行更新用の汎用文言(_WRITE_CONFLICT)ではなく専用
+    文言で案内し、Holding/Transaction/AvailableCashのいずれも書き込まない。"""
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    # 本人の買付余力(_DEFAULT_AVAILABLE_CASH=1億円)を上回る購入金額
+    # (10万株×1,500円=1.5億円)。
+    input_reply = service.handle_text_input(_USER, state, "本人,8306,100000,1500", _NOW)
+    assert "登録します" in input_reply.text
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+
+    confirm_reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
+
+    assert "買付余力が不足" in confirm_reply.text
+    assert "最新の保有状況が変更された" not in confirm_reply.text  # 汎用文言ではない
+    assert HoldingRepository().get(_HOLDING_ID) is None
+    available_cash = AvailableCashRepository().get(DEFAULT_OWNER)
+    assert available_cash is not None
+    assert available_cash.available_cash == _DEFAULT_AVAILABLE_CASH  # 変化なし
+    assert conversation_state_store.get(_USER, _NOW) is not None
+
+
 def test_buy_confirmation_and_success_messages_use_comma_formatting(
     moto_conversation_tables: None, service: ConversationService
 ) -> None:
