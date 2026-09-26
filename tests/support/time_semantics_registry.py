@@ -216,6 +216,7 @@ _KNOWN_TIME_SENSITIVE_MODULES = frozenset(
         "tests/unit/test_market_holiday_gate.py",
         "tests/unit/test_buy_candidates_handler.py",
         "tests/unit/test_watchlist_dispatcher_handler.py",
+        "tests/unit/test_issue_475_stock_snapshot_jst_date_window.py",
     }
 )
 
