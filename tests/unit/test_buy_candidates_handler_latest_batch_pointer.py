@@ -38,6 +38,9 @@ class _NoopAuditService:
     def record(self, *args: object, **kwargs: object) -> None:
         return None
 
+    def record_if_absent(self, *args: object, **kwargs: object) -> None:
+        return None
+
 
 class _FakeNotificationService:
     def notify_buy_candidates_digest(
