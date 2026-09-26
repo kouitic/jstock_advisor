@@ -668,7 +668,7 @@ DEAD_REFERENCE   = 0
 
 | module | 割り当て予定 |
 |---|---|
-| `services/write_plan.py` | 要判断(実測: 参照元 = infrastructure/aws/conversation_commit.py〔F-24〕・infrastructure/aws/dynamodb_transaction.py〔割り当て未定〕・infrastructure/aws/holding_replacement_commit.py〔F-26〕・services/portfolio_service.py〔F-26〕。F-24 と F-26 の両方が使う書き込み計画のデータ構造。`dynamodb_transaction.py` と一体で決める) |
+| `services/write_plan.py` | 要判断(実測: 参照元 = infrastructure/aws/conversation_commit.py〔F-24〕・infrastructure/aws/dynamodb_transaction.py〔割り当て未定〕・infrastructure/aws/holding_replacement_commit.py〔F-26〕・services/portfolio_service.py〔F-26〕・services/investment_thesis_service.py〔F-11。Issue #570でapply_conditional_put()を追加利用〕。F-24 と F-26 の両方が使う書き込み計画のデータ構造。`dynamodb_transaction.py` と一体で決める) |
 
 ```
 ★ `migrations/` 8 件は Issue #485(Phase D)で判断済み(MANAGER判断 2026-09-24)。

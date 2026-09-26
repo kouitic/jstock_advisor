@@ -106,64 +106,69 @@ def test_get_or_create_thesis_concurrent_create_is_prevented_by_insert_if_absent
     assert repo.get(_HOLDING_ID) == winner
 
 
-def test_get_or_create_thesis_loser_returns_the_winners_persisted_thesis(
-    tmp_path: Path,
+def test_get_or_create_thesis_loser_returns_the_winners_persisted_content_via_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """insert_if_absent()に負けたcallerが、勝者の実際に永続化された値を
-    返すこと(自分が構築したtransientなthesisを返さない)。
+    """サブちゃんレビュー対応F1: insert_if_absent()に負けたcallerが、
+    SERVICEのloser分岐(insert_if_absent=False時のfallback)を実際に経由して、
+    勝者が既に追加した条件を含む実際の永続化済みthesisを返すこと(自分が
+    構築したtransientな空thesisで上書きしない)。
+
+    2つの「並行実行」を、両方がget_by_holding()で「存在しない」と読んだ
+    直後の状態から再現する。racer 1はget_or_create_thesis()を完了させたうえで
+    条件を1件登録し(勝者の内容を「空」から区別可能にする)、racer 2は
+    get_by_holding()を一時的にNoneへ固定して「自分が読んだ時点では存在
+    しなかった」raceを再現する(実データは既にwinnerが永続化済みのため、
+    insert_if_absent()は実際にFalseを返し、fallback分岐が実行される)。
     """
     repo = InvestmentThesisRepository(tmp_path)
     service = InvestmentThesisService(thesis_repository=repo, store_dir=tmp_path)
 
-    # 先にholding_idのレコードを別の値(条件1件を持つ)で作っておく。
-    existing = InvestmentThesis(
-        investment_thesis_id=_HOLDING_ID,
-        holding_id=_HOLDING_ID,
-        stock_code=_STOCK_CODE,
-        conditions=[],
-        updated_at=_NOW,
-    )
-    repo.save(existing)
+    winner = service.register_condition(_HOLDING_ID, _STOCK_CODE, "架空の購入理由(勝者)", _NOW)
+    assert len(winner.conditions) == 1
 
-    result = service.get_or_create_thesis(_HOLDING_ID, _STOCK_CODE, _NOW)
+    monkeypatch.setattr(repo, "get_by_holding", lambda _holding_id: None)
+    loser_result = service.get_or_create_thesis(_HOLDING_ID, _STOCK_CODE, _NOW)
 
-    assert result.investment_thesis_id == _HOLDING_ID
-    assert len(repo.list_all()) == 1
+    # (1) 返り値が勝者のものであること(自分が構築したtransientな空thesisではない)。
+    assert loser_result.investment_thesis_id == winner.investment_thesis_id
+    # (2) 勝者が追加した条件が消えていないこと。
+    assert len(loser_result.conditions) == 1
+    assert loser_result.conditions[0].description == "架空の購入理由(勝者)"
 
 
 def test_get_or_create_thesis_negative_verification_without_insert_if_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """mutation-based negative verification: insert_if_absent()を無条件upsert
-    (常にTrueを返すsave())へ差し替えると、並行create防止が機能しないことを
-    示す(=このテストが検出したい実装欠陥そのものを再現する)。
+    (常にTrueを返すsave())へ差し替えると、上記テストと同じrace再現の下で、
+    loser(racer 2)が勝者の条件を上書きして消してしまうことを示す
+    (=このテストが検出したい実装欠陥そのものを再現する)。
 
-    実装を一時的に変異させ、正しいテストが実際に赤くなることを確認したうえで
-    復元する、という意味でのnegative verificationをここで固定する
-    (production codeは変更しない。repositoryのメソッドをmonkeypatchするのみ)。
+    production codeは変更せず、repositoryのメソッドをmonkeypatchするのみ。
     """
     repo = InvestmentThesisRepository(tmp_path)
+    service = InvestmentThesisService(thesis_repository=repo, store_dir=tmp_path)
+
+    winner = service.register_condition(_HOLDING_ID, _STOCK_CODE, "架空の購入理由(勝者)", _NOW)
+    assert len(winner.conditions) == 1
 
     def _broken_insert_if_absent(thesis: InvestmentThesis) -> bool:
-        # #570以前の欠陥を模した挙動: 常に成功する(重複チェックをしない)。
+        # #570以前の欠陥を模した挙動: 存在確認をせず常に上書き保存し、成功を返す。
         repo.save(thesis)
         return True
 
     monkeypatch.setattr(repo, "insert_if_absent", _broken_insert_if_absent)
-    service = InvestmentThesisService(thesis_repository=repo, store_dir=tmp_path)
+    monkeypatch.setattr(repo, "get_by_holding", lambda _holding_id: None)
 
-    service.get_or_create_thesis(_HOLDING_ID, _STOCK_CODE, _NOW)
-    # 2回目の呼び出しはget_by_holding()が既存を見つけるため、実際には
-    # 呼ばれないが、insert_if_absent自体が壊れていることを直接確認する。
-    duplicate = InvestmentThesis(
-        investment_thesis_id=_HOLDING_ID,
-        holding_id=_HOLDING_ID,
-        stock_code=_STOCK_CODE,
-        conditions=[],
-        updated_at=_NOW,
-    )
-    assert repo.insert_if_absent(duplicate) is True, (
-        "この壊れた実装はTrueを返す(=insert_if_absentの契約が壊れていることの確認)"
+    loser_result = service.get_or_create_thesis(_HOLDING_ID, _STOCK_CODE, _NOW)
+
+    # 壊れた実装では、loserが自分の空条件で勝者の条件を上書きしてしまう。
+    assert loser_result.conditions == []
+    persisted = repo.get(_HOLDING_ID)
+    assert persisted is not None
+    assert persisted.conditions == [], (
+        "この壊れた実装では勝者の条件が失われる(=insert_if_absentの契約が壊れていることの確認)"
     )
 
 
@@ -246,6 +251,22 @@ def test_register_condition_raises_concurrent_update_error_on_stale_write(
         service.register_condition(_HOLDING_ID, _STOCK_CODE, "架空の購入理由", _NOW)
 
 
+def test_register_condition_raises_value_error_when_raw_data_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """サブちゃんレビュー対応F2: get_or_create_thesis()直後にget_raw_data()が
+    Noneを返す(並行削除の疑い)場合、register_condition()がValueErrorを
+    送出すること(existing_raw is Noneガードの固定)。
+    """
+    repo = InvestmentThesisRepository(tmp_path)
+    service = InvestmentThesisService(thesis_repository=repo, store_dir=tmp_path)
+    service.get_or_create_thesis(_HOLDING_ID, _STOCK_CODE, _NOW)
+    monkeypatch.setattr(repo, "get_raw_data", lambda _id: None)
+
+    with pytest.raises(ValueError, match="get_raw_dataがNoneを返した"):
+        service.register_condition(_HOLDING_ID, _STOCK_CODE, "架空の購入理由", _NOW)
+
+
 def test_register_condition_succeeds_when_no_concurrent_write(tmp_path: Path) -> None:
     """通常の(競合が無い)呼び出しは正常に完了すること。"""
     service = _service(tmp_path)
@@ -278,6 +299,29 @@ def test_attest_condition_raises_concurrent_update_error_on_stale_write(
     monkeypatch.setattr(repo, "get_raw_data", lambda _id: stale_raw)
 
     with pytest.raises(ConcurrentUpdateError):
+        service.attest_condition(
+            _HOLDING_ID,
+            condition_id,
+            ThesisConditionAttestationStatus.MAINTAINED,
+            "架空の申告者",
+            _NOW,
+        )
+
+
+def test_attest_condition_raises_value_error_when_raw_data_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """サブちゃんレビュー対応F2: get_by_holding()直後にget_raw_data()が
+    Noneを返す(並行削除の疑い)場合、attest_condition()がValueErrorを
+    送出すること(existing_raw is Noneガードの固定)。
+    """
+    repo = InvestmentThesisRepository(tmp_path)
+    service = InvestmentThesisService(thesis_repository=repo, store_dir=tmp_path)
+    registered = service.register_condition(_HOLDING_ID, _STOCK_CODE, "架空の購入理由D", _NOW)
+    condition_id = registered.conditions[0].condition_id
+    monkeypatch.setattr(repo, "get_raw_data", lambda _id: None)
+
+    with pytest.raises(ValueError, match="データ取得に失敗しました"):
         service.attest_condition(
             _HOLDING_ID,
             condition_id,

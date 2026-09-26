@@ -293,9 +293,20 @@ def _iter_logger_calls(tree: ast.AST) -> Iterator[ast.Call]:
 #:   baseline_id                  = f"{holding_id}:v{version}"
 #:                                  (active_baseline_id / supersedes_baseline_id も含む)
 #:   holding_evaluation_id        = f"{holding_id}:{evaluated_at}"
+#:   investment_thesis_id         = holding_id自体(Issue #570以降の新形式レコード。
+#:                                  旧形式〔uuid4〕には該当しないが、名前ベースの判定は
+#:                                  値の形式を見ないため一律にguardする)
 #: baseline_id / holding_evaluation_id は holding_id を内包する合成 ID だが、名前に "holding_id" を
 #: 含まないため、従来の判定(holding_id / owner のみ)を素通りしていた(Issue #416)。
-_PII_BEARING_NAMES = ("holding_id", "owner", "baseline_id", "holding_evaluation_id")
+#: investment_thesis_id も同じ理由で追加した(Issue #570。現時点でloggerへ渡している
+#: 箇所は0件だが、将来の漏洩を塞ぐ)。
+_PII_BEARING_NAMES = (
+    "holding_id",
+    "owner",
+    "baseline_id",
+    "holding_evaluation_id",
+    "investment_thesis_id",
+)
 
 
 def _contains_pii_bearing_name(segment: str) -> bool:
