@@ -179,6 +179,63 @@ def test_reusing_key_from_buy_for_a_different_sell_is_rejected_not_silently_drop
     assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("900000")
 
 
+def test_reusing_key_for_buy_vs_sell_with_identical_amounts_is_rejected(env) -> None:
+    """サブちゃんレビュー#624 F5(N3)対応: 上記テストは単価もずれている
+    (1000→1800)ため、実際にはBUY/SELL区分ではなく単価不一致で通っていた
+    (区分そのものの取り違え検出を検証していなかった、という指摘)。銘柄・
+    株数・単価・日付を全て揃え、BUY/SELL区分のみを変えて、区分の照合が
+    単独で機能することを固定する。"""
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_sell(
+            DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+        )
+
+
+def test_reusing_key_for_different_trade_date_is_rejected(env) -> None:
+    """サブちゃんレビュー#624 F1'対応: 銘柄・株数・単価・区分が全て同じで
+    約定日だけが異なる場合も、日付違いの別取引が黙って消える(F1と同じ
+    失敗モード)ため拒否する(fail-closedを優先する判断。#624 issuecomment
+    参照)。"""
+    _seed_cash(env, "1000000")
+    env["service"].register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), dt.date(2026, 9, 26), "shared-key", _NOW
+    )
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        env["service"].register_buy(
+            DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), dt.date(2026, 9, 27), "shared-key", _NOW
+        )
+
+    assert env["holding_repo"].get(_HOLDING_ID).shares == 100  # 2回目は消えている
+    assert env["ac_repo"].get(DEFAULT_OWNER).available_cash == Decimal("900000")
+
+
+def test_race_path_also_rejects_mismatched_trade(env) -> None:
+    """サブちゃんレビュー#624 F5(N2)対応: fast-pathの照合だけを外す変異が
+    SURVIVEDした、という指摘。fast-pathを迂回させ(モンキーパッチ)、
+    `_commit_locally()`内のrace経路自身の照合が独立して機能することを
+    固定する。"""
+    _seed_cash(env, "1000000")
+    service = env["service"]
+    service.register_buy(
+        DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+    )
+
+    # fast-pathを常に「未登録」として扱わせ、race経路(save_if_absent()が
+    # Falseを返す分岐)へ強制的に到達させる。
+    service._fast_path_if_already_registered = lambda *args, **kwargs: None  # noqa: SLF001
+
+    with pytest.raises(IdempotencyKeyReusedForDifferentTradeError):
+        service.register_sell(
+            DEFAULT_OWNER, _STOCK, 100, Decimal("1000"), _NOW.date(), "shared-key", _NOW
+        )
+
+
 def test_reusing_key_for_different_shares_is_rejected(env) -> None:
     _seed_cash(env, "1000000")
     env["service"].register_buy(

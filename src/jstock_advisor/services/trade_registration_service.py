@@ -86,29 +86,49 @@ class IdempotencyKeyReusedForDifferentTradeError(ValueError):
         stock_code: str,
         shares: int,
         price: Decimal,
+        trade_date: dt.date,
         is_buy: bool,
     ) -> None:
         super().__init__(
             f"idempotency-key={existing.transaction_id}は既に別の取引"
             f"({existing.stock_code} {existing.shares}株 @{existing.execution_price}円 "
-            f"[{existing.transaction_type.value}])として登録済みのため、今回の取引"
-            f"({stock_code} {shares}株 @{price}円 [{'BUY' if is_buy else 'SELL'}])には"
-            "使用できません。別のidempotency-keyを指定してください。"
+            f"{existing.execution_date} [{existing.transaction_type.value}])として"
+            f"登録済みのため、今回の取引({stock_code} {shares}株 @{price}円 "
+            f"{trade_date} [{'BUY' if is_buy else 'SELL'}])には使用できません。"
+            "別のidempotency-keyを指定してください。"
         )
 
 
 def _verify_idempotency_key_matches(
-    existing: Transaction, *, stock_code: str, shares: int, price: Decimal, is_buy: bool
+    existing: Transaction,
+    *,
+    stock_code: str,
+    shares: int,
+    price: Decimal,
+    trade_date: dt.date,
+    is_buy: bool,
 ) -> None:
+    """既存Transactionと要求内容を照合する(Issue #619 サブちゃんレビュー
+    F1・F1'対応)。
+
+    約定日(`execution_date`)も照合対象に含める。同一キーで銘柄・株数・
+    単価・区分が全て一致し約定日だけが異なる場合も、日付違いの別取引が
+    黙って消える(F1と同じ失敗モード)ため区別する必要があるという判断
+    (サブちゃんレビュー#624 F1'。1回目が実は成功していたのに翌日
+    `--date`省略で再実行すると拒否され、別キーで打ち直すと二重登録に
+    なりうるtrade-offは認識したうえで、「exit 0で登録済みと報告した
+    まま取引が消える」実害の方が大きいためfail-closedを優先する)。
+    """
     mismatch = (
         existing.stock_code != stock_code
         or existing.shares != shares
         or existing.execution_price != price
+        or existing.execution_date != trade_date
         or _is_buy_type(existing.transaction_type) != is_buy
     )
     if mismatch:
         raise IdempotencyKeyReusedForDifferentTradeError(
-            existing, stock_code, shares, price, is_buy
+            existing, stock_code, shares, price, trade_date, is_buy
         )
 
 
@@ -157,7 +177,13 @@ class TradeRegistrationService:
     ) -> TradeRegistrationResult:
         owner = normalize_and_validate_owner(owner)
         fast_path = self._fast_path_if_already_registered(
-            owner, stock_code, idempotency_key, shares=shares, price=price, is_buy=True
+            owner,
+            stock_code,
+            idempotency_key,
+            shares=shares,
+            price=price,
+            trade_date=trade_date,
+            is_buy=True,
         )
         if fast_path is not None:
             return fast_path
@@ -197,6 +223,7 @@ class TradeRegistrationService:
             stock_code=stock_code,
             shares=shares,
             price=price,
+            trade_date=trade_date,
             is_buy=True,
             idempotency_key=idempotency_key,
             transaction=transaction,
@@ -221,7 +248,13 @@ class TradeRegistrationService:
     ) -> TradeRegistrationResult:
         owner = normalize_and_validate_owner(owner)
         fast_path = self._fast_path_if_already_registered(
-            owner, stock_code, idempotency_key, shares=shares, price=price, is_buy=False
+            owner,
+            stock_code,
+            idempotency_key,
+            shares=shares,
+            price=price,
+            trade_date=trade_date,
+            is_buy=False,
         )
         if fast_path is not None:
             return fast_path
@@ -251,6 +284,7 @@ class TradeRegistrationService:
             stock_code=stock_code,
             shares=shares,
             price=price,
+            trade_date=trade_date,
             is_buy=False,
             idempotency_key=idempotency_key,
             transaction=transaction,
@@ -271,13 +305,19 @@ class TradeRegistrationService:
         *,
         shares: int,
         price: Decimal,
+        trade_date: dt.date,
         is_buy: bool,
     ) -> TradeRegistrationResult | None:
         existing = self._transaction_repo.get_consistent(idempotency_key)
         if existing is None:
             return None
         _verify_idempotency_key_matches(
-            existing, stock_code=stock_code, shares=shares, price=price, is_buy=is_buy
+            existing,
+            stock_code=stock_code,
+            shares=shares,
+            price=price,
+            trade_date=trade_date,
+            is_buy=is_buy,
         )
         return TradeRegistrationResult(
             transaction=existing,
@@ -292,6 +332,7 @@ class TradeRegistrationService:
         stock_code: str,
         shares: int,
         price: Decimal,
+        trade_date: dt.date,
         is_buy: bool,
         idempotency_key: str,
         transaction: Transaction,
@@ -320,9 +361,21 @@ class TradeRegistrationService:
             # 一切の書き込みを行っていないため、そのままno-opとして返す
             # (`save_if_absent()`はDynamoDB実装ではattribute_not_exists条件付き
             # 書き込みで原子的にこれを保証するため、check-then-actにならない)。
+            #
+            # 申し送り(サブちゃんレビュー#624、今回対応不要): `get()`
+            # (結果整合性読み取り)が空を返した場合`transaction`(自分自身)へ
+            # フォールバックするため、その場合`_verify_idempotency_key_matches()`
+            # は自分自身と照合することになりguardを素通りする。CLIはローカル
+            # storeで即時読めるため現状は到達しないが、将来Lambda呼び出し元を
+            # 追加する場合は`get_consistent()`へ揃えると同じ保証になる。
             raced_existing = self._transaction_repo.get(idempotency_key) or transaction
             _verify_idempotency_key_matches(
-                raced_existing, stock_code=stock_code, shares=shares, price=price, is_buy=is_buy
+                raced_existing,
+                stock_code=stock_code,
+                shares=shares,
+                price=price,
+                trade_date=trade_date,
+                is_buy=is_buy,
             )
             return TradeRegistrationResult(
                 transaction=raced_existing,
