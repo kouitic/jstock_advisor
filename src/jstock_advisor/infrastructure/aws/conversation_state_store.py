@@ -68,6 +68,10 @@ class ConversationState:
     # M3(保有銘柄オーナー機能): BUY/SELLのCSV入力成功後からconfirmまで保持する
     # owner(中間状態のためOptional)。WATCHでは常にNoneのまま。
     owner: str | None
+    # 買付余力の棚卸し(Issue #592)専用。新しいavailable_cashの金額
+    # (中間状態のためOptional)。既存のpriceフィールドを意味流用しない
+    # (オープン決定事項D2、案(ii)採用)。BUY/SELL/WATCH/ANALYZEでは常にNone。
+    amount: Decimal | None
     created_at: dt.datetime
     updated_at: dt.datetime
     ttl: int
@@ -91,6 +95,7 @@ def _from_item(item: dict[str, Any]) -> ConversationState:
         shares=int(item["shares"]) if item.get("shares") is not None else None,
         price=item.get("price"),
         owner=item.get("owner"),
+        amount=item.get("amount"),
         created_at=dt.datetime.fromisoformat(item["created_at"]),
         updated_at=dt.datetime.fromisoformat(item["updated_at"]),
         ttl=int(item["ttl"]),
@@ -132,19 +137,25 @@ def start_or_replace(
 def record_input(
     user_id: str,
     expected_action: ConversationAction,
-    stock_code: str,
+    stock_code: str | None,
     now: dt.datetime,
     shares: int | None = None,
     price: Decimal | None = None,
     owner: str | None = None,
+    amount: Decimal | None = None,
 ) -> ConversationState | None:
     """INPUT_WAITING→CONFIRM_WAITING。actionが一致し、状態がINPUT_WAITING、
     かつ`ttl > now`の場合のみ成功する(期限切れは物理的に残っていても条件不成立
     として扱う)。成功時は新しいoperation_idを発行する。条件不成立時はNoneを返す。
 
-    shares/price/ownerはWATCH(銘柄コードのみ)ではNoneのまま渡す(該当属性を
-    REMOVEし、以前の対話で残っていた値をクリアする)。ownerはBUY/SELLの
+    stock_code/shares/price/owner/amountは、該当actionで使わない項目には
+    Noneのまま渡す(該当属性をREMOVEし、以前の対話で残っていた値をクリアする)。
+    stock_codeはBUY/SELL/WATCHでは必須実質だが、買付余力棚卸し(Issue #592、
+    AVAILABLE_CASH_RECONCILE)は銘柄コードを持たないためNoneを渡す
+    (Optional化はIssue #592で追加。既存呼び出し元〔BUY/SELL/WATCH〕は
+    引き続き非Noneの値を渡すため挙動は変わらない)。ownerはBUY/SELLの
     CSV入力(所有者,銘柄コード,株数,単価)成功時に正規化済みの値を渡すこと。
+    amountはAVAILABLE_CASH_RECONCILE専用(新しい買付余力の金額)。
     """
     operation_id = str(uuid.uuid4())
     now_iso = now.isoformat()
@@ -153,7 +164,6 @@ def record_input(
 
     set_clauses = [
         "#state = :confirm_waiting",
-        "#stock_code = :stock_code",
         "#operation_id = :new_op",
         "#updated_at = :now",
         "#ttl = :ttl",
@@ -163,12 +173,16 @@ def record_input(
         ":expected_action": expected_action.value,
         ":input_waiting": ConversationStateName.INPUT_WAITING.value,
         ":confirm_waiting": ConversationStateName.CONFIRM_WAITING.value,
-        ":stock_code": stock_code,
         ":new_op": operation_id,
         ":now": now_iso,
         ":now_epoch": now_epoch,
         ":ttl": ttl,
     }
+    if stock_code is not None:
+        set_clauses.append("#stock_code = :stock_code")
+        values[":stock_code"] = stock_code
+    else:
+        remove_clauses.append("#stock_code")
     if shares is not None:
         set_clauses.append("#shares = :shares")
         values[":shares"] = shares
@@ -184,6 +198,11 @@ def record_input(
         values[":owner"] = owner
     else:
         remove_clauses.append("#owner")
+    if amount is not None:
+        set_clauses.append("#amount = :amount")
+        values[":amount"] = amount
+    else:
+        remove_clauses.append("#amount")
 
     update_expression = "SET " + ", ".join(set_clauses)
     if remove_clauses:
@@ -191,8 +210,9 @@ def record_input(
 
     # DynamoDBはExpressionAttributeNamesに実際の式で参照されていないエントリが
     # 1つでもあるとValidationExceptionを送出するため、この呼び出しで実際に
-    # 使う名前だけに絞る(#shares/#price/#ownerはSET/REMOVEいずれかに必ず
-    # 含まれるが、#created_atはこの関数では一切参照しないため含めない)。
+    # 使う名前だけに絞る(#stock_code/#shares/#price/#owner/#amountはSET/
+    # REMOVEいずれかに必ず含まれるが、#created_atはこの関数では一切参照しない
+    # ため含めない)。
     names = {
         "#action": "action",
         "#state": "state",
@@ -203,6 +223,7 @@ def record_input(
         "#shares": "shares",
         "#price": "price",
         "#owner": "owner",
+        "#amount": "amount",
     }
 
     try:
@@ -222,15 +243,64 @@ def record_input(
     return get(user_id, now)
 
 
+def set_available_cash_owner(
+    user_id: str, expected_operation_id: str, owner: str, now: dt.datetime
+) -> ConversationState | None:
+    """AVAILABLE_CASH_RECONCILE専用: INPUT_WAITING中にownerだけを確定する
+    (Issue #592)。
+
+    新しい金額(amount)はまだ確定していないため、record_input()のような
+    CONFIRM_WAITINGへの遷移は行わない(状態はINPUT_WAITINGのまま)。
+    action・state・operation_id・期限が一致する場合のみ成功する
+    (owner選択のQuick Reply postback・自由テキストいずれの経路からも、
+    呼び出し時点のstate.operation_idをexpected_operation_idとして渡すこと)。
+    ttlは他の遷移と同様に更新する(対話の継続とみなす)。
+    """
+    now_iso = now.isoformat()
+    now_epoch = int(now.timestamp())
+    ttl = now_epoch + TTL_SECONDS
+    try:
+        _table().update_item(
+            Key={"user_id": user_id},
+            UpdateExpression="SET #owner = :owner, #updated_at = :now, #ttl = :ttl",
+            ConditionExpression=(
+                "#action = :expected_action AND #state = :input_waiting "
+                "AND #operation_id = :expected_op AND #ttl > :now_epoch"
+            ),
+            ExpressionAttributeNames={
+                "#action": "action",
+                "#state": "state",
+                "#operation_id": "operation_id",
+                "#updated_at": "updated_at",
+                "#ttl": "ttl",
+                "#owner": "owner",
+            },
+            ExpressionAttributeValues={
+                ":expected_action": ConversationAction.AVAILABLE_CASH_RECONCILE.value,
+                ":input_waiting": ConversationStateName.INPUT_WAITING.value,
+                ":expected_op": expected_operation_id,
+                ":owner": owner,
+                ":now": now_iso,
+                ":now_epoch": now_epoch,
+                ":ttl": ttl,
+            },
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _CONDITION_FAILURE_CODES:
+            return None
+        raise
+    return get(user_id, now)
+
+
 def retry(
     user_id: str,
     expected_action: ConversationAction,
     expected_operation_id: str,
     now: dt.datetime,
 ) -> ConversationState | None:
-    """CONFIRM_WAITING→INPUT_WAITING(入力し直し)。stock_code/shares/price/owner
-    をクリアし、operation_idを再発行する。operation_id・state・期限のいずれかが
-    一致しない場合は何も変更せずNoneを返す。"""
+    """CONFIRM_WAITING→INPUT_WAITING(入力し直し)。stock_code/shares/price/owner/
+    amountをクリアし、operation_idを再発行する。operation_id・state・期限の
+    いずれかが一致しない場合は何も変更せずNoneを返す。"""
     new_operation_id = str(uuid.uuid4())
     now_iso = now.isoformat()
     now_epoch = int(now.timestamp())
@@ -241,7 +311,7 @@ def retry(
             UpdateExpression=(
                 "SET #state = :input_waiting, #operation_id = :new_op, "
                 "#updated_at = :now, #ttl = :ttl "
-                "REMOVE #stock_code, #shares, #price, #owner"
+                "REMOVE #stock_code, #shares, #price, #owner, #amount"
             ),
             ConditionExpression=(
                 "#action = :expected_action AND #state = :confirm_waiting "
@@ -257,6 +327,7 @@ def retry(
                 "#shares": "shares",
                 "#price": "price",
                 "#owner": "owner",
+                "#amount": "amount",
             },
             ExpressionAttributeValues={
                 ":expected_action": expected_action.value,

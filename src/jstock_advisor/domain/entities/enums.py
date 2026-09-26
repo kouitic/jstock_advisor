@@ -1451,6 +1451,11 @@ class ConversationAction(StrEnum):
     # 判定の選択、というINPUT_WAITING単独の対話(CONFIRM_WAITINGへは進まない
     # 読み取り専用フロー)。
     ANALYZE = "ANALYZE"
+    # 買付余力(available_cash)の参照・棚卸し更新(Issue #592、#128 A5a)。
+    # owner確定(INPUT_WAITING中の中間ステップ)→新しい金額の入力→
+    # CONFIRM_WAITINGという2段階の入力を持つ(BUY/SELLの1メッセージCSV入力とは
+    # 異なる)。
+    AVAILABLE_CASH_RECONCILE = "AVAILABLE_CASH_RECONCILE"
 
 
 class ConversationStateName(StrEnum):
