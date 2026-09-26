@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from jstock_advisor.cli import (
     analyze,
     audit,
+    available_cash,
     baseline_repair,
     calibration,
     candidate_universe,
@@ -38,6 +39,7 @@ load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
 app = typer.Typer(help="日本株 長期・高配当・株主優待重視の売買支援システム CLI")
 app.add_typer(holdings.app, name="holdings")
+app.add_typer(available_cash.app, name="available-cash")
 app.add_typer(watchlist.app, name="watchlist")
 app.add_typer(analyze.app, name="analyze")
 app.add_typer(audit.app, name="audit")
