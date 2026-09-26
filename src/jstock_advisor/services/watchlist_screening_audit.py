@@ -120,6 +120,11 @@ def record_candidate_audit(
     「この評価結果が最終的にどう処理されたか」をbatch_id経由で突き合わせられる
     ようにする(Lambda fan-out・CLI単一プロセス実行のいずれも、実行1回につき
     1つのbatch_idを発行して両方の記録へ一貫して渡すこと)。
+
+    Issue #531(#71 F-C14): batch_idがあれば、batch_id+stock_code由来の
+    決定的audit_idでrecord_if_absent()を使い、非同期fan-outの再配信による
+    監査ログの重複を防ぐ(#528/#558と同型)。batch_id=None(CLI単一プロセス
+    実行等、既存呼び出し)は従来どおりrecord()のまま(後方互換)。
     """
     output_values: dict[str, Any] = {"evaluation_result": evaluation_result}
     if result is not None:
@@ -147,6 +152,19 @@ def record_candidate_audit(
                 "classification_basis": result.classification_basis,
             }
         )
+    if batch_id is not None:
+        AuditService().record_if_absent(
+            audit_id=f"{DECISION_TYPE_CANDIDATE}:{batch_id}:{stock_code}",
+            decision_type=DECISION_TYPE_CANDIDATE,
+            stock_code=stock_code,
+            input_values={"batch_id": batch_id, "stock_code": stock_code},
+            calculation_formulas={},
+            output_values=output_values,
+            data_sources=[],
+            rule_version=RULE_VERSION_PLACEHOLDER,
+            timestamp=now,
+        )
+        return
     AuditService().record(
         decision_type=DECISION_TYPE_CANDIDATE,
         stock_code=stock_code,
@@ -206,7 +224,12 @@ def record_repository_result_audit(
     }
     if error is not None:
         output_values["error_summary"] = _safe_error_summary(error)
-    AuditService().record(
+    # Issue #531(#71 F-C14): batch_id+stock_code由来の決定的audit_idで
+    # record_if_absent()を使い、非同期fan-outの再配信による監査ログの
+    # 重複を防ぐ(#528/#558と同型。batch_idは本関数では必須のため
+    # フォールバックのrecord()は不要)。
+    AuditService().record_if_absent(
+        audit_id=f"{DECISION_TYPE_REPOSITORY_RESULT}:{batch_id}:{stock_code}",
         decision_type=DECISION_TYPE_REPOSITORY_RESULT,
         stock_code=stock_code,
         input_values={"batch_id": batch_id, "stock_code": stock_code},
@@ -333,8 +356,15 @@ def record_rotation_commit_audit(
     「単なるconflict」だけでなく、期待したpointer_versionと実際に観測された
     pointer_versionを両方記録し、原因調査(実際の競合かバグか)を後から
     区別できるようにする。取得できなかった場合はNone。
+
+    Issue #531(#71 F-C14): batch_id由来の決定的audit_idでrecord_if_absent()
+    を使う。finalizeが中断・再試行された場合、1回目の呼び出しでcommit済みの
+    rotation stateへ2回目が古いexpected_versionのままconflict判定すると
+    (committed=Falseの)誤った失敗記録で1回目の真の結果を上書きしてしまう
+    ため、最初の記録を確定させ後続の再試行分は書き込まない。
     """
-    AuditService().record(
+    AuditService().record_if_absent(
+        audit_id=f"{DECISION_TYPE_ROTATION_COMMIT}:{batch_id}",
         decision_type=DECISION_TYPE_ROTATION_COMMIT,
         stock_code=None,
         input_values={"batch_id": batch_id},
