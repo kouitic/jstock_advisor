@@ -40,6 +40,7 @@ from jstock_advisor.infrastructure.local_repository.investment_thesis_baseline_r
 from jstock_advisor.infrastructure.local_repository.investment_thesis_repository import (
     InvestmentThesisRepository,
 )
+from jstock_advisor.services.write_plan import ConditionalPut, apply_conditional_put
 
 logger = logging.getLogger(__name__)
 
@@ -229,11 +230,25 @@ class InvestmentThesisService:
     def get_or_create_thesis(
         self, holding_id: str, stock_code: str, now: dt.datetime | None = None
     ) -> InvestmentThesis:
+        """holding_idに対応するInvestmentThesisを取得し、無ければ作成する。
+
+        Issue #570(#71 F-C13から分離): 同一holding_idへの並行呼び出しが
+        異なるinvestment_thesis_id(旧: uuid4)を持つ2件を二重生成しうる欠陥
+        への対処。新規作成時のinvestment_thesis_idを`holding_id`自体から
+        決定的に導出し(`investment_thesis_baseline_repository.py`の
+        `baseline_id = f"{holding_id}:v{version}"`と同型の決定的キー生成)、
+        既存のCollectionStore CAS primitive(`insert_if_absent()`。#17)で
+        原子的に作成する。新しいlock/lease機構は作らない。
+
+        `get_by_holding()`(線形scan)を既存確認に残すため、#570着手前に
+        作成された旧形式(uuid4のinvestment_thesis_id)のレコードも引き続き
+        見つかる(後方互換。migration/backfill不要)。
+        """
         existing = self._thesis_repo.get_by_holding(holding_id)
         if existing is not None:
             return existing
         thesis = InvestmentThesis(
-            investment_thesis_id=str(uuid.uuid4()),
+            investment_thesis_id=holding_id,
             holding_id=holding_id,
             stock_code=stock_code,
             conditions=[],
@@ -245,8 +260,24 @@ class InvestmentThesisService:
                 log_ref(holding_id),
             )
             return thesis
-        self._thesis_repo.save(thesis)
-        return thesis
+        if self._thesis_repo.insert_if_absent(thesis):
+            return thesis
+        # 他プロセスが先に同じholding_idでinsert_if_absent()に成功していた
+        # (同一holding_idへの並行create)。自分が構築したtransientなthesisは
+        # 捨て、既に永続化された方を返す(#570が防ぎたい二重生成そのもの)。
+        winner = self._thesis_repo.get(holding_id)
+        if winner is not None:
+            return winner
+        # 理論上到達しない(insert_if_absent失敗直後にgetがNoneになるのは、
+        # 直後に別プロセスが削除した場合のみで、本Issueのscopeでは削除経路が
+        # 存在しない)。defensiveに線形scanへfallbackする。
+        fallback = self._thesis_repo.get_by_holding(holding_id)
+        if fallback is not None:
+            return fallback
+        raise RuntimeError(
+            f"holding_ref={log_ref(holding_id)}: insert_if_absentが失敗したのに"
+            "該当レコードが見つかりません(想定外の状態)"
+        )
 
     def register_condition(
         self,
@@ -255,8 +286,51 @@ class InvestmentThesisService:
         description: str,
         now: dt.datetime | None = None,
     ) -> InvestmentThesis:
+        """個別購入理由を1件追加する。
+
+        Issue #570: 読み取り(get_or_create_thesis)と書き込み(save)の間に
+        別の更新が入ると後勝ちで消える(lost update)欠陥への対処。#530と
+        同型のCAS(services/write_plan.py::apply_conditional_put())へ切替え、
+        既存のCollectionStore CAS primitive(replace_if_raw_matches。#17)を
+        再利用する。新しいCAS方式は作らない。競合時は
+        `services.write_plan.ConcurrentUpdateError`(ValueErrorサブクラス)を
+        送出する(自動リトライしない。呼び出し元が最新状態を確認してやり直す)。
+        """
         current_time = now or dt.datetime.now(dt.UTC)
         thesis = self.get_or_create_thesis(holding_id, stock_code, current_time)
+        if self._execution_context.is_validation:
+            # #570着手前からの既存の非対称をそのまま維持する(挙動を変えない):
+            # get_or_create_thesis()はis_validation時にtransient(非永続)な
+            # thesisを返すが、本メソッドはis_validationかどうかに関わらず
+            # save()を無条件に呼んでいた(=conditions追加はVALIDATIONでも
+            # 実際に永続化される)。この非対称はIssue #570のscope外として
+            # 記録済み(OUT_OF_SCOPE。issuecomment-5841369172参照。是正を
+            # 検討する場合はUSER判断で別Issue化する)。ここでCASへ切り替えると
+            # (transient thesisにはget_raw_dataで拾える実データが無いため)
+            # 新たな失敗を作ってしまうため、is_validation時は従来どおり
+            # save()を直接呼ぶ(CASを経由しない)。
+            condition = CustomThesisCondition(
+                condition_id=str(uuid.uuid4()),
+                description=description,
+                registered_at=current_time,
+            )
+            updated = thesis.model_copy(
+                update={
+                    "conditions": [*thesis.conditions, condition],
+                    "updated_at": current_time,
+                }
+            )
+            self._thesis_repo.save(updated)
+            return updated
+        # Issue #570: expected_dataはthesis読み取りの直後、updated構築より前に
+        # 取得する(#530と同じ理由。既存条件から書き込み内容を組み立てた後に
+        # 生データを取り直すと、その間の並行更新をCASが素通りさせてしまう)。
+        existing_raw = self._thesis_repo.get_raw_data(thesis.investment_thesis_id)
+        if existing_raw is None:
+            raise ValueError(
+                f"holding_ref={log_ref(holding_id)}のInvestmentThesisデータ取得に失敗しました"
+                "(get_or_create_thesis直後にget_raw_dataがNoneを返した。並行削除の疑い)"
+            )
         condition = CustomThesisCondition(
             condition_id=str(uuid.uuid4()),
             description=description,
@@ -268,7 +342,12 @@ class InvestmentThesisService:
                 "updated_at": current_time,
             }
         )
-        self._thesis_repo.save(updated)
+        apply_conditional_put(
+            self._thesis_repo,
+            ConditionalPut(
+                model=updated, id_field="investment_thesis_id", expected_data=existing_raw
+            ),
+        )
         return updated
 
     def attest_condition(
@@ -279,11 +358,25 @@ class InvestmentThesisService:
         attested_by: str,
         now: dt.datetime | None = None,
     ) -> InvestmentThesis:
+        """個別購入理由の維持状況を人間が申告する。
+
+        Issue #570: register_condition()と同型のCAS対策(#530と同型。
+        write_plan.py::apply_conditional_put()を再利用)。読み取り直後の生JSONを
+        楽観ロック条件として保持する。
+        """
         current_time = now or dt.datetime.now(dt.UTC)
         thesis = self._thesis_repo.get_by_holding(holding_id)
         if thesis is None:
             raise ValueError(
                 f"holding_ref={log_ref(holding_id)}のInvestmentThesisが見つかりません"
+            )
+        # Issue #570(#530 F3と同型): get_by_holding()とget_raw_data()は別呼び出し
+        # のため、その間に並行削除されるとexisting_rawがNoneに到達しうる
+        # (assertではなく明示的なValueErrorとする)。
+        existing_raw = self._thesis_repo.get_raw_data(thesis.investment_thesis_id)
+        if existing_raw is None:
+            raise ValueError(
+                f"holding_ref={log_ref(holding_id)}のInvestmentThesisデータ取得に失敗しました"
             )
 
         new_conditions: list[CustomThesisCondition] = []
@@ -310,5 +403,10 @@ class InvestmentThesisService:
         updated = thesis.model_copy(
             update={"conditions": new_conditions, "updated_at": current_time}
         )
-        self._thesis_repo.save(updated)
+        apply_conditional_put(
+            self._thesis_repo,
+            ConditionalPut(
+                model=updated, id_field="investment_thesis_id", expected_data=existing_raw
+            ),
+        )
         return updated
