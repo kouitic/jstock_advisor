@@ -198,6 +198,18 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:stock_snapshot_jst_price_window",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #578(#66 16C): JpxCandidateUniverseProvider自身(provider層)の
+    # staleness判定基準日を、UTC 00:00からJST 00:00へ統一。T2 = provider自身の
+    # 値決定ロジック(source_dateの起点をprovider内部で決める。consumerが渡す
+    # 値を選ぶ変更ではないためT3ではない)。T4 = JST/UTC基準の食い違いが実際に
+    # 判定を変える9時間windowを跨ぐ固定clockを新規に導入した。可変の
+    # module-level stateを持たないため、cohortの相手はいない(SOLO)。
+    _Entry(
+        module="tests/unit/test_issue_578_jpx_staleness_jst.py",
+        triggers=("T2", "T4"),
+        cohort="SOLO:jpx_staleness_jst_basis",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
@@ -217,6 +229,7 @@ _KNOWN_TIME_SENSITIVE_MODULES = frozenset(
         "tests/unit/test_buy_candidates_handler.py",
         "tests/unit/test_watchlist_dispatcher_handler.py",
         "tests/unit/test_issue_475_stock_snapshot_jst_date_window.py",
+        "tests/unit/test_issue_578_jpx_staleness_jst.py",
     }
 )
 
