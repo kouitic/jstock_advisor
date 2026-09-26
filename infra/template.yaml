@@ -1591,6 +1591,26 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # Issue #595(#128 A6a): owner単位の買付余力(available_cash)。利用者の
+  # 実際の資金管理データであり、失うと再生成できない。
+  # HoldingDecisionRuntimeConfigTable(Issue #137)と同水準の保護を適用する。
+  AvailableCashTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DeletionProtectionEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TableName: !Sub "${TablePrefix}-available_cash"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: owner
+          AttributeType: S
+      KeySchema:
+        - AttributeName: owner
+          KeyType: HASH
+
   # --- Lambda関数(スケジュール実行、schedule.yaml対応) ------------------
 
   BuyCandidatesFunction:
@@ -3235,6 +3255,23 @@ Resources:
                 - !Sub "${PurchaseLotsTable.Arn}/index/*"
                 - !GetAtt ConversationStatesTable.Arn
                 - !Sub "${ConversationStatesTable.Arn}/index/*"
+        # Issue #595(#128 A6a): 買付余力の参照・棚卸し更新(AvailableCashService
+        # 経由)。call graph実測(#592実装内容)により、実際に使うアクションは
+        # GetItem(get/get_raw)・PutItem(conditional_put_transact_item()が
+        # 生成するConditionExpression付きPut。ConditionCheck項目を別途置いて
+        # いないためConditionCheckItemは不要)の2つのみと確認できたため、
+        # 上のDynamoDbCrudAccess Statement(10 action)には含めず、専用
+        # Statementへ最小権限で切り出す(サブちゃんレビュー対応。
+        # TradingPauseConfigConditionCheckAccessと同じ「共有Statementに
+        # 混ぜず専用Statementを追加する」既存の流儀を踏襲)。
+        - Statement:
+            - Sid: AvailableCashAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
+                - !GetAtt AvailableCashTable.Arn
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         # StockDisplayNameResolverのoverrideソース(手動上書き名称)・JPXソース用
         # (指摘対応、上記CANDIDATE_UNIVERSE_CACHE_BUCKET環境変数とあわせて追加)。
