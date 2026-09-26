@@ -499,7 +499,14 @@ def register_thesis_condition(
 ) -> None:
     """銘柄固有の個別購入理由を登録する(現状holding_id=stock_codeのエイリアス)。"""
     service = InvestmentThesisService()
-    thesis = service.register_condition(stock_code, stock_code, description)
+    try:
+        thesis = service.register_condition(stock_code, stock_code, description)
+    except ValueError as e:
+        # Issue #570: register_condition()がCAS競合時にConcurrentUpdateError
+        # (ValueErrorサブクラス)を送出するようになったため、attest-thesis-condition
+        # と同型のハンドリングを追加した(#530 F4と同型の要修正点)。
+        typer.echo(str(e))
+        raise typer.Exit(code=1) from e
     new_condition = thesis.conditions[-1]
     typer.echo(f"登録しました: condition_id={new_condition.condition_id} 「{description}」")
 
