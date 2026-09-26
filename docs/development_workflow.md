@@ -1009,6 +1009,19 @@ T4  test / mock / fixture の clock または期待日
 
 T4 を含めるのは、**Issue #143 が「テスト期待値の変更」として現れた**ためである。
 
+**T2 の解釈(USER決定、2026-09-26。Issue #475 / PR #600)**:
+
+```
+T2: provider層自身、またはprovider contractとして、providerが返す日付・
+    時刻・bar範囲を決定するロジックを変更する場合に該当する。
+    consumerがproviderへ渡すstart/end/as_of_date等の値を業務時刻・業務日付に
+    基づいて選択する変更は、それだけではT2には該当しない。その場合、
+    consumerの時刻由来の業務判断変更としてT3を適用する。
+    test/mock/fixtureのclockまたは期待日も変更する場合はT4を併用する。
+```
+
+この解釈は今後の同種判断の先例とする。
+
 ### 3.5.2 control identifiers
 
 ```
@@ -2583,3 +2596,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-18 | 3.5.8 の「PR 本文を CI で自動解析する仕組みは導入しない。」を改訂した(Issue #342、#337 の follow-up)。#337 の監査で、TIME_SEMANTICS_IMPACT 宣言の欠落 6 本・DoD 5 項目の欠落 2 本・`Closes` による close gate の飛び越え 1 本が実際に発生しており、いずれも PR 本文の形式で機械的に検出できるにもかかわらず検出されていなかった。`.github/workflows/governance.yml`(新設、`ci.yml` とは別 workflow。理由は `pii-metadata-audit.yml` と同じで、PR 本文を読むため GitHub API に依存すること)が必須節(概要 / TIME_SEMANTICS_IMPACT / DoD / 同型 sweep / 確認)・DoD 5 項目の各行・Issue 参照の有無を構文のみで検査する。`Closes` / `Fixes` / `Resolves` の使用は正本が条件つきで許容しているため一律 FAIL にはせず WARNING に留め、意味判定(後続 Phase が残るか等)は引き続きレビュワーが行う(前行「`NO` の宣言は免罪符ではない...FAIL とする」の運用は変更していない)。**CI の実装(`F_IMPLEMENTED`)と、required check として登録し merge を実際に止められること(`F_REQUIRED_ENFORCEMENT`)は別であり、登録は USER が別途 1 回だけ行う操作である**(本 PR の時点では `F_REQUIRED_ENFORCEMENT = NO`。job は走るが merge を止めない)。registry の schema violation / anchor の不在は `scripts/policy_check.py` 由来の `tests/unit/test_policy_registry.py` が既に通常の CI(`ci.yml` の `test` job)で検査済みのため、governance.yml では重複実装していない(CI 実行時間の悪化を避けるため)。**3.5.8 のこの 1 行以外・1146 行目(免罪符ではない、の行)・§2.6 WIP と domain lock・§4 ローカルテスト方針・§9.5 Issue 起点の原則・§10 人間承認の境界・CI の必須 job 構成はいずれも変更していない。** コード・Production 挙動の変更なし(governance.yml は required check 未登録のため、既存の PR merge 手順を変えない) |
 | 2026-09-19 | §10 へ 10.2「承認の真正性(HUMAN_GATE_AUTHENTICITY)への入口」を追加した(Issue #332 Unit 1-A)。全 AI セッションが同一の GitHub アカウントで投稿するため、author / mergedBy から USER 本人の承認を識別できず、承認が本文の自己申告に依存する、という Issue #332 の欠陥への対処である。**規則の本文は user_manager_collaboration_protocol.md 2.7節と ai_operation_message_contract.md 8.6節が正本であり、本文書へ複製していない**(入口と、発効状態の正本[`HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録]だけを置いた)。**本改訂は発効しない**(発効条件が成立して durable に記録されるまで、旧運用を継続する。新旧を混在させない)。**10節の人間承認の要否・10.1 の VERIFICATION_MANUAL_INVOCATION・承認の単位はいずれも変更・緩和していない。** 設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-25 | 2.6.9 の集約 read model(Issue #188)の**保管方式を「本文の可変 cache」から「append-only のコメント」へ正式移行**した(USER決定)。旧本文は「専用の tracking Issue の本文を可変 cache として使う(append-only のコメントで現況を管理しない。最新がどれか埋もれるため)」としていたが、実際の運用ではこの「本文上書き」方式が prepend 方式(新しい内容を先頭へ足し続ける運用)で行われ、2026-09-25 に #188 の本文が GitHub Issue body の上限(約 262,144 文字)へ到達する事故が発生した(JIRO が本文を READ_MODEL_REBUILD で圧縮し復旧)。一方、同じ本文書 6.5.3 節の `ISSUE_STATE_SNAPSHOT` は append-only のコメントを使いながら `LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` という規約で「最新がどれか埋もれる」問題を既に解決しており、2.6.9 が append-only を避けた根拠(最新が埋もれる)は、同じ文書内に既に解決策が存在していたことになる。本改訂は「保管」行を、tracking Issue へ append-only のコメントで現況を追記し、最新の判定は 6.5.3 と同じ `LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` に従う形へ改めた。本文(body)は恒久的な使い方の説明(掲示・label・更新責務)のみを保持し、可変 cache としては使わない。「更新責務」行もコメント追記による更新であることを明記した。**レビュー対応(USER 指摘 F1)**: 当初案の「コメント順で最後のものを現況とする」は、tracking Issue #188 自身へ投稿されうる通常の Issue コメント(個別 Issue の `DOMAIN_WIP_DECLARATION` の引用・USER 判断の記録・訂正・障害記録等。read model の snapshot ではないもの)を、単純な「最後のコメント」判定では現況として誤読しうる欠陥があった。`VALID_READ_MODEL_UPDATE` を新設し、必須 field(`GENERATED_AT` / `SOURCE_MAIN` / `SOURCE_ISSUES` / `ACTIVE_DOMAIN_WIP` / `SHARED_LOCKS` / `WORKER_WIP` / `GRANDFATHERED_WIP` / `UNKNOWN_BRANCH_STATE`)をすべて持つ自己完結 snapshot のみを現況判定の対象とし、それ以外のコメントは(投稿順で最後であっても)対象外と明記した。**#188 自体の本文の訂正は本改訂とは別に MANAGER が行う(本 PR の scope 外)。WIP_STATE_SSOT(各 Issue の宣言 + 最新 snapshot)・READ_MODEL_IS_SSOT = NO・INDEX_ONLY・READ_MODEL_MISMATCH の扱い・着手前の確認手順・Human Gate / merge 承認 / Production approval / release-blocker lifecycle / label 4 軸 / §2.6 の取得ゲートと解放条件はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-09-26 | 3.5.1 の T2 の解釈を明確化した(Issue #475 / PR #600、USER決定)。旧本文の T2「provider が返す日付・時刻の決定ロジック」は、consumer が provider へ渡す start/end/as_of_date 等の値を業務時刻・業務日付に基づいて選択する変更まで含むのかが曖昧だった。PR #600 のレビューでサブちゃんが「T3(時刻由来値を受け取って業務分岐する consumer)に当たり、T2 ではない」と判定し、USER がこの解釈を今後の先例として承認した。本改訂は T2 の本文へ、**T2 は provider 層自身・provider contract として provider が返す値を決定するロジックの変更に限る**こと、consumer 側の時刻由来の値選択は T3 が適用されること、test/mock/fixture の clock・期待日も変更する場合は T4 を併用することを明記した。**T1/T3/T4 の定義・3.5.2 の control identifiers・3.5.3 の決定表・3.5.4 の control の内容はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
