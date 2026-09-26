@@ -34,6 +34,9 @@ from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
 )
+from jstock_advisor.infrastructure.local_repository.transaction_repository import (
+    TransactionRepository,
+)
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
     WatchlistRepository,
 )
@@ -227,6 +230,7 @@ def test_buy_confirm_rejected_with_dedicated_message_when_available_cash_insuffi
     assert "買付余力が不足" in confirm_reply.text
     assert "最新の保有状況が変更された" not in confirm_reply.text  # 汎用文言ではない
     assert HoldingRepository().get(_HOLDING_ID) is None
+    assert TransactionRepository().get(confirm_state.operation_id) is None
     available_cash = AvailableCashRepository().get(DEFAULT_OWNER)
     assert available_cash is not None
     assert available_cash.available_cash == _DEFAULT_AVAILABLE_CASH  # 変化なし
