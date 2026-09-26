@@ -118,6 +118,11 @@ def test_all_consumed_doc_type_codes_are_kept(
 
 
 def test_not_configured_is_failure_without_http_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Issue #586: 他テストが`EDINET_API_KEY`をos.environへ残す(load_dotenv経由。
+    # test_judgment_safety_shadow_cli.py参照)と、api_key=Noneでもコンストラクタの
+    # フォールバックで環境変数を拾ってしまい、このテストの前提(未設定)が崩れる。
+    monkeypatch.delenv("EDINET_API_KEY", raising=False)
+
     def fail(*args: object, **kwargs: object) -> None:
         raise AssertionError("APIキー未設定ではHTTP呼び出しを行わない")
 
@@ -208,7 +213,10 @@ def test_download_empty_payload_is_failure(monkeypatch: pytest.MonkeyPatch) -> N
     assert result.failure_reason is EdinetFailureReason.DOWNLOAD_ERROR
 
 
-def test_download_not_configured_is_failure() -> None:
+def test_download_not_configured_is_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Issue #586: 上記test_not_configured_is_failure_without_http_callと同じ理由。
+    monkeypatch.delenv("EDINET_API_KEY", raising=False)
+
     result = EdinetClient(api_key=None).download_document_zip("DOC1")
 
     assert result.status is EdinetFetchStatus.FETCH_FAILED
