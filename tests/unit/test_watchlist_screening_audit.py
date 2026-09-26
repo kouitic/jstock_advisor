@@ -21,9 +21,20 @@ _NOW = dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
 class _FakeAuditService:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._seen_audit_ids: set[str] = set()
 
     def record(self, **kwargs: Any) -> None:
         self.calls.append(kwargs)
+
+    def record_if_absent(self, **kwargs: Any) -> dict[str, Any] | None:
+        # Issue #531: 本物のAuditService.record_if_absent()と同じく、同一
+        # audit_idの2回目以降は何もしない。
+        audit_id = kwargs.pop("audit_id")
+        if audit_id in self._seen_audit_ids:
+            return None
+        self._seen_audit_ids.add(audit_id)
+        self.calls.append(kwargs)
+        return kwargs
 
 
 @pytest.fixture

@@ -120,6 +120,29 @@ def record_candidate_audit(
     「この評価結果が最終的にどう処理されたか」をbatch_id経由で突き合わせられる
     ようにする(Lambda fan-out・CLI単一プロセス実行のいずれも、実行1回につき
     1つのbatch_idを発行して両方の記録へ一貫して渡すこと)。
+
+    Issue #531(#71 F-C14): batch_idがあれば、batch_id+stock_code由来の
+    決定的audit_idでrecord_if_absent()を使い、非同期fan-outの再配信による
+    監査ログの重複を防ぐ(#528/#558と同型)。batch_id=None(CLI単一プロセス
+    実行等、既存呼び出し)は従来どおりrecord()のまま(後方互換)。
+
+    audit_idは`{DECISION_TYPE_CANDIDATE}:{batch_id}:{stock_code}`の3要素すべてを
+    含む(#62 `build_removal_audit_id()`の前例に倣う)。record_if_absent()は
+    既にaudit_idがあれば**黒く何も書かない**ため、いずれかを落とすと正当な監査
+    記録そのものが黙って失われる(重複よりも害が大きい):
+    - decision_typeを落とすと、同一(batch_id, stock_code)を使う
+      record_repository_result_audit()の記録と衝突する。
+    - batch_idを落とすと、別バッチの同一銘柄の記録が失われる。
+    - stock_codeを落とすと、同一バッチの別銘柄の記録が失われる。
+
+    ★ 既知の限界(#531レビュー対応 F3): この関数はcandidateの評価結果を
+    最初に確定させる(呼び出し順序上、finalizeのcomplete_candidate()より前)。
+    そのため、1回目の呼び出しでrecord_if_absent()が記録した内容が「確定した
+    評価結果」として残り、complete_candidate()側が失敗してlease失効後に
+    再評価が別の結果(データ更新等による非決定性)を出しても、この関数は
+    2回目を黙ってスキップする。結果として、AuditLogに残る評価内容と、
+    実際に採用された進捗行の内容が食い違う余地がある。抑止自体は例外も
+    ログも出さない(#530/#558で確立済みのrecord_if_absent()の契約どおり)。
     """
     output_values: dict[str, Any] = {"evaluation_result": evaluation_result}
     if result is not None:
@@ -147,6 +170,19 @@ def record_candidate_audit(
                 "classification_basis": result.classification_basis,
             }
         )
+    if batch_id is not None:
+        AuditService().record_if_absent(
+            audit_id=f"{DECISION_TYPE_CANDIDATE}:{batch_id}:{stock_code}",
+            decision_type=DECISION_TYPE_CANDIDATE,
+            stock_code=stock_code,
+            input_values={"batch_id": batch_id, "stock_code": stock_code},
+            calculation_formulas={},
+            output_values=output_values,
+            data_sources=[],
+            rule_version=RULE_VERSION_PLACEHOLDER,
+            timestamp=now,
+        )
+        return
     AuditService().record(
         decision_type=DECISION_TYPE_CANDIDATE,
         stock_code=stock_code,
@@ -193,6 +229,15 @@ def record_repository_result_audit(
 
     rankは追加件数上限適用「前」の全合格ランキングにおける順位(1始まり)。
     skipped_over_limitの銘柄も含め、合格した全銘柄について呼ぶこと。
+
+    audit_idは`{DECISION_TYPE_REPOSITORY_RESULT}:{batch_id}:{stock_code}`の
+    3要素すべてを含む(#62 `build_removal_audit_id()`の前例に倣う。#531
+    レビュー対応 F2)。record_if_absent()は既にaudit_idがあれば黙って何も
+    書かないため、いずれかを落とすと正当な監査記録が黙って失われる:
+    - decision_typeを落とすと、同一(batch_id, stock_code)を使う
+      record_candidate_audit()の記録と衝突する。
+    - batch_idを落とすと、別バッチの同一銘柄の記録が失われる。
+    - stock_codeを落とすと、同一バッチの別銘柄の記録が失われる。
     """
     output_values: dict[str, Any] = {
         "stock_name": stock_name,
@@ -206,7 +251,12 @@ def record_repository_result_audit(
     }
     if error is not None:
         output_values["error_summary"] = _safe_error_summary(error)
-    AuditService().record(
+    # Issue #531(#71 F-C14): batch_id+stock_code由来の決定的audit_idで
+    # record_if_absent()を使い、非同期fan-outの再配信による監査ログの
+    # 重複を防ぐ(#528/#558と同型。batch_idは本関数では必須のため
+    # フォールバックのrecord()は不要)。
+    AuditService().record_if_absent(
+        audit_id=f"{DECISION_TYPE_REPOSITORY_RESULT}:{batch_id}:{stock_code}",
         decision_type=DECISION_TYPE_REPOSITORY_RESULT,
         stock_code=stock_code,
         input_values={"batch_id": batch_id, "stock_code": stock_code},
@@ -333,8 +383,22 @@ def record_rotation_commit_audit(
     「単なるconflict」だけでなく、期待したpointer_versionと実際に観測された
     pointer_versionを両方記録し、原因調査(実際の競合かバグか)を後から
     区別できるようにする。取得できなかった場合はNone。
+
+    Issue #531(#71 F-C14): batch_id由来の決定的audit_idでrecord_if_absent()
+    を使う。finalizeが中断・再試行された場合、1回目の呼び出しでcommit済みの
+    rotation stateへ2回目が古いexpected_versionのままconflict判定すると
+    (committed=Falseの)誤った失敗記録で1回目の真の結果を上書きしてしまう
+    ため、最初の記録を確定させ後続の再試行分は書き込まない。
+
+    audit_idは`{DECISION_TYPE_ROTATION_COMMIT}:{batch_id}`の2要素を含む
+    (stock_codeはbatch単位の記録であり銘柄に紐付かないため対象外。#62
+    `build_removal_audit_id()`の前例に倣う。#531レビュー対応 F2)。
+    decision_typeを落とすと、同一batch_idを使う他のdecision_type
+    (record_batch_audit()のidempotency_key等)の記録と衝突しうる。
+    batch_idを落とすと、別バッチのrotation commit記録が失われる。
     """
-    AuditService().record(
+    AuditService().record_if_absent(
+        audit_id=f"{DECISION_TYPE_ROTATION_COMMIT}:{batch_id}",
         decision_type=DECISION_TYPE_ROTATION_COMMIT,
         stock_code=None,
         input_values={"batch_id": batch_id},
