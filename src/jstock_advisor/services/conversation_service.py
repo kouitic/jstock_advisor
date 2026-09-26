@@ -46,6 +46,7 @@ from jstock_advisor.infrastructure.local_repository.holding_repository import Ho
 from jstock_advisor.services.available_cash_service import (
     AvailableCashNotRegisteredError,
     AvailableCashService,
+    InsufficientAvailableCashError,
 )
 from jstock_advisor.services.buy_candidate_target_view_service import (
     CATEGORY_DISPLAY_LABELS,
@@ -125,11 +126,10 @@ _AVAILABLE_CASH_NOT_REGISTERED_FOR_TRADE = (
     "買付余力が未登録のため、売買登録ができませんでした。\n"
     "「余力管理」メニューから先に買付余力の登録を行ってください。"
 )
-# サブちゃんレビュー#620 F2対応: 余力不足(purchase_price*shares > 現在の
-# available_cash)によるAvailableCash側のValidationErrorを、並行更新用の
+# 余力不足(purchase_price*shares > 現在のavailable_cash)を、並行更新用の
 # 汎用文言(_WRITE_CONFLICT)へ落とさず専用文言で案内する(#614 F3と同型の
-# 対応)。余力不足時の拒否ロジック自体の設計(拒否基準の明確化・guard自体の
-# 実装)は#591のscope。
+# 対応。当初#620 F2でpydantic.ValidationErrorの暫定捕捉として導入し、
+# #591で専用例外InsufficientAvailableCashErrorへ切り替えた)。
 _AVAILABLE_CASH_INSUFFICIENT_FOR_TRADE = (
     "買付余力が不足しているため、登録できませんでした。\n"
     "「余力管理」メニューから買付余力をご確認ください。"
@@ -776,10 +776,14 @@ class ConversationService:
             )
         except AvailableCashNotRegisteredError:
             return ConversationReply(_AVAILABLE_CASH_NOT_REGISTERED_FOR_TRADE)
+        except InsufficientAvailableCashError:
+            # 購入金額が現在の買付余力を上回る場合(Issue #591)。汎用の
+            # _WRITE_CONFLICT(並行更新用)へ落とさず、専用文言で案内する。
+            return ConversationReply(_AVAILABLE_CASH_INSUFFICIENT_FOR_TRADE)
         except ValidationError:
-            # 購入金額が現在の買付余力を上回る場合(entity側validatorが
-            # available_cash<0を拒否)。汎用の_WRITE_CONFLICT(並行更新用)へ
-            # 落とさず、専用文言で案内する(#620 F2)。
+            # defense-in-depth: #591のInsufficientAvailableCashErrorが正しく
+            # 機能している限り理論上到達しない(entity側の汎用validatorが
+            # 送出する経路)。同じ専用文言で案内する。
             return ConversationReply(_AVAILABLE_CASH_INSUFFICIENT_FOR_TRADE)
         success = conversation_commit.commit_buy(
             user_id, state.operation_id, plan, transaction, now, available_cash_put
