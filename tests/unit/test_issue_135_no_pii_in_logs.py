@@ -431,6 +431,7 @@ _RAISE_GUARDED_MODULES = [
     "src/jstock_advisor/infrastructure/local_repository/investment_thesis_baseline_repository.py",
     "src/jstock_advisor/services/portfolio_service.py",
     "src/jstock_advisor/services/investment_thesis_service.py",
+    "src/jstock_advisor/services/available_cash_service.py",
 ]
 
 

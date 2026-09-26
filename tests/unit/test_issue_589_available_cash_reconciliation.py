@@ -53,6 +53,27 @@ def test_t1b_invalid_owner_is_rejected_via_existing_validation(tmp_path) -> None
         service.reconcile("owner#a", Decimal("1000"), _NOW)  # holding_id区切り文字を含む
 
 
+def test_t1c_get_normalizes_owner_the_same_way_as_reconcile(tmp_path) -> None:
+    """サブちゃんレビューF2対応: mutation testingがreconcile()側のみだった
+    ため、get()側でもowner正規化が実際に行われていることを固定する
+    (T1と同型)。"""
+    service = AvailableCashService(store_dir=tmp_path)
+    service.reconcile("owner-a", Decimal("1000"), _NOW)  # 半角で登録
+
+    result = service.get("owner-ａ")  # 全角の"a"を含む入力で取得
+
+    assert result is not None
+    assert result.available_cash == Decimal("1000")
+
+
+def test_t1d_get_rejects_invalid_owner_via_existing_validation(tmp_path) -> None:
+    from jstock_advisor.domain.entities.owner import InvalidOwnerError
+
+    service = AvailableCashService(store_dir=tmp_path)
+    with pytest.raises(InvalidOwnerError):
+        service.get("owner#a")
+
+
 # --- T2: 負値拒否(AC2。entity側の既存validatorへ委譲) -------------------------------
 
 
@@ -164,6 +185,65 @@ class _ConflictingRepository:
             self._remaining_failures -= 1
             return False
         return self._inner.replace_if_raw_matches(owner, expected_raw_data, record)
+
+
+class _ConcurrentCreateRepository:
+    """initialize()の最初の呼び出しを強制的に失敗させ、かつ他プロセスが
+    「先に」レコードを作成済みだったという状況を実際に再現する
+    (サブちゃんレビューF1対応: initialize()がFalseを返した場合に
+    reconcile()が誤って成功扱いしないことを、実際に競合後の状態からの
+    再取得〔get_raw〕+ CAS更新〔replace_if_raw_matches〕で正しく完走
+    できることまで含めて固定する)。"""
+
+    def __init__(self, inner: AvailableCashRepository, concurrent_record: AvailableCash) -> None:
+        self._inner = inner
+        self._concurrent_record = concurrent_record
+        self._initialize_calls = 0
+
+    def get(self, owner: str) -> AvailableCash | None:
+        return self._inner.get(owner)
+
+    def get_raw(self, owner: str) -> str | None:
+        return self._inner.get_raw(owner)
+
+    def initialize(self, record: AvailableCash) -> bool:
+        self._initialize_calls += 1
+        if self._initialize_calls == 1:
+            # 他プロセスが先にレコードを作成したことを模倣する。
+            self._inner.initialize(self._concurrent_record)
+            return False
+        return self._inner.initialize(record)
+
+    def replace_if_raw_matches(
+        self, owner: str, expected_raw_data: str, record: AvailableCash
+    ) -> bool:
+        return self._inner.replace_if_raw_matches(owner, expected_raw_data, record)
+
+
+def test_t8c_reconcile_does_not_report_success_when_initialize_loses_the_race(tmp_path) -> None:
+    """initialize()がFalse(他プロセスが先に作成済み)を返した場合、
+    reconcile()はその戻り値を無視して成功を返してはならない
+    (silent lost update防止)。正しい実装は、この場合retryして
+    get_raw()で競合後の状態を再取得し、replace_if_raw_matches()による
+    CAS更新で完走する。"""
+    inner = AvailableCashRepository(store_dir=tmp_path)
+    concurrent_record = AvailableCash(
+        owner="owner-a",
+        available_cash=Decimal("999"),  # 他プロセスが作成した値(このテストの主眼ではない)
+        updated_at=_NOW,
+        last_update_type=AvailableCashUpdateType.USER_RECONCILIATION,
+        last_reconciled_at=_NOW,
+    )
+    racy = _ConcurrentCreateRepository(inner, concurrent_record)
+    service = AvailableCashService(repository=racy, default_max_retries=3)
+
+    result = service.reconcile("owner-a", Decimal("1500"), _LATER)
+
+    # reconcile()自身の戻り値・実際に永続化された値の両方が、最終的に
+    # 呼び出し側が要求した値(1500)であることを確認する(999のまま
+    # 「成功」を返していないこと)。
+    assert result.available_cash == Decimal("1500")
+    assert inner.get("owner-a").available_cash == Decimal("1500")
 
 
 def test_t9_reconcile_retries_and_succeeds_after_a_transient_conflict(tmp_path) -> None:
