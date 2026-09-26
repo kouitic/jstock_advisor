@@ -41,7 +41,10 @@ from jstock_advisor.infrastructure.aws.conversation_state_store import Conversat
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.line.client import QuickReplyButton
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
-from jstock_advisor.services.available_cash_service import AvailableCashService
+from jstock_advisor.services.available_cash_service import (
+    AvailableCashNotRegisteredError,
+    AvailableCashService,
+)
 from jstock_advisor.services.buy_candidate_target_view_service import (
     CATEGORY_DISPLAY_LABELS,
     BuyCandidateTargetViewService,
@@ -113,6 +116,12 @@ _AVAILABLE_CASH_AMOUNT_PROMPT_TEMPLATE = (
 _AVAILABLE_CASH_NEGATIVE_AMOUNT = "買付余力は0以上の数値で指定してください"
 _AVAILABLE_CASH_WRITE_CONFLICT = (
     "最新の買付余力が変更されたため登録できませんでした。\nもう一度操作してください。"
+)
+
+# --- 通常売買登録とAvailable Cash更新の整合(Issue #590、#128 A3-LINE) ----
+_AVAILABLE_CASH_NOT_REGISTERED_FOR_TRADE = (
+    "買付余力が未登録のため、売買登録ができませんでした。\n"
+    "「余力管理」メニューから先に買付余力の登録を行ってください。"
 )
 
 # --- 銘柄分析(Phase 2-B、2026-08、読み取り専用) --------------------------
@@ -750,8 +759,14 @@ class ConversationService:
             execution_date=execution_date,
             now=now,
         )
+        try:
+            available_cash_put = self._available_cash.build_trade_update_plan(
+                state.owner, -(state.price * state.shares), now
+            )
+        except AvailableCashNotRegisteredError:
+            return ConversationReply(_AVAILABLE_CASH_NOT_REGISTERED_FOR_TRADE)
         success = conversation_commit.commit_buy(
-            user_id, state.operation_id, plan, transaction, now
+            user_id, state.operation_id, plan, transaction, now, available_cash_put
         )
         if not success:
             return ConversationReply(_WRITE_CONFLICT)
@@ -790,8 +805,14 @@ class ConversationService:
             execution_date=execution_date,
             now=now,
         )
+        try:
+            available_cash_put = self._available_cash.build_trade_update_plan(
+                state.owner, state.price * state.shares, now
+            )
+        except AvailableCashNotRegisteredError:
+            return ConversationReply(_AVAILABLE_CASH_NOT_REGISTERED_FOR_TRADE)
         success = conversation_commit.commit_sell(
-            user_id, state.operation_id, plan, transaction, now
+            user_id, state.operation_id, plan, transaction, now, available_cash_put
         )
         if not success:
             return ConversationReply(_WRITE_CONFLICT)

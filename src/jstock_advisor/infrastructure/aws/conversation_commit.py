@@ -99,6 +99,7 @@ def commit_buy(
     plan: PurchaseWritePlan,
     transaction: Transaction,
     now: dt.datetime,
+    available_cash_put: ConditionalPut,
 ) -> bool:
     items = [
         _trading_pause_condition_check_item(),
@@ -115,6 +116,9 @@ def commit_buy(
         dynamodb_transaction.conditional_put_transact_item(
             resolve_table_name(_HOLDINGS_TABLE_FILE), plan.holding_put
         ),
+        dynamodb_transaction.conditional_put_transact_item(
+            resolve_table_name(_AVAILABLE_CASH_TABLE_FILE), available_cash_put
+        ),
     ]
     return dynamodb_transaction.commit(items)
 
@@ -125,6 +129,7 @@ def commit_sell(
     plan: SaleWritePlan,
     transaction: Transaction,
     now: dt.datetime,
+    available_cash_put: ConditionalPut,
 ) -> bool:
     items = [
         _trading_pause_condition_check_item(),
@@ -153,6 +158,11 @@ def commit_sell(
                 holdings_table, plan.holding_delete
             )
         )
+    items.append(
+        dynamodb_transaction.conditional_put_transact_item(
+            resolve_table_name(_AVAILABLE_CASH_TABLE_FILE), available_cash_put
+        )
+    )
 
     return dynamodb_transaction.commit(items)
 

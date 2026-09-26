@@ -27,6 +27,22 @@ class AvailableCashReconciliationExhaustedError(RuntimeError):
     """棚卸し更新が競合により max_retries 回失敗した(#589)。"""
 
 
+class AvailableCashNotRegisteredError(ValueError):
+    """未登録ownerに対して売買登録(TRADE_UPDATE)を試みた(#590 D3)。
+
+    #584/#589で確立した「未登録owner != 実際の買付余力0円」契約と整合させる
+    ため、trade登録時に未登録ownerを自動0円初期化しない(fail-closedで
+    利用者に先に棚卸し登録〔#589 reconcile〕を行わせる)。
+    """
+
+    def __init__(self, owner: str) -> None:
+        super().__init__(
+            f"owner_ref={log_ref(owner)}: 買付余力が未登録のため、売買登録と連動した"
+            "更新ができません。先に買付余力の棚卸し登録を行ってください。"
+        )
+        self.owner = owner
+
+
 class AvailableCashService:
     def __init__(
         self,
@@ -113,4 +129,41 @@ class AvailableCashService:
             last_reconciled_at=now,
         )
         existing_raw = self._repo.get_raw(owner)
+        return ConditionalPut(model=record, id_field="owner", expected_data=existing_raw)
+
+    def build_trade_update_plan(
+        self, raw_owner: str, delta: Decimal, now: dt.datetime
+    ) -> ConditionalPut:
+        """通常売買登録(BUY/SELL)確定時、TransactWriteItemsへ含める単一Putの
+        計画のみを返す(Issue #590、#128 A3-LINE。このメソッド自体は一切
+        永続化しない)。
+
+        `delta`は呼び出し側(conversation_service.py)が符号込みで渡す
+        (BUY: -purchase_price*shares、SELL: +sale_price*shares)。本メソッドは
+        単純に現在値へ加算するのみで、符号の業務ルールは持たない。
+
+        未登録ownerへのTRADE_UPDATEは`AvailableCashNotRegisteredError`で
+        明示的に拒否する(D3。自動0円初期化はしない)。available_cash<0は
+        entityの既存validator(`_check_non_negative`)がValidationErrorとして
+        送出する(`build_reconcile_plan()`と同じくPydanticの通常のconstructor
+        経由で新レコードを構築するため検証が働く。`model_copy(update=...)`は
+        フィールド検証を行わないため使わない)。この失敗はplan構築フェーズ
+        (I/O前)で起きるため、Holding/Transaction/Cashのいずれも書き込まれ
+        ない(#591のinsufficient cash guardが依拠する契約)。
+
+        last_reconciled_atは既存値をそのまま引き継ぐ(TRADE_UPDATEでは進め
+        ない。#584 entity docstringの契約をここで強制する)。
+        """
+        owner = normalize_and_validate_owner(raw_owner)
+        existing = self._repo.get(owner)
+        if existing is None:
+            raise AvailableCashNotRegisteredError(owner)
+        existing_raw = self._repo.get_raw(owner)
+        record = AvailableCash(
+            owner=owner,
+            available_cash=existing.available_cash + delta,
+            updated_at=now,
+            last_update_type=AvailableCashUpdateType.TRADE_UPDATE,
+            last_reconciled_at=existing.last_reconciled_at,
+        )
         return ConditionalPut(model=record, id_field="owner", expected_data=existing_raw)

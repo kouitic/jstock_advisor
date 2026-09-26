@@ -17,11 +17,19 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from jstock_advisor.domain.entities.enums import ConversationStateName, Priority
+from jstock_advisor.domain.entities.available_cash import AvailableCash
+from jstock_advisor.domain.entities.enums import (
+    AvailableCashUpdateType,
+    ConversationStateName,
+    Priority,
+)
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.infrastructure.aws import conversation_state_store, trading_pause_config
 from jstock_advisor.infrastructure.line.webhook import LineTextMessageEvent
+from jstock_advisor.infrastructure.local_repository.available_cash_repository import (
+    AvailableCashRepository,
+)
 from jstock_advisor.infrastructure.local_repository.holding_repository import (
     HoldingRepository,
     PurchaseLotRepository,
@@ -37,6 +45,9 @@ _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _USER = "U1"
 _STOCK = "8306"
 _HOLDING_ID = build_holding_id(DEFAULT_OWNER, _STOCK)
+# BUY/SELL確定コミットがAvailableCashへも書き込むようになった(Issue #590)ため、
+# 本ファイルの全テストが暗黙に前提とする「余力は十分にある」状態を用意する。
+_DEFAULT_AVAILABLE_CASH = Decimal("100000000")
 
 
 @pytest.fixture
@@ -64,6 +75,9 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             ("jstock-buy_candidate_batch_completion", "pointer_id"),
             ("jstock-buy_candidate_evaluation_records", "evaluation_id"),
             ("jstock-recommendations", "recommendation_id"),
+            # Issue #590: BUY/SELL確定コミットのTransactWriteItemsがAvailableCash
+            # へのConditionalPutを含むため必要。
+            ("jstock-available_cash", "owner"),
         ):
             client.create_table(
                 TableName=table_name,
@@ -90,6 +104,15 @@ def moto_conversation_tables(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                 }
             ],
             BillingMode="PAY_PER_REQUEST",
+        )
+        AvailableCashRepository().initialize(
+            AvailableCash(
+                owner=DEFAULT_OWNER,
+                available_cash=_DEFAULT_AVAILABLE_CASH,
+                updated_at=_NOW,
+                last_update_type=AvailableCashUpdateType.USER_RECONCILIATION,
+                last_reconciled_at=_NOW,
+            )
         )
         yield
 
@@ -153,6 +176,34 @@ def test_buy_flow_start_input_confirm(
     assert holding.shares == 100
     assert PurchaseLotRepository().list_by_stock(_STOCK)[0].purchase_price == Decimal("1500")
     assert conversation_state_store.get(_USER, _NOW) is None
+    # Issue #590: BUY確定でavailable_cashが購入金額(100株×1500円)分減算される。
+    available_cash = AvailableCashRepository().get(DEFAULT_OWNER)
+    assert available_cash is not None
+    assert available_cash.available_cash == _DEFAULT_AVAILABLE_CASH - Decimal("150000")
+
+
+def test_buy_confirm_rejected_when_owner_has_no_available_cash_registered(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """Issue #590 D3: available_cash未登録のownerによるBUY確定は、Holding/
+    Transaction/AvailableCashのいずれも書き込まずに明示的な業務エラーで拒否
+    される(自動0円初期化はしない)。"""
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    input_reply = service.handle_text_input(_USER, state, "母,8306,100,1500", _NOW)
+    assert "登録します" in input_reply.text
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+
+    confirm_reply = service.handle_postback(_USER, "confirm", confirm_state.operation_id, _NOW)
+
+    assert "買付余力が未登録" in confirm_reply.text
+    assert HoldingRepository().get(build_holding_id("母", _STOCK)) is None
+    assert AvailableCashRepository().get("母") is None
+    # ConversationStateは消費されない(業務エラーで拒否されただけで、confirmは
+    # 未成立のまま。呼び出し元がボタンをやり直せるようにするため)。
+    assert conversation_state_store.get(_USER, _NOW) is not None
 
 
 def test_buy_confirmation_and_success_messages_use_comma_formatting(
@@ -296,6 +347,10 @@ def test_sell_flow_full_sell(
     assert "登録しました" in confirm_reply.text
     assert HoldingRepository().get(_HOLDING_ID) is None
     assert conversation_state_store.get(_USER, _NOW) is None
+    # Issue #590: SELL確定でavailable_cashが売却金額(100株×1800円)分加算される。
+    available_cash = AvailableCashRepository().get(DEFAULT_OWNER)
+    assert available_cash is not None
+    assert available_cash.available_cash == _DEFAULT_AVAILABLE_CASH + Decimal("180000")
 
 
 def test_case_m_line_conversation_partial_sell_updates_last_sale_date(
