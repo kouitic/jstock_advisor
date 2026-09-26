@@ -839,6 +839,33 @@ jstock transactions skip-recommendation <推奨ID> --reason WAITED_FOR_EARNINGS
 jstock transactions list
 ```
 
+**買付余力(available cash)と連動した登録(2026-09-26追加、Issue #619)**:
+上記`buy-executed`/`sell-executed`はTransactionのみを記録し、保有銘柄データ・
+買付余力(3.5節)は一切更新しません(`holdings add`等で別途更新が必要)。
+Holding/Transaction/AvailableCashを1回の登録操作として整合させたい場合は、
+代わりに次のコマンドを使用してください。
+
+```bash
+jstock transactions register-buy 2914 100 3400 --idempotency-key <一意な文字列>
+jstock transactions register-sell 2914 50 4600 --idempotency-key <一意な文字列>
+```
+
+`--idempotency-key`を省略すると毎回新規登録として扱われます(非冪等)。
+指定した場合、**所有者・銘柄・株数・単価・約定日・買付/売却の区分が完全に
+一致する再実行のみ**二重登録されません(スクリプト等からの再試行を安全に
+するため)。同じキーをこれらのいずれかが異なる別の取引へ使い回した場合は、
+その取引を黙って無視するのではなく、明示的なエラー(exit code 1)で
+拒否します(2026-09-26改訂、Issue #619サブちゃんレビュー対応。当初は
+この取り違えを検出できず、対象の取引が記録されないまま「既に登録済み
+です」と表示されてしまう欠陥があったため、fail-closedへ修正した。所有者
+違いの取り違え検出は同日追加のF6対応)。
+**したがって、複数の取引で同じ`--idempotency-key`を使い回さないこと**
+(取引ごとに一意な値を指定するか、省略して都度新規登録として扱うこと)。
+買付余力が未登録・不足している場合は明示的に拒否され、Holding/
+Transaction/AvailableCashのいずれも書き込まれません。これら2コマンドは
+既存の`buy-executed`/`sell-executed`/`holdings add`とは独立した経路で
+あり、互いに影響しません(既存コマンドの挙動は変更していません)。
+
 ### 6.1 (廃止)LINEチャットのCSVコマンドからの登録
 
 **この登録方式(「買付,銘柄コード,株数,単価」「売却,銘柄コード,株数,単価」
