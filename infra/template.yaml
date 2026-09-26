@@ -3255,12 +3255,23 @@ Resources:
                 - !Sub "${PurchaseLotsTable.Arn}/index/*"
                 - !GetAtt ConversationStatesTable.Arn
                 - !Sub "${ConversationStatesTable.Arn}/index/*"
-                # Issue #592(#128 A5a): 買付余力の参照・棚卸し更新
-                # (AvailableCashService経由。TransactWriteItemsで
-                # ConversationStatesの消費と同一トランザクション)。GSIは
-                # 無いが、本Statement内の他テーブルと表記を揃える。
+        # Issue #595(#128 A6a): 買付余力の参照・棚卸し更新(AvailableCashService
+        # 経由)。call graph実測(#592実装内容)により、実際に使うアクションは
+        # GetItem(get/get_raw)・PutItem(conditional_put_transact_item()が
+        # 生成するConditionExpression付きPut。ConditionCheck項目を別途置いて
+        # いないためConditionCheckItemは不要)の2つのみと確認できたため、
+        # 上のDynamoDbCrudAccess Statement(10 action)には含めず、専用
+        # Statementへ最小権限で切り出す(サブちゃんレビュー対応。
+        # TradingPauseConfigConditionCheckAccessと同じ「共有Statementに
+        # 混ぜず専用Statementを追加する」既存の流儀を踏襲)。
+        - Statement:
+            - Sid: AvailableCashAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
                 - !GetAtt AvailableCashTable.Arn
-                - !Sub "${AvailableCashTable.Arn}/index/*"
         - DynamoDBReadPolicy: { TableName: !Ref RecommendationsTable }
         # StockDisplayNameResolverのoverrideソース(手動上書き名称)・JPXソース用
         # (指摘対応、上記CANDIDATE_UNIVERSE_CACHE_BUCKET環境変数とあわせて追加)。

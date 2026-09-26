@@ -74,6 +74,21 @@ def _collect_referenced_logical_ids(node: Any) -> set[str]:
     return found
 
 
+def _collect_actions_for_resource(policies: list[Any], table_logical_id: str) -> set[str]:
+    """table_logical_idをResourceに含むStatementのActionを集計する。"""
+    actions: set[str] = set()
+    for policy in policies:
+        if not isinstance(policy, dict) or "Statement" not in policy:
+            continue
+        for statement in policy["Statement"]:
+            resource = statement.get("Resource")
+            resources = resource if isinstance(resource, list) else [resource]
+            if any(table_logical_id in _collect_referenced_logical_ids(r) for r in resources):
+                action = statement.get("Action")
+                actions |= set(action) if isinstance(action, list) else {action}
+    return actions
+
+
 @pytest.fixture(scope="module")
 def template() -> dict[str, Any]:
     return _load_template()
@@ -124,4 +139,23 @@ def test_only_line_webhook_function_is_granted_available_cash_table_access(
     assert granted_functions == [_AUTHORIZED_FUNCTION], (
         f"AvailableCashTableへのIAM権限が想定外のFunctionへ付与されている: "
         f"{granted_functions}(想定は{_AUTHORIZED_FUNCTION}のみ)"
+    )
+
+
+def test_available_cash_table_grants_only_get_and_put_item(template: dict[str, Any]) -> None:
+    """サブちゃんレビュー指摘(#617)の固定化: action粒度を最小限に保つ。
+
+    DeleteItem(既存レコードの削除で「未登録」契約を壊せる)・Scan(全owner
+    列挙)等、実際には使わないアクションを混入させない。call graph実測
+    (#592実装のAvailableCashService/conversation_commit.py)により、必要
+    なのはGetItem(get/get_raw)とPutItem(conditional_put_transact_item()が
+    生成するConditionExpression付きPut)の2つのみ(ConditionCheckは別途の
+    ConditionCheck transact item経由でのみ必要になるが、AvailableCashTable
+    に対してはそれを行わないためConditionCheckItemも不要)。
+    """
+    function = template["Resources"][_AUTHORIZED_FUNCTION]
+    policies = function["Properties"]["Policies"]
+    actions = _collect_actions_for_resource(policies, _TABLE_LOGICAL_ID)
+    assert actions == {"dynamodb:GetItem", "dynamodb:PutItem"}, (
+        f"AvailableCashTableへ付与されたactionが最小権限でない: {actions}"
     )
