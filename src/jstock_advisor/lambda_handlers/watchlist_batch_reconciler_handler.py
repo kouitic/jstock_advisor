@@ -49,9 +49,11 @@ from jstock_advisor.domain.entities.watchlist import WatchlistRemovalHistory
 from jstock_advisor.domain.jst import evaluation_date_jst, to_jst
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     BatchFamily,
+    StuckBatchVerdict,
     UnknownWatchlistJobTypeError,
     WatchlistBatchStatus,
     WatchlistJobType,
+    detect_stuck_batch,
     get_completion_batch,
     get_incident_detector_state,
     get_streak_state,
@@ -187,6 +189,19 @@ _REASON_CODE_WATCHLIST_MISSED_SCHEDULE = "watchlist_missed_schedule"
 _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK = "watchlist_universe_load_failure_streak"
 _REASON_CODE_WATCHLIST_QUEUE_BACKLOG = "watchlist_queue_backlog"
 _REASON_CODE_WATCHLIST_DELETION_ZERO_STREAK = "watchlist_deletion_zero_streak"
+
+# Issue #533(#319 Phase 2): buy/holdingsのstuck batch検知。IncidentJobの対応表
+# (domain/notification/incident_message.py::_INTERNAL_NAME_TO_JOB)は既に
+# Lambda関数名suffix "buy-candidates"/"holdings-watchlist" → BUY_CANDIDATES/
+# HOLDINGS_WATCHLISTを持つため、新しい対応の追加は不要。
+_INCIDENT_JOB_NAME_BY_FAMILY = {
+    BatchFamily.BUY_CANDIDATES: "buy-candidates",
+    BatchFamily.HOLDINGS_WATCHLIST: "holdings-watchlist",
+}
+_REASON_CODE_STUCK_BATCH_BY_FAMILY = {
+    BatchFamily.BUY_CANDIDATES: "buy_candidates_stuck_batch",
+    BatchFamily.HOLDINGS_WATCHLIST: "holdings_watchlist_stuck_batch",
+}
 
 # USER決定: 3営業日連続(#506 issuecomment-5805034769。2日=一過性障害を拾いやすい、
 # 5日=検知が遅すぎる、3日=バランス良いとして確定)。
@@ -968,6 +983,100 @@ def _handle_completion_recovery_candidate(
     return True
 
 
+def _handle_stuck_batch_candidate(batch_item: dict[str, Any], now: dt.datetime) -> bool | None:
+    """buy/holdingsの「一部がdispatchされたまま永久に完了しない」batch
+    (stuck)を検知し、確認済みならincident通知する(Issue #533。#319 Phase 2)。
+
+    既存の`_handle_completion_recovery_candidate()`は`is_complete=True`だが
+    finalizeだけ漏れたケースのみを扱い(925行付近で`is_complete`False側を
+    早期returnし、それ以上の調査を行わない)、この「未完了のまま停滞」する
+    ケースの検知手段が無かった。両者は`is_complete`で相互排他であり、本関数は
+    その裏側(is_complete=False側)だけを担当する。
+
+    戻り値:
+      None  … buy/holdings familyではない、またはis_complete=True(completion
+              recovery側の責務であり本関数の対象外)、または既にSTUCK以外と
+              判定できるほど早い(呼び出し側のログ抑制のためNoneに統一しない。
+              実際にはFalseを返す。docstringの体裁上ここに記載)
+      True  … STUCKと判定し、本日まだ未通知だったためincident通知した
+      False … buy/holdings familyだが、STUCKではない・判定不能・
+              既に本日通知済み、のいずれか
+
+    自動再送・自動再dispatch・Queue操作は一切行わない(Production mutationは
+    Human Gate)。STUCK検出をAuditLog等へは記録しない(#533スコープ外)。
+    """
+    raw_family = batch_item.get("batch_family")
+    if raw_family is None:
+        return None
+    try:
+        family = BatchFamily(raw_family)
+    except ValueError:
+        # 未知のfamily値は_handle_completion_recovery_candidate()側で既に
+        # ログ済み(同じraw_familyに対して同じ呼び出し順で先に評価される)。
+        # 二重ログを避けるためここでは何もしない。
+        return None
+
+    batch_id = batch_item["batch_id"]
+    record = get_completion_batch(batch_id)
+    if record is None:
+        # サブちゃんレビュー対応(PR #627): 本関数を_handle_completion_recovery_
+        # candidate()より先に呼ぶ評価順序(次の分岐のコメント参照)により、
+        # record is Noneの場合は本関数がFalseを返して継続(continue)するため、
+        # _handle_completion_recovery_candidate()側の同種の警告ログはこの経路
+        # では発火しなくなった。ログの欠落を避けるため、ここで同内容を出す。
+        logger.warning(
+            "watchlist reconciler: completion batch record unavailable batch_id=%s", batch_id
+        )
+        return False
+    if record.progress.is_complete:
+        # completion recovery側の責務(is_completeと相互排他)。
+        return None
+
+    started_at_raw = batch_item.get("started_at")
+    if not isinstance(started_at_raw, str):
+        # Issue #533より前に開始したbatch(started_at未記録)。判定不能。
+        return False
+    try:
+        started_at = dt.datetime.fromisoformat(started_at_raw)
+    except ValueError:
+        return False
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=dt.UTC)
+
+    verdict = detect_stuck_batch(
+        total=record.progress.total,
+        total_known=record.progress.total_known,
+        unique_completed=record.progress.unique_completed,
+        started_at=started_at,
+        now=now,
+    )
+    if verdict != StuckBatchVerdict.STUCK:
+        return False
+
+    today_jst = evaluation_date_jst(now)
+    envelope = {
+        "source": _INCIDENT_SOURCE_WATCHLIST_RECONCILER,
+        "job_name": _INCIDENT_JOB_NAME_BY_FAMILY[family],
+        "failure_stage": "DISPATCH",
+        "failure_type": "STUCK_BATCH",
+        "reason_code": _REASON_CODE_STUCK_BATCH_BY_FAMILY[family],
+        "occurred_at": now.isoformat(),
+        "is_ongoing": True,
+    }
+    notified = _notify_if_new_today(envelope, today_jst, now)
+    if notified:
+        logger.error(
+            "watchlist reconciler: stuck batch detected batch_id=%s batch_family=%s "
+            "total=%d unique_completed=%d started_at=%s",
+            batch_id,
+            family.value,
+            record.progress.total,
+            record.progress.unique_completed,
+            started_at_raw,
+        )
+    return notified
+
+
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # Issue #286 (#70 F-B4): watchlist系は execution_mode を**受け付けない**。
     reject_execution_mode(event, handler_name="watchlist batch reconciler")
@@ -1023,6 +1132,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     notification_retry_exhausted = 0
     completion_recovery_invoked = 0
     completion_recovery_skipped = 0
+    stuck_batch_notified = 0
+    stuck_batch_skipped = 0
     to_process_timeout: list[str] = []
 
     for batch_item in candidates:
@@ -1036,6 +1147,20 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # **family markerで積極識別して専用分岐へ隔離**する。
         # **watchlistの既存status分岐へ流してはならない**(#56と同型の
         # 「種別を確認せず既定経路へ流す」誤終端を再生産しないため)。
+        #
+        # Issue #533: stuck検知(is_complete=False側)をcompletion recovery
+        # (is_complete=True側)より**先**に評価する。両者は相互排他であり、
+        # _handle_stuck_batch_candidate()はis_complete=Trueの場合Noneを返して
+        # completion recoveryへ処理を譲るため、呼び出し順序はこの1回だけで
+        # buy/holdings項目を確実にwatchlist分岐から隔離できる。
+        stuck_outcome = _handle_stuck_batch_candidate(batch_item, now)
+        if stuck_outcome is not None:
+            if stuck_outcome:
+                stuck_batch_notified += 1
+            else:
+                stuck_batch_skipped += 1
+            continue
+
         family_outcome = _handle_completion_recovery_candidate(batch_item, now)
         if family_outcome is not None:
             if family_outcome:
@@ -1221,7 +1346,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "notification_retried=%d notification_retry_exhausted=%d timeout_processed=%d "
         "maintenance_trigger_retried=%d maintenance_trigger_retry_failed=%d "
         "maintenance_trigger_retry_skipped=%d maintenance_trigger_retry_configuration_error=%d "
-        "completion_recovery_invoked=%d completion_recovery_skipped=%d",
+        "completion_recovery_invoked=%d completion_recovery_skipped=%d "
+        "stuck_batch_notified=%d stuck_batch_skipped=%d",
         len(candidates),
         dispatch_failed,
         rescued,
@@ -1237,6 +1363,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         maintenance_trigger_retry_configuration_error,
         completion_recovery_invoked,
         completion_recovery_skipped,
+        stuck_batch_notified,
+        stuck_batch_skipped,
     )
     # Issue #506(O-1): 既存の回復処理とは独立した検知(相乗り)。既存処理の成否には
     # 依存させない(既存の回復処理が例外を出しても、ここへは到達しない現状の挙動を
@@ -1271,6 +1399,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "maintenance_trigger_retried": maintenance_trigger_retried,
         "completion_recovery_invoked": completion_recovery_invoked,
         "completion_recovery_skipped": completion_recovery_skipped,
+        "stuck_batch_notified": stuck_batch_notified,
+        "stuck_batch_skipped": stuck_batch_skipped,
         "maintenance_trigger_retry_failed": maintenance_trigger_retry_failed,
         "maintenance_trigger_retry_skipped": maintenance_trigger_retry_skipped,
         "maintenance_trigger_retry_configuration_error": (

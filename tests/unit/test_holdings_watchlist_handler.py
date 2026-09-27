@@ -173,6 +173,58 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
     } in stripped
 
 
+def test_dispatch_mode_uses_sqs_when_toggle_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #533(#319 Phase 2): HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED=trueの
+    とき、dispatch_async()ではなくdispatch_sqs()(HOLDINGS_WATCHLIST_QUEUE_URL
+    宛)を使う。
+
+    サブちゃんレビュー対応(F2-i。PR #627): 「トグルtrueのときdispatch_modeが
+    DISPATCH_MODE_SQSでstart_batch()へ渡る」配線自体を固定する(buy側と同型)。
+    """
+    _patch_common(monkeypatch)
+    monkeypatch.setenv("HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED", "true")
+    monkeypatch.setenv(
+        "HOLDINGS_WATCHLIST_QUEUE_URL", "https://sqs.example/holdings-watchlist-queue"
+    )
+    monkeypatch.setattr(
+        handler_module.PortfolioService, "list_holdings", lambda self: [_holding("2914")]
+    )
+
+    def _must_not_dispatch_async(*args: object, **kwargs: object) -> None:
+        raise AssertionError("dispatch_async must not be called when SQS toggle is enabled")
+
+    monkeypatch.setattr(handler_module, "dispatch_async", _must_not_dispatch_async)
+
+    sqs_calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_sqs",
+        lambda queue_url, payload: sqs_calls.append((queue_url, payload)),
+    )
+
+    start_batch_calls: list[dict[str, object]] = []
+    original_start_batch = handler_module.start_batch
+
+    def _recording_start_batch(*args: object, **kwargs: object) -> bool:
+        start_batch_calls.append(kwargs)
+        return original_start_batch(*args, **kwargs)
+
+    monkeypatch.setattr(handler_module, "start_batch", _recording_start_batch)
+
+    result = handler_module.handler({}, _FakeContext())
+
+    assert result == {"dispatched_holdings": 1}
+    assert len(sqs_calls) == 1
+    queue_url, payload = sqs_calls[0]
+    assert queue_url == "https://sqs.example/holdings-watchlist-queue"
+    assert payload["task"] == "holding"
+    assert payload["holding_id"] == build_holding_id(DEFAULT_OWNER, "2914")
+    assert len(start_batch_calls) == 1
+    assert start_batch_calls[0]["dispatch_mode"] == handler_module.DISPATCH_MODE_SQS
+
+
 def test_task_holding_processes_only_requested_stock(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_common(monkeypatch)
     target = _holding("2914")

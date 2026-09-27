@@ -54,9 +54,11 @@ _V2_OWNER_MODULE_TO_TABLES: dict[str, tuple[str, ...]] = {
 _ALL_FUNCTIONS = frozenset(
     {
         "BuyCandidatesFunction",
+        "BuyCandidateWorkerFunction",
         "DisclosureCheckFunction",
         "EvaluationFunction",
         "HoldingsWatchlistFunction",
+        "HoldingsWatchlistWorkerFunction",
         "IncidentNotifierFunction",
         "LineWebhookFunction",
         "MonthlyReviewFunction",
@@ -171,6 +173,15 @@ _PASSTHROUGH_MODULES = frozenset(
         "jstock_advisor.services.disclosure_check_service",
         "jstock_advisor.services.line_event_router",
         "jstock_advisor.services.watchlist_candidate_collector",
+        # Issue #533(#319 Phase 2、b-1採用): buy_candidate_worker_handler.py /
+        # holdings_watchlist_worker_handler.pyが、既存handler moduleのprivate関数
+        # (_process_single_candidate() / _process_single_holding())をそのまま
+        # importする。このprivate関数自身がPortfolioService経由でHoldingsTableV2等を
+        # 参照するため(直接構築ではなくimport越しの1段先)、BFSをここでも継続する。
+        # 他にこの2 moduleをimportするコードは無い(worker 2ファイルのみ)ことを
+        # 確認済みのため、他Functionの判定には影響しない。
+        "jstock_advisor.lambda_handlers.buy_candidates_handler",
+        "jstock_advisor.lambda_handlers.holdings_watchlist_handler",
     }
 )
 

@@ -112,6 +112,68 @@ class BatchFamily(StrEnum):
     HOLDINGS_WATCHLIST = "HOLDINGS_WATCHLIST"
 
 
+#: start_batch()のdispatch_mode既定値(Issue #533。#319 Phase 2)。従来の
+#: 非同期自己再帰呼び出し(_fanout.dispatch_async())。
+DISPATCH_MODE_LEGACY = "LEGACY"
+#: SQS Queue経由のdispatch(_fanout.dispatch_sqs())。
+DISPATCH_MODE_SQS = "SQS"
+
+#: stuck batch検知の閾値(秒)。Issue #533。#319の2026-09-20実測
+#: (target=1071・concurrent=396・throttle=652)を出発点とした仮値であり、
+#: 実際のSQS処理completionの所要時間分布が無いと確定できない
+#: (#319受入条件4への対応は本Issueでは未完了。最終確定値はUSER判断待ち)。
+#: HANAKO承認(#533 issuecomment、3件のHUMAN_DECISION): 仮値のままtestable
+#: contractとして実装してよい。
+STUCK_BATCH_THRESHOLD_SECONDS = 3600
+
+
+class StuckBatchVerdict(StrEnum):
+    """detect_stuck_batch()の判定結果(Issue #533)。"""
+
+    NOT_STUCK = "NOT_STUCK"
+    STUCK = "STUCK"
+    #: total_known=Falseの場合のみ(Issue #65 F-F8と同じfail-close原則。
+    #: 0や既定値で埋めない)。
+    UNKNOWN = "UNKNOWN"
+
+
+def detect_stuck_batch(
+    *,
+    total: int,
+    total_known: bool,
+    unique_completed: int,
+    started_at: dt.datetime,
+    now: dt.datetime,
+    threshold_seconds: int = STUCK_BATCH_THRESHOLD_SECONDS,
+) -> StuckBatchVerdict:
+    """buy/holdingsバッチが「一部がdispatchされたまま永久に完了しない」状態
+    (stuck)かどうかを判定する純粋関数(Issue #533。#319 Phase 2)。
+
+    既存のfinalize-recovery(_handle_completion_recovery_candidate())は
+    `is_complete=True`だがfinalizeだけ漏れたケースのみを扱い、一部が
+    dispatchされたまま完了しないケースの検知手段が無かった
+    (TARO Phase2設計issuecomment、JIRO指摘の実測確認)。本関数はその
+    stuck検知を、DynamoDBアクセスから独立してユニットテスト可能な純粋関数
+    として提供する。呼び出し元(reconciler)がBatchProgress・started_at属性
+    (start_batch()が新規に記録する。Issue #533)から値を取り出して渡す。
+
+    判定順序:
+      1. total_known=Falseなら UNKNOWN(判定不能。#65 F-F8と同じfail-close)。
+      2. unique_completed >= total なら NOT_STUCK(finalize-recovery側の責務。
+         is_complete=Trueの状態と一致し、両者は相互排他)。
+      3. (now - started_at) < threshold_seconds なら NOT_STUCK(まだ閾値内)。
+      4. それ以外(未完了 かつ 閾値超過)は STUCK。
+    """
+    if not total_known:
+        return StuckBatchVerdict.UNKNOWN
+    if unique_completed >= total:
+        return StuckBatchVerdict.NOT_STUCK
+    elapsed_seconds = (now - started_at).total_seconds()
+    if elapsed_seconds < threshold_seconds:
+        return StuckBatchVerdict.NOT_STUCK
+    return StuckBatchVerdict.STUCK
+
+
 # completion finalize gateの取得回数上限(Issue #57 Phase B2)。
 #
 # **これは「retry回数」ではなく「gate取得回数」である。**
@@ -274,6 +336,7 @@ def start_batch(
     family: BatchFamily,
     execution_context: ExecutionContext,
     holding_count: int = 0,
+    dispatch_mode: str = DISPATCH_MODE_LEGACY,
 ) -> bool:
     """ファンアウト開始時に呼ぶ。ローカル環境・対象0件の場合は何もせずTrueを返す。
 
@@ -291,6 +354,21 @@ def start_batch(
     NORMALとして再実行してはならない(Issue #105で永続化契約を是正した直後の
     ため、ここで取り違えると同じ問題を再導入する)。値が無い/未知の項目は
     recovery側でfail-closeする。
+
+    dispatch_mode(Issue #533。#319 Phase 2): このバッチがdispatch時点で使った
+    経路(DISPATCH_MODE_LEGACY=非同期自己再帰呼び出し / DISPATCH_MODE_SQS=SQS
+    Queue)を記録する。**1回のbatch起動は必ずdispatch時点の環境変数値で経路が
+    固定される**契約(後から環境変数が変わっても、このbatchの経路判定には
+    影響しない)をテスト可能にするための不変condition markerであり、経路の
+    実際の切替(env var参照)は呼び出し元(buy_candidates_handler.py /
+    holdings_watchlist_handler.py)の責務。
+
+    started_at(Issue #533): buy/holdingsのbatch項目はこれまでstarted_atを
+    持たなかった(class BatchFamilyのdocstring参照。watchlist側のみ既存)。
+    stuck batch検知(detect_stuck_batch())が経過時間を算出するために必要な
+    唯一の時刻情報として本関数で新規に追加する(既存の`completion_finalize_
+    started_at`はfinalize gate自体のfencing用であり、バッチ全体の開始時刻
+    ではない。混同しないこと)。
 
     戻り値(Issue #558): Trueは今回の呼び出しがbatch開始権を取得したことを
     意味する(呼び出し側はfanout等のbatch開始後の副作用を続けてよい)。
@@ -317,6 +395,9 @@ def start_batch(
         "batch_family": family.value,
         "execution_mode": execution_context.mode.value,
         "notification_mode": execution_context.notification_mode.value,
+        # Issue #533: dispatch経路の固定markerと、stuck検知用の開始時刻。
+        "dispatch_mode": dispatch_mode,
+        "started_at": now.isoformat(),
     }
     for category in SUMMARY_CATEGORIES:
         item[category] = 0

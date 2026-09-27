@@ -263,7 +263,8 @@ def test_every_lambda_function_in_the_template_has_an_entry() -> None:
     template = (_REPO_ROOT / "infra" / "template.yaml").read_text(encoding="utf-8")
     functions = set(re.findall(r'FunctionName: !Sub "\$\{AWS::StackName\}-([a-z0-9-]+)"', template))
 
-    assert len(functions) == 13  # 監視対象の Lambda は 12 本(#132)+ incident-notifier(#503)
+    # 監視対象の Lambda は 12 本(#132)+ incident-notifier(#503)+ worker 2 本(#533)
+    assert len(functions) == 15
     assert functions == set(incident_message._INTERNAL_NAME_TO_JOB)
 
 
