@@ -84,6 +84,15 @@ class LinePostbackEvent:
 # show_watchlist/show_targetsを追加(保有銘柄/ウォッチリスト/対象確認、
 # いずれも読み取り専用)。ここに無い値・パースできないdataは「想定外の
 # action値」として無視する(推測で補完しない)。
+#
+# ★ Issue #628: Rich Menu(rich_menu.json)・conversation_service.pyへ新規
+# actionを追加した際、このallowlistへの追加が漏れると、該当postbackは
+# ここでサイレントに読み捨てられ(下記continue)、handler()のhandled/ignored
+# いずれのカウンタにも到達しない(CloudWatch Logsにも異常として残らない)。
+# start_available_cash_reconcile(#592/#593)がこの漏れで無反応になっていた
+# (2026-09-27、Production実測で発見)。再発防止として、Rich Menuの全action
+# がこのallowlistに含まれることを固定する契約テストを追加した
+# (test_line_rich_menu.py参照)。
 _VALID_POSTBACK_ACTIONS = frozenset(
     {
         "start_buy",
@@ -98,6 +107,7 @@ _VALID_POSTBACK_ACTIONS = frozenset(
         "start_analyze",
         "show_analysis_buy",
         "show_analysis_sell",
+        "start_available_cash_reconcile",
     }
 )
 

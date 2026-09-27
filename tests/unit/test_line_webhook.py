@@ -173,10 +173,30 @@ def test_parse_postback_events_handles_all_confirmed_actions() -> None:
         "show_holdings",
         "show_watchlist",
         "show_targets",
+        "start_available_cash_reconcile",
     ):
         events = parse_postback_events(_postback_body(f"action={action}&op=x"))
         assert len(events) == 1
         assert events[0].action == action
+
+
+def test_parse_postback_events_handles_start_available_cash_reconcile() -> None:
+    """Issue #628回帰テスト: `_VALID_POSTBACK_ACTIONS`への追加漏れにより、
+    「余力管理」ボタン(action=start_available_cash_reconcile)のpostbackが
+    サイレントに読み捨てられ(handled/ignoredいずれのカウンタにも到達せず)、
+    Production上で無反応になっていた。
+    """
+    events = parse_postback_events(
+        _postback_body(
+            "action=start_available_cash_reconcile",
+            user_id="Uavailablecash0001",
+            reply_token="reply-628",
+        )
+    )
+    assert len(events) == 1
+    assert events[0].action == "start_available_cash_reconcile"
+    assert events[0].user_id == "Uavailablecash0001"
+    assert events[0].reply_token == "reply-628"
 
 
 # --- LINE UI第二弾(保有銘柄/ウォッチリスト/対象確認、2026-08) --------------------
