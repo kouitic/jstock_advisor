@@ -70,7 +70,12 @@ class IncidentJob(StrEnum):
 # 突き合わせる。関数が増えたら、ここへ足すまでテストが赤になる)。
 _INTERNAL_NAME_TO_JOB: dict[str, IncidentJob] = {
     "buy-candidates": IncidentJob.BUY_CANDIDATES,
+    # Issue #533(#319 Phase 2): SQS worker Lambda。dispatch経路(トグル既定false)が
+    # 何であってもwatchlist-worker/watchlist-dispatcherと同様、実行内容は親と同じ
+    # 「買い候補チェック」であるため同一jobへ割り当てる(専用jobは作らない)。
+    "buy-candidate-worker": IncidentJob.BUY_CANDIDATES,
     "holdings-watchlist": IncidentJob.HOLDINGS_WATCHLIST,
+    "holdings-watchlist-worker": IncidentJob.HOLDINGS_WATCHLIST,
     "disclosure-check": IncidentJob.DISCLOSURE_CHECK,
     "evaluation": IncidentJob.EVALUATION,
     "watchlist-dispatcher": IncidentJob.WATCHLIST_SCREENING,

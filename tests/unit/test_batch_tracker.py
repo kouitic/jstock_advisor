@@ -849,3 +849,102 @@ def test_record_terminal_failure_retries_transaction_conflict_then_succeeds(
     assert flaky.call_count == 2
     records = batch_tracker.query_all_candidate_progress("batch-1", consistent_read=True)
     assert records[0].status == batch_tracker.WatchlistProgressStatus.FAILED
+
+
+# --- Issue #533(#319 Phase 2): dispatch_mode / started_at / detect_stuck_batch() ---
+
+
+def test_start_batch_records_dispatch_mode_and_started_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """buy/holdingsのbatch項目はこれまでstarted_atを持たなかった
+    (BatchFamilyのdocstring参照)。detect_stuck_batch()が経過時間を算出する
+    ための唯一の時刻情報として、start_batch()が新規に記録することを固定する。
+    dispatch_modeも同時に記録され、既定はDISPATCH_MODE_LEGACYであることを
+    固定する(呼び出し元が明示しない場合の後方互換)。
+    """
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch("batch-1", 3, _NOW, _FAMILY, _CONTEXT)
+
+    item = table.items["batch-1"]
+    assert item["started_at"] == _NOW.isoformat()
+    assert item["dispatch_mode"] == batch_tracker.DISPATCH_MODE_LEGACY
+
+
+def test_start_batch_records_explicit_sqs_dispatch_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_tracker, "running_on_lambda", lambda: True)
+    table = _FakeTable()
+    monkeypatch.setattr(batch_tracker.boto3, "resource", lambda *a, **kw: _FakeResource(table))
+
+    batch_tracker.start_batch(
+        "batch-1", 3, _NOW, _FAMILY, _CONTEXT, dispatch_mode=batch_tracker.DISPATCH_MODE_SQS
+    )
+
+    assert table.items["batch-1"]["dispatch_mode"] == batch_tracker.DISPATCH_MODE_SQS
+
+
+def test_detect_stuck_batch_returns_unknown_when_total_not_known() -> None:
+    """Issue #65 F-F8と同じfail-close原則: total_known=Falseは判定不能であり、
+    0や既定値で埋めてNOT_STUCK/STUCKのいずれにも倒さない。
+    """
+    verdict = batch_tracker.detect_stuck_batch(
+        total=0,
+        total_known=False,
+        unique_completed=0,
+        started_at=_NOW - dt.timedelta(hours=2),
+        now=_NOW,
+    )
+    assert verdict is batch_tracker.StuckBatchVerdict.UNKNOWN
+
+
+def test_detect_stuck_batch_not_stuck_when_already_complete() -> None:
+    """unique_completed >= totalはfinalize-recovery側の責務(is_complete=Trueと
+    一致)であり、閾値超過していてもSTUCKにしない(両者は相互排他)。
+    """
+    verdict = batch_tracker.detect_stuck_batch(
+        total=3,
+        total_known=True,
+        unique_completed=3,
+        started_at=_NOW - dt.timedelta(hours=10),
+        now=_NOW,
+    )
+    assert verdict is batch_tracker.StuckBatchVerdict.NOT_STUCK
+
+
+def test_detect_stuck_batch_not_stuck_when_within_threshold() -> None:
+    verdict = batch_tracker.detect_stuck_batch(
+        total=3,
+        total_known=True,
+        unique_completed=1,
+        started_at=_NOW - dt.timedelta(seconds=batch_tracker.STUCK_BATCH_THRESHOLD_SECONDS - 1),
+        now=_NOW,
+    )
+    assert verdict is batch_tracker.StuckBatchVerdict.NOT_STUCK
+
+
+def test_detect_stuck_batch_stuck_when_incomplete_and_past_threshold() -> None:
+    verdict = batch_tracker.detect_stuck_batch(
+        total=3,
+        total_known=True,
+        unique_completed=1,
+        started_at=_NOW - dt.timedelta(seconds=batch_tracker.STUCK_BATCH_THRESHOLD_SECONDS + 1),
+        now=_NOW,
+    )
+    assert verdict is batch_tracker.StuckBatchVerdict.STUCK
+
+
+def test_detect_stuck_batch_exactly_at_threshold_boundary_is_stuck() -> None:
+    """境界値は「未満」のみNOT_STUCK側(elapsed < threshold)。ちょうど閾値到達は
+    STUCK側(仕様どおりの境界の連続性)。
+    """
+    at_boundary = batch_tracker.detect_stuck_batch(
+        total=3,
+        total_known=True,
+        unique_completed=1,
+        started_at=_NOW - dt.timedelta(seconds=batch_tracker.STUCK_BATCH_THRESHOLD_SECONDS),
+        now=_NOW,
+    )
+    assert at_boundary is batch_tracker.StuckBatchVerdict.STUCK

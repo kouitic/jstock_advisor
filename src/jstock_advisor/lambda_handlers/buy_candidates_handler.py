@@ -102,6 +102,8 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.add_on_risk import evaluate_add_on_eligibility
 from jstock_advisor.infrastructure.aws.batch_tracker import (
+    DISPATCH_MODE_LEGACY,
+    DISPATCH_MODE_SQS,
     MAX_SECTOR_ENTRIES,
     MAX_SECTOR_ENTRY_BYTES,
     BatchFamily,
@@ -133,7 +135,12 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers._execution_mode import resolve_execution_context
-from jstock_advisor.lambda_handlers._fanout import dispatch_async, resolve_function_name
+from jstock_advisor.lambda_handlers._fanout import (
+    buy_candidate_sqs_dispatch_enabled,
+    dispatch_async,
+    dispatch_sqs,
+    resolve_function_name,
+)
 from jstock_advisor.lambda_handlers._finalize_recovery import (
     is_recovery_event,
     resolve_finalize_only_request,
@@ -2380,6 +2387,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     holding_count = sum(
         1 for t in targets if t.source in (CandidateSource.HOLDING, CandidateSource.BOTH)
     )
+    # Issue #533(#319 Phase 2): dispatch経路はbatch開始時点の環境変数値で固定する
+    # (以後この変数を再評価しない。1回のbatch起動は必ず開始時点の経路のまま)。
+    use_sqs_dispatch = buy_candidate_sqs_dispatch_enabled()
+    dispatch_mode = DISPATCH_MODE_SQS if use_sqs_dispatch else DISPATCH_MODE_LEGACY
     started = start_batch(
         batch_id,
         len(targets),
@@ -2389,6 +2400,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         BatchFamily.BUY_CANDIDATES,
         execution_context,
         holding_count=holding_count,
+        dispatch_mode=dispatch_mode,
     )
     if not started:
         # Issue #558: 同一batch_idでの2回目の開始(Scheduler retry等)。正常な
@@ -2432,7 +2444,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # VALIDATION時のみキー自体を追加する(NORMAL実行への影響を避ける)。
         if execution_context.is_validation:
             child_payload["notification_mode"] = execution_context.notification_mode.value
-        dispatch_async(function_name, child_payload)
+        if use_sqs_dispatch:
+            dispatch_sqs(os.environ["BUY_CANDIDATE_QUEUE_URL"], child_payload)
+        else:
+            dispatch_async(function_name, child_payload)
 
     logger.info(
         "buy_candidates_handler dispatched: scanned=%d (holdings=%d) batch_id=%s",

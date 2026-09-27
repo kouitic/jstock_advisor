@@ -531,6 +531,43 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
         ),
         _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
     },
+    "buy_candidate_worker_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #533: resolve_execution_context()でSQS message bodyから解決し、"
+            "buy_candidates_handlerのtask=='buy_candidate'分岐と同じ規約で"
+            "repository/line_clientを切り替える",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #533: bodyのnotification_modeをresolve_execution_context()経由で解決する"
+            "(親のchild_payload構築時と同じ規約)",
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #533: bodyのtrade_detection_confirmedをそのまま受け取る。"
+            "欠落時False(fail-close。Issue #211と同じ規約)",
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    "holdings_watchlist_worker_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #533: buy_candidate_worker_handlerと同じくresolve_execution_context()"
+            "でbodyから解決する",
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #533: bodyのnotification_modeをresolve_execution_context()経由で解決する"
+            "(親のchild_payload構築時と同じ規約)",
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.PROPAGATES,
+            "Issue #533: bodyのtrade_detection_confirmedをそのまま受け取る。"
+            "欠落時False(fail-close。Issue #211と同じ規約)",
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
     "watchlist_dispatcher_handler": {
         _Dimension.EXECUTION_MODE: _cell(
             _ContractStatus.REJECTS_EXPLICITLY,

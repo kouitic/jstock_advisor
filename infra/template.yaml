@@ -111,6 +111,24 @@ Parameters:
     Description: >
       Issue #319 Phase 1。HoldingsWatchlistQueueのLambdaトリガーBatchSize。
       buy-candidates側と同じ理由で初期値は1とする。
+  BuyCandidateSqsDispatchEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Issue #533(#319 Phase 2)。true にすると、買い候補分析Lambdaが銘柄単位の
+      fan-outをBuyCandidateQueue経由(SQS)で行う。**既定は false
+      (従来どおり非同期自己再帰呼び出し)。** 有効化(Phase 3)はnatural
+      verification後の別の承認による。
+  HoldingsWatchlistSqsDispatchEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Issue #533(#319 Phase 2)。true にすると、保有銘柄分析Lambdaが
+      holding単位のfan-outをHoldingsWatchlistQueue経由(SQS)で行う。
+      **既定は false(従来どおり非同期自己再帰呼び出し)。** 有効化(Phase 3)は
+      natural verification後の別の承認による。
   AllowFullMarketScreening:
     Type: String
     Default: "false"
@@ -1632,10 +1650,18 @@ Resources:
           # **観測専用**であり、BUY判定・screening・portfolio exposureは
           # classify_industry(provider由来のsector/industry)を使うため影響を受けない。
           CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
+          # Issue #533(#319 Phase 2): 既定false(従来どおり非同期自己再帰呼び出し)。
+          BUY_CANDIDATE_SQS_DISPATCH_ENABLED: !Ref BuyCandidateSqsDispatchEnabled
+          BUY_CANDIDATE_QUEUE_URL: !Ref BuyCandidateQueue
       Policies:
         # Issue #318: EventInvokeConfigのOnFailure先へ送るために必要。
         - SQSSendMessagePolicy:
             QueueName: !GetAtt AsyncInvokeFailureDLQ.QueueName
+        # Issue #533(#319 Phase 2): BUY_CANDIDATE_SQS_DISPATCH_ENABLED=true時、
+        # 銘柄単位のfan-outをBuyCandidateQueueへ送信するために必要
+        # (既定falseの間は呼ばれないが、トグルのみで有効化できるようにする)。
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt BuyCandidateQueue.QueueName
         # コードレビュー対応(2026-08): テーブル数の増加に伴うIAMロールのインライン
         # ポリシー合計サイズ上限(10240バイト)超過を避けるため、HoldingsWatchlistFunction
         # と同様にStatementへ集約する(付与している権限自体はCRUD/Read個別指定時と同一)。
@@ -1801,6 +1827,127 @@ Resources:
             # 同一batch_idになり、start_batch()のatomicityが多重開始を拒否する)。
             Input: '{"scheduled_time": "<aws.scheduler.scheduled-time>"}'
 
+  BuyCandidateWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      # Issue #533(#319 Phase 2)。BuyCandidateQueue(#532で追加済み)から銘柄単位の
+      # メッセージを受け取り、既存の非同期再帰呼び出し経路(BuyCandidatesFunction
+      # 自身のtask=="buy_candidate"分岐)と等価な処理を行う。BUY_CANDIDATE_SQS_
+      # DISPATCH_ENABLED=falseの間はBuyCandidateQueueへメッセージが送られないため
+      # 本関数は起動されない(トグルのみで有効化できるよう先行して定義する)。
+      FunctionName: !Sub "${AWS::StackName}-buy-candidate-worker"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.buy_candidate_worker_handler.handler
+      # BuyCandidatesFunctionと同じ理由(24節仕様の再設計後の実データ取得件数増)。
+      Timeout: 900
+      ReservedConcurrentExecutions: !Ref BuyCandidateReservedConcurrentExecutions
+      Environment:
+        Variables:
+          CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
+      Policies:
+        # BuyCandidatesFunctionのDynamoDbCrudAccess/DynamoDbReadOnlyAccessと同一
+        # (_process_single_candidate()を直接importして呼ぶため、同じテーブル
+        # 群への同じ権限が必要。dispatch専用の権限(自己再帰invoke・
+        # AsyncInvokeFailureDLQ送信)は本関数には不要)。
+        - Statement:
+            - Sid: DynamoDbCrudAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
+                - !Sub "${AuditLogTable.Arn}/index/*"
+                - !GetAtt RecommendationsTable.Arn
+                - !Sub "${RecommendationsTable.Arn}/index/*"
+                - !GetAtt ValidationRecommendationsTable.Arn
+                - !Sub "${ValidationRecommendationsTable.Arn}/index/*"
+                - !GetAtt NotificationLogTable.Arn
+                - !Sub "${NotificationLogTable.Arn}/index/*"
+                - !GetAtt NotificationClaimsTable.Arn
+                - !GetAtt EdinetFilingCacheTable.Arn
+                - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDisclosureCacheTable.Arn
+                - !Sub "${EdinetDisclosureCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDailyDocumentListCacheTable.Arn
+                - !Sub "${EdinetDailyDocumentListCacheTable.Arn}/index/*"
+                - !GetAtt BatchRunsTable.Arn
+                - !Sub "${BatchRunsTable.Arn}/index/*"
+                - !GetAtt DecisionSnapshotsTable.Arn
+                - !Sub "${DecisionSnapshotsTable.Arn}/index/*"
+                - !GetAtt BuyCandidateEvaluationRecordsTable.Arn
+                - !Sub "${BuyCandidateEvaluationRecordsTable.Arn}/index/*"
+                - !GetAtt BuyCandidateBatchCompletionTable.Arn
+                - !Sub "${BuyCandidateBatchCompletionTable.Arn}/index/*"
+                - !GetAtt WatchStateTable.Arn
+                - !Sub "${WatchStateTable.Arn}/index/*"
+                - !GetAtt ValidationWatchStateTable.Arn
+                - !Sub "${ValidationWatchStateTable.Arn}/index/*"
+                - !GetAtt HoldingsSnapshotTable.Arn
+                - !Sub "${HoldingsSnapshotTable.Arn}/index/*"
+                - !GetAtt ValidationHoldingsSnapshotTable.Arn
+                - !Sub "${ValidationHoldingsSnapshotTable.Arn}/index/*"
+                - !GetAtt HoldingsSnapshotTableV2.Arn
+                - !Sub "${HoldingsSnapshotTableV2.Arn}/index/*"
+                - !GetAtt ValidationHoldingsSnapshotTableV2.Arn
+                - !Sub "${ValidationHoldingsSnapshotTableV2.Arn}/index/*"
+                - !GetAtt TradeDetectionRunLockTable.Arn
+                - !Sub "${TradeDetectionRunLockTable.Arn}/index/*"
+                - !GetAtt DailyNotificationPriorityTable.Arn
+                - !Sub "${DailyNotificationPriorityTable.Arn}/index/*"
+                - !GetAtt ValidationDailyNotificationPriorityTable.Arn
+                - !Sub "${ValidationDailyNotificationPriorityTable.Arn}/index/*"
+                - !GetAtt TradeEventRecordsTable.Arn
+                - !Sub "${TradeEventRecordsTable.Arn}/index/*"
+                - !GetAtt ValidationTradeEventRecordsTable.Arn
+                - !Sub "${ValidationTradeEventRecordsTable.Arn}/index/*"
+            - Sid: DynamoDbReadOnlyAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt WatchlistTable.Arn
+                - !Sub "${WatchlistTable.Arn}/index/*"
+                - !GetAtt HoldingsTable.Arn
+                - !Sub "${HoldingsTable.Arn}/index/*"
+                - !GetAtt HoldingsTableV2.Arn
+                - !Sub "${HoldingsTableV2.Arn}/index/*"
+                - !GetAtt PurchaseLotsTable.Arn
+                - !Sub "${PurchaseLotsTable.Arn}/index/*"
+                - !GetAtt ShareholderBenefitsTable.Arn
+                - !Sub "${ShareholderBenefitsTable.Arn}/index/*"
+                - !GetAtt CorporateActionRegistryTable.Arn
+                - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
+                - !GetAtt RuleVersionsTable.Arn
+                - !Sub "${RuleVersionsTable.Arn}/index/*"
+                - !GetAtt StockNameOverridesTable.Arn
+                - !Sub "${StockNameOverridesTable.Arn}/index/*"
+        # BuyCandidatesFunctionのCandidateUniverseCacheReadForJpxShadowと同一。
+        - Statement:
+            - Sid: CandidateUniverseCacheReadForJpxShadow
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
+      Events:
+        BuyCandidateQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BuyCandidateQueue.Arn
+            BatchSize: !Ref BuyCandidateSqsBatchSize
+            MaximumBatchingWindowInSeconds: 0
+
   HoldingsWatchlistFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -1811,10 +1958,20 @@ Resources:
       # (モメンタム・複数手法適正価格・分割調整等)で処理するため、既定の300秒では
       # 不足する。Lambdaの最大値である900秒まで引き上げる
       Timeout: 900
+      Environment:
+        Variables:
+          # Issue #533(#319 Phase 2): 既定false(従来どおり非同期自己再帰呼び出し)。
+          HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED: !Ref HoldingsWatchlistSqsDispatchEnabled
+          HOLDINGS_WATCHLIST_QUEUE_URL: !Ref HoldingsWatchlistQueue
       Policies:
         # Issue #318: EventInvokeConfigのOnFailure先へ送るために必要。
         - SQSSendMessagePolicy:
             QueueName: !GetAtt AsyncInvokeFailureDLQ.QueueName
+        # Issue #533(#319 Phase 2): HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED=true時、
+        # holding単位のfan-outをHoldingsWatchlistQueueへ送信するために必要
+        # (既定falseの間は呼ばれないが、トグルのみで有効化できるようにする)。
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt HoldingsWatchlistQueue.QueueName
         # コードレビュー対応(2026-08): テーブル数の増加に伴い、DynamoDBCrudPolicy/
         # DynamoDBReadPolicyをテーブルごとに個別指定すると、各エントリがロールへ
         # 個別のインラインポリシーとして追加され、IAMロールのインラインポリシー
@@ -1989,6 +2146,130 @@ Resources:
             # batch_id()がbatch_idを決定論的に導出できるようにする(retryで
             # 同一batch_idになり、start_batch()のatomicityが多重開始を拒否する)。
             Input: '{"scheduled_time": "<aws.scheduler.scheduled-time>"}'
+
+  HoldingsWatchlistWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      # Issue #533(#319 Phase 2)。HoldingsWatchlistQueue(#532で追加済み)から
+      # holding単位のメッセージを受け取り、既存の非同期再帰呼び出し経路
+      # (HoldingsWatchlistFunction自身のtask=="holding"分岐)と等価な処理を行う。
+      # HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED=falseの間はHoldingsWatchlistQueue
+      # へメッセージが送られないため本関数は起動されない。
+      FunctionName: !Sub "${AWS::StackName}-holdings-watchlist-worker"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.holdings_watchlist_worker_handler.handler
+      Timeout: 900
+      ReservedConcurrentExecutions: !Ref HoldingsWatchlistReservedConcurrentExecutions
+      Policies:
+        # HoldingsWatchlistFunctionのDynamoDbCrudAccess/DynamoDbReadOnlyAccessと同一
+        # (_process_single_holding()を直接importして呼ぶため、同じテーブル群への
+        # 同じ権限が必要。dispatch専用の権限は本関数には不要)。
+        - Statement:
+            - Sid: DynamoDbCrudAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
+                - !Sub "${AuditLogTable.Arn}/index/*"
+                - !GetAtt RecommendationsTable.Arn
+                - !Sub "${RecommendationsTable.Arn}/index/*"
+                - !GetAtt ValidationRecommendationsTable.Arn
+                - !Sub "${ValidationRecommendationsTable.Arn}/index/*"
+                - !GetAtt NotificationLogTable.Arn
+                - !Sub "${NotificationLogTable.Arn}/index/*"
+                - !GetAtt NotificationClaimsTable.Arn
+                - !GetAtt EdinetFilingCacheTable.Arn
+                - !Sub "${EdinetFilingCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDisclosureCacheTable.Arn
+                - !Sub "${EdinetDisclosureCacheTable.Arn}/index/*"
+                - !GetAtt EdinetDailyDocumentListCacheTable.Arn
+                - !Sub "${EdinetDailyDocumentListCacheTable.Arn}/index/*"
+                - !GetAtt BatchRunsTable.Arn
+                - !Sub "${BatchRunsTable.Arn}/index/*"
+                - !GetAtt HoldingDecisionResultsTable.Arn
+                - !Sub "${HoldingDecisionResultsTable.Arn}/index/*"
+                - !GetAtt InvestmentThesesTable.Arn
+                - !Sub "${InvestmentThesesTable.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselinesTable.Arn
+                - !Sub "${InvestmentThesisBaselinesTable.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselineSequencesTable.Arn
+                - !Sub "${InvestmentThesisBaselineSequencesTable.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselinePointersTable.Arn
+                - !Sub "${InvestmentThesisBaselinePointersTable.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselineSequencesTableV2.Arn
+                - !Sub "${InvestmentThesisBaselineSequencesTableV2.Arn}/index/*"
+                - !GetAtt InvestmentThesisBaselinePointersTableV2.Arn
+                - !Sub "${InvestmentThesisBaselinePointersTableV2.Arn}/index/*"
+                - !GetAtt DecisionSnapshotsTable.Arn
+                - !Sub "${DecisionSnapshotsTable.Arn}/index/*"
+                - !GetAtt WatchStateTable.Arn
+                - !Sub "${WatchStateTable.Arn}/index/*"
+                - !GetAtt ValidationWatchStateTable.Arn
+                - !Sub "${ValidationWatchStateTable.Arn}/index/*"
+                - !GetAtt HoldingsSnapshotTable.Arn
+                - !Sub "${HoldingsSnapshotTable.Arn}/index/*"
+                - !GetAtt ValidationHoldingsSnapshotTable.Arn
+                - !Sub "${ValidationHoldingsSnapshotTable.Arn}/index/*"
+                - !GetAtt HoldingsSnapshotTableV2.Arn
+                - !Sub "${HoldingsSnapshotTableV2.Arn}/index/*"
+                - !GetAtt ValidationHoldingsSnapshotTableV2.Arn
+                - !Sub "${ValidationHoldingsSnapshotTableV2.Arn}/index/*"
+                - !GetAtt TradeDetectionRunLockTable.Arn
+                - !Sub "${TradeDetectionRunLockTable.Arn}/index/*"
+                - !GetAtt DailyNotificationPriorityTable.Arn
+                - !Sub "${DailyNotificationPriorityTable.Arn}/index/*"
+                - !GetAtt ValidationDailyNotificationPriorityTable.Arn
+                - !Sub "${ValidationDailyNotificationPriorityTable.Arn}/index/*"
+                - !GetAtt TradeEventRecordsTable.Arn
+                - !Sub "${TradeEventRecordsTable.Arn}/index/*"
+                - !GetAtt ValidationTradeEventRecordsTable.Arn
+                - !Sub "${ValidationTradeEventRecordsTable.Arn}/index/*"
+                - !GetAtt HoldingEvaluationRecordsTable.Arn
+                - !Sub "${HoldingEvaluationRecordsTable.Arn}/index/*"
+            - Sid: DynamoDbReadOnlyAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt HoldingsTable.Arn
+                - !Sub "${HoldingsTable.Arn}/index/*"
+                - !GetAtt HoldingsTableV2.Arn
+                - !Sub "${HoldingsTableV2.Arn}/index/*"
+                - !GetAtt PurchaseLotsTable.Arn
+                - !Sub "${PurchaseLotsTable.Arn}/index/*"
+                - !GetAtt WatchlistTable.Arn
+                - !Sub "${WatchlistTable.Arn}/index/*"
+                - !GetAtt ShareholderBenefitsTable.Arn
+                - !Sub "${ShareholderBenefitsTable.Arn}/index/*"
+                - !GetAtt CorporateActionRegistryTable.Arn
+                - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
+                - !GetAtt RuleVersionsTable.Arn
+                - !Sub "${RuleVersionsTable.Arn}/index/*"
+                - !GetAtt StockNameOverridesTable.Arn
+                - !Sub "${StockNameOverridesTable.Arn}/index/*"
+                - !GetAtt HoldingDecisionRuntimeConfigTable.Arn
+                - !Sub "${HoldingDecisionRuntimeConfigTable.Arn}/index/*"
+      Events:
+        HoldingsWatchlistQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt HoldingsWatchlistQueue.Arn
+            BatchSize: !Ref HoldingsWatchlistSqsBatchSize
+            MaximumBatchingWindowInSeconds: 0
 
   DisclosureCheckFunction:
     Type: AWS::Serverless::Function

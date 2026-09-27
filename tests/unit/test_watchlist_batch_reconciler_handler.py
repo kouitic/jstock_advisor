@@ -21,6 +21,7 @@ from jstock_advisor.domain.entities.enums import ExecutionMode as _B2ExecutionMo
 from jstock_advisor.domain.entities.execution_context import (
     ExecutionContext as _B2ExecutionContext,
 )
+from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.signals.watchlist_screening import RankingEntry
 from jstock_advisor.infrastructure.aws import batch_tracker
 from jstock_advisor.infrastructure.aws.batch_tracker import (
@@ -885,6 +886,199 @@ def test_b2_missing_function_name_is_fail_closed(monkeypatch) -> None:
 
     assert outcome is False
     assert invoked == []
+
+
+# --- Issue #533(#319 Phase 2): stuck batch検知(_handle_stuck_batch_candidate) ---
+
+
+def _stuck_patch(monkeypatch, record, *, already_notified_today: bool = False):
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(handler_module, "get_completion_batch", lambda batch_id: record)
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    today_jst_iso = evaluation_date_jst(_B2_NOW).isoformat()
+    monkeypatch.setattr(
+        handler_module,
+        "get_incident_detector_state",
+        lambda reason_code: (
+            {"last_notified_date_jst": today_jst_iso} if already_notified_today else None
+        ),
+    )
+    monkeypatch.setattr(
+        handler_module, "record_incident_detector_state", lambda *a, **kw: None
+    )
+    return published
+
+
+def test_stuck_marker_absent_falls_through(monkeypatch) -> None:
+    """watchlist batch(markerが無い)はNoneを返し、既存経路(completion recovery→
+    watchlist分岐)へ処理を譲る。"""
+    published = _stuck_patch(monkeypatch, _b2_record())
+
+    outcome = handler_module._handle_stuck_batch_candidate(
+        {"batch_id": "watchlist-1", "status": "RUNNING"}, _B2_NOW
+    )
+
+    assert outcome is None
+    assert published == []
+
+
+def test_stuck_missing_record_logs_the_same_warning_as_completion_recovery(
+    monkeypatch, caplog
+) -> None:
+    """サブちゃんレビュー対応(その他の観察。PR #627): 評価順序変更
+    (_handle_stuck_batch_candidate()を_handle_completion_recovery_candidate()
+    より先に呼ぶ)により、record is Noneの場合の既存warning
+    ("completion batch record unavailable")が発火しなくなる副作用があった。
+    本関数が同内容を出すことで欠落を防いでいることを固定する。
+    """
+    published = _stuck_patch(monkeypatch, None)
+
+    with caplog.at_level("WARNING", logger=handler_module.logger.name):
+        outcome = handler_module._handle_stuck_batch_candidate(
+            {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        )
+
+    assert outcome is False
+    assert published == []
+    assert any(
+        "completion batch record unavailable batch_id=buy-1" in record.message
+        for record in caplog.records
+    )
+
+
+def test_stuck_is_complete_defers_to_completion_recovery(monkeypatch) -> None:
+    """is_complete=Trueはcompletion recovery側の責務であり、本関数はNoneを返す
+    (相互排他。呼び出し元のループはこの後_handle_completion_recovery_candidate()
+    を呼ぶ)。
+    """
+    record = _b2_record(progress=_b2_progress(total=1, completed_codes=["7203"]))
+    published = _stuck_patch(monkeypatch, record)
+
+    outcome = handler_module._handle_stuck_batch_candidate(
+        {
+            "batch_id": "buy-1",
+            "status": "RUNNING",
+            "batch_family": "BUY_CANDIDATES",
+            "started_at": (_B2_NOW - dt.timedelta(hours=10)).isoformat(),
+        },
+        _B2_NOW,
+    )
+
+    assert outcome is None
+    assert published == []
+
+
+def test_stuck_missing_started_at_is_undeterminable(monkeypatch) -> None:
+    """Issue #533より前に開始したbatch(started_at未記録)は判定不能としてFalseを
+    返す(黙って既存経路へ流さない。is_complete=Falseのためcompletion recoveryも
+    このbatchを救わないが、本関数がNoneを返して継続を許すと誤ってwatchlist分岐へ
+    落ちるためFalseで明示的に隔離する)。
+    """
+    record = _b2_record(progress=_b2_progress(total=3, completed_codes=["7203"]))
+    published = _stuck_patch(monkeypatch, record)
+
+    outcome = handler_module._handle_stuck_batch_candidate(
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+    )
+
+    assert outcome is False
+    assert published == []
+
+
+def test_stuck_not_yet_past_threshold_is_not_stuck(monkeypatch) -> None:
+    record = _b2_record(progress=_b2_progress(total=3, completed_codes=["7203"]))
+    published = _stuck_patch(monkeypatch, record)
+
+    outcome = handler_module._handle_stuck_batch_candidate(
+        {
+            "batch_id": "buy-1",
+            "status": "RUNNING",
+            "batch_family": "BUY_CANDIDATES",
+            "started_at": (
+                _B2_NOW
+                - dt.timedelta(seconds=batch_tracker.STUCK_BATCH_THRESHOLD_SECONDS - 60)
+            ).isoformat(),
+        },
+        _B2_NOW,
+    )
+
+    assert outcome is False
+    assert published == []
+
+
+def test_stuck_past_threshold_notifies_with_family_specific_envelope(monkeypatch) -> None:
+    record = _b2_record(progress=_b2_progress(total=3, completed_codes=["7203"]))
+    published = _stuck_patch(monkeypatch, record)
+
+    outcome = handler_module._handle_stuck_batch_candidate(
+        {
+            "batch_id": "buy-1",
+            "status": "RUNNING",
+            "batch_family": "BUY_CANDIDATES",
+            "started_at": (
+                _B2_NOW
+                - dt.timedelta(seconds=batch_tracker.STUCK_BATCH_THRESHOLD_SECONDS + 60)
+            ).isoformat(),
+        },
+        _B2_NOW,
+    )
+
+    assert outcome is True
+    assert len(published) == 1
+    envelope = published[0]
+    assert envelope["job_name"] == "buy-candidates"
+    assert envelope["reason_code"] == "buy_candidates_stuck_batch"
+    assert envelope["failure_stage"] == "DISPATCH"
+    assert envelope["failure_type"] == "STUCK_BATCH"
+    assert envelope["is_ongoing"] is True
+    assert set(envelope) <= handler_module._SNS_PAYLOAD_ALLOWLIST
+
+
+def test_stuck_holdings_family_uses_holdings_specific_envelope(monkeypatch) -> None:
+    record = _b2_record(
+        batch_id="hold-1",
+        family=_B2BatchFamily.HOLDINGS_WATCHLIST,
+        progress=_b2_progress(total=3, completed_codes=["h1"]),
+    )
+    published = _stuck_patch(monkeypatch, record)
+
+    outcome = handler_module._handle_stuck_batch_candidate(
+        {
+            "batch_id": "hold-1",
+            "status": "RUNNING",
+            "batch_family": "HOLDINGS_WATCHLIST",
+            "started_at": (
+                _B2_NOW
+                - dt.timedelta(seconds=batch_tracker.STUCK_BATCH_THRESHOLD_SECONDS + 60)
+            ).isoformat(),
+        },
+        _B2_NOW,
+    )
+
+    assert outcome is True
+    assert published[0]["job_name"] == "holdings-watchlist"
+    assert published[0]["reason_code"] == "holdings_watchlist_stuck_batch"
+
+
+def test_stuck_already_notified_today_is_deduped(monkeypatch) -> None:
+    record = _b2_record(progress=_b2_progress(total=3, completed_codes=["7203"]))
+    published = _stuck_patch(monkeypatch, record, already_notified_today=True)
+
+    outcome = handler_module._handle_stuck_batch_candidate(
+        {
+            "batch_id": "buy-1",
+            "status": "RUNNING",
+            "batch_family": "BUY_CANDIDATES",
+            "started_at": (
+                _B2_NOW
+                - dt.timedelta(seconds=batch_tracker.STUCK_BATCH_THRESHOLD_SECONDS + 60)
+            ).isoformat(),
+        },
+        _B2_NOW,
+    )
+
+    assert outcome is False
+    assert published == []
 
 
 # --- Issue #117 Phase B1b-4c: LINE認証情報の欠落は「構築の失敗」でなく「送信時の失敗」 ---

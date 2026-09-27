@@ -4093,3 +4093,86 @@ user-initiated機能向けに読み替えたもの)。人工的なProduction実�
 本節はIssue #596(#128 A6b)として、docsのみ追加した(コード変更を伴わない)。
 実際のChangeSet CREATE/EXECUTE・rich menu set-defaultはいずれも別Human Gate
 であり、本節の追加によってもProduction上の挙動は変わらない。
+
+## 34. BUY/holdings dispatchのSQS緊急停止手順(Issue #533、#319 Phase 2、2026-09-27追加)
+
+Issue #533は`BUY_CANDIDATE_SQS_DISPATCH_ENABLED`/`HOLDINGS_WATCHLIST_SQS_
+DISPATCH_ENABLED`(既定`false`)で銘柄・holding単位のfan-out経路を切り替える
+機構を追加した。**本節執筆時点でこの機構は無効(Phase 2。有効化=Phase 3は
+別Human Gate)であり、本節の手順はPhase 3有効化後にのみ必要になる。**
+
+### 34.1 通常のrollback(env var切替のみ)
+
+env var切替はdispatch側(BuyCandidatesFunction/HoldingsWatchlistFunctionが
+新規メッセージをどちらの経路へ送るか)のみを制御し、**worker Lambda・SQS Event
+Source Mapping自体の有効/無効とは独立**である。したがって通常のrollback
+(SQSを試験的に有効化した後、legacy(非同期自己再帰呼び出し)へ戻す場合)は
+以下だけでよい:
+
+```
+1  env var(BuyCandidateSqsDispatchEnabled / HoldingsWatchlistSqsDispatchEnabled)
+   をfalseへ戻すChangeSetを作成・実行する(通常のChangeSet CREATE/EXECUTE
+   Human Gate)。
+2  以後、新規batchはlegacy経路(dispatch_async)へ切り替わる。
+3  env var切替前にQueueへ送信済みのメッセージは、Event Source Mappingが
+   有効なままであれば引き続きworker Lambdaで処理され続け、自然に処理し
+   切られる(通常はこれで十分。追加のpurge操作は不要)。
+```
+
+**Queue残件の確認(2の後、必要なら)**: AWS ConsoleまたはCLIで対象Queueの
+`ApproximateNumberOfMessages`(+`ApproximateNumberOfMessagesNotVisible`)を
+確認し、両方0であれば処理完了。
+
+```bash
+aws sqs get-queue-attributes \
+  --queue-url <BuyCandidateQueueまたはHoldingsWatchlistQueueのURL> \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+### 34.2 緊急停止(Event Source Mapping自体の無効化。Human Gate)
+
+SQS側で異常な大量メッセージ・worker Lambdaの異常動作等により、Queueの
+自然消化を待たずに即時停止したい緊急ケースに限り、Event Source Mapping自体を
+無効化する。**これは34.1のenv var切替とは別のHuman Gateであり、AWS操作
+(ChangeSetを経由しない直接のAWS CLI/Console操作)であることに注意する。**
+
+```
+1  対象のEvent Source Mapping UUIDを確認する:
+
+   aws lambda list-event-source-mappings \
+     --function-name <stack名>-buy-candidate-worker
+   (holdingsは <stack名>-holdings-watchlist-worker)
+
+2  UUIDを使って無効化する(Enabled=falseへ更新するのみ。削除ではない):
+
+   aws lambda update-event-source-mapping --uuid <UUID> --enabled false
+
+3  再開する場合は同じUUIDでEnabled=trueへ戻す:
+
+   aws lambda update-event-source-mapping --uuid <UUID> --enabled true
+```
+
+**無効化してもQueue内のメッセージは削除されない**(単に配送が止まるだけ)。
+無効化中に新規メッセージがdispatch側から送られ続けると、Queueに蓄積し続ける
+(dispatch側のenv var切替〔34.1〕と併用し、まずdispatch自体を止めてから
+Event Source Mappingを止めるのが通常の緊急停止の順序)。
+
+蓄積したメッセージを完全に破棄する必要がある場合(再開を諦める場合)は、
+`aws sqs purge-queue --queue-url <QueueURL>`を使う(**破棄は取り消せない**。
+実行前にQueue深度・内容を必ず確認し、実施はUSER承認を得ること)。
+
+### 34.3 参考
+
+```
+・DLQ滞留の確認手順(24節。BuyCandidateTerminalFailureDLQ/HoldingsWatchlist
+  TerminalFailureDLQも同じ手順で確認できる)
+・異常を知ったときの手順(27節)
+・本節の対象Event Source MappingはPhase 2時点で未有効化(BUY_CANDIDATE_SQS_
+  DISPATCH_ENABLED等が既定false)のため、本節の手順が実際に必要になるのは
+  Phase 3有効化後のみ
+```
+
+本節はIssue #533(#319 Phase 2)として追加した。実際のChangeSet CREATE/
+EXECUTE・SQS dispatch有効化(Phase 3)はいずれも別Human Gateであり、本節の
+追加自体・Phase 2の実装自体によってもProduction上の挙動は変わらない
+(トグルの既定はfalseのまま)。
