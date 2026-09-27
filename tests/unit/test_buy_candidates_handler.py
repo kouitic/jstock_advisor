@@ -263,6 +263,44 @@ def test_dispatch_mode_dispatches_one_call_per_unified_target(
     } in stripped
 
 
+def test_dispatch_mode_uses_sqs_when_toggle_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #533(#319 Phase 2): BUY_CANDIDATE_SQS_DISPATCH_ENABLED=trueのとき、
+    dispatch_async()ではなくdispatch_sqs()(BUY_CANDIDATE_QUEUE_URL宛)を使う。
+    既定(未設定)ではdispatch_asyncのまま(後方互換)であることは他のdispatch_mode
+    系テストが固定しているため、本テストはSQS切替側のみを固定する。
+    """
+    _patch_common(monkeypatch)
+    monkeypatch.setenv("BUY_CANDIDATE_SQS_DISPATCH_ENABLED", "true")
+    monkeypatch.setenv("BUY_CANDIDATE_QUEUE_URL", "https://sqs.example/buy-candidate-queue")
+    monkeypatch.setattr(
+        handler_module.WatchlistService, "list_items", lambda self: [_watchlist_item("2914")]
+    )
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: [])
+
+    def _must_not_dispatch_async(*args: object, **kwargs: object) -> None:
+        raise AssertionError("dispatch_async must not be called when SQS toggle is enabled")
+
+    monkeypatch.setattr(handler_module, "dispatch_async", _must_not_dispatch_async)
+
+    sqs_calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        handler_module,
+        "dispatch_sqs",
+        lambda queue_url, payload: sqs_calls.append((queue_url, payload)),
+    )
+
+    result = handler_module.handler({}, _FakeContext())
+
+    assert result == {"dispatched": 1}
+    assert len(sqs_calls) == 1
+    queue_url, payload = sqs_calls[0]
+    assert queue_url == "https://sqs.example/buy-candidate-queue"
+    assert payload["task"] == "buy_candidate"
+    assert payload["stock_code"] == "2914"
+
+
 def test_dispatch_mode_merges_same_stock_code_into_both_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2765,7 +2803,9 @@ def test_dispatch_mode_holding_count_counts_unique_stock_codes_not_holding_recor
 
     captured: dict[str, object] = {}
 
-    def _fake_start_batch(batch_id, total, now, family, execution_context, holding_count=0):
+    def _fake_start_batch(
+        batch_id, total, now, family, execution_context, holding_count=0, dispatch_mode=None
+    ):
         captured.update(
             total=total,
             holding_count=holding_count,
