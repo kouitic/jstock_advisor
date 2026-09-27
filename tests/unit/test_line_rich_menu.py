@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from jstock_advisor.infrastructure.line.webhook import parse_postback_events
+
 _RICH_MENU_PATH = (
     Path(__file__).resolve().parents[2] / "infra" / "line_rich_menu" / "rich_menu.json"
 )
@@ -121,3 +123,35 @@ def test_rich_menu_available_cash_button_is_positioned_as_confirmed() -> None:
     assert len(matches) == 1
     bounds = matches[0]["bounds"]
     assert (bounds["x"], bounds["y"]) == (1875, 0)
+
+
+def test_rich_menu_actions_are_all_accepted_by_webhook_parser() -> None:
+    """Issue #628回帰防止契約テスト: Rich Menu(rich_menu.json)に定義された
+    postback actionは、`_VALID_POSTBACK_ACTIONS`を単純比較するのではなく、
+    実際に`parse_postback_events()`へ通してWebhook側で受理されることを確認する
+    (private constantの単純比較は、allowlist側の追加漏れを検出できないため)。
+
+    Rich Menuへ新規ボタンを追加した際、Webhook allowlistへの追加が漏れると
+    このテストが落ちる(start_available_cash_reconcileがこの漏れで
+    Production上サイレントに無反応になっていた事例の再発防止)。
+    """
+    data = _load()
+    for area in data["areas"]:
+        raw_data = area["action"]["data"]
+        payload = {
+            "events": [
+                {
+                    "type": "postback",
+                    "replyToken": "reply-contract-1",
+                    "source": {"type": "user", "userId": "Ucontracttest0001"},
+                    "postback": {"data": raw_data},
+                }
+            ]
+        }
+        body = json.dumps(payload).encode("utf-8")
+        events = parse_postback_events(body)
+        assert len(events) == 1, (
+            f"Rich Menuのaction data '{raw_data}' がWebhook parserで"
+            "受理されなかった(allowlistへの追加漏れの可能性)"
+        )
+        assert raw_data == f"action={events[0].action}"
