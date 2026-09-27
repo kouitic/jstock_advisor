@@ -39,6 +39,7 @@ from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:

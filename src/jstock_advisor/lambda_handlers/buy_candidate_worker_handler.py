@@ -48,6 +48,7 @@ from jstock_advisor.services.line_notification_service import LineNotificationSe
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
