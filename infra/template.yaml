@@ -3311,6 +3311,35 @@ Resources:
                 - !Sub "${CorporateActionRegistryTable.Arn}/index/*"
                 - !GetAtt StockNameOverridesTable.Arn
                 - !Sub "${StockNameOverridesTable.Arn}/index/*"
+            # Issue #529 corrective fix: PR #572でreconcile_pending_trade_events()
+            # (trade_event_reconciliation_service.py)を追加した際、本関数の
+            # IAM policyへTradeEventRecordsTableの付与が漏れていた
+            # (2026-09-27自然実行でdynamodb:Query AccessDeniedExceptionとして
+            # 検出。#529 issuecomment参照)。list_pending_with_raw()が
+            # pending-marker-index経由のQueryとGetItem、mark_consumed()が
+            # PutItem(CAS)を呼ぶため、この3 actionのみを付与する。
+            - Sid: TradeEventReconciliationAccess
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
+                - !GetAtt TradeEventRecordsTable.Arn
+                - !Sub "${TradeEventRecordsTable.Arn}/index/*"
+            # 同上(#529): end_for_trade_events()(watch_state_service.py)が
+            # get_active()/get_with_raw()(GetItem)とreplace_if_raw_matches()
+            # (PutItem、CAS)をWatchStateTableへ発行する。Query/Scanは呼ばない
+            # ため付与しない。現在pending件数は0のため未再現だが、
+            # コード到達性から明示的なfix対象とする(推測ではなくcode read
+            # による確認)。
+            - Sid: WatchStateEndForTradeEventsAccess
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
+                - !GetAtt WatchStateTable.Arn
         # 平日毎日起動化(2026-08)対応: WatchlistDispatcherFunction定義側の
         # 同名Statementと同じ理由(maybe_trigger_maintenanceの再試行invoke)。
         - Statement:
