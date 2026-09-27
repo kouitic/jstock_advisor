@@ -58,6 +58,20 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
 def _process_one(body: dict[str, Any]) -> dict[str, Any]:
     execution_context = resolve_execution_context(body)
+    # サブちゃんレビュー対応(PR #627): buy_candidates_handler.handler()の
+    # task=="buy_candidate"分岐と同じVALIDATION診断ログ。旧経路にのみ存在し
+    # workerに無かったため、VALIDATION実行での検証時に証跡が揃わなかった。
+    if execution_context.is_validation:
+        logger.info(
+            "VALIDATION MODE task=buy_candidate execution_mode=VALIDATION "
+            "notification_mode=%s event_notification_mode=%r is_dry_run=%s "
+            "validation_run_id=%s stock_code=%s",
+            execution_context.notification_mode.value,
+            body.get("notification_mode"),
+            execution_context.is_dry_run,
+            body.get("batch_id"),
+            body["stock_code"],
+        )
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     calendar = BusinessCalendar.from_config(config.holiday_calendar)

@@ -936,7 +936,7 @@ def test_detect_stuck_batch_stuck_when_incomplete_and_past_threshold() -> None:
     assert verdict is batch_tracker.StuckBatchVerdict.STUCK
 
 
-def test_detect_stuck_batch_exactly_at_threshold_boundary_is_not_stuck() -> None:
+def test_detect_stuck_batch_exactly_at_threshold_boundary_is_stuck() -> None:
     """境界値は「未満」のみNOT_STUCK側(elapsed < threshold)。ちょうど閾値到達は
     STUCK側(仕様どおりの境界の連続性)。
     """

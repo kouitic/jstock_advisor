@@ -49,6 +49,20 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
 
 def _process_one(body: dict[str, Any]) -> dict[str, Any]:
     execution_context = resolve_execution_context(body)
+    # サブちゃんレビュー対応(PR #627): holdings_watchlist_handler.handler()の
+    # task=="holding"分岐と同じVALIDATION診断ログ。旧経路にのみ存在しworkerに
+    # 無かったため、VALIDATION実行での検証時に証跡が揃わなかった。
+    if execution_context.is_validation:
+        logger.info(
+            "VALIDATION MODE task=holding execution_mode=VALIDATION "
+            "notification_mode=%s event_notification_mode=%r is_dry_run=%s "
+            "validation_run_id=%s holding_ref=%s",
+            execution_context.notification_mode.value,
+            body.get("notification_mode"),
+            execution_context.is_dry_run,
+            body.get("batch_id"),
+            log_ref(body["holding_id"]),
+        )
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     providers = build_real_provider_bundle(now, config)

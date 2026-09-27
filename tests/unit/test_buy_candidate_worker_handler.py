@@ -82,6 +82,87 @@ def test_handler_processes_one_record_via_process_single_candidate(
     assert result == {"processed": 1}
 
 
+def test_handler_processes_every_record_not_just_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """サブちゃんレビュー対応(F2-ii。PR #627): `BatchSize`は既定1(infra/
+    template.yaml)だが運用側がParameterで上げられるため、複数件のRecordsが
+    来た場合も全件処理することを固定する(1件目だけ処理する変異がSURVIVED
+    だった。BatchSizeを上げた瞬間、2件目以降が黙って消える経路)。
+    """
+    _patch_common(monkeypatch)
+
+    class _FakeOutcome:
+        data_error = "テストエラー"
+        recommendation = None
+        buy_action = None
+        ranking_group = None
+
+    processed_stock_codes: list[str] = []
+    original_process_one = worker_module._process_one
+
+    def _recording_process_one(body: dict[str, object]) -> dict[str, object]:
+        processed_stock_codes.append(body["stock_code"])
+        return original_process_one(body)
+
+    monkeypatch.setattr(worker_module, "_process_one", _recording_process_one)
+    monkeypatch.setattr(
+        buy_candidates_handler.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
+    )
+
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {"task": "buy_candidate", "stock_code": code, "source": "WATCHLIST"}
+                )
+            }
+            for code in ("2914", "8136")
+        ]
+    }
+
+    result = worker_module.handler(event, object())
+
+    assert result == {"processed": 2}
+    assert processed_stock_codes == ["2914", "8136"]
+
+
+def test_validation_mode_logs_the_same_diagnostic_marker_as_the_legacy_branch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """サブちゃんレビュー対応(その他の観察。PR #627): VALIDATION実行時の診断ログが
+    旧task分岐にのみ存在しworkerに無かった(Phase 3のVALIDATION検証で証跡が
+    揃わない)ため、同じログを追加したことを固定する。
+    """
+    _patch_common(monkeypatch)
+
+    class _FakeOutcome:
+        data_error = "テストエラー"
+        recommendation = None
+        buy_action = None
+        ranking_group = None
+
+    monkeypatch.setattr(
+        buy_candidates_handler.BuySignalService, "analyze", lambda self, *a, **kw: _FakeOutcome()
+    )
+
+    event = _sqs_event(
+        {
+            "task": "buy_candidate",
+            "stock_code": "2914",
+            "source": "WATCHLIST",
+            "execution_mode": "VALIDATION",
+        }
+    )
+
+    with caplog.at_level("INFO", logger=worker_module.logger.name):
+        worker_module.handler(event, object())
+
+    assert any(
+        "VALIDATION MODE task=buy_candidate" in record.message
+        and "stock_code=2914" in record.message
+        for record in caplog.records
+    )
+
+
 def test_process_one_matches_direct_task_branch_result(monkeypatch: pytest.MonkeyPatch) -> None:
     """workerが呼ぶ`_process_single_candidate()`は、既存の
     `buy_candidates_handler.handler()`のtask=="buy_candidate"分岐が呼ぶものと

@@ -1019,6 +1019,14 @@ def _handle_stuck_batch_candidate(batch_item: dict[str, Any], now: dt.datetime) 
     batch_id = batch_item["batch_id"]
     record = get_completion_batch(batch_id)
     if record is None:
+        # サブちゃんレビュー対応(PR #627): 本関数を_handle_completion_recovery_
+        # candidate()より先に呼ぶ評価順序(次の分岐のコメント参照)により、
+        # record is Noneの場合は本関数がFalseを返して継続(continue)するため、
+        # _handle_completion_recovery_candidate()側の同種の警告ログはこの経路
+        # では発火しなくなった。ログの欠落を避けるため、ここで同内容を出す。
+        logger.warning(
+            "watchlist reconciler: completion batch record unavailable batch_id=%s", batch_id
+        )
         return False
     if record.progress.is_complete:
         # completion recovery側の責務(is_completeと相互排他)。

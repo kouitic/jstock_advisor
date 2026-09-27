@@ -922,6 +922,30 @@ def test_stuck_marker_absent_falls_through(monkeypatch) -> None:
     assert published == []
 
 
+def test_stuck_missing_record_logs_the_same_warning_as_completion_recovery(
+    monkeypatch, caplog
+) -> None:
+    """サブちゃんレビュー対応(その他の観察。PR #627): 評価順序変更
+    (_handle_stuck_batch_candidate()を_handle_completion_recovery_candidate()
+    より先に呼ぶ)により、record is Noneの場合の既存warning
+    ("completion batch record unavailable")が発火しなくなる副作用があった。
+    本関数が同内容を出すことで欠落を防いでいることを固定する。
+    """
+    published = _stuck_patch(monkeypatch, None)
+
+    with caplog.at_level("WARNING", logger=handler_module.logger.name):
+        outcome = handler_module._handle_stuck_batch_candidate(
+            {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        )
+
+    assert outcome is False
+    assert published == []
+    assert any(
+        "completion batch record unavailable batch_id=buy-1" in record.message
+        for record in caplog.records
+    )
+
+
 def test_stuck_is_complete_defers_to_completion_recovery(monkeypatch) -> None:
     """is_complete=Trueはcompletion recovery側の責務であり、本関数はNoneを返す
     (相互排他。呼び出し元のループはこの後_handle_completion_recovery_candidate()

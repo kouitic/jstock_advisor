@@ -94,6 +94,83 @@ def test_handler_processes_one_record_via_process_single_holding(
     assert result == {"processed": 1}
 
 
+def test_handler_processes_every_record_not_just_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """サブちゃんレビュー対応(F2-ii。PR #627): `BatchSize`は既定1(infra/
+    template.yaml)だが運用側がParameterで上げられるため、複数件のRecordsが
+    来た場合も全件処理することを固定する(buy側と同型。1件目だけ処理する変異が
+    SURVIVEDだった)。
+    """
+    _patch_common(monkeypatch)
+    holdings_by_id = {
+        build_holding_id(DEFAULT_OWNER, "2914"): _holding("2914"),
+        build_holding_id(DEFAULT_OWNER, "8136"): _holding("8136"),
+    }
+    monkeypatch.setattr(
+        holdings_watchlist_handler.HoldingRepository,
+        "get",
+        lambda self, holding_id: holdings_by_id[holding_id],
+    )
+    monkeypatch.setattr(
+        holdings_watchlist_handler,
+        "build_stock_snapshot",
+        lambda *a, **kw: (None, "テストエラー"),
+    )
+
+    processed_holding_ids: list[str] = []
+    original_process_one = worker_module._process_one
+
+    def _recording_process_one(body: dict[str, object]) -> dict[str, object]:
+        processed_holding_ids.append(body["holding_id"])
+        return original_process_one(body)
+
+    monkeypatch.setattr(worker_module, "_process_one", _recording_process_one)
+
+    event = {
+        "Records": [
+            {"body": json.dumps({"task": "holding", "holding_id": holding_id})}
+            for holding_id in holdings_by_id
+        ]
+    }
+
+    result = worker_module.handler(event, object())
+
+    assert result == {"processed": 2}
+    assert processed_holding_ids == list(holdings_by_id)
+
+
+def test_validation_mode_logs_the_same_diagnostic_marker_as_the_legacy_branch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """サブちゃんレビュー対応(その他の観察。PR #627): VALIDATION実行時の診断ログが
+    旧task分岐にのみ存在しworkerに無かった(Phase 3のVALIDATION検証で証跡が
+    揃わない)ため、同じログを追加したことを固定する。
+    """
+    _patch_common(monkeypatch)
+    target = _holding("2914")
+    monkeypatch.setattr(
+        holdings_watchlist_handler.HoldingRepository,
+        "get",
+        lambda self, holding_id: target,
+    )
+    monkeypatch.setattr(
+        holdings_watchlist_handler,
+        "build_stock_snapshot",
+        lambda *a, **kw: (None, "テストエラー"),
+    )
+    holding_id = build_holding_id(DEFAULT_OWNER, "2914")
+
+    event = _sqs_event(
+        {"task": "holding", "holding_id": holding_id, "execution_mode": "VALIDATION"}
+    )
+
+    with caplog.at_level("INFO", logger=worker_module.logger.name):
+        worker_module.handler(event, object())
+
+    assert any(
+        "VALIDATION MODE task=holding" in record.message for record in caplog.records
+    )
+
+
 def test_process_one_matches_direct_task_branch_result(monkeypatch: pytest.MonkeyPatch) -> None:
     """workerが呼ぶ`_process_single_holding()`は、既存の
     `holdings_watchlist_handler.handler()`のtask=="holding"分岐が呼ぶものと

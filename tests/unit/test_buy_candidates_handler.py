@@ -270,6 +270,11 @@ def test_dispatch_mode_uses_sqs_when_toggle_enabled(
     dispatch_async()ではなくdispatch_sqs()(BUY_CANDIDATE_QUEUE_URL宛)を使う。
     既定(未設定)ではdispatch_asyncのまま(後方互換)であることは他のdispatch_mode
     系テストが固定しているため、本テストはSQS切替側のみを固定する。
+
+    サブちゃんレビュー対応(F2-i。PR #627): 「トグルtrueのときdispatch_modeが
+    DISPATCH_MODE_SQSでstart_batch()へ渡る」配線自体を固定する
+    (dispatch_modeを常にLEGACYで記録する変異がSURVIVEDだったため。この配線が
+    崩れると、stuck検知等の診断・帰属がすべてLEGACY表示になる)。
     """
     _patch_common(monkeypatch)
     monkeypatch.setenv("BUY_CANDIDATE_SQS_DISPATCH_ENABLED", "true")
@@ -291,6 +296,15 @@ def test_dispatch_mode_uses_sqs_when_toggle_enabled(
         lambda queue_url, payload: sqs_calls.append((queue_url, payload)),
     )
 
+    start_batch_calls: list[dict[str, object]] = []
+    original_start_batch = handler_module.start_batch
+
+    def _recording_start_batch(*args: object, **kwargs: object) -> bool:
+        start_batch_calls.append(kwargs)
+        return original_start_batch(*args, **kwargs)
+
+    monkeypatch.setattr(handler_module, "start_batch", _recording_start_batch)
+
     result = handler_module.handler({}, _FakeContext())
 
     assert result == {"dispatched": 1}
@@ -299,6 +313,8 @@ def test_dispatch_mode_uses_sqs_when_toggle_enabled(
     assert queue_url == "https://sqs.example/buy-candidate-queue"
     assert payload["task"] == "buy_candidate"
     assert payload["stock_code"] == "2914"
+    assert len(start_batch_calls) == 1
+    assert start_batch_calls[0]["dispatch_mode"] == handler_module.DISPATCH_MODE_SQS
 
 
 def test_dispatch_mode_merges_same_stock_code_into_both_source(

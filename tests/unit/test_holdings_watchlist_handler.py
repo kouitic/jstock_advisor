@@ -179,6 +179,9 @@ def test_dispatch_mode_uses_sqs_when_toggle_enabled(
     """Issue #533(#319 Phase 2): HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED=trueの
     とき、dispatch_async()ではなくdispatch_sqs()(HOLDINGS_WATCHLIST_QUEUE_URL
     宛)を使う。
+
+    サブちゃんレビュー対応(F2-i。PR #627): 「トグルtrueのときdispatch_modeが
+    DISPATCH_MODE_SQSでstart_batch()へ渡る」配線自体を固定する(buy側と同型)。
     """
     _patch_common(monkeypatch)
     monkeypatch.setenv("HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED", "true")
@@ -201,6 +204,15 @@ def test_dispatch_mode_uses_sqs_when_toggle_enabled(
         lambda queue_url, payload: sqs_calls.append((queue_url, payload)),
     )
 
+    start_batch_calls: list[dict[str, object]] = []
+    original_start_batch = handler_module.start_batch
+
+    def _recording_start_batch(*args: object, **kwargs: object) -> bool:
+        start_batch_calls.append(kwargs)
+        return original_start_batch(*args, **kwargs)
+
+    monkeypatch.setattr(handler_module, "start_batch", _recording_start_batch)
+
     result = handler_module.handler({}, _FakeContext())
 
     assert result == {"dispatched_holdings": 1}
@@ -209,6 +221,8 @@ def test_dispatch_mode_uses_sqs_when_toggle_enabled(
     assert queue_url == "https://sqs.example/holdings-watchlist-queue"
     assert payload["task"] == "holding"
     assert payload["holding_id"] == build_holding_id(DEFAULT_OWNER, "2914")
+    assert len(start_batch_calls) == 1
+    assert start_batch_calls[0]["dispatch_mode"] == handler_module.DISPATCH_MODE_SQS
 
 
 def test_task_holding_processes_only_requested_stock(monkeypatch: pytest.MonkeyPatch) -> None:
