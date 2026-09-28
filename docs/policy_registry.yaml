@@ -47,6 +47,13 @@ policies:
     human_gate_required: false
     machine_enforceable: false
 
+  - policy_id: DEVELOPMENT_WORKFLOW.SCOPE_REDUCTION_GATE
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 10.3 Issue の scope / AC 縮小には Human Gate が必要(SCOPE_REDUCTION_GATE)"
+    applicable_operations: [IMPLEMENTATION_START, PR_CREATE]
+    human_gate_required: true
+    machine_enforceable: false
+
   # --- push ---------------------------------------------------------------
   - policy_id: DEVELOPMENT_WORKFLOW.LOCAL_TEST_POLICY
     ssot_file: docs/development_workflow.md
