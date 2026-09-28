@@ -23,6 +23,7 @@ operations:
   - PRODUCTION_MANUAL_INVOKE
   - CHANGESET_CREATE
   - CHANGESET_EXECUTE
+  - ISSUE_SCOPE_REDUCTION
 
 policies:
   # --- 実装の着手 ---------------------------------------------------------
@@ -45,6 +46,26 @@ policies:
     ssot_anchor: "## 9.5 すべての変更を Issue 起点とする"
     applicable_operations: [IMPLEMENTATION_START, PR_CREATE]
     human_gate_required: false
+    machine_enforceable: false
+
+  - policy_id: DEVELOPMENT_WORKFLOW.SCOPE_REDUCTION_GATE
+    ssot_file: docs/development_workflow.md
+    ssot_anchor: "### 10.3 Issue の scope / AC 縮小には Human Gate が必要(SCOPE_REDUCTION_GATE)"
+    # ★ human_gate_required は operation 単位で any() 集約される(scripts/
+    # policy_check.py)。本 policy が要求する Human Gate は「Issue の
+    # scope/AC を縮小する」という特定の部分行為に対してであり、PR 作成
+    # という operation 全体には及ばない(§10 の人間承認必須 9 操作の
+    # 一覧に「PR 作成」自体は含まれていない)。PR_CREATE へ結び付けると、
+    # ISSUE_ORIGINATED_CHANGE と同じ PR_CREATE 全体が無条件に Human Gate
+    # を要求すると読める state になり、#337 と同型の欠陥(正本に無い
+    # gate を機械が要求する)を再生産する(サブちゃんレビュー指摘F6で
+    # 一度 human_gate_required: false へ倒したが、それでは今度は
+    # 「scope 縮小自体は Human Gate が必要」という本来の趣旨が
+    # machine-readable な形で表現されなくなる、というUSER指摘〔F7〕を
+    # 受け、専用の operation `ISSUE_SCOPE_REDUCTION` を新設してそちらへ
+    # 結び付ける形に改めた)。
+    applicable_operations: [ISSUE_SCOPE_REDUCTION]
+    human_gate_required: true
     machine_enforceable: false
 
   # --- push ---------------------------------------------------------------

@@ -127,13 +127,53 @@ def test_implementation_start_does_not_require_an_unsourced_gate(
     Issue #337 の監査で `IMPLEMENTATION_APPROVED` が docs 全体で 0 件と実測された。
     ★ preflight がこれを復活させると、正本に無いゲートを機械が要求することになる。
 
-    development_workflow.md 10 節が列挙する人間承認の 8 操作に
+    development_workflow.md 10 節が列挙する人間承認の 9 操作に
     ★ 「実装の着手」は含まれていない。したがって human_gate_required は false。
     """
     report = policy_check.check("IMPLEMENTATION_START", registry, _worktree_reader())
     assert report["result"] == PASS
     assert report["human_gate_required"] is False
     assert "IMPLEMENTATION_APPROVED" not in " ".join(report["required_policies"])
+
+
+def test_pr_create_does_not_unconditionally_require_a_human_gate(
+    registry: dict[str, Any], fresh: None
+) -> None:
+    """★ PR_CREATE という operation 全体は、無条件の Human Gate を要求しない
+    (development_workflow.md 10 節が列挙する人間承認必須 9 操作に
+    「PR 作成」自体は含まれていない)。
+
+    Issue #689(SCOPE_REDUCTION_GATE、10.3節)は「Issue の scope/AC を
+    縮小する」という特定の部分行為に対する条件付きの Human Gate であり、
+    PR_CREATE という operation 全体には及ばない。この条件を
+    human_gate_required(operation単位でany()集約される)へ素朴に
+    PR_CREATE へ結び付けて true として載せると、PR_CREATEすべてが
+    無条件にHuman Gateを要求すると読める state になり、#337と同型の
+    欠陥(正本に無いgateを機械が要求する)を再生産する(サブちゃん
+    レビュー指摘F6対応)。専用のoperation `ISSUE_SCOPE_REDUCTION`
+    (下記test_issue_scope_reduction_requires_a_human_gate参照)を
+    新設して結び付け直した(USER指摘F7対応)ため、本テストは
+    PR_CREATE自体にSCOPE_REDUCTION_GATEが一切結び付いていないことを
+    確認する。
+    """
+    report = policy_check.check("PR_CREATE", registry, _worktree_reader())
+    assert report["result"] == PASS
+    assert report["human_gate_required"] is False
+    assert "DEVELOPMENT_WORKFLOW.SCOPE_REDUCTION_GATE" not in report["required_policies"]
+
+
+def test_issue_scope_reduction_requires_a_human_gate(
+    registry: dict[str, Any], fresh: None
+) -> None:
+    """★ ISSUE_SCOPE_REDUCTION(Issueのscope/AC縮小という部分行為)は
+    human_gate_required = true でなければならない(development_workflow.md
+    10節の人間承認必須9操作の9番目「Issueのscope/AC縮小(10.3節)」に
+    対応する。USER指摘F7対応)。
+    """
+    report = policy_check.check("ISSUE_SCOPE_REDUCTION", registry, _worktree_reader())
+    assert report["result"] == PASS
+    assert report["human_gate_required"] is True
+    assert "DEVELOPMENT_WORKFLOW.SCOPE_REDUCTION_GATE" in report["required_policies"]
 
 
 def test_jit_reading_points_at_sections_not_whole_documents(
