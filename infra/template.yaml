@@ -156,6 +156,53 @@ Parameters:
     Description: >
       振り返り機能改修(2026-08)。GitHub Issueを作成する対象リポジトリ
       ("owner/repo"形式)。未設定の間はGitHub Issue自動起票を行わない。
+  SecretResourcePolicyEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Issue #680(#133 UNIT2)。jstockが保持するSecrets Managerシークレット群へ、
+      identity policyとは独立したresource policy(第二の防壁。allow-listに
+      無いprincipalをexplicit Denyする)を適用するかのトグル。既定false
+      (未適用。本パラメータ・関連resourceのmerge単独ではAWS上の状態は一切
+      変更されない)。trueへの変更は、AdminPrincipalArn/DeployPrincipalArnを
+      実際の値へ差し替えたうえで、policy simulationによる事前確認・USER承認を
+      経たProduction適用のHuman Gateを通してから行うこと。
+  AdminPrincipalArn:
+    Type: String
+    Default: "arn:aws:iam::000000000000:role/not-configured"
+    Description: >
+      Issue #680。SecretResourcePolicyEnabled=trueのときのみ使用する。
+      resource policyのexplicit Denyから除外する、人間の管理者principal
+      (recovery/break-glass兼務。本アカウントには専用のbreak-glass
+      principalが別途存在しないため、管理者roleが実質的にrecovery経路を
+      兼ねる)のARN。SecretResourcePolicyEnabledをtrueにする前に、実際の
+      ARNへ差し替えること(既定値のダミーARNのままtrueにすると、管理者
+      自身がlockoutされる。infra/template.yamlのRulesセクションが
+      この組み合わせをstack操作自体で機械的に拒否する)。
+      ★ ここへ書くのはIAM role自体のARN(arn:aws:iam::<account>:role/<name>)
+      であり、CloudTrail・Console・AccessDeniedExceptionで見るsts::
+      assumed-role形式ではない(別物であり、そのまま貼るとallow-listが
+      機能しない)。管理者がAWS SSO(IAM Identity Center)経由のroleの
+      場合、実際のARNはarn:aws:iam::<account>:role/aws-reserved/
+      sso.amazonaws.com/<region>/AWSReservedSSO_<permission-set>_<hash>
+      という長い形式になり、permission setの削除・再作成で静かに値が
+      変わりうる(docs/operations_manual.md §35.1参照)。
+  DeployPrincipalArn:
+    Type: String
+    Default: "arn:aws:iam::000000000000:user/not-configured"
+    Description: >
+      Issue #680。SecretResourcePolicyEnabled=trueのときのみ使用する。
+      resource policyのexplicit Denyから除外する、Production deployに
+      使うprincipal(#164のscope。長期credentialの是正はIssue #164が
+      別途扱う)のARN。#164でdeploy principal自体が変更された場合、
+      本パラメータの値も同期して更新すること(同期を怠ると次回deploy時に
+      deploy principal自身がlockoutされうる)。
+      ★ ここへ書くのはIAM principal自体のARNであり、CloudTrail・Console・
+      AccessDeniedExceptionで見るsts::assumed-role形式ではない
+      (AdminPrincipalArnと同じ注意点。docs/operations_manual.md
+      §35.1参照)。deploy principalがlockoutされた場合の復旧手順は
+      同§35.2。
 
 Globals:
   Function:
@@ -179,6 +226,38 @@ Globals:
         # 値は運用者が明示的に渡す非秘密の版数であり、秘密を入れてはならない。
         LINE_CREDENTIAL_ROTATION_VERSION: !Ref LineCredentialRotationVersion
         EDINET_CREDENTIAL_ROTATION_VERSION: !Ref EdinetCredentialRotationVersion
+
+Conditions:
+  # Issue #680(#133 UNIT2): 以下のSecretsManager ResourcePolicyリソース群は、
+  # このConditionがtrueのときのみ作成される。既定(SecretResourcePolicyEnabled=
+  # "false")ではCloudFormationはこれらのresourceを一切作成しない。本PRのmerge・
+  # 通常のstack更新だけではAWS上の状態は変更されない(#533のSQS dispatch
+  # トグルと同型の安全策)。
+  SecretResourcePolicyIsEnabled: !Equals [!Ref SecretResourcePolicyEnabled, "true"]
+
+Rules:
+  # Issue #680(サブちゃんレビュー指摘F1対応): SecretResourcePolicyEnabled=true
+  # かつAdminPrincipalArn/DeployPrincipalArnが既定のダミー値のままだと、5secret
+  # すべてでadmin・deployの両方がDenyされ(allow-listに実ARNが1件も入っていない
+  # ため)、即座に全員lockoutする。この組み合わせを、Parameter Descriptionの
+  # 文章だけに頼らず、stack操作(create-change-set等)時に機械的に拒否する。
+  SecretResourcePolicyRequiresRealPrincipals:
+    RuleCondition: !Equals [!Ref SecretResourcePolicyEnabled, "true"]
+    Assertions:
+      - Assert:
+          !Not [!Equals [!Ref AdminPrincipalArn, "arn:aws:iam::000000000000:role/not-configured"]]
+        AssertDescription: >
+          SecretResourcePolicyEnabled=trueにする前に、AdminPrincipalArnへ実際の
+          管理者principalのARNを設定してください。既定のダミー値のままtrueにすると、
+          resource policyのexplicit Denyがallow-list外の全員(管理者含む)を拒否し、
+          即座にlockoutします。
+      - Assert:
+          !Not [!Equals [!Ref DeployPrincipalArn, "arn:aws:iam::000000000000:user/not-configured"]]
+        AssertDescription: >
+          SecretResourcePolicyEnabled=trueにする前に、DeployPrincipalArnへ実際の
+          deploy principalのARNを設定してください。既定のダミー値のままtrueにすると、
+          resource policyのexplicit Denyがallow-list外の全員(deploy principal含む)を
+          拒否し、次回以降のdeployが即座に失敗します。
 
 Resources:
   # --- 候補ユニバース本格対応(2026-08): S3キャッシュバケット ------------------
@@ -3628,6 +3707,161 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: prod
+
+  # --- Secrets Manager resource policy(#680。#133 UNIT2) ---------------------
+  # identity policy側の設定ミスに依存しない、secret自体の第二の防壁。
+  # allow-list(ADMIN/DEPLOY principal、および対象secretがGithubAppSecretArnの
+  # 場合のみ、実際にsecretsmanager:GetSecretValueを行う2 runtime role)に
+  # 無いprincipalからの、値の取得・書き換え・resource policy自体の操作を
+  # explicit Denyする。「Denyしたい相手を名指しする」のではなく
+  # 「許可したい相手をCondition[StringNotEquals]で除外する」形にすることで、
+  # 将来新しいprincipalが誤って広範な権限を持って作られた場合にも、
+  # allow-listに追加されていない限り自動的にDeny対象となる(#133 Phase Aの
+  # 「resource policyが無ければ第二の防壁にならない」という診断への対応)。
+  #
+  # ★ lockout防止の設計上の要点:
+  #   - Denyの対象からADMIN/DEPLOYを常に除外する(management principalが
+  #     自分自身をlockoutしない)。管理者role・deploy userのARNは
+  #     SecretResourcePolicyEnabled=true適用前に、AdminPrincipalArn/
+  #     DeployPrincipalArnパラメータへ実際の値を設定すること。
+  #   - explicit DenyはIAM側のAllow(管理者権限を含む)より常に優先される
+  #     (AWSの評価規則)。「管理者だから暗黙に復旧できる」という前提には
+  #     頼らず、policy自身のCondition除外リストへ管理者を明記することで
+  #     復旧経路を担保する。
+  #   - Production適用前に、policy simulation(iam:SimulatePrincipalPolicy等)
+  #     でADMIN/DEPLOY/RUNTIMEのいずれもlockoutされないことを確認すること
+  #     (本PRでは未実施。Production適用の別Human Gateで行う)。
+  GithubAppSecretResourcePolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Condition: SecretResourcePolicyIsEnabled
+    Properties:
+      SecretId: !Ref GithubAppSecretArn
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnlessIntendedPrincipal
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:DeleteSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:DeleteResourcePolicy
+            Resource: !Ref GithubAppSecretArn
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                  - !Ref AdminPrincipalArn
+                  - !Ref DeployPrincipalArn
+                  - !GetAtt IncidentNotifierFunctionRole.Arn
+                  - !GetAtt WeeklyReviewFunctionRole.Arn
+
+  EdinetApiKeySecretResourcePolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Condition: SecretResourcePolicyIsEnabled
+    Properties:
+      SecretId: !Ref EdinetApiKeySecretArn
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnlessIntendedPrincipal
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:DeleteSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:DeleteResourcePolicy
+            Resource: !Ref EdinetApiKeySecretArn
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                  - !Ref AdminPrincipalArn
+                  - !Ref DeployPrincipalArn
+
+  LineChannelAccessTokenSecretResourcePolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Condition: SecretResourcePolicyIsEnabled
+    Properties:
+      SecretId: !Ref LineChannelAccessTokenSecretArn
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnlessIntendedPrincipal
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:DeleteSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:DeleteResourcePolicy
+            Resource: !Ref LineChannelAccessTokenSecretArn
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                  - !Ref AdminPrincipalArn
+                  - !Ref DeployPrincipalArn
+
+  LineUserIdSecretResourcePolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Condition: SecretResourcePolicyIsEnabled
+    Properties:
+      SecretId: !Ref LineUserIdSecretArn
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnlessIntendedPrincipal
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:DeleteSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:DeleteResourcePolicy
+            Resource: !Ref LineUserIdSecretArn
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                  - !Ref AdminPrincipalArn
+                  - !Ref DeployPrincipalArn
+
+  LineChannelSecretSecretResourcePolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Condition: SecretResourcePolicyIsEnabled
+    Properties:
+      SecretId: !Ref LineChannelSecretSecretArn
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnlessIntendedPrincipal
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:DeleteSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:DeleteResourcePolicy
+            Resource: !Ref LineChannelSecretSecretArn
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                  - !Ref AdminPrincipalArn
+                  - !Ref DeployPrincipalArn
 
 Outputs:
   WebhookUrl:
