@@ -57,7 +57,13 @@ from jstock_advisor.domain.market_session import (
     expected_latest_completed_trading_session,
     missed_trading_sessions,
 )
-from jstock_advisor.interfaces.types import BenefitDetail, ShareholderBenefit
+from jstock_advisor.interfaces.market_data import MarketDataProvider
+from jstock_advisor.interfaces.types import (
+    BenefitDetail,
+    PriceHistory,
+    PriceSnapshot,
+    ShareholderBenefit,
+)
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
@@ -149,9 +155,7 @@ def _build(bundle: object, now: dt.datetime = _NOW) -> object:
         ("登録から1年", 365),
     ],
 )
-def test_t1_old_benefit_registration_does_not_make_data_stale(
-    label: str, days_ago: int
-) -> None:
+def test_t1_old_benefit_registration_does_not_make_data_stale(label: str, days_ago: int) -> None:
     """優待の登録が古いというだけで generic freshness が古くならない(F-J1)。
 
     修正前は `min(fetched_at)` が登録時刻を拾い、
@@ -199,23 +203,38 @@ def test_t2_market_source_staleness_still_drives_data_fetched_at() -> None:
     bundle = build_mock_provider_bundle(_NOW)
 
     class _StaleMarketDataProvider:
-        def __init__(self, delegate: object) -> None:
+        """#646: `MarketDataProvider`へ明示的に準拠させる(以前は`get_latest_price`
+        のみを定義し、他3メソッドは`__getattr__`によるdelegateへの委譲だけに
+        依存していた。実行時の挙動は委譲先[本物同様のmock]が正しく処理していた
+        ため問題は起きていなかったが、静的型検査ではProtocol準拠を示せなかった)。
+        """
+
+        def __init__(self, delegate: MarketDataProvider) -> None:
             self._delegate = delegate
 
-        def get_latest_price(self, stock_code: str) -> object | None:
-            snap = self._delegate.get_latest_price(stock_code)  # type: ignore[attr-defined]
+        def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
+            snap = self._delegate.get_latest_price(stock_code)
             if snap is None:
                 return None
             return snap.model_copy(
-                update={
-                    "source": snap.source.model_copy(
-                        update={"fetched_at": stale_fetched_at}
-                    )
-                }
+                update={"source": snap.source.model_copy(update={"fetched_at": stale_fetched_at})}
             )
 
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._delegate, name)
+        def get_price_history(
+            self, stock_code: str, start: dt.date, end: dt.date
+        ) -> PriceHistory | None:
+            return self._delegate.get_price_history(stock_code, start, end)
+
+        def get_average_trading_value(self, stock_code: str, business_days: int) -> Decimal | None:
+            return self._delegate.get_average_trading_value(stock_code, business_days)
+
+        def get_benchmark_price_history(
+            self, symbol: str, start: dt.date, end: dt.date
+        ) -> PriceHistory | None:
+            return self._delegate.get_benchmark_price_history(symbol, start, end)
+
+    _typecheck_stale_market_data: MarketDataProvider = _StaleMarketDataProvider(bundle.market_data)
+    del _typecheck_stale_market_data
 
     bundle = dataclasses.replace(
         bundle,
@@ -254,9 +273,7 @@ def test_t3b_benefit_presence_does_not_change_data_fetched_at() -> None:
             build_mock_provider_bundle(_NOW), shareholder_benefit=_NoBenefitProvider()
         )
     )
-    with_old_benefit = _build(
-        _bundle_with_benefit_registered_at(_NOW - dt.timedelta(days=365))
-    )
+    with_old_benefit = _build(_bundle_with_benefit_registered_at(_NOW - dt.timedelta(days=365)))
 
     assert without.data_fetched_at == with_old_benefit.data_fetched_at
 
@@ -364,9 +381,9 @@ def test_t7_same_instant_gives_same_session_regardless_of_tzinfo(
     label: str, instant: dt.datetime
 ) -> None:
     """同一の瞬間なら、tzinfo の表現によらず同じ結果になる。"""
-    assert expected_latest_completed_trading_session(instant, _CALENDAR) == dt.date(
-        2026, 9, 1
-    ), label
+    assert expected_latest_completed_trading_session(instant, _CALENDAR) == dt.date(2026, 9, 1), (
+        label
+    )
     assert missed_trading_sessions(dt.date(2026, 8, 31), instant, _CALENDAR) == 1, label
 
 
@@ -380,14 +397,10 @@ def test_t7b_utc_calendar_day_is_not_used() -> None:
     """
     # JST 2026-09-02 18:00(大引け後) -> 期待セッションは当日 09-02
     jst_evening = _jst(2026, 9, 2, 18, 0)
-    assert expected_latest_completed_trading_session(jst_evening, _CALENDAR) == dt.date(
-        2026, 9, 2
-    )
+    assert expected_latest_completed_trading_session(jst_evening, _CALENDAR) == dt.date(2026, 9, 2)
     # UTC暦日で見ると 09-02 09:00 であり同日だが、時刻は 09:00 で大引け前。
     # JSTへ変換せず時刻比較していれば 09-01 を返してしまう。
-    assert expected_latest_completed_trading_session(jst_evening, _CALENDAR) != dt.date(
-        2026, 9, 1
-    )
+    assert expected_latest_completed_trading_session(jst_evening, _CALENDAR) != dt.date(2026, 9, 1)
 
 
 def test_t7c_session_close_boundary_is_evaluated_in_jst() -> None:
@@ -395,12 +408,8 @@ def test_t7c_session_close_boundary_is_evaluated_in_jst() -> None:
     just_before = _jst(2026, 9, 2, 15, 29)
     just_after = _jst(2026, 9, 2, 15, 30)
 
-    assert expected_latest_completed_trading_session(just_before, _CALENDAR) == dt.date(
-        2026, 9, 1
-    )
-    assert expected_latest_completed_trading_session(just_after, _CALENDAR) == dt.date(
-        2026, 9, 2
-    )
+    assert expected_latest_completed_trading_session(just_before, _CALENDAR) == dt.date(2026, 9, 1)
+    assert expected_latest_completed_trading_session(just_after, _CALENDAR) == dt.date(2026, 9, 2)
     assert dt.time(15, 30) == JPX_REGULAR_SESSION_CLOSE_JST
 
 
@@ -432,6 +441,7 @@ def test_price_freshness_is_wired_only_through_the_policy_layer() -> None:
         "missed_trading_sessions が policy 層以外から参照されている。"
         f"閾値は domain/price_freshness.py へ集約すること: {referencing}"
     )
+
 
 def test_t8_expected_session_rejects_naive_datetime() -> None:
     """naive な `now` は ValueError(暗黙にUTC扱いしない)。

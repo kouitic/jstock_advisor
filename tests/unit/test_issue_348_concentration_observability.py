@@ -26,6 +26,7 @@ from jstock_advisor.services.line_notification_service import (
     NotificationOutcome,
     NotificationStatus,
 )
+from tests.factories import FakeMarketDataProvider
 
 _STOCK_A = "0000"
 _STOCK_B = "0001"
@@ -69,16 +70,8 @@ def _price(stock_code: str, close: str) -> PriceSnapshot:
     )
 
 
-class _FakeMarketData:
-    def __init__(self, prices: dict[str, PriceSnapshot]) -> None:
-        self._prices = prices
-
-    def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
-        return self._prices.get(stock_code)
-
-
 class _FakeProviders:
-    def __init__(self, market_data: _FakeMarketData) -> None:
+    def __init__(self, market_data: FakeMarketDataProvider) -> None:
         self.market_data = market_data
 
 
@@ -103,7 +96,7 @@ class _FakeRuleVersionService:
 
 
 def _run(holdings: list[Holding], prices: dict[str, PriceSnapshot]) -> None:
-    market = _FakeMarketData(prices)
+    market = FakeMarketDataProvider(latest_price=prices)
     providers = _FakeProviders(market)
     handler_module.evaluate_household_concentration_and_notify(
         holdings,
