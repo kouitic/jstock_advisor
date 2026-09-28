@@ -47,6 +47,7 @@ from jstock_advisor.services.line_notification_service import (
     NotificationOutcome,
     NotificationStatus,
 )
+from tests.factories import FakeMarketDataProvider
 
 # ★ JPX の証券コードとして割り当てが存在しない値。実在銘柄と衝突しない。
 _STOCK_A = "0000"  # 2 owner が持つ銘柄
@@ -87,20 +88,8 @@ def _price(stock_code: str, close: str) -> PriceSnapshot:
     )
 
 
-class _FakeMarketData:
-    """指定した銘柄だけ価格を返す（他は None = 取得失敗）。"""
-
-    def __init__(self, prices: dict[str, PriceSnapshot]) -> None:
-        self._prices = prices
-        self.calls: list[str] = []
-
-    def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
-        self.calls.append(stock_code)
-        return self._prices.get(stock_code)
-
-
 class _FakeProviders:
-    def __init__(self, market_data: _FakeMarketData) -> None:
+    def __init__(self, market_data: FakeMarketDataProvider) -> None:
         self.market_data = market_data
 
 
@@ -145,7 +134,7 @@ _PRICES = {_STOCK_A: _price(_STOCK_A, "1200"), _STOCK_B: _price(_STOCK_B, "7600"
 
 def _run(holdings=None, prices=None):
     """親側で銘柄単位の集中度判定を 1 回だけ走らせ、保存された Recommendation を返す。"""
-    market = _FakeMarketData(dict(_PRICES if prices is None else prices))
+    market = FakeMarketDataProvider(latest_price=dict(_PRICES if prices is None else prices))
     providers = _FakeProviders(market)
     repo, notifier = _SpyRepo(), _SpyNotificationService()
     handler_module.evaluate_household_concentration_and_notify(
