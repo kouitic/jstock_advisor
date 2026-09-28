@@ -2539,6 +2539,57 @@ HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT = Issue #332 の最新の durable 
         preflight は実行者が呼ぶものであり、hook ではない。満たさなければ実行しない。
 ```
 
+### 10.3 Issue の scope / AC 縮小には Human Gate が必要(SCOPE_REDUCTION_GATE)
+
+作業者が自身の調査に基づき、担当する Issue の Acceptance Criteria・対象
+範囲を、USER/MANAGER の明示承認記録なしに書き換えた事例が発生した
+(#254 / PR #687。#467 の分離は `SPLIT_DECIDED_BY = USER` として記録
+されていたのに対し、この事例では記録が無かった。2026-09-28、USER は
+この件自体は事後承認〔`POST_HOC_APPROVED`〕としたうえで、以後の恒久
+ルールとして本節を新設した)。
+
+```
+HUMAN_GATE_REQUIRED = YES:
+- AC項目を削除する
+- 対象経路・対象ケース数を減らす
+- Issueの一部scopeを別Issueへ移す
+- 「不要」と判断してDefinition of Doneを弱める
+- 既にUSER/MANAGER承認済みのscope境界を変更する
+
+HUMAN_GATE_REQUIRED = NO:
+- 誤字・事実記述の訂正
+- ACを変更しない説明の精緻化
+- ACを満たすためのテスト追加
+- 実装詳細の変更で、scope/DoDを弱めないもの
+```
+
+```
+原則:
+DEVELOPER_MAY_DISCOVER_SCOPE_MISMATCH        = YES
+DEVELOPER_MAY_PROPOSE_SCOPE_CHANGE           = YES
+DEVELOPER_MAY_UNILATERALLY_REDUCE_APPROVED_SCOPE = NO
+```
+
+scope縮小を発見した場合は、理由・影響・代替owner・残るcoverage gapを
+提示してHuman Gateを取る。**発見自体・縮小の提案自体は妨げない**
+(9.5節の`OPPORTUNISTIC_FIX_FORBIDDEN`と同様、調査を止めるのではなく
+承認手続きを挟む)。承認が下りるまでは、元のAC・scopeを正本として作業を
+続ける(縮小したものとして実装・報告しない)。
+
+```
+起票承認  Issue #689(本節の追記自体の起点)
+決定      USER決定(2026-09-28)。POLICY_AUTHORITY = HUMAN_ONLY
+          (CLAUDE.md §2 / user_manager_collaboration_protocol.md §8)
+          に基づく新設であり、本節はその記録である。
+```
+
+本節は10節が定める「人間承認が必要な操作」の一種として、Issue自体の
+scope/AC変更という対象を明示する位置づけである。9.5節の
+`NO_BEHAVIOR_OR_OPERATIONAL_CHANGE_WITHOUT_ISSUE`・
+`OPPORTUNISTIC_FIX_FORBIDDEN`とは対象が異なる(9.5節はコード変更に
+Issueが要るか、9.6節はscope外の不具合をその場で直すかを扱い、本節は
+「担当中のIssueそのものの範囲」を扱う)。重複はない。
+
 ---
 
 ## 11. docs のみの変更(DOC_ONLY_CHANGE)
