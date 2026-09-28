@@ -1029,6 +1029,172 @@ def test_fair_value_strong_condition_general_corporate_still_blocked_by_counter_
     assert result.fair_value_used_as_sole_strong_basis is False
 
 
+def test_fair_value_strong_condition_general_corporate_still_blocked_without_partial_sale() -> None:
+    """Issue #583(サブちゃんレビューF1対応): GENERAL業種の例外はindustry_model_
+    applied条件のみを免除する。一部売却が実行不可能(partial_sale_executable=
+    False)な場合は緩めない(mutation testingで、この条件の削除がSURVIVEDと
+    指摘された)。"""
+    fv_range = _fair_value_range(
+        neutral=Decimal("650"),
+        bull=Decimal("700"),
+        bear=Decimal("600"),
+        overall_confidence=ConfidenceLevel.HIGH,
+        method_count=3,
+    )
+    gates = dict(
+        _FULL_GATE_INPUTS,
+        industry_model_applied=False,
+        industry_sector=ProfitTakingIndustrySector.GENERAL,
+        partial_sale_executable=False,
+    )
+    result = evaluate_profit_taking(
+        current_price=Decimal("1010"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=None,
+        forecast_annual_dividend_per_share=None,
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=fv_range,
+            guidance_revision_disclosed=True,
+            fair_value_reflects_latest_earnings=True,
+            **gates,
+        ),
+    )
+    assert result.final_action != RecommendationType.FULL_PROFIT_TAKE
+    assert result.fair_value_used_as_sole_strong_basis is False
+
+
+def test_fair_value_strong_condition_general_corporate_blocked_without_earnings_days() -> None:
+    """Issue #583(サブちゃんレビューF1対応): GENERAL業種の例外はindustry_model_
+    applied条件のみを免除する。決算までの営業日数が未算出(None)の場合は緩めない
+    (mutation testingで、`is not None`チェックの削除がSURVIVEDと指摘された)。"""
+    fv_range = _fair_value_range(
+        neutral=Decimal("650"),
+        bull=Decimal("700"),
+        bear=Decimal("600"),
+        overall_confidence=ConfidenceLevel.HIGH,
+        method_count=3,
+    )
+    gates = dict(
+        _FULL_GATE_INPUTS,
+        industry_model_applied=False,
+        industry_sector=ProfitTakingIndustrySector.GENERAL,
+        days_to_next_earnings_business_days=None,
+    )
+    result = evaluate_profit_taking(
+        current_price=Decimal("1010"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=None,
+        forecast_annual_dividend_per_share=None,
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=fv_range,
+            guidance_revision_disclosed=True,
+            fair_value_reflects_latest_earnings=True,
+            **gates,
+        ),
+    )
+    assert result.final_action != RecommendationType.FULL_PROFIT_TAKE
+    assert result.fair_value_used_as_sole_strong_basis is False
+
+
+def test_fair_value_strong_condition_general_corporate_earnings_days_boundary() -> None:
+    """Issue #583(サブちゃんレビューF1対応): GENERAL業種の例外下でも、決算までの
+    営業日数は実configの閾値(min_business_days_to_earnings_for_fair_value_
+    action)をそのまま使う。閾値未満なら遮断され(mutation testingで閾値の
+    実質無効化がSURVIVEDと指摘された)、閾値以上〔ちょうど境界値〕なら成立する
+    (`>=`が`>`へ書き換えられた場合はこの境界値でFalseへ変わるため検出できる)。"""
+    fv_range = _fair_value_range(
+        neutral=Decimal("650"),
+        bull=Decimal("700"),
+        bear=Decimal("600"),
+        overall_confidence=ConfidenceLevel.HIGH,
+        method_count=3,
+    )
+    threshold = (
+        _CONFIG.profit_taking.condition_based_judgment.min_business_days_to_earnings_for_fair_value_action
+    )
+
+    def _run(days: int) -> RecommendationType:
+        gates = dict(
+            _FULL_GATE_INPUTS,
+            industry_model_applied=False,
+            industry_sector=ProfitTakingIndustrySector.GENERAL,
+            days_to_next_earnings_business_days=days,
+        )
+        result = evaluate_profit_taking(
+            current_price=Decimal("1010"),
+            average_purchase_price=Decimal("1000"),
+            shares=100,
+            total_purchase_amount=Decimal("100000"),
+            cumulative_dividend_received=Decimal("0"),
+            cumulative_benefit_value_received=Decimal("0"),
+            current_total_yield_pct=None,
+            forecast_annual_dividend_per_share=None,
+            mitigating_inputs=MitigatingFactorInputs(),
+            config=_CONFIG.profit_taking,
+            condition_inputs=ProfitTakingConditionInputs(
+                fair_value_range=fv_range,
+                guidance_revision_disclosed=True,
+                fair_value_reflects_latest_earnings=True,
+                **gates,
+            ),
+        )
+        return result.final_action
+
+    assert _run(threshold - 1) != RecommendationType.FULL_PROFIT_TAKE
+    assert _run(threshold) == RecommendationType.FULL_PROFIT_TAKE
+
+
+def test_fair_value_strong_condition_unknown_sector_still_blocked_without_industry_model() -> None:
+    """Issue #583(サブちゃんレビューF2対応): GENERAL業種の例外は、業種未分類
+    (industry_sector=None。データ未提供)だけでなく、classifierが明示的に
+    UNKNOWNへ分類した場合(本番でindustry_sectorがNoneになる経路は無く、
+    分類不能時はUNKNOWN enum値になる)にも及ばない。"""
+    fv_range = _fair_value_range(
+        neutral=Decimal("650"),
+        bull=Decimal("700"),
+        bear=Decimal("600"),
+        overall_confidence=ConfidenceLevel.HIGH,
+        method_count=3,
+    )
+    gates = dict(
+        _FULL_GATE_INPUTS,
+        industry_model_applied=False,
+        industry_sector=ProfitTakingIndustrySector.UNKNOWN,
+    )
+    result = evaluate_profit_taking(
+        current_price=Decimal("1010"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=None,
+        forecast_annual_dividend_per_share=None,
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=fv_range,
+            guidance_revision_disclosed=True,
+            fair_value_reflects_latest_earnings=True,
+            **gates,
+        ),
+    )
+    assert result.final_action != RecommendationType.FULL_PROFIT_TAKE
+    assert result.fair_value_used_as_sole_strong_basis is False
+
+
 def test_fair_value_strong_condition_banking_with_industry_model_applied_still_succeeds() -> None:
     """Issue #583: OR条件の左辺(industry_model_applied)は業種に関わらず有効で
     あることの回帰(GENERAL業種の例外追加が、既存の成立経路〔非GENERAL業種で

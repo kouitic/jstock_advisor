@@ -704,9 +704,13 @@ def _extra_action_gates_met(
     Issue #583: industry_model_appliedは#208の調査により恒久的にFalseと
     なることが判明している。専用モデルの実装コストが無いGENERAL業種
     (`ProfitTakingIndustrySector.GENERAL`)に限り、industry_model_applied
-    のOR条件としてindustry_sector==GENERALでもゲートを開く。BANKING等の
-    専用モデル対象業種、および業種未分類(None)は従来どおりindustry_model_
-    appliedの成立を要求する(安全側を維持)。
+    のOR条件としてindustry_sector==GENERALでもゲートを開く。GENERAL以外の
+    `ProfitTakingIndustrySector`の残り7値(BANKING/LEASING_FINANCE/FOOD/
+    CHEMICAL/GAS_UTILITY/SMALL_GROWTH/UNKNOWN)、および業種未分類(None)は
+    従来どおりindustry_model_appliedの成立を要求する(安全側を維持)。
+    industry_model_appliedが恒久的にFalseである限り、この7値は本ゲートに
+    関して恒久的に到達不能のまま残る(#583のスコープ外。専用の業種別適正
+    価格モデルが将来実装された場合に再評価する)。
     """
     industry_model_ok = (
         inputs.industry_model_applied
