@@ -144,7 +144,13 @@ def test_human_gate_operations_are_marked(registry: dict[str, Any]) -> None:
     registry が operation として持つものである。★ ここで 10 節の一覧そのものを
     複製しない（複製すると二重正本になる）。
     """
-    gated = ("MERGE", "PRODUCTION_MANUAL_INVOKE", "CHANGESET_CREATE", "CHANGESET_EXECUTE")
+    gated = (
+        "MERGE",
+        "PRODUCTION_MANUAL_INVOKE",
+        "CHANGESET_CREATE",
+        "CHANGESET_EXECUTE",
+        "ISSUE_SCOPE_REDUCTION",
+    )
     for operation in gated:
         assert operation in registry["operations"], f"{operation} が未登録"
         matched = [
