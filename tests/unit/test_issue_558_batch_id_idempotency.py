@@ -44,6 +44,7 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.infrastructure.aws import batch_tracker
 from jstock_advisor.lambda_handlers import buy_candidates_handler, holdings_watchlist_handler
 from jstock_advisor.lambda_handlers._scheduling import derive_scheduled_batch_id
+from tests.factories import FakeMarketDataProvider
 
 _REGION = "ap-northeast-1"
 _FAMILY = batch_tracker.BatchFamily.BUY_CANDIDATES
@@ -178,9 +179,7 @@ def _patch_buy_candidates_common(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         buy_candidates_handler, "build_real_provider_bundle", lambda now, config: object()
     )
-    monkeypatch.setattr(
-        buy_candidates_handler, "build_line_client_for_run", lambda **kw: object()
-    )
+    monkeypatch.setattr(buy_candidates_handler, "build_line_client_for_run", lambda **kw: object())
     monkeypatch.setattr(
         buy_candidates_handler,
         "build_stock_snapshot",
@@ -196,31 +195,21 @@ def _patch_buy_candidates_common(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         buy_candidates_handler, "AuditService", lambda *a, **kw: _NoopAuditService()
     )
-    monkeypatch.setattr(
-        buy_candidates_handler, "TradeCooldownService", _FakeTradeCooldownService
-    )
+    monkeypatch.setattr(buy_candidates_handler, "TradeCooldownService", _FakeTradeCooldownService)
     monkeypatch.setattr(
         buy_candidates_handler,
         "LineNotificationService",
-        lambda **kwargs: type(
-            "_Svc", (), {"notify_data_error": lambda self, *a, **kw: False}
-        )(),
+        lambda **kwargs: type("_Svc", (), {"notify_data_error": lambda self, *a, **kw: False})(),
     )
     monkeypatch.setattr(buy_candidates_handler.WatchlistService, "list_items", lambda self: [])
-    monkeypatch.setattr(
-        buy_candidates_handler.PortfolioService, "list_holdings", lambda self: []
-    )
+    monkeypatch.setattr(buy_candidates_handler.PortfolioService, "list_holdings", lambda self: [])
     monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
     monkeypatch.setenv("LINE_USER_ID", "user-value")
 
 
 def _patch_holdings_watchlist_common(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FakeMarketData:
-        def get_latest_price(self, stock_code: str) -> object | None:
-            return None
-
     class _FakeProviders:
-        market_data = _FakeMarketData()
+        market_data = FakeMarketDataProvider()
 
     monkeypatch.setattr(
         holdings_watchlist_handler,
@@ -269,9 +258,7 @@ def test_t6_buy_candidates_retry_with_the_same_scheduled_time_dispatches_nothing
 ) -> None:
     _patch_buy_candidates_common(monkeypatch)
     items = [_watchlist_item("2914"), _watchlist_item("8136")]
-    monkeypatch.setattr(
-        buy_candidates_handler.WatchlistService, "list_items", lambda self: items
-    )
+    monkeypatch.setattr(buy_candidates_handler.WatchlistService, "list_items", lambda self: items)
 
     dispatched: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -358,9 +345,7 @@ def test_t10_manual_invocation_without_scheduled_time_still_uses_a_random_suffix
     fallback(時刻+乱数)のままであることのみ確認する(回帰)。"""
     _patch_buy_candidates_common(monkeypatch)
     items = [_watchlist_item("2914")]
-    monkeypatch.setattr(
-        buy_candidates_handler.WatchlistService, "list_items", lambda self: items
-    )
+    monkeypatch.setattr(buy_candidates_handler.WatchlistService, "list_items", lambda self: items)
 
     dispatched: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -414,9 +399,7 @@ def test_t12_a_different_scheduled_time_starts_independently(
 ) -> None:
     _patch_buy_candidates_common(monkeypatch)
     items = [_watchlist_item("2914")]
-    monkeypatch.setattr(
-        buy_candidates_handler.WatchlistService, "list_items", lambda self: items
-    )
+    monkeypatch.setattr(buy_candidates_handler.WatchlistService, "list_items", lambda self: items)
 
     dispatched: list[dict[str, object]] = []
     monkeypatch.setattr(

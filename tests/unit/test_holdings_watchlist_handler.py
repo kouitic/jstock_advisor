@@ -28,10 +28,12 @@ from jstock_advisor.domain.market_session import (
     expected_latest_completed_trading_session,
 )
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
+from jstock_advisor.interfaces.types import PriceSnapshot
 from jstock_advisor.lambda_handlers import holdings_watchlist_handler as handler_module
 from jstock_advisor.services import holding_decision_service as holding_decision_service_module
 from jstock_advisor.services.audit_service import AuditService as RealAuditService
 from jstock_advisor.services.line_notification_service import NotificationOutcome
+from tests.factories import FakeMarketDataProvider
 
 _NOW = dt.datetime(2026, 7, 29, 7, 0, tzinfo=dt.UTC)
 
@@ -66,13 +68,8 @@ def _watchlist_item(stock_code: str) -> WatchlistItem:
     )
 
 
-class _FakeMarketData:
-    def get_latest_price(self, stock_code: str) -> object | None:
-        return None
-
-
 class _FakeProviders:
-    market_data = _FakeMarketData()
+    market_data = FakeMarketDataProvider()
 
 
 class _FakeTradeCooldownService:
@@ -131,9 +128,7 @@ def test_dispatch_mode_dispatches_one_call_per_holding(
     _patch_common(monkeypatch)
     holdings = [_holding("2914"), _holding("8136")]
 
-    monkeypatch.setattr(
-        handler_module.PortfolioService, "list_holdings", lambda self: holdings
-    )
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: holdings)
     assert not hasattr(handler_module, "WatchlistService")
 
     dispatched: list[dict[str, object]] = []
@@ -272,6 +267,7 @@ class _FakeFinancial:
     sector: str | None = None
     industry: str | None = None
 
+
 def _fresh_price_as_of_date(now: dt.datetime | None = None) -> dt.date:
     """`now` 時点で期待される直近の完了済みセッション。鮮度が正常な状態を表す。
 
@@ -287,7 +283,6 @@ def _fresh_price_as_of_date(now: dt.datetime | None = None) -> dt.date:
         now or dt.datetime.now(dt.UTC),
         BusinessCalendar.from_config(load_config().holiday_calendar),
     )
-
 
 
 @dataclass(frozen=True)
@@ -455,46 +450,37 @@ def test_task_holding_validation_mode_does_not_grow_production_audit_log(
     assert audit_repo.list_all() == []
 
 
-class _RaisingThenOkMarketData:
-    """1銘柄目の価格取得で例外を発生させ、2銘柄目は正常応答するフェイク。"""
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def get_latest_price(self, stock_code: str) -> object:
-        self.calls.append(stock_code)
-        if stock_code == "2914":
-            raise RuntimeError("yfinance boom")
-        return type(
-            "_Snap",
-            (),
-            {
-                "close_price": Decimal("1000"),
-                # Issue #67 F-I3: 判定に使った価格のsourceをそのまま持ち回るため
-                # フェイクにも同じ形を持たせる(確認している挙動は変えていない)。
-                "source": DataSourceReference(
-                    provider="fake-market-data", fetched_at=_NOW
-                ),
-            },
-        )()
+def _raising_then_ok_market_data() -> FakeMarketDataProvider:
+    """1銘柄目(stock_code="2914")の価格取得で例外を発生させ、他は正常応答する
+    フェイク(#646。挙動は移行前と同一)。"""
+    return FakeMarketDataProvider(
+        latest_price=PriceSnapshot(
+            stock_code="0000",
+            as_of_date=_NOW.date(),
+            close_price=Decimal("1000"),
+            # Issue #67 F-I3: 判定に使った価格のsourceをそのまま持ち回るため
+            # フェイクにも同じ形を持たせる(確認している挙動は変えていない)。
+            source=DataSourceReference(provider="fake-market-data", fetched_at=_NOW),
+        ),
+        raise_for_stock_codes=frozenset({"2914"}),
+        raise_error=RuntimeError("yfinance boom"),
+    )
 
 
-class _OkMarketData:
-    """常に価格を返すfake(集中度の保存経路の確認用)。"""
-
-    def get_latest_price(self, stock_code: str) -> object:
-        return type(
-            "_Snap",
-            (),
-            {
-                "close_price": Decimal("1000"),
-                "source": DataSourceReference(provider="fake-market-data", fetched_at=_NOW),
-            },
-        )()
+def _ok_market_data() -> FakeMarketDataProvider:
+    """常に価格を返すfake(集中度の保存経路の確認用。#646)。"""
+    return FakeMarketDataProvider(
+        latest_price=PriceSnapshot(
+            stock_code="0000",
+            as_of_date=_NOW.date(),
+            close_price=Decimal("1000"),
+            source=DataSourceReference(provider="fake-market-data", fetched_at=_NOW),
+        )
+    )
 
 
 class _RaisingProviders:
-    def __init__(self, market_data: _RaisingThenOkMarketData) -> None:
+    def __init__(self, market_data: FakeMarketDataProvider) -> None:
         self.market_data = market_data
 
 
@@ -502,7 +488,7 @@ def test_estimate_portfolio_totals_isolates_single_holding_price_fetch_error() -
     """1銘柄の価格取得が例外を投げても、他の銘柄の処理を止めず、時価総額のみを
     算出不能(None)として扱う(取得価格総額は影響を受けない)。"""
     holdings = [_holding("2914"), _holding("8136")]
-    market_data = _RaisingThenOkMarketData()
+    market_data = _raising_then_ok_market_data()
     providers = _RaisingProviders(market_data)
 
     total_market_value, total_acquisition_cost, positions = (
@@ -696,9 +682,7 @@ def test_handler_invalid_execution_mode_raises_before_any_processing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called: list[str] = []
-    monkeypatch.setattr(
-        handler_module, "load_config", lambda: called.append("load_config")
-    )
+    monkeypatch.setattr(handler_module, "load_config", lambda: called.append("load_config"))
 
     with pytest.raises(ValueError, match="unknown execution_mode"):
         handler_module.handler({"execution_mode": "BOGUS"}, _FakeContext())
@@ -719,7 +703,7 @@ def test_household_concentration_validation_mode_skips_save(
 
     handler_module.evaluate_household_concentration_and_notify(
         [_holding("2914")],
-        _RaisingProviders(_OkMarketData()),
+        _RaisingProviders(_ok_market_data()),
         handler_module.load_config(),
         repo,
         notification_service,
@@ -742,7 +726,7 @@ def test_household_concentration_normal_mode_still_saves(
 
     handler_module.evaluate_household_concentration_and_notify(
         [_holding("2914")],
-        _RaisingProviders(_OkMarketData()),
+        _RaisingProviders(_ok_market_data()),
         handler_module.load_config(),
         repo,
         notification_service,
@@ -799,7 +783,12 @@ def test_notify_legacy_sell_normal_mode_still_persists(monkeypatch: pytest.Monke
     )
 
     handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, True,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        True,
     )
 
     assert len(repo.saved) == 1
@@ -862,7 +851,12 @@ def test_detected_and_sent_when_sent_successfully() -> None:
     recommendation = _recommendation_of_type(RecommendationType.PARTIAL_PROFIT_TAKE)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, True,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        True,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -884,7 +878,12 @@ def test_detected_but_not_sent_when_trade_cooldown_blocks() -> None:
     recommendation = _recommendation_of_type(RecommendationType.PARTIAL_PROFIT_TAKE)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, True,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        True,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -906,7 +905,12 @@ def test_detected_but_not_sent_when_cross_pipeline_priority_blocks() -> None:
     recommendation = _recommendation_of_type(RecommendationType.FULL_PROFIT_TAKE)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, True,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        True,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -925,7 +929,12 @@ def test_detected_but_not_sent_when_dedup_blocks() -> None:
     recommendation = _recommendation_of_type(RecommendationType.SELL)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, True,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        True,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -985,7 +994,12 @@ def test_notification_disabled_actionable_data_quality_blocked_is_not_detected()
     recommendation = _recommendation_of_type(RecommendationType.SELL)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, False,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        False,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -1016,7 +1030,12 @@ def test_notification_disabled_internal_only_skips_data_quality_evaluation() -> 
     recommendation = _recommendation_of_type(RecommendationType.WATCH)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, False,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        False,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -1047,7 +1066,12 @@ def test_data_quality_blocked_is_excluded_from_detected() -> None:
     recommendation = _recommendation_of_type(RecommendationType.SELL)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, True,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        True,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -1289,7 +1313,12 @@ def test_record_result_if_a_notification_disabled_actionable_data_quality_ok(
     recommendation = _recommendation_of_type(RecommendationType.SELL)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, False,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        False,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -1329,7 +1358,12 @@ def test_record_result_if_b_notification_disabled_actionable_data_quality_blocke
     recommendation = _recommendation_of_type(RecommendationType.SELL)
 
     result = handler_module._notify_legacy_sell_and_build_result(
-        holding, _NOW, recommendation, repo, notification_service, False,
+        holding,
+        _NOW,
+        recommendation,
+        repo,
+        notification_service,
+        False,
         ExecutionContext(mode=ExecutionMode.VALIDATION),
     )
 
@@ -1722,9 +1756,7 @@ def test_b2_holdings_finalize_only_does_not_reexecute_worker(
         finalize_completed_at=None,
         finalize_failed_at=None,
     )
-    monkeypatch.setattr(
-        handler_module, "resolve_finalize_only_request", lambda *a, **kw: record
-    )
+    monkeypatch.setattr(handler_module, "resolve_finalize_only_request", lambda *a, **kw: record)
     summary_calls: list[str] = []
     monkeypatch.setattr(
         handler_module,
@@ -1765,7 +1797,8 @@ def test_b2_holdings_kill_switch_blocks_recovery_summary(
         completed_codes=["owner-a#8306"],
     )
     monkeypatch.setattr(
-        handler_module, "try_acquire_completion_finalize",
+        handler_module,
+        "try_acquire_completion_finalize",
         lambda *a, **kw: pytest.fail("kill switch ON must not acquire the gate"),
     )
 
@@ -1773,9 +1806,7 @@ def test_b2_holdings_kill_switch_blocks_recovery_summary(
         def get_notification_enabled(self) -> bool:
             return False
 
-    handler_module._send_batch_summary(
-        "hold-1", progress, _NOW, object(), _KillSwitchOff()
-    )
+    handler_module._send_batch_summary("hold-1", progress, _NOW, object(), _KillSwitchOff())
 
 
 # --- Issue #117 Phase B1b-3c: 実行モード別のLINE client構築を実際に通す ---
