@@ -25,6 +25,7 @@ FAILすることを確認したうえで本ファイルを完成させた)。
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -90,16 +91,48 @@ def _construct_intrinsic(loader: yaml.SafeLoader, suffix: str, node: yaml.Node) 
     return {f"Fn::{suffix}": loader.construct_mapping(node, deep=True)}
 
 
-def _load_template() -> dict[str, Any]:
+def _load_template_text(text: str) -> dict[str, Any]:
     class _Loader(yaml.SafeLoader):
         pass
 
     _Loader.add_multi_constructor("!", _construct_intrinsic)
-    return yaml.load(_TEMPLATE_PATH.read_text(encoding="utf-8"), Loader=_Loader)
+    return yaml.load(text, Loader=_Loader)
+
+
+def _load_template() -> dict[str, Any]:
+    return _load_template_text(_TEMPLATE_PATH.read_text(encoding="utf-8"))
 
 
 def _template() -> dict[str, Any]:
     return _load_template()
+
+
+def _remove_first_line_within_resource(
+    text: str, resource_name: str, line_to_remove: str
+) -> str:
+    """`resource_name`のresourceブロック内(次のtop-levelキーまたはEOFまで)に
+    限定して、`line_to_remove`と完全一致する最初の行を1行削除したテキストを返す。
+
+    ★ counter-evidence用のmutation helper。実ファイルは変更しない(on-diskの
+    template.yamlへは一切書き込まない)。同一の行内容が複数resourceに現れる
+    ため(5つのresource policyがいずれも同じallow-list行を持つ)、対象resourceの
+    ブロックへ限定しないと無関係な箇所を削ってしまう。
+    """
+    start_marker = f"\n  {resource_name}:\n"
+    start = text.index(start_marker) + 1  # 先頭の"\n"は次のresourceの終端として残す
+    # 次のtop-level resourceキー(2スペースインデント丁度+英字)を探す。property自体は
+    # 4スペース以上でインデントされるため、単純な"\n  "だけだとネストしたproperty行
+    # (例: "\n    Type:")にも誤って一致してしまう(3文字先頭一致のため)。
+    next_resource_match = re.search(r"\n  [A-Za-z]", text[start + len(start_marker) - 1 :])
+    end = (
+        start + len(start_marker) - 1 + next_resource_match.start()
+        if next_resource_match is not None
+        else len(text)
+    )
+    block = text[start:end]
+    assert line_to_remove in block, "line_to_removeがblock内に見つからない(前提が崩れている)"
+    mutated_block = block.replace(line_to_remove, "", 1)
+    return text[:start] + mutated_block + text[end:]
 
 
 def _resources() -> dict[str, Any]:
@@ -112,6 +145,10 @@ def _parameters() -> dict[str, Any]:
 
 def _conditions() -> dict[str, Any]:
     return _template()["Conditions"]
+
+
+def _rules() -> dict[str, Any]:
+    return _template()["Rules"]
 
 
 def _resource_policy_names() -> list[str]:
@@ -174,6 +211,51 @@ def test_the_condition_is_derived_from_the_toggle_parameter() -> None:
     assert condition == {"Fn::Equals": [{"Fn::Ref": "SecretResourcePolicyEnabled"}, "true"]}
 
 
+# --- サブちゃんレビュー指摘F1対応: placeholder ARNのままEnabled=trueにすると
+# 全員lockoutすることを、stack操作時に機械的に拒否するCloudFormation Rules ------
+
+
+def test_the_rule_only_applies_when_the_toggle_is_true() -> None:
+    """Rulesの評価対象はSecretResourcePolicyEnabled=trueの場合のみ(false運用時に
+    placeholder ARNのままでも既存のstack更新を妨げない)。
+    """
+    rule = _rules()["SecretResourcePolicyRequiresRealPrincipals"]
+    assert rule["RuleCondition"] == {
+        "Fn::Equals": [{"Fn::Ref": "SecretResourcePolicyEnabled"}, "true"]
+    }
+
+
+def test_the_rule_rejects_the_exact_placeholder_defaults() -> None:
+    """RuleのAssertionが、AdminPrincipalArn/DeployPrincipalArnの**実際のDefault値
+    そのもの**と一致することを固定する(Parameter側のDefaultだけを変更してRule側の
+    文字列を追従させ忘れると、ガードが静かに無効化されるため、両者の一致自体を
+    テストで縛る)。
+    """
+    admin_default = _parameters()["AdminPrincipalArn"]["Default"]
+    deploy_default = _parameters()["DeployPrincipalArn"]["Default"]
+    assertions = _rules()["SecretResourcePolicyRequiresRealPrincipals"]["Assertions"]
+    assert len(assertions) == 2
+    assert assertions[0]["Assert"] == {
+        "Fn::Not": [{"Fn::Equals": [{"Fn::Ref": "AdminPrincipalArn"}, admin_default]}]
+    }
+    assert assertions[1]["Assert"] == {
+        "Fn::Not": [{"Fn::Equals": [{"Fn::Ref": "DeployPrincipalArn"}, deploy_default]}]
+    }
+
+
+def test_the_rule_is_removed_if_someone_deletes_it_is_detected() -> None:
+    """★ 検査そのものの確認: Rulesセクション自体が丸ごと削除されても、上記2つの
+    テストが(KeyErrorという形で)検知することを、実際にon-disk template.yamlの
+    テキストからRulesセクションを削除した状態を再parseして確認する。
+    """
+    original_text = _TEMPLATE_PATH.read_text(encoding="utf-8")
+    rules_start = original_text.index("\nRules:\n")
+    resources_start = original_text.index("\nResources:\n", rules_start)
+    mutated_text = original_text[: rules_start + 1] + original_text[resources_start + 1 :]
+    mutated_template = _load_template_text(mutated_text)
+    assert "Rules" not in mutated_template
+
+
 # --- 各resource policyの内容 --------------------------------------------------
 
 
@@ -221,24 +303,49 @@ def test_the_other_four_secrets_allowlist_only_admin_and_deploy() -> None:
 
 
 def test_missing_admin_principal_from_the_allowlist_is_detected() -> None:
-    """★ 検査そのものの確認: allow-listからAdminPrincipalArnが1件でも
-    欠けていれば、上記の等価比較テストが検知する(空振りしない)ことを、
-    意図的に欠落させた比較で確認する。
+    """★ 検査そのものの確認(サブちゃんレビュー指摘F3対応): allow-listから
+    AdminPrincipalArnが1件でも欠ければ検知できることを、**実際にon-disk
+    template.yamlのテキストからその行を削除した状態を再parseして**確認する
+    (mutationはメモリ上のみで行い、実ファイルへは書き込まない)。
+
+    旧実装は`_allowlisted_principals()`が返した(常に正しい)listをPython側で
+    filterした結果同士を比較するだけで、実テンプレートを一切変更していなかった
+    ため、実際にtemplate.yamlからADMIN行を消しても常に緑のままだった
+    (空振りする検査)。本テストはこれを是正する。
     """
-    allowlist = _allowlisted_principals(_statement("EdinetApiKeySecretResourcePolicy"))
-    mutated = [p for p in allowlist if p != {"Fn::Ref": "AdminPrincipalArn"}]
-    assert mutated != _COMMON_ALLOWLIST
-    assert len(mutated) == len(_COMMON_ALLOWLIST) - 1
+    original_text = _TEMPLATE_PATH.read_text(encoding="utf-8")
+    mutated_text = _remove_first_line_within_resource(
+        original_text,
+        "EdinetApiKeySecretResourcePolicy",
+        "                  - !Ref AdminPrincipalArn\n",
+    )
+    mutated_template = _load_template_text(mutated_text)
+    statement = mutated_template["Resources"]["EdinetApiKeySecretResourcePolicy"][
+        "Properties"
+    ]["ResourcePolicy"]["Statement"][0]
+    mutated_allowlist = statement["Condition"]["StringNotEquals"]["aws:PrincipalArn"]
+    assert mutated_allowlist != _COMMON_ALLOWLIST
+    assert {"Fn::Ref": "AdminPrincipalArn"} not in mutated_allowlist
 
 
 def test_missing_a_runtime_role_from_the_github_app_allowlist_is_detected() -> None:
-    """★ 同上: GithubAppSecretのallow-listからruntime roleが1件でも
-    欠けていれば検知できることを確認する。
+    """★ 同上(サブちゃんレビュー指摘F3と同型の欠陥を併せて是正): GithubAppSecretの
+    allow-listからruntime roleが1件でも欠ければ検知できることを、実際に
+    on-disk template.yamlのテキストからその行を削除した状態を再parseして確認する。
     """
-    allowlist = _allowlisted_principals(_statement("GithubAppSecretResourcePolicy"))
-    mutated = [p for p in allowlist if p != {"Fn::GetAtt": "IncidentNotifierFunctionRole.Arn"}]
-    assert mutated != allowlist
-    assert len(mutated) == len(allowlist) - 1
+    original_text = _TEMPLATE_PATH.read_text(encoding="utf-8")
+    mutated_text = _remove_first_line_within_resource(
+        original_text,
+        "GithubAppSecretResourcePolicy",
+        "                  - !GetAtt IncidentNotifierFunctionRole.Arn\n",
+    )
+    mutated_template = _load_template_text(mutated_text)
+    statement = mutated_template["Resources"]["GithubAppSecretResourcePolicy"][
+        "Properties"
+    ]["ResourcePolicy"]["Statement"][0]
+    mutated_allowlist = statement["Condition"]["StringNotEquals"]["aws:PrincipalArn"]
+    assert {"Fn::GetAtt": "IncidentNotifierFunctionRole.Arn"} not in mutated_allowlist
+    assert len(mutated_allowlist) == len(_COMMON_ALLOWLIST) + len(_GITHUB_APP_EXTRA_ALLOWLIST) - 1
 
 
 def test_no_resource_policy_statement_has_a_wildcard_resource_string() -> None:

@@ -4172,6 +4172,116 @@ Event Source Mappingを止めるのが通常の緊急停止の順序)。
   Phase 3有効化後のみ
 ```
 
+## 35. Secretsリソースポリシー(第二の防壁)の有効化前提・lockout時の復旧手順(Issue #680、#133 UNIT2、2026-09-28追加)
+
+Issue #680は`SecretResourcePolicyEnabled`(既定`false`)で、jstockが保持する
+Secrets Managerシークレット5件へ、identity policyとは独立したresource
+policy(allow-listに無いprincipalをexplicit Denyする「第二の防壁」)を適用する
+機構を追加した。**本節執筆時点でこの機構は無効(コード・IaCのmerge単独では
+AWS上の状態は変更されない)であり、本節の手順はEnabled=true適用(別Human
+Gate)後にのみ必要になる。**
+
+### 35.1 Enabled=true適用前の必須前提(machine-enforced + human確認の両方)
+
+```
+機械的に強制されるもの(infra/template.yamlのRulesセクション、Issue #680)
+  SecretResourcePolicyEnabled=trueかつAdminPrincipalArn/DeployPrincipalArn
+  のいずれかが既定のダミー値のままだと、stack操作(create-change-set等)
+  自体が失敗する(CloudFormation Rulesによる機械的拒否)。
+
+human判断が必要なもの(Rulesでは検証できない)
+  1  AdminPrincipalArn/DeployPrincipalArnへ設定する値は、IAM roleの
+     ARN自体(arn:aws:iam::<account>:role/<name>)であり、CloudTrail・
+     AWS Console・AccessDeniedExceptionメッセージ等で表示される
+     sts::assumed-role形式(arn:aws:sts::<account>:assumed-role/<name>/
+     <session>)ではない。後者をそのまま設定すると、aws:PrincipalArn
+     条件キーの実際の評価値(IAM role自体のARN)と一致せず、allow-list
+     が機能しない(=そのprincipalがDenyされる)。
+  2  管理者principalがAWS SSO(IAM Identity Center)経由のroleである
+     場合、実際のARNは`arn:aws:iam::<account>:role/aws-reserved/
+     sso.amazonaws.com/<region>/AWSReservedSSO_<permission-set-name>_
+     <hash>`という長い形式になる。**permission setの削除・再作成
+     (名称は同じでも内部hashが変わる)で、このARNは静かに変わる**。
+     SSO経由の管理者principalを設定する場合は、permission setの
+     再作成がAdminPrincipalArnの値を陳腐化させうることを運用者が
+     認識しておくこと(自動検知の仕組みは無い。#680のscope外)。
+  3  Enabled=true適用前に、iam:SimulatePrincipalPolicy(read-only)で
+     次の両方を確認すること(Issue #680 PRのsimulation planへ追加):
+       a  許可されるべきprincipal(Admin/Deploy/2 runtime role)が、
+          対象の7 actionについて実際に許可されること
+       b  allow-list外の既存principal(例: 他workloadのrole)が、
+          実際に拒否されること
+       c  ★ **AdminPrincipalArn自身が、対象secretへの
+          secretsmanager:DeleteResourcePolicy/PutResourcePolicyを
+          実行できること**(35.2節のlockout復旧経路が実際に機能する
+          ことの事前確認。Admin principalのidentity policy側で
+          この権限が無ければ、35.2節の復旧経路は成立しない)
+```
+
+### 35.2 lockout発生時の復旧手順(deploy principalが締め出された場合)
+
+resource policyのexplicit Denyは、意図しない設定(誤ったARN・allow-list
+からの意図しない除外)が発生した場合、**deploy principal自身が対象secretへの
+7 action(GetSecretValue等)を拒否される**状態になりうる。この場合、通常の
+「code revertしてChangeSetを再適用する」というrollbackは**そのままでは
+機能しない**(ChangeSet実行はdeploy principalの認証情報で行われるため、
+resource policyを修正するChangeSetの適用自体が同じDenyの対象になる。
+循環的な自己ロックアウト)。
+
+```
+★ 重要な前提: account rootがexplicit Denyを上書きできるかは未検証。
+  Secrets Managerのresource-based policyがroot principalを自動的に
+  除外するかどうかは、AWS操作を伴う実機検証が必要であり、本Issueの
+  read-only設計フェーズでは確認していない。**「rootなら直せる」を
+  復旧計画の前提にしない。**
+
+復旧手順(deploy principalがlockoutされた場合)
+  1  deploy principalではなく、**AdminPrincipalArn principal**の認証
+     情報を使う(allow-listに含まれるため、対象secretへのDeny対象
+     7 actionが引き続き許可される。35.1節3-cで事前確認済みであること
+     が前提)。
+  2  Admin principalとして、以下いずれかの方法でresource policyを
+     修正する:
+       a(推奨)Admin principalの認証情報でsam deploy/aws cloudformation
+         update-stackを実行し、正しいAdminPrincipalArn/
+         DeployPrincipalArn(または誤って除外されたallow-listエントリ)
+         を修正したtemplateを再適用する(通常のChangeSet手順と同じ)。
+       b(緊急回避、CFN状態とのdrift注意)Admin principalの認証情報で
+         `aws secretsmanager delete-resource-policy --secret-id <secret
+         ARN>`を直接実行し、resource policyを即座に除去する。この方法は
+         CloudFormationのstack状態を経由しないため、**実施後は速やかに
+         (a)の手順でtemplateとの整合を取り戻すこと**(そのままでは次回
+         のstack更新時にCloudFormationが「resourceの実際の状態がstackの
+         認識と食い違っている」形でdrift検知・エラーになりうる)。
+  3  修正後、deploy principalが再び対象secretへアクセスできることを
+     確認する(read-only確認。GetSecretValue等の実行結果で確認)。
+```
+
+```
+★ 本手順が機能する前提そのもの(AdminPrincipalArnのidentity policyが
+  secretsmanager:DeleteResourcePolicy等を実際に許可していること)は、
+  35.1節3-cのsimulationで**Enabled=true適用前に必ず確認しておくこと**。
+  この事前確認を怠ると、本節の復旧手順自体が機能しない状態でlockoutが
+  発生しうる。
+```
+
+### 35.3 #137(PITR・削除保護)との関係
+
+本節の対象はresource policyによるアクセス拒否(lockout)であり、#137が
+扱うデータの誤削除・誤更新からの復旧(PITR)とは別種の障害である。
+resource policyのlockoutはsecret item自体を削除・破損しないため、PITRでの
+復旧対象ではない(#138の責務分離〔本文の#137/#138責務差〕と同じ考え方を
+lockout/data-loss軸へ適用したもの)。
+
+### 35.4 参考
+
+```
+・Issue #680(PR本文にProduction適用前simulation計画の詳細)
+・#133(secretsmanager least privilege調査、本機構の発見契機)
+・#164(deploy principal自体のlong-term credential是正。DeployPrincipalArn
+  の値が#164の変更と同期する必要がある)
+```
+
 本節はIssue #533(#319 Phase 2)として追加した。実際のChangeSet CREATE/
 EXECUTE・SQS dispatch有効化(Phase 3)はいずれも別Human Gateであり、本節の
 追加自体・Phase 2の実装自体によってもProduction上の挙動は変わらない
