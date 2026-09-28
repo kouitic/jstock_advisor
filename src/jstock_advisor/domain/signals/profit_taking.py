@@ -176,7 +176,11 @@ class ProfitTakingConditionInputs:
     # ことが多い。適正価格単独での強い判定を許すゲートの1つ)。
     industry_model_applied: bool = False
     # profit_taking_industry.pyの区分(classify_profit_taking_industry_sector()の
-    # 戻り値)。表示用途(_INDUSTRY_SECTOR_LABELS等)にのみ使う。
+    # 戻り値)。表示用途(_INDUSTRY_SECTOR_LABELS等)に加え、GENERAL業種の場合のみ
+    # _extra_action_gates_met()のindustry_model_applied代替条件としても使う
+    # (Issue #583。#208で恒久的にindustry_model_applied=Falseとなることが判明した
+    # ため、専用モデル実装コストが不要なGENERAL業種に限り、この欠落だけでゲートを
+    # 塞がないようにする。BANKING等の専用モデル対象業種は従来どおり適用を要求する)。
     industry_sector: ProfitTakingIndustrySector | None = None
     # 再コードレビュー対応(2026-08、指摘5): ceiling_price(fair_value_range.bull)を
     # 上値余地グリッドの主要根拠として使ってよいかの業種別ゲート
@@ -696,9 +700,20 @@ def _extra_action_gates_met(
     _fair_value_partial_gate_metのみで課す。HIGH信頼度の強いFULL条件
     (_fair_value_strong_condition)は、含み益がわずかでも適正価格が著しく
     乖離していれば成立するという既存の設計を維持するため、ここには含めない。
+
+    Issue #583: industry_model_appliedは#208の調査により恒久的にFalseと
+    なることが判明している。専用モデルの実装コストが無いGENERAL業種
+    (`ProfitTakingIndustrySector.GENERAL`)に限り、industry_model_applied
+    のOR条件としてindustry_sector==GENERALでもゲートを開く。BANKING等の
+    専用モデル対象業種、および業種未分類(None)は従来どおりindustry_model_
+    appliedの成立を要求する(安全側を維持)。
     """
-    return (
+    industry_model_ok = (
         inputs.industry_model_applied
+        or inputs.industry_sector == ProfitTakingIndustrySector.GENERAL
+    )
+    return (
+        industry_model_ok
         and inputs.days_to_next_earnings_business_days is not None
         and inputs.days_to_next_earnings_business_days >= min_earnings_business_days
         and inputs.partial_sale_executable
