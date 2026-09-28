@@ -4205,18 +4205,105 @@ human判断が必要なもの(Rulesでは検証できない)
      SSO経由の管理者principalを設定する場合は、permission setの
      再作成がAdminPrincipalArnの値を陳腐化させうることを運用者が
      認識しておくこと(自動検知の仕組みは無い。#680のscope外)。
-  3  Enabled=true適用前に、iam:SimulatePrincipalPolicy(read-only)で
-     次の両方を確認すること(Issue #680 PRのsimulation planへ追加):
-       a  許可されるべきprincipal(Admin/Deploy/2 runtime role)が、
-          対象の7 actionについて実際に許可されること
-       b  allow-list外の既存principal(例: 他workloadのrole)が、
-          実際に拒否されること
-       c  ★ **AdminPrincipalArn自身が、対象secretへの
-          secretsmanager:DeleteResourcePolicy/PutResourcePolicyを
-          実行できること**(35.2節のlockout復旧経路が実際に機能する
-          ことの事前確認。Admin principalのidentity policy側で
-          この権限が無ければ、35.2節の復旧経路は成立しない)
+  3  下記「IAM Policy Simulatorの適用範囲」を参照。role principalに
+     ついてsimulationだけでno-lockoutを確認することはできない
+     (RESIDUAL_RISK)。
 ```
+
+★★ **IAM Policy Simulator(`iam:SimulatePrincipalPolicy`)には、
+AdminPrincipalArn/DeployPrincipalArn(いずれもSSO由来のIAM role)・
+IncidentNotifierFunctionRole/WeeklyReviewFunctionRole(いずれも
+Lambda実行role)という本Issueの全principalに対して、resource policy
+込みのend-to-end評価(no-lockout確認)ができないという制約がある
+(2026-09-28、USER Human Gate指摘F7で判明。旧版の本節・Issue #680 PR
+本文にあった「simulationでADMIN/DEPLOY/RUNTIMEのlockoutを確認する」
+という記述は誤りであり、削除した)。**
+
+#### IAM Policy Simulatorの適用範囲(用語定義)
+
+用語(AWS公式ドキュメント`SimulatePrincipalPolicy` APIリファレンス・
+IAM User Guide「IAM policy testing with the IAM policy simulator」に
+基づく):
+
+```
+IDENTITY_POLICY_CHECK
+  PolicySourceArn=対象role、ResourcePolicyパラメータ無しでの
+  simulation。そのroleのidentity-based policy側の許可のみを評価する。
+  IAM roleに対しても機能する(PolicySourceArnはuser/group/role
+  いずれでもよい)。ただしresource-based policy(本Issueのexplicit
+  Deny)を一切考慮しないため、「resource policyがあっても最終的に
+  allowされるか(=lockoutしないか)」の確認にはならない。
+
+RESOURCE_POLICY_CHECK_FOR_IAM_USER
+  PolicySourceArnがIAM userの場合に限り、ResourcePolicyパラメータへ
+  実際のresource-based policy文字列を渡すことで、identity policyと
+  resource-based policyを合成したend-to-end評価が可能(AWS公式:
+  「You can also optionally include one resource-based policy to be
+  evaluated ... for IAM users only.」)。本Issueのprincipalは全て
+  roleであり、この経路は使えない。
+
+RESOURCE_POLICY_CHECK_FOR_IAM_ROLE
+  非対応。AWS公式ドキュメント(SimulatePrincipalPolicy APIリファレンス、
+  `ResourceArns`/`ResourcePolicy`パラメータの説明)に明記:
+  「Simulation of resource-based policies isn't supported for IAM
+  roles.」また、resourceのpolicyはsimulatorが自動取得しない
+  (「The simulation does not automatically retrieve policies for the
+  specified resources.」)ため、そもそも自動的にresource policyが
+  加味されることも無い。
+```
+
+#### RESIDUAL_RISKへの対処(Enabled=true適用前に組み合わせるもの)
+
+**RESIDUAL_RISK**(role principalについて、pre-apply simulationでは
+resource policy込みのend-to-end許可を機械的に証明できない)への対処
+として、Enabled=true適用前は以下a〜eを組み合わせる(simulation単独に
+依存しない):
+
+```
+a  IDENTITY_POLICY_CHECK
+   AdminPrincipalArn/DeployPrincipalArn/2 runtime roleそれぞれの
+   identity-based policyが、対象secretへの7 action(resource
+   policyのAction一覧と同一: GetSecretValue/PutSecretValue/
+   DeleteSecret/UpdateSecret/RotateSecret/PutResourcePolicy/
+   DeleteResourcePolicy)を許可していることをSimulatePrincipalPolicy
+   で確認する(resource policyは考慮されないため、これは必要条件の
+   一部にすぎない)。
+
+b  RESOURCE_POLICY_STATIC_REVIEW(静的検証。simulationの代替)
+   resource policy自体(`infra/template.yaml`の各
+   `*SecretResourcePolicy`リソース)のCondition[StringNotEquals]
+   allow-listに、AdminPrincipalArn/DeployPrincipalArn/
+   IncidentNotifierFunctionRole.Arn/WeeklyReviewFunctionRole.Arnの
+   4者が過不足なく列挙されていることを、テンプレートを直接読んで
+   確認する。この4者はCloudFormationの`!Ref`/`!GetAtt`で本文と同一
+   値を参照するため、パラメータ値さえ正しければ(下記c)、resource
+   policy側でこの4者がDenyされないことは構成上保証される
+   (`test_issue_680_secret_resource_policy.py`が同じ4者allow-list
+   を回帰的に固定していることも参照)。
+
+c  principal ARN fresh確認(本節1・2で既述)
+   AdminPrincipalArn/DeployPrincipalArnへ設定する値が、role ARN自体
+   (sts::assumed-role形式ではない)であり、SSO permission setの
+   再作成等で陳腐化していない直近の実際の値であることを、ChangeSet
+   CREATE直前にfreshに確認する。
+
+d  適用後の即時verification(pre-apply simulationの代わりにend-to-end
+   許可を確認する唯一の実測手段)
+   ChangeSet EXECUTE直後に、a〜cの机上確認ではなく実際のAWS呼び出し
+   (GetSecretValue等、read-only)でADMIN/DEPLOY/2 runtime roleの
+   アクセスが引き続き許可されることを実測確認する。想定外の
+   AccessDeniedが発生した場合は即座に35.2節の復旧手順へ進む。
+
+e  rollback/lockout復旧準備
+   dの実測確認で問題が見つかった場合に備え、35.2節の復旧手順
+   (AdminPrincipalArn principalでの復旧)がすぐ実行できる状態
+   (認証情報・実行権限を事前に用意した状態)でEXECUTEに臨む。
+```
+
+**a〜eの組み合わせであっても、pre-apply時点での数学的証明ではない
+(dが実際の初回証跡)。これは受容されたRESIDUAL_RISKであり、role
+principalについて「simulationで(resource policy込みの)no-lockoutを
+確認済み」という表現は用いない。**
 
 ### 35.2 lockout発生時の復旧手順(deploy principalが締め出された場合)
 
@@ -4238,8 +4325,9 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
 復旧手順(deploy principalがlockoutされた場合)
   1  deploy principalではなく、**AdminPrincipalArn principal**の認証
      情報を使う(allow-listに含まれるため、対象secretへのDeny対象
-     7 actionが引き続き許可される。35.1節3-cで事前確認済みであること
-     が前提)。
+     7 actionが引き続き許可される。35.1節RESIDUAL_RISK a〜cで事前
+     確認・dで実測確認済みであることが前提。roleに対するresource
+     policy込みのsimulationはできない点に注意)。
   2  Admin principalとして、以下いずれかの方法でresource policyを
      修正する:
        a(推奨)Admin principalの認証情報でsam deploy/aws cloudformation
@@ -4260,7 +4348,11 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
 ```
 ★ 本手順が機能する前提そのもの(AdminPrincipalArnのidentity policyが
   secretsmanager:DeleteResourcePolicy等を実際に許可していること)は、
-  35.1節3-cのsimulationで**Enabled=true適用前に必ず確認しておくこと**。
+  35.1節RESIDUAL_RISK a(IDENTITY_POLICY_CHECK)・b(静的検証)で
+  **Enabled=true適用前に必ず確認しておくこと**。ただし、AdminPrincipalArn
+  はIAM roleであるため、resource policy込みのend-to-end許可を
+  simulationで証明することはできない(35.1節参照)。dの適用後即時
+  verificationまでが本手順の実効性を担保する一連の確認である。
   この事前確認を怠ると、本節の復旧手順自体が機能しない状態でlockoutが
   発生しうる。
 ```
@@ -4280,6 +4372,15 @@ lockout/data-loss軸へ適用したもの)。
 ・#133(secretsmanager least privilege調査、本機構の発見契機)
 ・#164(deploy principal自体のlong-term credential是正。DeployPrincipalArn
   の値が#164の変更と同期する必要がある)
+・AWS公式ドキュメント(35.1節のIAM Policy Simulator制約の根拠。
+  2026-09-28、USER Human Gate指摘F7対応で確認):
+  - IAM User Guide「IAM policy testing with the IAM policy simulator」
+    https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_testing-policies.html
+  - IAM API Reference「SimulatePrincipalPolicy」
+    (`ResourcePolicy`/`ResourceArns`パラメータの説明に
+    "Simulation of resource-based policies isn't supported for IAM
+    roles." と明記)
+    https://docs.aws.amazon.com/IAM/latest/APIReference/API_SimulatePrincipalPolicy.html
 ```
 
 本節はIssue #680(#133 UNIT2)として追加した。実際のChangeSet CREATE/
