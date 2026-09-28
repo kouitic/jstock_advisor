@@ -19,8 +19,19 @@
 
 本テストは、この設計が意図どおりの形でtemplate.yamlに書かれていること、
 および allow-list からintended principalのいずれか1つでも欠けると
-検知できることを固定する(counter-evidence: 実際に1件ずつ欠落させて
-FAILすることを確認したうえで本ファイルを完成させた)。
+検知できることを固定する。
+
+counter-evidenceとして個別のmutation test(on-disk template.yamlの
+テキストから該当行を実際に削除し再parseする形)を用意しているのは
+AdminPrincipalArn(全5secret共通のallow-list代表)とGithubAppSecretの
+runtime role 1件(IncidentNotifierFunctionRole)の2件のみである。
+DeployPrincipalArn・WeeklyReviewFunctionRoleには専用のmutation testは
+無いが、これらが欠落した場合も
+test_the_other_four_secrets_allowlist_only_admin_and_deploy /
+test_github_app_secret_allowlist_includes_admin_deploy_and_both_runtime_roles
+側のallow-list完全一致比較(`allowlist == 期待値`)が検知する
+(実際にDeployPrincipalArnの参照を一時的に削除し、上記テストがFAILする
+ことを確認したうえで復元済み)。
 """
 
 from __future__ import annotations
@@ -70,6 +81,11 @@ _COMMON_ALLOWLIST: list[Any] = [
 #: `!GetAtt Foo.Bar`(scalar短縮形)はFn::GetAttの値が"Foo.Bar"というドット
 #: 結合の文字列になる(`Fn::GetAtt: [Foo, Bar]`という長形式とは異なる表現。
 #: 意味は同一)。
+#: ★ Issue #696: この一覧(resource policy層)と、UNIT1
+#: (tests/unit/test_infra_issue_133_secretsmanager_least_privilege.pyの
+#: _EXPECTED_SECRETSMANAGER_PRINCIPALS、identity policy層)は独立に
+#: ハードコードされており、一方を更新しても他方への追従を機械的には
+#: 検知できない。この一覧を更新する場合はUNIT1側も併せて確認すること。
 _GITHUB_APP_EXTRA_ALLOWLIST = [
     {"Fn::GetAtt": "IncidentNotifierFunctionRole.Arn"},
     {"Fn::GetAtt": "WeeklyReviewFunctionRole.Arn"},

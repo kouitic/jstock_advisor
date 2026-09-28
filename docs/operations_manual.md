@@ -4282,7 +4282,7 @@ lockout/data-loss軸へ適用したもの)。
   の値が#164の変更と同期する必要がある)
 ```
 
-本節はIssue #533(#319 Phase 2)として追加した。実際のChangeSet CREATE/
-EXECUTE・SQS dispatch有効化(Phase 3)はいずれも別Human Gateであり、本節の
-追加自体・Phase 2の実装自体によってもProduction上の挙動は変わらない
+本節はIssue #680(#133 UNIT2)として追加した。実際のChangeSet CREATE/
+EXECUTE・SecretResourcePolicyEnabled有効化はいずれも別Human Gateであり、
+本節の追加自体・IaC定義の追加自体によってもProduction上の挙動は変わらない
 (トグルの既定はfalseのまま)。

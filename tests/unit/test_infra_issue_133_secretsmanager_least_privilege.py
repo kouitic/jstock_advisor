@@ -55,6 +55,11 @@ _SENSITIVE_SECRETSMANAGER_ACTIONS = {
 # 2026-09-27時点でsecretsmanager権限を持つことが確認済みの関数。
 # 新しい関数をここへ追加する場合は、Resourceがexact ARN(wildcardでない)
 # であることを別途確認したうえで追加すること。
+# ★ Issue #696: この集合(identity policy層)と、#680(resource policy層、
+# tests/unit/test_issue_680_secret_resource_policy.pyのGithubApp用
+# allow-list)は独立にハードコードされており、一方を更新しても他方への
+# 追従を機械的には検知できない。この集合を更新する場合は#680のallow-list
+# も併せて確認すること。
 _EXPECTED_SECRETSMANAGER_PRINCIPALS = {
     "IncidentNotifierFunction",
     "WeeklyReviewFunction",
