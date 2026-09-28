@@ -18,6 +18,7 @@ from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.lambda_handlers import holdings_watchlist_handler
 from jstock_advisor.lambda_handlers import holdings_watchlist_worker_handler as worker_module
+from tests.factories import FakeMarketDataProvider
 
 _NOW = dt.datetime(2026, 8, 24, 7, 0, tzinfo=dt.UTC)
 
@@ -26,13 +27,12 @@ def _sqs_event(body: dict[str, object]) -> dict[str, object]:
     return {"Records": [{"body": json.dumps(body)}]}
 
 
-class _FakeMarketData:
-    def get_latest_price(self, stock_code: str) -> object | None:
-        return None
-
-
 class _FakeProviders:
-    market_data = _FakeMarketData()
+    def __init__(self) -> None:
+        # サブちゃんレビュー対応(PR #686): FakeMarketDataProviderは
+        # self.callsという可変状態を持つため、instance属性とする
+        # (テスト間の状態共有を避ける)。
+        self.market_data = FakeMarketDataProvider()
 
 
 def _holding(stock_code: str) -> Holding:
@@ -166,9 +166,7 @@ def test_validation_mode_logs_the_same_diagnostic_marker_as_the_legacy_branch(
     with caplog.at_level("INFO", logger=worker_module.logger.name):
         worker_module.handler(event, object())
 
-    assert any(
-        "VALIDATION MODE task=holding" in record.message for record in caplog.records
-    )
+    assert any("VALIDATION MODE task=holding" in record.message for record in caplog.records)
 
 
 def test_process_one_matches_direct_task_branch_result(monkeypatch: pytest.MonkeyPatch) -> None:

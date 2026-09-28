@@ -37,7 +37,7 @@ from jstock_advisor.infrastructure.local_repository.evaluation_repository import
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
-from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot
+from jstock_advisor.interfaces.types import PriceBar, PriceHistory
 from jstock_advisor.providers.market_data.mock_impl import MockMarketDataProvider
 from jstock_advisor.services import line_notification_service as line_module
 from jstock_advisor.services.profit_taking_service import ProfitTakingService
@@ -45,6 +45,7 @@ from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
 )
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+from tests.factories import FakeMarketDataProvider
 from tests.unit.test_buy_signal_service import (
     _CALENDAR as _BUY_CALENDAR,
 )
@@ -265,8 +266,12 @@ def calendar(config: AppConfig) -> BusinessCalendar:
 
 def _bar(date: dt.date, *, high: str, low: str, close: str) -> PriceBar:
     return PriceBar(
-        date=date, open=Decimal(close), high=Decimal(high), low=Decimal(low),
-        close=Decimal(close), volume=1000,
+        date=date,
+        open=Decimal(close),
+        high=Decimal(high),
+        low=Decimal(low),
+        close=Decimal(close),
+        volume=1000,
     )
 
 
@@ -275,22 +280,16 @@ _FAKE_SOURCE = DataSourceReference(
 )
 
 
-class _FakeMarketDataProvider:
-    def __init__(self, bars: list[PriceBar]) -> None:
-        self._bars = bars
-
-    def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
-        return None
-
-    def get_price_history(
-        self, stock_code: str, start: dt.date, end: dt.date
-    ) -> PriceHistory | None:
-        return PriceHistory(symbol=stock_code, bars=self._bars, source=_FAKE_SOURCE)
-
-    def get_benchmark_price_history(
-        self, symbol: str, start: dt.date, end: dt.date
-    ) -> PriceHistory | None:
-        return None
+def _market_data_with_bars(bars: list[PriceBar]) -> FakeMarketDataProvider:
+    """#646(サブちゃんレビュー対応): 本ファイル独自のfakeが`MarketDataProvider`
+    Protocolの4メソッドのうち3件しか実装していなかった(`get_average_trading_
+    value`欠落)。#646が正そうとした欠陥そのものがこのファイルへ残っていた
+    ため、共有fakeへ移行する(挙動は変更しない。symbolはこのテストが
+    `.symbol`を検証しないため固定値でよい)。
+    """
+    return FakeMarketDataProvider(
+        price_history=PriceHistory(symbol="2914", bars=bars, source=_FAKE_SOURCE)
+    )
 
 
 def _make_sell_recommendation(recommended_at: dt.datetime) -> Recommendation:
@@ -350,7 +349,7 @@ def test_sell_price_reach_direction_is_high_not_low(
         _bar(dt.date(2026, 8, 5), high="2160", low="2050", close="2100"),
     ]
     service, recommendation_repo = _build_evaluation_service(
-        tmp_path, config, calendar, now, _FakeMarketDataProvider(bars)
+        tmp_path, config, calendar, now, _market_data_with_bars(bars)
     )
     recommendation_repo.save(_make_sell_recommendation(recommended_at))
 
@@ -374,7 +373,7 @@ def test_sell_price_reach_is_true_when_high_actually_reaches_target(
         _bar(dt.date(2026, 8, 4), high="2260", low="2200", close="2250"),
     ]
     service, recommendation_repo = _build_evaluation_service(
-        tmp_path, config, calendar, now, _FakeMarketDataProvider(bars)
+        tmp_path, config, calendar, now, _market_data_with_bars(bars)
     )
     recommendation_repo.save(_make_sell_recommendation(recommended_at))
 
@@ -403,7 +402,7 @@ def test_sell_price_reach_at_exact_boundary_price_is_true(
         _bar(dt.date(2026, 8, 4), high="2200", low="2100", close="2150"),
     ]
     service, recommendation_repo = _build_evaluation_service(
-        tmp_path, config, calendar, now, _FakeMarketDataProvider(bars)
+        tmp_path, config, calendar, now, _market_data_with_bars(bars)
     )
     recommendation_repo.save(_make_sell_recommendation(recommended_at))
 
@@ -438,7 +437,7 @@ def test_sell_price_reach_is_none_not_false_when_no_bars_in_window(
     """
     now = dt.datetime(2026, 8, 10, tzinfo=dt.UTC)
     service, _ = _build_evaluation_service(
-        tmp_path, config, calendar, now, _FakeMarketDataProvider([])
+        tmp_path, config, calendar, now, _market_data_with_bars([])
     )
     rec = _make_sell_recommendation(dt.datetime(2026, 8, 3, 7, 0, tzinfo=dt.UTC))
 
