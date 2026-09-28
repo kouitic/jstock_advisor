@@ -4190,13 +4190,18 @@ Gate)後にのみ必要になる。**
   自体が失敗する(CloudFormation Rulesによる機械的拒否)。
 
 human判断が必要なもの(Rulesでは検証できない)
-  1  AdminPrincipalArn/DeployPrincipalArnへ設定する値は、IAM roleの
-     ARN自体(arn:aws:iam::<account>:role/<name>)であり、CloudTrail・
+  1  AdminPrincipalArnへ設定する値は、IAM roleのARN自体
+     (arn:aws:iam::<account>:role/<name>)であり、CloudTrail・
      AWS Console・AccessDeniedExceptionメッセージ等で表示される
      sts::assumed-role形式(arn:aws:sts::<account>:assumed-role/<name>/
      <session>)ではない。後者をそのまま設定すると、aws:PrincipalArn
      条件キーの実際の評価値(IAM role自体のARN)と一致せず、allow-list
      が機能しない(=そのprincipalがDenyされる)。
+     ★ DeployPrincipalArnはIAM user(2026-09-28 fresh確認。下記参照)
+     のため、この種のsts::assumed-role形式との混同は原理的に起こらない
+     (IAM userはassumeされないため、常にuser自体のARNのみが存在する)。
+     ただし値そのものは陳腐化しうる(#164でdeploy principal自体が
+     変更された場合。本パラメータの同期更新が必要)。
   2  管理者principalがAWS SSO(IAM Identity Center)経由のroleである
      場合、実際のARNは`arn:aws:iam::<account>:role/aws-reserved/
      sso.amazonaws.com/<region>/AWSReservedSSO_<permission-set-name>_
@@ -4205,19 +4210,35 @@ human判断が必要なもの(Rulesでは検証できない)
      SSO経由の管理者principalを設定する場合は、permission setの
      再作成がAdminPrincipalArnの値を陳腐化させうることを運用者が
      認識しておくこと(自動検知の仕組みは無い。#680のscope外)。
-  3  下記「IAM Policy Simulatorの適用範囲」を参照。role principalに
-     ついてsimulationだけでno-lockoutを確認することはできない
-     (RESIDUAL_RISK)。
+  3  下記「IAM Policy Simulatorの適用範囲」を参照。ADMIN(AdminPrincipalArn)
+     ・RUNTIME 2 role(IncidentNotifierFunctionRole/
+     WeeklyReviewFunctionRole)はいずれもIAM roleであり、simulationだけ
+     でno-lockoutを確認することはできない(RESIDUAL_RISK)。DEPLOY
+     (DeployPrincipalArn)はIAM userであり(2026-09-28、サブちゃんレビュー
+     指摘F9でfresh確認)、別経路でend-to-end事前確認が可能である。
 ```
 
-★★ **IAM Policy Simulator(`iam:SimulatePrincipalPolicy`)には、
-AdminPrincipalArn/DeployPrincipalArn(いずれもSSO由来のIAM role)・
-IncidentNotifierFunctionRole/WeeklyReviewFunctionRole(いずれも
-Lambda実行role)という本Issueの全principalに対して、resource policy
-込みのend-to-end評価(no-lockout確認)ができないという制約がある
-(2026-09-28、USER Human Gate指摘F7で判明。旧版の本節・Issue #680 PR
-本文にあった「simulationでADMIN/DEPLOY/RUNTIMEのlockoutを確認する」
-という記述は誤りであり、削除した)。**
+★★ **IAM Policy Simulator(`iam:SimulatePrincipalPolicy`)がresource
+policy込みのend-to-end評価(no-lockout確認)に使えるかどうかは、
+principalがIAM role/IAM userのどちらかで異なる(2026-09-28、USER
+Human Gate指摘F7・サブちゃんレビュー指摘F9で判明)。**
+
+```
+principal種別のfresh確認結果(read-only、jstock-observer profile)
+  AdminPrincipalArn         = IAM role(AWS SSO/IAM Identity Center経由)
+  DeployPrincipalArn        = IAM user(Issue #164が問題とする、長期
+                              access key・広範権限を持つ既存のIAM user
+                              と一致。roleの一時credentialではない)
+  IncidentNotifierFunctionRole
+  WeeklyReviewFunctionRole  = いずれもIAM role(Lambda実行role)
+```
+
+旧版の本節・Issue #680 PR本文にあった「AdminPrincipalArn/
+DeployPrincipalArnはいずれもSSO由来のIAM role」という前提(F7時点の
+記述)は誤りであり、削除した。DEPLOYがIAM userである点は、
+`infra/template.yaml`のDeployPrincipalArn Defaultの書式
+(`arn:aws:iam::<account>:user/not-configured`)・resource policy定義
+直前のコメント(「管理者role・deploy user」)とも整合する。
 
 #### IAM Policy Simulatorの適用範囲(用語定義)
 
@@ -4227,10 +4248,10 @@ IAM User Guide「IAM policy testing with the IAM policy simulator」に
 
 ```
 IDENTITY_POLICY_CHECK
-  PolicySourceArn=対象role、ResourcePolicyパラメータ無しでの
-  simulation。そのroleのidentity-based policy側の許可のみを評価する。
-  IAM roleに対しても機能する(PolicySourceArnはuser/group/role
-  いずれでもよい)。ただしresource-based policy(本Issueのexplicit
+  PolicySourceArn=対象principal、ResourcePolicyパラメータ無しでの
+  simulation。そのprincipalのidentity-based policy側の許可のみを
+  評価する。IAM roleに対しても機能する(PolicySourceArnはuser/group/
+  roleいずれでもよい)。ただしresource-based policy(本Issueのexplicit
   Deny)を一切考慮しないため、「resource policyがあっても最終的に
   allowされるか(=lockoutしないか)」の確認にはならない。
 
@@ -4239,8 +4260,8 @@ RESOURCE_POLICY_CHECK_FOR_IAM_USER
   実際のresource-based policy文字列を渡すことで、identity policyと
   resource-based policyを合成したend-to-end評価が可能(AWS公式:
   「You can also optionally include one resource-based policy to be
-  evaluated ... for IAM users only.」)。本Issueのprincipalは全て
-  roleであり、この経路は使えない。
+  evaluated ... for IAM users only.」)。**本IssueではDeployPrincipalArn
+  (IAM user)にこの経路が使える**(2026-09-28 fresh確認)。
 
 RESOURCE_POLICY_CHECK_FOR_IAM_ROLE
   非対応。AWS公式ドキュメント(SimulatePrincipalPolicy APIリファレンス、
@@ -4249,61 +4270,105 @@ RESOURCE_POLICY_CHECK_FOR_IAM_ROLE
   roles.」また、resourceのpolicyはsimulatorが自動取得しない
   (「The simulation does not automatically retrieve policies for the
   specified resources.」)ため、そもそも自動的にresource policyが
-  加味されることも無い。
+  加味されることも無い。**AdminPrincipalArn・2 runtime roleの3者が
+  該当する。**
 ```
 
 #### RESIDUAL_RISKへの対処(Enabled=true適用前に組み合わせるもの)
 
-**RESIDUAL_RISK**(role principalについて、pre-apply simulationでは
-resource policy込みのend-to-end許可を機械的に証明できない)への対処
-として、Enabled=true適用前は以下a〜eを組み合わせる(simulation単独に
-依存しない):
+**RESIDUAL_RISK**(ADMIN・RUNTIME 2 role=IAM roleについて、pre-apply
+simulationではresource policy込みのend-to-end許可を機械的に証明
+できない。DEPLOY=IAM userは下記bで別途end-to-end確認が可能なため
+対象外)への対処として、Enabled=true適用前は以下a〜fを組み合わせる:
 
 ```
 a  IDENTITY_POLICY_CHECK
-   AdminPrincipalArn/DeployPrincipalArn/2 runtime roleそれぞれの
-   identity-based policyが、対象secretへの7 action(resource
-   policyのAction一覧と同一: GetSecretValue/PutSecretValue/
-   DeleteSecret/UpdateSecret/RotateSecret/PutResourcePolicy/
-   DeleteResourcePolicy)を許可していることをSimulatePrincipalPolicy
-   で確認する(resource policyは考慮されないため、これは必要条件の
-   一部にすぎない)。
+   ADMIN/DEPLOYそれぞれのidentity-based policyが、対象secretへの
+   7 action(resource policyのAction一覧と同一: GetSecretValue/
+   PutSecretValue/DeleteSecret/UpdateSecret/RotateSecret/
+   PutResourcePolicy/DeleteResourcePolicy)を許可していることを
+   SimulatePrincipalPolicyで確認する(resource policyは考慮されない
+   ため、ADMINについてはこれは必要条件の一部にすぎない)。
+   ★ RUNTIME 2 role(IncidentNotifierFunctionRole/
+   WeeklyReviewFunctionRole)は、7 actionではなく**secretsmanager:
+   GetSecretValueのみ**を許可していることを確認する(2026-09-28、
+   サブちゃんレビュー指摘F10で修正。両roleの実際のidentity policyは
+   最小権限によりGetSecretValueのみであり、これが正しい状態である。
+   チェックリストを満たすためにPutSecretValue等を追加付与しては
+   ならない。それは#133/#680が縮小しようとしているblast radiusを
+   逆に広げる)。
 
-b  RESOURCE_POLICY_STATIC_REVIEW(静的検証。simulationの代替)
+b  RESOURCE_POLICY_CHECK_FOR_IAM_USER(DEPLOYのみ。pre-apply時点で
+   得られる、simulationによる唯一の真のend-to-end確認)
+   PolicySourceArn=DeployPrincipalArn、ResourcePolicyパラメータへ
+   `infra/template.yaml`の実際のresource policy(該当secretの
+   `*SecretResourcePolicy`定義)を渡し、CallerArnを別途指定せずに
+   simulateする(DeployPrincipalArnがIAM userのため、CallerArn省略時は
+   PolicySourceArnがそのままcallerとして評価される。AWS公式:
+   「If you do not specify a CallerArn, it defaults to the ARN of the
+   ... entity ... in PolicySourceArn.」)。7 actionすべてについて
+   `allowed`となることを確認する。DEPLOYについては、この結果が
+   pre-apply時点での実質的なend-to-end証跡であり、dの適用後
+   verificationは重複確認の位置づけになる。
+
+c  RESOURCE_POLICY_STATIC_REVIEW(静的検証。ADMIN・RUNTIME 2 roleに
+   ついてはsimulationの代替、DEPLOYについてはbの追加的な裏付け)
    resource policy自体(`infra/template.yaml`の各
    `*SecretResourcePolicy`リソース)のCondition[StringNotEquals]
    allow-listに、AdminPrincipalArn/DeployPrincipalArn/
    IncidentNotifierFunctionRole.Arn/WeeklyReviewFunctionRole.Arnの
    4者が過不足なく列挙されていることを、テンプレートを直接読んで
    確認する。この4者はCloudFormationの`!Ref`/`!GetAtt`で本文と同一
-   値を参照するため、パラメータ値さえ正しければ(下記c)、resource
+   値を参照するため、パラメータ値さえ正しければ(下記d)、resource
    policy側でこの4者がDenyされないことは構成上保証される
    (`test_issue_680_secret_resource_policy.py`が同じ4者allow-list
    を回帰的に固定していることも参照)。
+   ★ **negative path**: 上記4者以外のprincipal(allow-list外の既存
+   principal。例: 他workloadのrole)が実際に拒否されることは、
+   simulationではなくこの静的検証(explicit Deny + Principal "*" +
+   Condition[StringNotEquals]という構成上の保証)で確認する
+   (2026-09-28、サブちゃんレビュー指摘F11でPR本文からdurable文書へ
+   明記を移した)。
 
-c  principal ARN fresh確認(本節1・2で既述)
-   AdminPrincipalArn/DeployPrincipalArnへ設定する値が、role ARN自体
-   (sts::assumed-role形式ではない)であり、SSO permission setの
-   再作成等で陳腐化していない直近の実際の値であることを、ChangeSet
-   CREATE直前にfreshに確認する。
+d  principal ARN fresh確認(本節1・2で既述)
+   AdminPrincipalArn/DeployPrincipalArnへ設定する値が、それぞれの
+   principal種別に応じた正しいARN形式(ADMIN=role自体のARN、
+   DEPLOY=user自体のARN。いずれもsts::assumed-role形式ではない)で
+   あり、SSO permission setの再作成等で陳腐化していない直近の実際の
+   値であることを、ChangeSet CREATE直前にfreshに確認する。
 
-d  適用後の即時verification(pre-apply simulationの代わりにend-to-end
-   許可を確認する唯一の実測手段)
-   ChangeSet EXECUTE直後に、a〜cの机上確認ではなく実際のAWS呼び出し
-   (GetSecretValue等、read-only)でADMIN/DEPLOY/2 runtime roleの
+e  適用後の即時verification(ADMIN・RUNTIME 2 roleについて、pre-apply
+   simulationの代わりにend-to-end許可を確認する唯一の実測手段。
+   DEPLOYはbで既にpre-apply確認済みのため、ここでは一貫性の再確認)
+   ChangeSet EXECUTE直後に、a・cの机上確認ではなく実際のAWS呼び出し
+   (GetSecretValue、read-only)でADMIN/DEPLOY/RUNTIME 2 roleの
    アクセスが引き続き許可されることを実測確認する。想定外の
    AccessDeniedが発生した場合は即座に35.2節の復旧手順へ進む。
+   ★ **未解消のresidual gap(2026-09-28、サブちゃんレビュー指摘F12)**:
+   ここで実測できるのはGetSecretValue等の通常操作のみであり、
+   ADMINのsecretsmanager:DeleteResourcePolicy/PutResourcePolicy
+   (35.2節の復旧経路が実際に依存する権限)は、実際にlockoutが発生して
+   35.2節の手順を実行する場面までend-to-endでは実測されない。ADMINは
+   IAM roleのためbのような事前simulationも使えず(RESOURCE_POLICY_
+   CHECK_FOR_IAM_ROLE非対応)、この2 actionについては「aのidentity
+   policy確認」と「cの静的検証」の組み合わせのみが事前の裏付けであり、
+   pre-apply時点でのend-to-end実測手段は存在しない。人為的にlockout
+   状態を作ってDeleteResourcePolicyを試験することは、Production環境
+   への意図的な障害注入であり行わない方針とする(このresidual gapは
+   受容する)。
 
-e  rollback/lockout復旧準備
-   dの実測確認で問題が見つかった場合に備え、35.2節の復旧手順
+f  rollback/lockout復旧準備
+   eの実測確認で問題が見つかった場合に備え、35.2節の復旧手順
    (AdminPrincipalArn principalでの復旧)がすぐ実行できる状態
    (認証情報・実行権限を事前に用意した状態)でEXECUTEに臨む。
 ```
 
-**a〜eの組み合わせであっても、pre-apply時点での数学的証明ではない
-(dが実際の初回証跡)。これは受容されたRESIDUAL_RISKであり、role
-principalについて「simulationで(resource policy込みの)no-lockoutを
-確認済み」という表現は用いない。**
+**a〜fの組み合わせであっても、pre-apply時点での数学的証明ではない
+(ADMIN・RUNTIME 2 roleについてはeが実際の初回証跡。DEPLOYはbで
+pre-apply証跡を得られるが、ADMINのDeleteResourcePolicy/
+PutResourcePolicyはeでも実測されない〔上記gap参照〕)。これは受容
+されたRESIDUAL_RISKであり、ADMIN・RUNTIME roleについて「simulationで
+(resource policy込みの)no-lockoutを確認済み」という表現は用いない。**
 
 ### 35.2 lockout発生時の復旧手順(deploy principalが締め出された場合)
 
@@ -4325,9 +4390,11 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
 復旧手順(deploy principalがlockoutされた場合)
   1  deploy principalではなく、**AdminPrincipalArn principal**の認証
      情報を使う(allow-listに含まれるため、対象secretへのDeny対象
-     7 actionが引き続き許可される。35.1節RESIDUAL_RISK a〜cで事前
-     確認・dで実測確認済みであることが前提。roleに対するresource
-     policy込みのsimulationはできない点に注意)。
+     7 actionが引き続き許可される。35.1節RESIDUAL_RISK a・cで事前
+     確認・eでGetSecretValue等は実測確認済みであることが前提。ただし
+     AdminPrincipalArnはIAM roleであるため、resource policy込みの
+     simulationはできず、DeleteResourcePolicy/PutResourcePolicy自体は
+     この段階までend-to-endでは実測されていない〔35.1節eのgap参照〕)。
   2  Admin principalとして、以下いずれかの方法でresource policyを
      修正する:
        a(推奨)Admin principalの認証情報でsam deploy/aws cloudformation
@@ -4348,13 +4415,16 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
 ```
 ★ 本手順が機能する前提そのもの(AdminPrincipalArnのidentity policyが
   secretsmanager:DeleteResourcePolicy等を実際に許可していること)は、
-  35.1節RESIDUAL_RISK a(IDENTITY_POLICY_CHECK)・b(静的検証)で
+  35.1節RESIDUAL_RISK a(IDENTITY_POLICY_CHECK)・c(静的検証)で
   **Enabled=true適用前に必ず確認しておくこと**。ただし、AdminPrincipalArn
   はIAM roleであるため、resource policy込みのend-to-end許可を
-  simulationで証明することはできない(35.1節参照)。dの適用後即時
-  verificationまでが本手順の実効性を担保する一連の確認である。
-  この事前確認を怠ると、本節の復旧手順自体が機能しない状態でlockoutが
-  発生しうる。
+  simulationで証明することはできない(35.1節参照)。**この2 action
+  (DeleteResourcePolicy/PutResourcePolicy)自体は、35.1節eの適用後即時
+  verificationでも実測されない(GetSecretValue等の通常操作しか確認
+  しないため)。実際にlockoutが発生し本節の手順を実行する場面まで、
+  end-to-endでは未実測のまま残る(35.1節e、2026-09-28 F12。受容された
+  residual gap)。** この事前確認を怠ると、本節の復旧手順自体が機能
+  しない状態でlockoutが発生しうる。
 ```
 
 ### 35.3 #137(PITR・削除保護)との関係
