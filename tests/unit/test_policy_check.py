@@ -127,13 +127,34 @@ def test_implementation_start_does_not_require_an_unsourced_gate(
     Issue #337 の監査で `IMPLEMENTATION_APPROVED` が docs 全体で 0 件と実測された。
     ★ preflight がこれを復活させると、正本に無いゲートを機械が要求することになる。
 
-    development_workflow.md 10 節が列挙する人間承認の 8 操作に
+    development_workflow.md 10 節が列挙する人間承認の 9 操作に
     ★ 「実装の着手」は含まれていない。したがって human_gate_required は false。
     """
     report = policy_check.check("IMPLEMENTATION_START", registry, _worktree_reader())
     assert report["result"] == PASS
     assert report["human_gate_required"] is False
     assert "IMPLEMENTATION_APPROVED" not in " ".join(report["required_policies"])
+
+
+def test_pr_create_does_not_unconditionally_require_a_human_gate(
+    registry: dict[str, Any], fresh: None
+) -> None:
+    """★ PR_CREATE という operation 全体は、無条件の Human Gate を要求しない
+    (development_workflow.md 10 節が列挙する人間承認必須 9 操作に
+    「PR 作成」自体は含まれていない)。
+
+    Issue #689(SCOPE_REDUCTION_GATE、10.3節)は「その PR が scope/AC を
+    縮小する場合」に限った条件付きの Human Gate であり、PR_CREATE
+    という operation 全体には及ばない。この条件を human_gate_required
+    (operation単位でany()集約される)へ素朴に true として載せると、
+    PR_CREATEすべてが無条件にHuman Gateを要求すると読める state になり、
+    #337と同型の欠陥(正本に無いgateを機械が要求する)を再生産する
+    (サブちゃんレビュー指摘F6対応)。
+    """
+    report = policy_check.check("PR_CREATE", registry, _worktree_reader())
+    assert report["result"] == PASS
+    assert report["human_gate_required"] is False
+    assert "DEVELOPMENT_WORKFLOW.SCOPE_REDUCTION_GATE" in report["required_policies"]
 
 
 def test_jit_reading_points_at_sections_not_whole_documents(

@@ -51,7 +51,16 @@ policies:
     ssot_file: docs/development_workflow.md
     ssot_anchor: "### 10.3 Issue の scope / AC 縮小には Human Gate が必要(SCOPE_REDUCTION_GATE)"
     applicable_operations: [PR_CREATE]
-    human_gate_required: true
+    # ★ human_gate_required は operation 単位で any() 集約される(scripts/
+    # policy_check.py)。本 policy が要求する Human Gate は「その PR が
+    # scope/AC を縮小する場合」に限る条件付きのものであり、PR_CREATE
+    # という operation 全体には及ばない(§10 の人間承認必須 9 操作の
+    # 一覧に「PR 作成」自体は含まれていない)。ここを true にすると
+    # ISSUE_ORIGINATED_CHANGE と同じ PR_CREATE 全体が無条件に Human Gate
+    # を要求すると読める state になり、#337 と同型の欠陥(正本に無い
+    # gate を機械が要求する)を再生産する。条件そのものは10.3節の prose
+    # (ssot_anchor 経由の jit_reading)で読むこと。
+    human_gate_required: false
     machine_enforceable: false
 
   # --- push ---------------------------------------------------------------
