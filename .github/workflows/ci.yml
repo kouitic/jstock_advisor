@@ -47,6 +47,12 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-lock.txt
       - run: python -m mypy src
+      # Issue #646(サブちゃんレビューF1対応): tests/全体をmypy対象にすると
+      # 既存の大量errorに埋もれるため、tests/factories.pyのみを個別に
+      # 対象とする。この1行がFakeMarketDataProviderの
+      # MarketDataProvider Protocol準拠を実際にCIで検証する
+      # (`mypy src`だけではtests/配下は一切チェックされない)。
+      - run: python -m mypy tests/factories.py
 
   test:
     runs-on: ubuntu-latest

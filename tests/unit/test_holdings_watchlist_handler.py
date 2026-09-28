@@ -69,7 +69,12 @@ def _watchlist_item(stock_code: str) -> WatchlistItem:
 
 
 class _FakeProviders:
-    market_data = FakeMarketDataProvider()
+    def __init__(self) -> None:
+        # サブちゃんレビュー対応(PR #686): FakeMarketDataProviderは
+        # self.callsという可変状態を持つため、class属性(全テストで1
+        # インスタンス共有)ではなくinstance属性(呼び出しごとに新規生成)
+        # とする(テスト間の状態共有を避ける既存方針。#148/#229と同種)。
+        self.market_data = FakeMarketDataProvider()
 
 
 class _FakeTradeCooldownService:

@@ -209,7 +209,8 @@ def _patch_buy_candidates_common(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _patch_holdings_watchlist_common(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeProviders:
-        market_data = FakeMarketDataProvider()
+        def __init__(self) -> None:
+            self.market_data = FakeMarketDataProvider()
 
     monkeypatch.setattr(
         holdings_watchlist_handler,

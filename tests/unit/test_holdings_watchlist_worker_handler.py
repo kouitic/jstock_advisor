@@ -28,7 +28,11 @@ def _sqs_event(body: dict[str, object]) -> dict[str, object]:
 
 
 class _FakeProviders:
-    market_data = FakeMarketDataProvider()
+    def __init__(self) -> None:
+        # サブちゃんレビュー対応(PR #686): FakeMarketDataProviderは
+        # self.callsという可変状態を持つため、instance属性とする
+        # (テスト間の状態共有を避ける)。
+        self.market_data = FakeMarketDataProvider()
 
 
 def _holding(stock_code: str) -> Holding:

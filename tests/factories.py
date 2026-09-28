@@ -10,8 +10,16 @@ Protocol全体を実装しなくても構文上は「動く」ため、本来検
 いた。
 
 `_typecheck_market_data: MarketDataProvider = FakeMarketDataProvider()`の
-1行により、mypy(`strict = true`)がこのfakeとMarketDataProvider Protocolの
-構造的な不一致を将来のProtocol変更時にも検出する。
+1行により、mypyがこのfakeとMarketDataProvider Protocolの構造的な不一致を
+将来のProtocol変更時にも検出する。
+
+サブちゃんレビュー対応(PR #686 F1): CIの`typecheck`job(ci.yml)は
+`mypy src`のみを実行しており、`tests/`配下はデフォルトでは対象外
+(`mypy src tests`へ全体化すると既存の大量errorに埋もれるため不可)。
+本ファイル1つに限定した`mypy tests/factories.py`をCIへ個別に追加
+しており、この1行の保護は**そのCI stepが存在する限りで**有効である
+(手元で`mypy tests/factories.py`を実行するだけでは、CIでの検証には
+ならない)。
 """
 
 from __future__ import annotations
