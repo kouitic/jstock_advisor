@@ -1,4 +1,4 @@
-"""本番Protocolへ準拠する共有test double(Issue #646。#275 Child A)。
+"""本番Protocolへ準拠する共有test double・factory(Issue #646/#647。#275 Child A/B)。
 
 ## なぜ必要か
 
@@ -27,7 +27,11 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Mapping
 from decimal import Decimal
+from typing import Any
 
+from jstock_advisor.domain.entities.common import DataSourceReference
+from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
+from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.interfaces.market_data import MarketDataProvider
 from jstock_advisor.interfaces.types import PriceHistory, PriceSnapshot
 
@@ -93,3 +97,34 @@ class FakeMarketDataProvider:
 
 
 _typecheck_market_data: MarketDataProvider = FakeMarketDataProvider()
+
+
+def build_recommendation(**overrides: Any) -> Recommendation:
+    """`Recommendation`の共有factory(Issue #647。#275 Child B)。
+
+    `Recommendation(...)`の直接構築が各テストファイルへ重複しており、その
+    大半が本番では必ず設定される`reasons`/`data_sources`を省略していた
+    (#275 fresh確認)。省略されたfixtureでテストが「合格」し続けると、
+    これらのfieldに依存する挙動(通知本文の判定理由表示等)の回帰を検出
+    できない。本factoryは`reasons`/`data_sources`へ非空の既定値を持つ。
+
+    必須fieldにも呼び出し側で共通して使う既定値を設定してあるため、
+    `build_recommendation(recommendation_type=RecommendationType.HOLD)`
+    のように、変えたいfieldだけをkeyword引数で上書きすればよい。
+    """
+    defaults: dict[str, Any] = {
+        "recommendation_id": "rec-factory-0001",
+        "stock_code": "0000",
+        "stock_name": "テスト銘柄",
+        "recommended_at": dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+        "recommendation_type": RecommendationType.BUY,
+        "price_at_recommendation": Decimal("1000"),
+        "confidence": ConfidenceLevel.MEDIUM,
+        "rule_version": "v1-mvp",
+        "reasons": ["factoryの既定判定理由"],
+        "data_sources": [
+            DataSourceReference(provider="fake", fetched_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
+        ],
+    }
+    defaults.update(overrides)
+    return Recommendation(**defaults)
