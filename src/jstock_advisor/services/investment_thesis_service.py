@@ -43,6 +43,10 @@ from jstock_advisor.infrastructure.local_repository.investment_thesis_repository
 from jstock_advisor.services.write_plan import ConditionalPut, apply_conditional_put
 
 logger = logging.getLogger(__name__)
+# Issue #413/#497: VALIDATION mode診断ログ(本moduleのlogger.info()呼び出し)を
+# 有効化する。Lambdaのroot logger既定(WARNING)ではINFOが出力されないため、
+# module単位で明示的に宣言する。
+logger.setLevel(logging.INFO)
 
 _DEFAULT_MAX_RETRIES = 3
 # 通知検証モード機能(2026-08)コードレビュー対応: VALIDATIONではbaseline/thesisの
