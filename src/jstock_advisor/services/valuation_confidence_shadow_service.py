@@ -7,10 +7,17 @@ shadow = 判定・通知・保存を**変えず**に、「`determine_valuation_c
 (Recommendationの保存が完了した後)から呼ばれ、candidate側の判定を
 `determine_valuation_confidence` → `compute_valuation_anchor` →
 `compute_margin_of_safety` → `determine_buy_price_reliability` →
-`compute_buy_price_levels` → `decide_buy_action` の6手順(すべて既存の純関数の
-再利用)で再実行し、結果を既存の`AuditLogTable`へ`decision_type=
+`compute_buy_price_levels` → `decide_buy_action` → `validate_buy_recommendation`
+(buy_signal_service.pyのstep9〜18相当。すべて既存の純関数の再利用)で再実行し、
+結果を既存の`AuditLogTable`へ`decision_type=
 "valuation_confidence_shadow"`として1件記録する(judgment_safety_shadow_service.py
 〔#160 PR-3〕と同型)。
+
+サブちゃんレビュー対応(PR #704): candidate側にも`validate_buy_recommendation`
+(step18の整合性検証)を適用する。production側の`actual_buy_action`は
+この検証**後**の値であり、candidate側を検証前のままにすると
+「検証後のactual」と「検証前のcandidate」という不揃いな比較になり、
+実際には何も変わっていないケースでもbuy_action_changedが見かけ上発火する。
 
 ## 本流を変えない構造(不変条件)
 
@@ -50,6 +57,7 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueRange
 from jstock_advisor.domain.shadow_observation import isolated_shadow_computation
+from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
 from jstock_advisor.domain.signals.buy_decision import decide_buy_action
 from jstock_advisor.domain.signals.valuation_confidence_shadow_config import (
     ValuationConfidenceShadowConfig,
@@ -138,6 +146,16 @@ def _price_diff_pct(actual: Decimal | None, candidate: Decimal | None) -> float 
 def _margin_tier(confidence: ConfidenceLevel) -> str:
     # margin_of_safety.compute_margin_of_safety()自身のtier選択(HIGH/MEDIUM。
     # LOWはallowed=Falseで安全余裕率を生成しない)をそのまま表す。
+    #
+    # サブちゃんレビュー対応(PR #704 SHOULD): margin_tier(本関数の戻り値)は
+    # confidenceそのものの写像であり、margin_tier_changedはconfidence_changedと
+    # 定義上常に同値になる(compute_margin_of_safety()が信頼度以外でtierを
+    # 切り替えないため)。これは意図した設計であり不具合ではない
+    # (USER指定6項目の「margin tier変化件数」はconfidence tierの変化を指す)。
+    # ただし、entry/standard/strong価格側のmaximum_marginキャップにより、
+    # tierが変わっても実際の必要安全余裕率(%)が変わらない(=価格差分が0に近い)
+    # ケースはentry_price_diff_pct等の価格差分側で別途観測できる。tierの変化と
+    # 価格の変化は本output_valuesでは別のキーとして記録しており混同していない。
     return confidence.value
 
 
@@ -197,14 +215,39 @@ def _run_candidate_chain(inputs: ValuationConfidenceShadowInputs) -> _CandidateR
         buy_price_reliability=reliability_result.reliability,
         config=config.buy_decision,
     )
+    candidate_entry_price = buy_price_levels.entry.price if buy_price_levels.entry else None
+    candidate_standard_price = (
+        buy_price_levels.standard.price if buy_price_levels.standard else None
+    )
+    candidate_strong_price = buy_price_levels.strong.price if buy_price_levels.strong else None
+    candidate_buy_action = decision.action
+
+    # --- サブちゃんレビュー対応(PR #704 MUST1): production側のstep18
+    # (整合性検証。buy_signal_service.py:1489-1501)をcandidate側にも適用する。
+    # これを省くと「step18適用後のactual」と「step18適用前のcandidate」を
+    # 比較する形になり、実際には何も変わっていない(raw同士は同一)のに
+    # buy_action_changed/action_transitionが見かけ上発火してしまう。
+    violations = validate_buy_recommendation(
+        action=candidate_buy_action,
+        current_price=inputs.current_price,
+        entry_price=candidate_entry_price,
+        standard_price=candidate_standard_price,
+        strong_price=candidate_strong_price,
+        confidence=candidate_confidence,
+        business_days_to_earnings=inputs.business_days_to_earnings,
+        valuation_dispersion_ratio=inputs.valuation_summary.valuation_dispersion_ratio,
+        config=config.buy_decision,
+    )
+    if violations:
+        candidate_buy_action = BuyAction.MANUAL_REVIEW
 
     return _CandidateResult(
         confidence=candidate_confidence,
         reasons_not_high=tuple(candidate_confidence_result.reasons_not_high),
-        entry_price=buy_price_levels.entry.price if buy_price_levels.entry else None,
-        standard_price=buy_price_levels.standard.price if buy_price_levels.standard else None,
-        strong_price=buy_price_levels.strong.price if buy_price_levels.strong else None,
-        buy_action=decision.action,
+        entry_price=candidate_entry_price,
+        standard_price=candidate_standard_price,
+        strong_price=candidate_strong_price,
+        buy_action=candidate_buy_action,
         raw_buy_action=decision.raw_action,
     )
 

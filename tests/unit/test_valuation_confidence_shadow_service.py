@@ -144,6 +144,35 @@ def _actual_medium_chain(
     )
 
 
+def _candidate_high_chain() -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """require_industry_model=Falseで実際にHIGHへ変わった場合の、価格を独立に算出する
+
+    (build_shadow_record()とは別に、実際の純関数を直接呼んで期待値を作る。
+    サブちゃんレビュー対応PR #704 MUST2: candidate側がactual_confidence
+    〔MEDIUM〕を取り違えて使っても本関数の期待値とは無関係に実行されるため、
+    価格差分が非ゼロであることを固定できる)。
+    """
+    vs = _valuation_summary()
+    dispersion_band = determine_dispersion_band(
+        vs.valuation_dispersion_ratio, _CONFIG.buy_decision.valuation_dispersion
+    )
+    anchor = compute_valuation_anchor(
+        vs,
+        ConfidenceLevel.HIGH,
+        dispersion_band,
+        _CONFIG.valuation.fair_value_methods.method_weights,
+    )
+    margin = compute_margin_of_safety(
+        ConfidenceLevel.HIGH, [], _CONFIG.buy_decision.margin_of_safety
+    )
+    levels = compute_buy_price_levels(anchor.anchor, margin)
+    return (
+        levels.entry.price if levels.entry else None,
+        levels.standard.price if levels.standard else None,
+        levels.strong.price if levels.strong else None,
+    )
+
+
 def _inputs(**overrides: Any) -> ValuationConfidenceShadowInputs:
     actual_confidence, actual_entry, actual_standard, actual_strong = _actual_medium_chain()
     defaults: dict[str, Any] = dict(
@@ -226,6 +255,103 @@ def test_build_shadow_record_recomputes_candidate_with_require_industry_model_fa
     assert output_values["confidence_changed"] is True
     assert output_values["candidate_reasons_not_high"] == []
     assert output_values["reasons_not_high_diff"]["removed"] == ["業種別適正価格モデル未適用"]
+
+
+def test_build_shadow_record_medium_to_high_fixture_produces_nonzero_price_diffs() -> None:
+    """統合テスト(サブちゃんレビュー対応PR #704 MUST2。USER指定TEST_PLAN
+    「実際にMEDIUM→HIGHへ変わるfixtureで6項目を固定」)。
+
+    candidate側のanchor/margin計算でcandidate_confidenceの代わりに
+    actual_confidence(MEDIUM)を誤って使う変異を入れても、修正前は
+    MEDIUM→HIGHへ変化した既存テスト(confidence自体)しか検証していなかった
+    ため検出できなかった(サブちゃん実測: mutation N6/N7 SURVIVED、449件中
+    1件も検出せず)。価格差分(entry/standard/strong)を、
+    build_shadow_record()とは独立に計算した期待値(_candidate_high_chain)
+    と比較して固定することで、この変異を検出できるようにする。
+    """
+    inputs = _inputs()
+    expected_entry, expected_standard, expected_strong = _candidate_high_chain()
+
+    _, output_values = build_shadow_record(_rec(), inputs)
+
+    # MEDIUM(actual)とHIGH(candidate)は安全余裕率テーブルが異なるため、
+    # 有効なanchorが存在する限り価格は必ず異なる(0では比較不能でNoneになるため、
+    # まずNoneでないことも確認する)。
+    assert output_values["entry_price_diff_pct"] is not None
+    assert output_values["standard_price_diff_pct"] is not None
+    assert output_values["strong_price_diff_pct"] is not None
+    assert output_values["entry_price_diff_pct"] != 0.0
+    assert output_values["standard_price_diff_pct"] != 0.0
+    assert output_values["strong_price_diff_pct"] != 0.0
+
+    # 独立に算出した期待値(HIGH tier基準)と完全一致することを固定する
+    # (candidate側が誤ってactual_confidence=MEDIUMを使っていた場合、
+    # ここがMEDIUM tier価格になり不一致となって検出される)。
+    actual_confidence, actual_entry, actual_standard, actual_strong = _actual_medium_chain()
+    assert actual_entry is not None and expected_entry is not None
+    assert actual_standard is not None and expected_standard is not None
+    assert actual_strong is not None and expected_strong is not None
+    expected_entry_diff = float((expected_entry - actual_entry) / actual_entry * 100)
+    expected_standard_diff = float((expected_standard - actual_standard) / actual_standard * 100)
+    expected_strong_diff = float((expected_strong - actual_strong) / actual_strong * 100)
+    assert output_values["entry_price_diff_pct"] == pytest.approx(expected_entry_diff)
+    assert output_values["standard_price_diff_pct"] == pytest.approx(expected_standard_diff)
+    assert output_values["strong_price_diff_pct"] == pytest.approx(expected_strong_diff)
+
+
+def test_build_shadow_record_uses_simplified_dcf_still_blocks_candidate_high() -> None:
+    """サブちゃんレビュー対応PR #704 SHOULD: inputs.uses_simplified_dcfがcandidate側の
+    determine_valuation_confidence()へ正しく渡っていることを固定する
+    (誤った定数へ固定する変異が入ると、この理由が消えてHIGHへ到達してしまう)。
+    """
+    inputs = _inputs(uses_simplified_dcf=True)
+
+    _, output_values = build_shadow_record(_rec(), inputs)
+
+    assert output_values["candidate_confidence"] == "MEDIUM"
+    assert output_values["candidate_reasons_not_high"] == [
+        "簡易DCF(固定割引率・固定成長率の前提)を使用"
+    ]
+
+
+def test_build_shadow_record_normalized_eps_confidence_flows_to_candidate() -> None:
+    """サブちゃんレビュー対応PR #704 SHOULD: inputs.normalized_eps_confidenceが
+    candidate側へ正しく渡っていることを固定する。"""
+    inputs = _inputs(normalized_eps_confidence=ConfidenceLevel.MEDIUM)
+
+    _, output_values = build_shadow_record(_rec(), inputs)
+
+    assert output_values["candidate_confidence"] == "MEDIUM"
+    assert output_values["candidate_reasons_not_high"] == ["平準化EPSの信頼度が十分でない"]
+
+
+def test_build_shadow_record_adjustment_codes_flow_to_candidate_margin() -> None:
+    """サブちゃんレビュー対応PR #704 SHOULD: inputs.adjustment_codesが
+    candidate側のcompute_margin_of_safety()へ正しく渡っていることを固定する
+    (誤った定数〔空リスト等〕へ固定する変異が入ると、加算が消えて価格差分が
+    変わらなくなる)。"""
+    without_adjustment = _inputs()
+    with_adjustment = _inputs(adjustment_codes=("very_high_valuation_dispersion",))
+
+    _, output_without = build_shadow_record(_rec(), without_adjustment)
+    _, output_with = build_shadow_record(_rec(), with_adjustment)
+
+    assert output_with["entry_price_diff_pct"] != output_without["entry_price_diff_pct"]
+
+
+def test_build_shadow_record_action_transition_format() -> None:
+    """サブちゃんレビュー対応PR #704 SHOULD: action_transitionが
+    "{actual}->{candidate}" の形式で記録され、actualがNoneの場合は
+    "NONE"へ落ちることを固定する(フィールドを落とす変異を検出する)。"""
+    none_inputs = _inputs(actual_buy_action=None)
+    _, none_output = build_shadow_record(_rec(), none_inputs)
+    assert none_output["action_transition"] == f"NONE->{none_output['candidate_buy_action']}"
+
+    set_inputs = _inputs(actual_buy_action=BuyAction.WATCH_FOR_PRICE)
+    _, set_output = build_shadow_record(_rec(), set_inputs)
+    assert (
+        set_output["action_transition"] == f"WATCH_FOR_PRICE->{set_output['candidate_buy_action']}"
+    )
 
 
 def test_build_shadow_record_price_diffs_are_zero_when_prices_are_identical() -> None:
