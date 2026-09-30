@@ -4352,25 +4352,48 @@ b  RESOURCE_POLICY_CHECK_FOR_IAM_USER(DEPLOYのみ。pre-apply時点で
       渡さずに実行すると、たとえ正しくallow-listされている
       principalであっても`explicitDeny`に見えかねない
       (F13-1)。
+   3  ★ **5 secretそれぞれについて個別に実行する(2026-10-01、
+      サブちゃんレビュー指摘F18)**。`ResourcePolicy`パラメータは
+      「1回のsimulationにつき1つのresource-based policyのみ」を
+      対象にでき(AWS公式: 「You can include only one resource-based
+      policy in a simulation.」)、そのpolicyは`ResourceArns`に
+      列挙した**すべての**resourceに対して「あたかも付与されている
+      かのように」扱われる(AWS公式: 「Each resource in the
+      simulation is treated as if it had this policy attached.」)。
+      5 secretの実resource policyはそれぞれ`Resource:`が別の
+      ARNを指す別個のstatementであるため、ResourceArnsへ5件の
+      ARNをまとめて渡しつつResourcePolicyに1件分のpolicy文書しか
+      渡さないと、他の4件はそのpolicy文書の`Resource:`と一致せず
+      Denyが評価対象に入らない(F13-2と同型のfalse green)。
+      **ResourceArns=[secret Xの実ARN]とResourcePolicy=[secret X
+      自身のresource policy文書]を1組として、5 secret分(5回)
+      individual に実行すること。**
 
-   PolicySourceArn=DeployPrincipalArn、ResourcePolicyパラメータへ
-   `infra/template.yaml`の実際のresource policyを渡し、CallerArnを
-   別途指定せずにsimulateする(DeployPrincipalArnがIAM userのため、
-   CallerArn省略時はPolicySourceArnがそのままcallerとして評価される。
-   AWS公式: 「If you do not specify a CallerArn, it defaults to the
-   ARN of the ... entity ... in PolicySourceArn.」)。上記1・2を満たした
-   うえで、7 actionすべてについて`allowed`となることを確認する。
-   ★ **negative control(2026-10-01、サブちゃんレビュー指摘F14)**:
-   上記と同じResourceArns・ResourcePolicyのまま、ContextEntriesの
-   `aws:PrincipalArn`だけをallow-list外の任意のARN文字列(実在の
-   principalである必要はない。Production無改変で実施可能)へ差し替えて
-   再実行し、7 actionすべてが`explicitDeny`になることを確認する。この
-   negative controlが通ることで、上記の`allowed`判定が1・2の不備による
-   「落ちない検査」の産物ではなく、resource policyのCondition自体が
-   実際にPrincipalArnで弁別していることを裏付ける。
-   1・2・negative controlの三つを満たしたとき、この結果がDEPLOYに
-   ついてのpre-apply時点での実質的なend-to-end証跡であり、eの適用後
-   verificationは重複確認の位置づけになる。
+   PolicySourceArn=DeployPrincipalArn、CallerArnを別途指定せずに
+   simulateする(DeployPrincipalArnがIAM userのため、CallerArn省略時は
+   PolicySourceArnがそのままcallerとして評価される。AWS公式:
+   「If you do not specify a CallerArn, it defaults to the ARN of the
+   ... entity ... in PolicySourceArn.」)。上記1・2・3を満たしたうえで、
+   **5 secretそれぞれについて**、7 actionすべてが`allowed`となることを
+   確認する。
+   ★ **negative control(2026-10-01、サブちゃんレビュー指摘F14。
+   F18により5 secret分へ拡張)**:
+   5 secretそれぞれについて、同じResourceArns・ResourcePolicy(その
+   secret自身のもの)のまま、ContextEntriesの`aws:PrincipalArn`だけを
+   allow-list外の任意のARN文字列(実在のprincipalである必要はない。
+   Production無改変で実施可能)へ差し替えて再実行し、7 actionすべてが
+   `explicitDeny`になることを確認する。このnegative controlが通る
+   ことで、上記の`allowed`判定が1・2・3の不備による「落ちない検査」の
+   産物ではなく、resource policyのCondition自体が実際にPrincipalArnで
+   弁別していることを裏付ける。
+   **合計5 secret×(陽性1回+negative control 1回)=10回のsimulate
+   呼び出しが必要**であり、1 secretのみの実行結果を根拠に「DEPLOYは
+   確認済み」と記録すると、残り4 secretについて未検証のまま
+   allow-listの誤りを見逃す過大評価になる(F18)。
+   1・2・3・negative controlのすべてを、5 secret全件について満たした
+   とき、この結果がDEPLOYについてのpre-apply時点での実質的な
+   end-to-end証跡であり、eの適用後verificationは重複確認の位置づけに
+   なる。
 
 c  RESOURCE_POLICY_STATIC_REVIEW(静的検証。ADMIN・RUNTIME 2 roleに
    ついてはsimulationの代替、DEPLOYについてはbの追加的な裏付け)
