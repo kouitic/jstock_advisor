@@ -626,6 +626,48 @@ def test_issue_582_valuation_confidence_shadow_inputs_match_the_actual_judgment(
     assert shadow_inputs.industry_model_applied is False  # #208: 本番で恒久的にFalse
 
 
+def test_issue_582_valuation_confidence_shadow_inputs_match_production_call_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """サブちゃんレビュー対応(PR #704 F3/SHOULD1): shadow入力スナップショットの
+    uses_simplified_dcf/normalized_eps_confidence/industry_model_applied/
+    adjustment_codesが、production側の実際の呼び出し引数と一致することを固定する。
+
+    valuation_confidence_shadow_service.py側のテストはshadow serviceへ渡された
+    inputsのpass-throughのみを固定しており、buy_signal_service.py::analyze()が
+    実際にdetermine_valuation_confidence()/compute_margin_of_safety()へ渡した
+    引数とスナップショットが一致する保証は無かった(サブちゃん実測: N13/N14/N15
+    SURVIVED)。production側の実呼び出しをspyし、実際に渡された引数と
+    スナップショットの値を直接比較する。
+    """
+    captured: dict[str, object] = {}
+    real_determine = service_module.determine_valuation_confidence
+    real_margin = service_module.compute_margin_of_safety
+
+    def _spy_determine(**kwargs: object) -> object:
+        captured["industry_model_applied"] = kwargs["industry_model_applied"]
+        captured["uses_simplified_dcf"] = kwargs["uses_simplified_dcf"]
+        captured["normalized_eps_confidence"] = kwargs["normalized_eps_confidence"]
+        return real_determine(**kwargs)  # type: ignore[arg-type]
+
+    def _spy_margin(confidence: object, adjustment_codes: object, config: object) -> object:
+        captured["adjustment_codes"] = list(adjustment_codes)  # type: ignore[call-overload]
+        return real_margin(confidence, adjustment_codes, config)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service_module, "determine_valuation_confidence", _spy_determine)
+    monkeypatch.setattr(service_module, "compute_margin_of_safety", _spy_margin)
+
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+
+    shadow_inputs = outcome.valuation_confidence_shadow_inputs
+    assert shadow_inputs is not None
+    assert captured  # spyが実際に呼ばれたことの確認(呼ばれなければ以下は無意味)
+    assert shadow_inputs.industry_model_applied == captured["industry_model_applied"]
+    assert shadow_inputs.uses_simplified_dcf == captured["uses_simplified_dcf"]
+    assert shadow_inputs.normalized_eps_confidence == captured["normalized_eps_confidence"]
+    assert shadow_inputs.adjustment_codes == tuple(captured["adjustment_codes"])  # type: ignore[arg-type]
+
+
 def test_buy_score_input_facts_includes_forecast_eps_and_bps_for_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

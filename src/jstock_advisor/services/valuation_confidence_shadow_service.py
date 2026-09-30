@@ -227,6 +227,16 @@ def _run_candidate_chain(inputs: ValuationConfidenceShadowInputs) -> _CandidateR
     # これを省くと「step18適用後のactual」と「step18適用前のcandidate」を
     # 比較する形になり、実際には何も変わっていない(raw同士は同一)のに
     # buy_action_changed/action_transitionが見かけ上発火してしまう。
+    #
+    # F8(サブちゃんレビュー対応、記録のみ): この検証は通常の入力では発火しない
+    # (サブちゃん実測: 5通りの入力すべてで不発火)。entry/standard/strongの
+    # 価格順序・confidence起因の矛盾は、同じ`compute_buy_price_levels`/
+    # `decide_buy_action`から導出されたcandidate_entry_price等を渡している限り
+    # 構造的に生じにくいためである。**candidate側でMANUAL_REVIEWが一度も
+    # 観測されないこと自体は実装漏れではない**(production側のstep18も同じ
+    # 理由で通常は不発火であり、稀な不整合入力に対する二重の安全策として
+    # 存在する)。対称性(actual/candidate双方に同じ検証を適用する)を保つ目的で
+    # 追加しており、発火頻度を上げる目的の変更ではない。
     violations = validate_buy_recommendation(
         action=candidate_buy_action,
         current_price=inputs.current_price,

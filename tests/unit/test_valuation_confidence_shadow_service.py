@@ -90,6 +90,67 @@ def _valuation_summary() -> FairValueRange:
     )
 
 
+# --- サブちゃんレビュー対応(PR #704 F7): anchor側のconfidence取り違え検出用
+# fixture。band=LOW かつ weighted_median != trimmed_mean となるよう、
+# method_weightsを歪めた(dcf=0.80、他4方式=0.05)。この歪みが無いと
+# (既定の等weight)weighted_median=trimmed_mean寄りとなりHIGH/MEDIUMの
+# anchorが一致してしまい、anchor側の取り違えを検出できない
+# (サブちゃん実測: N7型変異464件中0件検出)。 ---
+_SKEWED_WEIGHTS = {
+    "target_yield": 0.05,
+    "per": 0.05,
+    "pbr": 0.05,
+    "historical_range": 0.05,
+    "dcf": 0.80,
+}
+_SKEWED_CONFIG = _CONFIG.model_copy(
+    update={
+        "valuation": _CONFIG.valuation.model_copy(
+            update={
+                "fair_value_methods": _CONFIG.valuation.fair_value_methods.model_copy(
+                    update={"method_weights": _SKEWED_WEIGHTS}
+                )
+            }
+        )
+    }
+)
+
+
+def _asymmetric_methods() -> list[FairValueMethodResult]:
+    return [
+        FairValueMethodResult(
+            method="per", fair_value=Decimal("1000"), confidence=ConfidenceLevel.HIGH
+        ),
+        FairValueMethodResult(
+            method="pbr", fair_value=Decimal("1005"), confidence=ConfidenceLevel.HIGH
+        ),
+        FairValueMethodResult(
+            method="target_yield", fair_value=Decimal("1010"), confidence=ConfidenceLevel.HIGH
+        ),
+        FairValueMethodResult(
+            method="historical_range", fair_value=Decimal("1015"), confidence=ConfidenceLevel.HIGH
+        ),
+        FairValueMethodResult(
+            method="dcf", fair_value=Decimal("1200"), confidence=ConfidenceLevel.HIGH
+        ),
+    ]
+
+
+def _asymmetric_valuation_summary() -> FairValueRange:
+    methods = _asymmetric_methods()
+    return FairValueRange(
+        bear=Decimal("1000"),
+        neutral=Decimal("1010"),
+        bull=Decimal("1200"),
+        overall_confidence=ConfidenceLevel.HIGH,
+        methods_used=methods,
+        methods_excluded=[],
+        usable_for_trading_judgment=True,
+        valuation_dispersion_ratio=1200 / 1000,
+        methods_used_count=len(methods),
+    )
+
+
 def _rec(
     *,
     recommendation_id: str = "rec-582-1",
@@ -115,26 +176,30 @@ def _rec(
 
 
 def _actual_medium_chain(
-    *, industry_model_applied: bool = False
+    *,
+    industry_model_applied: bool = False,
+    valuation_summary: FairValueRange | None = None,
+    config: Any = None,
 ) -> tuple[ConfidenceLevel, Decimal | None, Decimal | None, Decimal | None]:
     """require_industry_model省略(=True、本番の実際の経路)で、baselineの実際の結果を計算する。"""
-    vs = _valuation_summary()
+    vs = valuation_summary if valuation_summary is not None else _valuation_summary()
+    cfg = config if config is not None else _CONFIG
     dispersion_band = determine_dispersion_band(
-        vs.valuation_dispersion_ratio, _CONFIG.buy_decision.valuation_dispersion
+        vs.valuation_dispersion_ratio, cfg.buy_decision.valuation_dispersion
     )
     confidence = determine_valuation_confidence(
         methods_used_count=vs.methods_used_count or 0,
         dispersion_ratio=vs.valuation_dispersion_ratio,
-        dispersion_medium_max=_CONFIG.buy_decision.valuation_dispersion.medium_max,
-        dispersion_anchor_block=_CONFIG.buy_decision.valuation_dispersion.anchor_block,
+        dispersion_medium_max=cfg.buy_decision.valuation_dispersion.medium_max,
+        dispersion_anchor_block=cfg.buy_decision.valuation_dispersion.anchor_block,
         industry_model_applied=industry_model_applied,
         uses_simplified_dcf=False,
         normalized_eps_confidence=None,
     )
     anchor = compute_valuation_anchor(
-        vs, confidence.level, dispersion_band, _CONFIG.valuation.fair_value_methods.method_weights
+        vs, confidence.level, dispersion_band, cfg.valuation.fair_value_methods.method_weights
     )
-    margin = compute_margin_of_safety(confidence.level, [], _CONFIG.buy_decision.margin_of_safety)
+    margin = compute_margin_of_safety(confidence.level, [], cfg.buy_decision.margin_of_safety)
     levels = compute_buy_price_levels(anchor.anchor, margin)
     return (
         confidence.level,
@@ -144,7 +209,9 @@ def _actual_medium_chain(
     )
 
 
-def _candidate_high_chain() -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+def _candidate_high_chain(
+    *, valuation_summary: FairValueRange | None = None, config: Any = None
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
     """require_industry_model=Falseで実際にHIGHへ変わった場合の、価格を独立に算出する
 
     (build_shadow_record()とは別に、実際の純関数を直接呼んで期待値を作る。
@@ -152,19 +219,18 @@ def _candidate_high_chain() -> tuple[Decimal | None, Decimal | None, Decimal | N
     〔MEDIUM〕を取り違えて使っても本関数の期待値とは無関係に実行されるため、
     価格差分が非ゼロであることを固定できる)。
     """
-    vs = _valuation_summary()
+    vs = valuation_summary if valuation_summary is not None else _valuation_summary()
+    cfg = config if config is not None else _CONFIG
     dispersion_band = determine_dispersion_band(
-        vs.valuation_dispersion_ratio, _CONFIG.buy_decision.valuation_dispersion
+        vs.valuation_dispersion_ratio, cfg.buy_decision.valuation_dispersion
     )
     anchor = compute_valuation_anchor(
         vs,
         ConfidenceLevel.HIGH,
         dispersion_band,
-        _CONFIG.valuation.fair_value_methods.method_weights,
+        cfg.valuation.fair_value_methods.method_weights,
     )
-    margin = compute_margin_of_safety(
-        ConfidenceLevel.HIGH, [], _CONFIG.buy_decision.margin_of_safety
-    )
+    margin = compute_margin_of_safety(ConfidenceLevel.HIGH, [], cfg.buy_decision.margin_of_safety)
     levels = compute_buy_price_levels(anchor.anchor, margin)
     return (
         levels.entry.price if levels.entry else None,
@@ -294,6 +360,55 @@ def test_build_shadow_record_medium_to_high_fixture_produces_nonzero_price_diffs
     expected_entry_diff = float((expected_entry - actual_entry) / actual_entry * 100)
     expected_standard_diff = float((expected_standard - actual_standard) / actual_standard * 100)
     expected_strong_diff = float((expected_strong - actual_strong) / actual_strong * 100)
+    assert output_values["entry_price_diff_pct"] == pytest.approx(expected_entry_diff)
+    assert output_values["standard_price_diff_pct"] == pytest.approx(expected_standard_diff)
+    assert output_values["strong_price_diff_pct"] == pytest.approx(expected_strong_diff)
+
+
+def test_build_shadow_record_anchor_confidence_mixup_is_detected_via_asymmetric_fixture() -> None:
+    """サブちゃんレビュー対応PR #704 F7(MUST): anchor側のconfidence取り違えを検出する。
+
+    compute_valuation_anchor()はHIGH=weighted_median・MEDIUM=min(weighted_median,
+    trimmed_mean)と異なる集約を使う。対称なfixture(既存のMUST2テスト)では
+    weighted_median==trimmed_mean寄りとなり両者のanchorが一致してしまうため、
+    anchor呼び出しへcandidate_confidenceの代わりにinputs.actual_confidenceを
+    渡す変異が464件中0件検出できなかった(サブちゃん実測)。band=LOWかつ
+    weighted_median(=1200、dcf方式へ0.80の重みを集中)とtrimmed_mean(=1046、
+    単純平均)が一致しない非対称fixtureを使い、HIGH anchor=1200/MEDIUM
+    anchor=1046(差+14.7%)という、margin tier差(約+5.6%)より大きい価格差分を
+    固定する。
+    """
+    vs = _asymmetric_valuation_summary()
+    cfg = _SKEWED_CONFIG
+    actual_confidence, actual_entry, actual_standard, actual_strong = _actual_medium_chain(
+        valuation_summary=vs, config=cfg
+    )
+    expected_entry, expected_standard, expected_strong = _candidate_high_chain(
+        valuation_summary=vs, config=cfg
+    )
+    assert actual_confidence is ConfidenceLevel.MEDIUM
+    assert actual_entry is not None and expected_entry is not None
+    assert actual_standard is not None and expected_standard is not None
+    assert actual_strong is not None and expected_strong is not None
+
+    inputs = _inputs(
+        valuation_summary=vs,
+        config=cfg,
+        actual_confidence=actual_confidence,
+        actual_entry_price=actual_entry,
+        actual_standard_price=actual_standard,
+        actual_strong_price=actual_strong,
+    )
+
+    _, output_values = build_shadow_record(_rec(), inputs)
+
+    assert output_values["candidate_confidence"] == "HIGH"
+    expected_entry_diff = float((expected_entry - actual_entry) / actual_entry * 100)
+    expected_standard_diff = float((expected_standard - actual_standard) / actual_standard * 100)
+    expected_strong_diff = float((expected_strong - actual_strong) / actual_strong * 100)
+    # anchor側の差(+14.7%相当)がmargin tier差(約+5.6%)より大きいことも固定する
+    # (anchor側の取り違えが入ると効果を過小評価したままHuman Gateへ上がるため)。
+    assert abs(expected_entry_diff) > 10.0
     assert output_values["entry_price_diff_pct"] == pytest.approx(expected_entry_diff)
     assert output_values["standard_price_diff_pct"] == pytest.approx(expected_standard_diff)
     assert output_values["strong_price_diff_pct"] == pytest.approx(expected_strong_diff)
