@@ -6,7 +6,7 @@
 恒久的にFalseであることにより(#208)Productionで一度も到達していない。
 `require_industry_model=False`を渡した場合に判定・価格・BuyActionがどう
 変わるかを、v1の判定・通知・保存を一切変えずに観測するための設定を持つ
-(judgment_safety_shadow_config.py〔#160〕と同型)。
+(#160の専用configモデル・loaderと同型)。
 
 ## AppConfig(共通部品S-13)へ載せない理由
 
