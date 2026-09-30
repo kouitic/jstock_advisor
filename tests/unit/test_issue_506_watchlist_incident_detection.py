@@ -447,7 +447,7 @@ def _fake_reconciler_config(
         watchlist_screening=SimpleNamespace(
             enabled=enabled,
             scheduled_run_enabled=scheduled_run_enabled,
-            auto_removal=SimpleNamespace(readd_cooldown_days=30),
+            auto_removal=SimpleNamespace(readd_cooldown_days=30, minimum_age_days=90),
         ),
     )
 
@@ -456,13 +456,17 @@ def _stub_507_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #507(O-1): これらのテストはS-2(missed schedule)を検証対象とし、
     S-6/S-7とは無関係なため、実際のCloudWatch呼び出し・
     WatchlistRemovalHistoryRepositoryの構築(ローカルJSONストアへの実I/O)は
-    行わせない。
+    行わせない。Issue #708: S-7が追加でWatchlistRepositoryを読むように
+    なったため、同様に実I/Oさせない(空のwatchlistとして扱う)。
     """
     monkeypatch.setattr(handler_module, "_fetch_watchlist_worker_metrics", lambda now: {})
     monkeypatch.setattr(
         handler_module,
         "WatchlistRemovalHistoryRepository",
         lambda *_a, **_kw: SimpleNamespace(list_all=lambda: []),
+    )
+    monkeypatch.setattr(
+        handler_module, "WatchlistRepository", lambda: SimpleNamespace(list_all=lambda: [])
     )
 
 
