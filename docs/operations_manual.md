@@ -4261,7 +4261,16 @@ RESOURCE_POLICY_CHECK_FOR_IAM_USER
   resource-based policyを合成したend-to-end評価が可能(AWS公式:
   「You can also optionally include one resource-based policy to be
   evaluated ... for IAM users only.」)。**本IssueではDeployPrincipalArn
-  (IAM user)にこの経路が使える**(2026-09-28 fresh確認)。
+  (IAM user)にこの経路が使える**(2026-09-28 fresh確認)。ただし
+  `ResourceArns`・`ContextEntries`(`aws:PrincipalArn`)を正しく指定
+  しないと検査として機能しない(2026-10-01 F13。下記RESIDUAL_RISKへの
+  対処bを参照)。
+  ★ **この経路が使えるのは、DEPLOYが現在IAM userだからに過ぎない**
+  (2026-10-01、サブちゃんレビュー指摘F15)。Issue #164(Production
+  deploy用の長期credentialの是正)がDEPLOYをIAM role化した場合、この
+  経路は使えなくなり、RESIDUAL_RISKの対象にDEPLOYが再び含まれる
+  ことになる。#164着手時は、本節(35.1)のRESIDUAL_RISKの記述を
+  合わせて見直すこと。
 
 RESOURCE_POLICY_CHECK_FOR_IAM_ROLE
   非対応。AWS公式ドキュメント(SimulatePrincipalPolicy APIリファレンス、
@@ -4289,6 +4298,15 @@ a  IDENTITY_POLICY_CHECK
    PutResourcePolicy/DeleteResourcePolicy)を許可していることを
    SimulatePrincipalPolicyで確認する(resource policyは考慮されない
    ため、ADMINについてはこれは必要条件の一部にすぎない)。
+   ★ **将来の既知リスク(2026-10-01、サブちゃんレビュー指摘F16)**:
+   この「DEPLOYは7 actionを許可している」という前提は、現在DEPLOYが
+   広範権限(AdministratorAccess相当)を持つことに依存している。
+   Issue #164のscope項目3(deployに本当に必要な権限範囲を洗い出し、
+   管理者相当からの縮小可否を判断する)が適用されると、DEPLOYの
+   identity policyが7 actionの一部(特にDeleteResourcePolicy/
+   PutResourcePolicy等の管理系action)を含まなくなる可能性があり、
+   その場合この確認項目はF10がRUNTIME 2 roleで検出したのと同型の
+   矛盾を起こす。#164着手時は、この項目も合わせて見直すこと。
    ★ RUNTIME 2 role(IncidentNotifierFunctionRole/
    WeeklyReviewFunctionRole)は、7 actionではなく**secretsmanager:
    GetSecretValueのみ**を許可していることを確認する(2026-09-28、
@@ -4300,15 +4318,58 @@ a  IDENTITY_POLICY_CHECK
 
 b  RESOURCE_POLICY_CHECK_FOR_IAM_USER(DEPLOYのみ。pre-apply時点で
    得られる、simulationによる唯一の真のend-to-end確認)
+   ★★ **2026-10-01、サブちゃんレビュー指摘F13(MUST)で判明**:
+   単純にResourcePolicyパラメータを渡すだけでは、以下2つの理由で
+   このsimulationは検査として機能しない(allow-listが実際には誤って
+   いても`allowed`が返りうる〔落ちない検査〕、逆に正しい設定でも
+   `explicitDeny`に見えうる、という両方向に信頼できない結果になる)。
+   正しい手順は以下のとおり:
+
+   1  ResourceArnsへ、対象secretの実際のARN(該当secretの
+      `*SecretResourcePolicy`が`SecretId`に指定しているARN)を明示的に
+      指定する。省略すると既定で`*`になり、resource policyの
+      `Resource:`(secretの実ARNへscope済み)と一致するとは限らず、
+      Denyステートメントが評価対象に入らない可能性がある
+      (F13-2。AWS公式: 「The simulation does not automatically
+      retrieve policies for the specified resources.」と同根で、
+      Resourceの対応もsimulator側で自動的には解決されない)。
+   2  ContextEntriesへ、`aws:PrincipalArn`(ContextKeyType=string、
+      ContextKeyValues=[DeployPrincipalArnの値])を明示的に渡す。
+      IAM Policy Simulatorが自動供給するcontext keyは
+      `aws:PrincipalAccount`/`aws:PrincipalId`/`aws:PrincipalType`/
+      `aws:Type`/`aws:UserId`/`aws:UserName`のみであり、
+      `aws:PrincipalArn`は含まれない(AWS公式:
+      「You provide the values for all other condition keys that
+      your policies reference.」)。resource policyのDeny条件は
+      `StringNotEquals: {aws:PrincipalArn: [...]}`という**負の
+      (negated)条件演算子**であり、AWS公式ドキュメント
+      (IAM JSON policy elements: Condition operators)に
+      「If the policy condition requires that the key is not
+      matched, such as StringNotLike or ArnNotLike, and the right
+      key is not present, the condition is true.」と明記の
+      とおり、参照するcontext keyが欠落するとnegated条件は
+      **true(=Deny側が成立)** と評価される。ContextEntriesを
+      渡さずに実行すると、たとえ正しくallow-listされている
+      principalであっても`explicitDeny`に見えかねない
+      (F13-1)。
+
    PolicySourceArn=DeployPrincipalArn、ResourcePolicyパラメータへ
-   `infra/template.yaml`の実際のresource policy(該当secretの
-   `*SecretResourcePolicy`定義)を渡し、CallerArnを別途指定せずに
-   simulateする(DeployPrincipalArnがIAM userのため、CallerArn省略時は
-   PolicySourceArnがそのままcallerとして評価される。AWS公式:
-   「If you do not specify a CallerArn, it defaults to the ARN of the
-   ... entity ... in PolicySourceArn.」)。7 actionすべてについて
-   `allowed`となることを確認する。DEPLOYについては、この結果が
-   pre-apply時点での実質的なend-to-end証跡であり、dの適用後
+   `infra/template.yaml`の実際のresource policyを渡し、CallerArnを
+   別途指定せずにsimulateする(DeployPrincipalArnがIAM userのため、
+   CallerArn省略時はPolicySourceArnがそのままcallerとして評価される。
+   AWS公式: 「If you do not specify a CallerArn, it defaults to the
+   ARN of the ... entity ... in PolicySourceArn.」)。上記1・2を満たした
+   うえで、7 actionすべてについて`allowed`となることを確認する。
+   ★ **negative control(2026-10-01、サブちゃんレビュー指摘F14)**:
+   上記と同じResourceArns・ResourcePolicyのまま、ContextEntriesの
+   `aws:PrincipalArn`だけをallow-list外の任意のARN文字列(実在の
+   principalである必要はない。Production無改変で実施可能)へ差し替えて
+   再実行し、7 actionすべてが`explicitDeny`になることを確認する。この
+   negative controlが通ることで、上記の`allowed`判定が1・2の不備による
+   「落ちない検査」の産物ではなく、resource policyのCondition自体が
+   実際にPrincipalArnで弁別していることを裏付ける。
+   1・2・negative controlの三つを満たしたとき、この結果がDEPLOYに
+   ついてのpre-apply時点での実質的なend-to-end証跡であり、eの適用後
    verificationは重複確認の位置づけになる。
 
 c  RESOURCE_POLICY_STATIC_REVIEW(静的検証。ADMIN・RUNTIME 2 roleに
@@ -4438,19 +4499,31 @@ lockout/data-loss軸へ適用したもの)。
 ### 35.4 参考
 
 ```
-・Issue #680(PR本文にProduction適用前simulation計画の詳細)
+・Issue #680(PR本文にProduction適用前確認計画〔旧称: simulation計画〕の
+  詳細。2026-09-28 F7対応で改称)
 ・#133(secretsmanager least privilege調査、本機構の発見契機)
 ・#164(deploy principal自体のlong-term credential是正。DeployPrincipalArn
-  の値が#164の変更と同期する必要がある)
+  の値が#164の変更と同期する必要がある。DeployPrincipalArnが現在IAM user
+  であること自体が#164の是正対象であり、35.1節RESIDUAL_RISKのb・F15の
+  前提が#164適用後に崩れる点に注意)
 ・AWS公式ドキュメント(35.1節のIAM Policy Simulator制約の根拠。
-  2026-09-28、USER Human Gate指摘F7対応で確認):
+  2026-09-28、USER Human Gate指摘F7対応で確認。2026-10-01、サブちゃん
+  レビュー指摘F13でCondition operatorsのページを追加確認):
   - IAM User Guide「IAM policy testing with the IAM policy simulator」
     https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_testing-policies.html
   - IAM API Reference「SimulatePrincipalPolicy」
     (`ResourcePolicy`/`ResourceArns`パラメータの説明に
     "Simulation of resource-based policies isn't supported for IAM
-    roles." と明記)
+    roles." と明記。`ResourceArns`の説明に「The simulation does not
+    automatically retrieve policies for the specified resources.」も
+    明記)
     https://docs.aws.amazon.com/IAM/latest/APIReference/API_SimulatePrincipalPolicy.html
+  - IAM User Guide「IAM JSON policy elements: Condition operators」
+    (negated条件演算子〔StringNotEquals等〕は、参照するcontext keyが
+    request context に無い場合 true と評価されると明記。
+    「IAM policy simulatorが自動供給するcontext key」は
+    IAM User Guideの上記ページに一覧がある)
+    https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition_operators.html
 ```
 
 本節はIssue #680(#133 UNIT2)として追加した。実際のChangeSet CREATE/
