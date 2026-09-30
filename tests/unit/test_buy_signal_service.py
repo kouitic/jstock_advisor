@@ -604,6 +604,28 @@ def test_only_nihon_shinyaku_is_not_excluded_for_price_reasons(
     assert "EARNINGS_WINDOW" in nihon_shinyaku_reasons
 
 
+def test_issue_582_valuation_confidence_shadow_inputs_match_the_actual_judgment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #582: shadow入力スナップショットのactual_*が、実際の判定結果と一致する。
+
+    v1の判定(recommendation/buy_action/価格)は本Issueで変更していない(golden
+    invariant)。shadow入力は既存の実際の結果を束ねているだけであることを固定する。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    shadow_inputs = outcome.valuation_confidence_shadow_inputs
+    assert shadow_inputs is not None
+    assert shadow_inputs.actual_buy_action == outcome.buy_action
+    assert shadow_inputs.actual_raw_buy_action == rec.raw_buy_action
+    assert shadow_inputs.actual_entry_price == rec.entry_buy_price
+    assert shadow_inputs.actual_standard_price == rec.standard_buy_price
+    assert shadow_inputs.actual_strong_price == rec.strong_buy_price
+    assert shadow_inputs.current_price == _NIHON_SHINYAKU.current_price
+    assert shadow_inputs.industry_model_applied is False  # #208: 本番で恒久的にFalse
+
+
 def test_buy_score_input_facts_includes_forecast_eps_and_bps_for_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1236,6 +1258,8 @@ def test_buy_unavailable_disclosure_is_data_insufficient_not_disclosure_risk(
     assert not any("リスクキーワード" in reason for reason in outcome.exclusion_reasons)
     assert outcome.data_error is not None
     assert "取得できなかった" in outcome.data_error
+    # Issue #582: 早期returnの経路(推奨が生成されない)ではshadow入力も設定しない
+    assert outcome.valuation_confidence_shadow_inputs is None
 
 
 def test_buy_unavailable_disclosure_does_not_pass_as_clean(
