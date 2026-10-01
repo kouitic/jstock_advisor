@@ -4298,6 +4298,23 @@ a  IDENTITY_POLICY_CHECK
    PutResourcePolicy/DeleteResourcePolicy)を許可していることを
    SimulatePrincipalPolicyで確認する(resource policyは考慮されない
    ため、ADMINについてはこれは必要条件の一部にすぎない)。
+   ★★ **ResourceArnsへ5 secretの実ARNをまとめて指定すること
+   (2026-10-01、サブちゃんレビュー指摘F19・MUST相当)**。省略すると
+   既定で`*`になり、RUNTIME 2 role(下記)のようにidentity policyの
+   `Resource:`が対象secretの実ARNへscope済み(`infra/template.yaml`の
+   該当IAM policy)の場合、`*`という文字列はそのResourceパターンと
+   一致せず`implicitDeny`に見えてしまう(F10が「正しい状態」と明記した
+   構成が、手順上は権限不足に見える)。逆にADMIN/DEPLOYは広範権限
+   (`Resource: "*"`相当)のため、ResourceArns省略でも`allowed`が
+   返りやすく、対象secretへの実際のアクセス可否を確認したことに
+   ならない。両principal種別とも、この誤りの影響を受ける(前者は
+   false deny、後者はfalse allow)。
+   ★ 本項目はResourcePolicyパラメータを渡さないため、bのような
+   「1回のsimulationにつき1つのresource-based policyのみ」という
+   制約(F18参照)は適用されない。ResourceArnsへ5 secret分を一括で
+   指定し、principalごとに1回(ADMIN/DEPLOY/RUNTIME 2 roleの計4回)
+   実行すれば足りる(F18のように5 secret×principal分へ増やす必要は
+   ない)。
    ★ **将来の既知リスク(2026-10-01、サブちゃんレビュー指摘F16)**:
    この「DEPLOYは7 actionを許可している」という前提は、現在DEPLOYが
    広範権限(AdministratorAccess相当)を持つことに依存している。
