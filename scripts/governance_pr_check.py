@@ -7,6 +7,16 @@ Closes/Fixes/ResolvesはFAILにしない。正本(development_workflow.md、
 「NOの宣言は免罪符ではない...FAILとする」の行)が条件つきで許容しているため、
 一律禁止は設計より厳しい(Issue #337 Phase A v2、issuecomment-5638458766
 4節)。検出した場合はWARNINGとして出力し、reviewerへ意味判断を促す。
+
+IAM contractへの気付きgate(Issue #663 PR-2): handler/repository層を
+変更しているPRが、infra/template.yamlもtests/unit/test_infra_*.pyも
+変更していない場合にWARNINGを出す。#529(新しいDynamoDB到達経路を追加した
+handlerの変更が、対応するIAM Policy追加を伴わずにPR/CI/reviewを素通りし、
+Production自然実行で初めてAccessDeniedExceptionが発覚した事象)の再発防止。
+意味判定(実際にIAM影響があるか)は行わない。diffにinfra/template.yamlが
+含まれなければレビュワーが気づく手がかりが無い、という構造的な欠落を
+無条件のWARNINGで埋めるのみで、FAILにはしない(false positiveでPRを
+止めない。Option C相当の実AWS dry-runは見送り。Issue #663参照)。
 """
 
 from __future__ import annotations
@@ -36,6 +46,22 @@ _ISSUE_REF_ANYWHERE_RE = re.compile(
     rf"(?:\bRefs\s+#\d+)|(?:\b(?:{_CLOSE_KEYWORDS})\s+#\d+)", re.IGNORECASE
 )
 
+# Issue #663 PR-2: handler/repository層とIAM/IaC contractの対応関係に
+# 気付くgate。対象pathはIssue #663 Scope節の「application codeが新しい
+# AWS resourceへの到達経路を追加しうる層」に対応する。
+_HANDLER_OR_REPOSITORY_RE = re.compile(
+    r"^src/jstock_advisor/lambda_handlers/.*\.py$"
+    r"|^src/jstock_advisor/infrastructure/(?:aws|local_repository)/.*\.py$"
+)
+_TEMPLATE_PATH_STR = "infra/template.yaml"
+_INFRA_CONTRACT_TEST_RE = re.compile(r"^tests/unit/test_infra_.*\.py$")
+
+_IAM_CONTRACT_AWARENESS_MESSAGE = (
+    "本PRはhandler/repository層を変更していますが、infra/template.yamlも"
+    "test_infra_*.pyも変更していません。新しいAWS resourceへの到達経路を"
+    "追加した場合、IAM権限が不足していないかを確認してください(#529参照)"
+)
+
 FAIL = "FAIL"
 WARNING = "WARNING"
 PASS = "PASS"
@@ -52,6 +78,7 @@ class CheckResult:
     has_issue_reference: bool = False
     closes_matches: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    iam_contract_warnings: list[str] = field(default_factory=list)
 
 
 def _non_code_non_quote_lines(body: str) -> list[str]:
@@ -143,21 +170,61 @@ def check_pr_body(body: str) -> CheckResult:
     return result
 
 
+def check_iam_contract_awareness(changed_files: list[str]) -> list[str]:
+    """IAM contract気付きgate(Issue #663 PR-2、AC2/T1-T4)。
+
+    handler/repository層の変更が含まれ、かつinfra/template.yamlも
+    tests/unit/test_infra_*.pyも変更されていない場合にWARNINGメッセージの
+    リストを返す。意味判定(実際にIAM不足があるか)は行わない
+    (false positiveでPRを止めない。AC3)。
+    """
+    touches_handler_or_repository = any(
+        _HANDLER_OR_REPOSITORY_RE.match(f) for f in changed_files
+    )
+    if not touches_handler_or_repository:
+        return []
+
+    touches_template = _TEMPLATE_PATH_STR in changed_files
+    touches_infra_contract_test = any(_INFRA_CONTRACT_TEST_RE.match(f) for f in changed_files)
+
+    if touches_template or touches_infra_contract_test:
+        return []
+
+    return [_IAM_CONTRACT_AWARENESS_MESSAGE]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PR本文の構文検査(Issue #342)")
     parser.add_argument("--body-file", required=True, help="PR本文を含むファイル")
+    parser.add_argument(
+        "--changed-files-file",
+        required=False,
+        default=None,
+        help="変更ファイル一覧(1行1パス。Issue #663 PR-2のIAM contract気付きgate用。"
+        "未指定の場合はこのgateをスキップする)",
+    )
     args = parser.parse_args(argv)
 
     with open(args.body_file, encoding="utf-8") as f:
         body = f.read()
 
+    changed_files: list[str] = []
+    if args.changed_files_file:
+        with open(args.changed_files_file, encoding="utf-8") as f:
+            changed_files = [line.strip() for line in f if line.strip()]
+
     check = check_pr_body(body)
+    check.iam_contract_warnings = check_iam_contract_awareness(changed_files)
+    if check.iam_contract_warnings and check.result != FAIL:
+        check.result = WARNING
+
     report = {
         "result": check.result,
         "missing_sections": check.missing_sections,
         "missing_dod_items": check.missing_dod_items,
         "has_issue_reference": check.has_issue_reference,
         "closes_matches": check.closes_matches,
+        "iam_contract_warnings": check.iam_contract_warnings,
         "problems": check.problems,
         "disclaimer": (
             "構文検査のみ。意味判定(宣言内容が変更と矛盾しないか)は"
@@ -172,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
                 "::warning::Closes/Fixes/Resolvesの使用を検出しました"
                 f"(意味判定はレビュワーが行います): {m}"
             )
+        for m in check.iam_contract_warnings:
+            print(f"::warning::{m}")
 
     if check.result == FAIL:
         return EXIT_FAIL
