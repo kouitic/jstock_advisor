@@ -683,6 +683,18 @@ def test_issue_582_valuation_confidence_shadow_inputs_match_production_call_argu
     assert shadow_inputs.normalized_eps_confidence == captured["normalized_eps_confidence"]
     assert shadow_inputs.adjustment_codes == tuple(captured["adjustment_codes"])  # type: ignore[arg-type]
 
+    # サブちゃん最終確認での軽微な観測への対応: fixtureの前提
+    # (test_issue_582_eps_medium_cyclical_fixture_is_not_vacuous_for_n14)は
+    # is_cyclical_industryの分類条件のみを固定しており、normalized_eps_
+    # confidenceが実際にNoneでないこと(EPS正規化側の別の前提)までは見ていな
+    # かった。ここで直接assertし、N14が無検出になる条件をこのテスト自身にも
+    # 明示的に残す("eps_none"は意図的にNone、"eps_medium_cyclical"は非None
+    # であることの両方を固定する)。
+    if fx is _DAIKYO_NISHIKAWA:
+        assert captured["normalized_eps_confidence"] is not None
+    else:
+        assert captured["normalized_eps_confidence"] is None
+
 
 def test_issue_582_eps_medium_cyclical_fixture_is_not_vacuous_for_n14() -> None:
     """サブちゃんレビュー対応(再レビューSHOULD、N14 vacuous対策の裏付け)。
