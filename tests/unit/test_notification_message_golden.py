@@ -296,6 +296,11 @@ def test_stock_analysis_holding_profit_taking_status_body(tmp_path: Path) -> Non
         authoritative_recommendation_id="rec-watch",
         authoritative_engine="PROFIT_TAKING",
         authoritative_outcome_category="watch",
+        # Issue #683の修正後、利確判定の状況はrecord.profit_taking_*経由で
+        # 復元する(authoritative_engine=PROFIT_TAKINGの実データでは常に
+        # この2つが対象recommendationと同一のidで揃っている)。
+        profit_taking_ran=True,
+        profit_taking_recommendation_id="rec-watch",
     )
 
     text = _analysis_service(tmp_path).build_holding_analysis_text(_OWNER, _CODE)
