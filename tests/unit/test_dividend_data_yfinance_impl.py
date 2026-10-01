@@ -3,14 +3,19 @@ from decimal import Decimal
 
 import pytest
 
+from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import (
     CorporateActionType,
     DividendComparisonOutcome,
     DividendPeriodEndBasis,
+    DividendValidationStatus,
     RecordDateUnknownReason,
 )
-from jstock_advisor.interfaces.types import CorporateActionEvent
+from jstock_advisor.interfaces.types import AnnualDividendActual, CorporateActionEvent, DividendInfo
+from jstock_advisor.providers.dividend_data.cross_validating_impl import (
+    CrossValidatingDividendDataProvider,
+)
 from jstock_advisor.providers.dividend_data.yfinance_impl import YFinanceDividendDataProvider
 from jstock_advisor.services.corporate_action_service import CorporateActionService
 
@@ -108,21 +113,24 @@ class _FixedCorporateActionProvider:
 def test_real_dividend_cut_is_not_hidden_by_double_split_adjustment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_sum_by_calendar_yearが各支払いを既にself._now.date()基準へ調整済みの値を、
-    classify_dividend_change呼び出し時にさらに調整してしまう回帰テスト(修正前は
-    分割係数が二重に適用され、実際の減配が見かけ上の増配として隠れていた)。
+    """Issue #706(二重調整バグ)の回帰テスト。`ticker.dividends`は問い合わせ
+    時点までの分割を反映して既に遡及調整済みの値を返す(実測で確認済み)。
+    FY2025の配当実績(yfinanceが返す、既に分割後基準の値)は25円×2回=50円。
+    2026年4月1日に1:5分割が発生しているが、この50円はすでにその分割を反映した
+    基準で表示されているため、追加の分割調整をしてはならない。
 
-    FY2025の配当実績(分割前基準)は25円×2回=50円。2026年4月1日に1:5分割が
-    発生しているため、分割後基準では50/5=10円に相当する。予想配当(分割後基準、
-    yfinanceの現在値なので既に分割後)が9円なら、これは約10%の実質減配であり、
-    増配(DIVIDEND_INCREASE)と誤判定されてはならない。
+    予想配当(同じく分割後基準の現在値)が12円なら、50円→12円は76%の実質減配
+    であり、FORECAST_DIVIDEND_CUTと判定されなければならない。**修正前の
+    バグ(50円を分割後基準の生値だと誤認し、さらに5で割っていた)では
+    50/5=10円となり、forecast(12円) > buggy_actual(10円)でDIVIDEND_INCREASE
+    (増配)に誤判定されていた**(実際には76%の減配であるにもかかわらず)。
     """
     import jstock_advisor.providers.dividend_data.yfinance_impl as module
 
     class _TickerWithSplitStraddlingDividends(_FakeTicker):
         def __init__(self, symbol: str) -> None:
             super().__init__(symbol)
-            self.info = {"regularMarketPrice": 1000, "dividendRate": 9}
+            self.info = {"regularMarketPrice": 1000, "dividendRate": 12}
             self.dividends = {
                 dt.datetime(2025, 6, 27): 25.0,
                 dt.datetime(2025, 12, 29): 25.0,
@@ -146,8 +154,9 @@ def test_real_dividend_cut_is_not_hidden_by_double_split_adjustment(
     info = provider.get_dividend_info("5401")
 
     assert info is not None
-    # 修正前は二重調整により src=2円(10円をさらに5で割った値)となり、
-    # forecast(9円) > src(2円)でDIVIDEND_INCREASEに誤判定されていた。
+    assert info.actual_annual_dividend_per_share == Decimal("50")
+    # 修正前は二重調整により実質10円(50/5)となり、forecast(12円) > 10円で
+    # DIVIDEND_INCREASEに誤判定されていた(実際は50→12円の76%減配)。
     assert info.dividend_comparison_outcome == DividendComparisonOutcome.FORECAST_DIVIDEND_CUT
     assert info.inferred_dividend_decrease is True
 
@@ -323,11 +332,20 @@ def test_annual_dividend_actual_period_boundaries_are_correct(
     assert actual.period_start_is_estimated is False
 
 
-def test_raw_and_normalized_values_differ_without_double_adjustment(
+def test_raw_and_normalized_values_are_identical_even_when_a_split_occurred(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """raw_dividend_per_share(正規化前)とnormalized_dividend_per_share(正規化後)が
-    分割発生年度で正しく異なり、二重補正が起きないこと。"""
+    """Issue #706(二重調整バグの修正): raw_dividend_per_shareと
+    normalized_dividend_per_shareは常に同一になる(分割が発生した年度でも)。
+
+    `ticker.dividends`はyfinance(Yahoo Finance)が問い合わせ時点までの分割を
+    反映して既に遡及調整済みの値を返すため(実測で確認済み)、
+    `_sum_by_fiscal_year()`はこれを追加で分割調整しない。本テストは旧版
+    (`test_raw_and_normalized_values_differ_without_double_adjustment`、
+    raw=50・normalized=10〔=50/5〕を期待していた)の前提が実際のyfinance
+    応答と矛盾していたことの是正であり、CorporateActionService経由の
+    追加調整が無いことを明示的に固定する。
+    """
     import jstock_advisor.providers.dividend_data.yfinance_impl as module
 
     class _TickerWithSplitStraddlingDividends(_FakeTicker):
@@ -358,8 +376,8 @@ def test_raw_and_normalized_values_differ_without_double_adjustment(
 
     assert info is not None
     actual = info.annual_dividend_actuals[-1]
-    assert actual.raw_dividend_per_share == Decimal("50")  # 分割調整前の生値(25+25)
-    assert actual.normalized_dividend_per_share == Decimal("10")  # 分割後基準(50/5)
+    assert actual.raw_dividend_per_share == Decimal("50")  # yfinanceの値をそのまま合算(25+25)
+    assert actual.normalized_dividend_per_share == Decimal("50")  # 追加調整はしない(二重調整の解消)
     assert actual.normalization_basis_date is not None
 
 
@@ -480,3 +498,96 @@ def test_missing_market_data_is_still_unknown_not_failure(
     provider = _provider_for(monkeypatch, _NoPriceTicker)
 
     assert provider.get_dividend_info("7203") is None
+
+
+def test_issue_706_end_to_end_cross_validation_no_longer_falsely_excludes_split_stock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #706の実例(stock_code=1925)を模した統合テスト。
+
+    yfinance実測: FY2026-03の配当イベントは2025-09-29(37.5)+2026-03-30(50.0)
+    で合計87.5(既に2026-09-29の2倍分割を反映した、問い合わせ時点基準の値)。
+    EDINET側はこの決算期の生値(未調整)として175.00を報告している
+    (175.00 = 87.5 * 2。分割前基準の原本値)。
+
+    修正前は`_sum_by_fiscal_year()`がyfinance側の87.5をさらに2で割り43.75とし、
+    EDINET側を正しく87.5へ調整した結果と比較して50%の「真の乖離」と誤判定し、
+    配当データ取得不可(DATA_INSUFFICIENT)として除外していた。修正後は
+    yfinance側がそのまま87.5となり、EDINET側の調整結果(87.5)と一致し、
+    VALIDATEDとなる(除外されない)。
+    """
+    import jstock_advisor.providers.dividend_data.yfinance_impl as module
+
+    class _SplitAffectedTicker(_FakeTicker):
+        def __init__(self, symbol: str) -> None:
+            super().__init__(symbol)
+            self.info = {"regularMarketPrice": 1000, "dividendRate": 90}
+            self.dividends = {
+                dt.datetime(2025, 9, 29): 37.5,
+                dt.datetime(2026, 3, 30): 50.0,
+            }
+
+    monkeypatch.setattr(module.yf, "Ticker", _SplitAffectedTicker)
+
+    # 実際のbatch実行時刻(2026-09-30 08:01 JST)を模す。分割効力発生
+    # (2026-09-29)より後でなければ、この統合シナリオ自体が成立しない。
+    now = dt.datetime(2026, 9, 29, 23, 1, tzinfo=dt.UTC)
+    split_event = CorporateActionEvent(
+        stock_code="1925",
+        event_type=CorporateActionType.SPLIT,
+        announced_date=dt.date(2026, 9, 29),
+        effective_date=dt.date(2026, 9, 29),
+        ratio=Decimal("2"),
+        source=DataSourceReference(provider="test", fetched_at=now),
+    )
+
+    class _FixedCorporateActionProvider:
+        def __init__(self, events: list[CorporateActionEvent]) -> None:
+            self._events = events
+
+        def get_corporate_actions(
+            self, stock_code: str, since: dt.date
+        ) -> list[CorporateActionEvent]:
+            return [
+                e for e in self._events if e.effective_date is None or e.effective_date >= since
+            ]
+
+    corporate_action = CorporateActionService(_FixedCorporateActionProvider([split_event]), now=now)
+    primary = YFinanceDividendDataProvider(now=now, corporate_action_service=corporate_action)
+
+    period_end = dt.date(2026, 3, 31)
+    edinet_actual = AnnualDividendActual(
+        period_end=period_end,
+        period_end_basis=DividendPeriodEndBasis.REPORTED,
+        period_start=dt.date(2025, 4, 1),
+        period_start_is_estimated=False,
+        raw_dividend_per_share=Decimal("175.00"),
+        normalized_dividend_per_share=None,
+        normalization_basis_date=None,
+    )
+
+    class _FixedSecondaryProvider:
+        def get_dividend_info(
+            self, stock_code: str, fiscal_year_end_month: int | None = None
+        ) -> DividendInfo:
+            return DividendInfo(
+                stock_code="1925",
+                fiscal_year="2026",
+                actual_annual_dividend_per_share=Decimal("175.00"),
+                source=DataSourceReference(provider="edinet", fetched_at=now),
+                annual_dividend_actuals=[edinet_actual],
+            )
+
+    cross_validated = CrossValidatingDividendDataProvider(
+        primary=primary,
+        secondary=_FixedSecondaryProvider(),
+        corporate_action_service=corporate_action,
+        config=load_config().data_validation,
+        now=now,
+    )
+
+    result = cross_validated.get_dividend_info("1925", fiscal_year_end_month=3)
+
+    assert result is not None
+    assert result.actual_annual_dividend_per_share == Decimal("87.5")
+    assert result.validation_status == DividendValidationStatus.VALIDATED

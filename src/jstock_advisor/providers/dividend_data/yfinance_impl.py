@@ -132,9 +132,7 @@ class YFinanceDividendDataProvider:
         effective_fiscal_year_end_month = fiscal_year_end_month or 12
         evaluation_date = evaluation_date_jst(self._now)
 
-        yearly_totals = self._sum_by_fiscal_year(
-            dividends, stock_code, effective_fiscal_year_end_month
-        )
+        yearly_totals = self._sum_by_fiscal_year(dividends, effective_fiscal_year_end_month)
         actual_annual = None
         previous_annual = None
         actual_fiscal_year: int | None = None
@@ -265,14 +263,31 @@ class YFinanceDividendDataProvider:
         )
 
     def _sum_by_fiscal_year(
-        self, dividends: Any, stock_code: str, fiscal_year_end_month: int
+        self, dividends: Any, fiscal_year_end_month: int
     ) -> dict[int, _FiscalYearTotal]:
+        """配当イベント(`yfinance.Ticker.dividends`)を決算期単位で合算する。
+
+        Issue #706(二重調整バグの修正): `ticker.dividends`は、yfinance
+        (Yahoo Finance)が問い合わせ時点までに判明している株式分割を反映して
+        **既に遡及調整済み**の値を返す(実測で確認: 分割が確定した後に
+        過去の配当イベントを取得すると、分割前の日付であっても既に分割後の
+        株数基準の額で表示される)。かつてはこれを「分割前基準の生値」と
+        誤認し、`CorporateActionService.adjust_per_share_metric()`で**再度**
+        分割調整していたため、配当支払日(dividend_event_date)から基準日
+        (評価日)までの間に分割が発生した銘柄で、正しい値をさらに分割比率で
+        割る二重調整が生じていた(例: 2分割なら実際の半分の値)。
+
+        yfinance側は既に単一の基準日(問い合わせ時点)へ統一されているため、
+        各イベントの支払日が決算期の途中で分割を挟んでいても、額面の混在
+        (分割前後の額が同一決算期内に混在する問題。かつての`_sum_by_
+        calendar_year`時代の根本原因レポート原因1)は発生しない。そのため
+        本関数ではraw(=yfinanceからの値をそのまま合算したもの)と
+        normalized(=基準日へ正規化済みの値)は常に同一になる
+        (`CorporateActionService`による追加調整は行わない)。
+        """
         if dividends is None or len(dividends) == 0:
             return {}
-        basis_date = evaluation_date_jst(self._now)
-        source = self._source()
         raw_totals: dict[int, float] = {}
-        normalized_totals: dict[int, float] = {}
         for index, value in dividends.items():
             dividend_event_date = index.date() if hasattr(index, "date") else None
             if dividend_event_date is None:
@@ -280,15 +295,8 @@ class YFinanceDividendDataProvider:
             fy_label = _fiscal_year_label(dividend_event_date, fiscal_year_end_month)
             amount = float(value)
             raw_totals[fy_label] = raw_totals.get(fy_label, 0.0) + amount
-
-            adjusted = self._corporate_action.adjust_per_share_metric(
-                Decimal(str(amount)), stock_code, dividend_event_date, basis_date, source
-            )
-            normalized_amount = float(adjusted.adjusted_value)
-            normalized_totals[fy_label] = normalized_totals.get(fy_label, 0.0) + normalized_amount
         return {
-            fy: _FiscalYearTotal(raw=raw_totals[fy], normalized=normalized_totals[fy])
-            for fy in raw_totals
+            fy: _FiscalYearTotal(raw=total, normalized=total) for fy, total in raw_totals.items()
         }
 
     @staticmethod
