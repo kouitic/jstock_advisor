@@ -34,6 +34,7 @@ from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
 )
 from jstock_advisor.domain.entities.common import BuyPriceLevels, ScoreBreakdown
 from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory, RecommendationType
+from jstock_advisor.domain.entities.holding_evaluation_record import HoldingEvaluationRecord
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import (
     FairValueUnusableReasonCode,
@@ -1211,7 +1212,7 @@ class StockAnalysisViewService:
         else:
             lines.append(_UNRESTORABLE)
 
-        profit_taking_lines = _profit_taking_status_lines(recommendation)
+        profit_taking_lines = self._resolve_profit_taking_status_lines(record)
         if profit_taking_lines:
             lines += ["", "■ 利確判定の状況", *profit_taking_lines]
 
@@ -1220,6 +1221,44 @@ class StockAnalysisViewService:
             lines += ["", "■ 売却目安の根拠", *quantity_lines]
 
         return "\n".join(lines)
+
+    def _resolve_profit_taking_status_lines(self, record: HoldingEvaluationRecord) -> list[str]:
+        """authoritative recommendationのengineに関わらず、record.profit_taking_*
+        フィールドから利確判定の判定時点情報を復元する(Issue #683)。
+
+        従来はauthoritative recommendation(LEGACY_SELL側等)をそのまま
+        `_profit_taking_status_lines`へ渡していたため、このサイクルで利確判定が
+        実行されていなくても「含み益率：不明」という誤った表示になっていた
+        (profit_taking_ran=Falseなのに、別engineのrecommendationから
+        unrealized_profit_loss_pct等を読んでいたため)。authoritative
+        recommendation自体はprofit_taking判定の復元には使わないため、
+        引数として受け取らない。
+
+        優先順位:
+        1. profit_taking_ran=Falseなら「未実行」(このサイクルでは判定していない)
+        2. profit_taking_recommendation_id経由でRecommendationを復元できれば
+           それを使う(authoritative_engine=PROFIT_TAKINGの既存経路と同一)
+        3. profit_taking_audit_log_id経由でAuditLogから復元できればそれを使う
+           (#369のpure HOLD経路と同じ_profit_taking_hold_audit_linesを再利用)
+        4. いずれも復元できない場合のみ「記録欠落」(真のデータ損失)
+        """
+        if not record.profit_taking_ran:
+            return [
+                "利確判定は今回の評価サイクルでは実行されていません(他の判定が優先されたため)。"
+            ]
+        if record.profit_taking_recommendation_id is not None:
+            pt_recommendation = self._recommendations.get(record.profit_taking_recommendation_id)
+            if pt_recommendation is not None:
+                return _profit_taking_status_lines(pt_recommendation)
+        if record.profit_taking_audit_log_id is not None:
+            pt_audit = self._audit_log.get(record.profit_taking_audit_log_id)
+            if pt_audit is not None:
+                hold_lines = _profit_taking_hold_audit_lines(pt_audit)
+                if hold_lines:
+                    return hold_lines
+        return [
+            "利確判定は実行されましたが、判定時点の記録が残っていないため内容を復元できません。"
+        ]
 
 
 _HOLDING_JUDGMENT_LABEL: dict[RecommendationType, str] = {
@@ -1260,18 +1299,24 @@ def _profit_taking_status_lines(recommendation: Recommendation) -> list[str]:
     #   `profit_protection_current_gain_pct`にあるためそちらへフォールバックする。
     #   ★ どちらも無いときは行を消さず「不明」と出す(行が出ないのか値が無いのかを
     #     読み手が区別できないため)。★ どちらの値も判定には使わない。
-    #   ★ 2つの項目は型が違う(Decimal と float)。表示は :.1f で揃うため
+    #   ★ 2つの項目は型が違う(Decimal と float)。表示は :.2f で揃うため
     #     union のまま扱い、暗黙の変換で桁が変わることを避ける。
+    #   ★ Issue #685: 判定は29.951220...%のような生の浮動小数点精度で行う一方、
+    #     表示は従来:.1fへ丸めていたため、閾値(30%)の直下にある値が表示上は
+    #     「30.0%」(=閾値以上に見える)と出る一方、まだ利確しない理由には
+    #     「一部利確基準(30%)未満」が同時に出る矛盾があった。判定値・閾値・
+    #     比較演算子は変更せず、表示精度のみ:.2fへ上げて実世界での衝突窓を
+    #     約1/10に縮小する(Option 2)。
     gain_pct: Decimal | float | None = recommendation.unrealized_profit_loss_pct
     if gain_pct is None:
         gain_pct = recommendation.profit_protection_current_gain_pct
     if gain_pct is not None:
-        lines.append(f"含み益率：{gain_pct:.1f}%")
+        lines.append(f"含み益率：{gain_pct:.2f}%")
     else:
         lines.append("含み益率：不明（判定時点の記録に含み益率が残っていません）")
     upside_pct = recommendation.profit_taking_upside_pct
     if upside_pct is not None:
-        lines.append(f"想定上限価格までの上値余地：{upside_pct:.1f}%")
+        lines.append(f"想定上限価格までの上値余地：{upside_pct:.2f}%")
     if recommendation.not_yet_action_reasons:
         lines.append("まだ利確しない理由：")
         lines += [f"・{reason}" for reason in recommendation.not_yet_action_reasons]
@@ -1381,22 +1426,25 @@ def _profit_taking_hold_audit_lines(audit_entry: AuditLogEntry) -> list[str]:
     ):
         return []
     lines: list[str] = []
+    # Issue #685 sweep: 判定値・閾値は変更せず、表示精度のみ:.1f→:.2fへ揃える
+    # (_profit_taking_status_linesと同じ理由。境界直下の値が閾値以上に見える
+    # 表示上の衝突を縮小する)。
     if gain_pct is not None:
-        gain_line = f"含み益率：{gain_pct:.1f}%"
+        gain_line = f"含み益率：{gain_pct:.2f}%"
         if watch_pct is not None:
-            gain_line += f"（利確の監視を始める水準：{watch_pct:.1f}%）"
+            gain_line += f"（利確の監視を始める水準：{watch_pct:.2f}%）"
         lines.append(gain_line)
     else:
         lines.append("含み益率：不明（判定時点の記録に含み益率が残っていません）")
     if neutral_pct is not None or bull_pct is not None:
         parts = []
         if neutral_pct is not None:
-            parts.append(f"中立の適正価格に対して{neutral_pct:+.1f}%")
+            parts.append(f"中立の適正価格に対して{neutral_pct:+.2f}%")
         if bull_pct is not None:
-            parts.append(f"強気の適正価格に対して{bull_pct:+.1f}%")
+            parts.append(f"強気の適正価格に対して{bull_pct:+.2f}%")
         lines.append("現在価格の位置（プラスは適正価格を上回る）：" + "、".join(parts))
     if upside_pct is not None:
-        lines.append(f"想定上限価格までの上値余地：{upside_pct:.1f}%")
+        lines.append(f"想定上限価格までの上値余地：{upside_pct:.2f}%")
     if unusable_code:
         lines.append(
             _FAIR_VALUE_UNUSABLE_TEXTS.get(str(unusable_code), _FAIR_VALUE_UNUSABLE_GENERIC_TEXT)
