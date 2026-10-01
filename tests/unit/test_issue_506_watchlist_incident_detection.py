@@ -466,7 +466,7 @@ def _stub_507_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *_a, **_kw: SimpleNamespace(list_all=lambda: []),
     )
     monkeypatch.setattr(
-        handler_module, "WatchlistRepository", lambda: SimpleNamespace(list_all=lambda: [])
+        handler_module, "WatchlistRepository", lambda: SimpleNamespace(iter_all=lambda: iter([]))
     )
 
 

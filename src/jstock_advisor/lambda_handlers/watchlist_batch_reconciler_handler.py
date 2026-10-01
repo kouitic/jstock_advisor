@@ -611,8 +611,15 @@ def _has_removal_eligible_candidate(
     (REIT/ETF化等のhard exclusion)は`minimum_age_days`を適用しない
     別経路のため、この判定の対象に含めない(=age gateのみを見る。
     即時削除が機能していない場合の検知は本Issueのscope外)。
+
+    ★ Issue #708(サブちゃんレビュー、実装上の提案): `list_all()`
+    (全件を一括listへ保持)ではなく`iter_all()`(Issue #113のページ単位
+    遅延生成)を使い、該当が見つかった時点で早期returnする。存在確認
+    だけが目的のため全件読了・全件保持は不要であり、watchlistは
+    今後も増え続ける側のテーブルであるため(ピークメモリ・読了時間の
+    観点で)有利。
     """
-    for item in WatchlistRepository().list_all():
+    for item in WatchlistRepository().iter_all():
         if item.registration_source != WatchlistRegistrationSource.AUTO_SCREENING:
             continue
         if (now - item.created_at).days >= minimum_age_days:
@@ -732,12 +739,26 @@ def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) 
         for batch_item in list_new_candidate_screening_batches()
         if _started_at_jst_date(batch_item) == today_jst
     ]
+    # ★ Issue #708(サブちゃんレビューF1): 以前は4検知すべてを計算し終えてから
+    # return文の中でまとめて_notify_if_new_today()を呼んでいたため、後段の
+    # 検知(S-7、最も軽いwarning)が例外を出すと、既に計算済みのS-2/S-4/S-6
+    # (より重い検知)の通知までreturn文へ到達できず失われる非対称な失敗様式
+    # だった。各検知の直後に即座へ通知することで、後段の失敗が前段の
+    # 既に成功した通知結果を道連れにしないようにする(個々の検知・通知自体の
+    # 例外伝播は従来どおり変えない。既存のWatchlistRemovalHistoryRepository
+    # 経由の読み出しも同じ構造的脆弱性を持っていたため、ここで併せて解消する)。
     missed_schedule = _detect_watchlist_missed_schedule(todays_batches, calendar, now)
+    missed_schedule_notified = _notify_if_new_today(missed_schedule, today_jst, now)
+
     streak_count = _evaluate_and_persist_universe_load_failure_streak(todays_batches, calendar, now)
     universe_load_failure_streak = _detect_watchlist_universe_load_failure_streak(streak_count, now)
+    universe_load_failure_streak_notified = _notify_if_new_today(
+        universe_load_failure_streak, today_jst, now
+    )
 
     worker_metrics = _fetch_watchlist_worker_metrics(now)
     queue_backlog = _detect_watchlist_queue_backlog(worker_metrics, now)
+    queue_backlog_notified = _notify_if_new_today(queue_backlog, today_jst, now)
 
     removal_history = WatchlistRemovalHistoryRepository(
         config.watchlist_screening.auto_removal.readd_cooldown_days
@@ -745,20 +766,27 @@ def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) 
     deletion_streak_count = _evaluate_and_persist_watchlist_deletion_zero_streak(
         removal_history, calendar, now
     )
-    removal_eligible = _has_removal_eligible_candidate(
-        now, config.watchlist_screening.auto_removal.minimum_age_days
+    # ★ Issue #708(サブちゃんレビュー、実装上の提案): streakが閾値未満の
+    # (=どのみち検知しない)大多数の日は、_has_removal_eligible_candidate()の
+    # DynamoDB Scanを行わない(遅延評価)。
+    removal_eligible = (
+        _has_removal_eligible_candidate(
+            now, config.watchlist_screening.auto_removal.minimum_age_days
+        )
+        if deletion_streak_count is not None
+        and deletion_streak_count >= _DELETION_ZERO_STREAK_THRESHOLD_DAYS
+        else False
     )
     deletion_zero_streak = _detect_watchlist_deletion_zero_streak(
         deletion_streak_count, now, removal_eligible
     )
+    deletion_zero_streak_notified = _notify_if_new_today(deletion_zero_streak, today_jst, now)
 
     return {
-        "missed_schedule_notified": _notify_if_new_today(missed_schedule, today_jst, now),
-        "universe_load_failure_streak_notified": _notify_if_new_today(
-            universe_load_failure_streak, today_jst, now
-        ),
-        "queue_backlog_notified": _notify_if_new_today(queue_backlog, today_jst, now),
-        "deletion_zero_streak_notified": _notify_if_new_today(deletion_zero_streak, today_jst, now),
+        "missed_schedule_notified": missed_schedule_notified,
+        "universe_load_failure_streak_notified": universe_load_failure_streak_notified,
+        "queue_backlog_notified": queue_backlog_notified,
+        "deletion_zero_streak_notified": deletion_zero_streak_notified,
     }
 
 

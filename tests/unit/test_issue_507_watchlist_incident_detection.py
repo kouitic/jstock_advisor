@@ -391,7 +391,7 @@ def test_removal_eligible_true_when_auto_screening_item_old_enough(
     monkeypatch.setattr(
         handler_module,
         "WatchlistRepository",
-        lambda: SimpleNamespace(list_all=lambda: [_watchlist_item(old_enough)]),
+        lambda: SimpleNamespace(iter_all=lambda: iter([_watchlist_item(old_enough)])),
     )
 
     assert handler_module._has_removal_eligible_candidate(now, 90) is True
@@ -405,7 +405,7 @@ def test_removal_eligible_false_when_all_auto_screening_items_too_young(
     monkeypatch.setattr(
         handler_module,
         "WatchlistRepository",
-        lambda: SimpleNamespace(list_all=lambda: [_watchlist_item(too_young)]),
+        lambda: SimpleNamespace(iter_all=lambda: iter([_watchlist_item(too_young)])),
     )
 
     assert handler_module._has_removal_eligible_candidate(now, 90) is False
@@ -420,13 +420,15 @@ def test_removal_eligible_ignores_manual_items(monkeypatch: pytest.MonkeyPatch) 
         handler_module,
         "WatchlistRepository",
         lambda: SimpleNamespace(
-            list_all=lambda: [
-                _watchlist_item(
-                    old_enough,
-                    stock_code="9999",
-                    registration_source=WatchlistRegistrationSource.MANUAL,
-                )
-            ]
+            iter_all=lambda: iter(
+                [
+                    _watchlist_item(
+                        old_enough,
+                        stock_code="9999",
+                        registration_source=WatchlistRegistrationSource.MANUAL,
+                    )
+                ]
+            )
         ),
     )
 
@@ -436,7 +438,7 @@ def test_removal_eligible_ignores_manual_items(monkeypatch: pytest.MonkeyPatch) 
 def test_removal_eligible_false_when_watchlist_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     now = _now_jst(_WED, 8)
     monkeypatch.setattr(
-        handler_module, "WatchlistRepository", lambda: SimpleNamespace(list_all=lambda: [])
+        handler_module, "WatchlistRepository", lambda: SimpleNamespace(iter_all=lambda: iter([]))
     )
 
     assert handler_module._has_removal_eligible_candidate(now, 90) is False
@@ -626,7 +628,7 @@ def test_detect_and_notify_publishes_deletion_zero_streak(
     monkeypatch.setattr(
         handler_module,
         "WatchlistRepository",
-        lambda: SimpleNamespace(list_all=lambda: [_watchlist_item(old_enough)]),
+        lambda: SimpleNamespace(iter_all=lambda: iter([_watchlist_item(old_enough)])),
     )
     config = _fake_reconciler_config()
 
@@ -655,7 +657,7 @@ def test_detect_and_notify_suppresses_deletion_zero_streak_when_no_candidate_is_
     monkeypatch.setattr(
         handler_module,
         "WatchlistRepository",
-        lambda: SimpleNamespace(list_all=lambda: [_watchlist_item(too_young)]),
+        lambda: SimpleNamespace(iter_all=lambda: iter([_watchlist_item(too_young)])),
     )
     config = _fake_reconciler_config()
 
@@ -664,6 +666,44 @@ def test_detect_and_notify_suppresses_deletion_zero_streak_when_no_candidate_is_
     result = handler_module._detect_and_notify_watchlist_incidents(_now_jst(_WED, 8), config)
 
     assert result["deletion_zero_streak_notified"] is False
+    assert not any(p["reason_code"] == "watchlist_deletion_zero_streak" for p in published)
+
+
+def test_detect_and_notify_sends_earlier_notifications_before_gate_scan_failure(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #708 サブちゃんレビューSHOULD対応: S-7のgate scan
+    (_has_removal_eligible_candidate)が例外を出しても、既に検知・通知済みの
+    S-2(missed schedule)は失われない(return文の中でまとめて通知していた
+    旧実装では、ここで全て失われていた)。
+    """
+    published: list[dict] = []
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    monkeypatch.setattr(handler_module, "_fetch_watchlist_worker_metrics", lambda now: {})
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRemovalHistoryRepository",
+        lambda *_a, **_kw: SimpleNamespace(list_all=lambda: []),
+    )
+    config = _fake_reconciler_config()
+
+    # streakを閾値(3営業日)まで積み上げる(gateが遅延評価されず実際に
+    # 呼ばれるようにする)。MON/TUEは正常に完了させる。
+    handler_module._detect_and_notify_watchlist_incidents(_now_jst(_MON, 8), config)
+    handler_module._detect_and_notify_watchlist_incidents(_now_jst(_TUE, 8), config)
+    published.clear()  # MON/TUE分のmissed_schedule等をクリアし、WED分のみ見る
+
+    def _raise() -> SimpleNamespace:
+        raise RuntimeError("simulated DynamoDB Scan failure")
+
+    monkeypatch.setattr(handler_module, "WatchlistRepository", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated DynamoDB Scan failure"):
+        handler_module._detect_and_notify_watchlist_incidents(_now_jst(_WED, 8), config)
+
+    # S-7(gate scan)は例外で中断したが、その手前で検知・通知済みのS-2は
+    # 失われていない。
+    assert any(p["reason_code"] == "watchlist_missed_schedule" for p in published)
     assert not any(p["reason_code"] == "watchlist_deletion_zero_streak" for p in published)
 
 
