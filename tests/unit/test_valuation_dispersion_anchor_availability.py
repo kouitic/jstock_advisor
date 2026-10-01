@@ -262,6 +262,12 @@ def test_sell_side_does_not_use_this_path() -> None:
 
     determine_valuation_confidence を import しているモジュールを実測で固定する
     (import 方向の回帰)。docstring 内の言及は対象にしない。
+
+    Issue #582: services/valuation_confidence_shadow_service.py を追加した
+    (require_industry_model=False でのcandidate再計算専用。BUY側のshadow計測
+    でのみ使われ、SELL/保有判断からは呼ばれない。buy_signal_service.py経由の
+    呼び出しと同じくBUY側専用のため、本testの意図〔SELL側が本経路を通らない〕
+    は保たれている)。
     """
     import ast
     import pathlib
@@ -278,4 +284,7 @@ def test_sell_side_does_not_use_this_path() -> None:
             ):
                 importers.append(path.as_posix())
                 break
-    assert sorted(importers) == ["src/jstock_advisor/services/buy_signal_service.py"]
+    assert sorted(importers) == [
+        "src/jstock_advisor/services/buy_signal_service.py",
+        "src/jstock_advisor/services/valuation_confidence_shadow_service.py",
+    ]

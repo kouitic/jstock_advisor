@@ -58,6 +58,7 @@ def determine_valuation_confidence(
     industry_model_applied: bool,
     uses_simplified_dcf: bool,
     normalized_eps_confidence: ConfidenceLevel | None,
+    require_industry_model: bool = True,
 ) -> ValuationConfidenceResult:
     """--- Issue #186(2026-09-06): dispersionによるLOW判定の閾値を分離した ---
 
@@ -74,6 +75,17 @@ def determine_valuation_confidence(
     「比較対象として成立していない極端な入力を保護する」用途に限定する。
     auto_buy_block(2.00)は変更していない。自動購入の禁止は引き続き
     decide_buy_action()/validate_buy_recommendation()が担う。
+
+    --- Issue #582(2026-09-28): require_industry_model(既定True) ---
+
+    industry_model_appliedは#208の調査により恒久的にFalseとなることが
+    判明しており、本関数のHIGH tierはProductionで一度も到達していない。
+    `require_industry_model=False`を渡すと、industry_model_appliedを
+    reasons_not_highの判定対象から除外する(他の理由〔dispersion・簡易DCF・
+    平準化EPS信頼度〕は従来どおり評価する)。既定値Trueは既存呼び出し元の
+    挙動を完全に保つ(#582のDOMAIN_WIP_DECLARATION・COMPATIBILITY_EVIDENCE
+    参照)。Falseを渡す呼び出しは現時点でshadow計測専用であり、Production
+    のBUY判定・Recommendation保存には使用しない。
     """
     if methods_used_count == 0:
         return ValuationConfidenceResult(
@@ -87,7 +99,7 @@ def determine_valuation_confidence(
         reasons_not_high.append(
             f"適正価格手法間のばらつきが{dispersion_medium_max}倍を超えています"
         )
-    if not industry_model_applied:
+    if require_industry_model and not industry_model_applied:
         reasons_not_high.append("業種別適正価格モデル未適用")
     if uses_simplified_dcf:
         reasons_not_high.append("簡易DCF(固定割引率・固定成長率の前提)を使用")

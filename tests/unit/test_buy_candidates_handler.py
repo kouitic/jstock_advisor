@@ -3281,6 +3281,66 @@ def test_process_single_candidate_normal_mode_still_calls_decision_snapshot(
     assert len(snapshot_calls) == 1
 
 
+def test_process_single_candidate_validation_mode_skips_valuation_confidence_shadow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """サブちゃんレビュー対応(PR #704 SHOULD): #582のshadow計測も、#160の
+    judgment_safety_shadowと同じ合流点・同じガードの内側にあるため、VALIDATION
+    モードでは呼ばれないことを本PR自身のテストで固定する。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    shadow_calls: list[object] = []
+    monkeypatch.setattr(
+        handler_module,
+        "observe_valuation_confidence_shadow",
+        lambda *a, **kw: shadow_calls.append(a),
+    )
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, None, _NOW, object(), _CONFIG,
+        object(), repo, fake_service, ExecutionContext(mode=ExecutionMode.VALIDATION),
+    )
+
+    assert shadow_calls == []
+
+
+def test_process_single_candidate_normal_mode_still_calls_valuation_confidence_shadow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """NORMAL回帰確認: VALIDATION除外の配線を追加しても、NORMALでは従来通り呼ばれ続ける。"""
+    _patch_snapshot(monkeypatch)
+    _patch_audit(monkeypatch)
+    recommendation = _make_recommendation(
+        "2914", company_quality_score=72.5, recommendation_id="rec-1", buy_action=BuyAction.BUY
+    )
+    outcome = _outcome(recommendation, ranking_group="buy_candidate")
+    monkeypatch.setattr(handler_module.BuySignalService, "analyze", lambda self, *a, **kw: outcome)
+    fake_service = _FakeNotificationServiceForRanking()
+    repo = RecommendationRepository(store_dir=tmp_path)
+
+    shadow_calls: list[object] = []
+    monkeypatch.setattr(
+        handler_module,
+        "observe_valuation_confidence_shadow",
+        lambda *a, **kw: shadow_calls.append(a),
+    )
+
+    handler_module._process_single_candidate(
+        "2914", CandidateSource.WATCHLIST, None, None, None, _NOW, object(), _CONFIG,
+        object(), repo, fake_service,
+    )
+
+    assert len(shadow_calls) == 1
+
+
 def test_process_single_candidate_validation_mode_reports_validation_recommendation_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

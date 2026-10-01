@@ -163,6 +163,9 @@ from jstock_advisor.services.jpx_industry_source import (
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+from jstock_advisor.services.valuation_confidence_shadow_service import (
+    ValuationConfidenceShadowInputs,
+)
 from jstock_advisor.services.watch_state_service import WatchStateService
 
 # アクティブなRuleVersionが未登録の場合(初期運用時)のフォールバック値
@@ -329,6 +332,13 @@ class BuyAnalysisOutcome:
     # 推奨が生成された経路でのみ設定する(data_error / excludedはNone)。等価比較・reprには
     # 含めない(既存の比較・ログを変えない)。shadowの評価点(PR-3以降)だけが読む。
     safety_facts: SafetyFacts | None = field(default=None, compare=False, repr=False)
+    # --- Issue #582 shadow計測: valuation_confidence(HIGH tier到達可否)の
+    # candidate再計算に必要な入力のスナップショット(非永続・v1判定へ使わない)。
+    # 推奨が生成された経路でのみ設定する。等価比較・reprには含めない(既存の
+    # 比較・ログを変えない)。handlerの合流点(Recommendation保存後)でのみ読む。
+    valuation_confidence_shadow_inputs: ValuationConfidenceShadowInputs | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 def _financials_are_stale_fact(verdict: FinancialFreshnessVerdict) -> bool | None:
@@ -1997,5 +2007,37 @@ class BuySignalService:
             ranking_group=ranking_group,
             safety_facts=SafetyFacts(
                 financials_are_stale=_financials_are_stale_fact(financial_freshness.verdict)
+            ),
+            # --- Issue #582 shadow計測: candidate再計算(require_industry_model=
+            # False)に必要な入力のスナップショット。実際の再計算・監査記録は
+            # handlerの合流点(Recommendation保存後)でshadowがONの場合のみ行う
+            # (valuation_confidence_shadow_service.observe_valuation_confidence_
+            # shadow)。ここでは参照を束ねるだけで新規計算は行わない ---
+            valuation_confidence_shadow_inputs=ValuationConfidenceShadowInputs(
+                valuation_summary=valuation_summary,
+                dispersion_band=dispersion_band,
+                industry_model_applied=industry_model_applied,
+                uses_simplified_dcf=filtered_dcf.applicable,
+                normalized_eps_confidence=(eps_result.confidence if is_cyclical_industry else None),
+                adjustment_codes=tuple(adjustment_codes),
+                data_quality_warning=data_quality_warning,
+                earnings_date_status=earnings_date_status,
+                current_price=current_price,
+                company_quality_score=company_quality_score,
+                business_days_to_earnings=business_days_to_earnings,
+                config=self._config,
+                actual_confidence=valuation_confidence_result.level,
+                actual_reasons_not_high=tuple(valuation_confidence_result.reasons_not_high),
+                actual_entry_price=(
+                    buy_price_levels.entry.price if buy_price_levels.entry else None
+                ),
+                actual_standard_price=(
+                    buy_price_levels.standard.price if buy_price_levels.standard else None
+                ),
+                actual_strong_price=(
+                    buy_price_levels.strong.price if buy_price_levels.strong else None
+                ),
+                actual_buy_action=buy_action,
+                actual_raw_buy_action=raw_buy_action,
             ),
         )
