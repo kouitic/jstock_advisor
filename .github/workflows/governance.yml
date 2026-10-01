@@ -4,6 +4,11 @@ name: Governance
 # 意味判定(宣言内容が変更と矛盾しないか)は行わない。それは引き続き
 # レビュワーの責務である(development_workflow.md 3.5.8)。
 #
+# あわせて、handler/repository層の変更がinfra/template.yaml・
+# test_infra_*.pyのいずれも伴わない場合にWARNINGを出す、IAM contract
+# 気付きgateも行う(Issue #663 PR-2)。こちらも意味判定はせず、
+# FAILにはしない。
+#
 # ci.ymlはrequired 8 jobの出所であり、job を足すとrequired_status_checks
 # との対応を誤りやすいこと、また本workflowはPR本文を読むためGitHub APIに
 # 依存することから、pii-metadata-audit.yml と同じ理由でci.ymlとは別
@@ -26,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -36,5 +43,17 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr_body.txt"
+      # Issue #663 PR-2: IAM contract気付きgate用の変更ファイル一覧。
+      # base/head SHAはGitHub側が決めるpull_requestイベントの値であり、
+      # shell injectionの懸念はPR本文ほど無いが、念のためenv経由で渡す。
+      - name: Compute changed files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed_files.txt"
       - name: Check PR body (syntax only)
-        run: python scripts/governance_pr_check.py --body-file "$RUNNER_TEMP/pr_body.txt"
+        run: |
+          python scripts/governance_pr_check.py \
+            --body-file "$RUNNER_TEMP/pr_body.txt" \
+            --changed-files-file "$RUNNER_TEMP/changed_files.txt"
