@@ -4663,17 +4663,47 @@ BUILD_SOURCE_SHA_MATCHES_RELEASE_TARGET = YES/NO
 
 ### 36.4 Artifact identity記録・比較(ARTIFACT_IDENTITY_GATE)
 
+**前節(36.2)までの手順だけでは「正しいsourceからbuildしたこと」までしか
+保証できない。** buildした成果物が、実際にChangeSetが参照するS3オブジェクト
+そのものであることまで確認しなければ、build後に成果物が差し替わる・
+古いS3オブジェクトがキャッシュ的に再利用される、といった経路を検出
+できない。そのため、以下は「対応していることを目視で確認する」という
+宣言だけでなく、**SAM自身が払い出す content-hash keyを仲立ちにした
+機械的に照合可能な手順**とする。
+
 ```
 1  sam build後、.aws-sam/build/配下の対象Lambda/Layerディレクトリに、
    今回のrelease targetに含まれるはずの変更が実際に存在することを
    grep等で確認する(例: 特定関数の新規ヘルパー関数名、更新された
    依存パッケージの.dist-infoディレクトリ名)。対象は今回のrelease
    targetに含まれる主要なfix・機能変更とする(悉皆的な確認ではない)
-2  ChangeSet CREATE後、`aws cloudformation describe-change-set`で
-   各リソースの新しいS3 Key(Lambda Code / Layer Content)を確認する
-3  1で確認したbuild成果物と、2でChangeSetが実際に参照するS3 Keyが
-   対応していることを確認する(36.5のsamconfig.toml drift確認と
-   合わせて行う)
+
+2  `sam deploy --no-execute-changeset`実行時の標準出力に出る
+   `Uploading to <prefix>/<key>`(新規アップロード)・
+   `File with same data already exists at <prefix>/<key>`
+   (内容が前回と同一のため再利用)の行を**全て保存する**。
+   `<key>`はS3オブジェクトの内容から決まるcontent-hash(SAMの管理バケット
+   はこの方式でkeyを払い出す)であり、「"確認する"対象」ではなく
+   「このbuildが実際に何を指しているかそのもの」である。
+   ★ 前回と同一内容の成果物は新規アップロードされず
+   `File with same data already exists`になる。これは異常ではない
+   (意図せず変更していないartifactが実際に不変であることの裏付けでも
+   ある)。想定していた変更対象の成果物が`File with same data already
+   exists`になっている場合は、buildが期待どおりの変更を含んでいない
+   可能性を示す**警報**として扱う
+
+3  `aws cloudformation describe-change-set`(または
+   `get-template --change-set-name <arn> --template-stage Processed`)で、
+   変更対象リソース(Lambda Function Code / Layer Content)が実際に
+   参照するS3 Key(`<prefix>/<key>`形式)を取得する
+
+4  2で記録したkey一覧と3で取得したkeyを突き合わせ、ChangeSetが
+   参照するkeyが、このbuildが生成・アップロードした(または
+   既存一致として確認した)keyと**完全に一致する**ことを確認する。
+   一致しない場合、ChangeSetは今回のbuild成果物とは異なる
+   (より古い、または何らかの理由で異なる内容の)S3オブジェクトを
+   参照している可能性があり、ChangeSet CREATE前(未CREATEの場合)
+   またはEXECUTE前(CREATE済みの場合)に停止して原因を特定する
 ```
 
 2026-10-01のRelease(#705・#708、ChangeSet
@@ -4681,9 +4711,12 @@ samcli-deploy1790849724/a8ca2b28-7d39-436e-8f32-40aa76efeecf)では、
 build直後に`.aws-sam/build/DependenciesLayer`内の`urllib3-2.8.0.dist-info`
 / `pyjwt-2.15.1.dist-info`、および`.aws-sam/build/WatchlistBatchReconciler
 Function`内の対象関数定義の存在を1の手順で確認し、deploy後に対象関数の
-`LastModified`・新Layer版numberのattachを実測確認した。これは1〜3を
-手動で実施した実例であり、本節が新しいツールを前提としないことの裏付けで
-もある。
+`LastModified`・新Layer版numberのattachを実測確認した。**ただし、この
+実例は1(build成果物の中身確認)とdeploy後のLastModified確認までを
+行ったものであり、2〜4(sam deployのアップロードkeyとChangeSetの
+参照keyの突き合わせ)までは実施していなかった(レビュー指摘により判明。
+2026-10-02追記)。** 2〜4は本節で新たに明文化した手順であり、次回の
+release実行が初めての実地検証機会になる。
 
 ### 36.5 Deploy設定(samconfig.toml)の非センシティブ値drift確認(#650)
 
@@ -4732,7 +4765,8 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 [ ] SHA_GATE      : git rev-parse HEADがrelease target SHAと一致する(36.2)
 [ ] CLEAN_TREE_GATE: git status --porcelainが空である(36.2)
 [ ] BUILD_RECORD  : BUILD_SOURCE_SHA等をrelease実行記録へ記載した(36.3)
-[ ] ARTIFACT_CHECK: build成果物に対象fixが含まれることを確認した(36.4)
+[ ] ARTIFACT_CHECK: build成果物に対象fixが含まれ、sam deployのアップロードkeyと
+                    ChangeSetの参照keyが一致することを確認した(36.4)
 [ ] SAMCONFIG_DRIFT: samconfig.tomlの非センシティブ値がexampleと一致する(36.5)
 ```
 
