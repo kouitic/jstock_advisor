@@ -166,8 +166,9 @@ Parameters:
       無いprincipalをexplicit Denyする)を適用するかのトグル。既定false
       (未適用。本パラメータ・関連resourceのmerge単独ではAWS上の状態は一切
       変更されない)。trueへの変更は、AdminPrincipalArn/DeployPrincipalArnを
-      実際の値へ差し替えたうえで、policy simulationによる事前確認・USER承認を
-      経たProduction適用のHuman Gateを通してから行うこと。
+      実際の値へ差し替えたうえで、事前確認(IAM Policy Simulatorが使える
+      範囲はprincipalの種別で異なる。docs/operations_manual.md §35.1参照)・
+      USER承認を経たProduction適用のHuman Gateを通してから行うこと。
   AdminPrincipalArn:
     Type: String
     Default: "arn:aws:iam::000000000000:role/not-configured"
@@ -195,14 +196,17 @@ Parameters:
       Issue #680。SecretResourcePolicyEnabled=trueのときのみ使用する。
       resource policyのexplicit Denyから除外する、Production deployに
       使うprincipal(#164のscope。長期credentialの是正はIssue #164が
-      別途扱う)のARN。#164でdeploy principal自体が変更された場合、
-      本パラメータの値も同期して更新すること(同期を怠ると次回deploy時に
-      deploy principal自身がlockoutされうる)。
-      ★ ここへ書くのはIAM principal自体のARNであり、CloudTrail・Console・
-      AccessDeniedExceptionで見るsts::assumed-role形式ではない
-      (AdminPrincipalArnと同じ注意点。docs/operations_manual.md
-      §35.1参照)。deploy principalがlockoutされた場合の復旧手順は
-      同§35.2。
+      別途扱う)のARN。**現状はIAM user自体のARN
+      (arn:aws:iam::<account>:user/<name>)を想定する**(2026-09-28、
+      サブちゃんレビュー指摘F9でfresh確認。#164が問題とする「長期・
+      自動失効なしのcredential」はIAM roleの一時credentialではなく
+      IAM userの長期access keyであることと整合する)。#164でdeploy
+      principal自体が変更された場合、本パラメータの値も同期して
+      更新すること(同期を怠ると次回deploy時にdeploy principal自身が
+      lockoutされうる。また、AdminPrincipalArnとは異なりIAM roleでは
+      ないため、IAM Policy Simulatorのresource policy込みsimulationが
+      使える〔docs/operations_manual.md §35.1参照〕という違いがある)。
+      deploy principalがlockoutされた場合の復旧手順は同§35.2。
 
 Globals:
   Function:
@@ -3728,9 +3732,15 @@ Resources:
   #     (AWSの評価規則)。「管理者だから暗黙に復旧できる」という前提には
   #     頼らず、policy自身のCondition除外リストへ管理者を明記することで
   #     復旧経路を担保する。
-  #   - Production適用前に、policy simulation(iam:SimulatePrincipalPolicy等)
-  #     でADMIN/DEPLOY/RUNTIMEのいずれもlockoutされないことを確認すること
-  #     (本PRでは未実施。Production適用の別Human Gateで行う)。
+  #   - Production適用前の事前確認は、principalの種別で手段が異なる
+  #     (2026-09-28、サブちゃんレビュー指摘F7/F9で判明。IAM Policy
+  #     Simulatorのresource policy込みend-to-end simulationはIAM role
+  #     には非対応)。ADMIN(SSO role)・RUNTIME 2 role(Lambda実行role)は
+  #     roleのためこの制約を受けるが、DEPLOYはIAM userのため
+  #     iam:SimulatePrincipalPolicyのResourcePolicyパラメータで実際に
+  #     end-to-end simulationができる。詳細な確認手順は
+  #     docs/operations_manual.md §35.1(本PRでは未実施。Production適用の
+  #     別Human Gateで行う)。
   GithubAppSecretResourcePolicy:
     Type: AWS::SecretsManager::ResourcePolicy
     Condition: SecretResourcePolicyIsEnabled
