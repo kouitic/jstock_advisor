@@ -170,6 +170,9 @@ from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
+from jstock_advisor.services.valuation_confidence_shadow_service import (
+    observe_valuation_confidence_shadow,
+)
 from jstock_advisor.services.watch_state_service import (
     WATCH_END_NOTIFIABLE_REASONS,
     WatchStateService,
@@ -982,6 +985,16 @@ def _process_single_candidate(
                     final_recommendation,
                     outcome,
                     ENGINE_BUY_CANDIDATES,
+                    now,
+                    execution_context=execution_context,
+                    audit_service=audit_service,
+                )
+                # Issue #582: 適正価格信頼度(valuation_confidence)のHIGH tier到達可否
+                # shadow計測。上記と同じ理由(保存後にのみ置く・失敗隔離・VALIDATION除外済み)
+                # で、observe_judgment_safety_shadowと同じ合流点から呼ぶ。
+                observe_valuation_confidence_shadow(
+                    final_recommendation,
+                    outcome,
                     now,
                     execution_context=execution_context,
                     audit_service=audit_service,

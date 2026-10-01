@@ -26,6 +26,10 @@ import pytest
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.classification.buy_industry import (
+    CYCLICAL_SECTORS,
+    classify_buy_industry_sector,
+)
 from jstock_advisor.domain.classification.canonical_industry import JpxLookupStatus
 from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.domain.entities.common import DataSourceReference
@@ -602,6 +606,108 @@ def test_only_nihon_shinyaku_is_not_excluded_for_price_reasons(
     assert nihon_shinyaku_rec.raw_buy_action in BUY_FAMILY_ACTIONS
     nihon_shinyaku_reasons = [r.code for r in nihon_shinyaku_rec.buy_decision_reasons]
     assert "EARNINGS_WINDOW" in nihon_shinyaku_reasons
+
+
+def test_issue_582_valuation_confidence_shadow_inputs_match_the_actual_judgment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #582: shadow入力スナップショットのactual_*が、実際の判定結果と一致する。
+
+    v1の判定(recommendation/buy_action/価格)は本Issueで変更していない(golden
+    invariant)。shadow入力は既存の実際の結果を束ねているだけであることを固定する。
+    """
+    outcome = _analyze(monkeypatch, _NIHON_SHINYAKU)
+    rec = outcome.recommendation
+    assert rec is not None
+    shadow_inputs = outcome.valuation_confidence_shadow_inputs
+    assert shadow_inputs is not None
+    assert shadow_inputs.actual_buy_action == outcome.buy_action
+    assert shadow_inputs.actual_raw_buy_action == rec.raw_buy_action
+    assert shadow_inputs.actual_entry_price == rec.entry_buy_price
+    assert shadow_inputs.actual_standard_price == rec.standard_buy_price
+    assert shadow_inputs.actual_strong_price == rec.strong_buy_price
+    assert shadow_inputs.current_price == _NIHON_SHINYAKU.current_price
+    assert shadow_inputs.industry_model_applied is False  # #208: 本番で恒久的にFalse
+
+
+@pytest.mark.parametrize(
+    "fx",
+    [_NIHON_SHINYAKU, _DAIKYO_NISHIKAWA],
+    ids=["eps_none", "eps_medium_cyclical"],
+)
+def test_issue_582_valuation_confidence_shadow_inputs_match_production_call_arguments(
+    monkeypatch: pytest.MonkeyPatch, fx: _StockFixture
+) -> None:
+    """サブちゃんレビュー対応(PR #704 F3/SHOULD1、再レビューSHOULD): shadow入力
+    スナップショットのuses_simplified_dcf/normalized_eps_confidence/
+    industry_model_applied/adjustment_codesが、production側の実際の呼び出し
+    引数と一致することを固定する。
+
+    valuation_confidence_shadow_service.py側のテストはshadow serviceへ渡された
+    inputsのpass-throughのみを固定しており、buy_signal_service.py::analyze()が
+    実際にdetermine_valuation_confidence()/compute_margin_of_safety()へ渡した
+    引数とスナップショットが一致する保証は無かった(サブちゃん実測: N13/N14/N15
+    SURVIVED)。production側の実呼び出しをspyし、実際に渡された引数と
+    スナップショットの値を直接比較する。
+
+    再レビュー対応: `_NIHON_SHINYAKU`単独ではnormalized_eps_confidenceが
+    恒常的にNone(非cyclical industryのため)であり、N14(この値を取り違える
+    変異)がNone==Noneとして常に無検出(vacuous)になっていた。eps非None
+    (is_cyclical_industry=True、normalized_eps_confidence=MEDIUM)の
+    `_DAIKYO_NISHIKAWA`を追加のparametrize caseとして使う。
+    """
+    captured: dict[str, object] = {}
+    real_determine = service_module.determine_valuation_confidence
+    real_margin = service_module.compute_margin_of_safety
+
+    def _spy_determine(**kwargs: object) -> object:
+        captured["industry_model_applied"] = kwargs["industry_model_applied"]
+        captured["uses_simplified_dcf"] = kwargs["uses_simplified_dcf"]
+        captured["normalized_eps_confidence"] = kwargs["normalized_eps_confidence"]
+        return real_determine(**kwargs)  # type: ignore[arg-type]
+
+    def _spy_margin(confidence: object, adjustment_codes: object, config: object) -> object:
+        captured["adjustment_codes"] = list(adjustment_codes)  # type: ignore[call-overload]
+        return real_margin(confidence, adjustment_codes, config)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service_module, "determine_valuation_confidence", _spy_determine)
+    monkeypatch.setattr(service_module, "compute_margin_of_safety", _spy_margin)
+
+    outcome = _analyze(monkeypatch, fx)
+
+    shadow_inputs = outcome.valuation_confidence_shadow_inputs
+    assert shadow_inputs is not None
+    assert captured  # spyが実際に呼ばれたことの確認(呼ばれなければ以下は無意味)
+    assert shadow_inputs.industry_model_applied == captured["industry_model_applied"]
+    assert shadow_inputs.uses_simplified_dcf == captured["uses_simplified_dcf"]
+    assert shadow_inputs.normalized_eps_confidence == captured["normalized_eps_confidence"]
+    assert shadow_inputs.adjustment_codes == tuple(captured["adjustment_codes"])  # type: ignore[arg-type]
+
+    # サブちゃん最終確認での軽微な観測への対応: fixtureの前提
+    # (test_issue_582_eps_medium_cyclical_fixture_is_not_vacuous_for_n14)は
+    # is_cyclical_industryの分類条件のみを固定しており、normalized_eps_
+    # confidenceが実際にNoneでないこと(EPS正規化側の別の前提)までは見ていな
+    # かった。ここで直接assertし、N14が無検出になる条件をこのテスト自身にも
+    # 明示的に残す("eps_none"は意図的にNone、"eps_medium_cyclical"は非None
+    # であることの両方を固定する)。
+    if fx is _DAIKYO_NISHIKAWA:
+        assert captured["normalized_eps_confidence"] is not None
+    else:
+        assert captured["normalized_eps_confidence"] is None
+
+
+def test_issue_582_eps_medium_cyclical_fixture_is_not_vacuous_for_n14() -> None:
+    """サブちゃんレビュー対応(再レビューSHOULD、N14 vacuous対策の裏付け)。
+
+    上記parametrizeの"eps_medium_cyclical"ケースが実際にNone以外の値を
+    経由すること自体をここで固定する(fixtureの前提〔_DAIKYO_NISHIKAWAが
+    is_cyclical_industry=True〕が将来の実装変更で崩れた場合、このテスト自身が
+    真っ先に落ちて気づけるようにする)。
+    """
+    sector = classify_buy_industry_sector(
+        _DAIKYO_NISHIKAWA.industry, _DAIKYO_NISHIKAWA.sector, False
+    )
+    assert sector in CYCLICAL_SECTORS
 
 
 def test_buy_score_input_facts_includes_forecast_eps_and_bps_for_audit(
@@ -1236,6 +1342,8 @@ def test_buy_unavailable_disclosure_is_data_insufficient_not_disclosure_risk(
     assert not any("リスクキーワード" in reason for reason in outcome.exclusion_reasons)
     assert outcome.data_error is not None
     assert "取得できなかった" in outcome.data_error
+    # Issue #582: 早期returnの経路(推奨が生成されない)ではshadow入力も設定しない
+    assert outcome.valuation_confidence_shadow_inputs is None
 
 
 def test_buy_unavailable_disclosure_does_not_pass_as_clean(

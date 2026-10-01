@@ -1,0 +1,14 @@
+# 適正価格信頼度(valuation_confidence)shadow計測の設定(Issue #582)。
+# shadow = 「industry_model_applied未適用でもHIGH tierを許した場合に何が変わるか」を、
+# 判定・通知・保存を一切変えずに観測だけする機構。
+#
+# mode:
+# ★ 値は必ず引用符で囲むこと("OFF")。引用符なしのOFFはYAML 1.1で真偽値Falseと解釈され、検証に失敗して
+#   設定ファイル全体が読まれなくなる(いわゆるNorway problem)。
+#   OFF     既定。shadow処理を一切実行しない(新規I/Oも行わない)。
+#   SHADOW  観測のみ行う。判定・通知・保存は変えない。SHADOW化は別のconfig変更(人間承認)で行う。
+#
+# このファイルが無い・読めない・不正な場合は、mode=OFFとして扱う(shadowを実行しない側へ倒す)。
+# 本流の起動を落とさない。
+version: 1
+mode: "OFF"
