@@ -51,12 +51,26 @@ def _to_dynamo_item(config: TradingPauseConfig) -> dict[str, Any]:
     }
 
 
+def _updated_at_as_utc(updated_at_raw: str) -> dt.datetime:
+    """保存されたupdated_at(ISO8601文字列)をtimezone-aware UTCへ正規化する。
+
+    書き込み経路(init()の既定値dt.datetime.now(dt.UTC))は常にaware UTCのため
+    aware UTCが正規形(notification_log_repository.pyの`_sent_at_as_utc()`と
+    同じ先例)。naiveな値(想定外の旧データ・テストデータ)はローカルタイムゾーン
+    として暗黙解釈せず、UTCとみなす(#66 F-L6-a)。
+    """
+    updated_at = dt.datetime.fromisoformat(updated_at_raw)
+    if updated_at.tzinfo is None:
+        return updated_at.replace(tzinfo=dt.UTC)
+    return updated_at.astimezone(dt.UTC)
+
+
 def _from_dynamo_item(item: dict[str, Any]) -> TradingPauseConfig:
     return TradingPauseConfig(
         config_id=str(item["config_id"]),
         config_version=int(item["config_version"]),
         pause_buy_sell=bool(item["pause_buy_sell"]),
-        updated_at=dt.datetime.fromisoformat(item["updated_at"]),
+        updated_at=_updated_at_as_utc(item["updated_at"]),
         updated_by=str(item["updated_by"]),
         change_reason=str(item["change_reason"]),
     )

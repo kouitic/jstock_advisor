@@ -29,6 +29,20 @@ from jstock_advisor.infrastructure.github.client import (
 _LABEL_FOR_SEARCH = "auto-generated"
 
 
+def _expires_at_as_utc(expires_raw: str) -> dt.datetime:
+    """保存されたclaim期限(ISO8601文字列)をtimezone-aware UTCへ正規化する。
+
+    書き込み経路はnowを引き回すのみで、Lambda entry点のdt.datetime.now(dt.UTC)
+    (aware)が常に起源のため、aware UTCが正規形(notification_log_repository.py
+    の`_sent_at_as_utc()`と同じ先例)。naiveな値(想定外の旧データ・テストデータ)
+    はローカルタイムゾーンとして暗黙解釈せず、UTCとみなす(#66 F-L6-a)。
+    """
+    expires_at = dt.datetime.fromisoformat(expires_raw)
+    if expires_at.tzinfo is None:
+        return expires_at.replace(tzinfo=dt.UTC)
+    return expires_at.astimezone(dt.UTC)
+
+
 def _issue_marker(candidate_key: str) -> str:
     return f"<!-- improvement_candidate_key: {candidate_key} -->"
 
@@ -253,7 +267,7 @@ def _reconcile_stale_issue_creation(
     claimed_raw = task.get("issue_claimed_at")
     if not expires_raw or not claimed_raw:
         return ImprovementTaskStatus.ISSUE_CREATING
-    expires_at = dt.datetime.fromisoformat(expires_raw)
+    expires_at = _expires_at_as_utc(expires_raw)
     if now < expires_at:
         return ImprovementTaskStatus.ISSUE_CREATING  # 他実行が処理中(未失効)
 
@@ -329,7 +343,7 @@ def _reconcile_stale_comment(
     expires_raw = task.get("comment_claim_expires_at")
     if not expires_raw:
         return ImprovementTaskStatus.ISSUE_CREATED
-    expires_at = dt.datetime.fromisoformat(expires_raw)
+    expires_at = _expires_at_as_utc(expires_raw)
     if now < expires_at:
         return ImprovementTaskStatus.ISSUE_CREATED  # 他実行が処理中(未失効)
 
