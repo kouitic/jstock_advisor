@@ -527,3 +527,110 @@ def test_active_issue_creating_claim_skips_without_github_calls_beyond_auth(
         candidate, "2026-W32", still_within_timeout, config, "owner", "repo", aws_env
     )
     assert status == ImprovementTaskStatus.ISSUE_CREATING
+
+
+# --- Issue #575(#66 F-L6-a): naive/aware混入への防御 ------------------------
+
+
+def test_issue_575_expires_at_as_utc_normalizes_naive_and_aware() -> None:
+    """`_expires_at_as_utc()`: naiveはUTCとみなし、awareは他TZでもUTCへ揃える。"""
+    naive = "2026-08-10T09:10:00"
+    aware_utc = "2026-08-10T09:10:00+00:00"
+    aware_jst = "2026-08-10T18:10:00+09:00"  # 同じ瞬間をJSTで表現
+
+    normalized_naive = github_issue_service._expires_at_as_utc(naive)
+    normalized_aware_utc = github_issue_service._expires_at_as_utc(aware_utc)
+    normalized_aware_jst = github_issue_service._expires_at_as_utc(aware_jst)
+
+    assert normalized_naive.tzinfo is dt.UTC
+    assert normalized_naive == dt.datetime(2026, 8, 10, 9, 10, tzinfo=dt.UTC)
+    assert normalized_aware_utc == normalized_naive
+    assert normalized_aware_jst == normalized_naive  # 同一の瞬間
+
+
+def _overwrite_attribute(table_name: str, key: dict[str, str], attr: str, value: str) -> None:
+    table: Any = boto3.resource("dynamodb", region_name=_REGION).Table(table_name)
+    table.update_item(
+        Key=key,
+        UpdateExpression="SET #a = :v",
+        ExpressionAttributeNames={"#a": attr},
+        ExpressionAttributeValues={":v": value},
+    )
+
+
+def test_issue_575_naive_issue_claim_expires_at_does_not_raise_and_is_treated_as_utc(
+    monkeypatch: pytest.MonkeyPatch, aws_env: str, config
+) -> None:
+    """issue_claim_expires_atが(想定外に)naive文字列として保存されていても、
+    例外にならず、UTCとみなした場合と同じ判定になることを固定する
+    (counter-example: 修正前はnaiveとawareの比較でTypeErrorになっていた)。
+    """
+    candidate = _candidate()
+    tracker.ensure_task_exists(
+        candidate.candidate_key,
+        candidate.recommendation_type,
+        candidate.rule_version,
+        candidate.segment_key,
+        candidate.priority,
+        _NOW,
+    )
+    tracker.try_claim_new_issue_creation(candidate.candidate_key, _NOW, 10)
+    expires_at_utc = _NOW + dt.timedelta(minutes=10)
+    naive_expires_iso = expires_at_utc.replace(tzinfo=None).isoformat()
+    _overwrite_attribute(
+        "jstock-improvement_tasks",
+        {"candidate_key": candidate.candidate_key},
+        "issue_claim_expires_at",
+        naive_expires_iso,
+    )
+    still_within_timeout = _NOW + dt.timedelta(minutes=5)
+
+    fake = _FakeUrlopen([])  # 未失効(UTCとして解釈すれば)のためGitHub API呼び出しは発生しないはず
+    monkeypatch.setattr(github_client_module.urllib.request, "urlopen", fake)
+
+    status = github_issue_service.process_candidate(
+        candidate, "2026-W32", still_within_timeout, config, "owner", "repo", aws_env
+    )
+
+    assert status == ImprovementTaskStatus.ISSUE_CREATING
+
+
+def test_issue_575_naive_comment_claim_expires_at_does_not_raise_and_is_treated_as_utc(
+    monkeypatch: pytest.MonkeyPatch, aws_env: str, config
+) -> None:
+    """comment_claim_expires_atが(想定外に)naive文字列として保存されていても、
+    例外にならず、UTCとみなした場合と同じ判定になることを固定する。"""
+    candidate = _candidate()
+    tracker.ensure_task_exists(
+        candidate.candidate_key,
+        candidate.recommendation_type,
+        candidate.rule_version,
+        candidate.segment_key,
+        candidate.priority,
+        _NOW,
+    )
+    tracker.mark_issue_created(candidate.candidate_key, 1, "https://github.com/o/r/issues/1", _NOW)
+    tracker.try_claim_new_comment(candidate.candidate_key, "2026-W32", _NOW, 10)
+    expires_at_utc = _NOW + dt.timedelta(minutes=10)
+    naive_expires_iso = expires_at_utc.replace(tzinfo=None).isoformat()
+    _overwrite_attribute(
+        "jstock-improvement_tasks",
+        {"candidate_key": candidate.candidate_key},
+        "comment_claim_expires_at",
+        naive_expires_iso,
+    )
+    still_within_timeout = _NOW + dt.timedelta(minutes=5)
+
+    # _process_with_clientは既存issueの状態確認(client.get_issue)を先に行う
+    # ため、未失効(UTCとして解釈すれば)でもこの1回だけGitHub API呼び出しが
+    # 発生する(コメント再claim側のreconcile自体はGitHub APIを呼ばない)。
+    fake = _FakeUrlopen([_token_response(), _issue_response(1, state="open")])
+    monkeypatch.setattr(github_client_module.urllib.request, "urlopen", fake)
+
+    status = github_issue_service.process_candidate(
+        candidate, "2026-W32", still_within_timeout, config, "owner", "repo", aws_env
+    )
+
+    assert status == ImprovementTaskStatus.ISSUE_CREATED
+    comment_calls = [r for r in fake.requests if "/comments" in r.full_url]
+    assert comment_calls == []  # reconcileは未失効のため何もしない(新規コメントなし)

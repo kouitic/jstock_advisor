@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import Any
 
 import boto3
 import pytest
@@ -181,3 +182,46 @@ def test_dynamodb_update_conflict_on_stale_version(dynamo_lambda_env: object) ->
             change_reason="B's stale change",
             now=_NOW,
         )
+
+
+# --- Issue #575(#66 F-L6-a): naive/aware混入への防御 ------------------------
+
+
+def test_issue_575_updated_at_as_utc_normalizes_naive_and_aware() -> None:
+    """`_updated_at_as_utc()`: naiveはUTCとみなし、awareは他TZでもUTCへ揃える。"""
+    naive = "2026-08-01T07:00:00"
+    aware_utc = "2026-08-01T07:00:00+00:00"
+    aware_jst = "2026-08-01T16:00:00+09:00"  # 同じ瞬間をJSTで表現
+
+    normalized_naive = repo._updated_at_as_utc(naive)
+    normalized_aware_utc = repo._updated_at_as_utc(aware_utc)
+    normalized_aware_jst = repo._updated_at_as_utc(aware_jst)
+
+    assert normalized_naive.tzinfo is dt.UTC
+    assert normalized_naive == dt.datetime(2026, 8, 1, 7, 0, tzinfo=dt.UTC)
+    assert normalized_aware_utc == normalized_naive
+    assert normalized_aware_jst == normalized_naive  # 同一の瞬間
+
+
+def test_issue_575_naive_updated_at_does_not_raise_and_is_treated_as_utc(
+    dynamo_lambda_env: object,
+) -> None:
+    """DynamoDB上のupdated_atが(想定外に)naive文字列として保存されていても、
+    get()が例外にならず、UTCとみなした結果を返すことを固定する
+    (counter-example: 修正前はdt.datetime.fromisoformat()がnaiveのまま
+    返し、呼び出し側でawareなnowと比較するとTypeErrorになり得た)。
+    """
+    repo.init(pause_buy_sell=False, updated_by="tester", change_reason="init", now=_NOW)
+    table: Any = boto3.resource("dynamodb", region_name=_REGION).Table(_TABLE_NAME)
+    naive_updated_at = _NOW.replace(tzinfo=None).isoformat()
+    table.update_item(
+        Key={"config_id": "trading_pause"},
+        UpdateExpression="SET updated_at = :v",
+        ExpressionAttributeValues={":v": naive_updated_at},
+    )
+
+    fetched = repo.get()
+
+    assert fetched is not None
+    assert fetched.updated_at.tzinfo is dt.UTC
+    assert fetched.updated_at == _NOW
