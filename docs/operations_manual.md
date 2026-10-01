@@ -4332,6 +4332,19 @@ a  IDENTITY_POLICY_CHECK
    チェックリストを満たすためにPutSecretValue等を追加付与しては
    ならない。それは#133/#680が縮小しようとしているblast radiusを
    逆に広げる)。
+   ★★ **resource軸の期待値(2026-10-01、サブちゃんレビュー指摘F20)**:
+   F19によりaはResourceArnsへ5 secret分のARNをまとめて渡すため、
+   RUNTIME 2 roleについては**github-app secretのみ`allowed`、残り
+   4 secret(edinet-api-key/line-channel-access-token/line-user-id/
+   line-channel-secret)は`implicitDeny`になるのが正しい結果**である
+   (両roleのidentity policyは`Resource: !Ref GithubAppSecretArn`
+   〔`infra/template.yaml`の該当IAM policy〕のみへscopeされており、
+   他4 secretへのGetSecretValueはそもそも許可していない。resource
+   policy側のallow-listもgithub-app secretのみこの2 roleを含み、
+   残り4 secretはADMIN/DEPLOYの2者のみである)。**この4件の
+   implicitDenyはチェック失敗ではない。これを解消しようとして
+   allow-listやidentity policyを広げてはならない**(F10がaction軸で
+   警告したのと同型の、resource軸でのblast radius拡大になる)。
 
 b  RESOURCE_POLICY_CHECK_FOR_IAM_USER(DEPLOYのみ。pre-apply時点で
    得られる、simulationによる唯一の真のend-to-end確認)
