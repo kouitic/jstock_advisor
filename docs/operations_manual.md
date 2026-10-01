@@ -4583,3 +4583,166 @@ lockout/data-loss軸へ適用したもの)。
 EXECUTE・SecretResourcePolicyEnabled有効化はいずれも別Human Gateであり、
 本節の追加自体・IaC定義の追加自体によってもProduction上の挙動は変わらない
 (トグルの既定はfalseのまま)。
+
+## 36. Release Build/Artifact ProvenanceとDeploy設定driftの検出(Issue #649・#650、2026-10-02追加)
+
+### 36.1 背景(実際に発生した事象)
+
+```
+near-miss(#338 finding (a)。実害なし)
+  release build直前、作業ツリーのHEADがrelease targetとは別branchに
+  なっていたことに気づき、detached checkoutしてからbuildしたため
+  事なきを得た事象。「気づいたから避けられた」のであり、手順が
+  防いだのではない。
+
+実害あり(#649へのTARO実例報告、2026-09-27。#529 corrective IAM fixの
+  deploy作業)
+  sam build/sam deployを実行した作業ツリーが、意図したorigin/mainでは
+  なく別のfeature branchのままだった。ChangeSetはCREATE_COMPLETE・
+  EXECUTEはUPDATE_COMPLETEを返したが、意図したIAM是正が実際には
+  含まれていなかった。検出はdeploy完了後のread-only確認(対象roleの
+  inline policyを直接確認)によってのみ行えた。ChangeSet CREATE前の
+  `git log`目視確認だけでは検出できなかった
+  (REVIEWED_SOURCE != BUILT_SOURCEの典型例)。
+
+実害あり(#650。Release W6、#314 W6_ARTIFACT_CAUSE_ANALYSIS)
+  ChangeSetが全Lambda・両Layerを更新対象と誤って計算した直接原因が、
+  `infra/samconfig.toml`(git管理外)の`s3_prefix`値と、deploy済み
+  artifactの実際のS3 key prefixとの食い違いだったことが実測された。
+  bucket・md5(全14成果物)は同一で、接頭辞の有無だけが違っていた。
+```
+
+いずれも「承認したsource/build/deploy入力と、実際にbuild・deployされた
+artifact・ChangeSetとの一致」を機械的に確認する手順が存在しないことに
+起因する、同じroot cause family(deploy-time provenance検証の欠如)
+である。本節は#649(build対象SHA固定・artifact同一性)と#650
+(deploy設定drift)を統合したChangeSet CREATE前チェックリストを定める。
+
+### 36.2 Build前ゲート(BRANCH_GATE / SHA_GATE / CLEAN_TREE_GATE)
+
+Production release buildの直前に、以下を**必須手順**とする:
+
+```
+1  git fetch origin main
+2  git rev-parse HEAD と git rev-parse origin/main(または、USER承認済みの
+   正確なrelease target SHA)を比較し、一致することを確認する
+   (「originをfetchして見た」だけでは不十分。実際にbuildするHEADとの
+   突き合わせが必要。#649実例はここが欠けていたことが直接原因)
+3  git status --porcelain が空であることを確認する(untracked/uncommitted
+   差分を含んだままbuildしない)
+4  1〜3のいずれかが不一致の場合、`git checkout <release_target_sha>`で
+   detached HEADへ切り替えてからbuildする(現在の作業branchのHEADの
+   ままbuildしない)。build完了後、`git checkout <元のbranch>`で
+   作業branchへ戻し、detached状態を放置しない
+```
+
+★ 推奨(#649 OD1): 上記3を都度確認するのではなく、Production release
+buildでは常にrelease target SHAへのdetached checkoutを既定の手順とする
+(人間の見落としに依存しない構造的な防止。「気づいたから避けられた」
+near-missは、気づきに依存しない設計でのみ構造的に防げる)。ただし
+運用手順の変更であるため、実施可否はrelease実行者の判断に委ねる
+(いずれを選んでも36.3以降の記録項目は変わらない)。
+
+### 36.3 Build記録(DEPLOYED_PROVENANCE_RECORD)
+
+release実行記録(Issue #314に蓄積されているW1〜W9形式のUSER判断記録・
+TARGET/CONTENT/REVIEW/EXECUTE_COND/AFTER形式のコメント)へ、以下の
+fieldを追加する:
+
+```
+BUILD_SOURCE_SHA                        = sam build実行時のgit rev-parse HEAD
+BUILD_SOURCE_BRANCH                     = sam build実行時のgit branch --show-current
+                                           (detached HEADの場合は"DETACHED"と記録する)
+BUILD_TIMESTAMP                         = sam build開始時刻(UTC)
+BUILD_SOURCE_SHA_MATCHES_RELEASE_TARGET = YES/NO
+```
+
+新しいツール・スクリプトは作らない。36.2の手順を踏めば、これらの値は
+手動記録で足りる(#649 Design-First期間の方針。自動化は将来のfollow-up
+候補)。
+
+### 36.4 Artifact identity記録・比較(ARTIFACT_IDENTITY_GATE)
+
+```
+1  sam build後、.aws-sam/build/配下の対象Lambda/Layerディレクトリに、
+   今回のrelease targetに含まれるはずの変更が実際に存在することを
+   grep等で確認する(例: 特定関数の新規ヘルパー関数名、更新された
+   依存パッケージの.dist-infoディレクトリ名)。対象は今回のrelease
+   targetに含まれる主要なfix・機能変更とする(悉皆的な確認ではない)
+2  ChangeSet CREATE後、`aws cloudformation describe-change-set`で
+   各リソースの新しいS3 Key(Lambda Code / Layer Content)を確認する
+3  1で確認したbuild成果物と、2でChangeSetが実際に参照するS3 Keyが
+   対応していることを確認する(36.5のsamconfig.toml drift確認と
+   合わせて行う)
+```
+
+2026-10-01のRelease(#705・#708、ChangeSet
+samcli-deploy1790849724/a8ca2b28-7d39-436e-8f32-40aa76efeecf)では、
+build直後に`.aws-sam/build/DependenciesLayer`内の`urllib3-2.8.0.dist-info`
+/ `pyjwt-2.15.1.dist-info`、および`.aws-sam/build/WatchlistBatchReconciler
+Function`内の対象関数定義の存在を1の手順で確認し、deploy後に対象関数の
+`LastModified`・新Layer版numberのattachを実測確認した。これは1〜3を
+手動で実施した実例であり、本節が新しいツールを前提としないことの裏付けで
+もある。
+
+### 36.5 Deploy設定(samconfig.toml)の非センシティブ値drift確認(#650)
+
+```
+`infra/samconfig.toml`は、PUBLICリポジトリ化に伴い意図的にgit管理外
+(.gitignore:22)である(commit adb0f51、2026-07-30: 実際のAWSアカウントID・
+Secrets Manager ARNを含むため)。この制約により、samconfig.tomlを
+git管理へ戻すことはできない(#650 Phase A調査。アカウントID露出になる)。
+```
+
+代わりに、ChangeSet CREATE前に以下を確認する:
+
+```
+1  infra/samconfig.toml(git管理外、実際にdeployで使われる値)の
+   非センシティブ値(stack_name / resolve_s3 / s3_prefix / region /
+   confirm_changeset / capabilities / disable_rollback)を確認する
+2  infra/samconfig.toml.example(git管理下、tracked baseline)の
+   対応する値と比較し、一致することを確認する
+   (parameter_overrides内のSecrets ARN・アカウントID自体は比較・
+   記録の対象外。値そのものをログ・Issueへ書き出さない)
+3  不一致があれば、意図的な変更か設定ドリフトかを判別し、意図的な
+   変更であれば同時にsamconfig.toml.exampleも更新する。原因不明の
+   不一致があればChangeSet CREATE前に停止し、原因を特定する
+```
+
+2026-10-02時点のfresh確認: `infra/samconfig.toml`と
+`infra/samconfig.toml.example`の非センシティブ値(stack_name /
+resolve_s3 / s3_prefix / region / confirm_changeset / capabilities /
+disable_rollback)は一致している。また、2026-10-01のdeploy
+(36.4参照)後、`aws cloudformation get-template --template-stage
+Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
+(`s3_prefix = "jstock-advisor"`を反映した形式)であることを実測確認し、
+現在のsamconfig.toml.exampleの値がProduction実態と一致していることを
+確認した(#650 7節のEDGE_CASEで指摘されていた「比較の基準自体が
+ずれている可能性」への対応)。
+
+選択肢としてファイル分割(センシティブ/非センシティブを別ファイルへ
+分離する案)も検討したが、SAM CLIが複数config fileを直接mergeしない
+ため新規ツール化を伴う。Design-First期間の方針により、本節のような
+手順化(選択肢B)を採用し、ファイル構造は変更しない(#650 4節)。
+
+### 36.6 ChangeSet CREATE前チェックリスト(まとめ)
+
+```
+[ ] BRANCH_GATE   : 現在のbranch / release target SHAをfreshに確認した(36.2)
+[ ] SHA_GATE      : git rev-parse HEADがrelease target SHAと一致する(36.2)
+[ ] CLEAN_TREE_GATE: git status --porcelainが空である(36.2)
+[ ] BUILD_RECORD  : BUILD_SOURCE_SHA等をrelease実行記録へ記載した(36.3)
+[ ] ARTIFACT_CHECK: build成果物に対象fixが含まれることを確認した(36.4)
+[ ] SAMCONFIG_DRIFT: samconfig.tomlの非センシティブ値がexampleと一致する(36.5)
+```
+
+本チェックリストは31節(release前validationの責務境界)の「ChangeSet
+CREATE」段階より前に位置する確認であり、31節が扱う「AWS API側の
+semantic制約」とは別の関心事(build/deploy入力側のprovenance)を扱う。
+
+### 36.7 Production影響
+
+なし。本節は既存のrelease実行記録・チェックリストへの手順・記録項目の
+追加のみであり、build/deployの実際の挙動(どのartifactが生成され、
+どうdeployされるか)自体は変更しない。新規ツール・スクリプトは追加して
+いない(#649 OD2・#650 4節の方針どおり、自動化は将来のfollow-up候補)。
