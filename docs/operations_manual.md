@@ -4616,7 +4616,8 @@ near-miss(#338 finding (a)。実害なし)
 artifact・ChangeSetとの一致」を機械的に確認する手順が存在しないことに
 起因する、同じroot cause family(deploy-time provenance検証の欠如)
 である。本節は#649(build対象SHA固定・artifact同一性)と#650
-(deploy設定drift)を統合したChangeSet CREATE前チェックリストを定める。
+(deploy設定drift)を統合し、ChangeSet CREATEの前後にまたがるゲート
+(36.7参照)を定める。
 
 ### 36.2 Build前ゲート(BRANCH_GATE / SHA_GATE / CLEAN_TREE_GATE)
 
@@ -4661,64 +4662,133 @@ BUILD_SOURCE_SHA_MATCHES_RELEASE_TARGET = YES/NO
 手動記録で足りる(#649 Design-First期間の方針。自動化は将来のfollow-up
 候補)。
 
-### 36.4 Artifact identity記録・比較(ARTIFACT_IDENTITY_GATE)
+### 36.4 Build artifact identityの記録(PRE_CREATE GATE)
 
-**前節(36.2)までの手順だけでは「正しいsourceからbuildしたこと」までしか
-保証できない。** buildした成果物が、実際にChangeSetが参照するS3オブジェクト
+**前節(36.2〜36.3)までの手順は「正しいsourceからbuildしたこと」しか
+保証しない。** buildした成果物が、実際にChangeSetが参照するS3オブジェクト
 そのものであることまで確認しなければ、build後に成果物が差し替わる・
-古いS3オブジェクトがキャッシュ的に再利用される、といった経路を検出
-できない。そのため、以下は「対応していることを目視で確認する」という
-宣言だけでなく、**SAM自身が払い出す content-hash keyを仲立ちにした
-機械的に照合可能な手順**とする。
+別branch由来の余計な変更が混入している(対象の修正さえ含まれていれば
+grepは素通りする)・古いS3オブジェクトがキャッシュ的に再利用される、
+といった経路を検出できない(2026-10-02、ChatGPTレビューMUST-1指摘。
+旧版の本節はspot checkに留まり、artifactの実体同一性を検証していな
+かった)。
+
+**ARTIFACT_CONTENT_SPOT_CHECK(補助確認。identity verificationの代替
+ではない)**
 
 ```
-1  sam build後、.aws-sam/build/配下の対象Lambda/Layerディレクトリに、
-   今回のrelease targetに含まれるはずの変更が実際に存在することを
-   grep等で確認する(例: 特定関数の新規ヘルパー関数名、更新された
-   依存パッケージの.dist-infoディレクトリ名)。対象は今回のrelease
-   targetに含まれる主要なfix・機能変更とする(悉皆的な確認ではない)
+sam build後、.aws-sam/build/配下の対象Lambda/Layerディレクトリに、
+今回のrelease targetに含まれるはずの変更が実際に存在することを
+grep等で確認する(例: 特定関数の新規ヘルパー関数名、更新された
+依存パッケージの.dist-infoディレクトリ名)。対象は今回のrelease
+targetに含まれる主要なfix・機能変更とする(悉皆的な確認ではない)。
 
-2  `sam deploy --no-execute-changeset`実行時の標準出力に出る
-   `Uploading to <prefix>/<key>`(新規アップロード)・
-   `File with same data already exists at <prefix>/<key>`
-   (内容が前回と同一のため再利用)の行を**全て保存する**。
-   `<key>`はS3オブジェクトの内容から決まるcontent-hash(SAMの管理バケット
-   はこの方式でkeyを払い出す)であり、「"確認する"対象」ではなく
-   「このbuildが実際に何を指しているかそのもの」である。
-   ★ 前回と同一内容の成果物は新規アップロードされず
-   `File with same data already exists`になる。これは異常ではない
-   (意図せず変更していないartifactが実際に不変であることの裏付けでも
-   ある)。想定していた変更対象の成果物が`File with same data already
-   exists`になっている場合は、buildが期待どおりの変更を含んでいない
-   可能性を示す**警報**として扱う
+★ これは「期待する変更が含まれているか」のspot checkに過ぎない。
+別branch由来の無関係な変更が同時に混入していても、対象の修正さえ
+存在すればこの確認はPASSする。**artifactの実体同一性(以下の
+BUILD_ARTIFACT_IDENTITY)の代替にはならない。**
+```
 
-3  `aws cloudformation describe-change-set`(または
-   `get-template --change-set-name <arn> --template-stage Processed`)で、
-   変更対象リソース(Lambda Function Code / Layer Content)が実際に
-   参照するS3 Key(`<prefix>/<key>`形式)を取得する
+**BUILD_ARTIFACT_IDENTITYの記録(本節の主手順)**
 
-4  2で記録したkey一覧と3で取得したkeyを突き合わせ、ChangeSetが
-   参照するkeyが、このbuildが生成・アップロードした(または
-   既存一致として確認した)keyと**完全に一致する**ことを確認する。
-   一致しない場合、ChangeSetは今回のbuild成果物とは異なる
-   (より古い、または何らかの理由で異なる内容の)S3オブジェクトを
-   参照している可能性があり、ChangeSet CREATE前(未CREATEの場合)
-   またはEXECUTE前(CREATE済みの場合)に停止して原因を特定する
+`.aws-sam/build/<LogicalId>/`配下のLambda/Layer成果物は、SAM CLIが
+`sam deploy`(`sam package`相当の内部処理)実行時に、**ディレクトリ
+全体のMD5ハッシュ**をS3オブジェクト名(key)としてそのまま使用する
+(read-onlyでSAM CLI自身の実装を確認した実測結果。推測ではない):
+
+```
+samcli/lib/package/utils.py::zip_folder()
+  md5hash = dir_checksum(folder_path, followlinks=True)  # ディレクトリ全体のMD5
+  (zipfile名を"data-<md5hash>"とした上でzip化)
+
+samcli/lib/package/utils.py::zip_and_upload()
+  uploader.upload_with_dedup(zip_file, precomputed_md5=md5_hash, ...)
+
+samcli/lib/package/local_files_utils.py::get_uploaded_s3_object_name()
+  precomputed_md5を**そのまま**S3オブジェクト名として返す
+  (docstring: "Generate the file name that will be used while creating
+  the S3 Object based on the file hash value")
+
+samcli/lib/package/s3_uploader.py::upload_with_dedup()
+  docstring: "This construction of remote_path is critical to
+  preventing duplicate uploads of same object"
+```
+
+すなわち、`sam deploy`実行時に標準出力へ出る`Uploading to <prefix>/<key>`
+(新規アップロード)・`File with same data already exists at <prefix>/<key>`
+(内容が前回と同一のため再利用)の`<key>`は、**偶然一致する文字列ではなく、
+ビルドディレクトリ内容のMD5ハッシュそのもの**である(SAMの重複アップロード
+防止〔dedup〕機構の実装そのものに由来する)。これを根拠として、以下を
+BUILD_ARTIFACT_IDENTITYとして記録する:
+
+```
+1  `sam deploy --no-execute-changeset`実行時の標準出力から、対象Lambda/
+   Layerごとの`Uploading to <prefix>/<key>`または`File with same data
+   already exists at <prefix>/<key>`行を**全て保存する**
+2  ★ 前回と同一内容の成果物は新規アップロードされず`File with same
+   data already exists`になる。これは異常ではない(意図せず変更して
+   いないartifactが実際に不変であることの裏付けでもある)。想定して
+   いた変更対象の成果物が`File with same data already exists`になって
+   いる場合は、buildが期待どおりの変更を含んでいない可能性を示す
+   **警報**として扱う
+3  Lambda/Layerごとに以下の形式で記録する:
+
+   BUILD_ARTIFACT_IDENTITY
+     WatchlistBatchReconcilerFunction = jstock-advisor/<key>
+     DependenciesLayer                = jstock-advisor/<key>
+     ConfigLayer                      = jstock-advisor/<key>
+     ...(対象Lambda/Layerごとに列挙)
+```
+
+### 36.5 ChangeSet artifact identityの照合(POST_CREATE / PRE_EXECUTE GATE)
+
+ChangeSet **CREATE後・EXECUTE前**に行う(31.1節のとおりCREATE_COMPLETEは
+EXECUTEの成功を保証しないが、本節のartifact identity照合はCREATEの
+成否とは独立に、**EXECUTEしてよいかの最終防御**として位置づける)。
+
+```
+1  `aws cloudformation describe-change-set`(または`get-template
+   --change-set-name <arn> --template-stage Processed`)で、変更対象
+   リソース(Lambda Function Code / Layer Content)が実際に参照する
+   S3 Key(`<prefix>/<key>`形式)を取得する。Lambda/Layerごとに以下の
+   形式で記録する:
+
+   CHANGESET_ARTIFACT_IDENTITY
+     WatchlistBatchReconcilerFunction = jstock-advisor/<key>
+     DependenciesLayer                = jstock-advisor/<key>
+     ConfigLayer                      = jstock-advisor/<key>
+     ...(36.4のBUILD_ARTIFACT_IDENTITYと同じLambda/Layer一覧)
+
+2  Lambda/Layerごとに、36.4のBUILD_ARTIFACT_IDENTITYと本節の
+   CHANGESET_ARTIFACT_IDENTITYの`<key>`部分を**文字列として完全一致**
+   で突き合わせる(36.4節の根拠により、`<key>`はcontent MD5そのもの
+   なので、一致 = 内容が同一であることの直接証明になる。「文字列が
+   同じならcontent identity」という推測ではなく、SAM CLI自身の
+   dedup実装に基づく)
+
+   ARTIFACT_IDENTITY_MATCH = YES / NO(Lambda/Layerごと)
+
+3  **いずれか1件でもARTIFACT_IDENTITY_MATCH = NO、または照合不能
+   (片方のkeyが取得できない等)の場合、EXECUTEへ進まず停止する。**
+   ChangeSetは今回のbuild成果物とは異なる(より古い、または何らかの
+   理由で異なる内容の)S3オブジェクトを参照している可能性があり、
+   原因を特定してからやり直す
 ```
 
 2026-10-01のRelease(#705・#708、ChangeSet
 samcli-deploy1790849724/a8ca2b28-7d39-436e-8f32-40aa76efeecf)では、
 build直後に`.aws-sam/build/DependenciesLayer`内の`urllib3-2.8.0.dist-info`
 / `pyjwt-2.15.1.dist-info`、および`.aws-sam/build/WatchlistBatchReconciler
-Function`内の対象関数定義の存在を1の手順で確認し、deploy後に対象関数の
-`LastModified`・新Layer版numberのattachを実測確認した。**ただし、この
-実例は1(build成果物の中身確認)とdeploy後のLastModified確認までを
-行ったものであり、2〜4(sam deployのアップロードkeyとChangeSetの
-参照keyの突き合わせ)までは実施していなかった(レビュー指摘により判明。
-2026-10-02追記)。** 2〜4は本節で新たに明文化した手順であり、次回の
-release実行が初めての実地検証機会になる。
+Function`内の対象関数定義の存在をARTIFACT_CONTENT_SPOT_CHECKの手順で
+確認し、deploy後に対象関数の`LastModified`・新Layer版numberのattachを
+実測確認した。**ただし、この実例はspot checkとdeploy後のLastModified
+確認までを行ったものであり、本節のBUILD_ARTIFACT_IDENTITY /
+CHANGESET_ARTIFACT_IDENTITYの記録・突き合わせは実施していなかった
+(2026-10-02、ChatGPTレビュー指摘により判明。過大な実績主張を訂正する)。**
+本節は新たに明文化した手順であり、次回のrelease実行が初めての実地
+検証機会になる。
 
-### 36.5 Deploy設定(samconfig.toml)の非センシティブ値drift確認(#650)
+### 36.6 Deploy設定(samconfig.toml)の非センシティブ値drift確認(#650)
 
 ```
 `infra/samconfig.toml`は、PUBLICリポジトリ化に伴い意図的にgit管理外
@@ -4746,7 +4816,7 @@ git管理へ戻すことはできない(#650 Phase A調査。アカウントID�
 `infra/samconfig.toml.example`の非センシティブ値(stack_name /
 resolve_s3 / s3_prefix / region / confirm_changeset / capabilities /
 disable_rollback)は一致している。また、2026-10-01のdeploy
-(36.4参照)後、`aws cloudformation get-template --template-stage
+(36.4〜36.5参照)後、`aws cloudformation get-template --template-stage
 Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 (`s3_prefix = "jstock-advisor"`を反映した形式)であることを実測確認し、
 現在のsamconfig.toml.exampleの値がProduction実態と一致していることを
@@ -4758,23 +4828,44 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 ため新規ツール化を伴う。Design-First期間の方針により、本節のような
 手順化(選択肢B)を採用し、ファイル構造は変更しない(#650 4節)。
 
-### 36.6 ChangeSet CREATE前チェックリスト(まとめ)
+### 36.7 ChangeSet CREATE前後のゲート(まとめ)
+
+**PRE_BUILD / PRE_CREATE GATE**(ChangeSet CREATEより前。36.2〜36.4・36.6)
 
 ```
-[ ] BRANCH_GATE   : 現在のbranch / release target SHAをfreshに確認した(36.2)
-[ ] SHA_GATE      : git rev-parse HEADがrelease target SHAと一致する(36.2)
+[ ] BRANCH_GATE    : 現在のbranch / release target SHAをfreshに確認した(36.2)
+[ ] SHA_GATE       : git rev-parse HEADがrelease target SHAと一致する(36.2)
 [ ] CLEAN_TREE_GATE: git status --porcelainが空である(36.2)
-[ ] BUILD_RECORD  : BUILD_SOURCE_SHA等をrelease実行記録へ記載した(36.3)
-[ ] ARTIFACT_CHECK: build成果物に対象fixが含まれ、sam deployのアップロードkeyと
-                    ChangeSetの参照keyが一致することを確認した(36.4)
-[ ] SAMCONFIG_DRIFT: samconfig.tomlの非センシティブ値がexampleと一致する(36.5)
+[ ] BUILD_RECORD   : BUILD_SOURCE_SHA等をrelease実行記録へ記載した(36.3)
+[ ] ARTIFACT_CONTENT_SPOT_CHECK: build成果物に対象fixが含まれることを確認した
+                    (36.4。identity verificationの代替ではない補助確認)
+[ ] BUILD_ARTIFACT_IDENTITY: Lambda/Layerごとのbuild artifact identity
+                    (sam deployのアップロードkey)を記録した(36.4)
+[ ] SAMCONFIG_DRIFT: samconfig.tomlの非センシティブ値がexampleと一致する(36.6)
 ```
 
-本チェックリストは31節(release前validationの責務境界)の「ChangeSet
-CREATE」段階より前に位置する確認であり、31節が扱う「AWS API側の
-semantic制約」とは別の関心事(build/deploy入力側のprovenance)を扱う。
+**→ ChangeSet CREATE実行 →**
 
-### 36.7 Production影響
+**POST_CREATE / PRE_EXECUTE GATE**(ChangeSet CREATEの後・EXECUTEより前。36.5)
+
+```
+[ ] CHANGESET_ARTIFACT_IDENTITY: ChangeSetが実際に参照するLambda/Layerごとの
+                    S3 Keyを取得した(36.5)
+[ ] ARTIFACT_IDENTITY_MATCH = YES: 36.4のBUILD_ARTIFACT_IDENTITYと完全一致する
+                    ことを確認した(36.5。1件でもNO・照合不能ならここで停止し
+                    EXECUTEへ進まない)
+[ ] CHANGESET_DIFF_REVIEW: ChangeSetの差分(Add/Modify/Delete/Replacement)を
+                    人間が確認した(既存の運用。本節が新設するものではない)
+```
+
+**→ EXECUTE(USER承認を要する別のHuman Gate。31節参照)**
+
+本ゲート構成は31節(release前validationの責務境界)の「ChangeSet CREATE」
+段階の前後を本節がさらに時系列で細分化したものであり、31節が扱う「AWS
+API側のsemantic制約」とは別の関心事(build/deploy入力側のprovenance)を
+扱う。
+
+### 36.8 Production影響
 
 なし。本節は既存のrelease実行記録・チェックリストへの手順・記録項目の
 追加のみであり、build/deployの実際の挙動(どのartifactが生成され、
