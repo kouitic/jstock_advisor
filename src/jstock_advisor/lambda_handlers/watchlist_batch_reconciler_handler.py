@@ -44,7 +44,7 @@ import boto3
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.enums import ExecutionMode
+from jstock_advisor.domain.entities.enums import ExecutionMode, WatchlistRegistrationSource
 from jstock_advisor.domain.entities.watchlist import WatchlistRemovalHistory
 from jstock_advisor.domain.jst import evaluation_date_jst, to_jst
 from jstock_advisor.infrastructure.aws.batch_tracker import (
@@ -96,6 +96,9 @@ from jstock_advisor.infrastructure.local_repository.trade_event_record_repositor
 )
 from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (
     WatchlistRemovalHistoryRepository,
+)
+from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
+    WatchlistRepository,
 )
 from jstock_advisor.lambda_handlers._fanout import dispatch_async
 from jstock_advisor.lambda_handlers._finalize_recovery import build_finalize_only_payload
@@ -595,14 +598,54 @@ def _evaluate_and_persist_watchlist_deletion_zero_streak(
     )
 
 
+def _has_removal_eligible_candidate(
+    now: dt.datetime, minimum_age_days: int
+) -> bool:
+    """Issue #708: AUTO_SCREENING銘柄のうち、削除条件の必須ANDゲート
+    (`minimum_age_days`。`services/watchlist_maintenance_service.py::
+    evaluate_maintenance_decision()`)に1件でも到達しているかを確認する。
+
+    1件も無ければ、その期間の削除実績ゼロは「まだ削除できる銘柄が
+    構造的に存在しない」という想定どおりの状態であり、S-7が警告すべき
+    異常(削除ロジックが機能していない)ではない。即時削除
+    (REIT/ETF化等のhard exclusion)は`minimum_age_days`を適用しない
+    別経路のため、この判定の対象に含めない(=age gateのみを見る。
+    即時削除が機能していない場合の検知は本Issueのscope外)。
+
+    ★ Issue #708(サブちゃんレビュー、実装上の提案): `list_all()`
+    (全件を一括listへ保持)ではなく`iter_all()`(Issue #113のページ単位
+    遅延生成)を使い、該当が見つかった時点で早期returnする。存在確認
+    だけが目的のため全件読了・全件保持は不要であり、watchlistは
+    今後も増え続ける側のテーブルであるため(ピークメモリ・読了時間の
+    観点で)有利。
+    """
+    for item in WatchlistRepository().iter_all():
+        if item.registration_source != WatchlistRegistrationSource.AUTO_SCREENING:
+            continue
+        if (now - item.created_at).days >= minimum_age_days:
+            return True
+    return False
+
+
 def _detect_watchlist_deletion_zero_streak(
-    streak_count: int | None, now: dt.datetime
+    streak_count: int | None, now: dt.datetime, removal_eligible: bool
 ) -> dict[str, Any] | None:
     """S-7: 削除実績ゼロの連続日数が閾値(3営業日)以上ならincident envelopeを
     返す。USER決定どおりwarning(重大incidentではない運用warning)として扱う
     (allowlist自体にseverityを表すフィールドは無いため、区別は#503側の運用判断
     〔本文の文言等〕に委ねる。本Issueのscopeは検知・通知の配線のみ)。
+
+    ★ Issue #708: `removal_eligible`(`_has_removal_eligible_candidate()`の
+    結果)がFalseの間は検知しない。`minimum_age_days`以上経過した
+    AUTO_SCREENING銘柄が1件も無い間は、削除実績ゼロが構造的に保証される
+    正常な状態であり、これをS-7が異常として検知・通知し続けると
+    false positiveになる(実際に2026-09-27〜2026-10-01の5営業日連続で
+    発生を確認した)。streak_count自体(`_evaluate_and_persist_
+    watchlist_deletion_zero_streak()`)は本ゲートと独立して引き続き
+    記録する(観測用の連続日数カウントを歪めない)。
     """
+    if not removal_eligible:
+        return None
     if streak_count is None or streak_count < _DELETION_ZERO_STREAK_THRESHOLD_DAYS:
         return None
     return {
@@ -696,12 +739,26 @@ def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) 
         for batch_item in list_new_candidate_screening_batches()
         if _started_at_jst_date(batch_item) == today_jst
     ]
+    # ★ Issue #708(サブちゃんレビューF1): 以前は4検知すべてを計算し終えてから
+    # return文の中でまとめて_notify_if_new_today()を呼んでいたため、後段の
+    # 検知(S-7、最も軽いwarning)が例外を出すと、既に計算済みのS-2/S-4/S-6
+    # (より重い検知)の通知までreturn文へ到達できず失われる非対称な失敗様式
+    # だった。各検知の直後に即座へ通知することで、後段の失敗が前段の
+    # 既に成功した通知結果を道連れにしないようにする(個々の検知・通知自体の
+    # 例外伝播は従来どおり変えない。既存のWatchlistRemovalHistoryRepository
+    # 経由の読み出しも同じ構造的脆弱性を持っていたため、ここで併せて解消する)。
     missed_schedule = _detect_watchlist_missed_schedule(todays_batches, calendar, now)
+    missed_schedule_notified = _notify_if_new_today(missed_schedule, today_jst, now)
+
     streak_count = _evaluate_and_persist_universe_load_failure_streak(todays_batches, calendar, now)
     universe_load_failure_streak = _detect_watchlist_universe_load_failure_streak(streak_count, now)
+    universe_load_failure_streak_notified = _notify_if_new_today(
+        universe_load_failure_streak, today_jst, now
+    )
 
     worker_metrics = _fetch_watchlist_worker_metrics(now)
     queue_backlog = _detect_watchlist_queue_backlog(worker_metrics, now)
+    queue_backlog_notified = _notify_if_new_today(queue_backlog, today_jst, now)
 
     removal_history = WatchlistRemovalHistoryRepository(
         config.watchlist_screening.auto_removal.readd_cooldown_days
@@ -709,15 +766,27 @@ def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) 
     deletion_streak_count = _evaluate_and_persist_watchlist_deletion_zero_streak(
         removal_history, calendar, now
     )
-    deletion_zero_streak = _detect_watchlist_deletion_zero_streak(deletion_streak_count, now)
+    # ★ Issue #708(サブちゃんレビュー、実装上の提案): streakが閾値未満の
+    # (=どのみち検知しない)大多数の日は、_has_removal_eligible_candidate()の
+    # DynamoDB Scanを行わない(遅延評価)。
+    removal_eligible = (
+        _has_removal_eligible_candidate(
+            now, config.watchlist_screening.auto_removal.minimum_age_days
+        )
+        if deletion_streak_count is not None
+        and deletion_streak_count >= _DELETION_ZERO_STREAK_THRESHOLD_DAYS
+        else False
+    )
+    deletion_zero_streak = _detect_watchlist_deletion_zero_streak(
+        deletion_streak_count, now, removal_eligible
+    )
+    deletion_zero_streak_notified = _notify_if_new_today(deletion_zero_streak, today_jst, now)
 
     return {
-        "missed_schedule_notified": _notify_if_new_today(missed_schedule, today_jst, now),
-        "universe_load_failure_streak_notified": _notify_if_new_today(
-            universe_load_failure_streak, today_jst, now
-        ),
-        "queue_backlog_notified": _notify_if_new_today(queue_backlog, today_jst, now),
-        "deletion_zero_streak_notified": _notify_if_new_today(deletion_zero_streak, today_jst, now),
+        "missed_schedule_notified": missed_schedule_notified,
+        "universe_load_failure_streak_notified": universe_load_failure_streak_notified,
+        "queue_backlog_notified": queue_backlog_notified,
+        "deletion_zero_streak_notified": deletion_zero_streak_notified,
     }
 
 

@@ -23,7 +23,8 @@ import pytest
 from moto import mock_aws
 
 from jstock_advisor.domain.business_calendar import BusinessCalendar
-from jstock_advisor.domain.entities.watchlist import WatchlistRemovalHistory
+from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
+from jstock_advisor.domain.entities.watchlist import WatchlistItem, WatchlistRemovalHistory
 from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (
     WatchlistRemovalHistoryRepository,
 )
@@ -366,6 +367,83 @@ def _removal(date: dt.date, stock_code: str = "1111") -> WatchlistRemovalHistory
     )
 
 
+def _watchlist_item(
+    created_at: dt.datetime,
+    stock_code: str = "1111",
+    registration_source: WatchlistRegistrationSource = WatchlistRegistrationSource.AUTO_SCREENING,
+) -> WatchlistItem:
+    return WatchlistItem(
+        stock_code=stock_code,
+        created_at=created_at,
+        updated_at=created_at,
+        registration_source=registration_source,
+    )
+
+
+# --- Issue #708: S-7のfalse positive防止(minimum_age_days未到達ゲート) ----------
+
+
+def test_removal_eligible_true_when_auto_screening_item_old_enough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now_jst(_WED, 8)
+    old_enough = now - dt.timedelta(days=90)
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRepository",
+        lambda: SimpleNamespace(iter_all=lambda: iter([_watchlist_item(old_enough)])),
+    )
+
+    assert handler_module._has_removal_eligible_candidate(now, 90) is True
+
+
+def test_removal_eligible_false_when_all_auto_screening_items_too_young(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now_jst(_WED, 8)
+    too_young = now - dt.timedelta(days=89)
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRepository",
+        lambda: SimpleNamespace(iter_all=lambda: iter([_watchlist_item(too_young)])),
+    )
+
+    assert handler_module._has_removal_eligible_candidate(now, 90) is False
+
+
+def test_removal_eligible_ignores_manual_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MANUAL登録銘柄がどれだけ古くても、AUTO_SCREENINGの母集団には数えない
+    (削除条件自体がAUTO_SCREENING専用のため)。"""
+    now = _now_jst(_WED, 8)
+    old_enough = now - dt.timedelta(days=365)
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRepository",
+        lambda: SimpleNamespace(
+            iter_all=lambda: iter(
+                [
+                    _watchlist_item(
+                        old_enough,
+                        stock_code="9999",
+                        registration_source=WatchlistRegistrationSource.MANUAL,
+                    )
+                ]
+            )
+        ),
+    )
+
+    assert handler_module._has_removal_eligible_candidate(now, 90) is False
+
+
+def test_removal_eligible_false_when_watchlist_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = _now_jst(_WED, 8)
+    monkeypatch.setattr(
+        handler_module, "WatchlistRepository", lambda: SimpleNamespace(iter_all=lambda: iter([]))
+    )
+
+    assert handler_module._has_removal_eligible_candidate(now, 90) is False
+
+
 @pytest.fixture
 def dynamo(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", _REGION)
@@ -394,7 +472,9 @@ def test_deletion_zero_streak_below_threshold_is_not_detected(dynamo) -> None:
     _evaluate_deletion_day(_MON, [])
     streak = _evaluate_deletion_day(_TUE, [])
 
-    result = handler_module._detect_watchlist_deletion_zero_streak(streak, _now_jst(_TUE, 8))
+    result = handler_module._detect_watchlist_deletion_zero_streak(
+        streak, _now_jst(_TUE, 8), removal_eligible=True
+    )
 
     assert streak == 2
     assert result is None
@@ -405,7 +485,9 @@ def test_deletion_zero_streak_at_threshold_is_detected(dynamo) -> None:
     _evaluate_deletion_day(_TUE, [])
     streak = _evaluate_deletion_day(_WED, [])
 
-    result = handler_module._detect_watchlist_deletion_zero_streak(streak, _now_jst(_WED, 8))
+    result = handler_module._detect_watchlist_deletion_zero_streak(
+        streak, _now_jst(_WED, 8), removal_eligible=True
+    )
 
     assert streak == 3
     assert result is not None
@@ -413,6 +495,21 @@ def test_deletion_zero_streak_at_threshold_is_detected(dynamo) -> None:
     assert result["consecutive_days"] == 3
     assert result["failure_count"] == 3
     assert result["is_ongoing"] is True
+
+
+def test_deletion_zero_streak_not_detected_when_no_removal_eligible_candidate(dynamo) -> None:
+    """Issue #708: streakが閾値に達していても、削除可能年齢(minimum_age_days)に
+    到達したAUTO_SCREENING銘柄が1件も無ければ検知しない(false positive防止)。"""
+    _evaluate_deletion_day(_MON, [])
+    _evaluate_deletion_day(_TUE, [])
+    streak = _evaluate_deletion_day(_WED, [])
+
+    result = handler_module._detect_watchlist_deletion_zero_streak(
+        streak, _now_jst(_WED, 8), removal_eligible=False
+    )
+
+    assert streak == 3
+    assert result is None
 
 
 def test_deletion_zero_streak_resets_when_a_deletion_happens(dynamo) -> None:
@@ -448,7 +545,9 @@ def test_deletion_zero_streak_envelope_has_only_allowlisted_keys(dynamo) -> None
     _evaluate_deletion_day(_TUE, [])
     streak = _evaluate_deletion_day(_WED, [])
 
-    result = handler_module._detect_watchlist_deletion_zero_streak(streak, _now_jst(_WED, 8))
+    result = handler_module._detect_watchlist_deletion_zero_streak(
+        streak, _now_jst(_WED, 8), removal_eligible=True
+    )
 
     assert result is not None
     assert set(result) <= handler_module._SNS_PAYLOAD_ALLOWLIST
@@ -485,7 +584,7 @@ def _fake_reconciler_config() -> SimpleNamespace:
         watchlist_screening=SimpleNamespace(
             enabled=True,
             scheduled_run_enabled=True,
-            auto_removal=SimpleNamespace(readd_cooldown_days=30),
+            auto_removal=SimpleNamespace(readd_cooldown_days=30, minimum_age_days=90),
         ),
     )
 
@@ -523,6 +622,14 @@ def test_detect_and_notify_publishes_deletion_zero_streak(
         "WatchlistRemovalHistoryRepository",
         lambda *_a, **_kw: SimpleNamespace(list_all=lambda: []),
     )
+    # Issue #708: 削除可能年齢に到達したAUTO_SCREENING銘柄が1件は存在する前提
+    # (この前提が無いとS-7は検知しない。以下の専用テストを参照)。
+    old_enough = _now_jst(_WED, 8) - dt.timedelta(days=90)
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRepository",
+        lambda: SimpleNamespace(iter_all=lambda: iter([_watchlist_item(old_enough)])),
+    )
     config = _fake_reconciler_config()
 
     handler_module._detect_and_notify_watchlist_incidents(_now_jst(_MON, 8), config)
@@ -531,6 +638,73 @@ def test_detect_and_notify_publishes_deletion_zero_streak(
 
     assert result["deletion_zero_streak_notified"] is True
     assert any(p["reason_code"] == "watchlist_deletion_zero_streak" for p in published)
+
+
+def test_detect_and_notify_suppresses_deletion_zero_streak_when_no_candidate_is_old_enough(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #708の再現: streakが閾値に達しても、AUTO_SCREENING銘柄が1件も
+    minimum_age_daysへ到達していなければ通知しない(false positive防止)。"""
+    published: list[dict] = []
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    monkeypatch.setattr(handler_module, "_fetch_watchlist_worker_metrics", lambda now: {})
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRemovalHistoryRepository",
+        lambda *_a, **_kw: SimpleNamespace(list_all=lambda: []),
+    )
+    too_young = _now_jst(_WED, 8) - dt.timedelta(days=89)
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRepository",
+        lambda: SimpleNamespace(iter_all=lambda: iter([_watchlist_item(too_young)])),
+    )
+    config = _fake_reconciler_config()
+
+    handler_module._detect_and_notify_watchlist_incidents(_now_jst(_MON, 8), config)
+    handler_module._detect_and_notify_watchlist_incidents(_now_jst(_TUE, 8), config)
+    result = handler_module._detect_and_notify_watchlist_incidents(_now_jst(_WED, 8), config)
+
+    assert result["deletion_zero_streak_notified"] is False
+    assert not any(p["reason_code"] == "watchlist_deletion_zero_streak" for p in published)
+
+
+def test_detect_and_notify_sends_earlier_notifications_before_gate_scan_failure(
+    dynamo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #708 サブちゃんレビューSHOULD対応: S-7のgate scan
+    (_has_removal_eligible_candidate)が例外を出しても、既に検知・通知済みの
+    S-2(missed schedule)は失われない(return文の中でまとめて通知していた
+    旧実装では、ここで全て失われていた)。
+    """
+    published: list[dict] = []
+    monkeypatch.setattr(handler_module, "_publish_incident_envelope", published.append)
+    monkeypatch.setattr(handler_module, "_fetch_watchlist_worker_metrics", lambda now: {})
+    monkeypatch.setattr(
+        handler_module,
+        "WatchlistRemovalHistoryRepository",
+        lambda *_a, **_kw: SimpleNamespace(list_all=lambda: []),
+    )
+    config = _fake_reconciler_config()
+
+    # streakを閾値(3営業日)まで積み上げる(gateが遅延評価されず実際に
+    # 呼ばれるようにする)。MON/TUEは正常に完了させる。
+    handler_module._detect_and_notify_watchlist_incidents(_now_jst(_MON, 8), config)
+    handler_module._detect_and_notify_watchlist_incidents(_now_jst(_TUE, 8), config)
+    published.clear()  # MON/TUE分のmissed_schedule等をクリアし、WED分のみ見る
+
+    def _raise() -> SimpleNamespace:
+        raise RuntimeError("simulated DynamoDB Scan failure")
+
+    monkeypatch.setattr(handler_module, "WatchlistRepository", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated DynamoDB Scan failure"):
+        handler_module._detect_and_notify_watchlist_incidents(_now_jst(_WED, 8), config)
+
+    # S-7(gate scan)は例外で中断したが、その手前で検知・通知済みのS-2は
+    # 失われていない。
+    assert any(p["reason_code"] == "watchlist_missed_schedule" for p in published)
+    assert not any(p["reason_code"] == "watchlist_deletion_zero_streak" for p in published)
 
 
 def test_detect_and_notify_skips_s6_s7_when_scheduled_dispatch_disabled(

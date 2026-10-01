@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
@@ -16,6 +17,13 @@ class WatchlistRepository:
 
     def list_all(self) -> list[WatchlistItem]:
         return self._store.list_all()
+
+    def iter_all(self) -> Iterator[WatchlistItem]:
+        """Issue #708(サブちゃんレビュー): 全件を一括listへ保持せず1件ずつ
+        遅延生成する(`CollectionStore.iter_all()`〔Issue #113〕のpassthrough)。
+        存在確認だけで全件読了が不要な呼び出し(早期return)向け。
+        """
+        return self._store.iter_all()
 
     def get(self, stock_code: str) -> WatchlistItem | None:
         return self._store.get(stock_code)
