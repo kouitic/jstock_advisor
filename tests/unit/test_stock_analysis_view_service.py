@@ -2110,13 +2110,18 @@ def test_n5_profit_taking_status_is_shown_for_a_watch_recommendation(
         authoritative_recommendation_id="rec-222-watch",
         authoritative_engine="PROFIT_TAKING",
         authoritative_outcome_category="watch",
+        # Issue #683の修正後、利確判定の状況はrecord.profit_taking_*経由で
+        # 復元する。authoritative_engine=PROFIT_TAKINGの実データでは常に
+        # この2つが対象recommendationと同一のidで揃っている(#683で確認済み)。
+        profit_taking_ran=True,
+        profit_taking_recommendation_id="rec-222-watch",
     )
 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
     assert "■ 利確判定の状況" in text
-    assert "含み益率：32.5%" in text
-    assert "想定上限価格までの上値余地：8.4%" in text
+    assert "含み益率：32.50%" in text
+    assert "想定上限価格までの上値余地：8.40%" in text
     assert "まだ利確しない理由：" in text
     assert "・決算発表が近いため、価格基準の利確判定を保留しています" in text
 
@@ -2153,11 +2158,15 @@ def test_n5_upside_line_is_omitted_when_the_ceiling_price_is_unusable(
         authoritative_recommendation_id="rec-222-nofv",
         authoritative_engine="PROFIT_TAKING",
         authoritative_outcome_category="watch",
+        # Issue #683の修正後、利確判定の状況はrecord.profit_taking_*経由で
+        # 復元する(詳細は上のテストの注記と同じ)。
+        profit_taking_ran=True,
+        profit_taking_recommendation_id="rec-222-nofv",
     )
 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
-    assert "含み益率：41.0%" in text
+    assert "含み益率：41.00%" in text
     assert "上値余地" not in text
     assert "価格基準の利確判定に使用していません" in text
 
@@ -2271,7 +2280,7 @@ def test_r3_profit_taking_section_is_shown_for_a_pure_hold(tmp_path: Path) -> No
     assert "保有継続" in text
     assert "■ 利確判定の状況" in text
     # R-3(ii): unrealized_profit_loss_pct が無くても実値を出す
-    assert "含み益率：27.5%" in text
+    assert "含み益率：27.50%" in text
     assert "・想定上限価格を使えないため保留しています" in text
 
 
@@ -2342,9 +2351,9 @@ def test_issue_369_pure_hold_profit_taking_is_restored_from_audit_log(tmp_path: 
 
     assert "■ 利確判定の状況" in text
     assert "判定時点の記録が残っていないため" not in text
-    assert "含み益率：27.5%" in text
-    assert "中立の適正価格に対して-3.2%" in text
-    assert "強気の適正価格に対して-15.0%" in text
+    assert "含み益率：27.50%" in text
+    assert "中立の適正価格に対して-3.20%" in text
+    assert "強気の適正価格に対して-15.00%" in text
     # 理由の見出しは出さない(HOLDでは常に空で、表示しても意味を持たない)
     assert "判定に該当した理由" not in text
     assert "利確を見送った要因" not in text
@@ -2382,7 +2391,7 @@ def test_issue_369_reason_strings_are_never_displayed_even_if_recorded(tmp_path:
 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
-    assert "含み益率：27.5%" in text
+    assert "含み益率：27.50%" in text
     assert "98765" not in text
     assert "43210" not in text
 
@@ -2424,8 +2433,8 @@ def test_issue_419_pure_hold_shows_structured_hold_basis(tmp_path: Path) -> None
 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
-    assert "含み益率：8.0%（利確の監視を始める水準：20.0%）" in text
-    assert "想定上限価格までの上値余地：12.5%" in text
+    assert "含み益率：8.00%（利確の監視を始める水準：20.00%）" in text
+    assert "想定上限価格までの上値余地：12.50%" in text
     assert (
         "適正価格を算出できる評価手法が不足しているため、価格基準の利確判定に使用していません"
         in text
@@ -2441,7 +2450,7 @@ def test_issue_419_partial_keys_show_only_available_lines(tmp_path: Path) -> Non
 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
-    assert "含み益率：8.0%" in text
+    assert "含み益率：8.00%" in text
     assert "監視を始める水準" not in text
     assert "上値余地" not in text
     assert "独立した条件" not in text
@@ -2482,7 +2491,7 @@ def test_issue_419_only_allowlisted_keys_are_read(tmp_path: Path) -> None:
 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
-    assert "含み益率：8.0%" in text
+    assert "含み益率：8.00%" in text
     for leaked in ("98765", "43210", "555株", "321", "77777", "66666"):
         assert leaked not in text
 
@@ -2501,8 +2510,8 @@ def test_issue_419_old_record_without_new_keys_keeps_ratio_lines(tmp_path: Path)
 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
-    assert "含み益率：27.5%" in text
-    assert "中立の適正価格に対して-3.2%" in text
+    assert "含み益率：27.50%" in text
+    assert "中立の適正価格に対して-3.20%" in text
     assert "監視を始める水準" not in text
 
 
@@ -2522,7 +2531,7 @@ def test_issue_369_audit_of_other_decision_type_is_not_shown(tmp_path: Path) -> 
     text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
 
     assert "判定時点の記録が残っていないため" in text
-    assert "含み益率：27.5%" not in text
+    assert "含み益率：27.50%" not in text
 
 
 def test_r3_gain_pct_falls_back_and_is_never_silent(tmp_path: Path) -> None:
@@ -2547,10 +2556,10 @@ def test_r3_gain_pct_falls_back_and_is_never_silent(tmp_path: Path) -> None:
         profit_protection_current_gain_pct=22.2,
         **base,
     )
-    assert "含み益率：11.1%" in _profit_taking_status_lines(a)
+    assert "含み益率：11.10%" in _profit_taking_status_lines(a)
     # b  無ければ保有側の項目へフォールバックする
     b = Recommendation(recommendation_id="b", profit_protection_current_gain_pct=22.2, **base)
-    assert "含み益率：22.2%" in _profit_taking_status_lines(b)
+    assert "含み益率：22.20%" in _profit_taking_status_lines(b)
     # c  両方無くても行を消さない
     c = Recommendation(recommendation_id="c", **base)
     assert any("含み益率：不明" in line for line in _profit_taking_status_lines(c))
@@ -2575,3 +2584,302 @@ def test_issue_369_record_without_new_field_reads_as_none() -> None:
         HoldingEvaluationRecord.model_validate(new.model_dump()).profit_taking_audit_log_id
         == "audit-x"
     )
+
+
+# --- Issue #683: authoritative_engine≠PROFIT_TAKINGでも利確判定状況を正しく復元する ---
+
+
+def test_issue_683_legacy_sell_with_profit_taking_not_run_shows_not_run(tmp_path: Path) -> None:
+    """T1(counter-example): 実際に本番で観測したパターン(authoritative_engine=
+    LEGACY_SELL・authoritative_recommendation_idが非None・profit_taking_ran=False)
+    で「未実行」と表示する。
+
+    修正前は、authoritative recommendation(LEGACY_SELL側)をそのまま
+    `_profit_taking_status_lines`へ渡していたため、このサイクルで利確判定が
+    実行されていなくても「含み益率：不明（判定時点の記録に含み益率が残っていません）」
+    という誤った表示になっていた。
+    """
+    rec = Recommendation(
+        recommendation_id="rec-683-legacy",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL,
+        price_at_recommendation=Decimal("2400"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1",
+        reasons=["該当ルール: 投資前提の重大な悪化"],
+    )
+    RecommendationRepository(store_dir=tmp_path).save(rec)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id="rec-683-legacy",
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="sold_full",
+        profit_taking_ran=False,
+        profit_taking_recommendation_id=None,
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "■ 利確判定の状況" in text
+    assert "利確判定は今回の評価サイクルでは実行されていません" in text
+    assert "含み益率：不明" not in text
+
+
+def test_issue_683_profit_taking_authoritative_regression(tmp_path: Path) -> None:
+    """T2(回帰): authoritative_engine=PROFIT_TAKINGの既存パターンは表示結果が
+    変わらない(record.profit_taking_recommendation_id == authoritative_
+    recommendation_idの実データ上の一致を経由して、同じRecommendationへ
+    到達する)。"""
+    rec = Recommendation(
+        recommendation_id="rec-683-pt",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+        reasons=["含み益率が監視の基準に達しました"],
+        unrealized_profit_loss_pct=Decimal("32.5"),
+        profit_taking_upside_pct=8.4,
+    )
+    RecommendationRepository(store_dir=tmp_path).save(rec)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id="rec-683-pt",
+        authoritative_engine="PROFIT_TAKING",
+        authoritative_outcome_category="watch",
+        profit_taking_ran=True,
+        profit_taking_recommendation_id="rec-683-pt",
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：32.50%" in text
+    assert "想定上限価格までの上値余地：8.40%" in text
+
+
+def test_issue_683_non_profit_taking_authoritative_restores_from_profit_taking_recommendation(
+    tmp_path: Path,
+) -> None:
+    """T4: profit_taking_ran=Trueかつauthoritative_engine≠PROFIT_TAKING(現在の
+    Productionには存在しないが構造的にありうる)でも、profit_taking_
+    recommendation_id経由でそのサイクルの利確判定自体(別のRecommendation)を
+    正しく復元する(authoritative側の内容を誤って使わない)。"""
+    legacy_sell_rec = Recommendation(
+        recommendation_id="rec-683-t4-legacy",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.URGENT_REVIEW,
+        price_at_recommendation=Decimal("2400"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1",
+        reasons=["該当ルール: 投資前提の重大な悪化"],
+    )
+    profit_taking_rec = Recommendation(
+        recommendation_id="rec-683-t4-pt",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+        unrealized_profit_loss_pct=Decimal("12.3"),
+    )
+    RecommendationRepository(store_dir=tmp_path).save(legacy_sell_rec)
+    RecommendationRepository(store_dir=tmp_path).save(profit_taking_rec)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id="rec-683-t4-legacy",
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="sold_full",
+        profit_taking_ran=True,
+        profit_taking_recommendation_id="rec-683-t4-pt",
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：12.30%" in text
+    assert "利確判定は今回の評価サイクルでは実行されていません" not in text
+
+
+def test_issue_683_ran_but_no_pointer_shows_missing_record(tmp_path: Path) -> None:
+    """T5: profit_taking_ran=Trueだがprofit_taking_recommendation_id・
+    profit_taking_audit_log_idのいずれもNone(真のデータ損失)の場合のみ
+    「記録欠落」文言を出す。"""
+    rec = Recommendation(
+        recommendation_id="rec-683-t5",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.SELL,
+        price_at_recommendation=Decimal("2400"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1",
+        reasons=["該当ルール: 投資前提の重大な悪化"],
+    )
+    RecommendationRepository(store_dir=tmp_path).save(rec)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id="rec-683-t5",
+        authoritative_engine="LEGACY_SELL",
+        authoritative_outcome_category="sold_full",
+        profit_taking_ran=True,
+        profit_taking_recommendation_id=None,
+        profit_taking_audit_log_id=None,
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    missing_text = (
+        "利確判定は実行されましたが、判定時点の記録が残っていないため内容を復元できません。"
+    )
+    assert missing_text in text
+    assert "利確判定は今回の評価サイクルでは実行されていません" not in text
+
+
+# --- Issue #685: 利確閾値の境界で表示丸めにより「30.0%」と「30%未満」が同時表示される ---
+
+
+def test_issue_685_boundary_value_no_longer_contradicts_the_reason_text(tmp_path: Path) -> None:
+    """T1(counter-example): 実際に本番で確認した値(29.951220...%)で、表示
+    (含み益率)と理由(一部利確基準30%未満)が矛盾しないことを固定する。
+
+    修正前は`:.1f`表示が"30.0%"へ丸められ、「一部利確基準(30%)未満」という
+    reasonと並べると自己矛盾していた。修正後は"29.95%"と表示され、閾値未満
+    であることが視覚的にも一致する。
+    """
+    rec = Recommendation(
+        recommendation_id="rec-685-t1",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+        profit_protection_current_gain_pct=29.951220,
+        not_yet_action_reasons=["含み益率は一部利確基準(30%)未満"],
+    )
+    RecommendationRepository(store_dir=tmp_path).save(rec)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id="rec-685-t1",
+        authoritative_engine="PROFIT_TAKING",
+        authoritative_outcome_category="watch",
+        profit_taking_ran=True,
+        profit_taking_recommendation_id="rec-685-t1",
+    )
+
+    text = _service(tmp_path).build_holding_analysis_text("本人", "8306")
+
+    assert "含み益率：29.95%" in text
+    assert "含み益率：30.0%" not in text
+    assert "一部利確基準(30%)未満" in text
+
+
+def test_issue_685_boundary_sweep(tmp_path: Path) -> None:
+    """T2: 29.95・29.99・30.00・30.01の境界で、表示が判定(未満/以上)の実際の
+    大小関係と視覚的に一致する(矛盾を生まない)ことを確認する。"""
+    from jstock_advisor.services.stock_analysis_view_service import (
+        _profit_taking_status_lines,
+    )
+
+    base = dict(
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+    )
+    cases = {
+        "29.95": "含み益率：29.95%",
+        "29.99": "含み益率：29.99%",
+        "30.00": "含み益率：30.00%",
+        "30.01": "含み益率：30.01%",
+    }
+    for value, expected_line in cases.items():
+        rec = Recommendation(
+            recommendation_id=f"rec-685-{value}",
+            profit_protection_current_gain_pct=float(value),
+            **base,
+        )
+        assert expected_line in _profit_taking_status_lines(rec)
+
+
+def test_issue_685_values_far_from_threshold_are_unaffected(tmp_path: Path) -> None:
+    """T3(回帰): 閾値から十分離れた値は、桁数が増える以外の見た目の変化がない。"""
+    from jstock_advisor.services.stock_analysis_view_service import (
+        _profit_taking_status_lines,
+    )
+
+    base = dict(
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+    )
+    low = Recommendation(
+        recommendation_id="rec-685-low", profit_protection_current_gain_pct=15.0, **base
+    )
+    high = Recommendation(
+        recommendation_id="rec-685-high", profit_protection_current_gain_pct=50.0, **base
+    )
+    assert "含み益率：15.00%" in _profit_taking_status_lines(low)
+    assert "含み益率：50.00%" in _profit_taking_status_lines(high)
+
+
+def test_issue_685_sweep_upside_pct_and_pure_hold_audit_lines_use_two_decimals(
+    tmp_path: Path,
+) -> None:
+    """T4: 同型sweep。`profit_taking_upside_pct`(Recommendation経由)と、
+    #369の純粋HOLD経路(`_profit_taking_hold_audit_lines`。AuditLog経由)の
+    両方で、近傍の閾値表示が同じ精度(:.2f)へ揃っていることを固定する。
+    """
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+    from jstock_advisor.services.stock_analysis_view_service import (
+        _profit_taking_hold_audit_lines,
+        _profit_taking_status_lines,
+    )
+
+    rec = Recommendation(
+        recommendation_id="rec-685-t4-upside",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.WATCH,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1",
+        profit_protection_current_gain_pct=20.0,
+        profit_taking_upside_pct=9.951220,
+    )
+    assert "想定上限価格までの上値余地：9.95%" in _profit_taking_status_lines(rec)
+
+    audit_entry = AuditLogEntry(
+        audit_id="audit-685-t4",
+        timestamp=_NOW,
+        stock_code="8306",
+        decision_type="profit_taking",
+        input_values={},
+        calculation_formulas={},
+        data_sources=[],
+        rule_version="v1",
+        output_values={
+            "unrealized_pnl_pct": 29.951220,
+            "gain_watch_threshold_pct": 30.0,
+            "upside_pct": 9.951220,
+        },
+    )
+    hold_lines = _profit_taking_hold_audit_lines(audit_entry)
+    assert "含み益率：29.95%（利確の監視を始める水準：30.00%）" in hold_lines
+    assert "想定上限価格までの上値余地：9.95%" in hold_lines
