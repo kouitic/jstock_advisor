@@ -2744,7 +2744,9 @@ line_webhook                 Lambda失敗(Errors)
 dispatcher(NEW_CANDIDATE)    lease取得・BatchRuns作成の前に失敗(バッチが作られない。状態変更なし)
 buy_candidates / holdings /  NORMAL・VALIDATION+SENDは失敗。DRY_RUNは従来どおり(認証情報不要)
   disclosure_check
-worker / terminal_failure    NEW_CANDIDATE_SCREENINGを含む呼び出しは、状態変更の前に失敗。MAINTENANCEのみは影響なし
+worker / terminal_failure    (Issue #430で是正済み)状態変更(リース取得・完了記録・終端記録)は継続し、
+                              通知だけNOTIFICATION_FAILED。全処理の後にErrors。MAINTENANCEのみは影響なし
+                              (reconcilerと同じ契約へ統一。是正前は状態変更の前に失敗していた)
 reconciler                   ウォッチリスト登録は継続し、通知だけNOTIFICATION_FAILED。全処理の後にErrors
 weekly_review・CLI 3本        未変更(従来どおり)
 ```
@@ -2769,9 +2771,9 @@ LINE認証情報は `infra/template.yaml` の `Globals.Function.Environment.Vari
 C1 NEW_CANDIDATE_SCREENINGの進行中バッチが0であること。
    batch_runsの最新バッチが終端状態(COMPLETED / COMPLETED_WITH_NOTIFICATION_FAILURE / ABORTED / TIMED_OUT / DISPATCH_FAILED)であり、
    DISPATCHING / RUNNING / FINALIZE_* / NOTIFICATION_* / TIMEOUT_* が無いこと。
-   ★ 運用条件: NEW_CANDIDATEのバッチ処理中は、LINE credentialのrotation・再デプロイを行わない(#430)。
-     dispatch時点では認証情報があり、バッチ処理中に認証情報が欠落した状態で再デプロイされると、workerが評価を行えず、
-     候補が登録されないままバッチが24時間後にTIMED_OUTになる見込みがある(#430。DLQ Alarmが無いため気づかれない)。
+   ★ Issue #430是正後は、バッチ処理中にLINE credentialが欠落してもworkerの評価・登録自体は
+     継続する(候補が失われてTIMED_OUTになる旧来のリスクは解消済み。reconcilerと同じ契約)。
+     本条件は、純粋にバッチ処理中のデプロイそのものを避ける一般的な慎重策として維持する。
 C2 WatchlistScreeningQueue / WatchlistTerminalFailureQueue / WatchlistTerminalFailureDLQ の滞留が0であること。
    (デプロイ後に増減を判定する基準にもなる)
 C3 LINE credential関連のデプロイ前確認が正常であること。

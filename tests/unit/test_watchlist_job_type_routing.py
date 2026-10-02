@@ -210,7 +210,9 @@ def _run_terminal_handler(job_type: str | None) -> list[str]:
         patch.object(terminal_module, "load_config", lambda: None),
         patch.object(terminal_module, "build_real_provider_bundle", lambda *a, **k: object()),
         patch.object(terminal_module, "build_cached_provider_bundle", lambda *a, **k: object()),
-        patch.object(terminal_module, "_build_notification_service", lambda _c: object()),
+        patch.object(
+            terminal_module, "_build_notification_service", lambda _c, _l=None: object()
+        ),
         patch.object(terminal_module, "record_terminal_failure", lambda *a, **k: True),
         patch.object(
             terminal_module, "maybe_finalize", lambda *a, **k: routed.append("add") or True
