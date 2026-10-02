@@ -312,15 +312,28 @@ def test_t4b_non_evaluated_types_are_inconclusive() -> None:
         assert is_performance_evaluated_type(recommendation_type) is False
 
 
-def test_t4c_excluded_set_contains_only_the_approved_type() -> None:
-    """★ 除外集合は **URGENT_HOLDING_REVIEW のみ**であること（USER の O-2 承認の範囲）。
+def test_t4c_excluded_set_is_the_approved_types() -> None:
+    """★ 除外集合は **承認された型だけ**であること。
 
-    ここへ型を足すことは「その型の評価定義を**不要と決めた**」という
-    設計判断であり、#25 が型ごとに判断する。**本 Issue で先取りしない。**
+    #270 では URGENT_HOLDING_REVIEW のみ（USER の O-2 承認の範囲）だった。
+    #25 が当時の 6 型を意味論（価格の上昇/下落という評価方向性があるか）で判断し、
+    方向性を持たない 5 型（WATCH_BEFORE_EARNINGS / REVIEW_BEFORE_EARNINGS /
+    REVIEW_AFTER_EARNINGS / MANUAL_REVIEW_REQUIRED / PORTFOLIO_CONCENTRATION_REVIEW）を
+    追加した。★ 6 型目の PARTIAL_RISK_REDUCTION は方向性を持つため EXIT へ分類しており、
+    除外集合には**入っていない**（根拠は test_issue_25_recommendation_evaluation_semantics.py）。
+    ここへ型を足すことは「その型に評価方向性が存在しない」という設計判断である。
     """
-    assert set(_EXCLUDED_TYPES) == {RecommendationType.URGENT_HOLDING_REVIEW}
+    assert set(_EXCLUDED_TYPES) == {
+        RecommendationType.URGENT_HOLDING_REVIEW,
+        RecommendationType.WATCH_BEFORE_EARNINGS,
+        RecommendationType.REVIEW_BEFORE_EARNINGS,
+        RecommendationType.REVIEW_AFTER_EARNINGS,
+        RecommendationType.MANUAL_REVIEW_REQUIRED,
+        RecommendationType.PORTFOLIO_CONCENTRATION_REVIEW,
+    }
     assert is_evaluation_excluded_type(RecommendationType.URGENT_HOLDING_REVIEW) is True
-    assert is_evaluation_excluded_type(RecommendationType.WATCH_BEFORE_EARNINGS) is False
+    assert is_evaluation_excluded_type(RecommendationType.WATCH_BEFORE_EARNINGS) is True
+    assert is_evaluation_excluded_type(RecommendationType.PARTIAL_RISK_REDUCTION) is False
 
 
 # =============================================================================
@@ -372,15 +385,25 @@ def test_t5_excluded_type_does_not_create_a_github_issue() -> None:
 
 
 @pytest.mark.parametrize(
-    "recommendation_type", _EVALUATION_UNDEFINED_TYPES, ids=lambda t: t.value
+    "recommendation_type",
+    (
+        # #25 で `_EVALUATION_UNDEFINED_TYPES` は空になったため、「除外されていない型は
+        # 従来どおり起票される」という**仕組み**を、除外集合に含まれない型で固定する。
+        # (未整備型が将来増えたとき、それらも自動的にこの対象へ加わる)
+        *_EVALUATION_UNDEFINED_TYPES,
+        RecommendationType.PARTIAL_RISK_REDUCTION,
+        RecommendationType.SELL,
+        RecommendationType.BUY,
+    ),
+    ids=lambda t: t.value,
 )
-def test_t5b_undefined_types_still_create_issues(
+def test_t5b_non_excluded_types_still_create_issues(
     recommendation_type: RecommendationType,
 ) -> None:
-    """★ 逆側: 「まだ決めていない」型は**従来どおり起票される**こと。
+    """★ 逆側: **除外されていない型**(「まだ決めていない」型を含む)は**従来どおり起票される**こと。
 
     除外を広げすぎていないことの確認。ここを止めてしまうと
-    **未整備が仕様として固定**され、#25 が扱うべき対象が見えなくなる。
+    **未整備が仕様として固定**され、見直すべき対象が見えなくなる。
     """
     eligible = WeeklyImprovementReviewService._is_issue_eligible(
         None,  # type: ignore[arg-type]

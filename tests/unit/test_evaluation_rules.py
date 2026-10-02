@@ -103,8 +103,8 @@ def test_review_too_sensitive_when_price_rallies() -> None:
 
 
 def test_inconclusive_for_watch_before_earnings_type() -> None:
-    # WATCH_BEFORE_EARNINGSは評価基準が未確定のため保留中(Issue #10、2026-08-20)。
-    # 評価定義未整備系がINCONCLUSIVEのままであることの回帰。
+    # WATCH_BEFORE_EARNINGSは方向性を持たない状態のため評価対象外(Issue #10 / #241 / #25)。
+    # 評価対象外の型が常にINCONCLUSIVEであることの回帰。
     label, _ = determine_evaluation_label(
         RecommendationType.WATCH_BEFORE_EARNINGS, 5.0, None, None, _CONFIG
     )
