@@ -1599,6 +1599,13 @@ def _format_watch_profit_taking_message(
         lines.extend(f"・{r}" for r in recommendation.not_yet_action_reasons)
         lines.append("")
 
+    # Issue #701(OD-3 = LINE_AND_ANALYSIS_VIEW): 判定を直接変更していない
+    # 参考情報は「直ちに利確しない理由」と分離した別見出しで表示する(OD-5)。
+    if recommendation.valuation_caveats:
+        lines.append("判断上の留意点:")
+        lines.extend(f"・{c}" for c in recommendation.valuation_caveats)
+        lines.append("")
+
     if recommendation.next_review_conditions:
         lines.append("監視条件:")
         lines.extend(f"・{c}" for c in recommendation.next_review_conditions)
@@ -1661,6 +1668,12 @@ def _format_earnings_suppressed_message(recommendation: Recommendation) -> str:
         lines.append("理由:")
         for r in recommendation.not_yet_action_reasons or recommendation.reasons:
             lines.append(f"・{r}")
+        lines.append("")
+    # Issue #701(OD-3 = LINE_AND_ANALYSIS_VIEW)。
+    if recommendation.valuation_caveats:
+        lines.append("判断上の留意点:")
+        for c in recommendation.valuation_caveats:
+            lines.append(f"・{c}")
         lines.append("")
     if recommendation.next_earnings_date:
         lines.append(f"次回決算: {recommendation.next_earnings_date}")

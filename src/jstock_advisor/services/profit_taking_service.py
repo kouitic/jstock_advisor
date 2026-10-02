@@ -294,29 +294,44 @@ def _profit_taking_fair_value_block_reason_text(
 def _build_not_yet_action_reasons(
     result: ProfitTakingResult,
     config: AppConfig,
-    fair_value_overall_confidence: ConfidenceLevel | None,
-    industry_sector: ProfitTakingIndustrySector,
-    industry_model_applied: bool,
     trading_unit_feasibility: TradingUnitFeasibility,
-    has_strong_counter_material: bool,
-    is_uptrend: bool,
     fair_value_unusable_reason_code: FairValueUnusableReasonCode | None,
+    effective_recommendation_type: RecommendationType,
 ) -> list[str]:
-    """「直ちに利確しない理由」を、最終判定の種類からではなく実際に評価した
-    数値条件から構築する(要求仕様§2)。MUFGのように含み益率が閾値以上でも
-    最終判定がWATCHになりうる(業種別モデル未対応等が理由の)ケースで、
-    誤って「含み益率が閾値未満」と表示しないようにする。
+    """「直ちに利確しない理由」を構築する(要求仕様§2)。
+
+    Issue #701(2026-10、USER確定方針): 本関数が返すのは、実際に判定を
+    遮断した事実(fair_value_unusable_reason_code・fair_value_action_block_
+    reason_code)と、実際に判定を弱めた事実(mitigating_downgrade_applied・
+    timing_downgrade_applied)、およびPARTIAL判定で実行制約が実際に該当した
+    事実のみとする。判定を変えていない参考情報(信頼度MEDIUM・業種別モデル
+    未適用・反対材料/上昇トレンドの単なる該当)は`_build_valuation_caveats()`
+    (「判断上の留意点」)へ分離した。表示層で旧閾値(unrealized_gain_
+    partial_pct)を再計算して理由を作ることも廃止した(config自身が
+    「判定レベルの決定には使わない」と明記しており、実際の判定はgain×upside
+    の2次元マトリクスのため、単一閾値での説明はそもそも不正確だった)。
 
     Issue #21: fair_value_unusable_reason_code(usable_for_trading_judgment=
     Falseのときのみ非None)がある場合、実際に価格基準の利確判定を遮断した
-    理由を、業種モデル等の一般的な説明より先に表示する(従来は遮断要因が
-    どこにも表示されず、ほぼ常時発火する業種モデル文言だけが見えていた)。
-    既存の他の理由は従来どおり残す。
+    理由を表示する。
+
+    Issue #700: PARTIAL固有の実行制約(trading_unit_feasibility.
+    partial_sale_executable)は、effective_recommendation_type==
+    PARTIAL_PROFIT_TAKEの場合のみ評価する(OD-1 = PARTIAL_ONLY_GUARD)。
+    profit_taking_service.py内の既存のfail-closed不変条件(PARTIAL_PROFIT_
+    TAKEかつpartial_sale_executable=Falseの組は、本関数へ到達する前に
+    別経路でrecommendation=Noneとして弾かれる)により、現状this guardは
+    実質的にno-opだが、「D分類はPARTIAL専用」という契約をコード自身に
+    明示し、他所の不変条件1か所だけに依存しない防御的設計とする
+    (service.py内の既存方針「domain/service間の不変条件...個別経路の
+    ゲート漏れに依存しない防御」と同型)。
+
+    USER確定方針により、実際の遮断・降格理由が1つも無い場合に「適正価格
+    モデルには手法間のばらつき等の不確実性がある」を無条件で補完する旧来の
+    fallbackは廃止した。空リストをそのまま返す(呼び出し元・表示層は空リスト
+    を許容する)。
     """
-    t = config.profit_taking.thresholds
     reasons: list[str] = []
-    if result.pnl.unrealized_pnl_pct < t.unrealized_gain_partial_pct:
-        reasons.append(f"含み益率は一部利確基準({t.unrealized_gain_partial_pct:.0f}%)未満")
     if fair_value_unusable_reason_code is not None:
         reasons.append(_FAIR_VALUE_UNUSABLE_REASON_TEXTS[fair_value_unusable_reason_code])
     # Issue #221 Phase 1(U2-a): レンジ自体は使えるが、利確判定側のより厳しい
@@ -325,14 +340,56 @@ def _build_not_yet_action_reasons(
     if result.fair_value_action_block_reason_code is not None:
         reasons.append(
             _profit_taking_fair_value_block_reason_text(
-                ProfitTakingFairValueBlockReasonCode(
-                    result.fair_value_action_block_reason_code
-                ),
+                ProfitTakingFairValueBlockReasonCode(result.fair_value_action_block_reason_code),
                 config,
             )
         )
+    if (
+        effective_recommendation_type == RecommendationType.PARTIAL_PROFIT_TAKE
+        and not trading_unit_feasibility.partial_sale_executable
+    ):
+        reasons.append(
+            f"保有株数が売買単位({trading_unit_feasibility.trading_unit}株)に届かず"
+            "一部売却が実行できない"
+        )
+    # Issue #221 Phase 1(U2-b): 「該当した」ことではなく「実際に判定を1段下げた」
+    # ことを書く。
+    if result.mitigating_downgrade_applied:
+        reasons.append("上記の反対材料により、利確の判定を1段階弱めています")
+    if result.timing_downgrade_applied:
+        reasons.append("上昇トレンドの継続により、利確の判定を1段階弱めています")
+    if result.fair_value_used_as_sole_strong_basis:
+        reasons.append(
+            "適正価格モデルの手法間一致度・強気適正価格との関係が強い確信の水準に達していない"
+        )
+    return reasons
+
+
+def _build_valuation_caveats(
+    fair_value_overall_confidence: ConfidenceLevel | None,
+    industry_sector: ProfitTakingIndustrySector,
+    industry_model_applied: bool,
+    has_strong_counter_material: bool,
+    is_uptrend: bool,
+    mitigating_downgrade_applied: bool,
+    timing_downgrade_applied: bool,
+) -> list[str]:
+    """「判断上の留意点」: 判定を直接変更していないが利用者にとって有用な
+    参考情報(Issue #701、OD-5 = ACTUAL_REASON_VS_CAVEAT_SEPARATION)。
+
+    has_strong_counter_material/is_uptrendは、対応する実際のdowngradeが
+    既に適用されている場合(mitigating_downgrade_applied/timing_downgrade_
+    applied=True)、「まだ利確しない理由」側に同じ事実が既に出ているため、
+    ここでは重複させない(OD-2 = SUPPRESS_DUPLICATED_CAVEAT)。
+
+    partial_sale_executable==Falseはここに含めない(OD-1。execution/action
+    gateであり、どのcandidate/actionを実際に抑制したかによって意味が
+    変わるため、現状の構造では因果を判別できず、表示層で因果を推測しない。
+    詳細は#720〔causal trace Issue〕参照)。
+    """
+    caveats: list[str] = []
     if fair_value_overall_confidence == ConfidenceLevel.MEDIUM:
-        reasons.append("適正価格モデルの信頼度がMEDIUM")
+        caveats.append("適正価格モデルの信頼度がMEDIUM")
     if not industry_model_applied:
         # 利用者向け通知では内部設計用語(「専用モデルが未適用」)をそのまま使わず、
         # 業種名が安全に取得できる場合だけそれを含めた自然な文言にする
@@ -343,40 +400,19 @@ def _build_not_yet_action_reasons(
             ProfitTakingIndustrySector.GENERAL,
             ProfitTakingIndustrySector.UNKNOWN,
         ):
-            reasons.append(
+            caveats.append(
                 "現在の適正価格は汎用モデルによる参考値です"
                 if industry_sector == ProfitTakingIndustrySector.GENERAL
                 else "業種特性を反映した専用評価モデルではありません"
             )
         else:
             label = _INDUSTRY_SECTOR_LABELS[industry_sector]
-            reasons.append(f"{label}の事業特性を十分に反映した専用評価モデルではありません")
-    # Issue #471(USER決定 U-b = REPLACE): 以前ここにあった「次回決算まで N 営業日」は、上限価格を
-    # 使えなかった原因の1つ(EARNINGS_TOO_CLOSE_FOR_ACTION)として、上の理由コードの文言へ置き換えた
-    # (同じ事実を2行にしない。閾値も遮断側の1か所へ一本化)。
-    if not trading_unit_feasibility.partial_sale_executable:
-        reasons.append(
-            f"保有株数が売買単位({trading_unit_feasibility.trading_unit}株)に届かず"
-            "一部売却が実行できない"
-        )
-    if has_strong_counter_material:
-        reasons.append("増益・増配などの反対材料がある")
-    if is_uptrend:
-        reasons.append("強い上昇トレンドが継続")
-    # Issue #221 Phase 1(U2-b): 「該当した」ことではなく「実際に判定を1段下げた」
-    # ことを書く。上の2行は材料の有無を述べるだけで、それが判定を弱めたかどうかは
-    # 伝わらない(降格が無効化される経路もある)。
-    if result.mitigating_downgrade_applied:
-        reasons.append("上記の反対材料により、利確の判定を1段階弱めています")
-    if result.timing_downgrade_applied:
-        reasons.append("上昇トレンドの継続により、利確の判定を1段階弱めています")
-    if result.fair_value_used_as_sole_strong_basis:
-        reasons.append(
-            "適正価格モデルの手法間一致度・強気適正価格との関係が強い確信の水準に達していない"
-        )
-    if not reasons:
-        reasons.append("適正価格モデルには手法間のばらつき等の不確実性がある")
-    return reasons
+            caveats.append(f"{label}の事業特性を十分に反映した専用評価モデルではありません")
+    if has_strong_counter_material and not mitigating_downgrade_applied:
+        caveats.append("増益・増配などの反対材料がある")
+    if is_uptrend and not timing_downgrade_applied:
+        caveats.append("強い上昇トレンドが継続")
+    return caveats
 
 
 _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
@@ -1354,14 +1390,19 @@ class ProfitTakingService:
             not_yet_action_reasons=_build_not_yet_action_reasons(
                 result,
                 self._config,
+                trading_unit_feasibility,
+                fv_range.unusable_reason_code,
+                effective_recommendation_type,
+            ),
+            valuation_caveats=_build_valuation_caveats(
                 fv_range.overall_confidence,
                 industry_sector,
                 industry_model_applied,
-                trading_unit_feasibility,
                 has_strong_counter_material,
                 snapshot.momentum.trend_classification
                 in (TrendClassification.UPTREND, TrendClassification.STRONG_UPTREND),
-                fv_range.unusable_reason_code,
+                result.mitigating_downgrade_applied,
+                result.timing_downgrade_applied,
             ),
             current_price_vs_neutral_fair_value_pct=(
                 result.current_price_vs_neutral_fair_value_pct

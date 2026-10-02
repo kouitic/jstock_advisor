@@ -1320,6 +1320,11 @@ def _profit_taking_status_lines(recommendation: Recommendation) -> list[str]:
     if recommendation.not_yet_action_reasons:
         lines.append("まだ利確しない理由：")
         lines += [f"・{reason}" for reason in recommendation.not_yet_action_reasons]
+    # Issue #701: 判定を直接変更していない参考情報は「まだ利確しない理由」と
+    # 分離した別見出しで表示する(OD-5)。
+    if recommendation.valuation_caveats:
+        lines.append("判断上の留意点：")
+        lines += [f"・{caveat}" for caveat in recommendation.valuation_caveats]
     return lines
 
 
