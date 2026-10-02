@@ -750,6 +750,13 @@ class ConversationService:
             TransactionType.ADDITIONAL_BUY if holding is not None else TransactionType.BUY
         )
         execution_date = evaluation_date_jst(now)
+        # Issue #626(#619 F7のUSER決定Aと同じ原則。同一取引から生成される
+        # 永続データ間でaccount_typeを一致させる): LINE経由の買付は
+        # 会話フローにNISA/特定口座を選ばせる入力が無く常にGENERAL固定
+        # (account_typeを変数へ1度だけ定め、Lot/Holding側・Transaction側の
+        # 両方へ同じ値を渡す。別々に書くと将来片方だけが変わる同型の
+        # 不整合が再発するため)。
+        account_type = AccountType.GENERAL
         plan = self._portfolio.build_purchase_write_plan(
             owner=state.owner,
             stock_code=state.stock_code,
@@ -757,7 +764,7 @@ class ConversationService:
             shares=state.shares,
             purchase_price=state.price,
             purchase_date=execution_date,
-            account_type=AccountType.GENERAL,
+            account_type=account_type,
             now=now,
         )
         transaction = self._transactions.build_execution_plan(
@@ -768,6 +775,7 @@ class ConversationService:
             shares=state.shares,
             execution_price=state.price,
             execution_date=execution_date,
+            account_type=account_type,
             now=now,
         )
         try:
