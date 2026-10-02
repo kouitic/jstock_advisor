@@ -1460,8 +1460,22 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
         auto_removal_config.readd_cooldown_days
     )
 
+    # Issue #224(O-1): この回のfinalize開始時点のウォッチリスト母数(全
+    # registration_source。AUTO_SCREENING以外も含む)。ループ内の削除より
+    # 前に数える(「その回の母数」を表すため、本バッチの削除結果を含めない)。
+    watchlist_total_count = sum(1 for _ in watchlist_repo.iter_all())
+
     outcome_counts: dict[str, int] = {}
     stale_unconfirmed_count = 0
+    # Issue #141: stale_unconfirmedと対(NOT_EVALUABLEが長期間続いた件数)。
+    stale_not_evaluable_count = 0
+    # Issue #224(O-1): Bルート(3回連続非該当+最低継続期間)の各条件で
+    # 止まっている件数。evaluate_maintenance_decision()が返す条件充足状況
+    # (age_condition_met等)をそのまま集計するだけで、判定ロジックは
+    # 再実装しない。
+    blocked_by_minimum_age_count = 0
+    blocked_by_count_condition = 0
+    blocked_by_span_condition = 0
     # Issue #62 Phase B(U3): 中断した削除の補完の観測。
     # 新規のmetric基盤は作らず、既存のbatch auditとログへ載せる。
     #
@@ -1542,6 +1556,19 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
                 item.stock_code,
                 batch_id,
             )
+        if decision.stale_not_evaluable:
+            stale_not_evaluable_count += 1
+            logger.warning(
+                "watchlist maintenance: stock long not evaluable stock_code=%s batch_id=%s",
+                item.stock_code,
+                batch_id,
+            )
+        if decision.age_condition_met is False:
+            blocked_by_minimum_age_count += 1
+        if decision.count_condition_met is False:
+            blocked_by_count_condition += 1
+        if decision.span_condition_met is False:
+            blocked_by_span_condition += 1
 
         if decision.outcome in (
             MaintenanceOutcome.IMMEDIATE_REMOVAL,
@@ -1609,6 +1636,17 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
         else:
             watchlist_repo.upsert(decision.updated_item)
 
+    # Issue #224(O-1): eligible_for_removal_count/removed_countは
+    # outcome_countsから直接導出できる値だが、監査を見るだけで「削除条件を
+    # 満たした件数」「実際に削除した件数」が分かるよう、明示的な名前の
+    # フィールドとしても出す。
+    eligible_for_removal_count = outcome_counts.get(
+        MaintenanceOutcome.CONSECUTIVE_NOT_QUALIFIED_REMOVAL.value, 0
+    )
+    removed_count = eligible_for_removal_count + outcome_counts.get(
+        MaintenanceOutcome.IMMEDIATE_REMOVAL.value, 0
+    )
+
     record_batch_audit(
         execution_mode=resolve_batch_execution_mode(maintenance_batch_item),
         universe_provider=MAINTENANCE_UNIVERSE_PROVIDER,
@@ -1617,6 +1655,8 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             "execution_result": EXECUTION_RESULT_NORMAL,
             "outcome_counts": outcome_counts,
             "stale_unconfirmed_count": stale_unconfirmed_count,
+            # Issue #141
+            "stale_not_evaluable_count": stale_not_evaluable_count,
             # Issue #62 Phase B(U3): 中断した削除の補完の観測。
             # attempted は finalize の再実行でも増えるため、平常時に 0 で
             # あるべきなのは written のほう。written が 0 以外なら、
@@ -1627,6 +1667,16 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             "removal_audit_completion_written_count": (
                 removal_audit_completion_written_count
             ),
+            # Issue #224(O-1): 母数と削除3条件の充足内訳。「削除が動いて
+            # いない」のか「まだ削除してよい銘柄が無い」のかを監査だけで
+            # 区別できるようにする。
+            "watchlist_total_count": watchlist_total_count,
+            "auto_screening_count": len(records),
+            "blocked_by_minimum_age_count": blocked_by_minimum_age_count,
+            "blocked_by_count_condition": blocked_by_count_condition,
+            "blocked_by_span_condition": blocked_by_span_condition,
+            "eligible_for_removal_count": eligible_for_removal_count,
+            "removed_count": removed_count,
         },
         now=now,
         batch_id=batch_id,
@@ -1635,12 +1685,23 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
     mark_watchlist_batch_completed(batch_id, EXECUTION_RESULT_NORMAL, now)
     logger.info(
         "watchlist_maintenance finalized batch_id=%s outcome_counts=%s stale_unconfirmed=%d "
-        "removal_audit_completion_attempted=%d removal_audit_completion_written=%d",
+        "stale_not_evaluable=%d removal_audit_completion_attempted=%d "
+        "removal_audit_completion_written=%d watchlist_total_count=%d auto_screening_count=%d "
+        "blocked_by_minimum_age=%d blocked_by_count_condition=%d blocked_by_span_condition=%d "
+        "eligible_for_removal=%d removed=%d",
         batch_id,
         outcome_counts,
         stale_unconfirmed_count,
+        stale_not_evaluable_count,
         removal_audit_completion_attempted_count,
         removal_audit_completion_written_count,
+        watchlist_total_count,
+        len(records),
+        blocked_by_minimum_age_count,
+        blocked_by_count_condition,
+        blocked_by_span_condition,
+        eligible_for_removal_count,
+        removed_count,
     )
 
 

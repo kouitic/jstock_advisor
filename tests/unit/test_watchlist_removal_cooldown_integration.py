@@ -346,6 +346,9 @@ def test_removal_audit_records_full_decision_context(
         def delete(self, stock_code: str) -> bool:
             return self._items.pop(stock_code, None) is not None
 
+        def iter_all(self):  # noqa: ANN201
+            return iter(self._items.values())
+
     fake_repo = _FakeMaintenanceWatchlistRepository()
     registered_at = _NOW - dt.timedelta(days=120)
     fake_repo.upsert(

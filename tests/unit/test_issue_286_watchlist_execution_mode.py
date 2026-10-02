@@ -372,7 +372,11 @@ def test_maintenance_finalize_audit_reflects_the_batch_row(
     monkeypatch.setattr(
         watchlist_batch_finalizer, "query_all_candidate_progress", lambda *a, **k: []
     )
-    monkeypatch.setattr(watchlist_batch_finalizer, "WatchlistRepository", lambda *a, **k: object())
+    monkeypatch.setattr(
+        watchlist_batch_finalizer,
+        "WatchlistRepository",
+        lambda *a, **k: SimpleNamespace(iter_all=lambda: iter(())),
+    )
     monkeypatch.setattr(
         watchlist_batch_finalizer, "WatchlistRemovalHistoryRepository", lambda *a, **k: object()
     )

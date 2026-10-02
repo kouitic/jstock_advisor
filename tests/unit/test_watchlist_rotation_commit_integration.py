@@ -522,6 +522,9 @@ def test_maintenance_job_never_touches_rotation_state(
         def delete(self, stock_code: str) -> bool:
             return self._items.pop(stock_code, None) is not None
 
+        def iter_all(self) -> Any:
+            return iter(self._items.values())
+
     from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
     from jstock_advisor.domain.entities.watchlist import WatchlistItem
     from jstock_advisor.services.watchlist_maintenance_service import (
