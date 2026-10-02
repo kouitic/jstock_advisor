@@ -103,6 +103,7 @@ from jstock_advisor.infrastructure.local_repository.watchlist_repository import 
 from jstock_advisor.lambda_handlers._fanout import dispatch_async
 from jstock_advisor.lambda_handlers._finalize_recovery import build_finalize_only_payload
 from jstock_advisor.lambda_handlers._watchlist_execution_mode import reject_execution_mode
+from jstock_advisor.services.incident_envelope_publisher import publish_incident_envelope
 from jstock_advisor.services.line_notification_service import LineNotificationService
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
@@ -187,6 +188,42 @@ _INCIDENT_SOURCE_WATCHLIST_RECONCILER = "watchlist_reconciler"
 # "watchlist-dispatcher" → WATCHLIST_SCREENING を持つため、新しい対応の追加は不要。
 _INCIDENT_JOB_NAME_WATCHLIST_DISPATCHER = "watchlist-dispatcher"
 _INCIDENT_JOB_NAME_WATCHLIST_WORKER = "watchlist-worker"
+# Issue #666(HF-1): 対応表は既に"watchlist-batch-reconciler" → WATCHLIST_SCREENING
+# を持つため、新しい対応の追加は不要。
+_INCIDENT_JOB_NAME_WATCHLIST_BATCH_RECONCILER = "watchlist-batch-reconciler"
+
+# Issue #666(HF-1): 隔離された技術的部分失敗(B1〜B6)をHF-0契約(#665)で
+# USER通知するための境界メタデータ。failure_stageをキーに、
+# (failure_type, reason_code〔fingerprintのerror_type相当。exception messageの
+# 生の内容は使わない〕)を持つ。1 Lambda実行(run)内で完結する集計のため、
+# #667/#668(銘柄/保有単位のfan-out worker)のような複数Lambda実行をまたぐ
+# batch識別の問題は生じない(run単位でカウンタを集約してから1回だけpublishする)。
+_HANDLED_FAILURE_BOUNDARY_METADATA: dict[str, tuple[str, str]] = {
+    "COMPLETION_RECOVERY": (
+        "INVOKE_FAILED",
+        "reconciler_completion_recovery_invoke_failed",
+    ),
+    "TRADE_EVENT_RECONCILIATION": (
+        "UNHANDLED_EXCEPTION",
+        "reconciler_trade_event_reconciliation_failed",
+    ),
+    "FINALIZE_RETRY": (
+        "UNHANDLED_EXCEPTION",
+        "reconciler_finalize_retry_unexpected_error",
+    ),
+    "NOTIFICATION_RETRY": (
+        "UNHANDLED_EXCEPTION",
+        "reconciler_notification_retry_unexpected_error",
+    ),
+    "TIMEOUT_FINALIZING": (
+        "UNHANDLED_EXCEPTION",
+        "reconciler_timeout_finalizing_unexpected_error",
+    ),
+    "MAINTENANCE_TRIGGER_RETRY": (
+        "UNHANDLED_EXCEPTION",
+        "reconciler_maintenance_trigger_retry_unexpected_error",
+    ),
+}
 
 _REASON_CODE_WATCHLIST_MISSED_SCHEDULE = "watchlist_missed_schedule"
 _REASON_CODE_WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK = "watchlist_universe_load_failure_streak"
@@ -598,9 +635,7 @@ def _evaluate_and_persist_watchlist_deletion_zero_streak(
     )
 
 
-def _has_removal_eligible_candidate(
-    now: dt.datetime, minimum_age_days: int
-) -> bool:
+def _has_removal_eligible_candidate(now: dt.datetime, minimum_age_days: int) -> bool:
     """Issue #708: AUTO_SCREENING銘柄のうち、削除条件の必須ANDゲート
     (`minimum_age_days`。`services/watchlist_maintenance_service.py::
     evaluate_maintenance_decision()`)に1件でも到達しているかを確認する。
@@ -790,6 +825,34 @@ def _detect_and_notify_watchlist_incidents(now: dt.datetime, config: AppConfig) 
     }
 
 
+def _notify_handled_failures_if_any(
+    handled_failure_counts: dict[str, int], now: dt.datetime
+) -> None:
+    """Issue #666(HF-1): B1〜B6のうち、このrun内で1件以上発生した境界ごとに、
+    HF-0契約(#665)でHANDLED_FAILURE envelopeをpublishする(HF1-AC2: 境界ごとに
+    run単位で集約した1件。個別発生ごとには送らない)。0件の境界は何もしない。
+
+    この関数自体の失敗(publish失敗等)がhandler()の返り値・既存の回復処理の
+    完了報告を汚染しないよう、呼び出し元で独立したtry/exceptに包む
+    (`reconcile_pending_trade_events()`呼び出しと同じ設計方針)。
+    """
+    for failure_stage, count in handled_failure_counts.items():
+        if count <= 0:
+            continue
+        failure_type, reason_code = _HANDLED_FAILURE_BOUNDARY_METADATA[failure_stage]
+        envelope = {
+            "source": _INCIDENT_SOURCE_WATCHLIST_RECONCILER,
+            "job_name": _INCIDENT_JOB_NAME_WATCHLIST_BATCH_RECONCILER,
+            "failure_stage": failure_stage,
+            "failure_type": failure_type,
+            "reason_code": reason_code,
+            "occurred_at": now.isoformat(),
+            "failure_count": count,
+            "failure_class": "HANDLED_FAILURE",
+        }
+        publish_incident_envelope(envelope)
+
+
 class _CredentialDeferredLineClient:
     """LINE認証情報が無いときに渡す、送信の瞬間に必ず失敗するclient(Issue #117)。
 
@@ -965,7 +1028,7 @@ _COMPLETION_RECOVERY_FUNCTION_ENV = {
 
 
 def _handle_completion_recovery_candidate(
-    batch_item: dict[str, Any], now: dt.datetime
+    batch_item: dict[str, Any], now: dt.datetime, handled_failure_counts: dict[str, int]
 ) -> bool | None:
     """buy/holdingsのfinalize recovery候補を処理する(Issue #57 Phase B2)。
 
@@ -973,7 +1036,8 @@ def _handle_completion_recovery_candidate(
       None  … このバッチはbuy/holdings familyではない(=呼び出し側は
               既存のwatchlist経路をそのまま続行する)
       True  … finalize-only invokeを発行した
-      False … buy/holdings familyだが今回は何もしなかった
+      False … buy/holdingsだが今回は何もしなかった(invoke失敗〔Issue #666
+              HF-1 B1。`handled_failure_counts`へ計上する〕を含む複数理由)
 
     **marker不在は None を返す。** 既存のwatchlist batchには`batch_family`が
     無いため、marker不在を一律skipするとwatchlist recoveryを壊す。
@@ -1041,6 +1105,7 @@ def _handle_completion_recovery_candidate(
             batch_id,
             family.value,
         )
+        handled_failure_counts["COMPLETION_RECOVERY"] += 1
         return False
     logger.info(
         "watchlist reconciler: finalize recovery invoked batch_id=%s batch_family=%s "
@@ -1153,6 +1218,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     config = load_config()
     wc = config.watchlist_screening
 
+    # Issue #666(HF-1): B1〜B6それぞれの、このrun内でのHANDLED_FAILURE発生回数。
+    # run終了時に`_notify_handled_failures_if_any()`で境界ごとに集約publishする。
+    handled_failure_counts: dict[str, int] = dict.fromkeys(_HANDLED_FAILURE_BOUNDARY_METADATA, 0)
+
     # Issue #529(#71 F-C11 Phase 2): 売買検知の部分適用クラッシュ時のtakeover
     # 再検知漏れを解消するconsumption stepへ相乗りする。既存のwatchlist batch
     # reconciliation(このメソッドの本体)とは無関係な処理のため、独立した
@@ -1181,6 +1250,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             "watchlist reconciler: trade_event_reconciliation failed "
             "(isolated from watchlist batch reconciliation, continuing)"
         )
+        # Issue #666(HF-1 B2)
+        handled_failure_counts["TRADE_EVENT_RECONCILIATION"] += 1
 
     providers: ProviderBundle = build_cached_provider_bundle(
         build_real_provider_bundle(now, config), config, now
@@ -1230,7 +1301,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 stuck_batch_skipped += 1
             continue
 
-        family_outcome = _handle_completion_recovery_candidate(batch_item, now)
+        family_outcome = _handle_completion_recovery_candidate(
+            batch_item, now, handled_failure_counts
+        )
         if family_outcome is not None:
             if family_outcome:
                 completion_recovery_invoked += 1
@@ -1320,6 +1393,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 logger.exception(
                     "watchlist reconciler: retry_finalize unexpected error batch_id=%s", batch_id
                 )
+                # Issue #666(HF-1 B3)
+                handled_failure_counts["FINALIZE_RETRY"] += 1
             continue
 
         if status == WatchlistBatchStatus.NOTIFICATION_FAILED.value:
@@ -1347,6 +1422,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     "watchlist reconciler: retry_notification unexpected error batch_id=%s",
                     batch_id,
                 )
+                # Issue #666(HF-1 B4)
+                handled_failure_counts["NOTIFICATION_RETRY"] += 1
             continue
 
         if status == WatchlistBatchStatus.TIMEOUT_FINALIZE_FAILED.value:
@@ -1365,6 +1442,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - 1バッチの想定外エラーで他バッチの処理を止めない
             logger.exception("watchlist reconciler: unexpected error batch_id=%s", batch_id)
             transition_timeout_finalizing_to_failed(batch_id, now, str(exc))
+            # Issue #666(HF-1 B5)
+            handled_failure_counts["TIMEOUT_FINALIZING"] += 1
 
     # 平日毎日起動化(2026-08)対応・Medium修正(2026-08再レビュー): WATCHLIST_
     # MAINTENANCE後続起動のinvoke失敗等でmaintenance_trigger_status=TRIGGERING
@@ -1408,6 +1487,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 "watchlist reconciler: maintenance trigger retry unexpected error batch_id=%s",
                 batch_id,
             )
+            # Issue #666(HF-1 B6)
+            handled_failure_counts["MAINTENANCE_TRIGGER_RETRY"] += 1
 
     logger.info(
         "watchlist reconciler completed: candidates=%d dispatch_failed=%d rescued=%d "
@@ -1416,7 +1497,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "maintenance_trigger_retried=%d maintenance_trigger_retry_failed=%d "
         "maintenance_trigger_retry_skipped=%d maintenance_trigger_retry_configuration_error=%d "
         "completion_recovery_invoked=%d completion_recovery_skipped=%d "
-        "stuck_batch_notified=%d stuck_batch_skipped=%d",
+        "stuck_batch_notified=%d stuck_batch_skipped=%d handled_failure_counts=%s",
         len(candidates),
         dispatch_failed,
         rescued,
@@ -1434,7 +1515,16 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         completion_recovery_skipped,
         stuck_batch_notified,
         stuck_batch_skipped,
+        handled_failure_counts,
     )
+    # Issue #666(HF-1): run内で1件以上発生した境界ごとにHANDLED_FAILURE通知を
+    # publishする。この検知自体の失敗がhandler()の返り値・既存の回復処理の
+    # 完了報告を汚染しないよう、独立したtry/exceptで囲む。
+    try:
+        _notify_handled_failures_if_any(handled_failure_counts, now)
+    except Exception:  # noqa: BLE001 - HANDLED_FAILURE通知自体の失敗で返り値を汚染しない
+        logger.exception("watchlist reconciler: failed to notify handled failures")
+
     # Issue #506(O-1): 既存の回復処理とは独立した検知(相乗り)。既存処理の成否には
     # 依存させない(既存の回復処理が例外を出しても、ここへは到達しない現状の挙動を
     # 変えない。検知自体の失敗は後述のLINE欠落顕在化より前に出す: 検知の例外は
@@ -1475,4 +1565,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "maintenance_trigger_retry_configuration_error": (
             maintenance_trigger_retry_configuration_error
         ),
+        # Issue #666(HF-1): 境界ごとのこのrun内でのHANDLED_FAILURE発生回数
+        # (運用監視用。通知有無自体は`_notify_handled_failures_if_any()`が
+        # 別途publishする)。
+        "handled_failure_counts": dict(handled_failure_counts),
     }

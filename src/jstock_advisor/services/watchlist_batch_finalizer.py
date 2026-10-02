@@ -138,6 +138,7 @@ from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_re
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import (
     WatchlistRepository,
 )
+from jstock_advisor.services.incident_envelope_publisher import publish_incident_envelope
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     compute_watchlist_addition_content_hash,
@@ -181,6 +182,17 @@ logger = logging.getLogger(__name__)
 # module が宣言しないと INFO は出ない)。出力する値に、生の owner / holding_id 等を含めない
 # (#135 / #416)。有効化の時点の PII 確認は PR に記録した。
 logger.setLevel(logging.INFO)
+
+# Issue #671(HF-6)/#694: このmoduleはreconciler/dispatcher/worker/terminal_failure_handlerの
+# いずれからも呼ばれるため(`maybe_finalize()`の呼び出し元4箇所)、呼び出し元固有のjob_nameを
+# 付け直すと`domain/notification/incident_message.py`(D5)の対応表へ新規追加が必要になる。
+# 対応表には既に"watchlist-batch-reconciler" → WATCHLIST_SCREENINGの登録があり(#666)、
+# finalize失敗はいずれのLambda由来でもウォッチリスト自動追加という同一job分類のため、
+# 新規登録を増やさずこの既存登録を再利用する(D5への追加touchを避ける)。fingerprintは
+# reason_code/failure_stageが境界ごとに異なるため、reconciler本体のHANDLED_FAILUREとは
+# 別fingerprintになる。
+_INCIDENT_SOURCE_WATCHLIST_FINALIZER = "watchlist_batch_finalizer"
+_INCIDENT_JOB_NAME_WATCHLIST_BATCH_RECONCILER = "watchlist-batch-reconciler"
 
 # Issue #56: maintenance batchの監査記録で使うuniverse_provider。
 # ADD用のcandidate_universe.providerと取り違えると、メンテナンス実行が
@@ -468,7 +480,7 @@ def _write_watchlist_additions(
     providers: ProviderBundle,
     resolver: StockDisplayNameResolver,
     now: dt.datetime,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], int]:
     """WATCHLIST_WRITE_COMPLETEDフェーズ本体。`pending_entries`は
     `finalize_target_stock_codes`のうち、まだ`repository_results`に結果が
     永続化されていない銘柄のみ(呼び出し側が絞り込み済み、運用ハードニング
@@ -476,8 +488,9 @@ def _write_watchlist_additions(
     永続化するため、この関数の途中でLambdaが異常終了しても、次回は未処理の
     銘柄のみが`pending_entries`として渡される(`add_if_new()`自体も条件付き
     書き込みのため、たとえ永続化自体が欠落しても実際の重複追加は発生しない、
-    二重の安全策)。戻り値は今回処理した銘柄分のみのdict(呼び出し側が
-    既存のrepository_resultsへマージする)。
+    二重の安全策)。戻り値は(今回処理した銘柄分のみのdict、Issue #671 HF-6:
+    add_if_new()失敗件数)のタプル(呼び出し側が既存のrepository_resultsへ
+    マージし、失敗件数が1件以上ならHANDLED_FAILURE通知を行う)。
 
     計画Part C-4: add_if_new()を試みる前に、自動削除後の再追加クールダウン
     (`WatchlistRemovalHistory.cooldown_until`)が有効な銘柄は追加をスキップする
@@ -491,6 +504,7 @@ def _write_watchlist_additions(
     )
 
     newly_resolved: dict[str, str] = {}
+    repository_add_failed_count = 0
 
     for entry in pending_entries:
         rank = rank_by_code[entry.stock_code]
@@ -532,6 +546,8 @@ def _write_watchlist_additions(
             added = repository.add_if_new(item)
         except Exception as exc:  # noqa: BLE001 - 1銘柄のRepository書き込み失敗で全体を止めない
             logger.exception("watchlist add_if_new failed stock_code=%s", entry.stock_code)
+            # Issue #671(HF-6 B1)
+            repository_add_failed_count += 1
             newly_resolved[entry.stock_code] = REPOSITORY_RESULT_FAILED
             record_repository_result_item(batch_id, now, entry.stock_code, REPOSITORY_RESULT_FAILED)
             record_repository_result_audit(
@@ -596,7 +612,54 @@ def _write_watchlist_additions(
             now,
         )
 
-    return newly_resolved
+    return newly_resolved, repository_add_failed_count
+
+
+def _notify_repository_add_failures_if_any(
+    repository_add_failed_count: int, now: dt.datetime
+) -> None:
+    """Issue #671(HF-6): add_if_new()の失敗が1件以上あれば、finalize呼び出し
+    単位で集約した1件のHANDLED_FAILURE envelopeをpublishする(#666と同じ設計
+    方針。個別銘柄ごとには送らない)。0件なら何もしない。
+
+    この関数自体の失敗がfinalize本体の完了・戻り値を汚染しないよう、呼び出し元で
+    独立したtry/exceptに包む。
+    """
+    if repository_add_failed_count <= 0:
+        return
+    envelope = {
+        "source": _INCIDENT_SOURCE_WATCHLIST_FINALIZER,
+        "job_name": _INCIDENT_JOB_NAME_WATCHLIST_BATCH_RECONCILER,
+        "failure_stage": "WATCHLIST_REPOSITORY_ADD",
+        "failure_type": "UNHANDLED_EXCEPTION",
+        "reason_code": "watchlist_finalizer_repository_add_failed",
+        "occurred_at": now.isoformat(),
+        "failure_count": repository_add_failed_count,
+        "failure_class": "HANDLED_FAILURE",
+    }
+    publish_incident_envelope(envelope)
+
+
+def _notify_unexpected_errors_if_any(unexpected_error_count: int, now: dt.datetime) -> None:
+    """Issue #694: evaluation_result=UNEXPECTED_ERRORがdata_unavailable_countへ
+    合算され、既存の通知からはNOT_FOUND/DATA_ERROR(業務上のN/A)と区別できない
+    問題を可視化する。batch_id単位(finalize 1回の呼び出し。#666/#671と異なり
+    cross-workerの集約は不要。`compute_batch_metrics()`の戻り値をそのまま使う)。
+    0件(NOT_FOUND/DATA_ERRORのみ発生)なら通知しない(業務上のN/Aとの区別)。
+    """
+    if unexpected_error_count <= 0:
+        return
+    envelope = {
+        "source": _INCIDENT_SOURCE_WATCHLIST_FINALIZER,
+        "job_name": _INCIDENT_JOB_NAME_WATCHLIST_BATCH_RECONCILER,
+        "failure_stage": "WATCHLIST_SCREENING_EVALUATION",
+        "failure_type": "UNHANDLED_EXCEPTION",
+        "reason_code": "watchlist_finalizer_unexpected_error_count",
+        "occurred_at": now.isoformat(),
+        "failure_count": unexpected_error_count,
+        "failure_class": "HANDLED_FAILURE",
+    }
+    publish_incident_envelope(envelope)
 
 
 def _evaluate_abort_reasons(metrics: dict[str, Any], wc: Any) -> list[str]:
@@ -1033,6 +1096,16 @@ def _finalize_completed(
     ranked_count = metrics["screening_completed_count"]
     total_target_count = metrics["total_candidate_count"]
 
+    # Issue #694: UNEXPECTED_ERRORがdata_unavailable_countへ希釈され、既存の
+    # watchlist追加サマリー通知からはNOT_FOUND/DATA_ERROR(業務上のN/A)と区別
+    # できない問題の可視化。data_unavailable_countの算出・既存通知は変更しない。
+    # この検知自体の失敗がfinalize本体の完了報告を汚染しないよう、独立した
+    # try/exceptで囲む(#666/#671と同じ設計方針)。
+    try:
+        _notify_unexpected_errors_if_any(metrics["unexpected_error_count"], now)
+    except Exception:  # noqa: BLE001 - HANDLED_FAILURE通知自体の失敗で本体を汚染しない
+        logger.exception("watchlist finalizer: failed to notify unexpected errors")
+
     # --- Phase 1: FINALIZE_PREPARING ---
     if "finalize_target_stock_codes" in batch_item:
         target_codes: list[str] = list(batch_item["finalize_target_stock_codes"])
@@ -1077,11 +1150,17 @@ def _finalize_completed(
         entries_by_code = {entry.stock_code: entry for entry in ranked}
         rank_by_code = {entry.stock_code: i for i, entry in enumerate(ranked, start=1)}
         pending_entries = [entries_by_code[code] for code in pending_codes]
-        newly_resolved = _write_watchlist_additions(
+        newly_resolved, repository_add_failed_count = _write_watchlist_additions(
             batch_id, pending_entries, rank_by_code, config, providers, resolver, now
         )
         repository_results.update(newly_resolved)
         batch_item["repository_results"] = repository_results
+        # Issue #671(HF-6): この検知自体の失敗がfinalize本体の完了報告を汚染
+        # しないよう、独立したtry/exceptで囲む(#666と同じ設計方針)。
+        try:
+            _notify_repository_add_failures_if_any(repository_add_failed_count, now)
+        except Exception:  # noqa: BLE001 - HANDLED_FAILURE通知自体の失敗で本体を汚染しない
+            logger.exception("watchlist finalizer: failed to notify repository add failures")
     # 純粋な状態遷移(データは銘柄単位で既に永続化済み)。前回既にこのフェーズを
     # 完了していた場合はConditionExpression不成立でFalseになるだけで、再開ロジック
     # はこの戻り値を分岐条件に使わない。
