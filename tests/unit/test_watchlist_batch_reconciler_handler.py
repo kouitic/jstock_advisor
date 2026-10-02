@@ -74,6 +74,64 @@ def dynamo(monkeypatch: pytest.MonkeyPatch):
         yield client
 
 
+# Issue #648(#275 Child C): 実際のrepositoryをDynamoDB経路(moto)で動かす。
+# 本番のrepositoryは`running_on_lambda()`でDynamoDBを使うが、`dynamo`だけを使うテストは
+# batch trackerだけがmotoのDynamoDBで、repositoryは`store_dir`のローカルJSONで動く
+# (本番には無い組み合わせ。#275 H11)。以下のcollectionを使う対象テストだけが、
+# この fixture を明示的に要求する(opt-in。autouseにしない。#367 条件1)。
+_COLLECTIONS_ON_DYNAMODB = (
+    ("notification_log.json", "notification_id"),
+    ("notification_claims.json", "claim_id"),
+    ("recommendations.json", "recommendation_id"),
+    ("watchlist_removal_history.json", "stock_code"),
+    ("audit_log.json", "audit_id"),
+    # finalizerの`_maybe_commit_rotation()`が、Lambda上では実際にDynamoDBを読み書きする
+    # (非Lambdaでは no-op になっていた経路。本番と同じ経路を通すために表が要る)。
+    ("watchlist_rotation_dispatch_lease.json", "rotation_id"),
+    ("watchlist_screening_rotation_state.json", "rotation_id"),
+)
+
+
+@pytest.fixture
+def dynamo_collections(
+    dynamo, lambda_runtime_env, create_collection_table, assert_dynamodb_backend, tmp_path
+):
+    """`dynamo`(batch tracker用のmoto)に加え、repositoryの5 collectionを本番と同じ表名でmotoへ作り、
+    `AWS_LAMBDA_FUNCTION_NAME`で`running_on_lambda()`をTrueにする(#367 条件2)。
+
+    ★ #367 条件4: 「fixtureを付けただけ」で完了扱いにしない。5つのrepositoryが実際に
+      DynamoDBバックエンドを通ることを、ここで(対象テストごとに)assertする。
+    """
+    from jstock_advisor.infrastructure.local_repository.audit_log_repository import (
+        AuditLogRepository,
+    )
+    from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
+        NotificationClaimRepository,
+    )
+    from jstock_advisor.infrastructure.local_repository.notification_log_repository import (
+        NotificationLogRepository,
+    )
+    from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
+        RecommendationRepository,
+    )
+    from jstock_advisor.infrastructure.local_repository.watchlist_removal_history_repository import (  # noqa: E501
+        WatchlistRemovalHistoryRepository,
+    )
+
+    for file_name, id_field in _COLLECTIONS_ON_DYNAMODB:
+        create_collection_table(file_name, id_field, region=_REGION)
+
+    for repository in (
+        NotificationLogRepository(store_dir=tmp_path / "parity-log"),
+        NotificationClaimRepository(store_dir=tmp_path / "parity-claims"),
+        RecommendationRepository(store_dir=tmp_path / "parity-rec"),
+        WatchlistRemovalHistoryRepository(30, store_dir=tmp_path / "parity-history"),
+        AuditLogRepository(store_dir=tmp_path / "parity-audit"),
+    ):
+        assert_dynamodb_backend(repository._store)
+    yield
+
+
 def _fake_scoring_config() -> SimpleNamespace:
     return SimpleNamespace(
         minimum_total_score=60.0,
@@ -435,7 +493,7 @@ def test_process_timeout_finalizing_releases_rotation_lease_on_timed_out(
 
 
 def test_reconciler_retries_notification_failed_without_rewriting_watchlist(
-    dynamo, _stub_expensive_dependencies: SimpleNamespace
+    dynamo, dynamo_collections, _stub_expensive_dependencies: SimpleNamespace
 ) -> None:
     """運用ハードニング第3弾1節: NOTIFICATION_FAILED状態のバッチに対し、
     Reconcilerが通知のみを再試行し、ウォッチリスト追加(add_if_new)が
@@ -1207,6 +1265,7 @@ def _run_expecting_credentials_error() -> None:
 
 def test_t1_missing_credentials_at_23h_still_registers_and_marks_notification_failed(
     dynamo,
+    dynamo_collections,
     credentials_missing: None,
     real_notification_service: None,
     _stub_expensive_dependencies: SimpleNamespace,
@@ -1227,6 +1286,7 @@ def test_t1_missing_credentials_at_23h_still_registers_and_marks_notification_fa
 
 def test_t2_missing_credentials_beyond_24h_keeps_the_registration_and_does_not_time_out(
     dynamo,
+    dynamo_collections,
     credentials_missing: None,
     real_notification_service: None,
     _stub_expensive_dependencies: SimpleNamespace,
@@ -1243,6 +1303,7 @@ def test_t2_missing_credentials_beyond_24h_keeps_the_registration_and_does_not_t
 
 def test_t3_recovery_retries_only_the_notification_without_rerunning_registration(
     dynamo,
+    dynamo_collections,
     monkeypatch: pytest.MonkeyPatch,
     credentials_missing: None,
     real_notification_service: None,
@@ -1269,6 +1330,7 @@ def test_t3_recovery_retries_only_the_notification_without_rerunning_registratio
 
 def test_t4_persistent_outage_reaches_the_retry_cap_and_keeps_the_registration(
     dynamo,
+    dynamo_collections,
     credentials_missing: None,
     real_notification_service: None,
     _stub_expensive_dependencies: SimpleNamespace,
@@ -1294,6 +1356,7 @@ def test_t4_persistent_outage_reaches_the_retry_cap_and_keeps_the_registration(
 
 def test_t5_crash_after_registration_does_not_double_add_or_double_notify(
     dynamo,
+    dynamo_collections,
     monkeypatch: pytest.MonkeyPatch,
     real_notification_service: None,
     add_if_new_calls: list[str],
@@ -1335,6 +1398,7 @@ def test_t5_crash_after_registration_does_not_double_add_or_double_notify(
 
 def test_t7_missing_credentials_do_not_fail_when_no_notification_is_needed(
     dynamo,
+    dynamo_collections,
     monkeypatch: pytest.MonkeyPatch,
     credentials_missing: None,
     real_notification_service: None,
@@ -1397,6 +1461,7 @@ def test_t8_maintenance_rescue_runs_without_credentials(
 
 def test_t9_other_exceptions_are_not_mistaken_for_missing_credentials(
     dynamo,
+    dynamo_collections,
     monkeypatch: pytest.MonkeyPatch,
     real_notification_service: None,
     _stub_expensive_dependencies: SimpleNamespace,
