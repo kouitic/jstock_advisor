@@ -31,7 +31,6 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     IndustryClassification,
-    ProfitTakingIndustrySector,
     RecommendationType,
 )
 from jstock_advisor.domain.entities.valuation import (
@@ -418,13 +417,9 @@ def _reasons(result: ProfitTakingResult) -> list[str]:
     return _build_not_yet_action_reasons(
         result=result,
         config=_CONFIG,
-        fair_value_overall_confidence=ConfidenceLevel.HIGH,
-        industry_sector=ProfitTakingIndustrySector.GENERAL,
-        industry_model_applied=True,
         trading_unit_feasibility=_FEASIBLE,
-        has_strong_counter_material=False,
-        is_uptrend=False,
         fair_value_unusable_reason_code=None,
+        effective_recommendation_type=RecommendationType.FULL_PROFIT_TAKE,
     )
 
 
