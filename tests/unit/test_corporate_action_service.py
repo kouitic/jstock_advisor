@@ -355,6 +355,29 @@ def test_classify_basis_date_consistency_undetermined_regardless_of_date_order()
     assert result == BasisDateConsistency.UNDETERMINED
 
 
+def test_classify_basis_date_consistency_undetermined_when_two_events_offset_to_factor_one() -> (
+    None
+):
+    """レビュー指摘(issuecomment-5957234551 S-2)の反証: 2:1分割と1:2併合が
+    同一窓に入ると比率の積は1になるが、財務指標側が片方だけ遡及調整済みという
+    状態はこの積だけでは区別できない。件数(イベントの有無)で判定するため、
+    積が1であってもイベントが2件あればCONSISTENTではなくUNDETERMINEDになる。"""
+    events = [
+        _split_event("5401", dt.date(2026, 3, 1), "2"),
+        _event("5401", CorporateActionType.REVERSE_SPLIT, dt.date(2026, 5, 1), "0.5"),
+    ]
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    # 比率の積: 2 * 0.5 = 1(素のcumulative_split_factor()ならCONSISTENT相当になってしまう)
+    factor = service.cumulative_split_factor("5401", dt.date(2026, 1, 1), dt.date(2026, 7, 27))
+    assert factor == Decimal("1")
+    result = service.classify_basis_date_consistency(
+        "5401",
+        price_basis_date=dt.date(2026, 7, 27),
+        fundamental_basis_date=dt.date(2026, 1, 1),
+    )
+    assert result == BasisDateConsistency.UNDETERMINED
+
+
 def test_classify_basis_date_consistency_ignores_merger_without_ratio_adjustment() -> None:
     """MERGER等、1株当たり指標の調整対象ではないイベントは判定に混入しない。"""
     events = [_event("5401", CorporateActionType.MERGER, dt.date(2026, 4, 1), "3")]
