@@ -33,7 +33,14 @@ from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
 
 _CFG = load_config()
-_NOW = dt.datetime.now(dt.UTC)
+# Issue #149: 実 wall clock(module import 時の現在時刻)を基準時刻にすると、同一 commit でも
+# 実行時刻により mock provider の as_of_date・価格鮮度・市場セッションの判定が変わりうる
+# (#143 と同じ構造)。基準時刻は**固定**する。同じ cohort(holding_decision_runtime_config)の
+# test_holding_decision_regression.py と同じ、営業日の大引け後(POST_CLOSE)を選ぶ。
+# 水曜(週末・祝日・月末のいずれでもない)の 16:00 JST で、大引け 15:30 JST の後。
+# 立会時間・境界日を踏まない。
+_JST = dt.timezone(dt.timedelta(hours=9))
+_NOW = dt.datetime(2026, 9, 2, 16, 0, tzinfo=_JST)  # 水曜 16:00 JST = 大引け後
 _PROVIDERS = build_mock_provider_bundle(_NOW)
 
 
