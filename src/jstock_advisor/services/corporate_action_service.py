@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import ROUND_HALF_UP, Decimal
+from enum import StrEnum
 
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.corporate_action import AdjustedDecimal, AdjustedShares
@@ -34,6 +35,14 @@ class NonIntegerShareAdjustmentError(ValueError):
 
 class MismatchedAdjustmentBasisDateError(ValueError):
     """基準日が異なる調整済み値同士を計算・比較しようとした場合。"""
+
+
+class BasisDateConsistency(StrEnum):
+    """価格側・財務指標側の基準日整合性の判定結果(要求仕様3節、Issue #698)。"""
+
+    CONSISTENT = "CONSISTENT"
+    UNDETERMINED = "UNDETERMINED"
+    DETECTED = "DETECTED"
 
 
 class CorporateActionService:
@@ -175,6 +184,62 @@ class CorporateActionService:
             source=source,
             source_timestamp=self._now,
         )
+
+    def classify_basis_date_consistency(
+        self,
+        stock_code: str,
+        price_basis_date: dt.date,
+        fundamental_basis_date: dt.date,
+        events: list[CorporateActionEvent] | None = None,
+    ) -> BasisDateConsistency:
+        """価格とEPS/BPS/DPS等の1株当たり指標が、同一の分割・併合・無償割当の
+        基準の上で組み合わされているかを判定する(Issue #698)。
+
+        価格(market_data provider経由)は問い合わせ時点に関わらず常に最新の
+        分割基準へ遡及調整されることを実測で確認済みだが、財務指標
+        (EPS/BPS/DPS)が同様に遡及調整されるかはprovider・取得時点によって
+        保証されない。
+
+        本関数はprice_basis_dateとfundamental_basis_dateの間(どちらが古いか
+        を問わない)に、1株当たり指標の調整対象イベント(SPLIT/REVERSE_SPLIT/
+        FREE_ALLOTMENT)の効力発生日が**取得できた範囲で**1件でも存在するか
+        どうかだけで判定する(要求仕様12節: 取得できない情報を推測で補完
+        しない)。★比率の積ではなく件数で判定する: 例えば2:1分割と1:2併合が
+        同一窓に入ると比率の積は1になるが、財務指標側が片方のイベントだけ
+        遡及調整済みという状態はこの積だけでは区別できない。fail-safeとして
+        安全な側(件数ベース)に倒すため、積ではなく該当イベントの有無で判定する
+        (レビュー指摘。issuecomment-5957234551 S-2)。
+
+        provider側で日付・比率を解析できなかった行は`get_effective_events()`
+        から事実上欠落するため(既存の`cumulative_split_factor()`と7消費箇所が
+        共有する既存挙動。本関数のLOCK_LEVEL_1契約では変更しない)、実在する
+        分割・併合が取得漏れの場合はfactorが1のままとなりCONSISTENTを誤って
+        返しうる。この残存リスクは#698 PR-2/PR-3の設計で引き続き検討する
+        (レビュー指摘。issuecomment-5957234551 S-1)。
+
+        該当イベントが(取得できた範囲で)1件も無ければCONSISTENT(両者の
+        基準がそもそもずれる余地が無い)。1件でもあればUNDETERMINED(財務
+        指標側が遡及調整済みかどうかを本関数だけでは確認できないため、
+        安全側へ倒す。USER決定OD-3: 不整合の有無を判定できない場合も抑止
+        対象とする)。
+
+        DETECTED(実際の不整合を確認できた)は本関数では返さない。確定検出には
+        実測値の比較(算出結果が分割比率で説明できる水準まで乖離している等、
+        日付情報だけでは判定できない根拠)が必要であり、呼び出し側が本関数の
+        UNDETERMINED結果と実測値の異常検知を組み合わせて最終的な判定を行う
+        (#698 PR-2/PR-3で実装予定)。
+        """
+        if price_basis_date == fundamental_basis_date:
+            return BasisDateConsistency.CONSISTENT
+        lo, hi = sorted((price_basis_date, fundamental_basis_date))
+        if events is None:
+            events = self.get_effective_events(stock_code, lo)
+        for event in self.get_ratio_adjustment_events(events):
+            if event.effective_date is None:
+                continue  # is_per_share_adjustment_eventで除外済みのはずだが型上はOptional
+            if lo < event.effective_date <= hi:
+                return BasisDateConsistency.UNDETERMINED
+        return BasisDateConsistency.CONSISTENT
 
     def require_matching_basis_dates(self, *values: AdjustedDecimal | AdjustedShares) -> None:
         """基準日が異なる調整済み値同士の計算・比較を禁止する。"""
