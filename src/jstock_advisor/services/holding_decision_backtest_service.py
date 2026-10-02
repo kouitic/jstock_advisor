@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -43,7 +44,13 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
-from jstock_advisor.domain.entities.owner import build_holding_id, normalize_and_validate_owner
+from jstock_advisor.domain.entities.owner import (
+    DEFAULT_OWNER,
+    InvalidOwnerError,
+    build_holding_id,
+    normalize_and_validate_owner,
+    split_holding_id,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import JST
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
@@ -655,10 +662,38 @@ def _new_fields_for_result(
     return _NewSideFields(None, None, None, method, match_warning, None)
 
 
+logger = logging.getLogger(__name__)
+
+
+def _owner_of_holding_id(holding_id: str) -> str | None:
+    """HoldingDecisionResult.holding_idの所有者を返す(Issue #736)。
+
+    owner対応前の旧形式(区切り無し = stock_codeそのもの)は、所有者移行の規則
+    (migrations/conversions.pyの`DEFAULT_MIGRATION_OWNER`。旧形式はその所有とみなす)に
+    従い`DEFAULT_OWNER`の所有とする。区切りが2つ以上ある不正な形式は、どのownerの
+    ものとも判別できないため`None`を返す(呼び出し側が除外する。fail-closed)。
+    """
+    try:
+        parsed = split_holding_id(holding_id)
+    except InvalidOwnerError:
+        return None
+    return DEFAULT_OWNER if parsed is None else parsed[0]
+
+
+def _owner_of_recommendation(recommendation: Recommendation) -> str:
+    """旧方式Recommendationの所有者を返す(Issue #736)。
+
+    `owner`が設定されていればその所有者、未設定(owner対応前の旧方式の売却系)は
+    所有者移行の規則と同じく`DEFAULT_OWNER`の所有とする。
+    """
+    return recommendation.owner if recommendation.owner is not None else DEFAULT_OWNER
+
+
 def run_history_replay(
     stock_codes: list[str],
     start_date: dt.date,
     end_date: dt.date,
+    owner: str,
     holding_decision_result_repo: HoldingDecisionResultRepository | None = None,
     recommendation_repo: RecommendationRepository | None = None,
     notification_log_repo: NotificationLogRepository | None = None,
@@ -669,6 +704,13 @@ def run_history_replay(
     蓄積が無ければ空リストを返す(推測で埋め合わせない)。期間はJST基準の暦日
     半開区間[start_date 00:00 JST, end_date翌日 00:00 JST)で絞り込む。
 
+    Issue #736: 結果は`owner`の所有のものだけに絞る(HoldingDecisionResultは`holding_id`の
+    所有者部分、旧方式Recommendationは`owner`で判定する。対応付け・単独の行とも同じ規則)。
+    ownerは必須引数であり、既定値(`DEFAULT_OWNER`)への解決はCLI層(`--owner`)だけが行う。
+    owner対応前の旧形式のholding_id・owner未設定のRecommendationは、所有者移行の規則と
+    同じく`DEFAULT_OWNER`の所有とみなす。区切りが2つ以上ある不正なholding_idは、どのowner
+    にも属さないものとして除外する(警告ログに件数のみ記録。識別子は出さない)。
+
     allow_same_day_fallback(既定False)を有効にしない限り、同一日候補のみによる
     対応付け(SAME_DAY_FALLBACK)は行わない(信頼度が低いため安全側で無効)。
     """
@@ -676,15 +718,30 @@ def run_history_replay(
     rec_repo = recommendation_repo or RecommendationRepository()
     notif_repo = notification_log_repo or NotificationLogRepository()
 
+    normalized_owner = normalize_and_validate_owner(owner)
     start_utc, end_exclusive_utc = _jst_date_range_to_utc(start_date, end_date)
     stock_code_filter = set(stock_codes) if stock_codes else None
 
-    hd_results = [
+    in_range_results = [
         r
         for r in hd_repo.list_between(start_utc, end_exclusive_utc)
         if start_utc <= _as_aware_utc(r.evaluated_at) < end_exclusive_utc
         and (stock_code_filter is None or r.stock_code in stock_code_filter)
     ]
+    hd_results = []
+    unattributable_count = 0
+    for r in in_range_results:
+        result_owner = _owner_of_holding_id(r.holding_id)
+        if result_owner is None:
+            unattributable_count += 1
+        elif result_owner == normalized_owner:
+            hd_results.append(r)
+    if unattributable_count:
+        logger.warning(
+            "history replay excluded %d holding decision results whose holding_id has an "
+            "invalid owner format (cannot be attributed to any owner)",
+            unattributable_count,
+        )
     # Issue #576: タプルsortの第1要素がnaive/aware混在だとTypeErrorになる。
     hd_results.sort(
         key=lambda r: (_as_aware_utc(r.evaluated_at), r.stock_code, r.holding_decision_result_id)
@@ -699,6 +756,8 @@ def run_history_replay(
         if classify_recommendation_source(rec.recommendation_type) != (
             BacktestRecommendationSource.LEGACY_SELL
         ):
+            continue
+        if _owner_of_recommendation(rec) != normalized_owner:
             continue
         legacy_candidates_by_stock.setdefault(rec.stock_code, []).append(rec)
     for candidates in legacy_candidates_by_stock.values():

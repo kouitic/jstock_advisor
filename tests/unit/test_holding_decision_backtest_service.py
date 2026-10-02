@@ -494,6 +494,7 @@ def test_history_replay_returns_empty_when_no_data(store_dir: Path):
         ["2914"],
         dt.date(2020, 1, 1),
         dt.date(2020, 12, 31),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -519,6 +520,7 @@ def test_history_replay_matches_legacy_recommendation_by_nearest_timestamp(store
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -539,6 +541,7 @@ def test_history_replay_excludes_data_outside_range(store_dir: Path):
         ["2914"],
         dt.date(2026, 1, 1),
         dt.date(2026, 12, 31),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -555,6 +558,7 @@ def test_history_replay_filters_by_stock_code(store_dir: Path):
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -571,6 +575,7 @@ def test_history_replay_no_stock_filter_includes_all(store_dir: Path):
         [],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -603,6 +608,7 @@ def test_history_replay_excludes_non_legacy_sell_recommendation_types(store_dir:
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -634,6 +640,7 @@ def test_history_replay_excludes_profit_taking_recommendation_type(store_dir: Pa
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -658,6 +665,7 @@ def test_history_replay_no_match_normal_active_means_legacy_not_run(store_dir: P
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -686,6 +694,7 @@ def test_history_replay_no_match_non_active_mode_is_unknown_not_hold(store_dir: 
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -715,6 +724,7 @@ def test_history_replay_ambiguous_match_does_not_assert_created_or_notify(store_
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -738,6 +748,7 @@ def test_history_replay_does_not_double_assign_same_recommendation(store_dir: Pa
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -771,6 +782,7 @@ def test_history_replay_new_recommendation_id_verified(store_dir: Path):
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
         notification_log_repo=notif_repo,
@@ -797,6 +809,7 @@ def test_history_replay_new_recommendation_id_missing_record(store_dir: Path):
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -831,6 +844,7 @@ def test_history_replay_new_recommendation_id_different_stock_code(store_dir: Pa
         ["2914", "9861"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -865,6 +879,7 @@ def test_history_replay_new_recommendation_id_type_mismatch_legacy_type(store_di
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -899,6 +914,7 @@ def test_history_replay_new_recommendation_id_type_mismatch_excluded_type(store_
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -916,6 +932,7 @@ def test_history_replay_new_recommendation_no_recommendation_when_id_is_none(sto
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -951,6 +968,7 @@ def test_history_replay_notification_sent_when_log_exists(store_dir: Path):
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
         notification_log_repo=notif_repo,
@@ -983,6 +1001,7 @@ def test_history_replay_notification_unknown_when_no_log(store_dir: Path):
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )
@@ -1019,6 +1038,7 @@ def test_history_replay_notification_duplicate_logs_produce_warning(store_dir: P
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
         notification_log_repo=notif_repo,
@@ -1039,6 +1059,7 @@ def test_history_replay_standalone_legacy_only_row(store_dir: Path):
         ["2914"],
         dt.date(2026, 6, 1),
         dt.date(2026, 6, 30),
+        DEFAULT_OWNER,
         holding_decision_result_repo=hd_repo,
         recommendation_repo=rec_repo,
     )

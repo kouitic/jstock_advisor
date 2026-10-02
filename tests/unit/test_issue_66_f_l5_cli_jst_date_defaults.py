@@ -65,6 +65,7 @@ def test_holding_decision_cli_replay_end_date_default_uses_jst_calendar_date(
         stock_codes: list[str],
         start_date: dt.date,
         end_date: dt.date,
+        owner: str,
         holding_decision_result_repo: object | None = None,
         recommendation_repo: object | None = None,
         notification_log_repo: object | None = None,
