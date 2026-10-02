@@ -21,6 +21,7 @@ from jstock_advisor.domain.entities.holding_decision import (
     InvestmentThesisScore,
     RiskDeductionScore,
 )
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.services.holding_decision_compare_service import (
     CompareRow,
@@ -41,12 +42,12 @@ _PROVIDERS = build_mock_provider_bundle(_NOW)
 
 
 def test_run_compare_returns_one_row_per_stock_code():
-    rows = run_compare(["2914", "9861"], _PROVIDERS, _CFG, _NOW)
+    rows = run_compare(["2914", "9861"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER)
     assert [r.stock_code for r in rows] == ["2914", "9861"]
 
 
 def test_run_compare_row_carries_detailed_fields():
-    rows = run_compare(["2914"], _PROVIDERS, _CFG, _NOW)
+    rows = run_compare(["2914"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER)
     row = rows[0]
     assert row.legacy_category is not None
     assert row.new_category is not None
@@ -60,7 +61,7 @@ def test_run_compare_row_carries_detailed_fields():
 def test_run_compare_non_holding_stock_does_not_evaluate_legacy(store_dir: Path):
     """非保有銘柄は旧方式(SellSignalService)を評価しない(コードレビュー対応)。"""
     portfolio = PortfolioService(holding_repository=HoldingRepository(store_dir=store_dir))
-    rows = run_compare(["2914"], _PROVIDERS, _CFG, _NOW, portfolio_service=portfolio)
+    rows = run_compare(["2914"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER, portfolio_service=portfolio)
     row = rows[0]
     assert row.legacy_category == "NOT_EVALUATED_NON_HOLDING"
     assert row.legacy_should_notify is None
@@ -89,12 +90,22 @@ def test_run_compare_wires_first_evaluation_flag_onto_the_returned_row(store_dir
     )
 
     first_rows = run_compare(
-        ["2914"], _PROVIDERS, _CFG, _NOW, holding_decision_service=holding_decision_service
+        ["2914"],
+        _PROVIDERS,
+        _CFG,
+        _NOW,
+        DEFAULT_OWNER,
+        holding_decision_service=holding_decision_service,
     )
     assert first_rows[0].first_evaluation is True
 
     second_rows = run_compare(
-        ["2914"], _PROVIDERS, _CFG, _NOW, holding_decision_service=holding_decision_service
+        ["2914"],
+        _PROVIDERS,
+        _CFG,
+        _NOW,
+        DEFAULT_OWNER,
+        holding_decision_service=holding_decision_service,
     )
     assert second_rows[0].first_evaluation is False
 
@@ -183,7 +194,7 @@ def test_category_diff_not_comparable_when_legacy_is_none():
 
 
 def test_write_compare_csv_round_trips(tmp_path: Path):
-    rows = run_compare(["2914"], _PROVIDERS, _CFG, _NOW)
+    rows = run_compare(["2914"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER)
     csv_path = tmp_path / "compare.csv"
     write_compare_csv(rows, csv_path)
 

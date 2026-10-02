@@ -43,7 +43,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
+from jstock_advisor.domain.entities.owner import build_holding_id, normalize_and_validate_owner
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import JST
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
@@ -215,7 +215,7 @@ class BacktestRow:
         )
 
 
-def placeholder_holding(stock_code: str, now: dt.datetime) -> Holding:
+def placeholder_holding(stock_code: str, now: dt.datetime, owner: str) -> Holding:
     """保有していない銘柄をbacktest対象にする場合のダミー保有データ。
 
     保有判断スコアは現在株価・取得単価・含み益率を一切入力に含めないため
@@ -225,10 +225,14 @@ def placeholder_holding(stock_code: str, now: dt.datetime) -> Holding:
     **新方式(HoldingDecisionService)専用。旧方式(SellSignalService)へは絶対に
     渡さないこと**(コードレビュー対応: 旧方式は含み益率・保有期間を実際に使うため、
     ダミー値を渡すと架空の評価結果になる)。
+
+    ownerは必須引数(Issue #579)。仮の保有が別ownerのholding_idを名乗らないよう、
+    指定ownerで`owner`と`holding_id`を構築する。
     """
+    normalized_owner = normalize_and_validate_owner(owner)
     return Holding(
-        owner=DEFAULT_OWNER,
-        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
+        owner=normalized_owner,
+        holding_id=build_holding_id(normalized_owner, stock_code),
         stock_code=stock_code,
         stock_name=stock_code,
         shares=100,
@@ -243,13 +247,25 @@ def placeholder_holding(stock_code: str, now: dt.datetime) -> Holding:
 
 
 def resolve_target_stock_codes(
-    explicit_stock_codes: list[str], portfolio_service: PortfolioService | None = None
+    explicit_stock_codes: list[str],
+    owner: str,
+    portfolio_service: PortfolioService | None = None,
 ) -> list[str]:
-    """--stock-codeが1件以上指定されていればそれを使い、無指定なら全保有銘柄を使う。"""
+    """--stock-codeが1件以上指定されていればそれを使い、無指定なら指定ownerの全保有銘柄を使う。
+
+    Issue #579: 無指定時の列挙も指定ownerへscopeする(従来は`list_holdings()`で全ownerの
+    銘柄を列挙していたため、指定ownerに存在しない他owner銘柄が「未登録」として混入した)。
+    ownerは必須引数であり、既定値への解決はCLI層(`--owner`)だけが行う。
+    """
+    normalized_owner = normalize_and_validate_owner(owner)
     if explicit_stock_codes:
         return list(dict.fromkeys(explicit_stock_codes))  # 重複除去・順序維持
     portfolio = portfolio_service or PortfolioService()
-    return list(dict.fromkeys(h.stock_code for h in portfolio.list_holdings()))
+    return list(
+        dict.fromkeys(
+            h.stock_code for h in portfolio.list_holdings() if h.owner == normalized_owner
+        )
+    )
 
 
 def _data_error_row(stock_code: str, now: dt.datetime, error: str | None) -> BacktestRow:
@@ -283,6 +299,7 @@ def run_live_comparison(
     providers: ProviderBundle,
     config: AppConfig,
     now: dt.datetime,
+    owner: str,
     sell_service: SellSignalService | None = None,
     holding_decision_service: HoldingDecisionService | None = None,
     portfolio_service: PortfolioService | None = None,
@@ -294,7 +311,11 @@ def run_live_comparison(
     旧方式(SellSignalService)を評価しない(コードレビュー対応: 架空の取得単価・
     保有期間による誤評価を防ぐ)。新方式は非保有銘柄でも安全に評価できる
     (placeholder_holding参照)。
+
+    ownerは必須引数(Issue #579)。指定ownerの保有として判定する。既定値への解決は
+    CLI層(`--owner`)だけが行う。
     """
+    normalized_owner = normalize_and_validate_owner(owner)
     sell_service = sell_service or SellSignalService(providers=providers, config=config)
     holding_decision_service = holding_decision_service or HoldingDecisionService(providers, config)
     portfolio = portfolio_service or PortfolioService()
@@ -306,8 +327,10 @@ def run_live_comparison(
             rows.append(_data_error_row(stock_code, now, error))
             continue
 
-        actual_holding = portfolio.get_holding(DEFAULT_OWNER, stock_code)
+        actual_holding = portfolio.get_holding(normalized_owner, stock_code)
         override = (holding_overrides or {}).get(stock_code)
+        if override is not None and override.owner != normalized_owner:
+            raise ValueError(f"{stock_code}の仮の保有情報のownerが、指定されたownerと一致しません")
         if override is not None and actual_holding is not None:
             raise ValueError(
                 f"{stock_code}は既に保有銘柄として登録されているため"
@@ -329,7 +352,7 @@ def run_live_comparison(
                 else "HOLD"
             )
 
-        new_holding = holding or placeholder_holding(stock_code, now)
+        new_holding = holding or placeholder_holding(stock_code, now, normalized_owner)
         new_outcome = holding_decision_service.evaluate(
             new_holding, now, ExecutionPlanReason.NORMAL_SHADOW, snapshot=snapshot
         )

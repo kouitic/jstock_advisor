@@ -79,8 +79,12 @@ def test_holding_decision_cli_replay_end_date_default_uses_jst_calendar_date(
         holding_decision_cli, "run_history_replay", _fake_run_history_replay
     )
 
+    # Issue #579: Typer関数を直接呼ぶため、`--owner`の既定値(CLI層が解決する)も明示して渡す。
+    from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
+
     holding_decision_cli.backtest(
         stock_code=["9999"],
+        owner=DEFAULT_OWNER,
         start_date="2026-01-01",
         end_date=None,
         source="mock",

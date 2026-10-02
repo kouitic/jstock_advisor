@@ -1234,8 +1234,10 @@ Shadow運用中に新旧の判定差分を確認するためのコマンドで�
 
 ```bash
 jstock holding-decision compare --stock-code 2914 --stock-code 8306
-# 保有銘柄すべてを対象にする場合は --stock-code を省略
+# 保有銘柄すべてを対象にする場合は --stock-code を省略(省略時は所有者「本人」の保有銘柄のみ)
 jstock holding-decision compare
+# 本人以外の所有者を対象にする場合は --owner を指定(保有の確認・銘柄の一覧とも、その所有者の保有だけが対象)
+jstock holding-decision compare --owner <所有者名>
 # 実データで比較する場合(既定はmock)
 jstock holding-decision compare --source real
 # CSVへ出力
@@ -1270,9 +1272,17 @@ jstock holding-decision backtest --stock-code 2914
 # replayモード(--start-date指定時): 過去に保存された評価結果を期間指定で再生
 jstock holding-decision backtest --start-date 2026-08-01 --end-date 2026-08-31
 
-# 保有銘柄すべてを対象にCSV出力
+# 保有銘柄すべてを対象にCSV出力(--stock-code省略時は所有者「本人」の保有銘柄のみ)
 jstock holding-decision backtest --csv backtest_result.csv
+
+# 本人以外の所有者を対象にする場合は --owner を指定(保有の確認・銘柄の一覧とも、その所有者の保有だけが対象。
+# replayモードでは --owner は対象銘柄の一覧にだけ使い、再生そのものは所有者で絞らない)
+jstock holding-decision backtest --owner <所有者名>
 ```
+
+`jstock review before-after`(銘柄指定は`--stocks`)も同じ`--owner`(省略時は本人)を持ちます。
+Issue #579より前は、これらのコマンドが所有者を常に「本人」として保有を調べていたため、本人以外の
+所有者の保有銘柄が`NOT_EVALUATED_NON_HOLDING`(未登録)と表示されていました。
 
 replayモードは`mode=shadow`で運用した蓄積データが無い期間を指定すると、
 推測で埋め合わせず素直に「該当するデータがありません」と表示します。

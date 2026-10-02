@@ -171,13 +171,17 @@ def _sent_log(recommendation_id: str, sent_at: dt.datetime) -> NotificationLog:
 
 def test_resolve_target_stock_codes_uses_explicit_list_when_given(store_dir: Path):
     portfolio = PortfolioService(holding_repository=HoldingRepository(store_dir=store_dir))
-    result = resolve_target_stock_codes(["2914", "9861"], portfolio_service=portfolio)
+    result = resolve_target_stock_codes(
+        ["2914", "9861"], DEFAULT_OWNER, portfolio_service=portfolio
+    )
     assert result == ["2914", "9861"]
 
 
 def test_resolve_target_stock_codes_deduplicates_while_preserving_order(store_dir: Path):
     portfolio = PortfolioService(holding_repository=HoldingRepository(store_dir=store_dir))
-    result = resolve_target_stock_codes(["2914", "9861", "2914"], portfolio_service=portfolio)
+    result = resolve_target_stock_codes(
+        ["2914", "9861", "2914"], DEFAULT_OWNER, portfolio_service=portfolio
+    )
     assert result == ["2914", "9861"]
 
 
@@ -186,20 +190,20 @@ def test_resolve_target_stock_codes_falls_back_to_all_holdings(store_dir: Path):
     portfolio = PortfolioService(holding_repository=holding_repo)
     holding_repo.upsert(_holding("2914"))
     holding_repo.upsert(_holding("9861"))
-    result = resolve_target_stock_codes([], portfolio_service=portfolio)
+    result = resolve_target_stock_codes([], DEFAULT_OWNER, portfolio_service=portfolio)
     assert set(result) == {"2914", "9861"}
 
 
 def test_resolve_target_stock_codes_empty_when_no_holdings_and_no_explicit_codes(store_dir: Path):
     portfolio = PortfolioService(holding_repository=HoldingRepository(store_dir=store_dir))
-    assert resolve_target_stock_codes([], portfolio_service=portfolio) == []
+    assert resolve_target_stock_codes([], DEFAULT_OWNER, portfolio_service=portfolio) == []
 
 
 # ===== run_live_comparison =====
 
 
 def test_live_comparison_returns_one_row_per_stock_code():
-    rows = run_live_comparison(["2914", "9861"], _PROVIDERS, _CFG, _NOW)
+    rows = run_live_comparison(["2914", "9861"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER)
     assert [r.stock_code for r in rows] == ["2914", "9861"]
     assert all(r.source == "live" for r in rows)
 
@@ -208,7 +212,9 @@ def test_live_comparison_row_has_legacy_and_new_engine_fields(store_dir: Path):
     holding_repo = HoldingRepository(store_dir=store_dir)
     holding_repo.upsert(_holding("2914"))
     portfolio = PortfolioService(holding_repository=holding_repo)
-    rows = run_live_comparison(["2914"], _PROVIDERS, _CFG, _NOW, portfolio_service=portfolio)
+    rows = run_live_comparison(
+        ["2914"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER, portfolio_service=portfolio
+    )
     row = rows[0]
     assert row.legacy_recommendation_type is not None
     assert row.new_score is not None
@@ -220,7 +226,7 @@ def test_live_comparison_row_has_legacy_and_new_engine_fields(store_dir: Path):
 def test_live_comparison_never_created_or_sent_since_nothing_is_persisted():
     """liveモードは何も永続化・送信しないため、recommendation_created/
     notification_sentは常にFalse(should_notifyとは独立)。"""
-    rows = run_live_comparison(["2914"], _PROVIDERS, _CFG, _NOW)
+    rows = run_live_comparison(["2914"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER)
     row = rows[0]
     assert row.legacy_recommendation_created is False
     assert row.new_recommendation_created is False
@@ -241,7 +247,9 @@ def test_live_comparison_non_holding_stock_skips_legacy_engine(store_dir: Path, 
         return SellSignalOutcome(holding.stock_code, None, None)
 
     monkeypatch.setattr(SellSignalService, "analyze", _spy_analyze)
-    rows = run_live_comparison(["2914"], _PROVIDERS, _CFG, _NOW, portfolio_service=portfolio)
+    rows = run_live_comparison(
+        ["2914"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER, portfolio_service=portfolio
+    )
     assert called["count"] == 0
     assert rows[0].legacy_recommendation_type == "NOT_EVALUATED_NON_HOLDING"
     assert rows[0].legacy_should_notify is None
@@ -272,6 +280,7 @@ def test_live_comparison_holding_overrides_used_for_non_holding_stock(store_dir:
         _PROVIDERS,
         _CFG,
         _NOW,
+        DEFAULT_OWNER,
         portfolio_service=portfolio,
         holding_overrides={"2914": override},
     )
@@ -289,6 +298,7 @@ def test_live_comparison_holding_overrides_conflicts_with_actual_holding_raises(
             _PROVIDERS,
             _CFG,
             _NOW,
+            DEFAULT_OWNER,
             portfolio_service=portfolio,
             holding_overrides={"2914": override},
         )
@@ -304,6 +314,7 @@ def test_live_comparison_holding_overrides_not_persisted(store_dir: Path):
         _PROVIDERS,
         _CFG,
         _NOW,
+        DEFAULT_OWNER,
         portfolio_service=portfolio,
         holding_overrides={"2914": override},
     )
@@ -1045,7 +1056,7 @@ def test_history_replay_standalone_legacy_only_row(store_dir: Path):
 
 
 def test_write_backtest_csv_round_trips_live_rows(tmp_path: Path):
-    rows = run_live_comparison(["2914"], _PROVIDERS, _CFG, _NOW)
+    rows = run_live_comparison(["2914"], _PROVIDERS, _CFG, _NOW, DEFAULT_OWNER)
     csv_path = tmp_path / "backtest.csv"
     write_backtest_csv(rows, csv_path)
 
