@@ -218,3 +218,61 @@ def test_audit_failure_alone_does_not_emit_the_aggregate_commit_notification(
     evaluation_handler.handler({}, None)
 
     assert [e["failure_stage"] for e in published] == ["AUDIT_PERSIST"]
+
+
+# --- 消費側(incident_notifier_handler)が、本handlerのenvelopeをそのまま解釈できる ----------
+
+
+def test_audit_envelope_is_accepted_by_the_real_notifier_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_handler: list[_StubService],
+    published: list[dict[str, Any]],
+) -> None:
+    import datetime as dt
+
+    from jstock_advisor.domain.notification.incident_message import (
+        IncidentJob,
+        resolve_incident_job,
+    )
+    from jstock_advisor.domain.notification.incident_signal import FailureClass
+    from jstock_advisor.lambda_handlers import incident_notifier_handler
+
+    monkeypatch.setattr(evaluation_handler, "record_run_summary", lambda *_a, **_k: False)
+
+    evaluation_handler.handler({}, None)
+
+    now = dt.datetime(2026, 10, 2, 9, 0, tzinfo=dt.UTC)
+    signal = incident_notifier_handler._normalize_internal_message(published[0], now)
+    assert signal.failure_class is FailureClass.HANDLED_FAILURE
+    assert signal.failure_count == 1
+    assert signal.failure_stage == "AUDIT_PERSIST"
+    assert resolve_incident_job(signal.job_name) is IncidentJob.EVALUATION
+
+
+def test_the_two_notifications_have_different_fingerprints(
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_handler: list[_StubService],
+    published: list[dict[str, Any]],
+) -> None:
+    """#673と#674は別の条件のため、同一のfingerprintに畳まれて片方が失われない。"""
+    import datetime as dt
+
+    from jstock_advisor.domain.notification.incident_fingerprint import compute_fingerprint
+    from jstock_advisor.lambda_handlers import incident_notifier_handler
+
+    _StubService.aggregate_commit_failed_count = 2
+    monkeypatch.setattr(evaluation_handler, "record_run_summary", lambda *_a, **_k: False)
+
+    evaluation_handler.handler({}, None)
+
+    now = dt.datetime(2026, 10, 2, 9, 0, tzinfo=dt.UTC)
+    fingerprints = {
+        compute_fingerprint(
+            incident_notifier_handler._build_fingerprint_input(
+                incident_notifier_handler._normalize_internal_message(e, now)
+            )
+        )
+        for e in published
+    }
+    assert len(published) == 2
+    assert len(fingerprints) == 2

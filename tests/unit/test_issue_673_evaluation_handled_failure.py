@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 from types import SimpleNamespace
@@ -252,3 +253,33 @@ def test_real_publisher_delivers_the_envelope_to_the_topic(
     assert body["failure_stage"] == "AGGREGATE_COMMIT"
     assert body["failure_count"] == 7
     assert set(body) <= INCIDENT_ENVELOPE_ALLOWLIST
+
+
+# --- 消費側(incident_notifier_handler)が、本handlerのenvelopeをそのまま解釈できる ----------
+
+
+def test_envelope_is_accepted_by_the_real_notifier_normalization(
+    stubbed_handler: list[_StubService], published: list[dict[str, Any]]
+) -> None:
+    """生成側(本handler)と消費側(#665のnormalize)の食い違いが無いこと。
+
+    envelopeの形が消費側の契約(allowlist・型)に合わなければ、HANDLED_FAILURE通知は
+    Production配線後に黙って失われる。ここでは配線なしで、実際の正規化関数に通して固定する。
+    """
+    from jstock_advisor.domain.notification.incident_message import (
+        IncidentJob,
+        resolve_incident_job,
+    )
+    from jstock_advisor.domain.notification.incident_signal import FailureClass
+    from jstock_advisor.lambda_handlers import incident_notifier_handler
+
+    _StubService.count = 6
+
+    evaluation_handler.handler({}, None)
+
+    now = dt.datetime(2026, 10, 2, 9, 0, tzinfo=dt.UTC)
+    signal = incident_notifier_handler._normalize_internal_message(published[0], now)
+    assert signal.failure_class is FailureClass.HANDLED_FAILURE  # GitHub Issueは作られない(HF-0)
+    assert signal.failure_count == 6
+    assert signal.failure_stage == "AGGREGATE_COMMIT"
+    assert resolve_incident_job(signal.job_name) is IncidentJob.EVALUATION
