@@ -11,8 +11,9 @@
 
 加えて Issue #320(F-I7): `recommended_action_summary` は旧 SELL と保有判断だけが保存する。
 これは ★ **意図的な非対称**であり、転記の対象ではない(全 writer へ同じ文言を埋める修正は
-しない)。適用表の 1 行として根拠を宣言し、末尾の「#320」節で、読み手・書き手の全数と
-欠落時の挙動を固定する。
+しない)。適用表の 1 行として根拠を宣言し、末尾の「#320」節で、書き手(keyword 引数)と
+読み手(属性アクセス)の全数と、欠落時の挙動を固定する。
+★ 検出できる式の形は「keyword 引数」と「属性アクセス」だけである(末尾の「#320」節を参照)。
 
 ★ **転記のみ**である。取得し直さない・再解決しない・過去レコードを埋め直さない。
   そのため各テストは「保存されたこと」だけでなく ★ **判定と通知文面が変わって
@@ -631,8 +632,15 @@ def test_transfer_does_not_change_the_recommendation_type(
 #   を固定する。
 #
 # ★ 再評価トリガー(Issue #320): 読み手が増える(R-3 = BUY の表示が summary を読む)・書き手が
-#   増える(R-2 = 全経路で必須とする契約)と (1) が落ちる。落ちたら、表を直す前に
-#   Issue #320 の Priority(P3)の再評価条件を確認すること。
+#   増える(R-2 = 全経路で必須とする契約)と、★ 次の 2 つの形で足された場合に (1) が落ちる。
+#     書き手  `recommended_action_summary=...` の keyword 引数
+#     読み手  `.recommended_action_summary` の属性アクセス(Load)
+#   落ちたら、表を直す前に Issue #320 の Priority(P3)の再評価条件を確認すること。
+#
+# ★ 視界外(検出しない形。現在の src にはこの 2 形での書き手・読み手は無いが、将来入りうる):
+#     dict literal の key 文字列  例 `rec.model_copy(update={"recommended_action_summary": ...})`
+#     getattr の文字列定数        例 `getattr(rec, "recommended_action_summary")`
+#   これらの形で足された場合は、このテストは落ちない(#320 の snapshot に DISCOVERY として記録)。
 
 _SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "jstock_advisor"
 _SUMMARY = "recommended_action_summary"
@@ -673,7 +681,9 @@ def _is_summary_attribute_read(node: ast.AST) -> bool:
 def test_summary_table_matches_the_writers_in_src() -> None:
     """★ 適用表で「非該当」の経路には書き手が無く、「必須 / 条件付き」の経路にだけ書き手がある。
 
-    新しい writer を足したのに表を更新しない(または、表を誤分類した)と落ちる。
+    書き手は、src 全体の AST で `recommended_action_summary=` の keyword 引数として数える。
+    その形で新しい writer を足したのに表を更新しない(または、表を誤分類した)と落ちる。
+    dict literal の key 文字列(`model_copy(update={...})` 等)での書き込みは視界外。
     """
     declared_writers = {
         route
@@ -685,10 +695,11 @@ def test_summary_table_matches_the_writers_in_src() -> None:
 
 
 def test_summary_readers_in_src_are_exactly_the_known_ones() -> None:
-    """★ 読み手の全数を固定する。BUY の表示が summary を読むようになると(R-3)落ちる。
+    """★ 属性アクセス(`.recommended_action_summary` の Load)の読み手を、src 全体で固定する。
 
-    落ちたときは、BUY を「非該当」と書いた根拠(独自に組み立てる)が崩れていないかを
-    確認してから、この集合と適用表を更新する。
+    その形で BUY の表示が summary を読むようになると(R-3)落ちる。落ちたときは、BUY を
+    「非該当」と書いた根拠(独自に組み立てる)が崩れていないかを確認してから、この集合と
+    適用表を更新する。getattr の文字列定数での読み取りは視界外。
     """
     assert _src_modules_where(_is_summary_attribute_read) == _SUMMARY_READER_MODULES
 
