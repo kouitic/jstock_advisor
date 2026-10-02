@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 
 from jstock_advisor.config.models import HoldingDecisionRulesConfig
 from jstock_advisor.domain.entities.enums import (
@@ -101,7 +102,11 @@ def combine_holding_decision(
     else:
         final_score = base_score
 
-    display_value = round(final_score)
+    # Issue #68(F-H2): 組み込みround()はfloatの.5をbanker's rounding
+    # (ROUND_HALF_EVEN)で処理するため、house標準のROUND_HALF_UPと
+    # 不一致になりうる(-2.5 -> 組み込みround()は-2、house標準は-3)。
+    # 家の慣習(float設定値はDecimal(str(x))経由で扱う)に揃える。
+    display_value = int(Decimal(str(final_score)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     category = _category_for_score(final_score, rules)
 
     overall_coverage = (
