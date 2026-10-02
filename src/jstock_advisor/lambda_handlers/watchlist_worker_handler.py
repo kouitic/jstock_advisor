@@ -24,7 +24,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
@@ -40,7 +40,12 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     complete_candidate,
     resolve_watchlist_job_type,
 )
-from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
+from jstock_advisor.infrastructure.line.client import (
+    LineClient,
+    LineCredentialsMissingError,
+    QuickReplyButton,
+    build_live_line_client_from_env,
+)
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -263,9 +268,73 @@ def _evaluate_candidate(
     )
 
 
-def _build_notification_service(config: AppConfig) -> LineNotificationService:
+class _CredentialDeferredLineClient:
+    """LINE認証情報が無いときに渡す、送信の瞬間に必ず失敗するclient(Issue #430。
+    #429〔reconciler〕と同一ロジック。USER決定OD1=Bによりreconciler側との共通化は
+    行わず、このファイル内へ独立に複製する)。
+
+    workerはNEW_CANDIDATE_SCREENINGのリース取得・完了記録(Phase 1/2)と、
+    finalizerのPhase 3(通知)を同じLambda呼び出し内で行う。認証情報の欠落を
+    通知サービスの「構築失敗」として扱うと、Phase 1/2まで巻き込んで失敗し、
+    リースが失効するまで再処理されない。
+
+    そこで欠落は「実際の送信時の失敗」として扱う。送信メソッド(push_message等)は
+    **必ず**`LineCredentialsMissingError`を送出し、決して成功を返さない。
+    finalizerのPhase 3は例外を捕捉してNOTIFICATION_FAILEDとして記録し
+    (ウォッチリスト登録は保持される)、通知だけが既存のretry_notification()の
+    再試行機構に載る。
+
+    ★ Phase 3の例外捕捉により、このままではLambda呼び出しが成功扱いになり欠落が
+      不可視になる。そのため「欠落のまま送信が試みられた」事実を保持し、
+      `raise_if_send_attempted()`をhandlerの全処理完了後に呼んで送出する。
+    """
+
+    def __init__(self, missing: LineCredentialsMissingError) -> None:
+        self._missing = missing
+        self.send_attempted = False
+
+    def _fail(self) -> NoReturn:
+        self.send_attempted = True
+        raise LineCredentialsMissingError(str(self._missing))
+
+    def push_message(self, text: str) -> None:
+        self._fail()
+
+    def reply_message(
+        self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
+    ) -> None:
+        self._fail()
+
+    def reply_messages(
+        self,
+        reply_token: str,
+        texts: list[str],
+        quick_reply: list[QuickReplyButton] | None = None,
+    ) -> None:
+        self._fail()
+
+    def raise_if_send_attempted(self) -> None:
+        if self.send_attempted:
+            raise LineCredentialsMissingError(str(self._missing))
+
+
+def _build_worker_line_client() -> LineClient:
+    """認証情報があればLiveLineClient、無ければ送信時に必ず失敗するclientを返す。
+
+    構築の失敗(`LineCredentialsMissingError`)だけを送信時の失敗へ変える。認証情報の
+    欠落以外の例外は握りつぶさず、従来どおり伝播する。
+    """
+    try:
+        return build_live_line_client_from_env()
+    except LineCredentialsMissingError as exc:
+        return _CredentialDeferredLineClient(exc)
+
+
+def _build_notification_service(
+    config: AppConfig, line_client: LineClient | None = None
+) -> LineNotificationService:
     return LineNotificationService(
-        line_client=build_live_line_client_from_env(),
+        line_client=line_client if line_client is not None else _build_worker_line_client(),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
@@ -298,14 +367,16 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         vintage=cache_vintage,
     )
     # Issue #117: 通知サービスを使うのはNEW_CANDIDATE_SCREENINGのfinalizeだけ。
-    # 認証情報欠落を黙ってConsoleLineClientへ落とさず、状態変更(リース取得・完了記録)
-    # より前に失敗させる。MAINTENANCEしか処理しない呼び出しは不要な認証情報で新たに
-    # 失敗させない(メッセージを事前に走査。判定は本処理と同じresolve関数)。
-    notification_service = (
-        _build_notification_service(config)
-        if sqs_records_require_notification_service(event, missing_job_type_default=None)
-        else None
-    )
+    # MAINTENANCEしか処理しない呼び出しは不要な認証情報で新たに失敗させない
+    # (メッセージを事前に走査。判定は本処理と同じresolve関数)。
+    # Issue #430: 認証情報欠落は構築の失敗にせず、送信時の失敗として扱う
+    # (_CredentialDeferredLineClient。状態変更[リース取得・完了記録]より
+    # 前に失敗させない)。
+    line_client: LineClient | None = None
+    notification_service: LineNotificationService | None = None
+    if sqs_records_require_notification_service(event, missing_job_type_default=None):
+        line_client = _build_worker_line_client()
+        notification_service = _build_notification_service(config, line_client)
     owner_id = getattr(context, "aws_request_id", None) or uuid.uuid4().hex
 
     processed: list[dict[str, Any]] = []
@@ -410,4 +481,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         cache_stats.hit_count,
         cache_stats.miss_count,
     )
+    # Issue #430: リース取得・完了記録・NOTIFICATION_FAILEDの記録を全て終えた
+    # 後に、認証情報の欠落を顕在化させる(Lambda呼び出しをErrorsとして失敗
+    # させる)。finalizerのPhase 3が例外を捕捉するため、これが無いと欠落が
+    # 不可視になる(#429と同じ設計方針)。
+    if isinstance(line_client, _CredentialDeferredLineClient):
+        line_client.raise_if_send_attempted()
     return {"processed": processed}

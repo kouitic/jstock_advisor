@@ -14,6 +14,7 @@ Dispatcher側は「NEW_CANDIDATE_SCREENING以外はmaintenance扱い」、Worker
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 
@@ -47,7 +48,7 @@ def _patch_common(
     )
     if patch_notification_service:
         monkeypatch.setattr(
-            handler_module, "_build_notification_service", lambda config: object()
+            handler_module, "_build_notification_service", lambda config, line_client=None: object()
         )
     monkeypatch.setattr(
         handler_module, "claim_candidate_lease", lambda *a, **kw: True
@@ -191,7 +192,7 @@ def _patch_order_recording(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     order: list[str] = []
     _patch_common(monkeypatch)
 
-    def _build(config: Any) -> object:
+    def _build(config: Any, line_client: Any = None) -> object:
         order.append("build_notification_service")
         return object()
 
@@ -231,27 +232,56 @@ def test_maintenance_only_call_does_not_build_the_service(
     assert order == ["claim_candidate_lease"]
 
 
-def test_new_candidate_fails_before_state_change_when_line_credentials_missing(
+def test_new_candidate_state_change_succeeds_when_line_credentials_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """構築関数を差し替えない実分岐。認証情報が無ければConsoleLineClientへ黙って落ちず、
-    リース取得(状態変更)の前にLineCredentialsMissingErrorで失敗する。"""
+    """Issue #430: 構築関数を差し替えない実分岐。認証情報が無くても、構築自体は
+    失敗しない(_CredentialDeferredLineClientを返すだけ)ため、リース取得・
+    完了記録(状態変更)は正常に完了する(#429と同じ設計方針)。"""
+    calls = _patch_common(monkeypatch, patch_notification_service=False)
+    monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
+    event = _sqs_event(
+        {"batch_id": "batch-1", "stock_code": "1111", "job_type": "NEW_CANDIDATE_SCREENING"}
+    )
+
+    result = handler_module.handler(event, object())
+
+    assert len(calls["complete_candidate"]) == 1
+    assert len(calls["maybe_finalize"]) == 1
+    assert result["processed"][0]["completed"] is True
+
+
+def test_new_candidate_surfaces_credentials_error_after_notification_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #430: 状態変更が完了した後、通知(Phase 3相当)が実際に送信を試みた
+    場合にのみ、handler()の末尾でLineCredentialsMissingErrorが可視化される
+    (#429のreconciler側と同じ設計方針)。maybe_finalizeの中身(Phase 3の
+    例外捕捉)はこのファイルではフェイク化しているため、同等の捕捉を
+    フェイク内で再現して検証する。"""
     from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
 
-    _patch_common(monkeypatch, patch_notification_service=False)
+    calls = _patch_common(monkeypatch, patch_notification_service=False)
     monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("LINE_USER_ID", raising=False)
 
-    def _claim_must_not_run(*a: Any, **kw: Any) -> bool:
-        pytest.fail("claim_candidate_lease must not run before the notification service is built")
+    def _fake_maybe_finalize_attempting_send(*a: Any, **kw: Any) -> None:
+        notification_service = a[4]
+        # 実際のPhase 3と同じく、送信失敗はNOTIFICATION_FAILEDとして握りつぶす。
+        with contextlib.suppress(LineCredentialsMissingError):
+            notification_service._client.push_message("test")
 
-    monkeypatch.setattr(handler_module, "claim_candidate_lease", _claim_must_not_run)
+    monkeypatch.setattr(handler_module, "maybe_finalize", _fake_maybe_finalize_attempting_send)
     event = _sqs_event(
         {"batch_id": "batch-1", "stock_code": "1111", "job_type": "NEW_CANDIDATE_SCREENING"}
     )
 
     with pytest.raises(LineCredentialsMissingError):
         handler_module.handler(event, object())
+
+    # 状態変更(リース取得・完了記録)は、通知の失敗より前に完了している。
+    assert len(calls["complete_candidate"]) == 1
 
 
 def test_maintenance_call_runs_without_line_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,3 +316,32 @@ def _real_config() -> Any:
     from jstock_advisor.config.loader import load_config
 
     return load_config()
+
+
+# --- Issue #430: credential-deferred clientの単体テスト(#429と同型) -----------
+
+
+def test_deferred_client_never_succeeds_and_remembers_the_attempt() -> None:
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    client = handler_module._CredentialDeferredLineClient(LineCredentialsMissingError("missing"))
+
+    assert client.send_attempted is False
+    client.raise_if_send_attempted()  # 送信を試みていなければ送出しない
+    with pytest.raises(LineCredentialsMissingError):
+        client.push_message("hello")  # 決して成功を返さない
+    assert client.send_attempted is True
+    with pytest.raises(LineCredentialsMissingError):
+        client.raise_if_send_attempted()
+
+
+@pytest.mark.parametrize("method", ["reply_message", "reply_messages"])
+def test_deferred_client_fails_for_every_send_method(method: str) -> None:
+    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+
+    client = handler_module._CredentialDeferredLineClient(LineCredentialsMissingError("missing"))
+    args: tuple[Any, ...] = ("token", "text") if method == "reply_message" else ("token", ["t"])
+
+    with pytest.raises(LineCredentialsMissingError):
+        getattr(client, method)(*args)
+    assert client.send_attempted is True
