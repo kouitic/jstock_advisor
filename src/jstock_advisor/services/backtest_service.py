@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from jstock_advisor.domain.entities.enums import RecommendationType
@@ -34,8 +35,9 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.performance_metrics_service import (
+    MetricsAccumulator,
     MetricsBucket,
-    build_metrics_bucket,
+    iter_evaluations_with_recommendations,
 )
 
 
@@ -115,8 +117,23 @@ class BacktestService:
                 proposed_value=proposed_value,
             )
 
-        pairs = self._collect_pairs(spec, evaluation_semantics_version)
-        if not pairs:
+        # Issue #540: 評価・Recommendationの全件をlistへ保持せず、1件ずつ集計へ足し込む。
+        # 結果(件数・bucketの値・除外IDの並び)は従来と同一。
+        current_acc = MetricsAccumulator()
+        proposed_acc = MetricsAccumulator()
+        excluded_ids: list[str] = []
+        pair_count = 0
+        proposed_count = 0
+        for evaluation, recommendation in self._iter_pairs(spec, evaluation_semantics_version):
+            pair_count += 1
+            current_acc.add(evaluation)
+            value = getattr(recommendation, spec.attribute)
+            if self._passes(spec, value, proposed_value):
+                proposed_acc.add(evaluation)
+                proposed_count += 1
+            else:
+                excluded_ids.append(recommendation.recommendation_id)
+        if pair_count == 0:
             return BacktestResult(
                 target=target,
                 supported=False,
@@ -126,52 +143,42 @@ class BacktestService:
                 evaluation_semantics_version=evaluation_semantics_version,
             )
 
-        retained_ids: set[str] = set()
-        proposed_evals: list[EvaluationResult] = []
-        for evaluation, recommendation in pairs:
-            value = getattr(recommendation, spec.attribute)
-            if self._passes(spec, value, proposed_value):
-                retained_ids.add(recommendation.recommendation_id)
-                proposed_evals.append(evaluation)
-
-        excluded_ids = [
-            r.recommendation_id for _, r in pairs if r.recommendation_id not in retained_ids
-        ]
-
         return BacktestResult(
             target=target,
             supported=True,
             reason_unsupported=None,
             current_value=current_value,
             proposed_value=proposed_value,
-            evaluation_count_current=len(pairs),
-            evaluation_count_proposed=len(proposed_evals),
-            current_performance=build_metrics_bucket("current", [e for e, _ in pairs]),
-            proposed_performance=build_metrics_bucket("proposed", proposed_evals),
+            evaluation_count_current=pair_count,
+            evaluation_count_proposed=proposed_count,
+            current_performance=current_acc.to_bucket("current"),
+            proposed_performance=proposed_acc.to_bucket("proposed"),
             excluded_recommendation_ids=excluded_ids,
             evaluation_semantics_version=evaluation_semantics_version,
         )
 
-    def _collect_pairs(
+    def _iter_pairs(
         self, spec: _MetricSpec, evaluation_semantics_version: str
-    ) -> list[tuple[EvaluationResult, Recommendation]]:
+    ) -> Iterator[tuple[EvaluationResult, Recommendation]]:
         # Issue #389(#66 F-L3): v1/v2のEvaluationResultが並存する期間、
         # 明示的にsemanticsを揃えたペアのみを対象にする(BACKTEST_MIXED_
         # SEMANTICS=PROHIBITED)。既定はEVALUATION_SEMANTICS_V1であり、
         # 呼び出し側を変えない限り既存の挙動と完全に一致する。
-        pairs: list[tuple[EvaluationResult, Recommendation]] = []
-        for evaluation in self._evaluations.list_all():
-            if evaluation.evaluation_semantics_version != evaluation_semantics_version:
-                continue
-            recommendation = self._recommendations.get(evaluation.recommendation_id)
+        matching = (
+            evaluation
+            for evaluation in self._evaluations.iter_all()
+            if evaluation.evaluation_semantics_version == evaluation_semantics_version
+        )
+        for evaluation, recommendation in iter_evaluations_with_recommendations(
+            matching, self._recommendations
+        ):
             if recommendation is None or recommendation.recommendation_type not in (
                 spec.applicable_types
             ):
                 continue
             if getattr(recommendation, spec.attribute) is None:
                 continue
-            pairs.append((evaluation, recommendation))
-        return pairs
+            yield evaluation, recommendation
 
     @staticmethod
     def _is_tightening(spec: _MetricSpec, current_value: float, proposed_value: float) -> bool:

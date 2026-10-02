@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from collections.abc import Callable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
 from jstock_advisor.domain.entities.enums import EvaluationLabel
@@ -184,14 +184,41 @@ class MetricsAccumulator:
         )
 
 
-def _group_bucket(
-    pairs: list[tuple[EvaluationResult, Recommendation]], key_fn: Callable[[Recommendation], str]
-) -> list[MetricsBucket]:
-    grouped: dict[str, list[EvaluationResult]] = {}
-    for evaluation, recommendation in pairs:
-        key = key_fn(recommendation)
-        grouped.setdefault(key, []).append(evaluation)
-    return [build_metrics_bucket(key, evals) for key, evals in sorted(grouped.items())]
+# Recommendationを一括取得する単位(Issue #540)。BatchGetItemの上限(100件/リクエスト)に合わせる。
+_RECOMMENDATION_BATCH_SIZE = 100
+
+
+def iter_evaluations_with_recommendations(
+    evaluations: Iterable[EvaluationResult],
+    recommendations: RecommendationRepository,
+    batch_size: int = _RECOMMENDATION_BATCH_SIZE,
+) -> Iterator[tuple[EvaluationResult, Recommendation | None]]:
+    """評価を1件ずつ受け取り、対応するRecommendationを`get_many()`で一括取得して返す(Issue #540)。
+
+    従来は評価ごとに`get()`を呼び(N+1)、評価の件数分のRecommendation(1件約20KB)を
+    別個のオブジェクトとして保持していた。ここでは`batch_size`件ずつまとめて取得し、
+    呼び出し側が1件ずつ消費したら破棄できる形で返す(件数に比例して保持しない)。
+
+    ★ 列挙順は入力の`evaluations`と同じ(集計の浮動小数点の合計が従来と同じ結果になるため)。
+    ★ 対応するRecommendationが存在しない評価は、`(evaluation, None)`で返す(捨てない。
+      「推奨が無い評価も全体の集計には入る」という従来の意味を保つため)。
+    """
+    batch: list[EvaluationResult] = []
+    for evaluation in evaluations:
+        batch.append(evaluation)
+        if len(batch) >= batch_size:
+            yield from _resolve_recommendations(batch, recommendations)
+            batch = []
+    if batch:
+        yield from _resolve_recommendations(batch, recommendations)
+
+
+def _resolve_recommendations(
+    batch: list[EvaluationResult], recommendations: RecommendationRepository
+) -> Iterator[tuple[EvaluationResult, Recommendation | None]]:
+    by_id = recommendations.get_many({e.recommendation_id for e in batch})
+    for evaluation in batch:
+        yield evaluation, by_id.get(evaluation.recommendation_id)
 
 
 class PerformanceMetricsService:
@@ -206,23 +233,43 @@ class PerformanceMetricsService:
     def summarize(
         self, horizon_business_days: int | None = None, now: dt.datetime | None = None
     ) -> PerformanceSummary:
-        evaluations = self._evaluations.list_all()
-        if horizon_business_days is not None:
-            evaluations = [
-                e for e in evaluations if e.horizon_business_days == horizon_business_days
-            ]
+        # Issue #540: 評価を1件ずつ読み(iter_all)、Recommendationは100件ずつ一括取得し、
+        # 集計は既存のMetricsAccumulatorへ1件ずつ足し込む。評価・Recommendationの全件を
+        # listへ保持しない。結果(各bucketの値)は従来のbuild_metrics_bucket()と同一
+        # (MetricsAccumulatorがbit単位で同じ結果を返すことは#377のテストが固定している)。
+        def _matching_evaluations() -> Iterator[EvaluationResult]:
+            for evaluation in self._evaluations.iter_all():
+                if (
+                    horizon_business_days is None
+                    or evaluation.horizon_business_days == horizon_business_days
+                ):
+                    yield evaluation
 
-        pairs: list[tuple[EvaluationResult, Recommendation]] = []
-        for evaluation in evaluations:
-            recommendation = self._recommendations.get(evaluation.recommendation_id)
-            if recommendation is not None:
-                pairs.append((evaluation, recommendation))
+        overall = MetricsAccumulator()
+        by_type: dict[str, MetricsAccumulator] = {}
+        by_confidence: dict[str, MetricsAccumulator] = {}
+        by_rule_version: dict[str, MetricsAccumulator] = {}
+        for evaluation, recommendation in iter_evaluations_with_recommendations(
+            _matching_evaluations(), self._recommendations
+        ):
+            overall.add(evaluation)
+            if recommendation is None:
+                continue
+            by_type.setdefault(recommendation.recommendation_type.value, MetricsAccumulator()).add(
+                evaluation
+            )
+            by_confidence.setdefault(recommendation.confidence.value, MetricsAccumulator()).add(
+                evaluation
+            )
+            by_rule_version.setdefault(recommendation.rule_version, MetricsAccumulator()).add(
+                evaluation
+            )
 
         return PerformanceSummary(
             generated_at=now or dt.datetime.now(dt.UTC),
             horizon_business_days=horizon_business_days,
-            overall=build_metrics_bucket("overall", evaluations),
-            by_recommendation_type=_group_bucket(pairs, lambda r: r.recommendation_type.value),
-            by_confidence=_group_bucket(pairs, lambda r: r.confidence.value),
-            by_rule_version=_group_bucket(pairs, lambda r: r.rule_version),
+            overall=overall.to_bucket("overall"),
+            by_recommendation_type=[a.to_bucket(k) for k, a in sorted(by_type.items())],
+            by_confidence=[a.to_bucket(k) for k, a in sorted(by_confidence.items())],
+            by_rule_version=[a.to_bucket(k) for k, a in sorted(by_rule_version.items())],
         )
