@@ -213,9 +213,18 @@ class CorporateActionService:
         provider側で日付・比率を解析できなかった行は`get_effective_events()`
         から事実上欠落するため(既存の`cumulative_split_factor()`と7消費箇所が
         共有する既存挙動。本関数のLOCK_LEVEL_1契約では変更しない)、実在する
-        分割・併合が取得漏れの場合はfactorが1のままとなりCONSISTENTを誤って
-        返しうる。この残存リスクは#698 PR-2/PR-3の設計で引き続き検討する
-        (レビュー指摘。issuecomment-5957234551 S-1)。
+        分割・併合が取得漏れの場合は対象イベントが0件に見えるためCONSISTENTを
+        誤って返しうる(件数ベース判定〔S-2〕に合わせた表現。旧docstringの
+        「factorが1のまま」は積ベース判定時代の表現であり、本関数は現在
+        factorを計算しないため削除した)。この残存リスクは#698 PR-2/PR-3の
+        設計で引き続き検討する(レビュー指摘。issuecomment-5957234551 S-1、
+        表現是正はissuecomment-5957466197 S-3)。
+
+        窓境界(lo当日を含めるか/hi当日を除くか)は、共有部品
+        `cumulative_split_factor()`と同じ`lo < event.effective_date <= hi`
+        (hi当日を含め、lo当日を除く)を使う。この境界はfail-safeとして
+        安全な側(hi当日に効力発生した分割を見落とさない)であることを
+        テストで固定済み(#698 PR-2 Step 1)。
 
         該当イベントが(取得できた範囲で)1件も無ければCONSISTENT(両者の
         基準がそもそもずれる余地が無い)。1件でもあればUNDETERMINED(財務
