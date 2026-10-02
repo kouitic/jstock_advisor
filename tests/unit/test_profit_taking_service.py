@@ -1726,25 +1726,30 @@ def test_pr2b_corporate_action_provider_is_called_exactly_once(
 def test_pr2b_no_eligible_valuation_method_does_not_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """per/pbr/target_yieldのいずれもsource_dateを持たない(=該当手法が無い)
-    場合は、basis_date_consistencyをNoneのまま記録する(取得できない情報を
-    推測で補完しない。要求仕様12節)。"""
+    """fair_value_range.methods_usedが空(=該当手法が無い)場合は、
+    basis_date_consistencyをNoneのまま記録する(取得できない情報を推測で
+    補完しない。要求仕様12節)。
+
+    E3採用後、財務側基準日はmethods_used個々のsource_dateではなく
+    snapshot.financial_input_provenance.fiscal_period_endから導出するため、
+    「該当手法の有無」はmethods_usedの空リスト判定そのもので表現する
+    (個々の値を加工する必要が無くなった分、注入は空リスト化のみで足りる。
+    このbranch自体は「methods_usedが空かどうか」という純粋な分岐ロジックの
+    確認であり、今回発見した欠陥〔source_dateが共有pipelineを実際に流れて
+    こない〕のクラスとは別の観点のため、fixtureへの直接注入で十分と判断した)。
+    """
     import jstock_advisor.services.profit_taking_service as service_module
 
     original_build = service_module.build_stock_snapshot
 
-    def _build_without_source_dates(*args: object, **kwargs: object) -> object:
+    def _build_with_empty_methods_used(*args: object, **kwargs: object) -> object:
         snapshot, error = original_build(*args, **kwargs)
         if snapshot is None:
             return snapshot, error
-        methods_used = [
-            m.model_copy(update={"source_date": None})
-            for m in snapshot.fair_value_range.methods_used
-        ]
-        forced = snapshot.fair_value_range.model_copy(update={"methods_used": methods_used})
+        forced = snapshot.fair_value_range.model_copy(update={"methods_used": []})
         return dataclasses.replace(snapshot, fair_value_range=forced), error
 
-    monkeypatch.setattr(service_module, "build_stock_snapshot", _build_without_source_dates)
+    monkeypatch.setattr(service_module, "build_stock_snapshot", _build_with_empty_methods_used)
     monkeypatch.setattr(
         "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
         lambda **kwargs: _canned_result(RecommendationType.FULL_PROFIT_TAKE),
@@ -1768,50 +1773,37 @@ def test_pr2b_no_eligible_valuation_method_does_not_record(
     assert len(recording_provider.calls) == 1
 
 
-def test_pr2b_min_source_date_is_used_not_max(monkeypatch: pytest.MonkeyPatch) -> None:
-    """複数のvaluation手法が異なるsource_dateを持つ場合、**最古値**
-    (min)を財務側基準日として使う(最大値〔max〕を使う退行があれば、この
-    テストはCONSISTENTを誤って返して落ちる)。
-
-    2026-03-01(古い。perのsource_date)と2026-07-01(新しい。pbrの
-    source_date)の間に分割(2026-05-01)がある構成にする。
-    min=2026-03-01を使えば窓(2026-03-01, 評価日]に分割を含みUNDETERMINED。
-    max=2026-07-01を使うと窓(2026-07-01, 評価日]には分割(2026-05-01、
-    すでに過ぎた日)が入らずCONSISTENTになり、本テストが区別する。
-    """
+def test_pr2b_fiscal_period_end_missing_records_undetermined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """該当手法はある(methods_usedは非空)が、財務側基準日
+    (financial_input_provenance.fiscal_period_end)自体が不明な場合は、
+    UNDETERMINEDへ倒す(HANAKO確定issuecomment-5961781383: 「記録なし」
+    ではなく安全側のUNDETERMINEDとする)。"""
     import jstock_advisor.services.profit_taking_service as service_module
-    from jstock_advisor.domain.entities.enums import ConfidenceLevel
-    from jstock_advisor.domain.entities.valuation import FairValueMethodResult
 
     original_build = service_module.build_stock_snapshot
 
-    def _build_with_split_source_dates(*args: object, **kwargs: object) -> object:
+    def _build_without_fiscal_period_end(*args: object, **kwargs: object) -> object:
         snapshot, error = original_build(*args, **kwargs)
-        if snapshot is None:
+        if snapshot is None or snapshot.financial_input_provenance is None:
             return snapshot, error
-        methods_used = [
-            FairValueMethodResult(
-                method="per",
-                fair_value=Decimal("1000"),
-                confidence=ConfidenceLevel.HIGH,
-                source_date=dt.date(2026, 3, 1),
-            ),
-            FairValueMethodResult(
-                method="pbr",
-                fair_value=Decimal("1000"),
-                confidence=ConfidenceLevel.HIGH,
-                source_date=dt.date(2026, 7, 1),
-            ),
-        ]
-        forced = snapshot.fair_value_range.model_copy(update={"methods_used": methods_used})
-        return dataclasses.replace(snapshot, fair_value_range=forced), error
+        forced_provenance = snapshot.financial_input_provenance.model_copy(
+            update={"fiscal_period_end": None}
+        )
+        return (
+            dataclasses.replace(snapshot, financial_input_provenance=forced_provenance),
+            error,
+        )
 
-    monkeypatch.setattr(service_module, "build_stock_snapshot", _build_with_split_source_dates)
+    monkeypatch.setattr(
+        service_module, "build_stock_snapshot", _build_without_fiscal_period_end
+    )
     monkeypatch.setattr(
         "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
         lambda **kwargs: _canned_result(RecommendationType.FULL_PROFIT_TAKE),
     )
-    recording_provider = _RecordingCorporateActionProvider([_split_event(dt.date(2026, 5, 1))])
+    recording_provider = _RecordingCorporateActionProvider([])
     providers = _providers(None, _PR2B_FISCAL_PERIOD_END)
     providers = dataclasses.replace(providers, corporate_action=recording_provider)
     service = ProfitTakingService(providers=providers, config=_CONFIG)
@@ -1824,6 +1816,11 @@ def test_pr2b_min_source_date_is_used_not_max(monkeypatch: pytest.MonkeyPatch) -
     profit_records = [r for r in audit.records if r.get("decision_type") == "profit_taking"]
     output_values = profit_records[0]["output_values"]
     assert output_values["basis_date_consistency"] == "UNDETERMINED"
+    assert output_values["basis_date_consistency_check_failed"] is False
+    # 企業行動providerへの呼び出しは、Profit Protection自身の既存取得
+    # (本PRの対象外。本テストでは基準日不明のため窓を広げない)の1回のみ。
+    # classify()自体は(基準日が無いため)呼ばれない。
+    assert len(recording_provider.calls) == 1
 
 
 def test_pr2b_classify_failure_is_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:

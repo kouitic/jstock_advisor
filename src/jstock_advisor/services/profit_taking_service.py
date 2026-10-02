@@ -852,19 +852,23 @@ class ProfitTakingService:
             )
         )
 
-        # Issue #698 PR-2b: basis_date_consistency判定の財務指標側基準日
-        # (EPS/BPS/DPS等を使うvaluation手法のsource_dateのうち最古値)を、
-        # 下の企業行動events取得の窓の下限(extra_since_floor)としても使う
-        # (1回の取得でbasis_date_consistencyの判定も賄うため。追加の
-        # provider呼び出しを発生させない)。該当手法が1つも無ければ
-        # 窓を広げず、basis_date_consistency自体も記録しない(「取得できない
-        # 情報を推測で補完しない」要求仕様12節)。
-        fundamental_basis_dates = [
-            m.source_date
-            for m in snapshot.fair_value_range.methods_used
-            if m.source_date is not None
-        ]
-        fundamental_basis_date = min(fundamental_basis_dates) if fundamental_basis_dates else None
+        # Issue #698 PR-2b(E3採用。MANAGER決定issuecomment-5961781383):
+        # 財務指標側基準日は、共有pipelineに既に無条件で設定済みの
+        # snapshot.financial_input_provenance.fiscal_period_endを使う
+        # (buy_signal_serviceが自前のvaluation_summaryで使うのと同じ値)。
+        # 共有pipeline・S-05(domain/valuation/)・financial_input_provenance.py
+        # 本体はいずれも変更しない(既存fieldを読むだけ)。
+        # 「該当手法が無ければ記録しない」という既存方針は維持するため、
+        # fair_value_range.methods_usedが空の場合は窓を広げず、
+        # basis_date_consistency自体も記録しない(「取得できない情報を
+        # 推測で補完しない」要求仕様12節)。
+        has_applicable_valuation_method = bool(snapshot.fair_value_range.methods_used)
+        fiscal_period_end = (
+            snapshot.financial_input_provenance.fiscal_period_end
+            if snapshot.financial_input_provenance is not None
+            else None
+        )
+        fundamental_basis_date = fiscal_period_end if has_applicable_valuation_method else None
 
         # Issue #160 / #456: 企業行動eventsの1回の取得を、Profit ProtectionとG4(shadow)で共用する。
         corporate_action_events = self._fetch_corporate_action_events(
@@ -890,7 +894,14 @@ class ProfitTakingService:
         # よう、本判定だけUNDETERMINEDへfail-softする。
         basis_date_consistency: str | None = None
         basis_date_consistency_check_failed = False
-        if fundamental_basis_date is not None:
+        if has_applicable_valuation_method and fundamental_basis_date is None:
+            # 該当手法はあるが財務側基準日(fiscal_period_end)自体が不明。
+            # HANAKO確定待ち(issuecomment-5961781383): 「記録なし」ではなく
+            # 安全側のUNDETERMINEDへ暫定で倒す(「確認できない場合はUNDETERMINED」
+            # という既存設計哲学〔要求仕様12節・USER決定OD-3〕と一貫させるため)。
+            # 「記録なし」が確定した場合は、この分岐を削除するだけでよい。
+            basis_date_consistency = BasisDateConsistency.UNDETERMINED.value
+        elif fundamental_basis_date is not None:
             try:
                 basis_date_consistency_service = CorporateActionService(
                     self._providers.corporate_action, now=now
