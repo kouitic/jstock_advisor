@@ -30,7 +30,6 @@ from jstock_advisor.domain.entities.exit_price_range import ExitPriceRangeResult
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.financial_decomposition import is_fundamentally_driven
-from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.shadow_observation import (
     isolated_shadow_computation,
     isolated_shadow_observation,
@@ -89,7 +88,6 @@ from jstock_advisor.domain.signals.timing_score import (
 )
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
-from jstock_advisor.services.corporate_action_service import CorporateActionService
 from jstock_advisor.services.financial_freshness_integration import (
     FINANCIAL_STALE_USER_WARNING,
     FinancialFreshnessAssessment,
@@ -414,32 +412,6 @@ class SellSignalService:
             result, snapshot, now, counter_factors_evaluated, financial_freshness
         )
 
-        # Issue #698 PR-2: valuation依存判定(fair_value_rangeがEPS/BPS/DPS等
-        # 財務指標を使う手法)で、価格側と財務指標側の基準日が分割・併合・
-        # 無償割当をまたいでいないかを記録する(記録のみ。抑止はしない。
-        # 既存の判定結果は一切変更しない)。buy_signal_serviceと同じ
-        # evaluation_date_jst(now)を価格側基準日として使う(生成側・比較側の
-        # 基準日を統一する)。財務指標側基準日はsnapshot.fair_value_range
-        # (このファイルは自前でFairValueRangeを構築せず、stock_snapshot_service
-        # が一度だけ構築した共有の値を使う)のmethods_usedのsource_dateのうち
-        # 最も古いもの(最も保守的)。該当手法が1つも無ければ記録しない
-        # (「取得できない情報を推測で補完しない」要求仕様12節)。
-        basis_date_consistency: str | None = None
-        fundamental_basis_dates = [
-            m.source_date
-            for m in snapshot.fair_value_range.methods_used
-            if m.source_date is not None
-        ]
-        if fundamental_basis_dates:
-            corporate_action_service = CorporateActionService(
-                self._providers.corporate_action, now=now
-            )
-            basis_date_consistency = corporate_action_service.classify_basis_date_consistency(
-                holding.stock_code,
-                price_basis_date=evaluation_date_jst(now),
-                fundamental_basis_date=min(fundamental_basis_dates),
-            ).value
-
         audit_entry = self._audit.record(
             decision_type="sell_signal",
             stock_code=holding.stock_code,
@@ -464,8 +436,6 @@ class SellSignalService:
                 ),
             },
             output_values={
-                # Issue #698 PR-2: 記録のみ(抑止はしない)。
-                "basis_date_consistency": basis_date_consistency,
                 "recommendation_type": recommendation_type.value,
                 "raw_recommendation_type": result.recommendation_type.value,
                 "downgraded_reason": downgraded_reason,

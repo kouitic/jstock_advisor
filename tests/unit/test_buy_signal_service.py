@@ -21,7 +21,6 @@ import datetime as dt
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from types import SimpleNamespace
 
 import pytest
 
@@ -79,7 +78,6 @@ from jstock_advisor.interfaces.types import (
     HistoricalValuation,
     QuarterlyFinancials,
 )
-from jstock_advisor.providers.corporate_action.mock_impl import MockCorporateActionProvider
 from jstock_advisor.services import buy_signal_service as service_module
 from jstock_advisor.services.buy_signal_service import BuySignalService
 from jstock_advisor.services.jpx_industry_source import (
@@ -489,9 +487,7 @@ _EXTREME_DISPERSION_STOCK = _StockFixture(
 def _providers() -> ProviderBundle:
     # build_stock_snapshotをmonkeypatchで置き換えるため、providersの中身は
     # 一切参照されない(型を満たすだけのダミー)。
-    # Issue #698 PR-2: corporate_actionのみ、classify_basis_date_consistency()
-    # 呼び出し用に実際に使われる(空イベントのMock。他のfieldは引き続き未参照)。
-    return SimpleNamespace(corporate_action=MockCorporateActionProvider())  # type: ignore[return-value]
+    return object()  # type: ignore[return-value]
 
 
 def _analyze(

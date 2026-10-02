@@ -156,7 +156,6 @@ from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository
 )
 from jstock_advisor.interfaces.disclosure import DisclosureAvailability
 from jstock_advisor.services.audit_service import AuditService
-from jstock_advisor.services.corporate_action_service import CorporateActionService
 from jstock_advisor.services.jpx_industry_source import (
     JpxIndustrySource,
     get_default_jpx_industry_source,
@@ -1622,30 +1621,6 @@ class BuySignalService:
                 )
                 watch_end_reason = transition.end_reason
 
-        # Issue #698 PR-2: valuation依存判定(PER/PBR/target_yield。現在株価と
-        # EPS/BPS/DPSを組み合わせる手法)で、価格側と財務指標側の基準日が
-        # 分割・併合・無償割当をまたいでいないかを記録する(記録のみ。
-        # 抑止はしない。既存の判定結果は一切変更しない)。
-        # 価格側基準日: 価格は問い合わせ時点に関わらず常に最新の分割基準へ
-        # 遡及調整される(#698 PR-1で実測確認済み)ため、常に評価日(今日)。
-        # 財務指標側基準日: EPS/BPS/DPSを使う手法(per/pbr/target_yield)の
-        # source_dateのうち最も古いもの(最も保守的。1つでも古ければ
-        # UNDETERMINEDへ倒れる)。該当手法が1つも無ければ記録しない
-        # (「取得できない情報を推測で補完しない」要求仕様12節)。
-        basis_date_consistency: str | None = None
-        fundamental_basis_dates = [
-            m.source_date for m in valuation_summary.methods_used if m.source_date is not None
-        ]
-        if fundamental_basis_dates:
-            corporate_action_service = CorporateActionService(
-                self._providers.corporate_action, now=now
-            )
-            basis_date_consistency = corporate_action_service.classify_basis_date_consistency(
-                stock_code,
-                price_basis_date=evaluation_date,
-                fundamental_basis_date=min(fundamental_basis_dates),
-            ).value
-
         # --- 22. 監査ログ保存(買い候補にならなかった銘柄も含め全件記録) ---
         self._audit.record(
             decision_type="buy_signal",
@@ -1665,8 +1640,6 @@ class BuySignalService:
                 **score_result.formulas,
             },
             output_values={
-                # Issue #698 PR-2: 記録のみ(抑止はしない)。
-                "basis_date_consistency": basis_date_consistency,
                 "raw_company_quality_score": company_quality_score,
                 "raw_purchase_attractiveness_score": purchase_attractiveness_score,
                 "raw_buy_action": raw_buy_action.value,
