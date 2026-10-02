@@ -5,11 +5,14 @@ zipする。作業ツリーのバイト列がcore.autocrlfに依存すると、�
 (= ConfigLayerの版上がり)ができる。`.gitattributes`の`config/** text=auto eol=lf`は、
 **gitがtextと判定したconfig/配下のファイルだけ**を、環境に依らずLFに固定する。
 
-反証: 修正前(`.gitattributes`が無い状態)は、core.autocrlf=falseの環境でCRLFのファイルを
-`git add`するとCRLFのままindexへ入る。修正後は同じ操作でLFへ正規化される。
-下の隔離repoテストは、実際の`.gitattributes`をそのままコピーした場合と、コピーしない
-場合(= 修正前相当)を並べて検証し、後者でCRLFが残ることを示す(テストが修正の有無を
-区別できる証拠)。
+root causeの直接の固定(SAME_COMMIT -> SAME_CONFIG_WORKTREE_BYTES):
+同一commitを`core.autocrlf=true`と`false`の2環境でcheckout(clone)し、config/配下の
+作業ツリーのバイト列が一致することを、隔離repoで直接assertする。
+
+反証: 修正前(`.gitattributes`が無い状態)は、同じ2環境でバイト列が食い違う
+(trueはCRLF、falseはLF)。修正後はどちらもLFで一致する。隔離repoテストは、実際の
+`.gitattributes`をそのままcommitに含めた場合と、含めない場合(= 修正前相当)を並べて
+検証し、後者で食い違うことを示す(テストが修正の有無を区別できる証拠)。
 """
 
 from __future__ import annotations
@@ -26,12 +29,22 @@ _GITATTRIBUTES = _REPO_ROOT / ".gitattributes"
 _GIT = shutil.which("git")
 pytestmark = pytest.mark.skipif(_GIT is None, reason="git command is required")
 
+_BINARY_PAYLOAD = b"\x00\x01binary\r\nbytes\r\n"
+_SYNTHETIC_BINARY = "config/synthetic_binary.bin"
 
-def _git_bytes(cwd: Path, *args: str) -> bytes:
-    """gitの出力をバイト列のまま返す(universal newlineによるCRLF→LF変換を避ける)。"""
+
+def _git_bytes(cwd: Path, *args: str, autocrlf: str | None = "false") -> bytes:
+    """gitの出力をバイト列のまま返す(universal newlineによるCRLF→LF変換を避ける)。
+
+    autocrlfがNoneの場合は`core.autocrlf`を注入しない(cloneで`-c core.autocrlf=...`を
+    明示する呼び出し用)。
+    """
     assert _GIT is not None
+    config = ["-c", "core.safecrlf=false"]
+    if autocrlf is not None:
+        config += ["-c", f"core.autocrlf={autocrlf}"]
     result = subprocess.run(  # noqa: S603 - 固定のgit引数のみ(外部入力なし)
-        [_GIT, "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", *args],
+        [_GIT, *config, *args],
         cwd=cwd,
         check=True,
         capture_output=True,
@@ -115,7 +128,7 @@ def test_crlf_config_file_is_normalized_to_lf_with_the_repo_gitattributes(
     _git(repo, "add", "config/sample.yaml")
 
     assert _index_eol(repo, "config/sample.yaml") == "i/lf"
-    assert _git(repo, "cat-file", "-p", ":config/sample.yaml") == "key: 1\nother: 2\n"
+    assert _git_bytes(repo, "cat-file", "-p", ":config/sample.yaml") == b"key: 1\nother: 2\n"
 
 
 def test_crlf_config_file_stays_crlf_without_gitattributes_counterexample(
@@ -147,9 +160,111 @@ def test_binary_file_under_config_is_not_converted(tmp_path: Path) -> None:
     config/配下のファイル(NUL文字を含む)は改行変換されない。
     """
     repo = _init_repo(tmp_path, with_gitattributes=True)
-    payload = b"\x00\x01binary\r\nbytes\r\n"
-    (repo / "config" / "blob.bin").write_bytes(payload)
+    (repo / "config" / "blob.bin").write_bytes(_BINARY_PAYLOAD)
 
     _git(repo, "add", "config/blob.bin")
 
-    assert _git_bytes(repo, "cat-file", "-p", ":config/blob.bin") == payload
+    assert _git_bytes(repo, "cat-file", "-p", ":config/blob.bin") == _BINARY_PAYLOAD
+
+
+# --- root cause: SAME_COMMIT -> SAME_CONFIG_WORKTREE_BYTES(core.autocrlf=true / false) ---
+
+
+def _tracked_config_blobs() -> dict[str, bytes]:
+    """本repoのconfig/配下のgit管理ファイルを、index(commitされる内容)のバイト列で返す。"""
+    names = _git(_REPO_ROOT, "ls-files", "-z", "--", "config").split("\0")
+    blobs = {name: _git_bytes(_REPO_ROOT, "show", f":{name}") for name in names if name}
+    assert blobs, "config/配下にgit管理ファイルが無い"
+    return blobs
+
+
+def _make_source_repo(tmp_path: Path, *, with_gitattributes: bool) -> Path:
+    """本repoのconfig/(index内容)+合成のbinaryを1 commitにまとめた隔離repoを作る。"""
+    repo = tmp_path / ("src_with" if with_gitattributes else "src_without")
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    if with_gitattributes:
+        shutil.copyfile(_GITATTRIBUTES, repo / ".gitattributes")
+    blobs = dict(_tracked_config_blobs())
+    blobs[_SYNTHETIC_BINARY] = _BINARY_PAYLOAD
+    for name, data in blobs.items():
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    _git(repo, "add", "-A")
+    _git(
+        repo,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "seed",
+    )
+    return repo
+
+
+def _checkout_config_bytes(src: Path, dst: Path, *, autocrlf: str) -> dict[str, bytes]:
+    """同一commitを指定のcore.autocrlfでcloneし、config/配下の作業ツリーのバイト列を返す。"""
+    _git_bytes(
+        dst.parent,
+        "clone",
+        "-q",
+        "--no-hardlinks",
+        "-c",
+        f"core.autocrlf={autocrlf}",
+        str(src),
+        str(dst),
+        autocrlf=None,
+    )
+    return {
+        path.relative_to(dst).as_posix(): path.read_bytes()
+        for path in sorted((dst / "config").rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_same_commit_gives_same_config_worktree_bytes_for_autocrlf_true_and_false(
+    tmp_path: Path,
+) -> None:
+    """root causeの直接の固定: 同一commitを core.autocrlf=true / false の2環境で
+    checkoutしても、config/配下の作業ツリーのバイト列は完全に一致する
+    (= ConfigLayerの入力が環境に依らない)。
+    """
+    src = _make_source_repo(tmp_path, with_gitattributes=True)
+
+    on = _checkout_config_bytes(src, tmp_path / "clone_autocrlf_true", autocrlf="true")
+    off = _checkout_config_bytes(src, tmp_path / "clone_autocrlf_false", autocrlf="false")
+
+    assert on == off
+    assert set(on) == set(_tracked_config_blobs()) | {_SYNTHETIC_BINARY}
+    # textファイルは、commitされた内容(LF)そのままである(CRLFへ変換されていない)。
+    for name, data in _tracked_config_blobs().items():
+        assert on[name] == data, name
+        assert b"\r\n" not in on[name], name
+    # binaryは、どちらの環境でも1byteも変換されない(text=auto)。
+    assert on[_SYNTHETIC_BINARY] == _BINARY_PAYLOAD
+
+
+def test_same_commit_gives_different_worktree_bytes_without_gitattributes_counterexample(
+    tmp_path: Path,
+) -> None:
+    """反証: `.gitattributes`が無い(= 修正前)と、同一commitでも core.autocrlf の違いで
+    config/の作業ツリーのバイト列が食い違う(trueはCRLF、falseはLF)。
+    上のテストはこの差で、修正の有無を区別できる(修正前の実装では失敗する)。
+    """
+    src = _make_source_repo(tmp_path, with_gitattributes=False)
+
+    on = _checkout_config_bytes(src, tmp_path / "clone_autocrlf_true", autocrlf="true")
+    off = _checkout_config_bytes(src, tmp_path / "clone_autocrlf_false", autocrlf="false")
+
+    assert on != off
+    # falseはcommitされた内容(LF)のまま、trueはtextファイルがCRLFになる。
+    yaml_names = [name for name in on if name.endswith(".yaml")]
+    assert yaml_names
+    assert all(b"\r\n" not in off[name] for name in yaml_names)
+    assert any(b"\r\n" in on[name] for name in yaml_names)
