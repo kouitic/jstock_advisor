@@ -393,13 +393,30 @@ def test_consecutive_bad_weeks_becomes_issue_eligible(aws_env, repos) -> None:
     assert "WEEK_OVER_WEEK_DROP" in candidate.reason_codes
 
 
-def test_evaluation_undefined_candidate_is_issue_eligible_on_first_week(aws_env, repos) -> None:
-    """WATCHはEXIT型評価基準を持つに至ったため(Rule Improvement対応2026-08、
-    Issue #9)、ここでは評価基準が引き続き未定義のWATCH_BEFORE_EARNINGSを使う
-    (Issue #10、2026-08-20時点で保留中)。この保留がWATCH/REVIEW対応(Issue #9・
-    #11)の影響を受けず、引き続き「自動評価の対象外」経路
-    (EVALUATION_CRITERIA_UNDEFINED)を使うことの回帰確認を兼ねる。
+def test_evaluation_undefined_candidate_is_issue_eligible_on_first_week(
+    aws_env, repos, monkeypatch
+) -> None:
+    """「評価基準がまだ決まっていない型」は、従来どおり「評価定義が未整備」の
+    GitHub Issue候補になること(EVALUATION_CRITERIA_UNDEFINED)。
+
+    Issue #25で、WATCH_BEFORE_EARNINGSを含む当時の6型の分類が確定し、
+    `_EVALUATION_UNDEFINED_TYPES`は空になった(WATCH_BEFORE_EARNINGSは評価対象外へ分類)。
+    そのため、ここでは「分類をまだ決めていない型」を、WATCH_BEFORE_EARNINGSを
+    一時的に評価対象外の集合から外すことで再現し、**起票の仕組み自体**
+    (未整備型は起票される)の回帰を固定する。実際の分類の固定は
+    test_issue_25_recommendation_evaluation_semantics.pyが担う。
     """
+    from jstock_advisor.domain import evaluation_rules
+
+    monkeypatch.setattr(
+        evaluation_rules,
+        "_EXCLUDED_TYPES",
+        tuple(
+            t
+            for t in evaluation_rules._EXCLUDED_TYPES
+            if t is not RecommendationType.WATCH_BEFORE_EARNINGS
+        ),
+    )
     period_start, _, _ = _resolve_review_period(_RUN_AT)
     mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
     for i in range(15):  # default閾値=10
@@ -418,6 +435,28 @@ def test_evaluation_undefined_candidate_is_issue_eligible_on_first_week(aws_env,
     candidate = repos["candidate"].list_all()[0]
     assert candidate.problem_category == "EVALUATION_CRITERIA_UNDEFINED"
     assert candidate.recommended_action.value == "DEFINE_EVALUATION_CRITERIA"
+
+
+def test_evaluation_excluded_type_is_not_issue_eligible_end_to_end(aws_env, repos) -> None:
+    """Issue #25: 方向性を持たない型(WATCH_BEFORE_EARNINGS)は、評価件数が閾値を超えて
+    常にINCONCLUSIVEでも「評価定義が未整備」のGitHub Issue候補にならないこと
+    (毎週同じIssueが立ち続けるノイズを止める。#10 / #241の再発防止)。
+    """
+    period_start, _, _ = _resolve_review_period(_RUN_AT)
+    mid_week = dt.datetime.combine(period_start + dt.timedelta(days=2), dt.time(9), tzinfo=dt.UTC)
+    for i in range(15):  # default閾値=10
+        rec_id = f"excl{i}"
+        repos["recommendation"].save(
+            _recommendation(rec_id, RecommendationType.WATCH_BEFORE_EARNINGS, "v1", mid_week)
+        )
+        repos["evaluation"].save(
+            _evaluation(f"excle{i}", rec_id, EvaluationLabel.INCONCLUSIVE, mid_week)
+        )
+
+    service = _build_service(repos)
+    outcome = service.run(_RUN_AT)
+
+    assert outcome.issue_eligible_candidates == 0
 
 
 def test_none_metrics_are_not_mistaken_for_degradation(aws_env, repos) -> None:
