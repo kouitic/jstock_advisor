@@ -12,9 +12,15 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs
+
+logger = logging.getLogger(__name__)
+
+# 構造情報(長さ)の上限表示用の定数(Issue #630)。
+_MAX_LOGGED_ACTION_LENGTH = 64
 
 
 def verify_line_signature(channel_secret: str, body: bytes, signature: str) -> bool:
@@ -147,6 +153,16 @@ def parse_postback_events(body: bytes) -> list[LinePostbackEvent]:
         parsed = parse_qs(data, keep_blank_values=True)
         action_values = parsed.get("action")
         if not action_values or action_values[0] not in _VALID_POSTBACK_ACTIONS:
+            # Issue #630: allowlist不一致で無音に捨てると、Rich Menu以外の
+            # 経路(Quick Reply等)で未知のactionが送られてきたことを検知
+            # できない(#628の根本原因)。action自体の内容(値)はPII/secret等の
+            # 非公開値を含み得るためログへ一切出さず、reject事実・action有無・
+            # 長さ(上限付き)のみを記録する。
+            logger.warning(
+                "postback ignored: action not in allowlist action_present=%s action_length=%s",
+                bool(action_values),
+                min(len(action_values[0]), _MAX_LOGGED_ACTION_LENGTH) if action_values else None,
+            )
             continue
         op_values = parsed.get("op")
         op = op_values[0] if op_values else None

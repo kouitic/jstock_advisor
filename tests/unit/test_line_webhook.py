@@ -3,6 +3,8 @@ import hashlib
 import hmac
 import json
 
+import pytest
+
 from jstock_advisor.infrastructure.line.webhook import (
     parse_postback_events,
     parse_text_message_events,
@@ -233,3 +235,64 @@ def test_parse_postback_events_show_watchlist_has_no_owner_or_category() -> None
     assert len(events) == 1
     assert events[0].owner is None
     assert events[0].category is None
+
+
+# --- Issue #630: allowlist不一致の失敗の可視性 ------------------------------
+
+
+def test_issue_630_unknown_action_logs_warning_without_leaking_the_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """allowlist不一致のactionは無音で捨てず、WARNINGログへ事実(reject・
+    action有無・長さ)のみを記録する。action自体の値(内容)はログへ一切
+    出さない(PII/secret等の非公開値が紛れ込む可能性があるため。USER決定、
+    #630)。
+    """
+    secret_action = "delete_everything_confidential_token_abc123"
+    with caplog.at_level("WARNING"):
+        events = parse_postback_events(_postback_body(f"action={secret_action}"))
+
+    assert events == []
+    assert "postback ignored" in caplog.text
+    assert "action not in allowlist" in caplog.text
+    assert "action_present=True" in caplog.text
+    assert f"action_length={len(secret_action)}" in caplog.text
+    # 値そのものが文字列として一切出現しないこと(単に改行が無いことの確認ではない)。
+    assert secret_action not in caplog.text
+
+
+def test_issue_630_action_length_is_capped_at_the_logged_maximum(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """長さの表示にも上限がある(値の実際の長さをそのまま出さない。長さ自体が
+    手がかりになり得る極端なケースへの配慮)。"""
+    very_long_action = "x" * 500
+    with caplog.at_level("WARNING"):
+        parse_postback_events(_postback_body(f"action={very_long_action}"))
+
+    assert "action_length=64" in caplog.text
+    assert "action_length=500" not in caplog.text
+
+
+def test_issue_630_missing_action_logs_action_present_false(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """actionパラメータ自体が欠落している場合、action_present=False・
+    action_length=Noneになる(action_valuesが空のケース)。"""
+    with caplog.at_level("WARNING"):
+        events = parse_postback_events(_postback_body("op=abc-123"))
+
+    assert events == []
+    assert "action_present=False" in caplog.text
+    assert "action_length=None" in caplog.text
+
+
+def test_issue_630_known_action_does_not_log_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """既知のactionは従来どおり警告を出さない(回帰確認)。"""
+    with caplog.at_level("WARNING"):
+        events = parse_postback_events(_postback_body("action=start_buy"))
+
+    assert len(events) == 1
+    assert "postback ignored" not in caplog.text
