@@ -100,6 +100,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.data_quality_service import DataQualityIssueSeverity, detect_anomalies
+from jstock_advisor.services.financial_freshness_integration import FINANCIAL_STALE_USER_WARNING
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.watchlist_addition_summary_builder import (
@@ -1640,6 +1641,16 @@ def _format_watch_profit_taking_message(
         )
     )
     lines.append("")
+    # Issue #474(#468 U17/Q1=W2の利確formatterへの適用漏れの補完): 留意事項が
+    # あるときだけの節。空なら見出しも空行も出さず、通常の通知本文は1バイトも
+    # 変わらない。信頼度の行の直前に置く(#468と同じ配置方針)。USER決定
+    # OD1=OPTION_B: key_risks全体ではなく、財務データ鮮度の警告のみを抽出する。
+    # 本関数の既存の他節(保有継続を支持する要因・直ちに利確しない理由・
+    # 判断上の留意点)と同じ、半角コロン見出し+箇条書き形式に揃える。
+    if FINANCIAL_STALE_USER_WARNING in recommendation.key_risks:
+        lines.append("留意事項:")
+        lines.append(f"・{FINANCIAL_STALE_USER_WARNING}")
+        lines.append("")
     # 「適正価格算出の信頼度」(_fair_value_range_lines)とは別軸の、この保有継続
     # 判定自体の信頼度であることをラベルで明示する(要求仕様§6、旧「信頼度:」の
     # ラベル無し表示を解消)。
@@ -1831,6 +1842,14 @@ def _format_profit_taking_message(
     if recommendation.next_earnings_date:
         lines.append(f"次回決算予定日: {recommendation.next_earnings_date}")
     lines.extend(_confirmation_lines(recommendation))
+    # Issue #474(#468 U17/Q1=W2の利確formatterへの適用漏れの補完): 留意事項が
+    # あるときだけの行。無ければ出さず、通常の通知本文は1バイトも変わらない。
+    # 信頼度の行の直前に置く(#468と同じ配置方針)。USER決定OD1=OPTION_B:
+    # key_risks全体ではなく、財務データ鮮度の警告のみを抽出する(含み損益率・
+    # 累計利益率等は表示しない)。本関数の既存の他フィールド(reasons・
+    # counter_factors等)と同じ、半角コロン1行形式に揃える。
+    if FINANCIAL_STALE_USER_WARNING in recommendation.key_risks:
+        lines.append(f"留意事項: {FINANCIAL_STALE_USER_WARNING}")
     if recommendation.data_sources:
         # Issue #576: naive値混在時のmin()比較TypeErrorに対する防御。
         fetched_at = min(normalize_to_aware_utc(s.fetched_at) for s in recommendation.data_sources)
@@ -1866,6 +1885,14 @@ def _format_sell_message(recommendation: Recommendation) -> str:
         lines.append("次の判断条件: " + " / ".join(recommendation.next_review_conditions))
     if recommendation.holding_risks:
         lines.append("保有を継続する場合のリスク: " + " / ".join(recommendation.holding_risks))
+    # Issue #474(旧SELL/URGENT_REVIEW/REVIEW経路のfresh sweepで発見。利確側と
+    # 同一欠陥: STALE警告がkey_risksへ格納されるが表示されていなかった)。
+    # USER決定OD1=OPTION_B: key_risks全体ではなく財務データ鮮度の警告のみを
+    # 抽出する(「該当ルール: ...」等の他のkey_risks項目は表示しない)。本関数の
+    # 既存の他フィールド(反対材料・保有を継続する場合のリスク等)と同じ、
+    # 半角コロン1行形式に揃える。
+    if FINANCIAL_STALE_USER_WARNING in recommendation.key_risks:
+        lines.append(f"留意事項: {FINANCIAL_STALE_USER_WARNING}")
     if recommendation.data_sources:
         # Issue #576: naive値混在時のmin()比較TypeErrorに対する防御。
         fetched_at = min(normalize_to_aware_utc(s.fetched_at) for s in recommendation.data_sources)

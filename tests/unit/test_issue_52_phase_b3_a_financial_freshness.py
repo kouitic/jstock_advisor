@@ -613,6 +613,8 @@ def test_production_call_sites_are_limited_to_the_current_phase() -> None:
                  tests/unit/test_issue_52_phase_b3_b2_sell_profit_financial_freshness.py
     #468(保有判断)
                  tests/unit/test_issue_468_holding_decision_financial_freshness.py
+    #474(利確・旧売却経路のLINE本文表示)
+                 tests/unit/test_line_notification_service.py(test_issue474_*)
     """
     src_root = Path(__file__).resolve().parents[2] / "src" / "jstock_advisor"
     importers = sorted(
@@ -631,6 +633,10 @@ def test_production_call_sites_are_limited_to_the_current_phase() -> None:
         # service = cap判定と監査 / builder = 利用者向けの留意事項(key_risks)
         "services/holding_decision_notification_builder.py",
         "services/holding_decision_service.py",
+        # Issue #474: 既存のkey_risks(SELL/利確/旧売却経路が既に保持している
+        # FINANCIAL_STALE_USER_WARNING)をLINE本文へ表示するだけで、鮮度判定・
+        # confidenceへの接続は一切持たない(表示専用)。
+        "services/line_notification_service.py",
         "services/profit_taking_service.py",
         "services/sell_signal_service.py",
     ], f"unexpected call sites: {importers}"

@@ -717,13 +717,23 @@ def test_x6_stale_body_differs_from_non_stale_body_only_by_the_section() -> None
 
 
 def test_x8_other_notification_bodies_do_not_render_key_risks() -> None:
-    """T-X8: 本Issueは保有判断のLINE本文だけを変える。他の本文関数は key_risks を参照しない。
+    """T-X8: 本Issue(#468)は保有判断のLINE本文を変える。
 
-    SELL・利確・BUYのLINE本文は変更しない(可視性は #474 で別途調査)。
+    Issue #474(fresh sweepで発見した適用漏れの補完)により、SELL・利確・旧売却
+    経路(SELL/URGENT_REVIEW/REVIEW)のLINE本文もkey_risksを参照するようになった
+    (FINANCIAL_STALE_USER_WARNINGのみを抽出する形。OPTION_B)。BUYは引き続き
+    key_risksを参照しない(counter_factorsを別途表示する既存設計のため、
+    #474でも対象外と判断された)。
     """
     tree = ast.parse((_SRC / "services/line_notification_service.py").read_text(encoding="utf-8"))
     referrers = []
     for function in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
         if any(isinstance(n, ast.Attribute) and n.attr == "key_risks" for n in ast.walk(function)):
             referrers.append(function.name)
-    assert referrers == ["_format_holding_decision_message"]
+    assert set(referrers) == {
+        "_format_holding_decision_message",
+        "_format_profit_taking_message",
+        "_format_watch_profit_taking_message",
+        "_format_sell_message",
+    }
+    assert "_format_buy_candidate_message" not in referrers

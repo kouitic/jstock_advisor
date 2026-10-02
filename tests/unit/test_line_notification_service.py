@@ -61,6 +61,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.services import line_notification_service as line_notification_service_module
 from jstock_advisor.services.audit_service import AuditService
+from jstock_advisor.services.financial_freshness_integration import FINANCIAL_STALE_USER_WARNING
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     NotificationDeliveryResult,
@@ -5715,3 +5716,116 @@ def test_issue36_validation_and_dry_run_return_pushed(
     dry_result = dry_service.send_recommendation_notification(rec, _I17_T1)
     assert dry_result is NotificationDeliveryResult.PUSHED
     assert dry_run_claims.list_all() == []
+
+
+# ===== Issue #474: 財務鮮度警告(key_risks)を利確・旧売却経路の本文へ表示する =====
+# #468(U17/Q1=W2)はSELL_CONSIDERATION等の保有判断経路(_format_holding_decision_
+# message)にのみ「留意事項」節を追加しており、利確(_format_profit_taking_message/
+# _format_watch_profit_taking_message)と旧SELL/URGENT_REVIEW/REVIEW経路
+# (_format_sell_message)には適用されていなかった(fresh sweepで発見)。
+# USER決定OD1=OPTION_B: key_risks全体ではなく、FINANCIAL_STALE_USER_WARNINGのみを
+# 抽出して表示する(含み損益率・累計利益率・「該当ルール」等は表示しない)。
+
+
+def _make_profit_taking_recommendation(
+    *,
+    recommendation_id: str,
+    recommendation_type: RecommendationType,
+    key_risks: list[str],
+) -> Recommendation:
+    return Recommendation(
+        recommendation_id=recommendation_id,
+        stock_code="2914",
+        stock_name="日本たばこ産業",
+        recommended_at=_NOW,
+        recommendation_type=recommendation_type,
+        sell_prices=SellPriceLevels(),
+        price_at_recommendation=Decimal("4200"),
+        average_purchase_price_at_recommendation=Decimal("4000"),
+        shares_at_recommendation=100,
+        confidence=ConfidenceLevel.MEDIUM,
+        rule_version="v1-mvp",
+        key_risks=key_risks,
+    )
+
+
+def test_issue474_profit_taking_message_shows_stale_warning_only() -> None:
+    rec = _make_profit_taking_recommendation(
+        recommendation_id="i474-1",
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        key_risks=[
+            "含み損益率25.0%",
+            "配当・優待込み累計利益率26.3%",
+            FINANCIAL_STALE_USER_WARNING,
+        ],
+    )
+    text = render_notification_preview(rec)
+    assert f"留意事項: {FINANCIAL_STALE_USER_WARNING}" in text
+    # OD1=OPTION_B: STALE警告以外のkey_risks項目(P&L等)は表示しない。
+    assert "含み損益率25.0%" not in text
+    assert "累計利益率26.3%" not in text
+
+
+def test_issue474_profit_taking_message_omits_section_when_not_stale() -> None:
+    rec = _make_profit_taking_recommendation(
+        recommendation_id="i474-2",
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        key_risks=["含み損益率25.0%", "配当・優待込み累計利益率26.3%"],
+    )
+    text = render_notification_preview(rec)
+    assert "留意事項" not in text
+
+
+def test_issue474_watch_profit_taking_message_shows_stale_warning_only() -> None:
+    rec = _make_profit_taking_recommendation(
+        recommendation_id="i474-3",
+        recommendation_type=RecommendationType.WATCH,
+        key_risks=[FINANCIAL_STALE_USER_WARNING],
+    )
+    text = render_notification_preview(rec)
+    assert f"留意事項:\n・{FINANCIAL_STALE_USER_WARNING}" in text
+
+
+def test_issue474_watch_profit_taking_message_omits_section_when_not_stale() -> None:
+    rec = _make_profit_taking_recommendation(
+        recommendation_id="i474-4",
+        recommendation_type=RecommendationType.WATCH,
+        key_risks=[],
+    )
+    text = render_notification_preview(rec)
+    assert "留意事項" not in text
+
+
+def test_issue474_legacy_sell_message_shows_stale_warning_only() -> None:
+    """旧SELL/URGENT_REVIEW/REVIEW経路(_format_sell_message)。fresh sweepで
+    発見した欠陥: STALE警告がkey_risksへ格納されていたが表示されていなかった。"""
+    rec = _make_profit_taking_recommendation(
+        recommendation_id="i474-5",
+        recommendation_type=RecommendationType.SELL,
+        key_risks=["該当ルール: price_below_support", FINANCIAL_STALE_USER_WARNING],
+    )
+    text = render_notification_preview(rec)
+    assert f"留意事項: {FINANCIAL_STALE_USER_WARNING}" in text
+    assert "該当ルール" not in text
+
+
+def test_issue474_legacy_sell_message_omits_line_when_not_stale() -> None:
+    rec = _make_profit_taking_recommendation(
+        recommendation_id="i474-6",
+        recommendation_type=RecommendationType.URGENT_REVIEW,
+        key_risks=["該当ルール: price_below_support"],
+    )
+    text = render_notification_preview(rec)
+    assert "留意事項" not in text
+
+
+def test_issue474_review_type_also_uses_legacy_sell_formatter_and_shows_warning() -> None:
+    """RecommendationType.REVIEWも_format_sell_messageへ落ちる(SELL/URGENT_REVIEWと
+    同じ経路)ことの回帰確認。"""
+    rec = _make_profit_taking_recommendation(
+        recommendation_id="i474-7",
+        recommendation_type=RecommendationType.REVIEW,
+        key_risks=[FINANCIAL_STALE_USER_WARNING],
+    )
+    text = render_notification_preview(rec)
+    assert f"留意事項: {FINANCIAL_STALE_USER_WARNING}" in text
