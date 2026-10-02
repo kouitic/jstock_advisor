@@ -34,6 +34,8 @@ from typing import Any
 
 import yaml
 
+from tests.support.secret_access_registry import SECRETSMANAGER_RUNTIME_FUNCTIONS
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATE_PATH = _REPO_ROOT / "infra" / "template.yaml"
 
@@ -57,13 +59,11 @@ _SENSITIVE_SECRETSMANAGER_ACTIONS = {
 # であることを別途確認したうえで追加すること。
 # ★ Issue #696: この集合(identity policy層)と、#680(resource policy層、
 # tests/unit/test_issue_680_secret_resource_policy.pyのGithubApp用
-# allow-list)は独立にハードコードされており、一方を更新しても他方への
-# 追従を機械的には検知できない。この集合を更新する場合は#680のallow-list
-# も併せて確認すること。
-_EXPECTED_SECRETSMANAGER_PRINCIPALS = {
-    "IncidentNotifierFunction",
-    "WeeklyReviewFunction",
-}
+# allow-list)は、共有のregistry(tests/support/secret_access_registry.py)
+# から導出する。期待集合の定義はregistryの1箇所だけで、更新は両層へ同時に効く。
+# さらに tests/unit/test_issue_696_secret_allowlist_drift.py が、registryに
+# 依存せず2つの層を直接突き合わせる。
+_EXPECTED_SECRETSMANAGER_PRINCIPALS = set(SECRETSMANAGER_RUNTIME_FUNCTIONS)
 
 
 def _load_template() -> dict[str, Any]:

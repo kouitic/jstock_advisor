@@ -42,6 +42,11 @@ from typing import Any
 
 import yaml
 
+from tests.support.secret_access_registry import (
+    SECRETSMANAGER_RUNTIME_FUNCTIONS,
+    runtime_role_logical_id,
+)
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATE_PATH = _REPO_ROOT / "infra" / "template.yaml"
 
@@ -83,12 +88,14 @@ _COMMON_ALLOWLIST: list[Any] = [
 #: 意味は同一)。
 #: ★ Issue #696: この一覧(resource policy層)と、UNIT1
 #: (tests/unit/test_infra_issue_133_secretsmanager_least_privilege.pyの
-#: _EXPECTED_SECRETSMANAGER_PRINCIPALS、identity policy層)は独立に
-#: ハードコードされており、一方を更新しても他方への追従を機械的には
-#: 検知できない。この一覧を更新する場合はUNIT1側も併せて確認すること。
+#: _EXPECTED_SECRETSMANAGER_PRINCIPALS、identity policy層)は、共有のregistry
+#: (tests/support/secret_access_registry.py)の同じ定義から導出する(順序は
+#: registryの記載順 = template.yaml中の記載順)。さらに
+#: tests/unit/test_issue_696_secret_allowlist_drift.py が、registryに依存せず
+#: 2つの層を直接突き合わせる。
 _GITHUB_APP_EXTRA_ALLOWLIST = [
-    {"Fn::GetAtt": "IncidentNotifierFunctionRole.Arn"},
-    {"Fn::GetAtt": "WeeklyReviewFunctionRole.Arn"},
+    {"Fn::GetAtt": f"{runtime_role_logical_id(function)}.Arn"}
+    for function in SECRETSMANAGER_RUNTIME_FUNCTIONS
 ]
 
 
