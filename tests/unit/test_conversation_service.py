@@ -19,6 +19,7 @@ from moto import mock_aws
 
 from jstock_advisor.domain.entities.available_cash import AvailableCash
 from jstock_advisor.domain.entities.enums import (
+    AccountType,
     AvailableCashUpdateType,
     ConversationStateName,
     Priority,
@@ -183,6 +184,60 @@ def test_buy_flow_start_input_confirm(
     available_cash = AvailableCashRepository().get(DEFAULT_OWNER)
     assert available_cash is not None
     assert available_cash.available_cash == _DEFAULT_AVAILABLE_CASH - Decimal("150000")
+
+
+def test_buy_confirm_writes_consistent_account_type_across_lot_holding_transaction(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """Issue #626(#619 F7と同じUSER決定A: 同一取引から生成される永続データ間で
+    account_typeを一致させる)。LINE経由の新規買付は、PurchaseLot/Holding/
+    Transactionのすべてでaccount_type=GENERALが一致する(以前はTransactionだけ
+    Noneになっていた)。"""
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    service.handle_text_input(_USER, state, "本人,8306,100,1500", _NOW)
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+    op = confirm_state.operation_id
+
+    confirm_reply = service.handle_postback(_USER, "confirm", op, _NOW)
+
+    assert "登録しました" in confirm_reply.text
+    holding = HoldingRepository().get(_HOLDING_ID)
+    assert holding is not None
+    assert holding.account_type == AccountType.GENERAL
+    lot = PurchaseLotRepository().list_by_stock(_STOCK)[0]
+    assert lot.account_type == AccountType.GENERAL
+    transaction = TransactionRepository().get(op)
+    assert transaction is not None
+    assert transaction.account_type == AccountType.GENERAL
+
+
+def test_buy_confirm_additional_buy_writes_consistent_account_type(
+    moto_conversation_tables: None, service: ConversationService
+) -> None:
+    """買い増し(ADDITIONAL_BUY。既存保有あり)でも、新規買付と同じく
+    Transaction.account_type = GENERALが一致する。"""
+    _seed_holding(shares=100)
+    service.handle_postback(_USER, "start_buy", None, _NOW)
+    state = conversation_state_store.get(_USER, _NOW)
+    assert state is not None
+    service.handle_text_input(_USER, state, "本人,8306,50,1600", _NOW)
+    confirm_state = conversation_state_store.get(_USER, _NOW)
+    assert confirm_state is not None
+    op = confirm_state.operation_id
+
+    confirm_reply = service.handle_postback(_USER, "confirm", op, _NOW)
+
+    assert "登録しました" in confirm_reply.text
+    holding = HoldingRepository().get(_HOLDING_ID)
+    assert holding is not None
+    assert holding.shares == 150
+    assert holding.account_type == AccountType.GENERAL
+    transaction = TransactionRepository().get(op)
+    assert transaction is not None
+    assert transaction.account_type == AccountType.GENERAL
 
 
 def test_buy_confirm_rejected_when_owner_has_no_available_cash_registered(
@@ -382,6 +437,11 @@ def test_sell_flow_full_sell(
     available_cash = AvailableCashRepository().get(DEFAULT_OWNER)
     assert available_cash is not None
     assert available_cash.available_cash == _DEFAULT_AVAILABLE_CASH + Decimal("180000")
+    # Issue #626回帰: SELLのTransaction.account_typeはNoneのまま変わらない
+    # (CLIのregister_sell()と同じ。SELLはFIFO消費で口座種別をまたぐため概念が無い)。
+    transaction = TransactionRepository().get(confirm_state.operation_id)
+    assert transaction is not None
+    assert transaction.account_type is None
 
 
 def test_case_m_line_conversation_partial_sell_updates_last_sale_date(
