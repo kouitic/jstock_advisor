@@ -117,13 +117,7 @@ _REGISTRY: tuple[_Entry, ...] = (
         module="tests/unit/test_holding_decision_service_audit_fields.py",
         triggers=("T4",),
         cohort="holding_decision_runtime_config",
-        wall_clock_policy=_ALLOWED_EXISTING,
-        rationale=(
-            "既存の wall-clock 依存(モジュールレベル _NOW)。"
-            "Issue #145 では修正せず、owner Issue で固定 clock 化するまで"
-            "明示的な例外として追跡する。"
-        ),
-        related_issue="#149",
+        wall_clock_policy=_FORBIDDEN,
     ),
     _Entry(
         module="tests/unit/test_issue_52_session_aware_future_date.py",
