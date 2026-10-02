@@ -697,6 +697,11 @@ def _b2_record(
     )
 
 
+def _b2_handled_failure_counts() -> dict[str, int]:
+    """Issue #666(HF-1): 本番の`handler()`と同じ初期化形で境界カウンタを作る。"""
+    return dict.fromkeys(handler_module._HANDLED_FAILURE_BOUNDARY_METADATA, 0)
+
+
 def _b2_patch(monkeypatch, record, invoked: list[tuple[str, dict]]):
     monkeypatch.setenv("BUY_CANDIDATES_FUNCTION_NAME", "fn-buy")
     monkeypatch.setenv("HOLDINGS_WATCHLIST_FUNCTION_NAME", "fn-holdings")
@@ -716,6 +721,7 @@ def test_b2_buy_batch_is_routed_to_finalize_recovery(monkeypatch) -> None:
     outcome = handler_module._handle_completion_recovery_candidate(
         {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
         _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is True
@@ -742,6 +748,7 @@ def test_b2_holdings_batch_is_routed_to_finalize_recovery(monkeypatch) -> None:
     outcome = handler_module._handle_completion_recovery_candidate(
         {"batch_id": "hold-1", "status": "RUNNING", "batch_family": "HOLDINGS_WATCHLIST"},
         _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is True
@@ -756,7 +763,7 @@ def test_b2_marker_absent_falls_through_to_watchlist_path(monkeypatch) -> None:
     _b2_patch(monkeypatch, _b2_record(), invoked)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "watchlist-1", "status": "RUNNING"}, _B2_NOW
+        {"batch_id": "watchlist-1", "status": "RUNNING"}, _B2_NOW, _b2_handled_failure_counts()
     )
 
     assert outcome is None, "marker不在は既存watchlist経路へ継続しなければならない"
@@ -769,7 +776,9 @@ def test_b2_unknown_family_is_fail_closed(monkeypatch) -> None:
     _b2_patch(monkeypatch, _b2_record(), invoked)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "x-1", "status": "RUNNING", "batch_family": "SOMETHING_ELSE"}, _B2_NOW
+        {"batch_id": "x-1", "status": "RUNNING", "batch_family": "SOMETHING_ELSE"},
+        _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is False, "未知familyを既存経路へ流してはならない"
@@ -783,7 +792,9 @@ def test_b2_validation_batch_is_not_invoked(monkeypatch) -> None:
     _b2_patch(monkeypatch, record, invoked)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is False
@@ -809,7 +820,9 @@ def test_b2_unknown_context_is_not_invoked(monkeypatch) -> None:
     monkeypatch.setattr(handler_module, "get_completion_batch", lambda batch_id: record)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is False
@@ -822,7 +835,9 @@ def test_b2_already_finalized_batch_is_not_invoked(monkeypatch) -> None:
     _b2_patch(monkeypatch, _b2_record(completed_at="2026-08-31T23:00:00+00:00"), invoked)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is False
@@ -836,7 +851,9 @@ def test_b2_incomplete_batch_is_not_invoked(monkeypatch) -> None:
     _b2_patch(monkeypatch, record, invoked)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is False
@@ -849,7 +866,9 @@ def test_b2_exhausted_batch_is_not_invoked(monkeypatch) -> None:
     _b2_patch(monkeypatch, _b2_record(attempt_count=3), invoked)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is False
@@ -868,7 +887,9 @@ def test_b2_invoke_failure_is_contained(monkeypatch) -> None:
     monkeypatch.setattr(handler_module, "dispatch_async", _boom)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is False
@@ -881,7 +902,9 @@ def test_b2_missing_function_name_is_fail_closed(monkeypatch) -> None:
     monkeypatch.delenv("BUY_CANDIDATES_FUNCTION_NAME", raising=False)
 
     outcome = handler_module._handle_completion_recovery_candidate(
-        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
+        _b2_handled_failure_counts(),
     )
 
     assert outcome is False
@@ -978,7 +1001,8 @@ def test_stuck_missing_started_at_is_undeterminable(monkeypatch) -> None:
     published = _stuck_patch(monkeypatch, record)
 
     outcome = handler_module._handle_stuck_batch_candidate(
-        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"}, _B2_NOW
+        {"batch_id": "buy-1", "status": "RUNNING", "batch_family": "BUY_CANDIDATES"},
+        _B2_NOW,
     )
 
     assert outcome is False
