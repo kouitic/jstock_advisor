@@ -210,16 +210,45 @@ _INCIDENT_SOURCE_BUY_CANDIDATES = "buy_candidates"
 _INCIDENT_JOB_NAME_BUY_CANDIDATES = "buy-candidates"
 
 
-def _notify_handled_failure(failure_stage: str, reason_code: str, now: dt.datetime) -> None:
+def _scoped_failure_stage(failure_stage: str, batch_id: str | None) -> str:
+    """Issue #717 MUST-1是正: fingerprintをbatch単位で区別するため、batch_idを
+    `failure_stage`へ埋め込む。
+
+    #665のfingerprint計算(`compute_fingerprint()`)は、`error_type`/`error_message`
+    のみを`normalize_error_signature()`で正規化する(UUID・ISO8601日時・16進数の
+    並び・数字の並びを`<ID>`/`<TS>`/`<HEX>`/`<N>`へ置換する)。`failure_stage`/
+    `failure_type`/`job_name`はこの正規化を受けず、生の値がそのまま
+    `_field_digest()`でハッシュされる(incident_fingerprint.py実測済み)。
+
+    したがって、batch_idを`reason_code`(error_type/error_messageへ渡る)へ
+    含めても正規化で失われてしまうが、`failure_stage`へ含めれば失われない。
+    これにより、同一batch_id内の複数回failureは同一fingerprintとして
+    既存のclaim/dedup機構で1件に集約され(SAME_BATCH_MULTIPLE_FAILURES ->
+    max 1)、異なるbatch_idは完全に異なるfingerprintとなるため、時間的な
+    近接の有無に関わらず常に独立して観測できる(DIFFERENT_BATCH_FAILURES ->
+    independently observable)。旧版(batch_idを含まない固定failure_stage)は
+    30分の時間窓dedupのみに依存しており、この2つの不変条件を保証しなかった
+    (ChatGPTレビューMUST-1指摘、2026-10-02)。
+
+    batch_idがNone(白箱テスト・recovery経路等、batch概念が無い呼び出し)の
+    場合は、従来どおりfailure_stageをそのまま返す(この場合は時間窓dedupの
+    みに頼ることになるが、batch_id自体が無い以上、他に取りうる識別子が無い)。
+    """
+    if batch_id is None:
+        return failure_stage
+    return f"{failure_stage}#{batch_id}"
+
+
+def _notify_handled_failure(
+    failure_stage: str, reason_code: str, now: dt.datetime, batch_id: str | None
+) -> None:
     """Issue #667(HF-2): catchされた技術的部分失敗をHF-0契約(#665)でUSER通知する。
 
-    1銘柄ごとに直接publishするが、#665のfingerprint(job_name/failure_stage/
-    failure_type/error_type/error_message)はcatch境界ごとに固定値であり、
-    銘柄コードを含まない。そのため同一batch内で複数銘柄が同じ境界で失敗しても、
-    incident_notifier_handler.py側の既存dedup(claim window)により実質的に
-    batch単位で1件のLINE通知へ集約される(HF2-AC2相当)。batch_idをまたいで
-    カウンタを集約する新しい永続schema(infrastructure/aws/batch_tracker.py側の
-    変更)を必要としない、既存資産のみの再利用である。
+    1銘柄ごとに直接publishするが、batch_idを`failure_stage`へ埋め込むことで
+    (`_scoped_failure_stage()`参照)、#665のfingerprintがbatch単位で区別される。
+    batch_idをまたいでカウンタを集約する新しい永続schema
+    (infrastructure/aws/batch_tracker.py側の変更)を必要としない、既存資産の
+    再利用である。
 
     通知自体の失敗が候補銘柄の判定・保存・通知処理を一切妨げないよう、
     呼び出し元から独立したtry/exceptで囲む(本関数の外側)。
@@ -227,7 +256,7 @@ def _notify_handled_failure(failure_stage: str, reason_code: str, now: dt.dateti
     envelope = {
         "source": _INCIDENT_SOURCE_BUY_CANDIDATES,
         "job_name": _INCIDENT_JOB_NAME_BUY_CANDIDATES,
-        "failure_stage": failure_stage,
+        "failure_stage": _scoped_failure_stage(failure_stage, batch_id),
         "failure_type": "UNEXPECTED_EXCEPTION",
         "reason_code": reason_code,
         "occurred_at": now.isoformat(),
@@ -236,22 +265,24 @@ def _notify_handled_failure(failure_stage: str, reason_code: str, now: dt.dateti
     publish_incident_envelope(envelope)
 
 
-def _notify_handled_failure_safely(failure_stage: str, reason_code: str, now: dt.datetime) -> None:
+def _notify_handled_failure_safely(
+    failure_stage: str, reason_code: str, now: dt.datetime, batch_id: str | None
+) -> None:
     """`_notify_handled_failure()`の失敗(SNS権限不足・Topic ARN未設定等)が、
     候補銘柄の判定・保存・既存通知処理を絶対にブロックしないためのラッパー
     (`_save_evaluation_record_safely()`と同じ設計方針)。"""
     try:
-        _notify_handled_failure(failure_stage, reason_code, now)
+        _notify_handled_failure(failure_stage, reason_code, now, batch_id)
     except Exception:  # noqa: BLE001 - HANDLED_FAILURE通知自体の失敗で本処理を止めない
         logger.warning(
-            "buy_candidates_handler: failed to publish HANDLED_FAILURE envelope "
-            "failure_stage=%s",
+            "buy_candidates_handler: failed to publish HANDLED_FAILURE envelope failure_stage=%s",
             failure_stage,
         )
 
 
 def _deterministic_recommendation_id(batch_id: str, stock_code: str) -> str:
     return str(uuid.uuid5(_RECOMMENDATION_ID_NAMESPACE, f"{batch_id}:{stock_code}"))
+
 
 # 購入候補ランキングの第一ソートキー(BuyActionの強さ。数値が大きいほど優先)。
 _ACTION_PRIORITY: dict[BuyAction, int] = {
@@ -557,9 +588,7 @@ def _build_unified_targets(
             # retryのたびに監査レコードが重複する。record_if_absent()で
             # batch_id由来の決定的audit_idを使い、2回目以降は書き込まない。
             audit_id = (
-                f"unified_buy_candidate_batch_aborted:{batch_id}"
-                if batch_id
-                else str(uuid.uuid4())
+                f"unified_buy_candidate_batch_aborted:{batch_id}" if batch_id else str(uuid.uuid4())
             )
             AuditService(execution_context=execution_context).record_if_absent(
                 audit_id=audit_id,
@@ -990,9 +1019,7 @@ def _process_single_candidate(
             if batch_id is not None:
                 final_recommendation = final_recommendation.model_copy(
                     update={
-                        "recommendation_id": _deterministic_recommendation_id(
-                            batch_id, stock_code
-                        )
+                        "recommendation_id": _deterministic_recommendation_id(batch_id, stock_code)
                     }
                 )
             is_new_recommendation = recommendation_repo.insert_if_absent(final_recommendation)
@@ -1093,9 +1120,12 @@ def _process_single_candidate(
                     and final_recommendation.watch_type is not None
                 )
                 category = "near_buy" if is_near_buy else "watch_wait"
-                record_purchase_category = resolve_purchase_category(
-                    final_recommendation.buy_action, final_recommendation.watch_type
-                ) or PurchaseCategory.WATCH_FOR_PRICE
+                record_purchase_category = (
+                    resolve_purchase_category(
+                        final_recommendation.buy_action, final_recommendation.watch_type
+                    )
+                    or PurchaseCategory.WATCH_FOR_PRICE
+                )
                 if (
                     final_recommendation.watch_type is not None
                     or final_recommendation.buy_action == BuyAction.WATCH_BEFORE_EARNINGS
@@ -1130,7 +1160,9 @@ def _process_single_candidate(
         logger.exception("buy candidate analysis failed unexpectedly stock_code=%s", stock_code)
         result = {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
         # Issue #667(HF-2 B1)
-        _notify_handled_failure_safely("CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", now)
+        _notify_handled_failure_safely(
+            "CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", now, batch_id
+        )
 
     if batch_id is not None:
         evaluation_record_saved = _save_evaluation_record_safely(
@@ -1158,9 +1190,7 @@ def _process_single_candidate(
             validation_recommendation_id=validation_recommendation_id,
             near_buy_ranking_entry=near_buy_ranking_entry,
             watch_end_ranking_entry=watch_end_ranking_entry,
-            evaluation_record_saved_stock_code=(
-                stock_code if evaluation_record_saved else None
-            ),
+            evaluation_record_saved_stock_code=(stock_code if evaluation_record_saved else None),
             # Issue #57 B1: finalize eligibilityの正本となる完了識別子。
             # stock_code引数はcategoryが"data_insufficient"/"failed"のときしか
             # 渡されないため流用できず、専用引数として常に渡す。
@@ -1177,8 +1207,7 @@ def _process_single_candidate(
             finalize_token = try_acquire_completion_finalize(batch_id, now)
             if finalize_token is None:
                 logger.info(
-                    "buy candidates finalize skipped (already acquired or completed) "
-                    "batch_id=%s",
+                    "buy candidates finalize skipped (already acquired or completed) batch_id=%s",
                     batch_id,
                 )
             else:
@@ -1351,7 +1380,10 @@ def _save_evaluation_record_safely(
         )
         # Issue #667(HF-2 B3)
         _notify_handled_failure_safely(
-            "EVALUATION_RECORD_SAVE", "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED", now
+            "EVALUATION_RECORD_SAVE",
+            "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED",
+            now,
+            batch_id,
         )
         return False
 
@@ -1643,6 +1675,7 @@ def _update_evaluation_record_outcome_safely(
             "NOTIFICATION_OUTCOME_RECORD_UPDATE",
             "BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED",
             dt.datetime.now(dt.UTC),
+            batch_id,
         )
         logger.warning(
             "buy_candidates_handler: failed to update BuyCandidateEvaluationRecord "
@@ -1683,9 +1716,7 @@ def _finalize_batch(
 
     # progress.sector_entriesはDynamoDB属性名(既存schema互換のため改称しない)だが、
     # 中身はIssue #82以降 screening結果に依存しないportfolio exposure factである。
-    exposure = _aggregate_portfolio_exposure(
-        progress.sector_entries, progress.holding_count
-    )
+    exposure = _aggregate_portfolio_exposure(progress.sector_entries, progress.holding_count)
     portfolio_total = exposure.portfolio_total
     basis = exposure.basis
     coverage_ratio = exposure.coverage_ratio
@@ -1710,8 +1741,16 @@ def _finalize_batch(
             )
             record_not_found_count += 1
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
-                False, "RECORD_NOT_FOUND", "RECORD_NOT_FOUND", (), None,
+                evaluation_record_repo,
+                batch_id,
+                stock_code,
+                unified_rank,
+                None,
+                False,
+                "RECORD_NOT_FOUND",
+                "RECORD_NOT_FOUND",
+                (),
+                None,
                 execution_context,
             )
             continue
@@ -1722,18 +1761,33 @@ def _finalize_batch(
         if not dq.eligible:
             data_quality_blocked_count += 1
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, recommendation, unified_rank, None,
-                "NOT_REQUIRED", dq, basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                recommendation,
+                unified_rank,
+                None,
+                "NOT_REQUIRED",
+                dq,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                evaluation_record_repo,
+                batch_id,
+                stock_code,
+                unified_rank,
+                None,
                 False,
                 dq.block_category.value
                 if dq.block_category
                 else EligibilityBlockCategory.DATA_QUALITY.value,
-                dq.block_reason, (), None,
+                dq.block_reason,
+                (),
+                None,
                 execution_context,
             )
             continue
@@ -1746,19 +1800,33 @@ def _finalize_batch(
         if not buy_cooldown.eligible:
             trade_cooldown_blocked_count += 1
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, recommendation, unified_rank, None,
-                buy_cooldown.block_reason or "NOT_REQUIRED", buy_cooldown,
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                recommendation,
+                unified_rank,
+                None,
+                buy_cooldown.block_reason or "NOT_REQUIRED",
+                buy_cooldown,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                evaluation_record_repo,
+                batch_id,
+                stock_code,
+                unified_rank,
+                None,
                 False,
                 buy_cooldown.block_category.value
                 if buy_cooldown.block_category
                 else EligibilityBlockCategory.TRADE_COOLDOWN.value,
-                buy_cooldown.block_reason, (), None,
+                buy_cooldown.block_reason,
+                (),
+                None,
                 execution_context,
             )
             continue
@@ -1770,19 +1838,33 @@ def _finalize_batch(
         if not buy_priority.eligible:
             cross_pipeline_blocked_count += 1
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, recommendation, unified_rank, None,
-                buy_priority.block_reason or "NOT_REQUIRED", buy_priority,
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                recommendation,
+                unified_rank,
+                None,
+                buy_priority.block_reason or "NOT_REQUIRED",
+                buy_priority,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                evaluation_record_repo,
+                batch_id,
+                stock_code,
+                unified_rank,
+                None,
                 False,
                 buy_priority.block_category.value
                 if buy_priority.block_category
                 else EligibilityBlockCategory.LOW_PRIORITY.value,
-                buy_priority.block_reason, (), None,
+                buy_priority.block_reason,
+                (),
+                None,
                 execution_context,
             )
             continue
@@ -1850,18 +1932,33 @@ def _finalize_batch(
             if not addon_eligibility.eligible:
                 addon_blocked_count += 1
                 _record_notification_outcome_audit(
-                    audit_service, rule_version, now, recommendation, unified_rank, None,
-                    "NOT_REQUIRED", addon_eligibility, basis, portfolio_total, coverage_ratio,
+                    audit_service,
+                    rule_version,
+                    now,
+                    recommendation,
+                    unified_rank,
+                    None,
+                    "NOT_REQUIRED",
+                    addon_eligibility,
+                    basis,
+                    portfolio_total,
+                    coverage_ratio,
                     batch_id=batch_id,
                     notification_pathway="buy",
                 )
                 _update_evaluation_record_outcome_safely(
-                    evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                    evaluation_record_repo,
+                    batch_id,
+                    stock_code,
+                    unified_rank,
+                    None,
                     False,
                     addon_eligibility.block_category.value
                     if addon_eligibility.block_category
                     else None,
-                    addon_eligibility.block_reason, assessment.reasons, None,
+                    addon_eligibility.block_reason,
+                    assessment.reasons,
+                    None,
                     execution_context,
                 )
                 continue
@@ -1870,18 +1967,33 @@ def _finalize_batch(
         if not resend.eligible:
             resend_suppressed_count += 1
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, recommendation, unified_rank, None,
-                resend.block_reason or "SUPPRESSED", resend, basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                recommendation,
+                unified_rank,
+                None,
+                resend.block_reason or "SUPPRESSED",
+                resend,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
+                evaluation_record_repo,
+                batch_id,
+                stock_code,
+                unified_rank,
+                None,
                 False,
                 resend.block_category.value
                 if resend.block_category
                 else EligibilityBlockCategory.RECENTLY_NOTIFIED.value,
-                resend.block_reason, (), None,
+                resend.block_reason,
+                (),
+                None,
                 execution_context,
             )
             continue
@@ -1889,20 +2001,35 @@ def _finalize_batch(
         if len(eligible_winners) >= max_notifications:
             outside_top5_count += 1
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, recommendation, unified_rank, None,
+                audit_service,
+                rule_version,
+                now,
+                recommendation,
+                unified_rank,
+                None,
                 "NOT_REQUIRED",
                 NotificationEligibility(
                     eligible=False,
                     block_category=EligibilityBlockCategory.OUTSIDE_TOP_5,
                     block_reason="OUTSIDE_TOP_5",
                 ),
-                basis, portfolio_total, coverage_ratio,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, stock_code, unified_rank, None,
-                False, EligibilityBlockCategory.OUTSIDE_TOP_5.value, "OUTSIDE_TOP_5", (), None,
+                evaluation_record_repo,
+                batch_id,
+                stock_code,
+                unified_rank,
+                None,
+                False,
+                EligibilityBlockCategory.OUTSIDE_TOP_5.value,
+                "OUTSIDE_TOP_5",
+                (),
+                None,
                 execution_context,
             )
             continue
@@ -1945,30 +2072,62 @@ def _finalize_batch(
             # 実送信はしていない」ことを監査上も明確に区別する(将来のLINEからの
             # 理由照会機能で「送信済み」と誤認されないようにするため)。
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, rec, unified_rank, None,
-                outcome, NotificationEligibility(eligible=True),
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                rec,
+                unified_rank,
+                None,
+                outcome,
+                NotificationEligibility(eligible=True),
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
-                True, None, None, (), outcome,
+                evaluation_record_repo,
+                batch_id,
+                rec.stock_code,
+                unified_rank,
+                None,
+                True,
+                None,
+                None,
+                (),
+                outcome,
                 execution_context,
             )
         elif outcome in ("SENT_AND_RECORDED", "SENT_VALIDATION", "SENT_LOG_FAILED"):
             notification_rank += 1
             sent_count += 1
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, rec, unified_rank, notification_rank,
-                "SENT", NotificationEligibility(eligible=True),
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                rec,
+                unified_rank,
+                notification_rank,
+                "SENT",
+                NotificationEligibility(eligible=True),
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, notification_rank,
-                True, None, None, (), outcome,
+                evaluation_record_repo,
+                batch_id,
+                rec.stock_code,
+                unified_rank,
+                notification_rank,
+                True,
+                None,
+                None,
+                (),
+                outcome,
                 execution_context,
             )
         elif outcome == "CLAIM_SUPPRESSED":
@@ -1980,29 +2139,61 @@ def _finalize_batch(
             # 監査上も区別する(WOULD_SEND_DRY_RUNと同じ記録パターン)。
             claim_suppressed_count += 1
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, rec, unified_rank, None,
-                outcome, NotificationEligibility(eligible=True),
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                rec,
+                unified_rank,
+                None,
+                outcome,
+                NotificationEligibility(eligible=True),
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
-                True, None, None, (), outcome,
+                evaluation_record_repo,
+                batch_id,
+                rec.stock_code,
+                unified_rank,
+                None,
+                True,
+                None,
+                None,
+                (),
+                outcome,
                 execution_context,
             )
         else:
             send_failed_count += 1
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, rec, unified_rank, None,
-                outcome, NotificationEligibility(eligible=False, block_reason=outcome),
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                rec,
+                unified_rank,
+                None,
+                outcome,
+                NotificationEligibility(eligible=False, block_reason=outcome),
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="buy",
             )
             _update_evaluation_record_outcome_safely(
-                evaluation_record_repo, batch_id, rec.stock_code, unified_rank, None,
-                False, None, outcome, (), outcome,
+                evaluation_record_repo,
+                batch_id,
+                rec.stock_code,
+                unified_rank,
+                None,
+                False,
+                None,
+                outcome,
+                (),
+                outcome,
                 execution_context,
             )
 
@@ -2044,8 +2235,17 @@ def _finalize_batch(
         )
         if not nb_dq.eligible:
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
-                "NOT_REQUIRED", nb_dq, basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                nb_recommendation,
+                near_unified_rank,
+                None,
+                "NOT_REQUIRED",
+                nb_dq,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="near_buy",
             )
@@ -2054,9 +2254,17 @@ def _finalize_batch(
         nb_cooldown = notification_service.check_trade_cooldown_eligibility(nb_recommendation, now)
         if not nb_cooldown.eligible:
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
-                nb_cooldown.block_reason or "NOT_REQUIRED", nb_cooldown,
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                nb_recommendation,
+                near_unified_rank,
+                None,
+                nb_cooldown.block_reason or "NOT_REQUIRED",
+                nb_cooldown,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="near_buy",
             )
@@ -2068,9 +2276,17 @@ def _finalize_batch(
         )
         if not nb_priority.eligible:
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
-                nb_priority.block_reason or "NOT_REQUIRED", nb_priority,
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                nb_recommendation,
+                near_unified_rank,
+                None,
+                nb_priority.block_reason or "NOT_REQUIRED",
+                nb_priority,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="near_buy",
             )
@@ -2079,9 +2295,17 @@ def _finalize_batch(
         nb_resend = notification_service.check_resend_eligibility(nb_recommendation, now)
         if not nb_resend.eligible:
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
-                nb_resend.block_reason or "SUPPRESSED", nb_resend,
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                nb_recommendation,
+                near_unified_rank,
+                None,
+                nb_resend.block_reason or "SUPPRESSED",
+                nb_resend,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="near_buy",
             )
@@ -2092,14 +2316,21 @@ def _finalize_batch(
         is_near_buy = nb_recommendation.watch_type == WatchType.NEAR_BUY
         if is_near_buy and near_buy_daily_count >= near_buy_max:
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, nb_recommendation, near_unified_rank, None,
+                audit_service,
+                rule_version,
+                now,
+                nb_recommendation,
+                near_unified_rank,
+                None,
                 "NOT_REQUIRED",
                 NotificationEligibility(
                     eligible=False,
                     block_category=EligibilityBlockCategory.DAILY_LIMIT_NEAR_BUY,
                     block_reason="DAILY_LIMIT_NEAR_BUY",
                 ),
-                basis, portfolio_total, coverage_ratio,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="near_buy",
             )
@@ -2115,14 +2346,21 @@ def _finalize_batch(
         if is_near_buy:
             near_buy_daily_count += 1
         _record_notification_outcome_audit(
-            audit_service, rule_version, now, nb_recommendation, near_unified_rank,
-            near_buy_sent_count, "NOT_REQUIRED",
+            audit_service,
+            rule_version,
+            now,
+            nb_recommendation,
+            near_unified_rank,
+            near_buy_sent_count,
+            "NOT_REQUIRED",
             NotificationEligibility(
                 eligible=False,
                 block_category=EligibilityBlockCategory.NON_ACTIONABLE,
                 block_reason="NON_ACTIONABLE",
             ),
-            basis, portfolio_total, coverage_ratio,
+            basis,
+            portfolio_total,
+            coverage_ratio,
             batch_id=batch_id,
             notification_pathway="near_buy",
         )
@@ -2145,8 +2383,17 @@ def _finalize_batch(
         )
         if not we_dq.eligible:
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, we_recommendation, None, None,
-                "NOT_REQUIRED", we_dq, basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                we_recommendation,
+                None,
+                None,
+                "NOT_REQUIRED",
+                we_dq,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="watch_end",
             )
@@ -2155,9 +2402,17 @@ def _finalize_batch(
         we_cooldown = notification_service.check_trade_cooldown_eligibility(we_recommendation, now)
         if not we_cooldown.eligible:
             _record_notification_outcome_audit(
-                audit_service, rule_version, now, we_recommendation, None, None,
-                we_cooldown.block_reason or "NOT_REQUIRED", we_cooldown,
-                basis, portfolio_total, coverage_ratio,
+                audit_service,
+                rule_version,
+                now,
+                we_recommendation,
+                None,
+                None,
+                we_cooldown.block_reason or "NOT_REQUIRED",
+                we_cooldown,
+                basis,
+                portfolio_total,
+                coverage_ratio,
                 batch_id=batch_id,
                 notification_pathway="watch_end",
             )
@@ -2168,14 +2423,21 @@ def _finalize_batch(
         # ではないため、NEAR BUY/WATCH_BEFORE_EARNINGSと同様にLINE送信をやめ、
         # NON_ACTIONABLEとしてAuditへ記録するのみとする。
         _record_notification_outcome_audit(
-            audit_service, rule_version, now, we_recommendation, None, None,
+            audit_service,
+            rule_version,
+            now,
+            we_recommendation,
+            None,
+            None,
             "NOT_REQUIRED",
             NotificationEligibility(
                 eligible=False,
                 block_category=EligibilityBlockCategory.NON_ACTIONABLE,
                 block_reason="NON_ACTIONABLE",
             ),
-            basis, portfolio_total, coverage_ratio,
+            basis,
+            portfolio_total,
+            coverage_ratio,
             batch_id=batch_id,
             notification_pathway="watch_end",
         )
@@ -2335,9 +2597,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # (銘柄評価・Recommendation/DecisionSnapshot/EvaluationRecord再生成・
         # Audit再登録・record_result・fanoutのいずれも実行しない)。task分岐より
         # 前に置き、未知のrecovery_actionが通常worker経路へ落ちないようにする。
-        record = resolve_finalize_only_request(
-            event, BatchFamily.BUY_CANDIDATES, execution_context
-        )
+        record = resolve_finalize_only_request(event, BatchFamily.BUY_CANDIDATES, execution_context)
         if record is None:
             return {"finalize_recovery": "REJECTED"}
         return _run_finalize_only_recovery(
@@ -2480,9 +2740,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # Issue #558: 同一batch_idでの2回目の開始(Scheduler retry等)。正常な
         # idempotency結果として扱い、fanout・通知・進捗初期化のいずれも
         # 行わずに終了する(ERROR/例外にしない。retryをさらに誘発しない)。
-        logger.info(
-            "buy_candidates_handler: duplicate batch start ignored batch_id=%s", batch_id
-        )
+        logger.info("buy_candidates_handler: duplicate batch start ignored batch_id=%s", batch_id)
         return {"dispatched": 0, "skipped": "duplicate_batch_start"}
     if execution_context.is_validation:
         # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、

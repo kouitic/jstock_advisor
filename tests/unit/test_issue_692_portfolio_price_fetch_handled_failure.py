@@ -125,11 +125,11 @@ def test_multiple_technical_failures_in_one_run_are_summed() -> None:
 def test_evaluate_household_concentration_notifies_handled_failure_when_price_fetch_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    notified: list[tuple[str, str]] = []
+    notified: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
         handler_module,
         "_notify_handled_failure_safely",
-        lambda stage, reason, now: notified.append((stage, reason)),
+        lambda stage, reason, now, batch_id: notified.append((stage, reason, batch_id)),
     )
     monkeypatch.setattr(
         handler_module,
@@ -154,18 +154,18 @@ def test_evaluate_household_concentration_notifies_handled_failure_when_price_fe
     )
 
     assert notified == [
-        ("PORTFOLIO_TOTAL_ESTIMATION", "HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED")
+        ("PORTFOLIO_TOTAL_ESTIMATION", "HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED", None)
     ]
 
 
 def test_evaluate_household_concentration_does_not_notify_when_no_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    notified: list[tuple[str, str]] = []
+    notified: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
         handler_module,
         "_notify_handled_failure_safely",
-        lambda stage, reason, now: notified.append((stage, reason)),
+        lambda stage, reason, now, batch_id: notified.append((stage, reason, batch_id)),
     )
     monkeypatch.setattr(
         handler_module,

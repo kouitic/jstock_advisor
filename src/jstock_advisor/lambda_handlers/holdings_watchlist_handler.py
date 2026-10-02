@@ -181,18 +181,52 @@ _INCIDENT_SOURCE_HOLDINGS_WATCHLIST = "holdings_watchlist"
 _INCIDENT_JOB_NAME_HOLDINGS_WATCHLIST = "holdings-watchlist"
 
 
-def _notify_handled_failure(failure_stage: str, reason_code: str, now: dt.datetime) -> None:
+def _scoped_failure_stage(failure_stage: str, batch_id: str | None) -> str:
+    """Issue #717 MUST-1是正: fingerprintをbatch単位で区別するため、batch_idを
+    `failure_stage`へ埋め込む(buy_candidates_handler.py::_scoped_failure_stage()
+    と同型)。
+
+    incident_fingerprint.pyのcompute_fingerprint()は、`error_type`/`error_message`
+    のみをnormalize_error_signature()で正規化し(UUID/ISO8601/16進数/連続する
+    数字を`<ID>`/`<TS>`/`<HEX>`/`<N>`へ置換)、`job_name`/`failure_stage`/
+    `failure_type`は生の値をそのままハッシュする。そのためbatch_idを
+    `failure_stage`へ埋め込めば、正規化で消えずにfingerprintへ反映される。
+
+    30分の時間窓fingerprint dedupは「同一batch内の複数failureをまとめる」
+    目的には有効だが、「別batchのfailureをそれぞれ独立して観測できる」ことは
+    保証しない(時間窓が重なれば別batchのfailureも同一fingerprintに畳み込まれる
+    ため)。batch_idをfailure_stageへ含めることで、fingerprintがbatch単位で
+    区別され、以下の3つの不変条件を満たす:
+      - SAME_BATCH_MULTIPLE_FAILURES → 同一fingerprint → 通知1件まで
+      - DIFFERENT_BATCH_FAILURES    → 異なるfingerprint → 独立して観測できる
+      - SUCCESS_BATCH               → 追加通知0件(変更なし)
+
+    batch_idがNone(白箱テスト等、fan-out経路を使わない呼び出し元)の場合は
+    従来どおりfailure_stageをそのまま返す(挙動不変)。failure_stage/
+    error_message/reason_codeはLINE本文の組み立てに使われないため(incident_
+    message.py::_send_line()参照)、ここへbatch_idを埋め込んでもH-30の
+    PII/識別子除外allowlistに抵触しない。
+    """
+    if batch_id is None:
+        return failure_stage
+    return f"{failure_stage}#{batch_id}"
+
+
+def _notify_handled_failure(
+    failure_stage: str, reason_code: str, now: dt.datetime, batch_id: str | None
+) -> None:
     """Issue #668(HF-3): catchされた技術的部分失敗をHF-0契約(#665)でUSER通知する。
 
     buy_candidates_handler.py::_notify_handled_failure()(#667)と同型。
-    batch単位の集約は新しい永続カウンタを追加せず、incident_notifier_handler.py
-    側の既存dedup(claim window)へ委ねる設計とした(詳細はそちらのdocstring
-    参照)。
+    Issue #717 MUST-1是正: batch単位の集約は、`_scoped_failure_stage()`で
+    failure_stageへbatch_idを埋め込むことでfingerprintをbatch単位に区別し、
+    incident_notifier_handler.py側の既存dedup(claim window)と組み合わせて
+    実現する(新しい永続カウンタは追加しない)。
     """
     envelope = {
         "source": _INCIDENT_SOURCE_HOLDINGS_WATCHLIST,
         "job_name": _INCIDENT_JOB_NAME_HOLDINGS_WATCHLIST,
-        "failure_stage": failure_stage,
+        "failure_stage": _scoped_failure_stage(failure_stage, batch_id),
         "failure_type": "UNEXPECTED_EXCEPTION",
         "reason_code": reason_code,
         "occurred_at": now.isoformat(),
@@ -201,11 +235,13 @@ def _notify_handled_failure(failure_stage: str, reason_code: str, now: dt.dateti
     publish_incident_envelope(envelope)
 
 
-def _notify_handled_failure_safely(failure_stage: str, reason_code: str, now: dt.datetime) -> None:
+def _notify_handled_failure_safely(
+    failure_stage: str, reason_code: str, now: dt.datetime, batch_id: str | None
+) -> None:
     """`_notify_handled_failure()`の失敗が既存処理を絶対にブロックしないための
     ラッパー(buy_candidates_handler.pyの同名関数と同型)。"""
     try:
-        _notify_handled_failure(failure_stage, reason_code, now)
+        _notify_handled_failure(failure_stage, reason_code, now, batch_id)
     except Exception:  # noqa: BLE001 - HANDLED_FAILURE通知自体の失敗で本処理を止めない
         logger.warning(
             "holdings_watchlist_handler: failed to publish HANDLED_FAILURE envelope "
@@ -395,10 +431,17 @@ def evaluate_household_concentration_and_notify(
     if price_fetch_failed_count > 0:
         # Issue #692: 技術的failureのみを対象とする(業務上の「価格データなし」とは
         # 区別する。get_latest_price()が例外を投げずNoneを返す経路はここに現れない)。
+        # Issue #717 MUST-1: この判定は親Lambdaの1回のLambda実行内で1回だけ
+        # 行われ(#667/#668のようなholding単位fan-out workerの集約ではない)、
+        # ChatGPTレビューでも#692はcross-worker集約を必要としないためMUST-1の
+        # 対象外と確認済み。batch_id相当の単位が無いため明示的にNoneを渡す
+        # (_scoped_failure_stage()はNone時に従来どおりfailure_stageをそのまま
+        # 使う)。
         _notify_handled_failure_safely(
             "PORTFOLIO_TOTAL_ESTIMATION",
             "HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED",
             now,
+            None,
         )
     threshold = config.portfolio_concentration.single_stock_weight_threshold_pct
     # Issue #348: 発火件数を数える手段が無く、#329の本番検証観測が構造的に
@@ -722,6 +765,7 @@ def _persist_holding_evaluation_record(
     now: dt.datetime,
     execution_context: ExecutionContext,
     rule_version: str,
+    batch_id: str | None,
     *,
     execution_plan_mode: str | None,
     execution_plan_reason: str | None,
@@ -783,7 +827,10 @@ def _persist_holding_evaluation_record(
         )
         # Issue #668(HF-3 B2)
         _notify_handled_failure_safely(
-            "EVALUATION_RECORD_SAVE", "HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED", now
+            "EVALUATION_RECORD_SAVE",
+            "HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED",
+            now,
+            batch_id,
         )
 
 
@@ -871,6 +918,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=None,
             execution_plan_reason=None,
             notification_enabled=None,
@@ -937,6 +985,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=None,
             execution_plan_reason=None,
             notification_enabled=None,
@@ -1062,6 +1111,7 @@ def _analyze_one_holding(
                     now,
                     execution_context,
                     rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+                    batch_id,
                     execution_plan_mode=runtime_lookup.config.mode.value,
                     execution_plan_reason=plan.execution_reason.value,
                     notification_enabled=notification_enabled,
@@ -1135,6 +1185,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
@@ -1159,6 +1210,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
@@ -1203,6 +1255,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
@@ -1355,6 +1408,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
@@ -1417,6 +1471,7 @@ def _analyze_one_holding(
         now,
         execution_context,
         rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+        batch_id,
         execution_plan_mode=runtime_lookup.config.mode.value,
         execution_plan_reason=plan.execution_reason.value,
         notification_enabled=notification_enabled,
@@ -1731,7 +1786,7 @@ def _process_single_holding(
         )
         # Issue #668(HF-3 B1)
         _notify_handled_failure_safely(
-            "HOLDING_ANALYSIS", "HOLDINGS_WATCHLIST_ANALYSIS_FAILED", now
+            "HOLDING_ANALYSIS", "HOLDINGS_WATCHLIST_ANALYSIS_FAILED", now, batch_id
         )
         return {"holding_id": holding_id, "recommended": False, "notified": False, "failed": True}
 

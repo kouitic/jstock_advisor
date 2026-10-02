@@ -75,12 +75,14 @@ def test_notify_handled_failure_publishes_allowlisted_envelope(
     )
 
     handler_module._notify_handled_failure(
-        "CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", _NOW
+        "CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", _NOW, "batch-1"
     )
 
     assert captured["source"] == "buy_candidates"
     assert captured["job_name"] == "buy-candidates"
-    assert captured["failure_stage"] == "CANDIDATE_ANALYSIS"
+    # Issue #717 MUST-1: batch_idがfailure_stageへ埋め込まれ、fingerprintが
+    # batch単位で区別される(詳細はtest_fingerprint_invariants.py相当のテスト参照)。
+    assert captured["failure_stage"] == "CANDIDATE_ANALYSIS#batch-1"
     assert captured["reason_code"] == "BUY_CANDIDATES_ANALYSIS_FAILED"
     assert captured["failure_class"] == "HANDLED_FAILURE"
     # HF2-AC3: 個別の投資情報(stock_code等)を一切含まない。
@@ -97,7 +99,7 @@ def test_notify_handled_failure_safely_swallows_publish_failure(
 
     with caplog.at_level("WARNING"):
         handler_module._notify_handled_failure_safely(
-            "CANDIDATE_ANALYSIS", "X", _NOW
+            "CANDIDATE_ANALYSIS", "X", _NOW, "batch-1"
         )  # 例外を投げないことが検証
 
     assert "failed to publish HANDLED_FAILURE envelope" in caplog.text
@@ -109,11 +111,11 @@ def test_notify_handled_failure_safely_swallows_publish_failure(
 def test_b1_unexpected_analysis_failure_notifies_handled_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    notified: list[tuple[str, str]] = []
+    notified: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
         handler_module,
         "_notify_handled_failure_safely",
-        lambda stage, reason, now: notified.append((stage, reason)),
+        lambda stage, reason, now, batch_id: notified.append((stage, reason, batch_id)),
     )
 
     def _boom(self: object, *args: object, **kwargs: object) -> None:
@@ -144,18 +146,18 @@ def test_b1_unexpected_analysis_failure_notifies_handled_failure(
         "notified": False,
         "failed": True,
     }
-    assert notified == [("CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED")]
+    assert notified == [("CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", "batch-1")]
 
 
 def test_b1_normal_analysis_does_not_notify(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """HF2-AC2相当: 失敗が無ければ追加通知は発生しない。"""
-    notified: list[tuple[str, str]] = []
+    notified: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
         handler_module,
         "_notify_handled_failure_safely",
-        lambda stage, reason, now: notified.append((stage, reason)),
+        lambda stage, reason, now, batch_id: notified.append((stage, reason, batch_id)),
     )
     monkeypatch.setattr(handler_module, "build_stock_snapshot", lambda *a, **kw: (object(), None))
 
@@ -214,11 +216,11 @@ def test_b1_normal_analysis_does_not_notify(
 def test_b3_evaluation_record_save_failure_notifies_handled_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    notified: list[tuple[str, str]] = []
+    notified: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
         handler_module,
         "_notify_handled_failure_safely",
-        lambda stage, reason, now: notified.append((stage, reason)),
+        lambda stage, reason, now, batch_id: notified.append((stage, reason, batch_id)),
     )
 
     from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory
@@ -238,7 +240,9 @@ def test_b3_evaluation_record_save_failure_notifies_handled_failure(
     )
 
     assert saved is False
-    assert notified == [("EVALUATION_RECORD_SAVE", "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED")]
+    assert notified == [
+        ("EVALUATION_RECORD_SAVE", "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED", "batch-1")
+    ]
 
 
 # --- B4: _update_evaluation_record_outcome_safely()の更新失敗 ------------------------
@@ -247,11 +251,11 @@ def test_b3_evaluation_record_save_failure_notifies_handled_failure(
 def test_b4_outcome_update_failure_notifies_handled_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    notified: list[tuple[str, str]] = []
+    notified: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
         handler_module,
         "_notify_handled_failure_safely",
-        lambda stage, reason, now: notified.append((stage, reason)),
+        lambda stage, reason, now, batch_id: notified.append((stage, reason, batch_id)),
     )
 
     handler_module._update_evaluation_record_outcome_safely(
@@ -272,6 +276,7 @@ def test_b4_outcome_update_failure_notifies_handled_failure(
         (
             "NOTIFICATION_OUTCOME_RECORD_UPDATE",
             "BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED",
+            "batch-1",
         )
     ]
 
@@ -287,11 +292,11 @@ def test_b4_record_not_found_does_not_notify_handled_failure(
         BuyCandidateEvaluationRecordRepository,
     )
 
-    notified: list[tuple[str, str]] = []
+    notified: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
         handler_module,
         "_notify_handled_failure_safely",
-        lambda stage, reason, now: notified.append((stage, reason)),
+        lambda stage, reason, now, batch_id: notified.append((stage, reason, batch_id)),
     )
     eval_repo = BuyCandidateEvaluationRecordRepository(store_dir=tmp_path)
 
@@ -309,4 +314,118 @@ def test_b4_record_not_found_does_not_notify_handled_failure(
         ExecutionContext.normal(),
     )
 
-    assert notified == []
+
+# --- Issue #717 MUST-1(ChatGPTレビュー指摘): fingerprint不変条件のEnd-to-End確認 -------
+#
+# SAME_BATCH_MULTIPLE_FAILURES -> max 1 HANDLED_FAILURE notification
+# DIFFERENT_BATCH_FAILURES    -> independently observable
+# SUCCESS_BATCH               -> 0 additional notification
+#
+# `_notify_handled_failure()`が実際に構築するenvelopeを捕捉し、
+# `incident_notifier_handler.handler()`(実際のfingerprint計算・claim/dedupを
+# 行う本物のconsumer)へSNSイベントとして流し込み、LINE送信回数で不変条件を
+# 直接確認する(時間窓dedupに頼らず、batch_idごとに独立したfingerprintに
+# なっていることをE2Eで固定する)。
+
+
+class _RecordingLineClient:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def push_message(self, text: str) -> None:
+        self.sent.append(text)
+
+
+def _captured_envelope(
+    monkeypatch: pytest.MonkeyPatch, failure_stage: str, reason_code: str, batch_id: str | None
+) -> dict[str, object]:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        handler_module, "publish_incident_envelope", lambda envelope: captured.update(envelope)
+    )
+    handler_module._notify_handled_failure(failure_stage, reason_code, _NOW, batch_id)
+    return captured
+
+
+@pytest.fixture
+def incident_notifier_env(monkeypatch: pytest.MonkeyPatch):
+    import boto3
+    from moto import mock_aws
+
+    from jstock_advisor.lambda_handlers import incident_notifier_handler as notifier_module
+
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("DYNAMODB_TABLE_PREFIX", "jstock")
+    monkeypatch.delenv("GITHUB_APP_SECRET_ARN", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    fake_line = _RecordingLineClient()
+    monkeypatch.setattr(notifier_module, "build_live_line_client_from_env", lambda: fake_line)
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="ap-northeast-1")
+        client.create_table(
+            TableName="jstock-incident_state",
+            KeySchema=[{"AttributeName": "fingerprint", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "fingerprint", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        yield fake_line
+
+
+def _deliver_to_incident_notifier(envelope: dict[str, object]) -> None:
+    import json
+
+    from jstock_advisor.lambda_handlers import incident_notifier_handler as notifier_module
+
+    event = {"Records": [{"Sns": {"Message": json.dumps(envelope)}}]}
+    notifier_module.handler(event, None)
+
+
+def test_same_batch_multiple_failures_send_at_most_one_notification(
+    monkeypatch: pytest.MonkeyPatch, incident_notifier_env: _RecordingLineClient
+) -> None:
+    """SAME_BATCH_MULTIPLE_FAILURES -> max 1 HANDLED_FAILURE notification。
+    同一batch_id内で異なる銘柄(B1境界)が2回失敗しても、LINE送信は1件のみ。
+    """
+    envelope_1 = _captured_envelope(
+        monkeypatch, "CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", "batch-A"
+    )
+    envelope_2 = _captured_envelope(
+        monkeypatch, "CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", "batch-A"
+    )
+
+    _deliver_to_incident_notifier(envelope_1)
+    _deliver_to_incident_notifier(envelope_2)
+
+    assert len(incident_notifier_env.sent) == 1
+
+
+def test_different_batch_failures_are_independently_observable(
+    monkeypatch: pytest.MonkeyPatch, incident_notifier_env: _RecordingLineClient
+) -> None:
+    """DIFFERENT_BATCH_FAILURES -> independently observable。異なるbatch_idの
+    失敗は、時間的に近接していても(=時間窓dedupでは本来区別できない)、それぞれ
+    独立してLINE通知が届く(旧版の時間窓onlyのdedupでは本来ここが壊れていた)。
+    """
+    envelope_a = _captured_envelope(
+        monkeypatch, "CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", "batch-A"
+    )
+    envelope_b = _captured_envelope(
+        monkeypatch, "CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", "batch-B"
+    )
+
+    _deliver_to_incident_notifier(envelope_a)
+    _deliver_to_incident_notifier(envelope_b)
+
+    assert len(incident_notifier_env.sent) == 2
+
+
+def test_success_batch_sends_zero_additional_notifications(
+    incident_notifier_env: _RecordingLineClient,
+) -> None:
+    """SUCCESS_BATCH -> 0 additional notification。失敗が無ければ
+    `_notify_handled_failure_safely()`自体が呼ばれないため、当然LINE送信も0件
+    (他のtestの前提〔test_b1_normal_analysis_does_not_notify等〕と合わせて
+    E2Eでも固定する)。"""
+    assert incident_notifier_env.sent == []
