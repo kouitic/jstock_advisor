@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.infrastructure.line.client import build_line_client_from_env
 from jstock_advisor.services.before_after_report_service import BeforeAfterReportService
 from jstock_advisor.services.provider_factory import (
@@ -51,6 +52,7 @@ def before_after(
     output: Path = typer.Option(
         None, "--output", help="出力先パス(省略時はdocs/design/配下に自動生成)"
     ),
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者(既定は本人)"),
 ) -> None:
     """根本原因修正の前後で判定がどう変化したかをMarkdownレポートとして出力する(LINE送信なし)。"""
     stock_codes = [s.strip() for s in stocks.split(",") if s.strip()]
@@ -74,7 +76,7 @@ def before_after(
         else build_mock_provider_bundle(now)
     )
     service = BeforeAfterReportService(providers=providers, config=config)
-    report = service.build_report(stock_codes, now)
+    report = service.build_report(stock_codes, now, owner)
     markdown = service.render_markdown(report)
 
     output_path = output or (

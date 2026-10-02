@@ -15,7 +15,7 @@ from pathlib import Path
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.audit import AuditLogEntry
 from jstock_advisor.domain.entities.holding import Holding
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
+from jstock_advisor.domain.entities.owner import build_holding_id, normalize_and_validate_owner
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
@@ -68,13 +68,15 @@ class BeforeAfterReportService:
             repository=AuditLogRepository(store_dir=self._scratch_audit_dir)
         )
 
-    def build_entry(self, stock_code: str, now: dt.datetime) -> BeforeAfterEntry:
+    def build_entry(self, stock_code: str, now: dt.datetime, owner: str) -> BeforeAfterEntry:
         before_recommendations = self._recommendation_repo.list_by_stock(stock_code)
         before_audit_entries = self._audit_repo.list_by_stock(stock_code)
-        # M3(保有銘柄オーナー機能): HoldingRepositoryのPKはholding_id。本レポートは
-        # owner別の切り替えUIを持たないため、既定owner(DEFAULT_OWNER)の保有のみを
-        # 対象とする。
-        holding = self._holding_repo.get(build_holding_id(DEFAULT_OWNER, stock_code))
+        # M3(保有銘柄オーナー機能): HoldingRepositoryのPKはholding_id。指定されたowner
+        # の保有のみを対象とする(Issue #579)。ownerは必須引数であり、既定値への解決は
+        # CLI層(`--owner`)だけが行う(service層にDEFAULT_OWNERを持たせない)。
+        holding = self._holding_repo.get(
+            build_holding_id(normalize_and_validate_owner(owner), stock_code)
+        )
 
         if holding is None:
             return BeforeAfterEntry(
@@ -104,8 +106,10 @@ class BeforeAfterReportService:
             after_error=profit_taking_outcome.data_error or sell_signal_outcome.data_error,
         )
 
-    def build_report(self, stock_codes: list[str], now: dt.datetime) -> BeforeAfterReport:
-        entries = [self.build_entry(code, now) for code in stock_codes]
+    def build_report(
+        self, stock_codes: list[str], now: dt.datetime, owner: str
+    ) -> BeforeAfterReport:
+        entries = [self.build_entry(code, now, owner) for code in stock_codes]
         return BeforeAfterReport(basis_date=now.date(), entries=entries)
 
     def render_markdown(self, report: BeforeAfterReport) -> str:

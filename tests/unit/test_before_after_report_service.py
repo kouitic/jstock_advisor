@@ -50,7 +50,7 @@ def _service(tmp_path: Path) -> BeforeAfterReportService:
 def test_entry_without_holding_skips_after_and_notes_reason(tmp_path: Path) -> None:
     service = _service(tmp_path)
 
-    entry = service.build_entry("2914", _NOW)
+    entry = service.build_entry("2914", _NOW, DEFAULT_OWNER)
 
     assert entry.holding is None
     assert entry.after_profit_taking is None
@@ -112,7 +112,7 @@ def test_entry_with_holding_runs_after_pipeline(tmp_path: Path) -> None:
         holding_repository=holding_repo,
     )
 
-    entry = service.build_entry("2914", _NOW)
+    entry = service.build_entry("2914", _NOW, DEFAULT_OWNER)
 
     assert entry.holding is not None
     assert entry.before_recommendations == [before_rec]
@@ -122,7 +122,7 @@ def test_entry_with_holding_runs_after_pipeline(tmp_path: Path) -> None:
 
 def test_render_markdown_includes_both_sections(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    report = service.build_report(["2914"], _NOW)
+    report = service.build_report(["2914"], _NOW, DEFAULT_OWNER)
 
     markdown = service.render_markdown(report)
 
