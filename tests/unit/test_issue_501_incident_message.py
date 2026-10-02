@@ -311,9 +311,13 @@ def _extract_boundary_metadata_reason_codes(path: Path, dict_name: str) -> set[s
 
 
 def _actual_handled_failure_reason_codes() -> set[str]:
-    """src全体から、現在実際にfailure_class="HANDLED_FAILURE"で発行される
-    reason_codeを機械的に抽出する(test_every_lambda_function_in_the_template_
-    has_an_entryと同型の、allowlistとsrcの実体を突き合わせるguard)。"""
+    """走査するのは列挙した5箇所(buy_candidates/holdings_watchlist/evaluationの
+    _notify_handled_failure_safely第2位置引数、finalizerのdict literal、
+    reconcilerのboundary metadata)であり、キーワード引数での指定と、列挙外の
+    新規ファイルのHANDLED_FAILURE envelopeは視界外である(src全数の走査では
+    ない)。新しい発行元を足すときは本guardの走査対象も更新すること。
+    視界外を構造的に塞ぐ仕組み自体は別Issueとする(PR #740 issuecomment-
+    5959946879 SHOULD S-1)。"""
     handlers_dir = _REPO_ROOT / "src" / "jstock_advisor" / "lambda_handlers"
     services_dir = _REPO_ROOT / "src" / "jstock_advisor" / "services"
 
