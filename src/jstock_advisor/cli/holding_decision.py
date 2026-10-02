@@ -309,7 +309,12 @@ def backtest(
     owner: str = typer.Option(
         DEFAULT_OWNER,
         "--owner",
-        help="所有者(既定は本人。replayモードでは対象銘柄の列挙にのみ使う)",
+        help=(
+            "所有者(既定は本人)。liveモードでは対象銘柄の列挙と評価に、replayモードでは"
+            "対象銘柄の列挙と、再生する結果(指定所有者のHoldingDecisionResult・旧方式"
+            "Recommendationのみ)の絞り込みに使う。owner対応前の旧形式のデータは既定の"
+            "所有者(本人)のものとして扱う"
+        ),
     ),
     start_date: str = typer.Option(
         None,
@@ -397,7 +402,11 @@ def backtest(
             typer.echo("--start-date/--end-dateはYYYY-MM-DD形式で指定してください。")
             raise typer.Exit(code=1) from e
         rows = run_history_replay(
-            stock_codes, parsed_start, parsed_end, allow_same_day_fallback=allow_same_day_fallback
+            stock_codes,
+            parsed_start,
+            parsed_end,
+            owner,
+            allow_same_day_fallback=allow_same_day_fallback,
         )
     else:
         now = dt.datetime.now(dt.UTC)
