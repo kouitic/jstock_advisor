@@ -140,6 +140,7 @@ from jstock_advisor.services.holding_decision_runtime_config_service import (
     HoldingDecisionRuntimeConfigService,
 )
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
+from jstock_advisor.services.incident_envelope_publisher import publish_incident_envelope
 from jstock_advisor.services.judgment_safety_shadow_service import (
     ENGINE_HOLDINGS_PROFIT_TAKING,
     observe_judgment_safety_shadow,
@@ -171,6 +172,83 @@ _PROCESS_NAME = "保有銘柄分析"
 # このデフォルトは内部関数を直接呼ぶ既存テストコード(白箱テスト)向けの
 # 後方互換専用で、本番の呼び出し経路では使われない。
 _DEFAULT_EXECUTION_CONTEXT = ExecutionContext.normal()
+
+# Issue #668(HF-3): HANDLED_FAILURE通知のsource/job_name。job_nameは
+# incident_message.py::_INTERNAL_NAME_TO_JOB(`"holdings-watchlist"`)がそのまま
+# resolve_incident_job()で解決できる既存の値を使う(buy_candidates_handler.pyの
+# #667と同型の設計)。
+_INCIDENT_SOURCE_HOLDINGS_WATCHLIST = "holdings_watchlist"
+_INCIDENT_JOB_NAME_HOLDINGS_WATCHLIST = "holdings-watchlist"
+
+
+def _scoped_failure_stage(failure_stage: str, batch_id: str | None) -> str:
+    """Issue #717 MUST-1是正: fingerprintをbatch単位で区別するため、batch_idを
+    `failure_stage`へ埋め込む(buy_candidates_handler.py::_scoped_failure_stage()
+    と同型)。
+
+    incident_fingerprint.pyのcompute_fingerprint()は、`error_type`/`error_message`
+    のみをnormalize_error_signature()で正規化し(UUID/ISO8601/16進数/連続する
+    数字を`<ID>`/`<TS>`/`<HEX>`/`<N>`へ置換)、`job_name`/`failure_stage`/
+    `failure_type`は生の値をそのままハッシュする。そのためbatch_idを
+    `failure_stage`へ埋め込めば、正規化で消えずにfingerprintへ反映される。
+
+    30分の時間窓fingerprint dedupは「同一batch内の複数failureをまとめる」
+    目的には有効だが、「別batchのfailureをそれぞれ独立して観測できる」ことは
+    保証しない(時間窓が重なれば別batchのfailureも同一fingerprintに畳み込まれる
+    ため)。batch_idをfailure_stageへ含めることで、fingerprintがbatch単位で
+    区別され、以下の3つの不変条件を満たす:
+      - SAME_BATCH_MULTIPLE_FAILURES → 同一fingerprint → 通知1件まで
+      - DIFFERENT_BATCH_FAILURES    → 異なるfingerprint → 独立して観測できる
+      - SUCCESS_BATCH               → 追加通知0件(変更なし)
+
+    batch_idがNone(白箱テスト等、fan-out経路を使わない呼び出し元)の場合は
+    従来どおりfailure_stageをそのまま返す(挙動不変)。failure_stage/
+    error_message/reason_codeはLINE本文の組み立てに使われないため(incident_
+    message.py::_send_line()参照)、ここへbatch_idを埋め込んでもH-30の
+    PII/識別子除外allowlistに抵触しない。
+    """
+    if batch_id is None:
+        return failure_stage
+    return f"{failure_stage}#{batch_id}"
+
+
+def _notify_handled_failure(
+    failure_stage: str, reason_code: str, now: dt.datetime, batch_id: str | None
+) -> None:
+    """Issue #668(HF-3): catchされた技術的部分失敗をHF-0契約(#665)でUSER通知する。
+
+    buy_candidates_handler.py::_notify_handled_failure()(#667)と同型。
+    Issue #717 MUST-1是正: batch単位の集約は、`_scoped_failure_stage()`で
+    failure_stageへbatch_idを埋め込むことでfingerprintをbatch単位に区別し、
+    incident_notifier_handler.py側の既存dedup(claim window)と組み合わせて
+    実現する(新しい永続カウンタは追加しない)。
+    """
+    envelope = {
+        "source": _INCIDENT_SOURCE_HOLDINGS_WATCHLIST,
+        "job_name": _INCIDENT_JOB_NAME_HOLDINGS_WATCHLIST,
+        "failure_stage": _scoped_failure_stage(failure_stage, batch_id),
+        "failure_type": "UNEXPECTED_EXCEPTION",
+        "reason_code": reason_code,
+        "occurred_at": now.isoformat(),
+        "failure_class": "HANDLED_FAILURE",
+    }
+    publish_incident_envelope(envelope)
+
+
+def _notify_handled_failure_safely(
+    failure_stage: str, reason_code: str, now: dt.datetime, batch_id: str | None
+) -> None:
+    """`_notify_handled_failure()`の失敗が既存処理を絶対にブロックしないための
+    ラッパー(buy_candidates_handler.pyの同名関数と同型)。"""
+    try:
+        _notify_handled_failure(failure_stage, reason_code, now, batch_id)
+    except Exception:  # noqa: BLE001 - HANDLED_FAILURE通知自体の失敗で本処理を止めない
+        logger.warning(
+            "holdings_watchlist_handler: failed to publish HANDLED_FAILURE envelope "
+            "failure_stage=%s",
+            failure_stage,
+        )
+
 
 # Issue #528(#71 F-D2/F-C8のD2/D3分。D1〔buy_candidates_handler.py〕で確立済みの
 # パターンをそのまま横展開する): 非同期fan-outの再試行・二重配信・部分失敗後の
@@ -347,9 +425,24 @@ def evaluate_household_concentration_and_notify(
     ★本判定は従来どおりINTERNAL_ONLY(LINE送信対象ではない)である。本是正で
     通知の宛先・文面は変更していない。閾値も変更していない(保存するだけ)。
     """
-    total_market_value, total_acquisition_cost, positions = _estimate_portfolio_totals(
-        holdings, providers
+    total_market_value, total_acquisition_cost, positions, price_fetch_failed_count = (
+        _estimate_portfolio_totals(holdings, providers)
     )
+    if price_fetch_failed_count > 0:
+        # Issue #692: 技術的failureのみを対象とする(業務上の「価格データなし」とは
+        # 区別する。get_latest_price()が例外を投げずNoneを返す経路はここに現れない)。
+        # Issue #717 MUST-1: この判定は親Lambdaの1回のLambda実行内で1回だけ
+        # 行われ(#667/#668のようなholding単位fan-out workerの集約ではない)、
+        # ChatGPTレビューでも#692はcross-worker集約を必要としないためMUST-1の
+        # 対象外と確認済み。batch_id相当の単位が無いため明示的にNoneを渡す
+        # (_scoped_failure_stage()はNone時に従来どおりfailure_stageをそのまま
+        # 使う)。
+        _notify_handled_failure_safely(
+            "PORTFOLIO_TOTAL_ESTIMATION",
+            "HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED",
+            now,
+            None,
+        )
     threshold = config.portfolio_concentration.single_stock_weight_threshold_pct
     # Issue #348: 発火件数を数える手段が無く、#329の本番検証観測が構造的に
     # 未了になっていた。銘柄コード等は出さず件数のみをループ終了後に1回集計する
@@ -672,6 +765,7 @@ def _persist_holding_evaluation_record(
     now: dt.datetime,
     execution_context: ExecutionContext,
     rule_version: str,
+    batch_id: str | None,
     *,
     execution_plan_mode: str | None,
     execution_plan_reason: str | None,
@@ -730,6 +824,13 @@ def _persist_holding_evaluation_record(
     except Exception:  # noqa: BLE001 - 記録失敗で既存の通知・戻り値に影響させない
         logger.exception(
             "holding_evaluation_record_save_failed holding_ref=%s", log_ref(holding.holding_id)
+        )
+        # Issue #668(HF-3 B2)
+        _notify_handled_failure_safely(
+            "EVALUATION_RECORD_SAVE",
+            "HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED",
+            now,
+            batch_id,
         )
 
 
@@ -817,6 +918,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=None,
             execution_plan_reason=None,
             notification_enabled=None,
@@ -883,6 +985,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=None,
             execution_plan_reason=None,
             notification_enabled=None,
@@ -1008,6 +1111,7 @@ def _analyze_one_holding(
                     now,
                     execution_context,
                     rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+                    batch_id,
                     execution_plan_mode=runtime_lookup.config.mode.value,
                     execution_plan_reason=plan.execution_reason.value,
                     notification_enabled=notification_enabled,
@@ -1081,6 +1185,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
@@ -1105,6 +1210,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
@@ -1149,6 +1255,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
@@ -1301,6 +1408,7 @@ def _analyze_one_holding(
             now,
             execution_context,
             rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+            batch_id,
             execution_plan_mode=runtime_lookup.config.mode.value,
             execution_plan_reason=plan.execution_reason.value,
             notification_enabled=notification_enabled,
@@ -1363,6 +1471,7 @@ def _analyze_one_holding(
         now,
         execution_context,
         rule_version_service.get_active_version_or(RULE_VERSION_PLACEHOLDER),
+        batch_id,
         execution_plan_mode=runtime_lookup.config.mode.value,
         execution_plan_reason=plan.execution_reason.value,
         notification_enabled=notification_enabled,
@@ -1471,9 +1580,7 @@ def _finish_batch_item(
     )
     if progress is None or not progress.is_complete:
         return
-    _send_batch_summary(
-        batch_id, progress, now, notification_service, runtime_config_service
-    )
+    _send_batch_summary(batch_id, progress, now, notification_service, runtime_config_service)
 
 
 def _send_batch_summary(
@@ -1677,6 +1784,10 @@ def _process_single_holding(
         _finish_batch_item(
             batch_id, "failed", holding_id, now, notification_service, runtime_config_service
         )
+        # Issue #668(HF-3 B1)
+        _notify_handled_failure_safely(
+            "HOLDING_ANALYSIS", "HOLDINGS_WATCHLIST_ANALYSIS_FAILED", now, batch_id
+        )
         return {"holding_id": holding_id, "recommended": False, "notified": False, "failed": True}
 
     # Issue #362: 子の正常系の終端にも batch_id を出し、「うまくいった1件」を run へ
@@ -1730,7 +1841,7 @@ class _StockPosition:
 
 def _estimate_portfolio_totals(
     holdings: list[Holding], providers: ProviderBundle
-) -> tuple[Decimal | None, Decimal | None, list[_StockPosition]]:
+) -> tuple[Decimal | None, Decimal | None, list[_StockPosition], int]:
     """ポートフォリオ全体の時価総額・取得価格総額と、銘柄単位の保有を概算する(§14)。
 
     フルスナップショット(財務・適正価格等)は取得コストが高いため、時価総額の
@@ -1745,6 +1856,14 @@ def _estimate_portfolio_totals(
 
     Issue #64 F-I3: 使った価格のsource(提供元・取得時刻)もそのまま持ち回る。
     保存のために価格を取り直さないため、判定に使った値と記録が必ず一致する。
+
+    Issue #692(HF系列): 4番目の戻り値として、価格取得が**技術的failure**
+    (例外送出)で失敗した銘柄数を返す。`get_latest_price()`が例外を投げずに
+    正常に`None`を返す経路(業務上「価格データが無い」という事実)とは区別する
+    (技術的failureのみを数える。詳細はIssue #692 Phase B設計§1の発見事項参照)。
+    本関数は`evaluate_household_concentration_and_notify()`から1回のLambda
+    実行内で1回だけ呼ばれるため、cross-worker集約(DynamoDB等)を必要としない
+    (戻り値をそのまま使うだけで足りる)。
     """
     by_stock: dict[str, list[Holding]] = {}
     for holding in holdings:
@@ -1753,6 +1872,7 @@ def _estimate_portfolio_totals(
     total_acquisition_cost = sum((h.total_purchase_amount for h in holdings), start=Decimal("0"))
     total_market_value: Decimal | None = Decimal("0")
     positions: list[_StockPosition] = []
+    price_fetch_failed_count = 0
     for stock_code, group in by_stock.items():
         try:
             snap = providers.market_data.get_latest_price(stock_code)
@@ -1761,6 +1881,7 @@ def _estimate_portfolio_totals(
                 "portfolio total estimation: price fetch failed stock_code=%s", stock_code
             )
             snap = None
+            price_fetch_failed_count += 1
         shares = sum(h.shares for h in group)
         market_value = None if snap is None else snap.close_price * shares
         if market_value is None:
@@ -1782,7 +1903,7 @@ def _estimate_portfolio_totals(
                 price_sources=() if snap is None else (snap.source,),
             )
         )
-    return total_market_value, total_acquisition_cost, positions
+    return total_market_value, total_acquisition_cost, positions, price_fetch_failed_count
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:

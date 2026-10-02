@@ -13,14 +13,37 @@ reconciler等が発行するInternal structured incident payloadの両方を、�
 `failure_count` / `consecutive_days` / `is_ongoing`(#501の`IncidentNotice`が受け取る
 構造化フィールド)も併せて持つ点が異なる。これらはInternal payload(reconciler等)が
 明示的に計算して渡す値であり、CloudWatch Alarm由来の場合はNone(該当情報を持たない)。
+
+Issue #665(HF-0): `failure_class`を追加した。try/exceptで隔離された技術的部分失敗
+(`HANDLED_FAILURE`)と、job全体が成立しない障害(`UNHANDLED_FAILURE`。既定値・
+CloudWatch Alarm由来は常にこちら)を区別する。区別する目的は、GitHub Issue自動起票
+(#508)をUNHANDLED_FAILUREのみへ限定するためであり、LINE通知・fingerprint・dedupの
+既存契約には一切影響しない(`incident_notifier_handler.py`参照)。
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from enum import StrEnum
 
 from jstock_advisor.domain.jst import require_timezone_aware
+
+
+class FailureClass(StrEnum):
+    """Issue #665(HF-0): catchした失敗の種別。
+
+    値を文字列にしているのは、SNS envelope(JSON)との往復・既存のallowlist方式
+    (#506)との親和性のため(他の`IncidentJob`/`IncidentClaimOutcome`と同じ理由)。
+    """
+
+    # 主処理は継続する、既知のcatch境界で隔離された技術的部分失敗。USER通知する。
+    # GitHub Issueは自動起票しない(既存のincident検知〔#132ファミリー〕の抑止・
+    # dedup設計と衝突しないため)。
+    HANDLED_FAILURE = "HANDLED_FAILURE"
+    # job自体が成立しない障害(handler未捕捉例外・timeout等)。既存契約(変更なし)。
+    # USER通知し、GitHub Issue自動起票の対象にする(既存#508経路)。
+    UNHANDLED_FAILURE = "UNHANDLED_FAILURE"
 
 
 @dataclass(frozen=True)
@@ -31,6 +54,10 @@ class IncidentSignal:
     #502のfingerprint計算の入力(environmentに相当する位置)には使わない
     (fingerprintの安定性は`job_name`/`failure_stage`/`failure_type`/`error_type`/
     `error_message`の5要素のみで決める、既存の契約を変更しないため)。
+
+    `failure_class`もfingerprintの入力に含めない(#665設計どおり。1つのcatch境界が
+    発行するenvelopeのfailure_classは実装上常に固定値であり、同一fingerprintが
+    両方の値を取ることは想定しない)。
     """
 
     source: str
@@ -43,6 +70,7 @@ class IncidentSignal:
     failure_count: int | None = None
     consecutive_days: int | None = None
     is_ongoing: bool | None = None
+    failure_class: FailureClass = FailureClass.UNHANDLED_FAILURE
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -68,3 +96,5 @@ class IncidentSignal:
                 raise ValueError(f"{field_name} must not be negative, got {value!r}")
         if self.is_ongoing is not None and not isinstance(self.is_ongoing, bool):
             raise TypeError("is_ongoing must be bool or None")
+        if not isinstance(self.failure_class, FailureClass):
+            raise TypeError(f"failure_class must be a FailureClass, got {self.failure_class!r}")

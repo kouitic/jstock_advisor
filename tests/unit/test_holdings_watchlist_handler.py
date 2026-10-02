@@ -496,7 +496,7 @@ def test_estimate_portfolio_totals_isolates_single_holding_price_fetch_error() -
     market_data = _raising_then_ok_market_data()
     providers = _RaisingProviders(market_data)
 
-    total_market_value, total_acquisition_cost, positions = (
+    total_market_value, total_acquisition_cost, positions, price_fetch_failed_count = (
         handler_module._estimate_portfolio_totals(holdings, providers)
     )
 
@@ -509,6 +509,8 @@ def test_estimate_portfolio_totals_isolates_single_holding_price_fetch_error() -
         "2914": False,
         "8136": True,
     }
+    # Issue #692: 技術的failure(例外送出)が発生した銘柄数を返す。
+    assert price_fetch_failed_count == 1
 
 
 # --- 通知検証モード機能(2026-08追加) -------------------------------------
