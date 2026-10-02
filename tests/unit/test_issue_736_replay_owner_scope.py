@@ -35,7 +35,11 @@ from pathlib import Path
 import pytest
 
 from jstock_advisor.cli import holding_decision as holding_decision_cli
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
+from jstock_advisor.domain.entities.owner import (
+    DEFAULT_OWNER,
+    InvalidOwnerError,
+    build_holding_id,
+)
 from jstock_advisor.infrastructure.local_repository.holding_decision_result_repository import (
     HoldingDecisionResultRepository,
 )
@@ -200,6 +204,66 @@ def test_t3_a_result_is_never_matched_with_another_owners_recommendation(repos) 
     assert rows[0].legacy_match_method == LegacyRecommendationMatchMethod.UNKNOWN_NO_MATCH.value
     # owner-b から見ると、自分の Recommendation だけが(単独の行として)出る
     assert _times(_replay(repos, _OWNER_B)) == [_T_A + dt.timedelta(minutes=1)]
+
+
+# --- T4: 一方が他方の前方部分になる owner の組(PR #756 の SHOULD S-1)--------------------
+#
+# validate_owner が拒否するのは「空」「長すぎる」「区切り文字を含む」の 3 つだけなので、
+# 既定の owner(DEFAULT_OWNER)を前方に含む別の owner も有効な入力である。owner の比較が
+# 前方一致へ退行すると、--owner 省略(= 既定の owner)の replay へ別の owner の行が混ざる
+# (#736 / #579 が塞ごうとしている方向と逆の誤り)。完全一致であることを固定する。
+
+_PREFIX_PAIRS = [
+    pytest.param(_OWNER_A, _OWNER_A + "2", id="owner-a_and_owner-a2"),
+    pytest.param(DEFAULT_OWNER, DEFAULT_OWNER + "2", id="default_owner_and_its_extension"),
+]
+
+
+@pytest.mark.parametrize(("short", "long"), _PREFIX_PAIRS)
+def test_t4_owners_where_one_is_a_prefix_of_the_other_do_not_see_each_others_results(
+    repos, short: str, long: str
+) -> None:  # type: ignore[no-untyped-def]
+    hd_repo, _ = repos
+    _save_result(hd_repo, _T_A, build_holding_id(short, _CODE), "r-short")
+    _save_result(hd_repo, _T_B, build_holding_id(long, _CODE), "r-long")
+    assert _times(_replay(repos, short)) == [_T_A]
+    assert _times(_replay(repos, long)) == [_T_B]
+
+
+@pytest.mark.parametrize(("short", "long"), _PREFIX_PAIRS)
+def test_t4_owners_where_one_is_a_prefix_of_the_other_do_not_see_each_others_recommendations(
+    repos, short: str, long: str
+) -> None:  # type: ignore[no-untyped-def]
+    _, rec_repo = repos
+    _save_rec(rec_repo, _T_A, "rec-short", short)
+    _save_rec(rec_repo, _T_B, "rec-long", long)
+    assert _times(_replay(repos, short)) == [_T_A]
+    assert _times(_replay(repos, long)) == [_T_B]
+
+
+def test_t4_the_default_owner_does_not_see_a_longer_owner_that_starts_with_it(repos) -> None:  # type: ignore[no-untyped-def]
+    """--owner 省略(= 既定の owner)の replay に、それを前方に含む別の owner の行は混ざらない。"""
+    hd_repo, rec_repo = repos
+    longer = DEFAULT_OWNER + "2"
+    _save_result(hd_repo, _T_A, _CODE, "r-legacy-format")  # 旧形式 = 既定の owner の所有
+    _save_result(hd_repo, _T_B, build_holding_id(longer, _CODE), "r-longer")
+    _save_rec(rec_repo, _T_LEGACY, "rec-longer", longer)
+    assert _times(_replay(repos, DEFAULT_OWNER)) == [_T_A]
+    assert _times(_replay(repos, longer)) == [_T_B, _T_LEGACY]
+
+
+@pytest.mark.parametrize(
+    "raw_owner", [" owner-a ", "ｏｗｎｅｒ-ａ"], ids=["whitespace", "fullwidth"]
+)
+def test_t4_the_requested_owner_is_normalized_before_it_is_compared(repos, raw_owner: str) -> None:  # type: ignore[no-untyped-def]
+    """入力の揺れ(前後の空白・全角)があっても、正規化後の owner で比べる(列挙が空にならない)。"""
+    _two_owners(repos)
+    assert _times(_replay(repos, raw_owner)) == [_T_A]
+
+
+def test_t4_an_invalid_requested_owner_is_rejected(repos) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(InvalidOwnerError):
+        _replay(repos, "owner#a")
 
 
 # --- T6: CLI ---------------------------------------------------------------------------
