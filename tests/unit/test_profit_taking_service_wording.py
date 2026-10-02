@@ -17,6 +17,7 @@ import pytest
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
+    IndustryClassification,
     ProfitTakingIndustrySector,
     RecommendationType,
 )
@@ -382,11 +383,73 @@ def test_10_counter_material_without_mitigating_downgrade_applied() -> None:
     assert "増益・増配などの反対材料がある" in caveats
 
 
+def _result_full_via_price_position_gain_28_1_upside_minus_16_9() -> ProfitTakingResult:
+    """西部ガスHD 9536相当(#701発見契機)の入力を実際に`evaluate_profit_taking()`
+    へ通し、PRICE_POSITION経路でFULL_PROFIT_TAKEへ到達する結果を構築する。
+
+    ChatGPTレビュー指摘(MUST-1): `dataclasses.replace()`で`recommendation_type`
+    を直接注入すると、判定ロジック(`_level_from_price_position()`の閾値)が
+    将来変わってこの入力がFULLを返さなくなっても、本テストは気づかず通り続けて
+    しまう。そのため実際の判定関数へ、gain≈28.1%・upside≈-16.9%・confidence=
+    MEDIUMを再現する具体的な入力(現在値1281円・取得単価1000円・適正価格
+    レンジbear900/bull1064、手法3件)を通し、本当にFULLへ到達することを
+    テスト側でも固定する(前提の固定。呼び出し元のtest_11自身がassertする)。
+    """
+    fv = FairValueRange(
+        bear=Decimal("900"),
+        neutral=Decimal("980"),
+        bull=Decimal("1064"),
+        overall_confidence=ConfidenceLevel.MEDIUM,
+        methods_used=[
+            FairValueMethodResult(
+                method="m1", fair_value=Decimal("980"), confidence=ConfidenceLevel.MEDIUM
+            ),
+            FairValueMethodResult(
+                method="m2", fair_value=Decimal("990"), confidence=ConfidenceLevel.MEDIUM
+            ),
+            FairValueMethodResult(
+                method="m3", fair_value=Decimal("970"), confidence=ConfidenceLevel.MEDIUM
+            ),
+        ],
+        methods_excluded=[],
+        usable_for_trading_judgment=True,
+    )
+    return evaluate_profit_taking(
+        current_price=Decimal("1281"),
+        average_purchase_price=Decimal("1000"),
+        shares=100,
+        total_purchase_amount=Decimal("100000"),
+        cumulative_dividend_received=Decimal("0"),
+        cumulative_benefit_value_received=Decimal("0"),
+        current_total_yield_pct=4.0,
+        forecast_annual_dividend_per_share=Decimal("40"),
+        mitigating_inputs=MitigatingFactorInputs(),
+        config=_CONFIG.profit_taking,
+        condition_inputs=ProfitTakingConditionInputs(
+            fair_value_range=fv,
+            fair_value_reflects_latest_earnings=True,
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+        ),
+    )
+
+
 def test_11_full_profit_take_with_gain_below_stale_30pct_threshold() -> None:
     """11. gain=28.1/upside=-16.9相当でFULL_PROFIT_TAKEへ到達したケース
     (西部ガスHD 9536相当、#701発見契機)。「一部利確基準(30%)未満」は出ない。
     FULLと矛盾する「まだ利確しない理由」も出ない。"""
-    result = dataclasses.replace(_result(), recommendation_type=RecommendationType.FULL_PROFIT_TAKE)
+    result = _result_full_via_price_position_gain_28_1_upside_minus_16_9()
+
+    # 前提の固定(ChatGPTレビュー指摘のMUST-1対応): 実際の判定ロジックが
+    # この入力に対して本当にFULL_PROFIT_TAKEを導出することを先に確認する。
+    # 判定ロジック(price_position閾値等)が将来変わってFULLでなくなった場合、
+    # ここで検出され、後続の表示アサーションが無意味に通り続けることを防ぐ。
+    assert result.recommendation_type == RecommendationType.FULL_PROFIT_TAKE
+    assert result.upside_pct is not None
+    assert 28.0 < result.pnl.unrealized_pnl_pct < 28.2
+    assert -17.0 < result.upside_pct < -16.8
+    assert result.fair_value_action_block_reason_code is None
+
+    # 表示のアサーション(本題)。
     reasons = _reasons_for(
         result, effective_recommendation_type=RecommendationType.FULL_PROFIT_TAKE
     )
