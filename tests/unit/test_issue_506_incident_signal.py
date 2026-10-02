@@ -124,6 +124,7 @@ _ALLOWED_IMPORTS = {
     "__future__",
     "datetime",
     "dataclasses",
+    "enum",
     "jstock_advisor.domain.jst",
 }
 

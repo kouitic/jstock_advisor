@@ -153,6 +153,7 @@ from jstock_advisor.lambda_handlers._scheduling import derive_scheduled_batch_id
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
+from jstock_advisor.services.incident_envelope_publisher import publish_incident_envelope
 from jstock_advisor.services.judgment_safety_shadow_service import (
     ENGINE_BUY_CANDIDATES,
     observe_judgment_safety_shadow,
@@ -201,6 +202,52 @@ _STOCK_CODE_PATTERN = re.compile(r"^[0-9]{4,5}$")
 # 同一の再処理は同じrecommendation_idになるようにする。異なるbatch_id
 # (=別日の正当な再評価)は別IDのまま変わらない。
 _RECOMMENDATION_ID_NAMESPACE = uuid.UUID("6f1b1b4a-6b2d-4c7b-9b1a-2a6b7c8d9e0f")
+
+# Issue #667(HF-2): HANDLED_FAILURE通知のsource/job_name。job_nameは
+# incident_message.py::_INTERNAL_NAME_TO_JOB(`"buy-candidates"`)がそのまま
+# resolve_incident_job()で解決できる既存の値を使う(新規対応表を増やさない)。
+_INCIDENT_SOURCE_BUY_CANDIDATES = "buy_candidates"
+_INCIDENT_JOB_NAME_BUY_CANDIDATES = "buy-candidates"
+
+
+def _notify_handled_failure(failure_stage: str, reason_code: str, now: dt.datetime) -> None:
+    """Issue #667(HF-2): catchされた技術的部分失敗をHF-0契約(#665)でUSER通知する。
+
+    1銘柄ごとに直接publishするが、#665のfingerprint(job_name/failure_stage/
+    failure_type/error_type/error_message)はcatch境界ごとに固定値であり、
+    銘柄コードを含まない。そのため同一batch内で複数銘柄が同じ境界で失敗しても、
+    incident_notifier_handler.py側の既存dedup(claim window)により実質的に
+    batch単位で1件のLINE通知へ集約される(HF2-AC2相当)。batch_idをまたいで
+    カウンタを集約する新しい永続schema(infrastructure/aws/batch_tracker.py側の
+    変更)を必要としない、既存資産のみの再利用である。
+
+    通知自体の失敗が候補銘柄の判定・保存・通知処理を一切妨げないよう、
+    呼び出し元から独立したtry/exceptで囲む(本関数の外側)。
+    """
+    envelope = {
+        "source": _INCIDENT_SOURCE_BUY_CANDIDATES,
+        "job_name": _INCIDENT_JOB_NAME_BUY_CANDIDATES,
+        "failure_stage": failure_stage,
+        "failure_type": "UNEXPECTED_EXCEPTION",
+        "reason_code": reason_code,
+        "occurred_at": now.isoformat(),
+        "failure_class": "HANDLED_FAILURE",
+    }
+    publish_incident_envelope(envelope)
+
+
+def _notify_handled_failure_safely(failure_stage: str, reason_code: str, now: dt.datetime) -> None:
+    """`_notify_handled_failure()`の失敗(SNS権限不足・Topic ARN未設定等)が、
+    候補銘柄の判定・保存・既存通知処理を絶対にブロックしないためのラッパー
+    (`_save_evaluation_record_safely()`と同じ設計方針)。"""
+    try:
+        _notify_handled_failure(failure_stage, reason_code, now)
+    except Exception:  # noqa: BLE001 - HANDLED_FAILURE通知自体の失敗で本処理を止めない
+        logger.warning(
+            "buy_candidates_handler: failed to publish HANDLED_FAILURE envelope "
+            "failure_stage=%s",
+            failure_stage,
+        )
 
 
 def _deterministic_recommendation_id(batch_id: str, stock_code: str) -> str:
@@ -1082,6 +1129,8 @@ def _process_single_candidate(
     except Exception:  # noqa: BLE001 - 1銘柄の想定外エラーで再帰呼び出し全体を落とさない
         logger.exception("buy candidate analysis failed unexpectedly stock_code=%s", stock_code)
         result = {"stock_code": stock_code, "recommended": False, "notified": False, "failed": True}
+        # Issue #667(HF-2 B1)
+        _notify_handled_failure_safely("CANDIDATE_ANALYSIS", "BUY_CANDIDATES_ANALYSIS_FAILED", now)
 
     if batch_id is not None:
         evaluation_record_saved = _save_evaluation_record_safely(
@@ -1299,6 +1348,10 @@ def _save_evaluation_record_safely(
             stock_code,
             batch_id,
             exc_info=True,
+        )
+        # Issue #667(HF-2 B3)
+        _notify_handled_failure_safely(
+            "EVALUATION_RECORD_SAVE", "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED", now
         )
         return False
 
@@ -1583,6 +1636,14 @@ def _update_evaluation_record_outcome_safely(
             )
         )
     except Exception:  # noqa: BLE001 - 参照用の副次記録の失敗で本処理を止めない
+        # Issue #667(HF-2 B4)。本関数はnowを引数に持たないため、通知時刻は
+        # 失敗検知時点のUTC時刻を直接取得する(既存シグネチャを変更しない
+        # ための最小diff)。
+        _notify_handled_failure_safely(
+            "NOTIFICATION_OUTCOME_RECORD_UPDATE",
+            "BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED",
+            dt.datetime.now(dt.UTC),
+        )
         logger.warning(
             "buy_candidates_handler: failed to update BuyCandidateEvaluationRecord "
             "stock_code=%s batch_id=%s",

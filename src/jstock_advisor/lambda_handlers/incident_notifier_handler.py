@@ -24,14 +24,21 @@ reconciler等が発行するInternal structured incident payload → 同じSNS T
 
 Internal payloadのallowlist(#506 USER決定): source / job_name / failure_stage /
 failure_type / reason_code / occurred_at / failure_count / consecutive_days /
-is_ongoing のみ。stock_code / owner / holding_id / stack trace / 生exception message /
-AWS account ID / ARN / request ID は禁止(#501/#503のH-30契約を維持する)。
+is_ongoing / failure_class(#665)のみ。stock_code / owner / holding_id /
+stack trace / 生exception message / AWS account ID / ARN / request ID は禁止
+(#501/#503のH-30契約を維持する)。
 
 Issue #508(#132 X-9): LINE送信後(成功・失敗いずれの場合も)、GitHub Issue自動起票
 (`services/incident_github_issue_service.py`)を試行する。GitHub側の処理は独立した
 try/exceptで例外を完全に握りつぶし、本handlerの成否・LINE通知経路には一切影響しない
 (★最重要要件)。config.incident_notification.issue_creation_enabled=false(既定)の
 間はGitHub API・Secrets Manager呼び出しを一切行わない。
+
+Issue #665(#132 HF-0): `IncidentSignal.failure_class`が`HANDLED_FAILURE`
+(catchされた技術的部分失敗。主処理は継続)の場合、LINE通知・fingerprint・dedupは
+UNHANDLED_FAILUREと完全に同じ経路を通るが、GitHub Issue自動起票だけは試行しない
+(既定値`UNHANDLED_FAILURE`・CloudWatch Alarm由来は常にこちらのため、既存呼び出し元は
+無変更で現状の挙動を維持する)。
 """
 
 from __future__ import annotations
@@ -58,7 +65,7 @@ from jstock_advisor.domain.notification.incident_message import (
     build_incident_message,
     resolve_incident_job,
 )
-from jstock_advisor.domain.notification.incident_signal import IncidentSignal
+from jstock_advisor.domain.notification.incident_signal import FailureClass, IncidentSignal
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
 from jstock_advisor.services import incident_github_issue_service
@@ -190,12 +197,31 @@ def _optional_bool(message: dict[str, Any], key: str) -> bool | None:
     return value
 
 
+def _failure_class(message: dict[str, Any]) -> FailureClass:
+    """Issue #665: `failure_class`は省略可能(既定`UNHANDLED_FAILURE`)。
+
+    誤って未知の値・タイプミスが来た場合もfail-safe方向(UNHANDLED_FAILUREへ
+    fallback)とする。本来HANDLED_FAILUREのはずがUNHANDLEDとしてGitHub Issue化
+    される誤りは既存dedup(#508)が抑制できるが、逆(本来UNHANDLEDの重大障害が
+    HANDLED_FAILUREと誤認されGitHub Issue化されない)は実害が大きいため
+    (#665設計§7 ERROR_EDGE_CASES)。
+    """
+    value = message.get("failure_class")
+    if value is None:
+        return FailureClass.UNHANDLED_FAILURE
+    try:
+        return FailureClass(value)
+    except ValueError:
+        return FailureClass.UNHANDLED_FAILURE
+
+
 def _normalize_internal_message(message: dict[str, Any], now: dt.datetime) -> IncidentSignal:
     """Internal structured incident payload(reconciler等)をIncidentSignalへ正規化する。
 
-    許可するキーは#506 USER決定のallowlistのみ(source / job_name / failure_stage /
-    failure_type / reason_code / occurred_at / failure_count / consecutive_days /
-    is_ongoing)。reason_codeはfingerprint計算のerror_type(識別性の高い安定値)として
+    許可するキーは#506 USER決定のallowlistに#665のfailure_classを加えたもの
+    (source / job_name / failure_stage / failure_type / reason_code /
+    occurred_at / failure_count / consecutive_days / is_ongoing / failure_class)。
+    reason_codeはfingerprint計算のerror_type(識別性の高い安定値)として
     使う(#502のnormalize_error_signature()が数字列を正規化してしまうため、
     failure_count/consecutive_daysのような可変値はfingerprintの入力に含めない。
     reason_codeは固定の識別子文字列であり数字を含まない設計とする)。
@@ -211,6 +237,7 @@ def _normalize_internal_message(message: dict[str, Any], now: dt.datetime) -> In
         failure_count=_optional_int(message, "failure_count"),
         consecutive_days=_optional_int(message, "consecutive_days"),
         is_ongoing=_optional_bool(message, "is_ongoing"),
+        failure_class=_failure_class(message),
     )
 
 
@@ -257,7 +284,10 @@ def _process_signal(signal: IncidentSignal, config: AppConfig, now: dt.datetime)
     )
 
     line_failure: Exception | None = None
-    github_safe_to_attempt = True
+    # Issue #665: HANDLED_FAILURE(catchされた技術的部分失敗。主処理は継続)は
+    # GitHub Issue自動起票の対象外とする(HF-0 Approved Policy。既存の
+    # UNHANDLED_FAILURE契約は変更しない)。
+    github_safe_to_attempt = signal.failure_class is not FailureClass.HANDLED_FAILURE
     if outcome in _CLAIMED_OUTCOMES and claim_token is not None:
         line_failure = _send_line(fingerprint, claim_token, outcome, signal, now)
         if line_failure is not None and outcome is tracker.IncidentClaimOutcome.CLAIMED_NEW:
