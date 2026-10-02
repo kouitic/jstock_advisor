@@ -1626,6 +1626,43 @@ def test_partial_profit_take_shows_quantity_flow_with_ratio_snapshot(tmp_path: P
     assert "売却目安：200株" in text
 
 
+def test_partial_profit_take_theoretical_quantity_floors_at_half_boundary(
+    tmp_path: Path,
+) -> None:
+    """Issue #68(F-H4): 理論株数はfloor(truncation)で算出する(実際の売却
+    数量算出〔compute_suggested_sell_shares()〕と同じ方式)。shares=51・
+    ratio=0.5のとき51*0.5=25.5円相当となり、組み込みround()(banker's
+    rounding)なら26(偶数側)になるが、floor方式では25になる。"""
+    rec = Recommendation(
+        recommendation_id="rec-sell-half-boundary",
+        stock_code="8306",
+        stock_name="x",
+        recommended_at=_NOW,
+        recommendation_type=RecommendationType.PARTIAL_PROFIT_TAKE,
+        price_at_recommendation=Decimal("3000"),
+        confidence=ConfidenceLevel.HIGH,
+        rule_version="v1",
+        shares_at_recommendation=51,
+        suggested_sell_shares=25,
+        suggested_sell_ratio=0.5,
+        sell_intensity="STANDARD",
+        reasons=["含み益率が利確検討の基準に達しました"],
+        config_values_used={"partial_sell_ratios": {"standard": 0.5}},
+    )
+    RecommendationRepository(store_dir=tmp_path).save(rec)
+    _save_holding_eval_record(
+        tmp_path,
+        authoritative_recommendation_id="rec-sell-half-boundary",
+        authoritative_engine="PROFIT_TAKING",
+    )
+    service = _service(tmp_path)
+
+    text = service.build_holding_analysis_text("本人", "8306")
+
+    assert "理論株数：25株相当" in text  # floor(25.5) = 25(組み込みround()なら26)
+    assert "理論株数：26株相当" not in text
+
+
 def test_full_profit_take_does_not_fabricate_a_ratio(tmp_path: Path) -> None:
     rec = Recommendation(
         recommendation_id="rec-sell-2",

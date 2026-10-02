@@ -37,6 +37,7 @@ from jstock_advisor.domain.entities.valuation import (
     FairValueRange,
     ValuationExclusionReason,
 )
+from jstock_advisor.domain.valuation.fair_value import round_yen
 from jstock_advisor.domain.valuation.fair_value_usability import build_fair_value_range
 from jstock_advisor.domain.valuation.valuation_confidence import (
     CODE_VALUATION_ANCHOR_CALCULATION_FAILED,
@@ -99,7 +100,7 @@ def _detect_outlier(
                 return ValuationExclusionReason(
                     code="EXTREME_LOW_RELATIVE_TO_MEDIAN",
                     message=(
-                        f"算出値({value}円)が他方式の中央値({round(median_others, 0)}円)の"
+                        f"算出値({value}円)が他方式の中央値({round_yen(median_others)}円)の"
                         f"{float(_EXTREME_LOW_VS_MEDIAN_RATIO) * 100:.0f}%未満であり、"
                         "算出誤差または前提の異常による外れ値の可能性が高いため除外"
                     ),
@@ -111,7 +112,7 @@ def _detect_outlier(
                 return ValuationExclusionReason(
                     code="EXTREME_HIGH_RELATIVE_TO_MEDIAN",
                     message=(
-                        f"算出値({value}円)が他方式の中央値({round(median_others, 0)}円)の"
+                        f"算出値({value}円)が他方式の中央値({round_yen(median_others)}円)の"
                         f"{float(_EXTREME_HIGH_VS_MEDIAN_RATIO) * 100:.0f}%を超えており、"
                         "算出誤差または前提の異常による外れ値の可能性が高いため除外"
                     ),
@@ -196,8 +197,8 @@ def _interpolate_borderline(
             f"算出値({value}円)が除外基準({reference}円)の"
             f"{float(ratio) * 100:.1f}%であり、境界帯"
             f"({float(transition_min_ratio) * 100:.0f}%以上100%未満)に入るため、"
-            f"完全に除外せず他方式の中央値({round(median_others, 0)}円)へ寄せて"
-            f"{round(interpolated, 0)}円として採用"
+            f"完全に除外せず他方式の中央値({round_yen(median_others)}円)へ寄せて"
+            f"{round_yen(interpolated)}円として採用"
         ),
         actual_value=value,
         reference_value=reference,

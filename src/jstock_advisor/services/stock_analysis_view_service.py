@@ -1474,7 +1474,13 @@ def _sell_quantity_lines(recommendation: Recommendation) -> list[str]:
     if ratios is not None and recommendation.sell_intensity is not None:
         ratio_value = ratios.get(recommendation.sell_intensity.lower())
         if ratio_value is not None and holding_shares is not None:
-            theoretical = round(holding_shares * ratio_value)
+            # Issue #68(F-H4): 組み込みround()(round-half-even)ではなく、
+            # 実際の売却数量算出(trading_unit_feasibility.py::
+            # compute_suggested_sell_shares())と同じfloor(truncation)で
+            # 算出する。表示値を実際の算出根拠と一致させるための変更
+            # (house標準のROUND_HALF_UPとは無関係。この値は切り捨て方式が
+            # 正しい)。
+            theoretical = int(holding_shares * ratio_value)
             lines.append(f"目標売却比率：{ratio_value * 100:.0f}%")
             lines.append(f"比率適用後の理論株数：{theoretical}株相当")
     lines.append(f"単元株単位への調整後の売却目安：{recommendation.suggested_sell_shares}株")

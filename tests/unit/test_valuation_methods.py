@@ -2,8 +2,13 @@ from decimal import Decimal
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import BuyPriceReliability, ConfidenceLevel
-from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from jstock_advisor.domain.entities.valuation import (
+    FairValueMethodResult,
+    ValuationExclusionReason,
+)
 from jstock_advisor.domain.valuation.valuation_methods import (
+    _detect_outlier,
+    _interpolate_borderline,
     apply_dcf_divergence_filter,
     apply_outlier_filters,
     build_valuation_summary,
@@ -317,3 +322,61 @@ def test_valuation_anchor_calculation_failed_when_all_weights_non_positive() -> 
     assert result.anchor is None
     assert result.blocking_reason is not None
     assert result.blocking_reason.code == "VALUATION_ANCHOR_CALCULATION_FAILED"
+
+
+# --- Issue #68(F-H3): 除外理由メッセージの中央値・補間値はROUND_HALF_UPで
+# 表示する(組み込みround()のbanker's roundingとは.5ちょうどで結果が
+# 分かれる)。
+
+
+def test_extreme_low_message_rounds_median_half_up() -> None:
+    # median_others=1000.5円。組み込みround(Decimal("1000.5"), 0)は
+    # banker's roundingで1000(偶数側)になるが、house標準のROUND_HALF_UPは
+    # 1001になる。
+    reason = _detect_outlier(
+        value=Decimal("100"),
+        other_values=[Decimal("1000.5")],
+        current_price=None,  # current_price側の判定を経由させない
+        low_52_week=None,
+    )
+    assert reason is not None
+    assert reason.code == "EXTREME_LOW_RELATIVE_TO_MEDIAN"
+    assert "1001円" in reason.message
+    assert "1000円" not in reason.message
+
+
+def test_extreme_high_message_rounds_median_half_up() -> None:
+    reason = _detect_outlier(
+        value=Decimal("5000"),
+        other_values=[Decimal("1000.5")],
+        current_price=None,
+        low_52_week=None,
+    )
+    assert reason is not None
+    assert reason.code == "EXTREME_HIGH_RELATIVE_TO_MEDIAN"
+    assert "1001円" in reason.message
+    assert "1000円" not in reason.message
+
+
+def test_borderline_interpolation_message_rounds_interpolated_value_half_up() -> None:
+    # transition_min_ratio=0.5、actual/reference=75/100=0.75 -> share=0.5。
+    # median_others=100、value=201 -> interpolated = 100 + (201-100)*0.5 = 150.5円。
+    # 組み込みround(Decimal("150.5"), 0)はbanker's roundingで150(偶数側)に
+    # なるが、house標準のROUND_HALF_UPは151になる。
+    exclusion = ValuationExclusionReason(
+        code="BELOW_52_WEEK_LOW",
+        message="placeholder",
+        actual_value=Decimal("75"),
+        reference_value=Decimal("100"),
+    )
+    result = _interpolate_borderline(
+        value=Decimal("201"),
+        exclusion=exclusion,
+        other_values=[Decimal("100")],
+        transition_min_ratio=0.5,
+    )
+    assert result is not None
+    interpolated, detail = result
+    assert interpolated == Decimal("150.5")
+    assert "151円として採用" in detail.message
+    assert "150円として採用" not in detail.message

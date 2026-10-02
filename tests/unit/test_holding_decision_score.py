@@ -191,6 +191,36 @@ def test_display_value_rounding_matches_expectation():
     assert out.display_value == -1
 
 
+# --- Issue #68(F-H2): .5ちょうどの境界はROUND_HALF_UP(house標準)で
+# 丸める。組み込みround()のbanker's rounding(ROUND_HALF_EVEN)とは
+# -2.5 -> -2 vs -3 で結果が分かれる唯一のケース。
+
+
+def test_display_value_half_rounds_up_at_minus_2_5():
+    q, i, r = _score_for_target(-2.5)
+    out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
+    assert out.final_score == -2.5
+    assert out.display_value == -3  # 組み込みround(-2.5)は-2(banker's rounding)
+
+
+def test_display_value_half_rounds_up_at_1_5():
+    q, i, r = _score_for_target(1.5)
+    out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
+    assert out.final_score == 1.5
+    assert out.display_value == 2  # 組み込みround(1.5)も2のため、ここは両者一致
+                                     # (正の奇数側への丸めはROUND_HALF_EVENと
+                                     # ROUND_HALF_UPが一致するケースの確認)
+
+
+def test_display_value_half_rounds_up_at_minus_3_5():
+    q, i, r = _score_for_target(-3.5)
+    out = combine_holding_decision(q, i, r, _NO_GATE, _RULES)
+    assert out.final_score == -3.5
+    assert out.display_value == -4  # 組み込みround(-3.5)は-4(偶数)で両者一致する
+                                     # ケース。-2.5のケースとの対比で、house標準が
+                                     # 「.5は常に遠い方へ丸める」ことを固定する
+
+
 # ===== 修正3: notify_below_score境界値テスト =====
 #
 # 仕様(実装プラン5節)は score_threshold_met = final_score < notify_below_score
