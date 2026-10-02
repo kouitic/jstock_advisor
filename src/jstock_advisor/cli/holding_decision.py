@@ -25,7 +25,11 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.holding_decision import ReasonImpact
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
+from jstock_advisor.domain.entities.owner import (
+    DEFAULT_OWNER,
+    build_holding_id,
+    normalize_and_validate_owner,
+)
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.aws.baseline_pointer import BaselinePointerConflictError
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
@@ -254,6 +258,7 @@ def _build_holding_override(
     purchase_date: str,
     shares: str,
     now: dt.datetime,
+    owner: str,
 ) -> Holding:
     """--purchase-price等から非保有銘柄用の仮Holdingを構築する(コードレビュー対応)。
 
@@ -278,9 +283,11 @@ def _build_holding_override(
     if date_value > business_date(now):
         typer.echo("--purchase-dateは評価基準日(JST)以前の日付を指定してください。")
         raise typer.Exit(code=1)
+    # Issue #579: 仮の保有が別ownerのholding_idを名乗らないよう、指定ownerで構築する。
+    normalized_owner = normalize_and_validate_owner(owner)
     return Holding(
-        owner=DEFAULT_OWNER,
-        holding_id=build_holding_id(DEFAULT_OWNER, stock_code),
+        owner=normalized_owner,
+        holding_id=build_holding_id(normalized_owner, stock_code),
         stock_code=stock_code,
         stock_name=stock_code,
         shares=shares_value,
@@ -297,7 +304,12 @@ def _build_holding_override(
 @app.command("backtest")
 def backtest(
     stock_code: list[str] = typer.Option(
-        [], "--stock-code", help="対象銘柄コード(複数指定可、省略時は全保有銘柄)"
+        [], "--stock-code", help="対象銘柄コード(複数指定可、省略時は指定所有者の全保有銘柄)"
+    ),
+    owner: str = typer.Option(
+        DEFAULT_OWNER,
+        "--owner",
+        help="所有者(既定は本人。replayモードでは対象銘柄の列挙にのみ使う)",
     ),
     start_date: str = typer.Option(
         None,
@@ -346,9 +358,12 @@ def backtest(
     (架空の取得単価による誤評価を防ぐため)。--purchase-price/--purchase-date/
     --sharesをすべて指定した場合に限り、単一銘柄指定時だけ旧方式も評価する。
     """
-    stock_codes = resolve_target_stock_codes(stock_code)
+    stock_codes = resolve_target_stock_codes(stock_code, owner)
     if not stock_codes:
-        typer.echo("対象銘柄がありません(--stock-codeを指定するか、保有銘柄を登録してください)。")
+        typer.echo(
+            "対象銘柄がありません(--stock-codeを指定するか、"
+            f"所有者{owner}の保有銘柄を登録してください)。"
+        )
         raise typer.Exit(code=1)
 
     purchase_options = (purchase_price, purchase_date, shares)
@@ -398,11 +413,11 @@ def backtest(
             assert purchase_date is not None
             assert shares is not None
             override = _build_holding_override(
-                stock_codes[0], purchase_price, purchase_date, shares, now
+                stock_codes[0], purchase_price, purchase_date, shares, now, owner
             )
             holding_overrides = {stock_codes[0]: override}
         rows = run_live_comparison(
-            stock_codes, providers, config, now, holding_overrides=holding_overrides
+            stock_codes, providers, config, now, owner, holding_overrides=holding_overrides
         )
 
     _print_backtest_rows(rows)
@@ -447,8 +462,9 @@ def _print_compare_rows(rows: list[CompareRow]) -> None:
 @app.command("compare")
 def compare(
     stock_code: list[str] = typer.Option(
-        [], "--stock-code", help="対象銘柄コード(複数指定可、省略時は全保有銘柄)"
+        [], "--stock-code", help="対象銘柄コード(複数指定可、省略時は指定所有者の全保有銘柄)"
     ),
+    owner: str = typer.Option(DEFAULT_OWNER, "--owner", help="所有者(既定は本人)"),
     source: str = typer.Option("mock", "--source", help="データ取得元: mock(既定)/ real"),
     csv_path: Path = typer.Option(None, "--csv", help="結果をCSVへ出力するパス"),
 ) -> None:
@@ -459,9 +475,12 @@ def compare(
     1銘柄ごとに表示する。mode=shadowで運用しているときに、本稼働へ切り替えて
     よいかを判断する材料として使う。
     """
-    stock_codes = resolve_target_stock_codes(stock_code)
+    stock_codes = resolve_target_stock_codes(stock_code, owner)
     if not stock_codes:
-        typer.echo("対象銘柄がありません(--stock-codeを指定するか、保有銘柄を登録してください)。")
+        typer.echo(
+            "対象銘柄がありません(--stock-codeを指定するか、"
+            f"所有者{owner}の保有銘柄を登録してください)。"
+        )
         raise typer.Exit(code=1)
 
     now = dt.datetime.now(dt.UTC)
@@ -471,7 +490,7 @@ def compare(
         if source == "real"
         else build_mock_provider_bundle(now)
     )
-    rows = run_compare(stock_codes, providers, config, now)
+    rows = run_compare(stock_codes, providers, config, now, owner)
 
     _print_compare_rows(rows)
 

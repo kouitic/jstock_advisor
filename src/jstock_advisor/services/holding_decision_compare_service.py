@@ -22,7 +22,7 @@ from pathlib import Path
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import BaselineOrigin, ExecutionPlanReason
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult, ReasonImpact
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
+from jstock_advisor.domain.entities.owner import normalize_and_validate_owner
 from jstock_advisor.services.holding_decision_backtest_service import placeholder_holding
 from jstock_advisor.services.holding_decision_service import HoldingDecisionService
 from jstock_advisor.services.portfolio_service import PortfolioService
@@ -150,10 +150,14 @@ def run_compare(
     providers: ProviderBundle,
     config: AppConfig,
     now: dt.datetime,
+    owner: str,
     sell_service: SellSignalService | None = None,
     holding_decision_service: HoldingDecisionService | None = None,
     portfolio_service: PortfolioService | None = None,
 ) -> list[CompareRow]:
+    # ownerは必須引数(Issue #579)。DEFAULT_OWNERへの解決はCLI層(`--owner`)だけが行う。
+    # 全銘柄がデータ取得失敗でも不正なownerを見逃さないよう、ループの前に検証する。
+    normalized_owner = normalize_and_validate_owner(owner)
     sell_service = sell_service or SellSignalService(providers=providers, config=config)
     holding_decision_service = holding_decision_service or HoldingDecisionService(providers, config)
     portfolio = portfolio_service or PortfolioService()
@@ -181,7 +185,7 @@ def run_compare(
             )
             continue
 
-        holding = portfolio.get_holding(DEFAULT_OWNER, stock_code)
+        holding = portfolio.get_holding(normalized_owner, stock_code)
         legacy_category: str
         legacy_should_notify: bool | None
         legacy_reason_codes: tuple[str, ...]
@@ -199,7 +203,7 @@ def run_compare(
             legacy_should_notify = legacy_outcome.recommendation is not None
             legacy_reason_codes = legacy_outcome.triggered_rule_names
 
-        new_holding = holding or placeholder_holding(stock_code, now)
+        new_holding = holding or placeholder_holding(stock_code, now, normalized_owner)
         new_outcome = holding_decision_service.evaluate(
             new_holding,
             now,
