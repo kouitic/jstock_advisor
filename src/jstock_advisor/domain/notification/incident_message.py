@@ -34,8 +34,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from jstock_advisor.domain.jst import require_timezone_aware, to_jst
+from jstock_advisor.domain.notification.incident_signal import FailureClass
 
+# UNHANDLED_FAILURE用(既存。変更しない)。HANDLED_FAILURE用は_HANDLED_HEADLINE。
 _HEADLINE = "⚠️ 本番処理でエラーが発生しました。システム側で調査情報を記録しました。"
+# Issue #724: HANDLED_FAILUREはGitHub Issueを自動作成しないため、恒久記録を
+# 示唆する文言(「システム側で調査情報を記録しました」)を含めない中立的な文面。
+_HANDLED_HEADLINE = "⚠️ 本番処理の一部で問題が発生しました。"
 
 # Lambda の関数名は、スタック名が前置される(`jstock-advisor-buy-candidates` 等)。
 _STACK_PREFIX = "jstock-advisor-"
@@ -118,6 +123,130 @@ def resolve_incident_job(internal_name: object) -> IncidentJob:
     return _QUEUE_NAME_TO_JOB.get(name, IncidentJob.OTHER)
 
 
+class IncidentContent(StrEnum):
+    """HANDLED_FAILURE通知の「内容」行に出してよい、既知のreason_codeの
+    利用者向け説明文(値がそのまま本文に出る)。IncidentJob/
+    IncidentFailureStageと同じ設計(Issue #724)。"""
+
+    BUY_CANDIDATES_ANALYSIS_FAILED = "銘柄分析の一部が完了しませんでした"
+    # Issue #724 PR #740レビュー是正(MUST F-1由来の派生修正): 当初
+    # HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILEDと文言が完全一致して
+    # おり、StrEnumの値重複によりaliasになっていた(IncidentContentの
+    # 列挙から名前が1つ消える)ことを、網羅性guardの実装過程で発見し是正した。
+    BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED = "買い候補の判定結果の記録保存に失敗しました"
+    BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED = "通知結果の記録更新に失敗しました"
+    HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED = (
+        "保有資産見積もりに必要な株価取得の一部に失敗しました"
+    )
+    HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED = "保有銘柄の判定結果の記録保存に失敗しました"
+    HOLDINGS_WATCHLIST_ANALYSIS_FAILED = "保有銘柄分析の一部が完了しませんでした"
+    EVALUATION_AGGREGATE_COMMIT_FAILED = "評価結果の集計確定に失敗しました"
+    EVALUATION_AUDIT_PERSIST_FAILED = "評価処理の記録保存に失敗しました"
+    WATCHLIST_FINALIZER_REPOSITORY_ADD_FAILED = "ウォッチリストへの銘柄追加の一部に失敗しました"
+    WATCHLIST_FINALIZER_UNEXPECTED_ERROR_COUNT = (
+        "ウォッチリスト判定処理で想定外のエラーが発生しました"
+    )
+    RECONCILER_COMPLETION_RECOVERY_INVOKE_FAILED = "処理完了の復旧処理の呼び出しに失敗しました"
+    RECONCILER_TRADE_EVENT_RECONCILIATION_FAILED = "売買記録の整合性確認処理に失敗しました"
+    RECONCILER_FINALIZE_RETRY_UNEXPECTED_ERROR = "処理完了の再試行で想定外のエラーが発生しました"
+    RECONCILER_NOTIFICATION_RETRY_UNEXPECTED_ERROR = "通知の再試行で想定外のエラーが発生しました"
+    RECONCILER_TIMEOUT_FINALIZING_UNEXPECTED_ERROR = (
+        "処理時間超過後の後処理で想定外のエラーが発生しました"
+    )
+    RECONCILER_MAINTENANCE_TRIGGER_RETRY_UNEXPECTED_ERROR = (
+        "メンテナンス処理の再試行で想定外のエラーが発生しました"
+    )
+    WATCHLIST_MISSED_SCHEDULE = "定時実行が行われなかった可能性があります"
+    WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK = "銘柄ユニバースの取得が複数日連続で失敗しています"
+    WATCHLIST_QUEUE_BACKLOG = "処理待ちが滞留しています"
+    WATCHLIST_DELETION_ZERO_STREAK = "ウォッチリストからの削除が複数日連続で発生していません"
+    BUY_CANDIDATES_STUCK_BATCH = "買い候補チェックの処理が完了せず滞留している可能性があります"
+    HOLDINGS_WATCHLIST_STUCK_BATCH = "保有株チェックの処理が完了せず滞留している可能性があります"
+    CLOUDWATCH_ALARM = "システムの監視アラームが検知されました"
+    OTHER = "技術的な問題を検知しました"  # 対応表に無いreason_codeの落ち先
+
+
+# 内部のreason_code(IncidentSignal.error_type)→ 利用者向けの「内容」文。
+# tests/unit/test_issue_501_incident_message.pyが、列挙した5箇所
+# (buy_candidates/holdings_watchlist/evaluationの_notify_handled_failure_
+# safely第2位置引数、finalizerのdict literal、reconcilerのboundary
+# metadata)を走査し、本辞書のkeyと突き合わせる。この5箇所の書き方で
+# HANDLEDの発行元を1件削除する・新しいHANDLED発行元を無登録のまま追加する、
+# のいずれもテストが赤くなる。★キーワード引数での指定・列挙外の新規
+# ファイルへの追加は視界外であり赤くならない(src全数の走査ではない。
+# 視界外を塞ぐ仕組みは#745)。新しい発行元を足すときは、本辞書と合わせて
+# 同テストの走査対象も更新すること。運用トレンド検知6件
+# (watchlist_missed_schedule等)とCloudWatchAlarmの計7件は、現時点では
+# envelopeがfailure_classをHANDLED_FAILUREに設定していないため到達しない
+# 先行登録であり、同テストが別途明示的に固定している(発行元が将来HF化
+# された場合はそちらのレビューで本コメント・テスト双方を更新すること)。
+_REASON_CODE_TO_CONTENT: dict[str, IncidentContent] = {
+    "BUY_CANDIDATES_ANALYSIS_FAILED": IncidentContent.BUY_CANDIDATES_ANALYSIS_FAILED,
+    "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED": (
+        IncidentContent.BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED
+    ),
+    "BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED": (
+        IncidentContent.BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED
+    ),
+    "HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED": (
+        IncidentContent.HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED
+    ),
+    "HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED": (
+        IncidentContent.HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED
+    ),
+    "HOLDINGS_WATCHLIST_ANALYSIS_FAILED": IncidentContent.HOLDINGS_WATCHLIST_ANALYSIS_FAILED,
+    "EVALUATION_AGGREGATE_COMMIT_FAILED": IncidentContent.EVALUATION_AGGREGATE_COMMIT_FAILED,
+    "EVALUATION_AUDIT_PERSIST_FAILED": IncidentContent.EVALUATION_AUDIT_PERSIST_FAILED,
+    "watchlist_finalizer_repository_add_failed": (
+        IncidentContent.WATCHLIST_FINALIZER_REPOSITORY_ADD_FAILED
+    ),
+    "watchlist_finalizer_unexpected_error_count": (
+        IncidentContent.WATCHLIST_FINALIZER_UNEXPECTED_ERROR_COUNT
+    ),
+    "reconciler_completion_recovery_invoke_failed": (
+        IncidentContent.RECONCILER_COMPLETION_RECOVERY_INVOKE_FAILED
+    ),
+    "reconciler_trade_event_reconciliation_failed": (
+        IncidentContent.RECONCILER_TRADE_EVENT_RECONCILIATION_FAILED
+    ),
+    "reconciler_finalize_retry_unexpected_error": (
+        IncidentContent.RECONCILER_FINALIZE_RETRY_UNEXPECTED_ERROR
+    ),
+    "reconciler_notification_retry_unexpected_error": (
+        IncidentContent.RECONCILER_NOTIFICATION_RETRY_UNEXPECTED_ERROR
+    ),
+    "reconciler_timeout_finalizing_unexpected_error": (
+        IncidentContent.RECONCILER_TIMEOUT_FINALIZING_UNEXPECTED_ERROR
+    ),
+    "reconciler_maintenance_trigger_retry_unexpected_error": (
+        IncidentContent.RECONCILER_MAINTENANCE_TRIGGER_RETRY_UNEXPECTED_ERROR
+    ),
+    "watchlist_missed_schedule": IncidentContent.WATCHLIST_MISSED_SCHEDULE,
+    "watchlist_universe_load_failure_streak": (
+        IncidentContent.WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK
+    ),
+    "watchlist_queue_backlog": IncidentContent.WATCHLIST_QUEUE_BACKLOG,
+    "watchlist_deletion_zero_streak": IncidentContent.WATCHLIST_DELETION_ZERO_STREAK,
+    "buy_candidates_stuck_batch": IncidentContent.BUY_CANDIDATES_STUCK_BATCH,
+    "holdings_watchlist_stuck_batch": IncidentContent.HOLDINGS_WATCHLIST_STUCK_BATCH,
+    "CloudWatchAlarm": IncidentContent.CLOUDWATCH_ALARM,
+}
+
+
+def resolve_incident_content(reason_code: object) -> IncidentContent:
+    """内部のreason_code生文字列を、利用者向けの「内容」文(列挙)へ引く。
+
+    対応表に無い値・文字列でない値は`IncidentContent.OTHER`へ落ちる
+    (`resolve_incident_job()`/`resolve_incident_failure_stage()`と同じ理由:
+    入力の不備によって通知自体を失わない。かつ**入力の生文字列は返り値へ
+    残らない**ため、将来未知のreason_codeが追加されても、対応表を更新する
+    までPUBLIC repositoryへ自由文字列が漏れることはない)。
+    """
+    if not isinstance(reason_code, str):
+        return IncidentContent.OTHER
+    return _REASON_CODE_TO_CONTENT.get(reason_code, IncidentContent.OTHER)
+
+
 def _require_count(name: str, value: object) -> None:
     if value is None:
         return
@@ -136,6 +265,10 @@ class IncidentNotice:
     failure_count: int | None = None
     consecutive_days: int | None = None
     is_ongoing: bool | None = None
+    # Issue #724: HANDLED_FAILUREのときだけ「内容」行を出す(headline分岐にも使う)。
+    # UNHANDLED_FAILURE(既定値)では本文は1バイトも変わらない(契約4)。
+    failure_class: FailureClass = FailureClass.UNHANDLED_FAILURE
+    content: IncidentContent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.job, IncidentJob):
@@ -147,15 +280,28 @@ class IncidentNotice:
         _require_count("consecutive_days", self.consecutive_days)
         if self.is_ongoing is not None and not isinstance(self.is_ongoing, bool):
             raise TypeError("is_ongoing must be bool or None")
+        if not isinstance(self.failure_class, FailureClass):
+            raise TypeError("failure_class must be a FailureClass")
+        if self.content is not None and not isinstance(self.content, IncidentContent):
+            raise TypeError("content must be an IncidentContent or None")
 
 
 def build_incident_message(notice: IncidentNotice) -> str:
-    """「異常 1 通」の本文を組み立てる(固定の文型。allowlist の項目だけ)。"""
+    """「異常 1 通」の本文を組み立てる(固定の文型。allowlist の項目だけ)。
+
+    Issue #724: HANDLED_FAILUREのときだけ、恒久記録を示唆しない中立的な
+    headline(`_HANDLED_HEADLINE`)を使い、「対象」の直後に「内容」行を
+    追加する。UNHANDLED_FAILUREは`_HEADLINE`のまま、内容行も追加しない
+    (契約4: 既存通知契約を不用意に変更しない)。
+    """
+    is_handled = notice.failure_class is FailureClass.HANDLED_FAILURE
     lines = [
-        _HEADLINE,
+        _HANDLED_HEADLINE if is_handled else _HEADLINE,
         f"対象: {notice.job.value}",
-        f"発生時刻: {to_jst(notice.occurred_at).strftime('%H:%M')}",
     ]
+    if is_handled and notice.content is not None:
+        lines.append(f"内容: {notice.content.value}")
+    lines.append(f"発生時刻: {to_jst(notice.occurred_at).strftime('%H:%M')}")
     if notice.failure_count is not None:
         lines.append(f"件数: {notice.failure_count}件")
     if notice.consecutive_days is not None:

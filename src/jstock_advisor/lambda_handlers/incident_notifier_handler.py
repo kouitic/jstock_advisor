@@ -63,6 +63,7 @@ from jstock_advisor.domain.notification.incident_github_issue_message import (
 from jstock_advisor.domain.notification.incident_message import (
     IncidentNotice,
     build_incident_message,
+    resolve_incident_content,
     resolve_incident_job,
 )
 from jstock_advisor.domain.notification.incident_signal import FailureClass, IncidentSignal
@@ -353,6 +354,12 @@ def _send_line(
         failure_count=failure_count,
         consecutive_days=signal.consecutive_days,
         is_ongoing=signal.is_ongoing,
+        failure_class=signal.failure_class,
+        content=(
+            resolve_incident_content(signal.error_type)
+            if signal.failure_class is FailureClass.HANDLED_FAILURE
+            else None
+        ),
     )
     text = build_incident_message(notice)
 
