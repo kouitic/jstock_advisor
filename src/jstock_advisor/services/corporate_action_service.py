@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import ROUND_HALF_UP, Decimal
+from enum import StrEnum
 
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.corporate_action import AdjustedDecimal, AdjustedShares
@@ -34,6 +35,14 @@ class NonIntegerShareAdjustmentError(ValueError):
 
 class MismatchedAdjustmentBasisDateError(ValueError):
     """基準日が異なる調整済み値同士を計算・比較しようとした場合。"""
+
+
+class BasisDateConsistency(StrEnum):
+    """価格側・財務指標側の基準日整合性の判定結果(要求仕様3節、Issue #698)。"""
+
+    CONSISTENT = "CONSISTENT"
+    UNDETERMINED = "UNDETERMINED"
+    DETECTED = "DETECTED"
 
 
 class CorporateActionService:
@@ -175,6 +184,44 @@ class CorporateActionService:
             source=source,
             source_timestamp=self._now,
         )
+
+    def classify_basis_date_consistency(
+        self,
+        stock_code: str,
+        price_basis_date: dt.date,
+        fundamental_basis_date: dt.date,
+        events: list[CorporateActionEvent] | None = None,
+    ) -> BasisDateConsistency:
+        """価格とEPS/BPS/DPS等の1株当たり指標が、同一の分割・併合・無償割当の
+        基準の上で組み合わされているかを判定する(Issue #698)。
+
+        価格(market_data provider経由)は問い合わせ時点に関わらず常に最新の
+        分割基準へ遡及調整されることを実測で確認済みだが、財務指標
+        (EPS/BPS/DPS)が同様に遡及調整されるかはprovider・取得時点によって
+        保証されない。
+
+        本関数はprice_basis_dateとfundamental_basis_dateの間(どちらが古いか
+        を問わない)に、1株当たり指標の調整対象イベント(SPLIT/REVERSE_SPLIT/
+        FREE_ALLOTMENT)の効力発生日が1件でも存在するかどうかだけで判定する
+        (要求仕様12節: 取得できない情報を推測で補完しない)。
+
+        該当イベントが1件も無ければCONSISTENT(両者の基準がそもそもずれる
+        余地が無い)。1件でもあればUNDETERMINED(財務指標側が遡及調整済みか
+        どうかを本関数だけでは確認できないため、安全側へ倒す。USER決定OD-3:
+        不整合の有無を判定できない場合も抑止対象とする)。
+
+        DETECTED(実際の不整合を確認できた)は本関数では返さない。確定検出には
+        実測値の比較(算出結果が分割比率で説明できる水準まで乖離している等、
+        日付情報だけでは判定できない根拠)が必要であり、呼び出し側が本関数の
+        UNDETERMINED結果と実測値の異常検知を組み合わせて最終的な判定を行う
+        (#698 PR-2/PR-3で実装予定)。
+        """
+        factor = self.cumulative_split_factor(
+            stock_code, fundamental_basis_date, price_basis_date, events
+        )
+        if factor == Decimal("1"):
+            return BasisDateConsistency.CONSISTENT
+        return BasisDateConsistency.UNDETERMINED
 
     def require_matching_basis_dates(self, *values: AdjustedDecimal | AdjustedShares) -> None:
         """基準日が異なる調整済み値同士の計算・比較を禁止する。"""

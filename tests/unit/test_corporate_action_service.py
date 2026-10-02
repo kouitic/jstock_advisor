@@ -7,6 +7,7 @@ from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import CorporateActionType
 from jstock_advisor.interfaces.types import CorporateActionEvent
 from jstock_advisor.services.corporate_action_service import (
+    BasisDateConsistency,
     CorporateActionService,
     MismatchedAdjustmentBasisDateError,
     NonIntegerShareAdjustmentError,
@@ -286,3 +287,97 @@ def test_cumulative_split_factor_ignores_merger_ratio() -> None:
     service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
     factor = service.cumulative_split_factor("5401", dt.date(2026, 1, 1), dt.date(2026, 7, 27))
     assert factor == Decimal("2")  # MERGERの3倍は無視され、SPLITの2倍のみ反映
+
+
+# ===== Issue #698 PR-1: basis-date不整合の検出機構 =====
+# 価格側と財務指標(EPS/BPS/DPS)側の基準日が、分割・併合・無償割当を
+# またいでいないかを判定する。CONSISTENTは「整合を確認できた」場合のみ
+# (保守的判定。MANAGER決定: 曖昧な場合はCONSISTENTではなくUNDETERMINEDへ倒す)。
+
+
+def test_classify_basis_date_consistency_consistent_when_no_ratio_event_between_dates() -> None:
+    """2つの基準日の間に分割等のイベントが1件も無ければCONSISTENT。"""
+    events = [_split_event("5401", dt.date(2025, 1, 1), "2")]  # 両基準日より前のイベント
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    result = service.classify_basis_date_consistency(
+        "5401",
+        price_basis_date=dt.date(2026, 7, 27),
+        fundamental_basis_date=dt.date(2026, 6, 1),
+    )
+    assert result == BasisDateConsistency.CONSISTENT
+
+
+def test_classify_basis_date_consistency_consistent_when_no_events_at_all() -> None:
+    service = CorporateActionService(_FakeCorporateActionProvider([]), now=_NOW)
+    result = service.classify_basis_date_consistency(
+        "5401",
+        price_basis_date=dt.date(2026, 7, 27),
+        fundamental_basis_date=dt.date(2024, 1, 1),
+    )
+    assert result == BasisDateConsistency.CONSISTENT
+
+
+def test_classify_basis_date_consistency_consistent_when_dates_are_equal() -> None:
+    """基準日が同一ならイベントの有無に関わらずCONSISTENT(ずれる余地が無い)。"""
+    events = [_split_event("5401", dt.date(2026, 3, 1), "2")]
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    result = service.classify_basis_date_consistency(
+        "5401",
+        price_basis_date=dt.date(2026, 7, 27),
+        fundamental_basis_date=dt.date(2026, 7, 27),
+    )
+    assert result == BasisDateConsistency.CONSISTENT
+
+
+def test_classify_basis_date_consistency_undetermined_when_split_falls_between_dates() -> None:
+    """9065・7242相当: 価格側のbasis_dateは分割後、財務側のbasis_dateは分割前
+    (財務指標側が遡及調整済みかを本関数だけでは確認できないため、安全側のUNDETERMINED)。"""
+    events = [_split_event("9065", dt.date(2026, 4, 1), "2")]
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    result = service.classify_basis_date_consistency(
+        "9065",
+        price_basis_date=dt.date(2026, 7, 27),
+        fundamental_basis_date=dt.date(2026, 1, 1),
+    )
+    assert result == BasisDateConsistency.UNDETERMINED
+
+
+def test_classify_basis_date_consistency_undetermined_regardless_of_date_order() -> None:
+    """price_basis_dateとfundamental_basis_dateの前後関係が逆でも、間にイベントが
+    あればUNDETERMINED(どちらが新しいかに依存しない判定)。"""
+    events = [_split_event("5401", dt.date(2026, 4, 1), "2")]
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    result = service.classify_basis_date_consistency(
+        "5401",
+        price_basis_date=dt.date(2026, 1, 1),
+        fundamental_basis_date=dt.date(2026, 7, 27),
+    )
+    assert result == BasisDateConsistency.UNDETERMINED
+
+
+def test_classify_basis_date_consistency_ignores_merger_without_ratio_adjustment() -> None:
+    """MERGER等、1株当たり指標の調整対象ではないイベントは判定に混入しない。"""
+    events = [_event("5401", CorporateActionType.MERGER, dt.date(2026, 4, 1), "3")]
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    result = service.classify_basis_date_consistency(
+        "5401",
+        price_basis_date=dt.date(2026, 7, 27),
+        fundamental_basis_date=dt.date(2026, 1, 1),
+    )
+    assert result == BasisDateConsistency.CONSISTENT
+
+
+def test_classify_basis_date_consistency_does_not_mutate_existing_methods() -> None:
+    """新規関数の追加が既存メソッドの挙動に影響しないことの回帰確認
+    (LOCK_LEVEL_1: EXISTING_CONSUMER_BEHAVIOR_UNCHANGED)。"""
+    events = [_split_event("5401", dt.date(2026, 3, 1), "2")]
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    result = service.adjust_price(
+        raw=Decimal("3500"),
+        stock_code="5401",
+        value_date=dt.date(2026, 1, 1),
+        basis_date=dt.date(2026, 7, 27),
+        source=_SOURCE,
+    )
+    assert result.adjustment_factor == Decimal("2")
+    assert result.adjusted_value == Decimal("1750")
