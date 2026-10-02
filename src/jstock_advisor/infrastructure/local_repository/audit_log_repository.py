@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.audit import AuditLogEntry
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 from jstock_advisor.infrastructure.record_failure_policy import (
@@ -46,11 +47,12 @@ class AuditLogRepository:
 
     def list_by_stock(self, stock_code: str) -> list[AuditLogEntry]:
         items = self._store.find(lambda e: e.stock_code == stock_code)
-        return sorted(items, key=lambda e: e.timestamp)
+        # Issue #576: naive値混入時のTypeErrorに対する防御(normalize_to_aware_utc)。
+        return sorted(items, key=lambda e: normalize_to_aware_utc(e.timestamp))
 
     def list_by_decision_type(self, decision_type: str) -> list[AuditLogEntry]:
         items = self._store.find(lambda e: e.decision_type == decision_type)
-        return sorted(items, key=lambda e: e.timestamp)
+        return sorted(items, key=lambda e: normalize_to_aware_utc(e.timestamp))
 
     def get(self, audit_id: str) -> AuditLogEntry | None:
         return self._store.get(audit_id)

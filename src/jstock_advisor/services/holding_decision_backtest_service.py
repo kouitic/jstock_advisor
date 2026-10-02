@@ -34,6 +34,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.enums import (
     AccountType,
     BacktestRecommendationSource,
@@ -121,12 +122,9 @@ def _jst_date_range_to_utc(
     return start_utc, end_exclusive_utc
 
 
-def _as_aware_utc(value: dt.datetime) -> dt.datetime:
-    """naiveはUTCとみなし(既存now生成規約dt.datetime.now(dt.UTC)に合わせる)、
-    awareなら必ずUTCへ変換する。"""
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=dt.UTC)
-    return value.astimezone(dt.UTC)
+# 共通部品(S-25。Issue #576)へ統合。この別名は導入前からの既存の呼び出し名・
+# テスト(test_holding_decision_backtest_service.py)との互換のために残っている。
+_as_aware_utc = normalize_to_aware_utc
 
 
 def business_date(value: dt.datetime) -> dt.date:
@@ -664,7 +662,10 @@ def run_history_replay(
         if start_utc <= _as_aware_utc(r.evaluated_at) < end_exclusive_utc
         and (stock_code_filter is None or r.stock_code in stock_code_filter)
     ]
-    hd_results.sort(key=lambda r: (r.evaluated_at, r.stock_code, r.holding_decision_result_id))
+    # Issue #576: タプルsortの第1要素がnaive/aware混在だとTypeErrorになる。
+    hd_results.sort(
+        key=lambda r: (_as_aware_utc(r.evaluated_at), r.stock_code, r.holding_decision_result_id)
+    )
 
     legacy_candidates_by_stock: dict[str, list[Recommendation]] = {}
     for rec in rec_repo.list_all():
@@ -757,7 +758,7 @@ def run_history_replay(
                 )
             )
 
-    return sorted(rows, key=lambda r: (r.evaluated_at, r.stock_code))
+    return sorted(rows, key=lambda r: (_as_aware_utc(r.evaluated_at), r.stock_code))
 
 
 def write_backtest_csv(rows: list[BacktestRow], path: Path) -> None:

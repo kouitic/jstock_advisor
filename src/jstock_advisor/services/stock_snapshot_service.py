@@ -15,6 +15,7 @@ from decimal import Decimal
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.stock_type import classify_stock_type
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.classification import StockTypeClassification
 from jstock_advisor.domain.entities.common import (
     BenefitUtilityCoefficients,
@@ -494,7 +495,8 @@ def build_stock_snapshot(
     # 将来ここへsourceを追加する場合、それが「取得してきたデータ」なのか
     # 「登録されたデータ」なのかを必ず判断すること。
     freshness_sources = [snap.source, financial.source, dividend.source]
-    data_fetched_at = min(s.fetched_at for s in freshness_sources)
+    # Issue #576: naive値混在時のmin()比較TypeErrorに対する防御。
+    data_fetched_at = min(normalize_to_aware_utc(s.fetched_at) for s in freshness_sources)
 
     keywords_found = detect_disclosure_risk_keywords(
         disclosures, config.sell.disclosure_risk_keywords
