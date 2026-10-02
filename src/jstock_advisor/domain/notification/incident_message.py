@@ -129,12 +129,16 @@ class IncidentContent(StrEnum):
     IncidentFailureStageと同じ設計(Issue #724)。"""
 
     BUY_CANDIDATES_ANALYSIS_FAILED = "銘柄分析の一部が完了しませんでした"
-    BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED = "判定結果の記録保存に失敗しました"
+    # Issue #724 PR #740レビュー是正(MUST F-1由来の派生修正): 当初
+    # HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILEDと文言が完全一致して
+    # おり、StrEnumの値重複によりaliasになっていた(IncidentContentの
+    # 列挙から名前が1つ消える)ことを、網羅性guardの実装過程で発見し是正した。
+    BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED = "買い候補の判定結果の記録保存に失敗しました"
     BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED = "通知結果の記録更新に失敗しました"
     HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED = (
         "保有資産見積もりに必要な株価取得の一部に失敗しました"
     )
-    HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED = "判定結果の記録保存に失敗しました"
+    HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED = "保有銘柄の判定結果の記録保存に失敗しました"
     HOLDINGS_WATCHLIST_ANALYSIS_FAILED = "保有銘柄分析の一部が完了しませんでした"
     EVALUATION_AGGREGATE_COMMIT_FAILED = "評価結果の集計確定に失敗しました"
     EVALUATION_AUDIT_PERSIST_FAILED = "評価処理の記録保存に失敗しました"
@@ -149,6 +153,9 @@ class IncidentContent(StrEnum):
     RECONCILER_TIMEOUT_FINALIZING_UNEXPECTED_ERROR = (
         "処理時間超過後の後処理で想定外のエラーが発生しました"
     )
+    RECONCILER_MAINTENANCE_TRIGGER_RETRY_UNEXPECTED_ERROR = (
+        "メンテナンス処理の再試行で想定外のエラーが発生しました"
+    )
     WATCHLIST_MISSED_SCHEDULE = "定時実行が行われなかった可能性があります"
     WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK = "銘柄ユニバースの取得が複数日連続で失敗しています"
     WATCHLIST_QUEUE_BACKLOG = "処理待ちが滞留しています"
@@ -160,8 +167,14 @@ class IncidentContent(StrEnum):
 
 
 # 内部のreason_code(IncidentSignal.error_type)→ 利用者向けの「内容」文。
-# 全既知のHANDLED_FAILURE発行元を網羅する(tests/unit/test_issue_501_incident_message.py
-# が既存発行元のreason_codeと突き合わせる。発行元が増えたら、ここへ足すまでテストが赤になる)。
+# tests/unit/test_issue_501_incident_message.pyが、現在実際にfailure_class=
+# HANDLED_FAILUREを設定している発行元(src全数のAST抽出)と本辞書のkeyを
+# 突き合わせる(現在HANDLEDの発行元を1件削除する・新しいHANDLED発行元を
+# 無登録のまま追加する、のいずれもテストが赤くなる)。運用トレンド検知6件
+# (watchlist_missed_schedule等)とCloudWatchAlarmの計7件は、現時点では
+# envelopeがfailure_classをHANDLED_FAILUREに設定していないため到達しない
+# 先行登録であり、同テストが別途明示的に固定している(発行元が将来HF化
+# された場合はそちらのレビューで本コメント・テスト双方を更新すること)。
 _REASON_CODE_TO_CONTENT: dict[str, IncidentContent] = {
     "BUY_CANDIDATES_ANALYSIS_FAILED": IncidentContent.BUY_CANDIDATES_ANALYSIS_FAILED,
     "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED": (
@@ -199,6 +212,9 @@ _REASON_CODE_TO_CONTENT: dict[str, IncidentContent] = {
     ),
     "reconciler_timeout_finalizing_unexpected_error": (
         IncidentContent.RECONCILER_TIMEOUT_FINALIZING_UNEXPECTED_ERROR
+    ),
+    "reconciler_maintenance_trigger_retry_unexpected_error": (
+        IncidentContent.RECONCILER_MAINTENANCE_TRIGGER_RETRY_UNEXPECTED_ERROR
     ),
     "watchlist_missed_schedule": IncidentContent.WATCHLIST_MISSED_SCHEDULE,
     "watchlist_universe_load_failure_streak": (

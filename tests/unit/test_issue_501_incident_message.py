@@ -166,6 +166,250 @@ def test_resolve_incident_content_unknown_or_non_string_falls_back_to_other() ->
     assert resolve_incident_content(123) is IncidentContent.OTHER
 
 
+# --- 1c PR #740レビュー是正(MUST F-1): 対応表の網羅性をsrcから機械的に検証する -------------
+
+# 現在実際にfailure_class="HANDLED_FAILURE"を設定している発行元のreason_code
+# (grep全数確認・レビュー済み)。このsetは下のtest_actual_handled_failure_reason_codes_*
+# が、src自体をASTで再抽出した結果と突き合わせる(人のレビューを経た側と、srcの実体を
+# 読んだ側の両方が一致することを固定する)。
+_REVIEWED_CURRENT_HANDLED_FAILURE_REASON_CODES = frozenset(
+    {
+        # buy_candidates_handler.py(_notify_handled_failure_safely呼び出し3箇所)
+        "BUY_CANDIDATES_ANALYSIS_FAILED",
+        "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED",
+        "BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED",
+        # holdings_watchlist_handler.py(同3箇所)
+        "HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED",
+        "HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED",
+        "HOLDINGS_WATCHLIST_ANALYSIS_FAILED",
+        # evaluation_handler.py(同2箇所。モジュール定数経由)
+        "EVALUATION_AGGREGATE_COMMIT_FAILED",
+        "EVALUATION_AUDIT_PERSIST_FAILED",
+        # watchlist_batch_finalizer.py(envelope辞書に直接記載。2箇所)
+        "watchlist_finalizer_repository_add_failed",
+        "watchlist_finalizer_unexpected_error_count",
+        # watchlist_batch_reconciler_handler.py(_HANDLED_FAILURE_BOUNDARY_METADATA。6件)
+        "reconciler_completion_recovery_invoke_failed",
+        "reconciler_trade_event_reconciliation_failed",
+        "reconciler_finalize_retry_unexpected_error",
+        "reconciler_notification_retry_unexpected_error",
+        "reconciler_timeout_finalizing_unexpected_error",
+        "reconciler_maintenance_trigger_retry_unexpected_error",
+    }
+)
+
+# 先行登録(現在はenvelopeがfailure_classキー自体を持たない、または
+# _normalize_alarm_message()がfailure_classを設定しないため、常にUNHANDLED_FAILURE
+# としてのみ到達し、contentは計算されない)。
+_RESERVED_OPERATIONAL_TREND_REASON_CODES = frozenset(
+    {
+        "watchlist_missed_schedule",
+        "watchlist_universe_load_failure_streak",
+        "watchlist_queue_backlog",
+        "watchlist_deletion_zero_streak",
+        "buy_candidates_stuck_batch",
+        "holdings_watchlist_stuck_batch",
+    }
+)
+_RESERVED_ALARM_REASON_CODES = frozenset({"CloudWatchAlarm"})
+
+
+def _module_level_string_constants(tree: ast.Module) -> dict[str, str]:
+    """モジュールtop-levelの`NAME = "literal"`代入を集める(call引数がNameの場合の解決用)。"""
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            constants[node.targets[0].id] = node.value.value
+    return constants
+
+
+def _extract_call_reason_codes(path: Path, func_name: str, arg_index: int) -> set[str]:
+    """`func_name(...)`呼び出しの`arg_index`番目の位置引数を文字列として解決する。
+
+    Constant(文字列リテラル直書き)はそのまま、Name(モジュール定数経由)は
+    top-level代入から解決する。いずれでもない場合は、staticに解決できない値が
+    紛れ込んでいるということなので、guardの前提が崩れている合図としてAssertionErrorにする
+    (黙ってスキップしない)。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    constants = _module_level_string_constants(tree)
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != func_name or len(node.args) <= arg_index:
+            continue
+        arg = node.args[arg_index]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            found.add(arg.value)
+        elif isinstance(arg, ast.Name) and arg.id in constants:
+            found.add(constants[arg.id])
+        else:
+            raise AssertionError(
+                f"{path.name}: {func_name}の{arg_index}番目の引数を静的に解決できない"
+                f"(動的な値の可能性。guardの前提が崩れている)"
+            )
+    return found
+
+
+def _extract_envelope_dict_reason_codes(path: Path) -> set[str]:
+    """`{"failure_class": "HANDLED_FAILURE", "reason_code": "...", ...}`型の
+    辞書リテラルから、同じ辞書内のreason_codeを抽出する。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        pairs = {
+            k.value: v
+            for k, v in zip(node.keys, node.values, strict=True)
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        fc = pairs.get("failure_class")
+        rc = pairs.get("reason_code")
+        if (
+            isinstance(fc, ast.Constant)
+            and fc.value == "HANDLED_FAILURE"
+            and isinstance(rc, ast.Constant)
+            and isinstance(rc.value, str)
+        ):
+            found.add(rc.value)
+    return found
+
+
+def _extract_boundary_metadata_reason_codes(path: Path, dict_name: str) -> set[str]:
+    """`dict_name = {"KEY": ("TYPE", "reason_code"), ...}`型のmodule定数から、
+    各valueタプルの2要素目(reason_code)を抽出する。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in tree.body:
+        target_matches = (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == dict_name for t in node.targets)
+        ) or (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == dict_name
+        )
+        if not target_matches:
+            continue
+        assert isinstance(node.value, ast.Dict), f"{dict_name}はdict literalである前提"
+        for value in node.value.values:
+            assert isinstance(value, ast.Tuple) and len(value.elts) == 2, (
+                f"{dict_name}の値は(type, reason_code)の2要素tupleである前提"
+            )
+            reason_elt = value.elts[1]
+            assert isinstance(reason_elt, ast.Constant) and isinstance(reason_elt.value, str)
+            found.add(reason_elt.value)
+    return found
+
+
+def _actual_handled_failure_reason_codes() -> set[str]:
+    """src全体から、現在実際にfailure_class="HANDLED_FAILURE"で発行される
+    reason_codeを機械的に抽出する(test_every_lambda_function_in_the_template_
+    has_an_entryと同型の、allowlistとsrcの実体を突き合わせるguard)。"""
+    handlers_dir = _REPO_ROOT / "src" / "jstock_advisor" / "lambda_handlers"
+    services_dir = _REPO_ROOT / "src" / "jstock_advisor" / "services"
+
+    found: set[str] = set()
+    for filename in ("buy_candidates_handler.py", "holdings_watchlist_handler.py"):
+        found |= _extract_call_reason_codes(
+            handlers_dir / filename, "_notify_handled_failure_safely", 1
+        )
+    found |= _extract_call_reason_codes(
+        handlers_dir / "evaluation_handler.py", "_notify_handled_failure_safely", 1
+    )
+    found |= _extract_envelope_dict_reason_codes(services_dir / "watchlist_batch_finalizer.py")
+    found |= _extract_boundary_metadata_reason_codes(
+        handlers_dir / "watchlist_batch_reconciler_handler.py",
+        "_HANDLED_FAILURE_BOUNDARY_METADATA",
+    )
+    return found
+
+
+def test_actual_handled_failure_reason_codes_match_the_reviewed_set() -> None:
+    """srcから機械的に抽出した「現在実際にHANDLED_FAILUREとして発行される
+    reason_code」が、人のレビューを経た集合と一致する(発行元が増減したら、
+    レビュー側〔_REVIEWED_CURRENT_HANDLED_FAILURE_REASON_CODES〕を更新する
+    まで赤くなる)。"""
+    assert _actual_handled_failure_reason_codes() == _REVIEWED_CURRENT_HANDLED_FAILURE_REASON_CODES
+
+
+def test_reason_code_to_content_covers_every_actual_handled_failure_reason_code() -> None:
+    """MUST F-1是正: 現在実際にHANDLED_FAILUREとして発行されるreason_codeが、
+    1件でも_REASON_CODE_TO_CONTENTから欠けていたら赤くなる。"""
+    content_keys = set(incident_message._REASON_CODE_TO_CONTENT)
+    assert _actual_handled_failure_reason_codes() <= content_keys
+
+
+def test_reason_code_to_content_has_no_keys_beyond_actual_and_reserved() -> None:
+    """対応表の全キーが、(現在実際にHANDLED_FAILUREとして発行されるreason_code)
+    ∪ (明示的にレビュー済みの先行登録key)のいずれかである。未知のキーが紛れ込んだ
+    場合に検知する。"""
+    content_keys = set(incident_message._REASON_CODE_TO_CONTENT)
+    expected = (
+        _actual_handled_failure_reason_codes()
+        | _RESERVED_OPERATIONAL_TREND_REASON_CODES
+        | _RESERVED_ALARM_REASON_CODES
+    )
+    assert content_keys == expected
+
+
+# ★ IncidentJob(_REVIEWED_JOB_LABELS)の先例と同じ手法: 列挙から動的に作らず、
+# 人が手で書いた完全一致リストにする(列挙へ値を足しても、この集合は自動では
+# 広がらない)。
+_REVIEWED_INCIDENT_CONTENT_LABELS = {
+    "BUY_CANDIDATES_ANALYSIS_FAILED": "銘柄分析の一部が完了しませんでした",
+    "BUY_CANDIDATES_EVALUATION_RECORD_SAVE_FAILED": "買い候補の判定結果の記録保存に失敗しました",
+    "BUY_CANDIDATES_NOTIFICATION_OUTCOME_RECORD_UPDATE_FAILED": "通知結果の記録更新に失敗しました",
+    "HOLDINGS_WATCHLIST_PORTFOLIO_PRICE_FETCH_FAILED": (
+        "保有資産見積もりに必要な株価取得の一部に失敗しました"
+    ),
+    "HOLDINGS_WATCHLIST_EVALUATION_RECORD_SAVE_FAILED": (
+        "保有銘柄の判定結果の記録保存に失敗しました"
+    ),
+    "HOLDINGS_WATCHLIST_ANALYSIS_FAILED": "保有銘柄分析の一部が完了しませんでした",
+    "EVALUATION_AGGREGATE_COMMIT_FAILED": "評価結果の集計確定に失敗しました",
+    "EVALUATION_AUDIT_PERSIST_FAILED": "評価処理の記録保存に失敗しました",
+    "WATCHLIST_FINALIZER_REPOSITORY_ADD_FAILED": "ウォッチリストへの銘柄追加の一部に失敗しました",
+    "WATCHLIST_FINALIZER_UNEXPECTED_ERROR_COUNT": (
+        "ウォッチリスト判定処理で想定外のエラーが発生しました"
+    ),
+    "RECONCILER_COMPLETION_RECOVERY_INVOKE_FAILED": "処理完了の復旧処理の呼び出しに失敗しました",
+    "RECONCILER_TRADE_EVENT_RECONCILIATION_FAILED": "売買記録の整合性確認処理に失敗しました",
+    "RECONCILER_FINALIZE_RETRY_UNEXPECTED_ERROR": "処理完了の再試行で想定外のエラーが発生しました",
+    "RECONCILER_NOTIFICATION_RETRY_UNEXPECTED_ERROR": "通知の再試行で想定外のエラーが発生しました",
+    "RECONCILER_TIMEOUT_FINALIZING_UNEXPECTED_ERROR": (
+        "処理時間超過後の後処理で想定外のエラーが発生しました"
+    ),
+    "RECONCILER_MAINTENANCE_TRIGGER_RETRY_UNEXPECTED_ERROR": (
+        "メンテナンス処理の再試行で想定外のエラーが発生しました"
+    ),
+    "WATCHLIST_MISSED_SCHEDULE": "定時実行が行われなかった可能性があります",
+    "WATCHLIST_UNIVERSE_LOAD_FAILURE_STREAK": "銘柄ユニバースの取得が複数日連続で失敗しています",
+    "WATCHLIST_QUEUE_BACKLOG": "処理待ちが滞留しています",
+    "WATCHLIST_DELETION_ZERO_STREAK": "ウォッチリストからの削除が複数日連続で発生していません",
+    "BUY_CANDIDATES_STUCK_BATCH": "買い候補チェックの処理が完了せず滞留している可能性があります",
+    "HOLDINGS_WATCHLIST_STUCK_BATCH": "保有株チェックの処理が完了せず滞留している可能性があります",
+    "CLOUDWATCH_ALARM": "システムの監視アラームが検知されました",
+    "OTHER": "技術的な問題を検知しました",
+}
+
+
+def test_the_incident_content_enum_is_exactly_the_reviewed_set() -> None:
+    """★ IncidentJobの先例と同じ手法: 列挙の中身を完全一致リストで固定する。
+    列挙へ値を足す・値を書き換えると、この検査が赤くなる。"""
+    assert {member.name: member.value for member in IncidentContent} == (
+        _REVIEWED_INCIDENT_CONTENT_LABELS
+    )
+
+
 # --- 2 allowlist が不変条件(検査そのものの確認) -----------------------------------------------
 
 
