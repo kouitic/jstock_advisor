@@ -15,6 +15,7 @@ Production への injection は行わない。
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -143,6 +144,9 @@ class _RecordingWatchlistRepository:
     def delete(self, stock_code: str) -> bool:
         self.calls.append("delete")
         return self._items.pop(stock_code, None) is not None
+
+    def iter_all(self) -> Iterator[WatchlistItem]:
+        return iter(self._items.values())
 
 
 def _fake_config(*, readd_cooldown_days: int = 30) -> SimpleNamespace:

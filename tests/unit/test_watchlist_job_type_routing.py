@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -348,7 +349,11 @@ def test_maintenance_finalizer_audits_with_maintenance_universe_provider() -> No
 
     with (
         patch.object(finalizer_module, "query_all_candidate_progress", lambda *a, **k: []),
-        patch.object(finalizer_module, "WatchlistRepository", lambda *a, **k: object()),
+        patch.object(
+            finalizer_module,
+            "WatchlistRepository",
+            lambda *a, **k: SimpleNamespace(iter_all=lambda: iter(())),
+        ),
         patch.object(
             finalizer_module, "WatchlistRemovalHistoryRepository", lambda *a, **k: object()
         ),

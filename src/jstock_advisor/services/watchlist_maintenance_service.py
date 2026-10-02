@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 from jstock_advisor.config.models import AutoRemovalConfig
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
-from jstock_advisor.domain.signals.watchlist_screening import HardExclusionCode
+from jstock_advisor.domain.signals.watchlist_screening import ExclusionReason, HardExclusionCode
 from jstock_advisor.services.watchlist_screening_service import WatchlistScreeningResult
 
 
@@ -59,6 +59,12 @@ class MaintenanceScreeningSummary(BaseModel):
     # default_factoryにより空リストとして読み戻される(後方互換)。
     hard_exclusion_codes: list[HardExclusionCode] = Field(default_factory=list)
     policy_name: str | None = None
+    # Issue #141: 開示情報を取得できず`_data_insufficient_result()`が
+    # Policyの通常評価をスキップして代替した場合(#81のcritical data
+    # availability gate)。`hard_exclusion_reasons`/`hard_exclusion_codes`は
+    # この場合常に空になる(排他。watchlist_screening_service.py参照)ため、
+    # 原因情報が失われないよう専用フィールドとして運ぶ。
+    data_insufficient: bool = False
 
 
 def build_maintenance_screening_summary(
@@ -76,6 +82,7 @@ def build_maintenance_screening_summary(
         hard_exclusion_reasons=hard_exclusion_reasons,
         hard_exclusion_codes=hard_exclusion_codes,
         policy_name=result.policy_results[0].policy_name if result.policy_results else None,
+        data_insufficient=ExclusionReason.DATA_INSUFFICIENT in result.exclusion_reasons,
     )
 
 # 即時削除(Aルート)対象の構造化コード(横断整合性レビュー対応2026-08、
@@ -98,6 +105,11 @@ class MaintenanceOutcome(StrEnum):
     IMMEDIATE_REMOVAL = "IMMEDIATE_REMOVAL"
     CONSECUTIVE_NOT_QUALIFIED_REMOVAL = "CONSECUTIVE_NOT_QUALIFIED_REMOVAL"
     DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
+    # Issue #141: データは取得できたが評価モデル側が対応していない
+    # (UNSUPPORTED_INDUSTRY)、または開示データの必須項目が欠落している
+    # (data_insufficient)。DATA_UNAVAILABLE(データそのものが取得できない)
+    # とは原因が異なる別outcome。
+    NOT_EVALUABLE = "NOT_EVALUABLE"
 
 
 @dataclass(frozen=True)
@@ -108,6 +120,17 @@ class MaintenanceDecision:
     # C. 長期確認不能(計画Part C-3)。DATA_UNAVAILABLEが続き
     # maximum_unconfirmed_daysを超えた場合のみTrue(削除はしない、運用警告用)。
     stale_unconfirmed: bool = False
+    # Issue #141: NOT_EVALUABLEが続きmaximum_unconfirmed_daysを超えた場合の
+    # みTrue(stale_unconfirmedと対。削除はしない、運用警告用)。
+    stale_not_evaluable: bool = False
+    # Issue #224(O-1): Bルート(3回連続非該当+最低継続期間)の3条件(AND)の
+    # 個別充足状況。Bルートを評価した場合のみ値を持つ(それ以外はNone=
+    # 評価対象外)。呼び出し元(finalizer)が同じ判定ロジックを再実装せずに
+    # 「どの条件で止まっているか」を集計できるようにするための追加情報
+    # であり、削除の可否(outcome)自体はこれらに依存しない(outcomeが正)。
+    age_condition_met: bool | None = None
+    count_condition_met: bool | None = None
+    span_condition_met: bool | None = None
 
 
 def _immediate_removal_reason(
@@ -172,6 +195,32 @@ def evaluate_maintenance_decision(
         )
         return MaintenanceDecision(MaintenanceOutcome.KEEP, updated)
 
+    # 非該当(passed=False)。Aルート(即時削除)より先に、評価不能
+    # (Issue #141: データは取得できたが評価モデル側が対応していない
+    # UNSUPPORTED_INDUSTRY、または開示データの必須項目が欠落している
+    # data_insufficient)を判定する。安全側に倒すため、即時削除コードと
+    # 同時に立つケースでも誤って即時削除されないよう先に評価する。
+    if screening_summary.data_insufficient or (
+        HardExclusionCode.UNSUPPORTED_INDUSTRY in screening_summary.hard_exclusion_codes
+    ):
+        updated = item.model_copy(
+            update={
+                "last_screened_at": now,
+                "consecutive_not_qualified_count": 0,
+                "removal_candidate_since": None,
+                "last_monitoring_score": screening_summary.total_score,
+                "last_matched_target_types": screening_summary.matched_target_types,
+                "last_screening_result": "NOT_EVALUABLE",
+                "last_screening_policy": screening_summary.policy_name,
+                "updated_at": now,
+            }
+        )
+        reference_time = item.last_qualified_at or item.created_at
+        stale = (now - reference_time).days > config.maximum_unconfirmed_days
+        return MaintenanceDecision(
+            MaintenanceOutcome.NOT_EVALUABLE, updated, stale_not_evaluable=stale
+        )
+
     # 非該当(passed=False)。まずAルート(即時削除)を判定する。
     hard_exclusion_reasons = screening_summary.hard_exclusion_reasons
     immediate_reason = _immediate_removal_reason(
@@ -203,11 +252,10 @@ def evaluate_maintenance_decision(
 
     age_days = (now - item.created_at).days
     span_days = (now - new_removal_candidate_since).days
-    if (
-        age_days >= config.minimum_age_days
-        and new_consecutive_count >= config.consecutive_not_qualified_required
-        and span_days >= config.minimum_not_qualified_span_days
-    ):
+    age_condition_met = age_days >= config.minimum_age_days
+    count_condition_met = new_consecutive_count >= config.consecutive_not_qualified_required
+    span_condition_met = span_days >= config.minimum_not_qualified_span_days
+    if age_condition_met and count_condition_met and span_condition_met:
         reasons_summary = (
             "、".join(hard_exclusion_reasons)
             if hard_exclusion_reasons
@@ -217,6 +265,15 @@ def evaluate_maintenance_decision(
             MaintenanceOutcome.CONSECUTIVE_NOT_QUALIFIED_REMOVAL,
             updated,
             removal_reason=reasons_summary,
+            age_condition_met=age_condition_met,
+            count_condition_met=count_condition_met,
+            span_condition_met=span_condition_met,
         )
 
-    return MaintenanceDecision(MaintenanceOutcome.KEEP, updated)
+    return MaintenanceDecision(
+        MaintenanceOutcome.KEEP,
+        updated,
+        age_condition_met=age_condition_met,
+        count_condition_met=count_condition_met,
+        span_condition_met=span_condition_met,
+    )

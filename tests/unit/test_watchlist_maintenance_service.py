@@ -62,6 +62,7 @@ def _summary(
     matched_target_types: list[str] | None = None,
     hard_exclusion_reasons: list[str] | None = None,
     hard_exclusion_codes: list[HardExclusionCode] | None = None,
+    data_insufficient: bool = False,
 ) -> MaintenanceScreeningSummary:
     return MaintenanceScreeningSummary(
         passed=passed,
@@ -70,6 +71,7 @@ def _summary(
         hard_exclusion_reasons=hard_exclusion_reasons or [],
         hard_exclusion_codes=hard_exclusion_codes or [],
         policy_name="multi_style_monitoring",
+        data_insufficient=data_insufficient,
     )
 
 
@@ -419,3 +421,167 @@ def test_updated_item_records_failed_result_on_non_pass() -> None:
     decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
     assert decision.updated_item.last_screening_result == "FAILED"
     assert decision.updated_item.last_monitoring_score == 30.0
+
+
+# --- Issue #141: NOT_EVALUABLE(評価不能)は削除カウンタを進めない -----------------
+
+
+def test_data_insufficient_is_not_evaluable_and_does_not_advance_counter() -> None:
+    """DATA_INSUFFICIENT(開示情報取得不可)はNOT_EVALUABLEとなり、削除カウンタ
+    (consecutive_not_qualified_count)を進めない・removal_candidate_sinceも
+    Noneのまま。"""
+    item = _item(created_at=_NOW - dt.timedelta(days=120))
+    summary = _summary(passed=False, data_insufficient=True)
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.NOT_EVALUABLE
+    assert decision.updated_item.consecutive_not_qualified_count == 0
+    assert decision.updated_item.removal_candidate_since is None
+    assert decision.updated_item.last_screening_result == "NOT_EVALUABLE"
+
+
+def test_unsupported_industry_is_not_evaluable_and_does_not_advance_counter() -> None:
+    """UNSUPPORTED_INDUSTRY(業種未対応)も同様にNOT_EVALUABLE。"""
+    item = _item(created_at=_NOW - dt.timedelta(days=120))
+    summary = _summary(
+        passed=False,
+        hard_exclusion_reasons=["金融業のため評価モデル未対応"],
+        hard_exclusion_codes=[HardExclusionCode.UNSUPPORTED_INDUSTRY],
+    )
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.NOT_EVALUABLE
+    assert decision.updated_item.consecutive_not_qualified_count == 0
+    assert decision.updated_item.removal_candidate_since is None
+
+
+def test_not_evaluable_resets_existing_accumulated_counter_for_free() -> None:
+    """migration-for-free: 是正前に蓄積されたconsecutive_not_qualified_count
+    (>0)が、NOT_EVALUABLE判定時に0/Noneへリセットされる(特別な分岐無しで、
+    通常のNOT_EVALUABLE処理の結果としてリセットが起きる)。"""
+    item = _item(
+        created_at=_NOW - dt.timedelta(days=120),
+        consecutive_not_qualified_count=5,
+        removal_candidate_since=_NOW - dt.timedelta(days=20),
+    )
+    summary = _summary(
+        passed=False,
+        hard_exclusion_codes=[HardExclusionCode.UNSUPPORTED_INDUSTRY],
+    )
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.NOT_EVALUABLE
+    assert decision.updated_item.consecutive_not_qualified_count == 0
+    assert decision.updated_item.removal_candidate_since is None
+
+
+def test_not_evaluable_takes_priority_over_immediate_removal_hard_exclusion() -> None:
+    """UNSUPPORTED_INDUSTRYと即時削除コード(REIT_EXCLUDED等)が同時に立っても、
+    NOT_EVALUABLEが優先され、IMMEDIATE_REMOVALへ進まない(安全側)。"""
+    item = _item(created_at=_NOW - dt.timedelta(days=120))
+    summary = _summary(
+        passed=False,
+        hard_exclusion_reasons=["業種未対応", "REIT除外"],
+        hard_exclusion_codes=[
+            HardExclusionCode.UNSUPPORTED_INDUSTRY,
+            HardExclusionCode.REIT_EXCLUDED,
+        ],
+    )
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.NOT_EVALUABLE
+
+
+def test_not_evaluable_stale_boundary_exactly_at_threshold_is_not_stale() -> None:
+    """NOT_EVALUABLEのstale判定はDATA_UNAVAILABLEと同じ境界規則
+    (`> maximum_unconfirmed_days`。丁度は超過しない)。"""
+    item = _item(
+        created_at=_NOW - dt.timedelta(days=_CONFIG.maximum_unconfirmed_days),
+        last_qualified_at=_NOW - dt.timedelta(days=_CONFIG.maximum_unconfirmed_days),
+    )
+    summary = _summary(passed=False, data_insufficient=True)
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.NOT_EVALUABLE
+    assert decision.stale_not_evaluable is False
+
+
+def test_not_evaluable_stale_boundary_one_day_past_threshold_is_stale() -> None:
+    item = _item(
+        created_at=_NOW - dt.timedelta(days=_CONFIG.maximum_unconfirmed_days + 1),
+        last_qualified_at=_NOW - dt.timedelta(days=_CONFIG.maximum_unconfirmed_days + 1),
+    )
+    summary = _summary(passed=False, data_insufficient=True)
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.stale_not_evaluable is True
+
+
+def test_automatic_recovery_after_not_evaluable_uses_existing_branches() -> None:
+    """NOT_EVALUABLE判定の翌サイクルで通常のpassed=Trueへ戻った場合、特別な
+    復帰ロジック無しで既存のKEEP分岐が正しく動作する(回帰確認)。"""
+    item = _item(
+        created_at=_NOW - dt.timedelta(days=120),
+        consecutive_not_qualified_count=0,
+        removal_candidate_since=None,
+    )
+    not_evaluable_summary = _summary(passed=False, data_insufficient=True)
+    first = evaluate_maintenance_decision(item, not_evaluable_summary, _CONFIG, _NOW)
+    assert first.outcome == MaintenanceOutcome.NOT_EVALUABLE
+
+    recovered_summary = _summary(passed=True, total_score=65.0)
+    second = evaluate_maintenance_decision(
+        first.updated_item, recovered_summary, _CONFIG, _NOW + dt.timedelta(days=7)
+    )
+    assert second.outcome == MaintenanceOutcome.KEEP
+    assert second.updated_item.last_screening_result == "PASSED"
+
+
+# --- Issue #224(O-1): Bルート3条件の個別充足状況 ---------------------------------
+
+
+def test_route_b_condition_flags_are_none_when_route_b_not_evaluated() -> None:
+    """PASSED・NOT_EVALUABLE・IMMEDIATE_REMOVALはBルートを評価しないため、
+    3条件フラグはいずれもNone(評価対象外)のまま。"""
+    item = _item(created_at=_NOW - dt.timedelta(days=120))
+    passed_decision = evaluate_maintenance_decision(item, _summary(passed=True), _CONFIG, _NOW)
+    assert passed_decision.age_condition_met is None
+    assert passed_decision.count_condition_met is None
+    assert passed_decision.span_condition_met is None
+
+    not_evaluable_decision = evaluate_maintenance_decision(
+        item, _summary(passed=False, data_insufficient=True), _CONFIG, _NOW
+    )
+    assert not_evaluable_decision.age_condition_met is None
+
+
+def test_route_b_condition_flags_reflect_which_gate_blocks_removal() -> None:
+    """年齢条件のみ未達のケースで、age_condition_met=False・他はTrueになる。"""
+    item = _item(
+        created_at=_NOW - dt.timedelta(days=30),  # minimum_age_days(90)未達
+        consecutive_not_qualified_count=2,  # 今回+1で3(required)に到達
+        removal_candidate_since=_NOW - dt.timedelta(days=30),  # span(28)以上
+    )
+    summary = _summary(
+        passed=False,
+        hard_exclusion_reasons=["開示情報にリスクキーワードを検出しました"],
+        hard_exclusion_codes=[HardExclusionCode.DISCLOSURE_RISK],
+    )
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.KEEP  # 年齢条件未達のため削除されない
+    assert decision.age_condition_met is False
+    assert decision.count_condition_met is True
+    assert decision.span_condition_met is True
+
+
+def test_route_b_condition_flags_all_true_matches_removal_outcome() -> None:
+    """3条件すべてTrueのとき、outcomeは必ずCONSECUTIVE_NOT_QUALIFIED_REMOVAL。"""
+    item = _item(
+        created_at=_NOW - dt.timedelta(days=120),
+        consecutive_not_qualified_count=2,
+        removal_candidate_since=_NOW - dt.timedelta(days=30),
+    )
+    summary = _summary(
+        passed=False,
+        hard_exclusion_reasons=["開示情報にリスクキーワードを検出しました"],
+        hard_exclusion_codes=[HardExclusionCode.DISCLOSURE_RISK],
+    )
+    decision = evaluate_maintenance_decision(item, summary, _CONFIG, _NOW)
+    assert decision.outcome == MaintenanceOutcome.CONSECUTIVE_NOT_QUALIFIED_REMOVAL
+    assert decision.age_condition_met is True
+    assert decision.count_condition_met is True
+    assert decision.span_condition_met is True
