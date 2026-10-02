@@ -9,6 +9,11 @@
   F-I4  `earnings_date_status` / `earnings_date_raw`（決算日の確度と生値）
   F-I5  `benefit_record_date_recurring_label` / `benefit_record_date_source_type`
 
+加えて Issue #320(F-I7): `recommended_action_summary` は旧 SELL と保有判断だけが保存する。
+これは ★ **意図的な非対称**であり、転記の対象ではない(全 writer へ同じ文言を埋める修正は
+しない)。適用表の 1 行として根拠を宣言し、末尾の「#320」節で、読み手・書き手の全数と
+欠落時の挙動を固定する。
+
 ★ **転記のみ**である。取得し直さない・再解決しない・過去レコードを埋め直さない。
   そのため各テストは「保存されたこと」だけでなく ★ **判定と通知文面が変わって
   いないこと**も併せて固定する（#254 の観点: 否定形の assert だけで完結させない）。
@@ -25,9 +30,13 @@ fixture は架空値のみ。銘柄コードは ★ 割り当てが存在しな�
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import datetime as dt
+from collections.abc import Callable
 from decimal import Decimal
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -36,10 +45,12 @@ from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import (
     AccountType,
     BenefitUtilityCategory,
+    BuyAction,
     EarningsDateStatus,
     ExecutionPlanReason,
     HoldingDecisionCategory,
     HoldingDecisionConfidenceLevel,
+    NotificationCategory,
     NotificationType,
     PriceRangeEvaluationState,
     RecommendationType,
@@ -57,6 +68,10 @@ from jstock_advisor.domain.entities.holding_decision import (
     RiskDeductionScore,
 )
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
+from jstock_advisor.domain.notification import recommendation_adapter as adapter_module
+from jstock_advisor.domain.notification.recommendation_adapter import (
+    build_notification_text_input,
+)
 from jstock_advisor.domain.signals.sell_signal import SellSignalResult
 from jstock_advisor.interfaces.types import BenefitDetail, ShareholderBenefit
 from jstock_advisor.providers.corporate_action.mock_impl import MockCorporateActionProvider
@@ -70,9 +85,11 @@ from jstock_advisor.services import sell_signal_service as sell_signal_service_m
 from jstock_advisor.services.holding_decision_notification_builder import (
     build_holding_decision_recommendation,
 )
+from jstock_advisor.services.line_notification_service import resolve_notification_category
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
+from tests.factories import build_recommendation
 
 # ★ "0000" は JPX の証券コードとして割り当てが存在しない値であり、実在銘柄と衝突しない。
 _STOCK_CODE = "0000"
@@ -145,7 +162,43 @@ _APPLICABILITY: dict[str, dict[str, tuple[str, str | None]]] = {
         "HOLDING_DECISION": ("条件付き", "同上"),
         "CONCENTRATION": ("非該当", _NOT_CONSUMED_FINANCIAL),
     },
+    # Issue #320(F-I7): 上の 5 フィールドと違い、これは「転記」ではなく、★ **意図的な非対称**。
+    # 分類は「何の表示に使うから必要か」で書く(「保存しているから必要」ではない)。
+    # 経路の分類と src の書き手・読み手の一致は、末尾の「#320」節が機械的に検査する。
+    "recommended_action_summary": {
+        "BUY": (
+            "非該当",
+            "BUY の通知本文は価格・利回り・スコア内訳から独自に組み立て(_build_buy)、"
+            "summary を読まない。summary が空でも表示は欠けない。書き手も無い。",
+        ),
+        "SELL_LEGACY": (
+            "条件付き",
+            "reasons が空のときだけ、_build_sell / _build_critical_risk が代替として読む。"
+            "書き手 = sell_signal_service。",
+        ),
+        "PROFIT_TAKING": (
+            "非該当",
+            "FULL_PROFIT_TAKE は _build_sell を通るが、Recommendation が作られる経路では "
+            "reasons(triggered_reasons)が非空で、reasons が先に使われ代替に到達しない"
+            "(設計上の推論。全件スキャンによる実証はしていない)。PARTIAL 系は "
+            "_build_partial_sell で summary を読まない。書き手は無い。",
+        ),
+        "HOLDING_DECISION": (
+            "条件付き",
+            "SELL_CONSIDERATION / STRONG_SELL_CONSIDERATION は _build_sell、"
+            "URGENT_HOLDING_REVIEW は _build_critical_risk を通り、いずれも reasons "
+            "(negative_reasons)が空のときだけ summary を読む。"
+            "書き手 = holding_decision_notification_builder。",
+        ),
+        "CONCENTRATION": (
+            "非該当",
+            "summary を読む通知パスが無い(集中度は別の通知形式)。書き手も無い。",
+        ),
+    },
 }
+
+# 適用表を検査する対象のフィールド(転記する 5 フィールド + summary)。
+_APPLICABILITY_FIELDS = tuple(_APPLICABILITY)
 
 # ★ 本ファイルが実装を検査する経路（BUY / 利確は既に転記済みで、本 Issue の対象外）。
 _ROUTES_UNDER_TEST = ("SELL_LEGACY", "HOLDING_DECISION")
@@ -154,13 +207,13 @@ _ROUTES_UNDER_TEST = ("SELL_LEGACY", "HOLDING_DECISION")
 # --- 適用表そのものの検査（★ 「全フィールド一致」ではない） -------------------------
 
 
-@pytest.mark.parametrize("field", _TRANSFERRED_FIELDS)
+@pytest.mark.parametrize("field", _APPLICABILITY_FIELDS)
 def test_applicability_table_covers_every_route(field: str) -> None:
     """適用表が 5 経路すべてを宣言していること（経路を足したら表も足す）。"""
     assert tuple(_APPLICABILITY[field]) == _ROUTES
 
 
-@pytest.mark.parametrize("field", _TRANSFERRED_FIELDS)
+@pytest.mark.parametrize("field", _APPLICABILITY_FIELDS)
 def test_every_not_applicable_entry_states_a_reason(field: str) -> None:
     """★ 非該当には必ず理由が書かれていること。
 
@@ -563,3 +616,210 @@ def test_transfer_does_not_change_the_recommendation_type(
     )
     assert rec.recommendation_type == expected
     assert rec.recommendation_type != RecommendationType.REVIEW_AFTER_EARNINGS
+
+
+# --- #320(F-I7): recommended_action_summary は ★ 意図的な非対称 -----------------------
+#
+# `recommended_action_summary`(その判定で利用者に何を勧めるかの 1 行要約)は、旧 SELL と
+# 保有判断だけが保存する。BUY は通知本文を価格・利回り・スコア内訳から独自に組み立て、
+# 利確(FULL)は reasons が先に使われるため、summary を必要としない。
+#
+# ★ 「全 writer へ同じ文言を埋める」修正は誤りである(意図的な非対称を壊す)。ここでは
+#   (1) 適用表の分類と src の書き手・読み手が一致すること
+#   (2) 必要と結論した経路(SELL_LEGACY / HOLDING_DECISION)の、summary 欠落時の挙動
+#   (3) 不要と結論した経路の通知入力が、summary の有無で変わらないこと
+#   を固定する。
+#
+# ★ 再評価トリガー(Issue #320): 読み手が増える(R-3 = BUY の表示が summary を読む)・書き手が
+#   増える(R-2 = 全経路で必須とする契約)と (1) が落ちる。落ちたら、表を直す前に
+#   Issue #320 の Priority(P3)の再評価条件を確認すること。
+
+_SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "jstock_advisor"
+_SUMMARY = "recommended_action_summary"
+
+# 適用表が「書き手がある(必須 / 条件付き)」とする経路 → その書き手の module。
+_SUMMARY_WRITER_MODULES = {
+    "SELL_LEGACY": "services/sell_signal_service.py",
+    "HOLDING_DECISION": "services/holding_decision_notification_builder.py",
+}
+# summary を読む module(診断用の長文 preview を含む)。
+_SUMMARY_READER_MODULES = frozenset(
+    {
+        "domain/notification/recommendation_adapter.py",
+        "services/line_notification_service.py",
+    }
+)
+
+
+def _src_modules_where(predicate: Callable[[ast.AST], bool]) -> set[str]:
+    found: set[str] = set()
+    for path in _SRC_ROOT.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if any(predicate(node) for node in ast.walk(tree)):
+            found.add(path.relative_to(_SRC_ROOT).as_posix())
+    return found
+
+
+def _is_summary_keyword_write(node: ast.AST) -> bool:
+    return isinstance(node, ast.keyword) and node.arg == _SUMMARY
+
+
+def _is_summary_attribute_read(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute) and node.attr == _SUMMARY and isinstance(node.ctx, ast.Load)
+    )
+
+
+def test_summary_table_matches_the_writers_in_src() -> None:
+    """★ 適用表で「非該当」の経路には書き手が無く、「必須 / 条件付き」の経路にだけ書き手がある。
+
+    新しい writer を足したのに表を更新しない(または、表を誤分類した)と落ちる。
+    """
+    declared_writers = {
+        route
+        for route, (classification, _) in _APPLICABILITY[_SUMMARY].items()
+        if classification != "非該当"
+    }
+    assert declared_writers == set(_SUMMARY_WRITER_MODULES)
+    assert _src_modules_where(_is_summary_keyword_write) == set(_SUMMARY_WRITER_MODULES.values())
+
+
+def test_summary_readers_in_src_are_exactly_the_known_ones() -> None:
+    """★ 読み手の全数を固定する。BUY の表示が summary を読むようになると(R-3)落ちる。
+
+    落ちたときは、BUY を「非該当」と書いた根拠(独自に組み立てる)が崩れていないかを
+    確認してから、この集合と適用表を更新する。
+    """
+    assert _src_modules_where(_is_summary_attribute_read) == _SUMMARY_READER_MODULES
+
+
+# 経路 → (RecommendationType, 通知カテゴリ)。_build_sell は SELL カテゴリ、
+# _build_critical_risk は CRITICAL_RISK カテゴリが呼ぶ。
+_SUMMARY_READER_CASES = [
+    ("SELL_LEGACY", RecommendationType.SELL, NotificationCategory.SELL),
+    ("SELL_LEGACY", RecommendationType.URGENT_REVIEW, NotificationCategory.CRITICAL_RISK),
+    ("HOLDING_DECISION", RecommendationType.SELL_CONSIDERATION, NotificationCategory.SELL),
+    (
+        "HOLDING_DECISION",
+        RecommendationType.STRONG_SELL_CONSIDERATION,
+        NotificationCategory.SELL,
+    ),
+    (
+        "HOLDING_DECISION",
+        RecommendationType.URGENT_HOLDING_REVIEW,
+        NotificationCategory.CRITICAL_RISK,
+    ),
+]
+_SUMMARY_CASE_IDS = [f"{route}-{rtype.value}" for route, rtype, _ in _SUMMARY_READER_CASES]
+
+
+def _reason_for(
+    rtype: RecommendationType, reasons: list[str], summary: str | None
+) -> tuple[NotificationCategory, str | None]:
+    rec = build_recommendation(
+        recommendation_type=rtype, reasons=reasons, recommended_action_summary=summary
+    )
+    category = resolve_notification_category(rec)
+    return category, build_notification_text_input(rec, category).reason
+
+
+@pytest.mark.parametrize(
+    ("route", "rtype", "category"), _SUMMARY_READER_CASES, ids=_SUMMARY_CASE_IDS
+)
+def test_summary_is_the_reason_only_when_reasons_are_empty(
+    route: str, rtype: RecommendationType, category: NotificationCategory
+) -> None:
+    """★ 受入条件 5: reasons が空のときだけ summary が通知の判定理由になる(reasons が先)。"""
+    assert _APPLICABILITY[_SUMMARY][route][0] == "条件付き"
+
+    resolved, reason = _reason_for(rtype, ["判定理由A", "判定理由B"], "要約")
+    assert resolved == category
+    # reasons があれば summary は使われない(SELL は先頭、CRITICAL_RISK は " / " 連結)。
+    expected = "判定理由A" if category == NotificationCategory.SELL else "判定理由A / 判定理由B"
+    assert reason == expected
+
+    _, reason = _reason_for(rtype, [], "要約")
+    assert reason == "要約"
+
+
+@pytest.mark.parametrize(
+    ("route", "rtype", "category"), _SUMMARY_READER_CASES, ids=_SUMMARY_CASE_IDS
+)
+def test_missing_summary_with_empty_reasons_falls_back_as_before(
+    route: str, rtype: RecommendationType, category: NotificationCategory
+) -> None:
+    """★ 受入条件 5: reasons も summary も無いときの現行の挙動(エラーにしない)を固定する。
+
+    SELL は reason なし(None)、CRITICAL_RISK は既定文言。例外にはしない現行の挙動を保つ。
+    """
+    _, reason = _reason_for(rtype, [], None)
+    if category == NotificationCategory.SELL:
+        assert reason is None
+    else:
+        assert reason == adapter_module._CRITICAL_RISK_DEFAULT_REASON
+        assert reason
+
+
+def test_both_writers_save_a_non_empty_summary_that_reaches_the_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 書き手 2 つが実際に summary を保存し、reasons が空のときの通知理由へ届くこと。
+
+    書き手が summary を保存しなくなると、reasons が空の売却検討の通知から理由が消える
+    (SELL は reason なし)。
+    """
+    recs = _both_routes(monkeypatch, _base_snapshot())
+    for route, rec in recs.items():
+        assert rec.recommended_action_summary, f"{route} が summary を保存していない"
+        emptied = rec.model_copy(update={"reasons": []})
+        category = resolve_notification_category(emptied)
+        assert build_notification_text_input(emptied, category).reason == (
+            rec.recommended_action_summary
+        )
+
+
+_SUMMARY_NOT_NEEDED_CASES = [
+    (
+        "BUY",
+        {"recommendation_type": RecommendationType.BUY, "buy_action": BuyAction.BUY},
+        NotificationCategory.BUY,
+    ),
+    (
+        "PROFIT_TAKING",
+        {"recommendation_type": RecommendationType.FULL_PROFIT_TAKE},
+        NotificationCategory.SELL,
+    ),
+    (
+        "PROFIT_TAKING",
+        {"recommendation_type": RecommendationType.PARTIAL_PROFIT_TAKE},
+        NotificationCategory.PARTIAL_SELL,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("route", "overrides", "category"),
+    _SUMMARY_NOT_NEEDED_CASES,
+    ids=["BUY", "PROFIT_TAKING-FULL", "PROFIT_TAKING-PARTIAL"],
+)
+def test_routes_that_do_not_need_summary_render_the_same_with_or_without_it(
+    route: str, overrides: dict[str, Any], category: NotificationCategory
+) -> None:
+    """★ 受入条件 6 / 「意図的な非対称」の実測: BUY・利確の通知入力は summary の有無で変わらない。
+
+    (利確 FULL は reasons が非空のため、reasons が先に使われて summary は読まれない。
+     reasons が空の FULL の挙動は、利確が Recommendation を作る経路では起きないという
+     設計上の推論に依っており、ここでは固定しない。)
+    """
+    assert _APPLICABILITY[_SUMMARY][route][0] == "非該当"
+
+    with_summary = build_recommendation(
+        reasons=["判定理由"], recommended_action_summary="要約", **overrides
+    )
+    without_summary = build_recommendation(
+        reasons=["判定理由"], recommended_action_summary=None, **overrides
+    )
+    assert resolve_notification_category(with_summary) == category
+    assert build_notification_text_input(with_summary, category) == build_notification_text_input(
+        without_summary, category
+    )
