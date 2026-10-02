@@ -167,10 +167,15 @@ class IncidentContent(StrEnum):
 
 
 # 内部のreason_code(IncidentSignal.error_type)→ 利用者向けの「内容」文。
-# tests/unit/test_issue_501_incident_message.pyが、現在実際にfailure_class=
-# HANDLED_FAILUREを設定している発行元(src全数のAST抽出)と本辞書のkeyを
-# 突き合わせる(現在HANDLEDの発行元を1件削除する・新しいHANDLED発行元を
-# 無登録のまま追加する、のいずれもテストが赤くなる)。運用トレンド検知6件
+# tests/unit/test_issue_501_incident_message.pyが、列挙した5箇所
+# (buy_candidates/holdings_watchlist/evaluationの_notify_handled_failure_
+# safely第2位置引数、finalizerのdict literal、reconcilerのboundary
+# metadata)を走査し、本辞書のkeyと突き合わせる。この5箇所の書き方で
+# HANDLEDの発行元を1件削除する・新しいHANDLED発行元を無登録のまま追加する、
+# のいずれもテストが赤くなる。★キーワード引数での指定・列挙外の新規
+# ファイルへの追加は視界外であり赤くならない(src全数の走査ではない。
+# 視界外を塞ぐ仕組みは#745)。新しい発行元を足すときは、本辞書と合わせて
+# 同テストの走査対象も更新すること。運用トレンド検知6件
 # (watchlist_missed_schedule等)とCloudWatchAlarmの計7件は、現時点では
 # envelopeがfailure_classをHANDLED_FAILUREに設定していないため到達しない
 # 先行登録であり、同テストが別途明示的に固定している(発行元が将来HF化
