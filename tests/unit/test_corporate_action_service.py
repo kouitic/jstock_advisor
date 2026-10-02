@@ -289,6 +289,62 @@ def test_cumulative_split_factor_ignores_merger_ratio() -> None:
     assert factor == Decimal("2")  # MERGERの3倍は無視され、SPLITの2倍のみ反映
 
 
+# ===== Issue #698 PR-2 Step 1: 窓境界2ケースの固定 =====
+# サブちゃんのPR #733レビュー(issuecomment-5957466197)で、
+# cumulative_split_factor()の窓境界(lo当日を含めるか/hi当日を除くか)が
+# テストで固定されていないことが判明した(既存コードへの境界変異注入で
+# 両方ともSURVIVED)。本節はfresh再確認の結果(lo < event.effective_date
+# <= hi。:99実測)判明した「hi当日を含め、lo当日を除く」という現在の
+# 実装を、変更せずテストで固定する(fail-safeとして安全な側〔hi当日を
+# 見落とさない〕であることを確認済み。#698 issuecomment-5958946533)。
+
+
+def test_cumulative_split_factor_excludes_event_on_the_lo_boundary_date() -> None:
+    """lo(範囲の古い方の日付)当日に効力発生したイベントは、範囲に含まれない
+    (lo自身は「既にその基準の値である」ことを表すため、lo当日のイベントは
+    lo以前に属する)。"""
+    events = [_split_event("5401", dt.date(2026, 1, 1), "2")]  # lo当日
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    factor = service.cumulative_split_factor("5401", dt.date(2026, 1, 1), dt.date(2026, 7, 27))
+    assert factor == Decimal("1")  # loと同日のイベントは含まれない
+
+
+def test_cumulative_split_factor_includes_event_on_the_hi_boundary_date() -> None:
+    """★fail-safeの要点: hi(範囲の新しい方の日付)当日に効力発生した
+    イベントは、範囲に含まれる(見落とすとCONSISTENT/抑止なしへ誤って
+    倒れる、安全でない方向になる)。"""
+    events = [_split_event("5401", dt.date(2026, 7, 27), "2")]  # hi当日
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    factor = service.cumulative_split_factor("5401", dt.date(2026, 1, 1), dt.date(2026, 7, 27))
+    assert factor == Decimal("2")  # hiと同日のイベントは含まれる
+
+
+def test_classify_basis_date_consistency_excludes_event_on_the_lo_boundary_date() -> None:
+    """classify_basis_date_consistency()も同じ窓境界(lo < date <= hi)を
+    使うため、loと同じ判定になることを固定する。"""
+    events = [_split_event("5401", dt.date(2026, 1, 1), "2")]  # lo当日
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    result = service.classify_basis_date_consistency(
+        "5401",
+        price_basis_date=dt.date(2026, 7, 27),
+        fundamental_basis_date=dt.date(2026, 1, 1),
+    )
+    assert result == BasisDateConsistency.CONSISTENT
+
+
+def test_classify_basis_date_consistency_includes_event_on_the_hi_boundary_date() -> None:
+    """★fail-safeの要点: hi当日のイベントを見落とさずUNDETERMINEDへ倒す
+    (CONSISTENTへ誤って倒れない)ことを固定する。"""
+    events = [_split_event("5401", dt.date(2026, 7, 27), "2")]  # hi当日
+    service = CorporateActionService(_FakeCorporateActionProvider(events), now=_NOW)
+    result = service.classify_basis_date_consistency(
+        "5401",
+        price_basis_date=dt.date(2026, 7, 27),
+        fundamental_basis_date=dt.date(2026, 1, 1),
+    )
+    assert result == BasisDateConsistency.UNDETERMINED
+
+
 # ===== Issue #698 PR-1: basis-date不整合の検出機構 =====
 # 価格側と財務指標(EPS/BPS/DPS)側の基準日が、分割・併合・無償割当を
 # またいでいないかを判定する。CONSISTENTは「整合を確認できた」場合のみ

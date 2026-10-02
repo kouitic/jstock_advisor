@@ -1005,6 +1005,35 @@ class ProfitTakingService:
         )
         confidence_result = self._compute_confidence(result, snapshot, now, financial_freshness)
 
+        # Issue #698 PR-2: valuation依存判定(fair_value_rangeがEPS/BPS/DPS等
+        # 財務指標を使う手法)で、価格側と財務指標側の基準日が分割・併合・
+        # 無償割当をまたいでいないかを記録する(記録のみ。抑止はしない。
+        # 既存の判定結果は一切変更しない)。buy_signal_service/sell_signal_service
+        # と同じevaluation_date_jst(now)を価格側基準日として使う(生成側・比較側の
+        # 基準日を統一する)。財務指標側基準日はsnapshot.fair_value_rangeの
+        # methods_usedのsource_dateのうち最も古いもの(最も保守的)。該当手法が
+        # 1つも無ければ記録しない(「取得できない情報を推測で補完しない」
+        # 要求仕様12節)。本判定の窓(lo,hi]は呼び出し側で既に広く取得済みの
+        # corporate_action_events(上の_fetch_corporate_action_events。
+        # Profit Protection/G4用に基準日を広げた取得)とは独立に、
+        # classify_basis_date_consistency自身に取得させる(基準日取得範囲の
+        # 前提が異なる既存eventsを流用して取りこぼす余地を作らないため)。
+        basis_date_consistency: str | None = None
+        fundamental_basis_dates = [
+            m.source_date
+            for m in snapshot.fair_value_range.methods_used
+            if m.source_date is not None
+        ]
+        if fundamental_basis_dates:
+            basis_date_consistency_service = CorporateActionService(
+                self._providers.corporate_action, now=now
+            )
+            basis_date_consistency = basis_date_consistency_service.classify_basis_date_consistency(
+                holding.stock_code,
+                price_basis_date=evaluation_date,
+                fundamental_basis_date=min(fundamental_basis_dates),
+            ).value
+
         audit_entry = self._audit.record(
             decision_type="profit_taking",
             stock_code=holding.stock_code,
@@ -1030,6 +1059,8 @@ class ProfitTakingService:
                 ),
             },
             output_values={
+                # Issue #698 PR-2: 記録のみ(抑止はしない)。
+                "basis_date_consistency": basis_date_consistency,
                 "recommendation_type": result.recommendation_type.value,
                 "effective_recommendation_type": effective_recommendation_type.value,
                 "fundamental_action": result.fundamental_action.value,
