@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
     BuyCandidateEvaluationRecord,
 )
@@ -40,7 +41,8 @@ class BuyCandidateEvaluationRecordRepository:
 
     def list_by_stock(self, stock_code: str) -> list[BuyCandidateEvaluationRecord]:
         items = self._store.find(lambda r: r.stock_code == stock_code)
-        return sorted(items, key=lambda r: r.evaluated_at)
+        # Issue #576: naive値混入時のTypeErrorに対する防御(normalize_to_aware_utc)。
+        return sorted(items, key=lambda r: normalize_to_aware_utc(r.evaluated_at))
 
     def list_by_batch(self, batch_id: str) -> list[BuyCandidateEvaluationRecord]:
         """指定batch_idの全評価レコードを取得する(GSI Query、対象確認機能向け)。

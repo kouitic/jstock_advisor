@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.enums import RecommendationType
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
@@ -75,7 +76,8 @@ class RecommendationRepository:
 
     def list_by_stock(self, stock_code: str) -> list[Recommendation]:
         items = self._store.find(lambda r: r.stock_code == stock_code)
-        return sorted(items, key=lambda r: r.recommended_at)
+        # Issue #576: naive値混入時のTypeErrorに対する防御(normalize_to_aware_utc)。
+        return sorted(items, key=lambda r: normalize_to_aware_utc(r.recommended_at))
 
     def get(self, recommendation_id: str) -> Recommendation | None:
         return self._store.get(recommendation_id)
@@ -122,4 +124,4 @@ class RecommendationRepository:
         RecommendationTypeのうちrecommended_atが最新の1件を返す(無ければNone)。
         """
         items = self._store.find(lambda r: r.recommendation_type == recommendation_type)
-        return max(items, key=lambda r: r.recommended_at) if items else None
+        return max(items, key=lambda r: normalize_to_aware_utc(r.recommended_at)) if items else None

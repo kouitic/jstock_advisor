@@ -21,6 +21,7 @@ from enum import StrEnum
 from typing import Literal
 
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.daily_notification_priority import (
     DailyNotificationPriorityRecord,
     build_daily_notification_priority_id,
@@ -1275,7 +1276,8 @@ def _format_buy_candidate_message(recommendation: Recommendation) -> str:
         lines.append(margin_line)
     lines.extend(_confirmation_lines(recommendation))
     if recommendation.data_sources:
-        fetched_at = min(s.fetched_at for s in recommendation.data_sources)
+        # Issue #576: naive値混在時のmin()比較TypeErrorに対する防御。
+        fetched_at = min(normalize_to_aware_utc(s.fetched_at) for s in recommendation.data_sources)
         lines.append(f"データ取得日時: {format_jst(fetched_at)}")
     lines.append(f"通知ID: {recommendation.recommendation_id}")
     lines.append(_DISCLAIMER)
@@ -1817,7 +1819,8 @@ def _format_profit_taking_message(
         lines.append(f"次回決算予定日: {recommendation.next_earnings_date}")
     lines.extend(_confirmation_lines(recommendation))
     if recommendation.data_sources:
-        fetched_at = min(s.fetched_at for s in recommendation.data_sources)
+        # Issue #576: naive値混在時のmin()比較TypeErrorに対する防御。
+        fetched_at = min(normalize_to_aware_utc(s.fetched_at) for s in recommendation.data_sources)
         lines.append(f"データ取得日時: {format_jst(fetched_at)}")
     lines.append(f"判定の信頼度: {recommendation.confidence.value}")
     lines.append(f"通知ID: {recommendation.recommendation_id}")
@@ -1851,7 +1854,8 @@ def _format_sell_message(recommendation: Recommendation) -> str:
     if recommendation.holding_risks:
         lines.append("保有を継続する場合のリスク: " + " / ".join(recommendation.holding_risks))
     if recommendation.data_sources:
-        fetched_at = min(s.fetched_at for s in recommendation.data_sources)
+        # Issue #576: naive値混在時のmin()比較TypeErrorに対する防御。
+        fetched_at = min(normalize_to_aware_utc(s.fetched_at) for s in recommendation.data_sources)
         lines.append(f"データ取得日時: {format_jst(fetched_at)}")
     lines.append(f"判定の信頼度: {recommendation.confidence.value}")
     lines.append(f"通知ID: {recommendation.recommendation_id}")
@@ -1992,7 +1996,8 @@ def _format_holding_decision_message(recommendation: Recommendation) -> str:
 
     lines.append(f"判定の信頼度：{recommendation.confidence.value}")
     if recommendation.data_sources:
-        fetched_at = min(s.fetched_at for s in recommendation.data_sources)
+        # Issue #576: naive値混在時のmin()比較TypeErrorに対する防御。
+        fetched_at = min(normalize_to_aware_utc(s.fetched_at) for s in recommendation.data_sources)
         lines.append(f"データ取得日時：{format_jst(fetched_at)}")
     lines.append(f"通知ID：{recommendation.recommendation_id}")
     lines.append("")
@@ -3380,7 +3385,8 @@ class LineNotificationService:
                 # Issue #23と同じくJST暦日同士の差分で数える(UTC暦日だと
                 # JST 09:00の境界を跨いだだけで1日経過と誤判定する)。
                 days_elapsed = (
-                    evaluation_date_jst(now) - evaluation_date_jst(latest_log.sent_at)
+                    evaluation_date_jst(now)
+                    - evaluation_date_jst(normalize_to_aware_utc(latest_log.sent_at))
                 ).days
                 if days_elapsed < self._config.notification.resend_after_days:
                     logger.info(
@@ -3764,7 +3770,8 @@ class LineNotificationService:
                 # 一致だけでは、同日内に件数が変わる形で複数回実行された場合に
                 # 複数回送信されてしまう不備があった)。
                 same_jst_date = latest is not None and (
-                    evaluation_date_jst(latest.sent_at) == evaluation_date_jst(now)
+                    evaluation_date_jst(normalize_to_aware_utc(latest.sent_at))
+                    == evaluation_date_jst(now)
                 )
                 if same_jst_date:
                     logger.info(
@@ -4611,7 +4618,8 @@ class LineNotificationService:
         # sent_at/nowはいずれもUTC instantとして保持し、比較の直前でのみ
         # JST暦日へ変換する(再送許可条件そのものは変更しない)。
         days_elapsed = (
-            evaluation_date_jst(now) - evaluation_date_jst(latest_log.sent_at)
+            evaluation_date_jst(now)
+            - evaluation_date_jst(normalize_to_aware_utc(latest_log.sent_at))
         ).days
         if previous is None:
             # Issue #271: 前回の内容と**比較できないまま日数だけで判断した**ことを残す。

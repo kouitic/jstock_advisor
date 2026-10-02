@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.holding_decision import HoldingDecisionResult
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
@@ -43,11 +44,12 @@ class HoldingDecisionResultRepository:
 
     def list_by_holding(self, holding_id: str) -> list[HoldingDecisionResult]:
         items = self._store.find(lambda r: r.holding_id == holding_id)
-        return sorted(items, key=lambda r: r.evaluated_at)
+        # Issue #576: naive値混入時のTypeErrorに対する防御(normalize_to_aware_utc)。
+        return sorted(items, key=lambda r: normalize_to_aware_utc(r.evaluated_at))
 
     def list_by_stock(self, stock_code: str) -> list[HoldingDecisionResult]:
         items = self._store.find(lambda r: r.stock_code == stock_code)
-        return sorted(items, key=lambda r: r.evaluated_at)
+        return sorted(items, key=lambda r: normalize_to_aware_utc(r.evaluated_at))
 
     def latest_by_holding(self, holding_id: str) -> HoldingDecisionResult | None:
         items = self.list_by_holding(holding_id)
@@ -60,8 +62,11 @@ class HoldingDecisionResultRepository:
     def list_between(
         self, start: dt.datetime, end: dt.datetime
     ) -> list[HoldingDecisionResult]:
-        items = self._store.find(lambda r: start <= r.evaluated_at <= end)
-        return sorted(items, key=lambda r: r.evaluated_at)
+        # Issue #576同型sweep: filter比較自体もnaive値混入時にTypeErrorになり得る
+        # ため、sort keyと同じ防御をここにも適用する(設計時のリストは3箇所の
+        # sortedのみを挙げていたが、同じrisk patternであるこの比較も対象とする)。
+        items = self._store.find(lambda r: start <= normalize_to_aware_utc(r.evaluated_at) <= end)
+        return sorted(items, key=lambda r: normalize_to_aware_utc(r.evaluated_at))
 
     def list_all(self) -> list[HoldingDecisionResult]:
         return self._store.list_all()

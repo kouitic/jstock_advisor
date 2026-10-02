@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from jstock_advisor.config.models import TradeCooldownConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.enums import TransactionType
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.holding import Holding
@@ -122,10 +123,15 @@ class TradeCooldownService:
             if status == trade_detection_lock.RunLockStatus.COMPLETED.value:
                 return TradeDetectionOutcome(confirmed=True, events=[])
             # stale lock: 先行Lambdaが異常終了した可能性。自分がリースを奪取する。
+            # Issue #577(F-L7): ISO文字列の辞書順比較ではなく、型付き比較で判定する
+            # (naive値が書かれても「常に期限切れ」という誤判定にならない)。
+            lease_expired = (
+                lease_expires_at is not None
+                and normalize_to_aware_utc(dt.datetime.fromisoformat(lease_expires_at)) < now
+            )
             if (
                 status == trade_detection_lock.RunLockStatus.PROCESSING.value
-                and lease_expires_at is not None
-                and lease_expires_at < now.isoformat()
+                and lease_expired
                 and trade_detection_lock.try_acquire(business_date, now, _LEASE_SECONDS)
             ):
                 events = self._do_detect_and_apply(current_holdings, evaluation_date, now)

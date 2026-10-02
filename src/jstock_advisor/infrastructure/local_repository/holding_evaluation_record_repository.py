@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jstock_advisor.domain.datetime_normalization import normalize_to_aware_utc
 from jstock_advisor.domain.entities.holding_evaluation_record import HoldingEvaluationRecord
 from jstock_advisor.infrastructure.collection_store import CollectionStore, build_collection_store
 
@@ -48,4 +49,5 @@ class HoldingEvaluationRecordRepository:
         items = self._store.query_by_index(HOLDING_ID_INDEX_NAME, "holding_id", holding_id)
         if not items:
             return None
-        return max(items, key=lambda r: r.evaluated_at)
+        # Issue #576: naive値混入時のTypeErrorに対する防御(normalize_to_aware_utc)。
+        return max(items, key=lambda r: normalize_to_aware_utc(r.evaluated_at))

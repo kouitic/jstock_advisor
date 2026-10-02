@@ -598,5 +598,8 @@ def test_t9_the_early_return_is_not_reintroduced() -> None:
     assert "if previous is None:\n            return NotificationStatus.SENT" not in source, (
         "previous is None を『送信してよい』へ倒す early return が復活している(#271)"
     )
-    # 日数判定が previous を参照しないままであること（O-1 の前提）
-    assert "evaluation_date_jst(latest_log.sent_at)" in source
+    # 日数判定が previous を参照しないままであること（O-1 の前提）。
+    # Issue #576で naive/aware混入への防御(normalize_to_aware_utc)が
+    # sent_at の直接参照に追加されたため、固定する文字列もそれに合わせる
+    # (読む対象が previous ではなく latest_log.sent_at であること自体は不変)。
+    assert "evaluation_date_jst(normalize_to_aware_utc(latest_log.sent_at))" in source
