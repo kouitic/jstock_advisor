@@ -237,6 +237,15 @@ class CorporateActionService:
         日付情報だけでは判定できない根拠)が必要であり、呼び出し側が本関数の
         UNDETERMINED結果と実測値の異常検知を組み合わせて最終的な判定を行う
         (#698 PR-2/PR-3で実装予定)。
+
+        ★例外契約: `events`省略時に内部で呼ぶ`get_effective_events()`は、
+        provider取得失敗時に空リストへ潰さず例外を送出する(`get_effective_events()`
+        と7消費箇所が共有する既存挙動。本関数もこの契約を変更しない)。
+        本関数自身は失敗を握り潰さない設計であるため、**呼び出し側が
+        fail-soft化する必要がある場合は呼び出し側でtry/exceptすること**
+        (レビュー指摘。PR #747 issuecomment-5961092047 F-1。#698 PR-2の
+        valuation経路配線がこの契約を見落とし、記録のための付随処理の
+        失敗が判定・通知自体を止めてしまう退行を作った)。
         """
         if price_basis_date == fundamental_basis_date:
             return BasisDateConsistency.CONSISTENT

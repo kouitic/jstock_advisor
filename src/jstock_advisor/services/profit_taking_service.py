@@ -136,7 +136,10 @@ from jstock_advisor.domain.signals.trading_unit_feasibility import (
 from jstock_advisor.interfaces.types import CorporateActionEvent, DividendInfo, ShareholderBenefit
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
-from jstock_advisor.services.corporate_action_service import CorporateActionService
+from jstock_advisor.services.corporate_action_service import (
+    BasisDateConsistency,
+    CorporateActionService,
+)
 from jstock_advisor.services.data_quality_service import check_split_consistency
 from jstock_advisor.services.financial_freshness_integration import (
     FINANCIAL_STALE_USER_WARNING,
@@ -544,7 +547,11 @@ class ProfitTakingService:
         return now.date() - dt.timedelta(days=365 * lookback_years)
 
     def _fetch_corporate_action_events(
-        self, holding: Holding, now: dt.datetime
+        self,
+        holding: Holding,
+        now: dt.datetime,
+        *,
+        extra_since_floor: dt.date | None = None,
     ) -> list[CorporateActionEvent]:
         """企業行動eventsを**1回だけ**取得する(Issue #160 / #456 U7 OPTION_B_SINGLE_WIDENED_FETCH)。
 
@@ -555,9 +562,19 @@ class ProfitTakingService:
         `effective_date >= basis_date`で再filterする
         (`_compute_profit_protection_metrics`)ため、結果は変わらない。shadowのmodeには依存しない
         (単一のコード経路。MANAGER判断 D-b)。
+
+        `extra_since_floor`(Issue #698 PR-2b): basis_date_consistency判定が
+        必要とする窓(fundamental_basis_dateとprice_basis_dateの間)もこの
+        1回の取得で賄うため、指定された場合は取得開始日をさらにそこまで
+        広げる。取得範囲を広げるだけであり(上記と同じ「広く取得・個別に
+        filter」の原則)、Profit Protection/G4 shadow側の`effective_date >=
+        basis_date`フィルタ・挙動は一切変更しない。basis_date_consistency側は
+        呼び出し元で`events`引数へこの戻り値をそのまま渡し、再取得しない。
         """
         basis_date = self._profit_protection_basis_date(holding)
         since = min(basis_date, self._split_consistency_lookback_start(now))
+        if extra_since_floor is not None:
+            since = min(since, extra_since_floor)
         corporate_action_service = CorporateActionService(self._providers.corporate_action, now=now)
         return corporate_action_service.get_effective_events(holding.stock_code, since)
 
@@ -835,11 +852,74 @@ class ProfitTakingService:
             )
         )
 
+        # Issue #698 PR-2b(E3採用。MANAGER決定issuecomment-5961781383):
+        # 財務指標側基準日は、共有pipelineに既に無条件で設定済みの
+        # snapshot.financial_input_provenance.fiscal_period_endを使う
+        # (buy_signal_serviceが自前のvaluation_summaryで使うのと同じ値)。
+        # 共有pipeline・S-05(domain/valuation/)・financial_input_provenance.py
+        # 本体はいずれも変更しない(既存fieldを読むだけ)。
+        # 「該当手法が無ければ記録しない」という既存方針は維持するため、
+        # fair_value_range.methods_usedが空の場合は窓を広げず、
+        # basis_date_consistency自体も記録しない(「取得できない情報を
+        # 推測で補完しない」要求仕様12節)。
+        has_applicable_valuation_method = bool(snapshot.fair_value_range.methods_used)
+        fiscal_period_end = (
+            snapshot.financial_input_provenance.fiscal_period_end
+            if snapshot.financial_input_provenance is not None
+            else None
+        )
+        fundamental_basis_date = fiscal_period_end if has_applicable_valuation_method else None
+
         # Issue #160 / #456: 企業行動eventsの1回の取得を、Profit ProtectionとG4(shadow)で共用する。
-        corporate_action_events = self._fetch_corporate_action_events(holding, now)
+        corporate_action_events = self._fetch_corporate_action_events(
+            holding, now, extra_since_floor=fundamental_basis_date
+        )
         profit_protection_metrics = self._compute_profit_protection_metrics(
             holding, snapshot, now, events=corporate_action_events
         )
+
+        # Issue #698 PR-2b: valuation経路(fair_value_rangeがEPS/BPS/DPS等
+        # 財務指標を使う手法)で、価格側と財務指標側の基準日が分割・併合・
+        # 無償割当をまたいでいないかを記録する(記録のみ。抑止はしない。
+        # 既存の判定結果は一切変更しない)。上で取得済みのcorporate_action_events
+        # をそのまま渡すため(events=Noneにしない)、この判定自体は追加の
+        # provider呼び出しを発生させない。
+        # fail-soft(レビュー対応issuecomment-5961092047 F-1):
+        # classify_basis_date_consistency()はprovider取得失敗時に例外を
+        # 送出する契約を変更していない(上のcorporate_action_events取得が
+        # 既に成功した後にのみ本ブロックへ到達するため、provider障害時は
+        # 通常ここへ到達しない。その場合はProfit Protection自体が従来どおり
+        # 例外を送出する〔本PRで変更しない既存挙動〕)。それでも本判定固有の
+        # 処理で想定外の例外が起きた場合に、利確判定・通知・保存を止めない
+        # よう、本判定だけUNDETERMINEDへfail-softする。
+        basis_date_consistency: str | None = None
+        basis_date_consistency_check_failed = False
+        if has_applicable_valuation_method and fundamental_basis_date is None:
+            # 該当手法はあるが財務側基準日(fiscal_period_end)自体が不明。
+            # HANAKO確定待ち(issuecomment-5961781383): 「記録なし」ではなく
+            # 安全側のUNDETERMINEDへ暫定で倒す(「確認できない場合はUNDETERMINED」
+            # という既存設計哲学〔要求仕様12節・USER決定OD-3〕と一貫させるため)。
+            # 「記録なし」が確定した場合は、この分岐を削除するだけでよい。
+            basis_date_consistency = BasisDateConsistency.UNDETERMINED.value
+        elif fundamental_basis_date is not None:
+            try:
+                basis_date_consistency_service = CorporateActionService(
+                    self._providers.corporate_action, now=now
+                )
+                basis_date_consistency = (
+                    basis_date_consistency_service.classify_basis_date_consistency(
+                        holding.stock_code,
+                        price_basis_date=evaluation_date,
+                        fundamental_basis_date=fundamental_basis_date,
+                        events=corporate_action_events,
+                    ).value
+                )
+            except Exception:  # noqa: BLE001 - 記録のみの付随処理。失敗しても利確判定・通知・保存を止めない
+                logger.exception(
+                    "basis_date_consistency check failed stock_code=%s", holding.stock_code
+                )
+                basis_date_consistency = BasisDateConsistency.UNDETERMINED.value
+                basis_date_consistency_check_failed = True
 
         # Issue #53 Phase B2: accounting_or_scandal_or_delisting_riskはここで一切
         # 設定せず、既定のFalseのままとする(開示情報を取得できなかったことを
@@ -1030,6 +1110,9 @@ class ProfitTakingService:
                 ),
             },
             output_values={
+                # Issue #698 PR-2b: 記録のみ(抑止はしない)。
+                "basis_date_consistency": basis_date_consistency,
+                "basis_date_consistency_check_failed": basis_date_consistency_check_failed,
                 "recommendation_type": result.recommendation_type.value,
                 "effective_recommendation_type": effective_recommendation_type.value,
                 "fundamental_action": result.fundamental_action.value,
