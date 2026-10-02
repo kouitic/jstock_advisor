@@ -331,3 +331,35 @@ def test_negative_failure_count_raises() -> None:
 
     with pytest.raises(ValueError):
         handler_module._normalize(message, now)
+
+
+# --- Issue #724: HANDLED_FAILUREの「内容」行が実送信本文へ実際に届くこと -------------------
+
+
+def test_handled_failure_content_line_reaches_the_actual_sent_line_text(
+    recording_line_client: _RecordingLineClient,
+) -> None:
+    """★ #474/#701/#468で判明した「診断専用経路にしか反映されない」gapの再発防止。
+    build_incident_message()の戻り値が、実際にline_client.push_message()へ渡される
+    本文そのものであることを、handler()を通して直接確認する(診断用のpreview関数等を
+    経由しない)。"""
+    message = _internal_message(
+        job_name="buy-candidates",
+        failure_stage="CANDIDATE_ANALYSIS",
+        failure_type="UNHANDLED_EXCEPTION",
+        reason_code="BUY_CANDIDATES_ANALYSIS_FAILED",
+        failure_count=1,
+        consecutive_days=None,
+        is_ongoing=None,
+    )
+    message["failure_class"] = "HANDLED_FAILURE"
+
+    result = handler_module.handler(_sns_event(message), None)
+
+    assert result == {"processed": 1}
+    assert len(recording_line_client.sent) == 1
+    sent_text = recording_line_client.sent[0]
+    assert "内容: 銘柄分析の一部が完了しませんでした" in sent_text
+    assert "⚠️ 本番処理の一部で問題が発生しました。" in sent_text
+    # HANDLED_FAILUREの恒久記録を示唆する旧文言が混入していないこと。
+    assert "システム側で調査情報を記録しました" not in sent_text

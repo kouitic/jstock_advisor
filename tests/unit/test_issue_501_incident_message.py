@@ -26,11 +26,14 @@ import yaml
 
 from jstock_advisor.domain.notification import incident_message
 from jstock_advisor.domain.notification.incident_message import (
+    IncidentContent,
     IncidentJob,
     IncidentNotice,
     build_incident_message,
+    resolve_incident_content,
     resolve_incident_job,
 )
+from jstock_advisor.domain.notification.incident_signal import FailureClass
 
 _UTC = dt.UTC
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -112,6 +115,55 @@ def test_the_time_is_shown_in_jst(utc: dt.datetime, jst_text: str) -> None:
     text = build_incident_message(_notice(occurred_at=utc))
 
     assert text.splitlines()[2] == f"発生時刻: {jst_text}"
+
+
+# --- 1b Issue #724: HANDLED_FAILUREのheadline分岐・「内容」行 -------------------------------
+
+_HANDLED_HEADLINE = "⚠️ 本番処理の一部で問題が発生しました。"
+
+
+def test_unhandled_failure_body_is_byte_for_byte_unchanged() -> None:
+    """契約4: UNHANDLED_FAILURE(既定値)の本文は1バイトも変わらない。"""
+    text = build_incident_message(_notice())
+    assert text == f"{_HEADLINE}\n対象: 買い候補チェック\n発生時刻: 08:03"
+    assert "内容" not in text
+
+
+def test_handled_failure_uses_neutral_headline_and_adds_content_line() -> None:
+    notice = _notice(
+        failure_class=FailureClass.HANDLED_FAILURE,
+        content=IncidentContent.BUY_CANDIDATES_ANALYSIS_FAILED,
+    )
+    text = build_incident_message(notice)
+    assert text == (
+        f"{_HANDLED_HEADLINE}\n対象: 買い候補チェック\n"
+        f"内容: {IncidentContent.BUY_CANDIDATES_ANALYSIS_FAILED.value}\n発生時刻: 08:03"
+    )
+
+
+def test_handled_failure_without_content_omits_the_line() -> None:
+    """理論上の後方互換ケース(contentが未設定のHANDLED_FAILURE)。"""
+    text = build_incident_message(_notice(failure_class=FailureClass.HANDLED_FAILURE))
+    assert "内容" not in text
+    assert text.startswith(_HANDLED_HEADLINE)
+
+
+def test_resolve_incident_content_known_reason_code() -> None:
+    assert (
+        resolve_incident_content("BUY_CANDIDATES_ANALYSIS_FAILED")
+        is IncidentContent.BUY_CANDIDATES_ANALYSIS_FAILED
+    )
+    assert (
+        resolve_incident_content("watchlist_queue_backlog")
+        is IncidentContent.WATCHLIST_QUEUE_BACKLOG
+    )
+    assert resolve_incident_content("CloudWatchAlarm") is IncidentContent.CLOUDWATCH_ALARM
+
+
+def test_resolve_incident_content_unknown_or_non_string_falls_back_to_other() -> None:
+    assert resolve_incident_content("some-future-reason-code") is IncidentContent.OTHER
+    assert resolve_incident_content(None) is IncidentContent.OTHER
+    assert resolve_incident_content(123) is IncidentContent.OTHER
 
 
 # --- 2 allowlist が不変条件(検査そのものの確認) -----------------------------------------------
@@ -222,6 +274,10 @@ def test_the_notice_has_no_free_text_field() -> None:
         "failure_count": "int | None",
         "consecutive_days": "int | None",
         "is_ongoing": "bool | None",
+        # Issue #724: HANDLED_FAILUREのときだけ「内容」行とheadline分岐に使う。
+        # いずれも列挙(FailureClass/IncidentContent)であり自由文字列ではない。
+        "failure_class": "FailureClass",
+        "content": "IncidentContent | None",
     }
     assert not any("str" in annotation for annotation in fields.values())
 
@@ -424,6 +480,9 @@ _ALLOWED_IMPORTS = {
     "dataclasses",
     "enum",
     "jstock_advisor.domain.jst",
+    # Issue #724: FailureClassのみ(列挙)。incident_signal.py自身もpure domain
+    # module(ネットワーク・ファイル・AWSに触れない)であることを確認済み。
+    "jstock_advisor.domain.notification.incident_signal",
 }
 
 
