@@ -1,4 +1,4 @@
-"""datetime正規化(naive→aware UTC)の共通部品(S-04。Issue #576)。
+"""datetime正規化(naive→aware UTC)の共通部品(S-25。Issue #576)。
 
 内部で保持するdatetimeはすべてaware UTCであるべき(書き込み経路は常に
 `dt.datetime.now(dt.UTC)`を起源とする)。naive値(想定外の旧データ・

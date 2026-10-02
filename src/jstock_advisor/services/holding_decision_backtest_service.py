@@ -122,7 +122,7 @@ def _jst_date_range_to_utc(
     return start_utc, end_exclusive_utc
 
 
-# 共通部品(S-04。Issue #576)へ統合。この別名は導入前からの既存の呼び出し名・
+# 共通部品(S-25。Issue #576)へ統合。この別名は導入前からの既存の呼び出し名・
 # テスト(test_holding_decision_backtest_service.py)との互換のために残っている。
 _as_aware_utc = normalize_to_aware_utc
 

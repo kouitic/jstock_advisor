@@ -1,4 +1,4 @@
-"""domain/datetime_normalization.py(S-04共通部品。Issue #576)のテスト。"""
+"""domain/datetime_normalization.py(S-25共通部品。Issue #576)のテスト。"""
 
 import datetime as dt
 

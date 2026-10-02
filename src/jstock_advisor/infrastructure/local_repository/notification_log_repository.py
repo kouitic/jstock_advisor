@@ -47,9 +47,9 @@ NOTIFICATION_LOG_RETENTION_DAYS = 730
 _TTL_EXEMPT_TYPES = frozenset({NotificationType.PROFIT_PROTECTION_ATTENTION})
 
 
-# 共通部品(S-04。Issue #576)へ統合。書き込み経路(line_notification_service.py)
+# 共通部品(S-25。Issue #576)へ統合。書き込み経路(line_notification_service.py)
 # は常にdt.datetime.now(dt.UTC)を渡すためaware UTCが正規形で、この別名自体が
-# S-04導入前からの既存の呼び出し名・テスト(#280)との互換のために残っている。
+# S-25導入前からの既存の呼び出し名・テスト(#280)との互換のために残っている。
 _sent_at_as_utc = normalize_to_aware_utc
 
 
