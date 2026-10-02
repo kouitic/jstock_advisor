@@ -18,6 +18,7 @@ import dataclasses
 import datetime as dt
 from collections.abc import Sequence
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -1615,3 +1616,238 @@ def test_safety_facts_are_unset_on_every_path_that_produces_no_recommendation(
 
     assert outcome.recommendation is None
     assert outcome.safety_facts is None
+
+
+# ============================================================================
+# Issue #698 PR-2b: profit_takingへのbasis_date_consistency配線
+# レビュー対応(PR #747 issuecomment-5961092047 F-1/F-2/F-3の再発防止として、
+# 呼び出し回数・配線の値導出・fail-softの3点をそれぞれ独立したmutationで検知する)
+# ============================================================================
+
+_PR2B_FISCAL_PERIOD_END = dt.date(2026, 3, 31)
+
+
+class _RecordingCorporateActionProvider:
+    """get_corporate_actionsの呼び出し回数とsinceを記録し、指定eventsのうち
+    since以降のものだけを返す(実providerと同じ絞り込み契約)。"""
+
+    def __init__(self, events: list[CorporateActionEvent]) -> None:
+        self._events = events
+        self.calls: list[tuple[str, dt.date]] = []
+
+    def get_corporate_actions(
+        self, stock_code: str, since: dt.date
+    ) -> list[CorporateActionEvent]:
+        self.calls.append((stock_code, since))
+        return [e for e in self._events if e.effective_date is None or e.effective_date >= since]
+
+
+class _RecordingAuditForPr2b:
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+
+    def record(self, **kwargs: object) -> object:
+        self.records.append(kwargs)
+        return SimpleNamespace(audit_id="audit-pr2b-test")
+
+
+def _analyze_for_basis_date_consistency(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    corporate_action_events: list[CorporateActionEvent],
+    fiscal_period_end: dt.date = _PR2B_FISCAL_PERIOD_END,
+) -> tuple[object, dict[str, object], _RecordingCorporateActionProvider]:
+    """basis_date_consistency配線を検証する共通ヘルパー。
+
+    FULL_PROFIT_TAKEのcanned結果を使い、利確判定ロジック自体には依存しない
+    (既存のtest_stale_earnings_date_*系と同じ既存パターンを踏襲)。
+    """
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.FULL_PROFIT_TAKE),
+    )
+    recording_provider = _RecordingCorporateActionProvider(corporate_action_events)
+    providers = _providers(None, fiscal_period_end)
+    providers = dataclasses.replace(providers, corporate_action=recording_provider)
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    audit = _RecordingAuditForPr2b()
+    monkeypatch.setattr(service, "_audit", audit)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    profit_records = [r for r in audit.records if r.get("decision_type") == "profit_taking"]
+    assert len(profit_records) == 1
+    output_values = profit_records[0]["output_values"]
+    return outcome, output_values, recording_provider  # type: ignore[return-value]
+
+
+def test_pr2b_no_event_in_window_records_consistent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fiscal_period_end(財務側基準日)と評価日(価格側基準日)の間に分割・併合・
+    無償割当が無ければCONSISTENTを記録する。"""
+    outcome, output_values, _ = _analyze_for_basis_date_consistency(
+        monkeypatch, corporate_action_events=[]
+    )
+
+    assert outcome.recommendation is not None
+    assert output_values["basis_date_consistency"] == "CONSISTENT"
+    assert output_values["basis_date_consistency_check_failed"] is False
+
+
+def test_pr2b_event_in_window_records_undetermined(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fiscal_period_end(2026-03-31)と評価日(2026-08-06)の間(2026-05-01)に
+    分割があればUNDETERMINEDを記録する(N5〜N13相当: キー削除・配線無効化・
+    価格側/財務側の取り違えのいずれでもこのassertは失敗する)。"""
+    outcome, output_values, _ = _analyze_for_basis_date_consistency(
+        monkeypatch, corporate_action_events=[_split_event(dt.date(2026, 5, 1))]
+    )
+
+    assert outcome.recommendation is not None
+    assert output_values["basis_date_consistency"] == "UNDETERMINED"
+    assert output_values["basis_date_consistency_check_failed"] is False
+
+
+def test_pr2b_corporate_action_provider_is_called_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """basis_date_consistency配線を追加しても、企業行動providerの呼び出しは
+    保有1件あたり1回のまま(Profit Protection/G4 shadowと共用)。
+
+    レビュー対応(F-3): 独立取得(2回目のget_corporate_actions呼び出し)へ戻すと、
+    このassertが2!=1で落ちる(実際に変異させて確認し、revertした。本テストの
+    docstringに実測結果を残す: 変異版は`assert 2 == 1`相当でFAILした)。
+    """
+    _, _, provider = _analyze_for_basis_date_consistency(
+        monkeypatch, corporate_action_events=[_split_event(dt.date(2026, 5, 1))]
+    )
+
+    assert len(provider.calls) == 1
+
+
+def test_pr2b_no_eligible_valuation_method_does_not_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fair_value_range.methods_usedが空(=該当手法が無い)場合は、
+    basis_date_consistencyをNoneのまま記録する(取得できない情報を推測で
+    補完しない。要求仕様12節)。
+
+    E3採用後、財務側基準日はmethods_used個々のsource_dateではなく
+    snapshot.financial_input_provenance.fiscal_period_endから導出するため、
+    「該当手法の有無」はmethods_usedの空リスト判定そのもので表現する
+    (個々の値を加工する必要が無くなった分、注入は空リスト化のみで足りる。
+    このbranch自体は「methods_usedが空かどうか」という純粋な分岐ロジックの
+    確認であり、今回発見した欠陥〔source_dateが共有pipelineを実際に流れて
+    こない〕のクラスとは別の観点のため、fixtureへの直接注入で十分と判断した)。
+    """
+    import jstock_advisor.services.profit_taking_service as service_module
+
+    original_build = service_module.build_stock_snapshot
+
+    def _build_with_empty_methods_used(*args: object, **kwargs: object) -> object:
+        snapshot, error = original_build(*args, **kwargs)
+        if snapshot is None:
+            return snapshot, error
+        forced = snapshot.fair_value_range.model_copy(update={"methods_used": []})
+        return dataclasses.replace(snapshot, fair_value_range=forced), error
+
+    monkeypatch.setattr(service_module, "build_stock_snapshot", _build_with_empty_methods_used)
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.FULL_PROFIT_TAKE),
+    )
+    recording_provider = _RecordingCorporateActionProvider([])
+    providers = _providers(None, _PR2B_FISCAL_PERIOD_END)
+    providers = dataclasses.replace(providers, corporate_action=recording_provider)
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    audit = _RecordingAuditForPr2b()
+    monkeypatch.setattr(service, "_audit", audit)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.recommendation is not None
+    profit_records = [r for r in audit.records if r.get("decision_type") == "profit_taking"]
+    output_values = profit_records[0]["output_values"]
+    assert output_values["basis_date_consistency"] is None
+    assert output_values["basis_date_consistency_check_failed"] is False
+    # 該当手法が無いため、窓を広げる必要も無い(from_dateが従来のbasis_dateの
+    # ままであることまでは本テストでは固定しない。call countのみ確認)。
+    assert len(recording_provider.calls) == 1
+
+
+def test_pr2b_fiscal_period_end_missing_records_undetermined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """該当手法はある(methods_usedは非空)が、財務側基準日
+    (financial_input_provenance.fiscal_period_end)自体が不明な場合は、
+    UNDETERMINEDへ倒す(HANAKO確定issuecomment-5961781383: 「記録なし」
+    ではなく安全側のUNDETERMINEDとする)。"""
+    import jstock_advisor.services.profit_taking_service as service_module
+
+    original_build = service_module.build_stock_snapshot
+
+    def _build_without_fiscal_period_end(*args: object, **kwargs: object) -> object:
+        snapshot, error = original_build(*args, **kwargs)
+        if snapshot is None or snapshot.financial_input_provenance is None:
+            return snapshot, error
+        forced_provenance = snapshot.financial_input_provenance.model_copy(
+            update={"fiscal_period_end": None}
+        )
+        return (
+            dataclasses.replace(snapshot, financial_input_provenance=forced_provenance),
+            error,
+        )
+
+    monkeypatch.setattr(
+        service_module, "build_stock_snapshot", _build_without_fiscal_period_end
+    )
+    monkeypatch.setattr(
+        "jstock_advisor.services.profit_taking_service.evaluate_profit_taking",
+        lambda **kwargs: _canned_result(RecommendationType.FULL_PROFIT_TAKE),
+    )
+    recording_provider = _RecordingCorporateActionProvider([])
+    providers = _providers(None, _PR2B_FISCAL_PERIOD_END)
+    providers = dataclasses.replace(providers, corporate_action=recording_provider)
+    service = ProfitTakingService(providers=providers, config=_CONFIG)
+    audit = _RecordingAuditForPr2b()
+    monkeypatch.setattr(service, "_audit", audit)
+
+    outcome = service.analyze(_holding("2914"), _NOW)
+
+    assert outcome.recommendation is not None
+    profit_records = [r for r in audit.records if r.get("decision_type") == "profit_taking"]
+    output_values = profit_records[0]["output_values"]
+    assert output_values["basis_date_consistency"] == "UNDETERMINED"
+    assert output_values["basis_date_consistency_check_failed"] is False
+    # 企業行動providerへの呼び出しは、Profit Protection自身の既存取得
+    # (本PRの対象外。本テストでは基準日不明のため窓を広げない)の1回のみ。
+    # classify()自体は(基準日が無いため)呼ばれない。
+    assert len(recording_provider.calls) == 1
+
+
+def test_pr2b_classify_failure_is_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """classify_basis_date_consistency()が想定外の例外を送出しても、利確判定・
+    他のoutput_values・戻り値は従来どおり生成される(記録のための付随処理の
+    失敗が投資判断を止めない。レビュー対応 issuecomment-5961092047 F-1)。
+    basis_date_consistencyはUNDETERMINEDへfail-softし、
+    basis_date_consistency_check_failed=Trueで原因を区別できるようにする。
+
+    本テストからtry/exceptを外すと(手動で変異させて確認し、revertした)、
+    例外がanalyze()の外まで伝播しAttributeError等でテスト自体がエラー終了
+    することを確認済み(=このテストは配線のfail-soft化を実際に検知する)。
+    """
+    from jstock_advisor.services.corporate_action_service import CorporateActionService
+
+    def _raise(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("boom: provider data error (injected)")
+
+    monkeypatch.setattr(CorporateActionService, "classify_basis_date_consistency", _raise)
+
+    outcome, output_values, _ = _analyze_for_basis_date_consistency(
+        monkeypatch, corporate_action_events=[]
+    )
+
+    assert outcome.recommendation is not None
+    assert output_values["basis_date_consistency"] == "UNDETERMINED"
+    assert output_values["basis_date_consistency_check_failed"] is True
+    # 他の既存output_valuesキーは従来どおり生成されている(記録の失敗が
+    # 判定結果自体を欠落させない)。
+    assert output_values["recommendation_type"] == RecommendationType.FULL_PROFIT_TAKE.value
