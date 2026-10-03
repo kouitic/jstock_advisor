@@ -158,7 +158,10 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
-from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
+from jstock_advisor.services.shareholder_benefit_registry_service import (
+    check_registry_coverage,
+    check_registry_health,
+)
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
 from jstock_advisor.services.watch_state_service import WatchStateService
@@ -2033,6 +2036,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     )
     function_name = resolve_function_name(context, os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""))
     holdings = PortfolioService().list_holdings()
+    # Issue #754: 株主優待registryのcoverageの保有側をINFO記録する(読み込み済みのholdingsから算出。
+    # 候補側は買い候補バッチで記録する。判定・通知は変えない)。
+    check_registry_coverage(candidate_codes=None, holding_codes=[h.stock_code for h in holdings])
 
     # --- BUY候補裾野拡大機能(2026-08、§5-1・§5-2): 売買イベント検知を
     # BUY候補Lambda・保有銘柄Lambdaの起動順序に依存させない。両ハンドラの
