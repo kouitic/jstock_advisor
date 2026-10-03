@@ -260,6 +260,7 @@ def _analyze(
     shadow: JudgmentSafetyShadowConfig | None = None,
     events: list[CorporateActionEvent] | None = None,
     distinct_previous_dividend: bool = False,
+    distinct_bar_open: bool = False,
 ) -> tuple[Any, Any, Holding, list[dict[str, Any]]]:
     """(snapshot, outcome, holding, `check_split_consistency` が受け取った引数の捕捉)を返す。"""
     captured: list[dict[str, Any]] = []
@@ -299,6 +300,13 @@ def _analyze(
                     update={"previous_fiscal_year_dividend_per_share": actual * 2}
                 ),
             )
+        if distinct_bar_open:
+            # mock の足は全銘柄・全足で open == close のため、bars_close_by_date を bar.open へ
+            # 取り違えても値が変わらず検出できない(#776 の REVIEWER の指摘)。
+            # fixture では open を close と異なる値にする。
+            factor = Decimal("1.005")
+            shifted = [bar.model_copy(update={"open": bar.close * factor}) for bar in snapshot.bars]
+            snapshot = dataclasses.replace(snapshot, bars=shifted)
         holding = _holding(stock_code, average_purchase_price)
         service = ProfitTakingService(
             providers=providers,
@@ -718,7 +726,9 @@ class _WiredG4:
             shadow=_SHADOW_ON,
             events=self.events,
             distinct_previous_dividend=True,
+            distinct_bar_open=True,
         )
+        self.snapshot = snapshot
         # shadow が走っていない fixture では、以下の検査が空振りする(vacuous)。
         assert outcome.recommendation is not None
         assert outcome.recommendation.recommendation_type is RecommendationType.FULL_PROFIT_TAKE
@@ -738,9 +748,13 @@ def g4(request: pytest.FixtureRequest) -> _WiredG4:
 
 
 def test_the_g4_argument_list_is_exactly_the_ten_checked_arguments(g4: _WiredG4) -> None:
-    """検査対象の引数名が、サービスの実際の呼び出しと一致する(増減を黙って見落とさない)。"""
-    assert tuple(g4.captured) == _G4_ARGUMENT_NAMES == tuple(g4.expected)
-    assert len(_G4_ARGUMENT_NAMES) == 10
+    """検査対象の引数名が、サービスの実際の呼び出しと一致する(増減を黙って見落とさない)。
+
+    名前の集合と件数で比べる。キーワード引数の並び順は固定しない(並べ替えは意味が変わらないため。
+    引数の値の取り違え・欠落は、下の A1 とメタテストが検出する)。
+    """
+    assert set(g4.captured) == set(_G4_ARGUMENT_NAMES) == set(g4.expected)
+    assert len(g4.captured) == len(g4.expected) == len(_G4_ARGUMENT_NAMES) == 10
 
 
 def test_a3_every_g4_argument_is_present_and_the_swap_prone_pairs_differ(g4: _WiredG4) -> None:
@@ -749,6 +763,8 @@ def test_a3_every_g4_argument_is_present_and_the_swap_prone_pairs_differ(g4: _Wi
     引数を落とす変異は None / 欠落になるため、期待値が None / 空だと差が出ない。取り違えやすい組
     (現在値と公正価値・実績配当と前期配当)の値が等しいと、その取り違えを検出できない。
     mock の配当は実績と前期が全銘柄で等しいため、fixture では前期の配当を別の値にしている。
+    mock の足は全銘柄・全足で open == close のため、bars の close と open の取り違えが検出できない。
+    fixture では open を close と異なる値にしている(下の assert が、全足で異なることを固定する)。
     """
     expected = g4.expected
     for name, value in expected.items():
@@ -760,6 +776,9 @@ def test_a3_every_g4_argument_is_present_and_the_swap_prone_pairs_differ(g4: _Wi
     )
     assert len(expected["corporate_action_events"]) == 1
     assert expected["bars_close_by_date"], "bars が空で、取り違えても差が出ない"
+    assert all(bar.open != bar.close for bar in g4.snapshot.bars), (
+        "open == close の足があり、close を open へ取り違える変異を検出できない"
+    )
 
 
 def test_a1_check_split_consistency_receives_exactly_the_expected_arguments(g4: _WiredG4) -> None:
