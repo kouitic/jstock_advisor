@@ -168,7 +168,10 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalService
-from jstock_advisor.services.shareholder_benefit_registry_service import check_registry_health
+from jstock_advisor.services.shareholder_benefit_registry_service import (
+    check_registry_coverage,
+    check_registry_health,
+)
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 from jstock_advisor.services.trade_cooldown_service import TradeCooldownService
 from jstock_advisor.services.valuation_confidence_shadow_service import (
@@ -2742,6 +2745,20 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # 行わずに終了する(ERROR/例外にしない。retryをさらに誘発しない)。
         logger.info("buy_candidates_handler: duplicate batch start ignored batch_id=%s", batch_id)
         return {"dispatched": 0, "skipped": "duplicate_batch_start"}
+    # Issue #754: 株主優待registryのcoverageを、候補側・保有側の2軸でINFO記録する(読み込み済みの
+    # targetsから算出するため、watchlist・holdingsの追加の読み込みは無い。判定・通知は変えない)。
+    check_registry_coverage(
+        candidate_codes=[
+            t.stock_code
+            for t in targets
+            if t.source in (CandidateSource.WATCHLIST, CandidateSource.BOTH)
+        ],
+        holding_codes=[
+            t.stock_code
+            for t in targets
+            if t.source in (CandidateSource.HOLDING, CandidateSource.BOTH)
+        ],
+    )
     if execution_context.is_validation:
         # 通知検証モード機能(2026-08追加): batch_idはここで初めて確定するため、
         # イベント解析直後ではなくこの時点でVALIDATION開始ログを出す。
