@@ -1101,6 +1101,10 @@ class ProfitTakingService:
         # 通過側へ置換して同じ純粋関数(_evaluate)で再評価する。S-20の
         # isolated_shadow_computation()で隔離し、失敗しても利確判定・通知・保存を
         # 止めず、「算出できなかった」ことを記録側へ残す(空listへ偽装しない)。
+        # ★ industry_model_appliedは上で定数Falseを渡している(現状の配線)ため、
+        # この入力は全保有で常に遮断側となり、INDUSTRY_MODEL_NOT_APPLIEDの記録が
+        # 必ず1件入る(業種モデルの遮断が至る所で起きているという発見ではない)。
+        # 遮断が他に1つでもあればJOINT判定の再評価も走る(詳細はgate_trace module)。
         gate_trace = isolated_shadow_computation(
             "profit_taking_gate_trace",
             lambda: build_profit_taking_gate_trace(

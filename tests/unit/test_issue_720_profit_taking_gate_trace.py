@@ -3,9 +3,10 @@
 ## 確認する契約
 
 - 純粋関数(`build_profit_taking_gate_trace`)は、遮断側の入力を1つずつ通過側へ
-  置換して`evaluate_profit_taking()`を再評価し、effect(ACTION_CHANGED /
-  ORIGIN_ONLY / JOINT_ONLY / NONE)を決める。実際の`evaluate_profit_taking()`を
-  通して値を固定する(fixtureへ結果を直接差し込むだけにしない)。
+  置換して`evaluate_profit_taking()`を再評価し、USER決定が列挙した5項目
+  (gate_name / gate_result / candidate_action / actually_suppressed /
+  superseded_by)**だけ**を記録する。実際の`evaluate_profit_taking()`を通して
+  値を固定する(fixtureへ結果を直接差し込むだけにしない)。
 - service経由(`ProfitTakingService.analyze()`)で、監査記録の`output_values`へ
   `profit_taking_gate_trace`が**値つきで**入る(キー名・gate_result・
   actually_suppressedの取り違え、配線の無効化で落ちる)。
@@ -110,33 +111,38 @@ def test_no_blocked_input_produces_an_empty_trace() -> None:
     assert _trace(_fv_strong_inputs(), "1010") == []
 
 
+_APPROVED_RECORD_KEYS = {
+    "gate_name",
+    "gate_result",
+    "candidate_action",
+    "actually_suppressed",
+    "superseded_by",
+}
+
+
 @pytest.mark.parametrize(
-    ("override", "gate_name", "families"),
+    ("override", "gate_name"),
     [
-        ({"industry_model_applied": False}, "INDUSTRY_MODEL_NOT_APPLIED", [1, 2]),
-        ({"days_to_next_earnings_business_days": None}, "EARNINGS_DAYS_UNKNOWN", [1]),
-        ({"days_to_next_earnings_business_days": 1}, "EARNINGS_TOO_CLOSE", [1, 2]),
-        ({"partial_sale_executable": False}, "PARTIAL_SALE_NOT_EXECUTABLE", [1, 3]),
-        ({"has_strong_counter_material": True}, "STRONG_COUNTER_MATERIAL_PRESENT", [1]),
+        ({"industry_model_applied": False}, "INDUSTRY_MODEL_NOT_APPLIED"),
+        ({"days_to_next_earnings_business_days": None}, "EARNINGS_DAYS_UNKNOWN"),
+        ({"days_to_next_earnings_business_days": 1}, "EARNINGS_TOO_CLOSE"),
+        ({"partial_sale_executable": False}, "PARTIAL_SALE_NOT_EXECUTABLE"),
+        ({"has_strong_counter_material": True}, "STRONG_COUNTER_MATERIAL_PRESENT"),
     ],
 )
 def test_each_blocked_input_actually_suppressing_fv_strong_full_is_recorded(
-    override: dict[str, Any], gate_name: str, families: list[int]
+    override: dict[str, Any], gate_name: str
 ) -> None:
     """適正価格ベースのFULLが成立する入力で、gateを1つだけ閉じるとWATCHへ落ちる。
-    そのgateは「実際に抑制した」(ACTION_CHANGED)として値つきで残る。"""
+    そのgateは「実際に抑制した」として、承認された5項目だけで値つきに残る。"""
     records = _trace(_fv_strong_inputs(**override), "1010")
 
     assert records == [
         {
-            "input": next(iter(override)),
             "gate_name": gate_name,
             "gate_result": "BLOCKED",
-            "families": families,
-            "effect": "ACTION_CHANGED",
-            "actually_suppressed": True,
-            "baseline_action": RecommendationType.WATCH.value,
             "candidate_action": RecommendationType.FULL_PROFIT_TAKE.value,
+            "actually_suppressed": True,
             "superseded_by": None,
         }
     ]
@@ -153,12 +159,17 @@ def test_gate_covered_by_another_path_is_not_counted_as_suppression() -> None:
 
     records = _trace(inputs, "1600")
 
-    assert len(records) == 1
-    assert records[0]["gate_name"] == "PARTIAL_SALE_NOT_EXECUTABLE"
-    assert records[0]["effect"] == "ORIGIN_ONLY"
-    assert records[0]["actually_suppressed"] is False
-    assert records[0]["superseded_by"] == "PRICE_POSITION"
-    assert records[0]["baseline_action"] == records[0]["candidate_action"]
+    baseline_action = _real_evaluate_factory("1600")(inputs).final_action.value
+    assert records == [
+        {
+            "gate_name": "PARTIAL_SALE_NOT_EXECUTABLE",
+            "gate_result": "BLOCKED",
+            # 開けても最終判定は変わらない(他の経路が既にカバーしている)
+            "candidate_action": baseline_action,
+            "actually_suppressed": False,
+            "superseded_by": "PRICE_POSITION",
+        }
+    ]
 
 
 def test_the_same_input_closing_two_families_still_suppresses_when_other_path_is_closed() -> None:
@@ -173,8 +184,8 @@ def test_the_same_input_closing_two_families_still_suppresses_when_other_path_is
     records = _trace(inputs, "1600")
 
     assert [r["gate_name"] for r in records] == ["EARNINGS_TOO_CLOSE"]
-    assert records[0]["effect"] == "ACTION_CHANGED"
     assert records[0]["actually_suppressed"] is True
+    assert records[0]["superseded_by"] is None
 
 
 def test_counterfactual_passes_the_earnings_threshold_exactly() -> None:
@@ -211,8 +222,54 @@ def test_joint_only_when_only_passing_every_blocked_input_changes_the_action() -
 
     records = build_profit_taking_gate_trace(inputs, _evaluate, _evaluate(inputs), _MIN_DAYS)
 
-    assert [r["effect"] for r in records] == ["JOINT_ONLY", "JOINT_ONLY"]
+    assert [r["gate_name"] for r in records] == [
+        "PARTIAL_SALE_NOT_EXECUTABLE",
+        "STRONG_COUNTER_MATERIAL_PRESENT",
+    ]
     assert all(r["actually_suppressed"] is True for r in records)
+    assert all(r["superseded_by"] is None for r in records)
+    # candidate_actionは「そのgateを開けた場合の候補」。単独では変わらないため、
+    # 遮断中の全入力を同時に開けたときの候補(FULL)を記録する(単独の再評価結果の
+    # WATCHは実際の判定と同じで、「抑制された」記録と矛盾して見えるため)。
+    full = RecommendationType.FULL_PROFIT_TAKE.value
+    assert all(r["candidate_action"] == full for r in records)
+
+
+def test_a_record_carries_exactly_the_five_approved_fields() -> None:
+    """USER決定が列挙した5項目だけを記録する(拡張項目を紛れ込ませない)。
+    抑制・非抑制(他の経路がカバー)・JOINT・変化なしのどの場合も同じ5項目。"""
+    suppressing = _trace(_fv_strong_inputs(partial_sale_executable=False), "1010")
+    covered = _trace(
+        dataclasses.replace(
+            _fv_strong_inputs(partial_sale_executable=False),
+            industry_classification=IndustryClassification.GENERAL_CORPORATE,
+        ),
+        "1600",
+    )
+    unchanged = _trace(
+        _fv_strong_inputs(partial_sale_executable=False, has_strong_counter_material=True),
+        "1010",
+    )
+
+    def _joint_evaluate(inputs: ProfitTakingConditionInputs) -> ProfitTakingResult:
+        ok = inputs.partial_sale_executable and not inputs.has_strong_counter_material
+        action = RecommendationType.FULL_PROFIT_TAKE if ok else RecommendationType.WATCH
+        return dataclasses.replace(_canned_result(action), final_action=action, origin="NONE")
+
+    joint_inputs = ProfitTakingConditionInputs(
+        industry_model_applied=True,
+        days_to_next_earnings_business_days=_MIN_DAYS,
+        partial_sale_executable=False,
+        has_strong_counter_material=True,
+    )
+    joint = build_profit_taking_gate_trace(
+        joint_inputs, _joint_evaluate, _joint_evaluate(joint_inputs), _MIN_DAYS
+    )
+
+    all_records = suppressing + covered + unchanged + joint
+    assert len(all_records) >= 5
+    for record in all_records:
+        assert set(record) == _APPROVED_RECORD_KEYS
 
 
 # ============================================================================
@@ -241,6 +298,17 @@ def _fake_evaluate(calls: list[dict[str, Any]], *, fail_after_first: bool = Fals
             if kwargs["condition_inputs"].partial_sale_executable
             else RecommendationType.WATCH
         )
+        return dataclasses.replace(_canned_result(action), final_action=action, origin="NONE")
+
+    return _evaluate
+
+
+def _fake_evaluate_never_changing(calls: list[dict[str, Any]]):  # type: ignore[no-untyped-def]
+    """入力を置換しても判定が変わらない偽のevaluate(呼び出し回数を数えるため)。"""
+
+    def _evaluate(**kwargs: Any) -> ProfitTakingResult:
+        calls.append(kwargs)
+        action = RecommendationType.WATCH
         return dataclasses.replace(_canned_result(action), final_action=action, origin="NONE")
 
     return _evaluate
@@ -280,16 +348,19 @@ def test_service_records_the_trace_with_values_through_the_real_snapshot_pipelin
     assert _TRACE_KEY in output_values
     by_gate = {r["gate_name"]: r for r in output_values[_TRACE_KEY]}
     partial = by_gate["PARTIAL_SALE_NOT_EXECUTABLE"]
-    assert partial["gate_result"] == "BLOCKED"
-    assert partial["effect"] == "ACTION_CHANGED"
-    assert partial["actually_suppressed"] is True
-    assert partial["baseline_action"] == RecommendationType.WATCH.value
-    assert partial["candidate_action"] == RecommendationType.FULL_PROFIT_TAKE.value
-    assert partial["superseded_by"] is None
+    assert partial == {
+        "gate_name": "PARTIAL_SALE_NOT_EXECUTABLE",
+        "gate_result": "BLOCKED",
+        "candidate_action": RecommendationType.FULL_PROFIT_TAKE.value,
+        "actually_suppressed": True,
+        "superseded_by": None,
+    }
     # 現行のサービスは業種別モデルを常に未適用(False)として渡すため、同じ実入力に
-    # 対して遮断側として記録される(他の入力は単独では判定を変えない)。
-    assert by_gate["INDUSTRY_MODEL_NOT_APPLIED"]["effect"] == "JOINT_ONLY"
-    assert by_gate["INDUSTRY_MODEL_NOT_APPLIED"]["actually_suppressed"] is True
+    # 対して遮断側として記録される(他の入力は単独では判定を変えず、全入力を同時に
+    # 開けたときだけ変わる)。
+    industry = by_gate["INDUSTRY_MODEL_NOT_APPLIED"]
+    assert industry["actually_suppressed"] is True
+    assert industry["candidate_action"] == RecommendationType.FULL_PROFIT_TAKE.value
 
 
 def test_service_records_nothing_for_an_input_that_is_not_blocked(
@@ -301,6 +372,32 @@ def test_service_records_nothing_for_an_input_that_is_not_blocked(
     _, output_values, _ = _analyze(monkeypatch, shares=300, fake=_fake_evaluate(calls))
 
     assert "PARTIAL_SALE_NOT_EXECUTABLE" not in {r["gate_name"] for r in output_values[_TRACE_KEY]}
+
+
+@pytest.mark.parametrize("shares", [100, 300])
+def test_the_industry_model_gate_is_blocked_for_every_holding_with_the_real_service_inputs(
+    monkeypatch: pytest.MonkeyPatch, shares: int
+) -> None:
+    """現状のサービスは`industry_model_applied`を定数Falseで渡す(業種別の専用モデルは
+    未実装)。そのため実入力ではこの入力が**全保有で常に遮断側**となり、
+    INDUSTRY_MODEL_NOT_APPLIEDの記録が必ず1件入る。これは「業種モデルの遮断が至る所で
+    起きている」という発見ではなく、現在の配線の定数の反映である(監査記録を後から読む
+    人が誤読しないよう、事実としてテストで固定する。配線が実値へ変われば、この
+    テストとgate_trace moduleのdocstringを見直す合図になる)。
+
+    あわせて、遮断が他に1つでもあれば遮断入力が2件以上になるため、JOINT判定の
+    追加の再評価(全入力を同時に通した1回)が走る。単独で変わる入力が無い場合の
+    evaluate呼び出し回数 = 実判定1 + 遮断入力ごとの単独1 + JOINT1。
+    """
+    calls: list[dict[str, Any]] = []
+    unchanged_fake = _fake_evaluate_never_changing(calls)
+
+    _, output_values, _ = _analyze(monkeypatch, shares=shares, fake=unchanged_fake)
+
+    trace = output_values[_TRACE_KEY]
+    assert "INDUSTRY_MODEL_NOT_APPLIED" in {r["gate_name"] for r in trace}
+    assert len(trace) >= 2
+    assert len(calls) == 1 + len(trace) + 1
 
 
 def test_counterfactual_calls_use_the_same_arguments_as_the_real_judgment(
