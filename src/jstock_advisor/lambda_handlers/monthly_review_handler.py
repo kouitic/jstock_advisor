@@ -14,6 +14,7 @@ import datetime as dt
 import logging
 from typing import Any
 
+from jstock_advisor.lambda_handlers._review_execution_mode import reject_execution_mode
 from jstock_advisor.lambda_handlers._scheduling import is_first_saturday_of_month
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ logger.setLevel(logging.INFO)
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    reject_execution_mode(event, handler_name="monthly review")
     now = dt.datetime.now(dt.UTC)
     is_monthly_review_day = is_first_saturday_of_month(now.date())
     logger.info(
