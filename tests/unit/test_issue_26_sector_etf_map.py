@@ -337,16 +337,20 @@ class _IndustryOverrideFinancialProvider:
         return getattr(self._delegate, name)
 
 
-def _etf_stand_in(topix: Any) -> Any:
-    """TOPIX の足から、TOPIX とは値の異なる ETF 系列を作る(終値だけ日ごとに増やす)。
+_DEFAULT_ETF_DRIFT = Decimal(1) / Decimal(2000)
+
+
+def _etf_stand_in(topix: Any, drift: Decimal = _DEFAULT_ETF_DRIFT) -> Any:
+    """TOPIX の足から、TOPIX とは値の異なる ETF 系列を作る(終値だけ日ごとに drift ずつ増減する)。
 
     TOPIX と同一の系列だと、sector の足が TOPIX 側(市場相対)へ漏れても値が変わらず、
-    SHADOW_ONLY の検査(T-D)が漏れを検出できない。
+    SHADOW_ONLY の検査(T-D)が漏れを検出できない。drift を変えると ETF 同士も区別できる
+    (T-E: 「どの足を使ったか」の固定に使う)。
     """
     if topix is None:
         return None
     bars = [
-        bar.model_copy(update={"close": bar.close * (1 + Decimal(index) / Decimal(2000))})
+        bar.model_copy(update={"close": bar.close * (1 + Decimal(index) * drift)})
         for index, bar in enumerate(topix.bars)
     ]
     return topix.model_copy(update={"bars": bars})
@@ -360,10 +364,17 @@ class _SpyMarketDataProvider:
     かどうかに依存しないよう、ETF の応答は常にここで明示する。
     """
 
-    def __init__(self, delegate: Any, etf_symbols: frozenset[str], etf_has_data: bool) -> None:
+    def __init__(
+        self,
+        delegate: Any,
+        etf_symbols: frozenset[str],
+        etf_has_data: bool,
+        etf_drift: Decimal = _DEFAULT_ETF_DRIFT,
+    ) -> None:
         self._delegate = delegate
         self._etf_symbols = etf_symbols
         self._etf_has_data = etf_has_data
+        self._etf_drift = etf_drift
         self.benchmark_symbols: list[str] = []
 
     def get_benchmark_price_history(self, symbol: str, start: dt.date, end: dt.date) -> Any:
@@ -371,16 +382,21 @@ class _SpyMarketDataProvider:
         if symbol in self._etf_symbols:
             if not self._etf_has_data:
                 return None
-            return _etf_stand_in(self._delegate.get_benchmark_price_history("TOPIX", start, end))
+            topix = self._delegate.get_benchmark_price_history("TOPIX", start, end)
+            return _etf_stand_in(topix, self._etf_drift)
         return self._delegate.get_benchmark_price_history(symbol, start, end)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)
 
 
-def _providers(industry: str) -> tuple[Any, _SpyMarketDataProvider]:
+def _providers(
+    industry: str, etf_drift: Decimal = _DEFAULT_ETF_DRIFT
+) -> tuple[Any, _SpyMarketDataProvider]:
     bundle = build_mock_provider_bundle(_NOW)
-    spy = _SpyMarketDataProvider(bundle.market_data, frozenset(_TOPIX17_ETFS), etf_has_data=True)
+    spy = _SpyMarketDataProvider(
+        bundle.market_data, frozenset(_TOPIX17_ETFS), etf_has_data=True, etf_drift=etf_drift
+    )
     providers = dataclasses.replace(
         bundle,
         market_data=spy,
@@ -389,8 +405,10 @@ def _providers(industry: str) -> tuple[Any, _SpyMarketDataProvider]:
     return providers, spy
 
 
-def _build(industry: str, config: Any = _CFG) -> tuple[Any, _SpyMarketDataProvider]:
-    providers, spy = _providers(industry)
+def _build(
+    industry: str, config: Any = _CFG, etf_drift: Decimal = _DEFAULT_ETF_DRIFT
+) -> tuple[Any, _SpyMarketDataProvider]:
+    providers, spy = _providers(industry, etf_drift)
     snapshot, error = build_stock_snapshot(providers, _STOCK_CODE, _NOW, config, _CALENDAR)
     assert error is None, error
     assert snapshot is not None
@@ -436,6 +454,32 @@ def test_every_mapped_industry_requests_exactly_its_own_etf(industry: str) -> No
 def test_every_not_applicable_industry_requests_no_sector_etf(industry: str) -> None:
     _snapshot, spy = _build(industry)
     assert not [s for s in spy.benchmark_symbols if s in _TOPIX17_ETFS]
+
+
+# --- T-E: 「どの足を使ったか」(要求した symbol ではなく、評価に使われた足の由来) ----------------
+
+
+def test_the_sector_result_is_derived_from_the_sector_etf_bars() -> None:
+    """★ ETF の足だけを変えると、sector 環境と sector 相対強度が変わる。
+
+    T-C は「どの symbol を要求したか」を固定するが、取得した足のうちどれを評価へ渡したかは
+    固定しない。sector の足を TOPIX の足(や銘柄自身の足)へ取り違えると、ETF が上昇でも下落でも
+    同じ結果になり、セクター相対強度が TOPIX 対 TOPIX になったまま EVALUATED として
+    静かに記録される。上昇する ETF と下落する ETF で結果が分かれることを固定する。
+    """
+    rising, _ = _build("Packaged Foods", etf_drift=Decimal(1) / Decimal(1000))
+    falling, _ = _build("Packaged Foods", etf_drift=Decimal(-1) / Decimal(1000))
+    for snapshot in (rising, falling):
+        assert snapshot.sector_environment.sector_etf_symbol == "1617.T"
+        assert snapshot.sector_environment.state == SectorEnvironmentEvaluationState.EVALUATED
+    assert rising.sector_environment.score is not None
+    assert falling.sector_environment.score is not None
+    assert rising.sector_environment.score > falling.sector_environment.score
+    rising_rs = rising.momentum.relative_strength_vs_sector_pct
+    falling_rs = falling.momentum.relative_strength_vs_sector_pct
+    assert rising_rs is not None and falling_rs is not None
+    # 相対強度は「銘柄 − セクター」。セクターが上昇するほど小さくなる(銘柄の足は両ケースで同一)
+    assert rising_rs < falling_rs
 
 
 # --- T-D: SHADOW_ONLY(map の有無で、判定の入力・出力が変わらない) ------------------------------
