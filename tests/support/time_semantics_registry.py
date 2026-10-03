@@ -192,6 +192,18 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:stock_snapshot_jst_price_window",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #690: build_stock_snapshot()を非営業日(土日・祝日・5連休・GW・年末年始)の
+    # nowで通したend-to-endの検証。T3 = evaluation_date(時刻由来値)を受け取って
+    # business_days_to_earnings・earnings_date_statusを分岐させるconsumer(
+    # stock_snapshot_service.py自体はdiffなし。テストの対象)。T4 = 非営業日・UTC/JST
+    # 暦日境界の固定clockとliteralの期待日を新規に導入した。可変のmodule-level stateを
+    # 持たないため、cohortの相手はいない(SOLO。先例 #475)。
+    _Entry(
+        module="tests/unit/test_issue_690_stock_snapshot_non_business_now.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:stock_snapshot_non_business_now",
+        wall_clock_policy=_FORBIDDEN,
+    ),
     # Issue #578(#66 16C): JpxCandidateUniverseProvider自身(provider層)の
     # staleness判定基準日を、UTC 00:00からJST 00:00へ統一。T2 = provider自身の
     # 値決定ロジック(source_dateの起点をprovider内部で決める。consumerが渡す
