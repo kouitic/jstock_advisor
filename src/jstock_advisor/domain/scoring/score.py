@@ -106,25 +106,60 @@ def score_total_yield_attractiveness(
     return score, formula
 
 
+# 配当持続性の算出方式(Issue #30 案C。input_facts["dividend_sustainability_method"]へ
+# 値で残す。formula文字列のparseに頼らず、監査・分析が新旧と式の別を判別できるようにする)。
+SUSTAINABILITY_METHOD_THREE_FACTOR = "THREE_FACTOR"
+SUSTAINABILITY_METHOD_RENORMALIZED_TWO_FACTOR = "RENORMALIZED_TWO_FACTOR"
+
+
+def dividend_sustainability_method(dividend: DividendInfo) -> str:
+    """score_dividend_sustainability()がどちらの式を使うか(式の分岐の唯一の判定)。
+
+    registry既知(True/False)は3項式、registry不明(None)は累進/DOE項を除いた
+    2要素の再正規化式。式の分岐と記録(input_facts・formula文字列)が食い違わないよう、
+    両者ともこの関数を経由する。
+    """
+    if dividend.is_progressive_or_doe_policy is None:
+        return SUSTAINABILITY_METHOD_RENORMALIZED_TWO_FACTOR
+    return SUSTAINABILITY_METHOD_THREE_FACTOR
+
+
 def score_dividend_sustainability(
     dividend: DividendInfo, financial: FinancialSummary, max_payout_ratio_pct: float, weight: float
 ) -> tuple[float, str]:
+    """配当持続性(配点weight点)を、係数(0〜1) × 配点で求める。
+
+    Issue #30(USER決定2026-10-03、案C): 累進配当/DOE方針(is_progressive_or_doe_policy)が
+    registry未登録のためNone(不明)の銘柄は、方針項(0.4)を「無かったこと」にして0点へ
+    落とすのではなく、残る2要素(連続増配年数・配当性向の余力)を元の比率0.4:0.2のまま
+    満点が1.0になるよう2/3:1/3へ再正規化する。registry既知(True/False)は従来の
+    3項式(0.4/0.4/0.2)から一切変えない。
+    欠測規約(年数None=0年扱い、配当性向がNone・上限<=0なら余力項は0)は両式で同じ。
+    """
+    method = dividend_sustainability_method(dividend)
+    renormalized = method == SUSTAINABILITY_METHOD_RENORMALIZED_TWO_FACTOR
+    years_weight = 2 / 3 if renormalized else 0.4
+    headroom_weight = 1 / 3 if renormalized else 0.2
     factor = 0.0
     parts = []
     if dividend.is_progressive_or_doe_policy:
         factor += 0.4
         parts.append("累進配当/DOE方針(+0.4)")
     years = min(dividend.consecutive_dividend_increase_years or 0, 5)
-    factor += (years / 5) * 0.4
-    parts.append(f"連続増配{years}年評価(+{years / 5 * 0.4:.2f})")
+    years_contribution = (years / 5) * years_weight
+    factor += years_contribution
+    parts.append(f"連続増配{years}年評価(+{years_contribution:.2f})")
     if financial.payout_ratio_pct is not None and max_payout_ratio_pct > 0:
         headroom = 1 - (financial.payout_ratio_pct / max_payout_ratio_pct)
-        contribution = _clip(headroom, 0.0, 1.0) * 0.2
+        contribution = _clip(headroom, 0.0, 1.0) * headroom_weight
         factor += contribution
         parts.append(f"配当性向の余力評価(+{contribution:.2f})")
     factor = _clip(factor, 0.0, 1.0)
     score = weight * factor
-    formula = f"配当持続性係数{factor:.2f}({', '.join(parts)}) × 配点{weight}点"
+    detail = ", ".join(parts)
+    if renormalized:
+        detail = f"registry未登録のため累進/DOE方針を除く2要素で再正規化: {detail}"
+    formula = f"配当持続性係数{factor:.2f}({detail}) × 配点{weight}点"
     return score, formula
 
 
@@ -288,6 +323,7 @@ def compute_score(
         ),
         "shareholder_return_policy_type": dividend.shareholder_return_policy_type,
         "shareholder_return_policy_source": dividend.shareholder_return_policy_source_reference,
+        "dividend_sustainability_method": dividend_sustainability_method(dividend),
         "shareholder_return_policy_checked_at": (
             dividend.shareholder_return_policy_checked_at.isoformat()
             if dividend.shareholder_return_policy_checked_at is not None
@@ -365,11 +401,17 @@ def _build_component_states(
     # UNKNOWN/NONE確認済みでも、連続増配・配当性向のfactorは評価可能なため
     # component全体はEVALUATEDのまま、subfactor理由としてreason_codesへ記録する
     # (POLICY_STATUS_UNKNOWN=レジストリ未登録・取得不能 /
-    #  POLICY_NONE_CONFIRMED=人間確認済みで方針なし。いずれもscoreは方針分0点で、
-    #  UNKNOWNへの中立加点・再正規化は行わない)。
+    #  POLICY_NONE_CONFIRMED=人間確認済みで方針なし)。
+    # Issue #30 案C(USER決定2026-10-03): UNKNOWN(None)は累進/DOE項を除く2要素で
+    # 再正規化して採点する(中立加点ではない)ため、POLICY_STATUS_UNKNOWNへ加えて
+    # POLICY_UNKNOWN_RENORMALIZEDを残す(Phase 1当時のNoneは方針分0点で再正規化なし、
+    # 本Issue以降のNoneは再正規化あり。同じPOLICY_STATUS_UNKNOWNが別の採点方式を指すと
+    # 保存済みレコードを後から集計するときに新旧を区別できないため、加法的に追加する)。
+    # NONE確認済み(False)は従来どおり方針分0点の3項式。
     sustainability_reasons: list[str] = []
     if dividend.is_progressive_or_doe_policy is None:
         sustainability_reasons.append("POLICY_STATUS_UNKNOWN")
+        sustainability_reasons.append("POLICY_UNKNOWN_RENORMALIZED")
     elif dividend.is_progressive_or_doe_policy is False:
         sustainability_reasons.append("POLICY_NONE_CONFIRMED")
     if financial.payout_ratio_pct is None:
