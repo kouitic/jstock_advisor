@@ -16,7 +16,7 @@ Recommendation.key_risks へ警告の1行(`FINANCIAL_STALE_USER_WARNING`)を入�
 
 ## なぜ文言をここへ置くか(依存方向。#474 D-3 / MANAGER 判断 = 案 D)
 
-警告文言の元の定義は `services/financial_freshness_integration.py` にある。
+警告文言の元の定義は services 層の財務鮮度の接続部分(`FINANCIAL_STALE_USER_WARNING`)にある。
 `recommendation_adapter.py` 自身が「domain 層から service 層への逆依存を作らない」ことを
 設計方針としているため、adapter が services の定数を import しない。lock を増やさない
 (F-38 / D8 の主要 source を変更しない)ため、services 側は変更せず、**同じ文言を本 module に
@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-# services/financial_freshness_integration.py の FINANCIAL_STALE_USER_WARNING と同じ値で
+# services 層の FINANCIAL_STALE_USER_WARNING(財務鮮度の接続部分)と同じ値で
 # なければならない(一致テストが固定する)。変更する場合は両方を同時に変えること。
 FINANCIAL_STALE_WARNING_TEXT = "最新の決算が財務データへ反映されていない可能性がある"
 
