@@ -316,6 +316,10 @@ def _build_snapshot(
         dividend=dividend,
         benefit=None,
         bars=[],
+        # Issue #698 PR-A: 価格履歴が「期間内に分割は無い」と報告した状態(基準整合はMATCH)。
+        # 基準整合を検証するテストは tests/unit/test_issue_698_pr_a_basis_consistency.py。
+        price_history_splits=[],
+        price_history_start=dt.date(2023, 8, 4),
         historical_valuations=_historical_per_only(fx.per_median, fx.pbr_median),
         avg_trading_value=Decimal("100000000"),
         disclosures=disclosures or [],

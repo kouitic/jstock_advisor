@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 import yfinance as yf
 
@@ -17,7 +18,7 @@ from jstock_advisor.interfaces.provider_errors import (
     ProviderDataError,
     ProviderFailureCategory,
 )
-from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot
+from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot, PriceSplit
 from jstock_advisor.providers._failure import raise_provider_data_error
 from jstock_advisor.providers.market_data._yfinance_log_filter import (
     install_yfinance_expected_missing_log_filter,
@@ -53,6 +54,34 @@ def _to_decimal(value: float) -> Decimal | None:
         return Decimal(str(round(f, 2)))
     except InvalidOperation:
         return None
+
+
+def _parse_splits(df: Any) -> list[PriceSplit] | None:
+    """応答のStock Splits列から分割・併合を取り出す(Issue #698 PR-A)。
+
+    列が無い応答・値がNaNの行を含む応答はNone(取得元が報告しなかった)を返す。
+    「分割なし」(空リスト)と取り違えると、報告されなかっただけの銘柄が基準の
+    揃った銘柄と判定されるため、安全側(None)へ倒す。0は「その日は分割なし」。
+    """
+    if "Stock Splits" not in df.columns:
+        return None
+    splits: list[PriceSplit] = []
+    for index, value in df["Stock Splits"].items():
+        try:
+            ratio_float = float(value)
+        except (ValueError, TypeError):
+            return None
+        if ratio_float != ratio_float:  # NaN
+            return None
+        if ratio_float == 0.0:
+            continue
+        try:
+            ratio = Decimal(str(round(ratio_float, 4)))
+        except InvalidOperation:
+            return None
+        split_date = index.date() if hasattr(index, "date") else index
+        splits.append(PriceSplit(date=split_date, ratio=ratio))
+    return splits
 
 
 def _reject_non_positive_close(stock_code: str, close: Decimal, *, operation: str) -> None:
@@ -138,7 +167,9 @@ class YFinanceMarketDataProvider:
 
         if not bars:
             return None
-        return PriceHistory(symbol=ticker_symbol, bars=bars, source=self._source())
+        return PriceHistory(
+            symbol=ticker_symbol, bars=bars, source=self._source(), splits=_parse_splits(df)
+        )
 
     def get_latest_price(self, stock_code: str) -> PriceSnapshot | None:
         history = self._fetch_history(
@@ -169,7 +200,12 @@ class YFinanceMarketDataProvider:
         history = self._fetch_history(f"{stock_code}{_TICKER_SUFFIX}", start, end)
         if history is None:
             return None
-        return PriceHistory(symbol=stock_code, bars=history.bars, source=history.source)
+        return PriceHistory(
+            symbol=stock_code,
+            bars=history.bars,
+            source=history.source,
+            splits=history.splits,
+        )
 
     def get_average_trading_value(self, stock_code: str, business_days: int) -> Decimal | None:
         # 土日祝を考慮し、必要営業日数の2倍強のカレンダー日数をさかのぼって取得する
@@ -192,4 +228,6 @@ class YFinanceMarketDataProvider:
         history = self._fetch_history(ticker_symbol, start, end)
         if history is None:
             return None
-        return PriceHistory(symbol=symbol, bars=history.bars, source=history.source)
+        return PriceHistory(
+            symbol=symbol, bars=history.bars, source=history.source, splits=history.splits
+        )

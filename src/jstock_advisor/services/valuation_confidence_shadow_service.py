@@ -57,6 +57,7 @@ from jstock_advisor.domain.entities.execution_context import ExecutionContext
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueRange
 from jstock_advisor.domain.shadow_observation import isolated_shadow_computation
+from jstock_advisor.domain.signals.buy_basis_consistency import BasisConsistency
 from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
 from jstock_advisor.domain.signals.buy_decision import decide_buy_action
 from jstock_advisor.domain.signals.valuation_confidence_shadow_config import (
@@ -109,6 +110,11 @@ class ValuationConfidenceShadowInputs:
     actual_strong_price: Decimal | None
     actual_buy_action: BuyAction | None
     actual_raw_buy_action: BuyAction | None
+    # Issue #698 PR-A: actualのBuyActionへ適用された基準整合のgate(UNKNOWNのBUY系→
+    # WATCH_FOR_PRICE)を、candidateにも同じく適用して比較の対称性を保つ(適用しないと
+    # 「gate適用後のactual」と「gate適用前のcandidate」を比べる形になり、何も変わって
+    # いないのにbuy_action_changedが見かけ上発火する)。既定None = 未評価。
+    basis_consistency: BasisConsistency | None = None
 
 
 @dataclass(frozen=True)
@@ -213,6 +219,7 @@ def _run_candidate_chain(inputs: ValuationConfidenceShadowInputs) -> _CandidateR
         business_days_to_earnings=inputs.business_days_to_earnings,
         valuation_dispersion_ratio=inputs.valuation_summary.valuation_dispersion_ratio,
         buy_price_reliability=reliability_result.reliability,
+        basis_consistency=inputs.basis_consistency,
         config=config.buy_decision,
     )
     candidate_entry_price = buy_price_levels.entry.price if buy_price_levels.entry else None
