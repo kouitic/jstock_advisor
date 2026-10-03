@@ -109,6 +109,7 @@ from jstock_advisor.interfaces.types import (
     FinancialSummary,
     HistoricalValuation,
     PriceBar,
+    PriceSplit,
     ShareholderBenefit,
 )
 from jstock_advisor.services.provider_bundle import ProviderBundle
@@ -214,6 +215,14 @@ class StockSnapshot:
     # 観測専用フィールドで、BUY/SELL両パイプラインがRecommendationへ転記する。
     # テスト等で手動構築されたsnapshotではNone(NOT_CAPTURED相当)になりうる。
     financial_input_provenance: FinancialInputProvenance | None = None
+    # --- Issue #698 PR-A: BUY経路の基準整合判定(株価と財務指標の分割基準)の入力 ---
+    # price_history_splits: 価格履歴の応答に含まれる分割・併合(barsと同じ期間内)。
+    #   None = 取得元が報告しなかった(「分割なし」の空リストとは別。既定のNoneは
+    #   安全側で、手動構築されたsnapshotはBUY経路でUNKNOWNになる)。
+    # price_history_start: 価格履歴の窓の始端(これより前の分割は取得範囲外)。
+    # 判定ロジック(domain/signals/buy_basis_consistency.py)だけが参照する。
+    price_history_splits: list[PriceSplit] | None = None
+    price_history_start: dt.date | None = None
 
 
 def build_financial_input_provenance(
@@ -914,5 +923,7 @@ def build_stock_snapshot(
         sector_environment=sector_environment,
         environment=environment,
         financial_input_provenance=financial_input_provenance,
+        price_history_splits=history.splits if history is not None else None,
+        price_history_start=history_start,
     )
     return snapshot, None

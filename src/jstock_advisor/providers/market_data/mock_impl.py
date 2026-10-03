@@ -75,7 +75,9 @@ class MockMarketDataProvider:
         ]
         if not bars:
             return None
-        return PriceHistory(symbol=stock_code, bars=bars, source=self._source())
+        # splits=[]: mockは「期間内に分割は無い」と報告する(Noneは「報告しなかった」の意味
+        # で、BUY経路の基準整合判定ではUNKNOWNになる。Issue #698 PR-A)。
+        return PriceHistory(symbol=stock_code, bars=bars, source=self._source(), splits=[])
 
     def get_average_trading_value(self, stock_code: str, business_days: int) -> Decimal | None:
         series = get_price_volume_series(stock_code)
@@ -108,4 +110,4 @@ class MockMarketDataProvider:
         ]
         if not bars:
             return None
-        return PriceHistory(symbol=symbol, bars=bars, source=self._source())
+        return PriceHistory(symbol=symbol, bars=bars, source=self._source(), splits=[])

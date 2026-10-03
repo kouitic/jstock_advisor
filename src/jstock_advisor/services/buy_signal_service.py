@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -69,6 +70,13 @@ from jstock_advisor.domain.scoring.undervaluation_categories import (
 )
 from jstock_advisor.domain.screening.rules import evaluate_screening
 from jstock_advisor.domain.shadow_observation import isolated_shadow_observation
+from jstock_advisor.domain.signals.buy_basis_consistency import (
+    BasisAssessment,
+    BasisConsistency,
+    BasisMismatchEvidence,
+    BasisReasonCode,
+    assess_basis_consistency,
+)
 from jstock_advisor.domain.signals.buy_consistency import validate_buy_recommendation
 from jstock_advisor.domain.signals.buy_decision import (
     compute_purchase_attractiveness_score,
@@ -370,6 +378,7 @@ class BuySignalService:
         watch_state_service: WatchStateService | None = None,
         holdings_snapshot_repository: HoldingsSnapshotRepository | None = None,
         jpx_industry_source: JpxIndustrySource | None = None,
+        basis_mismatch_evidence_source: Callable[[str], BasisMismatchEvidence | None] | None = None,
     ) -> None:
         self._providers = providers
         self._config = config
@@ -387,6 +396,50 @@ class BuySignalService:
         # --- Issue #54 Phase B-1(2026-08-29): 業種分類canonical観測用 ---
         # 観測専用。解決できなくても判定は従来どおり継続する。
         self._jpx_industry_source = jpx_industry_source or get_default_jpx_industry_source()
+        # --- Issue #698 PR-A: 基準整合のMISMATCH(不整合を確認できた)の根拠の供給元 ---
+        # **本番では常にNone(供給元が無い)ため、MISMATCHは本番では発火しない。**
+        # 手動登録簿(CorporateActionRegistryRepository)へ書き込む手段がsrcに存在せず、
+        # 「財務指標が未調整」を表す項目も無い。値の整合の検査は標本不足で未実装
+        # (#698 PR-B / USER判断)。分岐とテストは、供給元が追加された時にBUY経路が
+        # 止まることを固定するために先に入れている。
+        self._basis_mismatch_evidence_source = basis_mismatch_evidence_source
+
+    def _assess_basis_consistency(
+        self, snapshot: StockSnapshot, stock_code: str
+    ) -> BasisAssessment:
+        """株価と財務指標の分割基準の整合を判定する(fail-soft)。
+
+        判定・根拠の取得のどちらが失敗しても例外を伝播させない(検出機構の失敗がBUY判定を
+        止めてはならない)。根拠の取得に失敗した場合は根拠なしとして日付・分割の判定へ
+        進み、判定処理自体が失敗した場合はUNKNOWN(BASIS_ASSESSMENT_FAILED)にする
+        (確認できなかったことを「基準は揃っている」へ潰さない)。
+        """
+        try:
+            evidence: BasisMismatchEvidence | None = None
+            if self._basis_mismatch_evidence_source is not None:
+                try:
+                    evidence = self._basis_mismatch_evidence_source(stock_code)
+                except Exception:  # noqa: BLE001 - 根拠の取得失敗は判定を止めない
+                    logger.warning(
+                        "basis_mismatch_evidence lookup failed stock_code=%s",
+                        stock_code,
+                        exc_info=True,
+                    )
+            return assess_basis_consistency(
+                price_as_of_date=snapshot.price_as_of_date,
+                fundamental_period_end=snapshot.financial.fiscal_period_end,
+                history_start=snapshot.price_history_start,
+                bars_available=bool(snapshot.bars),
+                splits=snapshot.price_history_splits,
+                mismatch_evidence=evidence,
+            )
+        except Exception:  # noqa: BLE001 - 検出機構の失敗でBUY判定を止めない
+            logger.warning(
+                "basis_consistency assessment failed stock_code=%s", stock_code, exc_info=True
+            )
+            return BasisAssessment(
+                status=BasisConsistency.UNKNOWN, reason_code=BasisReasonCode.ASSESSMENT_FAILED
+            )
 
     def _observe_canonical_industry(
         self,
@@ -760,6 +813,54 @@ class BuySignalService:
                 None,
                 buy_action=BuyAction.EXCLUDED,
                 ranking_group="excluded",
+            )
+
+        # --- Issue #698 PR-A: 株価と財務指標の分割基準の整合(MATCH / MISMATCH / UNKNOWN) ---
+        # 事故(2026-09-29の山九): 分割調整後の株価に、分割前の基準のEPS・BPSから算出した
+        # PER・PBRが組み合わされ、適正価格・買付価格・BUY判定まで伝播した。
+        # 取得は価格履歴の応答(既に取得済み)から行い、追加のprovider呼び出しは無い。
+        basis = self._assess_basis_consistency(snapshot, stock_code)
+        if basis.status is not BasisConsistency.MATCH:
+            logger.warning(
+                "basis_consistency stock_code=%s status=%s reason=%s events=%d",
+                stock_code,
+                basis.status.value,
+                basis.reason_code.value,
+                len(basis.events),
+            )
+        if basis.status is BasisConsistency.MISMATCH:
+            # 異なる基準のデータが混在していることを確認できた銘柄は、BUY候補の提示そのものを
+            # 抑止する(valuationだけ除外して別ロジックでBUYを成立させない。価格・適正価格・
+            # 買付価格を記録に残さないため、valuationより前でreturnする)。
+            # 区分は既存のDATA_INSUFFICIENT相当の内部区分で、新しい利用者向けの文言・区分は
+            # 追加しない(理由コードは監査ログにのみ残す)。UNKNOWNは抑止ではなく格下げ。
+            reason = (
+                "分析に必要なデータの整合を確認できなかったため評価できません"
+                f"(理由区分: {basis.reason_code.value})"
+            )
+            self._audit.record(
+                decision_type="buy_signal",
+                stock_code=stock_code,
+                input_values={},
+                calculation_formulas={},
+                output_values={
+                    "data_error": reason,
+                    "basis_consistency": basis.to_facts(),
+                    "final_buy_action": BuyAction.DATA_INSUFFICIENT.value,
+                    "notification_suppression_reason": "BASIS_MISMATCH",
+                },
+                data_sources=list(snapshot.data_sources),
+                rule_version=self._active_rule_version(),
+                timestamp=now,
+            )
+            return BuyAnalysisOutcome(
+                stock_code,
+                None,
+                screening_result.passed,
+                [],
+                reason,
+                buy_action=BuyAction.DATA_INSUFFICIENT,
+                ranking_group=None,
             )
 
         financial = snapshot.financial
@@ -1324,6 +1425,9 @@ class BuySignalService:
             # このキーが無い既存RecommendationはLEGACY_UNVERSIONEDとして扱う
             # (モジュール冒頭のFACTS_SCHEMA_VERSIONコメント参照)。
             "buy_score_input_facts_schema_version": FACTS_SCHEMA_VERSION,
+            # Issue #698 PR-A: 株価と財務指標の分割基準の整合(判定時点の事実。UNKNOWN率・
+            # 理由別の内訳を、保存済み記録から後から集計できるように残す)。
+            "basis_consistency": basis.to_facts(),
             # Common Quality候補の本来値(判定時点にsnapshotへ算出済みだが従来
             # 未保存だったもの。暫定代替ではなく本来値をそのまま保存する)。
             # net_incomeを併存保存するのは、is_deficitがnet_income=Noneのとき
@@ -1479,6 +1583,7 @@ class BuySignalService:
             business_days_to_earnings=business_days_to_earnings,
             valuation_dispersion_ratio=valuation_summary.valuation_dispersion_ratio,
             buy_price_reliability=buy_price_reliability,
+            basis_consistency=basis.status,
             config=self._config.buy_decision,
         )
         buy_action = decision.action
@@ -1591,7 +1696,11 @@ class BuySignalService:
             entry.cooldown_until_date is not None and evaluation_date <= entry.cooldown_until_date
             for entry in self._holdings_snapshot_repo.list_by_stock(stock_code)
         )
-        if not in_trade_cooldown:
+        # Issue #698 PR-A: 基準整合が確認できない(UNKNOWN)日は、売買クールダウン中と同じく
+        # WatchStateServiceを呼ばない(新規開始も継続更新もしない)。歪んだ買付価格のまま
+        # NEAR_BUYの監視が開始・継続しないようにするため。既存の監視は更新されないため、
+        # max_stale_business_days後に次回の評価でSTALE終了になりうる。
+        if not in_trade_cooldown and basis.status is not BasisConsistency.UNKNOWN:
             transition = self._watch_state_service.evaluate_and_update(
                 stock_code=stock_code,
                 buy_action=buy_action,
@@ -2039,5 +2148,6 @@ class BuySignalService:
                 ),
                 actual_buy_action=buy_action,
                 actual_raw_buy_action=raw_buy_action,
+                basis_consistency=basis.status,
             ),
         )
