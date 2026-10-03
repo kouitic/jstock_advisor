@@ -58,7 +58,11 @@ mitigating_factors:
     enabled: true
     downgrade_levels: 1
   nisa_long_term_benefit:
-    enabled: true
+    # 2026-10-03 USER決定(案A。Issue #778、原本 = #122 issuecomment-5968181968): 口座区分(NISA / 特定 / 一般)を
+    # 判定に実質的に使わない。NISA口座の保有に対する利確判定の軽減(downgrade)を行わない。
+    # 出荷値をfalseに固定するguardが tests/unit/test_issue_778_nisa_mitigation_disabled.py にある
+    # (trueへ戻すにはUSERの決定の変更とguardの更新が要る)。downgrade_levelsは据え置き(enabled: falseの間は使われない)。
+    enabled: false
     downgrade_levels: 1
 
 # 権利確定日・決算発表予定日が近い場合、判定に付記する(自動での判定変更は行わない)
