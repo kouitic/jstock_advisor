@@ -214,30 +214,54 @@ def test_score_both_policy_is_still_8_points_not_16() -> None:
     assert _sustainability(info) == pytest.approx(8.0)
 
 
-def test_score_false_and_none_are_zero_and_identical() -> None:
+def test_score_false_and_none_are_zero_when_no_other_factor_exists() -> None:
+    """連続増配年数・配当性向のどちらも無い場合は、方針がFalseでもNoneでも0点。
+    Noneは残る2要素を再正規化して採点するが(Issue #30 案C)、再正規化の対象が
+    0なら0のまま(中立加点ではない)。他のfactorがある場合にFalseとNoneで
+    値が異なることは下の2件と test_issue_30_dividend_sustainability_renormalization.py
+    で値を固定している。"""
     false_score = _sustainability(_dividend(is_progressive_or_doe_policy=False))
     none_score = _sustainability(_dividend(is_progressive_or_doe_policy=None))
     assert false_score == pytest.approx(0.0)
-    assert none_score == pytest.approx(0.0)  # UNKNOWNへの中立加点・再正規化はしない
+    assert none_score == pytest.approx(0.0)
 
 
-def test_score_streak_and_payout_parts_unchanged_by_policy_state() -> None:
-    """連続増配(0.4)・配当性向(0.2)のfactorは方針の3状態と独立に従来どおり。"""
-    for policy in (False, None):
-        score, formula = score_dividend_sustainability(
-            _dividend(is_progressive_or_doe_policy=policy, consecutive_dividend_increase_years=5),
-            _financial(payout_ratio_pct=0.0),
-            max_payout_ratio_pct=70.0,
-            weight=20.0,
-        )
-        # 0.4(連続増配5年満点) + 0.2(配当性向余力満点) = 0.6 -> 12点
-        assert score == pytest.approx(12.0)
-        assert "連続増配5年" in formula
+def test_score_streak_and_payout_parts_by_policy_state() -> None:
+    """連続増配・配当性向の2要素は、方針の3状態で次のとおり評価される
+    (Issue #30 案C。USER決定2026-10-03、#122 issuecomment-5962362666。
+    Phase 1の「Noneも方針分0点・再正規化しない」契約からの意図的な変更)。
+
+    - False(registry確認済み・方針なし): 従来の3項式(0.4/0.4/0.2)のまま。
+      連続増配5年満点0.4 + 配当性向余力満点0.2 = 0.6 -> 12点
+    - None(registry不明): 累進/DOE項を除く2要素を2/3:1/3へ再正規化。
+      2/3 + 1/3 = 1.0 -> 20点
+    """
+    false_score, false_formula = score_dividend_sustainability(
+        _dividend(is_progressive_or_doe_policy=False, consecutive_dividend_increase_years=5),
+        _financial(payout_ratio_pct=0.0),
+        max_payout_ratio_pct=70.0,
+        weight=20.0,
+    )
+    assert false_score == pytest.approx(12.0)
+    assert "連続増配5年" in false_formula
+    assert "再正規化" not in false_formula
+
+    none_score, none_formula = score_dividend_sustainability(
+        _dividend(is_progressive_or_doe_policy=None, consecutive_dividend_increase_years=5),
+        _financial(payout_ratio_pct=0.0),
+        max_payout_ratio_pct=70.0,
+        weight=20.0,
+    )
+    assert none_score == pytest.approx(20.0)
+    assert "連続増配5年" in none_formula
+    assert "再正規化" in none_formula
 
 
 def test_five_year_streak_does_not_infer_policy() -> None:
     """5年連続増配・レジストリ未登録 -> policyはNoneのまま(実績から推測しない)。
-    方針分の8点は加点されない(J/K基準)。"""
+    方針分の加点は行わない(J/K基準)。Noneの採点は累進/DOE項を除く2要素の再正規化で、
+    連続増配5年のみ(配当性向なし)なら係数は2/3 -> 13.33点(Issue #30 案C。
+    方針あり(True)の16点には届かない)。"""
     provider = ShareholderReturnPolicyEnrichingDividendDataProvider(
         inner=_FakeInnerProvider(_dividend(consecutive_dividend_increase_years=5)),
         policies=_registry(),
@@ -248,7 +272,8 @@ def test_five_year_streak_does_not_infer_policy() -> None:
     score, _ = score_dividend_sustainability(
         info, _financial(payout_ratio_pct=None), max_payout_ratio_pct=70.0, weight=20.0
     )
-    assert score == pytest.approx(8.0)  # 連続増配0.4のみ(方針0.4は加点なし)
+    assert score == pytest.approx(20.0 * 2 / 3)
+    assert score < 16.0  # 方針あり(True)の同条件(0.4+0.4=0.8 -> 16点)を超えない
 
 
 # --- input_facts / component_states ------------------------------------------
