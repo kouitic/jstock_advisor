@@ -1050,9 +1050,18 @@ def _process_single_candidate(
             # 判定に使ったsnapshotの時刻等がリトライごとに変わり得ることに起因する
             # 不要な内容比較・警告ログを避けるため、ここで打ち切る)。
             if not execution_context.is_validation and is_new_recommendation:
-                save_decision_snapshot_safely(
+                decision_snapshot_saved = save_decision_snapshot_safely(
                     DecisionSnapshotRepository(), final_recommendation, DecisionType.BUY, logger
                 )
+                if not decision_snapshot_saved:
+                    # Issue #672(HF-7): 保存失敗をUSERへ通知する(判定・Recommendation・通知・
+                    # 戻り値は変えない。通知の失敗も本処理を止めない)。
+                    _notify_handled_failure_safely(
+                        "DECISION_SNAPSHOT_SAVE",
+                        "BUY_CANDIDATES_DECISION_SNAPSHOT_SAVE_FAILED",
+                        now,
+                        batch_id,
+                    )
                 # Issue #160 / #457(PR-3): 判断の安全条件(G1〜G4)のshadow計測。**保存が完了した
                 # 後**に置くため、Recommendation・DecisionSnapshot・通知・戻り値を変えられない。
                 # shadowがOFF(既定)なら何もしない。SHADOWでも評価・記録の失敗は隔離され、

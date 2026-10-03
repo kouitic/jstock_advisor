@@ -173,20 +173,32 @@ class IncidentContent(StrEnum):
     # 文言の文型「<対象>の<処理>に失敗しました」に揃えた暫定案であり、deploy前に
     # USERの確認が要る項目としてRELEASE_SCOPE_GATEの材料に載せる(「USER決定」ではない)。
     SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED = "株主優待データの確認処理に失敗しました"
+    # Issue #672(HF-7): ★ PROVISIONAL(暫定の文言)。この2件の「内容」文についてのUSERの承認は無い。
+    # 既存の文言の文型「<対象>の<処理>に失敗しました」に揃えた暫定案であり、Recommendation保存
+    # (「判定結果の記録保存」)とは別の保存(DecisionSnapshot)であることを対象語で区別している
+    # が、利用者に分かりやすいかは未検証。deploy前にUSERの確認が要る項目として
+    # RELEASE_SCOPE_GATEの材料に載せる(「USER決定」ではない)。
+    BUY_CANDIDATES_DECISION_SNAPSHOT_SAVE_FAILED = "買い候補の判定時点のデータの保存に失敗しました"
+    HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED = (
+        "保有銘柄の判定時点のデータの保存に失敗しました"
+    )
     CLOUDWATCH_ALARM = "システムの監視アラームが検知されました"
     OTHER = "技術的な問題を検知しました"  # 対応表に無いreason_codeの落ち先
 
 
 # 内部のreason_code(IncidentSignal.error_type)→ 利用者向けの「内容」文。
-# tests/unit/test_issue_501_incident_message.pyが、列挙した6箇所
-# (buy_candidates/holdings_watchlist/evaluation/shareholder_benefit_registry_service
-# の_notify_handled_failure_safely第2位置引数、finalizerのdict literal、
-# reconcilerのboundary metadata)を走査し、本辞書のkeyと突き合わせる。この5箇所の書き方で
-# HANDLEDの発行元を1件削除する・新しいHANDLED発行元を無登録のまま追加する、
-# のいずれもテストが赤くなる。★キーワード引数での指定・列挙外の新規
-# ファイルへの追加は視界外であり赤くならない(src全数の走査ではない。
-# 視界外を塞ぐ仕組みは#745)。新しい発行元を足すときは、本辞書と合わせて
-# 同テストの走査対象も更新すること。運用トレンド検知6件
+# tests/unit/test_issue_501_incident_message.pyの網羅guardが、src全体をASTで走査して
+# HANDLED_FAILUREの発行元のファイルを検出し(failure_classがHANDLED_FAILUREの辞書リテラル
+# 〔文字列・enum参照・module定数経由〕・failure_class=のキーワード引数・
+# _notify_handled_failure_safelyの呼び出しの3形。除外リストは持たない。Issue #745)、
+# そのreason_codeを本辞書のkeyと突き合わせる。発行元のファイルを人が列挙する方式では
+# ないため、新しいHANDLED発行元(新しいファイルを含む)を無登録のまま追加する・既存の
+# 発行元を1件削除する、のいずれもテストが赤くなる(発行元のファイル集合・reason_code集合・
+# 本辞書の3つを更新するまで)。検出できない形(別名のwrapper経由・後から代入する辞書・
+# f-stringや文字列連結など計算して作った値など)は、#745のPR本文と、同テストの
+# _handled_failure_filesのdocstringの限界の節を参照。_notify_handled_failure_safelyは
+# 第2位置引数をreason_codeにする位置引数で呼ぶこと(キーワード引数での指定は同テストが
+# AssertionErrorにする)。運用トレンド検知6件
 # (watchlist_missed_schedule等)とCloudWatchAlarmの計7件は、現時点では
 # envelopeがfailure_classをHANDLED_FAILUREに設定していないため到達しない
 # 先行登録であり、同テストが別途明示的に固定している(発行元が将来HF化
@@ -244,6 +256,14 @@ _REASON_CODE_TO_CONTENT: dict[str, IncidentContent] = {
     # 内容文は PROVISIONAL(IncidentContent の該当行のコメント参照)。
     "SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED": (
         IncidentContent.SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED
+    ),
+    # Issue #672(HF-7。発行元 = buy_candidates_handler / holdings_watchlist_handler の
+    # DecisionSnapshot保存失敗)。内容文は PROVISIONAL(IncidentContent の該当行のコメント参照)。
+    "BUY_CANDIDATES_DECISION_SNAPSHOT_SAVE_FAILED": (
+        IncidentContent.BUY_CANDIDATES_DECISION_SNAPSHOT_SAVE_FAILED
+    ),
+    "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED": (
+        IncidentContent.HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED
     ),
     "CloudWatchAlarm": IncidentContent.CLOUDWATCH_ALARM,
 }

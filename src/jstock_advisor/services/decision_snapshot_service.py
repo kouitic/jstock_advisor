@@ -43,10 +43,18 @@ def save_decision_snapshot_safely(
     recommendation: Recommendation,
     decision_type: DecisionType,
     logger: logging.Logger,
-) -> None:
+) -> bool:
     """DecisionSnapshotの構築・保存失敗が既存のRecommendation保存・通知フローを
     絶対にブロックしないためのラッパー。例外はWARNINGログのみに留め、呼び出し元へ
     伝播させない。
+
+    戻り値(Issue #672 HF-7): 「保存失敗(SAVE_FAILED)ではなかった」ならTrue、
+    保存失敗ならFalse。呼び出し元が失敗をUSERへ通知するかを決めるための値であり、
+    判定・保存の流れを変えるものではない。経路ごとの値:
+      - 新規insert成功 / 同一内容の既存(冪等再実行): True
+      - 内容不一致の既存(CONFLICT。insert-only保証の想定内動作でSAVE_FAILEDではない): True
+      - 例外(構築・読み取り・insert): False
+      - insert_if_absent=Falseなのに強整合readでも存在しない(例外ではない第2の失敗経路): False
 
     insert-only保証: 真正な重複防止の正はrepo.insert_if_absent()の条件付き
     書き込みとする(get→insertのcheck-then-actを排他制御として信用しない)。
@@ -59,14 +67,14 @@ def save_decision_snapshot_safely(
         existing = repo.get_consistent(new_snapshot.decision_id)
         if existing is None:
             if repo.insert_if_absent(new_snapshot):
-                return
+                return True
             # 並行実行で他プロセスが先にinsertしたため、strongly consistent read
             # でその値を取得する(通常のget()だと結果整合性読み取りにより一時的に
             # Noneが返り、正常な冪等再実行を誤ってconflict扱いする恐れがあるため)。
             existing = repo.get_consistent(new_snapshot.decision_id)
         if existing == new_snapshot:
             # 同一内容の正常な冪等再実行(warning不要)。
-            return
+            return True
         if existing is None:
             # insert_if_absent=Falseなのにstrongly consistent readでも存在しない
             # のは通常想定できない(削除操作は存在しない)。内容不一致conflictでは
@@ -78,7 +86,7 @@ def save_decision_snapshot_safely(
                 recommendation.recommendation_id,
                 decision_type.value,
             )
-            return
+            return False
         logger.warning(
             "%s stock_code=%s recommendation_id=%s decision_id=%s decision_type=%s",
             DECISION_SNAPSHOT_CONFLICT_EVENT,
@@ -87,6 +95,8 @@ def save_decision_snapshot_safely(
             new_snapshot.decision_id,
             decision_type.value,
         )
+        # CONFLICTは既存の記録を正として保持する想定内の動作で、保存失敗ではない。
+        return True
     except Exception:
         logger.warning(
             "%s stock_code=%s recommendation_id=%s decision_type=%s",
@@ -96,3 +106,4 @@ def save_decision_snapshot_safely(
             decision_type.value,
             exc_info=True,
         )
+        return False

@@ -626,6 +626,7 @@ def test_n8_reverting_to_uuid4_and_save_changes_the_result(
         notification_service,
         notification_enabled,
         execution_context=handler_module._DEFAULT_EXECUTION_CONTEXT,
+        batch_id=None,  # Issue #672: 呼び出し元が末尾に渡すようになった引数(この再現では未使用)
     ):
         # 修正前: recommendation_idの決定化なし・plainなsave()(#528以前の実装)。
         if not execution_context.is_validation:

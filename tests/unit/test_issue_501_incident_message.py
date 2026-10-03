@@ -200,6 +200,11 @@ _REVIEWED_CURRENT_HANDLED_FAILURE_REASON_CODES = frozenset(
         # shareholder_benefit_registry_service.py(Issue #675。
         # _notify_handled_failure_safely呼び出し1箇所。モジュール定数経由)
         "SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED",
+        # buy_candidates_handler.py / holdings_watchlist_handler.py(Issue #672 HF-7。
+        # DecisionSnapshot保存失敗。_notify_handled_failure_safely呼び出しを、buyに1箇所・
+        # holdings_watchlistに3箇所追加。holdingsの3箇所は同一のreason_code)
+        "BUY_CANDIDATES_DECISION_SNAPSHOT_SAVE_FAILED",
+        "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED",
     }
 )
 
@@ -336,6 +341,8 @@ def _handled_failure_files(src_root: Path) -> set[str]:
     ★ 「全」の断定は、この 3 つの形に限る。別名の wrapper を経由して HANDLED を渡す、
     動的に組み立てた辞書へ後から "failure_class" を代入する、といった形は検出できない。
     ★ 関数呼び出し・別の属性参照が値の`failure_class=`(consumer の素通し)は発行元として数えない。
+    ★ f-string・文字列連結など、計算して作った値は検出しない(解決できない Name は
+    AssertionError にするが、これらは黙って見逃す。Issue #745 PR #775 の REVIEWER 指摘)。
     """
     files: set[str] = set()
     for path in sorted(src_root.rglob("*.py")):
@@ -737,6 +744,13 @@ _REVIEWED_INCIDENT_CONTENT_LABELS = {
     "HOLDINGS_WATCHLIST_STUCK_BATCH": "保有株チェックの処理が完了せず滞留している可能性があります",
     # Issue #675(HF-10): ★ PROVISIONAL(暫定の文言。USERの承認なし)。deploy前にUSERの確認が要る。
     "SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED": "株主優待データの確認処理に失敗しました",
+    # Issue #672(HF-7): ★ PROVISIONAL(暫定の文言。USERの承認なし)。deploy前にUSERの確認が要る。
+    "BUY_CANDIDATES_DECISION_SNAPSHOT_SAVE_FAILED": (
+        "買い候補の判定時点のデータの保存に失敗しました"
+    ),
+    "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED": (
+        "保有銘柄の判定時点のデータの保存に失敗しました"
+    ),
     "CLOUDWATCH_ALARM": "システムの監視アラームが検知されました",
     "OTHER": "技術的な問題を検知しました",
 }
