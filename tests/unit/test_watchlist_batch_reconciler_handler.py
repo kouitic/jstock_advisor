@@ -532,8 +532,22 @@ def _mark_batch_completed(batch_id: str) -> None:
     `_finish_batch`到達時点で計算済みのfinal_statusを渡す設計になったため、
     Reconciler側は毎回フルスキャンで取得した`batch_item["status"]`から
     final_statusを復元する(list_stale_maintenance_triggers参照)。"""
-    batch_tracker.mark_watchlist_batch_completed(
-        batch_id, batch_tracker.EXECUTION_RESULT_NORMAL, _NOW
+    # Issue #573: 完了遷移は条件付きになった(項目が無い・許容外のstatusなら何もしない)。
+    # 実運用では項目はfinalize中のstatusで存在するため、同じ前提(FINALIZE_PREPARING)を
+    # 先に作る(以前は無条件のSETが項目を新規に作っていた)。
+    if batch_tracker.get_watchlist_batch(batch_id) is None:
+        boto3.client("dynamodb", region_name="ap-northeast-1").put_item(
+            TableName=_BATCH_TABLE,
+            Item={
+                "batch_id": {"S": batch_id},
+                "status": {"S": WatchlistBatchStatus.FINALIZE_PREPARING.value},
+            },
+        )
+    assert (
+        batch_tracker.mark_watchlist_batch_completed(
+            batch_id, batch_tracker.EXECUTION_RESULT_NORMAL, _NOW
+        )
+        is True
     )
 
 

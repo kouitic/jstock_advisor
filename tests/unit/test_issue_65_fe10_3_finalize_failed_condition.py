@@ -13,10 +13,10 @@ Reconcilerが自動再試行を打ち切る(= 復旧できたはずのバッチ�
   **永久に発火しない**(= 無限リトライ)という、二重計上より重い逆方向の失敗になる。
   そのためT-7で集合の網羅性を機械的に固定する。
 
-★ 既知の限界(Issue #213 (g) / #65 issuecomment-5618908669で開示済み):
-  `mark_watchlist_batch_completed()`が無条件のため、
-  FINALIZE_FAILED→COMPLETEDへ「蘇生」してから再び失敗する経路では二重計上が残る。
-  本テストはその**現状を明示的に固定**する(黙って残さない。T-9)。
+★ 既知の限界だった「FINALIZE_FAILED→COMPLETEDの蘇生」(Issue #213 (g) / #65
+  issuecomment-5618908669で開示)は、Issue #573(#65 F-E10(1))で
+  `mark_watchlist_batch_completed()`を条件付きにしたため解消した(T-9は、以前の
+  「残存する二重計上」の固定から、解消後の期待値へ変えている)。
 
 ★ 実在の銘柄コード・銘柄名は使用しない。
 """
@@ -324,30 +324,31 @@ def test_the_add_and_the_condition_live_in_the_same_update_item() -> None:
     assert block.count("update_item(") == 1
 
 
-# --- T-9 既知の限界(Issue #213 (g))を明示的に固定する -------------------------------------
+# --- T-9 既知の限界(Issue #213 (g))は、Issue #573 で解消した -----------------------------
 
 
-def test_known_limitation_completion_resurrection_still_double_counts(dynamo) -> None:
-    """★ **残存する二重計上**を、既知の限界として明示的に固定する。
+def test_completion_resurrection_no_longer_double_counts(dynamo) -> None:
+    """★ 以前は**残存する二重計上**を既知の限界として固定していたが、Issue #573
+    (#65 F-E10(1))で完了遷移を条件付きにしたため、解消した。
 
-    `mark_watchlist_batch_completed()`は無条件のため、1人目がFINALIZE_FAILEDにした
-    後でも2人目がCOMPLETEDへ「蘇生」でき、そこから再び失敗すると条件が再び成立して
-    2回目の加算が起きる。根は完了遷移が無条件であることで、その条件付けは別の設計
-    判断を要するため本単位では直さない(Issue #213 (g)。
-    #65 issuecomment-5618908669で開示し、issuecomment-5618875590の方針で承認済み)。
-
-    ★ このテストは「望ましい仕様」ではなく**現状の記録**である。#213 (g)を直す際は
-      期待値を1へ変えること。
+    以前: `mark_watchlist_batch_completed()`が無条件のため、1人目がFINALIZE_FAILEDに
+    した後でも2人目がCOMPLETEDへ「蘇生」でき、そこから再び失敗すると条件が再び成立して
+    2回目の加算が起きた(期待値 2)。
+    今: FINALIZE_FAILEDは完了遷移の許容集合に含まれないため蘇生せず、2人目の失敗記録は
+    FINALIZE_FAILEDのまま弾かれる(期待値 1)。(Issue #573 の期待値の変更。#213 (g)の是正。)
     """
     _seed("b-11", WatchlistBatchStatus.FINALIZE_PREPARING)
-    mark_watchlist_batch_completed("b-11", EXECUTION_RESULT_NORMAL, _NOW)
+    assert mark_watchlist_batch_completed("b-11", EXECUTION_RESULT_NORMAL, _NOW) is True
 
     # 1人目: 後片付けが失敗 -> COMPLETEDは許容集合内なので成立
     mark_watchlist_finalize_failed("b-11", _NOW, "cleanup failed")
     assert _attempt_count("b-11") == 1
 
-    # 2人目: 無条件の完了遷移がFINALIZE_FAILEDをCOMPLETEDへ蘇生させる
-    mark_watchlist_batch_completed("b-11", EXECUTION_RESULT_NORMAL, _NOW)
+    # 2人目: 完了遷移は条件付きのため、FINALIZE_FAILEDをCOMPLETEDへ蘇生させない
+    assert mark_watchlist_batch_completed("b-11", EXECUTION_RESULT_NORMAL, _NOW) is False
     mark_watchlist_finalize_failed("b-11", _NOW, "cleanup failed")
 
-    assert _attempt_count("b-11") == 2  # ★ 残存する二重計上(#213 (g))
+    assert _attempt_count("b-11") == 1  # ★ 二重計上が起きない(#213 (g)の解消)
+    item = get_watchlist_batch("b-11")
+    assert item is not None
+    assert item["status"] == WatchlistBatchStatus.FINALIZE_FAILED.value

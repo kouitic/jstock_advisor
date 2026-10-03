@@ -2534,13 +2534,54 @@ def resolve_watchlist_batch_completion_status(
     return WatchlistBatchStatus.ABORTED
 
 
+# Issue #573(#65 F-E10(1)): 完了遷移(`mark_watchlist_batch_completed()`)を許容する遷移元の集合。
+# 呼び出し元3箇所(dispatcherの候補0件 / finalizerの`_finish_batch` / maintenanceの完了)が
+# 書き込む時点のstatusの全数:
+#   DISPATCHING                  候補0件の日(Issue #65 F-E5。ここを外すと0件の日が終端しない)
+#   FINALIZE_PREPARING 他3段階   finalize処理中(`_FINALIZE_IN_PROGRESS_STATUSES`。通常のPhase 4・
+#                                安全弁abort・maintenanceの完了はいずれもここから来る)
+#   NOTIFICATION_FAILED          通知の恒久失敗(上限到達)で完了させる経路
+# 含めない(= 2人目のfinalizerはここで弾く):
+#   COMPLETED / COMPLETED_WITH_NOTIFICATION_FAILURE / ABORTED  既に完了確定済み(二重確定の防止)
+#   FINALIZE_FAILED   「FINALIZE_FAILED→COMPLETEDの蘇生」を塞ぐ(Issue #213 (g)。正当な再試行は
+#                     `try_retry_finalize()`がFINALIZE_PREPARINGへ戻してから走るため影響を受けない)
+#   RUNNING / DISPATCH_FAILED / TIMEOUT系  別のライフサイクル
+# 集合を狭くしすぎると「正当な完了が弾かれて日が終端しない」という、二重確定より重い逆方向の
+# 失敗になる(許容集合の網羅性はtest_issue_573_completion_fencingで機械的に固定する)。
+_COMPLETION_ALLOWED_FROM_STATUSES = (
+    WatchlistBatchStatus.DISPATCHING,
+    *_FINALIZE_IN_PROGRESS_STATUSES,
+    WatchlistBatchStatus.NOTIFICATION_FAILED,
+)
+
+
 def mark_watchlist_batch_completed(
     batch_id: str,
     execution_result: str,
     now: dt.datetime,
     notification_permanently_failed: bool = False,
-) -> None:
+) -> bool:
     """11節: _finalize_completed相当の後続処理が成功した後に呼ぶ。
+
+    Issue #573(#65 F-E10(1)): 完了遷移は`_COMPLETION_ALLOWED_FROM_STATUSES`のいずれかからの
+    遷移である場合に限る。戻り値は「この呼び出しが完了を確定させたか」(True = 自分が確定させた /
+    False = 既に他の実行が完了確定済み、または許容外のstatus、または一時的な書き込みの競合
+    〔TransactionConflictException。書き込みは起きていない。この場合はstatusがfinalize中のまま残り、
+    Reconcilerのstuck検知で回収される〕)。
+    ★ 条件とSETは**同一のUpdateItem**に置く(別writeへ分けない)。
+    ★ 条件不成立でも**例外を送出しない**(bool返却)。送出すると、2人目のfinalizerの外側の
+      exceptが`mark_watchlist_finalize_failed()`を呼び、そのときのstatusがCOMPLETEDで
+      許容集合(F-E10(3))に入って成立し、**完了済みバッチがFINALIZE_FAILEDへ巻き戻って
+      Reconcilerが再試行する**という、現状より悪い状態になる。
+    ★ 呼び出し側(`_finish_batch`)は、Falseなら後片付け(rotation lease解放+cursor前進・
+      maintenance起動)を走らせない(自分は2人目であり、1人目が行う)。
+    ★ 既知の限界: tokenによるcrash takeoverは付かない。1人目が完了確定の直後(後片付けの前)に
+      例外を出さずに強制終了した場合(timeout / OOM等)、2人目は弾かれて後片付けをしない。
+      **この後片付けを再実行する仕組みは、現在のmainには無い**(Reconcilerが救うのは
+      TRIGGERINGのまま失効したmaintenance trigger・TIMED_OUT・DISPATCHINGのまま放置された
+      leaseの解放のみ。rotation leaseはbatch_processing_timeout_hoursで自然失効する)。
+      この欠落はIssue #781で扱う。なお後片付けが**例外**を送出した場合は、
+      FINALIZE_FAILED → Reconcilerの再試行(try_retry_finalize)で再実行される。
 
     execution_resultはEXECUTION_RESULT_NORMAL(通常完了)、または
     _ABORTED_EXECUTION_RESULTSのいずれか(10/3節のスロットリング率・主要項目
@@ -2561,16 +2602,36 @@ def mark_watchlist_batch_completed(
     status = resolve_watchlist_batch_completion_status(
         execution_result, notification_permanently_failed
     )
-    _table().update_item(
-        Key={"batch_id": batch_id},
-        UpdateExpression="SET #status = :status, execution_result = :result, updated_at = :now",
-        ExpressionAttributeNames={"#status": "status"},
-        ExpressionAttributeValues={
-            ":status": status.value,
-            ":result": execution_result,
-            ":now": now.isoformat(),
-        },
-    )
+    allowed_values = {f":s{i}": s.value for i, s in enumerate(_COMPLETION_ALLOWED_FROM_STATUSES)}
+    allowed_condition = " OR ".join(f"#status = {placeholder}" for placeholder in allowed_values)
+    try:
+        _table().update_item(
+            Key={"batch_id": batch_id},
+            UpdateExpression=(
+                "SET #status = :status, execution_result = :result, updated_at = :now"
+            ),
+            ConditionExpression=allowed_condition,
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":status": status.value,
+                ":result": execution_result,
+                ":now": now.isoformat(),
+                **allowed_values,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] not in _TRANSACTION_CONDITION_FAILURE_CODES:
+            raise
+        # 失敗の可視性: 完了を確定させられなかったことを残す(平常時は出ない。出た場合は
+        # 同時実行が実在した証拠、または項目が存在しない異常のいずれか)。
+        # Issue #135: batch_id以外の可変文字列(例外本文等)はログへ出さない。
+        logger.warning(
+            "watchlist batch completion not recorded (status was not one of %s) batch_id=%s",
+            [s.value for s in _COMPLETION_ALLOWED_FROM_STATUSES],
+            batch_id,
+        )
+        return False
 
 
 # Issue #65 F-E10(3): finalize失敗の記録を許容する遷移元の集合。
@@ -2608,10 +2669,10 @@ def mark_watchlist_finalize_failed(
     ★ 条件不成立でも**例外を送出しない**。送出すると「後片付けの失敗でfinalize全体が
       落ちる」という別の欠陥になる(呼び出し側4箇所はいずれも記録後に元の例外を
       再送出する形で、本関数の失敗を前提にしていない)。
-    ★ 既知の限界(Issue #213 (g)): `mark_watchlist_batch_completed()`が無条件の
+    ★ かつての既知の限界(Issue #213 (g)): `mark_watchlist_batch_completed()`が無条件の
       ため、FINALIZE_FAILED→COMPLETEDへ「蘇生」してから再び失敗する経路では
-      二重計上が残る。根は完了遷移が無条件であることで、その条件付けは別の設計
-      判断を要する。
+      二重計上が残っていた。Issue #573で完了遷移を条件付きにしたため(FINALIZE_FAILED
+      は完了遷移の許容集合に含まれない)、解消した。
     """
     now_iso = now.isoformat()
     truncated = (error_message or "")[:MAX_FINALIZE_ERROR_MESSAGE_LENGTH] if error_message else None
