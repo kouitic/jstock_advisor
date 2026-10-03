@@ -45,7 +45,7 @@ from decimal import Decimal
 
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.interfaces.market_data import MarketDataProvider
-from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot
+from jstock_advisor.interfaces.types import PriceBar, PriceHistory, PriceSnapshot, PriceSplit
 
 _HistoryFetch = Callable[[dt.date, dt.date], PriceHistory | None]
 
@@ -58,6 +58,8 @@ class _CachedWindow:
     end: dt.date
     bars: list[PriceBar]
     source: DataSourceReference | None
+    # Issue #698 PR-A: 下位providerが報告した分割。None = 報告されなかった(空リストとは別)。
+    splits: list[PriceSplit] | None = None
 
 
 class RunScopedMarketDataCache:
@@ -150,6 +152,11 @@ class RunScopedMarketDataCache:
             end=fetch_end,
             bars=list(history.bars) if history is not None else [],
             source=history.source if history is not None else None,
+            splits=(
+                list(history.splits)
+                if history is not None and history.splits is not None
+                else None
+            ),
         )
         cache[key] = window
         return window
@@ -164,4 +171,10 @@ class RunScopedMarketDataCache:
             # バーが無い場合、素のproviderは`None`を返す(取得は成立したが該当期間に
             # データが無い)。その意味論をそのまま維持する。
             return None
-        return PriceHistory(symbol=symbol, bars=bars, source=window.source)
+        # 分割は要求範囲の分だけを返す(barsと同じ。Noneは「報告されなかった」のまま伝える)。
+        splits = (
+            [s for s in window.splits if start <= s.date <= end]
+            if window.splits is not None
+            else None
+        )
+        return PriceHistory(symbol=symbol, bars=bars, source=window.source, splits=splits)

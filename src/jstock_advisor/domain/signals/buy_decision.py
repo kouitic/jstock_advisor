@@ -24,6 +24,10 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
 )
 from jstock_advisor.domain.screening.rules import ScreeningResult
+from jstock_advisor.domain.signals.buy_basis_consistency import (
+    BASIS_UNKNOWN_CAP_REASON_CODE,
+    BasisConsistency,
+)
 from jstock_advisor.domain.valuation.valuation_methods import DispersionBand
 from jstock_advisor.interfaces.types import ShareholderBenefit
 
@@ -91,6 +95,7 @@ def decide_buy_action(
     business_days_to_earnings: int | None,
     valuation_dispersion_ratio: float | None,
     buy_price_reliability: BuyPriceReliability | None = None,
+    basis_consistency: BasisConsistency | None = None,
     config: BuyDecisionRulesConfig,
 ) -> BuyActionDecision:
     """第3段階: 現在価格での購入判断。
@@ -183,6 +188,24 @@ def decide_buy_action(
                 message="適正価格算出手法間のばらつきが大きく、自動購入判定を禁止する",
                 actual_value=valuation_dispersion_ratio,
                 threshold_value=dispersion_config.auto_buy_block,
+            )
+        )
+
+    # Issue #698 PR-A: 株価と財務指標の分割基準が揃っているか確認できない(UNKNOWN)銘柄は、
+    # 「到達」「通常買い」「積極買い」のような実行性の高いBUY系判定へ昇格させない。
+    # 前例のBUY_PRICE_RELIABILITY_LOWと同じくWATCH_FOR_PRICEへ格下げする(SMALL_ENTRYへ
+    # 下げるだけではBUY系に残り、監視からの昇格〔「到達」〕を抑止できないため)。
+    # raw_action(価格条件のみの仮判定)は変えない。MISMATCHはここへ来ない(analyze()が
+    # 早期returnする)。None(未評価)は何もしない。
+    if basis_consistency is BasisConsistency.UNKNOWN and action in BUY_FAMILY_ACTIONS:
+        action = BuyAction.WATCH_FOR_PRICE
+        reasons.append(
+            BuyDecisionReason(
+                code=BASIS_UNKNOWN_CAP_REASON_CODE,
+                message=(
+                    "株価と財務指標の分割等の基準が揃っているか確認できないため、"
+                    "実行性の高い購入判定へ昇格させない"
+                ),
             )
         )
 

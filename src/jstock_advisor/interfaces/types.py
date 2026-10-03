@@ -67,10 +67,27 @@ class PriceSnapshot(ImmutableSnapshot):
     source: DataSourceReference
 
 
+class PriceSplit(ImmutableSnapshot):
+    """価格履歴の応答に含まれる株式分割・併合(Issue #698 PR-A)。
+
+    dateはデータ提供元が価格の遡及調整を始める日(権利落ち日。効力発生日ではない。
+    例: 効力発生日が2026-10-01の分割が2026-09-29)。ratioは新株/旧株(5:1分割なら5、
+    1:5併合なら0.2)。
+    """
+
+    date: dt.date
+    ratio: Decimal
+
+
 class PriceHistory(ImmutableSnapshot):
     symbol: str  # 銘柄コード、またはベンチマーク指数シンボル(例: "TOPIX")
     bars: list[PriceBar]
     source: DataSourceReference
+    # Issue #698 PR-A: 同じ応答に含まれる分割・併合(barsの期間内のもののみ)。
+    # None = 取得元がこの情報を報告しなかった(「分割が無かった」ではない)。空リスト =
+    # 取得元が「期間内に分割は無い」と報告した。両者を混同しないこと(Noneを空と
+    # みなすと、取得元が報告しなかっただけの銘柄が「基準は揃っている」と判定される)。
+    splits: list[PriceSplit] | None = None
 
 
 class QuarterlyFinancials(ImmutableSnapshot):
