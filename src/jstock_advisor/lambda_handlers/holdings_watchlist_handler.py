@@ -559,6 +559,7 @@ def _notify_legacy_sell_and_build_result(
     notification_service: LineNotificationService,
     notification_enabled: bool,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+    batch_id: str | None = None,
 ) -> _HoldingResult:
     """Recommendation保存はkill switchの影響を受けず常に行う(コードレビュー対応)。
     LINE送信のみ`notification_enabled`で制御する。通知検証モード機能(2026-08追加)
@@ -584,9 +585,17 @@ def _notify_legacy_sell_and_build_result(
         # 判定に使ったsnapshotの時刻等がリトライごとに変わり得ることに起因する
         # 不要な内容比較・警告ログを避ける。D1と同じ理由)。
         if is_new_recommendation:
-            save_decision_snapshot_safely(
+            decision_snapshot_saved = save_decision_snapshot_safely(
                 DecisionSnapshotRepository(), recommendation, DecisionType.SELL, logger
             )
+            if not decision_snapshot_saved:
+                # Issue #672(HF-7): 保存失敗をUSERへ通知する(判定・通知・戻り値は変えない)。
+                _notify_handled_failure_safely(
+                    "DECISION_SNAPSHOT_SAVE",
+                    "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED",
+                    now,
+                    batch_id,
+                )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
     )
@@ -714,9 +723,17 @@ def _notify_holding_decision_and_build_result(
         # 全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
         # Issue #528: 重複配信時はスキップする(D1と同じ理由)。
         if is_new_recommendation:
-            save_decision_snapshot_safely(
+            decision_snapshot_saved = save_decision_snapshot_safely(
                 DecisionSnapshotRepository(), recommendation, DecisionType.HOLDING_DECISION, logger
             )
+            if not decision_snapshot_saved:
+                # Issue #672(HF-7): 保存失敗をUSERへ通知する(判定・通知・戻り値は変えない)。
+                _notify_handled_failure_safely(
+                    "DECISION_SNAPSHOT_SAVE",
+                    "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED",
+                    now,
+                    batch_id,
+                )
     outcome = _send_or_suppress_notification(
         recommendation, notification_enabled, notification_service, now
     )
@@ -1068,6 +1085,7 @@ def _analyze_one_holding(
                 notification_service,
                 notification_enabled,
                 execution_context,
+                batch_id,
             )
 
     holding_decision_result_notified: _HoldingResult | None = None
@@ -1311,12 +1329,20 @@ def _analyze_one_holding(
             # Phase Bまで全てNone)。失敗しても既存の通知・戻り値には一切影響しない。
             # Issue #528: 重複配信時はスキップする(D1と同じ理由)。
             if is_new_recommendation:
-                save_decision_snapshot_safely(
+                decision_snapshot_saved = save_decision_snapshot_safely(
                     DecisionSnapshotRepository(),
                     pt_recommendation,
                     DecisionType.PROFIT_TAKING,
                     logger,
                 )
+                if not decision_snapshot_saved:
+                    # Issue #672(HF-7): 保存失敗をUSERへ通知する(判定・通知・戻り値は変えない)。
+                    _notify_handled_failure_safely(
+                        "DECISION_SNAPSHOT_SAVE",
+                        "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED",
+                        now,
+                        batch_id,
+                    )
                 # Issue #160 / #457(PR-3): 判断の安全条件(G1〜G4)のshadow計測。**保存が完了した
                 # 後・通知の前**に置くため、Recommendation・DecisionSnapshot・通知・戻り値を
                 # 変えられない。
