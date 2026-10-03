@@ -359,7 +359,9 @@ SHORT_TEXT_CATEGORIES = frozenset(_BUILDERS.keys())
 #                   得るため適用)
 # BUY / NEAR_BUY / 買い候補側のWATCH_BEFORE_EARNINGSは、これらのproducerがkey_risksへ入れない
 # ため対象にしない。ATTENTION(build_attention_text_input)とWATCH終了
-# (build_watch_end_text_input)は別builderで、本関数を通らないため対象外(MANAGER判断 D-2)。
+# (build_watch_end_text_input)は別builderで、本関数を通らない(MANAGER判断 D-2)。
+# ATTENTIONは、Issue #767(USER決定 B、2026-10-03)で専用builder内に同じ完全一致の判定を置いて
+# 「決算未反映」を付ける。WATCH終了は今回は変更しない(警告を付けない)。
 _STALE_WARNING_CATEGORIES = frozenset(
     {
         NotificationCategory.SELL,
@@ -419,6 +421,13 @@ def build_attention_text_input(
     呼び出し前提: resolve_notification_intent()がATTENTIONと判定した
     Recommendation(RecommendationType.WATCH、profit_protection_signalが
     CANDIDATE/STRONGのいずれか)にのみ呼ぶこと。
+
+    Issue #767(USER決定 B、2026-10-03): ATTENTIONは通常の監視通知を置き換えるため、
+    key_risksに財務鮮度の警告が**完全一致**で含まれるときは、#474と同じ短縮ラベル
+    (決算未反映)をfinancial_stale_labelへ渡す(substring / prefix判定は使わない)。
+    formatter側の優先順位(必須の警告 > 任意の理由文)は変更しない: 70文字を超えるときに
+    落ちるのは理由文(補足説明)だけで、警告は落ちない。STALEでない通知の本文は従来と
+    1文字も変わらない。WATCH終了(build_watch_end_text_input)は変更しない。
     """
     peak_gain = recommendation.profit_protection_peak_gain_pct
     drawdown = recommendation.profit_protection_drawdown_from_peak_pct
@@ -436,6 +445,11 @@ def build_attention_text_input(
         current_price=recommendation.price_at_recommendation,
         reason=reason,
         label_override=_ATTENTION_LABEL,
+        financial_stale_label=(
+            FINANCIAL_STALE_SHORT_LABEL
+            if has_financial_stale_warning(recommendation.key_risks)
+            else None
+        ),
         # ATTENTIONは常にholding-scope(呼び出し前提のとおり保有銘柄由来)。
         owner=recommendation.owner,
     )
