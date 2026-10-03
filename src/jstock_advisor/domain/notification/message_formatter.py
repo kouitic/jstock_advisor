@@ -3,8 +3,9 @@ Profit Protection Round 3 コードレビュー対応)。
 
 原則50文字程度・目安70文字(Python `len()`基準)。判定・銘柄コード・銘柄名は
 必須(削れない)。優先順位: 1.判定 2.銘柄コード・銘柄名 3.現在値 4.売却数量
-(PARTIAL専用、あれば必須) 5.目標価格/乖離率 6.WATCH連続日数 7.理由 8.StockType
-(最大2件)。この簡潔化はユーザー向けLINE通知本文にのみ適用し、内部データ・監査
+(PARTIAL専用、あれば必須) 5.目標価格/乖離率 5b.財務鮮度の警告(決算未反映。STALEの
+ときのみ、必須) 6.WATCH連続日数 7.理由 8.StockType(最大2件)。
+この簡潔化はユーザー向けLINE通知本文にのみ適用し、内部データ・監査
 ログの情報量は一切減らさない(呼び出し元は本モジュールを通知テキスト生成にのみ
 使い、Recommendation自体は完全な情報を保持したまま保存すること)。
 
@@ -124,6 +125,18 @@ class NotificationTextInput:
     # ラベル文言(「打診価格内」/「打診価格超過」)はUSER確定(2026-09-17、
     # adapter層の_ENTRY_PRICE_WITHIN_RANGE_LABEL等を参照)。
     entry_price_range_label: str | None = None
+    # Issue #474(USER決定 2026-10-03、OPTION 2): 判定に使った財務データが最新の決算を
+    # 反映していない可能性がある(財務鮮度 STALE)ことを示す短縮ラベル(例:「決算未反映」)。
+    # adapter層(recommendation_adapter.py)が key_risks の警告を**完全一致**で判定した
+    # ときだけ設定する(formatter側は判定せず、渡された文字列を1つの**必須**セグメントとして
+    # 表示するのみ)。Noneの場合はセグメント自体を生成しない(STALEでない通知の本文は
+    # 従来と1文字も変わらない)。
+    # 優先順位: 判定・銘柄・現在値・売却数量・必要な価格情報(MANDATORY) > 本ラベル(HIGH) >
+    # 任意の補足(OPTIONAL: 継続日数・理由文・銘柄分類等)。文字数が足りないときに落ちるのは
+    # OPTIONALだけで、本ラベルより先に評価される(下記ループの並び順が優先度)。
+    # MANDATORYと本ラベルだけで70文字を超える場合は、既存の必須セグメント(売却数量・
+    # 算定不可ラベル)と同じく超過を許容する(70文字の値は変更しない)。
+    financial_stale_label: str | None = None
 
 
 def _fmt_price(price: Decimal) -> str:
@@ -194,6 +207,13 @@ def format_notification_text(
         optional_segments.append((f"あと{data.distance_pct:.1f}%", False))
     elif data.target_price_withheld_label is not None:
         optional_segments.append((data.target_price_withheld_label, True))
+    # Issue #474: 財務鮮度の警告(決算未反映)。判定・銘柄・現在値・売却数量・目標価格
+    # (または算定不可)の**直後**、以降の任意セグメント(打診価格内・副目標価格・継続日数・
+    # 理由文)より**前**に置く。貪欲法の評価順がそのまま優先度なので、文字数が足りないとき
+    # 先に落ちるのは後続の任意セグメントで、MANDATORYの前に置かないため価格情報も
+    # 落とさない。requiredなので70文字を超えても落とさない。
+    if data.financial_stale_label:
+        optional_segments.append((data.financial_stale_label, True))
     # Issue #374 (N-1): 「現在値が打診買いの範囲内かどうか」を示す短い状態語。
     # target_priceの直後(secondary_target_price・銘柄分類より優先)に置く
     # (USER確定: 銘柄分類より表示優先度を高くする)。非必須(70文字上限で
