@@ -183,7 +183,16 @@ def test_jit_reading_points_at_sections_not_whole_documents(
     report = policy_check.check("MERGE", registry, _worktree_reader())
     assert report["jit_reading"], "jit_reading が空"
     for entry in report["jit_reading"]:
-        assert set(entry) == {"policy_id", "ssot_file", "ssot_anchor"}
+        # Issue #656: 従来の 3 field(出典の pointer)は変えず、節の本文・出典の revision・
+        # 範囲を**追加**した(既存の field の削除・改名なし)。
+        assert set(entry) == {
+            "policy_id",
+            "ssot_file",
+            "ssot_anchor",
+            "source_commit_sha",
+            "expand",
+            "section_text",
+        }
         assert entry["ssot_anchor"].startswith("#"), "anchor は見出し文字列である"
 
 
@@ -845,3 +854,321 @@ def test_unexpected_result_does_not_exit_zero(
     assert code == EXIT_UNKNOWN
     assert code != EXIT_PASS
     assert json.loads(capsys.readouterr().out)["result"] == "SOMETHING_ELSE"
+
+
+# --- 節の本文の抽出(Issue #656。#364 Unit 4) ------------------------------------
+#
+# 期待値は literal(小さな文書を直接書く)。実装の切り出しを再現して期待値を作らない。
+
+_DOC = """\
+# 文書の題
+
+前置き
+
+## 1 第 1 章
+
+1 章の本文
+
+### 1.1 節 A
+
+A の本文
+
+#### 1.1.1 小節 A1
+
+A1 の本文
+
+### 1.2 節 B
+
+B の本文
+```
+# コードの中のコメント(見出しではない)
+### コードの中の偽の見出し
+```
+B の続き
+
+## 2 第 2 章
+
+2 章の本文
+"""
+
+
+def test_extract_section_stops_before_the_next_heading_of_the_same_or_higher_level() -> None:
+    text = policy_check.extract_section(_DOC, "### 1.1 節 A")
+    assert text == "### 1.1 節 A\n\nA の本文\n\n#### 1.1.1 小節 A1\n\nA1 の本文"
+
+
+def test_extract_section_includes_deeper_sub_sections() -> None:
+    text = policy_check.extract_section(_DOC, "## 1 第 1 章")
+    assert text is not None
+    assert "#### 1.1.1 小節 A1" in text
+    assert "### 1.2 節 B" in text
+    assert "## 2 第 2 章" not in text
+    assert text.splitlines()[0] == "## 1 第 1 章"
+
+
+def test_extract_section_runs_to_the_end_of_the_file_for_the_last_section() -> None:
+    text = policy_check.extract_section(_DOC, "## 2 第 2 章")
+    assert text == "## 2 第 2 章\n\n2 章の本文"
+
+
+def test_code_fence_lines_are_not_headings_and_do_not_end_a_section() -> None:
+    """★ フェンス内の「# ...」「### ...」で節が途中で切れない。"""
+    text = policy_check.extract_section(_DOC, "### 1.2 節 B")
+    assert text is not None
+    assert "# コードの中のコメント(見出しではない)" in text
+    assert "### コードの中の偽の見出し" in text
+    assert text.endswith("B の続き")
+
+
+def test_an_anchor_that_only_exists_inside_a_code_fence_is_not_found() -> None:
+    assert policy_check.extract_section(_DOC, "### コードの中の偽の見出し") is None
+
+
+def test_an_anchor_that_only_appears_in_prose_is_not_a_heading() -> None:
+    doc = "# 題\n\nここに ### 1.1 節 A と書いてある文\n"
+    assert policy_check.extract_section(doc, "### 1.1 節 A") is None
+
+
+def test_an_anchor_matching_several_headings_is_an_error_not_a_silent_choice() -> None:
+    doc = "## 同じ見出し\n\n本文 1\n\n## 同じ見出し\n\n本文 2\n"
+    with pytest.raises(policy_check.SectionExtractionError):
+        policy_check.extract_section(doc, "## 同じ見出し")
+
+
+def test_tilde_fences_and_longer_fences_are_recognised() -> None:
+    doc = (
+        "## 章\n\n~~~\n# 偽\n~~~\n\n````\n```\n# 偽 2\n```\n````\n\n"
+        "## 次の章\n\n次の本文\n"
+    )
+    text = policy_check.extract_section(doc, "## 章")
+    assert text is not None
+    assert "# 偽" in text and "# 偽 2" in text
+    assert "## 次の章" not in text
+
+
+def test_crlf_content_gives_the_same_section_as_lf_content() -> None:
+    lf = policy_check.extract_section(_DOC, "### 1.1 節 A")
+    crlf = policy_check.extract_section(_DOC.replace("\n", "\r\n"), "### 1.1 節 A")
+    assert crlf == lf
+
+
+def test_expand_parent_returns_the_enclosing_section() -> None:
+    parent = policy_check.extract_section(_DOC, "### 1.1 節 A", "parent")
+    assert parent == policy_check.extract_section(_DOC, "## 1 第 1 章")
+
+
+def test_expand_parent_of_a_top_level_heading_is_the_whole_document() -> None:
+    top = policy_check.extract_section(_DOC, "# 文書の題", "parent")
+    assert top == policy_check.extract_section(_DOC, "# 文書の題", "full")
+    assert top is not None and top.startswith("# 文書の題") and "2 章の本文" in top
+
+
+def test_expand_full_returns_the_whole_document_but_still_requires_the_anchor() -> None:
+    full = policy_check.extract_section(_DOC, "### 1.1 節 A", "full")
+    assert full is not None
+    assert full.startswith("# 文書の題") and full.endswith("2 章の本文")
+    assert policy_check.extract_section(_DOC, "### 存在しない見出し", "full") is None
+
+
+def test_extract_section_rejects_an_unknown_expand_mode() -> None:
+    with pytest.raises(ValueError):
+        policy_check.extract_section(_DOC, "## 2 第 2 章", "everything")
+
+
+# --- check() が節の本文と出典を返すこと ----------------------------------------
+
+
+def _doc_reader(files: dict[str, str]) -> policy_check.SourceReader:
+    return lambda relpath: files.get(relpath)
+
+
+_FAKE_REGISTRY: dict[str, Any] = {
+    "operations": ["OP_A"],
+    "policies": [
+        {
+            "policy_id": "FAKE.SECTION_B",
+            "ssot_file": "docs/fake.md",
+            "ssot_anchor": "### 1.2 節 B",
+            "applicable_operations": ["OP_A"],
+            "human_gate_required": False,
+            "machine_enforceable": False,
+        }
+    ],
+}
+
+
+def test_check_returns_the_section_text_with_provenance(fresh: None) -> None:
+    report = policy_check.check(
+        "OP_A", _FAKE_REGISTRY, _doc_reader({"docs/fake.md": _DOC})
+    )
+    assert report["result"] == PASS
+    (entry,) = report["jit_reading"]
+    assert entry["policy_id"] == "FAKE.SECTION_B"
+    assert entry["ssot_file"] == "docs/fake.md"
+    assert entry["ssot_anchor"] == "### 1.2 節 B"
+    assert entry["expand"] == "section"
+    assert entry["section_text"] == (
+        "### 1.2 節 B\n\nB の本文\n```\n# コードの中のコメント(見出しではない)\n"
+        "### コードの中の偽の見出し\n```\nB の続き"
+    )
+
+
+def test_source_commit_sha_is_none_when_the_source_is_not_a_verified_revision(
+    fresh: None,
+) -> None:
+    """★ working tree 等を読んだ report へ revision の SHA を付けない(policy_ref と同じ理由)。"""
+    report = policy_check.check("OP_A", _FAKE_REGISTRY, _doc_reader({"docs/fake.md": _DOC}))
+    assert report["policy_ref"] is None
+    (entry,) = report["jit_reading"]
+    assert entry["source_commit_sha"] is None
+
+
+def test_source_commit_sha_matches_the_revision_the_text_was_read_from(
+    monkeypatch: pytest.MonkeyPatch, fresh: None
+) -> None:
+    monkeypatch.setattr(
+        policy_check, "make_revision_reader", lambda revision: _doc_reader({"docs/fake.md": _DOC})
+    )
+    monkeypatch.setattr(
+        policy_check, "load_registry", lambda read_source: _FAKE_REGISTRY
+    )
+    report = policy_check.check("OP_A")
+    assert report["result"] == PASS
+    assert report["policy_source_kind"] == SOURCE_KIND_REVISION
+    (entry,) = report["jit_reading"]
+    assert report["policy_source_revision"] == _FAKE_SHA
+    assert entry["source_commit_sha"] == _FAKE_SHA
+
+
+def test_check_expand_widens_the_range(fresh: None) -> None:
+    reader = _doc_reader({"docs/fake.md": _DOC})
+    section = policy_check.check("OP_A", _FAKE_REGISTRY, reader)["jit_reading"][0]
+    parent = policy_check.check("OP_A", _FAKE_REGISTRY, reader, expand="parent")["jit_reading"][0]
+    full = policy_check.check("OP_A", _FAKE_REGISTRY, reader, expand="full")["jit_reading"][0]
+    assert section["section_text"] in parent["section_text"] in full["section_text"]
+    assert len(section["section_text"]) < len(parent["section_text"]) < len(full["section_text"])
+    assert (section["expand"], parent["expand"], full["expand"]) == ("section", "parent", "full")
+
+
+def test_check_rejects_an_unknown_expand_mode(fresh: None) -> None:
+    with pytest.raises(ValueError):
+        policy_check.check("OP_A", _FAKE_REGISTRY, _doc_reader({"docs/fake.md": _DOC}), expand="x")
+
+
+def test_an_anchor_that_is_not_a_heading_line_is_fail_not_an_empty_section(
+    fresh: None,
+) -> None:
+    """★ validate_references は文書内に anchor が「在る」ことだけを見る。見出し行として
+    成立しない anchor(散文にしか無い)は、空の節を返さず FAIL にする(fail-closed)。"""
+    registry = {
+        "operations": ["OP_A"],
+        "policies": [
+            {**_FAKE_REGISTRY["policies"][0], "ssot_anchor": "### 1.2 節 B と書いた文"}
+        ],
+    }
+    doc = _DOC + "\n文中に ### 1.2 節 B と書いた文 がある\n"
+    report = policy_check.check("OP_A", registry, _doc_reader({"docs/fake.md": doc}))
+    assert report["result"] == FAIL
+    assert report["jit_reading"] == []
+    assert any("見出し行として一致しない" in p for p in report["problems"])
+
+
+def test_an_anchor_matching_several_headings_is_fail(fresh: None) -> None:
+    doc = "## 同じ見出し\n\n1\n\n## 同じ見出し\n\n2\n"
+    registry = {
+        "operations": ["OP_A"],
+        "policies": [{**_FAKE_REGISTRY["policies"][0], "ssot_anchor": "## 同じ見出し"}],
+    }
+    report = policy_check.check("OP_A", registry, _doc_reader({"docs/fake.md": doc}))
+    assert report["result"] == FAIL
+    assert report["jit_reading"] == []
+
+
+def test_report_states_that_section_text_is_not_the_ssot(fresh: None) -> None:
+    """★ 抽出結果が cache / generated context であって SSoT ではないことが出力に明示される。"""
+    report = policy_check.check("OP_A", _FAKE_REGISTRY, _doc_reader({"docs/fake.md": _DOC}))
+    notice = report["section_text_notice"]
+    assert "SSoT ではない" in notice
+    assert "正本は ssot_file 自体" in notice
+    assert "--expand" in notice
+
+
+# --- 実際の registry の全 policy で、節が取り出せること ---------------------------------
+
+
+def test_every_registered_policy_yields_a_non_empty_section_that_starts_with_its_anchor(
+    registry: dict[str, Any], fresh: None
+) -> None:
+    for operation in registry["operations"]:
+        report = policy_check.check(operation, registry, _worktree_reader())
+        assert report["result"] == PASS, (operation, report["problems"])
+        for entry in report["jit_reading"]:
+            text = entry["section_text"]
+            first_line = text.splitlines()[0].strip()
+            assert first_line == entry["ssot_anchor"].strip(), entry["policy_id"]
+            assert len(text) > len(first_line), f"{entry['policy_id']}: 節の本文が空"
+
+
+def test_every_registered_section_is_contained_in_its_parent_and_the_full_document(
+    registry: dict[str, Any], fresh: None
+) -> None:
+    reader = _worktree_reader()
+    for policy in registry["policies"]:
+        content = reader(policy["ssot_file"])
+        assert content is not None
+        section = policy_check.extract_section(content, policy["ssot_anchor"], "section")
+        parent = policy_check.extract_section(content, policy["ssot_anchor"], "parent")
+        full = policy_check.extract_section(content, policy["ssot_anchor"], "full")
+        assert section is not None and parent is not None and full is not None
+        assert section in parent in full, policy["policy_id"]
+
+
+# --- CLI --------------------------------------------------------------------------
+
+
+def test_cli_passes_expand_to_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _fake_check(operation: str, **kwargs: Any) -> dict[str, Any]:
+        seen["operation"] = operation
+        seen.update(kwargs)
+        return {"result": PASS}
+
+    monkeypatch.setattr(policy_check, "check", _fake_check)
+    assert policy_check.main(["--operation", "PR_CREATE", "--expand", "parent"]) == EXIT_PASS
+    assert seen == {"operation": "PR_CREATE", "expand": "parent"}
+
+
+def test_cli_default_expand_is_section(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _fake_check(operation: str, **kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"result": PASS}
+
+    monkeypatch.setattr(policy_check, "check", _fake_check)
+    policy_check.main(["--operation", "PR_CREATE"])
+    assert seen == {"expand": "section"}
+
+
+def test_cli_rejects_an_unknown_expand_mode_with_the_usage_error_code() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        policy_check.main(["--operation", "PR_CREATE", "--expand", "everything"])
+    assert excinfo.value.code == EXIT_CLI_USAGE_ERROR
+
+
+def test_cli_output_is_utf8_even_when_stdout_cannot_encode_the_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 標準出力が cp932 でも、section_text の「—」等で UnicodeEncodeError にならない
+    (Issue #656 の実機確認で、Windows の既定 encoding により実際に落ちた)。JSON は UTF-8 で出る。"""
+    import io
+
+    raw = io.BytesIO()
+    cp932_stdout = io.TextIOWrapper(raw, encoding="cp932", write_through=True)
+    monkeypatch.setattr(sys, "stdout", cp932_stdout)
+    monkeypatch.setattr(
+        policy_check, "check", lambda operation, **kwargs: {"result": PASS, "text": "A — B"}
+    )
+    assert policy_check.main(["--operation", "PR_CREATE"]) == EXIT_PASS
+    assert json.loads(raw.getvalue().decode("utf-8")) == {"result": PASS, "text": "A — B"}
