@@ -1567,10 +1567,10 @@ LINE文面確認自体が目的ではない作業では、原則こちらを使�
 | `watchlist_worker_handler` | ★ **拒否**(同上) | 同上 |
 | `watchlist_batch_reconciler_handler` | ★ **拒否**(同上) | 同上 |
 | `watchlist_terminal_failure_handler` | ★ **拒否**(同上) | 同上 |
-| `evaluation_handler` | ⚠ **黙殺**(通常運用として実行される) | **Issue #287で未解消**。指定しないこと |
-| `weekly_review_handler` | ⚠ **黙殺**(同上) | 同上 |
-| `monthly_review_handler` | ⚠ **黙殺**(同上) | 同上 |
-| `quarterly_review_handler` | ⚠ **黙殺**(同上) | 同上 |
+| `evaluation_handler` | ★ **拒否**(Lambda呼び出しが失敗する) | Issue #287。理由は下記 |
+| `weekly_review_handler` | ★ **拒否**(同上) | 同上。LINE送信とGitHub Issue起票を伴う処理 |
+| `monthly_review_handler` | ★ **拒否**(同上) | 同上 |
+| `quarterly_review_handler` | ★ **拒否**(同上) | 同上 |
 | `line_webhook_handler` | 対象外 | LINEからのwebhook受信であり、バッチ起動の概念を持たない |
 
 ```
@@ -1601,12 +1601,27 @@ LINE文面確認自体が目的ではない作業では、原則こちらを使�
 ```
 
 ```
-★ ⚠ の4本(evaluation / weekly / monthly / quarterly review)について
+★ 評価・レビュー系4本(evaluation / weekly / monthly / quarterly review)を「拒否」にした理由
 
-  **指定しても黙って通常運用として実行されます。** Issue #287で是正予定。
-  それまでの間、これら4本へ`execution_mode`を渡した「検証実行」は
-  **行わないでください**(通常運用の実行になります)。
-  weekly_reviewはLINE送信とGitHub Issue起票を伴います。
+  これら4本には、検証モードで副作用を隔離する仕組みがありません。
+  以前は`execution_mode`を読まず、**指定しても黙って通常運用として実行されて**いました
+  (評価結果・監査記録の書き込み、weekly_reviewはLINE送信とGitHub Issue起票)。
+  「検証のつもりで本番を動かした」事故を防ぐため、対応せず**明示的に失敗させる**
+  方針としました(Issue #287。`execution_mode` / `notification_mode`のどちらの指定も対象。
+  値が`None`のキーは「指定なし」として扱います)。
+
+★ 拒否されたときの見え方(★ 運用上の注意)
+  Lambda呼び出しが`ReviewExecutionModeNotSupportedError`で失敗し、CloudWatch Logsへ
+  「どのhandlerがどのキーを拒否したか」がERRORで1件残ります(キーの値は出しません)。
+  **Lambdaの失敗は`Errors`として計上されるため、4本とも`Errors`のAlarmを持つ以上、
+  拒否されるとAlarmが作動し、IncidentNotifier経由でLINEに異常通知が届きうる**
+  (Alarmの閾値・期間の条件を満たした場合)。これは、検証実行のつもりの操作が
+  静かに成功してしまう状態を、目に見える失敗にするための意図した挙動です。
+  拒否の前にconfigの読み込み・LINE送信・GitHub Issue起票・評価結果や監査記録の
+  書き込みは一切行われません。
+
+★ **自動実行(EventBridge Scheduler)は影響を受けません。**
+  4本のScheduleはInputを持たず、`execution_mode`を渡さないためです(Alarmも増えません)。
 ```
 
 ### 13.5 監査記録の`execution_mode`(起動経路)の読み方(Issue #286、2026-09-08追加)

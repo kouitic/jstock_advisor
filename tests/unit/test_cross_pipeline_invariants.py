@@ -429,13 +429,17 @@ def test_c6_semantic_family_inventory_is_not_empty() -> None:
 #
 # 本 Group が固定するのは **inventory / completeness 層のみ** である。
 # 「全 handler が execution_mode を解決すること」という behavioral invariant は
-# **今も main で FAIL する**ので追加しない(評価・レビュー系 4 handler が
-# 依然として黙殺しており、Issue #287 で扱う)。
+# **対応しない handler があるので追加しない**(watchlist 系 4 handler〔#286〕と
+# 評価・レビュー系 4 handler〔#287〕は、対応ではなく明示的な拒否を選んだ)。
 # (F-B3 = trade_detection_confirmed の fail-open は Issue #211 で解消済み。
 #  解消後の契約は test_d7_trade_detection_confirmed_is_fail_closed が固定する。
 #  F-B4 = watchlist 系 4 handler の黙殺は Issue #286 で解消済み。**対応**ではなく
 #  **明示的な拒否**(REJECTS_EXPLICITLY)を選んだ。解消後の契約は
-#  test_d7_watchlist_handlers_reject_execution_mode が固定する。)
+#  test_d7_watchlist_handlers_reject_execution_mode が固定する。
+#  F-B9 = 評価・レビュー系 4 handler の黙殺は Issue #287 で解消済み。同じく
+#  明示的な拒否(REJECTS_EXPLICITLY)を選んだ。台帳との対応づけは同じ
+#  test_d7_watchlist_handlers_reject_execution_mode が固定し、振る舞いは
+#  test_issue_287_review_execution_mode.py が固定する。)
 # ここでは代わりに、
 #
 #   - Lambda handler を **機械的に列挙**し、
@@ -498,6 +502,15 @@ _NA_NO_JOB_TYPE = "watchlist job_type を扱わない"
 #: 受け付けると「検証のつもりで本番の状態を変える」ことになるからである。
 _WATCHLIST_REJECTS_MODE = (
     "Issue #286: VALIDATION の隔離が存在しないため対応せず、"
+    "reject_execution_mode() が指定を検出して例外で止める"
+)
+
+#: Issue #287(#70 F-B9): 評価・レビュー系 4 handler も execution_mode / notification_mode を
+#: **対応せず、渡されたら例外で止める**(黙殺しない)。これらの処理には検証モードで副作用を
+#: 隔離する仕組みが無く(評価結果・監査ログの書き込み、週次レビューの LINE 送信・GitHub Issue 起票)、
+#: 受け付けると「検証のつもりで本番を実行する」ことになるからである(USER 決定 A)。
+_REVIEW_REJECTS_MODE = (
+    "Issue #287: VALIDATION の隔離が存在しないため対応せず、"
     "reject_execution_mode() が指定を検出して例外で止める"
 )
 
@@ -652,8 +665,10 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
         _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
     },
     "evaluation_handler": {
-        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_CONTEXT),
-        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE
+        ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
         ),
@@ -671,24 +686,30 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
         _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
     },
     "weekly_review_handler": {
-        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_CONTEXT),
-        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE
+        ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
         ),
         _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
     },
     "monthly_review_handler": {
-        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_CONTEXT),
-        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE
+        ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
         ),
         _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
     },
     "quarterly_review_handler": {
-        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_CONTEXT),
-        _Dimension.NOTIFICATION_MODE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NOT_DISPATCHER),
+        _Dimension.EXECUTION_MODE: _cell(_ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE
+        ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
         ),
@@ -831,11 +852,14 @@ def test_d7_issue_70_findings_are_tracked_in_the_inventory() -> None:
     assert "F-B4" not in tracked, (
         "F-B4 は Issue #286 で解消済み(REJECTS_EXPLICITLY)。KNOWN_GAP として台帳へ戻さないこと"
     )
+    assert "F-B9" not in tracked, (
+        "F-B9 は Issue #287 で解消済み(REJECTS_EXPLICITLY)。KNOWN_GAP として台帳へ戻さないこと"
+    )
     assert not tracked, f"#70 由来の KNOWN_GAP が残っている: {sorted(tracked)}"
 
 
 def test_d7_watchlist_handlers_reject_execution_mode() -> None:
-    """★ 台帳が REJECTS_EXPLICITLY と主張する内容を、実際のソースで裏づける(#286)。
+    """★ 台帳が REJECTS_EXPLICITLY と主張する内容を、実際のソースで裏づける(#286 / #287)。
 
     台帳の cell を書き換えるだけでは「直したことにする」ことができてしまう。
     そこで 4 handler が実際に拒否関数を呼んでいることをソースから確かめる。
@@ -849,6 +873,11 @@ def test_d7_watchlist_handlers_reject_execution_mode() -> None:
         "watchlist_worker_handler",
         "watchlist_terminal_failure_handler",
         "watchlist_batch_reconciler_handler",
+        # Issue #287(F-B9): 評価・レビュー系 4 handler
+        "evaluation_handler",
+        "weekly_review_handler",
+        "monthly_review_handler",
+        "quarterly_review_handler",
     ):
         module = importlib.import_module(f"jstock_advisor.lambda_handlers.{module_name}")
         source = Path(inspect.getfile(module)).read_text(encoding="utf-8")
@@ -858,6 +887,8 @@ def test_d7_watchlist_handlers_reject_execution_mode() -> None:
         )
         cell = _CONTEXT_CONTRACT_MATRIX[module_name][_Dimension.EXECUTION_MODE]
         assert cell.status is _ContractStatus.REJECTS_EXPLICITLY
+        notification_cell = _CONTEXT_CONTRACT_MATRIX[module_name][_Dimension.NOTIFICATION_MODE]
+        assert notification_cell.status is _ContractStatus.REJECTS_EXPLICITLY
 
 
 def test_d8_issue_56_job_type_contract_is_recorded_as_green() -> None:
