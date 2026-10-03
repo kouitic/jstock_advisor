@@ -1725,6 +1725,9 @@ Resources:
       Timeout: 900
       Environment:
         Variables:
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
+          # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
           # Issue #116: Issue #54 Phase B-1のshadow observation
           # (services/jpx_industry_source.py::JpxIndustrySource)が
           # CandidateUniverseCacheIO経由でJPX上場銘柄一覧キャッシュを読むために必要。
@@ -1872,6 +1875,14 @@ Resources:
               Effect: Allow
               Action: s3:GetObject
               Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
+        # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       # Issue #318: _fanout.dispatch_async(InvocationType="Event")による
       # 自己呼び出しと、Reconcilerからの完了リカバリ呼び出しが**非同期**である。
       # 既定は「2回再試行/最大6時間」で、行き先が無いため失敗は静かに消えていた。
@@ -1926,6 +1937,9 @@ Resources:
       ReservedConcurrentExecutions: !Ref BuyCandidateReservedConcurrentExecutions
       Environment:
         Variables:
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
+          # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
           CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
       Policies:
         # BuyCandidatesFunctionのDynamoDbCrudAccess/DynamoDbReadOnlyAccessと同一
@@ -2023,6 +2037,14 @@ Resources:
               Effect: Allow
               Action: s3:GetObject
               Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
+        # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       Events:
         BuyCandidateQueue:
           Type: SQS
@@ -2043,6 +2065,9 @@ Resources:
       Timeout: 900
       Environment:
         Variables:
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
+          # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
           # Issue #533(#319 Phase 2): 既定false(従来どおり非同期自己再帰呼び出し)。
           HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED: !Ref HoldingsWatchlistSqsDispatchEnabled
           HOLDINGS_WATCHLIST_QUEUE_URL: !Ref HoldingsWatchlistQueue
@@ -2189,6 +2214,14 @@ Resources:
             - Effect: Allow
               Action: lambda:InvokeFunction
               Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-holdings-watchlist"
+        # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       # Issue #318: _fanout.dispatch_async(InvocationType="Event")による
       # 自己呼び出しと、Reconcilerからの完了リカバリ呼び出しが**非同期**である。
       # 既定は「2回再試行/最大6時間」で、行き先が無いため失敗は静かに消えていた。
@@ -2243,6 +2276,11 @@ Resources:
       Handler: jstock_advisor.lambda_handlers.holdings_watchlist_worker_handler.handler
       Timeout: 900
       ReservedConcurrentExecutions: !Ref HoldingsWatchlistReservedConcurrentExecutions
+      Environment:
+        Variables:
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
+          # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
       Policies:
         # HoldingsWatchlistFunctionのDynamoDbCrudAccess/DynamoDbReadOnlyAccessと同一
         # (_process_single_holding()を直接importして呼ぶため、同じテーブル群への
@@ -2346,6 +2384,14 @@ Resources:
                 - !Sub "${StockNameOverridesTable.Arn}/index/*"
                 - !GetAtt HoldingDecisionRuntimeConfigTable.Arn
                 - !Sub "${HoldingDecisionRuntimeConfigTable.Arn}/index/*"
+        # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       Events:
         HoldingsWatchlistQueue:
           Type: SQS
@@ -2422,6 +2468,9 @@ Resources:
       Timeout: 900
       Environment:
         Variables:
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
+          # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
           # Issue #537: 既定 false。true のとき、暦日7日の評価の保存が Transaction(EvaluationResult + Aggregate)になる。
           WEEKLY_AGGREGATE_WRITE_ENABLED: !Ref WeeklyAggregateWriteEnabled
           WEEKLY_EVALUATION_AGGREGATE_TABLE: !Ref WeeklyEvaluationAggregateTable
@@ -2449,6 +2498,14 @@ Resources:
               Action: dynamodb:PutItem
               Resource:
                 - !GetAtt AuditLogTable.Arn
+        # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       Events:
         DailyEvening:
           Type: ScheduleV2
@@ -2557,6 +2614,57 @@ Resources:
             Effect: Allow
             Principal:
               AWS: !GetAtt WatchlistBatchReconcilerFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)を発行する他の8 Lambdaの
+          # 実行ロールを個別に許可する(WatchlistBatchReconcilerと同じ方式。Resource="*"・
+          # ワイルドカードPrincipalは使わない)。Sidは10件すべて一意(#557。重複するとChangeSet EXECUTE時に失敗する)。
+          - Sid: AllowBuyCandidatesPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt BuyCandidatesFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+          - Sid: AllowBuyCandidateWorkerPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt BuyCandidateWorkerFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+          - Sid: AllowHoldingsWatchlistPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt HoldingsWatchlistFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+          - Sid: AllowHoldingsWatchlistWorkerPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt HoldingsWatchlistWorkerFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+          - Sid: AllowWatchlistDispatcherPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt WatchlistDispatcherFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+          - Sid: AllowWatchlistWorkerPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt WatchlistWorkerFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+          - Sid: AllowWatchlistTerminalFailureHandlerPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt WatchlistTerminalFailureHandlerFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
+          - Sid: AllowEvaluationPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt EvaluationFunctionRole.Arn
             Action: sns:Publish
             Resource: !Ref IncidentNotificationTopic
 
@@ -3040,6 +3148,9 @@ Resources:
       Timeout: 300 # 3/18節: dispatch leaseの算出根拠(300秒+60秒余裕=360秒)
       Environment:
         Variables:
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
+          # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
           WATCHLIST_SCREENING_QUEUE_URL: !Ref WatchlistScreeningQueue
           CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
           ALLOW_FULL_MARKET_SCREENING: !Ref AllowFullMarketScreening
@@ -3132,6 +3243,14 @@ Resources:
               Action: lambda:InvokeFunction
               Resource:
                 - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-dispatcher"
+        # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       Events:
         # ウォッチリスト新規候補評価・自動メンテナンスの平日毎日起動化(2026-08)。
         # NEW_CANDIDATE_SCREENINGは月曜〜金曜06:00 JST(cron自体は祝日判定なし。東証休場日は起動後にhandler側でskip: Issue #440)に起動する。
@@ -3181,6 +3300,9 @@ Resources:
       ReservedConcurrentExecutions: !Ref WatchlistReservedConcurrentExecutions
       Environment:
         Variables:
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
+          # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
           # 平日毎日起動化(2026-08)対応: NEW_CANDIDATE_SCREENING最後の候補完了が
           # このWorkerで確定した場合、maybe_finalize()経由でwatchlist_batch_
           # finalizer.maybe_trigger_maintenance()がWatchlistDispatcherFunctionを
@@ -3260,6 +3382,14 @@ Resources:
               Action: lambda:InvokeFunction
               Resource:
                 - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-dispatcher"
+        # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       Events:
         ScreeningQueue:
           Type: SQS
@@ -3275,6 +3405,11 @@ Resources:
       CodeUri: ../src/
       Handler: jstock_advisor.lambda_handlers.watchlist_terminal_failure_handler.handler
       Timeout: 60
+      Environment:
+        Variables:
+          # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
+          # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
         - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
@@ -3292,6 +3427,14 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       Events:
         TerminalFailureQueue:
           Type: SQS

@@ -155,10 +155,16 @@ def test_topic_policy_grants_reconciler_publish_without_wildcard_resource() -> N
     """
     policy = _resources()["IncidentNotificationTopicPolicy"]
     statements = policy["Properties"]["PolicyDocument"]["Statement"]
+    # Issue #725: Topic policyには、reconcilerに加えて他の8 Lambdaの実行ロール向けStatementも
+    # ある(個別の検証は test_infra_issue_725_incident_publish_wiring.py)。ここではreconcilerの
+    # Statement(Sid指定)だけを取り出して従来どおり検証する。
     reconciler_statements = [
-        s for s in statements if s.get("Principal") != {"Service": "cloudwatch.amazonaws.com"}
+        s for s in statements if s.get("Sid") == "AllowWatchlistBatchReconcilerPublish"
     ]
     [statement] = reconciler_statements
+    assert statement["Principal"] == {
+        "AWS": {"Fn::GetAtt": "WatchlistBatchReconcilerFunctionRole.Arn"}
+    }
     assert statement["Effect"] == "Allow"
     assert statement["Action"] == "sns:Publish"
     assert statement["Resource"] == {"Fn::Ref": _TOPIC_LOGICAL_ID}
