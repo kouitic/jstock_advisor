@@ -51,6 +51,7 @@ from jstock_advisor.domain.financial_decomposition import (
 )
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.domain.shadow_observation import (
+    SHADOW_STATE_COMPUTATION_FAILED,
     isolated_shadow_computation,
     isolated_shadow_observation,
 )
@@ -113,6 +114,9 @@ from jstock_advisor.domain.signals.profit_taking import (
     ProfitTakingConditionInputs,
     ProfitTakingResult,
     evaluate_profit_taking,
+)
+from jstock_advisor.domain.signals.profit_taking_gate_trace import (
+    build_profit_taking_gate_trace,
 )
 from jstock_advisor.domain.signals.record_date_resolution import (
     resolve_benefit_record_date_recurring_label,
@@ -950,8 +954,12 @@ class ProfitTakingService:
         )
 
         is_benefit_eligible = snapshot.benefit is not None
-        try:
-            result = evaluate_profit_taking(
+
+        def _evaluate(inputs: ProfitTakingConditionInputs) -> ProfitTakingResult:
+            # 実判定(下)と、Issue #720のgate因果追跡(反実仮想の再評価)の両方が
+            # 同じ呼び出しを使う(condition_inputs以外の引数を2か所で別々に書いて
+            # 食い違わせないため)。
+            return evaluate_profit_taking(
                 current_price=snapshot.current_price,
                 average_purchase_price=holding.average_purchase_price,
                 shares=holding.shares,
@@ -964,13 +972,16 @@ class ProfitTakingService:
                 ),
                 mitigating_inputs=mitigating_inputs,
                 config=self._config.profit_taking,
-                condition_inputs=condition_inputs,
+                condition_inputs=inputs,
                 annual_benefit_value_at_min_lot=snapshot.annual_benefit_value,
                 benefit_min_shares_required=(
                     snapshot.benefit.min_shares_required if snapshot.benefit is not None else None
                 ),
                 is_benefit_eligible=is_benefit_eligible,
             )
+
+        try:
+            result = _evaluate(condition_inputs)
         except InvalidProfitTakingInputError as exc:
             # --- Issue #75(2026-08-30): 取得原価が不正な保有の fail-close ---
             # 以前はdomain側が不正入力を含み損益率0.0%へ潰していたため、
@@ -1085,6 +1096,31 @@ class ProfitTakingService:
         )
         confidence_result = self._compute_confidence(result, snapshot, now, financial_freshness)
 
+        # Issue #720: 利確gateが実際に候補を抑制したかの因果追跡(観測のみ。
+        # 判定結果・通知・Recommendationは一切変えない)。遮断側の入力を1つずつ
+        # 通過側へ置換して同じ純粋関数(_evaluate)で再評価する。S-20の
+        # isolated_shadow_computation()で隔離し、失敗しても利確判定・通知・保存を
+        # 止めず、「算出できなかった」ことを記録側へ残す(空listへ偽装しない)。
+        # ★ industry_model_appliedは上で定数Falseを渡している(現状の配線)ため、
+        # この入力は全保有で常に遮断側となり、INDUSTRY_MODEL_NOT_APPLIEDの記録が
+        # 必ず1件入る(業種モデルの遮断が至る所で起きているという発見ではない)。
+        # 遮断が他に1つでもあればJOINT判定の再評価も走る(詳細はgate_trace module)。
+        gate_trace = isolated_shadow_computation(
+            "profit_taking_gate_trace",
+            lambda: build_profit_taking_gate_trace(
+                condition_inputs,
+                _evaluate,
+                result,
+                self._config.profit_taking.condition_based_judgment.min_business_days_to_earnings_for_fair_value_action,
+            ),
+            lambda exc: [
+                {
+                    "shadow_state": SHADOW_STATE_COMPUTATION_FAILED,
+                    "error_type": type(exc).__name__,
+                }
+            ],
+        )
+
         audit_entry = self._audit.record(
             decision_type="profit_taking",
             stock_code=holding.stock_code,
@@ -1113,6 +1149,8 @@ class ProfitTakingService:
                 # Issue #698 PR-2b: 記録のみ(抑止はしない)。
                 "basis_date_consistency": basis_date_consistency,
                 "basis_date_consistency_check_failed": basis_date_consistency_check_failed,
+                # Issue #720: 記録のみ(判定・通知・Recommendationは変えない)。
+                "profit_taking_gate_trace": gate_trace,
                 "recommendation_type": result.recommendation_type.value,
                 "effective_recommendation_type": effective_recommendation_type.value,
                 "fundamental_action": result.fundamental_action.value,
