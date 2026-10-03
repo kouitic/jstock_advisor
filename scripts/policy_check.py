@@ -79,6 +79,35 @@ fresh」とは扱わない。
 正本 4 文書は合計 7,000 行を超える。毎回すべてを読む設計にはせず、
 `jit_reading` として**読むべき節だけ**を返す。
 
+## 節の本文を抽出して返す(Issue #656。#364 Unit 4)
+
+`jit_reading` の各 entry は、`ssot_anchor` が指す**節の本文**(`section_text`)と、
+その出典(`ssot_file` / `ssot_anchor` / `source_commit_sha` / `policy_id`)を持つ。
+本文は、検証済み revision(`POLICY_REF_PINNING` の revision)の正本から**呼び出しの
+たびに**取り出す。保存しない。
+
+    ★ section_text は cache / generated context であり、SSoT ではない。
+      正本は ssot_file 自体であり、食い違う場合は正本が優先する
+      (出力の `section_text_notice` に明示する)。要約版を作らない・規則を複製しない。
+
+`expand` で範囲を広げられる(section-first であって section-only ではない)。
+
+    section  anchor の節だけ(既定)
+    parent   anchor の 1 つ上の level の節(最上位の見出しなら文書全体)
+    full     ssot_file の全文
+
+節の切り出し(`extract_section`)の規則:
+
+    - ATX 見出し(`#` の個数 = level)だけを見出しとして扱う
+    - **コードフェンス(``` / ~~~)の内側の行は見出しとして扱わない**
+      (フェンス内の `# コメント` で節が途中で切れないようにする)
+    - 節は、anchor の見出しから、次の「同じ level 以下の見出し」の直前までである
+    - anchor が見出し行として 1 件に決まらない場合は、**黙って選ばず失敗にする**
+      (見つからない / 複数 = `FAIL`)。fail-open にしない
+
+registry(`docs/policy_registry.yaml`)の内容は本スクリプトが変更しない。
+どの operation にどの policy を載せるかは恒久規則の領域である(POLICY_AUTHORITY = HUMAN_ONLY)。
+
 ## 依存
 
 標準ライブラリと PyYAML のみ。PyYAML は `config/*.yaml` の読み込みで
@@ -89,6 +118,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -138,8 +168,32 @@ MAX_REGISTRY_FIELD_LENGTH = 200
 SourceReader = Callable[[str], "str | None"]
 
 
+# jit_reading の節の範囲(Issue #656)。section-first であって section-only ではない。
+EXPAND_SECTION = "section"
+EXPAND_PARENT = "parent"
+EXPAND_FULL = "full"
+EXPAND_MODES = (EXPAND_SECTION, EXPAND_PARENT, EXPAND_FULL)
+
+SECTION_TEXT_NOTICE = (
+    "section_text は current main の正本から都度取り出した cache / generated context であり、"
+    "SSoT ではない。正本は ssot_file 自体であり、食い違う場合は正本が優先する。"
+    "節だけでは足りない場合は --expand parent / full で範囲を広げる"
+)
+
+_ATX_HEADING = re.compile(r"^(#{1,6})[ \t]+\S")
+_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
 class RegistryError(Exception):
     """registry を読めない、または内容が壊れている。"""
+
+
+class SectionExtractionError(Exception):
+    """anchor の節を**一意に**取り出せなかった。
+
+    見つからない場合だけでなく、複数の見出しに一致する場合も含む。
+    どれを採るかを黙って決めると、別の節を「正本の節」として渡してしまう。
+    """
 
 
 class SourceReadError(Exception):
@@ -267,6 +321,74 @@ def check_policy_freshness() -> tuple[str, str | None]:
     return VERIFIED, local_sha
 
 
+def _scan_headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    """ATX 見出しを (行 index, level, 行の文字列) で返す。コードフェンスの内側は読まない。"""
+    headings: list[tuple[int, int, str]] = []
+    fence: tuple[str, int] | None = None  # (fence の文字, 開きの長さ)
+    for index, line in enumerate(lines):
+        fence_match = _FENCE_LINE.match(line)
+        if fence is None:
+            if fence_match:
+                marker, info = fence_match.group(1), fence_match.group(2)
+                # バッククォートのフェンスは、info 文字列にバッククォートを含められない
+                if not (marker[0] == "`" and "`" in info):
+                    fence = (marker[0], len(marker))
+                    continue
+        else:
+            # 閉じは、同じ文字・開き以上の長さ・info 文字列なし
+            if (
+                fence_match
+                and fence_match.group(1)[0] == fence[0]
+                and len(fence_match.group(1)) >= fence[1]
+                and fence_match.group(2).strip() == ""
+            ):
+                fence = None
+            continue
+        heading = _ATX_HEADING.match(line)
+        if heading:
+            headings.append((index, len(heading.group(1)), line.strip()))
+    return headings
+
+
+def extract_section(content: str, anchor: str, expand: str = EXPAND_SECTION) -> str | None:
+    """`content` から、見出し `anchor` の節の本文を取り出す(Issue #656)。
+
+    - anchor に一致する見出しが無い → None(anchor が散文・コードフェンス内にしか無い場合を含む)
+    - anchor に一致する見出しが複数 → SectionExtractionError(黙って選ばない)
+    - expand = section: anchor の見出しから、次の「同じ level 以下の見出し」の直前まで
+    - expand = parent: 1 つ上の level の節(最上位の見出しなら文書全体)
+    - expand = full: 文書全体
+
+    改行は "\n" へ正規化して返す。末尾の空行は含めない。
+    """
+    if expand not in EXPAND_MODES:
+        raise ValueError(f"expand は {EXPAND_MODES} のいずれかである必要がある: {expand!r}")
+    lines = content.splitlines()
+    headings = _scan_headings(lines)
+    wanted = anchor.strip()
+    matches = [h for h in headings if h[2] == wanted]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise SectionExtractionError(
+            f"anchor が複数の見出しに一致する({len(matches)} 件): {wanted}"
+        )
+    if expand == EXPAND_FULL:
+        return "\n".join(lines).rstrip()
+    start, level, _ = matches[0]
+    if expand == EXPAND_PARENT:
+        parents = [h for h in headings if h[0] < start and h[1] < level]
+        if not parents:
+            return "\n".join(lines).rstrip()
+        start, level, _ = parents[-1]
+    end = len(lines)
+    for index, heading_level, _ in headings:
+        if index > start and heading_level <= level:
+            end = index
+            break
+    return "\n".join(lines[start:end]).rstrip()
+
+
 def load_registry(read_source: SourceReader) -> dict[str, Any]:
     """registry を読む。壊れていれば RegistryError を送出する。"""
     try:
@@ -353,6 +475,7 @@ def check(
     operation: str,
     registry: dict[str, Any] | None = None,
     read_source: SourceReader | None = None,
+    expand: str = EXPAND_SECTION,
 ) -> dict[str, Any]:
     """operation に必要な policy を引く。
 
@@ -361,7 +484,12 @@ def check(
 
     `read_source` を渡した場合は、その reader が返す内容で判定する。
     `registry` を渡した場合は registry の読み込みだけを差し替える。
+
+    `expand`(Issue #656): jit_reading の `section_text` の範囲
+    (section / parent / full。`extract_section` 参照)。
     """
+    if expand not in EXPAND_MODES:
+        raise ValueError(f"expand は {EXPAND_MODES} のいずれかである必要がある: {expand!r}")
     freshness, local_sha = check_policy_freshness()
 
     report: dict[str, Any] = {
@@ -381,6 +509,8 @@ def check(
         "required_policies": [],
         "human_gate_required": False,
         "jit_reading": [],
+        "expand": expand,
+        "section_text_notice": SECTION_TEXT_NOTICE,
         "result": UNKNOWN,
         "problems": [],
         "disclaimer": (
@@ -446,16 +576,65 @@ def check(
     report["human_gate_required"] = any(
         policy.get("human_gate_required", False) for policy in matched
     )
-    report["jit_reading"] = [
-        {
-            "policy_id": policy["policy_id"],
-            "ssot_file": policy["ssot_file"],
-            "ssot_anchor": policy["ssot_anchor"],
-        }
-        for policy in matched
-    ]
+    jit_reading: list[dict[str, Any]] = []
+    extraction_problems: list[str] = []
+    for policy in matched:
+        try:
+            content = read_source(policy["ssot_file"])
+            section_text = (
+                extract_section(content, policy["ssot_anchor"], expand)
+                if content is not None
+                else None
+            )
+        except (SourceReadError, SectionExtractionError) as exc:
+            extraction_problems.append(f"{policy['policy_id']}: {exc}")
+            continue
+        if section_text is None:
+            # validate_references は anchor が文書内に存在するかだけを見る。
+            # 見出し行として成立しない(散文・コードフェンス内にしか無い)anchor は、
+            # ここで検出する。黙って空の節を返さない。
+            extraction_problems.append(
+                f"{policy['policy_id']}: ssot_anchor が見出し行として一致しない: "
+                f"{policy['ssot_file']}"
+            )
+            continue
+        jit_reading.append(
+            {
+                "policy_id": policy["policy_id"],
+                "ssot_file": policy["ssot_file"],
+                "ssot_anchor": policy["ssot_anchor"],
+                # ★ 出典の revision。REVISION 経路でのみ値を持つ(WORKING_TREE 経路は None。
+                #   policy_ref と同じ理由で、読んでいない revision の SHA を付けない)
+                "source_commit_sha": report["policy_source_revision"],
+                "expand": expand,
+                "section_text": section_text,
+            }
+        )
+    if extraction_problems:
+        report["result"] = FAIL
+        report["problems"] = extraction_problems
+        return report
+    report["jit_reading"] = jit_reading
     report["result"] = PASS
     return report
+
+
+def _print_json(report: dict[str, Any]) -> None:
+    """report を UTF-8 の JSON として標準出力へ書く。
+
+    ★ `print()` は標準出力の encoding(Windows の既定は cp932 等)で符号化するため、
+      section_text に含まれる文字(— 等)が encoding で表せないと UnicodeEncodeError で
+      落ちる(Issue #656 の実機確認で発生)。JSON は UTF-8 が正であり、標準出力の
+      locale に依存させない。標準出力に buffer が無い場合(一部のテスト環境)だけ print へ戻す。
+    """
+    text = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        sys.stdout.write(text)
+        return
+    sys.stdout.flush()
+    buffer.write(text.encode("utf-8"))
+    buffer.flush()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -465,15 +644,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--operation", required=True, help="操作名")
     parser.add_argument("--issue", type=int, default=None, help="対象 Issue 番号")
     parser.add_argument("--pr", type=int, default=None, help="対象 PR 番号")
+    parser.add_argument(
+        "--expand",
+        choices=EXPAND_MODES,
+        default=EXPAND_SECTION,
+        help=(
+            "section_text の範囲(既定 section)。section = anchor の節 / "
+            "parent = 1 つ上の level の節 / full = 正本の全文"
+        ),
+    )
     args = parser.parse_args(argv)
 
-    report = check(args.operation)
+    report = check(args.operation, expand=args.expand)
     if args.issue is not None:
         report["issue"] = args.issue
     if args.pr is not None:
         report["pr"] = args.pr
 
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    _print_json(report)
     # 判定語ごとに exit code を分ける(Issue #343)。
     # UNKNOWN を 0 で返すと「確認できなかった」が「成功」として伝わる。
     # 未知の result は判定できていないのと同じであり、fail-close して
