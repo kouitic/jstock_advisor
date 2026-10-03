@@ -15,6 +15,7 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
+from jstock_advisor.lambda_handlers._review_execution_mode import reject_execution_mode
 from jstock_advisor.services.weekly_improvement_review_service import (
     WeeklyImprovementReviewService,
 )
@@ -35,6 +36,7 @@ def _split_github_repository() -> tuple[str | None, str | None]:
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    reject_execution_mode(event, handler_name="weekly review")
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     owner, repo = _split_github_repository()

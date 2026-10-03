@@ -36,6 +36,7 @@ from typing import Any
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.lambda_handlers._review_execution_mode import reject_execution_mode
 from jstock_advisor.services.evaluation_run_audit import record_run_summary
 from jstock_advisor.services.incident_envelope_publisher import publish_incident_envelope
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
@@ -114,6 +115,7 @@ def _build_time_budget(context: object) -> TimeBudget:
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    reject_execution_mode(event, handler_name="evaluation")
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     calendar = BusinessCalendar.from_config(config.holiday_calendar)
