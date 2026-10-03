@@ -219,6 +219,13 @@ _RESERVED_OPERATIONAL_TREND_REASON_CODES = frozenset(
 _RESERVED_ALARM_REASON_CODES = frozenset({"CloudWatchAlarm"})
 
 
+_SRC_ROOT = _REPO_ROOT / "src" / "jstock_advisor"
+_HANDLED = "HANDLED_FAILURE"
+_NOTIFY_FUNC = "_notify_handled_failure_safely"
+_NOTIFY_REASON_CODE_ARG_INDEX = 1
+_BOUNDARY_METADATA_NAME = "_HANDLED_FAILURE_BOUNDARY_METADATA"
+
+
 def _module_level_string_constants(tree: ast.Module) -> dict[str, str]:
     """モジュールtop-levelの`NAME = "literal"`代入を集める(call引数がNameの場合の解決用)。"""
     constants: dict[str, str] = {}
@@ -234,13 +241,122 @@ def _module_level_string_constants(tree: ast.Module) -> dict[str, str]:
     return constants
 
 
+def _module_level_assignments(tree: ast.Module) -> dict[str, ast.expr]:
+    """モジュールtop-levelの`NAME = <式>`代入(文字列でなくenum参照の別名も解決するため)。"""
+    assignments: dict[str, ast.expr] = {}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            assignments[node.targets[0].id] = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            assignments[node.target.id] = node.value
+    return assignments
+
+
+def _is_handled_failure_value(
+    node: ast.expr, assignments: dict[str, ast.expr], path: Path, depth: int = 0
+) -> bool:
+    """`failure_class`の値が「HANDLED_FAILURE」を指すか(AST上の形で判定する)。
+
+    - 文字列リテラル "HANDLED_FAILURE" / `FailureClass.HANDLED_FAILURE`(属性参照)は真。
+    - Name は module 定数を辿る。**辿れない Name は黙って偽にせず AssertionError**
+      (guard の前提が崩れた合図。仮引数経由などで HANDLED を渡す発行元を見落とさない)。
+    - 関数呼び出し・別の属性参照(`signal.failure_class` の素通し等)は判定できないため偽
+      (素通しは発行元ではなく consumer であり、除外リストを持たずに外すための扱い)。
+    """
+    if isinstance(node, ast.Constant):
+        return node.value == _HANDLED
+    if isinstance(node, ast.Attribute):
+        return node.attr == _HANDLED
+    if isinstance(node, ast.Name):
+        if depth > 5 or node.id not in assignments:
+            raise AssertionError(
+                f"{path.name}: failure_classの値(Name {node.id})を静的に解決できない"
+                f"(guardの前提が崩れている)"
+            )
+        return _is_handled_failure_value(assignments[node.id], assignments, path, depth + 1)
+    return False
+
+
+def _handled_failure_dicts(tree: ast.Module, path: Path) -> list[ast.Dict]:
+    """`{"failure_class": <HANDLED_FAILURE>, ...}`型の辞書リテラル(発行元の形その1)。"""
+    assignments = _module_level_assignments(tree)
+    found: list[ast.Dict] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values, strict=True):
+            if (
+                isinstance(key, ast.Constant)
+                and key.value == "failure_class"
+                and _is_handled_failure_value(value, assignments, path)
+            ):
+                found.append(node)
+                break
+    return found
+
+
+def _handled_failure_keywords(tree: ast.Module, path: Path) -> list[ast.keyword]:
+    """`f(failure_class=<HANDLED_FAILURE>)`型のキーワード引数(発行元の形その2)。"""
+    assignments = _module_level_assignments(tree)
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.keyword)
+        and node.arg == "failure_class"
+        and _is_handled_failure_value(node.value, assignments, path)
+    ]
+
+
+def _notify_calls(tree: ast.Module) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == _NOTIFY_FUNC
+    ]
+
+
+def _handled_failure_files(src_root: Path) -> set[str]:
+    """src_root配下で、HANDLED_FAILUREを発行する(または発行する関数を呼ぶ)ファイルの集合。
+
+    検出するのは AST 上の次の形のみで、**除外リストは持たない**(docstring・コメント・
+    `is FailureClass.HANDLED_FAILURE`の比較・enumの定義は、AST の文脈で自然に外れる)。
+        (i)   `{"failure_class": <HANDLED_FAILURE>, ...}`の辞書リテラル
+        (ii)  `failure_class=<HANDLED_FAILURE>`のキーワード引数
+        (iii) `_notify_handled_failure_safely(...)`の呼び出し
+    ★ 「全」の断定は、この 3 つの形に限る。別名の wrapper を経由して HANDLED を渡す、
+    動的に組み立てた辞書へ後から "failure_class" を代入する、といった形は検出できない。
+    ★ 関数呼び出し・別の属性参照が値の`failure_class=`(consumer の素通し)は発行元として数えない。
+    """
+    files: set[str] = set()
+    for path in sorted(src_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if (
+            _handled_failure_dicts(tree, path)
+            or _handled_failure_keywords(tree, path)
+            or _notify_calls(tree)
+        ):
+            files.add(path.relative_to(src_root).as_posix())
+    return files
+
+
 def _extract_call_reason_codes(path: Path, func_name: str, arg_index: int) -> set[str]:
     """`func_name(...)`呼び出しの`arg_index`番目の位置引数を文字列として解決する。
 
     Constant(文字列リテラル直書き)はそのまま、Name(モジュール定数経由)は
     top-level代入から解決する。いずれでもない場合は、staticに解決できない値が
     紛れ込んでいるということなので、guardの前提が崩れている合図としてAssertionErrorにする
-    (黙ってスキップしない)。
+    (黙ってスキップしない)。**位置引数が足りない呼び出し(キーワード引数での指定を含む)も
+    同じくAssertionError**にする(以前は黙ってcontinueしており、視界外になっていた。#745)。
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     constants = _module_level_string_constants(tree)
@@ -248,8 +364,13 @@ def _extract_call_reason_codes(path: Path, func_name: str, arg_index: int) -> se
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
             continue
-        if node.func.id != func_name or len(node.args) <= arg_index:
+        if node.func.id != func_name:
             continue
+        if len(node.args) <= arg_index:
+            raise AssertionError(
+                f"{path.name}: {func_name}を{arg_index}番目まで位置引数で呼んでいない"
+                f"(キーワード引数での指定は視界外になるため、位置引数で書くこと)"
+            )
         arg = node.args[arg_index]
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             found.add(arg.value)
@@ -263,29 +384,30 @@ def _extract_call_reason_codes(path: Path, func_name: str, arg_index: int) -> se
     return found
 
 
-def _extract_envelope_dict_reason_codes(path: Path) -> set[str]:
-    """`{"failure_class": "HANDLED_FAILURE", "reason_code": "...", ...}`型の
-    辞書リテラルから、同じ辞書内のreason_codeを抽出する。"""
+def _extract_envelope_dict_reason_codes(path: Path) -> tuple[set[str], bool]:
+    """`{"failure_class": <HANDLED_FAILURE>, "reason_code": "...", ...}`型の辞書リテラルから、
+    同じ辞書内のreason_codeを抽出する。
+
+    返り値は (文字列リテラルで書かれたreason_code, literalでないreason_codeを持つ辞書があるか)。
+    literalでない(仮引数・変数の)reason_codeは、呼び出し側(`_notify_handled_failure_safely`の
+    位置引数、またはboundary metadata)で解決される前提であり、その前提が成り立つかは
+    `_reason_codes_of_file`が検査する(成り立たなければAssertionError)。
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     found: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Dict):
-            continue
+    has_non_literal = False
+    for node in _handled_failure_dicts(tree, path):
         pairs = {
             k.value: v
             for k, v in zip(node.keys, node.values, strict=True)
             if isinstance(k, ast.Constant) and isinstance(k.value, str)
         }
-        fc = pairs.get("failure_class")
         rc = pairs.get("reason_code")
-        if (
-            isinstance(fc, ast.Constant)
-            and fc.value == "HANDLED_FAILURE"
-            and isinstance(rc, ast.Constant)
-            and isinstance(rc.value, str)
-        ):
+        if isinstance(rc, ast.Constant) and isinstance(rc.value, str):
             found.add(rc.value)
-    return found
+        else:
+            has_non_literal = True
+    return found, has_non_literal
 
 
 def _extract_boundary_metadata_reason_codes(path: Path, dict_name: str) -> set[str]:
@@ -315,37 +437,46 @@ def _extract_boundary_metadata_reason_codes(path: Path, dict_name: str) -> set[s
     return found
 
 
-def _actual_handled_failure_reason_codes() -> set[str]:
-    """走査するのは列挙した6箇所(buy_candidates/holdings_watchlist/evaluation/
-    shareholder_benefit_registry_serviceの_notify_handled_failure_safely第2位置引数、
-    finalizerのdict literal、reconcilerのboundary metadata)であり、
-    キーワード引数での指定と、列挙外の
-    新規ファイルのHANDLED_FAILURE envelopeは視界外である(src全数の走査では
-    ない)。新しい発行元を足すときは本guardの走査対象も更新すること。
-    視界外を構造的に塞ぐ仕組み自体は別Issueとする(PR #740 issuecomment-
-    5959946879 SHOULD S-1)。"""
-    handlers_dir = _REPO_ROOT / "src" / "jstock_advisor" / "lambda_handlers"
-    services_dir = _REPO_ROOT / "src" / "jstock_advisor" / "services"
+def _reason_codes_of_file(path: Path) -> set[str]:
+    """発行元のファイル1件から、reason_codeを3通りの形で抽出する。
 
-    found: set[str] = set()
-    for filename in ("buy_candidates_handler.py", "holdings_watchlist_handler.py"):
-        found |= _extract_call_reason_codes(
-            handlers_dir / filename, "_notify_handled_failure_safely", 1
+    (1) `_notify_handled_failure_safely`の第2位置引数(literal / module定数)
+    (2) 辞書リテラルのreason_code(literal)
+    (3) `_HANDLED_FAILURE_BOUNDARY_METADATA`(boundary metadata)
+    ★ 辞書がliteralでないreason_codeを持つのに、(1)(3)のどちらでも解決の手掛かりが無いファイル、
+    および1件もreason_codeを抽出できないファイルは、黙って空にせずAssertionErrorにする。
+    ★ 限界: ファイル単位の検査であり、解決できる発行元と解決できない発行元が同じファイルに
+    混在する場合は、後者を検出できない。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    from_calls = _extract_call_reason_codes(path, _NOTIFY_FUNC, _NOTIFY_REASON_CODE_ARG_INDEX)
+    from_dicts, has_non_literal = _extract_envelope_dict_reason_codes(path)
+    from_metadata = _extract_boundary_metadata_reason_codes(path, _BOUNDARY_METADATA_NAME)
+    resolvable_elsewhere = bool(_notify_calls(tree)) or bool(from_metadata)
+    if has_non_literal and not resolvable_elsewhere:
+        raise AssertionError(
+            f"{path.name}: literalでないreason_codeを持つHANDLED_FAILUREの辞書があるが、"
+            f"{_NOTIFY_FUNC}の呼び出しも{_BOUNDARY_METADATA_NAME}も無く、解決できない"
         )
-    found |= _extract_call_reason_codes(
-        handlers_dir / "evaluation_handler.py", "_notify_handled_failure_safely", 1
-    )
-    # Issue #675(HF-10): 6箇所目。services層の発行元(ハンドラーではない)。
-    found |= _extract_call_reason_codes(
-        services_dir / "shareholder_benefit_registry_service.py",
-        "_notify_handled_failure_safely",
-        1,
-    )
-    found |= _extract_envelope_dict_reason_codes(services_dir / "watchlist_batch_finalizer.py")
-    found |= _extract_boundary_metadata_reason_codes(
-        handlers_dir / "watchlist_batch_reconciler_handler.py",
-        "_HANDLED_FAILURE_BOUNDARY_METADATA",
-    )
+    found = from_calls | from_dicts | from_metadata
+    if not found:
+        raise AssertionError(
+            f"{path.name}: HANDLED_FAILUREの発行元と判定したが、reason_codeを1件も抽出できない"
+            f"(キーワード引数での発行など、guardが読めない形の可能性)"
+        )
+    return found
+
+
+def _actual_handled_failure_reason_codes(src_root: Path = _SRC_ROOT) -> set[str]:
+    """src_root配下のHANDLED_FAILURE発行元を機械的に列挙し、reason_codeを集める。
+
+    発行元のファイルは人が列挙せず、AST から検出する(`_handled_failure_files`)。
+    検出の範囲(3 つの形)と限界は同関数の docstring を参照。新しい発行元ファイルが増えると、
+    `_REVIEWED_HANDLED_FAILURE_FILES`の更新まで赤くなる。
+    """
+    found: set[str] = set()
+    for relative in sorted(_handled_failure_files(src_root)):
+        found |= _reason_codes_of_file(src_root / relative)
     return found
 
 
@@ -375,6 +506,197 @@ def test_reason_code_to_content_has_no_keys_beyond_actual_and_reserved() -> None
         | _RESERVED_ALARM_REASON_CODES
     )
     assert content_keys == expected
+
+
+# Issue #745: 発行元のファイル集合は人が列挙せず AST で検出する。この集合(人のレビュー済み)と
+# 検出結果が一致することを固定する。新しい発行元ファイルが増える・消えると、ここが赤くなる。
+_REVIEWED_HANDLED_FAILURE_FILES = frozenset(
+    {
+        "lambda_handlers/buy_candidates_handler.py",
+        "lambda_handlers/holdings_watchlist_handler.py",
+        "lambda_handlers/evaluation_handler.py",
+        "lambda_handlers/watchlist_batch_reconciler_handler.py",
+        "services/watchlist_batch_finalizer.py",
+        # Issue #675(HF-10)
+        "services/shareholder_benefit_registry_service.py",
+    }
+)
+
+
+def test_the_files_that_emit_handled_failure_match_the_reviewed_set() -> None:
+    """src全体をASTで走査して検出した発行元のファイル集合が、レビュー済みの集合と一致する。
+
+    検出する形(3 つ)と限界は`_handled_failure_files`のdocstringを参照。
+    """
+    detected = _handled_failure_files(_SRC_ROOT)
+    assert detected == _REVIEWED_HANDLED_FAILURE_FILES, (
+        f"新しい発行元: {sorted(detected - _REVIEWED_HANDLED_FAILURE_FILES)} / "
+        f"消えた発行元: {sorted(_REVIEWED_HANDLED_FAILURE_FILES - detected)}"
+    )
+
+
+# --- 合成 tree(tmp_path)で、検出の条件を値で固定する --------------------------------------
+# 実 src を書き換えずに「この形なら検出する / しない」を固定する。実 tree への変異は、
+# 最後に実際に 1 件ずつ追加して確認し、元に戻した(PR 本文)。
+
+_IMPORTS = "from jstock_advisor.domain.notification.incident_signal import FailureClass\n"
+
+_NEGATIVE_SOURCE = '''\
+"""docstring: HANDLED_FAILURE と failure_class="HANDLED_FAILURE" への言及だけ。"""
+from enum import StrEnum
+
+from jstock_advisor.domain.notification.incident_signal import FailureClass, IncidentSignal
+
+# コメントの HANDLED_FAILURE
+
+
+class Local(StrEnum):
+    HANDLED_FAILURE = "HANDLED_FAILURE"
+    UNHANDLED_FAILURE = "UNHANDLED_FAILURE"
+
+
+def consumer(signal, message):
+    if signal.failure_class is FailureClass.HANDLED_FAILURE:
+        return 1
+    if signal.failure_class == "HANDLED_FAILURE":
+        return 2
+    first = IncidentSignal(failure_class=signal.failure_class)
+    second = IncidentSignal(failure_class=_failure_class(message))
+    third = IncidentSignal(failure_class=FailureClass.UNHANDLED_FAILURE)
+    fourth = {"failure_class": "UNHANDLED_FAILURE", "reason_code": "X"}
+    return first, second, third, fourth
+'''
+
+_POSITIVE_SOURCES = {
+    "dict_literal": '{"failure_class": "HANDLED_FAILURE", "reason_code": "NEW_CODE"}\n',
+    "dict_enum": _IMPORTS + '{"failure_class": FailureClass.HANDLED_FAILURE, "reason_code": "N"}\n',
+    "keyword_enum": _IMPORTS + 'f(failure_class=FailureClass.HANDLED_FAILURE, reason_code="N")\n',
+    "keyword_literal": 'f(failure_class="HANDLED_FAILURE", reason_code="N")\n',
+    "module_string_constant": (
+        '_FC = "HANDLED_FAILURE"\n{"failure_class": _FC, "reason_code": "N"}\n'
+    ),
+    "module_enum_alias": (
+        _IMPORTS + '_FC = FailureClass.HANDLED_FAILURE\nf(failure_class=_FC, reason_code="N")\n'
+    ),
+    "notify_call_only": '_notify_handled_failure_safely("STAGE", "NEW_CODE", now, None)\n',
+}
+
+
+def _write_tree(root: Path, files: dict[str, str]) -> Path:
+    """`<root>/jstock_advisor/<相対パス>`へファイルを書き、src_rootを返す。"""
+    src_root = root / "jstock_advisor"
+    for relative, text in files.items():
+        target = src_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return src_root
+
+
+@pytest.mark.parametrize("name", sorted(_POSITIVE_SOURCES))
+def test_a_new_file_in_any_handled_failure_form_is_detected(tmp_path: Path, name: str) -> None:
+    src_root = _write_tree(
+        tmp_path,
+        {
+            "negative.py": _NEGATIVE_SOURCE,
+            "lambda_handlers/new_module.py": _POSITIVE_SOURCES[name],
+        },
+    )
+    assert _handled_failure_files(src_root) == {"lambda_handlers/new_module.py"}
+
+
+def test_mentions_comparisons_definitions_and_pass_throughs_are_not_detected(
+    tmp_path: Path,
+) -> None:
+    """false positive: docstring・コメント・比較・enumの定義・UNHANDLED・素通しでは赤くならない。"""
+    src_root = _write_tree(tmp_path, {"negative.py": _NEGATIVE_SOURCE})
+    assert _handled_failure_files(src_root) == set()
+
+
+def test_an_unresolvable_failure_class_name_is_an_error_not_a_silent_skip(tmp_path: Path) -> None:
+    src_root = _write_tree(
+        tmp_path,
+        {"services/new.py": "def f(failure_class):\n    g(failure_class=failure_class)\n"},
+    )
+    with pytest.raises(AssertionError, match="静的に解決できない"):
+        _handled_failure_files(src_root)
+
+
+def test_the_reason_codes_of_every_detected_file_are_collected(tmp_path: Path) -> None:
+    src_root = _write_tree(
+        tmp_path,
+        {
+            "lambda_handlers/a.py": (
+                '_RC = "CONST_CODE"\n'
+                '_notify_handled_failure_safely("S", _RC, n, b)\n'
+                '_notify_handled_failure_safely("S", "LITERAL_CODE", n, b)\n'
+            ),
+            "services/b.py": '{"failure_class": "HANDLED_FAILURE", "reason_code": "DICT_CODE"}\n',
+            "services/c.py": (
+                '_HANDLED_FAILURE_BOUNDARY_METADATA = {"B1": ("T", "META_CODE")}\n'
+                '{"failure_class": "HANDLED_FAILURE", "reason_code": rc}\n'
+            ),
+        },
+    )
+    assert _actual_handled_failure_reason_codes(src_root) == {
+        "CONST_CODE",
+        "LITERAL_CODE",
+        "DICT_CODE",
+        "META_CODE",
+    }
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '_notify_handled_failure_safely(reason_code="NEW_CODE")\n',
+        '_notify_handled_failure_safely("STAGE", reason_code="NEW_CODE")\n',
+        '_notify_handled_failure_safely("STAGE")\n',
+    ],
+    ids=["keyword_only", "stage_positional_then_keyword", "too_few_positionals"],
+)
+def test_a_call_without_the_reason_code_as_a_positional_argument_is_an_error(
+    tmp_path: Path, source: str
+) -> None:
+    """キーワード引数での指定は視界外になるため、黙って無視せずAssertionErrorにする(M11相当)。"""
+    src_root = _write_tree(tmp_path, {"lambda_handlers/new.py": source})
+    with pytest.raises(AssertionError, match="位置引数"):
+        _actual_handled_failure_reason_codes(src_root)
+
+
+def test_a_call_with_a_dynamic_reason_code_is_an_error(tmp_path: Path) -> None:
+    src_root = _write_tree(
+        tmp_path,
+        {"lambda_handlers/new.py": '_notify_handled_failure_safely("S", code_var, n, b)\n'},
+    )
+    with pytest.raises(AssertionError, match="静的に解決できない"):
+        _actual_handled_failure_reason_codes(src_root)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '{"failure_class": "HANDLED_FAILURE", "reason_code": rc}\n',
+        'f(failure_class="HANDLED_FAILURE", reason_code="N")\n',
+    ],
+    ids=["non_literal_reason_code_without_a_resolver", "keyword_emitter_yields_no_reason_code"],
+)
+def test_an_emitter_whose_reason_code_cannot_be_read_is_an_error(
+    tmp_path: Path, source: str
+) -> None:
+    """発行元と判定したのにreason_codeを読めないファイルを、黙って空にしない(fail-closed)。"""
+    src_root = _write_tree(tmp_path, {"services/new.py": source})
+    with pytest.raises(AssertionError):
+        _actual_handled_failure_reason_codes(src_root)
+
+
+def test_a_detected_but_unreviewed_file_is_reported_as_new(tmp_path: Path) -> None:
+    """合成 tree に実 tree のレビュー済み集合を適用すると、増えた発行元が差分として見える。"""
+    src_root = _write_tree(
+        tmp_path, {"services/new.py": '{"failure_class": "HANDLED_FAILURE", "reason_code": "N"}\n'}
+    )
+    detected = _handled_failure_files(src_root)
+    assert detected - _REVIEWED_HANDLED_FAILURE_FILES == {"services/new.py"}
+    assert _REVIEWED_HANDLED_FAILURE_FILES - detected == _REVIEWED_HANDLED_FAILURE_FILES
 
 
 # ★ IncidentJob(_REVIEWED_JOB_LABELS)の先例と同じ手法: 列挙から動的に作らず、
