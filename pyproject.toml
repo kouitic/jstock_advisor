@@ -72,6 +72,7 @@ markers = [
   "cohort_solo_recommendation_evaluation_v2_cutover: 営業日ホライズンday-zero(v1/v2)切替のsolo cohort(Issue #389 / #145)",
   "cohort_solo_calibration_dataset_v2_cutover: calibration datasetのv1/v2切替のsolo cohort(Issue #389 / #145)",
   "cohort_solo_stock_snapshot_jst_price_window: build_stock_snapshotの価格窓UTC/JST暦日切替のsolo cohort(Issue #475 / #145)",
+  "cohort_solo_stock_snapshot_non_business_now: build_stock_snapshotを非営業日のnowで通すend-to-end検証のsolo cohort(Issue #690 / #145)",
   "cohort_solo_jpx_staleness_jst_basis: JpxCandidateUniverseProviderのstaleness判定基準日UTC/JST切替のsolo cohort(Issue #578 / #145)",
   "cohort_solo_jpx_universe_staleness_observability: JPX候補ユニバースのstaleness上限・観測値検証のsolo cohort(Issue #223 / #578 / #145)",
   "cohort_solo_jpx_vintage_gap_cache_age_jst_basis: JPX vintage gap記録のcache_age_days UTC/JST切替のsolo cohort(Issue #69 / #612 / #145)",
