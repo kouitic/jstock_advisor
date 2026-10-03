@@ -54,6 +54,8 @@ _REVIEWED_JOB_LABELS = {
     "LINE_WEBHOOK": "LINE の応答",
     "INCIDENT_NOTIFIER": "異常通知の中継処理",
     "ASYNC_INVOKE_FAILURE": "非同期実行の失敗",
+    # Issue #675(HF-10): 表示名はUSER確定。
+    "SHAREHOLDER_BENEFIT_REGISTRY": "株主優待データの確認",
     "OTHER": "その他の処理",
 }
 
@@ -195,6 +197,9 @@ _REVIEWED_CURRENT_HANDLED_FAILURE_REASON_CODES = frozenset(
         "reconciler_notification_retry_unexpected_error",
         "reconciler_timeout_finalizing_unexpected_error",
         "reconciler_maintenance_trigger_retry_unexpected_error",
+        # shareholder_benefit_registry_service.py(Issue #675。
+        # _notify_handled_failure_safely呼び出し1箇所。モジュール定数経由)
+        "SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED",
     }
 )
 
@@ -311,9 +316,10 @@ def _extract_boundary_metadata_reason_codes(path: Path, dict_name: str) -> set[s
 
 
 def _actual_handled_failure_reason_codes() -> set[str]:
-    """走査するのは列挙した5箇所(buy_candidates/holdings_watchlist/evaluationの
-    _notify_handled_failure_safely第2位置引数、finalizerのdict literal、
-    reconcilerのboundary metadata)であり、キーワード引数での指定と、列挙外の
+    """走査するのは列挙した6箇所(buy_candidates/holdings_watchlist/evaluation/
+    shareholder_benefit_registry_serviceの_notify_handled_failure_safely第2位置引数、
+    finalizerのdict literal、reconcilerのboundary metadata)であり、
+    キーワード引数での指定と、列挙外の
     新規ファイルのHANDLED_FAILURE envelopeは視界外である(src全数の走査では
     ない)。新しい発行元を足すときは本guardの走査対象も更新すること。
     視界外を構造的に塞ぐ仕組み自体は別Issueとする(PR #740 issuecomment-
@@ -328,6 +334,12 @@ def _actual_handled_failure_reason_codes() -> set[str]:
         )
     found |= _extract_call_reason_codes(
         handlers_dir / "evaluation_handler.py", "_notify_handled_failure_safely", 1
+    )
+    # Issue #675(HF-10): 6箇所目。services層の発行元(ハンドラーではない)。
+    found |= _extract_call_reason_codes(
+        services_dir / "shareholder_benefit_registry_service.py",
+        "_notify_handled_failure_safely",
+        1,
     )
     found |= _extract_envelope_dict_reason_codes(services_dir / "watchlist_batch_finalizer.py")
     found |= _extract_boundary_metadata_reason_codes(
@@ -401,6 +413,8 @@ _REVIEWED_INCIDENT_CONTENT_LABELS = {
     "WATCHLIST_DELETION_ZERO_STREAK": "ウォッチリストからの削除が複数日連続で発生していません",
     "BUY_CANDIDATES_STUCK_BATCH": "買い候補チェックの処理が完了せず滞留している可能性があります",
     "HOLDINGS_WATCHLIST_STUCK_BATCH": "保有株チェックの処理が完了せず滞留している可能性があります",
+    # Issue #675(HF-10): ★ PROVISIONAL(暫定の文言。USERの承認なし)。deploy前にUSERの確認が要る。
+    "SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED": "株主優待データの確認処理に失敗しました",
     "CLOUDWATCH_ALARM": "システムの監視アラームが検知されました",
     "OTHER": "技術的な問題を検知しました",
 }
@@ -569,7 +583,11 @@ def test_every_lambda_function_in_the_template_has_an_entry() -> None:
 
     # 監視対象の Lambda は 12 本(#132)+ incident-notifier(#503)+ worker 2 本(#533)
     assert len(functions) == 15
-    assert functions == set(incident_message._INTERNAL_NAME_TO_JOB)
+    # Lambda関数ではないが、HANDLED_FAILUREの発行元として対応表に載る内部名(明示的に列挙する)。
+    # Issue #675(HF-10): 2つのバッチが共通で呼ぶ株主優待registryの健全性チェック。
+    non_lambda_internal_names = {"shareholder-benefit-registry"}
+    assert functions.isdisjoint(non_lambda_internal_names)
+    assert functions | non_lambda_internal_names == set(incident_message._INTERNAL_NAME_TO_JOB)
 
 
 def _load_template_resources() -> dict[str, Any]:
@@ -691,6 +709,8 @@ def test_every_terminal_dlq_in_the_template_has_an_entry() -> None:
         # ★ BuyCandidatesFunction/HoldingsWatchlistFunctionの両方が共有するため、
         # どちらか一方の既存jobへ誤って割り当てず専用の名称を持つ(USER決定)。
         ("async-invoke-failure-dlq", "非同期実行の失敗"),
+        # Issue #675(HF-10): 呼び出し元に依存しない固定の内部名 -> USER確定の表示名。
+        ("shareholder-benefit-registry", "株主優待データの確認"),
     ],
 )
 def test_internal_names_map_to_user_facing_labels(internal_name: str, label: str) -> None:

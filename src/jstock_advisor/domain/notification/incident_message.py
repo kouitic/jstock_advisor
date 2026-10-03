@@ -67,6 +67,9 @@ class IncidentJob(StrEnum):
     # どちらの関数由来かを区別できないため、既存の2 job(買い候補チェック/保有株チェック)の
     # どちらか一方へ誤って割り当てず、専用の名称を持つ(USER決定)。
     ASYNC_INVOKE_FAILURE = "非同期実行の失敗"
+    # Issue #675(HF-10): 株主優待registryの健全性チェック(買い候補・保有株の両バッチが
+    # 呼ぶ共通処理)。どちらのバッチ由来かは利用者向けに区別しない(USER決定。表示名も確定済み)。
+    SHAREHOLDER_BENEFIT_REGISTRY = "株主優待データの確認"
     OTHER = "その他の処理"  # 対応表に無い名前の落ち先(内部名を出さない)
 
 
@@ -92,6 +95,9 @@ _INTERNAL_NAME_TO_JOB: dict[str, IncidentJob] = {
     "quarterly-review": IncidentJob.QUARTERLY_REVIEW,
     "line-webhook": IncidentJob.LINE_WEBHOOK,
     "incident-notifier": IncidentJob.INCIDENT_NOTIFIER,
+    # Issue #675(HF-10): Lambda関数ではなく、2つのバッチが呼ぶ共通処理のため、呼び出し元に
+    # 依存しない固定の内部名を持つ(USER決定)。
+    "shareholder-benefit-registry": IncidentJob.SHAREHOLDER_BENEFIT_REGISTRY,
 }
 
 # Issue #349: SQS の DLQ(キュー名。スタック名の前置を除いたもの)→ 利用者向けの名称。
@@ -162,15 +168,20 @@ class IncidentContent(StrEnum):
     WATCHLIST_DELETION_ZERO_STREAK = "ウォッチリストからの削除が複数日連続で発生していません"
     BUY_CANDIDATES_STUCK_BATCH = "買い候補チェックの処理が完了せず滞留している可能性があります"
     HOLDINGS_WATCHLIST_STUCK_BATCH = "保有株チェックの処理が完了せず滞留している可能性があります"
+    # Issue #675(HF-10): ★ PROVISIONAL(暫定の文言)。この「内容」文についてのUSERの承認は無い
+    # (USERが確定したのは表示名「株主優待データの確認」とjob_nameの固定値のみ)。既存の
+    # 文言の文型「<対象>の<処理>に失敗しました」に揃えた暫定案であり、deploy前に
+    # USERの確認が要る項目としてRELEASE_SCOPE_GATEの材料に載せる(「USER決定」ではない)。
+    SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED = "株主優待データの確認処理に失敗しました"
     CLOUDWATCH_ALARM = "システムの監視アラームが検知されました"
     OTHER = "技術的な問題を検知しました"  # 対応表に無いreason_codeの落ち先
 
 
 # 内部のreason_code(IncidentSignal.error_type)→ 利用者向けの「内容」文。
-# tests/unit/test_issue_501_incident_message.pyが、列挙した5箇所
-# (buy_candidates/holdings_watchlist/evaluationの_notify_handled_failure_
-# safely第2位置引数、finalizerのdict literal、reconcilerのboundary
-# metadata)を走査し、本辞書のkeyと突き合わせる。この5箇所の書き方で
+# tests/unit/test_issue_501_incident_message.pyが、列挙した6箇所
+# (buy_candidates/holdings_watchlist/evaluation/shareholder_benefit_registry_service
+# の_notify_handled_failure_safely第2位置引数、finalizerのdict literal、
+# reconcilerのboundary metadata)を走査し、本辞書のkeyと突き合わせる。この5箇所の書き方で
 # HANDLEDの発行元を1件削除する・新しいHANDLED発行元を無登録のまま追加する、
 # のいずれもテストが赤くなる。★キーワード引数での指定・列挙外の新規
 # ファイルへの追加は視界外であり赤くならない(src全数の走査ではない。
@@ -229,6 +240,11 @@ _REASON_CODE_TO_CONTENT: dict[str, IncidentContent] = {
     "watchlist_deletion_zero_streak": IncidentContent.WATCHLIST_DELETION_ZERO_STREAK,
     "buy_candidates_stuck_batch": IncidentContent.BUY_CANDIDATES_STUCK_BATCH,
     "holdings_watchlist_stuck_batch": IncidentContent.HOLDINGS_WATCHLIST_STUCK_BATCH,
+    # Issue #675(HF-10。発行元 = services/shareholder_benefit_registry_service.py)。
+    # 内容文は PROVISIONAL(IncidentContent の該当行のコメント参照)。
+    "SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED": (
+        IncidentContent.SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED
+    ),
     "CloudWatchAlarm": IncidentContent.CLOUDWATCH_ALARM,
 }
 
