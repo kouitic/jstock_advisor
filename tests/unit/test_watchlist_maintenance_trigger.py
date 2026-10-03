@@ -205,7 +205,9 @@ def test_g_individual_candidate_failures_do_not_block_trigger_when_batch_complet
     起動可否の判定に一切影響しないことを実際の呼び出し経路で確認する。"""
     monkeypatch.setattr(finalizer, "record_batch_audit", lambda **kw: None)
     monkeypatch.setattr(finalizer, "mark_batch_audit_recorded", lambda *a: None)
-    monkeypatch.setattr(finalizer, "mark_watchlist_batch_completed", lambda *a, **kw: None)
+    # Issue #573: 完了遷移は「自分が確定させたか」を返す(True)。None(= 偽)を返すスタブは
+    # 「2人目」と扱われ、後片付けが走らない。
+    monkeypatch.setattr(finalizer, "mark_watchlist_batch_completed", lambda *a, **kw: True)
     monkeypatch.setattr(finalizer, "_maybe_commit_rotation", lambda *a: None)
     calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
@@ -382,7 +384,9 @@ def test_finish_batch_passes_resolved_final_status(monkeypatch: pytest.MonkeyPat
     maybe_trigger_maintenanceへ渡すこと(古いbatch_itemのstatusは参照しない)。"""
     monkeypatch.setattr(finalizer, "record_batch_audit", lambda **kw: None)
     monkeypatch.setattr(finalizer, "mark_batch_audit_recorded", lambda *a: None)
-    monkeypatch.setattr(finalizer, "mark_watchlist_batch_completed", lambda *a, **kw: None)
+    # Issue #573: 完了遷移は「自分が確定させたか」を返す(True)。None(= 偽)を返すスタブは
+    # 「2人目」と扱われ、後片付けが走らない。
+    monkeypatch.setattr(finalizer, "mark_watchlist_batch_completed", lambda *a, **kw: True)
     monkeypatch.setattr(finalizer, "_maybe_commit_rotation", lambda *a: None)
     triggered: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
@@ -425,7 +429,9 @@ def test_finish_batch_resolves_notification_permanently_failed_status(
     final_statusはCOMPLETED_WITH_NOTIFICATION_FAILUREとして渡されること。"""
     monkeypatch.setattr(finalizer, "record_batch_audit", lambda **kw: None)
     monkeypatch.setattr(finalizer, "mark_batch_audit_recorded", lambda *a: None)
-    monkeypatch.setattr(finalizer, "mark_watchlist_batch_completed", lambda *a, **kw: None)
+    # Issue #573: 完了遷移は「自分が確定させたか」を返す(True)。None(= 偽)を返すスタブは
+    # 「2人目」と扱われ、後片付けが走らない。
+    monkeypatch.setattr(finalizer, "mark_watchlist_batch_completed", lambda *a, **kw: True)
     monkeypatch.setattr(finalizer, "_maybe_commit_rotation", lambda *a: None)
     triggered: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
@@ -457,7 +463,9 @@ def test_finish_batch_resolves_aborted_status(monkeypatch: pytest.MonkeyPatch) -
     (High修正: この2段の組み合わせで初めてABORTED非起動が保証される)。"""
     monkeypatch.setattr(finalizer, "record_batch_audit", lambda **kw: None)
     monkeypatch.setattr(finalizer, "mark_batch_audit_recorded", lambda *a: None)
-    monkeypatch.setattr(finalizer, "mark_watchlist_batch_completed", lambda *a, **kw: None)
+    # Issue #573: 完了遷移は「自分が確定させたか」を返す(True)。None(= 偽)を返すスタブは
+    # 「2人目」と扱われ、後片付けが走らない。
+    monkeypatch.setattr(finalizer, "mark_watchlist_batch_completed", lambda *a, **kw: True)
     monkeypatch.setattr(finalizer, "_maybe_commit_rotation", lambda *a: None)
     triggered: list[tuple[Any, ...]] = []
     monkeypatch.setattr(

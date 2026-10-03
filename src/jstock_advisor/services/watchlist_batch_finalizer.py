@@ -1005,9 +1005,19 @@ def _finish_batch(
             idempotency_key=f"watchlist_batch_audit:{batch_id}",
         )
         mark_batch_audit_recorded(batch_id, now)
-    mark_watchlist_batch_completed(
+    completed_by_this_run = mark_watchlist_batch_completed(
         batch_id, execution_result, now, notification_permanently_failed
     )
+    if not completed_by_this_run:
+        # Issue #573(#65 F-E10(1)): 自分は2人目(既に他の実行が完了確定済み)。後片付け
+        # (rotation lease解放+cursor前進・maintenance起動)は1人目が行うため、ここで二重に
+        # 走らせない。条件不成立のWARNINGはmark_watchlist_batch_completed側が残している。
+        logger.warning(
+            "watchlist_screening completion was not recorded by this run; "
+            "skipping post-completion work batch_id=%s",
+            batch_id,
+        )
+        return
     _maybe_commit_rotation(batch_id, batch_item, records, now)
     # High修正(2026-08 再レビュー): ABORTEDからmaintenanceを起動しないため、
     # `_finish_batch`へ到達したかどうかではなく、直前に確定させたのと全く同じ
@@ -1682,7 +1692,13 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
         batch_id=batch_id,
         idempotency_key=f"watchlist_maintenance_batch_audit:{batch_id}",
     )
-    mark_watchlist_batch_completed(batch_id, EXECUTION_RESULT_NORMAL, now)
+    if not mark_watchlist_batch_completed(batch_id, EXECUTION_RESULT_NORMAL, now):
+        # Issue #573: 既に他の実行が完了確定済み(条件不成立のWARNINGはbatch_tracker側が残している)。
+        # この関数の後続は完了ログのみのため、「finalized」とは記録せず終える。
+        logger.warning(
+            "watchlist_maintenance completion was not recorded by this run batch_id=%s", batch_id
+        )
+        return
     logger.info(
         "watchlist_maintenance finalized batch_id=%s outcome_counts=%s stale_unconfirmed=%d "
         "stale_not_evaluable=%d removal_audit_completion_attempted=%d "
