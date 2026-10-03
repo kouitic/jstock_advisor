@@ -25,6 +25,7 @@ from jstock_advisor.infrastructure.local_repository.shareholder_benefit_registry
     ShareholderBenefitRegistryRepository,
 )
 from jstock_advisor.interfaces.types import BenefitDetail, ShareholderBenefit
+from jstock_advisor.services.incident_envelope_publisher import publish_incident_envelope
 
 logger = logging.getLogger(__name__)
 # Issue #413 / #493: Lambda の root logger は WARNING のため、module が宣言しないと INFO は出ない。
@@ -218,8 +219,60 @@ class ShareholderBenefitRegistryService:
         return self._repo.delete(stock_code)
 
 
+# Issue #675(HF-10): 健全性チェック自体の技術的失敗をHF-0契約(#665)でUSER通知する。
+# job_nameは、買い候補・保有株の2バッチが共通で呼ぶ処理のため、呼び出し元に依存しない固定値
+# (USER決定。どちらのバッチ由来かは利用者向けに区別しない)。内部名は
+# domain/notification/incident_message.py::_INTERNAL_NAME_TO_JOBで利用者向けの名称
+# 「株主優待データの確認」(USER確定)へ解決される。
+_INCIDENT_SOURCE_REGISTRY = "shareholder_benefit_registry"
+_INCIDENT_JOB_NAME_REGISTRY = "shareholder-benefit-registry"
+_INCIDENT_FAILURE_TYPE = "UNHANDLED_EXCEPTION"
+_FAILURE_STAGE_REGISTRY_HEALTH_CHECK = "REGISTRY_HEALTH_CHECK"
+_REASON_CODE_REGISTRY_HEALTH_CHECK_FAILED = "SHAREHOLDER_BENEFIT_REGISTRY_HEALTH_CHECK_FAILED"
+
+
+def _notify_handled_failure(failure_stage: str, reason_code: str, now: dt.datetime) -> None:
+    """catchされた技術的失敗をHF-0契約(#665)でUSER通知する。
+
+    envelopeはallowlistのキーのみ(銘柄コード・所有者・stack trace・生のexception messageは
+    含めない。`publish_incident_envelope()`が最後の防御として再確認する)。
+    `failure_class = HANDLED_FAILURE`のため、GitHub Issueは自動起票されない(HF-0)。
+    """
+    publish_incident_envelope(
+        {
+            "source": _INCIDENT_SOURCE_REGISTRY,
+            "job_name": _INCIDENT_JOB_NAME_REGISTRY,
+            "failure_stage": failure_stage,
+            "failure_type": _INCIDENT_FAILURE_TYPE,
+            "reason_code": reason_code,
+            "occurred_at": now.isoformat(),
+            "failure_count": 1,
+            "failure_class": "HANDLED_FAILURE",
+        }
+    )
+
+
+def _notify_handled_failure_safely(failure_stage: str, reason_code: str, now: dt.datetime) -> None:
+    """`_notify_handled_failure()`の失敗(SNS権限不足・Topic ARN未設定等)が、fail-soft契約
+    (Issue #120。健全性チェックの失敗が判定・通知処理を止めない)を破らないためのラッパー。
+
+    失敗は握りつぶさず、WARNINGログへ残す(例外の型のみ。内容・識別子は出さない。#135)。
+    """
+    try:
+        _notify_handled_failure(failure_stage, reason_code, now)
+    except Exception as exc:  # noqa: BLE001 - HANDLED_FAILURE通知自体の失敗で本処理を止めない
+        logger.warning(
+            "event=shareholder_benefit_registry_health_check_notify_failed "
+            "failure_stage=%s error_type=%s",
+            failure_stage,
+            type(exc).__name__,
+        )
+
+
 def check_registry_health(
-    min_expected_entries: int, service: ShareholderBenefitRegistryService | None = None
+    min_expected_entries: int,
+    service: ShareholderBenefitRegistryService | None = None,
+    now: dt.datetime | None = None,
 ) -> None:
     """優待レジストリの読み込み件数をINFOで常時記録し、想定より少ない場合は
     追加でWARNINGを出す(2026-07仕様レビュー対応: CSVは用意されているのに
@@ -232,7 +285,7 @@ def check_registry_health(
 
     serviceは主にテスト用(任意のリポジトリを注入できるようにするため)。
     未指定時は既定のリポジトリ(Lambda環境ではDynamoDB、それ以外はローカル
-    JSON)を使う。
+    JSON)を使う。nowは通知envelopeのoccurred_at用(テスト用。未指定時は現在時刻)。
 
     **fail-soft契約(Issue #120)**: 件数取得自体が失敗しても例外を外へ出さない。
     本関数は「登録件数をログへ残す」だけの観測処理であり、判定・通知に必要な
@@ -250,6 +303,11 @@ def check_registry_health(
     **沈黙fail-softは禁止**。失敗時は件数不明であることを観測できるよう
     `event=shareholder_benefit_registry_health_check_failed`のERRORを必ず残す。
 
+    **Issue #675(HF-10)**: 上のERRORログに加えて、失敗をUSERへLINE通知する
+    (HANDLED_FAILURE。headlineは「本番処理の一部で問題が発生しました」)。通知の発行自体が
+    失敗しても、fail-soft契約は破らない(`_notify_handled_failure_safely()`)。
+    「件数が少ないWARNING」(下)は別の事象(#493)であり、本通知の対象にしない。
+
     なお本契約は健全性チェック自身の失敗に限る。**判定に必要な優待データの
     取得失敗まで握り潰すものではない**(business dataの取得は
     shareholder_benefit provider経由で行われ、失敗時は従来どおり銘柄単位で
@@ -264,6 +322,11 @@ def check_registry_health(
             "株主優待レジストリの件数取得に失敗しました。健全性チェックのみを"
             "スキップし、判定・通知処理は継続します(登録件数は不明)。",
             min_expected_entries,
+        )
+        _notify_handled_failure_safely(
+            _FAILURE_STAGE_REGISTRY_HEALTH_CHECK,
+            _REASON_CODE_REGISTRY_HEALTH_CHECK_FAILED,
+            now if now is not None else dt.datetime.now(dt.UTC),
         )
         return
     logger.info("ShareholderBenefitRegistry loaded %d entries.", count)
