@@ -32,5 +32,133 @@ trend_classification:
   strong_trend_rsi_threshold: 60.0
 
 # セクター指数の相対強度は、流動性のあるETFが存在する業種のみ対応する
-# (yfinanceには全33業種を網羅する指数が無いため)。未対応業種はNoneのままとする。
-sector_etf_map: {}
+# (yfinanceには全33業種を網羅する指数が無いため)。未対応業種(下記に載せない業種)は
+# NOT_APPLICABLEのまま(0点・NEUTRALとは区別される)。100% mappingは強制しない。
+#
+# Issue #26(USER決定 2026-09-28): 分類軸 = TOPIX-17(NEXT FUNDS TOPIX-17シリーズ17本)。
+# キー = yfinanceのindustry文字列(JPXの「東証33業種→TOPIX-17」の公式対応表とは別の体系。
+# 各業種→区分の対応は、通常どの区分の企業群かの事実確認に基づく。判断に迷う業種は載せない)。
+# 値 = yfinanceのticker("<証券コード>.T")。get_benchmark_price_historyが登録外symbolとして
+# そのままtickerへ渡す(先例: TOPIX = 1306.T)。
+# ETFのコード・名称は、運用会社(野村アセットマネジメント NEXT FUNDS)の各銘柄ページで2026-10-03に確認した。
+# SHADOW_ONLY: 結果はDecisionSnapshotの記録専用で、BUY/SELL/利確/保有判断・LINE通知には使わない。
+sector_etf_map:
+  # 1617 NEXT FUNDS 食品(TOPIX-17)上場投信
+  "Packaged Foods": "1617.T"
+  "Confectioners": "1617.T"
+  "Beverages-Non-Alcoholic": "1617.T"
+  "Beverages-Brewers": "1617.T"
+  "Beverages-Wineries & Distilleries": "1617.T"
+  "Farm Products": "1617.T"
+  # 1618 NEXT FUNDS エネルギー資源(TOPIX-17)上場投信
+  "Oil & Gas Refining & Marketing": "1618.T"
+  "Oil & Gas E&P": "1618.T"
+  "Oil & Gas Integrated": "1618.T"
+  "Oil & Gas Equipment & Services": "1618.T"
+  "Thermal Coal": "1618.T"
+  "Coking Coal": "1618.T"
+  # 1619 NEXT FUNDS 建設・資材(TOPIX-17)上場投信
+  "Engineering & Construction": "1619.T"
+  "Building Products & Equipment": "1619.T"
+  "Residential Construction": "1619.T"
+  "Building Materials": "1619.T"
+  # 1620 NEXT FUNDS 素材・化学(TOPIX-17)上場投信
+  "Specialty Chemicals": "1620.T"
+  "Chemicals": "1620.T"
+  "Textile Manufacturing": "1620.T"
+  "Paper & Paper Products": "1620.T"
+  "Packaging & Containers": "1620.T"
+  "Agricultural Inputs": "1620.T"
+  # 1621 NEXT FUNDS 医薬品(TOPIX-17)上場投信
+  "Drug Manufacturers - Specialty & Generic": "1621.T"
+  "Drug Manufacturers - General": "1621.T"
+  "Biotechnology": "1621.T"
+  # 1622 NEXT FUNDS 自動車・輸送機(TOPIX-17)上場投信
+  "Auto Parts": "1622.T"
+  "Auto Manufacturers": "1622.T"
+  # 1623 NEXT FUNDS 鉄鋼・非鉄(TOPIX-17)上場投信
+  "Steel": "1623.T"
+  "Aluminum": "1623.T"
+  "Copper": "1623.T"
+  "Other Precious Metals & Mining": "1623.T"
+  "Other Industrial Metals & Mining": "1623.T"
+  # 1624 NEXT FUNDS 機械(TOPIX-17)上場投信
+  "Specialty Industrial Machinery": "1624.T"
+  "Farm & Heavy Construction Machinery": "1624.T"
+  "Tools & Accessories": "1624.T"
+  "Metal Fabrication": "1624.T"
+  # 1625 NEXT FUNDS 電機・精密(TOPIX-17)上場投信
+  "Electronic Components": "1625.T"
+  "Semiconductor Equipment & Materials": "1625.T"
+  "Semiconductors": "1625.T"
+  "Scientific & Technical Instruments": "1625.T"
+  "Medical Instruments & Supplies": "1625.T"
+  "Medical Devices": "1625.T"
+  "Consumer Electronics": "1625.T"
+  "Computer Hardware": "1625.T"
+  "Communication Equipment": "1625.T"
+  "Electrical Equipment & Parts": "1625.T"
+  # 1626 NEXT FUNDS 情報通信・サービスその他(TOPIX-17)上場投信
+  "Information Technology Services": "1626.T"
+  "Software - Application": "1626.T"
+  "Software - Infrastructure": "1626.T"
+  "Internet Content & Information": "1626.T"
+  "Electronic Gaming & Multimedia": "1626.T"
+  "Telecom Services": "1626.T"
+  "Health Information Services": "1626.T"
+  "Consulting Services": "1626.T"
+  "Specialty Business Services": "1626.T"
+  "Business Equipment & Supplies": "1626.T"
+  "Staffing & Employment Services": "1626.T"
+  "Advertising Agencies": "1626.T"
+  "Education & Training Services": "1626.T"
+  "Broadcasting": "1626.T"
+  "Entertainment": "1626.T"
+  "Publishing": "1626.T"
+  "Security & Protection Services": "1626.T"
+  "Personal Services": "1626.T"
+  "Leisure": "1626.T"
+  # 1627 NEXT FUNDS 電力・ガス(TOPIX-17)上場投信
+  "Utilities - Renewable": "1627.T"
+  "Utilities - Regulated Gas": "1627.T"
+  "Utilities - Regulated Electric": "1627.T"
+  "Utilities - Independent Power Producers": "1627.T"
+  "Utilities - Diversified": "1627.T"
+  # 1628 NEXT FUNDS 運輸・物流(TOPIX-17)上場投信
+  "Integrated Freight & Logistics": "1628.T"
+  "Railroads": "1628.T"
+  "Trucking": "1628.T"
+  "Marine Shipping": "1628.T"
+  "Airlines": "1628.T"
+  "Airports & Air Services": "1628.T"
+  # 1629 NEXT FUNDS 商社・卸売(TOPIX-17)上場投信
+  "Industrial Distribution": "1629.T"
+  "Electronics & Computer Distribution": "1629.T"
+  "Medical Distribution": "1629.T"
+  "Food Distribution": "1629.T"
+  # 1630 NEXT FUNDS 小売(TOPIX-17)上場投信
+  "Specialty Retail": "1630.T"
+  "Department Stores": "1630.T"
+  "Apparel Retail": "1630.T"
+  "Grocery Stores": "1630.T"
+  "Internet Retail": "1630.T"
+  "Home Improvement Retail": "1630.T"
+  "Discount Stores": "1630.T"
+  "Pharmaceutical Retailers": "1630.T"
+  # 1631 NEXT FUNDS 銀行(TOPIX-17)上場投信
+  "Banks - Regional": "1631.T"
+  "Banks - Diversified": "1631.T"
+  # 1632 NEXT FUNDS 金融(除く銀行)(TOPIX-17)上場投信
+  "Capital Markets": "1632.T"
+  "Credit Services": "1632.T"
+  "Asset Management": "1632.T"
+  "Insurance - Life": "1632.T"
+  "Insurance - Property & Casualty": "1632.T"
+  "Insurance - Diversified": "1632.T"
+  "Insurance Brokers": "1632.T"
+  "Mortgage Finance": "1632.T"
+  "Financial Conglomerates": "1632.T"
+  # 1633 NEXT FUNDS 不動産(TOPIX-17)上場投信
+  "Real Estate Services": "1633.T"
+  "Real Estate - Diversified": "1633.T"
+  "Real Estate - Development": "1633.T"
