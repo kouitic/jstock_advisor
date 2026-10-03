@@ -25,6 +25,10 @@ from jstock_advisor.domain.entities.enums import (
     is_full_sell_like,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.notification.financial_stale_warning import (
+    FINANCIAL_STALE_SHORT_LABEL,
+    has_financial_stale_warning,
+)
 from jstock_advisor.domain.notification.message_formatter import NotificationTextInput
 
 _WATCH_END_REASON_LABELS: dict[str, str] = {
@@ -343,6 +347,29 @@ _BUILDERS = {
 # 専用として維持される(実送信経路からは到達しない)。
 SHORT_TEXT_CATEGORIES = frozenset(_BUILDERS.keys())
 
+# Issue #474(USER決定 2026-10-03、OPTION 2): 財務鮮度の警告(決算未反映)を実送信短文へ出すカテゴリ。
+# FINANCIAL_STALE_USER_WARNINGをkey_risksへ入れるproducerは売却・利確側のみ
+# (profit_taking_service / sell_signal_service / holding_decision_notification_builder)で、
+# 該当するRecommendationTypeの実際のカテゴリは次のとおり:
+#   SELL            FULL_PROFIT_TAKE / SELL / SELL_CONSIDERATION / STRONG_SELL_CONSIDERATION
+#   CRITICAL_RISK   URGENT_REVIEW / URGENT_HOLDING_REVIEW(SELLではない)
+#   MANUAL_REVIEW   REVIEW(SELLではない)
+#   PARTIAL_SELL    PARTIAL_PROFIT_TAKE / PARTIAL_RISK_REDUCTION
+#   WATCH           利確側のWATCH系(MANAGER判断 D-2: 利確検討価格が財務由来の公正価値に依存し
+#                   得るため適用)
+# BUY / NEAR_BUY / 買い候補側のWATCH_BEFORE_EARNINGSは、これらのproducerがkey_risksへ入れない
+# ため対象にしない。ATTENTION(build_attention_text_input)とWATCH終了
+# (build_watch_end_text_input)は別builderで、本関数を通らないため対象外(MANAGER判断 D-2)。
+_STALE_WARNING_CATEGORIES = frozenset(
+    {
+        NotificationCategory.SELL,
+        NotificationCategory.CRITICAL_RISK,
+        NotificationCategory.MANUAL_REVIEW,
+        NotificationCategory.PARTIAL_SELL,
+        NotificationCategory.WATCH,
+    }
+)
+
 
 def build_notification_text_input(
     recommendation: Recommendation, category: NotificationCategory
@@ -355,8 +382,18 @@ def build_notification_text_input(
     M3(保有銘柄オーナー機能): holding_idが設定されている(=holding-scope、
     SELL/PARTIAL_SELL/CRITICAL_RISK/WATCH等)場合のみownerを付与する。
     holding_id=None(BUY候補、stock-scope)ではownerを表示しない。
+
+    Issue #474: `_STALE_WARNING_CATEGORIES`のカテゴリでは、key_risksに財務鮮度の警告が
+    **完全一致**で含まれるときだけ、短縮ラベル(決算未反映)をfinancial_stale_labelへ渡す
+    (substring / prefix判定は使わない)。短文へ出す財務鮮度の源はkey_risksの完全一致だけで、
+    valuation_caveats(#701。現在は短文へ未接続)を将来短文へ接続する場合は、同じ警告と
+    一致する要素を除外して二重表示を作らないこと(financial_stale_warning.pyの契約)。
     """
     result = _BUILDERS[category](recommendation)
+    if category in _STALE_WARNING_CATEGORIES and has_financial_stale_warning(
+        recommendation.key_risks
+    ):
+        result = dataclasses.replace(result, financial_stale_label=FINANCIAL_STALE_SHORT_LABEL)
     if recommendation.holding_id is not None:
         result = dataclasses.replace(result, owner=recommendation.owner)
     return result
