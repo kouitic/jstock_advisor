@@ -4444,6 +4444,8 @@ LINEには1通あたりに送れる文字数・メッセージ数の上限があ
 
 ## 16. 変更履歴
 
+追記規則: 末尾 append-only(既存行を並べ替えず、最新を先頭へ insert しない)。正本は [docs/development_workflow.md](development_workflow.md) §12 であり、ここへ複製しない。
+
 | 日付 | 内容 |
 |---|---|
 | 2026-07-30 | 初版作成 |
