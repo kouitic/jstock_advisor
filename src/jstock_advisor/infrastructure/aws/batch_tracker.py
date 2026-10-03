@@ -2565,7 +2565,9 @@ def mark_watchlist_batch_completed(
 
     Issue #573(#65 F-E10(1)): 完了遷移は`_COMPLETION_ALLOWED_FROM_STATUSES`のいずれかからの
     遷移である場合に限る。戻り値は「この呼び出しが完了を確定させたか」(True = 自分が確定させた /
-    False = 既に他の実行が完了確定済み、または許容外のstatus)。
+    False = 既に他の実行が完了確定済み、または許容外のstatus、または一時的な書き込みの競合
+    〔TransactionConflictException。書き込みは起きていない。この場合はstatusがfinalize中のまま残り、
+    Reconcilerのstuck検知で回収される〕)。
     ★ 条件とSETは**同一のUpdateItem**に置く(別writeへ分けない)。
     ★ 条件不成立でも**例外を送出しない**(bool返却)。送出すると、2人目のfinalizerの外側の
       exceptが`mark_watchlist_finalize_failed()`を呼び、そのときのstatusがCOMPLETEDで
@@ -2574,8 +2576,12 @@ def mark_watchlist_batch_completed(
     ★ 呼び出し側(`_finish_batch`)は、Falseなら後片付け(rotation lease解放+cursor前進・
       maintenance起動)を走らせない(自分は2人目であり、1人目が行う)。
     ★ 既知の限界: tokenによるcrash takeoverは付かない。1人目が完了確定の直後(後片付けの前)に
-      落ちた場合、2人目は弾かれて後片付けをしない(後片付けの再実行はReconciler側の既存の
-      仕組みに委ねる)。
+      例外を出さずに強制終了した場合(timeout / OOM等)、2人目は弾かれて後片付けをしない。
+      **この後片付けを再実行する仕組みは、現在のmainには無い**(Reconcilerが救うのは
+      TRIGGERINGのまま失効したmaintenance trigger・TIMED_OUT・DISPATCHINGのまま放置された
+      leaseの解放のみ。rotation leaseはbatch_processing_timeout_hoursで自然失効する)。
+      この欠落はIssue #781で扱う。なお後片付けが**例外**を送出した場合は、
+      FINALIZE_FAILED → Reconcilerの再試行(try_retry_finalize)で再実行される。
 
     execution_resultはEXECUTION_RESULT_NORMAL(通常完了)、または
     _ABORTED_EXECUTION_RESULTSのいずれか(10/3節のスロットリング率・主要項目
