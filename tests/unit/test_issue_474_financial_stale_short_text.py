@@ -489,10 +489,12 @@ def test_buy_side_watch_before_earnings_does_not_get_the_label() -> None:
     assert result.financial_stale_label is None
 
 
-def test_attention_and_watch_end_builders_do_not_get_the_label() -> None:
+def test_watch_end_builder_does_not_get_the_label() -> None:
+    # 利益保全注意(ATTENTION)は Issue #767(USER決定 B)で対象になった
+    # (tests/unit/test_issue_767_attention_financial_stale.py)。監視終了は今回は変更しない。
     rec = _recommendation(RecommendationType.WATCH, key_risks=[FINANCIAL_STALE_USER_WARNING])
     attention = build_attention_text_input(rec, "PROFIT_PROTECTION_STRONG_NOT_EXECUTABLE")
-    assert attention.financial_stale_label is None
+    assert attention.financial_stale_label == FINANCIAL_STALE_SHORT_LABEL
     ended = rec.model_copy(
         update={
             "watch_end_reason": "PRICE_OUT_OF_RANGE",
