@@ -37,7 +37,17 @@ earnings_date_status      = 決算日なし=UNAVAILABLE / evaluation_date より
 2026-05-02(土)〜05-06(水)                  GW(5/3 日・5/4 みどりの日・5/5 こどもの日・5/6 振替休日)
 2026-12-31(木)・2027-01-01(金)〜01-03(日)  JPX 休場
                                            (config recurring_market_closures: 12-31 / 01-01〜01-03)
+2025-12-31(水)・2026-01-01(木)・01-02(金)  同じ年末年始の休場(系列の内側。直前営業日 2025-12-30)
 ```
+
+## 年末年始の局面を、系列の収録範囲の内側でも固定する理由(Issue #690 S-1)
+
+mock の価格系列は 2021-01-04〜2026-12-30 で、2026 年末の「直前の営業日 = 2026-12-30」は
+**系列の最終日そのもの**である。`as_of = max(系列の日付 <= cutoff)` のため、cutoff を後ろへ
+ずらしても 2026-12-30 のままで、`price_as_of_date` の assert は cutoff の誤りを検出できない
+(2026-12-31 / 2027-01-02 の2局面。`business_days_to_earnings` の assert は検出できる)。
+系列の内側の年末年始(2025-12-31 / 2026-01-02。直前営業日は 2025-12-30)を足し、cutoff が
+後ろへずれたら as_of が 2026-12-30 となって落ちる状態にする。
 """
 
 from __future__ import annotations
@@ -151,6 +161,25 @@ _NON_BUSINESS_CASES = [
         2,
         id="new-year-closure",
     ),
+    # 年末年始(系列の収録範囲の内側。Issue #690 S-1)。上の2局面の as_of は系列の最終日
+    # (2026-12-30)に依存しているが、こちらは cutoff が後ろへずれると as_of が
+    # 2026-12-30 になって落ちる。
+    pytest.param(
+        "年末(2025-12-31 は JPX 休場。系列の内側)",
+        _jst_0800(2025, 12, 31),
+        dt.date(2026, 1, 6),
+        dt.date(2025, 12, 30),
+        2,
+        id="year-end-closure-inside-series",
+    ),
+    pytest.param(
+        "年始(2026-01-02 は JPX 休場。系列の内側)",
+        _jst_0800(2026, 1, 2),
+        dt.date(2026, 1, 6),
+        dt.date(2025, 12, 30),
+        2,
+        id="new-year-closure-inside-series",
+    ),
     # 対照: 営業日の now でも as_of が「直前の営業日」になること
     # (非営業日だけの挙動ではないことの確認)
     pytest.param(
@@ -194,6 +223,27 @@ def test_snapshot_wires_the_previous_business_day_and_business_days_to_earnings(
     assert snapshot.next_earnings_date == earnings, situation
     # 営業日数: evaluation_date(JST 暦日)の翌日から決算日までの営業日だけを数える
     assert snapshot.business_days_to_earnings == expected_business_days, situation
+
+
+def test_year_end_cases_are_inside_the_mock_series_range() -> None:
+    """fixture が端で満たされていないことの自己確認(Issue #690 S-1)。
+
+    年末年始の「系列の内側」の局面(as_of = 2025-12-30)は、系列の最終日(2026-12-30)より前、かつ
+    系列に実在する営業日でなければならない。系列の最終日と一致する局面では、cutoff が後ろへずれても
+    as_of が変わらず、assert が cutoff の誤りを検出できない(本テストが防ぐ退行)。
+    """
+    from jstock_advisor.providers.mock_fixtures import get_price_volume_series
+
+    series = get_price_volume_series(_STOCK_CODE)
+    assert series, "mock の価格系列が取得できない"
+    last_bar = max(series)
+    assert last_bar == dt.date(2026, 12, 30)  # 系列の最終日(S-1 が依存していた端)
+    inside = dt.date(2025, 12, 30)
+    assert inside in series  # 系列に実在する営業日
+    assert inside < last_bar  # 端ではない(cutoff が後ろへずれると as_of が last_bar になる)
+    # 年末年始の休場日そのものは系列に無い(as_of が「直前の営業日」へ戻る根拠)
+    for closed in (dt.date(2025, 12, 31), dt.date(2026, 1, 1), dt.date(2026, 1, 2)):
+        assert closed not in series
 
 
 # UTC と JST で暦日が異なる境界(金曜 → 土曜)。
