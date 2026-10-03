@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "location_type": "ISSUE_BODY",
+      "location_id": "#393",
+      "hash_prefix": "6599e178",
+      "reason": "EMAIL_PATTERN",
+      "confirmed_by": "classification per the USER decision of 2026-10-03 (Issue #393, DECISION = A): classified by REVIEWER and independently re-verified by DEVELOPER; not an individual confirmation by the USER",
+      "confirmed_at": "2026-10-03",
+      "classification": "PYTEST_DECORATOR_REFERENCE",
+      "issue_ref": "#393"
+    },
+    {
+      "location_type": "ISSUE_BODY",
+      "location_id": "#393",
+      "hash_prefix": "d8576854",
+      "reason": "EMAIL_PATTERN",
+      "confirmed_by": "classification per the USER decision of 2026-10-03 (Issue #393, DECISION = A): classified by REVIEWER and independently re-verified by DEVELOPER; not an individual confirmation by the USER",
+      "confirmed_at": "2026-10-03",
+      "classification": "PYTEST_DECORATOR_REFERENCE",
+      "issue_ref": "#393"
+    },
+    {
+      "location_type": "COMMENT",
+      "location_id": "comment5826672172",
+      "hash_prefix": "6599e178",
+      "reason": "EMAIL_PATTERN",
+      "confirmed_by": "classification per the USER decision of 2026-10-03 (Issue #393, DECISION = A): classified by REVIEWER and independently re-verified by DEVELOPER; not an individual confirmation by the USER",
+      "confirmed_at": "2026-10-03",
+      "classification": "PYTEST_DECORATOR_REFERENCE",
+      "issue_ref": "#393"
+    },
+    {
+      "location_type": "COMMENT",
+      "location_id": "comment5957042928",
+      "hash_prefix": "6599e178",
+      "reason": "EMAIL_PATTERN",
+      "confirmed_by": "classification per the USER decision of 2026-10-03 (Issue #393, DECISION = A): classified by REVIEWER and independently re-verified by DEVELOPER; not an individual confirmation by the USER",
+      "confirmed_at": "2026-10-03",
+      "classification": "PYTEST_DECORATOR_REFERENCE",
+      "issue_ref": "#393"
+    },
+    {
+      "location_type": "COMMENT",
+      "location_id": "comment5706372901",
+      "hash_prefix": "d8576854",
+      "reason": "EMAIL_PATTERN",
+      "confirmed_by": "classification per the USER decision of 2026-10-03 (Issue #393, DECISION = A): classified by REVIEWER and independently re-verified by DEVELOPER; not an individual confirmation by the USER",
+      "confirmed_at": "2026-10-03",
+      "classification": "PYTEST_DECORATOR_REFERENCE",
+      "issue_ref": "#374"
+    }
+  ]
+}
