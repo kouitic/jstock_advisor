@@ -152,7 +152,22 @@ def test_every_info_call_site_passes_only_a_count() -> None:
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "logger"
     ]
-    assert len(infos) == 1
-    (call,) = infos
-    args = [a.id if isinstance(a, ast.Name) else type(a).__name__ for a in call.args[1:]]
-    assert args == ["count"]
+    # INFO は 2 箇所に限る: 登録件数(check_registry_health)と、coverage の件数・割合
+    # (check_registry_coverage。Issue #754)。どちらも引数は件数・割合だけで、内容・銘柄を渡さない。
+    assert len(infos) == 2
+    arg_lists = [
+        [a.id if isinstance(a, ast.Name) else type(a).__name__ for a in call.args[1:]]
+        for call in sorted(infos, key=lambda node: node.lineno)
+    ]
+    assert arg_lists[0] == ["count"]
+    # Issue #754: 件数(registered/total)・割合(%)の文字列と、registry の件数(len)だけ。
+    # 銘柄コード・所有者・holding_id を渡す引数を足すと、この一覧と食い違って赤くなる。
+    assert arg_lists[1] == [
+        "candidate_ratio",
+        "candidate_pct",
+        "holdings_ratio",
+        "holdings_pct",
+        "total_ratio",
+        "total_pct",
+        "Call",
+    ]

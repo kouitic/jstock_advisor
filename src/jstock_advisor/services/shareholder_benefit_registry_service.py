@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Iterable
 from decimal import Decimal
 
 from jstock_advisor.domain.entities.common import DataSourceReference
@@ -337,4 +338,84 @@ def check_registry_health(
             "CSV取込漏れの可能性があるためjstock shareholder-benefit list等で確認してください。",
             count,
             min_expected_entries,
+        )
+
+
+def _coverage_text(registered: int, total: int) -> str:
+    """割合(%)を小数1桁で返す。分母が0の軸は`n/a`(0%と区別する)。"""
+    if total == 0:
+        return "n/a"
+    return f"{registered / total * 100:.1f}"
+
+
+def check_registry_coverage(
+    candidate_codes: Iterable[str] | None,
+    holding_codes: Iterable[str] | None,
+    service: ShareholderBenefitRegistryService | None = None,
+) -> None:
+    """優待レジストリのcoverageを、候補側・保有側の2軸でINFOに記録する(Issue #754。#27 U-2)。
+
+    ```
+    CANDIDATE_COVERAGE = registry ∩ 候補(気になる銘柄) / 候補
+    HOLDINGS_COVERAGE  = registry ∩ 保有 / 保有
+    TOTAL_COVERAGE     = 補助情報のみ(単独の合計%を主指標にしない。候補側が0%へ悪化しても
+                         合計では見えにくいため、2軸に分けて記録する)
+    ```
+
+    **WARNINGは出さない**(USER決定: threshold = NONE。方針C〔株主優待データは判定に使わず
+    N/Aとして分母から除外〕の間は、coverage不足が投資判定を阻害しないため、警告はノイズになる)。
+    **coverageの値は投資判定に使わない。**
+
+    `candidate_codes` / `holding_codes`は、呼び出し側が**既に読み込んでいる**銘柄コードを渡す
+    (この関数はwatchlistやholdingsを読まない = 日次経路の外部読み込みを増やさない)。
+    渡さない軸(None)は記録しない。買い候補バッチは両軸を、保有監視バッチは保有側だけを渡す。
+    追加の外部読み込みは、registryの`list_all()`(読み取り専用)1回のみ。
+
+    **fail-soft契約(Issue #120と同じ)**: 算出が失敗しても例外を外へ出さず、
+    判定・通知・保存を止めない。
+    **沈黙fail-softは禁止**: 失敗時は件数不明であることを観測できる
+    `event=shareholder_benefit_registry_coverage_failed`のERRORを残す(例外の型のみ。
+    銘柄コード・所有者・holding_idは出さない。#135)。
+
+    ログには件数と割合だけを出す(銘柄コード・所有者・holding_idは出さない)。
+    """
+    try:
+        registry_codes = {
+            benefit.stock_code
+            for benefit in (service or ShareholderBenefitRegistryService()).list_all()
+        }
+        candidates = None if candidate_codes is None else set(candidate_codes)
+        holdings = None if holding_codes is None else set(holding_codes)
+
+        def _axis(codes: set[str] | None) -> tuple[str, str]:
+            if codes is None:
+                return "not_recorded", "not_recorded"
+            registered = len(codes & registry_codes)
+            return f"{registered}/{len(codes)}", _coverage_text(registered, len(codes))
+
+        candidate_ratio, candidate_pct = _axis(candidates)
+        holdings_ratio, holdings_pct = _axis(holdings)
+        combined = (candidates or set()) | (holdings or set())
+        total_ratio, total_pct = _axis(
+            combined if candidates is not None or holdings is not None else None
+        )
+        logger.info(
+            "event=shareholder_benefit_registry_coverage "
+            "candidate_registered_of_total=%s candidate_coverage_pct=%s "
+            "holdings_registered_of_total=%s holdings_coverage_pct=%s "
+            "total_registered_of_total=%s total_coverage_pct=%s registry_entries=%d",
+            candidate_ratio,
+            candidate_pct,
+            holdings_ratio,
+            holdings_pct,
+            total_ratio,
+            total_pct,
+            len(registry_codes),
+        )
+    except Exception as exc:  # noqa: BLE001 - 観測処理の失敗で判定・通知・保存を止めない
+        logger.error(
+            "event=shareholder_benefit_registry_coverage_failed error_type=%s "
+            "株主優待レジストリのcoverageの算出に失敗しました。coverageの記録のみを"
+            "スキップし、判定・通知処理は継続します(coverageは不明)。",
+            type(exc).__name__,
         )
