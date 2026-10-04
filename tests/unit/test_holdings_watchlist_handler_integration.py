@@ -79,6 +79,7 @@ from jstock_advisor.services.profit_taking_service import ProfitTakingService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalOutcome, SellSignalService
+from tests.factories import build_recommendation
 
 _CFG = load_config()
 _RULES = _CFG.holding_decision
@@ -121,7 +122,7 @@ def _holding(stock_code: str = _STOCK_CODE) -> Holding:
 
 
 def _fake_sell_recommendation(stock_code: str) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="legacy-fake-rec",
         stock_code=stock_code,
         stock_name="test",
@@ -573,7 +574,7 @@ def test_notification_disabled_manual_review_data_quality_sends_zero_line_messag
     from jstock_advisor.domain.entities.common import PriceWithRationale, SellPriceLevels
     from jstock_advisor.services.profit_taking_service import ProfitTakingOutcome
 
-    manual_review_recommendation = Recommendation(
+    manual_review_recommendation = build_recommendation(
         recommendation_id="dq-h-manual-review",
         stock_code=_STOCK_CODE,
         stock_name="x",

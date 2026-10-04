@@ -14,6 +14,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     VALIDATION_FILE_NAME,
     RecommendationRepository,
 )
+from tests.factories import build_recommendation
 
 
 def _recommendation(
@@ -22,7 +23,7 @@ def _recommendation(
     recommended_at: dt.datetime,
     rule_version: str,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=rec_id,
         stock_code="2914",
         stock_name="test",

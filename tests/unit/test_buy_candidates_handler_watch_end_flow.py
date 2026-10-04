@@ -34,6 +34,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.lambda_handlers import buy_candidates_handler as handler_module
 from jstock_advisor.services.audit_service import AuditService as RealAuditService
 from jstock_advisor.services.line_notification_service import LineNotificationService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -58,7 +59,7 @@ def _watch_end_recommendation(stock_code: str, recommendation_id: str) -> Recomm
     """6営業日継続後にPRICE_OUT_OF_RANGEで監視終了したことを示すRecommendation
     (buy_signal_service.pyが実際に生成するのと同じ形の付帯フィールドを持つ)。
     """
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
@@ -198,7 +199,7 @@ def test_promoted_to_buy_after_stale_gap_sends_single_notification(
     )
     store_dir = tmp_path / "local_store"
     repo = RecommendationRepository(store_dir=store_dir)
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="promoted-after-stale-1",
         stock_code="9432",
         stock_name="NTT",

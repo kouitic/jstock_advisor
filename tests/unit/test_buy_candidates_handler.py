@@ -41,6 +41,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers import buy_candidates_handler as handler_module
 from jstock_advisor.services.audit_service import AuditService as RealAuditService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 29, 7, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -440,7 +441,7 @@ def _make_recommendation(
     average_acquisition_price: str | None = None,
     conflicting_holding_action: RecommendationType | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
@@ -2900,7 +2901,7 @@ def test_process_single_candidate_sector_entry_uses_aggregated_holding_quantity(
 def _conflict_recommendation(
     stock_code: str, recommendation_type: RecommendationType, owner: str
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=f"conflict-{owner}",
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
