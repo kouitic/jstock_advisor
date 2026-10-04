@@ -3762,6 +3762,8 @@ Production ChangeSet EXECUTE 実際のリソースプロバイダAPI呼び出し
                               「事前検知ができた」ことは意味しない
 ```
 
+(上の「自動rollbackが安全網として働く」が働くかどうかは、EXECUTEのコマンドでのDisableRollbackの指定に関わる。指定の扱いと、失敗・UPDATE_FAILEDのまま残った場合の扱いは31.4を参照。Issue #793、2026-10-04追記)
+
 **実AWS環境でのpreflight/dry-run(ChangeSet CREATE〜EXECUTEを別accountの
 staging環境で先行実行する等)は、本節時点では採用していない。** CI/release
 pipelineへAWS credentialを新規・広範に持たせることになり、Issue #164(長期
