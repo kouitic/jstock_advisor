@@ -24,6 +24,7 @@ from jstock_advisor.services.calibration_analysis_service import (
     parse_dataset_jsonl,
     to_artifact_jsonl,
 )
+from tests.factories import build_recommendation
 
 _PARAMS = AnalysisParameters(bootstrap_iterations=50, bootstrap_seed=7)
 
@@ -449,7 +450,6 @@ def test_end_to_end_from_builder_jsonl() -> None:
     from jstock_advisor.config.loader import load_config
     from jstock_advisor.domain.business_calendar import BusinessCalendar
     from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-    from jstock_advisor.domain.entities.recommendation import Recommendation
     from jstock_advisor.services.calibration_dataset_service import (
         CalibrationDatasetBuilder,
         to_jsonl,
@@ -465,7 +465,7 @@ def test_end_to_end_from_builder_jsonl() -> None:
         def list_all(self):
             return list(self._items)
 
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-e2e",
         stock_code="8136",
         stock_name="テスト株式会社",

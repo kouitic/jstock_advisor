@@ -44,6 +44,7 @@ from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
     TimeBudget,
 )
+from tests.factories import build_recommendation
 
 _STOCK_CODE = "2914"
 _BENCHMARK = "TOPIX"
@@ -83,7 +84,7 @@ def _make_recommendation(
     recommended_at: dt.datetime = dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
     stock_code: str = _STOCK_CODE,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name="テスト銘柄",

@@ -64,6 +64,7 @@ from jstock_advisor.services.holding_decision_backtest_service import (
 from jstock_advisor.services.portfolio_service import PortfolioService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.sell_signal_service import SellSignalOutcome, SellSignalService
+from tests.factories import build_recommendation
 
 _CFG = load_config()
 _RULES = _CFG.holding_decision
@@ -94,7 +95,7 @@ def _recommendation(
     recommendation_type: RecommendationType = RecommendationType.SELL,
     recommendation_id: str | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id or f"rec-{stock_code}-{recommended_at.isoformat()}",
         stock_code=stock_code,
         stock_name="test",

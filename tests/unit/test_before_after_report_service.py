@@ -6,7 +6,6 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.entities.enums import AccountType, ConfidenceLevel, RecommendationType
 from jstock_advisor.domain.entities.holding import Holding
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
@@ -21,6 +20,7 @@ from jstock_advisor.providers.shareholder_benefit.mock_impl import MockSharehold
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.before_after_report_service import BeforeAfterReportService
 from jstock_advisor.services.provider_bundle import ProviderBundle
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 27, 7, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -78,7 +78,7 @@ def test_entry_with_holding_runs_after_pipeline(tmp_path: Path) -> None:
     holding_repo.upsert(holding)
 
     recommendation_repo = RecommendationRepository(store_dir=tmp_path)
-    before_rec = Recommendation(
+    before_rec = build_recommendation(
         recommendation_id="before-1",
         stock_code="2914",
         stock_name="日本たばこ産業",

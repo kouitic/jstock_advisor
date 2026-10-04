@@ -35,6 +35,7 @@ from jstock_advisor.domain.signals.judgment_safety_shadow_config import (
     JudgmentSafetyShadowConfig,
     ShadowMode,
 )
+from tests.factories import build_recommendation
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MODULE = _REPO_ROOT / "src" / "jstock_advisor" / "domain" / "signals" / "judgment_safety.py"
@@ -67,7 +68,7 @@ def _rec(
     buy_action: BuyAction | None = None,
     earnings_date_status: EarningsDateStatus | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-1",
         stock_code="0000",
         stock_name="銘柄A",

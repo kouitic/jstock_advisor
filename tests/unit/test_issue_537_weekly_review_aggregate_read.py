@@ -27,7 +27,6 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
 )
 from jstock_advisor.domain.entities.evaluation import EvaluationResult
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
     EvaluationResultRepository,
@@ -57,6 +56,7 @@ from jstock_advisor.services.weekly_improvement_review_service import (
     WeeklyImprovementReviewService,
     _resolve_review_period,
 )
+from tests.factories import build_recommendation
 
 # 2026-09-21(月)19:00 JST = 10:00Z。レビュー対象週 = 2026-09-14(月)〜09-20(日)= 2026-W38
 _RUN_AT = dt.datetime(2026, 9, 21, 10, 0, tzinfo=dt.UTC)
@@ -105,7 +105,7 @@ class Env:
         recommended_at = dt.datetime.combine(
             evaluation_date - dt.timedelta(days=_HORIZON), dt.time(3, 0), tzinfo=dt.UTC
         )
-        recommendation = Recommendation(
+        recommendation = build_recommendation(
             recommendation_id=rec_id,
             stock_code="1234",
             stock_name="test",
@@ -774,7 +774,6 @@ def test_cli_wiring_uses_a_reusable_callable_not_a_pre_called_iterator(
 
     from jstock_advisor.cli.main import app
     from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-    from jstock_advisor.domain.entities.recommendation import Recommendation
     from jstock_advisor.infrastructure.weekly_evaluation_aggregate_store import (
         build_weekly_evaluation_aggregate_store,
     )
@@ -783,7 +782,7 @@ def test_cli_wiring_uses_a_reusable_callable_not_a_pre_called_iterator(
     evaluations = EvaluationResultRepository()
     recommendations = RecommendationRepository()
     recommendations.save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-cli-wiring",
             stock_code="1234",
             stock_name="test",

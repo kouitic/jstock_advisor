@@ -21,12 +21,13 @@ from jstock_advisor.domain.valuation.downside_valuation_scenario import (
     derive_downside_valuation_observation,
 )
 from jstock_advisor.domain.valuation.valuation_spread_observation import ObservationStatus
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 9, 5, 23, 1, tzinfo=dt.UTC)
 
 
 def _recommendation(facts: dict[str, Any] | None) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="downside-rec-1",
         stock_code="8306",
         stock_name="テスト銘柄",

@@ -12,7 +12,6 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
 )
 from jstock_advisor.domain.entities.evaluation import EvaluationResult
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.rule_version import RuleProposal
 from jstock_advisor.infrastructure.line.client import ConsoleLineClient, LineClient
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
@@ -27,6 +26,7 @@ from jstock_advisor.infrastructure.local_repository.rule_version_repository impo
 from jstock_advisor.services.performance_metrics_service import PerformanceMetricsService
 from jstock_advisor.services.review_report_service import ReviewReportService
 from jstock_advisor.services.rule_proposal_service import RuleProposalService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 
@@ -37,7 +37,7 @@ def build_review_service(tmp_path: Path) -> Callable[[LineClient | None], Review
         rec_repo = RecommendationRepository(store_dir=tmp_path)
         eval_repo = EvaluationResultRepository(store_dir=tmp_path)
         rec_repo.save(
-            Recommendation(
+            build_recommendation(
                 recommendation_id="rec-1",
                 stock_code="2914",
                 stock_name="test",
@@ -110,7 +110,7 @@ def test_build_report_text_shows_out_of_scope_instead_of_zero_percent(tmp_path: 
     rec_repo = RecommendationRepository(store_dir=tmp_path)
     eval_repo = EvaluationResultRepository(store_dir=tmp_path)
     rec_repo.save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-watch",
             stock_code="2914",
             stock_name="test",

@@ -46,6 +46,7 @@ from jstock_advisor.services.recommendation_evaluation_service import (
     _CALENDAR_HORIZON_DAYS,
     V2_CUTOVER_AT,
 )
+from tests.factories import build_recommendation
 
 _CONFIG = load_config()
 _CALENDAR = BusinessCalendar.from_config(_CONFIG.holiday_calendar)
@@ -105,7 +106,7 @@ def _recommendation(
         buy_score_input_facts={"buy_score_input_facts_schema_version": 1},
     )
     base.update(overrides)
-    return Recommendation(**base)  # type: ignore[arg-type]
+    return build_recommendation(**base)  # type: ignore[arg-type]
 
 
 def _evaluation(
