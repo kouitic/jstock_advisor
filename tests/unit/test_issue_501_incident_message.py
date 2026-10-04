@@ -205,6 +205,12 @@ _REVIEWED_CURRENT_HANDLED_FAILURE_REASON_CODES = frozenset(
         # holdings_watchlistに3箇所追加。holdingsの3箇所は同一のreason_code)
         "BUY_CANDIDATES_DECISION_SNAPSHOT_SAVE_FAILED",
         "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED",
+        # holding_decision_runtime_config_service.py(Issue #669 HF-4。RuntimeConfigの取得失敗による
+        # fallback。_notify_handled_failure_safely呼び出し4箇所〔モジュール定数経由。
+        # kill switchの2箇所は同一のreason_code〕)
+        "HOLDINGS_WATCHLIST_RUNTIME_CONFIG_STALE_CACHE_USED",
+        "HOLDINGS_WATCHLIST_RUNTIME_CONFIG_FALLBACK_USED",
+        "HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED",
     }
 )
 
@@ -526,6 +532,8 @@ _REVIEWED_HANDLED_FAILURE_FILES = frozenset(
         "services/watchlist_batch_finalizer.py",
         # Issue #675(HF-10)
         "services/shareholder_benefit_registry_service.py",
+        # Issue #669(HF-4)
+        "services/holding_decision_runtime_config_service.py",
     }
 )
 
@@ -750,6 +758,16 @@ _REVIEWED_INCIDENT_CONTENT_LABELS = {
     ),
     "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED": (
         "保有銘柄の判定時点のデータの保存に失敗しました"
+    ),
+    # Issue #669(HF-4): ★ PROVISIONAL(暫定の文言。USERの承認なし)。deploy前にUSERの確認が要る。
+    "HOLDINGS_WATCHLIST_RUNTIME_CONFIG_STALE_CACHE_USED": (
+        "保有判断の設定を取得できず、直前に取得した設定で処理を続けています"
+    ),
+    "HOLDINGS_WATCHLIST_RUNTIME_CONFIG_FALLBACK_USED": (
+        "保有判断の設定を取得できず、安全側の既定の設定で処理を続けています"
+    ),
+    "HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED": (
+        "通知設定を取得できなかったため、投資判断の通知を止めた状態で処理を続けています"
     ),
     "CLOUDWATCH_ALARM": "システムの監視アラームが検知されました",
     "OTHER": "技術的な問題を検知しました",
