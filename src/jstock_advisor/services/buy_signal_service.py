@@ -159,6 +159,7 @@ from jstock_advisor.domain.valuation.valuation_methods import (
     build_valuation_summary,
     compute_valuation_anchor,
     determine_dispersion_band,
+    valuation_dispersion_config_values,
 )
 from jstock_advisor.infrastructure.local_repository.holdings_snapshot_repository import (
     HoldingsSnapshotRepository,
@@ -1940,9 +1941,18 @@ class BuySignalService:
                 # 左右するため、判定時点の値をスナップショットする。後からconfigを
                 # 変更しても、過去の判定を"現在の"閾値で誤って再解釈しないため
                 # (score_thresholds/scoring_weightsと同じ理由)。
-                # low_max/auto_buy_blockの未記録は別Issue(#189)。
+                # low_max/auto_buy_blockの未記録は#189で解消した(下の
+                # "valuation_dispersion"ブロック)。
                 "valuation_dispersion_anchor_block": (
                     self._config.buy_decision.valuation_dispersion.anchor_block
+                ),
+                # Issue #189: ばらつき閾値4値(low_max/medium_max/auto_buy_block/
+                # anchor_block)と集約規則の版のブロック。上の個別キー
+                # (valuation_dispersion_anchor_block)と、下の
+                # valuation_dispersion_medium_maxは、stock_analysis_view_service等の
+                # 読み手との互換のために残してあり、ブロックとの重複は意図的。
+                "valuation_dispersion": valuation_dispersion_config_values(
+                    self._config.buy_decision.valuation_dispersion
                 ),
                 # Issue #179: 52週安値フィルタの境界帯の下限。除外閾値そのもの
                 # (0.50)はコード定数のままであり記録対象外(#180のscope)。
