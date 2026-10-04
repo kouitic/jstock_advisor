@@ -4934,6 +4934,18 @@ BUILD_SOURCE_SHA_MATCHES_RELEASE_TARGET = YES/NO
 手動記録で足りる(#649 Design-First期間の方針。自動化は将来のfollow-up
 候補)。
 
+container build(`sam build --use-container`)を使った場合は、上記に加えて、buildに使った
+イメージ・そのdigest・architecture・toolchainを記録する(USER判断 2026-10-04の条件D。
+Issue #796・#798。USER判断の原文は36.5.1に引用)。toolchainの例: Python・pip・SAM CLI・
+aws_lambda_buildersの版。
+
+```
+BUILD_IMAGE         = container buildに使ったイメージ(tag)
+BUILD_IMAGE_DIGEST  = 同イメージのdigest
+BUILD_ARCHITECTURE  = build時のarchitecture
+BUILD_TOOLCHAIN     = build時のtoolchain(上記の例のとおり)
+```
+
 ### 36.5 Build artifact identityの記録(PRE_CREATE GATE)
 
 **前節(36.3〜36.4)までの手順は「正しいsourceからbuildしたこと」しか
@@ -5012,6 +5024,54 @@ BUILD_ARTIFACT_IDENTITYとして記録する:
      ...(対象Lambda/Layerごとに列挙)
 ```
 
+#### 36.5.1 期待差分の事前申告とartifact hashの比較(USER判断 2026-10-04。Issue #796・#798)
+
+原本: Issue #122 のUSER_DECISION_RECORD(issuecomment-5977840842)。以下の引用はUSERの
+発言の原文である(要約・言い換えをしていない)。引用の外の記述は、引用元の所在と、条件の
+手順書上の置き場所を示すだけで、USERの文言を超える規則を追加しない(例の値・閾値は定めない)。
+
+> 3. DEPENDENCIES_LAYER_EXPECTED_DIFF_DECLARATION = 採用
+>
+> 4. CONFIG_LAYER_LF_CHANGE_AND_CONTAINER_BUILD_SAME_RELEASE = 採用（条件付き）
+>
+> CONDITIONS_FOR_4 =
+>   A. ConfigLayer の LF 化と container build 化を、release 前に別々の変更要因として明示する
+>   B. それぞれの変更によって「どの artifact が変わるはずか」を事前申告する
+>   C. build 前に worktree bytes = Git SSoT を確認する
+>   D. container build のイメージ / digest / architecture / toolchain を記録する
+>   E. ConfigLayer / DependenciesLayer の artifact hash を前回 Production と比較する
+>   F. 想定外の artifact 差分が 1 件でもあれば CREATE / EXECUTE を止める
+>   G. ChangeSet 上で両 Layer の version 更新が事前申告どおりであることを確認する
+>   H. Lambda 15関数の code artifact に想定外差分がないことを確認する
+>   I. 同一releaseに含める理由を release tracking Issue に明記する
+
+本節の整理(★USER判断の引用ではない):
+
+```
+1  決定3(DependenciesLayerの期待差分の事前申告)
+   DependenciesLayerの期待差分を、ChangeSet CREATEの前に事前申告する。申告の内容は、変更要因と、
+   その変更によって「どのartifactが変わるはずか」(条件Bの文言)とする。
+   申告のないDependenciesLayerの差分は想定外として扱い、14.1の3のとおり、原因を確認してから
+   実行する。
+2  決定4(ConfigLayerのLF化とcontainer build化を同一releaseに含める場合)の条件A〜I
+   条件A〜Iは、決定4の同一releaseの場合の条件として示された。他のreleaseにも同じ条件を
+   適用するかは、本節では定めない。手順書上の置き場所:
+     A・B   上の1の事前申告。2つの変更要因を別々に明示し、それぞれで変わるはずのartifactを申告する
+     C      build前のゲート(36.3)の項目として、別に追記する(本節の範囲外)
+     D      36.4(container buildの記録)
+     E・F   下の3
+     G・H   36.6.1
+     I      下の4
+3  前回Productionとのartifact hashの比較(条件E・F)
+   ConfigLayerとDependenciesLayerのartifact hash(36.5のBUILD_ARTIFACT_IDENTITYの`<key>`)を、
+   前回Productionが参照しているartifactのkey(deploy済みstackのprocessed template。36.7と同じ
+   `aws cloudformation get-template --template-stage Processed`)と比較する。
+   事前申告にない想定外のartifact差分が1件でもあれば、ChangeSet CREATE / EXECUTEを止める。
+4  同一releaseに含める理由(条件I)
+   ConfigLayerのLF化とcontainer build化を同一releaseに含める場合は、その理由をrelease tracking
+   Issueに明記する。
+```
+
 ### 36.6 ChangeSet artifact identityの照合(POST_CREATE / PRE_EXECUTE GATE)
 
 ChangeSet **CREATE後・EXECUTE前**に行う(31.1節のとおりCREATE_COMPLETEは
@@ -5059,6 +5119,20 @@ CHANGESET_ARTIFACT_IDENTITYの記録・突き合わせは実施していなか�
 (2026-10-02、ChatGPTレビュー指摘により判明。過大な実績主張を訂正する)。**
 本節は新たに明文化した手順であり、次回のrelease実行が初めての実地
 検証機会になる。
+
+#### 36.6.1 ChangeSet上のLayerのversion更新とLambdaのcode artifactの確認(USER判断 2026-10-04の条件G・H)
+
+36.5.1の条件G・H(原文は36.5.1に引用)を、ChangeSet CREATEの後・EXECUTEの前に確認する。
+決定4(ConfigLayerのLF化とcontainer build化を同一releaseに含める場合)の条件として示された
+もので、他のreleaseにも適用するかは、本節では定めない。
+
+```
+G  ChangeSet上で、ConfigLayerとDependenciesLayerのversion更新(Add / Remove)が、36.5.1の
+   事前申告どおりであることを確認する
+H  全てのLambda関数のcode artifactのkeyに、事前申告にない想定外の差分がないことを確認する
+   (36.6の1〜3のCHANGESET_ARTIFACT_IDENTITYのkeyを使う)
+F  上のG・Hで想定外の差分が1件でもあれば、EXECUTEへ進まない(36.5.1の3)
+```
 
 ### 36.7 Deploy設定(samconfig.toml)の非センシティブ値drift確認(#650)
 
@@ -5118,6 +5192,12 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 [ ] BUILD_ARTIFACT_IDENTITY: Lambda/Layerごとのbuild artifact identity
                     (sam deployのアップロードkey)を記録した(36.5)
 [ ] SAMCONFIG_DRIFT: samconfig.tomlの非センシティブ値がexampleと一致する(36.7)
+[ ] BUILD_CONTAINER_RECORD: container buildの場合、イメージ・digest・architecture・toolchainを
+                    記録した(36.4)
+[ ] EXPECTED_ARTIFACT_CHANGE: DependenciesLayerの期待差分(変更要因と、変わるはずのartifact)を
+                    CREATEの前に事前申告した(36.5.1。決定4の場合は条件A〜I)
+[ ] ARTIFACT_HASH_COMPARISON: ConfigLayer / DependenciesLayerのartifact hashを前回Productionと
+                    比較し、想定外の差分が無いことを確認した(36.5.1の3。決定4の場合)
 ```
 
 **→ ChangeSet CREATE実行 →**
@@ -5132,6 +5212,10 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
                     EXECUTEへ進まない)
 [ ] CHANGESET_DIFF_REVIEW: ChangeSetの差分(Add/Modify/Delete/Replacement)を
                     人間が確認した(既存の運用。本節が新設するものではない)
+[ ] LAYER_VERSION_CHANGE_AS_DECLARED: 両Layerのversion更新が事前申告どおりである(36.6.1。
+                    決定4の場合)
+[ ] LAMBDA_CODE_ARTIFACT_NO_UNEXPECTED_DIFF: 全てのLambda関数のcode artifactに想定外の差分が
+                    ない(36.6.1。決定4の場合)
 ```
 
 **→ EXECUTE(USER承認を要する別のHuman Gate。31節参照)**
