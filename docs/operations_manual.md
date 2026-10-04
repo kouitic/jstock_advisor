@@ -1790,13 +1790,14 @@ lock方式で管理しています(それまでは範囲指定のみだったた
 - lockを更新しない限り、`sam build`は何度・いつ実行しても同一の依存集合を
   生成します。rollback時は過去コミットをcheckoutして`sam build`すれば当時の
   Layerが再現されます(PyPI側でyank/削除されていない限り)
-- ※注記(Issue #796。上の記述はRelease W10で成立しなかった): 上の「同一の依存集合」は、
+- ※注記(Issue #796。Release W10で、同じ版でもLayerのバイト列が前回と一致しなかった): 上の「同一の依存集合」は、
   パッケージとその版が同一であることを指します。同じ版でも、wheelの種別
   (例: cryptographyのmanylinux_2_17とmanylinux_2_34)は、build環境(ホストのOS・glibc・
   pip・SAM CLIとaws_lambda_buildersの版・`--use-container`の使用の有無)で変わりえます。
-  このため、同じ入力・同じ版でも、build環境が異なればDependenciesLayerのバイト列
-  (ディレクトリMD5)は一致しません。上の「rollback時に当時のLayerが再現される」は、
-  build環境が同一の場合に限られます。詳細はIssue #796を参照してください
+  このため、同じ入力・同じ版でも、build環境が同一でなければ、DependenciesLayerのバイト列
+  (ディレクトリMD5)の一致は保証されません(一致しないことがあります)。上の「rollback時に
+  当時のLayerが再現される」も、build環境が同一でない場合は保証されません。
+  詳細はIssue #796を参照してください
 - `tzdata`は`requirements.in`へ明示的に記載しています(pandas等がWindows限定
   markerで宣言しているため、Linux向け解決では自動には入らない。従来の
   Windows機ビルドの本番Layerとの同一性維持と、Lambda実行環境でのzoneinfo用
