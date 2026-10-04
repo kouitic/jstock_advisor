@@ -568,7 +568,7 @@ def infer_legacy_recommendation_scope(recommendation: Recommendation) -> Recomme
     2. ``owner``・``holding_id``がともにNone、``shares_at_recommendation``が非None、かつ
        寄与する保有の一覧が2件以上 -> ``HOUSEHOLD_AGGREGATE``(#329の複数保有寄与のケース)
     3. ``shares_at_recommendation``がNone、かつ``owner``・``holding_id``がともにNone、
-       かつ寄与する保有の一覧が無い(または空) -> ``STOCK_SCOPE``(保有固有の情報を一切持たない)
+       かつ寄与する保有の一覧が無い(または空) -> ``STOCK_SCOPE``(owner・holding_id・株数を持たない)
     4. 上記のいずれにも一致しない -> ``UNKNOWN_LEGACY``
        (例: owner・holding_idがNoneで株数だけを持つが寄与する保有が1件以下・欠落 /
        ownerだけ・holding_idだけを持つ / 株数が無いのにownerを持つ)

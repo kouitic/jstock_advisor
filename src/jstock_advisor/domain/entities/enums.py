@@ -1511,7 +1511,9 @@ class RecommendationScope(StrEnum):
     * ``SINGLE_HOLDING``: 1件の保有についての推奨(``owner``・``holding_id``を持つ)
     * ``HOUSEHOLD_AGGREGATE``: 家計内の複数の保有を合算した推奨(``owner``・``holding_id``は
       None。寄与する保有の一覧は``config_values_used["contributing_holding_ids"]``)
-    * ``STOCK_SCOPE``: 保有に依らない銘柄についての推奨(買い候補。保有固有の情報を持たない)
+    * ``STOCK_SCOPE``: 保有に依らない銘柄についての推奨(買い候補)。``owner``・``holding_id``・
+      ``shares_at_recommendation``を持たない。買い増し候補では、保有者の保有から導いた参考値
+      (保有数量・評価額など)を別のフィールドに持つことがある(それらはscopeの判定に使わない)
     * ``UNKNOWN_LEGACY``: ``scope_type``を持たない旧レコードのうち、他のフィールドから
       復元できない・互いに矛盾するもの。★ 推測で他の値へ倒さず、この値として明示する。
       新しいレコードを構築するコードがこの値を設定することは想定しない

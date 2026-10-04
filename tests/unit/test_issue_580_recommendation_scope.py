@@ -386,8 +386,11 @@ def test_legacy_inference_rules_1_to_3(
             "shares_at_recommendation": 100,
             "config_values_used": {"contributing_holding_ids": _IDS2},
         },
-        # 株数が無いのに寄与一覧が非空(規則 3 の不変条件〔保有固有の情報を持たない〕に反する)
+        # 株数が無いのに寄与一覧が非空(規則 3 の不変条件〔owner・holding_id・株数なし〕に反する)
         {"config_values_used": {"contributing_holding_ids": _IDS1}},
+        # ★ owner・holding_id・株数のいずれも無く、寄与する保有が 2 件以上(株数が無いのに合算の
+        #   一覧がある = 矛盾)。規則 2 の「株数が非 None」を外すと HOUSEHOLD_AGGREGATE へ倒れる
+        {"config_values_used": {"contributing_holding_ids": _IDS2}},
     ],
 )
 def test_legacy_inference_rule_4_unrestorable_records_become_unknown_legacy(
