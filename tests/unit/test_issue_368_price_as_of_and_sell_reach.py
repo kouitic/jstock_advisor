@@ -45,7 +45,7 @@ from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
 )
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
-from tests.factories import FakeMarketDataProvider
+from tests.factories import FakeMarketDataProvider, build_recommendation
 from tests.unit.test_buy_signal_service import (
     _CALENDAR as _BUY_CALENDAR,
 )
@@ -148,7 +148,7 @@ def test_profit_taking_service_wires_price_as_of_date_from_snapshot(
 
 
 def _rec_for_label(price_as_of_date: dt.date | None) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-label",
         stock_code="0000",
         stock_name="テスト銘柄",
@@ -293,7 +293,7 @@ def _market_data_with_bars(bars: list[PriceBar]) -> FakeMarketDataProvider:
 
 
 def _make_sell_recommendation(recommended_at: dt.datetime) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-sell-1",
         stock_code="2914",
         stock_name="テスト銘柄",
@@ -458,7 +458,7 @@ def test_sell_price_reach_is_none_when_recommendation_has_no_sell_prices(
         tmp_path, config, calendar, now, market_data
     )
     recommendation_repo.save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-buy-only",
             stock_code="2914",
             stock_name="テスト銘柄",

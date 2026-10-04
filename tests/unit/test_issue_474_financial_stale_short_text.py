@@ -76,6 +76,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.services.financial_freshness_integration import FINANCIAL_STALE_USER_WARNING
 from jstock_advisor.services.line_notification_service import LineNotificationService
+from tests.factories import build_recommendation
 
 _CONFIG = load_config()
 _NOW = dt.datetime(2026, 10, 3, 8, 0, tzinfo=dt.UTC)
@@ -108,7 +109,7 @@ def _recommendation(
     key_risks: list[str] | None = None,
     valuation_caveats: list[str] | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=f"rec-{uuid.uuid4()}",
         stock_code="8306",
         stock_name=stock_name,

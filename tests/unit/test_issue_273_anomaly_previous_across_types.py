@@ -60,6 +60,7 @@ from jstock_advisor.services.line_notification_service import (
     _RECOMMENDATION_TO_NOTIFICATION_TYPE,
     LineNotificationService,
 )
+from tests.factories import build_recommendation
 
 _CONFIG = load_config()
 #: 適正価格の急変とみなす閾値（config/data_validation 由来の実値）。
@@ -101,7 +102,7 @@ def _recommendation(
     recommended_at: dt.datetime = _NOW,
 ) -> Recommendation:
     """架空の推奨。`fair_value_at_recommendation` だけが急変検知の対象になる。"""
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=_STOCK,
         stock_name="銘柄 X",

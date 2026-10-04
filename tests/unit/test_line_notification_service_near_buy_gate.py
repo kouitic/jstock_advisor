@@ -38,6 +38,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.line_notification_service import LineNotificationService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -52,7 +53,7 @@ class _FakeLineClient(LineClient):
 
 
 def _near_buy_recommendation() -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-near-buy-1",
         stock_code="9432",
         stock_name="NTT",

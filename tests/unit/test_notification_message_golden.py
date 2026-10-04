@@ -62,7 +62,6 @@ from jstock_advisor.domain.entities.holding_evaluation_record import (
     HoldingEvaluationRecord,
     build_holding_evaluation_id,
 )
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
@@ -84,6 +83,7 @@ from jstock_advisor.services.watchlist_addition_summary_builder import (
     WatchlistAdditionItemView,
     WatchlistAdditionSummary,
 )
+from tests.factories import build_recommendation
 
 _GOLDEN_DIR = Path(__file__).parent / "golden" / "notification"
 _UPDATE_ENV = "UPDATE_GOLDEN"
@@ -189,7 +189,7 @@ def test_stock_analysis_notification_body(tmp_path: Path) -> None:
         )
     )
     RecommendationRepository(store_dir=tmp_path).save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-1",
             stock_code=_CODE,
             stock_name=_NAME,
@@ -276,7 +276,7 @@ def _save_holding_evaluation_record(store_dir: Path, **overrides: object) -> Non
 def test_stock_analysis_holding_profit_taking_status_body(tmp_path: Path) -> None:
     """銘柄分析(保有銘柄)。#222 N-5: 含み益率・上値余地・まだ利確しない理由を本文へ出す領域。"""
     RecommendationRepository(store_dir=tmp_path).save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-watch",
             stock_code=_CODE,
             stock_name=_NAME,
@@ -351,7 +351,7 @@ def test_stock_analysis_holding_hold_facts_body(tmp_path: Path) -> None:
 
 def test_profit_taking_notification_body() -> None:
     """利確判定(全部売却の検討)。実際に LINE へ送信される本文(短文の経路)。"""
-    recommendation = Recommendation(
+    recommendation = build_recommendation(
         recommendation_id="rec-profit",
         stock_code=_CODE,
         stock_name=_NAME,
@@ -373,7 +373,7 @@ def test_profit_taking_notification_body() -> None:
 
 def test_sell_notification_body() -> None:
     """売却判断(SELL)。実際に LINE へ送信される本文(短文の経路)。"""
-    recommendation = Recommendation(
+    recommendation = build_recommendation(
         recommendation_id="rec-sell",
         stock_code=_CODE,
         stock_name=_NAME,
