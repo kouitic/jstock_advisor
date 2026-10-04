@@ -46,6 +46,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.stock_analysis_view_service import StockAnalysisViewService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 25, 7, 0, tzinfo=dt.UTC)
 _HOLDING_ID = "本人#8306"
@@ -96,7 +97,7 @@ def _save_buy_recommendation(store_dir: Path, **overrides) -> Recommendation:
         ),
     )
     defaults.update(overrides)
-    rec = Recommendation(**defaults)
+    rec = build_recommendation(**defaults)
     RecommendationRepository(store_dir=store_dir).save(rec)
     return rec
 
@@ -1594,7 +1595,7 @@ def _save_holding_eval_record(store_dir: Path, **overrides) -> None:
 
 
 def test_partial_profit_take_shows_quantity_flow_with_ratio_snapshot(tmp_path: Path) -> None:
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-sell-1",
         stock_code="8306",
         stock_name="x",
@@ -1633,7 +1634,7 @@ def test_partial_profit_take_theoretical_quantity_floors_at_half_boundary(
     数量算出〔compute_suggested_sell_shares()〕と同じ方式)。shares=51・
     ratio=0.5のとき51*0.5=25.5円相当となり、組み込みround()(banker's
     rounding)なら26(偶数側)になるが、floor方式では25になる。"""
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-sell-half-boundary",
         stock_code="8306",
         stock_name="x",
@@ -1664,7 +1665,7 @@ def test_partial_profit_take_theoretical_quantity_floors_at_half_boundary(
 
 
 def test_full_profit_take_does_not_fabricate_a_ratio(tmp_path: Path) -> None:
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-sell-2",
         stock_code="8306",
         stock_name="x",
@@ -1694,7 +1695,7 @@ def test_full_profit_take_does_not_fabricate_a_ratio(tmp_path: Path) -> None:
 def test_legacy_sell_does_not_show_quantity_section(tmp_path: Path) -> None:
     """Legacy SELLエンジンには数量算出ロジックが無いため、他エンジンの比率
     ロジックを合成表示しない(修正8)。"""
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-sell-3",
         stock_code="8306",
         stock_name="x",
@@ -2125,7 +2126,7 @@ def test_n5_profit_taking_status_is_shown_for_a_watch_recommendation(
     従来は含み益率が監視水準を超える保有でも、通知本文にこれらが一切出ず、
     「なぜまだ利確しないのか」を利用者が読み取れなかった。
     """
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-222-watch",
         stock_code="8306",
         stock_name="x",
@@ -2172,7 +2173,7 @@ def test_n5_upside_line_is_omitted_when_the_ceiling_price_is_unusable(
     値が無いのに「上値余地なし」と書くと「余地が0」と誤読されるため、
     理由の側(not_yet_action_reasons)へ委ねる。
     """
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-222-nofv",
         stock_code="8306",
         stock_name="x",
@@ -2290,7 +2291,7 @@ def test_r3_profit_taking_section_is_shown_for_a_pure_hold(tmp_path: Path) -> No
     従来は recommendation が無い分岐が early return しており、利確の節へ
     構造的に到達しなかった。利確せずに持ち続けている保有こそ理由を知りたい。
     """
-    pt = Recommendation(
+    pt = build_recommendation(
         recommendation_id="rec-r3-pt",
         stock_code="8306",
         stock_name="x",
@@ -2587,7 +2588,7 @@ def test_r3_gain_pct_falls_back_and_is_never_silent(tmp_path: Path) -> None:
         rule_version="v1",
     )
     # a  買い候補側の項目があればそれを使う
-    a = Recommendation(
+    a = build_recommendation(
         recommendation_id="a",
         unrealized_profit_loss_pct=Decimal("11.1"),
         profit_protection_current_gain_pct=22.2,
@@ -2595,10 +2596,10 @@ def test_r3_gain_pct_falls_back_and_is_never_silent(tmp_path: Path) -> None:
     )
     assert "含み益率：11.10%" in _profit_taking_status_lines(a)
     # b  無ければ保有側の項目へフォールバックする
-    b = Recommendation(recommendation_id="b", profit_protection_current_gain_pct=22.2, **base)
+    b = build_recommendation(recommendation_id="b", profit_protection_current_gain_pct=22.2, **base)
     assert "含み益率：22.20%" in _profit_taking_status_lines(b)
     # c  両方無くても行を消さない
-    c = Recommendation(recommendation_id="c", **base)
+    c = build_recommendation(recommendation_id="c", **base)
     assert any("含み益率：不明" in line for line in _profit_taking_status_lines(c))
 
 
@@ -2636,7 +2637,7 @@ def test_issue_683_legacy_sell_with_profit_taking_not_run_shows_not_run(tmp_path
     実行されていなくても「含み益率：不明（判定時点の記録に含み益率が残っていません）」
     という誤った表示になっていた。
     """
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-683-legacy",
         stock_code="8306",
         stock_name="x",
@@ -2669,7 +2670,7 @@ def test_issue_683_profit_taking_authoritative_regression(tmp_path: Path) -> Non
     変わらない(record.profit_taking_recommendation_id == authoritative_
     recommendation_idの実データ上の一致を経由して、同じRecommendationへ
     到達する)。"""
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-683-pt",
         stock_code="8306",
         stock_name="x",
@@ -2705,7 +2706,7 @@ def test_issue_683_non_profit_taking_authoritative_restores_from_profit_taking_r
     Productionには存在しないが構造的にありうる)でも、profit_taking_
     recommendation_id経由でそのサイクルの利確判定自体(別のRecommendation)を
     正しく復元する(authoritative側の内容を誤って使わない)。"""
-    legacy_sell_rec = Recommendation(
+    legacy_sell_rec = build_recommendation(
         recommendation_id="rec-683-t4-legacy",
         stock_code="8306",
         stock_name="x",
@@ -2716,7 +2717,7 @@ def test_issue_683_non_profit_taking_authoritative_restores_from_profit_taking_r
         rule_version="v1",
         reasons=["該当ルール: 投資前提の重大な悪化"],
     )
-    profit_taking_rec = Recommendation(
+    profit_taking_rec = build_recommendation(
         recommendation_id="rec-683-t4-pt",
         stock_code="8306",
         stock_name="x",
@@ -2748,7 +2749,7 @@ def test_issue_683_ran_but_no_pointer_shows_missing_record(tmp_path: Path) -> No
     """T5: profit_taking_ran=Trueだがprofit_taking_recommendation_id・
     profit_taking_audit_log_idのいずれもNone(真のデータ損失)の場合のみ
     「記録欠落」文言を出す。"""
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-683-t5",
         stock_code="8306",
         stock_name="x",
@@ -2790,7 +2791,7 @@ def test_issue_685_boundary_value_no_longer_contradicts_the_reason_text(tmp_path
     reasonと並べると自己矛盾していた。修正後は"29.95%"と表示され、閾値未満
     であることが視覚的にも一致する。
     """
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-685-t1",
         stock_code="8306",
         stock_name="x",
@@ -2842,7 +2843,7 @@ def test_issue_685_boundary_sweep(tmp_path: Path) -> None:
         "30.01": "含み益率：30.01%",
     }
     for value, expected_line in cases.items():
-        rec = Recommendation(
+        rec = build_recommendation(
             recommendation_id=f"rec-685-{value}",
             profit_protection_current_gain_pct=float(value),
             **base,
@@ -2865,10 +2866,10 @@ def test_issue_685_values_far_from_threshold_are_unaffected(tmp_path: Path) -> N
         confidence=ConfidenceLevel.MEDIUM,
         rule_version="v1",
     )
-    low = Recommendation(
+    low = build_recommendation(
         recommendation_id="rec-685-low", profit_protection_current_gain_pct=15.0, **base
     )
-    high = Recommendation(
+    high = build_recommendation(
         recommendation_id="rec-685-high", profit_protection_current_gain_pct=50.0, **base
     )
     assert "含み益率：15.00%" in _profit_taking_status_lines(low)
@@ -2888,7 +2889,7 @@ def test_issue_685_sweep_upside_pct_and_pure_hold_audit_lines_use_two_decimals(
         _profit_taking_status_lines,
     )
 
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-685-t4-upside",
         stock_code="8306",
         stock_name="x",
