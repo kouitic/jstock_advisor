@@ -35,6 +35,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers import buy_candidates_handler as handler_module
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -317,10 +318,9 @@ def test_save_evaluation_record_safely_swallows_exception_and_still_returns_resu
 
     from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
     from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-    from jstock_advisor.domain.entities.recommendation import Recommendation
     from jstock_advisor.services.buy_signal_service import BuyAnalysisOutcome
 
-    recommendation = Recommendation(
+    recommendation = build_recommendation(
         recommendation_id="rec-1",
         stock_code="2914",
         stock_name="銘柄2914",

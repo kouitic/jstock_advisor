@@ -11,6 +11,7 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 27, tzinfo=dt.UTC)
 _CONFIG = load_config().data_validation.consistency_validation
@@ -27,7 +28,7 @@ def _recommendation(
     evidence_details: list[dict] | None = None,
     independent_evidence_group_count: int | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-1",
         stock_code="2914",
         stock_name="JT",
@@ -363,7 +364,7 @@ def _buy_recommendation(
         valuation_dispersion_ratio=Decimal("1.1"),
     )
     base.update(overrides)
-    return Recommendation(**base)  # type: ignore[arg-type]
+    return build_recommendation(**base)  # type: ignore[arg-type]
 
 
 def test_buy_action_not_flagged_when_consistent() -> None:

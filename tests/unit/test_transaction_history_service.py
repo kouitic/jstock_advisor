@@ -26,12 +26,13 @@ from jstock_advisor.infrastructure.local_repository.transaction_repository impor
     TransactionRepository,
 )
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
 
 
 def _buy_recommendation(recommendation_id: str = "rec-buy") -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="2914",
         stock_name="日本たばこ産業",
@@ -49,7 +50,7 @@ def _buy_recommendation(recommendation_id: str = "rec-buy") -> Recommendation:
 
 
 def _profit_take_recommendation(recommendation_id: str = "rec-sell") -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="2914",
         stock_name="日本たばこ産業",

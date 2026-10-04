@@ -17,6 +17,7 @@ from jstock_advisor.services.data_quality_service import (
     check_split_consistency,
     detect_anomalies,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 27, tzinfo=dt.UTC)
 _SOURCE = DataSourceReference(provider="test", fetched_at=_NOW)
@@ -166,7 +167,7 @@ def _recommendation(
     dividend_yield_pct: float | None = None,
     dividend_record_date: dt.date | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-1",
         stock_code="2914",
         stock_name="JT",

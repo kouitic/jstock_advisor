@@ -35,6 +35,7 @@ from jstock_advisor.services.stock_snapshot_service import (
     build_financial_input_provenance,
     build_stock_snapshot,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 9, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -195,7 +196,7 @@ def test_sell_pipeline_captures_provenance() -> None:
 def test_recommendation_serialization_round_trip_with_provenance() -> None:
     snapshot = _snapshot()
     provenance = build_financial_input_provenance(snapshot.financial, snapshot.dividend)
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="fp1-rec-1",
         stock_code="2914",
         stock_name="テスト銘柄",
@@ -212,7 +213,7 @@ def test_recommendation_serialization_round_trip_with_provenance() -> None:
 
 def test_recommendation_without_provenance_means_not_captured() -> None:
     """financial_input_provenance未指定(旧レコード相当)はNone=NOT_CAPTURED。"""
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="fp1-rec-0",
         stock_code="2914",
         stock_name="テスト銘柄",
