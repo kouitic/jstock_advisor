@@ -28,6 +28,7 @@ from jstock_advisor.domain.signals.profit_taking import (
     _apply_mitigating_factors,
 )
 from jstock_advisor.services.line_notification_service import render_notification_preview
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 29, 9, 0, tzinfo=dt.UTC)
 
@@ -186,7 +187,7 @@ def _holding_decision_recommendation(
     shares: int | None = 100,
     config_values_used: dict | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-hd-1",
         stock_code="2914",
         stock_name="テスト株式会社",

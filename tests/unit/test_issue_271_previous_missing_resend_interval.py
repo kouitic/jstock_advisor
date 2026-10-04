@@ -68,6 +68,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.line_notification_service import LineNotificationService
+from tests.factories import build_recommendation
 
 _CONFIG = load_config()
 #: config/notification_rules.yaml の実値。ここを変えると本テストの境界も動く。
@@ -122,7 +123,7 @@ def _sell_recommendation(
         sell_prices = SellPriceLevels(
             immediate_execution_price=PriceWithRationale(price=price, rationale="架空の根拠")
         )
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=_STOCK,
         stock_name="銘柄 X",

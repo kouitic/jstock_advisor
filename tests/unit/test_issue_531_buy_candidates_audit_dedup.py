@@ -48,6 +48,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers import buy_candidates_handler
 from jstock_advisor.services.audit_service import AuditService
+from tests.factories import build_recommendation
 
 _CONFIG = load_config()
 
@@ -180,7 +181,7 @@ def test_record_evaluation_audit_negative_verification_without_record_if_absent(
 
 
 def _make_recommendation(stock_code: str) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-1",
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
@@ -391,7 +392,7 @@ def test_same_stock_code_in_near_buy_and_watch_end_records_two_notification_outc
     )
     repo = RecommendationRepository(store_dir=tmp_path)
 
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-dual-1",
         stock_code="9432",
         stock_name="銘柄9432",

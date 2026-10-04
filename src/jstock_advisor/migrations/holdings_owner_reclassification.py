@@ -12,16 +12,16 @@ BaselinePointer。
 対象外(過去履歴、owner="本人"の残存を許容・確定指示): Recommendation /
 NotificationLog / DecisionSnapshot / Transaction / HoldingDecisionResult /
 InvestmentThesisBaseline。過去のowner帰属を現在の保有者から遡って推定する
-ことはできないため。また4631のtombstone(active_holding=False、対応する
+ことはできないため。またある銘柄のtombstone(active_holding=False、対応する
 Holdingが存在しない)も対象外(owner確定不能のため現状維持、確定指示)。
 
-4680(ラウンドワン)は1 Holding(400株)→2 Holding(大きい持分側+小さい持分側)へ
-分割する特殊ケース。9434(ソフトバンク)はowner変更に加えて取得単価の
+分割対象の銘柄は1 Holding→2 Holding(大きい持分側+小さい持分側)へ
+分割する特殊ケース。単価訂正の対象の銘柄はowner変更に加えて取得単価の
 訂正(確定指示)を伴う。
 
 実行前precondition(2026-08-23確定指示、コードレビュー対応): dry-runでの
 人間確認だけに頼らず、build_plan()自身が実行のたびに対象銘柄の実データ
-(shares・取得単価・4680のlot構成)をユーザー確定値と照合し、一致しない
+(shares・取得単価・分割対象のlot構成)をユーザー確定値と照合し、一致しない
 場合はPlanValidationErrorでfail-closedに中止する(下記RealDataInput参照)。
 
 owner型は引き続きEnum/allow-listではない(domain/entities/owner.py)。
@@ -39,7 +39,7 @@ owner型は引き続きEnum/allow-listではない(domain/entities/owner.py)。
     存在有無)から計画を再構築する。あるstock_codeの旧Holding(owner="本人")
     が既に削除済みであれば、そのstock_codeは次回scanの対象に含まれず、
     計画にも一切現れない(=完了済みグループは自動的に再処理されない)。
-  - 1グループ(旧holding_id1件、4680のみ新holding_id2件)内の書き込み順序は
+  - 1グループ(旧holding_id1件、分割対象のみ新holding_id2件)内の書き込み順序は
     「新規作成(upsert、常に安全に再試行可能)」→「旧レコード削除」の順で、
     旧Holdingの削除を必ず最後に行う。これにより、旧Holdingがまだ存在する
     間はグループ全体が「移行未完了」とみなされ安全に再試行できる
@@ -54,7 +54,7 @@ owner型は引き続きEnum/allow-listではない(domain/entities/owner.py)。
     新holding_id側に既にスナップショットが存在する場合は再導出・
     上書きをせずスキップする(write-once)。
   - PurchaseLotはlot_idを主キーとし、変更しない(owner/holding_id/
-    (9434のみ)purchase_priceフィールドのみをin-placeで書き換える)ため、
+    (単価訂正の対象のみ)purchase_priceフィールドのみをin-placeで書き換える)ため、
     削除は不要かつ常に同じlot_idで安全に再upsertできる。
 """
 
@@ -347,7 +347,7 @@ class ReclassificationTarget:
     lot_ids: tuple[str, ...]
     is_split: bool
     price_corrected: bool
-    # 4680分割時、既存InvestmentThesis/BaselineSequence/BaselinePointerを
+    # 分割時、既存InvestmentThesis/BaselineSequence/BaselinePointerを
     # 引き継ぐのはどちらか一方のみ(確定指示: 大きい持分側)。
     inherits_thesis_and_baseline: bool
     inherits_snapshot: bool
@@ -438,7 +438,7 @@ def build_plan(
     holding_idはstock_codeではなく実際に存在するHolding.owner=="本人"の
     行から導出する。stock_codeでlotsをグルーピングする(holding_idではなく)
     ことで、途中失敗後の再実行で一部lotのholding_idフィールドが既に新owner
-    へ書き換わっていても正しく再グルーピングできる(4680分割の場合、
+    へ書き換わっていても正しく再グルーピングできる(分割の場合、
     lot単位でreal_data.split_lot_ownersにより最終的な帰属先を決定するため、
     現在のlot.owner値に依存しない)。
     """
@@ -471,7 +471,7 @@ def build_plan(
     # 「本移行を部分的に再実行した結果として既に正しく書き込み済みの状態」
     # なのか、「本移行と無関係な既存データとの真の衝突」なのかを、lotから
     # 独立に再計算した期待値との内容一致で判定する(途中失敗後の再実行時、
-    # 4680分割の片方だけが既に書き込まれている状態を誤って衝突と判定しない
+    # 分割の片方だけが既に書き込まれている状態を誤って衝突と判定しない
     # ため)。内容が一致しない場合のみfail-closedで中止する。
     existing_by_id = {h.holding_id: h for h in holdings if h.owner != OLD_OWNER}
     lots_by_id = {lot.lot_id: lot for lot in lots}
@@ -612,7 +612,7 @@ def _new_holding_for_target(
     }
     if target.is_split and not target.inherits_thesis_and_baseline:
         # 分割で新設される側(小さい持分側)は、累積配当・優待受取実績や直近
-        # 売却日等、旧Holding全体(400株)に紐づく履歴的な累積値をそのまま
+        # 売却日等、旧Holding全体(分割前の全株)に紐づく履歴的な累積値をそのまま
         # 引き継がない(継承側=大きい持分側が旧Holdingの継続とみなされる
         # ことと対称的な設計。完了報告で明示し、実行前にユーザー確認を得ること)。
         update.update(
@@ -635,7 +635,7 @@ def _new_snapshot_for_target(
     if target.inherits_snapshot and old_snapshot is not None:
         # cooldown_until_date/last_trade_event_type/trade_detected_atは旧
         # スナップショットからそのまま引き継ぎ、shares/average_purchase_price
-        # のみ分割後の値へ補正する(旧400株スナップショットをそのまま複製すると
+        # のみ分割後の値へ補正する(分割前の全株のスナップショットをそのまま複製すると
         # 次回TradeCooldownService実行時に虚偽のPARTIAL_SELLイベントが誤検知
         # されるため。実コード(trade_event_detection.py)確認済み)。
         return old_snapshot.model_copy(

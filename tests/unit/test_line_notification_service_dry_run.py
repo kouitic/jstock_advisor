@@ -44,6 +44,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.line_notification_service import LineNotificationService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 24, 8, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -93,7 +94,7 @@ class _SpyAuditService(AuditService):
 def _make_recommendation(
     recommendation_id: str = "rec-1", stock_code: str = "2914"
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name="日本たばこ産業",

@@ -118,7 +118,7 @@ def test_benefit_recurring_label_prefers_registered_recurrence_over_unknown_reas
     """2026-07修正の核心: 手動登録(CSV取込含む)でbenefit_record_datesが空でも
     recurrence_monthsが登録されていれば、unknown_reason(=SOURCE_NOT_FOUNDでも)に
     関わらず登録済み周期ラベルを優先する(優先度の低い理由コードで高い優先度の
-    登録済みデータを覆い隠さない、というのが根本原因の修正)。2269相当のケース。
+    登録済みデータを覆い隠さない、というのが根本原因の修正)。
     """
     benefit = _benefit(
         benefit_record_date_recurrence_months=[3],
@@ -132,7 +132,7 @@ def test_benefit_recurring_label_prefers_registered_recurrence_over_unknown_reas
 
 
 def test_benefit_record_date_recurring_label_multiple_recurrence_months() -> None:
-    """4680相当のケース: 年4回の登録済み周期がすべて表示される。"""
+    """年4回の登録済み周期がすべて表示される。"""
     benefit = _benefit(
         frequency_per_year=4,
         benefit_record_date_recurrence_months=[3, 6, 9, 12],

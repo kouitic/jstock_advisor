@@ -51,6 +51,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.lambda_handlers import buy_candidates_handler, holdings_watchlist_handler
+from tests.factories import build_recommendation
 
 _STOCK = "0000"
 _NOW = dt.datetime(2026, 9, 8, tzinfo=dt.UTC)
@@ -64,7 +65,7 @@ _VALIDATION_DRY_RUN = ExecutionContext(
 
 def _recommendation(recommendation_id: str = "rec-0001") -> Recommendation:
     """架空の推奨レコード（保存先の検証にのみ使う）。"""
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=_STOCK,
         stock_name="銘柄 X",

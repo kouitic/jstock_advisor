@@ -57,6 +57,7 @@ from jstock_advisor.services.holding_decision_service import HoldingDecisionEval
 from jstock_advisor.services.profit_taking_service import ProfitTakingOutcome
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.sell_signal_service import SellSignalOutcome
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 9, 25, 7, 0, tzinfo=dt.UTC)
 _STOCK_CODE = "2914"
@@ -129,7 +130,7 @@ def _holding(stock_code: str = _STOCK_CODE) -> Holding:
 def _minimal_recommendation(stock_code: str = _STOCK_CODE) -> Recommendation:
     from jstock_advisor.domain.entities.enums import ConfidenceLevel
 
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=str(uuid.uuid4()),
         stock_code=stock_code,
         stock_name="テスト銘柄",

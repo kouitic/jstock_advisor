@@ -33,6 +33,7 @@ from jstock_advisor.domain.signals.profit_taking import (
     evaluate_profit_taking,
 )
 from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState
+from tests.factories import build_recommendation
 
 _CFG = load_config()
 _WEIGHTS = _CFG.holding_decision.investment_thesis_weights
@@ -193,7 +194,7 @@ def test_line_total_yield_line_does_not_assert_zero_for_unknown() -> None:
 
 
 def _buy_recommendation(total_yield: float | None) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-1",
         stock_code="1234",
         stock_name="テスト",

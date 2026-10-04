@@ -14,6 +14,7 @@ from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.infrastructure.aws import trade_detection_lock
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)  # 月曜
 _HID_2914 = build_holding_id(DEFAULT_OWNER, "2914")
@@ -403,9 +404,8 @@ def _partial_sell_recommendation(now: dt.datetime) -> Any:
     from decimal import Decimal
 
     from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-    from jstock_advisor.domain.entities.recommendation import Recommendation
 
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="tc-e2e-partial-sell",
         stock_code="2914",
         stock_name="テスト銘柄",
