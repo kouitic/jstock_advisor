@@ -4777,6 +4777,37 @@ ACTIVATION_STATE    = OFF(BuyCandidateSqsDispatchEnabled /
 PRODUCTION_IMPACT   = dormant codeのみ
 ```
 
+#### 36.2.1 デプロイ単位の明確化(USER 決定 2026-10-03。Issue #785)
+
+原本: Issue #122 の USER_DECISION_RECORD(issuecomment-5968760192)の「1. デプロイの単位」。
+以下の引用は USER の発言の原文である(要約・言い換えをしていない)。引用の外の記述は、引用元の所在を示すだけで、規則を追加しない。
+
+> 案1「全量のリリース」で決定します。
+>
+> 手順書36.2の、デプロイ対象は承認済みのmain SHA全体とし、一部コミットを抽出したrelease branchは作らない という原則を維持します。案3の例外は新設しません。
+>
+> 今回判明した「1ファイルの変更でも共有Layer等によって15関数すべての成果物が変わる」という構造を考えると、#725や#778だけを論理的に独立扱いしても、実際のCloudFormation/SAMのリリース単位とは一致しません。
+>
+> したがって以前の私の「#725は独立ChangeSetにできるなら分ける」という判断は、次のように明確化します。独立ChangeSet化は、mainの同一SHAから作成しても他の未デプロイ変更を含まない場合に限る。今回のリポジトリ構造ではその条件を満たさないため適用しない。手順書36.2を優先する。
+>
+> A/B/Cは今後も「変更内容のリスク分類・レビュー単位」として分けて構いませんが、Productionへの物理的なデプロイ単位は1つのmain SHAです。
+>
+> また、これは「83件を今すぐデプロイしてよい」という意味ではありません。デプロイ単位とrelease readinessは別です。
+>
+> (中略。現時点の release readiness のゲートの列挙、および次回の release の範囲を述べた段落は、原本を参照)
+
+※ 上の引用の「83件」は USER の発言の原文である。この件数は、後に Issue #783 で単位を明記して測り直され、どの単位とも一致しない単位不明の見積もりだったため、本書は件数の根拠にしない。現在の件数は Issue #783 の最新の記録を参照すること。
+
+本小節は 36.2 の冒頭の USER 判断(2026-10-02)を変更しない。上の決定は、その原則を維持したうえでの明確化である。
+
+#### 36.2.2 single window の定義(USER 決定 2026-10-03。Issue #785)
+
+原本: Issue #122 の USER_DECISION_RECORD(issuecomment-5968256759)の「17. 運用手順書」。以下の引用は USER の発言の原文である。
+
+> single window：以下で定義します。1回のUSER承認を起点として、Production向けChangeSetのCREATE、差分確認、EXECUTE、完了確認までを連続して扱う1つの変更セッション。同セッションが完了または中断した後に作り直したChangeSetは、新しいwindowとして再承認を必要とする。つまり、「同じ日だから同じwindow」ではありません。
+
+本書の他の箇所の「window」(rotation window、non-overlapping-window 等)は、この定義の対象ではない(別の意味で使われている)。
+
 ### 36.3 Build前ゲート(BRANCH_GATE / SHA_GATE / CLEAN_TREE_GATE)
 
 Production release buildの直前に、以下を**必須手順**とする:
