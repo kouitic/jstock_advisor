@@ -32,6 +32,7 @@ from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
     resolve_business_day_zero,
 )
+from tests.factories import build_recommendation
 
 _STOCK_CODE = "2914"
 _RECOMMENDED_AT = dt.datetime(2024, 1, 4, tzinfo=dt.UTC)
@@ -51,7 +52,7 @@ def _make_recommendation(
     recommendation_id: str = "rec-1",
     recommendation_type: RecommendationType = RecommendationType.BUY,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=_STOCK_CODE,
         stock_name="テスト銘柄",

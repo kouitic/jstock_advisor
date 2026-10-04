@@ -22,6 +22,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.backtest_service import BacktestService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 _TARGET = "screening.total_yield.min_total_yield_pct"
@@ -30,7 +31,7 @@ _TARGET = "screening.total_yield.min_total_yield_pct"
 def _recommendation(
     rec_id: str, total_yield_pct: float, rec_type: RecommendationType = RecommendationType.BUY
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=rec_id,
         stock_code="2914",
         stock_name="test",

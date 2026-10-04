@@ -18,6 +18,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.performance_metrics_service import PerformanceMetricsService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 
@@ -28,7 +29,7 @@ def _recommendation(
     confidence: ConfidenceLevel,
     rule_version: str,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=rec_id,
         stock_code="2914",
         stock_name="test",

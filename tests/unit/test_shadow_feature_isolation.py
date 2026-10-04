@@ -117,6 +117,7 @@ from jstock_advisor.services.recommendation_evaluation_service import (
 )
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
+from tests.factories import build_recommendation
 
 _CFG = load_config()
 _NOW = dt.datetime(2026, 8, 9, tzinfo=dt.UTC)
@@ -1178,7 +1179,7 @@ def test_environment_does_not_leak_into_notification_text() -> None:
 
 
 def _phase_a_make_recommendation(recommendation_id: str = "rec-1") -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=_STOCK_CODE,
         stock_name="テスト銘柄",
