@@ -59,6 +59,7 @@ from jstock_advisor.providers.market_data.mock_impl import MockMarketDataProvide
 from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
 )
+from tests.factories import build_recommendation
 
 # ★ リポジトリ共通の mock fixture が持つ銘柄コード(providers/mock_fixtures.py の
 # MOCK_STOCKS)。MockMarketDataProvider は fixture に無いコードだと株価を返さず、
@@ -83,7 +84,7 @@ def calendar(config: AppConfig) -> BusinessCalendar:
 
 
 def _make_recommendation() -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=_RECOMMENDATION_ID,
         stock_code=_STOCK_CODE,
         stock_name="テスト銘柄",

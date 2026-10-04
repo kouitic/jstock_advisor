@@ -96,3 +96,4 @@ SWEEP_RESULT =
 - [ ] `mypy src`
 - [ ] targeted tests / related regression(4節のローカルテスト方針に従う)
 - [ ] 仕様に影響する変更なら `docs/functional_spec.md` を更新し、変更履歴に追記した
+- [ ] 個人特定情報および、それと結び付いた資産情報が含まれていないこと

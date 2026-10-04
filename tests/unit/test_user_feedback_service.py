@@ -9,7 +9,6 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
     TransactionType,
 )
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.transaction import Transaction
 from jstock_advisor.infrastructure.local_repository.feedback_repository import (
     UserFeedbackRepository,
@@ -21,6 +20,7 @@ from jstock_advisor.infrastructure.local_repository.transaction_repository impor
     TransactionRepository,
 )
 from jstock_advisor.services.user_feedback_service import UserFeedbackService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 
@@ -29,7 +29,7 @@ _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 def service(tmp_path: Path) -> UserFeedbackService:
     rec_repo = RecommendationRepository(store_dir=tmp_path)
     rec_repo.save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-1",
             stock_code="2914",
             stock_name="test",

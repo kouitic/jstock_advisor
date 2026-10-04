@@ -11,7 +11,6 @@ from jstock_advisor.domain.entities.enums import (
     RecommendationType,
 )
 from jstock_advisor.domain.entities.evaluation import EvaluationResult
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.evaluation_repository import (
     EvaluationResultRepository,
 )
@@ -23,6 +22,7 @@ from jstock_advisor.infrastructure.local_repository.rule_version_repository impo
 )
 from jstock_advisor.services.backtest_service import BacktestService
 from jstock_advisor.services.rule_proposal_service import RuleProposalService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 _TARGET = "screening.total_yield.min_total_yield_pct"
@@ -37,7 +37,7 @@ def _seed(
         rec_id = f"rec-{i}"
         yield_pct = 3.6 + (i % 5) * 0.5
         rec_repo.save(
-            Recommendation(
+            build_recommendation(
                 recommendation_id=rec_id,
                 stock_code="2914",
                 stock_name="test",
