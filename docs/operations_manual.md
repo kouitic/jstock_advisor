@@ -4820,6 +4820,23 @@ RELEASE_SCOPE_GATE(build前、36.3のBRANCH_GATE等より前に実施する)
    記録は「deployされていない」ではなく「CODE_DEPLOYED=YES /
    ACTIVATION_APPROVED=NO / ACTIVATION_STATE=OFF」として明確に区別する
    (#533がこの実例。本節末尾参照)
+
+6  UNKNOWNの扱い(USER判断 2026-10-04。下の「」内は Issue #122
+   issuecomment-5974589887 の4節の原文の引用で、引用部分は変更しない)
+
+   「CODE_DEPLOY_APPROVEDについて: release target SHA全体について、CODE_DEPLOY_APPROVED = NO が0件 / 有効な DEPLOY_HOLD が0件 / release scopeの棚卸しが完了 / USERがそのSHAのChangeSet実差分を確認したうえでEXECUTEを明示承認 した場合、そのEXECUTE承認を、当該release target SHAに含まれるProduction到達変更すべての CODE_DEPLOY_APPROVED = YES とみなす。」
+
+   「ACTIVATION_APPROVEDについては分けます。deployと同時に機能が有効になる変更 → EXECUTE承認を ACTIVATION_APPROVED = YES とみなす / shadow・dormant・feature flag OFFなど、deployしても利用者向け機能が有効にならない変更 → deployは許可する。activationは別Human Gate / 明示的に ACTIVATION_APPROVED = NO かつdeployだけで有効化される変更 → EXECUTE不可。」
+
+   上の引用の位置づけ(本節の整理。USER判断の引用ではない):
+   ・手順2でUNKNOWNとなった項目は、上の引用の条件がそろった時点(USERが当該SHAのChangeSet実差分を
+     確認したうえでEXECUTEを明示承認した時点)で、CODE_DEPLOY_APPROVED / ACTIVATION_APPROVEDの
+     値が定まる
+   ・手順3の停止条件(CODE_DEPLOY_APPROVED=NO / 明示的なDEPLOY_HOLD)は変わらない。
+     手順3は「明示的なDEPLOY_HOLD」(Issue自身が明記しているもの)と書き、引用の条件は
+     「有効な DEPLOY_HOLD」と書く。両者の文言は同一ではなく、範囲の異同は本節では定めない
+   ・shadow・dormant・feature flag OFFの変更は、EXECUTE承認でdeployまでを承認する。
+     activationは別のHuman Gateのままである
 ```
 
 **CODE_DEPLOY_APPROVEDとACTIVATION_APPROVEDを分離する理由**: feature
@@ -4842,6 +4859,37 @@ ACTIVATION_STATE    = OFF(BuyCandidateSqsDispatchEnabled /
                       HoldingsWatchlistSqsDispatchEnabled、いずれもfalse)
 PRODUCTION_IMPACT   = dormant codeのみ
 ```
+
+#### 36.2.1 デプロイ単位の明確化(USER 決定 2026-10-03。Issue #785)
+
+原本: Issue #122 の USER_DECISION_RECORD(issuecomment-5968760192)の「1. デプロイの単位」。
+以下の引用は USER の発言の原文である(要約・言い換えをしていない)。引用の外の記述は、引用元の所在を示すだけで、規則を追加しない。
+
+> 案1「全量のリリース」で決定します。
+>
+> 手順書36.2の、デプロイ対象は承認済みのmain SHA全体とし、一部コミットを抽出したrelease branchは作らない という原則を維持します。案3の例外は新設しません。
+>
+> 今回判明した「1ファイルの変更でも共有Layer等によって15関数すべての成果物が変わる」という構造を考えると、#725や#778だけを論理的に独立扱いしても、実際のCloudFormation/SAMのリリース単位とは一致しません。
+>
+> したがって以前の私の「#725は独立ChangeSetにできるなら分ける」という判断は、次のように明確化します。独立ChangeSet化は、mainの同一SHAから作成しても他の未デプロイ変更を含まない場合に限る。今回のリポジトリ構造ではその条件を満たさないため適用しない。手順書36.2を優先する。
+>
+> A/B/Cは今後も「変更内容のリスク分類・レビュー単位」として分けて構いませんが、Productionへの物理的なデプロイ単位は1つのmain SHAです。
+>
+> また、これは「83件を今すぐデプロイしてよい」という意味ではありません。デプロイ単位とrelease readinessは別です。
+>
+> (中略。現時点の release readiness のゲートの列挙、および次回の release の範囲を述べた段落は、原本を参照)
+
+※ 上の引用の「83件」は USER の発言の原文である。この件数は、後に Issue #783 で単位を明記して測り直され、どの単位とも一致しない単位不明の見積もりだったため、本書は件数の根拠にしない。現在の件数は Issue #783 の最新の記録を参照すること。
+
+本小節は 36.2 の冒頭の USER 判断(2026-10-02)を変更しない。上の決定は、その原則を維持したうえでの明確化である。
+
+#### 36.2.2 single window の定義(USER 決定 2026-10-03。Issue #785)
+
+原本: Issue #122 の USER_DECISION_RECORD(issuecomment-5968256759)の「17. 運用手順書」。以下の引用は USER の発言の原文である。
+
+> single window：以下で定義します。1回のUSER承認を起点として、Production向けChangeSetのCREATE、差分確認、EXECUTE、完了確認までを連続して扱う1つの変更セッション。同セッションが完了または中断した後に作り直したChangeSetは、新しいwindowとして再承認を必要とする。つまり、「同じ日だから同じwindow」ではありません。
+
+本書の他の箇所の「window」(rotation window、non-overlapping-window 等)は、この定義の対象ではない(別の意味で使われている)。
 
 ### 36.3 Build前ゲート(BRANCH_GATE / SHA_GATE / CLEAN_TREE_GATE)
 
@@ -5060,6 +5108,7 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 [ ] RELEASE_SCOPE_GATE: release targetに含まれる全変更のCODE_DEPLOY_APPROVED/
                     ACTIVATION_APPROVEDを確認し、DEPLOY_HOLDが無いことを
                     確認した(36.2。最初に実施する)
+                    (UNKNOWNの項目の扱いは36.2の手順6による)
 [ ] BRANCH_GATE    : 現在のbranch / release target SHAをfreshに確認した(36.3)
 [ ] SHA_GATE       : git rev-parse HEADがrelease target SHAと一致する(36.3)
 [ ] CLEAN_TREE_GATE: git status --porcelainが空である(36.3)
