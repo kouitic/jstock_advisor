@@ -44,6 +44,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.line_notification_service import LineNotificationService
+from tests.factories import build_recommendation
 
 _CONFIG = load_config()
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
@@ -88,7 +89,7 @@ def _build_service(
 
 
 def _recommendation(recommendation_id: str = "rec-1") -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=_STOCK_CODE,
         stock_name="テスト銘柄",

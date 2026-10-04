@@ -54,6 +54,7 @@ from jstock_advisor.services.line_notification_service import (
     NOTIFICATION_TEXT_CHAR_BUDGET,
     LineNotificationService,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 20, 4, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -437,11 +438,10 @@ def test_buy_digest_chunks_fit_budget_including_header_and_footer(tmp_path: Path
     算入されておらず実効上限が予算を超えていた(Issue #50、off-by-one)。
     完成形が予算内に収まることを検証する。"""
     from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-    from jstock_advisor.domain.entities.recommendation import Recommendation
 
     service, client = _build_service(tmp_path)
     winners = [
-        Recommendation(
+        build_recommendation(
             recommendation_id=f"rec-{i}",
             stock_code=f"{1000 + i}",
             stock_name="テスト銘柄名称" * 5,
@@ -469,11 +469,10 @@ def test_buy_digest_chunks_fit_budget_including_header_and_footer(tmp_path: Path
 def test_buy_digest_single_chunk_keeps_footer(tmp_path: Path) -> None:
     """1チャンクに収まる通常ケースの既存挙動を変えない。"""
     from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-    from jstock_advisor.domain.entities.recommendation import Recommendation
 
     service, client = _build_service(tmp_path)
     winners = [
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-1",
             stock_code="1234",
             stock_name="テスト",
