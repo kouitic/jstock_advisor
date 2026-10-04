@@ -13,6 +13,7 @@ from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     HoldingDecisionCategory,
     HoldingDecisionConfidenceLevel,
+    RecommendationScope,
     RecommendationType,
 )
 from jstock_advisor.domain.entities.exit_price_range import ExitPriceRangeResult
@@ -245,6 +246,8 @@ def build_holding_decision_recommendation(
 
     return Recommendation(
         recommendation_id=recommendation_id or str(uuid.uuid4()),
+        # Issue #580: 1件の保有についての推奨。
+        scope_type=RecommendationScope.SINGLE_HOLDING,
         owner=holding.owner,
         holding_id=holding.holding_id,
         stock_code=holding.stock_code,

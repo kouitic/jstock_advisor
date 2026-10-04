@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from decimal import Decimal
 from typing import Any
 
@@ -31,6 +32,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     PriceRangeEvaluationState,
     ProfitTakingIndustrySector,
+    RecommendationScope,
     RecommendationType,
     RecordDateUnknownReason,
     SourceType,
@@ -39,6 +41,8 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.financial_input_provenance import FinancialInputProvenance
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+
+logger = logging.getLogger(__name__)
 
 
 class Recommendation(ImmutableSnapshot):
@@ -517,6 +521,17 @@ class Recommendation(ImmutableSnapshot):
     owner: str | None = None
     holding_id: str | None = None
 
+    # Issue #580(#64 A-2): このRecommendationが何についての推奨かを明示する(型で検証できる
+    # ようにするためのレコード側のscope種別)。旧レコード(2026-10より前の保存分)はこの
+    # fieldを持たないためNone。★ 旧レコードのscopeは`resolve_recommendation_scope()`が
+    # legacy inferenceで復元し、復元できないものは黙って他の値へ倒さずUNKNOWN_LEGACYを返す。
+    # ★ 新しくRecommendationを構築するコードは、省略せず明示的に設定すること(型上はOptional
+    # だが、省略は旧レコード専用)。
+    # ★ rollbackの窓(運用手順書30.7と同型): このfieldを含むレコードを、このfieldを知らない
+    # 旧コード(extra="forbid")は読めない。保存はmodel_dump_json()でNoneも出力するため、新コードが
+    # 保存する全レコードが対象になる。反映直後(新レコードがまだ無い間)のrollbackは安全。
+    scope_type: RecommendationScope | None = None
+
     @property
     def recommended(self) -> bool:
         """買い候補として現在購入可能かどうかの派生値(直接設定不可)。
@@ -529,3 +544,66 @@ class Recommendation(ImmutableSnapshot):
         if self.buy_action is None:
             return False
         return self.buy_action in BUY_FAMILY_ACTIONS
+
+
+def _contributing_holding_count(recommendation: Recommendation) -> int | None:
+    """``config_values_used["contributing_holding_ids"]``の件数。無い・list/tupleでない場合はNone。"""
+    ids = recommendation.config_values_used.get("contributing_holding_ids")
+    if isinstance(ids, (list, tuple)):
+        return len(ids)
+    return None
+
+
+def infer_legacy_recommendation_scope(recommendation: Recommendation) -> RecommendationScope:
+    """``scope_type``を持たない旧レコードの種別を、他のフィールドから復元する(Issue #580)。
+
+    ``scope_type``の値は見ない(旧レコードはNone。呼び出し側は`resolve_recommendation_scope()`を
+    使う)。
+    規則は次の順に評価し、どれにも一致しない・不変条件に反する(矛盾する)レコードは、推測で
+    他の値へ倒さず``UNKNOWN_LEGACY``とする(その場合は warning を出す。識別子・所有者・保有株数は
+    ログに出さない)。
+
+    1. ``owner``と``holding_id``がともに非None、かつ寄与する保有の一覧が無いか1件以下
+       -> ``SINGLE_HOLDING``(2件以上あれば矛盾するため規則4)
+    2. ``owner``・``holding_id``がともにNone、``shares_at_recommendation``が非None、かつ
+       寄与する保有の一覧が2件以上 -> ``HOUSEHOLD_AGGREGATE``(#329の複数保有寄与のケース)
+    3. ``shares_at_recommendation``がNone、かつ``owner``・``holding_id``がともにNone、
+       かつ寄与する保有の一覧が無い(または空) -> ``STOCK_SCOPE``(owner・holding_id・株数を持たない)
+    4. 上記のいずれにも一致しない -> ``UNKNOWN_LEGACY``
+       (例: owner・holding_idがNoneで株数だけを持つが寄与する保有が1件以下・欠落 /
+       ownerだけ・holding_idだけを持つ / 株数が無いのにownerを持つ)
+    """
+    contributing = _contributing_holding_count(recommendation)
+    has_owner = recommendation.owner is not None
+    has_holding_id = recommendation.holding_id is not None
+    has_shares = recommendation.shares_at_recommendation is not None
+
+    if has_owner and has_holding_id and (contributing is None or contributing <= 1):
+        return RecommendationScope.SINGLE_HOLDING
+    if not has_owner and not has_holding_id and has_shares and (contributing or 0) >= 2:
+        return RecommendationScope.HOUSEHOLD_AGGREGATE
+    if not has_shares and not has_owner and not has_holding_id and not contributing:
+        return RecommendationScope.STOCK_SCOPE
+    # ★ Issue #135: logger の書式引数へ owner / holding_id 由来の名前を渡さない(静的検査が弾く)。
+    #   どのフィールドを持つかの有無だけを、中立な名前の短い文字列(owner・holding_id・株数の順に
+    #   0 / 1)と寄与する保有の件数で出す。値(所有者・holding_id・株数・銘柄コード)は出さない。
+    presence_pattern = f"{int(has_owner)}{int(has_holding_id)}{int(has_shares)}"
+    logger.warning(
+        "recommendation scope could not be restored from legacy fields "
+        "(presence_pattern=%s contributing_count=%s)",
+        presence_pattern,
+        contributing,
+    )
+    return RecommendationScope.UNKNOWN_LEGACY
+
+
+def resolve_recommendation_scope(recommendation: Recommendation) -> RecommendationScope:
+    """Recommendationの種別を返す(Issue #580)。
+
+    ``scope_type``があればそれが正本で、他のフィールドは見ない。無い旧レコードだけ
+    ``infer_legacy_recommendation_scope()``で復元する。scopeに依存する新しいコードは、
+    ``owner is not None``等の組合せ判定を自分で書かず、この関数を使うこと。
+    """
+    if recommendation.scope_type is not None:
+        return recommendation.scope_type
+    return infer_legacy_recommendation_scope(recommendation)
