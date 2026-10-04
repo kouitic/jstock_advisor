@@ -224,7 +224,7 @@ def _check_simple_precondition(
         )
 
 
-def _check_9434_precondition(
+def _check_price_correction_precondition(
     holding: Holding, stock_lots: list[PurchaseLot], real_data: RealDataInput
 ) -> None:
     lot_id = real_data.nine_four_three_four_lot_id
@@ -259,7 +259,7 @@ def _check_9434_precondition(
         )
 
 
-def _check_4680_precondition(
+def _check_split_precondition(
     holding: Holding, stock_lots: list[PurchaseLot], real_data: RealDataInput
 ) -> None:
     stock_code = real_data.split_stock_code
@@ -310,7 +310,7 @@ def _verify_preconditions(
 
     nine_four_three_four = old_holdings_by_stock.get(real_data.nine_four_three_four_stock_code)
     if nine_four_three_four is not None:
-        _check_9434_precondition(
+        _check_price_correction_precondition(
             nine_four_three_four,
             lots_by_stock_code.get(real_data.nine_four_three_four_stock_code, []),
             real_data,
@@ -318,7 +318,7 @@ def _verify_preconditions(
 
     split_holding = old_holdings_by_stock.get(real_data.split_stock_code)
     if split_holding is not None:
-        _check_4680_precondition(
+        _check_split_precondition(
             split_holding, lots_by_stock_code.get(real_data.split_stock_code, []), real_data
         )
 
