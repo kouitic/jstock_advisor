@@ -54,6 +54,7 @@ from jstock_advisor.services.recommendation_evaluation_service import (
 from jstock_advisor.services.weekly_improvement_review_service import (
     WeeklyImprovementReviewService,
 )
+from tests.factories import build_recommendation
 
 _MODULES = [
     recommendation_evaluation_service.__name__,
@@ -102,7 +103,7 @@ def test_info_is_enabled_even_when_the_root_logger_is_at_warning(
 
 
 def _recommendation_with_owner(recommendation_id: str = "rec-1") -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="0000",
         stock_name="test",

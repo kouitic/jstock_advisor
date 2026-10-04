@@ -55,6 +55,7 @@ from jstock_advisor.services.profit_taking_service import ProfitTakingService
 from jstock_advisor.services.provider_factory import build_mock_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.sell_signal_service import SellSignalOutcome, SellSignalService
+from tests.factories import build_recommendation
 
 _CFG = load_config()
 # Issue #143: 実 wall clock を参照すると、同一 commit でも実行時刻により
@@ -208,7 +209,7 @@ def test_no_double_notification_across_modes(store_dir: Path):
 
 
 def _fake_sell_recommendation(stock_code: str) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="fake-rec-id",
         stock_code=stock_code,
         stock_name="test",

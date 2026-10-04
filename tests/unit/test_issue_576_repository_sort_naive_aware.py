@@ -34,7 +34,6 @@ from jstock_advisor.domain.entities.holding_decision import (
 )
 from jstock_advisor.domain.entities.holding_evaluation_record import HoldingEvaluationRecord
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import (
     AuditLogRepository,
 )
@@ -50,6 +49,7 @@ from jstock_advisor.infrastructure.local_repository.holding_evaluation_record_re
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from tests.factories import build_recommendation
 
 _JST = dt.timezone(dt.timedelta(hours=9))
 _STOCK_CODE = "8306"
@@ -219,7 +219,7 @@ def test_recommendation_repository_sort_and_max_with_mixed_naive_and_aware(
 ) -> None:
     repo = RecommendationRepository(store_dir=tmp_path)
     repo.save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-older-naive",
             recommended_at=_OLDER_NAIVE,
             stock_code=_STOCK_CODE,
@@ -231,7 +231,7 @@ def test_recommendation_repository_sort_and_max_with_mixed_naive_and_aware(
         )
     )
     repo.save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-newer-aware",
             recommended_at=_NEWER_AWARE_JST,
             stock_code=_STOCK_CODE,
