@@ -4950,6 +4950,8 @@ container build(`sam build --use-container`)を使った場合は、上記に加
 イメージ・そのdigest・architecture・toolchainを記録する(USER判断 2026-10-04の条件D。
 Issue #796・#798。USER判断の原文は36.5.1に引用)。toolchainの例: Python・pip・SAM CLI・
 aws_lambda_buildersの版。
+この記録は、USER判断の決定4(ConfigLayerのLF化とcontainer build化を同一releaseに含める場合)の
+条件Dとして示されたもので、他のreleaseにも求めるかは、本節では定めない(36.5.1の整理2)。
 
 ```
 BUILD_IMAGE         = container buildに使ったイメージ(tag)
@@ -5079,6 +5081,8 @@ BUILD_ARTIFACT_IDENTITYとして記録する:
    前回Productionが参照しているartifactのkey(deploy済みstackのprocessed template。36.7と同じ
    `aws cloudformation get-template --template-stage Processed`)と比較する。
    事前申告にない想定外のartifact差分が1件でもあれば、ChangeSet CREATE / EXECUTEを止める。
+   これは決定4の同一releaseの場合の条件E・Fとして示されたもので、他のreleaseにも適用するかは、
+   本節では定めない。
 4  同一releaseに含める理由(条件I)
    ConfigLayerのLF化とcontainer build化を同一releaseに含める場合は、その理由をrelease tracking
    Issueに明記する。
@@ -5206,6 +5210,7 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 [ ] SAMCONFIG_DRIFT: samconfig.tomlの非センシティブ値がexampleと一致する(36.7)
 [ ] BUILD_CONTAINER_RECORD: container buildの場合、イメージ・digest・architecture・toolchainを
                     記録した(36.4)
+                    (決定4の場合の項目。他のreleaseは36.5.1の整理2のとおり定めない)
 [ ] EXPECTED_ARTIFACT_CHANGE: DependenciesLayerの期待差分(変更要因と、変わるはずのartifact)を
                     CREATEの前に事前申告した(36.5.1。決定4の場合は条件A〜I)
 [ ] ARTIFACT_HASH_COMPARISON: ConfigLayer / DependenciesLayerのartifact hashを前回Productionと
