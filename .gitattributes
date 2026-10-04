@@ -9,12 +9,18 @@
 #       同じ commit でも異なる zip になりうる。
 #       2026-09-11 の W5 で ConfigLayer の版が不要に上がったのはこの経路である。
 #
-# 範囲: ★ config/ のみ。他の path には適用しない(必要最小限)。
+# 範囲: ★ config/・src/・infra/layer/ のみ。他の path(docs/・tests/・infra/template.yaml 等)には
+#       適用しない(必要最小限)。
+#       src/ と infra/layer/ は Issue #802(USER 承認 = #122 issuecomment-5979839836)で追加した。
+#       sam build が作業ツリーの src/ と infra/layer/ を取り込むため、これらも package する環境の
+#       core.autocrlf に依存して成果物のバイト列が変わる(Lambda の code artifact の hash)。
 #       text=auto とすることで ★ git が binary と判定したファイルは正規化しない
 #       (現時点の config/ は 35 件すべて text。将来 binary が追加されても壊さない)。
 #
 # 注意: 本ファイルを追加しても git の index(commit される内容)は変わらない
-#       (config/ は既に全件 LF で commit されている)。変わるのは「作業ツリーへ
+#       (config/・src/・infra/layer/ は既に全件 LF または改行なしで commit されている)。変わるのは「作業ツリーへ
 #       checkout されるときの改行コード」であり、これが packaging の入力を固定する。
 
 config/** text=auto eol=lf
+src/** text=auto eol=lf
+infra/layer/** text=auto eol=lf
