@@ -303,12 +303,15 @@ def test_binary_file_under_config_is_not_converted(tmp_path: Path) -> None:
 # --- root cause: SAME_COMMIT -> SAME_CONFIG_WORKTREE_BYTES(core.autocrlf=true / false) ---
 
 
-def _tracked_blobs(roots: tuple[str, ...]) -> dict[str, bytes]:
-    """本repoのroots配下のgit管理ファイルを、index(commitされる内容)のバイト列で返す。"""
+def _tracked_blobs(roots: tuple[str, ...], *, limit: int | None = None) -> dict[str, bytes]:
+    """本repoのroots配下のgit管理ファイルを、index(commitされる内容)のバイト列で返す。
+
+    limitを指定すると、root ごとに先頭からlimit件だけを返す(反証テストの実行時間を抑える)。
+    """
     blobs: dict[str, bytes] = {}
     for root in roots:
-        names = _git(_REPO_ROOT, "ls-files", "-z", "--", root).split("\0")
-        found = {name: _git_bytes(_REPO_ROOT, "show", f":{name}") for name in names if name}
+        names = [n for n in _git(_REPO_ROOT, "ls-files", "-z", "--", root).split("\0") if n]
+        found = {name: _git_bytes(_REPO_ROOT, "show", f":{name}") for name in names[:limit]}
         assert found, f"{root}配下にgit管理ファイルが無い"
         blobs.update(found)
     return blobs
@@ -325,6 +328,7 @@ def _make_source_repo(
     with_gitattributes: bool,
     roots: tuple[str, ...] = ("config",),
     binaries: tuple[str, ...] = (_SYNTHETIC_BINARY,),
+    limit: int | None = None,
 ) -> Path:
     """本repoのroots(index内容)+合成のbinaryを1 commitにまとめた隔離repoを作る。"""
     repo = tmp_path / ("src_with" if with_gitattributes else "src_without")
@@ -332,7 +336,7 @@ def _make_source_repo(
     _git(repo, "init", "-q")
     if with_gitattributes:
         shutil.copyfile(_GITATTRIBUTES, repo / ".gitattributes")
-    blobs = dict(_tracked_blobs(roots))
+    blobs = dict(_tracked_blobs(roots, limit=limit))
     for binary in binaries:
         blobs[binary] = _BINARY_PAYLOAD
     for name, data in blobs.items():
@@ -425,7 +429,7 @@ def test_same_commit_gives_different_worktree_bytes_without_gitattributes_counte
     assert any(b"\r\n" in on[name] for name in yaml_names)
 
 
-# --- #802 root cause: SAME_COMMIT -> SAME_WORKTREE_BYTES(src/・infra/layer/。core.autocrlf=true / false) ---
+# --- #802 root cause: SAME_COMMIT -> SAME_WORKTREE_BYTES(src/・infra/layer/) ---
 
 
 def test_same_commit_gives_same_pinned_roots_worktree_bytes_for_autocrlf_true_and_false(
@@ -470,7 +474,8 @@ def test_same_commit_gives_different_pinned_roots_bytes_without_gitattributes_co
     (trueはCRLF、falseはLF)。上のテストはこの差で、変更の有無を区別できる。
     """
     roots = ("src", "infra/layer")
-    src = _make_source_repo(tmp_path, with_gitattributes=False, roots=roots, binaries=())
+    # 食い違いの再現には全件は要らない(実行時間を抑えるため、rootごとに先頭20件)。
+    src = _make_source_repo(tmp_path, with_gitattributes=False, roots=roots, binaries=(), limit=20)
 
     on = _checkout_config_bytes(src, tmp_path / "clone_autocrlf_true", autocrlf="true", roots=roots)
     off = _checkout_config_bytes(
