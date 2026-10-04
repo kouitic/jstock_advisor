@@ -30,7 +30,7 @@ import math
 import statistics
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from jstock_advisor.config.models import FairValueUsability, ValuationDispersionThresholds
 from jstock_advisor.domain.entities.enums import BuyPriceReliability, ConfidenceLevel
@@ -405,6 +405,37 @@ def determine_dispersion_band(
     return "HIGH"
 
 
+# Issue #189: `compute_valuation_anchor()`の「bandごとの集約器の選択規則」の版。
+# 保存済みのRecommendationを後から再計算して検証するとき、config値(閾値)だけでは
+# 「どの規則で集約したか」が分からないため、判定時点の版を`config_values_used`へ記録する。
+# 規則(band → 集約器の選択)を変えたときは、人がこの値を上げる(規則の変更を自動検知する
+# ものではない)。規則を変えるとband別の集約器を固定する
+# `tests/unit/test_issue_260_anchor_monotone_clamp.py`が落ちるため、そのときに版を上げるかを
+# 判断する(版の値自体は`tests/unit/test_issue_189_dispersion_threshold_snapshot.py`が固定)。
+#   v1: Issue #260の是正前(ばらつき大でpercentile_40を単独で採る)。保存データには版の
+#       キーが無い(= 規則の版が不明。v1以前を含む)。
+#   v2: Issue #260の是正後(ばらつき大でmin(weighted_median, trimmed_mean, percentile_40))。
+VALUATION_AGGREGATION_RULE_VERSION = "v2"
+
+
+def valuation_dispersion_config_values(config: ValuationDispersionThresholds) -> dict[str, Any]:
+    """判定当時に実際に使用したvaluationのばらつき閾値と、集約規則の版
+    (Recommendation.config_values_used["valuation_dispersion"]として保存する。
+    他のconfigブロックと同じく、後からconfigを変更しても過去の判定を"現在の"
+    値で誤って再解釈しないため)。
+
+    `ValuationDispersionThresholds`の全fieldを出す(新しいfieldを足したら記録も要る。
+    tests/unit/test_issue_189_dispersion_threshold_snapshot.pyが網羅を固定している)。
+    """
+    return {
+        "low_max": config.low_max,
+        "medium_max": config.medium_max,
+        "auto_buy_block": config.auto_buy_block,
+        "anchor_block": config.anchor_block,
+        "aggregation_rule_version": VALUATION_AGGREGATION_RULE_VERSION,
+    }
+
+
 def apply_dcf_divergence_filter(
     dcf_result: FairValueMethodResult, other_applicable_results: list[FairValueMethodResult]
 ) -> FairValueMethodResult:
@@ -557,6 +588,9 @@ def compute_valuation_anchor(
       #189 判定時点スナップショットに集約規則のバージョンが記録されないため、
            保存済みRecommendationを後から再計算して検証する際に、
            是正前後のどちらの規則で判定されたかを区別できない。
+           → `VALUATION_AGGREGATION_RULE_VERSION`(現在はv2)を
+           config_values_used["valuation_dispersion"]へ記録する
+           (規則を変えたら版を上げる)。
     """
     if valuation_confidence == ConfidenceLevel.LOW:
         return ValuationAnchorResult(anchor=None)
