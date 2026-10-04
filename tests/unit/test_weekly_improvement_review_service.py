@@ -52,6 +52,7 @@ from jstock_advisor.services.weekly_improvement_review_service import (
     WeeklyImprovementReviewService,
     _resolve_review_period,
 )
+from tests.factories import build_recommendation
 
 _REGION = "ap-northeast-1"
 # 2026-08-10はJSTで月曜。週次レビュー実行日として使う。
@@ -126,7 +127,7 @@ def _recommendation(
     rule_version: str,
     recommended_at: dt.datetime,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=rec_id,
         stock_code="1234",
         stock_name="test",

@@ -55,6 +55,7 @@ from jstock_advisor.services.judgment_safety_shadow_service import (
     observe_judgment_safety_shadow,
     shadow_audit_id,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 9, 20, 9, 0, tzinfo=dt.UTC)
 _SHADOW = JudgmentSafetyShadowConfig(mode=ShadowMode.SHADOW)
@@ -69,7 +70,7 @@ def _rec(
     earnings_date_status: EarningsDateStatus | None = EarningsDateStatus.CONFIRMED,
     recommendation_id: str = "rec-457-1",
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         # 所有者・holding_idを含む値をあえて持たせ、shadowの記録へ漏れないことを確認する。
         owner="owner-a",

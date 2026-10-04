@@ -36,6 +36,7 @@ from jstock_advisor.providers.market_data.mock_impl import MockMarketDataProvide
 from jstock_advisor.services.recommendation_evaluation_service import (
     RecommendationEvaluationService,
 )
+from tests.factories import build_recommendation
 
 # tests/unit/test_issue_71_fc12_evaluation_unique_key.py と同じ銘柄・日付(mock の株価がある銘柄)
 _STOCK_CODE = "2914"
@@ -55,7 +56,7 @@ def calendar(config: AppConfig) -> BusinessCalendar:
 
 
 def _recommendation() -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-537",
         stock_code=_STOCK_CODE,
         stock_name="テスト銘柄",
