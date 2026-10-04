@@ -29,7 +29,7 @@ app = typer.Typer(help="データ移行コマンド群")
 holdings_owner_app = typer.Typer(help="保有銘柄オーナー機能移行(owner/holding_id対応)")
 app.add_typer(holdings_owner_app, name="holdings-owner")
 owner_reclassification_app = typer.Typer(
-    help="既存保有データのowner実態補正(M4.1、4680分割・9434単価訂正含む)"
+    help="既存保有データのowner実態補正(M4.1、分割・単価訂正を含む)"
 )
 app.add_typer(owner_reclassification_app, name="owner-reclassification")
 

@@ -1,6 +1,6 @@
 """既存保有データのowner実態補正(M4.1)のテスト。
 
-4680分割・9434単価訂正に相当する分割/価格訂正ケース、pause強制確認、
+分割/価格訂正のケース、pause強制確認、
 holding_id衝突検知、dry-run、冪等性・途中失敗後再実行、tombstone不変、
 InvestmentThesis/BaselineSequence/BaselinePointerの分割時継承方針を検証する。
 
@@ -56,9 +56,23 @@ _STOCK_C = "3001"  # 子owner付け替え(所有者Cへ)
 _STOCK_SPLIT = "4001"  # 分割対象
 _STOCK_PRICE_CORRECTED = "5001"  # 子owner付け替え+単価訂正
 
-_SPLIT_LOT_A = "lot-4001-a"  # 300株@1193 → 所有者A(大きい持分側)
-_SPLIT_LOT_B = "lot-4001-b"  # 100株@1258 → 所有者B(小さい持分側)
-_PRICE_CORRECTED_LOT = "lot-5001-x"  # 100株、187→188へ訂正
+_SPLIT_LOT_A = "lot-4001-a"  # 所有者A(大きい持分側)
+_SPLIT_LOT_B = "lot-4001-b"  # 所有者B(小さい持分側)
+_PRICE_CORRECTED_LOT = "lot-5001-x"  # 単価訂正の対象lot
+
+# --- 検証用の架空の数量・単価(実保有とは無関係。期待値は式で導く) -------------
+# 各テストは、これらの定数と、そこから導いた値だけを使う(数値リテラルを散らさない)。
+_QTY_A, _PRICE_A = 110, 1620  # 通常付け替え(preconditionなし)
+_QTY_B1, _PRICE_B1 = 130, 2740
+_QTY_B2, _PRICE_B2 = 360, 641
+_QTY_C, _PRICE_C = 90, 4125
+_SPLIT_QTY_A, _SPLIT_PRICE_A = 240, 1010
+_SPLIT_QTY_B, _SPLIT_PRICE_B = 80, 1075
+_SPLIT_OLD_QTY = _SPLIT_QTY_A + _SPLIT_QTY_B
+_SPLIT_OLD_TOTAL = Decimal(_SPLIT_QTY_A * _SPLIT_PRICE_A + _SPLIT_QTY_B * _SPLIT_PRICE_B)
+_SPLIT_OLD_AVG = _SPLIT_OLD_TOTAL / _SPLIT_OLD_QTY  # 小数部を持つ加重平均になる値を選んである
+_PC_QTY, _PC_OLD_PRICE = 70, 453
+_PC_NEW_PRICE = _PC_OLD_PRICE + 1  # 訂正後の単価。想定外の価格は _PC_NEW_PRICE + 1 で表す
 
 _REAL_DATA = RealDataInput(
     default_new_owner=_OWNER_A,
@@ -73,29 +87,29 @@ _REAL_DATA = RealDataInput(
         _SPLIT_LOT_A: _OWNER_A,
         _SPLIT_LOT_B: _OWNER_B,
     },
-    price_corrections={_PRICE_CORRECTED_LOT: Decimal("188")},
+    price_corrections={_PRICE_CORRECTED_LOT: Decimal(_PC_NEW_PRICE)},
     simple_preconditions={
         _STOCK_B1: _SimplePrecondition(
-            expected_shares=200, expected_average_price=Decimal("3215")
+            expected_shares=_QTY_B1, expected_average_price=Decimal(_PRICE_B1)
         ),
         _STOCK_B2: _SimplePrecondition(
-            expected_shares=500, expected_average_price=Decimal("587")
+            expected_shares=_QTY_B2, expected_average_price=Decimal(_PRICE_B2)
         ),
         _STOCK_C: _SimplePrecondition(
-            expected_shares=100, expected_average_price=Decimal("5480")
+            expected_shares=_QTY_C, expected_average_price=Decimal(_PRICE_C)
         ),
     },
     nine_four_three_four_stock_code=_STOCK_PRICE_CORRECTED,
     nine_four_three_four_lot_id=_PRICE_CORRECTED_LOT,
-    nine_four_three_four_shares=100,
-    nine_four_three_four_old_price=Decimal("187"),
+    nine_four_three_four_shares=_PC_QTY,
+    nine_four_three_four_old_price=Decimal(_PC_OLD_PRICE),
     split_lot_preconditions={
-        _SPLIT_LOT_A: (300, Decimal("1193")),
-        _SPLIT_LOT_B: (100, Decimal("1258")),
+        _SPLIT_LOT_A: (_SPLIT_QTY_A, Decimal(_SPLIT_PRICE_A)),
+        _SPLIT_LOT_B: (_SPLIT_QTY_B, Decimal(_SPLIT_PRICE_B)),
     },
-    split_old_shares=400,
-    split_old_average_price=Decimal("1209.25"),
-    split_old_total_amount=Decimal("483700"),
+    split_old_shares=_SPLIT_OLD_QTY,
+    split_old_average_price=_SPLIT_OLD_AVG,
+    split_old_total_amount=_SPLIT_OLD_TOTAL,
 )
 
 
@@ -253,9 +267,10 @@ def _seed_pointer(store_dir: Path, owner: str, stock_code: str, baseline_version
 
 
 def _seed_split(store_dir: Path) -> None:
-    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, 300, "1193")
-    _seed_lot(store_dir, _SPLIT_LOT_B, _OLD, _STOCK_SPLIT, 100, "1258")
-    _seed_holding(store_dir, _OLD, _STOCK_SPLIT, 400, "1209.25")  # (300*1193+100*1258)/400
+    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, _SPLIT_QTY_A, str(_SPLIT_PRICE_A))
+    _seed_lot(store_dir, _SPLIT_LOT_B, _OLD, _STOCK_SPLIT, _SPLIT_QTY_B, str(_SPLIT_PRICE_B))
+    # 旧Holding = 2 lotの加重平均(式で導いた値)
+    _seed_holding(store_dir, _OLD, _STOCK_SPLIT, _SPLIT_OLD_QTY, str(_SPLIT_OLD_AVG))
 
 
 def _holding_store(store_dir: Path):
@@ -283,7 +298,7 @@ def _thesis_store(store_dir: Path):
 
 def test_refuses_when_pause_false(store_dir: Path) -> None:
     _set_pause(store_dir, False)
-    _seed_simple(store_dir, _STOCK_A, 100, "1500")
+    _seed_simple(store_dir, _STOCK_A, _QTY_A, str(_PRICE_A))
     with pytest.raises(ReclassificationAbortedError, match="pause_buy_sell=false"):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
 
@@ -298,7 +313,7 @@ def test_refuses_when_pause_unset(store_dir: Path) -> None:
 
 def test_default_owner_reassignment(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_A, 100, "1500")
+    _seed_simple(store_dir, _STOCK_A, _QTY_A, str(_PRICE_A))
 
     result = _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
@@ -307,7 +322,7 @@ def test_default_owner_reassignment(store_dir: Path) -> None:
     new_holding = _holding_store(store_dir).get(new_id)
     assert new_holding is not None
     assert new_holding.owner == _OWNER_A
-    assert new_holding.shares == 100
+    assert new_holding.shares == _QTY_A
     assert _holding_store(store_dir).get(f"{_OLD}#{_STOCK_A}") is None
     lot = _lot_store(store_dir).get(f"lot-{_STOCK_A}")
     assert lot is not None
@@ -317,7 +332,7 @@ def test_default_owner_reassignment(store_dir: Path) -> None:
 
 def test_child_owner_reassignment_stock_b1(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_B1, 200, "3215")
+    _seed_simple(store_dir, _STOCK_B1, _QTY_B1, str(_PRICE_B1))
 
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
@@ -329,7 +344,7 @@ def test_child_owner_reassignment_stock_b1(store_dir: Path) -> None:
 
 def test_child_owner_reassignment_stock_c(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_C, 100, "5480")
+    _seed_simple(store_dir, _STOCK_C, _QTY_C, str(_PRICE_C))
 
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
@@ -353,10 +368,10 @@ def test_split_stock_splits_into_two_holdings(store_dir: Path) -> None:
     holding_a = _holding_store(store_dir).get(id_a)
     holding_b = _holding_store(store_dir).get(id_b)
     assert holding_a is not None and holding_b is not None
-    assert holding_a.shares == 300
-    assert holding_a.average_purchase_price == Decimal("1193")
-    assert holding_b.shares == 100
-    assert holding_b.average_purchase_price == Decimal("1258")
+    assert holding_a.shares == _SPLIT_QTY_A
+    assert holding_a.average_purchase_price == Decimal(_SPLIT_PRICE_A)
+    assert holding_b.shares == _SPLIT_QTY_B
+    assert holding_b.average_purchase_price == Decimal(_SPLIT_PRICE_B)
     assert _holding_store(store_dir).get(f"{_OLD}#{_STOCK_SPLIT}") is None
 
 
@@ -371,11 +386,11 @@ def test_split_lot_ids_unchanged_only_owner_fields_updated(store_dir: Path) -> N
     assert lot_a is not None
     assert lot_a.owner == _OWNER_A
     assert lot_a.holding_id == f"{_OWNER_A}#{_STOCK_SPLIT}"
-    assert lot_a.shares == 300
+    assert lot_a.shares == _SPLIT_QTY_A
     assert lot_b is not None
     assert lot_b.owner == _OWNER_B
     assert lot_b.holding_id == f"{_OWNER_B}#{_STOCK_SPLIT}"
-    assert lot_b.shares == 100
+    assert lot_b.shares == _SPLIT_QTY_B
 
 
 # --- 単価訂正 --------------------------------------------------------------------
@@ -386,29 +401,31 @@ def test_price_corrected_with_matching_lot_id(store_dir: Path) -> None:
     (別lot_idでは補正されない、という設計自体は
     test_other_stock_prices_unchangedで別途確認)。"""
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, 100, "187")
-    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, 100, "187")
+    _seed_lot(
+        store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY, str(_PC_OLD_PRICE)
+    )
+    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY, str(_PC_OLD_PRICE))
 
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
     lot = _lot_store(store_dir).get(_PRICE_CORRECTED_LOT)
     holding = _holding_store(store_dir).get(f"{_OWNER_B}#{_STOCK_PRICE_CORRECTED}")
     assert lot is not None
-    assert lot.purchase_price == Decimal("188")
+    assert lot.purchase_price == Decimal(_PC_NEW_PRICE)
     assert holding is not None
-    assert holding.average_purchase_price == Decimal("188")
-    assert holding.total_purchase_amount == Decimal("18800")
+    assert holding.average_purchase_price == Decimal(_PC_NEW_PRICE)
+    assert holding.total_purchase_amount == Decimal(_PC_QTY * _PC_NEW_PRICE)
 
 
 def test_other_stock_prices_unchanged(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_A, 100, "1500")
-    _seed_simple(store_dir, _STOCK_B1, 200, "3215")
+    _seed_simple(store_dir, _STOCK_A, _QTY_A, str(_PRICE_A))
+    _seed_simple(store_dir, _STOCK_B1, _QTY_B1, str(_PRICE_B1))
 
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
-    assert _lot_store(store_dir).get(f"lot-{_STOCK_A}").purchase_price == Decimal("1500")  # type: ignore[union-attr]
-    assert _lot_store(store_dir).get(f"lot-{_STOCK_B1}").purchase_price == Decimal("3215")  # type: ignore[union-attr]
+    assert _lot_store(store_dir).get(f"lot-{_STOCK_A}").purchase_price == Decimal(_PRICE_A)  # type: ignore[union-attr]
+    assert _lot_store(store_dir).get(f"lot-{_STOCK_B1}").purchase_price == Decimal(_PRICE_B1)  # type: ignore[union-attr]
 
 
 # --- holding_id衝突検知 --------------------------------------------------------
@@ -416,7 +433,7 @@ def test_other_stock_prices_unchanged(store_dir: Path) -> None:
 
 def test_fails_closed_on_holding_id_collision_with_existing_holding(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_A, 100, "1500")
+    _seed_simple(store_dir, _STOCK_A, _QTY_A, str(_PRICE_A))
     # 既に新holding_idが(本移行対象外の理由で)存在するという衝突状態を再現する。
     _seed_holding(store_dir, _OWNER_A, _STOCK_A, 999, "1")
 
@@ -429,7 +446,7 @@ def test_fails_closed_on_holding_id_collision_with_existing_holding(store_dir: P
 
 def test_dry_run_writes_nothing(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_A, 100, "1500")
+    _seed_simple(store_dir, _STOCK_A, _QTY_A, str(_PRICE_A))
 
     result = _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
 
@@ -445,7 +462,7 @@ def test_dry_run_writes_nothing(store_dir: Path) -> None:
 
 def test_rerun_after_full_success_is_idempotent_noop(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_A, 100, "1500")
+    _seed_simple(store_dir, _STOCK_A, _QTY_A, str(_PRICE_A))
 
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
     result_second = _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
@@ -516,8 +533,8 @@ def test_resume_after_partial_failure_completes_split_correctly(
     assert _holding_store(store_dir).get(old_id) is None
     holding_a = _holding_store(store_dir).get(id_a)
     holding_b = _holding_store(store_dir).get(id_b)
-    assert holding_a is not None and holding_a.shares == 300
-    assert holding_b is not None and holding_b.shares == 100
+    assert holding_a is not None and holding_a.shares == _SPLIT_QTY_A
+    assert holding_b is not None and holding_b.shares == _SPLIT_QTY_B
 
 
 # --- owner値の自由度(allow-listではない) --------------------------------------
@@ -531,7 +548,7 @@ def test_owner_is_not_restricted_to_allow_list(store_dir: Path) -> None:
 
     # 今回のマッピングに含まれない任意のowner文字列でも正規化・検証が通る
     # (M4.1のマッピングが正規化ロジック自体を制限していないことの確認)。
-    assert normalize_and_validate_owner("第三子") == "第三子"
+    assert normalize_and_validate_owner("所有者D") == "所有者D"
 
 
 # --- tombstone不変 -------------------------------------------------------------
@@ -539,7 +556,7 @@ def test_owner_is_not_restricted_to_allow_list(store_dir: Path) -> None:
 
 def test_tombstone_snapshot_untouched(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_A, 100, "1500")
+    _seed_simple(store_dir, _STOCK_A, _QTY_A, str(_PRICE_A))
     # tombstone(対応するHoldingが存在しない、全部売却済み)。
     _seed_snapshot(store_dir, _OLD, "9999", 0, "0")
     tombstone_before = _snapshot_store(store_dir).get(f"{_OLD}#9999")
@@ -638,7 +655,14 @@ def test_split_snapshot_larger_share_inherits_cooldown_smaller_share_gets_fresh_
     _set_pause(store_dir, True)
     _seed_split(store_dir)
     cooldown_until = dt.date(2026, 8, 27)
-    _seed_snapshot(store_dir, _OLD, _STOCK_SPLIT, 400, "1209.25", cooldown_until=cooldown_until)
+    _seed_snapshot(
+        store_dir,
+        _OLD,
+        _STOCK_SPLIT,
+        _SPLIT_OLD_QTY,
+        str(_SPLIT_OLD_AVG),
+        cooldown_until=cooldown_until,
+    )
 
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
@@ -646,11 +670,11 @@ def test_split_snapshot_larger_share_inherits_cooldown_smaller_share_gets_fresh_
     snapshot_b = _snapshot_store(store_dir).get(f"{_OWNER_B}#{_STOCK_SPLIT}")
 
     assert snapshot_a is not None
-    assert snapshot_a.shares == 300
+    assert snapshot_a.shares == _SPLIT_QTY_A
     assert snapshot_a.cooldown_until_date == cooldown_until  # cooldown引き継ぎ
 
     assert snapshot_b is not None
-    assert snapshot_b.shares == 100
+    assert snapshot_b.shares == _SPLIT_QTY_B
     assert snapshot_b.cooldown_until_date is None  # 新規baseline、cooldown無し
 
     assert _snapshot_store(store_dir).get(f"{_OLD}#{_STOCK_SPLIT}") is None
@@ -663,36 +687,36 @@ def test_simple_reassignment_snapshot_carries_over_without_spurious_event(
     (shares等)がそのまま引き継がれ、TradeCooldownServiceが次回検知する
     虚偽イベントの原因(shares不一致)を作らないこと。"""
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_A, 100, "1500")
-    _seed_snapshot(store_dir, _OLD, _STOCK_A, 100, "1500")
+    _seed_simple(store_dir, _STOCK_A, _QTY_A, str(_PRICE_A))
+    _seed_snapshot(store_dir, _OLD, _STOCK_A, _QTY_A, str(_PRICE_A))
 
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
     new_snapshot = _snapshot_store(store_dir).get(f"{_OWNER_A}#{_STOCK_A}")
     assert new_snapshot is not None
-    assert new_snapshot.shares == 100
+    assert new_snapshot.shares == _QTY_A
     assert _snapshot_store(store_dir).get(f"{_OLD}#{_STOCK_A}") is None
 
 
-# --- 実行前precondition(2026-08-23確定指示相当) --------------------------------
+# --- 実行前precondition --------------------------------------------------------
 
 
 def test_stock_b2_reassignment_matches_confirmed_precondition(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_B2, 500, "587")
+    _seed_simple(store_dir, _STOCK_B2, _QTY_B2, str(_PRICE_B2))
 
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
     new_holding = _holding_store(store_dir).get(f"{_OWNER_B}#{_STOCK_B2}")
     assert new_holding is not None
     assert new_holding.owner == _OWNER_B
-    assert new_holding.shares == 500
-    assert new_holding.average_purchase_price == Decimal("587")
+    assert new_holding.shares == _QTY_B2
+    assert new_holding.average_purchase_price == Decimal(_PRICE_B2)
 
 
 def test_stock_b1_precondition_fails_on_shares_mismatch(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_B1, 199, "3215")  # 確定指示は200株
+    _seed_simple(store_dir, _STOCK_B1, _QTY_B1 - 1, str(_PRICE_B1))  # 期待値は _QTY_B1 株
 
     with pytest.raises(PlanValidationError, match=_STOCK_B1):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
@@ -700,7 +724,7 @@ def test_stock_b1_precondition_fails_on_shares_mismatch(store_dir: Path) -> None
 
 def test_stock_b1_precondition_fails_on_price_mismatch(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_B1, 200, "3216")  # 確定指示は@3215
+    _seed_simple(store_dir, _STOCK_B1, _QTY_B1, str(_PRICE_B1 + 1))  # 期待値は @_PRICE_B1
 
     with pytest.raises(PlanValidationError, match=_STOCK_B1):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
@@ -708,7 +732,7 @@ def test_stock_b1_precondition_fails_on_price_mismatch(store_dir: Path) -> None:
 
 def test_stock_b2_precondition_fails_on_shares_mismatch(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_B2, 501, "587")  # 確定指示は500株
+    _seed_simple(store_dir, _STOCK_B2, _QTY_B2 + 1, str(_PRICE_B2))  # 期待値は _QTY_B2 株
 
     with pytest.raises(PlanValidationError, match=_STOCK_B2):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
@@ -716,7 +740,7 @@ def test_stock_b2_precondition_fails_on_shares_mismatch(store_dir: Path) -> None
 
 def test_stock_c_precondition_fails_on_price_mismatch(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_C, 100, "5481")  # 確定指示は@5480
+    _seed_simple(store_dir, _STOCK_C, _QTY_C, str(_PRICE_C + 1))  # 期待値は @_PRICE_C
 
     with pytest.raises(PlanValidationError, match=_STOCK_C):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
@@ -727,11 +751,13 @@ def test_simple_precondition_fails_on_lot_composition_mismatch(store_dir: Path) 
     再計算値と食い違うケースを検知する(1lot構成のはずが2lot合算で偶然
     合計が一致してしまう場合等、再計算による突合が必須である根拠)。"""
     _set_pause(store_dir, True)
-    _seed_holding(store_dir, _OLD, _STOCK_B1, 200, "3215")
-    # 2lotに分割し、合計株数は200のまま平均単価が3215からずれるケース
-    # (100株@3000+100株@3400=640000/200=3200 != 3215)。
-    _seed_lot(store_dir, f"lot-{_STOCK_B1}-a", _OLD, _STOCK_B1, 100, "3000")
-    _seed_lot(store_dir, f"lot-{_STOCK_B1}-b", _OLD, _STOCK_B1, 100, "3400")
+    _seed_holding(store_dir, _OLD, _STOCK_B1, _QTY_B1, str(_PRICE_B1))
+    # 2lotに分割し、合計株数は _QTY_B1 のまま、lot の加重平均が _PRICE_B1 からずれるケース。
+    half = _QTY_B1 // 2
+    low, high = _PRICE_B1 - 240, _PRICE_B1 + 160
+    assert Decimal(half * low + half * high) / _QTY_B1 != Decimal(_PRICE_B1)  # 食い違いの前提
+    _seed_lot(store_dir, f"lot-{_STOCK_B1}-a", _OLD, _STOCK_B1, half, str(low))
+    _seed_lot(store_dir, f"lot-{_STOCK_B1}-b", _OLD, _STOCK_B1, half, str(high))
 
     with pytest.raises(PlanValidationError, match=_STOCK_B1):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
@@ -740,11 +766,13 @@ def test_simple_precondition_fails_on_lot_composition_mismatch(store_dir: Path) 
 def test_price_correction_precondition_passes_when_already_price_corrected(
     store_dir: Path,
 ) -> None:
-    """途中失敗後の再実行で、対象lotが既に188円へ訂正済みの状態でも
+    """途中失敗後の再実行で、対象lotが既に訂正後の単価になっている状態でも
     冪等にPASSすること。"""
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, 100, "188")
-    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, 100, "188")
+    _seed_lot(
+        store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY, str(_PC_NEW_PRICE)
+    )
+    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY, str(_PC_NEW_PRICE))
 
     result = _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
 
@@ -752,11 +780,12 @@ def test_price_correction_precondition_passes_when_already_price_corrected(
 
 
 def test_price_correction_precondition_fails_on_unexpected_price(store_dir: Path) -> None:
-    """187円(訂正前)でも188円(訂正後)でもない想定外の価格(189円)を
-    勝手に188円へ上書きしないこと。"""
+    """訂正前でも訂正後でもない想定外の単価を、勝手に訂正後の単価へ
+    上書きしないこと。"""
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, 100, "189")
-    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, 100, "189")
+    unexpected = str(_PC_NEW_PRICE + 1)
+    _seed_lot(store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY, unexpected)
+    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY, unexpected)
 
     with pytest.raises(PlanValidationError, match=_STOCK_PRICE_CORRECTED):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
@@ -764,13 +793,20 @@ def test_price_correction_precondition_fails_on_unexpected_price(store_dir: Path
     # 実際に書き込みは行われていない(fail-closed、書き込み前に中止)。
     lot = _lot_store(store_dir).get(_PRICE_CORRECTED_LOT)
     assert lot is not None
-    assert lot.purchase_price == Decimal("189")
+    assert lot.purchase_price == Decimal(unexpected)
 
 
 def test_price_correction_precondition_fails_on_shares_mismatch(store_dir: Path) -> None:
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, 101, "187")
-    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, 101, "187")
+    _seed_lot(
+        store_dir,
+        _PRICE_CORRECTED_LOT,
+        _OLD,
+        _STOCK_PRICE_CORRECTED,
+        _PC_QTY + 1,
+        str(_PC_OLD_PRICE),
+    )
+    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY + 1, str(_PC_OLD_PRICE))
 
     with pytest.raises(PlanValidationError, match=_STOCK_PRICE_CORRECTED):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
@@ -779,57 +815,58 @@ def test_price_correction_precondition_fails_on_shares_mismatch(store_dir: Path)
 def test_price_correction_precondition_fails_on_lot_composition_mismatch(
     store_dir: Path,
 ) -> None:
-    """確定指示のlot_id1件のみのはずが、別lotが混在している場合は
+    """期待するlot_id1件のみのはずが、別lotが混在している場合は
     fail-closedで中止すること。"""
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, 100, "187")
+    _seed_lot(
+        store_dir, _PRICE_CORRECTED_LOT, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY, str(_PC_OLD_PRICE)
+    )
     extra_lot_id = f"lot-{_STOCK_PRICE_CORRECTED}-extra"
     _seed_lot(store_dir, extra_lot_id, _OLD, _STOCK_PRICE_CORRECTED, 0, "0")
-    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, 100, "187")
+    _seed_holding(store_dir, _OLD, _STOCK_PRICE_CORRECTED, _PC_QTY, str(_PC_OLD_PRICE))
 
     with pytest.raises(PlanValidationError, match=_STOCK_PRICE_CORRECTED):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
 
 
 def test_split_precondition_fails_when_lot_shares_wrong(store_dir: Path) -> None:
-    """lot_idは正しいがsharesが確定指示と異なる場合、分割を実行しないこと。"""
+    """lot_idは正しいがsharesが期待値と異なる場合、分割を実行しないこと。"""
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, 301, "1193")
-    _seed_lot(store_dir, _SPLIT_LOT_B, _OLD, _STOCK_SPLIT, 99, "1258")
-    _seed_holding(store_dir, _OLD, _STOCK_SPLIT, 400, "1209.25")
+    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, _SPLIT_QTY_A + 1, str(_SPLIT_PRICE_A))
+    _seed_lot(store_dir, _SPLIT_LOT_B, _OLD, _STOCK_SPLIT, _SPLIT_QTY_B - 1, str(_SPLIT_PRICE_B))
+    _seed_holding(store_dir, _OLD, _STOCK_SPLIT, _SPLIT_OLD_QTY, str(_SPLIT_OLD_AVG))
 
     with pytest.raises(PlanValidationError, match=_STOCK_SPLIT):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
 
 
 def test_split_precondition_fails_when_lot_price_wrong(store_dir: Path) -> None:
-    """lot_id・sharesは正しいがpurchase_priceが確定指示と異なる場合、
+    """lot_id・sharesは正しいがpurchase_priceが期待値と異なる場合、
     分割を実行しないこと。"""
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, 300, "1194")
-    _seed_lot(store_dir, _SPLIT_LOT_B, _OLD, _STOCK_SPLIT, 100, "1258")
-    _seed_holding(store_dir, _OLD, _STOCK_SPLIT, 400, "1209.25")
+    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, _SPLIT_QTY_A, str(_SPLIT_PRICE_A + 1))
+    _seed_lot(store_dir, _SPLIT_LOT_B, _OLD, _STOCK_SPLIT, _SPLIT_QTY_B, str(_SPLIT_PRICE_B))
+    _seed_holding(store_dir, _OLD, _STOCK_SPLIT, _SPLIT_OLD_QTY, str(_SPLIT_OLD_AVG))
 
     with pytest.raises(PlanValidationError, match=_STOCK_SPLIT):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
 
 
 def test_split_precondition_fails_when_old_holding_total_wrong(store_dir: Path) -> None:
-    """average_purchase_priceは確定指示どおり(1209.25)でも、
-    total_purchase_amountだけが確定指示の値(483700)と食い違う場合を
-    独立に検知すること。"""
+    """average_purchase_priceは期待値どおりでも、
+    total_purchase_amountだけが期待値と食い違う場合を独立に検知すること。"""
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, 300, "1193")
-    _seed_lot(store_dir, _SPLIT_LOT_B, _OLD, _STOCK_SPLIT, 100, "1258")
+    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, _SPLIT_QTY_A, str(_SPLIT_PRICE_A))
+    _seed_lot(store_dir, _SPLIT_LOT_B, _OLD, _STOCK_SPLIT, _SPLIT_QTY_B, str(_SPLIT_PRICE_B))
     build_collection_store(Holding, "holdings_v2.json", "holding_id", store_dir).upsert(
         Holding(
             owner=_OLD,
             holding_id=build_holding_id(_OLD, _STOCK_SPLIT),
             stock_code=_STOCK_SPLIT,
             stock_name=f"銘柄{_STOCK_SPLIT}",
-            shares=400,
-            average_purchase_price=Decimal("1209.25"),
-            total_purchase_amount=Decimal("999999"),  # 確定指示(483700)と不一致
+            shares=_SPLIT_OLD_QTY,
+            average_purchase_price=_SPLIT_OLD_AVG,
+            total_purchase_amount=_SPLIT_OLD_TOTAL + 1,  # 期待値と不一致
             first_purchase_date=dt.date(2026, 1, 1),
             last_purchase_date=dt.date(2026, 1, 1),
             account_type=AccountType.GENERAL,
@@ -843,12 +880,12 @@ def test_split_precondition_fails_when_old_holding_total_wrong(store_dir: Path) 
 
 
 def test_split_precondition_fails_when_lot_composition_wrong(store_dir: Path) -> None:
-    """確定指示のlot_id集合と異なる(想定外のlot_idが混在する)場合、
+    """期待するlot_id集合と異なる(想定外のlot_idが混在する)場合、
     分割を実行しないこと。"""
     _set_pause(store_dir, True)
-    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, 300, "1193")
-    _seed_lot(store_dir, "unexpected-lot-id", _OLD, _STOCK_SPLIT, 100, "1258")
-    _seed_holding(store_dir, _OLD, _STOCK_SPLIT, 400, "1209.25")
+    _seed_lot(store_dir, _SPLIT_LOT_A, _OLD, _STOCK_SPLIT, _SPLIT_QTY_A, str(_SPLIT_PRICE_A))
+    _seed_lot(store_dir, "unexpected-lot-id", _OLD, _STOCK_SPLIT, _SPLIT_QTY_B, str(_SPLIT_PRICE_B))
+    _seed_holding(store_dir, _OLD, _STOCK_SPLIT, _SPLIT_OLD_QTY, str(_SPLIT_OLD_AVG))
 
     with pytest.raises(PlanValidationError, match=_STOCK_SPLIT):
         _run(MigrationTarget.LOCAL, dry_run=True, store_dir=store_dir)
@@ -858,7 +895,7 @@ def test_precondition_not_checked_when_already_migrated(store_dir: Path) -> None
     """旧Holding(owner=本人)が既に存在しない(=既に移行済み)stock_codeは、
     preconditionが再検証されず冪等に成功扱いになること。"""
     _set_pause(store_dir, True)
-    _seed_simple(store_dir, _STOCK_B1, 200, "3215")
+    _seed_simple(store_dir, _STOCK_B1, _QTY_B1, str(_PRICE_B1))
     _run(MigrationTarget.LOCAL, dry_run=False, store_dir=store_dir)
 
     # 移行後、新Holdingの株数を(本移行と無関係な事情で)後から変更しても、
