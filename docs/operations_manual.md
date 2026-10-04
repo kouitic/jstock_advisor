@@ -4754,6 +4754,22 @@ RELEASE_SCOPE_GATE(build前、36.3のBRANCH_GATE等より前に実施する)
    記録は「deployされていない」ではなく「CODE_DEPLOYED=YES /
    ACTIVATION_APPROVED=NO / ACTIVATION_STATE=OFF」として明確に区別する
    (#533がこの実例。本節末尾参照)
+
+6  UNKNOWNの扱い(USER判断 2026-10-04。下の「」内は Issue #122
+   issuecomment-5974589887 の4節の原文の引用で、引用部分は変更しない)
+
+   「CODE_DEPLOY_APPROVEDについて: release target SHA全体について、CODE_DEPLOY_APPROVED = NO が0件 / 有効な DEPLOY_HOLD が0件 / release scopeの棚卸しが完了 / USERがそのSHAのChangeSet実差分を確認したうえでEXECUTEを明示承認 した場合、そのEXECUTE承認を、当該release target SHAに含まれるProduction到達変更すべての CODE_DEPLOY_APPROVED = YES とみなす。」
+
+   「ACTIVATION_APPROVEDについては分けます。deployと同時に機能が有効になる変更 → EXECUTE承認を ACTIVATION_APPROVED = YES とみなす / shadow・dormant・feature flag OFFなど、deployしても利用者向け機能が有効にならない変更 → deployは許可する。activationは別Human Gate / 明示的に ACTIVATION_APPROVED = NO かつdeployだけで有効化される変更 → EXECUTE不可。」
+
+   上の引用の位置づけ(本節の整理。USER判断の引用ではない):
+   ・手順2でUNKNOWNとなった項目は、上の引用の条件がそろった時点(USERが当該SHAのChangeSet実差分を
+     確認したうえでEXECUTEを明示承認した時点)で、CODE_DEPLOY_APPROVED / ACTIVATION_APPROVEDの
+     値が定まる
+   ・手順3の停止条件(CODE_DEPLOY_APPROVED=NO / 明示的なDEPLOY_HOLD)は変わらない。引用の条件の
+     「NO が0件」「有効な DEPLOY_HOLD が0件」は、手順3と同じ内容である
+   ・shadow・dormant・feature flag OFFの変更は、EXECUTE承認でdeployまでを承認する。
+     activationは別のHuman Gateのままである
 ```
 
 **CODE_DEPLOY_APPROVEDとACTIVATION_APPROVEDを分離する理由**: feature
@@ -4994,6 +5010,7 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 [ ] RELEASE_SCOPE_GATE: release targetに含まれる全変更のCODE_DEPLOY_APPROVED/
                     ACTIVATION_APPROVEDを確認し、DEPLOY_HOLDが無いことを
                     確認した(36.2。最初に実施する)
+                    (UNKNOWNの項目の扱いは36.2の手順6による)
 [ ] BRANCH_GATE    : 現在のbranch / release target SHAをfreshに確認した(36.3)
 [ ] SHA_GATE       : git rev-parse HEADがrelease target SHAと一致する(36.3)
 [ ] CLEAN_TREE_GATE: git status --porcelainが空である(36.3)
