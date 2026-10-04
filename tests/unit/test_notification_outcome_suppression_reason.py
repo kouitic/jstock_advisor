@@ -41,6 +41,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers.holdings_watchlist_handler import _resolve_suppression_reason
 from jstock_advisor.services.line_notification_service import LineNotificationService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -73,7 +74,7 @@ def _service(
 
 
 def _sell_recommendation(stock_code: str, recommendation_id: str) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
@@ -92,7 +93,7 @@ def _sell_recommendation(stock_code: str, recommendation_id: str) -> Recommendat
 def _near_buy_recommendation(stock_code: str, recommendation_id: str) -> Recommendation:
     from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
 
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
@@ -117,7 +118,7 @@ def _near_buy_recommendation(stock_code: str, recommendation_id: str) -> Recomme
 def _buy_recommendation(stock_code: str, recommendation_id: str) -> Recommendation:
     from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
 
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",

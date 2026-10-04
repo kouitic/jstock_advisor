@@ -55,6 +55,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
     RecommendationRepository,
 )
 from jstock_advisor.services.line_notification_service import LineNotificationService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -89,7 +90,7 @@ def service(tmp_path: Path) -> tuple[LineNotificationService, _FakeLineClient]:
 def _buy_recommendation(
     stock_code: str = "4516", recommendation_id: str = "rec-buy-1"
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name="日本新薬",
@@ -113,7 +114,7 @@ def _buy_recommendation(
 def _near_buy_recommendation(
     stock_code: str = "9432", recommendation_id: str = "rec-nb-1"
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name="NTT",
@@ -137,7 +138,7 @@ def _near_buy_recommendation(
 
 
 def _watch_before_earnings_recommendation(stock_code: str = "7203") -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-wbe-1",
         stock_code=stock_code,
         stock_name="トヨタ自動車",
@@ -154,7 +155,7 @@ def _watch_before_earnings_recommendation(stock_code: str = "7203") -> Recommend
 def _sell_recommendation(
     stock_code: str = "4631", recommendation_id: str = "rec-sell-1"
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name="ＤＩＣ",
@@ -175,7 +176,7 @@ def _sell_recommendation(
 def _partial_sell_recommendation(
     stock_code: str = "4631", recommendation_id: str = "rec-partial-1"
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name="ＤＩＣ",
@@ -230,7 +231,7 @@ def _critical_risk_recommendation(stock_code: str = "1234") -> Recommendation:
         "継続企業の前提に重大な疑義が生じたため、緊急に保有内容の見直しを検討してください。"
         "詳細はIR資料をご確認ください。"
     )
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-critical-1",
         stock_code=stock_code,
         stock_name="サンプル株式会社",
@@ -719,7 +720,7 @@ def _profit_taking_recommendation(
             industry_classification=IndustryClassification.GENERAL_CORPORATE,
         ),
     )
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name="テスト水産",
@@ -826,7 +827,7 @@ def test_fundamental_critical_risk_body_uses_current_price_not_future_target(
     )
     assert result.final_action == RecommendationType.FULL_PROFIT_TAKE
     assert result.origin == "FUNDAMENTAL_CRITICAL_RISK"
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-fundamental-critical",
         stock_code="1301",
         stock_name="テスト水産",

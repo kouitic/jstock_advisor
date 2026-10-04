@@ -81,6 +81,7 @@ from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     _compute_attention_event_identity,
 )
+from tests.factories import build_recommendation
 
 _CONFIG = load_config()
 _NOW = dt.datetime(2026, 10, 3, 8, 0, tzinfo=dt.UTC)
@@ -124,7 +125,7 @@ def _attention(
             profit_protection_drawdown_from_peak_pct=12.0,
             profit_protection_gain_giveback_ratio_pct=35.0,
         )
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=f"rec-{uuid.uuid4()}",
         stock_code="8306",
         stock_name=stock_name,
