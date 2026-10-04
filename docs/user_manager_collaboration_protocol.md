@@ -1980,13 +1980,14 @@ MANAGER     3.8節の management responsibility / ownership を ★ 引き続き
 ★ 3.8節の本文は変更していない。
 ```
 
-**新設しない。** 本節が加えるのは次の 4 点だけである。
+**新設しない。** 本節が加えるのは次の 5 点だけである。
 
 ```
 取得する artifact の列挙
 requirement traceability
 surrounding code の確認
 PR 本文の必須節の確認
+公開面の確認(個人特定情報および、それと結び付いた資産情報が含まれていないこと。下の「公開面の確認項目」)
 ```
 
 ### 手順
@@ -2063,7 +2064,7 @@ unverified measurement 観測値など(LEVEL_B または LEVEL_C)
 
 > 単純な「銘柄名があるか」「実値があるか」をNG条件にはしないでください。
 
-これは手順 11(PR 本文の必須節の確認)と同じ段で行う確認項目であり、新しい depth の label や手順番号は作らない。上の「本節が加えるのは次の 4 点だけ」に、この確認項目を 1 つ加える。
+これは手順 11(PR 本文の必須節の確認)と同じ段で行う確認項目であり、新しい depth の label や手順番号は作らない。この確認項目は、上の 5 点のうちの 5 点目である。
 
 ---
 
@@ -3610,3 +3611,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-19 | 2.7節「Human Gate の真正性(HUMAN_GATE_AUTHENTICITY)」を新設した(Issue #332 Unit 1-A)。全 AI セッションが同一の GitHub アカウントで投稿するため、author / mergedBy から USER 本人の承認を識別できず、承認が本文の自己申告に依存し、読み飛ばしを検出する仕組みも無い、という欠陥への対処である。(1)`HUMAN_GATE_VALID` の条件(USER_DIRECT_TURN・EXPLICIT_APPROVAL_INTENT・APPROVAL_REQUEST / RECEIPT の存在と REQUEST_ID・GATE_TYPE・SCOPE・EXECUTOR・TARGET_IDENTITY・TARGET_VERSION の一致・時系列整合・NOT_EXPIRED / NOT_REVOKED / NOT_CONSUMED・EXECUTING の single-writer・RECEIPT 未編集)、(2)Human Gate の状態遷移(REQUESTED / APPROVED / EXECUTING / CONSUMED / EXPIRED / REVOKED / INVALIDATED_BY_TARGET_CHANGE)、(3)GitHub 上の身元共有(R-7。author / mergedBy を USER 本人の証拠にしない。真正性の起点は USER_DIRECT_TURN と同一ターンの RECEIPT のみ)、(4)gate 別の TTL・binding・retry、(5)緊急時 `EMERGENCY_USER_ABSENT_POLICY = FAIL_CLOSE`(USER 不在時の bypass 経路を設けない)、(6)残余リスク R-1〜R-13、(7)発効条件 `EFFECTIVE_FROM_CONDITIONS` と `OPERATIONAL_READINESS_CONFIRMED`、過去の承認記録の扱い(`LEGACY_UNVERIFIED_APPROVAL`)、(8)preflight の検査項目(v3 §6(b) の 14 項目。うち「必要な MANAGER scope check」の内容は v3 が定義しておらず、本節も定めない)を正本へ反映した。**本改訂は発効しない**(`MERGE_IS_NOT_ACTIVATION = YES`。発効状態の正本は `HUMAN_GATE_AUTHENTICITY_ACTIVATION_STATE_SSOT` = Issue #332 の最新の durable な activation 記録で、固定値を本書へ埋め込まない。発効前は旧運用を継続し、新旧を途中で混在させない。識別子は既存の `ACTIVATION_STATE_SSOT` [#353]・`SESSION_POLICY_ACTIVATION_STATE_SSOT` [#355] と衝突しない名前にした)。**2節の承認単位・例外なしの原則・2.5節・2.6節・3節以降・1節の役割定義はいずれも変更・緩和していない。** 表に行が無い gate(release-blocker 解除・rollback 等)の TTL・binding・retry は v3 に定めが無く、AI が補わず「未決定」と明記した(発効前に USER の決定を要する)。**preflight の自動化は形式の検査を機械化するにすぎず、USER 本人性は解決しない**ことも明記した。本文書は形式(書式)を定めず、書式は ai_operation_message_contract.md 8.6節が正本である。設計の根拠は Issue #332 の v3 最終版(issuecomment-5737842742。DECIDED_BY = USER、MANAGER 経由のチャット指示として記録)。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-19 | 2.7節の 3 か所を補正した(Issue #332 Unit 1-A の追補)。(1)`RECEIPT_EXISTS` を「**有効な** RECEIPT が存在する」と明確化し、`RECEIPT_STATE` が `APPROVAL_DECISION` と一致しない RECEIPT(APPROVE 以外なのに APPROVED 等)は無効で存在するものとして数えないことを明記した。(2)preflight の検査項目へ「`RECEIPT_STATE` が `APPROVAL_DECISION` と一致する」を追加した(検査項目を【A】v3 §6(b) 由来の14項目と【B】v3 の外[contract 8.6.2節由来]の1項目に分け、出典を本文で判別できるようにした。15 項目が HUMAN_GATE_VALID の17条件を置き換えるものではないことと、17条件との対応[15項目で覆われるもの・15項目に無いが機械で検査できるもの・機械では検査できないもの]を「17 条件との対応」として明記した)。**いずれも新しい規則ではなく、PR #426 のレビュー(F1)で ai_operation_message_contract.md 8.6.2節に既に定めた不変条件が、本節の一覧に無かったための所在の補正である**(一覧から実装すると、却下の受領証を承認として読む向きの検査が抜ける)。(3)標準の TTL より長い `VALID_UNTIL` を許すかを、v3 に定めが無い「未決定」として明記した(AI が推測で補わない)。**HUMAN_GATE_VALID の17条件の名前・状態遷移・TTL の表・発効条件・残余リスクはいずれも変更していない。本改訂は発効しない**(発効状態の正本は #332 の最新の durable な記録)。MANAGER 判断(2026-09-19)により、Unit 1-B の実装(scripts/)の前に正本を整えるために行う。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-10-04 | 11節「公開リポジトリとしての取り扱い」の、公開禁止の範囲を明確化した(Issue #122。USER 判断 = #122 issuecomment-5980464388)。**禁止するのは個人特定情報と、個人特定情報と結び付いた資産情報**であり、保有銘柄の名称・証券コード・数量・取得単価・現在値・金額は単独では一律禁止にしない(必要性のない実値は架空値・丸めた値・割合を推奨)。従来の「実際の保有数量 / 取得単価 / portfolio 価値 / 個別保有銘柄」を一律に載せないと読める記載を、USER の原文の引用へ置き換えた。あわせて 3.11節に「公開面の確認項目」を追加した。過去の公開記録は、この判断だけを理由に書き換えない(今後新規・更新する記録に適用)。日次監査・denylist の検出範囲は変更していない。**コード・Production 挙動の変更なし** |
+| 2026-10-05 | 2026-10-04 の行(公開禁止の範囲の明確化。Issue #122)のレビュー指摘への是正。(1) operations_manual 27.2・27.3・27.6 に、21節を根拠として銘柄コード・銘柄名・保有数量を一律に書かないと読める記述が残っていたため、同じ定義(個人特定情報、およびそれと結び付いた資産情報が禁止。銘柄・数量・金額は単独では一律禁止にしない。必要性のない実値は架空値・丸めた値・割合を優先)へ明確化した。所有者・AWS アカウント識別子・ARN の扱いは弱めていない。(2) 3.11節の冒頭の「4 点」を、確認項目を含む「5 点」に整え、節内の数を 1 つに確定した。新しい規則・例・閾値は足していない。**コード・Production 挙動の変更なし** |
