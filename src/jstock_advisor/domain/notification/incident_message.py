@@ -182,6 +182,22 @@ class IncidentContent(StrEnum):
     HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED = (
         "保有銘柄の判定時点のデータの保存に失敗しました"
     )
+    # Issue #669(HF-4): ★ PROVISIONAL(暫定の文言)。この3件の「内容」文についてのUSERの承認は無い
+    # (USER承認の範囲は、暫定の文面で実装してよく、deploy前にUSERが文面を承認する、という進め方〔
+    # #122 issuecomment-5978254843〕のみ)。既存の文言の文型に揃えた暫定案であり、
+    # fallbackで処理を続けている事実(保有判断の設定)と、投資判断の通知を止めた事実(通知設定)を
+    # 区別して伝えることを意図している。利用者に分かりやすいかは未検証。deploy前にUSERの確認が
+    # 要る項目としてPR本文に一覧で載せる(「USER決定」ではない)。内部のreason code・例外・
+    # stack trace・識別子は含めない(allowlist方式)。
+    HOLDINGS_WATCHLIST_RUNTIME_CONFIG_STALE_CACHE_USED = (
+        "保有判断の設定を取得できず、直前に取得した設定で処理を続けています"
+    )
+    HOLDINGS_WATCHLIST_RUNTIME_CONFIG_FALLBACK_USED = (
+        "保有判断の設定を取得できず、安全側の既定の設定で処理を続けています"
+    )
+    HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED = (
+        "通知設定を取得できなかったため、投資判断の通知を止めた状態で処理を続けています"
+    )
     CLOUDWATCH_ALARM = "システムの監視アラームが検知されました"
     OTHER = "技術的な問題を検知しました"  # 対応表に無いreason_codeの落ち先
 
@@ -264,6 +280,18 @@ _REASON_CODE_TO_CONTENT: dict[str, IncidentContent] = {
     ),
     "HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED": (
         IncidentContent.HOLDINGS_WATCHLIST_DECISION_SNAPSHOT_SAVE_FAILED
+    ),
+    # Issue #669(HF-4。発行元 = services/holding_decision_runtime_config_service.py の
+    # _notify_handled_failure_safely呼び出し。モジュール定数経由)。内容文は PROVISIONAL
+    # (IncidentContent の該当行のコメント参照)。
+    "HOLDINGS_WATCHLIST_RUNTIME_CONFIG_STALE_CACHE_USED": (
+        IncidentContent.HOLDINGS_WATCHLIST_RUNTIME_CONFIG_STALE_CACHE_USED
+    ),
+    "HOLDINGS_WATCHLIST_RUNTIME_CONFIG_FALLBACK_USED": (
+        IncidentContent.HOLDINGS_WATCHLIST_RUNTIME_CONFIG_FALLBACK_USED
+    ),
+    "HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED": (
+        IncidentContent.HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED
     ),
     "CloudWatchAlarm": IncidentContent.CLOUDWATCH_ALARM,
 }
