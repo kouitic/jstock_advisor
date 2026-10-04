@@ -44,6 +44,7 @@ from jstock_advisor.domain.entities.enums import (
     BuyIndustrySector,
     ConfidenceLevel,
     PeriodType,
+    RecommendationScope,
     RecommendationType,
     StockType,
     WatchTransitionType,
@@ -1883,6 +1884,8 @@ class BuySignalService:
 
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
+            # Issue #580: 買い候補は保有に依らない銘柄についての推奨(owner・holding_id・株数なし)。
+            scope_type=RecommendationScope.STOCK_SCOPE,
             stock_code=stock_code,
             stock_name=financial.stock_name or stock_code,
             recommended_at=now,

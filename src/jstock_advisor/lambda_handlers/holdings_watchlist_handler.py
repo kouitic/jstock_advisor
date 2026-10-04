@@ -57,6 +57,7 @@ from jstock_advisor.domain.entities.enums import (
     NotificationIntent,
     NotificationStatus,
     PriceRangeEvaluationState,
+    RecommendationScope,
     RecommendationType,
     resolve_holding_summary_action,
 )
@@ -501,6 +502,13 @@ def evaluate_household_concentration_and_notify(
         single_contributor = len(position.holding_ids) == 1
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
+            # Issue #580: 寄与する保有が1件なら SINGLE_HOLDING、2件以上なら HOUSEHOLD_AGGREGATE
+            # (家計内の複数の保有を合算した推奨。owner・holding_id は None のまま)。
+            scope_type=(
+                RecommendationScope.SINGLE_HOLDING
+                if single_contributor
+                else RecommendationScope.HOUSEHOLD_AGGREGATE
+            ),
             # Issue #64 F-A2: 寄与が1件なら確定できるので入れる。2件以上は一意に
             # 定まらないためNoneとし、一覧をconfig_values_usedへ残す。
             owner=position.owners[0] if single_contributor else None,

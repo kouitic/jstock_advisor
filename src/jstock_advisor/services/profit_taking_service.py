@@ -32,6 +32,7 @@ from jstock_advisor.domain.entities.enums import (
     EarningsReleaseConfirmationState,
     PriceRangeEvaluationState,
     ProfitTakingIndustrySector,
+    RecommendationScope,
     RecommendationType,
     SellIntensity,
     StockType,
@@ -1412,6 +1413,8 @@ class ProfitTakingService:
 
         recommendation = Recommendation(
             recommendation_id=str(uuid.uuid4()),
+            # Issue #580: 1件の保有についての推奨。
+            scope_type=RecommendationScope.SINGLE_HOLDING,
             owner=holding.owner,
             holding_id=holding.holding_id,
             stock_code=holding.stock_code,
