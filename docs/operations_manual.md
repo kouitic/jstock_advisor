@@ -4766,8 +4766,9 @@ RELEASE_SCOPE_GATE(build前、36.3のBRANCH_GATE等より前に実施する)
    ・手順2でUNKNOWNとなった項目は、上の引用の条件がそろった時点(USERが当該SHAのChangeSet実差分を
      確認したうえでEXECUTEを明示承認した時点)で、CODE_DEPLOY_APPROVED / ACTIVATION_APPROVEDの
      値が定まる
-   ・手順3の停止条件(CODE_DEPLOY_APPROVED=NO / 明示的なDEPLOY_HOLD)は変わらない。引用の条件の
-     「NO が0件」「有効な DEPLOY_HOLD が0件」は、手順3と同じ内容である
+   ・手順3の停止条件(CODE_DEPLOY_APPROVED=NO / 明示的なDEPLOY_HOLD)は変わらない。
+     手順3は「明示的なDEPLOY_HOLD」(Issue自身が明記しているもの)と書き、引用の条件は
+     「有効な DEPLOY_HOLD」と書く。両者の文言は同一ではなく、範囲の異同は本節では定めない
    ・shadow・dormant・feature flag OFFの変更は、EXECUTE承認でdeployまでを承認する。
      activationは別のHuman Gateのままである
 ```
