@@ -69,7 +69,9 @@ def _sns_topic_policy_statements(resources: dict[str, Any]) -> list[tuple[str, l
 def test_incident_notification_topic_policy_statements_have_unique_sids() -> None:
     resources = _resources()
     statement = resources[_TOPIC_POLICY_LOGICAL_ID]["Properties"]["PolicyDocument"]["Statement"]
-    assert len(statement) == 2, "Issue #557当時の2 Statement構成を前提とする"
+    # Issue #725: 2 Statement(#557当時)→ 10 Statement(HANDLED_FAILURE通知を発行する8 Lambdaの
+    # 実行ロール分を追加)。個別の内容は test_infra_issue_725_incident_publish_wiring.py。
+    assert len(statement) == 10, "Issue #725の10 Statement構成を前提とする"
 
     sids = [entry.get("Sid") for entry in statement]
     assert all(sid is not None for sid in sids), (
@@ -80,6 +82,14 @@ def test_incident_notification_topic_policy_statements_have_unique_sids() -> Non
     assert sids == [
         "AllowCloudWatchAlarmPublish",
         "AllowWatchlistBatchReconcilerPublish",
+        "AllowBuyCandidatesPublish",
+        "AllowBuyCandidateWorkerPublish",
+        "AllowHoldingsWatchlistPublish",
+        "AllowHoldingsWatchlistWorkerPublish",
+        "AllowWatchlistDispatcherPublish",
+        "AllowWatchlistWorkerPublish",
+        "AllowWatchlistTerminalFailureHandlerPublish",
+        "AllowEvaluationPublish",
     ]
 
 

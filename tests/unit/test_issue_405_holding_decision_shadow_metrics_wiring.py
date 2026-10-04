@@ -365,9 +365,49 @@ def _call_names(module: Any, name: str) -> int:
 
 
 def test_the_handler_calls_the_builder_and_the_exit_computation_exactly_once() -> None:
-    """src 内の builder の呼び出し元は handler の 1 箇所で、exit の算出の呼び出しも 1 箇所。"""
+    """handler モジュール内の builder の呼び出しと、exit の算出の呼び出しが、それぞれ 1 回。
+
+    ★ 数えているのは handler モジュールの中だけである。src 全体の呼び出し元は、下のテストが数える。
+    """
     assert _call_names(handler_module, "build_holding_decision_recommendation") == 1
     assert _call_names(handler_module, "evaluate_exit_price_range") == 1
+
+
+def _src_call_counts(name: str) -> dict[str, int]:
+    """src/jstock_advisor/ 配下の全 .py で、`name` を関数として呼ぶ箇所の数(ファイル別。AST)。"""
+    root = Path(inspect.getsourcefile(handler_module) or "").parents[1]
+    counts: dict[str, int] = {}
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text("utf-8"))
+        found = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if (isinstance(func, ast.Name) and func.id == name) or (
+                    isinstance(func, ast.Attribute) and func.attr == name
+                ):
+                    found += 1
+        if found:
+            counts[path.relative_to(root).as_posix()] = found
+    return counts
+
+
+def test_the_call_sites_in_the_whole_src_are_the_known_ones() -> None:
+    """★ src 全体では、`evaluate_exit_price_range` の呼び出し元は 3 箇所である。
+
+    保有判断の handler(本ファイルが検査)・SELL(sell_signal_service。#405 PR-2 が検査)・
+    利確(profit_taking_service。#405 PR-3 が検査)。「exit の算出は 1 箇所だけ」ではない。
+    引数列を変えるときは 3 経路すべてを見直すこと。4 箇所目が増えたら落ちる(引数列の検査が要る)。
+    builder(`build_holding_decision_recommendation`)の呼び出し元は、src 全体で handler の 1 箇所。
+    """
+    assert _src_call_counts("evaluate_exit_price_range") == {
+        "lambda_handlers/holdings_watchlist_handler.py": 1,
+        "services/profit_taking_service.py": 1,
+        "services/sell_signal_service.py": 1,
+    }
+    assert _src_call_counts("build_holding_decision_recommendation") == {
+        "lambda_handlers/holdings_watchlist_handler.py": 1,
+    }
 
 
 def test_the_spec_covers_exactly_the_nine_metrics_fields_and_nine_copied_fields(
