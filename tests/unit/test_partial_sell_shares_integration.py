@@ -27,7 +27,6 @@ from jstock_advisor.domain.entities.enums import (
     NotificationCategory,
     RecommendationType,
 )
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.notification.message_formatter import format_notification_text
 from jstock_advisor.domain.notification.recommendation_adapter import (
     build_notification_text_input,
@@ -36,6 +35,7 @@ from jstock_advisor.domain.signals.trading_unit_feasibility import (
     compute_suggested_sell_shares,
     evaluate_trading_unit_feasibility,
 )
+from tests.factories import build_recommendation
 
 _APP_CONFIG = load_config()
 _NOW = dt.datetime(2026, 8, 14, 8, 0, tzinfo=dt.UTC)
@@ -67,7 +67,7 @@ def test_case_q_sanrio_500_shares_strong_intensity_end_to_end() -> None:
     assert suggestion.shares == 300
     assert suggestion.ratio == 0.60
 
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-sanrio-8136",
         stock_code="8136",
         stock_name="サンリオ",

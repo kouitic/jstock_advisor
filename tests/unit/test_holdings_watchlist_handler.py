@@ -33,7 +33,7 @@ from jstock_advisor.lambda_handlers import holdings_watchlist_handler as handler
 from jstock_advisor.services import holding_decision_service as holding_decision_service_module
 from jstock_advisor.services.audit_service import AuditService as RealAuditService
 from jstock_advisor.services.line_notification_service import NotificationOutcome
-from tests.factories import FakeMarketDataProvider
+from tests.factories import FakeMarketDataProvider, build_recommendation
 
 _NOW = dt.datetime(2026, 7, 29, 7, 0, tzinfo=dt.UTC)
 
@@ -517,7 +517,7 @@ def test_estimate_portfolio_totals_isolates_single_holding_price_fetch_error() -
 
 
 def _minimal_recommendation(recommendation_id: str = "rec-1") -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="2914",
         stock_name="銘柄2914",
@@ -1096,7 +1096,7 @@ def test_data_quality_blocked_is_excluded_from_detected() -> None:
 
 
 def _attention_watch_recommendation(signal: str = "CANDIDATE") -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="pt-attention-1",
         stock_code="2914",
         stock_name="銘柄2914",

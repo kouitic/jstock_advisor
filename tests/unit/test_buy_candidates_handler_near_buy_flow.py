@@ -21,6 +21,7 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 )
 from jstock_advisor.lambda_handlers import buy_candidates_handler as handler_module
 from jstock_advisor.services.audit_service import AuditService as RealAuditService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 17, 8, 0, tzinfo=dt.UTC)
 _CONFIG = load_config()
@@ -36,7 +37,7 @@ def _patch_audit(monkeypatch, tmp_path: Path) -> None:
 def _near_buy_recommendation(
     stock_code: str, recommendation_id: str, distance_pct: str, quality_score: float
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
