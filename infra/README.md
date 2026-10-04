@@ -59,6 +59,13 @@ python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements
   `requirements.txt`をpip-audit監査する
 - rollback時は過去コミットをcheckoutして`sam build`すれば、pin済み集合により
   当時と同一のLayerが再現される(PyPI上でyank/削除されていない限り)
+- ※注記(Issue #796。上の記述はRelease W10で成立しなかった): 上の「同一のLayerが再現される」は、
+  build環境が同一の場合に限られる。同じ版でも、wheelの種別(例: cryptographyのmanylinux_2_17と
+  manylinux_2_34)は、build環境(ホストのOS・glibc・pip・SAM CLIとaws_lambda_buildersの版・
+  `--use-container`の使用の有無)で変わりうるため、build環境が異なるとLayerのバイト列は
+  一致しない。詳細は`docs/operations_manual.md`14.2とIssue #796を参照
+- Layerの入力は`layer/requirements.txt`である。リポジトリ直下の`requirements-lock.txt`は、
+  CI(lint / typecheck / test / dependency-audit)用の別のファイルで、Lambdaには入らない
 - 運用フロー全体は`docs/operations_manual.md`14節を参照
 
 ## ビルド・デプロイ
