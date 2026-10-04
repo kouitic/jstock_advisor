@@ -3762,6 +3762,8 @@ Production ChangeSet EXECUTE 実際のリソースプロバイダAPI呼び出し
                               「事前検知ができた」ことは意味しない
 ```
 
+(上の「自動rollbackが安全網として働く」が働くかどうかは、EXECUTEのコマンドでのDisableRollbackの指定に関わる。指定の扱いと、失敗・UPDATE_FAILEDのまま残った場合の扱いは31.4を参照。Issue #793、2026-10-04追記)
+
 **実AWS環境でのpreflight/dry-run(ChangeSet CREATE〜EXECUTEを別accountの
 staging環境で先行実行する等)は、本節時点では採用していない。** CI/release
 pipelineへAWS credentialを新規・広範に持たせることになり、Issue #164(長期
@@ -3799,6 +3801,70 @@ broad credentialの恒久利用)・Issue #359(deploy principalの権限設計)�
 
 本節は Issue #559(design-defect・priority:P2)の実装(PR-1〜PR-3)の一部として
 追加した。判定ロジック・通知内容・保存データ形式・Production挙動は変更していない。
+
+### 31.4 ChangeSet EXECUTEのDisableRollbackの指定と、UPDATE_FAILEDのまま残った場合の扱い(Issue #793、2026-10-04追加)
+
+31.2は、Production ChangeSet EXECUTEで失敗した場合にCloudFormationの自動rollbackが安全網として働くと述べている。本節は、その安全網が働くかどうかが、EXECUTEのコマンドでのDisableRollbackの指定に関わることを記録する。
+
+#### 31.4.1 EXECUTEのコマンド
+
+USER決定(Release W10のChangeSet EXECUTE承認。Issue #122 issuecomment-5974803370。原文のまま引用):
+
+```
+既存のProduction deploy資格情報を使用し、aws cloudformation execute-change-set の経路で実行してください。失敗時に自動rollbackするよう、必ず --no-disable-rollback を明示してください。sam deploy による直接EXECUTEは禁止します。
+```
+
+(同じ文書の次の1文「今回のEXECUTE承認は、この既存ChangeSet 1件に対してのみ有効です。」はW10の承認の範囲を定めるもので、本節の規則ではないため引用から省いた。原本を参照。)
+
+本節の整理(★USER決定の引用ではない):
+
+```
+1  EXECUTEのコマンドは、DisableRollbackの既定値に依存せず、--no-disable-rollback(rollbackを有効にする指定)を明示する
+2  EXECUTEのコマンドとそのDisableRollbackの指定を、releaseの実行記録へ残す
+   (W10の実績: W10の実行記録のEXECUTE_COMMAND / ROLLBACK_SETTING。#783 issuecomment-5974880432)
+```
+
+事実(規則ではない):
+
+```
+・samconfig.tomlのdisable_rollbackが効くのは、SAM CLI自身がChangeSetを実行する場合である。本手順書の経路
+  (CREATE = sam deploy --no-execute-changeset / EXECUTE = aws cloudformation execute-change-set)では、
+  EXECUTEはsamconfig.tomlの値を受け取らない。したがってEXECUTEが失敗したときのrollbackの有無は、
+  execute-change-setの指定で決まる(出典: Issue #793。SAM CLIの公開ソースの読解。読んだのはdevelopの最新で、
+  実際に使われた版ではない)
+・「--disable-rollbackを指定しなければrollbackが有効か」は、裏付けが取れていない。AWS CLI 2.36.8のhelpは
+  execute-change-setの--disable-rollbackにDefault: "True"と記載している。一方、31節の冒頭(導入文)はRelease W9の
+  EXECUTE失敗が自動rollbackで収束したと記録している。2つが食い違い、どちらがサービスの実挙動かは、AWSを
+  呼ばずには確定できない。本節が既定値の主張をせず「明示する」と定めるのは、このためである
+・W10の実績: aws cloudformation execute-change-setに--no-disable-rollbackを明示して実行し、stackの
+  DisableRollback = Falseを確認し、UPDATE_COMPLETE(FAILED_EVENTS 0・rollbackなし)で終端した
+  (#783 issuecomment-5974880432)
+```
+
+#### 31.4.2 失敗した場合・UPDATE_FAILEDのまま残った場合
+
+USER決定(同じ文書。原文のまま引用):
+
+```
+失敗またはrollbackが発生した場合は、追加操作を自己判断で行わず、その状態を記録して停止してください。
+```
+
+事実(AWS CLI 2.36.8のhelpの記載。規則ではない。どの操作を実行するかはUSER判断であり、実行者は自己判断で実行しない):
+
+```
+・execute-change-setの--disable-rollback: "Preserves the state of previously provisioned resources when an
+  operation fails."(rollbackを無効にすると、失敗時にリソースの状態が保持される。stackがUPDATE_FAILEDの
+  まま残りうる。Issue #793の想定であり、W10では起きていない)
+・rollback-stack: "Rolls back the specified stack to the last known stable state from CREATE_FAILED or
+  UPDATE_FAILED stack statuses."。ただし "This operation will delete a stack if it doesn't contain a last
+  known stable state."
+・continue-update-rollback: UPDATE_ROLLBACK_FAILED(rollback自体が失敗した状態)からUPDATE_ROLLBACK_COMPLETE
+  へ進める
+・上記以外の復旧(例: 修正を入れた新しいChangeSetで前へ進める。ChangeSetのCREATEとEXECUTEは別のHuman Gate)を
+  含め、どれを選ぶかはUSER判断
+```
+
+本節はIssue #793の実装として追加した(docsのみ)。判定ロジック・通知内容・保存データ形式・Production挙動は変更していない。
 
 ## 32. 本番ジョブ異常のGitHub Issue自動起票(Issue #508。#132 X-9)の Verification Plan(2026-09-25追加)
 
