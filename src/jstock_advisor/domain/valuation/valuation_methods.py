@@ -25,6 +25,8 @@ valuation_anchor・バラつき判定・通知の適正価格レンジに使わ�
 
 from __future__ import annotations
 
+import logging
+import math
 import statistics
 from dataclasses import dataclass
 from decimal import Decimal
@@ -43,6 +45,19 @@ from jstock_advisor.domain.valuation.valuation_confidence import (
     CODE_VALUATION_ANCHOR_CALCULATION_FAILED,
     ValuationAnchorBlockingReason,
 )
+
+logger = logging.getLogger(__name__)
+
+# Issue #263: `_trimmed_mean()`の既定のtrim割合。trim_count = int(n * 割合)は、
+# n >= ceil(1 / 割合)(既定では10)になって初めて1以上になる。本番の方式数(最大6)では
+# 一度もtrimせず単純平均と同一である(挙動は変えない。実態は`_trimmed_mean()`のdocstring参照)。
+_TRIM_FRACTION = 0.1
+
+
+def _min_values_to_trim(trim_fraction: float = _TRIM_FRACTION) -> int:
+    """trimが効き始める値の最小件数(int(n * trim_fraction) >= 1 になる最小のn)。"""
+    return math.ceil(1 / trim_fraction)
+
 
 DispersionBand = Literal["LOW", "MEDIUM", "HIGH"]
 
@@ -445,10 +460,30 @@ def _weighted_median(values_with_weights: list[tuple[Decimal, float]]) -> Decima
     return ordered[-1][0]
 
 
-def _trimmed_mean(values: list[Decimal], trim_fraction: float = 0.1) -> Decimal:
+def _trimmed_mean(values: list[Decimal], trim_fraction: float = _TRIM_FRACTION) -> Decimal:
+    """両端を`int(n * trim_fraction)`件ずつ除いた平均。
+
+    ★ Issue #263: 本番の方式数(最大6)では、n < 10のためtrim_count = 0となり、**一度も
+    trimせず単純平均と同一**である(名前の「trimmed」は本番では機能していない)。算出式・
+    既定値・関数名は変えない(過去の説明・呼び出しの参照が多く、挙動を変えるとanchorが動くため)。
+    根拠と実測は`compute_valuation_anchor()`のdocstringの#263の注記と、Issue #263を参照
+    (ここで重複して書かない)。
+
+    ★ nが`_min_values_to_trim()`(既定では10)以上になり実際にtrimされる場合は、anchorの算出規則が
+    黙って変わらないよう、WARNINGを1行出す(件数のみ。銘柄コード・数量は出さない。平常時は0件。
+    戻り値は変えない)。
+    """
     ordered = sorted(values)
     n = len(ordered)
     trim_count = int(n * trim_fraction)
+    if trim_count >= 1:
+        logger.warning(
+            "valuation trimmed_mean is trimming (n=%d, min_n_to_trim=%d, trim_count=%d): "
+            "the aggregation differs from the simple mean (Issue #263)",
+            n,
+            _min_values_to_trim(trim_fraction),
+            trim_count,
+        )
     trimmed = ordered[trim_count : n - trim_count] if n - 2 * trim_count > 0 else ordered
     return sum(trimmed, Decimal("0")) / len(trimmed)
 
