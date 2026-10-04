@@ -2192,6 +2192,9 @@ baseline → target の commit 列挙で確認する。
 満たす限り複数 Issue を含めてよいが、**いずれの場合も
 release scope 外の変更を便乗させない**点は共通である。
 
+Production へ反映する単位(承認済みの main SHA 全体)と single window の定義は、
+[docs/operations_manual.md](operations_manual.md) 36.2 節(36.2.1・36.2.2)が正本である。本節へは複製しない。
+
 ---
 
 ## 9.5 すべての変更を Issue 起点とする
@@ -2623,6 +2626,24 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 
 ---
 
+## 12. docs の変更履歴の追記規則(CHANGELOG_APPEND_ONLY)
+
+USER 決定(2026-10-03。Issue #785。原本: Issue #122 の USER_DECISION_RECORD〔issuecomment-5968256759〕の「17. 運用手順書」)。
+以下の引用は USER の発言の原文である(要約・言い換えをしていない)。
+
+> 変更履歴：末尾append-onlyとする。既存行を並べ替えず、最新を先頭へinsertしない。これで同一箇所の編集競合を減らします。1リリースで複数PRがある場合も、可能ならrelease単位で1エントリにまとめます。
+
+```
+適用     docs の「変更履歴」の表(2026-10-03 時点で変更履歴の節を持つ文書 6 本: 本書・ai_operation_message_contract.md・
+         issue_label_policy.md・user_manager_collaboration_protocol.md・functional_spec.md・functional_domains.md。grep)
+本文     本節が正本。他の文書の変更履歴の直前には、本節への pointer を 1 行だけ置く(規則本文を複製しない。
+         2026-10-03 時点で pointer を置いたのは functional_spec.md・functional_domains.md の 2 本。残りの 3 本への pointer は MANAGER の判断)
+```
+
+本節は規則の追加であり、既存の変更履歴の行の書き換えは伴わない。
+
+---
+
 ## 変更履歴
 
 | 日付 | 変更概要 |
@@ -2658,3 +2679,4 @@ Issue なしで進められるのは §9.5 の `ISSUE_EXCEPTION=DOC_ONLY_NON_BEH
 | 2026-09-25 | 2.6.9 の集約 read model(Issue #188)の**保管方式を「本文の可変 cache」から「append-only のコメント」へ正式移行**した(USER決定)。旧本文は「専用の tracking Issue の本文を可変 cache として使う(append-only のコメントで現況を管理しない。最新がどれか埋もれるため)」としていたが、実際の運用ではこの「本文上書き」方式が prepend 方式(新しい内容を先頭へ足し続ける運用)で行われ、2026-09-25 に #188 の本文が GitHub Issue body の上限(約 262,144 文字)へ到達する事故が発生した(JIRO が本文を READ_MODEL_REBUILD で圧縮し復旧)。一方、同じ本文書 6.5.3 節の `ISSUE_STATE_SNAPSHOT` は append-only のコメントを使いながら `LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` という規約で「最新がどれか埋もれる」問題を既に解決しており、2.6.9 が append-only を避けた根拠(最新が埋もれる)は、同じ文書内に既に解決策が存在していたことになる。本改訂は「保管」行を、tracking Issue へ append-only のコメントで現況を追記し、最新の判定は 6.5.3 と同じ `LATEST_SNAPSHOT_TRUTH_SOURCE = GITHUB_COMMENT_ORDER` に従う形へ改めた。本文(body)は恒久的な使い方の説明(掲示・label・更新責務)のみを保持し、可変 cache としては使わない。「更新責務」行もコメント追記による更新であることを明記した。**レビュー対応(USER 指摘 F1)**: 当初案の「コメント順で最後のものを現況とする」は、tracking Issue #188 自身へ投稿されうる通常の Issue コメント(個別 Issue の `DOMAIN_WIP_DECLARATION` の引用・USER 判断の記録・訂正・障害記録等。read model の snapshot ではないもの)を、単純な「最後のコメント」判定では現況として誤読しうる欠陥があった。`VALID_READ_MODEL_UPDATE` を新設し、必須 field(`GENERATED_AT` / `SOURCE_MAIN` / `SOURCE_ISSUES` / `ACTIVE_DOMAIN_WIP` / `SHARED_LOCKS` / `WORKER_WIP` / `GRANDFATHERED_WIP` / `UNKNOWN_BRANCH_STATE`)をすべて持つ自己完結 snapshot のみを現況判定の対象とし、それ以外のコメントは(投稿順で最後であっても)対象外と明記した。**#188 自体の本文の訂正は本改訂とは別に MANAGER が行う(本 PR の scope 外)。WIP_STATE_SSOT(各 Issue の宣言 + 最新 snapshot)・READ_MODEL_IS_SSOT = NO・INDEX_ONLY・READ_MODEL_MISMATCH の扱い・着手前の確認手順・Human Gate / merge 承認 / Production approval / release-blocker lifecycle / label 4 軸 / §2.6 の取得ゲートと解放条件はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-28 | §10 へ 10.3「Issue の scope / AC 縮小には Human Gate が必要(SCOPE_REDUCTION_GATE)」を新設した(Issue #689)。#254 / PR #687 のレビュー過程で、作業者が自身の調査結果に基づき Acceptance Criteria の対象範囲を USER/MANAGER の明示承認記録なしに書き換えていた事実が判明した(先行する #467 分離は `SPLIT_DECIDED_BY = USER` として記録されていたのに対し、今回はその記録が無かった)。2026-09-28 に USER はこの件自体を事後承認(`POST_HOC_APPROVED`)としたうえで、以後の恒久ルールとして本節を新設した。AC 項目の削除・対象範囲の縮小・scope の別 Issue への移管・DoD を弱める判断・承認済み scope 境界の変更のいずれかに当たる場合は Human Gate を要し(`HUMAN_GATE_REQUIRED = YES`)、誤字訂正・AC を変えない説明の精緻化・AC を満たすためのテスト追加・scope/DoD を弱めない実装詳細の変更は不要とする(`HUMAN_GATE_REQUIRED = NO`)。`DEVELOPER_MAY_DISCOVER_SCOPE_MISMATCH = YES` / `DEVELOPER_MAY_PROPOSE_SCOPE_CHANGE = YES` / `DEVELOPER_MAY_UNILATERALLY_REDUCE_APPROVED_SCOPE = NO` とし、scope 縮小の発見・提案自体は妨げない(9.5節の `OPPORTUNISTIC_FIX_FORBIDDEN` と同様、調査を止めるのではなく承認手続きを挟む)。承認が下りるまでは元の AC・scope を正本として作業を続ける。**本節はルールの本文を新設するものではなく、USER が 2026-09-28 に新設した内容を正本へ書き込むものである**(`POLICY_AUTHORITY = HUMAN_ONLY`)。9.5節(`NO_BEHAVIOR_OR_OPERATIONAL_CHANGE_WITHOUT_ISSUE` / `OPPORTUNISTIC_FIX_FORBIDDEN`)との重複がないことを確認済み(9.5節はコード変更に Issue が要るか・scope 外の不具合をその場で直すかを扱い、本節は担当中の Issue そのものの scope/AC 変更を扱う)。**既存の §9.5・§10 の他の項目・10.1・10.2 はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-26 | 3.5.1 の T2 の解釈を明確化した(Issue #475 / PR #600、USER決定)。旧本文の T2「provider が返す日付・時刻の決定ロジック」は、consumer が provider へ渡す start/end/as_of_date 等の値を業務時刻・業務日付に基づいて選択する変更まで含むのかが曖昧だった。PR #600 のレビューでサブちゃんが「T3(時刻由来値を受け取って業務分岐する consumer)に当たり、T2 ではない」と判定し、USER がこの解釈を今後の先例として承認した。本改訂は T2 の本文へ、**T2 は provider 層自身・provider contract として provider が返す値を決定するロジックの変更に限る**こと、consumer 側の時刻由来の値選択は T3 が適用されること、test/mock/fixture の clock・期待日も変更する場合は T4 を併用することを明記した。**T1/T3/T4 の定義・3.5.2 の control identifiers・3.5.3 の決定表・3.5.4 の control の内容はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-10-03 | §12「docs の変更履歴の追記規則(CHANGELOG_APPEND_ONLY)」を新設し、§9 の末尾へ operations_manual.md 36.2 への pointer を 1 行追加した(Issue #785。**USER 決定 2026-10-03、原本 = Issue #122 issuecomment-5968256759 の 17 節**)。変更履歴は末尾 append-only(既存行を並べ替えず、最新を先頭へ insert しない。可能なら release 単位で 1 エントリ)。規則本文は本節のみとし、functional_spec.md・functional_domains.md の変更履歴の直前に pointer を 1 行置いた。あわせて operations_manual.md 36.2 に 36.2.1(デプロイ単位の明確化)・36.2.2(single window の定義)を原文引用で追記した。**既存の規則文は書き換えていない(追記のみ)。** 恒久規則の文書の変更であり、USER が merge する Human Gate(POLICY_AUTHORITY = HUMAN_ONLY)。コード・Production 挙動の変更なし |
