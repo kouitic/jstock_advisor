@@ -100,6 +100,32 @@ def test_default_trim_fraction_is_unchanged() -> None:
     assert _min_values_to_trim() == 10
 
 
+# --- docstring の注記 ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "本番の方式数",
+        "trimせず単純平均と同一",
+        "Issue #263",
+        "Issue #263を参照",
+    ],
+)
+def test_trimmed_mean_docstring_keeps_the_issue_263_note(fragment: str) -> None:
+    """★ ``_trimmed_mean`` の docstring の注記を固定する。
+
+    固定するのは、本番の方式数では trim されず単純平均と同一であることと、Issue #263 への参照
+    (PR #804 の SHOULD-1。注記を消しても CI が落ちなかった)。
+
+    文書の文言そのものの固定であり、算出式・戻り値は見ない(挙動は他のテストが固定する)。
+    要点を 3 つの断片に分けるのは、どの要点が失われたかを失敗の表示で分かるようにするため。
+    """
+    doc = inspect.getdoc(_trimmed_mean)
+    assert doc is not None
+    assert fragment in doc
+
+
 @pytest.mark.parametrize("fraction", [0.05, 0.1, 0.2, 0.25])
 def test_min_values_to_trim_is_exactly_where_trim_count_becomes_one(fraction: float) -> None:
     """★ _min_values_to_trim() は、int(n * 割合) >= 1 になる最小の n と一致する(境界の算術)。"""
