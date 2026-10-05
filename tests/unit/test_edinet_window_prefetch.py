@@ -458,6 +458,22 @@ def test_timeout_is_retried_and_the_recovered_result_is_saved(tmp_path: Path) ->
     assert cached.fetch_status is EdinetFetchStatus.SUCCESS_WITH_DOCUMENTS
 
 
+def test_retry_wait_is_the_approved_two_seconds(tmp_path: Path) -> None:
+    """再試行の待ちの**値**を固定する(MANAGER判断 Q2: 2秒。#818 issuecomment-5987822549)。
+    定数を参照せず、リテラルで比べる(定数を変えると期待値も一緒に動くテストでは、値の変更を
+    検出できないため)。待ちを伸ばすと、劣化時に予算の内側で開始できる日付が減る方向へ挙動が
+    変わるので、変更するときは予算の見積り(模擬の時計のテスト)も合わせて見直すこと。
+    """
+    slow = _EXPECTED_DATES[1]
+    client = FakeClient(script={slow: [_TIMEOUT, _OK]})
+    sleeps: list[float] = []
+
+    prefetch_recent_document_lists(_source(client, tmp_path), _NOW, sleep=sleeps.append)
+
+    assert RETRY_WAIT_SECONDS == 2.0
+    assert sleeps == [2.0]
+
+
 def test_only_the_failed_date_is_retried(tmp_path: Path) -> None:
     slow = _EXPECTED_DATES[1]
     client = FakeClient(script={slow: [_TIMEOUT, _OK]})
