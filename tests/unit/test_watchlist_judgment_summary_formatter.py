@@ -30,6 +30,7 @@ from jstock_advisor.services.watchlist_judgment_summary_formatter import (
     format_watchlist_line,
     format_watchlist_line_body,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 24, 7, 0, tzinfo=dt.UTC)
 
@@ -85,7 +86,7 @@ def _recommendation(
     config_values_used: dict | None = None,
     buy_score_input_facts: dict | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="9432",
         stock_name="銘柄9432",

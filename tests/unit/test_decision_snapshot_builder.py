@@ -23,6 +23,7 @@ from jstock_advisor.domain.entities.decision_snapshot import (
 )
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, DecisionType, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from tests.factories import build_recommendation
 
 _STOCK_CODE = "2914"
 
@@ -37,7 +38,7 @@ def _recommendation(
     fair_value_overall_confidence: ConfidenceLevel | None = ConfidenceLevel.HIGH,
     config_values_used: dict | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=_STOCK_CODE,
         stock_name="テスト銘柄",

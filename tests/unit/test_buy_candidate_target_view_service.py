@@ -40,6 +40,7 @@ from jstock_advisor.services.buy_candidate_target_view_service import (
 )
 from jstock_advisor.services.latest_batch_records_provider import STILL_PROPAGATING_MESSAGE
 from jstock_advisor.services.watchlist_judgment_summary_formatter import format_watchlist_line_body
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 24, 7, 0, tzinfo=dt.UTC)
 _WEIGHTS = ScoreWeights(
@@ -112,7 +113,7 @@ def _recommendation(
     buy_score_input_facts: dict | None = None,
     final_buy_action: BuyAction = BuyAction.WATCH_FOR_PRICE,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",

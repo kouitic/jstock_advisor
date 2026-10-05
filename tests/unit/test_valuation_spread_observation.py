@@ -29,6 +29,7 @@ from jstock_advisor.domain.valuation.valuation_spread_observation import (
     derive_sell_spread_observation,
     derive_spread_observations,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 24, 23, 1, tzinfo=dt.UTC)
 
@@ -45,7 +46,7 @@ def _make_recommendation(**overrides: object) -> Recommendation:
         "rule_version": "v1-test",
     }
     base.update(overrides)
-    return Recommendation(**base)  # type: ignore[arg-type]
+    return build_recommendation(**base)  # type: ignore[arg-type]
 
 
 def _method(

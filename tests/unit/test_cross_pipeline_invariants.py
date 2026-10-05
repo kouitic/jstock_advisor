@@ -65,12 +65,13 @@ from jstock_advisor.services.line_notification_service import (
     resolve_notification_intent_for_recommendation,
 )
 from jstock_advisor.services.screening_data_provider import ScreeningDataStatus
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 16, 8, 0, tzinfo=dt.UTC)
 
 
 def _recommendation(recommendation_type: RecommendationType) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=f"inv-{recommendation_type.value}",
         stock_code="1234",
         stock_name="テスト銘柄",
