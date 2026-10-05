@@ -5124,7 +5124,8 @@ BUILD_ARTIFACT_IDENTITYとして記録する:
    適用するかは、本節では定めない。手順書上の置き場所:
      A・B   上の1の事前申告。2つの変更要因を別々に明示し、それぞれで変わるはずのartifactを申告する
      C      build前のゲート(36.3)の項目として、別に追記する(本節の範囲外)
-     D      36.4(container buildの記録)
+     D      36.4(container buildの記録。36.3の5によりreleaseのbuildはすべてcontainer buildになるため、
+            結果としてすべてのreleaseのbuildで記録する。E〜Iは据え置き)
      E・F   下の3
      G・H   36.6.1
      I      下の4
@@ -5254,8 +5255,11 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 上の1の確認項目に`use_container`を加えた。`infra/samconfig.toml`(git管理外)側に同じ節があることは、
 次のreleaseのdrift確認で確認する(git管理外のため、この追記の時点では確認していない)。
 実測の限定(事実): samconfigのbuild節だけで`sam build`がCLI引数なしにcontainerで動いたことは、
-1回の実測・SAM CLI 1.164.0のみで確認した(Issue #796 issuecomment-5979112271)。他の版・環境では
-未確認のため、36.3の5のとおり`--use-container`を明示してbuildする。
+1回の実測・SAM CLI 1.164.0のみで確認した(Issue #796 issuecomment-5979112271)。実測した設定は、
+`use_container`と`skip_pull_image`の2つを持つ合成のsamconfigだった(`skip_pull_image`も効いた)。
+`infra/samconfig.toml.example`は`use_container`のみで、`skip_pull_image`は未決定のため含めていない。
+他の版・環境、および`use_container`のみの設定では未確認のため、36.3の5のとおり`--use-container`を
+明示してbuildする。
 
 選択肢としてファイル分割(センシティブ/非センシティブを別ファイルへ
 分離する案)も検討したが、SAM CLIが複数config fileを直接mergeしない
