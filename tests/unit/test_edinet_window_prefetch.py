@@ -16,11 +16,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import inspect
+import re
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from jstock_advisor.infrastructure.edinet import window_prefetch
+from jstock_advisor.infrastructure.edinet.client import EdinetClient
 from jstock_advisor.infrastructure.edinet.document_list_cache import (
     EdinetDailyDocumentListCache,
     EdinetDailyDocumentListCacheRepository,
@@ -43,6 +48,11 @@ from jstock_advisor.infrastructure.edinet.window_prefetch import (
     prefetch_recent_document_lists,
     prefetch_recent_document_lists_safely,
 )
+
+_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "infra" / "template.yaml"
+# EdinetClient.list_documents の urlopen timeout(秒)。事前取得の時間の上限の前提。
+# 値そのものは下のテストでソースと結び付けて固定する。
+_CLIENT_LIST_TIMEOUT_SECONDS = 15.0
 
 # 2026-10-05(月)08:00:47 JST = 2026-10-04 23:00:47 UTC(実際の障害日の朝の起動時刻)。
 _NOW = dt.datetime(2026, 10, 4, 23, 0, 47, tzinfo=dt.UTC)
@@ -275,6 +285,25 @@ def test_failed_cache_is_not_treated_as_fresh_by_prefetch_and_is_overwritten(
     assert cached.fetch_status is EdinetFetchStatus.SUCCESS_WITH_DOCUMENTS
 
 
+def test_prefetch_does_not_reuse_a_failed_l1_memo_of_an_injected_source(tmp_path: Path) -> None:
+    """source を注入する経路: `list_documents` は失敗の結果を L1 memo に入れる(negative TTL の間は
+    再利用する)。その source を事前取得へ渡しても、事前取得は L1 の失敗を新しいとみなさず、
+    取り直して成功を保存する(L1 の成功判定 `memo.result.succeeded` の固定)。
+    """
+    client = FakeClient(result=_TIMEOUT)
+    source = _source(client, tmp_path)
+    assert not source.list_documents(_EXPECTED_DATES[1], _NOW).succeeded
+    client.result = _OK  # EDINET が回復した
+
+    summary = prefetch_recent_document_lists(source, _NOW + dt.timedelta(seconds=10))
+
+    assert summary.failed == 0
+    assert client.list_calls.count(_EXPECTED_DATES[1]) == 2  # 失敗した 1 回 + 事前取得の取り直し
+    cached = _repo(tmp_path).get(_EXPECTED_DATES[1])
+    assert cached is not None
+    assert cached.fetch_status is EdinetFetchStatus.SUCCESS_WITH_DOCUMENTS
+
+
 # --- fail-soft / 時間の上限 / 未設定 ---------------------------------------
 
 
@@ -327,11 +356,37 @@ def test_time_budget_stops_starting_new_dates(tmp_path: Path) -> None:
     assert summary.skipped_by_budget == 3
 
 
-def test_worst_case_delay_is_far_below_the_dispatcher_timeout() -> None:
-    client_timeout_seconds = 15.0  # EdinetClient.list_documents の urlopen timeout
-    dispatcher_timeout_seconds = 900.0  # infra/template.yaml の BuyCandidatesFunction Timeout
+def _buy_candidates_timeout_seconds() -> float:
+    """infra/template.yaml の BuyCandidatesFunction の Timeout(個別の値。無ければ Globals)。"""
 
-    assert DEFAULT_BUDGET_SECONDS + client_timeout_seconds < dispatcher_timeout_seconds / 4
+    class _Loader(yaml.SafeLoader):
+        pass
+
+    _Loader.add_multi_constructor("!", lambda _l, suffix, node: {f"Fn::{suffix}": node.value})
+    template: dict[str, Any] = yaml.load(_TEMPLATE_PATH.read_text(encoding="utf-8"), Loader=_Loader)
+    props = template["Resources"]["BuyCandidatesFunction"]["Properties"]
+    return float(props.get("Timeout", template["Globals"]["Function"]["Timeout"]))
+
+
+def test_budget_assumes_the_real_edinet_client_timeout() -> None:
+    """時間の上限の前提(client の timeout 15 秒)を、EdinetClient のソースと結び付ける。"""
+    source = inspect.getsource(EdinetClient.list_documents)
+
+    assert {float(value) for value in re.findall(r"timeout=(\d+)", source)} == {
+        _CLIENT_LIST_TIMEOUT_SECONDS
+    }
+
+
+def test_worst_case_edinet_delay_stays_far_below_the_dispatcher_timeout_in_the_template() -> None:
+    """EDINET の呼び出しに費やす最悪の時間(予算 + client の timeout)が、template の
+    BuyCandidatesFunction の Timeout の 1/4 未満であること。Timeout の値は template から読む
+    (直書きしない)。template 側で Timeout を下げて余裕が無くなると、このテストが落ちる。
+    L2(DynamoDB)の時間は含まない(module の docstring の「保証しない」を参照)。
+    """
+    timeout = _buy_candidates_timeout_seconds()
+
+    worst_case_edinet_seconds = DEFAULT_BUDGET_SECONDS + _CLIENT_LIST_TIMEOUT_SECONDS
+    assert worst_case_edinet_seconds * 4 < timeout, timeout
 
 
 def test_module_logs_only_counts_never_stock_codes_or_document_content(
