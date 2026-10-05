@@ -23,7 +23,7 @@ L2(共有cache)を新しくする。子は新しい成功cacheを再利用する
     始めない。EDINETへの1回の取得は最大15秒(`EdinetClient`のurlopen timeout)なので、EDINETの
     呼び出しに費やす時間は、最悪でも`DEFAULT_BUDGET_SECONDS` + 15秒(= 135秒)である。
   - 保証しない: L2(DynamoDB)の日付ごとの読み(GetItem)と保存(PutItem)の時間は、この上限に
-    含まれない。repoは`botocore.config.Config`を指定しておらず(infrastructure配下の検索)、
+    含まれない。repoは`botocore.config.Config`を指定しておらず(src全体の検索)、
     boto3の既定(connect / read timeoutは各60秒、DynamoDBのlegacy retryは最大10回)に従う。
     したがって135秒は「EDINET側の上限」であり、事前取得全体の絶対上限ではない。
   - 絶対上限: dispatcherのLambda Timeout(`infra/template.yaml`のBuyCandidatesFunction。900秒)。
