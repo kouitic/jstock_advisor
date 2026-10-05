@@ -73,6 +73,7 @@ from jstock_advisor.services.watchlist_addition_summary_builder import (
     WatchlistAdditionItemView,
     WatchlistAdditionSummary,
 )
+from tests.factories import build_recommendation
 
 _CONFIG = load_config()
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
@@ -107,7 +108,7 @@ def _make_recommendation(
     正本)。
     """
     is_buy = recommendation_type == RecommendationType.BUY
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="2914",
         stock_name="日本たばこ産業",
@@ -146,7 +147,7 @@ def _make_earnings_review_recommendation(
     再送のシグナルになる(next_review_conditionsは表示文言のみで、dedup判定には
     使われない)。
     """
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="2914",
         stock_name="日本たばこ産業",
@@ -332,7 +333,7 @@ def test_resend_when_judgment_type_changes(service_and_repos) -> None:
     再評価でもCross Pipeline Priorityに阻まれない。
     """
     service, repo, client = service_and_repos
-    rec1 = Recommendation(
+    rec1 = build_recommendation(
         recommendation_id="rec-1",
         stock_code="2914",
         stock_name="日本たばこ産業",
@@ -345,7 +346,7 @@ def test_resend_when_judgment_type_changes(service_and_repos) -> None:
     repo.save(rec1)
     service.notify_recommendation(rec1, _NOW)
 
-    rec2 = Recommendation(
+    rec2 = build_recommendation(
         recommendation_id="rec-2",
         stock_code="2914",
         stock_name="日本たばこ産業",
@@ -648,7 +649,7 @@ def test_disclosure_risk_notification_resends_for_different_disclosure(service_a
 def _make_full_profit_take_recommendation(
     *, recommendation_id: str, full_take_price: str
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="2914",
         stock_name="日本たばこ産業",
@@ -790,7 +791,7 @@ def _make_sell_recommendation(
     evidence_details: list[dict] | None = None,
     independent_evidence_group_count: int = 2,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="4631",
         stock_name="ＤＩＣ",
@@ -907,7 +908,7 @@ def test_data_quality_alert_logs_stock_name_and_recommended_action(
 
 
 def _make_review_recommendation_with_immediate_execution_price() -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-review-contradiction",
         stock_code="4631",
         stock_name="ＤＩＣ",
@@ -953,7 +954,7 @@ def test_watch_with_immediate_execution_price_contradiction_sends_safety_valve(
     評価され、要確認LINEの安全弁が送信される。
     """
     service, repo, client = service_and_repos
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-watch-contradiction",
         stock_code="4631",
         stock_name="ＤＩＣ",
@@ -1391,7 +1392,7 @@ def test_watch_message_suppresses_bullish_scenario_note_when_dispersion_large() 
 def _make_buy_pipeline_recommendation(
     *, buy_action: BuyAction, recommendation_type: RecommendationType = RecommendationType.BUY
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-buy-1",
         stock_code="4516",
         stock_name="日本新薬",
@@ -2902,7 +2903,7 @@ def _rationale_heavy_fields() -> dict:
 def _blacklist_test_recommendations() -> list[Recommendation]:
     common = _rationale_heavy_fields()
     return [
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-buy",
             stock_code="1001",
             stock_name="テスト買い",
@@ -2919,7 +2920,7 @@ def _blacklist_test_recommendations() -> list[Recommendation]:
             rule_version="v1-mvp",
             **common,
         ),
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-near-buy",
             stock_code="1002",
             stock_name="テスト打診接近",
@@ -2935,7 +2936,7 @@ def _blacklist_test_recommendations() -> list[Recommendation]:
             rule_version="v1-mvp",
             **common,
         ),
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-watch-before-earnings",
             stock_code="1003",
             stock_name="テスト決算前監視",
@@ -2946,7 +2947,7 @@ def _blacklist_test_recommendations() -> list[Recommendation]:
             rule_version="v1-mvp",
             **common,
         ),
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-sell",
             stock_code="1004",
             stock_name="テスト売却検討",
@@ -2960,7 +2961,7 @@ def _blacklist_test_recommendations() -> list[Recommendation]:
             rule_version="v1-mvp",
             **common,
         ),
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-full-sell",
             stock_code="1005",
             stock_name="テスト全部売却検討",
@@ -2976,7 +2977,7 @@ def _blacklist_test_recommendations() -> list[Recommendation]:
             rule_version="v1-mvp",
             **common,
         ),
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-critical",
             stock_code="1006",
             stock_name="テスト緊急確認",
@@ -2990,7 +2991,7 @@ def _blacklist_test_recommendations() -> list[Recommendation]:
             rule_version="v1-mvp",
             **common,
         ),
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-watch",
             stock_code="1007",
             stock_name="テスト監視",
@@ -3003,7 +3004,7 @@ def _blacklist_test_recommendations() -> list[Recommendation]:
             rule_version="v1-mvp",
             **common,
         ),
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-partial-sell",
             stock_code="1008",
             stock_name="テスト一部売却",
@@ -3016,7 +3017,7 @@ def _blacklist_test_recommendations() -> list[Recommendation]:
             rule_version="v1-mvp",
             **common,
         ),
-        Recommendation(
+        build_recommendation(
             recommendation_id="bl-manual-review",
             stock_code="1009",
             stock_name="テスト要確認",
@@ -3072,7 +3073,7 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
 
     # A. ProfitTaking WATCH: 適正価格手法の内訳・confidence・生の適正価格レンジは
     # LINEに出ないが、Recommendationには引き続き保持される。
-    rec_a = Recommendation(
+    rec_a = build_recommendation(
         recommendation_id="audit-a-watch",
         stock_code="2001",
         stock_name="ケースA監視",
@@ -3105,7 +3106,7 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
 
     # B. PARTIAL_PROFIT_TAKE: 反対材料・監視条件の長文はLINEに出ないが、
     # Recommendationには保持される。
-    rec_b = Recommendation(
+    rec_b = build_recommendation(
         recommendation_id="audit-b-partial",
         stock_code="2002",
         stock_name="ケースB一部利確",
@@ -3135,7 +3136,7 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
 
     # C. REVIEW(要確認): 検出内容の技術的な詳細(evidence_details)はLINEに
     # 出ないが、Recommendationには保持される。
-    rec_c = Recommendation(
+    rec_c = build_recommendation(
         recommendation_id="audit-c-review",
         stock_code="2003",
         stock_name="ケースC要確認",
@@ -3157,7 +3158,7 @@ def test_audit_separation_acceptance_cases_a_to_e(service_and_repos) -> None:
 
     # E. 業種モデル未対応: 未対応である旨の技術説明はLINEに出ないが、
     # Recommendationには保持される。
-    rec_e = Recommendation(
+    rec_e = build_recommendation(
         recommendation_id="audit-e-industry",
         stock_code="2005",
         stock_name="ケースE業種未対応",
@@ -3575,7 +3576,7 @@ def test_resolve_notification_category_profit_taking_watch_before_earnings() -> 
     BuyAction.WATCH_BEFORE_EARNINGS→NotificationCategory.WATCH_BEFORE_EARNINGS
     という既存経路とは独立していることも確認する。
     """
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="cat-watch-before-earnings",
         stock_code="9434",
         stock_name="ソフトバンク",
@@ -3605,7 +3606,7 @@ def test_profit_taking_watch_before_earnings_routes_to_short_watch_category(
     無いこと)は、send_recommendation_notification()を直接呼んで検証する。
     """
     service, repo, client = service_and_repos
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="watch-before-earnings-1",
         stock_code="9434",
         stock_name="ソフトバンク",
@@ -3645,7 +3646,7 @@ def _make_strong_sell_recommendation(
     # future_condition()(要求仕様§8、成立済みの現在値を将来条件として提示
     # しない)に引っかかり、要手動確認へ切り替わって本テストの対象(通常の
     # 再送抑止判定)を検証できなくなるため。
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="1010",
         stock_name="テスト全部売却",
@@ -3727,7 +3728,7 @@ def test_resend_when_full_profit_consideration_price_changes(service_and_repos) 
 def test_representative_price_selection_unchanged_for_partial_watch_and_normal_sell() -> None:
     # D. PARTIAL_PROFIT_TAKE/WATCH/通常SELL_CONSIDERATIONの既存の代表価格
     # 選択(recommendation_adapter.pyの表示価格選択と同じ優先順位)を壊さない。
-    rec_partial = Recommendation(
+    rec_partial = build_recommendation(
         recommendation_id="rp-partial",
         stock_code="1011",
         stock_name="テスト一部売却",
@@ -3743,7 +3744,7 @@ def test_representative_price_selection_unchanged_for_partial_watch_and_normal_s
     )
     assert line_notification_service_module._representative_price(rec_partial) == Decimal("2600")
 
-    rec_watch = Recommendation(
+    rec_watch = build_recommendation(
         recommendation_id="rp-watch",
         stock_code="1012",
         stock_name="テスト監視",
@@ -3758,7 +3759,7 @@ def test_representative_price_selection_unchanged_for_partial_watch_and_normal_s
     )
     assert line_notification_service_module._representative_price(rec_watch) == Decimal("2200")
 
-    rec_sell = Recommendation(
+    rec_sell = build_recommendation(
         recommendation_id="rp-sell",
         stock_code="1013",
         stock_name="テスト売却検討",
@@ -3786,7 +3787,7 @@ def _make_attention_watch_recommendation(
     peak_price: Decimal = Decimal("1500"),
     stock_code: str = "8136",
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name="テスト利益保全",
@@ -4042,7 +4043,7 @@ def test_partial_profit_take_is_actionable_not_attention(service_and_repos) -> N
     で送信される(ATTENTION→PARTIAL昇格時、ATTENTION専用ロジックには一切触れない
     ことの確認)。"""
     service, repo, client = service_and_repos
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="att-upgraded-partial",
         stock_code="8136",
         stock_name="テスト利益保全",
@@ -4170,7 +4171,7 @@ def test_attention_sent_then_sell_is_not_blocked(service_and_repos) -> None:
     first = service.notify_recommendation_with_status(attention_rec, _NOW)
     assert first.sent is True
 
-    sell_rec = Recommendation(
+    sell_rec = build_recommendation(
         recommendation_id="prio-r-sell",
         stock_code=attention_rec.stock_code,
         stock_name=attention_rec.stock_name,
@@ -4190,7 +4191,7 @@ def test_attention_sent_then_sell_is_not_blocked(service_and_repos) -> None:
 def test_sell_sent_then_attention_is_blocked(service_and_repos) -> None:
     """指摘10-S: SELL/一部売却送信後にATTENTION → priorityが低いため抑止される。"""
     service, repo, client = service_and_repos
-    sell_rec = Recommendation(
+    sell_rec = build_recommendation(
         recommendation_id="prio-s-sell",
         stock_code="8136",
         stock_name="テスト利益保全",
@@ -4225,7 +4226,7 @@ def test_attention_sent_then_critical_is_not_blocked(service_and_repos) -> None:
     first = service.notify_recommendation_with_status(attention_rec, _NOW)
     assert first.sent is True
 
-    critical_rec = Recommendation(
+    critical_rec = build_recommendation(
         recommendation_id="prio-t-critical",
         stock_code=attention_rec.stock_code,
         stock_name=attention_rec.stock_name,
@@ -4254,7 +4255,7 @@ def test_attention_sent_then_critical_is_not_blocked(service_and_repos) -> None:
 
 
 def _sell_recommendation_for_priority(recommendation_id: str, now: dt.datetime) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code="2914",
         stock_name="日本たばこ産業",
@@ -4537,7 +4538,7 @@ def _i33_holding_sell_recommendation(
         if limit_price is not None
         else SellPriceLevels()
     )
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         owner=owner,
         holding_id=build_holding_id(owner, stock_code),
