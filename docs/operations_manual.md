@@ -4943,13 +4943,13 @@ near-missは、気づきに依存しない設計でのみ構造的に防げる)�
 > K5はaとします。
 > デプロイにおいて複数の経路、パターンを設けるのは想定外のエラーを生じうるのでDockerを必須とする
 
-上の1〜4に続けて、次を**必須手順**とする(本手順書のrelease build全般に適用する):
+36.3冒頭の手順1〜4に続けて、次を**必須手順**とする(本手順書のrelease build全般に適用する):
 
 ```
 5  buildは `sam build --use-container` で行う(Dockerが必要)。releaseのbuildの経路はこの1つだけとし、
    例外を設けない(K5)。Dockerが使えない場合は、releaseのbuildをしない。container buildの記録は36.4
 6  build前に、buildの入力(`config/`・`src/`・`infra/layer/`)の作業ツリーのバイト列が、release target SHAの
-   gitの内容と同一であること(worktree bytes = Git SSoT)を確認する(2。36.5.1の条件C)。方式(E1):
+   gitの内容と同一であること(worktree bytes = Git SSoT)を確認する(USERの決定2。36.5.1の条件C)。方式(E1):
      git ls-files --eol -- config src infra/layer
    の出力の各行のうち、作業ツリー側(`w/`)が `crlf` または `mixed` の行が1件も無いこと。
    1件でもあれば、その作業ツリーではreleaseのbuildを始めない。確認の例(出力が空であること):
