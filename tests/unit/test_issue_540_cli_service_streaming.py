@@ -50,6 +50,7 @@ from jstock_advisor.services.performance_metrics_service import (
     build_metrics_bucket,
     iter_evaluations_with_recommendations,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, tzinfo=dt.UTC)
 _TARGET = "screening.total_yield.min_total_yield_pct"
@@ -104,7 +105,7 @@ class _SpyEvaluationRepository(EvaluationResultRepository):
 
 
 def _recommendation(index: int) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=f"r{index:04d}",
         stock_code="0000",
         stock_name="test",

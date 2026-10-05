@@ -17,6 +17,7 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.notification.recommendation_adapter import (
     build_notification_text_input,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 14, 8, 0, tzinfo=dt.UTC)
 
@@ -30,7 +31,7 @@ def _make_recommendation(
     suggested_sell_ratio: float | None = None,
     current_vs_entry_price_pct: Decimal | None = None,
 ) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-1",
         stock_code="2914",
         stock_name="日本たばこ産業",

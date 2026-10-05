@@ -17,6 +17,7 @@ from jstock_advisor.services.line_notification_service import (
     _is_fair_value_dispersion_large,
     _resolve_watch_profit_taking_title,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
 _THRESHOLD = 2.0
@@ -39,7 +40,7 @@ def _make_watch_recommendation(**overrides: object) -> Recommendation:
         "fair_value_spread_ratio": 1.2,
     }
     defaults.update(overrides)
-    return Recommendation(**defaults)
+    return build_recommendation(**defaults)
 
 
 # テストコード削減対応2026-08: 5関数はいずれも_make_watch_recommendation()の

@@ -49,6 +49,7 @@ from jstock_advisor.services.transaction_csv_import_service import (
     compute_import_id,
 )
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
+from tests.factories import build_recommendation
 
 _OWNER = "所有者A"
 _CODE = "2914"
@@ -523,9 +524,8 @@ _ROW_WITH_REC = f"{_OWNER},{_CODE},BUY,2026-03-01,100,4200,R1\n"
 
 def _recommendation(recommendation_id: str) -> Any:
     from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-    from jstock_advisor.domain.entities.recommendation import Recommendation
 
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=_CODE,
         stock_name="J社",

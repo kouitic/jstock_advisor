@@ -8,7 +8,7 @@ from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRatio
 from jstock_advisor.domain.entities.enums import AccountType, ConfidenceLevel, RecommendationType
 from jstock_advisor.domain.entities.holding import PurchaseLot, summarize_lots
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
-from jstock_advisor.domain.entities.recommendation import Recommendation
+from tests.factories import build_recommendation
 
 
 def _lot(shares: int, price: str, date: dt.date, lot_id: str = "lot") -> PurchaseLot:
@@ -54,7 +54,7 @@ def test_summarize_lots_empty_raises() -> None:
 
 
 def test_recommendation_is_immutable() -> None:
-    rec = Recommendation(
+    rec = build_recommendation(
         recommendation_id="rec-1",
         stock_code="8136",
         stock_name="サンリオ",

@@ -41,6 +41,7 @@ from jstock_advisor.domain.entities.enums import DecisionType
 from jstock_advisor.infrastructure.local_repository.decision_snapshot_repository import (
     DecisionSnapshotRepository,
 )
+from tests.factories import build_recommendation
 
 # V2 フィールドを一切持たない旧形式レコード。
 # 実際に保存されている JSON と同じ経路（リポジトリ）で読めることを確認する。
@@ -350,9 +351,8 @@ def test_i_snapshot_builder_does_not_populate_v2_fields() -> None:
     from jstock_advisor.domain.decision_snapshot_builder import build_decision_snapshot
     from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
     from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-    from jstock_advisor.domain.entities.recommendation import Recommendation
 
-    recommendation = Recommendation(
+    recommendation = build_recommendation(
         recommendation_id="rec-b1",
         stock_code="2914",
         stock_name="日本たばこ産業",

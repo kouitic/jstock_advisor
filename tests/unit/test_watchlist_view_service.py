@@ -50,6 +50,7 @@ from jstock_advisor.services.watchlist_view_service import (
     _MessagePacker,
     _pack_category_groups,
 )
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 24, 7, 0, tzinfo=dt.UTC)
 _WEIGHTS = ScoreWeights(
@@ -95,7 +96,7 @@ def _eval_record(
 
 
 def _recommendation(recommendation_id: str, stock_code: str) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id=recommendation_id,
         stock_code=stock_code,
         stock_name=f"銘柄{stock_code}",
