@@ -24,6 +24,7 @@ from jstock_advisor.analysis.valuation_shadow_analysis import (
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueMethodResult
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 8, 24, 23, 1, tzinfo=dt.UTC)
 _GENERATED_AT = dt.datetime(2026, 8, 28, 12, 0, tzinfo=dt.UTC)
@@ -41,7 +42,7 @@ def _make_recommendation(**overrides: object) -> Recommendation:
         "rule_version": "v1-test",
     }
     base.update(overrides)
-    return Recommendation(**base)  # type: ignore[arg-type]
+    return build_recommendation(**base)  # type: ignore[arg-type]
 
 
 def _method(method: str, fair_value: Decimal | None) -> FairValueMethodResult:

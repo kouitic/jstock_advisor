@@ -6,7 +6,6 @@ import pytest
 
 from jstock_advisor.domain.entities.common import BuyPriceLevels, PriceWithRationale
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
-from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
@@ -19,6 +18,7 @@ from jstock_advisor.services.transaction_csv_import_service import (
     TransactionCsvImportService,
 )
 from jstock_advisor.services.transaction_history_service import TransactionHistoryService
+from tests.factories import build_recommendation
 
 _NOW = dt.datetime(2026, 7, 24, 8, 0, tzinfo=dt.UTC)
 
@@ -30,7 +30,7 @@ _HEADER = "owner,stock_code,transaction_type,execution_date,shares,execution_pri
 def history_service(tmp_path: Path) -> TransactionHistoryService:
     recommendation_repo = RecommendationRepository(store_dir=tmp_path)
     recommendation_repo.save(
-        Recommendation(
+        build_recommendation(
             recommendation_id="rec-buy",
             stock_code="2914",
             stock_name="日本たばこ産業",

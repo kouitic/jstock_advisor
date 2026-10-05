@@ -31,6 +31,7 @@ from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
 from jstock_advisor.domain.signals.add_on_risk import evaluate_add_on_eligibility
+from jstock_advisor.infrastructure.edinet import window_prefetch
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import AuditLogRepository
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
@@ -5125,3 +5126,54 @@ def test_issue_457_buy_non_strong_judgment_is_not_recorded(
     )
 
     assert on["shadow_audits"] == []
+
+
+# --- Issue #818 案B: dispatcherによるEDINET書類一覧の事前取得 --------------------------
+
+
+def test_dispatcher_prefetches_edinet_once_before_the_first_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """事前取得は、fan-out(銘柄ごとの非同期invoke)を始める前に、dispatcherで1回だけ行う。"""
+    _patch_common(monkeypatch)
+    items = [_watchlist_item("2914"), _watchlist_item("8136")]
+    monkeypatch.setattr(handler_module.WatchlistService, "list_items", lambda self: items)
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: [])
+    events: list[str] = []
+    monkeypatch.setattr(
+        handler_module,
+        "prefetch_recent_document_lists_safely",
+        lambda now: events.append("prefetch"),
+    )
+    monkeypatch.setattr(
+        handler_module, "dispatch_async", lambda function_name, payload: events.append("dispatch")
+    )
+
+    result = handler_module.handler({}, _FakeContext())
+
+    assert result == {"dispatched": 2}
+    assert events == ["prefetch", "dispatch", "dispatch"]
+
+
+def test_dispatcher_still_fans_out_when_the_prefetch_source_cannot_be_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fail-soft: 事前取得の準備で例外が出ても、fan-outは全銘柄ぶん始まる。"""
+    _patch_common(monkeypatch)
+    items = [_watchlist_item("2914"), _watchlist_item("8136")]
+    monkeypatch.setattr(handler_module.WatchlistService, "list_items", lambda self: items)
+    monkeypatch.setattr(handler_module.PortfolioService, "list_holdings", lambda self: [])
+
+    def _broken_default_source() -> None:
+        raise RuntimeError("prefetch setup failed")
+
+    monkeypatch.setattr(window_prefetch, "_default_source", _broken_default_source)
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        handler_module, "dispatch_async", lambda function_name, payload: dispatched.append(payload)
+    )
+
+    result = handler_module.handler({}, _FakeContext())
+
+    assert result == {"dispatched": 2}
+    assert len(dispatched) == 2

@@ -115,6 +115,9 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     start_batch,
     try_acquire_completion_finalize,
 )
+from jstock_advisor.infrastructure.edinet.window_prefetch import (
+    prefetch_recent_document_lists_safely,
+)
 from jstock_advisor.infrastructure.line.client import build_line_client_for_run
 from jstock_advisor.infrastructure.local_repository.buy_candidate_evaluation_record_repository import (  # noqa: E501
     BuyCandidateEvaluationRecordRepository,
@@ -2778,6 +2781,13 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             batch_id,
             len(targets),
         )
+
+    # Issue #818 案B: fan-outの前に、dispatcher(このプロセス1つ)が窓内の日付のEDINET書類一覧を
+    # あらかじめ取得してL2(共有cache)を新しくする。子は新しい成功cacheを再利用し、同じ日付の
+    # 重複取得(最初の数秒に多数のcoldなプロセスが同時に取得する構造)を避ける。
+    # fail-soft: 例外・タイムアウトでもfan-outは始める。失敗はcacheへ保存しない(子は従来どおり
+    # 自分で取得を試み、失敗すれば従来どおりFETCH_FAILED → DATA_INSUFFICIENTのまま。Issue #53)。
+    prefetch_recent_document_lists_safely(now)
 
     for target in targets:
         child_payload: dict[str, Any] = {

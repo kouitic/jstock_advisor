@@ -38,12 +38,13 @@ from jstock_advisor.services.decision_snapshot_service import (
     DECISION_SNAPSHOT_SAVE_FAILED_EVENT,
     save_decision_snapshot_safely,
 )
+from tests.factories import build_recommendation
 
 _STOCK_CODE = "2914"
 
 
 def _recommendation(price_at_recommendation: Decimal = Decimal("1150")) -> Recommendation:
-    return Recommendation(
+    return build_recommendation(
         recommendation_id="rec-1",
         stock_code=_STOCK_CODE,
         stock_name="テスト銘柄",
