@@ -119,7 +119,7 @@ def test_trimmed_mean_docstring_keeps_the_issue_263_note(fragment: str) -> None:
     (PR #804 の SHOULD-1。注記を消しても CI が落ちなかった)。
 
     文書の文言そのものの固定であり、算出式・戻り値は見ない(挙動は他のテストが固定する)。
-    要点を 3 つの断片に分けるのは、どの要点が失われたかを失敗の表示で分かるようにするため。
+    要点を 4 つの断片に分けるのは、どの要点が失われたかを失敗の表示で分かるようにするため。
     """
     doc = inspect.getdoc(_trimmed_mean)
     assert doc is not None
