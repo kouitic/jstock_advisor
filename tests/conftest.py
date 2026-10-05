@@ -72,6 +72,18 @@ def _isolated_default_store_dir(
     yield store_dir
 
 
+@pytest.fixture(autouse=True)
+def _no_real_edinet_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """開発機の環境変数 `EDINET_API_KEY` がテストを実EDINETへ接続させないようにする(Issue #818)。
+
+    BuyCandidates dispatcherは、fan-outの前にEDINETの書類一覧を事前取得する
+    (`infrastructure/edinet/window_prefetch.py`)。APIキーが設定されている環境では、
+    dispatcherを通るテストが実際のEDINETを呼びうる。キーを使うテストは、各テストの中で
+    `monkeypatch.setenv` / 明示の引数で渡す(後から効くため、本fixtureの削除に影響されない)。
+    """
+    monkeypatch.delenv("EDINET_API_KEY", raising=False)
+
+
 # --- Issue #277: cohort marker の自動付与 -----------------------------------------
 #
 # cohort の正本は tests/support/time_semantics_registry.py の _REGISTRY である。
