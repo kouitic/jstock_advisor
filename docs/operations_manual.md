@@ -5088,6 +5088,17 @@ BUILD_ARTIFACT_IDENTITYとして記録する:
 4  同一releaseに含める理由(条件I)
    ConfigLayerのLF化とcontainer build化を同一releaseに含める場合は、その理由をrelease tracking
    Issueに明記する。
+5  `.gitattributes`の`eol=lf`を`src/`と`infra/layer/`へ広げた変更(Issue #802。USER承認 =
+   #802 issuecomment-5979840501)による期待差分
+   この変更の後に新しくcheckoutした作業ツリーでは、`src/`と`infra/layer/`のバイト列が、
+   core.autocrlfに依らずLFになる(git indexの内容は変わらない)。したがって、次回releaseの
+   Lambdaのcode artifact(15関数が同じ`src/`を共有する)のhashは、前回Productionと異なりうる。
+   これは期待差分であり、上の1・2のA・Bと同じく、変更要因として明示し、どのartifactが変わるはず
+   かを事前申告する。事前申告にないcode artifactの差分は、上の3のとおり想定外として扱う。
+   DependenciesLayerのartifact hashが`infra/layer/`の改行コードの影響を受けるかは、
+   本節では未確認(実測していない)。確認するまでは、事前申告の対象に含める。
+   既存のworktreeの扱い・renormalize・release時のbyte整合確認は、#798・#796 γ-3の手順で定める
+   (本節の範囲外)。
 ```
 
 ### 36.6 ChangeSet artifact identityの照合(POST_CREATE / PRE_EXECUTE GATE)
