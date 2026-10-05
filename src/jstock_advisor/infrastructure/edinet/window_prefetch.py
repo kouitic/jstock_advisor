@@ -18,9 +18,21 @@ L2(共有cache)を新しくする。子は新しい成功cacheを再利用する
     (取得失敗を「開示なし」として通さない)。本moduleは判定・失敗の扱いに触れない。
   - fail-soft: どんな例外・タイムアウトでも、呼び出し元(dispatcher)のfan-outを止めない。
 
-時間の上限: 事前取得の全体が`DEFAULT_BUDGET_SECONDS`を超えたら、新しい日付の取得を始めない。
-1回の取得は最大15秒(`EdinetClient`のtimeout)なので、最悪でも`DEFAULT_BUDGET_SECONDS` +
-15秒でdispatcherへ戻る(dispatcherのTimeoutは900秒)。
+時間の上限(何を保証し、何を保証しないか):
+  - 保証する: 事前取得の全体が`DEFAULT_BUDGET_SECONDS`(120秒)を超えたら、新しい日付の取得を
+    始めない。EDINETへの1回の取得は最大15秒(`EdinetClient`のurlopen timeout)なので、EDINETの
+    呼び出しに費やす時間は、最悪でも`DEFAULT_BUDGET_SECONDS` + 15秒(= 135秒)である。
+  - 保証しない: L2(DynamoDB)の日付ごとの読み(GetItem)と保存(PutItem)の時間は、この上限に
+    含まれない。repoは`botocore.config.Config`を指定しておらず(infrastructure配下の検索)、
+    boto3の既定(connect / read timeoutは各60秒、DynamoDBのlegacy retryは最大10回)に従う。
+    したがって135秒は「EDINET側の上限」であり、事前取得全体の絶対上限ではない。
+  - 絶対上限: dispatcherのLambda Timeout(`infra/template.yaml`のBuyCandidatesFunction。900秒)。
+    なお、dispatcherはfan-outの前に`start_batch`などでDynamoDBを既に使っており、DynamoDBが
+    応答しない状況ではfan-out自体が成立しない。事前取得がDynamoDBについて新たに加えるリスクは
+    限定的である。
+  - テスト(`tests/unit/test_edinet_window_prefetch.py`)は、予算 + clientのtimeoutが、templateの
+    Timeoutの1/4未満であることを、templateの実値から固定する(template側でTimeoutを下げると
+    落ちる)。
 
 log: 件数と種別のみ。銘柄コード・書類の内容は出さない(そもそも銘柄を扱わない)。
 """
