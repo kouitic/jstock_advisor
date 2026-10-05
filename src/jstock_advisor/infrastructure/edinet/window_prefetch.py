@@ -40,6 +40,11 @@ from jstock_advisor.infrastructure.edinet.document_list_cache import EdinetDocum
 from jstock_advisor.infrastructure.edinet.scan_window import business_days_between
 
 logger = logging.getLogger(__name__)
+# Issue #413: INFO を CloudWatch Logs へ出力する(Lambda の root logger の既定は WARNING で、
+# module が宣言しないと INFO は出ない)。出力する値は件数と失敗の種別のみで、銘柄コード・
+# 書類の内容・所有者・holding_id を含まない(本 module は銘柄を扱わない。#135 / #416)。
+# PII の確認は PR に記録した。
+logger.setLevel(logging.INFO)
 
 #: 事前取得の全体の時間の上限(秒)。これを超えたら新しい日付の取得を始めない。
 DEFAULT_BUDGET_SECONDS = 120.0
