@@ -186,6 +186,55 @@ class EdinetDocumentSource:
         self._save(scan_date, result, now)
         return result
 
+    def prefetch_success_only(
+        self, scan_date: dt.date, now: dt.datetime
+    ) -> tuple[EdinetListResult, bool] | None:
+        """dispatcherによる事前取得(Issue #818 案B)。戻り値 = (結果, EDINETを呼んだか)。
+
+        `list_documents()`との違いは次の2点だけである。
+          - 新しい**成功**cache(L1・L2)があればそれを使い、EDINETを呼ばない。FETCH_FAILEDの
+            cacheは「新しい」とみなさず、取り直す(失敗を再利用しない)。
+          - 取得が**失敗**した場合、その結果を返すだけで、L1にもL2にも**保存しない**。失敗を
+            保存すると、negative TTL(5分)の間、後続の全プロセスがその失敗を再利用してしまう。
+            保存しなければ、後続は従来どおり自分で取得を試みる(事前取得の失敗が、現状より
+            悪い結果を招かない)。後続の取得が失敗すれば、従来どおりFETCH_FAILEDのまま
+            判定側へ伝わる(取得失敗を「開示なし」として通さない = Issue #53)。
+        APIキー未設定ならNone(何もしない。L2にも触れない)。
+        """
+        if not self._client.is_configured:
+            return None
+
+        today = evaluation_date_jst(now)
+        key = scan_date.isoformat()
+
+        memo = self._memo.get(key)
+        if (
+            memo is not None
+            and memo.result.succeeded
+            and self._is_fresh(memo.result.status, memo.fetched_at, scan_date, today, now)
+        ):
+            return memo.result, False
+
+        cached = self._repo.get(scan_date)
+        if (
+            cached is not None
+            and cached.fetch_status is not EdinetFetchStatus.FETCH_FAILED
+            and self._is_fresh(cached.fetch_status, cached.fetched_at, scan_date, today, now)
+        ):
+            result = EdinetListResult(
+                status=cached.fetch_status,
+                entries=list(cached.entries),
+                failure_reason=cached.failure_reason,
+            )
+            self._memo[key] = _MemoEntry(result, cached.fetched_at)
+            return result, False
+
+        result = self._client.list_documents(scan_date)
+        if result.succeeded:
+            self._memo[key] = _MemoEntry(result, now)
+            self._save(scan_date, result, now)
+        return result, True
+
     def _is_fresh(
         self,
         status: EdinetFetchStatus,
