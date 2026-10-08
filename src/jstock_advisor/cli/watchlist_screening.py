@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from typing import NoReturn
 
 import typer
 
@@ -35,7 +36,12 @@ from jstock_advisor.infrastructure.aws.batch_tracker import (
     try_operator_abort,
 )
 from jstock_advisor.infrastructure.aws.watchlist_rotation_state import get_rotation_state
-from jstock_advisor.infrastructure.line.client import build_line_client_from_env
+from jstock_advisor.infrastructure.line.client import (
+    LineClient,
+    LineCredentialsMissingError,
+    QuickReplyButton,
+    build_live_line_client_from_env,
+)
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -103,9 +109,78 @@ from jstock_advisor.services.watchlist_screening_service import (
 app = typer.Typer(help="ウォッチリスト自動追加(新規候補スクリーニング)の手動実行・運用コマンド")
 
 
-def _build_notification_service(config: AppConfig) -> LineNotificationService:
+class _CredentialDeferredLineClient:
+    """LINE認証情報が無いときに渡す、送信の瞬間に必ず失敗するclient(Issue #434。
+    worker / terminal_failure / dispatcher(#430 / #438)、reconciler(#429)と同一ロジック。
+    USER決定OD1=Bにより共通化(S-21への追加)は行わず、このファイル内へ独立に複製する)。
+
+    これまでこのCLIは`build_line_client_from_env()`で構築しており、認証情報が無いと
+    ConsoleLineClient(標準出力のみ・送信しない)へ黙ってフォールバックした。その結果、
+    実際にはLINEへ送られていないのに「送信しました」と表示・記録され、手動の通知再試行も
+    送られないまま「完了」と記録されうる(不可視の失敗)。
+
+    そこで欠落は「実際の送信時の失敗」として扱う。送信メソッド(push_message等)は
+    **必ず**`LineCredentialsMissingError`を送出し、決して成功を返さない。
+    finalizerのPhase 3は例外を捕捉してNOTIFICATION_FAILEDとして記録するため、
+    「欠落のまま送信が試みられた」事実を保持し、呼び出し側がコマンドの末尾で
+    終了コード非0と明示のメッセージにする。
+    """
+
+    def __init__(self, missing: LineCredentialsMissingError) -> None:
+        self._missing = missing
+        self.send_attempted = False
+
+    def _fail(self) -> NoReturn:
+        self.send_attempted = True
+        raise LineCredentialsMissingError(str(self._missing))
+
+    def push_message(self, text: str) -> None:
+        self._fail()
+
+    def reply_message(
+        self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
+    ) -> None:
+        self._fail()
+
+    def reply_messages(
+        self,
+        reply_token: str,
+        texts: list[str],
+        quick_reply: list[QuickReplyButton] | None = None,
+    ) -> None:
+        self._fail()
+
+
+def _build_deferred_line_client() -> LineClient:
+    """認証情報があればLiveLineClient、無ければ送信時に必ず失敗するclientを返す。
+
+    run / retry-finalize / retry-stock用。構築の失敗(`LineCredentialsMissingError`)だけを
+    送信時の失敗へ変える(他の例外は握りつぶさない)。ConsoleLineClientへは決して
+    フォールバックしない。
+    """
+    try:
+        return build_live_line_client_from_env()
+    except LineCredentialsMissingError as exc:
+        return _CredentialDeferredLineClient(exc)
+
+
+_CREDENTIALS_MISSING_AFTER_FINALIZE_MESSAGE = (
+    "finalizeは実行しましたが、LINE通知は送信していません(LINE認証情報が無いため)。"
+    "バッチはNOTIFICATION_FAILEDとして記録されます。"
+    "認証情報のある環境で retry-notification を実行してください。"
+)
+
+
+def _send_attempted(line_client: LineClient) -> bool:
+    """欠落のまま送信が試みられたか(deferred clientのときだけ真になりうる)。"""
+    return isinstance(line_client, _CredentialDeferredLineClient) and line_client.send_attempted
+
+
+def _build_notification_service(
+    config: AppConfig, line_client: LineClient
+) -> LineNotificationService:
     return LineNotificationService(
-        line_client=build_line_client_from_env(),
+        line_client=line_client,
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
@@ -359,16 +434,12 @@ def run(
 
     notification_sent = False
     notification_failure = False
+    credentials_missing = False
     if added_items and wc.notification_enabled:
-        notification_service = LineNotificationService(
-            line_client=build_line_client_from_env(),
-            notification_log_repository=NotificationLogRepository(),
-            # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
-            # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
-            notification_claim_repository=NotificationClaimRepository(),
-            recommendation_repository=RecommendationRepository(),
-            config=config,
-        )
+        # Issue #434: 認証情報が無いときにConsoleLineClientへ黙ってフォールバックしない
+        # (「送信しました」と誤表示・誤記録される)。送信時に必ず失敗するclientを渡し、
+        # 下のexceptで「送信していません(認証情報が無いため)」と明示して終了コードを非0にする。
+        notification_service = _build_notification_service(config, _build_deferred_line_client())
         content_hash = compute_watchlist_addition_content_hash(
             batch_id, [item.stock_code for item in added_items], wc.screening_policy, now.date()
         )
@@ -389,6 +460,10 @@ def run(
             notification_sent = notification_service.notify_watchlist_additions(
                 summary, content_hash
             )
+        except LineCredentialsMissingError:
+            typer.echo("LINE通知を送信していません(LINE認証情報が無いため)。")
+            notification_failure = True
+            credentials_missing = True
         except Exception as e:  # noqa: BLE001 - 通知失敗はバッチ失敗にしない(ベストエフォート)
             typer.echo(f"LINE通知に失敗しました: {e}")
             notification_failure = True
@@ -425,6 +500,10 @@ def run(
 
     typer.echo(f"\nウォッチリストへ{len(added_items)}件追加しました。")
     typer.echo(f"LINE通知: {'送信しました' if notification_sent else '送信していません'}")
+    if credentials_missing:
+        # ウォッチリストへの追加は確定・保持されている。通知だけが送られていないことを
+        # 終了コードで明示する(認証情報のある環境で通知を再試行すること)。
+        raise typer.Exit(code=1)
 
 
 def _print_summary(
@@ -556,8 +635,14 @@ def retry_finalize_command(
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
-    notification_service = _build_notification_service(config)
+    # Issue #434: 認証情報の欠落は構築の失敗にしない(通知が不要なら従来どおり完了できる)。
+    # 通知が必要で欠落なら、finalizerがNOTIFICATION_FAILEDとして記録し、下で終了コード非0にする。
+    line_client = _build_deferred_line_client()
+    notification_service = _build_notification_service(config, line_client)
     if retry_finalize(batch_id, now, providers, config, notification_service):
+        if _send_attempted(line_client):
+            typer.echo(_CREDENTIALS_MISSING_AFTER_FINALIZE_MESSAGE)
+            raise typer.Exit(code=1)
         typer.echo("finalizeの再試行に成功しました。")
     else:
         typer.echo("再試行条件が不成立でした(既に他の主体が処理済み、または状態が変化しています)。")
@@ -593,7 +678,18 @@ def retry_notification_command(
     now = dt.datetime.now(dt.UTC)
     config = load_config()
     providers = build_cached_provider_bundle(build_real_provider_bundle(now, config), config, now)
-    notification_service = _build_notification_service(config)
+    # Issue #434: 送信が唯一の目的のため、認証情報が無ければ状態を変える前に失敗させる
+    # (strict版。以前はConsoleLineClientへ黙ってフォールバックし、送られないまま
+    # NOTIFICATION_SENT / COMPLETEDと記録されえた)。tracebackではなく分かりやすいメッセージにする。
+    try:
+        live_client = build_live_line_client_from_env()
+    except LineCredentialsMissingError:
+        typer.echo(
+            "LINE認証情報が無いため、通知を再試行できません(バッチの状態は変更していません)。"
+            "認証情報のある環境で再実行してください。"
+        )
+        raise typer.Exit(code=1) from None
+    notification_service = _build_notification_service(config, live_client)
     if retry_notification(batch_id, now, providers, config, notification_service):
         typer.echo("通知の再試行に成功しました。")
     else:
@@ -628,7 +724,9 @@ def retry_stock(
     now = dt.datetime.now(dt.UTC)
     owner_id = f"cli-retry-{uuid.uuid4().hex[:8]}"
     if not claim_candidate_lease(batch_id, stock_code, owner_id, now, _WORKER_LEASE_SECONDS):
-        typer.echo("リースを取得できませんでした(他のWorker/Reconcilerが処理中の可能性があります)。")
+        typer.echo(
+            "リースを取得できませんでした(他のWorker/Reconcilerが処理中の可能性があります)。"
+        )
         raise typer.Exit(code=1)
 
     config = load_config()
@@ -652,12 +750,17 @@ def retry_stock(
     )
     typer.echo(f"評価結果: {outcome.evaluation_result} (completed={completed})")
     if completed:
-        notification_service = _build_notification_service(config)
+        # Issue #434: 構築を失敗させない(complete_candidate後の中途状態を作らない)。
+        line_client = _build_deferred_line_client()
+        notification_service = _build_notification_service(config, line_client)
         finalized = maybe_finalize(
             batch_id, completion_time, providers, config, notification_service
         )
         finalize_label = "実行しました" if finalized else "対象外でした(未完了行が他にあります)"
         typer.echo(f"finalize結果: {finalize_label}")
+        if _send_attempted(line_client):
+            typer.echo(_CREDENTIALS_MISSING_AFTER_FINALIZE_MESSAGE)
+            raise typer.Exit(code=1)
 
 
 @app.command("abort")
@@ -710,8 +813,7 @@ def rotation_status() -> None:
     wc = config.watchlist_screening
     if not wc.rotation.enabled:
         typer.echo(
-            "rotation.enabled=false のため、ローテーションは無効です"
-            "(固定スライス方式で動作中)。"
+            "rotation.enabled=false のため、ローテーションは無効です(固定スライス方式で動作中)。"
         )
         raise typer.Exit(code=1)
 
@@ -748,8 +850,7 @@ def rotation_status() -> None:
     typer.echo("=" * 50)
     typer.echo(f"cycle_number: {state.cycle_number}周目")
     typer.echo(
-        f"cycle進捗(概算): {state.cycle_progress_selected_count}/{eligible}件"
-        f" ({progress_pct:.1f}%)"
+        f"cycle進捗(概算): {state.cycle_progress_selected_count}/{eligible}件 ({progress_pct:.1f}%)"
     )
     typer.echo(
         "現在のカーソル: "
