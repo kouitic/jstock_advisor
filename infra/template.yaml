@@ -3308,6 +3308,10 @@ Resources:
           # finalizer.maybe_trigger_maintenance()がWatchlistDispatcherFunctionを
           # 非同期invokeする(最も頻度が高い後続起動経路)。
           WATCHLIST_DISPATCHER_FUNCTION_NAME: !Sub "${AWS::StackName}-watchlist-dispatcher"
+          # Issue #816: 銘柄名の解決(StockDisplayNameResolver)がJPX上場銘柄一覧キャッシュを読むために必要。
+          # 本変数が無いとresolve_candidate_universe_bucket()がRuntimeErrorとなり、
+          # 銘柄名が外部provider・銘柄コードへfallbackする(WatchlistDispatcherFunctionは配線済み)。
+          CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
       Policies:
         # WatchlistDispatcherFunctionと同じ理由(docs/operations_manual.md 11節)で
         # CRUD/ReadをStatementへ集約する。rotation commitとremoval historyの
@@ -3382,6 +3386,17 @@ Resources:
               Action: lambda:InvokeFunction
               Resource:
                 - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-watchlist-dispatcher"
+        # Issue #816: 銘柄名の解決(StockDisplayNameResolver。finalizeの追加対象の通知文面)が
+        # CandidateUniverseCacheIO経由でJPX上場銘柄一覧キャッシュ(S3)を読むために必要。
+        # BuyCandidatesFunctionのCandidateUniverseCacheReadForJpxShadow(#116)と同じ最小権限:
+        # s3:GetObjectのみ・current/*限定。ListBucket/書き込み/ワイルドカードは付与しない。
+        # キャッシュ未生成の403(ListBucket無しのためNoSuchKeyでなくAccessDeniedになる)は
+        # resolverがfail-softで吸収する(銘柄名は従来どおり外部provider・銘柄コードへfallback)。
+        - Statement:
+            - Sid: CandidateUniverseCacheReadForJpxStockName
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
         # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
         # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
         - Statement:
@@ -3410,6 +3425,10 @@ Resources:
           # Issue #725: HANDLED_FAILURE通知(publish_incident_envelope)の到達経路。
           # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
           INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
+          # Issue #816: 銘柄名の解決(StockDisplayNameResolver)がJPX上場銘柄一覧キャッシュを読むために必要。
+          # 本変数が無いとresolve_candidate_universe_bucket()がRuntimeErrorとなり、
+          # 銘柄名が外部provider・銘柄コードへfallbackする(WatchlistDispatcherFunctionは配線済み)。
+          CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref AuditLogTable }
         - DynamoDBCrudPolicy: { TableName: !Ref BatchRunsTable }
@@ -3427,6 +3446,17 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref ShareholderBenefitsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CorporateActionRegistryTable }
         - DynamoDBReadPolicy: { TableName: !Ref StockNameOverridesTable }
+        # Issue #816: 銘柄名の解決(StockDisplayNameResolver。finalizeの追加対象の通知文面)が
+        # CandidateUniverseCacheIO経由でJPX上場銘柄一覧キャッシュ(S3)を読むために必要。
+        # BuyCandidatesFunctionのCandidateUniverseCacheReadForJpxShadow(#116)と同じ最小権限:
+        # s3:GetObjectのみ・current/*限定。ListBucket/書き込み/ワイルドカードは付与しない。
+        # キャッシュ未生成の403(ListBucket無しのためNoSuchKeyでなくAccessDeniedになる)は
+        # resolverがfail-softで吸収する(銘柄名は従来どおり外部provider・銘柄コードへfallback)。
+        - Statement:
+            - Sid: CandidateUniverseCacheReadForJpxStockName
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
         # Issue #725: HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
         # (Resource="*"は付与しない。WatchlistBatchReconcilerFunctionと同じ内容)。
         - Statement:
@@ -3468,6 +3498,10 @@ Resources:
           # throttle_rate(補助指標)観測対象のworker関数名。
           WATCHLIST_SCREENING_QUEUE_NAME: !GetAtt WatchlistScreeningQueue.QueueName
           WATCHLIST_WORKER_FUNCTION_NAME: !Sub "${AWS::StackName}-watchlist-worker"
+          # Issue #816: 銘柄名の解決(StockDisplayNameResolver)がJPX上場銘柄一覧キャッシュを読むために必要。
+          # 本変数が無いとresolve_candidate_universe_bucket()がRuntimeErrorとなり、
+          # 銘柄名が外部provider・銘柄コードへfallbackする(WatchlistDispatcherFunctionは配線済み)。
+          CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
       Policies:
         # 本番検証(2026-08)で発覚: retry_finalize()経由でDispatcher/Worker
         # と同じ_finalize_completed()/_maybe_commit_rotation()を呼ぶため、
@@ -3584,6 +3618,17 @@ Resources:
               Resource:
                 - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-buy-candidates"
                 - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-holdings-watchlist"
+        # Issue #816: 銘柄名の解決(StockDisplayNameResolver。finalizeの追加対象の通知文面)が
+        # CandidateUniverseCacheIO経由でJPX上場銘柄一覧キャッシュ(S3)を読むために必要。
+        # BuyCandidatesFunctionのCandidateUniverseCacheReadForJpxShadow(#116)と同じ最小権限:
+        # s3:GetObjectのみ・current/*限定。ListBucket/書き込み/ワイルドカードは付与しない。
+        # キャッシュ未生成の403(ListBucket無しのためNoSuchKeyでなくAccessDeniedになる)は
+        # resolverがfail-softで吸収する(銘柄名は従来どおり外部provider・銘柄コードへfallback)。
+        - Statement:
+            - Sid: CandidateUniverseCacheReadForJpxStockName
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${CandidateUniverseCacheBucket.Arn}/current/*"
         # Issue #506(O-1): missed schedule / 候補ユニバース連続失敗の検知結果を
         # IncidentNotificationTopic限定でpublishする(Resource="*"は付与しない)。
         - Statement:
