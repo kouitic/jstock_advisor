@@ -83,6 +83,22 @@ _CI_YML = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
         (["./docs/a.md"], False),
         (["../x.md"], False),
         (["docs/../src/x.md"], False),
+        # PR #867 の MUST-1: git が返した path は変更せずに判定する(strip しない)。
+        # 先頭・末尾に空白文字がある path は、strip すると別の path の `.md` に見えるので FULL
+        (["docs/example.md "], False),
+        ([" docs/example.md"], False),
+        (["docs/example.md\t"], False),
+        (["\tdocs/example.md"], False),
+        (["docs/example.md\n"], False),
+        (["docs/example.md　"], False),  # 全角空白
+        (["docs/example.md "], False),  # 改行しない空白
+        (["docs/example.md ", "docs/normal.md"], False),
+        (["docs/normal.md", " docs/example.md"], False),
+        # 途中の空白・日本語の正常な .md は従来どおり Markdown-only
+        (["docs/example.md"], True),
+        (["docs/my document.md"], True),
+        (["docs/日本語 の 文書.md"], True),
+        (["docs/a  b.md", "docs/c d.md"], True),
         (["docs\\a.md"], False),
     ],
 )
@@ -180,6 +196,111 @@ def test_reason_names_the_files_that_forced_full_test() -> None:
 def test_paths_with_spaces_and_japanese_are_handled_via_nul_separation() -> None:
     names = _z("docs/日本語 の 文書.md", "docs/sp ace.md")
     assert cmo.classify("pull_request", "r", "B", "H", _FakeGit(names))[0] is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["docs/example.md ", " docs/example.md", "docs/example.md\t", "\tdocs/example.md"],
+)
+def test_classify_does_not_strip_git_paths_with_edge_whitespace(name: str) -> None:
+    # PR #867 の MUST-1: git が返した path を変更しない。strip すると Markdown-only に見えてしまう
+    markdown_only, reason = cmo.classify("pull_request", "r", "B", "H", _FakeGit(_z(name)))
+    assert markdown_only is False
+    assert reason.startswith("FULL_TEST")
+    assert repr(name) in reason  # 判定できなかった path が CI のログで読める
+
+
+def test_classify_with_one_edge_whitespace_path_among_normal_markdown_is_full() -> None:
+    names = _z("docs/normal.md", "docs/example.md ", "CLAUDE.md")
+    markdown_only, reason = cmo.classify("pull_request", "r", "B", "H", _FakeGit(names))
+    assert markdown_only is False
+    assert "docs/normal.md" not in reason  # 普通の Markdown は『FULL にした理由』に入らない
+
+
+def test_main_does_not_crash_on_whitespace_and_control_characters_in_names(
+    tmp_path: Path,
+) -> None:
+    names = _z("docs/a.md\x01", "docs/b\x1f.md", "\x7f", " ", "docs/c.md\r")
+    env = _env(
+        tmp_path,
+        GITHUB_EVENT_NAME="pull_request",
+        GITHUB_REF="r",
+        PR_BASE_SHA="B",
+        PR_HEAD_SHA="H",
+    )
+    assert cmo.main(env, _FakeGit(names)) == 0
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "markdown_only=false\n"
+
+
+# --- _subprocess_git: strict な復号(PR #867 の SHOULD-1) ------------------------------
+
+
+class _Completed:
+    def __init__(self, stdout: bytes, returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def _patch_git_output(monkeypatch: pytest.MonkeyPatch, stdout: bytes, returncode: int = 0) -> None:
+    def fake_run(*args: object, **kwargs: object) -> _Completed:
+        return _Completed(stdout, returncode)
+
+    monkeypatch.setattr(cmo.subprocess, "run", fake_run)
+
+
+def test_subprocess_git_decodes_valid_utf8_japanese_names_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_git_output(monkeypatch, "docs/日本語 の 文書.md".encode() + b"\0")
+    assert cmo._subprocess_git(["diff"]) == "docs/日本語 の 文書.md\0"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        b"docs/\xff.md\0",  # 単独の継続バイトでない不正バイト
+        b"docs/\xe3\x81.md\0",  # 途中で切れたマルチバイト
+        b"docs/a.md\0docs/\xc0\xaf.md\0",  # overlong な符号化
+        b"\xfe\xff",
+    ],
+)
+def test_subprocess_git_returns_none_for_invalid_utf8_instead_of_replacing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stdout: bytes
+) -> None:
+    _patch_git_output(monkeypatch, stdout)
+    assert cmo._subprocess_git(["diff"]) is None  # 置換文字へ変換して続行しない
+    assert "not valid UTF-8" in capsys.readouterr().out  # 理由が CI のログで読める
+
+
+def test_invalid_utf8_git_output_classifies_as_full_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 置換文字へ変換すると `docs/�.md` は Markdown-only に見える。strict ならこの経路は FULL
+    _patch_git_output(monkeypatch, b"docs/\xff.md\0")
+    markdown_only, reason = cmo.classify("pull_request", "r", "B", "H", cmo._subprocess_git)
+    assert markdown_only is False
+    assert reason == "FULL_TEST: git diff failed for B...H"
+
+
+def test_main_with_invalid_utf8_git_output_exits_zero_and_writes_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_git_output(monkeypatch, b"docs/\xff.md\0")
+    env = _env(
+        tmp_path,
+        GITHUB_EVENT_NAME="pull_request",
+        GITHUB_REF="r",
+        PR_BASE_SHA="B",
+        PR_HEAD_SHA="H",
+    )
+    assert cmo.main(env) == 0  # 判定処理は異常終了しない
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "markdown_only=false\n"
+    out = capsys.readouterr().out
+    assert "not valid UTF-8" in out  # 判定不能だった理由
+    assert "FULL_TEST: git diff failed" in out
+
+
+def test_subprocess_git_still_returns_none_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_git_output(monkeypatch, b"docs/a.md\0", returncode=128)
+    assert cmo._subprocess_git(["diff"]) is None
 
 
 # --- main(): GITHUB_OUTPUT・fail-safe・常に exit 0 -----------------------------------------

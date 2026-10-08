@@ -70,10 +70,13 @@ RunGit = Callable[[Sequence[str]], "str | None"]
 def is_markdown_only(paths: Iterable[str]) -> bool:
     """変更された path の一覧が「Markdown のみの変更」か。空・不明は False(fail-safe)。"""
     seen = False
-    for raw in paths:
-        path = raw.strip()
+    for path in paths:
+        # git が返した path は変更せずに判定する。strip すると、末尾が空白の `docs/a.md ` が
+        # `.md` で終わる path に見えてしまう(別の path を Markdown と取り違える)。
         if not path:
             return False  # 空の path は判定できない
+        if path != path.strip():
+            return False  # 先頭・末尾に空白文字がある path は判定できない(途中の空白は正常)
         if "\\" in path or path.startswith(("/", "./", "../")) or ".." in path.split("/"):
             return False  # 正規化されていない path は判定しない(git は常に / 区切りの相対 path)
         if not path.endswith(MARKDOWN_SUFFIX):
@@ -146,7 +149,14 @@ def _subprocess_git(args: Sequence[str]) -> str | None:
         return None
     if completed.returncode != 0:
         return None
-    return completed.stdout.decode("utf-8", errors="replace")
+    try:
+        # strict に復号する。errors="replace" だと不正な UTF-8 が置換文字になり、
+        # 判定できない名前が `.md` で終わる path に見えうる。
+        # 復号できなければ git 失敗相当(= FULL_TEST)。
+        return completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print(f"FULL_TEST: git output is not valid UTF-8 ({exc.reason} at byte {exc.start})")
+        return None
 
 
 def main(environ: dict[str, str] | None = None, run_git: RunGit | None = None) -> int:
