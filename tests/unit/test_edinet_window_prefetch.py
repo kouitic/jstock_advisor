@@ -18,7 +18,9 @@ from __future__ import annotations
 import datetime as dt
 import inspect
 import re
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -43,17 +45,16 @@ from jstock_advisor.infrastructure.edinet.types import (
     EdinetListResult,
 )
 from jstock_advisor.infrastructure.edinet.window_prefetch import (
+    ASSUMED_CLIENT_TIMEOUT_SECONDS,
     DEFAULT_BUDGET_SECONDS,
+    MAX_ATTEMPTS_PER_DATE,
+    RETRY_WAIT_SECONDS,
     prefetch_dates,
     prefetch_recent_document_lists,
     prefetch_recent_document_lists_safely,
 )
 
 _TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "infra" / "template.yaml"
-# EdinetClient.list_documents の urlopen timeout(秒)。事前取得の時間の上限の前提。
-# 値そのものは下のテストでソースと結び付けて固定する。
-_CLIENT_LIST_TIMEOUT_SECONDS = 15.0
-
 # 2026-10-05(月)08:00:47 JST = 2026-10-04 23:00:47 UTC(実際の障害日の朝の起動時刻)。
 _NOW = dt.datetime(2026, 10, 4, 23, 0, 47, tzinfo=dt.UTC)
 _TODAY_JST = dt.date(2026, 10, 5)
@@ -96,8 +97,10 @@ class FakeClient:
         raises: Exception | None = None,
         clock: FakeClock | None = None,
         seconds_per_call: float = 0.0,
+        script: dict[dt.date, list[EdinetListResult]] | None = None,
     ) -> None:
         self.result = result
+        self._script = script or {}
         self._configured = configured
         self._raises = raises
         self._clock = clock
@@ -114,7 +117,17 @@ class FakeClient:
             self._clock.now += self._seconds_per_call
         if self._raises is not None:
             raise self._raises
+        queued = self._script.get(date)
+        if queued:
+            return queued.pop(0)
         return self.result
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """再試行の待ち(time.sleep)で実時間を使わない。"""
+    stub = SimpleNamespace(monotonic=time.monotonic, sleep=lambda _seconds: None)
+    monkeypatch.setattr(window_prefetch, "time", stub)
 
 
 def _repo(store_dir: Path) -> EdinetDailyDocumentListCacheRepository:
@@ -373,7 +386,7 @@ def test_budget_assumes_the_real_edinet_client_timeout() -> None:
     source = inspect.getsource(EdinetClient.list_documents)
 
     assert {float(value) for value in re.findall(r"timeout=(\d+)", source)} == {
-        _CLIENT_LIST_TIMEOUT_SECONDS
+        ASSUMED_CLIENT_TIMEOUT_SECONDS
     }
 
 
@@ -385,7 +398,7 @@ def test_worst_case_edinet_delay_stays_far_below_the_dispatcher_timeout_in_the_t
     """
     timeout = _buy_candidates_timeout_seconds()
 
-    worst_case_edinet_seconds = DEFAULT_BUDGET_SECONDS + _CLIENT_LIST_TIMEOUT_SECONDS
+    worst_case_edinet_seconds = DEFAULT_BUDGET_SECONDS + ASSUMED_CLIENT_TIMEOUT_SECONDS
     assert worst_case_edinet_seconds * 4 < timeout, timeout
 
 
@@ -420,3 +433,144 @@ def test_unconfigured_environment_never_constructs_the_cache_source(
 
     assert summary.configured is False
     assert summary.error is False
+
+
+# --- F 限定版: TIMEOUT の再試行(失敗した日付だけ・予算の内側・失敗は保存しない) --------
+
+
+def test_timeout_is_retried_and_the_recovered_result_is_saved(tmp_path: Path) -> None:
+    slow = _EXPECTED_DATES[1]
+    client = FakeClient(script={slow: [_TIMEOUT, _OK]})
+    sleeps: list[float] = []
+
+    summary = prefetch_recent_document_lists(_source(client, tmp_path), _NOW, sleep=sleeps.append)
+
+    assert client.list_calls.count(slow) == 2
+    assert (summary.fetched, summary.failed, summary.retries, summary.recovered_by_retry) == (
+        6,
+        0,
+        1,
+        1,
+    )
+    assert sleeps == [RETRY_WAIT_SECONDS]
+    cached = _repo(tmp_path).get(slow)
+    assert cached is not None
+    assert cached.fetch_status is EdinetFetchStatus.SUCCESS_WITH_DOCUMENTS
+
+
+def test_retry_wait_is_the_approved_two_seconds(tmp_path: Path) -> None:
+    """再試行の待ちの**値**を固定する(MANAGER判断 Q2: 2秒。#818 issuecomment-5987822549)。
+    定数を参照せず、リテラルで比べる(定数を変えると期待値も一緒に動くテストでは、値の変更を
+    検出できないため)。待ちを伸ばすと、劣化時に予算の内側で開始できる日付が減る方向へ挙動が
+    変わるので、変更するときは予算の見積り(模擬の時計のテスト)も合わせて見直すこと。
+    """
+    slow = _EXPECTED_DATES[1]
+    client = FakeClient(script={slow: [_TIMEOUT, _OK]})
+    sleeps: list[float] = []
+
+    prefetch_recent_document_lists(_source(client, tmp_path), _NOW, sleep=sleeps.append)
+
+    assert RETRY_WAIT_SECONDS == 2.0
+    assert sleeps == [2.0]
+
+
+def test_only_the_failed_date_is_retried(tmp_path: Path) -> None:
+    slow = _EXPECTED_DATES[1]
+    client = FakeClient(script={slow: [_TIMEOUT, _OK]})
+
+    prefetch_recent_document_lists(_source(client, tmp_path), _NOW, sleep=lambda _s: None)
+
+    for scan_date in _EXPECTED_DATES:
+        expected = 2 if scan_date == slow else 1
+        assert client.list_calls.count(scan_date) == expected, scan_date
+
+
+def test_retries_stop_at_the_maximum_attempts_and_the_failure_stays_unsaved(
+    tmp_path: Path,
+) -> None:
+    slow = _EXPECTED_DATES[1]
+    client = FakeClient(script={slow: [_TIMEOUT] * 10})
+    sleeps: list[float] = []
+
+    summary = prefetch_recent_document_lists(_source(client, tmp_path), _NOW, sleep=sleeps.append)
+
+    assert client.list_calls.count(slow) == MAX_ATTEMPTS_PER_DATE
+    assert len(sleeps) == MAX_ATTEMPTS_PER_DATE - 1
+    assert (summary.failed, summary.failure_reasons) == (1, (("TIMEOUT", 1),))
+    failed = next(item for item in summary.date_results if item.scan_date == slow)
+    assert (failed.outcome, failed.attempts, failed.failure_reason) == (
+        "failed",
+        MAX_ATTEMPTS_PER_DATE,
+        "TIMEOUT",
+    )
+    # 最後まで失敗した日付は保存しない(子は従来どおり自分で取得を試みる。取得失敗は成功にしない)。
+    assert _repo(tmp_path).get(slow) is None
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [EdinetFailureReason.HTTP_ERROR, EdinetFailureReason.PARSE_ERROR, EdinetFailureReason.OTHER],
+)
+def test_failures_other_than_timeout_are_not_retried(
+    tmp_path: Path, reason: EdinetFailureReason
+) -> None:
+    client = FakeClient(result=EdinetListResult(EdinetFetchStatus.FETCH_FAILED, [], reason))
+    sleeps: list[float] = []
+
+    summary = prefetch_recent_document_lists(_source(client, tmp_path), _NOW, sleep=sleeps.append)
+
+    assert client.list_calls == _EXPECTED_DATES  # 各日付 1 回だけ
+    assert sleeps == []
+    assert (summary.failed, summary.retries) == (6, 0)
+
+
+def test_retries_stay_inside_the_time_budget(tmp_path: Path) -> None:
+    """全日付が TIMEOUT し続けても、EDINET の呼び出しに費やす時間は予算(120 秒)を超えない
+    (各試行は想定の最大 15 秒で終わるものとする)。試行を始める条件は 経過 + 待ち + 15 秒 <= 予算。
+    """
+    clock = FakeClock()
+    client = FakeClient(
+        result=_TIMEOUT, clock=clock, seconds_per_call=ASSUMED_CLIENT_TIMEOUT_SECONDS
+    )
+
+    def advance(seconds: float) -> None:
+        clock.now += seconds
+
+    summary = prefetch_recent_document_lists(
+        _source(client, tmp_path),
+        _NOW,
+        budget_seconds=DEFAULT_BUDGET_SECONDS,
+        clock=clock,
+        sleep=advance,
+    )
+
+    assert clock.now <= DEFAULT_BUDGET_SECONDS
+    assert summary.elapsed_seconds <= DEFAULT_BUDGET_SECONDS
+    assert summary.budget_exceeded is True
+    assert summary.skipped_by_budget >= 1
+    assert all(_repo(tmp_path).get(scan_date) is None for scan_date in _EXPECTED_DATES)
+
+
+def test_per_date_log_lines_carry_outcome_attempts_seconds_and_reason_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    slow = _EXPECTED_DATES[1]
+    client = FakeClient(script={slow: [_TIMEOUT] * 10})
+    with caplog.at_level("INFO", logger=window_prefetch.logger.name):
+        prefetch_recent_document_lists_safely(
+            _NOW, source_factory=lambda: _source(client, tmp_path), sleep=lambda _s: None
+        )
+
+    lines = [record.getMessage() for record in caplog.records]
+    failed_line = next(line for line in lines if f"date={slow.isoformat()}" in line)
+    assert "outcome=failed" in failed_line
+    assert f"attempts={MAX_ATTEMPTS_PER_DATE}" in failed_line
+    assert "reason=TIMEOUT" in failed_line
+    assert re.search(r"elapsed=\d+\.\ds", failed_line)
+    ok_line = next(line for line in lines if f"date={_EXPECTED_DATES[0].isoformat()}" in line)
+    assert "outcome=fetched" in ok_line and "attempts=1" in ok_line and "reason=-" in ok_line
+    summary_line = next(line for line in lines if "dates=6" in line)
+    assert "retries=2" in summary_line and "recovered_by_retry=0" in summary_line
+    text = " ".join(lines)
+    assert "29140" not in text
+    assert "DOC1" not in text

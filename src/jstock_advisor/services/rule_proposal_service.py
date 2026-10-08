@@ -91,7 +91,9 @@ class RuleProposalService:
                 backtest_result.current_performance, backtest_result.proposed_performance
             )
         else:
-            evaluation_count = len(self._evaluations.list_all())
+            # Issue #742: 件数だけが要るため、全評価を list へ保持しない(iter_all() を数える。
+            # 件数は list_all() と一致する。CollectionStore の契約)。
+            evaluation_count = sum(1 for _ in self._evaluations.iter_all())
             min_required = RuleProposal.MIN_EVALUATION_COUNT_FOR_PROPOSAL
             current_performance = {}
             proposed_performance = {
