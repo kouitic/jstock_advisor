@@ -272,6 +272,10 @@ def test_o9_contamination_case_targets_the_leaking_test() -> None:
     モジュール単位の順序へ戻すと、汚染を残さないテストが最後に走って汚染が隠れ、
     保護(autouse fixture)を外しても落ちない空振りの順序に戻る(#744 の調査)。
     この case が node id を最低 1 件含むことを固定する。
+
+    また、この順序は、保護(autouse fixture)がある現在は失敗しない(保護を外したときにだけ
+    失敗する)ので、`known_failure_issue`(失敗する宣言)を持たないこと(Issue #851)。
+    O5 は値があるときの形式しか見ないため、宣言だけが残っても他の guard は落ちない。
     """
     case = next(c for c in _ORDER_CASES if c.name == "ORDER_CASE_148_CONTAMINATION")
     node_ids = [spec for spec in case.modules if split_order_spec(spec)[1] is not None]
@@ -283,6 +287,11 @@ def test_o9_contamination_case_targets_the_leaking_test() -> None:
     first_path, first_name = split_order_spec(case.modules[0])
     assert first_name is not None, "先頭は汚染を残す側のテスト(node id)にしてください。"
     assert first_path != split_order_spec(case.modules[-1])[0]
+    assert not case.known_failure_issue, (
+        "ORDER_CASE_148_CONTAMINATION は保護がある現在は失敗しない順序です。"
+        f"known_failure_issue={case.known_failure_issue!r} を外してください(Issue #851。"
+        "実際には失敗しないのに、失敗する宣言が残っていたことが #744 の原因でした)。"
+    )
 
 
 @pytest.mark.parametrize(
