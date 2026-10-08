@@ -3559,14 +3559,11 @@ activation 宣言をもって行う。手順は
 [development_workflow.md](development_workflow.md) 2.6.10節と同様とする。
 
 ```
-docs review -> docs implementation -> PR -> CI -> 人間の merge 承認 ->
-merge -> main CI -> 周知 -> 人間による明示的な発効宣言
-```
-
-```
 PRE_ACTIVATION  = PUBLIC_SANITIZED は現行正本どおり有効。PUBLIC_MINIMAL は
                   historical / de-facto usage であり、本節の正式定義は
-                  まだ規範ではない
+                  まだ規範ではない。activation 前も、PUBLIC_MINIMAL を
+                  宣言した記録では従来の運用(より厳格な開示)を続ける。
+                  本改訂は公開可能範囲を広げない
 POST_ACTIVATION = PUBLIC_SANITIZED / PUBLIC_MINIMAL の2段階定義を、
                   activation 後に新規作成される記録へ適用する
 ```
@@ -3723,4 +3720,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-19 | 2.7節の 3 か所を補正した(Issue #332 Unit 1-A の追補)。(1)`RECEIPT_EXISTS` を「**有効な** RECEIPT が存在する」と明確化し、`RECEIPT_STATE` が `APPROVAL_DECISION` と一致しない RECEIPT(APPROVE 以外なのに APPROVED 等)は無効で存在するものとして数えないことを明記した。(2)preflight の検査項目へ「`RECEIPT_STATE` が `APPROVAL_DECISION` と一致する」を追加した(検査項目を【A】v3 §6(b) 由来の14項目と【B】v3 の外[contract 8.6.2節由来]の1項目に分け、出典を本文で判別できるようにした。15 項目が HUMAN_GATE_VALID の17条件を置き換えるものではないことと、17条件との対応[15項目で覆われるもの・15項目に無いが機械で検査できるもの・機械では検査できないもの]を「17 条件との対応」として明記した)。**いずれも新しい規則ではなく、PR #426 のレビュー(F1)で ai_operation_message_contract.md 8.6.2節に既に定めた不変条件が、本節の一覧に無かったための所在の補正である**(一覧から実装すると、却下の受領証を承認として読む向きの検査が抜ける)。(3)標準の TTL より長い `VALID_UNTIL` を許すかを、v3 に定めが無い「未決定」として明記した(AI が推測で補わない)。**HUMAN_GATE_VALID の17条件の名前・状態遷移・TTL の表・発効条件・残余リスクはいずれも変更していない。本改訂は発効しない**(発効状態の正本は #332 の最新の durable な記録)。MANAGER 判断(2026-09-19)により、Unit 1-B の実装(scripts/)の前に正本を整えるために行う。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-10-04 | 11節「公開リポジトリとしての取り扱い」の、公開禁止の範囲を明確化した(Issue #122。USER 判断 = #122 issuecomment-5980464388)。**禁止するのは個人特定情報と、個人特定情報と結び付いた資産情報**であり、保有銘柄の名称・証券コード・数量・取得単価・現在値・金額は単独では一律禁止にしない(必要性のない実値は架空値・丸めた値・割合を推奨)。従来の「実際の保有数量 / 取得単価 / portfolio 価値 / 個別保有銘柄」を一律に載せないと読める記載を、USER の原文の引用へ置き換えた。あわせて 3.11節に「公開面の確認項目」を追加した。過去の公開記録は、この判断だけを理由に書き換えない(今後新規・更新する記録に適用)。日次監査・denylist の検出範囲は変更していない。**コード・Production 挙動の変更なし** |
 | 2026-10-05 | 2026-10-04 の行(公開禁止の範囲の明確化。Issue #122)のレビュー指摘への是正。(1) operations_manual 27.2・27.3・27.6 に、21節を根拠として銘柄コード・銘柄名・保有数量を一律に書かないと読める記述が残っていたため、同じ定義(個人特定情報、およびそれと結び付いた資産情報が禁止。銘柄・数量・金額は単独では一律禁止にしない。必要性のない実値は架空値・丸めた値・割合を優先)へ明確化した。所有者・AWS アカウント識別子・ARN の扱いは弱めていない。(2) 3.11節の冒頭の「4 点」を、確認項目を含む「5 点」に整え、節内の数を 1 つに確定した。新しい規則・例・閾値は足していない。**コード・Production 挙動の変更なし** |
-| 2026-10-08 | 11節「公開リポジトリとしての取り扱い」へ、開示レベル(DISCLOSURE)の小節を新設した(Issue #660)。PUBLIC_SANITIZED(既定)と、既存運用を正式化する PUBLIC_MINIMAL(PUBLIC_SANITIZED に追加する、より厳格な開示。security 面)の 2 段階を定め、適用条件(TRIGGER-A / B・NON-TRIGGER-C)、private evidence の traceability、遡及しないこと(RETROACTIVE_APPLICATION = NO)を明記した。**PUBLIC_MINIMAL の正式定義は merge では発効せず、人間による明示的な activation 宣言をもって発効する**(`DISCLOSURE_POLICY_ACTIVATION_STATE_SSOT`)。2026-10-04 の「公開禁止の定義」の小節〔USER の引用を含む〕は変更していない。コード・Production 挙動の変更なし |
+| 2026-10-08 | 11節「公開リポジトリとしての取り扱い」の「記録が必要な場合は次を明示する」の記述を、開示レベル(DISCLOSURE)の小節へ置き換えて新設した(Issue #660)。PUBLIC_SANITIZED(既定)と、既存運用を正式化する PUBLIC_MINIMAL(PUBLIC_SANITIZED に追加する、より厳格な開示。security 面)の 2 段階を定め、適用条件(TRIGGER-A / B・NON-TRIGGER-C)、private evidence の traceability、遡及しないこと(RETROACTIVE_APPLICATION = NO)を明記した。**PUBLIC_MINIMAL の正式定義は merge では発効せず、人間による明示的な activation 宣言をもって発効する**(`DISCLOSURE_POLICY_ACTIVATION_STATE_SSOT`)。2026-10-04 の「公開禁止の定義」の小節〔USER の引用を含む〕は変更していない。コード・Production 挙動の変更なし |
