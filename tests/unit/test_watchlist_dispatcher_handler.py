@@ -35,8 +35,9 @@ def _fake_config(
 
 @pytest.fixture(autouse=True)
 def _line_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #117 (B1b-2): dispatcherはNEW_CANDIDATE_SCREENINGでLINE認証情報を必須とする
-    (欠落時はlease取得前に例外)。開始後の経路を検証する既存テストは有効な認証情報を前提とする。"""
+    """既存テストは有効なLINE認証情報を前提とする(認証情報の欠落時の挙動は
+    Issue #438のテスト〔test_issue_438_dispatcher_deferred_line_client.py〕と、
+    test_new_candidate_screening_reaches_lease_when_line_credentials_missingが固定する)。"""
     monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "token-value")
     monkeypatch.setenv("LINE_USER_ID", "user-value")
 
@@ -398,21 +399,31 @@ def test_collect_maintenance_targets_omits_trigger_metadata_when_absent(
     assert extra_kwargs == {}
 
 
-def test_new_candidate_screening_fails_before_lease_when_line_credentials_missing(
+def test_new_candidate_screening_reaches_lease_when_line_credentials_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """LINE認証情報の欠落は、dispatch lease・BatchRuns行の作成より前に例外で止まる
-    (状態を作った後に失敗してDISPATCHINGのまま残る中途状態を作らない)。"""
-    from jstock_advisor.infrastructure.line.client import LineCredentialsMissingError
+    """Issue #438(USER決定A): LINE認証情報の欠落は通知サービスの「構築失敗」にしない。
+    認証情報が無くても、dispatch leaseの取得まで到達する(候補発見をLINEの可用性と結合させない)。
 
+    以前(Issue #117 B1b-2)は、欠落をdispatch lease・BatchRuns行の作成より前に例外にしていた。
+    欠落の顕在化は、通知が実際に必要になった場合のhandler末尾(raise_if_send_attempted)へ移した。"""
     monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("LINE_USER_ID", raising=False)
     monkeypatch.setenv("ALLOW_FULL_MARKET_SCREENING", "true")
     monkeypatch.setattr(handler_module, "load_config", lambda: _fake_config(candidate_limit=None))
     monkeypatch.setattr(handler_module, "record_batch_audit", lambda **kw: None)
-    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", _fail_if_called)
+    reached: list[bool] = []
 
-    with pytest.raises(LineCredentialsMissingError):
-        handler_module.handler({}, object())
+    def _lease(*args: Any, **kwargs: Any) -> bool:
+        reached.append(True)
+        return False
+
+    monkeypatch.setattr(handler_module, "try_acquire_dispatch_lease", _lease)
+
+    result = handler_module.handler({}, object())
+
+    assert reached == [True]
+    assert result == {"skipped": "lease_not_acquired"}
 
 
 def test_maintenance_job_does_not_require_line_credentials(

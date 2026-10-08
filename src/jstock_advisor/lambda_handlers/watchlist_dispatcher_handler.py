@@ -43,7 +43,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any
+from typing import Any, NoReturn
 
 import boto3
 
@@ -79,7 +79,12 @@ from jstock_advisor.infrastructure.aws.watchlist_rotation_state import (
     DEFAULT_ROTATION_ID,
     create_rotation_state_if_absent,
 )
-from jstock_advisor.infrastructure.line.client import build_live_line_client_from_env
+from jstock_advisor.infrastructure.line.client import (
+    LineClient,
+    LineCredentialsMissingError,
+    QuickReplyButton,
+    build_live_line_client_from_env,
+)
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -169,9 +174,72 @@ def _send_batch_with_retry(
     return results
 
 
-def _build_notification_service(config: Any) -> LineNotificationService:
+class _CredentialDeferredLineClient:
+    """LINE認証情報が無いときに渡す、送信の瞬間に必ず失敗するclient(Issue #438。
+    worker / terminal_failure の#430、reconciler の#429と同一ロジック。USER決定
+    OD1=Bにより共通化は行わず、このファイル内へ独立に複製する)。
+
+    dispatcherはNEW_CANDIDATE_SCREENINGのdispatch lease・BatchRuns行・進捗行の作成と
+    SQS投入の後に、finalizerのPhase 3(通知)を同じLambda呼び出し内で行いうる
+    (候補が0件などでその場でfinalizeする場合)。認証情報の欠落を通知サービスの
+    「構築失敗」として扱うと、通知と無関係なはずの候補発見(その日のバッチ作成)まで
+    止まる。
+
+    そこで欠落は「実際の送信時の失敗」として扱う。送信メソッド(push_message等)は
+    **必ず**`LineCredentialsMissingError`を送出し、決して成功を返さない。
+    finalizerのPhase 3は例外を捕捉してNOTIFICATION_FAILEDとして記録する。
+
+    ★ Phase 3の例外捕捉により、このままではLambda呼び出しが成功扱いになり欠落が
+      不可視になる。そのため「欠落のまま送信が試みられた」事実を保持し、
+      `raise_if_send_attempted()`をhandlerの全処理完了後に呼んで送出する。
+    """
+
+    def __init__(self, missing: LineCredentialsMissingError) -> None:
+        self._missing = missing
+        self.send_attempted = False
+
+    def _fail(self) -> NoReturn:
+        self.send_attempted = True
+        raise LineCredentialsMissingError(str(self._missing))
+
+    def push_message(self, text: str) -> None:
+        self._fail()
+
+    def reply_message(
+        self, reply_token: str, text: str, quick_reply: list[QuickReplyButton] | None = None
+    ) -> None:
+        self._fail()
+
+    def reply_messages(
+        self,
+        reply_token: str,
+        texts: list[str],
+        quick_reply: list[QuickReplyButton] | None = None,
+    ) -> None:
+        self._fail()
+
+    def raise_if_send_attempted(self) -> None:
+        if self.send_attempted:
+            raise LineCredentialsMissingError(str(self._missing))
+
+
+def _build_dispatcher_line_client() -> LineClient:
+    """認証情報があればLiveLineClient、無ければ送信時に必ず失敗するclientを返す。
+
+    構築の失敗(`LineCredentialsMissingError`)だけを送信時の失敗へ変える。認証情報の
+    欠落以外の例外は握りつぶさず、従来どおり伝播する。
+    """
+    try:
+        return build_live_line_client_from_env()
+    except LineCredentialsMissingError as exc:
+        return _CredentialDeferredLineClient(exc)
+
+
+def _build_notification_service(
+    config: Any, line_client: LineClient | None = None
+) -> LineNotificationService:
     return LineNotificationService(
-        line_client=build_live_line_client_from_env(),
+        line_client=line_client if line_client is not None else _build_dispatcher_line_client(),
         notification_log_repository=NotificationLogRepository(),
         # LINE通知dedupの原子化(Issue #17): NORMAL実行の送信決定を原子的に
         # 一意化するclaimリポジトリ(VALIDATION/DRY_RUNでは使用されない)。
@@ -475,16 +543,22 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     ):
         return {"skipped": SKIP_REASON}
 
-    # Issue #117 (B1b-2): LINE認証情報の欠落はここ(dispatch lease・BatchRuns行・
-    # 進捗行の作成より前)で例外にする。以前は構築がSQS投入の直前(状態作成後)に
-    # あり、strict版へ切り替えるとbatchがDISPATCHINGのままleaseを保持した中途状態で
-    # 失敗してしまうため、上のゲートと同じ「開始前に中止する」位置へ移した。
+    # Issue #438(USER決定A。#430のworker / terminal_failureと同じ方針): LINE認証情報の
+    # 欠落は「通知サービスの構築失敗」にしない。構築位置は従来どおり(dispatch lease・
+    # BatchRuns行・進捗行の作成より前)だが、認証情報が無ければ送信の瞬間に必ず失敗する
+    # client(_CredentialDeferredLineClient)を渡し、構築では失敗させない。これにより、
+    # 通知が不要な日(取得成功・追加0件など)は認証情報が無くても候補発見が進む。
+    # 通知が実際に必要になった(finalizeが送信を試みた)場合だけ、下の末尾で
+    # LineCredentialsMissingErrorを送出してErrorsとして顕在化する。
+    # (Issue #117 B1b-2の「欠落は開始前に例外にする」は、この方針で置き換えた。
+    # 代償としてfail-fast性は弱まる〔USER決定Aで許容〕。)
     # 通知サービスを使うのはNEW_CANDIDATE_SCREENINGのfinalizeのみ(maintenanceは
-    # 未使用)のため、maintenanceが不要な認証情報で新たに失敗しないようNoneにする。
+    # 未使用)のため、maintenanceは従来どおり構築しない(None)。
+    line_client: LineClient | None = (
+        _build_dispatcher_line_client() if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING else None
+    )
     notification_service = (
-        _build_notification_service(config)
-        if job_type == JOB_TYPE_NEW_CANDIDATE_SCREENING
-        else None
+        _build_notification_service(config, line_client) if line_client is not None else None
     )
 
     batch_prefix = (
@@ -721,4 +795,10 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         job_type,
         total,
     )
+    # Issue #438: dispatch lease・BatchRuns行・進捗行・SQS投入・NOTIFICATION_FAILEDの
+    # 記録を全て終えた後に、認証情報の欠落を顕在化させる(Lambda呼び出しをErrorsとして
+    # 失敗させる)。finalizerのPhase 3が例外を捕捉するため、これが無いと欠落が不可視に
+    # なる(#430 / #429と同じ設計方針)。
+    if isinstance(line_client, _CredentialDeferredLineClient):
+        line_client.raise_if_send_attempted()
     return {"dispatched": total, "batch_id": batch_id, "job_type": job_type}

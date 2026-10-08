@@ -544,8 +544,13 @@ def test_off_never_recomputes_or_records(monkeypatch: pytest.MonkeyPatch) -> Non
     assert audit.calls == []
 
 
-def test_default_config_is_the_shipped_off_config() -> None:
-    """shadow_configを渡さない既定は、出荷configを読む(mode: "OFF")。何も記録しない。"""
+def test_default_config_is_the_shipped_shadow_config() -> None:
+    """shadow_configを渡さない既定は、出荷configを読む。
+
+    Issue #838(USER承認 2026-10-08)で出荷値はSHADOW(観測専用)になった。したがって
+    shadow_configを渡さない呼び出しは、記録する(Issue #582の時点では出荷値がOFFで、
+    記録しないことを確認していた)。OFFの挙動は、明示的にOFFのconfigを渡す別のテストで固定する。
+    """
     audit = _SpyAuditService()
 
     recorded = observe_valuation_confidence_shadow(
@@ -556,9 +561,10 @@ def test_default_config_is_the_shipped_off_config() -> None:
         audit_service=cast(AuditService, audit),
     )
 
-    assert recorded is False
-    assert audit.calls == []
-    assert load_valuation_confidence_shadow_config().enabled is False  # 出荷既定の確認
+    assert load_valuation_confidence_shadow_config().enabled is True  # 出荷値の確認
+    assert recorded is True
+    assert len(audit.calls) == 1
+    assert audit.calls[0]["decision_type"] == DECISION_TYPE
 
 
 def test_inputs_none_does_not_record_even_when_shadow_is_on() -> None:
