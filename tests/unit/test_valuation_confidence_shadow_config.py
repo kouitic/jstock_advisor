@@ -53,9 +53,11 @@ def test_shipped_config_values_are_exactly_what_the_file_says() -> None:
 
     cfg = load_valuation_confidence_shadow_config(_REPO_ROOT / "config")
 
-    assert raw["mode"] == "OFF"
-    assert cfg.mode is ShadowMode.OFF
-    assert cfg.enabled is False
+    # Issue #838(USER承認 2026-10-08): 出荷値はSHADOW(観測専用。観測期間 20営業日)。
+    # コード上の既定値(モデルの既定・fallback)はOFFのまま(下のtest_default_model_is_off)。
+    assert raw["mode"] == "SHADOW"
+    assert cfg.mode is ShadowMode.SHADOW
+    assert cfg.enabled is True
 
 
 def test_unquoted_off_is_a_boolean_in_yaml_and_is_rejected_not_silently_accepted(
