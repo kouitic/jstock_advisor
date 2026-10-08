@@ -253,11 +253,17 @@ _EXPECTED_ENV_KEYS = {
         "WATCHLIST_DISPATCHER_FUNCTION_NAME",
         "WATCHLIST_SCREENING_QUEUE_URL",
     ],
+    # Issue #816: 銘柄名の解決(JPXキャッシュの読取)のため
+    # CANDIDATE_UNIVERSE_CACHE_BUCKETを追加(追加のみ)。
     "WatchlistWorkerFunction": [
+        "CANDIDATE_UNIVERSE_CACHE_BUCKET",
         "INCIDENT_NOTIFICATION_TOPIC_ARN",
         "WATCHLIST_DISPATCHER_FUNCTION_NAME",
     ],
-    "WatchlistTerminalFailureHandlerFunction": ["INCIDENT_NOTIFICATION_TOPIC_ARN"],
+    "WatchlistTerminalFailureHandlerFunction": [
+        "CANDIDATE_UNIVERSE_CACHE_BUCKET",
+        "INCIDENT_NOTIFICATION_TOPIC_ARN",
+    ],
     "EvaluationFunction": [
         "INCIDENT_NOTIFICATION_TOPIC_ARN",
         "WEEKLY_AGGREGATE_WRITE_ENABLED",
@@ -299,9 +305,13 @@ _EXPECTED_STATEMENT_SIDS = {
         "DynamoDbCrudAccess",
         "DynamoDbReadOnlyAccess",
         "InvokeDispatcherForMaintenanceTrigger",
+        "CandidateUniverseCacheReadForJpxStockName",
         "PublishIncidentNotification",
     ],
-    "WatchlistTerminalFailureHandlerFunction": ["PublishIncidentNotification"],
+    "WatchlistTerminalFailureHandlerFunction": [
+        "CandidateUniverseCacheReadForJpxStockName",
+        "PublishIncidentNotification",
+    ],
     "EvaluationFunction": [
         "UpdateWeeklyEvaluationAggregate",
         "PutEvaluationRunSummaryAudit",
@@ -315,8 +325,8 @@ _EXPECTED_POLICY_ENTRIES = {
     "HoldingsWatchlistFunction": 5,
     "HoldingsWatchlistWorkerFunction": 2,
     "WatchlistDispatcherFunction": 5,
-    "WatchlistWorkerFunction": 3,
-    "WatchlistTerminalFailureHandlerFunction": 16,
+    "WatchlistWorkerFunction": 4,
+    "WatchlistTerminalFailureHandlerFunction": 17,
     "EvaluationFunction": 5,
 }
 
