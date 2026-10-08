@@ -21,6 +21,8 @@ Range・Market/Sector/Environment・Earnings Surprise/Trend・次回決算日は
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -45,7 +47,16 @@ from jstock_advisor.interfaces.types import DividendInfo, FinancialSummary, Shar
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 from jstock_advisor.services.watchlist_data_cache import CacheVintage
-from jstock_advisor.services.yfinance_rate_limit import call_with_rate_limit_retry
+from jstock_advisor.services.yfinance_rate_limit import (
+    RateLimitRetryResult,
+    call_with_rate_limit_retry,
+)
+
+logger = logging.getLogger(__name__)
+# Issue #853(#718 I-2) / #413: Lambda の root logger は WARNING のため、
+# module が宣言しないと INFO は出ない。出すのは 1 銘柄の取得ごとに 1 行
+# (outcome・retry の回数・待機秒・所要時間)。stock_code は出さない。
+logger.setLevel(logging.INFO)
 
 # WatchlistScreeningInputの必須項目・スコア項目の分類(要求仕様§5・§8)。
 # 必須条件用フィールド(is_debt_excess等)はStockSnapshot取得できた時点で常にbool値
@@ -184,6 +195,30 @@ def _with_cache_vintage(
         financial_cache_refetched_count=vintage.refetched_count,
         financial_cache_age_hours_max=vintage.age_hours_max,
         financial_cache_age_hours_min=vintage.age_hours_min,
+    )
+
+
+def _log_fetch_stats(
+    started: float,
+    outcome: str,
+    retry_result: RateLimitRetryResult[object] | None = None,
+) -> None:
+    """Issue #853(#718 I-2): 1 銘柄の取得の観測値を 1 行のログに残す(観測のみ)。
+
+    悪循環仮説(SQS 滞留 → provider への高負荷 → 速度低下 → 滞留の悪化)の検証のため、
+    所要時間のうち retry の待機が占める割合を分けられるようにする。stock_code は出さない
+    (件数と時間のみ)。判定・保存・通知・retry の挙動には影響しない。`retry_result` が無い
+    のは、障害疑いでない例外が再送出された場合(retry の回数は分からない)。
+    """
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "watchlist screening fetch stats outcome=%s attempts=%s retry_slept_seconds=%s "
+        "duration_ms=%d provider_failure_suspected=%s",
+        outcome,
+        retry_result.attempts if retry_result is not None else "na",
+        f"{retry_result.slept_seconds:.1f}" if retry_result is not None else "na",
+        duration_ms,
+        retry_result.is_provider_failure_suspected if retry_result is not None else "na",
     )
 
 
@@ -332,11 +367,13 @@ class StockSnapshotScreeningDataProvider:
         # Provider実装は一切変更しない(欠点は同関数のdocstring参照)。429疑いでない
         # 例外はcall_with_rate_limit_retry()が再送出するため、従来どおりここで
         # 捕捉してDATA_ERRORとして扱う(この層の例外処理契約自体は変更しない)。
+        started = time.monotonic()
         try:
             retry_result = call_with_rate_limit_retry(
                 lambda: build_stock_snapshot(self._providers, stock_code, now, self._config)
             )
         except Exception as exc:  # noqa: BLE001 - 将来のretry判定用にstatusで区別するため意図的に捕捉
+            _log_fetch_stats(started, "DATA_ERROR")
             return ScreeningDataResult(
                 status=ScreeningDataStatus.DATA_ERROR,
                 input=None,
@@ -344,6 +381,7 @@ class StockSnapshotScreeningDataProvider:
                 error_message=str(exc),
             )
         if retry_result.error is not None:
+            _log_fetch_stats(started, "DATA_ERROR", retry_result)
             return ScreeningDataResult(
                 status=ScreeningDataStatus.DATA_ERROR,
                 input=None,
@@ -353,6 +391,7 @@ class StockSnapshotScreeningDataProvider:
             )
         assert retry_result.value is not None
         snapshot, error = retry_result.value
+        _log_fetch_stats(started, "NOT_FOUND" if snapshot is None else "OK", retry_result)
 
         if snapshot is None:
             return ScreeningDataResult(
@@ -394,11 +433,13 @@ class LightweightScreeningDataProvider:
         return _with_cache_vintage(self._vintage, self._collect, stock_code, now)
 
     def _collect(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:
+        started = time.monotonic()
         try:
             retry_result = call_with_rate_limit_retry(
                 lambda: self._fetch_and_build(stock_code, now)
             )
         except Exception as exc:  # noqa: BLE001 - 将来のretry判定用にstatusで区別するため意図的に捕捉
+            _log_fetch_stats(started, "DATA_ERROR")
             return ScreeningDataResult(
                 status=ScreeningDataStatus.DATA_ERROR,
                 input=None,
@@ -406,6 +447,7 @@ class LightweightScreeningDataProvider:
                 error_message=str(exc),
             )
         if retry_result.error is not None:
+            _log_fetch_stats(started, "DATA_ERROR", retry_result)
             return ScreeningDataResult(
                 status=ScreeningDataStatus.DATA_ERROR,
                 input=None,
@@ -415,6 +457,7 @@ class LightweightScreeningDataProvider:
             )
         assert retry_result.value is not None
         input_dto, error = retry_result.value
+        _log_fetch_stats(started, "NOT_FOUND" if input_dto is None else "OK", retry_result)
 
         if input_dto is None:
             return ScreeningDataResult(
