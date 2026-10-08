@@ -1913,6 +1913,16 @@ class AutoRemovalConfig(StrictModel):
     # 削除された銘柄が同一条件で再追加されるまでの最低待機日数
     # (削除→即再追加→削除、という振動を防ぐ)。
     readd_cooldown_days: int = Field(gt=0)
+    # Issue #324: ウォッチリスト総件数の上限(件数の発散を止める唯一の収束機構)。
+    # 比較する対象は「ACTIVE_CAPACITY_COUNT」= 実在する項目のうち
+    # last_screening_result == "NOT_EVALUABLE"(#141)を除いた件数。超過分は
+    # AUTO_SCREENING銘柄のうち last_monitoring_score の低い順
+    # (同点は created_at の古い順)に淘汰する。MANUAL登録銘柄は淘汰されず、
+    # 件数には数える。必須項目(既定値を持たせない): 上限が無い状態を黙って
+    # 許さないため、設定漏れはconfig読み込みの段階で失敗させる。
+    # ★ 値を下げる変更は、利用者に見える監視リストの変更になる。事前に
+    # 本番の実データで淘汰される件数を試算してから行うこと。
+    total_count_cap: int = Field(gt=0)
 
 
 class WatchlistScreeningRulesConfig(StrictModel):
