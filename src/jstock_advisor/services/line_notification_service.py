@@ -29,6 +29,8 @@ from jstock_advisor.domain.entities.daily_notification_priority import (
 from jstock_advisor.domain.entities.data_quality_alert import DataQualityAlert
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
+    HOLDING_DECISION_RECOMMENDATION_TYPES,
+    WATCH_FAMILY_ACTIONS,
     BuyAction,
     CandidateSource,
     ConfidenceLevel,
@@ -1876,15 +1878,6 @@ def _format_sell_message(recommendation: Recommendation) -> str:
     return "\n".join(lines)
 
 
-_HOLDING_DECISION_RECOMMENDATION_TYPES = frozenset(
-    {
-        RecommendationType.SELL_CONSIDERATION,
-        RecommendationType.STRONG_SELL_CONSIDERATION,
-        RecommendationType.URGENT_HOLDING_REVIEW,
-    }
-)
-
-
 def _format_holding_decision_message(recommendation: Recommendation) -> str:
     """保有判断スコア方式(2026-08仕様)の売却検討通知(実装プラン16節)。
 
@@ -2031,10 +2024,7 @@ def _format_message(
     if recommendation.buy_action is not None:
         if recommendation.buy_action in BUY_FAMILY_ACTIONS:
             return _format_buy_candidate_message(recommendation)
-        if recommendation.buy_action in {
-            BuyAction.WATCH_FOR_PRICE,
-            BuyAction.WATCH_BEFORE_EARNINGS,
-        }:
+        if recommendation.buy_action in WATCH_FAMILY_ACTIONS:
             return _format_watch_for_price_message(recommendation)
     if notification_type in (
         NotificationType.DAILY_BUY_CANDIDATES,
@@ -2043,7 +2033,7 @@ def _format_message(
         return _format_buy_candidate_message(recommendation)
     if notification_type == NotificationType.PROFIT_TAKING_SIGNAL:
         return _format_profit_taking_message(recommendation, large_spread_ratio_threshold)
-    if recommendation.recommendation_type in _HOLDING_DECISION_RECOMMENDATION_TYPES:
+    if recommendation.recommendation_type in HOLDING_DECISION_RECOMMENDATION_TYPES:
         return _format_holding_decision_message(recommendation)
     return _format_sell_message(recommendation)
 

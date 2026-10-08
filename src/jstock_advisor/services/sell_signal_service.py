@@ -20,6 +20,7 @@ from jstock_advisor.domain.business_calendar import BusinessCalendar
 from jstock_advisor.domain.classification.financial_industry import classify_industry
 from jstock_advisor.domain.entities.common import SellPriceLevels
 from jstock_advisor.domain.entities.enums import (
+    LEGACY_SELL_RECOMMENDATION_TYPES,
     IndustryClassification,
     PriceRangeEvaluationState,
     RecommendationScope,
@@ -98,7 +99,9 @@ from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot, build_stock_snapshot
 
-_STRONG_TYPES = (RecommendationType.SELL, RecommendationType.URGENT_REVIEW)
+# Issue #276: 旧SELL方式のうちREVIEW(単一の根拠のみ)を除いた「強い」型。以前は
+# (SELL, URGENT_REVIEW)を直接列挙していた(値は同一。使い方は`in`のみ)。
+_STRONG_TYPES = LEGACY_SELL_RECOMMENDATION_TYPES - {RecommendationType.REVIEW}
 
 # 反対材料(counter_factors)の評価対象カテゴリー(2026-07仕様レビュー対応)。
 # 実際に評価できたカテゴリーのみをcounter_factors_evaluatedの判定に使う

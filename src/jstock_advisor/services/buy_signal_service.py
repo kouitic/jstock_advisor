@@ -40,6 +40,7 @@ from jstock_advisor.domain.classification.profit_taking_industry import (
 from jstock_advisor.domain.entities.buy_decision import BuyDecisionReason
 from jstock_advisor.domain.entities.enums import (
     BUY_FAMILY_ACTIONS,
+    WATCH_FAMILY_ACTIONS,
     BuyAction,
     BuyIndustrySector,
     ConfidenceLevel,
@@ -1616,7 +1617,7 @@ class BuySignalService:
         # --- 19〜20. ランキング区分の確定 ---
         if buy_action in BUY_FAMILY_ACTIONS:
             ranking_group = "buy_candidate"
-        elif buy_action in {BuyAction.WATCH_FOR_PRICE, BuyAction.WATCH_BEFORE_EARNINGS}:
+        elif buy_action in WATCH_FAMILY_ACTIONS:
             ranking_group = "watch_price"
         else:
             ranking_group = "excluded"

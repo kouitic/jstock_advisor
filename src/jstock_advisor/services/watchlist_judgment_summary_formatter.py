@@ -25,7 +25,7 @@ from jstock_advisor.domain.entities.buy_candidate_evaluation_record import (
 )
 from jstock_advisor.domain.entities.buy_decision import BuyDecisionReason
 from jstock_advisor.domain.entities.common import ScoreBreakdown
-from jstock_advisor.domain.entities.enums import BuyAction, PurchaseCategory
+from jstock_advisor.domain.entities.enums import BUY_FAMILY_ACTIONS, BuyAction, PurchaseCategory
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.valuation.valuation_confidence import (
     CODE_NO_VALID_VALUATION_METHODS,
@@ -97,7 +97,6 @@ _SCORE_BELOW_THRESHOLD_WATCH_TEXT = "総合評価により買付を見送り"
 _SCORE_BELOW_THRESHOLD_NOT_ATTRACTIVE_TEXT = "総合評価が購入基準を下回る"
 
 _SCORE_BELOW_THRESHOLD_CODE = "SCORE_BELOW_THRESHOLD"
-_PRICE_TIER_FAMILY = (BuyAction.STRONG_BUY, BuyAction.BUY, BuyAction.SMALL_ENTRY)
 
 
 def category_label(category: PurchaseCategory) -> str:
@@ -118,7 +117,7 @@ def _category_reason_text(
     final_action = record.final_buy_action
 
     if last_reason.code == _SCORE_BELOW_THRESHOLD_CODE:
-        if final_action in _PRICE_TIER_FAMILY:
+        if final_action in BUY_FAMILY_ACTIONS:
             # 価格帯自体はまだ買い候補水準にあり続けている(スコアで1段階
             # だけ格下げされたが範囲内に留まった)。事実として矛盾しない
             # 価格帯ベースの文言を使う。
