@@ -100,15 +100,29 @@ class RecommendationType(StrEnum):
 # 代わりにis_sell_like()を呼ぶことで、判定区分が増減しても呼び出し側の変更を不要にする
 # (BUY_FAMILY_ACTIONSと同じパターン)。旧3値(SELL/URGENT_REVIEW/REVIEW)は新方式への
 # 移行完了後も、過去データの再判定・監査のため削除しない。
-SELL_LIKE_RECOMMENDATION_TYPES = frozenset(
+#
+# Issue #276(N-11): SELL_LIKEは「旧SellSignalService由来」と「新holding_decision由来」の
+# 和集合として導出する(以前は3つの集合が別々に書かれていた)。値は従来と同一。
+# 旧SellSignalService(domain/signals/sell_signal.py)のみが生成することをgrepで
+# 全数確認済み(他に代入箇所なし)。
+LEGACY_SELL_RECOMMENDATION_TYPES = frozenset(
     {
         RecommendationType.SELL,
         RecommendationType.URGENT_REVIEW,
         RecommendationType.REVIEW,
+    }
+)
+# 新holding_decision_notification_builder.pyのみが生成することをgrepで全数確認済み
+# (他に代入箇所なし)。
+HOLDING_DECISION_RECOMMENDATION_TYPES = frozenset(
+    {
         RecommendationType.SELL_CONSIDERATION,
         RecommendationType.STRONG_SELL_CONSIDERATION,
         RecommendationType.URGENT_HOLDING_REVIEW,
     }
+)
+SELL_LIKE_RECOMMENDATION_TYPES = (
+    LEGACY_SELL_RECOMMENDATION_TYPES | HOLDING_DECISION_RECOMMENDATION_TYPES
 )
 
 
@@ -210,24 +224,11 @@ class BacktestRecommendationSource(StrEnum):
     EXCLUDED = "EXCLUDED"
 
 
-# 旧SellSignalService(domain/signals/sell_signal.py)のみが生成することをgrepで
-# 全数確認済み(他に代入箇所なし)。
-_LEGACY_SELL_RECOMMENDATION_TYPES = frozenset(
-    {
-        RecommendationType.SELL,
-        RecommendationType.URGENT_REVIEW,
-        RecommendationType.REVIEW,
-    }
-)
-# 新holding_decision_notification_builder.pyのみが生成することをgrepで全数確認済み
-# (他に代入箇所なし)。
-_HOLDING_DECISION_RECOMMENDATION_TYPES = frozenset(
-    {
-        RecommendationType.SELL_CONSIDERATION,
-        RecommendationType.STRONG_SELL_CONSIDERATION,
-        RecommendationType.URGENT_HOLDING_REVIEW,
-    }
-)
+# 定義は上のLEGACY_SELL_RECOMMENDATION_TYPES / HOLDING_DECISION_RECOMMENDATION_TYPES
+# (Issue #276で公開名にし、SELL_LIKEの導出元にした)。以前のprivate名は、既存の
+# 参照(tests/unit/test_enums.py等)のため同じ値を指すaliasとして残す。
+_LEGACY_SELL_RECOMMENDATION_TYPES = LEGACY_SELL_RECOMMENDATION_TYPES
+_HOLDING_DECISION_RECOMMENDATION_TYPES = HOLDING_DECISION_RECOMMENDATION_TYPES
 # 売却方式比較に無関係(BUY候補・利確・ポートフォリオ集中リスク)、または
 # MANUAL_REVIEW_REQUIREDのようにどのサービスも生成していない値。
 _EXCLUDED_RECOMMENDATION_TYPES = frozenset(
@@ -1120,6 +1121,21 @@ class NotificationCategory(StrEnum):
     MANUAL_REVIEW = "MANUAL_REVIEW"
     OTHER = "OTHER"
     NOT_NOTIFIABLE = "NOT_NOTIFIABLE"
+
+
+class ProfitProtectionSignal(StrEnum):
+    """Profit Protection判定の状態ラベル(Issue #276 / N-11。以前は生成側
+    〔profit_protection.signal_label〕と判定側〔notification_intent〕が、同じ文字列を
+    別々に書いていた)。
+
+    StrEnumのため`str`と等しく、保存される値("STRONG"等)・Recommendation.
+    profit_protection_signalの型(str | None)・既存の文字列比較はいずれも変わらない。
+    """
+
+    DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
+    STRONG = "STRONG"
+    CANDIDATE = "CANDIDATE"
+    NONE = "NONE"
 
 
 class NotificationIntent(StrEnum):
