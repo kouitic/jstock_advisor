@@ -4761,6 +4761,15 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
                                         Secrets Manager の操作 = secretsmanager:GetResourcePolicy / DescribeSecret /
                                         PutResourcePolicy / DeleteResourcePolicy を含む)。この再確認は、identity policy 側の
                                         read-only の確認であり、resource policy 込みの end-to-end の確認ではない(下)
+                                      ★ 再確認の方法・資格情報・担当(#830 の案 C と同じ read-only の方法):
+                                          方法    新しい ADMIN role について、boundary の有無(iam:GetRole)・付いている managed policy
+                                                  (iam:ListAttachedRolePolicies)・inline policy(iam:ListRolePolicies)を確認し、
+                                                  管理者用 managed policy の内容を iam:GetPolicy / iam:GetPolicyVersion で読む
+                                          資格情報 観測用(read-only)の認証情報。書込・権限の拡大・別の認証情報による迂回はしない
+                                          担当    DEVELOPER_WITH_DEPLOY が行い、結果(許可 / 拒否 / 条件つきの区分のみ。
+                                                  実 ARN・Account ID・ロール名・policy 名は記録しない)を Issue へ記録する
+                                          拒否された場合  観測用の認証情報が上記の呼び出しを拒否したら、権限を拡大せず、別の認証情報で迂回せず、
+                                                  その時点で停止して報告し、USER の判断(承認)を得る。承認なしに deploy 資格情報へ切り替えない
   DEPLOY principal(IAM user)          ADMIN とは別の確認対象。上の ADMIN の案 C の結果を、DEPLOY について『同じ意味で確認済み』と読まない。
                                       通常復旧・緊急回避はいずれも DEPLOY principal に依存する(ChangeSet の CREATE / EXECUTE を行う主体)。
                                       #830 の AC b(IAM user である DEPLOY について、resource policy を含めた simulation =
@@ -4798,7 +4807,8 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   2  USER が新しい Permission Set でサインインし、新しい ADMIN role の ARN を確認する
   3  実 ARN を Issue・PR・手順書へ記録せず、既存のルール(上の予防の 1)に従い、照合値で対象 ARN を確認する
   4  新しい ADMIN role について、identity policy 側を再確認する(secretsmanager:GetResourcePolicy / DescribeSecret /
-     PutResourcePolicy / DeleteResourcePolicy を含む。以前の案 C の結果を、新しい role の確認として扱わない)
+     PutResourcePolicy / DeleteResourcePolicy を含む。以前の案 C の結果を、新しい role の確認として扱わない。
+     方法・資格情報・担当は、事前確認の整理の ADMIN の項のとおり)
   5  AdminPrincipalArn を新しい ARN へ更新した ChangeSet を CREATE し、EXECUTE する
      (CREATE と EXECUTE は、それぞれ USER の Human Gate)
   6  修正後、ADMIN が対象シークレットへアクセスできることを read-only で確認する
