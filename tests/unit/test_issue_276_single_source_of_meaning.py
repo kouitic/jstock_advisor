@@ -370,3 +370,25 @@ def test_serialization_of_the_signal_is_unchanged() -> None:
     legacy = build_recommendation(profit_protection_signal="STRONG")
     assert legacy.profit_protection_signal == rec.profit_protection_signal
     assert type(rec.profit_protection_signal) is str
+
+
+def test_audit_entry_json_keeps_the_signal_as_a_plain_string() -> None:
+    """DynamoDB への書き込み経路(model_dump_json)でも、audit の値は従来の文字列と同一。"""
+    import datetime as dt
+
+    from jstock_advisor.domain.entities.audit import AuditLogEntry
+
+    entry = AuditLogEntry(
+        audit_id="a",
+        timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+        decision_type="profit_taking",
+        input_values={},
+        calculation_formulas={},
+        output_values={"profit_protection_signal": ProfitProtectionSignal.STRONG},
+        data_sources=[],
+        rule_version="v",
+    )
+    dumped = entry.model_dump_json()
+    assert json.loads(dumped)["output_values"]["profit_protection_signal"] == "STRONG"
+    restored = AuditLogEntry.model_validate_json(dumped)
+    assert type(restored.output_values["profit_protection_signal"]) is str
