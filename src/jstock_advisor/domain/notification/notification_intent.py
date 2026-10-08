@@ -21,7 +21,11 @@ candidate/strongシグナルに起因する場合はATTENTION、決算待ち・�
 
 from __future__ import annotations
 
-from jstock_advisor.domain.entities.enums import NotificationCategory, NotificationIntent
+from jstock_advisor.domain.entities.enums import (
+    NotificationCategory,
+    NotificationIntent,
+    ProfitProtectionSignal,
+)
 
 # ATTENTIONの初期スコープ(要求仕様2026-08): Profit Protectionのcandidate/strong
 # シグナルに起因するWATCHのみ。STRONGはpartial_sale_executable=False(単元未満等の
@@ -29,7 +33,9 @@ from jstock_advisor.domain.entities.enums import NotificationCategory, Notificat
 # (profit_taking.pyのorigin floorロジック、_RawLevelOrigin.PROFIT_PROTECTION_STRONGは
 # raw_level>=PARTIAL成立時に必ずfinal_level>=PARTIALへ床上げされるため、STRONG WATCHは
 # この経路以外から生じない)。
-_ATTENTION_PROFIT_PROTECTION_SIGNALS = frozenset({"CANDIDATE", "STRONG"})
+_ATTENTION_PROFIT_PROTECTION_SIGNALS = frozenset(
+    {ProfitProtectionSignal.CANDIDATE, ProfitProtectionSignal.STRONG}
+)
 
 # 再コードレビュー対応(2026-08): NotificationIntentを「送信意図の唯一の正本」と
 # するため、fail-closed(allowlist)方式へ変更した。明示的にACTIONABLEと定義される
@@ -89,6 +95,6 @@ def resolve_attention_origin(
     intent = resolve_notification_intent(category, profit_protection_signal)
     if intent is not NotificationIntent.ATTENTION:
         return None
-    if profit_protection_signal == "STRONG":
+    if profit_protection_signal == ProfitProtectionSignal.STRONG:
         return "PROFIT_PROTECTION_STRONG_NOT_EXECUTABLE"
     return "PROFIT_PROTECTION_CANDIDATE"

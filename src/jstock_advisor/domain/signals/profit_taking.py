@@ -29,6 +29,7 @@ from jstock_advisor.domain.entities.enums import (
     IndustryClassification,
     PriceBasisType,
     PriceFieldBasis,
+    ProfitProtectionSignal,
     ProfitTakingIndustrySector,
     RecommendationType,
     SellIntensity,
@@ -1732,7 +1733,9 @@ def evaluate_profit_taking(
         timing_downgrade_applied=timing_downgrade_applied,
         origin=origin.name,
         profit_protection_signal=(
-            profit_protection.signal_label if profit_protection is not None else "NONE"
+            profit_protection.signal_label
+            if profit_protection is not None
+            else ProfitProtectionSignal.NONE
         ),
         profit_protection_basis_date=(
             condition_inputs.profit_protection_basis_date if profit_protection is not None else None

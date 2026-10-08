@@ -26,6 +26,7 @@ from decimal import Decimal
 
 from jstock_advisor.config.models import ProfitProtectionConfig
 from jstock_advisor.domain.business_calendar import BusinessCalendar
+from jstock_advisor.domain.entities.enums import ProfitProtectionSignal
 from jstock_advisor.interfaces.types import PriceBar
 
 
@@ -49,15 +50,16 @@ class ProfitProtectionMetrics:
     strong_signal: bool
 
     @property
-    def signal_label(self) -> str:
-        """監査・通知向けの状態ラベル(要求仕様§8)。"""
+    def signal_label(self) -> ProfitProtectionSignal:
+        """監査・通知向けの状態ラベル(要求仕様§8)。ProfitProtectionSignalはStrEnumのため、
+        保存される値は従来の文字列("STRONG"等)と同一(Issue #276)。"""
         if self.insufficient_data_reason is not None:
-            return "DATA_INSUFFICIENT"
+            return ProfitProtectionSignal.DATA_INSUFFICIENT
         if self.strong_signal:
-            return "STRONG"
+            return ProfitProtectionSignal.STRONG
         if self.candidate_signal:
-            return "CANDIDATE"
-        return "NONE"
+            return ProfitProtectionSignal.CANDIDATE
+        return ProfitProtectionSignal.NONE
 
 
 def _insufficient(reason: str) -> ProfitProtectionMetrics:
