@@ -1,0 +1,17 @@
+# Issue #866: Markdown のみの変更で CI の test job が実行する「Markdown を実際に読むテスト」の定義。
+#
+# .github/workflows/ci.yml は、変更が Markdown のみ(scripts/ci_markdown_only.py の判定)のとき
+# 全体 pytest を省略し、下のテストファイルだけを実行する。
+#
+# ★ 1 行 1 path(repo 相対)。# 行と空行は無視する。
+# ★ Markdown を実際に読む(tests/ の外の *.md を open する・git show する)テストファイルは
+#   必ずここに載せる。載っていないと、全体 pytest の実行時に tests/support/markdown_read_audit.py が
+#   session を失敗にする。
+# ★ このファイルは tests/ の下にあるため、変更する PR は Markdown-only にならず全体 pytest が走る。
+
+tests/unit/test_check_catalog_coverage.py
+tests/unit/test_human_gate_preflight.py
+tests/unit/test_issue_736_replay_owner_scope.py
+tests/unit/test_policy_check.py
+tests/unit/test_policy_registry.py
+tests/unit/test_scan_for_pii.py
