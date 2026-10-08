@@ -3417,7 +3417,7 @@ jstock weekly-aggregate rebuild --week 2026-W38 [--week ...] [--execute]      # 
 ```
 
 - **write は、上の指定に加えて `--execute`(verify は `--mark-rebuild-required`)を別に要する。** 指定が無ければ書込 API を呼ばない。dry-run・verify(突合のみ)は read-only で、**読取専用の資格情報(観測用 profile)で実行できる**。
-- 実行すると、処理の前に `backend` / `aws_region` / `aggregate_table` / `writes`(YES または NO(read-only))/ `mode` を表示する。対象を取り違えていないか、ここで確認する。
+- 実行すると、**処理の前に** `backend` / `aws_region` / `aggregate_table` / `writes`(YES または NO(read-only))を表示する(`--backend local` のときは `backend` のみ)。対象を取り違えていないか、ここで確認する。`mode`(DRY_RUN / EXECUTE)は backfill・rebuild で**処理の後**に表示され、`verify` には `mode` の表示が無い(`mode=EXECUTE` の表示を待って確認しない)。
 - **書込に使う資格情報は、既存の deploy 用資格情報(承認された backfill の実行窓の間だけ)とする**(USER 決定 #833_BACKFILL_CREDENTIAL_DECISION = A、#122 issuecomment-6057142430)。専用の IAM は作らない。ただし**実 write の承認とは別**であり、段 3 の実行は USER の別の execute Gate が必要(実行窓の承認を含む)。
 - 実行手順の例(Production。dry-run は読取専用 profile、execute のみ deploy 用の資格情報):
 
