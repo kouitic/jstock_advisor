@@ -41,6 +41,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -118,6 +119,77 @@ _IDS = [e.module.rsplit("/", 1)[-1] for e in _REGISTRY]
 
 _ORDER_IDS = [c.name for c in _ORDER_CASES]
 
+# --- order case の要素(Issue #744): `<path>` または `<path>::<テスト関数名>` -----------
+
+_NODE_ID_SEPARATOR = "::"
+
+
+def split_order_spec(spec: str) -> tuple[str, str | None]:
+    """order case の要素を (module の path, テスト関数名 | None) に分ける。
+
+    `<path>` は (path, None)、`<path>::<name>` は (path, name)。形式の妥当性は
+    `is_well_formed_order_spec()` が別に判定する(ここでは分けるだけ)。
+    """
+    path, separator, name = spec.partition(_NODE_ID_SEPARATOR)
+    return path, (name if separator else None)
+
+
+def is_well_formed_order_spec(spec: str) -> bool:
+    """要素の形式が妥当か。
+
+    - `::` は高々 1 つ(クラス内のテストなど入れ子の node id は指定しない)
+    - path 部・テスト関数名が空でない
+    - テスト関数名に `[` を含まない(parametrize の id は指定しない)
+    """
+    if spec.count(_NODE_ID_SEPARATOR) > 1:
+        return False
+    path, name = split_order_spec(spec)
+    if not path.strip():
+        return False
+    if name is None:
+        return True
+    return bool(name.strip()) and "[" not in name
+
+
+def defined_test_names(source: str) -> frozenset[str]:
+    """module 直下の関数と、module 直下のクラスのメソッドの名前を返す(AST)。
+
+    関数の内側に入れ子になった同名の補助関数は拾わない(実在しないテストを
+    実在すると誤判定しないため)。
+    """
+    names: set[str] = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            names.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                    names.add(child.name)
+    return frozenset(names)
+
+
+def find_unresolved_node_ids(
+    specs: tuple[str, ...], read_source: Callable[[str], str]
+) -> list[str]:
+    """node id の指すテスト関数が、その module に実在しない要素を返す(path のみの要素は対象外)。
+
+    `read_source` は module の path から source を返す関数(実装は呼び出し側が与える)。
+    ファイルの読み込みと判定を分けているのは、判定そのものを合成した入力で単体テスト
+    できるようにするため(『常に空を返す』ような退行を検出できる)。
+    """
+    unresolved: list[str] = []
+    for spec in specs:
+        path, name = split_order_spec(spec)
+        if name is None:
+            continue
+        if name not in defined_test_names(read_source(path)):
+            unresolved.append(spec)
+    return unresolved
+
+
+def _case_module_paths(case: _OrderCase) -> tuple[str, ...]:
+    return tuple(split_order_spec(spec)[0] for spec in case.modules)
+
 
 # --- O1-O6: order metadata の自己検証 --------------------------------------------
 
@@ -131,7 +203,7 @@ def test_o1_order_case_is_not_empty(case: _OrderCase) -> None:
 def test_o2_order_case_modules_are_registered(case: _OrderCase) -> None:
     """順序に現れるモジュールは registry に登録済みであること。"""
     registered = {e.module for e in _REGISTRY}
-    unknown = sorted(set(case.modules) - registered)
+    unknown = sorted(set(_case_module_paths(case)) - registered)
     assert unknown == [], (
         f"{case.name} が registry 未登録のモジュールを参照しています: {unknown}。"
         "先に registry へ登録してください。"
@@ -148,7 +220,7 @@ def test_o3_order_case_has_no_duplicate_module(case: _OrderCase) -> None:
 def test_o4_order_case_stays_within_its_cohort(case: _OrderCase) -> None:
     """cohort 外のモジュールを混ぜないこと(cohort の定義が曖昧になるため)。"""
     members = {e.module for e in _cohort_members(case.cohort)}
-    outside = sorted(set(case.modules) - members)
+    outside = sorted(set(_case_module_paths(case)) - members)
     assert outside == [], (
         f"{case.name} が cohort '{case.cohort}' の外のモジュールを参照しています: {outside}"
     )
@@ -163,6 +235,111 @@ def test_o5_known_failure_issue_is_not_blank_when_present(case: _OrderCase) -> N
         f"{case.name} の known_failure_issue は '#<番号>' 形式で記載してください: "
         f"{case.known_failure_issue!r}"
     )
+
+
+@pytest.mark.parametrize("case", _ORDER_CASES, ids=_ORDER_IDS)
+def test_o7_order_case_specs_are_well_formed(case: _OrderCase) -> None:
+    """要素が `<path>` または `<path>::<テスト関数名>` の形であること(Issue #744)。"""
+    malformed = [spec for spec in case.modules if not is_well_formed_order_spec(spec)]
+    assert malformed == [], (
+        f"{case.name} に形式の不正な要素があります: {malformed}。"
+        "`<path>` か `<path>::<テスト関数名>` で記述してください(`::` は 1 つまで・"
+        "parametrize の `[...]` は付けない)。"
+    )
+
+
+@pytest.mark.parametrize("case", _ORDER_CASES, ids=_ORDER_IDS)
+def test_o8_order_case_test_names_exist_in_their_modules(case: _OrderCase) -> None:
+    """node id が指すテスト関数が、そのファイルに実在すること(Issue #744)。
+
+    テストの rename・削除で、宣言した順序が静かに空振りになる(指すテストが無いまま、
+    順序だけが残る)のを防ぐ forcing function。実行そのものは自動化しない(数十秒かかり、
+    development_workflow.md 3.5.4 が自動化しない方針のため)。metadata で検出できる範囲 =
+    『指す先が実在すること』までを固定する。
+    """
+    unresolved = find_unresolved_node_ids(
+        case.modules, lambda path: (_REPO_ROOT / path).read_text(encoding="utf-8")
+    )
+    assert unresolved == [], (
+        f"{case.name} が指すテストが見つかりません: {unresolved}。"
+        "テストを rename・削除した場合は order case も更新してください(Issue #744)。"
+    )
+
+
+def test_o9_contamination_case_targets_the_leaking_test() -> None:
+    """ORDER_CASE_148_CONTAMINATION は、汚染を残す『テスト』を名指しすること(Issue #744)。
+
+    モジュール単位の順序へ戻すと、汚染を残さないテストが最後に走って汚染が隠れ、
+    保護(autouse fixture)を外しても落ちない空振りの順序に戻る(#744 の調査)。
+    この case が node id を最低 1 件含むことを固定する。
+    """
+    case = next(c for c in _ORDER_CASES if c.name == "ORDER_CASE_148_CONTAMINATION")
+    node_ids = [spec for spec in case.modules if split_order_spec(spec)[1] is not None]
+    assert node_ids, (
+        "ORDER_CASE_148_CONTAMINATION がモジュール単位の順序になっています。"
+        "汚染を残すテストを `<path>::<テスト関数名>` で名指ししてください(Issue #744)。"
+    )
+    # 汚染を残す側(node id)が、汚染を受ける側より先に実行される順序であること。
+    first_path, first_name = split_order_spec(case.modules[0])
+    assert first_name is not None, "先頭は汚染を残す側のテスト(node id)にしてください。"
+    assert first_path != split_order_spec(case.modules[-1])[0]
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("tests/unit/a.py", ("tests/unit/a.py", None)),
+        ("tests/unit/a.py::test_x", ("tests/unit/a.py", "test_x")),
+        ("tests/unit/a.py::", ("tests/unit/a.py", "")),
+    ],
+)
+def test_split_order_spec(spec: str, expected: tuple[str, str | None]) -> None:
+    assert split_order_spec(spec) == expected
+
+
+@pytest.mark.parametrize(
+    ("spec", "well_formed"),
+    [
+        ("tests/unit/a.py", True),
+        ("tests/unit/a.py::test_x", True),
+        ("tests/unit/a.py::", False),  # テスト関数名が空
+        ("::test_x", False),  # path が空
+        ("tests/unit/a.py::Cls::test_x", False),  # 入れ子の node id は指定しない
+        ("tests/unit/a.py::test_x[case1]", False),  # parametrize の id は付けない
+    ],
+)
+def test_is_well_formed_order_spec(spec: str, well_formed: bool) -> None:
+    assert is_well_formed_order_spec(spec) is well_formed
+
+
+def test_defined_test_names_finds_functions_and_methods_but_not_nested_helpers() -> None:
+    newline = chr(10)
+    source = newline.join(
+        [
+            "def test_top():",
+            "    def test_nested_helper():",
+            "        pass",
+            "async def test_async():",
+            "    pass",
+            "class TestGroup:",
+            "    def test_method(self):",
+            "        pass",
+            "x = 1",
+        ]
+    )
+    assert defined_test_names(source) == {"test_top", "test_async", "test_method"}
+    assert "test_nested_helper" not in defined_test_names(source)
+
+
+def test_find_unresolved_node_ids_reports_only_missing_tests() -> None:
+    sources = {"tests/unit/a.py": "def test_exists(): pass"}
+    specs = (
+        "tests/unit/a.py::test_exists",
+        "tests/unit/a.py::test_missing",
+        "tests/unit/a.py",  # path のみの要素は対象外
+    )
+    assert find_unresolved_node_ids(specs, sources.__getitem__) == ["tests/unit/a.py::test_missing"]
+    assert find_unresolved_node_ids(("tests/unit/a.py::test_exists",), sources.__getitem__) == []
 
 
 def test_o6_order_sensitive_cohorts_declare_order_cases() -> None:

@@ -293,9 +293,18 @@ class _OrderCase:
 
     name                 識別子
     cohort               所属 cohort(cohort 外のモジュールは参照できない)
-    modules              実行順。registry 登録済みのモジュールのみ
+    modules              実行順。各要素は次のいずれか(Issue #744)
+                           - `<module の path>` … そのモジュールのテスト全体
+                           - `<module の path>::<テスト関数名>` … そのモジュールの 1 テスト
+                             (pytest の node id と同じ形。parametrize の `[...]` は付けない)
+                         path 部は registry 登録済みのモジュールのみ。node id の『テスト関数名』が
+                         そのファイルに実在することは guard(O8)が固定する。
+                         テスト単位を許すのは、汚染は『特定の 1 テストが残した状態』で起きるため、
+                         モジュール単位の順序では、汚染を残さないテストが最後に走って汚染が隠れるから
+                         である(#744: 宣言の順序は、保護を外しても落ちない空振りだった)。
     known_failure_issue  この順序で既知の失敗が出る場合、その owner Issue。
                          「red だが既知」で済ませず、失敗集合の一致を確認するための印。
+                         失敗が出ない順序(回帰の検出が目的の case)では空にする。
     """
 
     name: str
@@ -317,13 +326,24 @@ _ORDER_CASES: tuple[_OrderCase, ...] = (
             "tests/unit/test_holdings_watchlist_handler_integration.py",
         ),
     ),
+    # Issue #744: #148 の汚染(RuntimeConfig の module-global cache が test 間で漏れる)の
+    # 回帰を検出する case。汚染を残す 1 テスト(ACTIVE mode を書き込んで終わる)を先に、
+    # 汚染を受ける側の module を後に実行する。
+    #
+    # 以前の宣言は『integration の module 全体 → handler の module 全体』で、#148 の是正
+    # (#519 の autouse fixture)を外しても通る空振りだった(integration の最後のテストが
+    # 汚染を残さない形になったため。#744 の調査)。2026-10-08 の origin/main での実測:
+    #   この順序 + fixture あり  → 59 passed
+    #   この順序 + fixture 無効化 → 14 failed, 45 passed
+    # known_failure_issue は持たない(保護がある今は『通る』のが期待で、保護を外すと
+    # 失敗する、という回帰の検出が目的)。実行は自動化しない(development_workflow.md 3.5.4)。
     _OrderCase(
         name="ORDER_CASE_148_CONTAMINATION",
         cohort="holding_decision_runtime_config",
         modules=(
-            "tests/unit/test_holdings_watchlist_handler_integration.py",
+            "tests/unit/test_holdings_watchlist_handler_integration.py"
+            "::test_active_mode_general_corporate_new_engine_notifies",
             "tests/unit/test_holdings_watchlist_handler.py",
         ),
-        known_failure_issue="#148",
     ),
 )
