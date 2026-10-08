@@ -5,10 +5,15 @@
 # mode:
 # ★ 値は必ず引用符で囲むこと("OFF")。引用符なしのOFFはYAML 1.1で真偽値Falseと解釈され、検証に失敗して
 #   設定ファイル全体が読まれなくなる(いわゆるNorway problem)。
-#   OFF     既定。shadow処理を一切実行しない(新規I/Oも行わない)。
-#   SHADOW  観測のみ行う。判定・通知・保存は変えない。SHADOW化は別のconfig変更(人間承認)で行う。
+#   OFF     shadow処理を一切実行しない(新規I/Oも行わない)。コード上の既定値(モデルの既定)もOFF。
+#   SHADOW  観測のみ行う。判定・通知・保存は変えない。
+#
+# ★ 現在の出荷値はSHADOW(Issue #838。USER承認 2026-10-08: SHADOW_ACTIVATION = APPROVED、
+#   初期の観測期間 = 20営業日)。shadowは観測専用で、Productionの BUY / SELL / confidence の判定には接続しない
+#   (接続は別のUSER判断)。rollback: modeを"OFF"へ戻して再deployする(Lambda Layerの静的設定のため、
+#   config変更 + 再deployが要る)。
 #
 # このファイルが無い・読めない・不正な場合は、mode=OFFとして扱う(shadowを実行しない側へ倒す)。
 # 本流の起動を落とさない。
 version: 1
-mode: "OFF"
+mode: "SHADOW"
