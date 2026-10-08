@@ -12,6 +12,7 @@ from jstock_advisor.infrastructure.local_repository.holding_repository import (
 from jstock_advisor.infrastructure.local_repository.watchlist_repository import WatchlistRepository
 from jstock_advisor.services import holding_decision_runtime_config_service as runtime_config_module
 from jstock_advisor.services import jpx_industry_source as jpx_industry_source_module
+from jstock_advisor.services import watchlist_display_name as watchlist_display_name_module
 from jstock_advisor.services.csv_import_ledger import CsvImportLedger
 from jstock_advisor.services.csv_import_service import HoldingsCsvImportService
 from jstock_advisor.services.jpx_industry_source import (
@@ -109,6 +110,35 @@ def _isolated_holding_decision_runtime_config_cache() -> Iterator[None]:
     reset_holding_decision_runtime_config_cache()
     yield
     reset_holding_decision_runtime_config_cache()
+
+
+def reset_shared_jpx_stock_name_source() -> None:
+    """`watchlist_display_name`のプロセス内共有JPX銘柄名ソースを破棄する(次回の取得で作り直される)。
+
+    共有インスタンスは単一のモジュール変数(`_shared_jpx_stock_name_source`)だけが持つ。
+    resetはその変数を未生成(None)へ戻すだけで、src側には隔離専用の関数を足さない
+    (`reset_holding_decision_runtime_config_cache()`と同じく、テスト基盤の側に置く)。
+    """
+    watchlist_display_name_module._shared_jpx_stock_name_source = None
+
+
+@pytest.fixture(autouse=True)
+def _isolated_shared_jpx_stock_name_source() -> Iterator[None]:
+    """JPX銘柄名の共有ソース(Issue #520)を、unit testから隔離する。
+
+    `build_stock_display_name_resolver()`は、共有インスタンスをモジュールレベルの
+    `_shared_jpx_stock_name_source`へ保持する(`get_shared_jpx_stock_name_source()`の
+    `global`代入が唯一の書き込み口)。テスト間でリセットされないため、先行テストが作った
+    インスタンス(成功マップ・negative cache・timestamp)が後続テストへ漏れ、実行順序で
+    結果が変わる(#148と同型)。
+
+    本fixtureが**各テストの前後で必ずresetする**(monkeypatchの復元では、漏れた値へ
+    戻るため使わない)。共有そのものの挙動を検証するテストは、テスト内で明示的に
+    扱う(tests/unit/test_issue_496_watchlist_display_name_info_enabled.py)。
+    """
+    reset_shared_jpx_stock_name_source()
+    yield
+    reset_shared_jpx_stock_name_source()
 
 
 _LAMBDA_ENV_FUNCTION_NAME = "jstock-advisor-test-lambda"
