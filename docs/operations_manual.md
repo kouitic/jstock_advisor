@@ -3394,18 +3394,40 @@ MANAGER / USER へ、次を分けて報告する。
         確認: 次の月曜の週次レビューが完走し、監査の aggregate_read = true、EvaluationResultsTable の Scan が無いこと(ログの scan の行が出ない)
 ```
 
-### 28.3 backfill・照合・rebuild の使い方(CLI。**ローカル専用**)
+### 28.3 backfill・照合・rebuild の使い方(CLI。既定はローカル。Production は明示指定のときだけ)
 
 ```
 jstock weekly-aggregate backfill                 # dry-run(既定)。対象週数・行数・想定 write 数を出す(何も書かない)
-jstock weekly-aggregate backfill --execute       # ローカルの Aggregate ストアへ書く
+jstock weekly-aggregate backfill --execute       # Aggregate ストアへ書く
 jstock weekly-aggregate verify [--week 2026-W38] [--mark-rebuild-required]   # raw と Aggregate の突合。不一致があれば終了コード 1
 jstock weekly-aggregate rebuild --week 2026-W38 [--week ...] [--execute]      # 指定週だけ raw から作り直す(dry-run 既定)
 ```
 
-- 本 CLI は**ローカルの保管ディレクトリだけ**を読み書きする(Lambda 以外では、本番のテーブルにアクセスしない)。
-- ★ **Production の Aggregate に対する backfill / verify / rebuild の実行手段**(どの主体・どの経路で実行するか)は、本 PR では決めていない。段 2 の前に、USER の判断で決める(実行手段の新設は別の作業・別の承認)。
+**対象の選択(Issue #833 E2)。環境変数 `AWS_LAMBDA_FUNCTION_NAME` では何も選ばない。**
+
+```
+--backend local      既定。ローカルの保管ディレクトリだけを読み書きする。
+                     ★ AWS_LAMBDA_FUNCTION_NAME が設定されている環境では拒否する(ローカルのつもりで Production に触れないため)。
+                     ★ --aws-region / --confirm-table / --aws-profile / --table-prefix は指定できない。
+--backend dynamodb   Production の DynamoDB(表名は {prefix}-evaluation_results / -recommendations / -weekly_evaluation_aggregate。prefix の既定は jstock)。
+                     次の 2 つが揃わなければ、1 件も読まない・書かない(サービスを構築する前に非 0 で終了する)。
+                       --aws-region <region>       既定なし。明示する
+                       --confirm-table <表名>      対象の Aggregate 表名の完全一致(jstock-weekly_evaluation_aggregate)。エラーに期待値は表示しない
+                     --aws-profile <名前> は任意(資格情報の選択。backend の選択とは独立)。
+```
+
+- **write は、上の指定に加えて `--execute`(verify は `--mark-rebuild-required`)を別に要する。** 指定が無ければ書込 API を呼ばない。dry-run・verify(突合のみ)は read-only で、**読取専用の資格情報(観測用 profile)で実行できる**。
+- 実行すると、処理の前に `backend` / `aws_region` / `aggregate_table` / `writes`(YES または NO(read-only))/ `mode` を表示する。対象を取り違えていないか、ここで確認する。
+- **書込に使う資格情報は、既存の deploy 用資格情報(承認された backfill の実行窓の間だけ)とする**(USER 決定 #833_BACKFILL_CREDENTIAL_DECISION = A、#122 issuecomment-6057142430)。専用の IAM は作らない。ただし**実 write の承認とは別**であり、段 3 の実行は USER の別の execute Gate が必要(実行窓の承認を含む)。
+- 実行手順の例(Production。dry-run は読取専用 profile、execute のみ deploy 用の資格情報):
+
+```
+jstock weekly-aggregate backfill --backend dynamodb --aws-region <region> --confirm-table jstock-weekly_evaluation_aggregate --aws-profile <読取専用 profile>             # dry-run
+jstock weekly-aggregate backfill --backend dynamodb --aws-region <region> --confirm-table jstock-weekly_evaluation_aggregate --aws-profile <deploy 用> --execute   # 段 3(USER の execute Gate の後)
+```
+
 - rebuild は、その週の raw を読んだ後に新しい評価が届いた場合、上書きせずに失敗する(届いた評価を消さないため)。もう一度実行する。
+- backfill の見積もり(2026-10-08 の dry-run 実測): 走査 90,900 件・集計対象 25,344 件・10 週・集計行 52・書込 73 項目、dry-run の所要は約 2 分。実行(--execute)は走査が 2 回になるため数分を見込む。
 
 ### 28.4 戻し方(rollback)
 
@@ -3427,7 +3449,7 @@ Aggregate Table       削除しない(DeletionPolicy Retain)。raw の Evaluatio
 ### 28.6 この節が決めていないこと
 
 ```
-・Production の Aggregate への backfill / verify / rebuild の実行手段(28.3)
+・Production の Aggregate への backfill の**実行の可否・時期**(28.3 の CLI で実行できるが、実 write は USER の別の execute Gate)
 ・切替の各段の実施の可否・時期(別の Human Gate)
 ・EvaluationResults の retention(本 Issue は変更しない。データ保持期間は Issue #138)
 ```
