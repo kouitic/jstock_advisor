@@ -4689,6 +4689,53 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   しない状態でlockoutが発生しうる。
 ```
 
+### 35.2.1 ADMIN principal(SSO ロール)の ARN が変わった場合の lockout(Issue #830。確認 5)
+
+35.2 は deploy principal が締め出された場合の手順である。ここでは、**ADMIN principal
+(`AdminPrincipalArn`。IAM Identity Center〔SSO〕経由の IAM role)の ARN が、
+`SecretResourcePolicyEnabled = true` の適用後に変わった場合**を扱う。
+
+```
+リスク(事実)
+  ・SSO 経由の role の ARN には、Permission Set の内部 hash が含まれる。Permission Set の
+    削除・再作成(名称が同じでも)で、ARN は静かに変わる。自動検知の仕組みは無い(35.1 節の 2)
+  ・適用後に ARN が変わると、新しい ARN は allow-list(`aws:PrincipalArn` の StringNotEquals)に
+    無いため、ADMIN は対象 5 シークレットの 7 action(PutResourcePolicy / DeleteResourcePolicy を含む)を
+    explicit Deny される。通常の経路(ADMIN による resource policy の撤回・修正)が使えなくなる
+  ・IAM role は、resource policy を含めた simulation ができない(35.1 節)。このため、適用前に
+    『ADMIN が適用後も操作できること』を機械的に証明することはできない(RESIDUAL_RISK)
+
+予防(適用の前・直前に必ず行う)
+  1  適用の直前に、ADMIN に設定する role の ARN を再取得し、USER が管理者用 Permission Set で
+     サインインして確認した ARN と一致することを、照合値(ARN の SHA-256 の先頭 12 桁)で確認する。
+     ARN は『IAM role 自体の ARN』であり、assumed-role 形式ではない(35.1 節の 1)。
+     実 ARN・Account ID・ロール名・照合値は、Issue・PR・手順書へ書かない(照合値は担当者間のメッセージで受け渡す)
+  2  Permission Set を削除・再作成する作業の前に、AdminPrincipalArn の更新が必要になることを
+     作業手順に含める(再作成の後ではなく、前に気付く)
+  3  ADMIN の identity policy 側の許可(DeleteResourcePolicy / PutResourcePolicy / GetResourcePolicy /
+     DescribeSecret)を確認する。確認の方法は、simulation(iam:SimulatePrincipalPolicy)、または
+     管理者用 managed policy の内容の読取(内容が全 action を無条件に許可し、Deny が無いこと)。
+     いずれも identity policy 側の確認であり、resource policy を含めた no-lockout の証明ではない
+  4  下の『確認できていないこと』を、適用を判断する人が把握していること
+
+復旧手順(ADMIN の ARN が変わって lockout した場合)
+  1  deploy principal(`DeployPrincipalArn`。IAM user。allow-list に含まれる)の認証情報を使う
+     ★ この経路は deploy principal が allow-list に残っていることに依存する。#164(deploy 用の
+        長期認証情報の是正)で deploy principal の種別・ARN が変わる場合は、先にこの復旧経路を見直す
+  2  次のいずれかで、新しい ADMIN の ARN を反映する(通常の ChangeSet 手順と同じ。CREATE / EXECUTE は Human Gate)
+       a(推奨)AdminPrincipalArn を新しい ARN へ更新した template を ChangeSet で適用する
+       b(緊急回避)SecretResourcePolicyEnabled = false の ChangeSet を適用して、resource policy を除去する
+  3  新しい ARN の取得: USER が新しい Permission Set でサインインし、そのロールの ARN を確認する
+     (実 ARN は記録しない。照合値で確認する)
+  4  修正後、ADMIN が対象シークレットを操作できることを read-only で確認する
+
+確認できていないこと(未確認。復旧経路に数えない)
+  ・account root が explicit Deny を迂回できるか(35.2 節のとおり未検証)
+  ・Organizations の SCP が secretsmanager の操作を制限していないか(identity policy・simulation の読取の対象外)
+  ・サインイン時のセッション policy の有無
+  ・シークレットの暗号化鍵(KMS)の key policy(customer managed key の場合)
+```
+
 ### 35.3 #137(PITR・削除保護)との関係
 
 本節の対象はresource policyによるアクセス拒否(lockout)であり、#137が
@@ -4703,6 +4750,8 @@ lockout/data-loss軸へ適用したもの)。
 ・Issue #680(PR本文にProduction適用前確認計画〔旧称: simulation計画〕の
   詳細。2026-09-28 F7対応で改称)
 ・#133(secretsmanager least privilege調査、本機構の発見契機)
+・Issue #830(ADMIN principal の確認〔USER の AWS コンソールでの確認 + 管理者用 managed policy の内容の
+  読取〕と、35.2.1 の lockout リスク・復旧手順の文案。2026-10-08)
 ・#164(deploy principal自体のlong-term credential是正。DeployPrincipalArn
   の値が#164の変更と同期する必要がある。DeployPrincipalArnが現在IAM user
   であること自体が#164の是正対象であり、35.1節RESIDUAL_RISKのb・F15の
