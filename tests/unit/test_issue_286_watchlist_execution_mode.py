@@ -413,7 +413,7 @@ def _fake_maintenance_config() -> SimpleNamespace:
     return SimpleNamespace(
         watchlist_screening=SimpleNamespace(
             candidate_universe=SimpleNamespace(provider="csv"),
-            auto_removal=SimpleNamespace(readd_cooldown_days=30),
+            auto_removal=SimpleNamespace(readd_cooldown_days=30, total_count_cap=1300),
             screening_policy="multi_style_monitoring",
         )
     )

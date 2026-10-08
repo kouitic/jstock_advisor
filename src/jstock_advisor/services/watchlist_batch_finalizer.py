@@ -1442,6 +1442,61 @@ def retry_notification(
 # 呼ばない(計画Part A-9、job_type=="NEW_CANDIDATE_SCREENING"専用)。
 
 
+# Issue #324: 総件数上限による淘汰の removal_category。既存の2値("IMMEDIATE" /
+# "CONSECUTIVE_NOT_QUALIFIED")とは別の値にし、監査・削除履歴から「評価の結果として
+# 外れた」のか「件数の上限のために外れた」のかを区別できるようにする。
+REMOVAL_CATEGORY_CAPACITY_EVICTION = "CAPACITY_EVICTION"
+
+
+def _is_active_capacity_item(item: WatchlistItem) -> bool:
+    """ACTIVE_CAPACITY_COUNT に数える項目か(#141: NOT_EVALUABLE は除く)。"""
+    return item.last_screening_result != MaintenanceOutcome.NOT_EVALUABLE.value
+
+
+def _count_active_capacity(items: list[WatchlistItem]) -> int:
+    return sum(1 for item in items if _is_active_capacity_item(item))
+
+
+def _evict_over_capacity(all_items: list[WatchlistItem], cap: int) -> list[WatchlistItem]:
+    """Issue #324: ACTIVE_CAPACITY_COUNT が cap を超えるとき、淘汰する項目を返す。
+
+    **純粋関数**(削除・書き込みは行わない。削除は呼び出し側が、既存の自動削除と
+    同じ「履歴 -> delete -> 監査」の順で行う)。
+
+    capacity の3つの意味(設計 #324 issuecomment-5854072710):
+      PHYSICAL_ITEM_COUNT      実在する項目の総数(MANUAL・NOT_EVALUABLE も含む)
+      ACTIVE_CAPACITY_COUNT    PHYSICAL から NOT_EVALUABLE を除いた件数。cap と比べるのは
+                               この値(#141 の USER 決定: NOT_EVALUABLE は削除も淘汰もしない)
+      EVICTION_ELIGIBLE_COUNT  ACTIVE のうち AUTO_SCREENING のもの。淘汰できるのはこれだけ
+
+    MANUAL登録銘柄は淘汰されず、ACTIVE_CAPACITY_COUNT には数える。MANUALが多く
+    超過分を淘汰対象だけでは賄えない場合は、淘汰対象の全件を返す(上限は未達のまま。
+    呼び出し側が超過の残りを監査へ記録する)。
+
+    淘汰の順序(OD1 = A。USER 決定 #324 issuecomment-5854275274):
+      last_monitoring_score の昇順。同点は created_at の昇順(古いものから)。
+      last_monitoring_score が None の項目は最も低い(0.0)として扱う。
+    registration_source が欠落した旧形式の項目は、entity の既定どおり MANUAL
+    (淘汰しない)として読まれている。
+    """
+    active_items = [item for item in all_items if _is_active_capacity_item(item)]
+    overflow = len(active_items) - cap
+    if overflow <= 0:
+        return []
+    eligible = [
+        item
+        for item in active_items
+        if item.registration_source == WatchlistRegistrationSource.AUTO_SCREENING
+    ]
+    eligible.sort(
+        key=lambda item: (
+            item.last_monitoring_score if item.last_monitoring_score is not None else 0.0,
+            item.created_at,
+        )
+    )
+    return eligible[:overflow]
+
+
 def _parse_maintenance_screening_summary(raw: str | None) -> MaintenanceScreeningSummary | None:
     if raw is None:
         return None
@@ -1473,7 +1528,15 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
     # Issue #224(O-1): この回のfinalize開始時点のウォッチリスト母数(全
     # registration_source。AUTO_SCREENING以外も含む)。ループ内の削除より
     # 前に数える(「その回の母数」を表すため、本バッチの削除結果を含めない)。
-    watchlist_total_count = sum(1 for _ in watchlist_repo.iter_all())
+    #
+    # Issue #324: 同じ走査の結果を、総件数上限の判定に使う「この回の終了時点の
+    # 状態」の元にもする(下の current_items。削除・更新をこの回の判定結果で
+    # 上書きする)。ループの後に再走査しない理由: Scanは結果整合のため、直前の
+    # upsert / delete が反映される前の状態を読みうる。
+    current_items: dict[str, WatchlistItem] = {
+        item.stock_code: item for item in watchlist_repo.iter_all()
+    }
+    watchlist_total_count = len(current_items)
 
     outcome_counts: dict[str, int] = {}
     stale_unconfirmed_count = 0
@@ -1628,6 +1691,7 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
                 )
             )
             watchlist_repo.delete(item.stock_code)
+            current_items.pop(item.stock_code, None)
             record_removal_audit(
                 item.stock_code,
                 item.stock_name,
@@ -1645,6 +1709,80 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             )
         else:
             watchlist_repo.upsert(decision.updated_item)
+            current_items[item.stock_code] = decision.updated_item
+
+    # --- Issue #324: 総件数上限による淘汰 ---
+    # 既存の自動削除(A / B / 即時 / #141)の**後**に、1回だけ行う。評価の結果として
+    # 外れる銘柄が先に外れ、それでも ACTIVE_CAPACITY_COUNT が上限を超える場合に
+    # だけ、監視スコアの低い AUTO_SCREENING 銘柄を外す。
+    capacity_cap = auto_removal_config.total_count_cap
+    capacity_items = list(current_items.values())
+    active_capacity_count = _count_active_capacity(capacity_items)
+    capacity_over_count_before = max(0, active_capacity_count - capacity_cap)
+    capacity_evicted_count = 0
+    capacity_eviction_skipped_count = 0
+    for victim in _evict_over_capacity(capacity_items, capacity_cap):
+        # 判定に使った状態(この回の開始時点の走査)から、淘汰の直前までの間に
+        # 登録元が変わった(手動で登録し直された等)項目を、誤って外さない。
+        latest = watchlist_repo.get(victim.stock_code)
+        if (
+            latest is None
+            or latest.registration_source != WatchlistRegistrationSource.AUTO_SCREENING
+            or not _is_active_capacity_item(latest)
+        ):
+            capacity_eviction_skipped_count += 1
+            continue
+        eviction_reason = (
+            f"ウォッチリストの総件数が上限({capacity_cap}件)を超えたため、"
+            f"監視スコアの低い順に自動で外しました"
+            f"(監視スコア={latest.last_monitoring_score}、"
+            f"対象件数={active_capacity_count}件)"
+        )
+        # 書き込みの順序は上の自動削除と同じ(履歴 -> delete -> 監査。Issue #62 Phase B)。
+        removal_history_repo.upsert(
+            WatchlistRemovalHistory(
+                stock_code=latest.stock_code,
+                removed_at=now,
+                removal_reason=eviction_reason,
+                removal_category=REMOVAL_CATEGORY_CAPACITY_EVICTION,
+                cooldown_until=now + dt.timedelta(days=auto_removal_config.readd_cooldown_days),
+            )
+        )
+        watchlist_repo.delete(latest.stock_code)
+        current_items.pop(latest.stock_code, None)
+        record_removal_audit(
+            latest.stock_code,
+            latest.stock_name,
+            latest.created_at,
+            latest.registration_policy,
+            now,
+            eviction_reason,
+            REMOVAL_CATEGORY_CAPACITY_EVICTION,
+            latest.last_monitoring_score,
+            latest.last_matched_target_types,
+            latest.consecutive_not_qualified_count,
+            [],
+            now,
+            batch_id,
+        )
+        capacity_evicted_count += 1
+    capacity_over_count_after = max(
+        0, _count_active_capacity(list(current_items.values())) - capacity_cap
+    )
+    if capacity_evicted_count:
+        outcome_counts[REMOVAL_CATEGORY_CAPACITY_EVICTION] = capacity_evicted_count
+    if capacity_over_count_after:
+        # 超過分を淘汰対象(AUTO_SCREENING)だけでは賄えなかった(MANUAL が多い等)。
+        # MANUAL は淘汰しない設計のため上限は未達のまま。見落とさないよう WARNING。
+        logger.warning(
+            "watchlist maintenance: capacity cap not reached batch_id=%s cap=%d "
+            "active_capacity_count=%d over_after_eviction=%d skipped=%d",
+            batch_id,
+            capacity_cap,
+            active_capacity_count,
+            capacity_over_count_after,
+            capacity_eviction_skipped_count,
+        )
 
     # Issue #224(O-1): eligible_for_removal_count/removed_countは
     # outcome_countsから直接導出できる値だが、監査を見るだけで「削除条件を
@@ -1653,8 +1791,12 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
     eligible_for_removal_count = outcome_counts.get(
         MaintenanceOutcome.CONSECUTIVE_NOT_QUALIFIED_REMOVAL.value, 0
     )
-    removed_count = eligible_for_removal_count + outcome_counts.get(
-        MaintenanceOutcome.IMMEDIATE_REMOVAL.value, 0
+    # Issue #324: removed_count は「実際に削除した件数」のため、総件数上限による
+    # 淘汰も含める(eligible_for_removal_count は B ルートの条件充足の件数のまま)。
+    removed_count = (
+        eligible_for_removal_count
+        + outcome_counts.get(MaintenanceOutcome.IMMEDIATE_REMOVAL.value, 0)
+        + capacity_evicted_count
     )
 
     record_batch_audit(
@@ -1687,6 +1829,16 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             "blocked_by_span_condition": blocked_by_span_condition,
             "eligible_for_removal_count": eligible_for_removal_count,
             "removed_count": removed_count,
+            # Issue #324: 総件数上限。capacity_active_count は NOT_EVALUABLE を除いた件数
+            # (cap と比べる値)。watchlist_total_count(この回の開始時点の物理件数)とは
+            # 別に記録する。capacity_over_count_after_eviction が 0 でなければ、
+            # MANUAL が多い等で上限を満たせていない。
+            "capacity_total_count_cap": capacity_cap,
+            "capacity_active_count": active_capacity_count,
+            "capacity_over_count_before_eviction": capacity_over_count_before,
+            "capacity_evicted_count": capacity_evicted_count,
+            "capacity_eviction_skipped_count": capacity_eviction_skipped_count,
+            "capacity_over_count_after_eviction": capacity_over_count_after,
         },
         now=now,
         batch_id=batch_id,
@@ -1704,7 +1856,8 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
         "stale_not_evaluable=%d removal_audit_completion_attempted=%d "
         "removal_audit_completion_written=%d watchlist_total_count=%d auto_screening_count=%d "
         "blocked_by_minimum_age=%d blocked_by_count_condition=%d blocked_by_span_condition=%d "
-        "eligible_for_removal=%d removed=%d",
+        "eligible_for_removal=%d removed=%d capacity_cap=%d capacity_active=%d "
+        "capacity_evicted=%d capacity_over_after=%d",
         batch_id,
         outcome_counts,
         stale_unconfirmed_count,
@@ -1718,6 +1871,10 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
         blocked_by_span_condition,
         eligible_for_removal_count,
         removed_count,
+        capacity_cap,
+        active_capacity_count,
+        capacity_evicted_count,
+        capacity_over_count_after,
     )
 
 

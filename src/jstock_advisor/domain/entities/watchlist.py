@@ -88,5 +88,6 @@ class WatchlistRemovalHistory(Entity):
     stock_code: str
     removed_at: dt.datetime
     removal_reason: str
-    removal_category: str  # "IMMEDIATE" | "CONSECUTIVE_NOT_QUALIFIED"
+    # "IMMEDIATE" | "CONSECUTIVE_NOT_QUALIFIED" | "CAPACITY_EVICTION"(Issue #324: 総件数上限)
+    removal_category: str
     cooldown_until: dt.datetime

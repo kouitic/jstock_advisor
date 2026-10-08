@@ -194,6 +194,7 @@ def _fake_config(*, readd_cooldown_days: int = 30) -> SimpleNamespace:
         auto_removal=SimpleNamespace(
             enabled=True,
             readd_cooldown_days=readd_cooldown_days,
+            total_count_cap=1300,
             minimum_age_days=90,
             consecutive_not_qualified_required=3,
             minimum_not_qualified_span_days=28,

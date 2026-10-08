@@ -315,7 +315,7 @@ def _fake_config() -> Any:
             notification_failure_retry_limit=3,
             finalize_stuck_minutes=30,
             candidate_universe=SimpleNamespace(provider="jpx"),
-            auto_removal=SimpleNamespace(readd_cooldown_days=30),
+            auto_removal=SimpleNamespace(readd_cooldown_days=30, total_count_cap=1300),
             screening_policy="multi_style_monitoring",
         )
     )
