@@ -4751,8 +4751,25 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
     explicit Deny される。通常の経路(ADMIN による resource policy の撤回・修正)が使えなくなる
 
 事前確認の整理(適用前に完全には証明できない = RESIDUAL_RISK)
-  identity policy                     案 C(管理者用 managed policy の内容を GetPolicy / GetPolicyVersion で
-                                      read-only に確認)で確認済み(#830。全 action を無条件に許可し、Deny が無い)
+  ADMIN principal の identity policy  案 C(管理者用 managed policy の内容を GetPolicy / GetPolicyVersion で
+                                      read-only に確認)で確認した(#830。2026-10-08 時点の、その時点の ADMIN role について。
+                                      全 action を無条件に許可し、Deny が無い)
+                                      ★ この確認は、Permission Set / assignment の再作成で作られる『新しい ADMIN role』へは
+                                        自動的には引き継がれない(再作成後の role の権限の内容が、以前と同一とは限らない)。
+                                        『過去に案 C で確認済み』を、新しい ADMIN role も確認済みの意味に読まない。
+                                        新しい ADMIN role について、identity policy 側を再確認する(35.2 の復旧経路が依存する
+                                        Secrets Manager の操作 = secretsmanager:GetResourcePolicy / DescribeSecret /
+                                        PutResourcePolicy / DeleteResourcePolicy を含む)。この再確認は、identity policy 側の
+                                        read-only の確認であり、resource policy 込みの end-to-end の確認ではない(下)
+  DEPLOY principal(IAM user)          ADMIN とは別の確認対象。上の ADMIN の案 C の結果を、DEPLOY について『同じ意味で確認済み』と読まない。
+                                      通常復旧・緊急回避はいずれも DEPLOY principal に依存する(ChangeSet の CREATE / EXECUTE を行う主体)。
+                                      #830 の AC b(IAM user である DEPLOY について、resource policy を含めた simulation =
+                                      RESOURCE_POLICY_CHECK_FOR_IAM_USER。35.1 節)と関連する。
+                                      ★ 本手順書は、この simulation を『実施済み』とは書かない。観測用の認証情報では
+                                        iam:SimulatePrincipalPolicy が拒否され、ADMIN 側は USER 決定で案 C へ移行した経緯があるが、
+                                        それは DEPLOY 側の AC b の実施を意味しない。DEPLOY 側で何が確認済みで、何が activation の前に
+                                        残っているか(activation gate)は、#830 の記録を参照する。本手順書は #830 の activation の
+                                        前提を変更・縮小しない(未確認のものを確認済みへ格上げしない)
   Organizations の SCP                案 C では確認していない(未確認)。SCP が Secrets Manager の操作を制限していれば、
                                       identity policy が Allow でも実操作は拒否され得る。
                                       IAM Policy Simulator を実施する場合は、条件により SCP も評価対象になり得る
@@ -4769,7 +4786,9 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
      実 ARN・Account ID・ロール名・照合値は、Issue・PR・手順書へ書かない(照合値は担当者間のメッセージで受け渡す)
   2  Permission Set / assignment を削除・再作成する作業の前に、AdminPrincipalArn の更新が必要になることを
      作業手順に含める(再作成の後ではなく、前に気付く)。再作成した後は、適用の判断の前に fresh に確認し直す
-  3  下の『確認できていないこと』を、適用を判断する人が把握していること
+  3  Permission Set / assignment を再作成して ADMIN role が作り直された後は、新しい ADMIN role について、
+     identity policy 側を再確認する(事前確認の整理の ADMIN の項のとおり。以前の案 C の結果を引き継がない)
+  4  下の『確認できていないこと』を、適用を判断する人が把握していること
 
 通常復旧(ADMIN の ARN が変わって lockout したが、deploy principal は allow-list に残っている場合)
   前提  deploy principal(`DeployPrincipalArn`。IAM user)が allow-list に残っていること
@@ -4778,9 +4797,11 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   1  deploy principal の認証情報を使う
   2  USER が新しい Permission Set でサインインし、新しい ADMIN role の ARN を確認する
   3  実 ARN を Issue・PR・手順書へ記録せず、既存のルール(上の予防の 1)に従い、照合値で対象 ARN を確認する
-  4  AdminPrincipalArn を新しい ARN へ更新した ChangeSet を CREATE し、EXECUTE する
+  4  新しい ADMIN role について、identity policy 側を再確認する(secretsmanager:GetResourcePolicy / DescribeSecret /
+     PutResourcePolicy / DeleteResourcePolicy を含む。以前の案 C の結果を、新しい role の確認として扱わない)
+  5  AdminPrincipalArn を新しい ARN へ更新した ChangeSet を CREATE し、EXECUTE する
      (CREATE と EXECUTE は、それぞれ USER の Human Gate)
-  5  修正後、ADMIN が対象シークレットへアクセスできることを read-only で確認する
+  6  修正後、ADMIN が対象シークレットへアクセスできることを read-only で確認する
   ★ 因果順は『新しい ADMIN ARN の取得・照合 → AdminPrincipalArn の更新 → ChangeSet』である。
     ChangeSet を作る前に、新しい ADMIN ARN を取得・確認している必要がある
 
@@ -4795,8 +4816,9 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   1  lockout の解除を確認する(上の緊急回避の 2)
   2  新しい ADMIN role の ARN を取得し、照合値で確認する(通常復旧の 2・3 と同じ)
   3  template / parameter(AdminPrincipalArn)を新しい ARN へ更新する
-  4  #830 の activation preflight を再実施する(ADMIN の確認 1・2・4、identity policy 側の確認、
-     未確認事項〔下〕の再評価など。前回の結果を流用しない)
+  4  #830 の activation preflight を再実施する(ADMIN の確認 1・2・4、新しい ADMIN role の identity policy 側の確認
+     〔secretsmanager:GetResourcePolicy / DescribeSecret / PutResourcePolicy / DeleteResourcePolicy を含む〕、
+     DEPLOY 側の確認状態の再評価、未確認事項〔下〕の再評価など。前回の結果を流用しない)
   5  exact な ChangeSet を作る
   6  USER の CREATE の Human Gate
   7  USER の EXECUTE の Human Gate
