@@ -724,9 +724,7 @@ def retry_stock(
     now = dt.datetime.now(dt.UTC)
     owner_id = f"cli-retry-{uuid.uuid4().hex[:8]}"
     if not claim_candidate_lease(batch_id, stock_code, owner_id, now, _WORKER_LEASE_SECONDS):
-        typer.echo(
-            "リースを取得できませんでした(他のWorker/Reconcilerが処理中の可能性があります)。"
-        )
+        typer.echo("リースを取得できませんでした(他のWorker/Reconcilerが処理中の可能性があります)。")
         raise typer.Exit(code=1)
 
     config = load_config()
@@ -813,7 +811,8 @@ def rotation_status() -> None:
     wc = config.watchlist_screening
     if not wc.rotation.enabled:
         typer.echo(
-            "rotation.enabled=false のため、ローテーションは無効です(固定スライス方式で動作中)。"
+            "rotation.enabled=false のため、ローテーションは無効です"
+            "(固定スライス方式で動作中)。"
         )
         raise typer.Exit(code=1)
 
@@ -850,7 +849,8 @@ def rotation_status() -> None:
     typer.echo("=" * 50)
     typer.echo(f"cycle_number: {state.cycle_number}周目")
     typer.echo(
-        f"cycle進捗(概算): {state.cycle_progress_selected_count}/{eligible}件 ({progress_pct:.1f}%)"
+        f"cycle進捗(概算): {state.cycle_progress_selected_count}/{eligible}件"
+        f" ({progress_pct:.1f}%)"
     )
     typer.echo(
         "現在のカーソル: "
