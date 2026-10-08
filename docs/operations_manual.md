@@ -4930,6 +4930,52 @@ near-missは、気づきに依存しない設計でのみ構造的に防げる)�
 運用手順の変更であるため、実施可否はrelease実行者の判断に委ねる
 (いずれを選んでも36.4以降の記録項目は変わらない)。
 
+**releaseのbuildの方式と入力の検査(USER判断 2026-10-04。Issue #796・#798)**
+
+原本: Issue #122 のUSER_DECISION_RECORD(1・2 = issuecomment-5977840842。K5 = issuecomment-5978398097)。
+以下の引用はUSERの発言の原文である(要約・言い換えをしていない)。引用の外の記述は、置き場所と
+手順の整理であり、★USER判断の引用ではない。
+
+> 1. STANDARD_RELEASE_BUILD_WITH_CONTAINER = 採用
+>
+> 2. BUILD_INPUT_BYTE_CONSISTENCY_GATE = 採用
+>
+> K5はaとします。
+> デプロイにおいて複数の経路、パターンを設けるのは想定外のエラーを生じうるのでDockerを必須とする
+
+36.3冒頭の手順1〜4に続けて、次を**必須手順**とする(本手順書のrelease build全般に適用する):
+
+```
+5  buildは `sam build --use-container` で行う(Dockerが必要)。releaseのbuildの経路はこの1つだけとし、
+   例外を設けない(K5)。Dockerが使えない場合は、releaseのbuildをしない。container buildの記録は36.4
+6  build前に、buildの入力(`config/`・`src/`・`infra/layer/`)の作業ツリーのバイト列が、release target SHAの
+   gitの内容と同一であること(worktree bytes = Git SSoT)を確認する(USERの決定2。36.5.1の条件C)。方式(E1):
+     git ls-files --eol -- config src infra/layer
+   の出力の各行のうち、作業ツリー側(`w/`)が `crlf` または `mixed` の行が1件も無いこと。
+   1件でもあれば、その作業ツリーではreleaseのbuildを始めない。確認の例(出力が空であること):
+     git ls-files --eol -- config src infra/layer | grep -E '^i/[^ ]+ +w/(crlf|mixed)'
+```
+
+```
+読み方(事実)
+  ・出力の `i/` はgit管理の内容(index)、`w/` は作業ツリーのバイト列。`.gitattributes`の`eol=lf`
+    (Issue #802。対象は`config/`・`src/`・`infra/layer/`)により、新しくcheckoutした作業ツリーは
+    `w/lf` または `w/none`(改行なし)になる
+  ・`.gitattributes`は、checkoutで書き換えられたファイルにだけ効く。#802のmergeより前に作った作業ツリーは、
+    再checkoutするまでCRLFのまま残る(`git status --porcelain`は、改行コードだけの違いを差分として示さない
+    ため、36.3の3ではこの状態を検出できない。E1はこの状態を検出するためのものである)
+実測(測定日 2026-10-05。Issue #796・#802)
+  ・#802より前に作った作業ツリー(core.autocrlf = true)で、対象435件のうち403件が `w/crlf` だった
+  ・同じ条件でmain(#802のmerge後)を新しくclone + checkoutした作業ツリーでは、`w/crlf`・`w/mixed`は0件
+    (`w/lf` 408件・`w/none` 27件)だった
+  ・E1に該当した作業ツリーを直すための一括変換の手順は、本節では定めない(release target SHAを新しく
+    checkoutした作業ツリーでbuildするか、対象ファイルを再checkoutした作業ツリーでE1を満たしてから
+    buildするかは、release実行者が選ぶ。いずれもE1を満たすことが条件)
+```
+
+★ 本手順書の他の節(rollback・設定変更の手順)にある `sam build && sam deploy` の記載も、Production
+へ反映するbuildとして行う場合は、上の5に従う(`sam build --use-container`)。
+
 ### 36.4 Build記録(DEPLOYED_PROVENANCE_RECORD)
 
 release実行記録(Issue #314に蓄積されているW1〜W9形式のUSER判断記録・
@@ -4948,12 +4994,16 @@ BUILD_SOURCE_SHA_MATCHES_RELEASE_TARGET = YES/NO
 手動記録で足りる(#649 Design-First期間の方針。自動化は将来のfollow-up
 候補)。
 
-container build(`sam build --use-container`)を使った場合は、上記に加えて、buildに使った
-イメージ・そのdigest・architecture・toolchainを記録する(USER判断 2026-10-04の条件D。
+releaseのbuildは、36.3の5によりcontainer build(`sam build --use-container`)に限る。上記に加えて、
+buildに使ったイメージ・そのdigest・architecture・toolchainを記録する(USER判断 2026-10-04の条件D。
 Issue #796・#798。USER判断の原文は36.5.1に引用)。toolchainの例: Python・pip・SAM CLI・
 aws_lambda_buildersの版。
-この記録は、USER判断の決定4(ConfigLayerのLF化とcontainer build化を同一releaseに含める場合)の
-条件Dとして示されたもので、他のreleaseにも求めるかは、本節では定めない(36.5.1の整理2)。
+イメージはdigestを固定せず、記録のみとする(MANAGER判断 K2 = Issue #796 issuecomment-5978344793。
+イメージの更新による差は、36.5.1の期待差分の事前申告とartifact hashの比較で検出する)。
+条件D自体は、USER判断の決定4(ConfigLayerのLF化とcontainer build化を同一releaseに含める場合)の
+条件として示された。36.3の5によりreleaseのbuildはすべてcontainer buildになるため、この記録はすべての
+releaseのbuildで行う。決定4の他の条件(E・Fなど)を他のreleaseにも適用するかは、36.5.1の整理2のとおり、
+本節では定めない。
 
 ```
 BUILD_IMAGE         = container buildに使ったイメージ(tag)
@@ -5074,7 +5124,8 @@ BUILD_ARTIFACT_IDENTITYとして記録する:
    適用するかは、本節では定めない。手順書上の置き場所:
      A・B   上の1の事前申告。2つの変更要因を別々に明示し、それぞれで変わるはずのartifactを申告する
      C      build前のゲート(36.3)の項目として、別に追記する(本節の範囲外)
-     D      36.4(container buildの記録)
+     D      36.4(container buildの記録。36.3の5によりreleaseのbuildはすべてcontainer buildになるため、
+            結果としてすべてのreleaseのbuildで記録する。E〜Iは据え置き)
      E・F   下の3
      G・H   36.6.1
      I      下の4
@@ -5177,7 +5228,8 @@ git管理へ戻すことはできない(#650 Phase A調査。アカウントID�
 ```
 1  infra/samconfig.toml(git管理外、実際にdeployで使われる値)の
    非センシティブ値(stack_name / resolve_s3 / s3_prefix / region /
-   confirm_changeset / capabilities / disable_rollback)を確認する
+   confirm_changeset / capabilities / disable_rollback、および
+   `[default.build.parameters]`の use_container)を確認する
 2  infra/samconfig.toml.example(git管理下、tracked baseline)の
    対応する値と比較し、一致することを確認する
    (parameter_overrides内のSecrets ARN・アカウントID自体は比較・
@@ -5198,6 +5250,17 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 確認した(#650 7節のEDGE_CASEで指摘されていた「比較の基準自体が
 ずれている可能性」への対応)。
 
+2026-10-05追記(Issue #796 γ-3。MANAGER判断 K1): releaseのbuildをcontainer buildに固定する(36.3の5)
+ため、`infra/samconfig.toml.example`に`[default.build.parameters]`の`use_container = true`を足し、
+上の1の確認項目に`use_container`を加えた。`infra/samconfig.toml`(git管理外)側に同じ節があることは、
+次のreleaseのdrift確認で確認する(git管理外のため、この追記の時点では確認していない)。
+実測の限定(事実): samconfigのbuild節だけで`sam build`がCLI引数なしにcontainerで動いたことは、
+1回の実測・SAM CLI 1.164.0のみで確認した(Issue #796 issuecomment-5979112271)。実測した設定は、
+`use_container`と`skip_pull_image`の2つを持つ合成のsamconfigだった(`skip_pull_image`も効いた)。
+`infra/samconfig.toml.example`は`use_container`のみで、`skip_pull_image`は未決定のため含めていない。
+他の版・環境、および`use_container`のみの設定では未確認のため、36.3の5のとおり`--use-container`を
+明示してbuildする。
+
 選択肢としてファイル分割(センシティブ/非センシティブを別ファイルへ
 分離する案)も検討したが、SAM CLIが複数config fileを直接mergeしない
 ため新規ツール化を伴う。Design-First期間の方針により、本節のような
@@ -5215,15 +5278,18 @@ Processed`で実際に使われているS3 Keyが`jstock-advisor/<md5>`形式
 [ ] BRANCH_GATE    : 現在のbranch / release target SHAをfreshに確認した(36.3)
 [ ] SHA_GATE       : git rev-parse HEADがrelease target SHAと一致する(36.3)
 [ ] CLEAN_TREE_GATE: git status --porcelainが空である(36.3)
+[ ] CONTAINER_BUILD: releaseのbuildを`sam build --use-container`で行った。例外なし(36.3の5)
+[ ] BUILD_INPUT_BYTE_CONSISTENCY: buildの入力(config/・src/・infra/layer/)の作業ツリーのバイト列が
+                    gitの内容と同一である(E1: `git ls-files --eol`の作業ツリー側にcrlf / mixedが0件。36.3の6)
 [ ] BUILD_RECORD   : BUILD_SOURCE_SHA等をrelease実行記録へ記載した(36.4)
 [ ] ARTIFACT_CONTENT_SPOT_CHECK: build成果物に対象fixが含まれることを確認した
                     (36.5。identity verificationの代替ではない補助確認)
 [ ] BUILD_ARTIFACT_IDENTITY: Lambda/Layerごとのbuild artifact identity
                     (sam deployのアップロードkey)を記録した(36.5)
 [ ] SAMCONFIG_DRIFT: samconfig.tomlの非センシティブ値がexampleと一致する(36.7)
-[ ] BUILD_CONTAINER_RECORD: container buildの場合、イメージ・digest・architecture・toolchainを
-                    記録した(36.4)
-                    (決定4の場合の項目。他のreleaseは36.5.1の整理2のとおり定めない)
+[ ] BUILD_CONTAINER_RECORD: イメージ・digest・architecture・toolchainを記録した(36.4。
+                    36.3の5によりreleaseのbuildはすべてcontainer build)
+                    (決定4の他の条件は、他のreleaseには36.5.1の整理2のとおり定めない)
 [ ] EXPECTED_ARTIFACT_CHANGE: DependenciesLayerの期待差分(変更要因と、変わるはずのartifact)を
                     CREATEの前に事前申告した(36.5.1。決定4の場合は条件A〜I)
 [ ] ARTIFACT_HASH_COMPARISON: ConfigLayer / DependenciesLayerのartifact hashを前回Productionと
@@ -5261,3 +5327,8 @@ API側のsemantic制約」とは別の関心事(build/deploy入力側のprovenan
 追加のみであり、build/deployの実際の挙動(どのartifactが生成され、
 どうdeployされるか)自体は変更しない。新規ツール・スクリプトは追加して
 いない(#649 OD2・#650 4節の方針どおり、自動化は将来のfollow-up候補)。
+
+2026-10-05追記(Issue #796 γ-3): 36.3の5・6は、今後のreleaseのbuildの方式(container build)と入力の検査
+(E1)を定める。手順書のmerge単独では、Productionも既存のartifactも変わらない。ただし、今後のreleaseで
+buildの方式や入力のバイト列が前回と異なる場合、artifactのhashが前回と異なりうる。それは期待差分として、
+36.5.1の事前申告の対象になる。
