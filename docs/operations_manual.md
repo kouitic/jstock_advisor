@@ -4697,41 +4697,71 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
 
 ```
 リスク(事実)
-  ・SSO 経由の role の ARN には、Permission Set の内部 hash が含まれる。Permission Set の
-    削除・再作成(名称が同じでも)で、ARN は静かに変わる。自動検知の仕組みは無い(35.1 節の 2)
+  ・SSO 経由の role の名前は AWSReservedSSO_<permission-set-name>_<unique-suffix> の形で、
+    ARN には unique suffix が含まれる。Permission Set に紐づく対象 AWS アカウントへの assignment が
+    失われ、IAM Identity Center が対応する AWSReservedSSO role を削除・再作成した場合などに、
+    再作成後の role の unique suffix(= ARN)が変わり得る。自動検知の仕組みは無い(35.1 節の 2)
+    ★ 変わる条件をここで網羅しない。運用上の安全境界は次のとおり:
+      AdminPrincipalArn は永続不変ではない → stale になると allow-list から外れて lockout する
+      → activation の直前と、Permission Set / assignment を再作成した後に、fresh に確認する
   ・適用後に ARN が変わると、新しい ARN は allow-list(`aws:PrincipalArn` の StringNotEquals)に
     無いため、ADMIN は対象 5 シークレットの 7 action(PutResourcePolicy / DeleteResourcePolicy を含む)を
     explicit Deny される。通常の経路(ADMIN による resource policy の撤回・修正)が使えなくなる
-  ・IAM role は、resource policy を含めた simulation ができない(35.1 節)。このため、適用前に
-    『ADMIN が適用後も操作できること』を機械的に証明することはできない(RESIDUAL_RISK)
+
+事前確認の整理(適用前に完全には証明できない = RESIDUAL_RISK)
+  identity policy                     案 C(管理者用 managed policy の内容を GetPolicy / GetPolicyVersion で
+                                      read-only に確認)で確認済み(#830。全 action を無条件に許可し、Deny が無い)
+  Organizations の SCP                案 C では確認していない(未確認)。SCP が Secrets Manager の操作を制限していれば、
+                                      identity policy が Allow でも実操作は拒否され得る。
+                                      IAM Policy Simulator を実施する場合は、条件により SCP も評価対象になり得る
+  resource policy 込みの end-to-end
+  simulation                          IAM role では不可(`SimulatePrincipalPolicy` は IAM role について
+                                      resource-based policy 込みの simulation をサポートしない。35.1 節)。
+                                      これは SCP の扱いとは別の制約
+  実際の no-lockout                   適用前に完全には証明できない(RESIDUAL_RISK)
 
 予防(適用の前・直前に必ず行う)
   1  適用の直前に、ADMIN に設定する role の ARN を再取得し、USER が管理者用 Permission Set で
      サインインして確認した ARN と一致することを、照合値(ARN の SHA-256 の先頭 12 桁)で確認する。
      ARN は『IAM role 自体の ARN』であり、assumed-role 形式ではない(35.1 節の 1)。
      実 ARN・Account ID・ロール名・照合値は、Issue・PR・手順書へ書かない(照合値は担当者間のメッセージで受け渡す)
-  2  Permission Set を削除・再作成する作業の前に、AdminPrincipalArn の更新が必要になることを
-     作業手順に含める(再作成の後ではなく、前に気付く)
-  3  ADMIN の identity policy 側の許可(DeleteResourcePolicy / PutResourcePolicy / GetResourcePolicy /
-     DescribeSecret)を確認する。確認の方法は、simulation(iam:SimulatePrincipalPolicy)、または
-     管理者用 managed policy の内容の読取(内容が全 action を無条件に許可し、Deny が無いこと)。
-     いずれも identity policy 側の確認であり、resource policy を含めた no-lockout の証明ではない
-  4  下の『確認できていないこと』を、適用を判断する人が把握していること
+  2  Permission Set / assignment を削除・再作成する作業の前に、AdminPrincipalArn の更新が必要になることを
+     作業手順に含める(再作成の後ではなく、前に気付く)。再作成した後は、適用の判断の前に fresh に確認し直す
+  3  下の『確認できていないこと』を、適用を判断する人が把握していること
 
-復旧手順(ADMIN の ARN が変わって lockout した場合)
-  1  deploy principal(`DeployPrincipalArn`。IAM user。allow-list に含まれる)の認証情報を使う
-     ★ この経路は deploy principal が allow-list に残っていることに依存する。#164(deploy 用の
-        長期認証情報の是正)で deploy principal の種別・ARN が変わる場合は、先にこの復旧経路を見直す
-  2  次のいずれかで、新しい ADMIN の ARN を反映する(通常の ChangeSet 手順と同じ。CREATE / EXECUTE は Human Gate)
-       a(推奨)AdminPrincipalArn を新しい ARN へ更新した template を ChangeSet で適用する
-       b(緊急回避)SecretResourcePolicyEnabled = false の ChangeSet を適用して、resource policy を除去する
-  3  新しい ARN の取得: USER が新しい Permission Set でサインインし、そのロールの ARN を確認する
-     (実 ARN は記録しない。照合値で確認する)
-  4  修正後、ADMIN が対象シークレットを操作できることを read-only で確認する
+通常復旧(ADMIN の ARN が変わって lockout したが、deploy principal は allow-list に残っている場合)
+  前提  deploy principal(`DeployPrincipalArn`。IAM user)が allow-list に残っていること
+        ★ #164(deploy 用の長期認証情報の是正)で deploy principal の種別・ARN が変わる場合は、
+          先にこの復旧経路を見直す
+  1  deploy principal の認証情報を使う
+  2  USER が新しい Permission Set でサインインし、新しい ADMIN role の ARN を確認する
+  3  実 ARN を Issue・PR・手順書へ記録せず、既存のルール(上の予防の 1)に従い、照合値で対象 ARN を確認する
+  4  AdminPrincipalArn を新しい ARN へ更新した ChangeSet を CREATE し、EXECUTE する
+     (CREATE と EXECUTE は、それぞれ USER の Human Gate)
+  5  修正後、ADMIN が対象シークレットへアクセスできることを read-only で確認する
+  ★ 因果順は『新しい ADMIN ARN の取得・照合 → AdminPrincipalArn の更新 → ChangeSet』である。
+    ChangeSet を作る前に、新しい ADMIN ARN を取得・確認している必要がある
 
-確認できていないこと(未確認。復旧経路に数えない)
+緊急回避(新しい ADMIN ARN を先に取得できない場合。通常復旧とは分けて行う)
+  1  deploy principal で SecretResourcePolicyEnabled = false の ChangeSet を CREATE し、EXECUTE する
+     (CREATE と EXECUTE は、それぞれ USER の Human Gate)。resource policy が除去され、lockout が解除される
+  2  lockout が解除されたこと(ADMIN が対象シークレットへアクセスできること)を read-only で確認する
+  ★ false に戻しただけで復旧は完了ではない。『OFF にすれば復旧完了で、そのまま後日 true に戻せる』
+    ものとして扱わない。再度 true にする前に、次の再有効化の手順が必要である
+
+緊急 OFF 後の再有効化(この順序で行う。省略しない)
+  1  lockout の解除を確認する(上の緊急回避の 2)
+  2  新しい ADMIN role の ARN を取得し、照合値で確認する(通常復旧の 2・3 と同じ)
+  3  template / parameter(AdminPrincipalArn)を新しい ARN へ更新する
+  4  #830 の activation preflight を再実施する(ADMIN の確認 1・2・4、identity policy 側の確認、
+     未確認事項〔下〕の再評価など。前回の結果を流用しない)
+  5  exact な ChangeSet を作る
+  6  USER の CREATE の Human Gate
+  7  USER の EXECUTE の Human Gate
+
+確認できていないこと(未確認。復旧経路に数えない。確認済みへ格上げしない)
   ・account root が explicit Deny を迂回できるか(35.2 節のとおり未検証)
-  ・Organizations の SCP が secretsmanager の操作を制限していないか(identity policy・simulation の読取の対象外)
+  ・Organizations の SCP が Secrets Manager の操作を制限していないか(案 C では確認していない)
   ・サインイン時のセッション policy の有無
   ・シークレットの暗号化鍵(KMS)の key policy(customer managed key の場合)
 ```
