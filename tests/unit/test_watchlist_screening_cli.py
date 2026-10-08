@@ -238,7 +238,7 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, config: SimpleNamespace | Non
     monkeypatch.setattr(
         cli_module, "build_candidate_universe_provider", lambda cfg, now: object()
     )
-    monkeypatch.setattr(cli_module, "build_line_client_from_env", lambda: object())
+    monkeypatch.setattr(cli_module, "_build_deferred_line_client", lambda: object())
     monkeypatch.setattr(
         cli_module,
         "build_screening_data_provider",
