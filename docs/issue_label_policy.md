@@ -1530,13 +1530,19 @@ SSoT 優先順位
 ### 9.1 label 同期の運用契約
 
 ```
-STATE_TRANSITION_WRITEBACK_REQUIRED = YES（既存）
-STATUS_LABEL_WRITEBACK_REQUIRED     = YES（新規）
+STATE_TRANSITION_WRITEBACK_REQUIRED = YES  [正本: development_workflow.md §6.5。値の変更は同節で行う]
+STATUS_LABEL_WRITEBACK_REQUIRED     = YES（新規。本節固有の契約）
 
-WORKER_STATE_WRITE_OWNER        = ACTOR_WHO_CHANGED_STATE（既存）
-WORKER_STATUS_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE（新規）
-STATE_READ_OWNER        = MANAGER（既存。役割名を製品非依存へ改めた）
+WORKER_STATE_WRITE_OWNER        = ACTOR_WHO_CHANGED_STATE  [正本: development_workflow.md §6.5]
+WORKER_STATUS_LABEL_WRITE_OWNER = ACTOR_WHO_CHANGED_STATE（新規。本節固有の契約）
+STATE_READ_OWNER                = MANAGER  [正本: development_workflow.md §6.5]
 ```
+
+上記のうち `STATE_TRANSITION_WRITEBACK_REQUIRED` / `WORKER_STATE_WRITE_OWNER` /
+`STATE_READ_OWNER` の 3 項目は development_workflow.md §6.5 で定義済みの値を
+表示しているだけであり、本節はその値を再定義しない。本節が新規に定めるのは
+`STATUS_LABEL_WRITEBACK_REQUIRED` と `WORKER_STATUS_LABEL_WRITE_OWNER` の 2 項目
+（GitHub status label の同期契約）のみである。
 
 state を変更した当人が、同じ作業の中で status label も同期する。
 同期対象となる state transition は次のとおり。
@@ -1876,3 +1882,4 @@ Release Blocker 軸と混同されるため不可)。
 | 2026-09-07 | §7.3.7 の検出時点へ 5 つ目「週次 read-only 棚卸(WEEKLY_INVENTORY / DEVELOPER / 月曜)」を追加し、§7.3.9 の「4 つの検出時点」を 5 つへ同期した(Issue #220)。既存の 1〜4 はいずれも「誰かがその Issue に用があったとき」に働くため、**用が無くなった Issue を拾う網が無かった**。実際に #36 は「待ち先の無い status:デプロイ済」が付いたまま 4 日間だれにも見られず、#128 / #132 の Priority 欠落は「再開判断」という発生しなかった trigger を待っていた。棚卸は read-only であり、対象は OPEN Issue 全件の 4 軸の欠落・最新 snapshot の日付・status:デプロイ済 / マージ済 の滞留日数・waiting: の孤立、成果物は tracking Issue 1 件、初回は #213 とする。**`BULK_REWRITE_FORBIDDEN` と `LAZY_ON_TOUCH` は維持する**(5 は一括書き換えではなく read-only の検出であり両立する)。label の適用は別 Instruction、close と Priority 変更は USER の gate という現行の境界も変えない。あわせて §7.3.9 へ CI(必須 job) / 日次 workflow / 週次棚卸(人)の分担を明記し、**機械側は「数える」までで「正しいか」は判断しない**ことを述べた。さらに §7.4 を「必須 verification を名指しできない code 変更」まで拡張し、見出しを「Production 変更を伴わない Issue」から「status:デプロイ済 を経由しない Issue」へ改めた(拡張後の対象は Production 変更の有無では決まらないため)。`VERIFICATION_NAMEABLE = NO` なら status:デプロイ済 を経由せず status:本番検証済 + CLOSE_READY へ進める。**これは §7.1 の定義の変更ではない**(「必須 verification が存在しない」なら「未完了」ではありえず、そもそも定義に当てはまらない。当てはまらない場合の明文化である)。「名指しできない」と「不要だと判断した」を区別し、**分からないまま デプロイ済 を付けない**ことも明記した。post-merge / post-deploy の Instruction と報告へ `VERIFICATION_REQUIRED = <項目 | NONE>` を必須とするが、その書式と適用範囲の正本は ai_operation_message_contract.md 11節であり本文書へ複製していない。**Progress Status の 8 段階の名称・意味(§7.1)・排他制約(§7.2)・§7.3 の分割判定基準・Type / Priority / Release Blocker の判定基準・waiting label・Human Gate の境界はいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-08 | Issue 分割の判定を**実装単位**で行うよう §7.3 を改訂し、週次棚卸へ収束指標と decode 失敗の観測項目を追加した(Issue #251 / #245)。§7.3.1 は「残る作業単位の Progress Status が 2 種類以上なら分割」と定めていたが、**「作業単位」が定義されていなかった**ため、実務では「確認観点の残り」(自然実行待ち・外部条件待ち・利用者操作待ち)も 1 単位として数えられ、実装としては 1 つの Issue が分割されていた(#199 -> #227、#137 -> #226。いずれも同日中に役目を終え tracking の管理コストだけが残った)。**実装単位 = 別の PR になる code / docs の変更**と定義し、確認観点は含めないことを明記した。★ **これは判定条件の追加ではなく名詞の定義であり、判定式(> 1 なら分割)は変えていない**(同節が「判定条件を増やさないこと自体がこのルールの要件」と定めているため)。あわせて §7.3.1a(確認観点の残りでは分割せず、元 Issue を デプロイ済 + waiting のまま保持し受入条件を 1 つずつ確認して close する)と §7.3.1b(起票時に実装単位で分ける。ただし途中分割の禁止ではなく起票時の既定)を新設し、§7.3.6 へ**本改訂より前の分割は履歴としてそのまま残す**(遡って統合しない)ことを追記した。§7.3.7 の WEEKLY_INVENTORY には CONVERGENCE_METRIC(実体の欠陥 = bug / design-defect。tracking と ORIGIN_ISSUE / SPLIT_REASON を持つ分割 Issue を除外し、週次の 起票数 / close 数 / OPEN 残 を記録する)と、DECODE_FAILURE_OBSERVATION(Issue #245。Lambda から audit_log を読む経路は 0 件でProduction では decode 失敗が発生しないため、観測元は CLI 実行時の端末とし、0 件でも記録する。#114 Phase B3 で observer が入れば CloudWatch へ移る)を追加した。**Progress Status の 8 段階の名称・意味(§7.1)・排他制約(§7.2)・§7.3.1 の判定式・Type / Priority / Release Blocker の判定基準・waiting label(§8)・Human Gate の境界・BULK_REWRITE_FORBIDDEN / LAZY_ON_TOUCH・WEEKLY_INVENTORY が read-only であることはいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-09-09 | §7.4 へ 2 項を新設した(Issue #226 / #213)。**7.4.1 code を伴わない運用 Issue の Progress Status**: drill・棚卸・監査は §7.1 の 8 段階(code の lifecycle)へ素直に対応しないため、(a) 実施と検証が終わったなら status:本番検証済 / (b) 残る実装単位があればその段階、のいずれかを選び**理由を snapshot へ記録する**。判定できないなら label を変えず `STATUS_RECONCILIATION_REQUIRED` として報告する。★ status:本番検証済 を選んでも `CLOSE_READY` は自動では YES にならない(#226 は課金実績の確認と手順書追記が残るため NO)。**7.4.2 自然発生でしか確認できない検証項目**: (a) テストで分岐の到達を固定し、かつ (b) 平常時に本番で挙動が不変であることを確認した場合に限り検証済として扱える(**両方が必要**)。★ 条件を人工的に作らない(失敗注入は引き続き禁止)。★ close 時に「自然発生は未観測」であることと (a)(b) の確認先を必ず記録し、★ 「未観測」を PASS と書かない。利用者判断(2026-09-08 / #213 issuecomment-5584115344)による明文化である。**Progress Status の 8 段階の名称・意味(§7.1)・排他制約(§7.2)・§7.3 の分割判定・Type / Priority / Release Blocker の判定基準・waiting label(§8)・close が利用者の gate であることはいずれも変更していない。** docs のみの変更であり、コード・Production 挙動の変更なし |
+| 2026-10-08 | §9.1 の `STATE_TRANSITION_WRITEBACK_REQUIRED` / `WORKER_STATE_WRITE_OWNER` / `STATE_READ_OWNER` の 3 項目へ、正本が development_workflow.md §6.5 であることの pointer 注記を追加し、本節が新規に定める契約は `STATUS_LABEL_WRITEBACK_REQUIRED` と `WORKER_STATUS_LABEL_WRITE_OWNER` の 2 項目だけであることを 1 文で明記した(Issue #658。#657 の Phase B から分割)。3 項目は development_workflow.md §6.5 にも同じ値で宣言されているが、本節側に正本の pointer が無かったため、片方だけを変えると食い違うおそれがあった(同じ §9 の §9.3 は『正本は development_workflow.md』と明記する形を取っている)。★ 値(`YES` / `ACTOR_WHO_CHANGED_STATE` / `MANAGER`)・契約・意味は変更していない(SEMANTIC_CHANGE = NONE)。development_workflow.md は変更していない。docs のみの変更であり、コード・Production 挙動の変更なし |
