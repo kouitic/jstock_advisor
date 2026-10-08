@@ -47,7 +47,7 @@ from pathlib import Path
 import pytest
 
 # Issue #277: registry は tests/support/ へ移動した(conftest からも参照するため)。
-# 識別子は 1 文字も変えていない。ここでは import するだけで、検証(V1-V8 / O1-O6)は
+# 識別子は 1 文字も変えていない。ここでは import するだけで、検証(V1-V8 / O1-O9)は
 # 従来どおり本モジュールが持つ。
 from tests.support.time_semantics_registry import (
     _ALLOWED_EXISTING,
@@ -191,7 +191,7 @@ def _case_module_paths(case: _OrderCase) -> tuple[str, ...]:
     return tuple(split_order_spec(spec)[0] for spec in case.modules)
 
 
-# --- O1-O6: order metadata の自己検証 --------------------------------------------
+# --- O1-O9: order metadata の自己検証 --------------------------------------------
 
 
 @pytest.mark.parametrize("case", _ORDER_CASES, ids=_ORDER_IDS)
