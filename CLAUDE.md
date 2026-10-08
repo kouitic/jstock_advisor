@@ -146,7 +146,7 @@ REVIEWER は §2 と docs/user_manager_collaboration_protocol.md 1節 / 3.9〜3.
   [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
   11節が正本であり、本ファイルへ複製しない。**
 
-  混入はCIの3つの検出(`pii-scan` / `pii-scan-commit-messages` / `pii-metadata-audit`)が
+  混入は3つの検出経路(`pii-scan` / `pii-scan-commit-messages` / `pii-metadata-audit`)が
   事後に検知する。検出経路の詳細は
   [docs/operations_manual.md](docs/operations_manual.md) 21.1節が正本。
   **検出は事後の網であって事前防止の代わりにはならない**(denylist方式であり、
