@@ -228,6 +228,7 @@ def _fake_config(
         auto_removal=SimpleNamespace(
             enabled=True,
             readd_cooldown_days=30,
+            total_count_cap=1300,
             minimum_age_days=90,
             consecutive_not_qualified_required=3,
             minimum_not_qualified_span_days=28,
@@ -553,6 +554,7 @@ def test_maintenance_job_never_touches_rotation_state(
         stale_recheck_days=30,
         maximum_unconfirmed_days=180,
         readd_cooldown_days=30,
+        total_count_cap=1300,
     )
     config = SimpleNamespace(
         watchlist_screening=SimpleNamespace(
