@@ -19,16 +19,15 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Protocol
 
 from jstock_advisor.domain.entities.enums import RecommendationType
 from jstock_advisor.domain.entities.evaluation import EvaluationResult
+from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.weekly_evaluation_aggregate import (
     WeeklyEvaluationAggregate,
     delta_of,
     review_week_label,
-)
-from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
-    RecommendationRepository,
 )
 from jstock_advisor.infrastructure.weekly_evaluation_aggregate_store import (
     WeeklyEvaluationAggregateStore,
@@ -42,6 +41,17 @@ logger.setLevel(logging.INFO)
 
 #: Recommendation の取得は chunk 単位(BatchGetItem の上限 100 件に揃える)。週次レビューと同じ理由。
 _RECOMMENDATION_JOIN_CHUNK_SIZE = 100
+
+
+class RecommendationLookup(Protocol):
+    """Recommendation の結合に必要な操作(`get_many` だけ)。
+
+    `RecommendationRepository`(ローカル / Lambda)と `DynamoDbCollectionStore`
+    (CLI が Production の DynamoDB を明示指定したとき。Issue #833 E2)の両方が満たす。
+    型だけの変更で、挙動は変わらない。
+    """
+
+    def get_many(self, recommendation_ids: Iterable[str], /) -> dict[str, Recommendation]: ...
 
 
 def aggregate_to_bucket(row: WeeklyEvaluationAggregate, key: str) -> MetricsBucket:
@@ -91,7 +101,7 @@ class RawScan:
 
 def scan_raw_aggregates(
     evaluations: Iterable[EvaluationResult],
-    recommendations: RecommendationRepository,
+    recommendations: RecommendationLookup,
     horizon_calendar_days: int,
     now: dt.datetime,
     *,
@@ -199,7 +209,7 @@ class WeeklyAggregateMaintenanceService:
         self,
         store: WeeklyEvaluationAggregateStore,
         evaluations: EvaluationsSource | None,
-        recommendations: RecommendationRepository,
+        recommendations: RecommendationLookup,
         horizon_calendar_days: int,
     ) -> None:
         self._store = store

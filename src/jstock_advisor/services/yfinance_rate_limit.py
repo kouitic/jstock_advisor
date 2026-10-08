@@ -49,6 +49,10 @@ class RateLimitRetryResult[T]:
     value: T | None
     is_provider_failure_suspected: bool
     error: Exception | None
+    # Issue #853(#718 I-2): 悪循環仮説の検証用の観測値。retry の挙動は変えず、数えるだけ。
+    # 既定値つきの末尾追加で、従来の構築(上の3つのキーワード引数)と読み方は変わらない。
+    attempts: int = 1  # func を呼んだ回数(初回を含む)
+    slept_seconds: float = 0.0  # retry の待機として time.sleep() へ渡した秒数の合計
 
 
 def call_with_rate_limit_retry[T](func: Callable[[], T]) -> RateLimitRetryResult[T]:
@@ -60,10 +64,17 @@ def call_with_rate_limit_retry[T](func: Callable[[], T]) -> RateLimitRetryResult
     `ScreeningDataStatus.DATA_ERROR` + `is_provider_failure_suspected=True`として扱う)。
     """
     last_exception: Exception | None = None
+    attempts = 0
+    slept_seconds = 0.0
     for attempt in range(_MAX_RETRIES + 1):
+        attempts = attempt + 1
         try:
             return RateLimitRetryResult(
-                value=func(), is_provider_failure_suspected=False, error=None
+                value=func(),
+                is_provider_failure_suspected=False,
+                error=None,
+                attempts=attempts,
+                slept_seconds=slept_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - 障害判定のため一旦すべて捕捉する
             if not classify_provider_failure(exc):
@@ -75,9 +86,15 @@ def call_with_rate_limit_retry[T](func: Callable[[], T]) -> RateLimitRetryResult
             if delay is None:
                 delay = min(_MAX_DELAY_SECONDS, _BASE_DELAY_SECONDS * (2**attempt))
                 delay *= 1 + random.uniform(-_JITTER_RATIO, _JITTER_RATIO)
-            time.sleep(max(0.0, delay))
+            wait_seconds = max(0.0, delay)
+            time.sleep(wait_seconds)
+            slept_seconds += wait_seconds
 
     assert last_exception is not None  # ループはbreak前に必ず1回は例外を捕捉している
     return RateLimitRetryResult(
-        value=None, is_provider_failure_suspected=True, error=last_exception
+        value=None,
+        is_provider_failure_suspected=True,
+        error=last_exception,
+        attempts=attempts,
+        slept_seconds=slept_seconds,
     )
