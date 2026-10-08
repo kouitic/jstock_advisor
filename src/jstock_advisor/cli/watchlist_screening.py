@@ -462,6 +462,16 @@ def run(
             )
         except LineCredentialsMissingError:
             typer.echo("LINE通知を送信していません(LINE認証情報が無いため)。")
+            # runはfinalizerを通さず直接送信し、batchの状態遷移を行わない。retry-notificationは
+            # NOTIFICATION_FAILED状態のbatchだけが対象のため、runで送れなかった通知は
+            # 対象にならない。runを再実行しても、既に追加済みの銘柄は除外される
+            # (実装の事実だけを書く)。
+            typer.echo(
+                "この通知は retry-notification では再送できません"
+                "(run はバッチの状態を更新せず、retry-notification は NOTIFICATION_FAILED の"
+                "バッチだけが対象のため)。この CLI には、run で送れなかった通知の再送手段は"
+                "ありません(run を再実行しても、追加済みの銘柄は除外されます)。"
+            )
             notification_failure = True
             credentials_missing = True
         except Exception as e:  # noqa: BLE001 - 通知失敗はバッチ失敗にしない(ベストエフォート)

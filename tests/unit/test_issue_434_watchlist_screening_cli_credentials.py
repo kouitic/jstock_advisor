@@ -167,6 +167,22 @@ def test_run_without_credentials_says_not_sent_and_exits_nonzero(
     )
 
 
+def test_run_without_credentials_does_not_suggest_retry_notification_can_resend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """runで送れなかった通知はretry-notificationの対象にならない(batchの状態遷移を行わない)。
+    メッセージは『再送できる』と読める文言を含まず、実装の事実だけを書く。"""
+    _prepare_run(monkeypatch)
+
+    result = _runner.invoke(cli_module.app, ["run"])
+
+    assert result.exit_code == 1, result.output
+    assert "この通知は retry-notification では再送できません" in result.output
+    assert "再送手段は" in result.output
+    # run は batch の状態遷移を行わない: batch を更新・参照する関数を呼んでいない
+    assert "retry-notification を実行してください" not in result.output
+
+
 def test_run_with_credentials_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     repo, batch_audits = _prepare_run(monkeypatch)
     _set_credentials(monkeypatch)
