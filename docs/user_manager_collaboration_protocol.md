@@ -3546,13 +3546,124 @@ AWS account ID / 不要な ARN
 詳細は [CLAUDE.md](../CLAUDE.md) の個人情報ルールが正本であり、
 CI の `pii-scan` が既知の実在人物名を検知した場合はビルドを失敗させる。
 
-記録が必要な場合は次を明示する。
+### 開示レベル(DISCLOSURE)
 
 ```
-DISCLOSURE = PUBLIC_SANITIZED
+DISCLOSURE_POLICY_ACTIVATION_STATE_SSOT = Issue #660 の最新の durable な
+                                           activation 記録
 ```
 
-構造・件数・割合・commit SHA・Issue / PR 番号は記載してよい。
+**本節のうち PUBLIC_MINIMAL の正式定義(#### PUBLIC_MINIMAL 以下)は、
+docs が main に入っただけでは発効しない。** 発効は、人間による明示的な
+activation 宣言をもって行う。手順は
+[development_workflow.md](development_workflow.md) 2.6.10節と同様とする。
+
+```
+docs review -> docs implementation -> PR -> CI -> 人間の merge 承認 ->
+merge -> main CI -> 周知 -> 人間による明示的な発効宣言
+```
+
+```
+PRE_ACTIVATION  = PUBLIC_SANITIZED は現行正本どおり有効。PUBLIC_MINIMAL は
+                  historical / de-facto usage であり、本節の正式定義は
+                  まだ規範ではない
+POST_ACTIVATION = PUBLIC_SANITIZED / PUBLIC_MINIMAL の2段階定義を、
+                  activation 後に新規作成される記録へ適用する
+```
+
+記録が必要な場合は、次のいずれかの開示レベルを明示する。
+
+```
+DISCLOSURE = PUBLIC_SANITIZED | PUBLIC_MINIMAL
+```
+
+#### PUBLIC_SANITIZED(既定)
+
+上の「ルール」と「公開禁止の定義」で禁止された情報を伏せたうえで、
+それ以外(構造・件数・割合・commit SHA・Issue / PR 番号など)は
+記載してよい。
+
+#### PUBLIC_MINIMAL(PUBLIC_SANITIZED よりさらに厳格な開示。既存運用の正式化)
+
+PUBLIC_SANITIZED を置き換えるものではなく、それに追加する、より厳格な
+制約である。PUBLIC_SANITIZED の禁止事項に加え、次も公開面へ載せない。
+
+```
+実 role 名 / 実 policy 名
+secret / resource の具体名
+Production の physical identifier
+攻撃経路を再構成できる具体的な手順
+公開不要な詳細 security topology
+```
+
+公開面には次の形式でのみ情報を残す。
+
+```
+CATEGORY_ONLY         識別子を伏せた構造・概念レベルの記述
+GENERALIZED_STRUCTURE 具体的な資源名ではなく汎用ラベルでの記述
+COUNTS                件数・割合
+BOOLEAN_RESULT        YES / NO 等の判定結果
+SANITIZED_AGGREGATE   個別値を復元できない粒度の集計値
+```
+
+**「何でも伏せれば PUBLIC_MINIMAL」ではない。** 目的は問題の存在・影響・
+判断に必要な最小限の情報を示すことであり、判断不能になるまで情報を
+落とすことではない。
+
+##### 適用する場合(TRIGGER)
+
+次のいずれかに該当する場合に PUBLIC_MINIMAL を選ぶ。security Issue か
+どうかという分類だけで機械的に決めない。
+
+```
+TRIGGER-A  公開すると credential / privilege / Production topology 等の
+           具体的な攻撃・権限境界の再構成に寄与する情報を含む
+TRIGGER-B  PUBLIC_SANITIZED のままでは、判断に必要な範囲を超えて
+           具体的な resource / policy / principal 情報が公開面に残る
+```
+
+##### 適用しない場合(NON-TRIGGER)
+
+```
+NON-TRIGGER-C  参照先の Issue が PUBLIC_MINIMAL であることだけを理由に、
+               自動的に PUBLIC_MINIMAL を継承しない。参照元自身の内容が
+               TRIGGER-A / TRIGGER-B に該当するかを個別に判断する。
+               該当しなければ PUBLIC_SANITIZED でよい。
+```
+
+##### private evidence の traceability
+
+PUBLIC_MINIMAL により詳細 evidence を GitHub 外の private な記録へ退避する
+場合でも、公開面には次を残す。
+
+```
+PRIVATE_EVIDENCE_EXISTS     = YES | NO
+EVIDENCE_TYPE               = <種別。例: AWS API 実行結果 / ログ抜粋 等>
+MEASURED_AT                 = <ISO-8601>
+OWNER_OR_REVIEW_AUTHORITY   = <役割名。例: TARO | MANAGER>
+RETENTION_OR_LOCATION_CLASS = <保管形態の分類。例: ローカル一時ファイル /
+                               session 記録 等。具体的 path は書かない>
+RETRIEVABLE_BY              = <取得可能な役割。例: 本人の再実行 | MANAGER 依頼>
+```
+
+**目的は証拠を公開することではなく、証拠が存在し、必要な権限者が後から
+追跡可能であることを保証することである。** private storage の実 path /
+secret identifier / credential identifier / Production の physical
+identifier 等、それ自体が公開禁止情報になる値はここにも記載しない。
+
+```
+RETROACTIVE_APPLICATION = NO
+PRE_ACTIVATION_PUBLIC_MINIMAL_RECORDS = HISTORICAL_ONLY_FOR_NEW_DEFINITION_CONFORMANCE
+```
+
+activation 前に作成された `DISCLOSURE = PUBLIC_MINIMAL` の記録は、本節の
+正式な TRIGGER / NON-TRIGGER 定義への適合を保証しない。これらは作成当時の
+判断・運用実態を示す監査証跡として扱い、遡及評価・遡及修正はしない。
+本節の正式な定義は activation 後に新規作成される記録から適用する。
+
+```
+既存 Issue 本文・comment の `DISCLOSURE = PUBLIC_MINIMAL` は書き換えない。
+```
 
 ### 例外
 
@@ -3612,3 +3723,4 @@ Production の具体的な運用手順                          -> operations_ma
 | 2026-09-19 | 2.7節の 3 か所を補正した(Issue #332 Unit 1-A の追補)。(1)`RECEIPT_EXISTS` を「**有効な** RECEIPT が存在する」と明確化し、`RECEIPT_STATE` が `APPROVAL_DECISION` と一致しない RECEIPT(APPROVE 以外なのに APPROVED 等)は無効で存在するものとして数えないことを明記した。(2)preflight の検査項目へ「`RECEIPT_STATE` が `APPROVAL_DECISION` と一致する」を追加した(検査項目を【A】v3 §6(b) 由来の14項目と【B】v3 の外[contract 8.6.2節由来]の1項目に分け、出典を本文で判別できるようにした。15 項目が HUMAN_GATE_VALID の17条件を置き換えるものではないことと、17条件との対応[15項目で覆われるもの・15項目に無いが機械で検査できるもの・機械では検査できないもの]を「17 条件との対応」として明記した)。**いずれも新しい規則ではなく、PR #426 のレビュー(F1)で ai_operation_message_contract.md 8.6.2節に既に定めた不変条件が、本節の一覧に無かったための所在の補正である**(一覧から実装すると、却下の受領証を承認として読む向きの検査が抜ける)。(3)標準の TTL より長い `VALID_UNTIL` を許すかを、v3 に定めが無い「未決定」として明記した(AI が推測で補わない)。**HUMAN_GATE_VALID の17条件の名前・状態遷移・TTL の表・発効条件・残余リスクはいずれも変更していない。本改訂は発効しない**(発効状態の正本は #332 の最新の durable な記録)。MANAGER 判断(2026-09-19)により、Unit 1-B の実装(scripts/)の前に正本を整えるために行う。docs のみの変更であり、コード・Production 挙動の変更なし |
 | 2026-10-04 | 11節「公開リポジトリとしての取り扱い」の、公開禁止の範囲を明確化した(Issue #122。USER 判断 = #122 issuecomment-5980464388)。**禁止するのは個人特定情報と、個人特定情報と結び付いた資産情報**であり、保有銘柄の名称・証券コード・数量・取得単価・現在値・金額は単独では一律禁止にしない(必要性のない実値は架空値・丸めた値・割合を推奨)。従来の「実際の保有数量 / 取得単価 / portfolio 価値 / 個別保有銘柄」を一律に載せないと読める記載を、USER の原文の引用へ置き換えた。あわせて 3.11節に「公開面の確認項目」を追加した。過去の公開記録は、この判断だけを理由に書き換えない(今後新規・更新する記録に適用)。日次監査・denylist の検出範囲は変更していない。**コード・Production 挙動の変更なし** |
 | 2026-10-05 | 2026-10-04 の行(公開禁止の範囲の明確化。Issue #122)のレビュー指摘への是正。(1) operations_manual 27.2・27.3・27.6 に、21節を根拠として銘柄コード・銘柄名・保有数量を一律に書かないと読める記述が残っていたため、同じ定義(個人特定情報、およびそれと結び付いた資産情報が禁止。銘柄・数量・金額は単独では一律禁止にしない。必要性のない実値は架空値・丸めた値・割合を優先)へ明確化した。所有者・AWS アカウント識別子・ARN の扱いは弱めていない。(2) 3.11節の冒頭の「4 点」を、確認項目を含む「5 点」に整え、節内の数を 1 つに確定した。新しい規則・例・閾値は足していない。**コード・Production 挙動の変更なし** |
+| 2026-10-08 | 11節「公開リポジトリとしての取り扱い」へ、開示レベル(DISCLOSURE)の小節を新設した(Issue #660)。PUBLIC_SANITIZED(既定)と、既存運用を正式化する PUBLIC_MINIMAL(PUBLIC_SANITIZED に追加する、より厳格な開示。security 面)の 2 段階を定め、適用条件(TRIGGER-A / B・NON-TRIGGER-C)、private evidence の traceability、遡及しないこと(RETROACTIVE_APPLICATION = NO)を明記した。**PUBLIC_MINIMAL の正式定義は merge では発効せず、人間による明示的な activation 宣言をもって発効する**(`DISCLOSURE_POLICY_ACTIVATION_STATE_SSOT`)。2026-10-04 の「公開禁止の定義」の小節〔USER の引用を含む〕は変更していない。コード・Production 挙動の変更なし |
