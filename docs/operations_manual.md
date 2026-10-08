@@ -3417,9 +3417,12 @@ jstock weekly-aggregate rebuild --week 2026-W38 [--week ...] [--execute]      # 
 ```
 
 - **write は、上の指定に加えて `--execute`(verify は `--mark-rebuild-required`)を別に要する。** 指定が無ければ書込 API を呼ばない。dry-run・verify(突合のみ)は read-only で、**読取専用の資格情報(観測用 profile)で実行できる**。
-- 実行すると、**処理の前に** `backend` / `aws_region` / `aggregate_table` / `writes`(YES または NO(read-only))を表示する(`--backend local` のときは `backend` のみ)。対象を取り違えていないか、ここで確認する。`mode`(DRY_RUN / EXECUTE)は backfill・rebuild で**処理の後**に表示され、`verify` には `mode` の表示が無い(`mode=EXECUTE` の表示を待って確認しない)。
+- 実行すると、**処理の前に** `backend` / `aws_region` / `aggregate_table` / `writes`(YES または NO(read-only))を表示する(`--backend local` のときは `backend` のみ)。`mode`(DRY_RUN / EXECUTE)は backfill・rebuild で**処理の後**に表示され、`verify` には `mode` の表示が無い。
+  **この表示は対話的な確認 Gate ではない。CLI は表示のあとで停止も確認の入力待ちもせず、そのまま処理を続行する**(`--execute` を付けていれば、表示と同時に書込が始まる)。表示を見て実行者が中断できるのは、人間がその場で見ているときだけであり、CLI は待たない。表示は、取り違えに気付くための記録として使う。
+  **誤操作を止めるのは表示ではなく、次の 2 つである。** (a) `--backend` / `--aws-region` / `--confirm-table`(Aggregate 表名の完全一致)/ `--execute` のいずれかが欠けていることによる、起動前の拒否(1 件も読まない・書かない)。(b) execute の窓の前の、呼び出し元 identity と書込権限の read-only 確認という**手順**(下の 2 つの項目)。対象を取り違えていないかは、`--execute` を付ける**前に** dry-run の表示で確認し、execute は確認済みの同じ指定で実行する。
 - **書込に使う資格情報は、既存の deploy 用資格情報(承認された backfill の実行窓の間だけ)とする**(USER 決定 #833_BACKFILL_CREDENTIAL_DECISION = A、#122 issuecomment-6057142430)。専用の IAM は作らない。ただし**実 write の承認とは別**であり、段 3 の実行は USER の別の execute Gate が必要(実行窓の承認を含む)。
 - 実行手順の例(Production。dry-run は読取専用 profile、execute のみ deploy 用の資格情報):
+  ★ いずれのコマンドも、実行を促す確認(y/n や入力待ち)を出さず、起動した時点で処理が始まる。`--execute` の行は、起動と同時に書込が始まる。
 
 ```
 jstock weekly-aggregate backfill --backend dynamodb --aws-region <region> --confirm-table jstock-weekly_evaluation_aggregate --aws-profile <読取専用 profile>             # dry-run
@@ -3451,7 +3454,7 @@ Aggregate Table       削除しない(DeletionPolicy Retain)。raw の Evaluatio
 ### 28.6 この節が決めていないこと
 
 ```
-・Production の Aggregate への backfill の**実行の可否・時期**(28.3 の CLI で実行できるが、実 write は USER の別の execute Gate)
+・Production の Aggregate への backfill の**実行の可否・時期**(28.3 の CLI で実行できるが、実 write は USER の別の execute Gate)。★CLI の実行前の表示(backend・region・表名・writes)は対話的な確認 Gate ではなく、CLI は停止せず処理を続行する。誤操作を止めるのは、起動前の拒否(指定の欠落)と execute 前の read-only 確認の手順である(28.3)
 ・切替の各段の実施の可否・時期(別の Human Gate)
 ・EvaluationResults の retention(本 Issue は変更しない。データ保持期間は Issue #138)
 ```
