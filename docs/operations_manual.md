@@ -3427,6 +3427,7 @@ jstock weekly-aggregate backfill --backend dynamodb --aws-region <region> --conf
 ```
 
 - **宛先は region + 表名 + 資格情報で決まる。資格情報は flag ではなく環境側(`--aws-profile` または環境の AWS_PROFILE 等)から来るため、同名の表が別のアカウントにある場合、`--confirm-table` では区別できない。** 実行の前に、呼び出し元の identity が意図したアカウントであることを read-only で確認する(例: `aws sts get-caller-identity --profile <使う profile>` の Account が、Production の Account であること。値は手順書・Issue・PR へ書かない)。execute の窓では、この確認を `--execute` の直前に必ず行う。
+- **execute の窓の前に、使う資格情報が Aggregate 表へ書けるかを read-only で事前確認する。** テスト(moto)は IAM を模擬しないため、権限不足は実行して初めて分かる(書込の途中で失敗する)。確認は書込を伴わない方法(例: IAM policy simulator による `dynamodb:TransactWriteItems` 相当〔`PutItem` / `UpdateItem` / `DeleteItem` / `ConditionCheckItem`〕と `dynamodb:Query` / `dynamodb:GetItem` の可否の確認。資格情報の権限を拡大して対処しない)で行い、不足があれば実行せず HANAKO へ報告する。
 - rebuild は、その週の raw を読んだ後に新しい評価が届いた場合、上書きせずに失敗する(届いた評価を消さないため)。もう一度実行する。
 - backfill の見積もり(2026-10-08 の dry-run 実測): 走査 90,900 件・集計対象 25,344 件・10 週・集計行 52・書込 73 項目、dry-run の所要は約 2 分。実行(--execute)は走査が 2 回になるため数分を見込む。
 
