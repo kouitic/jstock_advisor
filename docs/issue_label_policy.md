@@ -1530,7 +1530,7 @@ SSoT 優先順位
 ### 9.1 label 同期の運用契約
 
 ```
-STATE_TRANSITION_WRITEBACK_REQUIRED = YES  [正本: development_workflow.md §6.5。値の変更は同節で行う]
+STATE_TRANSITION_WRITEBACK_REQUIRED = YES  [正本: development_workflow.md §6.5]
 STATUS_LABEL_WRITEBACK_REQUIRED     = YES（新規。本節固有の契約）
 
 WORKER_STATE_WRITE_OWNER        = ACTOR_WHO_CHANGED_STATE  [正本: development_workflow.md §6.5]
@@ -1539,7 +1539,7 @@ STATE_READ_OWNER                = MANAGER  [正本: development_workflow.md §6.
 ```
 
 上記のうち `STATE_TRANSITION_WRITEBACK_REQUIRED` / `WORKER_STATE_WRITE_OWNER` /
-`STATE_READ_OWNER` の 3 項目は development_workflow.md §6.5 で定義済みの値を
+`STATE_READ_OWNER` の 3 項目は [docs/development_workflow.md](development_workflow.md) §6.5 で定義済みの値を
 表示しているだけであり、本節はその値を再定義しない。本節が新規に定めるのは
 `STATUS_LABEL_WRITEBACK_REQUIRED` と `WORKER_STATUS_LABEL_WRITE_OWNER` の 2 項目
 （GitHub status label の同期契約）のみである。
