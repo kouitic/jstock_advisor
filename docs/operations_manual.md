@@ -3430,10 +3430,20 @@ jstock weekly-aggregate backfill --backend dynamodb --aws-region <region> --conf
 ```
 
 - **宛先は region + 表名 + 資格情報で決まる。資格情報は flag ではなく環境側(`--aws-profile` または環境の AWS_PROFILE 等)から来るため、同名の表が別のアカウントにある場合、`--confirm-table` では区別できない。** 実行の前に、呼び出し元の identity が意図したアカウントであることを read-only で確認する(例: `aws sts get-caller-identity --profile <使う profile>` の Account が、Production の Account であること。値は手順書・Issue・PR へ書かない)。execute の窓では、この確認を `--execute` の直前に必ず行う。
-- **execute の窓の前に、使う資格情報が Aggregate 表へ書けるかを read-only で事前確認する。** テスト(moto)は IAM を模擬しないため、権限不足は実行して初めて分かる(書込の途中で失敗する)。確認は書込を伴わない方法(例: IAM policy simulator による `dynamodb:TransactWriteItems` 相当〔`PutItem` / `UpdateItem` / `DeleteItem` / `ConditionCheckItem`〕と `dynamodb:Query` / `dynamodb:GetItem` の可否の確認。資格情報の権限を拡大して対処しない)で行い、不足があれば実行せず HANAKO へ報告する。
+- **execute の窓の前に、execute に使う deploy 資格情報自身について、backfill が実際に呼ぶ DynamoDB の read / write 権限が揃っているかを、書込を伴わずに確認する。** テスト(moto)は IAM を模擬しないため、権限不足は実行して初めて分かる(書込の途中で失敗する)。
+  - **dry-run の成功は、execute の権限の確認ではない。** dry-run は観測用(read-only)の profile で実施する。execute では別の deploy 資格情報を使うため、dry-run で read の経路を確認済みでも、execute 用の資格情報に read / write の権限が揃っていることにはならない。execute の直前に、deploy 資格情報自身について確認する。
+  - **確認する action と対象 table**(2026-10-09 時点の main の実装の call graph。対象は実際に backfill が触る Production の 3 table に限定し、ワイルドカードや過剰な権限確認へ広げない):
+    - `evaluation_results`: `dynamodb:Scan`(`execute_backfill` は全履歴を 2 回走査する: 対象週の探索〔`_discover_weeks`〕と本走査〔`_scan`〕)
+    - `recommendations`: `dynamodb:BatchGetItem`(評価と推奨の結合。`get_many`)
+    - `weekly_evaluation_aggregate`(read): `dynamodb:GetItem`(各週の state・backfill の状態)・`dynamodb:Query`(`replace_week` が現在の週の集計行を取得)
+    - `weekly_evaluation_aggregate`(write): `dynamodb:PutItem`・`dynamodb:UpdateItem`・`dynamodb:DeleteItem`(`replace_week` の `TransactWriteItems` 内)と、`dynamodb:UpdateItem`(`set_backfill_complete`)
+  - **`ConditionCheckItem` は、今回の backfill の必須権限としない。** 現行の `replace_week` の transaction には独立した ConditionCheck の項目が無く、`TransactWriteItems` の中の条件式つきの Put / Update / Delete が実体である(それぞれ `PutItem` / `UpdateItem` / `DeleteItem` の権限で足りる)。独立した ConditionCheck を使用していないため、今回の backfill では `ConditionCheckItem` は要求しない。
+  - **execute の前には、最新の main の実装が実際に呼ぶ DynamoDB の API を fresh に確認する**(実装が変われば、必要な action も変わりうる。上の一覧を固定的な一般論として扱わない)。
+  - 確認は書込を伴わない方法(例: IAM policy simulator による上の action と対象 table の可否の確認)で行う。**権限が不足していた場合は、権限をその場で拡大せず、別の資格情報へ迂回せず、execute せず、HANAKO / USER へ報告する**(fail-closed)。
 - **execute が途中で失敗・中断した場合の状態**: Aggregate は週ごとに書かれ(`replace_week`)、全週を書き終えた**後**に初めて backfill の状態が COMPLETE になる(`set_backfill_complete`)。このため、途中で失敗・中断すると**一部の週だけが書かれ、backfill の状態は COMPLETE にならない**(走査中に新しい評価が届いた週で楽観ロックが失敗した場合も同様に、その時点で止まり COMPLETE にならない)。回復は**同じ指定での再実行**(週ごとに上書きするため冪等で、二重加算にならない。28.2 段 3)。この時点では読み取り側は OFF(28.2 段 6 で初めて ON)で、backfill が COMPLETE でなければ読み取り側は ON にしても読まず従来の経路へ戻り(28.1)、raw の EvaluationResult が常に正本のため(28.4)、途中の Aggregate が判定・通知に使われることはない。
 - rebuild は、その週の raw を読んだ後に新しい評価が届いた場合、上書きせずに失敗する(届いた評価を消さないため)。もう一度実行する。
-- backfill の見積もり(2026-10-08 の dry-run 実測): 走査 90,900 件・集計対象 25,344 件・10 週・集計行 52・書込 73 項目、dry-run の所要は約 2 分。実行(--execute)は走査が 2 回になるため数分を見込む。
+- backfill の見積もり(2026-10-08 の dry-run 実測): 走査 90,900 件・集計対象 25,344 件・10 週・集計行 52、dry-run の所要は約 2 分。実行(--execute)は走査が 2 回になるため数分を見込む。
+  - **書込の件数には 2 つの数があり、意味が異なる。** CLI の `estimated_write_items`(2026-10-08 の dry-run の出力 = **82**)は、週ごとの固定分を 3 項目として数える**保守的な見積り**(集計行 52 + 10 週 × 3)である。一方、現行の backfill の経路(`request_recompute = False`)と現在の空の Aggregate の条件をコードから数えた、**実際の予定 write は 73 項目**である(集計行の Put 52 + 週の状態の Update 10 + REBUILD 一覧の Update 10 + backfill の COMPLETE の Update 1)。82 は dry-run の CLI の出力値、73 は現在の実行条件での実 write の見込みで、どちらも誤りではない。(CLI の見積もりの算出は、この手順書の変更では直さない。将来修正が要ると判断した場合は、別の Issue の候補として記録する。)
 
 ### 28.4 戻し方(rollback)
 
