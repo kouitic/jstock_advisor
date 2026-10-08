@@ -220,4 +220,6 @@ REVIEWER は §2 と docs/user_manager_collaboration_protocol.md 1節 / 3.9〜3.
   が別のcontractとして定める)。
 
 - **開発者の実装レビューでは、宣言された領域と lock の妥当性を確認する。**
-  確認の観点の正本は、同文書3.8節である。**確認された lock omission は合格にしない。**
+  確認の観点の正本は、
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  3.8節である。**確認された lock omission は合格にしない。**
