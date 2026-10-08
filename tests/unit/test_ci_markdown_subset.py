@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -74,12 +75,57 @@ def test_subset_file_exists_and_is_not_empty() -> None:
     assert _subset()
 
 
+def subset_entry_problems(entry: str, exists: Callable[[str], bool]) -> list[str]:
+    """subset の entry 1 行の問題の一覧(空なら問題なし)。
+
+    ci.yml は subset を ``$(grep ... | tr -d ...)`` で展開して pytest に渡す(= shell の単語分割)。
+    entry の内部に空白があると別々の path として渡され、pytest の usage error で job が赤くなる
+    (安全側だが原因が読み取りにくい)。そのため空白を機械的に禁止する。
+    """
+    problems: list[str] = []
+    if any(char.isspace() for char in entry):
+        problems.append("contains whitespace (the shell would split it into separate paths)")
+    if not entry.startswith("tests/"):
+        problems.append("does not start with tests/")
+    if not entry.endswith(".py"):
+        problems.append("does not end with .py")
+    if "\\" in entry or ".." in entry.split("/"):
+        problems.append("is not a normalized relative path")
+    if not exists(entry):
+        problems.append("does not exist")
+    return problems
+
+
+@pytest.mark.parametrize(
+    ("entry", "problem"),
+    [
+        ("tests/unit/test_a.py", None),
+        ("tests/unit/a b.py", "whitespace"),
+        ("tests/unit/a\tb.py", "whitespace"),
+        ("tests/unit/a\u3000b.py", "whitespace"),  # 全角空白
+        ("tests/unit/a.py ", "whitespace"),
+        ("unit/test_a.py", "start with tests/"),
+        ("tests/unit/test_a.txt", "end with .py"),
+        ("tests/../src/a.py", "normalized"),
+        (r"tests\unit\a.py", "normalized"),
+    ],
+)
+def test_subset_entry_problems_table(entry: str, problem: str | None) -> None:
+    problems = subset_entry_problems(entry, lambda _entry: True)
+    if problem is None:
+        assert problems == []
+    else:
+        assert any(problem in item for item in problems), problems
+
+
+def test_subset_entry_that_does_not_exist_is_a_problem() -> None:
+    assert subset_entry_problems("tests/unit/test_a.py", lambda _entry: False) == ["does not exist"]
+
+
 def test_every_subset_entry_is_an_existing_test_file_under_tests() -> None:
     for entry in sorted(_subset()):
-        assert entry.startswith("tests/"), entry
-        assert entry.endswith(".py"), entry
-        assert "\\" not in entry and ".." not in entry.split("/"), entry
-        assert (_REPO_ROOT / entry).is_file(), f"subset entry does not exist: {entry}"
+        problems = subset_entry_problems(entry, lambda item: (_REPO_ROOT / item).is_file())
+        assert problems == [], f"{entry}: {problems}"
 
 
 def test_subset_entries_have_no_duplicates_and_no_trailing_whitespace() -> None:
