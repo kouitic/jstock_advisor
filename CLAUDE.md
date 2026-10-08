@@ -43,7 +43,8 @@ REVIEWER は §2 と docs/user_manager_collaboration_protocol.md 1節 / 3.9〜3.
 
 **担当は変わりうるため、恒久文書へ焼き込まない。**
 現在の担当(誰がどの役割か)を確認する必要がある場合は、`ROLE_ASSIGNMENT_SSOT`
-(同文書1節が正本)が指す最新のdurableな体制記録をfreshに読むこと。
+([docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+1節が正本)が指す最新のdurableな体制記録をfreshに読むこと。
 
 ---
 
@@ -198,7 +199,9 @@ REVIEWER は §2 と docs/user_manager_collaboration_protocol.md 1節 / 3.9〜3.
   1.5節が正本である**(`PRODUCTION_DEPLOYMENT_EXECUTOR = DEVELOPER_WITH_DEPLOY`)。
   具体的な手順は [docs/operations_manual.md](docs/operations_manual.md) が正本。
   `DEVELOPER`(デプロイ権限なし)へのdeploy操作の委譲は、既定では禁止されている
-  (`DEPLOY_OPERATION_DELEGATION`。値は同節が正本)。
+  (`DEPLOY_OPERATION_DELEGATION`。値は
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  1.5節が正本)。
 
   **担当が1体へ集約されていることは、人間承認なしに実行してよいという意味ではない。**
   ChangeSet の CREATE と EXECUTE は別のHuman Gateであり、承認は exact ARN に対して
@@ -215,7 +218,8 @@ REVIEWER は §2 と docs/user_manager_collaboration_protocol.md 1節 / 3.9〜3.
   4.1節である。** 採番するのは指示側。
 
 - **利用者向けの説明の水準(前提としてよい知識・言い換えの要否・背景と因果関係の添え方)の正本は、
-  同文書1.6節である。** 開発者からの完了報告は機械可読形式でよい
+  [docs/user_manager_collaboration_protocol.md](docs/user_manager_collaboration_protocol.md)
+  1.6節である。** 開発者からの完了報告は機械可読形式でよい
   ([docs/ai_operation_message_contract.md](docs/ai_operation_message_contract.md)
   が別のcontractとして定める)。
 
