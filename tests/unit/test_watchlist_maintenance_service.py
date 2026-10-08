@@ -30,6 +30,7 @@ _CONFIG = AutoRemovalConfig(
     stale_recheck_days=30,
     maximum_unconfirmed_days=180,
     readd_cooldown_days=30,
+    total_count_cap=1300,
 )
 
 
