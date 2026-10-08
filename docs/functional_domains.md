@@ -367,9 +367,10 @@ code WIP を取得すべき領域である(L節)。呼び出し元の実測に�
 | S-21 | LINE通知clientの実行時構築 | `infrastructure/line/client.py` | D1 / D2 / D3 / D4 / D5 / D7 / D8 / D9 | `buy_candidates_handler`(F-01) `holdings_watchlist_handler`(F-46) `disclosure_check_handler`(F-37) `line_webhook_handler`(F-24) `weekly_review_handler`(F-31) `watchlist_dispatcher_handler` / `watchlist_worker_handler` / `watchlist_terminal_failure_handler` / `watchlist_batch_reconciler_handler`(F-16) `cli/analyze.py` `cli/review.py` `cli/watchlist_screening.py`。Issue #117 Phase B1aで`build_live_line_client_from_env()`を追加。★ 切替済み: `line_webhook_handler`(B1b-1) / `watchlist_dispatcher_handler`(B1b-2) / `buy_candidates_handler`(B1b-3b)/ `holdings_watchlist_handler`(B1b-3c)/ `disclosure_check_handler`(B1b-3d)(後3者は実行モード別の`build_line_client_for_run(dry_run=...)`)/ `watchlist_worker_handler`(B1b-4a。strict版`build_live_line_client_from_env()`をNEW_CANDIDATE_SCREENING検出時のみ構築)/ `watchlist_terminal_failure_handler`(B1b-4b。workerと同じprescan方式、job_type欠損時の既定はNEW_CANDIDATE_SCREENING)/ `watchlist_batch_reconciler_handler`(B1b-4c。認証情報欠落は構築の失敗でなく送信時の失敗として扱い、登録は継続・欠落は全処理の後に送出)/ `weekly_review_handler`(B1b-4d。認証情報欠落は`service.run`の前に失敗させるfail-early)(★ Lambda handlerの切替は9本すべて完了。残る3 CLI(`cli/analyze.py` `cli/review.py` `cli/watchlist_screening.py`)は、CLI専用として意図的に旧`build_line_client_from_env()`のまま。ただし`cli/watchlist_screening.py`の4コマンド(run / retry-finalize / retry-notification / retry-stock)には`--notify`が無く、送信されないまま「送信済み」と記録される不具合がある: Issue #434) |
 | S-22 | 市場休場日gate | `lambda_handlers/_market_holiday.py` | D1 / D5 / D9 | `buy_candidates_handler`(親)・`holdings_watchlist_handler`(親)・`watchlist_dispatcher_handler`(NEW_CANDIDATE_SCREENINGのみ)。営業日判定は`domain/business_calendar.py`(S-04)へ委譲し、新しい判定を作らない。recovery/child/worker/reconciler・適時開示・評価・週次月次四半期は対象外。VALIDATION限定のbypass(`allow_market_closed`) |
 | S-23 | 外部入力値の解析 | `infrastructure/external_value_parser.py` | 全領域 | CLI(`cli/holding_decision.py`・`cli/holdings.py`・`cli/shareholder_benefit.py`・`cli/transactions.py`・`cli/watchlist.py`・`cli/available_cash.py`〔#594。F-54〕。F-44)・候補ユニバースの取り込み(`providers/candidate_universe/csv_impl.py`・`jpx_impl.py`。F-39)・CSV取り込みのservice(`services/csv_import_service.py`〔F-26〕・`services/shareholder_benefit_csv_import_service.py`〔F-29〕・`services/transaction_csv_import_service.py`〔F-27〕・`services/watchlist_csv_import_service.py`〔F-18〕)・`services/conversation_service.py`(F-24)。参照元13 moduleが属する行の影響領域のunion(D1 / D4 / D5 / D6 / D8 / D9 + F-44の全領域)。狭く書かない。外部から入る値の正規化・解析の共通部品であり、この解析を変えると取り込み経路の全体へ及ぶ |
+| S-24 | TransactWriteItems原子コミット基盤 | `infrastructure/aws/dynamodb_transaction.py` `services/write_plan.py` | D3 / D4 / D5 / D6 / D7 | `infrastructure/aws/conversation_commit.py`(F-24 / D5)・`infrastructure/aws/holding_replacement_commit.py`(F-26 / D6)・`infrastructure/aws/weekly_evaluation_aggregate_dynamodb.py`(F-31 / D7・D5)・`services/available_cash_service.py`(F-54 / D6)・`services/investment_thesis_service.py`(F-11 / D3)・`services/portfolio_service.py`(F-26 / D6)・`services/trade_registration_service.py`(F-26 / D6)・`services/watchlist_service.py`(F-18 / D4)。参照元の影響領域のunion(D3 / D4 / D5 / D6 / D7。USER決定 D-1。狭く書かない)。DynamoDBの`TransactWriteItems`による複数itemの原子コミット(楽観ロックの条件・一時的な競合のみのリトライ)と、その書き込み計画のデータ構造(`ConditionalPut`/`ConditionalDelete`・`HoldingReplacementPlan`・`ConcurrentUpdateError`・単一repositoryへの条件付き適用)の共通部品であり、変更すると会話応答・保有登録・買付余力・投資仮説・監視銘柄・週次集計の書き込みに及ぶ |
 | S-25 | datetime正規化(naive→aware UTC) | `domain/datetime_normalization.py` | D1 / D2 / D3 / D4 / D5 / D6 / D7 / D9 | `infrastructure/local_repository/audit_log_repository.py` / `buy_candidate_evaluation_record_repository.py` / `holding_decision_result_repository.py` / `holding_evaluation_record_repository.py` / `recommendation_repository.py` / `notification_log_repository.py`(既存`_sent_at_as_utc()`を統合) / `services/line_notification_service.py` / `services/holding_decision_backtest_service.py`(既存`_as_aware_utc()`を統合) / `services/stock_snapshot_service.py` / `services/trade_cooldown_service.py`(#577のstale lock判定)。影響領域は参照元10 moduleが属する行の影響領域のunion(D8は参照元に含まれないため対象外) |
 
-`SHARED_ID` は再利用しない。S-24はUSER確認待ちの別件(`dynamodb_transaction.py`/`write_plan.py`。2026-09-22変更履歴参照)で暫定的に言及されているため、本コンポーネントはS-24と重複しないS-25を採番した(名称・配置のUSER決定自体は#576 issuecommentのとおりだが、そこで示された番号案「S-04」は既存のS-04〔営業日カレンダー〕と衝突していたため訂正した)。
+`SHARED_ID` は再利用しない。S-24は(当時)USER確認待ちの別件(`dynamodb_transaction.py`/`write_plan.py`。2026-09-22変更履歴参照。のちにUSER決定どおりS-24として新設した。2026-10-08変更履歴参照)で暫定的に言及されていたため、本コンポーネントはS-24と重複しないS-25を採番した(名称・配置のUSER決定自体は#576 issuecommentのとおりだが、そこで示された番号案「S-04」は既存のS-04〔営業日カレンダー〕と衝突していたため訂正した)。
 
 ### S-17 の読み取り API(2026-09-08 / Issue #279 で 1 つ追加)
 
@@ -651,13 +652,6 @@ DEAD_REFERENCE   = 0
   (一覧そのものが陳腐化しないようにするため)。
 ```
 
-#### `infrastructure/aws/`  1 件
-
-| module | 割り当て予定 |
-|---|---|
-| `infrastructure/aws/dynamodb_transaction.py` | 要判断(2026-09-22に再測定: 参照元 = infrastructure/aws/holding_replacement_commit.py〔F-26〕と infrastructure/aws/conversation_commit.py〔F-24〕の2 module。#483での「F-26の1 moduleのみ」は、この時点の実測と一致しない。F-26を選ぶと、F-24の書き込み経路で使う共通の helper が F-26 の影響領域にしか覆われない。同じ理由で `services/write_plan.py` も同じ2経路が使う。推奨 = 2つを一体として、共通部品〔S行の新設。MANAGER・USERの判断〕または F-26 のままにするかを再決定) |
-
-
 #### `migrations/`  1 件(恒久UNCATALOGED例外。残り7件はF-52/F-53へ割り当て済み。Issue #485)
 
 | module | 割り当て予定 |
@@ -665,12 +659,6 @@ DEAD_REFERENCE   = 0
 | `migrations/baseline_migration.py` | **恒久UNCATALOGED例外(確定。MANAGER判断 2026-09-24。Issue #485)**: InvestmentThesisBaselineSequence/Pointerのholding_id移行(M2)専用のCLIスクリプト。#212 issuecomment-5575015538の3条件(Production経路〔lambda_handlers〕から到達しない/一回限り/挙動不変)をすべて満たす: 書き込み先はV2の物理テーブルのみで、現在のProductionコードはV2テーブルをまだ一切読まない(M3切替まで)。current_versionは移行前後で不変(自身のdocstringで明記)。M2という特定の1回のスキーマ移行イベントに紐づき、再実行の必要性は薄い(holdings_owner_reclassification.pyと異なり、再実行を前提とした冪等性設計は持たない)。F行を新設しない。 |
 
 
-
-#### `services/`  1 件
-
-| module | 割り当て予定 |
-|---|---|
-| `services/write_plan.py` | 要判断(実測: 参照元 = infrastructure/aws/conversation_commit.py〔F-24〕・infrastructure/aws/dynamodb_transaction.py〔割り当て未定〕・infrastructure/aws/holding_replacement_commit.py〔F-26〕・services/portfolio_service.py〔F-26〕・services/investment_thesis_service.py〔F-11。Issue #570でapply_conditional_put()を追加利用〕。F-24 と F-26 の両方が使う書き込み計画のデータ構造。`dynamodb_transaction.py` と一体で決める) |
 
 ```
 ★ `migrations/` 8 件は Issue #485(Phase D)で判断済み(MANAGER判断 2026-09-24)。
@@ -685,8 +673,8 @@ DEAD_REFERENCE   = 0
   影響領域を D6 / D3 とした(lock 範囲をカタログ上で追跡できるようにするため、
   恒久例外にしなかった)。
 
-★ `domain/entities/_legacy_migration.py` と `services/write_plan.py` も
-  用途の実測が要る(要判断)。
+★ `domain/entities/_legacy_migration.py` は S-16 へ、`infrastructure/aws/dynamodb_transaction.py` と
+  `services/write_plan.py` は S-24 へ割り当て済み(Issue #212。USER決定 D-1。2026-10-08)。
 ```
 
 ---
@@ -855,3 +843,4 @@ DEAD_REFERENCE   = 0
 | 2026-10-08 | F-34(改善提案・ルール版管理)の`services/rule_proposal_service.py`(`RuleProposalService.create_proposal()`)が、バックテスト未対応の経路〔数値でない値、またはバックテストが未対応〕で**評価件数のためだけに全評価を`list`へ読み込むのをやめた**(Issue #742。#540の残る同型のうち1箇所)。`len(list_all())`を`sum(1 for _ in iter_all())`へ変更し、評価を1件ずつ数える(`iter_all()`は`list_all()`と列挙順・件数・内容が一致する契約。#377)。**提案の内容・件数・エラーメッセージ・保存形式は従来と同一**(件数の一致・記録される`evaluation_count`・エラー文を、旧実装〔`list_all`の長さ〕と突き合わせて固定。数えている間に評価を同時に保持しないことも固定)。バックテスト対応の経路は変更なし。CLI専用で、Lambdaからは到達しない(Productionへの反映は無い)。領域の宣言は PRIMARY D7 / LOCKED D7, D9(本moduleはF-34 = D7 / D9)。残る同型(DecisionPerformanceService・calibration_dataset_service)は本変更の対象外 |
 | 2026-10-08 | F-18(監視銘柄の登録・削除・維持。`domain/entities/watchlist.py`の`WatchlistRemovalHistory.removal_category`の値に`CAPACITY_EVICTION`を追加)と F-47(batch finalize recovery。`services/watchlist_batch_finalizer.py`の maintenance finalize に総件数上限による淘汰`_evict_over_capacity()`を追加)へ、**ウォッチリストの総件数の上限(`auto_removal.total_count_cap`)と、超過分を監視スコアの低い AUTO_SCREENING 銘柄から外す処理**を追加した(Issue #324。USER 決定 OD1 = A・OD3 = B = #324 issuecomment-5854275274)。S-13(`config/models.py` の `AutoRemovalConfig` に必須 field `total_count_cap` を追加。LOCK_LEVEL_2。全領域 lock)。新規の機能行・共通部品は追加していない。永続形式の破壊的変更なし(`removal_category` は `str` のまま。読み手は src に無い)。初期値は現在の件数より十分高く、導入時点で 1 件も淘汰しない |
 | 2026-10-08 | S-16(共通 enum・基底。`domain/entities/enums.py`)で、**同じ意味が複数箇所に別々に書かれていた 4 群を単一の定義へ集約した**(Issue #276 / N-11。**挙動不変**〔通知・判定・保存データの値は変わらない〕。LOCK_LEVEL_1。D1 / D2 / D4 / D5)。G1: `LEGACY_SELL_RECOMMENDATION_TYPES` / `HOLDING_DECISION_RECOMMENDATION_TYPES` を公開し、`SELL_LIKE_RECOMMENDATION_TYPES` をその和集合として導出(private 名は alias として残す)。`line_notification_service.py` の私的コピーを削除し、`sell_signal_service.py` の `_STRONG_TYPES` を導出に。G2: 未使用だった `WATCH_FAMILY_ACTIONS` を `buy_signal_service.py` / `line_notification_service.py` で、`BUY_FAMILY_ACTIONS` を `watchlist_judgment_summary_formatter.py` で使う。G3(USER 決定 = Option A): 「要確認」を表す enum はコードを統合せず、対応表 1 つ(`tests/unit/test_issue_276_single_source_of_meaning.py`)+ 一致 / drift テスト。実装時の実測で、設計時の 4 つに加えて `NotificationType.MANUAL_REVIEW_REQUIRED` と `JudgmentStrength.REVIEW`(強度の段)も表に載せた。G4: `ProfitProtectionSignal`(StrEnum。F-08 の `signal_label` と F-22 の `notification_intent.py` が同じ enum を参照。保存される値は従来の文字列のまま)。`evaluation_rules._EXIT_TYPES`(F-32 判定の事後評価。意図して別集合)は変更せず、差をテストで固定した |
+| 2026-10-08 | **新規共通部品S-24(TransactWriteItems原子コミット基盤)を追加し、UNCATALOGED一覧から`infrastructure/aws/dynamodb_transaction.py`と`services/write_plan.py`の2件を割り当てた**(Issue #212。docsのみ・`src/`は変更していない)。USER決定 D-1(#212 issuecomment-5953447606。名称・主要source・影響領域 D3 / D4 / D5 / D6 / D7)と、S-24のdocs PRの実装開始の許可(#122 issuecomment-6057083271。merge は含まない)に基づく。影響領域は、実際の全importerが属するF / S行のunionをorigin/mainの`git grep`で再測定して確定した(狭く書かない方針はS-23と同じ): `dynamodb_transaction.py`の参照元 = `conversation_commit.py`(F-24 / D5)・`holding_replacement_commit.py`(F-26 / D6)・`weekly_evaluation_aggregate_dynamodb.py`(F-31 / D7・D5)、`write_plan.py`の参照元 = 上の2 module + `available_cash_service.py`(F-54 / D6)・`investment_thesis_service.py`(F-11 / D3)・`portfolio_service.py`(F-26 / D6)・`trade_registration_service.py`(F-26 / D6)・`watchlist_service.py`(F-18 / D4)。union = D3 / D4 / D5 / D6 / D7(USER決定の影響領域と一致)。UNCATALOGED 3→1(残りは`migrations/baseline_migration.py`のみ。承認済みの恒久例外)。S-25の採番の注記(S-24の記述)と、一覧末尾の注記(`write_plan.py`の「要判断」)を現況に合わせた。**STAGE_2(未解決のUNCATALOGEDが0件)の成立と、catalog-coverageのrequired化(リポジトリrulesetの変更)は本変更に含まない**(後者は別のUSERのHuman Gate)。コード・Production挙動の変更なし |
