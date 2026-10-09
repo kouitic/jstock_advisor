@@ -14,6 +14,8 @@
     (d) LINE の通知(送った文面・件数・handler の戻り値・状態の SENT)は、flag が false のときと
         true のときで同一(GitHub の起票は LINE を変えない)
     (e) 無効の config(false)では GitHub を一切呼ばない(出荷が true になっても、無効の挙動は残る)
+    (f) 既存 Issue の検索に使う label(_SEARCH_LABEL)が、起票時に付ける label に含まれる
+        (ずれると、再発のたびに重複して起票する)
 
 ## 何を検証しないか
 
@@ -67,6 +69,18 @@ def test_shipped_config_changes_only_the_one_value() -> None:
         "github_issue_claim_timeout_minutes": 10,
         "issue_labels": ["production-incident", "auto-generated"],
     }
+
+
+def test_the_search_label_is_one_of_the_labels_attached_to_a_created_issue() -> None:
+    # 既存 OPEN Issue の検索(incident_github_issue_service._SEARCH_LABEL)に使う label が、
+    # 起票時に付ける label(出荷 config の issue_labels)に含まれること。ずれると、再発のたびに
+    # 既存の OPEN Issue を見つけられず、公開 repo へ重複して起票してしまう(有効化で初めて効く経路)。
+    from jstock_advisor.services import incident_github_issue_service
+
+    labels = load_config().incident_notification.issue_labels
+    assert incident_github_issue_service._SEARCH_LABEL in labels
+    # 検索は専用 label で行う(auto-generated は週次改善レビューの Issue とも共有するため、検索に使うと混在する)
+    assert incident_github_issue_service._SEARCH_LABEL == "production-incident"
 
 
 def test_the_model_default_stays_disabled_so_a_missing_key_never_enables_creation() -> None:
