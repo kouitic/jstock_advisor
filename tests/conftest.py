@@ -47,6 +47,10 @@ import pytest
 from jstock_advisor.infrastructure.local_repository import json_store
 from tests.support.time_semantics_registry import _REGISTRY, cohort_marker_name
 
+# Issue #866: Markdown を実際に読むテストが tests/ci_markdown_subset.txt に載っていることを検査する
+# (Markdown のみの変更で全体 pytest を省略する ci.yml の前提。plugin の説明は同 module)。
+pytest_plugins = ["tests.support.markdown_read_audit"]
+
 
 @pytest.fixture(autouse=True)
 def _isolated_default_store_dir(
