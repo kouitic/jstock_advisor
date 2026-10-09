@@ -152,6 +152,8 @@ class CandidateUniverseResultLike:
         self.invalid_code_count = 0
         self.holding_excluded_count = 0
         self.watchlist_excluded_count = 0
+        # Issue #373: CollectorResult.universe_source_date(候補一覧データの公開日。CLI が表示する)
+        self.universe_source_date = None
 
 
 class _FakeScreeningDataProvider:
