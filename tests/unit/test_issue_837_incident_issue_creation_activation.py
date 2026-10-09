@@ -79,7 +79,7 @@ def test_the_search_label_is_one_of_the_labels_attached_to_a_created_issue() -> 
 
     labels = load_config().incident_notification.issue_labels
     assert incident_github_issue_service._SEARCH_LABEL in labels
-    # 検索は専用 label で行う(auto-generated は週次改善レビューの Issue とも共有するため、検索に使うと混在する)
+    # 検索は専用 label で行う(auto-generated は週次改善レビューの Issue とも共有する)
     assert incident_github_issue_service._SEARCH_LABEL == "production-incident"
 
 
