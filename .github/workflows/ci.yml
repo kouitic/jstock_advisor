@@ -54,15 +54,42 @@ jobs:
       # (`mypy src`だけではtests/配下は一切チェックされない)。
       - run: python -m mypy tests/factories.py
 
+  # Issue #866: Markdownのみの変更では全体pytestを省略する。
+  #
+  # - test jobは存在し続け、成功する(required check `test` のcontextをPendingにしない。
+  #   Rulesetは変更しない)。workflow全体のpaths-ignoreやjob-levelのifは使わない。
+  # - 省略するのは「全体pytest」のstepだけ。代わりに、Markdownを実際に読むテスト
+  #   (tests/ci_markdown_subset.txt)だけを実行する(Markdownの変更で壊れうるテストを
+  #   PRで検出するため)。subsetの網羅はtests/support/markdown_read_audit.pyが
+  #   全体pytestの実行時に検査する。
+  # - 判定はscripts/ci_markdown_only.py(変更が全て*.mdで、かつsrc/ tests/ config/ infra/
+  #   scripts/ .github/ の外にあるときだけtrue。曖昧ならfalse)。classify stepが失敗しても
+  #   outputが無いので `!= 'true'` となり全体pytestが走る(fail-safe)。
+  # - 比較範囲: pull_request=base...head / issue-**のpush=origin/main...HEAD /
+  #   mainのpush・workflow_dispatch=常にfull(mainのCI runはrelease・lock解放の証跡)。
+  # - 比較にmerge-baseが要るため fetch-depth: 0。
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - id: classify
+        continue-on-error: true
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/ci_markdown_only.py
       - run: pip install -r requirements-lock.txt
-      - run: python -m pytest tests -q
+      - if: steps.classify.outputs.markdown_only != 'true'
+        run: python -m pytest tests -q
+      - if: steps.classify.outputs.markdown_only == 'true'
+        run: echo "Markdown-only change - full pytest skipped (running the Markdown-reading subset only)"
+      - if: steps.classify.outputs.markdown_only == 'true'
+        run: python -m pytest -q $(grep -v -E '^\s*(#|$)' tests/ci_markdown_subset.txt | tr -d '\015')
 
   secret-scan:
     runs-on: ubuntu-latest
