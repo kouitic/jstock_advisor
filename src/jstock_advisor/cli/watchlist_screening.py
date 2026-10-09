@@ -596,6 +596,11 @@ def batch_status(batch_id: str) -> None:
     for key in sorted(batch_item):
         if key == "batch_id":
             continue
+        if key == "held_stock_codes":
+            # Issue #328: 保有済みの銘柄コードの一覧は端末へ出さない(件数のみ)。
+            held = batch_item[key]
+            typer.echo(f"{key}: {len(held)}件" if isinstance(held, list) else f"{key}: {held}")
+            continue
         typer.echo(f"{key}: {batch_item[key]}")
 
 

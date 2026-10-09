@@ -366,6 +366,10 @@ def test_collect_maintenance_targets_propagates_trigger_metadata(
         "WatchlistRepository",
         lambda: SimpleNamespace(list_all=lambda: [fake_item]),
     )
+    # Issue #328: 保有の読取は本テストの関心ではない(保有なし)
+    monkeypatch.setattr(
+        handler_module, "HoldingRepository", lambda: SimpleNamespace(list_all=lambda: [])
+    )
 
     codes, extra_kwargs = handler_module._collect_maintenance_targets(
         {
@@ -379,16 +383,21 @@ def test_collect_maintenance_targets_propagates_trigger_metadata(
     assert extra_kwargs == {
         "triggered_by_batch_id": "batch-1",
         "trigger_type": "POST_NEW_CANDIDATE_SCREENING",
+        "held_stock_codes": [],
     }
 
 
 def test_collect_maintenance_targets_omits_trigger_metadata_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """triggered_by_batch_idが無いevent(手動CLI等)ではextra_kwargsへ何も
-    追加しないこと(既存の後方互換動作)。"""
+    """triggered_by_batch_idが無いevent(手動CLI等)ではextra_kwargsへtriggered_by_batch_id /
+    trigger_typeを追加しないこと(既存の後方互換動作)。Issue #328以降は保有済みの銘柄コード
+    (held_stock_codes)だけが常に入る。"""
     monkeypatch.setattr(
         handler_module, "WatchlistRepository", lambda: SimpleNamespace(list_all=lambda: [])
+    )
+    monkeypatch.setattr(
+        handler_module, "HoldingRepository", lambda: SimpleNamespace(list_all=lambda: [])
     )
 
     codes, extra_kwargs = handler_module._collect_maintenance_targets(
@@ -396,7 +405,7 @@ def test_collect_maintenance_targets_omits_trigger_metadata_when_absent(
     )
 
     assert codes == []
-    assert extra_kwargs == {}
+    assert extra_kwargs == {"held_stock_codes": []}
 
 
 def test_new_candidate_screening_reaches_lease_when_line_credentials_missing(

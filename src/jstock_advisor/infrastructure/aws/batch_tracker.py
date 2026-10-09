@@ -1612,6 +1612,7 @@ def set_watchlist_batch_total(
     universe_jpx400_source_date: str | None = None,
     universe_jpx400_cache_age_days: int | None = None,
     universe_vintage_gap_days: int | None = None,
+    held_stock_codes: list[str] | None = None,
 ) -> None:
     """1節ステップ2: 候補リスト確定後にtotalを設定し、dispatch_completedを
     falseで初期化する(この時点ではまだSQS送信を開始していないため)。
@@ -1656,6 +1657,15 @@ def set_watchlist_batch_total(
     検査していないため、混成vintageを外形的に知る手段が無かった。
     ★ 差があっても処理は中断しない(記録とWARNINGのみ)。
     ★ どちらかのsource_dateが不明な場合、gapは0ではなくNoneとする。
+
+    Issue #328(O-4): `held_stock_codes`は、WATCHLIST_MAINTENANCEのdispatch時点の
+    『保有 ∩ 監視リストのAUTO_SCREENING』の銘柄コード(少数)。finalizeが総件数上限の
+    淘汰で、保有済みのAUTO_SCREENINGを超過分の範囲内で先に外すために読む(finalizeを
+    実行するWorker / TerminalFailureHandler / Reconcilerは保有テーブルを読めないため、
+    保有を読めるDispatcherが記録する)。**銘柄コードのみ**(所有者・数量・取得単価を
+    含めない)。None(既定・保有を読めなかった・NEW_CANDIDATE_SCREENING)はNULLで保存され、
+    読む側は『優先なし』= 従来の淘汰順位として扱う。dispatch時点のスナップショットで、
+    finalizeまでの売買は反映されない。
     """
     ttl = int((now + dt.timedelta(hours=ttl_hours)).timestamp())
     _table().update_item(
@@ -1683,7 +1693,8 @@ def set_watchlist_batch_total(
             "universe_jpx400_promoted = :universe_jpx400_promoted, "
             "universe_jpx400_source_date = :universe_jpx400_source_date, "
             "universe_jpx400_cache_age_days = :universe_jpx400_cache_age_days, "
-            "universe_vintage_gap_days = :universe_vintage_gap_days"
+            "universe_vintage_gap_days = :universe_vintage_gap_days, "
+            "held_stock_codes = :held_stock_codes"
         ),
         ExpressionAttributeNames={"#total": "total", "#ttl": "ttl"},
         ExpressionAttributeValues={
@@ -1712,6 +1723,7 @@ def set_watchlist_batch_total(
             ":universe_jpx400_source_date": universe_jpx400_source_date,
             ":universe_jpx400_cache_age_days": universe_jpx400_cache_age_days,
             ":universe_vintage_gap_days": universe_vintage_gap_days,
+            ":held_stock_codes": held_stock_codes,
         },
     )
 
