@@ -3419,7 +3419,7 @@ jstock weekly-aggregate rebuild --week 2026-W38 [--week ...] [--execute]      # 
 - **write は、上の指定に加えて `--execute`(verify は `--mark-rebuild-required`)を別に要する。** 指定が無ければ書込 API を呼ばない。dry-run・verify(突合のみ)は read-only で、**読取専用の資格情報(観測用 profile)で実行できる**。
 - 実行すると、**処理の前に** `backend` / `aws_region` / `aggregate_table` / `writes`(YES または NO(read-only))を表示する(`--backend local` のときは `backend` のみ)。`mode`(DRY_RUN / EXECUTE)は backfill・rebuild で**処理の後**に表示され、`verify` には `mode` の表示が無い。
   **この表示は対話的な確認 Gate ではない。CLI は表示のあとで停止も確認の入力待ちもせず、そのまま処理を続行する**(`--execute` を付けていれば、表示と同時に書込が始まる)。表示を見て実行者が中断できるのは、人間がその場で見ているときだけであり、CLI は待たない。表示は、取り違えに気付くための記録として使う。
-  **誤操作を止めるのは表示ではなく、次の 2 つである。** (a) `--backend` / `--aws-region` / `--confirm-table`(Aggregate 表名の完全一致)/ `--execute` のいずれかが欠けていることによる、起動前の拒否(1 件も読まない・書かない)。(b) execute の窓の前の、呼び出し元 identity と書込権限の read-only 確認という**手順**(下の 2 つの項目)。対象を取り違えていないかは、`--execute` を付ける**前に** dry-run の表示で確認し、execute は確認済みの同じ指定で実行する。
+  **誤操作を止めるのは表示ではなく、次の 2 つである。** (a) `--backend` / `--aws-region` / `--confirm-table`(Aggregate 表名の完全一致)/ `--execute` のいずれかが欠けていることによる、起動前の拒否(1 件も読まない・書かない)。(b) execute の窓の前の、呼び出し元 identity と書込権限の read-only 確認という**手順**(下の、execute の窓の前の確認に関する各項目)。対象を取り違えていないかは、`--execute` を付ける**前に** dry-run の表示で確認し、execute は確認済みの同じ指定で実行する。
 - **書込に使う資格情報は、既存の deploy 用資格情報(承認された backfill の実行窓の間だけ)とする**(USER 決定 #833_BACKFILL_CREDENTIAL_DECISION = A、#122 issuecomment-6057142430)。専用の IAM は作らない。ただし**実 write の承認とは別**であり、段 3 の実行は USER の別の execute Gate が必要(実行窓の承認を含む)。
 - 実行手順の例(Production。dry-run は読取専用 profile、execute のみ deploy 用の資格情報):
   ★ いずれのコマンドも、実行を促す確認(y/n や入力待ち)を出さず、起動した時点で処理が始まる。`--execute` の行は、起動と同時に書込が始まる。
@@ -3442,7 +3442,7 @@ jstock weekly-aggregate backfill --backend dynamodb --aws-region <region> --conf
   - 確認は書込を伴わない方法(例: IAM policy simulator による上の action と対象 table の可否の確認)で行う。**権限が不足していた場合は、権限をその場で拡大せず、別の資格情報へ迂回せず、execute せず、HANAKO / USER へ報告する**(fail-closed)。
 - **上の事前確認自体が実行できることを、execute の窓を始める前に確認しておく**(順序: 窓の開始前に完了しておく。窓の中で初めて試して AccessDenied になると、fail-closed で execute しないことは安全だが、承認された実行窓が消費される)。
   - **実施主体と必要な権限**: 手順書が例示する IAM policy simulator(API は `iam:SimulatePrincipalPolicy`)は、その権限を持つ資格情報でしか実行できない。観測用(read-only)の profile は、この権限を持たないことが #830 の段階 2b で確認されている(AccessDenied)。execute に使う deploy 資格情報がこの権限を持つかは、この手順書では確認していない(未確認)ため、窓の前に実施主体と資格情報を決めて試す。
-  - **代替手段**(事実の範囲): (a) USER が AWS コンソールの IAM Policy Simulator で、deploy principal について、上の action と 3 table の可否を同じ条件で確認する(画面操作は HANAKO が具体的に提示する)。(b) read の action(`Scan` / `BatchGetItem` / `GetItem` / `Query`)は、deploy 資格情報で、最小の対象に限った read-only の呼び出し(例: 件数 1 に限った読み取り)で確認できる。(c) write の action(`PutItem` / `UpdateItem` / `DeleteItem`)は、書込を伴わずに read の呼び出しで確認することはできない。write の呼び出しによる試行は、USER の承認なしに行わない。
+  - **代替手段**(事実の範囲): (a) USER が AWS コンソールの IAM Policy Simulator で、deploy principal について、上の action と 3 table の可否を同じ条件で確認する(画面操作は HANAKO が具体的に提示する)。(b) read の action(`Scan` / `BatchGetItem` / `GetItem` / `Query`)は、deploy 資格情報で、最小の対象に限った read-only の呼び出し(例: 件数 1 に限った読み取り)で確認できる。**ただし、deploy 資格情報を使うこと自体が USER の承認の対象である**(#830 では、read-only の呼び出しであっても、deploy 資格情報を使うことに USER の承認が必要だった)。実施の前に USER の承認を得る。**(b) が保証するのは、その呼び出し(最小の対象への読み取り)が許可されることだけである。** IAM に条件(例: `dynamodb:Attributes` や `dynamodb:Select` で、読み取れる属性や取得の方法を制限する条件)がある場合、本番の全走査や、各週の `Query` が許可されるかどうかは、(b) の結果からは分からない(保証しない)。可否を条件も含めて確認するには、(a) を優先する。(c) write の action(`PutItem` / `UpdateItem` / `DeleteItem`)は、書込を伴わずに read の呼び出しで確認することはできない。write の呼び出しによる試行は、USER の承認なしに行わない。
   - **拒否された場合**: 権限をその場で拡大せず、別の資格情報へ迂回せず、execute の窓を使う前に停止して、HANAKO / USER へ報告する。
 - **execute が途中で失敗・中断した場合の状態**: Aggregate は週ごとに書かれ(`replace_week`)、全週を書き終えた**後**に初めて backfill の状態が COMPLETE になる(`set_backfill_complete`)。このため、途中で失敗・中断すると**一部の週だけが書かれ、backfill の状態は COMPLETE にならない**(走査中に新しい評価が届いた週で楽観ロックが失敗した場合も同様に、その時点で止まり COMPLETE にならない)。回復は**同じ指定での再実行**(週ごとに上書きするため冪等で、二重加算にならない。28.2 段 3)。この時点では読み取り側は OFF(28.2 段 6 で初めて ON)で、backfill が COMPLETE でなければ読み取り側は ON にしても読まず従来の経路へ戻り(28.1)、raw の EvaluationResult が常に正本のため(28.4)、途中の Aggregate が判定・通知に使われることはない。
 - rebuild は、その週の raw を読んだ後に新しい評価が届いた場合、上書きせずに失敗する(届いた評価を消さないため)。もう一度実行する。
@@ -4761,6 +4761,39 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
                                         Secrets Manager の操作 = secretsmanager:GetResourcePolicy / DescribeSecret /
                                         PutResourcePolicy / DeleteResourcePolicy を含む)。この再確認は、identity policy 側の
                                         read-only の確認であり、resource policy 込みの end-to-end の確認ではない(下)
+                                      ★ 再確認の方法・資格情報・担当(#830 の段階 2a + 案 C と同じ read-only の方法):
+                                          方法    #830 の『段階 2a』と『案 C』を合わせたもの(2 つは別の段階で、一対一ではない)
+                                                  ・段階 2a: 新しい ADMIN role の permissions boundary の有無(iam:GetRole)・
+                                                    付いている managed policy(iam:ListAttachedRolePolicies)・
+                                                    inline policy(iam:ListRolePolicies)を確認する
+                                                  ・案 C: 管理者用 managed policy の内容を iam:GetPolicy / iam:GetPolicyVersion で読む
+                                          資格情報 観測用(read-only)の認証情報。書込・権限の拡大・別の認証情報による迂回はしない
+                                          担当    DEVELOPER_WITH_DEPLOY が行い、結果(許可 / 拒否 / 条件つきの区分のみ。
+                                                  実 ARN・Account ID・ロール名・policy 名は記録しない)を Issue へ記録する
+                                          拒否された場合  観測用の認証情報が上記の呼び出しを拒否したら、権限を拡大せず、別の認証情報で迂回せず、
+                                                  その時点で停止して報告し、USER の判断(承認)を得る。承認なしに deploy 資格情報へ切り替えない
+                                      ★ 想定外の構成を検出した場合(fail-closed。上の拒否された場合と同じく、判定できないことを『確認済み』にしない):
+                                          想定する構成  #830 の案 C の実施時点(2026-10-08)と同等 = permissions boundary が無い /
+                                                  managed policy が管理者用の AWS 管理 policy 1 件のみ(他の managed policy は 0 件)/
+                                                  inline policy が 0 件 / その管理者用 policy が全 action を無条件に許可し Deny を持たない
+                                          想定外とみなす  次のいずれか 1 つでも当てはまる場合(判定できない場合を含む)
+                                                  ・permissions boundary が設定されている
+                                                  ・managed policy が上の 1 件でない(追加・差し替え・件数の変化、顧客管理 policy の付与)
+                                                  ・inline policy が 1 件以上ある
+                                                  ・管理者用 policy の内容が『全 action を無条件に許可・Deny なし』でない
+                                                    (Deny・Condition・NotAction・NotResource・Resource の限定のいずれかがある)
+                                                  ・結果を読めない・取得が完了しない(拒否・応答の欠落・ページングの未完・予期しない応答)
+                                          検出したら  1 『確認済み』として扱わない(OK・問題なしと記録しない。推測で補わない)
+                                                  2 先へ進まない(新しい ADMIN ARN を前提にする ChangeSet の提示・CREATE・EXECUTE、
+                                                    SecretResourcePolicyEnabled = true の activation、再有効化の手順の次の step へ進まない)
+                                                  3 その時点で停止して報告し、USER の判断を得る(検出した区分だけを書く。実 ARN・Account ID・
+                                                    ロール名・policy 名は記録しない)
+                                                  4 権限を拡大せず、別の認証情報で迂回して確認し直さず、自己判断で『支障なし』と解釈しない。
+                                                    構成が想定外でも identity policy が許可している可能性はあるが、それを根拠に進めない
+                                                  ※ 緊急回避(SecretResourcePolicyEnabled = false の ChangeSet)を行うかどうかも USER の判断
+                                                    (CREATE と EXECUTE は、それぞれ元から USER の Human Gate)
+                                          ※ この条件は、上の『案 C は resource policy 込みの end-to-end の確認ではない』『Organizations の SCP は
+                                            未確認』『DEPLOY principal は別の確認対象』『#830 の AC b は変更しない』の各記述を変更・緩和しない
   DEPLOY principal(IAM user)          ADMIN とは別の確認対象。上の ADMIN の案 C の結果を、DEPLOY について『同じ意味で確認済み』と読まない。
                                       通常復旧・緊急回避はいずれも DEPLOY principal に依存する(ChangeSet の CREATE / EXECUTE を行う主体)。
                                       #830 の AC b(IAM user である DEPLOY について、resource policy を含めた simulation =
@@ -4787,7 +4820,8 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   2  Permission Set / assignment を削除・再作成する作業の前に、AdminPrincipalArn の更新が必要になることを
      作業手順に含める(再作成の後ではなく、前に気付く)。再作成した後は、適用の判断の前に fresh に確認し直す
   3  Permission Set / assignment を再作成して ADMIN role が作り直された後は、新しい ADMIN role について、
-     identity policy 側を再確認する(事前確認の整理の ADMIN の項のとおり。以前の案 C の結果を引き継がない)
+     identity policy 側を再確認する(事前確認の整理の ADMIN の項のとおり。以前の案 C の結果を引き継がない)。
+     想定外の構成を検出したら、同じ項の fail-closed 条件に従い、確認済みとして扱わず先へ進まない
   4  下の『確認できていないこと』を、適用を判断する人が把握していること
 
 通常復旧(ADMIN の ARN が変わって lockout したが、deploy principal は allow-list に残っている場合)
@@ -4798,7 +4832,9 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   2  USER が新しい Permission Set でサインインし、新しい ADMIN role の ARN を確認する
   3  実 ARN を Issue・PR・手順書へ記録せず、既存のルール(上の予防の 1)に従い、照合値で対象 ARN を確認する
   4  新しい ADMIN role について、identity policy 側を再確認する(secretsmanager:GetResourcePolicy / DescribeSecret /
-     PutResourcePolicy / DeleteResourcePolicy を含む。以前の案 C の結果を、新しい role の確認として扱わない)
+     PutResourcePolicy / DeleteResourcePolicy を含む。以前の案 C の結果を、新しい role の確認として扱わない。
+     方法・資格情報・担当・想定外の構成を検出したときの fail-closed 条件〔確認済みとして扱わない・先へ進まない・
+     停止して報告し USER の判断を得る〕は、事前確認の整理の ADMIN の項のとおり)
   5  AdminPrincipalArn を新しい ARN へ更新した ChangeSet を CREATE し、EXECUTE する
      (CREATE と EXECUTE は、それぞれ USER の Human Gate)
   6  修正後、ADMIN が対象シークレットへアクセスできることを read-only で確認する
@@ -4817,7 +4853,8 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   2  新しい ADMIN role の ARN を取得し、照合値で確認する(通常復旧の 2・3 と同じ)
   3  template / parameter(AdminPrincipalArn)を新しい ARN へ更新する
   4  #830 の activation preflight を再実施する(ADMIN の確認 1・2・4、新しい ADMIN role の identity policy 側の確認
-     〔secretsmanager:GetResourcePolicy / DescribeSecret / PutResourcePolicy / DeleteResourcePolicy を含む〕、
+     〔secretsmanager:GetResourcePolicy / DescribeSecret / PutResourcePolicy / DeleteResourcePolicy を含む。
+     想定外の構成を検出したら、事前確認の整理の ADMIN の項の fail-closed 条件に従い先へ進まない〕、
      DEPLOY 側の確認状態の再評価、未確認事項〔下〕の再評価など。前回の結果を流用しない)
   5  exact な ChangeSet を作る
   6  USER の CREATE の Human Gate
