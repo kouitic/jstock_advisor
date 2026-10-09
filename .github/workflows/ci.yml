@@ -162,6 +162,12 @@ jobs:
       - run: pip install -r infra/layer/build-requirements.txt
       - run: python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements.txt --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --no-annotate --custom-compile-command "python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements.txt --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --no-annotate"
       - run: git diff --exit-code -- infra/layer/requirements.txt
+      # Issue #244(O-1): CI が使う requirements-lock.txt が、Layer の lock(infra/layer/requirements.txt)の
+      # 全 package を含むこと(名前のみ。版は見ない)を検査する。標準ライブラリのみの read-only script。
+      # 直前の step は「Layer の lock が .in と一致するか」で、本 step は別の観点(CI の lock が Layer を包含するか)。
+      # step 名で区別できる。job 名・required check の一覧は変えない。
+      - name: CI の lock が Layer の lock を包含している(Issue #244)
+        run: python scripts/check_lock_consistency.py
 
   # Issue #481(#212 W2): docs/functional_domains.md の網羅性(M.5 C1〜C4 と C3-b / C3-c)を
   # 検査する。scripts/check_catalog_coverage.py(#480)は read-only で、標準ライブラリのみを使う
